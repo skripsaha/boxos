@@ -6,25 +6,19 @@
 #include "../cow/cow.h"
 #include "../integrity/integrity.h"
 #include "../../../kernel/drivers/timer/rtc.h"
-#include "use_context.h"   /* the user's tags, narrowing every query */
-#include "process.h"       /* a stand-in strand for the scheduler's question */
+#include "use_context.h"
+#include "process.h"
 #include "cabin.h"
 
-// ============================================================================
-// Global Test State
-// ============================================================================
 
 static TestStats g_test_stats;
 static bool g_tests_initialized = false;
-static uint8_t g_test_buffer[16384];  // 4 blocks for testing
+static uint8_t g_test_buffer[16384];
 static uint8_t g_test_output[16384];
 
-// ============================================================================
-// Utility Functions
-// ============================================================================
 
 static uint64_t get_time_ms(void) {
-    return rtc_get_unix64() * 1000;  // Approximate
+    return rtc_get_unix64() * 1000;
 }
 
 static void fill_random(void* buffer, uint32_t size) {
@@ -42,9 +36,6 @@ static void fill_pattern(void* buffer, uint32_t size, uint8_t pattern) {
     memset(buffer, pattern, size);
 }
 
-// ============================================================================
-// Core TagFS Tests
-// ============================================================================
 
 static TestResult test_tagfs_init(void) {
     TagFSState* fs = tagfs_get_state();
@@ -53,9 +44,6 @@ static TestResult test_tagfs_init(void) {
     return TEST_PASS;
 }
 
-/* What the mounted volume says about itself — out of its Deed and its Ledger,
- * which is where it now lives. There is no magic number to check here: a
- * volume whose deed did not check out never became a mount at all. */
 static TestResult test_tagfs_deed(void) {
     TagFSState* fs = tagfs_get_state();
     TEST_ASSERT(fs != NULL, "TagFS state should not be NULL");
@@ -79,66 +67,47 @@ static TestResult test_tagfs_deed(void) {
 static TestResult test_tagfs_create_file(void) {
     uint32_t file_id;
     uint16_t tag_ids[2] = {1, 2};
-    
+
     error_t err = tagfs_create_file("test_file", tag_ids, 2, &file_id);
     TEST_ASSERT_OK(err, "tagfs_create_file should succeed");
     TEST_ASSERT(file_id > 0, "File ID should be > 0");
-    
-    // Cleanup
+
     tagfs_delete_file(file_id);
-    
+
     return TEST_PASS;
 }
 
 static TestResult test_tagfs_write_read(void) {
     uint32_t file_id;
     uint16_t tag_ids[1] = {1};
-    
-    // Create file
+
     error_t err = tagfs_create_file("test_rw", tag_ids, 1, &file_id);
     TEST_ASSERT_OK(err, "tagfs_create_file should succeed");
-    
-    // Open for write
+
     TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     TEST_ASSERT(handle != NULL, "tagfs_open should succeed");
-    
-    // Write data
+
     fill_random(g_test_buffer, 4096);
     int written = tagfs_write(handle, g_test_buffer, 4096);
     TEST_ASSERT_EQ(written, 4096, "Should write 4096 bytes");
-    
-    // Close and reopen for read
+
     tagfs_close(handle);
     handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
     TEST_ASSERT(handle != NULL, "tagfs_open for read should succeed");
-    
-    // Read data
+
     memset(g_test_output, 0, sizeof(g_test_output));
     int read = tagfs_read(handle, g_test_output, 4096);
     TEST_ASSERT_EQ(read, 4096, "Should read 4096 bytes");
-    
-    // Verify data
+
     TEST_ASSERT(memcmp(g_test_buffer, g_test_output, 4096) == 0, "Data should match");
-    
-    // Cleanup
+
     tagfs_close(handle);
     tagfs_delete_file(file_id);
 
     return TEST_PASS;
 }
 
-// ============================================================================
-// Dedup index — does a block leave it when it leaves the allocator?
-//
-// It did not, until now: only truncate ever unregistered anything, so every
-// deleted file left its blocks in the index for the lifetime of the system,
-// each one mapping content that no longer exists to bytes handed to somebody
-// else. These pin both halves of the fix — the entry goes when the block goes,
-// and a block the index still counts as shared does NOT go.
-// ============================================================================
 
-// Give a block content nothing else in the volume holds, so a hash lookup for
-// it can only find this test's block.
 static void dedup_stamp(uint8_t *buf, uint8_t fill, const char *marker) {
     fill_pattern(buf, TAGFS_BLOCK_SIZE, fill);
     for (uint32_t i = 0; marker[i]; i++)
@@ -275,7 +244,6 @@ static TestResult test_dedup_reregister_follows_content(void) {
     TagFS_DedupCheck(g_test_buffer, &found, &is_dup);
     TEST_ASSERT(!is_dup, "and not by what it used to hold");
 
-    // One block, one entry: a single release must empty it.
     TEST_ASSERT_EQ(tagfs_free_blocks(block, 1), 0, "release");
     is_dup = false;
     TagFS_DedupCheck(g_test_output, &found, &is_dup);
@@ -284,22 +252,13 @@ static TestResult test_dedup_reregister_follows_content(void) {
     return TEST_PASS;
 }
 
-// ============================================================================
-// Bcdc Compression Tests
-// ============================================================================
 
 static TestResult test_bcdc_init(void) {
-    // Bcdc should already be initialized by TagFS
-    // Just verify it's working
     BcdcStats stats;
     BcdcGetStats(&stats);
     return TEST_PASS;
 }
 
-/* BSS pool shared by the test_bcdc_* functions below. TagFS_RunAllTests
- * is single-threaded at boot, so a single set of buffers is safe across
- * sequential test calls; keeps the per-function stack frame under the
- * -Wstack-usage=8192 threshold. */
 static uint8_t  s_bcdc_input[4096];
 static uint8_t  s_bcdc_output[4096 + 24];
 static uint8_t  s_bcdc_decompressed[4096];
@@ -310,21 +269,17 @@ static TestResult test_bcdc_compress_decompress_random(void) {
     uint8_t  *decompressed  = s_bcdc_decompressed;
     uint16_t output_size, decompressed_size;
 
-    // Fill with random data (hard to compress)
     fill_random(input, 4096);
 
-    // Compress with BCDC_TYPE_NONE (random data won't compress well)
     error_t err = BcdcCompress(input, 4096, output, &output_size,
                                BCDC_TYPE_NONE, BCDC_LEVEL_DEFAULT, 0);
     TEST_ASSERT_OK(err, "BcdcCompress should succeed");
     TEST_ASSERT(output_size <= 4096 + 24, "Output should fit in buffer");
 
-    // Decompress
     err = BcdcDecompress(output, output_size, decompressed, &decompressed_size, 0);
     TEST_ASSERT_OK(err, "BcdcDecompress should succeed");
     TEST_ASSERT_EQ(decompressed_size, 4096, "Decompressed size should match");
 
-    // Verify data
     TEST_ASSERT(memcmp(input, decompressed, 4096) == 0, "Data should match");
 
     return TEST_PASS;
@@ -336,20 +291,16 @@ static TestResult test_bcdc_compress_decompress_zeros(void) {
     uint8_t  *decompressed  = s_bcdc_decompressed;
     uint16_t output_size, decompressed_size;
 
-    // Fill with zeros (easy to compress with RLE)
     fill_zeros(input, 4096);
 
-    // Compress with RLE (best for zeros)
     error_t err = BcdcCompress(input, 4096, output, &output_size,
                                BCDC_TYPE_RLE, BCDC_LEVEL_DEFAULT, 0);
     TEST_ASSERT_OK(err, "BcdcCompress should succeed");
 
-    // Decompress
     err = BcdcDecompress(output, output_size, decompressed, &decompressed_size, 0);
     TEST_ASSERT_OK(err, "BcdcDecompress should succeed");
     TEST_ASSERT_EQ(decompressed_size, 4096, "Decompressed size should match");
 
-    // Verify data
     TEST_ASSERT(memcmp(input, decompressed, 4096) == 0, "Data should match");
 
     return TEST_PASS;
@@ -360,25 +311,20 @@ static TestResult test_bcdc_compress_decompress_pattern(void) {
     uint8_t  *output        = s_bcdc_output;
     uint8_t  *decompressed  = s_bcdc_decompressed;
     uint16_t output_size, decompressed_size;
-    
-    // Fill with repeating pattern (RLE should work well)
+
     fill_pattern(input, 4096, 0xAA);
-    
-    // Compress with RLE
+
     error_t err = BcdcCompress(input, 4096, output, &output_size,
                                BCDC_TYPE_RLE, BCDC_LEVEL_DEFAULT, 0);
     TEST_ASSERT_OK(err, "BcdcCompress RLE should succeed");
-    
-    // Should compress well
+
     TEST_ASSERT(output_size < 4096, "RLE should compress repeating data");
-    
-    // Decompress
+
     err = BcdcDecompress(output, output_size, decompressed, &decompressed_size, 0);
     TEST_ASSERT_OK(err, "BcdcDecompress should succeed");
-    
-    // Verify data
+
     TEST_ASSERT(memcmp(input, decompressed, 4096) == 0, "Data should match");
-    
+
     return TEST_PASS;
 }
 
@@ -387,21 +333,18 @@ static TestResult test_bcdc_checksum_verification(void) {
     uint8_t  *output        = s_bcdc_output;
     uint8_t  *decompressed  = s_bcdc_decompressed;
     uint16_t output_size, decompressed_size;
-    
+
     fill_random(input, 4096);
-    
-    // Compress
+
     error_t err = BcdcCompress(input, 4096, output, &output_size,
                                BCDC_TYPE_LZ, BCDC_LEVEL_DEFAULT, 0);
     TEST_ASSERT_OK(err, "BcdcCompress should succeed");
-    
-    // Corrupt compressed data
+
     output[50] ^= 0xFF;
-    
-    // Decompress should fail
+
     err = BcdcDecompress(output, output_size, decompressed, &decompressed_size, 0);
     TEST_ASSERT(err != OK, "BcdcDecompress should detect corruption");
-    
+
     return TEST_PASS;
 }
 
@@ -415,12 +358,8 @@ static TestResult test_bcdc_stats(void) {
     return TEST_PASS;
 }
 
-// ============================================================================
-// DiskBook Journal Tests
-// ============================================================================
 
 static TestResult test_diskbook_init(void) {
-    // DiskBook should already be initialized
     TEST_ASSERT(DiskBookIsInitialized(), "DiskBook should be initialized");
     return TEST_PASS;
 }
@@ -438,43 +377,35 @@ static TestResult test_diskbook_stats(void) {
     return TEST_PASS;
 }
 
-// ============================================================================
-// Snapshot Tests
-// ============================================================================
 
 static TestResult test_snapshot_create(void) {
     uint32_t snapshot_id;
-    
+
     error_t err = TagFS_SnapshotCreate("test_snap", 0, &snapshot_id);
     TEST_ASSERT_OK(err, "TagFS_SnapshotCreate should succeed");
     TEST_ASSERT(snapshot_id > 0, "Snapshot ID should be > 0");
-    
-    // Cleanup
+
     TagFS_SnapshotDelete(snapshot_id);
-    
+
     return TEST_PASS;
 }
 
 static TestResult test_snapshot_list(void) {
     uint32_t ids[16];
     uint32_t count;
-    
+
     error_t err = TagFS_SnapshotList(ids, 16, &count);
     TEST_ASSERT_OK(err, "TagFS_SnapshotList should succeed");
-    
+
     return TEST_PASS;
 }
 
-// ============================================================================
-// Stress Tests
-// ============================================================================
 
 static TestResult test_stress_many_files(void) {
-    const uint32_t FILE_COUNT = 10;  // Reduced for QEMU performance
+    const uint32_t FILE_COUNT = 10;
     uint32_t file_ids[10];
     uint16_t tag_ids[2] = {1, 2};
 
-    // Create many files
     for (uint32_t i = 0; i < FILE_COUNT; i++) {
         char name[32];
         ksnprintf(name, sizeof(name), "stress_file_%u", i);
@@ -483,7 +414,6 @@ static TestResult test_stress_many_files(void) {
         TEST_ASSERT_OK(err, "tagfs_create_file should succeed");
     }
 
-    // Write to all files
     for (uint32_t i = 0; i < FILE_COUNT; i++) {
         TagFSFileHandle* handle = tagfs_open(file_ids[i], TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
         if (handle) {
@@ -493,7 +423,6 @@ static TestResult test_stress_many_files(void) {
         }
     }
 
-    // Read from all files
     for (uint32_t i = 0; i < FILE_COUNT; i++) {
         TagFSFileHandle* handle = tagfs_open(file_ids[i], TAGFS_HANDLE_READ);
         if (handle) {
@@ -503,7 +432,6 @@ static TestResult test_stress_many_files(void) {
         }
     }
 
-    // Cleanup
     for (uint32_t i = 0; i < FILE_COUNT; i++) {
         tagfs_delete_file(file_ids[i]);
     }
@@ -512,37 +440,31 @@ static TestResult test_stress_many_files(void) {
 }
 
 static TestResult test_stress_large_file(void) {
-    const uint32_t FILE_SIZE = 16 * 1024;  // Reduced to 16KB for QEMU
+    const uint32_t FILE_SIZE = 16 * 1024;
     uint32_t file_id;
     uint16_t tag_ids[1] = {1};
 
-    // Create file
     error_t err = tagfs_create_file("large_file", tag_ids, 1, &file_id);
     TEST_ASSERT_OK(err, "tagfs_create_file should succeed");
 
-    // Open for write
     TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     TEST_ASSERT(handle != NULL, "tagfs_open should succeed");
 
-    // Write file in 4KB chunks
     fill_random(g_test_buffer, 4096);
     for (uint32_t i = 0; i < FILE_SIZE / 4096; i++) {
         int written = tagfs_write(handle, g_test_buffer, 4096);
         TEST_ASSERT_EQ(written, 4096, "Should write 4096 bytes");
     }
 
-    // Close and reopen for read
     tagfs_close(handle);
     handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
     TEST_ASSERT(handle != NULL, "tagfs_open for read should succeed");
 
-    // Read and verify (just first and last block for speed)
     memset(g_test_output, 0, sizeof(g_test_output));
     int read = tagfs_read(handle, g_test_output, 4096);
     TEST_ASSERT_EQ(read, 4096, "Should read 4096 bytes");
 
     if (memcmp(g_test_buffer, g_test_output, 4096) != 0) {
-        /* Diagnostic: find first mismatch and dump context */
         for (int i = 0; i < 4096; i++) {
             if (g_test_buffer[i] != g_test_output[i]) {
                 debug_printf("[DIAG] large_file MISMATCH at byte %d: expected 0x%02x got 0x%02x\n",
@@ -556,7 +478,6 @@ static TestResult test_stress_large_file(void) {
     }
     TEST_ASSERT(memcmp(g_test_buffer, g_test_output, 4096) == 0, "First block should match");
 
-    // Cleanup
     tagfs_close(handle);
     tagfs_delete_file(file_id);
 
@@ -564,7 +485,7 @@ static TestResult test_stress_large_file(void) {
 }
 
 static TestResult test_stress_compression(void) {
-    const uint32_t ITERATIONS = 20;  // Reduced from 100 for QEMU performance
+    const uint32_t ITERATIONS = 20;
 
     for (uint32_t i = 0; i < ITERATIONS; i++) {
         uint8_t  *input        = s_bcdc_input;
@@ -572,7 +493,6 @@ static TestResult test_stress_compression(void) {
         uint8_t  *decompressed = s_bcdc_decompressed;
         uint16_t output_size, decompressed_size;
 
-        // Alternate between random and zeros
         if (i % 2 == 0) {
             fill_random(input, 4096);
         } else {
@@ -600,94 +520,82 @@ static TestResult test_braid_init(void) {
 static TestResult test_braid_add_disk(void) {
     error_t err = BraidAddDisk(0, 1000000);
     TEST_ASSERT_OK(err, "BraidAddDisk should succeed");
-    
+
     err = BraidAddDisk(1, 1000000);
     TEST_ASSERT_OK(err, "BraidAddDisk second disk should succeed");
-    
+
     TEST_ASSERT(BraidIsHealthy(), "Braid should be healthy with 2 disks");
     TEST_ASSERT_EQ(BraidGetActiveDiskCount(), 2, "Should have 2 active disks");
-    
-    // Clean up: remove test disks so Braid does not stay "healthy" and intercept
-    // all subsequent TagFS block I/O (which would route through non-existent ATA slave).
+
     BraidRemoveDisk(0);
     BraidRemoveDisk(1);
-    
+
     return TEST_PASS;
 }
 
 static TestResult test_braid_write_read(void) {
-    // Skip - requires multiple physical disks not available in QEMU
     return TEST_SKIP;
 }
 
 static TestResult test_cow_snapshot_create(void) {
     uint32_t snapshot_id;
-    
+
     error_t err = TagFS_SnapshotCreate("test-snapshot", 0, &snapshot_id);
     TEST_ASSERT_OK(err, "TagFS_SnapshotCreate should succeed");
     TEST_ASSERT(snapshot_id > 0, "Snapshot ID should be > 0");
-    
-    // Cleanup
+
     TagFS_SnapshotDelete(snapshot_id);
-    
+
     return TEST_PASS;
 }
 
 static TestResult test_cow_before_after_write(void) {
     uint32_t file_id;
     uint16_t tag_ids[1] = {1};
-    
-    // Create file
+
     error_t err = tagfs_create_file("cow-test", tag_ids, 1, &file_id);
     TEST_ASSERT_OK(err, "tagfs_create_file should succeed");
-    
-    // Open and write initial data
+
     TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     TEST_ASSERT(handle != NULL, "tagfs_open should succeed");
-    
+
     fill_random(g_test_buffer, 4096);
     int written = tagfs_write(handle, g_test_buffer, 4096);
     TEST_ASSERT_EQ(written, 4096, "Should write 4096 bytes");
-    
+
     tagfs_close(handle);
-    
-    // Test CoW before write
+
     uint32_t new_block;
     err = TagFS_CowBeforeWrite(file_id, 1, &new_block);
-    // May fail if no snapshot active, which is OK
     if (err == OK) {
         TEST_ASSERT(new_block > 0, "New block should be allocated");
-        
+
         err = TagFS_CowAfterWrite(file_id, 1, new_block);
         TEST_ASSERT_OK(err, "TagFS_CowAfterWrite should succeed");
     }
-    
-    // Cleanup
+
     tagfs_delete_file(file_id);
-    
+
     return TEST_PASS;
 }
 
 static TestResult test_stress_braid_operations(void) {
-    // Skip - requires multiple physical disks not available in QEMU
     return TEST_SKIP;
 }
 
 static TestResult test_stress_concurrent_operations(void) {
-    const uint32_t FILE_COUNT = 10;  // Reduced from 50 for QEMU performance
+    const uint32_t FILE_COUNT = 10;
     uint32_t file_ids[10];
     uint16_t tag_ids[2] = {1, 2};
-    
-    // Create files
+
     for (uint32_t i = 0; i < FILE_COUNT; i++) {
         char name[32];
         ksnprintf(name, sizeof(name), "concurrent_%u", i);
-        
+
         error_t err = tagfs_create_file(name, tag_ids, 2, &file_ids[i]);
         TEST_ASSERT_OK(err, "tagfs_create_file should succeed");
     }
-    
-    // Write to all files concurrently (simulated)
+
     for (uint32_t i = 0; i < FILE_COUNT; i++) {
         TagFSFileHandle* handle = tagfs_open(file_ids[i], TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
         if (handle) {
@@ -696,8 +604,7 @@ static TestResult test_stress_concurrent_operations(void) {
             tagfs_close(handle);
         }
     }
-    
-    // Read from all files
+
     for (uint32_t i = 0; i < FILE_COUNT; i++) {
         TagFSFileHandle* handle = tagfs_open(file_ids[i], TAGFS_HANDLE_READ);
         if (handle) {
@@ -706,27 +613,23 @@ static TestResult test_stress_concurrent_operations(void) {
             tagfs_close(handle);
         }
     }
-    
-    // Cleanup
+
     for (uint32_t i = 0; i < FILE_COUNT; i++) {
         tagfs_delete_file(file_ids[i]);
     }
-    
+
     return TEST_PASS;
 }
 
-// ============================================================================
-// Test Runner Implementation
-// ============================================================================
 
 error_t TagFS_TestsInit(void) {
     if (g_tests_initialized)
         return ERR_ALREADY_INITIALIZED;
-    
+
     memset(&g_test_stats, 0, sizeof(TestStats));
     g_test_stats.start_time = get_time_ms();
     g_tests_initialized = true;
-    
+
     debug_printf("[Tests] Initialized\n");
     return OK;
 }
@@ -734,11 +637,11 @@ error_t TagFS_TestsInit(void) {
 void TagFS_TestsShutdown(void) {
     if (!g_tests_initialized)
         return;
-    
+
     g_test_stats.end_time = get_time_ms();
     g_test_stats.total_duration_ms = g_test_stats.end_time - g_test_stats.start_time;
     g_tests_initialized = false;
-    
+
     debug_printf("[Tests] Shutdown complete\n");
 }
 
@@ -752,19 +655,19 @@ void TagFS_PrintTestResults(const TestStats* stats) {
     debug_printf("Failed:         %u\n", stats->total_failed);
     debug_printf("Skipped:        %u\n", stats->total_skipped);
     debug_printf("Duration:       %lu ms\n", (unsigned long)stats->total_duration_ms);
-    
+
     if (stats->total_failed == 0) {
         debug_printf("\n[SUCCESS] All tests passed!\n");
     } else {
         debug_printf("\n[FAILURE] %u tests failed\n", stats->total_failed);
     }
-    
+
     debug_printf("========================================\n");
 }
 
 void TagFS_DumpState(void) {
     debug_printf("\n=== TagFS State Dump ===\n");
-    
+
     TagFSState* fs = tagfs_get_state();
     if (fs && fs->initialized) {
         debug_printf("Total blocks:   %u\n", fs->layout.data_blocks);
@@ -772,7 +675,7 @@ void TagFS_DumpState(void) {
         debug_printf("Total files:    %u\n", fs->ledger.total_files);
         debug_printf("Total tags:     %u\n", fs->ledger.total_tags);
     }
-    
+
     BcdcStats bcdc_stats;
     BcdcGetStats(&bcdc_stats);
     debug_printf("\n=== Bcdc Stats ===\n");
@@ -780,17 +683,13 @@ void TagFS_DumpState(void) {
     debug_printf("Bytes before:        %lu\n", (unsigned long)bcdc_stats.bytes_before);
     debug_printf("Bytes after:         %lu\n", (unsigned long)bcdc_stats.bytes_after);
     if (bcdc_stats.bytes_before > 0) {
-        debug_printf("Compression ratio:   %lu%%\n", 
+        debug_printf("Compression ratio:   %lu%%\n",
                      (unsigned long)(bcdc_stats.bytes_after * 100 / bcdc_stats.bytes_before));
     }
-    
+
     debug_printf("======================\n");
 }
 
-// Run all tests
-// ============================================================================
-// BoxHash v2 tests (deterministic integrity/content hashing)
-// ============================================================================
 
 static TestResult test_boxhash_determinism(void) {
     uint8_t seed[16];
@@ -830,7 +729,7 @@ static TestResult test_boxhash_avalanche(void) {
     BoxHashInit(&c, seed, 8);
     for (int i = 0; i < 4096; i++) g_test_buffer[i] = (uint8_t)(i * 3 + 1);
     BoxHash a = BoxHashContent(g_test_buffer, 4096, &c);
-    g_test_buffer[2000] ^= 0x01;                 // flip a single bit
+    g_test_buffer[2000] ^= 0x01;
     BoxHash b = BoxHashContent(g_test_buffer, 4096, &c);
     TEST_ASSERT(!BoxHashEqual(&a, &b), "1-bit change -> different hash");
 
@@ -844,7 +743,6 @@ static TestResult test_boxhash_avalanche(void) {
 }
 
 static TestResult test_boxhash_sha256_kat(void) {
-    // FIPS 180-4: SHA-256("abc")
     static const uint8_t expected[32] = {
         0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea,0x41,0x41,0x40,0xde,0x5d,0xae,0x22,0x23,
         0xb0,0x03,0x61,0xa3,0x96,0x17,0x7a,0x9c,0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad
@@ -858,7 +756,6 @@ static TestResult test_boxhash_sizes(void) {
     uint8_t seed[4] = {9, 8, 7, 6};
     BoxHashContext c;
     BoxHashInit(&c, seed, 4);
-    // Exercise every tail length class (wyhash 1-3 / 4-7 / 8-16 / >16) — no OOB.
     static const uint32_t sizes[] = {1,7,8,15,16,17,31,32,33,63,64,65,4096};
     uint64_t prev = 0;
     for (uint32_t k = 0; k < sizeof(sizes)/sizeof(sizes[0]); k++) {
@@ -874,12 +771,6 @@ static TestResult test_boxhash_sizes(void) {
     return TEST_PASS;
 }
 
-// ============================================================================
-// CoW redirect durability — snapshot frozen view survives reboot
-// Reproduces the post-reboot state (snapshot restored from the manifest with no
-// in-memory redirects) and runs the real mount-time DiskBook replay path,
-// confirming the redirect is restored from the durable log.
-// ============================================================================
 static TestResult test_cow_redirect_reboot_survival(void) {
     if (!DiskBookIsInitialized())
         return TEST_SKIP;
@@ -892,13 +783,9 @@ static TestResult test_cow_redirect_reboot_survival(void) {
         return TEST_SKIP;
     }
 
-    // Inject a snapshot exactly as the mount manifest-restore path does: present
-    // in memory, but with its redirect list empty (redirects are not in the
-    // manifest — they live only in the DiskBook log). This IS the post-reboot
-    // state before replay.
     CowSnapshot snap;
     memset(&snap, 0, sizeof(snap));
-    snap.snapshot_id = 0x7eb007u;     // "reboot" test id — won't collide
+    snap.snapshot_id = 0x7eb007u;
     strncpy(snap.name, "_reboot_surv", TAGFS_SNAPSHOT_NAME_LEN - 1);
     snap.flags = COW_SNAP_READONLY;
     TagFS_CowRestoreSnapshot(&snap);
@@ -907,25 +794,18 @@ static TestResult test_cow_redirect_reboot_survival(void) {
     TEST_ASSERT(TagFS_SnapshotInfo(snap.snapshot_id, &info) == OK, "test snapshot exists");
     TEST_ASSERT(info.redirect_count == 0, "post-reboot snapshot starts with 0 redirects");
 
-    // Durably record a redirect, as a pre-reboot CoW write would have.
     TEST_ASSERT(DiskBookLogRedirect(snap.snapshot_id, oldb, newb, 0) == OK,
                 "DiskBookLogRedirect persists the redirect");
 
-    // Run the real mount-time recovery path — it must restore the redirect.
     TEST_ASSERT(DiskBookValidateAndReplay() == OK, "DiskBook replay succeeds");
     TEST_ASSERT(TagFS_SnapshotInfo(snap.snapshot_id, &info) == OK, "snapshot still exists");
     TEST_ASSERT(info.redirect_count >= 1, "replay restored the CoW redirect (survives reboot)");
 
-    // Cleanup: delete frees the redirect's old_block + compacts the journal;
-    // free the new block we allocated.
     TagFS_SnapshotDelete(snap.snapshot_id);
     tagfs_free_blocks(newb, 1);
     return TEST_PASS;
 }
 
-// ============================================================================
-// Data integrity (verify-on-read) test
-// ============================================================================
 static TestResult test_integrity_detects_mismatch(void) {
     if (!IntegrityIsInitialized())
         return TEST_SKIP;
@@ -938,20 +818,16 @@ static TestResult test_integrity_detects_mismatch(void) {
     TEST_ASSERT(IntegrityVerify(blk, g_test_buffer), "verify matches the recorded digest");
 
     uint32_t before = IntegrityErrorCount();
-    g_test_buffer[100] ^= 0xFF;                       // simulate a flipped bit on disk
+    g_test_buffer[100] ^= 0xFF;
     TEST_ASSERT(!IntegrityVerify(blk, g_test_buffer), "verify detects a 1-byte mismatch");
     TEST_ASSERT(IntegrityErrorCount() == before + 1, "bit-rot counter incremented exactly once");
 
-    IntegrityDrainReports();   // exercise the deferred Touch-report path (no crash)
+    IntegrityDrainReports();
 
     tagfs_free_blocks(blk, 1);
     return TEST_PASS;
 }
 
-// Integrity-map reboot survival: persist -> release the in-RAM map -> reload it
-// from disk, then confirm a digest written before the cycle still verifies (and
-// still catches corruption). This is the map's actual reboot-recovery path,
-// exercised safely in-kernel (no FS-wide teardown, no reboot orchestration).
 static TestResult test_integrity_persist_reload(void) {
     if (!IntegrityIsInitialized())
         return TEST_SKIP;
@@ -960,10 +836,10 @@ static TestResult test_integrity_persist_reload(void) {
         return TEST_SKIP;
 
     for (int i = 0; i < 4096; i++) g_test_buffer[i] = (uint8_t)(i * 11 + 3);
-    IntegrityUpdate(blk, g_test_buffer);   // record digest
-    IntegrityFlush();                       // persist the map to disk
+    IntegrityUpdate(blk, g_test_buffer);
+    IntegrityFlush();
 
-    IntegrityShutdown();                    // drop the in-RAM map (disk copy remains)
+    IntegrityShutdown();
     TEST_ASSERT(IntegrityInit() == OK, "integrity remount (re-init from disk) succeeds");
 
     TEST_ASSERT(IntegrityVerify(blk, g_test_buffer), "digest survived persist + reload (reboot)");
@@ -974,17 +850,7 @@ static TestResult test_integrity_persist_reload(void) {
     return TEST_PASS;
 }
 
-// ============================================================================
-// Use Context Tests — reads only.
-//
-// The context is the user's and the volume is the user's; neither is written
-// to prove that a query is narrowed. Every context set here is set WITHOUT
-// interning (a tag the volume does not know stays unknown), and whatever the
-// user had is put back afterwards.
-// ============================================================================
 
-/* The context as it was: a comma-joined list to hand back to UseContextSet,
- * or NULL for none. */
 static bool use_snapshot_take(char **out_list)
 {
     uint32_t n    = 0;
@@ -1016,7 +882,6 @@ static void use_snapshot_restore(char *list)
     }
 }
 
-/* A strand that wears exactly one tag, for UseContextMatches. */
 static process_t *use_test_strand(uint16_t tag_id, cabin_t **out_cabin)
 {
     cabin_t *cabin = kmalloc(sizeof(cabin_t));
@@ -1053,8 +918,6 @@ static void use_test_strand_free(process_t *proc, cabin_t *cabin)
     kfree(proc);
 }
 
-/* Spelling: blanks dropped, "key:" is "key", a duplicate kept once, an unfit
- * tag refused with the context left as it was. */
 static TestResult test_use_context_spelling(void)
 {
     char *saved;
@@ -1087,8 +950,6 @@ static TestResult test_use_context_spelling(void)
     return TEST_PASS;
 }
 
-/* Walls: a context of a tag nobody wears shows nothing, and no strand can be
- * in its tier. */
 static TestResult test_use_context_walls(void)
 {
     char *saved;
@@ -1121,8 +982,6 @@ static TestResult test_use_context_walls(void)
     return TEST_PASS;
 }
 
-/* Narrowing: a context of a tag some file wears shows only files wearing it,
- * and a strand wearing it is in the tier while one without is not. */
 static TestResult test_use_context_narrows(void)
 {
     uint32_t first[1];
@@ -1132,7 +991,7 @@ static TestResult test_use_context_narrows(void)
     TEST_ASSERT(tagfs_get_metadata(first[0], &meta) == 0, "the first file's metadata");
     if (meta.tag_count == 0) {
         tagfs_metadata_free(&meta);
-        return TEST_SKIP;   /* nothing to narrow by */
+        return TEST_SKIP;
     }
     uint16_t tag_id = meta.tag_ids[0];
     tagfs_metadata_free(&meta);
@@ -1181,15 +1040,6 @@ static TestResult test_use_context_narrows(void)
     return TEST_PASS;
 }
 
-/*
- * The volume remembers the context. What is said to it is read back off the
- * medium by the Ledger's own reader; a list longer than the record holds is
- * forgotten whole rather than kept in part; and what the volume held before
- * is put back, so the boot road recalls exactly what it would have.
- *
- * Only the volume's memory is touched here, never the machine's context:
- * the road that takes one up runs after these tests, on an empty context.
- */
 static TestResult test_use_context_remembered(void)
 {
     typedef struct {
@@ -1217,7 +1067,6 @@ static TestResult test_use_context_remembered(void)
         TEST_ASSERT(kept, "and remembers it");
     }
 
-    /* Off the medium, not out of memory: the newer of the two copies. */
     int newest = -1;
     for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
         if (!tagfs_ledger_peek(c, &sc->led[c], sc->tail[c], &sc->tail_len[c])) continue;
@@ -1233,7 +1082,6 @@ static TestResult test_use_context_remembered(void)
         TEST_ASSERT(false, "the medium carries the context as said, right after the fixed fields");
     }
 
-    /* Longer than the record holds: forgotten whole, and said so. */
     memset(sc->oversize, 'a', sizeof(sc->oversize));
     rc = tagfs_remember_use_context(sc->oversize, sizeof(sc->oversize), &kept);
     size_t left = tagfs_recall_use_context(NULL, 0);
@@ -1244,7 +1092,6 @@ static TestResult test_use_context_remembered(void)
         TEST_ASSERT(left == 0, "the volume now remembers none, not half");
     }
 
-    /* What was there is put back. */
     rc = tagfs_remember_use_context(sc->before, before_len, &kept);
     bool restored = rc == OK && (before_len == 0 || kept);
     kfree(sc);
@@ -1252,13 +1099,6 @@ static TestResult test_use_context_remembered(void)
     return TEST_PASS;
 }
 
-/*
- * Whether this build is allowed to write to the volume it is testing.
- *
- * A build switch rather than a runtime guess: "is this medium somebody's" is
- * not a question a kernel can answer by looking at it, and guessing wrong in
- * the permissive direction costs somebody their files.
- */
 #ifdef CONFIG_VOLUME_TESTS
 static const bool g_volume_tests_allowed = true;
 #else
@@ -1270,18 +1110,17 @@ error_t TagFS_RunAllTests(TestStats* stats) {
         return ERR_NOT_INITIALIZED;
 
     uint32_t skipped_writers = 0;
-    
+
     memset(stats, 0, sizeof(TestStats));
     stats->start_time = get_time_ms();
-    
-    // Define all tests
+
     static TestCase core_tests[] = {
         {"tagfs_init", test_tagfs_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
         {"tagfs_deed", test_tagfs_deed, TEST_SKIP, 0, "", TEST_READS_ONLY},
         {"tagfs_create_file", test_tagfs_create_file, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
         {"tagfs_write_read", test_tagfs_write_read, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
     };
-    
+
     static TestCase compression_tests[] = {
         {"bcdc_init", test_bcdc_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
         {"bcdc_compress_decompress_random", test_bcdc_compress_decompress_random, TEST_SKIP, 0, "", TEST_READS_ONLY},
@@ -1349,7 +1188,6 @@ error_t TagFS_RunAllTests(TestStats* stats) {
         {"use_context_remembered", test_use_context_remembered, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
     };
 
-    // Run all test suites
     static TestCase* all_suites[] = {
         core_tests, compression_tests, journal_tests, snapshot_tests, stress_tests, braid_tests, cow_tests, boxhash_tests, integrity_tests, dedup_tests, use_context_tests
     };
@@ -1369,27 +1207,11 @@ error_t TagFS_RunAllTests(TestStats* stats) {
 
     debug_printf("\n[Tests] Starting test run...\n");
 
-    /* Derived, not typed: the count used to be a literal 9, which is a silent
-     * way to add a suite that never runs. */
     for (uint32_t s = 0; s < sizeof(all_suites)/sizeof(all_suites[0]); s++) {
         for (uint32_t i = 0; i < suite_sizes[s]; i++) {
             TestCase* test = &all_suites[s][i];
             uint64_t start = get_time_ms();
 
-            /*
-             * A test that writes goes nowhere near a volume somebody is using.
-             *
-             * The mounted volume belongs to whoever switched the machine on.
-             * These tests create files, allocate blocks and checkpoint the
-             * journal — on their medium, in their filesystem, on every boot.
-             * That was found by reading the owner's flash drive back: his own
-             * files with test_file, test_rw and stress_file_0..2 among them.
-             *
-             * Built with VOLUME_TESTS=on they run, which is what the test
-             * images in QEMU are for. Otherwise they are skipped and said to
-             * have been skipped — a test silently not run is worse than one
-             * that never existed.
-             */
             if (test->reach == TEST_WRITES_TO_VOLUME && !g_volume_tests_allowed) {
                 test->result      = TEST_SKIP;
                 test->duration_ms = 0;
@@ -1403,7 +1225,7 @@ error_t TagFS_RunAllTests(TestStats* stats) {
 
             test->result = test->func();
             test->duration_ms = get_time_ms() - start;
-            
+
             stats->total_tests++;
             if (test->result == TEST_PASS) {
                 stats->total_passed++;
@@ -1417,22 +1239,19 @@ error_t TagFS_RunAllTests(TestStats* stats) {
             }
         }
     }
-    
+
     stats->end_time = get_time_ms();
     stats->total_duration_ms = stats->end_time - stats->start_time;
 
-    /* Said with kprintf, and said even when the number is zero on a build that
-     * allows them: "37 run, 35 passed" tells nobody which 37, and a suite that
-     * quietly shrank is how a test stops covering anything. */
     if (skipped_writers > 0) {
         kprintf("[TESTS] %u test(s) that write to the volume were not run — "
                 "this volume belongs to whoever is using this machine (build "
                 "with VOLUME_TESTS=on to run them)\n", skipped_writers);
     }
-    
+
     TagFS_PrintTestResults(stats);
     TagFS_DumpState();
-    
+
     return stats->total_failed == 0 ? OK : ERR_INTERNAL;
 }
 

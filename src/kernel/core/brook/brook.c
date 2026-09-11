@@ -1,23 +1,3 @@
-/*
- * brook.c — SPSC ordered streaming primitive.
- *
- * Mirrors the Bay subsystem (src/kernel/core/bay/bay.c) for its hashing,
- * tag resolution, claim-list lifecycle and PMM/VMM chunk allocation —
- * but layers a stream-specific role discipline (writer/reader pids in
- * BrookObject), a shared 4 KiB BrookHeader page that both peers map
- * read-write, and a futex-style wait/wake protocol that lets the
- * userspace hot path run lock-free (atomic head/tail updates) and only
- * descend into a syscall when the ring is full (writer) / empty (reader).
- *
- * See brook.h for the full lifecycle, ordering rules and lost-wakeup
- * proof. This file owns:
- *   - 256-bucket hash keyed by tag_id
- *   - chunk allocation (4 KiB vs implicit 2 MiB huge pages)
- *   - per-cabin VA reservation inside CABIN_BROOK_BASE..CABIN_BROOK_END
- *   - hard SPSC enforcement
- *   - wait/wake syscalls' kernel side
- *   - peer-death wake on process_destroy
- */
 
 #include "brook.h"
 #include "process.h"
@@ -30,31 +10,18 @@
 #include "atomics.h"
 #include "error.h"
 #include "kernel_config.h"
-#include "acpi.h"          /* acpi_get_numa, ACPI_NUMA_DOMAIN_UNKNOWN */
-#include "amp.h"           /* amp_get_core_index, g_amp.cores */
-#include "cpuid.h"         /* g_cpu_caps for WAITPKG + monitor line size */
-#include "kring.h"         /* KResultPush — the kernel rings a departing peer's bell */
-#include "result.h"        /* Result */
+#include "acpi.h"
+#include "amp.h"
+#include "cpuid.h"
+#include "kring.h"
+#include "result.h"
 
-/* ─────────────────────────────────────────────────────────────────────
- * Page-class policy mirrors Bay. 4 KiB by default; 2 MiB when total
- * slot size ≥ 2 MiB AND a 2 MiB-aligned chunk can be carved. 1 GiB
- * pages are out of scope for v1 (BUDDY_MAX_ORDER caps order at 14).
- *
- * NOTE: the header page is always exactly 1 × 4 KiB regardless of
- * page class — it carries only the 128 B BrookHeader plus padding.
- * ───────────────────────────────────────────────────────────────────── */
 #define BROOK_PAGE_CLASS_4K     12u
 #define BROOK_PAGE_CLASS_2M     21u
 #define BROOK_HUGE_THRESHOLD    VMM_LARGE_PAGE_2M_SIZE
 #define BROOK_HUGE_SIZE         VMM_LARGE_PAGE_2M_SIZE
 #define BROOK_HUGE_PAGES        VMM_LARGE_PAGE_2M_PAGES
 
-/* ─────────────────────────────────────────────────────────────────────
- * Hash table — 256 buckets, per-bucket spinlock. Cross-tag operations
- * never serialise. Identical sizing to Bay; the typical concurrent
- * Brook count per cabin is single-digit so 256 is plenty.
- * ───────────────────────────────────────────────────────────────────── */
 #define BROOK_BUCKETS           256u
 #define BROOK_BUCKET_MASK       (BROOK_BUCKETS - 1)
 
@@ -65,8 +32,6 @@ typedef struct BrookBucket {
 
 static BrookBucket g_brook_buckets[BROOK_BUCKETS];
 
-/* The kernel's half of the bell — defined near BrookBellUnrung, declared here
- * because both release paths use it and both sit above it. */
 static uint32_t brook_take_survivor_bell_locked(BrookHeader *kh, uint32_t departing_role);
 static void     brook_ring_pid(uint32_t who);
 
@@ -89,29 +54,6 @@ void BrookInit(void)
     debug_printf("[Brook] init: %u buckets, 2 MiB huge-page threshold\n",
                  (unsigned)BROOK_BUCKETS);
 
-    /* Real-HW posture log. Brook's wait path correctness depends on
-     * three runtime invariants:
-     *
-     *   - UMONITOR cacheline granularity (CPUID.05H) — the BrookHeader
-     *     layout (writer state on CL0, reader state on CL1) assumes 64 B
-     *     cachelines. Other sizes don't break correctness (every store
-     *     to the monitored line wakes the watcher, regardless of line
-     *     size) but expose either false-sharing penalty (line > 64 B,
-     *     CL0 and CL1 share one monitor line — spurious cross-peer
-     *     wakes) or unused padding (line < 64 B).
-     *
-     *   - WAITPKG (CPUID.07H:ECX[5]) — userspace cpu_has_waitpkg picks
-     *     the UMWAIT fast path; otherwise the PAUSE+yield fallback.
-     *     This bit is the kernel-wide INTERSECTION (per_core.c calls
-     *     cpu_intersect_features_ap on every AP) so heterogeneous P+E
-     *     CPUs surface here correctly.
-     *
-     *   - NUMA topology (SRAT) — brook_alloc_zero_in_domain places ring
-     *     pages on the opener's home node when SRAT is present. Log
-     *     domain count so the operator sees the placement landscape.
-     *
-     * One line per concern; quiet by default on uniform single-domain
-     * single-vendor configs (the common case). */
     {
         unsigned line_min = (unsigned)g_cpu_caps.monitor_line_min;
         unsigned line_max = (unsigned)g_cpu_caps.monitor_line_max;
@@ -132,12 +74,6 @@ void BrookInit(void)
                          wait_path, line_min, line_max, domain_count);
         }
 
-        /* BrookHeader layout sanity: with line_max > 64 the writer-side
-         * cacheline (CL0) and reader-side cacheline (CL1) collide on
-         * one monitor line. Correctness preserved (per SDM Vol 2A
-         * UMONITOR — any store to the monitored line wakes the
-         * watcher) but every push/pop pings both peers. Log the
-         * scenario so the operator can correlate any perf surprise. */
         if (line_max > 64) {
             debug_printf("[Brook] note: monitor line %u B > 64 B "
                          "(writer/reader cachelines share one line — wakes correct, "
@@ -147,37 +83,12 @@ void BrookInit(void)
     }
 }
 
-/* ─────────────────────────────────────────────────────────────────────
- * Tag resolution. Same pattern as Bay/Touch.
- * ───────────────────────────────────────────────────────────────────── */
 static uint16_t brook_resolve_tag(const char *tag, bool intern_if_missing)
 {
     if (!tag || tag[0] == '\0') return TAGFS_INVALID_TAG_ID;
     return intern_if_missing ? tagfs_tag_intern(tag) : tagfs_tag_lookup(tag);
 }
 
-/* ─────────────────────────────────────────────────────────────────────
- * NUMA-aware backing-page allocation.
- *
- * SPSC streams are sensitive to cross-node coherence: on a 2-socket
- * Xeon / EPYC the cross-socket cache-coherent bounce of a tail update
- * can be 3-5× slower than intra-socket. Brook's hot path is exactly
- * that — producer writes tail, consumer's cacheline goes M → I → S.
- * Co-locating the ring + header pages with the caller's CPU keeps the
- * coherence chatter on-socket.
- *
- * Determine the preferred NUMA domain from the current CPU's APIC ID
- * mapped through SRAT (acpi_numa_info_t.cpus[]). ACPI_NUMA_DOMAIN_UNKNOWN
- * when there's no SRAT (uniform memory machine), no matching CPU entry,
- * or CPUs are running before SRAT parse — every caller of
- * pmm_alloc_in_domain handles UNKNOWN by falling through to any-zone
- * buddy_alloc, so the unknown path is the safe default.
- *
- * The "opener's CPU wins" heuristic is intentional: in BoxOS the
- * opening cabin typically also produces or consumes — proc-spawn
- * affinity tends to keep the producer/consumer on the same socket as
- * the original creator. Cross-socket spawns lose ~10 % vs an optimal
- * placement; uniform-memory machines see no difference. ───────────── */
 static uint32_t brook_preferred_domain(void)
 {
     const acpi_numa_info_t *n = acpi_get_numa();
@@ -194,16 +105,6 @@ static uint32_t brook_preferred_domain(void)
     return ACPI_NUMA_DOMAIN_UNKNOWN;
 }
 
-/* Zero-fill wrapper around pmm_alloc_in_domain. pmm_alloc_in_domain
- * returns raw uncleared pages (vs pmm_alloc_zero); we must memset to
- * preserve the "ring starts in a known state" invariant for the
- * BrookHeader and the lock-free push path.
- *
- * Falls back to any-zone pmm_alloc_zero on UNKNOWN domain or in-domain
- * failure — exactly what pmm_alloc_in_domain already does on the
- * domain side, but we keep the symmetric fallback at the brook layer
- * so the zero-fill always happens regardless of which path served the
- * allocation. */
 static void *brook_alloc_zero_in_domain(size_t pages, uint32_t domain)
 {
     if (domain == ACPI_NUMA_DOMAIN_UNKNOWN) {
@@ -211,10 +112,6 @@ static void *brook_alloc_zero_in_domain(size_t pages, uint32_t domain)
     }
     void *p = pmm_alloc_in_domain(pages, domain);
     if (!p) {
-        /* Domain-local allocator + global fallback inside it failed.
-         * Try the zero-fill any-zone path one more time — different
-         * code path inside the buddy might find pages even though the
-         * range-constrained walk didn't. */
         p = pmm_alloc_zero(pages);
         if (p) return p;
         return NULL;
@@ -223,14 +120,6 @@ static void *brook_alloc_zero_in_domain(size_t pages, uint32_t domain)
     return p;
 }
 
-/* ─────────────────────────────────────────────────────────────────────
- * Allocate slot-region chunks. Same fall-back-to-4K pattern as Bay:
- * try 2 MiB chunks first when total ≥ 2 MiB, drop to 4 KiB for the
- * WHOLE region if even one chunk can't be served at 2 MiB granularity.
- *
- * Returns OK + fills out_* on success. On failure, every partially-
- * allocated chunk is returned to PMM before propagating the error.
- * ───────────────────────────────────────────────────────────────────── */
 static error_t brook_alloc_slot_chunks(uint64_t total_size,
                                        uint32_t domain,
                                        uint16_t *out_class,
@@ -259,7 +148,6 @@ static error_t brook_alloc_slot_chunks(uint64_t total_size,
         size_t pages = (cls == BROOK_PAGE_CLASS_2M) ? BROOK_HUGE_PAGES : 1;
         void *p = brook_alloc_zero_in_domain(pages, domain);
         if (!p && cls == BROOK_PAGE_CLASS_2M) {
-            /* Drop the partial 2 MiB run and rebuild at 4 KiB. */
             for (uint32_t j = 0; j < i; j++) {
                 if (chunks[j]) pmm_free((void *)chunks[j], BROOK_HUGE_PAGES);
             }
@@ -271,9 +159,6 @@ static error_t brook_alloc_slot_chunks(uint64_t total_size,
             chunks = (uint64_t *)kmalloc(cc * sizeof(uint64_t));
             if (!chunks) return ERR_NO_MEMORY;
             memset(chunks, 0, cc * sizeof(uint64_t));
-            /* Re-enter the loop at i=0. The for-loop post-increment
-             * runs on `continue`, so we set i = UINT32_MAX here; the
-             * post-increment wraps to 0 and the body starts fresh. */
             i = (uint32_t)-1;
             continue;
         }
@@ -294,11 +179,6 @@ static error_t brook_alloc_slot_chunks(uint64_t total_size,
     return OK;
 }
 
-/* Map slot chunks into proc->cabin at user_va_base. Unwinds on failure. */
-/* Phase 2C — register MemRegionAttach bookkeeping for the Brook header
- * (1 page) + each slot chunk. Mirror flag set used in brook_map_*_into_cabin
- * verbatim (USER_RW | NX). Best-effort per-chunk; future enforcement
- * walks tolerate missing entries. */
 static void brook_memtag_attach_all(struct process_t *proc,
                                      uint64_t hdr_phys,
                                      uint64_t va_header,
@@ -333,7 +213,6 @@ static void brook_memtag_attach_all(struct process_t *proc,
     }
 }
 
-/* Inverse — detach header + every slot chunk. Idempotent. */
 static void brook_memtag_detach_all(struct process_t *proc,
                                      uint64_t hdr_phys,
                                      uint64_t va_header,
@@ -366,10 +245,6 @@ static error_t brook_map_slots_into_cabin(struct process_t *proc,
 {
     if (!proc || !proc->cabin) return ERR_INVALID_ARGUMENT;
 
-    /* RW + NX — Brook payload is data, not code. Both peers always get
-     * RW; there is no read-only-reader flag (the kernel cannot enforce
-     * SPSC discipline if the reader can write the cursor, and the
-     * frame slots are exclusive-write-by-producer by protocol). */
     const uint64_t vmm_flags = VMM_FLAGS_USER_RW | VMM_FLAG_NO_EXECUTE;
 
     for (uint32_t i = 0; i < chunk_count; i++) {
@@ -409,7 +284,6 @@ static void brook_unmap_slots_from_cabin(struct process_t *proc,
     }
 }
 
-/* Map / unmap the 4 KiB BrookHeader page. */
 static bool brook_map_header_into_cabin(struct process_t *proc,
                                         uint64_t user_va_header,
                                         uint64_t header_phys)
@@ -428,7 +302,6 @@ static void brook_unmap_header_from_cabin(struct process_t *proc,
     vmm_unmap_page(proc->cabin->vmm, user_va_header);
 }
 
-/* Free every backing chunk + the header page via PMM. */
 static void brook_free_backing(BrookObject *brook)
 {
     if (!brook) return;
@@ -448,15 +321,6 @@ static void brook_free_backing(BrookObject *brook)
     }
 }
 
-/* ─────────────────────────────────────────────────────────────────────
- * Per-cabin VA reservation. Bump-allocator within
- * CABIN_BROOK_BASE..CABIN_BROOK_END. Same model as Bay — released VAs
- * are NOT recycled (the 31 TiB window is enormous; fragmentation
- * irrelevant for any realistic workload). Each Brook open reserves
- * [header_page | aligned slot region]. The header page is always 4 KiB
- * (one PMM_PAGE_SIZE), the slot region is aligned to slot_chunk_size
- * so huge-page mappings land on PDE boundaries.
- * ───────────────────────────────────────────────────────────────────── */
 static error_t brook_reserve_user_va(struct process_t *proc,
                                      uint64_t slot_total_size,
                                      uint64_t slot_chunk_size,
@@ -468,23 +332,13 @@ static error_t brook_reserve_user_va(struct process_t *proc,
 
     spin_lock(&proc->cabin->brook_lock);
 
-    /* Page-align cursor for the header. */
     uint64_t cur = (proc->cabin->brook_va_next + (PMM_PAGE_SIZE - 1))
                    & ~(PMM_PAGE_SIZE - 1);
     uint64_t va_header = cur;
 
-    /* Slot region aligned to slot_chunk_size (= 2 MiB for huge). */
     uint64_t va_slots = (va_header + PMM_PAGE_SIZE + slot_chunk_size - 1)
                         & ~(slot_chunk_size - 1);
 
-    /* Wrap-safe bounds check.
-     *   - va_slots < va_header: ALIGN_UP wrapped through 0
-     *   - va_slots >= CABIN_BROOK_END: header took us past the window
-     *     end (next subtraction would underflow)
-     *   - slot_total_size > CABIN_BROOK_END - va_slots: slot region
-     *     would spill past the window
-     *   - Also reject overflow of the final cursor (va_slots + size
-     *     could wrap past 0 on the upper end). */
     if (va_slots < va_header ||
         va_slots >= CABIN_BROOK_END ||
         slot_total_size > CABIN_BROOK_END - va_slots ||
@@ -502,10 +356,6 @@ static error_t brook_reserve_user_va(struct process_t *proc,
     return OK;
 }
 
-/* ─────────────────────────────────────────────────────────────────────
- * Claim list helpers — proc->cabin->brook_claims_head singly-linked.
- * Identical shape to Bay's claim list.
- * ───────────────────────────────────────────────────────────────────── */
 static bool brook_link_claim(struct process_t *proc, BrookClaim *claim)
 {
     spin_lock(&proc->cabin->brook_lock);
@@ -537,9 +387,6 @@ static BrookClaim *brook_unlink_claim_by_va(struct process_t *proc,
     return NULL;
 }
 
-/* ─────────────────────────────────────────────────────────────────────
- * Bucket helpers — caller must hold bucket->lock.
- * ───────────────────────────────────────────────────────────────────── */
 static BrookObject *brook_bucket_find_locked(BrookBucket *b, uint16_t tag_id)
 {
     for (BrookObject *o = b->head; o; o = o->bucket_next) {
@@ -561,12 +408,9 @@ static inline uint64_t brook_total_pages(const BrookObject *brook)
     uint64_t pages_per_chunk = (brook->slot_chunk_size == BROOK_HUGE_SIZE)
                                ? BROOK_HUGE_PAGES : 1;
     uint64_t slot_pages = (uint64_t)brook->slot_chunk_count * pages_per_chunk;
-    return slot_pages + 1;  /* +1 for header */
+    return slot_pages + 1;
 }
 
-/* Drop one ref. Caller MUST hold b->lock on entry; releases the lock
- * before returning. If ref_count hits zero, BrookObject is unlinked,
- * backing pages return to PMM, and the struct is freed. */
 static void brook_drop_ref_locked(BrookBucket *b, BrookObject *brook)
 {
     brook->ref_count--;
@@ -583,28 +427,11 @@ static void brook_drop_ref_locked(BrookBucket *b, BrookObject *brook)
     spin_unlock(&b->lock);
 }
 
-/* ─────────────────────────────────────────────────────────────────────
- * Header convenience — translate BrookObject.header_phys to a writable
- * kernel virtual pointer so the kernel side of wait/wake can read and
- * mutate the futex flags.
- *
- * vmm_phys_to_virt resolves through the kernel direct map, which is
- * mapped write-back (WB). That's the cacheability class UMONITOR
- * requires for the userspace peer's monitor to fire: Intel SDM
- * Vol 2A UMONITOR — "The address range must use memory of the
- * write-back type. Only write-back memory is guaranteed to correctly
- * trigger the monitoring hardware." If the kernel direct map were ever
- * remapped UC/WC, the kernel's alive=0 store would bypass caches and
- * the userspace peer's UMWAIT would never wake on it. The userspace
- * mapping is also VMM_FLAGS_USER_RW (no PCD/PWT/PAT bits) → WB.
- * Both aliases agree; alive-flag writes go through the cache and
- * wake the monitor as expected. ────────────────────────────────────── */
 static inline BrookHeader *brook_kernel_header(const BrookObject *brook)
 {
     return (BrookHeader *)vmm_phys_to_virt(brook->header_phys);
 }
 
-/* Initialise a freshly-allocated header page. */
 static void brook_header_init(BrookHeader *hdr,
                               uint32_t frame_size,
                               uint32_t frame_count)
@@ -615,21 +442,17 @@ static void brook_header_init(BrookHeader *hdr,
     hdr->frame_size           = frame_size;
     hdr->frame_count          = frame_count;
     hdr->magic                = BROOK_HEADER_MAGIC;
-    hdr->writer_alive         = 0;   /* set when writer attaches */
-    hdr->reader_alive         = 0;   /* set when reader attaches */
+    hdr->writer_alive         = 0;
+    hdr->reader_alive         = 0;
     hdr->writer_ever_attached = 0;
     hdr->reader_ever_attached = 0;
 }
 
-/* Power-of-two helper. */
 static inline bool brook_is_pow2(uint32_t x)
 {
     return x != 0 && (x & (x - 1)) == 0;
 }
 
-/* ─────────────────────────────────────────────────────────────────────
- * BrookOpenInternal
- * ───────────────────────────────────────────────────────────────────── */
 error_t BrookOpenInternal(struct process_t *proc,
                           const char *tag,
                           uint32_t frame_size,
@@ -666,7 +489,6 @@ error_t BrookOpenInternal(struct process_t *proc,
 
     BrookBucket *b = &g_brook_buckets[brook_bucket_index(tag_id)];
 
-    /* Phase 1: probe for existing. */
     spin_lock(&b->lock);
     BrookObject *brook = brook_bucket_find_locked(b, tag_id);
 
@@ -675,15 +497,9 @@ error_t BrookOpenInternal(struct process_t *proc,
             spin_unlock(&b->lock);
             return ERR_TAG_NOT_FOUND;
         }
-        /* Drop the lock for the chunk allocation; we'll re-lock and
-         * resolve any concurrent-create race. */
         spin_unlock(&b->lock);
 
         uint64_t slot_total = (uint64_t)frame_size * frame_count;
-        /* NUMA placement hint: the cabin that creates the Brook gets
-         * its ring + header on its CPU's home memory node. On uniform-
-         * memory (no SRAT) machines this resolves to UNKNOWN and the
-         * NUMA-aware helpers fall through to any-zone allocation. */
         uint32_t domain = brook_preferred_domain();
         uint16_t  cls;
         uint64_t  cs;
@@ -735,7 +551,6 @@ error_t BrookOpenInternal(struct process_t *proc,
         spin_lock(&b->lock);
         BrookObject *winner = brook_bucket_find_locked(b, tag_id);
         if (winner) {
-            /* Lost the race — discard our fresh copy, use the winner. */
             spin_unlock(&b->lock);
             brook_free_backing(fresh);
             kfree(fresh);
@@ -752,9 +567,6 @@ error_t BrookOpenInternal(struct process_t *proc,
             atomic_fetch_add_u64(&g_stat_objects, 1);
             atomic_fetch_add_u64(&g_stat_pages, brook_total_pages(fresh));
 
-            /* MemTag integration: tag header + each slot chunk with the
-             * Brook's key:value AND "purpose:brook" + "purpose:stream"
-             * so the streaming buffers are queryable via tag algebra. */
             char tag_buf[128];
             if (tagfs_tag_text(tag_id, tag_buf, sizeof(tag_buf))) {
                 MemTagApplyByPhys(fresh->header_phys, 1, tag_buf);
@@ -771,12 +583,7 @@ error_t BrookOpenInternal(struct process_t *proc,
         }
     }
 
-    /* At this point we hold b->lock and `brook` points to a live BrookObject. */
 
-    /* Shape check: if caller passed frame_size/count and they differ from
-     * the existing Brook (and caller is not just opening), reject. This
-     * keeps stream shape as part of tag identity — two cabins that ask
-     * for different shapes can't accidentally share a stream. */
     if (frame_size != 0 && brook->frame_size != frame_size) {
         spin_unlock(&b->lock);
         return ERR_ALREADY_EXISTS;
@@ -786,9 +593,6 @@ error_t BrookOpenInternal(struct process_t *proc,
         return ERR_ALREADY_EXISTS;
     }
 
-    /* Hard SPSC: second open with same role → ERR_BUSY. Same role +
-     * same pid (re-open by us) is also rejected — boxlib should be
-     * caching its handle. */
     if (role == BROOK_WRITER) {
         if (brook->writer_pid != 0) {
             spin_unlock(&b->lock);
@@ -812,27 +616,21 @@ error_t BrookOpenInternal(struct process_t *proc,
     uint32_t slot_cc    = brook->slot_chunk_count;
     spin_unlock(&b->lock);
 
-    /* Reserve VA window. */
     uint64_t va_header = 0, va_slots = 0;
     error_t rc = brook_reserve_user_va(proc, slot_total, slot_cs,
                                        &va_header, &va_slots);
     if (rc != OK) goto rollback_ref;
 
-    /* Phase 2B M2 — enforce MemTag capabilities BEFORE mapping the
-     * Brook's header/slot pages into the cabin. Header phys is the
-     * canonical witness — slot regions carry the same tags. */
     if (!MemTagEnforcePhys(proc->pid, (uintptr_t)hdr_phys)) {
         rc = ERR_PERMISSION_DENIED;
         goto rollback_ref;
     }
 
-    /* Map header. */
     if (!brook_map_header_into_cabin(proc, va_header, hdr_phys)) {
         rc = ERR_NO_MEMORY;
         goto rollback_ref;
     }
 
-    /* Map slot chunks. */
     rc = brook_map_slots_into_cabin(proc, va_slots, brook->slot_chunks,
                                     slot_cc, slot_cs);
     if (rc != OK) {
@@ -840,13 +638,9 @@ error_t BrookOpenInternal(struct process_t *proc,
         goto rollback_ref;
     }
 
-    /* Phase 2C — attach bookkeeping for header + each slot chunk so
-     * future revoke/grant sweeps can locate Brook's PTEs without scanning
-     * the page table. */
     brook_memtag_attach_all(proc, hdr_phys, va_header,
                              brook->slot_chunks, slot_cc, va_slots, slot_cs);
 
-    /* Allocate claim and link. */
     BrookClaim *claim = (BrookClaim *)kmalloc(sizeof(BrookClaim));
     if (!claim) {
         brook_memtag_detach_all(proc, hdr_phys, va_header,
@@ -864,16 +658,6 @@ error_t BrookOpenInternal(struct process_t *proc,
     claim->role            = role;
     claim->flags           = flags;
 
-    /* Publish peer-alive bit. CAS expected=0, new=1 — if the surviving
-     * peer has already FROZEN this side (single-session EOF/
-     * PROCESS_TERMINATED decision), the CAS fails and we reject the
-     * attach with ERR_INVALID_STATE. This is the lock-free race
-     * elimination: writer's attach-CAS and reader's EOF-CAS contend
-     * for the alive flag; exactly one wins, exclusive outcome.
-     *
-     * ever_attached is set ONLY AFTER alive CAS succeeds — the survivor's
-     * check (`alive==0 && ever_attached==1`) only ever observes a true
-     * "peer was here and left" state, never a half-published attach. */
     BrookHeader *kh = brook_kernel_header(brook);
     volatile uint32_t *alive_ptr;
     volatile uint32_t *ever_ptr;
@@ -890,9 +674,6 @@ error_t BrookOpenInternal(struct process_t *proc,
                                          false,
                                          __ATOMIC_ACQ_REL,
                                          __ATOMIC_ACQUIRE)) {
-            /* Either FROZEN (peer EOF'd this session — terminal) or 1
-             * (shouldn't happen under bucket_lock + pid check). Roll
-             * back: detach memtag, unmap, free claim, drop ref. */
             brook_memtag_detach_all(proc, hdr_phys, va_header,
                                      brook->slot_chunks, slot_cc, va_slots, slot_cs);
             brook_unmap_slots_from_cabin(proc, va_slots, slot_cc, slot_cs);
@@ -905,12 +686,7 @@ error_t BrookOpenInternal(struct process_t *proc,
         __atomic_store_n(ever_ptr, 1u, __ATOMIC_RELEASE);
     }
 
-    /* Link claim AFTER alive published. The destroying-check inside
-     * brook_link_claim closes the window where BrookCleanupProcess
-     * might have drained the list while we were busy. */
     if (!brook_link_claim(proc, claim)) {
-        /* Undo alive flag (CAS 1→0; if reader concurrently FROZEN'd,
-         * leave it FROZEN). */
         uint32_t one = 1u;
         __atomic_compare_exchange_n(alive_ptr, &one, 0u, false,
                                     __ATOMIC_RELEASE, __ATOMIC_RELAXED);
@@ -932,7 +708,6 @@ error_t BrookOpenInternal(struct process_t *proc,
     return OK;
 
 rollback_ref:
-    /* Drop the role we just claimed + the ref. Same-bucket; re-lock. */
     spin_lock(&b->lock);
     if (role == BROOK_WRITER && brook->writer_pid == proc->pid) {
         brook->writer_pid = 0;
@@ -943,10 +718,6 @@ rollback_ref:
     return rc;
 }
 
-/* ─────────────────────────────────────────────────────────────────────
- * Release — drop this cabin's claim. If both peers gone, destroy.
- * Wakes the surviving peer (if any) so it sees peer_alive=0 immediately.
- * ───────────────────────────────────────────────────────────────────── */
 error_t BrookReleaseInternal(struct process_t *proc, uint64_t user_va_header)
 {
     if (!proc || user_va_header == 0) return ERR_INVALID_ARGUMENT;
@@ -957,12 +728,10 @@ error_t BrookReleaseInternal(struct process_t *proc, uint64_t user_va_header)
     BrookObject *brook = claim->brook;
     if (!brook) { kfree(claim); return ERR_INVALID_STATE; }
 
-    /* Phase 2C — detach memtag attachments before the PTEs go away. */
     brook_memtag_detach_all(proc, brook->header_phys, claim->user_va_header,
                              brook->slot_chunks, brook->slot_chunk_count,
                              claim->user_va_slots, brook->slot_chunk_size);
 
-    /* Unmap from this cabin first. */
     brook_unmap_slots_from_cabin(proc, claim->user_va_slots,
                                  brook->slot_chunk_count,
                                  brook->slot_chunk_size);
@@ -972,10 +741,6 @@ error_t BrookReleaseInternal(struct process_t *proc, uint64_t user_va_header)
 
     spin_lock(&b->lock);
 
-    /* Mark our side dead in the shared header BEFORE dropping the pid.
-     * Use CAS expected=1→0 so a concurrent FROZEN set by the surviving
-     * peer (single-session EOF decision) is preserved — alive becomes
-     * sticky FROZEN, blocking any future attach to this session. */
     BrookHeader *kh = brook_kernel_header(brook);
     if (claim->role == BROOK_WRITER) {
         uint32_t one = 1u;
@@ -988,15 +753,10 @@ error_t BrookReleaseInternal(struct process_t *proc, uint64_t user_va_header)
                                     __ATOMIC_RELEASE, __ATOMIC_RELAXED);
         if (brook->reader_pid == proc->pid) brook->reader_pid = 0;
     }
-    /* Take the survivor's bell HERE, under the lock that guards the header;
-     * the ring itself waits until the lock is dropped (BrookRingPeer). */
     uint32_t ring_pid = brook_take_survivor_bell_locked(kh, claim->role);
 
     brook_drop_ref_locked(b, brook);
-    /* `brook` may have been freed inside brook_drop_ref_locked when
-     * ref_count hit zero — do NOT touch it past this point. */
 
-    /* Lock is gone (drop_ref_locked releases it either way): ring now. */
     brook_ring_pid(ring_pid);
 
     kfree(claim);
@@ -1005,20 +765,10 @@ error_t BrookReleaseInternal(struct process_t *proc, uint64_t user_va_header)
     return OK;
 }
 
-/* ─────────────────────────────────────────────────────────────────────
- * BrookCleanupProcess — process_destroy hook. Drains the per-cabin
- * claim list, drops every role, wakes peers with peer-alive=0.
- * ───────────────────────────────────────────────────────────────────── */
 void BrookCleanupProcess(struct process_t *proc)
 {
     if (!proc || !proc->cabin) return;
 
-    /* Splice out only THIS strand's claims (claim->proc == proc); claims
-     * held by sibling strands of the same cabin stay mapped and keep their
-     * peer-alive flags set.  Pointer surgery runs under brook_lock (so
-     * concurrent opens, which check proc->destroying first, cannot race-link
-     * past us); the heavy release runs outside it.  For a single-strand
-     * cabin every claim matches — identical to the old wholesale drain. */
     BrookClaim *to_free = NULL;
     spin_lock(&proc->cabin->brook_lock);
     BrookClaim **pp = (BrookClaim **)&proc->cabin->brook_claims_head;
@@ -1064,14 +814,9 @@ void BrookCleanupProcess(struct process_t *proc)
                                             __ATOMIC_RELAXED);
                 if (brook->reader_pid == proc->pid) brook->reader_pid = 0;
             }
-            /* A strand that DIES holding one end is the commonest way a stream
-             * ends, and the sleeper on the other end has even less to go on
-             * than after an orderly release — nobody called anything. Take the
-             * bell here, ring below the lock. */
             uint32_t ring_pid = brook_take_survivor_bell_locked(kh, to_free->role);
 
             brook_drop_ref_locked(b, brook);
-            /* `brook` may be freed past this point — don't touch it. */
 
             brook_ring_pid(ring_pid);
 
@@ -1084,35 +829,6 @@ void BrookCleanupProcess(struct process_t *proc)
     }
 }
 
-/* See brook.h. Walks every bucket because a brook is keyed by tag, not by the
- * strands on its ends — there is no index from a pid to the streams it holds,
- * and building one to serve a report that runs only when the whole machine has
- * gone quiet would be a lock in every open and release to save a walk nobody
- * is waiting on. 256 buckets, single-digit brooks in each.
- *
- * ‼ WHAT A LOST RING ACTUALLY LOOKS LIKE, and it is not what it sounds like.
- * The obvious test — "a bell still hanging over a stream that has work" — is
- * the wrong one, and a staged defect proved it: the peer TAKES the bell (the
- * CAS is what makes exactly one of them pay) and only then rings. Lose the ring
- * and the bell is already down; the stream sits with one frame and a clean
- * header, and that test sees nothing at all. Measured, not reasoned: with the
- * ring disabled the wedged lane read bell=0 head=0 tail=1.
- *
- * So the accusation rests on two facts from the same strand:
- *
- *   IT WENT TO SLEEP EXPECTING A BELL — at least one of its brooks carries its
- *   pid, on the side it holds. Only a strand that hung one is owed a ring,
- *   which is what keeps this away from the perfectly legitimate case of a
- *   strand parked on something else while a stream waits for it to come back.
- *
- *   AND ONE OF THEM COULD HAVE SERVED IT — a reader with frames it has not
- *   read, or a writer with room it has not been told about. Somebody moved a
- *   cursor for a strand that is asleep.
- *
- * Both ends are checked, because both ends sleep: a reader waiting for a frame
- * and a writer waiting for a slot are the same defect wearing different hats,
- * and the writer's is the console jam that used to be visible only as a line
- * of print sixty seconds later. */
 bool BrookBellUnrung(uint32_t strand_pid, uint16_t *out_tag_id,
                      uint64_t *out_head, uint64_t *out_tail)
 {
@@ -1135,17 +851,11 @@ bool BrookBellUnrung(uint32_t strand_pid, uint16_t *out_tag_id,
             const BrookHeader *h = brook_kernel_header(o);
             if (!h) continue;
 
-            /* Asleep in a stream — durable now that taking a bell only marks
-             * it. This is the fact that separates a strand owed a ring from
-             * one merely parked elsewhere while a stream waits for it. */
             uint32_t rb = __atomic_load_n(&h->reader_bell, __ATOMIC_ACQUIRE);
             uint32_t wb = __atomic_load_n(&h->writer_bell, __ATOMIC_ACQUIRE);
             if (is_reader && rb != 0) hung = true;
             if (is_writer && wb != 0) hung = true;
 
-            /* head BEFORE tail — same rule as the Result ring: read the
-             * consumer cursor first and the producer cursor cannot be sampled
-             * behind it, so an empty stream can never look full. */
             uint64_t head = __atomic_load_n(&h->head, __ATOMIC_ACQUIRE);
             uint64_t tail = __atomic_load_n(&h->tail, __ATOMIC_ACQUIRE);
             bool     can  = is_reader ? (head != tail)
@@ -1168,25 +878,7 @@ bool BrookBellUnrung(uint32_t strand_pid, uint16_t *out_tag_id,
     return true;
 }
 
-/* ─────────────────────────────────────────────────────────────────────
- * BrookRingPeer — the kernel rings for a peer that cannot ring for itself.
- *
- * A strand asleep on a stream is woken by the other end moving a cursor. A
- * strand asleep on a stream whose other end has DEPARTED is woken by nothing
- * at all: the departure is a store to `*_alive` made by a kernel that has no
- * cursor to move, and the sleeper's last look happened before it. It would
- * wait for a frame that can never come, or a slot that will never be freed.
- *
- * So the kernel does exactly what the departing peer would have done if it
- * still could: take the survivor's bell and ring it. Split in two on purpose —
- * TAKE runs under the bucket lock that guards the header, RING does not,
- * because ringing walks the target's page tables (KResultPush) and that is not
- * work to do with a bucket lock held.
- * ───────────────────────────────────────────────────────────────────── */
 
-/* Under the bucket lock: take the SURVIVOR's bell. `departing_role` is the
- * side that is leaving, so the bell taken is the other one. Returns the pid to
- * ring, or 0 if nobody was asleep. */
 static uint32_t brook_take_survivor_bell_locked(BrookHeader *kh, uint32_t departing_role)
 {
     if (!kh) return 0;
@@ -1194,24 +886,13 @@ static uint32_t brook_take_survivor_bell_locked(BrookHeader *kh, uint32_t depart
                                                                : &kh->writer_bell;
     uint32_t who = __atomic_load_n(bell, __ATOMIC_ACQUIRE);
     if (who == 0) return 0;
-    if (who & BROOK_BELL_RUNG) return 0;        /* already rung for this sleep */
-    /* Mark, never erase — the sleeper's own hand is the only one that clears
-     * this word, so the fact that it IS asleep in a stream survives the ring.
-     * See BROOK_BELL_RUNG in brook.h. */
+    if (who & BROOK_BELL_RUNG) return 0;
     if (!__atomic_compare_exchange_n(bell, &who, who | BROOK_BELL_RUNG, false,
                                      __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
-        return 0;                       /* the peer took it first and rang */
+        return 0;
     return BROOK_BELL_PID(who);
 }
 
-/* Outside every lock: deliver the ring.
- *
- * Exactly the record system.bell pushes — no sender, no token,
- * ERR_WOULD_BLOCK: the shape every consumer in boxlib has discarded since the
- * async-park ack existed. Its whole job is to move the target's Result cursor,
- * which is what its sleep is watching, and wearing a shape nobody can mistake
- * for a message is what keeps this out of anybody's mailbox.
- * Best-effort: a target already gone needs no telling. */
 static void brook_ring_pid(uint32_t who)
 {
     if (who == 0) return;

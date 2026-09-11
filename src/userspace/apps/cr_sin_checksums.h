@@ -1,5 +1,3 @@
-// FNV-1a checksums over MPFR-CR sin for the deterministic x stream —
-// GENERATED. Guest folds its own results; match => 0 non-CR over N.
 static const unsigned long long kSinN    = 20000ULL;
 static const unsigned long long kSinSeed = 0x9E3779B97F4A7C15ULL;
 static const int kSinElo = -20;

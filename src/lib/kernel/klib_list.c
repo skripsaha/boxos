@@ -1,10 +1,3 @@
-/* klib_list.c — generic doubly-linked list with an internal spinlock.
- *
- * Every mutating operation acquires the list lock BEFORE inspecting head /
- * tail. An unlocked NULL-check shortcut races with a concurrent push from
- * a peer CPU and either loses the just-pushed item or dereferences a NULL
- * tail re-read inside the lock — both bugs were present and fixed during
- * the AMP correctness sweep. */
 #include "klib.h"
 
 void list_init(list_t *list)

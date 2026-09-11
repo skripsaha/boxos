@@ -1,8 +1,3 @@
-/*
- * personality.cpp — __gxx_personality_v0: the Itanium Level 2 C++
- * personality over the boxcxx unwinder. Decodes the LSDA
- * (.gcc_except_table): call-site table → action chain → type table.
- */
 
 #include "cxxabi_typeinfo.h"
 
@@ -20,8 +15,6 @@ struct CxaException;
 
 namespace {
 
-// Mirrors the layout in cxa_exception.cpp (single source of truth there;
-// only the fields the personality touches are accessed via this view).
 struct CxaExceptionView {
     size_t          referenceCount;
     std::type_info *exceptionType;
@@ -90,7 +83,7 @@ uint64_t ReadEncoded(const uint8_t **p, uint8_t enc)
     case 0x0C: { int64_t t; __builtin_memcpy(&t, *p, 8); *p += 8; v = uint64_t(t); break; }
     default: boxcxx::Panic("lsda: unsupported DW_EH_PE format");
     }
-    if ((enc & 0x70) == 0x10) v += uint64_t(uintptr_t(field));   // pcrel
+    if ((enc & 0x70) == 0x10) v += uint64_t(uintptr_t(field));
     else if ((enc & 0x70) != 0) boxcxx::Panic("lsda: unsupported application");
     if (enc & 0x80) v = *reinterpret_cast<const uint64_t *>(v);
     return v;
@@ -118,12 +111,11 @@ struct LsdaScan {
     bool           found_cleanup = false;
     bool           found_handler = false;
     uint64_t       landing_pad   = 0;
-    int64_t        switch_value  = 0;   // filter for handlers, 0 cleanup
+    int64_t        switch_value  = 0;
     void          *adjusted      = nullptr;
     const uint8_t *action_record = nullptr;
 };
 
-// Scans the LSDA of the frame at `ip` for the throw of `throw_type`.
 bool ScanLsda(const uint8_t *lsda, uint64_t func_start, uint64_t ip,
               const std::type_info *throw_type, void *thrown_object,
               bool native, LsdaScan *out)
@@ -154,14 +146,14 @@ bool ScanLsda(const uint8_t *lsda, uint64_t func_start, uint64_t ip,
         uint64_t pad    = ReadEncoded(&p, cs_enc);
         uint64_t action = ReadUleb(&p);
 
-        if (key < start) break;          // table is sorted; we passed it
+        if (key < start) break;
         if (key >= start + len) continue;
 
-        if (pad == 0) return false;      // covered, but nothing to do
+        if (pad == 0) return false;
 
         out->landing_pad = lpstart + pad;
 
-        if (action == 0) {               // cleanup only
+        if (action == 0) {
             out->found_cleanup = true;
             out->switch_value  = 0;
             return true;
@@ -184,7 +176,7 @@ bool ScanLsda(const uint8_t *lsda, uint64_t func_start, uint64_t ip,
                 void *adjusted = thrown_object;
                 bool matches =
                     catch_type == nullptr
-                        ? true   // catch(...)
+                        ? true
                         : (native && __cxxabiv1::CatchMatches(
                                          catch_type, throw_type, &adjusted));
                 if (matches) {
@@ -196,8 +188,6 @@ bool ScanLsda(const uint8_t *lsda, uint64_t func_start, uint64_t ip,
                     return true;
                 }
             } else {
-                // filter < 0: exception specification (noexcept).
-                // Anything reaching it violates the spec → handler.
                 out->found_handler = true;
                 out->switch_value  = filter;
                 out->adjusted      = thrown_object;
@@ -206,10 +196,8 @@ bool ScanLsda(const uint8_t *lsda, uint64_t func_start, uint64_t ip,
             }
 
             if (next == 0) break;
-            // `next` is a self-relative displacement from the address of
-            // the next-offset field itself.
             const uint8_t *next_field = record;
-            (void)ReadSleb(&next_field);         // skip filter
+            (void)ReadSleb(&next_field);
             act = next_field + next;
         }
         return out->found_cleanup;
@@ -217,7 +205,7 @@ bool ScanLsda(const uint8_t *lsda, uint64_t func_start, uint64_t ip,
     return false;
 }
 
-} // namespace
+}
 
 extern "C" _Unwind_Reason_Code
 __gxx_personality_v0(int version, _Unwind_Action actions,
@@ -238,9 +226,6 @@ __gxx_personality_v0(int version, _Unwind_Action actions,
 
     CxaExceptionView *view = native ? ViewOf(exc) : nullptr;
     const std::type_info *throw_type = view ? view->exceptionType : nullptr;
-    // A dependent exception (low class byte 0x01, used by
-    // rethrow_exception) carries no payload — its object is the primary
-    // exception, stashed in the referenceCount slot.
     bool dependent      = native && (exception_class & 0xFFull) == 0x01;
     void *thrown_object = !view ? nullptr
                           : dependent
@@ -265,12 +250,11 @@ __gxx_personality_v0(int version, _Unwind_Action actions,
         return _URC_HANDLER_FOUND;
     }
 
-    // Cleanup phase.
     bool handler_frame = (actions & _UA_HANDLER_FRAME) != 0;
     if (!handler_frame && !scan.found_cleanup && !scan.found_handler)
         return _URC_CONTINUE_UNWIND;
     if (!handler_frame && !scan.found_cleanup)
-        return _URC_CONTINUE_UNWIND;   // handler match belongs to phase 1
+        return _URC_CONTINUE_UNWIND;
 
     int64_t switch_value;
     uint64_t landing_pad;
@@ -285,8 +269,8 @@ __gxx_personality_v0(int version, _Unwind_Action actions,
         landing_pad  = scan.landing_pad;
     }
 
-    _Unwind_SetGR(ctx, 0, reinterpret_cast<_Unwind_Word>(exc));   // rax
-    _Unwind_SetGR(ctx, 1, _Unwind_Word(switch_value));            // rdx
+    _Unwind_SetGR(ctx, 0, reinterpret_cast<_Unwind_Word>(exc));
+    _Unwind_SetGR(ctx, 1, _Unwind_Word(switch_value));
     _Unwind_SetIP(ctx, landing_pad);
     return _URC_INSTALL_CONTEXT;
 }

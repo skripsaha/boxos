@@ -27,7 +27,6 @@ void detect_cpu_info(char* cpu_vendor, char* cpu_brand) {
             *((uint32_t*)(cpu_brand + i * 16 + 12)) = edx;
         }
         cpu_brand[48] = '\0';
-        // Strip leading spaces (memmove: src/dst may overlap)
         char* start = cpu_brand;
         while (*start == ' ') start++;
         if (start != cpu_brand) {
@@ -184,6 +183,6 @@ void cpu_print_detailed_info(void) {
     kprintf("Extended features: ");
     if (cpu_info.extended_features_ecx & (1 << 5)) kprintf("LZCNT ");
     if (cpu_info.extended_features_ecx & (1 << 6)) kprintf("SSE4A ");
-    if (cpu_info.extended_features_ecx & (1 << 29)) kprintf("LM ");  // Long mode
+    if (cpu_info.extended_features_ecx & (1 << 29)) kprintf("LM ");
     kprintf("\n");
 }

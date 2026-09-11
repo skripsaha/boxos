@@ -1,16 +1,3 @@
-/*
- * chain — single-syscall stress test for the Manifest dispatcher.
- *
- * Builds a Manifest with 1000 ops.fill operations on one Crate, submits it
- * with a single ManifestSubmit, and verifies the buffer ends up filled with
- * the byte the *last* op wrote. Proves the new architecture has no 32-prefix
- * cap (which the legacy POCKET_MAX_PREFIXES baked in) and that one syscall
- * round-trip really executes N ops.
- *
- * Layout per op in the Manifest stream:
- *   ManifestOp header (12 bytes) + 1 byte param (fill_byte) = 13 bytes
- * Total Manifest size = sizeof(Manifest) [16] + N * 13 ≈ 13 KiB for N=1000.
- */
 
 #include "box/print.h"
 #include "box/core/manifest.h"
@@ -23,9 +10,8 @@
 
 #define CHAIN_OPS         1000
 #define CHAIN_BUF_BYTES   64
-#define CHAIN_MBUF_BYTES  (16 + CHAIN_OPS * 13 + 64)  /* header + ops + slack */
+#define CHAIN_MBUF_BYTES  (16 + CHAIN_OPS * 13 + 64)
 
-/* Operations Deck opcodes (mirror src/kernel/core/decks/operations/operations_deck.h) */
 #define OP_BUF_FILL  0x02
 
 static uint8_t  s_mbuf[CHAIN_MBUF_BYTES];
@@ -33,8 +19,6 @@ static uint8_t  s_buf[CHAIN_BUF_BYTES];
 
 int main(void)
 {
-    /* Bypass the display-server IPC route and write straight to VGA — this
-     * test is meant to run standalone without a display server. */
     io_set_mode(IO_MODE_VGA);
 
     print("[chain] building ");
@@ -48,12 +32,12 @@ int main(void)
     }
 
     for (int i = 0; i < CHAIN_OPS; i++) {
-        uint8_t fill_byte = (uint8_t)i;   /* wraps at 256 — that's fine */
+        uint8_t fill_byte = (uint8_t)i;
         if (ManifestBuilderAddOp(&mb,
                                  DECK_OPERATIONS, OP_BUF_FILL,
-                                 0,                  /* flags */
-                                 CRATE_INDEX_NONE,   /* in */
-                                 0,                  /* out = crates[0] */
+                                 0,
+                                 CRATE_INDEX_NONE,
+                                 0,
                                  &fill_byte, 1) != 0) {
             print("[chain] FAIL — add op #");
             print_int(i);
@@ -67,7 +51,6 @@ int main(void)
         exit(1);
     }
 
-    /* Pre-poison so any unwritten byte stands out. */
     memset(s_buf, 0x33, sizeof(s_buf));
 
     Crate crates[1];
@@ -90,7 +73,6 @@ int main(void)
         exit(1);
     }
 
-    /* Last fill byte was (CHAIN_OPS - 1) % 256. */
     uint8_t expected = (uint8_t)((CHAIN_OPS - 1) & 0xFF);
     bool ok = true;
     for (int i = 0; i < CHAIN_BUF_BYTES; i++) {

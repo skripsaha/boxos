@@ -1,25 +1,8 @@
-// boxcxx — <stdatomic.h>  ([stdatomic.h.syn], P0943R6, C++23)
-//
-// The C spelling of <atomic>, and nothing more: _Atomic(T) becomes
-// std::atomic<T>, and every name [atomics.syn] declares is re-exported into
-// the global namespace. C code carrying atomics into BoxOS's C++ userspace
-// compiles unchanged and gets the SAME objects the C++ side uses -- there
-// is no second implementation to keep in step.
-//
-// The ATOMIC_*_LOCK_FREE and ATOMIC_FLAG_INIT macros need no re-export;
-// <atomic> already defines them as macros, which have no namespace.
-//
-// Filling this in is what surfaced the missing atomic_int_least*_t /
-// atomic_int_fast*_t aliases in <atomic>: [atomics.syn] has listed them
-// since C++11 and boxcxx never had them. They are there now, and the
-// using-declarations below would not compile if they went away again.
 #ifndef BOXCXX_STDATOMIC_H
 #define BOXCXX_STDATOMIC_H
 
 #include <atomic>
 
-// [version.syn] names this header as an owner of the macro below;
-// nothing else here is declared, so nothing else is answered for.
 #define BOXCXX_OWNS_stdatomic_h
 #include <__bits/version_stdatomic>
 
@@ -116,4 +99,4 @@ using std::atomic_flag_test_and_set_explicit;
 using std::atomic_signal_fence;
 using std::atomic_thread_fence;
 
-#endif // BOXCXX_STDATOMIC_H
+#endif

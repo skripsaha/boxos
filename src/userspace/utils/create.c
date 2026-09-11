@@ -14,8 +14,6 @@ int main(void) {
         return 1;
     }
 
-    /* Every word after the name is a tag; joined with commas into a list
-     * sized to what was typed, so no tag is ever dropped. */
     char *tags = NULL;
     if (argc > 2) {
         size_t total = 0;

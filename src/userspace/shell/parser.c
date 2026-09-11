@@ -1,10 +1,3 @@
-/*
- * parser.c — cut a typed line into words for the built-in commands.
- *
- * The cut is the luggage's cut (box/luggage.h): blanks separate, "double
- * quotes" group. One rule, so a built-in sees the same words an external
- * program finds in its Luggage.
- */
 
 #include "parser.h"
 #include "box/string.h"

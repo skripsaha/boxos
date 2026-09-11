@@ -7,20 +7,11 @@ extern "C" {
 
 #include "box/types.h"
 
-/*
- * CabinInfo — read-only metadata at CABIN_INFO_VADDR (0x1000).
- * Kernel writes this once at process creation. Userspace reads pid,
- * spawner_pid, heap layout, stack top — and the Luggage: what the spawner
- * said to this cabin at boarding, the command line as the person typed it.
- * luggage_addr points at the bytes (in this very page when they fit, in the
- * buffer heap when they do not), luggage_length counts them; both zero for
- * a cabin given nothing. Read it through box/luggage.h.
- */
 typedef struct PACKED {
-    uint32_t magic;           /* CABIN_INFO_MAGIC ("CABN") */
+    uint32_t magic;
     uint32_t pid;
     uint32_t spawner_pid;
-    uint32_t generation;      /* pid_generation at creation: (pid, generation) is who this is */
+    uint32_t generation;
     uint64_t heap_base;
     uint64_t heap_max_size;
     uint64_t buf_heap_base;
@@ -40,4 +31,4 @@ INLINE CabinInfo* cabin_info(void) {
 }
 #endif
 
-#endif /* BOX_CORE_CABIN_H */
+#endif

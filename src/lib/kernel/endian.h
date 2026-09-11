@@ -3,7 +3,6 @@
 
 #include "ktypes.h"
 
-// x86-64 only (little-endian); these macros exist for future portability
 #define LITTLE_ENDIAN 1
 #define BIG_ENDIAN    0
 
@@ -54,4 +53,4 @@ static inline uint64_t bswap64(uint64_t x) {
 #define ntohl(x)  be32_to_cpu(x)
 #define ntohll(x) be64_to_cpu(x)
 
-#endif // ENDIAN_H
+#endif

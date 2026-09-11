@@ -1,9 +1,3 @@
-/*
- * stdexcept.cpp — key functions for the <stdexcept> hierarchy (single
- * vtable/typeinfo emission) + the boxcxx::Throw* helpers containers use
- * instead of including <stdexcept> (it includes <string>; the include
- * cycle breaks here, same scheme as libstdc++'s __throw_* functions).
- */
 
 #include <stdexcept>
 
@@ -26,7 +20,7 @@ range_error::~range_error()         = default;
 overflow_error::~overflow_error()   = default;
 underflow_error::~underflow_error() = default;
 
-} // namespace std
+}
 
 namespace boxcxx {
 
@@ -49,4 +43,4 @@ void ThrowUnderflowError(const char *what)
 void ThrowLogicError(const char *what) { throw std::logic_error(what); }
 void ThrowRuntimeError(const char *what) { throw std::runtime_error(what); }
 
-} // namespace boxcxx
+}

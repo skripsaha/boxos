@@ -9,8 +9,6 @@ int main(void)
 {
     int argc = (int)luggage_word_count();
 
-    /* Every word after the name is a tag; joined with commas into a list
-     * sized to what was typed, so no tag is ever dropped. */
     char *query_tags = NULL;
     if (argc > 1)
     {
@@ -34,8 +32,6 @@ int main(void)
         query_tags[pos] = '\0';
     }
 
-    /* Every file that answers, however many: the kernel says how many there
-     * are and the list is sized to that. */
     uint32_t *s_file_ids = NULL;
     int count = query_all(query_tags, &s_file_ids);
     free(query_tags);
@@ -71,7 +67,6 @@ int main(void)
         }
     }
 
-    /* Insertion sort by filename — stable and in place. */
     for (int i = 1; i < count; i++)
     {
         file_info_t key_info = s_file_infos[i];

@@ -36,4 +36,4 @@
 #define DEBUG_TAG_GDT      "GDT"
 #define DEBUG_TAG_PIC      "PIC"
 
-#endif // DEBUG_H
+#endif

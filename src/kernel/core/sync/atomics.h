@@ -118,21 +118,6 @@ static inline uint64_t rdtsc(void) {
     return ((uint64_t)high << 32) | low;
 }
 
-/* Serialised rdtsc — strict ordering for calibration / measurement
- * windows where preceding & following instructions MUST be observable
- * in program order around the timestamp read.
- *
- * Intel SDM Vol 2 (RDTSC) — "The RDTSC instruction is not a serializing
- * instruction" — so the CPU may execute it speculatively. For ±1 cycle
- * precision (HFT, ring-bench microbench, calibration windows shorter
- * than 1 ms) wrap rdtsc in LFENCE which is a load-fence. Pre-fence
- * forces older loads to complete; post-fence prevents reordering past
- * the timestamp.
- *
- * Intel-recommended sequence: LFENCE ; RDTSC. AMD-recommended sequence
- * for Zen+ matches. RDTSCP would also serialize but isn't universally
- * present on older silicon (CPUID.80000001h:EDX[27]); LFENCE+RDTSC is
- * portable. */
 static inline uint64_t rdtsc_serialized(void) {
     uint32_t low, high;
     __asm__ __volatile__("lfence\n\t"
@@ -162,4 +147,4 @@ static inline bool atomic_cas_u8(volatile uint8_t* ptr, uint8_t expected, uint8_
     return prev == expected;
 }
 
-#endif // ATOMICS_H
+#endif

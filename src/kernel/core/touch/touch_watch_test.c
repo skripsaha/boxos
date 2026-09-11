@@ -2,27 +2,12 @@
 #include "logbook.h"
 #include "klib.h"
 
-/* -------------------------------------------------------------------------
- * TouchWatch self-test.
- *
- * A kernel ear is the kind of thing that looks obviously correct and is
- * obviously correct right up until two of them exist, or one is cleared while
- * a publish is walking the list, or a callback publishes. Those are the cases
- * that cost real sessions, so they are the cases written down here — with the
- * expected counts stated as literals rather than computed by the code under
- * test.
- *
- * It runs immediately after guide_init, where Touch is up and no process
- * exists yet. That is deliberate: the whole reason this subsystem exists is
- * that the kernel needs to listen during bring-up, before there is any
- * userspace to listen on its behalf.
- * ------------------------------------------------------------------------- */
 
 typedef struct {
     uint32_t calls;
     TouchTag last_tag;
     uint32_t last_plen;
-    uint32_t last_value;   /* first 4 payload bytes, when present */
+    uint32_t last_value;
 } WatchProbe;
 
 static void watch_probe_fn(TouchTag tag_id, const void *payload, uint32_t plen,
@@ -37,7 +22,6 @@ static void watch_probe_fn(TouchTag tag_id, const void *payload, uint32_t plen,
                     ? *(const uint32_t *)payload : 0;
 }
 
-/* Re-entry probe: publishes to a second tag from inside its own callback. */
 static TouchTag  g_reentry_target = TOUCH_TAG_INVALID;
 static WatchProbe g_reentry_inner;
 
@@ -61,8 +45,6 @@ void TouchWatchSelfTest(void)
         else      { fail++; kprintf("[TOUCH WATCH TEST] FAIL: " label "\n"); }    \
     } while (0)
 
-    /* Named through the kernel's own book, which is the only vocabulary
-     * guaranteed to exist here — no volume has been mounted yet. */
     TouchTag full = TOUCH_TAG_INVALID, bare = TOUCH_TAG_INVALID;
     TouchLogbookResolve("watchtest:one", &full, &bare);
     if (full == TOUCH_TAG_INVALID || bare == TOUCH_TAG_INVALID) {
@@ -72,7 +54,6 @@ void TouchWatchSelfTest(void)
     WATCH_CHECK((full & 0x8000u) && (bare & 0x8000u),
                 "a name from the Logbook carries the kernel bit");
 
-    /* --- one ear hears one publish, with its payload intact --- */
     WatchProbe a = {0};
     TouchWatch *wa = TouchWatchSet(full, watch_probe_fn, &a);
     if (!wa) { kprintf("[TOUCH WATCH TEST] FAILED: no memory for a watch\n"); return; }
@@ -88,7 +69,6 @@ void TouchWatchSelfTest(void)
     WATCH_CHECK(a.last_plen == 4,       "it was told how many bytes arrived");
     WATCH_CHECK(a.last_value == 0x1234u,"the payload arrived unchanged");
 
-    /* --- two ears on one tag both hear it: this is multicast, not a queue --- */
     WatchProbe b = {0};
     TouchWatch *wb = TouchWatchSet(full, watch_probe_fn, &b);
     if (!wb) { kprintf("[TOUCH WATCH TEST] FAILED: no memory for a second watch\n"); TouchWatchClear(wa); return; }
@@ -97,17 +77,12 @@ void TouchWatchSelfTest(void)
     TouchPublishId(full, &payload, sizeof(payload), 0, TOUCH_FLAG_KERNEL);
     WATCH_CHECK(a.calls == 2 && b.calls == 1, "both ears heard the same publish");
 
-    /* --- clearing the SECOND-added ear (the list head) must leave the other
-     *     linked. Getting head-vs-middle unlink wrong is the classic way a
-     *     list like this loses a listener silently. --- */
     TouchWatchClear(wb);
     WATCH_CHECK(TouchWatchCount(full) == 1, "clearing one ear leaves one");
     TouchPublishId(full, &payload, sizeof(payload), 0, TOUCH_FLAG_KERNEL);
     WATCH_CHECK(a.calls == 3, "the surviving ear still hears");
     WATCH_CHECK(b.calls == 1, "the cleared ear hears nothing more");
 
-    /* --- the bare id is the wildcard: publishing the pair reaches an ear on
-     *     the key even though the value was never named to it --- */
     WatchProbe c = {0};
     TouchWatch *wc = TouchWatchSet(bare, watch_probe_fn, &c);
     if (wc) {
@@ -119,9 +94,6 @@ void TouchWatchSelfTest(void)
         fail++; kprintf("[TOUCH WATCH TEST] FAIL: no memory for a bare-key watch\n");
     }
 
-    /* --- an ear may publish from inside itself; the nested publish is
-     *     delivered, and the stack-headroom guard is what stops it running
-     *     away --- */
     TouchTag inner_full = TOUCH_TAG_INVALID, inner_bare = TOUCH_TAG_INVALID;
     TouchLogbookResolve("watchtest:inner", &inner_full, &inner_bare);
     g_reentry_target = inner_full;
@@ -144,7 +116,6 @@ void TouchWatchSelfTest(void)
     if (w_inner) TouchWatchClear(w_inner);
     g_reentry_target = TOUCH_TAG_INVALID;
 
-    /* --- the last ear leaving makes the tag quiet again --- */
     uint32_t before = a.calls;
     TouchWatchClear(wa);
     WATCH_CHECK(TouchWatchCount(full) == 0, "no ears left on the tag");

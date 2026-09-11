@@ -1,18 +1,8 @@
-/*
- * VMM Helper + Probe tests
- *
- * Covers vmm_pte_* encoder/decoder helpers, vmm_*_probe consistency
- * checks, and Phase 2D-2K bit-window helpers. These were previously
- * mixed into memtag_test.c; moved here in the clean-slate audit because
- * they're VMM-level helpers with no MemTag-specific state. MemTag's
- * own test file now covers only the TagFS-shaped namespace, regions,
- * and capability enforcement.
- */
 
 #include "vmm.h"
 #include "klib.h"
 #include "cpuid.h"
-#include "memtag.h"   /* MEMTAG_PTE_REGION_MASK — verify orthogonality */
+#include "memtag.h"
 
 #define VT_CHECK(cond, label) \
     do { if (cond) { pass++; } \
@@ -23,19 +13,16 @@ void VmmHelperTest(void) {
     kprintf("[VMM TEST] Starting VMM helper + probe test...\n");
     size_t pass = 0, fail = 0;
 
-    /* ── A: PTE-bits-52-58 metadata probe (Phase 2D) ───────────────── */
     kprintf("[VMM TEST] A: PTE bits 52-58 metadata probe\n");
     VT_CHECK(vmm_verify_pte_metadata_bits_52_58(),
              "bits 52-58 SAFE on current CPU");
 
-    /* ── B: PAT MSR consistency probe (Phase 2E) ────────────────────── */
     kprintf("[VMM TEST] B: PAT MSR consistency probe\n");
     VT_CHECK(vmm_verify_pat_msr(),
              "vmm_verify_pat_msr returns true on BSP");
     VT_CHECK(vmm_get_pat_msr_value() != 0,
              "vmm_get_pat_msr_value() non-zero (programmed by vmm_pat_init)");
 
-    /* ── C: PTE → cache-type decoder (Phase 2E) ─────────────────────── */
     kprintf("[VMM TEST] C: PTE→cache-type decoder\n");
     {
         uint64_t pte_wb = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE;
@@ -65,21 +52,14 @@ void VmmHelperTest(void) {
         VT_CHECK(vmm_pte_pat_index(pte_wc, false) == 6, "PAT index = 6");
     }
 
-    /* ── D: PKU PTE bits 62:59 encoder + CR4.CET-gated decoder ────── */
     kprintf("[VMM TEST] D: PKU bit-62:59 encoder + effective decoder\n");
     for (uint8_t k = 0; k <= VMM_PTE_PKEY_MAX; k++) {
         uint64_t enc = vmm_pte_encode_pkey(k);
         VT_CHECK(vmm_pte_pkey(enc | VMM_FLAG_PRESENT) == k,
                  "vmm_pte_encode_pkey ↔ vmm_pte_pkey round-trip");
     }
-    /* vmm_pte_pkey_cet_conflict — flag has bits outside-of-60 in the
-     * pkey window AND bit 60 set. Use pkey=1 (bit 59 only, no bit 60)
-     * for the "pkey-only no-conflict" baseline and pkey=1 + CET for
-     * the conflict case. Pkey values 2,3,6,7,10,11,14,15 use bit 60
-     * intrinsically — those are inherently CET-conflicting; the helper
-     * flags them correctly. */
     {
-        uint64_t pkey1     = vmm_pte_encode_pkey(1);   /* bit 59 only */
+        uint64_t pkey1     = vmm_pte_encode_pkey(1);
         uint64_t cet_only  = VMM_PTE_CET_SS_SUPV;
         uint64_t both      = pkey1 | VMM_PTE_CET_SS_SUPV;
         VT_CHECK(!vmm_pte_pkey_cet_conflict(0), "no conflict on zero flags");
@@ -91,14 +71,13 @@ void VmmHelperTest(void) {
                  "conflict on pkey=1 + CET bit 60");
     }
     if (g_cpu_caps.has_pku) {
-        (void)vmm_read_pkru();  /* gate test — no #GP after vmm_pku_init */
+        (void)vmm_read_pkru();
         VT_CHECK(true, "RDPKRU executed without #GP");
     } else {
         VT_CHECK(vmm_read_pkru() == 0,
                  "vmm_read_pkru returns 0 on non-PKU CPU");
     }
 
-    /* ── E: LAM pointer-tag helpers (Phase 2I) ─────────────────────── */
     kprintf("[VMM TEST] E: LAM tag-bit helpers\n");
     for (uint8_t tag = 0; tag <= 0x7F; tag++) {
         uint64_t base = 0x0000123456789000ULL;
@@ -117,7 +96,6 @@ void VmmHelperTest(void) {
     VT_CHECK((vmm_pte_addr_mask & VMM_CR3_LAM_U57) == 0,
              "CR3.LAM_U57 outside PML4 phys mask");
 
-    /* ── F: TME-MK KeyID encoder (Phase 2J) ────────────────────────── */
     kprintf("[VMM TEST] F: TME-MK KeyID encoder\n");
     {
         uint64_t phys_base = 0x0000000ABCDEF000ULL;
@@ -130,13 +108,11 @@ void VmmHelperTest(void) {
                      (phys_base & ((1ULL << 42) - 1ULL)),
                      "low phys bits preserved");
         }
-        /* Bound guard (audit-1): num+max > 64 returns phys unchanged */
         uint64_t bad = vmm_phys_with_keyid(phys_base, 1, 15, 52);
         VT_CHECK(bad == phys_base,
                  "vmm_phys_with_keyid bound guard (15+52 > 64) → no-op");
     }
 
-    /* ── G: CET shadow-stack PTE bit 60 encoder (Phase 2K) ─────────── */
     kprintf("[VMM TEST] G: CET shadow-stack bit-60 encoder\n");
     {
         uint64_t base = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE;
@@ -151,8 +127,6 @@ void VmmHelperTest(void) {
                  "CET SS bit 60 outside phys mask");
         VT_CHECK((MEMTAG_PTE_REGION_MASK & VMM_PTE_CET_SS_SUPV) == 0,
                  "CET SS bit 60 outside Phase 2D region bits");
-        /* Phase 2H PKEY field (bits 62:59) INTENTIONALLY overlaps bit 60.
-         * Documented in vmm_pte_pkey_cet_conflict — not asserted here. */
     }
 
     if (fail == 0)

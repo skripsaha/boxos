@@ -1,11 +1,3 @@
-/*
- * IOMMU presence + accessor test (Phase 2G).
- *
- * Verifies iommu_present consistency, iommu_domain_id boundary
- * behaviour, and conditional domain_alloc/free round-trip on real
- * hardware. Previously bundled inside memtag_test.c Phase 14L; split
- * out so IOMMU tests live next to IOMMU code.
- */
 
 #include "iommu.h"
 #include "klib.h"
@@ -37,11 +29,6 @@ void IommuPresenceTest(void) {
                     "(backend cap reached — OK)\n");
         }
     } else {
-        /* Say what is actually known. iommu_present() reports whether a
-         * backend registered itself during iommu_init(), which is a different
-         * fact from whether the firmware published DMAR or IVRS — the tables
-         * can be there and the backend still decline, which is exactly what
-         * happened on the first machine that had one. */
         kprintf("[IOMMU TEST]   note: no backend registered — IOMMU dormant "
                 "(firmware tables: see the [ACPI] inventory above)\n");
     }

@@ -1,46 +1,8 @@
-// boxcxx — __cxa_demangle: Itanium C++ ABI name demangling.
-//
-// A mangled name is what the linker keeps; a demangled one is what a person
-// reads. BoxOS needed the second the moment images started carrying their own
-// symbol names (Nameplate, Ф37): a backtrace that says
-// _ZNSt6vectorIiSaIiEE9push_backERKi is technically complete and practically
-// useless.
-//
-// This is the Itanium ABI [demangler] section implemented against a measured
-// target rather than a guessed one: every name in the shipped C++ images —
-// 32381 of them, from cxxtest, brookexec and currentexec — is demangled and
-// compared byte for byte against the reference (x86_64-elf-c++filt, which is
-// libiberty). The corpus is what decided which productions had to exist.
-//
-// ── Representation ────────────────────────────────────────────────────────
-//
-// C declarator syntax wraps: a pointer to a function taking char and
-// returning int is `int (*)(char)`, with the type's own text split around the
-// declarator. So a type here is a PAIR of strings, a prefix and a suffix, and
-// wrapping something in a pointer appends "*" to the prefix while leaving the
-// suffix alone. A full AST would also work and is what libc++abi builds; two
-// strings are enough for everything the ABI can express and are far less
-// machinery to get wrong.
-//
-// Substitutions (S_, S0_, ...) and template parameters (T_, T0_, ...) are
-// tables of those same pairs, which is exactly what the ABI says they are:
-// a back-reference stands for a component already produced.
-//
-// ── What this does NOT do ─────────────────────────────────────────────────
-//
-// It is not a validator. A mangled name that is not well-formed gets
-// rejected, but the ABI's grammar is larger than what any real compiler
-// emits, and productions no compiler in this tree can produce are not
-// implemented for their own sake. Where the corpus proves a production
-// exists, it is here.
 
 #include <stddef.h>
 #include <stdint.h>
 
 extern "C" {
-// BoxOS userspace spells the allocator this way — box/memory.h keeps `malloc`
-// as a macro over it, and a library that is not allowed to include box headers
-// asks for the function itself. The host test harness supplies the same name.
 void  *malloc(size_t);
 void   free(void *);
 size_t strlen(const char *);
@@ -50,11 +12,6 @@ int    memcmp(const void *, const void *, size_t);
 
 namespace {
 
-// ── arena ─────────────────────────────────────────────────────────────────
-//
-// Every string this builds lives until the demangling finishes and then dies
-// with it. One bump-allocated chain answers that, and it is the reason no
-// individual piece of this code has to think about ownership.
 
 struct Block {
     Block *Next;
@@ -98,7 +55,6 @@ struct Arena {
     }
 };
 
-// ── strings ───────────────────────────────────────────────────────────────
 
 struct Str {
     const char *P = "";
@@ -149,8 +105,6 @@ struct Builder {
     }
 };
 
-// Template arguments after a name that itself ends in '<' or '>' need a
-// space between them, or `operator<<<char>` reads as a shift.
 Str JoinArgs(Arena *a, Str name, Str args);
 
 Str Join(Arena *a, Str x, Str y)
@@ -167,9 +121,6 @@ Str JoinArgs(Arena *a, Str name, Str args)
 {
     Builder b(a);
     b.Add(name);
-    // Only a trailing '<' is ambiguous with the opening bracket of the
-    // argument list: `operator< <int>` needs the space, `operator<=><int>`
-    // does not, and libiberty draws the line in exactly that place.
     if (name.N && name.P[name.N - 1] == '<') b.Add(' ');
     b.Add(args);
     return b.Done();
@@ -207,30 +158,21 @@ Str Number(Arena *a, long long v)
     return b.Done();
 }
 
-// ── the two halves of a declarator ────────────────────────────────────────
 
 struct Type {
-    Str Pre;    // everything left of the declarator
-    Str Post;   // everything right of it (array bounds, function parameters)
+    Str Pre;
+    Str Post;
 
-    // A declarator group is already open: Pre ends inside a "(" that Post
-    // closes. A second pointer then goes INSIDE it — `int (**)(int)`, not
-    // `int (* (*))(int)`.
     bool Open = false;
 
-    // References collapse: applying & to a T& is still T&. Two strings
-    // cannot remember that on their own.
     enum Ref { NoRef, LRef, RRef };
     Ref Reference = NoRef;
 
-    // A parameter pack keeps its members, because `Dp` expands the pattern
-    // around it once per member: DpOT_ over {long, long} is `long&&, long&&`,
-    // which no amount of string joining produces.
     const struct Type *Elems = nullptr;
     size_t             ElemCount = 0;
     bool               IsPack = false;
-    bool               IsFunction = false;   // cv-qualifiers go after the parameters
-    bool               IsCompound = false;   // a binary expression, which needs parens as an operand
+    bool               IsFunction = false;
+    bool               IsCompound = false;
 
     bool Empty() const { return Pre.Empty() && Post.Empty(); }
 };
@@ -251,9 +193,6 @@ Str Flatten(Arena *a, Type t)
 }
 
 
-// The bare name of a component: what a constructor or destructor is called.
-// `std::basic_istream<char, ...>` is spelled `basic_istream` there, so the
-// namespace qualification and the template arguments both come off.
 Str BareName(Str s)
 {
     size_t start = 0;
@@ -271,7 +210,6 @@ Str BareName(Str s)
     return r;
 }
 
-// ── parser ────────────────────────────────────────────────────────────────
 
 const size_t kMaxSubs      = 512;
 const size_t kMaxTemplate  = 64;
@@ -286,28 +224,26 @@ struct Parser {
 
     struct Sub {
         Type        Value;
-        const char *Begin = nullptr;   // the range that produced it...
+        const char *Begin = nullptr;
         const char *End   = nullptr;
-        bool        HasParam = false;  // ...worth re-reading only if it can change
+        bool        HasParam = false;
     };
     Sub    Subs[kMaxSubs];
     size_t SubCount  = 0;
-    size_t ParamUses = 0;   // bumped by every <template-param>, to spot the above
+    size_t ParamUses = 0;
 
     Type   Templ[kMaxTemplate];
     size_t TemplCount = 0;
     bool   InTemplateArgs = false;
-    bool   NameIsTemplate = false;   // the encoding carries a return type iff this
-    bool   NameIsCtorDtor = false;   // ...and never for a constructor or destructor
-    int    TypeDepth      = 0;       // >0 while inside a <type>
-    size_t PackIndex      = 0;       // which member of a pack T_ resolves to
-    size_t PackSize       = 0;       // how many members the pattern referenced
-    bool   PackEmpty      = false;   // ...and whether that count was zero
-    bool   InLambdaSig    = false;   // T_ is the lambda's own generic parameter
-    bool   PackOpen       = false;   // a pack with no arguments to expand against
+    bool   NameIsTemplate = false;
+    bool   NameIsCtorDtor = false;
+    int    TypeDepth      = 0;
+    size_t PackIndex      = 0;
+    size_t PackSize       = 0;
+    bool   PackEmpty      = false;
+    bool   InLambdaSig    = false;
+    bool   PackOpen       = false;
 
-    // Lambdas are numbered per enclosing scope by the mangling itself, so the
-    // parser only has to render the number it is given.
     Parser(Arena *a, const char *p, size_t n) : A(a), P(p), End(p + n) {}
 
     bool Done() const { return P >= End; }
@@ -357,11 +293,10 @@ struct Parser {
 
         P        = savedP;
         End      = savedEnd;
-        SubCount = savedSubs;   // a re-read adds no candidates of its own
+        SubCount = savedSubs;
         return got ? again : s.Value;
     }
 
-    // <number>
     bool ParseNumber(long long *out)
     {
         bool neg = false;
@@ -379,7 +314,6 @@ struct Parser {
         return true;
     }
 
-    // <source-name> ::= <positive length number> <identifier>
     bool ParseSourceName(Str *out)
     {
         long long len = 0;
@@ -389,8 +323,6 @@ struct Parser {
         const char *start = P;
         P += len;
 
-        // GCC gives an unnamed namespace this fixed spelling; the ABI does
-        // not mandate it, and every demangler special-cases it.
         if (len >= 12 && memcmp(start, "_GLOBAL__N_", 11) == 0) {
             *out = Lit("(anonymous namespace)");
             return true;
@@ -423,7 +355,6 @@ struct Parser {
     bool ParseUnnamedTypeName(Str *out);
 };
 
-// <operator-name>
 Str Parser::ParseOperatorName()
 {
     struct Entry {
@@ -460,7 +391,6 @@ Str Parser::ParseOperatorName()
 
     if (End - P < 2) return Str();
 
-    // Conversion operator — the target type follows.
     if (P[0] == 'c' && P[1] == 'v') {
         P += 2;
         Type t;
@@ -474,7 +404,6 @@ Str Parser::ParseOperatorName()
         b.Add(Flatten(A, t));
         return b.Done();
     }
-    // Literal operator: li <source-name>
     if (P[0] == 'l' && P[1] == 'i') {
         P += 2;
         Str name;
@@ -484,7 +413,6 @@ Str Parser::ParseOperatorName()
         b.Add(name);
         return b.Done();
     }
-    // Vendor extended operator: v <digit> <source-name>
     if (P[0] == 'v') {
         P += 1;
         if (Peek() < '0' || Peek() > '9') return Str();
@@ -503,8 +431,6 @@ Str Parser::ParseOperatorName()
     return Str();
 }
 
-// <unnamed-type-name> ::= Ut [<number>] _   |   <closure-type-name>
-// <closure-type-name> ::= Ul <lambda-sig> E [<number>] _
 bool Parser::ParseUnnamedTypeName(Str *out)
 {
     if (Peek() != 'U') return false;
@@ -527,11 +453,6 @@ bool Parser::ParseUnnamedTypeName(Str *out)
     if (PeekAt(1) != 'l') return false;
     P += 2;
 
-    // The parameter types of a closure signature ARE substitution
-    // candidates — measured, not assumed: suppressing them scored 88.36% on
-    // the corpus against 88.91% for keeping them. What is NOT a candidate in
-    // the enclosing sense is the lambda's own invented parameter, which is
-    // why InLambdaSig exists.
     const bool   savedLambda = InLambdaSig;
     InLambdaSig = true;
     Builder sig(A);
@@ -563,7 +484,6 @@ bool Parser::ParseUnnamedTypeName(Str *out)
     return true;
 }
 
-// <unqualified-name>
 bool Parser::ParseUnqualifiedName(Str *out, bool *isCtorDtor, Str enclosing)
 {
     *isCtorDtor = false;
@@ -572,11 +492,8 @@ bool Parser::ParseUnqualifiedName(Str *out, bool *isCtorDtor, Str enclosing)
     if (c >= '0' && c <= '9') return ParseSourceName(out);
 
     if (c == 'C') {
-        // <ctor-dtor-name> ::= C1 | C2 | C3 | C4 | C5 | CI1 | CI2
         char k = PeekAt(1);
         if (k == 'I') {
-            // <ctor-dtor-name> ::= CI1 <base type> — an inheriting
-            // constructor is named after the base it inherits from.
             P += 2;
             if (Peek() < '1' || Peek() > '5') return false;
             P++;
@@ -603,11 +520,11 @@ bool Parser::ParseUnqualifiedName(Str *out, bool *isCtorDtor, Str enclosing)
         return true;
     }
     if (c == 'U') return ParseUnnamedTypeName(out);
-    if (c == 'L') {   // internal linkage
+    if (c == 'L') {
         P++;
         return ParseUnqualifiedName(out, isCtorDtor, enclosing);
     }
-    if (c == 'D' && PeekAt(1) == 'C') {   // structured binding
+    if (c == 'D' && PeekAt(1) == 'C') {
         P += 2;
         Builder b(A);
         b.Add('[');
@@ -631,7 +548,6 @@ bool Parser::ParseUnqualifiedName(Str *out, bool *isCtorDtor, Str enclosing)
     return true;
 }
 
-// <substitution>
 bool Parser::ParseSubstitution(Type *out, bool *wasAbbrev)
 {
     if (wasAbbrev) *wasAbbrev = false;
@@ -654,9 +570,6 @@ bool Parser::ParseSubstitution(Type *out, bool *wasAbbrev)
         if (Peek() == a.Code) {
             P++;
             if (wasAbbrev) *wasAbbrev = true;
-            // Ss/Si/So/Sd stand for the full specialization, and libiberty
-            // spells them out. St is a namespace, not a type: it must NOT be
-            // a substitution candidate of its own.
             if (a.Code == 's') *out = PlainLit("std::basic_string<char, std::char_traits<char>, std::allocator<char> >");
             else if (a.Code == 'i') *out = PlainLit("std::basic_istream<char, std::char_traits<char> >");
             else if (a.Code == 'o') *out = PlainLit("std::basic_ostream<char, std::char_traits<char> >");
@@ -668,7 +581,6 @@ bool Parser::ParseSubstitution(Type *out, bool *wasAbbrev)
 
     size_t index = 0;
     if (Peek() != '_') {
-        // seq-id is base-36
         size_t v = 0;
         while (!Done()) {
             char c = Peek();
@@ -685,7 +597,6 @@ bool Parser::ParseSubstitution(Type *out, bool *wasAbbrev)
     return true;
 }
 
-// <template-param> ::= T_ | T <number> _
 bool Parser::ParseTemplateParam(Type *out)
 {
     if (!Eat('T')) return false;
@@ -724,10 +635,6 @@ bool Parser::ParseTemplateParam(Type *out)
         *out = t;
         return true;
     }
-    // A parameter referenced before its argument list is known — inside the
-    // signature of the very template being named. The ABI's own answer is
-    // that it refers to the enclosing template's parameter, and libiberty
-    // prints it positionally.
     PackOpen = true;
     Builder b(A);
     b.Add("auto:");
@@ -736,15 +643,10 @@ bool Parser::ParseTemplateParam(Type *out)
     return true;
 }
 
-// Wrap a type in a declarator piece ("*", "&", "Class::*"). C's declarator
-// syntax is why this is not just string concatenation: a pointer to an array
-// or to a function has to parenthesise, or `int *[5]` would claim to be an
-// array of pointers.
 Type Wrap(Arena *a, Type t, const char *decl)
 {
     Type r;
 
-    // Already inside a declarator group: just add to it.
     if (t.Open) {
         Builder pre(a);
         pre.Add(t.Pre);
@@ -755,8 +657,6 @@ Type Wrap(Arena *a, Type t, const char *decl)
         return r;
     }
 
-    // A bare function type carries a trailing space (`int ` + `(int)`); a
-    // declarator supplies its own, so the space comes off here.
     if (t.Pre.N && t.Pre.P[t.Pre.N - 1] == ' ') t.Pre.N--;
     if (!t.Post.Empty()) {
         Builder pre(a);
@@ -779,7 +679,6 @@ Type Wrap(Arena *a, Type t, const char *decl)
     return r;
 }
 
-// <CV-qualifiers> [<ref-qualifier>]
 Str Parser::ParseCvQualifiers(bool *hadCv, bool *hadRef, bool *hadRRef)
 {
     Builder b(A);
@@ -802,7 +701,6 @@ Str Parser::ParseCvQualifiers(bool *hadCv, bool *hadRef, bool *hadRRef)
     return b.Done();
 }
 
-// <builtin-type>
 bool Parser::ParseBuiltinType(Type *out)
 {
     struct Entry {
@@ -859,9 +757,6 @@ bool Parser::ParseBuiltinType(Type *out)
     return false;
 }
 
-// <bare-function-type> ::= <signature type>+
-// The first type is the return type only inside a template-parameterised
-// function; the caller knows which case it is in.
 bool Parser::ParseBareFunctionType(Str *out, bool skipFirst, Type *firstType)
 {
     Builder b(A);
@@ -879,14 +774,11 @@ bool Parser::ParseBareFunctionType(Str *out, bool skipFirst, Type *firstType)
             continue;
         }
         first = false;
-        // A lone `void` parameter list is written as no parameters at all.
-        // A lone `void` parameter list is written as no parameters at all —
-        // including when a ref-qualifier follows it, as in `int () &&`.
         if (!wroteAny && Same(Flatten(A, t), "void") &&
             (Done() || Peek() == 'E' || Peek() == '.' ||
              ((Peek() == 'R' || Peek() == 'O') && PeekAt(1) == 'E')))
             break;
-        if (Flatten(A, t).Empty()) continue;   // an expanded empty pack
+        if (Flatten(A, t).Empty()) continue;
         if (wroteAny) b.Add(", ");
         wroteAny = true;
         b.Add(Flatten(A, t));
@@ -896,11 +788,10 @@ bool Parser::ParseBareFunctionType(Str *out, bool skipFirst, Type *firstType)
     return true;
 }
 
-// <function-type> ::= [<CV-qualifiers>] F [Y] <bare-function-type> [<ref-qualifier>] E
 bool Parser::ParseFunctionType(Type *out)
 {
     if (!Eat('F')) return false;
-    if (Peek() == 'Y') P++;   // extern "C"
+    if (Peek() == 'Y') P++;
 
     Type ret;
     if (!ParseType(&ret)) return false;
@@ -920,7 +811,6 @@ bool Parser::ParseFunctionType(Type *out)
     return true;
 }
 
-// <type>
 bool Parser::ParseType(Type *out)
 {
     if (Failed || Done()) return false;
@@ -936,7 +826,6 @@ bool Parser::ParseType(Type *out)
     const size_t paramMark = ParamUses;
     char         c         = Peek();
 
-    // CV-qualified type — a substitution candidate in its own right.
     if (c == 'r' || c == 'V' || c == 'K') {
         bool cv = false, ref = false, rref = false;
         Str  quals = ParseCvQualifiers(&cv, &ref, &rref);
@@ -972,8 +861,6 @@ bool Parser::ParseType(Type *out)
         P++;
         Type inner;
         if (!ParseType(&inner)) return false;
-        // [dcl.ref] collapsing: an lvalue reference to any reference is an
-        // lvalue reference, and the mangling relies on it.
         Type r = inner.Reference != Type::NoRef ? inner : Wrap(A, inner, "&");
         r.Reference = Type::LRef;
         AddSubRange(r, typeStart, paramMark);
@@ -1012,7 +899,7 @@ bool Parser::ParseType(Type *out)
         *out = r;
         return true;
     }
-    case 'A': {   // <array-type>
+    case 'A': {
         P++;
         Builder dim(A);
         dim.Add(" [");
@@ -1037,7 +924,7 @@ bool Parser::ParseType(Type *out)
         *out = r;
         return true;
     }
-    case 'M': {   // <pointer-to-member-type>
+    case 'M': {
         P++;
         Type cls;
         if (!ParseType(&cls)) return false;
@@ -1047,7 +934,6 @@ bool Parser::ParseType(Type *out)
         decl.Add(Flatten(A, cls));
         decl.Add("::*");
         Type r = Wrap(A, member, decl.Done().P ? decl.Done().P : "::*");
-        // Wrap takes a C string; rebuild it with explicit lengths instead.
         {
             Builder pre(A);
             Builder post(A);
@@ -1085,7 +971,6 @@ bool Parser::ParseType(Type *out)
     case 'T': {
         Type r;
         if (!ParseTemplateParam(&r)) return false;
-        // A template-template-param is followed by its arguments.
         if (Peek() == 'I') {
             Str args;
             if (!ParseTemplateArgs(&args)) return false;
@@ -1099,8 +984,6 @@ bool Parser::ParseType(Type *out)
         return true;
     }
     case 'S': {
-        // `St` is the std:: namespace introducing a name, not a component
-        // that stands on its own — hand it to the name grammar.
         if (PeekAt(1) == 't') {
             Type n;
             if (!ParseName(&n)) return false;
@@ -1108,7 +991,6 @@ bool Parser::ParseType(Type *out)
             *out = n;
             return true;
         }
-        // Sb/Ss/... and back-references, possibly followed by template args.
         Type r;
         if (!ParseSubstitution(&r)) return false;
         if (Peek() == 'I') {
@@ -1123,7 +1005,7 @@ bool Parser::ParseType(Type *out)
         return true;
     }
     case 'D': {
-        if (PeekAt(1) == 'p') {   // pack expansion
+        if (PeekAt(1) == 'p') {
             P += 2;
             const char  *start    = P;
             const size_t subMark  = SubCount;
@@ -1146,8 +1028,6 @@ bool Parser::ParseType(Type *out)
                 return true;
             }
             if (total == 0 && PackOpen) {
-                // Nothing to expand against — the pack stays written as one,
-                // which is how a generic lambda's own signature reads.
                 PackIndex = savedIdx;
                 PackSize  = savedLen;
                 Builder b(A);
@@ -1164,9 +1044,6 @@ bool Parser::ParseType(Type *out)
                 return true;
             }
 
-            // Re-read the same pattern for each remaining member. The
-            // substitution table is rewound between passes so the numbering
-            // ends up where a single pass would have left it.
             Builder b(A);
             b.Add(Flatten(A, firstElem));
             for (size_t k = 1; k < total; k++) {
@@ -1183,7 +1060,7 @@ bool Parser::ParseType(Type *out)
             *out = Plain(b.Done());
             return true;
         }
-        if (PeekAt(1) == 'o' || PeekAt(1) == 'O') {   // noexcept function type
+        if (PeekAt(1) == 'o' || PeekAt(1) == 'O') {
             bool computed = PeekAt(1) == 'O';
             P += 2;
             Str condition;
@@ -1210,11 +1087,11 @@ bool Parser::ParseType(Type *out)
             *out = r;
             return true;
         }
-        if (PeekAt(1) == 't' || PeekAt(1) == 'T') {   // Dt <expr> E / DT <expr> E
+        if (PeekAt(1) == 't' || PeekAt(1) == 'T') {
             P += 2;
             Type e;
             if (!ParseExpression(&e)) return false;
-            if (!Eat('E')) return false;   // the production's own terminator
+            if (!Eat('E')) return false;
             Builder b(A);
             b.Add("decltype (");
             b.Add(Flatten(A, e));
@@ -1231,7 +1108,7 @@ bool Parser::ParseType(Type *out)
         }
         return false;
     }
-    case 'U': {   // vendor extended type
+    case 'U': {
         P++;
         Str name;
         if (!ParseSourceName(&name)) return false;
@@ -1260,12 +1137,9 @@ bool Parser::ParseType(Type *out)
     Type builtin;
     if (ParseBuiltinType(&builtin)) {
         *out = builtin;
-        return true;   // builtin types are NOT substitution candidates
+        return true;
     }
 
-    // <class-enum-type> ::= <name>. A named type is a substitution
-    // candidate; the prefixes inside it were recorded as they were parsed,
-    // and this records the whole thing.
     Type name;
     if (!ParseName(&name)) return false;
     AddSubRange(name, typeStart, paramMark);
@@ -1273,10 +1147,9 @@ bool Parser::ParseType(Type *out)
     return true;
 }
 
-// <template-arg>
 bool Parser::ParseTemplateArg(Type *out)
 {
-    if (Peek() == 'X') {   // expression
+    if (Peek() == 'X') {
         P++;
         Type e;
         if (!ParseExpression(&e)) return false;
@@ -1284,7 +1157,7 @@ bool Parser::ParseTemplateArg(Type *out)
         *out = e;
         return true;
     }
-    if (Peek() == 'J') {   // argument pack
+    if (Peek() == 'J') {
         P++;
         const size_t kMaxPack = 64;
         Type  *elems = (Type *)A->Take(sizeof(Type) * kMaxPack);
@@ -1311,13 +1184,10 @@ bool Parser::ParseTemplateArg(Type *out)
     return ParseType(out);
 }
 
-// <template-args> ::= I <template-arg>+ E
 bool Parser::ParseTemplateArgs(Str *out, bool nameLevel)
 {
     if (!Eat('I')) return false;
 
-    // A constructor template inside a class template has its own T_; the
-    // class's parameters are not what it refers to.
     if (nameLevel && TypeDepth == 0) TemplCount = 0;
 
     bool saved = InTemplateArgs;
@@ -1335,10 +1205,6 @@ bool Parser::ParseTemplateArgs(Str *out, bool nameLevel)
         if (nameLevel && TypeDepth == 0 && TemplCount < kMaxTemplate) Templ[TemplCount++] = t;
         Str text = Flatten(A, t);
         if (text.Empty()) {
-            // An empty pack contributes no text and no comma — and it also
-            // clears the "ends in an angle bracket" state, which is why
-            // `construct_at<basic_string<...>>` closes without the space that
-            // `foo<basic_string<...> >` needs.
             lastWasAngle = false;
             continue;
         }
@@ -1350,8 +1216,6 @@ bool Parser::ParseTemplateArgs(Str *out, bool nameLevel)
     if (!Eat('E')) { InTemplateArgs = saved; return false; }
     (void)base;
 
-    // `>>` would lex as a shift in the output, which is why every demangler
-    // in the field separates them.
     if (lastWasAngle) b.Add(' ');
     b.Add('>');
 
@@ -1360,17 +1224,10 @@ bool Parser::ParseTemplateArgs(Str *out, bool nameLevel)
     return true;
 }
 
-// <local-name> ::= Z <function encoding> E <entity name> [<discriminator>]
-//              ::= Z <function encoding> E s [<discriminator>]
 bool Parser::ParseLocalName(Type *out)
 {
     if (!Eat('Z')) return false;
 
-    // The enclosing function's encoding, printed in full — that is what makes
-    // a lambda inside a lambda read as the chain of scopes it really is. It is
-    // a complete encoding, so what it reports about itself — template or not,
-    // constructor or not — is what decides whether its first signature type
-    // is a return type.
     Type   savedTempl[kMaxTemplate];
     size_t savedCount = TemplCount;
     for (size_t i = 0; i < TemplCount; i++) savedTempl[i] = Templ[i];
@@ -1396,17 +1253,15 @@ bool Parser::ParseLocalName(Type *out)
 
     Str trailing;
     Builder b(A);
-    // Same shape as the top-level encoding: the name, then its parameters,
-    // and only then the cv / ref qualifiers a member function carries.
     b.Add(enclosing.Pre);
     b.Add(params);
     b.Add(enclosing.Post);
     b.Add("::");
 
-    if (Peek() == 's') {   // string literal
+    if (Peek() == 's') {
         P++;
         b.Add("string literal");
-    } else if (Peek() == 'd') {   // parameter default argument
+    } else if (Peek() == 'd') {
         P += 1;
         long long n = 0;
         if (Peek() != '_') ParseNumber(&n);
@@ -1421,7 +1276,6 @@ bool Parser::ParseLocalName(Type *out)
         trailing = inner.Post;
     }
 
-    // <discriminator> ::= _ <non-negative number> | __ <number> _
     if (Peek() == '_') {
         const char *save = P;
         P++;
@@ -1437,30 +1291,26 @@ bool Parser::ParseLocalName(Type *out)
 
     Type r;
     r.Pre  = b.Done();
-    r.Post = trailing;   // the entity's own cv / ref qualifiers
+    r.Post = trailing;
     *out = r;
     return true;
 }
 
-// <nested-name> ::= N [<CV-qualifiers>] [<ref-qualifier>] <prefix> <unqualified-name> E
 bool Parser::ParseNestedName(Type *out)
 {
     if (!Eat('N')) return false;
-    Eat('H');   // explicit object parameter — nothing to print, but it is there
+    Eat('H');
 
     bool cv = false, ref = false, rref = false;
     Str  quals = ParseCvQualifiers(&cv, &ref, &rref);
 
     Str  path;
-    Str  last;          // the trailing component, for ctor/dtor naming
+    Str  last;
     bool any = false;
-    bool pending = false;   // a component not yet known to be a prefix
+    bool pending = false;
 
     while (!Done() && Peek() != 'E') {
         if (Failed) return false;
-        // The previous component turned out to have something after it, so it
-        // IS a prefix and becomes a substitution candidate. The final
-        // component never does — [mangle.substitution] lists prefixes.
         if (pending) { AddSub(Plain(path)); pending = false; }
 
         Type component;
@@ -1471,11 +1321,9 @@ bool Parser::ParseNestedName(Type *out)
             bool abbrev = false;
             if (!ParseSubstitution(&component, &abbrev)) return false;
             text = Flatten(A, component);
-            // A substitution used as a prefix is not re-added.
             path = any ? Join(A, Join(A, path, Lit("::")), text) : text;
             last = text;
             any  = true;
-            // Template arguments may follow immediately.
             if (Peek() == 'I') {
                 Str args;
                 if (!ParseTemplateArgs(&args, true)) return false;
@@ -1484,9 +1332,6 @@ bool Parser::ParseNestedName(Type *out)
             } else {
                 NameIsTemplate = false;
             }
-            // A component that is itself a substitution never re-enters the
-            // table — neither a standard abbreviation nor a back-reference.
-            // Every later S_ is numbered on that assumption.
             (void)abbrev;
             pending = false;
             continue;
@@ -1502,7 +1347,7 @@ bool Parser::ParseNestedName(Type *out)
             NameIsCtorDtor = false;
             continue;
         }
-        if (c == 'D' && PeekAt(1) == 't') {   // decltype as a prefix
+        if (c == 'D' && PeekAt(1) == 't') {
             Type d;
             if (!ParseType(&d)) return false;
             text = Flatten(A, d);
@@ -1511,11 +1356,11 @@ bool Parser::ParseNestedName(Type *out)
             any  = true;
             continue;
         }
-        if (c == 'M') {   // data-member pointer marker inside a prefix
+        if (c == 'M') {
             P++;
             continue;
         }
-        if (c == 'F') {   // <friend-name> — GCC marks these explicitly
+        if (c == 'F') {
             P++;
             bool ctor = false;
             Str  fname;
@@ -1550,9 +1395,6 @@ bool Parser::ParseNestedName(Type *out)
         any  = true;
 
         if (Peek() == 'I') {
-            // A template-id prefix IS a candidate even when it is last: the
-            // name and its arguments are two components, and the name half
-            // was already recorded above.
             AddSub(Plain(path));
             Str args;
             if (!ParseTemplateArgs(&args, true)) return false;
@@ -1580,7 +1422,6 @@ bool Parser::ParseNestedName(Type *out)
     return true;
 }
 
-// <unscoped-name> [<template-args>]
 bool Parser::ParseUnscopedName(Type *out)
 {
     bool isStd = false;
@@ -1609,7 +1450,6 @@ bool Parser::ParseUnscopedName(Type *out)
     return true;
 }
 
-// <name>
 bool Parser::ParseName(Type *out)
 {
     if (Failed || Done()) return false;
@@ -1636,12 +1476,11 @@ bool Parser::ParseName(Type *out)
     return ParseUnscopedName(out);
 }
 
-// <expr-primary> ::= L <type> <value number> E | L <mangled-name> E | ...
 bool Parser::ParseExprPrimary(Type *out)
 {
     if (!Eat('L')) return false;
 
-    if (Peek() == '_' && PeekAt(1) == 'Z') {   // external name
+    if (Peek() == '_' && PeekAt(1) == 'Z') {
         P += 2;
         Type inner;
         if (!ParseName(&inner)) return false;
@@ -1654,7 +1493,6 @@ bool Parser::ParseExprPrimary(Type *out)
     if (!ParseType(&t)) return false;
     Str typeText = Flatten(A, t);
 
-    // Booleans and nullptr get spelled, not numbered.
     if (Same(typeText, "bool")) {
         long long v = 0;
         if (!ParseNumber(&v)) return false;
@@ -1669,8 +1507,6 @@ bool Parser::ParseExprPrimary(Type *out)
         return true;
     }
 
-    // Everything else: the value, with the type spelled out around it when
-    // the type is not one of the ones a bare literal already implies.
     Builder digits(A);
     while (!Done() && Peek() != 'E') {
         digits.Add(Peek());
@@ -1679,7 +1515,6 @@ bool Parser::ParseExprPrimary(Type *out)
     if (!Eat('E')) return false;
     Str raw = digits.Done();
 
-    // A leading 'n' means negative in the mangling, '-' in the output.
     Builder value(A);
     for (size_t i = 0; i < raw.N; i++) {
         if (i == 0 && raw.P[i] == 'n') value.Add('-');
@@ -1721,9 +1556,6 @@ bool Parser::ParseExprPrimary(Type *out)
     return true;
 }
 
-// <expression> — only the shapes a compiler actually emits into a mangled
-// name: dependent expressions inside template arguments, array bounds, and
-// noexcept specifications.
 bool Parser::ParseExpression(Type *out)
 {
     if (Failed || Done()) return false;
@@ -1790,7 +1622,6 @@ bool Parser::ParseExpression(Type *out)
             }
         }
 
-        // sizeof / alignof and their pack forms
         if (P[0] == 's' && (P[1] == 'z' || P[1] == 'Z')) {
             bool pack = P[1] == 'Z';
             P += 2;
@@ -1825,7 +1656,6 @@ bool Parser::ParseExpression(Type *out)
             *out = Plain(b.Done());
             return true;
         }
-        // <function-param> ::= fp <number> _ | fL <number> p <number> _
         if (P[0] == 'f' && (P[1] == 'p' || P[1] == 'L')) {
             P += 2;
             long long n = 0;
@@ -1842,7 +1672,6 @@ bool Parser::ParseExpression(Type *out)
             *out = Plain(b.Done());
             return true;
         }
-        // dt / pt — member access
         if (P[0] == 'd' && (P[1] == 't' || P[1] == 'n')) {
             P += 2;
             Type obj;
@@ -1857,7 +1686,7 @@ bool Parser::ParseExpression(Type *out)
             *out = Plain(b.Done());
             return true;
         }
-        if (P[0] == 's' && P[1] == 'r') {   // scope resolution
+        if (P[0] == 's' && P[1] == 'r') {
             P += 2;
             Type scope;
             if (!ParseType(&scope)) return false;
@@ -1871,7 +1700,7 @@ bool Parser::ParseExpression(Type *out)
             *out = Plain(b.Done());
             return true;
         }
-        if (P[0] == 'c' && P[1] == 'l') {   // call
+        if (P[0] == 'c' && P[1] == 'l') {
             P += 2;
             Type callee;
             if (!ParseExpression(&callee)) return false;
@@ -1891,7 +1720,7 @@ bool Parser::ParseExpression(Type *out)
             *out = Plain(b.Done());
             return true;
         }
-        if (P[0] == 't' && P[1] == 'l') {   // braced init
+        if (P[0] == 't' && P[1] == 'l') {
             P += 2;
             Type t;
             if (!ParseType(&t)) return false;
@@ -1913,12 +1742,9 @@ bool Parser::ParseExpression(Type *out)
         }
     }
 
-    // Anything else is a type used where an expression was expected, which is
-    // legal for the non-type template arguments compilers actually emit.
     return ParseType(out);
 }
 
-// <call-offset> — the fixed-point adjustments of a virtual thunk.
 bool Parser::ParseCallOffset()
 {
     if (Peek() == 'h') {
@@ -1937,9 +1763,8 @@ bool Parser::ParseCallOffset()
     return false;
 }
 
-}   // namespace
+}
 
-// ── the ABI entry point ───────────────────────────────────────────────────
 
 extern "C" char *__cxa_demangle(const char *mangled, char *buf, size_t *n, int *status)
 {
@@ -1957,11 +1782,6 @@ extern "C" char *__cxa_demangle(const char *mangled, char *buf, size_t *n, int *
 
     if (len < 2 || mangled[0] != '_' || mangled[1] != 'Z') return finish(kInvalid);
 
-    // GCC appends clone suffixes (.isra.0, .cold, .actor) to local
-    // specialisations, and the reference demangler hangs them off the end.
-    // The cut has to be found from the RIGHT and confirmed by a successful
-    // parse: a coroutine frame type is a source-name that CONTAINS a dot
-    // (`_ZN...Ev.Frame`), and cutting at the first one loses the name.
     size_t body = len;
 
     Arena arena;
@@ -1972,8 +1792,6 @@ extern "C" char *__cxa_demangle(const char *mangled, char *buf, size_t *n, int *
         const char *p   = mangled + 2;
         size_t      rem = body - 2;
 
-        // <special-name> — the two thunk forms the corpus contains.
-        // <special-name> ::= TW <name> | TH <name> — the two the tree emits.
         const char *tlsKind = nullptr;
         if (rem >= 2 && p[0] == 'T' && (p[1] == 'W' || p[1] == 'H')) {
             tlsKind = p[1] == 'W' ? "TLS wrapper function for "
@@ -1982,8 +1800,6 @@ extern "C" char *__cxa_demangle(const char *mangled, char *buf, size_t *n, int *
             rem -= 2;
         }
 
-        // Th is a NON-virtual thunk and Tv a virtual one; Tc is a covariant
-        // return thunk carrying both adjustments.
         bool        isThunk    = false;
         bool        isCovariant = false;
         const char *thunkKind  = "virtual thunk to ";
@@ -2026,20 +1842,12 @@ extern "C" char *__cxa_demangle(const char *mangled, char *buf, size_t *n, int *
             Type name;
             if (parser.ParseName(&name)) {
                 Builder b(&arena);
-                // Pre is the name; Post holds the trailing cv / ref
-                // qualifiers of a member function, which belong after the
-                // parameter list and nowhere else.
                 b.Add(name.Pre);
 
-                // A function's parameters follow its name. A variable's do
-                // not, and that is the only thing that tells the two apart.
                 bool bodyOk = true;
                 if (!parser.Done() && !parser.Failed) {
                     Str  params;
                     Type ret;
-                    // [mangle.encoding]: the return type is part of the
-                    // mangling only for a function template, because only
-                    // there can it participate in overload resolution.
                     const bool hasReturn = parser.NameIsTemplate && !parser.NameIsCtorDtor;
                     bodyOk = parser.ParseBareFunctionType(&params, hasReturn, &ret);
                     if (bodyOk) {
@@ -2061,7 +1869,7 @@ extern "C" char *__cxa_demangle(const char *mangled, char *buf, size_t *n, int *
                             b = full;
                         }
                         b.Add(params);
-                        b.Add(name.Post);   // trailing cv / ref qualifiers
+                        b.Add(name.Post);
                     }
                 } else {
                     b.Add(name.Post);
@@ -2073,8 +1881,6 @@ extern "C" char *__cxa_demangle(const char *mangled, char *buf, size_t *n, int *
         }
 
         if (ok) break;
-        // Retreat to the previous dot and try again; give up when there is
-        // none left to try.
         size_t dot = 0;
         for (size_t i = 2; i < body; i++)
             if (mangled[i] == '.') dot = i;

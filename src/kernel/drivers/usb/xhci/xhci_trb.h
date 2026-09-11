@@ -36,10 +36,6 @@ typedef struct {
 #define TRB_IOC                      (1 << 5)
 #define TRB_IDT                      (1 << 6)
 
-/* Block Set Address Request, Address Device Command TRB only (xHCI 1.2
- * Section 6.4.3.4, bit 9 of the control dword). Set, the controller does its
- * own half of addressing and puts nothing on the bus; clear, it also sends the
- * device a USB SET_ADDRESS. */
 #define TRB_BSR                      (1 << 9)
 
 #define TRB_TYPE_SHIFT               10
@@ -48,10 +44,6 @@ typedef struct {
 #define TRB_SET_TYPE(type)           (((type) << TRB_TYPE_SHIFT) & TRB_TYPE_MASK)
 #define TRB_GET_TYPE(ctrl)           (((ctrl) & TRB_TYPE_MASK) >> TRB_TYPE_SHIFT)
 
-/* Completion codes (xHCI 1.2 Table 6-90). The ones this driver acts on are
- * named; the rest are printed by number through xhci_completion_name, because
- * on a machine whose only diagnostic is a screen "Context State Error" and
- * "code 19" are not the same amount of help. */
 #define TRB_COMPLETION_SUCCESS          1
 #define TRB_COMPLETION_DATA_BUFFER_ERR  2
 #define TRB_COMPLETION_BABBLE           3
@@ -79,10 +71,8 @@ typedef struct {
 #define TRB_COMPLETION_STOPPED_LENGTH   27
 #define TRB_COMPLETION_SPLIT_TRANS_ERR  36
 
-/* What a completion code is called. Never NULL. */
 const char* xhci_completion_name(uint8_t code);
 
-/* What a command TRB type is called, for the same reason. Never NULL. */
 const char* xhci_command_name(uint8_t trb_type);
 
 #endif

@@ -3,14 +3,6 @@
 
 #include "ktypes.h"
 
-/*
- * BoxOS ACPI subsystem public interface.
- *
- * All on-disk / firmware structures are packed per ACPI 6.5 §5.2.
- * Static asserts guarantee the layout matches the spec across compilers
- * and CPU revisions so a build never silently produces a misaligned
- * accessor.
- */
 
 typedef enum {
     ACPI_OK = 0,
@@ -25,28 +17,24 @@ typedef enum {
     ACPI_ERR_NO_PM1A = 9
 } acpi_error_t;
 
-/* ACPI 6.5 §5.2.5.3 — Root System Description Pointer.
- * V1 (rev=0) is 20 bytes; V2 (rev=2+) is the full 36-byte structure with
- * a `length` field that may grow in future revisions. */
 typedef struct {
-    char signature[8];        /* "RSD PTR " */
-    uint8_t checksum;         /* V1 checksum (sum of first 20 bytes == 0) */
+    char signature[8];
+    uint8_t checksum;
     char oem_id[6];
-    uint8_t revision;         /* 0 = ACPI 1.0, 2 = ACPI 2.0+ */
+    uint8_t revision;
     uint32_t rsdt_address;
-    uint32_t length;          /* total RSDP length when rev >= 2 */
+    uint32_t length;
     uint64_t xsdt_address;
-    uint8_t extended_checksum;/* V2 checksum (sum of first `length` bytes == 0) */
+    uint8_t extended_checksum;
     uint8_t reserved[3];
 } __attribute__((packed)) acpi_rsdp_t;
 _Static_assert(sizeof(acpi_rsdp_t) == 36, "acpi_rsdp_t must be 36 bytes (ACPI 6.5 §5.2.5.3)");
 
-/* ACPI 6.5 §5.2.6 — System Description Table Header. */
 typedef struct {
     char signature[4];
     uint32_t length;
     uint8_t revision;
-    uint8_t checksum;         /* sum of `length` bytes must equal 0 */
+    uint8_t checksum;
     char oem_id[6];
     char oem_table_id[8];
     uint32_t oem_revision;
@@ -65,7 +53,6 @@ typedef struct {
     uint64_t entries[];
 } __attribute__((packed)) acpi_xsdt_t;
 
-/* ACPI 6.5 §5.2.3.2 — Generic Address Structure. */
 typedef struct {
     uint8_t address_space;
     uint8_t bit_width;
@@ -75,10 +62,6 @@ typedef struct {
 } __attribute__((packed)) acpi_gas_t;
 _Static_assert(sizeof(acpi_gas_t) == 12, "acpi_gas_t must be 12 bytes");
 
-/* ACPI 6.5 §5.2.9 — Fixed ACPI Description Table.
- * Length varies: 116 bytes on ACPI 1.0 (rev=1), 244+ bytes on ACPI 2.0+
- * (rev=3+). All `x_*` and `reset_reg` fields are extensions and must
- * be guarded by a FADT-length check before access. */
 typedef struct {
     acpi_sdt_header_t header;
     uint32_t firmware_ctrl;
@@ -135,13 +118,10 @@ typedef struct {
 } __attribute__((packed)) acpi_fadt_t;
 _Static_assert(sizeof(acpi_fadt_t) >= 244, "acpi_fadt_t too short for ACPI 2.0");
 
-/* ============================================================
- * HPET (Intel HPET Specification 1.0a, IA-PC HPET ACPI table)
- * ============================================================ */
 typedef struct {
     acpi_sdt_header_t header;
-    uint32_t event_timer_block_id;   /* bits 31:16 vendor, 15:8 num timers, etc. */
-    acpi_gas_t base_address;          /* MMIO base of the HPET registers */
+    uint32_t event_timer_block_id;
+    acpi_gas_t base_address;
     uint8_t hpet_number;
     uint16_t minimum_tick;
     uint8_t page_protection;
@@ -149,19 +129,16 @@ typedef struct {
 _Static_assert(sizeof(acpi_hpet_t) == 56, "acpi_hpet_t must be 56 bytes");
 
 typedef struct {
-    uintptr_t base;             /* MMIO physical base address */
+    uintptr_t base;
     uint16_t  vendor_id;
-    uint8_t   comparator_count; /* number of comparators (n+1 where n is HW field) */
-    uint8_t   counter_size_64;  /* 1 if 64-bit main counter, else 32-bit */
-    uint8_t   legacy_replacement;/* LegacyReplacement-capable */
+    uint8_t   comparator_count;
+    uint8_t   counter_size_64;
+    uint8_t   legacy_replacement;
     uint8_t   hpet_number;
     uint16_t  minimum_tick;
     bool      present;
 } acpi_hpet_info_t;
 
-/* ============================================================
- * MCFG (PCI Firmware Specification 3.0 §4.1.2)
- * ============================================================ */
 typedef struct {
     uint64_t base_address;
     uint16_t segment_group;
@@ -185,12 +162,9 @@ typedef struct {
     bool     present;
 } acpi_mcfg_info_t;
 
-/* ============================================================
- * SRAT (Static Resource Affinity Table) — ACPI 6.5 §5.2.16
- * ============================================================ */
 typedef struct {
     acpi_sdt_header_t header;
-    uint32_t reserved1;     /* must be 1 per spec */
+    uint32_t reserved1;
     uint64_t reserved2;
 } __attribute__((packed)) acpi_srat_t;
 
@@ -203,19 +177,17 @@ typedef struct {
     uint8_t  length;
 } __attribute__((packed)) srat_entry_header_t;
 
-/* Type 0 — Processor Local APIC/SAPIC Affinity, 16 bytes. */
 typedef struct {
     srat_entry_header_t header;
     uint8_t  lo_domain;
     uint8_t  apic_id;
-    uint32_t flags;             /* bit 0 = enabled */
+    uint32_t flags;
     uint8_t  sapic_eid;
-    uint8_t  hi_domain[3];      /* bits 8..31 of proximity domain */
+    uint8_t  hi_domain[3];
     uint32_t clock_domain;
 } __attribute__((packed)) srat_local_apic_t;
 _Static_assert(sizeof(srat_local_apic_t) == 16, "SRAT Type 0 = 16 bytes");
 
-/* Type 1 — Memory Affinity, 40 bytes. */
 typedef struct {
     srat_entry_header_t header;
     uint32_t domain;
@@ -223,18 +195,17 @@ typedef struct {
     uint64_t base_address;
     uint64_t length;
     uint32_t reserved2;
-    uint32_t flags;             /* bit 0=enabled, bit 1=hot-pluggable, bit 2=non-volatile */
+    uint32_t flags;
     uint64_t reserved3;
 } __attribute__((packed)) srat_memory_t;
 _Static_assert(sizeof(srat_memory_t) == 40, "SRAT Type 1 = 40 bytes");
 
-/* Type 2 — Processor Local x2APIC Affinity, 24 bytes. */
 typedef struct {
     srat_entry_header_t header;
     uint16_t reserved1;
     uint32_t domain;
     uint32_t x2apic_id;
-    uint32_t flags;             /* bit 0 = enabled */
+    uint32_t flags;
     uint32_t clock_domain;
     uint32_t reserved2;
 } __attribute__((packed)) srat_local_x2apic_t;
@@ -249,7 +220,7 @@ _Static_assert(sizeof(srat_local_x2apic_t) == 24, "SRAT Type 2 = 24 bytes");
 #define ACPI_NUMA_MAX_MEM_RANGES 64
 
 typedef struct {
-    uint32_t apic_id;       /* x2APIC ID (also fits 8-bit LAPIC IDs) */
+    uint32_t apic_id;
     uint32_t domain;
     bool     enabled;
 } acpi_numa_cpu_t;
@@ -263,36 +234,28 @@ typedef struct {
 
 typedef struct {
     acpi_numa_cpu_t cpus[ACPI_NUMA_MAX_CPUS];
-    uint16_t        cpu_count;        /* up to ACPI_NUMA_MAX_CPUS (256) */
+    uint16_t        cpu_count;
     acpi_numa_mem_t mem[ACPI_NUMA_MAX_MEM_RANGES];
     uint8_t         mem_count;
-    uint8_t         domain_count;     /* unique domain IDs observed */
+    uint8_t         domain_count;
     uint32_t        domains[ACPI_NUMA_MAX_DOMAINS];
     bool            present;
 } acpi_numa_info_t;
 
-/* ============================================================
- * SLIT (System Locality Information Table) — ACPI 6.5 §5.2.17
- * ============================================================ */
 typedef struct {
     acpi_sdt_header_t header;
     uint64_t locality_count;
-    /* uint8_t matrix[locality_count * locality_count]; */
 } __attribute__((packed)) acpi_slit_t;
 
 typedef struct {
     uint8_t  locality_count;
-    /* Flattened row-major matrix: distance[i*N + j]. NULL when absent. */
     uint8_t  matrix[ACPI_NUMA_MAX_DOMAINS * ACPI_NUMA_MAX_DOMAINS];
     bool     present;
 } acpi_slit_info_t;
 
-/* ============================================================
- * DMAR (Intel VT-d) — VT-d Spec §8.1
- * ============================================================ */
 typedef struct {
     acpi_sdt_header_t header;
-    uint8_t  host_address_width;   /* max guest address width minus 1 */
+    uint8_t  host_address_width;
     uint8_t  flags;
     uint8_t  reserved[10];
 } __attribute__((packed)) acpi_dmar_t;
@@ -311,7 +274,7 @@ typedef struct {
 
 typedef struct {
     dmar_entry_header_t header;
-    uint8_t  flags;             /* bit 0 = INCLUDE_PCI_ALL */
+    uint8_t  flags;
     uint8_t  reserved;
     uint16_t segment;
     uint64_t register_base;
@@ -327,16 +290,13 @@ typedef struct {
 } acpi_drhd_info_t;
 
 typedef struct {
-    uint8_t  host_address_width_bits;   /* HAW value + 1 */
+    uint8_t  host_address_width_bits;
     uint8_t  flags;
     acpi_drhd_info_t drhd[ACPI_DMAR_MAX_DRHD];
     uint8_t  drhd_count;
     bool     present;
 } acpi_dmar_info_t;
 
-/* ============================================================
- * IVRS (AMD IOMMU) — AMD I/O Virtualization Tech Spec
- * ============================================================ */
 typedef struct {
     acpi_sdt_header_t header;
     uint32_t iv_info;
@@ -357,7 +317,7 @@ typedef struct {
     uint64_t iommu_base;
     uint16_t pci_segment;
     uint16_t iommu_info;
-    uint32_t iommu_feature;     /* Type 0x10 — feature reporting; 0x11/0x40 differ */
+    uint32_t iommu_feature;
 } __attribute__((packed)) ivrs_ivhd_t;
 _Static_assert(sizeof(ivrs_ivhd_t) == 24, "IVRS IVHD core = 24 bytes");
 
@@ -375,9 +335,6 @@ typedef struct {
     bool     present;
 } acpi_ivrs_info_t;
 
-/* ============================================================
- * APEI tables — HEST/BERT/ERST — ACPI 6.5 §18
- * ============================================================ */
 typedef struct {
     acpi_sdt_header_t header;
     uint32_t error_source_count;
@@ -406,9 +363,6 @@ typedef struct {
     bool     erst_present;
 } acpi_apei_info_t;
 
-/* ============================================================
- * AML opcodes — minimal set for _S5 parsing
- * ============================================================ */
 #define AML_SCOPE_OP        0x10
 #define AML_NAME_OP         0x08
 #define AML_PACKAGE_OP      0x12
@@ -423,68 +377,30 @@ void acpi_shutdown(void) __attribute__((noreturn));
 void acpi_reboot(void) __attribute__((noreturn));
 void acpi_print_info(void);
 
-/* Surface any pre-boot hardware error recorded by firmware (APEI BERT
- * region) plus a summary of HEST / ERST visibility. Safe no-op when
- * the APEI tables are absent. Intended for kernel boot dmesg. */
 void acpi_apei_consume(void);
 
-/* Register and unmask the System Control Interrupt (SCI) on the GSI
- * announced by FADT.sci_interrupt. Subsequent SCI events (power button,
- * GPE, GHES SCI-class notifications) land in a kernel handler that
- * clears PM1 status bits + walks the active GPE block. Safe no-op
- * when ACPI is not initialised or sci_interrupt is zero. */
 void acpi_sci_register(void);
 
-/* Unmask the SCI — after Touch is up (guide_init) and the APEI runtime is
- * initialised: the handler says its events under names it must already hold,
- * and an interrupt cannot resolve one. A level-triggered SCI raised before
- * this waits in the IOAPIC. Also arms the power button. */
 void acpi_sci_arm(void);
 
-/* Enter ACPI sleep state `s` ∈ {1..5}. Reads \_Sx package from AML
- * namespace to derive SLP_TYPa/SLP_TYPb, calls _PTS(s) and _BFS(s)
- * (when present) before writing PM1a/b CNT with SLP_TYP + SLP_EN.
- * S5 is implemented via acpi_shutdown(); other states return.
- * Returns 0 on success or negative on missing prerequisites. */
 int acpi_enter_sleep(uint8_t state);
 
-/* GPE (General Purpose Event) handler registry. Each GPE bit may have
- * one C-callback. When the SCI handler observes the bit fire, the
- * callback runs at IRQ context — keep it short or queue work elsewhere.
- *
- * `gpe` is the global GPE index: 0..(gpe0_length/2*8 - 1) live in GPE0
- * block, the rest in GPE1.
- *
- * Future AML interpreter audit will wire the firmware-defined
- * `\_GPE._Lxx` / `\_GPE._Exx` methods through the same dispatcher by
- * registering an AML-callback wrapper as the handler. */
 typedef void (*acpi_gpe_handler_t)(uint16_t gpe);
 #define ACPI_MAX_GPES  256
 int  acpi_gpe_register(uint16_t gpe, acpi_gpe_handler_t cb);
 void acpi_gpe_unregister(uint16_t gpe);
 
-/* Subsystem accessors. Return NULL/false until acpi_init() succeeds. */
 const acpi_hpet_info_t *acpi_get_hpet(void);
 const acpi_mcfg_info_t *acpi_get_mcfg(void);
 const acpi_numa_info_t *acpi_get_numa(void);
 const acpi_slit_info_t *acpi_get_slit(void);
 
-/* Look up the NUMA proximity domain that owns `phys`. Returns the domain
- * ID on hit, ACPI_NUMA_DOMAIN_UNKNOWN otherwise (e.g. no SRAT, address
- * outside every enabled SRAT memory range). Cheap linear scan — the
- * memory range table is bounded to ACPI_NUMA_MAX_MEM_RANGES (64) and
- * lives in g_acpi. Future NUMA-aware PMM consumes this directly. */
 #define ACPI_NUMA_DOMAIN_UNKNOWN  0xFFFFFFFFu
 uint32_t acpi_numa_domain_for_phys(uint64_t phys);
 
-/* Look up the NUMA proximity domain that owns the CPU with the given
- * full-width APIC ID (xAPIC 8-bit or x2APIC 32-bit). Returns the domain ID
- * on hit, ACPI_NUMA_DOMAIN_UNKNOWN otherwise (no SRAT, CPU not in SRAT, or
- * SRAT marked the CPU disabled). Used by per-K-Core subsystems
- * (ManifestStage scratch, Brook ring placement) to allocate local memory. */
 uint32_t acpi_numa_domain_for_apic(uint32_t apic_id);
 const acpi_dmar_info_t *acpi_get_dmar(void);
 const acpi_ivrs_info_t *acpi_get_ivrs(void);
 const acpi_apei_info_t *acpi_get_apei(void);
 
-#endif // ACPI_H
+#endif

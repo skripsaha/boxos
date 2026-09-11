@@ -1,46 +1,9 @@
-/*
- * BoxOS — UEFI Variable Services bridge (UEFI 2.10 §8.2)
- *
- * Wraps GetVariable, SetVariable, GetNextVariableName, QueryVariableInfo
- * with the project's serialisation + IRQ-save discipline (efi_rt_lock /
- * efi_rt_unlock from efi_runtime.c). Also provides ASCII conveniences:
- * the firmware expects UCS-2 variable names, so the kernel translates
- * narrow C strings in a stack scratch buffer with no allocation.
- *
- * Touch surface (real-HW observability):
- *   - efi:variable:set        — successful SetVariable mutation (NV+RT/BS
- *                                variables only; per-set is informative
- *                                but kept off the hot path by gating on
- *                                NON_VOLATILE attribute).
- *   - efi:variable:set-fail   — SetVariable returned an error status.
- *   - efi:variable:nv-info    — periodic / on-demand snapshot of NV
- *                                quota from QueryVariableInfo.
- *
- * Security: SetVariable on authenticated variables (PK/KEK/db/dbx)
- * requires an EFI_VARIABLE_AUTHENTICATION_2 envelope per UEFI 2.10
- * §8.2.2. We do not synthesise that envelope — callers pass through
- * a fully-formed payload and the firmware enforces signature checks.
- *
- * References:
- *   UEFI 2.10 §8.2.1 — GetVariable
- *   UEFI 2.10 §8.2.2 — SetVariable
- *   UEFI 2.10 §8.2.3 — GetNextVariableName
- *   UEFI 2.10 §8.2.4 — QueryVariableInfo
- *   UEFI 2.10 §8.1  — Reentrancy rules
- */
 
 #include "efi.h"
 #include "efi_runtime_internal.h"
 #include "klib.h"
 #include "touch.h"
 
-/* =========================================================================
- * UCS-2 helpers
- *
- * EFI variable names are NUL-terminated UCS-2 (effectively UTF-16LE
- * restricted to BMP). Real-HW variable names are pure ASCII subset of
- * UCS-2 (per UEFI 2.10 §3.1) so a byte-wise widen suffices.
- * ========================================================================= */
 
 size_t efi_ucs2_strlen(const uint16_t *s)
 {
@@ -61,9 +24,6 @@ size_t efi_ascii_to_ucs2(const char *ascii, uint16_t *dest, size_t dest_chars)
     return n;
 }
 
-/* =========================================================================
- * Public wrappers
- * ========================================================================= */
 
 EfiStatus efi_get_variable(uint16_t *variable_name,
                            const EfiGuid *vendor,
@@ -106,10 +66,6 @@ EfiStatus efi_set_variable(uint16_t *variable_name,
     efi_rt_watch_end("SetVariable", t0);
     efi_rt_unlock(rflags);
 
-    /* Publish a Touch event for observability. Build a compact payload
-     * with the variable name (truncated UCS-2 → ASCII), GUID, attrs,
-     * size, and the resulting status. Kept to a single 80-byte struct
-     * so the Touch ring stays cheap. */
     struct {
         char     name[32];
         EfiGuid  vendor;
@@ -164,10 +120,6 @@ EfiStatus efi_query_variable_info(uint32_t attributes,
     EfiRuntimeServices *rt = efi_rt_get();
     if (!rt || !rt->query_variable_info) return EFI_STATUS_UNSUPPORTED;
 
-    /* QueryVariableInfo is a UEFI 2.0+ service (revision >= 2.0 in the
-     * RT services table). On firmware reporting an older revision the
-     * pointer may be NULL even when the table exists. Spec-compliant
-     * graceful return when that happens. */
     if (rt->hdr.revision < ((2U << 16) | 0)) {
         return EFI_STATUS_UNSUPPORTED;
     }
@@ -205,18 +157,8 @@ EfiStatus efi_query_variable_info(uint32_t attributes,
     return s;
 }
 
-/* =========================================================================
- * ASCII conveniences
- *
- * Most call sites know the variable name as a C string literal —
- * widening to UCS-2 with a 128-CHAR16 stack scratch keeps the API
- * ergonomic without forcing the caller to maintain a parallel widened
- * literal. 128 is more than enough: the longest standard global var
- * name is "PlatformLangCodes" (17 chars), and image-security DB names
- * top out at "PKDefault" / "KEKDefault" (10 chars).
- * ========================================================================= */
 
-#define EFI_VAR_NAME_SCRATCH  128u   /* in CHAR16 units */
+#define EFI_VAR_NAME_SCRATCH  128u
 
 EfiStatus efi_get_variable_ascii(const char *name_ascii,
                                  const EfiGuid *vendor,

@@ -2,23 +2,8 @@
 #include "klib.h"
 #include "vmm.h"
 
-/*
- * BoxOS mini-AML scanner for _S5_.
- *
- * A full AML interpreter (uACPI/ACPICA) is the right long-term answer — _S5
- * may live behind If/Else, may reference DerefOf, etc. This scanner handles
- * the overwhelmingly common case: a literal `Name (_S5_, Package () { ... })`
- * in either the DSDT or any loaded SSDT body. ACPI 6.5 §5.2.11.2 explicitly
- * permits _S5 to be defined in an SSDT, which is why this function takes a
- * raw AML buffer rather than reaching into the DSDT directly.
- *
- * False positives (the byte sequence `\_S5_` showing up inside a Buffer or
- * String literal) are improbable in practice and would fail the subsequent
- * PackageOp check, returning false instead of programming bogus PM1 values.
- */
 
-/* AML package length encoding — ACPI 6.5 §20.2.4. */
-#define AML_MAX_SANE_PKG_LENGTH (1024u * 1024u)  /* 1 MiB cap; sanity only */
+#define AML_MAX_SANE_PKG_LENGTH (1024u * 1024u)
 
 static uint32_t decode_pkg_length(const uint8_t* aml, uint32_t* bytes_consumed) {
     uint8_t lead_byte = aml[0];
@@ -41,7 +26,6 @@ static uint32_t decode_pkg_length(const uint8_t* aml, uint32_t* bytes_consumed) 
     return length;
 }
 
-/* AML integer encoding — ACPI 6.5 §20.2.3. */
 static uint32_t extract_integer_value(const uint8_t* aml,
                                        uint32_t aml_remaining,
                                        uint32_t* bytes_consumed) {
@@ -72,7 +56,6 @@ static uint32_t extract_integer_value(const uint8_t* aml,
 
         default:
             if (prefix <= 0x01) {
-                /* ZeroOp (0x00) or OneOp (0x01) — single-byte literal. */
                 *bytes_consumed = 1;
                 return prefix;
             }
@@ -84,17 +67,12 @@ static uint32_t extract_integer_value(const uint8_t* aml,
 bool acpi_search_s5_in_aml(uint8_t* aml, uint32_t aml_len) {
     if (!aml) return false;
 
-    /* Need at least: NameOp + (\\)? + (^*)? + "_S5_" + PackageOp + pkglen(1)
-     * + numelem(1) + 2 * minimal integer (1) = 9 bytes worst case. Reject
-     * shorter buffers before the loop so the bound is sane. */
     if (aml_len < 9) return false;
 
     for (uint32_t i = 0; i + 8 < aml_len; i++) {
         if (aml[i] != AML_NAME_OP)
             continue;
 
-        /* Skip optional NameString prefix: one RootChar (0x5C) and any
-         * number of ParentPrefixChar (0x5E). */
         uint32_t name_off = i + 1;
         if (name_off < aml_len && aml[name_off] == 0x5C) name_off++;
         while (name_off < aml_len && aml[name_off] == 0x5E) name_off++;
@@ -115,8 +93,6 @@ bool acpi_search_s5_in_aml(uint8_t* aml, uint32_t aml_len) {
         }
         pos++;
 
-        /* Worst case after PackageOp: pkglen(4) + numelem(1) +
-         * 2 * extract_integer(max 5) = 15. Bound it. */
         if (pos + 1 > aml_len) continue;
         uint32_t pkg_bytes = 0;
         uint32_t pkg_len = decode_pkg_length(&aml[pos], &pkg_bytes);
@@ -142,7 +118,7 @@ bool acpi_search_s5_in_aml(uint8_t* aml, uint32_t aml_len) {
                                                &value_bytes);
         if (value_bytes == 0) continue;
 
-        g_acpi.slp_typa = (uint16_t)(a_val & 0x07);   /* SLP_TYP is 3 bits */
+        g_acpi.slp_typa = (uint16_t)(a_val & 0x07);
         g_acpi.slp_typb = (uint16_t)(b_val & 0x07);
         g_acpi.s5_found = true;
 

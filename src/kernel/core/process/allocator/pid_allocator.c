@@ -2,17 +2,14 @@
 #include "klib.h"
 #include "io.h"
 
-/* 64-bit-word bitmap: scanning uses __builtin_ctzll for ~64x speedup over the
- * byte-loop. Requires PID_MAX_COUNT to be a multiple of 64; static-asserted
- * below so a future config change can't silently round it down. */
 #define PID_BITMAP_QWORDS ((PID_MAX_COUNT + 63) / 64)
 _Static_assert((PID_MAX_COUNT % 64) == 0,
                "PID_MAX_COUNT must be a multiple of 64 for the qword-bitmap scan");
 
 typedef struct
 {
-    uint64_t bitmap[PID_BITMAP_QWORDS];  // 1 bit per PID, packed
-    uint32_t generation[PID_MAX_COUNT];  // generation counters (tracked but not exposed)
+    uint64_t bitmap[PID_BITMAP_QWORDS];
+    uint32_t generation[PID_MAX_COUNT];
     uint32_t allocated_count;
     spinlock_t lock;
 } pid_allocator_t;
@@ -48,18 +45,13 @@ static uint32_t bitmap_find_free(const uint64_t *bitmap, uint32_t max_bits)
             return max_bits;
         }
     }
-    return max_bits; // not found
+    return max_bits;
 }
 
 void pid_allocator_init(void)
 {
     memset(&g_allocator, 0, sizeof(pid_allocator_t));
 
-    // generation 0 is reserved for PID_INVALID; start generations at 0.
-    // First allocation will increment to 1, producing PID = (1 << 16) | 0 = 65536.
-    // This is expected — generation 0 is invalid, so first valid generation is 1.
-    // All generations start at 0, increment happens in pid_alloc().
-    // (memset already zeroed everything, so no explicit loop needed)
 
     spinlock_init(&g_allocator.lock);
 
@@ -86,17 +78,12 @@ uint32_t pid_alloc(void)
     bitmap_set(g_allocator.bitmap, index);
     g_allocator.generation[index]++;
 
-    // Wrap generation within 16-bit range (skip 0 which is reserved for PID_INVALID)
     if (g_allocator.generation[index] > 0xFFFF)
     {
         g_allocator.generation[index] = 1;
         debug_printf("[PID] WARNING: Generation wrapped on index %u (2^16 allocations)\n", index);
     }
 
-    // Use simple index-based PID for readability: PID = index + 1.
-    // First process gets PID 1, second gets PID 2, etc.
-    // Generation is still tracked internally for double-free protection,
-    // but not exposed in the PID value itself.
     uint32_t pid = index + 1;
 
     g_allocator.allocated_count++;
@@ -117,7 +104,6 @@ void pid_free(uint32_t pid)
         return;
     }
 
-    // New PID format: PID = index + 1 (simple sequential numbering)
     uint32_t index = pid - 1;
 
     if (index >= PID_MAX_COUNT)
@@ -137,9 +123,6 @@ void pid_free(uint32_t pid)
         return;
     }
 
-    // Generation is tracked internally but not used for validation in simple mode.
-    // The bitmap alone is sufficient for allocation tracking.
-    // Generation still protects against rapid alloc/free/realloc cycles.
 
     bitmap_clear(g_allocator.bitmap, index);
     g_allocator.allocated_count--;
@@ -158,7 +141,6 @@ bool pid_validate(uint32_t pid)
         return false;
     }
 
-    // New PID format: PID = index + 1
     uint32_t index = pid - 1;
 
     if (index >= PID_MAX_COUNT)
@@ -168,7 +150,6 @@ bool pid_validate(uint32_t pid)
 
     spin_lock(&g_allocator.lock);
 
-    // Check if PID is currently allocated (bitmap is authoritative)
     bool allocated = bitmap_test(g_allocator.bitmap, index);
 
     spin_unlock(&g_allocator.lock);
@@ -192,9 +173,6 @@ uint32_t pid_generation(uint32_t pid)
 
     spin_lock(&g_allocator.lock);
 
-    // Generation counter for this slot — bumped on every pid_alloc, never reset
-    // on free, so a recycled pid always reads a different generation than it had
-    // in a previous life. The bitmap (allocated or not) is irrelevant here.
     uint32_t generation = g_allocator.generation[index];
 
     spin_unlock(&g_allocator.lock);
@@ -222,17 +200,9 @@ PidLife pid_life(uint32_t pid, uint32_t generation)
     bool     allocated = bitmap_test(g_allocator.bitmap, index);
     spin_unlock(&g_allocator.lock);
 
-    /* Newer than anything this slot has ever issued: no such incarnation.
-     * A caller asking about it mistyped or invented it, and answering
-     * "finished" would be a lie that reads exactly like success. */
     if (generation > slot_gen) return PID_LIFE_NEVER;
 
-    /* Older than the slot's count: the slot has been handed out again since,
-     * which cannot happen while the earlier tenant still holds it. */
     if (generation < slot_gen) return PID_LIFE_DEPARTED;
 
-    /* The slot's current incarnation — the bitmap says whether it still
-     * holds the number. Freed means finished; the generation is not bumped
-     * again until the number is re-issued, so this stays true afterwards. */
     return allocated ? PID_LIFE_LIVE : PID_LIFE_DEPARTED;
 }

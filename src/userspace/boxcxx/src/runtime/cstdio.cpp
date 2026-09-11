@@ -1,50 +1,25 @@
-// boxcxx — <cstdio> runtime: the byte layer
-//
-// FILE over Current. Everything a stream does that is not formatting lives
-// here; the printf and scanf families are beside this file and reach a stream
-// only through Put()/Get() below, so there is one place that knows how bytes
-// leave and arrive.
-//
-// The buffer is single: a FILE is either reading or writing at any moment, and
-// switching direction flushes. C requires exactly that of an update stream
-// (a write must not follow a read without an intervening fflush or seek), so
-// the rule is the standard's rather than a simplification, and one buffer means
-// there is no second copy of the "is this data mine" question.
 
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <new>
-#include <print>   // __print::ToConsole / Console — the ONE screen road
+#include <print>
 
-#include <__bits/c_file>   // the flags, the Guard and the three locked
-                           // primitives live beside the struct they describe:
-                           // <cwchar>'s wide I/O is a second consumer of all
-                           // three, and a multi-byte character has to be
-                           // assembled under ONE lock.
+#include <__bits/c_file>
 
 #include "box/current.h"
 #include "box/file.h"
 
 namespace {
 
-// Everything below spells the flags, the Guard and the locked primitives
-// unqualified, as it always did; they are simply defined elsewhere now.
 using namespace ::std::__stdio;
 
 ::Current *Cur(::std::FILE *f) { return static_cast<::Current *>(f->__cur); }
 
-// Every FILE the program opened, so exit() can flush them. A singly linked
-// list rather than a table: there is no FOPEN_MAX ceiling here, only the
-// guarantee, and a list has no size to pick.
-//
-// `tmpname` is where a tmpfile's backing name lives. It belongs here rather
-// than in FILE because exactly one kind of stream needs it, and FILE's layout
-// is the standard's business.
 struct Node {
     ::std::FILE *f;
-    char        *tmpname;   // owned; non-null only for tmpfile()
+    char        *tmpname;
     Node        *next;
 };
 Node       *g_open = nullptr;
@@ -53,7 +28,7 @@ Node       *g_open = nullptr;
 void Track(::std::FILE *f)
 {
     Node *n = static_cast<Node *>(::std::malloc(sizeof(Node)));
-    if (!n) return;   // untracked: it still works, it just will not auto-flush
+    if (!n) return;
     n->f       = f;
     n->tmpname = nullptr;
     ::umutex_lock(&g_open_lock);
@@ -62,8 +37,6 @@ void Track(::std::FILE *f)
     ::umutex_unlock(&g_open_lock);
 }
 
-// Detaches the node and hands back the temp name it was holding, if any, so
-// the caller can delete the backing after the Current is released.
 char *Untrack(::std::FILE *f)
 {
     char *name = nullptr;
@@ -83,26 +56,19 @@ char *Untrack(::std::FILE *f)
     return name;
 }
 
-// Records the name a tmpfile was created under.
 void MarkTemp(::std::FILE *f, char *owned_name)
 {
     ::umutex_lock(&g_open_lock);
     for (Node *n = g_open; n; n = n->next)
         if (n->f == f) { n->tmpname = owned_name; owned_name = nullptr; break; }
     ::umutex_unlock(&g_open_lock);
-    ::std::free(owned_name);   // untracked stream: nothing to attach it to
+    ::std::free(owned_name);
 }
 
-// ── the raw ends ────────────────────────────────────────────────────────
-// One place that writes bytes out, one that reads them in. Everything above
-// goes through these two, so "where does a byte actually go" has one answer.
 
 int RawWrite(::std::FILE *f, const char *p, ::std::size_t n)
 {
     if (f->__flags & kConsole) {
-        // The screen has ONE handle, shared with std::cout, std::cerr and
-        // std::print. A second road would let two callers' output arrive in an
-        // order neither asked for.
         ::std::__print::ToConsole(::std::string_view(p, n));
         return static_cast<int>(n);
     }
@@ -118,7 +84,6 @@ int RawRead(::std::FILE *f, char *p, ::std::size_t n)
     return ::current_read(c, p, n);
 }
 
-// ── buffer plumbing ─────────────────────────────────────────────────────
 
 bool EnsureBuf(::std::FILE *f)
 {
@@ -132,9 +97,6 @@ bool EnsureBuf(::std::FILE *f)
 }
 
 
-// Abandon read-ahead. A stream that seeks or switches direction must forget
-// what it had buffered, and its logical position must come back to where the
-// program thinks it is rather than where the read-ahead left the backing.
 void DropReadAhead(::std::FILE *f)
 {
     if (!(f->__flags & kReading)) return;
@@ -147,17 +109,12 @@ void DropReadAhead(::std::FILE *f)
     f->__flags &= ~kReading;
 }
 
-// Fill the buffer. Returns bytes available, 0 at end of stream, -1 on error.
 int Fill(::std::FILE *f)
 {
     if (!EnsureBuf(f)) return -1;
     if (f->__flags & kWriting) { if (FlushLocked(f) != 0) return -1; f->__flags &= ~kWriting; }
 
     f->__pos = f->__end = 0;
-    // The keyboard hands back a line WITHOUT its newline — the terminating key
-    // is not data the reader asked for — so the newline is added here, exactly
-    // as <iostream>'s console buffer does. Both must agree or a program that
-    // mixes std::cin and getchar() sees two different line shapes.
     const ::std::size_t room = (f->__flags & kKeyboard) ? f->__cap - 1 : f->__cap;
     const int got = RawRead(f, f->__buf, room);
     if (got < 0) { f->__flags |= kErr; return -1; }
@@ -174,9 +131,6 @@ int Fill(::std::FILE *f)
 
 
 
-// ── the three conventional streams ──────────────────────────────────────
-// Static storage, so they exist before any constructor runs and cost nothing
-// until used; their Currents open on first touch.
 
 ::std::FILE g_in{};
 ::std::FILE g_out{};
@@ -184,7 +138,7 @@ int Fill(::std::FILE *f)
 
 ::std::FILE *InitStd(::std::FILE *f, unsigned flags, int mode)
 {
-    if (f->__flags) return f;      // already built
+    if (f->__flags) return f;
     f->__unget = EOF;
     f->__mode  = mode;
     f->__flags = flags | kStatic;
@@ -193,21 +147,10 @@ int Fill(::std::FILE *f)
     return f;
 }
 
-} // namespace
+}
 
-// ── the primitives the wide layer shares ────────────────────────────────
-//
-// These three are the whole of what <cwchar>'s wide I/O needs from the byte
-// layer: one byte in, one byte out, and the pending-output drain. They sit
-// in std::__stdio rather than in the unnamed namespace above so that a second
-// translation unit can reach them — which is exactly what an unnamed
-// namespace is for preventing, and exactly why they had to leave it.
-//
-// They still call the helpers above: names with internal linkage are visible
-// through the rest of the translation unit, so nothing had to move with them.
 namespace std { namespace __stdio {
 
-// Push pending output. Returns 0 on success, EOF on failure.
 int FlushLocked(::std::FILE *f)
 {
     if (!(f->__flags & kWriting) || f->__pos == 0) return 0;
@@ -252,18 +195,14 @@ int PutLocked(::std::FILE *f, int c)
     return static_cast<unsigned char>(c);
 }
 
-}} // namespace std::__stdio
+}}
 
 namespace std {
 
 FILE *__stdin() noexcept  { return InitStd(&g_in,  kRead | kKeyboard, _IOLBF); }
 FILE *__stdout() noexcept { return InitStd(&g_out, kWrite | kConsole, _IOLBF); }
-// C requires stderr to be at most line-buffered and never fully buffered; here
-// it is unbuffered outright, because a diagnostic that is still in a buffer
-// when the program dies is a diagnostic nobody reads.
 FILE *__stderr() noexcept { return InitStd(&g_err, kWrite | kConsole, _IONBF); }
 
-// ── file access ─────────────────────────────────────────────────────────
 
 FILE *fopen(const char *filename, const char *mode) noexcept
 {
@@ -276,8 +215,6 @@ FILE *fopen(const char *filename, const char *mode) noexcept
     case 'a': write = true; create = true; append = true; break;
     default: return nullptr;
     }
-    // 'b' is accepted and ignored: there is no text mode here to differ from,
-    // so the two are the same stream and saying otherwise would be a fiction.
     for (const char *p = mode + 1; *p; p++) {
         if (*p == '+') { read = write = true; }
         else if (*p != 'b' && *p != 'x') return nullptr;
@@ -343,9 +280,6 @@ int fclose(FILE *stream) noexcept
     if (stream->__flags & kStatic) { stream->__flags &= ~(kWriting | kReading); return rc; }
     char *tmp = Untrack(stream);
     ::std::free(stream);
-    // A temporary file goes away with the stream that made it — that is the
-    // whole difference between tmpfile() and fopen(), and it has to happen
-    // AFTER the Current is released or the delete races the last write.
     if (tmp) { remove(tmp); ::std::free(tmp); }
     return rc;
 }
@@ -358,8 +292,6 @@ int fflush(FILE *stream) noexcept
         if (::Current *c = Cur(stream)) ::current_flush(c);
         return rc;
     }
-    // A null argument flushes every stream that can be flushed — C says so, and
-    // it is what exit() needs.
     int rc = 0;
     ::umutex_lock(&g_open_lock);
     for (Node *n = g_open; n; n = n->next) {
@@ -384,11 +316,9 @@ FILE *freopen(const char *filename, const char *mode, FILE *stream) noexcept
         if (::Current *c = Cur(stream)) { ::current_flush(c); ::current_release(c); }
         stream->__cur = nullptr;
     }
-    if (!filename) return nullptr;   // "same file, new mode" needs a name here
+    if (!filename) return nullptr;
     FILE *fresh = fopen(filename, mode);
     if (!fresh) return nullptr;
-    // Move the fresh stream's state into the caller's object: the pointer the
-    // program holds must stay valid, which is the whole point of freopen.
     Guard g(stream);
     const unsigned keep = stream->__flags & kStatic;
     if (stream->__flags & kOwnBuf) ::std::free(stream->__buf);
@@ -409,7 +339,7 @@ int setvbuf(FILE *stream, char *buf, int mode, size_t size) noexcept
     if (!stream) return -1;
     if (mode != _IOFBF && mode != _IOLBF && mode != _IONBF) return -1;
     Guard g(stream);
-    if (stream->__pos != 0 || stream->__end != 0) return -1;  // must precede any I/O
+    if (stream->__pos != 0 || stream->__end != 0) return -1;
     if (stream->__flags & kOwnBuf) { ::std::free(stream->__buf); stream->__flags &= ~kOwnBuf; }
     stream->__buf = nullptr;
     stream->__cap = 0;
@@ -426,18 +356,11 @@ void setbuf(FILE *stream, char *buf) noexcept
     setvbuf(stream, buf, buf ? _IOFBF : _IONBF, buf ? BUFSIZ : 0);
 }
 
-// ── character input/output ──────────────────────────────────────────────
 
 int fgetc(FILE *stream) noexcept
 {
     if (!stream) return EOF;
     Guard g(stream);
-    // C: the first byte operation on a stream fixes its orientation, and
-    // that is not bookkeeping. It is what makes sharing __unget with
-    // <cwchar>'s wide push-back safe by construction — the two can never
-    // both be live. The claim belongs HERE and not in GetLocked/PutLocked,
-    // because the wide layer calls those to move its own bytes; putting it
-    // one layer down made every wide write refuse itself.
     if (!ClaimByte(stream)) { stream->__flags |= kErr; return EOF; }
     return GetLocked(stream);
 }
@@ -459,7 +382,7 @@ int ungetc(int c, FILE *stream) noexcept
     if (!stream || c == EOF) return EOF;
     Guard g(stream);
     if (!ClaimByte(stream)) { stream->__flags |= kErr; return EOF; }
-    if (stream->__unget != EOF) return EOF;   // one byte of pushback, as C guarantees
+    if (stream->__unget != EOF) return EOF;
     stream->__unget = static_cast<unsigned char>(c);
     if (stream->__off > 0) stream->__off--;
     stream->__flags &= ~kEof;
@@ -501,12 +424,9 @@ int puts(const char *s) noexcept
     if (!ClaimByte(f)) { f->__flags |= kErr; return EOF; }
     for (const char *p = s; *p; p++)
         if (PutLocked(f, static_cast<unsigned char>(*p)) == EOF) return EOF;
-    // puts appends the newline fputs does not — the one difference between them
-    // and the one people get wrong.
     return PutLocked(f, '\n') == EOF ? EOF : 0;
 }
 
-// ── direct input/output ─────────────────────────────────────────────────
 
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) noexcept
 {
@@ -518,7 +438,7 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) noexcept
     for (; done < nmemb; done++) {
         for (size_t b = 0; b < size; b++) {
             const int c = GetLocked(stream);
-            if (c == EOF) return done;   // a partial element is not an element
+            if (c == EOF) return done;
             *out++ = static_cast<char>(c);
         }
     }
@@ -540,7 +460,6 @@ size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) noexcept
     return done;
 }
 
-// ── positioning ─────────────────────────────────────────────────────────
 
 int fseek(FILE *stream, long offset, int whence) noexcept
 {
@@ -577,9 +496,6 @@ long ftell(FILE *stream) noexcept
     if (!stream) return -1;
     Guard g(stream);
     if (!(stream->__flags & kSeekable)) return -1;
-    // Pending output has not reached the backing yet, and read-ahead has taken
-    // the backing past where the program is. __off is the program's position,
-    // which is the one C asks about.
     return static_cast<long>(stream->__off);
 }
 
@@ -606,7 +522,6 @@ int fsetpos(FILE *stream, const fpos_t *pos) noexcept
     return fseek(stream, static_cast<long>(pos->__off), SEEK_SET);
 }
 
-// ── error handling ──────────────────────────────────────────────────────
 
 void clearerr(FILE *stream) noexcept
 {
@@ -637,7 +552,6 @@ void perror(const char *s) noexcept
     fputc('\n', e);
 }
 
-// ── operations on files ─────────────────────────────────────────────────
 
 int remove(const char *filename) noexcept
 {
@@ -659,15 +573,10 @@ int rename(const char *old_p, const char *new_p) noexcept
 
 char *tmpnam(char *s) noexcept
 {
-    // Per-strand storage when the caller passes nullptr, for the same reason
-    // gmtime's buffer is per strand: two strands asking at once must not be
-    // handed one answer.
     static thread_local char buf[L_tmpnam];
     static unsigned long long counter = 0;
 
     char *out = s ? s : buf;
-    // The name has to be unique among files that exist, not merely unlikely:
-    // ask, and step until the answer is no.
     for (unsigned tries = 0; tries < TMP_MAX; tries++) {
         unsigned long long id = ++counter;
         char *p = out;
@@ -697,10 +606,6 @@ FILE *tmpfile() noexcept
     return f;
 }
 
-} // namespace std
+}
 
-// Strong, overriding boxlib's weak getchar, so that a byte pushed back with
-// std::ungetc(c, stdin) comes back to the next getchar(). boxlib's cannot see
-// that pushback — it has no FILE to hold it — which is right for C and wrong
-// here.
 extern "C" int getchar(void) { return ::std::fgetc(::std::__stdin()); }

@@ -1,15 +1,3 @@
-// cxx_regex_stand.cpp — boxcxx's own regex leaves, on the host compiler.
-//
-// The third column of the differential stand. It includes the REAL
-// <__bits/regex_syntax>, <__bits/regex_program> and <__bits/regex_parse> —
-// reached through symlinks the driver drops in a private include directory, so
-// that boxcxx's <string> and <vector> do not shadow the host's — and walks the
-// identical case sequence the two reference columns walk.
-//
-// This is the whole reason the parser was written as a template over its traits
-// and told nothing about locales: with no locale in it, it builds anywhere.
-// The traits below mirror std::regex_traits in <regex> member for member, so a
-// verdict that differs from a reference is the PARSER differing, not the traits.
 #include <cctype>
 #include <chrono>
 #include <cwctype>
@@ -49,18 +37,6 @@ static const char *ErrName(std::regex_constants::error_type e)
     return "other";
 }
 
-// A copy of boxcxx's std::regex_traits<charT>, over the HOST's locale rather
-// than over BoxOS's. Every table here is the same table.
-//
-// ‼ It is a template for Ф44-e, and what that does and does not prove is worth
-// being exact about. Instantiated for wchar_t it proves the ENGINE is generic
-// over the character type — that the parser, the two machines and the class
-// representation answer the same way when the same characters arrive in a
-// wider box. It does NOT prove anything about boxcxx's own wide ctype: this
-// traits asks the host's <cwctype>, and BoxOS's answers come from the Unicode
-// database Ф42-a built, which deliberately differs from macOS's (iswalpha of
-// U+4E2D is 1 there and 0 here). The questions that go through those tables
-// are answered in QEMU by phase238, not on this stand.
 template <class charT>
 class HostTraitsT {
 public:
@@ -228,9 +204,6 @@ static void ParseOne(const char *id, const std::string &pattern,
     }
 }
 
-// Until the machine exists, the only way to see whether a quantifier produced
-// the SHAPE it should is to read the program out. `a{0,2}` must hold two Char
-// instructions, not three — a distinction no accept/reject sweep can make.
 static const char *OpName(boxcxx::re::Op op)
 {
     using boxcxx::re::Op;
@@ -248,9 +221,6 @@ static const char *OpName(boxcxx::re::Op op)
     return "?";
 }
 
-// The match verdict, printed in the oracle's format so the three columns diff
-// directly. match_results does not exist yet; the machine fills a slot vector
-// and this reads it, which is exactly what match_results will do.
 static void MatchOne(const char *id, const std::string &pattern, const std::string &subject,
                      std::regex_constants::syntax_option_type f)
 {
@@ -286,9 +256,6 @@ static void MatchOne(const char *id, const std::string &pattern, const std::stri
     std::printf("\n");
 }
 
-// ── the wide half, on the same leaves ───────────────────────────────────
-// One verdict rendered exactly as the oracle renders it, so the three columns
-// diff without anything having to know which is which.
 template <class charT>
 static std::string VerdictT(const std::basic_string<charT> &pattern,
                             const std::basic_string<charT> &subject,
@@ -345,9 +312,6 @@ static void WideOnly(const char *id, const std::string &pattern, const std::stri
     std::printf("%s |%s| |%s| -> %s\n", id, pattern.c_str(), subject.c_str(), w.c_str());
 }
 
-// One timed search, so the blowup shapes are measured in THREE columns and not
-// in two with the third asserted. Same shape as the oracle's `adv`: one case
-// per process, because a tool that measures a hang must not be able to hang.
 static int Adversarial(const char *pattern, int n)
 {
     const std::string subject((std::size_t)n, 'a');

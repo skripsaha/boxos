@@ -1,9 +1,6 @@
 #include "tag_bitmap.h"
 #include "klib.h"
 
-// ---------------------------------------------------------------------------
-// Internal helpers (no locking)
-// ---------------------------------------------------------------------------
 
 static void ensure_bitmap_capacity(TagBitmapIndex* idx, uint16_t tag_id) {
     if ((uint32_t)tag_id < idx->bitmap_capacity) {
@@ -127,9 +124,6 @@ static void reverse_index_remove(TagBitmapIndex* idx, uint32_t file_id, uint16_t
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 TagBitmapIndex* tag_bitmap_create(uint32_t initial_tag_cap, uint32_t initial_file_cap) {
     TagBitmapIndex* idx = kmalloc(sizeof(TagBitmapIndex));
@@ -316,13 +310,10 @@ void tag_bitmap_remove_file(TagBitmapIndex* idx, uint32_t file_id) {
     spin_unlock(&idx->lock);
 }
 
-// ---------------------------------------------------------------------------
-// Query cache helpers (called under lock)
-// ---------------------------------------------------------------------------
 
 static uint32_t query_hash(const uint16_t* tag_ids, uint32_t tag_count,
                            TagKeyGroup** groups, uint32_t group_count) {
-    uint32_t h = 0x811c9dc5;  // FNV-1a
+    uint32_t h = 0x811c9dc5;
     for (uint32_t i = 0; i < tag_count; i++) {
         h ^= tag_ids[i];
         h *= 0x01000193;
@@ -356,7 +347,6 @@ static QueryCacheEntry* cache_lookup(TagBitmapIndex* idx, uint32_t hash,
 static void cache_store(TagBitmapIndex* idx, uint32_t hash,
                         const uint16_t* tag_ids, uint32_t tag_count,
                         const uint32_t* file_ids, uint32_t count) {
-    // Find empty or oldest slot (simple: use hash % SLOTS)
     int slot = (int)(hash % QUERY_CACHE_SLOTS);
     QueryCacheEntry* e = &idx->cache[slot];
 
@@ -377,9 +367,6 @@ static void cache_store(TagBitmapIndex* idx, uint32_t hash,
         memcpy(e->tag_key, tag_ids, sizeof(uint16_t) * tag_count);
 }
 
-// ---------------------------------------------------------------------------
-// Fast bit extraction: use CTZ to skip empty words
-// ---------------------------------------------------------------------------
 
 static uint32_t extract_set_bits(const uint8_t* bitmap, uint32_t byte_count,
                                   uint32_t max_file_id,
@@ -388,7 +375,6 @@ static uint32_t extract_set_bits(const uint8_t* bitmap, uint32_t byte_count,
     const uint64_t* words = (const uint64_t*)bitmap;
     uint32_t word_count = byte_count / 8;
 
-    // 64-bit word scan with CTZ
     for (uint32_t w = 0; w < word_count && count < max_results; w++) {
         uint64_t word = words[w];
         while (word != 0 && count < max_results) {
@@ -397,11 +383,10 @@ static uint32_t extract_set_bits(const uint8_t* bitmap, uint32_t byte_count,
             if (fid >= 1 && fid <= max_file_id) {
                 out_ids[count++] = fid;
             }
-            word &= word - 1;  // clear lowest set bit
+            word &= word - 1;
         }
     }
 
-    // Handle remaining bytes (if byte_count not aligned to 8)
     for (uint32_t b = word_count * 8; b < byte_count && count < max_results; b++) {
         uint8_t byte = bitmap[b];
         while (byte != 0 && count < max_results) {
@@ -417,9 +402,6 @@ static uint32_t extract_set_bits(const uint8_t* bitmap, uint32_t byte_count,
     return count;
 }
 
-// ---------------------------------------------------------------------------
-// Check if bitmap is all-zero (early termination)
-// ---------------------------------------------------------------------------
 
 static bool bitmap_is_empty(const uint8_t* bitmap, uint32_t byte_count) {
     const uint64_t* words = (const uint64_t*)bitmap;
@@ -433,9 +415,6 @@ static bool bitmap_is_empty(const uint8_t* bitmap, uint32_t byte_count) {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Optimized query: cache + 64-bit AND + CTZ extraction + early termination
-// ---------------------------------------------------------------------------
 
 int tag_bitmap_query(TagBitmapIndex* idx,
                      const uint16_t* tag_ids, uint32_t tag_count,
@@ -452,7 +431,6 @@ int tag_bitmap_query(TagBitmapIndex* idx,
         return 0;
     }
 
-    // --- Cache lookup (only for simple tag-only queries) ---
     uint32_t hash = 0;
     if (tag_count > 0 && group_count == 0) {
         hash = query_hash(tag_ids, tag_count, groups, group_count);
@@ -465,9 +443,7 @@ int tag_bitmap_query(TagBitmapIndex* idx,
         }
     }
 
-    // --- Bitmap intersection ---
     uint32_t result_size = (idx->max_file_id + 8) / 8;
-    // Align to 8 bytes for safe uint64_t access
     result_size = (result_size + 7) & ~7u;
 
     uint8_t* result_bitmap = kmalloc(result_size);
@@ -479,7 +455,6 @@ int tag_bitmap_query(TagBitmapIndex* idx,
 
     bool first = true;
 
-    // AND all required tags
     for (uint32_t i = 0; i < tag_count; i++) {
         uint16_t tid = tag_ids[i];
         if ((uint32_t)tid >= idx->bitmap_capacity || !idx->bitmaps[tid]) {
@@ -505,14 +480,12 @@ int tag_bitmap_query(TagBitmapIndex* idx,
             for (uint32_t w = 0; w < words; w++) {
                 r64[w] &= b64[w];
             }
-            // AND remaining bytes that don't fill a full 64-bit word
             for (uint32_t b = words * 8; b < copy_len; b++) {
                 result_bitmap[b] &= bm->bits[b];
             }
             for (uint32_t b = copy_len; b < result_size; b++) {
                 result_bitmap[b] = 0;
             }
-            // Early termination: if result is all-zero, no matches possible
             if (bitmap_is_empty(result_bitmap, result_size)) {
                 kfree(result_bitmap);
                 spin_unlock(&idx->lock);
@@ -521,7 +494,6 @@ int tag_bitmap_query(TagBitmapIndex* idx,
         }
     }
 
-    // AND with each group (OR within group)
     for (uint32_t g = 0; g < group_count; g++) {
         TagKeyGroup* grp = groups[g];
         if (!grp || grp->count == 0) {
@@ -551,7 +523,6 @@ int tag_bitmap_query(TagBitmapIndex* idx,
             for (uint32_t w = 0; w < words; w++) {
                 t64[w] |= b64[w];
             }
-            // OR remaining bytes that don't fill a full 64-bit word
             for (uint32_t b = words * 8; b < or_len; b++) {
                 temp[b] |= bm->bits[b];
             }
@@ -571,7 +542,6 @@ int tag_bitmap_query(TagBitmapIndex* idx,
 
         kfree(temp);
 
-        // Early termination after group AND
         if (!first && bitmap_is_empty(result_bitmap, result_size)) {
             kfree(result_bitmap);
             spin_unlock(&idx->lock);
@@ -585,12 +555,10 @@ int tag_bitmap_query(TagBitmapIndex* idx,
         return 0;
     }
 
-    // --- Fast bit extraction with CTZ ---
     uint32_t count = extract_set_bits(result_bitmap, result_size,
                                        idx->max_file_id,
                                        out_file_ids, max_results);
 
-    // --- Store in cache (simple tag-only queries, non-truncated only) ---
     if (tag_count > 0 && group_count == 0 && count < max_results) {
         cache_store(idx, hash, tag_ids, tag_count, out_file_ids, count);
     }

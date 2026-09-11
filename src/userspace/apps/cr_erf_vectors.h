@@ -1,4 +1,3 @@
-// Baked 80-bit (x, MPFR-CR-ref) vectors for erf — GENERATED, do not edit.
 static const CrVec kErfVec[] = {
 {0x8000000000000000ULL,0x3FFDu,0x8D7AA71196B04482ULL,0x3FFDu},
 {0x8000000000000000ULL,0x3FFEu,0x853F7AE0C76E915FULL,0x3FFEu},

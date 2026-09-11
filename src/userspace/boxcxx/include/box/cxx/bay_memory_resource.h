@@ -1,11 +1,3 @@
-// boxcxx — box::bay_memory_resource
-//
-// A std::pmr::memory_resource backed by a BoxOS Bay: a named, refcounted,
-// cross-cabin shared region. Allocation is monotonic (bump) inside the Bay,
-// so a producer cabin can build pmr containers straight into shared memory
-// and any consumer cabin that bay_open()s the same tag sees the bytes.
-// Deallocation is a no-op (monotonic); drop the whole resource to release
-// the cabin's Bay claim. This is a box:: extension — not part of std.
 #ifndef BOXCXX_BOX_BAY_MEMORY_RESOURCE_H
 #define BOXCXX_BOX_BAY_MEMORY_RESOURCE_H
 
@@ -29,8 +21,6 @@ class bay_memory_resource : public std::pmr::memory_resource {
     }
 
 public:
-    // Open (or create) the Bay named `tag`. With BAY_CREATE, `bytes` must be
-    // non-zero; with BAY_OPEN it joins an existing Bay (size from the Bay).
     bay_memory_resource(const char *tag, uint64_t bytes,
                         uint32_t flags = BAY_CREATE)
         : base_(bay_open(tag, bytes, flags)),
@@ -61,13 +51,13 @@ protected:
         off_ += pad + bytes;
         return reinterpret_cast<void *>(aligned);
     }
-    void do_deallocate(void *, size_t, size_t) override {} // monotonic
+    void do_deallocate(void *, size_t, size_t) override {}
     bool do_is_equal(const std::pmr::memory_resource &o) const noexcept override
     {
         return this == &o;
     }
 };
 
-} // namespace box
+}
 
-#endif // BOXCXX_BOX_BAY_MEMORY_RESOURCE_H
+#endif

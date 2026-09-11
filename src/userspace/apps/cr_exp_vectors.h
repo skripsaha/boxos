@@ -1,5 +1,3 @@
-// Baked 80-bit (x, MPFR-CR-ref) vectors for exp2/exp — GENERATED, do not edit.
-// {x mantissa, x se, ref mantissa, ref se}; se = sign<<15 | exp15.
 struct CrVec { unsigned long long xm; unsigned short xse; unsigned long long rm; unsigned short rse; };
 
 static const CrVec kExp2Vec[] = {
@@ -11240,4 +11238,3 @@ static const CrVec kExpVec[] = {
 {0xB13BA1E68C0E5E5BULL,0x400Cu,0xA3F7E7D246FCF4A4ULL,0x7FEBu},
 };
 static const unsigned kExpVecN = 5633;
-

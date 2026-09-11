@@ -1,13 +1,3 @@
-/*
- * cxa_exception.cpp — Itanium Level 2 exception object management:
- * __cxa_allocate_exception / __cxa_throw / __cxa_begin_catch /
- * __cxa_end_catch / __cxa_rethrow (+ emergency pool for OOM throws).
- *
- * Multiple strands may share one cabin (std::thread), so the Itanium
- * __cxa_eh_globals — the caught-exception LIFO and the uncaught counter — are
- * PER-STRAND thread_local (each strand owns its own in-flight exceptions, like
- * libstdc++). The shared emergency OOM pool is claimed with an atomic test-and-set.
- */
 
 #include "cxxabi_typeinfo.h"
 
@@ -32,13 +22,12 @@ namespace std {
 
 namespace {
 
-// "BOXSC++\0" — vendor(4) + language(4); low byte 0 marks the base class.
 constexpr uint64_t kExceptionClass =
     (uint64_t('B') << 56) | (uint64_t('O') << 48) | (uint64_t('X') << 40) |
     (uint64_t('S') << 32) | (uint64_t('C') << 24) | (uint64_t('+') << 16) |
     (uint64_t('+') << 8);
 
-} // namespace
+}
 
 namespace __cxxabiv1 {
 
@@ -47,13 +36,11 @@ extern "C" void __cxa_free_exception(void *thrown_object) noexcept;
 extern "C" void __cxa_increment_exception_refcount(void *obj) noexcept;
 extern "C" void __cxa_decrement_exception_refcount(void *obj) noexcept;
 
-// Itanium __cxa_exception with the refcount extension; the thrown object
-// immediately follows this header (unwindHeader is last on purpose).
 struct CxaException {
     size_t            referenceCount;
     std::type_info   *exceptionType;
     void            (*exceptionDestructor)(void *);
-    void             *unexpectedHandler;   // legacy slots, kept for layout
+    void             *unexpectedHandler;
     void             *terminateHandler;
     CxaException     *nextException;
     int               handlerCount;
@@ -69,16 +56,9 @@ static_assert(sizeof(_Unwind_Exception) == 32, "unwind header ABI shape");
 
 namespace {
 
-// Per-strand (Itanium __cxa_eh_globals are thread-local). Strands share one
-// cabin under std::thread, so plain globals would let a concurrent throw/catch
-// on a sibling strand corrupt this LIFO (use-after-free / double-free of a
-// foreign in-flight exception) and lose-update the counter. thread_local places
-// them in the per-strand neg-TLS (Ф20b-1); both are zero-init POD (.tbss), so
-// no dynamic init / __cxa_thread_atexit is involved.
 thread_local CxaException *g_caught_stack   = nullptr;
 thread_local int           g_uncaught_count = 0;
 
-// Emergency pool: enough for a bad_alloc cascade when the heap is gone.
 constexpr size_t kEmergencySlotPayload = 256;
 constexpr int    kEmergencySlots       = 8;
 struct EmergencySlot {
@@ -96,7 +76,6 @@ CxaException *FromUnwind(_Unwind_Exception *exc)
 
 bool IsNative(_Unwind_Exception *exc)
 {
-    // Vendor+language match, any low-byte variant.
     return (exc->exception_class & ~0xFFull) == kExceptionClass;
 }
 
@@ -108,9 +87,6 @@ void ExceptionCleanup(_Unwind_Reason_Code, _Unwind_Exception *exc)
     __cxa_free_exception(header + 1);
 }
 
-// A dependent exception (rethrow_exception) reuses the CxaException layout
-// but carries no payload: the referenceCount slot holds the primary object
-// pointer and the low class byte is 0x01.
 constexpr uint64_t kDependentClass = kExceptionClass | 0x01ull;
 
 bool IsDependent(CxaException *h)
@@ -126,7 +102,7 @@ void DependentCleanup(_Unwind_Reason_Code, _Unwind_Exception *exc)
     free(dep);
 }
 
-} // namespace
+}
 
 extern "C" int *__boxcxx_uncaught_count()
 {
@@ -138,9 +114,6 @@ extern "C" void *__cxa_allocate_exception(size_t thrown_size) noexcept
     void *raw = malloc(sizeof(CxaException) + thrown_size);
     if (!raw) {
         if (thrown_size <= kEmergencySlotPayload) {
-            // Shared pool across strands: claim a slot with an atomic
-            // test-and-set so two strands hitting OOM at once cannot grab the
-            // same slot and overlay two exception objects.
             for (auto &slot : g_emergency) {
                 if (!__atomic_exchange_n(&slot.used, true, __ATOMIC_ACQ_REL)) {
                     raw = slot.bytes;
@@ -187,7 +160,6 @@ extern "C" [[noreturn]] void __cxa_throw(void *thrown_object,
     _Unwind_Reason_Code code =
         _Unwind_RaiseException(&header->unwindHeader);
 
-    // Unwinding only comes back on failure.
     printf("[boxcxx] unhandled exception of type %s (unwind code %d)\n",
            tinfo ? tinfo->name() : "?", int(code));
     std::terminate();
@@ -204,14 +176,11 @@ extern "C" void *__cxa_begin_catch(void *unwind_exc) noexcept
     auto *exc = static_cast<_Unwind_Exception *>(unwind_exc);
 
     if (!IsNative(exc)) {
-        // Foreign exception: only catch(...) reaches here; no object
-        // pointer to give and no caught-stack bookkeeping beyond count.
         return nullptr;
     }
 
     CxaException *header = FromUnwind(exc);
 
-    // Negative handlerCount marks a rethrown exception in flight.
     header->handlerCount = header->handlerCount < 0
                                ? -header->handlerCount + 1
                                : header->handlerCount + 1;
@@ -230,7 +199,6 @@ extern "C" void __cxa_end_catch()
     if (!header) boxcxx::Panic("__cxa_end_catch: no active exception");
 
     if (header->handlerCount < 0) {
-        // Rethrown: leave it alive; the rethrow owns the lifetime now.
         if (++header->handlerCount == 0) g_caught_stack = header->nextException;
         return;
     }
@@ -241,9 +209,6 @@ extern "C" void __cxa_end_catch()
             void *primary = reinterpret_cast<void *>(header->referenceCount);
             __cxa_decrement_exception_refcount(primary);
             free(header);
-            // exception_ptr can be shared cross-strand (an async future captures
-            // one on the worker and rethrows on another strand): this decrement
-            // races the atomic exception_ptr ABI ops below, so it must be atomic.
         } else if (__atomic_sub_fetch(&header->referenceCount, 1, __ATOMIC_ACQ_REL) == 0) {
             if (header->exceptionDestructor)
                 header->exceptionDestructor(header + 1);
@@ -252,7 +217,6 @@ extern "C" void __cxa_end_catch()
     }
 }
 
-// ── exception_ptr ABI ([propagation] — refcounted primary + dependent) ──
 
 extern "C" void __cxa_increment_exception_refcount(void *obj) noexcept
 {
@@ -282,18 +246,6 @@ extern "C" void *__cxa_current_primary_exception() noexcept
     return obj;
 }
 
-// P2927R3 std::exception_ptr_cast. Asking "is the exception in this
-// exception_ptr an E?" needed the same machinery the personality routine uses
-// to answer "does this handler catch it?" -- the thrown type_info from the
-// header, and type_info::__do_catch, which is what performs the base-class
-// adjustment. Without it the only way to look inside an exception_ptr was to
-// rethrow it into a try block, which cannot be done from a noexcept function
-// and costs an unwind either way.
-//
-// The header sits immediately before the thrown object, and
-// __cxa_current_primary_exception hands out the OBJECT pointer, so one step
-// back reaches it. Returns the (possibly base-adjusted) object pointer, or
-// null when the handler type would not catch it.
 extern "C" void *__boxcxx_exception_ptr_cast(void *obj, const std::type_info *want) noexcept
 {
     if (!obj || !want) return nullptr;
@@ -307,7 +259,7 @@ extern "C" void *__boxcxx_exception_ptr_cast(void *obj, const std::type_info *wa
 
 extern "C" [[noreturn]] void __cxa_rethrow_primary_exception(void *obj)
 {
-    if (!obj) std::terminate(); // rethrowing a null exception_ptr
+    if (!obj) std::terminate();
 
     CxaException *primary = static_cast<CxaException *>(obj) - 1;
     CxaException *dep =
@@ -316,10 +268,10 @@ extern "C" [[noreturn]] void __cxa_rethrow_primary_exception(void *obj)
         boxcxx::Panic("__cxa_rethrow_primary_exception: out of memory");
 
     __builtin_memset(dep, 0, sizeof(CxaException));
-    dep->referenceCount       = reinterpret_cast<size_t>(obj); // primary obj
+    dep->referenceCount       = reinterpret_cast<size_t>(obj);
     dep->exceptionType        = primary->exceptionType;
     dep->exceptionDestructor  = primary->exceptionDestructor;
-    __cxa_increment_exception_refcount(obj); // the dependent owns a ref
+    __cxa_increment_exception_refcount(obj);
     dep->unwindHeader.exception_class   = kDependentClass;
     dep->unwindHeader.exception_cleanup = DependentCleanup;
 
@@ -338,7 +290,7 @@ extern "C" [[noreturn]] void __cxa_rethrow()
         std::terminate();
     }
 
-    header->handlerCount = -header->handlerCount;   // mark rethrown
+    header->handlerCount = -header->handlerCount;
     g_uncaught_count++;
 
     _Unwind_Reason_Code code =
@@ -348,8 +300,6 @@ extern "C" [[noreturn]] void __cxa_rethrow()
     std::terminate();
 }
 
-// noexcept violations / legacy dynamic-spec mismatches land here via the
-// personality's filter<0 path.
 extern "C" [[noreturn]] void __cxa_call_unexpected(void *unwind_exc)
 {
     auto *exc = static_cast<_Unwind_Exception *>(unwind_exc);
@@ -363,18 +313,6 @@ extern "C" [[noreturn]] void __cxa_call_unexpected(void *unwind_exc)
     std::terminate();
 }
 
-// [except.terminate]: called by compiler-generated cleanup code when a
-// destructor (or other cleanup action), run WHILE UNWINDING for one
-// exception, itself throws a SECOND exception -- that second exception
-// must never propagate further, std::terminate is mandatory. unwind_exc
-// is THIS ESCAPING (second) exception, NOT the one originally being
-// unwound for. Per the Itanium ABI (2.5.3) and libstdc++'s own
-// eh_call.cc, __cxa_begin_catch runs on the escaping exception first --
-// this is what lets a user std::set_terminate handler's
-// std::current_exception() actually find and report it (boxcxx ships
-// both set_terminate and exception_ptr, so this is reachable, not
-// theoretical). Real GCC also guards a null ue_header before
-// dereferencing it; mirrored here.
 extern "C" [[noreturn]] void __cxa_call_terminate(void *unwind_exc)
 {
     auto *exc = static_cast<_Unwind_Exception *>(unwind_exc);
@@ -390,4 +328,4 @@ extern "C" [[noreturn]] void __cxa_call_terminate(void *unwind_exc)
     std::terminate();
 }
 
-} // namespace __cxxabiv1
+}

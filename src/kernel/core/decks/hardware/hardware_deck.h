@@ -6,7 +6,6 @@
 
 #define HARDWARE_DECK_ID DECK_HARDWARE
 
-/* Manifest opcodes (used by hardware_ops.c handlers + boxlib wrappers). */
 #define HW_TIMER_GET_TICKS    0x10
 #define HW_TIMER_GET_MS       0x11
 #define HW_TIMER_GET_FREQ     0x12
@@ -47,33 +46,15 @@
 #define HW_VGA_SCROLL_UP        0x79
 #define HW_VGA_NEWLINE          0x7A
 #define HW_VGA_GET_DIMENSIONS   0x7B
-/* A rectangle of finished cells, laid down in one op. The others say things;
- * this one draws, and the difference is load-bearing — see HwVgaPaint. */
 #define HW_VGA_PAINT            0x7C
-/* Move the cursor by a signed count of cells, resolved against the console's
- * own position — the only party that knows it. See HwVgaStepCursor. */
 #define HW_VGA_STEP_CURSOR      0x7D
 
 #define HW_SYSTEM_REBOOT        0x80
 #define HW_SYSTEM_SHUTDOWN      0x81
 #define HW_DEBUG_PRINT          0x82
 #define HW_LOG_READ             0x83
-/* The account of the run BEFORE this one, carried through a warm reset in a
- * fixed physical window (klib_logring.h). Same wire shape as HW_LOG_READ so
- * one reader in userspace serves both. */
 #define HW_LOG_PREVIOUS         0x84
 
-/*
- * ‼ A RETIRED OPCODE IS NEVER REISSUED.
- *
- * 0x90 was hw.usb.init and 0x93 was hw.usb.stop. Both are withdrawn: the first
- * re-ran the driver's boot and took the machine's USB down with it, the second
- * returned success for doing nothing (hardware_ops.c says what each of them
- * actually did). Their numbers stay spent, so an old caller that still knows
- * them can only ever be told there is no such op — never handed a different
- * one. The Boarding Pass keeps its stamp kinds the same way and for the same
- * reason: a number that meant one thing must not come back meaning another.
- */
 #define HW_USB_RESET            0x91
 #define HW_USB_START            0x92
 #define HW_USB_PORT_STATUS      0x94
@@ -84,20 +65,10 @@
 
 error_t HardwareDeckRegister(void);
 
-/*
- * Prove, on this machine, that asking the hardware deck to put a USB controller
- * back in service does it — and that the two withdrawn opcodes answer to
- * nothing. Runs once, on the first pass through the idle or guide loop with a
- * controller in service and a volume mounted; that is a fact about the machine
- * and not a moment waited for.
- *
- * It costs the machine every USB device it has, once, so it exists only in a
- * build made with USBRECOVER=on. Off, it is not a call at all.
- */
 #if CONFIG_USB_RECOVER_PROOF
 void HardwareDeckUsbRecoverProof(void);
 #else
 static inline void HardwareDeckUsbRecoverProof(void) { }
 #endif
 
-#endif /* HARDWARE_DECK_H */
+#endif

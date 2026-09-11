@@ -1,5 +1,3 @@
-// Baked 80-bit (x, MPFR-CR-ref) vectors for asinh — GENERATED, do not edit.
-// {x mantissa, x se, ref mantissa, ref se}; se = sign<<15 | exp15.
 static const CrVec kAsinhVec[] = {
 {0x8000000000000000ULL,0x3FFDu,0xFD67D91CCF31B747ULL,0x3FFCu},
 {0x8000000000000000ULL,0x3FFEu,0xF661657628B04CA6ULL,0x3FFDu},

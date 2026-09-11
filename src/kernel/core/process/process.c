@@ -10,7 +10,7 @@
 #include "kring.h"
 #include "touch_ring.h"
 #include "vmm.h"
-#include "nameplate.h"   /* nameplate_locate — where this image keeps its names */
+#include "nameplate.h"
 #include "scheduler.h"
 #include "gdt.h"
 #include "tss.h"
@@ -28,12 +28,12 @@
 #include "bay.h"
 #include "brook.h"
 #include "tagfs.h"
-#include "use_context.h"    /* UseContextBindTag — a tag the user's context waited for */
+#include "use_context.h"
 #include "per_core.h"
 #include "amp.h"
-#include "cet_lifecycle.h"  /* Phase 2K+ per-process shadow-stack hooks */
-#include "strand_rings.h"   /* P5a per-strand IPC rings + StrandInfo TLS */
-#include "strand_pool_abi.h" /* Ф20e StrandPool GenState offset + state enum */
+#include "cet_lifecycle.h"
+#include "strand_rings.h"
+#include "strand_pool_abi.h"
 
 typedef struct
 {
@@ -48,20 +48,8 @@ static volatile uint32_t process_count = 0;
 static spinlock_t process_lock;
 static process_cleanup_queue_t g_cleanup_queue;
 
-// Round-robin counter for App Core assignment (multi-core only).
 static volatile uint32_t g_appcore_rr_counter = 0;
 
-/*
- * Tag bit mutation on process tags — these are now cabin-level operations
- * but called from process.c helpers that hold process_lock.
- *
- * process_set_tag_bit / process_clear_tag_bit operate on proc->cabin->tag_bits
- * and proc->cabin->tag_overflow_*.
- *
- * See cabin.c: cabin_set_tag_bit for the matching creation-time path.
- * Lock-free read protocol (overflow_ids) is identical to the old process.c
- * version — atomic store-release on publish, atomic load-acquire by readers.
- */
 static int process_set_tag_bit(process_t *proc, uint16_t tag_id)
 {
     cabin_t *cabin = proc->cabin;
@@ -96,9 +84,6 @@ static int process_set_tag_bit(process_t *proc, uint16_t tag_id)
 
         if (old_ids)
         {
-            /* Retire, do NOT free: process_has_tag_id reads tag_overflow_ids
-             * lock-free on the hot publish path and may still hold this
-             * pointer.  The old buffer is freed in cabin_destroy. */
             TagOverflowRetired *node = kmalloc(sizeof(TagOverflowRetired));
             if (node)
             {
@@ -106,8 +91,6 @@ static int process_set_tag_bit(process_t *proc, uint16_t tag_id)
                 node->next = cabin->tag_overflow_retired;
                 cabin->tag_overflow_retired = node;
             }
-            /* node==NULL (OOM): old_ids leaks until cabin teardown — still
-             * safe (never freed under a concurrent reader). */
         }
     }
 
@@ -136,8 +119,6 @@ static int process_clear_tag_bit(process_t *proc, uint16_t tag_id)
     return -1;
 }
 
-/* Hash table for O(1) process_find(pid). Size sourced from kernel_config.h
- * (CONFIG_PROCESS_HASH_SIZE) — must be a power of two for the mask hash. */
 #define PROCESS_HASH_SIZE CONFIG_PROCESS_HASH_SIZE
 _Static_assert((PROCESS_HASH_SIZE & (PROCESS_HASH_SIZE - 1)) == 0,
                "CONFIG_PROCESS_HASH_SIZE must be a power of two");
@@ -175,21 +156,12 @@ static bool cleanup_queue_enqueue(process_t *proc);
 static process_t *cleanup_queue_dequeue(void);
 static void process_cleanup_immediate(process_t *proc);
 
-/* Live-process high-water mark.  Every live process pins a kernel stack, an
- * FPU buffer and a process_t, so the PEAK — not the total ever created — is
- * what the fixed kernel pool has to survive.  On one core the peak stays
- * near one; it grows with the number of cores that can be inside
- * strand_spawn at the same time, which is exactly the axis along which
- * spawn failures were showing up.  Recorded under process_lock, reported
- * (after the unlock) each time it advances by PEAK_REPORT_STEP. */
 #define PEAK_REPORT_STEP 16u
 static uint32_t g_proc_peak = 0;
 static uint32_t g_proc_peak_reported = 0;
 static uint32_t g_cleanup_peak = 0;
 static uint32_t g_cleanup_peak_reported = 0;
 
-/* Call with process_lock held, right after process_count++.  Returns the new
- * peak when it deserves a line, 0 otherwise. */
 static uint32_t process_note_peak_locked(void)
 {
     if (process_count <= g_proc_peak)
@@ -226,14 +198,6 @@ void process_init(void)
     debug_printf("[PROCESS] Deferred cleanup queue initialized (intrusive, unbounded)\n");
 }
 
-/* ── Shared execution-context construction ───────────────────────────
- *
- * A process_t IS one strand (one execution context).  process_create
- * builds the first strand of a brand-new cabin; strand_spawn builds an
- * additional strand inside an existing cabin.  Everything strand-local —
- * scheduler state, home core, kernel stack, register-frame base, FPU
- * buffer — is identical for both, so it lives in these helpers and the
- * two constructors cannot drift. */
 
 static void process_init_strand_fields(process_t *proc)
 {
@@ -250,9 +214,9 @@ static void process_init_strand_fields(process_t *proc)
     proc->started       = false;
     proc->kcore_pending = 0;
     proc->touch_cleaned = 0;
-    proc->quiesce_core  = QUIESCE_CORE_NONE;   /* never dispatched yet */
+    proc->quiesce_core  = QUIESCE_CORE_NONE;
     proc->quiesce_seq   = 0;
-    proc->on_cpu        = -1;                  /* not dispatched on any core */
+    proc->on_cpu        = -1;
 
     proc->irq_stack_top    = 0;
     proc->irq_rip          = 0;
@@ -280,7 +244,6 @@ static void process_init_strand_fields(process_t *proc)
 
 static void process_assign_home_core(process_t *proc)
 {
-    // Round-robin across App Cores (multi-core) or BSP (single-core).
     if (g_amp.app_count > 0)
     {
         uint32_t rr = atomic_fetch_add_u32(&g_appcore_rr_counter, 1);
@@ -312,10 +275,6 @@ static void process_assign_home_core(process_t *proc)
     }
 }
 
-/* Allocate the per-strand kernel stack: one guard page (unmapped) below
- * CONFIG_KERNEL_STACK_PAGES data pages.  Sets kernel_stack_guard_base /
- * kernel_stack / kernel_stack_top and returns true; on failure leaves
- * nothing allocated and returns false. */
 static bool process_alloc_kernel_stack(process_t *proc)
 {
     size_t kernel_stack_size = CONFIG_KERNEL_STACK_PAGES * VMM_PAGE_SIZE;
@@ -355,20 +314,6 @@ static bool process_alloc_kernel_stack(process_t *proc)
     return true;
 }
 
-/* Free the kernel stack — the ONLY way these pages ever go back to the PMM
- * (error unwind in both constructors, and normal teardown).
- *
- * process_alloc_kernel_stack punches the guard page OUT OF THE PULL MAP by
- * zeroing its leaf PTE, so while the stack is owned, the block's first page
- * has no kernel mapping at all.  The buddy allocator keeps its free list
- * intrusively — buddy_list_insert writes order/next/prev into the first
- * bytes of the freed block, reached through the Pull Map.  So the guard
- * mapping MUST be restored before pmm_free, or the allocator faults on the
- * very block being handed to it (#PF, P=0 W=1, CR2 = PullMap(block)+0x10).
- *
- * If the leaf cannot be restored, the block is deliberately NOT returned:
- * leaking CONFIG_KERNEL_STACK_TOTAL_PAGES beats giving the allocator memory
- * it cannot touch. */
 static void process_free_kernel_stack(process_t *proc)
 {
     if (!proc->kernel_stack_guard_base)
@@ -397,10 +342,6 @@ static void process_free_kernel_stack(process_t *proc)
     debug_printf("[PROCESS] Freed kernel stack: guard=0x%lx (PID %u)\n", guard_virt, proc->pid);
 }
 
-/* Initialise the register-frame base shared by every execution context:
- * CR3 from the cabin, ring-3 selectors, RFLAGS, and a fresh FPU buffer.
- * rip/rsp/rdi are set by the caller.  Returns false (nothing allocated)
- * if the FPU buffer allocation fails. */
 static bool process_init_context_base(process_t *proc)
 {
     memset(&proc->context, 0, sizeof(ProcessContext));
@@ -426,10 +367,6 @@ static bool process_init_context_base(process_t *proc)
     return true;
 }
 
-/* Unmap + free a strand's hammock user stack.  No-op for the main strand
- * (user_stack_phys == 0), whose stack lives at the top of the address
- * space and is reclaimed wholesale by vmm_destroy_context at cabin
- * teardown.  Used by strand_spawn error-unwind and process cleanup. */
 static void process_free_strand_stack(process_t *proc)
 {
     if (!proc || proc->user_stack_phys == 0 || !proc->cabin)
@@ -483,10 +420,6 @@ process_t *process_create(const char *tags)
 
     proc->cabin = cabin;
 
-    /* P5a: the main strand's per-strand ring fields ALIAS the cabin's
-     * fixed-VA rings (kring.c / touch_ring.c route by proc->*_ring_phys).
-     * strandinfo_phys stays 0 → its FS base stays 0 / the C++ TCB, so boxlib
-     * falls back to the fixed cabin ring VAs for the main strand. */
     proc->pocket_ring_phys = cabin->pocket_ring_phys;
     proc->result_ring_phys = cabin->result_ring_phys;
     proc->touch_ring_phys  = cabin->touch_ring_phys;
@@ -624,18 +557,6 @@ void process_set_state(process_t *proc, process_state_t new_state)
     spin_lock(&proc->state_lock);
     process_state_t old_state = proc->state;
 
-    /* Death is terminal. A wake (process_set_state PROC_WORKING) that races a
-     * strand's exit must NOT resurrect a DONE/CRASHED corpse: the WORKING
-     * transition runs sched_enqueue, putting a dead strand back on a runqueue.
-     * From there it is either dispatched with a stale context, or — because
-     * process_destroy's later PROC_CRASHED transition skips sched_dequeue for a
-     * non-WORKING old state — freed while still enqueued, leaving a dangling
-     * runqueue slot that dispatches the freed/recycled process_t. That is the
-     * strandtest UEFI-16c recycle-race (Facet A: stale strand context; Facet B:
-     * the freed kernel stack reused as an iret frame). The 13 wake sites
-     * (touch/kring/sync_ops/touch_ring) are best-effort and already tolerate a
-     * target that has gone away, so refusing the wake here is the correct
-     * no-op — there is no live strand left to run. */
     if (new_state == PROC_WORKING &&
         (old_state == PROC_DONE || old_state == PROC_CRASHED))
     {
@@ -643,18 +564,6 @@ void process_set_state(process_t *proc, process_state_t new_state)
         return;
     }
 
-    /* Sleep is refused while an answer is already on the table. Every
-     * kernel park (addr_park, touch_await, storage) ends exactly when its
-     * token-stamped reply is consumed — so committing PROC_WAITING with
-     * such a reply published-and-unread is the lost-wake wedge itself
-     * (Nightwatch: "undelivered result ... a defect, not a slow test").
-     * Racing wakers take state_lock through process_set_state too, so
-     * under this lock the ring scan and the commit are one atom: either
-     * the completion landed first and we refuse the sleep, or we sleep
-     * first and the completion's unconditional PROC_WORKING flip (kring
-     * step 9) lands after — no interleaving loses the wake. The refusal
-     * degrades to exactly the contract every parked op already honours:
-     * return runnable, let the caller's result_wait consume the reply. */
     if (new_state == PROC_WAITING && KResultRingHasPendingReply(proc))
     {
         new_state = PROC_WORKING;
@@ -769,12 +678,6 @@ void process_destroy(process_t *proc)
 
     process_set_state(proc, PROC_CRASHED);
 
-    /* Referenced-nowhere invariant: guarantee no runqueue still points at this
-     * strand before anything frees it. The PROC_CRASHED transition above only
-     * dequeues from home_core when the old state was WORKING; a corpse reaped
-     * after exit (old state DONE) is not covered, nor is a strand enqueued off
-     * its home core. Sweeping every core closes the dangling-slot window that
-     * would otherwise dispatch the freed struct (the recycle-race). */
     sched_dequeue_all_cores(proc);
 
     uint32_t cancelled = async_io_cancel_by_pid(proc->pid);
@@ -786,19 +689,9 @@ void process_destroy(process_t *proc)
 
     ManifestReleaseAllForOwner(proc->pid);
 
-    /* The shared IPC ring MemTags are cleared in cabin_destroy (last
-     * strand), not here: a non-last strand's exit must not strip tags
-     * from rings its siblings still use. */
 
-    /* Genuine-fault / kernel-forced teardown. When this is the FIRST cleanup
-     * (a real crash) it publishes process:died with PROC_EXIT_CRASHED; when a
-     * SysProcKill already cleaned this strand (kill or self-exit), the call
-     * no-ops on touch_cleaned and that earlier disposition stands. */
     TouchCleanupProcess(proc, PROC_EXIT_CRASHED);
 
-    /* strand:exited — pairs with strand:spawned.  Fires on every strand
-     * exit (main or spawned).  Cabin teardown itself happens later, when
-     * the last strand's cabin_ref_dec reaches zero. */
     {
         struct __attribute__((packed)) { uint32_t pid; uint32_t cabin_pid; } ev;
         ev.pid       = proc->pid;
@@ -806,20 +699,6 @@ void process_destroy(process_t *proc)
         TouchPublish("strand:exited", &ev, sizeof(ev));
     }
 
-    /* Ф20e — crash-orphan stamp. If this strand bound a StrandPool slot and died
-     * WITHOUT an orderly flush, the slot's GenState is still (bound_gen<<8|LIVE):
-     * the CAS succeeds and marks it ORPHANED so a surviving strand reclaims the
-     * cached blocks back to the global heap. An orderly exit (strand_pool_flush_
-     * self) bumped the generation first, so the expected word no longer matches
-     * and the CAS is a harmless no-op. One atomic, no lock, no allocation.
-     *
-     * We re-resolve the bound VA fresh from the live cabin page tables here
-     * instead of trusting a stored phys: if the pool's page were unmapped or
-     * recycled between bind and death, a stored phys could point at a page now
-     * owned by ANOTHER cabin and we would corrupt it. vmm_virt_to_phys walks the
-     * cabin's own tables (no active-CR3 requirement, valid from the reaper
-     * K-Core), and a 0 result — last-strand/cabin teardown already tore the
-     * mapping down — simply skips the stamp, which is harmless. */
     _Static_assert(__builtin_offsetof(StrandPool, GenState) == 116,
                    "kernel StrandPool GenState offset");
     if (proc->strand_pool_va && proc->cabin) {
@@ -842,21 +721,11 @@ void process_destroy(process_t *proc)
         }
     }
 
-    BayCleanupProcess(proc);
-
     BrookCleanupProcess(proc);
 
     cet_process_destroy(proc);
     cet_process_destroy_kernel_ssp(proc);
 
-    /* Unlink the embedded addr_wait_entry BEFORE the final ref_dec. Otherwise a
-     * concurrent SysAddrWake on a hash-colliding physical address could still
-     * find this entry, process_ref_inc the corpse (0->1) and process_ref_dec
-     * (1->0), and re-enqueue an already-cleanup-bound process_t — a double
-     * cleanup / double free that corrupts the cleanup queue and cabin refcount.
-     * Removing the waiter here makes it unreachable before the refcount can
-     * reach 0. (process_cleanup_immediate keeps an idempotent unlink as a
-     * belt-and-suspenders; AddrWaitUnlinkIfLinked is safe to call twice.) */
     AddrWaitUnlinkIfLinked(&proc->addr_wait_entry);
 
     proc->magic = CONFIG_PROCESS_POISON_MAGIC;
@@ -893,26 +762,6 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     void *code_virt = vmm_phys_to_virt((uintptr_t)code_phys);
     memcpy(code_virt, binary_data, size);
 
-    /*
-     * ‼ THE LAST PLACE THAT CAN TELL A PROGRAM FROM A PAGE OF ZEROS
-     *
-     * Every caller is supposed to have read the whole image before getting
-     * here, and each of them now checks. This is the check that does not
-     * depend on any of them being right, because the cost of being wrong is
-     * paid in a way that looks like something else entirely:
-     *
-     *   0x00 0x00  is  add [rax], al
-     *
-     * so a process handed an image of zeros does not fail to start. It starts,
-     * executes the zeros, writes to whatever address RAX holds — which at
-     * entry is zero — and dies with a user-mode page fault at 0x0 with every
-     * register clear. That fault names the process, not the medium that would
-     * not read, and says nothing at all about why.
-     *
-     * A real image begins with something: 0x7F 'E' 'L' 'F', or the first
-     * instruction of a flat binary. Sixteen zero bytes at the front is not a
-     * program under any of those.
-     */
     {
         const uint8_t *head = (const uint8_t *)code_virt;
         size_t look = size < 16 ? size : 16;
@@ -941,11 +790,6 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
         return -1;
     }
 
-    /* Where this image keeps the names of its own functions, so a fault dump
-     * can print them instead of a column of hex. Read here and nowhere else:
-     * this is the one moment the WHOLE file is in kernel memory — for an ELF
-     * the pages below are handed straight back, and after that only the
-     * mapped segments exist. Costs nothing when the image has no table. */
     proc->nameplate_va    = 0;
     proc->nameplate_bytes = 0;
     (void)nameplate_locate(code_virt, size, VMM_CABIN_CODE_START,
@@ -1024,8 +868,6 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     ci->heap_max_size = CABIN_HEAP_MAX_SIZE;
     ci->buf_heap_base = proc->cabin->aslr_buf_heap_base;
     ci->stack_top   = stack_top;
-    /* No luggage until the spawner hands some over (system.proc.exec does,
-     * after this load and before the first dispatch); autostart never does. */
     ci->luggage_addr     = 0;
     ci->luggage_length   = 0;
     ci->luggage_reserved = 0;
@@ -1044,23 +886,6 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     return 0;
 }
 
-/*
- * strand_spawn — create an ADDITIONAL execution context (strand) inside an
- * EXISTING cabin.  Unlike process_create (which builds a fresh cabin and
- * loads a binary), the strand shares the cabin's address space (CR3), IPC
- * rings, tags, code and heap.  Strand-local state is fresh: its own pid,
- * kernel stack, register frame, user stack + CET shadow stack (carved from
- * the cabin's hammock window), and scheduler state.
- *
- * The strand begins executing at entry_va with `arg` in rdi and its own
- * stack top in rsp.  It is enqueued immediately; the first scheduler
- * dispatch builds the iretq frame from proc->context (same path every
- * non-initial process uses).  cabin->strand_count is incremented so the
- * cabin outlives the spawning strand; the cabin is destroyed only when its
- * last strand exits (cabin_ref_dec → 0).
- *
- * Returns the new strand, or NULL on any failure (fully unwound).
- */
 process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool joinable)
 {
     if (!cabin || !cabin->vmm)
@@ -1073,13 +898,6 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
         debug_printf("[STRAND] ERROR: invalid entry VA 0x%lx\n", (unsigned long)entry_va);
         return NULL;
     }
-    /* P5a: spawned strands REQUIRE FSGSBASE. Per-strand TLS detection reads
-     * the FS base from ring 3 via RDFSBASE (an MSR-programmed FS base is not
-     * readable in ring 3), so a strand could not locate its own StrandInfo /
-     * rings without it. Refuse to spawn rather than hand back a strand that
-     * would route IPC through the cabin's shared rings. Real hardware always
-     * has FSGSBASE; both the STRICT matrix and `make run` enable it — only the
-     * bare qemu64 TCG model lacks it. */
     if (!g_fsgsbase_active)
     {
         debug_printf("[STRAND] ERROR: strand_spawn requires FSGSBASE (per-strand TLS)\n");
@@ -1099,26 +917,17 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
     proc->magic    = PROCESS_MAGIC;
     proc->rq_prio  = -1;
     proc->rq_index = -1;
-    /* Zombie-until-join: a joinable strand (std::thread) must not be reaped on
-     * exit until join()/detach() releases it, so its pid (== thread::id) stays
-     * unique while the std::thread is joinable. Raw workers spawn joinable=0. */
     proc->reap_blocked = joinable ? 1u : 0u;
 
     proc->pid = pid_alloc();
     if (proc->pid == PID_INVALID)
     {
-        /* Resource exhaustion at runtime, not an API misuse: say it on the
-         * record. A debug_printf here compiles to NOTHING in release and a
-         * silent refusal reads as a ghost at the caller. */
         kprintf("[STRAND] ERROR: PID allocation failed (exhaustion)\n");
         kfree(proc);
         return NULL;
     }
     proc->generation = pid_generation(proc->pid);
 
-    /* Share the existing cabin — strand_count++ keeps it alive until this
-     * strand (and every sibling) exits.  From here on, every failure path
-     * must cabin_ref_dec. */
     proc->cabin = cabin;
     cabin_ref_inc(cabin);
 
@@ -1144,10 +953,6 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
         return NULL;
     }
 
-    /* Carve one hammock slot for this strand's user stack + CET SSP.  The
-     * cursor is bump-allocated under hammock_lock so concurrent spawns from
-     * sibling strands never hand out the same VA (P2 made the VMM safe for
-     * intra-cabin concurrency). */
     spin_lock(&cabin->hammock_lock);
     uint64_t slot_base = cabin->hammock_va_next;
     bool hammock_ok = (slot_base + CABIN_HAMMOCK_SLOT_SIZE) <= CABIN_HAMMOCK_END;
@@ -1187,9 +992,6 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
         return NULL;
     }
 
-    /* Map the stack into the SHARED cabin address space.  Same flags as the
-     * main strand's user stack (process_load_binary): user RW, no NX (the
-     * main stack is mapped executable too — keep strands consistent). */
     vmm_map_result_t smap = vmm_map_pages(
         cabin->vmm, stack_data_base, (uintptr_t)ustack_phys,
         CONFIG_USER_STACK_PAGES,
@@ -1208,32 +1010,13 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
     }
     proc->user_stack_phys = (uintptr_t)ustack_phys;
 
-    /* Register frame: shared CR3 (already set by process_init_context_base),
-     * the strand's entry point, its own stack, and the user argument in rdi
-     * (System V first integer argument).
-     *
-     * Stack alignment: the x86-64 System V ABI requires (RSP + 8) % 16 == 0
-     * at a function's entry — a normal CALL pushes an 8-byte return address
-     * onto a 16-aligned stack, so the callee sees RSP ≡ 8 (mod 16).  The
-     * strand enters its C entry function via iretq with NO pushed return
-     * address, so bias the 16-aligned stack top down by 8 to reproduce that
-     * alignment.  Without it, the entry's first 16-byte SSE access (movaps /
-     * movdqa on a spilled local — e.g. inside the IPC result path) #GPs. */
     proc->context.rip = entry_va;
     proc->context.rsp = stack_top - 8;
     proc->context.rdi = arg;
 
-    /* Per-strand CET shadow stacks.  cet_process_create maps the user SSP at
-     * THIS strand's hammock SSP VA (process_user_ssp_va_for derives it from
-     * hammock_base, so sibling strands never collide).  Both are dormant on
-     * TCG; this is real-HW correctness. */
     (void)cet_process_create(proc);
     (void)cet_process_create_kernel_ssp(proc, entry_va);
 
-    /* P5a: carve this strand's OWN Pocket/Result/Touch rings + StrandInfo TLS
-     * from its Hammock slot and point its FS base at the StrandInfo. Without
-     * this the strand would route IPC through the cabin's shared rings (the
-     * P4 data race). On failure, unwind everything allocated so far. */
     if (!strand_rings_create(proc))
     {
         kprintf("[STRAND] ERROR: per-strand rings/TLS setup failed (PID %u)\n", proc->pid);
@@ -1288,9 +1071,6 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
                  proc->pid, (unsigned long)entry_va, (unsigned long)stack_top,
                  (unsigned long)arg, proc->home_core);
 
-    /* strand:spawned lifecycle event — pairs with strand:exited in
-     * process_destroy.  Observers (e.g. a thread monitor) get the strand's
-     * pid and the cabin's primary pid. */
     {
         struct __attribute__((packed)) { uint32_t pid; uint32_t cabin_pid; } ev;
         ev.pid       = proc->pid;
@@ -1298,9 +1078,6 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
         TouchPublish("strand:spawned", &ev, sizeof(ev));
     }
 
-    /* Enqueue.  PROC_CREATED → PROC_WORKING triggers sched_enqueue; the
-     * first dispatch on the home core restores proc->context into the iretq
-     * frame and returns to entry_va in ring 3. */
     process_set_state(proc, PROC_WORKING);
 
     return proc;
@@ -1525,7 +1302,7 @@ void process_test(void)
     kprintf("====================================\n");
     kprintf("\n");
 }
-#endif // CONFIG_KERNEL_TESTS
+#endif
 
 bool process_has_tag_id(process_t *proc, uint16_t tag_id)
 {
@@ -1534,13 +1311,6 @@ bool process_has_tag_id(process_t *proc, uint16_t tag_id)
     if (tag_id < 64)
         return (__atomic_load_n(&proc->cabin->tag_bits, __ATOMIC_ACQUIRE)
                 & ((uint64_t)1 << tag_id)) != 0;
-    /* Overflow (tag_id >= 64), read lock-free.  Load the count BEFORE the
-     * array pointer: a concurrent grow stores the new pointer, then writes
-     * the new id and increments the count, so count-first guarantees
-     * count <= the valid-entry count of whichever pointer we then load
-     * (old or new) — we never combine an old buffer with a new count and
-     * read out of bounds.  Old buffers are retired (not freed), so the
-     * pointer always references live memory. */
     uint16_t  n   = __atomic_load_n(&proc->cabin->tag_overflow_count, __ATOMIC_ACQUIRE);
     uint16_t *ids = __atomic_load_n(&proc->cabin->tag_overflow_ids,   __ATOMIC_ACQUIRE);
     for (uint16_t i = 0; ids && i < n; i++)
@@ -1556,7 +1326,6 @@ uint64_t *process_active_memtags(process_t *proc)
     return (proc && proc->cabin) ? proc->cabin->active_memtags : NULL;
 }
 
-/* ─── Phase 2K+ CET SSP accessors ────────────────────────────────── */
 
 #define PROCESS_USER_SSP_REGION_SIZE       (4u * 4096u)
 #define PROCESS_USER_SSP_STACK_SLACK       (8ULL * 1024ULL * 1024ULL)
@@ -1567,19 +1336,7 @@ uint64_t *process_active_memtags(process_t *proc)
 #define PROCESS_USER_SSP_GUARD_HI_BASE     PROCESS_USER_SSP_REGION_TOP
 #define PROCESS_USER_SSP_GUARD_LO_BASE     (PROCESS_USER_SSP_REGION_BASE - 0x1000ULL)
 
-/* Base VA of a strand's CET user shadow-stack region.
- *
- * The main strand (hammock_base == 0) uses the fixed region 8 MiB below
- * VMM_USER_STACK_TOP, exactly as before.  A strand spawned via
- * strand_spawn (hammock_base != 0) uses the SSP slice of its own hammock
- * slot — see the slot map in cabin_layout.h: [low guard][stack 16pg]
- * [mid guard][SSP 4pg][high guard].  Deriving from hammock_base is what
- * keeps sibling strands' shadow stacks from colliding in the shared
- * address space (CET dormant on TCG, so this is real-HW correctness). */
 #define PROCESS_USER_SSP_GUARD_PAGE        0x1000ULL
-/* The hammock slot must hold: low guard + user stack + mid guard +
- * 4-page CET SSP + high guard.  If the stack size grows past the slot,
- * fail the build rather than silently overlap the next strand's slot. */
 _Static_assert(CABIN_HAMMOCK_STACK_PAGE_OFF + CONFIG_USER_STACK_PAGES + 1u + 4u + 1u
                    <= CABIN_HAMMOCK_SLOT_PAGES,
                "hammock slot too small for [guard|stack|guard|SSP(4pg)|guard]");
@@ -1634,9 +1391,6 @@ void process_set_user_ssp(process_t *proc, uintptr_t phys, uintptr_t va, uint32_
     proc->user_ssp_size = size;
 }
 
-/* MemTag Phase 2C accessor — exposes the cabin's vmm_context_t* so memtag.c
- * can locate it for PTE manipulation without pulling process.h into its
- * public headers (avoids circular dep). NULL-safe. */
 void *process_get_cabin(process_t *proc)
 {
     return (proc && proc->cabin) ? (void *)proc->cabin->vmm : NULL;
@@ -1684,47 +1438,12 @@ int process_add_tag(process_t *proc, const char *tag)
     char key[256], value[256];
     tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
 
-    /* Is there a volume? A tag id is the volume's to issue, and this used to
-     * be asked by looking at its registry pointer — the one thing a re-mount
-     * gives back to the allocator. The flag beside it says the same thing and
-     * is not a pointer. */
     TagFSState *fs = tagfs_get_state();
     if (!fs || !fs->initialized)
     {
-        /*
-         * No volume, so no membership — a tag id is the volume's to issue and
-         * there is nowhere to record one. But AUTHORITY is not the volume's to
-         * grant, and refusing it here is what left a machine unable to use its
-         * own shell.
-         *
-         * The auth bit for a bare privilege key is FIXED by the key string
-         * (auth_tags.h), has never depended on a registry id, and names one of
-         * the seven keys the kernel declares for itself in tagfs_reserved.h.
-         * They are the machine's constitution, not somebody's data.
-         *
-         * What the old refusal cost, measured end to end: on a diskless boot
-         * every process came up with auth_bits == 0, so auth_level_permits()
-         * denied every OP_AUTH_APP op there is — broadcast, touch.intern,
-         * touch.claim, all of storage. The fallback shell still printed its
-         * banner, because writing the text buffer is a store and not an op,
-         * and then could not read one keystroke, because claiming the keyboard
-         * IS an op. Typing "help" into that machine does nothing at all; the
-         * same keystrokes on a mounted one run the command. That is the second
-         * reason a live board with a working keyboard could not be typed on,
-         * and it is not a USB problem either.
-         *
-         * No new way in: userspace reaches tags through SysTagAdd, which still
-         * requires authority over the target AND that the grant not exceed the
-         * caller's own. This path is the kernel deciding what it gives its own
-         * processes, which is what it was always for.
-         *
-         * Membership is not backfilled when a volume turns up later. The cabin
-         * carries the authority and not the tag id, so anything ADDRESSED to
-         * the tag will not reach it until the process is retagged.
-         */
         uint32_t bit = value[0] ? 0u : auth_bit_for_key(key);
         if (bit == 0)
-            return -1;          /* an ordinary tag genuinely has nowhere to go */
+            return -1;
         __atomic_or_fetch(&proc->cabin->auth_bits, bit, __ATOMIC_RELAXED);
         return 0;
     }
@@ -1738,16 +1457,9 @@ int process_add_tag(process_t *proc, const char *tag)
         return -1;
     }
 
-    /* The user's context may name this tag without yet having a number for
-     * it; this is the number, so a strand tagged after `use` still lands in
-     * the context tier. */
     UseContextBindTag(tag, tid);
 
     int ret = process_set_tag_bit(proc, tid);
-    /* Mirror the fixed auth bit for a bare auth key (no-op for any other key),
-     * but only once membership actually took — keeps auth_bits ⟺ membership exact
-     * even on the (prod-unreachable) id>=64 overflow-alloc failure path.
-     * RELAXED, matching tag_bits; serialized by process_lock. */
     if (ret == 0 && !value[0])
         __atomic_or_fetch(&proc->cabin->auth_bits, auth_bit_for_key(key), __ATOMIC_RELAXED);
     spin_unlock(&process_lock);
@@ -1759,8 +1471,6 @@ int process_remove_tag(process_t *proc, const char *tag)
     if (!proc || !proc->cabin || !tag || tag[0] == '\0')
         return -1;
 
-    /* No volume, no membership to take away — and the answer is the refusal it
-     * has always been rather than "nothing to do", which reads as success. */
     TagFSState *fs = tagfs_get_state();
     if (!fs || !fs->initialized)
         return -1;
@@ -1774,8 +1484,6 @@ int process_remove_tag(process_t *proc, const char *tag)
 
     spin_lock(&process_lock);
     int ret = process_clear_tag_bit(proc, tid);
-    /* Drop the fixed auth bit when the bare auth key is removed (no-op
-     * otherwise). RELAXED, matching tag_bits; serialized by process_lock. */
     if (!value[0])
         __atomic_and_fetch(&proc->cabin->auth_bits, ~auth_bit_for_key(key), __ATOMIC_RELAXED);
     spin_unlock(&process_lock);
@@ -1844,20 +1552,12 @@ void process_start_initial(process_t *proc)
         asm volatile("cli; hlt");
 }
 
-/*
- * One tag, appended to a comma-separated list. False when it would not fit,
- * which ends the list.
- *
- * The two loops below used to carry a copy of this each, forty lines apart and
- * identical, and both of them wrote the separator BEFORE finding out whether
- * what follows it fits — so a list that ran out of room ended in a comma.
- */
 static bool snapshot_append_tag(char *buffer, size_t buffer_size, size_t *pos,
                                 bool *first, uint16_t tag_id)
 {
     char text[512];
     if (!tagfs_tag_text(tag_id, text, sizeof(text)))
-        return true;                /* this volume has no such tag — skip it */
+        return true;
 
     size_t len  = strlen(text);
     size_t need = len + (*first ? 0u : 1u);
@@ -1908,12 +1608,6 @@ static bool cleanup_queue_enqueue(process_t *proc)
     if (!proc)
         return false;
 
-    /* One-shot guard: a process_t must enter the cleanup queue at most once.
-     * The queue threads through the single proc->cleanup_next field, so a
-     * second enqueue of the same node would corrupt the list and drive a double
-     * process_cleanup_immediate (double kfree + double cabin_ref_dec). Win the
-     * 0->1 CAS to enqueue; a loser returns true ("already handled") so the
-     * caller does NOT fall back to process_cleanup_immediate. */
     uint32_t expected = 0;
     if (!__atomic_compare_exchange_n(&proc->cleanup_enqueued, &expected, 1u,
                                      false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
@@ -1931,11 +1625,6 @@ static bool cleanup_queue_enqueue(process_t *proc)
         g_cleanup_queue.head = proc;
     g_cleanup_queue.tail = proc;
     g_cleanup_queue.count++;
-    /* Depth matters as much as process_count: process_destroy decrements
-     * process_count while the kernel stack and FPU buffer are still held,
-     * and only this queue's drain releases them.  Live memory is therefore
-     * process_count PLUS this depth — a lagging drain is invisible in the
-     * process count alone. */
     uint32_t depth = g_cleanup_queue.count;
     bool report = (depth > g_cleanup_peak &&
                    depth >= g_cleanup_peak_reported + PEAK_REPORT_STEP);
@@ -1979,31 +1668,14 @@ static void process_cleanup_immediate(process_t *proc)
 
     process_free_kernel_stack(proc);
 
-    /* Last sweep of the Touch Owed queue. TouchCleanupProcess emptied it at
-     * death, but a publisher still holding a proc ref could have appended
-     * after that; here the ref count is zero, so whatever is left is ours.
-     * It runs BEFORE the rings go: the sweep clears the ring's slip, and for
-     * a main strand that ring page is the cabin's, freed by the cabin_ref_dec
-     * below. */
     TouchOwedRelease(proc);
 
-    /* Reclaim this strand's per-strand IPC rings + StrandInfo and its hammock
-     * user stack (both no-ops for the main strand) while the cabin's address
-     * space is still alive — must precede cabin_ref_dec, which may tear the
-     * cabin down. The strand's CET shadow stacks were already unmapped in
-     * process_destroy via cet_process_destroy{,_kernel_ssp}. */
     strand_rings_destroy(proc);
     process_free_strand_stack(proc);
 
-    /* Drop the strand's reference to its cabin.  strand_count goes N→N-1;
-     * when it reaches 0 (last strand of the cabin), cabin_ref_dec triggers
-     * cabin_destroy (ring MemTag clear + VMM teardown + tag_overflow free). */
     cabin_ref_dec(proc->cabin);
     proc->cabin = NULL;
 
-    /* Unlink the embedded addr-wait entry if still in a bucket — a strand
-     * destroyed while parked must not leave a dangling pointer behind.
-     * Takes only the per-bucket spinlock (leaf lock; no other locks held). */
     AddrWaitUnlinkIfLinked(&proc->addr_wait_entry);
 
     pid_free(proc->pid);
@@ -2012,13 +1684,6 @@ static void process_cleanup_immediate(process_t *proc)
     kfree(proc);
 }
 
-/* Shutdown-only: forcibly reclaim the process-subsystem locks after every AP
- * core is confirmed halted. If an AP was stopped (IPI_PANIC → cli;hlt) while
- * holding process_lock — e.g. mid strand-reaper snapshot or process_destroy —
- * it will never release it, and the BSP's shutdown walk (halt_terminate_all_
- * processes → process_list_lock) would spin forever. system_halt calls this
- * AFTER halt_all_ap_cores, where no other core is alive to touch a lock, so
- * stealing them is safe. MUST NOT be called during normal operation. */
 void process_force_release_locks_for_shutdown(void)
 {
     spin_force_release(&process_lock);
@@ -2042,19 +1707,6 @@ void process_cleanup_deferred(void)
         debug_printf("[PROCESS] Deferred cleanup: freed %u processes\n", cleaned);
 }
 
-/* True while some core may still be executing on `proc`'s kernel stack, so the
- * reaper must not tear it down yet. Two cases:
- *   (1) proc is still current_process on a core (not yet switched out);
- *   (2) it WAS switched out, but the core that last ran it (quiesce_core) has
- *       not dispatched again since — i.e. it is still in the post-(current_
- *       process=next) iretq epilogue, executing on proc's kernel stack.
- * The scheduler runs every ISR/syscall/fault on the running strand's OWN kernel
- * stack (TSS.RSP0), and a switch only finishes at the iretq AFTER current_process
- * has already moved on — so without this gate the reaper could free a kernel
- * stack a core is mid-epilogue on (corrupting the iret frame → SMEP #PF). Loading
- * current_process with ACQUIRE orders schedule()'s RELEASE eviction stamp, so a
- * not-current observation always sees the matching (quiesce_core, quiesce_seq).
- * QUIESCE_CORE_NONE ⇒ never dispatched ⇒ no stack in use. */
 static bool strand_stack_in_use(process_t *proc)
 {
     for (uint8_t c = 0; c < g_amp.total_cores; c++)
@@ -2066,18 +1718,13 @@ static bool strand_stack_in_use(process_t *proc)
 
     uint8_t qc = proc->quiesce_core;
     if (qc == QUIESCE_CORE_NONE)
-        return false;                  /* never ran — no core can be on its stack */
+        return false;
     scheduler_state_t *qs = scheduler_get_core(qc);
     if (!qs)
         return false;
-    /* Not quiescent until quiesce_core has scheduled again past the stamp. */
     return __atomic_load_n(&qs->quiesce_seq, __ATOMIC_ACQUIRE) <= proc->quiesce_seq;
 }
 
-/* P5b strand reaper — single-reaper-at-a-time guard. A plain test-and-set:
- * the first K-Core to claim it does the scan + destroys; others skip this
- * tick. This serialises process_destroy across cores so two of them never
- * unlink the same zombie (which would corrupt the global list). */
 static volatile uint8_t g_strand_reaping = 0;
 
 void process_reap_strands(void)
@@ -2085,20 +1732,6 @@ void process_reap_strands(void)
     if (__atomic_exchange_n(&g_strand_reaping, 1, __ATOMIC_ACQUIRE) != 0)
         return;
 
-    /* Snapshot a bounded batch of reapable strand corpses UNDER the list lock,
-     * then destroy them after releasing it (process_destroy takes process_lock
-     * itself, so it must not be called while we hold it).
-     *
-     * Pin each snapshotted corpse with a reference while it sits in the batch:
-     * process_destroy's final process_ref_dec then drops the birth ref to 1
-     * (not 0 — no free yet), and OUR process_ref_dec below drops it to 0,
-     * enqueueing the real teardown. Holding the ref makes the batch pointer
-     * self-defending — it cannot be freed between snapshot and destroy
-     * regardless of any other process_destroy caller — so the reaper does not
-     * have to rely on the (currently true but fragile) "only the reaper
-     * destroys a listed strand at runtime" invariant. On the bail path
-     * (process_destroy declines a still-current corpse) the ref_dec returns it
-     * to 1 and it is retried next tick. */
     process_t *batch[CONFIG_STRAND_REAP_BATCH];
     uint32_t n = 0;
 
@@ -2107,47 +1740,14 @@ void process_reap_strands(void)
          p && n < CONFIG_STRAND_REAP_BATCH;
          p = p->next)
     {
-        if (p->magic != PROCESS_MAGIC) continue;   /* listed ⇒ always live magic */
-        /* Reap exited full processes (main strand, hammock_base == 0) as well as
-         * spawned strands — every process is a strand of its cabin.  The main
-         * strand was previously skipped here, leaking its slot/pid/cabin-VMM
-         * forever once it exited (nothing else calls process_destroy on it at
-         * runtime).  Safe: the teardown chain already no-ops the strand-only
-         * steps for hammock_base == 0 (strand_rings_destroy / free_strand_stack)
-         * and cabin_ref_dec frees the cabin only as the LAST strand; and pid
-         * recycling is harmless — no caller addresses a process by a held pid
-         * past its death (SYS_PROC_KILL is self-only; death is observed via the
-         * process:died / strand:exited Touch events, never collected by pid). */
-        /* destroying is written __ATOMIC_SEQ_CST in process_destroy; read it
-         * the same way (not a plain access) — a hint either way, since
-         * process_destroy re-checks "current on a core" authoritatively under
-         * the scheduler scan and bails (we retry next tick). */
+        if (p->magic != PROCESS_MAGIC) continue;
         if (__atomic_load_n(&p->destroying, __ATOMIC_ACQUIRE)) continue;
-        /* Zombie-until-join: a joinable std::thread strand (reap_blocked=1) is
-         * NOT reclaimed even after it exits — its pid (== thread::id) must stay
-         * reserved while the std::thread is still joinable, or a recycled pid
-         * would collide with the live id. join()/detach() clears the flag via
-         * SYSTEM_OP_STRAND_RELEASE, after which the next tick reaps it. Raw
-         * strand_spawn workers (reap_blocked=0) keep the eager-reap behavior. */
         if (__atomic_load_n(&p->reap_blocked, __ATOMIC_ACQUIRE)) continue;
         process_state_t st = __atomic_load_n(&p->state, __ATOMIC_ACQUIRE);
         if (st == PROC_DONE || st == PROC_CRASHED)
         {
-            /* Reap-vs-switch: skip a corpse whose kernel stack a core may still
-             * be executing on (current somewhere, or its last core not yet
-             * dispatched past the eviction). Retried next tick once quiescent —
-             * monotonic, so once safe it stays safe. */
             if (strand_stack_in_use(p))
                 continue;
-            /* Referenced-nowhere: never free a strand still linked into a
-             * runqueue — its slot would dangle and later dispatch the freed/
-             * recycled process_t. A corpse should never BE enqueued
-             * (process_set_state refuses to resurrect a dead strand, and the
-             * schedule() re-enqueue re-checks WORKING under the runqueue lock),
-             * so this is a defense-in-depth assertion of the invariant; if it
-             * ever holds we just retry next tick. rq_prio/rq_index are -1
-             * exactly when not enqueued (maintained under each runqueue lock; an
-             * aligned scalar read is a safe conservative hint either way). */
             if (p->rq_prio >= 0 || p->rq_index >= 0)
                 continue;
             process_ref_inc(p);
@@ -2158,8 +1758,8 @@ void process_reap_strands(void)
 
     for (uint32_t i = 0; i < n; i++)
     {
-        process_destroy(batch[i]);   /* unlink + hooks + ref_dec (→1 under our pin) */
-        process_ref_dec(batch[i]);   /* release pin → 0 triggers cleanup-queue teardown */
+        process_destroy(batch[i]);
+        process_ref_dec(batch[i]);
     }
 
     __atomic_store_n(&g_strand_reaping, 0, __ATOMIC_RELEASE);

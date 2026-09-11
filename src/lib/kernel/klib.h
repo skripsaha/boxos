@@ -14,28 +14,16 @@ extern uintptr_t _kernel_start;
 #define ALIGN_UP(addr, align) (((addr) + (align) - 1) & ~((align) - 1))
 #define ALIGN_DOWN(addr, align) ((addr) & ~((align) - 1))
 
-/* Kernel-heap sizing.
- *   TARGET   = KLIB_HEAP_RAM_PERCENT% of total RAM
- *   FLOOR    = KLIB_HEAP_MIN_SIZE
- *   CEILING  = max(KLIB_HEAP_MAX_SIZE, total_ram / KLIB_HEAP_RAM_CAP_DIVISOR)
- * The dynamic ceiling lifts the legacy fixed 16 MB cap on machines with
- * > ~1 GB RAM — at the divisor below this is ≈1.56 % of physical RAM. */
 #define KLIB_HEAP_MIN_SIZE          (2 * 1024 * 1024)
 #define KLIB_HEAP_MAX_SIZE          (16 * 1024 * 1024)
 #define KLIB_HEAP_RAM_PERCENT       3
 #define KLIB_HEAP_RAM_CAP_DIVISOR   64
 
-/* The MBR + Stage2 path only identity-maps the first 128 MB until the VMM's
- * Pull Map is activated. The pool is allocated whole at boot, but only this
- * much of it is PUBLISHED until mem_activate_pull_map hands over the tail —
- * see mem_init. Anything larger would be untouchable while the window is all
- * the addressing there is. */
 #define KLIB_HEAP_BOOTLOADER_SAFE_SIZE  (2 * 1024 * 1024)
 
-// 32 bytes: mem_block_t is 20 bytes; 16-byte alignment causes misaligned new_block pointers in kmalloc split
 #define KLIB_BLOCK_ALIGNMENT  32
 #define KLIB_MAGIC_NUMBER     0xDEADBEEF
-#define KLIB_MAGIC_FREE       0xFEEDFACE   /* set by kfree, checked by kfree to detect double-free in O(1) */
+#define KLIB_MAGIC_FREE       0xFEEDFACE
 
 typedef struct mem_block {
     size_t size;
@@ -88,12 +76,6 @@ int kvsnprintf(char* buf, size_t size, const char* fmt, va_list args);
 void kputchar(char c);
 int kputnl(void);
 
-/* Console lock — acquired by kprintf, exposed so any other producer of
- * VGA framebuffer + serial writes (HwVgaPutString, HwVgaPutChar,
- * HwVgaNewline, …) can serialise against kprintf and against other
- * cores doing the same. Without this, two cores writing the
- * framebuffer concurrently race on cursor + cell stores → visible
- * character salad on screen and interleaved binary in serial.log. */
 void console_lock_acquire(void);
 void console_lock_release(void);
 
@@ -109,15 +91,6 @@ void spin_unlock(spinlock_t* lock);
 bool spin_trylock(spinlock_t* lock);
 void spin_force_release(spinlock_t* lock);
 
-/* Service hook drained once per iteration while spin_lock() spins on a
- * contended lock. spin_lock() keeps IRQs disabled across the whole wait, so a
- * core wedged here cannot take an interrupt — including a cross-core TLB
- * shootdown IPI that targets it. The shootdown initiator spins for that ACK
- * and PANICS on timeout ("TLB shootdown timeout"); a core spinning here with
- * IRQs off is exactly the real-HW deadlock that trips it. The VMM registers a
- * hook that drains shootdowns for the current core inline (lock-free,
- * generation-gated, idempotent — safe mid-spin). NULL until the VMM registers
- * it; single-core boot has no shootdowns to service. */
 typedef void (*spin_wait_service_fn)(void);
 void spin_set_wait_service(spin_wait_service_fn fn);
 
@@ -170,23 +143,13 @@ bool isspace(int c);
 int utf8_encode(uint32_t codepoint, char out[4]);
 int utf8_decode(const char* utf8, uint32_t* codepoint);
 
-/* strtok() removed — global saveptr was not AMP-safe; callers must use
- * strtok_r() with a local saveptr. */
 char* strtok_r(char* str, const char* delim, char** saveptr);
 size_t strspn(const char* s, const char* accept);
 size_t strcspn(const char* s, const char* reject);
 char* strpbrk(const char* s, const char* accept);
 
-/* kscreen_hold is gone. It held the screen for a second so a line could be
- * photographed, which was the only way to read this machine while it was being
- * brought up — and it stopped being the only way when the kernel learned to
- * keep its own boot in a ring and write it to the volume (`make
- * PRINTTOFILE=on`, then `logsave`). What it left behind was six seconds of a
- * boot spent deliberately doing nothing. Anything that needs to be stared at
- * again belongs behind a build key, not in the path every boot takes. */
 
-// Tag wildcard matching: "key:..." matches any "key:<value>"
 bool tag_is_wildcard(const char* tag);
 bool tag_match(const char* pattern, const char* tag);
 
-#endif // KLIB_H
+#endif

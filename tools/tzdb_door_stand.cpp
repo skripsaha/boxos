@@ -1,28 +1,3 @@
-// tzdb_door_stand — the `clock:tzdb` gate, attacked on the build host.
-//
-// Everything that arrives through the TagFS door goes through
-// std::__boxcxx::tzdata::Validate and then through the SAME reader the image's
-// own table runs. There is no second, careful reader; there is one reader and
-// one gate. So the gate is not reviewed here, it is attacked: the real baked
-// table is copied onto the heap, corrupted, and handed over. Two outcomes are
-// allowed and one is not.
-//
-//   * the gate refuses it            — fine, nothing else runs
-//   * the gate admits it AND the reader stays inside the blob — fine; a
-//     mutation in a name's letters or a transition's delta changes answers,
-//     it does not make them unsafe
-//   * the gate admits it and the reader reads outside the blob — a defect,
-//     and ASan is what notices, because the copy is exactly kTableBytes long
-//     so one byte past either end is a heap-buffer-overflow.
-//
-// It also reads tools/gen_tzdb_mini.py's output, which is written from the
-// format description at the top of <__bits/tzdb_read> rather than from
-// gen_tzdb.py's writer: a reader that accepts THAT has confirmed the
-// description instead of agreeing with its own encoder.
-//
-// Run it with tools/tzdb_door_check.sh. It needs no BoxOS and no emulator —
-// <__bits/tzdb_read> speaks `long long` and `const char*` and no std type, so
-// it compiles here exactly as it compiles for the guest.
 
 #include <__bits/tzdb_read>
 #include "tzdb_mini.h"
@@ -46,8 +21,6 @@ static std::vector<unsigned char> Fresh()
     return std::vector<unsigned char>(tz::kTable, tz::kTable + tz::kTableBytes);
 }
 
-// Ask a table everything the guest can ask it. Every read lands inside the
-// heap block or the sanitiser says so.
 static unsigned long long Exercise(const unsigned char *base)
 {
     const tz::Table t = tz::Bind(base);
@@ -92,7 +65,6 @@ static unsigned long long Exercise(const unsigned char *base)
     return acc;
 }
 
-// ── the table the door is tested with ───────────────────────────────────────
 
 static void WantInfo(const tz::Table &t, const char *zone, long long at,
                      int offset, int save, const char *abbrev)
@@ -140,8 +112,6 @@ static void MiniTable()
     Want(target >= 0 && tz::LinkTarget(t, target) == tz::kNoLink,
          "and the target is a Zone, not another Link");
 
-    // A name no IANA release can carry: what proves, in the guest, that an
-    // answer came out of the loaded table rather than the baked one.
     Want(tz::Find(t, "America/New_York", 16) < 0,
          "the baked table's zones are NOT in here");
 
@@ -173,7 +143,6 @@ static void MiniTable()
     }
 }
 
-// ── the gate ────────────────────────────────────────────────────────────────
 
 static void TheGate()
 {
@@ -188,8 +157,6 @@ static void TheGate()
         std::printf("baked table: accepted, checksum %llu\n", Exercise(v.data()));
     }
 
-    // Truncation — a blob half written to TagFS is the likeliest way this door
-    // is ever handed rubbish.
     {
         auto v = Fresh();
         long long accepted = 0;
@@ -204,9 +171,6 @@ static void TheGate()
         Want(accepted == 0, "every truncation is refused");
     }
 
-    // The sort, which no bounds check would ever catch. Find() is a binary
-    // search: break the order and the table is not unsafe, it is WRONG — a
-    // name that is present reads as absent.
     {
         auto v = Fresh();
         const tz::Table t = tz::Bind(v.data());
@@ -219,7 +183,6 @@ static void TheGate()
              "an unsorted name index is refused");
     }
 
-    // A Link pointing at a Link: locate_zone resolves exactly one hop.
     {
         auto v = Fresh();
         const tz::Table t = tz::Bind(v.data());
@@ -237,8 +200,6 @@ static void TheGate()
         }
     }
 
-    // The fuzz. Weighted towards the header and the indexes — the parts whose
-    // corruption is dangerous rather than merely wrong.
     {
         std::mt19937_64 rng(20260823);
         long long accepted = 0, refused = 0;
@@ -253,8 +214,8 @@ static void TheGate()
             const int burst = 1 + int(rng() % 4);
             for (int k = 0; k < burst; ++k) {
                 const unsigned long long off = (rng() % 2)
-                    ? rng() % index_end            // header + indexes
-                    : rng() % tz::kTableBytes;     // anywhere
+                    ? rng() % index_end
+                    : rng() % tz::kTableBytes;
                 v[off] = static_cast<unsigned char>(rng() & 0xFF);
             }
             if (tz::Validate(v.data(), v.size())) {
@@ -269,9 +230,6 @@ static void TheGate()
                     kRounds, refused, accepted);
     }
 
-    // Hostile header words, one at a time. Random flips barely reach these:
-    // the nine header words are the only numbers in the blob that a reader
-    // multiplies and adds before following.
     {
         static const unsigned kHostile[] = {
             0u, 1u, 2u, 7u, 43u, 44u, 0x7FFFu, 0x8000u, 0xFFFFu,

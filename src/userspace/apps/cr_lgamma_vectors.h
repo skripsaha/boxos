@@ -1,4 +1,3 @@
-// Baked 80-bit (x, MPFR-CR-ref) vectors for lgamma — GENERATED, do not edit.
 static const CrVec kLgammaVec[] = {
 {0x8000000000000000ULL,0x3FFDu,0xA4DDEC0E0B77D8F2ULL,0x3FFFu},
 {0x8000000000000000ULL,0x3FFEu,0x928682473D0DE85FULL,0x3FFEu},

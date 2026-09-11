@@ -1,15 +1,3 @@
-/*
- * rollcall — every line said answers with its number, whole, on the wire.
- *
- * Four strands talk at once, each line carrying the strand and its number.
- * Two speak through printf — the console lane, the display daemon, the VGA
- * mirror to COM1 — and two through kdbg_print, the kernel's own kprintf.
- * Every path a line can take to the serial account is walked by a numbered
- * line, so a host reading serial.log can call the roll: which numbers never
- * answered, and which lines came out carrying somebody else's.
- *
- * Prints [ROLLCALL] done: S strands x N lines when every strand has spoken.
- */
 
 #include "box/print.h"
 #include "box/debug.h"

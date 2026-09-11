@@ -5,57 +5,34 @@
 #include "process.h"
 #include "cabin.h"
 
-/*
- * One tag of the context: its name, and the volume's number for it if the
- * volume has one. TAGFS_INVALID_TAG_ID means unbound — the volume that is up
- * (or the absence of one) has no page for this name yet.
- */
 typedef struct UseTag
 {
     char    *text;
     uint16_t id;
 } UseTag;
 
-/*
- * The whole context. Everything below `lock` is written under it; the three
- * fields the scheduler reads without it — ready, bits, overflow_count — are
- * stored atomically, and a reader that needs the overflow list itself takes
- * the lock. `overflow` is allocated with room for every tag of the context at
- * the moment the context is set, so nothing here allocates under the lock.
- */
 static struct
 {
     UseTag   *tags;
     uint32_t  count;
-    uint32_t  unbound;      /* tags with no volume number */
-    uint16_t *overflow;     /* numbers >= 64, room for `count` of them */
+    uint32_t  unbound;
+    uint16_t *overflow;
     uint16_t  overflow_count;
-    uint64_t  bits;         /* numbers < 64 */
-    volatile uint32_t ready; /* 1 = count > 0 && unbound == 0 */
+    uint64_t  bits;
+    volatile uint32_t ready;
     spinlock_t lock;
 } g_use;
 
-/* The volume registry's field widths (TagRegistryEntry on disk: a one-byte
- * key length; every TagFS parse buffer is 256). A tag that cannot be written
- * to the volume cannot be a context tag either. */
 #define USE_TAG_PART_MAX 255u
 
-/* -------------------------------------------------------------------------
- * Names
- * ------------------------------------------------------------------------- */
 
-/* What tag_normalise made of a raw tag. */
 typedef enum
 {
-    TAG_BLANK   = 0,    /* nothing but blanks — the caller skips it */
-    TAG_SPELLED = 1,    /* a tag, written canonically into `out` */
-    TAG_UNFIT   = 2,    /* a key or value the registry could not hold */
+    TAG_BLANK   = 0,
+    TAG_SPELLED = 1,
+    TAG_UNFIT   = 2,
 } TagSpelling;
 
-/*
- * One raw tag out of a list — as typed, blanks and all — into its canonical
- * spelling: "key" or "key:value".
- */
 static TagSpelling tag_normalise(const char *raw, size_t len, char *out, size_t out_cap)
 {
     while (len > 0 && (raw[0] == ' ' || raw[0] == '\t')) { raw++; len--; }
@@ -72,7 +49,6 @@ static TagSpelling tag_normalise(const char *raw, size_t len, char *out, size_t 
     if (klen == 0 || klen > USE_TAG_PART_MAX || vlen > USE_TAG_PART_MAX)
         return TAG_UNFIT;
 
-    /* "key:" says the same thing as "key"; the registry has one entry for it. */
     size_t need = klen + (vlen ? vlen + 1 : 0) + 1;
     if (need > out_cap) return TAG_UNFIT;
 
@@ -92,11 +68,6 @@ static void tags_free(UseTag *tags, uint32_t count)
     kfree(tags);
 }
 
-/*
- * Parse a comma-separated list into an array of unbound tags. A duplicate is
- * kept once. On any failure nothing is kept and the error is the caller's to
- * report.
- */
 static error_t list_parse(const char *list, UseTag **out_tags, uint32_t *out_count)
 {
     *out_tags  = NULL;
@@ -148,12 +119,7 @@ static error_t list_parse(const char *list, UseTag **out_tags, uint32_t *out_cou
     return OK;
 }
 
-/* -------------------------------------------------------------------------
- * The scheduler's cache
- * ------------------------------------------------------------------------- */
 
-/* Recount bits / overflow / unbound from the tags' numbers. Under the lock;
- * `overflow` already has room for every tag. */
 static void cache_rebuild_locked(void)
 {
     uint64_t bits     = 0;
@@ -167,8 +133,6 @@ static void cache_rebuild_locked(void)
         else                              g_use.overflow[overflow++] = id;
     }
 
-    /* ready goes down before the numbers move and up after they have moved,
-     * so a reader that sees ready sees numbers of one context. */
     __atomic_store_n(&g_use.ready, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_use.bits, bits, __ATOMIC_RELAXED);
     __atomic_store_n(&g_use.overflow_count, overflow, __ATOMIC_RELAXED);
@@ -178,9 +142,6 @@ static void cache_rebuild_locked(void)
                      __ATOMIC_RELEASE);
 }
 
-/* -------------------------------------------------------------------------
- * Set / clear / read
- * ------------------------------------------------------------------------- */
 
 error_t UseContextSet(const char *list, bool intern)
 {
@@ -194,8 +155,6 @@ error_t UseContextSet(const char *list, bool intern)
         return OK;
     }
 
-    /* Numbers first, outside the lock: the registry takes the volume's door
-     * and its own lock, and neither is taken while ours is held. */
     for (uint32_t i = 0; i < count; i++) {
         tags[i].id = intern ? tagfs_tag_intern(tags[i].text)
                             : tagfs_tag_lookup(tags[i].text);
@@ -278,7 +237,6 @@ error_t UseContextTagArray(char **out_block, const char ***out_ptrs, uint32_t *o
         uint32_t got = 0;
         size_t   now = UseContextTags(block, need, &got);
         if (now > need) {
-            /* The context grew between the two looks; measure again. */
             kfree(block);
             continue;
         }
@@ -304,9 +262,6 @@ bool UseContextIsSet(void)
     return __atomic_load_n(&g_use.count, __ATOMIC_RELAXED) > 0;
 }
 
-/* -------------------------------------------------------------------------
- * The scheduler's question
- * ------------------------------------------------------------------------- */
 
 bool UseContextMatches(const struct process_t *proc)
 {
@@ -321,9 +276,6 @@ bool UseContextMatches(const struct process_t *proc)
     if (__atomic_load_n(&g_use.overflow_count, __ATOMIC_RELAXED) == 0)
         return true;
 
-    /* Numbers past 63 live in lists on both sides; compare them under the
-     * lock, re-reading the fast-path fields because the context may have
-     * changed between the loads above and here. */
     spin_lock(&g_use.lock);
     bool match = __atomic_load_n(&g_use.ready, __ATOMIC_RELAXED) != 0 &&
                  (worn & g_use.bits) == g_use.bits;
@@ -341,18 +293,9 @@ bool UseContextMatches(const struct process_t *proc)
     return match;
 }
 
-/* -------------------------------------------------------------------------
- * The volume's numbers
- * ------------------------------------------------------------------------- */
 
-/* The volume's book changed under the cache: look every tag up in the registry
- * that was just mounted — lookup only, because mounting somebody's medium must
- * not write into it. */
 static void UseContextRebind(void)
 {
-    /* Held across the lookups: the registry never calls back in here, so the
-     * order use-lock then registry-lock has no reverse, and every lookup is a
-     * hash probe under the volume's door — no I/O, no allocation. */
     spin_lock(&g_use.lock);
     for (uint32_t i = 0; i < g_use.count; i++)
         g_use.tags[i].id = tagfs_tag_lookup(g_use.tags[i].text);
@@ -365,8 +308,6 @@ void UseContextRemember(bool *remembered)
     bool kept = false;
     if (remembered) *remembered = false;
 
-    /* Through the door, like every caller from outside the volume: the ground
-     * may be clearing under a medium that just left. */
     if (!tagfs_enter()) return;
 
     uint32_t n    = 0;
@@ -375,8 +316,6 @@ void UseContextRemember(bool *remembered)
     if (need == 0 || block) {
         size_t len = 0;
         if (need) {
-            /* NUL-separated to comma-joined, no NUL at the end — the form
-             * UseContextSet reads back. */
             uint32_t got = 0;
             UseContextTags(block, need, &got);
             size_t pos = 0;
@@ -450,9 +389,6 @@ void UseContextBindTag(const char *tag, uint16_t tag_id)
     spin_unlock(&g_use.lock);
 }
 
-/* -------------------------------------------------------------------------
- * Lifetime
- * ------------------------------------------------------------------------- */
 
 void UseContextInit(void)
 {

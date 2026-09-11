@@ -1,31 +1,6 @@
-/*
- * Storage Deck — Manifest-native handlers.
- *
- * Removes the 168/176-byte stack buffers that capped legacy OBJ_READ /
- * OBJ_WRITE at sub-200-byte payloads per syscall. Reads and writes now move
- * to / from a Crate of arbitrary capacity through the page-walked crate_io
- * primitives, so a payload that straddles a page boundary is copied across
- * every backing frame. A 1-MiB read fits in one syscall.
- *
- * Phase 7 scope: OBJ_READ, OBJ_WRITE, OBJ_DELETE, OBJ_RENAME, OBJ_GET_INFO.
- * OBJ_CREATE, TAG_*, CONTEXT_* deferred — they need a separate pass because
- * of variable-length tag-string parsing.
- *
- * Param layouts (little-endian, packed):
- *   OBJ_READ      params: [u32 file_id][u64 offset]
- *   OBJ_WRITE     params: [u32 file_id][u64 offset][u32 flags]
- *   OBJ_DELETE    params: [u32 file_id]
- *   OBJ_RENAME    params: [u32 file_id][u16 new_name_len][char new_name[]]
- *   OBJ_GET_INFO  params: [u32 file_id]
- *
- *   OBJ_READ.out_crate     : payload destination; size <- bytes_read
- *   OBJ_WRITE.in_crate     : payload source
- *   OBJ_WRITE.out_crate    : optional [u64 bytes_written][u64 new_file_size]
- *   OBJ_GET_INFO.out_crate : serialized record, see ObjGetInfo() below
- */
 
 #include "klib.h"
-#include "chit.h"        /* ChitGive / ChitDue — an answer put off is an answer promised */
+#include "chit.h"
 #include "crate_stage.h"
 #include "crate_io.h"
 #include "op_registry.h"
@@ -34,7 +9,7 @@
 #include "boxos_crate.h"
 #include "storage_deck.h"
 #include "tagfs.h"
-#include "use_context.h"   /* the user's tags — folded into query and create */
+#include "use_context.h"
 #include "tag_registry.h"
 #include "vmm.h"
 #include "pmm.h"
@@ -44,44 +19,18 @@
 #include "kring.h"
 #include "kresult.h"
 #include "write_job.h"
-#include "baton.h"   /* BatonPass — never-drop read completion (Ф26 M2/M4) */
+#include "baton.h"
 #include "ata.h"
 #include "touch.h"
 #include "cow.h"
-#include "amp.h"   /* g_amp.total_cores — async write needs a K-Core to pump */
+#include "amp.h"
 #include "boardroom.h"
 
-/*
- * Can the medium under the volume answer a read without somebody standing over
- * it?
- *
- * This used to be "is there an AHCI controller", which was the same question as
- * "is the volume on it" only for as long as there was nowhere else a volume
- * could be. Then it became "is the volume on AHCI", which stopped reads going
- * to somebody else's disk but left the real answer unasked: a machine that
- * boots from a flash drive has its filesystem on the USB bus, answered no, and
- * spent a core standing over every block of every file it read — while the
- * same machine booted from SATA parked the caller and got on with something
- * else. The medium was never what made the difference.
- *
- * So the question is put to the seat, which is the one place that knows what is
- * under it.
- */
 static inline bool tagfs_volume_can_read_async(void)
 {
     return BoardroomSeatCanReadAsync(tagfs_get_seat());
 }
 
-/*
- * Writing is still AHCI's, and only AHCI's — honestly rather than by omission.
- *
- * A write here is not one command: it is a WriteJob that allocates blocks,
- * threads the DiskBook journal and may copy on write, and its state machine is
- * built on AHCI slots and the AHCI completion. Pointing it at another kind of
- * seat would need that machine rebuilt, not a different submit call. Until it
- * is, a volume on a flash drive takes the synchronous write path, which is
- * correct and says so.
- */
 static inline bool tagfs_volume_is_ahci(void)
 {
     return BoardroomSeatKind(tagfs_get_seat()) == BOARD_AHCI;
@@ -89,18 +38,7 @@ static inline bool tagfs_volume_is_ahci(void)
 
 #define OBJ_WRITE_APPEND_FLAG (1u << 0)
 
-/* -------------------------------------------------------------------------
- * Crate I/O lives in crate_io.{h,c}: crate_read / crate_write move a fixed
- * payload between a user Crate and a kernel buffer, and crate_in_buf /
- * crate_out_alloc / crate_out_commit / crate_buf_free carry the variable-
- * size bounce-buffer pattern. All page-walk the user range, so a Crate
- * payload that straddles a page boundary is copied across every backing
- * frame — the legacy single-page StorageCrateMap fast path is gone.
- * ------------------------------------------------------------------------- */
 
-/* -------------------------------------------------------------------------
- * Param accessors — alignment-safe.
- * ------------------------------------------------------------------------- */
 
 static uint32_t param_u32(const ManifestOp *op, uint16_t off)
 {
@@ -123,66 +61,28 @@ static uint16_t param_u16(const ManifestOp *op, uint16_t off)
     return v;
 }
 
-/* -------------------------------------------------------------------------
- * OBJ_READ — fill out_crate with up to capacity bytes from file at offset.
- *
- * Stage 2 async fast-path: when the request lands entirely inside one
- * disk block, we submit an ahci_submit_read_async, park the caller
- * (PROC_WAITING) and return ERR_WOULD_BLOCK. The AHCI IRQ fires the
- * obj_read_async_complete callback which memcpy's DMA → user buffer,
- * writes the actual byte count back into the Crate, KResultPush'es a
- * Result and ref_dec's the pinned process — KResultPush also flips
- * PROC_WAITING → PROC_WORKING so the caller wakes.
- *
- * Fallback (multi-block, off-block, no AHCI, allocation failure, no
- * proc context) takes the existing tagfs_read sync path.
- * ------------------------------------------------------------------------- */
 
-/* ------------------------------------------------------------------------
- * Multi-block async read state machine.
- *
- * Each completed disk read fires the callback which memcpy's the chunk
- * out of the reusable DMA page, advances the file cursor, and either
- * submits the NEXT block read (state transition) or finishes the
- * request (KResultPush + cleanup). Sequential submission keeps the
- * model simple; future enhancement could batch consecutive
- * intra-extent blocks into one multi-sector read.
- *
- * The DMA buffer is a single 4 KiB page reused across iterations;
- * each iteration overwrites the previous read since we memcpy out
- * before submitting again.
- * ------------------------------------------------------------------------ */
 typedef struct {
-    process_t       *target;       /* pinned via process_find_ref */
-    TagFSFileHandle *handle;       /* close on completion */
-    Crate           *out_crate;    /* points into crates_kbuf; valid until release */
-    uint8_t         *out_base;     /* kernel-side bounce buffer (kmalloc'd) */
-    uintptr_t        out_user_addr;/* user vaddr; commit_out target for payload */
+    process_t       *target;
+    TagFSFileHandle *handle;
+    Crate           *out_crate;
+    uint8_t         *out_base;
+    uintptr_t        out_user_addr;
     uint64_t         total_bytes;
     uint64_t         bytes_done;
     uint64_t         start_offset;
-    uint64_t         waybill;       /* Ф26e: ferry correlation token (0 = sync/no-token) */
-    uint32_t         submit_cookie; /* the read submit's cloakroom token — echoed
-                                     * into the plain (waybill==0) completion so
-                                     * the caller's paired wait adopts its own. */
+    uint64_t         waybill;
+    uint32_t         submit_cookie;
     void            *dma_phys;
     void            *dma_virt;
     uint32_t         in_flight_off_in_blk;
     uint32_t         in_flight_chunk;
-    error_t          if_status;      /* Ф26 M2: AHCI IRQ stashes status here; obj_read_pump reads it */
+    error_t          if_status;
 
-    /* CrateStage handoff: ownership of the staged Crate[] buffer transfers
-     * from the dispatcher to this async context the moment ObjRead returns
-     * ERR_WOULD_BLOCK with PROC_WAITING. Async completion writes
-     * crates_kbuf[idx].size = N (via out_crate above), then calls
-     * crate_stage_commit_and_release to write back + free. */
     Crate           *crates_kbuf;
     uint64_t         crates_uaddr;
     uint16_t         crate_count;
 
-    /* Never-drop completion node (Ф26 M4): the AHCI IRQ posts this read to
-     * the drain core with zero allocation, so a completion can never be
-     * dropped. run = obj_read_pump, ctx = this ctx; set once at alloc. */
     Baton cq_node;
 } ObjReadAsyncCtx;
 
@@ -190,7 +90,7 @@ static void obj_read_step(ObjReadAsyncCtx *ctx);
 static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_ok);
 static void obj_read_async_complete(uint8_t port, uint8_t slot,
                                      error_t status, void *ctx_);
-static void obj_read_pump(void *ctx_);   /* Ф26 M2: K-Core half of a read completion */
+static void obj_read_pump(void *ctx_);
 
 static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_ok)
 {
@@ -201,16 +101,9 @@ static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_o
     r.error_code  = (status == OK) ? OK : ERR_IO;
     r.data_length = (uint32_t)reported;
     r.sender_pid  = 0;
-    /* Ф26e: a waybilled (box::ferry) read echoes its correlation token in
-     * data_addr and flies the KCTX_STORAGE flag so boxlib routes it to the
-     * ferry station and nothing else. A plain (waybill==0) read keeps
-     * KCTX_GUIDE / data_addr==0 — byte-identical to the pre-ferry substrate. */
     if (ctx->waybill) { r.context = KCTX_STORAGE; r.data_addr = ctx->waybill; }
     else              { r.context = KCTX_PACK24(KCTX_GUIDE, ctx->submit_cookie); }
 
-    /* Commit bounce buffer back into user pages BEFORE waking caller.
-     * If commit fails (e.g. user unmapped the page mid-flight) we still
-     * report the byte count — the user's buffer is just left untouched. */
     if (reported > 0 && ctx->out_base && ctx->target && ctx->target->cabin) {
         vmm_user_buf_commit_out(ctx->target->cabin->vmm, ctx->out_user_addr,
                                  ctx->out_base, (size_t)reported);
@@ -220,33 +113,18 @@ static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_o
     if (ctx->dma_phys)  pmm_free(ctx->dma_phys, 1);
     if (ctx->handle)    tagfs_close(ctx->handle);
 
-    /* CrateStage release: the dispatcher handed the staged Crate[] buffer
-     * to this async context at ERR_WOULD_BLOCK. We wrote crates[idx].size
-     * just above; now commit the whole descriptor array back to user
-     * memory and free the kbuf. Always run, even on partial-fail paths —
-     * the dispatcher will NOT clean up after async-park. */
     if (ctx->crates_kbuf) {
         crate_stage_commit_and_release(ctx->crates_kbuf, ctx->crate_count,
                                         (ctx->target && ctx->target->cabin) ? ctx->target->cabin->vmm : NULL,
                                         ctx->crates_uaddr);
     }
 
-    /* The answer is determined; only its delivery remains, and that is the
-     * kernel's own debt. Due here, kept by the push. */
     ChitDue(ctx->target, ctx->submit_cookie);
     KResultPush(ctx->target, &r);
     process_ref_dec(ctx->target);
     kfree(ctx);
 }
 
-/* Ф26 M2/M4 — IRQ callback, LEAN. Runs in raw AHCI completion IRQ context. Stashes
- * the retire status and posts the heavy half (memcpy out of DMA, page-walked
- * commit, pmm/vmm free, tagfs_close, crate-stage release, KResultPush, kfree, and
- * re-arming the next block) to the drain core's K-Core pump via the ctx's
- * embedded never-drop node. Doing that work HERE is the exact "no allocation /
- * no thread-context locks from IRQ" violation diagnosed as the root of the
- * 2026-05-17 random-hang class; the write path (wjob_ahci_complete) posts the
- * same way. The node lives inside the ctx, so the post can never be dropped. */
 static void obj_read_async_complete(uint8_t port, uint8_t slot,
                                      error_t status, void *ctx_)
 {
@@ -254,52 +132,40 @@ static void obj_read_async_complete(uint8_t port, uint8_t slot,
     (void)slot;
     ObjReadAsyncCtx *ctx = (ObjReadAsyncCtx *)ctx_;
     ctx->if_status = status;
-    BatonPass(&ctx->cq_node);   /* never-drop; heavy half on the K-Core pump */
+    BatonPass(&ctx->cq_node);
 }
 
-/* Ф26 M2 — K-Core pump: the heavy half of a read completion, drained by the same
- * BatonPump loop that pumps write jobs (kcore_run_loop). Safe to take locks /
- * alloc / free / page-walk here (pump context, not IRQ). Applies the just-read
- * chunk, advances the cursor, and either finalizes or arms the next block. */
 static void obj_read_pump(void *ctx_)
 {
     ObjReadAsyncCtx *ctx = (ObjReadAsyncCtx *)ctx_;
 
     if (ctx->if_status != OK) {
-        obj_read_finish(ctx, ERR_IO, /*partial_ok=*/false);
+        obj_read_finish(ctx, ERR_IO, false);
         return;
     }
 
-    /* Apply this chunk out of the reusable DMA page. The next block is armed
-     * only AFTER this copy (both in pump context), so the device cannot
-     * overwrite the page between completion and copy. */
     memcpy(ctx->out_base + ctx->bytes_done,
            (uint8_t *)ctx->dma_virt + ctx->in_flight_off_in_blk,
            ctx->in_flight_chunk);
     ctx->bytes_done += ctx->in_flight_chunk;
 
     if (ctx->bytes_done >= ctx->total_bytes) {
-        obj_read_finish(ctx, OK, /*partial_ok=*/true);
+        obj_read_finish(ctx, OK, true);
         return;
     }
 
-    /* More to do — arm the next block (now in pump context, not IRQ). */
     obj_read_step(ctx);
 }
 
 static void obj_read_step(ObjReadAsyncCtx *ctx)
 {
-    /* The same question the write pump asks, for the same reason: this read
-     * carries a handle full of block numbers from the mounting it started in,
-     * and a volume that left and came back has been read again since. */
     if (!tagfs_handle_is_of_this_mount(ctx->handle)) {
-        obj_read_finish(ctx, ERR_IO, /*partial_ok=*/false);
+        obj_read_finish(ctx, ERR_IO, false);
         return;
     }
 
     uint64_t file_pos = ctx->start_offset + ctx->bytes_done;
 
-    /* Locate extent containing file_pos. */
     uint64_t extent_start = 0;
     uint16_t ext_idx = 0xFFFF;
     for (uint16_t i = 0; i < ctx->handle->extent_count; i++) {
@@ -308,8 +174,7 @@ static void obj_read_step(ObjReadAsyncCtx *ctx)
         extent_start += ext_size;
     }
     if (ext_idx == 0xFFFF) {
-        /* Walked past last extent — finish with what we have. */
-        obj_read_finish(ctx, OK, /*partial_ok=*/true);
+        obj_read_finish(ctx, OK, true);
         return;
     }
 
@@ -329,25 +194,10 @@ static void obj_read_step(ObjReadAsyncCtx *ctx)
     error_t  err = BoardroomReadAsync(tagfs_get_seat(), lba, 8, ctx->dma_phys,
                                       obj_read_async_complete, ctx);
     if (err != OK) {
-        obj_read_finish(ctx, ERR_IO, /*partial_ok=*/false);
+        obj_read_finish(ctx, ERR_IO, false);
     }
 }
 
-/* Ф26e — deliver a box::ferry completion for a storage op that ran on the
- * SYNCHRONOUS fallback (single core, EOF read, or an allocation failure that
- * declined the async state machine). Without this the guide dispatcher would
- * push the op's ordinary KCTX_GUIDE self-Result, which carries no waybill, so
- * the ferry awaiter would match nothing and hang forever.
- *
- * Mirrors the async finaliser: flush the staged Crate[] descriptors back to
- * user memory and free the kbuf (the dispatcher will NOT, because we claim the
- * async-owner flag), publish a KCTX_STORAGE Result carrying the waybill + byte
- * count, and return ERR_WOULD_BLOCK so guide_process_manifest_pocket takes its
- * async-park branch (skips the crate commit + the KCTX_GUIDE push). The caller
- * was NOT parked — it ran synchronously and stays PROC_WORKING, consuming this
- * completion from its own ResultRing via the ferry poll. Descriptor write-back
- * precedes the KResultPush so a ferry that frees its submission block on
- * completion cannot race it (no UAF). */
 static int storage_sync_ferry_finalize(const OpContext *ctx, Crate *crates,
                                        error_t err, uint64_t bytes,
                                        uint64_t waybill)
@@ -366,18 +216,10 @@ static int storage_sync_ferry_finalize(const OpContext *ctx, Crate *crates,
     r.context     = KCTX_STORAGE;
     KResultPush(ctx->proc, &r);
 
-    /* A ferry op is submitted without a token — nobody waits on a Result to
-     * it — so this raises the async flag and leaves no chit. */
     ChitGive(ctx, "storage.ferry", waybill);
     return ERR_WOULD_BLOCK;
 }
 
-/* Ф26e — fail a storage op on the channel its submitter listens on. A waybilled
- * (box::ferry) op MUST answer on KCTX_STORAGE even from an early-error exit, or
- * its awaiter — which only ever collects KCTX_STORAGE records — waits for a
- * completion that never comes and hangs (the dispatcher would deliver the raw
- * code as a KCTX_GUIDE reply, which the ferry isolation routes away). A plain
- * (waybill==0) op returns the code for the ordinary KCTX_GUIDE push. */
 static int storage_op_fail(const OpContext *ctx, Crate *crates,
                            error_t err, uint64_t waybill)
 {
@@ -397,16 +239,11 @@ static int ObjRead(const ManifestOp *op,
 
     uint32_t file_id = param_u32(op, 0);
     uint64_t offset  = param_u64(op, 4);
-    /* Ф26e: optional trailing correlation waybill (box::ferry). Absent for a
-     * synchronous read (param_size 12) → 0 → plain KCTX_GUIDE completion. */
     uint64_t waybill = (op->param_size >= 20) ? param_u64(op, 12) : 0;
     Crate   *out     = &crates[op->out_crate];
     if (out->capacity == 0)
         return storage_op_fail(ctx, crates, ERR_BUFFER_TOO_SMALL, waybill);
 
-    /* Bounce buffer for multi-page user payloads. tagfs_read fills kp,
-     * we copy back to user pages at the end. The kernel address is one
-     * contiguous allocation regardless of how the user pages map. */
     void *kp = crate_out_alloc(out, out->capacity);
     if (!kp) return storage_op_fail(ctx, crates, ERR_INVALID_ADDRESS, waybill);
 
@@ -418,18 +255,6 @@ static int ObjRead(const ManifestOp *op,
 
     handle->offset = offset;
 
-    /* Async path — multi-block state machine. Covers any in-bounds read
-     * regardless of size or extent layout. The state machine submits one
-     * disk read at a time; each completion's callback memcpy's the chunk
-     * out of the reusable DMA page, advances the cursor and either fires
-     * the next read or finalizes. Sequential per-block submission keeps
-     * the model simple — future work can batch consecutive blocks within
-     * one extent into a single multi-sector read. */
-    /* Multi-core only: the async read completion (obj_read_finish) runs in
-     * AHCI IRQ context and touches the heap / tagfs / result ring. On a
-     * single core that IRQ preempts the very userspace thread that owns
-     * those structures; the sync read path below is correct there and on
-     * real HW (which is multi-core) the async path still applies. */
     if (offset < handle->file_size && handle->extent_count > 0 &&
         tagfs_volume_can_read_async() && ctx && ctx->proc && g_amp.total_cores > 1) {
 
@@ -456,36 +281,14 @@ static int ObjRead(const ManifestOp *op,
                         async_ctx->submit_cookie = ctx->submit_cookie;
                         async_ctx->dma_phys      = dma_phys;
                         async_ctx->dma_virt      = dma_virt;
-                        /* CrateStage ownership transfer: the dispatcher
-                         * staged the Crate[] kbuf and points `crates`
-                         * (handler arg) at it. We take that pointer +
-                         * the user-side write-back coordinates from
-                         * OpContext. After we return ERR_WOULD_BLOCK
-                         * + PROC_WAITING, the dispatcher will not touch
-                         * the staged crates; obj_read_finish must call
-                         * crate_stage_commit_and_release. */
                         async_ctx->crates_kbuf   = crates;
                         async_ctx->crates_uaddr  = ctx->crates_uaddr;
                         async_ctx->crate_count   = ctx->crate_count;
 
-                        /* Never-drop completion node: set before the first
-                         * submit so the AHCI IRQ can post it with no alloc. */
                         async_ctx->cq_node.run   = obj_read_pump;
                         async_ctx->cq_node.ctx   = async_ctx;
 
-                        /* Park BEFORE the first submit — if the IRQ
-                         * fires before we set WAITING, KResultPush's
-                         * "if state==WAITING flip to WORKING" is a
-                         * no-op and the wake is lost. Setting WAITING
-                         * first makes that transition reliable. */
                         process_set_state(ctx->proc, PROC_WAITING);
-                        /* The chit, and with it the ownership transfer of
-                         * the staged crates kbuf to the async_ctx (the flag
-                         * the dispatcher reads instead of process state —
-                         * race-safe vs a fast completion that flips state
-                         * back to PROC_WORKING). Given BEFORE the first
-                         * submit: the finish that keeps it may run on
-                         * another core the moment the read is armed. */
                         ChitGive(ctx, "storage.read", file_id);
                         obj_read_step(async_ctx);
                         return ERR_WOULD_BLOCK;
@@ -494,12 +297,9 @@ static int ObjRead(const ManifestOp *op,
                 }
                 pmm_free(dma_phys, 1);
             }
-            /* Allocation failure — fall through to sync. */
         }
     }
 
-    /* Sync fallback (no AHCI, no proc context, alloc failure, or empty
-     * read). Same bounce path — we already allocated kp above. */
     int got = tagfs_read(handle, kp, out->capacity);
     tagfs_close(handle);
 
@@ -518,21 +318,15 @@ static int ObjRead(const ManifestOp *op,
             out->size  = (uint64_t)got;
         }
     } else {
-        out->size = 0;   /* EOF read: 0 bytes, success */
+        out->size = 0;
     }
     crate_buf_free(kp);
 
-    /* Ф26e: a ferry read that fell through to sync must still be answered on
-     * the KCTX_STORAGE channel or its awaiter hangs (single-core / EOF-read). */
     if (waybill != 0)
         return storage_sync_ferry_finalize(ctx, crates, sync_err, sync_bytes, waybill);
     return (sync_err == OK) ? OK : (int)sync_err;
 }
 
-/* -------------------------------------------------------------------------
- * OBJ_WRITE — write in_crate.size bytes to file at offset.
- * If out_crate is provided and capacity >= 16, write back stats.
- * ------------------------------------------------------------------------- */
 
 static int ObjWrite(const ManifestOp *op,
                     Crate            *crates,
@@ -546,38 +340,21 @@ static int ObjWrite(const ManifestOp *op,
     uint32_t file_id = param_u32(op, 0);
     uint64_t offset  = param_u64(op, 4);
     uint32_t flags   = param_u32(op, 12);
-    /* Ф26e: optional trailing correlation waybill (box::ferry). Absent for a
-     * synchronous write (param_size 16) → 0 → plain KCTX_GUIDE completion. */
     uint64_t waybill = (op->param_size >= 24) ? param_u64(op, 16) : 0;
 
     Crate *src = &crates[op->in_crate];
     if (src->size == 0)
         return storage_op_fail(ctx, crates, ERR_INVALID_ARGUMENT, waybill);
 
-    /* Bounce-buffer the input crate. Multi-page user buffers are common
-     * (any write over 4 KiB) and vmm_translate_user_addr cannot span
-     * pages, so we copy through a kmalloc'd kernel buffer. The async
-     * path takes ownership of src_bounce on a successful submit and
-     * frees it from W_DONE; otherwise we free here. */
     void *src_bounce = crate_in_buf(src, ctx);
     if (!src_bounce) return storage_op_fail(ctx, crates, ERR_INVALID_ADDRESS, waybill);
 
-    /* Optional output stats crate [u64 bytes_written][u64 new_file_size].
-     * Written via crate_write (sync) / vmm_user_buf_commit_out (async) —
-     * both page-walk, so a stats crate that straddles a page is safe. */
     Crate *out_crate = NULL;
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *o = &crates[op->out_crate];
         if (o->capacity >= 16) out_crate = o;
     }
 
-    /* Async write requires a K-Core to pump its IRQ-deferred completion
-     * continuations (write completion does heavy work — alloc / DiskBook /
-     * CoW — that cannot run in IRQ context, so it is posted to the never-drop
-     * storage completion queue and drained by kcore_run_loop). That loop only exists in multi-core
-     * mode; on a single core the BSP runs userspace and never pumps, so the
-     * job would strand. Use the sync path there — it is correct and has no
-     * benefit to lose (one core does everything regardless). */
     if (tagfs_volume_is_ahci() && ctx && ctx->proc && g_amp.total_cores > 1) {
         int rc = ObjWriteAsync(file_id, offset, flags,
                                src_bounce, (uint32_t)src->size,
@@ -585,14 +362,10 @@ static int ObjWrite(const ManifestOp *op,
                                crates, ctx->crate_count, ctx->crates_uaddr,
                                waybill);
         if (rc == ERR_WOULD_BLOCK) {
-            /* Async owns src_bounce AND the staged Crate[] kbuf now —
-             * wjob_finalize frees both at W_DONE. */
             return ERR_WOULD_BLOCK;
         }
-        /* Hard failure before submission — free + fall through. */
     }
 
-    /* Sync fallback. */
     TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
     if (!handle) {
         crate_buf_free(src_bounce);
@@ -619,19 +392,13 @@ static int ObjWrite(const ManifestOp *op,
         return ERR_IO;
     }
 
-    /* WROTE fan-out — same 32-byte payload as write_job.c::w_publish so
-     * a tag listener (write_observer, etc.) gets identical layout on
-     * sync (BIOS / single-core) and async (UEFI + AHCI + multi-core)
-     * paths. Drift between the two surfaced as
-     *   "[WO] FAIL: payload too small (8)"
-     * on every sync-path config. */
     if (wrote > 0 && TouchHasAnyListeners()) {
         TagFSMetadata wmeta;
         memset(&wmeta, 0, sizeof(wmeta));
         if (tagfs_get_metadata(file_id, &wmeta) == OK) {
             struct {
                 uint32_t file_id;
-                uint8_t  op;          /* 1 = WRITE */
+                uint8_t  op;
                 uint8_t  _pad[3];
                 uint64_t offset;
                 uint64_t bytes;
@@ -657,22 +424,14 @@ static int ObjWrite(const ManifestOp *op,
         uint64_t bytes_written = (uint64_t)wrote;
         memcpy(stats + 0, &bytes_written, sizeof(uint64_t));
         memcpy(stats + 8, &final_size,    sizeof(uint64_t));
-        /* Best-effort: a commit failure (user unmapped the page mid-op)
-         * leaves the stats crate empty but does not fail the completed
-         * write — crate_write sets out_crate->size only on success. */
         (void)crate_write(out_crate, ctx, stats, 16);
     }
 
-    /* Ф26e: answer a ferry write on the KCTX_STORAGE channel — the async
-     * path was declined (single core / alloc-fail) and fell through here. */
     if (waybill != 0)
         return storage_sync_ferry_finalize(ctx, crates, OK, (uint64_t)wrote, waybill);
     return OK;
 }
 
-/* -------------------------------------------------------------------------
- * OBJ_DELETE — refuse to delete files with system/boot tags.
- * ------------------------------------------------------------------------- */
 
 static int ObjDelete(const ManifestOp *op,
                      Crate            *crates,
@@ -703,21 +462,6 @@ static int ObjDelete(const ManifestOp *op,
     return (rc == 0) ? OK : ERR_FILE_NOT_FOUND;
 }
 
-/* -------------------------------------------------------------------------
- * OBJ_TRUNCATE — params = [u32 file_id][u64 new_size]. Shrink only.
- *
- * Guarded like OBJ_DELETE: cutting a "system" or "boot" file down to nothing
- * destroys it just as thoroughly as deleting it, so the same tags refuse the
- * same way.
- *
- * Publishes the TRUNCATED fan-out on every tag of the file, in the same
- * 32-byte payload shape ObjWrite uses so one observer can read both:
- *   op = 3, offset = the cut point (= the new length),
- *   bytes = how many bytes were discarded, final_size = the new length.
- * A content change that published nothing would be a hole in the Touch spine
- * — an observer would have to poll to notice, which is the thing Touch exists
- * to remove.
- * ------------------------------------------------------------------------- */
 
 static int ObjTruncate(const ManifestOp *op,
                        Crate            *crates,
@@ -757,7 +501,7 @@ static int ObjTruncate(const ManifestOp *op,
         if (old_size > new_size && TouchHasAnyListeners()) {
             struct {
                 uint32_t file_id;
-                uint8_t  op;          /* 3 = TRUNCATE */
+                uint8_t  op;
                 uint8_t  _pad[3];
                 uint64_t offset;
                 uint64_t bytes;
@@ -779,9 +523,6 @@ static int ObjTruncate(const ManifestOp *op,
     return OK;
 }
 
-/* -------------------------------------------------------------------------
- * OBJ_RENAME — params carry the new name inline.
- * ------------------------------------------------------------------------- */
 
 static int ObjRename(const ManifestOp *op,
                      Crate            *crates,
@@ -807,23 +548,6 @@ static int ObjRename(const ManifestOp *op,
     return (rc == 0) ? OK : ERR_INVALID_ARGUMENT;
 }
 
-/* -------------------------------------------------------------------------
- * OBJ_GET_INFO — serialize file metadata into out_crate.
- *
- * Layout written into out_crate (little-endian):
- *   [u32 file_id]
- *   [u32 flags]
- *   [u64 size]
- *   [u16 tag_count]
- *   [u16 filename_len]
- *   [char filename[filename_len]]
- *   for each tag:
- *     [u16 key_len][u16 val_len][u8 type][char key[key_len]][char val[val_len]]
- *       type: 1 = system (reserved-vocabulary tag), 0 = user.
- *
- * out_crate.size is set to the total bytes written. No truncation: if the
- * crate is too small, we return ERR_BUFFER_TOO_SMALL with size unchanged.
- * ------------------------------------------------------------------------- */
 
 static int ObjGetInfo(const ManifestOp *op,
                       Crate            *crates,
@@ -849,16 +573,11 @@ static int ObjGetInfo(const ManifestOp *op,
         filename_len = (uint16_t)l;
     }
 
-    /* Compute required size up front so we can fail fast on too-small crate. */
     uint64_t need = 4u + 4u + 8u + 2u + 2u + filename_len;
     for (uint16_t i = 0; i < md.tag_count; i++) {
-        /* A tag the volume no longer knows still takes its place in the list:
-         * the count in the header says how many records follow, so skipping
-         * one would leave the reader parsing the next tag's bytes as this
-         * one's. tagfs_tag_parts empties both buffers when it answers no. */
         char k[128], v[128];
         (void)tagfs_tag_parts(md.tag_ids[i], k, sizeof(k), v, sizeof(v), NULL);
-        need += 2u + 2u + 1u + strlen(k) + strlen(v);   /* +1: per-tag type byte */
+        need += 2u + 2u + 1u + strlen(k) + strlen(v);
     }
 
     if (need > out->capacity) {
@@ -869,10 +588,6 @@ static int ObjGetInfo(const ManifestOp *op,
     uint8_t *kp = crate_out_alloc(out, need);
     if (!kp) { tagfs_metadata_free(&md); return ERR_INVALID_ADDRESS; }
 
-    /* trashed and hidden are tags, not bits the kernel ever set in the
-     * record — so the flags a program read said "not trashed" of every file,
-     * and `erase <name>` refused every file as not trashed yet. The record
-     * carries the bits; the tags decide them. */
     uint32_t flags = md.flags;
     {
         const WellKnownTags *wk = tagfs_get_well_known_tags();
@@ -901,11 +616,6 @@ static int ObjGetInfo(const ManifestOp *op,
         (void)tagfs_tag_parts(md.tag_ids[i], k, sizeof(k), v, sizeof(v), &is_system);
         uint16_t kl = (uint16_t)strlen(k);
         uint16_t vl = (uint16_t)strlen(v);
-        /* The two passes read the registry twice, and a volume that changed
-         * in between could make the second one longer than the first measured.
-         * Stopping here is what keeps this inside the buffer; the count is
-         * corrected below so the reader is told how many records there are
-         * rather than how many were hoped for. */
         if (pos + 5u + kl + vl > need) break;
         memcpy(kp + pos, &kl, 2); pos += 2;
         memcpy(kp + pos, &vl, 2); pos += 2;
@@ -914,23 +624,16 @@ static int ObjGetInfo(const ManifestOp *op,
         if (vl) { memcpy(kp + pos, v, vl); pos += vl; }
         written++;
     }
-    memcpy(kp + 16, &written, 2);       /* tag_count: what was actually written */
+    memcpy(kp + 16, &written, 2);
 
     int crc = crate_out_commit(out, ctx, kp, pos);
     crate_buf_free(kp);
     tagfs_metadata_free(&md);
-    if (crc != OK) return crc;   /* fail closed: leave out->size unset */
+    if (crc != OK) return crc;
     out->size = pos;
     return OK;
 }
 
-/* =========================================================================
- *  Tag / Query / Context / Create — Phase 12 additions
- *
- *  All tag-string parsing is done with a small static helper that tolerates
- *  empty input. The auto-context tags are merged in for query and create
- *  exactly as the legacy handler did, keyed on ctx->proc->pid.
- * ========================================================================= */
 
 static int parse_tag_list(const char *src, size_t src_len,
                           const char *tags[], char buffer[][32],
@@ -959,10 +662,6 @@ static int parse_tag_list(const char *src, size_t src_len,
     return (int)count;
 }
 
-/*
- * The scope byte of storage.query / storage.create (boxos_decks.h): inside the
- * Use Context unless the caller said everywhere. Absent means inside.
- */
 static error_t storage_scope_of(const ManifestOp *op, size_t at, uint8_t *out_scope)
 {
     uint8_t scope = STORAGE_SCOPE_USE;
@@ -973,15 +672,6 @@ static error_t storage_scope_of(const ManifestOp *op, size_t at, uint8_t *out_sc
     return OK;
 }
 
-/*
- * The caller's tags followed by the Use Context's, as one array of names —
- * what a query is asked for and what a created file is stamped with when the
- * scope is USE. `own` are the caller's parsed tags; the result is kmalloc'd
- * (*out_all) and so is the block the context's names live in (*out_block);
- * the caller frees both. Both NULL with *out_total == own_count when the
- * scope is EVERYWHERE or the context is empty, so the caller's own array is
- * used as is.
- */
 static error_t storage_tags_with_use(uint8_t scope,
                                      const char **own, uint32_t own_count,
                                      const char ***out_all, char **out_block,
@@ -1015,18 +705,6 @@ static error_t storage_tags_with_use(uint8_t scope,
     return OK;
 }
 
-/* STORAGE_TAG_QUERY  params (optional): [u8 scope] — inside the Use Context
- *                    (absent, STORAGE_SCOPE_USE) or STORAGE_SCOPE_EVERYWHERE
- *                    in_crate (optional): comma-separated tag string
- *                    out_crate: [u32 delivered][u32 total][u32 file_ids[delivered]]
- *                    `total` is how many files match; `delivered` is how many
- *                    of them the crate had room for. A caller whose crate was
- *                    too small is told the true count and can ask again with
- *                    room for it. It used to be told the smaller number as if
- *                    that were the whole answer, and nothing said otherwise.
- *                    Inside the context the user's tags are ANDed with the
- *                    caller's: `use code cpp` then "project" asks for files
- *                    that are code AND cpp AND project. */
 static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                     const OpContext *ctx)
 {
@@ -1043,8 +721,6 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     TagFSState *state = tagfs_get_state();
     if (!state || !state->initialized) return ERR_NOT_INITIALIZED;
 
-    /* Query string from in_crate, if any. Read it BEFORE allocating the
-     * output bounce buffer so an early return here cannot leak the kbuf. */
     char    qbuf[256];
     size_t  qlen = 0;
     if (op->in_crate != CRATE_INDEX_NONE) {
@@ -1069,10 +745,6 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (mrc != OK) return mrc;
     const char **asked = all_tags ? all_tags : own_tags;
 
-    /* Room for every file the volume can hold, so the count is the true one
-     * and not the size of the caller's crate. The volume's ceiling — the
-     * number no file id reaches — is the only honest size for such a buffer,
-     * the same one proc_exec asks for. */
     uint32_t  room    = tagfs_file_ceiling();
     uint32_t *all_ids = NULL;
     if (room > 0) {
@@ -1094,8 +766,8 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 
     uint32_t max_results = (uint32_t)((out->capacity - 8) / sizeof(uint32_t));
     uint32_t hdr[2];
-    hdr[0] = (uint32_t)count < max_results ? (uint32_t)count : max_results;  /* delivered */
-    hdr[1] = (uint32_t)count;                                                 /* total     */
+    hdr[0] = (uint32_t)count < max_results ? (uint32_t)count : max_results;
+    hdr[1] = (uint32_t)count;
     uint64_t out_bytes = 8 + (uint64_t)hdr[0] * sizeof(uint32_t);
 
     uint8_t *kp = crate_out_alloc(out, out_bytes);
@@ -1109,12 +781,11 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 
     int crc = crate_out_commit(out, ctx, kp, out_bytes);
     crate_buf_free(kp);
-    if (crc != OK) return crc;   /* fail closed: leave out->size unset */
+    if (crc != OK) return crc;
     out->size = out_bytes;
     return OK;
 }
 
-/* STORAGE_TAG_SET  params:[u32 file_id]  in_crate: "key" or "key:value" */
 static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
@@ -1140,7 +811,6 @@ static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return OK;
 }
 
-/* STORAGE_TAG_UNSET  params:[u32 file_id]  in_crate: tag key */
 static int ObjTagUnset(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
@@ -1162,13 +832,6 @@ static int ObjTagUnset(const ManifestOp *op, Crate *crates, uint16_t crate_count
     return OK;
 }
 
-/* STORAGE_OBJ_CREATE  params:[char filename[32]] (NUL-padded)
- *                            [u8 scope] (optional) — inside the Use Context
- *                            (absent, STORAGE_SCOPE_USE) or EVERYWHERE
- *                     in_crate (optional): tag string
- *                     out_crate (optional): u32 file_id
- *                     Inside the context the new file is stamped with the
- *                     user's tags as well as its own. */
 static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
@@ -1183,13 +846,11 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     size_t fn_copy = op->param_size < 32 ? op->param_size : 32;
     memcpy(filename, op->params, fn_copy);
     filename[fn_copy] = '\0';
-    /* trim at first NUL within the 32-byte field */
     for (size_t i = 0; i < fn_copy; i++) {
         if (filename[i] == '\0') { filename[i] = '\0'; break; }
     }
     if (filename[0] == '\0') return ERR_INVALID_ARGUMENT;
 
-    /* Parse tag list (in_crate) + auto-context tags. */
     char    tag_buf[256];
     size_t  tlen = 0;
     if (op->in_crate != CRATE_INDEX_NONE) {
@@ -1214,7 +875,6 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (mrc != OK) return mrc;
     const char **stamped = all_tags ? all_tags : own_tags;
 
-    /* Intern every tag into the registry — the file's own and the user's. */
     uint16_t *tag_ids      = NULL;
     uint16_t  intern_count = 0;
     if (total > 0) {
@@ -1251,14 +911,6 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 }
 
 
-/* -------------------------------------------------------------------------
- * Snapshot ops — userspace surface for CoW snapshots.
- *
- *   STORAGE_SNAP_CREATE  params: [u32 file_id][u8 name_len][char name[]]
- *                        out_crate: [u32 snapshot_id]
- *   STORAGE_SNAP_DELETE  params: [u32 snapshot_id]
- *   STORAGE_SNAP_LIST    out_crate: [u32 count][u32 ids[count]]
- * ------------------------------------------------------------------------- */
 
 static int ObjSnapCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
@@ -1315,22 +967,13 @@ static int ObjSnapList(const ManifestOp *op, Crate *crates, uint16_t crate_count
     if (err != OK) return err;
 
     uint32_t bytes = 4 + count * 4;
-    uint8_t blob[4 + 64 * 4];   /* count + up to max_ids (<= 64) ids */
+    uint8_t blob[4 + 64 * 4];
     memcpy(blob, &count, 4);
     if (count > 0) memcpy(blob + 4, ids, count * 4);
     if (crate_write(out, ctx, blob, bytes) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
-/* STORAGE_SNAP_INFO  params: [u32 snapshot_id]
- *                    out_crate: [u32 id][u32 parent_file_id][u64 created_time]
- *                               [u32 file_count][u64 total_size][u8 flags]
- *                               [char name[32]]  (61 bytes)
- *
- * The structured counterpart to SNAP_LIST (ids only) — carries the snapshot's
- * name so userspace can resolve a snapshot by name for deterministic cleanup.
- * The record is a fixed 61 bytes, so it ships through crate_write of a stack
- * blob rather than a capacity-sized bounce buffer. */
 static int ObjSnapInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                         const OpContext *ctx)
 {
@@ -1342,9 +985,9 @@ static int ObjSnapInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count
 
     CowSnapshot cs;
     error_t err = TagFS_SnapshotInfo(snapshot_id, &cs);
-    if (err != OK) return (int)err;   /* ERR_SNAPSHOT_NOT_FOUND for an unknown id */
+    if (err != OK) return (int)err;
 
-    uint32_t need = 4u + 4u + 8u + 4u + 8u + 1u + 32u;   /* 61 bytes */
+    uint32_t need = 4u + 4u + 8u + 4u + 8u + 1u + 32u;
     Crate   *out  = &crates[op->out_crate];
     if (out->capacity < need) return ERR_BUFFER_TOO_SMALL;
 
@@ -1362,46 +1005,18 @@ static int ObjSnapInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count
     return OK;
 }
 
-/* -------------------------------------------------------------------------
- * STORAGE_OBJ_ANCHOR — durability primitive.
- *
- *   params: [u32 file_id]   (0 = anchor everything; non-zero = the file
- *                             whose tags get the Touch payload's fid)
- *
- * Blocking semantics for the caller — returns when meta_pool current
- * block, file_table dirty blocks, block-bitmap, and superblock are all
- * persisted to disk. Plus the AHCI cache flush is forced.
- *
- * Then publishes a Touch "anchor" event on every tag of file_id so any
- * REST/REACT subscriber observing that tag wakes up: *this file is now
- * durable*. No POSIX equivalent — fsync() returns silently; anchor()
- * fans out a tag-targeted notification, so OBSERVERS get to react too.
- * Combined with Touch's REST mode, an app can fire-and-forget many
- * fwrites and have a single observer await N "anchor" events when its
- * full transaction is durable.
- *
- *   Form A (blocking):  anchor(fid)             — POSIX-shaped sync.
- *   Form B (Touch obs): touch_claim("anchor"…); — async durability fan-out.
- * ------------------------------------------------------------------------- */
 static int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                       const OpContext *ctx)
 {
     (void)crates; (void)crate_count; (void)ctx;
     uint32_t file_id = (op->param_size >= 4) ? param_u32(op, 0) : 0;
 
-    /* Sync flush of all in-memory state — same path bye uses, but
-     * inline so caller's fwrite-then-anchor is durable without a
-     * shutdown. */
     tagfs_sync();
     tagfs_flush_cache();
 
-    /* Touch fan-out. For file_id == 0 we publish on a special "anchor"
-     * tag (registered well-known); for a specific fid, publish on every
-     * tag attached to that file so any observer keyed by file's tag
-     * wakes up. */
     struct __attribute__((packed)) {
         uint32_t file_id;
-        uint8_t  op;          /* 2 = ANCHOR */
+        uint8_t  op;
         uint8_t  _pad[3];
         uint64_t now_us;
     } ev = { file_id, 2, {0,0,0}, 0 };
@@ -1419,15 +1034,6 @@ static int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
             tagfs_metadata_free(&wmeta);
         }
     }
-    /* Always also publish on the bare "anchor" tag — generic listeners.
-     *
-     * The one kernel publisher that deliberately does NOT name into the
-     * Logbook. "anchor" is a durability event in the SHARED vocabulary,
-     * keyed the same way as the per-file tag ids published just above, and
-     * a process subscribes to it by name (box::tagfs::on_anchor) — usually
-     * before this code has ever run. Naming it in the kernel's own book
-     * would put publisher and subscriber on two different ids depending on
-     * who spoke first. The reader door gives both sides the same id. */
     TouchTag anchor_full, anchor_bare;
     TouchTagResolve("anchor", &anchor_full, &anchor_bare);
     TouchPublishPair(anchor_full, anchor_bare, &ev, sizeof(ev),
@@ -1435,9 +1041,6 @@ static int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return OK;
 }
 
-/* -------------------------------------------------------------------------
- * Registration
- * ------------------------------------------------------------------------- */
 
 error_t StorageDeckRegister(void)
 {
@@ -1447,11 +1050,9 @@ error_t StorageDeckRegister(void)
         uint32_t    auth;
         const char *name;
     } table[] = {
-        /* Read-only / cooperative: app+ (any process can list and read). */
         { STORAGE_TAG_QUERY,    ObjQuery,        OP_AUTH_APP, "storage.query"    },
         { STORAGE_OBJ_READ,     ObjRead,         OP_AUTH_APP, "storage.read"     },
         { STORAGE_OBJ_GET_INFO, ObjGetInfo,      OP_AUTH_APP, "storage.getinfo"  },
-        /* Mutating: app+ — TagFS context further restricts what's visible. */
         { STORAGE_TAG_SET,      ObjTagSet,       OP_AUTH_APP, "storage.tag.set"  },
         { STORAGE_TAG_UNSET,    ObjTagUnset,     OP_AUTH_APP, "storage.tag.unset"},
         { STORAGE_OBJ_WRITE,    ObjWrite,        OP_AUTH_APP, "storage.write"    },
@@ -1459,7 +1060,6 @@ error_t StorageDeckRegister(void)
         { STORAGE_OBJ_DELETE,   ObjDelete,       OP_AUTH_APP, "storage.delete"   },
         { STORAGE_OBJ_TRUNCATE, ObjTruncate,     OP_AUTH_APP, "storage.truncate" },
         { STORAGE_OBJ_RENAME,   ObjRename,       OP_AUTH_APP, "storage.rename"   },
-        /* Snapshot management: app+. */
         { STORAGE_SNAP_CREATE,  ObjSnapCreate,   OP_AUTH_APP, "storage.snap.create"},
         { STORAGE_SNAP_DELETE,  ObjSnapDelete,   OP_AUTH_APP, "storage.snap.delete"},
         { STORAGE_SNAP_LIST,    ObjSnapList,     OP_AUTH_APP, "storage.snap.list"  },

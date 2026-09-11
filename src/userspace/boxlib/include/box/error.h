@@ -11,21 +11,8 @@ typedef uint32_t error_t;
 
 #define OK                      0
 
-/* ── BOX_ERROR_LIST — the single source of truth for every BoxOS error code ──
- * One row per code, mirroring the kernel enum (src/kernel/core/error/error.h)
- * and its strings (error.c ErrorString):
- *
- *     X(SUFFIX, enumerator, value, "message", "category")
- *
- * EVERY downstream artifact expands from THIS list — the boxlib ERR_* code
- * constants below, the C++ box::errc enumerators (box/cxx/error.h), and the
- * box:: message + category tables (src/runtime/box_error.cpp). Add a code here
- * and all three layers follow; there is no second hand-list to drift against.
- * (The C preprocessor cannot emit a #define from a macro, so the codes are an
- * anonymous enum — exactly like the kernel — not #defines; nothing in the tree
- * keys off ERR_* being a macro, so this is transparent to every caller.) */
 #define BOX_ERROR_LIST(X) \
-    /* General (1-20) */ \
+     \
     X(UNKNOWN,                       unknown,                       1,    "unknown error",                 "core") \
     X(NOT_IMPLEMENTED,               not_implemented,               2,    "not implemented",               "core") \
     X(INVALID_ARGUMENT,              invalid_argument,              3,    "invalid argument",              "core") \
@@ -46,7 +33,7 @@ typedef uint32_t error_t;
     X(VERSION_MISMATCH,              version_mismatch,              18,   "version mismatch",              "core") \
     X(CHECKSUM,                      checksum,                      19,   "checksum failed",               "core") \
     X(QUOTA_EXCEEDED,                quota_exceeded,                20,   "quota exceeded",                "core") \
-    /* Memory (100-116) */ \
+     \
     X(NO_MEMORY,                     no_memory,                     100,  "out of memory",                 "memory") \
     X(INVALID_ADDRESS,               invalid_address,               101,  "invalid address",               "memory") \
     X(PAGE_FAULT,                    page_fault,                    102,  "page fault",                    "memory") \
@@ -64,7 +51,7 @@ typedef uint32_t error_t;
     X(TLB_FLUSH_FAILED,              tlb_flush_failed,              114,  "tlb flush failed",              "memory") \
     X(PHYS_ADDR_EXCEEDED,            phys_addr_exceeded,            115,  "physical address exceeded",     "memory") \
     X(PCID_EXHAUSTED,                pcid_exhausted,                116,  "pcid pool exhausted",           "memory") \
-    /* I/O (200-214) */ \
+     \
     X(IO,                            io,                            200,  "i/o error",                     "io") \
     X(READ_FAILED,                   read_failed,                   201,  "read failed",                   "io") \
     X(WRITE_FAILED,                  write_failed,                  202,  "write failed",                  "io") \
@@ -80,7 +67,7 @@ typedef uint32_t error_t;
     X(DMA_TIMEOUT,                   dma_timeout,                   212,  "dma timeout",                   "io") \
     X(SECTOR_READ_FAILED,            sector_read_failed,            213,  "sector read failed",            "io") \
     X(SECTOR_WRITE_FAILED,           sector_write_failed,           214,  "sector write failed",           "io") \
-    /* Filesystem (300-324) */ \
+     \
     X(FILE_NOT_FOUND,                file_not_found,                300,  "file not found",                "storage") \
     X(OBJECT_NOT_FOUND,              object_not_found,              301,  "object not found",              "storage") \
     X(TAG_NOT_FOUND,                 tag_not_found,                 302,  "tag not found",                 "storage") \
@@ -106,7 +93,7 @@ typedef uint32_t error_t;
     X(SNAPSHOT_NOT_FOUND,            snapshot_not_found,            322,  "snapshot not found",            "storage") \
     X(DEDUP_FAILED,                  dedup_failed,                  323,  "deduplication failed",          "storage") \
     X(SELF_HEAL_FAILED,              self_heal_failed,              324,  "self-healing failed",           "storage") \
-    /* Process (400-414) */ \
+     \
     X(PROCESS_NOT_FOUND,             process_not_found,             400,  "process not found",             "process") \
     X(INVALID_PID,                   invalid_pid,                   401,  "invalid pid",                   "process") \
     X(PROCESS_LIMIT_EXCEEDED,        process_limit_exceeded,        402,  "process limit exceeded",        "process") \
@@ -124,7 +111,7 @@ typedef uint32_t error_t;
     X(STACK_ALLOC_FAILED,            stack_alloc_failed,            414,  "stack allocation failed",       "process") \
     X(PROCESS_KILLED,                process_killed,                415,  "process killed",                "process") \
     X(PROCESS_CRASHED,               process_crashed,               416,  "process crashed",               "process") \
-    /* Security (500-506) */ \
+     \
     X(ACCESS_DENIED,                 access_denied,                 500,  "access denied",                 "security") \
     X(PERMISSION_DENIED,             permission_denied,             501,  "permission denied",             "security") \
     X(SECURITY_VIOLATION,            security_violation,            502,  "security violation",            "security") \
@@ -132,7 +119,7 @@ typedef uint32_t error_t;
     X(INVALID_OPERATION,             invalid_operation,             504,  "invalid operation",             "security") \
     X(PRIVILEGE_REQUIRED,            privilege_required,            505,  "privilege required",            "security") \
     X(SANDBOX_VIOLATION,             sandbox_violation,             506,  "sandbox violation",             "security") \
-    /* Hardware (600-612) */ \
+     \
     X(HARDWARE,                      hardware,                      600,  "hardware error",                "hardware") \
     X(INVALID_DEVICE,                invalid_device,                601,  "invalid device",                "hardware") \
     X(DEVICE_BUSY,                   device_busy,                   602,  "device busy",                   "hardware") \
@@ -146,14 +133,14 @@ typedef uint32_t error_t;
     X(TIMER_ERROR,                   timer_error,                   610,  "timer error",                   "hardware") \
     X(INTERRUPT_ERROR,               interrupt_error,               611,  "interrupt error",               "hardware") \
     X(CPU_ERROR,                     cpu_error,                     612,  "cpu error",                     "hardware") \
-    /* ACPI (800-805) */ \
+     \
     X(ACPI_NOT_FOUND,                acpi_not_found,                800,  "acpi tables not found",         "acpi") \
     X(ACPI_INVALID_TABLE,            acpi_invalid_table,            801,  "invalid acpi table",            "acpi") \
     X(ACPI_CHECKSUM_FAILED,          acpi_checksum_failed,          802,  "acpi checksum failed",          "acpi") \
     X(ACPI_PARSE_ERROR,              acpi_parse_error,              803,  "acpi parse error",              "acpi") \
     X(ACPI_MADT_NOT_FOUND,           acpi_madt_not_found,           804,  "acpi madt not found",           "acpi") \
     X(ACPI_FADT_NOT_FOUND,           acpi_fadt_not_found,           805,  "acpi fadt not found",           "acpi") \
-    /* TagFS core (850-865) */ \
+     \
     X(TAGFS_NOT_INITIALIZED,         tagfs_not_initialized,         850,  "tagfs not initialized",         "tagfs") \
     X(TAGFS_CORRUPTED,               tagfs_corrupted,               851,  "tagfs corrupted",               "tagfs") \
     X(TAGFS_NO_SPACE,                tagfs_no_space,                852,  "tagfs no space",                "tagfs") \
@@ -170,7 +157,7 @@ typedef uint32_t error_t;
     X(TAGFS_INVALID_TAG,             tagfs_invalid_tag,             863,  "tagfs invalid tag",             "tagfs") \
     X(TAGFS_EXTENT_ERROR,            tagfs_extent_error,            864,  "tagfs extent error",            "tagfs") \
     X(TAGFS_RECOVERY_FAILED,         tagfs_recovery_failed,         865,  "tagfs recovery failed",         "tagfs") \
-    /* Pocket / IPC (900-911) */ \
+     \
     X(POCKET_RING_FULL,              pocket_ring_full,              900,  "pocket ring full",              "ipc") \
     X(RESULT_RING_FULL,              result_ring_full,              901,  "result ring full",              "ipc") \
     X(INVALID_POCKET,                invalid_pocket,                902,  "invalid pocket",                "ipc") \
@@ -183,28 +170,28 @@ typedef uint32_t error_t;
     X(KCORE_SUBMIT_FAILED,           kcore_submit_failed,           909,  "k-core submit failed",          "ipc") \
     X(RESULT_NOT_READY,              result_not_ready,              910,  "result not ready",              "ipc") \
     X(RESULT_STASH_FULL,             result_stash_full,             911,  "result stash full",             "ipc") \
-    /* Routing (940-945) */ \
+     \
     X(ROUTE_TARGET_FULL,             route_target_full,             940,  "route target queue full",       "routing") \
     X(ROUTE_NO_SUBSCRIBERS,          route_no_subscribers,          941,  "no subscribers for route",      "routing") \
     X(ROUTE_SELF,                    route_self,                    942,  "cannot route to self",          "routing") \
     X(LISTEN_TABLE_FULL,             listen_table_full,             943,  "listen table full",             "routing") \
     X(LISTEN_ALREADY,                listen_already,                944,  "already listening on route",    "routing") \
     X(ROUTE_INVALID_TAG,             route_invalid_tag,             945,  "invalid route tag",             "routing") \
-    /* Pocket failure (950) — its own code, a pocket-class fault */ \
+     \
     X(POCKET_FAILED,                 pocket_failed,                 950,  "pocket failed",                 "ipc") \
-    /* Scheduler (960-964) */ \
+     \
     X(SCHEDULER_LOCKED,              scheduler_locked,              960,  "scheduler locked",              "scheduler") \
     X(RUNQUEUE_FULL,                 runqueue_full,                 961,  "runqueue full",                 "scheduler") \
     X(RUNQUEUE_EMPTY,                runqueue_empty,                962,  "runqueue empty",                "scheduler") \
     X(HOME_CORE_INVALID,             home_core_invalid,             963,  "invalid home core",             "scheduler") \
     X(WORK_STEAL_FAILED,             work_steal_failed,             964,  "work stealing failed",          "scheduler") \
-    /* Boot (970-974) */ \
+     \
     X(BOOT_INFO_INVALID,             boot_info_invalid,             970,  "invalid boot info",             "boot") \
     X(E820_FAILED,                   e820_failed,                   971,  "e820 memory detection failed",  "boot") \
     X(A20_FAILED,                    a20_failed,                    972,  "a20 gate failed",               "boot") \
     X(LONG_MODE_FAILED,              long_mode_failed,              973,  "long mode failed",              "boot") \
     X(KERNEL_LOAD_FAILED,            kernel_load_failed,            974,  "kernel load failed",            "boot") \
-    /* TagFS module — DiskBook (1000-1008) */ \
+     \
     X(DISKBOOK_NOT_INITIALIZED,      diskbook_not_initialized,      1000, "diskbook not initialized",      "diskbook") \
     X(DISKBOOK_FULL,                 diskbook_full,                 1001, "diskbook journal full",         "diskbook") \
     X(DISKBOOK_CORRUPTED,            diskbook_corrupted,            1002, "diskbook journal corrupted",    "diskbook") \
@@ -214,30 +201,30 @@ typedef uint32_t error_t;
     X(DISKBOOK_INVALID_TXN,          diskbook_invalid_txn,          1006, "diskbook invalid transaction",  "diskbook") \
     X(DISKBOOK_WRITE_FAILED,         diskbook_write_failed,         1007, "diskbook write failed",         "diskbook") \
     X(DISKBOOK_READ_FAILED,          diskbook_read_failed,          1008, "diskbook read failed",          "diskbook") \
-    /* TagFS module — CoW snapshots (1010-1015) */ \
+     \
     X(COW_NOT_INITIALIZED,           cow_not_initialized,           1010, "cow snapshots not initialized", "cow") \
     X(COW_SNAPSHOT_EXISTS,           cow_snapshot_exists,           1011, "snapshot already exists",       "cow") \
     X(COW_SNAPSHOT_NOT_FOUND,        cow_snapshot_not_found,        1012, "snapshot not found",            "cow") \
     X(COW_SNAPSHOT_LIMIT,            cow_snapshot_limit,            1013, "snapshot limit reached",        "cow") \
     X(COW_ALLOCATION_FAILED,         cow_allocation_failed,         1014, "cow allocation failed",         "cow") \
     X(COW_RESTORE_FAILED,            cow_restore_failed,            1015, "snapshot restore failed",       "cow") \
-    /* TagFS module — Dedup (1020-1024) */ \
+     \
     X(DEDUP_NOT_INITIALIZED,         dedup_not_initialized,         1020, "dedup not initialized",         "dedup") \
     X(DEDUP_HASH_COLLISION,          dedup_hash_collision,          1021, "dedup hash collision",          "dedup") \
     X(DEDUP_POOL_EXHAUSTED,          dedup_pool_exhausted,          1022, "dedup entry pool exhausted",    "dedup") \
     X(DEDUP_GC_FAILED,               dedup_gc_failed,               1023, "dedup gc failed",               "dedup") \
     X(DEDUP_REGISTER_FAILED,         dedup_register_failed,         1024, "dedup register failed",         "dedup") \
-    /* TagFS module — Self-Heal (1030-1034) */ \
+     \
     X(SELF_HEAL_NOT_INITIALIZED,     self_heal_not_initialized,     1030, "self-heal not initialized",     "selfheal") \
     X(SELF_HEAL_CORRUPTION_DETECTED, self_heal_corruption_detected, 1031, "self-heal corruption detected", "selfheal") \
     X(SELF_HEAL_RECOVERY_FAILED,     self_heal_recovery_failed,     1032, "self-heal recovery failed",     "selfheal") \
     X(SELF_HEAL_MIRROR_FAILED,       self_heal_mirror_failed,       1033, "self-heal mirror failed",       "selfheal") \
     X(SELF_HEAL_SCRUB_FAILED,        self_heal_scrub_failed,        1034, "self-heal scrub failed",        "selfheal") \
-    /* TagFS module — BoxHash (1040-1042) */ \
+     \
     X(BOXHASH_INVALID_CONTEXT,       boxhash_invalid_context,       1040, "boxhash invalid context",       "boxhash") \
     X(BOXHASH_VERIFICATION_FAILED,   boxhash_verification_failed,   1041, "boxhash verification failed",   "boxhash") \
     X(BOXHASH_KEY_NOT_SET,           boxhash_key_not_set,           1042, "boxhash key not set",           "boxhash") \
-    /* TagFS module — Braid RAID (1050-1059) */ \
+     \
     X(BRAID_NOT_INITIALIZED,         braid_not_initialized,         1050, "braid not initialized",         "braid") \
     X(BRAID_DISK_OFFLINE,            braid_disk_offline,            1051, "braid disk offline",            "braid") \
     X(BRAID_DISK_FULL,               braid_disk_full,               1052, "braid disk full",               "braid") \
@@ -248,49 +235,28 @@ typedef uint32_t error_t;
     X(BRAID_INSUFFICIENT_DISKS,      braid_insufficient_disks,      1057, "braid insufficient disks",      "braid") \
     X(BRAID_MODE_INVALID,            braid_mode_invalid,            1058, "braid invalid mode",            "braid") \
     X(BRAID_REBUILD_FAILED,          braid_rebuild_failed,          1059, "braid rebuild failed",          "braid") \
-    /* Strand (1100) */ \
+     \
     X(ADDR_VALUE_MISMATCH,           addr_value_mismatch,           1100, "park value mismatch",           "strand")
 
-/* The boxlib code constants — emitted from the list above (kernel parity). */
 enum {
 #define BOX_ERROR_DEFINE(SUFFIX, name, value, msg, cat) ERR_##SUFFIX = (value),
     BOX_ERROR_LIST(BOX_ERROR_DEFINE)
 #undef BOX_ERROR_DEFINE
 };
 
-/* Convenience aliases (boxlib-only; resolve to codes defined above). Note:
- * ERR_POCKET_FAILED is NO LONGER an alias — it is its own code 950 (matching
- * the kernel), so a real "pocket failed" cause is no longer mislabelled 906. */
 #define ERR_INVALID_ARGS        ERR_INVALID_ARGUMENT
 #define ERR_RESULT_INVALID      ERR_CORRUPTED
 
 #define IS_ERROR(err)   ((err) != OK)
 #define IS_SUCCESS(err) ((err) == OK)
 
-/* ── error-cause preservation (Ф23) ──────────────────────────────────────
- * BoxOS keeps a failed call's real error_t in its RETURN VALUE — never in a
- * system-wide errno register (that Unix idiom is deliberately absent). A
- * boxlib syscall stub gets the cause back from MfCall1 in three dialects: 0
- * on success, a POSITIVE error_t for a kernel-side error, and a NEGATIVE
- * -ERR_* for a builder/submit (transport) failure. box_fail folds the two
- * failure dialects into one negative form, so a stub reports failure as a
- * value < 0 whose magnitude is the real error_t (the boxlib stubs are
- * converted to this rule in Ф23b). The caller — plain C, or the C++
- * box::result bridge — recovers the cause with box_errno_of.
- *
- * One rule across all of boxlib: a return  < 0  is failure with
- * error_t == box_errno_of(ret); a return >= 0 is success (a payload or 0). */
 static inline int box_fail(int rc)
 {
-    /* 0 → 0 (caller maps to its own success); kernel +error_t → negate;
-     * transport -ERR_* → keep. Result is <= 0, and 0 only when rc == 0. */
     return rc == 0 ? 0 : (rc > 0 ? -rc : rc);
 }
 
 static inline error_t box_errno_of(int ret)
 {
-    /* Recover the error_t a failing stub returned. ret >= 0 carries no
-     * cause. Widen before negating so INT_MIN cannot overflow. */
     return ret >= 0 ? OK : (error_t)(-(long)ret);
 }
 
@@ -298,4 +264,4 @@ static inline error_t box_errno_of(int ret)
 }
 #endif
 
-#endif // BOX_ERROR_H
+#endif

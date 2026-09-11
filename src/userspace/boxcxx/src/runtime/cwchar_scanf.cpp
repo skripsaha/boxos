@@ -1,26 +1,3 @@
-// boxcxx — <cwchar> runtime, formatted wide input
-//
-// ── What is shared with the narrow engine, and what cannot be ──────────────
-// The VALUE conversion is shared: a gathered token is handed to `wcstoll`,
-// `wcstoull` or `wcstod`, which narrow it one character to one character and
-// call the `strto*` that <cstdlib> already has. So there is one decimal-to-
-// binary path, one set of overflow rules, and one answer to "is this hex".
-//
-// The TOKENIZER cannot be shared, and the reason is not laziness. Two things
-// the narrow engine does are wrong at this width:
-//   * white space is `iswspace`, which has been Unicode-wide since Ф42-a, so a
-//     field may be preceded by U+2003 and the narrow `isspace` would stop dead
-//     on the first byte of it;
-//   * a field width counts CHARACTERS, and the narrow engine counts bytes.
-// A tokenizer that got either wrong would be silently reading the wrong field.
-//
-// ── How much look-ahead, and why exactly that much ────────────────────────
-// The gatherers below over-read by a bounded amount — `0x` with no hex digit
-// after it, a `-` that begins nothing, the prefixes of `inf`, `infinity` and
-// `nan`. `wcstod` and `wcstoll` then report through `endptr` how much of the
-// token was really theirs, and everything past it is pushed back. The stack is
-// eight deep because `infinity` is eight characters: Ф41 measured that when a
-// single-cell push-back swallowed seven of them.
 
 #include <cstdarg>
 #include <cstddef>
@@ -38,8 +15,6 @@ constexpr wint_t kEnd    = WEOF;
 constexpr int    kPbCap  = 8;
 constexpr int    kTokCap = 512;
 
-// Either a stream or a wide array. `taken` is what %n reports: characters
-// pulled from the source and not pushed back.
 struct WSource {
     ::std::FILE   *file;
     const wchar_t *str;
@@ -73,8 +48,6 @@ void Unget(WSource &s, wint_t c)
 
 bool AtEnd(const WSource &s) { return s.npb == 0 && s.hit_end; }
 
-// Unicode white space, not ASCII white space. This is the line the narrow
-// engine cannot be asked to walk.
 void SkipSpace(WSource &s)
 {
     wint_t c;
@@ -82,11 +55,10 @@ void SkipSpace(WSource &s)
     Unget(s, c);
 }
 
-// ── the parsed directive ────────────────────────────────────────────────────
 struct Spec {
     bool suppress;
-    int  width;      // 0 when absent
-    char length;     // 0, 'h', 'H' (hh), 'l', 'q' (ll), 'j', 'z', 't', 'L'
+    int  width;
+    char length;
 };
 
 void StoreSigned(void *dst, char length, long long v)
@@ -121,19 +93,6 @@ bool HexDigit(wint_t c)
     return (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F');
 }
 
-// Collects an integer field. The base is resolved BEFORE any digit is taken,
-// and only digits valid in that base are gathered, so what wcstoll declines is
-// at most the two characters of a `0x` that led nowhere.
-//
-// Gathering generously and letting the converter sort it out was the first
-// version, and it was wrong in a way no reading would have shown: `%i` on
-// "0888888888888" resolves to octal, so eighteen characters became tail, the
-// eight-deep push-back silently dropped ten of them, and the NEXT field read
-// the wrong number. Measured against the host, which returned 888888888888
-// where this returned 8888888.
-//
-// The push-back depth stays eight because that is what `infinity` needs; the
-// invariant that keeps it sufficient is this function, not its size.
 int GatherInteger(WSource &s, wchar_t *buf, int width, unsigned base)
 {
     int    n = 0;
@@ -144,7 +103,6 @@ int GatherInteger(WSource &s, wchar_t *buf, int width, unsigned base)
         c = Get(s);
     }
 
-    // Resolve the base from the prefix, consuming only what the prefix really is.
     if (c == L'0' && (!width || n < width)) {
         buf[n++] = L'0';
         c = Get(s);
@@ -155,8 +113,6 @@ int GatherInteger(WSource &s, wchar_t *buf, int width, unsigned base)
                 base = 16;
                 c    = d;
             } else {
-                // "0x" that leads nowhere: the field is the 0 alone, and both
-                // characters go back in the order they were read.
                 Unget(s, d);
                 Unget(s, c);
                 buf[n] = L'\0';
@@ -184,9 +140,6 @@ int GatherInteger(WSource &s, wchar_t *buf, int width, unsigned base)
     return n;
 }
 
-// The floating field, including the words. `inf`, `infinity` and `nan` are
-// gathered whole so wcstod can recognise them; the eight-deep push-back is what
-// makes `infinity` safe to try and abandon.
 int GatherFloat(WSource &s, wchar_t *buf, int width)
 {
     int    n = 0;
@@ -210,10 +163,6 @@ int GatherFloat(WSource &s, wchar_t *buf, int width)
         const bool digit = hex ? HexDigit(c) : (c >= L'0' && c <= L'9');
         const bool expo  = hex ? (c == L'p' || c == L'P') : (c == L'e' || c == L'E');
         if (c == L'.') {
-            // One radix point only. Gathering "1.2.3.4.5.6" whole would leave
-            // wcstold declining everything after "1.2", and a tail that long
-            // does not fit the push-back — the same defect the integer
-            // gatherer had.
             if (seenDot) break;
             seenDot = true;
             buf[n++] = static_cast<wchar_t>(c);
@@ -239,7 +188,6 @@ int GatherFloat(WSource &s, wchar_t *buf, int width)
             Unget(s, sign);
             break;
         }
-        // inf / infinity / nan, tried and abandoned whole.
         if (n == 0 || (n == 1 && (buf[0] == L'+' || buf[0] == L'-'))) {
             const wchar_t *word = nullptr;
             if (c == L'i' || c == L'I') word = L"infinity";
@@ -271,7 +219,6 @@ int GatherFloat(WSource &s, wchar_t *buf, int width)
     return n;
 }
 
-// Pushes back everything wcsto* declined, so the next directive sees it.
 void PushBackTail(WSource &s, const wchar_t *buf, int n, const wchar_t *endp)
 {
     int used = endp ? static_cast<int>(endp - buf) : 0;
@@ -331,7 +278,7 @@ int Run(WSource &s, const wchar_t *fmt, va_list ap)
             if (sp.suppress) break;
             void *p = va_arg(ap, void *);
             StoreSigned(p, sp.length, s.taken);
-            break;      // %n is not a conversion and is not counted
+            break;
         }
 
         case L'd': case L'i': case L'o': case L'u': case L'x': case L'X': case L'p': {
@@ -396,9 +343,6 @@ int Run(WSource &s, const wchar_t *fmt, va_list ap)
                 if (sp.length == 'l') {
                     static_cast<wchar_t *>(p)[got] = static_cast<wchar_t>(c);
                 } else {
-                    // No `l`: C converts to multibyte and stores bytes, so the
-                    // caller's char array receives UTF-8 rather than truncated
-                    // code points.
                     char             mb[8];
                     ::std::mbstate_t st{};
                     const size_t     r = ::std::wcrtomb(mb, static_cast<wchar_t>(c), &st);
@@ -450,7 +394,7 @@ int Run(WSource &s, const wchar_t *fmt, va_list ap)
             bool invert = false;
             if (*fmt == L'^') { invert = true; ++fmt; }
             const wchar_t *setBegin = fmt;
-            if (*fmt == L']') ++fmt;                 // a leading ] is a member
+            if (*fmt == L']') ++fmt;
             while (*fmt != L']' && *fmt != L'\0') ++fmt;
             const wchar_t *setEnd = fmt;
             if (*fmt == L']') ++fmt;
@@ -498,7 +442,7 @@ int Run(WSource &s, const wchar_t *fmt, va_list ap)
     return assigned;
 }
 
-} // namespace
+}
 
 namespace std {
 
@@ -508,12 +452,6 @@ int vfwscanf(FILE *stream, const wchar_t *format, va_list arg) noexcept
     WSource s{};
     s.file = stream;
     const int r = Run(s, format, arg);
-    // The look-ahead lives in a stack local to this call, so anything still in
-    // it when Run returns has been read out of the stream and would simply
-    // vanish. One character can go back; C promises no more, and the narrow
-    // vfscanf hands its own back on exactly these terms. It is the LAST one
-    // pushed, which is the character the failing conversion refused — the one
-    // [fwscanf] requires to be left unread.
     if (s.npb > 0) ungetwc(s.pb[s.npb - 1], stream);
     return r;
 }
@@ -558,4 +496,4 @@ int swscanf(const wchar_t *s, const wchar_t *format, ...) noexcept
     return rc;
 }
 
-} // namespace std
+}

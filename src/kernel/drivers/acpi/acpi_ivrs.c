@@ -1,19 +1,6 @@
 #include "acpi_internal.h"
 #include "klib.h"
 
-/*
- * IVRS (I/O Virtualization Reporting Structure) parser
- *   — AMD I/O Virtualization Technology (IOMMU) Specification, §5.2.
- *
- * IVRS is the AMD analogue of Intel's DMAR. The first IVRS-block per
- * IOMMU is an IVHD (I/O Virtualization Hardware Definition). We record
- * one entry per IVHD so the future AMD IOMMU driver can find each
- * controller without re-parsing.
- *
- * Device entries inside an IVHD describe which PCI devices/aliases are
- * routed through this IOMMU — relevant only when a full driver is
- * present, so we skip them here.
- */
 
 void acpi_parse_ivrs(void) {
     memset(&g_acpi.ivrs, 0, sizeof(g_acpi.ivrs));

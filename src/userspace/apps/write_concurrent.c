@@ -1,20 +1,6 @@
-/*
- * write_concurrent — drives the OFE token handoff under contention.
- *
- * Parent creates a fresh file, spawns N children. Each child writes
- * its assigned slice (one PAGE_SIZE block) repeatedly. The kernel's
- * async OFE token serializes them — the file content must always be
- * each child's deterministic pattern at its slice offset, never
- * interleaved bytes from different writers.
- *
- * After all children exit, parent re-reads the file and verifies
- * every slice. If a write was interleaved or torn, bytes will not
- * match a single writer's pattern.
- */
 
 #include "box/bay.h"
 #include "box/file.h"
-#include "box/touch.h"
 #include "box/system.h"
 #include "box/core/cabin.h"
 #include "box/core/result.h"
@@ -33,18 +19,6 @@ static char rbuf[PAGE_SIZE];
 
 static int child_role(uint32_t my_pid)
 {
-    /* Claim a slice ATOMICALLY instead of deriving it from the pid.
-     *
-     * This was `my_pid % CHILD_COUNT`, under a comment claiming pid parity
-     * kept the assignment deterministic "even when the kernel allocates pids
-     * in different orders". It does the opposite: CONSECUTIVE pids differ in
-     * parity, non-consecutive ones need not. Let any other process take a pid
-     * between the two spawns — routine as soon as more than one core is
-     * running — and both children land on the same slice while the other slice
-     * is never written and keeps the parent's pre-fill. The parent then read
-     * zeros, reconstructed writer pid 0 from byte 0, and reported the kernel's
-     * write path as torn. The requirement is "one writer per slice"; a claim
-     * counter states it, pid arithmetic guesses it. */
     uint32_t *claim = (uint32_t *)bay_open(WC_CLAIM_TAG, 0, BAY_OPEN);
     if (!claim) {
         kdbg_print("[WC child %u] claim bay missing", my_pid);
@@ -67,7 +41,6 @@ static int child_role(uint32_t my_pid)
     }
     uint32_t fid = fids[0];
 
-    /* Pattern: byte j = (my_pid + j) & 0xFF — unique per writer. */
     for (uint32_t i = 0; i < PAGE_SIZE; i++) {
         wbuf[i] = (char)((my_pid + i) & 0xFF);
     }
@@ -90,14 +63,10 @@ int main(void)
     CabinInfo *ci = cabin_info();
     uint32_t my_pid = ci ? ci->pid : 0;
 
-    /* Child branch — spawned by another instance. Shell PID is 2; if
-     * spawner is anything else (and not zero) we're a child. */
     if (ci && ci->spawner_pid != 0 && ci->spawner_pid != 2) {
         return child_role(my_pid);
     }
 
-    /* Parent. Pre-create the file with N×PAGE_SIZE bytes by writing once
-     * to each slice — guarantees extents exist before children race. */
     int fid = create(WC_NAME, WC_TAG);
     if (fid < 0) {
         kdbg_print("[WC] create rc=%d", fid);
@@ -114,9 +83,6 @@ int main(void)
         }
     }
 
-    /* Slice-claim Bay. Created before the first spawn so no child can find
-     * it missing, and held by the parent until every child has exited so the
-     * last release cannot re-key it mid-run. */
     uint32_t *claim = (uint32_t *)bay_open(WC_CLAIM_TAG, PAGE_SIZE, BAY_CREATE);
     if (!claim) {
         kdbg_print("[WC] claim bay create FAIL");
@@ -125,56 +91,26 @@ int main(void)
     }
     *claim = 0;
 
-    /* Subscribe to process:died so we know when children finish. */
-    TouchTag died_tag = TOUCH_TAG_ID(TOUCH_TAG_PROCESS_DIED);
-    if (touch_claim(died_tag, TOUCH_REST, 0, 0) != 0) {
-        kdbg_print("[WC] claim process:died FAIL");
-        bay_release(claim);
-        delete(fid);
-        return 1;
-    }
-
-    int kids[CHILD_COUNT];
-    int kids_alive = 0;
+    int      kids[CHILD_COUNT];
+    uint32_t gens[CHILD_COUNT];
     for (int i = 0; i < CHILD_COUNT; i++) {
-        kids[i] = proc_exec("write_concurrent");
-        if (kids[i] < 0) {
+        kids[i] = proc_exec_gen("write_concurrent", NULL, &gens[i]);
+        if (kids[i] <= 0) {
             kdbg_print("[WC] spawn child %d rc=%d", i, kids[i]);
-            touch_release(died_tag);
             bay_release(claim);
             delete(fid);
             return 1;
         }
-        kids_alive++;
     }
 
-    /* Wait for all children to die. Bounded poll with deadline. */
-    int seen[CHILD_COUNT] = {0};
-    for (int spin = 0; spin < 200 && kids_alive > 0; spin++) {
-        Touch t;
-        int rc = touch_await(died_tag, &t, 200);
-        if (rc != 0) continue;
-        const uint8_t *p = t.payload;
-        if (t.payload_len < 8) continue;
-        uint32_t dead_pid;
-        memcpy(&dead_pid, p, 4);
-        for (int i = 0; i < CHILD_COUNT; i++) {
-            if (kids[i] == (int)dead_pid && !seen[i]) {
-                seen[i] = 1;
-                kids_alive--;
-                kdbg_print("[WC] child %d (pid=%u) exited", i, dead_pid);
-                break;
-            }
-        }
-    }
-
-    touch_release(died_tag);
-
-    if (kids_alive > 0) {
-        kdbg_print("[WC] FAIL: %d children still alive after timeout", kids_alive);
-        bay_release(claim);
-        delete(fid);
-        return 1;
+    for (int i = 0; i < CHILD_COUNT; i++) {
+        int32_t child_exit = 0;
+        int     gone       = process_gone((uint32_t)kids[i], gens[i], &child_exit);
+        if (gone != 0)
+            kdbg_print("[WC] child %d (pid=%d gen=%u): process.gone refused rc=%d",
+                       i, kids[i], gens[i], gone);
+        else
+            kdbg_print("[WC] child %d (pid=%d) ended with %d", i, kids[i], (int)child_exit);
     }
 
     uint32_t claimed = *claim;
@@ -185,10 +121,6 @@ int main(void)
         return 1;
     }
 
-    /* Verify: each slice must match exactly ONE writer's pattern. The
-     * winning writer is whoever did the last write to that slice — they
-     * all wrote the same content for their assigned slice every time,
-     * so the slice = pattern_of(writer_of_that_slice). */
     int fails = 0;
     for (int slice = 0; slice < CHILD_COUNT; slice++) {
         if (fread(fid, (uint64_t)slice * PAGE_SIZE, rbuf, PAGE_SIZE) != PAGE_SIZE) {
@@ -196,10 +128,6 @@ int main(void)
             fails++;
             continue;
         }
-        /* An all-zero slice is the parent's pre-fill, not a torn write: no
-         * writer can produce it, since a writer's bytes step by one from its
-         * own pid. Calling that "torn at j=1" is what sent the last hunt after
-         * the kernel's write path instead of after the missing writer. */
         bool written = false;
         for (uint32_t j = 0; j < PAGE_SIZE; j++) {
             if (rbuf[j] != 0) { written = true; break; }
@@ -210,7 +138,6 @@ int main(void)
             continue;
         }
 
-        /* Reconstruct writer PID from byte 0: byte0 = (pid + 0) & 0xFF. */
         uint8_t pid_low = (uint8_t)rbuf[0];
         bool clean = true;
         for (uint32_t j = 1; j < PAGE_SIZE; j++) {

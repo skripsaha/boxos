@@ -1,26 +1,3 @@
-// boxcxx — box::manifest / box::crate  (the expert C++ face of the BoxOS syscall ABI)
-//
-// Every BoxOS syscall is a Manifest: an ordered list of ops (deck + opcode +
-// inline params) plus a table of Crates (variable-size payload descriptors that
-// point into the cabin heap). The typed box:: layers (box::tagfs, box::message,
-// box::bay, ...) are built on this; this header is the low-level builder for
-// expert code that needs raw deck/opcode access or multi-op batching.
-//
-//   box::crate              — a payload descriptor: crate::input(span) /
-//                             output(span) / in_out(...) / input_object<T> /
-//                             output_object<T>; produced() reads back what an op
-//                             wrote into an output crate after a submit.
-//   box::manifest<Buf,N>    — a fixed-capacity, fluent multi-op builder that owns
-//                             its manifest buffer + crate table. add(crate) ->
-//                             index; op(deck, opcode, in, out, params, flags);
-//                             submit(target_pid, timeout) -> box::mf_outcome.
-//   box::compiled_manifest  — a RAII "prepared statement": compile a manifest
-//                             once, submit it repeatedly (skips the kernel's
-//                             per-call validate/lookup), released on scope exit.
-//   box::mf_call1(deck, op, params, in, out) — the single-op convenience.
-//
-// This is a box:: extension, not part of std. Crates are NON-owning views — the
-// backing buffers must outlive the submit (the kernel reads/writes them in place).
 #ifndef BOXCXX_BOX_MANIFEST_H
 #define BOXCXX_BOX_MANIFEST_H
 
@@ -29,16 +6,14 @@
 #include <span>
 #include <type_traits>
 
-#include "box/core/manifest.h"  // ManifestBuilder, MfCall1, ManifestSubmitFull, *Handle
-#include "box/core/crate.h"     // Crate + CrateSetInput/Output/InOut
-#include "boxos_decks.h"        // DECK_* ids (for expert callers)
+#include "box/core/manifest.h"
+#include "box/core/crate.h"
+#include "boxos_decks.h"
 
 namespace box {
 
-// CRATE_INDEX_NONE as a named C++ constant — "this op has no input/output crate".
 inline constexpr std::uint16_t no_crate = CRATE_INDEX_NONE;
 
-// ── box::crate — a payload descriptor (non-owning view over caller memory) ──
 class crate {
     Crate c_{};
 
@@ -46,21 +21,18 @@ public:
     crate() noexcept { CrateInit(&c_); }
     explicit crate(const Crate &c) noexcept : c_(c) {}
 
-    // An op reads from this region (kernel never mutates an input crate's bytes).
     static crate input(std::span<const std::byte> b) noexcept
     {
         Crate c;
         CrateSetInput(&c, const_cast<std::byte *>(b.data()), b.size());
         return crate(c);
     }
-    // An op writes up to b.size() bytes here; produced() reports how many.
     static crate output(std::span<std::byte> b) noexcept
     {
         Crate c;
         CrateSetOutput(&c, b.data(), b.size());
         return crate(c);
     }
-    // An op reads `valid` bytes then writes back in place (capacity == b.size()).
     static crate in_out(std::span<std::byte> b, std::uint64_t valid) noexcept
     {
         Crate c;
@@ -87,10 +59,9 @@ public:
     Crate         &raw() noexcept { return c_; }
     const Crate   &raw() const noexcept { return c_; }
     CrateKind      kind() const noexcept { return static_cast<CrateKind>(c_.kind); }
-    std::uint64_t  size() const noexcept { return c_.size; }      // valid / produced bytes
+    std::uint64_t  size() const noexcept { return c_.size; }
     std::uint64_t  capacity() const noexcept { return c_.capacity; }
 
-    // The bytes an op produced into an output crate (valid after submit).
     std::span<std::byte> produced() const noexcept
     {
         return {reinterpret_cast<std::byte *>(static_cast<std::uintptr_t>(c_.addr)),
@@ -98,14 +69,12 @@ public:
     }
 };
 
-// ── box::mf_outcome — the result of a submit ────────────────────────────────
 struct mf_outcome {
-    int    rc;       // OK (0) on success; kernel error_t / negative builder error otherwise
-    Result result;   // the kernel Result record
+    int    rc;
+    Result result;
     explicit operator bool() const noexcept { return rc == 0; }
 };
 
-// ── box::manifest — a fixed-capacity, fluent multi-op syscall builder ───────
 template <std::size_t BufBytes = 256, std::uint16_t MaxCrates = 8>
 class manifest {
     alignas(8) std::uint8_t buf_[BufBytes];
@@ -119,7 +88,6 @@ public:
     manifest(const manifest &)            = delete;
     manifest &operator=(const manifest &) = delete;
 
-    // Register a crate; returns its index for op() references (no_crate if full).
     std::uint16_t add(const crate &c) noexcept
     {
         if (crate_count_ >= MaxCrates) {
@@ -130,13 +98,10 @@ public:
         return crate_count_++;
     }
 
-    // Append one op (chainable). Crate args are indices from add() or no_crate.
     manifest &op(std::uint16_t deck, std::uint16_t opcode,
                  std::uint16_t in_crate = no_crate, std::uint16_t out_crate = no_crate,
                  std::span<const std::byte> params = {}, std::uint16_t flags = 0) noexcept
     {
-        // param_size is a 16-bit ABI field — reject an oversized blob rather
-        // than silently truncating it into a wrong-sized op.
         if (params.size() > 0xFFFFu) {
             ok_ = false;
             return *this;
@@ -150,7 +115,6 @@ public:
     bool valid() const noexcept { return ok_; }
     explicit operator bool() const noexcept { return ok_; }
 
-    // Finalize (idempotent) + submit. target_pid 0 == self; timeout 0 == default.
     mf_outcome submit(std::uint32_t target_pid = 0, std::uint32_t timeout_ms = 0) noexcept
     {
         if (!ok_) return {-1, Result{}};
@@ -164,7 +128,6 @@ public:
         return {rc, r};
     }
 
-    // A crate's descriptor after submit (read produced() / size()).
     crate          crate_at(std::uint16_t idx) const noexcept
     {
         return idx < crate_count_ ? crate(crates_[idx]) : crate();
@@ -180,10 +143,6 @@ public:
     }
 };
 
-// ── box::compiled_manifest — a RAII "prepared statement" handle ─────────────
-// Compile a built box::manifest once, then submit it repeatedly with refreshed
-// crate buffers — each submit skips the kernel's per-call validate + per-op
-// registry lookup. Released on scope exit (move-only).
 class compiled_manifest {
     ManifestHandle h_     = 0;
     bool           valid_ = false;
@@ -217,8 +176,6 @@ public:
     explicit operator bool() const noexcept { return valid_; }
     ManifestHandle handle() const noexcept { return h_; }
 
-    // Submit reusing a manifest's crate table (mutate the crate buffers between
-    // submits to feed fresh data). The manifest's op structure is the cached one.
     template <std::size_t B, std::uint16_t M>
     mf_outcome submit(manifest<B, M> &mf, std::uint32_t timeout_ms = 0) noexcept
     {
@@ -227,7 +184,6 @@ public:
         int    rc = ManifestSubmitHandleTimeout(h_, mf.crates(), mf.crate_count(), &r, timeout_ms);
         return {rc, r};
     }
-    // Submit with an explicit crate array.
     mf_outcome submit(Crate *crates, std::uint16_t crate_count, std::uint32_t timeout_ms = 0) noexcept
     {
         if (!valid_) return {-1, Result{}};
@@ -237,10 +193,9 @@ public:
     }
 };
 
-// ── box::mf_call1 — the single-op convenience over MfCall1 ──────────────────
 struct mf_call_result {
-    int           rc;        // OK (0) on success
-    std::uint32_t produced;  // bytes the kernel wrote into the output buffer
+    int           rc;
+    std::uint32_t produced;
     explicit operator bool() const noexcept { return rc == 0; }
 };
 
@@ -250,8 +205,6 @@ inline mf_call_result mf_call1(std::uint16_t deck, std::uint16_t opcode,
                                std::span<std::byte>       out     = {},
                                std::uint32_t              timeout_ms = 0) noexcept
 {
-    // ABI field widths: param_size is 16-bit, in/out sizes are 32-bit. Reject
-    // an oversized span rather than silently truncating into a wrong-sized call.
     if (params.size() > 0xFFFFu || in.size() > 0xFFFFFFFFull || out.size() > 0xFFFFFFFFull)
         return {-1, 0};
     std::uint32_t actual = 0;
@@ -263,6 +216,6 @@ inline mf_call_result mf_call1(std::uint16_t deck, std::uint16_t opcode,
     return {rc, actual};
 }
 
-}  // namespace box
+}
 
-#endif  // BOXCXX_BOX_MANIFEST_H
+#endif

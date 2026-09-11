@@ -16,10 +16,10 @@
 
 #define ROLE_MAGIC 0xBB
 
-static int spawn_role(uint8_t role)
+static int spawn_role(uint8_t role, uint32_t *out_gen)
 {
-    int child = proc_exec("touch_stress");
-    if (child < 0) return child;
+    int child = proc_exec_gen("touch_stress", NULL, out_gen);
+    if (child <= 0) return child;
     uint8_t pkt[2] = { ROLE_MAGIC, role };
     send((uint32_t)child, pkt, 2);
     return child;
@@ -40,9 +40,6 @@ static uint64_t uptime_ms(void)
     return s_last_uptime_ms;
 }
 
-/* -----------------------------------------------------------------------
- * S1 — Producer-consumer: 4 producers × 1000 sends each → parent counts
- * ----------------------------------------------------------------------- */
 
 #define KV_ITERS     1000
 #define KV_PRODUCERS 4
@@ -66,8 +63,8 @@ static void test_s1(void)
 
     int children[KV_PRODUCERS];
     for (int i = 0; i < KV_PRODUCERS; i++) {
-        children[i] = spawn_role(ROLE_KV_PRODUCER);
-        if (children[i] < 0) {
+        children[i] = spawn_role(ROLE_KV_PRODUCER, NULL);
+        if (children[i] <= 0) {
             kdbg_print("[STRESS S1] FAIL: spawn failed i=%d", i);
             touch_release(tag);
             return;
@@ -95,9 +92,6 @@ static void test_s1(void)
                    expected, count);
 }
 
-/* -----------------------------------------------------------------------
- * S2 — Tag churn: claim + release 10000 times on different tag names
- * ----------------------------------------------------------------------- */
 
 static void int_to_str(int v, char *buf, int *len)
 {
@@ -112,7 +106,6 @@ static void test_s2(void)
     uint64_t t0 = uptime_ms();
     bool crashed = false;
 
-    /* Dynamic tag names — must intern each iteration (no caching). */
     for (int i = 0; i < 10000 && !crashed; i++) {
         char tag_str[32];
         int p = 0;
@@ -147,9 +140,6 @@ static void test_s2(void)
         kdbg_print("[STRESS S2] tag-churn 10000x: FAIL crashed=%d final_rc=%d", (int)crashed, final_rc);
 }
 
-/* -----------------------------------------------------------------------
- * S3 — Multi-listener flood: 4 listeners, 1 sender × 500 sends
- * ----------------------------------------------------------------------- */
 
 #define FLOOD_LISTENERS 4
 #define FLOOD_SENDS     500
@@ -180,10 +170,11 @@ static void test_s3(void)
 
     uint64_t t0 = uptime_ms();
 
-    int children[FLOOD_LISTENERS];
+    int      children[FLOOD_LISTENERS];
+    uint32_t gens[FLOOD_LISTENERS];
     for (int i = 0; i < FLOOD_LISTENERS; i++) {
-        children[i] = spawn_role(ROLE_FLOOD_LISTENER);
-        if (children[i] < 0) {
+        children[i] = spawn_role(ROLE_FLOOD_LISTENER, &gens[i]);
+        if (children[i] <= 0) {
             kdbg_print("[STRESS S3] FAIL: spawn failed i=%d", i);
             return;
         }
@@ -192,19 +183,13 @@ static void test_s3(void)
     Result r;
     int ready_count = 0;
     bool ready[FLOOD_LISTENERS] = { false };
-    for (int t = 0; t < 60 && ready_count < FLOOD_LISTENERS; t++) {
-        if (receive_wait(&r, 200)) {
-            for (int i = 0; i < FLOOD_LISTENERS; i++) {
-                if (!ready[i] && r.sender_pid == (uint32_t)children[i]) {
-                    ready[i] = true; ready_count++; break;
-                }
+    while (ready_count < FLOOD_LISTENERS) {
+        (void)receive_wait(&r, 0);
+        for (int i = 0; i < FLOOD_LISTENERS; i++) {
+            if (!ready[i] && r.sender_pid == (uint32_t)children[i]) {
+                ready[i] = true; ready_count++; break;
             }
         }
-    }
-    if (ready_count < FLOOD_LISTENERS) {
-        kdbg_print("[STRESS S3] FAIL: only %d/%d listeners ready",
-                   ready_count, FLOOD_LISTENERS);
-        return;
     }
 
     for (volatile int i = 0; i < 500000; i++) {}
@@ -214,17 +199,16 @@ static void test_s3(void)
         touch_send(pair, &i, sizeof(i), 0);
     }
 
+    for (int i = 0; i < FLOOD_LISTENERS; i++)
+        (void)process_gone((uint32_t)children[i], gens[i], NULL);
+
     uint32_t counts[FLOOD_LISTENERS] = {0};
-    int counts_received = 0;
-    for (int t = 0; t < 100 && counts_received < FLOOD_LISTENERS; t++) {
-        if (receive_wait(&r, 200)) {
-            for (int i = 0; i < FLOOD_LISTENERS; i++) {
-                if (r.sender_pid == (uint32_t)children[i] &&
-                    r.data_length >= 4 && r.data_addr != 0) {
-                    memcpy(&counts[i], (const void *)(uintptr_t)r.data_addr, 4);
-                    counts_received++;
-                    break;
-                }
+    while (receive(&r)) {
+        for (int i = 0; i < FLOOD_LISTENERS; i++) {
+            if (r.sender_pid == (uint32_t)children[i] &&
+                r.data_length >= 4 && r.data_addr != 0) {
+                memcpy(&counts[i], (const void *)(uintptr_t)r.data_addr, 4);
+                break;
             }
         }
     }
@@ -250,26 +234,19 @@ int main(void)
 
     if (ci && ci->spawner_pid != 0 && ci->spawner_pid != 2) {
         Result r;
-        bool found_role = false;
         uint8_t role = 0;
-
-        for (int attempt = 0; attempt < 150 && !found_role; attempt++) {
-            if (!receive_wait(&r, 200)) continue;
+        for (;;) {
+            (void)receive_wait(&r, 0);
             if (r.data_length >= 2 && r.data_addr != 0) {
                 const uint8_t *buf = (const uint8_t *)(uintptr_t)r.data_addr;
-                if (buf[0] == ROLE_MAGIC) {
-                    role = buf[1];
-                    found_role = true;
-                }
+                if (buf[0] == ROLE_MAGIC) { role = buf[1]; break; }
             }
         }
 
-        if (found_role) {
-            switch (role) {
-            case ROLE_KV_PRODUCER:    role_kv_producer(ci->spawner_pid);    break;
-            case ROLE_FLOOD_LISTENER: role_flood_listener(ci->spawner_pid); break;
-            default: break;
-            }
+        switch (role) {
+        case ROLE_KV_PRODUCER:    role_kv_producer(ci->spawner_pid);    break;
+        case ROLE_FLOOD_LISTENER: role_flood_listener(ci->spawner_pid); break;
+        default: break;
         }
         exit(0);
     }

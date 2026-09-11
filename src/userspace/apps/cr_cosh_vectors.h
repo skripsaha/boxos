@@ -1,5 +1,3 @@
-// Baked 80-bit (x, MPFR-CR-ref) vectors for cosh — GENERATED, do not edit.
-// {x mantissa, x se, ref mantissa, ref se}; se = sign<<15 | exp15.
 static const CrVec kCoshVec[] = {
 {0x8000000000000000ULL,0x3FFDu,0x8405582E530A2F6EULL,0x3FFFu},
 {0x8000000000000000ULL,0x3FFEu,0x90560C3157468323ULL,0x3FFFu},

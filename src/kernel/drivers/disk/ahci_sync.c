@@ -6,59 +6,16 @@
 #include "klib.h"
 #include "atomics.h"
 
-/*
- * ‼ HOW LONG A DISK IS GIVEN TO ANSWER, AND WHY IT IS NOT TWO SECONDS.
- *
- * It was two — CONFIG_AHCI_CMD_TIMEOUT_MS — and a spinning disk does not obey
- * it. A drive that meets a marginal sector retries the head internally before
- * it answers, and how long it may spend doing that is a property of the drive:
- * desktop drives without configurable error recovery routinely take seven
- * seconds and are permitted far more. Under a two-second clock every one of
- * those reads was declared a timeout, the port was recovered, and the read was
- * tried again — three times, and then reported as a failure on a disk that
- * would have answered.
- *
- * Every host stack gives a disk command tens of seconds: Linux's SCSI layer
- * uses thirty (drivers/scsi/sd.h, SD_TIMEOUT) and this kernel already had that
- * number written down, in CONFIG_AHCI_IO_TIMEOUT_MS, and did not use it here.
- *
- * And it is the LAST RESORT rather than the test. What ends the wait below in
- * every case anybody can name is a FACT the port reports: the slot clearing,
- * an error bit, or the link no longer being established.
- */
 #define AHCI_CMD_PATIENCE_MS  CONFIG_AHCI_IO_TIMEOUT_MS
 
-/*
- * ‼ A DISK THAT STOPS ANSWERING MUST SAY SO OUT LOUD.
- *
- * Every give-up on this path used to be a debug_printf, which compiles to
- * NOTHING in every build anybody makes — so on a machine whose only diagnostic
- * is its screen, a disk that had stopped answering was completely silent, and
- * no oracle could ask about it either. The chatter stays where it was; the
- * moments where the driver gives up on a command are said.
- */
 
-/* What ended the wait for a command slot. Four answers, and only the last one
- * is a clock. */
 typedef enum {
-    AHCI_SLOT_DONE,      /* the controller cleared it: the command ran */
-    AHCI_SLOT_FAULTED,   /* the port reported an error, and PxIS is cleared */
-    AHCI_SLOT_GONE,      /* the link is not established any more */
-    AHCI_SLOT_SILENT     /* attached, no error, and still not finished */
+    AHCI_SLOT_DONE,
+    AHCI_SLOT_FAULTED,
+    AHCI_SLOT_GONE,
+    AHCI_SLOT_SILENT
 } AhciSlotEnd;
 
-/*
- * Wait for one command slot, and say WHY the wait ended.
- *
- * This used to be written out three times — read, write, flush — with the same
- * two facts and the same clock in each, which is three places for the third
- * fact to be missing from. It is missing from all three: PxSSTS says whether
- * there is still a device on the other end of the cable and whether the PHY is
- * talking to it (AHCI 1.3.1 §3.3.10, DET), and a command outstanding on a link
- * that has dropped is a command nobody is going to answer. Waiting out the
- * whole budget for it is the disk equivalent of waiting for a stick that has
- * been pulled.
- */
 static AhciSlotEnd ahci_wait_for_slot(ahci_port_t* port_state,
                                       volatile ahci_port_regs_t* regs,
                                       uint8_t slot, bool queued)
@@ -79,9 +36,6 @@ static AhciSlotEnd ahci_wait_for_slot(ahci_port_t* port_state,
             return AHCI_SLOT_FAULTED;
         }
 
-        /* The cable, asked before the clock. Anything other than "device
-         * present and communication established" means the answer this is
-         * waiting for cannot arrive. */
         if ((regs->ssts & AHCI_SSTS_DET_MASK) != AHCI_SSTS_DET_PRESENT) {
             kprintf("[AHCI] port %u: the link is no longer established "
                     "(SSTS=0x%08x) — the command on slot %u has nobody to "
@@ -106,7 +60,6 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
         return -1;
     }
 
-    // DMA buffer: AHCI PRDT addresses must be below 4GB unless s64a is confirmed.
     uint32_t pages_needed = (sector_count * 512 + 4095) / 4096;
     if (pages_needed == 0) pages_needed = 1;
     void* dma_page = pmm_alloc(pages_needed, PHYS_TAG_DMA32);
@@ -135,17 +88,9 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
         }
 
         volatile ahci_port_regs_t* regs = ahci_get_port_regs_pub(port);
-        /* Submit per AHCI 1.3.1 §10.3.2: write CI / SACT as a direct
-         * store with ONLY the new slot bit set, never RMW. The HBA
-         * clears bits independently as commands complete; a `|=` reads
-         * a possibly-stale value (a bit the HW just cleared for
-         * another slot) and writes it back, re-arming a completed slot
-         * to be re-executed with stale FIS/PRDT. The `port_state->lock`
-         * still serialises *software* writers to keep two SW-side
-         * stores from racing each other. */
         spin_lock(&port_state->lock);
         if (port_state->ncq) {
-            regs->sact = (1U << slot);   // NCQ only; non-queued uses PxCI alone
+            regs->sact = (1U << slot);
         }
         regs->ci = (1U << slot);
         spin_unlock(&port_state->lock);
@@ -160,9 +105,6 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
             return 0;
         }
 
-        /* A link that is not there is not a command to retry: recovering the
-         * port and asking again three times spends the whole of a boot on a
-         * cable somebody has unplugged. */
         if (how == AHCI_SLOT_GONE) {
             break;
         }
@@ -197,7 +139,6 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
         return -1;
     }
 
-    // DMA buffer: must be below 4GB.
     uint32_t pages_needed = (sector_count * 512 + 4095) / 4096;
     if (pages_needed == 0) pages_needed = 1;
     void* dma_page = pmm_alloc(pages_needed, PHYS_TAG_DMA32);
@@ -227,12 +168,9 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
         }
 
         volatile ahci_port_regs_t* regs = ahci_get_port_regs_pub(port);
-        /* Direct store, not RMW — see read path above for the spec
-         * reference. Re-arming a completed slot via stale-read OR
-         * corrupts NCQ on real Intel/AMD HBAs (hidden on QEMU). */
         spin_lock(&port_state->lock);
         if (port_state->ncq) {
-            regs->sact = (1U << slot);   // NCQ only; non-queued uses PxCI alone
+            regs->sact = (1U << slot);
         }
         regs->ci = (1U << slot);
         spin_unlock(&port_state->lock);
@@ -299,14 +237,10 @@ int ahci_flush_cache_sync(uint8_t port) {
         mfence();
 
         volatile ahci_port_regs_t* regs = ahci_get_port_regs_pub(port);
-        /* FLUSH CACHE EXT is always non-queued — issue via PxCI only with a
-         * direct single-bit store (PxCI is write-1-to-set; an RMW could
-         * re-arm a slot the HBA just cleared). */
         spin_lock(&port_state->lock);
         regs->ci = (1U << slot);
         spin_unlock(&port_state->lock);
 
-        /* FLUSH CACHE EXT is never queued, so PxSACT says nothing about it. */
         AhciSlotEnd how = ahci_wait_for_slot(port_state, regs, (uint8_t)slot,
                                              false);
         ahci_free_slot(port, slot);
@@ -332,9 +266,6 @@ int ahci_flush_cache_sync(uint8_t port) {
     return -1;
 }
 
-/* 128 KiB — thirty-two contiguous DMA32 pages, an order the buddy allocator
- * satisfies routinely, and sixteen times the four-kilobyte block everything
- * above this reads in. */
 uint32_t ahci_max_run_sectors(uint8_t port)
 {
     (void)port;

@@ -3,21 +3,24 @@
 
 #include "../tagfs.h"
 
-int      meta_pool_init(uint32_t first_block, uint32_t block_count);
+int      meta_pool_init(uint32_t first_block);
 
-/* Let the pool go. `write_back` false means exactly that and nothing else is
- * written — see the note on file_table_shutdown, which had the same fault. */
 void     meta_pool_shutdown(bool write_back);
 
 int      meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out);
 int      meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* out_offset);
+
 int      meta_pool_delete(uint32_t block, uint32_t offset);
 
 int      meta_pool_mirror_init(uint32_t max_file_id);
 int      meta_pool_read_cached(uint32_t file_id, TagFSMetadata* out);
 
+int      meta_pool_mirror_where(uint32_t file_id, uint32_t* out_block, uint32_t* out_offset);
+
 void     tagfs_metadata_free(TagFSMetadata* meta);
 uint32_t meta_pool_record_size(const TagFSMetadata* meta);
-int      meta_pool_flush(void);
 
-#endif // META_POOL_H
+int      meta_pool_flush(void);
+int      meta_pool_flush_retires(void);
+
+#endif

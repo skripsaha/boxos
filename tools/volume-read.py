@@ -275,14 +275,25 @@ class Volume:
         """
         out = []
         seen_blocks = set()
-        block = self.layout["file_table_block"]
+        # ‼ TWO COORDINATE SYSTEMS, AND THIS WALK USED TO MIX THEM.
+        #
+        # file_table_block in the Deed is counted from the START OF THE VOLUME;
+        # every next_block in the chain is counted from the START OF THE DATA
+        # RUN — that is what mkfs writes and what file_table_flush writes, and
+        # tagboot.c:931 does the subtraction for the same reason. Reading the
+        # continuation through volume_block() therefore landed in the bitmap
+        # region, the magic check failed, and the walk stopped at the first
+        # block. MEASURED on a 701-file image: this tool listed 510 files and
+        # said nothing about the rest, which is exactly the shape of the kernel
+        # defect it exists to check for.
+        block = self.layout["file_table_block"] - self.layout["data_block"]
 
         for _ in range(4096):
             if block in seen_blocks:
                 break
             seen_blocks.add(block)
 
-            blk = self.volume_block(block)
+            blk = self.data_block(block)
             magic, next_block, entry_count, _reserved = struct.unpack_from(
                 "<IIII", blk, 0)
             if magic != FILETBL_MAGIC:

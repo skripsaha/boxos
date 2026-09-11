@@ -1,15 +1,3 @@
-/*
- * MCE Page Migration — implementation
- *
- * See mce_migrate.h for design + race analysis. This file contains:
- *   1. Static request ring + per-CPU nesting state.
- *   2. mce_migrate_request — IRQ-safe producer (called from #MC IST).
- *   3. mce_migrate_worker — K-Core consumer (runs off the slot's baton).
- *   4. mce_migrate_perform — the actual region lookup, copy, PTE swap.
- *   5. mce_safe_page_copy — 64 B chunked copy with abort flag.
- *   6. mce_swap_pte — atomic CAS on leaf PTE preserving metadata bits.
- *   7. mce_migrate_note_nested — called from outer mce_handle.
- */
 
 #include "mce_migrate.h"
 #include "mce.h"
@@ -23,7 +11,6 @@
 #include "logbook.h"
 #include "baton.h"
 
-/* ─── Request ring (static — no allocation in IRQ context) ──────── */
 
 #define MCE_MIGRATE_RING_SIZE   32u
 #define MCE_MIGRATE_RING_MASK   (MCE_MIGRATE_RING_SIZE - 1u)
@@ -31,37 +18,21 @@
 typedef struct {
     uintptr_t       phys;
     uint64_t        status;
-    uint16_t        severity;       /* mce_severity_t */
+    uint16_t        severity;
     uint16_t        rsv0;
     uint32_t        rsv1;
-    volatile uint32_t in_use;       /* 0 = free, 1 = in-flight */
-    /* The slot's own pass to the drain core (baton.h): allocation-free and
-     * never dropped. `in_use` is the gate — a slot is passed once per claim
-     * and released by the worker before it can be claimed again. */
+    volatile uint32_t in_use;
     Baton           baton;
 } MceMigrateSlot;
 
 static MceMigrateSlot   g_ring[MCE_MIGRATE_RING_SIZE];
 static volatile uint32_t g_ring_cursor = 0;
 
-/* ─── Per-CPU nesting state (for safe-copy) ─────────────────────── */
-/*
- * g_in_migration[cpu] holds the phys currently being copied on `cpu`,
- * or 0 when no migration is active on that CPU. mce_handle's outer
- * entry calls mce_migrate_note_nested which checks this; if it matches
- * the nested-#MC's phys, we set g_migration_aborted[cpu]=true.
- *
- * The copy loop checks the abort flag between 64 B chunks and zero-
- * fills the remainder on observed abort. We size the per-CPU arrays
- * by MAX_CORES (256, from amp.h) for full coverage without a per-CPU
- * heap allocation.
- */
 #define MCE_MIGRATE_MAX_CORES   256u
 
 static volatile uintptr_t g_in_migration[MCE_MIGRATE_MAX_CORES];
 static volatile uint32_t  g_migration_aborted[MCE_MIGRATE_MAX_CORES];
 
-/* ─── Telemetry (RELAXED counters — never load-bearing) ─────────── */
 
 static volatile uint64_t g_stat_requests       = 0;
 static volatile uint64_t g_stat_drops          = 0;
@@ -73,7 +44,6 @@ static volatile uint64_t g_stat_cabins_touched = 0;
 static volatile uint64_t g_stat_pages_migrated = 0;
 static volatile uint64_t g_stat_skipped_2m     = 0;
 
-/* ─── Touch tag handles (resolved once at init) ─────────────────── */
 
 static TouchTag g_tag_completed = TOUCH_TAG_INVALID;
 static TouchTag g_tag_failed    = TOUCH_TAG_INVALID;
@@ -81,30 +51,27 @@ static TouchTag g_tag_unmapped  = TOUCH_TAG_INVALID;
 
 static volatile bool g_initialized = false;
 
-/* ─── Per-migration Touch payload (fits 64 B Pocket envelope) ───── */
 
 typedef struct {
-    uint64_t old_phys;          /* 8 */
-    uint64_t new_phys;          /* 8 */
-    uint64_t status;            /* 8 — MCx_STATUS for forensics */
-    uint64_t pages_migrated;    /* 8 — always 1 in Phase 1 */
-    uint32_t cabins_touched;    /* 4 */
-    uint32_t region_id;         /* 4 */
-    uint8_t  severity;          /* 1 */
-    uint8_t  copy_clean;        /* 1 — 0 if nested-#MC aborted partial copy */
-    uint8_t  pages_skipped_2m;  /* 1 */
-    uint8_t  pad8;              /* 1 */
-    uint8_t  pad[20];           /* 20 → total = 64 B */
+    uint64_t old_phys;
+    uint64_t new_phys;
+    uint64_t status;
+    uint64_t pages_migrated;
+    uint32_t cabins_touched;
+    uint32_t region_id;
+    uint8_t  severity;
+    uint8_t  copy_clean;
+    uint8_t  pages_skipped_2m;
+    uint8_t  pad8;
+    uint8_t  pad[20];
 } mce_migrate_payload_t;
 
 _Static_assert(sizeof(mce_migrate_payload_t) == 64,
                "mce_migrate_payload must fit 64 B Pocket envelope");
 
-/* ─── Bounded snapshot buffer for attach chain ──────────────────── */
 
 #define MCE_MIGRATE_ATTACHES_PER_CALL  32u
 
-/* ─── Init ──────────────────────────────────────────────────────── */
 
 bool mce_migrate_is_initialized(void) {
     return g_initialized;
@@ -126,10 +93,6 @@ void mce_migrate_init(void) {
         __atomic_store_n(&g_migration_aborted[c], 0, __ATOMIC_RELAXED);
     }
 
-    /* Resolve Touch tag handles upfront. TouchLogbookIntern is OK in normal
-     * kernel context but not in IRQ — we cache here so the deferred
-     * worker can publish without a registry lookup, matching the Phase
-     * 2F pattern used by mce.c for the IRQ-side tags. */
     g_tag_completed = TouchLogbookIntern("mce:migration:completed");
     g_tag_failed    = TouchLogbookIntern("mce:migration:failed");
     g_tag_unmapped  = TouchLogbookIntern("mce:migration:unmapped");
@@ -144,16 +107,6 @@ void mce_migrate_init(void) {
     g_initialized = true;
 }
 
-/* ─── Atomic PTE swap ────────────────────────────────────────────── */
-/*
- * Replace PHYS bits of the leaf PTE at (ctx, va) with `new_phys`,
- * preserving everything else: low-12 flag bits, NX (bit 63), Phase 2D
- * region_id (bits 52-58), Phase 2H PKEY (bits 62:59), Phase 2K CET
- * supv-SS (bit 60 when CR4.CET=1). Returns true on swap, false if
- * the PTE no longer exists (vmm_unmap raced) or is a 2 MiB leaf
- * (Phase 1 migration is 4 KiB-only — log via stats and let caller
- * decide).
- */
 static bool mce_swap_pte(void *ctx_ptr, uintptr_t va, uintptr_t new_phys,
                           bool *out_was_2m) {
     vmm_context_t *ctx = (vmm_context_t *)ctx_ptr;
@@ -165,10 +118,6 @@ static bool mce_swap_pte(void *ctx_ptr, uintptr_t va, uintptr_t new_phys,
     if (!pte) return false;
 
     if (level != 1) {
-        /* 2 MiB / 1 GiB leaf. Splitting a huge page to migrate one 4 KiB
-         * subrange is out of scope for Phase 1 — the caller logs this
-         * via stats and leaves the original PTE alone (process will #PF
-         * if it touches the poisoned subrange and be killed cleanly). */
         if (out_was_2m) *out_was_2m = true;
         return false;
     }
@@ -183,18 +132,9 @@ static bool mce_swap_pte(void *ctx_ptr, uintptr_t va, uintptr_t new_phys,
                                          __ATOMIC_ACQUIRE)) {
             return true;
         }
-        /* CAS failed; `old` now reflects the latest PTE — retry. */
     }
 }
 
-/* ─── Safe-copy with nested-#MC detection ───────────────────────── */
-/*
- * Copy PMM_PAGE_SIZE bytes from old_phys to new_phys in 64-byte chunks.
- * Before starting, publish g_in_migration[cpu] = old_phys so a nested
- * #MC hitting the bad cache line can flag the copy as aborted. On
- * abort, zero-fill remaining bytes and return false; caller still
- * installs the new PTE (process keeps running with partial-zero data).
- */
 static bool mce_safe_page_copy(uintptr_t old_phys, uintptr_t new_phys) {
     void *old_va = vmm_phys_to_virt(old_phys);
     void *new_va = vmm_phys_to_virt(new_phys);
@@ -213,7 +153,6 @@ static bool mce_safe_page_copy(uintptr_t old_phys, uintptr_t new_phys) {
 
     for (size_t off = 0; off < PMM_PAGE_SIZE; off += LINE) {
         if (__atomic_load_n(&g_migration_aborted[cpu], __ATOMIC_ACQUIRE)) {
-            /* Nested #MC observed — bail and zero the rest. */
             __builtin_memset(dst + off, 0, PMM_PAGE_SIZE - off);
             clean = false;
             __atomic_fetch_add(&g_stat_nested_aborts, 1, __ATOMIC_RELAXED);
@@ -227,7 +166,6 @@ static bool mce_safe_page_copy(uintptr_t old_phys, uintptr_t new_phys) {
     return clean;
 }
 
-/* ─── Core migration routine (runs in K-Core context) ───────────── */
 
 static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
                                      uint64_t status) {
@@ -237,7 +175,6 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
         return 0;
     }
 
-    /* 1. Reverse-map phys → region_id (O(1) via id_by_page). */
     uint32_t region_id = MemRegionFromPhys(phys);
     if (region_id == MEMTAG_INVALID_REGION_ID) {
         __atomic_fetch_add(&g_stat_no_owner, 1, __ATOMIC_RELAXED);
@@ -251,7 +188,6 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
         return 0;
     }
 
-    /* 2. Snapshot region descriptor + attach chain. */
     MemRegionRegistry *reg = MemTagGetRegionRegistry();
     if (!reg) {
         __atomic_fetch_add(&g_stat_failed, 1, __ATOMIC_RELAXED);
@@ -272,8 +208,6 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
     uintptr_t region_end    = region_base + region_pages * PMM_PAGE_SIZE;
 
     if (phys < region_base || phys >= region_end) {
-        /* Stale id_by_page entry — region was destroyed + recycled
-         * between MemRegionFromPhys and now. Bail cleanly. */
         __atomic_fetch_add(&g_stat_no_owner, 1, __ATOMIC_RELAXED);
         return 0;
     }
@@ -282,9 +216,6 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
     size_t n_attach = MemRegionRegistrySnapshotAttachs(reg, region_id, snap,
                                                        MCE_MIGRATE_ATTACHES_PER_CALL);
     if (n_attach == 0) {
-        /* Region exists but no cabin currently maps it (kernel-only
-         * buffer / future-Bay-pre-attach). Nothing to migrate — PMM
-         * bitmap already prevents future allocs hitting this page. */
         mce_migrate_payload_t ev = {0};
         ev.old_phys  = phys;
         ev.status    = status;
@@ -296,14 +227,8 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
         return 0;
     }
 
-    /* 3. Allocate ONE replacement phys page. Same page for every
-     * attached cabin — preserves Bay shared semantics by construction.
-     * We use PHYS_TAG_USER (mid zone) which is where typical Bay/Brook
-     * buffers live. Falling back to any-zone alloc would still work but
-     * crosses NUMA domains. */
     void *new_phys_ptr = pmm_alloc(1, PHYS_TAG_USER);
     if (!new_phys_ptr) {
-        /* Try any zone before giving up. */
         new_phys_ptr = pmm_alloc(1);
     }
     if (!new_phys_ptr) {
@@ -320,12 +245,8 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
     }
     uintptr_t new_phys = (uintptr_t)new_phys_ptr;
 
-    /* 4. Safe-copy old → new with nested-#MC abort. */
     bool copy_clean = mce_safe_page_copy(phys, new_phys);
 
-    /* 5. Walk attachments, swap PTEs in-place. Same new_phys for all
-     * (Bay-correct). Per-attach state machine: 2 MiB leaves are
-     * counted but skipped (Phase 1 only handles 4 KiB). */
     size_t page_index = (phys - region_base) / PMM_PAGE_SIZE;
     uint32_t cabins_touched = 0;
     uint32_t skipped_2m = 0;
@@ -334,15 +255,12 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
         MemRegionAttach *att = &snap[i];
         if (!att->ctx) continue;
 
-        /* Phase 1 only migrates 4 KiB attaches. 2 MiB leaves require
-         * page-table splitting (split 2 MiB PD-leaf into 512×4 KiB PTs,
-         * then swap one), which is non-trivial and out-of-scope. */
         if (att->page_class == MEMTAG_ATTACH_CLASS_2M) {
             skipped_2m++;
             continue;
         }
         if (att->state != MEMTAG_ATTACH_ACTIVE) continue;
-        if (page_index >= att->pages) continue;       /* not in this attach */
+        if (page_index >= att->pages) continue;
 
         uintptr_t target_va = att->va_base + page_index * PMM_PAGE_SIZE;
 
@@ -360,7 +278,6 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
     }
 
     if (cabins_touched == 0) {
-        /* Nothing swapped — return the unused replacement. */
         pmm_free(new_phys_ptr, 1);
         __atomic_fetch_add(&g_stat_failed, 1, __ATOMIC_RELAXED);
         mce_migrate_payload_t ev = {0};
@@ -377,7 +294,6 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
         return 0;
     }
 
-    /* 6. Publish completed event. */
     __atomic_fetch_add(&g_stat_completed,      1,              __ATOMIC_RELAXED);
     __atomic_fetch_add(&g_stat_pages_migrated, 1,              __ATOMIC_RELAXED);
     __atomic_fetch_add(&g_stat_cabins_touched, cabins_touched, __ATOMIC_RELAXED);
@@ -405,20 +321,12 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
     return cabins_touched;
 }
 
-/* ─── The slot's continuation (runs on a K-Core, off the slot's baton) ── */
 
-/* Requests that found no free slot, as many as the worker has said so far.
- * Worker-only (single consumer), so a plain variable. */
 static uint64_t g_stat_drops_said = 0;
 
 static void mce_migrate_worker(void *slot_ptr) {
     MceMigrateSlot *slot = (MceMigrateSlot *)slot_ptr;
 
-    /* A request that found every slot taken was dropped in #MC context,
-     * where nothing can be said; it is said here, by the first worker that
-     * runs after it, with the count. The page itself stays poisoned in the
-     * PMM, so it is never handed out again — what was lost is its
-     * migration, and its owner will fault on it. */
     uint64_t drops = __atomic_load_n(&g_stat_drops, __ATOMIC_RELAXED);
     if (drops != g_stat_drops_said) {
         kprintf("[MCE] ERROR: %lu page migration request(s) found no free slot — "
@@ -430,8 +338,6 @@ static void mce_migrate_worker(void *slot_ptr) {
         g_stat_drops_said = drops;
     }
 
-    /* Copy parameters before releasing the slot so back-to-back IRQ
-     * producers can reuse it immediately. */
     uintptr_t phys     = slot->phys;
     uint64_t  status   = slot->status;
     uint16_t  severity = slot->severity;
@@ -441,18 +347,11 @@ static void mce_migrate_worker(void *slot_ptr) {
     (void)mce_migrate_perform(phys, (mce_severity_t)severity, status);
 }
 
-/* ─── Public API ────────────────────────────────────────────────── */
 
 bool mce_migrate_request(uintptr_t phys, mce_severity_t sev, uint64_t status) {
     if (!g_initialized) return false;
     if (phys == 0) return false;
 
-    /* Claim a slot from the static pool — #MC context can neither allocate
-     * nor wait, so the slots exist in advance. Producer rolls a fetch_add
-     * cursor and tries to CAS in_use from 0 → 1; a claimed slot passes its
-     * own baton, which cannot be dropped. Only the pool can run out: that
-     * is counted here and SAID by the next worker (nothing can be printed
-     * from #MC). */
     uint32_t start = __atomic_fetch_add(&g_ring_cursor, 1, __ATOMIC_RELAXED);
     for (uint32_t k = 0; k < MCE_MIGRATE_RING_SIZE; k++) {
         uint32_t idx = (start + k) & MCE_MIGRATE_RING_MASK;
@@ -473,10 +372,6 @@ bool mce_migrate_request(uintptr_t phys, mce_severity_t sev, uint64_t status) {
         }
     }
 
-    /* Pool saturation — the request is dropped and counted; the next worker
-     * says it. Phase 2F already poisoned the page so future allocations skip
-     * it; the process that owns the page will #PF on access and be killed
-     * cleanly. */
     __atomic_fetch_add(&g_stat_drops, 1, __ATOMIC_RELAXED);
     return false;
 }
@@ -494,11 +389,9 @@ bool mce_migrate_note_nested(uintptr_t phys) {
 }
 
 uint32_t mce_migrate_run_sync(uintptr_t phys) {
-    /* Tests bypass the baton hop. Same perform() — different entry. */
     return mce_migrate_perform(phys, MCE_SEV_UCR, 0ULL);
 }
 
-/* ─── Telemetry ─────────────────────────────────────────────────── */
 
 void mce_migrate_get_stats(mce_migrate_stats_t *out) {
     if (!out) return;

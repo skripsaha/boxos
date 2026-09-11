@@ -1,19 +1,6 @@
 #include "acpi_internal.h"
 #include "klib.h"
 
-/*
- * SRAT (Static Resource Affinity Table) parser — ACPI 6.5 §5.2.16.
- *
- * SRAT maps CPUs and physical RAM ranges to NUMA proximity domains. The OS
- * uses it to keep per-thread memory and per-IO buffers on the same NUMA
- * node as the CPU using them. BoxOS does not yet have a NUMA-aware
- * allocator; this pass parses the table and exports the topology via
- * acpi_get_numa(), so the future memory subsystem audit can consume it
- * without reparsing the firmware buffer.
- *
- * x86-only entry types are handled (Type 0 LAPIC, Type 1 Memory, Type 2
- * x2APIC). ARM-only types (GICC/GIC-ITS) are skipped silently.
- */
 
 static void numa_record_domain(uint32_t domain) {
     for (uint8_t i = 0; i < g_acpi.numa.domain_count; i++) {
@@ -101,7 +88,6 @@ void acpi_parse_srat(void) {
                 break;
             }
             default:
-                /* GICC, GIC-ITS, Generic Initiator — not applicable to x86. */
                 break;
         }
         ptr += eh->length;

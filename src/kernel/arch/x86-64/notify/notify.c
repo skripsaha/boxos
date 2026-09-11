@@ -10,16 +10,12 @@
 
 #define EFER_SCE            (1ULL << 0)
 
-/* SFMASK — RFLAGS bits cleared on SYSCALL entry (IA32_FMASK, 0xC0000084).
- * See per_core.c for the long per-bit rationale. Keep this mask EXACTLY
- * in sync with per_core.c:SFMASK_VALUE — the BSP programs the same MSR
- * value via per_core_setup_notify_msrs after notify_init's bootstrap. */
-#define SFMASK_VALUE        ((1ULL <<  9) /* IF */ | \
-                             (1ULL <<  8) /* TF */ | \
-                             (1ULL << 10) /* DF */ | \
-                             (1ULL << 14) /* NT */ | \
-                             (1ULL << 16) /* RF */ | \
-                             (1ULL << 18) /* AC — SMAP defense */)
+#define SFMASK_VALUE        ((1ULL <<  9)  | \
+                             (1ULL <<  8)  | \
+                             (1ULL << 10)  | \
+                             (1ULL << 14)  | \
+                             (1ULL << 16)  | \
+                             (1ULL << 18) )
 
 static PerCpuData g_per_cpu __attribute__((aligned(16)));
 
@@ -42,27 +38,17 @@ void notify_init(void) {
     efer |= EFER_SCE;
     wrmsr_local(MSR_EFER, efer);
 
-    // STAR MSR: kernel CS/SS in [47:32], user base in [63:48]
-    //   Notify entry: CS = STAR[47:32], SS = STAR[47:32] + 8
-    //   Notify exit:  SS = STAR[63:48] + 8, CS = STAR[63:48] + 16
-    //
-    //   Kernel: CS=0x08 SS=0x10  →  STAR[47:32] = 0x08
-    //   User:   SS=0x1B CS=0x23  →  STAR[63:48] = 0x10
     uint64_t star = ((uint64_t)GDT_KERNEL_DATA << 48) | ((uint64_t)GDT_KERNEL_CODE << 32);
     wrmsr_local(MSR_STAR, star);
 
-    // LSTAR: notify entry point
     wrmsr_local(MSR_LSTAR, (uint64_t)notify_entry);
 
-    // SFMASK: clear IF, TF, DF on entry — kernel runs with interrupts disabled
     wrmsr_local(MSR_SFMASK, SFMASK_VALUE);
 
-    // Initialize PerCpuData
     g_per_cpu.kernel_rsp = 0;
     g_per_cpu.user_rsp = 0;
     g_per_cpu.self = (uint64_t)&g_per_cpu;
 
-    // Set KernelGSBASE — swapgs loads this into GSBASE on notify entry
     wrmsr_local(MSR_KERNEL_GS_BASE, (uint64_t)&g_per_cpu);
 
     debug_printf("[NOTIFY] STAR=0x%lx LSTAR=0x%lx SFMASK=0x%lx\n",

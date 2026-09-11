@@ -8,27 +8,23 @@
 #define SLAB_PAGE_SIZE       4096
 #define SLAB_LARGE_THRESHOLD 2048
 
-// Size classes: 16, 32, 64, 128, 256, 512, 1024, 2048
-// 4096 removed: obj_size == page_size leaves 0 slots after header.
-// Each SlabPage header sits at offset 0 of a PMM page.
-// Free slots use uint16_t offsets from page start (no rebasing needed).
 
-#define SLAB_FREE_END 0xFFFF  // sentinel: end of free list
+#define SLAB_FREE_END 0xFFFF
 
 typedef struct SlabPage {
-    uint16_t       free_head;    // offset of first free slot (or SLAB_FREE_END)
-    uint16_t       free_count;   // slots free in this page
-    uint16_t       total_slots;  // total slots per page
-    uint16_t       obj_size;     // object size for this page
-    uintptr_t      page_phys;    // physical address of this PMM page
-    struct SlabPage* next;       // next slab page in class chain
+    uint16_t       free_head;
+    uint16_t       free_count;
+    uint16_t       total_slots;
+    uint16_t       obj_size;
+    uintptr_t      page_phys;
+    struct SlabPage* next;
 } SlabPage;
 
 typedef struct {
-    SlabPage*  partial;          // pages with free slots
-    SlabPage*  full;             // pages with no free slots
-    size_t     obj_size;         // size of each object in this class
-    uint16_t   slots_per_page;   // precomputed
+    SlabPage*  partial;
+    SlabPage*  full;
+    size_t     obj_size;
+    uint16_t   slots_per_page;
     spinlock_t lock;
 } SlabClass;
 
@@ -42,8 +38,6 @@ void* slab_alloc(size_t size);
 void  slab_free(void* ptr);
 void  slab_activate_pull_map(void);
 bool  slab_owns(void* ptr);
-/* Boot-time proof that membership comes from the page registry, not page
- * content — panics if a content heuristic ever creeps back. */
 void  slab_identity_selftest(void);
 
-#endif // SLAB_H
+#endif

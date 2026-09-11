@@ -1,32 +1,3 @@
-/* draft — a text still in work, held on the glass and put back byte for byte.
- *
- * A volume full of tagged files and no way to change one of them by hand is a
- * library with no pen. This is the pen. It takes the whole screen as a grid of
- * cells and lays every frame down in one blit, and it hears every key as an
- * event, so a machine with an editor open on it spends no core on waiting. It
- * is the weight of a note pad rather than of a workshop — two chords and a
- * word line — because the hands that reach for it are on a bench beside the
- * board, and a chord nobody can remember is a chord nobody uses.
- *
- *   draft NAME           -> that file, or an empty page the first save creates
- *   draft NAME TAG...    -> the tags narrow which NAME is meant when several
- *                           answer, and are stamped on a file that is created
- *   ^S / ^Q              -> save / leave
- *   ESC then a word      -> save, quit, quit!, name, tag, untag, find, go, help
- *
- * Two things here must not be undone. The round trip is a rule: N newlines
- * become N+1 lines, so "a\nb\n" holds a trailing empty line and joining with
- * '\n' writes the same bytes back — draft never adds or removes a byte the
- * person did not type, and a byte it cannot draw is drawn '?' and KEPT, never
- * rewritten to match the glass. And nothing may printf between the first paint
- * and the last clear: printed text travels the display daemon's lane and lands
- * on top of the frame at a moment nobody chose.
- *
- * This file is the one that decides. It holds the state the other three parts
- * read (draft.h names it), takes the keys and the word line, and opens and
- * closes the whole thing: the book is in draft_book.c, the glass in
- * draft_paint.c, the volume in draft_file.c.
- */
 
 #include "box/print.h"
 #include "box/vga.h"
@@ -44,11 +15,11 @@
 #include "draft.h"
 
 DraftBook g_book;
-uint32_t  g_fid;        /* 0 until the volume has this draft */
-char     *g_tags;       /* comma list create() stamps, NULL when none */
-uint32_t  g_line;       /* the cursor's line */
-uint32_t  g_byte;       /* the cursor's byte inside that line */
-uint32_t  g_want;       /* display column Up and Down aim at */
+uint32_t  g_fid;
+char     *g_tags;
+uint32_t  g_line;
+uint32_t  g_byte;
+uint32_t  g_want;
 uint32_t  g_saves;
 int       g_dirty;
 static int g_leaving;
@@ -59,15 +30,12 @@ uint32_t  g_cols;
 TextCell *g_frame;
 
 char s_name[DRAFT_NAME_MAX + 1];
-char s_tagline[80];             /* the tags as the title bar says them */
+char s_tagline[80];
 char s_msg[DRAFT_SAY_MAX];
 char s_cmd[DRAFT_SAY_MAX];
-static char s_find[DRAFT_SAY_MAX];     /* what `find` repeats */
-static char s_work[DRAFT_SAY_MAX];     /* the command line, cut in place */
+static char s_find[DRAFT_SAY_MAX];
+static char s_work[DRAFT_SAY_MAX];
 
-/* ---------------------------------------------------------------------------
- * The word line — everything that is not a chord.
- * ------------------------------------------------------------------------- */
 
 static char *first_word(char *s)
 {
@@ -88,8 +56,6 @@ static void cmd_save(char *rest)
 {
     if (!*rest) { save_book(); return; }
 
-    /* A line of length n holds at most (n+1)/2 words — one byte each and a
-     * blank between — so the cut is sized from what was typed, not guessed. */
     uint32_t room  = (uint32_t)(strlen(rest) + 1) / 2 + 1;
     char   **words = malloc(room * sizeof(char *));
     if (!words) { no_memory("that line's words"); return; }
@@ -114,9 +80,6 @@ static void cmd_save(char *rest)
     say_str(s_name, sizeof(s_name), words[0]);
     free(words);
 
-    /* A new name is a new file, stamped with the words that came with it; the
-     * editor edits that one from here on, and the old one keeps its own last
-     * saved bytes. */
     free(g_tags);
     g_tags = tags;
     g_fid  = 0;
@@ -191,9 +154,6 @@ static int line_holds(const DraftLine *l, uint32_t from, const char *needle,
     return 0;
 }
 
-/* Forward from just after the cursor, wrapping once. The second pass searches
- * the starting line from its head, so a match behind the cursor on the same
- * line is found last rather than never. */
 static void cmd_find(char *rest)
 {
     if (*rest) {
@@ -255,7 +215,7 @@ static void run_command(void)
         while (*rest == ' ' || *rest == '\t') rest++;
     }
 
-    if (!*word)                       return;   /* ESC then Enter: nothing said */
+    if (!*word)                       return;
     if (strcmp(word, "save")  == 0) { cmd_save(rest); return; }
     if (strcmp(word, "quit")  == 0) { leave_or_refuse(); return; }
     if (strcmp(word, "quit!") == 0) { g_leaving = 1; return; }
@@ -274,9 +234,6 @@ static void run_command(void)
     msg_add("draft: no such word - try  help");
 }
 
-/* ---------------------------------------------------------------------------
- * Keys.
- * ------------------------------------------------------------------------- */
 
 static void handle_extended(uint8_t scancode)
 {
@@ -299,7 +256,7 @@ static void handle_edit_key(const kb_event_t *k)
     if (k->mods & KB_MOD_CTRL) {
         if (k->ascii == 's' || k->ascii == 'S') save_book();
         else if (k->ascii == 'q' || k->ascii == 'Q') leave_or_refuse();
-        return;         /* every other chord is deliberately not a command */
+        return;
     }
     if (k->mods & KB_MOD_EXTENDED) { handle_extended(k->scancode); return; }
 
@@ -310,8 +267,6 @@ static void handle_edit_key(const kb_event_t *k)
         s_cmd[0]   = '\0';
         return;
     }
-    /* '\r' as well as '\n': a serial line sends the carriage return, and the
-     * house line editor has always taken both for Enter. */
     if (c == '\n' || c == '\r')                { split_line(); return; }
     if (c == KEY_BACKSPACE || c == 0x7F)       { backspace();  return; }
     if (c == '\t' || (c >= 0x20 && c < 0x7F))  insert_byte((char)c);
@@ -334,14 +289,7 @@ static void handle_command_key(const kb_event_t *k)
     }
 }
 
-/* ---------------------------------------------------------------------------
- * Opening, running, leaving.
- * ------------------------------------------------------------------------- */
 
-/* Everything that must be settled before the screen is taken. Returns NULL
- * when the draft is open, or the sentence to say on the way out — a refusal
- * has to be printed while printing is still allowed, and once the frame is on
- * the glass it no longer is. */
 static const char *open_the_draft(int argc)
 {
     const char *name = luggage_word(1);
@@ -382,12 +330,6 @@ static const char *take_the_screen(TouchTag *ear)
 {
     vga_dimensions_t dim;
     if (vga_getdimensions(&dim) != 0) return "This screen would not say how big it is.";
-    /* A zero means there is no console at all. It used to mean something else
-     * as well — the geometry travels in two bytes and the kernel CAST a wider
-     * screen into them, so 320 columns arrived as 64 and only an exact
-     * multiple of 2048 pixels wrapped to zero. The kernel clamps now: a screen
-     * with more columns than can be named answers 255, and a draft is written
-     * on the part of it this ABI can address. */
     if (dim.rows == 0 || dim.cols == 0)
         return "This machine has no console to write a draft on.";
     if (dim.rows < 3) return "This screen has too few rows for a title, a text and a foot.";
@@ -407,20 +349,13 @@ static void run_the_editor(TouchTag ear)
     while (!g_leaving) {
         paint();
 
-        /* No deadline: an editor has nothing to do between keys, and the
-         * kernel parks the whole cabin until one arrives.
-         *
-         * A refusal is therefore not "not yet", it is "there is nothing left
-         * to hear" — the ear has been taken or the ring is gone. Looping on it
-         * would repaint the screen as fast as the machine can, forever, with
-         * no key able to stop it: a full-screen program nobody can leave. */
         Touch t;
         if (touch_await(ear, &t, 0) != 0) break;
         if (t.payload_len < sizeof(kb_event_t)) continue;
 
         kb_event_t k;
         memcpy(&k, t.payload, sizeof(k));
-        s_msg[0] = '\0';        /* a message stands until the next key */
+        s_msg[0] = '\0';
         if (g_cmd_open) handle_command_key(&k);
         else            handle_edit_key(&k);
     }

@@ -1,31 +1,3 @@
-/*
- * BoxOS — UEFI Secure Boot variable consumer (UEFI 2.10 §32).
- *
- * Reads firmware-side auth variables (state + the four databases),
- * parses the EFI_SIGNATURE_LIST chain in each database into a kernel
- * inventory of cert/hash entries, and exposes lookup helpers to
- * efi_authenticode.c for image-signature verification.
- *
- * Real-HW notes (Microsoft + Lenovo + HP + Dell + Apple T2 + ARM-based
- * UEFI boards, audited against their published Secure Boot specifications):
- *
- *   * SetupMode = 1 means PK is unenrolled. SetVariable on the auth
- *     databases is unauthenticated. Production OEMs ship with PK
- *     enrolled at the factory, so we expect SetupMode == 0 in the field.
- *
- *   * AuditMode is intended for fleet-test enrolment; many OEMs never
- *     expose the UI for it but the variable is always readable.
- *
- *   * The dbx variable on Microsoft-signed Windows boards has grown
- *     past 4 KB on many systems; our GetVariable retry path handles
- *     up to 256 KB which exceeds the largest dbx Microsoft has ever
- *     shipped (the August 2025 dbx revision was 116 KB).
- *
- *   * EFI_VARIABLE_AUTHENTICATION_2 wrappers are NOT synthesised here.
- *     A future SetVariable-on-auth-var path (e.g. for our own deploy
- *     pipeline) must build the WIN_CERT + UEFI_AUTHENTICATED_VARIABLE
- *     payload externally; this driver only READS db variables.
- */
 
 #include "efi.h"
 #include "efi_secureboot.h"
@@ -34,9 +6,6 @@
 #include "crypto.h"
 #include "touch.h"
 
-/* =========================================================================
- * GUID constants (UEFI 2.10)
- * ========================================================================= */
 
 const EfiGuid EFI_GLOBAL_VARIABLE_GUID = {
     0x8BE4DF61, 0x93CA, 0x11D2,
@@ -48,7 +17,6 @@ const EfiGuid EFI_IMAGE_SECURITY_DATABASE_GUID = {
     {0xA3, 0xBC, 0xDA, 0xD0, 0x0E, 0x67, 0x65, 0x6F}
 };
 
-/* UEFI 2.10 §32.4.1 Table 32-5 signature type GUIDs. */
 const EfiGuid EFI_CERT_X509_GUID = {
     0xA5C059A1, 0x94E4, 0x4AA7,
     {0x87, 0xB5, 0xAB, 0x15, 0x5C, 0x2B, 0xF0, 0x72}
@@ -86,28 +54,22 @@ const EfiGuid EFI_CERT_X509_SHA512_GUID = {
     {0xBC, 0xFA, 0x24, 0x65, 0xD2, 0xB0, 0xFE, 0x9D}
 };
 
-/* =========================================================================
- * Driver state
- * ========================================================================= */
 
-#define EFI_SB_MAX_DB_BYTES   (256u * 1024u)   /* dbx ceiling we accept */
-#define EFI_SB_MAX_CERT_LEN   8192u             /* sanity per X.509 entry */
+#define EFI_SB_MAX_DB_BYTES   (256u * 1024u)
+#define EFI_SB_MAX_CERT_LEN   8192u
 #define EFI_SB_MAX_HASH_LEN   64u
-#define EFI_SB_MAX_CERTS      4096u             /* hard cap defensive */
-#define EFI_SB_MAX_HASHES     16384u            /* hard cap defensive */
+#define EFI_SB_MAX_CERTS      4096u
+#define EFI_SB_MAX_HASHES     16384u
 
 typedef struct {
-    uint8_t  *blob;            /* kmalloc'd buffer holding the raw db */
+    uint8_t  *blob;
     uint32_t  blob_len;
 } EfiSbDbBlob;
 
-static EfiSbDbBlob   g_db_blobs[EFI_SB_DB_COUNT];   /* indexed by EfiSbDb */
+static EfiSbDbBlob   g_db_blobs[EFI_SB_DB_COUNT];
 
-/* Inventory arrays are LAZY-ALLOCATED with exact sizes after the
- * two-pass scan in efi_secureboot_init. A system with no Secure Boot
- * enrolment has cert_count=0 + hash_count=0 and no kmalloc happens. */
 static EfiSbCertEntry *g_certs       = NULL;
-static uint32_t        g_certs_cap   = 0;   /* allocated capacity */
+static uint32_t        g_certs_cap   = 0;
 static uint32_t        g_cert_count  = 0;
 static EfiSbHashEntry *g_hashes      = NULL;
 static uint32_t        g_hashes_cap  = 0;
@@ -116,14 +78,6 @@ static uint32_t        g_hash_count  = 0;
 static EfiSecureBootState g_state = {0};
 static bool               g_ready = false;
 
-/* =========================================================================
- * Variable read helper with EFI_BUFFER_TOO_SMALL retry
- *
- * UEFI 2.10 §8.2.1 — GetVariable on data=NULL returns BUFFER_TOO_SMALL
- * with *data_size set to the required size. We retry once with a
- * matching allocation. Cap to EFI_SB_MAX_DB_BYTES to refuse runaway
- * firmware bugs (e.g. a chip that returns 0xFFFFFFFF for the size).
- * ========================================================================= */
 
 static EfiStatus efi_sb_read_var(const char *name,
                                   const EfiGuid *vendor,
@@ -140,12 +94,11 @@ static EfiStatus efi_sb_read_var(const char *name,
     EfiStatus s = efi_get_variable_ascii(name, vendor, &attrs, &want, NULL);
 
     if (s == EFI_STATUS_SUCCESS) {
-        /* Variable existed but had zero-length data — legal. */
         if (out_attrs) *out_attrs = attrs;
         return EFI_STATUS_SUCCESS;
     }
     if (s != EFI_STATUS_BUFFER_TOO_SMALL) {
-        return s;   /* not present, no permission, device error */
+        return s;
     }
     if (want == 0 || want > EFI_SB_MAX_DB_BYTES) {
         return EFI_STATUS_OUT_OF_RESOURCES;
@@ -166,9 +119,6 @@ static EfiStatus efi_sb_read_var(const char *name,
     return EFI_STATUS_SUCCESS;
 }
 
-/* =========================================================================
- * UINT8 state-variable reads
- * ========================================================================= */
 
 static bool read_u8_var(const char *name, uint8_t *out)
 {
@@ -184,21 +134,11 @@ static bool read_u8_var(const char *name, uint8_t *out)
     return false;
 }
 
-/* =========================================================================
- * EFI_SIGNATURE_LIST parser
- *
- * Walk a database blob. Each EFI_SIGNATURE_LIST block contains a header
- * + signature_header_size opaque bytes + N entries of fixed size:
- *   signature_size = sizeof(EfiGuid)+signature_payload_size
- *
- * UEFI 2.10 §32.4.1 specifies the exact format. We validate every length
- * field — a malformed block aborts parsing of that block (others continue).
- * ========================================================================= */
 
 static int classify_signature(const EfiGuid *type, int *out_hash_bits)
 {
     if (out_hash_bits) *out_hash_bits = 0;
-    if (efi_guid_equal(type, &EFI_CERT_X509_GUID))           return 1;  /* cert */
+    if (efi_guid_equal(type, &EFI_CERT_X509_GUID))           return 1;
     if (efi_guid_equal(type, &EFI_CERT_SHA256_GUID))         { *out_hash_bits = 256; return 2; }
     if (efi_guid_equal(type, &EFI_CERT_SHA384_GUID))         { *out_hash_bits = 384; return 2; }
     if (efi_guid_equal(type, &EFI_CERT_SHA512_GUID))         { *out_hash_bits = 512; return 2; }
@@ -207,15 +147,9 @@ static int classify_signature(const EfiGuid *type, int *out_hash_bits)
     if (efi_guid_equal(type, &EFI_CERT_X509_SHA512_GUID))    { *out_hash_bits = 512; return 3; }
     if (efi_guid_equal(type, &EFI_CERT_RSA2048_GUID))        return 4;
     if (efi_guid_equal(type, &EFI_CERT_RSA2048_SHA256_GUID)) return 5;
-    return 0;   /* unknown */
+    return 0;
 }
 
-/* Walk a signature list once.
- *   `count_only=true`  → just bumps *out_cert_count / *out_hash_count.
- *   `count_only=false` → appends parsed entries to g_certs / g_hashes
- *                        using g_cert_count / g_hash_count as cursors
- *                        (already pre-allocated to exact size).
- * The fixed-cap defenses still apply against runaway firmware. */
 static void walk_signature_list(EfiSbDb kind, const uint8_t *blob, uint32_t blob_len,
                                  bool count_only,
                                  uint32_t *out_cert_count, uint32_t *out_hash_count)
@@ -254,7 +188,6 @@ static void walk_signature_list(EfiSbDb kind, const uint8_t *blob, uint32_t blob
             uint32_t payload_len = sig_size - sizeof(EfiGuid);
 
             if (klass == 1) {
-                /* X.509 DER cert */
                 if (count_only) { (*out_cert_count)++; continue; }
                 if (g_cert_count >= g_certs_cap)    continue;
                 g_certs[g_cert_count].owner    = owner;
@@ -291,9 +224,6 @@ next_list:
     }
 }
 
-/* =========================================================================
- * Touch publishing
- * ========================================================================= */
 
 static void touch_publish_state(void)
 {
@@ -335,7 +265,6 @@ void efi_secureboot_publish_touch(void)
     if (!g_ready) return;
     touch_publish_state();
 
-    /* Per-cert tags. */
     for (uint32_t i = 0; i < g_cert_count; i++) {
         const EfiSbCertEntry *c = &g_certs[i];
         uint8_t digest[32];
@@ -347,12 +276,10 @@ void efi_secureboot_publish_touch(void)
         TouchPublish(tag, digest, sizeof(digest));
     }
 
-    /* Per-hash tags (only SHA-256 raw hashes; SHA-384/512 skipped to
-     * keep the index small — authenticode currently uses SHA-256 only). */
     for (uint32_t i = 0; i < g_hash_count; i++) {
         const EfiSbHashEntry *h = &g_hashes[i];
         if ((h->hash_kind & 0x7FFF) != 256) continue;
-        if (h->hash_kind & 0x8000)          continue;   /* x509+hash kind */
+        if (h->hash_kind & 0x8000)          continue;
         char hex[65];
         hash_to_hex(h->hash, 32, hex, sizeof(hex));
         char tag[96];
@@ -361,13 +288,7 @@ void efi_secureboot_publish_touch(void)
     }
 }
 
-/* =========================================================================
- * Init / Inventory loading
- * ========================================================================= */
 
-/* Stage 1: read the raw variable blob into g_db_blobs[kind]. No parsing,
- * no inventory commits — just preserve the bytes so the second pass can
- * walk them once we know exact alloc sizes. */
 static void stage_read_db(EfiSbDb kind, const char *name, const EfiGuid *vendor)
 {
     uint8_t *buf = NULL;
@@ -395,7 +316,6 @@ bool efi_secureboot_init(void)
         return false;
     }
 
-    /* Read state variables first — fast and gives early signal. */
     uint8_t sb = 0, setup = 0, audit = 0, deployed = 0;
     bool have_sb       = read_u8_var("SecureBoot",   &sb);
     bool have_setup    = read_u8_var("SetupMode",    &setup);
@@ -412,9 +332,6 @@ bool efi_secureboot_init(void)
                  g_state.enforced, g_state.setup_mode,
                  g_state.audit_mode, g_state.deployed_mode);
 
-    /* Stage 1: read all six databases verbatim into g_db_blobs.
-     * Variables not present (SB-disabled boards) leave their slot
-     * with blob=NULL. No inventory allocation yet. */
     stage_read_db(EFI_SB_DB_PK,  "PK",  &EFI_GLOBAL_VARIABLE_GUID);
     stage_read_db(EFI_SB_DB_KEK, "KEK", &EFI_GLOBAL_VARIABLE_GUID);
     stage_read_db(EFI_SB_DB_DB,  "db",  &EFI_IMAGE_SECURITY_DATABASE_GUID);
@@ -422,9 +339,6 @@ bool efi_secureboot_init(void)
     stage_read_db(EFI_SB_DB_DBT, "dbt", &EFI_IMAGE_SECURITY_DATABASE_GUID);
     stage_read_db(EFI_SB_DB_DBR, "dbr", &EFI_IMAGE_SECURITY_DATABASE_GUID);
 
-    /* Stage 2: counting pass — walk each preserved blob to compute the
-     * exact cert+hash totals. Per-DB counters drive both the lazy alloc
-     * and the diagnostic state struct. */
     uint32_t per_db_cert[EFI_SB_DB_COUNT] = {0};
     uint32_t per_db_hash[EFI_SB_DB_COUNT] = {0};
     uint32_t total_certs = 0, total_hashes = 0;
@@ -444,8 +358,6 @@ bool efi_secureboot_init(void)
     debug_printf("[SB] inventory totals: certs=%u hashes=%u (skipping alloc if zero)\n",
                  total_certs, total_hashes);
 
-    /* Stage 3: lazy allocation. Zero entries → zero alloc → ~690 KB saved
-     * on every BIOS-only / SB-disabled machine. */
     if (total_certs > 0) {
         g_certs = kmalloc(sizeof(EfiSbCertEntry) * total_certs);
         if (!g_certs) {
@@ -466,7 +378,6 @@ bool efi_secureboot_init(void)
     g_cert_count = 0;
     g_hash_count = 0;
 
-    /* Stage 4: populate pass — re-walk each blob and commit entries. */
     for (uint32_t k = 0; k < EFI_SB_DB_COUNT; k++) {
         if (!g_db_blobs[k].blob) continue;
         walk_signature_list((EfiSbDb)k, g_db_blobs[k].blob,
@@ -501,11 +412,6 @@ const EfiSbHashEntry *efi_secureboot_hash_get(uint32_t idx)
     return &g_hashes[idx];
 }
 
-/* =========================================================================
- * Lookup helpers (linear scan — db/dbx are tiny vs the search frequency,
- * and a precomputed hash table would add complexity without measurable
- * benefit when verification is rare).
- * ========================================================================= */
 
 const EfiSbCertEntry *efi_secureboot_find_db_cert(const uint8_t *der, uint32_t len)
 {
@@ -565,9 +471,6 @@ const EfiSbHashEntry *efi_secureboot_find_db_hash_sha256(const uint8_t hash[32])
     return find_hash_sha256(EFI_SB_DB_DB, hash);
 }
 
-/* =========================================================================
- * Diagnostic
- * ========================================================================= */
 
 void efi_secureboot_print(void)
 {

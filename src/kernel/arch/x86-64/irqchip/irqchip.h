@@ -3,51 +3,28 @@
 
 #include "ktypes.h"
 
-// Vector layout:
-//   0-31:   CPU exceptions
-//   32-55:  Hardware IRQs (GSI 0-23, covers PIC + IO-APIC)
-//   128:    Syscall (INT 0x80)
-//   254:    LAPIC timer
-//   255:    LAPIC spurious
 
 #define IRQ_VECTOR_BASE         32
-#define IRQ_MAX_COUNT           24      // Standard IO-APIC: 24 pins (GSI 0-23)
-#define IRQ_VECTOR_MAX          (IRQ_VECTOR_BASE + IRQ_MAX_COUNT - 1)  // 55
+#define IRQ_MAX_COUNT           24
+#define IRQ_VECTOR_MAX          (IRQ_VECTOR_BASE + IRQ_MAX_COUNT - 1)
 
-#define LAPIC_TIMER_VECTOR      0xFE    // 254
-#define LAPIC_SPURIOUS_VECTOR   0xFF    // 255
+#define LAPIC_TIMER_VECTOR      0xFE
+#define LAPIC_SPURIOUS_VECTOR   0xFF
 
-// MSI (message-signalled interrupt) device vectors. MSI is delivered
-// straight to the LAPIC (acked with LAPIC EOI, not the IOAPIC) so these sit
-// outside the IOAPIC GSI range (32-55). Dispatched explicitly in irq_handler.
-#define AHCI_MSI_VECTOR         0x70    // 112 — AHCI controller
-/* One vector per USB controller, not one for all of them.
- *
- * MSI is a message carrying a vector, and two devices told to send the same
- * message are two devices the processor cannot tell apart. A machine has as
- * many USB controllers as it has — a chipset one and, very often, another on a
- * graphics card — and giving them all 0x71 meant every interrupt had to be
- * offered to every controller in turn, on the chance that it was the one that
- * spoke. That works and it is not right: an interrupt should name its source.
- *
- * Eight is the number of controllers this kernel will bring up, so it is the
- * number of vectors reserved for them. */
-#define XHCI_MSI_VECTOR         0x71    // 113 — first USB xHCI controller
+#define AHCI_MSI_VECTOR         0x70
+#define XHCI_MSI_VECTOR         0x71
 #define XHCI_MSI_VECTOR_COUNT   8
 #define XHCI_MSI_VECTOR_LAST    (XHCI_MSI_VECTOR + XHCI_MSI_VECTOR_COUNT - 1)
 
-// AMP inter-processor interrupt vectors
-#define IPI_WAKE_VECTOR         0xF0    // 240 — wake idle AP or reschedule
-#define IPI_SHOOTDOWN_VECTOR    0xF1    // 241 — TLB shootdown
-#define IPI_PANIC_VECTOR        0xF2    // 242 — broadcast halt on panic
+#define IPI_WAKE_VECTOR         0xF0
+#define IPI_SHOOTDOWN_VECTOR    0xF1
+#define IPI_PANIC_VECTOR        0xF2
 
-// Interrupt controller type
 typedef enum {
-    IRQCHIP_PIC,        // Legacy 8259A PIC (fallback)
-    IRQCHIP_APIC        // Local APIC + IO-APIC (preferred)
+    IRQCHIP_PIC,
+    IRQCHIP_APIC
 } irqchip_type_t;
 
-// Abstract interrupt controller operations
 typedef struct irq_chip {
     const char* name;
     void (*enable_irq)(uint8_t gsi);
@@ -58,7 +35,6 @@ typedef struct irq_chip {
     uint8_t max_irqs;
 } irq_chip_t;
 
-// Global API - all drivers use these instead of pic_* directly
 void irqchip_init(void);
 void irqchip_enable_irq(uint8_t gsi);
 void irqchip_disable_irq(uint8_t gsi);
@@ -70,19 +46,11 @@ irqchip_type_t irqchip_get_type(void);
 const char* irqchip_get_name(void);
 uint8_t irqchip_max_irqs(void);
 
-/* Access to the MADT info captured by irqchip_init(). Returns NULL when
- * running on the PIC fallback path (no MADT). Used by AP bring-up to
- * apply Local APIC NMI assignments per-CPU. */
-struct madt_info; /* forward decl from acpi_madt.h */
+struct madt_info;
 const struct madt_info *irqchip_get_madt(void);
 
-/* Apply MADT LAPIC NMI entries to the *currently executing* CPU.
- * Looks up the running CPU's APIC ID via lapic_get_id(), finds the
- * matching ACPI processor ID in the MADT CPU map, and writes the LVT
- * NMI bits. Safe to call from the AP entry path after lapic_enable. */
 void irqchip_apply_lapic_nmi_self(void);
 
-// Convert between GSI and IDT vector
 static inline uint8_t irq_gsi_to_vector(uint8_t gsi) {
     return IRQ_VECTOR_BASE + gsi;
 }
@@ -90,4 +58,4 @@ static inline uint8_t irq_vector_to_gsi(uint8_t vector) {
     return vector - IRQ_VECTOR_BASE;
 }
 
-#endif // IRQCHIP_H
+#endif

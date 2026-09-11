@@ -1,15 +1,3 @@
-/*
- * MCE — Machine Check Architecture implementation
- *
- * See mce.h for spec citations. Code paths:
- *   mce_init()        — BSP bring-up (CR4.MCE, MCG_CAP, per-bank CTL+CLEAR,
- *                       LMCE gate, telemetry)
- *   mce_ap_init()     — same minus IDT
- *   mce_handle(frame) — runs in #MC context (IST stack); MUST NOT call any
- *                       service that could itself trigger an error (kmalloc,
- *                       framebuffer write, etc.). Uses only kprintf+pmm+
- *                       MemTagApplyByPhys (all path-tested IRQ-safe).
- */
 
 #include "mce.h"
 #include "mce_migrate.h"
@@ -20,28 +8,17 @@
 #include "touch.h"
 #include "logbook.h"
 
-/* ─── State ────────────────────────────────────────────────────────── */
 
 static bool      g_mce_initialized = false;
 static bool      g_mce_lmce_on     = false;
 static uint32_t  g_mce_bank_count  = 0;
 static uint64_t  g_mce_mcg_cap     = 0;
-static uint64_t  g_mce_ban_mask    = 0;  /* bit i set ⇒ bank i CTL skipped */
+static uint64_t  g_mce_ban_mask    = 0;
 
-/* Pre-resolved Touch tag handles. The #MC handler runs on the IST stack
- * (non-maskable, even more restrictive than IRQ context). Per touch.h
- * §IRQ-Publishers, ISR-context code MUST NOT call TouchPublish/TouchPublishId
- * directly because that path can take per-bucket spinlocks + kmalloc the
- * L2 leaf, which deadlocks against any caller that held a Touch lock
- * when the #MC fired. The IRQ-safe variant TouchPublishIrqPair takes
- * pre-resolved tag handles + a bounded payload + queues for K-Core
- * delivery. We resolve once at mce_init time (outside IRQ) and cache
- * the handles here; mce_handle hot-path uses them. */
 static TouchTag  g_mce_tag_detected   = TOUCH_TAG_INVALID;
 static TouchTag  g_mce_tag_recovered  = TOUCH_TAG_INVALID;
 static TouchTag  g_mce_tag_fatal      = TOUCH_TAG_INVALID;
 
-/* ─── MSR primitives ──────────────────────────────────────────────── */
 
 static inline uint64_t mce_rdmsr(uint32_t msr) {
     uint32_t lo, hi;
@@ -55,11 +32,7 @@ static inline void mce_wrmsr(uint32_t msr, uint64_t value) {
     __asm__ volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
 }
 
-/* ─── CPU feature gating ───────────────────────────────────────────── */
 
-/* CPUID.1:EDX[7]=MCE, [14]=MCA. Both must be set for full MCA. MCE
- * alone (legacy P5/P6 without architecture) is not enough — we refuse
- * to drive a non-MCA system. */
 static bool mce_supported_local(void) {
     uint32_t eax, ebx, ecx, edx;
     cpuid(CPUID_LEAF_FEATURES, &eax, &ebx, &ecx, &edx);
@@ -68,22 +41,15 @@ static bool mce_supported_local(void) {
     return mce && mca;
 }
 
-/* Intel bank-0 historical hazard. P54C/P55C and a handful of early P-IV
- * SKUs hang or report spurious errors when bank 0 CTL is written all-1s.
- * Linux mce/intel.c skips bank 0 on those families. Modern Intel (Family
- * 6 Model >= 0x0F, all family >= 0xF after Tejas) handles bank 0
- * normally. We detect by family/model. AMD: no equivalent hazard. */
 static bool mce_skip_bank_zero(void) {
     cpu_identity_t id;
     cpu_read_identity(&id);
-    if (id.vendor[0] != 'G') return false;  /* "GenuineIntel" check */
-    /* Pre-Pentium-Pro families had no MCA; we don't reach here on them. */
-    if (id.family == 0x0F && id.model < 0x03) return true;  /* Willamette/Northwood */
-    if (id.family == 0x06 && id.model < 0x0E) return true;  /* Pre-Core (Banias/Dothan) */
+    if (id.vendor[0] != 'G') return false;
+    if (id.family == 0x0F && id.model < 0x03) return true;
+    if (id.family == 0x06 && id.model < 0x0E) return true;
     return false;
 }
 
-/* ─── CR4.MCE bit toggle ──────────────────────────────────────────── */
 
 #define CR4_MCE_BIT (1ULL << 6)
 
@@ -96,15 +62,10 @@ static inline void mce_cr4_enable(void) {
     }
 }
 
-/* ─── LMCE bring-up (Intel SDM §15.3.1.4) ──────────────────────────── */
 
 static bool mce_enable_lmce_if_supported(uint64_t mcg_cap) {
     if (!(mcg_cap & MCE_CAP_MCG_LMCE_P)) return false;
 
-    /* LMCE requires IA32_FEATURE_CONTROL.LOCK=1 AND LMCE_EN=1. If the
-     * firmware hasn't enabled LMCE in IA32_FEATURE_CONTROL we leave it
-     * off (writing those bits ourselves would conflict with TXT/VMX
-     * negotiation done by firmware). */
     uint64_t feat = mce_rdmsr(MCE_MSR_IA32_FEATURE_CONTROL);
     if ((feat & MCE_MSR_FEAT_LOCK_BIT) &&
         (feat & MCE_MSR_FEAT_LMCE_BIT)) {
@@ -113,22 +74,15 @@ static bool mce_enable_lmce_if_supported(uint64_t mcg_cap) {
     return false;
 }
 
-/* ─── Bank programming (used by BSP + per-AP) ──────────────────────── */
 
 static void mce_program_banks(uint32_t count, uint64_t skip_mask) {
     for (uint32_t i = 0; i < count && i < MCE_MAX_BANKS; i++) {
         if (skip_mask & (1ULL << i)) continue;
-        /* Enable all error sources on this bank. SDM Vol 3B §15.3.2.1:
-         * IA32_MCi_CTL is bank-specific; writing 0xFFFFFFFFFFFFFFFF is
-         * the canonical "enable everything" pattern. */
         mce_wrmsr(MCE_MSR_MC_CTL_BASE + i * 4, 0xFFFFFFFFFFFFFFFFULL);
-        /* Clear any stale status the firmware left behind. SDM §15.3.2.2
-         * notes that BIOS POST may have left UC errors logged. */
         mce_wrmsr(MCE_MSR_MC_STATUS_BASE + i * 4, 0ULL);
     }
 }
 
-/* ─── Public API ──────────────────────────────────────────────────── */
 
 bool mce_is_initialized(void) { return g_mce_initialized; }
 uint32_t mce_bank_count(void) { return g_mce_bank_count; }
@@ -153,15 +107,10 @@ void mce_init(void) {
 
     mce_program_banks(bank_count, skip);
 
-    /* MCG_CTL_P: write 0xFF...FF to enable global reporting on systems
-     * with the global control MSR. Skipped when absent (writing would
-     * #GP). */
     if (cap & MCE_CAP_MCG_CTL_P) {
         mce_wrmsr(MCE_MSR_MCG_CTL, 0xFFFFFFFFFFFFFFFFULL);
     }
 
-    /* Make sure the in-progress flag is clear at boot. Some firmware
-     * leaves MCIP=1 after a warm reboot following a fatal MCE. */
     mce_wrmsr(MCE_MSR_MCG_STATUS, 0ULL);
 
     g_mce_mcg_cap    = cap;
@@ -179,11 +128,6 @@ void mce_init(void) {
                  (unsigned long)skip,
                  (unsigned long)cap);
 
-    /* Pre-resolve Touch tag handles for the IST-safe publish path. Done
-     * here (outside IRQ context) because TouchLogbookIntern takes
-     * locks. The handles are stored as globals for mce_handle to use
-     * via TouchPublishIrqPair (which is the only Touch publisher safe
-     * to call from IST). Tags are MemTag-reserved in SeedReservedTags. */
     g_mce_tag_detected  = TouchLogbookIntern("mce:fault:detected");
     g_mce_tag_recovered = TouchLogbookIntern("mce:fault:recovered");
     g_mce_tag_fatal     = TouchLogbookIntern("mce:fault:fatal");
@@ -197,18 +141,11 @@ void mce_init(void) {
 }
 
 void mce_ap_init(void) {
-    /* APs program their own CR4.MCE + per-bank state. The BSP detected
-     * bank count + capability flags via the shared g_mce_mcg_cap.
-     * On a hybrid CPU where an AP reports different MCG_CAP, we trust
-     * the AP's CPUID gate to keep us from #GPing on bank registers it
-     * doesn't have. */
-    if (!g_mce_initialized) return;          /* BSP refused — skip AP */
-    if (!mce_supported_local()) return;      /* this AP lacks MCA */
+    if (!g_mce_initialized) return;
+    if (!mce_supported_local()) return;
 
     mce_cr4_enable();
 
-    /* Re-read MCG_CAP — possible per-thread divergence on hybrid CPUs.
-     * Cap by the BSP-observed count to keep telemetry coherent. */
     uint64_t cap = mce_rdmsr(MCE_MSR_MCG_CAP);
     uint32_t bank_count = (uint32_t)(cap & MCE_CAP_COUNT_MASK);
     if (bank_count > g_mce_bank_count) bank_count = g_mce_bank_count;
@@ -222,10 +159,7 @@ void mce_ap_init(void) {
     mce_wrmsr(MCE_MSR_MCG_STATUS, 0ULL);
 }
 
-/* ─── #MC handler ─────────────────────────────────────────────────── */
 
-/* Touch payload — fits 64 B Pocket envelope. Userspace subscribers
- * to `mce:fault:detected` learn precise bank + status without RDMSR. */
 typedef struct {
     uint64_t  status;
     uint64_t  addr;
@@ -233,8 +167,8 @@ typedef struct {
     uint64_t  mcg_status;
     uint64_t  rip;
     uint32_t  bank;
-    uint8_t   severity;     /* mce_severity_t */
-    uint8_t   recovered;    /* 1 = handled, 0 = fatal */
+    uint8_t   severity;
+    uint8_t   recovered;
     uint16_t  pad;
 } mce_event_payload_t;
 
@@ -255,9 +189,6 @@ static const char *mce_sev_str(mce_severity_t s) {
     }
 }
 
-/* Page-aligned phys address recovered from a bank's ADDR register +
- * the granularity hint in MISC.LSB (bits 5:0 of MISC, when MISCV=1).
- * SDM §15.3.2.4. Return 0 if ADDRV not set. */
 static uintptr_t mce_extract_phys_page(uint64_t status, uint64_t addr) {
     if (!(status & MCE_MC_STATUS_ADDRV)) return 0;
     return addr & ~(uintptr_t)(PMM_PAGE_SIZE - 1);
@@ -266,10 +197,7 @@ static uintptr_t mce_extract_phys_page(uint64_t status, uint64_t addr) {
 bool mce_handle(interrupt_frame_t *frame) {
     bool any_fatal       = false;
     bool any_recovered   = false;
-    bool nested_consumed = false;     /* set if any bank's phys matched an
-                                       * in-flight migration on this CPU
-                                       * — the inner copy loop will see the
-                                       * abort flag and zero-fill the tail. */
+    bool nested_consumed = false;
     uint64_t mcg_status  = mce_rdmsr(MCE_MSR_MCG_STATUS);
     bool ripv            = (mcg_status & MCE_MCG_STATUS_RIPV) != 0;
 
@@ -300,35 +228,18 @@ bool mce_handle(interrupt_frame_t *frame) {
                      mce_sev_str(sev),
                      (unsigned long)poisoned_phys);
 
-        /* Nested-#MC notifier: if this CPU is in the middle of a
-         * mce_safe_page_copy and the bad phys matches the in-flight
-         * migration's source, signal the copy loop to abort + zero-fill.
-         * This must happen BEFORE we poison the page below so the abort
-         * flag is set while the copy is still running. The check is
-         * O(1) per-CPU. */
         if (poisoned_phys != 0 && mce_migrate_note_nested(poisoned_phys)) {
             nested_consumed = true;
         }
 
-        /* Mark the affected page poisoned for future allocations. Active
-         * mappings keep working until the owning process exits OR until
-         * the deferred migration worker (queued below) swaps the PTE to
-         * a fresh phys page. */
         if (poisoned_phys != 0 &&
             (sev == MCE_SEV_UCR || sev == MCE_SEV_UC)) {
             pmm_set_poisoned(poisoned_phys);
             (void)MemTagApplyByPhys(poisoned_phys, 1, "mce:poisoned");
 
-            /* Queue a deferred migration. The actual copy + PTE swap +
-             * TLB shootdown runs in K-Core context off the slot's baton (the
-             * #MC IST stack can't safely take pmm_alloc / region-bucket
-             * locks). Failure to queue (ring saturation) is non-fatal:
-             * the page stays poisoned in the PMM bitmap, so the owning
-             * process will eventually #PF on access and die cleanly. */
             (void)mce_migrate_request(poisoned_phys, sev, status);
         }
 
-        /* Touch payload — copied onto IRQ pocket inline. */
         mce_event_payload_t ev = {
             .status     = status,
             .addr       = addr,
@@ -341,12 +252,6 @@ bool mce_handle(interrupt_frame_t *frame) {
             .pad        = 0,
         };
 
-        /* IRQ-safe Touch publish — see touch.h §IRQ-Publishers. The
-         * #MC handler runs on the IST_MACHINE_CHECK stack; calling
-         * TouchPublish here would deadlock against any caller holding
-         * a Touch lock at the moment #MC fired. TouchPublishIrqPair
-         * copies the payload into a preallocated static slot and
-         * defers actual publish to a K-Core worker. */
         TouchTag pub_tag = TOUCH_TAG_INVALID;
         switch (sev) {
             case MCE_SEV_UC:
@@ -355,8 +260,6 @@ bool mce_handle(interrupt_frame_t *frame) {
                 pub_tag = g_mce_tag_fatal;
                 break;
             case MCE_SEV_UCR:
-                /* Recoverable iff RIPV=1. Without RIPV, IRET resumes at
-                 * an unknown RIP — fatal even when UC=1 + PCC=0. */
                 ev.recovered = ripv ? 1 : 0;
                 if (ripv) {
                     any_recovered = true;
@@ -378,23 +281,14 @@ bool mce_handle(interrupt_frame_t *frame) {
         if (pub_tag != TOUCH_TAG_INVALID) {
             TouchPublishIrqPair(pub_tag, TOUCH_TAG_INVALID,
                                 &ev, (uint16_t)sizeof(ev),
-                                0u /* source_pid: kernel */, 0u /* flags */);
+                                0u , 0u );
         }
 
-        /* Clear bank status so we don't re-read on the next #MC. SDM
-         * §15.3.2.2: write 0 clears VAL + all sticky bits. */
         mce_wrmsr(MCE_MSR_MC_STATUS_BASE + i * 4, 0ULL);
     }
 
-    /* Clear MCG_STATUS.MCIP. SDM §15.3.1.2: "After the OS has read MCG_
-     * STATUS, it must clear MCIP". Failing to do so blocks future #MC
-     * delivery on this thread. */
     mce_wrmsr(MCE_MSR_MCG_STATUS, 0ULL);
 
-    /* Telemetry — visible in serial when DEBUG=on. nested_consumed=1
-     * tells operators that an in-flight migration was poisoned by a
-     * recursive #MC; the copy loop's zero-fill will keep the process
-     * alive but with partial data. */
     if (nested_consumed) {
         debug_printf("[MCE] nested #MC consumed by in-flight migration\n");
     }

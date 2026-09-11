@@ -1,6 +1,3 @@
-// boxcxx — Itanium C++ ABI type_info hierarchy (data layouts fixed by
-// the ABI §2.9.5 — the compiler emits objects with exactly these
-// shapes; the virtuals are boxcxx's own machinery).
 #ifndef BOXCXX_CXXABI_TYPEINFO_H
 #define BOXCXX_CXXABI_TYPEINFO_H
 
@@ -113,14 +110,11 @@ public:
                     unsigned outer) const override;
 };
 
-// [except.handle] matching: does a handler of type `catch_type` accept an
-// exception object of dynamic type `throw_type`? Adjusts *thrown_object
-// (base subobject / pointer conversions) on success.
 bool CatchMatches(const std::type_info *catch_type,
                   const std::type_info *throw_type, void **thrown_object);
 
-} // namespace __cxxabiv1
+}
 
 namespace abi = __cxxabiv1;
 
-#endif // BOXCXX_CXXABI_TYPEINFO_H
+#endif

@@ -15,23 +15,10 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
         return -1;
     }
 
-    // Determine target: if target_pid != 0, deliver to target process (IPC).
-    // Otherwise deliver to the sender.
     uint32_t target_pid = pocket->target_pid;
 
     if (target_pid != 0)
     {
-        // IPC: deliver Result to target process's ResultRing,
-        // then deliver confirmation Result to sender's ResultRing.
-        //
-        // Pin the target with a reference across the push. P5a made the
-        // ResultRing strand-lifetime (a spawned strand's ring is freed by
-        // strand_rings_destroy at cleanup), and P5b adds a runtime strand
-        // reaper — so without a ref a concurrent reaper / process_destroy of
-        // a sibling target could unmap+free its ring pages out from under
-        // KResultPush (write into freed physical memory). The ref keeps both
-        // the struct AND its rings alive until process_ref_dec below, exactly
-        // as the storage / write-job / system IPC paths already do.
         process_t *target = process_find_ref(target_pid);
         process_t *sender = proc;
 
@@ -48,7 +35,6 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
             return -1;
         }
 
-        // Deliver IPC Result to target
         Result ipc_result;
         ipc_result.error_code  = pocket->error_code;
         ipc_result.data_length = pocket->manifest_size;
@@ -58,7 +44,6 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
         KResultPush(target, &ipc_result);
         process_ref_dec(target);
 
-        // Deliver confirmation Result to sender (sender_pid = 0 so result_pop_non_ipc finds it)
         if (sender)
         {
             Result confirm;
@@ -66,14 +51,12 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
             confirm.data_length = 0;
             confirm.data_addr   = 0;
             confirm.sender_pid  = 0;
-            /* The sender's paired wait adopts this by its own token. */
             confirm.context     = KCTX_PACK24(KCTX_IPC, PocketCookie24(pocket));
             KResultPush(sender, &confirm);
         }
         return 0;
     }
 
-    // Self: deliver Result to sender's own ResultRing
     process_t *target = proc;
     if (!target) return 0;
 
@@ -82,15 +65,10 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
     result.data_length = pocket->manifest_size;
     result.data_addr   = pocket->manifest_addr;
     result.sender_pid  = 0;
-    /* Echo the submit's cloakroom token — the waiter adopts only its own. */
     result.context     = KCTX_PACK24(KCTX_GUIDE, PocketCookie24(pocket));
 
     if (!KResultPush(target, &result))
     {
-        /* KResultPush has already said why. This is the answer to a submit
-         * the strand is waiting on, and a refusal here is the whole of the
-         * "work taken, answer never promised" stall — it used to be a
-         * debug_printf, which is compiled to nothing. */
         kprintf("[EXECUTION] DEFECT: the answer to pid %u's submit (token 0x%06x, "
                 "rc=%u) was refused by its reply ring\n",
                 (unsigned int)target->pid, (unsigned int)PocketCookie24(pocket),

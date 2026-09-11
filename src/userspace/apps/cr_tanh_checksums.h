@@ -1,4 +1,3 @@
-// FNV-1a checksums over MPFR-CR tanh for the deterministic x stream — GENERATED.
 static const unsigned long long kTanhN    = 20000ULL;
 static const unsigned long long kTanhSeed = 0x165667B19E3779F9ULL;
 static const int kTanhElo = -30;

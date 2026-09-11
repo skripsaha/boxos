@@ -57,16 +57,10 @@ int main(void)
         return 1;
     }
 
-    // printf("Content of %s (%lu bytes):\n", info.filename, (unsigned long)info.size);
-    // println("----------------------------------------");
 
-    /* Read and display file content in chunks. boxlib's fread no longer
-     * has the old 168/176-byte Pocket payload cap (Phase 12 Manifest +
-     * Crate makes it unbounded), so 4 KiB per fread is one storage
-     * syscall instead of ~24. */
     char buffer[4096];
     size_t total_read = 0;
-    size_t bytes_to_read = (info.size > 4096) ? 4096 : info.size; // limit display
+    size_t bytes_to_read = (info.size > 4096) ? 4096 : info.size;
 
     while (total_read < bytes_to_read)
     {
@@ -84,11 +78,9 @@ int main(void)
         if (result == 0)
             break;
 
-        // Print the chunk (handle binary safely)
         for (int i = 0; i < result; i++)
         {
             char c = buffer[i];
-            // Print printable characters, escape others
             if (c >= 32 && c < 127)
             {
                 char s[2] = {c, 0};
@@ -110,10 +102,6 @@ int main(void)
             break;
     }
 
-    // if (info.size > 4096) {
-    //     println("\n----------------------------------------");
-    //     printf("(Truncated: showing first 4096 of %lu bytes)\n", (unsigned long)info.size);
-    // }
 
     println("");
     exit(0);

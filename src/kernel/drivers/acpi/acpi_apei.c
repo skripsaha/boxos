@@ -4,25 +4,18 @@
 #include "vmm.h"
 #include "touch.h"
 
-/* ACPI 6.5 §18.3.2 — Boot Error Region.
- * 32 byte header followed by CPER records. Block Status flags the kind
- * of error captured at the previous boot. */
 typedef struct {
-    uint32_t block_status;          /* bits: 0 uncorr, 1 corr, 2 multi-uncorr, 3 multi-corr */
+    uint32_t block_status;
     uint32_t raw_data_offset;
     uint32_t raw_data_length;
     uint32_t data_length;
-    uint32_t error_severity;        /* 0=recoverable, 1=fatal, 2=corrected, 3=none */
+    uint32_t error_severity;
 } __attribute__((packed)) acpi_bert_region_t;
 
-/* UEFI Spec Appendix N — Common Platform Error Record.
- * Header is fixed 128 bytes followed by N section descriptors (72 each)
- * and the section data they point to.
- */
 typedef struct {
-    char     signature[4];          /* "CPER" */
+    char     signature[4];
     uint16_t revision;
-    uint32_t signature_end;         /* 0xFFFFFFFF */
+    uint32_t signature_end;
     uint16_t section_count;
     uint32_t error_severity;
     uint32_t validation_bits;
@@ -53,8 +46,6 @@ typedef struct {
 } __attribute__((packed)) cper_section_desc_t;
 _Static_assert(sizeof(cper_section_desc_t) == 72, "CPER section desc = 72 bytes");
 
-/* Section Type GUIDs (UEFI Spec Appendix N). Stored little-endian wire
- * format (data1..data4 LE, the byte tail as-is). */
 static const uint8_t SECT_GUID_PROCESSOR[16] = {
     0xB0,0xA0,0x3E,0xDC, 0x44,0xA1, 0x97,0x47,
     0xB9,0x5B, 0x53,0xFA,0x24,0x2B,0x6E,0x1D
@@ -104,15 +95,9 @@ static const char* cper_severity_text(uint32_t sev) {
     }
 }
 
-/* Decode the CPER record(s) that follow the BERT header. Logs the
- * record header + a one-line summary of every section descriptor.
- * `region` is the full BERT region MMIO map; `region_len` is its
- * declared length. */
 static void cper_decode_region(volatile uint8_t* region,
                                 uint32_t region_len,
                                 uint32_t data_length) {
-    /* The first CPER record sits immediately after the 32-byte BERT
-     * header. data_length tells us how many CPER bytes follow. */
     if (data_length < sizeof(cper_record_header_t)) {
         debug_printf("[APEI] BERT data_length %u below CPER header size\n",
                      data_length);
@@ -153,8 +138,6 @@ static void cper_decode_region(volatile uint8_t* region,
     volatile cper_section_desc_t* desc =
         (volatile cper_section_desc_t*)(rec + 1);
     for (uint16_t i = 0; i < rec->section_count; i++) {
-        /* Bound the descriptor walk to record_length so a bad firmware
-         * cannot drive us off the end of the region. */
         uint32_t off = (uint32_t)((uintptr_t)(desc + i + 1)
                                  - (uintptr_t)rec);
         if (off > rec->record_length) {
@@ -168,8 +151,6 @@ static void cper_decode_region(volatile uint8_t* region,
                      i, tname,
                      cper_severity_text(desc[i].section_severity),
                      desc[i].section_length, desc[i].section_offset);
-        /* Per-section tag broadcast: subscribers can scope their
-         * interest (e.g. only memory or only PCIe). */
         int kind = (tname[0] == 'P' && tname[1] == 'r') ? 0
                  : (tname[0] == 'M') ? 1
                  : (tname[0] == 'P') ? 2
@@ -183,24 +164,7 @@ static void cper_decode_region(volatile uint8_t* region,
     }
 }
 
-/*
- * APEI (ACPI Platform Error Interfaces) — ACPI 6.5 §18.
- *
- * Three tables, all optional, all detected here:
- *   HEST — Hardware Error Source Table (catalogue of error sources)
- *   BERT — Boot Error Record Table (one-shot record carried across reboot)
- *   ERST — Error Record Serialization Table (persistent error log API)
- *
- * BoxOS does not yet act as a full WHEA-style RAS consumer. This pass
- * only records presence + handful of top-level fields so a future RAS
- * subsystem can find the descriptors without re-walking the firmware
- * tables. Server boards that expose machine-check details, IPMI alerts,
- * or persistent log regions surface them through these tables.
- */
 
-/* HEST error source type codes (ACPI 6.5 §18.3.2.1). The header common
- * to every type starts with: type(2), source_id(2). Subsequent fields
- * vary by type, so we only step using the runtime-declared length. */
 #define HEST_TYPE_IA32_MCE         0
 #define HEST_TYPE_IA32_CMCI        1
 #define HEST_TYPE_IA32_NMI         2
@@ -211,13 +175,8 @@ static void cper_decode_region(volatile uint8_t* region,
 #define HEST_TYPE_GHESV2           10
 #define HEST_TYPE_IA32_DMC         11
 
-/* HW Error Notification Structure — embedded in GHES at offset 0x40
- * (ACPI 6.5 §18.3.2.7). 28 bytes. The Type field tells the OS how the
- * platform signals an error to us. */
 typedef struct {
-    uint8_t  type;           /* 0=Polled, 1=External-IRQ, 2=Local-IRQ,
-                                3=SCI, 4=NMI, 5=CMCI, 6=MCE, 7=GPIO,
-                                8=SEA, 9=SEI, 10=ExtInt (GSIV) */
+    uint8_t  type;
     uint8_t  length;
     uint16_t cfg_write_enable;
     uint32_t poll_interval;
@@ -247,38 +206,17 @@ static const char* ghes_notify_name(uint8_t t) {
     }
 }
 
-/* Decode the GHES-specific tail of a HEST entry (after the common 12
- * bytes shared with simpler types). Layout per ACPI 6.5 §18.3.2.7:
- *   +12   related source ID (2)
- *   +14   reserved (1)
- *   +15   enabled (1)
- *   +16   records to preallocate (4)
- *   +20   max sections per record (4)
- *   +24   max raw data length (4)
- *   +28   error status address GAS (12)
- *   +40   notification structure (28)
- *   +68   error status block length (4)
- * Total 92 bytes (GHES) or 116 for GHESv2 (adds Read-Ack registers).
- */
 static void decode_ghes(uint8_t* entry, bool v2) {
     uint16_t source_id  = *(uint16_t*)(entry + 2);
     uint8_t  enabled    = entry[15];
     uint32_t records    = *(uint32_t*)(entry + 16);
     uint32_t max_sect   = *(uint32_t*)(entry + 20);
     ghes_notification_t* n = (ghes_notification_t*)(entry + 40);
-    /* Error Status Address GAS at offset 28..39, followed by the
-     * notification structure at 40 and finally an Error Status Block
-     * Length field at offset 68 (both GHES and GHESv2). We carry the
-     * Address.address field through to the runtime path so GHES
-     * processing knows where to read the GESB. */
-    uint64_t gesb_addr = *(uint64_t*)(entry + 28 + 4); /* GAS.Address @ off+4 */
+    uint64_t gesb_addr = *(uint64_t*)(entry + 28 + 4);
     uint32_t gesb_len  = *(uint32_t*)(entry + 68);
-    /* GHESv2 extends the entry with three 12-byte GAS blocks for the
-     * Read-Ack Register at offsets 72, 84 and two scalars at 96 + 104
-     * (preserve/write). v1 leaves those zero. */
     uint64_t ack_addr = 0, ack_preserve = 0, ack_write = 0;
     if (v2) {
-        ack_addr     = *(uint64_t*)(entry + 72 + 4);   /* GAS.Address */
+        ack_addr     = *(uint64_t*)(entry + 72 + 4);
         ack_preserve = *(uint64_t*)(entry + 96);
         ack_write    = *(uint64_t*)(entry + 104);
     }
@@ -311,8 +249,6 @@ static const char* hest_type_name(uint16_t t) {
     }
 }
 
-/* Length of each HEST error-source entry, per spec. Returns 0 for
- * unknown types so the walker can fall back to "scan rest of table". */
 static uint16_t hest_entry_len(uint16_t t) {
     switch (t) {
         case HEST_TYPE_IA32_MCE:      return 264;
@@ -338,7 +274,6 @@ void acpi_parse_apei(void) {
         debug_printf("[ACPI] HEST: %u error source(s), len=%u\n",
                      hest->error_source_count, hest->header.length);
 
-        /* Walk every error source, classifying by type code at offset 0. */
         uint8_t* ptr = (uint8_t*)hest + sizeof(acpi_hest_t);
         uint8_t* end = (uint8_t*)hest + hest->header.length;
         uint32_t walked = 0;
@@ -377,10 +312,6 @@ void acpi_parse_apei(void) {
         acpi_erst_bind(erst);
         debug_printf("[ACPI] ERST: %u instruction entries\n",
                      erst->instruction_entry_count);
-        /* Each instruction entry is 32 bytes:
-         *   Action(1) Instruction(1) Flags(1) Reserved(1)
-         *   RegisterRegion(GAS, 12)
-         *   Value(8) Mask(8). */
         uint8_t* base = (uint8_t*)erst + sizeof(acpi_erst_t);
         uint32_t entry_size = 32;
         for (uint32_t i = 0; i < erst->instruction_entry_count; i++) {
@@ -389,9 +320,6 @@ void acpi_parse_apei(void) {
             uint8_t action = e[0];
             uint8_t instr  = e[1];
             uint8_t flags  = e[2];
-            /* +4 .. +15 : Register Region (Generic Address Structure).
-             * +16 .. +23 : Value
-             * +24 .. +31 : Mask */
             acpi_gas_t* reg = (acpi_gas_t*)(e + 4);
             uint64_t value = *(uint64_t*)(e + 16);
             uint64_t mask  = *(uint64_t*)(e + 24);
@@ -423,10 +351,6 @@ static const char* severity_text(uint32_t sev) {
     }
 }
 
-/* Read the BERT region (if present) and print a one-line summary so a
- * prior-boot uncorrectable error is visible in serial. The actual CPER
- * decode + dispatch into a runtime RAS pipeline belongs to a future
- * APEI/WHEA driver — at this layer we just surface the fact. */
 void acpi_apei_consume(void) {
     if (!g_acpi.apei.bert_present) return;
     if (g_acpi.apei.bert_region_length < sizeof(acpi_bert_region_t)) {
@@ -458,14 +382,10 @@ void acpi_apei_consume(void) {
                  severity_text(rg->error_severity),
                  rg->data_length);
 
-    /* Broadcast the prior-boot error so a userspace logger / telemetry
-     * daemon (anyone subscribing to `acpi:boot-error`) can persist it
-     * before the next crash. */
     struct { uint32_t status; uint32_t severity; uint32_t data_length; } ev =
         { status, rg->error_severity, rg->data_length };
     TouchPublish("acpi:boot-error", &ev, sizeof(ev));
 
-    /* Decode the embedded CPER record + each section. */
     cper_decode_region((volatile uint8_t*)rg,
                        g_acpi.apei.bert_region_length,
                        rg->data_length);

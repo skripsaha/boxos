@@ -1,15 +1,3 @@
-/*
- * cstdlib.cpp — the parts of [cstdlib.syn] that are not boxlib's, plus
- * <cstring>'s strerror.
- *
- * The split is deliberate. boxlib owns what a C program shares with the rest of
- * BoxOS — the heap, and the two ways a process ends — because those must have
- * ONE implementation in the system. Everything here is C-library behaviour with
- * nothing underneath it to share: a grammar (strto*), an algorithm (qsort), a
- * generator (rand), an encoding (the mb* family). Putting them in boxlib would
- * have meant a second parser for numbers, when <charconv> already has the hard
- * half of one.
- */
 
 #include <cerrno>
 #include <charconv>
@@ -18,20 +6,16 @@
 #include <__bits/c_utf8>
 #include <cstring>
 
-#include "box/sync.h"   // uspin_t — the at_quick_exit registry lock
+#include "box/sync.h"
 
 extern "C" {
 int  __cxa_atexit(void (*fn)(void *), void *arg, void *dso);
-extern void *__dso_handle;   // DEFINED by cxa_runtime.cpp — one per image
-const char *__boxcxx_generic_text(int code) noexcept;  // system_error.cpp
+extern void *__dso_handle;
+const char *__boxcxx_generic_text(int code) noexcept;
 }
 
 namespace {
 
-// ── at_quick_exit registry ──────────────────────────────────────────────
-// Its own list, because quick_exit runs THESE and not the atexit ones. Grown
-// on demand rather than capped: C asks for at least 32 registrations and a
-// fixed 32 would be a limit invented for the sake of having one.
 struct QuickExitList {
     void (**Fns)() = nullptr;
     size_t  Count  = 0;
@@ -41,20 +25,10 @@ struct QuickExitList {
 QuickExitList g_quick_exit;
 uspin_t       g_quick_exit_lock = USPIN_INIT;
 
-// ── per-strand rand state ───────────────────────────────────────────────
-// C says srand(1) is the state a program starts in, so an unseeded rand() must
-// produce the sequence srand(1) produces.
 constexpr unsigned int kDefaultSeed = 1u;
 
 thread_local unsigned long long g_rand_state = kDefaultSeed;
 
-// ── UTF-8, the "C" locale's multibyte encoding here ─────────────────────
-// The codec itself moved to <__bits/c_utf8> in Ф41-e, because <cuchar> needs
-// the same one and could not reach it in this anonymous namespace. These two
-// keep their old shape so the five call sites below are unchanged, and the one
-// line that matters is the Incomplete case: for a NON-restartable conversion
-// bounded by n, "you did not give me enough bytes" IS an invalid character.
-// The restartable family in <cuchar> maps the same status to (size_t)(-2).
 int Utf8Decode(const char *s, size_t n, char32_t *out)
 {
     const auto d = ::std::__utf8::Decode(s, n);
@@ -67,7 +41,6 @@ int Utf8Decode(const char *s, size_t n, char32_t *out)
 
 int Utf8Encode(char *s, char32_t cp) { return ::std::__utf8::Encode(s, cp); }
 
-// ── the strto* grammar ──────────────────────────────────────────────────
 bool IsSpace(char c)
 {
     return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' ||
@@ -82,15 +55,11 @@ int DigitValue(char c)
     return -1;
 }
 
-// One integer parser for all four public entry points. `limit` is the largest
-// magnitude the caller's type can hold in THIS direction — the asymmetry of
-// two's complement is the caller's business, not the parser's, which is why
-// the accumulation is unsigned and the clamp is a parameter.
 struct IntParse {
     unsigned long long Value    = 0;
     bool               Negative = false;
     bool               Overflow = false;
-    bool               Valid    = false;   // at least one digit consumed
+    bool               Valid    = false;
     const char        *End      = nullptr;
 };
 
@@ -98,7 +67,7 @@ IntParse ParseInteger(const char *nptr, int base, unsigned long long limit)
 {
     IntParse out;
     const char *p = nptr;
-    out.End = nptr;                       // C: endptr = nptr when no conversion
+    out.End = nptr;
     if (!p) return out;
 
     while (IsSpace(*p)) p++;
@@ -144,7 +113,7 @@ template <class T>
 T StrToSigned(const char *nptr, char **endptr, int base, T lo, T hi)
 {
     const unsigned long long limit =
-        static_cast<unsigned long long>(hi) + 1;   // magnitude of |lo|
+        static_cast<unsigned long long>(hi) + 1;
     IntParse r = ParseInteger(nptr, base, limit);
     if (endptr) *endptr = const_cast<char *>(r.End);
     if (!r.Valid) return 0;
@@ -171,16 +140,10 @@ T StrToUnsigned(const char *nptr, char **endptr, int base, T hi)
     if (endptr) *endptr = const_cast<char *>(r.End);
     if (!r.Valid) return 0;
     if (r.Overflow) { errno = ERANGE; return hi; }
-    // C wraps a negated magnitude rather than rejecting it: strtoul("-1") is
-    // ULONG_MAX, which is surprising and is what the standard says.
     return r.Negative ? static_cast<T>(0 - static_cast<T>(r.Value))
                       : static_cast<T>(r.Value);
 }
 
-// The floating grammar: whitespace, sign, then <charconv> for the magnitude
-// (which already knows decimal, hex significands, inf/infinity and nan(...)).
-// The 0x prefix has to be consumed here because [charconv] forbids from_chars
-// from accepting it.
 template <class T>
 T StrToFloat(const char *nptr, char **endptr)
 {
@@ -208,12 +171,9 @@ T StrToFloat(const char *nptr, char **endptr)
 
     T                      value{};
     std::from_chars_result r = std::from_chars(mag, end, value, fmt);
-    if (r.ec == std::errc::invalid_argument) return T{};   // endptr stays nptr
+    if (r.ec == std::errc::invalid_argument) return T{};
 
     if (r.ec == std::errc::result_out_of_range) {
-        // Which side? Ask a wider type: an 80-bit long double covers every
-        // double and float that overflowed, so the answer is a comparison
-        // rather than a re-scan of the text.
         errno = ERANGE;
         long double wide{};
         std::from_chars_result w = std::from_chars(mag, end, wide, fmt);
@@ -221,11 +181,11 @@ T StrToFloat(const char *nptr, char **endptr)
         if (w.ec == std::errc{}) {
             const long double mag_abs = wide < 0 ? -wide : wide;
             out = (mag_abs > static_cast<long double>(1))
-                      ? __builtin_huge_vall()   // overflow
-                      : T{};                    // underflow flushes to zero
+                      ? __builtin_huge_vall()
+                      : T{};
             if (r.ptr < w.ptr) r.ptr = w.ptr;
         } else {
-            out = __builtin_huge_vall();        // too big even for long double
+            out = __builtin_huge_vall();
         }
         if (endptr) *endptr = const_cast<char *>(r.ptr);
         return neg ? static_cast<T>(-out) : out;
@@ -235,7 +195,6 @@ T StrToFloat(const char *nptr, char **endptr)
     return neg ? static_cast<T>(-value) : value;
 }
 
-// ── qsort ───────────────────────────────────────────────────────────────
 void SwapBytes(unsigned char *a, unsigned char *b, size_t n)
 {
     while (n--) {
@@ -278,17 +237,12 @@ void HeapSort(unsigned char *base, size_t n, size_t size, Cmp cmp)
     }
 }
 
-// Introsort: quicksort until the recursion gets deeper than 2*log2(n), then
-// heapsort the rest. C asks for no complexity at all and every hosted libc
-// ships a plain quicksort with a quadratic worst case — a system that must not
-// stall cannot ship that, and the fallback costs one counter.
 void IntroSort(unsigned char *base, size_t n, size_t size, Cmp cmp, int depth)
 {
     while (n > 16) {
         if (depth == 0) { HeapSort(base, n, size, cmp); return; }
         depth--;
 
-        // Median of three, moved to the front as the pivot.
         unsigned char *lo  = base;
         unsigned char *mid = base + (n / 2) * size;
         unsigned char *hi  = base + (n - 1) * size;
@@ -307,8 +261,6 @@ void IntroSort(unsigned char *base, size_t n, size_t size, Cmp cmp, int depth)
         }
         SwapBytes(base, base + j * size, size);
 
-        // Recurse into the smaller side, loop on the larger: the stack depth
-        // stays O(log n) even when the partition is bad.
         if (j < n - j - 1) {
             IntroSort(base, j, size, cmp, depth);
             base += (j + 1) * size;
@@ -328,18 +280,13 @@ int Log2Floor(size_t n)
     return r;
 }
 
-} // namespace
+}
 
 namespace std {
 
-// ── termination ─────────────────────────────────────────────────────────
 int atexit(void (*func)()) noexcept
 {
     if (!func) return -1;
-    // Registered in the SAME list as static destructors, through the Itanium
-    // hook: [basic.start.term] orders atexit handlers and static destructors
-    // against each other by registration, and two separate lists could only
-    // guess at that order.
     return __cxa_atexit(reinterpret_cast<void (*)(void *)>(func), nullptr,
                         &__dso_handle);
 }
@@ -366,8 +313,6 @@ int at_quick_exit(void (*func)()) noexcept
 
 [[noreturn]] void quick_exit(int status) noexcept
 {
-    // Reverse registration order, and re-read the count each turn: a handler
-    // may register another one, and C says those run too.
     for (;;) {
         uspin_lock(&g_quick_exit_lock);
         if (g_quick_exit.Count == 0) {
@@ -381,25 +326,17 @@ int at_quick_exit(void (*func)()) noexcept
     ::_Exit(status);
 }
 
-// ── environment ─────────────────────────────────────────────────────────
 char *getenv(const char *) noexcept
 {
-    // Not a stub: a BoxOS process is a cabin carrying TAGS, and tags are read
-    // with box::this_process, not with a string table inherited from a parent
-    // that may not exist. Every name is absent, always.
     return nullptr;
 }
 
 int system(const char *string)
 {
-    // C: a null argument asks whether a command processor exists. There is
-    // none — BoxOS spawns a program by name (box::process::spawn), and a shell
-    // command line is not a thing the kernel can be handed.
     if (!string) return 0;
     return -1;
 }
 
-// ── conversions ─────────────────────────────────────────────────────────
 long strtol(const char *nptr, char **endptr, int base) noexcept
 {
     return StrToSigned<long>(nptr, endptr, base, LONG_MIN, LONG_MAX);
@@ -435,9 +372,6 @@ long double strtold(const char *nptr, char **endptr) noexcept
     return StrToFloat<long double>(nptr, endptr);
 }
 
-// The ato* family is defined by C as strto* with the diagnostics thrown away —
-// no endptr, no errno, undefined on overflow. Written that way rather than
-// reimplemented, so there is one grammar.
 int atoi(const char *nptr) noexcept
 {
     return static_cast<int>(StrToSigned<long>(nptr, nullptr, 10, INT_MIN, INT_MAX));
@@ -446,10 +380,9 @@ long atol(const char *nptr) noexcept { return strtol(nptr, nullptr, 10); }
 long long atoll(const char *nptr) noexcept { return strtoll(nptr, nullptr, 10); }
 double atof(const char *nptr) noexcept { return strtod(nptr, nullptr); }
 
-// ── multibyte (UTF-8) ───────────────────────────────────────────────────
 int mblen(const char *s, size_t n) noexcept
 {
-    if (!s) return 0;                 // UTF-8 is stateless: no shift sequences
+    if (!s) return 0;
     return Utf8Decode(s, n, nullptr);
 }
 
@@ -510,7 +443,6 @@ size_t wcstombs(char *s, const wchar_t *pwcs, size_t n) noexcept
     }
 }
 
-// ── searching and sorting ───────────────────────────────────────────────
 const void *bsearch(const void *key, const void *base, size_t nmemb,
                     size_t size, __boxcxx_compare *compar)
 {
@@ -545,27 +477,20 @@ void qsort(void *base, size_t nmemb, size_t size, __boxcxx_compare *compar)
               2 * Log2Floor(nmemb));
 }
 
-// ── pseudo-random ───────────────────────────────────────────────────────
 int rand() noexcept
 {
-    // A 64-bit LCG (the multiplier is Knuth's MMIX one), returning the HIGH
-    // bits: the low bits of any LCG have short periods, and returning them is
-    // the classic way rand() earns its reputation.
     g_rand_state = g_rand_state * 6364136223846793005ULL + 1442695040888963407ULL;
     return static_cast<int>((g_rand_state >> 33) & 0x7FFFFFFFULL);
 }
 
 void srand(unsigned int seed) noexcept { g_rand_state = seed; }
 
-} // namespace std
+}
 
-// ── <cstring>'s strerror ────────────────────────────────────────────────
 namespace std {
 
 char *strerror(int errnum) noexcept
 {
-    // Per-strand, because C permits the next call to overwrite the buffer and
-    // a shared one would let another strand do the overwriting.
     static thread_local char buf[48];
 
     if (const char *text = __boxcxx_generic_text(errnum)) {
@@ -575,9 +500,6 @@ char *strerror(int errnum) noexcept
         return buf;
     }
 
-    // The unnamed conditions are the Unix socket/STREAMS ones BoxOS cannot
-    // surface; system_error.cpp declines to cargo-cult their strings and so
-    // does this.
     const char prefix[] = "generic error ";
     size_t     i        = 0;
     for (; prefix[i]; i++) buf[i] = prefix[i];
@@ -593,4 +515,4 @@ char *strerror(int errnum) noexcept
     return buf;
 }
 
-} // namespace std
+}

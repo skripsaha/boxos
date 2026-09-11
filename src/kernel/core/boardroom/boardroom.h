@@ -4,295 +4,64 @@
 #include "ktypes.h"
 #include "error.h"
 
-/*
- * The Boardroom — where every medium this machine can keep a filesystem on has
- * a seat, and where anything that wants sectors comes to ask for them.
- *
- * Before it, a filesystem asked "AHCI or ATA?" at every call site that touched
- * a disk. There were eight of them. Adding a third medium would have made
- * twenty-four, and each one would have been a place where the answer could be
- * given differently from the others — which is how a volume ends up half read
- * from one device and half written to another.
- *
- * So the question is asked once, here. A seat is a medium that answered when
- * it was called on; what kind of controller is under it is the Boardroom's
- * business and nobody else's.
- */
 
 typedef enum {
     BOARD_NONE = 0,
-    BOARD_AHCI,             /* a SATA disk behind an AHCI controller */
-    BOARD_ATA,              /* a disk on the legacy IDE channels */
-    BOARD_USB               /* a mass storage device on the USB bus */
+    BOARD_AHCI,
+    BOARD_ATA,
+    BOARD_USB
 } BoardKind;
 
-/* Sectors are 512 bytes here, everywhere, on every kind of seat. A medium that
- * addresses itself differently is refused by whoever knows about it rather
- * than translated silently. */
 #define BOARDROOM_SECTOR_BYTES 512
 
-/* Call the room to order: find every medium, and let the USB bus finish saying
- * what is on it first. Safe to call more than once; later calls pick up media
- * that arrived since. */
 void BoardroomInit(void);
 
-/*
- * Something arrived on a bus that can gain media while the machine runs.
- *
- * Noted from wherever it was noticed — an interrupt handler, usually — and
- * acted on by the pass below, which runs where waiting is allowed. It has to
- * be two steps: seating a medium means asking it how large it is and whether
- * it is ready, and both of those are transfers.
- *
- * Without this the room was called to order exactly once, at boot, and a stick
- * pushed in afterwards was a device the USB driver knew all about and no
- * filesystem could ever reach: it had no seat, and a seat is the only way in.
- */
 void BoardroomNoteArrival(void);
 
-/*
- * A medium left, and this is said at the moment it does — naming which one.
- *
- * Not deferred, because a seat holds a controller-specific index and those are
- * handed out again as soon as they are free: by the time a deferred pass ran,
- * the seat could be pointing at a different medium with the same number, and
- * nothing would ever have noticed the first one leaving. Called from the
- * service pass that takes the device down, which is ordinary kernel context.
- *
- * The medium is named by the controller and the index it had, not by a seat
- * number, because the caller is a driver and a driver does not hold seats. The
- * room works out which chair that was and empties it.
- */
 void BoardroomNoteDeparture(BoardKind kind, uint8_t index);
 
-/* Cheap enough for the idle loop: one atomic load when nothing has arrived,
- * which is almost always. */
 void BoardroomAttendIfPending(void);
 
-/*
- * The room says what changed in it, and does not decide what that means.
- *
- * It used to call the filesystem directly — the comment at the call site
- * apologised for it, which is usually a sign that the arrangement is wrong
- * rather than that the apology was needed. A room full of media has no
- * business knowing that anybody keeps a filesystem on one; it announces, and
- * whoever cares is listening.
- *
- *   seat:taken     one or more seats have somebody in them who was not there
- *   seat:emptied   a seat has nobody in it any more, and it is named
- *
- * Announced AFTER the room has settled, never part-way through seating: a
- * listener that mounts on this event would otherwise be looking at a room
- * that is still filling up, and would choose from the seats that happened to
- * be added first.
- *
- * ‼ seat:taken fires whenever a seat CHANGES HANDS, not only when the room
- * grows. That distinction is the whole of a bug that survived every test in
- * QEMU: a stick pulled out and pushed back in gets its unit number handed
- * straight back to it, so the chair it lands in is one the room already had.
- * The room grew by nothing, said nothing, and the volume on that stick was
- * never mounted again — on a machine that boots from a stick, that is the
- * machine gone until it is switched off and on. Every oracle passed, because
- * every oracle plugged the stick in exactly once.
- */
 typedef struct __attribute__((packed)) {
-    uint8_t seated;      /* seats with a medium in them now */
-    uint8_t changed;     /* how many seats changed hands just now */
-    uint8_t first;       /* lowest seat that changed, or BOARDROOM_NO_SEAT */
+    uint8_t seated;
+    uint8_t changed;
+    uint8_t first;
     uint8_t reserved;
 } BoardroomSeatEvent;
 
-/* How many media answered, and what each of them is. */
 uint8_t     BoardroomSeatCount(void);
 BoardKind   BoardroomSeatKind(uint8_t seat);
 const char* BoardroomSeatName(uint8_t seat);
 
-/* True for a medium that can be unplugged — which is also the medium this
- * machine was most likely booted from, and the tie-breaker when a filesystem
- * turns out to live on more than one seat. */
 bool        BoardroomSeatIsRemovable(uint8_t seat);
 
-/*
- * Is there still a medium in this seat?
- *
- * A seat outlives the medium that sat in it — seat numbers never move under
- * anybody, so a disk that leaves leaves an empty chair rather than renumbering
- * the room. Anything holding a seat number has to be able to ask whether there
- * is still something in it, because the answer changes while it is holding it:
- * that is what removable means.
- */
 bool        BoardroomSeatOccupied(uint8_t seat);
 
-/*
- * WHICH seating of the room this chair's current occupant is.
- *
- * A chair is a place, not a medium, and it can be taken again. That is what
- * makes the room a room rather than a list that only ever grows — but it costs
- * something, and this is what pays for it: "there is a medium in seat 3" stops
- * being enough to know it is the SAME medium that was there a moment ago.
- *
- * Every taking anywhere in the room gets the next number, so a chair whose
- * seating has not changed has not changed hands, and one whose seating has
- * changed is carrying somebody else — even if it happened between two reads
- * and nothing else could tell. Anything that holds a seat across time stamps
- * this when it takes hold and compares it afterwards.
- *
- * Zero for a chair nobody has ever sat in, and for a seat that does not exist.
- */
 uint32_t    BoardroomSeatSeating(uint8_t seat);
 
-/*
- * What the medium in this seat is BUILT from, in bytes, as opposed to what it
- * is addressed in — which is always 512 here, on every kind of seat.
- *
- * Almost every flash device made is addressed in 512-byte blocks and built
- * from 4096-byte ones. A volume laid out on the finer grid works and costs
- * the device a read, a patch and a write for every metadata write that does
- * not cover a whole physical block. Nothing could ask this until now: the
- * answer was known to each driver and to nobody else, so a volume's own
- * statement of the grid it was laid out for had nothing to be checked against.
- *
- * Zero means the medium would not say, which is an answer and not a failure.
- */
 uint32_t BoardroomSeatPhysicalBytes(uint8_t seat);
 
-/*
- * How far the medium in this seat runs, in the 512-byte sectors this room is
- * addressed in.
- *
- * Zero means the medium would not say, which is an answer and not a failure —
- * the same shape as BoardroomSeatPhysicalBytes, and for the same reason: a
- * caller that cannot be told has to be able to see that it was not, rather
- * than being handed a number somebody invented.
- *
- * ‼ NOTHING COULD ASK THIS UNTIL NOW, AND TWO THINGS NEEDED IT.
- *
- * A GPT keeps a second copy of its table in the LAST sector of the medium, and
- * UEFI 2.10 §5.3.2 requires a reader whose primary copy does not check out to
- * go and read it. Where the last sector IS was a fact each driver held and the
- * room did not hand out — so a disk with a damaged primary GPT and a perfectly
- * good backup simply did not mount, and on a machine that boots from a stick
- * that is the machine gone.
- *
- * And the plainer one: a partition table is bytes off a medium, and a table
- * that claims a run reaching past the end of it is a table that would have
- * this kernel reading where there is nothing. Until this door there was
- * nobody to ask, so nothing checked.
- *
- * Every driver already knew — xhci_msd_unit_sectors, ahci_port_t.total_sectors,
- * g_ata_devices[].total_sectors — and each answers in ITS OWN logical sectors,
- * which is what this converts.
- */
 uint64_t BoardroomSeatSectors(uint8_t seat);
 
-/* The controller-specific index behind a seat — an AHCI port, an ATA drive, a
- * USB unit. This is a deliberate way out of the abstraction, for the one thing
- * the abstraction cannot express: a fast path that exists on one kind of
- * controller and nowhere else. Anything using it must check the kind first,
- * because the number means something different for each. */
 uint8_t BoardroomSeatIndex(uint8_t seat);
 
-/* Sector I/O. Counts are in 512-byte sectors and are split as needed, so no
- * caller has to know what any particular controller's limit is. */
 int BoardroomRead (uint8_t seat, uint64_t lba, uint32_t count, void* buffer);
 int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffer);
 
-/*
- * A read for a caller that is not going to stand and watch.
- *
- * The room is where "which controller is this" is answered, and this is the
- * same question in the one place it is asked. Before it, the storage deck asked
- * "is there an AHCI disk under the volume?" — because when it was written a
- * volume could only live on one, and there was nothing else to ask. A machine
- * that boots from a flash drive answers no, and every block of every file it
- * reads is read by a core standing over the transfer, while the same machine
- * booting from SATA parks the caller and gets on with something else.
- *
- * `cb` runs on a K-Core once the medium has answered, and is shaped the way the
- * SATA path already shaped it — `index` names the port or the unit, `slot` is
- * the AHCI command slot and is zero for a seat that has no such thing — so the
- * same function can be handed to either kind of seat with nothing standing in
- * between to translate.
- *
- * Sectors land straight in `dma_phys`. Returns OK when the read is on its way
- * and the callback WILL run; on any other return it will not, and the caller
- * still owns everything it passed in.
- */
 typedef void (*BoardroomAsyncCb)(uint8_t index, uint8_t slot,
                                  error_t status, void* ctx);
 
-/*
- * How big a run of sectors this seat takes in ONE call.
- *
- * The room used to impose a single number on every medium — 64 sectors, for
- * everybody — and that number was wrong in both directions at once. It was far
- * below what a SATA disk or a flash drive will swallow in one command, and it
- * was ABOVE the eight sectors past which the legacy channel gives up its DMA
- * path and moves the bytes with the processor. One guess cannot be right for
- * three kinds of medium, so the medium is asked instead.
- *
- * In the room's 512-byte sectors, never zero. A caller that wants more is not
- * refused: the room splits, which is why nothing above has to know this number
- * exists.
- */
 uint32_t BoardroomSeatRun(uint8_t seat);
 
 error_t BoardroomReadAsync(uint8_t seat, uint64_t lba, uint32_t count,
                            void* dma_phys, BoardroomAsyncCb cb, void* ctx);
 
-/* Whether this seat can take the call above at all. A seat that cannot is not
- * a broken seat — it is one whose caller has to stay and wait. */
 bool BoardroomSeatCanReadAsync(uint8_t seat);
 
-/*
- * Prove, on this machine, that a read nobody stands over brings back the same
- * bytes as one somebody does.
- *
- * A boot self-test rather than a unit test, because the thing being tested is a
- * conversation with the hardware in front of it: whether the completion reaches
- * the pump, whether the sectors land where they were asked to, and whether the
- * bytes are the right ones. None of that can be established anywhere but on the
- * machine, and the machine this matters most on is read by photographing its
- * screen — so it says PASSED or FAILED in one line, names the seat, and says
- * why.
- *
- * It always speaks. Where the machine will never read this way — one core, or
- * a seat whose caller has to stay — it says so and asks nothing. It has no
- * clock of its own: the seat's driver answers for a medium that does not.
- */
 void BoardroomProveUnattendedRead(uint8_t seat);
 
-/* Push the medium's own write cache out. A write that has completed is a write
- * the device has accepted, not necessarily one it has kept. */
 int BoardroomFlush(uint8_t seat);
 
-/*
- * Find the seat carrying a volume, by asking each one in turn.
- *
- * The caller supplies the recognition — the Boardroom knows about media, not
- * about what anybody keeps on them. `probe` is handed a seat and returns true
- * when it recognises its own volume there, filling `out_uuid` with whatever
- * that volume calls itself.
- *
- * When more than one seat answers, the identity decides. The loader read this
- * kernel out of one particular volume and wrote down which one, so the seat
- * whose volume matches the Boarding Pass is the seat this machine booted from
- * — not a resemblance, the same sixteen bytes.
- *
- * Only when there is no pass, or nothing on the bus matches it, does the old
- * rule apply: the removable medium wins, because a machine that boots from a
- * stick while carrying an old volume on an internal disk should not quietly
- * mount the wrong decade. That rule is a guess, and it is printed as one.
- *
- * `out_uuid` — optional — is filled with what the chosen seat's volume calls
- * itself. This is not a convenience: the room has ALREADY been told that
- * identity by the probe, and the caller that wants it used to get it by
- * probing the same seat a second time — which for a filesystem means reading
- * that medium's partition table and its deed all over again, for sixteen bytes
- * the room was holding and threw away.
- *
- * Returns the seat, or 0xFF when nothing was recognised.
- */
 typedef bool (*BoardroomProbe)(void* ctx, uint8_t seat, uint8_t out_uuid[16]);
 uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx,
                             uint8_t out_uuid[16]);

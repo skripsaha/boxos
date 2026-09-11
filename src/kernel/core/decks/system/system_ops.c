@@ -1,21 +1,3 @@
-/*
- * System Deck — Manifest-native handlers (Phase 8 complete).
- *
- * Surface (all opcodes already defined in system_deck.h):
- *
- *   IPC                 route, broadcast, listen
- *   Process lifecycle   spawn, kill, info, exec
- *   Use Context         use.set, use.get, use.clear
- *   Buffers             buf.alloc, buf.free, buf.resize
- *   Tags                tag.add, tag.remove, tag.check
- *   Filesystem          defrag, frag_score
- *   Telemetry           perf.dump
- *
- * Inputs that are inherently small (PIDs, handles, sizes) ride in op->params.
- * Variable inputs (ELF tags, filenames, tag strings, IPC payload) live in
- * in_crate. Variable outputs (proc info, frag stats, buf descriptors) live in
- * out_crate. There is no fixed 192-byte response cargo.
- */
 
 #include "klib.h"
 #include "op_registry.h"
@@ -35,44 +17,31 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "process.h"
-#include "pid_allocator.h"  /* pid_generation — own-child authority defeats pid-reuse */
+#include "pid_allocator.h"
 #include "tagfs.h"
 #include "use_context.h"
 #include "perf_trace.h"
 #include "kernel_config.h"
 #include "amp.h"
-#include "guide.h"   /* guide_dispatch_stats — enclosed/addressed split for perf.dump */
-#include "atomics.h"        /* rdtsc — system.proc.cputime's in-flight term */
+#include "guide.h"
+#include "atomics.h"
 
-/* TSC frequency, for turning a cycle delta into microseconds. */
 extern uint64_t cpu_get_tsc_freq_khz(void);
 #include "rtc.h"
 #include "pit.h"
 #include "cpu_calibrate.h"
 #include "cpuid.h"
-#include "fpu.h"   /* g_user_fsbase_used — TLS FS-base context-switch gate */
+#include "fpu.h"
 #include "sync_ops.h"
-#include "cabin.h"          /* cabin_t.vmm — for StrandPool bind virt->phys walk */
-#include "cabin_info.h"     /* CabinInfo — where a child's Luggage is written */
-#include "cabin_layout.h"   /* CABIN_USER_VA_CANONICAL_END — bind VA range check */
-#include "strand_pool_abi.h" /* StrandPool — _Alignof for the bind alignment check */
+#include "cabin.h"
+#include "cabin_info.h"
+#include "cabin_layout.h"
+#include "strand_pool_abi.h"
 
 #define BROADCAST_TAG_MAX      64u
 
 
-/* -------------------------------------------------------------------------
- * Crate I/O
- *
- * Fixed payloads move through crate_io.{h,c} (crate_read / crate_write) and
- * variable payloads through crate_in_buf / crate_out_alloc / crate_out_commit.
- * Each walks the user page table page-by-page, so a Crate whose payload
- * crosses a page boundary is copied across every backing frame instead of
- * being clipped to its first page (the vmm_translate_user_addr straddle bug).
- * ------------------------------------------------------------------------- */
 
-/* Read a NUL-bounded copy of in_crate into a caller-supplied buffer via the
- * page-walked crate_io snapshot. Returns OK / ERR_INVALID_ARGUMENT /
- * ERR_INVALID_ADDRESS. */
 static error_t sys_crate_string(const Crate *c, const OpContext *ctx,
                                 char *dst, size_t dst_size)
 {
@@ -107,9 +76,6 @@ static bool push_ipc_result(process_t *target,
     return KResultPush(target, &r);
 }
 
-/* =========================================================================
- *  IPC
- * ========================================================================= */
 
 static int SysRoute(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                     const OpContext *ctx)
@@ -119,10 +85,6 @@ static int SysRoute(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (ctx->target_pid == 0)          return ERR_INVALID_ARGUMENT;
     if (ctx->target_pid == ctx->proc->pid) return ERR_ROUTE_SELF;
 
-    /* Pin the target with a refcount so it cannot be torn down between
-     * the lookup and the result push. Without this, a concurrent
-     * process_destroy on another core can free target's cabin/result_ring
-     * while ipc_copy_to_heap or KResultPush still dereferences them. */
     process_t *target = process_find_ref(ctx->target_pid);
     if (!target) return ERR_PROCESS_NOT_FOUND;
     if (!target_alive(target)) {
@@ -172,10 +134,6 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     if (op->in_crate != CRATE_INDEX_NONE) {
         src    = &crates[op->in_crate];
         length = (uint32_t)(src->size > UINT32_MAX ? UINT32_MAX : src->size);
-        /* Fail fast if the whole source range is unreadable, before fanning
-         * out to subscribers. ipc_copy_to_heap re-reads it per target; this
-         * page-walks the full range once so a bad address is ERR_INVALID_ADDRESS
-         * rather than a misleading "no subscribers". */
         if (length > 0) {
             void *probe = crate_in_buf(src, ctx);
             if (!probe) return ERR_INVALID_ADDRESS;
@@ -183,21 +141,9 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
         }
     }
 
-    /* Resolve the tag to its registry id once, outside the process-list
-     * lock — sys_proc_has_tag's string/wildcard path would re-acquire
-     * process_lock through process_snapshot_tags and self-deadlock. */
     uint16_t tid = tagfs_tag_lookup(tag);
     if (tid == TAGFS_INVALID_TAG_ID) return ERR_ROUTE_NO_SUBSCRIBERS;
 
-    /* Phase 1: snapshot matching pids under process_list_lock so the
-     * iter->next chain cannot mutate mid-walk (process_destroy unlinks
-     * under the same lock). Tag check is the inline bitfield path —
-     * no nested lock acquisition, and nothing is allocated under the lock
-     * either: the walk counts first, the room is made for that count, and
-     * the walk fills it — if the list grew past the count in between, room
-     * is made again for what it is now. What stood here was a stack tray of
-     * 256 and a walk that stopped when it was full: the 257th carrier of the
-     * tag was never told, and nothing said so. */
     uint32_t *pid_list  = NULL;
     uint32_t  pid_cap   = 0;
     uint32_t  pid_count = 0;
@@ -215,7 +161,7 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
         }
         process_list_unlock();
 
-        if (pid_count <= pid_cap) break;          /* the room held every one */
+        if (pid_count <= pid_cap) break;
         if (pid_list) kfree(pid_list);
         pid_cap  = pid_count;
         pid_list = (uint32_t *)kmalloc(pid_cap * sizeof(uint32_t));
@@ -226,15 +172,11 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
         return ERR_ROUTE_NO_SUBSCRIBERS;
     }
 
-    /* Phase 2: pin each target via process_find_ref before any cabin or
-     * result_ring dereference; release the ref before moving on. This
-     * is the same UAF-closing pattern as SysRoute. */
     uint32_t delivered = 0;
     for (uint32_t i = 0; i < pid_count; i++) {
         process_t *target = process_find_ref(pid_list[i]);
         if (!target) continue;
 
-        /* Recheck liveness — pid could have been recycled. */
         if (!target_alive(target)) {
             process_ref_dec(target);
             continue;
@@ -258,27 +200,11 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     return delivered > 0 ? OK : ERR_ROUTE_NO_SUBSCRIBERS;
 }
 
-/* =========================================================================
- *  Process lifecycle
- * ========================================================================= */
 
-/* Shared grant gate for spawn-tags and tag.add: the granter must not confer any
- * auth privilege it does not itself hold (granted auth-level ⊆ granter auth-level).
- * god grants anything. stopped is a self-freeze, not an escalation, so it passes.
- *
- * This gates only the auth-privilege keys — unlike the PROC_EXEC merge path,
- * which rejects every reserved key. The asymmetry is deliberate: a spawn tag
- * set is wholly caller-supplied (there is no trusted file-tag base to protect),
- * and the non-auth reserved keys (name/autostart/snapshot/trashed/hidden) confer
- * no op-authority — none appear in any auth mask — so they are not escalations.
- *
- * Authority is the FIXED auth_bits (auth_tags.h) on both sides, so the subset
- * check no longer depends on the privilege tags interning below registry id 64.
- * The colon-split key keeps "god:foo" detected as a god request. */
 static error_t proc_authorize_tag_grant(const char *tags, const process_t *spawner)
 {
     uint32_t caller = spawner->cabin->auth_bits;
-    if (caller & AUTH_TAG_GOD) return OK;       /* god may grant anything */
+    if (caller & AUTH_TAG_GOD) return OK;
 
     uint32_t requested = 0;
     const char *p = tags;
@@ -295,33 +221,21 @@ static error_t proc_authorize_tag_grant(const char *tags, const process_t *spawn
         if (!comma) break;
         p = comma + 1;
     }
-    if (requested == 0) return OK;              /* nothing privileged requested */
-    if (requested & AUTH_TAG_GOD) return ERR_ACCESS_DENIED;  /* only god grants god */
+    if (requested == 0) return OK;
+    if (requested & AUTH_TAG_GOD) return ERR_ACCESS_DENIED;
 
     const uint32_t levels[] = { OP_AUTH_APP, OP_AUTH_UTILITY, OP_AUTH_SYSTEM, OP_AUTH_NETWORK };
     for (size_t i = 0; i < sizeof(levels)/sizeof(levels[0]); i++) {
         uint32_t mask = auth_mask_for_level(levels[i]);
-        if ((requested & mask) && !(caller & mask)) return ERR_ACCESS_DENIED;  /* amplification */
+        if ((requested & mask) && !(caller & mask)) return ERR_ACCESS_DENIED;
     }
     return OK;
 }
 
-/* Authority to MUTATE (kill/tag) a target: self ∨ same cabin (one trust domain,
- * shared address space) ∨ system-ensign (god|system|bypass) ∨ the exact child
- * this caller launched. "Own child" is (spawner_pid, spawner_gen) — a pid alone
- * is not identity (pids recycle), so a later process inheriting a dead spawner's
- * pid must NOT inherit authority. Parentless procs (autostart/init,
- * spawner_pid==0) are reachable only via the system ensign. */
 static bool proc_has_authority_over(const process_t *caller, const process_t *target)
 {
     if (!caller || !target) return false;
     if (caller->pid == target->pid) return true;
-    /* Same cabin = one trust domain: sibling strands share this address space
-     * and can already read/write each other's memory, so tagging or killing a
-     * cabin-mate is an in-domain act — and is what lets a spawned strand run
-     * box::tag_scope (its pid is not the cabin-main pid boxlib addresses). Guard
-     * NULL so cabin-less procs don't alias; foreign targets keep a distinct
-     * cabin_t and fall through. Cf. the same rule in SysStrandRelease. */
     if (caller->cabin && caller->cabin == target->cabin) return true;
     uint32_t cb = caller->cabin ? caller->cabin->auth_bits : 0;
     if (auth_level_permits(cb, OP_AUTH_SYSTEM)) return true;
@@ -333,10 +247,6 @@ static bool proc_has_authority_over(const process_t *caller, const process_t *ta
     return false;
 }
 
-/* Boot self-test for proc_has_authority_over. Synthetic process_t/cabin_t on the
- * stack drive the predicate directly (it is static here). caller.pid is the top
- * pid index, which boot never allocates — its generation is a stable snapshot for
- * the run, so the match/stale pair reads one deterministic pid_generation value. */
 error_t ProcAuthSelfTest(void)
 {
     process_t caller, target;
@@ -348,19 +258,17 @@ error_t ProcAuthSelfTest(void)
     caller.cabin = &caller_cabin;
     target.cabin = &target_cabin;
 
-    caller.pid = PID_MAX_COUNT;                       /* index PID_MAX_COUNT-1, unallocated at boot */
+    caller.pid = PID_MAX_COUNT;
     uint32_t caller_gen = pid_generation(caller.pid);
 
-    /* self: same pid is permitted at any auth level (self-exit needs this). */
     target.pid = caller.pid;
     if (!proc_has_authority_over(&caller, &target)) {
         kprintf("[PROCAUTH] FAIL: self denied\n");
         return ERR_INTERNAL;
     }
 
-    target.pid = caller.pid - 1;                      /* a distinct, foreign pid */
+    target.pid = caller.pid - 1;
 
-    /* foreign: no spawner link, caller holds no authority -> denied. */
     caller_cabin.auth_bits   = 0;
     target_cabin.spawner_pid  = PROCESS_INVALID_PID;
     target_cabin.spawner_gen  = 0;
@@ -369,11 +277,6 @@ error_t ProcAuthSelfTest(void)
         return ERR_INTERNAL;
     }
 
-    /* same cabin: the SAME foreign pid, now sharing the caller's cabin_t, is one
-     * trust domain — authority holds with no privilege and no spawner link (the
-     * box::tag_scope-from-a-strand case). Only the same-cabin clause can grant
-     * here (self fails: pids differ; ensign fails: auth_bits==0; own-child fails:
-     * no spawner link), so an ALLOW proves that clause is live and unmasked. */
     target.cabin = &caller_cabin;
     if (!proc_has_authority_over(&caller, &target)) {
         kprintf("[PROCAUTH] FAIL: same-cabin denied\n");
@@ -381,7 +284,6 @@ error_t ProcAuthSelfTest(void)
     }
     target.cabin = &target_cabin;
 
-    /* own child: target records (caller.pid, caller's live generation). */
     target_cabin.spawner_pid = caller.pid;
     target_cabin.spawner_gen = caller_gen;
     if (!proc_has_authority_over(&caller, &target)) {
@@ -389,15 +291,12 @@ error_t ProcAuthSelfTest(void)
         return ERR_INTERNAL;
     }
 
-    /* stale child: spawner_pid matches but the generation cannot — proves a
-     * recycled pid does not inherit a dead spawner's authority. */
     target_cabin.spawner_gen = caller_gen ^ 0xFFFFu;
     if (proc_has_authority_over(&caller, &target)) {
         kprintf("[PROCAUTH] FAIL: stale child permitted (pid-reuse hole)\n");
         return ERR_INTERNAL;
     }
 
-    /* system ensign: god (and system) reach a foreign target with no link. */
     target_cabin.spawner_pid = PROCESS_INVALID_PID;
     target_cabin.spawner_gen = 0;
     caller_cabin.auth_bits   = AUTH_TAG_GOD;
@@ -415,18 +314,6 @@ error_t ProcAuthSelfTest(void)
     return OK;
 }
 
-/* SysProcSpawn loads a process from a caller-supplied physical-address ELF blob
- * with caller-supplied tags. proc_authorize_tag_grant gates those tags so a
- * spawned child can never gain an auth privilege the spawner itself lacks
- * (child auth-level ⊆ spawner auth-level; god may grant anything). Without this
- * a utility caller could spawn a "god" child (a phys address is obtainable via
- * the app-level MEMTAG_INFO base_phys field), i.e. utility→god escalation. */
-/* SYSTEM_OP_PROC_SPAWN
- *   params:  [u64 binary_phys][u64 binary_size]
- *   in_crate: tags string (NUL-bounded)
- *   out_crate (optional): u32 new_pid
- *   A blob spawn carries no Luggage: nobody types a line at a binary in
- *   memory. The child's CabinInfo says so (luggage_length 0). */
 static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                         const OpContext *ctx)
 {
@@ -449,8 +336,6 @@ static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     error_t srcrc = sys_crate_string(&crates[op->in_crate], ctx, tags, sizeof(tags));
     if (srcrc != OK) return srcrc;
 
-    /* Gate the child's tags BEFORE creating it or reading the binary: a denied
-     * spawn must create no process and dereference no caller memory. */
     error_t gate = proc_authorize_tag_grant(tags, ctx->proc);
     if (gate != OK) return gate;
 
@@ -470,9 +355,6 @@ static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_coun
         return ERR_SPAWN_FAILED;
     }
 
-    /* Publish process:spawned so monitors / shells can react. Pair with
-     * the process:died event in TouchCleanupProcess — together they form
-     * the lifecycle stream apps subscribe to instead of polling. */
     {
         struct __attribute__((packed)) {
             uint32_t pid;
@@ -491,28 +373,6 @@ static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     return OK;
 }
 
-/* SYSTEM_OP_PROC_KILL
- *   params:  [u32 target_pid]            (0 == self exit; 4-byte form, code 0)
- *            [u32 target_pid][i32 code]  (optional 8-byte form; `code` is the
- *                                         self-exit disposition, ignored when
- *                                         killing another process)
- *            [u32 target_pid][i32 code][u32 generation]
- *                                        (12-byte form: kill that exact
- *                                         incarnation, or nothing)
- *   out_crate (optional): u32 killed_pid
- *
- * exit_code semantics (proc_exit.h): a self-exit publishes `code` masked to
- * [0, INT32_MAX]; killing another process forces PROC_EXIT_KILLED (-1).
- *
- * WHY THE 12-BYTE FORM. A pid is a seat, and seats are re-let. Between
- * deciding to end a process and saying so, that process can end on its own
- * and its pid be handed to another — and a killer with the system ensign has
- * authority over that one too, so the kill lands, on the wrong process, and
- * reports success. Naming the generation closes it: the incarnation is
- * either still in the seat or the kill is refused as ERR_PROCESS_NOT_FOUND,
- * which is the truth. Generation 0 in this form means "any" (never a real
- * generation), so a caller that has no generation to name is not forced to
- * invent one. */
 static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
@@ -523,14 +383,11 @@ static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count
     uint32_t target_pid;
     memcpy(&target_pid, op->params, sizeof(uint32_t));
 
-    /* Optional 8-byte form carries the self-exit code after the pid; the
-     * 4-byte form (and any kill-other) defaults it to a clean 0. */
     int32_t exit_code = 0;
     if (op->param_size >= sizeof(uint32_t) + sizeof(int32_t))
         memcpy(&exit_code, (const uint8_t *)op->params + sizeof(uint32_t),
                sizeof(int32_t));
 
-    /* 12-byte form: the exact incarnation, or none. */
     uint32_t want_gen = 0;
     if (op->param_size >= 3 * sizeof(uint32_t))
         memcpy(&want_gen, (const uint8_t *)op->params + 2 * sizeof(uint32_t),
@@ -540,44 +397,19 @@ static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count
     if (self_exit) target_pid = ctx->proc->pid;
 
     if (target_pid == PROCESS_INVALID_PID) return ERR_INVALID_ARGUMENT;
-    /* Pin target across the state transition + buffer cleanup so a
-     * concurrent destroy on another core cannot recycle target_pid
-     * mid-flight. */
     process_t *target = process_find_ref(target_pid);
     if (!target) return ERR_PROCESS_NOT_FOUND;
 
-    /* The seat is taken — but by whom? A named generation that does not match
-     * is a process that already left; say so rather than end its successor. */
     if (want_gen != 0 && target->generation != want_gen) {
         process_ref_dec(target);
         return ERR_PROCESS_NOT_FOUND;
     }
 
-    /* Internal gate (the op stays OP_AUTH_NONE so every process can self-exit):
-     * killing ANOTHER process needs authority over it — self-exit always passes
-     * (caller->pid == target->pid); beyond self, a kill needs a same-cabin
-     * sibling, the god/system ensign, or the exact child this caller spawned.
-     * Without it any app could kill any process. */
     if (!proc_has_authority_over(ctx->proc, target)) {
         process_ref_dec(target);
         return ERR_ACCESS_DENIED;
     }
 
-    /* Publish process:died with the CORRECT disposition and claim the cleanup
-     * BEFORE process_set_state exposes this proc to the reaper. If we marked it
-     * PROC_DONE/CRASHED first, the reaper's process_destroy (another K-Core)
-     * could win the touch_cleaned claim in that window and publish
-     * PROC_EXIT_CRASHED for an intentional exit/kill. TouchCleanupProcess reads
-     * no proc state and `target` is pinned (process_find_ref above), so claiming
-     * first is safe; the claim-guard in TouchClaimSet (touch_cleaned check under
-     * subs_lock) already blocks any sub the still-running target might race in.
-     * TouchCleanupProcess is idempotent on touch_cleaned, so the later
-     * process_destroy call no-ops and this disposition stands.
-     *
-     * Disposition (proc_exit.h): a self-exit publishes the caller's code with
-     * the sign bit cleared so it can never look like a negative sentinel; a
-     * kill-other forces PROC_EXIT_KILLED — the victim never chose a code, so
-     * any param code is ignored. */
     TouchCleanupProcess(target,
                         self_exit ? (int32_t)(exit_code & 0x7FFFFFFF)
                                   : PROC_EXIT_KILLED);
@@ -595,16 +427,6 @@ static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count
     return OK;
 }
 
-/* SYSTEM_OP_TLS_FSBASE
- *   params: [u64 fsbase] — user-canonical VA (0 clears).
- *
- * Fallback for CPUs without FSGSBASE, where ring-3 WRFSBASE #UDs: store
- * the TLS thread pointer in ProcessContext and flip the MSR-restore gate.
- * Deliberately NO direct WRMSR here — Manifest ops may execute on a
- * K-Core, i.e. a different CPU than the caller; writing IA32_FS_BASE
- * there would program the wrong core. The value materializes on the
- * caller's next context restore — boxcxx follows the op with yield(),
- * making that deterministic before any thread_local access. */
 static int SysTlsFsbase(const ManifestOp *op, Crate *crates,
                         uint16_t crate_count, const OpContext *ctx)
 {
@@ -616,28 +438,8 @@ static int SysTlsFsbase(const ManifestOp *op, Crate *crates,
     uint64_t base;
     memcpy(&base, op->params, sizeof(base));
 
-    /* User half + canonical only — a kernel-half FS base would let ring 3
-     * read kernel memory through fs: overrides on the next switch-in. */
     if (base >= 0x0000800000000000ULL) return ERR_INVALID_ADDRESS;
 
-    /*
-     * ‼ RECORDED AS A DEBT, NOT WRITTEN INTO THE SAVED CONTEXT.
-     *
-     * This op runs in the guide loop on a K-Core — not the caller's CPU — so
-     * it cannot program IA32_FS_BASE, and the branch that used to try was
-     * guarded by process_get_current() == ctx->proc, which is never true here
-     * (that reads the K-Core's own current process, and a K-Core is running
-     * the guide loop, not a process). Dead code guarding a hazard.
-     *
-     * Nor may it write ProcessContext.user_fsbase: that field belongs to the
-     * SAVE, which fills it from the live register. Writing it here made two
-     * writers of one field, and the loser was this one — see the note in
-     * process.h. The request goes somewhere the save never reads, and the
-     * caller's next dispatch installs it.
-     */
-    /* The gate first, then the debt: the restore checks the gate before it
-     * writes the MSR, and a core that saw the debt without the gate would
-     * clear it having installed nothing. */
     g_user_fsbase_used = 1;
     ctx->proc->fsbase_wanted = base;
     __atomic_store_n(&ctx->proc->fsbase_owed, 1, __ATOMIC_RELEASE);
@@ -645,19 +447,6 @@ static int SysTlsFsbase(const ManifestOp *op, Crate *crates,
     return OK;
 }
 
-/* SYSTEM_OP_PROC_INFO
- *   params:  [u32 target_pid]   (0 == self)
- *   out_crate (>= 32 bytes): [u32 pid][u32 state][i32 score][u32 _pad]
- *                            [u64 code_start][u64 code_size]
- *                            [char tags[capacity-32]] */
-/* SYSTEM_OP_PROC_CPUTIME
- *   params:    none
- *   out_crate (>= 8): [u64 processor microseconds used by the calling cabin]
- *
- * Self only, and that is the design rather than a limitation: there is no pid
- * parameter because another cabin's processor time is not this op's business,
- * and because a question about yourself needs no authority to check — which is
- * what makes OP_AUTH_NONE honest here rather than convenient. */
 static int SysProcCpuTime(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
 {
@@ -668,24 +457,6 @@ static int SysProcCpuTime(const ManifestOp *op, Crate *crates, uint16_t crate_co
     Crate *out = &crates[op->out_crate];
     if (out->capacity < sizeof(uint64_t)) return ERR_BUFFER_TOO_SMALL;
 
-    /* Completed slices, plus the one running right now.
-     *
-     * The in-flight term is measured from cpu_tsc_stamp, and the base matters
-     * more than the arithmetic. An earlier version used last_run_time and was
-     * wrong twice over: schedule() re-stamps it on every pass, and it SURVIVES
-     * A PARK, so the difference spanned a whole sleep and a 300 ms nap read as
-     * 300 ms of processor time. cpu_tsc_stamp exists only while the strand
-     * holds the core — set when it takes it, cleared when it leaves — so a
-     * strand that is not running contributes nothing here, and one that is
-     * gets credited to the cycle.
-     *
-     * Without this term the answer would only move at a context switch, and on
-     * a machine with a spare core a strand can run a long time without one: a
-     * 50 ms CPU-bound loop on 16 cores measured as zero. That is what this
-     * paragraph is for.
-     *
-     * The read happens on the core the caller is running on, so the two TSC
-     * values come from the same clock. */
     uint64_t us = __atomic_load_n(&ctx->proc->total_cpu_time, __ATOMIC_RELAXED);
     const uint64_t stamp = ctx->proc->cpu_tsc_stamp;
     if (stamp != 0) {
@@ -710,7 +481,6 @@ static int SysProcInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count
     memcpy(&target_pid, op->params, sizeof(uint32_t));
     if (target_pid == 0) target_pid = ctx->proc->pid;
 
-    /* Pin target across all field reads + tag snapshot. */
     process_t *target = process_find_ref(target_pid);
     if (!target) return ERR_PROCESS_NOT_FOUND;
 
@@ -720,10 +490,6 @@ static int SysProcInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count
         return ERR_BUFFER_TOO_SMALL;
     }
 
-    /* out->capacity is attacker-controlled and unvalidated, and this op is
-     * unauthenticated — bound the kernel bounce to one page (the 32-byte
-     * header plus any realistic tag snapshot), never the claimed capacity, so
-     * a giant capacity can't force a giant kmalloc+memset. */
     uint64_t alloc_sz = out->capacity > 4096u ? 4096u : out->capacity;
     uint8_t *kp = crate_out_alloc(out, alloc_sz);
     if (!kp) {
@@ -758,35 +524,6 @@ static int SysProcInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count
     return OK;
 }
 
-/* SYSTEM_OP_PROC_CREW — who wears this tag.
- *   params:    the tag, as text; param_size is its length, no NUL
- *   out_crate: [u32 delivered][u32 total] then `delivered` records, each
- *              [u32 pid][u32 generation][u32 state][u32 tags_len]
- *              [u64 cpu_us][char tags[tags_len]]   (no NUL, no padding)
- *
- * WHY THIS EXISTS. `system.broadcast` has always walked the carriers of a tag
- * — it is how one word reaches three hundred of them — but it only ever spoke
- * to them, and told the asker nothing about who they were. Anything that
- * needed to KNOW had one door: system.proc.info, one pid at a time, so
- * "who is running?" was four thousand syscalls and a race in the middle
- * (a pid freed and re-let between two of them names a different process).
- *
- * The same walk, answering instead of speaking. `total` is how many wear the
- * tag and `delivered` how many fitted the crate, so a caller with too little
- * room learns the true count and asks again with room for it — the shape
- * storage.tag.query settled on, for the same reason.
- *
- * The caller is IN its own answer if it wears the tag. A list of who is
- * aboard that leaves out the one asking is a list somebody has to correct.
- *
- * Each record carries `generation` because a pid is a seat and seats are
- * re-let: the pair (pid, generation) is what a later kill must be aimed at,
- * and without it the gap between deciding and doing cannot be closed.
- */
-/* The kernel bounce for one answer. Sized so that every seat on the machine
- * (MAX_PROCESSES) can be in it with its tags — the crew of `utility` on a
- * busy machine is not an edge case, and an answer that silently stopped at a
- * round number would be the tray headcount already caught once. */
 #define PROC_CREW_ANSWER_MAX  262144u
 #define PROC_CREW_HEADER      8u
 #define PROC_CREW_FIXED       24u
@@ -819,14 +556,8 @@ static int SysProcCrew(const ManifestOp *op, Crate *crates, uint16_t crate_count
     uint32_t total     = 0;
     uint64_t used      = PROC_CREW_HEADER;
 
-    /* Resolved once, outside the list lock: process_has_tag's string path
-     * re-enters process_lock through process_snapshot_tags and would
-     * self-deadlock (the same rule SysBroadcast keeps). An unknown tag is
-     * nobody wearing it, not a failure — the answer is an honest zero. */
     uint16_t tid = tagfs_tag_lookup(tag);
     if (tid != TAGFS_INVALID_TAG_ID) {
-        /* Phase 1: the pids, under the list lock, counted then made room for
-         * then filled — never a fixed tray that silently drops the last one. */
         uint32_t *pid_list = NULL;
         uint32_t  pid_cap  = 0;
         for (;;) {
@@ -848,10 +579,8 @@ static int SysProcCrew(const ManifestOp *op, Crate *crates, uint16_t crate_count
             if (!pid_list) { crate_buf_free(kp); return ERR_NO_MEMORY; }
         }
 
-        /* Phase 2: each one pinned while its record is read, outside the list
-         * lock — process_snapshot_tags takes process_lock itself. */
         for (uint32_t i = 0; i < total; i++) {
-            if (used + PROC_CREW_FIXED >= alloc_sz) break;   /* no room left */
+            if (used + PROC_CREW_FIXED >= alloc_sz) break;
 
             process_t *mate = process_find_ref(pid_list[i]);
             if (!mate) continue;
@@ -867,14 +596,6 @@ static int SysProcCrew(const ManifestOp *op, Crate *crates, uint16_t crate_count
                                                    (size_t)room);
             process_ref_dec(mate);
 
-            /* A list that filled the room to its last byte may have been cut
-             * there — process_snapshot_tags stops when the next tag will not
-             * fit and does not say that it did. A cut list is worse than a
-             * missing record: the caller would judge a cabin by tags it does
-             * not know it is missing, and narrowing by one of them would drop
-             * a cabin that wears it. So the record is not delivered at all,
-             * `total` still counts it, and the shortfall sends the caller back
-             * with more room. */
             if (tlen + 1 >= (size_t)room) break;
 
             uint32_t tags_len = (uint32_t)tlen;
@@ -899,8 +620,6 @@ static int SysProcCrew(const ManifestOp *op, Crate *crates, uint16_t crate_count
     return OK;
 }
 
-/* True iff comma-delimited `list` already contains exactly `token` (element-exact,
- * so "app" never matches inside "apple" or "touch_test"). */
 static bool tag_list_contains(const char *list, const char *token)
 {
     size_t tlen = strlen(token);
@@ -915,33 +634,28 @@ static bool tag_list_contains(const char *list, const char *token)
     return false;
 }
 
-/* Merge caller `augment` (comma-list) into `dst` (file-tags, already built).
- * Per token: reject if its KEY (before ':') is reserved -> ERR_ACCESS_DENIED;
- * skip if already present (dedup); else append ",token" or ERR_INVALID_ARGUMENT
- * on cap overflow. file-tags are never the casualty (trusted, built first). */
 static error_t proc_exec_merge_augment(char *dst, size_t dst_size, const char *augment)
 {
     const char *p = augment;
     while (*p) {
         const char *comma = strchr(p, ',');
         size_t tlen = comma ? (size_t)(comma - p) : strlen(p);
-        if (tlen == 0) { if (!comma) break; p = comma + 1; continue; } /* skip empty token */
+        if (tlen == 0) { if (!comma) break; p = comma + 1; continue; }
 
         char token[PROCESS_TAG_SIZE];
         if (tlen >= sizeof(token)) return ERR_INVALID_ARGUMENT;
         memcpy(token, p, tlen); token[tlen] = '\0';
 
-        /* key = token up to ':' (value-bearing tags like "k:v") */
         char key[PROCESS_TAG_SIZE];
         const char *colon = strchr(token, ':');
         size_t klen = colon ? (size_t)(colon - token) : tlen;
         memcpy(key, token, klen); key[klen] = '\0';
 
-        if (tagfs_key_is_reserved(key)) return ERR_ACCESS_DENIED;  /* fail-closed: no escalation */
+        if (tagfs_key_is_reserved(key)) return ERR_ACCESS_DENIED;
 
         if (!tag_list_contains(dst, token)) {
             size_t cur = strlen(dst);
-            size_t need = cur + (cur ? 1 : 0) + tlen + 1; /* comma + token + NUL */
+            size_t need = cur + (cur ? 1 : 0) + tlen + 1;
             if (need > dst_size) return ERR_INVALID_ARGUMENT;
             if (cur) dst[cur++] = ',';
             memcpy(dst + cur, token, tlen); dst[cur + tlen] = '\0';
@@ -952,14 +666,6 @@ static error_t proc_exec_merge_augment(char *dst, size_t dst_size, const char *a
     return OK;
 }
 
-/*
- * Hand a child its Luggage — what the spawner said to it at boarding, the
- * command line as the person typed it. It rides in the child's own cabin: in
- * the CabinInfo page right after the header when it fits there, in the
- * child's buffer heap when it does not, so a line has no ceiling but memory.
- * Written before the child's first dispatch, so it is there from the child's
- * first instruction — nothing to wait for, nothing that can arrive late.
- */
 static error_t cabin_luggage_give(process_t *child, const uint8_t *bytes, uint32_t length)
 {
     CabinInfo *ci = (CabinInfo *)vmm_phys_to_virt(child->cabin->cabin_info_phys);
@@ -984,13 +690,6 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
                             const char *filename,
                             const uint8_t *luggage, uint32_t luggage_len);
 
-/* SYSTEM_OP_PROC_EXEC
- *   in_crate: [program name][NUL][luggage bytes…] — the name the program is
- *             filed under, then, after one NUL, the command line as typed
- *             (the program's own name included, as its first word). A crate
- *             that is only a name, no NUL, starts the program with no luggage.
- *   params (optional): caller-tag augment (comma-list); child = file-tags ∪ augment
- *   out_crate (optional): u32 new_pid, or {u32 pid, u32 generation} */
 static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
@@ -1005,7 +704,6 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
     uint8_t *raw = crate_in_buf(src, ctx);
     if (!raw) return ERR_INVALID_ADDRESS;
 
-    /* The name ends at the first NUL, or at the end of the crate. */
     uint64_t name_len = 0;
     while (name_len < src->size && raw[name_len] != '\0') name_len++;
 
@@ -1033,9 +731,6 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
                             const char *filename,
                             const uint8_t *luggage, uint32_t luggage_len)
 {
-    /* Optional caller-tag augment rides in op->params (NUL-free, length-bounded).
-     * Empty (param_size == 0) leaves augment "" so the merge below is a no-op and
-     * this path stays byte-identical to a plain proc_exec. */
     char augment[PROCESS_TAG_SIZE];
     augment[0] = '\0';
     if (op->param_size > 0) {
@@ -1044,11 +739,6 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
         augment[op->param_size] = '\0';
     }
 
-    /* Locate the file by tag-name + executable tag: every file that carries
-     * the name as a tag, asked of the index, with room for every one of them.
-     * The volume knows how many files it has and that is the only ceiling
-     * there is. What stood here was a scan of the first 256 files of the
-     * volume, so the 257th program was "not found" — and nothing said so. */
     uint32_t room = tagfs_file_ceiling();
     if (room == 0) return ERR_FILE_NOT_FOUND;
     uint32_t *file_ids = kmalloc(room * sizeof(uint32_t));
@@ -1098,9 +788,6 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
 
     if (found_id == 0) return ERR_FILE_NOT_FOUND;
 
-    /* Fold the caller augment into found_tags BEFORE any binary I/O, so a
-     * reserved/oversize augment costs zero disk reads and never spawns an
-     * orphan. found_tags is already NUL-terminated by the build loop above. */
     error_t arc = proc_exec_merge_augment(found_tags, sizeof(found_tags), augment);
     if (arc != OK) return arc;
 
@@ -1121,10 +808,6 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
         pmm_free(phys, pages);
         return ERR_SPAWN_FAILED;
     }
-    /* The whole image or none of it — see the same check in autostart.c. A
-     * short read leaves the rest of the buffer as the zeros it was allocated
-     * with, and a process started on those runs `add [rax], al` off the first
-     * page and dies writing to address zero. */
     int rd = tagfs_read(fh, virt, file_size);
     tagfs_close(fh);
     if (rd < 0 || (uint64_t)rd != file_size) {
@@ -1149,28 +832,18 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
         return ERR_SPAWN_FAILED;
     }
 
-    /* The luggage goes aboard after the cabin is built and before the child
-     * is ever dispatched: a child that cannot be given its line is not started
-     * without it. */
     error_t lrc = cabin_luggage_give(new_proc, luggage, luggage_len);
     if (lrc != OK) {
         process_destroy(new_proc);
         return lrc;
     }
 
-    /* Snapshot the child's identity BEFORE process_set_state exposes it to the
-     * scheduler/reaper: once PROC_WORKING the child may exit and be reaped on
-     * another core, turning new_proc into a dangling read. The spawned event and
-     * the out-crate below both use these locals, never new_proc, post-WORKING. */
     uint32_t child_pid = new_proc->pid;
     uint32_t child_gen = new_proc->generation;
 
     __sync_synchronize();
     process_set_state(new_proc, PROC_WORKING);
 
-    /* Publish process:spawned (mirrors SysProcSpawn). proc_exec is the
-     * primary userspace entry — without this hook subscribers see only
-     * binary-from-memory spawns and miss every shell-invoked one. */
     {
         struct __attribute__((packed)) {
             uint32_t pid;
@@ -1179,9 +852,6 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
         TouchPublish("process:spawned", &ev, sizeof(ev));
     }
 
-    /* Out crate is capacity-gated: an 8-byte reader (proc_exec_gen) receives
-     * {pid, generation}; a legacy 4-byte reader (proc_exec / proc_exec_tagged)
-     * receives just the pid. Both stay correct. */
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
         if (out->capacity >= 8) {
@@ -1194,20 +864,6 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
     return OK;
 }
 
-/* =========================================================================
- *  SYSTEM_OP_STRAND_SPAWN — spawn an additional strand in the caller's cabin
- *
- *  params: [u64 entry_va][u64 arg]   (16 bytes)
- *  out crate (optional): u32 new strand pid
- *
- *  Creates a second+ execution context that shares the caller's address
- *  space (CR3 / rings / tags / heap) — the kernel substrate for
- *  std::thread.  The strand begins at entry_va with `arg` in rdi (System V
- *  first argument); userspace passes a trampoline that runs the thread
- *  function then terminates the strand.  OP_AUTH_APP: a cabin may always
- *  spawn strands into itself (no new address space is created, unlike
- *  proc.spawn), so this needs no elevated capability.
- * ========================================================================= */
 static int SysStrandSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
 {
@@ -1219,10 +875,6 @@ static int SysStrandSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_co
     memcpy(&entry_va, op->params,     sizeof(uint64_t));
     memcpy(&arg,      op->params + 8, sizeof(uint64_t));
 
-    /* Optional 3rd param: joinable (low byte of a u64). std::thread passes 1 so
-     * the strand is zombie-until-join (pid held until SYSTEM_OP_STRAND_RELEASE);
-     * a raw strand_spawn worker omits it (param_size==16) and spawns joinable=0
-     * (eager reap, as before). */
     uint8_t joinable = (op->param_size >= 17) ? op->params[16] : 0u;
 
     process_t *strand = strand_spawn(ctx->proc->cabin, (uintptr_t)entry_va, arg,
@@ -1240,14 +892,6 @@ static int SysStrandSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_co
     return OK;
 }
 
-/* =========================================================================
- *  SYSTEM_OP_STRAND_RELEASE — clear a joinable strand's reap-block so the P5b
- *  reaper may reclaim it. Called by std::thread join()/detach() once the strand
- *  is done being referenced as an id. Cabin-scoped: a cabin may release only its
- *  OWN strands. Idempotent and safe on an unknown / already-released / non-
- *  joinable pid (no-op) — so a benign double call or a race with the reaper
- *  cannot corrupt anything.
- * ========================================================================= */
 static int SysStrandRelease(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                             const OpContext *ctx)
 {
@@ -1259,11 +903,8 @@ static int SysStrandRelease(const ManifestOp *op, Crate *crates, uint16_t crate_
     memcpy(&pid, op->params, sizeof(uint32_t));
 
     process_t *target = process_find_ref(pid);
-    if (!target) return OK;   /* already reaped / never existed — nothing to do */
+    if (!target) return OK;
 
-    /* Only release a strand of THIS cabin (a cabin cannot poke siblings'
-     * cabins' strands). Clearing reap_blocked lets the reaper reclaim it on the
-     * next tick (it is, or will become, PROC_DONE). */
     if (target->cabin == ctx->proc->cabin)
         __atomic_store_n(&target->reap_blocked, 0u, __ATOMIC_SEQ_CST);
 
@@ -1271,21 +912,6 @@ static int SysStrandRelease(const ManifestOp *op, Crate *crates, uint16_t crate_
     return OK;
 }
 
-/* =========================================================================
- *  SYSTEM_OP_STRAND_POOL_BIND — register the caller strand's boxlib StrandPool
- *  slab slot for crash-orphan reclaim (Ф20e).
- *
- *  params: [u64 pool_va][u32 gen]   (12 bytes)
- *
- *  boxlib calls this once, right after it claims a slab slot and writes the
- *  slot (so the page is present and resolvable). We validate that the VA is in
- *  the caller's user range, StrandPool-aligned, and currently mapped, then stash
- *  the VA (not a phys) plus the bound generation on the process_t. process_destroy
- *  RE-RESOLVES the VA through the live cabin page tables at death, so a page that
- *  was unmapped/recycled between bind and death can never make us stamp a phys
- *  that now belongs to a different cabin. There is no unbind op: an orderly flush
- *  bumps the generation, which makes the death-stamp CAS miss. OP_AUTH_APP — a
- *  strand only ever binds a pool inside its own cabin. */
 static int SysStrandPoolBind(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                              const OpContext *ctx)
 {
@@ -1321,15 +947,7 @@ static int SysStrandPoolBind(const ManifestOp *op, Crate *crates, uint16_t crate
     return OK;
 }
 
-/* =========================================================================
- *  Use Context (use) — what the user is doing, said in tags
- * ========================================================================= */
 
-/* After a set or a clear: the volume is told, and the caller learns whether
- * it listened. out_crate (optional): u8 — 1 when the volume now remembers
- * exactly this context, 0 when it does not (no volume up, a medium that will
- * not take the write, a context longer than the Ledger's record holds). The
- * context itself is set either way; the person is told, never refused. */
 static int UseSayRemembered(const ManifestOp *op, Crate *crates, const OpContext *ctx)
 {
     bool kept = false;
@@ -1341,12 +959,6 @@ static int UseSayRemembered(const ManifestOp *op, Crate *crates, const OpContext
     return OK;
 }
 
-/* SYSTEM_OP_USE_SET  in_crate: comma-separated tag list. No crate, or an
- * empty one, clears — the same thing use.clear says. The list rides whole:
- * copied off the caller's pages at its own length, no ceiling of this deck's
- * choosing, and handed to the context, which spells every tag canonically
- * and refuses one the volume registry could not hold.
- * out_crate (optional): u8 remembered — see UseSayRemembered. */
 static int SysUseSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
@@ -1362,7 +974,6 @@ static int SysUseSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     void  *raw = crate_in_buf(src, ctx);
     if (!raw) return ERR_INVALID_ADDRESS;
 
-    /* The crate carries bytes; the context reads a string. */
     char *list = kmalloc(src->size + 1);
     if (!list) {
         crate_buf_free(raw);
@@ -1374,12 +985,10 @@ static int SysUseSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 
     error_t rc = UseContextSet(list, true);
     kfree(list);
-    if (rc != OK) return rc;   /* refused: the context is as it was, nothing to tell */
+    if (rc != OK) return rc;
     return UseSayRemembered(op, crates, ctx);
 }
 
-/* SYSTEM_OP_USE_CLEAR  nothing in; out_crate (optional): u8 remembered — see
- * UseSayRemembered. */
 static int SysUseClear(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
@@ -1389,11 +998,6 @@ static int SysUseClear(const ManifestOp *op, Crate *crates, uint16_t crate_count
     return UseSayRemembered(op, crates, ctx);
 }
 
-/* SYSTEM_OP_USE_GET  out_crate: [u32 count][u32 needed][(u16 len)(char tag[len])]*
- * Every tag that fits, in the context's order. count is what was written, so
- * a caller whose crate was too small sees fewer tags rather than torn ones;
- * needed is the byte length of the whole context comma-joined, NUL included,
- * so that caller can tell a short answer from a full one and size a buffer. */
 static int SysUseGet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
@@ -1417,16 +1021,14 @@ static int SysUseGet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
         return ERR_INVALID_ADDRESS;
     }
 
-    /* Comma-joined, every tag costs its length plus one — a comma between
-     * tags, the NUL after the last; an empty context is one NUL. */
     uint32_t needed  = 1;
     uint64_t pos     = 8;
     uint32_t written = 0;
     for (uint32_t i = 0; i < count; i++) {
         size_t l = strlen(names[i]);
         needed += (uint32_t)l + (i ? 1u : 0u);
-        if (pos + 2u + l > out->capacity) continue;   /* no room: still counted */
-        if (written != i) continue;                    /* keep the order whole */
+        if (pos + 2u + l > out->capacity) continue;
+        if (written != i) continue;
         uint16_t l16 = (uint16_t)l;
         memcpy(kp + pos, &l16, 2);       pos += 2;
         memcpy(kp + pos, names[i], l);   pos += l;
@@ -1439,17 +1041,12 @@ static int SysUseGet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 
     int crc = crate_out_commit(out, ctx, kp, pos);
     crate_buf_free(kp);
-    if (crc != OK) return crc;   /* fail closed: leave out->size unset */
+    if (crc != OK) return crc;
     out->size = pos;
     return OK;
 }
 
-/* =========================================================================
- *  Tags
- * ========================================================================= */
 
-/* On OK, *out_target carries a pinned reference; the caller MUST
- * release it via process_ref_dec when done. On error, no ref is held. */
 static error_t sys_tag_target(const ManifestOp *op, Crate *crates,
                               const OpContext *ctx,
                               process_t **out_target,
@@ -1486,16 +1083,10 @@ static int SysTagAdd(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     error_t rc = sys_tag_target(op, crates, ctx, &target, tag, sizeof(tag));
     if (rc != OK) return rc;
 
-    /* Mutating another process's tags needs authority over it (self / same-cabin
-     * / god|system / own child); without this any app could freeze or
-     * de-privilege any process by pid. */
     if (!proc_has_authority_over(ctx->proc, target)) {
         process_ref_dec(target);
         return ERR_ACCESS_DENIED;
     }
-    /* And the granted tag must not exceed the CALLER's own authority — reuse the
-     * spawn grant gate so an app cannot self-grant "god"/"system" (escalation).
-     * Non-privilege tags (auth bit 0) and "stopped" pass freely. */
     error_t grant = proc_authorize_tag_grant(tag, ctx->proc);
     if (grant != OK) {
         process_ref_dec(target);
@@ -1526,9 +1117,6 @@ static int SysTagRemove(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     error_t rc = sys_tag_target(op, crates, ctx, &target, tag, sizeof(tag));
     if (rc != OK) return rc;
 
-    /* Same authority gate as tag.add: only self / same-cabin / god|system /
-     * own-child may strip a target's tags (no grant gate — dropping a tag never
-     * escalates). */
     if (!proc_has_authority_over(ctx->proc, target)) {
         process_ref_dec(target);
         return ERR_ACCESS_DENIED;
@@ -1548,7 +1136,6 @@ static int SysTagRemove(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     return result;
 }
 
-/* SYSTEM_OP_TAG_CHECK   out_crate: u8 has_tag (0/1) */
 static int SysTagCheck(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
@@ -1571,12 +1158,7 @@ static int SysTagCheck(const ManifestOp *op, Crate *crates, uint16_t crate_count
     return OK;
 }
 
-/* =========================================================================
- *  Filesystem maintenance
- * ========================================================================= */
 
-/* SYSTEM_OP_DEFRAG_FILE  params:[u32 file_id][u32 target_block]
- *                        out_crate (optional): u32 frag_score */
 static int SysDefragFile(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                          const OpContext *ctx)
 {
@@ -1600,7 +1182,6 @@ static int SysDefragFile(const ManifestOp *op, Crate *crates, uint16_t crate_cou
     return OK;
 }
 
-/* SYSTEM_OP_FRAG_SCORE  out_crate:[u32 score][u32 total_files][u32 total_gaps] */
 static int SysFragScore(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                         const OpContext *ctx)
 {
@@ -1633,28 +1214,6 @@ static int SysFragScore(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     return OK;
 }
 
-/* =========================================================================
- *  System info — real-time snapshot (no hardcoded values)
- *
- *  Layout written into out_crate (must be ≥ 96 bytes, matches userspace
- *  system_info_t):
- *
- *    [00..31]  char     version[32]
- *    [32..39]  uint64_t uptime_ns
- *    [40..47]  uint64_t total_memory
- *    [48..55]  uint64_t used_memory
- *    [56..63]  uint64_t free_memory
- *    [64..71]  uint64_t tsc_freq_khz
- *    [72..75]  uint32_t cpu_total
- *    [76..79]  uint32_t cpu_k_cores
- *    [80..83]  uint32_t cpu_app_cores
- *    [84..87]  uint32_t process_count
- *    [88..91]  uint32_t pit_freq_hz
- *    [92]      uint8_t  multicore_active
- *    [93]      uint8_t  has_invariant_tsc
- *    [94]      uint8_t  has_waitpkg
- *    [95]      uint8_t  reserved
- * ========================================================================= */
 
 #define SYSINFO_BLOB_SIZE  96
 
@@ -1670,15 +1229,12 @@ static int SysInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 
     uint8_t blob[SYSINFO_BLOB_SIZE];
 
-    /* Version string. Pinned here for now (kernel_config.h has no version
-     * macro yet); migrate to a single source when the version policy lands. */
     static const char kver[] = "BoxOS v0.2.0";
     size_t vlen = sizeof(kver) - 1;
     if (vlen > 31) vlen = 31;
     memset(blob, 0, 32);
     memcpy(blob, kver, vlen);
 
-    /* Memory in bytes — PMM tracks pages; convert with PAGE_SIZE. */
     uint64_t total_pages = (uint64_t)pmm_total_pages();
     uint64_t used_pages  = (uint64_t)pmm_used_pages();
     uint64_t free_pages  = total_pages > used_pages ? total_pages - used_pages : 0;
@@ -1718,9 +1274,6 @@ static int SysInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return OK;
 }
 
-/* =========================================================================
- *  Telemetry
- * ========================================================================= */
 
 static int SysPerfDump(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
@@ -1729,8 +1282,6 @@ static int SysPerfDump(const ManifestOp *op, Crate *crates, uint16_t crate_count
     perf_dump();
     ManifestStageDumpAll();
     {
-        /* Dispatch transport split — the runtime witness that enclosed
-         * Manifests actually ride in their envelopes (guide.c). */
         uint64_t d[2];
         guide_dispatch_stats(d);
         kprintf("[GUIDE] dispatches: enclosed=%lu addressed=%lu\n",
@@ -1739,28 +1290,6 @@ static int SysPerfDump(const ManifestOp *op, Crate *crates, uint16_t crate_count
     return OK;
 }
 
-/* =========================================================================
- *  Manifest compile-and-reuse — "prepared statement" pattern.
- *
- *  COMPILE:  in_crate  = raw Manifest bytes (any size up to MANIFEST_RAW_MAX_SIZE)
- *            out_crate = uint64 handle (capacity ≥ 8)
- *
- *            The kernel copies the raw bytes via ManifestCompile (page-walked
- *            user-PT copy is built into ManifestCompile's is_kernel_ptr=false
- *            path), validates each op, resolves and caches per-op handler
- *            pointers, allocates a slot in the global ManifestTable, and
- *            returns a (gen << 32 | slot) handle. Ownership is recorded
- *            against ctx->proc->pid so process_destroy can auto-release
- *            any leaked handles.
- *
- *  RELEASE:  in_crate  = uint64 handle (size == 8)
- *
- *            Decrements the handle's refcount. On 0 the CompiledManifest is
- *            freed. Ownership check: only the cabin that compiled the
- *            handle may release it (ERR_ACCESS_DENIED otherwise). Concurrent
- *            ManifestExecute on the same handle stays safe — its internal
- *            Resolve holds the form alive past this Release.
- * ========================================================================= */
 
 static int SysManifestCompile(const ManifestOp *op, Crate *crates,
                                uint16_t crate_count, const OpContext *ctx)
@@ -1782,19 +1311,15 @@ static int SysManifestCompile(const ManifestOp *op, Crate *crates,
     error_t rc = ManifestCompile(ctx->proc,
                                   (const void *)(uintptr_t)in->addr,
                                   (uint32_t)in->size,
-                                  /*is_kernel_ptr=*/false,
+                                  false,
                                   &handle);
     if (rc != OK) return (int)rc;
 
-    /* Publish handle into the user's out crate payload via page-walked
-     * commit_out. The Crate descriptor itself (out->size) is mutated in
-     * the staged kbuf and write-back by guide.c's commit-and-release. */
     error_t commit_rc = vmm_user_buf_commit_out(ctx->proc->cabin->vmm,
                                                  (uintptr_t)out->addr,
                                                  &handle,
                                                  sizeof(handle));
     if (commit_rc != OK) {
-        /* Roll back the compile — userspace will never see this handle. */
         ManifestRelease(handle);
         return (int)commit_rc;
     }
@@ -1813,36 +1338,20 @@ static int SysManifestRelease(const ManifestOp *op, Crate *crates,
     if (!CrateIsValid(in))                       return ERR_INVALID_BUFFER_ID;
     if (in->size != sizeof(ManifestHandle))      return ERR_INVALID_ARGUMENT;
 
-    /* Read the handle out of the user payload via the page-walked snapshot —
-     * an 8-byte read still straddles when it sits within 7 bytes of a page
-     * end, so the single-page map cannot be assumed safe. */
     ManifestHandle handle;
     error_t read_rc = crate_read(in, ctx, &handle, sizeof(handle));
     if (read_rc != OK) return read_rc;
 
-    /* Ownership check via Resolve (which pins the form, preventing concurrent
-     * free during the verification). Balance with one Release. */
     CompiledManifest *cm = ManifestResolve(handle);
     if (!cm) return ERR_INVALID_ARGUMENT;
     if (cm->owner_pid != ctx->proc->pid) {
         ManifestRelease(handle);
         return ERR_ACCESS_DENIED;
     }
-    /* Drop the Resolve's ref. */
     ManifestRelease(handle);
-    /* Drop the user's initial ref (from compile). Concurrent Execute holds
-     * its own Resolve ref so the form survives until that completes. */
     return (int)ManifestRelease(handle);
 }
 
-/* =========================================================================
- *  EFI runtime / Secure Boot / ESRT — read-only introspection ops.
- *
- *  Replaces the previous "subscribe to secureboot:on/off at boot" surface
- *  with a synchronous query so userspace can poll state on demand. The
- *  kernel-side state is cached in efi_secureboot.c / efi_esrt.c; these
- *  handlers just marshal it into out_crate.
- * ========================================================================= */
 
 #include "efi.h"
 #include "efi_esrt.h"
@@ -1875,22 +1384,6 @@ static int SysEfiInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     uint32_t cert_count    = sb.cert_count;
     uint32_t hash_count    = sb.hash_count;
 
-    /* Layout (offset-aligned, packed):
-     *   +0   u32 version
-     *   +4   u8  rt_available
-     *   +5   u8  esrt_available
-     *   +6   u8  sb_available
-     *   +7   u8  sb_enforced
-     *   +8   u8  sb_setup_mode
-     *   +9   u8  sb_audit_mode
-     *   +10  u8  sb_deployed_mode
-     *   +11  u8  _pad
-     *   +12  u32 esrt_count
-     *   +16  u32 cert_count_total
-     *   +20  u32 hash_count_total
-     *   +24  u32 cert_count_by_db[6]   (PK,KEK,db,dbx,dbt,dbr)
-     *   +48  u32 hash_count_by_db[6]
-     *   +72  56  reserved (zero) */
     memcpy(blob + 0,  &version,        4);
     blob[4]  = rt_available;
     blob[5]  = esrt_available;
@@ -1909,8 +1402,6 @@ static int SysEfiInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return OK;
 }
 
-/* SYSTEM_OP_EFI_ESRT_GET — fetch one EFI_SYSTEM_RESOURCE_ENTRY by index.
- * Index travels in op->params as a u32; entry written to out_crate. */
 static int SysEfiEsrtGet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
 {
@@ -1932,11 +1423,6 @@ static int SysEfiEsrtGet(const ManifestOp *op, Crate *crates, uint16_t crate_cou
     return OK;
 }
 
-/* SYSTEM_OP_EFI_VERIFY_PE — verify an Authenticode-signed PE against
- * the platform's db/dbx. in_crate carries the entire PE image; out_crate
- * receives a 80-byte blob: { u32 result, u32 pe_size,
- *                             u8 pe_sha256[32], u8 signer_sha256[32],
- *                             u8 _pad[8] }. */
 #define EFI_VERIFY_PE_OUT_SIZE  80u
 static int SysEfiVerifyPe(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                            const OpContext *ctx)
@@ -1949,13 +1435,9 @@ static int SysEfiVerifyPe(const ManifestOp *op, Crate *crates, uint16_t crate_co
     Crate *in  = &crates[op->in_crate];
     Crate *out = &crates[op->out_crate];
     if (in->size == 0)                     return ERR_INVALID_ARGUMENT;
-    if (in->size > (16u * 1024u * 1024u))  return ERR_INVALID_ARGUMENT;  /* 16 MB cap */
+    if (in->size > (16u * 1024u * 1024u))  return ERR_INVALID_ARGUMENT;
     if (out->capacity < EFI_VERIFY_PE_OUT_SIZE) return ERR_BUFFER_TOO_SMALL;
 
-    /* Bounce the whole PE through a page-walked kernel buffer. The image is
-     * always multi-page, so the old single-page map fed efi_authenticode a
-     * pointer that read a foreign frame past the first page — wrong hashes
-     * and a stray-frame read. */
     uint8_t *pe = crate_in_buf(in, ctx);
     if (!pe) return ERR_INVALID_ADDRESS;
 
@@ -1977,9 +1459,6 @@ static int SysEfiVerifyPe(const ManifestOp *op, Crate *crates, uint16_t crate_co
     return OK;
 }
 
-/* =========================================================================
- *  Registration
- * ========================================================================= */
 
 error_t SystemDeckRegister(void)
 {
@@ -1989,16 +1468,11 @@ error_t SystemDeckRegister(void)
         uint32_t    auth;
         const char *name;
     } table[] = {
-        /* IPC: app+ — IPC is the lifeblood of any process. */
         { SYSTEM_OP_ROUTE,        SysRoute,       OP_AUTH_APP,    "system.route"      },
         { SYSTEM_OP_ROUTE_TAG,    SysBroadcast,   OP_AUTH_APP,    "system.broadcast"  },
-        /* Process lifecycle: spawn/exec are utility+; info/kill/exit are open
-         * (kill of pid==0 is self-exit, used by every process). */
         { SYSTEM_OP_PROC_SPAWN,   SysProcSpawn,   OP_AUTH_UTILITY,"system.proc.spawn" },
         { SYSTEM_OP_PROC_KILL,    SysProcKill,    OP_AUTH_NONE,   "system.proc.kill"  },
         { SYSTEM_OP_PROC_INFO,    SysProcInfo,    OP_AUTH_NONE,   "system.proc.info"  },
-        /* crew answers about others, but says nothing system.proc.info would
-         * not say about each of them one at a time — so it is open too. */
         { SYSTEM_OP_PROC_CREW,    SysProcCrew,    OP_AUTH_NONE,   "system.proc.crew"  },
         { SYSTEM_OP_PROC_CPUTIME, SysProcCpuTime, OP_AUTH_NONE,   "system.proc.cputime"},
         { SYSTEM_OP_TLS_FSBASE,   SysTlsFsbase,   OP_AUTH_NONE,   "system.tls.fsbase" },
@@ -2007,35 +1481,22 @@ error_t SystemDeckRegister(void)
         { SYSTEM_OP_STRAND_RELEASE, SysStrandRelease, OP_AUTH_APP, "system.strand.release"},
         { SYSTEM_OP_STRAND_POOL_BIND, SysStrandPoolBind, OP_AUTH_APP, "system.strand.pool.bind"},
         { SYSTEM_OP_INFO,         SysInfo,        OP_AUTH_NONE,   "system.info"       },
-        /* Use Context: what the user is doing, said in tags. set and clear
-         * speak for the user, so they take system authority — the shell, or a
-         * program wearing `system`. get is anyone's: any program may ask what
-         * the user is doing. */
         { SYSTEM_OP_USE_SET,      SysUseSet,      OP_AUTH_SYSTEM, "system.use.set"    },
         { SYSTEM_OP_USE_GET,      SysUseGet,      OP_AUTH_NONE,   "system.use.get"    },
         { SYSTEM_OP_USE_CLEAR,    SysUseClear,    OP_AUTH_SYSTEM, "system.use.clear"  },
-        /* Tags: app+. */
         { SYSTEM_OP_TAG_ADD,      SysTagAdd,      OP_AUTH_APP,    "system.tag.add"    },
         { SYSTEM_OP_TAG_REMOVE,   SysTagRemove,   OP_AUTH_APP,    "system.tag.remove" },
         { SYSTEM_OP_TAG_CHECK,    SysTagCheck,    OP_AUTH_NONE,   "system.tag.check"  },
-        /* FS maintenance: utility+. */
         { SYSTEM_OP_DEFRAG_FILE,  SysDefragFile,  OP_AUTH_UTILITY,"system.fs.defrag"  },
         { SYSTEM_OP_FRAG_SCORE,   SysFragScore,   OP_AUTH_NONE,   "system.fs.score"   },
-        /* Telemetry: admin only. */
         { SYSTEM_OP_PERF_DUMP,    SysPerfDump,    OP_AUTH_SYSTEM, "system.perf.dump"  },
 
-        /* Manifest compile-and-reuse — prepared-statement pattern. */
         { SYSTEM_OP_MANIFEST_COMPILE, SysManifestCompile, OP_AUTH_APP,
           "system.manifest.compile" },
         { SYSTEM_OP_MANIFEST_RELEASE, SysManifestRelease, OP_AUTH_APP,
           "system.manifest.release" },
-        /* EFI introspection: open to any process (read-only state). */
         { SYSTEM_OP_EFI_INFO,     SysEfiInfo,     OP_AUTH_NONE,   "system.efi.info"   },
         { SYSTEM_OP_EFI_ESRT_GET, SysEfiEsrtGet,  OP_AUTH_NONE,   "system.efi.esrt"   },
-        /* PE verification gated to utility-or-better — it can be expensive
-         * (RSA modexp + SHA-256 stream) so we keep it out of the unauth
-         * lane to prevent a non-app process from DOSing the kernel with
-         * bogus PE buffers. */
         { SYSTEM_OP_EFI_VERIFY_PE,SysEfiVerifyPe, OP_AUTH_UTILITY,"system.efi.verifype"},
     };
 

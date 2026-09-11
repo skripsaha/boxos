@@ -6,7 +6,6 @@
 typedef enum {
     OK = 0,
 
-    // General Errors (1-99)
     ERR_UNKNOWN = 1,
     ERR_NOT_IMPLEMENTED = 2,
     ERR_INVALID_ARGUMENT = 3,
@@ -26,13 +25,8 @@ typedef enum {
     ERR_UNSUPPORTED = 17,
     ERR_VERSION_MISMATCH = 18,
     ERR_CHECKSUM = 19,
-    /* Per-resource quota limit reached (e.g. per-process TME-MK
-     * KeyID quota exhausted). Distinct from ERR_NO_MEMORY (global
-     * memory pressure) and ERR_BUSY (transient) — the caller can
-     * retry only after releasing existing resources. */
     ERR_QUOTA_EXCEEDED = 20,
 
-    // Memory Errors (100-199)
     ERR_NO_MEMORY = 100,
     ERR_INVALID_ADDRESS = 101,
     ERR_PAGE_FAULT = 102,
@@ -51,7 +45,6 @@ typedef enum {
     ERR_PHYS_ADDR_EXCEEDED = 115,
     ERR_PCID_EXHAUSTED = 116,
 
-    // I/O Errors (200-299)
     ERR_IO = 200,
     ERR_READ_FAILED = 201,
     ERR_WRITE_FAILED = 202,
@@ -68,7 +61,6 @@ typedef enum {
     ERR_SECTOR_READ_FAILED = 213,
     ERR_SECTOR_WRITE_FAILED = 214,
 
-    // Filesystem Errors (300-399)
     ERR_FILE_NOT_FOUND = 300,
     ERR_OBJECT_NOT_FOUND = 301,
     ERR_TAG_NOT_FOUND = 302,
@@ -95,7 +87,6 @@ typedef enum {
     ERR_DEDUP_FAILED = 323,
     ERR_SELF_HEAL_FAILED = 324,
 
-    // Process Errors (400-499)
     ERR_PROCESS_NOT_FOUND = 400,
     ERR_INVALID_PID = 401,
     ERR_PROCESS_LIMIT_EXCEEDED = 402,
@@ -114,7 +105,6 @@ typedef enum {
     ERR_PROCESS_KILLED = 415,
     ERR_PROCESS_CRASHED = 416,
 
-    // Security Errors (500-599)
     ERR_ACCESS_DENIED = 500,
     ERR_PERMISSION_DENIED = 501,
     ERR_SECURITY_VIOLATION = 502,
@@ -123,7 +113,6 @@ typedef enum {
     ERR_PRIVILEGE_REQUIRED = 505,
     ERR_SANDBOX_VIOLATION = 506,
 
-    // Hardware Errors (600-699)
     ERR_HARDWARE = 600,
     ERR_INVALID_DEVICE = 601,
     ERR_DEVICE_BUSY = 602,
@@ -138,9 +127,7 @@ typedef enum {
     ERR_INTERRUPT_ERROR = 611,
     ERR_CPU_ERROR = 612,
 
-    // Network Errors (700-799) - reserved
 
-    // ACPI Errors (800-899)
     ERR_ACPI_NOT_FOUND = 800,
     ERR_ACPI_INVALID_TABLE = 801,
     ERR_ACPI_CHECKSUM_FAILED = 802,
@@ -148,7 +135,6 @@ typedef enum {
     ERR_ACPI_MADT_NOT_FOUND = 804,
     ERR_ACPI_FADT_NOT_FOUND = 805,
 
-    // Pocket System Errors (900-999)
     ERR_POCKET_RING_FULL = 900,
     ERR_RESULT_RING_FULL = 901,
     ERR_INVALID_POCKET = 902,
@@ -162,7 +148,6 @@ typedef enum {
     ERR_RESULT_NOT_READY = 910,
     ERR_RESULT_STASH_FULL = 911,
 
-    // Routing/IPC Errors (940-949)
     ERR_ROUTE_TARGET_FULL    = 940,
     ERR_ROUTE_NO_SUBSCRIBERS = 941,
     ERR_ROUTE_SELF           = 942,
@@ -172,21 +157,18 @@ typedef enum {
 
     ERR_POCKET_FAILED        = 950,
 
-    // Scheduler Errors (960-969)
     ERR_SCHEDULER_LOCKED = 960,
     ERR_RUNQUEUE_FULL = 961,
     ERR_RUNQUEUE_EMPTY = 962,
     ERR_HOME_CORE_INVALID = 963,
     ERR_WORK_STEAL_FAILED = 964,
 
-    // Boot Errors (970-979)
     ERR_BOOT_INFO_INVALID = 970,
     ERR_E820_FAILED = 971,
     ERR_A20_FAILED = 972,
     ERR_LONG_MODE_FAILED = 973,
     ERR_KERNEL_LOAD_FAILED = 974,
 
-    // TagFS Core Errors (850-869)
     ERR_TAGFS_NOT_INITIALIZED = 850,
     ERR_TAGFS_CORRUPTED = 851,
     ERR_TAGFS_NO_SPACE = 852,
@@ -204,8 +186,6 @@ typedef enum {
     ERR_TAGFS_EXTENT_ERROR = 864,
     ERR_TAGFS_RECOVERY_FAILED = 865,
 
-    // TagFS Module Errors (1000-1099)
-    // DiskBook
     ERR_DISKBOOK_NOT_INITIALIZED = 1000,
     ERR_DISKBOOK_FULL = 1001,
     ERR_DISKBOOK_CORRUPTED = 1002,
@@ -215,35 +195,30 @@ typedef enum {
     ERR_DISKBOOK_INVALID_TXN = 1006,
     ERR_DISKBOOK_WRITE_FAILED = 1007,
     ERR_DISKBOOK_READ_FAILED = 1008,
-    
-    // CoW Snapshots
+
     ERR_COW_NOT_INITIALIZED = 1010,
     ERR_COW_SNAPSHOT_EXISTS = 1011,
     ERR_COW_SNAPSHOT_NOT_FOUND = 1012,
     ERR_COW_SNAPSHOT_LIMIT = 1013,
     ERR_COW_ALLOCATION_FAILED = 1014,
     ERR_COW_RESTORE_FAILED = 1015,
-    
-    // Dedup
+
     ERR_DEDUP_NOT_INITIALIZED = 1020,
     ERR_DEDUP_HASH_COLLISION = 1021,
     ERR_DEDUP_POOL_EXHAUSTED = 1022,
     ERR_DEDUP_GC_FAILED = 1023,
     ERR_DEDUP_REGISTER_FAILED = 1024,
-    
-    // Self-Heal
+
     ERR_SELF_HEAL_NOT_INITIALIZED = 1030,
     ERR_SELF_HEAL_CORRUPTION_DETECTED = 1031,
     ERR_SELF_HEAL_RECOVERY_FAILED = 1032,
     ERR_SELF_HEAL_MIRROR_FAILED = 1033,
     ERR_SELF_HEAL_SCRUB_FAILED = 1034,
-    
-    // BoxHash
+
     ERR_BOXHASH_INVALID_CONTEXT = 1040,
     ERR_BOXHASH_VERIFICATION_FAILED = 1041,
     ERR_BOXHASH_KEY_NOT_SET = 1042,
-    
-    // Braid RAID
+
     ERR_BRAID_NOT_INITIALIZED = 1050,
     ERR_BRAID_DISK_OFFLINE = 1051,
     ERR_BRAID_DISK_FULL = 1052,
@@ -255,7 +230,6 @@ typedef enum {
     ERR_BRAID_MODE_INVALID = 1058,
     ERR_BRAID_REBUILD_FAILED = 1059,
 
-    /* Strand addr_park: *addr != expected at park time (no park performed). */
     ERR_ADDR_VALUE_MISMATCH = 1100,
 
     ERR_MAX = 1100
@@ -273,4 +247,4 @@ typedef enum {
 
 const char* ErrorString(error_t err);
 
-#endif // BOXOS_ERROR_H
+#endif

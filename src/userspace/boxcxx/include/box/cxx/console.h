@@ -1,35 +1,14 @@
-// boxcxx — box::console  (color, styled text, VGA batch session)
-//
-// The idiomatic C++ surface over the boxlib screen-presentation API
-// (box/color.h, box/vga.h). BoxOS color is NOT ANSI escape codes — it is
-// structured metadata attached to a text run (one printf → one syscall), so:
-//
-//   box::color        — a 24-bit RGB value (r/g/b, named ctors, == ).
-//   box::colors::*    — the standard BoxOS palette (black/red/.../berry/ocean…).
-//   box::styled       — RAII: set the process-local text color for a scope and
-//                       restore it on exit (text printed in the scope inherits
-//                       it). It flips state, it does NOT emit escape bytes.
-//   box::vga::session — RAII batch: collect VGA ops between begin/commit into a
-//                       single Manifest, one kernel re-entry for the whole run.
-//   std::formatter<box::color> — formats the color *value* as "#RRGGBB" (a
-//                       representation, never a control sequence).
-//
-// This is a box:: extension, not part of std. The on-screen *rendering* of a
-// color is a display-daemon property (GOP 24-bit / VGA 16-color quantized) —
-// not observable from a byte log; the color STATE, the formatter, and the VGA
-// batch syscall are the parts validated here.
 #ifndef BOXCXX_BOX_CONSOLE_H
 #define BOXCXX_BOX_CONSOLE_H
 
 #include <cstdint>
 #include <format>
 
-#include "box/color.h"  // Color / COLOR_* palette / set_color / get_color[_bg]
-#include "box/vga.h"     // vga_begin/commit + putchar/puts/clear/cursor/color/dims
+#include "box/color.h"
+#include "box/vga.h"
 
 namespace box {
 
-// ── box::color — a 24-bit RGB color value (0x00RRGGBB, or a sentinel) ───────
 class color {
     Color v_{COLOR_DEFAULT};
 
@@ -50,13 +29,11 @@ public:
     constexpr std::uint8_t b() const noexcept { return static_cast<std::uint8_t>(COLOR_B(v_)); }
     constexpr bool         is_default() const noexcept { return v_ == COLOR_DEFAULT; }
     constexpr bool         is_inherit() const noexcept { return v_ == COLOR_INHERIT; }
-    // True for a real RGB triple (not a sentinel).
     constexpr bool         is_rgb() const noexcept { return !is_default() && !is_inherit(); }
 
     friend constexpr bool operator==(color a, color b) noexcept { return a.v_ == b.v_; }
 };
 
-// ── box::colors — the standard BoxOS palette (RGB, readable on black) ───────
 namespace colors {
 inline constexpr color black {COLOR_BLACK};
 inline constexpr color white {COLOR_WHITE};
@@ -74,7 +51,6 @@ inline constexpr color dark_blue {COLOR_DARK_BLUE};
 inline constexpr color brown {COLOR_BROWN};
 inline constexpr color dark_cyan {COLOR_DARK_CYAN};
 inline constexpr color dark_magenta {COLOR_DARK_MAGENTA};
-// BoxOS-flavour accents — unique names, not ANSI clones.
 inline constexpr color berry {COLOR_BERRY};
 inline constexpr color ocean {COLOR_OCEAN};
 inline constexpr color leaf {COLOR_LEAF};
@@ -85,12 +61,8 @@ inline constexpr color coral {COLOR_CORAL};
 inline constexpr color slate {COLOR_SLATE};
 inline constexpr color use_default = color::use_default();
 inline constexpr color inherit = color::inherit();
-}  // namespace colors
+}
 
-// ── box::styled — scoped text color (set on entry, restore on exit) ─────────
-// Flips the process-local text color (foreground, and optionally background)
-// for its lifetime; text written in the scope inherits it. Restores the prior
-// color on destruction. No escape bytes are emitted — color is metadata.
 class styled {
     Color saved_fg_;
     Color saved_bg_;
@@ -117,50 +89,35 @@ public:
     styled &operator=(const styled &) = delete;
 };
 
-// Read / set the process-local text color directly (styled is the scoped form).
 inline color current_color() noexcept { return color::from_raw(::get_color()); }
 inline color current_background() noexcept { return color::from_raw(::get_color_bg()); }
 inline void  set_color(color fg) noexcept { ::set_color(fg.raw()); }
 inline void  set_background(color bg) noexcept { ::set_color_bg(bg.raw()); }
 
-// ── box::vga — VGA text-mode ops + the batch session ────────────────────────
 namespace vga {
 
 using dimensions = vga_dimensions_t;
 using position   = vga_pos_t;
 
-// RAII batch: ops between construction and commit() / destruction are collected
-// into one Manifest and submitted as a single syscall. Nests correctly (only
-// the outermost commit flushes). Getter ops resolve immediately, bypassing it.
 class session {
     bool open_{true};
 
 public:
     session() noexcept { vga_begin(); }
     ~session() { if (open_) vga_commit(); }
-    // Flush early; further ops in this scope would start a fresh (un-batched) op.
     int commit() noexcept { if (!open_) return 0; open_ = false; return vga_commit(); }
     session(const session &)            = delete;
     session &operator=(const session &) = delete;
 };
 
-// Write. Full #RRGGBB reaches the kernel; only the VGA *text* backend
-// quantizes, at draw time — the GOP framebuffer renders the value exactly.
 inline bool put(char c) noexcept { return vga_putchar(c) == 0; }
-/* vga_puts reports the byte count on success (like the C puts family), so
- * success is "not negative" — `== 0` held only for the empty string and made
- * this wrapper report failure for every string it ever drew. */
 inline bool put(const char *s) noexcept { return vga_puts(s) >= 0; }
 inline bool newline() noexcept { return vga_newline() == 0; }
 
-// Color: the box::color pair for following runs. Sentinels resolve to their
-// role defaults (fg → light gray, bg → black) before the wire.
 inline bool set_color(color fg, color bg = colors::inherit) noexcept
 {
     return vga_setcolor_rgb(fg.raw(), bg.raw()) == 0;
 }
-// The kernel's current pair — concrete triples, exactly as a setter shipped
-// them (a set_color/get_color round-trip is bit-exact).
 inline bool get_color(color &fg, color &bg) noexcept
 {
     Color f = 0, b = 0;
@@ -203,19 +160,15 @@ inline dimensions size() noexcept
     return d;
 }
 
-}  // namespace vga
+}
 
-}  // namespace box
+}
 
-// ── std::formatter<box::color> — the color VALUE as "#RRGGBB" (not a control
-//    sequence; sentinels render as "default" / "inherit") ────────────────────
-// Inherits formatter<string_view> for the spec, so a palette can be printed in
-// columns; the three renderings are all seven characters wide either way.
 template <> struct std::formatter<box::color> : std::formatter<std::string_view, char> {
     auto format(const box::color &c, std::format_context &ctx) const
     {
         static constexpr char kFmt[] = "#{:02X}{:02X}{:02X}";
-        char             buf[sizeof kFmt + 3 * 2];   // three two-digit fields
+        char             buf[sizeof kFmt + 3 * 2];
         std::string_view sv;
         if (c.is_default())      sv = "default";
         else if (c.is_inherit()) sv = "inherit";
@@ -230,4 +183,4 @@ template <> struct std::formatter<box::color> : std::formatter<std::string_view,
     }
 };
 
-#endif  // BOXCXX_BOX_CONSOLE_H
+#endif

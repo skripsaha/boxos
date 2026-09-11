@@ -1,10 +1,3 @@
-/* draft_paint.c — the glass. This part turns the book into one rectangle of
- * cells and hands the whole rectangle over at once; it decides which lines and
- * which columns are in view, and it is the only part that owns that decision.
- * It never changes a byte of the draft: what it cannot draw it draws '?' and
- * leaves alone, because the buffer is the file and the screen is only a look
- * at it.
- */
 
 #include "box/vga.h"
 #include "box/color.h"
@@ -21,14 +14,11 @@
 #define DRAFT_MSG_FG      COLOR_AMBER
 #define DRAFT_CMD_FG      COLOR_WHITE
 
-static uint32_t g_top;         /* first line drawn */
-static uint32_t g_left;        /* first display column drawn */
+static uint32_t g_top;
+static uint32_t g_left;
 
-static char s_right[64];               /* the title bar's right-hand count */
+static char s_right[64];
 
-/* ---------------------------------------------------------------------------
- * The painter. One frame, one vga_paint, one blit — never a cell at a time.
- * ------------------------------------------------------------------------- */
 
 static void frame_cell(uint32_t row, uint32_t col, char ch, Color fg, Color bg)
 {
@@ -42,8 +32,6 @@ static void frame_cell(uint32_t row, uint32_t col, char ch, Color fg, Color bg)
     c->pad[2] = 0;
 }
 
-/* A filename off the volume is bytes, not necessarily letters; the font is
- * ASCII 8x16 and anything else would land on the glass as a stray glyph. */
 static uint32_t frame_say(uint32_t row, uint32_t col, const char *s,
                           Color fg, Color bg)
 {
@@ -101,9 +89,6 @@ static void paint_line(uint32_t row, const DraftLine *l)
                 frame_cell(row, w - g_left, c, DRAFT_TEXT_FG, DRAFT_TEXT_BG);
             w++;
         } else {
-            /* Drawn as '?', kept as itself — the buffer is the file, not the
-             * glass, and an editor that "fixes" a byte it cannot show has
-             * quietly rewritten someone's data. */
             if (w >= g_left)
                 frame_cell(row, w - g_left, '?', DRAFT_ODD_FG, DRAFT_TEXT_BG);
             w++;
@@ -157,16 +142,6 @@ void paint(void)
     paint_text();
     paint_foot();
 
-    /* ‼ THE CARET GOES FIRST AND THE PICTURE GOES LAST.
-     *
-     * A paint and a cursor move are two operations, so they are two commits
-     * and two blits whichever way round they go. Painted first, the frame
-     * reaches the glass carrying the caret at the position it had in the
-     * PREVIOUS frame — the caret is visibly on the old line until the cursor
-     * move lands behind it. Moved first, the caret is briefly in its new place
-     * over the old frame, and the frame that arrives a moment later already
-     * has it where it belongs. A caret that is early is not seen; a caret that
-     * is late is exactly what the editor was reported for. */
     uint32_t crow, ccol;
     if (g_cmd_open) {
         crow = g_rows - 1;
@@ -178,9 +153,5 @@ void paint(void)
     }
     (void)vga_setcursor((uint8_t)crow, (uint8_t)ccol);
 
-    /* A refused paint cannot be reported from here — printf between the first
-     * paint and the last clear lands on top of the frame at a moment nobody
-     * chose. The rectangle is the whole screen, so the only refusal left is a
-     * screen that changed size under us, and the next frame asks again. */
     (void)vga_paint(0, 0, (uint8_t)g_rows, (uint8_t)g_cols, g_frame);
 }

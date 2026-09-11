@@ -1,6 +1,3 @@
-/*
- * time.c — userspace RTC/timer wrappers (Phase 12: Manifest-only).
- */
 
 #include "box/time.h"
 #include "box/core/manifest.h"
@@ -20,7 +17,6 @@ int time_get(BoxTime *out)
 {
     if (!out) return ERR_NULL_POINTER;
 
-    /* Out-crate layout matches kernel's BoxTime struct (20 bytes). */
     uint8_t buf[20] = {0};
     int rc = MfCall1(DECK_HARDWARE, HW_RTC_GET_TIME,
                      NULL, 0, NULL, 0,
@@ -57,11 +53,6 @@ int time_uptime_ms(uint64_t *out_ms)
 {
     if (!out_ms) return ERR_NULL_POINTER;
 
-    /* ClockBoard fast path: a single memory load instead of a 46 µs
-     * HW-deck round trip. Falls through to the manifest path if the
-     * page is missing or carries the wrong magic (older kernel,
-     * missing mapping, future ABI mismatch). The page is mapped R/O
-     * into every Cabin at CABIN_CLOCKBOARD_ADDR. */
     const volatile ClockBoardView *v =
         (const volatile ClockBoardView *)(uintptr_t)CABIN_CLOCKBOARD_ADDR;
     if (v->magic == CLOCKBOARD_MAGIC_USER && v->version >= 1u) {
@@ -92,7 +83,6 @@ int time_uptime_ns(uint64_t *out_ns)
     return OK;
 }
 
-/* ------------------------------------------------------------------------- */
 
 static void write2(char *buf, uint8_t v)
 {

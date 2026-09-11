@@ -1,4 +1,3 @@
-// Baked 80-bit (x, MPFR-CR-ref) vectors for tgamma — GENERATED, do not edit.
 static const CrVec kTgammaVec[] = {
 {0x8000000000000000ULL,0x3FFDu,0xE809FE23F77751E7ULL,0x4000u},
 {0x8000000000000000ULL,0x3FFEu,0xE2DFC48DA77B553DULL,0x3FFFu},

@@ -1,22 +1,6 @@
-/* klib_str.c — string and memory primitives for the kernel.
- *
- * mem* are tuned for real hardware:
- *   - When CPUID.07H:0.EBX[9] (ERMS) reports support, the bulk path uses
- *     `rep stosb` / `rep movsb`. Intel SDM Vol 1 §7.3.9.4 documents these
- *     as the fastest sequence for n >= a small threshold on Ivy Bridge
- *     and newer (FSRM — bit EDX[4] — extends that down to very small n).
- *   - Below the threshold the scalar 8-byte path stays in service. The
- *     legacy scalar code also remains the fallback for early-boot calls
- *     that happen before cpu_detect_features() has populated g_cpu_caps
- *     (the struct is BSS-zero, so has_erms = false → scalar). */
 #include "klib.h"
-#include "cpuid.h"   /* g_cpu_caps for has_erms / has_fsrm */
+#include "cpuid.h"
 
-/* Bulk-path threshold. Below this, scalar wins on every microarchitecture
- * because rep movsb/rep stosb pays a fixed setup cost; ERMS amortises only
- * over larger n. 64 bytes is the conventional break-even on Ivy Bridge
- * through Sapphire Rapids. With FSRM the threshold can be 0 — handled by
- * the `g_cpu_caps.has_fsrm` short-circuit below. */
 #define KLIB_ERMS_THRESHOLD  64
 
 size_t strlen(const char *s)
@@ -132,8 +116,6 @@ char *strncat(char *dest, const char *src, size_t n)
     return ret;
 }
 
-/* strtok() removed: a kernel-wide static `strtok_saveptr` is not AMP-safe.
- * Callers must use strtok_r() with a local or per-task saveptr. */
 char *strtok_r(char *str, const char *delim, char **saveptr)
 {
     if (str)
@@ -199,10 +181,6 @@ void *memset(void *s, int c, size_t n)
     unsigned char *p = (unsigned char *)s;
     unsigned char uc = (unsigned char)c;
 
-    /* Real-HW fast path: `rep stosb` runs at full memory bandwidth on
-     * any CPU advertising ERMS, and FSRM extends that down to very small
-     * n. g_cpu_caps is BSS-zero until cpu_detect_features() runs late in
-     * boot — early callers harmlessly take the scalar path. */
     if (g_cpu_caps.has_erms && (g_cpu_caps.has_fsrm || n >= KLIB_ERMS_THRESHOLD))
     {
         __asm__ volatile (
@@ -214,7 +192,6 @@ void *memset(void *s, int c, size_t n)
         return s;
     }
 
-    /* Scalar fallback — also used during early boot before ERMS detection. */
     if (n < 8)
     {
         while (n--)
@@ -255,7 +232,6 @@ void *memcpy(void *dest, const void *src, size_t n)
     unsigned char *d = (unsigned char *)dest;
     const unsigned char *s = (const unsigned char *)src;
 
-    /* Real-HW fast path — see memset above for the ERMS/FSRM rationale. */
     if (g_cpu_caps.has_erms && (g_cpu_caps.has_fsrm || n >= KLIB_ERMS_THRESHOLD))
     {
         __asm__ volatile (
@@ -267,10 +243,6 @@ void *memcpy(void *dest, const void *src, size_t n)
         return dest;
     }
 
-    /* Scalar fast path: equal-alignment qword copy.  If alignments differ,
-     * the source would be misaligned even after aligning the destination,
-     * risking a read across an unmapped page boundary — fall through to
-     * byte-by-byte which is always safe. */
     if (((uintptr_t)d & 7) == ((uintptr_t)s & 7))
     {
         while (((uintptr_t)d & 7) && n > 0)
@@ -315,18 +287,11 @@ void *memmove(void *dest, const void *src, size_t n)
     unsigned char *d = (unsigned char *)dest;
     const unsigned char *s = (const unsigned char *)src;
 
-    /* If the ranges do not overlap, memmove == memcpy and we can use the
-     * full ERMS-accelerated path. Overlap is detected geometrically:
-     * `[dest, dest+n)` intersects `[src, src+n)` iff `dest < src+n` AND
-     * `src < dest+n`. */
     const unsigned char *src_end  = s + n;
     const unsigned char *dest_end = d + n;
     if (d >= src_end || s >= dest_end)
         return memcpy(dest, src, n);
 
-    /* Overlap. Forward copy (d < s) is still safe — and we can still use
-     * `rep movsb` because the CPU dispatches it as ascending-address copy
-     * (Intel SDM Vol 2B "REP/REPE/REPZ … MOVSB"). */
     if (d < s)
     {
         if (g_cpu_caps.has_erms && (g_cpu_caps.has_fsrm || n >= KLIB_ERMS_THRESHOLD))
@@ -344,10 +309,6 @@ void *memmove(void *dest, const void *src, size_t n)
         return dest;
     }
 
-    /* d > s: must copy backwards. ERMS does not natively support
-     * descending copies (DF set + rep movsb works but is slow on most
-     * modern micro-architectures), so use the scalar backward path —
-     * still correct, and rare in practice. */
     d += n;
     s += n;
     while (n--)
@@ -384,10 +345,6 @@ char *reverse_str(char *str)
     if (!str)
         return NULL;
 
-    /* Return the ORIGINAL start so callers can chain with strlen/strcpy.
-     * The legacy version returned the meeting-pointer in the middle of the
-     * buffer, which silently broke the few callers that did use the result
-     * (none currently, but the surface bug is latent). */
     char *orig = str;
     char *end  = str + strlen(str) - 1;
     while (str < end)

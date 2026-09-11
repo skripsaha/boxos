@@ -1,5 +1,3 @@
-// Baked 80-bit (x, y, MPFR-CR-ref) vectors for pow — GENERATED, do not edit.
-// arg1=x, arg2=y; CrVec2 is defined in cxxtest.cpp.
 static const CrVec2 kPowVec[] = {
 {0x8000000000000000ULL,0x3FFDu,0x8000000000000000ULL,0x3FFEu,0x8000000000000000ULL,0x3FFEu},
 {0x8000000000000000ULL,0x3FFDu,0x8000000000000000ULL,0x3FFFu,0x8000000000000000ULL,0x3FFDu},

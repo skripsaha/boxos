@@ -1,11 +1,5 @@
 #include <box/types.h>
 
-/*
- * GCC stack protector support for BoxOS userspace.
- *
- * __stack_chk_guard: canary value. Contains a null byte to stop string overflows.
- * __stack_chk_fail: called on canary corruption — exits the process immediately.
- */
 
 uintptr_t __stack_chk_guard = 0x00000AFF0DEADC0DEULL;
 

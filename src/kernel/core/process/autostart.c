@@ -10,34 +10,11 @@
 #include "kernel_config.h"
 #include "proc_exit.h"
 
-/*
- * Autostart — the programs the volume asks for, whenever the volume turns up.
- *
- * This used to be a hundred and ninety lines in the middle of kernel_main,
- * executed once, at a moment chosen by where it happened to sit in the boot.
- * A machine whose medium finished enumerating a second later came up with
- * nothing on it and stayed that way: the files were there, readable, tagged
- * autostart, and nobody ever looked again.
- *
- * So it is a function, and it runs when a volume is mounted rather than when
- * the boot reaches a particular line. Twice at most: once from the boot, and
- * once more if the boot found no volume and one arrived afterwards.
- */
 
-/* The stand-in the kernel starts when there is nothing to start from a volume.
- * Held as a pid rather than a pointer: by the time the relief arrives this
- * process may have exited on its own and been reaped, and a pid that has gone
- * away simply fails to resolve, where a pointer would be a dangling read. */
 static volatile uint32_t g_stand_in_pid = 0;
 
-/* Whether a volume's programs have ever been launched. One-shot: a volume that
- * leaves and comes back does not start second copies of everything, because
- * the first copies are still there. */
 static volatile uint32_t g_volume_launched = 0;
 
-/* One core does the late launch and the rest go away rather than queue up
- * behind it — the same arrangement the Boardroom uses for seating, and for
- * the same reason: this creates processes and reads a disk. */
 static volatile uint32_t g_busy = 0;
 
 static TouchWatch *g_mount_watch = NULL;
@@ -52,9 +29,6 @@ void AutostartNoteVolumeLaunched(void)
     __atomic_store_n(&g_volume_launched, 1u, __ATOMIC_RELEASE);
 }
 
-/* Collect a file's tags into the comma-separated string process_create wants.
- * The names are the volume's, so they are asked of it one at a time and copied
- * out: the registry they live in belongs to a mount, and a mount ends. */
 static void autostart_collect_tags(const TagFSMetadata *meta,
                                    char *out, size_t out_size)
 {
@@ -85,10 +59,6 @@ static bool autostart_wanted(const TagFSMetadata *meta)
     return has_autostart && has_exec_tag;
 }
 
-/* Read one file out of the volume and turn it into a process. Returns the
- * process, or NULL with the reason already printed — every refusal here names
- * the file it refused, because a machine that silently starts three of four
- * programs is worse than one that starts none. */
 static process_t *autostart_launch_one(uint32_t file_id, TagFSMetadata *meta,
                                        const char *tags)
 {
@@ -113,20 +83,6 @@ static process_t *autostart_launch_one(uint32_t file_id, TagFSMetadata *meta,
         kprintf("[AUTOSTART] Skip '%s': tagfs_open failed\n", meta->filename);
         return NULL;
     }
-    /*
-     * ‼ THE WHOLE IMAGE, OR NONE OF IT
-     *
-     * tagfs_read returns the number of bytes it managed. This tested it for
-     * being negative, which catches a read that failed outright and misses the
-     * one that stopped early — and the buffer underneath was allocated zeroed,
-     * so a short read hands over an image that is partly, or entirely, zeros.
-     *
-     * A page of zeros is not an empty program. 0x00 0x00 decodes as
-     * `add [rax], al`, so the process starts, writes to address zero with
-     * every register still clear, and dies with a page fault at 0x0 — which is
-     * exactly what a machine whose flash drive stopped answering showed on the
-     * screen, having first announced that it had started the program.
-     */
     int read_result = tagfs_read(fh, virt_buf, file_size);
     tagfs_close(fh);
     if (read_result < 0 || (uint64_t)read_result != file_size) {
@@ -160,8 +116,6 @@ int AutostartLaunchFromVolume(process_t **out_first, bool scheduler_live)
 {
     if (out_first) *out_first = NULL;
 
-    /* Is there a volume? Asked of the flag rather than of the registry
-     * pointer beside it, which a re-mount frees. */
     TagFSState *fs = tagfs_get_state();
     if (!fs || !fs->initialized) return 0;
 
@@ -194,13 +148,6 @@ int AutostartLaunchFromVolume(process_t **out_first, bool scheduler_live)
             continue;
         }
 
-        /*
-         * At boot the scheduler is not running yet and every WORKING process is
-         * swept onto a run queue in one pass afterwards, so the state is set
-         * directly — exactly as it always was. Once the machine is up there is
-         * no such pass, and process_set_state is what enqueues; it is the same
-         * call the runtime spawn path makes.
-         */
         if (scheduler_live) {
             process_set_state(proc, PROC_WORKING);
         } else {
@@ -219,19 +166,6 @@ int AutostartLaunchFromVolume(process_t **out_first, bool scheduler_live)
     return launched;
 }
 
-/*
- * The relief has arrived, so the stand-in hands over the watch.
- *
- * A machine that came up with no volume is running the embedded shell. When
- * its own volume turns up carrying a display daemon and a shell of its own,
- * leaving both running would put two shells on one keyboard and two writers on
- * one screen. The one that was only ever standing in is the one that goes.
- *
- * Ended the way SysProcKill ends anything: the Touch subscriptions are torn
- * down and the disposition claimed BEFORE the state changes, so the reaper on
- * another core cannot get there first and call an orderly hand-over a crash.
- * The code is a clean zero — this process did nothing wrong.
- */
 static void autostart_relieve_stand_in(void)
 {
     uint32_t pid = __atomic_exchange_n(&g_stand_in_pid, 0u, __ATOMIC_ACQ_REL);
@@ -258,8 +192,6 @@ static void autostart_on_volume_mounted(TouchTag tag, const void *payload,
     if (__atomic_load_n(&g_volume_launched, __ATOMIC_ACQUIRE) != 0) return;
     if (__atomic_exchange_n(&g_busy, 1u, __ATOMIC_ACQUIRE) != 0) return;
 
-    /* Re-checked inside the gate: two mounts can be announced close enough
-     * together that both callers passed the load above. */
     if (__atomic_load_n(&g_volume_launched, __ATOMIC_ACQUIRE) == 0) {
         int n = AutostartLaunchFromVolume(NULL, true);
         if (n > 0) {

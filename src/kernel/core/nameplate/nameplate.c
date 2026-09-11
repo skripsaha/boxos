@@ -1,9 +1,3 @@
-/*
- * nameplate.c — the kernel half of Nameplate.
- *
- * See nameplate.h for what the two entry points are for, and
- * src/include/nameplate_format.h for the table itself.
- */
 
 #include "nameplate.h"
 
@@ -12,9 +6,6 @@
 
 #include "nameplate_format.h"
 
-/* ELF64, only the parts the section-header walk touches. vmm.c keeps its own
- * copy of the header and the PROGRAM headers for the loading side; these two
- * are the section-header side and are needed nowhere else. */
 typedef struct
 {
     uint8_t  e_ident[16];
@@ -47,11 +38,10 @@ typedef struct
     uint64_t sh_entsize;
 } __attribute__((packed)) NpElfShdr;
 
-/* ── locate ───────────────────────────────────────────────────────────── */
 
 static int SectionSpanOk(const NpElfShdr *sh, uint64_t bytes)
 {
-    if (sh->sh_type == 8 /* SHT_NOBITS */) return 0;
+    if (sh->sh_type == 8 ) return 0;
     if (sh->sh_offset > bytes) return 0;
     return sh->sh_size <= bytes - sh->sh_offset;
 }
@@ -87,10 +77,10 @@ static int LocateInElf(const uint8_t *image, uint64_t bytes, uintptr_t *out_va,
         if (sh->sh_name >= names->sh_size) continue;
         name = strings + sh->sh_name;
         left = names->sh_size - sh->sh_name;
-        if (strnlen(name, left) >= left) continue;   /* unterminated */
+        if (strnlen(name, left) >= left) continue;
         if (strcmp(name, NAMEPLATE_SECTION_NAME) != 0) continue;
 
-        if (sh->sh_addr == 0) return 0;                   /* never mapped */
+        if (sh->sh_addr == 0) return 0;
         if (!SectionSpanOk(sh, bytes)) return 0;
         if (sh->sh_size < sizeof(NameplateHeader)) return 0;
 
@@ -111,9 +101,6 @@ static int LocateInFlat(const uint8_t *image, uint64_t bytes, uintptr_t load_bas
 
     if (bytes < sizeof(NameplateHeader)) return 0;
 
-    /* The table is eight-byte aligned in the image and a flat binary is the
-     * image, byte for byte, from its load address — so stepping by eight
-     * cannot step over it. */
     for (off = 0; off + sizeof(NameplateHeader) <= bytes; off += 8) {
         const NameplateHeader *header = (const NameplateHeader *)(image + off);
 
@@ -142,29 +129,15 @@ int nameplate_locate(const void *image, uint64_t bytes, uintptr_t load_base,
     return LocateInFlat(bytes_in, bytes, load_base, out_va, out_bytes);
 }
 
-/* ── lookup, across the address-space boundary ────────────────────────── */
 
-/* Every read below goes through one of these, chosen by the caller. The table
- * being searched is sometimes in a faulted process's address space and
- * sometimes in the kernel's own image, and those are not the same memory —
- * get_user_u32 exists precisely to refuse a kernel address. One search, two
- * ways of touching the bytes; the alternative is a second copy of a binary
- * search, which is a second place for it to be wrong.
- *
- * get_user_u32 stays the user-side primitive: it is the one the fault dump
- * already used before Nameplate existed, and a diagnostic is a bad place to
- * introduce a mechanism that has never run in exception context. */
 typedef int (*NameplateReadWord)(uintptr_t at, uint32_t *out);
 
 static int ReadWordUser(uintptr_t at, uint32_t *out)
 {
-    if (at & 3u) return 0;                       /* every field is aligned */
+    if (at & 3u) return 0;
     return get_user_u32(out, (const uint32_t *)at) == 0;
 }
 
-/* The kernel's own table lives inside the kernel image, which is mapped for
- * as long as there is a kernel at all. A plain load is correct here and a
- * get_user would simply refuse the address. */
 static int ReadWordKernel(uintptr_t at, uint32_t *out)
 {
     if (at & 3u) return 0;
@@ -216,8 +189,6 @@ static int NameAt(NameplateReadWord Read, uintptr_t table_va,
     if (!Read(offsets, &start_off)) return 0;
     if (want < start_off) return 0;
 
-    /* Greatest entry at or below the address — the same search boxlib does
-     * in-process, one get_user per probe instead of one load. */
     low  = 0;
     high = header.EntryCount;
     while (high - low > 1) {
@@ -238,18 +209,11 @@ static int NameAt(NameplateReadWord Read, uintptr_t table_va,
     start = header.BaseAddress + start_off;
     delta = (uint64_t)addr - start;
 
-    /* Past the end of the nearest function: padding, or code no symbol
-     * claims. Say nothing rather than name the neighbour — a dump that
-     * confidently names the wrong function costs more than one that admits
-     * it does not know. */
     if (span != 0 && delta >= span) return 0;
 
     if (!Read(name_offsets + (uintptr_t)hit * 4u, &name_off)) return 0;
     if (name_off >= header.NameBytes) return 0;
 
-    /* Copy the name out a word at a time, since the bytes are not aligned and
-     * get_user_u32 is the only primitive in play. Stops at the NUL, at the
-     * end of the blob, or at the buffer — whichever comes first. */
     {
         uint64_t left = header.NameBytes - name_off;
         uint32_t word = 0;
@@ -281,20 +245,13 @@ static int NameAt(NameplateReadWord Read, uintptr_t table_va,
     return 1;
 }
 
-/* ── the two entry points ─────────────────────────────────────────────── */
 
-/* A faulted process's table, read across the address-space boundary. */
 int nameplate_name_at(uintptr_t table_va, uint64_t table_bytes, uintptr_t addr,
                       NameplateName *out)
 {
     return NameAt(ReadWordUser, table_va, table_bytes, addr, out);
 }
 
-/* The kernel's own table, read directly. This is what turns a kernel panic
- * from a column of hexadecimal into a call chain somebody can read off a
- * photograph of a screen — with no matching kernel.elf at the other end of
- * the world, which is exactly the situation a panic on a strange machine
- * puts you in. */
 int nameplate_name_at_kernel(uintptr_t table_va, uint64_t table_bytes,
                              uintptr_t addr, NameplateName *out)
 {

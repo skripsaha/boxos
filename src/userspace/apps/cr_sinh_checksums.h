@@ -1,4 +1,3 @@
-// FNV-1a checksums over MPFR-CR sinh for the deterministic x stream — GENERATED.
 static const unsigned long long kSinhN    = 20000ULL;
 static const unsigned long long kSinhSeed = 0x2545F4914F6CDD1DULL;
 static const int kSinhElo = -30;

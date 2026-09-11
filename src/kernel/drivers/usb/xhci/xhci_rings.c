@@ -9,8 +9,6 @@ int xhci_ring_init(xhci_ring_t* ring, uint32_t num_trbs, bool producer)
         return -1;
     }
 
-    // TRB ring pages are DMA targets — xHCI controller reads them directly.
-    // Even if AC64=1, allocate below 4GB to stay safe with all QEMU configs.
     size_t pages_needed = vmm_size_to_pages(num_trbs * sizeof(xhci_trb_t));
     void* trbs_phys = pmm_alloc_zero(pages_needed, PHYS_TAG_DMA32);
     if (!trbs_phys) {
@@ -27,9 +25,6 @@ int xhci_ring_init(xhci_ring_t* ring, uint32_t num_trbs, bool producer)
     spinlock_init(&ring->ring_lock);
 
     if (producer) {
-        /* Place Link TRB at the last slot pointing back to ring start.
-         * TC (Toggle Cycle) bit is set so HC toggles cycle on wrap.
-         * Cycle bit starts as 0 — software sets it when enqueue wraps. */
         xhci_trb_t* link = &ring->trbs[num_trbs - 1];
         link->parameter = ring->trbs_phys;
         link->status = 0;
@@ -61,21 +56,16 @@ uint64_t xhci_ring_get_phys_addr(xhci_ring_t* ring)
     return ring->trbs_phys;
 }
 
-/* How many slots a producer ring actually has: the last one is the Link TRB
- * and belongs to the hardware, not to whoever is queueing work. */
 static uint32_t ring_slots(const xhci_ring_t* ring)
 {
     return ring->num_trbs - 1;
 }
 
-/* How far `to` is ahead of `from`, going the way the ring goes. */
 static uint32_t ring_distance(uint32_t from, uint32_t to, uint32_t slots)
 {
     return (to + slots - from) % slots;
 }
 
-/* Free slots, with one always kept empty so that full and empty are different
- * pairs of indices. Called with the ring lock held. */
 static uint32_t ring_space_locked(const xhci_ring_t* ring)
 {
     uint32_t slots = ring_slots(ring);
@@ -109,10 +99,6 @@ void xhci_ring_reclaim_to(xhci_ring_t* ring, uint64_t trb_phys)
 
     uint32_t slots = ring_slots(ring);
     if (idx < slots) {
-        /* Only forward, and only as far as software has actually queued: an
-         * answer from before the ring was repositioned names a TRB that is
-         * behind the dequeue index now, and honouring it would free slots that
-         * are in use. */
         uint32_t reach = ring_distance(ring->dequeue_idx, idx, slots);
         uint32_t queued = ring_distance(ring->dequeue_idx, ring->enqueue_idx, slots);
         if (reach < queued) {
@@ -141,8 +127,6 @@ uint64_t xhci_ring_enqueue(xhci_ring_t* ring, xhci_trb_t* trb)
 
     spin_lock(&ring->ring_lock);
 
-    /* No room means no room. Writing anyway is writing over a TRB the
-     * controller has not executed yet. */
     if (ring->producer && ring_space_locked(ring) == 0) {
         spin_unlock(&ring->ring_lock);
         return 0;
@@ -150,20 +134,16 @@ uint64_t xhci_ring_enqueue(xhci_ring_t* ring, xhci_trb_t* trb)
 
     uint32_t idx = ring->enqueue_idx;
 
-    /* Set cycle bit to match current producer cycle state */
     trb->control = (trb->control & ~TRB_C) | (ring->cycle_state ? TRB_C : 0);
 
-    /* Write TRB to ring */
     ring->trbs[idx] = *trb;
     __sync_synchronize();
 
     uint64_t trb_phys = ring->trbs_phys + (idx * sizeof(xhci_trb_t));
 
-    /* Advance index */
     ring->enqueue_idx = idx + 1;
 
     if (ring->producer && ring->enqueue_idx >= ring->num_trbs - 1) {
-        /* Reached Link TRB slot — activate it and wrap */
         xhci_trb_t* link = &ring->trbs[ring->num_trbs - 1];
         link->control = TRB_SET_TYPE(TRB_TYPE_LINK) | TRB_TC |
                         (ring->cycle_state ? TRB_C : 0);
@@ -179,20 +159,6 @@ uint64_t xhci_ring_enqueue(xhci_ring_t* ring, xhci_trb_t* trb)
     return trb_phys;
 }
 
-/* -------------------------------------------------------------------------
- * The ring arithmetic, checked at boot.
- *
- * A transfer ring only ever overflows on a machine doing something this driver
- * does not do yet — one transfer per endpoint is in flight at a time, so the
- * accounting above is right by an invariant nothing states. That is exactly the
- * kind of code that is wrong the first time somebody queues two things: the
- * check it replaced was unreachable for years and nobody noticed, because
- * nothing ever reached it either.
- *
- * So the arithmetic is exercised directly, with the numbers written down rather
- * than computed by the code under test. Eight TRBs: seven slots, the eighth is
- * the Link TRB, and one slot is always left empty — six usable.
- * ------------------------------------------------------------------------- */
 void XhciRingSelfTest(void)
 {
     kprintf("[xHCI RING TEST] begin\n");
@@ -211,8 +177,6 @@ void XhciRingSelfTest(void)
 
     RING_CHECK(xhci_ring_space(&ring) == 6, "a fresh ring of eight offers six slots");
 
-    /* Six fit, the seventh does not — and the seventh must be REFUSED rather
-     * than written over the first. */
     xhci_trb_t trb = {0};
     trb.control = TRB_SET_TYPE(TRB_TYPE_NORMAL);
     int accepted = 0;
@@ -224,25 +188,18 @@ void XhciRingSelfTest(void)
     RING_CHECK(accepted == 6 && xhci_ring_space(&ring) == 0,
                "six are taken and the seventh is refused");
 
-    /* An answer for the third TRB frees it and the two queued ahead of it. */
     xhci_ring_reclaim_to(&ring, ring.trbs_phys + 2 * sizeof(xhci_trb_t));
     RING_CHECK(xhci_ring_space(&ring) == 3,
                "an answer for the third frees three");
 
-    /* An answer from before that — for work already accounted for — must move
-     * nothing. Honouring it would hand the same slots out twice. */
     xhci_ring_reclaim_to(&ring, ring.trbs_phys);
     RING_CHECK(xhci_ring_space(&ring) == 3,
                "a stale answer moves the dequeue index nowhere");
 
-    /* Repositioning the ring gives every queued slot back at once. */
     xhci_ring_abandon(&ring);
     RING_CHECK(xhci_ring_space(&ring) == 6,
                "abandoning what was queued returns all six");
 
-    /* And the wrap: the enqueue index steps onto the Link TRB, which is armed
-     * with the cycle bit the controller is still looking for, and the ring's
-     * own cycle flips behind it. */
     uint8_t before = ring.cycle_state;
     xhci_ring_enqueue(&ring, &trb);
     uint32_t link_control = ring.trbs[7].control;

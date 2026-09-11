@@ -1,23 +1,3 @@
-/*
- * CET lifecycle integration test.
- *
- * On QEMU TCG (which doesn't advertise SHSTK/IBT as of QEMU 10.x) the
- * runtime stays dormant — these tests verify the dormant path doesn't
- * crash + correctly reports "not enabled" through cet_is_enabled +
- * the stats accessor. Real-HW CET enforcement (RET-vs-shadow-stack,
- * indirect-call-vs-ENDBR64) belongs to the physical-HW QA pass
- * (must-implement #4).
- *
- * Scenarios:
- *   T1. cet_lifecycle_init_bsp can be called when CET is dormant +
- *       reports ERR_UNSUPPORTED (TCG case).
- *   T2. cet_is_enabled reflects the post-init state coherently with
- *       g_cpu_caps.has_shstk / has_ibt.
- *   T3. cet_process_create on a CET-less CPU sets ssp fields to 0.
- *   T4. process_user_ssp_va_for returns the canonical SSP VA anchor
- *       (below VMM_USER_STACK_TOP) regardless of CET state.
- *   T5. cet_lifecycle_get_stats fills every field without UB.
- */
 
 #include "cet_lifecycle.h"
 #include "process.h"
@@ -35,16 +15,14 @@ void CetLifecycleTest(void) {
     kprintf("[CET TEST] Starting CET lifecycle test...\n");
     size_t pass = 0, fail = 0;
 
-    /* ── T1: init idempotency ───────────────────────────────────── */
     {
         error_t e1 = cet_lifecycle_init_bsp();
-        error_t e2 = cet_lifecycle_init_bsp();   /* idempotent */
+        error_t e2 = cet_lifecycle_init_bsp();
         bool both_ok = (e1 == OK || e1 == ERR_UNSUPPORTED) &&
                        (e2 == OK || e2 == ERR_UNSUPPORTED);
         CET_CHECK(both_ok, "T1: init_bsp idempotent (OK or NOT_SUPPORTED)");
     }
 
-    /* ── T2: cet_is_enabled coherent with cpu caps ──────────────── */
     {
         bool en       = cet_is_enabled();
         bool has_any  = g_cpu_caps.has_shstk || g_cpu_caps.has_ibt;
@@ -55,11 +33,7 @@ void CetLifecycleTest(void) {
         }
     }
 
-    /* ── T3: process_create on CET-less leaves ssp=0 ────────────── */
     if (!g_cpu_caps.has_shstk) {
-        /* Synthesize a transient process struct stub.
-         * cet_process_create only reads has_shstk to decide; it doesn't
-         * dereference cabin in the dormant branch. */
         process_t dummy;
         for (size_t i = 0; i < sizeof(dummy); i++) ((uint8_t *)&dummy)[i] = 0;
         dummy.pid = 0xCE7u;
@@ -73,7 +47,6 @@ void CetLifecycleTest(void) {
                   "T3: SSP size remains 0 on dormant CPU");
     }
 
-    /* ── T4: canonical SSP VA anchor ───────────────────────────── */
     {
         uintptr_t va         = process_user_ssp_va_for(NULL);
         uintptr_t guard_hi   = process_user_ssp_guard_hi_for(NULL);
@@ -81,16 +54,6 @@ void CetLifecycleTest(void) {
         CET_CHECK(va != 0, "T4: SSP VA anchor non-zero");
         CET_CHECK(va < VMM_USER_STACK_TOP,
                   "T4: SSP VA anchor below VMM_USER_STACK_TOP");
-        /* Layout invariants (process.c PROCESS_USER_SSP_*):
-         *   - SSP region is 4 pages (16 KiB).
-         *   - HI guard sits ABOVE the region (= VA + SIZE).
-         *   - LO guard sits BELOW the region (= VA - 4 KiB).
-         *   - 8 MiB slack separates region top from the max possible
-         *     ASLR-shifted user stack base.
-         * We assert structural relationships rather than absolute
-         * constants so the layout can change without churning this
-         * test — the relationships are what real-HW correctness depends
-         * on. */
         CET_CHECK((va & 0xFFFu) == 0,
                   "T4: SSP VA anchor page-aligned");
         CET_CHECK(guard_hi == va + (4u * 4096u),
@@ -101,7 +64,6 @@ void CetLifecycleTest(void) {
                   "T4: SSP region clear of max ASLR stack reach");
     }
 
-    /* ── T5: stats sane ─────────────────────────────────────────── */
     {
         cet_lifecycle_stats_t s;
         cet_lifecycle_get_stats(&s);

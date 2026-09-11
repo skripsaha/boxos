@@ -8,18 +8,13 @@
 #include "efi.h"
 #include <stddef.h>
 
-/* ACPI Generic Address Structure address_space_id values (ACPI 6.x §5.2.3.2) */
-#define GAS_AS_SYSTEM_MEMORY  0  /* MMIO */
-#define GAS_AS_SYSTEM_IO      1  /* I/O port */
+#define GAS_AS_SYSTEM_MEMORY  0
+#define GAS_AS_SYSTEM_IO      1
 
-/* True iff `len` bytes of FADT cover the X_/extended field that ends at
- * `field_end` (offsetof(field) + sizeof(field)). ACPI 1.0b FADT is only
- * 116 bytes — its `x_*` and `reset_reg` fields are not present, and
- * struct accesses past EOT yield garbage from neighbouring memory. */
 static inline bool fadt_field_present(uint32_t len, size_t field_end) {
     return (size_t)len >= field_end;
 }
-#define GAS_AS_PCI_CONFIG     2  /* PCI config space */
+#define GAS_AS_PCI_CONFIG     2
 
 static void delay_ms(uint32_t ms) {
     uint64_t deadline = rdtsc() + cpu_ms_to_tsc(ms);
@@ -57,50 +52,15 @@ static void attempt_keyboard_reset(void) {
     delay_ms(100);
 }
 
-/* attempt_cf9_reset — reboot via the chipset Reset Control Register (RST_CNT).
- *
- * Intel PCH/ICH and the QEMU/Bochs PIIX southbridge expose a byte-wide reset
- * register at I/O port 0xCF9 (Intel 400-series PCH register database, "Reset
- * Control Register (RST_CNT) — offset cf9"; layout unchanged back to ICH/PIIX):
- *   bit 1  SYS_RST  : 0 = soft reset (CPU INIT only), 1 = hard (asserts PCIRST#)
- *   bit 2  RST_CPU  : a 0->1 transition initiates the reset
- *   bit 3  FULL_RST : 1 = full power cycle (cold), 0 = warm
- *
- * Sequence matches Linux `reboot=pci`: arm a warm hard reset (SYS_RST), pause,
- * then pulse RST_CPU 0->1 to fire it. 0x06 keeps it warm — no power cycle.
- *
- * This is the one method that resets legacy-BIOS Bochs (whose rombios FADT is
- * ACPI 1.0 and carries no reset register), QEMU, and every modern x86 chipset,
- * so it sits ahead of the 8042 and triple-fault fallbacks.
- *
- * 0xCF9 overlaps the high byte of the 0xCF8 PCI CONFIG_ADDRESS dword. The
- * chipset decodes a *byte* write at 0xCF9 as RST_CNT, but a byte READ returns
- * CONFIG_ADDRESS[15:8] — not the reset register. So we write fully-defined
- * values instead of read-modify-write: an RMW would fold stray PCI-address
- * bits (and any firmware-set FULL_RST) into the write and could turn the
- * intended warm reset into a cold power-cycle. Explicit writes guarantee
- * SYS_RST=1, FULL_RST=0, with a clean 0->1 edge on RST_CPU. */
 static void attempt_cf9_reset(void) {
     debug_printf("[ACPI] Attempting 0xCF9 reset control register...\n");
 
-    outb(0xCF9, 0x02u);   /* SYS_RST=1, RST_CPU=0, FULL_RST=0: arm warm hard reset */
+    outb(0xCF9, 0x02u);
     delay_ms(1);
-    outb(0xCF9, 0x06u);   /* RST_CPU 0->1: trigger warm hard reset */
+    outb(0xCF9, 0x06u);
     delay_ms(100);
 }
 
-/* gas_write_word — write a 16-bit value through a Generic Address Structure.
- *
- * GAS address_space dispatch matches the ACPI spec rather than assuming I/O.
- * On consumer/desktop x86 PM1 CNT lives at I/O 0x604-class ports; on some
- * server boards and embedded SoCs (ACPI 2.0+) it can be memory-mapped, where
- * `outw` would silently miss the register. UEFI machines occasionally route
- * the reset register via PCI config space. Handle all three.
- *
- * For MMIO we map the register UC via vmm_map_mmio so the access is
- * uncached + write-through (PCD=1, PWT=1) and visible to the chipset
- * regardless of MTRR state — same correctness path as the VGA framebuffer.
- */
 static int gas_write_word(const acpi_gas_t *gas, uint16_t value) {
     if (!gas || gas->address == 0) return -1;
 
@@ -119,19 +79,10 @@ static int gas_write_word(const acpi_gas_t *gas, uint16_t value) {
                 return -1;
             }
             *(volatile uint16_t *)vmap = value;
-            /* Don't unmap — we're on a one-way path to power off / reset. */
             return 0;
         }
 
         case GAS_AS_PCI_CONFIG: {
-            /* ACPI 6.5 §5.2.3.2 + edk2 layout for PCI Configuration Space:
-             *   address[63:48] PCI segment
-             *   address[31:24] PCI bus
-             *   address[23:19] device   (5 bits)
-             *   address[18:16] function (3 bits)
-             *   address[15:0]  register offset
-             * ECAM unlocks segments != 0 + extended (12-bit) offsets; the
-             * 0xCF8/0xCFC fallback is limited to segment 0, offset <= 0xFC. */
             uint16_t segment = (uint16_t)((gas->address >> 48) & 0xFFFFu);
             uint8_t  bus     = (uint8_t)((gas->address >> 24) & 0xFFu);
             uint8_t  device  = (uint8_t)((gas->address >> 19) & 0x1Fu);
@@ -203,16 +154,6 @@ static int gas_write_byte(const acpi_gas_t *gas, uint8_t value) {
     }
 }
 
-/* Pick the live PM1 control GAS:
- *   1. ACPI 2.0+ X_ variant if the FADT is long enough to actually contain
- *      it AND it has a non-zero address — spec-preferred descriptor.
- *   2. Synthesise a legacy I/O GAS from the 32-bit FADT field otherwise.
- *
- * The length check matters on real hardware: every ACPI 1.0b firmware (and
- * QEMU's default i440fx FADT) ships rev=1, len=116, where `x_pm1a_*` lives
- * past EOT and `*x_gas` reads garbage. Trusting it sends PM1 writes to a
- * random MMIO address and shutdown silently fails.
- */
 static acpi_gas_t resolve_pm1_gas(const acpi_gas_t *x_gas, uint32_t legacy_port,
                                   uint32_t fadt_len, size_t x_field_end) {
     acpi_gas_t out = {0};
@@ -234,7 +175,7 @@ static acpi_gas_t resolve_pm1_gas(const acpi_gas_t *x_gas, uint32_t legacy_port,
 static void attempt_acpi_pm1(const acpi_gas_t *gas, uint16_t slp_typ, const char *tag) {
     if (gas->address == 0) return;
 
-    uint16_t value = (uint16_t)((slp_typ << 10) | (1u << 13));   /* SLP_TYP | SLP_EN */
+    uint16_t value = (uint16_t)((slp_typ << 10) | (1u << 13));
 
     debug_printf("[ACPI] %s shutdown via GAS as=%u addr=0x%lx SLP_TYP=0x%x val=0x%x\n",
                  tag, gas->address_space,
@@ -250,10 +191,6 @@ static void attempt_acpi_pm1(const acpi_gas_t *gas, uint16_t slp_typ, const char
 static void attempt_acpi_reset(void) {
     if (!g_acpi.initialized || !g_acpi.fadt) return;
 
-    /* reset_reg + reset_value were added in ACPI 2.0 (FADT rev 3, length
-     * grew to 244). On a rev 1 FADT (len=116) those bytes don't exist —
-     * accessing them reads adjacent table data and would issue a wild
-     * write to a random MMIO/IO address. Guard with a length check. */
     uint32_t flen = g_acpi.fadt->header.length;
     if (!fadt_field_present(flen, offsetof(acpi_fadt_t, reset_value) + 1)) {
         debug_printf("[ACPI] FADT too short for reset register (len=%u)\n", flen);
@@ -291,12 +228,6 @@ void acpi_shutdown(void) {
         debug_printf("[ACPI] not initialised; no soft poweroff available\n");
     }
 
-    /* UEFI 2.10 §8.5.1: EFI ResetSystem(EfiResetShutdown) is the
-     * firmware-supported soft-off path on UEFI machines. Prefer it
-     * because ACPI PM1 SLP_TYP writes can silently no-op when the SCI
-     * is disabled or the FADT is ACPI 1.0b without an _S5 object.
-     * Returns only if the firmware refuses; we then fall through to
-     * the spec-preferred ACPI PM1 path. */
     if (efi_runtime_available()) {
         debug_printf("[ACPI] trying EFI ResetSystem(SHUTDOWN)...\n");
         efi_reset_system(EFI_RESET_SHUTDOWN, EFI_STATUS_SUCCESS, 0, NULL);
@@ -318,11 +249,6 @@ void acpi_shutdown(void) {
         if (pm1b.address) attempt_acpi_pm1(&pm1b, g_acpi.slp_typb, "PM1b");
     }
 
-    /* Soft poweroff exhausted. ACPI S5 is the only standardised way to
-     * power down on x86 — there is no second method on real hardware.
-     * NEVER reset/triple-fault here: those reboot the machine, which is
-     * the wrong semantics for shutdown. Park the CPU and let the operator
-     * pull power. */
     debug_printf("[ACPI] Soft poweroff failed; halting CPU. Power off manually.\n");
     while (1) {
         __asm__ volatile("cli; hlt");
@@ -332,23 +258,9 @@ void acpi_shutdown(void) {
 void acpi_reboot(void) {
     __asm__ volatile("cli");
 
-    /* Escalating reboot methods, cleanest first; each is bounded and falls
-     * through to the next on failure:
-     *   1. EFI ResetSystem(EfiResetWarm) — UEFI 2.10 §8.5.1. Available
-     *      only on UEFI boots after efi_runtime_init succeeded. This is
-     *      the spec-mandated firmware reset on UEFI machines and works
-     *      uniformly across vendors when 0xCF9 is filtered or routed.
-     *   2. ACPI reset register — firmware-described. On UEFI the FADT
-     *      typically routes this to 0xCF9 itself.
-     *   3. 0xCF9 RST_CNT — universal chipset reset (real PCH/ICH, QEMU,
-     *      Bochs); the only method that resets legacy BIOS whose FADT
-     *      has no reset reg.
-     *   4. 8042 pulse (0xFE -> 0x64) — legacy keyboard-controller fallback.
-     *   5. triple fault — last resort; real CPUs always reset on it. */
     if (efi_runtime_available()) {
         debug_printf("[ACPI] Attempting EFI ResetSystem(WARM)...\n");
         efi_reset_system(EFI_RESET_WARM, EFI_STATUS_SUCCESS, 0, NULL);
-        /* If the firmware refused (returns), fall through. */
     }
 
     debug_printf("[ACPI] Attempting ACPI reset register...\n");

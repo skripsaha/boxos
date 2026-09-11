@@ -1,31 +1,3 @@
-/* lastsaid — what the machine said the LAST time it ran.
- *
- * `logsave` exists and is untouched: it pours THIS boot's log onto the volume.
- * That is the right tool right up until the moment it is needed most, and this
- * one was written because that moment arrived. A board wedged itself — a
- * storming interrupt, a host controller out of slots — and the volume was
- * exactly the thing that had stopped answering. There was no way to ask the
- * machine what had happened to it except to photograph a scrolling screen.
- *
- * So the kernel now carries its log through a reset in a fixed window of
- * memory it does not clear at boot (klib_logring.h), and this reads it.
- *
- *   lastsaid           -> prints it, which needs no filesystem at all
- *   lastsaid NAME      -> writes it to NAME on the volume
- *
- * The no-argument form is the point. On a machine whose volume is the failure,
- * a tool that can only write a file is a tool that cannot be used.
- *
- * ‼ WHAT IT CAN AND CANNOT SEE, so nobody trusts it further than it goes:
- *   - it sees the previous run after a WARM reset — the RESET button, a
- *     reboot, a triple fault. Memory keeps its contents across those.
- *   - it sees NOTHING after power was removed. Holding the power button for
- *     four seconds cuts the rails and takes RAM with them. On a wedged
- *     machine, press RESET, not power.
- *   - a kernel built without PRINTTOFILE=on carries nothing through a reset
- *     (the ring of THIS run it keeps regardless), and says so by name rather
- *     than handing back an empty file.
- */
 #include "box/print.h"
 #include "box/luggage.h"
 #include "box/current.h"
@@ -33,9 +5,6 @@
 #include "box/string.h"
 #include "box/system.h"
 
-/* Same size and the same reason as logsave's: the kernel hands over a page per
- * call regardless, so a larger pail would not fill any faster, and this one
- * has to stay off a userspace stack. */
 static char s_pail[4096];
 static char s_target[128];
 
@@ -78,10 +47,6 @@ int main(void)
         out = current_open_ex(s_target, CURRENT_WRITE, 0,
                               CURRENT_CREATE | CURRENT_TRUNCATE, &why);
         if (!out) {
-            /* Named, and then it prints instead. A volume that will not take
-             * the file is the commonest reason anybody runs this at all, and
-             * refusing to show the log because it cannot also store it would
-             * be the tool failing in exactly the case it was built for. */
             printf("%s could not be written (error %u) — printing it "
                    "instead\n", name, (unsigned)why);
         }
@@ -115,16 +80,11 @@ int main(void)
             }
             if (failed) break;
         } else {
-            /* Straight to the screen, one pail at a time. write_bytes rather
-             * than println because the log holds its own newlines and adding
-             * any would change what the machine actually said. */
             print_bytes(s_pail, (size_t)n);
             poured += (uint64_t)n;
         }
     }
 
-    /* Asked BEFORE the handle is let go. A gap that reads as continuous is
-     * worse than a gap that is announced, because it will be believed. */
     uint64_t lost = current_lost(log);
 
     if (out) current_release(out);
@@ -138,8 +98,6 @@ int main(void)
 
     if (failed) { exit(1); return 1; }
 
-    /* Zero is an ANSWER, not a failure, and it has three ordinary causes
-     * worth naming so the operator does not go looking for a fourth. */
     if (poured == 0) {
         println("Nothing came through the last reset. Either this is the "
                 "first run, or power was removed rather than the machine "

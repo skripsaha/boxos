@@ -1,29 +1,3 @@
-/*
- * vga.c — userspace VGA wrappers (Phase 12: Manifest-only).
- *
- * Two execution modes:
- *   - Immediate: every public call builds a single-op Manifest via
- *     MfCall1 and submits + waits in line. Simple, one syscall per op.
- *   - Batched (vga_begin / vga_commit): public calls accumulate ops into
- *     a per-process scratch builder; vga_commit fires ONE multi-op
- *     Manifest containing the whole sequence. This is the BoxOS Deck
- *     dispatch advantage in practice — a printf with five colored runs
- *     used to cost up to 10 syscalls (alternating SET_COLOR + PUTSTRING);
- *     batched it's a single submit, one kernel re-entry total.
- *
- * Colour: full #RRGGBB pairs on the wire ([u32 fg][u32 bg] little-endian
- * in op params). Sentinels are resolved to concrete triples HERE, before
- * anything is cached or sent — the kernel stores concrete values only,
- * so a getter round-trips exactly what a setter shipped.
- *
- * Getter ops (vga_getcolor_rgb/cursor/dimensions) ALWAYS go immediate even
- * inside a batch — they need the kernel's answer before the caller can
- * decide what comes next. Cached values short-circuit them when
- * possible so most getters never reach the kernel anyway.
- *
- * The batch buffers are static (one per process) — boxlib runs in a
- * single thread of execution per Cabin, so contention is not possible.
- */
 
 #include "box/vga.h"
 #include "box/core/manifest.h"
@@ -45,7 +19,6 @@ static uint8_t s_dims_rows    = 0;
 static uint8_t s_dims_cols    = 0;
 static bool    s_dims_valid   = false;
 
-/* Hardware Deck VGA opcodes. */
 #define HW_VGA_PUTCHAR        0x70
 #define HW_VGA_PUTSTRING      0x71
 #define HW_VGA_CLEAR_SCREEN   0x72
@@ -61,30 +34,15 @@ static bool    s_dims_valid   = false;
 #define HW_VGA_PAINT          0x7C
 #define HW_VGA_STEP_CURSOR    0x7D
 
-/* Little-endian u32 into an op-param byte stream (params are unaligned). */
 static inline void put_color_param(uint8_t *dst, Color c)
 {
     memcpy(dst, &c, sizeof(uint32_t));
 }
 
-/* ===========================================================================
- * Batch state — sized for the console daemon's lane bursts, the heaviest
- * batcher: dozens of ConsoleRun frames (a puts + a newline each) render in
- * ONE commit, so a saturated console costs tens of submits per second, not
- * thousands (measured on print_stress: submit count is the render-side
- * wall). A typical printf still fits many times over. Hitting either
- * ceiling auto-flushes and starts a new batch so the caller never has to
- * manage capacity.
- * =========================================================================== */
-#define VGA_BATCH_MANIFEST_BYTES  4096u    /* ManifestBuilder scratch */
-#define VGA_BATCH_PAYLOAD_BYTES   8192u    /* PUTSTRING in-crate staging */
+#define VGA_BATCH_MANIFEST_BYTES  4096u
+#define VGA_BATCH_PAYLOAD_BYTES   8192u
 #define VGA_BATCH_CRATES_MAX      96u
 
-/* Nesting depth so a wrapper that does its own vga_begin/vga_commit
- * pair composes with an outer caller's batch. Without this, an inner
- * vga_commit would flush mid-printf and the outer would re-flush an
- * empty batch — losing the syscall coalescing the outer intended.
- */
 static uint32_t         s_batch_depth   = 0;
 static uint8_t          s_mbuf[VGA_BATCH_MANIFEST_BYTES];
 static ManifestBuilder  s_mb;
@@ -93,14 +51,6 @@ static uint32_t         s_payload_used = 0;
 static Crate            s_crates[VGA_BATCH_CRATES_MAX];
 static uint16_t         s_crate_count  = 0;
 
-/* The batch builder is MAIN-STRAND state. It is a set of bare statics
- * (builder, payload staging, crate table, depth counter) with no lock —
- * fine for the processes that batch today (shell, daemon: single strand),
- * fatal if concurrent strands ever interleaved ops into one builder. A
- * spawned strand therefore never batches: its begin/commit are no-ops and
- * every write op submits immediately. The value caches (colour/cursor)
- * stay shared — a spawned strand racing them can at worst leave a stale
- * cached pair (one wrong-coloured run), never a corrupted submit. */
 static inline bool on_main_strand(void) { return strand_info_or_null() == NULL; }
 
 static inline bool batch_active(void) { return s_batch_depth > 0 && on_main_strand(); }
@@ -112,9 +62,6 @@ static void batch_reset_locked(void)
     s_crate_count  = 0;
 }
 
-/* Flush a non-empty batch via one Manifest submit. Returns the kernel
- * status (OK on success). After this call the batch is empty regardless
- * of submission outcome — callers must not retain stale crate indices. */
 static int batch_flush_locked(void)
 {
     if (s_mb.op_count == 0) {
@@ -129,12 +76,7 @@ static int batch_flush_locked(void)
     int rc = ManifestSubmitTimeout((Manifest *)s_mbuf,
                                    s_crates, s_crate_count,
                                    &r, BOX_ANSWER_GUARANTEED);
-    /* Reset BEFORE returning so the next vga_* call lands on a clean
-     * builder regardless of which failure mode hit. */
     batch_reset_locked();
-    /* Cursor cache is now ambiguous (no per-op output crates were
-     * attached in batch mode), so invalidate it. The next getter will
-     * re-fetch from the kernel. */
     s_cursor_valid = false;
     return rc;
 }
@@ -142,8 +84,6 @@ static int batch_flush_locked(void)
 static bool batch_have_capacity(uint32_t param_bytes,
                                 uint32_t payload_bytes)
 {
-    /* Reserve sizeof(ManifestOp) + param_bytes in the builder, and
-     * payload_bytes in the input staging buffer, plus one Crate slot. */
     uint32_t need_mfs = sizeof(ManifestOp) + param_bytes;
     if (s_mb.size + need_mfs > s_mb.capacity) return false;
     if (s_payload_used + payload_bytes > sizeof(s_payload)) return false;
@@ -151,10 +91,6 @@ static bool batch_have_capacity(uint32_t param_bytes,
     return true;
 }
 
-/* Flush the current batch while leaving the begin/commit depth intact.
- * Used by getters and by big-string immediate fallback so accumulated
- * ops dispatch in the order the caller issued them — without forcing
- * the outer caller's vga_commit to no-op. */
 static int batch_flush_preserving_depth(void)
 {
     return batch_flush_locked();
@@ -162,9 +98,7 @@ static int batch_flush_preserving_depth(void)
 
 void vga_begin(void)
 {
-    if (!on_main_strand()) return;   /* spawned strands never batch */
-    /* First begin in a chain resets the builder; nested begin just
-     * increments the depth counter so inner commits won't flush. */
+    if (!on_main_strand()) return;
     if (s_batch_depth == 0) batch_reset_locked();
     s_batch_depth++;
 }
@@ -173,14 +107,10 @@ int vga_commit(void)
 {
     if (!on_main_strand()) return OK;
     if (s_batch_depth == 0) return OK;
-    /* Only the outermost commit fires the syscall. */
     if (--s_batch_depth > 0) return OK;
     return batch_flush_locked();
 }
 
-/* =========================================================================
- *  Cached query operations — always go immediate; getters can't be batched.
- * ========================================================================= */
 
 int vga_getcolor_rgb(Color *fg, Color *bg)
 {
@@ -191,11 +121,6 @@ int vga_getcolor_rgb(Color *fg, Color *bg)
         return 0;
     }
 
-    /* Inside an active batch, accumulated ops have NOT been applied by
-     * the kernel yet — an immediate kernel read here would return the
-     * pre-batch colour and disagree with what the caller thinks they
-     * just set. Flush first so kernel state catches up; the outer
-     * vga_commit is still safe because the depth counter is untouched. */
     if (batch_active()) (void)batch_flush_preserving_depth();
 
     uint32_t out[2] = {0, 0};
@@ -220,8 +145,6 @@ int vga_getcursor(vga_pos_t *pos)
         pos->col = s_cursor_col;
         return 0;
     }
-    /* Same rationale as vga_getcolor_rgb: flush before reading so the
-     * cursor we report reflects every batched op the caller issued. */
     if (batch_active()) (void)batch_flush_preserving_depth();
 
     uint8_t out[2] = {0};
@@ -246,8 +169,6 @@ int vga_getdimensions(vga_dimensions_t *dims)
         dims->cols = s_dims_cols;
         return 0;
     }
-    /* Dimensions never change at runtime, but the same flush-before-read
-     * rule keeps the contract uniform across getters. */
     if (batch_active()) (void)batch_flush_preserving_depth();
 
     uint8_t out[2] = {0};
@@ -264,29 +185,7 @@ int vga_getdimensions(vga_dimensions_t *dims)
     return 0;
 }
 
-/* =========================================================================
- *  Write operations — batched when batch_active(), immediate otherwise.
- * ========================================================================= */
 
-/* Append an op to the active batch. Caller has already confirmed capacity.
- *
- * ‼ EVERY OP IN A CONSOLE BATCH IS OPTIONAL, AND THAT IS NOT A RELAXATION.
- *
- * A Manifest stops at its first refusal: manifest_exec.c breaks out of the
- * dispatch loop on any op that fails and is not marked OPTIONAL, so every op
- * BEHIND it is never executed. That rule is right for a Manifest that is one
- * transaction — do not write the file if the seek failed — and wrong for this
- * one, which is a rope of independent things said to a screen. The display
- * daemon packs a whole burst of output into one batch, so a single cell the
- * kernel would not draw — a rectangle that no longer fits, a snapshot that
- * found no memory — silently took the entire REST of the burst with it, up to
- * and including the prompt printed at the end of it. Nothing was said, because
- * the batch reports its first error and the daemon has no use for it.
- *
- * A console op that fails costs its own cell. It must not cost the ones after
- * it. Where the caller wants to know, the answer is still there: the submit
- * returns the first error either way (vga_commit), and the daemon now says so.
- */
 static int batch_add_op(uint16_t opcode,
                         const void *params, uint16_t param_size,
                         uint16_t in_idx)
@@ -310,7 +209,6 @@ int vga_setcolor_rgb(Color fg, Color bg)
 
     if (batch_active()) {
         if (!batch_have_capacity(sizeof(params), 0)) {
-            /* Auto-flush to make room, then proceed. */
             int rc = batch_flush_locked();
             if (rc != OK) return rc;
         }
@@ -334,12 +232,6 @@ int vga_setcursor(uint8_t row, uint8_t col)
             int rc = batch_flush_locked();
             if (rc != OK) return rc;
         }
-        /* Invalidate the cursor cache — we cannot pre-populate (row, col)
-         * because the kernel clamps out-of-bounds coordinates against the
-         * real screen dimensions, and an immediate getcursor inside the
-         * same batch would otherwise read the unclamped input instead of
-         * the post-clamp truth. The getter's flush-preserving-depth path
-         * brings the kernel state up to date when needed. */
         s_cursor_valid = false;
         return batch_add_op(HW_VGA_SET_CURSOR, params, sizeof(params),
                             CRATE_INDEX_NONE) == 0 ? OK : -ERR_INVALID_ARGS;
@@ -364,11 +256,6 @@ int vga_step_cursor(int32_t delta)
     uint8_t params[4];
     memcpy(params, &delta, sizeof(delta));
 
-    /* Batched like any other write, and that is the point of having it: a
-     * backspace is then ONE Manifest — the text that redraws the tail and the
-     * step that puts the caret back — instead of a flush, a synchronous read
-     * and a write. Where the caret ends up is the kernel's answer, so the
-     * cached position no longer stands. */
     if (batch_active()) {
         if (!batch_have_capacity(sizeof(params), 0)) {
             int rc = batch_flush_locked();
@@ -386,9 +273,6 @@ int vga_step_cursor(int32_t delta)
                    BOX_ANSWER_GUARANTEED, NULL);
 }
 
-/* Current pair for the write ops below. First use without an explicit
- * setcolor fetches the kernel's truth once (another Cabin may have set
- * the console colour before us). */
 static int current_pair(Color *fg, Color *bg)
 {
     if (s_color_valid) {
@@ -433,21 +317,14 @@ static int vga_putstring_batched(const char *str, size_t len,
     put_color_param(&params[4], bg);
     params[8] = 0;
 
-    /* Need: ManifestOp + 9-byte params  +  payload_bytes (the string)
-     *       + 1 Crate slot. */
     if (!batch_have_capacity(sizeof(params), (uint32_t)len)) {
         int rc = batch_flush_locked();
         if (rc != OK) return rc;
     }
-    /* If a single string is bigger than the whole staging buffer, fall
-     * through to the immediate path — there is no way to fit it batched. */
     if (len > sizeof(s_payload)) {
         return vga_putstring_immediate(str, len, fg, bg);
     }
 
-    /* Copy the caller's bytes into our staging buffer so the pointer
-     * remains valid through vga_commit even after the caller's frame
-     * unwinds. */
     uint8_t *dst = s_payload + s_payload_used;
     memcpy(dst, str, len);
     s_payload_used += (uint32_t)len;
@@ -455,14 +332,9 @@ static int vga_putstring_batched(const char *str, size_t len,
     CrateSetInput(&s_crates[s_crate_count], dst, (uint64_t)len);
     uint16_t in_idx = s_crate_count++;
 
-    /* Batched putstring has no output crate (we don't collect cursor
-     * updates per-op). The cursor cache is invalidated NOW (not at
-     * flush) so a mid-batch getcursor flushes and re-reads truth
-     * instead of returning the pre-puts row/col. */
     s_cursor_valid = false;
     if (batch_add_op(HW_VGA_PUTSTRING, params, sizeof(params),
                      in_idx) != 0) {
-        /* Roll back the crate + payload reservation on failure. */
         s_crate_count--;
         s_payload_used -= (uint32_t)len;
         return -ERR_INVALID_ARGS;
@@ -472,8 +344,6 @@ static int vga_putstring_batched(const char *str, size_t len,
 
 int vga_putchar(char c)
 {
-    /* Route through PUTSTRING (1-byte input) so the kernel advances
-     * the cursor naturally; PUTCHAR has different cursor semantics. */
     Color fg, bg;
     if (current_pair(&fg, &bg) != 0) {
         fg = COLOR_LIGHT_GRAY;
@@ -534,9 +404,6 @@ int vga_newline(void)
             int rc = batch_flush_locked();
             if (rc != OK) return rc;
         }
-        /* Newline advances row (possibly triggers scroll); we cannot
-         * predict the post-op cursor without the kernel's bookkeeping
-         * — invalidate so the next getcursor flushes and re-reads. */
         s_cursor_valid = false;
         return batch_add_op(HW_VGA_NEWLINE, NULL, 0, CRATE_INDEX_NONE) == 0
                    ? OK : -ERR_INVALID_ARGS;
@@ -562,23 +429,11 @@ int vga_paint(uint8_t row, uint8_t col, uint8_t height, uint8_t width,
 {
     if (!cells || height == 0 || width == 0) return -ERR_INVALID_ARGS;
 
-    /* Never batched, and it does not need to be: a paint is already ONE op.
-     * The staging buffer a batched input crate copies through is 8 KiB and a
-     * frame is ten times that, so batching it would mean either a second copy
-     * of every frame or a silent split. Pending ops go first so the caller's
-     * order survives. */
     if (batch_active()) {
         int rc = batch_flush_preserving_depth();
         if (rc != OK) return rc;
     }
 
-    /* Sentinels are the one thing this path does NOT resolve before the wire.
-     * Every other op carries one pair and resolving it here costs two
-     * branches; a frame carries six thousand, and resolving them would mean
-     * either walking the caller's buffer (it is const, and theirs) or copying
-     * the whole frame to walk the copy. The kernel already makes one snapshot
-     * of these bytes to get them out of user memory — it resolves as it
-     * paints, so the Canvas still never sees a sentinel. */
     uint32_t n = (uint32_t)height * (uint32_t)width;
 
     uint8_t params[4];

@@ -1,5 +1,3 @@
-// Baked 80-bit (x, MPFR-CR-ref) vectors for acos — GENERATED, do not edit.
-// {x mantissa, x se, ref mantissa, ref se}; se = sign<<15 | exp15.
 static const CrVec kAcosVec[] = {
 {0x8000000000000000ULL,0x3FFDu,0xA8B807060A5927F8ULL,0x3FFFu},
 {0x8000000000000000ULL,0x3FFEu,0x860A91C16B9B2C23ULL,0x3FFFu},

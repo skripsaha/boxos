@@ -21,4 +21,4 @@ struct DisplayBackend;
 
 struct DisplayBackend *HwVgaBackendInit(void);
 
-#endif /* HW_VGA_H */
+#endif

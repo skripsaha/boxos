@@ -1,21 +1,3 @@
-/* logsave — write what the kernel has said onto the volume.
- *
- * A machine on a bench has no serial cable, and its whole account of itself is
- * whatever is still on the screen. This pours the kernel's log ring into a
- * file so the account survives the scroll, the photograph and the reboot.
- *
- * It is two Currents and nothing else: `log:file` opened for reading,
- * `file:NAME` opened for writing, one poured into the other. No door of its
- * own — the kernel already had one, and the spine already knew how to carry
- * bytes.
- *
- *   logsave            -> watch.log
- *   logsave NAME       -> NAME
- *
- * Every kernel keeps the ring — it is the serial line's source — so the read
- * is refused only by a kernel with no log door at all, and that is said by
- * name rather than by handing back an empty file.
- */
 #include "box/print.h"
 #include "box/luggage.h"
 #include "box/current.h"
@@ -25,9 +7,6 @@
 
 #define LOGSAVE_DEFAULT_NAME  "watch.log"
 
-/* Big enough that a megabyte of log is a few hundred passes, small enough to
- * stay off a userspace stack — the ring is read a page at a time behind this
- * anyway, so a larger pail would not fill any faster. */
 static char s_pail[4096];
 static char s_target[128];
 
@@ -53,8 +32,6 @@ int main(void)
         return 1;
     }
 
-    /* "file:" + the name, in a buffer of our own — the tag is what names the
-     * backing, and building it wrong is how a Current opens something else. */
     size_t nlen = strlen(name);
     if (nlen + 6 > sizeof(s_target)) {
         println("That name is too long for a file tag.");
@@ -80,7 +57,7 @@ int main(void)
 
     for (;;) {
         int n = current_read(log, s_pail, sizeof(s_pail));
-        if (n == CURRENT_CLOSED) break;          /* the log ended where we began */
+        if (n == CURRENT_CLOSED) break;
         if (n < 0) {
             printf("The log stopped being readable after %lu byte(s) "
                    "(error %d)\n", (unsigned long)poured, -n);
@@ -103,9 +80,6 @@ int main(void)
         if (failed) break;
     }
 
-    /* Asked BEFORE the handle is let go, and said out loud whether or not it
-     * is zero-worthy: a log with a hole in it that reads as continuous is
-     * worse than no log, because it will be believed. */
     uint64_t lost = current_lost(log);
 
     current_close(out);

@@ -2,20 +2,6 @@
 #include "klib.h"
 #include "vmm.h"
 
-/*
- * DMAR (DMA Remapping Reporting) parser — Intel VT-d Spec §8.1.
- *
- * The presence of DMAR signals an Intel-built IOMMU. This parser records:
- *   - host address width (HAW): max guest physical address supported
- *   - per-DRHD (DMA Remapping Hardware Unit) register-base and segment
- *
- * RMRR/ATSR/RHSA/ANDD entries are noted but not stored — they're only
- * relevant once a full IOMMU driver runs and we're then in the IOMMU
- * subsystem audit.
- *
- * Code accessing acpi_get_dmar() can plumb IRQ remapping, DMA isolation,
- * Thunderbolt/USB4 security, etc.
- */
 
 void acpi_parse_dmar(void) {
     memset(&g_acpi.dmar, 0, sizeof(g_acpi.dmar));
@@ -24,7 +10,7 @@ void acpi_parse_dmar(void) {
     if (!dmar) return;
 
     g_acpi.dmar.host_address_width_bits =
-        (uint8_t)(dmar->host_address_width + 1);   /* spec: value = bits - 1 */
+        (uint8_t)(dmar->host_address_width + 1);
     g_acpi.dmar.flags = dmar->flags;
 
     debug_printf("[ACPI] DMAR len=%u HAW=%u flags=0x%x\n",
@@ -89,16 +75,10 @@ const acpi_dmar_info_t *acpi_get_dmar(void) {
     return g_acpi.dmar.present ? &g_acpi.dmar : NULL;
 }
 
-/* VT-d register block offsets (Intel VT-d Spec §10.4). Only the few we
- * probe for capability discovery are listed; full programming lives in
- * a future IOMMU driver. */
-#define VTD_REG_VER       0x000   /* 32-bit, version */
-#define VTD_REG_CAP       0x008   /* 64-bit, capability */
-#define VTD_REG_ECAP      0x010   /* 64-bit, extended capability */
+#define VTD_REG_VER       0x000
+#define VTD_REG_CAP       0x008
+#define VTD_REG_ECAP      0x010
 
-/* Probe each DRHD register block and log version + key capability bits.
- * Reads only — no programming. Used by future IOMMU driver as the
- * source of truth for "what does this controller support". */
 void acpi_dmar_probe_registers(void) {
     if (!g_acpi.dmar.present) return;
     for (uint8_t i = 0; i < g_acpi.dmar.drhd_count; i++) {
@@ -120,11 +100,11 @@ void acpi_dmar_probe_registers(void) {
                      (ver >> 4) & 0xF, ver & 0xF,
                      (unsigned long)cap, (unsigned long)ecap);
         debug_printf("[DMAR]   features:%s%s%s%s%s%s\n",
-                     (ecap & (1ULL << 1))  ? " QI"   : "",   /* queued invalidation */
-                     (ecap & (1ULL << 3))  ? " IR"   : "",   /* interrupt remap */
-                     (ecap & (1ULL << 7))  ? " PT"   : "",   /* passthrough */
-                     (ecap & (1ULL << 11)) ? " EAFS" : "",   /* extended access flag */
-                     (cap  & (1ULL << 7))  ? " PLMR" : "",   /* protected low-memory region */
-                     (cap  & (1ULL << 8))  ? " PHMR" : "");  /* protected high-memory region */
+                     (ecap & (1ULL << 1))  ? " QI"   : "",
+                     (ecap & (1ULL << 3))  ? " IR"   : "",
+                     (ecap & (1ULL << 7))  ? " PT"   : "",
+                     (ecap & (1ULL << 11)) ? " EAFS" : "",
+                     (cap  & (1ULL << 7))  ? " PLMR" : "",
+                     (cap  & (1ULL << 8))  ? " PHMR" : "");
     }
 }

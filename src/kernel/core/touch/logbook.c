@@ -1,40 +1,26 @@
 #include "logbook.h"
-#include "tagfs.h"      /* tagfs_parse_tag — pure string split, no volume */
+#include "tagfs.h"
 #include "muster.h"
 
-/*
- * One name the kernel has used for an occurrence. `value` is NULL for a bare
- * tag ("keyboard") and for the bare half of a valued one ("usb" out of
- * "usb:arrived"). Entries are never removed: a name the kernel has spoken
- * keeps its id for the life of the boot, which is what lets a driver cache a
- * handle at init and publish from an IRQ forever after.
- */
 typedef struct LogbookEntry {
-    struct LogbookEntry *chain;   /* hash bucket chain */
+    struct LogbookEntry *chain;
     char                *key;
-    char                *value;   /* NULL = bare */
+    char                *value;
     TouchTag             tag_id;
-    bool                 mustered; /* named before the voyage, not on first use */
-    bool                 warned;   /* its absence from the muster has been said */
+    bool                 mustered;
+    bool                 warned;
 } LogbookEntry;
 
-/*
- * Both tables grow; neither has a ceiling written into it. The hash doubles
- * and rehashes when it reaches one entry per bucket, the index doubles when
- * it fills. The only hard limit is the id space itself
- * (TOUCH_LOGBOOK_MAX_INDEX), and hitting it is a refusal, not a wrap.
- */
-/* How many un-mustered names are worth a line before the point is made. */
 #define LOGBOOK_MISS_LINES 8u
 static uint32_t g_muster_misses = 0;
 
 static struct {
     LogbookEntry **buckets;
     uint32_t       bucket_count;
-    LogbookEntry **by_index;      /* index n -> entry; id = 0x8000 | n */
+    LogbookEntry **by_index;
     uint32_t       index_capacity;
     uint32_t       count;
-    spinlock_t     lock;          /* statically zeroed == unlocked */
+    spinlock_t     lock;
     bool           ready;
 } g_logbook;
 
@@ -45,8 +31,6 @@ static void logbook_split(const char *tag, char *key, size_t key_size,
 #define LOGBOOK_INITIAL_BUCKETS  64u
 #define LOGBOOK_INITIAL_INDEX    64u
 
-/* Same djb2 the volume registry uses, so the two books hash names alike and
- * a reader comparing them by eye is not surprised. */
 static uint32_t logbook_hash(const char *key, const char *value)
 {
     uint32_t hash = 5381;
@@ -75,8 +59,6 @@ static char *logbook_copy(const char *src)
     return dst;
 }
 
-/* Caller holds the lock. Builds the two tables on first use — there is no
- * init call and no boot phase to get wrong. */
 static bool logbook_ready_unlocked(void)
 {
     if (g_logbook.ready) return true;
@@ -113,8 +95,6 @@ static LogbookEntry *logbook_find_unlocked(const char *key, const char *value)
     return NULL;
 }
 
-/* Caller holds the lock. A failed grow is not fatal — the table keeps
- * working at its current width, chains just get longer. */
 static void logbook_grow_buckets_unlocked(void)
 {
     uint32_t new_count = g_logbook.bucket_count * 2;
@@ -138,7 +118,6 @@ static void logbook_grow_buckets_unlocked(void)
     g_logbook.bucket_count = new_count;
 }
 
-/* Caller holds the lock. */
 static bool logbook_reserve_index_unlocked(uint32_t index)
 {
     while (index >= g_logbook.index_capacity) {
@@ -156,8 +135,6 @@ static bool logbook_reserve_index_unlocked(uint32_t index)
     return true;
 }
 
-/* Caller holds the lock. Returns the id of an existing or freshly created
- * entry, TOUCH_TAG_INVALID if it could not be made. */
 static TouchTag logbook_intern_unlocked(const char *key, const char *value,
                                         bool *out_created)
 {
@@ -205,16 +182,6 @@ static TouchTag logbook_intern_unlocked(const char *key, const char *value,
     return entry->tag_id;
 }
 
-/*
- * Call the muster — every name this kernel can speak, entered before anybody
- * asks for one. Caller holds the lock, and this runs exactly once, from the
- * same place the tables are built: there is no init call to forget and no boot
- * phase to get wrong, which is the property the rest of this file was written
- * for.
- *
- * A failure to seat a name is not fatal. It costs that ONE name the guarantee
- * the muster exists to give, and the line below says which.
- */
 static void logbook_muster_unlocked(void)
 {
     unsigned seated = 0, refused = 0;
@@ -248,12 +215,6 @@ static void logbook_muster_unlocked(void)
             refused ? ", SOME REFUSED — see above" : "");
 }
 
-/*
- * Split a tag string the same way the volume registry does, so a name means
- * the same thing in both books. "usb:arrived" -> key "usb", value "arrived";
- * "keyboard" -> key "keyboard", no value; "usb:..." -> the wildcard form,
- * which resolves to the bare id only.
- */
 static void logbook_split(const char *tag, char *key, size_t key_size,
                           char *value, size_t value_size, bool *out_has_value)
 {
@@ -287,26 +248,6 @@ static void logbook_resolve(const char *tag, TouchTag *out_full,
         *out_bare = logbook_intern_unlocked(key, NULL, NULL);
         if (has_value) *out_full = logbook_intern_unlocked(key, value, NULL);
 
-        /*
-         * A name entered here and not at the muster is a name this kernel can
-         * speak and never declared. It works — the entry exists from now on —
-         * but the guarantee the muster gives is exactly the one it does not
-         * have: anybody who asked for it EARLIER got an id out of the volume
-         * instead, and is waiting on it.
-         *
-         * What counts as a miss is the BARE KEY, not the full name. A family
-         * whose members are built from data — "pci:vendor:8086:1901", one per
-         * device — is declared at the muster by its key alone, and every
-         * member of it is then a name the muster covers. Judging the full name
-         * instead made the muster's own entry worthless: the full name is new
-         * for every device that has ever existed, so a correctly declared
-         * family printed eight lines on every single boot, capped only because
-         * the cap was there. It worked as written and was written wrong.
-         *
-         * So: said once, per key, and only for a key nobody declared. A family
-         * missing from the muster is one line naming the family; a family in
-         * it is silent, which is what having declared it is supposed to buy.
-         */
         LogbookEntry *bare = logbook_find_unlocked(key, NULL);
         if (bare && !bare->mustered && !bare->warned &&
             g_muster_misses < LOGBOOK_MISS_LINES) {

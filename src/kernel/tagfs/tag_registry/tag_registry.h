@@ -16,4 +16,4 @@ int          tag_registry_flush(TagRegistry* reg);
 bool         tag_registry_is_dirty(void);
 int          tag_registry_load(TagRegistry* reg, uint32_t first_block);
 
-#endif // TAG_REGISTRY_H
+#endif

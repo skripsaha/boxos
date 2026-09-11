@@ -1,5 +1,3 @@
-// Baked 80-bit (x, MPFR-CR-ref) vectors for acosh — GENERATED, do not edit.
-// {x mantissa, x se, ref mantissa, ref se}; se = sign<<15 | exp15.
 static const CrVec kAcoshVec[] = {
 {0x8000000000000000ULL,0x3FFFu,0x0000000000000000ULL,0x0000u},
 {0x8000000000000000ULL,0x4000u,0xA892138CC021A4DFULL,0x3FFFu},

@@ -34,23 +34,6 @@ typedef struct {
 
 static rtc_state_t rtc_state;
 
-/* NMI mask byte OR'd into every CMOS register selection.
- *
- * Port 0x70 bit 7 is the system-wide NMI mask: writing 1 disables
- * NMI, writing 0 enables it. The byte is write-only — the chip does
- * not expose the current state for read-back — so every outb to 0x70
- * must explicitly choose the NMI state along with the register index.
- *
- * The legacy implementation here OR'd 0x80 unconditionally into every
- * read, masking NMI for the duration of every PIO cycle. On real HW
- * with watchdog/IOCHK/SERR# wired into NMI, that trains a
- * microsecond-wide NMI blackout *every* `cmos_read()` call (the
- * scheduler and rtc_get_unix64 path do this dozens of times per
- * second), which can drop legitimate hardware errors silently.
- *
- * Default: bit 7 = 0 (NMI enabled). Callers that genuinely require
- * an NMI-free CMOS sequence (e.g. arming the alarm interrupt) call
- * cmos_nmi_disable() → ... → cmos_nmi_enable(). */
 static uint8_t g_cmos_nmi_select = 0x00;
 
 void cmos_nmi_disable(void) { g_cmos_nmi_select = 0x80; }
@@ -61,11 +44,6 @@ static uint8_t cmos_read(uint8_t reg) {
     return inb(CMOS_DATA);
 }
 
-/* Returns true once the RTC clears its Update-In-Progress bit (≤1 ms on real
- * HW), false if the deadline expires — protects against a wedged or absent
- * RTC chip hanging boot indefinitely. The caller proceeds with whatever
- * value is in the BCD/binary registers; rtc_init's two-read consistency
- * check then catches any straddling update. */
 static bool wait_not_uip(void) {
     for (uint32_t i = 0; i < 1000000; i++) {
         if ((cmos_read(CMOS_REG_STA) & STA_UIP) == 0) return true;
@@ -176,10 +154,6 @@ void rtc_init(void) {
     rtc_state.base_seconds  = calendar_to_unix(full_year, mon, day, hour, min, sec);
     rtc_state.base_pit_ticks = pit_get_ticks();
 
-    /* Leave the index register at CMOS_REG_SEC (0x00) with the
-     * current NMI mask state so any subsequent port-0x71 reader
-     * (firmware SMI, third-party driver) gets a deterministic
-     * register selection rather than whatever was last addressed. */
     outb(CMOS_ADDR, g_cmos_nmi_select | CMOS_REG_SEC);
 
     debug_printf("[RTC] Initialized: %04u-%02u-%02u %02u:%02u:%02u (unix=%llu)\n",
@@ -209,9 +183,5 @@ uint64_t rtc_get_unix64(void) {
 }
 
 uint64_t rtc_get_uptime_ns(void) {
-    /* Use the monotonic microsecond counter — surviving freq changes — and
-     * extend to nanoseconds. The old `(ticks - base) / freq * 1e9 + …`
-     * derivation was non-monotonic when the scheduler reprogrammed the PIT
-     * (see HwTimerGetMs comment). */
     return pit_get_uptime_us() * 1000ULL;
 }

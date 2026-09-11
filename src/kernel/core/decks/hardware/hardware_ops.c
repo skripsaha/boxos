@@ -1,13 +1,3 @@
-/*
- * Hardware Deck — Manifest-native handlers (Phase 8 complete).
- *
- * Every prefix-chain handler in hardware_deck.c has a corresponding op here,
- * but the ABI is freed from the 192-byte cargo cult: bytes flow through
- * Crates of arbitrary size, fixed inputs through op->params.
- *
- * Param/Crate layouts are documented inline next to each handler so the
- * userspace builder can be regenerated mechanically.
- */
 
 #include "klib.h"
 #include "klib_logring.h"
@@ -37,12 +27,6 @@
 
 #define VGA_PUTSTRING_FLAG_KEEP_COLOR 0x02u
 
-/* What userspace puts on the screen goes into the log ring, where the serial
- * line reads it (the Wire) and `logsave` writes it down. A saved log that has
- * the kernel's answers but not the command that caused them is a log
- * somebody has to guess at — the board is exactly where nobody can afford
- * to. The ring costs a store; nothing here waits on a UART, so the gate that
- * kept this off a board (87 us a character) is gone with the wait. */
 static inline void HwVgaMirrorChar(char ch)
 {
     LogRingPut(ch);
@@ -53,7 +37,6 @@ static bool hw_irq_is_valid(uint8_t irq)
     return irq < irqchip_max_irqs() && irq != 0 && irq != 2;
 }
 
-/* Colours arrive as unaligned little-endian u32 inside op->params. */
 static inline uint32_t hw_color_param(const uint8_t *p)
 {
     uint32_t v;
@@ -61,11 +44,7 @@ static inline uint32_t hw_color_param(const uint8_t *p)
     return v;
 }
 
-/* =========================================================================
- *  VGA
- * ========================================================================= */
 
-/* HW_VGA_PUTCHAR  params:[u8 row][u8 col][u8 char][u32 fg][u32 bg] */
 static int HwVgaPutChar(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                         const OpContext *ctx)
 {
@@ -78,28 +57,15 @@ static int HwVgaPutChar(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     uint32_t fg  = hw_color_param(&op->params[3]);
     uint32_t bg  = hw_color_param(&op->params[7]);
 
-    /* Compared as the counts they are, not through a byte. The cast was the
-     * same defect as the one HwVgaGetDimensions carried: on a 320-column
-     * console (uint8_t)320 is 64, so every cell from column 64 rightward was
-     * refused as out of range on a screen that had it. */
     if ((int)row >= VideoGetRows() || (int)col >= VideoGetCols()) {
         return ERR_OUT_OF_RANGE;
     }
 
     console_lock_acquire();
 
-    /* The cursor is put back where it was, so the cell this op paints does not
-     * disturb the line somebody else is writing. Kept as counts, not bytes:
-     * the borrowed position is the kernel's own and has no business being
-     * squeezed through the ABI's byte on a console wider than 255 cells. */
     int old_x = VideoGetCursorX();
     int old_y = VideoGetCursorY();
 
-    /* One batch, and therefore one commit and one blit for the whole op. Its
-     * body moves the cursor twice, and since a cursor move now reaches the
-     * glass on its own (canvas.c: CanvasSetCursor), an unbatched putchar_at
-     * would light the caret at the target cell, paint, and light it again back
-     * home — three presents to put down one character. */
     VideoBatchBegin();
     VideoSetCursor(col, row);
     VideoPrintCharRgb((char)ch, fg, bg);
@@ -111,9 +77,6 @@ static int HwVgaPutChar(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     return OK;
 }
 
-/* HW_VGA_PUTSTRING  params:[u32 fg][u32 bg][u8 flags]
- *                   in_crate: string bytes (size = byte count, no length cap)
- *                   out_crate (optional): [u8 chars_written][u8 row][u8 col] */
 static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
 {
@@ -126,13 +89,6 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
     uint8_t  flags = op->params[8];
 
     Crate *str_crate = &crates[op->in_crate];
-    /* Snapshot the user string BEFORE taking the console lock, so user memory
-     * is page-walked (and any page straddle handled) outside the lock.
-     *
-     * str_crate->size is attacker-controlled and this op is OP_AUTH_NONE, so
-     * snapshot at most one page — a console line is a screenful, never the
-     * gigabytes a caller could claim. CrateIsValid (manifest_exec) already
-     * guarantees size <= capacity, so `want` is always a safe read length. */
     uint64_t want = str_crate->size < 4096u ? str_crate->size : 4096u;
     if (want == 0) return ERR_INVALID_ADDRESS;
     char *str = kmalloc((size_t)want);
@@ -142,11 +98,6 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
         return ERR_INVALID_ADDRESS;
     }
 
-    /* Hold the console lock around the whole VGA run.
-     * The framebuffer and cursor are global state; without serialisation
-     * a kprintf from another core (or another user process calling
-     * vga_puts in parallel) would interleave at cell-level and produce
-     * the character-salad screen the user saw on 2026-05-15. */
     console_lock_acquire();
 
     uint32_t old_fg, old_bg;
@@ -159,7 +110,7 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
         char c = str[i];
         if (c == '\0') break;
         VideoPrintCharCur(c);
-        LogRingPut(c);           /* see HwVgaMirrorChar */
+        LogRingPut(c);
         chars_written++;
     }
     VideoBatchEnd();
@@ -186,22 +137,6 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
     return OK;
 }
 
-/* HW_VGA_PAINT  params:[u8 row][u8 col][u8 height][u8 width]
- *               in_crate: height*width TextCell, row-major, `width` per row
- *
- * A PICTURE, NOT SPEECH — and that is why nothing here reaches the log ring.
- * Every other op on this deck mirrors what it puts on screen into the ring so
- * the serial line and `logsave` carry the machine's account of itself. A
- * painted frame has no account to give: it is 6144 cells of colour thirty
- * times a second, and mirroring it would take the ring's global lock a
- * hundred thousand times a second and bury every word the machine actually
- * said under a screenful of spaces. What a painting program has to say, it
- * says in words, through printf, like everything else.
- *
- * One op is also one Canvas commit and therefore one Present: the whole
- * frame reaches the glass in a single blit, with no tear down its middle.
- * Painted through vga_putchar_at it would have been 6144 ops, ~141 KB of
- * Manifest, and — past boxlib's 4 KiB builder — a dozen separate blits. */
 static int HwVgaPaint(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                       const OpContext *ctx)
 {
@@ -215,23 +150,13 @@ static int HwVgaPaint(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     uint32_t width  = op->params[3];
     if (height == 0 || width == 0) return ERR_INVALID_ARGUMENT;
 
-    /* The rectangle's size is the contract, not a maximum: a crate that is
-     * one cell short would otherwise be painted with whatever followed it in
-     * the caller's address space. Exact, or refused. */
     Crate   *src  = &crates[op->in_crate];
     uint64_t want = (uint64_t)height * width * sizeof(TextCell);
     if (src->size != want) return ERR_INVALID_ARGUMENT;
 
-    /* Snapshot outside the console lock — the same rule as PUTSTRING: user
-     * memory is page-walked (and any page straddle handled) before any lock
-     * is taken. crate_in_buf caps nothing, and it does not need to: `want` is
-     * bounded by 255*255 cells because the geometry arrives as four bytes. */
     TextCell *cells = (TextCell *)crate_in_buf(src, ctx);
     if (!cells) return ERR_INVALID_ADDRESS;
 
-    /* Resolve the sentinels here rather than in boxlib: this is the snapshot,
-     * so the pass is free, and the Canvas keeps its rule that nothing but a
-     * concrete triple ever reaches a cell. */
     for (uint64_t i = 0, n = (uint64_t)height * width; i < n; i++) {
         cells[i].fg = BoxColorResolveFg(cells[i].fg);
         cells[i].bg = BoxColorResolveBg(cells[i].bg);
@@ -245,8 +170,6 @@ static int HwVgaPaint(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return fit ? OK : ERR_OUT_OF_RANGE;
 }
 
-/* HW_VGA_CLEAR_SCREEN  params:[u32 fg][u32 bg] — every cell becomes a
- * space in this pair; the current colour state is untouched. */
 static int HwVgaClearScreen(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                             const OpContext *ctx)
 {
@@ -258,7 +181,6 @@ static int HwVgaClearScreen(const ManifestOp *op, Crate *crates, uint16_t crate_
     return OK;
 }
 
-/* HW_VGA_CLEAR_LINE  params:[u8 row][u32 fg][u32 bg] */
 static int HwVgaClearLine(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
 {
@@ -273,7 +195,6 @@ static int HwVgaClearLine(const ManifestOp *op, Crate *crates, uint16_t crate_co
     return OK;
 }
 
-/* HW_VGA_CLEAR_TO_EOL  params: none */
 static int HwVgaClearToEol(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                            const OpContext *ctx)
 {
@@ -282,7 +203,6 @@ static int HwVgaClearToEol(const ManifestOp *op, Crate *crates, uint16_t crate_c
     return OK;
 }
 
-/* HW_VGA_GET_CURSOR  out_crate:[u8 row][u8 col] */
 static int HwVgaGetCursor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
 {
@@ -298,8 +218,6 @@ static int HwVgaGetCursor(const ManifestOp *op, Crate *crates, uint16_t crate_co
     return OK;
 }
 
-/* HW_VGA_SET_CURSOR  params:[u8 row][u8 col]
- *                    out_crate (optional): clamped [u8 row][u8 col] */
 static int HwVgaSetCursor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
 {
@@ -322,37 +240,6 @@ static int HwVgaSetCursor(const ManifestOp *op, Crate *crates, uint16_t crate_co
     return OK;
 }
 
-/* HW_VGA_STEP_CURSOR  params:[i32 delta]
- *
- * ‼ A RELATIVE MOVE IS RESOLVED WHERE THE POSITION LIVES, NOT WHERE IT IS
- * GUESSED.
- *
- * A line editor knows how far the caret must move — one cell left, four cells
- * back to the start of what it echoed — and it never knows where on the screen
- * that is: the column belongs to the console, which the kernel, the daemon and
- * every other program write to as well. Until this op the move was done in two
- * halves from outside: read the cursor with HW_VGA_GET_CURSOR, do the
- * arithmetic in userspace, write it back with HW_VGA_SET_CURSOR. Three things
- * were wrong with that, and this op ends all three.
- *
- * It read a position that could be stale by the time it was written. Anything
- * printed between the two calls — a kprintf from another core, another lane's
- * output — moved the cursor, and the step then landed relative to somebody
- * else's text.
- *
- * It made the caller do the arithmetic in cells, so it had to know how wide
- * the screen is. The width travels in a byte (HW_VGA_GET_DIMENSIONS), so on a
- * console wider than 255 columns the caller's arithmetic was wrong, and a
- * caller that failed to learn the width at all silently stopped moving the
- * cursor for the rest of the boot.
- *
- * And it cost three synchronous round trips per keystroke where one would do —
- * a read that had to flush the writer's batch, then the write. Backspace and
- * the arrow keys were three times heavier than typing a letter.
- *
- * The position is linear, row * cols + col, so a step crosses line ends the
- * way a reader expects, and it is clamped to the screen rather than wrapping
- * round: a caret cannot be stepped off the console it belongs to. */
 static int HwVgaStepCursor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                            const OpContext *ctx)
 {
@@ -367,7 +254,7 @@ static int HwVgaStepCursor(const ManifestOp *op, Crate *crates, uint16_t crate_c
 
     int cols = VideoGetCols();
     int rows = VideoGetRows();
-    if (cols <= 0 || rows <= 0) {          /* no console to move a caret on */
+    if (cols <= 0 || rows <= 0) {
         console_lock_release();
         return ERR_UNSUPPORTED;
     }
@@ -383,8 +270,6 @@ static int HwVgaStepCursor(const ManifestOp *op, Crate *crates, uint16_t crate_c
     return OK;
 }
 
-/* HW_VGA_SET_COLOR  params:[u32 fg][u32 bg]
- *                   out_crate (optional): [u32 old_fg][u32 old_bg] */
 static int HwVgaSetColor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                          const OpContext *ctx)
 {
@@ -405,7 +290,6 @@ static int HwVgaSetColor(const ManifestOp *op, Crate *crates, uint16_t crate_cou
     return OK;
 }
 
-/* HW_VGA_GET_COLOR  out_crate: [u32 fg][u32 bg] */
 static int HwVgaGetColor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                          const OpContext *ctx)
 {
@@ -420,7 +304,6 @@ static int HwVgaGetColor(const ManifestOp *op, Crate *crates, uint16_t crate_cou
     return OK;
 }
 
-/* HW_VGA_SCROLL_UP  no params */
 static int HwVgaScrollUp(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                          const OpContext *ctx)
 {
@@ -431,7 +314,6 @@ static int HwVgaScrollUp(const ManifestOp *op, Crate *crates, uint16_t crate_cou
     return OK;
 }
 
-/* HW_VGA_NEWLINE  out_crate (optional): [u8 row][u8 col] */
 static int HwVgaNewline(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                         const OpContext *ctx)
 {
@@ -453,28 +335,6 @@ static int HwVgaNewline(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     return OK;
 }
 
-/* HW_VGA_GET_DIMENSIONS  out_crate:[u8 cols][u8 rows]
- *
- * ‼ CLAMPED, NOT TRUNCATED, AND THE DIFFERENCE IS THE WHOLE POINT.
- *
- * The geometry travels in two bytes, so a console with more than 255 of
- * anything cannot be named in full here. This used to answer with a CAST:
- * a 2560-pixel GOP is 320 columns, and (uint8_t)320 is 64 — so a program
- * asked how wide the screen was, was told sixty-four, painted a fifth of the
- * glass and reported success. Worse, the value it was told was not even a
- * ceiling it could trust: 3840 px answered 224 of 480, and a program checking
- * for the zero that "too wide" was supposed to produce saw a plausible number
- * instead, because only an exact multiple of 2048 pixels wraps to zero.
- *
- * Clamping says the true thing this ABI can say: "255 is as far as you can
- * name". A program then paints the part of the screen it can address, and
- * everything it addresses is really there. A zero now has one meaning left —
- * there is no console — which is what VideoGetCols answers when the Canvas is
- * not ready, and that is worth being able to tell apart.
- *
- * The widening of the whole VGA ABI to sixteen bits is a separate piece of
- * work: it moves putchar_at, setcursor, clear_line, paint and this op, plus
- * every caller of vga_dimensions_t. Until then, this is the honest answer. */
 static int HwVgaGetDimensions(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                               const OpContext *ctx)
 {
@@ -493,9 +353,6 @@ static int HwVgaGetDimensions(const ManifestOp *op, Crate *crates, uint16_t crat
     return OK;
 }
 
-/* =========================================================================
- *  Timer
- * ========================================================================= */
 
 static int HwTimerGetTicks(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                            const OpContext *ctx)
@@ -518,11 +375,6 @@ static int HwTimerGetMs(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     Crate *out = &crates[op->out_crate];
     if (out->capacity < sizeof(uint64_t)) return ERR_BUFFER_TOO_SMALL;
 
-    /* Use the dedicated monotonic uptime counter (advanced per-tick by
-     * 1_000_000/freq µs) instead of deriving from `ticks * 1000 / freq`,
-     * which is NOT monotonic when the scheduler reprograms the PIT under
-     * load. The old derivation produced backwards-jumps causing S1's
-     * "elapsed=0xFFFFFFFFFFFF…" underflow. */
     uint64_t ms = pit_get_uptime_ms();
     if (crate_write(out, ctx, &ms, sizeof(uint64_t)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
@@ -541,9 +393,6 @@ static int HwTimerGetFreq(const ManifestOp *op, Crate *crates, uint16_t crate_co
     return OK;
 }
 
-/* =========================================================================
- *  RTC
- * ========================================================================= */
 
 static int HwRtcGetUnix64(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
@@ -558,7 +407,6 @@ static int HwRtcGetUnix64(const ManifestOp *op, Crate *crates, uint16_t crate_co
     return OK;
 }
 
-/* HW_RTC_GET_TIME  out_crate: BoxTime (20 bytes packed) */
 static int HwRtcGetTime(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                         const OpContext *ctx)
 {
@@ -573,7 +421,6 @@ static int HwRtcGetTime(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     return OK;
 }
 
-/* HW_RTC_GET_UPTIME  out_crate: u64 ns */
 static int HwRtcGetUptime(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
 {
@@ -587,9 +434,6 @@ static int HwRtcGetUptime(const ManifestOp *op, Crate *crates, uint16_t crate_co
     return OK;
 }
 
-/* =========================================================================
- *  Port I/O
- * ========================================================================= */
 
 static int HwPortInb(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
@@ -677,9 +521,6 @@ static int HwPortOutl(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return OK;
 }
 
-/* =========================================================================
- *  IRQ
- * ========================================================================= */
 
 static int HwIrqEnable(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
@@ -740,9 +581,6 @@ static int HwIrqGetIrr(const ManifestOp *op, Crate *crates, uint16_t crate_count
     return OK;
 }
 
-/* =========================================================================
- *  CPU
- * ========================================================================= */
 
 static int HwCpuHalt(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
@@ -752,13 +590,7 @@ static int HwCpuHalt(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return OK;
 }
 
-/* =========================================================================
- *  Disk (ATA primary master/slave info + cache flush)
- * ========================================================================= */
 
-/* HW_DISK_INFO  params:[u8 is_master]
- *               out_crate: [u8 exists][char model[40]][char serial[20]]
- *                          [u64 total_sectors][u64 size_mb]   = 77 bytes */
 static int HwDiskInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                       const OpContext *ctx)
 {
@@ -782,17 +614,6 @@ static int HwDiskInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return OK;
 }
 
-/* HW_DISK_FLUSH  params:[u8 is_master]
- *
- * The userspace ABI still carries the legacy 0/1 master/slave flag,
- * but the only durable thing it can mean today is "flush the TagFS
- * volume" — that is the device any commit really cares about. Route
- * through tagfs_flush_cache(), which resolves the volume location
- * (AHCI port number or ATA drive index) at the storage layer and
- * therefore stays correct on every (ATA, AHCI) × (boot port) combo.
- * The is_master parameter is preserved for ABI stability and logged
- * for diagnostics.
- */
 static int HwDiskFlush(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
@@ -803,9 +624,6 @@ static int HwDiskFlush(const ManifestOp *op, Crate *crates, uint16_t crate_count
 }
 
 
-/* =========================================================================
- *  System power (reboot / shutdown — noreturn)
- * ========================================================================= */
 
 static int HwSystemReboot(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
@@ -814,7 +632,7 @@ static int HwSystemReboot(const ManifestOp *op, Crate *crates, uint16_t crate_co
     debug_printf("[HardwareDeck] reboot requested by PID %u\n",
                  (ctx && ctx->proc) ? ctx->proc->pid : 0);
     system_halt(true);
-    return OK; /* unreachable */
+    return OK;
 }
 
 static int HwSystemShutdown(const ManifestOp *op, Crate *crates, uint16_t crate_count,
@@ -824,72 +642,17 @@ static int HwSystemShutdown(const ManifestOp *op, Crate *crates, uint16_t crate_
     debug_printf("[HardwareDeck] shutdown requested by PID %u\n",
                  (ctx && ctx->proc) ? ctx->proc->pid : 0);
     system_halt(false);
-    return OK; /* unreachable */
+    return OK;
 }
 
-/* =========================================================================
- *  USB (xHCI control surface)
- * ========================================================================= */
 
-/*
- * ‼ WHAT THIS SURFACE DELIBERATELY NO LONGER OFFERS
- *
- * `hw.usb.init` (opcode 0x90) and `hw.usb.stop` (0x93) are gone, and their
- * numbers are retired for ever — see hardware_deck.h. They were not operations.
- * They were two of the driver's own boot steps, exposed by name to anything
- * carrying the system tag.
- *
- *   init  ran xhci_init() a second time. That begins with a memset of the whole
- *         device-slot table — every live device on the machine, including the
- *         medium the filesystem is mounted from, silently becomes idle — and
- *         then finds the SAME PCI function again and brings it up a second time
- *         into a second controller structure: a second MMIO mapping, a second
- *         set of rings and DCBAA (the first leaks), a reset that drops the bus,
- *         and MSI moved to the neighbouring vector so interrupts arrive at the
- *         new structure while the old one is drained for ever by every "for
- *         each controller" loop in the driver.
- *
- *   stop  returned OK and did nothing at all, and said so in its own comment.
- *         There is no xhci_stop, and halting the controller a machine reads its
- *         volume through is not an operation anybody wants offered by name.
- *
- * What replaced them is one honest thing: hw.usb.reset now means "put this
- * controller back in service", which is the whole eleven-step repair the driver
- * already implements — not the single step it used to run.
- */
 
-/*
- * Every USB op below names the controller it is about, as its first parameter.
- *
- * A machine has as many USB controllers as it has: one on the chipset where
- * the sockets on the case are, and very often another on a graphics card. Which
- * of them a bus walk reaches first is decided by topology — a PCIe bridge sits
- * at device 1 and the chipset controller at device 0x14, so a depth-first walk
- * meets the graphics card first. "The controller" names nothing.
- *
- * Controllers are numbered from zero in the order they were brought up, and an
- * index past the last one is refused. That is also how a caller learns how many
- * there are: ask, and be told no.
- */
 static xhci_controller_t *usb_named_controller(const ManifestOp *op)
 {
     if (op->param_size < 1) return NULL;
     return xhci_controller_at(op->params[0]);
 }
 
-/*
- * HW_USB_RESET  params:[u8 controller] — put this controller back in service.
- *
- * The whole repair, not the first step of it. What this used to be was a bare
- * xhci_reset: the controller was halted and cleared, and then nothing — its
- * registers left at zero, this driver's own `running` and `initialized` still
- * claiming it was healthy, `error_state` still clear so the automatic repair
- * would never come for it, and every device slot still naming a device the
- * silicon had just forgotten. One system-authorised call and the machine's USB
- * was dead until it was switched off and on, with no line anywhere saying so.
- *
- * A door, not a screwdriver from the lock.
- */
 static int HwUsbReset(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                       const OpContext *ctx)
 {
@@ -913,7 +676,6 @@ static int HwUsbStart(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return xhci_start(c) == 0 ? OK : ERR_INTERNAL;
 }
 
-/* HW_USB_PORT_STATUS  params:[u8 controller, u8 port]  out_crate: u32 portsc */
 static int HwUsbPortStatus(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                            const OpContext *ctx)
 {
@@ -935,7 +697,6 @@ static int HwUsbPortStatus(const ManifestOp *op, Crate *crates, uint16_t crate_c
     return OK;
 }
 
-/* HW_USB_PORT_RESET  params:[u8 controller, u8 port] */
 static int HwUsbPortReset(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
 {
@@ -948,22 +709,10 @@ static int HwUsbPortReset(const ManifestOp *op, Crate *crates, uint16_t crate_co
     if (port == 0 || port > c->max_ports) return ERR_INVALID_ARGUMENT;
     if (!xhci_port_has_device(c, port))   return ERR_DEVICE_NOT_READY;
 
-    /* Starting the reset is the whole of the operation. The port announces
-     * its own completion through a port-status change, and the enumeration
-     * state machine is what listens for it — so this returns as soon as the
-     * reset is in flight rather than holding a caller for the tens of
-     * milliseconds the hardware takes. A port that needed no reset (a USB 3
-     * link that trained itself) reports success without touching it. */
     int rc = xhci_port_begin_reset(c, port, NULL);
     return rc >= 0 ? OK : ERR_INTERNAL;
 }
 
-/* HW_USB_PORT_QUERY  params:[u8 controller]
- * out_crate:[u8 max_ports][u8 max_slots][u8 irq][u8 polling][u8 controllers]
- *
- * The last byte is how many controllers there are, so a caller that wants to
- * walk them all learns the number from the first one it asks rather than by
- * counting refusals. */
 static int HwUsbPortQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
 {
@@ -984,7 +733,6 @@ static int HwUsbPortQuery(const ManifestOp *op, Crate *crates, uint16_t crate_co
     return OK;
 }
 
-/* HW_USB_ENUM_DEVICE  params:[u8 controller, u8 port] */
 static int HwUsbEnumDevice(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                            const OpContext *ctx)
 {
@@ -1000,7 +748,6 @@ static int HwUsbEnumDevice(const ManifestOp *op, Crate *crates, uint16_t crate_c
     return ERR_INTERNAL;
 }
 
-/* HW_USB_GET_INFO  params:[u8 slot_id]  out_crate:[u8 slot][u8 port][u8 state] */
 static int HwUsbGetInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                         const OpContext *ctx)
 {
@@ -1025,30 +772,6 @@ static int HwUsbGetInfo(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     return OK;
 }
 
-/* ── proving the door, on the machine it has to hold ──────────────────────────
- *
- * A boot self-test rather than a unit test, for the reason the Boardroom's and
- * the ring's already give: the thing being tested is a conversation with the
- * silicon in front of it. Whether a controller comes back from a reset, whether
- * the devices on it are found again, and whether the keyboard a person is
- * typing on survives the whole of it are facts about THIS machine and cannot be
- * established anywhere else.
- *
- * ‼ IT IS THE OP THAT IS PROVED, NOT THE DRIVER BEHIND IT. The handler is
- * reached the way the dispatcher reaches it — looked up in the registry by
- * op_kind, called with a ManifestOp built the way a caller builds one. A test
- * that called xhci_put_back_in_service directly would prove the driver and say
- * nothing about the surface, and the surface is what had two ops on it that
- * broke the machine.
- *
- * WHEN, and it is a fact rather than a clock: the first pass through the idle
- * or guide loop on which this machine has a controller in service AND a volume
- * mounted. Before that there is nothing to lose and the proof would prove
- * nothing; there is no moment to wait out and no deadline to expire.
- *
- * Gated behind USBRECOVER=on. This costs the machine every USB device it has,
- * once, and is not something a shipped build does to itself.
- */
 #if CONFIG_USB_RECOVER_PROOF
 void HardwareDeckUsbRecoverProof(void)
 {
@@ -1062,8 +785,6 @@ void HardwareDeckUsbRecoverProof(void)
     kprintf("[USB RECOVER TEST] begin — a controller in service and a volume "
             "on seat %u\n", tagfs_get_seat());
 
-    /* The two that were withdrawn. Their numbers are spent for ever, so the
-     * only right answer the registry can give about them is "no such op". */
     int gone = 0;
     if (!OpRegistryLookup(OP_KIND(HARDWARE_DECK_ID, 0x90u))) gone++;
     if (!OpRegistryLookup(OP_KIND(HARDWARE_DECK_ID, 0x93u))) gone++;
@@ -1088,8 +809,6 @@ void HardwareDeckUsbRecoverProof(void)
                 "system-only\n");
     }
 
-    /* One op, one parameter: which controller. Built the way a caller builds
-     * one, packed so `params` really does begin where the header ends. */
     struct __packed {
         ManifestOp head;
         uint8_t    params[1];
@@ -1099,7 +818,7 @@ void HardwareDeckUsbRecoverProof(void)
     req.head.in_crate   = CRATE_INDEX_NONE;
     req.head.out_crate  = CRATE_INDEX_NONE;
     req.head.param_size = 1;
-    req.params[0]       = 0;                    /* the first controller */
+    req.params[0]       = 0;
 
     OpContext ctx;
     memset(&ctx, 0, sizeof(ctx));
@@ -1114,12 +833,8 @@ void HardwareDeckUsbRecoverProof(void)
                 rc);
     }
 }
-#endif /* CONFIG_USB_RECOVER_PROOF */
+#endif
 
-/* =========================================================================
- *  Debug print — serial output from userspace via kernel kprintf
- *  HW_DEBUG_PRINT  in_crate: NUL-terminated string (max 256 bytes)
- * ========================================================================= */
 
 static int HwDebugPrint(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                         const OpContext *ctx)
@@ -1140,28 +855,10 @@ static int HwDebugPrint(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     return OK;
 }
 
-/* =========================================================================
- *  Log ring — what this kernel has said, asked for from userspace
- *
- *  HW_LOG_READ  params:    [u64 from]  — ring position to read from
- *               out_crate: [u64 oldest][u64 written][u64 copied][bytes...]
- *
- *  Self-describing on purpose: `oldest` says where the ring actually begins
- *  now, so a reader the writers overtook learns the size of its gap instead
- *  of splicing two ends of the log together and believing the seam.
- *
- *  Bounded to a page per call. LogRingRead copies with interrupts off, and
- *  the length of that window is the only price the rest of the machine pays
- *  for being asked what it said; a reader that wants more asks again.
- * ========================================================================= */
 
 #define HW_LOG_READ_HEADER  24u
 #define HW_LOG_READ_CHUNK   4096u
 
-/* One reader for both banks: the log this boot is still writing, and the one
- * the boot before it left behind. They differ only in which function supplies
- * the bytes, and a second copy of the crate arithmetic would be a second place
- * for the header offsets to drift. */
 typedef uint64_t (*LogSource)(uint64_t, void *, uint64_t, uint64_t *, uint64_t *);
 
 static int HwLogReadFrom(LogSource source, const ManifestOp *op, Crate *crates,
@@ -1197,11 +894,6 @@ static int HwLogReadFrom(LogSource source, const ManifestOp *op, Crate *crates,
     return (crc == OK) ? OK : ERR_INVALID_ADDRESS;
 }
 
-/* What the run before this one said. A kernel built without the carry-over
- * window (PRINTTOFILE) says so, rather than answering with an empty log that
- * reads exactly like a machine that never spoke; an empty answer from a
- * kernel that HAS the window means nothing came through the last reset,
- * which is a different fact and one the caller is left to report. */
 static int HwLogPrevious(const ManifestOp *op, Crate *crates,
                          uint16_t crate_count, const OpContext *ctx)
 {
@@ -1214,8 +906,6 @@ static int HwLogPrevious(const ManifestOp *op, Crate *crates,
 #endif
 }
 
-/* What this run has said so far. Every kernel keeps it: the ring is the
- * serial line's source. */
 static int HwLogRead(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
@@ -1223,9 +913,6 @@ static int HwLogRead(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return HwLogReadFrom(LogRingRead, op, crates, ctx);
 }
 
-/* =========================================================================
- *  Registration
- * ========================================================================= */
 
 error_t HardwareDeckRegister(void)
 {
@@ -1235,33 +922,26 @@ error_t HardwareDeckRegister(void)
         uint32_t    auth;
         const char *name;
     } table[] = {
-        /* Timer + RTC: read-only telemetry, anyone can use. */
         { HW_TIMER_GET_TICKS,    HwTimerGetTicks,    OP_AUTH_NONE,   "hw.timer.ticks"   },
         { HW_TIMER_GET_MS,       HwTimerGetMs,       OP_AUTH_NONE,   "hw.timer.ms"      },
         { HW_TIMER_GET_FREQ,     HwTimerGetFreq,     OP_AUTH_NONE,   "hw.timer.freq"    },
         { HW_RTC_GET_TIME,       HwRtcGetTime,       OP_AUTH_NONE,   "hw.rtc.time"      },
         { HW_RTC_GET_UNIX64,     HwRtcGetUnix64,     OP_AUTH_NONE,   "hw.rtc.unix64"    },
         { HW_RTC_GET_UPTIME,     HwRtcGetUptime,     OP_AUTH_NONE,   "hw.rtc.uptime"    },
-        /* Port I/O: arbitrary I/O space access — system+ only. */
         { HW_PORT_INB,           HwPortInb,          OP_AUTH_SYSTEM, "hw.port.inb"      },
         { HW_PORT_OUTB,          HwPortOutb,         OP_AUTH_SYSTEM, "hw.port.outb"     },
         { HW_PORT_INW,           HwPortInw,          OP_AUTH_SYSTEM, "hw.port.inw"      },
         { HW_PORT_OUTW,          HwPortOutw,         OP_AUTH_SYSTEM, "hw.port.outw"     },
         { HW_PORT_INL,           HwPortInl,          OP_AUTH_SYSTEM, "hw.port.inl"      },
         { HW_PORT_OUTL,          HwPortOutl,         OP_AUTH_SYSTEM, "hw.port.outl"     },
-        /* IRQ control: privileged. */
         { HW_IRQ_ENABLE,         HwIrqEnable,        OP_AUTH_SYSTEM, "hw.irq.enable"    },
         { HW_IRQ_DISABLE,        HwIrqDisable,       OP_AUTH_SYSTEM, "hw.irq.disable"   },
         { HW_IRQ_GET_ISR,        HwIrqGetIsr,        OP_AUTH_SYSTEM, "hw.irq.isr"       },
         { HW_IRQ_GET_IRR,        HwIrqGetIrr,        OP_AUTH_SYSTEM, "hw.irq.irr"       },
         { HW_IRQ_SEND_EOI,       HwIrqSendEoi,       OP_AUTH_SYSTEM, "hw.irq.eoi"       },
-        /* CPU halt: privileged (would freeze the system if app called it). */
         { HW_CPU_HALT,           HwCpuHalt,          OP_AUTH_SYSTEM, "hw.cpu.halt"      },
-        /* Disk: info is read-only; flush is cooperative — both NONE. */
         { HW_DISK_INFO,          HwDiskInfo,         OP_AUTH_NONE,   "hw.disk.info"     },
         { HW_DISK_FLUSH,         HwDiskFlush,        OP_AUTH_NONE,   "hw.disk.flush"    },
-        /* Keyboard: anyone reading their own focused input. */
-        /* VGA: cosmetic, anyone. */
         { HW_VGA_PUTCHAR,        HwVgaPutChar,       OP_AUTH_NONE,   "hw.vga.putchar"   },
         { HW_VGA_PUTSTRING,      HwVgaPutString,     OP_AUTH_NONE,   "hw.vga.putstring" },
         { HW_VGA_CLEAR_SCREEN,   HwVgaClearScreen,   OP_AUTH_NONE,   "hw.vga.clear"     },
@@ -1276,15 +956,11 @@ error_t HardwareDeckRegister(void)
         { HW_VGA_GET_DIMENSIONS, HwVgaGetDimensions, OP_AUTH_NONE,   "hw.vga.dims"      },
         { HW_VGA_PAINT,          HwVgaPaint,         OP_AUTH_NONE,   "hw.vga.paint"     },
         { HW_VGA_STEP_CURSOR,    HwVgaStepCursor,    OP_AUTH_NONE,   "hw.vga.step"      },
-        /* System power: only system-tagged processes can reboot/shutdown. */
         { HW_SYSTEM_REBOOT,      HwSystemReboot,     OP_AUTH_SYSTEM, "hw.system.reboot"  },
         { HW_SYSTEM_SHUTDOWN,    HwSystemShutdown,   OP_AUTH_SYSTEM, "hw.system.shutdown"},
         { HW_DEBUG_PRINT,        HwDebugPrint,       OP_AUTH_NONE,   "hw.debug.print"    },
         { HW_LOG_READ,           HwLogRead,          OP_AUTH_UTILITY,"hw.log.read"       },
         { HW_LOG_PREVIOUS,       HwLogPrevious,      OP_AUTH_UTILITY,"hw.log.previous"   },
-        /* USB: hardware control, system+. Nothing here can leave a controller
-         * halfway through anything — see the note above HwUsbReset for the two
-         * that could and are gone. */
         { HW_USB_RESET,          HwUsbReset,         OP_AUTH_SYSTEM, "hw.usb.reset"     },
         { HW_USB_START,          HwUsbStart,         OP_AUTH_SYSTEM, "hw.usb.start"     },
         { HW_USB_PORT_STATUS,    HwUsbPortStatus,    OP_AUTH_SYSTEM, "hw.usb.port.status"},

@@ -14,12 +14,10 @@ int broadcast(const char* tag, const void* data, uint16_t size);
 int listen(uint64_t required_tags, uint8_t flags);
 bool receive(Result* out);
 bool receive_wait(Result* out, uint32_t timeout_ms);
-/* A program's arguments are not a message: they are its Luggage, in its cabin
- * from the first instruction — see box/luggage.h. */
 
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // IPC_H
+#endif

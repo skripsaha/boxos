@@ -1,19 +1,3 @@
-/*
- * headcount — every carrier of a tag is told once, and every one answers.
- *
- * The oracle of system.broadcast. The parent claims the answer tag, starts
- * CREW children that carry the crew tag from boarding (a spawn tag), says one
- * word to that tag — once — and counts the answers. A child reads the one
- * message it is sent, answers on the answer tag and leaves. The answer is a
- * Touch: a full ring owes it, it is never lost, so the count is exact.
- *
- * Every child must answer. broadcast used to take the carriers of a tag into
- * a stack tray of 256 and stop when the tray was full, so the 257th carrier
- * was never told, and nothing said so. CREW is more than that tray was.
- *
- *   headcount            the parent — [HEADCOUNT] PASS / FAIL
- *   headcount answer     a child, started by the parent, never by hand
- */
 
 #include "box/print.h"
 #include "box/ipc.h"
@@ -30,7 +14,7 @@
 static int answer(void)
 {
     Result word;
-    if (!receive_wait(&word, 0)) return 1;   /* no deadline: the word is coming */
+    if (!receive_wait(&word, 0)) return 1;
     return touch_send(TOUCH_TAG_PAIR(ANSWER_TAG), NULL, 0, 0) < 0 ? 1 : 0;
 }
 

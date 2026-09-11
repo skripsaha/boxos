@@ -6,12 +6,10 @@
 
 static tss_t kernel_tss;
 
-// Phase 1: static stacks for early boot (before PMM/VMM)
 static uint8_t ist_stacks_boot[IST_COUNT][IST_STACK_SIZE] __attribute__((aligned(16)));
 static uint8_t kernel_stack_boot[32768] __attribute__((aligned(16)));
 
-// Phase 2: dynamic IST stacks with guard pages (set by tss_setup_dynamic_stacks)
-static void *ist_guard_bases[IST_COUNT];  // for diagnostics
+static void *ist_guard_bases[IST_COUNT];
 
 void tss_init(void) {
     debug_printf("[TSS] Initializing Task State Segment...\n");
@@ -22,7 +20,6 @@ void tss_init(void) {
     kernel_tss.rsp1 = 0;
     kernel_tss.rsp2 = 0;
 
-    // IST1-5 only, IST6-7 unused
     for (int i = 0; i < 5; i++) {
         uint64_t stack_top = (uint64_t)ist_stacks_boot[i] + IST_STACK_SIZE - 16;
 
@@ -50,7 +47,7 @@ void tss_init(void) {
         }
     }
 
-    kernel_tss.iomap_base = sizeof(tss_t);  // No I/O bitmap
+    kernel_tss.iomap_base = sizeof(tss_t);
 
     debug_printf("[TSS] RSP0 (Ring 0 stack): 0x%p\n", (void*)kernel_tss.rsp0);
     debug_printf("[TSS] IOMAP base: 0x%04x\n", kernel_tss.iomap_base);
@@ -82,17 +79,12 @@ void tss_setup_dynamic_stacks(void) {
         void *virt_base = vmm_phys_to_virt((uintptr_t)phys);
         ist_guard_bases[i] = virt_base;
 
-        // Unmap guard page (first page)
         pte_t *guard_pte = vmm_get_or_create_pte(kernel_ctx, (uintptr_t)virt_base);
         if (guard_pte) {
             *guard_pte = 0;
-            /* Cross-core shootdown — without it, other cores keep the
-             * cached huge Pull-Map entry and IST stack overflow lands
-             * on real RAM instead of the guard. */
             vmm_shootdown_page(kernel_ctx, (uintptr_t)virt_base);
         }
 
-        // Stack top = base + guard + data - 16 (alignment)
         uint64_t stack_top = (uint64_t)virt_base + (total_pages * 4096) - 16;
 
         switch (i) {
@@ -125,7 +117,6 @@ tss_t* tss_get_ptr(void) {
 }
 
 uint64_t tss_get_ist_stack(int ist_num) {
-    // access IST entries by index without pointer arithmetic on struct members
     switch (ist_num) {
         case 1: return kernel_tss.ist1;
         case 2: return kernel_tss.ist2;

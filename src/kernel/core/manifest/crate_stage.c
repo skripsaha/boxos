@@ -1,9 +1,3 @@
-/*
- * CrateStage — implementation.
- *
- * See crate_stage.h for the architectural rationale and the
- * handler/dispatcher ownership protocol.
- */
 
 #include "crate_stage.h"
 #include "ktypes.h"
@@ -39,14 +33,6 @@ error_t crate_stage_commit_and_release(Crate                *crates,
 {
     if (!crates) return OK;
     error_t rc = OK;
-    /*
-     * user_uaddr == 0 is the sentinel for "kernel-internal staging" — used
-     * by touch_react_deliver where the Crate descriptor is synthesized
-     * inside the kernel and the subscriber's manifest never asked for a
-     * user-side write-back. In that mode we skip commit_out entirely and
-     * just kfree. The Pocket-dispatch path in guide.c always passes a
-     * real user vaddr, so this sentinel only matches the intended caller.
-     */
     if (count > 0 && cabin && user_uaddr != 0) {
         size_t bytes = (size_t)count * sizeof(Crate);
         rc = vmm_user_buf_commit_out(cabin, (uintptr_t)user_uaddr, crates, bytes);
@@ -55,7 +41,6 @@ error_t crate_stage_commit_and_release(Crate                *crates,
                          rc, (unsigned long)user_uaddr, (unsigned long)bytes);
         }
     }
-    /* Always free, even on commit failure — the buffer must not leak. */
     kfree(crates);
     return rc;
 }

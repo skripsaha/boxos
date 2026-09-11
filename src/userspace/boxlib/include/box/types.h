@@ -7,7 +7,6 @@
 #include "boxos_sizes.h"
 #include "boxos_decks.h"
 
-// Cabin addresses
 #define CABIN_INFO_VADDR   CABIN_INFO_ADDR
 #define POCKET_RING_VADDR  CABIN_POCKET_RING_ADDR
 #define RESULT_RING_VADDR  CABIN_RESULT_RING_ADDR
@@ -27,4 +26,4 @@
 
 typedef uint32_t file_id_t;
 
-#endif // BOX_TYPES_H
+#endif

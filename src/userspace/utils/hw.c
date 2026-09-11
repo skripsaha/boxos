@@ -1,16 +1,3 @@
-/*
- * hw — real-HW per-process state utility.
- *
- *   hw                         — CPU feature summary (from cpu_caps page)
- *   hw cpu                     — full CPU feature table
- *   hw pku get [<pkey>]        — read PKRU (all keys or one)
- *   hw pku set <pkey> <ad> <wd>— write a single PKRU slot
- *   hw lam get                 — read this process's LAM mode
- *   hw lam set none|u48|u57    — set this process's LAM mode
- *
- * Region-tag operations (pku-region, dump-*) live in `memtag` — they
- * operate on a region, not on the calling process's CPU state.
- */
 
 #include "box/print.h"
 #include "box/luggage.h"
@@ -44,7 +31,6 @@ static const char *lam_name(int mode)
     }
 }
 
-/* ─── CPU feature table ─────────────────────────────────────────────── */
 
 static void do_cpu(void)
 {
@@ -60,7 +46,6 @@ static void do_cpu(void)
     printf("  TME / TME-MK  : %s\n", yn(cpu_has_tme()));
 }
 
-/* ─── PKRU ──────────────────────────────────────────────────────────── */
 
 static void print_pkey_rights(uint8_t pkey)
 {
@@ -112,7 +97,6 @@ static void do_pku_set(uint8_t pkey, int ad, int wd)
     }
 }
 
-/* ─── LAM ───────────────────────────────────────────────────────────── */
 
 static void do_lam_get(void)
 {
@@ -152,11 +136,9 @@ static void do_lam_set(const char *arg)
     }
 }
 
-/* ─── TME ─────────────────────────────────────────────────────────── */
 
 static const char *tme_alg_name(uint8_t alg)
 {
-    /* IA32_TME_ACTIVATE.ALGS_ENABLED bits [7:4] — algorithm field */
     switch (alg) {
         case 0:  return "AES-XTS-128";
         case 1:  return "AES-XTS-128 + integrity";

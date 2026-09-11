@@ -1,11 +1,3 @@
-/*
- * PMM poison-page bitmap test (Phase 2F).
- *
- * Verifies pmm_set_poisoned / pmm_is_poisoned / pmm_is_range_poisoned
- * atomic byte-OR semantics and pmm_alloc / pmm_free leak-on-poison
- * behaviour. Previously bundled inside memtag_test.c Phase 14K; split
- * out so PMM tests live next to PMM code.
- */
 
 #include "pmm.h"
 #include "klib.h"
@@ -19,7 +11,6 @@ void PmmPoisonTest(void) {
     kprintf("[PMM TEST] Starting poison-bitmap test...\n");
     size_t pass = 0, fail = 0;
 
-    /* Allocate a fresh DMA32 page — initially clean. */
     void *clean = pmm_alloc(1, PHYS_TAG_DMA32);
     PT_CHECK(clean != NULL, "alloc DMA32 page");
 
@@ -36,10 +27,6 @@ void PmmPoisonTest(void) {
     PT_CHECK(!pmm_is_range_poisoned(target + 0x100000, 1),
              "pmm_is_range_poisoned negative for clean range");
 
-    /* Free + re-alloc: alloc-side retry MUST skip the poisoned phys.
-     * Buddy LIFO returns the same chunk → my retry detects poison,
-     * marks every page poisoned, leaks the chunk, retries with next
-     * available. Result: returned addr != target. */
     pmm_free(clean, 1);
     void *retry = pmm_alloc(1, PHYS_TAG_DMA32);
     if (retry != NULL) {
@@ -51,7 +38,6 @@ void PmmPoisonTest(void) {
                 "test PASSES via NULL return\n");
     }
 
-    /* Idempotent set_poisoned — second set shouldn't double-count. */
     size_t mid = pmm_poisoned_page_count();
     pmm_set_poisoned(target);
     PT_CHECK(pmm_poisoned_page_count() == mid,

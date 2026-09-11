@@ -1,10 +1,3 @@
-/*
- * memory_resource.cpp — std::pmr global resources + the memory_resource
- * key function (single vtable/typeinfo emission). The default-resource
- * pointer is an __atomic pointer so set/get_default_resource are safe under
- * the strands epic / cross-core use, defaulting lazily to
- * new_delete_resource().
- */
 
 #include <memory_resource>
 #include <new>
@@ -46,7 +39,7 @@ class NullResource final : public memory_resource {
 
 memory_resource *g_default = nullptr;
 
-} // namespace
+}
 
 memory_resource *new_delete_resource() noexcept
 {
@@ -80,4 +73,4 @@ memory_resource *set_default_resource(memory_resource *r) noexcept
     return prev ? prev : new_delete_resource();
 }
 
-} // namespace std::pmr
+}

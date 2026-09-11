@@ -32,7 +32,6 @@ static void uint64_to_hex(uint64_t v, char *buf, int *len)
     for (int i = n - 1; i >= 0; i--) buf[(*len)++] = tmp[i];
 }
 
-/* Minimal vsnprintf supporting %s %d %u %x %lu %lx — no width/prec. */
 static int debug_vsnprintf(char *dst, int cap, const char *fmt, va_list ap)
 {
     int pos = 0;
@@ -85,28 +84,13 @@ static int debug_vsnprintf(char *dst, int cap, const char *fmt, va_list ap)
 void kdbg(const char *msg)
 {
     if (!msg) return;
-    /* WITHOUT a deadline, deliberately. The 60s budget that stood here was
-     * this file's own diagnosis half-applied: it documented that a timeout
-     * leaves the real reply orphaned in the ResultRing, where the very next
-     * MfCall1 pops it as ITS own answer (S2 final_rc=302/902 cascade) — and
-     * then kept a timer anyway, only longer. HW_DEBUG_PRINT is answered
-     * synchronously; the reply is guaranteed, so nothing needs guarding,
-     * and 16-core congestion proved even 60s is a guess something can
-     * outlast. An answer that never comes is a kernel defect Nightwatch
-     * names. */
     MfCall1(DECK_HARDWARE, HW_DEBUG_PRINT,
             NULL, 0,
             msg, (uint32_t)(strlen(msg) + 1),
             NULL, 0, NULL,
-            0 /* no deadline — reply guaranteed */, NULL);
+            0 , NULL);
 }
 
-/* Say it without waiting for an answer. For the one place a wait cannot be
- * afforded: a strand whose ring holds, at its head, a record it has nowhere
- * to keep (box/core/stash.h) — the answer to a print would stand behind it.
- * The kernel reads the text and the crate after this returns, so both are
- * static, and the line is one per process: a second call is dropped rather
- * than overwrite a line the kernel may still be reading. */
 void kdbg_nowait(const char *msg)
 {
     static char    text[256];

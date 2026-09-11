@@ -1,10 +1,3 @@
-/* draft_file.c — the volume side. Everything that crosses between the draft in
- * memory and the tagged file it came from lives here: which file the given
- * name and tags actually mean, reading it in whole however many pieces the
- * storage hands over, and putting the bytes back with the tail cut and the
- * write confirmed. It says what happened into the message line and paints
- * nothing itself.
- */
 
 #include "box/memory.h"
 #include "box/string.h"
@@ -13,9 +6,6 @@
 
 #include "draft.h"
 
-/* ---------------------------------------------------------------------------
- * The volume — resolving a name, reading it, writing it back.
- * ------------------------------------------------------------------------- */
 
 void tagline_from(uint32_t fid)
 {
@@ -50,11 +40,6 @@ char *join_with_commas(const char *const *words, uint32_t count)
     return list;
 }
 
-/* Which files on the volume answer to this name. With tags, the ask is the
- * name's stem AND every tag — the BoxOS answer to "which notes.txt did you
- * mean" — and the answers are then held to the filename exactly, because a
- * stem is shared by every extension of it. Returns the count and hands back a
- * malloc'd list the caller frees, or a negative -error_t. */
 int matches_by_name(const char *name, const char *tags, uint32_t **out_ids)
 {
     *out_ids = NULL;
@@ -102,8 +87,6 @@ int matches_by_name(const char *name, const char *tags, uint32_t **out_ids)
     return kept;
 }
 
-/* A short read is not an error — it is the storage answering with what it had
- * in hand, so the loop asks again until the whole size is here. */
 int load_content(void)
 {
     file_info_t info;
@@ -162,10 +145,6 @@ void save_book(void)
     }
     free(bytes);
 
-    /* Shrink-only by construction: a draft that GREW has no tail to cut, and
-     * the volume says so with ERR_INVALID_ARGUMENT. That is this call
-     * succeeding, and treating it as a failure would call every growing save
-     * broken. */
     int rc = file_truncate(g_fid, len);
     if (rc != 0 && box_errno_of(rc) != ERR_INVALID_ARGUMENT) {
         msg_begin();
@@ -175,9 +154,6 @@ void save_book(void)
         return;
     }
 
-    /* The bytes left the cabin, so the buffer is no longer ahead of the file
-     * whatever the plate says next — but an unconfirmed write is not a safe
-     * one, and saying so is the whole point of asking. */
     g_dirty = 0;
     g_saves++;
 

@@ -1,41 +1,24 @@
-/*
- * ManifestStage — implementation.
- *
- * See manifest_stage.h for the architectural rationale and tier semantics.
- *
- * This file owns:
- *   - the private layout of struct ManifestStage
- *   - the static array g_stages[MAX_CORES] (one slot per K-Core)
- *   - the boot-time scratch sizing helper (autoscale by RAM/cores)
- *   - the acquire/release tier dispatch
- *   - the kprintf diagnostic dump
- */
 
 #include "manifest_stage.h"
-#include "manifest.h"      /* MANIFEST_RAW_MAX_SIZE */
+#include "manifest.h"
 #include "ktypes.h"
 #include "klib.h"
 #include "atomics.h"
 #include "amp.h"
 #include "pmm.h"
-#include "vmm.h"           /* vmm_phys_to_virt for NUMA-direct alloc */
-#include "acpi.h"          /* acpi_numa_domain_for_apic */
+#include "vmm.h"
+#include "acpi.h"
 
-/* ---- Private layout ---------------------------------------------------- */
 
 struct ManifestStage {
-    /* Scratch slab — preallocated at boot, lives forever. */
     uint8_t  *scratch;
     uint32_t  scratch_capacity;
     bool      scratch_in_use;
     uint8_t   kcore_id;
     uint8_t   _pad;
-    size_t    scratch_pages;     /* page count, needed for pmm_free on rollback */
-    void     *scratch_phys;      /* phys addr (NUMA path only); needed for pmm_free */
+    size_t    scratch_pages;
+    void     *scratch_phys;
 
-    /* Counters. __ATOMIC_RELAXED for read paths is intentional — these are
-     * statistics, not synchronisation primitives. Same-core writes need no
-     * special ordering since the K-Core invariant serialises producers. */
     uint64_t  c_scratch_acquires;
     uint64_t  c_kmalloc_acquires;
     uint64_t  c_reentry_fallbacks;
@@ -45,31 +28,11 @@ struct ManifestStage {
     uint32_t  _pad2;
 };
 
-/* MAX_CORES comes from amp.h. */
 static struct ManifestStage g_stages[MAX_CORES];
 static bool                 g_stages_initialized;
 
-/* Chosen per-K-Core scratch size, frozen at boot. Each stage holds its
- * own copy too — this global is just for diagnostic dumps. */
 static uint32_t g_scratch_per_core;
 
-/*
- * Two assertion flavours:
- *
- *   STAGE_ASSERT       — always-active. Used for load-bearing invariants
- *                        whose violation would silently corrupt kernel
- *                        memory (mismatched grant kbuf, double-release of
- *                        the scratch CAS, unknown tier enum, NULL kmalloc
- *                        kbuf in release). Better to crash than to limp
- *                        forward with corrupted dispatch state.
- *   STAGE_DEBUG_ASSERT — DEBUG-only. Used for soft invariants that have
- *                        a defined fallback path in release builds. The
- *                        re-entry detector belongs here: K-Core dispatch
- *                        is sequential by construction so re-entry MUST
- *                        NOT happen, but if it ever does the kmalloc tier
- *                        below is a safe fallback — better than panicking
- *                        a production kernel for a recoverable race.
- */
 #define STAGE_ASSERT(cond, msg) do {                                      \
     if (__builtin_expect(!(cond), 0)) {                                   \
         panic("[ManifestStage] %s (cond '%s' at %s:%d)",                  \
@@ -83,12 +46,7 @@ static uint32_t g_scratch_per_core;
 #define STAGE_DEBUG_ASSERT(cond, msg) ((void)0)
 #endif
 
-/* ---- Boot helpers ------------------------------------------------------ */
 
-/* Round v DOWN to the largest power of two no greater than v, clamped to
- * [lo, hi]. Pow-of-two stride keeps the scratch buffer cacheline-aligned
- * naturally (PMM always returns page-aligned allocations; powers of two
- * within ≥ a page are trivially aligned). */
 static uint32_t stage_round_pow2_clamp(uint32_t v, uint32_t lo, uint32_t hi)
 {
     if (v < lo) return lo;
@@ -102,32 +60,12 @@ static uint32_t stage_round_pow2_clamp(uint32_t v, uint32_t lo, uint32_t hi)
     return v;
 }
 
-/*
- * Pick the per-K-Core scratch size at boot. Budget 0.1 % of total RAM
- * for ALL stages combined, divide by core count, clamp upward to FLOOR
- * (so embedded boxes don't drop below realistic op-stream size) and
- * downward to DEFAULT (so big-RAM boxes don't waste bulk allocation
- * budget on scratches no workload uses).
- *
- * Examples:
- *    64 MB ×  1 core    →  64 KB / 1024 / 1   = 64 KB raw → 64 KB default
- *   256 MB ×  4 cores   → 256 KB / 4          = 64 KB     → 64 KB default
- *   1 GB  × 16 cores    →   1 MB / 16         = 64 KB     → 64 KB default
- *   8 GB  × 16 cores    →   8 MB / 16         = 512 KB raw→ 64 KB (cap)
- *  128 MB × 16 cores    → 128 KB / 16         =  8 KB raw → 16 KB floor
- *
- * Bulk total = per_core × ncores stays bounded:
- *   single-core box:  64 KB
- *   16-core 8 GB box:  1 MB
- *   64-core box (max realistic): 4 MB
- */
 static uint32_t stage_choose_scratch_size(uint32_t ncores)
 {
     if (ncores == 0) ncores = 1;
     uint64_t total = pmm_get_total_ram_bytes();
     if (total == 0) return MANIFEST_STAGE_SCRATCH_DEFAULT_SIZE;
 
-    /* 0.1% of RAM combined, divided by core count. */
     uint64_t budget = total / 1024ull;
     uint64_t per_core_64 = budget / (uint64_t)ncores;
     uint32_t per_core = per_core_64 > (uint64_t)MANIFEST_STAGE_SCRATCH_DEFAULT_SIZE
@@ -138,25 +76,6 @@ static uint32_t stage_choose_scratch_size(uint32_t ncores)
                                    MANIFEST_STAGE_SCRATCH_DEFAULT_SIZE);
 }
 
-/*
- * Allocate `pages` contiguous physical frames preferring the K-Core's NUMA
- * domain (looked up by LAPIC ID via SRAT), and return a kernel Pull-Map
- * pointer. NULL only when the PMM has no contiguous block at this order.
- *
- * The domain hint is dropped — not the allocation — when: SRAT is absent
- * (single-socket boards), the LAPIC ID is not in SRAT's CPU table, or the
- * named domain has no free block at this order.
- *
- * The scratch is page-scale, so BOTH tiers take it from the PMM: domain-
- * hinted when SRAT names this core's domain, plain otherwise.
- *
- * The second tier used to be kmalloc, on the stated belief that it "routes
- * through the same buddy but cannot honour a domain hint". It does not: a
- * request of this size skips the slab and lands in the kernel's FIXED
- * small-object pool. And SRAT naming no domain is not the exotic case — it
- * is every UMA machine, so on a 16-core host this quietly carved
- * 16 × 64 KiB = 1 MiB out of a 2 MiB heap and left every other large
- * allocation in the kernel fighting for the remainder. */
 static uint8_t *stage_alloc_scratch_numa(uint8_t kcore_id, size_t pages,
                                           void **out_phys,
                                           uint32_t *out_numa_hits,
@@ -189,9 +108,6 @@ static uint8_t *stage_alloc_scratch_numa(uint8_t kcore_id, size_t pages,
     return (uint8_t *)kv;
 }
 
-/* Only called on the init-rollback path — per-K-Core scratch never frees
- * during steady-state lifetime. Both allocation tiers are PMM, so there is
- * one deallocator. */
 static void stage_free_scratch(struct ManifestStage *st)
 {
     if (!st->scratch) return;
@@ -200,7 +116,6 @@ static void stage_free_scratch(struct ManifestStage *st)
     st->scratch_phys = NULL;
 }
 
-/* ---- Public API -------------------------------------------------------- */
 
 error_t ManifestStageInitAll(void)
 {
@@ -216,23 +131,6 @@ error_t ManifestStageInitAll(void)
     uint32_t per_core = stage_choose_scratch_size(ncores);
     g_scratch_per_core = per_core;
 
-    /*
-     * Per-core allocation. NUMA-aware on multi-socket boxes:
-     *   1. Look up the K-Core's NUMA domain via its LAPIC ID (SRAT-driven).
-     *   2. pmm_alloc_in_domain returns contiguous phys frames in that
-     *      domain; vmm_phys_to_virt converts to the kernel direct-map
-     *      pointer (Pull Map). The buffer is then zeroed.
-     *   3. On UMA hosts, SRAT-absent BIOS, or the rare case where the
-     *      domain has no free contiguous block of the required order,
-     *      fall through to kmalloc (which routes through the same buddy
-     *      but cannot honour a domain hint). Either path returns a
-     *      contiguous kernel buffer.
-     *
-     * Autoscale caps per_core at DEFAULT (64 KiB), so the sequential
-     * alloc storm during init is bounded:
-     *   per_core × MAX_CORES = 64 KiB × MAX_CORES (256) = 16 MiB worst,
-     *   in practice 16 cores × 64 KiB = 1 MiB.
-     */
     size_t per_core_pages = (per_core + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
     uint32_t numa_hits   = 0;
     uint32_t uma_hits = 0;
@@ -277,15 +175,10 @@ ManifestStage *ManifestStageCurrent(void)
 {
     if (!g_stages_initialized) return NULL;
     uint8_t core = amp_get_core_index();
-    /* core < MAX_CORES always holds for uint8_t given MAX_CORES==256;
-     * the meaningful guard is against an out-of-bounds index for the
-     * currently-active set published by amp_init. */
     if (core >= g_amp.total_cores) return NULL;
     return &g_stages[core];
 }
 
-/* Race-free monotonic max via CAS. RELAXED ordering — same as the other
- * counters; stats accuracy is best-effort. */
 static inline void stage_observe_size(struct ManifestStage *st, uint32_t bytes)
 {
     uint32_t cur;
@@ -311,7 +204,6 @@ error_t ManifestStageAcquire(ManifestStage *st, uint32_t bytes,
         return ERR_INVALID_ARGUMENT;
     }
 
-    /* Tier-1: scratch. CAS on scratch_in_use serialises against re-entry. */
     if (bytes <= st->scratch_capacity) {
         bool expected = false;
         if (__atomic_compare_exchange_n(&st->scratch_in_use, &expected, true,
@@ -324,20 +216,11 @@ error_t ManifestStageAcquire(ManifestStage *st, uint32_t bytes,
             out->tier  = MANIFEST_STAGE_TIER_SCRATCH;
             return OK;
         }
-        /* Re-entry — the K-Core invariant has been broken. Count the event,
-         * panic in DEBUG so we catch the violation at the boundary, and
-         * fall through to kmalloc in release so the syscall STILL completes
-         * correctly (defense in depth — a kernel panic is worse than a
-         * minor heap allocation for a once-in-lifetime race). */
         __atomic_add_fetch(&st->c_reentry_fallbacks, 1, __ATOMIC_RELAXED);
         STAGE_DEBUG_ASSERT(false,
                            "scratch_in_use was true on acquire — nested dispatch on the same K-Core");
     }
 
-    /* Tier-2: kmalloc. Used when bytes > scratch_capacity OR on rare
-     * re-entry fallback. The cost (one alloc + one free per syscall) is
-     * acceptable for cold-path Manifest sizes; tier-1 carries the hot
-     * path. */
     void *kbuf = kmalloc(bytes);
     if (!kbuf) {
         __atomic_add_fetch(&st->c_reject_alloc_failed, 1, __ATOMIC_RELAXED);
@@ -374,17 +257,11 @@ void ManifestStageRelease(ManifestStage *st, ManifestStageGrant *grant)
         kfree(grant->kbuf);
         break;
     case MANIFEST_STAGE_TIER_INVALID:
-        /* Already-released or never-acquired grant — no-op is the right
-         * behaviour, matches the guide.c fast-fail paths that release a
-         * partially-initialised grant on early error returns. */
         return;
     default:
         STAGE_ASSERT(false, "unknown grant tier");
     }
 
-    /* Poison the grant so accidental reuse is caught immediately on the
-     * next release (TIER_INVALID branch above) instead of corrupting
-     * state silently. */
     grant->kbuf  = NULL;
     grant->bytes = 0;
     grant->tier  = MANIFEST_STAGE_TIER_INVALID;

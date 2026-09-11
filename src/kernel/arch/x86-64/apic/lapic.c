@@ -3,35 +3,16 @@
 #include "klib.h"
 #include "vmm.h"
 #include "acpi_madt.h"
-#include "cpu_calibrate.h"   // cpu_ms_to_tsc / cpu_get_tsc_freq_khz
-#include "atomics.h"         // rdtsc
-#include "cpuid.h"           // g_cpu_caps.has_tsc_deadline
+#include "cpu_calibrate.h"
+#include "atomics.h"
+#include "cpuid.h"
 
 static volatile uint32_t* lapic_base_virt = NULL;
 static uintptr_t lapic_base_phys = 0;
 static bool lapic_enabled = false;
 
-/* Cached x2APIC mode flag.
- *
- * Sampled once from IA32_APIC_BASE.EXTD (bit 10) at lapic_init time.
- * BoxOS never disables x2APIC after enabling it (the spec also makes
- * the transition extd→xapic require disabling-then-reenabling APIC,
- * which we do not do), so this cache is stable for the kernel
- * lifetime.
- *
- * Writing legacy MMIO ICR offsets 0x300/0x310 with EXTD=1 is a #GP
- * (Intel SDM Vol 3A §10.12.9), so EVERY ICR write must consult this
- * flag and dispatch through lapic_icr_write. */
 static bool g_x2apic_active = false;
 
-/* TSC-deadline timer state (Intel SDM Vol 3A §10.5.4.1). When the CPU supports
- * the deadline timer, App Cores run the scheduler tick in deadline mode instead
- * of periodic: it is driven by the invariant TSC (exact, low-jitter) rather
- * than the bus-clock-derived LAPIC counter. The mode is one-shot per deadline,
- * so lapic_timer_rearm() reloads the next deadline from the IRQ handler.
- * g_lapic_tsc_period is the per-tick interval in TSC cycles. Both are written
- * by every App Core in lapic_timer_init() to the same values (has_tsc_deadline
- * is intersected across cores), so the shared writes are benign. */
 static bool     g_lapic_tsc_deadline = false;
 static uint64_t g_lapic_tsc_period   = 0;
 
@@ -58,7 +39,6 @@ void lapic_init(uintptr_t base_addr) {
 
     debug_printf("[LAPIC] Initializing Local APIC at phys 0x%lx\n", base_addr);
 
-    // Map LAPIC MMIO region (4KB, uncacheable)
     lapic_base_virt = (volatile uint32_t*)vmm_map_mmio(
         base_addr, 4096,
         VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_CACHE_DISABLE
@@ -69,37 +49,27 @@ void lapic_init(uintptr_t base_addr) {
         return;
     }
 
-    // Enable LAPIC via MSR (set global enable bit) — leave EXTD alone:
-    // if firmware/BSP enabled x2APIC, we honour it; if not, we stay xAPIC.
     uint64_t apic_base_msr = rdmsr(MSR_APIC_BASE);
     apic_base_msr |= MSR_APIC_BASE_ENABLE;
     wrmsr(MSR_APIC_BASE, apic_base_msr);
 
-    // Re-sample the EXTD bit AFTER enabling — some firmwares only expose
-    // x2APIC once the APIC global enable is set.
     g_x2apic_active = (rdmsr(MSR_APIC_BASE) & MSR_APIC_BASE_EXTD) != 0;
 
-    // Set Spurious Interrupt Vector Register: enable APIC + set spurious vector
     uint32_t svr = lapic_read(LAPIC_REG_SVR);
     svr |= LAPIC_SVR_ENABLE;
     svr = (svr & ~0xFF) | LAPIC_SPURIOUS_VECTOR;
     lapic_write(LAPIC_REG_SVR, svr);
 
-    // Clear Task Priority Register (accept all interrupts)
     lapic_write(LAPIC_REG_TPR, 0);
 
-    // Mask LINT0 and LINT1 by default
     lapic_write(LAPIC_REG_LINT0_LVT, LAPIC_LVT_MASKED);
     lapic_write(LAPIC_REG_LINT1_LVT, LAPIC_LVT_MASKED);
 
-    // Mask timer LVT by default
     lapic_write(LAPIC_REG_TIMER_LVT, LAPIC_LVT_MASKED);
 
-    // Clear any pending errors
     lapic_write(LAPIC_REG_ESR, 0);
     lapic_write(LAPIC_REG_ESR, 0);
 
-    // Send EOI to clear any pending interrupts from before init
     lapic_write(LAPIC_REG_EOI, 0);
 
     lapic_enabled = true;
@@ -121,17 +91,9 @@ void lapic_send_eoi(void) {
 }
 
 uint32_t lapic_get_id(void) {
-    /* x2APIC: the local APIC ID lives in the read-only MSR
-     * IA32_X2APIC_APICID (0x802) and is the FULL 32-bit register value —
-     * it is NOT shifted by 24 like the xAPIC MMIO form. The memory-mapped
-     * APIC register window (offset 0x20) is disabled while EXTD=1, so an
-     * MMIO read here returns garbage (typically all-ones) and would make
-     * every core resolve to the same bogus index (Intel SDM Vol 3A
-     * §10.12.1.2 "x2APIC Register Availability"). */
     if (g_x2apic_active) {
         return (uint32_t)rdmsr(MSR_X2APIC_APICID);
     }
-    /* xAPIC: 8-bit APIC ID in bits 31:24 of the MMIO ID register. */
     return (lapic_read(LAPIC_REG_ID) >> 24) & 0xFF;
 }
 
@@ -157,16 +119,6 @@ uintptr_t lapic_get_base(void) {
     return lapic_base_phys;
 }
 
-/* True once the MMIO window is actually mapped and lapic_read/lapic_write are
- * safe to call. Not the same question as lapic_get_base(): the physical base
- * is recorded before the mapping is attempted, and the mapping can fail, so a
- * non-zero base is no promise that a register read will land anywhere.
- *
- * lapic_read() is `lapic_base_virt[reg / 4]`, which with a null base turns the
- * APIC ID register at offset 0x20 into a load from virtual address 0x20. That
- * is where BoxOS's first panic on real hardware died — the panic path prints
- * the core index, amp_get_core_index() fell back to the APIC ID, and the dump
- * we had asked for was replaced by "Unhandled kernel #PF at 0x20 err=0x0". */
 bool lapic_is_mapped(void) {
     return lapic_base_virt != NULL;
 }
@@ -174,32 +126,15 @@ bool lapic_is_mapped(void) {
 void lapic_timer_init(uint8_t vector, uint32_t frequency_hz) {
     debug_printf("[LAPIC] Calibrating APIC timer for %u Hz...\n", frequency_hz);
 
-    /* Preferred on modern hardware: TSC-deadline mode. The timer is driven by
-     * the invariant TSC (exact, low-jitter) instead of the bus-clock-derived
-     * LAPIC counter, and needs no counter calibration — we derive the per-tick
-     * interval directly from the already-calibrated TSC frequency. It is a
-     * one-shot per deadline, so lapic_timer_rearm() reloads it each IRQ.
-     * Intel SDM Vol 3A §10.5.4.1.
-     *
-     * Hard precondition: invariant TSC. Without it the TSC rate changes
-     * with P-states and the precomputed g_lapic_tsc_period drifts. Intel
-     * SDM §17.17 — TSC invariance is reported via CPUID.80000007h:EDX[8].
-     * Real silicon from Nehalem (2008) onward is invariant; QEMU TCG with
-     * `-cpu qemu64` is NOT. Fall back to periodic mode for non-invariant
-     * targets — the periodic LAPIC counter is bus-clock-derived and
-     * already independent of P-states. */
     if (g_cpu_caps.has_tsc_deadline && g_cpu_caps.has_invariant_tsc) {
         uint64_t cyc_per_sec = cpu_get_tsc_freq_khz() * 1000ULL;
         g_lapic_tsc_period = (frequency_hz > 0) ? (cyc_per_sec / frequency_hz)
                                                 : cyc_per_sec;
         if (g_lapic_tsc_period == 0)
-            g_lapic_tsc_period = cyc_per_sec;   // guard against bad calibration
+            g_lapic_tsc_period = cyc_per_sec;
         g_lapic_tsc_deadline = true;
 
         lapic_write(LAPIC_REG_TIMER_LVT, vector | LAPIC_LVT_TIMER_TSC_DEADLINE);
-        /* The LVT-mode store must be ordered before the first deadline write —
-         * WRMSR(IA32_TSC_DEADLINE) is not otherwise serialized against the LVT
-         * MMIO store (SDM Vol 3A §10.5.4.1). */
         __asm__ volatile("mfence" ::: "memory");
         wrmsr(MSR_IA32_TSC_DEADLINE, rdtsc() + g_lapic_tsc_period);
 
@@ -208,23 +143,10 @@ void lapic_timer_init(uint8_t vector, uint32_t frequency_hz) {
         return;
     }
 
-    /* Fallback: periodic mode, calibrated against the TSC, NOT PIT channel 2.
-     *
-     * Each AP runs this from per_core_init_ap() while the BSP is concurrently
-     * busy-waiting on PIT channel 2 (pit_delay_us) inside amp_boot_aps() to
-     * pace INIT/SIPI and to poll the AP-online flag. PIT channel 2 is a single
-     * shared resource (ports 0x42/0x43, gate via 0x61); two CPUs programming
-     * it at once corrupt each other's window, so the old channel-2 calibration
-     * yielded a wrong APIC timer period on real hardware (QEMU's looser timing
-     * masked it). The TSC is per-core and was already calibrated by
-     * cpu_calibrate_tsc() before any AP boots (main.c), so timing the window
-     * with rdtsc() needs no shared hardware and cannot race. */
     #define LAPIC_CAL_MS 10u
 
     lapic_write(LAPIC_REG_TIMER_DCR, LAPIC_TIMER_DIV_16);
 
-    // Free-run the count-down from max; the LVT stays masked so no IRQ fires
-    // during measurement.
     lapic_write(LAPIC_REG_TIMER_ICR, 0xFFFFFFFF);
 
     uint64_t tsc_deadline = rdtsc() + cpu_ms_to_tsc(LAPIC_CAL_MS);
@@ -233,18 +155,16 @@ void lapic_timer_init(uint8_t vector, uint32_t frequency_hz) {
 
     uint32_t elapsed = 0xFFFFFFFF - lapic_read(LAPIC_REG_TIMER_CCR);
 
-    // Stop timer
     lapic_write(LAPIC_REG_TIMER_LVT, LAPIC_LVT_MASKED);
 
     uint32_t ticks_per_sec    = elapsed * (1000u / LAPIC_CAL_MS);
     uint32_t ticks_per_period = (frequency_hz > 0) ? (ticks_per_sec / frequency_hz) : 0;
     if (ticks_per_period == 0)
-        ticks_per_period = 1;   // never load ICR=0 — that stops the timer
+        ticks_per_period = 1;
 
     debug_printf("[LAPIC] Timer: %u ticks/%ums, %u ticks/s, period=%u ticks\n",
                  elapsed, LAPIC_CAL_MS, ticks_per_sec, ticks_per_period);
 
-    // Configure periodic timer
     lapic_write(LAPIC_REG_TIMER_DCR, LAPIC_TIMER_DIV_16);
     lapic_write(LAPIC_REG_TIMER_LVT, vector | LAPIC_LVT_TIMER_PERIODIC);
     lapic_write(LAPIC_REG_TIMER_ICR, ticks_per_period);
@@ -259,10 +179,6 @@ void lapic_timer_stop(void) {
 }
 
 void lapic_timer_rearm(void) {
-    /* TSC-deadline is one-shot: the IA32_TSC_DEADLINE MSR self-clears when it
-     * fires, so the timer IRQ handler must program the next deadline or the
-     * tick stops. Relative to "now" (rdtsc) so it self-corrects if a tick ran
-     * long. No-op in periodic mode (the LAPIC reloads the count itself). */
     if (g_lapic_tsc_deadline)
         wrmsr(MSR_IA32_TSC_DEADLINE, rdtsc() + g_lapic_tsc_period);
 }
@@ -273,19 +189,10 @@ bool lapic_is_x2apic_active(void) {
 
 void lapic_icr_write(uint32_t dest_id, uint32_t cmd) {
     if (g_x2apic_active) {
-        /* x2APIC: single 64-bit MSR write to 0x830. The destination
-         * goes in the upper 32 bits, the command in the lower 32.
-         * The CPU serialises delivery; no busy-poll is required (Intel
-         * SDM Vol 3A §10.12.9: "Write to IA32_X2APIC_ICR ... is
-         * self-clearing on completion"). */
         wrmsr(MSR_X2APIC_ICR, ((uint64_t)dest_id << 32) | (uint64_t)cmd);
         return;
     }
 
-    /* xAPIC: poll delivery-status (bit 12) BEFORE writing, then write
-     * ICR_HIGH (destination in upper 8 bits), then ICR_LOW (the actual
-     * command — writing ICR_LOW triggers the send). Bounded poll so a
-     * wedged/disabled LAPIC can't hang the kernel. */
     for (uint32_t spins = 0; spins < 100000u; spins++) {
         if (!(lapic_read(LAPIC_REG_ICR_LOW) & LAPIC_ICR_SEND_PENDING)) break;
         __asm__ volatile("pause");
@@ -295,50 +202,21 @@ void lapic_icr_write(uint32_t dest_id, uint32_t cmd) {
 }
 
 void lapic_send_ipi(uint32_t dest_lapic_id, uint8_t vector) {
-    /* lapic_icr_write picks the mode-correct path: xAPIC uses dest[7:0] in
-     * ICR_HIGH[31:24], x2APIC uses the full 32-bit dest. So a 32-bit x2APIC
-     * destination is delivered correctly here. */
     lapic_icr_write(dest_lapic_id, (uint32_t)vector);
 }
 
 void lapic_send_ipi_all_excluding_self(uint8_t vector) {
-    /* Shorthand bits 18-19 = 11b ("all excluding self") cause the LAPIC
-     * to ignore the destination field; pass dest=0 for safety on both
-     * xAPIC and x2APIC paths. Identical layout on both modes for the
-     * shorthand field. */
     lapic_icr_write(0u, (uint32_t)vector | (3u << 18));
 }
 
-/*
- * Translate ACPI 6.5 §5.2.12.5 MPS INTI Flags into LVT bits 13/15.
- *
- *   bits[1:0] Polarity:
- *     00 = conforms to bus     -> treat as active high (ISA default)
- *     01 = active high
- *     10 = reserved
- *     11 = active low
- *
- *   bits[3:2] Trigger Mode:
- *     00 = conforms to bus     -> NMI is edge-triggered by hardware design,
- *                                  so default to edge
- *     01 = edge
- *     10 = reserved
- *     11 = level
- *
- * For NMI the trigger should almost always be edge; some firmware
- * publishes "conforms" and trusts the OS to know that. We honour
- * whatever the firmware explicitly states.
- */
 static uint32_t mps_flags_to_lvt(uint16_t mps_flags) {
     uint32_t lvt = 0;
     uint16_t polarity = mps_flags & 0x3;
     uint16_t trigger  = (mps_flags >> 2) & 0x3;
 
     if (polarity == 0x3) lvt |= LAPIC_LVT_PIN_POLARITY_LOW;
-    /* 0x0 (conforms) and 0x1 (active high) map to "no polarity bit". */
 
     if (trigger == 0x3) lvt |= LAPIC_LVT_TRIGGER_LEVEL;
-    /* 0x0 (conforms) and 0x1 (edge) map to edge — LVT bit 15 = 0. */
 
     return lvt;
 }
@@ -347,7 +225,7 @@ void lapic_apply_madt_nmi(const struct madt_info *info,
                           uint8_t acpi_processor_id) {
     if (!lapic_enabled || !info) return;
 
-    uint8_t applied[2] = { 0, 0 };  /* LINT0, LINT1 — track which we wrote */
+    uint8_t applied[2] = { 0, 0 };
 
     for (uint8_t i = 0; i < info->nmi_count; i++) {
         const madt_nmi_entry_t *e = &info->nmi[i];

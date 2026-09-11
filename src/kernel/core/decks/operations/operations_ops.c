@@ -1,28 +1,3 @@
-/*
- * Operations Deck — Manifest-native handlers.
- *
- * Each op cleanly separates INPUT and OUTPUT through Crates. There is no
- * "single buffer with packed args" cargo cult: parameters live in op->params
- * and never overlap data buffers.
- *
- * Two-input ops (CMP, FIND, XOR-with-key) carry the second buffer via a
- * crate index encoded in op->params. ManifestOp's two crate slots (in/out)
- * cover the common case; params encode anything beyond that.
- *
- * Buffers move through the page-walked crate_io primitives (crate_in_buf /
- * crate_out_alloc / crate_out_commit, plus crate_read / crate_write for fixed
- * scalars). A Crate payload that straddles a page boundary is copied across
- * every backing frame instead of being clipped to its first page — the
- * vmm_translate_user_addr straddle bug that silently corrupted every >4 KiB
- * transform. Inputs are snapshotted into kernel buffers and each transform
- * runs kernel->kernel, which also makes the in-place-looking ops (MOVE / XOR /
- * BIT_SWAP) overlap-safe for free.
- *
- * Every op here is OP_AUTH_APP, and Crate.size / Crate.capacity are
- * attacker-controlled (CrateIsValid bounds neither), so each snapshot and each
- * output allocation is capped to OPS_MAX_BYTES — an unbounded crate_in_buf /
- * crate_out_alloc of a claimed size would be a kmalloc DoS.
- */
 
 #include "klib.h"
 #include "op_registry.h"
@@ -35,24 +10,13 @@
 #include "pmm.h"
 #include "process.h"
 
-/*
- * Operations ceiling. The legacy single-page map effectively capped every op
- * at one page (4 KiB), so no real workload ever moved more; 1 MiB is far past
- * any genuine buffer transform yet small enough that an attacker-sized crate
- * cannot exhaust the kernel heap. Applied to every crate_in_buf snapshot and
- * crate_out_alloc output below.
- */
-#define OPS_MAX_BYTES (1u << 20)   /* 1 MiB */
+#define OPS_MAX_BYTES (1u << 20)
 
 static vmm_context_t *op_vmm(const OpContext *ctx)
 {
     return (ctx && ctx->proc && ctx->proc->cabin) ? ctx->proc->cabin->vmm : NULL;
 }
 
-/* -------------------------------------------------------------------------
- * BUF_MOVE — copy in_crate.size bytes into out_crate (overlap-safe).
- * params: none.
- * ------------------------------------------------------------------------- */
 
 static int OpBufMove(const ManifestOp *op,
                      Crate            *crates,
@@ -68,23 +32,16 @@ static int OpBufMove(const ManifestOp *op,
     if (src->size > dst->capacity) return ERR_BUFFER_TOO_SMALL;
     if (src->size > OPS_MAX_BYTES) return ERR_BUFFER_TOO_SMALL;
 
-    /* Snapshot the source into a kernel buffer, then commit that buffer to the
-     * destination: src/dst may overlap in user space but the bounce is its own
-     * allocation, so the copy is overlap-safe. */
     void *kbuf = crate_in_buf(src, ctx);
     if (!kbuf) return ERR_INVALID_ADDRESS;
 
     int rc = crate_out_commit(dst, ctx, kbuf, src->size);
     crate_buf_free(kbuf);
-    if (rc != OK) return rc;          /* fail closed: dst->size left unchanged */
+    if (rc != OK) return rc;
     dst->size = src->size;
     return OK;
 }
 
-/* -------------------------------------------------------------------------
- * BUF_FILL — fill out_crate.capacity bytes with a constant.
- * params: [u8 fill_byte].
- * ------------------------------------------------------------------------- */
 
 static int OpBufFill(const ManifestOp *op,
                      Crate            *crates,
@@ -98,15 +55,11 @@ static int OpBufFill(const ManifestOp *op,
     Crate   *dst       = &crates[op->out_crate];
     uint8_t  fill_byte = op->params[0];
     uint64_t n         = dst->capacity;
-    if (n == 0) return ERR_INVALID_ADDRESS;   /* legacy mapped capacity==0 -> NULL */
-    if (n > OPS_MAX_BYTES) return ERR_BUFFER_TOO_SMALL;   /* bound fill CPU like other ops */
+    if (n == 0) return ERR_INVALID_ADDRESS;
+    if (n > OPS_MAX_BYTES) return ERR_BUFFER_TOO_SMALL;
 
     vmm_context_t *vmm = op_vmm(ctx);
     if (vmm) {
-        /* One page of the fill byte committed across the user output in
-         * page-sized chunks: kernel memory stays a single page no matter how
-         * large dst->capacity is (it is attacker-controlled and unbounded), so
-         * a giant capacity cannot force a giant kmalloc+memset. */
         uint8_t *page = kmalloc(PMM_PAGE_SIZE);
         if (!page) return ERR_NO_MEMORY;
         memset(page, fill_byte, PMM_PAGE_SIZE);
@@ -115,7 +68,7 @@ static int OpBufFill(const ManifestOp *op,
             if (chunk > PMM_PAGE_SIZE) chunk = PMM_PAGE_SIZE;
             error_t rc = vmm_user_buf_commit_out(vmm, (uintptr_t)dst->addr + off,
                                                  page, (size_t)chunk);
-            if (rc != OK) { kfree(page); return rc; }   /* fail closed */
+            if (rc != OK) { kfree(page); return rc; }
         }
         kfree(page);
     } else {
@@ -125,10 +78,6 @@ static int OpBufFill(const ManifestOp *op,
     return OK;
 }
 
-/* -------------------------------------------------------------------------
- * BUF_XOR — XOR src bytes with a repeating key, writing into dst.
- * params: [u32 key_len][u8 key[key_len]].
- * ------------------------------------------------------------------------- */
 
 static int OpBufXor(const ManifestOp *op,
                     Crate            *crates,
@@ -143,7 +92,7 @@ static int OpBufXor(const ManifestOp *op,
 
     uint32_t key_len = *(const uint32_t *)op->params;
     if (key_len == 0)                         return ERR_INVALID_ARGUMENT;
-    if ((uint64_t)4 + key_len > op->param_size) return ERR_INVALID_ARGUMENT; /* no u32 wrap */
+    if ((uint64_t)4 + key_len > op->param_size) return ERR_INVALID_ARGUMENT;
     const uint8_t *key = op->params + 4;
 
     Crate *src = &crates[op->in_crate];
@@ -168,10 +117,6 @@ static int OpBufXor(const ManifestOp *op,
     return OK;
 }
 
-/* -------------------------------------------------------------------------
- * BUF_HASH — ROL5 additive hash over in_crate, write 4 bytes to out_crate.
- * params: none.
- * ------------------------------------------------------------------------- */
 
 static int OpBufHash(const ManifestOp *op,
                      Crate            *crates,
@@ -197,15 +142,9 @@ static int OpBufHash(const ManifestOp *op,
     }
     crate_buf_free(in);
 
-    /* 4-byte result -> stack scalar; crate_write sets dst->size on success. */
     return crate_write(dst, ctx, &hash, 4);
 }
 
-/* -------------------------------------------------------------------------
- * BUF_CMP — compare in_crate with crates[params.crate_b_idx]; write 4-byte
- * result to out_crate (0 == equal, otherwise sign of memcmp).
- * params: [u16 crate_b_idx].
- * ------------------------------------------------------------------------- */
 
 static int OpBufCmp(const ManifestOp *op,
                     Crate            *crates,
@@ -226,7 +165,6 @@ static int OpBufCmp(const ManifestOp *op,
     if (r->capacity < 4) return ERR_BUFFER_TOO_SMALL;
     if (a->size > OPS_MAX_BYTES || b->size > OPS_MAX_BYTES) return ERR_BUFFER_TOO_SMALL;
 
-    /* Two inputs -> two snapshots. */
     uint8_t *a_kp = crate_in_buf(a, ctx);
     if (!a_kp) return ERR_INVALID_ADDRESS;
     uint8_t *b_kp = crate_in_buf(b, ctx);
@@ -245,11 +183,6 @@ static int OpBufCmp(const ManifestOp *op,
     return rc;
 }
 
-/* -------------------------------------------------------------------------
- * BUF_FIND — search for inline pattern inside in_crate; write 4-byte offset
- * to out_crate (0xFFFFFFFF if not found).
- * params: [u32 pattern_len][u8 pattern[pattern_len]].
- * ------------------------------------------------------------------------- */
 
 static int OpBufFind(const ManifestOp *op,
                      Crate            *crates,
@@ -264,7 +197,7 @@ static int OpBufFind(const ManifestOp *op,
 
     uint32_t pattern_len = *(const uint32_t *)op->params;
     if (pattern_len == 0)                     return ERR_INVALID_ARGUMENT;
-    if ((uint64_t)4 + pattern_len > op->param_size) return ERR_INVALID_ARGUMENT; /* no u32 wrap */
+    if ((uint64_t)4 + pattern_len > op->param_size) return ERR_INVALID_ARGUMENT;
     const uint8_t *pattern = op->params + 4;
 
     Crate *hay = &crates[op->in_crate];
@@ -290,11 +223,6 @@ static int OpBufFind(const ManifestOp *op,
     return crate_write(out, ctx, &found, 4);
 }
 
-/* -------------------------------------------------------------------------
- * BUF_PACK — RLE compress in_crate into out_crate. Pairs of [count][byte];
- * out_crate.size set to compressed length.
- * params: none.
- * ------------------------------------------------------------------------- */
 
 static int OpBufPack(const ManifestOp *op,
                      Crate            *crates,
@@ -312,10 +240,6 @@ static int OpBufPack(const ManifestOp *op,
     uint8_t *in = crate_in_buf(src, ctx);
     if (!in) return ERR_INVALID_ADDRESS;
 
-    /* Worst-case RLE output is two bytes per input byte; src->size is already
-     * bounded, so the bounce is at most 2*OPS_MAX. Allocate the smaller of the
-     * real worst case and the claimed capacity (==0 -> ERR_INVALID_ADDRESS,
-     * matching the legacy capacity map). */
     uint64_t worst   = src->size * 2;
     uint64_t out_cap = (worst < dst->capacity) ? worst : dst->capacity;
     uint8_t *out = crate_out_alloc(dst, out_cap);
@@ -347,10 +271,6 @@ static int OpBufPack(const ManifestOp *op,
     return OK;
 }
 
-/* -------------------------------------------------------------------------
- * BUF_UNPACK — RLE decompress in_crate into out_crate.
- * params: none.
- * ------------------------------------------------------------------------- */
 
 static int OpBufUnpack(const ManifestOp *op,
                        Crate            *crates,
@@ -369,13 +289,8 @@ static int OpBufUnpack(const ManifestOp *op,
     uint8_t *in = crate_in_buf(src, ctx);
     if (!in) return ERR_INVALID_ADDRESS;
 
-    /* Legacy mapped the whole output capacity up front as an address gate. */
     if (dst->capacity == 0) { crate_buf_free(in); return ERR_INVALID_ADDRESS; }
 
-    /* Decompressed length is the sum of the run counts. A single [count] byte
-     * amplifies up to 255x, so resolve the exact size BEFORE allocating and
-     * reject if it would exceed the user capacity (legacy ERR_BUFFER_TOO_SMALL)
-     * or the operations ceiling (an unbounded kmalloc DoS otherwise). */
     uint64_t total = 0;
     for (uint64_t i = 0; i + 1 < src->size; i += 2) total += in[i];
     if (total > dst->capacity || total > OPS_MAX_BYTES) {
@@ -404,10 +319,6 @@ static int OpBufUnpack(const ManifestOp *op,
     return OK;
 }
 
-/* -------------------------------------------------------------------------
- * BIT_SWAP — endian swap of in_crate bytes into out_crate.
- * params: [u8 mode] where 0=16-bit, 1=32-bit, 2=64-bit element width.
- * ------------------------------------------------------------------------- */
 
 static int OpBitSwap(const ManifestOp *op,
                      Crate            *crates,
@@ -437,8 +348,6 @@ static int OpBitSwap(const ManifestOp *op,
         return ERR_INVALID_ARGUMENT;
     }
 
-    /* Seed with a straight copy so any trailing bytes that do not fill a whole
-     * element pass through from the source — never leak uninitialised heap. */
     uint64_t n = src->size;
     memcpy(out, in, (size_t)n);
     if (mode == 0) {
@@ -453,7 +362,7 @@ static int OpBitSwap(const ManifestOp *op,
             out[i + 2] = in[i + 1];
             out[i + 3] = in[i];
         }
-    } else {   /* mode == 2 */
+    } else {
         for (uint64_t i = 0; i + 7 < n; i += 8) {
             for (int j = 0; j < 4; j++) {
                 out[i + j]     = in[i + 7 - j];
@@ -470,11 +379,6 @@ static int OpBitSwap(const ManifestOp *op,
     return OK;
 }
 
-/* -------------------------------------------------------------------------
- * VAL_ADD — atomic-style add to a value at offset in out_crate (in-place).
- * params: [u32 offset][u8 type_size][i32 delta].
- * type_size in {1, 2, 4}.
- * ------------------------------------------------------------------------- */
 
 static int OpValAdd(const ManifestOp *op,
                     Crate            *crates,
@@ -491,10 +395,8 @@ static int OpValAdd(const ManifestOp *op,
 
     Crate *target = &crates[op->out_crate];
     if (type_size != 1 && type_size != 2 && type_size != 4)  return ERR_INVALID_ARGUMENT;
-    if ((uint64_t)offset + type_size > target->size)         return ERR_OUT_OF_RANGE; /* no u32 wrap */
+    if ((uint64_t)offset + type_size > target->size)         return ERR_OUT_OF_RANGE;
 
-    /* In-place read-modify-write of just the type_size bytes at offset, page-
-     * walked so an offset past the first page lands on the right frame. */
     uintptr_t      at  = (uintptr_t)target->addr + offset;
     vmm_context_t *vmm = op_vmm(ctx);
 
@@ -525,9 +427,6 @@ static int OpValAdd(const ManifestOp *op,
     return OK;
 }
 
-/* -------------------------------------------------------------------------
- * Registration entry point. Called once at boot after OpRegistryInit.
- * ------------------------------------------------------------------------- */
 
 error_t OperationsDeckRegister(void)
 {
@@ -537,7 +436,6 @@ error_t OperationsDeckRegister(void)
         uint32_t    auth;
         const char *name;
     } table[] = {
-        /* Pure-buffer ops on caller-supplied Crates: app+. */
         { OP_BUF_MOVE,   OpBufMove,   OP_AUTH_APP, "ops.move"   },
         { OP_BUF_FILL,   OpBufFill,   OP_AUTH_APP, "ops.fill"   },
         { OP_BUF_XOR,    OpBufXor,    OP_AUTH_APP, "ops.xor"    },

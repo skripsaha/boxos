@@ -1,21 +1,6 @@
 #include "op_registry.h"
 #include "klib.h"
 
-/*
- * Hash-chained registry. Each bucket holds a singly-linked list of
- * OpRegistryNode. Resize doubles bucket count when load factor exceeds 75%.
- *
- * Bucket count is always a power of two; index = mix(op_kind) & (cap - 1).
- *
- * The table is owned by a single global OpRegistryState. Concurrency is
- * protected by a spinlock for the rare write paths (register, resize) and
- * by stable-pointer reads for the hot path (lookup).
- *
- * Memory ownership:
- *   - Each OpRegistryNode is kmalloc'd on register and lives until shutdown.
- *   - The buckets array is kmalloc'd and reallocated on resize.
- *   - name is pointer-only; caller guarantees lifetime ≥ shutdown.
- */
 
 #define OP_REGISTRY_INITIAL_BUCKETS 64u
 #define OP_REGISTRY_MAX_BUCKETS     (1u << 20)
@@ -39,7 +24,6 @@ static OpRegistryState g_op_registry;
 
 static inline uint32_t op_kind_hash(uint32_t op_kind)
 {
-    /* Mix high (deck) and low (opcode) halves. Knuth multiplicative hash. */
     uint32_t k = op_kind ^ (op_kind >> 16);
     return k * 2654435761u;
 }
@@ -60,7 +44,6 @@ static error_t op_registry_resize_locked(uint32_t new_count)
     if (!new_buckets) return ERR_NO_MEMORY;
     for (uint32_t i = 0; i < new_count; i++) new_buckets[i] = NULL;
 
-    /* Rehash every node into the new bucket array. */
     for (uint32_t b = 0; b < g_op_registry.bucket_count; b++) {
         OpRegistryNode *n = g_op_registry.buckets[b];
         while (n) {
@@ -80,7 +63,6 @@ static error_t op_registry_resize_locked(uint32_t new_count)
 
 static bool op_registry_should_grow(void)
 {
-    /* entry_count / bucket_count > LOAD_NUM / LOAD_DEN  ↔  entries*DEN > buckets*NUM */
     return (uint64_t)g_op_registry.entry_count * (uint64_t)OP_REGISTRY_LOAD_DEN >
            (uint64_t)g_op_registry.bucket_count * (uint64_t)OP_REGISTRY_LOAD_NUM;
 }
@@ -132,7 +114,6 @@ error_t OpRegistryRegister(uint32_t    op_kind,
 
     spin_lock(&g_op_registry.lock);
 
-    /* Reject duplicates. */
     uint32_t b = bucket_of(op_kind, g_op_registry.bucket_count);
     for (OpRegistryNode *n = g_op_registry.buckets[b]; n; n = n->next) {
         if (n->entry.op_kind == op_kind) {
@@ -159,7 +140,6 @@ error_t OpRegistryRegister(uint32_t    op_kind,
         uint32_t new_cap = g_op_registry.bucket_count * 2u;
         error_t  rc      = op_registry_resize_locked(new_cap);
         if (rc != OK) {
-            /* Resize failure is non-fatal; the table just stays denser. */
             debug_printf("[OpRegistry] resize to %u failed (%d), continuing\n", new_cap, rc);
         }
     }
@@ -172,10 +152,6 @@ const OpRegistration *OpRegistryLookup(uint32_t op_kind)
 {
     if (!g_op_registry.initialized) return NULL;
 
-    /* Read-only fast path; we still take the lock to be safe under concurrent
-     * resize. A future optimization can move to RCU semantics with a stable
-     * snapshot pointer; for now correctness over micro-optimization.
-     */
     spin_lock(&g_op_registry.lock);
     uint32_t b = bucket_of(op_kind, g_op_registry.bucket_count);
     const OpRegistration *result = NULL;

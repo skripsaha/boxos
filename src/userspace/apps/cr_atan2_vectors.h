@@ -1,5 +1,3 @@
-// Baked 80-bit (arg1, arg2, MPFR-CR-ref) vectors for atan2 — GENERATED, do not edit.
-// arg1=y, arg2=x; CrVec2 {a1m,a1se,a2m,a2se,rm,rse} is defined in cxxtest.cpp.
 static const CrVec2 kAtan2Vec[] = {
 {0x80090FDBC83E807DULL,0x3FF0u,0x80090FDBC83E807AULL,0x3FF0u,0xC90FDAA22168C238ULL,0x3FFEu},
 {0x80090FDBC83E807DULL,0x3FF0u,0x80090FDBC83E8080ULL,0xBFF0u,0x96CBE3F9990E91A8ULL,0x4000u},

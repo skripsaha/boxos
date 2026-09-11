@@ -5,34 +5,8 @@
 #include "pmm.h"
 #include "touch.h"
 
-/* =====================================================================
- * AMD-Vi (AMD IOMMU) driver — production implementation.
- *
- * Reference: "AMD I/O Virtualization Technology (IOMMU) Specification",
- *            revision 3.06+ (the AMD-Vi spec).
- *
- * What this driver does
- * ---------------------
- *   * Map each IVHD register block (4 KB MMIO)
- *   * Allocate Device Table (DTE) — 32-byte entries × 64 K Bus×Dev×Fn
- *     IDs; here we right-size to one full segment (≈ 2 MiB) and fill
- *     it lazily as devices are attached
- *   * Allocate Command Buffer + Event Log (4 KB each, ring buffers)
- *   * Build a single second-level Long-Mode page table identity-mapping
- *     the bottom 4 GiB (shared across all DTEs in "passthrough" mode)
- *   * Program IOMMU base registers (DEV_TAB_BAR, CMD_BUF_BAR, EVT_LOG_BAR)
- *   * Issue COMPLETION_WAIT to drain command buffer
- *   * `amdvi_enable()` flips IOMMU_CTRL.IommuEn; init() leaves it off
- *     so untranslated DMA continues to work without OS intervention
- *
- * The DTE format used is "V=1, host-page-table set to identity-map"
- * (DTE bits 1:0 = 11, DomainID=0, host page table pointer = SLPT root,
- * mode=4 for 4-level paging). This is the same model used by Linux's
- * "iommu=pt" mode.
- * ===================================================================== */
 
-/* IOMMU MMIO registers (AMD-Vi §3.1.6). */
-#define MMIO_DEV_TAB_BAR     0x0000   /* 64-bit */
+#define MMIO_DEV_TAB_BAR     0x0000
 #define MMIO_CMD_BUF_BAR     0x0008
 #define MMIO_EVT_LOG_BAR     0x0010
 #define MMIO_CTRL            0x0018
@@ -45,24 +19,19 @@
 #define MMIO_EVT_TAIL        0x2018
 #define MMIO_STATUS          0x2020
 
-/* CTRL bits. */
 #define CTRL_IOMMU_EN        (1ULL << 0)
 #define CTRL_HT_TUN_EN       (1ULL << 1)
 #define CTRL_EVT_LOG_EN      (1ULL << 2)
 #define CTRL_CMD_BUF_EN      (1ULL << 12)
 
-/* Command opcodes. */
 #define CMD_OP_COMPLETION_WAIT      0x01
 #define CMD_OP_INVALIDATE_DEV_TAB   0x02
 #define CMD_OP_INVALIDATE_IOMMU_PG  0x03
 #define CMD_OP_INVALIDATE_IOTLB_PG  0x04
 #define CMD_OP_INVALIDATE_ALL       0x08
 
-/* DEV_TAB_BAR low bits encode size class:
- *   0x0 = 4 KB (256 entries, single bus), 0xF = 1 MB (64 K entries).
- * We choose 0xF (full segment) for production. */
 #define DEV_TAB_SIZE_CLASS  0xF
-#define DEV_TAB_BYTES       (256ULL * 1024 * 8)   /* 2 MiB total */
+#define DEV_TAB_BYTES       (256ULL * 1024 * 8)
 
 #define CMD_BUF_BYTES       4096u
 #define EVT_LOG_BYTES       4096u
@@ -88,7 +57,6 @@ static uint64_t*    g_id_root      = NULL;
 static uint64_t     g_id_root_phys = 0;
 
 static void* alloc_aligned_4k(uint64_t* phys_out, size_t size_bytes) {
-    /* Round up to 4 KB. */
     size_t pages = (size_bytes + 4095) / 4096;
     void* p = pmm_alloc(pages);
     if (!p) { *phys_out = 0; return NULL; }
@@ -97,8 +65,6 @@ static void* alloc_aligned_4k(uint64_t* phys_out, size_t size_bytes) {
     return p;
 }
 
-/* AMD-Vi long-mode page-table entries share the bit layout with x86_64
- * paging. Reuse the canonical bits. */
 #define AMD_PTE_P  (1ULL << 0)
 #define AMD_PTE_W  (1ULL << 1)
 #define AMD_PTE_U  (1ULL << 2)
@@ -121,7 +87,6 @@ static int amd_identity_build(void) {
     void* p = alloc_aligned_4k(&g_id_root_phys, 4096);
     if (!p) return -1;
     g_id_root = (uint64_t*)p;
-    /* Bottom 4 GiB at 4 KB granularity. */
     for (uint64_t a = 0; a < (1ULL << 32); a += 4096) {
         unsigned i4 = (unsigned)((a >> 39) & 0x1FF);
         unsigned i3 = (unsigned)((a >> 30) & 0x1FF);
@@ -135,8 +100,6 @@ static int amd_identity_build(void) {
     return 0;
 }
 
-/* Encode a DTE: V=1, TV=1, host page table = caller-supplied,
- * mode = 4 (4-level), caller-supplied DomainID. AMD-Vi §2.2.2.1. */
 static void amdvi_dte_program(uint8_t* dte_base, uint16_t devid,
                                 uint64_t host_pt_phys, uint16_t domain_id) {
     uint64_t* dte = (uint64_t*)(dte_base + (size_t)devid * 32);
@@ -146,7 +109,6 @@ static void amdvi_dte_program(uint8_t* dte_base, uint16_t devid,
     dte[3] = 0;
 }
 
-/* ----- Command buffer ----- */
 
 static void amdvi_cmd_push(amdvi_unit_t* u, uint64_t cmd0, uint64_t cmd1) {
     if (!u->cmd_buf) return;
@@ -158,9 +120,6 @@ static void amdvi_cmd_push(amdvi_unit_t* u, uint64_t cmd0, uint64_t cmd1) {
 }
 
 static void amdvi_completion_wait(amdvi_unit_t* u) {
-    /* Op[63:60]=0x1, Store completion bit 0. Use a poll loop on a flag
-     * inside the command buffer itself — bit 0 of qword 1 toggles when
-     * the IOMMU finishes the wait. */
     volatile uint64_t* wait_slot =
         (volatile uint64_t*)((uint8_t*)u->cmd_buf + u->cmd_tail + 8);
     *wait_slot = 0;
@@ -172,7 +131,6 @@ static void amdvi_completion_wait(amdvi_unit_t* u) {
     debug_printf("[AMD-Vi] completion-wait timeout\n");
 }
 
-/* ----- Per-unit init ----- */
 
 static int amdvi_unit_init(amdvi_unit_t* u, uint64_t reg_phys,
                             uint16_t seg) {
@@ -183,7 +141,6 @@ static int amdvi_unit_init(amdvi_unit_t* u, uint64_t reg_phys,
                   VMM_FLAG_CACHE_DISABLE);
     if (!u->reg) return -1;
 
-    /* Allocate tables. */
     u->dev_tab = alloc_aligned_4k(&u->dev_tab_phys, (size_t)DEV_TAB_BYTES);
     if (!u->dev_tab) return -2;
     u->cmd_buf = alloc_aligned_4k(&u->cmd_buf_phys, CMD_BUF_BYTES);
@@ -191,22 +148,14 @@ static int amdvi_unit_init(amdvi_unit_t* u, uint64_t reg_phys,
     u->evt_log = alloc_aligned_4k(&u->evt_log_phys, EVT_LOG_BYTES);
     if (!u->evt_log) return -4;
 
-    /* Pre-fill DTE with V=0 (not valid) — devices become valid on
-     * device_attach(). For an initial pass-everything-through model
-     * we could instead V=1 every entry now; we keep V=0 to avoid
-     * surprising firmware before drivers are ready. */
 
-    /* Program base registers. */
     *(volatile uint64_t*)(u->reg + MMIO_DEV_TAB_BAR) =
         u->dev_tab_phys | DEV_TAB_SIZE_CLASS;
-    /* CMD_BUF_BAR: size class in low 4 bits (encoded log2(size) - 12). */
-    /* 4 KB = log2(4096)-12 = 0. */
     *(volatile uint64_t*)(u->reg + MMIO_CMD_BUF_BAR) =
-        u->cmd_buf_phys | (8ULL << 56);    /* size = 8 -> 2^8 entries * 16 = 4 KB */
+        u->cmd_buf_phys | (8ULL << 56);
     *(volatile uint64_t*)(u->reg + MMIO_EVT_LOG_BAR) =
         u->evt_log_phys | (8ULL << 56);
 
-    /* Enable command buffer + event log; keep IOMMU_EN off. */
     uint64_t ctrl = *(volatile uint64_t*)(u->reg + MMIO_CTRL);
     ctrl |= CTRL_CMD_BUF_EN | CTRL_EVT_LOG_EN;
     *(volatile uint64_t*)(u->reg + MMIO_CTRL) = ctrl;
@@ -230,7 +179,6 @@ int amdvi_enable(void) {
     return en;
 }
 
-/* ----- ops vtable ----- */
 
 struct iommu_domain {
     uint32_t id;
@@ -322,7 +270,6 @@ static int amdvi_map(iommu_domain_t* d, uint64_t iova, uint64_t phys,
         if (iova != phys) return -1;
         return 0;
     }
-    /* Per-domain map: walk d->host_pt; reuse amd_pt_walk. */
     uint64_t end = iova + sz;
     for (uint64_t a = iova & ~0xFFFULL; a < end; a += 4096) {
         unsigned i4 = (unsigned)((a >> 39) & 0x1FF);
@@ -339,12 +286,6 @@ static int amdvi_map(iommu_domain_t* d, uint64_t iova, uint64_t phys,
     }
     return 0;
 }
-/* TME-MK aware map. AMD-Vi rev 4 "Cache Coherent Memory" mode uses the
- * same SL-PTE phys-field layout as the CPU PTE — bits [51:12] hold the
- * phys with the upper num_keyid_bits portion encoding the KeyID. The
- * existing amdvi_map preserves all upper bits via `phys & ~0xFFF`, so
- * we just route through it for non-identity domains. Identity domain
- * is rejected: per-KeyID DMA only makes sense in a per-device domain. */
 static int amdvi_map_with_keyid(iommu_domain_t* d, uint64_t iova,
                                   uint64_t phys_with_keyid, uint64_t sz,
                                   uint32_t perm) {
@@ -368,10 +309,6 @@ static int amdvi_unmap(iommu_domain_t* d, uint64_t iova, uint64_t size) {
     return 0;
 }
 
-/* Drain the event log on every IOMMU. AMD-Vi §3.1.6 event entries are
- * 16 bytes; type code lives in bits 31:28 of qword 0. We log every
- * pending event then advance the head to the tail. Callers run this
- * from the SCI handler or as a periodic poll. */
 void amdvi_poll_events(void) {
     for (uint8_t i = 0; i < g_unit_count; i++) {
         amdvi_unit_t* u = &g_units[i];
@@ -382,9 +319,6 @@ void amdvi_poll_events(void) {
             uint8_t* slot = (uint8_t*)u->evt_log + (head & (EVT_LOG_BYTES - 1));
             uint32_t code = ((*(uint32_t*)slot) >> 28) & 0xF;
             debug_printf("[AMD-Vi] IVHD[%u] event code=0x%x\n", i, code);
-            /* Per-event broadcast — userspace logger / fault recoverer
-             * subscribes by `iommu:fault` and decodes the 16-byte slot
-             * we shipped as payload. */
             TouchPublish("iommu:fault", slot, 16);
             head = (head + 16) & (EVT_LOG_BYTES - 1);
         }
@@ -401,7 +335,6 @@ static void amdvi_invalidate(iommu_domain_t* d) {
     }
 }
 
-/* Phase 2G — opaque domain → ID accessor. Trivial field read. */
 static uint32_t amdvi_domain_id(iommu_domain_t* d) {
     return d ? ((struct iommu_domain*)d)->id : 0xFFFFFFFFu;
 }

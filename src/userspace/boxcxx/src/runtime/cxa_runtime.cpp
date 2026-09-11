@@ -1,19 +1,3 @@
-/*
- * cxa_runtime.cpp — Itanium C++ ABI runtime core for BoxOS userspace.
- *
- *   - __cxa_atexit / __cxa_finalize   (static destructor registry)
- *   - __cxa_guard_acquire/release/abort (function-local static init)
- *   - __cxa_pure_virtual / __cxa_deleted_virtual
- *   - std::terminate machinery + key functions of <exception>/<new> classes
- *
- * Multiple strands may share a cabin (strand_spawn). The static-dtor registry
- * (__cxa_atexit) stays process-global — statics have process duration and are
- * drained once at exit. thread_local destructors (__cxa_thread_atexit) are
- * PER-STRAND: their registry head lives in each strand's own neg-TLS, so every
- * strand drains exactly its own thread-storage objects with no lock. The
- * function-local-static guards use an atomic in-progress byte so concurrent
- * first-touch by two strands still runs the initializer exactly once.
- */
 
 #include <exception>
 #include <new>
@@ -23,45 +7,33 @@
 
 #include "box/print.h"
 #include "box/system.h"
-#include "box/sync.h"               // yield() — guard loser back-off
-#include "box/cxx/tls_strand.h"     // __boxcxx_thread_storage_exit decl
-#include "box/core/strand_self.h"   // strand_self() — guard owner token
+#include "box/sync.h"
+#include "box/cxx/tls_strand.h"
+#include "box/core/strand_self.h"
 
 extern "C" {
 void *malloc(size_t size);
 void *realloc(void *ptr, size_t size);
 void  free(void *ptr);
-int  *__boxcxx_uncaught_count();   // cxa_exception.cpp
+int  *__boxcxx_uncaught_count();
 }
 
 namespace boxcxx {
 
-// The library's fatal path: an uncaught exception, a pure virtual call, a
-// failed guard, a new that could not be satisfied and had no handler.
-//
-// It used to end with exit(134) — 128 + SIGABRT, the right STATUS, reached the
-// wrong way. exit() runs __cxa_finalize and the .fini_array, so every static
-// destructor and every std::atexit callback in the program ran on the way out
-// of a fatal error: destructors touching state an uncaught exception had just
-// abandoned, teardown code printing after the diagnostic, an atexit callback
-// getting a turn the standard never gives it. [exception.terminate]/2 says the
-// default terminate handler calls abort, and [support.start.term]/9 says abort
-// runs none of that. Until <csignal> existed there was no abort to call.
 [[noreturn]] void Panic(const char *msg)
 {
     printf("[boxcxx] FATAL: %s\n", msg);
     std::abort();
 }
 
-} // namespace boxcxx
+}
 
-// ── std::terminate ──────────────────────────────────────────────────────
 
 namespace {
 
 std::terminate_handler g_terminate_handler = nullptr;
 
-} // namespace
+}
 
 namespace std {
 
@@ -82,7 +54,6 @@ void terminate() noexcept
     terminate_handler handler = g_terminate_handler;
     if (handler) {
         handler();
-        // A terminate handler must not return — enforce it.
         boxcxx::Panic("terminate handler returned");
     }
     boxcxx::Panic("std::terminate() called");
@@ -93,7 +64,6 @@ int uncaught_exceptions() noexcept
     return *__boxcxx_uncaught_count();
 }
 
-// ── Key functions: vtables + what() for the base hierarchy ─────────────
 
 exception::~exception() = default;
 
@@ -125,21 +95,14 @@ const char *bad_array_new_length::what() const noexcept
 
 const nothrow_t nothrow{};
 
-} // namespace std
+}
 
-// Itanium ABI: emitted by the compiler at array-new sites whose element
-// count could overflow the allocation size (e.g. make_unique<T[]>(n)).
 extern "C" [[noreturn]] void __cxa_throw_bad_array_new_length()
 {
     throw std::bad_array_new_length{};
 }
 
-// ── __cxa_atexit / __cxa_finalize ───────────────────────────────────────
 
-// Normally supplied by crtbegin.o; BoxOS binaries are fully static single
-// images, so the canonical "main program" handle is NULL. Referenced by
-// compiler-emitted __cxa_atexit registration calls (hidden visibility —
-// must live inside every link that contains C++ static dtors, i.e. here).
 extern "C" {
 __attribute__((visibility("hidden"))) void *__dso_handle = nullptr;
 }
@@ -155,11 +118,11 @@ AtExitEntry *g_atexit_entries = nullptr;
 size_t       g_atexit_count   = 0;
 size_t       g_atexit_cap     = 0;
 
-} // namespace
+}
 
 extern "C" int __cxa_atexit(void (*fn)(void *), void *arg, void *dso)
 {
-    (void)dso;   // static linking — single image, no DSO handles
+    (void)dso;
     if (!fn) return -1;
 
     if (g_atexit_count == g_atexit_cap) {
@@ -176,20 +139,13 @@ extern "C" int __cxa_atexit(void (*fn)(void *), void *arg, void *dso)
     return 0;
 }
 
-// thread_local destructors — Itanium __cxa_thread_atexit. PER-STRAND: the list
-// head lives in this strand's own neg-TLS (zeroed by the kernel for a spawned
-// strand, by tls_init for main), so each strand owns an independent LIFO list
-// with zero locking. Nodes are heap-allocated (malloc is strand-safe). Drained
-// by __boxcxx_thread_storage_exit when the strand ends — for main strand, that
-// call sits in __cxa_finalize BEFORE the static dtors ([basic.start.term]:
-// thread storage duration ends before static storage duration).
 namespace {
 struct ThreadExitNode {
     void (*fn)(void *);
     void           *arg;
     ThreadExitNode *next;
 };
-} // namespace
+}
 
 static thread_local ThreadExitNode *g_thread_exit_head = nullptr;
 
@@ -203,16 +159,13 @@ extern "C" int __cxa_thread_atexit(void (*fn)(void *), void *arg, void *dso)
 
     node->fn   = fn;
     node->arg  = arg;
-    node->next = g_thread_exit_head;   // LIFO push onto this strand's head
+    node->next = g_thread_exit_head;
     g_thread_exit_head = node;
     return 0;
 }
 
 extern "C" void __boxcxx_thread_storage_exit(void)
 {
-    // Pop LIFO — reverse of registration order. A dtor that registers another
-    // thread_local re-pushes onto the head, so the loop re-reads it and the
-    // late registration is honoured before the list drains.
     while (g_thread_exit_head) {
         ThreadExitNode *node = g_thread_exit_head;
         g_thread_exit_head   = node->next;
@@ -223,13 +176,8 @@ extern "C" void __boxcxx_thread_storage_exit(void)
 
 extern "C" void __cxa_finalize(void *dso)
 {
-    (void)dso;   // NULL → run everything (only mode for static binaries)
+    (void)dso;
 
-    // Main strand's thread_local destructors run first (thread storage duration
-    // ends before static), then the process-global statics in reverse
-    // registration order. Handlers registered DURING the static drain (a dtor
-    // constructing another static) land at the tail and are picked up because
-    // the loop re-reads the count.
     __boxcxx_thread_storage_exit();
 
     while (g_atexit_count > 0) {
@@ -242,79 +190,54 @@ extern "C" void __cxa_finalize(void *dso)
     g_atexit_cap     = 0;
 }
 
-// ── Function-local static guards ────────────────────────────────────────
-//
-// Itanium ABI: 64-bit guard object; byte 0 = "initialized", the rest is
-// implementation-defined. The whole word is operated on atomically so a
-// concurrent first-touch by two strands resolves to exactly one initializer:
-//
-//   bit  0     (byte 0)    GUARD_DONE        — initialized (ABI-mandated byte)
-//   bit  8     (byte 1)    GUARD_BUSY        — an initializer is running
-//   bits 32-63 (bytes 4-7) owner strand id   — who is running it (recursion)
-//
-// The winner CASes BUSY|owner in one atomic op (no torn owner window). A loser
-// whose own strand id matches the owner is a genuine recursive re-entry (UB per
-// [stmt.dcl]) and panics; any other loser spins until DONE, or — if the
-// initializer threw (abort clears BUSY without setting DONE) — retries to become
-// the initializer itself. Single-thread behaviour is unchanged: the very first
-// acquire always wins the CAS, and self-recursion is still detected.
 
 namespace {
-constexpr uint64_t GUARD_DONE = 0x1ull;        // byte 0
-constexpr uint64_t GUARD_BUSY = 0x100ull;      // byte 1
+constexpr uint64_t GUARD_DONE = 0x1ull;
+constexpr uint64_t GUARD_BUSY = 0x100ull;
 constexpr int      GUARD_OWNER_SHIFT = 32;
 
 inline uint64_t guard_owner_bits(uint32_t self)
 {
     return static_cast<uint64_t>(self) << GUARD_OWNER_SHIFT;
 }
-} // namespace
+}
 
 extern "C" int __cxa_guard_acquire(uint64_t *guard)
 {
-    const uint32_t self = strand_self();   // distinct per strand; cabin pid for main
+    const uint32_t self = strand_self();
 
     for (;;) {
         uint64_t cur = __atomic_load_n(guard, __ATOMIC_ACQUIRE);
         if (cur & GUARD_DONE)
-            return 0;                       // already initialized
+            return 0;
 
         if (cur & GUARD_BUSY) {
             uint32_t owner = static_cast<uint32_t>(cur >> GUARD_OWNER_SHIFT);
             if (owner == self) {
-                // Same strand re-entered its own in-progress init — real UB.
                 boxcxx::Panic("recursive initialization of function-local static");
             }
-            // Another strand is initializing: back off and re-poll.
             yield();
             continue;
         }
 
-        // Claim it: publish BUSY + owner in a single atomic step.
         uint64_t want = GUARD_BUSY | guard_owner_bits(self);
         if (__atomic_compare_exchange_n(guard, &cur, want, false,
                                         __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
-            return 1;                       // we are the initializer
+            return 1;
         }
-        // Lost the race (cur reloaded) — loop and re-evaluate.
     }
 }
 
 extern "C" void __cxa_guard_release(uint64_t *guard)
 {
-    // Initialized: clear BUSY/owner, set DONE. Release so the constructed object
-    // is visible to any strand that observes DONE.
     __atomic_store_n(guard, GUARD_DONE, __ATOMIC_RELEASE);
 }
 
 extern "C" void __cxa_guard_abort(uint64_t *guard)
 {
-    // Initializer threw: clear BUSY/owner, leave DONE unset so a waiting strand
-    // re-attempts the initialization.
     __atomic_store_n(guard, 0ull, __ATOMIC_RELEASE);
 }
 
-// ── Vtable trap entries ─────────────────────────────────────────────────
 
 extern "C" [[noreturn]] void __cxa_pure_virtual()
 {

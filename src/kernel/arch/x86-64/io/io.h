@@ -81,4 +81,4 @@ static inline void memory_barrier(void) {
     __asm__ volatile ("" ::: "memory");
 }
 
-#endif // IO_H
+#endif

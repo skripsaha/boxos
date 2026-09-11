@@ -32,4 +32,4 @@ static inline void cpu_cpuid(uint32_t eax, uint32_t ecx, uint32_t* a, uint32_t* 
         : "a"(eax), "c"(ecx));
 }
 
-#endif // CPU_H
+#endif

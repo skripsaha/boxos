@@ -5,33 +5,20 @@
 #include "klib.h"
 #include "vmm.h"
 
-/* ACPI 6.5 §5.2.12 entry-length expectations. A real BIOS that publishes a
- * shorter entry of a known type is broken; we skip such entries rather
- * than misread garbage past their declared end. */
 static uint8_t expected_entry_length(uint8_t type) {
     switch (type) {
         case MADT_TYPE_LOCAL_APIC:        return sizeof(madt_local_apic_t);
         case MADT_TYPE_IO_APIC:           return sizeof(madt_io_apic_t);
         case MADT_TYPE_ISO:               return sizeof(madt_iso_t);
-        case MADT_TYPE_NMI_SOURCE:        return 8;   /* spec fixed */
+        case MADT_TYPE_NMI_SOURCE:        return 8;
         case MADT_TYPE_LOCAL_APIC_NMI:    return sizeof(madt_lapic_nmi_t);
         case MADT_TYPE_LAPIC_OVERRIDE:    return sizeof(madt_lapic_override_t);
         case MADT_TYPE_LX2APIC:           return sizeof(madt_lx2apic_t);
         case MADT_TYPE_LX2APIC_NMI:       return sizeof(madt_lx2apic_nmi_t);
-        default:                          return 0;   /* type unknown to us */
+        default:                          return 0;
     }
 }
 
-/*
- * ACPI 6.5 §5.2.12.2: the OSPM determines the BSP at runtime — it is the
- * processor that is currently executing OS init code. CPUID(1).EBX[31:24]
- * yields the local APIC ID of the executing CPU on every x86_64 part that
- * supports the APIC, which is universal for our target hardware (real CPUs
- * shipping with x86_64 always have an integrated LAPIC). Using this
- * instead of "first enabled MADT entry" avoids the trap of MADTs whose
- * Local APIC list is sorted by ACPI processor ID rather than by which
- * core booted first.
- */
 static uint8_t detect_bsp_apic_id(void) {
     uint32_t eax, ebx, ecx, edx;
     cpuid(CPUID_LEAF_FEATURES, &eax, &ebx, &ecx, &edx);
@@ -99,8 +86,6 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
                 debug_printf("[MADT]   LAPIC: ACPI ID=%u, APIC ID=%u, %s\n",
                              lapic->acpi_processor_id, lapic->apic_id,
                              enabled ? "enabled" : "disabled");
-                /* Resolve BSP ACPI processor ID by matching the APIC ID
-                 * that CPUID reported for the running CPU. */
                 if (info->bsp_lapic_found &&
                     !info->bsp_acpi_id_resolved &&
                     lapic->apic_id == info->bsp_lapic_id) {
@@ -122,8 +107,6 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
                              ioapic->io_apic_id,
                              ioapic->io_apic_address,
                              ioapic->gsi_base);
-                /* Use the first IO-APIC found. Multi-IOAPIC support is a
-                 * future IOAPIC-subsystem audit. */
                 if (info->ioapic_address == 0) {
                     info->ioapic_address = ioapic->io_apic_address;
                     info->ioapic_id = ioapic->io_apic_id;
@@ -197,8 +180,6 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
                 if (n->lint > 1) break;
                 if (info->nmi_count >= MADT_MAX_NMI_ENTRIES) break;
                 madt_nmi_entry_t* slot = &info->nmi[info->nmi_count++];
-                /* Truncate UID to one byte for our processor-ID match
-                 * — adequate until BoxOS supports >255 CPUs. */
                 slot->acpi_processor_id = (n->acpi_processor_uid == 0xFFFFFFFFu)
                                           ? MADT_NMI_PROCESSOR_ALL
                                           : (uint8_t)(n->acpi_processor_uid & 0xFF);
@@ -259,37 +240,29 @@ uint8_t amp_collect_lapics(uint32_t* ids_out, uint8_t max_count) {
     uint8_t* ptr = (uint8_t*)madt + sizeof(acpi_madt_t);
     uint8_t* end = (uint8_t*)madt + madt->header.length;
 
-    /* Collect BOTH MADT Type 0 (Processor Local APIC, 8-bit id) and Type 9
-     * (Processor Local x2APIC, 32-bit id). ACPI 6.5 §5.2.12.2 / §5.2.12.12:
-     * a logical processor with id < 255 is listed via Type 0 (even in x2APIC
-     * mode), and any processor with id >= 255 MUST be listed via Type 9. A
-     * machine with >254 logical processors therefore interleaves both. */
     while (ptr + sizeof(madt_entry_header_t) <= end && count < max_count) {
         madt_entry_header_t* entry = (madt_entry_header_t*)ptr;
         if (entry->length < sizeof(madt_entry_header_t)) break;
         if (ptr + entry->length > end) break;
 
-        uint32_t id = 0xFFFFFFFFu;   /* sentinel: "no usable id from this entry" */
+        uint32_t id = 0xFFFFFFFFu;
 
         if (entry->type == MADT_TYPE_LOCAL_APIC &&
             entry->length >= sizeof(madt_local_apic_t)) {
             madt_local_apic_t* lapic = (madt_local_apic_t*)entry;
             if ((lapic->flags & MADT_LAPIC_ENABLED) ||
                 (lapic->flags & MADT_LAPIC_ONLINE_CAP))
-                id = lapic->apic_id;                 /* 8-bit xAPIC id */
+                id = lapic->apic_id;
         } else if (entry->type == MADT_TYPE_LX2APIC &&
                    entry->length >= sizeof(madt_lx2apic_t)) {
             madt_lx2apic_t* x2 = (madt_lx2apic_t*)entry;
-            /* x2apic_id == 0xFFFFFFFF marks an unusable slot — skip it. */
             if (((x2->flags & MADT_LAPIC_ENABLED) ||
                  (x2->flags & MADT_LAPIC_ONLINE_CAP)) &&
                 x2->x2apic_id != 0xFFFFFFFFu)
-                id = x2->x2apic_id;                  /* 32-bit x2APIC id */
+                id = x2->x2apic_id;
         }
 
         if (id != 0xFFFFFFFFu) {
-            /* A processor is listed in exactly one of Type 0 / Type 9, but be
-             * defensive against firmware that double-lists it. */
             bool dup = false;
             for (uint8_t i = 0; i < count; i++)
                 if (ids_out[i] == id) { dup = true; break; }

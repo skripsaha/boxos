@@ -1,12 +1,3 @@
-// brookexec — cross-strand Brook + box::executor co_await regression test.
-//
-// A sibling strand is the Brook WRITER; the MAIN strand drives a box::executor
-// draining a coroutine that does `co_await r->next()` (box::brook<T>, the Brook
-// wait-domain awaiter). This is the precise C++ shape Ф24c (co_await current
-// read, Brook-backed) builds on — it guards that an executor-driven cross-strand
-// reader converges with a sibling writer. Proven on bios1/bios16/uefi1/uefi16.
-//
-// Emits [BE] PASS / [BE] FAIL.
 
 #include <coroutine>
 #include <cstdint>
@@ -32,12 +23,10 @@ constexpr const char *TAG   = "brook:exec:repro";
 constexpr std::uint32_t CAP = 16;
 constexpr std::uint32_t N   = 8;
 
-// sibling-strand rendezvous (shared cabin AS)
-volatile std::uint64_t g_w_done;   // 0 running, 1 done, 2 open-fail
+volatile std::uint64_t g_w_done;
 volatile std::uint32_t g_w_pushed;
 volatile std::uint32_t g_w_avail;
 
-// The sibling strand: open the Brook WRITER and push N ticks, then park alive.
 extern "C" void writer_strand(void *)
 {
     auto w = box::brook<Tick>::writer(TAG, CAP);
@@ -56,24 +45,22 @@ extern "C" void writer_strand(void *)
     __atomic_store_n(&g_w_done, 1u, __ATOMIC_RELEASE);
     addr_wake((void *)&g_w_done, 0);
 
-    for (;;) yield();   // keep the writer + its mapping/alive flag live
+    for (;;) yield();
 }
 
-// Main-strand consumer coroutine: drain `count` frames via co_await on the
-// executor (the Brook wait-domain awaiter). Reports how many it actually got.
 box::task<std::uint32_t> consumer(box::brook<Tick> *r, std::uint32_t count)
 {
     std::uint32_t got = 0;
     for (std::uint32_t i = 0; i < count; i++) {
         std::optional<Tick> t = co_await r->next();
-        if (!t) break;                 // stream terminal
+        if (!t) break;
         if (t->idx != i || t->mag != 0xBEEFu) break;
         got++;
     }
     co_return got;
 }
 
-} // namespace
+}
 
 int main()
 {
@@ -86,11 +73,9 @@ int main()
 
     g_w_done = 0; g_w_pushed = 0; g_w_avail = 0;
 
-    // Spawn the sibling WRITER strand first.
     std::uint32_t wpid = strand_spawn(writer_strand, nullptr);
     if (wpid == 0) { printf("[BE] FAIL: strand_spawn returned 0\n"); exit(1); }
 
-    // Wait (bounded) for the writer to finish pushing.
     std::uint32_t cyc = 0;
     while (__atomic_load_n(&g_w_done, __ATOMIC_ACQUIRE) == 0) {
         if (++cyc > 400u) { printf("[BE] FAIL: writer never signalled done\n"); exit(1); }
@@ -102,7 +87,6 @@ int main()
     std::uint32_t pushed = __atomic_load_n(&g_w_pushed, __ATOMIC_RELAXED);
     std::uint32_t wav    = __atomic_load_n(&g_w_avail,  __ATOMIC_RELAXED);
 
-    // Main strand attaches the READER and drains via the executor coroutine.
     auto r = box::brook<Tick>::reader(TAG);
     if (!r) { printf("[BE] FAIL: reader open NULL\n"); exit(1); }
     printf("[BE] writer pushed=%u wavail=%u | reader ravail=%u\n",

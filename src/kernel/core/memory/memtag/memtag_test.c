@@ -1,40 +1,19 @@
-/*
- * MemTag — Stress + Correctness Tests
- *
- * Exercises the TagFS-shaped memory tagging architecture:
- *   - Tag intern (key:value, key-only, idempotence, registry growth)
- *   - Region create / destroy via PMM (pmm_alloc(N, "tag"))
- *   - Multi-tag per region (MemTagApply, MemTagApplyMany, MemTagClear)
- *   - Set algebra: AND / OR / Mixed (required, any, excluded)
- *   - Query cache (hit/miss, generation invalidation)
- *   - Bitmap word boundary (tag_id 63→64 across uint64_t boundary)
- *   - Boot-seeded zone regions queryable via MemTagAnd("zone:dma32")
- *   - Forward lookup MemRegionFromPhys (O(1) dense index)
- *   - PMM round-trip: alloc tagged, query, free, region gone
- *   - Stress: 64 alloc cycle × 8 tags
- *   - Generation counter monotone under mutation
- */
 
 #include "memtag.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "klib.h"
-#include "mce.h"     /* Phase 14K — mce_is_initialized + bank count */
-#include "iommu.h"   /* Phase 14L — iommu_present / iommu_domain_id */
-#include "cpuid.h"   /* Phase 14M — g_cpu_caps.has_pku gate */
+#include "mce.h"
+#include "iommu.h"
+#include "cpuid.h"
 
-static MemTagResult s_res;  /* avoid 4 KB on kernel stack */
+static MemTagResult s_res;
 
 #define MT_CHECK(cond, label) \
     do { if (cond) { pass++; } \
          else { fail++; kprintf("[MEMTAG TEST]   %[R]FAIL%[D]: " label "\n"); } \
     } while (0)
 
-/* Helpers via the out-pointer variant — return-by-value of
- * MemTagResult (2056 bytes) would spill to the caller's stack and
- * accumulate the >8 KiB warning that triggered the -Wstack-usage
- * cleanup. noinline keeps the MemTagResult temp on this function's
- * frame, not the caller's. */
 static __attribute__((noinline)) size_t CountAnd1(const char *a) {
     const char *tags[2] = { a, NULL };
     static MemTagResult r;
@@ -67,13 +46,12 @@ void MemTagStressTest(void) {
         return;
     }
 
-    /* ── Phase 1: tag intern ─────────────────────────────────────────── */
     kprintf("[MEMTAG TEST] Phase 1: tag intern\n");
 
     uint16_t t1a = MemTagInternStr("test:phase1");
     MT_CHECK(t1a != MEMTAG_INVALID_TAG_ID, "intern test:phase1");
 
-    uint16_t t1b = MemTagInternStr("test:phase1");  /* idempotent */
+    uint16_t t1b = MemTagInternStr("test:phase1");
     MT_CHECK(t1b == t1a, "intern idempotent (same id on second call)");
 
     uint16_t t1c = MemTagResolveStr("test:phase1");
@@ -82,14 +60,12 @@ void MemTagStressTest(void) {
     uint16_t t1miss = MemTagResolveStr("test:never-interned");
     MT_CHECK(t1miss == MEMTAG_INVALID_TAG_ID, "resolve unknown → INVALID");
 
-    /* Key-only tag */
     uint16_t t1key = MemTagIntern("test", NULL);
     MT_CHECK(t1key != MEMTAG_INVALID_TAG_ID, "intern key-only");
     MT_CHECK(MemTagKey(t1key) && strcmp(MemTagKey(t1key), "test") == 0,
              "MemTagKey returns 'test'");
     MT_CHECK(MemTagValue(t1key) == NULL, "MemTagValue is NULL for key-only");
 
-    /* ── Phase 2: pmm_alloc(N, "tag") creates a region ─────────────── */
     kprintf("[MEMTAG TEST] Phase 2: pmm_alloc creates region\n");
 
     void *p2 = MemTagPmmAlloc(1, "test:p2");
@@ -99,7 +75,6 @@ void MemTagStressTest(void) {
     MT_CHECK(MemRegionHasTagStr(r2, "test:p2"), "region has tag test:p2");
     MT_CHECK(CountAnd1("test:p2") >= 1, "AND(test:p2) count >= 1");
 
-    /* ── Phase 3: multi-tag application ────────────────────────────── */
     kprintf("[MEMTAG TEST] Phase 3: multi-tag\n");
 
     void *p3 = pmm_alloc(1);
@@ -122,7 +97,6 @@ void MemTagStressTest(void) {
     MT_CHECK(CountAnd2("test:a", "test:never-interned") == 0,
              "AND(test:a, unknown) == 0 (unknown tag kills AND)");
 
-    /* ── Phase 4: OR query ─────────────────────────────────────────── */
     kprintf("[MEMTAG TEST] Phase 4: OR query\n");
 
     void *p4a = MemTagPmmAlloc(1, "test:or_x");
@@ -138,7 +112,6 @@ void MemTagStressTest(void) {
                  "OR result contains p4b's region");
     }
 
-    /* ── Phase 5: Mixed (required+any+excluded) ────────────────────── */
     kprintf("[MEMTAG TEST] Phase 5: mixed query\n");
 
     void *p5a = pmm_alloc(1);
@@ -165,7 +138,6 @@ void MemTagStressTest(void) {
     const char *exc[]  = { "test:excluded5", NULL };
     MemTagQueryMixedInto_(req, any_, exc, &s_res);
 
-    /* p5a (shared2+a2) and p5b (shared2+b2) should match; p5c excluded */
     MT_CHECK(s_res.count >= 2, "mixed query count >= 2");
     MT_CHECK(ResultContainsRegionForPhys(&s_res, (uintptr_t)p5a),
              "mixed: p5a present (shared2 ∧ a2 ∧ !excluded)");
@@ -174,7 +146,6 @@ void MemTagStressTest(void) {
     MT_CHECK(!ResultContainsRegionForPhys(&s_res, (uintptr_t)p5c),
              "mixed: p5c absent (excluded5 filtered)");
 
-    /* ── Phase 6: tag clear + tag re-add ───────────────────────────── */
     kprintf("[MEMTAG TEST] Phase 6: clear + re-add\n");
 
     size_t before = CountAnd1("test:a");
@@ -187,18 +158,15 @@ void MemTagStressTest(void) {
     MT_CHECK(MemRegionHasTagStr(r3, "test:b"),
              "r3 still has test:b (only test:a cleared)");
 
-    /* Re-apply restores */
     MemTagApply(r3, "test:a");
     MT_CHECK(CountAnd1("test:a") == before, "re-apply restores count");
 
-    /* ── Phase 7: zone-region seeding ──────────────────────────────── */
     kprintf("[MEMTAG TEST] Phase 7: boot-seeded zones queryable\n");
 
     MemTagAndInto(&s_res, "zone:dma32");
     MT_CHECK(s_res.count >= 1, "AND(zone:dma32) finds boot-seeded zone");
 
     MemTagAndInto(&s_res, "zone:user");
-    /* zone:user may be absent on tiny memory configs; not a hard fail */
     if (s_res.count == 0) {
         kprintf("[MEMTAG TEST]   note: zone:user empty (small RAM config)\n");
     }
@@ -209,13 +177,11 @@ void MemTagStressTest(void) {
     MemTagAndInto(&s_res, "purpose:kernel");
     MT_CHECK(s_res.count >= 1, "AND(purpose:kernel) finds kernel image");
 
-    /* ── Phase 8: query cache hit/miss ─────────────────────────────── */
     kprintf("[MEMTAG TEST] Phase 8: query cache\n");
 
     MemTagStats stats_before;
     MemTagGetStats(&stats_before);
 
-    /* Run the same query 5 times; first miss, next 4 hits. */
     for (int i = 0; i < 5; i++) (void)MemTagAnd("zone:dma32");
 
     MemTagStats stats_after;
@@ -226,30 +192,22 @@ void MemTagStressTest(void) {
     MT_CHECK(new_hits >= 4, "cache: 4+ hits on repeated query");
     MT_CHECK(new_misses <= 1, "cache: at most 1 miss on first query");
 
-    /* ── Phase 9: cache invalidation on mutation ───────────────────── */
     kprintf("[MEMTAG TEST] Phase 9: cache invalidation\n");
 
-    /* Run query, cache it */
     MemTagAnd("test:cache_inv_x");
-    /* Mutate — apply tag to a fresh region */
     void *pinv = pmm_alloc(1);
     uint32_t rinv = MemRegionCreate((uintptr_t)pinv, 0, NULL, 1,
                                      MEMTAG_REGION_FLAG_PHYSICAL);
     MemTagApply(rinv, "test:cache_inv_x");
 
-    /* Re-query — should pick up the new region (cache invalidated) */
     MemTagAndInto(&s_res, "test:cache_inv_x");
     MT_CHECK(s_res.count >= 1,
              "post-mutation query sees new region (cache invalidated)");
     MT_CHECK(ResultContainsRegionForPhys(&s_res, (uintptr_t)pinv),
              "new region rinv present in re-query");
 
-    /* ── Phase 10: bitmap word boundary (tag_id 63→64) ─────────────── */
     kprintf("[MEMTAG TEST] Phase 10: bitmap word boundary\n");
 
-    /* Pad registry to cross the 64-bit boundary inside the per-region
-     * tag_ids sorted array. (Phase 1's bitmap is byte-addressed, so the
-     * "word boundary" is internal — but exercise the path regardless.) */
     char buf[32];
     for (int i = 0; i < 70; i++) {
         ksnprintf(buf, sizeof(buf), "test:pad:%d", i);
@@ -266,7 +224,6 @@ void MemTagStressTest(void) {
     MT_CHECK(ResultContainsRegionForPhys(&s_res, (uintptr_t)pbnd),
              "pbnd in AND(bnd_lo, bnd_hi) result");
 
-    /* ── Phase 11: PMM round-trip (alloc → query → free → gone) ─── */
     kprintf("[MEMTAG TEST] Phase 11: PMM round-trip\n");
 
     void *prt = MemTagPmmAlloc(1, "test:roundtrip");
@@ -277,7 +234,6 @@ void MemTagStressTest(void) {
     MT_CHECK(MemRegionFromPhys(prt_phys) == MEMTAG_INVALID_REGION_ID,
              "after pmm_free: phys → INVALID region");
 
-    /* ── Phase 12.5: derived NUMA tag ──────────────────────────────── */
     kprintf("[MEMTAG TEST] Phase 12.5: NUMA derived tag (graceful if SRAT absent)\n");
 
     void *pnuma = MemTagPmmAlloc(1, "test:numa-probe");
@@ -295,11 +251,8 @@ void MemTagStressTest(void) {
         pmm_free(pnuma, 1);
     }
 
-    /* ── Phase 12.6: MMIO derived cache + purpose tags ────────────── */
     kprintf("[MEMTAG TEST] Phase 12.6: MMIO derived cache:uc + purpose:mmio\n");
 
-    /* LAPIC base 0xFEE00000 — standard MMIO that we don't actually use here.
-     * Map it briefly, check the tags landed, unmap. */
     volatile void *mmio_va = vmm_map_mmio(0xFEE00000UL, 4096, VMM_FLAGS_KERNEL_RW);
     if (mmio_va) {
         uint32_t rmmio = MemRegionFromPhys(0xFEE00000UL);
@@ -309,9 +262,6 @@ void MemTagStressTest(void) {
             MT_CHECK(MemRegionHasTagStr(rmmio, "purpose:mmio"),
                      "MMIO region tagged purpose:mmio");
         } else {
-            /* id_by_page doesn't cover MMIO range above mem_end — region
-             * exists in registry but not findable by phys. Verify via
-             * bitmap query instead. */
             MemTagResult mmio_q = MemTagAnd("cache:uc", "purpose:mmio");
             MT_CHECK(mmio_q.count >= 1,
                      "MMIO regions findable via tag bitmap (id_by_page miss is OK)");
@@ -319,21 +269,12 @@ void MemTagStressTest(void) {
         vmm_unmap_mmio(mmio_va, 4096);
     }
 
-    /* ── Phase 13: capability enforcement (Phase 2A infrastructure) ── */
     kprintf("[MEMTAG TEST] Phase 13: capability enforcement (guard/grant/revoke/check)\n");
 
-    /* Take any kernel process (pid 0 == kernel sentinel — skip; use boot
-     * shell's pid which we don't know yet). Instead, use the calling
-     * context — but this test runs early in boot before any user proc.
-     * Strategy: use pid 0 (the kernel "process") as the cabin under test.
-     * pid 0 has no real cabin but process_find returns the kernel sentinel
-     * and grant/revoke on it just flips bits in an unused mask. The
-     * MemRegionAccessAllowed query is what we actually verify. */
     uint32_t test_pid = 0;
     uint16_t cap_tid  = MemTagInternStr("test:phase13:capability");
     MT_CHECK(cap_tid != MEMTAG_INVALID_TAG_ID, "intern test capability tag");
 
-    /* Default: no guards → access allowed. */
     void *pcap = MemTagPmmAlloc(1, "test:phase13:guarded-region");
     MT_CHECK(pcap != NULL, "alloc guarded-region");
     uint32_t rcap = MemRegionFromPhys((uintptr_t)pcap);
@@ -341,12 +282,10 @@ void MemTagStressTest(void) {
     MT_CHECK(MemRegionAccessAllowed(test_pid, rcap),
              "default: no guards → access allowed");
 
-    /* Apply capability tag to the region. Still no guard set → allowed. */
     MemTagApply(rcap, "test:phase13:capability");
     MT_CHECK(MemRegionAccessAllowed(test_pid, rcap),
              "tag applied, not guarded → access allowed");
 
-    /* Flip guard ON. Cabin does NOT hold cap → DENIED. */
     error_t gerr = MemTagSetGuard("test:phase13:capability", true);
     MT_CHECK(gerr == OK, "MemTagSetGuard(ON) ok");
     MT_CHECK(MemTagIsGuard(cap_tid), "tag is guarded after SetGuard");
@@ -355,20 +294,15 @@ void MemTagStressTest(void) {
     MT_CHECK(MemRegionFirstMissingGuard(test_pid, rcap) == cap_tid,
              "missing-guard reports correct tag_id");
 
-    /* Grant capability to cabin. Now ALLOWED. */
     error_t grerr = MemCabinGrant(test_pid, cap_tid);
     MT_CHECK(grerr == OK || grerr == ERR_OBJECT_NOT_FOUND,
              "MemCabinGrant returns ok or no-proc");
-    /* pid 0 may not have a real process_t — that's OK for this test;
-     * we mostly verify the API doesn't crash. Run check anyway: if
-     * grant succeeded (real cabin), access should now be allowed. */
     if (grerr == OK) {
         MT_CHECK(MemCabinHolds(test_pid, cap_tid),
                  "MemCabinHolds returns true after grant");
         MT_CHECK(MemRegionAccessAllowed(test_pid, rcap),
                  "grant ON → access ALLOWED");
 
-        /* Revoke → DENIED again. */
         MemCabinRevoke(test_pid, cap_tid);
         MT_CHECK(!MemCabinHolds(test_pid, cap_tid),
                  "MemCabinHolds returns false after revoke");
@@ -379,20 +313,16 @@ void MemTagStressTest(void) {
                 test_pid);
     }
 
-    /* Cleanup: clear guard so subsequent system code isn't affected. */
     MemTagSetGuard("test:phase13:capability", false);
     MT_CHECK(!MemTagIsGuard(cap_tid), "guard OFF cleared correctly");
 
     if (pcap) pmm_free(pcap, 1);
 
-    /* ── Phase 14: MemTagEnforce / EnforcePhys gates (Phase 2B) ─── */
     kprintf("[MEMTAG TEST] Phase 14: MemTagEnforce/EnforcePhys gates\n");
 
-    /* Untracked phys → allow (no region known). */
     MT_CHECK(MemTagEnforcePhys(0, 0xDEADBEEF000UL),
              "untracked phys → MemTagEnforcePhys returns true");
 
-    /* Region without guards → allow. */
     void *p14a = MemTagPmmAlloc(1, "test:phase14:metadata-tag");
     uint32_t r14a = MemRegionFromPhys((uintptr_t)p14a);
     MT_CHECK(MemTagEnforce(0, 0, r14a),
@@ -400,31 +330,20 @@ void MemTagStressTest(void) {
     MT_CHECK(MemTagEnforcePhys(0, (uintptr_t)p14a),
              "no-guard region via phys → MemTagEnforcePhys returns true");
 
-    /* Region with guard → deny (pid 0, no cabin). */
     MemTagSetGuard("test:phase14:metadata-tag", true);
     MT_CHECK(!MemTagEnforce(0, 0, r14a),
              "guard set + pid invalid → MemTagEnforce returns false");
     MT_CHECK(!MemTagEnforcePhys(0, (uintptr_t)p14a),
              "guard set + pid invalid → MemTagEnforcePhys returns false");
 
-    /* Invalid region_id → permissive default (no enforcement target). */
     MT_CHECK(MemTagEnforce(0, 0, MEMTAG_INVALID_REGION_ID),
              "invalid region_id → returns true (no enforcement)");
 
-    /* Cleanup */
     MemTagSetGuard("test:phase14:metadata-tag", false);
     if (p14a) pmm_free(p14a, 1);
 
-    /* ── Phase 14C: attach/detach bookkeeping (Phase 2C infra) ────── */
     kprintf("[MEMTAG TEST] Phase 14C: attach/detach bookkeeping\n");
     {
-        /* Allocate a region and use real VMM contexts as stand-in cabins.
-         * Phase 2D's StampPteRegion walks ctx->pml4 inside MemRegionAttachCabin,
-         * so fake pointers would #GP — allocate two empty contexts whose
-         * PML4 entries are all NULL for the test's va_base values. The
-         * leaf walker returns NULL on first PML4 check (entries unmapped),
-         * so stamping is a safe no-op while the attach bookkeeping is
-         * exercised end-to-end. */
         void *pat = MemTagPmmAlloc(1, "test:phase14c:attach-region");
         MT_CHECK(pat != NULL, "alloc attach-region");
         uint32_t rat = MemRegionFromPhys((uintptr_t)pat);
@@ -453,7 +372,6 @@ void MemTagStressTest(void) {
                                                       rat, snap, 8);
         MT_CHECK(ns == 2, "snapshot returns 2 attachments");
 
-        /* Verify both ctx pointers + va_base pairs are present. */
         bool seen_a = false, seen_b = false;
         for (size_t i = 0; i < ns; i++) {
             if (snap[i].ctx == fake_ctx_a && snap[i].va_base == va1) seen_a = true;
@@ -463,7 +381,6 @@ void MemTagStressTest(void) {
         }
         MT_CHECK(seen_a && seen_b, "snapshot contains both attaches");
 
-        /* Idempotent re-attach: should refresh, not duplicate. */
         error_t e3 = MemRegionAttachCabin(rat, fake_ctx_a, va1, 1,
                                            MEMTAG_ATTACH_CLASS_4K,
                                            VMM_FLAGS_USER_RW | VMM_FLAG_NO_EXECUTE);
@@ -472,7 +389,6 @@ void MemTagStressTest(void) {
                                                rat, snap, 8);
         MT_CHECK(ns == 2, "snapshot still returns 2 after re-attach");
 
-        /* State change via set_attach_state. */
         MemRegionRegistrySetAttachState(MemTagGetRegionRegistry(), rat,
                                          fake_ctx_a, va1,
                                          MEMTAG_ATTACH_REVOKED);
@@ -485,21 +401,18 @@ void MemTagStressTest(void) {
         }
         MT_CHECK(revoked_seen, "state mutation reflected in snapshot");
 
-        /* Single detach. */
         error_t e4 = MemRegionDetachCabin(rat, fake_ctx_a, va1);
         MT_CHECK(e4 == OK, "single detach ok");
         ns = MemRegionRegistrySnapshotAttachs(MemTagGetRegionRegistry(),
                                                rat, snap, 8);
         MT_CHECK(ns == 1, "snapshot returns 1 after one detach");
 
-        /* Bulk detach by ctx (defensive scrub). */
         size_t detached = MemTagDetachAllForCabin(fake_ctx_b);
         MT_CHECK(detached >= 1, "bulk detach by ctx removes ≥1");
         ns = MemRegionRegistrySnapshotAttachs(MemTagGetRegionRegistry(),
                                                rat, snap, 8);
         MT_CHECK(ns == 0, "snapshot empty after bulk detach");
 
-        /* Idempotent detach. */
         error_t e5 = MemRegionDetachCabin(rat, fake_ctx_a, va1);
         MT_CHECK(e5 == OK, "idempotent detach (already gone) returns OK");
 
@@ -508,26 +421,22 @@ void MemTagStressTest(void) {
         if (ctx_b) vmm_destroy_context(ctx_b);
     }
 
-    /* ── Phase 14D: SweepGuard + EnforceRevokePost no-crash on bogus pid ── */
     kprintf("[MEMTAG TEST] Phase 14D: enforce post-ops no-crash on bogus pid\n");
     {
         uint16_t spook = MemTagInternStr("test:phase14d:guard");
         MT_CHECK(spook != MEMTAG_INVALID_TAG_ID, "intern phase14d guard tag");
 
-        /* No regions carry this tag — sweep is no-op but must not crash. */
         size_t swept_on  = MemTagSweepGuard(spook, true);
         size_t swept_off = MemTagSweepGuard(spook, false);
         MT_CHECK(swept_on == 0 && swept_off == 0,
                  "SweepGuard returns 0 when no regions match");
 
-        /* Bogus pid — post-grant/revoke must be safe (process_find fails). */
         size_t pr = MemCabinEnforceRevokePost(0xFFFFFFFFu, spook);
         size_t pg = MemCabinEnforceGrantPost(0xFFFFFFFFu, spook);
         MT_CHECK(pr == 0 && pg == 0,
                  "EnforceRevokePost / GrantPost no-op on bogus pid");
     }
 
-    /* ── Phase 14E: MemRegionFromPte fast-path correctness (Phase 2D M1) ── */
     kprintf("[MEMTAG TEST] Phase 14E: MemRegionFromPte fast-path\n");
     {
         void *p14e = MemTagPmmAlloc(1, "test:phase14e:fast-path");
@@ -540,16 +449,12 @@ void MemTagStressTest(void) {
             uint64_t encoded = ((uint64_t)(r14e & MEMTAG_PTE_REGION_MAX))
                                << MEMTAG_PTE_REGION_SHIFT;
 
-            /* Synthesize PTE: phys + flags + correct encoded id. */
             uint64_t good_pte = phys_14e | encoded |
                                 VMM_FLAG_PRESENT | VMM_FLAG_USER;
             uint32_t found = MemRegionFromPte(good_pte, phys_14e);
             MT_CHECK(found == r14e,
                      "MemRegionFromPte hits cache when encoded id covers phys");
 
-            /* Synthesize PTE with WRONG encoded id but correct phys —
-             * fast-path mismatches the slot's base_phys, falls back to
-             * dense id_by_page → still returns r14e. */
             uint32_t wrong_id = (r14e + 1u) & MEMTAG_PTE_REGION_MAX;
             if (wrong_id != (r14e & MEMTAG_PTE_REGION_MAX)) {
                 uint64_t wrong_encoded = ((uint64_t)wrong_id)
@@ -565,7 +470,6 @@ void MemTagStressTest(void) {
         if (p14e) pmm_free(p14e, 1);
     }
 
-    /* ── Phase 14F: MemRegionFromPte collision rejection ─────────────── */
     kprintf("[MEMTAG TEST] Phase 14F: MemRegionFromPte rejects bogus phys\n");
     {
         void *p14f = MemTagPmmAlloc(1, "test:phase14f:collide-base");
@@ -574,13 +478,9 @@ void MemTagStressTest(void) {
         MT_CHECK(r14f != MEMTAG_INVALID_REGION_ID, "find 14f region");
 
         if (r14f != MEMTAG_INVALID_REGION_ID) {
-            /* Construct a PTE with r14f's encoded id but phys far above
-             * mem_end (no region covers it). MemRegionFromPte should
-             * reject the cache hit (slot's base_phys mismatch) and the
-             * fallback should also fail (phys outside id_by_page). */
             uint64_t encoded = ((uint64_t)(r14f & MEMTAG_PTE_REGION_MAX))
                                << MEMTAG_PTE_REGION_SHIFT;
-            uintptr_t bogus_phys = 0x1000000000000UL;  /* above MAXPHYADDR */
+            uintptr_t bogus_phys = 0x1000000000000UL;
             uint64_t bogus_pte = bogus_phys | encoded | VMM_FLAG_PRESENT;
             uint32_t found = MemRegionFromPte(bogus_pte, bogus_phys);
             MT_CHECK(found == MEMTAG_INVALID_REGION_ID,
@@ -590,44 +490,29 @@ void MemTagStressTest(void) {
         if (p14f) pmm_free(p14f, 1);
     }
 
-    /* Phase 14G's VMM probe (vmm_verify_pte_metadata_bits_52_58) moved
-     * to VmmHelperTest in vmm_test.c — it's a pure CPU-state probe. */
 
-    /* ── Phase 14H: cache:* derived tags on boot-seeded regions (2E) ── */
     kprintf("[MEMTAG TEST] Phase 14H: derived cache tags on boot regions\n");
     {
-        /* Zones carry cache:wb (Phase 2E SeedZoneRegions). */
         MemTagAndInto(&s_res, "zone:dma32", "cache:wb");
         MT_CHECK(s_res.count >= 1,
                  "zone:dma32 ∧ cache:wb finds boot zone region");
 
-        /* MMIO E820 entries carry cache:uc (Phase 2E). */
         MemTagAndInto(&s_res, "purpose:mmio", "cache:uc");
         MT_CHECK(s_res.count >= 1,
                  "purpose:mmio ∧ cache:uc finds MMIO region");
 
-        /* Kernel image gets cache:wb. */
         MemTagAndInto(&s_res, "purpose:kernel", "cache:wb");
         MT_CHECK(s_res.count >= 1,
                  "purpose:kernel ∧ cache:wb finds kernel image region");
     }
 
-    /* Phase 14I + 14J (vmm_verify_pat_msr, vmm_pte_cache_type_str,
-     * vmm_pte_pat_index) moved to VmmHelperTest in vmm_test.c — pure
-     * VMM helpers with no MemTag-specific state. */
 
-    /* Phase 14K's MCE + PMM helper checks moved to McePresenceTest and
-     * PmmPoisonTest respectively. The MemTag-side check that the
-     * `mce:poisoned` tag was correctly reserved during boot stays as
-     * a namespace presence check below. */
     {
-        MemTagAndInto(&s_res, "mce:poisoned");  /* must not panic on empty result */
+        MemTagAndInto(&s_res, "mce:poisoned");
         MT_CHECK(MemTagResolveStr("mce:poisoned") != MEMTAG_INVALID_TAG_ID,
                  "mce:poisoned reserved tag interned at boot");
     }
 
-    /* Phase 14L's iommu_present / iommu_domain_id helper checks moved
-     * to IommuPresenceTest. MemTag-side reserved-namespace check stays. */
     {
         MT_CHECK(MemTagResolveStr("iommu:ready") != MEMTAG_INVALID_TAG_ID,
                  "iommu:ready reserved tag interned at boot");
@@ -637,12 +522,8 @@ void MemTagStressTest(void) {
                  "iommu:domain:attached reserved tag interned");
     }
 
-    /* Phase 14M/N/O/P's VMM encoder + helper checks moved to
-     * VmmHelperTest in vmm_test.c. MemTag's job here is to verify the
-     * RESERVED NAMESPACE was seeded correctly for each phase. */
     kprintf("[MEMTAG TEST] Phase NS: hardware-derived reserved namespace\n");
     {
-        /* Phase 2E cache:* */
         MT_CHECK(MemTagResolveStr("cache:wb") != MEMTAG_INVALID_TAG_ID,
                  "cache:wb interned");
         MT_CHECK(MemTagResolveStr("cache:uc") != MEMTAG_INVALID_TAG_ID,
@@ -652,7 +533,6 @@ void MemTagStressTest(void) {
         MT_CHECK(MemTagResolveStr("cache:wt") != MEMTAG_INVALID_TAG_ID,
                  "cache:wt interned");
 
-        /* Phase 2H pku:* */
         MT_CHECK(MemTagResolveStr("pku:0")  != MEMTAG_INVALID_TAG_ID,
                  "pku:0 interned");
         MT_CHECK(MemTagResolveStr("pku:15") != MEMTAG_INVALID_TAG_ID,
@@ -660,13 +540,11 @@ void MemTagStressTest(void) {
         MT_CHECK(MemTagResolveStr("pku:fault:denied") != MEMTAG_INVALID_TAG_ID,
                  "pku:fault:denied interned");
 
-        /* Phase 2I lam:* */
         MT_CHECK(MemTagResolveStr("lam:ready") != MEMTAG_INVALID_TAG_ID,
                  "lam:ready interned");
         MT_CHECK(MemTagResolveStr("lam:fault:tag") != MEMTAG_INVALID_TAG_ID,
                  "lam:fault:tag interned");
 
-        /* Phase 2J tme:* */
         MT_CHECK(MemTagResolveStr("tme:ready") != MEMTAG_INVALID_TAG_ID,
                  "tme:ready interned");
         MT_CHECK(MemTagResolveStr("tme:mk_active") != MEMTAG_INVALID_TAG_ID,
@@ -676,7 +554,6 @@ void MemTagStressTest(void) {
         MT_CHECK(MemTagResolveStr("tme:keyid:15") != MEMTAG_INVALID_TAG_ID,
                  "tme:keyid:15 interned");
 
-        /* Phase 2K cet:* */
         MT_CHECK(MemTagResolveStr("cet:ready") != MEMTAG_INVALID_TAG_ID,
                  "cet:ready interned");
         MT_CHECK(MemTagResolveStr("cet:shstk:supervisor") != MEMTAG_INVALID_TAG_ID,
@@ -685,7 +562,6 @@ void MemTagStressTest(void) {
                  "cet:fault:cp interned");
     }
 
-    /* ── Phase 12: stress — 64 allocs × 8 tags ────────────────────── */
     kprintf("[MEMTAG TEST] Phase 12: stress 64 × 8 tags\n");
 
     #define STRESS_N    64
@@ -698,9 +574,6 @@ void MemTagStressTest(void) {
     size_t n_alloc = 0;
 
     for (size_t i = 0; i < STRESS_N; i++) {
-        /* Use MemTagPmmAlloc directly — the pmm_alloc macro's
-         * __typeof__(+(arg)) trick can't classify dynamic char* values
-         * (only literal char[N] arrays). */
         void *sp = MemTagPmmAlloc(1, s_tag_strs[i % STRESS_TAGS]);
         if (!sp) break;
         s_stress[n_alloc++] = (uintptr_t)sp;
@@ -722,12 +595,10 @@ void MemTagStressTest(void) {
                  "OR of all 8 stress tags covers all allocations");
     }
 
-    /* Cleanup */
     for (size_t i = 0; i < n_alloc; i++) {
         pmm_free((void *)s_stress[i], 1);
     }
 
-    /* Cleanup remaining Phase 2-10 allocs */
     if (p2)    pmm_free(p2, 1);
     if (p3)    { MemRegionDestroy(r3);  pmm_free(p3, 1); }
     if (p4a)   pmm_free(p4a, 1);
@@ -738,7 +609,6 @@ void MemTagStressTest(void) {
     if (pinv)  { MemRegionDestroy(rinv); pmm_free(pinv, 1); }
     if (pbnd)  { MemRegionDestroy(rbnd); pmm_free(pbnd, 1); }
 
-    /* ── Summary ──────────────────────────────────────────────────── */
     MemTagStats final_stats;
     MemTagGetStats(&final_stats);
     kprintf("[MEMTAG TEST] Stats: tags=%u active_regs=%u/%u  reg_gen=%lu  bmp_gen=%lu  hits=%lu  misses=%lu\n",

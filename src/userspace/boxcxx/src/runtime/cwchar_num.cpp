@@ -1,24 +1,3 @@
-// boxcxx — <cwchar> runtime, numeric conversion
-//
-// The seven wcsto* functions. None of them parses a number: every character a
-// numeric literal can contain is ASCII, so the candidate run is narrowed one
-// character to one character and handed to the strto* that <cstdlib> already
-// has. That keeps exactly one implementation of the grammar, one of the
-// correctly-rounded decimal-to-binary path, and one set of overflow rules —
-// the same reasoning that gave the system exactly one printf in Ф41.
-//
-// Two things are genuinely different in the wide form, and both come from C
-// rather than from us:
-//
-//   * The leading white space is skipped by `iswspace`, which has been
-//     Unicode-wide since Ф42-a. `wcstod(L" " L"42", ...)` therefore
-//     consumes the EM SPACE and reads 42, where the narrow `strtod` would stop
-//     at the first byte of it. This is not an oversight in either direction:
-//     C defines the skip in terms of the classification of the character type
-//     it was given.
-//   * `endptr` must point into the CALLER's wide string. Because the narrowing
-//     is one character to one character, the count strto* consumed maps back by
-//     addition, with no second scan and nothing to keep in step.
 
 #include <cstddef>
 #include <cstdlib>
@@ -28,11 +7,6 @@
 
 namespace {
 
-// A superset of every character any numeric literal can hold: digits and
-// letters (hex digits, the x/e/p markers, and the letters of `inf`, `infinity`
-// and `nan`), the sign, the radix point, and the parentheses and underscores
-// of nan's n-char-sequence. Bounding the copy by this rather than by "ASCII"
-// keeps a megabyte of following prose out of the buffer.
 bool NumericByte(::std::wint_t c) noexcept
 {
     return (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'z') ||
@@ -40,26 +14,18 @@ bool NumericByte(::std::wint_t c) noexcept
            c == L'(' || c == L')' || c == L'_';
 }
 
-// Long enough that no literal anyone writes reaches the heap: 1074 digits is
-// the most that can affect a double, and a hex float needs far fewer.
 constexpr ::std::size_t kInline = 512;
 
-// The narrowed candidate, plus where it started in the wide string.
 struct Candidate {
-    char             *text;      // NUL-terminated, ASCII
+    char             *text;
     ::std::size_t     len;
-    const wchar_t    *begin;     // first character after the white space
+    const wchar_t    *begin;
     char              inln[kInline];
     bool              heap;
 
     ~Candidate() { if (heap) ::operator delete[](text); }
 };
 
-// Narrows the numeric candidate at `s`. Returns false only when the run is too
-// long for the inline buffer AND the heap refuses it, which is a genuine
-// out-of-memory rather than a parse outcome; the caller then reports "no
-// conversion", which is the one answer C gives that cannot be wrong about the
-// value.
 bool Narrow(const wchar_t *s, Candidate &c) noexcept
 {
     while (::std::iswspace(static_cast<::std::wint_t>(*s))) ++s;
@@ -81,9 +47,6 @@ bool Narrow(const wchar_t *s, Candidate &c) noexcept
     return true;
 }
 
-// Maps the narrow end pointer back into the caller's wide string. strto* leaves
-// `nend` at the narrowed text when it converted nothing, and C then requires
-// endptr to be the ORIGINAL argument — before the white space, not after it.
 void SetEnd(wchar_t **endptr, const Candidate &c, const char *nend,
             const wchar_t *original) noexcept
 {
@@ -93,7 +56,7 @@ void SetEnd(wchar_t **endptr, const Candidate &c, const char *nend,
                         : const_cast<wchar_t *>(c.begin) + used;
 }
 
-} // namespace
+}
 
 namespace std {
 
@@ -132,4 +95,4 @@ BOXCXX_WCSTO_INT(wcstoull, strtoull, unsigned long long)
 
 #undef BOXCXX_WCSTO_INT
 
-} // namespace std
+}

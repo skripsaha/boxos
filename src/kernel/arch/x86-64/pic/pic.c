@@ -16,12 +16,11 @@ void pic_init(void) {
     outb(PIC1_COMMAND, ICW1_INIT | ICW1_ICW4);
     outb(PIC2_COMMAND, ICW1_INIT | ICW1_ICW4);
 
-    // ICW2: Master PIC IRQ 0-7 -> vectors 32-39, Slave IRQ 8-15 -> vectors 40-47
     outb(PIC1_DATA, 32);
     outb(PIC2_DATA, 40);
 
-    outb(PIC1_DATA, 4);     // Slave at IRQ2
-    outb(PIC2_DATA, 2);     // Slave cascade identity
+    outb(PIC1_DATA, 4);
+    outb(PIC2_DATA, 2);
 
     outb(PIC1_DATA, ICW4_8086);
     outb(PIC2_DATA, ICW4_8086);
@@ -56,7 +55,6 @@ void pic_enable_irq(uint8_t irq) {
         pic2_mask &= ~(1 << slave_irq);
         outb(PIC2_DATA, pic2_mask);
 
-        // Also enable IRQ 2 (cascade line) on master
         pic1_mask &= ~(1 << 2);
         outb(PIC1_DATA, pic1_mask);
 
@@ -85,9 +83,9 @@ void pic_disable_irq(uint8_t irq) {
 
 void pic_send_eoi(uint8_t irq) {
     if (irq >= 8) {
-        outb(PIC2_COMMAND, PIC_EOI);  // Send EOI to slave PIC
+        outb(PIC2_COMMAND, PIC_EOI);
     }
-    outb(PIC1_COMMAND, PIC_EOI);      // Send EOI to master PIC
+    outb(PIC1_COMMAND, PIC_EOI);
 }
 
 void pic_set_mask(uint8_t mask1, uint8_t mask2) {

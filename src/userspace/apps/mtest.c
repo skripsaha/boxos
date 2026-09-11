@@ -1,17 +1,3 @@
-/*
- * mtest — Manifest-mode end-to-end demonstration.
- *
- * Builds a tiny Manifest with two operations on the Operations Deck:
- *   1. ops.fill   — fill crate[0] with byte 0xAB
- *   2. ops.move   — copy crate[0] -> crate[1]
- *
- * Submits via ManifestSubmit. Verifies both buffers contain 0xAB on return.
- *
- * Proves the whole chain end-to-end:
- *   userspace builder -> POCKET_FLAG_MANIFEST -> guide_process_manifest_pocket
- *   -> ManifestExecuteOnce -> OpRegistryLookup -> OpBufFill / OpBufMove
- *   -> Result back into ResultRing.
- */
 
 #include "box/core/manifest.h"
 #include "box/print.h"
@@ -31,7 +17,6 @@ int main(void)
     static uint8_t  buf_a[BUF_BYTES];
     static uint8_t  buf_b[BUF_BYTES];
 
-    /* Pre-poison so we can detect untouched bytes. */
     memset(buf_a, 0x11, sizeof(buf_a));
     memset(buf_b, 0x22, sizeof(buf_b));
 
@@ -83,11 +68,8 @@ int main(void)
     }
     print("[mtest] PASS — fill+move via Manifest worked\n");
 
-    /* Phase 2 of demo: print a message via Hardware Deck PUTSTRING using the
-     * Manifest path — proves hw ops are reachable through the new dispatch. */
     static uint8_t mbuf2[128];
     static const char hw_msg[] = "[mtest] HW VGA via Manifest works\n";
-    /* [u32 fg][u32 bg][u8 flags] — light gray on black, flags=0. */
     uint8_t  hw_params[9];
     uint32_t hw_fg = 0xAAAAAAu, hw_bg = 0x000000u;
     memcpy(&hw_params[0], &hw_fg, 4);
@@ -96,13 +78,12 @@ int main(void)
 
     ManifestBuilder mb2;
     if (ManifestBuilderInit(&mb2, mbuf2, sizeof(mbuf2)) != 0) exit(1);
-    if (ManifestBuilderAddOp(&mb2, DECK_HARDWARE, 0x71u /* HW_VGA_PUTSTRING */,
+    if (ManifestBuilderAddOp(&mb2, DECK_HARDWARE, 0x71u ,
                              0, 0, CRATE_INDEX_NONE,
                              hw_params, sizeof(hw_params)) != 0) exit(1);
     if (ManifestBuilderFinalize(&mb2) != 0) exit(1);
 
     Crate vga_in;
-    /* PUTSTRING reads in_crate.size bytes; do not include the trailing NUL. */
     CrateSetInput(&vga_in, (void *)hw_msg, sizeof(hw_msg) - 1);
 
     Result r2;

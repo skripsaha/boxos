@@ -1,0 +1,1960 @@
+<!DOCTYPE html>
+<html dir="ltr" lang="en-gb"><head>
+<meta http-equiv="content-type" content="text/html; charset=UTF-8">
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>[РЕШЕНО] Запросы xHCI Address Device (BSR=0) и Device Descriptor возвращают код завершения 4 - OSDev.org</title>
+
+	<link rel="alternate" type="application/atom+xml" title="Feed - OSDev.org" href="https://forum.osdev.org/app.php/feed?sid=efee10ed731cbccfc7f1a70c00296b2e">	<link rel="alternate" type="application/atom+xml" title="Feed - News" href="https://forum.osdev.org/app.php/feed/news?sid=efee10ed731cbccfc7f1a70c00296b2e">	<link rel="alternate" type="application/atom+xml" title="Feed - All forums" href="https://forum.osdev.org/app.php/feed/forums?sid=efee10ed731cbccfc7f1a70c00296b2e">	<link rel="alternate" type="application/atom+xml" title="Feed - New Topics" href="https://forum.osdev.org/app.php/feed/topics?sid=efee10ed731cbccfc7f1a70c00296b2e">	<link rel="alternate" type="application/atom+xml" title="Feed - Active Topics" href="https://forum.osdev.org/app.php/feed/topics_active?sid=efee10ed731cbccfc7f1a70c00296b2e">	<link rel="alternate" type="application/atom+xml" title="Feed - Forum - OS Development" href="https://forum.osdev.org/app.php/feed/forum/1?sid=efee10ed731cbccfc7f1a70c00296b2e">	<link rel="alternate" type="application/atom+xml" title="Feed - Topic - [SOLVED] xHCI Address Device (BSR=0) and Device Descriptor queries return completion code 4" href="https://forum.osdev.org/app.php/feed/topic/57621?sid=efee10ed731cbccfc7f1a70c00296b2e">	
+	<link rel="canonical" href="https://forum.osdev.org/viewtopic.php?t=57621">
+
+<!--
+	phpBB style name: Flat Style
+	Based on style:   prosilver (this is the default phpBB3 style)
+	Original author:  Tom Beddard ( http://www.subBlue.com/ )
+	Modified by:      Ian Bradley ( http://phpbbstyles.oo.gd/ )
+-->
+
+<link href="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/font-awesome.min_M2Do.css" rel="stylesheet">
+<link href="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/stylesheet_M2Do.css" rel="stylesheet">
+<link href="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/stylesheet_002_M2Do.css" rel="stylesheet">
+
+
+
+
+<!--[if lte IE 9]>
+	<link href="./styles/flat-style-blue/theme/tweaks.css?assets_version=8" rel="stylesheet">
+<![endif]-->
+
+
+
+
+
+</head>
+<body id="phpbb" class="notouch section-viewtopic ltr hasjs">
+
+
+<div id="wrap" class="wrap">
+	<a id="top" class="top-anchor" accesskey="t"></a>
+	<div id="page-header">
+		<div class="headerbar" role="banner">
+					<div class="inner">
+
+			<div id="site-description">
+				<a id="logo" class="logo" href="https://forum.osdev.org/index.php?sid=efee10ed731cbccfc7f1a70c00296b2e" title="Указатель доски"><span class="site_logo"></span></a>
+				<div class="site-description">
+					<h1>OSDev.org </h1>
+					<p>С чего начать разработчикам операционных систем? </p>
+					<p class="skiplink"><a href="#start_here">Перейти к содержимому </a></p>
+				</div>
+			</div>
+
+			</div>
+					</div>
+				<div class="navbar navbar-top" role="navigation">
+	<div class="inner">
+
+	<ul id="nav-main" class="nav-main linklist" role="menubar">
+
+		<li id="quick-links" class="quick-links dropdown-container responsive-menu" data-skip-responsive="true">
+			<a href="#" class="dropdown-trigger dropdown-toggle">
+				<i class="icon fa-bars fa-fw" aria-hidden="true"></i><span>Быстрые ссылки </span>
+			</a>
+			<div class="dropdown">
+				<div class="pointer"><div class="pointer-inner"></div></div>
+				<ul class="dropdown-contents" role="menu">
+					
+											<li class="separator"></li>
+																									<li>
+								<a href="https://forum.osdev.org/search.php?search_id=unanswered&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" role="menuitem">
+									<i class="icon fa-file fa-fw" aria-hidden="true"></i><span>Unanswered topics</span>
+								</a>
+							</li>
+							<li>
+								<a href="https://forum.osdev.org/search.php?search_id=active_topics&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" role="menuitem">
+									<i class="icon fa-file fa-fw" aria-hidden="true"></i><span>Active topics</span>
+								</a>
+							</li>
+							<li class="separator"></li>
+							<li>
+								<a href="https://forum.osdev.org/search.php?sid=efee10ed731cbccfc7f1a70c00296b2e" role="menuitem">
+									<i class="icon fa-search fa-fw" aria-hidden="true"></i><span>Search</span>
+								</a>
+							</li>
+					
+										
+										<li class="separator"></li>
+
+									</ul>
+			</div>
+		</li>
+
+				<li data-skip-responsive="true">
+			<a href="https://forum.osdev.org/app.php/help/faq?sid=efee10ed731cbccfc7f1a70c00296b2e" rel="help" title="Часто задаваемые вопросы" role="menuitem">
+				<i class="icon fa-question-circle fa-fw" aria-hidden="true"></i><span>Часто задаваемые вопросы </span>
+			</a>
+		</li>
+		<li data-skip-responsive="true">
+			<a href="https://wiki.osdev.org/" rel="help" title="Вики OSDev" role="menuitem">
+				<i class="icon fa-brands fa-wikipedia-w fa-fw" aria-hidden="true"></i><span>Неделя </span>
+			</a>
+		</li>
+						
+			<li class="rightside" data-skip-responsive="true">
+			<a href="https://forum.osdev.org/ucp.php?mode=login&amp;redirect=viewtopic.php%3Ft%3D57621&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Авторизоваться" accesskey="x" role="menuitem">
+				<i class="icon fa-power-off fa-fw" aria-hidden="true"></i><span>Авторизоваться </span>
+			</a>
+		</li>
+					<li class="rightside" data-skip-responsive="true">
+				<a href="https://forum.osdev.org/ucp.php?mode=register&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" role="menuitem">
+					<i class="icon fa-pencil-square-o  fa-fw" aria-hidden="true"></i><span>Регистрация </span>
+				</a>
+			</li>
+						</ul>
+    </div>
+</div>
+
+<div class="navbar" role="navigation">
+	<div class="inner">
+	<ul id="nav-breadcrumbs" class="nav-breadcrumbs linklist navlinks" role="menubar">
+						
+
+			
+		<li class="breadcrumbs" itemscope="" itemtype="https://schema.org/BreadcrumbList" style="max-width: 909px;">
+
+			
+							<span class="crumb" itemtype="https://schema.org/ListItem" itemprop="itemListElement" itemscope=""><a itemprop="item" href="https://forum.osdev.org/index.php?sid=efee10ed731cbccfc7f1a70c00296b2e" accesskey="h" data-navbar-reference="index" title="Указатель доски"><i class="icon fa-home fa-fw"></i><span itemprop="name">Указатель доски </span></a><meta itemprop="position" content="1"></span>
+
+											
+								<span class="crumb" itemtype="https://schema.org/ListItem" itemprop="itemListElement" itemscope="" data-forum-id="16"><a itemprop="item" href="https://forum.osdev.org/viewforum.php?f=16&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Разработка операционных систем"><span itemprop="name">Разработка операционных систем </span></a><meta itemprop="position" content="2"></span>
+															
+								<span class="crumb" itemtype="https://schema.org/ListItem" itemprop="itemListElement" itemscope="" data-forum-id="1"><a itemprop="item" href="https://forum.osdev.org/viewforum.php?f=1&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Разработка ОС"><span itemprop="name">Разработка ОС </span></a><meta itemprop="position" content="3"></span>
+							
+					</li>
+		
+				
+					<li id="search-box" class="rightside search-box responsive-hide" role="search">
+				<form action="./search.php?sid=efee10ed731cbccfc7f1a70c00296b2e" method="get" id="search">
+				<fieldset>
+					<input name="keywords" id="keywords" type="search" maxlength="128" title="Поиск по ключевым словам" class="inputbox search tiny" size="20" placeholder="Поиск…">
+					<button class="button button-search" type="submit" title="Поиск">
+						<i class="icon fa-search fa-fw" aria-hidden="true"></i><span class="sr-only">Поиск </span>
+					</button>
+					<a href="https://forum.osdev.org/search.php?sid=efee10ed731cbccfc7f1a70c00296b2e" class="button button-search-end" title="Расширенный поиск">
+						<i class="icon fa-cog fa-fw" aria-hidden="true"></i><span class="sr-only">Расширенный поиск </span>
+					</a>
+					<input type="hidden" name="sid" value="efee10ed731cbccfc7f1a70c00296b2e">
+
+				</fieldset>
+				</form>
+			</li>
+
+			<li class="rightside responsive-search">
+				<a href="https://forum.osdev.org/search.php?sid=efee10ed731cbccfc7f1a70c00296b2e" title="View the advanced search options" role="menuitem">
+					<i class="icon fa-search fa-fw" aria-hidden="true"></i><span class="sr-only">Search</span>
+				</a>
+			</li>
+							</ul>
+
+	</div>
+</div>
+	</div>
+
+	
+	<a id="start_here" class="anchor"></a>
+	<div id="page-body" class="page-body" role="main">
+		
+		
+<h2 class="topic-title"><a href="https://forum.osdev.org/viewtopic.php?t=57621&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">[РЕШЕНО] Запросы xHCI Address Device (BSR=0) и Device Descriptor возвращают код завершения 4 </a></h2>
+<!-- NOTE: remove the style="display: none" when you want to have the forum description on the topic body -->
+<div style="display: none !important;">Question about which tools to 
+use, bugs, the best way to implement a function, etc should go here. 
+Don't forget to see if your question is answered in the wiki first! When
+ in doubt post here.<br></div>
+
+
+<div class="action-bar bar-top">
+	
+			<a href="https://forum.osdev.org/posting.php?mode=reply&amp;t=57621&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="button" title="Оставить ответ">
+							<span>Ответить </span> <i class="icon fa-reply fa-fw" aria-hidden="true"></i>
+					</a>
+	
+			<div class="dropdown-container dropdown-button-control topic-tools">
+		<span title="Тематические инструменты" class="button button-secondary dropdown-trigger dropdown-select dropdown-toggle">
+			<i class="icon fa-wrench fa-fw" aria-hidden="true"></i>
+			<span class="caret"><i class="icon fa-sort-down fa-fw" aria-hidden="true"></i></span>
+		</span>
+		<div class="dropdown">
+			<div class="pointer"><div class="pointer-inner"></div></div>
+			<ul class="dropdown-contents">
+																												<li>
+					<a href="https://forum.osdev.org/viewtopic.php?t=57621&amp;sid=efee10ed731cbccfc7f1a70c00296b2e&amp;view=print" title="Print view" accesskey="p">
+						<i class="icon fa-print fa-fw" aria-hidden="true"></i><span>Print view</span>
+					</a>
+				</li>
+											</ul>
+		</div>
+	</div>
+	
+			<div class="search-box" role="search">
+			<form method="get" id="topic-search" action="./search.php?sid=efee10ed731cbccfc7f1a70c00296b2e">
+			<fieldset>
+				<input class="inputbox search tiny" type="search" name="keywords" id="search_keywords" size="20" placeholder="Поиск по этой теме…">
+				<button class="button button-search" type="submit" title="Поиск">
+					<i class="icon fa-search fa-fw" aria-hidden="true"></i><span class="sr-only">Поиск </span>
+				</button>
+				<a href="https://forum.osdev.org/search.php?sid=efee10ed731cbccfc7f1a70c00296b2e" class="button button-search-end" title="Расширенный поиск">
+					<i class="icon fa-cog fa-fw" aria-hidden="true"></i><span class="sr-only">Расширенный поиск </span>
+				</a>
+				<input type="hidden" name="t" value="57621">
+<input type="hidden" name="sf" value="msgonly">
+<input type="hidden" name="sid" value="efee10ed731cbccfc7f1a70c00296b2e">
+
+			</fieldset>
+			</form>
+		</div>
+	
+			<div class="pagination">
+			22 сообщения
+							 <ul>
+		<li class="active"><span>1 </span></li>
+				<li><a class="button" href="https://forum.osdev.org/viewtopic.php?t=57621&amp;sid=efee10ed731cbccfc7f1a70c00296b2e&amp;start=15" role="button">2 </a></li>
+				<li class="arrow next"><a class="button button-icon-only" href="https://forum.osdev.org/viewtopic.php?t=57621&amp;sid=efee10ed731cbccfc7f1a70c00296b2e&amp;start=15" rel="next" role="button"><i class="icon fa-chevron-right fa-fw" aria-hidden="true"></i><span class="sr-only">Следующий </span></a></li>
+	</ul>
+					</div>
+		</div>
+
+
+
+
+			<div id="p350851" class="post has-profile bg2 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile350851">
+			<dt class="no-profile-rank no-avatar">
+				<div class="avatar-container">
+																			</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">алнянн </a>							</dt>
+
+									
+		<dd class="profile-posts"><strong>Сообщений: </strong> <a href="https://forum.osdev.org/search.php?author_id=89169&amp;sr=posts&amp;sid=efee10ed731cbccfc7f1a70c00296b2e"> 20 </a></dd>		<dd class="profile-joined"><strong>Зарегистрирован: </strong> Пятница, 13 дек. 2024 г., 19:08 </dd>		
+		
+																<dd class="profile-custom-field profile-phpbb_location"><strong>Местоположение: </strong> Киев, Украина </dd>
+												<dd class="profile-custom-field profile-github"><strong>GitHub: </strong> <!-- m --><a class="postlink" href="https://git.alnyan.me/alnyan">https://git.alnyan.me/alnyan </a><!-- m --></dd>
+							
+							<dd class="profile-contact">
+				<strong>Контакт: </strong>
+				<div class="dropdown-container dropdown-left">
+					<a href="#" class="dropdown-trigger dropdown-toggle" title="Свяжитесь с alnyannn">
+						<i class="icon fa-commenting-o fa-fw icon-lg" aria-hidden="true"></i><span class="sr-only">Свяжитесь с alnyannn </span>
+					</a>
+					<div class="dropdown">
+						<div class="pointer"><div class="pointer-inner"></div></div>
+						<div class="dropdown-contents contact-icons">
+																																								<div>
+																	<a href="https://alnyan.me/" title="Website" class="last-cell">
+										<span class="contact-icon phpbb_website-icon">Website</span>									</a>
+																	</div>
+																					</div>
+					</div>
+				</div>
+			</dd>
+				
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content350851">
+
+						<h3 class="first">
+						<a href="https://forum.osdev.org/viewtopic.php?p=350851&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350851">[РЕШЕНО] Запросы xHCI Address Device (BSR=0) и Device Descriptor возвращают код завершения 4 </a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=350851&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Ответьте, прикрепив цитату." class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Цитировать </span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=350851&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350851" title="Почта">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Сообщение </span>
+					</a>
+								<span class="responsive-hide"> от <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username"> alnyannn </a></strong> » </span><time datetime="2025-01-30T12:41:30+00:00">Четверг, 30 января 2025 г., 6:41 утра </time>
+			</p>
+			
+			
+						
+			
+			<div class="content">Всем привет, <br>
+<br>
+Я продолжаю работу над повышением функциональности своей ОС на реальном 
+оборудовании. Сейчас я работаю над драйвером xHCI, а именно над его 
+обеспечением работы на реальном оборудовании. <br>
+<br>
+У меня возникли некоторые проблемы с xHCI на ноутбуке: <br>
+<br>
+* Существует два xHC, из которых (пока) я выбираю тот, который 
+используется для USB 2.0, потому что настройка обоих означает, что один и
+ тот же физический порт будет генерировать события для обоих xHC, с чем я
+ сейчас не хочу иметь дело. <br>
+* Функция настройки порта корневого концентратора, работающая под QEMU, 
+не выдает адрес устройству, при этом командное кольцо сообщает об ошибке
+ TRB с кодом завершения 4 (сбой USB-транзакции) при попытке выдать TRB 
+адреса устройства с BSR=0. <br>
+<br>
+Процесс инициализации моего порта выглядит следующим образом: <br>
+<br>
+1. Я обнаруживаю, что к порту подключено устройство, поскольку CCS=1 и CSC=1 для PORTSC. <br>
+2. Я выполняю перезагрузку этого порта, поскольку это порт USB 2.0, и 
+согласно спецификации, он будет оставаться в отключенном состоянии до 
+тех пор, пока не будет выполнена перезагрузка, после чего он перейдет в 
+включенное состояние (и устройство перейдет из состояния «Включено» в 
+состояние «По умолчанию»). <br>
+3. Выполните команду Enable Slot TRB с соответствующим типом слота и настройте контекст устройства в DCBAA. <br>
+4. Выдайте TRB для адресного устройства с BSR=1 и настройте контекст 
+ввода в соответствии со спецификацией (заблокируйте SET_ADDRESS, но 
+позвольте xHC выполнить свои внутренние действия). <br>
+5. Считайте дескриптор устройства из его конечной точки управления по 
+умолчанию (это необходимо для устройств с высокой скоростью передачи 
+данных, чтобы определить их максимальный размер пакета). <br>
+6. Сбросить кольцо конечной точки управления по умолчанию в исходное 
+состояние, чтобы снова получить DCS=1 и новый указатель извлечения из 
+очереди. <br>
+7. Наконец, я отправляю команду Address Device, на этот раз с BSR=0 и 
+соответствующим максимальным размером пакета для EP0, чтобы xHC отправил
+ пакет SET_ADDRESS. <br>
+<br>
+В QEMU всё работает отлично, устройство инициализируется и передаётся 
+универсальному драйверу стека USB. Но на реальном оборудовании я 
+постоянно получаю код завершения "ошибка транзакции USB" (4) на шаге 5 
+или шаге 7, если шаги 5-6 пропущены и максимальный размер пакета 
+считается равным 8. <br>
+<br>
+I know QEMU is quite forgiving in terms of configuration, but I've spent
+ quite a lot of time this week going through the spec's device init 
+process to find what I might be missing, and can't find anything.<br>
+<br>
+Here's the code involved in initializing the root hub port:<br>
+<br>
+<a href="https://git.alnyan.me/alnyan/yggdrasil/src/commit/deed830cb49adef96342bbd51c112806ba91aa7a/kernel/driver/usb/xhci/src/controller.rs#L320" class="postlink">https://git.alnyan.me/alnyan/yggdrasil/ ... er.rs#L320 </a></div>
+
+			
+			
+													<div class="notice">
+					Last edited by <a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a> on Tue Feb 04, 2025 4:02 am, edited 1 time in total.
+									</div>
+			
+						
+							<div id="sig350851" class="signature"><a href="https://git.alnyan.me/alnyan/yggdrasil" class="postlink">https://git.alnyan.me/alnyan/yggdrasil</a> — yet another UNIX-like OS for aarch64/i686/x86_64/riscv64, this time in Rust</div>			
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+				<div id="p350853" class="post has-profile bg1 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile350853">
+			<dt class="has-profile-rank has-avatar">
+				<div class="avatar-container">
+																<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="avatar"><img class="avatar" src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/15788_M2Do.png" width="65" height="80" alt="User avatar"></a>														</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">BenLunt</a>							</dt>
+
+						<dd class="profile-rank">Member<br><img src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/5_M2Do.gif" alt="Member" title="Member"></dd>			
+		<dd class="profile-posts"><strong>Posts:</strong> <a href="https://forum.osdev.org/search.php?author_id=15788&amp;sr=posts&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">1029</a></dd>		<dd class="profile-joined"><strong>Joined:</strong> Sat Nov 22, 2014 6:33 pm</dd>		
+		
+																<dd class="profile-custom-field profile-phpbb_location"><strong>Location:</strong> USA</dd>
+							
+							<dd class="profile-contact">
+				<strong>Contact:</strong>
+				<div class="dropdown-container dropdown-left">
+					<a href="#" class="dropdown-trigger dropdown-toggle" title="Contact BenLunt">
+						<i class="icon fa-commenting-o fa-fw icon-lg" aria-hidden="true"></i><span class="sr-only">Contact BenLunt</span>
+					</a>
+					<div class="dropdown">
+						<div class="pointer"><div class="pointer-inner"></div></div>
+						<div class="dropdown-contents contact-icons">
+																																								<div>
+																	<a href="http://www.fysnet.net/" title="Website" class="last-cell">
+										<span class="contact-icon phpbb_website-icon">Website</span>									</a>
+																	</div>
+																					</div>
+					</div>
+				</div>
+			</dd>
+				
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content350853">
+
+						<h3>
+						<a href="https://forum.osdev.org/viewtopic.php?p=350853&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350853">Re: xHCI Address Device (BSR=0) and Device Descriptor queries return completion code 4</a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=350853&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Reply with quote" class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Quote</span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=350853&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350853" title="Post">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Post</span>
+					</a>
+								<span class="responsive-hide">by <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">BenLunt</a></strong> » </span><time datetime="2025-01-30T13:26:47+00:00">Thu Jan 30, 2025 7:26 am</time>
+			</p>
+			
+			
+						
+			
+			<div class="content">Can you place a bootable image somewhere for download? If so, I can run it though my tests.<br>
+<br>
+Have you tried Bochs? When configured correctly, it can output quite a log file to show what is going on.<br>
+<br>
+Ben<br>
+ - <a href="https://www.fysnet.net/the_universal_serial_bus.htm" class="postlink">https://www.fysnet.net/the_universal_serial_bus.htm</a></div>
+
+			
+			
+									
+						
+										
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+				<div id="p350854" class="post has-profile bg2 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile350854">
+			<dt class="no-profile-rank no-avatar">
+				<div class="avatar-container">
+																			</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a>							</dt>
+
+									
+		<dd class="profile-posts"><strong>Posts:</strong> <a href="https://forum.osdev.org/search.php?author_id=89169&amp;sr=posts&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">20</a></dd>		<dd class="profile-joined"><strong>Joined:</strong> Fri Dec 13, 2024 7:08 pm</dd>		
+		
+																<dd class="profile-custom-field profile-phpbb_location"><strong>Location:</strong> Kyiv, Ukraine</dd>
+												<dd class="profile-custom-field profile-github"><strong>GitHub:</strong> <!-- m --><a class="postlink" href="https://git.alnyan.me/alnyan">https://git.alnyan.me/alnyan</a><!-- m --></dd>
+							
+							<dd class="profile-contact">
+				<strong>Contact:</strong>
+				<div class="dropdown-container dropdown-left">
+					<a href="#" class="dropdown-trigger dropdown-toggle" title="Contact alnyannn">
+						<i class="icon fa-commenting-o fa-fw icon-lg" aria-hidden="true"></i><span class="sr-only">Contact alnyannn</span>
+					</a>
+					<div class="dropdown">
+						<div class="pointer"><div class="pointer-inner"></div></div>
+						<div class="dropdown-contents contact-icons">
+																																								<div>
+																	<a href="https://alnyan.me/" title="Website" class="last-cell">
+										<span class="contact-icon phpbb_website-icon">Website</span>									</a>
+																	</div>
+																					</div>
+					</div>
+				</div>
+			</dd>
+				
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content350854">
+
+						<h3>
+						<a href="https://forum.osdev.org/viewtopic.php?p=350854&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350854">Re: xHCI Address Device (BSR=0) and Device Descriptor queries return completion code 4</a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=350854&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Reply with quote" class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Quote</span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=350854&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350854" title="Post">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Post</span>
+					</a>
+								<span class="responsive-hide">by <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a></strong> » </span><time datetime="2025-01-30T14:35:28+00:00">Thu Jan 30, 2025 8:35 am</time>
+			</p>
+			
+			
+						
+			
+			<div class="content"><blockquote class="uncited"><div>
+Can you place a bootable image somewhere for download? If so, I can run it though my tests.
+</div></blockquote>
+
+<span style="text-decoration:line-through">Sure. I don't have a proper .iso build process yet, but I have a fat32 FS image + build artifacts:<br>
+<br>
+* FAT-32 FS Image <a href="https://alnyan.me/public/image.fat32" class="postlink">https://alnyan.me/public/image.fat32</a><br>
+* kernel.elf: <a href="https://alnyan.me/public/kernel.elf" class="postlink">https://alnyan.me/public/kernel.elf</a><br>
+* initrd.img: <a href="https://alnyan.me/public/initrd.img" class="postlink">https://alnyan.me/public/initrd.img</a><br>
+* EFI bootloader: <a href="https://alnyan.me/public/yboot.efi" class="postlink">https://alnyan.me/public/yboot.efi</a><br>
+<br>
+I'm not sure if you can just flash a FAT-32 image onto a USB stick, but 
+you can set up a FAT-32 FS there with an EFI partition and do it 
+manually: just place the yboot.efi into EFI/Boot/BootX64.efi, and the 
+rest goes to the FS root. Note that the kernel is programmed to just 
+attempt to initialize a first device it finds and then hangs for 
+debugging purposes (so I can see the output of what's happening on the 
+screen)</span><br>
+<br>
+UPD: Nevermind, I've just made a bootable .iso: <a href="https://alnyan.me/public/image.iso" class="postlink">https://alnyan.me/public/image.iso</a><br>
+<br>
+As an additional note, I've just broken out a spare USB cable and 
+compared the same device setup in Linux vs my OS using a logic analyzer:<br>
+* In Linux, I see a SETUP packet almost immediately after reset, followed by a couple of extra packets<br>
+* In my OS, there is a reset, but after that only some broken (?) frames follow, with no real packets being sent</div>
+
+			
+			
+									
+						
+							<div id="sig350854" class="signature"><a href="https://git.alnyan.me/alnyan/yggdrasil" class="postlink">https://git.alnyan.me/alnyan/yggdrasil</a> — yet another UNIX-like OS for aarch64/i686/x86_64/riscv64, this time in Rust</div>			
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+				<div id="p350859" class="post has-profile bg1 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile350859">
+			<dt class="has-profile-rank has-avatar">
+				<div class="avatar-container">
+																<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="avatar"><img class="avatar" src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/15788_M2Do.png" width="65" height="80" alt="User avatar"></a>														</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">BenLunt</a>							</dt>
+
+						<dd class="profile-rank">Member<br><img src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/5_M2Do.gif" alt="Member" title="Member"></dd>			
+		<dd class="profile-posts"><strong>Posts:</strong> <a href="https://forum.osdev.org/search.php?author_id=15788&amp;sr=posts&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">1029</a></dd>		<dd class="profile-joined"><strong>Joined:</strong> Sat Nov 22, 2014 6:33 pm</dd>		
+		
+																<dd class="profile-custom-field profile-phpbb_location"><strong>Location:</strong> USA</dd>
+							
+							<dd class="profile-contact">
+				<strong>Contact:</strong>
+				<div class="dropdown-container dropdown-left">
+					<a href="#" class="dropdown-trigger dropdown-toggle" title="Contact BenLunt">
+						<i class="icon fa-commenting-o fa-fw icon-lg" aria-hidden="true"></i><span class="sr-only">Contact BenLunt</span>
+					</a>
+					<div class="dropdown">
+						<div class="pointer"><div class="pointer-inner"></div></div>
+						<div class="dropdown-contents contact-icons">
+																																								<div>
+																	<a href="http://www.fysnet.net/" title="Website" class="last-cell">
+										<span class="contact-icon phpbb_website-icon">Website</span>									</a>
+																	</div>
+																					</div>
+					</div>
+				</div>
+			</dd>
+				
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content350859">
+
+						<h3>
+						<a href="https://forum.osdev.org/viewtopic.php?p=350859&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350859">Re: xHCI Address Device (BSR=0) and Device Descriptor queries return completion code 4</a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=350859&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Reply with quote" class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Quote</span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=350859&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350859" title="Post">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Post</span>
+					</a>
+								<span class="responsive-hide">by <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">BenLunt</a></strong> » </span><time datetime="2025-01-31T00:47:47+00:00">Thu Jan 30, 2025 6:47 pm</time>
+			</p>
+			
+			
+						
+			
+			<div class="content">Hi,<br>
+<br>
+Thanks for the bootable image, however, may I suggest that next time you
+ use some kind of compression on the ISO image. The image is ~525meg, 
+but when compressed, it is ~190meg  :-)<br>
+<br>
+Side note, may have nothing to do with current issue, but Bochs complains early on:
+<div class="codebox"><p>Code: <a href="#" onclick="selectCode(this); return false;">Select all</a></p><pre><code>#PAE: asked to set dirty on paging leaf entry with R/W bit clear</code></pre></div>
+
+First impression I found is that the controller never sees any reads or writes to the Operational Registers.<br>
+<br>
+You write a base address to BAR #0 of 0xF0500000
+<div class="codebox"><p>Code: <a href="#" onclick="selectCode(this); return false;">Select all</a></p><pre><code>00517849738i[XHCI  ] BAR #0: mem base address = 0xf0500000</code></pre></div>
+If you read the BAR #0, you will notice that bit 2 is set, the <em class="text-italics">big</em> bit.<br>
+However, you never write to BAR #1. It just so happens that BAR #1 is zero.<br>
+<br>
+Anyway, my tests never see any writes to any addresses between 0x00000000F0500000 and 0x00000000F05008xx.<br>
+<br>
+Ben</div>
+
+			
+			
+									
+						
+										
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+				<div id="p350860" class="post has-profile bg2 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile350860">
+			<dt class="no-profile-rank no-avatar">
+				<div class="avatar-container">
+																			</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a>							</dt>
+
+									
+		<dd class="profile-posts"><strong>Posts:</strong> <a href="https://forum.osdev.org/search.php?author_id=89169&amp;sr=posts&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">20</a></dd>		<dd class="profile-joined"><strong>Joined:</strong> Fri Dec 13, 2024 7:08 pm</dd>		
+		
+																<dd class="profile-custom-field profile-phpbb_location"><strong>Location:</strong> Kyiv, Ukraine</dd>
+												<dd class="profile-custom-field profile-github"><strong>GitHub:</strong> <!-- m --><a class="postlink" href="https://git.alnyan.me/alnyan">https://git.alnyan.me/alnyan</a><!-- m --></dd>
+							
+							<dd class="profile-contact">
+				<strong>Contact:</strong>
+				<div class="dropdown-container dropdown-left">
+					<a href="#" class="dropdown-trigger dropdown-toggle" title="Contact alnyannn">
+						<i class="icon fa-commenting-o fa-fw icon-lg" aria-hidden="true"></i><span class="sr-only">Contact alnyannn</span>
+					</a>
+					<div class="dropdown">
+						<div class="pointer"><div class="pointer-inner"></div></div>
+						<div class="dropdown-contents contact-icons">
+																																								<div>
+																	<a href="https://alnyan.me/" title="Website" class="last-cell">
+										<span class="contact-icon phpbb_website-icon">Website</span>									</a>
+																	</div>
+																					</div>
+					</div>
+				</div>
+			</dd>
+				
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content350860">
+
+						<h3>
+						<a href="https://forum.osdev.org/viewtopic.php?p=350860&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350860">Re: xHCI Address Device (BSR=0) and Device Descriptor queries return completion code 4</a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=350860&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Reply with quote" class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Quote</span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=350860&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350860" title="Post">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Post</span>
+					</a>
+								<span class="responsive-hide">by <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a></strong> » </span><time datetime="2025-01-31T08:03:41+00:00">Fri Jan 31, 2025 2:03 am</time>
+			</p>
+			
+			
+						
+			
+			<div class="content">Wow, does bochs support UEFI now? It's been quite a while since I used it. Maybe some custom patching required?<br>
+<br>
+The test result looks weird: both on my real machine and in QEMU I 
+actually see a pretty large 64-bit address (which means two BARs) being 
+used. In QEMU it's 0x380000000000, for example.</div>
+
+			
+			
+									
+						
+							<div id="sig350860" class="signature"><a href="https://git.alnyan.me/alnyan/yggdrasil" class="postlink">https://git.alnyan.me/alnyan/yggdrasil</a> — yet another UNIX-like OS for aarch64/i686/x86_64/riscv64, this time in Rust</div>			
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+				<div id="p350861" class="post has-profile bg1 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile350861">
+			<dt class="no-profile-rank no-avatar">
+				<div class="avatar-container">
+																			</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a>							</dt>
+
+									
+		<dd class="profile-posts"><strong>Posts:</strong> <a href="https://forum.osdev.org/search.php?author_id=89169&amp;sr=posts&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">20</a></dd>		<dd class="profile-joined"><strong>Joined:</strong> Fri Dec 13, 2024 7:08 pm</dd>		
+		
+																<dd class="profile-custom-field profile-phpbb_location"><strong>Location:</strong> Kyiv, Ukraine</dd>
+												<dd class="profile-custom-field profile-github"><strong>GitHub:</strong> <!-- m --><a class="postlink" href="https://git.alnyan.me/alnyan">https://git.alnyan.me/alnyan</a><!-- m --></dd>
+							
+							<dd class="profile-contact">
+				<strong>Contact:</strong>
+				<div class="dropdown-container dropdown-left">
+					<a href="#" class="dropdown-trigger dropdown-toggle" title="Contact alnyannn">
+						<i class="icon fa-commenting-o fa-fw icon-lg" aria-hidden="true"></i><span class="sr-only">Contact alnyannn</span>
+					</a>
+					<div class="dropdown">
+						<div class="pointer"><div class="pointer-inner"></div></div>
+						<div class="dropdown-contents contact-icons">
+																																								<div>
+																	<a href="https://alnyan.me/" title="Website" class="last-cell">
+										<span class="contact-icon phpbb_website-icon">Website</span>									</a>
+																	</div>
+																					</div>
+					</div>
+				</div>
+			</dd>
+				
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content350861">
+
+						<h3>
+						<a href="https://forum.osdev.org/viewtopic.php?p=350861&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350861">Re: xHCI Address Device (BSR=0) and Device Descriptor queries return completion code 4</a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=350861&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Reply with quote" class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Quote</span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=350861&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350861" title="Post">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Post</span>
+					</a>
+								<span class="responsive-hide">by <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a></strong> » </span><time datetime="2025-01-31T08:57:31+00:00">Fri Jan 31, 2025 2:57 am</time>
+			</p>
+			
+			
+						
+			
+			<div class="content">I've just made an extra observation: when I 
+connect a device to a port, for USB3.1 ports I get PORTSC.PED=0. If I 
+ignore the USB3.1 ports and try to set up the same physical port using 
+USB2.0 registers, the port seems to reset fine (PED=1, PLS=0 immediately
+ after reset), but almost immediately after a successful reset PED 
+changes back to zero and PLS goes back to 7. So it looks like the device
+ just disconnects a really short time after a port reset is performed.<br>
+<br>
+So, for a USB2.0 port:<br>
+<br>
+* Immediately after a reset: PED=1, PLS=0, CCS=1, PS=3 (High), PP=1<br>
+* Sleeping for 20ms after a reset: PED=0, PLS=7, CCS=1, PS=3, PP=1<br>
+<br>
+When ignoring USB2.0 ports and only initializing USB3.1 ports (because the USB storage drive is a USB3 device):<br>
+<br>
+* I briefly get CCS=1 with CSC=1, indicating a device has been connected<br>
+* Then immediately CCS clears back to 0 before I even manage to reset the port<br>
+<br>
+This looks like the problem is not actually with SET_ADDRESS/Contexts, but even before that — with port connection/enabled state</div>
+
+			
+			
+									
+						
+							<div id="sig350861" class="signature"><a href="https://git.alnyan.me/alnyan/yggdrasil" class="postlink">https://git.alnyan.me/alnyan/yggdrasil</a> — yet another UNIX-like OS for aarch64/i686/x86_64/riscv64, this time in Rust</div>			
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+				<div id="p350866" class="post has-profile bg2 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile350866">
+			<dt class="has-profile-rank no-avatar">
+				<div class="avatar-container">
+																			</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=5320&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">rdos</a>							</dt>
+
+						<dd class="profile-rank">Member<br><img src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/5_M2Do.gif" alt="Member" title="Member"></dd>			
+		<dd class="profile-posts"><strong>Posts:</strong> <a href="https://forum.osdev.org/search.php?author_id=5320&amp;sr=posts&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">3396</a></dd>		<dd class="profile-joined"><strong>Joined:</strong> Wed Oct 01, 2008 1:55 pm</dd>		
+		
+						
+						
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content350866">
+
+						<h3>
+						<a href="https://forum.osdev.org/viewtopic.php?p=350866&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350866">Re: xHCI Address Device (BSR=0) and Device Descriptor queries return completion code 4</a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=350866&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Reply with quote" class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Quote</span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=350866&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350866" title="Post">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Post</span>
+					</a>
+								<span class="responsive-hide">by <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=5320&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">rdos</a></strong> » </span><time datetime="2025-01-31T11:03:50+00:00">Fri Jan 31, 2025 5:03 am</time>
+			</p>
+			
+			
+						
+			
+			<div class="content"><blockquote cite="./viewtopic.php?p=350859&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350859"><div><cite><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">BenLunt</a> wrote: <a href="https://forum.osdev.org/viewtopic.php?p=350859&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350859" data-post-id="350859" onclick="if(document.getElementById(hash.substr(1)))href=hash">↑</a><span class="responsive-hide">Thu Jan 30, 2025 6:47 pm</span></cite>
+Hi,<br>
+<br>
+Thanks for the bootable image, however, may I suggest that next time you
+ use some kind of compression on the ISO image. The image is ~525meg, 
+but when compressed, it is ~190meg  <img class="smilies" src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/icon_smile_M2Do.gif" width="15" height="15" alt=":-)" title="Smile"><br>
+<br>
+Side note, may have nothing to do with current issue, but Bochs complains early on:
+<div class="codebox"><p>Code: <a href="#" onclick="selectCode(this); return false;">Select all</a></p><pre><code>#PAE: asked to set dirty on paging leaf entry with R/W bit clear</code></pre></div>
+
+First impression I found is that the controller never sees any reads or writes to the Operational Registers.<br>
+<br>
+You write a base address to BAR #0 of 0xF0500000
+<div class="codebox"><p>Code: <a href="#" onclick="selectCode(this); return false;">Select all</a></p><pre><code>00517849738i[XHCI  ] BAR #0: mem base address = 0xf0500000</code></pre></div>
+If you read the BAR #0, you will notice that bit 2 is set, the <em class="text-italics">big</em> bit.<br>
+However, you never write to BAR #1. It just so happens that BAR #1 is zero.<br>
+<br>
+Anyway, my tests never see any writes to any addresses between 0x00000000F0500000 and 0x00000000F05008xx.<br>
+<br>
+Ben
+</div></blockquote>
+
+I don't think an OS ever should change BARs, only read their settings.<br>
+<br>
+Also, I note that newer motherboards will no longer set the bus master 
+and memory access bits, and if you fail to do that in the driver code, 
+then the BARs will not work and always return FF when read. This is 
+probably a protection means so non-activated PCI functions should not be
+ able to access PCI, but it really doesn't work for malious hardware 
+since it doesn't stop direct access to PCI from the hardware.</div>
+
+			
+			
+									
+						
+										
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+				<div id="p350867" class="post has-profile bg1 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile350867">
+			<dt class="no-profile-rank no-avatar">
+				<div class="avatar-container">
+																			</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a>							</dt>
+
+									
+		<dd class="profile-posts"><strong>Posts:</strong> <a href="https://forum.osdev.org/search.php?author_id=89169&amp;sr=posts&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">20</a></dd>		<dd class="profile-joined"><strong>Joined:</strong> Fri Dec 13, 2024 7:08 pm</dd>		
+		
+																<dd class="profile-custom-field profile-phpbb_location"><strong>Location:</strong> Kyiv, Ukraine</dd>
+												<dd class="profile-custom-field profile-github"><strong>GitHub:</strong> <!-- m --><a class="postlink" href="https://git.alnyan.me/alnyan">https://git.alnyan.me/alnyan</a><!-- m --></dd>
+							
+							<dd class="profile-contact">
+				<strong>Contact:</strong>
+				<div class="dropdown-container dropdown-left">
+					<a href="#" class="dropdown-trigger dropdown-toggle" title="Contact alnyannn">
+						<i class="icon fa-commenting-o fa-fw icon-lg" aria-hidden="true"></i><span class="sr-only">Contact alnyannn</span>
+					</a>
+					<div class="dropdown">
+						<div class="pointer"><div class="pointer-inner"></div></div>
+						<div class="dropdown-contents contact-icons">
+																																								<div>
+																	<a href="https://alnyan.me/" title="Website" class="last-cell">
+										<span class="contact-icon phpbb_website-icon">Website</span>									</a>
+																	</div>
+																					</div>
+					</div>
+				</div>
+			</dd>
+				
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content350867">
+
+						<h3>
+						<a href="https://forum.osdev.org/viewtopic.php?p=350867&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350867">Re: xHCI Address Device (BSR=0) and Device Descriptor queries return completion code 4</a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=350867&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Reply with quote" class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Quote</span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=350867&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350867" title="Post">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Post</span>
+					</a>
+								<span class="responsive-hide">by <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a></strong> » </span><time datetime="2025-01-31T11:06:23+00:00">Fri Jan 31, 2025 5:06 am</time>
+			</p>
+			
+			
+						
+			
+			<div class="content"><blockquote cite="./viewtopic.php?p=350866&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350866"><div><cite><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=5320&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">rdos</a> wrote: <a href="https://forum.osdev.org/viewtopic.php?p=350866&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350866" data-post-id="350866" onclick="if(document.getElementById(hash.substr(1)))href=hash">↑</a><span class="responsive-hide">Fri Jan 31, 2025 5:03 am</span></cite>
+Also, I note that newer motherboards will no longer set the bus master 
+and memory access bits, and if you fail to do that in the driver code, 
+then the BARs will not work and always return FF when read. This is 
+probably a protection means so non-activated PCI functions should not be
+ able to access PCI, but it really doesn't work for malious hardware 
+since it doesn't stop direct access to PCI from the hardware.
+</div></blockquote>
+
+I do set bus mastering + MMIO, I also clear port IO enable and IRQ 
+disable bits in the PCI configuration space's command register in my 
+probe() function:<br>
+
+<div class="codebox"><p>Code: <a href="#" onclick="selectCode(this); return false;">Select all</a></p><pre><code>    let mut cmd = PciCommandRegister::from_bits_retain(info.config_space.command());
+    cmd &amp;= !(PciCommandRegister::DISABLE_INTERRUPTS | PciCommandRegister::ENABLE_IO);
+    cmd |= PciCommandRegister::ENABLE_MEMORY | PciCommandRegister::BUS_MASTER;
+    info.config_space.set_command(cmd.bits());
+</code></pre></div>
+
+Also, an OS <em class="text-italics">can</em> update BARs if it wants 
+to. I believe Linux remaps some BARs even in x86(-64). And on platforms 
+like arm/riscv, you basically need to do that, because there might be no
+ proper firmware to setup the BARs for you.</div>
+
+			
+			
+									
+						
+							<div id="sig350867" class="signature"><a href="https://git.alnyan.me/alnyan/yggdrasil" class="postlink">https://git.alnyan.me/alnyan/yggdrasil</a> — yet another UNIX-like OS for aarch64/i686/x86_64/riscv64, this time in Rust</div>			
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+				<div id="p350871" class="post has-profile bg2 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile350871">
+			<dt class="no-profile-rank no-avatar">
+				<div class="avatar-container">
+																			</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a>							</dt>
+
+									
+		<dd class="profile-posts"><strong>Posts:</strong> <a href="https://forum.osdev.org/search.php?author_id=89169&amp;sr=posts&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">20</a></dd>		<dd class="profile-joined"><strong>Joined:</strong> Fri Dec 13, 2024 7:08 pm</dd>		
+		
+																<dd class="profile-custom-field profile-phpbb_location"><strong>Location:</strong> Kyiv, Ukraine</dd>
+												<dd class="profile-custom-field profile-github"><strong>GitHub:</strong> <!-- m --><a class="postlink" href="https://git.alnyan.me/alnyan">https://git.alnyan.me/alnyan</a><!-- m --></dd>
+							
+							<dd class="profile-contact">
+				<strong>Contact:</strong>
+				<div class="dropdown-container dropdown-left">
+					<a href="#" class="dropdown-trigger dropdown-toggle" title="Contact alnyannn">
+						<i class="icon fa-commenting-o fa-fw icon-lg" aria-hidden="true"></i><span class="sr-only">Contact alnyannn</span>
+					</a>
+					<div class="dropdown">
+						<div class="pointer"><div class="pointer-inner"></div></div>
+						<div class="dropdown-contents contact-icons">
+																																								<div>
+																	<a href="https://alnyan.me/" title="Website" class="last-cell">
+										<span class="contact-icon phpbb_website-icon">Website</span>									</a>
+																	</div>
+																					</div>
+					</div>
+				</div>
+			</dd>
+				
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content350871">
+
+						<h3>
+						<a href="https://forum.osdev.org/viewtopic.php?p=350871&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350871">Re: xHCI Address Device (BSR=0) and Device Descriptor queries return completion code 4</a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=350871&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Reply with quote" class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Quote</span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=350871&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350871" title="Post">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Post</span>
+					</a>
+								<span class="responsive-hide">by <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a></strong> » </span><time datetime="2025-01-31T22:41:11+00:00">Fri Jan 31, 2025 4:41 pm</time>
+			</p>
+			
+			
+						
+			
+			<div class="content">If I just dump the register state each time I 
+get an event, I see that the USB3.1 port, when a device is connected, 
+shows a correct PORTSC value with CCS=1, PED=1, PLS=0, PS=4 
+(SuperSpeed), but then immediately I receive a new event about that 
+port, with PORTSC reading CCS=0, PED=0, PLS=4, PS=0. <br>
+So looks like the xHC sees the device trying to connect, briefly shows 
+it actually managed to connect (CCS=1 + PLS=0 with the correct speed 
+value), but then immediately the connection is dropped for some reason 
+without me doing anything. Also, after this, I receive no further events
+ from that port in the Event Ring</div>
+
+			
+			
+									
+						
+							<div id="sig350871" class="signature"><a href="https://git.alnyan.me/alnyan/yggdrasil" class="postlink">https://git.alnyan.me/alnyan/yggdrasil</a> — yet another UNIX-like OS for aarch64/i686/x86_64/riscv64, this time in Rust</div>			
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+				<div id="p350872" class="post has-profile bg1 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile350872">
+			<dt class="has-profile-rank has-avatar">
+				<div class="avatar-container">
+																<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="avatar"><img class="avatar" src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/15788_M2Do.png" width="65" height="80" alt="User avatar"></a>														</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">BenLunt</a>							</dt>
+
+						<dd class="profile-rank">Member<br><img src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/5_M2Do.gif" alt="Member" title="Member"></dd>			
+		<dd class="profile-posts"><strong>Posts:</strong> <a href="https://forum.osdev.org/search.php?author_id=15788&amp;sr=posts&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">1029</a></dd>		<dd class="profile-joined"><strong>Joined:</strong> Sat Nov 22, 2014 6:33 pm</dd>		
+		
+																<dd class="profile-custom-field profile-phpbb_location"><strong>Location:</strong> USA</dd>
+							
+							<dd class="profile-contact">
+				<strong>Contact:</strong>
+				<div class="dropdown-container dropdown-left">
+					<a href="#" class="dropdown-trigger dropdown-toggle" title="Contact BenLunt">
+						<i class="icon fa-commenting-o fa-fw icon-lg" aria-hidden="true"></i><span class="sr-only">Contact BenLunt</span>
+					</a>
+					<div class="dropdown">
+						<div class="pointer"><div class="pointer-inner"></div></div>
+						<div class="dropdown-contents contact-icons">
+																																								<div>
+																	<a href="http://www.fysnet.net/" title="Website" class="last-cell">
+										<span class="contact-icon phpbb_website-icon">Website</span>									</a>
+																	</div>
+																					</div>
+					</div>
+				</div>
+			</dd>
+				
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content350872">
+
+						<h3>
+						<a href="https://forum.osdev.org/viewtopic.php?p=350872&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350872">Re: xHCI Address Device (BSR=0) and Device Descriptor queries return completion code 4</a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=350872&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Reply with quote" class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Quote</span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=350872&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350872" title="Post">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Post</span>
+					</a>
+								<span class="responsive-hide">by <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">BenLunt</a></strong> » </span><time datetime="2025-02-01T00:05:09+00:00">Fri Jan 31, 2025 6:05 pm</time>
+			</p>
+			
+			
+						
+			
+			<div class="content"><blockquote class="uncited"><div>Wow, does bochs support UEFI now? It's been quite a while since I used it. Maybe some custom patching required?</div></blockquote>
+<a href="https://forum.osdev.org/viewtopic.php?p=342362#p342362" class="postlink">It was a surprise</a> to me a while back too. It was quite embarrassing since I have contributed so much to the Bochs project. :-)
+<blockquote class="uncited"><div>...but then immediately the connection 
+is dropped for some reason without me doing anything. Also, after this, I
+ receive no further events from that port in the Event Ring</div></blockquote>
+This sounds like a power thing. Either you are inadvertently clearing 
+the power bit or (on real hardware) the port is finding an unrecoverable
+ error and kills the power to the port.<br>
+<br>
+After a bit more digging, come to find out, due to unknown 
+circumstances, Bochs and/or OVMF-pure-efi.fd doesn't boot even to the 
+EFI shell. All of the XHCI tests I was doing was on the EFI loading, not
+ your code. I have no idea why Bochs and/or OVMF-pure-efi.fd won't boot 
+to at least the EFI shell. Qemu does, as you know.<br>
+<br>
+Edit: I tried another configuration/OS and Bochs and OVMF-pure-efi.fd 
+booted it just fine. Most likely your OS does or doesn't do something 
+that Bochs likes.</div>
+
+			
+			
+									
+						
+										
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+				<div id="p350873" class="post has-profile bg2 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile350873">
+			<dt class="no-profile-rank no-avatar">
+				<div class="avatar-container">
+																			</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a>							</dt>
+
+									
+		<dd class="profile-posts"><strong>Posts:</strong> <a href="https://forum.osdev.org/search.php?author_id=89169&amp;sr=posts&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">20</a></dd>		<dd class="profile-joined"><strong>Joined:</strong> Fri Dec 13, 2024 7:08 pm</dd>		
+		
+																<dd class="profile-custom-field profile-phpbb_location"><strong>Location:</strong> Kyiv, Ukraine</dd>
+												<dd class="profile-custom-field profile-github"><strong>GitHub:</strong> <!-- m --><a class="postlink" href="https://git.alnyan.me/alnyan">https://git.alnyan.me/alnyan</a><!-- m --></dd>
+							
+							<dd class="profile-contact">
+				<strong>Contact:</strong>
+				<div class="dropdown-container dropdown-left">
+					<a href="#" class="dropdown-trigger dropdown-toggle" title="Contact alnyannn">
+						<i class="icon fa-commenting-o fa-fw icon-lg" aria-hidden="true"></i><span class="sr-only">Contact alnyannn</span>
+					</a>
+					<div class="dropdown">
+						<div class="pointer"><div class="pointer-inner"></div></div>
+						<div class="dropdown-contents contact-icons">
+																																								<div>
+																	<a href="https://alnyan.me/" title="Website" class="last-cell">
+										<span class="contact-icon phpbb_website-icon">Website</span>									</a>
+																	</div>
+																					</div>
+					</div>
+				</div>
+			</dd>
+				
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content350873">
+
+						<h3>
+						<a href="https://forum.osdev.org/viewtopic.php?p=350873&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350873">Re: xHCI Address Device (BSR=0) and Device Descriptor queries return completion code 4</a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=350873&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Reply with quote" class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Quote</span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=350873&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350873" title="Post">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Post</span>
+					</a>
+								<span class="responsive-hide">by <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a></strong> » </span><time datetime="2025-02-01T08:08:22+00:00">Sat Feb 01, 2025 2:08 am</time>
+			</p>
+			
+			
+						
+			
+			<div class="content"><blockquote cite="./viewtopic.php?p=350872&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350872"><div><cite><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">BenLunt</a> wrote: <a href="https://forum.osdev.org/viewtopic.php?p=350872&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350872" data-post-id="350872" onclick="if(document.getElementById(hash.substr(1)))href=hash">↑</a><span class="responsive-hide">Fri Jan 31, 2025 6:05 pm</span></cite>
+This sounds like a power thing. Either you are inadvertently clearing 
+the power bit or (on real hardware) the port is finding an unrecoverable
+ error and kills the power to the port.
+</div></blockquote>
+
+I think it's most likely the latter: I set the port power bit to 1 
+before starting polling any events and then sleep for 250ms just in 
+case. Also, the PORTSC dumps I do on each event show that PP stays at 1,
+ which means at least there's no problem here. I've also checked the PCI
+ power capability D-state, it's D0 when I begin initializing the xHC, so
+ I guess no problems here as well.<br>
+
+<blockquote cite="./viewtopic.php?p=350872&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350872"><div><cite><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">BenLunt</a> wrote: <a href="https://forum.osdev.org/viewtopic.php?p=350872&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350872" data-post-id="350872" onclick="if(document.getElementById(hash.substr(1)))href=hash">↑</a><span class="responsive-hide">Fri Jan 31, 2025 6:05 pm</span></cite>
+It was a surprise to me a while back too. It was quite embarrassing since I have contributed so much to the Bochs project. <img class="smilies" src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/icon_smile_M2Do.gif" width="15" height="15" alt=":-)" title="Smile">
+</div></blockquote>
+
+This is interesting. I'll make sure to try it out some time. I've tried 
+that once, hit the "ROM size too large" error and gave up.</div>
+
+			
+			
+									
+						
+							<div id="sig350873" class="signature"><a href="https://git.alnyan.me/alnyan/yggdrasil" class="postlink">https://git.alnyan.me/alnyan/yggdrasil</a> — yet another UNIX-like OS for aarch64/i686/x86_64/riscv64, this time in Rust</div>			
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+				<div id="p350878" class="post has-profile bg1 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile350878">
+			<dt class="has-profile-rank has-avatar">
+				<div class="avatar-container">
+																<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="avatar"><img class="avatar" src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/15788_M2Do.png" width="65" height="80" alt="User avatar"></a>														</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">BenLunt</a>							</dt>
+
+						<dd class="profile-rank">Member<br><img src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/5_M2Do.gif" alt="Member" title="Member"></dd>			
+		<dd class="profile-posts"><strong>Posts:</strong> <a href="https://forum.osdev.org/search.php?author_id=15788&amp;sr=posts&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">1029</a></dd>		<dd class="profile-joined"><strong>Joined:</strong> Sat Nov 22, 2014 6:33 pm</dd>		
+		
+																<dd class="profile-custom-field profile-phpbb_location"><strong>Location:</strong> USA</dd>
+							
+							<dd class="profile-contact">
+				<strong>Contact:</strong>
+				<div class="dropdown-container dropdown-left">
+					<a href="#" class="dropdown-trigger dropdown-toggle" title="Contact BenLunt">
+						<i class="icon fa-commenting-o fa-fw icon-lg" aria-hidden="true"></i><span class="sr-only">Contact BenLunt</span>
+					</a>
+					<div class="dropdown">
+						<div class="pointer"><div class="pointer-inner"></div></div>
+						<div class="dropdown-contents contact-icons">
+																																								<div>
+																	<a href="http://www.fysnet.net/" title="Website" class="last-cell">
+										<span class="contact-icon phpbb_website-icon">Website</span>									</a>
+																	</div>
+																					</div>
+					</div>
+				</div>
+			</dd>
+				
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content350878">
+
+						<h3>
+						<a href="https://forum.osdev.org/viewtopic.php?p=350878&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350878">Re: xHCI Address Device (BSR=0) and Device Descriptor queries return completion code 4</a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=350878&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Reply with quote" class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Quote</span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=350878&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350878" title="Post">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Post</span>
+					</a>
+								<span class="responsive-hide">by <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">BenLunt</a></strong> » </span><time datetime="2025-02-01T17:18:00+00:00">Sat Feb 01, 2025 11:18 am</time>
+			</p>
+			
+			
+						
+			
+			<div class="content">When I run your image though Bochs and UEFI, it 
+looks like your boot code repeats an inquiry to ACPI PM. At 0x03EB0097C,
+ your code does an <strong class="text-strong">in eax,dx</strong> with <strong class="text-strong">dx = 0xb008</strong>. It then does a few tests on the returned value, does a <strong class="text-strong">pause</strong> and then after a few other calls, returns to the <strong class="text-strong">in eax,dx</strong> a little while later. Does your initial boot check for something in the Power Management and loop indefinitely until satisfied?<br>
+<br>
+If you have the latest version of Bochs, this is the bochsrc.txt file I use to boot your image:<br>
+(Currently I have xHCI <em class="text-italics">off</em> to see if it boots first)
+<div class="codebox"><p>Code: <a href="#" onclick="selectCode(this); return false;">Select all</a></p><pre><code>display_library: win32, options="gui_debug:globalini" # use Win32 debugger gui
+romimage: file="OVMF-pure-efi.fd", address=0x0, options=none
+config_interface: win32config
+cpu: model=tigerlake
+cpu: count=1, ips=750000000, reset_on_triple_fault=1, ignore_bad_msrs=1
+cpu: cpuid_limit_winnt=0
+memory: guest=1024, host=1024
+vgaromimage: file=VGABIOS-lgpl-latest-cirrus.bin
+vga: extension=cirrus, update_freq=10
+ata0: enabled=1, ioaddr1=0x1f0, ioaddr2=0x3f0, irq=14
+ata1: enabled=0, ioaddr1=0x170, ioaddr2=0x370, irq=15
+ata2: enabled=0, ioaddr1=0x1e8, ioaddr2=0x3e0, irq=11
+ata3: enabled=0, ioaddr1=0x168, ioaddr2=0x360, irq=9
+ata0-master: type=cdrom, path=image.iso, status=inserted, model="image.iso"
+boot: cdrom
+clock: sync=both, time0=local
+floppy_bootsig_check: disabled=0
+log: log.txt
+panic: action=ask
+error: action=report, cpu0=ignore
+info: action=report, cpu0=ignore
+debug: action=ignore
+parport1: enabled=1, file="parport.out"
+mouse: enabled=0, type=imps2
+private_colormap: enabled=0
+pci: enabled=1, chipset=i440fx, slot1=cirrus
+#pci: enabled=1, chipset=i440fx, slot1=cirrus, slot2=usb_xhci
+#usb_debug: type=xhci, doorbell=1
+#usb_xhci: enabled=1, model="uPD720202", n_ports=4
+#usb_xhci: port4=floppy, options4="speed:full, path:floppy.img, model:teac"
+magic_break: enabled=1 cx
+print_timestamps: enabled=0</code></pre></div></div>
+
+			
+			
+									
+						
+										
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+				<div id="p350879" class="post has-profile bg2 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile350879">
+			<dt class="no-profile-rank no-avatar">
+				<div class="avatar-container">
+																			</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a>							</dt>
+
+									
+		<dd class="profile-posts"><strong>Posts:</strong> <a href="https://forum.osdev.org/search.php?author_id=89169&amp;sr=posts&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">20</a></dd>		<dd class="profile-joined"><strong>Joined:</strong> Fri Dec 13, 2024 7:08 pm</dd>		
+		
+																<dd class="profile-custom-field profile-phpbb_location"><strong>Location:</strong> Kyiv, Ukraine</dd>
+												<dd class="profile-custom-field profile-github"><strong>GitHub:</strong> <!-- m --><a class="postlink" href="https://git.alnyan.me/alnyan">https://git.alnyan.me/alnyan</a><!-- m --></dd>
+							
+							<dd class="profile-contact">
+				<strong>Contact:</strong>
+				<div class="dropdown-container dropdown-left">
+					<a href="#" class="dropdown-trigger dropdown-toggle" title="Contact alnyannn">
+						<i class="icon fa-commenting-o fa-fw icon-lg" aria-hidden="true"></i><span class="sr-only">Contact alnyannn</span>
+					</a>
+					<div class="dropdown">
+						<div class="pointer"><div class="pointer-inner"></div></div>
+						<div class="dropdown-contents contact-icons">
+																																								<div>
+																	<a href="https://alnyan.me/" title="Website" class="last-cell">
+										<span class="contact-icon phpbb_website-icon">Website</span>									</a>
+																	</div>
+																					</div>
+					</div>
+				</div>
+			</dd>
+				
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content350879">
+
+						<h3>
+						<a href="https://forum.osdev.org/viewtopic.php?p=350879&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350879">Re: xHCI Address Device (BSR=0) and Device Descriptor queries return completion code 4</a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=350879&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Reply with quote" class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Quote</span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=350879&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350879" title="Post">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Post</span>
+					</a>
+								<span class="responsive-hide">by <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a></strong> » </span><time datetime="2025-02-01T19:30:49+00:00">Sat Feb 01, 2025 1:30 pm</time>
+			</p>
+			
+			
+						
+			
+			<div class="content"><blockquote cite="./viewtopic.php?p=350878&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350878"><div><cite><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">BenLunt</a> wrote: <a href="https://forum.osdev.org/viewtopic.php?p=350878&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350878" data-post-id="350878" onclick="if(document.getElementById(hash.substr(1)))href=hash">↑</a><span class="responsive-hide">Sat Feb 01, 2025 11:18 am</span></cite>
+0x03EB0097C, your code does an in eax,dx with dx = 0xb008.
+</div></blockquote>
+
+Hmm, this is weird, I don't access anything ACPI-related from my UEFI 
+boot stub directly (and I'm fairly certain the EFI calls I do shouldn't 
+as well). And this is certainly not a location within the kernel, 
+because it's not a higher-half address. Are there any logs from the 
+serial port? Most of the code prints what's going on right now there, so
+ you can see what the UEFI stub/kernel were doing.<br>
+<br>
+UPD: Just set up Bochs with OVMF, it's doing the same for me, but I'm 
+absolutely sure it's OVMF&nbsp;— it's doing that even if I supply no 
+cdrom image</div>
+
+			
+			
+													<div class="notice">
+					Last edited by <a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a> on Sat Feb 01, 2025 3:16 pm, edited 1 time in total.
+									</div>
+			
+						
+							<div id="sig350879" class="signature"><a href="https://git.alnyan.me/alnyan/yggdrasil" class="postlink">https://git.alnyan.me/alnyan/yggdrasil</a> — yet another UNIX-like OS for aarch64/i686/x86_64/riscv64, this time in Rust</div>			
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+				<div id="p350882" class="post has-profile bg1 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile350882">
+			<dt class="no-profile-rank no-avatar">
+				<div class="avatar-container">
+																			</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a>							</dt>
+
+									
+		<dd class="profile-posts"><strong>Posts:</strong> <a href="https://forum.osdev.org/search.php?author_id=89169&amp;sr=posts&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">20</a></dd>		<dd class="profile-joined"><strong>Joined:</strong> Fri Dec 13, 2024 7:08 pm</dd>		
+		
+																<dd class="profile-custom-field profile-phpbb_location"><strong>Location:</strong> Kyiv, Ukraine</dd>
+												<dd class="profile-custom-field profile-github"><strong>GitHub:</strong> <!-- m --><a class="postlink" href="https://git.alnyan.me/alnyan">https://git.alnyan.me/alnyan</a><!-- m --></dd>
+							
+							<dd class="profile-contact">
+				<strong>Contact:</strong>
+				<div class="dropdown-container dropdown-left">
+					<a href="#" class="dropdown-trigger dropdown-toggle" title="Contact alnyannn">
+						<i class="icon fa-commenting-o fa-fw icon-lg" aria-hidden="true"></i><span class="sr-only">Contact alnyannn</span>
+					</a>
+					<div class="dropdown">
+						<div class="pointer"><div class="pointer-inner"></div></div>
+						<div class="dropdown-contents contact-icons">
+																																								<div>
+																	<a href="https://alnyan.me/" title="Website" class="last-cell">
+										<span class="contact-icon phpbb_website-icon">Website</span>									</a>
+																	</div>
+																					</div>
+					</div>
+				</div>
+			</dd>
+				
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content350882">
+
+						<h3>
+						<a href="https://forum.osdev.org/viewtopic.php?p=350882&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350882">Re: xHCI Address Device (BSR=0) and Device Descriptor queries return completion code 4</a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=350882&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Reply with quote" class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Quote</span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=350882&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350882" title="Post">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Post</span>
+					</a>
+								<span class="responsive-hide">by <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">alnyannn</a></strong> » </span><time datetime="2025-02-01T20:26:06+00:00">Sat Feb 01, 2025 2:26 pm</time>
+			</p>
+			
+			
+						
+			
+			<div class="content">Here's an example of qemu's xhci trace events 
+along with my OS's log messages when detecting the 
+connected/disconnected events for ports. Prior to this, the OS has not 
+written anything to the port registers, just initialized the HC by 
+resetting, halting, configuring and starting it. I don't try to 
+initialize anything, I just read and print the current connect status.<br>
+
+<div class="codebox"><p>Code: <a href="#" onclick="selectCode(this); return false;">Select all</a></p><pre><code>(qemu) device_add usb-kbd,id=kbd0
+usb_xhci_port_link port 5, pls 7
+usb_xhci_port_notify port 5, bits 0x20000
+usb_xhci_queue_event v 0, idx 0, ER_PORT_STATUS_CHANGE, CC_SUCCESS, p 0x0000000005000000, s 0x01000000, c 0x00008801
+usb_xhci_oper_read off 0x0004, ret 0x00000008       #### USBSTS read
+usb_xhci_oper_write off 0x0004, val 0x00000008      #### USBSTS write-back to clear RW1C bits
+usb_xhci_runtime_read off 0x0020, ret 0x00000002 #### Interrupter 0 IMAN read
+usb_xhci_runtime_write off 0x0020, val 0x00000003 #### Interrupted 0 IMAN write-back to clear IP
+000010:0:ygg_driver_usb_xhci::controller:149: IRQ started: 0x8   ##### This is the USBSTS value at the time of interrupt
+000010:0:ygg_driver_usb_xhci::controller:85: Event Ring: port 5 changed
+usb_xhci_port_read port 5, off 0x0000, ret 0x00020ee1
+usb_xhci_port_write port 5, off 0x0000, val 0x00020ee1
+000010:0:ygg_driver_usb_xhci::controller:94: port 5 connected = true
+usb_xhci_runtime_read off 0x0038, ret 0x00594008
+usb_xhci_runtime_read off 0x003c, ret 0x00000000
+usb_xhci_runtime_write off 0x0038, val 0x00594018 #### Interrupter 0 ERDP update
+usb_xhci_runtime_write off 0x003c, val 0x00000000
+000010:0:ygg_driver_usb_xhci::controller:159: IRQ finished
+(qemu) device_del kbd0
+usb_xhci_port_link port 5, pls 5
+usb_xhci_port_notify port 5, bits 0x20000
+usb_xhci_queue_event v 0, idx 1, ER_PORT_STATUS_CHANGE, CC_SUCCESS, p 0x0000000005000000, s 0x01000000, c 0x00008801
+usb_xhci_oper_read off 0x0004, ret 0x00000008
+usb_xhci_oper_write off 0x0004, val 0x00000008
+usb_xhci_runtime_read off 0x0020, ret 0x00000002
+usb_xhci_runtime_write off 0x0020, val 0x00000003
+000018:0:ygg_driver_usb_xhci::controller:149: IRQ started: 0x8
+000018:0:ygg_driver_usb_xhci::controller:85: Event Ring: port 5 changed
+usb_xhci_port_read port 5, off 0x0000, ret 0x000202a0
+usb_xhci_port_write port 5, off 0x0000, val 0x000202a0
+000018:0:ygg_driver_usb_xhci::controller:94: port 5 connected = false
+usb_xhci_runtime_read off 0x0038, ret 0x00594018
+usb_xhci_runtime_read off 0x003c, ret 0x00000000
+usb_xhci_runtime_write off 0x0038, val 0x00594028
+usb_xhci_runtime_write off 0x003c, val 0x00000000
+000018:0:ygg_driver_usb_xhci::controller:159: IRQ finished
+</code></pre></div>
+
+And here's what happens on my laptop (obviously, no handy xhci regs 
+tracing) when an USB flash drive is plugged into an USB3.1 port:<br>
+
+<div class="codebox"><p>Code: <a href="#" onclick="selectCode(this); return false;">Select all</a></p><pre><code>IRQ started 0x18
+Event Ring: port 6 changed (the USB3.1 port number)
+port 6 connected = true
+Event Ring: port 6 changed
+port 6 connected = false
+IRQ finished
+IRQ started 0x18
+Event Ring: port 2 changed
+port 2 connected = true
+IRQ finished
+##### I disconnect the flash drive
+IRQ started 0x18
+Event Ring: port 2 changed
+port 2 connected = false
+IRQ finished
+</code></pre></div>
+
+So looks like when a USB flash drive is connected to an USB3.1 port, the
+ xHC first sends two events (connect+disconnect) immediately regarding 
+the USB3.1 (6) port, then it sends an event regarding USB2.0 port (2). 
+Both are the same physical port.<br>
+After that, I never receive any events from the 6th port again.<br>
+<br>
+I've also noticed that unlike QEMU, a real xHC also sets the PCD=1 in 
+USBSTS when issuing interrupts, which means "any port has a change bit 
+transition from 0 to 1". Not quite sure if that's relevant here.</div>
+
+			
+			
+									
+						
+							<div id="sig350882" class="signature"><a href="https://git.alnyan.me/alnyan/yggdrasil" class="postlink">https://git.alnyan.me/alnyan/yggdrasil</a> — yet another UNIX-like OS for aarch64/i686/x86_64/riscv64, this time in Rust</div>			
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+				<div id="p350883" class="post has-profile bg2 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile350883">
+			<dt class="has-profile-rank has-avatar">
+				<div class="avatar-container">
+																<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="avatar"><img class="avatar" src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/15788_M2Do.png" width="65" height="80" alt="User avatar"></a>														</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">BenLunt</a>							</dt>
+
+						<dd class="profile-rank">Member<br><img src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/5_M2Do.gif" alt="Member" title="Member"></dd>			
+		<dd class="profile-posts"><strong>Posts:</strong> <a href="https://forum.osdev.org/search.php?author_id=15788&amp;sr=posts&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">1029</a></dd>		<dd class="profile-joined"><strong>Joined:</strong> Sat Nov 22, 2014 6:33 pm</dd>		
+		
+																<dd class="profile-custom-field profile-phpbb_location"><strong>Location:</strong> USA</dd>
+							
+							<dd class="profile-contact">
+				<strong>Contact:</strong>
+				<div class="dropdown-container dropdown-left">
+					<a href="#" class="dropdown-trigger dropdown-toggle" title="Contact BenLunt">
+						<i class="icon fa-commenting-o fa-fw icon-lg" aria-hidden="true"></i><span class="sr-only">Contact BenLunt</span>
+					</a>
+					<div class="dropdown">
+						<div class="pointer"><div class="pointer-inner"></div></div>
+						<div class="dropdown-contents contact-icons">
+																																								<div>
+																	<a href="http://www.fysnet.net/" title="Website" class="last-cell">
+										<span class="contact-icon phpbb_website-icon">Website</span>									</a>
+																	</div>
+																					</div>
+					</div>
+				</div>
+			</dd>
+				
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content350883">
+
+						<h3>
+						<a href="https://forum.osdev.org/viewtopic.php?p=350883&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350883">Re: xHCI Address Device (BSR=0) and Device Descriptor queries return completion code 4</a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=350883&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Reply with quote" class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Quote</span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=350883&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350883" title="Post">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Post</span>
+					</a>
+								<span class="responsive-hide">by <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="username">BenLunt</a></strong> » </span><time datetime="2025-02-01T22:22:07+00:00">Sat Feb 01, 2025 4:22 pm</time>
+			</p>
+			
+			
+						
+			
+			<div class="content"><blockquote cite="./viewtopic.php?p=350879&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350879"><div><cite><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=89169&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">alnyannn</a> wrote: <a href="https://forum.osdev.org/viewtopic.php?p=350879&amp;sid=efee10ed731cbccfc7f1a70c00296b2e#p350879" data-post-id="350879" onclick="if(document.getElementById(hash.substr(1)))href=hash">↑</a><span class="responsive-hide">Sat Feb 01, 2025 1:30 pm</span></cite>
+UPD: Just set up Bochs with OVMF, it's doing the same for me, but I'm 
+absolutely sure it's OVMF&nbsp;— it's doing that even if I supply no 
+cdrom image
+</div></blockquote>
+There seems to be an issue with Bochs or OVMF. Make the following change to the bochsrc.txt file and see if it will now boot.
+<div class="codebox"><p>Code: <a href="#" onclick="selectCode(this); return false;">Select all</a></p><pre><code>-   ata1: enabled=0, ioaddr1=0x170, ioaddr2=0x370, irq=15
++   ata1: enabled=1, ioaddr1=0x170, ioaddr2=0x370, irq=15</code></pre></div>
+i.e.: Enable ATA1 even though it isn't used...</div>
+
+			
+			
+									
+						
+										
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+	
+
+	<div class="action-bar bar-bottom">
+	
+			<a href="https://forum.osdev.org/posting.php?mode=reply&amp;t=57621&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="button" title="Post a reply">
+							<span>Post Reply</span> <i class="icon fa-reply fa-fw" aria-hidden="true"></i>
+					</a>
+		
+		<div class="dropdown-container dropdown-button-control topic-tools">
+		<span title="Topic tools" class="button button-secondary dropdown-trigger dropdown-select dropdown-toggle">
+			<i class="icon fa-wrench fa-fw" aria-hidden="true"></i>
+			<span class="caret"><i class="icon fa-sort-down fa-fw" aria-hidden="true"></i></span>
+		</span>
+		<div class="dropdown">
+			<div class="pointer"><div class="pointer-inner"></div></div>
+			<ul class="dropdown-contents">
+																												<li>
+					<a href="https://forum.osdev.org/viewtopic.php?t=57621&amp;sid=efee10ed731cbccfc7f1a70c00296b2e&amp;view=print" title="Print view" accesskey="p">
+						<i class="icon fa-print fa-fw" aria-hidden="true"></i><span>Print view</span>
+					</a>
+				</li>
+											</ul>
+		</div>
+	</div>
+
+			<form method="post" action="./viewtopic.php?t=57621&amp;sid=efee10ed731cbccfc7f1a70c00296b2e">
+		<div class="dropdown-container dropdown-container-left dropdown-button-control sort-tools">
+	<span title="Display and sorting options" class="button button-secondary dropdown-trigger dropdown-select dropdown-toggle">
+		<i class="icon fa-sort-amount-asc fa-fw" aria-hidden="true"></i>
+		<span class="caret"><i class="icon fa-sort-down fa-fw" aria-hidden="true"></i></span>
+	</span>
+	<div class="dropdown hidden">
+		<div class="pointer"><div class="pointer-inner"></div></div>
+		<div class="dropdown-contents">
+			<fieldset class="display-options">
+							<label>Display: <select name="st" id="st"><option value="0" selected="selected">All posts</option><option value="1">1 day</option><option value="7">7 days</option><option value="14">2 weeks</option><option value="30">1 month</option><option value="90">3 months</option><option value="180">6 months</option><option value="365">1 year</option></select></label>
+								<label>Sort by: <select name="sk" id="sk"><option value="a">Author</option><option value="t" selected="selected">Post time</option><option value="s">Subject</option></select></label>
+				<label>Direction: <select name="sd" id="sd"><option value="a" selected="selected">Ascending</option><option value="d">Descending</option></select></label>
+								<hr class="dashed">
+				<input type="submit" class="button2" name="sort" value="Go">
+						</fieldset>
+		</div>
+	</div>
+</div>
+		</form>
+	
+	
+	
+			<div class="pagination">
+			22 posts
+							<ul>
+		<li class="active"><span>1</span></li>
+				<li><a class="button" href="https://forum.osdev.org/viewtopic.php?t=57621&amp;sid=efee10ed731cbccfc7f1a70c00296b2e&amp;start=15" role="button">2</a></li>
+				<li class="arrow next"><a class="button button-icon-only" href="https://forum.osdev.org/viewtopic.php?t=57621&amp;sid=efee10ed731cbccfc7f1a70c00296b2e&amp;start=15" rel="next" role="button"><i class="icon fa-chevron-right fa-fw" aria-hidden="true"></i><span class="sr-only">Next</span></a></li>
+	</ul>
+					</div>
+	</div>
+
+
+<div class="action-bar actions-jump">
+		<p class="jumpbox-return">
+		<a href="https://forum.osdev.org/viewforum.php?f=1&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="left-box arrow-left" accesskey="r">
+			<i class="icon fa-angle-left fa-fw icon-black" aria-hidden="true"></i><span>Return to “OS Development”</span>
+		</a>
+	</p>
+	
+		<div class="jumpbox dropdown-container dropdown-container-right dropdown-up dropdown-left dropdown-button-control" id="jumpbox">
+			<span title="Jump to" class="button button-secondary dropdown-trigger dropdown-select dropdown-toggle">
+				<span>Jump to</span>
+				<span class="caret"><i class="icon fa-sort-down fa-fw" aria-hidden="true"></i></span>
+			</span>
+		<div class="dropdown">
+			<div class="pointer"><div class="pointer-inner"></div></div>
+			<ul class="dropdown-contents">
+																				<li><a href="https://forum.osdev.org/viewforum.php?f=16&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="jumpbox-cat-link"> <span> Operating System Development</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=1&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="jumpbox-sub-link"><span class="spacer"></span> <span>↳ &nbsp; OS Development</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=15&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="jumpbox-sub-link"><span class="spacer"></span> <span>↳ &nbsp; OS Design &amp; Theory</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=2&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="jumpbox-sub-link"><span class="spacer"></span> <span>↳ &nbsp; Announcements, Test Requests, &amp; Job openings</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=17&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="jumpbox-cat-link"> <span> Everything Else</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=13&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="jumpbox-sub-link"><span class="spacer"></span> <span>↳ &nbsp; General Programming</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=11&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="jumpbox-sub-link"><span class="spacer"></span> <span>↳ &nbsp; General Ramblings</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=7&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="jumpbox-sub-link"><span class="spacer"></span> <span>↳ &nbsp; Auto-Delete Forum</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=18&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="jumpbox-cat-link"> <span> OSDev.org</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=8&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="jumpbox-sub-link"><span class="spacer"></span> <span>↳ &nbsp; OSDev Wiki</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=6&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" class="jumpbox-sub-link"><span class="spacer"></span> <span>↳ &nbsp; About this site</span></a></li>
+											</ul>
+		</div>
+	</div>
+
+	</div>
+
+
+
+			</div>
+
+
+<div id="page-footer" class="page-footer" role="contentinfo">
+	<div class="navbar navbar-bottom" role="navigation">
+	<div class="inner">
+
+	<ul id="nav-footer" class="nav-footer linklist" role="menubar">
+		<li class="breadcrumbs">
+									<span class="crumb"><a href="https://forum.osdev.org/index.php?sid=efee10ed731cbccfc7f1a70c00296b2e" data-navbar-reference="index" title="Board index"><i class="icon fa-home fa-fw" aria-hidden="true"></i><span>Board index</span></a></span>					</li>
+		
+				
+							<li class="responsive-menu hidden rightside dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li><li class="rightside">
+				<a href="https://forum.osdev.org/ucp.php?mode=delete_cookies&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" data-ajax="true" data-refresh="true" role="menuitem">
+					<i class="icon fa-trash fa-fw" aria-hidden="true"></i><span>Delete cookies</span>
+				</a>
+			</li>
+				
+					</ul>
+
+	</div>
+</div>
+
+	<div class="copyright">
+				<p class="footer-row">
+			<span class="footer-copyright">Flat Style by <a href="http://phpbbstyles.iansvivarium.com/">Ian Bradley</a></span>
+		</p>
+        <p class="footer-row">
+			<span class="footer-copyright">Powered by <a href="https://www.phpbb.com/">phpBB</a>® Forum Software © phpBB Limited</span>
+		</p>
+						<p class="footer-row" role="menu">
+			<a class="footer-link" href="https://forum.osdev.org/ucp.php?mode=privacy&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Privacy" role="menuitem">
+				<span class="footer-link-text">Privacy</span>
+			</a>
+			|
+			<a class="footer-link" href="https://forum.osdev.org/ucp.php?mode=terms&amp;sid=efee10ed731cbccfc7f1a70c00296b2e" title="Terms" role="menuitem">
+				<span class="footer-link-text">Terms</span>
+			</a>
+		</p>
+					</div>
+
+	<div id="darkenwrapper" class="darkenwrapper" data-ajax-error-title="AJAX error" data-ajax-error-text="Something went wrong when processing your request." data-ajax-error-text-abort="User aborted request." data-ajax-error-text-timeout="Your request timed out; please try again." data-ajax-error-text-parsererror="Something went wrong with the request and the server returned an invalid reply.">
+		<div id="darken" class="darken">&nbsp;</div>
+	</div>
+
+	<div id="phpbb_alert" class="phpbb_alert" data-l-err="Error" data-l-timeout-processing-req="Request timed out.">
+		<a href="#" class="alert_close">
+			<i class="icon fa-times-circle fa-fw" aria-hidden="true"></i>
+		</a>
+		<h3 class="alert_title">&nbsp;</h3><p class="alert_text"></p>
+	</div>
+	<div id="phpbb_confirm" class="phpbb_alert">
+		<a href="#" class="alert_close">
+			<i class="icon fa-times-circle fa-fw" aria-hidden="true"></i>
+		</a>
+		<div class="alert_text"></div>
+	</div>
+</div>
+
+</div>
+
+<div>
+	<a id="bottom" class="anchor" accesskey="z"></a>
+	<img class="sr-only" aria-hidden="true" src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/cron.task.core_M2Do.gif" width="1" height="1" alt="">
+</div>
+
+<script src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/jquery-3.7.1.min_M2Do.js"></script>
+<script src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/core_M2Do.js"></script>
+
+
+<script>
+(function($) {  // Avoid conflicts with other libraries
+
+'use strict';
+
+	phpbb.addAjaxCallback('reporttosfs', function(data) {
+		if (data.postid !== "undefined") {
+			$('#sfs' + data.postid).hide();
+			phpbb.closeDarkenWrapper(5000);
+		}
+	});
+
+})(jQuery);
+</script>
+<script src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/forum_fn_M2Do.js"></script>
+<script src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/ajax_M2Do.js"></script>
+
+
+
+<script type="module" src="[%D0%A0%D0%95%D0%A8%D0%95%D0%9D%D0%9E]%20%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B%20xHCI%20Address%20Device%20(BSR=0)%20%D0%B8%20Device%20Descriptor%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D0%B0%D1%8E%D1%82%20%D0%BA%D0%BE%D0%B4%20%D0%B7%D0%B0%D0%B2%D0%B5%D1%80%D1%88%D0%B5%D0%BD%D0%B8%D1%8F%204%20-%20OSDev.org_files/v3d52b47920f24c319d37e2661827c42b1787588026925_M2Do" integrity="sha512-d9sL6GJLXn6fInD1+TVXhTcQOsmxeHfmHAvwGDIxp5TO+uo1fiWW7mHomMj4MLRlCsJDTqXzWLHJFFlPCEIj/A==" data-cf-beacon="{&quot;version&quot;:&quot;2024.11.0&quot;,&quot;token&quot;:&quot;ca8edd89ae604cb093371c5ef552b991&quot;,&quot;r&quot;:1}" crossorigin="anonymous"></script>
+
+
+</body></html>

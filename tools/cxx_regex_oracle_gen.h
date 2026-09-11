@@ -1,8 +1,3 @@
-// cxx_regex_oracle_gen.h — the case sequence, shared.
-//
-// The differential stand only means anything if every column walks the SAME
-// cases, so the generator lives here rather than in either of them. Nothing in
-// it may call rand(), time() or anything else that differs between two runs.
 #ifndef BOXCXX_REGEX_ORACLE_GEN_H
 #define BOXCXX_REGEX_ORACLE_GEN_H
 
@@ -10,11 +5,6 @@
 #include <cstdint>
 #include <cstdio>
 
-// ── UTF-8 <-> wide, by hand ────────────────────────────────────────────────
-// Shared because both the oracle and the stand have to agree byte for byte on
-// what a case file says. Done here rather than through mbstowcs on purpose:
-// a locale-driven conversion would make the answer depend on the host's
-// LC_CTYPE, and this stand exists to remove that kind of dependence.
 inline std::wstring ToWide(const std::string &s)
 {
     std::wstring w;
@@ -57,10 +47,6 @@ inline std::string ToUtf8(const std::wstring &w)
     return s;
 }
 
-// ── deterministic PRNG ─────────────────────────────────────────────────────
-// Not std::mt19937: its stream is specified, but the distributions layered on
-// top of it are not, and a case sequence that drifts between two libraries
-// compares nothing. splitmix64 by hand cannot drift.
 struct Rng {
     std::uint64_t s;
     explicit Rng(std::uint64_t seed) : s(seed) {}
@@ -74,11 +60,6 @@ struct Rng {
     unsigned Below(unsigned n) { return (unsigned)(Next() % n); }
 };
 
-// ── pattern generator ──────────────────────────────────────────────────────
-// A recursive descent over the shapes of [re.grammar], bounded by depth so it
-// terminates, and by fan so the result stays small enough to READ. A 400-char
-// pattern proves a disagreement exists and explains nothing; the reduced cases
-// live in the replay file instead.
 struct Gen {
     Rng &r;
     int groups = 0;
@@ -118,16 +99,13 @@ struct Gen {
     std::string Quantified(int depth)
     {
         std::string a = Atom(depth);
-        // A quantified anchor or lookahead is legal in the grammar and is a
-        // separate argument between the two libraries; keeping it out of the
-        // generator keeps this sweep about the ENGINE.
         if (a == "^" || a == "$" || a.compare(0, 3, "(?=") == 0 || a.compare(0, 3, "(?!") == 0)
             return a;
         unsigned q = r.Below(10);
         if (q >= 6) return a;
         static const char *kQ[] = {"*", "+", "?", "{1,2}", "{0,2}", "{2}"};
         std::string s = a + kQ[q];
-        if (r.Below(4) == 0 && kQ[q][0] != '{') s += "?";   // lazy
+        if (r.Below(4) == 0 && kQ[q][0] != '{') s += "?";
         return s;
     }
 
@@ -149,7 +127,6 @@ struct Gen {
 };
 
 
-// One case: the pattern and the subject the seed produces.
 struct Case { std::string pattern, subject; char id[16]; };
 
 inline Case MakeCase(std::uint64_t seed, int depth, int fan)
@@ -167,4 +144,4 @@ inline Case MakeCase(std::uint64_t seed, int depth, int fan)
     return c;
 }
 
-#endif // BOXCXX_REGEX_ORACLE_GEN_H
+#endif

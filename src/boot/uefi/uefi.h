@@ -1,22 +1,7 @@
 #ifndef UEFI_H
 #define UEFI_H
 
-/*
- * Minimal UEFI type and protocol definitions for TagBoot.
- * No external dependencies — implements exactly what TagBoot needs.
- * Based on UEFI Specification 2.10.
- *
- * CALLING CONVENTION (critical):
- *   UEFI on x86-64 uses the Microsoft x64 ABI (UEFI spec §2.3.4):
- *   arguments in RCX, RDX, R8, R9 — NOT System V (RDI, RSI, RDX, RCX).
- *   Every EFI function pointer and every EFI callback must be declared
- *   EFIAPI so GCC emits correct call sequences.  Without this attribute
- *   ALL UEFI calls silently pass arguments in the wrong registers.
- */
 
-/* =========================================================================
- * Basic types
- * ========================================================================= */
 
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
@@ -25,12 +10,6 @@ typedef unsigned long long uint64_t;
 typedef signed long long   int64_t;
 typedef signed int         int32_t;
 
-/*
- * uintptr_t must be 64-bit on the UEFI x86_64 target regardless of the
- * compiler's platform model (LP64 on Linux, LLP64 on Windows).
- * size_t is also guaranteed 64-bit on x86_64 UEFI.
- * Guard against redefinitions that may come from built-in headers.
- */
 #ifndef _UINTPTR_T_DEFINED
 #define _UINTPTR_T_DEFINED
 typedef unsigned long long uintptr_t;
@@ -41,10 +20,6 @@ typedef unsigned long long uintptr_t;
 typedef unsigned long long size_t;
 #endif
 
-/* =========================================================================
- * EFIAPI — Microsoft x64 calling convention for all UEFI functions.
- * Applied to every function pointer typedef and every EFI callback.
- * ========================================================================= */
 #if defined(__GNUC__) || defined(__clang__)
 #  define EFIAPI __attribute__((ms_abi))
 #else
@@ -66,9 +41,6 @@ typedef uint64_t  EFI_LBA;
 #define FALSE 0
 #define NULL  ((void *)0)
 
-/* =========================================================================
- * EFI_STATUS codes
- * ========================================================================= */
 
 #define EFI_SUCCESS               0ULL
 #define EFI_ERROR_BIT             (1ULL << 63)
@@ -86,9 +58,6 @@ typedef uint64_t  EFI_LBA;
 
 #define EFI_ERROR(s)  ((s) & EFI_ERROR_BIT)
 
-/* =========================================================================
- * GUID
- * ========================================================================= */
 
 typedef struct {
     uint32_t data1;
@@ -100,7 +69,6 @@ typedef struct {
 #define EFI_GUID_INIT(d1, d2, d3, b0,b1,b2,b3,b4,b5,b6,b7) \
     { (d1), (d2), (d3), { (b0),(b1),(b2),(b3),(b4),(b5),(b6),(b7) } }
 
-/* Protocol GUIDs we use */
 #define EFI_BLOCK_IO_PROTOCOL_GUID \
     EFI_GUID_INIT(0x964e5b21,0x6459,0x11d2, 0x8e,0x39,0x00,0xa0,0xc9,0x69,0x72,0x3b)
 
@@ -110,21 +78,16 @@ typedef struct {
 #define EFI_LOADED_IMAGE_PROTOCOL_GUID \
     EFI_GUID_INIT(0x5b1b31a1,0x9562,0x11d2, 0x8e,0x3f,0x00,0xa0,0xc9,0x69,0x72,0x3b)
 
-/* ACPI table GUIDs (UEFI spec §4.6) — for RSDP discovery */
 #define EFI_ACPI_20_TABLE_GUID \
     EFI_GUID_INIT(0x8868e871,0xe4f1,0x11d3, 0xbc,0x22,0x00,0x80,0xc7,0x3c,0x88,0x81)
 #define EFI_ACPI_TABLE_GUID \
     EFI_GUID_INIT(0xeb9d2d30,0x2d88,0x11d3, 0x9a,0x16,0x00,0x90,0x27,0x3f,0xc1,0x4d)
 
-/* EFI_CONFIGURATION_TABLE — one entry in the system table vendor table array */
 typedef struct {
     EFI_GUID  vendor_guid;
     void     *vendor_table;
 } EFI_CONFIGURATION_TABLE;
 
-/* =========================================================================
- * Memory types and map
- * ========================================================================= */
 
 typedef enum {
     EfiReservedMemoryType,
@@ -172,9 +135,6 @@ typedef enum {
     MaxAllocateType
 } EFI_ALLOCATE_TYPE;
 
-/* =========================================================================
- * Simple Text Output Protocol (minimal — for printing)
- * ========================================================================= */
 
 typedef struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
 
@@ -198,9 +158,6 @@ struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
     void                 *mode;
 };
 
-/* =========================================================================
- * Block IO Protocol
- * ========================================================================= */
 
 #define EFI_BLOCK_IO_PROTOCOL_REVISION  0x00010000ULL
 
@@ -252,9 +209,6 @@ struct EFI_BLOCK_IO_PROTOCOL {
     EFI_BLOCK_FLUSH      flush_blocks;
 };
 
-/* =========================================================================
- * Graphics Output Protocol
- * ========================================================================= */
 
 typedef enum {
     PixelRedGreenBlueReserved8BitPerColor,
@@ -291,7 +245,7 @@ typedef struct {
 
 typedef struct EFI_GRAPHICS_OUTPUT_PROTOCOL EFI_GRAPHICS_OUTPUT_PROTOCOL;
 
-typedef void *EFI_GRAPHICS_OUTPUT_PROTOCOL_BLT;  /* unused */
+typedef void *EFI_GRAPHICS_OUTPUT_PROTOCOL_BLT;
 
 typedef EFI_STATUS (EFIAPI *EFI_GRAPHICS_OUTPUT_PROTOCOL_QUERY_MODE)(
     EFI_GRAPHICS_OUTPUT_PROTOCOL            *this_proto,
@@ -310,9 +264,6 @@ struct EFI_GRAPHICS_OUTPUT_PROTOCOL {
     EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE       *mode;
 };
 
-/* =========================================================================
- * Loaded Image Protocol
- * ========================================================================= */
 
 typedef struct {
     uint32_t       revision;
@@ -330,9 +281,6 @@ typedef struct {
     void          *unload;
 } EFI_LOADED_IMAGE_PROTOCOL;
 
-/* =========================================================================
- * Boot Services
- * ========================================================================= */
 
 typedef EFI_STATUS (EFIAPI *EFI_ALLOCATE_PAGES)(
     EFI_ALLOCATE_TYPE     type,
@@ -410,23 +358,19 @@ typedef struct {
 
 typedef struct {
     EFI_TABLE_HEADER          hdr;
-    /* raise/restore TPL */
     void                     *raise_tpl;
     void                     *restore_tpl;
-    /* memory */
     EFI_ALLOCATE_PAGES        allocate_pages;
     EFI_FREE_PAGES            free_pages;
     EFI_GET_MEMORY_MAP        get_memory_map;
     EFI_ALLOCATE_POOL         allocate_pool;
     EFI_FREE_POOL             free_pool;
-    /* events */
     void                     *create_event;
     void                     *set_timer;
     void                     *wait_for_event;
     void                     *signal_event;
     void                     *close_event;
     void                     *check_event;
-    /* protocols */
     void                     *install_protocol_interface;
     void                     *reinstall_protocol_interface;
     void                     *uninstall_protocol_interface;
@@ -436,20 +380,16 @@ typedef struct {
     void                     *locate_handle;
     void                     *locate_device_path;
     void                     *install_configuration_table;
-    /* image */
     void                     *load_image;
     void                     *start_image;
     void                     *exit;
     void                     *unload_image;
     EFI_EXIT_BOOT_SERVICES    exit_boot_services;
-    /* misc */
     void                     *get_next_monotonic_count;
     void                     *stall;
     EFI_SET_WATCHDOG_TIMER    set_watchdog_timer;
-    /* driver */
     void                     *connect_controller;
     void                     *disconnect_controller;
-    /* protocols (extended) */
     EFI_OPEN_PROTOCOL         open_protocol;
     void                     *close_protocol;
     void                     *open_protocol_information;
@@ -458,27 +398,18 @@ typedef struct {
     EFI_LOCATE_PROTOCOL       locate_protocol;
     void                     *install_multiple_protocol_interfaces;
     void                     *uninstall_multiple_protocol_interfaces;
-    /* crc */
     void                     *calculate_crc32;
-    /* misc */
     void                     *copy_mem;
     void                     *set_mem;
     void                     *create_event_ex;
 } EFI_BOOT_SERVICES;
 
-/* =========================================================================
- * Runtime Services (minimal — only what we need)
- * ========================================================================= */
 
 typedef struct {
     EFI_TABLE_HEADER hdr;
-    /* lots of fields we don't use */
     uint8_t          _pad[256];
 } EFI_RUNTIME_SERVICES;
 
-/* =========================================================================
- * System Table
- * ========================================================================= */
 
 typedef struct {
     EFI_TABLE_HEADER                  hdr;
@@ -497,4 +428,4 @@ typedef struct {
     EFI_CONFIGURATION_TABLE          *configuration_table;
 } EFI_SYSTEM_TABLE;
 
-#endif /* UEFI_H */
+#endif

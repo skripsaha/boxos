@@ -11,10 +11,6 @@ int main(void) {
     println("Launching proca and procb...");
     io_flush();
 
-    /* Claim process:died BEFORE spawning so neither child can exit before we
-     * are watching. Its death (clean OR crash) drives loop termination — a
-     * separate ring from the args/message IPC below — and each death is matched
-     * by canonical (pid, generation), so a recycled pid can never be mistaken. */
     TouchTag pdied = touch_pair_choose(touch_intern(TOUCH_TAG_PROCESS_DIED));
     bool watching = (pdied != TOUCH_TAG_INVALID &&
                      touch_claim(pdied, TOUCH_REST, 0, 0) == OK);
@@ -45,8 +41,6 @@ int main(void) {
     bool dead_a = false, dead_b = false;
     int  received = 0;
 
-    /* Event-driven termination: stop once BOTH children's deaths are collected.
-     * received < 20 is a hard backstop. Messages are drained/printed meanwhile. */
     while (received < 20 && !(dead_a && dead_b)) {
         if (watching) {
             Touch t;
@@ -64,8 +58,8 @@ int main(void) {
 
         Result entry;
         if (!receive_wait(&entry, 500)) {
-            if (watching) continue;   /* idle slice — the deaths terminate us */
-            break;                    /* no claim: idle is the only stop signal */
+            if (watching) continue;
+            break;
         }
 
         char buf[257];

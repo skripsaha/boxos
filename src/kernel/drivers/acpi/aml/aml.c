@@ -7,35 +7,12 @@
 #include "pci.h"
 #include "touch.h"
 
-/* =====================================================================
- * AML interpreter — production subset of ACPI 6.5 §20.
- *
- * Coverage:
- *   * Namespace build from DSDT + every SSDT
- *   * Named objects: Name, Scope, Method, Device, Processor, PowerRes,
- *     ThermalZone, OpRegion, Field, Mutex, Event, Alias
- *   * Data types: Integer (Zero/One/Ones + Byte/Word/DWord/QWord prefix),
- *     String, Buffer, Package
- *   * Lookup with C-string paths (`\_SB.PCI0._INI`) including relative
- *     forms with parent-prefix walk
- *   * OpRegion handlers for SystemIO, SystemMemory, PCI_Config — all
- *     three actually drive hardware
- *   * Integer-value retrieval for callers that just need a Name (shutdown
- *     reads \_S5 this way)
- *   * _PIC method presence detection
- *
- * Out of scope (acknowledged in the header) — full method TermList
- * execution, buffer fields, generic conversions, Notify dispatch.
- * That work belongs to the next AML audit which can build on the
- * namespace this pass produces.
- * ===================================================================== */
 
 #define AML_MAX_NAMESPACE_OBJ   4096
 #define AML_MAX_SCOPE_DEPTH     32
 #define AML_MAX_BUFFER_BYTES    (1u << 20)
 #define AML_MAX_PACKAGE_LEN     1024
 
-/* AML opcodes — ACPI 6.5 §20.2.5. */
 #define ZeroOp           0x00
 #define OneOp            0x01
 #define AliasOp          0x06
@@ -66,7 +43,6 @@
 #define ExtPowerResOp    0x84
 #define ExtThermalZoneOp 0x85
 
-/* Executable opcodes (single-byte). */
 #define StoreOp          0x70
 #define RefOfOp          0x71
 #define AddOp            0x72
@@ -100,14 +76,10 @@
 #define ReturnOp         0xA4
 #define BreakOp          0xA5
 
-/* Address spaces. */
 #define REGION_SYSTEM_MEMORY  0
 #define REGION_SYSTEM_IO      1
 #define REGION_PCI_CONFIG     2
 
-/* ===========================================================
- * Namespace data structures
- * =========================================================== */
 
 struct aml_object {
     char        name[5];
@@ -123,9 +95,6 @@ struct aml_object {
             uint8_t  space;
             uint64_t base;
             uint64_t len;
-            /* MMIO cache: first SystemMemory access maps the region UC
-             * once; every subsequent read/write is a direct load/store
-             * with zero VMM calls. NULL until the first miss. */
             volatile uint8_t* mapped_virt;
         } region;
         struct {
@@ -182,9 +151,6 @@ static aml_object_t* obj_find_child(aml_object_t* parent, const char seg[4]) {
     return NULL;
 }
 
-/* ===========================================================
- * NameString resolution
- * =========================================================== */
 
 static aml_object_t* resolve_name(const uint8_t** p, const uint8_t* end,
                                     aml_object_t* scope, bool create,
@@ -239,9 +205,6 @@ static aml_object_t* resolve_name(const uint8_t** p, const uint8_t* end,
     return cur;
 }
 
-/* ===========================================================
- * Stream helpers
- * =========================================================== */
 
 static uint32_t decode_pkglen(const uint8_t** p, const uint8_t* end,
                               uint32_t* consumed) {
@@ -292,16 +255,13 @@ static uint64_t read_integer(const uint8_t** p, const uint8_t* end) {
     }
 }
 
-/* ===========================================================
- * Parser — populate namespace from a TermList byte range
- * =========================================================== */
 
 static aml_status_t parse_term_list(const uint8_t* aml, uint32_t len,
                                      aml_object_t* scope, int depth);
 
 static aml_status_t handle_buffer(const uint8_t** p, const uint8_t* end,
                                    aml_object_t* obj) {
-    (*p)++;     /* BufferOp */
+    (*p)++;
     uint32_t pklen_bytes;
     uint32_t pklen = decode_pkglen(p, end, &pklen_bytes);
     if (!pklen_bytes) return AML_ERR_BOUNDS;
@@ -322,7 +282,7 @@ static aml_status_t handle_buffer(const uint8_t** p, const uint8_t* end,
 
 static aml_status_t handle_package(const uint8_t** p, const uint8_t* end,
                                     aml_object_t* obj) {
-    (*p)++;     /* PackageOp */
+    (*p)++;
     uint32_t pklen_bytes;
     uint32_t pklen = decode_pkglen(p, end, &pklen_bytes);
     if (!pklen_bytes) return AML_ERR_BOUNDS;
@@ -330,15 +290,9 @@ static aml_status_t handle_package(const uint8_t** p, const uint8_t* end,
     const uint8_t* body_end   = *p + pklen;
     if (body_end > end || body_start >= body_end) return AML_ERR_BOUNDS;
 
-    /* PackageOp NumElements is a single byte — 0..255 fits any value
-     * we'd care to track. (VarPackageOp would use a TermArg and need a
-     * cap; that path is rare enough we currently parse only fixed-size
-     * Packages.) */
     uint8_t num = body_start[0];
     obj->type = AML_OBJ_PACKAGE;
     obj->v.package.count = num;
-    /* Capture the first element's integer value if it is one. We keep
-     * the storage minimal — most callers only need _S5[0]/_S5[1]. */
     const uint8_t* bp = body_start + 1;
     if (bp < body_end) {
         const uint8_t* before = bp;
@@ -351,7 +305,6 @@ static aml_status_t handle_package(const uint8_t** p, const uint8_t* end,
 
 static aml_status_t handle_named_data(const uint8_t** p, const uint8_t* end,
                                        aml_object_t* obj) {
-    /* DataRefObject following a NameOp NameString. */
     if (*p >= end) return AML_ERR_BOUNDS;
     uint8_t op = **p;
     if (op == BufferOp)        return handle_buffer(p, end, obj);
@@ -376,7 +329,7 @@ static aml_status_t handle_named_data(const uint8_t** p, const uint8_t* end,
 static aml_status_t handle_scope_method(const uint8_t** p, const uint8_t* end,
                                          aml_object_t* scope, int depth,
                                          bool is_method) {
-    (*p)++;     /* op byte */
+    (*p)++;
     uint32_t pklen_bytes;
     uint32_t pklen = decode_pkglen(p, end, &pklen_bytes);
     if (!pklen_bytes) return AML_ERR_BOUNDS;
@@ -409,8 +362,7 @@ static aml_status_t handle_scope_method(const uint8_t** p, const uint8_t* end,
 
 static aml_status_t handle_extended(const uint8_t** p, const uint8_t* end,
                                      aml_object_t* scope, int depth) {
-    (*p) += 2;     /* ExtOp + opcode */
-    /* Sub-opcode is at (*p - 1). */
+    (*p) += 2;
     uint8_t sub = (*p)[-1];
 
     if (sub == ExtOpRegionOp) {
@@ -554,9 +506,6 @@ static aml_status_t parse_term_list(const uint8_t* aml, uint32_t len,
     return AML_OK;
 }
 
-/* ===========================================================
- * SSDT iteration callback (must be module-level for parse_term_list)
- * =========================================================== */
 static bool ssdt_cb(acpi_sdt_header_t* h, void* u) {
     (void)u;
     uint32_t hdr = (uint32_t)sizeof(acpi_sdt_header_t);
@@ -565,9 +514,6 @@ static bool ssdt_cb(acpi_sdt_header_t* h, void* u) {
     return true;
 }
 
-/* ===========================================================
- * OpRegion access
- * =========================================================== */
 
 uint64_t aml_region_read(aml_object_t* region, uint64_t offset, uint8_t bits) {
     if (!region || region->type != AML_OBJ_REGION) return 0;
@@ -580,9 +526,6 @@ uint64_t aml_region_read(aml_object_t* region, uint64_t offset, uint8_t bits) {
             if (bytes == 4) return inl((uint16_t)addr);
             return 0;
         case REGION_SYSTEM_MEMORY: {
-            /* O(1) hot path: first access maps the whole region UC and
-             * caches the VA; subsequent reads dereference directly with
-             * zero VMM calls. */
             if (!region->v.region.mapped_virt) {
                 region->v.region.mapped_virt = (volatile uint8_t*)
                     vmm_map_mmio((uintptr_t)region->v.region.base,
@@ -666,9 +609,6 @@ void aml_region_write(aml_object_t* region, uint64_t offset, uint8_t bits,
     }
 }
 
-/* ===========================================================
- * Public API
- * =========================================================== */
 
 aml_status_t aml_init(void) {
     if (g_loaded) return AML_OK;
@@ -696,22 +636,16 @@ aml_status_t aml_init(void) {
                     dsdt->length - sizeof(acpi_sdt_header_t),
                     &g_root_obj, 0);
 
-    /* Every SSDT contributes additional namespace. */
     acpi_for_each_table("SSDT", ssdt_cb, NULL);
 
     g_loaded = true;
     debug_printf("[AML] namespace loaded: %u objects across DSDT + SSDTs\n",
                  g_pool_used);
-    /* Daemons that need the AML namespace (power manager, EC subscriber,
-     * thermal monitor) wait on this tag. The payload is the object
-     * count so subscribers can size their caches. */
     uint32_t cnt = g_pool_used;
     TouchPublish("aml:ready", &cnt, sizeof(cnt));
     return AML_OK;
 }
 
-/* Convert a C path like "\_SB.PCI0._INI" to an AML NameString byte
- * stream so we can reuse resolve_name(). */
 aml_status_t aml_find(const char* path, aml_object_t** out) {
     if (!g_loaded || !path) return AML_ERR_NOT_FOUND;
     uint8_t buf[128];
@@ -720,7 +654,6 @@ aml_status_t aml_find(const char* path, aml_object_t** out) {
     if (*s == '\\') { buf[bi++] = RootChar; s++; }
     while (*s == '^' && bi < sizeof(buf)) { buf[bi++] = ParentPrefixChar; s++; }
 
-    /* Count segments. */
     int segs = 0;
     if (*s) segs = 1;
     for (const char* q = s; *q; q++) if (*q == '.') segs++;
@@ -794,27 +727,12 @@ aml_status_t aml_eval_crs(const char* path, void* buf, size_t buf_len,
     return AML_ERR_NOT_LOADED;
 }
 
-/* =====================================================================
- * AML method execution engine.
- *
- * Reduced to integer-valued semantics, sufficient for the methods every
- * production firmware drives during OS init: _STA, _INI, _PTS, _BFS,
- * _WAK, _PIC, _OSI, _SUN, _ADR, _CID, _UID. The executor:
- *   - walks the method's TermList byte stream
- *   - keeps Locals[8] and Args[7] as 64-bit integers
- *   - dispatches arithmetic/logical/control/store/method-invoke
- *   - reads/writes Field operands through aml_region_read/write
- *
- * Non-integer result types from a method get reported as 0 — callers
- * that need the full object type system are deferred to a future
- * ACPICA/uACPI-grade rewrite.
- * ===================================================================== */
 
 #define EXEC_MAX_DEPTH    16
 #define EXEC_MAX_WHILE    (1u << 22)
 
 typedef struct exec_frame {
-    aml_object_t*  scope;             /* current namespace scope */
+    aml_object_t*  scope;
     uint64_t       locals[8];
     uint64_t       args[7];
     uint8_t        argc;
@@ -834,24 +752,19 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
 static aml_status_t exec_termlist(const uint8_t* aml, uint32_t len,
                                    exec_frame_t* fr, int depth);
 
-/* Evaluate a single TermArg, returning its integer reduction. Advances
- * the stream past the consumed bytes. */
 static aml_status_t exec_termarg(const uint8_t** p, const uint8_t* end,
                                   exec_frame_t* fr, uint64_t* out, int depth) {
     return exec_term(p, end, fr, out, depth);
 }
 
-/* Read one Field, with proper bit-level alignment, via OpRegion. */
 static uint64_t field_read(aml_object_t* f) {
     if (!f || f->type != AML_OBJ_FIELD || !f->v.field.region) return 0;
     uint32_t bit_off = f->v.field.bit_offset;
     uint32_t bits    = f->v.field.bit_width;
     if (bits == 0) return 0;
-    /* For aligned byte/word/dword/qword we can read in one shot. */
     if ((bit_off & 7) == 0 && (bits == 8 || bits == 16 || bits == 32 || bits == 64)) {
         return aml_region_read(f->v.field.region, bit_off / 8, (uint8_t)bits);
     }
-    /* Slow path: gather bits. Cap at 64. */
     if (bits > 64) bits = 64;
     uint64_t v = 0;
     for (uint32_t i = 0; i < bits; i++) {
@@ -882,19 +795,14 @@ static void field_write(aml_object_t* f, uint64_t v) {
     }
 }
 
-/* Resolve a SuperName / SimpleName operand into an aml_object_t* +
- * "kind" so Store can write back. We return NULL for things we can't
- * write to and fall back to discarding the value. */
 static aml_object_t* resolve_target(const uint8_t** p, const uint8_t* end,
                                      exec_frame_t* fr, uint8_t* kind_out) {
     if (*p >= end) return NULL;
     uint8_t op = **p;
     if (op == 0x60 || op == 0x61 || op == 0x62 || op == 0x63 ||
         op == 0x64 || op == 0x65 || op == 0x66 || op == 0x67) {
-        /* Local0..Local7 */
         if (kind_out) *kind_out = 1;
         (*p)++;
-        /* Stash local index in dummy object. */
         static aml_object_t locals_slots[8];
         locals_slots[op - 0x60].type = AML_OBJ_INTEGER;
         locals_slots[op - 0x60].v.integer = fr->locals[op - 0x60];
@@ -908,24 +816,15 @@ static aml_object_t* resolve_target(const uint8_t** p, const uint8_t* end,
         args_slots[op - 0x68].v.integer = fr->args[op - 0x68];
         return &args_slots[op - 0x68];
     }
-    if (op == 0x00 /* ZeroOp -> nil target */) {
+    if (op == 0x00 ) {
         (*p)++;
         if (kind_out) *kind_out = 0;
         return NULL;
     }
-    /* NamePath. */
     if (kind_out) *kind_out = 3;
     return resolve_name(p, end, fr->scope, false, NULL);
 }
 
-/*
- * Store a value back through a previously-resolved target.
- *
- * For Local/Arg the executor handles the write inline at the call
- * site (it knows the opcode index, which we don't have here), so kind
- * 1/2 are never passed in. This helper covers the NamePath case —
- * Name objects, raw Integer slots, and OpRegion-backed Fields.
- */
 static void exec_store(uint64_t value, aml_object_t* target,
                         exec_frame_t* fr, uint8_t kind) {
     (void)fr;
@@ -935,19 +834,15 @@ static void exec_store(uint64_t value, aml_object_t* target,
     if (target->type == AML_OBJ_FIELD)   { field_write(target, value); return; }
 }
 
-/* exec_term — read one expression, push integer result into *out.
- * Returns AML_OK on success. Recursive for compound exprs. */
 static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
                                exec_frame_t* fr, uint64_t* out, int depth) {
     if (depth > EXEC_MAX_DEPTH) return AML_ERR_DEEP_NEST;
     if (*p >= end) return AML_ERR_BOUNDS;
     uint8_t op = **p;
 
-    /* Local/Arg references as expressions read the value. */
     if (op >= 0x60 && op <= 0x67) { (*p)++; *out = fr->locals[op - 0x60]; return AML_OK; }
     if (op >= 0x68 && op <= 0x6E) { (*p)++; *out = fr->args[op - 0x68];   return AML_OK; }
 
-    /* Integer literals. */
     if (op == 0x00 || op == 0x01 || op == 0xFF ||
         op == BytePrefix || op == WordPrefix ||
         op == DWordPrefix || op == QWordPrefix) {
@@ -955,8 +850,6 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
         return AML_OK;
     }
 
-    /* Binary arithmetic — most opcodes share the same shape:
-     *   OP arg1 arg2 target  → result. */
 #define BIN_OP(opcode_, expr)                                                 \
     if (op == (opcode_)) {                                                    \
         (*p)++;                                                               \
@@ -990,7 +883,6 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
     BIN_OP(ShiftLeftOp,  a << (b & 63))
     BIN_OP(ShiftRightOp, a >> (b & 63))
 
-    /* Unary. */
     if (op == NotOp) {
         (*p)++;
         uint64_t a;
@@ -1024,7 +916,6 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
         return AML_OK;
     }
 
-    /* Logical comparisons. */
 #define CMP_OP(opcode_, expr)                                                 \
     if (op == (opcode_)) {                                                    \
         (*p)++;                                                               \
@@ -1059,7 +950,6 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
         return AML_OK;
     }
 
-    /* Store(value, target). */
     if (op == StoreOp) {
         (*p)++;
         uint64_t v;
@@ -1085,7 +975,6 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
         return AML_OK;
     }
 
-    /* If / While / Return. */
     if (op == IfOp) {
         (*p)++;
         uint32_t pklen_bytes;
@@ -1104,7 +993,6 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
             if (s != AML_OK) { *p = body_end; return s; }
         }
         *p = body_end;
-        /* Optional Else. */
         if (*p < end && **p == ElseOp) {
             (*p)++;
             uint32_t epk_bytes;
@@ -1156,7 +1044,6 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
     }
     if (op == BreakOp)    { (*p)++; fr->break_flag = true; *out = 0; return AML_OK; }
 
-    /* NamePath / method invocation. */
     if (op == RootChar || op == ParentPrefixChar ||
         op == DualNamePrefix || op == MultiNamePrefix ||
         (op >= 'A' && op <= 'Z') || op == '_' ||
@@ -1186,7 +1073,6 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
         return AML_OK;
     }
 
-    /* Unknown opcode — skip one byte and report. */
     (*p)++;
     *out = 0;
     return AML_OK;
@@ -1213,7 +1099,6 @@ aml_status_t aml_call_int(const char* path, uint64_t* args, int argc,
     aml_status_t s = aml_find(path, &m);
     if (s != AML_OK) return s;
     if (m->type != AML_OBJ_METHOD) {
-        /* Reading a Name yields its integer value directly. */
         if (m->type == AML_OBJ_INTEGER || m->type == AML_OBJ_NAME) {
             if (ret_value) *ret_value = m->v.integer;
             return AML_OK;

@@ -1,12 +1,3 @@
-/*
- * memtag — RAM region tagging introspection
- *
- *   memtag                 → global stats summary
- *   memtag stats           → full stats
- *   memtag query <tag>     → list region_ids tagged with <tag>
- *   memtag info <id>       → region descriptor
- *   memtag tags <id>       → all tags on a region
- */
 
 #include "box/print.h"
 #include "box/luggage.h"
@@ -28,7 +19,6 @@ static int parse_uint(const char *s, uint32_t *out)
     return 0;
 }
 
-/* Accepts "0x..." hex or decimal. Returns 0 on success. */
 static int parse_u64(const char *s, uint64_t *out)
 {
     if (!s || !*s) return -1;
@@ -54,7 +44,6 @@ static int parse_u64(const char *s, uint64_t *out)
     return 0;
 }
 
-/* Filter region's tags through prefix matching. `out_count` may be NULL. */
 static void print_tags_with_prefix(uint32_t rid, const char *prefix)
 {
     char     buf[1024];
@@ -97,8 +86,6 @@ static void print_info(uint32_t rid)
                COLOR_RED, rid, COLOR_DEFAULT);
         return;
     }
-    /* boxlib printf has no 'l' length modifier — render 64-bit values as
-     * %p (hex pointer) for safety. */
     printf("region %u:\n", rid);
     printf("  base_phys = %p\n", (void *)(uintptr_t)info.base_phys);
     printf("  base_virt = %p\n", (void *)(uintptr_t)info.base_virt);
@@ -147,7 +134,6 @@ static void print_query(const char *tag)
     }
 }
 
-/* ─── Phase 2A subcommands ─────────────────────────────────────────── */
 
 static void print_cabin(uint32_t pid)
 {
@@ -167,7 +153,6 @@ static void print_cabin(uint32_t pid)
     }
 }
 
-/* ─── Phase 2H+ PKU region stamping ────────────────────────────────── */
 
 static void do_pku_region(uint32_t rid, uint32_t pkey)
 {
@@ -184,7 +169,6 @@ static void do_pku_region(uint32_t rid, uint32_t pkey)
     }
 }
 
-/* ─── dump-cache <phys> — show cache:* tags on the region covering phys ─ */
 
 static void do_dump_cache(uint64_t phys)
 {
@@ -199,12 +183,9 @@ static void do_dump_cache(uint64_t phys)
     print_tags_with_prefix(rid, "cache:");
 }
 
-/* ─── dump-iommu — list regions tagged iommu:domain:* ──────────────── */
 
 static void do_dump_iommu(void)
 {
-    /* Query for the lifecycle marker — every domain mapping carries
-     * iommu:dma:mapped. We list each region's iommu:* tags. */
     uint32_t ids[64];
     const char *req[2] = { "iommu:dma:mapped", 0 };
     int n = mem_query(req, 0, 0, ids, 64);
@@ -228,7 +209,6 @@ static void do_dump_iommu(void)
     }
 }
 
-/* ─── dump-mce — list mce:poisoned regions ─────────────────────────── */
 
 static void do_dump_mce(void)
 {

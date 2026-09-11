@@ -15,9 +15,6 @@ int main(void) {
     }
 
     if (strcmp(luggage_word(1), "trashed") == 0) {
-        /* Ask for the trashed files by their tag — a plain listing leaves
-         * them out on purpose, so it was the one list that could never hold
-         * what this command deletes. */
         uint32_t *trashed = NULL;
         int total = query_all("trashed", &trashed);
 

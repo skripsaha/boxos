@@ -1,35 +1,3 @@
-// cxx_regex_oracle.cpp — the differential stand for Ф44's <regex>.
-//
-// boxcxx is written against the standard, but the standard's regex text is
-// large enough that "I read it correctly" is a claim, not a fact. The two
-// reference implementations are the cheapest way to turn it into a fact — as
-// long as you know where they disagree with EACH OTHER, because those are
-// precisely the cells where neither may be quoted as ground truth.
-//
-// This one translation unit is compiled twice, against libstdc++ and against
-// libc++, and prints one deterministic line per case. The outputs diff
-// directly. It exists BEFORE the engine, which is the whole point: the map of
-// untrustworthy cells has to be drawn before there is any code tempted to
-// trust them. A third column joins later, when the real __bits/regex_* leaves
-// can be symlinked in beside it (the Ф43-e-2 stand's shape).
-//
-// Modes:
-//   gen  FROM TO [DEPTH] [FAN]   generated sweep over case ids [FROM,TO)
-//   parse FROM TO [DEPTH] [FAN]  the same cases, verdict only: accepted with
-//                                how many groups, or which error
-//   file PATH                    replay explicit `pattern<TAB>subject` cases
-//   wgen FROM TO [DEPTH] [FAN]   the same generated cases run through BOTH
-//                                halves — narrow and wide — in one process
-//   wfile PATH                   replay UTF-8 `pattern<TAB>subject` cases as
-//                                wide, for the characters no narrow half has
-//   adv  PATTERN N               time ONE search of PATTERN against 'a'*N
-//
-// `adv` is one case per process on purpose. A tool that measures exponential
-// blowup must not be able to hang on it: the shell puts a clock on the process
-// and reports "hung" as a result, which is the answer, not a failure.
-//
-// Nothing here may call rand(), time() or anything else that differs between
-// two runs: the two libraries must walk a byte-identical case sequence.
 #include <regex>
 #include <string>
 #include <sstream>
@@ -49,10 +17,6 @@ static const char *kLib =
     "libstdc++";
 #endif
 
-// [re.err] fixes the NAMES of error_type and leaves the values to the
-// implementation: libstdc++ numbers from 0, libc++ from 1. Printing the raw
-// int manufactures a disagreement on every single throw — measured, on the
-// first sweep this tool ever ran. Print the name.
 static const char *ErrName(std::regex_constants::error_type e)
 {
     using namespace std::regex_constants;
@@ -72,7 +36,6 @@ static const char *ErrName(std::regex_constants::error_type e)
     return "other";
 }
 
-// ── one case, rendered so two libraries produce byte-identical text ────────
 static void Report(const char *id, const std::string &pattern, const std::string &subject,
                    std::regex_constants::syntax_option_type gram
                        = std::regex_constants::ECMAScript)
@@ -100,24 +63,6 @@ static void Report(const char *id, const std::string &pattern, const std::string
     }
 }
 
-// ── the wide half ───────────────────────────────────────────────────────
-// ‼ For an ASCII case the narrow half IS the oracle for the wide one, and that
-// is a stronger check than any cross-library diff: a library that answers
-// differently about the same characters depending on the width of the type it
-// stored them in has a defect, and it needs no second implementation to say
-// so. The shape is Ф42-g's, where <format>'s narrow half was the oracle for
-// its wide half over 20 286 spec/argument pairs.
-//
-// Text crosses the boundary as UTF-8 both ways, so the two verdicts are
-// byte-comparable strings and the case file stays a file anyone can read.
-// Decoding is done here rather than through a locale on purpose: mbstowcs
-// would make the answer depend on the host's LC_CTYPE, and this tool exists to
-// remove that kind of dependence, not to acquire one.
-// One verdict, rendered identically whatever the character type, so that the
-// two halves produce the same text for the same answer or the diff means
-// something. Positions and lengths are in CHARACTERS of the subject's own
-// type, which is what makes them comparable for an ASCII case and what makes
-// them the right answer for a wide one.
 template <class C>
 static std::string Verdict(const std::basic_string<C> &pattern,
                            const std::basic_string<C> &subject,
@@ -145,9 +90,6 @@ static std::string Verdict(const std::basic_string<C> &pattern,
     return out.str();
 }
 
-// Both halves of one case, on one line. A column disagreeing with ITSELF is
-// the finding; the three columns are still diffed as usual, because a library
-// can also be consistently wrong.
 static void BothHalves(const char *id, const std::string &pattern, const std::string &subject,
                        std::regex_constants::syntax_option_type gram)
 {
@@ -157,12 +99,6 @@ static void BothHalves(const char *id, const std::string &pattern, const std::st
                 n.c_str(), w.c_str(), n == w ? "" : "  <<WIDTH-DIFF");
 }
 
-// A case whose characters no narrow half can hold. Here the two reference
-// columns are the oracle again, and only for the questions that do not go
-// through a locale table: literals, ranges, `.`, quantifiers, back-references
-// and the anchors. Anything that asks what KIND of character U+4E2D is would
-// be comparing macOS's wide ctype against ours, which is Ф42-a's measured
-// divergence and not a regex question — those cases live in the QEMU phase.
 static void WideOnly(const char *id, const std::string &pattern, const std::string &subject,
                      std::regex_constants::syntax_option_type gram)
 {
@@ -176,9 +112,6 @@ static void GenCase(std::uint64_t seed, int depth, int fan)
     Report(c.id, c.pattern, c.subject);
 }
 
-// Parse-only verdict. Until the machine exists there is nothing to match with,
-// but whether a pattern is ACCEPTED, and with how many groups, is already a
-// complete differential question — and it is the one Ф44-a has to answer.
 static std::regex_constants::syntax_option_type GrammarOf(const char *name)
 {
     using namespace std::regex_constants;
@@ -205,10 +138,6 @@ static void ParseCase(std::uint64_t seed, int depth, int fan,
     }
 }
 
-// Parse verdict only, for a curated list. The POSIX grammars cannot be swept
-// with a generator that emits ECMAScript shapes — the patterns mean different
-// things there, and the noise buries the signal — so they are checked against
-// lists written by hand.
 static int ReplayParse(const char *path, std::regex_constants::syntax_option_type gram)
 {
     std::ifstream in(path);
@@ -266,14 +195,9 @@ static int ReplayWide(const char *path, std::regex_constants::syntax_option_type
     return 0;
 }
 
-// One timed search. Printed by the caller's clock as well, so a process the
-// shell had to kill is still reported — by its absence of a line here.
 static int Adversarial(const char *pattern, int n)
 {
     std::string subject((std::size_t)n, 'a');
-    // Nothing is printed before the search returns. A process the shell has to
-    // kill would otherwise leave half a line behind and the killer's report
-    // would land on the end of it.
     try {
         std::regex re(pattern);
         auto t0 = std::chrono::steady_clock::now();

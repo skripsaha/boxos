@@ -1,21 +1,3 @@
-/*
- * luggagetest — the Luggage, end to end: a child gets the line it was
- * started with, whole and as typed, before its first instruction.
- *
- * The parent starts itself twice with a line it can regenerate:
- *
- *   luggagetest carry <words> <bytes> "two words" w0000-… w0001-… …
- *
- * once short enough to live in the CabinInfo page, once long enough (many
- * kilobytes, far past the old 240-byte message and its 16 words of 64
- * bytes) to be deposited in the child's buffer heap. The child regenerates
- * the same line from <words>, checks every word, the quoted word, the total
- * byte count, the tails, and exits 0; the parent waits for each child as a
- * state (process_gone) and reads its exit code.
- *
- * Prints "[LUGGAGE] PASS" or "[LUGGAGE] FAIL: <what>"; the stress matrix
- * gates on it.
- */
 
 #include "box/print.h"
 #include "box/luggage.h"
@@ -25,12 +7,11 @@
 #include "box/error.h"
 #include "box/convert.h"
 
-#define WORD_BYTES 16u            /* "wNNNN-xxxxxxxxxx" */
-#define FIXED_WORDS 4u            /* luggagetest carry <words> <bytes> */
-#define QUOTED "\"two words\""    /* one word to the cutter, spaces kept */
+#define WORD_BYTES 16u
+#define FIXED_WORDS 4u
+#define QUOTED "\"two words\""
 #define QUOTED_WORD "two words"
 
-/* Decimal digits of `v` into `out`; returns how many. */
 static size_t put_decimal(char *out, uint32_t v)
 {
     char   tmp[11];
@@ -42,7 +23,6 @@ static size_t put_decimal(char *out, uint32_t v)
 
 static void generated_word(uint32_t i, char out[WORD_BYTES + 1])
 {
-    /* wNNNN- then ten letters that depend on i, so every word is distinct. */
     out[0] = 'w';
     out[1] = (char)('0' + (i / 1000) % 10);
     out[2] = (char)('0' + (i / 100) % 10);
@@ -53,8 +33,6 @@ static void generated_word(uint32_t i, char out[WORD_BYTES + 1])
     out[WORD_BYTES] = '\0';
 }
 
-/* Write the whole line for `words` generated words into `line`, claiming
- * `body` as its byte count; returns the length written. */
 static size_t write_line(char *line, uint32_t words, size_t body)
 {
     size_t pos = 0;
@@ -77,21 +55,13 @@ static size_t write_line(char *line, uint32_t words, size_t body)
     return pos;
 }
 
-/* The whole line for `words` generated words; the caller frees it. */
 static char *generated_line(uint32_t words, size_t *out_len)
 {
-    /* "luggagetest carry <words> <bytes> " + QUOTED + words * (" " + WORD_BYTES) */
     size_t head = 64;
     size_t len  = head + sizeof(QUOTED) + (size_t)words * (WORD_BYTES + 1) + 1;
     char  *line = malloc(len);
     if (!line) return NULL;
 
-    /* The byte count is part of the line it counts, so the line is written
-     * until it counts itself: each pass claims the length the previous pass
-     * came out at. A claim can only lengthen the line by the digits it adds
-     * — 0, then 169, then 171, then 171 again — so the passes run out of
-     * digits to add long before the cap. Two passes, which is what stood
-     * here, stopped one short: the line said 169 and was 171 bytes long. */
     size_t body = 0;
     for (int pass = 0; pass < 8; pass++) {
         size_t pos = write_line(line, words, body);
@@ -108,7 +78,6 @@ static int child_fail(const char *what)
     return 1;
 }
 
-/* The child: check the line against what the parent must have typed. */
 static int carry(void)
 {
     uint32_t count = luggage_word_count();
@@ -131,7 +100,6 @@ static int carry(void)
         if (!got || strcmp(got, w) != 0)          return child_fail("a generated word differs");
     }
 
-    /* The last tail is the last word; the tail past the end is empty. */
     if (words > 0) {
         char last[WORD_BYTES + 1];
         generated_word(words - 1, last);
@@ -140,7 +108,6 @@ static int carry(void)
     if (luggage_tail(count)[0] != '\0')           return child_fail("a tail past the end is not empty");
     if (luggage_word(count) != NULL)              return child_fail("a word past the end is not NULL");
 
-    /* And the line itself, byte for byte. */
     size_t expect_len = 0;
     char  *expect     = generated_line(words, &expect_len);
     if (!expect) return child_fail("no memory to regenerate the line");
@@ -150,7 +117,6 @@ static int carry(void)
     return 0;
 }
 
-/* The parent: start a child with `words` generated words and read its exit. */
 static int send_child(uint32_t words, const char *what)
 {
     size_t len  = 0;
@@ -188,8 +154,6 @@ int main(void)
         return rc;
     }
 
-    /* Short: fits the CabinInfo page beside the header. Long: thousands of
-     * bytes, so it is deposited in the child's buffer heap instead. */
     int failed = 0;
     failed += send_child(8, "short");
     failed += send_child(400, "long");

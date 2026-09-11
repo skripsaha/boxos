@@ -8,16 +8,16 @@
 #include "kernel_clock.h"
 
 typedef enum {
-    ASYNC_IO_LANE_META  = 0,  // TagFS superblock, tag registry, bitmap writes — highest priority
-    ASYNC_IO_LANE_DATA  = 1,  // file data block reads/writes
-    ASYNC_IO_LANE_BGND  = 2,  // dedup GC, self-heal, BCDC background work
+    ASYNC_IO_LANE_META  = 0,
+    ASYNC_IO_LANE_DATA  = 1,
+    ASYNC_IO_LANE_BGND  = 2,
     ASYNC_IO_LANE_COUNT = 3
 } async_io_lane_t;
 
 #define ASYNC_IO_LANE_META_CAPACITY  64
 #define ASYNC_IO_LANE_DATA_CAPACITY  256
 #define ASYNC_IO_LANE_BGND_CAPACITY  64
-#define ASYNC_IO_BGND_SERVE_INTERVAL  8   // dequeue 1 BGND per N DATA dequeues
+#define ASYNC_IO_BGND_SERVE_INTERVAL  8
 
 typedef enum {
     ASYNC_IO_OP_READ = 0,
@@ -30,22 +30,19 @@ typedef struct {
     uint32_t lba;
     uint16_t sector_count;
     uint8_t  is_master;
-    uint8_t  port_num;           // AHCI port index (0-based); 0 for ATA/single-drive
+    uint8_t  port_num;
     async_io_operation_t op;
 
-    /* For WRITE: buffer points to user heap data which is only valid until
-     * ata_dma_start_async_transfer() returns; data must be copied before returning.
-     * data_length is the actual valid bytes in buffer_virt (may be < sector_count * 512). */
     void*    buffer_virt;
     uint32_t data_length;
-    uint64_t submit_tick;        // kernel_tick_get() at submission — use global tick, not TSC
+    uint64_t submit_tick;
 
     uint32_t file_id;
     uint64_t write_offset;
     uint64_t original_file_size;
 
-    async_io_lane_t lane;        // which priority lane this request belongs to
-    uint8_t  cancelled;          // set by async_io_cancel_by_pid(), checked in dequeue
+    async_io_lane_t lane;
+    uint8_t  cancelled;
 } async_io_request_t;
 
 typedef struct {
@@ -76,7 +73,6 @@ uint32_t async_io_cancel_by_pid(uint32_t pid);
 void async_io_mark_completed(uint32_t event_id);
 void async_io_mark_completed_with_latency(uint32_t event_id, uint64_t submit_tick);
 void async_io_mark_failed(uint32_t event_id);
-// timeout_ticks: number of global PIT ticks (kernel_tick_get()) before a request is considered stale.
 uint32_t async_io_expire_stale(uint64_t timeout_ticks);
 
-#endif // ASYNC_IO_H
+#endif

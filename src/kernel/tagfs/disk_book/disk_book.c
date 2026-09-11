@@ -7,11 +7,6 @@
 #include "../../../kernel/drivers/disk/ahci.h"
 #include "boardroom.h"
 
-// Sector I/O through the volume's own door (tagfs_volume_read/write), not the
-// Boardroom directly: the DiskBook lives in a run of the volume named by its
-// Deed, so every sector it names is counted from the volume's start. Going to
-// the medium itself would mean knowing where the volume begins, which is
-// exactly the knowledge that stopped a volume from being able to move.
 static int disk_book_read_sectors(uint64_t vlba, uint16_t count, void *buf) {
     return tagfs_volume_read(vlba, count, buf);
 }
@@ -20,21 +15,17 @@ static int disk_book_write_sectors(uint64_t vlba, uint16_t count, const void *bu
     return tagfs_volume_write(vlba, count, buf);
 }
 
-// ----------------------------------------------------------------------------
-// Global state
-// ----------------------------------------------------------------------------
 static DiskBookSuperblock g_sb;
 static bool      g_initialized       = false;
 static spinlock_t g_lock;
-static uint64_t  g_sb_sector         = 0;   /* all three counted from the */
-static uint64_t  g_sb_backup_sector  = 0;   /* start of the volume         */
+static uint64_t  g_sb_sector         = 0;
+static uint64_t  g_sb_backup_sector  = 0;
 static uint32_t  g_redirects_logged  = 0;
 static uint32_t  g_replay_count      = 0;
 static uint32_t  g_crc_errors        = 0;
 static uint32_t  g_appends_since_flush = 0;
 static uint64_t  g_init_time         = 0;
 
-// CRC32 over a record with its record_crc32 field treated as zero.
 static uint32_t entry_crc(const DiskBookEntry *e) {
     DiskBookEntry tmp = *e;
     tmp.record_crc32 = 0;
@@ -45,12 +36,7 @@ static uint64_t record_sector(uint32_t idx) {
     return g_sb.start_sector + (uint64_t)idx * DISK_BOOK_SECTORS_PER_ENTRY;
 }
 
-// ----------------------------------------------------------------------------
-// Superblock I/O (primary + backup, each exactly one sector)
-// ----------------------------------------------------------------------------
 static int write_superblock_locked(void) {
-    /* Stamp CRC32 over the whole block with the crc32 field zeroed, so a torn
-     * superblock write is detected on the next mount and the backup is used. */
     g_sb.crc32 = 0;
     g_sb.crc32 = KCrc32((const uint8_t *)&g_sb, sizeof(DiskBookSuperblock));
 
@@ -59,7 +45,7 @@ static int write_superblock_locked(void) {
     memcpy(buf, &g_sb, sizeof(DiskBookSuperblock));
     if (disk_book_write_sectors(g_sb_sector, 1, buf) != 0)
         return ERR_IO;
-    disk_book_write_sectors(g_sb_backup_sector, 1, buf);   /* best-effort mirror */
+    disk_book_write_sectors(g_sb_backup_sector, 1, buf);
     return OK;
 }
 
@@ -120,9 +106,6 @@ static void format_fresh_locked(uint64_t records_sector) {
     g_sb.flags        = 0;
 }
 
-// ----------------------------------------------------------------------------
-// Init
-// ----------------------------------------------------------------------------
 error_t DiskBookInit(uint64_t head_sector, uint64_t backup_sector,
                     uint64_t records_sector) {
     if (g_initialized)
@@ -133,7 +116,6 @@ error_t DiskBookInit(uint64_t head_sector, uint64_t backup_sector,
     g_sb_backup_sector = backup_sector;
 
     DiskBookSuperblock disk;
-    /* read_superblock_into() needs g_sb_sector set (done above); it fills `disk`. */
     int rc = read_superblock_into(&disk);
     if (rc == OK && disk.version == DISK_BOOK_VERSION &&
         disk.capacity == DISK_BOOK_CAPACITY &&
@@ -156,12 +138,6 @@ error_t DiskBookInit(uint64_t head_sector, uint64_t backup_sector,
     return OK;
 }
 
-// ----------------------------------------------------------------------------
-// Replay — restore durable redirects into the (already-initialized) CoW layer.
-// Must run AFTER TagFS_CowInit + CoW manifest restore so snapshots exist.
-// Idempotent: TagFS_CowRestoreRedirect de-dups. Content-addressed: every record
-// is CRC-verified; a torn record is counted and skipped, never applied.
-// ----------------------------------------------------------------------------
 error_t DiskBookValidateAndReplay(void) {
     if (!g_initialized)
         return ERR_NOT_INITIALIZED;
@@ -191,9 +167,6 @@ error_t DiskBookValidateAndReplay(void) {
     return OK;
 }
 
-// ----------------------------------------------------------------------------
-// Append one redirect (durable mirror of the in-memory CoW redirect list)
-// ----------------------------------------------------------------------------
 error_t DiskBookLogRedirect(uint32_t snapshot_id, uint32_t old_block,
                             uint32_t new_block, uint64_t tag_bits) {
     if (!g_initialized)
@@ -205,8 +178,6 @@ error_t DiskBookLogRedirect(uint32_t snapshot_id, uint32_t old_block,
 
     if (g_sb.count >= g_sb.capacity) {
         spin_unlock(&g_lock);
-        /* Graceful: in-memory redirect stays authoritative this uptime; only
-         * crash recovery beyond the cap degrades to live-data reads. */
         debug_printf("[DiskBook] redirect log full (%u) — not journaled\n", g_sb.capacity);
         return ERR_DISK_FULL;
     }
@@ -225,13 +196,13 @@ error_t DiskBookLogRedirect(uint32_t snapshot_id, uint32_t old_block,
     e.record_crc32 = entry_crc(&e);
 
     if (write_entry(idx, &e) != OK) {
-        g_sb.generation--;   /* roll back the bump; slot not written */
+        g_sb.generation--;
         spin_unlock(&g_lock);
         return ERR_IO;
     }
 
     g_sb.count++;
-    write_superblock_locked();   /* persist count+generation (durable on next flush) */
+    write_superblock_locked();
     g_redirects_logged++;
 
     bool do_flush = (++g_appends_since_flush >= DISK_BOOK_FLUSH_THRESH);
@@ -245,10 +216,6 @@ error_t DiskBookLogRedirect(uint32_t snapshot_id, uint32_t old_block,
     return OK;
 }
 
-// ----------------------------------------------------------------------------
-// Compaction support: drop all on-disk redirects. Caller (CoW snapshot delete)
-// then re-logs the surviving redirects so dead ones are reclaimed.
-// ----------------------------------------------------------------------------
 void DiskBookResetRedirects(void) {
     if (!g_initialized)
         return;
@@ -259,11 +226,6 @@ void DiskBookResetRedirects(void) {
     spin_unlock(&g_lock);
 }
 
-// ----------------------------------------------------------------------------
-// Checkpoint / shutdown — persist + push the drive cache to media.
-// Redirects PERSIST across reboot (they live until their snapshot is deleted),
-// so shutdown does NOT clear the log — it only makes it durable.
-// ----------------------------------------------------------------------------
 error_t DiskBookCheckpoint(void) {
     if (!g_initialized)
         return ERR_NOT_INITIALIZED;
@@ -286,9 +248,6 @@ void DiskBookShutdown(void) {
     debug_printf("[DiskBook] Shutdown complete (%u redirects retained)\n", g_sb.count);
 }
 
-// ----------------------------------------------------------------------------
-// Stats / introspection
-// ----------------------------------------------------------------------------
 error_t DiskBookGetStats(DiskBookStats *stats) {
     if (!stats)
         return ERR_INVALID_ARGUMENT;

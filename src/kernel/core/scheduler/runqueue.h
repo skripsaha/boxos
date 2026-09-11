@@ -17,8 +17,8 @@
 struct process_t;
 
 typedef struct {
-    struct process_t **procs;    // Dynamic array
-    uint32_t          capacity;  // Current capacity
+    struct process_t **procs;
+    uint32_t          capacity;
     uint32_t          head;
     uint32_t          tail;
     uint32_t          count;
@@ -28,7 +28,7 @@ typedef struct {
     SchedQueue       queues[SCHED_PRIO_LEVELS];
     uint32_t         active_bitmap;
     spinlock_t       lock;
-    _Atomic uint32_t total;  // Sum of all queue counts; maintained atomically for lock-free reads
+    _Atomic uint32_t total;
 } RunQueue;
 
 void runqueue_init(RunQueue *rq);
@@ -37,8 +37,6 @@ bool runqueue_enqueue(RunQueue *rq, struct process_t *proc, int prio);
 struct process_t *runqueue_dequeue_best(RunQueue *rq);
 void runqueue_remove(RunQueue *rq, struct process_t *proc);
 bool runqueue_contains(RunQueue *rq, struct process_t *proc);
-/* runqueue_total_count() removed — RunqueueAtomicTotal() is the lock-free
- * canonical sum and was the only correct alternative anyway. */
 uint32_t RunqueueAtomicTotal(const RunQueue *rq);
 
-#endif // RUNQUEUE_H
+#endif

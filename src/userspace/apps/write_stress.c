@@ -1,20 +1,9 @@
-/*
- * write_stress — exercises the Stage 4 async ObjWrite path:
- *
- *   S1  multi-block write (16 KB across 4 disk blocks)
- *   S2  same-file overwrite churn (200 sequential writes through token handoff)
- *   S3  append loop (10× 64-byte appends → 640-byte file, alloc + meta-commit)
- *
- * Each scenario writes deterministic content and reads it back to verify
- * the bytes survived the async pump (W_LOCATE → W_DMA_FILL → W_AHCI_SUBMIT
- * → W_AHCI_DONE → W_LOG_META → W_PUBLISH → W_RELEASE_TOKEN → W_DONE).
- */
 
 #include "box/file.h"
 #include "box/debug.h"
 #include "box/string.h"
 
-#define S1_BYTES   16384       /* 4 disk blocks, multi-page user buffer */
+#define S1_BYTES   16384
 #define S2_LOOPS   200
 #define S2_BYTES   256
 #define S3_LOOPS   10
@@ -148,7 +137,6 @@ static int s3_append(void)
         return 1;
     }
 
-    /* Verify the last-appended chunk is intact at the end of file. */
     char rbuf[S3_BYTES];
     uint64_t tail_off = expected - S3_BYTES;
     int rrc = fread((uint32_t)fid, tail_off, rbuf, S3_BYTES);

@@ -1,10 +1,3 @@
-/*
- * Bay — Manifest opcode handlers (cross-cabin shared memory).
- *
- * The handlers translate the boxlib wrappers (bay_open / bay_release /
- * bay_size) into kernel-internal Bay* calls. Tag strings are passed via
- * the in_crate, sized scalars (va, size, flags) live in op->params.
- */
 
 #include "system_deck.h"
 #include "bay.h"
@@ -19,14 +12,6 @@
 #include "klib.h"
 #include "error.h"
 
-/* ─────────────────────────────────────────────────────────────────────
- * Tag string read — page-walked snapshot of the in_crate tag into a
- * bounded stack buffer via crate_io. A tag whose bytes straddle a page
- * boundary is copied across every backing frame (the old single-page
- * vmm_translate_user_addr clipped it). The read is capped at the buffer
- * size, so an attacker-set in_crate size can neither overflow the buffer
- * nor drive an oversized allocation.
- * ───────────────────────────────────────────────────────────────────── */
 static error_t bay_crate_string(const Crate *c, const OpContext *ctx,
                                 char *dst, size_t dst_size)
 {
@@ -39,14 +24,6 @@ static error_t bay_crate_string(const Crate *c, const OpContext *ctx,
     return OK;
 }
 
-/* ─────────────────────────────────────────────────────────────────────
- * SYSTEM_OP_BAY_OPEN
- *   in_crate:  tag string (null-terminated, payload-bytes is strlen+1)
- *   params:    [u64 size][u32 flags]   (12 bytes)
- *   out_crate: 16 bytes — [u64 user_va][u64 actual_size]
- *
- * Returns OK and fills out_crate on success.
- * ───────────────────────────────────────────────────────────────────── */
 static int SysBayOpen(const ManifestOp *op, Crate *crates,
                       uint16_t crate_count, const OpContext *ctx)
 {
@@ -65,9 +42,6 @@ static int SysBayOpen(const ManifestOp *op, Crate *crates,
     memcpy(&size,  op->params,     sizeof(uint64_t));
     memcpy(&flags, op->params + 8, sizeof(uint32_t));
 
-    /* Hard size cap — prevent a runaway userspace from asking for the
-     * whole physical RAM in one go. The cap is per-call; cabins can
-     * still open many separate Bays. */
     if (size > BAY_MAX_OPEN_SIZE) return ERR_INVALID_ARGUMENT;
 
     uint64_t user_va     = 0;
@@ -81,17 +55,12 @@ static int SysBayOpen(const ManifestOp *op, Crate *crates,
 
     Crate *out = &crates[op->out_crate];
     if (crate_write(out, ctx, blob, 16) != OK) {
-        /* Caller's out_crate is unwritable — roll back the open. */
         BayReleaseInternal(ctx->proc, user_va);
         return ERR_INVALID_ADDRESS;
     }
     return OK;
 }
 
-/* ─────────────────────────────────────────────────────────────────────
- * SYSTEM_OP_BAY_RELEASE
- *   params: [u64 user_va]  (8 bytes)
- * ───────────────────────────────────────────────────────────────────── */
 static int SysBayRelease(const ManifestOp *op, Crate *crates,
                          uint16_t crate_count, const OpContext *ctx)
 {
@@ -104,11 +73,6 @@ static int SysBayRelease(const ManifestOp *op, Crate *crates,
     return BayReleaseInternal(ctx->proc, user_va);
 }
 
-/* ─────────────────────────────────────────────────────────────────────
- * SYSTEM_OP_BAY_SIZE
- *   params:    [u64 user_va]  (8 bytes)
- *   out_crate: 8 bytes — [u64 size]
- * ───────────────────────────────────────────────────────────────────── */
 static int SysBaySize(const ManifestOp *op, Crate *crates,
                       uint16_t crate_count, const OpContext *ctx)
 {
@@ -127,30 +91,6 @@ static int SysBaySize(const ManifestOp *op, Crate *crates,
     return OK;
 }
 
-/* ─────────────────────────────────────────────────────────────────────
- * SYSTEM_OP_HEAP_PREFAULT — implicit huge-page hint from user-heap.
- *
- *   params: [u64 va_base][u64 size]   (16 bytes)
- *
- * Pre-back a 2 MiB-aligned VA range with 2 MiB physical pages, charged
- * to the calling cabin. The boxlib heap allocator calls this when its
- * sbrk-style growth crosses a 2 MiB threshold; the kernel maps 2 MiB
- * chunks in one shot rather than waiting for 4 KiB demand faults.
- *
- * Falls back to 4 KiB pages transparently if PMM can't deliver a 2 MiB
- * chunk for any reason (fragmentation, exhaustion). In either case the
- * VA range is fully resident on return.
- *
- * Cleanup: backing pages are reclaimed by vmm_destroy_context when the
- * process dies (the LARGE_PAGE walker in vmm.c sees VMM_FLAG_USER and
- * calls pmm_free(phys, VMM_LARGE_PAGE_2M_PAGES)). No per-process
- * tracker needed.
- *
- * VA bounds: we reject anything below CABIN_CODE_START_ADDR — the NULL
- * trap and Cabin metadata pages (PocketRing/ResultRing/TouchRing/
- * ClockBoard/CpuCaps) live there and a confused caller mapping a 2 MiB
- * leaf over those would silently demote the NULL trap. We also bound
- * the high side at CABIN_USER_VA_CANONICAL_END (bit 47 must stay 0). */
 static int SysHeapPrefault(const ManifestOp *op, Crate *crates,
                            uint16_t crate_count, const OpContext *ctx)
 {
@@ -166,7 +106,6 @@ static int SysHeapPrefault(const ManifestOp *op, Crate *crates,
     if (va_base & VMM_LARGE_PAGE_2M_MASK)             return ERR_INVALID_ARGUMENT;
     if (size    & VMM_LARGE_PAGE_2M_MASK)             return ERR_INVALID_ARGUMENT;
     if (va_base < CABIN_CODE_START_ADDR)              return ERR_INVALID_ARGUMENT;
-    /* Wrap-safe upper-bound check. */
     if (size > CABIN_USER_VA_CANONICAL_END - va_base) return ERR_INVALID_ARGUMENT;
 
     uint64_t chunks = size / VMM_LARGE_PAGE_2M_SIZE;
@@ -179,7 +118,6 @@ static int SysHeapPrefault(const ManifestOp *op, Crate *crates,
                                     pte_flags)) {
             continue;
         }
-        /* Fallback: 4 KiB pages for this chunk. */
         if (phys) pmm_free(phys, VMM_LARGE_PAGE_2M_PAGES);
         for (uint64_t j = 0; j < VMM_LARGE_PAGE_2M_PAGES; j++) {
             void *p = pmm_alloc_zero(1);
@@ -196,9 +134,6 @@ static int SysHeapPrefault(const ManifestOp *op, Crate *crates,
     return OK;
 }
 
-/* ─────────────────────────────────────────────────────────────────────
- * Registration. Called from SystemDeckRegister.
- * ───────────────────────────────────────────────────────────────────── */
 error_t BayOpsRegister(void)
 {
     struct {

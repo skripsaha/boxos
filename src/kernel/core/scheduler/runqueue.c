@@ -8,16 +8,14 @@ static bool schedqueue_resize(SchedQueue *sq, uint32_t new_cap)
 
     struct process_t **new_procs = kmalloc(sizeof(struct process_t *) * new_cap);
     if (!new_procs)
-        return false;  // Keep old buffer intact on allocation failure
+        return false;
 
-    // Copy existing entries in order
     uint32_t idx = sq->head;
     for (uint32_t i = 0; i < sq->count; i++) {
         new_procs[i] = sq->procs[idx];
         idx = (idx + 1) % sq->capacity;
     }
 
-    // Only free old buffer AFTER successful copy
     if (sq->procs)
         kfree(sq->procs);
 
@@ -73,13 +71,12 @@ bool runqueue_enqueue(RunQueue *rq, struct process_t *proc, int prio)
     if (!q->procs)
         return false;
 
-    // Auto-resize if near capacity
     if (q->count >= q->capacity) {
         uint32_t new_cap = q->capacity * 2;
         if (new_cap > RUNQUEUE_MAX_CAP)
             new_cap = RUNQUEUE_MAX_CAP;
         if (new_cap <= q->count)
-            return false;  // Truly full
+            return false;
         if (!schedqueue_resize(q, new_cap))
             return false;
     }
@@ -114,12 +111,10 @@ struct process_t *runqueue_dequeue_best(RunQueue *rq)
     if (q->count == 0)
         rq->active_bitmap &= ~(1u << prio);
 
-    // Update removed process tracking
     proc->rq_prio = -1;
     proc->rq_index = -1;
     __atomic_fetch_sub(&rq->total, 1, __ATOMIC_RELEASE);
 
-    // Shrink if significantly underutilized (save memory)
     if (q->count < q->capacity / 4 && q->capacity > RUNQUEUE_INITIAL_CAP) {
         uint32_t new_cap = q->capacity / 2;
         if (new_cap < RUNQUEUE_INITIAL_CAP)
@@ -135,35 +130,30 @@ void runqueue_remove(RunQueue *rq, struct process_t *proc)
     if (!rq || !proc)
         return;
 
-    // O(1) removal using stored index
     int prio = proc->rq_prio;
     int idx = proc->rq_index;
     if (prio < 0 || idx < 0)
-        return;  // Not enqueued
+        return;
 
     SchedQueue *q = &rq->queues[prio];
     if ((uint32_t)idx >= q->capacity || q->procs[idx] != proc)
-        return;  // Sanity check
+        return;
 
     q->count--;
     __atomic_fetch_sub(&rq->total, 1, __ATOMIC_RELEASE);
 
     if (q->count == 0) {
-        // Queue is now empty
         q->procs[idx] = NULL;
         rq->active_bitmap &= ~(1u << prio);
         q->head = 0;
         q->tail = 0;
     } else if ((uint32_t)idx == q->head) {
-        // Removing head — advance
         q->procs[idx] = NULL;
         q->head = (q->head + 1) % q->capacity;
     } else if ((uint32_t)idx == (q->tail - 1 + q->capacity) % q->capacity) {
-        // Removing tail — just decrement
         q->procs[idx] = NULL;
         q->tail = (q->tail - 1 + q->capacity) % q->capacity;
     } else {
-        // Removing middle — swap with tail for O(1)
         uint32_t tail_idx = (q->tail - 1 + q->capacity) % q->capacity;
         q->procs[idx] = q->procs[tail_idx];
         q->procs[idx]->rq_index = (int16_t)idx;
@@ -180,10 +170,6 @@ bool runqueue_contains(RunQueue *rq, struct process_t *proc)
     if (!rq || !proc)
         return false;
 
-    /* O(1) check using the stored priority and index that every enqueue/dequeue
-     * already maintains.  The old O(N) linear scan was called on every timer
-     * IRQ (sched_enqueue re-enqueues the current process) — at 250 Hz with
-     * 50 processes that was 12,500 wasted pointer comparisons per second. */
     int prio = proc->rq_prio;
     int idx  = proc->rq_index;
 
@@ -197,9 +183,6 @@ bool runqueue_contains(RunQueue *rq, struct process_t *proc)
     return q->procs[idx] == proc;
 }
 
-// Lock-free read of the running total. Safe to call without holding rq->lock.
-// Uses ACQUIRE ordering so the caller sees all enqueue/dequeue side-effects
-// that preceded the most recent __ATOMIC_RELEASE store.
 uint32_t RunqueueAtomicTotal(const RunQueue *rq)
 {
     if (!rq) return 0;

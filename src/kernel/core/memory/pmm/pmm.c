@@ -22,15 +22,8 @@ static uint64_t pmm_max_phys_addr = 0;
 
 static uint64_t pmm_mem_end = 0;
 
-/* Phase 2F — MCE poison bitmap. 1 bit per page. Allocated by pmm_init
- * tail and stored as a PHYS address; vmm_phys_to_virt is called on
- * every access so we survive the pull-map activation that follows
- * pmm_init (identity-mapped pointer cached here would dangle once the
- * identity map is torn down by pmm_activate_pull_map). 0 means "no
- * tracking yet" → all queries return false and set_poisoned is a no-op
- * (graceful degradation if the bitmap alloc failed on small-RAM hosts). */
 static uintptr_t pmm_poisoned_bitmap_phys = 0;
-static size_t    pmm_poisoned_bitmap_pages = 0;  /* mem_end / PMM_PAGE_SIZE */
+static size_t    pmm_poisoned_bitmap_pages = 0;
 static volatile uint64_t pmm_poisoned_set_count = 0;
 
 #define PMM_MCE_RETRY_MAX 8
@@ -40,15 +33,6 @@ static inline uint8_t *pmm_poisoned_bitmap_virt(void) {
     return (uint8_t *)vmm_phys_to_virt(pmm_poisoned_bitmap_phys);
 }
 
-/*
- * Pristine free count just after E820 USABLE entries were inserted into the
- * buddy zone, before any boot-time reserves were applied.  This is the actual
- * installed RAM (in pages) — distinct from `pmm_buddy.total_pages` which is
- * (mem_end - zone_base) / PAGE_SIZE and includes PCI MMIO holes, ACPI/UEFI
- * runtime regions, and any other gaps between usable E820 chunks.  Reporting
- * `total - free` against the SPAN inflates "used" by every gigabyte of hole
- * the kernel never owned in the first place.
- */
 static size_t pmm_usable_pages = 0;
 
 typedef struct {
@@ -56,8 +40,6 @@ typedef struct {
     uintptr_t end;
 } DeferredRegion;
 
-// Allocated from bootstrap physical memory in pmm_init(), sized to E820 entry count.
-// No slots are ever dropped — capacity = total E820 entries.
 static DeferredRegion *pmm_deferred     = NULL;
 static size_t          pmm_deferred_cap = 0;
 static size_t          pmm_deferred_count = 0;
@@ -68,7 +50,7 @@ static error_t pmm_init_maxphyaddr(void) {
         debug_printf("[PMM] Invalid MAXPHYADDR from CPUID: %u\n", maxphyaddr);
         return ERR_CPU_ERROR;
     }
-    
+
     pmm_maxphyaddr = maxphyaddr;
     pmm_max_phys_addr = (1ULL << pmm_maxphyaddr);
 
@@ -97,16 +79,6 @@ uint64_t pmm_get_mem_end(void) {
     return pmm_mem_end;
 }
 
-/* Add `[seed_start, seed_end)` to the buddy zone, carving out every
- * sub-range that overlaps a non-USABLE E820 entry. Real BIOSes can
- * publish overlapping descriptors (USABLE that crosses an ACPI NVS
- * region; USABLE that brushes the MCFG ECAM hole reported as RESERVED).
- * Letting the buddy receive such overlap = handing the allocator pages
- * firmware actively owns. BIOS_BOOT_SPEC §15.3.
- *
- * Iterative sweep: maintain a `[cur, seed_end)` cursor; on each step
- * find the lowest non-USABLE entry that overlaps the cursor, emit the
- * gap before it (if any), then jump the cursor past its end. */
 static void pmm_buddy_free_carved(BuddyZone *zone,
                                   uintptr_t seed_start, uintptr_t seed_end,
                                   const e820_entry_t *entries, size_t count)
@@ -138,7 +110,6 @@ static void pmm_buddy_free_carved(BuddyZone *zone,
 
 static error_t pmm_defer_region(uintptr_t start, uintptr_t end) {
     if (!pmm_deferred || pmm_deferred_count >= pmm_deferred_cap) {
-        // Should never happen: capacity set to entry_count in pmm_init().
         debug_printf("[PMM] BUG: deferred table overflow at 0x%lx-0x%lx\n", start, end);
         return ERR_NO_MEMORY;
     }
@@ -149,55 +120,27 @@ static error_t pmm_defer_region(uintptr_t start, uintptr_t end) {
     return OK;
 }
 
-/* ===========================================================================
- * Boot services memory, held and released — see the note in pmm.h.
- *
- * The EFI memory map TagBoot staged in ACPI NVS is the only place the kernel
- * can learn WHICH ranges were boot services; the E820 table cannot say,
- * because E820 has no such type and calling them RESERVED there would lose
- * the memory permanently on any board where the top of RAM happens to be one.
- * ======================================================================== */
 
-/* UEFI 2.10 §7.2 Table 7.10 memory types. Spelled here rather than pulled
- * from the EFI driver's header: this file is the physical allocator and has
- * no other business with EFI. */
 #define EFI_TYPE_BOOT_SERVICES_CODE  3u
 #define EFI_TYPE_BOOT_SERVICES_DATA  4u
 #define EFI_MEMORY_DESC_TYPE_OFFSET  0u
 #define EFI_MEMORY_DESC_PHYS_OFFSET  8u
 #define EFI_MEMORY_DESC_PAGES_OFFSET 24u
-/* type(4) pad(4) physical_start(8) virtual_start(8) number_of_pages(8)
- * attribute(8). The firmware may report a LARGER descriptor_size — that is
- * what the field is for — but never a smaller one, and a map that claims one
- * is not a map this walk can read. */
 #define EFI_MEMORY_DESC_MIN_SIZE     40u
 
 static bool   pmm_bs_held        = false;
 static size_t pmm_bs_pages_held  = 0;
-/* Set when a boot-services range was NOT taken in full — i.e. some of its
- * pages were already spoken for when Hold ran. Releasing such a range would
- * hand back memory this allocator never took, and whoever owned those pages
- * would keep using them while the buddy offered them to somebody else. It
- * cannot happen with the layouts either loader produces (the kernel image,
- * the loader's tables and its stack are all EfiLoaderData, never boot
- * services), which is exactly why it is worth checking rather than assuming:
- * if it ever does happen, the machine keeps the memory and says so. */
 static bool   pmm_bs_partial     = false;
 
-/* Walk the staged EFI memory map, calling back for every boot-services
- * range. Returns false when there is no map to walk (BIOS boot, or a UEFI
- * boot whose loader could not stage one). */
 static bool pmm_for_each_boot_services_range(
         void (*visit)(uintptr_t start, uintptr_t end))
 {
     boot_info_t *bi = boot_info_get();
     if (!boot_info_valid(bi)) return false;
-    if (bi->boot_method != 1) return false;              /* BIOS */
+    if (bi->boot_method != 1) return false;
     if (!bi->efi_mmap_phys || !bi->efi_mmap_size ||
         bi->efi_mmap_desc_size < EFI_MEMORY_DESC_MIN_SIZE) return false;
 
-    /* Identity during early boot, Pull Map afterwards — either way this is
-     * the kernel-readable address of the staged map. */
     uint8_t *map = (uint8_t *)vmm_phys_to_virt((uintptr_t)bi->efi_mmap_phys);
     if (!map) return false;
 
@@ -220,7 +163,6 @@ static bool pmm_for_each_boot_services_range(
     return true;
 }
 
-/* How many pages of [start,end) this buddy zone actually manages. */
 static size_t pmm_pages_in_zone(uintptr_t start, uintptr_t end)
 {
     uintptr_t zone_end = pmm_buddy.base + pmm_buddy.total_pages * PMM_PAGE_SIZE;
@@ -268,7 +210,7 @@ void PmmHoldBootServicesMemory(void)
 void PmmReleaseBootServicesMemory(void)
 {
     if (!pmm_bs_held) return;
-    pmm_bs_held = false;   /* first, so a re-entry cannot double-free */
+    pmm_bs_held = false;
 
     if (pmm_bs_partial) {
         kprintf("[PMM] keeping %zu page(s) of EFI boot-services memory: at "
@@ -332,24 +274,12 @@ error_t pmm_init(void) {
     size_t temp_pages = (mem_end - map_start) / PMM_PAGE_SIZE;
     size_t alloc_map_size = (temp_pages + 7) / 8;
 
-    // Allocate the deferred region array from bootstrap physical memory,
-    // immediately after the buddy bitmap. Sized to entry_count so that
-    // every E820 high-memory region is recorded — no silent drops.
     uintptr_t deferred_base = ALIGN_UP(map_start + alloc_map_size, 8);
     size_t    deferred_size = entry_count * sizeof(DeferredRegion);
     pmm_deferred     = (DeferredRegion *)deferred_base;
     pmm_deferred_cap = entry_count;
     pmm_deferred_count = 0;
 
-    /* Align the buddy zone base to a 2 MiB boundary. The buddy guarantees
-     * order-N alignment relative to zone->base; if the base is only 4 KiB-
-     * aligned, allocations at order 9 (2 MiB) yield blocks whose absolute
-     * physical address is NOT 2 MiB-aligned, which breaks anything that
-     * needs to install a 2 MiB PDE leaf (Bay, implicit user-heap huge,
-     * future drivers requiring 2 MiB-aligned DMA). The waste here is at
-     * most ~2 MiB ONCE at boot — negligible compared to the alternative
-     * of allocating 4 MiB and carving a 2 MiB-aligned sub-block on every
-     * huge request. */
     uintptr_t zone_base = ALIGN_UP(deferred_base + deferred_size, VMM_LARGE_PAGE_2M_SIZE);
 
     if (zone_base >= mem_end) {
@@ -404,10 +334,6 @@ error_t pmm_init(void) {
             if (start < zone_base) start = zone_base;
             if (start >= end) continue;
 
-            /* Carve out any overlap with non-USABLE entries before
-             * inserting into the buddy. Protects against BIOSes that
-             * publish USABLE brushing a RESERVED region (MCFG ECAM
-             * hole, SMRAM leak, ACPI NVS inside USABLE). */
             pmm_buddy_free_carved(&pmm_buddy, start, end,
                                   entries, entry_count);
         }
@@ -417,14 +343,6 @@ error_t pmm_init(void) {
         debug_printf("[PMM] %zu pages beyond MAXPHYADDR unusable\n", unusable_pages);
     }
 
-    /* Count actual installed RAM by summing every USABLE E820 entry, capped
-     * at MAXPHYADDR.  This INCLUDES high memory that's currently deferred
-     * (will be promoted in pmm_activate_pull_map) and INCLUDES the area
-     * below zone_base where the kernel image / alloc_map / deferred table
-     * live — those pages are physically present even though they're never
-     * inserted into the buddy.  Read against pmm_buddy.free_count, this
-     * gives the correct (usable - free = used = reserves + allocations)
-     * relation throughout the boot. */
     {
         size_t usable_total = 0;
         for (size_t i = 0; i < entry_count; i++) {
@@ -449,15 +367,8 @@ error_t pmm_init(void) {
 
     pmm_initialized = true;
 
-    /* Before a single page can be handed out: take back the regions the
-     * firmware may still walk into during SetVirtualAddressMap. See the note
-     * on PmmHoldBootServicesMemory in pmm.h. */
     PmmHoldBootServicesMemory();
 
-    /* And the window the log is carried through. It is a FIXED physical range
-     * this kernel wrote into before pmm_init ran and will keep writing into
-     * for the life of the boot; handing it to the buddy would mean handing out
-     * the account of whatever goes wrong next. */
     {
         uintptr_t keep_phys = 0;
         uint64_t  keep_len  = 0;
@@ -468,11 +379,6 @@ error_t pmm_init(void) {
         }
     }
 
-    /* Phase 2F — allocate the MCE poison-page bitmap. Sized to mem_end
-     * (one bit per 4 KiB page). Failure is non-fatal: pmm_set_poisoned
-     * silently no-ops if the bitmap pointer stays NULL, and
-     * pmm_is_poisoned reads false; future #MC events are still logged
-     * via Touch, just not auto-skipped by the allocator. */
     {
         size_t pages_to_track = (size_t)(pmm_mem_end / PMM_PAGE_SIZE);
         size_t bitmap_bytes   = (pages_to_track + 7u) / 8u;
@@ -480,10 +386,6 @@ error_t pmm_init(void) {
         if (bitmap_pages > 0) {
             void *phys = buddy_alloc(&pmm_buddy, bitmap_pages);
             if (phys) {
-                /* Zero via the current vmm_phys_to_virt mapping (identity
-                 * during boot, Pull Map after activation). Store the
-                 * PHYS — every subsequent access re-translates to catch
-                 * the post-pmm_activate_pull_map transition. */
                 uint8_t *zero_virt = (uint8_t *)vmm_phys_to_virt((uintptr_t)phys);
                 memset(zero_virt, 0, bitmap_pages * PMM_PAGE_SIZE);
                 pmm_poisoned_bitmap_phys  = (uintptr_t)phys;
@@ -505,7 +407,6 @@ error_t pmm_init(void) {
     return OK;
 }
 
-/* ─── Phase 2F — MCE poison bitmap API ────────────────────────────── */
 
 void pmm_set_poisoned(uintptr_t phys) {
     uint8_t *bitmap = pmm_poisoned_bitmap_virt();
@@ -514,9 +415,6 @@ void pmm_set_poisoned(uintptr_t phys) {
     if (page >= pmm_poisoned_bitmap_pages) return;
     size_t byte = page >> 3;
     uint8_t bit = (uint8_t)(1u << (page & 7u));
-    /* Atomic OR avoids a lock; the bitmap is sparse so contention is
-     * effectively never seen. Use the byte-grained __atomic_fetch_or
-     * (Intel: LOCK OR BYTE PTR ...). */
     uint8_t prev = __atomic_fetch_or(&bitmap[byte], bit, __ATOMIC_RELEASE);
     if (!(prev & bit)) {
         __atomic_add_fetch(&pmm_poisoned_set_count, 1, __ATOMIC_RELAXED);
@@ -536,7 +434,6 @@ bool pmm_is_poisoned(uintptr_t phys) {
 
 bool pmm_is_range_poisoned(uintptr_t phys, size_t pages) {
     if (!pmm_poisoned_bitmap_phys || !pages) return false;
-    /* Fast common case: zero poisoned set globally → skip the scan. */
     if (__atomic_load_n(&pmm_poisoned_set_count, __ATOMIC_RELAXED) == 0)
         return false;
     for (size_t i = 0; i < pages; i++) {
@@ -558,7 +455,7 @@ size_t pmm_pages_in_domain(uint32_t domain) {
     if (!n) return 0;
     uint64_t total = 0;
     for (uint8_t i = 0; i < n->mem_count; i++) {
-        if (!(n->mem[i].flags & 0x1)) continue;          /* not enabled */
+        if (!(n->mem[i].flags & 0x1)) continue;
         if (n->mem[i].domain != domain) continue;
         total += n->mem[i].length;
     }
@@ -572,13 +469,8 @@ void* pmm_alloc_in_domain(size_t pages, uint32_t domain) {
         return buddy_alloc(&pmm_buddy, pages);
     }
 
-    /* Range-constrained allocation: walk every SRAT memory range that
-     * belongs to `domain` and ask buddy_alloc_range for pages within
-     * its [base, base+length). First range that satisfies wins. This
-     * is O(domain_ranges) and never causes buddy churn (unlike the
-     * sample-retry approach we used before). */
     for (uint8_t i = 0; i < n->mem_count; i++) {
-        if (!(n->mem[i].flags & 0x1)) continue;     /* not enabled */
+        if (!(n->mem[i].flags & 0x1)) continue;
         if (n->mem[i].domain != domain) continue;
         uintptr_t lo = (uintptr_t)n->mem[i].base;
         uintptr_t hi = (uintptr_t)(n->mem[i].base + n->mem[i].length);
@@ -586,14 +478,9 @@ void* pmm_alloc_in_domain(size_t pages, uint32_t domain) {
         if (p) return p;
     }
 
-    /* No domain-local memory free at this size — fall back. */
     return buddy_alloc(&pmm_buddy, pages);
 }
 
-/* Aggregate the SRAT enabled memory ranges into one log line per domain
- * with total bytes per domain. Read-only — no allocator decisions taken
- * here; the future NUMA-aware buddy partition consumes this same data
- * directly via acpi_get_numa(). */
 void pmm_log_numa_topology(void) {
     const acpi_numa_info_t* n = acpi_get_numa();
     if (!n) {
@@ -602,8 +489,6 @@ void pmm_log_numa_topology(void) {
     }
     debug_printf("[PMM] NUMA: %u domain(s), %u CPU(s), %u memory range(s)\n",
                  n->domain_count, n->cpu_count, n->mem_count);
-    /* Topology summary on `numa:topology` so scheduler/affinity
-     * daemons can plan placement without re-walking SRAT. */
     struct { uint8_t domains; uint16_t cpus; uint8_t mem_ranges; } topo =
         { n->domain_count, n->cpu_count, n->mem_count };
     TouchPublish("numa:topology", &topo, sizeof(topo));
@@ -627,26 +512,10 @@ void pmm_log_numa_topology(void) {
     }
 }
 
-// ─── Core allocator ──────────────────────────────────────────────────────────
-// Called via the pmm_alloc(pages[, tag]) macro defined in pmm.h.
-//
-// tags == 0                  → any zone, first-fit from buddy
-// tags == PHYS_TAG_DMA32     → [0,  DMA32_END)  O(log max_order)
-// tags == PHYS_TAG_USER      → [DMA32_END, 4GB) O(log max_order)
-// tags == PHYS_TAG_HIGH      → [4GB, mem_end)   O(log max_order)
-// tags == anything else      → treated as no constraint (rejected as
-//                              non-zone hint; semantic tagging belongs
-//                              in MemTag string namespace, not numeric).
-// ─────────────────────────────────────────────────────────────────────────────
 void* _pmm_alloc_impl(size_t pages, uint64_t tags) {
     if (!pages || !pmm_initialized) return NULL;
 
     void* addr = NULL;
-    /* Phase 2F — MCE poison retry. Most allocations exit on the first
-     * iteration because the bitmap is empty (no MCE event since boot).
-     * After a real MCE, we loop up to PMM_MCE_RETRY_MAX trying to find a
-     * clean chunk, freeing each poisoned chunk back to the buddy so it
-     * isn't permanently leaked. */
     uint32_t retries_left = PMM_MCE_RETRY_MAX;
 
     for (;;) {
@@ -665,22 +534,12 @@ void* _pmm_alloc_impl(size_t pages, uint64_t tags) {
                                      (uintptr_t)CONFIG_PHYS_ZONE_USER_END,
                                      (uintptr_t)pmm_mem_end);
         } else {
-            /* Unknown numeric tag — semantic tagging is now MemTag's job
-             * (use pmm_alloc + MemTagApplyByPhys, or pmm_alloc_tagged). */
             return NULL;
         }
 
         if (!addr) break;
         if (!pmm_is_range_poisoned((uintptr_t)addr, pages)) break;
 
-        /* Returned chunk overlaps a poisoned page. We DO NOT buddy_free
-         * it — the buddy is LIFO so returning it would just hand the
-         * same poisoned chunk back on the next iteration, exhausting
-         * the retry budget without progress. Instead, *leak* the chunk
-         * (mark every page as poisoned so pmm_free can't re-introduce
-         * it later) and retry. Production semantics: a poisoned page
-         * is permanently bad; the retry cost is bounded; the leak is
-         * the correct outcome of a hardware-detected error. */
         for (size_t pi = 0; pi < pages; pi++) {
             pmm_set_poisoned((uintptr_t)addr + pi * PMM_PAGE_SIZE);
         }
@@ -693,8 +552,6 @@ void* _pmm_alloc_impl(size_t pages, uint64_t tags) {
     }
 
     if (!addr) {
-        /* Diagnostic: any pmm_alloc failure is a memory pressure signal.
-         * Rate-limited so a stuck-allocator loop doesn't flood serial. */
         static volatile uint64_t g_pmm_fail = 0;
         uint64_t cnt = __atomic_add_fetch(&g_pmm_fail, 1, __ATOMIC_RELAXED);
         if (cnt == 1 || cnt == 10 || (cnt % 100) == 0) {
@@ -725,30 +582,10 @@ void* _pmm_alloc_zero_impl(size_t pages, uint64_t tags) {
     return addr;
 }
 
-/* ─── TME / TME-MK: KeyID-tagged allocations ─────────────────────────
- *
- * pmm_alloc_with_keyid and pmm_free_with_keyid are thin convenience
- * wrappers around pmm_alloc_zero / pmm_free. They DO NOT augment the
- * returned phys with KeyID bits — that happens at MAP time (VMM) when
- * the consumer creates a per-process PTE for these pages. The wrappers'
- * only added job is to record the KeyID association as a MemTag
- * (`tme:keyid:N`) so diagnostics (hw, memtag list) and Touch
- * subscribers can see which KeyID governs each phys range.
- *
- * Falls back to plain pmm_alloc_zero when TME-MK is inactive — the
- * caller is expected to gate on tme_keyid_alloc returning OK, so this
- * path is for defensive correctness when MK was disabled mid-operation
- * (e.g., firmware lock changed under us, which it cannot — but defense
- * costs nothing).
- */
 void *pmm_alloc_with_keyid(size_t pages, uint16_t keyid) {
     void *phys = _pmm_alloc_zero_impl(pages, 0ULL);
     if (!phys) return NULL;
 
-    /* Tag is purely diagnostic when MK is off. When MK is on, downstream
-     * vmm_map_*_with_keyid uses the KeyID directly (the tag here is
-     * still diagnostic — the encryption itself is driven by the PTE
-     * upper bits, not by this metadata). */
     if (g_tme.mk_active && keyid > 0 && keyid <= g_tme.max_keyid) {
         char tag[32];
         ksnprintf(tag, sizeof(tag), "tme:keyid:%u", (unsigned)keyid);
@@ -758,11 +595,6 @@ void *pmm_alloc_with_keyid(size_t pages, uint16_t keyid) {
 }
 
 void pmm_free_with_keyid(void *phys, size_t pages, uint16_t keyid) {
-    /* The KeyID itself is freed independently via tme_keyid_free —
-     * a single KeyID may govern multiple non-contiguous allocations
-     * (e.g. several pages of an encrypted Bay). MemTagPmmFreed (called
-     * from pmm_free) destroys the per-range region; the tag string
-     * "tme:keyid:N" is purely metadata at this layer. */
     (void)keyid;
     pmm_free(phys, pages);
 }
@@ -776,16 +608,6 @@ void pmm_free(void* addr, size_t pages) {
         panic("PMM: Invalid free address %p", addr);
     }
 
-    /* Phase 2F — if any page in the chunk is poisoned, leak the whole
-     * chunk rather than return it to the buddy. A poisoned page is
-     * permanently bad; re-inserting it would let a future pmm_alloc
-     * pick it up (and the alloc-side retry would then leak it anyway).
-     * Leaking conservatively here avoids the alloc-side churn and keeps
-     * the buddy free-list clean of known-bad memory. The neighbouring
-     * clean pages in the chunk are also leaked — they're already part
-     * of a buddy unit, splitting at free time would require a buddy
-     * API extension. The expected loss is negligible (1 MCE → ≤
-     * PMM_MCE_RETRY_MAX pages leaked over the system lifetime). */
     if (pmm_is_range_poisoned(base, pages)) {
         MemTagPmmFreed(base, pages);
         return;
@@ -796,9 +618,6 @@ void pmm_free(void* addr, size_t pages) {
 }
 
 size_t pmm_total_pages(void) {
-    /* Installed RAM in pages — count of E820 USABLE entries inserted into
-     * the buddy at init.  NOT (mem_end - zone_base)/PAGE_SIZE: that span
-     * includes MMIO holes the kernel never owns. */
     return pmm_usable_pages;
 }
 
@@ -820,9 +639,6 @@ size_t pmm_used_pages(void) {
 }
 
 uint64_t pmm_get_total_memory(void) {
-    /* Physical TOP of the buddy zone (one-past-last byte).  Used by code
-     * that needs the addressable span (e.g. identity-map sizing); for
-     * RAM-quantity reporting use pmm_get_total_ram_bytes(). */
     return pmm_buddy.base + (pmm_buddy.total_pages * PMM_PAGE_SIZE);
 }
 
@@ -868,27 +684,10 @@ void pmm_activate_pull_map(void) {
     buddy_activate_pull_map(&pmm_buddy);
     debug_printf("[PMM] Buddy allocator rebased to Pull Map\n");
 
-    // Rebase pmm_deferred: it was set to a physical address in pmm_init()
-    // and is never valid as a virtual address after pull map activation.
     if (pmm_deferred) {
         pmm_deferred = (DeferredRegion*)vmm_phys_to_virt((uintptr_t)pmm_deferred);
     }
 
-    /* Phase 2: free deferred high-memory regions (saved during Phase 1)
-     * with the same overlap carving Phase 1 uses (DIMMs above 4 GiB can
-     * collide with GPU stolen aperture / hot-plug-reserve slots that
-     * firmware leaves RESERVED).
-     *
-     * E820 pointer resolution. pmm_activate_pull_map runs AFTER the Pull
-     * Map is live but typically BEFORE e820_activate_pull_map rebases
-     * the e820_entries pointer — so memory_map_get_entries() still
-     * returns the identity address (0x504), which is no longer mapped.
-     * Resolving it via vmm_virt_to_phys_direct → vmm_phys_to_virt is
-     * idempotent: identity stays identity-then-PullMap'd to the live
-     * kernel address, and a future call after e820_activate_pull_map
-     * (where the returned pointer is already a Pull-Map address) decodes
-     * back to phys and re-maps to the same Pull-Map address. Survives
-     * any future re-ordering of vmm_init's tail. */
     const e820_entry_t *entries_raw       = memory_map_get_entries();
     uintptr_t          entries_phys       = vmm_virt_to_phys_direct((void *)entries_raw);
     const e820_entry_t *entries_for_carve = (const e820_entry_t *)vmm_phys_to_virt(entries_phys);
@@ -907,10 +706,6 @@ void pmm_activate_pull_map(void) {
                  (pmm_buddy.free_count * PMM_PAGE_SIZE) / (1024 * 1024),
                  pmm_buddy.free_count);
 
-    /* Deferred HIGH ranges (>4 GB carved post Pull Map activation) are
-     * already covered by MemTag's boot-seeded zone:high region. No
-     * additional per-range tagging needed — the zone descriptor covers
-     * the entire above-4GB span. */
 }
 
 BuddyZone* pmm_get_buddy_zone(void) {
@@ -962,12 +757,6 @@ void pmm_test_high_memory(void) {
 
     size_t pass = 0, fail = 0;
 
-    /* Test 1: Single-page allocations from the >4GB band.
-     * Use PHYS_TAG_HIGH to deterministically request high memory via the
-     * range path — the untagged buddy_alloc() is first-fit and on a
-     * fresh boot the order-0 free list is dominated by sub-4GB pages
-     * left over from kernel init, so an untagged loop never touches the
-     * high zone (root cause of the false "0 from >4GB" report). */
     #define HIGH_TEST_COUNT 16
     void* allocs[HIGH_TEST_COUNT];
     size_t high_count = 0;
@@ -976,7 +765,6 @@ void pmm_test_high_memory(void) {
         void* phys = pmm_alloc(1, PHYS_TAG_HIGH);
         if (!phys) break;
         if ((uintptr_t)phys < IDENTITY_MAP_LIMIT) {
-            /* Should never happen — PHYS_TAG_HIGH is range-bounded. */
             pmm_free(phys, 1);
             continue;
         }
@@ -992,7 +780,7 @@ void pmm_test_high_memory(void) {
         uint64_t pattern = phys ^ 0xB0A0DEADBEEFCAFEULL;
         virt[0] = pattern;
         virt[1] = ~pattern;
-        virt[255] = pattern;  // near end of 4KB page
+        virt[255] = pattern;
 
         if (virt[0] == pattern && virt[1] == ~pattern && virt[255] == pattern) {
             pass++;
@@ -1003,7 +791,6 @@ void pmm_test_high_memory(void) {
         pmm_free(allocs[i], 1);
     }
 
-    // Test 2: Large block allocation (256 pages = 1MB) — likely from >4GB contiguous pool
     size_t large_sizes[] = {256, 64, 16};
     for (size_t s = 0; s < 3; s++) {
         size_t pages = large_sizes[s];
@@ -1017,7 +804,6 @@ void pmm_test_high_memory(void) {
                 pages, addr, is_high ? "(>4GB)" : "(<4GB)");
 
         if (is_high) {
-            // Verify first, middle, and last page of the block
             size_t test_offsets[] = {0, pages / 2, pages - 1};
             for (size_t t = 0; t < 3; t++) {
                 uintptr_t page_phys = addr + test_offsets[t] * PMM_PAGE_SIZE;
@@ -1025,7 +811,7 @@ void pmm_test_high_memory(void) {
 
                 uint64_t pattern = page_phys ^ 0xCAFEBABE12345678ULL;
                 virt[0] = pattern;
-                virt[511] = ~pattern;  // last uint64_t in page
+                virt[511] = ~pattern;
 
                 if (virt[0] == pattern && virt[511] == ~pattern) {
                     pass++;
@@ -1039,7 +825,6 @@ void pmm_test_high_memory(void) {
         pmm_free(phys, pages);
     }
 
-    // Test 3: pmm_alloc_zero from >4GB — verify zeroed
     void* zero_phys = NULL;
     for (size_t i = 0; i < 128; i++) {
         void* p = pmm_alloc_zero(1);

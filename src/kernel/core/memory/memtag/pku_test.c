@@ -1,21 +1,3 @@
-/*
- * PKU PTE-stamping integration test (Phase 2H+)
- *
- * Exercises tag-driven PKU stamping end-to-end on real vmm_context +
- * MemRegion attaches. Cannot run a true userspace WRPKRU (we're in
- * kernel context) but verifies the kernel-side state machine the
- * PKRU enforcement depends on:
- *
- *   T1. Attach with pre-applied pku:5 → PTE bits 62:59 stamped to 5
- *   T2. Attach without pku tag → PTE bits 62:59 stay at 0
- *   T3. MemTagApplyPkey(rid, 7) on a live attach → sweep updates PTE
- *   T4. MemTagApplyPkey(rid, 0) clears existing pku tag, PTE → 0
- *   T5. MemTagApplyPkey replace (pku:3 → pku:11) — old tag dropped
- *   T6. CET conflict: stamping skipped if bit 60 already set (smoke test
- *       — won't actually trigger here since CR4.CET=0 in BoxOS today)
- *
- * Builds on Phase 2D test patterns (memtag_test.c Phase 14C).
- */
 
 #include "memtag.h"
 #include "region_registry.h"
@@ -32,7 +14,7 @@
 static uint8_t pte_pkey_at(vmm_context_t *ctx, uintptr_t va) {
     uint8_t level = 0;
     pte_t *pte = vmm_get_leaf_pte(ctx, va, &level);
-    if (!pte) return 0xFF;     /* sentinel — no PTE */
+    if (!pte) return 0xFF;
     if (level != 1) return 0xFE;
     pte_t v = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
     return vmm_pte_pkey(v);
@@ -47,7 +29,6 @@ void PkuStampTest(void) {
         return;
     }
 
-    /* ── T1: pre-applied pku:5 → auto-stamped at attach ─────────── */
     {
         void *p1 = pmm_alloc(1, PHYS_TAG_USER);
         if (!p1) p1 = pmm_alloc(1);
@@ -67,7 +48,6 @@ void PkuStampTest(void) {
                                         MEMTAG_REGION_FLAG_CABIN);
                 PKU_CHECK(rid1 != MEMTAG_INVALID_REGION_ID, "T1: MemRegionCreate");
 
-                /* Apply pku:5 BEFORE attach — auto-stamp in AttachCabin. */
                 error_t e = MemTagApply(rid1, "pku:5");
                 PKU_CHECK(e == OK, "T1: MemTagApply(pku:5)");
 
@@ -89,7 +69,6 @@ void PkuStampTest(void) {
         }
     }
 
-    /* ── T2: no pku tag → PTE.PKEY == 0 ─────────────────────────── */
     {
         void *p2 = pmm_alloc(1, PHYS_TAG_USER);
         if (!p2) p2 = pmm_alloc(1);
@@ -123,9 +102,6 @@ void PkuStampTest(void) {
         }
     }
 
-    /* ── T3: MemTagApplyPkey on live attach → sweep updates PTE ─── */
-    /* ── T4: pkey == 0 clears existing tag → PTE.PKEY = 0 ─────────── */
-    /* ── T5: replace pku:3 → pku:11 ─────────────────────────────── */
     {
         void *p3 = pmm_alloc(1, PHYS_TAG_USER);
         if (!p3) p3 = pmm_alloc(1);
@@ -149,7 +125,6 @@ void PkuStampTest(void) {
                     PKU_CHECK(pte_pkey_at(ctx3, va3) == 0,
                               "T3 pre: PTE.PKEY == 0");
 
-                    /* Apply pku:7 — should sweep + stamp. */
                     error_t e = MemTagApplyPkey(rid3, 7);
                     PKU_CHECK(e == OK, "T3: MemTagApplyPkey(7)");
                     PKU_CHECK(pte_pkey_at(ctx3, va3) == 7,
@@ -157,7 +132,6 @@ void PkuStampTest(void) {
                     PKU_CHECK(MemRegionEffectivePkey(rid3) == 7,
                               "T3: EffectivePkey == 7");
 
-                    /* T4: clear by pkey=0. */
                     e = MemTagApplyPkey(rid3, 0);
                     PKU_CHECK(e == OK, "T4: MemTagApplyPkey(0) clears");
                     PKU_CHECK(pte_pkey_at(ctx3, va3) == 0,
@@ -165,7 +139,6 @@ void PkuStampTest(void) {
                     PKU_CHECK(MemRegionEffectivePkey(rid3) == 0,
                               "T4: EffectivePkey == 0");
 
-                    /* T5: apply pku:3, then replace with pku:11. */
                     e = MemTagApplyPkey(rid3, 3);
                     PKU_CHECK(e == OK && pte_pkey_at(ctx3, va3) == 3,
                               "T5 setup: pku:3 applied");
@@ -186,7 +159,6 @@ void PkuStampTest(void) {
         }
     }
 
-    /* ── T6: pkey out-of-range rejected ─────────────────────────── */
     {
         void *p6 = pmm_alloc(1, PHYS_TAG_USER);
         if (!p6) p6 = pmm_alloc(1);

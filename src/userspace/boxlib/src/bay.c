@@ -3,18 +3,16 @@
 #include "box/core/manifest.h"
 #include "box/string.h"
 #include "box/error.h"
-#include "boxos_decks.h"  /* SYSTEM_OP_BAY_* opcodes — single source */
+#include "boxos_decks.h"
 
 void *bay_open(const char *tag, uint64_t size, uint32_t flags)
 {
     if (!tag || tag[0] == '\0') return 0;
 
-    /* params: [u64 size][u32 flags]  (12 bytes) */
     uint8_t params[12];
     memcpy(params,     &size,  sizeof(uint64_t));
     memcpy(params + 8, &flags, sizeof(uint32_t));
 
-    /* Out: [u64 user_va][u64 actual_size] */
     uint8_t out[16] = {0};
 
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_BAY_OPEN,

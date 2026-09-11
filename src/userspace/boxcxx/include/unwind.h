@@ -1,9 +1,3 @@
-/*
- * boxcxx — <unwind.h>: Itanium C++ ABI, Level 1 (base ABI) unwinding
- * interface for x86-64 BoxOS userspace. Implemented by
- * src/unwind/unwind_level1.cpp over the boxcxx DWARF CFI engine; consumed
- * by __gxx_personality_v0 (Level 2) and by compiler-emitted code.
- */
 #ifndef BOXCXX_UNWIND_H
 #define BOXCXX_UNWIND_H
 
@@ -40,12 +34,11 @@ struct _Unwind_Exception;
 typedef void (*_Unwind_Exception_Cleanup_Fn)(_Unwind_Reason_Code,
                                              struct _Unwind_Exception *);
 
-/* 16-byte aligned per the ABI; the C++ exception object follows it. */
 struct _Unwind_Exception {
     _Unwind_Exception_Class      exception_class;
     _Unwind_Exception_Cleanup_Fn exception_cleanup;
-    _Unwind_Word                 private_1;   // handler CFA (phase-1 cache)
-    _Unwind_Word                 private_2;   // frames skipped (CET INCSSP)
+    _Unwind_Word                 private_1;
+    _Unwind_Word                 private_2;
 } __attribute__((aligned(16)));
 
 struct _Unwind_Context;
@@ -77,8 +70,6 @@ _Unwind_Reason_Code _Unwind_Backtrace(_Unwind_Trace_Fn trace, void *arg);
 _Unwind_Word _Unwind_GetGR(struct _Unwind_Context *ctx, int reg);
 void _Unwind_SetGR(struct _Unwind_Context *ctx, int reg, _Unwind_Word value);
 _Unwind_Word _Unwind_GetIP(struct _Unwind_Context *ctx);
-/* GetIPInfo: like GetIP, *ip_before_insn = 1 when the IP must NOT be
- * decremented before the FDE lookup (signal frames; always 0 here). */
 _Unwind_Word _Unwind_GetIPInfo(struct _Unwind_Context *ctx,
                                int *ip_before_insn);
 void _Unwind_SetIP(struct _Unwind_Context *ctx, _Unwind_Word value);
@@ -90,4 +81,4 @@ _Unwind_Word _Unwind_GetRegionStart(struct _Unwind_Context *ctx);
 }
 #endif
 
-#endif /* BOXCXX_UNWIND_H */
+#endif

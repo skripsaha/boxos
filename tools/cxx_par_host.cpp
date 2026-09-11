@@ -1,18 +1,3 @@
-// cxx_par_host.cpp — a brigade for the host stand.
-//
-// src/runtime/par_engine.cpp is a cabin's crew of strands and cannot be built
-// by a host compiler. This file gives the same five entry points a host-side
-// implementation over std::thread, so the third column of a stand exercises
-// the SPLIT path rather than quietly running everything on one strand.
-//
-// ‼ The division is copied from the real engine on purpose, not approximated:
-// chunk i covers [i*n/chunks, (i+1)*n/chunks) and the caller takes chunk 0.
-// A stand that split the range differently would still agree on the answers
-// and miss exactly the bugs that live on a boundary.
-//
-// Threads are spawned per region rather than parked in a pool. A pool is what
-// the real engine needs and what a stand does not: the point here is that two
-// chunks genuinely run at once, so ThreadSanitizer has something to watch.
 #include <__bits/par_engine>
 
 #include <cstdio>
@@ -51,10 +36,6 @@ size_t RunExact(Chunk fn, void *ctx, size_t n, size_t chunks)
         if (outer) t_inside = false;
         return 1;
     }
-    // ‼ BOXCXX_PAR_TRACE says how the work was actually divided. A stand that
-    // cannot show whether it exercised the path it exists for is a stand that
-    // agrees with the references for the wrong reason -- everything running on
-    // one thread also agrees.
     if (getenv("BOXCXX_PAR_TRACE"))
         fprintf(stderr, "[par] n=%zu chunks=%zu\n", n, chunks);
 
@@ -80,5 +61,5 @@ size_t Run(Chunk fn, void *ctx, size_t n, size_t grain)
     return RunExact(fn, ctx, n, Plan(n, grain));
 }
 
-} // namespace __par
-} // namespace std
+}
+}

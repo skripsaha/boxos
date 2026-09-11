@@ -12,12 +12,8 @@
 #include "use_context.h"
 #include "auth_tags.h"
 #include "atomics.h"
+#include "bay.h"
 
-/*
- * cabin_set_tag_bit — intern a single tag id into the cabin's fast-path
- * bitfield or overflow array.  Mirrors the former process_set_tag_bit logic.
- * Caller must hold whatever lock guards tag mutation (process_lock in P1).
- */
 static int cabin_set_tag_bit(cabin_t *cabin, uint16_t tag_id)
 {
     if (tag_id < 64)
@@ -144,12 +140,8 @@ cabin_t *cabin_create(uint32_t pid, const char *tags)
                 uint16_t tid = tagfs_tag_intern(tag_buf);
                 if (tid != TAGFS_INVALID_TAG_ID)
                 {
-                    /* The user's context may name this tag without yet having
-                     * a number for it; this is the number. */
                     UseContextBindTag(tag_buf, tid);
                     cabin_set_tag_bit(cabin, tid);
-                    /* Mirror the fixed auth bit for a bare auth key. Plain
-                     * OR: the cabin is not published to any core yet. */
                     if (!value[0])
                         cabin->auth_bits |= auth_bit_for_key(key);
                 }
@@ -170,12 +162,6 @@ void cabin_destroy(cabin_t *cabin)
     if (!cabin)
         return;
 
-    /* Clear the MemTag bookkeeping on the shared IPC ring pages before
-     * vmm_destroy_context frees them.  These tags are CABIN-wide (every
-     * strand shares the rings), so the clear belongs here at last-strand
-     * teardown — NOT in per-strand process_destroy, where a non-last
-     * strand's exit would wrongly strip the tags from rings its siblings
-     * are still using.  Mirrors the apply in cabin_create. */
     if (cabin->pocket_ring_phys) {
         MemTagClearByPhys(cabin->pocket_ring_phys, "purpose:shared");
         MemTagClearByPhys(cabin->pocket_ring_phys, "purpose:pocket-ring");
@@ -197,10 +183,6 @@ void cabin_destroy(cabin_t *cabin)
         cabin->tag_overflow_capacity = 0;
     }
 
-    /* Free retired overflow buffers (kept alive past each realloc so a
-     * lock-free reader never dereferenced freed memory — see
-     * TagOverflowRetired).  Safe to free now: cabin teardown means no
-     * strand survives to read them. */
     {
         TagOverflowRetired *r = cabin->tag_overflow_retired;
         while (r)
@@ -212,6 +194,8 @@ void cabin_destroy(cabin_t *cabin)
         }
         cabin->tag_overflow_retired = NULL;
     }
+
+    BayCleanupCabin(cabin);
 
     if (cabin->vmm)
     {

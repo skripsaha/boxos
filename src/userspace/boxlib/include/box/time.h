@@ -34,4 +34,4 @@ void time_add_ms(const BoxTime* t, int64_t ms, BoxTime* out);
 }
 #endif
 
-#endif // BOX_TIME_H
+#endif

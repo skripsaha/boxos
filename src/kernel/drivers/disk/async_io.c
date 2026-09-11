@@ -72,7 +72,6 @@ error_t async_io_submit(async_io_request_t* req) {
         return ERR_INVALID_ARGUMENT;
     }
 
-    // Default lane if caller forgot to set it
     if (req->lane >= ASYNC_IO_LANE_COUNT) {
         req->lane = ASYNC_IO_LANE_DATA;
     }
@@ -157,7 +156,6 @@ bool async_io_dequeue(async_io_request_t* req) {
     async_io_lane_queue_t* data = &g_async_queue.lanes[ASYNC_IO_LANE_DATA];
     async_io_lane_queue_t* bgnd = &g_async_queue.lanes[ASYNC_IO_LANE_BGND];
 
-    // META always highest priority
     if (atomic_load_u32(&meta->count) > 0) {
         if (dequeue_lane(meta, ASYNC_IO_LANE_META, req)) {
             spin_unlock(&g_async_queue.lock);
@@ -165,7 +163,6 @@ bool async_io_dequeue(async_io_request_t* req) {
         }
     }
 
-    // Force BGND service every ASYNC_IO_BGND_SERVE_INTERVAL DATA dequeues
     if (atomic_load_u32(&bgnd->count) > 0 &&
         g_data_served_count >= ASYNC_IO_BGND_SERVE_INTERVAL) {
         if (dequeue_lane(bgnd, ASYNC_IO_LANE_BGND, req)) {
@@ -175,7 +172,6 @@ bool async_io_dequeue(async_io_request_t* req) {
         }
     }
 
-    // Serve DATA
     if (atomic_load_u32(&data->count) > 0) {
         if (dequeue_lane(data, ASYNC_IO_LANE_DATA, req)) {
             g_data_served_count++;
@@ -184,7 +180,6 @@ bool async_io_dequeue(async_io_request_t* req) {
         }
     }
 
-    // Last resort: serve BGND if DATA is empty
     if (atomic_load_u32(&bgnd->count) > 0) {
         if (dequeue_lane(bgnd, ASYNC_IO_LANE_BGND, req)) {
             g_data_served_count = 0;

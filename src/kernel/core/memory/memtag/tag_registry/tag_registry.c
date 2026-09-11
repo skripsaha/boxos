@@ -1,17 +1,6 @@
-/*
- * MemTag — Tag Registry Implementation
- *
- * Mirrors src/kernel/tagfs/tag_registry/tag_registry.c. Differences:
- *   - No persistence (no flush/load, no g_registry_dirty)
- *   - Generation counter (every intern bumps it)
- *   - Ref-count on entries (region_count)
- *   - Kernel-reserved flag
- *   - InternStr / LookupStr split "key:value" on first colon
- */
 
 #include "tag_registry.h"
 
-/* ─── String helpers (parallel to TagFS) ──────────────────────────────── */
 
 static uint32_t RegistryHash(const char *key, const char *value, uint32_t buckets) {
     uint32_t hash = 5381;
@@ -50,8 +39,6 @@ static char *CopyString(const char *src) {
     return dst;
 }
 
-/* Split "key:value" on FIRST colon into two malloc'd halves. Returns true on
- * success. value_out is NULL if there was no colon. Caller frees both. */
 static bool SplitColon(const char *kv, char **key_out, char **value_out) {
     *key_out = NULL;
     *value_out = NULL;
@@ -82,7 +69,6 @@ static bool SplitColon(const char *kv, char **key_out, char **value_out) {
     return true;
 }
 
-/* ─── Key-group helpers (wildcard support) ────────────────────────────── */
 
 static void AddToKeyGroup(MemTagKeyGroup *group, uint16_t tag_id) {
     if (group->count >= group->capacity) {
@@ -131,13 +117,11 @@ static MemTagKeyGroup *FindOrCreateKeyGroup(MemTagRegistry *reg, const char *key
     return new_group;
 }
 
-/* ─── Capacity growth (mirrors TagFS) ─────────────────────────────────── */
 
 static int EnsureByIdCapacity(MemTagRegistry *reg, uint16_t needed_id) {
     while (needed_id >= reg->by_id_capacity) {
         uint32_t new_cap = reg->by_id_capacity * 2;
         if (new_cap < reg->by_id_capacity) {
-            /* overflow */
             return -1;
         }
         MemTagRegistryEntry **new_by_id =
@@ -157,7 +141,6 @@ static int EnsureByIdCapacity(MemTagRegistry *reg, uint16_t needed_id) {
     return 0;
 }
 
-/* ─── Core intern / lookup (must hold reg->lock) ──────────────────────── */
 
 static uint16_t LookupUnlocked(MemTagRegistry *reg,
                                 const char *key, const char *value) {
@@ -232,7 +215,6 @@ static uint16_t InternUnlocked(MemTagRegistry *reg,
     return assigned;
 }
 
-/* ─── Public API ──────────────────────────────────────────────────────── */
 
 error_t MemTagRegistryInit(MemTagRegistry *reg) {
     if (!reg) return ERR_INVALID_ARGUMENT;
@@ -385,7 +367,6 @@ MemTagKeyGroup *MemTagRegistryKeyGroup(MemTagRegistry *reg, const char *key) {
 
 uint64_t MemTagRegistryGeneration(MemTagRegistry *reg) {
     if (!reg) return 0;
-    /* Atomic 64-bit read on x86-64 — aligned uint64_t is atomic by ISA */
     return reg->generation;
 }
 

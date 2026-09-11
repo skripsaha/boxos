@@ -1,5 +1,3 @@
-// Baked 80-bit (x, MPFR-CR-ref) vectors for log10 — GENERATED, do not edit.
-// {x mantissa, x se, ref mantissa, ref se}; se = sign<<15 | exp15.
 static const CrVec kLog10Vec[] = {
 {0x0000000000000001ULL,0x0000u,0x9AB38198428FF9D1ULL,0xC00Bu},
 {0x0000000000000008ULL,0x0000u,0x9AAC481104542C11ULL,0xC00Bu},

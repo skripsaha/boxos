@@ -1,34 +1,18 @@
-/* ============================================================================
- * current.c — Current, the BoxOS-native I/O spine.
- *
- * Dispatches one tag-named, role-based channel onto an existing BoxOS
- * primitive (console / serial / TagFS / Brook). See box/current.h for the
- * concept and the contract. No new kernel mechanism: this is a userspace
- * spine over primitives that already exist.
- * ========================================================================== */
 
 #include "box/current.h"
-#include "box/print.h"    /* print_bytes, readline, io_flush      */
-#include "box/debug.h"    /* kdbg                                 */
-#include "box/file.h"     /* fread, fwrite, find_file_by_name, create */
-#include "box/brook.h"    /* brook_open/push/pop/release/...      */
-#include "box/memory.h"   /* malloc, free                         */
-#include "box/string.h"   /* strcmp, strncmp, memcpy, memset      */
-#include "box/core/manifest.h" /* MfCall1                          */
-#include "boxos_decks.h"  /* DECK_HARDWARE                        */
-#include "box/timeouts.h" /* BOX_ANSWER_GUARANTEED                */
+#include "box/print.h"
+#include "box/debug.h"
+#include "box/file.h"
+#include "box/brook.h"
+#include "box/memory.h"
+#include "box/string.h"
+#include "box/core/manifest.h"
+#include "boxos_decks.h"
+#include "box/timeouts.h"
 
-/* The hardware deck's log-ring door. Named here the way debug.c names
- * HW_DEBUG_PRINT next to it: userspace does not include kernel headers, and
- * the opcode's home is src/kernel/core/decks/hardware/hardware_deck.h. */
 #define HW_LOG_READ      0x83
-/* The account of the run BEFORE this one, carried through a warm reset. Same
- * wire shape, so one reader here serves both banks — see klib_logring.h. */
 #define HW_LOG_PREVIOUS  0x84
 
-/* --------------------------------------------------------------------------
- * Backend selection + handle layout
- * ------------------------------------------------------------------------ */
 
 typedef enum {
     CurScreen = 0,
@@ -41,49 +25,34 @@ typedef enum {
 
 struct Current {
     CurrentBackend backend;
-    uint32_t       role;        /* CURRENT_READ | CURRENT_WRITE */
-    uint32_t       flags;       /* CURRENT_NONBLOCK, ...         */
-    uint32_t       caps;        /* CURRENT_CAP_* bitset          */
-    uint32_t       item_size;   /* framed logical item size; 0 for byte backings */
+    uint32_t       role;
+    uint32_t       flags;
+    uint32_t       caps;
+    uint32_t       item_size;
 
-    /* stream (Brook) backing */
     Brook         *brook;
-    uint32_t       frame_bytes; /* actual Brook frame size (>= item_size)        */
-    uint8_t       *frame_buf;   /* staging buffer when frame_bytes != item_size  */
-    bool           closed;      /* writer announced close                        */
+    uint32_t       frame_bytes;
+    uint8_t       *frame_buf;
+    bool           closed;
 
-    /* file (TagFS) backing */
     uint32_t       file_id;
     uint64_t       file_pos;
 
-    /* log (kernel ring) backing, reader end */
-    uint8_t       *log_buf;     /* staging frame: header + one chunk        */
-    uint64_t       log_pos;     /* ring position this reader is at next     */
-    uint64_t       log_end;     /* what the kernel had said when we opened  */
-    uint64_t       log_lost;    /* bytes the ring dropped under this reader */
-    uint16_t       log_op;      /* which bank: HW_LOG_READ or HW_LOG_PREVIOUS */
+    uint8_t       *log_buf;
+    uint64_t       log_pos;
+    uint64_t       log_end;
+    uint64_t       log_lost;
+    uint16_t       log_op;
 };
 
 #define STREAM_FRAMES_DEFAULT  256u
 #define BROOK_FRAME_MIN        8u
 #define BROOK_FRAME_MAX        65536u
 
-/* --------------------------------------------------------------------------
- * log backing, reader end
- *
- * The kernel's log is one thing kept in two places, and the family says which:
- * `log:serial` is the line it goes out on, `log:file` is the ring it is held
- * in so it can become a file (klib_logring.h). One name each, one honest role
- * each — a wire cannot be read back, and a ring is not somewhere you speak.
- *
- * Wire: [u64 oldest][u64 written][u64 copied][bytes...]
- * ------------------------------------------------------------------------ */
 
 #define CUR_LOG_HEADER  24u
-#define CUR_LOG_CHUNK   4096u    /* the kernel copies a page per call at most */
+#define CUR_LOG_CHUNK   4096u
 
-/* One HW_LOG_READ into the handle's staging frame. Returns bytes staged (0 is
- * a legitimate answer — the pure "what have you got" question), or -ERR_*. */
 static int cur_log_pull(Current *c, uint64_t from, uint32_t want,
                         uint64_t *out_oldest, uint64_t *out_written)
 {
@@ -96,12 +65,6 @@ static int cur_log_pull(Current *c, uint64_t from, uint32_t want,
                      params, sizeof(params),
                      NULL, 0,
                      c->log_buf, CUR_LOG_HEADER + want,
-                     /* A memcpy of at most a page, answered on the spot. It
-                      * used to carry a 5 s deadline, and it matters here more
-                      * than most that it no longer does: logsave issues
-                      * hundreds of these back to back, and a reply abandoned
-                      * by a deadline is exactly the orphan the next call
-                      * would have to step over. */
                      NULL, BOX_ANSWER_GUARANTEED, NULL);
     if (rc != OK) return rc > 0 ? -rc : rc;
 
@@ -110,7 +73,7 @@ static int cur_log_pull(Current *c, uint64_t from, uint32_t want,
     memcpy(&written, c->log_buf + 8,  sizeof(uint64_t));
     memcpy(&copied,  c->log_buf + 16, sizeof(uint64_t));
 
-    if (copied > want) return -ERR_CORRUPTED;   /* the door overran its own crate */
+    if (copied > want) return -ERR_CORRUPTED;
 
     if (out_oldest)  *out_oldest  = oldest;
     if (out_written) *out_written = written;
@@ -124,16 +87,11 @@ static CurrentBackend ResolveBackend(const char *tag, const char **name_out)
     if (strcmp(tag, "keyboard") == 0)  return CurKeyboard;
     if (strcmp(tag, "log:serial") == 0) return CurLogSerial;
     if (strcmp(tag, "log:file") == 0)   return CurLogFile;
-    /* Same backend, different bank. Resolving to one kind keeps every switch
-     * in this file honest about what it handles; which bank is a field. */
     if (strcmp(tag, "log:previous") == 0) return CurLogFile;
     if (strncmp(tag, "file:", 5) == 0) { *name_out = tag + 5; return CurFile; }
     return CurStream;
 }
 
-/* --------------------------------------------------------------------------
- * Open / close
- * ------------------------------------------------------------------------ */
 
 Current *current_open(const char *tag, uint32_t role, uint32_t item_size, uint32_t flags)
 {
@@ -146,12 +104,6 @@ Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
 #define CUR_FAIL(err) do { if (out_err) *out_err = (err); return NULL; } while (0)
 
     if (!tag) CUR_FAIL(ERR_INVALID_ARGUMENT);
-    /* One role, except on the file backing, which genuinely is both. A stream
-     * writer and a stream reader are different ends of a pipe and cannot be
-     * the same handle; a file is one object that can be read and written
-     * through one cursor. The honesty rule cuts both ways — a Current must not
-     * claim a capability its backing lacks, and it should not hide one it has.
-     * Every other backing still takes exactly one role, checked per case. */
     if (role != CURRENT_READ && role != CURRENT_WRITE &&
         role != (CURRENT_READ | CURRENT_WRITE))
         CUR_FAIL(ERR_INVALID_ARGUMENT);
@@ -174,29 +126,14 @@ Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
         return c;
 
     case CurLogSerial:
-        /* The line, and a line has no memory: you can say something on it and
-         * you cannot ask it what was said. WRITE only, and that is not a
-         * limitation to be worked around — it is what a wire is. */
         if (role != CURRENT_WRITE) { free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
         c->caps = CURRENT_CAP_WRITE;
         if (out_err) *out_err = OK;
         return c;
 
     case CurLogFile: {
-        /* What was said, kept by the kernel so it can become a file. READ
-         * only: writing here would mean adding to the account of what the
-         * kernel said, and that is what saying it does — through log:serial,
-         * which lands in the same ring on its way out.
-         *
-         * Whether the kernel keeps it at all is a QUESTION put to the kernel,
-         * not a guess from a build flag on this side of the wall: a kernel
-         * built without the ring answers ERR_UNSUPPORTED and the open fails
-         * with that reason, instead of succeeding onto an empty channel that
-         * reads exactly like a machine which never said anything. */
         if (role != CURRENT_READ) { free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
 
-        /* `log:file` is what this boot has said so far; `log:previous` is what
-         * the boot before it left in the carry-over window. */
         c->log_op = (strcmp(tag, "log:previous") == 0) ? HW_LOG_PREVIOUS
                                                        : HW_LOG_READ;
 
@@ -210,10 +147,6 @@ Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
             free(c->log_buf); free(c);
             CUR_FAIL(why);
         }
-        /* Positions count from the first byte this kernel ever said, so
-         * `oldest` is itself the number of bytes the ring has already
-         * dropped — the gap this reader was born with, and the one it will
-         * be able to name instead of splicing over. */
         c->log_pos  = oldest;
         c->log_end  = written;
         c->log_lost = oldest;
@@ -241,15 +174,8 @@ Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
             if (fid < 0) { free(c); CUR_FAIL(box_errno_of(fid)); }
             c->file_id = (uint32_t)fid;
         } else {
-            /* read of a missing file, or write w/o CREATE */
             free(c); CUR_FAIL(ERR_FILE_NOT_FOUND);
         }
-        /* CURRENT_TRUNCATE: start the writer from an empty file rather than
-         * over the top of the old one. Without this a shorter rewrite leaves
-         * the previous tail readable past the new content — the hole that
-         * made <fstream>'s ios_base::out impossible to implement honestly.
-         * A refusal is fatal to the open: silently keeping the old bytes is
-         * the one outcome the caller definitely did not ask for. */
         if ((role & CURRENT_WRITE) && (flags & CURRENT_TRUNCATE)) {
             int trc = file_truncate(c->file_id, 0);
             if (trc != 0) { free(c); CUR_FAIL(box_errno_of(trc)); }
@@ -264,23 +190,15 @@ Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
     }
 
     case CurStream: {
-        /* A Brook end is a producer or a consumer, never both: the two roles
-         * open different objects. Reject the combined role here rather than
-         * letting it fall through the reader branch below. */
         if (role == (CURRENT_READ | CURRENT_WRITE)) { free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
         if (item_size == 0 || item_size > BROOK_FRAME_MAX) { free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
         uint32_t frame_bytes = item_size < BROOK_FRAME_MIN ? BROOK_FRAME_MIN : item_size;
 
         Brook *b;
         if (role == CURRENT_WRITE) {
-            /* The SPSC stream writer is always its own creator (a second
-             * writer gets ERR_BUSY), so creation is implicit — a stream
-             * writer needs no CURRENT_CREATE ceremony. */
             b = brook_open(tag, frame_bytes, STREAM_FRAMES_DEFAULT,
                            BROOK_WRITER | BROOK_CREATE);
         } else {
-            /* Reader inherits the live stream's shape, then we verify it
-             * matches the caller's expected item size. */
             b = brook_open(tag, 0, 0, BROOK_READER);
             if (b) frame_bytes = brook_frame_size(b);
         }
@@ -318,7 +236,7 @@ int current_close(Current *c)
     switch (c->backend) {
     case CurStream:
         if (c->brook && !c->closed) {
-            brook_release(c->brook);   /* the reader observes CURRENT_CLOSED once drained */
+            brook_release(c->brook);
             c->brook  = NULL;
             c->closed = true;
         }
@@ -352,21 +270,14 @@ int current_release(Current *c)
     return OK;
 }
 
-/* --------------------------------------------------------------------------
- * Transfer
- * ------------------------------------------------------------------------ */
 
-/* Uniform-signature shims so one helper drives try / timeout / blocking pops. */
 static int cur_pop_try(Brook *b, void *f, uint32_t ms)   { (void)ms; return brook_try_pop(b, f); }
 static int cur_pop_block(Brook *b, void *f, uint32_t ms) { (void)ms; return brook_pop(b, f); }
-/* brook_pop_timeout already matches (Brook*, void*, uint32_t). */
 
-/* Shared CurStream framed-take core: stage through frame_buf when the logical
- * item is smaller than the Brook frame, map the writer-leave terminal. */
 static int cur_stream_take(Current *c, void *item,
                            int (*pop)(Brook *, void *, uint32_t), uint32_t ms)
 {
-    if (!c->brook) return CURRENT_CLOSED;              /* writer side already released it */
+    if (!c->brook) return CURRENT_CLOSED;
     void *dst = c->frame_buf ? (void *)c->frame_buf : item;
     int rc = pop(c->brook, dst, ms);
     if (rc == 0) {
@@ -374,7 +285,7 @@ static int cur_stream_take(Current *c, void *item,
         return (int)c->item_size;
     }
     if (rc == -ERR_STREAM_CLOSED) return CURRENT_CLOSED;
-    return rc;                                          /* -ERR_WOULD_BLOCK / -ERR_TIMEOUT / -ERR_* */
+    return rc;
 }
 
 int current_write(Current *c, const void *data, size_t len)
@@ -389,9 +300,6 @@ int current_write(Current *c, const void *data, size_t len)
         return (int)len;
 
     case CurLogSerial: {
-        /* Serial diagnostic log is a TEXT channel: kdbg takes NUL-terminated
-         * strings, so bytes are emitted in NUL-bounded chunks. Embedded NULs
-         * truncate a chunk (documented: log carries text). */
         const char *p   = (const char *)data;
         size_t      rem = len;
         char        tmp[256];
@@ -407,9 +315,6 @@ int current_write(Current *c, const void *data, size_t len)
     }
 
     case CurFile: {
-        /* current_write is an int-returning channel primitive; cap the request
-         * so the widened int64 fwrite count fits an int (short-write — callers
-         * loop) instead of truncating a 2-4 GiB count into a negative int. */
         size_t  req = len > (size_t)INT32_MAX ? (size_t)INT32_MAX : len;
         int64_t n   = fwrite(c->file_id, c->file_pos, data, req);
         if (n < 0) return -ERR_WRITE_FAILED;
@@ -419,9 +324,9 @@ int current_write(Current *c, const void *data, size_t len)
 
     case CurStream: {
         if (len != c->item_size) return -ERR_INVALID_ARGUMENT;
-        if (!c->brook) return CURRENT_NO_READER;   /* already closed */
+        if (!c->brook) return CURRENT_NO_READER;
         const void *frame = data;
-        if (c->frame_buf) {                        /* small item: zero-pad to frame */
+        if (c->frame_buf) {
             memset(c->frame_buf, 0, c->frame_bytes);
             memcpy(c->frame_buf, data, c->item_size);
             frame = c->frame_buf;
@@ -431,7 +336,7 @@ int current_write(Current *c, const void *data, size_t len)
                : brook_push(c->brook, frame);
         if (rc == 0) return (int)len;
         if (rc == -ERR_PROCESS_TERMINATED) return CURRENT_NO_READER;
-        return rc;   /* -ERR_WOULD_BLOCK, -ERR_* */
+        return rc;
     }
 
     default:
@@ -447,25 +352,21 @@ int current_read(Current *c, void *buf, size_t len)
 
     switch (c->backend) {
     case CurKeyboard: {
-        int n = readline((char *)buf, len);   /* one edited line, newline stripped */
+        int n = readline((char *)buf, len);
         if (n < 0) return -ERR_READ_FAILED;
-        return n;                              /* never CURRENT_CLOSED — a live console has no end */
+        return n;
     }
 
     case CurFile: {
         size_t  req = len > (size_t)INT32_MAX ? (size_t)INT32_MAX : len;
         int64_t n   = fread(c->file_id, c->file_pos, buf, req);
         if (n < 0) return -ERR_READ_FAILED;
-        if (n == 0) return CURRENT_CLOSED;     /* content exhausted */
+        if (n == 0) return CURRENT_CLOSED;
         c->file_pos += (uint64_t)n;
         return (int)n;
     }
 
     case CurLogFile: {
-        /* Bounded at the position the kernel had reached when this handle was
-         * opened. Without that bound a reader could never finish: printing
-         * what it has read is itself something the kernel says, so the tail
-         * would grow exactly as fast as it was chased. */
         if (c->log_pos >= c->log_end) return CURRENT_CLOSED;
 
         uint64_t remain = c->log_end - c->log_pos;
@@ -475,14 +376,11 @@ int current_read(Current *c, void *buf, size_t len)
         int n = cur_log_pull(c, c->log_pos, want, &oldest, &written);
         if (n < 0)  return n;
 
-        /* Overtaken while we were away: the kernel restarted us at the oldest
-         * byte it still holds and said where that was. Count the gap rather
-         * than joining the two ends as if nothing were missing. */
         if (oldest > c->log_pos) {
             c->log_lost += oldest - c->log_pos;
             c->log_pos   = oldest;
         }
-        if (n == 0) return CURRENT_CLOSED;   /* nothing left within our bound */
+        if (n == 0) return CURRENT_CLOSED;
 
         memcpy(buf, c->log_buf + CUR_LOG_HEADER, (size_t)n);
         c->log_pos += (uint64_t)n;
@@ -506,7 +404,7 @@ int current_take_now(Current *c, void *item)
     if (!(c->caps & CURRENT_CAP_READ)) return -ERR_INVALID_OPERATION;
     if (!item) return -ERR_INVALID_ARGUMENT;
     if (c->backend == CurStream) return cur_stream_take(c, item, cur_pop_try, 0);
-    return -ERR_INVALID_OPERATION;   /* keyboard/file/screen/log are not framed streams */
+    return -ERR_INVALID_OPERATION;
 }
 
 int current_take_for(Current *c, void *item, uint32_t ms)
@@ -525,9 +423,6 @@ int current_flush(Current *c)
     return OK;
 }
 
-/* --------------------------------------------------------------------------
- * Random access (file)
- * ------------------------------------------------------------------------ */
 
 int current_seek(Current *c, uint64_t offset)
 {
@@ -543,9 +438,6 @@ uint64_t current_tell(const Current *c)
     return c->file_pos;
 }
 
-/* --------------------------------------------------------------------------
- * Extent (file)
- * ------------------------------------------------------------------------ */
 
 int64_t current_size(const Current *c)
 {
@@ -554,7 +446,7 @@ int64_t current_size(const Current *c)
 
     file_info_t info;
     int rc = file_info(c->file_id, &info);
-    if (rc < 0)  return (int64_t)rc;      /* already a negative -error_t */
+    if (rc < 0)  return (int64_t)rc;
     if (rc != 0) return -ERR_IO;
     return (int64_t)info.size;
 }
@@ -568,15 +460,10 @@ int current_resize(Current *c, uint64_t new_size)
     int rc = file_truncate(c->file_id, new_size);
     if (rc != 0) return rc;
 
-    /* Keep the cursor inside the file. Leaving it past the end would make the
-     * next write re-grow the file through a gap of blocks nobody wrote. */
     if (c->file_pos > new_size) c->file_pos = new_size;
     return OK;
 }
 
-/* --------------------------------------------------------------------------
- * Introspection
- * ------------------------------------------------------------------------ */
 
 uint32_t current_caps(const Current *c)      { return c ? c->caps : 0; }
 uint32_t current_item_size(const Current *c) { return c ? c->item_size : 0; }

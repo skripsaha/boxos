@@ -1,24 +1,3 @@
-/*
- * BoxOS — EFI System Resource Table driver (UEFI 2.10 §23.4).
- *
- * Reads the ESRT copy that TagBoot staged in EfiACPIMemoryNVS pre-EBS
- * (boot_info v4 fields efi_esrt_copy_phys + efi_esrt_copy_size).
- *
- * Why a copy: ESRT lives in EfiBootServicesData per UEFI 2.10 §23.4.3.
- * After ExitBootServices that memory type is reclaimable by the OS PMM;
- * by the time the kernel boots, the firmware-published bytes may be
- * overwritten by kmalloc heap pages. TagBoot's pre-EBS copy ensures
- * the ESRT contents persist for the lifetime of the kernel.
- *
- * Touch surface:
- *   esrt:ready                            payload = count
- *   esrt:fwclass:<GUID>:<version>         payload = full entry
- *
- * The per-entry tag follows the project's pci:vendor:VVVV:DDDD pattern
- * (see acpi_o1_uniqueness.md): drivers / userspace subscribe by exact
- * tag string instead of registering match tables. The GUID is rendered
- * in the canonical UEFI text form (8-4-4-4-12 lowercase hex).
- */
 
 #include "efi.h"
 #include "efi_esrt.h"
@@ -32,9 +11,6 @@ static const EfiSystemResourceEntry *g_esrt_entries = NULL;
 static uint32_t g_esrt_count = 0;
 static bool     g_esrt_ready = false;
 
-/* Convert a GUID to its canonical 36-char text form (UEFI spec
- * Appendix A; e.g. "bb2f4a48-c83d-4f96-bb24-2b32a4f4a1ec"). The buffer
- * must hold at least 37 bytes (36 hex/dash + NUL). */
 static void guid_to_string(const EfiGuid *g, char out[37])
 {
     static const char hex[] = "0123456789abcdef";
@@ -43,7 +19,6 @@ static void guid_to_string(const EfiGuid *g, char out[37])
         return;
     }
 
-    /* data1: 8 hex digits (little-endian → big-endian text). */
     uint32_t d1 = g->data1;
     for (int i = 7; i >= 0; i--) {
         out[i] = hex[d1 & 0xF];
@@ -110,7 +85,6 @@ bool efi_esrt_init(void)
         return false;
     }
 
-    /* Bounds check the entry count against the copy size. */
     uint64_t entries_bytes = (uint64_t)t->fw_resource_count *
                               sizeof(EfiSystemResourceEntry);
     if (entries_bytes + sizeof(EfiSystemResourceTable) > bi->efi_esrt_copy_size) {
@@ -142,9 +116,6 @@ const EfiSystemResourceEntry *efi_esrt_find(const EfiGuid *target)
 {
     if (!g_esrt_ready || !target) return NULL;
     for (uint32_t i = 0; i < g_esrt_count; i++) {
-        /* fw_class lives in a __packed parent — copy out to satisfy
-         * `-Waddress-of-packed-member` without depending on the host
-         * tolerating unaligned loads. */
         EfiGuid fc;
         memcpy(&fc, &g_esrt_entries[i].fw_class, sizeof(fc));
         if (efi_guid_equal(&fc, target)) {
@@ -186,8 +157,6 @@ void efi_esrt_print(void)
     }
 }
 
-/* Touch payload for per-entry tags — full entry plus the index so a
- * subscriber can fetch the exact record without re-walking ESRT. */
 typedef struct {
     uint32_t                index;
     uint32_t                _pad;
@@ -198,7 +167,6 @@ void efi_esrt_publish_touch(void)
 {
     if (!g_esrt_ready) return;
 
-    /* esrt:ready — count snapshot. */
     struct { uint32_t count; uint32_t max; uint64_t version; } ready_ev = {
         .count   = g_esrt_count,
         .max     = g_esrt_table->fw_resource_count_max,
@@ -206,9 +174,6 @@ void efi_esrt_publish_touch(void)
     };
     TouchPublish("esrt:ready", &ready_ev, sizeof(ready_ev));
 
-    /* esrt:fwclass:<GUID>:<ver> — one per entry. The tag is built on
-     * the stack; max length: "esrt:fwclass:" (13) + GUID (36) + ":" (1)
-     * + version (10 hex) + NUL = 61. Allocate 80 for slack. */
     for (uint32_t i = 0; i < g_esrt_count; i++) {
         const EfiSystemResourceEntry *e = &g_esrt_entries[i];
         EfiGuid fc;

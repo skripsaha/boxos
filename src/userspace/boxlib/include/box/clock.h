@@ -7,23 +7,11 @@ extern "C" {
 
 #include "box/types.h"
 #include "box/error.h"
-#include "box/time.h"   /* BoxTime, for clock_boxtime below */
+#include "box/time.h"
 
-/*
- * box/clock.h — userspace API over the kernel-mapped ClockBoard page.
- *
- * Reads cost a single memory load; no syscall, no manifest, no ring
- * round-trip. The page is mapped read-only at a fixed VA in every
- * Cabin; the kernel writes per-tick on the BSP. If the page is missing
- * or has the wrong magic / version (e.g. a future kernel/boxlib drift)
- * each helper falls back to the manifest path so the caller still gets
- * a correct answer — slower, but never wrong.
- */
 
-#define CLOCKBOARD_MAGIC_USER    0x4b4c4342u    /* 'BCLK' */
+#define CLOCKBOARD_MAGIC_USER    0x4b4c4342u
 
-/* Mirrors the kernel struct exactly — keep in lock-step with
- * src/kernel/core/clockboard/clockboard.h. */
 typedef struct PACKED {
     uint32_t magic;
     uint32_t version;
@@ -34,46 +22,23 @@ typedef struct PACKED {
     uint64_t boot_unix_secs;
 } ClockBoardView;
 
-/* True if the ClockBoard page is mapped and carries a valid header.
- * Helpers below silently fall back to the kernel path otherwise. */
 bool clock_available(void);
 
-/* Hot-path uptime reads (zero syscalls). */
 uint64_t clock_uptime_us(void);
 uint64_t clock_uptime_ms(void);
 
-/* Wallclock as unix-epoch seconds. Derived from boot_unix_secs +
- * uptime_us. Boxtime is the preferred form via clock_boxtime() below;
- * unix is kept for interop where seconds are already enough. */
 uint64_t clock_unix_now(void);
 
-/* Wallclock as unix-epoch NANOSECONDS (microsecond resolution from the
- * ClockBoard). Reads boot_unix_secs and uptime_us in a single board view
- * so the second- and sub-second pieces are mutually consistent — a split
- * across clock_unix_now()+clock_uptime_us() could straddle a tick. The
- * backing for std::chrono::system_clock::now(). */
 uint64_t clock_unix_now_ns(void);
 
-/* Calendar form. Computed in userspace from boot_unix_secs + uptime_us — the
- * kernel does NOT do calendar arithmetic in the IRQ.
- *
- * This used to be declared against `struct time_t_`, a type that was forward-
- * declared here and DEFINED NOWHERE; clock.c cast through it into the real
- * structure. The workaround existed because the real structure was called
- * time_t, a name <ctime> needs for an arithmetic type. Ф41-e gave it the name
- * the rest of the tree had always used for it, and the phantom went with it. */
 int clock_boxtime(BoxTime *out);
 
-/* Convert a TSC delta to nanoseconds using the calibrated frequency
- * cached on the ClockBoard. ns = (tsc * 1_000_000) / freq_khz. */
 uint64_t clock_tsc_to_ns(uint64_t tsc_ticks);
 
-/* Throttle helper: returns true at most once every interval_us, using
- * the ClockBoard as the time source. Caller maintains last_us. */
 bool clock_throttle(uint64_t *last_us, uint64_t interval_us);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* BOX_CLOCK_H */
+#endif

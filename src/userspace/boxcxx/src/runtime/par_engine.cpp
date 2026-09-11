@@ -1,32 +1,3 @@
-/*
- * par_engine.cpp — the brigade std::execution::par runs on.
- *
- * The decision this file implements: a parallel algorithm does NOT hire
- * strands and let them go. A cabin keeps one brigade, built the first time
- * anything asks for parallelism, asleep on the kernel's address-park until
- * there is work, and reused by every call after that. The alternative --
- * spawning per call -- makes par SLOWER than seq on anything short, which is
- * the opposite of what the policy is for; and polling instead of parking
- * would burn the very cores the work needs.
- *
- * One brigade, one job at a time. A second strand asking for parallelism
- * while a region is running waits for it rather than splitting the crew,
- * which keeps the dispatch free of per-call allocation. Nested parallelism --
- * a parallel algorithm called from inside one -- runs sequentially, which the
- * standard permits (an execution policy is permission, not obligation) and
- * which is the only way to be sure the brigade cannot wait on itself.
- *
- * Exceptions: [algorithms.parallel.exceptions] says an element access
- * function that exits by throwing calls terminate(). That is not a shortcut
- * here, it is the specified behaviour, and it is why the worker body catches
- * everything and calls terminate itself rather than letting an exception walk
- * out of a strand entry point.
- *
- * Without strands (no FSGSBASE, so strand_spawn refuses) the brigade has zero
- * workers and every parallel call runs on the caller. The policies still
- * mean what they say -- seq, par, unseq and par_unseq are all permission to
- * execute sequentially, and that is what a machine with one usable core does.
- */
 
 #include <__bits/par_engine>
 
@@ -44,7 +15,7 @@ namespace __par {
 namespace {
 
 struct Worker {
-    atomic<uint64_t> ticket{0};        // bumped to hand out a job; parked on
+    atomic<uint64_t> ticket{0};
     Chunk            fn    = nullptr;
     void            *ctx   = nullptr;
     size_t           idx   = 0;
@@ -54,7 +25,7 @@ struct Worker {
 };
 
 struct Brigade {
-    mutex            lock;             // creation, and one region at a time
+    mutex            lock;
     Worker          *workers = nullptr;
     box::strand     *strands = nullptr;
     size_t           count   = 0;
@@ -64,9 +35,6 @@ struct Brigade {
 
 Brigade g_brigade;
 
-// Set on a strand while it is inside a parallel region, so a nested call
-// takes the sequential path instead of waiting for a brigade that is already
-// busy with the outer one.
 thread_local bool t_inside = false;
 
 void RunGuarded(Chunk fn, void *ctx, size_t idx, size_t begin, size_t end)
@@ -74,7 +42,7 @@ void RunGuarded(Chunk fn, void *ctx, size_t idx, size_t begin, size_t end)
     try {
         fn(ctx, idx, begin, end);
     } catch (...) {
-        std::terminate();              // [algorithms.parallel.exceptions]
+        std::terminate();
     }
 }
 
@@ -84,7 +52,7 @@ void WorkerLoop(Worker *w)
     for (;;) {
         uint64_t ticket = w->ticket.load(memory_order_acquire);
         while (ticket == seen) {
-            box::park(w->ticket, seen);    // no lost wake: the kernel re-checks
+            box::park(w->ticket, seen);
             ticket = w->ticket.load(memory_order_acquire);
         }
         seen = ticket;
@@ -99,13 +67,12 @@ void WorkerLoop(Worker *w)
     }
 }
 
-// Called under g_brigade.lock.
 void Build()
 {
     g_brigade.built = true;
     const unsigned hc = thread::hardware_concurrency();
-    if (hc < 2) return;                    // nothing to share the work with
-    const size_t want = hc - 1;            // the caller takes a chunk too
+    if (hc < 2) return;
+    const size_t want = hc - 1;
 
     Worker *workers = new (nothrow) Worker[want];
     if (!workers) return;
@@ -121,7 +88,7 @@ void Build()
         try {
             new (&strands[made]) box::strand(WorkerLoop, &workers[made]);
         } catch (...) {
-            break;                         // no strands available: stay smaller
+            break;
         }
     }
     if (made == 0) {
@@ -134,9 +101,6 @@ void Build()
     g_brigade.count   = made;
 }
 
-// Winds the brigade down before the cabin does. Workers park forever by
-// design, so they have to be told; count is cleared first, so a parallel call
-// arriving during teardown simply runs on its own caller.
 struct Teardown {
     ~Teardown()
     {
@@ -159,13 +123,10 @@ struct Teardown {
 };
 Teardown g_teardown;
 
-} // namespace
+}
 
 size_t Width()
 {
-    // Asking from INSIDE a region must not take the lock: the region already
-    // holds it, and a reduction sizes its partials array before it knows
-    // whether it is nested. A nested region is one chunk wide anyway.
     if (t_inside) return 1;
     lock_guard<mutex> held(g_brigade.lock);
     if (!g_brigade.built) Build();
@@ -174,21 +135,11 @@ size_t Width()
 
 bool Nested() noexcept { return t_inside; }
 
-// Marks the calling strand as being inside a region for as long as it lives.
-// Anything the body then calls takes the sequential path, which is the only
-// path that does not want the brigade lock -- and the lock is held for the
-// whole of a real region.
 struct Inside {
     Inside() { t_inside = true; }
     ~Inside() { t_inside = false; }
 };
 
-// Deciding whether the range is worth splitting happens WITHOUT the lock, and
-// so does running it when it is not. The first version of Run did the
-// short-range case under the lock, and a body that then called another
-// parallel algorithm blocked on a mutex its own caller was holding -- a
-// self-deadlock that only appears when the outer range is too short to split
-// and the inner one is not. Found by phase201.
 size_t Plan(size_t n, size_t grain)
 {
     if (n == 0) return 0;
@@ -209,7 +160,7 @@ size_t RunExact(Chunk fn, void *ctx, size_t n, size_t chunks)
 
     lock_guard<mutex> held(g_brigade.lock);
     if (chunks > g_brigade.count + 1) chunks = g_brigade.count + 1;
-    if (chunks < 2) {                          // the brigade went away (teardown)
+    if (chunks < 2) {
         Inside marked;
         RunGuarded(fn, ctx, 0, 0, n);
         return 1;
@@ -229,14 +180,14 @@ size_t RunExact(Chunk fn, void *ctx, size_t n, size_t chunks)
 
     {
         Inside marked;
-        RunGuarded(fn, ctx, 0, 0, n / chunks);    // the caller works too
+        RunGuarded(fn, ctx, 0, 0, n / chunks);
     }
 
     const uint64_t want = chunks - 1;
     for (;;) {
         const uint64_t got = g_brigade.done.load(memory_order_acquire);
         if (got == want) break;
-        box::park(g_brigade.done, got);    // value_mismatch if it already moved
+        box::park(g_brigade.done, got);
     }
     return chunks;
 }
@@ -246,5 +197,5 @@ size_t Run(Chunk fn, void *ctx, size_t n, size_t grain)
     return RunExact(fn, ctx, n, Plan(n, grain));
 }
 
-} // namespace __par
-} // namespace std
+}
+}

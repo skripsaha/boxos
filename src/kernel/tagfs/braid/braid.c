@@ -7,27 +7,17 @@
 #include "../../../kernel/drivers/disk/ata.h"
 #include "../../../kernel/drivers/timer/rtc.h"
 
-// Global Braid state
 static BraidState g_braid_state;
 static BraidStats g_braid_stats;
 
-// Compute tag-based disk assignment (unique to Braid!)
 static uint8_t BraidComputeTagDisk(const uint8_t *tag_context, uint8_t disk_count) {
     if (!tag_context || disk_count == 0)
         return 0;
 
-    // Hash tag context to determine disk
     BoxHash tag_hash = BoxHashContent(tag_context, 16, &g_braid_state.hash_ctx);
     return tag_hash.bytes[0] % disk_count;
 }
 
-// Pure I/O helpers — no g_braid_state access, no lock assumed.
-// Callers are responsible for checking disk availability under lock,
-// then calling these outside the lock, then updating stats under lock.
-/* A Braid disk is a Boardroom seat. The identity that used to be an AHCI port
- * on one path and an ATA drive index on another — two numbering schemes for the
- * same idea, chosen by a runtime test at every call — is now one number that
- * means the same thing everywhere. */
 static int BraidRawRead(uint8_t disk_id, uint64_t sector, void *data) {
     return BoardroomRead(disk_id, sector, 8, data);
 }
@@ -36,10 +26,6 @@ static int BraidRawWrite(uint8_t disk_id, uint64_t sector, const void *data) {
     return BoardroomWrite(disk_id, sector, 8, data);
 }
 
-// Locked wrappers — used by BraidAutoHeal and BraidVerifyBlock which hold the lock
-// across multiple reads for majority-vote consensus.  Must not be used on the normal
-// I/O path (BraidReadBlock / BraidWriteBlock) where holding the lock during disk I/O
-// would stall unrelated disk operations.
 static error_t BraidReadFromDisk(uint8_t disk_id, uint64_t block_num, void *data) {
     if (!g_braid_state.initialized)
         return ERR_NOT_INITIALIZED;
@@ -77,7 +63,6 @@ static error_t BraidWriteToDisk(uint8_t disk_id, uint64_t block_num, const void 
     return ERR_IO;
 }
 
-// Verify block checksum
 static bool BraidVerifyChecksum(const void *data, uint32_t size, const BoxHash *expected) {
     if (!expected)
         return false;
@@ -88,14 +73,12 @@ static bool BraidVerifyChecksum(const void *data, uint32_t size, const BoxHash *
 error_t BraidInit(BraidMode mode) {
     if (g_braid_state.initialized)
         return ERR_ALREADY_INITIALIZED;
-    
+
     memset(&g_braid_state, 0, sizeof(BraidState));
     memset(&g_braid_stats, 0, sizeof(BraidStats));
-    
+
     spinlock_init(&g_braid_state.lock);
-    
-    // Deterministic per-volume hash seed (fs_uuid) — survives reboot so block
-    // checksums re-verify across mounts (the old per-boot RTC salt did not).
+
     BoxHashInit(&g_braid_state.hash_ctx, tagfs_get_state()->uuid, 16);
 
     g_braid_state.magic = BRAID_MAGIC;
@@ -112,23 +95,23 @@ error_t BraidInit(BraidMode mode) {
 void BraidShutdown(void) {
     if (!g_braid_state.initialized)
         return;
-    
+
     spin_lock(&g_braid_state.lock);
     g_braid_state.initialized = false;
     spin_unlock(&g_braid_state.lock);
-    
+
     debug_printf("[Braid] Shutdown complete\n");
 }
 
 error_t BraidAddDisk(uint8_t disk_id, uint64_t total_blocks) {
     if (!g_braid_state.initialized)
         return ERR_NOT_INITIALIZED;
-    
+
     if (disk_id >= BRAID_MAX_DISKS)
         return ERR_OUT_OF_RANGE;
-    
+
     spin_lock(&g_braid_state.lock);
-    
+
     BraidDisk *disk = &g_braid_state.disks[disk_id];
     disk->disk_id = disk_id;
     disk->online = true;
@@ -138,12 +121,12 @@ error_t BraidAddDisk(uint8_t disk_id, uint64_t total_blocks) {
     disk->write_count = 0;
     disk->error_count = 0;
     disk->last_seen = rtc_get_unix64();
-    
+
     g_braid_state.disk_count++;
     g_braid_state.active_disks++;
-    
+
     spin_unlock(&g_braid_state.lock);
-    
+
     debug_printf("[Braid] Added disk %u (%lu blocks)\n", disk_id, (unsigned long)total_blocks);
     return OK;
 }
@@ -151,24 +134,24 @@ error_t BraidAddDisk(uint8_t disk_id, uint64_t total_blocks) {
 error_t BraidRemoveDisk(uint8_t disk_id) {
     if (!g_braid_state.initialized)
         return ERR_NOT_INITIALIZED;
-    
+
     if (disk_id >= BRAID_MAX_DISKS)
         return ERR_OUT_OF_RANGE;
-    
+
     spin_lock(&g_braid_state.lock);
-    
+
     BraidDisk *disk = &g_braid_state.disks[disk_id];
     if (!disk->online) {
         spin_unlock(&g_braid_state.lock);
         return ERR_DEVICE_NOT_READY;
     }
-    
+
     disk->online = false;
     g_braid_state.active_disks--;
     g_braid_stats.disk_failures++;
-    
+
     spin_unlock(&g_braid_state.lock);
-    
+
     debug_printf("[Braid] Removed disk %u\n", disk_id);
     return OK;
 }
@@ -176,21 +159,21 @@ error_t BraidRemoveDisk(uint8_t disk_id) {
 error_t BraidSetDiskOnline(uint8_t disk_id, bool online) {
     if (!g_braid_state.initialized)
         return ERR_NOT_INITIALIZED;
-    
+
     if (disk_id >= BRAID_MAX_DISKS)
         return ERR_OUT_OF_RANGE;
-    
+
     spin_lock(&g_braid_state.lock);
-    
+
     BraidDisk *disk = &g_braid_state.disks[disk_id];
     disk->online = online;
     disk->last_seen = rtc_get_unix64();
-    
+
     if (online)
         g_braid_state.active_disks++;
     else
         g_braid_state.active_disks--;
-    
+
     spin_unlock(&g_braid_state.lock);
     return OK;
 }
@@ -199,7 +182,6 @@ error_t BraidReadBlock(uint64_t block_num, void *data, BoxHash *expected_checksu
     if (!g_braid_state.initialized || !data)
         return ERR_NOT_INITIALIZED;
 
-    // Snapshot disk availability without holding the lock during I/O
     spin_lock(&g_braid_state.lock);
     uint8_t disk_count = g_braid_state.disk_count;
     bool online[BRAID_MAX_DISKS];
@@ -248,9 +230,8 @@ error_t BraidWriteBlock(uint64_t block_num, const void *data, const uint8_t *tag
     if (!g_braid_state.initialized || !data)
         return ERR_NOT_INITIALIZED;
 
-    (void)tag_context;  // Used in tag-aware mode
+    (void)tag_context;
 
-    // Snapshot disk layout without holding the lock during I/O
     spin_lock(&g_braid_state.lock);
     uint8_t disk_count = g_braid_state.disk_count;
     BraidMode mode = g_braid_state.mode;
@@ -325,11 +306,6 @@ error_t BraidWriteBlock(uint64_t block_num, const void *data, const uint8_t *tag
     return result;
 }
 
-// Static scratch buffer for VerifyBlock + AutoHeal — both functions hold
-// g_braid_state.lock for their full duration, so a single BSS-resident
-// pool is mutually exclusive and avoids the catastrophic per-call stack
-// frame (uint8_t[BRAID_MAX_DISKS][BRAID_BLOCK_SIZE] = 32 KB > per-core
-// kernel stack). Located in .bss — zero runtime cost.
 static uint8_t  g_braid_verify_ref[BRAID_BLOCK_SIZE];
 static uint8_t  g_braid_verify_candidate[BRAID_BLOCK_SIZE];
 
@@ -340,12 +316,6 @@ error_t BraidVerifyBlock(uint64_t block_num, bool *is_valid) {
     *is_valid = false;
 
     if (g_braid_state.active_disks < 2) {
-        // Cannot cross-verify with only one disk — read and accept if I/O
-        // succeeds. BraidReadBlock takes g_braid_state.lock internally, so
-        // we must NOT hold it here (recursive spinlock = deadlock).
-        // 4 KiB on the kernel stack is well below the 8 KiB per-frame budget;
-        // the BSS pool is reserved for the multi-disk path where two 4 KiB
-        // buffers would otherwise blow the limit.
         uint8_t data[BRAID_BLOCK_SIZE];
         error_t result = BraidReadBlock(block_num, data, NULL);
         if (result == OK)
@@ -353,8 +323,6 @@ error_t BraidVerifyBlock(uint64_t block_num, bool *is_valid) {
         return result;
     }
 
-    // Read from each available disk and compare checksums to detect corruption.
-    // Agreement across at least two copies signals block integrity.
     BoxHash ref_hash;
     bool ref_set = false;
     uint8_t agreements = 0;
@@ -388,7 +356,6 @@ error_t BraidVerifyBlock(uint64_t block_num, bool *is_valid) {
     }
 
     if (agreements == 1) {
-        // Only one readable copy — treat as valid but degraded
         *is_valid = true;
         g_braid_stats.checksum_errors++;
         return OK;
@@ -397,7 +364,6 @@ error_t BraidVerifyBlock(uint64_t block_num, bool *is_valid) {
     return ERR_IO;
 }
 
-// Tag-aware read (unique to Braid!)
 error_t BraidReadBlockTagged(uint64_t block_num, void *data, const uint8_t *tag_context) {
     if (!g_braid_state.initialized || !data)
         return ERR_NOT_INITIALIZED;
@@ -412,7 +378,6 @@ error_t BraidReadBlockTagged(uint64_t block_num, void *data, const uint8_t *tag_
 
     error_t result = ERR_IO;
 
-    // Try preferred disk first (tag-aware locality)
     if (online[preferred]) {
         if (BraidRawRead(preferred, block_num, data) == 0) {
             spin_lock(&g_braid_state.lock);
@@ -427,7 +392,6 @@ error_t BraidReadBlockTagged(uint64_t block_num, void *data, const uint8_t *tag_
         spin_unlock(&g_braid_state.lock);
     }
 
-    // Fallback to other disks
     for (uint8_t i = 0; i < disk_count; i++) {
         if (i == preferred || !online[i])
             continue;
@@ -447,7 +411,6 @@ error_t BraidReadBlockTagged(uint64_t block_num, void *data, const uint8_t *tag_
     return result;
 }
 
-// Tag-aware write (unique to Braid!)
 error_t BraidWriteBlockTagged(uint64_t block_num, const void *data, const uint8_t *tag_context) {
     if (!g_braid_state.initialized || !data || !tag_context)
         return ERR_INVALID_ARGUMENT;
@@ -479,7 +442,6 @@ error_t BraidWriteBlockTagged(uint64_t block_num, const void *data, const uint8_
         }
     }
 
-    // For mirror/weave modes, replicate to additional disks
     if (mode == BraidModeMirror || mode == BraidModeWeave) {
         uint8_t writes_done = (result == OK) ? 1 : 0;
         uint8_t required = (mode == BraidModeMirror) ? 2 : 3;
@@ -504,18 +466,12 @@ error_t BraidWriteBlockTagged(uint64_t block_num, const void *data, const uint8_
         if (writes_done == 0)
             result = ERR_IO;
         else if (result != OK)
-            result = OK;  // Primary failed but at least one replica succeeded
+            result = OK;
     }
 
     return result;
 }
 
-// Auto-healing from mirror (unique to Braid!)
-// Reads all available copies, selects the one agreed upon by majority (checksum consensus),
-// then re-writes the agreed copy to any disk that diverged.
-// BSS-resident scratch for AutoHeal — held under g_braid_state.lock,
-// mutually exclusive with VerifyBlock. Stack-frame replacement (see note
-// above g_braid_verify_ref).
 static uint8_t g_braid_heal_copies[BRAID_MAX_DISKS][BRAID_BLOCK_SIZE];
 
 error_t BraidAutoHeal(uint64_t block_num) {
@@ -524,7 +480,6 @@ error_t BraidAutoHeal(uint64_t block_num) {
 
     spin_lock(&g_braid_state.lock);
 
-    // Gather one read per online disk into the BSS pool.
     BoxHash hashes[BRAID_MAX_DISKS];
     bool    readable[BRAID_MAX_DISKS];
 
@@ -539,7 +494,6 @@ error_t BraidAutoHeal(uint64_t block_num) {
         }
     }
 
-    // Find the hash that appears most often (majority vote)
     uint8_t best_disk   = 0xFF;
     uint8_t best_count  = 0;
 
@@ -562,7 +516,6 @@ error_t BraidAutoHeal(uint64_t block_num) {
         return ERR_IO;
     }
 
-    // Re-write the agreed copy to any disk whose hash differs
     uint8_t healed = 0;
     for (uint8_t i = 0; i < g_braid_state.disk_count; i++) {
         if (i == best_disk || !g_braid_state.disks[i].online)
@@ -586,26 +539,26 @@ error_t BraidAutoHeal(uint64_t block_num) {
 error_t BraidGetStats(BraidStats *stats) {
     if (!stats)
         return ERR_INVALID_ARGUMENT;
-    
+
     if (!g_braid_state.initialized) {
         memset(stats, 0, sizeof(BraidStats));
         return ERR_NOT_INITIALIZED;
     }
-    
+
     spin_lock(&g_braid_state.lock);
     memcpy(stats, &g_braid_stats, sizeof(BraidStats));
     spin_unlock(&g_braid_state.lock);
-    
+
     return OK;
 }
 
 error_t BraidPrintStats(void) {
     if (!g_braid_state.initialized)
         return ERR_NOT_INITIALIZED;
-    
+
     BraidStats stats;
     BraidGetStats(&stats);
-    
+
     debug_printf("\n=== Braid Statistics ===\n");
     debug_printf("Total reads:      %lu\n", (unsigned long)stats.total_reads);
     debug_printf("Total writes:     %lu\n", (unsigned long)stats.total_writes);
@@ -614,17 +567,16 @@ error_t BraidPrintStats(void) {
     debug_printf("Disk failures:    %lu\n", (unsigned long)stats.disk_failures);
     debug_printf("Tag assignments:  %lu\n", (unsigned long)stats.tag_assignments);
     debug_printf("======================\n");
-    
+
     return OK;
 }
 
 bool BraidIsHealthy(void) {
     if (!g_braid_state.initialized)
         return false;
-    
+
     spin_lock(&g_braid_state.lock);
-    
-    // Healthy if we have enough disks for the mode
+
     bool healthy = false;
     switch (g_braid_state.mode) {
         case BraidModeMirror:
@@ -637,7 +589,7 @@ bool BraidIsHealthy(void) {
             healthy = g_braid_state.active_disks >= 3;
             break;
     }
-    
+
     spin_unlock(&g_braid_state.lock);
     return healthy;
 }
@@ -645,10 +597,10 @@ bool BraidIsHealthy(void) {
 uint8_t BraidGetActiveDiskCount(void) {
     if (!g_braid_state.initialized)
         return 0;
-    
+
     spin_lock(&g_braid_state.lock);
     uint8_t count = g_braid_state.active_disks;
     spin_unlock(&g_braid_state.lock);
-    
+
     return count;
 }

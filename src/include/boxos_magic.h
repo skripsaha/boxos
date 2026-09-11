@@ -1,31 +1,26 @@
 #ifndef BOXOS_MAGIC_H
 #define BOXOS_MAGIC_H
 
-// Cabin
-#define CABIN_INFO_MAGIC       0x4341424E  // "CABN"
-#define POCKET_RING_MAGIC      0x504B5452  // "PKTR"
-#define RESULT_RING_MAGIC      0x52534C54  // "RSLT"
-#define TOUCH_RING_MAGIC       0x54434852  // "TCHR"
-#define BROOK_HEADER_MAGIC     0x42524B48  // "BRKH" — Brook SPSC stream header
+#define CABIN_INFO_MAGIC       0x4341424E
+#define POCKET_RING_MAGIC      0x504B5452
+#define RESULT_RING_MAGIC      0x52534C54
+#define TOUCH_RING_MAGIC       0x54434852
+#define BROOK_HEADER_MAGIC     0x42524B48
 
-// TagFS
-#define TAGFS_MAGIC            0x54414746  // "TAGF"
-#define TAGFS_REGISTRY_MAGIC   0x54524547  // "TREG"
-#define TAGFS_FILETBL_MAGIC    0x54465442  // "TFTB"
-#define TAGFS_MPOOL_MAGIC      0x544D504C  // "TMPL"
-#define JOURNAL_MAGIC          0x4A4F5552  // "JOUR"
-#define JOURNAL_ENTRY_MAGIC    0x4A454E54  // "JENT"
+#define TAGFS_MAGIC            0x54414746
+#define TAGFS_REGISTRY_MAGIC   0x54524547
+#define TAGFS_FILETBL_MAGIC    0x54465442
+#define TAGFS_MPOOL_MAGIC      0x544D504C
+#define JOURNAL_MAGIC          0x4A4F5552
+#define JOURNAL_ENTRY_MAGIC    0x4A454E54
 
-// Process
-#define PROCESS_MAGIC          0x50524F43  // "PROC"
+#define PROCESS_MAGIC          0x50524F43
 
-// Nameplate — the in-image "address -> name" table (nameplate_format.h)
-#define NAMEPLATE_MAGIC        0x4E504C54  // "NPLT"
+#define NAMEPLATE_MAGIC        0x4E504C54
 
-// Kernel boot
-#define KERNEL_HEADER_MAGIC    0x4E52454B  // "KERN"
-#define KERNEL_HEADER_MAGIC_HI 0x4C45      // "EL"
+#define KERNEL_HEADER_MAGIC    0x4E52454B
+#define KERNEL_HEADER_MAGIC_HI 0x4C45
 
 #define MAGIC_VALID(val, expected) ((val) == (expected))
 
-#endif // BOXOS_MAGIC_H
+#endif

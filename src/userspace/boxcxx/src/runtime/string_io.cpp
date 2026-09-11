@@ -1,21 +1,3 @@
-/*
- * string_io.cpp — out-of-line [string.io]/[string.view.io] bodies.
- *
- * <string>/<string_view> declare operator<</operator>>/getline against
- * <iosfwd>'s forward-declared basic_ostream/basic_istream only: <string>
- * cannot #include <ostream> (<ios>, needed by every stream header,
- * already transitively needs <string> via ios_base::failure : system_error
- * : runtime_error(const string&), so the reverse edge would cycle back
- * through <ios>). This is the one translation unit that includes both
- * sides together and provides the bodies, explicitly instantiated for both of
- * boxcxx's real instantiations: CharT=char, and CharT=wchar_t since Ф42-f.
- * The bodies did not change to gain the second one -- they were generic all
- * along, and this file was simply emitting half of what it declares, because
- * wide streams were an exclusion until then. Every OTHER translation unit
- * only ever sees the template declaration in <string>/<string_view>; the
- * linker resolves calls against the explicit instantiations emitted at the
- * bottom of this file.
- */
 
 #include <string>
 #include <string_view>
@@ -24,9 +6,6 @@
 
 namespace std {
 
-// [string.view.io]: formatted output, the same shape as the const-char*
-// free inserter in <ostream> -- right-padded via width()/fill()/
-// adjustfield, no sign/prefix, single sputn-equivalent write.
 template <class CharT, class Traits>
 basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os,
                                           basic_string_view<CharT, Traits> sv)
@@ -44,9 +23,6 @@ basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os,
     return os;
 }
 
-// [string.io]: "Equivalent to: return os << basic_string_view<charT,
-// traits>(str);" -- the real logic lives entirely on the string_view
-// overload above.
 template <class CharT, class Traits, class Allocator>
 basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os,
                                           const basic_string<CharT, Traits, Allocator> &s)
@@ -54,9 +30,6 @@ basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os,
     return os << basic_string_view<CharT, Traits>(s);
 }
 
-// [string.io]: formatted input. Caps at is.width() if set (>0), else at
-// s.max_size(); stops at the first "C"-locale whitespace character (which
-// is NOT extracted) or EOF. width() is reset to 0 afterward unconditionally.
 template <class CharT, class Traits, class Allocator>
 basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is,
                                           basic_string<CharT, Traits, Allocator> &s)
@@ -99,19 +72,6 @@ basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is,
     return is;
 }
 
-// [string.io]: unformatted (per its own wording, does not affect gcount()
-// -- never touched here since this is built purely on the streambuf's
-// public API, not on basic_istream's own gcount tracker). Extracts raw
-// characters (no leading-whitespace skip) and appends them until an
-// unextracted delimiter, s.max_size() characters, or EOF; the delimiter
-// itself IS extracted but never appended.
-//
-// Reaching the delimiter counts as "extracting a character" for the
-// failbit rule below even though nothing is appended for it -- a blank
-// line (delimiter found immediately) is therefore a successful EMPTY
-// read, matching basic_istream::getline's own already-shipped member
-// semantics exactly (Ф30e commit 3; cxxtest phase117's own getline
-// HOTSPOT coverage), not a failure.
 template <class CharT, class Traits, class Allocator>
 basic_istream<CharT, Traits> &getline(basic_istream<CharT, Traits> &is,
                                        basic_string<CharT, Traits, Allocator> &s, CharT delim)
@@ -152,9 +112,6 @@ basic_istream<CharT, Traits> &getline(basic_istream<CharT, Traits> &is,
     return is;
 }
 
-// C++11 rvalue-stream overloads: `is` is an lvalue expression inside the
-// function body (only its declared TYPE is an rvalue reference), so this
-// forwards straight to the lvalue overload above.
 template <class CharT, class Traits, class Allocator>
 basic_istream<CharT, Traits> &getline(basic_istream<CharT, Traits> &&is,
                                        basic_string<CharT, Traits, Allocator> &s, CharT delim)
@@ -174,10 +131,6 @@ basic_istream<CharT, Traits> &getline(basic_istream<CharT, Traits> &&is,
     return getline(is, s, is.widen('\n'));
 }
 
-// Explicit instantiation. Two now, not one: the bodies above were always
-// generic in CharT (that is why they compile unchanged), and until Ф42-f the
-// wide half had nothing to be instantiated FOR. Nothing here was rewritten —
-// the file simply stopped emitting half of what it declares.
 template basic_ostream<wchar_t> &operator<< <wchar_t, char_traits<wchar_t>>(
     basic_ostream<wchar_t> &, basic_string_view<wchar_t, char_traits<wchar_t>>);
 template basic_ostream<wchar_t> &operator<< <wchar_t, char_traits<wchar_t>, allocator<wchar_t>>(
@@ -208,4 +161,4 @@ template basic_istream<char> &getline<char, char_traits<char>, allocator<char>>(
 template basic_istream<char> &getline<char, char_traits<char>, allocator<char>>(
     basic_istream<char> &&, basic_string<char, char_traits<char>, allocator<char>> &);
 
-} // namespace std
+}

@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html class="client-js ve-available" lang="en" dir="ltr"><head>
+<meta http-equiv="content-type" content="text/html; charset=UTF-8">
+<meta charset="UTF-8">
+<title>Расширяемый интерфейс контроллера хоста - OSDev Wiki</title>
+<script>document.documentElement.className="client-js";RLCONF={"wgBreakFrames":false,"wgSeparatorTransformTable":["",""],"wgDigitTransformTable":["",""],"wgDefaultDateFormat":"dmy","wgMonthNames":["","January","February","March","April","May","June","July","August","September","October","November","December"],"wgRequestId":"616740e858470721e317b4ba","wgCSPNonce":false,"wgCanonicalNamespace":"","wgCanonicalSpecialPageName":false,"wgNamespaceNumber":0,"wgPageName":"EXtensible_Host_Controller_Interface","wgTitle":"EXtensible Host Controller Interface","wgCurRevisionId":30300,"wgRevisionId":30300,"wgArticleId":3309,"wgIsArticle":true,"wgIsRedirect":false,"wgAction":"view","wgUserName":null,"wgUserGroups":["*"],"wgCategories":["USB"],"wgPageContentLanguage":"en","wgPageContentModel":"wikitext","wgRelevantPageName":"EXtensible_Host_Controller_Interface","wgRelevantArticleId":3309,"wgIsProbablyEditable":false,"wgRelevantPageIsProbablyEditable":false,"wgRestrictionEdit":[],"wgRestrictionMove":[],
+"wgMFDisplayWikibaseDescriptions":{"search":false,"nearby":false,"watchlist":false,"tagline":false},"wgVisualEditor":{"pageLanguageCode":"en","pageLanguageDir":"ltr","pageVariantFallbacks":"en"},"wgVector2022PreviewPages":[],"wgMediaViewerOnClick":true,"wgMediaViewerEnabledByDefault":true,"wgEditSubmitButtonLabelPublish":false};RLSTATE={"site.styles":"ready","user.styles":"ready","user":"ready","user.options":"loading","ext.pygments":"ready","skins.vector.styles.legacy":"ready","ext.visualEditor.desktopArticleTarget.noscript":"ready","ext.DarkMode.styles":"ready"};RLPAGEMODULES=["site","mediawiki.page.ready","mediawiki.toc","skins.vector.legacy.js","ext.visualEditor.desktopArticleTarget.init","ext.visualEditor.targetLoader","ext.DarkMode","ext.moderation.notify","ext.moderation.ve","ext.moderation.ajaxhook","ext.moderation.notify.desktop"];</script>
+<script>(RLQ=window.RLQ||[]).push(function(){mw.loader.implement("user.options@12s5i",function($,jQuery,require,module){mw.user.tokens.set({"patrolToken":"+\\","watchToken":"+\\","csrfToken":"+\\"});});});</script>
+<link rel="stylesheet" href="%D0%A0%D0%B0%D1%81%D1%88%D0%B8%D1%80%D1%8F%D0%B5%D0%BC%D1%8B%D0%B8%CC%86%20%D0%B8%D0%BD%D1%82%D0%B5%D1%80%D1%84%D0%B5%D0%B8%CC%86%D1%81%20%D0%BA%D0%BE%D0%BD%D1%82%D1%80%D0%BE%D0%BB%D0%BB%D0%B5%D1%80%D0%B0%20%D1%85%D0%BE%D1%81%D1%82%D0%B0%20-%20OSDev%20Wiki_files/load_002_mN0S.css">
+<script async="" src="%D0%A0%D0%B0%D1%81%D1%88%D0%B8%D1%80%D1%8F%D0%B5%D0%BC%D1%8B%D0%B8%CC%86%20%D0%B8%D0%BD%D1%82%D0%B5%D1%80%D1%84%D0%B5%D0%B8%CC%86%D1%81%20%D0%BA%D0%BE%D0%BD%D1%82%D1%80%D0%BE%D0%BB%D0%BB%D0%B5%D1%80%D0%B0%20%D1%85%D0%BE%D1%81%D1%82%D0%B0%20-%20OSDev%20Wiki_files/load_mN0S.js"></script>
+<style>
+.mw-editfont-monospace{font-family:monospace,monospace}.mw-editfont-sans-serif{font-family:sans-serif}.mw-editfont-serif{font-family:serif} .mw-editfont-monospace,.mw-editfont-sans-serif,.mw-editfont-serif{  font-size:13px;  -moz-tab-size:4; tab-size:4; }.mw-editfont-monospace.oo-ui-textInputWidget,.mw-editfont-sans-serif.oo-ui-textInputWidget,.mw-editfont-serif.oo-ui-textInputWidget{font-size:inherit}.mw-editfont-monospace.oo-ui-textInputWidget > .oo-ui-inputWidget-input,.mw-editfont-sans-serif.oo-ui-textInputWidget > .oo-ui-inputWidget-input,.mw-editfont-serif.oo-ui-textInputWidget > .oo-ui-inputWidget-input{  font-size:13px}.mw-editfont-monospace.oo-ui-textInputWidget > input.oo-ui-inputWidget-input,.mw-editfont-sans-serif.oo-ui-textInputWidget > input.oo-ui-inputWidget-input,.mw-editfont-serif.oo-ui-textInputWidget > input.oo-ui-inputWidget-input{min-height:32px}
+.oo-ui-icon-bright,.mw-ui-icon-bright:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=bright&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E bright %3C/title%3E%3Cpath d=%22M17.07 7.07V2.93h-4.14L10 0 7.07 2.93H2.93v4.14L0 10l2.93 2.93v4.14h4.14L10 20l2.93-2.93h4.14v-4.14L20 10zM10 16a6 6 0 1 1 6-6 6 6 0 0 1-6 6z%22/%3E%3Ccircle cx=%2210%22 cy=%2210%22 r=%224.5%22/%3E%3C/svg%3E")}.oo-ui-image-invert.oo-ui-icon-bright,.mw-ui-icon-bright-invert:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=bright&variant=invert&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E bright %3C/title%3E%3Cg fill=%22%23fff%22%3E%3Cpath d=%22M17.07 7.07V2.93h-4.14L10 0 7.07 2.93H2.93v4.14L0 10l2.93 2.93v4.14h4.14L10 20l2.93-2.93h4.14v-4.14L20 10zM10 16a6 6 0 1 1 6-6 6 6 0 0 1-6 6z%22/%3E%3Ccircle cx=%2210%22 cy=%2210%22 r=%224.5%22/%3E%3C/g%3E%3C/svg%3E")}.oo-ui-image-progressive.oo-ui-icon-bright,.mw-ui-icon-bright-progressive:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=bright&variant=progressive&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E bright %3C/title%3E%3Cg fill=%22%2336c%22%3E%3Cpath d=%22M17.07 7.07V2.93h-4.14L10 0 7.07 2.93H2.93v4.14L0 10l2.93 2.93v4.14h4.14L10 20l2.93-2.93h4.14v-4.14L20 10zM10 16a6 6 0 1 1 6-6 6 6 0 0 1-6 6z%22/%3E%3Ccircle cx=%2210%22 cy=%2210%22 r=%224.5%22/%3E%3C/g%3E%3C/svg%3E")}.oo-ui-icon-halfBright,.mw-ui-icon-halfBright:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=halfBright&format=rasterized&lang=en&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E half bright %3C/title%3E%3Cpath d=%22M17 6.67V3h-4.2L9.87.07 6.94 3H3v3.67L.07 9.6 3 12.53V17h3.94l2.93 2.93L12.8 17H17v-4.47l2.93-2.93zm-7 8.93v-12a6.21 6.21 0 0 1 6 6 6.21 6.21 0 0 1-6 6z%22/%3E%3C/svg%3E")}.oo-ui-image-invert.oo-ui-icon-halfBright,.mw-ui-icon-halfBright-invert:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=halfBright&variant=invert&format=rasterized&lang=en&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E half bright %3C/title%3E%3Cg fill=%22%23fff%22%3E%3Cpath d=%22M17 6.67V3h-4.2L9.87.07 6.94 3H3v3.67L.07 9.6 3 12.53V17h3.94l2.93 2.93L12.8 17H17v-4.47l2.93-2.93zm-7 8.93v-12a6.21 6.21 0 0 1 6 6 6.21 6.21 0 0 1-6 6z%22/%3E%3C/g%3E%3C/svg%3E")}.oo-ui-image-progressive.oo-ui-icon-halfBright,.mw-ui-icon-halfBright-progressive:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=halfBright&variant=progressive&format=rasterized&lang=en&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E half bright %3C/title%3E%3Cg fill=%22%2336c%22%3E%3Cpath d=%22M17 6.67V3h-4.2L9.87.07 6.94 3H3v3.67L.07 9.6 3 12.53V17h3.94l2.93 2.93L12.8 17H17v-4.47l2.93-2.93zm-7 8.93v-12a6.21 6.21 0 0 1 6 6 6.21 6.21 0 0 1-6 6z%22/%3E%3C/g%3E%3C/svg%3E")}.oo-ui-icon-notBright,.mw-ui-icon-notBright:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=notBright&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E not bright %3C/title%3E%3Ccircle cx=%229.85%22 cy=%2210%22 r=%229%22/%3E%3C/svg%3E")}.oo-ui-image-invert.oo-ui-icon-notBright,.mw-ui-icon-notBright-invert:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=notBright&variant=invert&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E not bright %3C/title%3E%3Cg fill=%22%23fff%22%3E%3Ccircle cx=%229.85%22 cy=%2210%22 r=%229%22/%3E%3C/g%3E%3C/svg%3E")}.oo-ui-image-progressive.oo-ui-icon-notBright,.mw-ui-icon-notBright-progressive:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=notBright&variant=progressive&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E not bright %3C/title%3E%3Cg fill=%22%2336c%22%3E%3Ccircle cx=%229.85%22 cy=%2210%22 r=%229%22/%3E%3C/g%3E%3C/svg%3E")}.oo-ui-icon-eye,.mw-ui-icon-eye:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=eye&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E eye %3C/title%3E%3Cpath d=%22M10 14.5a4.5 4.5 0 1 1 4.5-4.5 4.5 4.5 0 0 1-4.5 4.5zM10 3C3 3 0 10 0 10s3 7 10 7 10-7 10-7-3-7-10-7z%22/%3E%3Ccircle cx=%2210%22 cy=%2210%22 r=%222.5%22/%3E%3C/svg%3E")}.oo-ui-image-invert.oo-ui-icon-eye,.mw-ui-icon-eye-invert:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=eye&variant=invert&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E eye %3C/title%3E%3Cg fill=%22%23fff%22%3E%3Cpath d=%22M10 14.5a4.5 4.5 0 1 1 4.5-4.5 4.5 4.5 0 0 1-4.5 4.5zM10 3C3 3 0 10 0 10s3 7 10 7 10-7 10-7-3-7-10-7z%22/%3E%3Ccircle cx=%2210%22 cy=%2210%22 r=%222.5%22/%3E%3C/g%3E%3C/svg%3E")}.oo-ui-image-progressive.oo-ui-icon-eye,.mw-ui-icon-eye-progressive:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=eye&variant=progressive&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E eye %3C/title%3E%3Cg fill=%22%2336c%22%3E%3Cpath d=%22M10 14.5a4.5 4.5 0 1 1 4.5-4.5 4.5 4.5 0 0 1-4.5 4.5zM10 3C3 3 0 10 0 10s3 7 10 7 10-7 10-7-3-7-10-7z%22/%3E%3Ccircle cx=%2210%22 cy=%2210%22 r=%222.5%22/%3E%3C/g%3E%3C/svg%3E")}.oo-ui-icon-eyeClosed,.mw-ui-icon-eyeClosed:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=eyeClosed&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E eye closed %3C/title%3E%3Cpath d=%22M12.49 9.94A2.5 2.5 0 0 0 10 7.5z%22/%3E%3Cpath d=%22M8.2 5.9a4.38 4.38 0 0 1 1.8-.4 4.5 4.5 0 0 1 4.5 4.5 4.34 4.34 0 0 1-.29 1.55L17 14.14A14 14 0 0 0 20 10s-3-7-10-7a9.63 9.63 0 0 0-4 .85zM2 2 1 3l2.55 2.4A13.89 13.89 0 0 0 0 10s3 7 10 7a9.67 9.67 0 0 0 4.64-1.16L18 19l1-1zm8 12.5A4.5 4.5 0 0 1 5.5 10a4.45 4.45 0 0 1 .6-2.2l1.53 1.44a2.47 2.47 0 0 0-.13.76 2.49 2.49 0 0 0 3.41 2.32l1.54 1.45a4.47 4.47 0 0 1-2.45.73z%22/%3E%3C/svg%3E")}.oo-ui-image-invert.oo-ui-icon-eyeClosed,.mw-ui-icon-eyeClosed-invert:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=eyeClosed&variant=invert&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E eye closed %3C/title%3E%3Cg fill=%22%23fff%22%3E%3Cpath d=%22M12.49 9.94A2.5 2.5 0 0 0 10 7.5z%22/%3E%3Cpath d=%22M8.2 5.9a4.38 4.38 0 0 1 1.8-.4 4.5 4.5 0 0 1 4.5 4.5 4.34 4.34 0 0 1-.29 1.55L17 14.14A14 14 0 0 0 20 10s-3-7-10-7a9.63 9.63 0 0 0-4 .85zM2 2 1 3l2.55 2.4A13.89 13.89 0 0 0 0 10s3 7 10 7a9.67 9.67 0 0 0 4.64-1.16L18 19l1-1zm8 12.5A4.5 4.5 0 0 1 5.5 10a4.45 4.45 0 0 1 .6-2.2l1.53 1.44a2.47 2.47 0 0 0-.13.76 2.49 2.49 0 0 0 3.41 2.32l1.54 1.45a4.47 4.47 0 0 1-2.45.73z%22/%3E%3C/g%3E%3C/svg%3E")}.oo-ui-image-progressive.oo-ui-icon-eyeClosed,.mw-ui-icon-eyeClosed-progressive:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=eyeClosed&variant=progressive&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E eye closed %3C/title%3E%3Cg fill=%22%2336c%22%3E%3Cpath d=%22M12.49 9.94A2.5 2.5 0 0 0 10 7.5z%22/%3E%3Cpath d=%22M8.2 5.9a4.38 4.38 0 0 1 1.8-.4 4.5 4.5 0 0 1 4.5 4.5 4.34 4.34 0 0 1-.29 1.55L17 14.14A14 14 0 0 0 20 10s-3-7-10-7a9.63 9.63 0 0 0-4 .85zM2 2 1 3l2.55 2.4A13.89 13.89 0 0 0 0 10s3 7 10 7a9.67 9.67 0 0 0 4.64-1.16L18 19l1-1zm8 12.5A4.5 4.5 0 0 1 5.5 10a4.45 4.45 0 0 1 .6-2.2l1.53 1.44a2.47 2.47 0 0 0-.13.76 2.49 2.49 0 0 0 3.41 2.32l1.54 1.45a4.47 4.47 0 0 1-2.45.73z%22/%3E%3C/g%3E%3C/svg%3E")}.oo-ui-icon-moon,.mw-ui-icon-moon:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=moon&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E moon %3C/title%3E%3Cpath d=%22M17.39 15.14A7.33 7.33 0 0 1 11.75 1.6c.23-.11.56-.23.79-.34a8.19 8.19 0 0 0-5.41.45 9 9 0 1 0 7 16.58 8.42 8.42 0 0 0 4.29-3.84 5.3 5.3 0 0 1-1.03.69z%22/%3E%3C/svg%3E")}.oo-ui-image-invert.oo-ui-icon-moon,.mw-ui-icon-moon-invert:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=moon&variant=invert&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E moon %3C/title%3E%3Cg fill=%22%23fff%22%3E%3Cpath d=%22M17.39 15.14A7.33 7.33 0 0 1 11.75 1.6c.23-.11.56-.23.79-.34a8.19 8.19 0 0 0-5.41.45 9 9 0 1 0 7 16.58 8.42 8.42 0 0 0 4.29-3.84 5.3 5.3 0 0 1-1.03.69z%22/%3E%3C/g%3E%3C/svg%3E")}.oo-ui-image-progressive.oo-ui-icon-moon,.mw-ui-icon-moon-progressive:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=moon&variant=progressive&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E moon %3C/title%3E%3Cg fill=%22%2336c%22%3E%3Cpath d=%22M17.39 15.14A7.33 7.33 0 0 1 11.75 1.6c.23-.11.56-.23.79-.34a8.19 8.19 0 0 0-5.41.45 9 9 0 1 0 7 16.58 8.42 8.42 0 0 0 4.29-3.84 5.3 5.3 0 0 1-1.03.69z%22/%3E%3C/g%3E%3C/svg%3E")}.oo-ui-icon-largerText,.mw-ui-icon-largerText:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=largerText&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E larger text %3C/title%3E%3Cpath d=%22M17.66 18h-2a.85.85 0 0 1-.56-.17 1.11 1.11 0 0 1-.32-.43l-1.33-3.53h-6.9L5.22 17.4a1.06 1.06 0 0 1-.31.41.83.83 0 0 1-.56.19h-2L8.68 2h2.63zm-4.92-6-2.2-5.84A16.17 16.17 0 0 1 10 4.43q-.12.52-.27 1t-.27.77L7.26 12z%22/%3E%3C/svg%3E")}.oo-ui-image-invert.oo-ui-icon-largerText,.mw-ui-icon-largerText-invert:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=largerText&variant=invert&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E larger text %3C/title%3E%3Cg fill=%22%23fff%22%3E%3Cpath d=%22M17.66 18h-2a.85.85 0 0 1-.56-.17 1.11 1.11 0 0 1-.32-.43l-1.33-3.53h-6.9L5.22 17.4a1.06 1.06 0 0 1-.31.41.83.83 0 0 1-.56.19h-2L8.68 2h2.63zm-4.92-6-2.2-5.84A16.17 16.17 0 0 1 10 4.43q-.12.52-.27 1t-.27.77L7.26 12z%22/%3E%3C/g%3E%3C/svg%3E")}.oo-ui-image-progressive.oo-ui-icon-largerText,.mw-ui-icon-largerText-progressive:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=largerText&variant=progressive&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E larger text %3C/title%3E%3Cg fill=%22%2336c%22%3E%3Cpath d=%22M17.66 18h-2a.85.85 0 0 1-.56-.17 1.11 1.11 0 0 1-.32-.43l-1.33-3.53h-6.9L5.22 17.4a1.06 1.06 0 0 1-.31.41.83.83 0 0 1-.56.19h-2L8.68 2h2.63zm-4.92-6-2.2-5.84A16.17 16.17 0 0 1 10 4.43q-.12.52-.27 1t-.27.77L7.26 12z%22/%3E%3C/g%3E%3C/svg%3E")}.oo-ui-icon-smallerText,.mw-ui-icon-smallerText:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=smallerText&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E smaller text %3C/title%3E%3Cpath d=%22M15.75 18h-1.51a.64.64 0 0 1-.42-.13.83.83 0 0 1-.24-.32l-1-2.65H7.41l-1 2.65a.79.79 0 0 1-.23.31.62.62 0 0 1-.42.14H4.25L9 6h2zm-3.69-4.5L10.4 9.12a12.13 12.13 0 0 1-.4-1.3q-.09.39-.2.72t-.2.58L7.95 13.5z%22/%3E%3C/svg%3E")}.oo-ui-image-invert.oo-ui-icon-smallerText,.mw-ui-icon-smallerText-invert:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=smallerText&variant=invert&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E smaller text %3C/title%3E%3Cg fill=%22%23fff%22%3E%3Cpath d=%22M15.75 18h-1.51a.64.64 0 0 1-.42-.13.83.83 0 0 1-.24-.32l-1-2.65H7.41l-1 2.65a.79.79 0 0 1-.23.31.62.62 0 0 1-.42.14H4.25L9 6h2zm-3.69-4.5L10.4 9.12a12.13 12.13 0 0 1-.4-1.3q-.09.39-.2.72t-.2.58L7.95 13.5z%22/%3E%3C/g%3E%3C/svg%3E")}.oo-ui-image-progressive.oo-ui-icon-smallerText,.mw-ui-icon-smallerText-progressive:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=smallerText&variant=progressive&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E smaller text %3C/title%3E%3Cg fill=%22%2336c%22%3E%3Cpath d=%22M15.75 18h-1.51a.64.64 0 0 1-.42-.13.83.83 0 0 1-.24-.32l-1-2.65H7.41l-1 2.65a.79.79 0 0 1-.23.31.62.62 0 0 1-.42.14H4.25L9 6h2zm-3.69-4.5L10.4 9.12a12.13 12.13 0 0 1-.4-1.3q-.09.39-.2.72t-.2.58L7.95 13.5z%22/%3E%3C/g%3E%3C/svg%3E")}.oo-ui-icon-visionSimulator,.mw-ui-icon-visionSimulator:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=visionSimulator&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E vision simulator %3C/title%3E%3Cpath d=%22M17.5 11.83a.79.79 0 0 1-.83.83h-3.34A1.49 1.49 0 0 1 11.67 11V9.33a.79.79 0 0 1 .83-.83h4.17a.79.79 0 0 1 .83.83zM8.33 11a1.49 1.49 0 0 1-1.67 1.67H3.33a.79.79 0 0 1-.83-.83V9.33a.79.79 0 0 1 .83-.83H7.5a.79.79 0 0 1 .83.83zM0 6.2v6.28a.2.2 0 0 0 .2.2h1.72a1.61 1.61 0 0 0 1.42.83h3.33A2.46 2.46 0 0 0 9.13 12a.19.19 0 0 1 .18-.13h1.39a.19.19 0 0 1 .18.13 2.46 2.46 0 0 0 2.46 1.53h3.33c.55 0 1.1 0 1.37-.7a.2.2 0 0 1 .18-.13h1.58a.2.2 0 0 0 .2-.2V6.2a.2.2 0 0 0-.2-.2H.2a.2.2 0 0 0-.2.2z%22/%3E%3C/svg%3E")}.oo-ui-image-invert.oo-ui-icon-visionSimulator,.mw-ui-icon-visionSimulator-invert:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=visionSimulator&variant=invert&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E vision simulator %3C/title%3E%3Cg fill=%22%23fff%22%3E%3Cpath d=%22M17.5 11.83a.79.79 0 0 1-.83.83h-3.34A1.49 1.49 0 0 1 11.67 11V9.33a.79.79 0 0 1 .83-.83h4.17a.79.79 0 0 1 .83.83zM8.33 11a1.49 1.49 0 0 1-1.67 1.67H3.33a.79.79 0 0 1-.83-.83V9.33a.79.79 0 0 1 .83-.83H7.5a.79.79 0 0 1 .83.83zM0 6.2v6.28a.2.2 0 0 0 .2.2h1.72a1.61 1.61 0 0 0 1.42.83h3.33A2.46 2.46 0 0 0 9.13 12a.19.19 0 0 1 .18-.13h1.39a.19.19 0 0 1 .18.13 2.46 2.46 0 0 0 2.46 1.53h3.33c.55 0 1.1 0 1.37-.7a.2.2 0 0 1 .18-.13h1.58a.2.2 0 0 0 .2-.2V6.2a.2.2 0 0 0-.2-.2H.2a.2.2 0 0 0-.2.2z%22/%3E%3C/g%3E%3C/svg%3E")}.oo-ui-image-progressive.oo-ui-icon-visionSimulator,.mw-ui-icon-visionSimulator-progressive:before{background-image:url(/load.php?modules=oojs-ui.styles.icons-accessibility&image=visionSimulator&variant=progressive&format=rasterized&skin=vector&version=1gpp1);background-image:linear-gradient(transparent,transparent),url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2220%22 height=%2220%22 viewBox=%220 0 20 20%22%3E%3Ctitle%3E vision simulator %3C/title%3E%3Cg fill=%22%2336c%22%3E%3Cpath d=%22M17.5 11.83a.79.79 0 0 1-.83.83h-3.34A1.49 1.49 0 0 1 11.67 11V9.33a.79.79 0 0 1 .83-.83h4.17a.79.79 0 0 1 .83.83zM8.33 11a1.49 1.49 0 0 1-1.67 1.67H3.33a.79.79 0 0 1-.83-.83V9.33a.79.79 0 0 1 .83-.83H7.5a.79.79 0 0 1 .83.83zM0 6.2v6.28a.2.2 0 0 0 .2.2h1.72a1.61 1.61 0 0 0 1.42.83h3.33A2.46 2.46 0 0 0 9.13 12a.19.19 0 0 1 .18-.13h1.39a.19.19 0 0 1 .18.13 2.46 2.46 0 0 0 2.46 1.53h3.33c.55 0 1.1 0 1.37-.7a.2.2 0 0 1 .18-.13h1.58a.2.2 0 0 0 .2-.2V6.2a.2.2 0 0 0-.2-.2H.2a.2.2 0 0 0-.2.2z%22/%3E%3C/g%3E%3C/svg%3E")}
+.ve-init-mw-progressBarWidget{height:1em;overflow:hidden;margin:0 25%}.ve-init-mw-progressBarWidget-bar{height:1em;width:0} .ve-init-mw-progressBarWidget{background-color:#fff;box-sizing:border-box;height:0.875em;border:1px solid #36c;border-radius:0.875em;box-shadow:0 1px 1px rgba(0,0,0,0.15)}.ve-init-mw-progressBarWidget-bar{background-color:#36c;height:0.875em}
+#pending-review{border:3px solid red} .mw-notification-area.mw-notification-area-modqueued{position:static;margin-left:auto;margin-right:auto;width:max-content;font-size:0.9em;line-height:25px}
+@media screen {
+	.toctoggle{-moz-user-select:none;-webkit-user-select:none;-ms-user-select:none;user-select:none;font-size:94%}}
+#postedit-modqueued a{font-weight:bold}#pending-review{display:inline-block;padding:5px;margin:10px;margin-left:0;font-weight:bold;font-size:120%;text-transform:uppercase}</style><style>
+.ve-init-mw-tempWikitextEditorWidget{border:0;padding:0;color:inherit;line-height:1.5em;width:100%; -moz-tab-size:4; tab-size:4; }.ve-init-mw-tempWikitextEditorWidget:focus{outline:0;padding:0}.ve-init-mw-tempWikitextEditorWidget::selection{background:rgba(109,169,247,0.5); }</style><style>
+.ve-active .ve-init-mw-desktopArticleTarget-editableContent #toc,.ve-active #siteNotice,.ve-active .mw-indicators,.ve-active #t-print,.ve-active #t-permalink,.ve-active #p-coll-print_export,.ve-active #t-cite,.ve-active .ve-init-mw-desktopArticleTarget-editableContent,.ve-active .ve-init-mw-tempWikitextEditorWidget{display:none}.ve-deactivating .ve-ui-surface{display:none}.ve-activating{ }.ve-activating .ve-ui-surface{height:0;padding:0 !important; overflow:hidden} .ve-loading .ve-init-mw-desktopArticleTarget-targetContainer > :not(.ve-init-mw-desktopArticleTarget-toolbarPlaceholder):not(.ve-init-mw-desktopArticleTarget),.ve-loading .ve-init-mw-desktopArticleTarget-originalContent,.ve-activated:not(.ve-loading) .ve-init-mw-desktopArticleTarget-uneditableContent{pointer-events:none;-webkit-user-select:none;-moz-user-select:none;-ms-user-select:none;user-select:none;opacity:0.5}.ve-activated .ve-init-mw-desktopArticleTarget-targetContainer #firstHeading{ -webkit-user-select:text;-moz-user-select:text;-ms-user-select:text;user-select:text;pointer-events:auto;cursor:text}.ve-activated .ve-init-mw-desktopArticleTarget-targetContainer #firstHeading a{ pointer-events:none}.ve-activated .ve-init-mw-desktopArticleTarget-originalContent #catlinks{cursor:pointer}.ve-activated .ve-init-mw-desktopArticleTarget-originalContent #catlinks:hover{ background:#e9f2fd}.ve-activated .ve-init-mw-desktopArticleTarget-originalContent #catlinks a{opacity:1} .ve-init-mw-desktopArticleTarget-loading-overlay{z-index:2;position:absolute;width:100%;top:1em}.ve-init-mw-desktopArticleTarget-toolbarPlaceholder{overflow:hidden;transition:height 250ms ease;height:0;padding-bottom:2px; }.ve-init-mw-desktopArticleTarget-toolbarPlaceholder-bar{transform:translateY(-100%);transition:transform 250ms ease}.ve-init-mw-desktopArticleTarget-toolbarPlaceholder-open .ve-init-mw-desktopArticleTarget-toolbarPlaceholder-bar{transform:translateY(0)}.ve-init-mw-desktopArticleTarget-toolbarPlaceholder-floating{transition:none}.ve-init-mw-desktopArticleTarget-toolbarPlaceholder-floating .ve-init-mw-desktopArticleTarget-toolbarPlaceholder-bar{position:fixed;top:0;z-index:1;background:#fff} .oo-ui-element-hidden{display:none !important; } .mw-editsection{ unicode-bidi:-moz-isolate;unicode-bidi:-webkit-isolate;unicode-bidi:isolate}.mw-editsection:before{content:'\200B'}.mw-editsection a{white-space:nowrap}.mw-editsection-divider{color:#54595d} .ve-init-mw-desktopArticleTarget-toolbarPlaceholder-bar{height:42px;border-bottom:1px solid #c8ccd1;box-shadow:0 1px 1px 0 rgba(0,0,0,0.1)}.ve-init-mw-desktopArticleTarget-toolbarPlaceholder-floating,.ve-init-mw-desktopArticleTarget-toolbarPlaceholder-open{height:42px} .ve-init-mw-desktopArticleTarget-toolbar,.ve-init-mw-desktopArticleTarget-toolbarPlaceholder{font-size:0.875em; margin:-1.14em -1.14em 1.14em -1.14em; }@media screen and (min-width:982px){.ve-init-mw-desktopArticleTarget-toolbar,.ve-init-mw-desktopArticleTarget-toolbarPlaceholder{ margin:-1.43em -1.71em 1.43em -1.71em}}.ve-init-mw-desktopArticleTarget-toolbarPlaceholder-floating{margin-top:0;margin-bottom:0} .ve-activated .vector-menu-tabs .selected{box-shadow:inset 0 -1px 0 #e1f1fc}</style><meta name="ResourceLoaderDynamicStyles" content="">
+<link rel="stylesheet" href="%D0%A0%D0%B0%D1%81%D1%88%D0%B8%D1%80%D1%8F%D0%B5%D0%BC%D1%8B%D0%B8%CC%86%20%D0%B8%D0%BD%D1%82%D0%B5%D1%80%D1%84%D0%B5%D0%B8%CC%86%D1%81%20%D0%BA%D0%BE%D0%BD%D1%82%D1%80%D0%BE%D0%BB%D0%BB%D0%B5%D1%80%D0%B0%20%D1%85%D0%BE%D1%81%D1%82%D0%B0%20-%20OSDev%20Wiki_files/load_mN0S.css">
+<meta name="generator" content="MediaWiki 1.39.7">
+<meta name="format-detection" content="telephone=no">
+<meta name="viewport" content="width=1000">
+<link rel="icon" href="https://wiki.osdev.org/favicon.ico">
+<link rel="search" type="application/opensearchdescription+xml" href="https://wiki.osdev.org/opensearch_desc.php" title="OSDev Wiki (en)">
+<link rel="EditURI" type="application/rsd+xml" href="https://wiki.osdev.org/api.php?action=rsd">
+<link rel="alternate" type="application/atom+xml" title="OSDev Wiki Atom feed" href="https://wiki.osdev.org/index.php?title=Special:RecentChanges&amp;feed=atom">
+</head>
+<body class="mediawiki ltr sitedir-ltr mw-hide-empty-elt ns-0 ns-subject page-EXtensible_Host_Controller_Interface rootpage-EXtensible_Host_Controller_Interface skin-vector action-view skin-vector-legacy vector-feature-language-in-header-enabled vector-feature-language-in-main-page-header-disabled vector-feature-language-alert-in-sidebar-disabled vector-feature-sticky-header-disabled vector-feature-sticky-header-edit-disabled vector-feature-table-of-contents-disabled vector-feature-visual-enhancement-next-disabled"><div id="mw-page-base" class="noprint"></div>
+<div id="mw-head-base" class="noprint"></div>
+<div id="content" class="mw-body ve-init-mw-desktopArticleTarget-targetContainer" role="main">
+	<a id="top"></a>
+	<div id="siteNotice"></div>
+	<div class="mw-indicators">
+	</div>
+	<h1 id="firstHeading" class="firstHeading mw-first-heading">Расширяемый интерфейс контроллера хоста </h1>
+	<div id="bodyContent" class="vector-body">
+		<div id="siteSub" class="noprint">From OSDev Wiki</div>
+		<div id="contentSub"></div>
+		<div id="contentSub2"></div>
+		
+		<div id="jump-to-nav"></div>
+		<a class="mw-jump-link" href="#mw-head">Перейти к навигации </a>
+		<a class="mw-jump-link" href="#searchInput"> Перейти к поиску </a>
+		<div id="mw-content-text" class="mw-body-content mw-content-ltr" lang="en" dir="ltr"><div class="mw-parser-output"><p>Интерфейс расширяемого хост-контроллера (xHCI) определяет описание хост-контроллера для универсальной последовательной шины ( <a href="https://wiki.osdev.org/USB" class="mw-redirect" title="USB"> USB </a>
+ ) на уровне регистров, способного взаимодействовать с устройствами, 
+совместимыми с USB 1.x, 2.0 и 3.0, без использования дополнительных 
+контроллеров.
+ </p>
+<div id="toc" class="toc" role="navigation" aria-labelledby="mw-toc-heading"><input type="checkbox" role="button" id="toctogglecheckbox" class="toctogglecheckbox" style="display:none"><div class="toctitle" lang="en" dir="ltr"><h2 id="mw-toc-heading">Содержание </h2><span class="toctogglespan"><label class="toctogglelabel" for="toctogglecheckbox"></label></span></div>
+<ul>
+<li class="toclevel-1 tocsection-1"><a href="#Technical_Details"><span class="tocnumber">1 </span> <span class="toctext"> Технические характеристики </span></a></li>
+<li class="toclevel-1 tocsection-2"><a href="#Capability_Registers"><span class="tocnumber">2 </span> <span class="toctext"> Регистра возможностей </span></a></li>
+<li class="toclevel-1 tocsection-3"><a href="#Operational_Registers"><span class="tocnumber">3 </span> <span class="toctext"> Операционных регистра </span></a></li>
+<li class="toclevel-1 tocsection-4"><a href="#Port_Registers"><span class="tocnumber">4 </span> <span class="toctext"> Портовых регистра </span></a></li>
+<li class="toclevel-1 tocsection-5"><a href="#Runtime_Registers"><span class="tocnumber">5 </span> <span class="toctext"> регистров времени выполнения </span></a></li>
+<li class="toclevel-1 tocsection-6"><a href="#Doorbell_Registers"><span class="tocnumber">6 </span> <span class="toctext"> дверных звонков </span></a></li>
+<li class="toclevel-1 tocsection-7"><a href="#Virtual_Registers"><span class="tocnumber">7 </span> <span class="toctext"> виртуальных регистров </span></a></li>
+<li class="toclevel-1 tocsection-8"><a href="#Chipsets_with_both_EHC_and_xHC"><span class="tocnumber">8 </span> <span class="toctext"> чипсетов с поддержкой EHC и xHC </span></a></li>
+<li class="toclevel-1 tocsection-9"><a href="#External_Links"><span class="tocnumber">9 </span> <span class="toctext"> Внешние ссылки </span></a></li>
+</ul>
+</div>
+
+<h2><span class="mw-headline" id="Technical_Details">Технические характеристики </span></h2>
+<p>Контроллер xHCI взаимодействует с операционной системой, используя 
+регистры, отображаемые в память, которые можно найти, выполнив поиск в <a href="https://wiki.osdev.org/PCI" title="ЧКВ"> конфигурационном пространстве PCI </a>
+ устройства с определенным идентификатором класса, идентификатором 
+подкласса и номером интерфейса. Все контроллеры xHCI будут иметь 
+идентификатор класса 0x0C, идентификатор подкласса 0x03 и значение 
+интерфейса 0x30. Конфигурационное пространство для этого устройства 
+будет содержать два регистра базового адреса: BAR0 и BAR1. Эти два 
+32-битных поля адреса объединяются, образуя один 64-битный адрес, 
+указывающий на базовый адрес регистров, отображаемых в память 
+контроллера.
+ </p>
+<h2><span class="mw-headline" id="Capability_Registers">Реестры возможностей </span></h2>
+<p>Регистры возможностей расположены по адресу, указанному в пространстве конфигурации PCI.
+ </p>
+<table border="2" cellpadding="4" cellspacing="0" style="margin-top:1em; margin-bottom:1em; background:#f9f9f9; border:1px #aaa solid; border-collapse:collapse; {{{1}}}">
+<tbody><tr>
+<th>Смещение (шестнадцатеричное)
+ </th>
+<th>Имя
+ </th>
+<th>Описание
+ </th></tr>
+<tr>
+<td>00 </td>
+<td>ДЛИНА ЧЕШУИ </td>
+<td>Длина регистра возможностей
+ </td></tr>
+<tr>
+<td>01 </td>
+<td>РСВД </td>
+<td>Сдержанный
+ </td></tr>
+<tr>
+<td>02 </td>
+<td>HCIVERSION </td>
+<td>Номер версии интерфейса
+ </td></tr>
+<tr>
+<td>04 </td>
+<td>HCSPARAMS1 </td>
+<td>Структурные параметры 1
+ </td></tr>
+<tr>
+<td>08 </td>
+<td>HCSPARAMS2 </td>
+<td>Структурные параметры 2
+ </td></tr>
+<tr>
+<td>0С </td>
+<td>HCSPARAMS3 </td>
+<td>Структурные параметры 3
+ </td></tr>
+<tr>
+<td>10 </td>
+<td>HCCPARAMS1 </td>
+<td>Параметры возможностей
+ </td></tr>
+<tr>
+<td>14</td>
+<td>DBOFF</td>
+<td>Doorbell Offset
+</td></tr>
+<tr>
+<td>18</td>
+<td>RTSOFF</td>
+<td>Runtime Registers Space Offset
+</td></tr>
+<tr>
+<td>1C</td>
+<td>HCCPARMS2</td>
+<td>Capability Parameters 2
+</td></tr>
+</tbody></table>
+<h2><span class="mw-headline" id="Operational_Registers">Operational Registers</span></h2>
+<p>The operational registers are located after the capability registers 
+in memory, and can be found by adding the CAPLENGTH field to the base 
+address specified in the PCI configuration space.
+</p>
+<table border="2" cellpadding="4" cellspacing="0" style="margin-top:1em; margin-bottom:1em; background:#f9f9f9; border:1px #aaa solid; border-collapse:collapse; {{{1}}}">
+<tbody><tr>
+<th>Offset (Hex)
+</th>
+<th>Name
+</th>
+<th>Description
+</th></tr>
+<tr>
+<td>00</td>
+<td>USBCMD</td>
+<td>USB Command
+</td></tr>
+<tr>
+<td>04</td>
+<td>USBSTS</td>
+<td>USB Status
+</td></tr>
+<tr>
+<td>08</td>
+<td>PAGESIZE</td>
+<td>Page Size
+</td></tr>
+<tr>
+<td>14</td>
+<td>DNCTRL</td>
+<td>Device Notification Control
+</td></tr>
+<tr>
+<td>18</td>
+<td>CRCR</td>
+<td>Command Ring Control
+</td></tr>
+<tr>
+<td>30</td>
+<td>DCBAAP</td>
+<td>Device Context Base Address Array Pointer
+</td></tr>
+<tr>
+<td>38</td>
+<td>CONFIG</td>
+<td>Configure
+</td></tr>
+</tbody></table>
+<p>Reading CRCR (or bits of it) provides '0'. Therefore, keep your own 
+track of this address. Bit 0 of CRCR is the Consumer Cycle State (CCS) 
+flag.
+</p>
+<h2><span class="mw-headline" id="Port_Registers">Port Registers</span></h2>
+<p>At the end of the operational registers (<b>at offset 0x400!</b>), 
+each port on the root hub is assigned a set of registers.  The number of
+ entries in the port registers table is determined by the MaxPorts value
+ in the HCSPARAMS1 register.
+</p>
+<table border="2" cellpadding="4" cellspacing="0" style="margin-top:1em; margin-bottom:1em; background:#f9f9f9; border:1px #aaa solid; border-collapse:collapse; {{{1}}}">
+<tbody><tr>
+<th>Offset (Hex)
+</th>
+<th>Name
+</th>
+<th>Description
+</th></tr>
+<tr>
+<td>00</td>
+<td>PORTSC</td>
+<td>Port Status and Control
+</td></tr>
+<tr>
+<td>04</td>
+<td>PORTPMSC</td>
+<td>Port Power Management Status and Control
+</td></tr>
+<tr>
+<td>08</td>
+<td>PORTLI</td>
+<td>Port Link Info
+</td></tr>
+<tr>
+<td>0C</td>
+<td>reserved
+</td></tr>
+</tbody></table>
+<h2><span class="mw-headline" id="Runtime_Registers">Runtime Registers</span></h2>
+<p>The runtime registers are located after the operational registers in 
+memory, and can be found by adding the RTSOFF field to the base address 
+specified in the PCI configuration space.
+</p>
+<table border="2" cellpadding="4" cellspacing="0" style="margin-top:1em; margin-bottom:1em; background:#f9f9f9; border:1px #aaa solid; border-collapse:collapse; {{{1}}}">
+<tbody><tr>
+<th>Offset (Hex)
+</th>
+<th>Name
+</th>
+<th>Description
+</th></tr>
+<tr>
+<td>00</td>
+<td>MFINDEX</td>
+<td>Microframe Index
+</td></tr>
+<tr>
+<td>20</td>
+<td>IR0-1023</td>
+<td>Interrupter Register Sets
+</td></tr>
+</tbody></table>
+<p>Starting at offset 0x20, each interrupter register set defines the 
+event ring memory addresses needed to send and receive events and data 
+to the USB bus.
+</p>
+<table border="2" cellpadding="4" cellspacing="0" style="margin-top:1em; margin-bottom:1em; background:#f9f9f9; border:1px #aaa solid; border-collapse:collapse; {{{1}}}">
+<tbody><tr>
+<th>Offset (Hex)
+</th>
+<th>Name
+</th>
+<th>Description
+</th></tr>
+<tr>
+<td>00</td>
+<td>IMAN</td>
+<td>Interrupter Management
+</td></tr>
+<tr>
+<td>04</td>
+<td>IMOD</td>
+<td>Interrupter Moderation
+</td></tr>
+<tr>
+<td>08</td>
+<td>ERSTSZ</td>
+<td>Event Ring Segment Table Size
+</td></tr>
+<tr>
+<td>10</td>
+<td>ERSTBA</td>
+<td>Event Ring Segment Table Base Address
+</td></tr>
+<tr>
+<td>18</td>
+<td>ERDP</td>
+<td>Event Ring Dequeue Pointer
+</td></tr>
+</tbody></table>
+<h2><span class="mw-headline" id="Doorbell_Registers">Doorbell Registers</span></h2>
+<p>The doorbell registers are located after the runtime registers in 
+memory, and can be found by adding the DBOFF field to the base address 
+specified in the PCI configuration space.  The length of the doorbell 
+register table is based on the number of ports specified in the MaxSlots
+ field in the HCSPARAMS1 register above.  Each doorbell register is 
+32-bits long, and is used to notify the controller that there are 
+pending operations to be performed on a specific device slot.
+</p>
+<h2><span class="mw-headline" id="Virtual_Registers">Virtual Registers</span></h2>
+<p>The xHCI specifications support "virtual" controllers that can be 
+used to support multiple virtual machines running on a single physical 
+machine.  These registers must be configured and managed by the VM host,
+ and effectively duplicate the registers above for use by the guest VMs.
+</p>
+<h2><span class="mw-headline" id="Chipsets_with_both_EHC_and_xHC">Chipsets with both EHC and xHC</span></h2>
+<p>Some chipsets such as the Intel Panther Point (<code>8086:1e31</code>)
+ feature both an EHC and xHC. Both controllers share the same set of 
+ports and access to each port is determined by a hardware toggle (0 = 
+EHC, 1 = xHC).
+</p><p>To switch a port to either the EHC or the xHC registers <code>USB3_PSSEN</code> (<code>0xd0</code>) and <code>XUSB2PR</code> (<code>0xd8</code>) must be written.
+</p><p>For example, to switch all available ports to the xHC (make sure the registers are actually present!):
+</p>
+<div class="mw-highlight mw-highlight-lang-c mw-content-ltr" dir="ltr"><pre><span></span><span class="cp">#define USB3_PSSEN 0xd0</span>
+<span class="cp">#define XUSB2PR    0xd8</span>
+
+<span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">pci_header</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">...;</span><span class="w"></span>
+<span class="p">(</span><span class="n">u32</span><span class="w"> </span><span class="o">*</span><span class="p">)(</span><span class="n">pci_header</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">USB3_PSSEN</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0xffff</span><span class="n">_ffff</span><span class="p">;</span><span class="w"> </span><span class="c1">// Enable SuperSpeed on USB3 ports</span>
+<span class="p">(</span><span class="n">u32</span><span class="w"> </span><span class="o">*</span><span class="p">)(</span><span class="n">pci_header</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">XUSB2PR</span><span class="p">)</span><span class="w">    </span><span class="o">=</span><span class="w"> </span><span class="mh">0xffff</span><span class="n">_ffff</span><span class="p">;</span><span class="w"> </span><span class="c1">// Switch over USB2 ports</span>
+</pre></div>
+<h2><span class="mw-headline" id="External_Links">External Links</span></h2>
+<ul><li><a rel="nofollow" class="external text" href="https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/extensible-host-controler-interface-usb-xhci.pdf">eXtensible Host Controller Interface Specification 1.2</a></li>
+<li>Commit <code>69e848c2090aebba5698a1620604c7dccb448684</code> in the Linux source tree</li>
+<li><a rel="nofollow" class="external text" href="https://github.com/haiku/haiku/blob/master/src/add-ons/kernel/busses/usb/xhci.cpp">Haiku's XHCI implementation</a></li></ul>
+<!-- 
+NewPP limit report
+Cached time: 20260828033556
+Cache expiry: 86400
+Reduced expiry: false
+Complications: [show‐toc]
+CPU time usage: 0.017 seconds
+Real time usage: 0.142 seconds
+Preprocessor visited node count: 53/1000000
+Post‐expand include size: 810/2097152 bytes
+Template argument size: 0/2097152 bytes
+Highest expansion depth: 3/100
+Expensive parser function count: 0/100
+Unstrip recursion depth: 0/20
+Unstrip post‐expand size: 1513/5000000 bytes
+-->
+<!--
+Transclusion expansion time report (%,ms,calls,template)
+100.00%    0.794      1 -total
+ 74.02%    0.588      5 Template:Wikitable
+-->
+
+<!-- Saved in parser cache with key wikidb:pcache:idhash:3309-0!canonical and timestamp 20260828033556 and revision id 30300.
+ -->
+</div>
+<div class="printfooter" data-nosnippet="">Retrieved from "<a dir="ltr" href="https://wiki.osdev.org/index.php?title=EXtensible_Host_Controller_Interface&amp;oldid=30300">https://wiki.osdev.org/index.php?title=EXtensible_Host_Controller_Interface&amp;oldid=30300</a>"</div></div>
+		<div id="catlinks" class="catlinks" data-mw="interface"><div id="mw-normal-catlinks" class="mw-normal-catlinks"><a href="https://wiki.osdev.org/Special:Categories" title="Special:Categories">Category</a>: <ul><li><a href="https://wiki.osdev.org/Category:USB" title="Category:USB">USB</a></li></ul></div></div>
+	</div>
+</div>
+
+<div id="mw-navigation">
+	<h2>Navigation menu</h2>
+	<div id="mw-head">
+		
+
+<nav id="p-personal" class="vector-menu mw-portlet mw-portlet-personal vector-user-menu-legacy" aria-labelledby="p-personal-label" role="navigation">
+	<h3 id="p-personal-label" class="vector-menu-heading ">
+		<span class="vector-menu-heading-label">Personal tools</span>
+	</h3>
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list"><li id="pt-login" class="mw-list-item"><a href="https://wiki.osdev.org/index.php?title=Special:UserLogin&amp;returnto=EXtensible+Host+Controller+Interface" title="Вам рекомендуется войти в систему, однако это не обязательно. [o]" accesskey="o"><span>Авторизоваться </span></a></li><li id="pt-darkmode" class="mw-list-item"><a href="#" class="ext-darkmode-link"><span>Темный режим </span></a></li></ul>
+		
+	</div>
+</nav>
+
+		<div id="left-navigation">
+			
+
+<nav id="p-namespaces" class="vector-menu mw-portlet mw-portlet-namespaces vector-menu-tabs vector-menu-tabs-legacy" aria-labelledby="p-namespaces-label" role="navigation">
+	<h3 id="p-namespaces-label" class="vector-menu-heading ">
+		<span class="vector-menu-heading-label">Namespaces</span>
+	</h3>
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list"><li id="ca-nstab-main" class="selected mw-list-item"><a href="https://wiki.osdev.org/EXtensible_Host_Controller_Interface" title="Просмотреть страницу содержимого [c]" accesskey="c"><span>Страница </span></a></li><li id="ca-talk" class="new mw-list-item"><a href="https://wiki.osdev.org/index.php?title=Talk:EXtensible_Host_Controller_Interface&amp;action=edit&amp;redlink=1" rel="discussion" title="Обсуждение страницы с контентом (страница не существует) [t]" accesskey="t"><span>Обсуждение </span></a></li></ul>
+		
+	</div>
+</nav>
+
+			
+
+<nav id="p-variants" class="vector-menu mw-portlet mw-portlet-variants emptyPortlet vector-menu-dropdown" aria-labelledby="p-variants-label" role="navigation">
+	<input type="checkbox" id="p-variants-checkbox" role="button" aria-haspopup="true" data-event-name="ui.dropdown-p-variants" class="vector-menu-checkbox" aria-labelledby="p-variants-label">
+	<label id="p-variants-label" aria-label="Change language variant" class="vector-menu-heading ">
+		<span class="vector-menu-heading-label">English</span>
+	</label>
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list"></ul>
+		
+	</div>
+</nav>
+
+		</div>
+		<div id="right-navigation">
+			
+
+<nav id="p-views" class="vector-menu mw-portlet mw-portlet-views vector-menu-tabs vector-menu-tabs-legacy" aria-labelledby="p-views-label" role="navigation">
+	<h3 id="p-views-label" class="vector-menu-heading ">
+		<span class="vector-menu-heading-label">Views</span>
+	</h3>
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list"><li id="ca-view" class="selected mw-list-item collapsible"><a href="https://wiki.osdev.org/EXtensible_Host_Controller_Interface"><span>Читать </span></a></li><li id="ca-viewsource" class="mw-list-item collapsible"><a href="https://wiki.osdev.org/index.php?title=EXtensible_Host_Controller_Interface&amp;action=edit" title="Эта страница защищена.
+Вы можете посмотреть его исходный код [e]" accesskey="e"><span>Просмотреть исходный код </span></a></li><li id="ca-history" class="mw-list-item collapsible"><a href="https://wiki.osdev.org/index.php?title=EXtensible_Host_Controller_Interface&amp;action=history" title="Предыдущие изменения этой страницы [h]" accesskey="h"><span>Просмотреть историю </span></a></li></ul>
+		
+	</div>
+</nav>
+
+			
+
+<nav id="p-cactions" class="vector-menu mw-portlet mw-portlet-cactions emptyPortlet vector-menu-dropdown" aria-labelledby="p-cactions-label" role="navigation" title="More options">
+	<input type="checkbox" id="p-cactions-checkbox" role="button" aria-haspopup="true" data-event-name="ui.dropdown-p-cactions" class="vector-menu-checkbox" aria-labelledby="p-cactions-label">
+	<label id="p-cactions-label" class="vector-menu-heading ">
+		<span class="vector-menu-heading-label">More</span>
+	</label>
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list"></ul>
+		
+	</div>
+</nav>
+
+			
+<div id="p-search" role="search" class="vector-search-box-vue  vector-search-box-show-thumbnail vector-search-box-auto-expand-width vector-search-box">
+	<div>
+			<h3>
+				<label for="searchInput">Поиск </label>
+			</h3>
+		<form action="/index.php" id="searchform" class="vector-search-box-form">
+			<div id="simpleSearch" class="vector-search-box-inner" data-search-loc="header-navigation">
+				<input class="vector-search-box-input" type="search" name="search" placeholder="Поиск в OSDev Wiki" aria-label="Search OSDev Wiki" autocapitalize="sentences" title="Поиск в вики OSDev [f]" accesskey="f" id="searchInput">
+				<input type="hidden" name="title" value="Special:Search">
+				<input id="mw-searchButton" class="searchButton mw-fallbackSearchButton" type="submit" name="fulltext" title="Найдите этот текст на соответствующих страницах." value="Поиск">
+				<input id="searchButton" class="searchButton" type="submit" name="go" title="Перейдите на страницу с точно таким же названием, если она существует." value="Идти">
+			</div>
+		</form>
+	</div>
+</div>
+
+		</div>
+	</div>
+	
+
+<div id="mw-panel">
+	<div id="p-logo" role="banner">
+		<a class="mw-wiki-logo" href="https://wiki.osdev.org/Main_Page" title="Перейти на главную страницу"></a>
+	</div>
+	
+
+<nav id="p-navigation" class="vector-menu mw-portlet mw-portlet-navigation vector-menu-portal portal" aria-labelledby="p-navigation-label" role="navigation">
+	<h3 id="p-navigation-label" class="vector-menu-heading ">
+		<span class="vector-menu-heading-label">Navigation</span>
+	</h3>
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list"><li id="n-mainpage" class="mw-list-item"><a href="https://wiki.osdev.org/Main_Page" title="Перейти на главную страницу [z]" accesskey="z"><span>Главная страница </span></a></li><li id="n-portal" class="mw-list-item"><a href="http://forum.osdev.org/" rel="nofollow" title="Информация о проекте, что вы можете сделать, где найти все необходимое."><span>Форумы </span></a></li><li id="n-FAQ" class="mw-list-item"><a href="https://wiki.osdev.org/Category:FAQ"><span>Часто задаваемые вопросы </span></a></li><li id="n-OS-Projects" class="mw-list-item"><a href="https://wiki.osdev.org/Projects"><span>Проекты ОС </span></a></li><li id="n-randompage" class="mw-list-item"><a href="https://wiki.osdev.org/Special:Random" title="Загрузить случайную страницу [x]" accesskey="x"><span>Случайная страница </span></a></li></ul>
+		
+	</div>
+</nav>
+
+	
+
+<nav id="p-about" class="vector-menu mw-portlet mw-portlet-about vector-menu-portal portal" aria-labelledby="p-about-label" role="navigation">
+	<h3 id="p-about-label" class="vector-menu-heading ">
+		<span class="vector-menu-heading-label">О </span>
+	</h3>
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list"><li id="n-This-site" class="mw-list-item"><a href="https://wiki.osdev.org/OSDevWiki:About"><span>Этот сайт </span></a></li><li id="n-Joining" class="mw-list-item"><a href="https://wiki.osdev.org/OSDevWiki:Joining"><span>Присоединение </span></a></li><li id="n-Editing-help" class="mw-list-item"><a href="https://wiki.osdev.org/OSDevWiki:Editing"><span>Помощь в редактировании </span></a></li><li id="n-recentchanges" class="mw-list-item"><a href="https://wiki.osdev.org/Special:RecentChanges" title="Список последних изменений в вики [r]" accesskey="r"><span>Последние изменения </span></a></li></ul>
+		
+	</div>
+</nav>
+
+
+<nav id="p-tb" class="vector-menu mw-portlet mw-portlet-tb vector-menu-portal portal" aria-labelledby="p-tb-label" role="navigation">
+	<h3 id="p-tb-label" class="vector-menu-heading ">
+		<span class="vector-menu-heading-label">Инструменты </span>
+	</h3>
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list"><li id="t-whatlinkshere" class="mw-list-item"><a href="https://wiki.osdev.org/Special:WhatLinksHere/EXtensible_Host_Controller_Interface" title="Список всех страниц вики, которые ссылаются сюда [j]" accesskey="j"><span>Какие ссылки сюда ведут? </span></a></li><li id="t-recentchangeslinked" class="mw-list-item"><a href="https://wiki.osdev.org/Special:RecentChangesLinked/EXtensible_Host_Controller_Interface" rel="nofollow" title="Последние изменения на страницах, ссылки на которые размещены на этой странице [k]" accesskey="k"><span>Соответствующие изменения </span></a></li><li id="t-specialpages" class="mw-list-item"><a href="https://wiki.osdev.org/Special:SpecialPages" title="Список всех специальных страниц [q]" accesskey="q"><span>Специальные страницы </span></a></li><li id="t-print" class="mw-list-item"><a href="javascript:print();" rel="alternate" title="Версия этой страницы для печати [p]" accesskey="p"><span>Версия для печати </span></a></li><li id="t-permalink" class="mw-list-item"><a href="https://wiki.osdev.org/index.php?title=EXtensible_Host_Controller_Interface&amp;oldid=30300" title="Постоянная ссылка на эту обновленную версию страницы"><span>Постоянная ссылка </span></a></li><li id="t-info" class="mw-list-item"><a href="https://wiki.osdev.org/index.php?title=EXtensible_Host_Controller_Interface&amp;action=info" title="Более подробная информация об этой странице"><span>Информация о странице </span></a></li></ul>
+		
+	</div>
+</nav>
+
+	
+</div>
+
+</div>
+
+<footer id="footer" class="mw-footer" role="contentinfo">
+	<ul id="footer-info">
+	<li id="footer-info-lastmod"> This page was last edited on 16 March 2026, at 20:31.</li>
+	<li id="footer-info-0">This page has been accessed 32,180 times.</li>
+</ul>
+
+	<ul id="footer-places">
+	<li id="footer-places-privacy"><a href="https://wiki.osdev.org/OSDev_Wiki:Privacy_policy">Privacy policy</a></li>
+	<li id="footer-places-about"><a href="https://wiki.osdev.org/OSDev_Wiki:About">About OSDev Wiki</a></li>
+	<li id="footer-places-disclaimer"><a href="https://wiki.osdev.org/OSDev_Wiki:General_disclaimer">Disclaimers</a></li>
+	<li id="footer-places-mobileview"><a href="https://wiki.osdev.org/index.php?title=EXtensible_Host_Controller_Interface&amp;mobileaction=toggle_view_mobile" class="noprint stopMobileRedirectToggle">Mobile view</a></li>
+</ul>
+
+	<ul id="footer-icons" class="noprint">
+	<li id="footer-poweredbyico"><a href="https://www.mediawiki.org/"><img src="%D0%A0%D0%B0%D1%81%D1%88%D0%B8%D1%80%D1%8F%D0%B5%D0%BC%D1%8B%D0%B8%CC%86%20%D0%B8%D0%BD%D1%82%D0%B5%D1%80%D1%84%D0%B5%D0%B8%CC%86%D1%81%20%D0%BA%D0%BE%D0%BD%D1%82%D1%80%D0%BE%D0%BB%D0%BB%D0%B5%D1%80%D0%B0%20%D1%85%D0%BE%D1%81%D1%82%D0%B0%20-%20OSDev%20Wiki_files/poweredby_mediawiki_88x31_mN0S.png" alt="Powered by MediaWiki" srcset="%D0%A0%D0%B0%D1%81%D1%88%D0%B8%D1%80%D1%8F%D0%B5%D0%BC%D1%8B%D0%B8%CC%86%20%D0%B8%D0%BD%D1%82%D0%B5%D1%80%D1%84%D0%B5%D0%B8%CC%86%D1%81%20%D0%BA%D0%BE%D0%BD%D1%82%D1%80%D0%BE%D0%BB%D0%BB%D0%B5%D1%80%D0%B0%20%D1%85%D0%BE%D1%81%D1%82%D0%B0%20-%20OSDev%20Wiki_files/poweredby_mediawiki_132x47_mN0S.png 1.5x, %D0%A0%D0%B0%D1%81%D1%88%D0%B8%D1%80%D1%8F%D0%B5%D0%BC%D1%8B%D0%B8%CC%86%20%D0%B8%D0%BD%D1%82%D0%B5%D1%80%D1%84%D0%B5%D0%B8%CC%86%D1%81%20%D0%BA%D0%BE%D0%BD%D1%82%D1%80%D0%BE%D0%BB%D0%BB%D0%B5%D1%80%D0%B0%20%D1%85%D0%BE%D1%81%D1%82%D0%B0%20-%20OSDev%20Wiki_files/poweredby_mediawiki_176x62_mN0S.png 2x" width="88" height="31" loading="lazy"></a></li>
+</ul>
+
+</footer>
+
+<script>(RLQ=window.RLQ||[]).push(function(){mw.config.set({"wgPageParseReport":{"limitreport":{"cputime":"0.017","walltime":"0.142","ppvisitednodes":{"value":53,"limit":1000000},"postexpandincludesize":{"value":810,"limit":2097152},"templateargumentsize":{"value":0,"limit":2097152},"expansiondepth":{"value":3,"limit":100},"expensivefunctioncount":{"value":0,"limit":100},"unstrip-depth":{"value":0,"limit":20},"unstrip-size":{"value":1513,"limit":5000000},"timingprofile":["100.00%    0.794      1 -total"," 74.02%    0.588      5 Template:Wikitable"]},"cachereport":{"timestamp":"20260828033556","ttl":86400,"transientcontent":false}}});mw.config.set({"wgBackendResponseTime":103});});</script>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3218e2a5862af79',t:'MTc4NzkwMTY0Ng=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script><iframe height="1" width="1" style="position: absolute; top: 0px; left: 0px; border: medium; visibility: hidden;"></iframe><script type="module" src="%D0%A0%D0%B0%D1%81%D1%88%D0%B8%D1%80%D1%8F%D0%B5%D0%BC%D1%8B%D0%B8%CC%86%20%D0%B8%D0%BD%D1%82%D0%B5%D1%80%D1%84%D0%B5%D0%B8%CC%86%D1%81%20%D0%BA%D0%BE%D0%BD%D1%82%D1%80%D0%BE%D0%BB%D0%BB%D0%B5%D1%80%D0%B0%20%D1%85%D0%BE%D1%81%D1%82%D0%B0%20-%20OSDev%20Wiki_files/v3d52b47920f24c319d37e2661827c42b1787588026925_mN0S" integrity="sha512-d9sL6GJLXn6fInD1+TVXhTcQOsmxeHfmHAvwGDIxp5TO+uo1fiWW7mHomMj4MLRlCsJDTqXzWLHJFFlPCEIj/A==" data-cf-beacon="{&quot;version&quot;:&quot;2024.11.0&quot;,&quot;token&quot;:&quot;ca8edd89ae604cb093371c5ef552b991&quot;,&quot;r&quot;:1}" crossorigin="anonymous"></script>
+
+</body></html>

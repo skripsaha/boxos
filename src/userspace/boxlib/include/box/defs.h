@@ -16,7 +16,6 @@ typedef long               ssize_t;
 typedef __UINTPTR_TYPE__   uintptr_t;
 typedef __INTPTR_TYPE__    intptr_t;
 
-// C23+ and C++ have bool as a keyword; older C standards need the typedef
 #ifndef __cplusplus
 #if !defined(__bool_true_false_are_defined) && (__STDC_VERSION__ < 202311L)
 typedef _Bool bool;
@@ -32,12 +31,6 @@ typedef _Bool bool;
 #define NULL ((void*)0)
 #endif
 
-/* #ifndef-guarded for the same reason the limits below are: a C++ TU may see
- * <cstdarg> first — which is the compiler's own <stdarg.h> — and it spells
- * these with the same builtins. The definitions are identical, so the only
- * thing an unguarded redefinition produced was four warnings, but "identical
- * today" is not a property worth relying on. Found by <cstdio>, which is the
- * first header to include both this file and <cstdarg>. */
 typedef __builtin_va_list va_list;
 #ifndef va_start
 #define va_start(ap, last) __builtin_va_start(ap, last)
@@ -52,9 +45,6 @@ typedef __builtin_va_list va_list;
 #define va_copy(d, s)      __builtin_va_copy(d, s)
 #endif
 
-/* #ifndef-guarded: C++ TUs may see boxcxx's <cstdint> first, which
- * defines the same limits via compiler builtins (equal values, different
- * spelling). Either include order must stay warning-free. */
 #ifndef UINT8_MAX
 #define UINT8_MAX   0xFF
 #endif
@@ -95,4 +85,4 @@ typedef __builtin_va_list va_list;
 #define SIZE_MAX    UINT64_MAX
 #endif
 
-#endif // BOX_DEFS_H
+#endif

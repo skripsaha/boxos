@@ -1,42 +1,11 @@
-/*
- * nameplate.c — build, verify and read the Nameplate table of a BoxOS image.
- *
- * The format and the reasoning behind it live in src/include/nameplate_format.h.
- * This is the half that runs on the build host.
- *
- * Usage:
- *   nameplate build  <pass1.elf> <out.o>   emit the table of pass1 as a
- *                                          relocatable object to link into
- *                                          pass 2
- *   nameplate verify <final.elf>           re-derive the table from the final
- *                                          binary and compare — this is what
- *                                          makes the two-pass link trustworthy
- *   nameplate list   <elf> [addr]          print the table, or resolve one
- *                                          address (the offline answer that
- *                                          x86_64-elf-nm used to give before
- *                                          images stopped carrying .symtab)
- *
- * Why two passes at all: the table names function addresses, and it cannot be
- * built before those addresses exist. Pass 1 links without it, pass 2 links
- * with it. The section is placed in the read-only region AFTER .text, so
- * adding it moves .data and .bss but not a single function — and `verify`
- * proves that rather than assuming it: if any address moved, the build fails
- * instead of shipping a table that names the wrong function.
- *
- * ELF structures are declared here rather than included: the build host is
- * macOS as often as Linux, and macOS has no <elf.h>.
- */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 
-#include "nameplate_format.h"  /* shared with boxlib and the kernel (-I src/include) */
+#include "nameplate_format.h"
 
-/* ====================================================================
- * ELF64, little-endian — only what this tool touches
- * ==================================================================== */
 
 typedef struct {
     unsigned char e_ident[16];
@@ -100,9 +69,6 @@ typedef struct {
 #define STB_LOCAL       0
 #define STB_GLOBAL      1
 
-/* ====================================================================
- * Loaded image
- * ==================================================================== */
 
 typedef struct {
     uint8_t *Bytes;
@@ -112,9 +78,9 @@ typedef struct {
 
 typedef struct {
     uint64_t    Address;
-    uint64_t    Length;   /* 0 when the symbol carries no size */
+    uint64_t    Length;
     const char *Name;
-    int         Typed;    /* STT_FUNC (1) beats a bare label (0) */
+    int         Typed;
     int         Global;
 } Symbol;
 
@@ -190,8 +156,7 @@ static const Elf64Shdr *ImageSections(const Image *Img)
 
 static void SectionCheck(const Image *Img, const Elf64Shdr *Shdr)
 {
-    /* NOBITS occupies no file space; everything else must be inside. */
-    if (Shdr->sh_type == 8 /* SHT_NOBITS */)
+    if (Shdr->sh_type == 8 )
         return;
     if (Shdr->sh_offset > Img->Size || Shdr->sh_size > Img->Size - Shdr->sh_offset)
         Fail("section extends past end of file", Img->Path);
@@ -226,9 +191,6 @@ static const Elf64Shdr *SectionByName(const Image *Img, const char *Want)
     return NULL;
 }
 
-/* ====================================================================
- * Symbol harvest
- * ==================================================================== */
 
 static int SymbolCompare(const void *A, const void *B)
 {
@@ -237,9 +199,6 @@ static int SymbolCompare(const void *A, const void *B)
 
     if (L->Address != R->Address)
         return L->Address < R->Address ? -1 : 1;
-    /* Same address: the winner is the one that describes it best, and the
-     * order must not depend on the link's symbol order — a table that
-     * reshuffles between two identical builds is a table nobody can diff. */
     if (L->Typed != R->Typed)
         return R->Typed - L->Typed;
     if ((L->Length != 0) != (R->Length != 0))
@@ -249,13 +208,6 @@ static int SymbolCompare(const void *A, const void *B)
     return strcmp(L->Name, R->Name);
 }
 
-/*
- * Every symbol that can legitimately appear in a return address: functions,
- * plus untyped labels that live in an executable section. The second kind is
- * not pedantry — hand-written assembly (boxlib_start, the context switchers)
- * has no .type directive, and a backtrace that stops naming things the moment
- * it reaches assembly is a backtrace that fails exactly where it is needed.
- */
 static size_t SymbolsHarvest(const Image *Img, Symbol **Out)
 {
     const Elf64Ehdr *Ehdr = ImageHeader(Img);
@@ -316,19 +268,6 @@ static size_t SymbolsHarvest(const Image *Img, Symbol **Out)
         if (!Executable)
             continue;
 
-        /* The address must actually lie inside the section the symbol claims.
-         *
-         * A linker script computes addresses as well as placing code, and an
-         * assignment like `_kernel_phys_start = . - KERNEL_VMA;` inherits
-         * whatever output section is current — so it arrives here untyped, in
-         * an executable section, holding a number that is nowhere near it. The
-         * BoxOS kernel has two such symbols, sitting at 0x100000 while .text
-         * begins at 0xffffffff80100000, and admitting them made the table
-         * "span more than 4 GiB of code" for an image whose code is 386 KB.
-         *
-         * A nameplate names code. A symbol whose address is outside its own
-         * section is not a code address; it is arithmetic that happened to be
-         * written down in the middle of one. */
         {
             const Elf64Shdr *Sec = &Sections[Sym->st_shndx];
             if (Sym->st_value < Sec->sh_addr ||
@@ -349,7 +288,6 @@ static size_t SymbolsHarvest(const Image *Img, Symbol **Out)
 
     qsort(List, Kept, sizeof(Symbol), SymbolCompare);
 
-    /* One name per address: the sort already put the best candidate first. */
     for (i = 0; i < Kept; i++) {
         if (Unique > 0 && List[Unique - 1].Address == List[i].Address)
             continue;
@@ -360,9 +298,6 @@ static size_t SymbolsHarvest(const Image *Img, Symbol **Out)
     return Unique;
 }
 
-/* ====================================================================
- * Table build
- * ==================================================================== */
 
 typedef struct {
     uint8_t *Bytes;
@@ -427,9 +362,6 @@ static Blob TableBuild(const Symbol *Syms, size_t Count)
     return Out;
 }
 
-/* ====================================================================
- * Emit — a relocatable object holding nothing but the table
- * ==================================================================== */
 
 static void ObjectWrite(const char *Path, const Blob *Table)
 {
@@ -461,14 +393,14 @@ static void ObjectWrite(const char *Path, const Blob *Table)
 
     memset(Sections, 0, sizeof(Sections));
 
-    Sections[1].sh_name      = 1;                    /* ".nameplate" */
+    Sections[1].sh_name      = 1;
     Sections[1].sh_type      = SHT_PROGBITS;
-    Sections[1].sh_flags     = SHF_ALLOC;            /* read-only, and MAPPED */
+    Sections[1].sh_flags     = SHF_ALLOC;
     Sections[1].sh_offset    = DataOff;
     Sections[1].sh_size      = Table->Size;
     Sections[1].sh_addralign = 8;
 
-    Sections[2].sh_name      = 12;                   /* ".shstrtab" */
+    Sections[2].sh_name      = 12;
     Sections[2].sh_type      = SHT_STRTAB;
     Sections[2].sh_offset    = StrOff;
     Sections[2].sh_size      = sizeof(ShStr);
@@ -492,9 +424,6 @@ static void ObjectWrite(const char *Path, const Blob *Table)
         Fail("cannot close", Path);
 }
 
-/* ====================================================================
- * Read back — the lookup, host side
- * ==================================================================== */
 
 typedef struct {
     const NameplateHeader *Header;
@@ -529,9 +458,6 @@ static Table TableOpen(const Image *Img)
     return T;
 }
 
-/* ====================================================================
- * Commands
- * ==================================================================== */
 
 static int CommandBuild(const char *InPath, const char *OutPath)
 {
@@ -554,11 +480,6 @@ static int CommandBuild(const char *InPath, const char *OutPath)
     return 0;
 }
 
-/*
- * The guarantee of the two-pass link, checked rather than assumed: every name
- * the shipped table carries must still sit at the address the table claims,
- * according to the shipped binary's own symbol table.
- */
 static int CommandVerify(const char *Path)
 {
     Image Img;
@@ -597,8 +518,6 @@ static int CommandVerify(const char *Path)
         }
     }
 
-    /* Ascending and unique, which is what the runtime binary search assumes
-     * and what no reader can afford to re-check on a crash path. */
     for (j = 1; j < T.Header->EntryCount; j++) {
         if (T.Offsets[j] <= T.Offsets[j - 1]) {
             fprintf(stderr, "nameplate: %s offsets are not ascending at %u\n",

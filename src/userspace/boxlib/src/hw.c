@@ -3,7 +3,7 @@
 #include "box/core/manifest.h"
 #include "box/string.h"
 #include "box/error.h"
-#include "boxos_decks.h"  /* SYSTEM_OP_HW_LAM_* — single source */
+#include "boxos_decks.h"
 
 int hw_lam_get(void) {
     uint8_t mode = 0;

@@ -7,8 +7,8 @@
 #include "box/convert.h"
 #include "box/debug.h"
 #include "box/brook.h"
+#include "box/bay.h"
 #include "box/system.h"
-#include "box/cpu.h"
 #include "box/clock.h"
 #include "box/error.h"
 #include "box/core/notify.h"
@@ -19,57 +19,27 @@
 #include "box/touch.h"
 #include "box/turnin.h"
 
-/* ===========================================================================
- * Per-strand print state — thread-confined, NO lock.
- *
- * Every strand (main + spawned) owns its own console lane, frame under
- * construction, VGA-attr cache and current colours. Concurrent strands
- * calling print/printf never touch each other's state, so the print path
- * itself never takes a lock.
- *
- * The console is a stream: output rides a per-strand Brook lane the display
- * daemon reads ("console:N", granted over DISP_CMD_LANE). The lane opens
- * lazily on the strand's FIRST print — opening costs a daemon round-trip,
- * a brook_open (kmalloc + PMM + VMM in both cabins) and one malloc for the
- * handle, so only strands that actually print ever pay it (the
- * touch_stash_ptr pattern). After that the steady-state path is memcpy into
- * the frame plus a lock-free brook_push — no malloc, no syscall until the
- * daemon side needs waking. That preserves the real safety contract of
- * printf-under-heap_lock ("no malloc on the path"): memory.c's
- * heap_dump_tags caller prints long after its strand's first print.
- *
- * A full lane SLOWS the writer (lane_push waits politely) — printing is
- * never dropped. A dead daemon is an honest refusal: one kdbg trace, then
- * the process falls back to direct VGA (the shell's own no-daemon
- * precedent) so the machine keeps talking.
- *
- * Storage: the main strand uses a static instance (g_main_print_state); a
- * spawned strand's instance lives inline in its StrandInfo (print_state[]).
- * The kernel zero-inits that block, so `initialized` starts false and
- * print_state_self() corrects fg/bg to the process defaults on first touch.
- * Per owner decision, a spawned strand's colours always start FRESH
- * (COLOR_DEFAULT / COLOR_BLACK) — no inheritance from whoever spawned it.
- * =========================================================================== */
 
 enum {
-    LANE_UNOPENED = 0,   /* kernel zero-init — no lane yet */
+    LANE_UNOPENED = 0,
     LANE_OPEN     = 1,
-    LANE_DEAD     = 2,   /* daemon refused/left; strand emits direct VGA */
+    LANE_DEAD     = 2,
 };
 
 typedef struct StrandPrintState {
-    void      *lane;        /* Brook* — this strand's console lane */
-    ConsoleRun run;         /* frame under construction; run.len = fill */
-    uint32_t   last_fg;     /* VGA-direct colour cache (resolved pair) */
+    void      *lane;
+    uint64_t  *order;
+    ConsoleRun run;
+    uint32_t   last_fg;
     uint32_t   last_bg;
-    uint32_t   color_fg;    /* current colours (may hold sentinels) */
+    uint32_t   color_fg;
     uint32_t   color_bg;
-    uint16_t   ear;         /* the lane's tag as a Touch tag (valid with EAR_CLAIMED) */
-    uint16_t   kb;          /* "keyboard" tag (valid with KB_CLAIMED) */
-    uint8_t    lane_state;  /* LANE_* */
-    uint8_t    last_set;    /* last_fg/last_bg carry a sent pair */
+    uint16_t   ear;
+    uint16_t   kb;
+    uint8_t    lane_state;
+    uint8_t    last_set;
     uint8_t    initialized;
-    uint8_t    ear_flags;   /* EAR_* */
+    uint8_t    ear_flags;
 } StrandPrintState;
 
 enum { EAR_CLAIMED = 1u, KB_CLAIMED = 2u };
@@ -94,33 +64,11 @@ static StrandPrintState *print_state_self(void)
     return ps;
 }
 
-/* ===========================================================================
- * Cabin I/O state
- *
- *   1. g_io_mode      — VGA direct vs. display-daemon IPC routing.
- *   2. g_display_pid  — discovered display daemon (on first IPC operation).
- *
- * Both stay PROCESS-GLOBAL (not per-strand): every strand shares one
- * backend and one discovered daemon. g_display_pid's write is hardened
- * below (first-writer-wins CAS) since any strand's lane grant / readline /
- * getchar can race to discover it; g_io_mode is a single-writer invariant
- * (see io_set_mode) with one sanctioned exception — the daemon-death
- * fallback flips it to IO_MODE_VGA so the machine keeps talking.
- * =========================================================================== */
 static uint8_t  g_io_mode      = IO_MODE_IPC;
 static uint32_t g_display_pid  = 0;
 
 void     io_set_mode(uint8_t mode)
 {
-    /* Switching between VGA and IPC paths invalidates the kernel colour
-     * state we cached locally; force the next emit to re-send.
-     * Single-writer invariant: call before any strand_spawn — no other
-     * strand's cache exists yet, so invalidating only the caller's own is
-     * sufficient (every strand spawned afterwards starts uninitialised
-     * anyway and re-sends its colour on its first emit). A strand that
-     * already opened a console lane and is then switched to VGA simply
-     * stops pushing; the daemon closes the idle lane when the strand
-     * exits (writer-leave drains to STREAM_CLOSED). */
     if (mode != g_io_mode) print_state_self()->last_set = false;
     g_io_mode = mode;
 }
@@ -128,91 +76,28 @@ uint8_t  io_get_mode(void)                { return g_io_mode; }
 void     io_set_display_pid(uint32_t pid) { g_display_pid = pid; }
 uint32_t io_get_display_pid(void)         { return g_display_pid; }
 
-/* ===========================================================================
- * Console lane — the strand's output stream to the display daemon.
- *
- * Grant protocol ("checkroom"): send DISP_CMD_LANE, the daemon opens the
- * reader side of a fresh "console:N" Brook FIRST and only then replies
- * [DISP_CMD_LANE][tag NUL] — the writer arrives at a laid table. A 1-byte
- * reply is an honest refusal.
- * =========================================================================== */
 
 static void emit_run(StrandPrintState *ps, const char *bytes, int len,
                      Color fg, Color bg);
 
-static void lane_fail(StrandPrintState *ps)
+static bool io_direct(const StrandPrintState *ps)
 {
-    /* Honest refusal, not silent swallowing: leave one trace, then keep
-     * the machine talking through direct VGA. Process-wide flip mirrors
-     * the shell's own no-daemon fallback; other strands' pushes fail the
-     * same way and converge here on their next emit. */
-    ps->lane_state = LANE_DEAD;
-    kdbg_print("[print] console lane unavailable; direct VGA from here on");
-    io_set_mode(IO_MODE_VGA);
+    return g_io_mode != IO_MODE_IPC || ps->lane_state == LANE_DEAD;
 }
 
-/* Wait for the daemon's DISP_CMD_LANE reply. Messages that are not the
- * grant are HELD aside and restashed after the wait — restashing inside
- * the loop would hand the same message straight back to us (receive
- * consults the ipc stash first), and dropping would eat a payload the
- * application is owed (spawn args arrive before a utility's first print).
- * The hold grows on demand so no flood can force a drop.
- *
- * There is no clock in this wait and no asking on a schedule. Two facts
- * end it, and nothing else:
- *
- *   - the ANSWER: a grant, or the daemon's honest one-byte refusal. The
- *     kernel says at once whether anyone wears the display tag at all
- *     (ERR_ROUTE_NO_SUBSCRIBERS), and a request that was delivered sits in
- *     a living daemon's ring until it gets there — a daemon that has not
- *     reached its loop yet on a crowded boot is worth waiting for
- *     (measured: 16 vCPUs on one host thread stretched a grant past five
- *     seconds, which is what a guessed deadline once called "no display");
- *   - the DEATH of whoever owes it: process:died is claimed before the
- *     ask. Once the daemon is known by pid, its own death ends the wait.
- *     Before it is known, any death makes the kernel the question again —
- *     an EMPTY broadcast, which a daemon ignores without replying (nothing
- *     to misread later) and which the kernel refuses when nobody wears the
- *     tag.
- *
- * Between the two the strand turns in — the same mark, look, sleep the
- * daemon itself lives by — so a writer waiting for its lane costs nothing. */
-/* Say something to the display daemon, and tell a REFUSAL from a DEATH.
- *
- * ‼ A FULL RING IS NOT A FUNERAL.
- *
- * `send` is a Manifest op, and the kernel refuses it for reasons that have
- * nothing to do with whether the daemon exists: its result ring is momentarily
- * full (ERR_ROUTE_TARGET_FULL, system_ops.c SysRoute), or there was no room to
- * copy the payload into it (ERR_NO_MEMORY). Both of those mean "not now". Only
- * ERR_PROCESS_NOT_FOUND means "nobody is there".
- *
- * Reading the first as the second is what this closes, and the place it hurt
- * was the prompt. console_listen runs the instant after a shell prints one —
- * the busiest moment the daemon has, directly behind a screenful of output —
- * and on ANY refusal the caller used to conclude the daemon had died: it tore
- * this strand's lane down, released the Brook with the prompt still sitting
- * unread inside it, and moved the strand onto the direct-VGA road. So the
- * prompt printed after a long command sometimes never appeared and the one
- * after a short command always did. Seen on the board, where a frame takes
- * long enough for the daemon to fall behind; never once under an emulator,
- * where it never falls behind at all.
- *
- * A refusal is WAITED OUT, not counted: the daemon is running and draining, so
- * the room comes back, and yield hands it the core to do that with instead of
- * spinning on the very thing being waited for. The wait ends by itself if the
- * daemon really goes — the next answer is then ERR_PROCESS_NOT_FOUND, which is
- * a death and is returned as one. No clock is consulted and no attempt is
- * counted, because neither of those would be the truth about when the room
- * comes back. */
+static void lane_fail(StrandPrintState *ps)
+{
+    ps->lane_state = LANE_DEAD;
+    ps->last_set   = false;
+    if (ps->order) { bay_release(ps->order); ps->order = NULL; }
+    kdbg_print("[print] this strand's console lane is unavailable; it prints "
+               "straight to the glass from here on");
+}
+
+static bool g_no_daemon;
+
 static int daemon_say(const uint8_t *req, uint16_t len)
 {
-    /* Said once per cabin, the first time a word to the daemon has to be
-     * waited for. Not a threshold and not a clock: the FACT that the daemon's
-     * ring was full at all is the news, because until this was found nobody
-     * knew it happened — the refusal was swallowed as a death and the machine
-     * quietly changed how it prints. One line, and the next board run says
-     * whether this road is the one being taken. */
     static bool waited_before = false;
 
     for (;;) {
@@ -231,7 +116,7 @@ static int daemon_say(const uint8_t *req, uint16_t len)
     }
 }
 
-static bool lane_await_grant(char *tag, size_t tag_cap)
+static bool lane_await_grant(char *tag, size_t tag_cap, bool *no_daemon)
 {
     Result  *held     = NULL;
     uint32_t held_n   = 0;
@@ -243,8 +128,6 @@ static bool lane_await_grant(char *tag, size_t tag_cap)
     bool     watching = (pdied != TOUCH_TAG_INVALID) &&
                         touch_claim(pdied, TOUCH_REST, 0, 0) == 0;
 
-    /* [cmd][u32 generation]: the lane is granted to (pid, generation),
-     * so a recycled pid can never be handed its predecessor's lane. */
     uint8_t  req[5];
     uint32_t gen = strand_self_generation();
     req[0] = DISP_CMD_LANE;
@@ -254,7 +137,10 @@ static bool lane_await_grant(char *tag, size_t tag_cap)
         if (daemon_say(req, sizeof(req)) < 0) done = true;
     } else {
         int rc = broadcast("display", req, sizeof(req));
-        if (rc < 0 && box_errno_of(rc) == ERR_ROUTE_NO_SUBSCRIBERS) done = true;
+        if (rc < 0 && box_errno_of(rc) == ERR_ROUTE_NO_SUBSCRIBERS) {
+            *no_daemon = true;
+            done = true;
+        }
     }
 
     while (!done) {
@@ -278,14 +164,22 @@ static bool lane_await_grant(char *tag, size_t tag_cap)
                         got = true;
                     }
                 }
-                done = true;   /* grant, or the daemon's explicit refusal */
+                done = true;
                 break;
             }
 
             if (held_n == held_cap) {
                 uint32_t cap = held_cap ? held_cap * 2 : 8;
                 Result *grown = (Result *)malloc(cap * sizeof(Result));
-                if (!grown) { result_restash(&r); break; }
+                if (!grown) {
+                    result_restash(&r);
+                    kdbg_print("[print] no room to hold what is not the lane "
+                               "grant; this strand gives up the lane and "
+                               "prints straight to the glass");
+                    for (uint32_t i = 0; i < held_n; i++) result_restash(&held[i]);
+                    if (held) free(held);
+                    return false;
+                }
                 if (held) {
                     memcpy(grown, held, held_n * sizeof(Result));
                     free(held);
@@ -321,11 +215,28 @@ static bool lane_await_grant(char *tag, size_t tag_cap)
 
     if (watching) touch_release(pdied);
 
-    /* Give every held message back in arrival order — the stash is
-     * consulted before the ring, so later consumers see them first. */
     for (uint32_t i = 0; i < held_n; i++) result_restash(&held[i]);
     if (held) free(held);
     return got;
+}
+
+
+static bool console_order_ensure(StrandPrintState *ps)
+{
+    if (ps->order) return true;
+
+    ps->order = (uint64_t *)bay_open(CONSOLE_ORDER_TAG, 0, BAY_OPEN);
+    if (!ps->order) {
+        kdbg_print("[print] the console granted a lane but no order; this "
+                   "strand gives the lane back and prints straight to the glass");
+        return false;
+    }
+    return true;
+}
+
+static uint64_t console_order_next(StrandPrintState *ps)
+{
+    return __atomic_add_fetch(ps->order, 1u, __ATOMIC_SEQ_CST);
 }
 
 static bool lane_ensure(StrandPrintState *ps)
@@ -333,65 +244,38 @@ static bool lane_ensure(StrandPrintState *ps)
     if (ps->lane_state == LANE_OPEN) return true;
     if (ps->lane_state == LANE_DEAD) return false;
 
+    if (g_no_daemon) { lane_fail(ps); return false; }
+
     char tag[64];
-    if (!lane_await_grant(tag, sizeof(tag))) {
+    bool no_daemon = false;
+    if (!lane_await_grant(tag, sizeof(tag), &no_daemon)) {
+        if (no_daemon) {
+            g_no_daemon = true;
+            io_set_mode(IO_MODE_VGA);
+        }
         lane_fail(ps);
         return false;
     }
 
-    /* Shape is part of tag identity; passing the canonical constants makes
-     * a header drift between writer and daemon fail loudly at open. */
     Brook *b = brook_open(tag, sizeof(ConsoleRun), CONSOLE_LANE_FRAMES,
                           BROOK_WRITER);
     if (!b) {
         lane_fail(ps);
         return false;
     }
+    if (!console_order_ensure(ps)) {
+        brook_release(b);
+        lane_fail(ps);
+        return false;
+    }
+
     ps->lane       = b;
     ps->lane_state = LANE_OPEN;
-    /* The lane's tag is also where this strand's keys will be said. */
     ps->ear        = touch_pair_choose(touch_intern(tag));
     ps->ear_flags &= (uint8_t)~EAR_CLAIMED;
     return true;
 }
 
-/* Push one built frame. A full lane SLOWS the writer — output is never dropped
- * — and until this had a bell, the wait had to be a guess.
- *
- * WHAT STOOD HERE, and why the guessing was not the writer's fault. Both naive
- * waits fail a fan-in at scale, measured with sixteen printing strands:
- *   - brook_push's old UMWAIT path held the core while it watched the reader's
- *     cursor; sixteen watchers starved the very reader they were waiting for,
- *     and 24k lines sat banked until the writers died;
- *   - a yield per attempt flooded the Guide with a syscall storm from every
- *     blocked writer, and the daemon's render ops drowned in that queue — 299
- *     frames rendered in 160 s.
- * So what stood here was the shape that survives both: pause-spin with
- * exponential backoff between yields, LANE_PUSH_SPIN_MIN doubling toward
- * LANE_PUSH_SPIN_MAX. It worked, and every number in it was a guess about a
- * machine nobody could measure — "always shorter than the ring-drain it is
- * waiting out" was a hope, not a fact. Beside it stood a second guess: after
- * sixty seconds of silence, announce that the lane is jammed, because a
- * deadline-free wait with no voice is how a machine stands still without a
- * word.
- *
- * Both guesses are gone, and neither is replaced by a better number. The
- * writer now hangs its own bell — in the cacheline the daemon already reads
- * for `tail` on every pop — and the daemon rings it the moment it frees a
- * slot. brook_push does that and then turns in, so a blocked writer costs
- * NOTHING rather than a core: strictly better than the UMWAIT it replaces, and
- * its syscall count is bounded by how many times it SLEEPS instead of by how
- * often it retries.
- *
- * The sixty-second voice is not replaced either, because the jam now has a
- * better witness than a stopwatch. A daemon that stops draining sleeps with
- * frames unread and its own bell hung out, and Nightwatch convicts exactly
- * that (BrookBellUnrung) — naming the reader that is not draining, on facts,
- * with no clock anywhere in it, and without the writer having to narrate its
- * own wait.
- *
- * On daemon death this flips to the VGA fallback and returns false so the
- * caller re-delivers its content by the direct path. */
 static bool lane_push(StrandPrintState *ps, const ConsoleRun *f)
 {
     int rc = brook_push((Brook *)ps->lane, f);
@@ -409,49 +293,16 @@ static void lane_flush_run(StrandPrintState *ps)
     if (ps->run.len == 0) return;
     ps->run.kind      = CONSOLE_RUN_TEXT;
     ps->run._reserved = 0;
-    ps->run.tsc       = cpu_rdtsc();
+    ps->run.order     = console_order_next(ps);
 
     bool    ok  = lane_push(ps, &ps->run);
     uint8_t len = ps->run.len;
     ps->run.len = 0;
     if (!ok) {
-        /* The frame never reached the daemon; its text still must reach
-         * the screen. lane_fail switched us to VGA, so this re-emit takes
-         * the direct path (run.fg/bg are already resolved — resolving
-         * again is the identity). */
         emit_run(ps, ps->run.text, len, ps->run.fg, ps->run.bg);
     }
 }
 
-/* Flush WHOLE LINES, and keep the unfinished one for the next frame.
- *
- * A frame is the unit the daemon interleaves. It merges every lane in global
- * push order, so two strands printing at once alternate at frame boundaries —
- * and a boundary that falls in the middle of a line puts half of one strand's
- * line inside another's. MEASURED, sixteen strands on sixteen cores: roughly
- * three hundred of thirty-two thousand lines came out spliced, e.g.
- *
- *     [PS-11] 00000[PS-04] 00000000
- *     [PS-04787
- *
- * Nothing is LOST — the character count is exact, every time — but a spliced
- * line is unreadable, and worse, unmatchable: every marker this system is
- * checked by is a grep, and a torn "[STRAND] PASS" is a green run reported as
- * a hang. That is what made a sixteen-core matrix a lottery.
- *
- * The cut is therefore taken at the last newline in the run rather than at the
- * end of the buffer, and the remainder — an unfinished line — stays behind to
- * be completed by the writer that owns it. A line then occupies whole frames
- * and cannot be split by anybody else's.
- *
- * Two cases still end a frame mid-line, and both are honest: a single line
- * longer than a whole frame has nowhere else to break, and a colour change
- * inside a line genuinely ends a run (the run IS the colour). Neither is a
- * splice between two writers waiting to happen the way an arbitrary
- * 108th-byte boundary was.
- *
- * Frame count is unchanged in the case that matters — the cut moves by at most
- * one line's worth, it does not add frames. */
 static void lane_flush_lines(StrandPrintState *ps)
 {
     uint8_t len = ps->run.len;
@@ -461,8 +312,6 @@ static void lane_flush_lines(StrandPrintState *ps)
     for (int i = (int)len - 1; i >= 0; i--) {
         if (ps->run.text[i] == '\n') { cut = i + 1; break; }
     }
-    /* No line ends inside this run, or the run already ends on one: it goes
-     * whole either way. */
     if (cut <= 0 || (uint8_t)cut == len) { lane_flush_run(ps); return; }
 
     char    tail[CONSOLE_RUN_TEXT_MAX];
@@ -479,8 +328,6 @@ static void lane_flush_lines(StrandPrintState *ps)
         memcpy(ps->run.text, tail, tlen);
         ps->run.len = tlen;
     } else {
-        /* The lane died inside the flush and it has already re-delivered its
-         * own bytes the direct way; the carried remainder must follow them. */
         emit_run(ps, tail, tlen, fg, bg);
     }
 }
@@ -496,14 +343,6 @@ void io_flush(void)
     io_flush_state(print_state_self());
 }
 
-/* ===========================================================================
- * Color state.
- *
- * On the lane, colour is frame METADATA — every ConsoleRun carries its
- * resolved (fg, bg) pair, so set_color is pure state and the pair rides
- * the next emitted run. Only the direct VGA path pushes colour eagerly
- * (the kernel keeps a current pair for kprintf and cursor-relative ops).
- * =========================================================================== */
 static void push_color(StrandPrintState *ps)
 {
     if (g_io_mode == IO_MODE_IPC) return;
@@ -534,12 +373,6 @@ void  set_color_bg(Color bg)
 }
 Color get_color_bg(void) { return print_state_self()->color_bg; }
 
-/* ===========================================================================
- * Low-level emit — push a chunk of ASCII bytes with a given colour pair.
- * Honours g_io_mode: the IPC path packs ConsoleRun frames onto the lane
- * ('\n' travels inside the text — it is content, not a control record);
- * the VGA direct path uses vga_puts.
- * =========================================================================== */
 static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg, Color bg)
 {
     if (len <= 0) return;
@@ -554,8 +387,6 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
         int off = 0;
         while (off < len && ps->lane_state == LANE_OPEN) {
             if (ps->run.len == CONSOLE_RUN_TEXT_MAX) {
-                /* Always makes room: the cut leaves either nothing or the
-                 * unfinished tail, both shorter than a full run. */
                 lane_flush_lines(ps);
                 continue;
             }
@@ -570,30 +401,14 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
             ps->run.len = (uint8_t)(ps->run.len + chunk);
             off += chunk;
         }
-        /* A finished line leaves NOW; only an unfinished tail stays staged.
-         * A strand's completed lines must never sit in its frame waiting for
-         * the frame to fill: measured, a worker's last two lines stayed
-         * behind while the main strand exited the cabin, the push then found
-         * the lane closed and the lines fell through to direct VGA — after
-         * the shell's next prompt, glued to it. */
         if (ps->lane_state == LANE_OPEN && memchr(ps->run.text, '\n', ps->run.len))
             lane_flush_lines(ps);
         if (off >= len) return;
 
-        /* The daemon died mid-run (lane_flush_run above fell back); the
-         * pending frame was already re-emitted, deliver the remainder the
-         * direct way too. */
         bytes += off;
         len   -= off;
     }
 
-    /* VGA direct: set colour only when it actually changed, then the text in
-     * as few PUTSTRING operations as it takes, newlines INSIDE them. The
-     * console lock is held per operation, so a line's text in one operation
-     * and its newline in the next left a gap for another core's kprintf to
-     * land in (the daemon's render had the same shape; measured there). A
-     * chunk is cut at the last newline that fits, so only a line longer than
-     * a chunk is ever split, and then by nobody else's. */
     bool changed = !ps->last_set || ps->last_fg != fg || ps->last_bg != bg;
     if (changed) {
         vga_setcolor_rgb(fg, bg);
@@ -618,21 +433,6 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
     }
 }
 
-/* ===========================================================================
- * Public output API
- *
- * print() streams the input in fixed-size chunks: each chunk is UTF-8
- * filtered into a stack scratch buffer, then handed to emit_run. There is no
- * upper bound on input length — the loop keeps consuming until the source
- * NUL. The chunk size is purely an internal staging optimisation.
- * =========================================================================== */
-/* Stream `len` bytes through the UTF-8 filter (ASCII pass-through; each
- * multi-byte sequence collapses to one '?') into fixed-size chunks, handing
- * each chunk to emit_run with the current colours. Shared by print(),
- * print_bytes() and println() so the filter lives in exactly one place.
- * `newline` rides in the LAST chunk rather than in an emit of its own: a
- * newline emitted separately is a separate operation on the direct path, and
- * the gap between the two is where another core's line lands. */
 static void emit_filtered(StrandPrintState *ps, const char* data, size_t len,
                           bool newline)
 {
@@ -671,13 +471,8 @@ void print(const char* str)
     if (!str) return;
     StrandPrintState *ps = print_state_self();
 
-    /* IO_MODE_IPC batches into the lane frame and flushes lazily;
-     * IO_MODE_VGA wins a syscall reduction by feeding every internal
-     * vga_setcolor/vga_puts into a single Manifest. The nested
-     * vga_begin/vga_commit composes with an outer caller that may itself be
-     * batching (printf, shell renderer). */
     bool we_began = false;
-    if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
+    if (io_direct(ps)) { vga_begin(); we_began = true; }
 
     emit_filtered(ps, str, strlen(str), false);
 
@@ -690,7 +485,7 @@ void print_bytes(const char* data, size_t len)
     StrandPrintState *ps = print_state_self();
 
     bool we_began = false;
-    if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
+    if (io_direct(ps)) { vga_begin(); we_began = true; }
 
     emit_filtered(ps, data, len, false);
 
@@ -701,10 +496,8 @@ void println(const char* str)
 {
     StrandPrintState *ps = print_state_self();
 
-    /* The newline goes with the text — same frame on the lane, same
-     * operation on the direct path — never as an emit of its own. */
     bool we_began = false;
-    if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
+    if (io_direct(ps)) { vga_begin(); we_began = true; }
 
     if (str) emit_filtered(ps, str, strlen(str), true);
     else     emit_run(ps, "\n", 1, ps->color_fg, ps->color_bg);
@@ -716,8 +509,6 @@ void clear(void)
 {
     StrandPrintState *ps = print_state_self();
 
-    /* Display state resets on clear; invalidate the colour cache so the
-     * next coloured run re-sends its pair. */
     ps->last_set = false;
 
     if (g_io_mode == IO_MODE_IPC && lane_ensure(ps)) {
@@ -728,31 +519,13 @@ void clear(void)
             f.kind = CONSOLE_RUN_CLEAR;
             f.fg   = COLOR_LIGHT_GRAY;
             f.bg   = COLOR_BLACK;
-            f.tsc  = cpu_rdtsc();
+            f.order = console_order_next(ps);
             if (lane_push(ps, &f)) return;
         }
-        /* Daemon died on the way — the fallback below still clears. */
     }
     vga_clear_rgb(COLOR_LIGHT_GRAY, COLOR_BLACK);
 }
 
-/* ===========================================================================
- * printf — BoxOS extension: %color consumes one Color (uint32_t RGB) and
- * switches the active foreground for following text runs.
- *
- * Implementation walks the format string, accumulates text into a working
- * buffer, and emits a colored run whenever:
- *   - %color is encountered (flush + change colour);
- *   - the buffer is about to overflow;
- *   - format string ends.
- *
- * UTF-8: ASCII pass-through; multi-byte runs collapse to '?' (kernel font
- * extension is a future milestone).
- *
- * One printf currently produces N×emit_run calls (N = colour changes). For
- * VGA direct mode each emit is 1 setcolor + 1 puts syscall; for IPC mode
- * everything coalesces into lane frames and flushes lazily.
- * =========================================================================== */
 
 #define PRINTF_BUFLEN 512
 
@@ -774,19 +547,6 @@ static int append_str(char *buf, int pos, int max, const char *s)
     return pos;
 }
 
-/* WEAK on purpose. boxlib's printf is BoxOS's coloured-run console printer and
- * converts %s %d %i %u %x %X %c %p %% — the set a C program on this system has
- * always had. boxcxx's <cstdio> defines the full C set, including the floating
- * conversions, and a program that links boxcxx must get THAT one: [cstdio.syn]
- * asks for conversions this function does not have, and two functions cannot
- * share an ELF symbol.
- *
- * Weak rather than moved to its own translation unit because printf lives on
- * this file's statics — g_io_mode, the per-strand colour state, the lane
- * machinery — and splitting it would mean exposing all three across a boundary
- * to solve a linking question. The link order that makes this work is already
- * stated in apps/Makefile: libboxcxx.a before libbox.a, "so our runtime symbols
- * always win". */
 __attribute__((weak)) int printf(const char *fmt, ...)
 {
     if (!fmt) return -1;
@@ -795,10 +555,8 @@ __attribute__((weak)) int printf(const char *fmt, ...)
     va_list args;
     va_start(args, fmt);
 
-    /* See print() for rationale — colored runs in VGA mode coalesce
-     * into a single Manifest submit instead of N syscalls. */
     bool we_began = false;
-    if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
+    if (io_direct(ps)) { vga_begin(); we_began = true; }
 
     char buf[PRINTF_BUFLEN];
     int  pos       = 0;
@@ -807,7 +565,6 @@ __attribute__((weak)) int printf(const char *fmt, ...)
     Color cur_bg   = ps->color_bg;
     char  numbuf[24];
 
-    /* Local helpers — re-emit and reset the working buffer. */
     #define FLUSH() do {                                    \
         if (pos > 0) {                                      \
             emit_run(ps, buf, pos, cur_fg, cur_bg);         \
@@ -828,7 +585,6 @@ __attribute__((weak)) int printf(const char *fmt, ...)
                 buf[pos++] = (char)b;
                 fmt++;
             } else {
-                /* UTF-8 multi-byte → single '?'. */
                 buf[pos++] = '?';
                 int seq;
                 if (b < 0xC2)      seq = 1;
@@ -846,16 +602,14 @@ __attribute__((weak)) int printf(const char *fmt, ...)
             continue;
         }
 
-        /* %... */
         const char *spec_start = fmt;
         fmt++;
-        if (*fmt == '\0') { /* trailing % — emit literal */
+        if (*fmt == '\0') {
             ENSURE(2);
             buf[pos++] = '%';
             break;
         }
 
-        /* %color — extension: switch foreground, no text emitted. */
         if (*fmt == 'c' && fmt[1] == 'o' && fmt[2] == 'l' &&
             fmt[3] == 'o' && fmt[4] == 'r') {
             FLUSH();
@@ -864,8 +618,6 @@ __attribute__((weak)) int printf(const char *fmt, ...)
             continue;
         }
 
-        /* %bgcolor — the same for the background: colour is a (fg, bg)
-         * pair everywhere, and printf can steer both halves. */
         if (*fmt == 'b' && fmt[1] == 'g' && fmt[2] == 'c' &&
             fmt[3] == 'o' && fmt[4] == 'l' && fmt[5] == 'o' &&
             fmt[6] == 'r') {
@@ -875,16 +627,6 @@ __attribute__((weak)) int printf(const char *fmt, ...)
             continue;
         }
 
-        /* Length modifier — `l` / `ll` / `z`. Determines the size of the
-         * va_arg pulled for %d/%u/%x. C99 promotion rules: variadic
-         * int8/int16 promote to int, so %hhd/%hd are not needed; long
-         * stays long; long long stays long long. `z` matches size_t
-         * (== uint64_t in our LP64 userspace).
-         *
-         * width = 0 → int / unsigned int   (default)
-         *         1 → long / unsigned long (also size_t)
-         *         2 → long long / unsigned long long
-         */
         int  width = 0;
         if (*fmt == 'l') {
             width = 1;
@@ -899,7 +641,6 @@ __attribute__((weak)) int printf(const char *fmt, ...)
             case 's': {
                 const char *s = va_arg(args, const char *);
                 if (!s) s = "(null)";
-                /* Stream UTF-8 byte-at-a-time, flushing on overflow. */
                 while (*s) {
                     ENSURE(4);
                     unsigned char b = (unsigned char)*s;
@@ -949,8 +690,6 @@ __attribute__((weak)) int printf(const char *fmt, ...)
                 if (width == 0)      v = (uint64_t)va_arg(args, unsigned int);
                 else if (width == 1) v = (uint64_t)va_arg(args, unsigned long);
                 else                 v = (uint64_t)va_arg(args, unsigned long long);
-                /* uint64_to_hex emits a "0x" prefix; printf %x in C is
-                 * "no prefix", so write the bare hex digits here. */
                 if (v == 0) {
                     ENSURE(2);
                     buf[pos++] = '0';
@@ -983,7 +722,6 @@ __attribute__((weak)) int printf(const char *fmt, ...)
                 break;
             }
             default: {
-                /* Unknown spec — copy verbatim from spec_start through *fmt. */
                 ENSURE(4);
                 buf[pos++] = '%';
                 buf[pos++] = *fmt;
@@ -1005,17 +743,6 @@ __attribute__((weak)) int printf(const char *fmt, ...)
     return total_out;
 }
 
-/* ===========================================================================
- * The ear — where this strand's keys arrive (the editor is readline.c)
- *
- * With a daemon: the strand's own lane tag. The lane is ensured, the tag is
- * claimed once, and the daemon is told to listen on EVERY call — its ear
- * stack moves the lane to the top, which is idempotent and exactly right
- * after a child took the ear and died. Claim BEFORE the ask, so a key the
- * daemon has banked is said to a claimant that already exists.
- *
- * Without a daemon: "keyboard" itself, claimed once per strand.
- * =========================================================================== */
 TouchTag console_listen(void)
 {
     StrandPrintState *ps = print_state_self();
@@ -1035,10 +762,6 @@ TouchTag console_listen(void)
         req[5] = 1;
         if (daemon_say(req, sizeof(req)) == 0) return ps->ear;
 
-        /* Nobody at that pid any more: the daemon is gone — daemon_say has
-         * already waited out every refusal that was merely a busy one. Say so
-         * the way a failed push would, and hear the keyboard directly from
-         * here on. */
         Brook *dead = (Brook *)ps->lane;
         ps->lane = NULL;
         lane_fail(ps);
@@ -1055,10 +778,6 @@ TouchTag console_listen(void)
     return ps->kb;
 }
 
-/* The reading is over: give the ear back, so whoever reads next hears, and a
- * key typed while nobody reads stays banked at the daemon for that reader
- * rather than landing in this strand's ring. Nothing to tell when the strand
- * hears the keyboard itself. */
 void console_unlisten(void)
 {
     StrandPrintState *ps = print_state_self();
@@ -1070,17 +789,9 @@ void console_unlisten(void)
     req[0] = DISP_CMD_LISTEN;
     memcpy(req + 1, &gen, sizeof(gen));
     req[5] = 0;
-    /* Given back the same way it was taken: a daemon that is merely behind is
-     * waited for, because a lane that fails to hand the ear back keeps it, and
-     * the next program to read would hear nothing. */
     (void)daemon_say(req, sizeof(req));
 }
 
-/* A cursor step is a frame on the lane, after whatever text is pending, so it
- * lands in the order it was said; without a daemon it is the same one op the
- * daemon would render it into. Nothing here knows, or needs to know, where the
- * caret is or how wide the screen is: a step says how FAR, and where that
- * lands is the console's business. */
 void console_step(int32_t delta)
 {
     if (delta == 0) return;
@@ -1096,20 +807,14 @@ void console_step(int32_t delta)
             memcpy(f.text, &delta, sizeof(delta));
             f.fg   = BoxColorResolveFg(ps->color_fg);
             f.bg   = BoxColorResolveBg(ps->color_bg);
-            f.tsc  = cpu_rdtsc();
+            f.order = console_order_next(ps);
             if (lane_push(ps, &f)) return;
         }
-        /* The daemon died on the way — the fallback below still steps. */
     }
 
-    /* No daemon: the same one op, straight to the deck. The arithmetic is the
-     * kernel's either way — see hardware_ops.c HwVgaStepCursor. */
     (void)vga_step_cursor(delta);
 }
 
-/* ===========================================================================
- * Convenience integer printers (kept for source compat with apps).
- * =========================================================================== */
 void print_int(int num)
 {
     char b[12];

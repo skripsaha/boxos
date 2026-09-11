@@ -1,16 +1,3 @@
-/*
- * usetest — the Use Context, end to end, from a program that may set it.
- *
- * This utility wears `system` (see the image tags in the Makefile), so it may
- * say what the user is doing. It proves the whole round trip the shell relies
- * on: use_set is taken; a file created inside the context is stamped with it;
- * a query inside the context sees that file and not one created everywhere;
- * a query everywhere sees both; use_get reports the context; use_clear puts
- * the walls away. Whatever context the user had is restored at the end, and
- * both probe files are erased — the volume is left as it was found.
- *
- * Prints "[USE] PASS" or "[USE] FAIL: <what>"; the stress matrix gates on it.
- */
 
 #include "box/print.h"
 #include "box/file.h"
@@ -41,7 +28,6 @@ static int fail(const char *what, int rc)
 int main(void)
 {
 
-    /* The user's context, to be put back. */
     size_t saved_need = 0;
     int    saved_tags = use_get(NULL, 0, &saved_need);
     if (saved_tags < 0) return fail("use_get refused", saved_tags);
@@ -73,13 +59,11 @@ int main(void)
     uint32_t ids[256];
     int n;
 
-    /* Inside: the stamped file is visible, the unstamped one is behind the walls. */
     n = query(NULL, ids, 256);
     if (n < 0) { verdict = fail("query inside", n); goto restore; }
     if (!has_id(ids, n, (uint32_t)inside_id)) { verdict = fail("a file created inside is not seen inside", 0); goto restore; }
     if (has_id(ids, n, (uint32_t)out_id))      { verdict = fail("a file created everywhere is seen inside", 0); goto restore; }
 
-    /* Everywhere: both. */
     n = query_everywhere(NULL, ids, 256);
     if (n < 0) { verdict = fail("query everywhere", n); goto restore; }
     if (!has_id(ids, n, (uint32_t)inside_id) || !has_id(ids, n, (uint32_t)out_id)) {
@@ -87,7 +71,6 @@ int main(void)
         goto restore;
     }
 
-    /* The stamp is a real tag: asked for by name, everywhere, only the stamped file answers. */
     n = query_everywhere(PROBE_TAG, ids, 256);
     if (n < 0) { verdict = fail("query everywhere by the context tag", n); goto restore; }
     if (!has_id(ids, n, (uint32_t)inside_id) || has_id(ids, n, (uint32_t)out_id)) {
@@ -95,7 +78,6 @@ int main(void)
         goto restore;
     }
 
-    /* Clear: the walls are gone, both are visible inside. */
     rc = use_clear(&remembered);
     if (rc == 0 && !remembered) { verdict = fail("the volume did not remember the clear", 0); goto restore; }
     if (rc < 0) { verdict = fail("use_clear", rc); goto restore; }

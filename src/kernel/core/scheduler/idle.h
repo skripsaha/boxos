@@ -6,21 +6,16 @@
 
 #define IDLE_PID 0
 
-// Initialize BSP idle process (PID 0).  Called once from kernel_main().
 void idle_process_init(void);
 
-// Initialize an idle process for an AP core.  Called from ap_entry_c().
 void idle_process_init_core(uint8_t core_index);
 
-// Return the idle process for the calling core.
 process_t *idle_process_get(void);
 
 bool process_is_idle(process_t *proc);
 
-// Assembly entry point: idle loop (idle_loop.asm) — calls cpu_idle() per pass.
 void idle_loop(void);
 
-// One idle wait (MWAIT-C1 when available, else HLT). Called from idle_loop.
 void cpu_idle(void);
 
-#endif // IDLE_H
+#endif

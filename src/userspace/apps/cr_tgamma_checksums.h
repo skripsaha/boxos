@@ -1,4 +1,3 @@
-// FNV-1a checksums over MPFR-CR tgamma for the deterministic x stream — GENERATED.
 static const unsigned long long kTgammaN    = 20000ULL;
 static const unsigned long long kTgammaSeed = 0x165667B19E3779F9ULL;
 static const int kTgammaElo = -4, kTgammaEhi = 10, kTgammaSigned = 0;

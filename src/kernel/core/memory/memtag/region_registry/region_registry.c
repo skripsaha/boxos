@@ -1,37 +1,13 @@
-/*
- * MemTag — Region Registry Implementation
- *
- * Region slot array + free-id stack + dense phys→region_id index.
- * Per-bucket spinlocks for region mutation; one global lock for slot growth
- * and free-stack pop/push (rare paths).
- *
- * id_by_page is allocated directly from PMM (not kmalloc) because it can be
- * MB-sized on large RAM (4 B per 4 KiB page = 4 MB per 4 GB RAM). Backed via
- * Pull Map (vmm_phys_to_virt) for kernel access.
- */
 
 #include "region_registry.h"
 #include "pmm.h"
 #include "vmm.h"
 
-/* ─── Internal helpers ────────────────────────────────────────────────── */
 
 static inline spinlock_t *BucketLock(MemRegionRegistry *reg, uint32_t id) {
     return &reg->bucket_locks[id % MEMTAG_REGION_BUCKETS];
 }
 
-/* Slot ceiling the kernel heap can actually back.
- *
- * slots[] and free_stack[] live in the kernel heap, a pool whose size is fixed
- * at boot. MEMTAG_REGION_MAX_CAP alone promised 1M slots — over 64 MiB of
- * arrays — which no heap in this kernel hands out, so a caller approaching the
- * ceiling learned about it from an allocation failure rather than from the cap
- * that was supposed to describe it. Derive the live bound from the pool and
- * keep the constant as the architectural ceiling.
- *
- * A quarter of the pool is the registry's share: growth briefly holds the old
- * arrays alongside the new, so the live bound must leave room for its own
- * transition and for every other heap user. */
 static uint32_t RegionSlotCeiling(void) {
     size_t per_slot = sizeof(MemRegion) + sizeof(uint32_t);
     size_t cap      = (mem_heap_size() / 4) / per_slot;
@@ -42,7 +18,6 @@ static uint32_t RegionSlotCeiling(void) {
 }
 
 static error_t EnsureSlotCapacity(MemRegionRegistry *reg, uint32_t needed_id) {
-    /* Caller must hold reg->lock. Grows slots[] / free_stack[] together. */
     if (needed_id < reg->slot_cap) return OK;
 
     uint32_t ceiling = RegionSlotCeiling();
@@ -80,9 +55,6 @@ static error_t EnsureSlotCapacity(MemRegionRegistry *reg, uint32_t needed_id) {
     return OK;
 }
 
-/* Walk id_by_page[first..last) and write `val`. Bounded by registry's
- * page_count — out-of-range pages (e.g. firmware MMIO above mem_end) are
- * silently skipped. */
 static void IdByPageFill(MemRegionRegistry *reg,
                           uintptr_t base_phys, size_t pages, uint32_t val) {
     if (!reg->id_by_page) return;
@@ -95,8 +67,6 @@ static void IdByPageFill(MemRegionRegistry *reg,
     }
 }
 
-/* Only clear pages still mapped to THIS region (don't clobber overlapping
- * later registration). */
 static void IdByPageClearMatching(MemRegionRegistry *reg,
                                    uintptr_t base_phys, size_t pages,
                                    uint32_t expect_id) {
@@ -111,8 +81,6 @@ static void IdByPageClearMatching(MemRegionRegistry *reg,
     }
 }
 
-/* Binary search for tag_id in sorted tag_ids[]. Returns insert position
- * (== count if larger than all) AND sets *found. */
 static uint16_t TagSearch(const uint16_t *ids, uint16_t count,
                            uint16_t tag_id, bool *found) {
     *found = false;
@@ -126,11 +94,10 @@ static uint16_t TagSearch(const uint16_t *ids, uint16_t count,
     return lo;
 }
 
-/* Grow tag_ids[] geometrically. Returns 0 on success. */
 static int TagsGrow(MemRegion *r) {
     uint16_t new_cap = (r->tag_cap == 0) ? MEMTAG_REGION_TAGS_INITIAL
                                           : (uint16_t)(r->tag_cap * 2);
-    if (new_cap <= r->tag_cap) return -1;  /* overflow */
+    if (new_cap <= r->tag_cap) return -1;
     uint16_t *new_ids = (uint16_t *)kmalloc(sizeof(uint16_t) * new_cap);
     if (!new_ids) return -1;
     if (r->tag_count > 0)
@@ -141,7 +108,6 @@ static int TagsGrow(MemRegion *r) {
     return 0;
 }
 
-/* ─── Public API ──────────────────────────────────────────────────────── */
 
 error_t MemRegionRegistryInit(MemRegionRegistry *reg, size_t mem_end) {
     if (!reg || !mem_end) return ERR_INVALID_ARGUMENT;
@@ -156,7 +122,6 @@ error_t MemRegionRegistryInit(MemRegionRegistry *reg, size_t mem_end) {
         return ERR_NO_MEMORY;
     }
 
-    /* Dense id_by_page allocated from PMM (can be MB-sized on large RAM). */
     size_t pages_in_ram = mem_end / PMM_PAGE_SIZE;
     size_t idbp_bytes   = pages_in_ram * sizeof(uint32_t);
     size_t idbp_pages   = (idbp_bytes + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
@@ -168,7 +133,6 @@ error_t MemRegionRegistryInit(MemRegionRegistry *reg, size_t mem_end) {
         return ERR_NO_MEMORY;
     }
     uint32_t *idbp = (uint32_t *)vmm_phys_to_virt(idbp_phys);
-    /* memset writes 0xFF bytes — MEMTAG_INVALID_REGION_ID is 0xFFFFFFFF. */
     memset(idbp, 0xFF, idbp_bytes);
 
     reg->id_by_page = idbp;
@@ -204,10 +168,6 @@ void MemRegionRegistryShutdown(MemRegionRegistry *reg) {
     }
     if (reg->slots)      kfree(reg->slots);
     if (reg->free_stack) kfree(reg->free_stack);
-    /* id_by_page is from PMM — released only at full subsystem teardown
-     * (which is boot-only). Leaving it freed via pmm_free would require
-     * tracking the original allocation pointer. For Phase 1 we treat
-     * shutdown as never-called in production. */
     reg->slots      = NULL;
     reg->free_stack = NULL;
     reg->id_by_page = NULL;
@@ -238,7 +198,6 @@ uint32_t MemRegionRegistryCreate(MemRegionRegistry *reg,
     MemRegion *r = &reg->slots[id];
     spin_unlock(&reg->lock);
 
-    /* Per-bucket lock for content init — other buckets can run in parallel. */
     spin_lock(BucketLock(reg, id));
     r->base_phys   = base_phys;
     r->base_virt   = base_virt;
@@ -254,7 +213,6 @@ uint32_t MemRegionRegistryCreate(MemRegionRegistry *reg,
     r->attach_head = NULL;
     spin_unlock(BucketLock(reg, id));
 
-    /* Index by phys page (last-writer-wins on overlap; bitmap is authoritative). */
     if (base_phys) IdByPageFill(reg, base_phys, pages, id);
 
     __atomic_add_fetch(&reg->generation, 1, __ATOMIC_RELEASE);
@@ -281,10 +239,6 @@ void MemRegionRegistryDestroy(MemRegionRegistry *reg, uint32_t id) {
     uintptr_t base = r->base_phys;
     size_t    pgs  = r->pages;
 
-    /* Free attach chain — Phase 2C bookkeeping must not outlive the
-     * region. Bay/Brook should have detached every attach by now, but
-     * leftover entries (after process_destroy without explicit detach)
-     * are reaped here to avoid leaks. */
     MemRegionAttach *att = r->attach_head;
     r->attach_head = NULL;
     while (att) {
@@ -319,8 +273,6 @@ void MemRegionRegistryDestroy(MemRegionRegistry *reg, uint32_t id) {
 bool MemRegionRegistryIsActive(MemRegionRegistry *reg, uint32_t id) {
     if (!reg || id == MEMTAG_INVALID_REGION_ID) return false;
     if (id >= reg->slot_count) return false;
-    /* Lock-free read of flag; ACTIVE bit is set/cleared atomically by C
-     * (uint16_t aligned on x86-64). Safe for snapshot. */
     return (reg->slots[id].flags & MEMTAG_REGION_FLAG_ACTIVE) != 0;
 }
 
@@ -378,7 +330,7 @@ error_t MemRegionRegistryAddTag(MemRegionRegistry *reg,
     uint16_t pos = TagSearch(r->tag_ids, r->tag_count, tag_id, &found);
     if (found) {
         spin_unlock(BucketLock(reg, id));
-        return OK;  /* idempotent */
+        return OK;
     }
 
     if (r->tag_count >= r->tag_cap) {
@@ -387,7 +339,6 @@ error_t MemRegionRegistryAddTag(MemRegionRegistry *reg,
             return ERR_NO_MEMORY;
         }
     }
-    /* Shift right to make room at pos */
     if (pos < r->tag_count) {
         memmove(&r->tag_ids[pos + 1], &r->tag_ids[pos],
                 sizeof(uint16_t) * (r->tag_count - pos));
@@ -415,9 +366,8 @@ error_t MemRegionRegistryRemoveTag(MemRegionRegistry *reg,
     uint16_t pos = TagSearch(r->tag_ids, r->tag_count, tag_id, &found);
     if (!found) {
         spin_unlock(BucketLock(reg, id));
-        return OK;  /* idempotent */
+        return OK;
     }
-    /* Shift left over removed entry */
     if (pos + 1 < r->tag_count) {
         memmove(&r->tag_ids[pos], &r->tag_ids[pos + 1],
                 sizeof(uint16_t) * (r->tag_count - pos - 1));
@@ -462,10 +412,7 @@ size_t MemRegionRegistryListTags(MemRegionRegistry *reg, uint32_t id,
     return n;
 }
 
-/* ─── Phase 2C — per-attach mapping registry ────────────────────────── */
 
-/* Internal: find attach matching (ctx, va_base). Caller must hold bucket
- * lock. Returns NULL if not found. */
 static MemRegionAttach *AttachLookup(MemRegion *r, void *ctx, uintptr_t va) {
     for (MemRegionAttach *a = r->attach_head; a; a = a->next) {
         if (a->ctx == ctx && a->va_base == va) return a;
@@ -486,8 +433,6 @@ error_t MemRegionRegistryAttach(MemRegionRegistry *reg,
     if (page_class != MEMTAG_ATTACH_CLASS_4K && page_class != MEMTAG_ATTACH_CLASS_2M)
         return ERR_INVALID_ARGUMENT;
 
-    /* Allocate the node OUTSIDE the bucket lock — kmalloc can take a
-     * long time on first slab allocation. */
     MemRegionAttach *fresh = (MemRegionAttach *)kmalloc(sizeof(MemRegionAttach));
     if (!fresh) return ERR_NO_MEMORY;
     fresh->ctx         = ctx;
@@ -509,9 +454,6 @@ error_t MemRegionRegistryAttach(MemRegionRegistry *reg,
         return ERR_OBJECT_NOT_FOUND;
     }
 
-    /* Idempotent: if (ctx, va_base) already present, refresh in place
-     * and discard the fresh node. Refreshes orig_flags + pages + state
-     * so subsequent grant/revoke operates on current mapping state. */
     MemRegionAttach *existing = AttachLookup(r, ctx, va_base);
     if (existing) {
         existing->pages      = pages;
@@ -523,7 +465,6 @@ error_t MemRegionRegistryAttach(MemRegionRegistry *reg,
         return OK;
     }
 
-    /* Link at head — O(1) and order doesn't matter for enforcement walks. */
     fresh->next     = r->attach_head;
     r->attach_head  = fresh;
     r->generation++;
@@ -543,7 +484,7 @@ error_t MemRegionRegistryDetach(MemRegionRegistry *reg,
     MemRegion *r = &reg->slots[region_id];
     if (!(r->flags & MEMTAG_REGION_FLAG_ACTIVE)) {
         spin_unlock(BucketLock(reg, region_id));
-        return OK;  /* race with destroy — idempotent */
+        return OK;
     }
 
     MemRegionAttach **p = &r->attach_head;
@@ -559,7 +500,7 @@ error_t MemRegionRegistryDetach(MemRegionRegistry *reg,
         p = &cur->next;
     }
     spin_unlock(BucketLock(reg, region_id));
-    return OK;  /* not found — idempotent */
+    return OK;
 }
 
 size_t MemRegionRegistrySnapshotAttachs(MemRegionRegistry *reg,
@@ -574,9 +515,6 @@ size_t MemRegionRegistrySnapshotAttachs(MemRegionRegistry *reg,
     size_t n = 0;
     if (r->flags & MEMTAG_REGION_FLAG_ACTIVE) {
         for (MemRegionAttach *a = r->attach_head; a && n < max; a = a->next) {
-            /* Snapshot copy: clear `next` so caller can't accidentally
-             * chase a stale pointer into registry-owned memory after the
-             * bucket lock drops. All consumed fields are by-value. */
             out[n]          = *a;
             out[n].next     = NULL;
             n++;
@@ -599,7 +537,7 @@ error_t MemRegionRegistrySetAttachState(MemRegionRegistry *reg,
     MemRegion *r = &reg->slots[region_id];
     if (!(r->flags & MEMTAG_REGION_FLAG_ACTIVE)) {
         spin_unlock(BucketLock(reg, region_id));
-        return OK;  /* race with destroy — silent */
+        return OK;
     }
 
     MemRegionAttach *a = AttachLookup(r, ctx, va_base);
@@ -614,9 +552,6 @@ error_t MemRegionRegistrySetAttachState(MemRegionRegistry *reg,
 size_t MemRegionRegistryDetachAllForCtx(MemRegionRegistry *reg, void *ctx) {
     if (!reg || !ctx) return 0;
     size_t removed = 0;
-    /* Walk every active slot under its bucket lock. Heavy on huge
-     * region counts but only runs during process_destroy cleanup paths
-     * where Bay/Brook missed an explicit detach. */
     for (uint32_t id = 0; id < reg->slot_count; id++) {
         spin_lock(BucketLock(reg, id));
         MemRegion *r = &reg->slots[id];
@@ -647,8 +582,6 @@ size_t MemRegionRegistryDetachAllForCtx(MemRegionRegistry *reg, void *ctx) {
 uint32_t MemRegionRegistryActiveCount(MemRegionRegistry *reg) {
     if (!reg) return 0;
     uint32_t active = 0;
-    /* Approximation under heavy mutation; exact reads would need to hold
-     * every bucket lock which is wasteful. */
     for (uint32_t i = 0; i < reg->slot_count; i++) {
         if (reg->slots[i].flags & MEMTAG_REGION_FLAG_ACTIVE) active++;
     }

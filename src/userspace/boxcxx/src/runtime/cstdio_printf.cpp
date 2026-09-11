@@ -1,21 +1,3 @@
-// boxcxx — <cstdio> runtime: the printf family
-//
-// One engine, two sinks. A stream sink hands bytes to the byte layer; a memory
-// sink fills a caller's buffer and keeps counting past the end, because that
-// count IS snprintf's return value and truncating it would lose the number the
-// caller needs to allocate correctly.
-//
-// The floating conversions do NOT carry their own digit generation. <charconv>
-// already produces correctly-rounded output in fixed, scientific, general and
-// hex forms (Ф9A, MPFR-verified), and printf's job here is the part around it:
-// the sign, the flags, the width and the padding. A second digit generator
-// would be a second thing to be right, and this one has been checked against
-// an oracle in a way a fresh one would not be.
-//
-// boxlib's printf, which owns the global name, converts %s %d %i %u %x %X %c
-// %p and %% and nothing else. This engine is the full C set. The two are
-// different functions reached by different spellings — see the note in
-// <cstdio> about why the global name stays boxlib's.
 
 #include <charconv>
 #include <cstdarg>
@@ -26,12 +8,11 @@
 
 namespace {
 
-// ── the sink ────────────────────────────────────────────────────────────
 struct Sink {
-    ::std::FILE   *stream;  // one of these two is null
+    ::std::FILE   *stream;
     char          *mem;
-    ::std::size_t  cap;     // mem: bytes available INCLUDING the terminator
-    ::std::size_t  len;     // bytes the result WOULD have; may exceed cap
+    ::std::size_t  cap;
+    ::std::size_t  len;
     bool           bad;
 };
 
@@ -59,22 +40,18 @@ void EmitRepeat(Sink &s, char c, int n)
     }
 }
 
-// ── one conversion's parsed shape ───────────────────────────────────────
 struct Spec {
-    bool left = false;      // '-'
-    bool plus = false;      // '+'
-    bool space = false;     // ' '
-    bool alt = false;       // '#'
-    bool zero = false;      // '0'
+    bool left = false;
+    bool plus = false;
+    bool space = false;
+    bool alt = false;
+    bool zero = false;
     int  width = 0;
-    int  prec = -1;         // -1 = absent
-    char length = 0;        // 'H'=hh 'h' 'l' 'q'=ll 'j' 'z' 't' 'L'
+    int  prec = -1;
+    char length = 0;
     char conv = 0;
 };
 
-// Writes body with sign/prefix, honouring width, zero-padding and adjustment.
-// One place, because getting padding right once is the difference between this
-// and a family of near-identical bugs.
 void Pad(Sink &s, const Spec &sp, const char *sign, const char *prefix,
          const char *body, int bodyn, int zeros)
 {
@@ -83,9 +60,6 @@ void Pad(Sink &s, const Spec &sp, const char *sign, const char *prefix,
     const int total   = signn + prefixn + zeros + bodyn;
     const int pad     = sp.width > total ? sp.width - total : 0;
 
-    // '0' is ignored when '-' is given or when a precision was specified for an
-    // integer conversion — both are C's rules, and both are the kind of thing a
-    // reader expects to see stated rather than inferred from the code.
     const bool zeropad = sp.zero && !sp.left;
 
     if (!sp.left && !zeropad) EmitRepeat(s, ' ', pad);
@@ -100,7 +74,6 @@ void Pad(Sink &s, const Spec &sp, const char *sign, const char *prefix,
 const char *kLowerDigits = "0123456789abcdef";
 const char *kUpperDigits = "0123456789ABCDEF";
 
-// Unsigned magnitude in the given base, written backwards into buf.
 int Digits(char *buf, unsigned long long v, unsigned base, bool upper)
 {
     const char *tab = upper ? kUpperDigits : kLowerDigits;
@@ -114,19 +87,12 @@ int Digits(char *buf, unsigned long long v, unsigned base, bool upper)
     return n;
 }
 
-// `is_signed` is not the same question as `negative`: '+' and ' ' apply to a
-// SIGNED conversion whatever its value, and to an unsigned one never. Passing
-// only `negative` made %+u print a plus, which the host disagreed with on 6554
-// of 35817 pairs — the first thing the differential sweep found.
 void Integer(Sink &s, const Spec &sp, bool is_signed, bool negative,
              unsigned long long mag, unsigned base, bool upper)
 {
     char body[72];
     int  n = Digits(body, mag, base, upper);
 
-    // A precision of 0 and a value of 0 produce NO digits at all. Every other
-    // conversion has something to show; this one deliberately does not, and it
-    // is the case an implementation forgets.
     if (sp.prec == 0 && mag == 0) n = 0;
 
     int zeros = (sp.prec > n) ? sp.prec - n : 0;
@@ -138,18 +104,13 @@ void Integer(Sink &s, const Spec &sp, bool is_signed, bool negative,
 
     const char *prefix = nullptr;
     if (sp.alt && base == 16 && mag != 0) prefix = upper ? "0X" : "0x";
-    // '#' on octal is not a prefix: C says it INCREASES THE PRECISION if
-    // necessary to force a leading zero. So it adds nothing when the precision
-    // has already produced one — adding unconditionally made %#.12o one digit
-    // too wide, which the host caught.
     if (sp.alt && base == 8 && zeros == 0 && (n == 0 || body[0] != '0')) zeros = 1;
 
     Spec eff = sp;
-    if (sp.prec >= 0) eff.zero = false;   // C: precision defeats '0'
+    if (sp.prec >= 0) eff.zero = false;
     Pad(s, eff, sign, prefix, body, n, zeros);
 }
 
-// ── floating point ──────────────────────────────────────────────────────
 
 void Floating(Sink &s, const Spec &sp, long double value, char conv)
 {
@@ -157,7 +118,6 @@ void Floating(Sink &s, const Spec &sp, long double value, char conv)
     const char low   = static_cast<char>(upper ? conv - 'A' + 'a' : conv);
 
     bool neg = false;
-    // A negative zero must print its sign, so the test cannot be `value < 0`.
     if (value < 0 || (value == 0 && __builtin_signbit(static_cast<double>(value)))) {
         neg = true;
         value = -value;
@@ -165,8 +125,6 @@ void Floating(Sink &s, const Spec &sp, long double value, char conv)
 
     const char *sign = neg ? "-" : (sp.plus ? "+" : (sp.space ? " " : nullptr));
 
-    // Infinities and NaNs have no digits to generate and no precision to honour,
-    // and '0' padding is forbidden for them.
     if (__builtin_isinf(static_cast<double>(value)) || value != value) {
         const bool isnan = (value != value);
         const char *txt = isnan ? (upper ? "NAN" : "nan") : (upper ? "INF" : "inf");
@@ -189,12 +147,6 @@ void Floating(Sink &s, const Spec &sp, long double value, char conv)
     default: break;
     }
 
-    // %#g keeps the trailing zeros %g drops, and chars_format::general drops
-    // them by definition — so '#' cannot be a post-processing step here, it has
-    // to change WHICH form is generated. C's rule is stated in terms of the
-    // exponent X the value would have in %e form: use %f style with precision
-    // P-1-X when -4 <= X < P, and %e style with precision P-1 otherwise. Ask
-    // for the exponent first, then render the chosen form at full width.
     int alt_g_prec = -1;
     if (low == 'g' && sp.alt) {
         char probe[64];
@@ -215,8 +167,6 @@ void Floating(Sink &s, const Spec &sp, long double value, char conv)
         }
     }
 
-    // Generous: %f of DBL_MAX with a large precision is long, and a short
-    // buffer here would be a truncation nobody asked for.
     char  body[1200];
     char *first = body;
     char *last  = body + sizeof(body);
@@ -231,13 +181,10 @@ void Floating(Sink &s, const Spec &sp, long double value, char conv)
         for (int i = 0; i < n; i++)
             if (body[i] >= 'a' && body[i] <= 'z') body[i] = static_cast<char>(body[i] - 'a' + 'A');
 
-    // '#' keeps the point that %g would have dropped, and gives %f/%e one when
-    // the precision is zero.
     if (sp.alt) {
         bool has_point = false;
         for (int i = 0; i < n; i++) if (body[i] == '.') { has_point = true; break; }
         if (!has_point) {
-            // Insert before the exponent, if there is one.
             int at = n;
             for (int i = 0; i < n; i++)
                 if (body[i] == 'e' || body[i] == 'E' || body[i] == 'p' || body[i] == 'P') { at = i; break; }
@@ -248,16 +195,10 @@ void Floating(Sink &s, const Spec &sp, long double value, char conv)
     }
 
     const char *prefix = (low == 'a') ? (upper ? "0X" : "0x") : nullptr;
-    // to_chars' hex form has no 0x prefix; C's %a does.
     Pad(s, sp, sign, prefix, body, n, 0);
 }
 
-// ── the walk ────────────────────────────────────────────────────────────
 
-// Saturating. A field width is written by the caller and nothing bounds its
-// digits, so `v * 10` on a plain int is signed overflow — undefined behaviour,
-// not merely a large number. Ф42 found this while giving the wide engine the
-// same parser and had to explain why the two differed; they no longer do.
 int ReadInt(const char *&p)
 {
     int v = 0;
@@ -280,7 +221,7 @@ int Run(Sink &s, const char *fmt, va_list ap)
             Emit(s, run, static_cast<::std::size_t>(p - run));
             continue;
         }
-        p++;                                   // past '%'
+        p++;
         if (*p == '%') { Emit(s, "%", 1); p++; continue; }
 
         Spec sp;
@@ -303,10 +244,8 @@ int Run(Sink &s, const char *fmt, va_list ap)
             p++;
             if (*p == '*') { sp.prec = va_arg(ap, int); p++; }
             else           { sp.prec = ReadInt(p); }
-            if (sp.prec < 0) sp.prec = -1;     // C: a negative * precision is absent
+            if (sp.prec < 0) sp.prec = -1;
         }
-        // Length modifiers, folded to one character each so the switch below
-        // has one case per width rather than one per spelling.
         if (p[0] == 'h' && p[1] == 'h') { sp.length = 'H'; p += 2; }
         else if (p[0] == 'l' && p[1] == 'l') { sp.length = 'q'; p += 2; }
         else if (*p == 'h' || *p == 'l' || *p == 'j' || *p == 'z' || *p == 't' || *p == 'L') {
@@ -330,7 +269,6 @@ int Run(Sink &s, const char *fmt, va_list ap)
             default:  v = va_arg(ap, int); break;
             }
             const bool neg = v < 0;
-            // -LLONG_MIN does not exist; negating in the unsigned domain does.
             const unsigned long long mag =
                 neg ? (~static_cast<unsigned long long>(v) + 1ull)
                     : static_cast<unsigned long long>(v);
@@ -371,8 +309,6 @@ int Run(Sink &s, const char *fmt, va_list ap)
             const char *str = va_arg(ap, const char *);
             if (!str) str = "(null)";
             int n = 0;
-            // A precision on %s bounds how far the argument is READ, not merely
-            // how much is printed: the array need not be terminated.
             if (sp.prec >= 0) { while (n < sp.prec && str[n]) n++; }
             else              { n = static_cast<int>(::std::strlen(str)); }
             Spec eff = sp;
@@ -394,8 +330,6 @@ int Run(Sink &s, const char *fmt, va_list ap)
             break;
         }
         case 'n': {
-            // The one conversion that writes through its argument. C++ keeps it;
-            // it is the caller's business whether that is wise.
             void *dst = va_arg(ap, void *);
             const long long written = static_cast<long long>(s.len);
             switch (sp.length) {
@@ -411,8 +345,6 @@ int Run(Sink &s, const char *fmt, va_list ap)
             break;
         }
         default:
-            // An unknown conversion is undefined in C. Printing it back is the
-            // version of undefined that tells the author what they wrote.
             Emit(s, "%", 1);
             Emit(s, &sp.conv, 1);
             break;
@@ -426,7 +358,7 @@ int Run(Sink &s, const char *fmt, va_list ap)
     return s.bad ? -1 : static_cast<int>(s.len);
 }
 
-} // namespace
+}
 
 namespace std {
 
@@ -445,7 +377,6 @@ int vsnprintf(char *str, size_t n, const char *format, va_list arg) noexcept
 
 int vsprintf(char *str, const char *format, va_list arg) noexcept
 {
-    // No bound, which is what sprintf means and why it is the one to avoid.
     Sink s{nullptr, str, static_cast<size_t>(-1), 0, false};
     return Run(s, format, arg);
 }
@@ -482,12 +413,8 @@ int sprintf(char *str, const char *format, ...) noexcept
     return r;
 }
 
-} // namespace std
+}
 
-// The strong definition that overrides boxlib's weak one. It is not in
-// namespace std because it IS ::printf — the same function the whole tree has
-// always called, now converting everything C asks for. A C++ program links
-// this; a C-only program, which cannot link boxcxx, keeps boxlib's.
 extern "C" int printf(const char *format, ...)
 {
     va_list ap;

@@ -67,18 +67,6 @@ void xhci_command_init(xhci_controller_t* ctrl)
     memset(ctrl->pending_cmds, 0, sizeof(ctrl->pending_cmds));
 }
 
-/*
- * Which command a completion is answering.
- *
- * The Command Completion Event carries the physical address of the Command TRB
- * (xHCI 1.2 Section 6.4.2.2), and that TRB lives at a known offset in a ring
- * this controller owns. So the answer is arithmetic, and it is exact: an
- * address outside this ring is not this controller's command, full stop.
- *
- * What it replaces was a linear search of a table shared by every controller
- * on the machine, keyed on an address, followed by a SECOND search of the
- * device table trying to work out which device the answer belonged to.
- */
 static int cmd_index_for(const xhci_controller_t* ctrl, uint64_t trb_phys)
 {
     uint64_t base = ctrl->command_ring.trbs_phys;
@@ -113,8 +101,6 @@ static int post_command(xhci_controller_t* ctrl, xhci_trb_t* trb,
 
     int index = cmd_index_for(ctrl, trb_phys);
     if (index < 0) {
-        /* The ring handed back an address that is not in the ring. Nothing
-         * sensible follows from that, and it must not be silent. */
         spin_unlock(&ctrl->pending_lock);
         kprintf("[xHCI %s] the command ring produced an address outside "
                 "itself (0x%llx)\n", ctrl->name,
@@ -123,12 +109,6 @@ static int post_command(xhci_controller_t* ctrl, xhci_trb_t* trb,
     }
 
     if (ctrl->pending_cmds[index].state == XHCI_CMD_POSTED) {
-        /*
-         * The ring has come all the way round onto a command the controller
-         * has still not answered. That is the controller being two hundred and
-         * fifty-five commands behind, which is not a queue — it is a stopped
-         * controller, and overwriting the TRB would hide it.
-         */
         spin_unlock(&ctrl->pending_lock);
         kprintf("[xHCI %s] the command ring wrapped onto %s, still unanswered "
                 "— the controller has stopped taking commands\n", ctrl->name,
@@ -136,9 +116,6 @@ static int post_command(xhci_controller_t* ctrl, xhci_trb_t* trb,
         return -1;
     }
 
-    /* The clock the stuck-ring test runs on starts when the ring stops being
-     * empty. Otherwise a controller idle for a minute looks overdue the
-     * instant it is given its first command. */
     if (ctrl->last_cmd_answer == 0) {
         ctrl->last_cmd_answer = rdtsc();
     }
@@ -158,14 +135,6 @@ static int post_command(xhci_controller_t* ctrl, xhci_trb_t* trb,
     return 0;
 }
 
-/*
- * Enable Slot names the kind of slot it wants (xHCI 1.2 Section 6.4.3.2, bits
- * 20:16), and the kind comes from the Supported Protocol capability that owns
- * the port — which this driver already reads and used to throw away. Zero is
- * right for USB 2 and USB 3 on every controller seen so far, and is exactly
- * the sort of "right everywhere I looked" that stops being right on somebody
- * else's machine.
- */
 int xhci_post_enable_slot_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
                               uint8_t slot_type)
 {
@@ -248,9 +217,6 @@ int xhci_post_stop_endpoint_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* own
         return -1;
     }
 
-    /* Suspend (bit 23) is left clear. It asks the controller to suspend the
-     * device as well as stop the endpoint, and nothing here wants that: the
-     * device is fine, it is the transfer that is being taken back. */
     xhci_trb_t trb = {0};
     trb.control = TRB_SET_TYPE(TRB_TYPE_STOP_ENDPOINT) |
                   ((uint32_t)dci << 16) | ((uint32_t)slot_id << 24);
@@ -275,29 +241,9 @@ int xhci_post_set_tr_dequeue_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* ow
     return post_command(ctrl, &trb, slot_id, owner);
 }
 
-/* Which commands are steps of enumeration.
- *
- * Every command completion used to be handed to the enumeration state machine,
- * which was harmless only while enumeration was the sole thing issuing
- * commands. It is not any more: an endpoint reset on a device that is already
- * running would arrive as an unexplained completion for a slot in a settled
- * state, and a state machine driven by events it did not ask for is a state
- * machine that will eventually take the wrong branch. */
 static bool cmd_is_enumeration_step(uint8_t trb_type,
                                     const xhci_device_slot_t* owner)
 {
-    /*
-     * Once a device is configured, enumeration is over, and every command
-     * posted against it belongs to whoever is driving it.
-     *
-     * A hub sets its own Hub bit with a Configure Endpoint after it has come
-     * up; a disk clears a halted bulk pipe with a Reset Endpoint and a Set TR
-     * Dequeue every time it is refused something. Handing those answers to the
-     * state machine put "slot 1 answered a step it was not on" on the screen
-     * for each of them — a line whose whole purpose is to report an answer
-     * arriving before the question was written down, printed for something
-     * that is neither, on the one screen that has to stay readable.
-     */
     if (!owner || __atomic_load_n(&owner->state, __ATOMIC_ACQUIRE) ==
                       ENUM_STATE_CONFIGURED) {
         return false;
@@ -308,10 +254,6 @@ static bool cmd_is_enumeration_step(uint8_t trb_type,
         case TRB_TYPE_ADDRESS_DEVICE:
         case TRB_TYPE_CONFIGURE_ENDPOINT:
         case TRB_TYPE_RESET_ENDPOINT:
-        /* Enumeration takes a control transfer back with this when the device
-         * answered nothing at all — Reset Endpoint is defined for a HALTED
-         * pipe, and a pipe nobody answered on is still Running. Its answer
-         * carries the state machine to the repositioning both roads share. */
         case TRB_TYPE_STOP_ENDPOINT:
         case TRB_TYPE_SET_TR_DEQUEUE:
             return true;
@@ -332,14 +274,6 @@ void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event)
 
     int index = cmd_index_for(ctrl, trb_phys);
     if (index < 0) {
-        /*
-         * An answer to a question this controller was never asked.
-         *
-         * Said out loud, not into a debug build: this is a completion that
-         * advances nothing, so whatever was waiting on it waits until a
-         * watchdog gives up — a device that never enumerates, with no line in
-         * the log to say why.
-         */
         kprintf("[xHCI %s] a completion names TRB 0x%llx, which is not on this "
                 "controller's command ring (slot %u, %s)\n",
                 ctrl->name, (unsigned long long)trb_phys, event_slot_id,
@@ -347,18 +281,12 @@ void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event)
         return;
     }
 
-    /* That TRB and everything queued ahead of it are done with — the command
-     * ring is executed strictly in order (Section 4.6.1), which is the same
-     * property that makes one unanswered command block the rest of it. */
     xhci_ring_reclaim_to(&ctrl->command_ring, trb_phys);
 
     spin_lock(&ctrl->pending_lock);
     xhci_pending_cmd_t entry = ctrl->pending_cmds[index];
     if (entry.state != XHCI_CMD_POSTED) {
         spin_unlock(&ctrl->pending_lock);
-        /* Command Ring Stopped is the controller acknowledging an abort, and
-         * it names the TRB it had reached rather than one still outstanding.
-         * Everything else here is a second answer to a settled question. */
         if (completion_code != TRB_COMPLETION_CMD_RING_STOPPED) {
             kprintf("[xHCI %s] a second answer arrived for a command already "
                     "settled (slot %u, %s)\n", ctrl->name, event_slot_id,
@@ -366,42 +294,19 @@ void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event)
         }
         return;
     }
-    /* Released before the state machine runs. The controller has finished with
-     * this TRB and with the input context it named, which is exactly what
-     * whoever is trying to take the device down needs to know. */
     ctrl->pending_cmds[index].state = XHCI_CMD_FREE;
     ctrl->pending_cmds[index].owner = NULL;
     ctrl->last_cmd_answer = rdtsc();
     ctrl->cmd_nudges      = 0;
     spin_unlock(&ctrl->pending_lock);
 
-    /*
-     * How long that took, when it took long enough to matter.
-     *
-     * Silent for the ordinary case — a command answered in microseconds is not
-     * news — and the one fact that separates "this controller is stuck" from
-     * "this controller is slower than somebody's timeout" on a machine that
-     * can only be read by photographing its screen.
-     */
     uint32_t took = (uint32_t)cpu_tsc_to_ms(rdtsc() - entry.posted_at);
     if (took >= XHCI_CMD_SLOW_MS) {
         kprintf("[xHCI %s] %s on slot %u took %u ms\n", ctrl->name,
                 xhci_command_name(entry.trb_type), event_slot_id, took);
     }
 
-    /*
-     * The answer goes to the device that asked, and to no other.
-     *
-     * The slot is named by the command, not looked for afterwards. Enable Slot
-     * is the reason that matters: it carries no slot id on the way out, so the
-     * old code answered it into "the first device in the table that looks like
-     * it is waiting for one" — which is a guess, and with four devices coming
-     * up at once on a live board it is four guesses in a row.
-     */
     if (!xhci_slot_still_is(entry.owner, entry.owner_epoch)) {
-        /* The device left while its command was in flight. Not an error — an
-         * unplug during enumeration is an ordinary thing — but it is worth one
-         * line, because it is also what a mis-delivered answer looks like. */
         kprintf("[xHCI %s] %s answered for slot %u after the device had gone "
                 "(%s)\n", ctrl->name, xhci_command_name(entry.trb_type),
                 event_slot_id, xhci_completion_name(completion_code));
@@ -409,15 +314,6 @@ void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event)
     }
 
     if (completion_code != TRB_COMPLETION_SUCCESS) {
-        /*
-         * Named by the command, not by the event.
-         *
-         * A Command Ring Stopped event carries the slot id of wherever the
-         * controller had got to, which is not the slot of the command being
-         * answered — measured: two commands belonging to ports 10 and 12 were
-         * both reported against slot 3, which is a third device that had
-         * nothing to do with either of them.
-         */
         kprintf("[xHCI %s] %s on slot %u was refused: %s (code %u)\n",
                 ctrl->name, xhci_command_name(entry.trb_type),
                 entry.slot_id ? entry.slot_id : event_slot_id,
@@ -436,9 +332,6 @@ int xhci_command_wait_idle(xhci_controller_t* ctrl, uint32_t timeout_ms)
         return -1;
     }
 
-    /* The completions this is waiting for are drained by a pass that cannot
-     * run until this call returns. Waiting would be spending the whole budget
-     * for an answer this caller is itself standing in front of. */
     if (xhci_drain_is_mine(ctrl)) {
         kprintf("[xHCI %s] the command ring was waited on from inside the "
                 "event drain — its answers cannot arrive until this returns\n",
@@ -532,22 +425,6 @@ bool xhci_command_oldest_for(xhci_controller_t* ctrl,
     return found;
 }
 
-/*
- * Abandoning a command the controller will not answer.
- *
- * There is exactly one way to do this and it is not "stop remembering it".
- * xHCI 1.2 Section 4.6.1.2: software sets CRCR.CA, waits for the controller to
- * stop the ring, and re-publishes the ring pointer. Until it has stopped, the
- * controller is entitled to read that TRB and everything the TRB points at —
- * and what an Address Device TRB points at is an Input Context that the device
- * teardown is about to hand back to the page allocator. Forgetting a command
- * instead of aborting it therefore does not lose a device; it lets the
- * controller DMA into somebody else's memory some time later.
- *
- * A controller that has stopped answering commands has stopped being useful,
- * so every device with a command in flight is released here. That is honest:
- * they were going nowhere.
- */
 void xhci_command_abort_if_wanted(xhci_controller_t* ctrl)
 {
     if (!ctrl || !ctrl->op_regs) {
@@ -559,15 +436,11 @@ void xhci_command_abort_if_wanted(xhci_controller_t* ctrl)
 
     volatile uint32_t* crcr_lo = (volatile uint32_t*)&ctrl->op_regs->crcr;
 
-    /* The pointer half of CRCR reads as zero, so this writes the abort bit and
-     * nothing else — which is what the specification asks for. */
     ctrl->op_regs->crcr = ctrl->op_regs->crcr | XHCI_CRCR_CA;
 
     uint64_t deadline = rdtsc() + cpu_ms_to_tsc(XHCI_CMD_ABORT_TIMEOUT_MS);
     bool stopped = false;
     while ((int64_t)(rdtsc() - deadline) < 0) {
-        /* The abort answers with events; draining is what lets the Command
-         * Ring Stopped event through and keeps the ring from filling. */
         xhci_process_events();
         if ((*crcr_lo & XHCI_CRCR_CRR) == 0) {
             stopped = true;
@@ -584,9 +457,6 @@ void xhci_command_abort_if_wanted(xhci_controller_t* ctrl)
         ctrl->error_state = true;
     }
 
-    /* Everything that was in flight is gone with the ring. Release the devices
-     * that were waiting on it before the ring is re-published, so that nothing
-     * is left believing an answer is still coming. */
     spin_lock(&ctrl->pending_lock);
     xhci_device_slot_t* orphans[XHCI_CMD_RING_TRBS];
     unsigned orphan_count = 0;
@@ -608,11 +478,6 @@ void xhci_command_abort_if_wanted(xhci_controller_t* ctrl)
         }
     }
 
-    /* Start the ring over. The controller's own dequeue pointer is reloaded
-     * from CRCR, so software's enqueue position and cycle state have to go
-     * back to where the controller will be looking. */
-    /* Nothing is owed any more, so the stuck-ring clock starts fresh with
-     * whatever is posted next rather than counting the abort against it. */
     ctrl->last_cmd_answer = 0;
     ctrl->cmd_nudges      = 0;
 
@@ -632,18 +497,6 @@ void xhci_command_abort_if_wanted(xhci_controller_t* ctrl)
     __sync_synchronize();
     ctrl->op_regs->crcr = ctrl->command_ring.trbs_phys | XHCI_CRCR_RCS;
 
-    /*
-     * What the CONTROLLER made of each of them, before they are taken apart.
-     *
-     * The Output Slot Context is written by the controller and never by
-     * software, so its Slot State is the controller's own account: Disabled
-     * means the Address Device never took effect, Addressed or Default mean it
-     * did and the answer went missing. Those are opposite faults with opposite
-     * fixes, nothing else on the machine distinguishes them, and until now the
-     * one line that would have said which never printed here — the enumeration
-     * watchdog would have said it, and this pass retires the slots first, so
-     * the watchdog correctly skips them and the report went with them.
-     */
     for (unsigned k = 0; k < orphan_count; k++) {
         xhci_device_slot_t* s = orphans[k];
         kprintf("[xHCI %s]   port %u (slot %u): controller says slot %s, "
@@ -663,20 +516,6 @@ void xhci_command_abort_if_wanted(xhci_controller_t* ctrl)
             ctrl->name, orphan_count);
 }
 
-/*
- * Is the command ring stuck — as opposed to merely slower than somebody hoped?
- *
- * The controller works through the ring in order, so a completion for any
- * command is proof that every command posted before it has been answered too.
- * The question is therefore about the RING, not about one command: has this
- * controller answered anything at all recently?
- *
- * Asking it the other way round — "has this command been outstanding for five
- * seconds" — cost two devices on a live board. Four Address Devices went out
- * together, the first crossed the budget, the ring was aborted, and one of the
- * commands that abort killed then completed with Success. It had not hung. It
- * was late.
- */
 void xhci_check_command_timeouts(xhci_controller_t* ctrl)
 {
     if (!ctrl || !ctrl->running) {
@@ -693,10 +532,6 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl)
     uint8_t  oldest_type = 0;
     uint8_t  oldest_slot = 0;
 
-    /* Who is owed an answer, so the ports they are on can be asked about it
-     * once the lock is let go. Collected here because this is the only walk
-     * that sees the pending table, and read outside because asking a port is
-     * an MMIO read and this lock is taken from the drain. */
     xhci_device_slot_t* waiting[XHCI_CMD_RING_TRBS];
     unsigned waiting_count = 0;
 
@@ -724,8 +559,6 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl)
     }
 
     if (outstanding == 0) {
-        /* Nothing owed. Let the clock start fresh with the next command
-         * rather than counting the idle time against it. */
         ctrl->last_cmd_answer = 0;
         spin_unlock(&ctrl->pending_lock);
         return;
@@ -740,43 +573,13 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl)
         return;
     }
 
-    /*
-     * ‼ ASK WHO IS OWED, BEFORE RINGING A BELL NOBODY IS BEHIND.
-     *
-     * "Nothing answered for five seconds" is a question about the RING, and
-     * the ladder below answers it in two steps: ring the doorbell, and if that
-     * changes nothing, take the ring away. The doorbell is there because a
-     * controller that did not act on one is indistinguishable, from outside,
-     * from a controller that has hung — and that is true, but only while there
-     * is somebody to hear it.
-     *
-     * There is a case where there is not, and it is the ordinary one on a
-     * machine with a socket in it: the command is owed by a device that has
-     * LEFT. The controller is not ignoring anything; it is holding a command
-     * for a device that stopped existing, and the Disable Slot that would
-     * clear it is queued BEHIND that command on a ring executed in order. No
-     * bell will move it. Ringing one costs a second full budget — five
-     * thousand milliseconds of a boot, twice over on a live board, and the
-     * measured "Address Device took 10005 ms" is exactly those two budgets
-     * end to end.
-     *
-     * So: when everything outstanding is owed by devices that have gone, the
-     * bell is skipped and the ring is taken back at once, and the log says
-     * WHY rather than reporting a controller that never misbehaved.
-     *
-     * Two ways to know a device has gone, and both are facts rather than
-     * deadlines. Its slot is no longer live — the port-status change retired
-     * it, which also clears the port number, so this is the answer most of the
-     * time. Or its port says so directly, which covers the window before that
-     * event has been drained. Neither is a clock.
-     */
     unsigned gone = 0;
     for (unsigned k = 0; k < waiting_count; k++) {
         xhci_device_slot_t* s = waiting[k];
         uint8_t port = s->port_num;
 
         if (!xhci_slot_still_is(s, xhci_slot_epoch(s))) {
-            gone++;                     /* retired: the device left */
+            gone++;
             continue;
         }
         if (port != 0 && xhci_port_says_gone(ctrl, port)) {
@@ -795,21 +598,9 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl)
                 "one of them is owed by a device that has left — not ringing "
                 "the doorbell, there is nobody behind it\n",
                 ctrl->name, outstanding, silent);
-        ctrl->cmd_nudges = XHCI_CMD_NUDGES;      /* straight to the remedy */
+        ctrl->cmd_nudges = XHCI_CMD_NUDGES;
     }
 
-    /*
-     * The cheap remedy first.
-     *
-     * A doorbell is how software says "there is work on the ring", and a
-     * controller that did not act on one is indistinguishable, from the
-     * outside, from a controller that has hung. Ringing it again is one
-     * register write, cannot corrupt anything, and does nothing at all if the
-     * controller was simply busy. Aborting the ring destroys every command in
-     * flight — measured on a live board: it killed an Address Device that then
-     * completed with Success — so it is what happens after the cheap thing has
-     * been tried, not instead of it.
-     */
     if (ctrl->cmd_nudges < XHCI_CMD_NUDGES) {
         ctrl->cmd_nudges++;
         xhci_ring_t* er = &ctrl->event_ring;
@@ -822,24 +613,6 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl)
                 xhci_command_name(oldest_type), oldest_slot, oldest_ms,
                 ctrl->cmd_nudges, XHCI_CMD_NUDGES);
 
-        /*
-         * And which of the two possible faults it is.
-         *
-         * The controller has executed commands whose completions never
-         * arrived — measured on a live board, three devices reading Addressed
-         * with addresses assigned while this driver was still waiting to be
-         * told. That leaves exactly two possibilities and this line separates
-         * them:
-         *
-         *   the TRB at the dequeue position carries the cycle bit we expect
-         *     ⇒ the events ARE on the ring and nobody is reading them;
-         *   it does not
-         *     ⇒ the controller executed the command and posted nothing.
-         *
-         * The skipped-drain count answers the same question from the other
-         * end: a drain that keeps finding somebody else already draining is a
-         * ring nobody is actually finishing.
-         */
         kprintf("[xHCI %s]   CRCR=0x%08x USBSTS=0x%08x ERDP=0x%08x "
                 "IMAN=0x%08x | command ring at %u | event ring at %u "
                 "expecting cycle %u, TRB there 0x%08x | %u drain(s) skipped\n",
@@ -854,15 +627,10 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl)
         __sync_synchronize();
         ctrl->doorbells->doorbells[0].doorbell = 0;
 
-        /* Give it the same budget again to answer the nudge. */
         ctrl->last_cmd_answer = now;
         return;
     }
 
-    /*
-     * It has been told three times and answered nothing. That is a stopped
-     * controller, and the ring has to be taken away from it.
-     */
     if (nobody_left_to_answer) {
         kprintf("[xHCI %s] the command ring is being taken back — it is "
                 "holding commands for devices that are not there any more\n",
@@ -873,17 +641,6 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl)
                 ctrl->name, XHCI_CMD_NUDGES);
     }
 
-    /*
-     * Asked for, not done here.
-     *
-     * This function is reached from xhci_tick, which runs inside IRQ0 and does
-     * not send its end-of-interrupt until it returns. The abort below is a
-     * five-second poll of CRCR, and spending it here stops the machine's clock
-     * for five seconds — see the note on cmd_abort_wanted in xhci.h. The K-Core
-     * guide loop and the idle loop both call xhci_recover_if_needed, which is
-     * where seconds are allowed to be spent; during boot, before either of them
-     * runs, xhci_enum_settle carries it out on this core.
-     */
     ctrl->cmd_nudges = 0;
     __atomic_store_n(&ctrl->cmd_abort_wanted, 1u, __ATOMIC_RELEASE);
 }

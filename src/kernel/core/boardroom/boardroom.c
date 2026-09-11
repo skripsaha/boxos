@@ -19,72 +19,25 @@
 #include "cpu_calibrate.h"
 #include "atomics.h"
 
-/*
- * A seat is a PLACE, and a medium is who is sitting in it.
- *
- * That used to be one thing: a seat was a medium, appended to the list when it
- * was found, and there was no way to say it had gone. Two faults came out of
- * the same missing idea. A stick pulled out left its chair behind for ever, so
- * sixteen plug cycles on a live board made sixteen chairs with nobody in
- * fifteen of them. And — far worse — a stick pushed back in got its unit
- * number handed straight back to it, landed in the chair the room already had,
- * and the room announced nothing, because the only thing it could announce was
- * that it had grown. The volume was never mounted again.
- *
- * So a chair can now be empty, and can be sat in again. The list still only
- * grows, and seat numbers still never move under anybody holding one — an
- * empty chair is not deleted, it is unoccupied, which is why a number handed
- * out once stays meaningful for as long as the machine runs.
- */
 typedef struct BoardSeat {
     struct BoardSeat* next;
     uint8_t   number;
     BoardKind kind;
-    uint8_t   index;            /* AHCI port, ATA drive, or USB unit */
+    uint8_t   index;
     bool      removable;
-    bool      occupied;         /* is there a medium in it at this moment */
-    uint32_t  seating;          /* which taking of the room this occupant is */
+    bool      occupied;
+    uint32_t  seating;
     char      name[48];
 } BoardSeat;
 
 static BoardSeat* g_seats = NULL;
-static uint8_t    g_seat_count = 0;     /* chairs, whether or not anybody is in them */
-static uint32_t   g_seatings = 0;       /* takings anywhere in the room, ever */
+static uint8_t    g_seat_count = 0;
+static uint32_t   g_seatings = 0;
 static bool       g_initialised = false;
 
-/*
- * The list, and the fields in it.
- *
- * Seats are never freed, so walking one is safe without holding anything —
- * a pointer into the room stays a pointer into the room. What needs the lock
- * is deciding to take a chair, because two cores that both find the same empty
- * one would both sit in it: departures come from the USB service pass and
- * arrivals from the attendance pass, and on a machine with six cores those are
- * routinely different cores at the same moment.
- *
- * ‼ Never held across disk I/O or an allocation. Every path below reads what
- * it needs, lets go, and only then talks to a medium — the alternative is the
- * one this kernel already has a debt for, and it is not going to be paid by
- * adding another.
- */
 static spinlock_t g_seats_lock;
 static bool       g_seats_lock_ready = false;
 
-/*
- * The room is called to order by ONE core at a time, and the second WAITS.
- *
- * There are two doors into it. The boot walks in on the BSP; the attendance
- * pass walks in from whichever core went idle, every time something arrives on
- * a bus. Only the second door had a lock on it, so on a machine whose USB
- * settles slowly — a controller that reset itself, a port that takes ten
- * seconds to answer — the boot was still seating media when a hot-plug sent
- * another core in through the other door. Both then attached the same disk.
- *
- * Waiting rather than going away, because both callers need the room to be IN
- * ORDER when they return: a boot that skipped it has no volume, and going away
- * would trade a duplicate for a machine with no filesystem. The wait is
- * bounded by exactly the work the waiter would otherwise have done itself.
- */
 static volatile uint32_t g_in_session = 0;
 
 static void seats_lock_init(void)
@@ -95,8 +48,6 @@ static void seats_lock_init(void)
     }
 }
 
-/* What a seat answers when it will not say, and the floor under every answer:
- * one filesystem block, which is the unit everything above reads in. */
 #define BOARD_RUN_FALLBACK 8u
 
 static BoardSeat* seat_find(uint8_t number)
@@ -109,24 +60,12 @@ static BoardSeat* seat_find(uint8_t number)
     return NULL;
 }
 
-/*
- * The chair, and only while somebody is in it.
- *
- * Every path that goes on to touch a medium comes through here rather than
- * through seat_find. The index in an empty chair is the number the controller
- * used to give the medium that left, and controllers hand those out again
- * immediately — so a caller holding a stale seat number would be sent to
- * whatever is in that unit now, and would be told nothing about it.
- */
 static BoardSeat* seat_taken(uint8_t number)
 {
     BoardSeat* s = seat_find(number);
     return (s && s->occupied) ? s : NULL;
 }
 
-/* The chair this medium is sitting in, or none. An empty chair that used to
- * hold it is not it: the whole point of emptying one is that the number in it
- * stops meaning anything. Caller holds the lock. */
 static BoardSeat* seat_holding_locked(BoardKind kind, uint8_t index)
 {
     for (BoardSeat* s = g_seats; s; s = s->next) {
@@ -146,20 +85,6 @@ static uint8_t seat_occupied_count(void)
     return n;
 }
 
-/*
- * Sit a medium down, and say which chair it got.
- *
- * An empty chair of the same kind is taken before a new one is added, lowest
- * first — a room that adds a chair per arrival is a room that fills up with
- * furniture on a machine somebody keeps swapping sticks on. Returns NULL when
- * this medium is already sitting somewhere, which is the ordinary answer on
- * every attendance pass after the first.
- *
- * The chair itself is allocated before the lock is taken and given back if it
- * turns out not to be needed: kmalloc under a spinlock is a wait of unbounded
- * length inside one of bounded length, and this room is walked from the USB
- * service pass.
- */
 static BoardSeat* seat_take(BoardKind kind, uint8_t index, bool removable,
                             const char* name)
 {
@@ -178,7 +103,7 @@ static BoardSeat* seat_take(BoardKind kind, uint8_t index, bool removable,
     BoardSeat* s = NULL;
     for (BoardSeat* c = g_seats; c; c = c->next) {
         if (!c->occupied && c->kind == kind) {
-            s = c;                      /* the list is in number order */
+            s = c;
             break;
         }
     }
@@ -194,7 +119,6 @@ static BoardSeat* seat_take(BoardKind kind, uint8_t index, bool removable,
         s->number = g_seat_count++;
         s->kind   = kind;
 
-        /* Appended, so seat numbers never move under anybody. */
         BoardSeat** link = &g_seats;
         while (*link) {
             link = &(*link)->next;
@@ -225,16 +149,6 @@ static const char* ata_slot_name(uint8_t drive)
     }
 }
 
-/*
- * Bring in whatever USB has to offer.
- *
- * Enumeration runs on interrupts, so a stick present at power-on is still
- * being asked who it is while the rest of the kernel boots. Waiting for that
- * to finish is the difference between finding the volume and deciding there
- * isn't one — and the conversation with each disk (how large are you, are you
- * ready) happens here rather than in the interrupt handler that enumerated it,
- * because it is made of transfers that have to be waited for.
- */
 static void usb_attach_visitor(void* ctx, xhci_device_slot_t* slot)
 {
     if (!slot || slot->driver != XHCI_DRIVER_STORAGE) {
@@ -248,19 +162,10 @@ static void usb_attach_visitor(void* ctx, xhci_device_slot_t* slot)
 
 static void seat_usb_take_attendance(void)
 {
-    /* Every controller, because a machine has as many as it has: the chipset
-     * one where the case sockets are, and often another on a graphics card.
-     * Asking only the first found the wrong silicon on a live board. */
     for (uint8_t ci = 0; ci < xhci_controller_count(); ci++) {
       xhci_controller_t* ctrl = xhci_controller_at(ci);
       if (!ctrl) continue;
 
-    /* Hubs first, and until the bus stops changing: a disk plugged into a hub
-     * is not on any port this controller has, and asking the controller what
-     * is attached would find the hub and stop there. Each pass may enumerate
-     * devices that turn out to be hubs themselves, so this repeats until a
-     * pass finds nothing new — bounded, because a bus that keeps changing on
-     * every pass is a bus with something wrong with it. */
     for (int pass = 0; pass < 8; pass++) {
         if (xhci_enum_settle(ctrl, 3000) > 0) {
             break;
@@ -282,22 +187,12 @@ static void seat_usb_take_attendance(void)
 
 void BoardroomInit(void)
 {
-    /*
-     * What counts as "new in this pass" is a TAKING, not a seat number.
-     *
-     * It used to be "seat number below the count we started with", which was
-     * the same thing only while chairs could never be sat in twice. Now a
-     * returning stick lands in seat 3 that has been there since boot, and the
-     * seat number says nothing at all about whether anything happened.
-     */
     seats_lock_init();
 
     while (__atomic_exchange_n(&g_in_session, 1u, __ATOMIC_ACQUIRE) != 0) {
         cpu_pause();
     }
 
-    /* Read AFTER the gate: whoever went first may have seated something, and
-     * counting from before their pass would report their work as ours. */
     uint32_t seatings_before = g_seatings;
 
     if (!g_initialised) {
@@ -308,8 +203,6 @@ void BoardroomInit(void)
 
     seat_usb_take_attendance();
 
-    /* USB first, so that a removable volume takes the lower seat number and
-     * anything scanning in order meets it first. */
     uint8_t usb_units = xhci_msd_unit_count();
     for (uint8_t n = 0; n < 255 && usb_units > 0; n++) {
         if (!xhci_msd_unit_present(n)) {
@@ -332,10 +225,6 @@ void BoardroomInit(void)
             seat_take(BOARD_AHCI, p, false, name);
         }
     } else {
-        /* The legacy channels, which only matter when AHCI is absent — a
-         * controller in IDE-compatibility mode presents the same disks twice
-         * otherwise, and a filesystem found on both is a filesystem found
-         * once. */
         uint8_t probe[BOARDROOM_SECTOR_BYTES];
         for (uint8_t d = 0; d < 4; d++) {
             if (ata_read_sectors_retry(d, 0, 1, probe) != 0) {
@@ -345,9 +234,6 @@ void BoardroomInit(void)
         }
     }
 
-    /* Nothing changed hands. The room is called to order on every arrival the
-     * bus notices, and most of those are a device this room already has — so
-     * saying the same thing again is how a log stops being read. */
     if (g_seatings == seatings_before) {
         __atomic_store_n(&g_in_session, 0u, __ATOMIC_RELEASE);
         return;
@@ -366,16 +252,6 @@ void BoardroomInit(void)
         kprintf("[Boardroom]   seat %u: %s%s\n", s->number, s->name,
                 s->removable ? " (removable)" : "");
 
-        /* And how the medium is divided, which nothing in this kernel used to
-         * read. A volume was assumed to begin at one absolute sector of the
-         * whole device, so BoxOS could exist in exactly one place on any
-         * medium — and a disk belonging to somebody else could not be shared
-         * with it at all.
-         *
-         * Only for the seats that changed hands in this pass. The room is
-         * called to order again every time something arrives, and re-reading
-         * the table of every medium already in it would say the same thing
-         * again on every hot-plug. */
         if (s->seating <= seatings_before) {
             continue;
         }
@@ -401,35 +277,13 @@ void BoardroomInit(void)
         }
     }
 
-    /*
-     * Said here, at the end, and not from seat_take: a listener that mounts on
-     * this would otherwise be choosing among the seats that happened to be
-     * filled first, while the rest of the room was still arriving.
-     *
-     * And said whenever a chair CHANGED HANDS, which is the whole repair. It
-     * used to be said only when the room GREW, and a stick pushed back into
-     * the machine it was pulled out of does not make the room grow: its unit
-     * number is free, it gets it back, and it sits down in the chair it left.
-     * The room went on holding a volume nobody had mounted.
-     */
     BoardroomSeatEvent ev = { seat_occupied_count(), changed, first, 0 };
 
-    /* Given back BEFORE the announcement: a listener that mounts a volume on
-     * this event reads sectors, and a reader must never be holding the door
-     * the medium's own arrival has to come through. */
     __atomic_store_n(&g_in_session, 0u, __ATOMIC_RELEASE);
 
     TouchPublish("seat:taken", &ev, sizeof(ev));
 }
 
-/*
- * A medium turned up after the room had already been called to order.
- *
- * Raised wherever the arrival was noticed, which is an interrupt handler, and
- * acted on below where waiting is allowed. The two cannot be the same place:
- * seating a medium means asking it how large it is and whether it is ready,
- * and both of those are transfers somebody has to wait for.
- */
 static volatile uint32_t g_arrival_pending = 0;
 
 void BoardroomNoteArrival(void)
@@ -444,24 +298,17 @@ void BoardroomNoteDeparture(BoardKind kind, uint8_t index)
     spin_lock(&g_seats_lock);
     BoardSeat* s = seat_holding_locked(kind, index);
     if (s) {
-        /* The chair stays. Only the person in it goes — which is what makes a
-         * seat number something anybody can hold on to across an unplug. */
         s->occupied = false;
     }
     uint8_t seated = seat_occupied_count();
     spin_unlock(&g_seats_lock);
 
     if (!s) {
-        /* A medium that was never seated. Ordinary: an enumeration that failed
-         * before the room was told about it still comes through here. */
         return;
     }
 
     kprintf("[Boardroom] seat %u is empty — %s has left\n", s->number, s->name);
 
-    /* The Boardroom knows about media and not about what anybody keeps on
-     * them, so it says what happened, names the chair it happened to, and lets
-     * whoever cares decide what that means. */
     BoardroomSeatEvent ev = { seated, 1, s->number, 0 };
     TouchPublish("seat:emptied", &ev, sizeof(ev));
 }
@@ -472,9 +319,6 @@ void BoardroomAttendIfPending(void)
         return;
     }
 
-    /* One core seats what arrived and the rest go away rather than queue up
-     * behind it — the same arrangement the hubs and the slot teardown use, and
-     * for the same reason: this walks and mutates the seat list. */
     static volatile uint32_t busy = 0;
     if (__atomic_exchange_n(&busy, 1u, __ATOMIC_ACQUIRE) != 0) {
         return;
@@ -483,8 +327,6 @@ void BoardroomAttendIfPending(void)
 
     uint32_t before = g_seatings;
 
-    /* Idempotent per medium: a medium already sitting somewhere is not seated
-     * twice, and seat numbers never move, so anything holding one keeps it. */
     BoardroomInit();
 
     if (g_seatings != before) {
@@ -492,9 +334,6 @@ void BoardroomAttendIfPending(void)
                 "to order\n", (unsigned)(g_seatings - before));
     }
 
-    /* Whether any of it carries the filesystem this machine lives on is not
-     * asked here at all any more. BoardroomInit said seat:taken on its way
-     * out, and whoever that concerns was listening. */
     __atomic_store_n(&busy, 0u, __ATOMIC_RELEASE);
 }
 
@@ -508,9 +347,6 @@ BoardKind BoardroomSeatKind(uint8_t seat)
 
 const char* BoardroomSeatName(uint8_t seat)
 {
-    /* An empty chair has no name. It keeps the last occupant's in the struct
-     * so the departure line can say who left, but handing that out afterwards
-     * would name a medium that is in somebody's pocket. */
     BoardSeat* s = seat_find(seat);
     return (s && s->occupied) ? s->name : "";
 }
@@ -537,19 +373,10 @@ uint32_t BoardroomSeatPhysicalBytes(uint8_t seat)
     }
 }
 
-/*
- * A medium's own logical sectors, in the 512-byte ones this room speaks.
- *
- * Almost always the identity: both disk drivers refuse anything but 512-byte
- * logical sectors, and the USB path converts before it answers. It is written
- * out anyway because "the number the device gave" and "the number this room
- * means" are different quantities, and the one place they are the same is
- * exactly where nobody notices when they stop being.
- */
 static uint64_t seat_sectors_in_512(uint64_t total, uint32_t logical)
 {
     if (logical == 0 || (logical % BOARDROOM_SECTOR_BYTES) != 0) {
-        return 0;               /* not something this room can express */
+        return 0;
     }
     return total * (uint64_t)(logical / BOARDROOM_SECTOR_BYTES);
 }
@@ -561,9 +388,6 @@ uint64_t BoardroomSeatSectors(uint8_t seat)
 
     switch (s->kind) {
     case BOARD_USB:
-        /* Already in this room's sectors — the disk driver does the conversion
-         * where it learns the geometry, because it is the one that has to
-         * split a request across the device's own blocks. */
         return xhci_msd_unit_sectors(s->index);
     case BOARD_AHCI: {
         ahci_port_t* p = ahci_get_port_state(s->index);
@@ -607,9 +431,6 @@ bool BoardroomSeatOccupied(uint8_t seat)
     }
 
     switch (s->kind) {
-    /* The only medium here that can walk away while the machine runs. The
-     * others are screwed to the board; a SATA disk that vanishes at runtime is
-     * a fault, not a removal, and it reports itself as failing commands. */
     case BOARD_USB:  return xhci_msd_unit_present(s->index);
     case BOARD_AHCI:
     case BOARD_ATA:  return true;
@@ -632,13 +453,9 @@ uint32_t BoardroomSeatRun(uint8_t seat)
     default:         run = BOARD_RUN_FALLBACK;                    break;
     }
 
-    /* A driver that answers nothing gets the floor rather than a division by
-     * zero or a loop that never advances. */
     if (run == 0) {
         run = BOARD_RUN_FALLBACK;
     }
-    /* Both disk paths take a 16-bit count, whatever they believe about
-     * themselves. The room is where that truth is kept. */
     if (run > 65535u) {
         run = 65535u;
     }
@@ -719,10 +536,6 @@ bool BoardroomSeatCanReadAsync(uint8_t seat)
     switch (s->kind) {
     case BOARD_AHCI: return ahci_is_initialized();
     case BOARD_USB:  return xhci_msd_unit_can_read_async(s->index);
-    /* The legacy channels are programmed I/O with the processor doing the
-     * moving. There is no completion to be told about, so there is nothing
-     * here to be asynchronous about — and saying so is better than pretending
-     * otherwise and quietly doing it synchronously underneath. */
     case BOARD_ATA:
     default:         return false;
     }
@@ -749,32 +562,19 @@ error_t BoardroomReadAsync(uint8_t seat, uint64_t lba, uint32_t count,
     }
 }
 
-/* ── a read nobody stands over, proved on this machine ─────────────────── */
 
-/*
- * The proof's record. It is a static, and it has to be: the seat keeps the
- * address of this record for as long as the read is outstanding, and a record
- * that is still outstanding cannot live on a stack frame that goes away. It
- * did, once. The proof gave up after a clock of its own, returned, and the
- * answer came in later through the completion interrupt — into whatever the
- * K-Core loop had put on that stack by then. Measured: 259 ms after the
- * give-up, on this core, at the same address.
- */
 typedef struct {
-    Baton    node;              /* the answer's continuation: passed by the
-                                 * seat's callback, run by the pump */
-    error_t  status;            /* what the medium said */
+    Baton    node;
+    error_t  status;
     uint8_t  seat;
-    void*    dma;               /* the physical page the medium wrote */
-    uint8_t* expect;            /* the attended read of the same block */
+    void*    dma;
+    uint8_t* expect;
     uint32_t bytes;
-    volatile uint8_t judged;    /* the verdict has been said */
+    volatile uint8_t judged;
 } UnattendedRead;
 
 static UnattendedRead g_unattended;
 
-/* The seat's callback. Lean, because on a running machine it is called from
- * the completion interrupt: it keeps what came and passes the rest on. */
 static void unattended_read_answered(uint8_t index, uint8_t slot,
                                      error_t status, void* ctx)
 {
@@ -784,7 +584,6 @@ static void unattended_read_answered(uint8_t index, uint8_t slot,
     BatonPass(&r->node);
 }
 
-/* The pump half: compares, says the verdict, gives the buffers back. */
 static void unattended_read_judge(void* ctx)
 {
     UnattendedRead* r    = (UnattendedRead*)ctx;
@@ -813,20 +612,6 @@ static void unattended_read_judge(void* ctx)
     __atomic_store_n(&r->judged, 1u, __ATOMIC_RELEASE);
 }
 
-/*
- * Turn the handle under the seat by hand.
- *
- * This runs before the machine is running. The BSP has not opened interrupts
- * yet — it does that on entering its K-Core loop, after kernel_main — so the
- * completion interrupt an AHCI port raises is left waiting in the LAPIC, and a
- * USB event lands on a ring nobody is reading. What the tick and the K-Core
- * loop do once the machine is up is done here instead, on this core and in the
- * same words: bring in what the medium has answered, and run the medium's own
- * watch over a read nobody stands over — the one that gives up on a silent
- * device at the device's own patience and answers for it. The proof therefore
- * has no clock of its own. A medium that answers ends the wait; one that does
- * not is given up on by the driver that owns it, and that ends the wait too.
- */
 static void seat_turn_handle(const BoardSeat* s)
 {
     switch (s->kind) {
@@ -847,17 +632,13 @@ void BoardroomProveUnattendedRead(uint8_t seat)
 {
     BoardSeat* s = seat_taken(seat);
     if (!s) {
-        return;             /* no volume under this machine: nothing to prove */
+        return;
     }
     if (!BoardroomSeatCanReadAsync(seat)) {
         kprintf("[UNATTENDED READ] not asked: seat %u (%s) answers only a read "
                 "somebody stands over\n", seat, BoardroomSeatName(seat));
         return;
     }
-    /* The condition under which the storage deck reads this way at all
-     * (storage_ops.c, ObjRead): on one core every read is attended, and a proof
-     * of a path this machine will never take says nothing about this machine.
-     * It is also the condition under which the AHCI watch runs. */
     if (g_amp.total_cores < 2) {
         kprintf("[UNATTENDED READ] not asked: with one core every read is "
                 "attended\n");
@@ -867,10 +648,6 @@ void BoardroomProveUnattendedRead(uint8_t seat)
     UnattendedRead* r    = &g_unattended;
     const char*     name = BoardroomSeatName(seat);
 
-    /* One filesystem block, which is the unit everything above reads in, and
-     * the only shape the unattended path accepts. Sector 0 because every
-     * medium has one and its contents are not this proof's business — the
-     * question is whether two ways of asking give the same answer. */
     const uint32_t sectors = BOARD_RUN_FALLBACK;
     const uint32_t bytes   = sectors * BOARDROOM_SECTOR_BYTES;
 
@@ -935,8 +712,6 @@ int BoardroomFlush(uint8_t seat)
     }
 }
 
-/* Sixteen bytes, printed whole. Two volumes made by the same tool on the same
- * day differ in the middle of it, so an abbreviation would not identify one. */
 static void uuid_text(const uint8_t uuid[16], char out[33])
 {
     static const char hex[] = "0123456789abcdef";
@@ -947,7 +722,6 @@ static void uuid_text(const uint8_t uuid[16], char out[33])
     out[32] = '\0';
 }
 
-/* One line of the list that is printed when more than one volume is here. */
 static void board_say_volume(uint8_t seat, const uint8_t uuid[16])
 {
     char text[33];
@@ -966,8 +740,6 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx,
         return BOARDROOM_NO_SEAT;
     }
 
-    /* What the loader said, if it said anything. Read once: the answer cannot
-     * change while the room is being called to order. */
     uint8_t  want[16];
     bool     have_pass = BoardingPassVolume(want);
 
@@ -976,17 +748,6 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx,
     uint8_t  by_identity = BOARDROOM_NO_SEAT;
     unsigned found       = 0;
 
-    /*
-     * The first volume met, held back by one line.
-     *
-     * The list below is only worth printing when there is more than one, and
-     * that is not known until the second turns up — by which time the first has
-     * been and gone. Two locals close that, and what they replace was a SECOND
-     * WALK of the room afterwards calling probe() again on every chair. probe()
-     * is the filesystem: it reads a partition table and a deed off each medium.
-     * Sixteen bytes were being paid for with a re-read of every disk in the
-     * machine.
-     */
     uint8_t first_seat = BOARDROOM_NO_SEAT;
     uint8_t first_uuid[16];
 
@@ -997,8 +758,6 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx,
         uint8_t uuid[16];
         memset(uuid, 0, sizeof(uuid));
 
-        /* An empty chair carries nothing, and probing one reads through a unit
-         * number that now belongs to somebody else. */
         if (!s->occupied) {
             continue;
         }
@@ -1029,8 +788,6 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx,
             continue;
         }
 
-        /* The fallback, for when nothing on the bus is the volume named on the
-         * pass — or there is no pass. */
         BoardSeat* c = seat_taken(chosen);
         if (c && !c->removable && s->removable) {
             chosen = s->number;
@@ -1038,18 +795,9 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx,
         }
     }
 
-    /*
-     * The pass wins when it can be honoured.
-     *
-     * Not "when there is more than one candidate": a single volume that is not
-     * the one this kernel came out of is still the wrong volume, and finding
-     * only one of something is not evidence that it is the right one.
-     */
     bool by_rule = true;
     if (by_identity != BOARDROOM_NO_SEAT) {
         chosen  = by_identity;
-        /* It was chosen BECAUSE it matched, so the pass's sixteen bytes are
-         * that seat's identity — there is nothing else it could be. */
         memcpy(chosen_uuid, want, 16);
         by_rule = false;
     }
@@ -1067,34 +815,11 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx,
         return chosen;
     }
 
-    /*
-     * The pass names a volume and the room is not carrying it. Nothing is
-     * handed over.
-     *
-     * This used to fall through to the rule below and give back somebody
-     * else's volume — and it did so having just printed, in as many words,
-     * that the volume it was looking for was not there. It had the exact
-     * sixteen bytes it wanted, knew they were absent, and guessed anyway.
-     *
-     * What made that expensive is what happens next: the mount succeeds, so
-     * nothing is ever wrong enough to retry, and when the real medium finishes
-     * enumerating half a second later it is ignored for the rest of the boot.
-     * Measured — a machine booted from a stick mounted its own old internal
-     * disk instead, silently, and went on to run programs out of it.
-     *
-     * So the question stops being "has the bus finished?", which nothing can
-     * answer except a clock, and becomes "has THAT volume arrived?", which the
-     * volume itself answers exactly. Until it does, this machine has no
-     * filesystem, which is the truth. Re-seating the medium is what a person
-     * does about it, and re-seating produces the arrival that ends the wait.
-     */
     if (have_pass) {
         char text[33];
         uuid_text(want, text);
         kprintf("[Boardroom] the loader came from the volume %s, and no seat "
                 "is carrying it\n", text);
-        /* found is at least one here — found == 0 returned above — so there is
-         * always somebody else's volume being declined. */
         kprintf("[Boardroom] %u volume(s) are here and none of them is this "
                 "machine's — mounting nothing, and waiting for the medium to "
                 "arrive\n", found);
@@ -1105,10 +830,6 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx,
                 "wins — seat %u\n", chosen);
     }
 
-    /* Which volume is about to be mounted, and on what grounds — the line that
-     * explains every file the machine goes on to read. It scrolls past like
-     * everything else and is recoverable like everything else, from the ring
-     * the kernel keeps of its own boot. */
     if (out_uuid) {
         memcpy(out_uuid, chosen_uuid, 16);
     }

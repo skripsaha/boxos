@@ -1,15 +1,3 @@
-// boxcxx — <cstdio> runtime: the scanf family
-//
-// The mirror of the printf engine: one walk, two sources. A stream source
-// reads through the byte layer (and pushes back through it); a string source
-// walks an array. Both offer exactly one character of pushback, which is all
-// scanf ever needs and all C promises a stream.
-//
-// The numeric conversions do NOT parse digits themselves. <charconv>'s
-// from_chars already turns text into the nearest representable value, which for
-// floating point is the hard half and the half that has an oracle behind it.
-// scanf's job here is deciding HOW MUCH text belongs to the number — the
-// longest prefix that could be one — and handing that span over.
 
 #include <charconv>
 #include <cstdarg>
@@ -22,18 +10,13 @@ namespace {
 constexpr int kEnd = -1;
 
 struct Source {
-    ::std::FILE  *stream;   // one of these two
+    ::std::FILE  *stream;
     const char   *text;
     ::std::size_t at;
-    // Pushback is a small STACK, not one character. Recognising "infinity"
-    // means reading up to eight characters that may all turn out to belong to
-    // something else, and a single slot would silently swallow seven of them.
-    // C only promises a stream one character of ungetc, so anything deeper
-    // lives here for the duration of the call and is handed back in order.
     int           pb[8];
     int           npb;
-    long long     consumed; // characters taken, for %n
-    bool          hit_end;  // nothing more will arrive
+    long long     consumed;
+    bool          hit_end;
 };
 
 int Get(Source &s)
@@ -61,10 +44,6 @@ void Unget(Source &s, int c)
     s.consumed--;
 }
 
-// `hit_end` is sticky — it records that the source was once read past — so it
-// cannot be the exhaustion test on its own: a conversion that looked ahead and
-// gave the character back leaves it set while input is still available. The
-// difference decides EOF versus a zero return, and the host caught it.
 bool AtEnd(const Source &s) { return s.npb == 0 && s.hit_end; }
 
 bool IsSpace(int c)
@@ -79,9 +58,6 @@ void SkipSpace(Source &s)
     Unget(s, c);
 }
 
-// ── the store ───────────────────────────────────────────────────────────
-// One place that writes an integer through a caller's pointer, so the length
-// modifier is interpreted once.
 void StoreSigned(void *dst, char length, long long v)
 {
     switch (length) {
@@ -110,9 +86,6 @@ void StoreUnsigned(void *dst, char length, unsigned long long v)
     }
 }
 
-// Collects the longest prefix that could begin a number of the given base.
-// Returns the count written; the caller hands the span to from_chars, which is
-// the only thing here that decides what the digits MEAN.
 int GatherInteger(Source &s, char *buf, int cap, int width, unsigned &base, bool allow_sign)
 {
     int n = 0;
@@ -123,9 +96,6 @@ int GatherInteger(Source &s, char *buf, int cap, int width, unsigned &base, bool
     int c = Get(s);
     if (allow_sign && (c == '+' || c == '-') && budget()) { take(c); taken++; c = Get(s); }
 
-    // 0x / 0 prefixes: %i decides the base from them, %x accepts an optional
-    // 0x, %o has none. The prefix is consumed only when it is followed by a
-    // digit that fits the base — otherwise the leading 0 is the whole number.
     if (c == '0' && budget()) {
         take(c); taken++;
         const int c2 = Get(s);
@@ -135,14 +105,14 @@ int GatherInteger(Source &s, char *buf, int cap, int width, unsigned &base, bool
                              (c3 >= 'A' && c3 <= 'F');
             if (hex) {
                 base = 16;
-                n--;                     // drop the '0'; from_chars wants bare digits
+                n--;
                 take(c3); taken += 2;
                 c = Get(s);
             } else {
                 Unget(s, c3);
                 if (base == 0) base = 8;
                 Unget(s, c2);
-                return n;                // "0x" with no digit: the number is 0
+                return n;
             }
         } else {
             if (base == 0) base = 8;
@@ -167,15 +137,10 @@ int GatherInteger(Source &s, char *buf, int cap, int width, unsigned &base, bool
     return n;
 }
 
-// The longest prefix that could be a floating literal. from_chars settles the
-// value; this only settles the extent — except for the two spellings that have
-// no digits at all, which it settles outright through `special`.
 enum class FloatSpecial : unsigned char { None, Inf, Nan };
 
 bool MatchWord(Source &s, const char *word, int &taken, int width)
 {
-    // Case-insensitive, and it must be able to give every character back: a
-    // partial "in" is not an infinity and the input has to survive the attempt.
     int seen[8];
     int n = 0;
     for (const char *w = word; *w; w++) {
@@ -184,7 +149,7 @@ bool MatchWord(Source &s, const char *word, int &taken, int width)
         const int lower = (c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c;
         seen[n++] = c;
         if (lower != *w) {
-            while (n) Unget(s, seen[--n]);   // one pushback is enough: undo in order
+            while (n) Unget(s, seen[--n]);
             return false;
         }
         taken++;
@@ -203,14 +168,12 @@ int GatherFloat(Source &s, char *buf, int cap, int width, FloatSpecial &special)
     bool neg = false;
     if ((c == '+' || c == '-') && budget()) { neg = (c == '-'); take(c); taken++; c = Get(s); }
 
-    // "inf", "infinity" and "nan" are floating literals to scanf and have no
-    // digits for from_chars to weigh, so they are decided here.
     const int lower0 = (c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c;
     if (lower0 == 'i' || lower0 == 'n') {
         Unget(s, c);
         if (MatchWord(s, "inf", taken, width)) {
             int probe = taken;
-            if (!MatchWord(s, "inity", probe, width)) { /* plain "inf" */ }
+            if (!MatchWord(s, "inity", probe, width)) {  }
             else taken = probe;
             special = FloatSpecial::Inf;
             buf[0] = neg ? '-' : '+';
@@ -233,8 +196,6 @@ int GatherFloat(Source &s, char *buf, int cap, int width, FloatSpecial &special)
         while (c >= '0' && c <= '9' && budget()) { take(c); taken++; any_digit = true; c = Get(s); }
     }
     if (any_digit && (c == 'e' || c == 'E') && budget()) {
-        // An exponent marker only belongs to the number if a digit follows it,
-        // possibly past a sign. "1e" is the number 1 and a leftover 'e'.
         const int save_n = n, save_t = taken;
         take(c); taken++;
         int c2 = Get(s);
@@ -266,8 +227,6 @@ int Run(Source &s, const char *fmt, va_list ap)
 
     for (const char *p = fmt; *p;) {
         if (IsSpace(static_cast<unsigned char>(*p))) {
-            // Any run of whitespace in the format matches any run of it in the
-            // input, including none.
             while (IsSpace(static_cast<unsigned char>(*p))) p++;
             SkipSpace(s);
             continue;
@@ -280,7 +239,7 @@ int Run(Source &s, const char *fmt, va_list ap)
             continue;
         }
 
-        p++;                                     // past '%'
+        p++;
         if (*p == '%') {
             SkipSpace(s);
             const int c = Get(s);
@@ -320,15 +279,7 @@ int Run(Source &s, const char *fmt, va_list ap)
             else if (*b == '-') { neg = true; b++; }
             unsigned long long mag = 0;
             auto r = ::std::from_chars(b, buf + n, mag, static_cast<int>(base));
-            // C leaves an out-of-range result undefined, and every
-            // implementation saturates rather than refusing the conversion —
-            // the digits were consumed either way, so declining to assign
-            // would lose an argument the caller is about to read.
             if (r.ec == ::std::errc::result_out_of_range) {
-                // Saturate, and do not then negate it: "-" in front of a value
-                // that already overflowed cannot make it smaller, and negating
-                // the saturated value would turn the largest possible answer
-                // into 1. The reference libraries agree.
                 mag = ~0ull;
                 neg = false;
             } else if (r.ec != ::std::errc{}) {
@@ -375,8 +326,6 @@ int Run(Source &s, const char *fmt, va_list ap)
             break;
         }
         case 'c': {
-            // The one conversion that does NOT skip leading whitespace: a space
-            // is a character like any other to it.
             const int count = width > 0 ? width : 1;
             char *dst = suppress ? nullptr : va_arg(ap, char *);
             int got = 0;
@@ -405,9 +354,6 @@ int Run(Source &s, const char *fmt, va_list ap)
             break;
         }
         case '[': {
-            // A scanset does not skip whitespace either, and '^' inverts it. A
-            // ']' first in the set is a literal ']', which is the rule people
-            // forget and the reason the loop starts before the test.
             bool member[256] = {};
             bool invert = false;
             if (*p == '^') { invert = true; p++; }
@@ -436,11 +382,6 @@ int Run(Source &s, const char *fmt, va_list ap)
                 if (dst) dst[got] = static_cast<char>(c);
                 got++;
             }
-            // C separates a MATCHING failure from an INPUT failure, and a
-            // scanset is where the difference shows: a first character that is
-            // simply not in the set is a matching failure — the call returns
-            // however many assignments it had already made, which may be none.
-            // EOF is only for running out of input before matching anything.
             if (got == 0) return assigned ? assigned : (AtEnd(s) ? EOF : 0);
             if (dst) { dst[got] = '\0'; assigned++; }
             break;
@@ -448,7 +389,6 @@ int Run(Source &s, const char *fmt, va_list ap)
         case 'p': {
             SkipSpace(s);
             unsigned base = 16;
-            // A pointer printed by %p carries the 0x this parses back off.
             const int n = GatherInteger(s, buf, sizeof(buf), width, base, false);
             if (n == 0) return assigned ? assigned : EOF;
             unsigned long long v = 0;
@@ -462,8 +402,6 @@ int Run(Source &s, const char *fmt, va_list ap)
             break;
         }
         case 'n': {
-            // Consumes nothing and counts as no assignment — both of which are
-            // easy to get wrong in the return value.
             if (!suppress) StoreSigned(va_arg(ap, void *), length, s.consumed);
             break;
         }
@@ -474,7 +412,7 @@ int Run(Source &s, const char *fmt, va_list ap)
     return assigned;
 }
 
-} // namespace
+}
 
 namespace std {
 
@@ -483,8 +421,6 @@ int vfscanf(FILE *stream, const char *format, va_list arg) noexcept
     if (!stream) return EOF;
     Source s{stream, nullptr, 0, {}, 0, 0, false};
     const int r = Run(s, format, arg);
-    // One character can go back to the stream; C promises no more, and a
-    // conversion that needed deeper lookahead has already decided with it.
     if (s.npb > 0) ungetc(s.pb[s.npb - 1], stream);
     return r;
 }
@@ -528,4 +464,4 @@ int sscanf(const char *str, const char *format, ...) noexcept
     return r;
 }
 
-} // namespace std
+}

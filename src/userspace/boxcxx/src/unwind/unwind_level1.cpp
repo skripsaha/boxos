@@ -1,17 +1,3 @@
-/*
- * unwind_level1.cpp — Itanium C++ ABI Level 1 over the boxcxx DWARF
- * engine (dwarf_cfi.cpp).
- *
- * Two-phase model ([abi.eh] §1.3): phase 1 walks the stack calling each
- * frame's personality with _UA_SEARCH_PHASE until one claims the
- * exception (its CFA is cached in exc->private_1); phase 2 re-walks with
- * _UA_CLEANUP_PHASE, running cleanups, and installs the handler context
- * when the personality answers _URC_INSTALL_CONTEXT.
- *
- * exc->private_2 accumulates the number of frames skipped in phase 2 —
- * Phase 4B's CET integration consumes it for INCSSPQ before the final
- * UnwRestoreContext transfer.
- */
 
 #include "unwind_internal.h"
 
@@ -21,7 +7,6 @@ namespace unw = boxcxx::unwind;
 
 namespace {
 
-// The concrete _Unwind_Context: register file + decoded frame info.
 struct UnwindContext {
     unw::UnwRegisterFile file;
     unw::FrameInfo       frame;
@@ -37,9 +22,6 @@ _Unwind_Context *ToAbi(UnwindContext *ctx)
     return reinterpret_cast<_Unwind_Context *>(ctx);
 }
 
-// Decode the frame containing the context's current IP. The lookup key
-// is IP-1: the saved RA points AFTER the call, which may be the first
-// byte of the next function's FDE.
 bool DecodeFrame(UnwindContext *ctx)
 {
     ctx->frame_valid =
@@ -47,7 +29,6 @@ bool DecodeFrame(UnwindContext *ctx)
     return ctx->frame_valid;
 }
 
-// Step to the caller. Returns false at end of stack.
 bool StepFrame(UnwindContext *ctx, uint64_t *cfa_out)
 {
     return unw::DwarfStep(ctx->frame, &ctx->file, cfa_out);
@@ -55,16 +36,8 @@ bool StepFrame(UnwindContext *ctx, uint64_t *cfa_out)
 
 [[noreturn]] void InstallContext(UnwindContext *ctx, uint64_t target_ra)
 {
-    // Resuming at a call site that pushed outgoing stack arguments:
-    // the normal return path would pop them with `add rsp, N`; the
-    // landing-pad path must do it here (DW_CFA_GNU_args_size).
     ctx->file.regs[unw::kRegRsp] += ctx->frame.state.args_size;
 
-    // CET shadow-stack reconciliation. The handler frame's own shadow
-    // entry holds its ORIGINAL return address (target_ra, captured
-    // before the personality overwrote the context IP) — pop entries
-    // until it surfaces. Shadow-stack pages are readable by plain
-    // loads; rdsspq is a NOP (leaves 0) when shadow stacks are off.
     uint64_t ssp = 0;
     __asm__ volatile("xor %0, %0\n\trdsspq %0" : "=r"(ssp));
     if (ssp != 0) {
@@ -81,9 +54,8 @@ bool StepFrame(UnwindContext *ctx, uint64_t *cfa_out)
     unw::UnwRestoreContext(&ctx->file);
 }
 
-} // namespace
+}
 
-// ── context accessors ───────────────────────────────────────────────────
 
 extern "C" _Unwind_Word _Unwind_GetGR(_Unwind_Context *ctx, int reg)
 {
@@ -119,7 +91,6 @@ extern "C" void _Unwind_SetIP(_Unwind_Context *ctx, _Unwind_Word value)
 
 extern "C" _Unwind_Word _Unwind_GetCFA(_Unwind_Context *ctx)
 {
-    // CFA of the current frame = where RSP will point after stepping out.
     UnwindContext probe = *FromAbi(ctx);
     uint64_t cfa = 0;
     if (probe.frame_valid) (void)unw::DwarfStep(probe.frame, &probe.file, &cfa);
@@ -137,16 +108,13 @@ extern "C" _Unwind_Word _Unwind_GetRegionStart(_Unwind_Context *ctx)
     return FromAbi(ctx)->frame.pc_begin;
 }
 
-// ── raise / resume ──────────────────────────────────────────────────────
 
-// Phase-2 walker shared by RaiseException and Resume.
 static _Unwind_Reason_Code
 _Unwind_RaiseException_Phase2(_Unwind_Exception *exc, void *opaque_ctx);
 
 extern "C" _Unwind_Reason_Code
 _Unwind_RaiseException(_Unwind_Exception *exc)
 {
-    // ── phase 1: search ────────────────────────────────────────────────
     UnwindContext ctx;
     unw::UnwCaptureContext(&ctx.file);
 
@@ -177,7 +145,6 @@ _Unwind_RaiseException(_Unwind_Exception *exc)
     exc->private_1 = handler_cfa;
     exc->private_2 = 0;
 
-    // ── phase 2: cleanup + install ─────────────────────────────────────
     unw::UnwCaptureContext(&ctx.file);
     return _Unwind_RaiseException_Phase2(exc, &ctx);
 }
@@ -198,8 +165,6 @@ _Unwind_RaiseException_Phase2(_Unwind_Exception *exc, void *opaque_ctx)
         bool handler_frame = (cfa == exc->private_1);
 
         if (ctx->frame.cie.personality) {
-            // The frame's real RA — needed for shadow-stack reconciliation
-            // BEFORE the personality redirects the IP to a landing pad.
             uint64_t preserved_ra = ctx->file.regs[unw::kRegRa];
             auto personality =
                 reinterpret_cast<__personality_routine>(ctx->frame.cie.personality);
@@ -212,11 +177,11 @@ _Unwind_RaiseException_Phase2(_Unwind_Exception *exc, void *opaque_ctx)
         }
 
         if (handler_frame)
-            return _URC_FATAL_PHASE2_ERROR;   // handler frame must install
+            return _URC_FATAL_PHASE2_ERROR;
 
         uint64_t stepped_cfa = 0;
         if (!StepFrame(ctx, &stepped_cfa)) return _URC_FATAL_PHASE2_ERROR;
-        exc->private_2++;   // one more frame skipped (CET INCSSP count)
+        exc->private_2++;
     }
 }
 
@@ -225,8 +190,6 @@ extern "C" void _Unwind_Resume(_Unwind_Exception *exc)
     UnwindContext ctx;
     unw::UnwCaptureContext(&ctx.file);
 
-    // Resume continues phase 2 from a cleanup landing pad: step out of
-    // the cleanup's frame first, then keep unwinding toward private_1.
     (void)_Unwind_RaiseException_Phase2(exc, &ctx);
     boxcxx::Panic("_Unwind_Resume: unwinding failed");
 }
@@ -234,8 +197,6 @@ extern "C" void _Unwind_Resume(_Unwind_Exception *exc)
 extern "C" _Unwind_Reason_Code
 _Unwind_Resume_or_Rethrow(_Unwind_Exception *exc)
 {
-    // Foreign/forced exceptions would need the stop-fn path; for native
-    // exceptions rethrow is a fresh raise.
     return _Unwind_RaiseException(exc);
 }
 
@@ -246,8 +207,6 @@ _Unwind_ForcedUnwind(_Unwind_Exception *exc, _Unwind_Stop_Fn stop,
     (void)exc;
     (void)stop;
     (void)stop_arg;
-    // No consumer in BoxOS yet (no pthread_cancel analogue). Implemented
-    // when a real caller appears — failing loudly beats a silent stub.
     boxcxx::Panic("_Unwind_ForcedUnwind: no consumer wired yet");
 }
 
@@ -257,7 +216,6 @@ extern "C" void _Unwind_DeleteException(_Unwind_Exception *exc)
         exc->exception_cleanup(_URC_FOREIGN_EXCEPTION_CAUGHT, exc);
 }
 
-// ── backtrace ───────────────────────────────────────────────────────────
 
 extern "C" _Unwind_Reason_Code _Unwind_Backtrace(_Unwind_Trace_Fn trace,
                                                  void *arg)

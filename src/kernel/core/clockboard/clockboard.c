@@ -3,13 +3,12 @@
 #include "vmm.h"
 #include "klib.h"
 
-/* The single shared page. Allocated once in clockboard_init, never freed. */
 static uint64_t    s_clockboard_phys = 0;
 static ClockBoard *s_clockboard_kva  = NULL;
 
 void clockboard_init(void)
 {
-    if (s_clockboard_phys) return;  /* idempotent */
+    if (s_clockboard_phys) return;
 
     void *page = pmm_alloc_zero(1);
     if (!page) {
@@ -24,12 +23,9 @@ void clockboard_init(void)
     s_clockboard_kva->uptime_us       = 0;
     s_clockboard_kva->uptime_ms       = 0;
     s_clockboard_kva->tick_count      = 0;
-    s_clockboard_kva->tsc_freq_khz    = 0;  /* set by clockboard_set_tsc_freq_khz */
-    s_clockboard_kva->boot_unix_secs  = 0;  /* set by clockboard_set_boot_unix_secs */
+    s_clockboard_kva->tsc_freq_khz    = 0;
+    s_clockboard_kva->boot_unix_secs  = 0;
 
-    /* Register as shared so vmm_destroy_context skips pmm_free — this
-     * page is mapped R/O into every Cabin and lives for the whole
-     * kernel session. */
     vmm_register_shared_phys(s_clockboard_phys);
 
     kprintf("[CLOCKBOARD] page allocated phys=0x%lx kva=0x%lx\n",
@@ -44,8 +40,6 @@ uint64_t clockboard_phys(void)
 void clockboard_tick_update(uint64_t uptime_us, uint64_t tick_count)
 {
     if (!s_clockboard_kva) return;
-    /* Single-writer (PIT IRQ on BSP). Plain stores; cross-core readers
-     * see naturally-aligned 8-byte word atomicity guaranteed by x86-64. */
     s_clockboard_kva->uptime_us  = uptime_us;
     s_clockboard_kva->uptime_ms  = uptime_us / 1000ULL;
     s_clockboard_kva->tick_count = tick_count;

@@ -1,13 +1,3 @@
-/*
- * anchor_test — proves anchor() makes a write durable without bye.
- *
- * Phase A:  if no marker file exists, write file + anchor() + halt
- *           the process (no bye).
- * Phase B:  if marker file exists, read it back and verify.
- *
- * Run anchor_test, then "kill" QEMU (no bye), then start BoxOS,
- * then run anchor_test again — should PASS.
- */
 
 #include "box/file.h"
 #include "box/touch.h"
@@ -17,7 +7,7 @@
 #define AT_NAME    "_anchor_test"
 #define AT_TAG     "anchortest"
 #define AT_BYTES   128
-#define AT_MAGIC   0x414e4348u   /* "ANCH" */
+#define AT_MAGIC   0x414e4348u
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -40,7 +30,6 @@ int main(void)
     int found = find_file_by_name(AT_NAME, fids, infos, 4);
 
     if (found <= 0) {
-        /* Phase A — write, anchor, exit (no bye). */
         int fid = create(AT_NAME, AT_TAG);
         if (fid < 0) {
             kdbg_print("[ANCHOR] create rc=%d", fid);
@@ -58,7 +47,6 @@ int main(void)
             return 1;
         }
 
-        /* The whole point: durable BEFORE caller exits. */
         int arc = anchor((uint32_t)fid);
         if (arc != 0) {
             kdbg_print("[ANCHOR] anchor rc=%d", arc);
@@ -70,7 +58,6 @@ int main(void)
         return 0;
     }
 
-    /* Phase B — verify. */
     AnchorRecord rec;
     memset(&rec, 0, sizeof(rec));
     int rrc = fread(fids[0], 0, &rec, sizeof(rec));

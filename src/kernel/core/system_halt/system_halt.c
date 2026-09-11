@@ -1,4 +1,4 @@
-#include "serial.h"      /* WireDrain — the last words are heard */
+#include "serial.h"
 #include "system_halt.h"
 #include "amp.h"
 #include "lapic.h"
@@ -28,19 +28,6 @@ static void halt_delay_ms(uint32_t ms)
     }
 }
 
-/*
- * Drain in-flight async storage I/O before we kill cores. Two targets:
- *   1. The never-drop baton queue — read/write state-machine continuations
- *      posted by the AHCI IRQ that haven't been consumed yet (a pending
- *      WRITE completion still owes its tagfs commit, so this must drain
- *      before we cut power or data is lost), and every other pass an
- *      interrupt made: SCI/GPE, AHCI recovery, the Touch IRQ ring's knock.
- *   2. AHCI port command issue (CI/SACT) — commands the controller is
- *      still executing.
- * We poll all until idle or the timeout elapses. Other cores are still
- * live at this point (cli not yet executed) so their guide loops keep
- * pumping continuations naturally.
- */
 static void halt_drain_async_writes(void)
 {
     kprintf("[HALT] Draining async writes...\n");
@@ -49,22 +36,8 @@ static void halt_drain_async_writes(void)
     while (rdtsc() < deadline) {
         bool any = false;
 
-        /* Pump THIS core's own queues before polling. system_halt runs in
-         * guide-loop context on whichever K-Core picked up the reboot/poweroff
-         * pocket — and that can be the BSP, which is the SOLE consumer of the
-         * never-drop storage completion queue (all completions route there).
-         * While we spin here the BSP is no longer in kcore_run_loop, so nothing
-         * else can drain its queue: a completion that lands during the drain
-         * (interrupts are still on before the cli below) would be held forever
-         * and its write's tagfs-commit continuation lost. Draining our own
-         * index each pass is a valid single-consumer pump (me == this core) and
-         * a harmless empty early-out on a non-drain core; other cores keep
-         * pumping their own queues from their guide loops. */
         BatonPump(me);
 
-        /* Unconsumed never-drop passes, across all cores. BatonOutstanding is
-         * counter-based, so it is safe to poll from this (possibly non-owning)
-         * core while the drain core keeps pumping. */
         for (uint8_t i = 0; i < g_amp.total_cores; i++) {
             if (BatonOutstanding(i)) {
                 any = true;
@@ -107,16 +80,9 @@ static void halt_all_ap_cores(void)
     {
         if (c == my_index)
             continue;
-        /* Release store pairs with amp_core_online's acquire load on the
-         * other side, so peers that still iterate g_amp.cores[] see this
-         * core leave the "online" set with proper cross-CPU visibility. */
         __atomic_store_n(&g_amp.cores[c].online, (uint8_t)0, __ATOMIC_RELEASE);
     }
 
-    /* Every AP is now in cli;hlt (online=0) and will never run again. If one
-     * was stopped while holding a process-subsystem lock (e.g. mid strand-
-     * reaper), reclaim those locks now so the shutdown walk below cannot spin
-     * on them forever. Safe precisely because no other core is alive to race. */
     process_force_release_locks_for_shutdown();
 
     kprintf("[HALT] All AP cores stopped\n");
@@ -124,9 +90,6 @@ static void halt_all_ap_cores(void)
 
 static void halt_detach_all_schedulers(void)
 {
-    // Clear current_process on every core's scheduler.
-    // AP cores are already in cli;hlt — they will never touch these pointers again.
-    // This prevents process_destroy() from refusing to destroy "current" processes.
     for (uint8_t c = 0; c < g_amp.total_cores; c++)
     {
         scheduler_state_t *s = scheduler_get_core(c);
@@ -138,7 +101,6 @@ static void halt_terminate_all_processes(void)
 {
     kprintf("[HALT] Terminating all processes...\n");
 
-    // Detach all processes from scheduler before destruction
     halt_detach_all_schedulers();
 
     process_cleanup_queue_flush();
@@ -208,12 +170,6 @@ static void halt_stop_hardware(void)
 
 void system_halt(bool reboot)
 {
-    /* Publish system:shutdown/system:reboot BEFORE we cli, so subscribers
-     * (e.g. user daemons holding open files / dirty caches) get woken on
-     * their App-Cores while interrupts and the scheduler still work. The
-     * grace_ms hint is currently nominal — the actual halt path doesn't
-     * await acks, but a future scheduler tick can be added between
-     * publish and `cli` to give listeners a chance to run. */
     {
         struct __attribute__((packed)) {
             uint32_t reason;
@@ -223,19 +179,10 @@ void system_halt(bool reboot)
                      &hint, sizeof(hint));
     }
 
-    /* Drain any pending Touch deliveries and let App-Cores run subscribers
-     * for a brief window before we kill interrupts. 50 ms is a hint — apps
-     * that need more should checkpoint on every state change, not on
-     * shutdown alone. */
     halt_delay_ms(50);
 
-    /* Drain BEFORE cli — other cores need their guide loops alive to
-     * pump pending continuations from the AHCI IRQ. */
     halt_drain_async_writes();
 
-    /* What the interrupts said this session and what of it was delivered —
-     * the one place the account is complete, because nothing knocks after
-     * the drain above and the reader is done. */
     TouchIrqRingAccount();
 
     __asm__ volatile("cli");
@@ -250,8 +197,6 @@ void system_halt(bool reboot)
     kprintf("[HALT] Cleanup complete.\n");
     kprintf(reboot ? "[HALT] Rebooting...\n" : "[HALT] Powering off...\n");
 
-    /* The last words onto the wire before the machine goes: interrupts are
-     * off, so the line cannot drive itself from here. */
     WireDrain();
 
     if (reboot) acpi_reboot();

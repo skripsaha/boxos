@@ -136,4 +136,4 @@ typedef volatile uint64_t vu64;
 
 #define STATIC_ASSERT(expr, msg) _Static_assert(expr, msg)
 
-#endif // KTYPES_H
+#endif

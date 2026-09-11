@@ -1,23 +1,3 @@
-// cxx_valarray_oracle.cpp — the differential <valarray> stand.
-//
-// One translation unit, three columns. Two of them are the reference libraries
-// (libstdc++ and libc++, both built by the host compilers); the third is
-// boxcxx's own leaf, reached through symlinks in a private include directory
-// so that our <string> and <vector> cannot shadow the host's — the shape
-// Ф43-e-2 and Ф44-0 both used, because it turns a fifty-second QEMU round trip
-// into a one-second one.
-//
-// Every case prints ONE deterministic line, so the columns diff directly:
-// there is no expected-output table anywhere in this file. A table can only
-// say what someone thought to write down; two independent implementations
-// disagreeing is a question that has to be answered from the standard, and
-// them agreeing is the closest thing to ground truth available offline.
-//
-// Doubles print at %.17g, which round-trips, so a diff cannot hide in the
-// seventeenth digit. Transcendentals go to the same libm in all three columns
-// (the stand does not symlink our <cmath>), so a difference there is a
-// difference in DISPATCH, which is what this file is for; the correctness of
-// the functions themselves is Ф27e's business and is tested in QEMU.
 #include <cstdio>
 #include <cstddef>
 #include <cmath>
@@ -36,11 +16,6 @@ using std::gslice;
 using std::slice;
 using std::valarray;
 
-// ── printing ────────────────────────────────────────────────────────────
-// Every case materialises into a valarray before printing. That is not
-// ceremony: with the fused design an operator returns a work order rather than
-// an array, and a case that printed the order would be testing the proxy
-// instead of the arithmetic. Materialising is also what calling code does.
 static void Pd(const char *id, const valarray<double> &v)
 {
     printf("%-30s [", id);
@@ -62,31 +37,15 @@ static void Pb(const char *id, const valarray<bool> &v)
 static void Ps(const char *id, double x) { printf("%-30s %.17g\n", id, x); }
 static void Pn(const char *id, size_t n) { printf("%-30s %zu\n", id, n); }
 
-// Fixed data, so the cases are reproducible and the numbers are ugly enough
-// that an off-by-one in a stride cannot look right by accident.
 static valarray<double> D6()
 {
     return valarray<double>{1.5, -2.25, 3.125, -4.0625, 5.03125, -6.015625};
 }
 static valarray<int> I6() { return valarray<int>{7, -3, 12, 5, -9, 40}; }
 
-// ── the parallel battery ────────────────────────────────────────────────
-// The semantic sweep above runs on six elements, and six elements is below any
-// grain worth splitting: on our column every one of those cases takes the
-// sequential path, so the brigade would go untested by the very sweep that
-// looks thorough. This battery is the other half — arrays long enough that
-// Plan() cuts them into real chunks.
-//
-// ‼ Every value here is an exact integer or an exact power of two, and that is
-// load-bearing rather than tidy. A parallel reduction adds its partials in an
-// order the sequential one does not use, and in floating point a different
-// order is a different number — so a battery built on values that round would
-// diff against the references on the last bit and be reporting arithmetic
-// instead of a defect. With exact values the order cannot be observed, which
-// is precisely why the comparison means something.
 static void Big()
 {
-    const size_t N = 200003;  // prime: no chunk boundary lands on a round number
+    const size_t N = 200003;
     valarray<double> a(N), b(N), c(N);
     for (size_t i = 0; i < N; ++i) {
         a[i] = double((long)(i % 1024) - 512);
@@ -136,9 +95,6 @@ static void Big()
     valarray<double> ap = a.apply([](double x) { return x < 0 ? -x : x; });
     Ps("big/apply.sum", ap.sum());
 
-    // Writing through a proxy over a long array: the write path splits too, and
-    // a chunk that computed its own bounds wrongly shows up here and nowhere in
-    // the six-element sweep.
     valarray<double> w = a;
     w[slice(0, N / 2, 2)] = 3.0;
     Ps("big/slice-write.sum", w.sum());
@@ -153,7 +109,6 @@ int main(int argc, char **argv)
         Big();
         return 0;
     }
-    // ── [valarray.cons] ─────────────────────────────────────────────────
     { valarray<double> v;            Pn("cons/default.size", v.size()); Pd("cons/default", v); }
     { valarray<double> v(4);         Pd("cons/n", v); }
     { valarray<double> v(2.5, 3);    Pd("cons/val-n", v); }
@@ -162,27 +117,17 @@ int main(int argc, char **argv)
     { valarray<double> s = D6(), v(s); Pd("cons/copy", v); }
     { valarray<double> s = D6(), v(static_cast<valarray<double> &&>(s));
       Pd("cons/move", v); Pn("cons/move.src-size", s.size()); }
-    // A zero-length valarray is a legal object, and the one every loop that
-    // assumes "at least one element" gets wrong.
     { valarray<double> v(0);         Pn("cons/zero.size", v.size()); Pd("cons/zero", v); }
 
-    // ── [valarray.assign] ───────────────────────────────────────────────
     { valarray<double> v(9.0, 6); v = D6();       Pd("assign/valarray", v); }
     { valarray<double> v = D6();  v = 7.25;       Pd("assign/scalar", v); }
     { valarray<double> v = D6();  v = {8, 9};     Pd("assign/init-list", v); }
-    // Self-assignment through the plain operator, and through a proxy of the
-    // same object: [valarray.assign] promises the first, and the second is the
-    // aliasing case an eager implementation gets right by accident and a fused
-    // one only gets right on purpose.
     { valarray<double> v = D6();  v = v;          Pd("assign/self", v); }
     { valarray<double> v = D6();  v = v[slice(0, 6, 1)]; Pd("assign/self-slice", v); }
     { valarray<double> v = D6();  v += v;         Pd("assign/self-add", v); }
-    // Assigning a longer valarray RESIZES ([valarray.assign]/2), which is the
-    // one place valarray does not require equal lengths.
     { valarray<double> v(1.0, 2);  v = D6();      Pd("assign/grow", v); }
     { valarray<double> v = D6();   v = valarray<double>{1, 2}; Pd("assign/shrink", v); }
 
-    // ── [valarray.access] and [valarray.sub] ────────────────────────────
     { const valarray<double> v = D6(); Ps("access/const-index", v[4]); }
     { valarray<double> v = D6(); v[4] = 99.5;     Pd("access/index-write", v); }
     { const valarray<double> v = D6();
@@ -194,9 +139,6 @@ int main(int argc, char **argv)
       Pd("sub/slice-assign-va", v); }
     { valarray<double> v = D6(); v[slice(1, 3, 2)] *= valarray<double>{2, 2, 2};
       Pd("sub/slice-compound", v); }
-    // A slice of length 0 and a slice of stride 0: the first is ordinary, the
-    // second addresses the same element repeatedly and is only well defined
-    // when read.
     { const valarray<double> v = D6();
       valarray<double> r = v[slice(2, 0, 1)];     Pd("sub/slice-empty", r); }
     { const valarray<double> v = D6();
@@ -235,13 +177,11 @@ int main(int argc, char **argv)
       valarray<size_t> ix;
       valarray<double> r = v[ix];                 Pd("sub/indirect-empty", r); }
 
-    // ── [valarray.unary] ────────────────────────────────────────────────
     { valarray<double> r = +D6(); Pd("unary/plus", r); }
     { valarray<double> r = -D6(); Pd("unary/minus", r); }
     { valarray<int> r = ~I6();    Pi("unary/bitnot", r); }
     { valarray<bool> r = !I6();   Pb("unary/not", r); }
 
-    // ── [valarray.binary] — three forms each ────────────────────────────
 #define BINOP_D(tag, op)                                                      \
     { valarray<double> r = D6() op D6();       Pd("bin/" tag "/vv", r); }     \
     { valarray<double> r = D6() op 2.5;        Pd("bin/" tag "/vs", r); }     \
@@ -254,18 +194,12 @@ int main(int argc, char **argv)
     { valarray<int> r = 3 op I6();             Pi("bin/" tag "/sv", r); }
     BINOP_I("mod", %) BINOP_I("and", &) BINOP_I("or", |) BINOP_I("xor", ^)
 #undef BINOP_I
-    // Shifts by a NEGATIVE count are undefined in C++ itself, so the counts
-    // here are positive and the interesting part is which operand is which.
     { valarray<int> r = I6() << valarray<int>(2, 6); Pi("bin/shl/vv", r); }
     { valarray<int> r = I6() << 2;                   Pi("bin/shl/vs", r); }
     { valarray<int> r = 256 >> valarray<int>{1, 2, 3, 4, 5, 6}; Pi("bin/shr/sv", r); }
-    // Three operands in one expression: the case the whole fused design exists
-    // for, and the one where a temporary would show up as a wrong answer only
-    // if the aliasing rules were broken.
     { valarray<double> a = D6(), b = D6() * 2.0, c = D6() + 1.0;
       valarray<double> r = a + b * c - a / 2.0;      Pd("bin/fused-4", r); }
 
-    // ── [valarray.comparison] ───────────────────────────────────────────
 #define CMP(tag, op)                                                          \
     { valarray<bool> r = D6() op D6();         Pb("cmp/" tag "/vv", r); }     \
     { valarray<bool> r = D6() op 0.0;          Pb("cmp/" tag "/vs", r); }     \
@@ -276,7 +210,6 @@ int main(int argc, char **argv)
       valarray<bool> r1 = a && b, r2 = a || b;
       Pb("cmp/logand", r1); Pb("cmp/logor", r2); }
 
-    // ── [valarray.cassign] ──────────────────────────────────────────────
 #define CASSIGN_D(tag, op)                                                    \
     { valarray<double> v = D6(); v op D6();    Pd("cas/" tag "/v", v); }      \
     { valarray<double> v = D6(); v op 2.5;     Pd("cas/" tag "/s", v); }
@@ -287,12 +220,6 @@ int main(int argc, char **argv)
     { valarray<int> v = I6(); v op 3;          Pi("cas/" tag "/s", v); }
     CASSIGN_I("mod", %=) CASSIGN_I("and", &=) CASSIGN_I("or", |=) CASSIGN_I("xor", ^=)
 #undef CASSIGN_I
-    // ‼ The shift counts come from their own array, not from I6(). The first
-    // sweep used I6() and the columns disagreed on one element out of 159 —
-    // `-9 <<= -9`, which is undefined in the LANGUAGE ([expr.shift]/1), not in
-    // the library. An oracle that sweeps undefined behaviour manufactures
-    // disagreements and then asks which library is right about them; the
-    // answer is neither, and the case does not belong in the sweep.
     { valarray<int> cnt{0, 1, 2, 3, 4, 5};
       valarray<int> v = I6(); v <<= cnt; Pi("cas/shl/v", v); }
     { valarray<int> v = I6(); v <<= 2;   Pi("cas/shl/s", v); }
@@ -300,7 +227,6 @@ int main(int argc, char **argv)
       valarray<int> v = I6(); v >>= cnt; Pi("cas/shr/v", v); }
     { valarray<int> v = I6(); v >>= 1;   Pi("cas/shr/s", v); }
 
-    // ── [valarray.members] ──────────────────────────────────────────────
     { valarray<double> v = D6(); Pn("mem/size", v.size()); }
     { valarray<double> v = D6(); Ps("mem/sum", v.sum()); }
     { valarray<double> v{4.0}; Ps("mem/sum-one", v.sum()); }
@@ -312,9 +238,6 @@ int main(int argc, char **argv)
     { valarray<double> r = D6().shift(-99); Pd("mem/shift-past-neg", r); }
     { valarray<double> r = D6().cshift(2);  Pd("mem/cshift+2", r); }
     { valarray<double> r = D6().cshift(-2); Pd("mem/cshift-2", r); }
-    // A rotation by more than the length, and by a negative more than the
-    // length: the standard says the result is the array rotated by n, and the
-    // only way to get that wrong is to take the remainder with the wrong sign.
     { valarray<double> r = D6().cshift(8);   Pd("mem/cshift-wrap", r); }
     { valarray<double> r = D6().cshift(-8);  Pd("mem/cshift-wrap-neg", r); }
     { valarray<double> r = D6().cshift(6);   Pd("mem/cshift-full", r); }
@@ -323,13 +246,10 @@ int main(int argc, char **argv)
       Pd("mem/apply", r); }
     { valarray<double> v = D6(); v.resize(3);      Pd("mem/resize-shrink", v); }
     { valarray<double> v = D6(); v.resize(8, 1.25); Pd("mem/resize-grow", v); }
-    // resize does NOT preserve: [valarray.members] says every element is set
-    // to the fill value, and code that expects vector's behaviour is wrong.
     { valarray<double> v = D6(); v.resize(6, 0.0);  Pd("mem/resize-same", v); }
     { valarray<double> a = D6(), b(1.0, 2); a.swap(b);
       Pd("mem/swap-a", a); Pd("mem/swap-b", b); }
 
-    // ── [valarray.transcend] ────────────────────────────────────────────
     {
         valarray<double> u{0.25, 0.5, 0.75};
         Pd("tr/abs",   abs(D6()));
@@ -353,13 +273,9 @@ int main(int argc, char **argv)
         Pd("tr/pow/vv",   pow(w, u));
         Pd("tr/pow/vs",   pow(w, 2.0));
         Pd("tr/pow/sv",   pow(2.0, w));
-        // A transcendental of an expression rather than of an array: the free
-        // functions take the replacement type too, and this is where an
-        // implementation that only declared them for valarray falls over.
         Pd("tr/of-expr", sqrt(D6() * D6()));
     }
 
-    // ── [valarray.range] ────────────────────────────────────────────────
     {
         valarray<double> v = D6();
         double s = 0;
@@ -370,14 +286,6 @@ int main(int argc, char **argv)
         Ps("range/const-first", *begin(c));
     }
 
-    // ── chained proxies: a slice of a mask, a gslice written through ────
-    // ‼ Measured before the first line of our header: `v[m] += 100.0` compiles
-    // in NEITHER reference, and both are right. [slice.arr.comp.assign] and its
-    // three siblings declare the compound assignments for `const valarray<T>&`
-    // only; the scalar is accepted by plain `=` and by nothing else. The
-    // asymmetry is the standard's, so it is ours too — an implementation that
-    // "helpfully" added the scalar overload would compile code here that no
-    // other library accepts, which is the kind of kindness that costs a port.
     {
         valarray<double> v = D6();
         valarray<bool> m{true, true, false, false, true, true};
@@ -396,11 +304,6 @@ int main(int argc, char **argv)
         v[gslice(1, sz, st)] += valarray<double>{1, 2, 3, 4};
         Pd("chain/gslice-compound", v);
     }
-    // ── orders that are not arrays ──────────────────────────────────────
-    // Everything above has a valarray on at least one side of every operator.
-    // These do not, and that is a different lookup: the replacement type is
-    // not the standard's, so whether `-(a + b)` or `sqrt(a * b)` compiles at
-    // all is a property of where an implementation put its operators.
     { valarray<double> r = -(D6() + D6());        Pd("ord/unary-minus", r); }
     { valarray<double> r = +(D6() * D6());        Pd("ord/unary-plus", r); }
     { valarray<int> r = ~(I6() + I6());           Pi("ord/unary-flip", r); }
@@ -419,23 +322,12 @@ int main(int argc, char **argv)
     { valarray<double> v = D6();
       valarray<bool> m{true, false, true, false, true, false};
       v[m] += valarray<double>{1, 2, 3} * 100.0;  Pd("ord/into-mask", v); }
-    // ‼ The result of + on two valarray<short> is a valarray<short>, not the
-    // valarray<int> the usual arithmetic conversions would give: the standard
-    // writes the return type as valarray<T>. An implementation that let the
-    // promotion through would still print the same digits here and stop
-    // compiling the moment someone assigned the result to a valarray<short>.
     {
         valarray<short> a{3, -4, 5}, b{7, 9, -2};
         valarray<short> r = a * b;
         printf("%-30s [%d,%d,%d]\n", "ord/no-promotion", (int)r[0], (int)r[1], (int)r[2]);
         static_assert(sizeof(decltype(a * b)) > 0, "");
     }
-    // ‼ [valarray.syn]/3: a function may return something other than
-    // valarray<T> only if "all the const member functions of valarray<T> other
-    // than begin and end are also applicable to this type". So every one of
-    // them is called here ON AN EXPRESSION, and an implementation whose
-    // expression type is a bare pair of size() and operator[] fails to compile
-    // this block rather than failing a comparison.
     {
         Ps("req/sum", (D6() + D6()).sum());
         Ps("req/min", (D6() * 2.0).min());
@@ -443,16 +335,6 @@ int main(int argc, char **argv)
         Pn("req/size", (D6() - D6()).size());
         Ps("req/index", (D6() + D6())[3]);
 #if defined(_LIBCPP_VERSION)
-        // ‼ MEASURED DEFECT, libc++ 22.1.6: shift and cshift ON AN EXPRESSION
-        // do not compile for a floating-point element type. Its __shift_expr
-        // computes the element branchlessly --
-        //   (__expr_[(__i + __n_) & __m] & __m) | (value_type() & ~__m)
-        // -- which is only valid for integers, and `double & long` is not an
-        // expression at all. valarray<double>::shift itself is fine; it is the
-        // replacement type that is not, so libc++ fails [valarray.syn]/3 for
-        // every floating-point valarray. The placeholder keeps the columns
-        // line-for-line comparable; the divergence is pinned in
-        // tools/valarray_oracle_refdiff.txt so that a NEW one still shouts.
         printf("%-30s %s\n", "req/shift", "<libc++: does not compile>");
         printf("%-30s %s\n", "req/cshift", "<libc++: does not compile>");
 #else
@@ -471,9 +353,6 @@ int main(int argc, char **argv)
         Pd("req/sub-indirect", (D6() * 2.0)[ix]);
     }
 
-    // Copy-assignment THROUGH the proxies: `w[s] = v[s]` is the one overload
-    // that takes the proxy itself, and it is a const member returning a const
-    // reference, which is a shape nothing else in the library has.
     {
         valarray<double> v = D6(), w(0.0, 6);
         w[slice(0, 3, 1)] = v[slice(3, 3, 1)];
@@ -486,9 +365,6 @@ int main(int argc, char **argv)
         Pd("ord/indirect-to-indirect", w);
     }
     {
-        // Writing one slice of an array from another slice OF THE SAME ARRAY.
-        // The standard leaves overlapping copies alone; both references are
-        // measured here rather than trusted.
         valarray<double> v = D6();
         v[slice(0, 3, 1)] = v[slice(3, 3, 1)];
         Pd("chain/slice-from-self", v);

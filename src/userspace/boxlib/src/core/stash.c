@@ -43,14 +43,12 @@ bool stash_reserve(Stash *s)
 
 void stash_put(Stash *s, const void *entry)
 {
-    StashChunk *c = s->tail;   /* the reserve made room here */
+    StashChunk *c = s->tail;
     memcpy(slot_at(s, c, c->head + c->count), entry, s->entry_size);
     c->count++;
     s->count++;
 }
 
-/* Every empty chunk at the head leaves the chain — kept as the spare, or freed
- * when one is kept already — unless it is the last chunk, which just resets. */
 static void drop_empty_heads(Stash *s)
 {
     while (s->head && s->head->count == 0 && s->head != s->tail) {
@@ -84,7 +82,6 @@ bool stash_take_where(Stash *s, bool (*match)(const void *, const void *),
             uint8_t *e = slot_at(s, c, c->head + i);
             if (!match(e, key)) continue;
             memcpy(out, e, s->entry_size);
-            /* close the gap: every later entry of this chunk moves back one */
             for (uint32_t j = i; j + 1 < c->count; j++) {
                 memcpy(slot_at(s, c, c->head + j),
                        slot_at(s, c, c->head + j + 1), s->entry_size);

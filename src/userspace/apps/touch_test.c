@@ -8,13 +8,13 @@
 #include "box/core/result.h"
 #include "box/string.h"
 #include "box/error.h"
-#include "box/core/manifest.h"   /* MfCall1 — raw kill-other for the killed case */
-#include "boxos_decks.h"         /* DECK_SYSTEM, SYSTEM_OP_PROC_KILL */
-#include "box/timeouts.h"        /* BOX_ANSWER_GUARANTEED */
-#include "box/strand.h"          /* strand_spawn — TT22 needs a 64-slot ring */
-#include "box/core/strand_self.h" /* strand_self — TT24 sends to the strand by pid */
-#include "box/sync.h"            /* yield */
-#include "proc_exit.h"           /* PROC_EXIT_KILLED — shared exit disposition */
+#include "box/core/manifest.h"
+#include "boxos_decks.h"
+#include "box/timeouts.h"
+#include "box/strand.h"
+#include "box/core/strand_self.h"
+#include "box/sync.h"
+#include "proc_exit.h"
 
 #define TAG_PING    "test:ping"
 #define TAG_BCAST   "test:bcast"
@@ -40,16 +40,12 @@
 #define ROLE_DIE_INDEXED    11
 #define ROLE_TAG_REPORT     12
 
-/* Clean self-exit code asserted by test12 — arbitrary non-zero, sign bit clear
- * so it stays a valid >= 0 disposition that never collides with -1/-2. */
 #define EXIT_CLEAN_CODE     0x42
 
-/* TT 14 concurrent race detector — N children, each exits with a DISTINCT code
- * CONCURRENT_BASE_CODE + i. Every code is a small positive int (sign bit clear),
- * so it survives SysProcKill's [0, INT32_MAX] disposition mask byte-for-byte and
- * can never be confused with a negative sentinel (-1 killed / -2 crashed). */
 #define CONCURRENT_CHILDREN   8
 #define CONCURRENT_BASE_CODE  0x100
+
+#define COLLECT_QUIET_MS      30000u
 
 static int g_passed = 0;
 static int g_total  = 0;
@@ -85,8 +81,6 @@ static int spawn_role(uint8_t role)
     return child;
 }
 
-/* Like spawn_role but appends a 4-byte exit code to the role packet — the
- * ROLE_DIE_INDEXED child reads it back and exits with exactly that value. */
 static int spawn_role_code(uint8_t role, uint32_t code)
 {
     int child = proc_exec("touch_test");
@@ -97,9 +91,6 @@ static int spawn_role_code(uint8_t role, uint32_t code)
     return child;
 }
 
-/* Like spawn_role but launches the child through proc_exec_tagged, so the kernel
- * folds `tags` (a caller augment) into the child's tag set on top of the file's
- * own tags — the union path T16 verifies. */
 static int spawn_role_tagged(uint8_t role, const char *tags)
 {
     int child = proc_exec_tagged("touch_test", tags);
@@ -109,31 +100,26 @@ static int spawn_role_tagged(uint8_t role, const char *tags)
     return child;
 }
 
-/*
- * drain_state — wipe BOTH ResultRing and TouchRing before a test runs.
- *
- * Each touch_test sub-test relies on a deterministic empty-ring baseline:
- *   - ResultRing leftovers from a previous test's await-timeout or IPC
- *     could be popped by a subsequent receive_wait and skew payload
- *     comparisons.
- *   - TouchRing leftovers are even nastier — touch_pop is FIFO and does
- *     not filter by tag, so a stale Touch from TT N-1 (e.g. TT 10's
- *     wildcard catching multiple paired publishes) will satisfy TT N's
- *     await with the wrong payload, surfacing as "TT N FAIL: ...".
- *     This was the root cause of the historical TT 11 LATCHED flake
- *     (~1-3 % per matrix run before this drain landed).
- *
- * The drain is cheap (each pop returns false immediately on an empty
- * ring), so it's safe to apply to every test entry — defense in depth
- * for any future TT that doesn't yet exist.
- */
 static inline void drain_state(void)
 {
     Result rd; while (receive_wait(&rd, 50)) { }
     Touch  td; while (touch_pop(&td))         { }
 }
 
-/* ---------- child roles ---------- */
+static bool collect_until(bool (*heard)(const Result *), uint32_t quiet_ms)
+{
+    uint64_t last_heard = uptime_ms();
+    for (;;) {
+        Result r;
+        if (receive_wait(&r, quiet_ms)) {
+            last_heard = uptime_ms();
+            if (heard(&r)) return true;
+        } else if (uptime_ms() - last_heard >= quiet_ms) {
+            return false;
+        }
+    }
+}
+
 
 static void role_ping_sender(uint32_t parent_pid)
 {
@@ -145,19 +131,12 @@ static void role_ping_sender(uint32_t parent_pid)
 
 static void role_bcast_listen(uint32_t parent_pid)
 {
-    /* Subscribe. After touch_claim returns OK the kernel has linked us
-     * into the bucket — publishes to TAG_BCAST will land in our result
-     * ring even if we haven't entered touch_await yet. */
     TouchTag tag = TOUCH_TAG_ID(TAG_BCAST);
     int claim_rc = touch_claim(tag, TOUCH_REST, 0, 0);
 
-    /* Signal subscription readiness to parent. claim_rc encodes whether
-     * subscription succeeded; parent treats nonzero as a listener error. */
     uint8_t ready = (claim_rc == 0) ? 1 : 0;
     send(parent_pid, &ready, 1);
 
-    /* 30 s — TCG-tolerant; the actual publish/delivery cycle is µs on
-     * real HW, and even heavily contended UEFI 4c TCG completes in <1 s. */
     Touch t;
     int rc = touch_await(tag, &t, 30000);
     uint8_t ok = (rc == 0) ? 1 : 0;
@@ -168,11 +147,6 @@ static void role_bcast_listen(uint32_t parent_pid)
 
 static void role_bcast_send(uint32_t parent_pid)
 {
-    /* Wait for explicit "go" from parent instead of a timing heuristic.
-     * Parent sends GO only after BOTH listeners have signaled ready
-     * (touch_claim has returned OK in each), which guarantees both subs
-     * are linked into the bucket. The broadcast then deterministically
-     * fans out to both. */
     Result r;
     for (int t = 0; t < 50; t++) {
         if (receive_wait(&r, 200)) {
@@ -229,19 +203,12 @@ static void role_react_send(uint32_t parent_pid)
     exit(0);
 }
 
-/* Clean exit carrying a known non-zero code — test12 reads it back off
- * process:died. exit() routes EXIT_CLEAN_CODE through SysProcKill's self-exit
- * disposition. */
 static void role_die_code(uint32_t parent_pid)
 {
     (void)parent_pid;
     exit(EXIT_CLEAN_CODE);
 }
 
-/* Alive-and-looping victim for the killed case. It signals readiness, then
- * yields forever and NEVER self-exits, so the only process:died for its pid is
- * the parent's PROC_KILL (PROC_EXIT_KILLED) — deterministic. yield() each turn
- * keeps a cooperative single core handing the CPU back to the parent. */
 static void role_loop_forever(uint32_t parent_pid)
 {
     uint8_t ready = 1;
@@ -249,13 +216,6 @@ static void role_loop_forever(uint32_t parent_pid)
     for (;;) yield();
 }
 
-/* TT 14 child: subscribe to the burst tag, tell the parent we're armed, then
- * block until the parent's single broadcast releases EVERY child at once. The
- * synchronized release makes all N exits hit the cross-core reaper in one burst
- * (max contention on the touch_cleaned claim) while every child is still alive
- * holding a DISTINCT pid — pid recycling (the allocator hands back the lowest
- * free index immediately) can't fold two children onto one pid. Then exit with
- * the per-child code handed in at spawn. */
 static void role_die_indexed(uint32_t parent_pid, uint32_t code)
 {
     TouchTag burst = TOUCH_TAG_ID(TAG_BURST);
@@ -268,9 +228,6 @@ static void role_die_indexed(uint32_t parent_pid, uint32_t code)
     exit(code);
 }
 
-/* T16 child: report which of its two expected tags landed. "spawn:aug" is the
- * caller augment proc_exec_tagged folded in; "touch_test" is the file's own
- * name-stem tag. Both present proves child = file-tags ∪ caller-tags. */
 static void role_tag_report(uint32_t parent_pid)
 {
     bool has_aug = false, has_file = false;
@@ -281,7 +238,6 @@ static void role_tag_report(uint32_t parent_pid)
     exit(0);
 }
 
-/* ---------- T1: REST round-trip ---------- */
 static void test1(void)
 {
     TouchTag tag = TOUCH_TAG_ID(TAG_PING);
@@ -303,7 +259,6 @@ static void test1(void)
     touch_release(tag);
 }
 
-/* ---------- T2: Multicast ---------- */
 static void test2(void)
 {
     drain_state();
@@ -326,17 +281,11 @@ static void test2(void)
     int sender = spawn_role(ROLE_BCAST_SEND);
     if (sender < 0) { fail(2, "spawn sender failed"); return; }
 
-    /* Listeners are subscribed (both ready=1 above). Tell sender to fire.
-     * No timing assumption — sender broadcasts as soon as it receives this. */
     uint8_t go = 0xC0;
     send((uint32_t)sender, &go, 1);
 
     bool ok_c1 = false, ok_c2 = false;
     uint8_t va = 0, vb = 0;
-    /* 60×500ms = 30s — matches the listener's own touch_await timeout.
-     * Each listener sends exactly ONE `ok` packet and nothing on exit (its
-     * death rides process:died, a separate ring), so the first packet from
-     * each child is the one and only one we care about. */
     for (int t = 0; t < 60 && !(ok_c1 && ok_c2); t++) {
         if (receive_wait(&r, 500)) {
             if (r.data_length < 1 || r.data_addr == 0) continue;
@@ -354,7 +303,6 @@ static void test2(void)
     }
 }
 
-/* ---------- T3: Self-touch immediate ---------- */
 static void test3(void)
 {
     TouchTag tag = TOUCH_TAG_ID(TAG_TIMER);
@@ -367,7 +315,6 @@ static void test3(void)
     touch_release(tag);
 }
 
-/* ---------- T4: process.died ---------- */
 static void test4(void)
 {
     TouchTag tag = TOUCH_TAG_ID(TAG_PDIED);
@@ -376,17 +323,11 @@ static void test4(void)
     int child = spawn_role(ROLE_DIE_CHILD);
     if (child < 0) { fail(4, "spawn failed"); touch_release(tag); return; }
 
-    /* process:died is a BROADCAST stream — every subscriber sees every death.
-     * Under SMP a sibling test's child can die first and land in our ring ahead
-     * of ours, so we must FILTER by our own child's pid, not assume the first
-     * death is ours. (On 1c cooperative ordering hid this; on 16c it surfaced
-     * as the intermittent "wrong pid in payload".) A real consumer of a death
-     * broadcast filters the same way. Bounded by attempts + per-wait timeout. */
     bool pid_ok = false;
     bool delivered = false;
     for (int tries = 0; tries < 16 && !pid_ok; tries++) {
         Touch t;
-        if (touch_await(tag, &t, 3000) != 0) break;   /* no further death in budget */
+        if (touch_await(tag, &t, 3000) != 0) break;
         delivered = true;
         if (t.payload_len >= 4) {
             uint32_t pid = 0;
@@ -400,7 +341,6 @@ static void test4(void)
     touch_release(tag);
 }
 
-/* ---------- T5: Timeout then data ---------- */
 static void test5(void)
 {
     TouchTag tag = TOUCH_TAG_ID(TAG_TIMEOUT);
@@ -417,7 +357,6 @@ static void test5(void)
     touch_release(tag);
 }
 
-/* ---------- T6: Self-touch delayed (after_ms=300) ---------- */
 static void test6(void)
 {
     TouchTag tag = TOUCH_TAG_ID(TAG_DELAYED);
@@ -438,7 +377,6 @@ static void test6(void)
     touch_release(tag);
 }
 
-/* ---------- T7: LEVEL policy ---------- */
 static void test7(void)
 {
     drain_state();
@@ -482,12 +420,11 @@ static void test7(void)
     if (got_touch && no_touch) pass(7); else fail(7, "level clear did not stop touch");
 }
 
-/* ---------- T8: OWNERS capability ---------- */
 static void test8(void)
 {
     {
         Result drain;
-        while (receive_wait(&drain, 50)) { /* discard */ }
+        while (receive_wait(&drain, 50)) {  }
     }
 
     TouchTag tag = TOUCH_TAG_ID(TAG_OWNERS);
@@ -510,10 +447,6 @@ static void test8(void)
 
     proc_tag_add(TAG_OWNERS);
 
-    /* The sender must wear the tag ITSELF: a child inherits nothing from its
-     * spawner, so it is boarded with the tag. (This half used to pass with a
-     * plain spawn because a kernel refusal came back as a positive code and
-     * read as success — touch_send reports a failure as < 0 now.) */
     int child_has = spawn_role_tagged(ROLE_HAS_TAG_SEND, TAG_OWNERS);
     if (child_has < 0) { fail(8, "spawn has-tag failed"); return; }
 
@@ -531,7 +464,6 @@ static void test8(void)
     proc_tag_remove(TAG_OWNERS);
 }
 
-/* ---------- T9: REACT mode — claim + send + no crash ---------- */
 static void test9(void)
 {
     TouchTag tag = TOUCH_TAG_ID(TAG_REACT);
@@ -554,13 +486,10 @@ static void test9(void)
     else fail(9, "REACT/REST verify failed");
 }
 
-/* ---------- T10: Wildcard — claim "key:..." catches any "key:value" send ---------- */
 static void test10(void)
 {
     drain_state();
 
-    /* Wildcard subscription resolves bare_id; sends to specific values
-     * publish to BOTH full and bare → wildcard receives. */
     TouchTag wild_tag = TOUCH_TAG_ID("wild:...");
     int rc1 = touch_claim(wild_tag, TOUCH_REST, 0, 0);
     if (rc1 < 0) { fail(10, "wildcard claim rejected"); return; }
@@ -580,7 +509,6 @@ static void test10(void)
     else fail(10, "wildcard did not catch values");
 }
 
-/* ---------- T11: LATCHED — only first publish queued until ack ---------- */
 static void test11(void)
 {
     drain_state();
@@ -611,9 +539,6 @@ static void test11(void)
     else fail(11, "LATCHED ordering or ack failed");
 }
 
-/* await_died_code — claim must already be active; spin (filtering by `pid`, a
- * broadcast stream) for that pid's process:died and hand back its exit_code.
- * Returns true on a matching death, false on timeout-with-no-match. */
 static bool await_died_code(TouchTag tag, uint32_t pid, int32_t *out_code,
                             bool *out_delivered)
 {
@@ -631,7 +556,6 @@ static bool await_died_code(TouchTag tag, uint32_t pid, int32_t *out_code,
     return false;
 }
 
-/* ---------- T12: clean exit carries its code ---------- */
 static void test12(void)
 {
     drain_state();
@@ -653,7 +577,6 @@ static void test12(void)
     touch_release(tag);
 }
 
-/* ---------- T13: kill-other reports PROC_EXIT_KILLED ---------- */
 static void test13(void)
 {
     drain_state();
@@ -664,8 +587,6 @@ static void test13(void)
     int child = spawn_role(ROLE_LOOP_FOREVER);
     if (child < 0) { fail(13, "spawn failed"); touch_release(tag); return; }
 
-    /* Wait for the victim to confirm it is alive and looping, so the kill lands
-     * on a running process rather than racing its startup. */
     bool ready = false;
     Result r;
     for (int t = 0; t < 30 && !ready; t++) {
@@ -677,10 +598,6 @@ static void test13(void)
     }
     if (!ready) { fail(13, "loop child not ready"); touch_release(tag); return; }
 
-    /* T15 covers the boxlib proc_kill() helper; here we deliberately keep the raw
-     * Manifest wire — SYSTEM_OP_PROC_KILL with a non-zero target pid — so the
-     * kernel kill-other path is proven independent of any userspace wrapper. The
-     * kernel forces PROC_EXIT_KILLED for a kill-other regardless of any param code. */
     uint32_t target = (uint32_t)child;
     int kill_rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_PROC_KILL,
                           &target, (uint16_t)sizeof(target),
@@ -699,33 +616,24 @@ static void test13(void)
     touch_release(tag);
 }
 
-/* PROC_EXIT_CRASHED (-2) has no dedicated positive test. It is published only
- * when process_destroy is the FIRST cleanup of a strand — a genuine fault or
- * kernel-forced teardown (the kill and self-exit paths clean touch first and win
- * the disposition). The only userspace trigger is a child faulting on purpose,
- * which routes through the IDT handler and spews a full [EXCEPTION] register dump
- * into every boot log — noise that mimics a real crash. T13 already proves a
- * NEGATIVE sentinel survives the compute -> TouchPublish snapshot -> ring ->
- * payload round-trip, and T14 below proves -2 never appears as a MISLABEL of a
- * clean exit under the cross-core reaper race. So -2 is covered, not faked. */
 
-/* ---------- T14: concurrent exit-code integrity under the reaper race --------
- *
- * Proves the SMP fix: a clean exit must publish its TRUE code even when the
- * self-exit path (SysProcKill, one K-Core) and the reaper (process_destroy,
- * another K-Core) reach TouchCleanupProcess for the same proc at once. Before
- * the fix the loser could double-publish or stamp PROC_EXIT_CRASHED (-2) over a
- * clean code. The window only opens under real cross-core parallelism, so this
- * is a no-op-correct pass on 1c and a genuine detector on bios16/uefi16.
- *
- * N children each carry a UNIQUE code (CONCURRENT_BASE_CODE + i). process:died
- * is claimed BEFORE the first spawn (a claim that postdates a death misses it);
- * all N are spawned and armed on a burst tag, then a single broadcast releases
- * them together so the deaths hit the reaper as one simultaneous burst. Every
- * delivered death is matched by pid against the expected set: a mislabel (-2), a
- * code swapped between children, a duplicate, or a missing death FAILs with the
- * offending pid named. Bounded by a per-death watchdog — a death that never
- * arrives FAILs rather than hangs. */
+static uint32_t g_t14_pid[CONCURRENT_CHILDREN];
+static bool     g_t14_armed[CONCURRENT_CHILDREN];
+static int      g_t14_armed_count;
+
+static bool t14_heard_armed(const Result *r)
+{
+    if (r->data_length >= 1 && r->data_addr != 0 &&
+        *(const uint8_t *)(uintptr_t)r->data_addr == 1) {
+        for (int i = 0; i < CONCURRENT_CHILDREN; i++) {
+            if (r->sender_pid == g_t14_pid[i] && !g_t14_armed[i]) {
+                g_t14_armed[i] = true; g_t14_armed_count++; break;
+            }
+        }
+    }
+    return g_t14_armed_count == CONCURRENT_CHILDREN;
+}
+
 static void test14(void)
 {
     drain_state();
@@ -733,55 +641,33 @@ static void test14(void)
     TouchTag tag = TOUCH_TAG_ID(TAG_PDIED);
     touch_claim(tag, TOUCH_REST, 0, 0);
 
-    uint32_t pid[CONCURRENT_CHILDREN];
     int32_t  want[CONCURRENT_CHILDREN];
     int32_t  got[CONCURRENT_CHILDREN];
-    bool     armed[CONCURRENT_CHILDREN];
     bool     seen[CONCURRENT_CHILDREN];
 
+    g_t14_armed_count = 0;
     for (int i = 0; i < CONCURRENT_CHILDREN; i++) {
         want[i]  = CONCURRENT_BASE_CODE + i;
         got[i]   = 0;
-        armed[i] = false;
         seen[i]  = false;
+        g_t14_armed[i] = false;
         int child = spawn_role_code(ROLE_DIE_INDEXED, (uint32_t)want[i]);
         if (child < 0) { fail(14, "spawn shortfall"); touch_release(tag); return; }
-        pid[i] = (uint32_t)child;
+        g_t14_pid[i] = (uint32_t)child;
     }
 
-    /* Barrier: wait until every child has claimed the burst tag and reported
-     * armed. Only then is the broadcast guaranteed to reach all N, and all N
-     * pids are simultaneously live (hence distinct). */
-    int armed_count = 0;
-    Result r;
-    for (int t = 0; t < 80 && armed_count < CONCURRENT_CHILDREN; t++) {
-        if (!receive_wait(&r, 200)) continue;
-        if (r.data_length < 1 || r.data_addr == 0) continue;
-        if (*(const uint8_t *)(uintptr_t)r.data_addr != 1) continue;
-        for (int i = 0; i < CONCURRENT_CHILDREN; i++) {
-            if (r.sender_pid == pid[i] && !armed[i]) {
-                armed[i] = true; armed_count++; break;
-            }
-        }
-    }
-    if (armed_count != CONCURRENT_CHILDREN) {
+    if (!collect_until(t14_heard_armed, COLLECT_QUIET_MS)) {
         fail(14, "children did not all arm");
         touch_release(tag);
         return;
     }
 
-    /* Release every child with one broadcast — a synchronized burst of exits. */
     if (touch_send(TOUCH_TAG_PAIR(TAG_BURST), "go", 2, 0) < 0) {
         fail(14, "burst broadcast failed");
         touch_release(tag);
         return;
     }
 
-    /* Collect. Each death is matched by pid into our set; deaths for pids we
-     * don't own are ignored. The loop ends when all N are in (success) or a
-     * touch_await times out (a death never came — FAIL, not hang). Stopping the
-     * instant remaining hits 0 means a later recycle of a child's pid can't be
-     * mistaken for a duplicate. The iteration cap is a hard backstop. */
     int remaining = CONCURRENT_CHILDREN;
     bool dup = false;
     uint32_t dup_pid = 0;
@@ -792,7 +678,7 @@ static void test14(void)
         TouchProcessDied died;
         memcpy(&died, t.payload, sizeof(died));
         for (int i = 0; i < CONCURRENT_CHILDREN; i++) {
-            if (died.pid != pid[i]) continue;
+            if (died.pid != g_t14_pid[i]) continue;
             if (seen[i]) { dup = true; dup_pid = died.pid; }
             else { seen[i] = true; got[i] = died.exit_code; remaining--; }
             break;
@@ -808,14 +694,14 @@ static void test14(void)
     for (int i = 0; i < CONCURRENT_CHILDREN; i++) {
         if (!seen[i]) {
             kdbg_print("[TT 14] FAIL: pid %u death never delivered (want %d)",
-                       pid[i], (int)want[i]);
+                       g_t14_pid[i], (int)want[i]);
             g_total++;
             touch_release(tag);
             return;
         }
         if (got[i] != want[i]) {
             kdbg_print("[TT 14] FAIL: pid %u got code %d want %d (mislabel/swap)",
-                       pid[i], (int)got[i], (int)want[i]);
+                       g_t14_pid[i], (int)got[i], (int)want[i]);
             g_total++;
             touch_release(tag);
             return;
@@ -825,7 +711,6 @@ static void test14(void)
     touch_release(tag);
 }
 
-/* ---------- T15: boxlib proc_kill() kills by pid; death carries KILLED ---------- */
 static void test15(void)
 {
     drain_state();
@@ -836,8 +721,6 @@ static void test15(void)
     int child = spawn_role(ROLE_LOOP_FOREVER);
     if (child < 0) { fail(15, "spawn failed"); touch_release(tag); return; }
 
-    /* Wait for the victim to confirm it is alive and looping so proc_kill lands
-     * on a running process rather than racing its startup. */
     bool ready = false;
     Result r;
     for (int t = 0; t < 30 && !ready; t++) {
@@ -849,7 +732,6 @@ static void test15(void)
     }
     if (!ready) { fail(15, "loop child not ready"); touch_release(tag); return; }
 
-    /* The path under test: the boxlib proc_kill() wrapper, kill-other by pid. */
     if (proc_kill((uint32_t)child) != OK) {
         fail(15, "proc_kill returned error");
         touch_release(tag);
@@ -864,27 +746,19 @@ static void test15(void)
     if (!matched)               { fail(15, "killed child death not delivered"); return; }
     if (code != PROC_EXIT_KILLED) { fail(15, "killed exit_code mismatch");    return; }
 
-    /* Locally deterministic guards (no child needed): proc_kill must refuse
-     * self-targeting. pid 0 is the kernel's self-exit form and our own pid is
-     * exit()'s job — both come back ERR_INVALID_ARGUMENT and leave us running. */
     if (proc_kill(0) != -ERR_INVALID_ARGUMENT) {
         fail(15, "proc_kill(0) not rejected"); return;
     }
     if (proc_kill(cabin_info()->pid) != -ERR_INVALID_ARGUMENT) {
         fail(15, "proc_kill(self) not rejected"); return;
     }
-    /* Still executing here — self never died. */
     pass(15);
 }
 
-/* ---------- T16: child = file ∪ caller tags; reserved augment is denied ------- */
 static void test16(void)
 {
     drain_state();
 
-    /* Union proof: "spawn" is neither reserved nor a tag the touch_test file
-     * carries, so a child reporting "spawn:aug" present alongside its own
-     * "touch_test" name tag proves the caller augment crossed PROC_EXEC. */
     int child = spawn_role_tagged(ROLE_TAG_REPORT, "spawn:aug");
     if (child < 0) { fail(16, "tagged spawn failed"); return; }
 
@@ -896,15 +770,13 @@ static void test16(void)
         if (r.sender_pid != (uint32_t)child) continue;
         if (r.data_length < 3 || r.data_addr == 0) continue;
         const uint8_t *b = (const uint8_t *)(uintptr_t)r.data_addr;
-        if (b[0] != 0xAA) continue;               /* 0xAA = tag-report opcode; guard payload shape */
+        if (b[0] != 0xAA) continue;
         has_aug = b[1]; has_file = b[2]; got = true;
     }
     if (!got)      { fail(16, "tag report not received");           return; }
     if (!has_aug)  { fail(16, "caller augment tag missing on child"); return; }
     if (!has_file) { fail(16, "file name tag missing on child");    return; }
 
-    /* Reserved-key augment must be refused wholesale — the child is never
-     * created, so no privilege can leak in. god + system both gate. */
     if (proc_exec_tagged("touch_test", "god") != -ERR_ACCESS_DENIED) {
         fail(16, "reserved 'god' augment not denied"); return;
     }
@@ -914,16 +786,6 @@ static void test16(void)
     pass(16);
 }
 
-/* Raw proc.spawn wire — no boxlib wrapper exists for it (spawn stays
- * kernel-internal), so issue the Manifest call directly like T13's raw kill.
- * params = [u64 binary_phys][u64 binary_size]; binary_phys = 0x1000 is page-
- * aligned, non-zero and < 4GiB, so it clears SysProcSpawn's early checks while
- * never being dereferenced on a gated reject (the gate fires pre-binary).
- *
- * Sign note: this is a RAW MfCall1, so a kernel-side error comes back as a
- * POSITIVE error_t (box/error.h: positive = kernel error, negative = transport).
- * That is why the comparisons below use +ERR_ACCESS_DENIED, unlike the
- * box_fail-wrapped boxlib stubs (T16) which return the negated -ERR_*. */
 static int proc_spawn_raw(const char *tags)
 {
     uint8_t params[16];
@@ -938,56 +800,24 @@ static int proc_spawn_raw(const char *tags)
                    BOX_ANSWER_GUARANTEED, NULL);
 }
 
-/* ---------- T17: proc.spawn child auth-level subset of spawner; no escalation -
- *
- * touch_test runs as "app,utility,test" (has utility, lacks system). The
- * proc.spawn tag gate must let it grant a utility child but deny a system
- * child — otherwise a utility process could mint a system-privileged child
- * (utility->system escalation; a phys address for the forged ELF is leaked via
- * the app-level MEMTAG_INFO base_phys field). The gate runs BEFORE
- * process_create and before the binary is read, so the reject branch is
- * deterministic and dereferences nothing.
- *
- * The rule is child auth-level subset of spawner: a utility caller may grant
- * what it itself holds (utility) but nothing above it (system) and nothing it
- * could never legitimately hold (god — only god grants god). We assert both the
- * "system" and "god" rejects: the reserved-seed fix now seeds the privilege
- * vocabulary at ids 0..11, so every well-known tag is representable (< 64) and
- * its auth bit is live — "god" is no longer a silently-zero mask, so the gate
- * really evaluates it and the escalation it must stop is the real one. */
 static void test17(void)
 {
     drain_state();
 
-    /* REJECT (pre-binary, deterministic): a utility spawner cannot grant the
-     * system privilege it does not itself hold — denied at the SYSTEM auth
-     * level the caller cannot reach. */
     if (proc_spawn_raw("system") != ERR_ACCESS_DENIED) {
         fail(17, "proc.spawn system not denied"); return;
     }
 
-    /* god is representable post reserved-seed fix, so "only god grants god"
-     * (system_ops.c) is live: a utility spawner is denied. */
     if (proc_spawn_raw("god") != ERR_ACCESS_DENIED) {
         fail(17, "proc.spawn god not denied"); return;
     }
 
-    /* ALLOW (not over-rejected): utility is within the spawner's own reach, so
-     * the gate passes and the op proceeds to fail on the dummy ELF blob
-     * (INVALID_ELF / SPAWN_FAILED). Anything but ACCESS_DENIED proves the gate
-     * let it through regardless of what 0x1000 happens to contain. */
     if (proc_spawn_raw("utility") == ERR_ACCESS_DENIED) {
         fail(17, "proc.spawn utility over-rejected"); return;
     }
     pass(17);
 }
 
-/* ---------- T18: self tag-add cannot self-grant a privilege (no escalation) ---
- *
- * tag.add now reuses the spawn grant gate: adding the "god" auth key to our own
- * process is an escalation app/utility cannot make, so it is denied — AND the
- * denial leaves no residue (the tag must not be present after). proc_tag_add is
- * a box_fail-wrapped wrapper, so a kernel error comes back NEGATED. */
 static void test18(void)
 {
     if (proc_tag_add("god") != -ERR_ACCESS_DENIED) {
@@ -999,28 +829,15 @@ static void test18(void)
     pass(18);
 }
 
-/* ---------- T19: non-privileged self tag-add stays free (no over-gate) -------
- *
- * The new authority + grant gates must not restrict an ordinary self tag. "test"
- * is no auth key, so the grant gate's requested-mask is 0 and the add proceeds.
- * (test8 already adds+removes this key, so it is absent here -> a clean add.) */
 static void test19(void)
 {
     if (proc_tag_add(TAG_OWNERS) != OK) {
         fail(19, "non-priv self tag rejected"); return;
     }
-    proc_tag_remove(TAG_OWNERS);   /* leave the tag set as we found it */
+    proc_tag_remove(TAG_OWNERS);
     pass(19);
 }
 
-/* ---------- T20: PROC_KILL authority gate denies killing a foreign process ----
- *
- * We run as app,utility,test (no system/god). Our spawner — the shell, tagged
- * "system" — is the ideal foreign target: alive and waiting on our exit, never
- * our child, and over which we hold no authority, so the kill MUST be denied and
- * the shell MUST survive (a wrong success would take down the whole session).
- * Raw Manifest wire -> POSITIVE error_t (cf. T13/T17). The spawner_pid==0 guard
- * keeps a target of 0 (= kernel self-exit form) from ever self-harming. */
 static void test20(void)
 {
     uint32_t parent = cabin_info()->spawner_pid;
@@ -1035,12 +852,6 @@ static void test20(void)
     pass(20);
 }
 
-/* ---------- T21: TAG_ADD authority gate denies tagging a foreign process ------
- *
- * Adding "stopped" to our (alive) parent would freeze it — a cross-process
- * mutation we have no authority for, so the kernel denies it before any tag is
- * applied. params = [u32 target_pid], in_crate = tag string. Raw wire ->
- * POSITIVE error_t. */
 static void test21(void)
 {
     uint32_t parent = cabin_info()->spawner_pid;
@@ -1056,35 +867,16 @@ static void test21(void)
     pass(21);
 }
 
-/* ---------- main ---------- */
 
-/* ---------- T22: a claim is a promise — a full ring loses nothing ----------
- *
- * The main strand's TouchRing is 8192 slots and never fills in practice; a
- * SPAWNED strand's is 64, carved out of its Hammock slot and not growable. That
- * is where a publish used to be thrown away after its retries, and a thrown-away
- * event can strand its subscriber forever.
- *
- * So: spawn a strand, have it claim a tag and then stay away from its ring while
- * this strand publishes more events than the ring can hold. Release it and read.
- * Every event must arrive, and in the order it was sent — what did not fit was
- * owed, not dropped, and the queue is FIFO. Before the Owed queue this test
- * received 64-odd of 96 and the kernel printed "[TOUCH] ERROR: dropped a
- * publish"; the tail of the sequence simply did not exist.
- *
- * It also exercises the hand-over door end to end: the strand drains its ring,
- * finds it empty with the header's `owed` slip non-zero, and yields — and a
- * yield is a syscall, which is the gate at which the kernel hands the rest
- * over. */
 #define OWED_TAG     "test:owed"
-#define OWED_EVENTS  96u    /* 64 the ring can hold + 32 that can only be owed */
+#define OWED_EVENTS  96u
 
 static TouchTagPair    g_owed_pair;
-static volatile uint32_t g_owed_claimed;    /* strand → main: tag claimed      */
-static volatile uint32_t g_owed_release;    /* main → strand: publishing done  */
-static volatile uint32_t g_owed_got;        /* strand: events received         */
-static volatile uint32_t g_owed_disorder;   /* strand: out-of-sequence arrivals */
-static volatile uint32_t g_owed_done;       /* strand → main: finished reading */
+static volatile uint32_t g_owed_claimed;
+static volatile uint32_t g_owed_release;
+static volatile uint32_t g_owed_got;
+static volatile uint32_t g_owed_disorder;
+static volatile uint32_t g_owed_done;
 
 static void owed_strand(void *arg)
 {
@@ -1095,19 +887,9 @@ static void owed_strand(void *arg)
     }
     __atomic_store_n(&g_owed_claimed, 1, __ATOMIC_RELEASE);
 
-    /* Stay off the ring while the publisher runs — filling it is the point.
-     * yield() rather than a hard spin: it gives the core back on a uniprocessor
-     * and it is also the door, so the kernel gets its chance to hand over and
-     * (correctly) cannot, because the ring is full. */
     while (__atomic_load_n(&g_owed_release, __ATOMIC_ACQUIRE) == 0)
         yield();
 
-    /* Read with touch_wait, not touch_wait_tag: this strand's ring carries only
-     * our tag, so nothing needs filtering, and touch_wait is the path that ends
-     * in UMWAIT on the ring header — which is exactly the path the slip has to
-     * rescue. (touch_wait_tag with a deadline returns at once on a stash-less
-     * strand, by its own documented degrade, and would never reach the wait.)
-     * The slice keeps every turn bounded; the deadline bounds the whole read. */
     uint32_t expect = 0;
     uint64_t deadline = uptime_ms() + 15000;
     for (;;) {
@@ -1165,33 +947,17 @@ static void test22(void)
     else                                fail(22, "a full ring lost or reordered events");
 }
 
-/* ── TT 23 / TT 24: what a strand is handed that is not for the caller at
- * hand is KEPT, however much of it there is.
- *
- * A strand waiting for one tag keeps the events of other tags in its stash;
- * a strand waiting for a kernel reply keeps the IPC messages ahead of it.
- * Both stashes used to be fixed at 256 entries: the Touch one shed the newest
- * foreign event on a forever wait, the IPC one dropped the oldest message —
- * in silence. They grow by the chunk now (box/core/stash.h), and the only
- * thing that can stop them is a heap with no room, which is said aloud.
- *
- * TT 23: a strand claims two tags, 300 events of the second are published,
- * then one of the first; the strand waits for the first alone and must then
- * find all 300 of the second.
- * TT 24: 300 IPC messages are sent to a strand while it waits on a Touch,
- * then a kernel reply is made to stand behind them (one sync call); every
- * message must still be there for receive(). */
 #define KEPT_TAG_A   "test:kept.a"
 #define KEPT_TAG_B   "test:kept.b"
-#define KEPT_EVENTS  300u   /* past the 256 the old stashes held */
+#define KEPT_EVENTS  300u
 
 static TouchTagPair      g_kept_a, g_kept_b;
-static volatile uint32_t g_kept_claimed;   /* strand → main: both tags claimed */
-static volatile uint32_t g_kept_release;   /* main → strand: everything sent   */
-static volatile uint32_t g_kept_got;       /* strand: events / messages found  */
-static volatile uint32_t g_kept_waited;    /* strand: the wait for A came back */
-static volatile uint32_t g_kept_done;      /* strand → main: finished          */
-static volatile uint32_t g_kept_pid;       /* strand → main: its own pid       */
+static volatile uint32_t g_kept_claimed;
+static volatile uint32_t g_kept_release;
+static volatile uint32_t g_kept_got;
+static volatile uint32_t g_kept_waited;
+static volatile uint32_t g_kept_done;
+static volatile uint32_t g_kept_pid;
 
 static void kept_touch_strand(void *arg)
 {
@@ -1203,7 +969,6 @@ static void kept_touch_strand(void *arg)
     }
     __atomic_store_n(&g_kept_claimed, 1, __ATOMIC_RELEASE);
 
-    /* The wait for A: every B met on the way must be kept, not shed. */
     Touch t;
     if (touch_wait_tag(g_kept_a.full, &t, 0))
         __atomic_store_n(&g_kept_waited, 1, __ATOMIC_RELEASE);
@@ -1266,9 +1031,6 @@ static void kept_ipc_strand(void *arg)
     __atomic_store_n(&g_kept_pid, strand_self(), __ATOMIC_RELEASE);
     __atomic_store_n(&g_kept_claimed, 1, __ATOMIC_RELEASE);
 
-    /* Off the ResultRing while the messages arrive: a Touch wait does not
-     * drain it. Then one synchronous call — its reply stands behind every
-     * message, and each one must be kept on the way to it. */
     Touch t;
     if (touch_wait_tag(g_kept_a.full, &t, 0))
         __atomic_store_n(&g_kept_waited, 1, __ATOMIC_RELEASE);

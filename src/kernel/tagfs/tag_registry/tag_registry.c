@@ -2,6 +2,32 @@
 
 static bool g_registry_dirty = false;
 
+static uint32_t* g_chain     = NULL;
+static uint32_t  g_chain_len = 0;
+static uint32_t  g_chain_cap = 0;
+
+static void chain_release(void) {
+    if (g_chain) kfree(g_chain);
+    g_chain     = NULL;
+    g_chain_len = 0;
+    g_chain_cap = 0;
+}
+
+static int chain_append(uint32_t block) {
+    if (g_chain_len == g_chain_cap) {
+        uint32_t cap = g_chain_cap ? g_chain_cap * 2 : 8;
+        uint32_t* grown = kmalloc(sizeof(uint32_t) * cap);
+        if (!grown) return -1;
+        if (g_chain && g_chain_len)
+            memcpy(grown, g_chain, sizeof(uint32_t) * g_chain_len);
+        if (g_chain) kfree(g_chain);
+        g_chain     = grown;
+        g_chain_cap = cap;
+    }
+    g_chain[g_chain_len++] = block;
+    return 0;
+}
+
 static uint32_t registry_hash(const char* key, const char* value, uint32_t bucket_count) {
     uint32_t hash = 5381;
     while (*key) {
@@ -108,7 +134,6 @@ static uint16_t lookup_unlocked(TagRegistry* reg, const char* key, const char* v
     return TAGFS_INVALID_TAG_ID;
 }
 
-// Grow by_id array to accommodate at least `needed_id`
 static int ensure_by_id_capacity(TagRegistry* reg, uint16_t needed_id) {
     while (needed_id >= reg->by_id_capacity) {
         uint32_t new_cap = reg->by_id_capacity * 2;
@@ -127,10 +152,8 @@ static int ensure_by_id_capacity(TagRegistry* reg, uint16_t needed_id) {
     return 0;
 }
 
-// Insert a tag at a specific ID (used by load to preserve disk IDs)
 static uint16_t intern_with_id_unlocked(TagRegistry* reg, uint16_t tag_id,
                                          const char* key, const char* value) {
-    // If this exact tag already exists, return existing
     uint16_t existing = lookup_unlocked(reg, key, value);
     if (existing != TAGFS_INVALID_TAG_ID) return existing;
 
@@ -138,7 +161,6 @@ static uint16_t intern_with_id_unlocked(TagRegistry* reg, uint16_t tag_id,
 
     if (ensure_by_id_capacity(reg, tag_id) != 0) return TAGFS_INVALID_TAG_ID;
 
-    // Slot already occupied — collision (shouldn't happen on clean load)
     if (reg->by_id[tag_id]) {
         debug_printf("[TagRegistry] intern_with_id: slot %u already used\n", tag_id);
         return TAGFS_INVALID_TAG_ID;
@@ -169,7 +191,6 @@ static uint16_t intern_with_id_unlocked(TagRegistry* reg, uint16_t tag_id,
     TagKeyGroup* group = find_or_create_key_group(reg, key);
     if (group) add_to_key_group(group, tag_id);
 
-    // Keep next_id above all known IDs
     if (tag_id >= reg->next_id) reg->next_id = tag_id + 1;
     reg->total_tags++;
     g_registry_dirty = true;
@@ -244,9 +265,6 @@ static uint16_t intern_unlocked(TagRegistry* reg, const char* key, const char* v
     return assigned_id;
 }
 
-// ----------------------------------------------------------------------------
-// Public API
-// ----------------------------------------------------------------------------
 
 int tag_registry_init(TagRegistry* reg) {
     reg->buckets = kmalloc(sizeof(TagRegistryNode*) * TAGFS_REG_BUCKETS);
@@ -324,6 +342,8 @@ void tag_registry_destroy(TagRegistry* reg) {
     kfree(reg->key_buckets);
     reg->key_buckets = NULL;
 
+    chain_release();
+
     debug_printf("[TagRegistry] destroyed\n");
 }
 
@@ -378,10 +398,6 @@ TagKeyGroup* tag_registry_key_group(TagRegistry* reg, const char* key) {
     return group;
 }
 
-// Stamp an entry as a reserved-vocabulary (system) tag. Idempotent OR of the
-// SYSTEM bit; deliberately does NOT raise g_registry_dirty — the bit is
-// re-derived from TagFsReservedKeys at every mount, so it must never be the
-// reason for a disk flush.
 void tag_registry_mark_system(TagRegistry* reg, uint16_t tag_id) {
     if (!reg || tag_id == TAGFS_INVALID_TAG_ID) return;
     spin_lock(&reg->lock);
@@ -404,12 +420,6 @@ bool tag_registry_is_dirty(void) {
     return g_registry_dirty;
 }
 
-/* BSS-resident scratch — TagRegistryBlock is exactly 4 KiB. Held
- * under reg->lock for the duration of any load/flush, so a single
- * shared buffer is mutually exclusive across both callers. Avoids
- * 4 KiB+local-frame stack usage that exceeded the
- * -Wstack-usage=8192 threshold and would compete with nested IRQ
- * frames on per-cpu stacks. */
 static TagRegistryBlock g_tag_registry_load_blk;
 
 int tag_registry_flush(TagRegistry* reg) {
@@ -418,17 +428,18 @@ int tag_registry_flush(TagRegistry* reg) {
     TagFSState* state = tagfs_get_state();
     if (!state) return -1;
 
-    /* The Deed states this in blocks of the whole volume; what the registry
-     * reads and writes is a block of the data run. tagfs.c owns that
-     * conversion — see data_block_of() there. */
-    uint32_t current_block = state->layout.tag_registry_block -
-                             state->layout.data_block;
-
     spin_lock(&reg->lock);
 
-    /* Shares the BSS scratch slot with tag_registry_load (both hold
-     * reg->lock for their full duration → mutually exclusive). Keeps
-     * the 4 KiB block off the kernel stack. */
+    if (g_chain_len == 0 &&
+        chain_append(state->layout.tag_registry_block -
+                     state->layout.data_block) != 0) {
+        spin_unlock(&reg->lock);
+        return -1;
+    }
+
+    uint32_t link          = 0;
+    uint32_t current_block = g_chain[0];
+
     TagRegistryBlock *blkp = &g_tag_registry_load_blk;
     memset(blkp, 0, sizeof(*blkp));
     blkp->magic       = TAGFS_REGISTRY_MAGIC;
@@ -450,10 +461,17 @@ int tag_registry_flush(TagRegistry* reg) {
 
         if (data_offset + record_size > TAGFS_REGISTRY_DATA_SIZE) {
             uint32_t new_block;
-            int alloc_result = tagfs_alloc_blocks(1, &new_block);
-            if (alloc_result != 0) {
-                spin_unlock(&reg->lock);
-                return -1;
+            if (link + 1 < g_chain_len) {
+                new_block = g_chain[link + 1];
+            } else {
+                if (tagfs_alloc_blocks(1, &new_block) != 0) {
+                    spin_unlock(&reg->lock);
+                    return -1;
+                }
+                if (chain_append(new_block) != 0) {
+                    spin_unlock(&reg->lock);
+                    return -1;
+                }
             }
 
             blkp->next_block = new_block;
@@ -463,6 +481,7 @@ int tag_registry_flush(TagRegistry* reg) {
                 return -1;
             }
 
+            link++;
             current_block = new_block;
             memset(blkp, 0, sizeof(*blkp));
             blkp->magic      = TAGFS_REGISTRY_MAGIC;
@@ -508,12 +527,30 @@ int tag_registry_flush(TagRegistry* reg) {
 int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
     if (!reg) return -1;
 
+    TagFSState* fs  = tagfs_get_state();
+    uint32_t    run = fs ? fs->layout.data_blocks : 0;
+    if (run == 0) {
+        kprintf("[TagRegistry] this volume states a data run of no blocks at "
+                "all, so there is nowhere for a tag registry to be — it is not "
+                "mounted\n");
+        return -1;
+    }
+
     spin_lock(&reg->lock);
+    chain_release();
 
     uint32_t block_num = first_block;
+    uint32_t hops      = 0;
 
-    /* Read at least the first block (block 0 is valid in our layout) */
     while (1) {
+        if (block_num >= run) {
+            kprintf("[TagRegistry] the chain points at block %u and this "
+                    "volume's data run is %u blocks — that is outside the "
+                    "volume, so it is not mounted\n", block_num, run);
+            spin_unlock(&reg->lock);
+            return -1;
+        }
+
         TagRegistryBlock *blkp = &g_tag_registry_load_blk;
         int read_result = tagfs_read_block(block_num, blkp);
         if (read_result != 0) {
@@ -522,6 +559,15 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
         }
 
         if (blkp->magic != TAGFS_REGISTRY_MAGIC) {
+            spin_unlock(&reg->lock);
+            return -1;
+        }
+
+        if (chain_append(block_num) != 0) {
+            kprintf("[TagRegistry] there is no memory to hold this volume's "
+                    "tag registry chain at %u blocks — it is not mounted\n",
+                    g_chain_len + 1);
+            chain_release();
             spin_unlock(&reg->lock);
             return -1;
         }
@@ -547,7 +593,7 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
 
             if (offset + record_size > TAGFS_REGISTRY_DATA_SIZE) break;
 
-            char key[256];  // uint8_t key_len always fits with null terminator
+            char key[256];
             memcpy(key, p, key_len);
             key[key_len] = '\0';
             p += key_len;
@@ -564,7 +610,6 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
                 value_ptr = value;
             }
 
-            // Use the stored disk tag_id to preserve ID mapping across reboots
             uint16_t new_id = intern_with_id_unlocked(reg, tag_id, key, value_ptr);
             if (new_id != TAGFS_INVALID_TAG_ID && reg->by_id[new_id]) {
                 reg->by_id[new_id]->flags = flags;
@@ -573,8 +618,16 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
             offset += record_size;
         }
 
+        if (blkp->next_block == 0) break;
+
+        if (++hops >= run) {
+            kprintf("[TagRegistry] this volume's tag registry chain has taken "
+                    "%u hops in a data run of %u blocks, so it is going round "
+                    "in a circle — it is not mounted\n", hops, run);
+            spin_unlock(&reg->lock);
+            return -1;
+        }
         block_num = blkp->next_block;
-        if (block_num == 0) break;  /* end of chain */
     }
 
     spin_unlock(&reg->lock);

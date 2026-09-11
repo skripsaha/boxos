@@ -1,11 +1,3 @@
-/*
- * MCE presence + state test (Phase 2F).
- *
- * Verifies mce_init succeeded + bank count + LMCE state. Cannot
- * exercise a real #MC without QEMU `qmp mce` injection; that's a
- * separate integration test. Previously bundled inside memtag_test.c
- * Phase 14K; split out so MCE tests live next to MCE code.
- */
 
 #include "mce.h"
 #include "klib.h"
@@ -24,8 +16,6 @@ void McePresenceTest(void) {
     MCT_CHECK(mce_bank_count() > 0,
               "mce_bank_count() > 0 on supported CPU");
 
-    /* LMCE is a Sapphire Rapids+ feature; on older silicon (or QEMU TCG)
-     * it stays off. Just log the state, don't assert. */
     kprintf("[MCE TEST]   LMCE state: %s\n",
             mce_lmce_enabled() ? "active" : "dormant");
 

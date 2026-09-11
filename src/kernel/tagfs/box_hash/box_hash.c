@@ -1,43 +1,33 @@
 #include "box_hash.h"
 #include "../../lib/kernel/klib.h"
 
-// ============================================================================
-// Secrets — nothing-up-my-sleeve constants (fractional parts of sqrt of small
-// primes). Used as the wyhash-class mixing secrets and SHA-256 round constants.
-// ============================================================================
 static const uint64_t SECRET[5] = {
-    0x9e3779b97f4a7c15ULL,  // sqrt(3)
-    0xbf58476d1ce4e5b9ULL,  // sqrt(5)
-    0x94d049bb133111ebULL,  // sqrt(7)
-    0x4cf5ad432745937fULL,  // sqrt(11)
-    0x3a478be4ac9e0d17ULL,  // sqrt(13)
+    0x9e3779b97f4a7c15ULL,
+    0xbf58476d1ce4e5b9ULL,
+    0x94d049bb133111ebULL,
+    0x4cf5ad432745937fULL,
+    0x3a478be4ac9e0d17ULL,
 };
 
-// 64x64 -> 128 multiply, folded to 64 bits (the wyhash mixer). __uint128_t is a
-// native GCC type on x86-64 (no libgcc call for the multiply).
 static inline uint64_t WyMix(uint64_t a, uint64_t b) {
     __uint128_t r = (__uint128_t)a * (__uint128_t)b;
     return (uint64_t)r ^ (uint64_t)(r >> 64);
 }
 
-// Little-endian loads (x86-64 is LE; memcpy avoids alignment UB).
 static inline uint64_t Read64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return v; }
 static inline uint64_t Read32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return (uint64_t)v; }
 
-// Read 1..3 trailing bytes without reading past the buffer (wyhash _wyr3).
 static inline uint64_t ReadSmall(const uint8_t *p, uint32_t k) {
     return ((uint64_t)p[0] << 16) | ((uint64_t)p[k >> 1] << 8) | (uint64_t)p[k - 1];
 }
 
-// wyhash (final v4) — strong 64-bit hash, seeded. Handles any length with no
-// out-of-bounds reads.
 static uint64_t WyHash64(const uint8_t *p, uint32_t len, uint64_t seed) {
     seed ^= WyMix(seed ^ SECRET[0], SECRET[1]);
     uint64_t a, b;
 
     if (len <= 16) {
         if (len >= 4) {
-            uint32_t off = (len >> 3) << 2;             // 0 for 4..7, 4 for 8..16
+            uint32_t off = (len >> 3) << 2;
             a = (Read32(p) << 32)            | Read32(p + off);
             b = (Read32(p + len - 4) << 32)  | Read32(p + len - 4 - off);
         } else if (len > 0) {
@@ -66,7 +56,6 @@ static uint64_t WyHash64(const uint8_t *p, uint32_t len, uint64_t seed) {
             q += 16;
             i -= 16;
         }
-        // Last 16 bytes (overlap with the tail just consumed — standard wyhash).
         a = Read64(q + i - 16);
         b = Read64(q + i - 8);
     }
@@ -79,9 +68,6 @@ static uint64_t WyHash64(const uint8_t *p, uint32_t len, uint64_t seed) {
     return WyMix(a ^ SECRET[0] ^ (uint64_t)len, b ^ SECRET[1]);
 }
 
-// ============================================================================
-// Public: deterministic seed derivation
-// ============================================================================
 void BoxHashInit(BoxHashContext *ctx, const void *seed, uint32_t seed_len) {
     if (!ctx) return;
     uint64_t base = (seed && seed_len)
@@ -93,9 +79,6 @@ void BoxHashInit(BoxHashContext *ctx, const void *seed, uint32_t seed_len) {
     }
 }
 
-// ============================================================================
-// Public: 64-bit integrity checksum
-// ============================================================================
 uint64_t BoxHashIntegrity(const void *data, uint32_t size, const BoxHashContext *ctx) {
     if (!data || size == 0)
         return 0;
@@ -103,11 +86,6 @@ uint64_t BoxHashIntegrity(const void *data, uint32_t size, const BoxHashContext 
     return WyHash64((const uint8_t *)data, size, seed);
 }
 
-// ============================================================================
-// Public: 256-bit content digest — four independent wyhash lanes (distinct
-// seeds). A collision requires all four 64-bit lanes to collide simultaneously,
-// which is astronomically unlikely for any realistic block count.
-// ============================================================================
 BoxHash BoxHashContent(const void *data, uint32_t size, const BoxHashContext *ctx) {
     BoxHash h;
     memset(&h, 0, sizeof(h));
@@ -125,9 +103,6 @@ BoxHash BoxHashContent(const void *data, uint32_t size, const BoxHashContext *ct
     return h;
 }
 
-// ============================================================================
-// SHA-256 (FIPS 180-4) — the cryptographic option. Unseeded, standard output.
-// ============================================================================
 static const uint32_t SHA256_K[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
     0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
@@ -184,7 +159,6 @@ BoxHash BoxHashSecure(const void *data, uint32_t size) {
         while (pos + 64 <= size) { Sha256Block(h, bytes + pos); pos += 64; }
     }
 
-    // Final padding: 0x80, zeros, 8-byte BE bit length (two blocks if needed).
     uint8_t chunk[64];
     uint32_t remaining = bytes ? size - pos : 0;
     uint64_t bit_len = (uint64_t)size * 8;
@@ -208,9 +182,6 @@ BoxHash BoxHashSecure(const void *data, uint32_t size) {
     return hash;
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
 bool BoxHashEqual(const BoxHash *a, const BoxHash *b) {
     if (!a || !b) return false;
     volatile uint8_t diff = 0;

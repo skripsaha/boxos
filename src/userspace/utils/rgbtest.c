@@ -1,29 +1,3 @@
-/*
- * rgbtest — the console's colour word is #RRGGBB, end to end.
- *
- * Three oracles, one small utility:
- *
- *   1. Wire round-trip (kernel truth, not the boxlib cache): SET_COLOR with
- *      an arbitrary 24-bit pair, then GET_COLOR read raw off the Hardware
- *      Deck — every bit must come back. Sentinels must resolve to their
- *      role defaults (fg → light gray, bg → black) and nothing else.
- *
- *   2. The printf path: the title and a background-probe line travel
- *      printf → display daemon → VGA ops. The probe line carries a %color
- *      run and two background changes; its space cells land at row 1 with
- *      backgrounds #402060 and #123456 — pixels a host-side screendump
- *      (tools/rgbcheck.sh) compares exactly. One 9-byte colour record
- *      carries the (fg, bg) pair together, so exact background pixels are
- *      exact evidence for the %color foreground riding the same record.
- *
- *   3. The direct path: rows 7-8 are painted with PUTCHAR ops — absolute
- *      coordinates and a colour pair in every op, so no concurrent
- *      writer's cursor can bend the probe. Row 7: CP437 full blocks
- *      (every pixel foreground) in six exact colours. Row 8: spaces
- *      (every pixel background) in two.
- *
- * Prints [RGBTEST] ALL PASS / FAILED; exit code follows.
- */
 
 #include "box/print.h"
 #include "box/color.h"
@@ -44,7 +18,6 @@ static void check(int ok, const char *what)
     }
 }
 
-/* Kernel truth, bypassing boxlib's local colour cache. */
 static int kernel_pair(Color *fg, Color *bg)
 {
     uint32_t out[2] = {0, 0};
@@ -62,7 +35,6 @@ int main(void)
 {
     Color fg = 0, bg = 0;
 
-    /* 1. Wire round-trip — arbitrary 24-bit values, bit-exact. */
     check(vga_setcolor_rgb(COLOR_RGB(0x12, 0x34, 0x56),
                            COLOR_RGB(0x65, 0x43, 0x21)) == 0,
           "set_color(#123456,#654321)");
@@ -80,12 +52,9 @@ int main(void)
     check(vga_setcolor_rgb(COLOR_LIGHT_GRAY, COLOR_BLACK) == 0,
           "restore default pair");
 
-    /* 2. The printf path. Direct clear first: black field, cursor (0,0). */
     check(vga_clear_rgb(COLOR_LIGHT_GRAY, COLOR_BLACK) == 0, "clear screen");
 
     printf("[RGBTEST] the console's colour word is #rrggbb\n");
-    /* First background via the colour-state API, second via the %bgcolor
-     * specifier — both halves of the pair steerable from a format string. */
     set_color_bg(COLOR_RGB(0x40, 0x20, 0x60));
     printf("%color        ", (Color)COLOR_RGB(0xFE, 0xDC, 0xBA));
     printf("%bgcolor        ", (Color)COLOR_RGB(0x12, 0x34, 0x56));
@@ -94,7 +63,6 @@ int main(void)
     printf("\n");
     io_flush();
 
-    /* 3. The direct probe — one batched Manifest of PUTCHAR ops. */
     static const Color probe_fg[6] = {
         COLOR_RGB(0xFF, 0x00, 0x00), COLOR_RGB(0x00, 0xFF, 0x00),
         COLOR_RGB(0x00, 0x00, 0xFF), COLOR_RGB(0x10, 0x20, 0x30),

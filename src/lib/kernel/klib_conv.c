@@ -1,16 +1,10 @@
-/* klib_conv.c — character classifiers, integer-to-string conversion,
- * UTF-8 encode/decode, tag matching, busy-wait delay.
- *
- * No state beyond a base-36 digit table (read-only). All routines are
- * pure functions of their inputs except `delay` (consults TSC / PIT). */
 #include "klib.h"
-#include "cpu_calibrate.h"  /* cpu_tsc_is_calibrated, cpu_ms_to_tsc */
-#include "atomics.h"        /* rdtsc */
-#include "pit.h"            /* pit_delay_busy */
+#include "cpu_calibrate.h"
+#include "atomics.h"
+#include "pit.h"
 
 static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
 
-/* ---- Character classifiers ---------------------------------------------- */
 
 int toupper(int c)
 {
@@ -46,7 +40,6 @@ bool isspace(int c)
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
 }
 
-/* ---- UTF-8 -------------------------------------------------------------- */
 
 int utf8_encode(uint32_t codepoint, char out[4])
 {
@@ -115,7 +108,6 @@ int utf8_decode(const char *utf8, uint32_t *codepoint)
     return 0;
 }
 
-/* ---- Integer-to-string (variants by signedness and width) --------------- */
 
 char *itoa(int value, char *str, int base)
 {
@@ -316,7 +308,6 @@ char *ultoa(unsigned long value, char *str, int base)  { return utoa64((uint64_t
 char *lltoa(long long value, char *str, int base)      { return itoa64((int64_t)value, str, base); }
 char *ulltoa(unsigned long long value, char *str, int base) { return utoa64((uint64_t)value, str, base); }
 
-/* ---- String-to-integer -------------------------------------------------- */
 
 int atoi(const char *str)
 {
@@ -399,7 +390,6 @@ long long atoll(const char *str)
     return sign * result;
 }
 
-/* ---- Time-source-aware delay ------------------------------------------- */
 
 void delay(uint32_t milliseconds)
 {
@@ -411,12 +401,10 @@ void delay(uint32_t milliseconds)
     }
     else
     {
-        /* Pre-calibration fallback: PIT busy-wait. */
         pit_delay_busy(milliseconds);
     }
 }
 
-/* ---- Tag wildcard matching --------------------------------------------- */
 
 bool tag_is_wildcard(const char *tag)
 {
@@ -425,7 +413,6 @@ bool tag_is_wildcard(const char *tag)
     return strstr(tag, "...") != NULL;
 }
 
-/* Match a single part (key or value) using "..." as the only wildcard. */
 static bool tag_match_part(const char *pattern, const char *text)
 {
     const char *wild = strstr(pattern, "...");
@@ -475,6 +462,5 @@ bool tag_match(const char *pattern, const char *tag)
     if (!p_colon && !t_colon)
         return tag_match_part(pattern, tag);
 
-    /* Mismatched form (one has colon, other doesn't) → no match. */
     return false;
 }

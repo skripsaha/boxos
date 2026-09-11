@@ -8,181 +8,47 @@ extern "C" {
 #include "box/types.h"
 #include "box/error.h"
 
-/*
- * Brook — single-producer/single-consumer (SPSC) ordered streaming
- * primitive over fixed-size frames. Tag-driven discovery, refcounted
- * lifetime, lock-free hot path.
- *
- * Open a Brook with a role and a shape. Both peers MUST agree on
- * frame_size and frame_count (the kernel rejects opens with mismatched
- * shape — stream shape is part of tag identity in BoxOS).
- *
- *   // writer
- *   Brook *b = brook_open("metric:tick", 64, 1024, BROOK_WRITER | BROOK_CREATE);
- *   uint8_t frame[64];
- *   build_frame(frame);
- *   brook_push(b, frame);             // blocks if reader hasn't drained
- *   brook_release(b);
- *
- *   // reader
- *   Brook *b = brook_open("metric:tick", 64, 1024, BROOK_READER);
- *   uint8_t frame[64];
- *   while (brook_pop(b, frame) == OK) {  // blocks if empty
- *       handle_frame(frame);
- *   }
- *
- * Hot path runs entirely in userspace (atomic head/tail updates, plain
- * memcpy) and never enters the kernel. The kernel is only invoked
- * when the ring is full (writer) or empty (reader) and the caller
- * asked for blocking semantics — at which point a futex-style
- * re-check inside the syscall closes the lost-wakeup race against the
- * peer's atomic clear of the wake-request flag.
- *
- * Backpressure: brook_push blocks when full (no frame loss). Use
- * brook_try_push for drop-on-full or brook_push_timeout for bounded
- * waits. Reader-side mirrors.
- *
- * Peer death: when one side releases (or its cabin is destroyed), the
- * surviving peer's next blocking call returns:
- *   - writer: -ERR_PROCESS_TERMINATED  (reader gone — no further drain)
- *   - reader: -ERR_STREAM_CLOSED       (writer gone AND ring empty)
- *   - reader: still OK while frames remain in the ring after writer
- *     left; the EOF marker fires only when the ring drains
- *
- * Limits:
- *   frame_size  ∈ [8, 65536]                 (must be ≥ 8 bytes, ≤ 64 KiB)
- *   frame_count ∈ [2, 16384]   AND power-of-2
- *   frame_size × frame_count ≤ 1 GiB
- *
- * Larger payloads belong in Bay (zero-copy shared memory); use Brook
- * for control events / metric ticks / log lines / audit records.
- */
 
 #define BROOK_WRITER     0x01u
 #define BROOK_READER     0x02u
 #define BROOK_CREATE     0x10u
-/* BROOK_STREAM — opt-in streaming semantics. Default (single-session)
- * mode: pop returns -ERR_STREAM_CLOSED on writer-leave (after draining
- * any remaining frames); push returns -ERR_PROCESS_TERMINATED on
- * reader-leave. That terminal signal is RACE-FREE via an atomic
- * compare-and-swap on the shared *_alive flag — once the survivor
- * commits to terminal, no future writer/reader can attach to this
- * Brook session (the next brook_open with the same tag fails with
- * -ERR_INVALID_STATE; callers must use a different tag).
- *
- * BROOK_STREAM disables the terminal signal: pop blocks through
- * writer-leave/re-attach cycles forever (use brook_pop_timeout for
- * bounded waits), push blocks through reader-leave/re-attach. Suitable
- * for long-running daemons that legitimately swap producers/consumers
- * over a stream's lifetime. The race-elimination CAS isn't needed in
- * this mode — there's no terminal decision to race against. */
 #define BROOK_STREAM     0x20u
 
 typedef struct Brook Brook;
 
-/* Open or create a Brook. Returns NULL on failure. (BoxOS has no errno
- * register; the typed cause is surfaced through the C++ box::result face,
- * box/cxx/error.h — this raw C entry only signals NULL vs non-NULL.) flags
- * MUST contain exactly one of {BROOK_WRITER, BROOK_READER}. Add BROOK_CREATE
- * to create the Brook if its tag is unbound; CREATE requires non-zero
- * frame_size and frame_count.
- *
- * For BROOK_OPEN (no CREATE) you may pass frame_size=0 and frame_count=0
- * — the existing Brook's shape wins and is reported via brook_frame_size
- * / brook_frame_count. If you pass non-zero values, they MUST match the
- * existing Brook or open fails with ERR_ALREADY_EXISTS. */
 Brook *brook_open(const char *tag,
                   uint32_t    frame_size,
                   uint32_t    frame_count,
                   uint32_t    flags);
 
-/* Release this cabin's claim on the Brook. After release the Brook
- * pointer is invalid. If both peers have released, backing pages
- * return to PMM; if a peer is still attached, its next blocking
- * push/pop sees peer-death and returns the appropriate error code. */
 int brook_release(Brook *b);
 
-/* Push one frame_size-byte frame. Blocking on full ring.
- * Returns:
- *   OK (0)                     — frame written
- *   -ERR_PROCESS_TERMINATED    — reader released or died
- *   -ERR_INVALID_ARGUMENT      — NULL pointer / bad handle */
 int brook_push(Brook *b, const void *frame);
 
-/* Non-blocking push. Returns -ERR_WOULD_BLOCK immediately when ring full. */
 int brook_try_push(Brook *b, const void *frame);
 
-/* Bounded-wait push. timeout_ms == 0 is the same as brook_push (infinite).
- * Returns -ERR_TIMEOUT if the deadline expires without a free slot. */
 int brook_push_timeout(Brook *b, const void *frame, uint32_t timeout_ms);
 
-/* Pop one frame_size-byte frame. Blocking on empty ring.
- * Returns:
- *   OK (0)                     — frame copied into `frame`
- *   -ERR_STREAM_CLOSED         — writer gone AND ring empty (clean EOS)
- *   -ERR_INVALID_ARGUMENT      — NULL pointer / bad handle */
 int brook_pop(Brook *b, void *frame);
 
 int brook_try_pop(Brook *b, void *frame);
 int brook_pop_timeout(Brook *b, void *frame, uint32_t timeout_ms);
 
-/* Shape queries — read from the shared header (no syscall). */
 uint32_t brook_frame_size(const Brook *b);
 uint32_t brook_frame_count(const Brook *b);
 
-/* Live counters — frames currently in ring / free slots remaining. */
 uint32_t brook_available(const Brook *b);
 uint32_t brook_free(const Brook *b);
 
-/* Writer-side history, read from the shared header (no syscall). For a
- * reader holding a checkroom of lanes: ever_attached == false means nobody
- * has ever written — an empty ring is provably empty forever once the
- * writer-to-be is known dead, so the lane is safe to revoke. */
 bool brook_writer_ever_attached(const Brook *b);
 
-/* ─────────────────────────────────────────────────────────────────────
- * The bell — how a side that goes to sleep can still be reached.
- *
- * A Brook push or pop is a store into a shared page. The kernel never sees it,
- * so nothing exists to wake a peer that has stopped looking: a reader that
- * sleeps on its rings alone sleeps through every frame a writer pushes, and a
- * writer that sleeps sleeps through every slot a reader frees. Neither drops
- * anything, so what follows is not slow output — it is a stopped machine.
- *
- * So a side about to sleep HANGS ITS BELL OUT: it writes its own pid where the
- * other side already looks — a writer on the line a reader reads for `tail`, a
- * reader on the line a writer reads for `head`. The peer takes it (exactly one
- * taker pays) and rings: an empty message to that pid, which lands in its
- * Result ring and is itself the wake. Once per SLEEP, never per frame; while
- * the peer is awake the bell is 0 and costs one compare against a cacheline it
- * already holds. The kernel rings the survivor's bell when the other end of a
- * stream departs, which is the one wake no cursor can carry.
- *
- * brook_pop and brook_push do all of this for themselves — a strand blocking
- * inside Brook needs nothing from its caller. These two are for a reader that
- * blocks somewhere ELSE: the console daemon try_pops many lanes and then
- * sleeps once for all of them, so hanging and sleeping happen in different
- * places and neither belongs to any one stream.
- *
- *     for each brook: brook_bell_hang(b, my_pid);
- *     mark = box_mark();
- *     if (look_at_everything()) { for each: brook_bell_take(b); continue; }
- *     box_turn_in(mark);
- *     for each brook: brook_bell_take(b);
- *
- * Hang the bell BEFORE the last look. Hanging it after is the lost wake: what
- * arrives in between is seen by neither side. Both halves carry a full
- * barrier, which is what makes "the peer sees the bell OR the sleeper sees the
- * cursor" true rather than merely likely.
- * ───────────────────────────────────────────────────────────────────── */
 int brook_bell_hang(Brook *b, uint32_t strand_pid);
 int brook_bell_take(Brook *b);
 
-/* Introspection: the VA the kernel mapped this Brook's header at (diagnostics). */
 uint64_t brook_handle_header_va(const Brook *b);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* BOX_BROOK_H */
+#endif

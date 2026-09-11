@@ -1,29 +1,3 @@
-/*
- * brook_test — SPSC streaming primitive end-to-end verification.
- *
- * Test plan:
- *   T1  basic SPSC: open writer+reader (same proc), push 64 frames,
- *       pop 64, verify content.
- *   T2  full-ring back-pressure: ring depth 4, try_push 4 times OK,
- *       5th returns -ERR_WOULD_BLOCK.
- *   T3  empty-ring back-pressure: try_pop returns -ERR_WOULD_BLOCK.
- *   T4  shape immutability: create with fs=64 fc=8, then open with
- *       a mismatching shape — second open fails with -ERR_ALREADY_EXISTS.
- *   T5  SPSC enforcement: second WRITER open with same role
- *       returns -ERR_BUSY.
- *   T6  cross-cabin push/pop: child reader drains parent writer's
- *       output. Verifies user-VA-shared header + slot region.
- *   T7  peer-death: child writer pushes 4 frames then exits. Parent
- *       reader drains 4 frames OK, 5th pop returns -ERR_STREAM_CLOSED.
- *   T8  block writer / wake on pop: ring depth 4, parent writer pushes
- *       4, then pushes 1 more (block). Child reader pops 1 → parent
- *       wakes, 5th push completes.
- *   T9  pop timeout: empty ring + brook_pop_timeout(100 ms) →
- *       -ERR_TIMEOUT (no writer attached → END_OF_FILE actually fires
- *       on the second-best ordering — we test with writer alive).
- *
- * Markers follow the stress_matrix.sh aggregator: `[BR N] PASS/FAIL`.
- */
 
 #include "box/brook.h"
 #include "box/memory.h"
@@ -62,9 +36,9 @@ static void wait_ms(uint32_t ms)
 #define TAG_STREAM   "brook:test:stream"
 
 #define ROLE_MAGIC          0xBA
-#define ROLE_CHILD_READER   1   /* child opens reader for TAG_CROSS, drains, exits */
-#define ROLE_CHILD_EOF_WR   2   /* child opens writer for TAG_EOF, pushes 4 + exits */
-#define ROLE_CHILD_DRAIN    3   /* child opens reader for TAG_BLOCK, drains 1 frame after wait_ms(50), exits */
+#define ROLE_CHILD_READER   1
+#define ROLE_CHILD_EOF_WR   2
+#define ROLE_CHILD_DRAIN    3
 
 static int g_passed = 0;
 static int g_total  = 0;
@@ -93,14 +67,12 @@ static int wait_child_exit(uint32_t child_pid)
     return -1;
 }
 
-/* ─────────────────────────── child roles ───────────────────────── */
 
 static void role_child_reader(void)
 {
     Brook *b = brook_open(TAG_CROSS, 0, 0, BROOK_READER);
     if (!b) { kdbg_print("[BR C-rd] open FAIL"); exit(1); }
 
-    /* Expect 32 frames of [u32 idx][u32 magic=0xDEADBEEF]. */
     uint8_t frame[8];
     for (int i = 0; i < 32; i++) {
         int rc = brook_pop(b, frame);
@@ -135,21 +107,18 @@ static void role_child_drain(void)
 {
     Brook *b = brook_open(TAG_BLOCK, 0, 0, BROOK_READER);
     if (!b) { kdbg_print("[BR C-dr] open FAIL"); exit(1); }
-    wait_ms(80);                            /* let parent block on push */
+    wait_ms(80);
     uint8_t frame[8];
-    int rc = brook_pop(b, frame);           /* free one slot */
+    int rc = brook_pop(b, frame);
     if (rc != 0) { kdbg_print("[BR C-dr] pop FAIL"); brook_release(b); exit(2); }
-    /* Drain rest so parent's release/destroy is clean. */
     while (brook_try_pop(b, frame) == 0) {}
     brook_release(b);
     exit(0);
 }
 
-/* ────────────────────────── parent tests ───────────────────────── */
 
 static void run_parent_tests(void)
 {
-    /* T1 — basic SPSC same-proc round trip. */
     {
         Brook *w = brook_open(TAG_BASIC, 32, 64, BROOK_WRITER | BROOK_CREATE);
         Brook *r = brook_open(TAG_BASIC, 32, 64, BROOK_READER);
@@ -172,7 +141,6 @@ static void run_parent_tests(void)
         }
     }
 
-    /* T2 — try_push fills ring then blocks. */
     {
         Brook *w = brook_open(TAG_FULL, 16, 4, BROOK_WRITER | BROOK_CREATE);
         Brook *r = brook_open(TAG_FULL, 16, 4, BROOK_READER);
@@ -189,7 +157,6 @@ static void run_parent_tests(void)
         }
     }
 
-    /* T3 — try_pop on empty. */
     {
         Brook *w = brook_open(TAG_EMPTY, 8, 4, BROOK_WRITER | BROOK_CREATE);
         Brook *r = brook_open(TAG_EMPTY, 8, 4, BROOK_READER);
@@ -203,12 +170,10 @@ static void run_parent_tests(void)
         }
     }
 
-    /* T4 — shape mismatch rejected. */
     {
         Brook *w = brook_open(TAG_SHAPE, 64, 8, BROOK_WRITER | BROOK_CREATE);
         if (!w) { fail(4, "create"); }
         else {
-            /* Second opener with different frame_size — must fail. */
             Brook *bad = brook_open(TAG_SHAPE, 128, 8, BROOK_READER);
             if (bad) { fail(4, "shape mismatch should fail"); brook_release(bad); }
             else pass(4);
@@ -216,7 +181,6 @@ static void run_parent_tests(void)
         }
     }
 
-    /* T5 — SPSC second writer rejected. */
     {
         Brook *w1 = brook_open(TAG_BUSY, 8, 4, BROOK_WRITER | BROOK_CREATE);
         if (!w1) { fail(5, "first writer"); }
@@ -228,7 +192,6 @@ static void run_parent_tests(void)
         }
     }
 
-    /* T6 — cross-cabin: parent writes, child reads. */
     {
         Brook *w = brook_open(TAG_CROSS, 8, 64, BROOK_WRITER | BROOK_CREATE);
         if (!w) { fail(6, "create writer"); }
@@ -251,8 +214,6 @@ static void run_parent_tests(void)
         }
     }
 
-    /* T7 — peer-death EOF: child writer pushes 4 + exits, parent
-     * reader drains 4 OK then receives END_OF_FILE. */
     {
         Brook *r = brook_open(TAG_EOF, 16, 8, BROOK_READER | BROOK_CREATE);
         if (!r) { fail(7, "create reader"); }
@@ -268,7 +229,6 @@ static void run_parent_tests(void)
                         if (frame[j] != (uint8_t)(0x10 + i)) ok = 0;
                     }
                 }
-                /* Wait for child exit, then expect EOF. */
                 wait_child_exit((uint32_t)child);
                 int rc = brook_pop(r, frame);
                 brook_release(r);
@@ -278,9 +238,6 @@ static void run_parent_tests(void)
         }
     }
 
-    /* T8 — block writer, wake on pop. Parent fills ring (4), pushes
-     * 5th (blocks). Child waits 80 ms then pops 1. Parent's push
-     * completes. */
     {
         Brook *w = brook_open(TAG_BLOCK, 8, 4, BROOK_WRITER | BROOK_CREATE);
         if (!w) { fail(8, "create writer"); }
@@ -290,13 +247,10 @@ static void run_parent_tests(void)
             else {
                 int ok = 1;
                 uint8_t f[8] = {0};
-                /* Wait a bit so child opens its reader. */
                 wait_ms(20);
-                /* Fill 4 slots. */
                 for (int i = 0; i < 4 && ok; i++) {
                     if (brook_push(w, f) != 0) ok = 0;
                 }
-                /* 5th push must block until child pops one. */
                 if (ok) {
                     int rc = brook_push(w, f);
                     if (rc != 0) ok = 0;
@@ -308,7 +262,6 @@ static void run_parent_tests(void)
         }
     }
 
-    /* T9 — pop timeout: open reader + writer; reader times out 100 ms. */
     {
         Brook *w = brook_open(TAG_TIMEOUT, 8, 4, BROOK_WRITER | BROOK_CREATE);
         Brook *r = brook_open(TAG_TIMEOUT, 8, 4, BROOK_READER);
@@ -325,13 +278,6 @@ static void run_parent_tests(void)
         }
     }
 
-    /* T10 — FROZEN protocol race-elimination. After reader's EOF
-     * decision (CAS writer_alive 0→FROZEN), the session is terminal
-     * and any new writer attach on the same tag MUST fail with
-     * -ERR_INVALID_STATE — proving the re-attach race is closed at
-     * the kernel level (CAS contention has exclusive outcome).
-     *
-     * In-process to avoid cross-tag child-role dependencies. */
     {
         Brook *r = brook_open(TAG_FROZEN, 8, 4, BROOK_READER | BROOK_CREATE);
         Brook *w1 = brook_open(TAG_FROZEN, 8, 4, BROOK_WRITER);
@@ -342,7 +288,6 @@ static void run_parent_tests(void)
         } else {
             int ok = 1;
 
-            /* Writer 1 pushes 2 frames then releases. */
             uint8_t frame[8];
             memset(frame, 0xC1, sizeof(frame));
             if (brook_push(w1, frame) != 0) ok = 0;
@@ -350,21 +295,17 @@ static void run_parent_tests(void)
             if (brook_push(w1, frame) != 0) ok = 0;
             brook_release(w1);
 
-            /* Reader drains 2 frames OK. */
             if (ok && brook_pop(r, frame) != 0) ok = 0;
             else if (ok && frame[0] != 0xC1)    ok = 0;
             if (ok && brook_pop(r, frame) != 0) ok = 0;
             else if (ok && frame[0] != 0xC2)    ok = 0;
 
-            /* Reader's next pop sees empty + writer_alive=0 +
-             * ever_attached=1 → CAS-freezes the session and returns EOF. */
             if (ok && brook_pop(r, frame) != -ERR_STREAM_CLOSED) ok = 0;
 
-            /* Race-closure check: new writer attach MUST fail. */
             Brook *w2 = brook_open(TAG_FROZEN, 8, 4, BROOK_WRITER);
             if (w2 != 0) {
                 brook_release(w2);
-                ok = 0;  /* Frozen session let a new writer in — race! */
+                ok = 0;
             }
 
             brook_release(r);
@@ -373,10 +314,6 @@ static void run_parent_tests(void)
         }
     }
 
-    /* T11 — STREAM mode: writer leaves and a NEW writer attaches on the
-     * same tag; reader (opened with BROOK_STREAM) drains both writers'
-     * frames without seeing EOF in between. Tests the opt-in streaming
-     * semantic for daemons that legitimately swap writers. */
     {
         Brook *r = brook_open(TAG_STREAM, 8, 8,
                               BROOK_READER | BROOK_CREATE | BROOK_STREAM);
@@ -385,7 +322,6 @@ static void run_parent_tests(void)
             int ok = 1;
             uint8_t frame[8];
 
-            /* Writer 1: attach, push 1 frame, release. */
             Brook *w1 = brook_open(TAG_STREAM, 8, 8,
                                    BROOK_WRITER | BROOK_STREAM);
             if (!w1) ok = 0;
@@ -395,10 +331,6 @@ static void run_parent_tests(void)
                 brook_release(w1);
             }
 
-            /* Writer 2: SAME tag, re-attach after writer 1 released. In
-             * single-session mode reader would have FROZEN the session
-             * here (BT10); with BROOK_STREAM the reader has NOT frozen
-             * and writer 2 attach succeeds. */
             Brook *w2 = brook_open(TAG_STREAM, 8, 8,
                                    BROOK_WRITER | BROOK_STREAM);
             if (!w2) ok = 0;
@@ -408,8 +340,6 @@ static void run_parent_tests(void)
                 brook_release(w2);
             }
 
-            /* Drain both frames. With STREAM mode the reader does NOT
-             * return EOF between writer transitions. */
             if (ok) {
                 uint8_t f[8];
                 if (brook_pop_timeout(r, f, 500) != 0) ok = 0;
@@ -431,7 +361,6 @@ static void run_parent_tests(void)
 
 int main(void)
 {
-    /* Children receive role byte via the first Pocket from the parent. */
     {
         Result r;
         for (int attempt = 0; attempt < 2; attempt++) {
@@ -445,7 +374,7 @@ int main(void)
                     case ROLE_CHILD_DRAIN:     role_child_drain();      break;
                     default: exit(255);
                     }
-                    exit(0);   /* defensive — role_* call exit() internally */
+                    exit(0);
                 }
             }
         }

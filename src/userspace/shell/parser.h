@@ -5,4 +5,4 @@
 
 int ParserParse(const char *input, ParsedCommand *cmd);
 
-#endif /* PARSER_H */
+#endif

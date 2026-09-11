@@ -4,96 +4,28 @@
 #include "ata.h"
 #include "error.h"
 
-/* ===========================================================================
- *  ATA / BMIDE async submit + IRQ-driven completion
- *
- *  This is the "real-HW" path for legacy PATA: every disk transfer is issued
- *  as a Bus-Master IDE DMA command and completes via the channel's INTRQ
- *  (BMISR.IRQ + drive STATUS read), never by polling the device. Bottom-half
- *  work (memcpy of read data into the caller buffer, the error report) runs
- *  on the waiting caller, which claims the channel's `landing` slot the IRQ
- *  stamped (no kmalloc / sleeping locks from IRQ).
- *
- *  Channel model: PATA is master/slave on a single bus, so only one command
- *  can be in flight per channel at any time. Submits past that point are
- *  linked onto a per-channel FIFO and dispatched in order by the completion
- *  bottom-half. The two channels run independently.
- *
- *  Backing primitives:
- *    - BMIDE register file        (Intel BMIDE Spec Rev 1.0 §3)
- *    - One pre-allocated DMA32     staging page per channel (4 KB, 8 sectors)
- *    - One PRD entry per command   (PRD table page-aligned, BSS)
- *    - One `landing` slot per channel (the completion, never dropped)
- *
- *  Init order:
- *    ata_init -> ata_discover_channels -> ata_async_init()
- *                  -> per-channel BMIDE bring-up
- *                  -> irq_register_handler + irqchip_enable_irq
- *                  -> clear nIEN on each present drive
- *                ata_identify  -> ata_async_negotiate_dma_mode()
- * =========================================================================*/
 
-/* Maximum sectors per submit — one 4 KB DMA staging page per channel. */
 #define ATA_ASYNC_MAX_SECTORS 8
 
-/* Initialise async DMA engine + IRQ wiring for every BMIDE-capable channel.
- * Idempotent. Called once from ata_init after channel discovery and per-
- * channel BMIDE register-file probe. When called pre-multicore (single-core
- * boot, init paths) the IRQ side stays armed but the sync wrapper detects
- * the IRQ path is not viable and routes to the polled fallback. */
 void ata_async_init(void);
 
-/* Per-drive DMA-mode negotiation (SET FEATURES 0xEF/0x03). Walks UDMA 6..0
- * then MDMA 2..0, stops on the first the drive accepts. Called from
- * ata_identify after PIO mode is set so the DMA-fast-path gate
- * (ata_async_usable) flips true on success. */
 void ata_async_negotiate_dma_mode(uint8_t drive_idx, const uint16_t *id);
 
-/* True when both controller-side BMIDE and the drive's IDENTIFY advertise
- * DMA, AND the channel finished ata_async_init successfully. */
 bool ata_async_usable(uint8_t drive_idx);
 
-/* Sync wrapper — submit then wait on the cmd's done flag with IF=1 (the
- * IRQ stamps `landing`, the waiter claims it and runs the bottom half). `count`
- * must be in 1..8 (one 4 KB staging page). Returns 0 on success
- * or negative ATA_ERR_*. Safe to call from kernel context when the
- * caller is NOT a K-Core that other code expects to keep pumping
- * (init/mount paths, sync legacy callers). Internally short-circuits to
- * the polled BMIDE engine while the IRQ path is not viable. */
 int ata_dma_sync(uint8_t drive_idx, uint64_t lba, uint16_t count,
                  bool is_write, void *buf);
 
-/* BMIDE completion watchdog — a safety BACKSTOP, not the delivery path. Glanced
- * at once per PIT tick on the BSP (idt.c), mutually exclusive with the BMIDE
- * IRQ handler (both need the channel's irqsave cmd_lock). Recovers, purely by
- * hardware event, the failure modes a lost/misrouted legacy IDE INTRQ leaves
- * behind: a latched-but-undelivered interrupt (TIER 1, reconciled inline via
- * the same `landing` seam the IRQ uses), an engine that quit or a device that
- * vanished with no interrupt at all, and — only for a DMA engine frozen with
- * ACTIVE stuck (the one software-unobservable case) — a liveness-of-last-resort
- * bound (TIER 2). A genuine wedge is failed ERR_IO + SRST-recovered on a K-Core
- * (never-drop), so a lost completion can never hang a BMIDE sync waiter forever.
- * No-op unless multi-core BMIDE async I/O is actually in flight. */
 void bmide_watchdog_scan(void);
 
-/* Boot self-test — proves the watchdog's TIER-1 lost-INTRQ reconcile on the
- * real BMIDE engine by masking a channel's IOAPIC pin so a genuine completion
- * latches BMISR.IRQ with no CPU IRQ, then confirming the scan retires it.
- * Read-only, bounded, multi-core + BMIDE only (skips gracefully otherwise).
- * Emits "[BMIDE-WD] TIER-1 ... PASS/FAIL" for the phase matrix to assert. */
 error_t bmide_watchdog_selftest(void);
 
-/* On-demand diagnostic (WEDGETEST=on only) — drives a synthetic wedge through
- * the real scan -> K-Core SRST recovery worker and asserts the wedged cmd fails
- * ERR_IO + the channel comes back. SRSTs the boot drive, so it is NOT part of a
- * normal boot. Emits "[BMIDE-WD] TIER-2 ... PASS/FAIL". */
 error_t bmide_wedge_selftest(void);
 
-/* Stats accessors (boot/diag prints, debug commands). */
 uint64_t ata_async_cmds_submitted(uint8_t channel);
 uint64_t ata_async_cmds_completed(uint8_t channel);
 uint64_t ata_async_cmds_failed(uint8_t channel);
 uint64_t ata_async_spurious_irqs(uint8_t channel);
 uint32_t ata_async_queue_depth(uint8_t channel);
 
-#endif /* ATA_ASYNC_H */
+#endif

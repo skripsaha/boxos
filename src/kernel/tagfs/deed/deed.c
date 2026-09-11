@@ -4,12 +4,6 @@
 #include "klib.h"
 #include "error.h"
 
-/*
- * How much of the ground a Deed occupies, and the eight bytes that say it is
- * one, both come from the pen (src/include/deed_pen.h) — the same numbers the
- * host tool writes with. A reader and a writer that spell the format twice are
- * a format that will disagree with itself.
- */
 #define DEED_SECTORS  DEED_PEN_SECTORS
 #define DEED_BYTES    DEED_PEN_BYTES
 
@@ -22,14 +16,6 @@ static const char *deed_role_name(uint32_t role)
     }
 }
 
-/*
- * Everything that can be checked without knowing what the ground is for.
- *
- * The order matters: nothing is trusted until the checksum has passed, so the
- * only fields read before it are the ones needed to know how much to sum.
- * Those are bounded first, which is what stops a Deed with a stated length of
- * sixty thousand from being summed over memory it does not own.
- */
 static error_t deed_validate(uint8_t seat, uint64_t at_sector,
                              const uint8_t *raw, uint32_t raw_bytes,
                              uint32_t want_role, DeedCopy *out)
@@ -39,12 +25,6 @@ static error_t deed_validate(uint8_t seat, uint64_t at_sector,
     VolumeDeed deed;
     memcpy(&deed, raw, sizeof(deed));
 
-    /* Silent. "There is no deed at this sector" is the ordinary answer for
-     * any ground that has not been made into a volume, and the caller knows
-     * whether that is worth a line — a ground claimed for BoxOS with nothing
-     * on it is news, a bare medium being looked at is not. Every OTHER refusal
-     * below speaks, because each of those is a deed that is present and
-     * wrong. */
     if (!DeedPenMagicIsHere(raw)) {
         return ERR_FILE_NOT_FOUND;
     }
@@ -59,10 +39,6 @@ static error_t deed_validate(uint8_t seat, uint64_t at_sector,
         return ERR_INVALID_ARGUMENT;
     }
 
-    /* The checksum covers the prologue with its own field zeroed, then exactly
-     * the stamps — so it is taken over what the deed says it is, never over
-     * the padding that follows it to the end of the sector. Summed from a copy
-     * so the buffer still holds what the medium holds. */
     uint32_t summed_bytes = (uint32_t)deed.prologue_bytes + deed.stamp_bytes;
     uint8_t *probe = (uint8_t *)kmalloc(summed_bytes);
     if (!probe) return ERR_NO_MEMORY;
@@ -123,16 +99,6 @@ error_t DeedReadHead(uint8_t seat, const MediumGround *ground, DeedCopy *out)
                               VOLUME_DEED_ROLE_HEAD, out);
     if (rc != OK) return rc;
 
-    /*
-     * The volume claims a length; the ground it was handed has one. A volume
-     * longer than its ground is an image copied short — the case that mounts
-     * happily today and then reads into somebody else's partition, or off the
-     * end of the medium entirely.
-     *
-     * A volume SHORTER than its ground is not an error: a partition may have
-     * been made larger than the volume that was put in it, and the volume
-     * simply does not use the rest.
-     */
     if (out->head.sectors > ground->sectors) {
         kprintf("[Deed] seat %u: the volume claims %llu sectors and the ground "
                 "it stands on has %llu — this is not all of it\n",
@@ -164,8 +130,6 @@ error_t DeedReadTail(uint8_t seat, const MediumGround *ground,
     error_t rc = deed_read_at(seat, at, VOLUME_DEED_ROLE_TAIL, out);
     if (rc != OK) return rc;
 
-    /* Two copies of one volume have to be the same volume. Anything else is
-     * two volumes overlapping, which is worse than either being damaged. */
     if (memcmp(out->head.uuid, head->head.uuid, 16) != 0) {
         kprintf("[Deed] seat %u: the copy at the far end belongs to a "
                 "different volume than the one at the near end\n", seat);
@@ -173,18 +137,6 @@ error_t DeedReadTail(uint8_t seat, const MediumGround *ground,
         return ERR_CORRUPTED;
     }
 
-    /* ‼ THE SAME VOLUME, DISAGREEING ABOUT ITS OWN LENGTH, IS A DIFFERENT
-     * PIECE OF NEWS — and until volumes could grow it could not happen, so
-     * both cases shared one line that named the wrong thing.
-     *
-     * A volume takes the ground behind it by writing the far copy first and
-     * the head second (tagfs.c: volume_take_more_ground). Lose power between
-     * the two and this is exactly what is left: one volume, two lengths, the
-     * newer one at the far end. The head is what the machine stands on, so the
-     * volume is its old size and whole — and the growth will be attempted
-     * again on this very mount, from the head's numbers. Nothing is lost and
-     * nothing needs repairing; it is said because a machine that goes quiet
-     * about a half-finished write is a machine nobody can trust. */
     if (out->head.sectors != head->head.sectors) {
         kprintf("[Deed] seat %u: the copy at the far end says %llu sectors and "
                 "the one at the near end says %llu — the same volume, caught "
@@ -205,10 +157,6 @@ error_t DeedReadTailAlone(uint8_t seat, const MediumGround *ground,
     if (!ground || !out) return ERR_INVALID_ARGUMENT;
     memset(out, 0, sizeof(*out));
 
-    /* The last whole DEED_SECTORS-aligned block of the ground — where a volume
-     * that fills its ground puts its far copy. A volume shorter than the
-     * partition it was given does not have its tail here, and this says so by
-     * finding nothing rather than by reading something else. */
     uint64_t blocks = ground->sectors / DEED_SECTORS;
     if (blocks == 0) return ERR_INVALID_ARGUMENT;
 
@@ -248,8 +196,6 @@ const void *DeedStamp(const DeedCopy *copy, uint16_t kind, uint16_t *out_bytes)
 
         uint32_t payload = s.bytes;
         if (payload > left - sizeof(VolumeStamp)) {
-            /* A stamp that claims more than remains ends the walk. Said once,
-             * here, rather than by every caller that goes looking. */
             kprintf("[Deed] a stamp of kind %u claims %u bytes with %u left — "
                     "the rest of this deed is not read\n",
                     s.kind, s.bytes, (unsigned)(left - sizeof(VolumeStamp)));
@@ -261,8 +207,6 @@ const void *DeedStamp(const DeedCopy *copy, uint16_t kind, uint16_t *out_bytes)
             return p + sizeof(VolumeStamp);
         }
 
-        /* The next stamp starts at the next four-byte boundary after this
-         * one's payload — the same rule the Boarding Pass walks by. */
         uint32_t step = sizeof(VolumeStamp) + payload;
         step = (step + 3u) & ~3u;
         if (step > left) return NULL;
@@ -319,19 +263,6 @@ void DeedSurveyAll(uint8_t standing_seat, uint64_t standing_start)
         uint8_t claimed = GroundSurvey(seat, ground, GROUND_MAX_PER_MEDIUM);
 
         for (uint8_t g = 0; g < claimed; g++) {
-            /*
-             * The ground this machine is already standing on.
-             *
-             * Its deed was read, checked against the copy at the far end and
-             * described by whoever mounted it, seconds before this ran. Reading
-             * it again establishes nothing and costs two more reads of the
-             * medium — on a flash drive, two more transfers over the bus — and
-             * it printed the same three lines a second time, which is how a log
-             * teaches the person reading it to stop looking.
-             *
-             * Named rather than skipped in silence: a survey that leaves a
-             * ground out without saying so is a survey nobody can count.
-             */
             if (seat == standing_seat &&
                 ground[g].start_sector == standing_start) {
                 kprintf("[Deed] seat %u ground %u carries the volume this "
@@ -342,10 +273,6 @@ void DeedSurveyAll(uint8_t standing_seat, uint64_t standing_start)
             DeedCopy head;
             bool from_tail = false;
             if (DeedReadHead(seat, &ground[g], &head) != OK) {
-                /* Ask the far end before reporting nothing. A survey that only
-                 * ever looks at the head says "no deed here" about a volume
-                 * that has one and is mounted off it — which is the survey
-                 * lying about the very case the second copy exists for. */
                 if (DeedReadTailAlone(seat, &ground[g], &head) != OK) {
                     kprintf("[Deed] seat %u ground %u is claimed for BoxOS and "
                             "carries no deed this kernel can read\n", seat, g);
@@ -356,9 +283,6 @@ void DeedSurveyAll(uint8_t standing_seat, uint64_t standing_start)
 
             DeedDescribe(seat, &head);
 
-            /* And whether the whole of it is there. A volume with only a head
-             * still mounts — a medium may have lost its tail — but it is a
-             * volume with no second opinion left, and that is worth a line. */
             DeedCopy tail;
             if (from_tail) {
                 kprintf("[Deed] seat %u: this volume's head is gone and its "

@@ -5,29 +5,8 @@
 #include "vmm.h"
 #include "touch.h"
 
-/* PCI config space access is two stages:
- *   outl(0xCF8, addr); inl/outl(0xCFC, ...);
- * If two cores interleave, one's `inl` can read using the other's `outl` of
- * 0xCF8 and return data from a different (bus,dev,fn,off). Currently config
- * cycles only run during boot (BSP) and during driver init, but the lock
- * makes the API safe to call from any core / any time. */
 static spinlock_t g_pci_cfg_lock = {0};
 
-/* ============================================================
- * ECAM (PCI Express Enhanced Configuration Access Mechanism)
- *
- * The PCI Firmware Specification 3.0 §4.1.2 fixes the per-device
- * address layout in the MCFG MMIO region:
- *
- *   ecam_phys(seg, bus, dev, fn, off) =
- *       segments[seg].base
- *       + ((bus - segments[seg].start_bus) << 20)
- *       + (dev << 15) + (fn << 12) + off
- *
- * A 256 MB window covers one full PCI segment (256 buses × 32 devices
- * × 8 functions × 4 KB). MCFG can publish multiple segments; we cache
- * the virtual mapping of each on pci_init().
- * ============================================================ */
 typedef struct {
     uint16_t segment;
     uint8_t  start_bus;
@@ -112,11 +91,6 @@ void pci_ecam_write_byte(uint16_t segment, uint8_t bus, uint8_t device,
     pci_ecam_write_dword(segment, bus, device, function, aligned_off, dword);
 }
 
-/* Map every MCFG segment that ACPI told us about. We map the full
- * (end_bus - start_bus + 1) * 1 MiB range as UC MMIO. On boards with
- * gargantuan segments (256 buses = 256 MB), that's still a one-off
- * VA cost — the mapping lives for the kernel lifetime, like the
- * other PCIe-class MMIO regions. */
 static void pci_ecam_init(void) {
     g_ecam_count = 0;
     const acpi_mcfg_info_t* mcfg = acpi_get_mcfg();
@@ -161,7 +135,6 @@ static inline uint32_t pci_build_address(uint8_t bus, uint8_t device, uint8_t fu
 }
 
 uint32_t pci_config_read_dword(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset) {
-    /* Fast path: ECAM for segment 0 when available. */
     volatile uint8_t* p = ecam_locate(0, bus, device, function,
                                       (uint16_t)(offset & 0xFCu));
     if (p) return *(volatile uint32_t *)p;
@@ -219,11 +192,6 @@ void pci_config_write_byte(uint8_t bus, uint8_t device, uint8_t function, uint8_
     pci_config_write_dword(bus, device, function, aligned_offset, dword);
 }
 
-/* Recursive bus scan with cycle guard: a malformed or virtualised bridge
- * graph can advertise the same secondary bus from two different bridges,
- * or even point back at an already-visited bus, sending plain recursion
- * into an infinite loop and overflowing the kernel stack. The visited
- * bitmap (256 bits = 32 bytes) costs nothing and guarantees termination. */
 static void pci_visited_clear(uint64_t visited[4]) {
     visited[0] = visited[1] = visited[2] = visited[3] = 0;
 }
@@ -231,7 +199,7 @@ static void pci_visited_clear(uint64_t visited[4]) {
 static bool pci_visited_test_set(uint64_t visited[4], uint8_t bus) {
     uint64_t mask = 1ULL << (bus & 63);
     uint64_t *slot = &visited[bus >> 6];
-    if (*slot & mask) return true;   /* already visited */
+    if (*slot & mask) return true;
     *slot |= mask;
     return false;
 }
@@ -277,11 +245,6 @@ static int pci_scan_bus_impl(uint8_t bus, uint8_t class_code, uint8_t subclass,
                 out->revision_id = pci_config_read_byte(bus, device, function, PCI_REVISION_ID);
                 out->header_type = header_type & PCI_HEADER_TYPE_MASK;
 
-                /* Matches before the one asked for are walked past rather than
-                 * returned. A machine may hold several devices of one class —
-                 * two xHCI controllers, say, one on the chipset and one on a
-                 * graphics card — and "the first one found" names none of them
-                 * in particular. */
                 if (skip && *skip > 0) {
                     (*skip)--;
                 } else
@@ -289,7 +252,6 @@ static int pci_scan_bus_impl(uint8_t bus, uint8_t class_code, uint8_t subclass,
                 return 0;
             }
 
-            // Recurse into PCI-to-PCI bridges to find devices behind them
             if ((header_type & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_BRIDGE) {
                 uint8_t secondary_bus = pci_config_read_byte(bus, device, function,
                                                               PCI_BRIDGE_SECONDARY_BUS);
@@ -305,7 +267,6 @@ static int pci_scan_bus_impl(uint8_t bus, uint8_t class_code, uint8_t subclass,
                 }
             }
 
-            // Single-function device: skip remaining functions
             if ((header_type & PCI_HEADER_TYPE_MF) == 0 && function == 0) {
                 break;
             }
@@ -327,7 +288,6 @@ int pci_find_nth_by_class(uint8_t class_code, uint8_t subclass, uint8_t prog_if,
     }
     uint32_t skip = index;
 
-    // Check if host bridge is multi-function (multiple PCI domains)
     uint8_t host_header = pci_config_read_byte(0, 0, 0, PCI_HEADER_TYPE);
 
     uint64_t visited[4];
@@ -376,10 +336,10 @@ uint32_t pci_read_bar(pci_device_t* device, uint8_t bar_num) {
     uint32_t bar_value = pci_config_read_dword(device->bus, device->device, device->function, bar_offset);
 
     if (bar_value & 0x01) {
-        return bar_value & 0xFFFFFFFC;  // I/O space
+        return bar_value & 0xFFFFFFFC;
     }
 
-    return bar_value & 0xFFFFFFF0;      // MMIO (32-bit portion only)
+    return bar_value & 0xFFFFFFF0;
 }
 
 uint64_t pci_read_bar64(pci_device_t* device, uint8_t bar_num) {
@@ -391,12 +351,10 @@ uint64_t pci_read_bar64(pci_device_t* device, uint8_t bar_num) {
     uint32_t bar_low = pci_config_read_dword(device->bus, device->device,
                                               device->function, bar_offset);
 
-    // I/O space BAR
     if (bar_low & 0x01) {
         return (uint64_t)(bar_low & 0xFFFFFFFC);
     }
 
-    // MMIO BAR: check type field (bits [2:1])
     uint8_t bar_type = (bar_low >> 1) & 0x03;
 
     if (bar_type == PCI_BAR_TYPE_64BIT) {
@@ -413,30 +371,9 @@ uint64_t pci_read_bar64(pci_device_t* device, uint8_t bar_num) {
         return addr;
     }
 
-    // 32-bit MMIO BAR
     return (uint64_t)(bar_low & 0xFFFFFFF0);
 }
 
-/*
- * pci_bar_size — how large is the window this BAR decodes?
- *
- * The device answers the question itself. Write all ones into the BAR and read
- * it back: every address bit the device does not decode reads back as zero, so
- * the size is the complement of what remains, plus one. This is the only way
- * to learn the extent — nothing in configuration space states it outright, and
- * a driver that instead deduces the extent from offsets the device published
- * (RTSOFF, a port count) is deducing a lower bound and calling it a size.
- * BoxOS paid for that once already: an xHCI controller whose extended
- * capabilities sat past the deduced end was a kernel page fault waiting for
- * the right motherboard.
- *
- * Memory decode is turned off around the probe. While the all-ones value sits
- * in the BAR the device claims a window it does not own, and a bus access that
- * lands there in the meantime reaches the wrong device.
- *
- * Returns 0 for an unimplemented BAR, an I/O-space BAR, or a device that
- * decodes nothing.
- */
 uint64_t pci_bar_size(pci_device_t* device, uint8_t bar_num) {
     if (!device || bar_num > 5) {
         return 0;
@@ -447,15 +384,15 @@ uint64_t pci_bar_size(pci_device_t* device, uint8_t bar_num) {
                                              device->function, off);
 
     if (orig_lo == 0xFFFFFFFFu || orig_lo == 0) {
-        return 0;                       /* unimplemented */
+        return 0;
     }
     if (orig_lo & 0x01u) {
-        return 0;                       /* I/O space — callers here want MMIO */
+        return 0;
     }
 
     bool is64 = (((orig_lo >> 1) & 0x03u) == PCI_BAR_TYPE_64BIT);
     if (is64 && bar_num >= 5) {
-        return 0;                       /* claims 64-bit with no upper half */
+        return 0;
     }
 
     uint8_t off_hi = (uint8_t)(off + 4);
@@ -488,7 +425,6 @@ uint64_t pci_bar_size(pci_device_t* device, uint8_t bar_num) {
     pci_config_write_word(device->bus, device->device, device->function,
                           PCI_COMMAND, cmd);
 
-    /* The low four bits are the BAR's type field, not address bits. */
     uint64_t mask = ((uint64_t)mask_hi << 32) | (uint64_t)(mask_lo & 0xFFFFFFF0u);
     if (!is64) {
         mask |= 0xFFFFFFFF00000000ULL;
@@ -500,9 +436,6 @@ uint64_t pci_bar_size(pci_device_t* device, uint8_t bar_num) {
     return ~mask + 1ULL;
 }
 
-/* ============================================================
- * Capability list walkers
- * ============================================================ */
 
 uint8_t pci_find_capability(uint8_t bus, uint8_t device, uint8_t function,
                              uint8_t cap_id) {
@@ -511,8 +444,6 @@ uint8_t pci_find_capability(uint8_t bus, uint8_t device, uint8_t function,
 
     uint8_t off = pci_config_read_byte(bus, device, function, PCI_CAP_LIST_PTR);
     off &= 0xFCu;
-    /* PCI 3.0 §6.7: cap pointer points into 0x40..0xFC. Bound the walk
-     * so a malformed firmware can't drive us into a loop. */
     for (uint8_t hops = 0; off != 0 && hops < 64; hops++) {
         if (off < 0x40 || off > 0xFCu) return 0;
         uint8_t id   = pci_config_read_byte(bus, device, function, off);
@@ -528,9 +459,6 @@ uint8_t pci_find_capability(uint8_t bus, uint8_t device, uint8_t function,
 uint16_t pci_find_ext_capability(uint16_t segment, uint8_t bus, uint8_t device,
                                   uint8_t function, uint16_t cap_id) {
     if (!pci_has_ecam()) return 0;
-    /* PCIe Base §7.9: extended cap list starts at offset 0x100, every
-     * entry has 16-bit ID + 4-bit version + 12-bit next-ptr; ptr 0 ends
-     * the chain. The first DWORD at 0x100 == 0xFFFFFFFF means "no caps". */
     uint16_t off = 0x100;
     for (uint16_t hops = 0; off != 0 && hops < 256; hops++) {
         uint32_t hdr = pci_ecam_read_dword(segment, bus, device, function, off);
@@ -544,24 +472,12 @@ uint16_t pci_find_ext_capability(uint16_t segment, uint8_t bus, uint8_t device,
     return 0;
 }
 
-/* ============================================================
- * MSI / MSI-X programming
- *
- * Both use the standard Intel xAPIC "compatibility format":
- *   Message Address = 0xFEE_{dest:8}_0000 (bits 19:12 = dest APIC ID)
- *   Message Data    = vector | (delivery_mode << 8)  ; we use fixed=0.
- * MSI-X tables live in MMIO at (BAR.bir + offset); each entry is 16 bytes:
- *   +0   addr_lo
- *   +4   addr_hi
- *   +8   data
- *   +12  vector control (bit 0 = masked)
- * ============================================================ */
 
 static inline uint32_t msi_addr_lo(uint8_t dest_lapic_id) {
     return 0xFEE00000u | ((uint32_t)dest_lapic_id << 12);
 }
 static inline uint32_t msi_data(uint8_t vector) {
-    return (uint32_t)vector;       /* fixed delivery, edge, physical, no RH */
+    return (uint32_t)vector;
 }
 
 int pci_msi_enable(uint8_t bus, uint8_t device, uint8_t function,
@@ -569,7 +485,6 @@ int pci_msi_enable(uint8_t bus, uint8_t device, uint8_t function,
     uint8_t cap = pci_find_capability(bus, device, function, PCI_CAP_ID_MSI);
     if (cap == 0) return -1;
 
-    /* Mask INTx so the device cannot fire both at once. */
     uint16_t cmd = pci_config_read_word(bus, device, function, PCI_COMMAND);
     cmd |= PCI_CMD_INT_DISABLE;
     cmd |= PCI_CMD_BUS_MASTER;
@@ -589,9 +504,8 @@ int pci_msi_enable(uint8_t bus, uint8_t device, uint8_t function,
                                 (uint16_t)msi_data(vector));
     }
 
-    /* Allocate one vector (MMC stays 000 = 1 message), set enable bit 0. */
-    mc &= ~(uint16_t)0x70u;        /* MME=0 -> 1 vector */
-    mc |= 0x0001u;                  /* MSI enable */
+    mc &= ~(uint16_t)0x70u;
+    mc |= 0x0001u;
     pci_config_write_word(bus, device, function, (uint8_t)(cap + 2), mc);
     return 0;
 }
@@ -614,8 +528,6 @@ int pci_msix_enable_vector(uint8_t bus, uint8_t device, uint8_t function,
         return -2;
     }
 
-    /* The BAR Indicator Register sits in the low 3 bits; the rest is a
-     * dword-aligned byte offset into that BAR. */
     uint8_t bir = (uint8_t)(table_off & 0x7u);
     uint32_t off = table_off & ~0x7u;
 
@@ -628,8 +540,6 @@ int pci_msix_enable_vector(uint8_t bus, uint8_t device, uint8_t function,
         return -3;
     }
 
-    /* Map the table region — sized for declared entries × 16 bytes,
-     * rounded up to a page so DMA pages stay aligned. */
     size_t span = (size_t)table_sz * 16u;
     span = (span + 4095u) & ~(size_t)4095u;
     volatile uint8_t *table = (volatile uint8_t *)vmm_map_mmio(
@@ -641,26 +551,22 @@ int pci_msix_enable_vector(uint8_t bus, uint8_t device, uint8_t function,
     }
 
     volatile uint32_t *entry = (volatile uint32_t *)(table + table_index * 16u);
-    entry[0] = msi_addr_lo(dest_lapic_id);  /* addr lo */
-    entry[1] = 0;                            /* addr hi */
-    entry[2] = msi_data(vector);             /* data */
-    entry[3] = 0;                            /* vector control: unmasked */
+    entry[0] = msi_addr_lo(dest_lapic_id);
+    entry[1] = 0;
+    entry[2] = msi_data(vector);
+    entry[3] = 0;
 
-    /* Disable INTx, ensure bus-mastering, enable MSI-X. */
     uint16_t cmd = pci_config_read_word(bus, device, function, PCI_COMMAND);
     cmd |= PCI_CMD_INT_DISABLE;
     cmd |= PCI_CMD_BUS_MASTER;
     pci_config_write_word(bus, device, function, PCI_COMMAND, cmd);
 
-    mc |= 0x8000u;                          /* MSI-X enable */
-    mc &= ~(uint16_t)0x4000u;               /* function mask = 0 */
+    mc |= 0x8000u;
+    mc &= ~(uint16_t)0x4000u;
     pci_config_write_word(bus, device, function, (uint8_t)(cap + 2), mc);
     return 0;
 }
 
-/* Decode a PCIe Express capability (cap 0x10) to a one-line summary
- * — link width and current speed taken from the Link Status register
- * at cap+0x12. */
 static void log_pcie_link(uint16_t segment, uint8_t bus, uint8_t dev,
                           uint8_t fn, uint8_t cap_off) {
     uint16_t link_status = pci_config_read_word(bus, dev, fn,
@@ -680,7 +586,6 @@ static void log_pcie_link(uint16_t segment, uint8_t bus, uint8_t dev,
     debug_printf("[PCI]     PCIe link: x%u @ %s\n", width, speed);
 }
 
-/* Walk one (bus, dev, fn) — only valid if vendor != 0xFFFF. */
 static void enumerate_function(uint16_t segment, uint8_t bus, uint8_t dev,
                                 uint8_t fn, uint32_t* counter) {
     uint16_t vendor = pci_config_read_word(bus, dev, fn, PCI_VENDOR_ID);
@@ -694,11 +599,6 @@ static void enumerate_function(uint16_t segment, uint8_t bus, uint8_t dev,
     debug_printf("[PCI]   %04x:%02x:%02x.%x  %04x:%04x  class=%02x.%02x.%02x\n",
                  segment, bus, dev, fn, vendor, devid, cls, sub, prog);
 
-    /* Tag-driven driver discovery — every found function publishes
-     * a `pci:vendor:VVVV:DDDD` (specific match) tag AND a broader
-     * `pci:class:CC:SS:PP` tag. Drivers subscribe by either tag and
-     * wake up here, instead of registering match tables. Payload is
-     * the full coordinate tuple so the driver can talk back. */
     struct {
         uint16_t segment;
         uint8_t  bus, dev, fn;
@@ -706,8 +606,6 @@ static void enumerate_function(uint16_t segment, uint8_t bus, uint8_t dev,
         uint8_t  cls, sub, prog;
     } ev = { segment, bus, dev, fn, vendor, devid, cls, sub, prog };
 
-    /* Build vendor:device tag inline (no kmalloc, no snprintf — pure
-     * hex digits). Format: "pci:vendor:XXXX:XXXX\0" = 21 bytes. */
     static const char hex[] = "0123456789abcdef";
     char vt[24] = "pci:vendor:";
     vt[11] = hex[(vendor >> 12) & 0xF];
@@ -731,7 +629,6 @@ static void enumerate_function(uint16_t segment, uint8_t bus, uint8_t dev,
     ct[18] = '\0';
     TouchPublish(ct, &ev, sizeof(ev));
 
-    /* Capability list. */
     uint8_t msi_off  = pci_find_capability(bus, dev, fn, PCI_CAP_ID_MSI);
     uint8_t msix_off = pci_find_capability(bus, dev, fn, PCI_CAP_ID_MSIX);
     uint8_t pcie_off = pci_find_capability(bus, dev, fn, PCI_CAP_ID_PCIE);
@@ -744,7 +641,6 @@ static void enumerate_function(uint16_t segment, uint8_t bus, uint8_t dev,
     if (pcie_off) {
         log_pcie_link(segment, bus, dev, fn, pcie_off);
 
-        /* PCIe extended capability chain (ECAM-only). */
         uint16_t aer = pci_find_ext_capability(segment, bus, dev, fn,
                                                   PCI_EXT_CAP_ID_AER);
         uint16_t vc  = pci_find_ext_capability(segment, bus, dev, fn,
@@ -783,7 +679,6 @@ uint32_t pci_enumerate_ecam(void) {
 
                 enumerate_function(seg->segment, (uint8_t)b, d, 0, &total);
 
-                /* Multi-function device? Bit 7 of header type. */
                 uint8_t htype = pci_ecam_read_byte(seg->segment,
                                                      (uint8_t)b, d, 0,
                                                      PCI_HEADER_TYPE);
@@ -808,13 +703,7 @@ uint32_t pci_enumerate_ecam(void) {
 void pci_init(void) {
     debug_printf("[PCI] Initializing PCI subsystem...\n");
 
-    /* Set up ECAM mappings before any bus scan. After this, every
-     * pci_config_* call to segment 0 will go through MMIO instead of
-     * 0xCF8/0xCFC when an MCFG entry covers the bus. */
     pci_ecam_init();
-    /* Walk every PCIe function reachable via ECAM for log visibility
-     * and to populate the capability cache hot in the dcache before
-     * driver init touches the same registers. */
     pci_enumerate_ecam();
 
     pci_device_t ide_controller;

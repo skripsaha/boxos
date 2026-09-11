@@ -1,5 +1,3 @@
-// Baked 80-bit (x, MPFR-CR-ref) vectors for atan — GENERATED, do not edit.
-// {x mantissa, x se, ref mantissa, ref se}; se = sign<<15 | exp15.
 static const CrVec kAtanVec[] = {
 {0x0000000000000001ULL,0x0000u,0x0000000000000001ULL,0x0000u},
 {0x0000000000000001ULL,0x8000u,0x0000000000000001ULL,0x8000u},

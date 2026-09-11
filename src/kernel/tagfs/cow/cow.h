@@ -6,27 +6,17 @@
 #include "../tagfs_constants.h"
 #include "../../core/error/error.h"
 
-// CoW Snapshots with Tag-Based Queries
 
 #define COW_MAGIC           0x434F5753
 #define COW_VERSION         1
 
-// On-disk snapshot manifest
-#define COW_MANIFEST_MAGIC  0x434F564D   // "COVM"
-#define COW_MANIFEST_MAX    60           // fits in one 4096-byte TagFS block
+#define COW_MANIFEST_MAGIC  0x434F564D
+#define COW_MANIFEST_MAX    60
 
-// Snapshot flags
 #define COW_SNAP_READONLY   (1 << 0)
 #define COW_SNAP_AUTO       (1 << 1)
 #define COW_SNAP_TAG_QUERY  (1 << 2)
 
-/* In-memory snapshot record. The runtime fields after `tag_ids[8]`
- * track CoW redirects so SnapshotDelete can release OLD blocks that
- * were preserved for this snapshot's frozen view. They're per-session
- * only — on reboot they re-init empty (a cold-start snapshot can't free
- * OLD blocks the previous session redirected; fsck eventually catches
- * orphans). The on-disk record (CowSnapshotDisk) is the persistent
- * subset and unchanged. */
 typedef struct CowRedirect {
     uint32_t old_block;
     uint32_t new_block;
@@ -44,14 +34,12 @@ typedef struct __packed {
     uint8_t  flags;
     uint8_t  tag_count;
     uint16_t tag_ids[8];
-    /* runtime fields — not persisted */
     struct CowRedirect *redirects;
     uint32_t            redirect_count;
     uint32_t            redirect_cap;
     uint8_t             reserved[10];
 } CowSnapshot;
 
-// On-disk per-snapshot entry (68 bytes each)
 typedef struct __packed {
     uint32_t snapshot_id;
     uint32_t parent_file_id;
@@ -64,8 +52,6 @@ typedef struct __packed {
     uint64_t total_size;
 } CowSnapshotDisk;
 
-// On-disk manifest block (must fit in TAGFS_BLOCK_SIZE = 4096 bytes)
-// Header (8) + 60 * 68 = 4088; pad to 4096.
 typedef struct __packed {
     uint32_t        magic;
     uint32_t        count;
@@ -75,7 +61,6 @@ typedef struct __packed {
 
 STATIC_ASSERT(sizeof(CowManifest) == 4096, "CowManifest must be 4096 bytes");
 
-// STATIC_ASSERT(sizeof(CowSnapshot) == 128, "CowSnapshot_must_be_128_bytes");
 
 typedef struct {
     uint32_t magic;
@@ -91,7 +76,6 @@ typedef struct {
     bool initialized;
 } CowState;
 
-// Public API
 error_t TagFS_CowInit(void);
 void TagFS_CowShutdown(void);
 
@@ -110,13 +94,8 @@ void TagFS_CowGetStats(uint64_t *cow_writes, uint64_t *cow_copies,
 bool TagFS_CowIsActive(uint32_t file_id);
 uint64_t TagFS_CowGetCheckpoint(void);
 
-// Restore a single snapshot from persistent storage into the in-memory list.
-// Only called during mount from tagfs_init to replay the on-disk manifest.
 void TagFS_CowRestoreSnapshot(const CowSnapshot *snap);
 
-// Restore a single CoW redirect (old_block→new_block for a snapshot) at mount,
-// replayed from the DiskBook redirect log. Idempotent (de-duped); a redirect
-// for an unknown/deleted snapshot is safely ignored.
 void TagFS_CowRestoreRedirect(uint32_t snapshot_id, uint32_t old_block, uint32_t new_block);
 
-#endif // COW_H
+#endif

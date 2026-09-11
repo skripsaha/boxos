@@ -1,33 +1,6 @@
-/*
- * WriteJob — async ObjWrite state-machine implementation.
- *
- * Pumped from K-Core continuations posted by the AHCI IRQ. The IRQ side
- * is intentionally minimal: stash status, set state=W_AHCI_DONE, enqueue
- * continuation. The K-Core side does everything that needs locks
- * (alloc, meta_pool_write, file_table_update, token release, CoW,
- * cache flush, Touch publish).
- *
- * State flow (full):
- *
- *   W_INIT → W_TOKEN_WAIT? → W_LOCATE
- *
- *   per chunk:
- *     W_LOCATE → (extent missing → W_ALLOC → W_LOCATE)
- *              → (CoW active    → W_COW_BEFORE → W_DMA_FILL)
- *              → (existing      → W_DMA_FILL)        [RMW if partial]
- *              → (fresh alloc   → W_DMA_FILL)        [zero-fill]
- *     W_DMA_FILL → W_AHCI_SUBMIT → (yield to IRQ) → W_AHCI_DONE
- *     W_AHCI_DONE → if more bytes: W_LOCATE
- *                 → else:           W_BEGIN_TXN
- *
- *   commit phase (once):
- *     W_BEGIN_TXN  → W_LOG_META  → W_COW_AFTER → W_COMMIT_TXN
- *                                            ↘ skipped if no CoW ↗
- *     W_COMMIT_TXN → W_PUBLISH → W_RELEASE_TOKEN → W_DONE
- */
 
 #include "write_job.h"
-#include "chit.h"        /* ChitGive / ChitDue — an answer put off is an answer promised */
+#include "chit.h"
 #include "boardroom.h"
 #include "baton.h"
 #include "crate_stage.h"
@@ -49,14 +22,10 @@
 #include "touch.h"
 #include "integrity.h"
 
-/* ---- forward decls ---- */
 static void wjob_pump(void *job_);
 static void wjob_finalize(WriteJob *j, int rc);
 static void wjob_ahci_complete(uint8_t port, uint8_t slot, error_t status, void *ctx);
 
-/* =========================================================================
- *  Token handoff
- * ========================================================================= */
 
 static bool token_try_claim(WriteJob *j)
 {
@@ -96,24 +65,12 @@ static WriteJob *token_release_handoff(WriteJob *j)
     return next;
 }
 
-/* =========================================================================
- *  Per-chunk in-flight scratch (allocated inside WriteJob via flags)
- * =========================================================================
- *  Tracking which subspecies of write this chunk is so we know what to
- *  do at meta-commit and CoW-after time.  Stored back into j->if_* fields.
- */
 
-/* =========================================================================
- *  State handlers
- * ========================================================================= */
 
-/* W_LOCATE — figure out which disk block to target for current cursor.
- * Decides: alloc, CoW, or plain. Returns true to keep pumping. */
 static bool w_locate(WriteJob *j)
 {
     uint64_t file_pos = j->start_offset + j->bytes_done;
 
-    /* Walk extents. */
     uint64_t extent_start = 0;
     int found = -1;
     for (uint16_t i = 0; i < j->handle->extent_count; i++) {
@@ -123,7 +80,6 @@ static bool w_locate(WriteJob *j)
     }
 
     if (found < 0) {
-        /* No extent yet — go alloc one. */
         atomic_store_u32((volatile uint32_t *)&j->state, W_ALLOC);
         return true;
     }
@@ -142,11 +98,6 @@ static bool w_locate(WriteJob *j)
     j->if_chunk       = chunk;
     j->if_partial_rmw = (off_in_blk != 0) || (chunk != TAGFS_BLOCK_SIZE);
 
-    /* CoW redirect: if this file has an active snapshot, the block we're
-     * about to write is potentially shared. Allocate a fresh copy via
-     * CowBeforeWrite (which also copies the OLD block content into NEW)
-     * and re-point the handle's extent. The actual user-bytes overlay
-     * happens in W_DMA_FILL after we've staged the post-CoW content. */
     bool cow = (!j->if_alloc_fresh) && TagFS_CowIsActive(j->file_id);
     if (cow) {
         atomic_store_u32((volatile uint32_t *)&j->state, W_COW_BEFORE);
@@ -156,12 +107,6 @@ static bool w_locate(WriteJob *j)
         return true;
     }
 
-    /* No CoW. For partial overwrite of an existing block we need
-     * read-modify-write — async-load disk into DMA via W_COW_READ_OLD
-     * (the same path CoW uses; "cow" here is a misnomer for "load
-     * existing block before overlay"). For fresh allocations we just
-     * zero the DMA so unwritten bytes are clean. Full-block writes
-     * skip both. */
     if (j->if_partial_rmw && !j->if_alloc_fresh) {
         atomic_store_u32((volatile uint32_t *)&j->state, W_COW_READ_OLD);
         return true;
@@ -174,8 +119,6 @@ static bool w_locate(WriteJob *j)
     return true;
 }
 
-/* W_ALLOC — extent missing for file_pos; alloc one block, splice into
- * handle. Mark if_alloc_fresh so W_LOCATE doesn't RMW stale content. */
 static bool w_alloc(WriteJob *j)
 {
     uint32_t blk = 0;
@@ -185,7 +128,6 @@ static bool w_alloc(WriteJob *j)
         return false;
     }
 
-    /* Track for rollback on error AND for meta-commit. */
     j->alloc_block         = blk;
     j->alloc_count         = 1;
     j->alloc_pending_meta  = true;
@@ -212,18 +154,8 @@ static bool w_alloc(WriteJob *j)
     return true;
 }
 
-/* W_COW_BEFORE — snapshot active. Redirect: allocate fresh block,
- * splice extent. For partial overwrites, transition to W_COW_READ_OLD
- * to async-load the OLD content; for full-block overwrites, jump
- * straight to W_DMA_FILL (no need to read old content — user supplies
- * the entire block). The K-Core never blocks here. */
 static bool w_cow_before(WriteJob *j)
 {
-    /* TagFS_CowBeforeWrite both allocates AND copies old → new on disk
-     * synchronously today. We only want the alloc — the copy step is
-     * the slow part we're trying to make async. Workaround: call it,
-     * accept the sync copy, and read NEW into DMA via async. Once cow.c
-     * grows an alloc-only entry point we can split this. */
     uint32_t new_block = 0;
     error_t err = TagFS_CowBeforeWrite(j->file_id, j->if_cow_old_block, &new_block);
     if (err != OK || new_block == 0) {
@@ -231,14 +163,10 @@ static bool w_cow_before(WriteJob *j)
         return false;
     }
 
-    /* Splice handle's extent table to point at the redirected block. */
     FileExtent *ex = &j->handle->extents[j->if_extent_idx];
     if (ex->block_count == 1) {
         ex->start_block = new_block;
     } else {
-        /* Multi-block extent — append a 1-block redirect extent for THIS
-         * chunk. Leaves the original extent record intact. Future passes
-         * can split-merge contiguous CoW redirects. */
         uint16_t new_cnt = (uint16_t)(j->handle->extent_count + 1);
         FileExtent *grown = kmalloc(sizeof(FileExtent) * new_cnt);
         if (!grown) {
@@ -260,10 +188,6 @@ static bool w_cow_before(WriteJob *j)
     j->if_cow_redirected  = true;
     j->alloc_pending_meta = true;
 
-    /* For partial writes we still need the old (now redirected) content
-     * loaded into DMA so the user-bytes overlay only mutates the
-     * targeted window. Read async — IRQ-completed; for full-block
-     * writes, skip directly to fill. */
     if (j->if_partial_rmw) {
         atomic_store_u32((volatile uint32_t *)&j->state, W_COW_READ_OLD);
     } else {
@@ -272,10 +196,6 @@ static bool w_cow_before(WriteJob *j)
     return true;
 }
 
-/* W_COW_READ_OLD — async read of (now-redirected) NEW block content
- * into DMA. CowBeforeWrite already populated NEW on disk with the OLD
- * bytes; we just need them into DMA so the user overlay can fold over.
- * IRQ jumps state to W_DMA_FILL via wjob_cow_read_complete. */
 static bool w_cow_read_old(WriteJob *j);
 static void wjob_cow_read_complete(uint8_t port, uint8_t slot,
                                     error_t status, void *ctx);
@@ -290,10 +210,9 @@ static bool w_cow_read_old(WriteJob *j)
         wjob_finalize(j, ERR_IO);
         return false;
     }
-    return false;  /* parked until IRQ */
+    return false;
 }
 
-/* W_DMA_FILL — overlay user bytes onto staged DMA window. */
 static bool w_dma_fill(WriteJob *j)
 {
     memcpy((uint8_t *)j->dma_virt + j->if_off_in_blk,
@@ -304,7 +223,6 @@ static bool w_dma_fill(WriteJob *j)
     return true;
 }
 
-/* W_AHCI_SUBMIT — fire write, yield to IRQ. */
 static bool w_ahci_submit(WriteJob *j)
 {
     uint64_t lba = tagfs_block_to_sector(j->if_disk_block);
@@ -315,10 +233,9 @@ static bool w_ahci_submit(WriteJob *j)
         wjob_finalize(j, ERR_IO);
         return false;
     }
-    return false;  /* parked until IRQ */
+    return false;
 }
 
-/* W_AHCI_DONE — IRQ retired. Advance and decide next phase. */
 static bool w_ahci_done(WriteJob *j)
 {
     if (j->if_status != OK) {
@@ -326,15 +243,11 @@ static bool w_ahci_done(WriteJob *j)
         return false;
     }
 
-    /* The async path writes straight to the AHCI port, bypassing
-     * tagfs_write_block — so drop the just-written block from the read-ahead
-     * cache ourselves, or a later read could serve pre-write data. */
     tagfs_readahead_invalidate(j->if_disk_block);
     IntegrityUpdate(j->if_disk_block, j->dma_virt);
 
     j->bytes_done += j->if_chunk;
 
-    /* Reset per-chunk flags before next iteration. */
     j->if_alloc_fresh = false;
 
     if (j->bytes_done >= j->total_bytes) {
@@ -345,22 +258,16 @@ static bool w_ahci_done(WriteJob *j)
     return true;
 }
 
-/* W_BEGIN_TXN — open a DiskBook transaction for crash safety. */
 static bool w_begin_txn(WriteJob *j)
 {
-    /* No journal here: TagFS metadata is crash-consistent via append-ordering
-     * + mount fsck; durability of the data blocks written above is forced by
-     * the cache flush in W_COMMIT_TXN. */
     atomic_store_u32((volatile uint32_t *)&j->state, W_LOG_META);
     return true;
 }
 
-/* W_LOG_META — write extent table + size through meta_pool. */
 static bool w_log_meta(WriteJob *j)
 {
     if (!j->alloc_pending_meta &&
         (j->start_offset + j->total_bytes) <= j->handle->file_size) {
-        /* Pure overwrite-in-place — no metadata change. */
         atomic_store_u32((volatile uint32_t *)&j->state, W_COMMIT_TXN);
         return true;
     }
@@ -372,7 +279,6 @@ static bool w_log_meta(WriteJob *j)
         return false;
     }
 
-    /* Pull authoritative extents from the handle. */
     if (meta.extents) { kfree(meta.extents); meta.extents = NULL; }
     meta.extent_count = j->handle->extent_count;
     if (j->handle->extent_count > 0) {
@@ -412,41 +318,22 @@ static bool w_log_meta(WriteJob *j)
     return true;
 }
 
-/* W_COW_AFTER — snapshot now owns OLD block; release it from the live
- * file's accounting so the next allocation sees it as free. */
 static bool w_cow_after(WriteJob *j)
 {
     if (j->if_cow_old_block != 0 && j->if_disk_block != j->if_cow_old_block) {
         TagFS_CowAfterWrite(j->file_id, j->if_cow_old_block, j->if_disk_block);
-        /* Free old block — snapshot manifest still references it through
-         * the journaled metadata; the actual byte contents on disk are
-         * preserved at the OLD physical block until something allocates
-         * over it AND a snapshot read is requested. The CowAfterWrite
-         * hook in cow.c marks accounting; here we explicitly free.
-         *
-         * NOTE: this path is conservative — a fully-correct Cow needs a
-         * refcount on the OLD block until snapshot deletion. Phase 5
-         * will integrate that. */
-        /* tagfs_free_blocks(j->if_cow_old_block, 1); -- deferred */
     }
     atomic_store_u32((volatile uint32_t *)&j->state, W_COMMIT_TXN);
     return true;
 }
 
-/* W_COMMIT_TXN — close out the journal txn. */
 static bool w_commit_txn(WriteJob *j)
 {
-    /* Force the data blocks written above out of the drive's volatile write
-     * cache to media (routes to the probed AHCI port / ATA drive). This is the
-     * durability point for an async write. */
     tagfs_flush_cache();
     atomic_store_u32((volatile uint32_t *)&j->state, W_PUBLISH);
     return true;
 }
 
-/* W_PUBLISH — emit Touch event "WROTE" to all of the file's tags so
- * tag-listening processes wake up. Best-effort: a publish failure does
- * not abort the write. */
 static bool w_publish(WriteJob *j)
 {
     if (j->bytes_done > 0 && TouchHasAnyListeners()) {
@@ -455,7 +342,7 @@ static bool w_publish(WriteJob *j)
         if (tagfs_get_metadata(j->file_id, &wmeta) == OK) {
             struct {
                 uint32_t file_id;
-                uint8_t  op;          /* 1 = WRITE */
+                uint8_t  op;
                 uint8_t  _pad[3];
                 uint64_t offset;
                 uint64_t bytes;
@@ -480,42 +367,31 @@ static bool w_publish(WriteJob *j)
     return true;
 }
 
-/* W_RELEASE_TOKEN — handoff to next pending writer (if any), then DONE. */
 static bool w_release_token(WriteJob *j)
 {
     WriteJob *next = token_release_handoff(j);
     if (next) {
         atomic_store_u32((volatile uint32_t *)&next->state, W_LOCATE);
-        BatonPass(&next->cq_node);   /* never-drop; routes to drain core */
+        BatonPass(&next->cq_node);
     }
     atomic_store_u32((volatile uint32_t *)&j->state, W_DONE);
     return true;
 }
 
-/* W_DONE / W_ERROR — common exit. */
 static void wjob_finalize(WriteJob *j, int rc)
 {
-    /* Token release on error path. */
     if (rc != OK && j->ofe) {
         WriteJob *next = token_release_handoff(j);
         if (next) {
             atomic_store_u32((volatile uint32_t *)&next->state, W_LOCATE);
-            BatonPass(&next->cq_node);   /* never-drop; routes to drain core */
+            BatonPass(&next->cq_node);
         }
     }
 
-    /* Roll back uncommitted allocations. */
     if (rc != OK && j->alloc_pending_meta && j->alloc_count > 0) {
         tagfs_free_blocks(j->alloc_block, j->alloc_count);
     }
 
-    /* Stat reporter (matches sync ObjWrite contract). out_crate points into
-     * the staged Crate[] kbuf; out_crate->addr is the user vaddr. Commit the
-     * 16 stats bytes through the page-walked path so a stats crate that
-     * straddles a page boundary is safe across the async boundary. j->target
-     * is pinned for the job's lifetime and commit_out walks the page tables
-     * physically (no target CR3 switch) — same model as the
-     * crate_stage_commit_and_release below. */
     uint64_t bytes_written = (rc == OK) ? j->bytes_done : 0;
     uint64_t final_size    = j->handle ? j->handle->file_size : 0;
     if (j->out_crate && j->out_crate->capacity >= 16 &&
@@ -532,11 +408,6 @@ static void wjob_finalize(WriteJob *j, int rc)
     if (j->handle)      tagfs_close(j->handle);
     if (j->src_bounce)  vmm_user_buf_free(j->src_bounce);
 
-    /* CrateStage release. Dispatcher handed us ownership of crates_kbuf
-     * at ObjWriteAsync's PROC_WAITING return. We just wrote
-     * j->out_crate->size = 16 above (into kbuf); commit_and_release
-     * flushes the whole descriptor array back to user memory and frees
-     * the kbuf. Cabin is target->cabin (already pinned via ref). */
     if (j->crates_kbuf) {
         crate_stage_commit_and_release(j->crates_kbuf, j->crate_count,
                                         (j->target && j->target->cabin) ? j->target->cabin->vmm : NULL,
@@ -548,15 +419,10 @@ static void wjob_finalize(WriteJob *j, int rc)
     r.error_code  = (rc == OK) ? OK : (uint32_t)ERR_IO;
     r.data_length = (uint32_t)bytes_written;
     r.sender_pid  = 0;
-    /* Ф26e: a waybilled (box::ferry) write echoes its correlation token in
-     * data_addr and flies the KCTX_STORAGE flag so boxlib routes it to the
-     * ferry station; a plain write keeps KCTX_GUIDE / data_addr==0. */
     if (j->waybill) { r.context = KCTX_STORAGE; r.data_addr = j->waybill; }
     else            { r.context = KCTX_PACK24(KCTX_GUIDE, j->submit_cookie); }
 
     if (j->target) {
-        /* The answer is determined; only its delivery remains, and that is
-         * the kernel's own debt. Due here, kept by the push. */
         ChitDue(j->target, j->submit_cookie);
         KResultPush(j->target, &r);
         process_ref_dec(j->target);
@@ -565,27 +431,11 @@ static void wjob_finalize(WriteJob *j, int rc)
     kfree(j);
 }
 
-/* =========================================================================
- *  Pump
- * ========================================================================= */
 
 static void wjob_pump(void *job_)
 {
     WriteJob *j = (WriteJob *)job_;
 
-    /*
-     * ‼ IS THIS STILL THE VOLUME THIS WRITE WAS AIMED AT?
-     *
-     * A job lives across yields, and what it carries is a handle holding its
-     * own copy of the file's extents — disk block numbers. If the medium left
-     * and came back in between, the volume has been read again and those
-     * numbers now name whatever it keeps there today. Carrying on would not
-     * fail: it would write this file's bytes into another file's blocks.
-     *
-     * Asked once per pump rather than once per state, because a re-mount
-     * cannot happen inside the loop below: it is finished by the same guide
-     * loop that is running this.
-     */
     if (!tagfs_handle_is_of_this_mount(j->handle)) {
         kprintf("[Storage] a write to file %u was aimed at an earlier mounting "
                 "of this volume — it is refused rather than written somewhere "
@@ -619,15 +469,6 @@ static void wjob_pump(void *job_)
     }
 }
 
-/* IRQ callback for CoW READ_OLD. Drops state directly to W_DMA_FILL —
- * the read populated DMA with the (redirected) old content, ready for
- * the user-bytes overlay.
- *
- * Runs in AHCI completion IRQ context. It only stashes status and posts
- * the job's embedded completion node (BatonPass) to the drain
- * core — no allocation, no lock, and NEVER dropped: the node lives inside
- * the WriteJob, so there is no slot to run out of. The heavy half (memcpy /
- * finalize / next-block) runs later in the K-Core pump. */
 static void wjob_cow_read_complete(uint8_t port, uint8_t slot,
                                     error_t status, void *ctx)
 {
@@ -639,11 +480,9 @@ static void wjob_cow_read_complete(uint8_t port, uint8_t slot,
     } else {
         atomic_store_u32((volatile uint32_t *)&j->state, W_DMA_FILL);
     }
-    BatonPass(&j->cq_node);   /* never-drop; heavy half on the K-Core pump */
+    BatonPass(&j->cq_node);
 }
 
-/* IRQ callback. Lean — only stash status + defer continuation. See
- * wjob_cow_read_complete above for the IRQ-safety rationale. */
 static void wjob_ahci_complete(uint8_t port, uint8_t slot,
                                 error_t status, void *ctx)
 {
@@ -651,12 +490,9 @@ static void wjob_ahci_complete(uint8_t port, uint8_t slot,
     WriteJob *j = (WriteJob *)ctx;
     j->if_status = status;
     atomic_store_u32((volatile uint32_t *)&j->state, W_AHCI_DONE);
-    BatonPass(&j->cq_node);   /* never-drop; heavy half on the K-Core pump */
+    BatonPass(&j->cq_node);
 }
 
-/* =========================================================================
- *  Public entry — ObjWriteAsync
- * ========================================================================= */
 
 int ObjWriteAsync(uint32_t            file_id,
                   uint64_t            offset,
@@ -704,9 +540,6 @@ int ObjWriteAsync(uint32_t            file_id,
     j->ofe           = handle->ofe;
     j->out_crate     = out_crate;
     j->src_kp        = (const uint8_t *)src_kp;
-    /* Caller (storage_ops ObjWrite) hands us a bounce buffer it allocated
-     * via crate_in_buf; on a successful return WE own it and free at
-     * W_DONE. Marker: src_bounce == src_kp says "we own this". */
     j->src_bounce    = (void *)src_kp;
     j->flags         = flags;
     j->waybill       = waybill;
@@ -714,7 +547,7 @@ int ObjWriteAsync(uint32_t            file_id,
     j->dma_phys      = dma_phys;
     j->dma_virt      = dma_virt;
 
-    if (flags & 0x1u /* OBJ_WRITE_APPEND_FLAG */) {
+    if (flags & 0x1u ) {
         j->start_offset = handle->file_size;
     } else {
         j->start_offset = offset;
@@ -722,39 +555,18 @@ int ObjWriteAsync(uint32_t            file_id,
     j->total_bytes   = size;
     j->bytes_done    = 0;
 
-    /* Never-drop completion node: the AHCI IRQ / token handoff posts this
-     * job to the drain core with no allocation. Set once, reused across
-     * every enqueue of this job. */
     j->cq_node.run   = wjob_pump;
     j->cq_node.ctx   = j;
 
-    /* CrateStage ownership transfer from dispatcher. After we return
-     * ERR_WOULD_BLOCK below (via process_set_state PROC_WAITING), the
-     * dispatcher will not touch the staged crates kbuf. wjob_finalize
-     * writes out_crate->size = bytes and calls
-     * crate_stage_commit_and_release to flush + free. */
     j->crates_kbuf   = crates_kbuf;
     j->crate_count   = crate_count;
     j->crates_uaddr  = crates_uaddr;
 
     process_set_state(ctx->proc, PROC_WAITING);
-    /* The chit, and with it the staged-crates ownership transfer to
-     * wjob_finalize (the dispatcher then skips its sync commit_out + kfree —
-     * race-safe vs a very fast completion). Before the token claim: a job
-     * that gets the token pumps at once, and can finish on another core. */
     ChitGive(ctx, "storage.write", file_id);
 
     if (token_try_claim(j)) {
         atomic_store_u32((volatile uint32_t *)&j->state, W_LOCATE);
-        /* Run the first pump synchronously in this syscall (thread) context,
-         * not as a posted continuation: thread context can safely take every
-         * lock the state machine needs and skips a queue round-trip on the
-         * common path. It pumps until it parks at W_AHCI_SUBMIT (yield to the
-         * AHCI IRQ, whose completion posts the job's never-drop node to the
-         * drain core). Any continuation the machine posts from here — e.g. a
-         * token handoff on an early-error exit — goes through
-         * BatonPass, which routes to the drain core (never the
-         * calling App Core), so it cannot strand. */
         wjob_pump(j);
     } else {
         atomic_store_u32((volatile uint32_t *)&j->state, W_TOKEN_WAIT);

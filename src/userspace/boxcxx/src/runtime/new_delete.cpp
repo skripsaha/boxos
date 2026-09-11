@@ -1,22 +1,3 @@
-/*
- * new_delete.cpp — the full replaceable allocation-function set (Itanium
- * x86-64) over the boxlib heap.
- *
- * Backing calls go straight to malloc/free. They used to have to be declared
- * here by hand, because box/memory.h made malloc a variadic MACRO and this
- * file had to route around it; Ф41 made malloc a function, for the reason
- * <cstdlib> would have forced anyway — the preprocessor does not look at
- * qualification, so a malloc macro turns std::malloc(n) into a name that does
- * not exist.
- *
- * Aligned forms over-allocate and stash the raw pointer one slot below
- * the aligned address. The compiler guarantees aligned new pairs with
- * aligned delete ([expr.delete]), so plain free() never sees an interior
- * pointer.
- *
- * Until the unwinder ships (Phase 4B) the throwing forms terminate with
- * a diagnostic on exhaustion; nothrow forms return nullptr.
- */
 
 #include <new>
 #include <cstddef>
@@ -43,7 +24,7 @@ void *AllocateWithHandler(size_t size)
         if (p) return p;
         std::new_handler handler = g_new_handler;
         if (!handler) return nullptr;
-        handler();   // may free memory, install a new handler, or panic
+        handler();
     }
 }
 
@@ -52,7 +33,6 @@ void *AlignedAllocate(size_t size, size_t align)
     if (align < sizeof(void *)) align = sizeof(void *);
     if (size == 0) size = 1;
 
-    // Overflow guard: size + align + sizeof(void*) must not wrap.
     if (size > SIZE_MAX - align - sizeof(void *)) return nullptr;
 
     for (;;) {
@@ -80,7 +60,7 @@ void AlignedFree(void *ptr)
     throw std::bad_alloc{};
 }
 
-} // namespace
+}
 
 namespace std {
 
@@ -96,9 +76,8 @@ new_handler set_new_handler(new_handler handler) noexcept
     return old;
 }
 
-} // namespace std
+}
 
-// ── Scalar forms ────────────────────────────────────────────────────────
 
 void *operator new(std::size_t size)
 {
@@ -156,7 +135,6 @@ void operator delete(void *ptr, std::align_val_t,
     AlignedFree(ptr);
 }
 
-// ── Array forms ─────────────────────────────────────────────────────────
 
 void *operator new[](std::size_t size)
 {

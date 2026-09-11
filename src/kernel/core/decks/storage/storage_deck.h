@@ -7,10 +7,8 @@
 
 #define STORAGE_DECK_ID         DECK_STORAGE
 
-/* The opcodes and the scope byte live in boxos_decks.h, the single source
- * both this deck's handler table and boxlib's wrappers read. */
 
 void    storage_deck_init(void);
 error_t StorageDeckRegister(void);
 
-#endif /* STORAGE_DECK_H */
+#endif

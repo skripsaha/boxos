@@ -1,24 +1,3 @@
-/* klib_mem.c — kernel heap allocator.
- *
- * Two-tier design:
- *   1. Slab — O(1) for allocations <= SLAB_LARGE_THRESHOLD (2048 bytes).
- *   2. Legacy first-fit pool — for everything larger, plus fallback when
- *      a slab class is empty and PMM cannot grow it.
- *
- * The pool itself lives at `memory_pool` (originally identity-mapped, later
- * rebased through Pull Map by `mem_activate_pull_map`). Each live block
- * carries `KLIB_MAGIC_NUMBER`; every free block carries `KLIB_MAGIC_FREE`.
- * Double-free is detected in O(1) by inspecting the tombstone — without
- * walking the free list — which used to be the dominant cost under
- * sustained IPC pressure (touch_stress, write_concurrent).
- *
- * HEAP_GUARD_ENABLED wraps every legacy allocation in canary words. Slab
- * allocations get their own validation via `slab_owns()`.
- *
- * mem_init also bootstraps the console-print lock by calling
- * klib_print_lock_init() — it lives in klib_print.c but must be wired in
- * one place so the spinlock_t invariants are initialised before the first
- * kprintf-class call. */
 #include "klib.h"
 #include "slab.h"
 #include "pmm.h"
@@ -36,39 +15,21 @@ typedef struct
 } heap_guard_t;
 
 static uint8_t      *memory_pool = NULL;
-/* PUBLISHED size — what the free list covers and what the range checks accept.
- * Before the Pull Map is up it is only the part the bootloader's identity
- * window can reach; mem_activate_pull_map raises it to memory_pool_full. */
 static size_t        memory_pool_size = 0;
-static size_t        memory_pool_full = 0;   /* size actually allocated at boot */
+static size_t        memory_pool_full = 0;
 static mem_block_t  *free_list = NULL;
 static spinlock_t    heap_lock = {0};
 
-/* Pool occupancy, maintained under heap_lock.  The pool is sized once at boot,
- * so how close it runs to full is the difference between a healthy system and
- * every caller's error-unwind path firing at once.  A high-water mark is the
- * only way to see that coming: instantaneous stats always read fine, because
- * the peak has already drained by the time anyone asks.
- *
- * Reported on each DOUBLING of the peak from HEAP_PEAK_REPORT_FLOOR up, not at
- * fractions of the pool: a fraction of a large pool is never crossed by a
- * healthy system, so the reporter would go silent exactly on the machines with
- * the most room to misjudge.  Doubling gives at most log2(pool/floor) lines —
- * eight for a 64 MiB pool — and each one is a real change of magnitude. */
 #define HEAP_PEAK_REPORT_FLOOR (256u * 1024u)
 static size_t g_heap_live  = 0;
 static size_t g_heap_peak  = 0;
-static size_t g_heap_max_1 = 0;   /* largest single request ever served */
+static size_t g_heap_max_1 = 0;
 static size_t g_heap_peak_reported = 0;
 
-/* Declared in klib_print.c — initialises g_kprintf_lock once. */
 void klib_print_lock_init(void);
 
 void mem_activate_pull_map(void)
 {
-    /* Rebase the pool head and every free-list link from identity-virtual
-     * to Pull Map-virtual.  identity == phys before activation, so the
-     * conversion is one vmm_phys_to_virt per pointer. */
     uintptr_t pool_phys = (uintptr_t)memory_pool;
     memory_pool = (uint8_t *)vmm_phys_to_virt(pool_phys);
 
@@ -87,13 +48,6 @@ void mem_activate_pull_map(void)
 
     slab_activate_pull_map();
 
-    /* Publish the tail. Every physical byte is addressable now, so the part of
-     * the pool the identity window could not reach joins the free list. The
-     * pool is ONE contiguous block, so this is an append — and a merge when the
-     * highest free block ends exactly where the tail begins — not a second
-     * region: the free list stays address-ordered and the range checks stay a
-     * single interval. Runs single-threaded during vmm_init, before the APs
-     * boot, so no lock is taken. */
     if (memory_pool_full > memory_pool_size)
     {
         uint8_t *tail  = memory_pool + memory_pool_size;
@@ -125,17 +79,12 @@ void mem_activate_pull_map(void)
 
 void mem_init(void)
 {
-    /* Initialise heap_lock + the console lock in klib_print.c. BSS-zero
-     * happens to mean "unlocked" for the current spinlock_t layout, but
-     * a deliberate spinlock_init keeps the invariant explicit. */
     spinlock_init(&heap_lock);
     klib_print_lock_init();
 
     size_t total_pages = pmm_total_pages();
     size_t total_ram   = total_pages * VMM_PAGE_SIZE;
 
-    /* Heap sizing: KLIB_HEAP_RAM_PERCENT of total RAM, clamped to
-     * [KLIB_HEAP_MIN_SIZE, dynamic_max]. Bounds defined in klib.h. */
     size_t heap_size = (total_ram * KLIB_HEAP_RAM_PERCENT) / 100;
 
     if (heap_size < KLIB_HEAP_MIN_SIZE)
@@ -150,23 +99,6 @@ void mem_init(void)
 
     heap_size = ALIGN_UP(heap_size, VMM_PAGE_SIZE);
 
-    /* Take the whole pool NOW, as ONE contiguous block, and publish only the
-     * part the bootloader's identity window can reach. The tail joins the free
-     * list in mem_activate_pull_map. The pool used to be clamped to the window
-     * outright, with a message promising it "will be N MB after VMM init" —
-     * nothing ever raised it, so a 2 MiB heap was all any machine ever got.
-     *
-     * pmm_alloc, not pmm_alloc_zero: zeroing the whole pool would touch bytes
-     * past the identity window. Each half is zeroed when it is published.
-     *
-     * The pool is one block, so clamp to the largest block the PMM can serve
-     * BEFORE asking. Learning that limit from a refusal works, but the refusal
-     * logs PMM_FAIL, and a scary line in every boot log is exactly the noise
-     * that sends the next investigation down the wrong path.
-     *
-     * Halving still covers what remains: the pre-Pull-Map window may not hold
-     * the ideal size. A machine that cannot spare it must still boot with a
-     * smaller heap, and the size it really got is printed rather than assumed. */
     size_t max_bytes = pmm_max_alloc_pages() * VMM_PAGE_SIZE;
     if (heap_size > max_bytes)
         heap_size = max_bytes;
@@ -204,8 +136,6 @@ void mem_init(void)
     slab_init();
 }
 
-/* Published pool size. Callers that size a growable structure against the
- * heap need the real number, not a constant that outlives the sizing policy. */
 size_t mem_heap_size(void)
 {
     return memory_pool_full ? memory_pool_full : memory_pool_size;
@@ -278,11 +208,6 @@ static void *kmalloc_internal(size_t size)
 
     if (result)
     {
-        /* Account the BLOCK, not the request: when the tail remainder is too
-         * small to split off, curr->size stays larger than `size` and the
-         * block carries that slack until it is freed. kfree_internal gives
-         * back curr->size, so charging `size` here would drift the counter
-         * down on every non-splitting allocation and understate the peak. */
         g_heap_live += curr->size + sizeof(mem_block_t);
         if (size > g_heap_max_1)
             g_heap_max_1 = size;
@@ -311,12 +236,6 @@ static void *kmalloc_internal(size_t size)
 
     spin_unlock(&heap_lock);
 
-    /* kprintf, not debug_printf: a NULL from here is how every caller's
-     * error-unwind path begins, and in a release build debug_printf is
-     * compiled out — heap exhaustion used to leave no trace at all, so the
-     * unwind that followed looked like a spontaneous failure.  Printing
-     * happens after the unlock: kprintf takes the console lock, and heap
-     * before console is not an ordering this kernel takes anywhere else. */
     if (!result)
         kprintf("[KLIB] ERROR: kmalloc failed for %zu bytes — pool %zu KB, live %zu KB, "
                 "peak %zu KB, largest free %zu B\n",
@@ -333,13 +252,11 @@ void *kmalloc(size_t size)
     if (size == 0)
         return NULL;
 
-    /* Slab path: O(1) for small allocations. */
     if (size <= SLAB_LARGE_THRESHOLD)
     {
         void *ptr = slab_alloc(size);
         if (ptr)
             return ptr;
-        /* Fall through if slab exhausted — legacy pool handles it. */
     }
 
 #if HEAP_GUARD_ENABLED
@@ -349,9 +266,6 @@ void *kmalloc(size_t size)
     if (!guard)
         return NULL;
 
-    /* A pool block must never live on a page the slab registry claims —
-     * that is two allocators owning one page. Catch the cohabitation at
-     * birth, where the culprit is on the stack, not at the eventual free. */
     if (slab_owns((uint8_t *)guard + sizeof(heap_guard_t)))
         panic("[HEAP] kmalloc(%zu) pool block %p lands on a slab-registry page — "
               "allocator cohabitation\n",
@@ -382,7 +296,6 @@ static void kfree_internal(void *ptr)
         (uintptr_t)block >= (uintptr_t)memory_pool + memory_pool_size)
         panic("Invalid free: pointer out of range!");
 
-    /* O(1) double-free detection via magic tombstone — see klib.h. */
     if (block->magic == KLIB_MAGIC_FREE)
         panic("Double free detected (magic=FREE)!");
     if (block->magic != KLIB_MAGIC_NUMBER)
@@ -434,13 +347,6 @@ void kfree(void *ptr)
     }
 
 #if HEAP_GUARD_ENABLED
-    /* Range-check BEFORE dereferencing the guard header. A garbage pointer
-     * (an overwritten local, a stale handle) used to reach the canary loads
-     * below, read whatever happened to live at ptr-0x20, and die in a
-     * SILENT cli;hlt behind debug_printf — which compiles to nothing in a
-     * normal build. The machine froze without a word; naming the pointer
-     * and halting loudly is the whole difference between a diagnosis and a
-     * morning of guessing. panic() prints, dumps and stops every core. */
     heap_guard_t *guard = (heap_guard_t *)((uint8_t *)ptr - sizeof(heap_guard_t));
 
     if ((uintptr_t)guard < (uintptr_t)memory_pool ||
@@ -451,11 +357,6 @@ void kfree(void *ptr)
               (void *)((uintptr_t)memory_pool + memory_pool_size));
 
     if (guard->canary_start != HEAP_CANARY_MAGIC) {
-        /* Slab-lens on the pointer's page: a destroyed "canary" of 0 with a
-         * page whose first words parse as a plausible SlabPage is the
-         * signature of an impostor page handed out by the slab free-list
-         * (see slab.c recruitment gates) — print the page's claimed
-         * geometry so the corpse names its allocator. */
         typedef struct { uint16_t obj_size, total_slots, free_count, free_head; } page_lens_t;
         const page_lens_t *lens =
             (const page_lens_t *)((uintptr_t)ptr & ~(uintptr_t)0xFFF);

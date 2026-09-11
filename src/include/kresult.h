@@ -3,7 +3,7 @@
 
 #include "ktypes.h"
 #include "error.h"
-#include "boxos_kctx.h"      /* KResultContext enum — shared with boxlib */
+#include "boxos_kctx.h"
 
 typedef struct {
     uint32_t status;
@@ -16,4 +16,4 @@ typedef struct {
 #define KRESULT_IS_OK(r)      ((r).status == 0)
 #define KRESULT_IS_ERR(r)     ((r).status != 0)
 
-#endif // KRESULT_H
+#endif

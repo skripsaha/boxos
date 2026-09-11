@@ -1,18 +1,3 @@
-/*
- * APEI/GHES runtime path — implementation.
- *
- * See apei_ghes_runtime.h for design + spec citations. This file owns:
- *   1. Per-source runtime descriptor table (16 max, bounded).
- *   2. apei_ghes_register_source() — invoked from acpi_apei.c decode_ghes.
- *   3. Generic Error Status Block walker — parses header + Generic Error
- *      Data Entries, routes each section through the proper destination.
- *   4. Memory Error CPER section parser (UEFI 2.10 §N.2.5) → bridges to
- *      mce_migrate_request so firmware-delivered ECC reaches the same
- *      poison + page-migration pipeline as architectural #MC events.
- *   5. Polled / NMI / SCI entry points.
- *   6. v2 read-ack flow per ACPI 6.5 §18.3.2.7.2.
- *   7. Telemetry + dump helpers + test-only simulate path.
- */
 
 #include "apei_ghes_runtime.h"
 #include "klib.h"
@@ -26,24 +11,20 @@
 #include "baton.h"
 #include "cpuid.h"
 
-/* TSC-frequency getter — published by cpu calibration into the cpu_caps
- * shared page; declared here to avoid a per-call lookup. */
 extern uint64_t cpu_get_tsc_freq_khz(void);
 
-/* ─── On-wire layouts (ACPI 6.5 §18.3.2.7.1 / UEFI 2.10 §N) ─────── */
 
 typedef struct {
-    uint32_t block_status;        /* bit 0 uncorr, 1 corr, 2 multi-uc, 3 multi-c
-                                   * bits 13:4 entry count */
+    uint32_t block_status;
     uint32_t raw_data_offset;
     uint32_t raw_data_length;
-    uint32_t data_length;         /* total bytes of Generic Error Data Entries */
-    uint32_t error_severity;      /* 0=recoverable 1=fatal 2=corrected 3=info */
+    uint32_t data_length;
+    uint32_t error_severity;
 } __attribute__((packed)) gesb_header_t;
 _Static_assert(sizeof(gesb_header_t) == 20, "GESB header = 20 B");
 
 typedef struct {
-    uint8_t  section_type[16];    /* GUID */
+    uint8_t  section_type[16];
     uint32_t error_severity;
     uint16_t revision;
     uint8_t  validation_bits;
@@ -55,7 +36,6 @@ typedef struct {
 } __attribute__((packed)) gedata_entry_t;
 _Static_assert(sizeof(gedata_entry_t) == 72, "Generic Error Data Entry = 72 B");
 
-/* Memory Error CPER section — UEFI 2.10 §N.2.5 r2 layout (80 bytes). */
 typedef struct {
     uint64_t validation_bits;
     uint64_t error_status;
@@ -72,8 +52,7 @@ typedef struct {
     uint64_t requestor_id;
     uint64_t responder_id;
     uint64_t target_id;
-    uint8_t  error_type;          /* 0=unknown 1=no-error 2=single-bit-ECC 3=multi-bit-ECC
-                                   * 4=single-symbol-ChipKill 5=multi-symbol-ChipKill ... */
+    uint8_t  error_type;
     uint8_t  extended[3];
 } __attribute__((packed)) cper_memory_error_t;
 
@@ -81,8 +60,6 @@ typedef struct {
 #define MEM_VBIT_PHYSADDR_MASK   (1u << 2)
 #define MEM_VBIT_ERROR_TYPE      (1u << 14)
 
-/* CPER section type GUIDs — wire byte order (little-endian data1..data4
- * then byte tail). Same constants as acpi_apei.c. */
 static const uint8_t SECT_PROCESSOR[16] = {
     0xB0,0xA0,0x3E,0xDC, 0x44,0xA1, 0x97,0x47,
     0xB9,0x5B, 0x53,0xFA,0x24,0x2B,0x6E,0x1D };
@@ -98,29 +75,23 @@ static inline bool guid_eq(const uint8_t *a, const uint8_t *b) {
     return true;
 }
 
-/* ─── Per-source runtime descriptor ─────────────────────────────── */
 
 typedef struct {
     uint16_t  source_id;
     uint8_t   notify_type;
-    uint8_t   flags;              /* bit 0: in_use, bit 1: v2 */
+    uint8_t   flags;
     uint32_t  gsiv;
     uint32_t  poll_interval_ms;
     uint32_t  gesb_len;
     uint64_t  gesb_phys;
-    void     *gesb_va;            /* mapped at register-time */
+    void     *gesb_va;
     uint64_t  next_poll_tsc;
-    /* GHESv2 read-ack registers (zero for v1). */
     uint64_t  read_ack_addr;
-    void     *read_ack_va;        /* mapped at register-time, like gesb_va */
+    void     *read_ack_va;
     uint64_t  read_ack_preserve;
     uint64_t  read_ack_write;
-    /* Per-source counters. */
     volatile uint64_t events;
     volatile uint64_t errors;
-    /* The NMI's one pass to a K-Core for this source (baton.h, Knock): an
-     * NMI notices the block and knocks; the walk runs where locks are
-     * allowed. A burst of NMIs for one block is one walk. */
     Knock     knock;
 } apei_ghes_source_t;
 
@@ -132,7 +103,6 @@ static void nmi_worker(void *ctx);
 static apei_ghes_source_t g_sources[APEI_GHES_MAX_RUNTIME_SOURCES];
 static volatile uint32_t  g_source_count = 0;
 
-/* ─── Stats (RELAXED — never load-bearing) ──────────────────────── */
 
 static volatile uint64_t g_stat_events_processed     = 0;
 static volatile uint64_t g_stat_memory_sections      = 0;
@@ -146,7 +116,6 @@ static volatile uint64_t g_stat_sci_invocations      = 0;
 static volatile uint64_t g_stat_map_failures         = 0;
 static volatile uint64_t g_stat_corrupt_records      = 0;
 
-/* ─── Touch tag cache ───────────────────────────────────────────── */
 
 static TouchTag g_tag_mem_error    = TOUCH_TAG_INVALID;
 static TouchTag g_tag_proc_error   = TOUCH_TAG_INVALID;
@@ -156,28 +125,26 @@ static TouchTag g_tag_ready        = TOUCH_TAG_INVALID;
 
 static volatile bool g_initialized = false;
 
-/* ─── Touch payload (64 B fits Pocket envelope) ─────────────────── */
 
 typedef struct {
-    uint64_t physical_address;   /* 8 */
-    uint64_t status;             /* 8 */
-    uint32_t source_id;          /* 4 */
-    uint32_t section_severity;   /* 4 */
-    uint16_t node;               /* 2 */
-    uint16_t card;               /* 2 */
-    uint16_t module;             /* 2 */
-    uint16_t bank;               /* 2 */
-    uint8_t  notify_type;        /* 1 */
-    uint8_t  error_type;         /* 1 */
-    uint8_t  v2;                 /* 1 */
-    uint8_t  pad8;               /* 1 */
-    uint32_t pad32;              /* 4 */
-    uint8_t  pad[24];            /* 24 → total 64 B */
+    uint64_t physical_address;
+    uint64_t status;
+    uint32_t source_id;
+    uint32_t section_severity;
+    uint16_t node;
+    uint16_t card;
+    uint16_t module;
+    uint16_t bank;
+    uint8_t  notify_type;
+    uint8_t  error_type;
+    uint8_t  v2;
+    uint8_t  pad8;
+    uint32_t pad32;
+    uint8_t  pad[24];
 } apei_event_payload_t;
 _Static_assert(sizeof(apei_event_payload_t) == 64,
                "APEI event payload must fit 64 B");
 
-/* ─── TSC helper (uses g_cpu_caps.tsc_freq_khz when available) ──── */
 
 static uint64_t apei_ghes_rdtsc(void) {
     uint32_t lo, hi;
@@ -187,11 +154,10 @@ static uint64_t apei_ghes_rdtsc(void) {
 
 static uint64_t apei_ghes_tsc_per_ms(void) {
     uint64_t khz = cpu_get_tsc_freq_khz();
-    if (khz == 0) khz = 1000000;  /* 1 GHz floor */
-    return khz;                   /* khz = ticks per ms by definition */
+    if (khz == 0) khz = 1000000;
+    return khz;
 }
 
-/* ─── Init ──────────────────────────────────────────────────────── */
 
 bool apei_ghes_runtime_is_initialized(void) { return g_initialized; }
 
@@ -227,7 +193,6 @@ error_t apei_ghes_register_source(uint16_t source_id, bool v2,
     if (gesb_phys == 0 || gesb_len < sizeof(gesb_header_t))
         return ERR_INVALID_ARGUMENT;
 
-    /* Idempotent refresh — find existing slot for this source_id first. */
     apei_ghes_source_t *slot = NULL;
     for (uint32_t i = 0; i < g_source_count; i++) {
         if ((g_sources[i].flags & SRC_IN_USE) &&
@@ -246,13 +211,6 @@ error_t apei_ghes_register_source(uint16_t source_id, bool v2,
         g_source_count++;
     }
 
-    /* Map the GESB once. Read/write so we can W1C block_status to ack.
-     * vmm_map_mmio returns volatile void* (MMIO accesses must not be
-     * cached or reordered by the compiler); we store the address as
-     * plain void* in the slot and re-apply the volatile qualifier at
-     * every dereference site (see process_source_gesb / ghes_read_ack
-     * which cast to `volatile <type>*`). The explicit cast here makes
-     * the qualifier drop intentional rather than implicit. */
     void *gesb_va = (void *)(uintptr_t)vmm_map_mmio(gesb_phys, gesb_len, VMM_FLAGS_KERNEL_RW);
     if (!gesb_va) {
         debug_printf("[APEI] GESB map failed for src=%u (phys=0x%lx len=%u)\n",
@@ -270,15 +228,8 @@ error_t apei_ghes_register_source(uint16_t source_id, bool v2,
     slot->gesb_phys          = gesb_phys;
     slot->gesb_va            = gesb_va;
     slot->gesb_len           = gesb_len;
-    slot->next_poll_tsc      = apei_ghes_rdtsc();   /* poll on first tick */
+    slot->next_poll_tsc      = apei_ghes_rdtsc();
     slot->read_ack_addr      = read_ack_addr;
-    /* Mapped here, once, for the same reason the GESB above is: ghes_read_ack
-     * runs on every consumed error record, and mapping eight bytes per
-     * acknowledgement leaks one kernel MMIO mapping — and the page-table pages
-     * beneath it — per hardware error, forever. Firmware that reports
-     * corrected ECC errors regularly is not exotic; it is what a machine with
-     * one tired DIMM does all day. A leak that only appears on real hardware,
-     * hours in, is the hardest kind to find and the easiest kind to prevent. */
     slot->read_ack_va        = (read_ack_addr != 0)
         ? (void *)(uintptr_t)vmm_map_mmio(read_ack_addr, 8, VMM_FLAGS_KERNEL_RW)
         : NULL;
@@ -299,20 +250,17 @@ error_t apei_ghes_register_source(uint16_t source_id, bool v2,
     return OK;
 }
 
-/* ─── CPER memory-error decoder + MCE bridge ────────────────────── */
 
 static mce_severity_t cper_to_mce_sev(uint32_t cper_sev) {
     switch (cper_sev) {
-        case 0: return MCE_SEV_UCR;       /* recoverable */
-        case 1: return MCE_SEV_UC;        /* fatal */
-        case 2: return MCE_SEV_CORRECTED; /* corrected */
-        case 3:                           /* informational */
+        case 0: return MCE_SEV_UCR;
+        case 1: return MCE_SEV_UC;
+        case 2: return MCE_SEV_CORRECTED;
+        case 3:
         default:return MCE_SEV_NONE;
     }
 }
 
-/* Process one Memory Error section. Returns true if a poison + migrate
- * request was queued (false on no phys / not poisonable severity). */
 static bool process_memory_section(const apei_ghes_source_t *src,
                                     uint32_t section_severity,
                                     const cper_memory_error_t *m,
@@ -343,9 +291,6 @@ static bool process_memory_section(const apei_ghes_source_t *src,
     }
     __atomic_fetch_add(&g_stat_memory_sections, 1, __ATOMIC_RELAXED);
 
-    /* Only UCR + UC sections poison. Corrected/informational stay
-     * advisory — they reflect HW that already recovered. Mirrors the
-     * Phase 2F policy: mce.c only calls pmm_set_poisoned on UC|UCR. */
     if (sev != MCE_SEV_UCR && sev != MCE_SEV_UC) return false;
 
     uintptr_t page_phys = phys & ~(uintptr_t)0xFFF;
@@ -356,8 +301,6 @@ static bool process_memory_section(const apei_ghes_source_t *src,
     return true;
 }
 
-/* Walk one Generic Error Data Entry, dispatch by section_type GUID.
- * Returns total bytes consumed (entry header + data) or 0 on corrupt. */
 static uint32_t process_entry(const apei_ghes_source_t *src,
                                const uint8_t *entry, uint32_t avail) {
     if (avail < sizeof(gedata_entry_t)) return 0;
@@ -399,45 +342,32 @@ static uint32_t process_entry(const apei_ghes_source_t *src,
     return (uint32_t)sizeof(gedata_entry_t) + data_len;
 }
 
-/* GHESv2 read-ack flow (ACPI 6.5 §18.3.2.7.2). Read the register, mask
- * preserve bits, OR write bits, store back. The read is mandatory —
- * firmware uses it to time the OS's consumption acknowledgement. v1
- * sources skip this entirely (no register specified). */
 static void ghes_read_ack(const apei_ghes_source_t *src) {
     if (!(src->flags & SRC_V2)) return;
     if (src->read_ack_addr == 0) return;
-    /* Mapped once at registration; see the comment there. Volatile is
-     * re-applied at the dereference below, as everywhere else in this file. */
     void *va = src->read_ack_va;
     if (!va) return;
     volatile uint64_t *reg = (volatile uint64_t *)va;
     uint64_t cur = *reg;
     uint64_t nxt = (cur & src->read_ack_preserve) | src->read_ack_write;
     *reg = nxt;
-    (void)*reg;            /* read-back to enforce ordering */
+    (void)*reg;
 }
 
-/* Process one source's GESB. Returns 1 if an event was acked, 0 if no
- * pending error, -1 on corrupt. Safe to call from K-Core context;
- * uses non-blocking primitives in the hot path. */
 static int process_source_gesb(apei_ghes_source_t *src) {
     if (!src || !(src->flags & SRC_IN_USE) || !src->gesb_va) return 0;
     volatile gesb_header_t *hdr = (volatile gesb_header_t *)src->gesb_va;
     uint32_t status = __atomic_load_n((uint32_t *)&hdr->block_status, __ATOMIC_ACQUIRE);
-    if (status == 0) return 0;          /* no error pending */
+    if (status == 0) return 0;
 
     uint32_t data_len = hdr->data_length;
     if (data_len > src->gesb_len - sizeof(gesb_header_t)) {
         __atomic_fetch_add(&g_stat_corrupt_records, 1, __ATOMIC_RELAXED);
-        /* Clear block_status to let firmware advance. */
         __atomic_store_n((uint32_t *)&hdr->block_status, 0u, __ATOMIC_RELEASE);
         ghes_read_ack(src);
         return -1;
     }
 
-    /* Iterate Generic Error Data Entries. Bit 13:4 of block_status
-     * reports entry count but we walk via byte budget so a stale count
-     * cannot drive us off the end. */
     const uint8_t *p   = (const uint8_t *)(uintptr_t)(src->gesb_va) + sizeof(gesb_header_t);
     uint32_t remaining = data_len;
     uint32_t entries   = 0;
@@ -452,9 +382,6 @@ static int process_source_gesb(apei_ghes_source_t *src) {
         entries++;
     }
 
-    /* Acknowledge: W1C block_status (firmware armed it; OS clears it to
-     * indicate consumption). For v2 sources also walk the Read-Ack
-     * register protocol. */
     __atomic_store_n((uint32_t *)&hdr->block_status, 0u, __ATOMIC_RELEASE);
     ghes_read_ack(src);
 
@@ -466,7 +393,6 @@ static int process_source_gesb(apei_ghes_source_t *src) {
     return 1;
 }
 
-/* ─── Delivery: Polled ──────────────────────────────────────────── */
 
 void apei_ghes_poll_tick(void) {
     if (!g_initialized) return;
@@ -477,18 +403,14 @@ void apei_ghes_poll_tick(void) {
     for (uint32_t i = 0; i < g_source_count; i++) {
         apei_ghes_source_t *src = &g_sources[i];
         if (!(src->flags & SRC_IN_USE)) continue;
-        if (src->notify_type != 0 && src->notify_type != 1) continue;  /* Polled / External-IRQ both polled */
+        if (src->notify_type != 0 && src->notify_type != 1) continue;
         if (now < src->next_poll_tsc) continue;
         src->next_poll_tsc = now + (uint64_t)src->poll_interval_ms * tsc_ms;
         (void)process_source_gesb(src);
     }
 }
 
-/* ─── Delivery: NMI ─────────────────────────────────────────────── */
 
-/* The walk, on a K-Core, once per knock on the source. The door opens
- * first: an NMI that lands during the walk brings another visit, and a visit
- * that finds the block already acknowledged returns at once. */
 static void nmi_worker(void *ctx) {
     apei_ghes_source_t *src = (apei_ghes_source_t *)ctx;
     KnockOpen(&src->knock);
@@ -508,14 +430,11 @@ bool apei_ghes_nmi_check(void) {
         volatile gesb_header_t *hdr = (volatile gesb_header_t *)src->gesb_va;
         if (__atomic_load_n((uint32_t *)&hdr->block_status, __ATOMIC_ACQUIRE) == 0) continue;
         any = true;
-        /* The source's own knock: allocation-free, never dropped, and a
-         * burst of NMIs for one block is one walk. */
         KnockOn(&src->knock);
     }
     return any;
 }
 
-/* ─── Delivery: SCI ─────────────────────────────────────────────── */
 
 uint32_t apei_ghes_sci_check(void) {
     if (!g_initialized) return 0;
@@ -530,11 +449,9 @@ uint32_t apei_ghes_sci_check(void) {
     return fired;
 }
 
-/* ─── Simulate (test-only) ──────────────────────────────────────── */
 
 uint32_t apei_ghes_simulate(uintptr_t gesb_phys, uint32_t gesb_len) {
     if (!g_initialized) return 0;
-    /* Find or create a slot bound to this synthetic GESB. */
     apei_ghes_source_t local = {0};
     local.source_id        = 0xFFFF;
     local.notify_type      = 0;
@@ -543,14 +460,11 @@ uint32_t apei_ghes_simulate(uintptr_t gesb_phys, uint32_t gesb_len) {
     local.poll_interval_ms = 0;
     local.gesb_phys        = gesb_phys;
     local.gesb_len         = gesb_len;
-    /* The simulate caller hands a kernel-VA buffer via gesb_phys
-     * (we don't actually map mmio in test mode). Reuse it directly. */
     local.gesb_va = (void *)gesb_phys;
     int r = process_source_gesb(&local);
     return (r > 0) ? 1u : 0u;
 }
 
-/* ─── Telemetry ─────────────────────────────────────────────────── */
 
 void apei_ghes_get_stats(apei_ghes_stats_t *out) {
     if (!out) return;

@@ -1,4 +1,3 @@
-// Baked 80-bit (x, MPFR-CR-ref) vectors for erfc — GENERATED, do not edit.
 static const CrVec kErfcVec[] = {
 {0x8000000000000000ULL,0x3FFDu,0xB942AC7734A7DDBFULL,0x3FFEu},
 {0x8000000000000000ULL,0x3FFEu,0xF5810A3E7122DD43ULL,0x3FFDu},

@@ -1,12 +1,3 @@
-/*
- * System Deck — helpers (Phase 12: post-prefix-chain).
- *
- * The legacy switch-style dispatcher and per-opcode helpers are gone. All
- * system ops now live in system_ops.c on the Manifest path. This file
- * retains the one helper that survived the migration:
- *
- *   ipc_copy_to_heap — used by system.route / system.broadcast
- */
 
 #include "system_deck.h"
 #include "klib.h"
@@ -23,10 +14,6 @@ uint64_t cabin_heap_deposit(process_t *target, const void *kbuf, uint32_t length
     uint32_t pages_needed = (length + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
     uint64_t bytes_needed = (uint64_t)pages_needed * PMM_PAGE_SIZE;
 
-    /* Atomically reserve a unique vaddr range. Plain `target_vaddr =
-     * buf_heap_next; … buf_heap_next += …` was not safe: two senders on
-     * different cores could read the same buf_heap_next, both write to
-     * the same target_vaddr, and stomp each other's payload. */
     uint64_t target_vaddr = __atomic_fetch_add(&target->cabin->buf_heap_next,
                                                bytes_needed,
                                                __ATOMIC_ACQ_REL);
@@ -43,9 +30,6 @@ uint64_t cabin_heap_deposit(process_t *target, const void *kbuf, uint32_t length
         }
     }
 
-    /* Page-walk-copy the kernel buffer into the freshly-mapped target pages.
-     * commit_out walks each page, so a multi-page target range (whose frames
-     * pmm_alloc may hand out non-contiguously) is delivered correctly too. */
     error_t crc = vmm_user_buf_commit_out(target->cabin->vmm, target_vaddr,
                                           kbuf, length);
     if (crc != OK) return 0;
@@ -59,11 +43,6 @@ uint64_t ipc_copy_to_heap(process_t *sender, process_t *target,
         return 0;
     }
 
-    /* Page-walk-copy the sender payload into a kernel bounce buffer. A
-     * straddling source range is copied across every backing frame; the old
-     * vmm_translate_user_addr clamped the range to its first page and the
-     * memcpy below overran into whatever physical frame happened to follow
-     * it, delivering a foreign frame's bytes to the target. */
     void *kbuf = vmm_user_buf_in(sender->cabin ? sender->cabin->vmm : NULL,
                                  src_addr, length);
     if (!kbuf) return 0;

@@ -1,25 +1,3 @@
-/*
- * BoxOS — UEFI Wakeup Time bridge (UEFI 2.10 §8.3.2-3).
- *
- * GetWakeupTime / SetWakeupTime program the platform's wake-alarm RTC
- * line — the same hardware that fires the ACPI wake-from-S5 event after
- * a scheduled interval. On real hardware this is backed by the legacy
- * 0x70/0x71 RTC chip in conjunction with the chipset's RTC_ALARM logic
- * (Intel PCH "Wake from RTC Alarm" enable bit in PMC_SS_PM_CFG / SLP_S3
- * generation gate, mediated by firmware behind the SetWakeupTime ABI).
- *
- * Why a kernel wrapper instead of writing CMOS directly:
- *   - Multiple OEM SKUs route the alarm through ME/PSP firmware policy,
- *     which the legacy CMOS path bypasses → "set" appears to succeed
- *     but firmware overrides on the next AC cycle.
- *   - UEFI spec mandates firmware honour SetWakeupTime even on platforms
- *     where the wake source is on the EC or PCH PMC; the firmware knows
- *     the right gates.
- *
- * Per UEFI 2.10 §8.3 "if the platform does not support a wakeup timer,
- * the SetWakeupTime function should return EFI_UNSUPPORTED" — we just
- * propagate that status.
- */
 
 #include "efi.h"
 #include "efi_runtime_internal.h"
@@ -53,10 +31,6 @@ EfiStatus efi_set_wakeup_time(uint8_t enabled, EfiTime *time)
     EfiRuntimeServices *rt = efi_rt_get();
     if (!rt || !rt->set_wakeup_time) return EFI_STATUS_UNSUPPORTED;
 
-    /* When disabling, UEFI 2.10 §8.3.3: "If Enable is FALSE then Time
-     * is ignored and the wakeup alarm is cleared." We still pass `time`
-     * through as some firmware checks it for validity even when
-     * disabling — being explicit costs nothing. */
     uint64_t rflags, t0;
     efi_rt_lock(&rflags);
     efi_rt_watch_start(&t0);
@@ -65,10 +39,6 @@ EfiStatus efi_set_wakeup_time(uint8_t enabled, EfiTime *time)
     efi_rt_watch_end("SetWakeupTime", t0);
     efi_rt_unlock(rflags);
 
-    /* Publish Touch event so userspace power-policy daemons can confirm
-     * that the alarm has actually armed. Some firmware silently fails
-     * SetWakeupTime when the requested time is in the past — surface
-     * the firmware-returned status alongside the requested datetime. */
     struct {
         uint8_t  enabled;
         uint8_t  _pad[3];

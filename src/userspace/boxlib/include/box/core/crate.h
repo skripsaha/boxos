@@ -8,12 +8,6 @@ extern "C" {
 #include "box/types.h"
 #include "boxos_crate.h"
 
-/*
- * box/crate.h — userspace helpers for Crate descriptors.
- *
- * The Crate type itself comes from the shared ABI header boxos_crate.h.
- * This file adds builder convenience for placing Crates in cabin heap.
- */
 
 INLINE void CrateInit(Crate *c)
 {
@@ -67,4 +61,4 @@ INLINE void CrateSetInOut(Crate *c, void *buf, uint64_t size, uint64_t capacity)
 }
 #endif
 
-#endif /* BOX_CRATE_H */
+#endif

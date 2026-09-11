@@ -6,7 +6,6 @@
 #include "../tagfs_constants.h"
 #include "../../core/error/error.h"
 
-// Self-Healing with Metadata Mirroring
 
 #define HEAL_MAGIC              0x4845414C
 #define HEAL_VERSION            1
@@ -57,10 +56,10 @@ typedef struct {
     uint32_t magic;
     uint32_t version;
     HealMirrorEntry mirrors[HEAL_MIRROR_COUNT];
-    uint32_t mirror_head;   // next slot to use when mirroring a new block (round-robin)
+    uint32_t mirror_head;
     HealCorruptionRecord records[HEAL_MAX_RECORDS];
     uint32_t record_count;
-    uint32_t record_head;   // next slot to write (post-increment ring pointer)
+    uint32_t record_head;
     uint32_t scrub_block_start;
     uint32_t scrub_block_current;
     uint64_t last_scrub_time;
@@ -72,7 +71,6 @@ typedef struct {
     bool initialized;
 } HealState;
 
-// Public API
 error_t TagFS_SelfHealInit(void);
 void TagFS_SelfHealShutdown(void);
 
@@ -97,4 +95,4 @@ error_t TagFS_SelfHealClearRecords(void);
 bool TagFS_SelfHealIsInitialized(void);
 uint32_t TagFS_SelfHealComputeCrc32(const uint8_t *data, uint32_t length);
 
-#endif // SELF_HEAL_H
+#endif

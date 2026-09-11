@@ -1,6 +1,3 @@
-/*
- * system.c — userspace process/buffer/tag/perf wrappers (Phase 12: Manifest-only).
- */
 
 #include "box/system.h"
 #include "box/core/manifest.h"
@@ -11,13 +8,10 @@
 #include "box/core/result.h"
 #include "box/string.h"
 #include "box/error.h"
-#include "box/timeouts.h" /* BOX_ANSWER_GUARANTEED — every op here is answered */
-#include "box/memory.h"   /* strand_pool_flush_self — main-pool flush at exit */
-#include "boxos_decks.h"  /* SYSTEM_OP_* opcodes — single source */
+#include "box/timeouts.h"
+#include "box/memory.h"
+#include "boxos_decks.h"
 
-/* SYSTEM_OP_* opcodes come from boxos_decks.h (included via box headers).
- * Local aliases below keep call sites readable without redefining the
- * numeric values. */
 #define SYS_PROC_SPAWN  SYSTEM_OP_PROC_SPAWN
 #define SYS_PROC_KILL   SYSTEM_OP_PROC_KILL
 #define SYS_PROC_INFO   SYSTEM_OP_PROC_INFO
@@ -36,14 +30,8 @@
 #define HW_SYSTEM_REBOOT    0x80
 #define HW_SYSTEM_SHUTDOWN  0x81
 
-/* Upper bound on a caller-supplied tag augment for proc_exec_tagged. Mirrors
- * the kernel PROCESS_TAG_SIZE (256) — the child's tag string can hold at most
- * that many bytes — and fits inside the 256-byte MfCall1 param region. */
 #define PROC_EXEC_TAGS_MAX 256
 
-/* =========================================================================
- *  Process lifecycle
- * ========================================================================= */
 
 int proc_cpu_time(uint64_t *out_us)
 {
@@ -71,23 +59,14 @@ int process_gone(uint32_t pid, uint32_t generation, int32_t *out_exit)
     memcpy(params,     &pid,        4);
     memcpy(params + 4, &generation, 4);
 
-    /* No deadline, and here that is a statement about the kernel rather than
-     * optimism: the op parks only on an incarnation it has just confirmed is
-     * live, and the single place a life ends owes every parked waiter an
-     * answer. A child may legitimately run for hours — a clock would only be
-     * able to lie about that — while a reply that never comes is a kernel
-     * defect, which Nightwatch can now see precisely because this wait is a
-     * real park rather than a userspace spin. */
     Result r;
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_PROCESS_GONE,
                      params, sizeof(params),
                      NULL, 0,
                      NULL, 0, NULL,
-                     0 /* no deadline */, &r);
+                     0 , &r);
     if (rc != 0) return box_fail(rc);
 
-    /* The disposition rides in data_length as a value (proc_exit.h): >= 0 is
-     * the code the process passed to exit(), negative is how it was ended. */
     if (out_exit) *out_exit = (int32_t)r.data_length;
     return 0;
 }
@@ -107,7 +86,6 @@ int proc_info(uint16_t pid, proc_info_t *info)
     if (rc != 0) return box_fail(rc);
     if (out_actual < 32) return -ERR_INTERNAL;
 
-    /* Layout: [u32 pid][u32 state][i32 score][u32 _pad][u64 cstart][u64 csize][char tags[]] */
     uint32_t blob_pid, state;
     int32_t  score;
     memcpy(&blob_pid, out + 0,  4);
@@ -117,7 +95,7 @@ int proc_info(uint16_t pid, proc_info_t *info)
     info->pid          = (uint16_t)blob_pid;
     info->state        = (uint8_t)state;
     info->priority     = (uint8_t)((score < 0) ? 0 : (score > 255 ? 255 : score));
-    info->memory_usage = 0;  /* not exposed by the new op */
+    info->memory_usage = 0;
     return OK;
 }
 
@@ -130,18 +108,12 @@ int tls_set_fsbase(uint64_t base)
     return box_fail(rc);
 }
 
-/* runtime_init.c — .fini_array + __cxa_finalize teardown (idempotent). */
 void __box_runtime_fini(void);
 
 void exit(int exit_code)
 {
-    /* Static destructors / atexit callbacks may still print — run them
-     * BEFORE the final io_flush so their output reaches the console. */
     __box_runtime_fini();
 
-    /* Ф20e — return the main strand's StrandPool cache to the global heap after
-     * all destructors have run (they may still free), so heap leak diagnostics
-     * see a quiesced heap with no blocks held out in the magazine. */
     strand_pool_flush_self();
 
     io_flush();
@@ -151,23 +123,10 @@ void exit(int exit_code)
 
 void _Exit(int exit_code)
 {
-    /* params:[u32 target_pid][i32 exit_code] — target 0 means self exit; the
-     * code rides into SysProcKill's self-exit disposition so process:died
-     * carries the real exit code (masked to [0, INT32_MAX] kernel-side). This
-     * is the ONLY exit signal now: observers watch the process:died Touch
-     * (which also fires on crash), so exit() sends the spawner nothing. */
     struct __attribute__((packed)) { uint32_t target; int32_t code; } kill_param = {
         0, (int32_t)exit_code
     };
 
-    /* Asked ONCE. Nothing stands between a self-kill and its answer — no
-     * medium, no other process — and a self-kill that was honoured does not
-     * come back: the process is PROC_DONE before the guide can answer it,
-     * and a corpse still on its core until the next tick only spins below.
-     * What stood here was three tries with a yield between, a counter over a
-     * ring-full refusal that pocket_submit no longer gives (it waits for
-     * room). A refusal that does come back is therefore a kernel defect, not
-     * contention to be out-waited: name it, and stay parked. */
     int kill_rc = MfCall1(DECK_SYSTEM, SYS_PROC_KILL,
                           &kill_param, sizeof(kill_param),
                           NULL, 0, NULL, 0, NULL,
@@ -175,10 +134,6 @@ void _Exit(int exit_code)
     if (kill_rc != 0)
         kdbg_print("[boxlib] _Exit(): self-kill refused rc=%d — kernel defect; halting here", kill_rc);
 
-    /* If the kernel honoured kill we will not run another instruction.
-     * If it didn't (or returned and somehow rescheduled us), park the
-     * process indefinitely so we don't fall through to undefined code.
-     * cpu_pause keeps the core friendly under contention. */
     while (1) {
         __asm__ volatile("pause");
     }
@@ -189,8 +144,6 @@ int proc_exec_gen(const char *line, const char *tags, uint32_t *out_gen)
     if (out_gen) *out_gen = 0;
     if (!line) return -ERR_INVALID_ARGUMENT;
 
-    /* The program is the line's first word; the whole line, as typed, is the
-     * program's Luggage. Leading blanks are not part of what was said. */
     while (*line == ' ' || *line == '\t') line++;
     size_t name_len = 0;
     while (line[name_len] != '\0' && line[name_len] != ' ' && line[name_len] != '\t') name_len++;
@@ -201,10 +154,9 @@ int proc_exec_gen(const char *line, const char *tags, uint32_t *out_gen)
     if (tags && tags[0]) {
         size_t tlen = strlen(tags);
         if (tlen >= PROC_EXEC_TAGS_MAX) return -ERR_INVALID_ARGUMENT;
-        pbuf = tags; psize = (uint16_t)tlen;   /* strlen, no NUL — kernel bounds + NUL-terminates */
+        pbuf = tags; psize = (uint16_t)tlen;
     }
 
-    /* in_crate: [name][NUL][the line as typed]. */
     size_t crate_len = name_len + 1 + line_len;
     char  *crate     = malloc(crate_len);
     if (!crate) return -ERR_NO_MEMORY;
@@ -212,31 +164,19 @@ int proc_exec_gen(const char *line, const char *tags, uint32_t *out_gen)
     crate[name_len] = '\0';
     memcpy(crate + name_len + 1, line, line_len);
 
-    /* 8-byte out: the kernel writes {pid, generation} when the crate fits both.
-     * out_actual tells us whether the generation half actually arrived. */
     uint32_t out_blob[2] = { 0, 0 };
     uint32_t out_actual = 0;
-    /* WITHOUT a deadline, deliberately. Spawn reads the program off the
-     * medium INSIDE this call — on a throttled stick that is minutes, and a
-     * guessed budget here split one fact into two lies: the caller was told
-     * "refused" while the kernel went on to start the child ("late"). The
-     * reply is guaranteed either way — success or a real error — so there
-     * is nothing for a timer to guard; an answer that never comes is a
-     * kernel defect Nightwatch names, not something to paper over. */
     int rc = MfCall1(DECK_SYSTEM, SYS_PROC_EXEC,
-                     pbuf, psize,                  /* params = caller-tag augment */
-                     crate, (uint32_t)crate_len,   /* in_crate = name, NUL, line */
+                     pbuf, psize,
+                     crate, (uint32_t)crate_len,
                      out_blob, sizeof(out_blob), &out_actual,
-                     0 /* no deadline */, NULL);
+                     0 , NULL);
     free(crate);
     if (rc != 0) return box_fail(rc);
     if (out_gen) *out_gen = (out_actual >= 8) ? out_blob[1] : 0;
     return (int)out_blob[0];
 }
 
-/* proc_exec_tagged / proc_exec are the generation-agnostic spellings: the wire
- * is identical (the kernel still pid-gates the 8-byte out), they just discard
- * the generation. Existing callers keep their int-pid return unchanged. */
 int proc_exec_tagged(const char *filename, const char *tags)
 {
     return proc_exec_gen(filename, tags, NULL);
@@ -246,9 +186,9 @@ int proc_exec(const char *filename) { return proc_exec_tagged(filename, NULL); }
 
 int proc_kill(uint32_t pid)
 {
-    if (pid == 0)                 return -ERR_INVALID_ARGUMENT; /* 0 == self-exit in kernel; use exit() */
-    if (pid == cabin_info()->pid) return -ERR_INVALID_ARGUMENT; /* self-termination is exit()'s job */
-    uint32_t target = pid;                                      /* 4-byte form -> kill-other -> PROC_EXIT_KILLED */
+    if (pid == 0)                 return -ERR_INVALID_ARGUMENT;
+    if (pid == cabin_info()->pid) return -ERR_INVALID_ARGUMENT;
+    uint32_t target = pid;
     int rc = MfCall1(DECK_SYSTEM, SYS_PROC_KILL,
                      &target, (uint16_t)sizeof(target),
                      NULL, 0, NULL, 0, NULL,
@@ -262,9 +202,6 @@ int proc_finish(uint32_t pid, uint32_t generation)
     if (pid == 0)                 return -ERR_INVALID_ARGUMENT;
     if (pid == cabin_info()->pid) return -ERR_INVALID_ARGUMENT;
 
-    /* 12-byte form: [u32 pid][i32 code][u32 generation]. The code is unread
-     * for a kill-other — the one ending never chose it — but it holds the
-     * place the 8-byte form defined, so the three forms stay one layout. */
     uint32_t params[3] = { pid, 0u, generation };
     int rc = MfCall1(DECK_SYSTEM, SYS_PROC_KILL,
                      params, (uint16_t)sizeof(params),
@@ -273,13 +210,8 @@ int proc_finish(uint32_t pid, uint32_t generation)
     return box_fail(rc);
 }
 
-/* Where the crew answer starts and how big a record's fixed half is —
- * boxos_decks.h SYSTEM_OP_PROC_CREW holds the layout itself. */
 #define PROC_CREW_HEADER  8u
 #define PROC_CREW_FIXED   24u
-/* First ask, and the ceiling the kernel's own bounce keeps. Between them the
- * ask doubles: a crew of three that answers in 8 KiB costs one syscall, and a
- * crew of a thousand costs five rather than a guessed allocation. */
 #define PROC_CREW_FIRST_ASK  8192u
 #define PROC_CREW_MAX_ASK    262144u
 
@@ -315,9 +247,6 @@ int proc_crew(const char *tag, ProcMate **out_mates, uint32_t *out_total)
         memcpy(&delivered, blob + 0, sizeof(uint32_t));
         memcpy(&total,     blob + 4, sizeof(uint32_t));
 
-        /* Everyone who wears the tag is in hand, or the room is at the
-         * ceiling and what came back is what there was room for — said as a
-         * count either way, never as a silent truncation. */
         if (delivered >= total || cap >= PROC_CREW_MAX_ASK) break;
         cap = cap * 2u > PROC_CREW_MAX_ASK ? PROC_CREW_MAX_ASK : cap * 2u;
     }
@@ -325,8 +254,6 @@ int proc_crew(const char *tag, ProcMate **out_mates, uint32_t *out_total)
     if (out_total) *out_total = total;
     if (delivered == 0) { free(blob); return 0; }
 
-    /* One allocation holds the array and every tag string after it, so the
-     * caller frees once and no member outlives its own name. */
     size_t names = (size_t)got - PROC_CREW_HEADER
                  - (size_t)delivered * PROC_CREW_FIXED;
     size_t bytes = (size_t)delivered * sizeof(ProcMate) + names + delivered;
@@ -358,9 +285,6 @@ int proc_crew(const char *tag, ProcMate **out_mates, uint32_t *out_total)
     return (int)delivered;
 }
 
-/* =========================================================================
- *  Tags
- * ========================================================================= */
 
 static int proc_tag_op(const char *tag, uint16_t opcode, uint8_t *out_byte)
 {
@@ -394,15 +318,9 @@ int proc_tag_check(const char *tag, bool *has_tag)
     return OK;
 }
 
-/* =========================================================================
- *  System power
- * ========================================================================= */
 
 int reboot(void)
 {
-    /* hw.system.reboot is noreturn on success; reaching the return is always
-     * a failure, so surface the real cause (or ERR_INTERNAL if the call came
-     * back OK yet the machine did not reboot). */
     int rc = MfCall1(DECK_HARDWARE, HW_SYSTEM_REBOOT,
                      NULL, 0, NULL, 0, NULL, 0, NULL,
                      BOX_ANSWER_GUARANTEED, NULL);
@@ -448,9 +366,6 @@ int sysinfo(system_info_t *info)
     return 0;
 }
 
-/* =========================================================================
- *  Filesystem maintenance / telemetry
- * ========================================================================= */
 
 int defrag(uint32_t file_id, uint32_t target_block)
 {
@@ -489,9 +404,6 @@ int perf_dump(void)
     return box_fail(rc);
 }
 
-/* =========================================================================
- *  EFI / Secure Boot introspection
- * ========================================================================= */
 
 int efi_info(efi_info_t *out)
 {

@@ -1,21 +1,3 @@
-/*
- * video.c — public Video* API surface.
- *
- * Translates the long-standing Video* names (called from kprintf, klib_print,
- * hardware_ops, panic/banner code, etc.) into Canvas operations.  Module-
- * local state is limited to:
- *   • g_cur_fg / g_cur_bg — the current colour pair, full #RRGGBB.  Lives
- *     here because the Canvas accepts an explicit per-call pair; the running
- *     default is a concern of the API surface, not the engine.  The kernel's
- *     own attribute paths enter through VideoSetColor, which converts a
- *     4+4-bit attribute to its exact palette RGB — the VGA backend's
- *     draw-time quantisation then reproduces the identical attribute byte.
- *   • g_display_mode — coarse-grained enum so callers (main.c boot log)
- *     can report whether GOP or VGA-text is active.
- *
- * The backend switch (VGA text → GOP under UEFI) goes through
- * CanvasReplaceBackend so cells survive the transition.
- */
 
 #include "video.h"
 #include "canvas.h"
@@ -24,12 +6,9 @@
 #include "klib.h"
 
 static DisplayMode g_display_mode = DISPLAY_VGA_TEXT;
-static uint32_t    g_cur_fg;      /* set in VideoInit */
+static uint32_t    g_cur_fg;
 static uint32_t    g_cur_bg;
 
-/* =========================================================================
- *  Lifecycle
- * ========================================================================= */
 
 void VideoInit(void)
 {
@@ -67,9 +46,6 @@ void VideoNotifyReady(void)
     CanvasNotifyReady();
 }
 
-/* =========================================================================
- *  Mode + colour
- * ========================================================================= */
 
 DisplayMode VideoGetMode(void) { return g_display_mode; }
 
@@ -91,9 +67,6 @@ void VideoGetColorRgb(uint32_t *fg, uint32_t *bg)
     if (bg) *bg = g_cur_bg;
 }
 
-/* =========================================================================
- *  Print path
- * ========================================================================= */
 
 void VideoPrintCharRgb(char ch, uint32_t fg, uint32_t bg)
 {
@@ -118,9 +91,6 @@ void VideoPrintNewline(void)
     CanvasPrintChar('\n', g_cur_fg, g_cur_bg);
 }
 
-/* =========================================================================
- *  Screen ops
- * ========================================================================= */
 
 void VideoClearScreenRgb(uint32_t fg, uint32_t bg)
 {
@@ -135,9 +105,6 @@ void VideoClearLineRgb(int line, uint32_t fg, uint32_t bg)
 bool VideoPaintCells(uint32_t row, uint32_t col, uint32_t height, uint32_t width,
                      const TextCell *cells)
 {
-    /* No sentinel resolution here: the pair in a painted cell is already
-     * concrete. Userspace resolves before the wire (box/vga.h), and the
-     * kernel's own callers pass what they mean. */
     return CanvasPaint(row, col, height, width, cells);
 }
 
@@ -151,9 +118,6 @@ void VideoScrollUp(void)
     CanvasScrollUp();
 }
 
-/* =========================================================================
- *  Cursor
- * ========================================================================= */
 
 void VideoSetCursor(int x, int y)       { CanvasSetCursor(x, y); }
 int  VideoGetCursorX(void)              { return CanvasGetCursorX(); }
@@ -163,9 +127,6 @@ void VideoUpdateCursor(void)            { CanvasUpdateCursor(); }
 int  VideoGetCols(void)                 { return CanvasGetCols(); }
 int  VideoGetRows(void)                 { return CanvasGetRows(); }
 
-/* =========================================================================
- *  Batch passthrough
- * ========================================================================= */
 
 void VideoBatchBegin(void)              { CanvasBatchBegin(); }
 void VideoBatchEnd(void)                { CanvasBatchEnd(); }

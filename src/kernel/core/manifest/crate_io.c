@@ -1,16 +1,3 @@
-/*
- * crate_io — page-walked Crate <-> kernel-buffer copy primitives.
- *
- * crate_read / crate_write copy a fixed-size payload between a user Crate and
- * a caller kernel buffer using the no-heap page-walk in vmm_user_buf_in_into /
- * vmm_user_buf_commit_out. A Crate payload that straddles a page boundary is
- * copied across every backing frame instead of being clipped to the first
- * page, which is what a raw vmm_translate_user_addr would do.
- *
- * crate_in_buf / crate_out_alloc / crate_out_commit / crate_buf_free are the
- * variable-size bounce helpers used by handlers that serialize a record whose
- * length is only known after it is built.
- */
 
 #include "crate_io.h"
 #include "klib.h"
@@ -27,7 +14,6 @@ error_t crate_read(const Crate *c, const OpContext *ctx, void *dst, uint64_t n)
         return vmm_user_buf_in_into(ctx->proc->cabin->vmm,
                                     (uintptr_t)c->addr, (size_t)n, dst);
     }
-    /* No cabin (kernel-internal selftest path). */
     memcpy(dst, (const void *)(uintptr_t)c->addr, (size_t)n);
     return OK;
 }
@@ -41,7 +27,7 @@ error_t crate_write(Crate *c, const OpContext *ctx, const void *src, uint64_t n)
     if (ctx && ctx->proc && ctx->proc->cabin) {
         error_t rc = vmm_user_buf_commit_out(ctx->proc->cabin->vmm,
                                              (uintptr_t)c->addr, src, (size_t)n);
-        if (rc != OK) return rc;   /* fail closed — leave size unchanged */
+        if (rc != OK) return rc;
     } else {
         memcpy((void *)(uintptr_t)c->addr, src, (size_t)n);
     }
@@ -56,8 +42,6 @@ void *crate_in_buf(const Crate *src, const OpContext *ctx)
     if (ctx && ctx->proc && ctx->proc->cabin) {
         return vmm_user_buf_in(ctx->proc->cabin->vmm, (uintptr_t)src->addr, (size_t)src->size);
     }
-    /* No cabin (kernel-internal caller) — snapshot the bytes so cleanup is
-     * uniform. */
     void *kbuf = kmalloc((size_t)src->size);
     if (!kbuf) return NULL;
     memcpy(kbuf, (const void *)(uintptr_t)src->addr, (size_t)src->size);

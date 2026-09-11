@@ -3,27 +3,7 @@
 #include "vmm.h"
 #include "io.h"
 
-/*
- * ERST (Error Record Serialization Table) runtime — ACPI 6.5 §18.5.
- *
- * Each "action" (BEGIN_WRITE, END_WRITE, BEGIN_READ, GET_STATUS,
- * GET_RECORD_IDENTIFIER, etc.) is represented in the firmware table as
- * a list of "instructions" the OS must replay in order. Instructions
- * move data between in/out registers and a single accumulator, with
- * loops/branches limited enough that we can execute them with a tiny
- * interpreter — no need to bring in a full AML stack.
- *
- * Public API:
- *   erst_run_action(action, in_value, out_value)
- *   erst_read_record(rec_id, buf, size)   — convenience wrapper
- *   erst_write_record(rec_id, buf, size)  — convenience wrapper
- *
- * The interpreter only implements the spec's "Serialization Instruction
- * Entry" semantics; the broader storage backend (BERT log block, NVRAM,
- * vendor-specific) lives on the firmware side.
- */
 
-/* Serialization Actions (Table 18-401). */
 enum erst_action {
     ERST_ACT_BEGIN_WRITE             = 0x00,
     ERST_ACT_BEGIN_READ              = 0x01,
@@ -43,7 +23,6 @@ enum erst_action {
     ERST_ACT_EXECUTE_TIMINGS         = 0x10,
 };
 
-/* Serialization Instructions (Table 18-402). */
 enum erst_instr {
     ERST_INS_READ_REGISTER           = 0x00,
     ERST_INS_READ_REGISTER_VALUE     = 0x01,
@@ -82,14 +61,6 @@ _Static_assert(sizeof(erst_entry_t) == 32, "ERST entry = 32 bytes");
 
 static acpi_erst_t* g_erst = NULL;
 
-/* The entry array, and how many of it are actually THERE.
- *
- * instruction_entry_count is a firmware-supplied number that used to be
- * returned as-is, and every loop over the array trusted it. A table that
- * declares more entries than its own header.length can hold sends those loops
- * reading past the end of the mapping — the count and the length are two
- * independent claims by the same firmware, and only one of them bounds real
- * memory. Take the smaller. */
 static erst_entry_t* erst_entries(uint32_t* count) {
     if (!g_erst) { *count = 0; return NULL; }
 
@@ -108,20 +79,6 @@ static erst_entry_t* erst_entries(uint32_t* count) {
     return (erst_entry_t*)((uint8_t*)g_erst + sizeof(acpi_erst_t));
 }
 
-/* SystemMemory GAS registers, mapped once each.
- *
- * gas_read and gas_write used to call vmm_map_mmio on every access and never
- * unmap. That is a leak anywhere; inside erst_run_action it is a weapon: the
- * interpreter runs up to 262144 instructions, every one of which may touch a
- * register, so firmware with a long enough action could ask the kernel for a
- * quarter of a million permanent MMIO mappings and the page-table pages under
- * them. An ERST action addresses a handful of distinct registers, so a handful
- * of slots is all it takes to make the mapping happen once.
- *
- * Not freed, deliberately: these registers are firmware-owned and live for the
- * kernel's lifetime, exactly like the ACPI tables themselves. */
-/* Longest STALL this interpreter will honour, in microseconds. Same value
- * Linux uses, and for the same reason: past it the table is wrong. */
 #define ERST_MAX_STALL_US 32000u
 
 #define GAS_MAP_SLOTS 8
@@ -195,21 +152,11 @@ static void gas_write(const acpi_gas_t* g, uint64_t v) {
     }
 }
 
-/* Run every instruction whose `action` matches `action_id`, threading
- * `value_in` through and writing the final accumulator to `*value_out`.
- *
- * Loop / branch caps: the spec says GOTO targets must be within the
- * same action's instructions; we additionally bound total ticks at
- * 256K to defeat malicious firmware. Returns 0 on success, -1 if no
- * matching entries, -2 on guard trip. */
 int erst_run_action(uint8_t action_id, uint64_t value_in, uint64_t* value_out) {
     uint32_t count = 0;
     erst_entry_t* base = erst_entries(&count);
     if (!base || count == 0) return -1;
 
-    /* Find first instruction for this action; iterate forward, honoring
-     * SKIP_NEXT_IF_TRUE / GOTO inside the contiguous run for this
-     * action. */
     uint32_t first = 0;
     bool found = false;
     for (uint32_t i = 0; i < count; i++) {
@@ -267,18 +214,6 @@ int erst_run_action(uint8_t action_id, uint64_t value_in, uint64_t* value_out) {
                 break;
             }
             case ERST_INS_STALL:
-                /* `value` is microseconds, and it comes from the firmware.
-                 * The interpreter's tick budget bounds how many instructions
-                 * run; it says nothing about how long ONE of them takes, and
-                 * an unbounded spin here is a table entry away from a machine
-                 * that never finishes booting. Linux caps the same instruction
-                 * at 32 ms for the same reason (FIRMWARE_MAX_STALL); a stall
-                 * longer than that is a malformed table, not a slow register.
-                 *
-                 * The spin itself is `outb 0x80`, which is roughly a
-                 * microsecond on legacy hardware and only roughly anything on
-                 * modern hardware — but ERST stalls exist to let a firmware
-                 * register settle, and erring long is the safe direction. */
                 if (e->value > ERST_MAX_STALL_US) {
                     debug_printf("[ERST] STALL of %lu us at pc=%u exceeds the "
                                  "%u us cap — table is malformed, skipping\n",
@@ -306,14 +241,10 @@ int erst_run_action(uint8_t action_id, uint64_t value_in, uint64_t* value_out) {
                     pc = (uint32_t)target;
                     continue;
                 }
-                /* Out-of-bounds target — terminate this action. */
                 pc = count;
                 continue;
             }
             case ERST_INS_SET_SRC_ADDR_BASE:
-                /* MOVE_DATA support is rare in published firmware and
-                 * needs an additional DRAM staging buffer; treat as
-                 * NOP here so the rest of the action still runs. */
                 break;
             case ERST_INS_SET_DST_ADDR_BASE:
                 break;
@@ -331,15 +262,10 @@ int erst_run_action(uint8_t action_id, uint64_t value_in, uint64_t* value_out) {
     return 0;
 }
 
-/* Bind g_erst when acpi_parse_apei sees the table. Called from there. */
 void acpi_erst_bind(acpi_erst_t* erst) {
     g_erst = erst;
 }
 
-/* Public convenience wrappers — every firmware does the same dance:
- *   BEGIN_*(record_id) -> EXECUTE_OPERATION -> CHECK_BUSY loop ->
- *   GET_COMMAND_STATUS -> END. We expose the loop, not every step,
- *   because clients only care about status. */
 static int erst_pump(uint8_t begin_action, uint64_t record_id,
                       uint64_t* out_status) {
     uint64_t v;

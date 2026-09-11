@@ -15,23 +15,6 @@
 
 acpi_state_t g_acpi = {0};
 
-/* ============================================================
- * Events noticed in the SCI handler and said from a K-Core.
- *
- * The handler runs in IRQ context, where TouchPublish is forbidden (it
- * takes registry and bucket locks and may kmalloc). Each event therefore
- * goes the way every interrupt-side event goes: into the Touch IRQ ring
- * under a name resolved in advance (TouchPublishIrqPair, touch.c), and
- * the K-Core that reads the ring publishes it. The names are resolved by
- * acpi_sci_arm, which is also what unmasks the line — the door opens only
- * after the names exist, so no event arrives nameless. Until then a
- * level-triggered SCI waits, masked, in the IOAPIC.
- *
- * GPE events all go on one name, "acpi:gpe", with the GPE index as the
- * payload word: a name per GPE bit would mean interning two hundred and
- * fifty-six names for events most machines never raise, and an interrupt
- * cannot intern the one it needs when it needs it.
- * ============================================================ */
 typedef struct {
     volatile TouchTag full;
     volatile TouchTag bare;
@@ -51,8 +34,6 @@ static void acpi_tag_resolve(AcpiTagPair *t, const char *name)
     __atomic_store_n(&t->bare, bare, __ATOMIC_RELEASE);
 }
 
-/* IRQ-side: the event's word (a PM1 status word, a GPE index) goes into the
- * Touch IRQ ring under the name resolved for it. */
 static void acpi_publish_irq(const AcpiTagPair *t, uint16_t word)
 {
     TouchTag full = __atomic_load_n(&t->full, __ATOMIC_ACQUIRE);
@@ -60,9 +41,6 @@ static void acpi_publish_irq(const AcpiTagPair *t, uint16_t word)
     TouchPublishIrqPair(full, bare, &word, sizeof(word), 0, TOUCH_FLAG_KERNEL);
 }
 
-/* ============================================================
- * GPE registry — one C callback per GPE bit. Lookup is O(1).
- * ============================================================ */
 static acpi_gpe_handler_t g_gpe_handlers[ACPI_MAX_GPES];
 
 int acpi_gpe_register(uint16_t gpe, acpi_gpe_handler_t cb) {
@@ -76,25 +54,10 @@ void acpi_gpe_unregister(uint16_t gpe) {
     g_gpe_handlers[gpe] = NULL;
 }
 
-/*
- * ACPI sleep entry. ACPI 6.5 §16.1.
- *
- *   1. Resolve \_S<state> from the AML namespace (Package of bytes;
- *      [0] = SLP_TYPa, [1] = SLP_TYPb).
- *   2. Call \_PTS(state) if present — gives firmware a chance to
- *      prepare. We only *find* the method today; full TermList
- *      execution belongs to the AML executor that lives next to
- *      `aml_call_method` (Phase DD).
- *   3. Write SLP_TYP|SLP_EN to PM1a_CNT (and PM1b if PM1b_CNT != 0).
- *   4. For S1 the CPU immediately enters low-power state; on wake the
- *      firmware clears SLP_EN, runs \_WAK and returns control here.
- *   5. S5 path delegates to acpi_shutdown() so the dedicated soft-off
- *      sequence runs (it also masks IRQs etc.).
- */
 int acpi_enter_sleep(uint8_t state) {
     if (state < 1 || state > 5) return -1;
     if (!g_acpi.initialized || !g_acpi.fadt) return -2;
-    if (state == 5) acpi_shutdown();   /* noreturn */
+    if (state == 5) acpi_shutdown();
 
     char path[6] = { '\\', '_', 'S', '0' + (char)state, '_', 0 };
     uint64_t typa = 0;
@@ -103,16 +66,11 @@ int acpi_enter_sleep(uint8_t state) {
         debug_printf("[ACPI] \\_S%u not found in namespace\n", state);
         return -3;
     }
-    /* For SLP_TYPb we'd need a second integer; the namespace builder
-     * only captures the first int of a Package. Most platforms use
-     * the same value for both ports, which is the safe default. */
     uint16_t slp_typa = (uint16_t)(typa & 0x7);
     uint16_t slp_typb = slp_typa;
 
     debug_printf("[ACPI] entering S%u (SLP_TYPa=0x%x)\n", state, slp_typa);
 
-    /* Invoke \_PTS(state) and \_BFS(state) if present — the AML
-     * executor now handles integer-result methods. */
     {
         uint64_t arg = state;
         uint64_t ret = 0;
@@ -126,11 +84,6 @@ int acpi_enter_sleep(uint8_t state) {
         }
     }
 
-    /* Broadcast to subscribers before we tip the platform into the
-     * sleep state. Daemons can flush, persist, drop hardware claims.
-     * The hardware-halt path in system_halt.c already drained the
-     * deferred work for S5; for S1/S2/S3 this is the canonical event
-     * that says "going down". */
     struct { uint8_t state; uint16_t slp_typa; uint16_t slp_typb; } ev =
         { state, slp_typa, slp_typb };
     static const char *sleep_tags[] = {
@@ -147,22 +100,10 @@ int acpi_enter_sleep(uint8_t state) {
     if (pm1a) outw((uint16_t)pm1a, va);
     if (pm1b) outw((uint16_t)pm1b, vb);
 
-    /* On S1, control returns here on wake. Other states either reset
-     * the CPU (S2-S3) or never return (S4-S5). */
     debug_printf("[ACPI] resumed from S%u\n", state);
     return 0;
 }
 
-/* Dispatch every fired bit in `block_base..block_base+half_len`. Two
- * fan-outs in priority order:
- *   1. The C-callback registry (`acpi_gpe_register`) — fast in-kernel
- *      handlers (EC, thermal-zone). Runs first because subscribers there
- *      need the lowest latency.
- *   2. A Touch publish on "acpi:gpe" with the bit's index as the payload
- *      word — userspace daemons can hear GPE bits without writing kernel
- *      code. The publish is a ring claim and a knock (zero blocking), so it
- *      doesn't slow the IRQ path beyond the registry call.
- */
 static void gpe_dispatch_block(uint8_t* fired_bytes, uint8_t bytes,
                                 uint16_t gpe_base) {
     for (uint8_t b = 0; b < bytes; b++) {
@@ -173,35 +114,17 @@ static void gpe_dispatch_block(uint8_t* fired_bytes, uint8_t bytes,
             if (idx < ACPI_MAX_GPES && g_gpe_handlers[idx]) {
                 g_gpe_handlers[idx](idx);
             }
-            /* Said from a K-Core (TouchPublish takes kmalloc and walks the
-             * process list, both forbidden here): the index rides the Touch
-             * IRQ ring under the one GPE name. */
             acpi_publish_irq(&g_acpi_tag_gpe, idx);
             f = (uint8_t)(f & ~(1u << bit));
         }
     }
 }
 
-/* ============================================================
- * The power button
- * ============================================================
- *
- * The PM1 event block is one block with two halves of PM1_EVT_LEN/2 bytes
- * each: status first, enable second. The chipset raises a status bit whether
- * or not anybody asked for it, and raises an SCI only for the bits named in
- * the enable half.
- *
- * Nothing here had ever written that half. So on a real machine the button set
- * PWRBTN_STS, no interrupt was raised, and the kernel never heard about the
- * press at all — the only thing that turned the machine off was holding the
- * button down for four seconds, which is the chipset doing it without asking
- * anybody, and is exactly what the owner of this board had to do.
- */
 #define GAS_AS_SYSTEM_IO 1
 #define PM1_EN_PWRBTN    (1u << 8)
 
 typedef struct {
-    uint16_t status;        /* 0 when this half of the pair does not exist */
+    uint16_t status;
     uint16_t enable;
 } AcpiPm1Event;
 
@@ -213,9 +136,6 @@ static bool fadt_has_field(uint32_t len, size_t field_end) {
     return len >= field_end;
 }
 
-/* An I/O port for a PM1 event block, preferring what the extended field says.
- * Every x86 firmware puts these in I/O space; one that does not is one this
- * kernel would silently read the wrong bytes from, so it says so instead. */
 static uint16_t pm1_event_port(const acpi_gas_t *x, uint32_t legacy,
                                uint32_t fadt_len, size_t x_field_end,
                                const char *which)
@@ -237,8 +157,6 @@ static void acpi_pm1_events_locate(void)
     uint32_t flen = g_acpi.fadt->header.length;
     uint8_t  half = (uint8_t)(g_acpi.fadt->pm1_event_length / 2);
 
-    /* Two registers of at least sixteen bits each — the specification's own
-     * minimum. A block too small to hold them describes nothing usable. */
     if (half < 2) {
         kprintf("[ACPI] PM1 event block is %u byte(s) — too small to hold a "
                 "status and an enable register; the power button cannot be "
@@ -265,18 +183,6 @@ static void acpi_pm1_events_locate(void)
     }
 }
 
-/* Switch the button on, in both halves of the pair.
- *
- * PM1b is not a spare copy of PM1a: a chipset that has one reports part of its
- * event state there and nowhere else, and a driver that reads only PM1a leaves
- * a status bit standing that nothing will ever clear — which on a level-
- * triggered line means the interrupt never stops being asserted.
- *
- * Only the power button is enabled. The sleep button would raise events this
- * kernel has nothing to do with, and by the rule below an event nobody claims
- * is one the kernel acts on — arming a button whose meaning is "sleep" and
- * answering it with "power off" is worse than leaving it silent.
- */
 static void acpi_pm1_arm_power_button(void)
 {
     bool armed = false;
@@ -287,8 +193,6 @@ static void acpi_pm1_arm_power_button(void)
     for (int i = 0; i < 2; i++) {
         if (pair[i]->status == 0) continue;
 
-        /* A press from before this kernel existed is not a press for it to
-         * answer. Clear it before switching the line on. */
         outw(pair[i]->status, PM1_EN_PWRBTN);
 
         uint16_t en = inw(pair[i]->enable);
@@ -306,19 +210,6 @@ static void acpi_pm1_arm_power_button(void)
     }
 }
 
-/*
- * A press nobody has claimed is a press the kernel answers.
- *
- * The owner of a machine expects the button to turn it off. A program that
- * wants to be asked first says so by subscribing, and then the decision is
- * its own — save the file, refuse,
- * ask the person in front of it. Nobody subscribed means
- * nobody is going to answer, and waiting for an answer that is not coming is
- * how a button ends up doing nothing at all.
- *
- * There is no timer here and nothing to wait for: whether anyone is listening
- * is a question with an answer at the instant of the press.
- */
 static void acpi_power_button_answer(void)
 {
     TouchTag full = TOUCH_TAG_INVALID, bare = TOUCH_TAG_INVALID;
@@ -337,13 +228,6 @@ static void acpi_power_button_answer(void)
     system_halt(false);
 }
 
-/* Carried out of the interrupt handler on a knock (baton.h): the press is
- * noticed in the SCI and answered where waiting is allowed. On a machine with
- * K-Cores that is the drain core's guide loop, which is the context the
- * shutdown sequence documents that it needs; on a machine that is one core it
- * is the timer's own pump, gated on having interrupted user mode so no kernel
- * lock is held. Presses that land before the answer runs are one knock and
- * one answer; a press after the door opened is answered again. */
 static void acpi_power_button_answer_knocked(void *ctx);
 static Knock g_acpi_power_button_knock = {
     .baton  = { .next = NULL, .run = acpi_power_button_answer_knocked, .ctx = NULL },
@@ -357,22 +241,6 @@ static void acpi_power_button_answer_knocked(void *ctx)
     acpi_power_button_answer();
 }
 
-/*
- * SCI interrupt handler — fires for any ACPI-routed event:
- *   - PM1 status bits (power button, sleep button, RTC alarm, wake)
- *   - GPE block status (each device-described event)
- *   - GHES SCI-class notifications (fixed-source RAS errors)
- *
- * Without a full AML interpreter we cannot dispatch GPE handlers, so
- * this stub:
- *   1. Reads PM1a status,
- *   2. Acknowledges every set status bit by writing the same value back
- *      (W1C semantics on PM1_STS — required to clear the SCI line),
- *   3. Logs the power-button / sleep-button bits for visibility.
- *
- * The PM1 STATUS block is at PM1a_CNT - PM1_EVENT_LENGTH/2, but the
- * canonical FADT layout puts it in `pm1a_event_block`. We use that.
- */
 #define PM1_STS_PWRBTN  (1u << 8)
 #define PM1_STS_SLPBTN  (1u << 9)
 #define PM1_STS_RTC     (1u << 10)
@@ -383,35 +251,11 @@ static void acpi_sci_handler(void) {
         irqchip_send_eoi(g_acpi.fadt ? g_acpi.fadt->sci_interrupt : 9);
         return;
     }
-    /* Both halves of the pair. PM1b is not a spare copy of PM1a: a chipset
-     * that has one reports part of its event state there and nowhere else,
-     * and a status bit nobody clears holds a level-triggered line asserted
-     * for good. Only PM1a was ever read. */
     uint16_t sts_a = g_pm1a_event.status ? inw(g_pm1a_event.status) : 0;
     uint16_t sts_b = g_pm1b_event.status ? inw(g_pm1b_event.status) : 0;
 
     if (g_pm1a_event.status == 0 && g_pm1b_event.status == 0) goto eoi;
 
-    /*
-     * ‼ AN EVENT IS A STATUS BIT **AND** ITS ENABLE BIT (ACPI 6.5 §4.8.3.1.1)
-     *
-     * The hardware raises status bits whether or not the matching event is
-     * enabled — PWRBTN_STS, RTC_STS and WAK_STS all latch on their own — so a
-     * status word on its own says what the chipset has SEEN, not what it is
-     * asking this kernel to act on. The GPE walk further down has always got
-     * this right (`fired = s & e`); this half took the raw word.
-     *
-     * What that cost, on a real board: the machine ran fine for as long as no
-     * ACPI event happened at all, and the FIRST SCI of the session — raised by
-     * the chipset when a flash drive was pulled out of a USB port — made this
-     * handler read PM1, find PWRBTN_STS standing, conclude the power button
-     * had been pressed with nobody listening, and switch the machine off.
-     * Instantly, mid-session, with no warning. Nobody had touched the button.
-     *
-     * A port that is not there answers `inw` with 0xFFFF, which is every bit
-     * set — including the power button's. That is not an event either, and it
-     * is now told apart from one instead of being obeyed.
-     */
     if (sts_a == 0xFFFF && sts_b == 0xFFFF) {
         kprintf("[ACPI] both PM1 status ports read 0xFFFF — that is a port "
                 "answering nothing, not every event at once; ignoring\n");
@@ -423,30 +267,13 @@ static void acpi_sci_handler(void) {
     if (en_a == 0xFFFF) en_a = 0;
     if (en_b == 0xFFFF) en_b = 0;
 
-    /* Decisions are made on what is enabled; the CLEARING below still writes
-     * the raw word back, because a latched bit nobody acknowledges holds a
-     * level-triggered SCI asserted for good whether it was enabled or not. */
     uint16_t sts = (uint16_t)((sts_a & en_a) | (sts_b & en_b));
 
-    /* Every PM1 event class fires both a debug line (keeps the boot log
-     * useful) and a Touch publish (lets every userspace listener that
-     * subscribed to the matching tag wake up and react — power-manager,
-     * lockscreen, RTC alarm daemon, etc.). The wire payload is the raw
-     * PM1 status word so subscribers can decode flags they care about. */
-    /* Nothing below publishes from here: each event's word goes into the
-     * Touch IRQ ring under its name and is published by the K-Core that
-     * reads the ring (acpi_publish_irq). */
     if (sts & PM1_STS_PWRBTN) {
-        /* Said out loud, not with debug_printf: the next thing this does is
-         * turn the machine off, and the one line explaining why must survive
-         * into a shipped build. */
         kprintf("[ACPI] PM1 says the power button was pressed "
                 "(PM1a sts 0x%04x en 0x%04x, PM1b sts 0x%04x en 0x%04x)\n",
                 sts_a, en_a, sts_b, en_b);
         acpi_publish_irq(&g_acpi_tag_power_button, sts);
-        /* Answered where waiting is allowed: deciding what a press means ends
-         * either in a Touch delivery or in the whole shutdown sequence, and
-         * neither of those belongs in an interrupt handler. */
         KnockOn(&g_acpi_power_button_knock);
     }
     if (sts & PM1_STS_SLPBTN) {
@@ -462,31 +289,14 @@ static void acpi_sci_handler(void) {
         acpi_publish_irq(&g_acpi_tag_wake, sts);
     }
 
-    /* W1C: write each half's own bits back to clear them. Writing PM1a's
-     * value into PM1b would acknowledge events that never happened there and
-     * leave the ones that did. This is what drops the SCI line so the IOAPIC
-     * can re-arm. */
     if (sts_a) outw(g_pm1a_event.status, sts_a);
     if (sts_b) outw(g_pm1b_event.status, sts_b);
 
-    /* APEI/GHES SCI-notify path. Walks every HEST GHES source whose
-     * notify type == 3 (SCI), reads its Generic Error Status Block,
-     * routes Memory Error sections into mce_migrate_request and
-     * publishes Touch events for every other section. Production
-     * server firmware uses this delivery mode for SMI-correlated
-     * MCE events. */
     {
         extern uint32_t apei_ghes_sci_check(void);
         (void)apei_ghes_sci_check();
     }
 
-    /* GPE0 / GPE1 drain. The status and enable blocks live back-to-back
-     * inside each GPE block: STS at offset 0, EN at offset length/2.
-     * Walk byte-by-byte, mask STS against EN so we only clear events we
-     * armed, and W1C any bit that fired. Without an AML interpreter we
-     * cannot run the per-bit _Lxx / _Exx methods, so this acks the
-     * event and logs visibility but does not dispatch device-level
-     * work. That dispatch belongs to a future AML interpreter audit. */
     uint32_t gpe0 = g_acpi.fadt->gpe0_block;
     uint8_t  gpe0_len = g_acpi.fadt->gpe0_length;
     if (gpe0 && gpe0_len >= 2) {
@@ -537,19 +347,7 @@ void acpi_sci_register(void) {
         debug_printf("[ACPI] SCI GSI %u beyond IOAPIC range\n", sci);
         return;
     }
-    /*
-     * ACPI 6.5 §5.2.15: the SCI is a level-sensitive, shareable, active-low
-     * interrupt — and that is not the ISA bus default the IOAPIC applies to a
-     * line nobody described. Firmware usually supplies an Interrupt Source
-     * Override saying so, and is not required to.
-     *
-     * Without one the line was programmed edge-triggered and active high,
-     * which on a level, active-low line reads as asserted the moment it is
-     * unmasked and never asserts again after the first event is cleared. QEMU
-     * forgives it. A chipset does not.
-     */
     if (!ioapic_gsi_flags(sci, NULL)) {
-        /* polarity 11 = active low, trigger 11 = level */
         ioapic_describe_gsi(sci, 0x000F);
         kprintf("[ACPI] firmware described no override for the SCI — GSI %u "
                 "programmed level-triggered and active low, as the "
@@ -561,16 +359,6 @@ void acpi_sci_register(void) {
             "exist (acpi_sci_arm)\n", sci);
 }
 
-/* The door, after the names.
- *
- * Every event the SCI handler notices is said under a name it must already
- * hold — an interrupt cannot resolve one — and the names live in the Touch
- * registry, which comes up inside guide_init, long after the handler was
- * registered. So the line is unmasked here, once the names are resolved and
- * the APEI runtime the handler also consults is up. A level-triggered SCI
- * raised meanwhile waits in the IOAPIC and lands the moment the line opens:
- * nothing is lost by opening late, and everything would be lost by opening
- * early. The power button is armed last, for the same reason. */
 void acpi_sci_arm(void)
 {
     if (!g_acpi.initialized || !g_acpi.fadt) return;
@@ -590,11 +378,6 @@ void acpi_sci_arm(void)
     acpi_pm1_arm_power_button();
 }
 
-/* ACPI 6.5 §16.3.2: many real firmwares boot in PIC/SMI mode (SCI_EN=0).
- * The OS must write FADT.ACPI_ENABLE to FADT.SMI_CMD then poll PM1a_CNT
- * until bit 0 (SCI_EN) becomes 1 before any PM1 write will take effect.
- * UEFI implementations usually have SCI_EN=1 already; legacy BIOS often
- * doesn't. Idempotent. */
 static void acpi_enable_mode(void) {
     if (!g_acpi.fadt) return;
     uint32_t smi   = g_acpi.fadt->smi_command_port;
@@ -615,15 +398,11 @@ static void acpi_enable_mode(void) {
                  smi, byte);
     outb((uint16_t)smi, byte);
 
-    /* Spin for SCI_EN bit. Spec gives no max time; we cap at 3 seconds
-     * using a coarse delay so we don't hang the boot on a misbehaved
-     * firmware. */
     for (uint32_t i = 0; i < 3000; i++) {
         if (inw((uint16_t)pm1a) & 0x1) {
             debug_printf("[ACPI] SCI_EN raised after %u ms\n", i);
             return;
         }
-        /* ~1 ms IO delay — outb 0x80 is the classic post-port no-op. */
         for (uint32_t j = 0; j < 1000; j++) outb(0x80, 0);
     }
     debug_printf("[ACPI] timed out waiting for SCI_EN (firmware bug)\n");
@@ -651,9 +430,6 @@ acpi_error_t acpi_init(void) {
 
     g_acpi.initialized = true;
 
-    /* Switch the platform into ACPI mode if firmware booted us in
-     * legacy/SMI mode. Must happen after FADT is captured but BEFORE
-     * any PM1 write is attempted. */
     acpi_enable_mode();
 
     debug_printf("[ACPI] Initialization complete (HPET=%s MCFG=%s S5=%s)\n",
@@ -661,11 +437,6 @@ acpi_error_t acpi_init(void) {
                  g_acpi.mcfg.present ? "yes" : "no",
                  g_acpi.s5_found     ? "yes" : "fallback");
 
-    /* Broadcast capability bitmap so userspace daemons can decide what
-     * features to bring up (battery service only matters if S3 works,
-     * IOMMU service only if DMAR/IVRS exposed something, etc.).
-     * Bits are stable across boots: this is the wire format that
-     * userspace subscribers see. */
     uint32_t caps =
         (g_acpi.hpet.present ? (1u <<  0) : 0) |
         (g_acpi.mcfg.present ? (1u <<  1) : 0) |

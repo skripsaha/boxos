@@ -3,18 +3,6 @@
 #include "klib.h"
 #include "crypto.h"
 
-/*
- * The pass, once it has been believed.
- *
- * Copied out of the loaders' window rather than pointed at, for two reasons.
- * The block sits below one megabyte in memory nothing owns after the loader
- * has finished with it — the physical allocator never hands that range out,
- * but nothing stops a driver's bounce buffer or a stray write landing in it,
- * and a fact this load-bearing should not be re-read from a place the kernel
- * has no way to defend. The second reason is that everything below can then be
- * a pure read of a validated copy, which is what makes it safe to ask from
- * anywhere at any time.
- */
 static uint8_t  g_pass[BOARDING_PASS_BYTES];
 static bool     g_present = false;
 
@@ -23,22 +11,12 @@ static const BoardingPassHeader* pass_header(void)
     return (const BoardingPassHeader*)g_pass;
 }
 
-/* Where the stamp after this one starts. Stamps are four-byte aligned so that
- * a walk never has to know what any of them mean. */
 static uint16_t stamp_stride(uint16_t payload_bytes)
 {
     uint32_t total = (uint32_t)sizeof(BoardingStampHeader) + payload_bytes;
     return (uint16_t)((total + 3u) & ~3u);
 }
 
-/*
- * Is what is sitting at that address a boarding pass?
- *
- * Every length in the block is checked against the block, and every stamp
- * against what is left of it. The alternative is a kernel that walks whatever
- * the last thing to use that memory left behind, which on a machine where the
- * loader died halfway is exactly the situation this has to survive.
- */
 static bool pass_is_sound(const uint8_t* raw, unsigned* out_stamps,
                           bool* out_sealed)
 {
@@ -51,22 +29,6 @@ static bool pass_is_sound(const uint8_t* raw, unsigned* out_stamps,
     if (h->magic != BOARDING_PASS_MAGIC) {
         return false;
     }
-    /*
-     * The version guards the HEADER, and the header alone.
-     *
-     * The sixteen bytes are frozen — every field keeps its offset and its
-     * meaning for as long as there is a pass — and `header_bytes` is what
-     * finds the first stamp, so a block written by a LATER loader is walkable
-     * by this kernel: the stamps it knows it reads, the ones it does not it
-     * steps over by their own stated length. That is the arrangement the
-     * stamps exist for, and this test used to defeat it: any number it had
-     * not been compiled against threw away the whole pass, volume and all,
-     * and sent the Boardroom back to guessing by rule.
-     *
-     * Zero is the one number that cannot be a version: nothing that follows
-     * this contract writes it, so a block carrying it is not a pass whatever
-     * else it says.
-     */
     if (h->version == 0) {
         kprintf("[Boarding] the pass states version 0, which no loader "
                 "writes — ignoring it\n");
@@ -105,10 +67,6 @@ static bool pass_is_sound(const uint8_t* raw, unsigned* out_stamps,
         }
         if (s->kind == BOARDING_STAMP_SEAL &&
             s->bytes >= sizeof(BoardingSeal)) {
-            /* Its own stride, not the one this kernel would have written: a
-             * later loader may seal with a wider stamp, and "is it last" has
-             * to be asked with the length the stamp states for itself or an
-             * honest pass gets thrown away for growing. */
             seal_at     = at;
             seal_stride = stride;
             have_seal   = true;
@@ -123,23 +81,11 @@ static bool pass_is_sound(const uint8_t* raw, unsigned* out_stamps,
         return false;
     }
 
-    /*
-     * And now the one stamp that is about the block rather than the journey.
-     *
-     * The seal is written last and covers everything ahead of its own payload,
-     * so what is summed here is exactly what was walked above. A block that
-     * does not add up is not the block the loader wrote — it was half-written
-     * by a loader that died, or the firmware handed the page it lives in to
-     * something else before ExitBootServices — and believing it would mean
-     * mounting whatever volume its bytes now happen to name.
-     */
     if (have_seal) {
         const BoardingSeal* seal =
             (const BoardingSeal*)(raw + seal_at + sizeof(BoardingStampHeader));
         uint32_t covered = (uint32_t)seal_at + sizeof(BoardingStampHeader);
 
-        /* Last, always — that is what makes "everything ahead of it" the same
-         * span for the loader that summed it and the kernel that checks it. */
         if ((uint32_t)seal_at + seal_stride != h->used_bytes) {
             kprintf("[Boarding] the seal is not the last stamp on the pass "
                     "— ignoring it\n");
@@ -181,9 +127,6 @@ const void* BoardingPassStamp(uint16_t kind, uint16_t* out_bytes)
             }
             return g_pass + at + sizeof(BoardingStampHeader);
         }
-        /* A kind this kernel does not know is stepped over by the length the
-         * stamp states for itself. That is the whole of the arrangement that
-         * lets a loader learn something new without this file changing. */
         at = (uint16_t)(at + stamp_stride(s->bytes));
     }
     return NULL;
@@ -223,9 +166,6 @@ bool BoardingPassMedium(uint8_t* out_firmware, uint8_t* out_bios_drive)
     return true;
 }
 
-/* A UUID is sixteen bytes and this kernel's printf has no field width, so the
- * digits are assembled by hand. Printed in full because two volumes made by the
- * same tool on the same day differ in the middle of it. */
 static void uuid_to_text(const uint8_t uuid[16], char out[33])
 {
     static const char hex[] = "0123456789abcdef";
@@ -236,11 +176,6 @@ static void uuid_to_text(const uint8_t uuid[16], char out[33])
     out[32] = '\0';
 }
 
-/* Every stamp on the pass, said out loud, once.
- *
- * On the machine this exists for there is no debug build and no log file —
- * there is a screen and somebody photographing it, and "which volume did the
- * loader say it came from" is the question the next hour depends on. */
 static void boarding_describe(unsigned stamps, bool sealed)
 {
     uint8_t uuid[16];
@@ -248,16 +183,6 @@ static void boarding_describe(unsigned stamps, bool sealed)
 
     kprintf("[Boarding] the loader left a pass with %u stamp(s)\n", stamps);
 
-    /*
-     * Whether the block could be checked at all, said before what it says.
-     *
-     * A pass that carries no seal is believed — loaders older than the stamp
-     * wrote none, and refusing to boot a machine whose loader is older than
-     * its kernel would be the wrong answer to a question nobody asked. But it
-     * is believed OUT LOUD, because "the loader said so" and "the loader said
-     * so and the block adds up" are different amounts of evidence for the one
-     * fact the rest of the boot leans on.
-     */
     if (sealed) {
         kprintf("[Boarding]   sealed, and the seal agrees — the block is the "
                 "one the loader wrote\n");
@@ -294,10 +219,6 @@ static void boarding_describe(unsigned stamps, bool sealed)
                 "will have to choose by rule\n");
     }
 
-    /* Four lines that answer "which loader, off what, from where". Said once,
-     * early, and the whole of the boot scrolls over them — which is why the
-     * kernel keeps its own account of what it said (`make PRINTTOFILE=on`,
-     * then `logsave`) instead of standing still to be photographed. */
 }
 
 void BoardingPassInit(void)
@@ -310,12 +231,6 @@ void BoardingPassInit(void)
     unsigned stamps = 0;
     bool     sealed = false;
     if (!pass_is_sound(raw, &stamps, &sealed)) {
-        /*
-         * No pass. Not an error and not silence either: the difference between
-         * "the loader did not say" and "the loader said and nobody listened"
-         * is the difference between a boot that mounts the wrong volume for a
-         * reason and one that does it for no reason anybody can find.
-         */
         kprintf("[Boarding] the loader left no pass — nothing to say which "
                 "volume this kernel came from\n");
         g_present = false;

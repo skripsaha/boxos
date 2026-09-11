@@ -1,4 +1,3 @@
-// FNV-1a checksums over MPFR-CR asinh for the deterministic x stream — GENERATED.
 static const unsigned long long kAsinhN    = 20000ULL;
 static const unsigned long long kAsinhSeed = 0x9E3779B97F4A7C15ULL;
 static const int kAsinhElo = -20;

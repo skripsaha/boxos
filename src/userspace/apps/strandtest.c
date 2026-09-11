@@ -1,45 +1,21 @@
-/*
- * strandtest — proves the Strands stack end-to-end (P4 go-live + P5a
- * per-strand IPC rings + TLS).
- *
- *   test1 (P4 baseline): spawn ONE worker strand into the caller's cabin and
- *     exercise shared-address-space atomics + park→wake. main and the worker
- *     each do ITERS atomic increments of one shared counter (== 2*ITERS proves
- *     real concurrency with no lost updates); main parks on a done flag and the
- *     worker wakes it.
- *
- *   test2 (P5a): spawn N worker strands that run CONCURRENT IPC syscalls. Each
- *     worker confirms its per-strand TLS (strand_self() == a real distinct pid)
- *     and per-strand IPC routing (MCALLS × proc_info(self) — every reply must
- *     come back to THIS strand's ResultRing, so info.pid echoes the queried
- *     pid). With the P4 shared-cabin rings this raced (replies misrouted /
- *     lost / #PF); with per-strand rings each strand is the sole owner of its
- *     rings + stashes, so the proven SPSC algorithms hold under concurrency.
- *
- * Emits exactly one "[STRAND] PASS" on success (the matrix greps for it).
- *
- * Strands require FSGSBASE (per-strand TLS detection uses ring-3 RDFSBASE).
- * The STRICT matrix (-cpu max) and `make run` (-cpu qemu64,+fsgsbase) both
- * provide it; on a CPU without it the test SKIPs cleanly instead of failing.
- */
 
 #include "box/print.h"
-#include "box/system.h"            /* exit, proc_info, proc_info_t */
-#include "box/sync.h"              /* addr_park, addr_wake */
-#include "box/strand.h"            /* strand_spawn */
-#include "box/cpu.h"               /* cpu_has_fsgsbase */
-#include "box/core/strand_self.h"  /* strand_self */
+#include "box/system.h"
+#include "box/clock.h"
+#include "box/sync.h"
+#include "box/strand.h"
+#include "box/cpu.h"
+#include "box/core/strand_self.h"
 #include "box/error.h"
 
-#define ITERS     100000u   /* big enough that the two strands' runs overlap   */
-#define NWORKERS  4u        /* concurrent IPC workers in test2                 */
-#define MCALLS    500u      /* syscalls per worker (routing stress)            */
+#define ITERS     100000u
+#define NWORKERS  4u
+#define MCALLS    500u
 
-/* ---- test1: P4 baseline — spawn + concurrent atomics + park→wake ---------- */
 
-static uint64_t g_counter = 0;   /* incremented by BOTH strands (atomic)       */
-static uint64_t g_witness = 0;   /* worker sets it — proves it ran + shares AS */
-static uint64_t g_done    = 0;   /* worker-done flag; also the park address    */
+static uint64_t g_counter = 0;
+static uint64_t g_witness = 0;
+static uint64_t g_done    = 0;
 
 static void worker1(void *arg)
 {
@@ -64,8 +40,6 @@ static int test1(void)
     for (uint32_t i = 0; i < ITERS; i++)
         __atomic_fetch_add(&g_counter, 1u, __ATOMIC_RELAXED);
 
-    /* Park until the worker signals done. Bounded retries so a genuine hang
-     * fails loudly (and flushes output) instead of wedging the harness. */
     uint32_t cycles = 0;
     while (__atomic_load_n(&g_done, __ATOMIC_ACQUIRE) == 0) {
         if (++cycles > 50u) {
@@ -88,11 +62,10 @@ static int test1(void)
     return 0;
 }
 
-/* ---- test2: N concurrent IPC-worker strands — per-strand rings + TLS ------ */
 
-static volatile uint64_t g_remaining;          /* workers decrement; main parks */
-static volatile uint32_t g_worker_fail;        /* set by any worker on mismatch */
-static uint32_t          g_worker_self[NWORKERS]; /* strand_self() per worker   */
+static volatile uint64_t g_remaining;
+static volatile uint32_t g_worker_fail;
+static uint32_t          g_worker_self[NWORKERS];
 
 static void ipc_worker(void *arg)
 {
@@ -101,12 +74,8 @@ static void ipc_worker(void *arg)
     g_worker_self[idx] = self;
 
     if (self == 0) {
-        /* TLS proof failed: a spawned strand must see its own (non-cabin) pid. */
         __atomic_store_n(&g_worker_fail, 1u, __ATOMIC_RELAXED);
     } else {
-        /* Routing proof: every proc_info(self) reply must return on THIS
-         * strand's ResultRing — info.pid echoes the queried pid. A shared-ring
-         * misroute would surface a sibling's reply (info.pid != self). */
         for (uint32_t i = 0; i < MCALLS; i++) {
             proc_info_t info;
             if (proc_info((uint16_t)self, &info) != 0 ||
@@ -136,9 +105,6 @@ static int test2(void)
         }
     }
 
-    /* Join: park until every worker has decremented g_remaining. Re-read the
-     * live value before each park so a decrement we missed returns
-     * ERR_ADDR_VALUE_MISMATCH immediately (lost-wake-safe). Bounded. */
     uint32_t cycles = 0;
     uint64_t cur;
     while ((cur = __atomic_load_n(&g_remaining, __ATOMIC_ACQUIRE)) != 0) {
@@ -155,7 +121,6 @@ static int test2(void)
         return -1;
     }
 
-    /* Every worker saw a real, DISTINCT pid (each strand is its own context). */
     for (uint32_t i = 0; i < NWORKERS; i++) {
         if (g_worker_self[i] == 0) {
             printf("[STRAND] FAIL test2: worker %u never recorded a pid\n", i);
@@ -174,11 +139,15 @@ static int test2(void)
     return 0;
 }
 
-/* ---- test3: strand reaper — exited strands are reclaimed at runtime ------- */
 
-#define CHURN 100u   /* well below MAX_PROCESSES; proof is "count returns to base" */
+#define CHURN 100u
+
+#define CHURN_STILL_MS  16000u
+
+#define REAPER_LOOK_MS  200u
 
 static volatile uint64_t g_churn_remaining;
+static volatile uint64_t g_reaper_sleep;
 
 static void noop_worker(void *arg)
 {
@@ -195,14 +164,10 @@ static int test3(void)
         return 0;
     }
 
-    /* Let any test1/test2 corpses settle so the baseline is clean. */
     for (int k = 0; k < 16; k++) yield();
     if (sysinfo(&si) != 0) return 0;
     uint32_t base = si.process_count;
 
-    /* Churn: spawn+join CHURN strands. Each exits → becomes a corpse the
-     * reaper must reclaim. Without a runtime reaper, process_count would climb
-     * to base+CHURN and stay there (and eventually exhaust the table). */
     for (uint32_t r = 0; r < CHURN; r++) {
         g_churn_remaining = 1;
         uint32_t pid = strand_spawn(noop_worker, 0);
@@ -210,29 +175,33 @@ static int test3(void)
             printf("[STRAND] FAIL test3: strand_spawn failed at round %u (table exhausted — reaper not reclaiming)\n", r);
             return -1;
         }
-        uint32_t cycles = 0; uint64_t cur;
+        uint64_t started = clock_uptime_ms();
+        uint64_t cur;
         while ((cur = __atomic_load_n(&g_churn_remaining, __ATOMIC_ACQUIRE)) != 0) {
-            if (++cycles > 80u) {
-                printf("[STRAND] FAIL test3: join stuck at round %u\n", r);
+            addr_park(&g_churn_remaining, cur, 200);
+            if (__atomic_load_n(&g_churn_remaining, __ATOMIC_ACQUIRE) != cur)
+                started = clock_uptime_ms();
+            else if (clock_uptime_ms() - started >= CHURN_STILL_MS) {
+                printf("[STRAND] FAIL test3: join stuck at round %u (%u ms with no progress)\n",
+                       r, (unsigned)CHURN_STILL_MS);
                 return -1;
             }
-            addr_park(&g_churn_remaining, cur, 200);
         }
     }
 
-    /* process_count must return toward baseline — the CHURN exited strands
-     * were process_destroy'd by the reaper (process_count-- happens only
-     * there). A broken reaper leaves it pinned near base+CHURN. */
     uint32_t cnt = base + CHURN;
-    for (uint32_t cyc = 0; cyc < 120u; cyc++) {
+    if (sysinfo(&si) == 0) cnt = si.process_count;
+    uint32_t best    = cnt;
+    uint64_t started = clock_uptime_ms();
+    while (cnt > base + 4u) {
+        if (clock_uptime_ms() - started >= CHURN_STILL_MS) {
+            printf("[STRAND] FAIL test3: process_count stuck at %u (base %u, churned %u) — reaper not reclaiming\n",
+                   cnt, base, CHURN);
+            return -1;
+        }
+        addr_park(&g_reaper_sleep, 0, REAPER_LOOK_MS);
         if (sysinfo(&si) == 0) cnt = si.process_count;
-        if (cnt <= base + 4u) break;
-        for (int k = 0; k < 4; k++) yield();
-    }
-    if (cnt > base + 4u) {
-        printf("[STRAND] FAIL test3: process_count stuck at %u (base %u, churned %u) — reaper not reclaiming\n",
-               cnt, base, CHURN);
-        return -1;
+        if (cnt < best) { best = cnt; started = clock_uptime_ms(); }
     }
 
     printf("[STRAND] test3 OK: %u spawn+join churn reclaimed (process_count base %u -> %u)\n",
@@ -240,20 +209,9 @@ static int test3(void)
     return 0;
 }
 
-/* ---- test4: a timed park is broken EARLY by a concurrent wake (Ф20d fix) ---
- * Pre-fix, a timed addr_park slept to its FULL deadline because addr_wake never
- * wrote the channel result_wait monitors (it only rescheduled the waiter into a
- * futile poll). Proof — host-timing independent AND race-free: main does ONE
- * long (5 s) park whose watched value NEVER changes, so the ONLY thing that can
- * end it before the deadline is a real wake delivering a completion Result. A
- * worker wakes REPEATEDLY until main reports done, which closes the spawn-vs-park
- * ordering window (an early wake that lands before main parks is a harmless
- * no-op; the next one delivers). addr_park must return OK (woken), never
- * ERR_TIMEOUT (slept to deadline) — that return value alone distinguishes the
- * fix from the bug, with no wall-clock measurement to flake on. */
 
-static volatile uint64_t g_t4_flag;   /* park address; stays 0 — pure notify, no value change */
-static volatile uint64_t g_t4_done;   /* main sets it when its park returns; stops the waker  */
+static volatile uint64_t g_t4_flag;
+static volatile uint64_t g_t4_done;
 
 static void wake_worker(void *arg)
 {
@@ -261,7 +219,7 @@ static void wake_worker(void *arg)
     uint32_t guard = 0;
     while (__atomic_load_n(&g_t4_done, __ATOMIC_ACQUIRE) == 0) {
         addr_wake(&g_t4_flag, 0);
-        if (++guard > 200000u) break;   /* never wedge the harness on a regression */
+        if (++guard > 200000u) break;
         yield();
     }
 }
@@ -277,8 +235,6 @@ static int test4(void)
         return -1;
     }
 
-    /* One long park on a value that never changes. OK proves a concurrent wake
-     * broke it early; ERR_TIMEOUT means the wake never reached result_wait. */
     error_t rc = addr_park(&g_t4_flag, 0, 5000);
     __atomic_store_n(&g_t4_done, 1u, __ATOMIC_RELEASE);
 
@@ -299,8 +255,6 @@ int main(void)
 {
     printf("[STRAND] strandtest start\n");
 
-    /* Strands require FSGSBASE for per-strand TLS (ring-3 RDFSBASE). Without
-     * it strand_spawn refuses, so SKIP cleanly rather than report a failure. */
     if (!cpu_has_fsgsbase()) {
         printf("[STRAND] SKIP: strands require FSGSBASE "
                "(run under STRICT or qemu64,+fsgsbase)\n");

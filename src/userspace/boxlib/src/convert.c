@@ -133,9 +133,6 @@ char* uint_to_str(unsigned int value, char* buf, size_t buf_size) {
     return buf;
 }
 
-/* 64-bit converters — used by printf %ld/%lld/%lu/%llu/%zu and by callers
- * that need to format Cabin-PIDs, file_ids > 2^32, TSC counters, etc.
- * Max output: 20 chars for 18446744073709551615 + NUL. */
 char* int64_to_str(int64_t value, char* buf, size_t buf_size) {
     if (!buf || buf_size < 2) return buf;
     if (value == 0) { buf[0] = '0'; buf[1] = '\0'; return buf; }
@@ -146,8 +143,6 @@ char* int64_to_str(int64_t value, char* buf, size_t buf_size) {
     uint64_t uval;
     if (value < 0) {
         neg = 1;
-        /* Build positive magnitude without overflow on INT64_MIN: cast
-         * (-(v+1)) then add 1 so the intermediate stays in int64_t. */
         uval = (uint64_t)(-(value + 1)) + 1;
     } else {
         uval = (uint64_t)value;

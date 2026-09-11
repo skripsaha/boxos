@@ -1,15 +1,3 @@
-/*
- * TME — Total Memory Encryption + Multi-Key tests.
- *
- * Exercises the KeyID pool lifecycle, PCONFIG state, and dormant-path
- * fallback. On QEMU TCG (no TME-MK) verifies that all allocation
- * paths return ERR_UNSUPPORTED and don't crash. On real silicon with
- * TME-MK locked active, exercises the full alloc/free round-trip and
- * confirms the bitmap accounting + re-key flow.
- *
- * Touch publish: every test failure is printed; the function returns
- * pass/fail counts via stat block.
- */
 
 #include "tme.h"
 #include "vmm.h"
@@ -24,11 +12,9 @@
 static void test_tme_dormant_path(int *pass_p, int *fail_p) {
     int pass = 0, fail = 0;
 
-    /* Init must succeed regardless of hardware support. */
     error_t rc = tme_init_bsp();
     TME_CHECK(rc == OK, "T1: tme_init_bsp idempotent + safe on any HW");
 
-    /* Calling alloc when MK inactive must return ERR_UNSUPPORTED, not crash. */
     if (!g_tme.mk_active) {
         uint16_t k = 0xFFFF;
         rc = tme_keyid_alloc(&k);
@@ -39,7 +25,6 @@ static void test_tme_dormant_path(int *pass_p, int *fail_p) {
         TME_CHECK(rc == ERR_UNSUPPORTED, "T3: free on dormant MK -> UNSUPPORTED");
     }
 
-    /* phys_with_keyid is an identity when MK is off. */
     if (!g_tme.mk_active) {
         uint64_t phys = 0x12345000ULL;
         uint64_t out  = tme_phys_with_keyid(phys, 5);
@@ -48,7 +33,6 @@ static void test_tme_dormant_path(int *pass_p, int *fail_p) {
         TME_CHECK(out == phys, "T4.1: phys_strip_keyid identity when MK off");
     }
 
-    /* Bogus args reject. */
     rc = tme_keyid_alloc(NULL);
     TME_CHECK(rc == ERR_INVALID_ARGUMENT || rc == ERR_UNSUPPORTED,
               "T5: alloc(NULL) -> INVALID_ARGUMENT or UNSUPPORTED");
@@ -65,7 +49,6 @@ static void test_tme_active_path(int *pass_p, int *fail_p) {
     if (!g_tme.mk_active) return;
     int pass = 0, fail = 0;
 
-    /* Pool sanity. */
     TME_CHECK(g_tme.pool_size > 0, "A1: pool_size > 0 when MK active");
     TME_CHECK(g_tme.pool_programmed > 0,
               "A2: at least one KeyID programmed via PCONFIG");
@@ -74,7 +57,6 @@ static void test_tme_active_path(int *pass_p, int *fail_p) {
     TME_CHECK(g_tme.reduced_maxphyaddr <= vmm_maxphyaddr,
               "A4: reduced_maxphyaddr <= effective MAXPHYADDR");
 
-    /* phys_with_keyid embeds non-zero KeyID into upper bits. */
     uint64_t phys = 0x00001000ULL;
     uint64_t with = tme_phys_with_keyid(phys, 1);
     TME_CHECK(with != phys,
@@ -82,7 +64,6 @@ static void test_tme_active_path(int *pass_p, int *fail_p) {
     TME_CHECK(tme_phys_strip_keyid(with) == phys,
               "A6: strip_keyid recovers raw phys");
 
-    /* Round-trip: alloc, free. */
     uint16_t k1 = 0, k2 = 0;
     error_t rc = tme_keyid_alloc(&k1);
     TME_CHECK(rc == OK, "A7: tme_keyid_alloc 1st");
@@ -92,21 +73,16 @@ static void test_tme_active_path(int *pass_p, int *fail_p) {
     TME_CHECK(rc == OK, "A9: tme_keyid_alloc 2nd");
     TME_CHECK(k2 != k1, "A10: distinct KeyIDs from concurrent alloc");
 
-    /* Free and re-alloc — slot should be reusable (after re-key). */
     rc = tme_keyid_free(k1);
     TME_CHECK(rc == OK, "A11: tme_keyid_free succeeds (PCONFIG SET_KEY_RANDOM)");
 
     uint16_t k3 = 0;
     rc = tme_keyid_alloc(&k3);
     TME_CHECK(rc == OK, "A12: re-alloc after free succeeds");
-    /* k3 may or may not equal k1 — the bitmap is linear-scan, so the
-     * lowest free slot wins. Either way, the slot is freshly re-keyed. */
 
-    /* Cleanup */
     (void)tme_keyid_free(k2);
     (void)tme_keyid_free(k3);
 
-    /* Double-free rejected. */
     rc = tme_keyid_free(k2);
     TME_CHECK(rc == ERR_INVALID_ARGUMENT,
               "A13: double-free returns INVALID_ARGUMENT");

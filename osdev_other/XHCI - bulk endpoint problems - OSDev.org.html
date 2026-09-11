@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html dir="ltr" lang="en-gb"><head>
+<meta http-equiv="content-type" content="text/html; charset=UTF-8">
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>XHCI — проблемы с массовыми конечными точками — OSDev.org</title>
+
+	<link rel="alternate" type="application/atom+xml" title="Feed - OSDev.org" href="https://forum.osdev.org/app.php/feed">	<link rel="alternate" type="application/atom+xml" title="Feed - News" href="https://forum.osdev.org/app.php/feed/news">	<link rel="alternate" type="application/atom+xml" title="Feed - All forums" href="https://forum.osdev.org/app.php/feed/forums">	<link rel="alternate" type="application/atom+xml" title="Feed - New Topics" href="https://forum.osdev.org/app.php/feed/topics">	<link rel="alternate" type="application/atom+xml" title="Feed - Active Topics" href="https://forum.osdev.org/app.php/feed/topics_active">	<link rel="alternate" type="application/atom+xml" title="Feed - Forum - OS Development" href="https://forum.osdev.org/app.php/feed/forum/1">	<link rel="alternate" type="application/atom+xml" title="Feed - Topic - XHCI - bulk endpoint problems" href="https://forum.osdev.org/app.php/feed/topic/58015">	
+	<link rel="canonical" href="https://forum.osdev.org/viewtopic.php?t=58015">
+
+<!--
+	phpBB style name: Flat Style
+	Based on style:   prosilver (this is the default phpBB3 style)
+	Original author:  Tom Beddard ( http://www.subBlue.com/ )
+	Modified by:      Ian Bradley ( http://phpbbstyles.oo.gd/ )
+-->
+
+<link href="XHCI%20-%20bulk%20endpoint%20problems%20-%20OSDev.org_files/font-awesome.min_zJQc.css" rel="stylesheet">
+<link href="XHCI%20-%20bulk%20endpoint%20problems%20-%20OSDev.org_files/stylesheet_zJQc.css" rel="stylesheet">
+<link href="XHCI%20-%20bulk%20endpoint%20problems%20-%20OSDev.org_files/stylesheet_002_zJQc.css" rel="stylesheet">
+
+
+
+
+<!--[if lte IE 9]>
+	<link href="./styles/flat-style-blue/theme/tweaks.css?assets_version=8" rel="stylesheet">
+<![endif]-->
+
+
+
+
+
+</head>
+<body id="phpbb" class="notouch section-viewtopic ltr hasjs">
+
+
+<div id="wrap" class="wrap">
+	<a id="top" class="top-anchor" accesskey="t"></a>
+	<div id="page-header">
+		<div class="headerbar" role="banner">
+					<div class="inner">
+
+			<div id="site-description">
+				<a id="logo" class="logo" href="https://forum.osdev.org/index.php" title="Указатель доски"><span class="site_logo"></span></a>
+				<div class="site-description">
+					<h1>OSDev.org </h1>
+					<p>С чего начать разработчикам операционных систем? </p>
+					<p class="skiplink"><a href="#start_here">Перейти к содержимому </a></p>
+				</div>
+			</div>
+
+			</div>
+					</div>
+				<div class="navbar navbar-top" role="navigation">
+	<div class="inner">
+
+	<ul id="nav-main" class="nav-main linklist" role="menubar">
+
+		<li id="quick-links" class="quick-links dropdown-container responsive-menu" data-skip-responsive="true">
+			<a href="#" class="dropdown-trigger dropdown-toggle">
+				<i class="icon fa-bars fa-fw" aria-hidden="true"></i><span>Быстрые ссылки </span>
+			</a>
+			<div class="dropdown">
+				<div class="pointer"><div class="pointer-inner"></div></div>
+				<ul class="dropdown-contents" role="menu">
+					
+											<li class="separator"></li>
+																									<li>
+								<a href="https://forum.osdev.org/search.php?search_id=unanswered" role="menuitem">
+									<i class="icon fa-file fa-fw" aria-hidden="true"></i><span>Unanswered topics</span>
+								</a>
+							</li>
+							<li>
+								<a href="https://forum.osdev.org/search.php?search_id=active_topics" role="menuitem">
+									<i class="icon fa-file fa-fw" aria-hidden="true"></i><span>Active topics</span>
+								</a>
+							</li>
+							<li class="separator"></li>
+							<li>
+								<a href="https://forum.osdev.org/search.php" role="menuitem">
+									<i class="icon fa-search fa-fw" aria-hidden="true"></i><span>Search</span>
+								</a>
+							</li>
+					
+										
+										<li class="separator"></li>
+
+									</ul>
+			</div>
+		</li>
+
+				<li data-skip-responsive="true">
+			<a href="https://forum.osdev.org/app.php/help/faq" rel="help" title="Часто задаваемые вопросы" role="menuitem">
+				<i class="icon fa-question-circle fa-fw" aria-hidden="true"></i><span>Часто задаваемые вопросы </span>
+			</a>
+		</li>
+		<li data-skip-responsive="true">
+			<a href="https://wiki.osdev.org/" rel="help" title="Вики OSDev" role="menuitem">
+				<i class="icon fa-brands fa-wikipedia-w fa-fw" aria-hidden="true"></i><span>Неделя </span>
+			</a>
+		</li>
+						
+			<li class="rightside" data-skip-responsive="true">
+			<a href="https://forum.osdev.org/ucp.php?mode=login&amp;redirect=viewtopic.php%3Ft%3D58015" title="Авторизоваться" accesskey="x" role="menuitem">
+				<i class="icon fa-power-off fa-fw" aria-hidden="true"></i><span>Авторизоваться </span>
+			</a>
+		</li>
+					<li class="rightside" data-skip-responsive="true">
+				<a href="https://forum.osdev.org/ucp.php?mode=register" role="menuitem">
+					<i class="icon fa-pencil-square-o  fa-fw" aria-hidden="true"></i><span>Регистрация </span>
+				</a>
+			</li>
+						</ul>
+    </div>
+</div>
+
+<div class="navbar" role="navigation">
+	<div class="inner">
+	<ul id="nav-breadcrumbs" class="nav-breadcrumbs linklist navlinks" role="menubar">
+						
+
+			
+		<li class="breadcrumbs" itemscope="" itemtype="https://schema.org/BreadcrumbList" style="max-width: 909px;">
+
+			
+							<span class="crumb" itemtype="https://schema.org/ListItem" itemprop="itemListElement" itemscope=""><a itemprop="item" href="https://forum.osdev.org/index.php" accesskey="h" data-navbar-reference="index" title="Указатель доски"><i class="icon fa-home fa-fw"></i><span itemprop="name">Указатель доски </span></a><meta itemprop="position" content="1"></span>
+
+											
+								<span class="crumb" itemtype="https://schema.org/ListItem" itemprop="itemListElement" itemscope="" data-forum-id="16"><a itemprop="item" href="https://forum.osdev.org/viewforum.php?f=16" title="Разработка операционных систем"><span itemprop="name">Разработка операционных систем </span></a><meta itemprop="position" content="2"></span>
+															
+								<span class="crumb" itemtype="https://schema.org/ListItem" itemprop="itemListElement" itemscope="" data-forum-id="1"><a itemprop="item" href="https://forum.osdev.org/viewforum.php?f=1" title="Разработка ОС"><span itemprop="name">Разработка ОС </span></a><meta itemprop="position" content="3"></span>
+							
+					</li>
+		
+				
+					<li id="search-box" class="rightside search-box responsive-hide" role="search">
+				<form action="./search.php" method="get" id="search">
+				<fieldset>
+					<input name="keywords" id="keywords" type="search" maxlength="128" title="Поиск по ключевым словам" class="inputbox search tiny" size="20" placeholder="Поиск…">
+					<button class="button button-search" type="submit" title="Поиск">
+						<i class="icon fa-search fa-fw" aria-hidden="true"></i><span class="sr-only">Поиск </span>
+					</button>
+					<a href="https://forum.osdev.org/search.php" class="button button-search-end" title="Расширенный поиск">
+						<i class="icon fa-cog fa-fw" aria-hidden="true"></i><span class="sr-only">Расширенный поиск </span>
+					</a>
+					
+				</fieldset>
+				</form>
+			</li>
+
+			<li class="rightside responsive-search">
+				<a href="https://forum.osdev.org/search.php" title="View the advanced search options" role="menuitem">
+					<i class="icon fa-search fa-fw" aria-hidden="true"></i><span class="sr-only">Search</span>
+				</a>
+			</li>
+							</ul>
+
+	</div>
+</div>
+	</div>
+
+	
+	<a id="start_here" class="anchor"></a>
+	<div id="page-body" class="page-body" role="main">
+		
+		
+<h2 class="topic-title"><a href="https://forum.osdev.org/viewtopic.php?t=58015">XHCI - проблемы с массовой обработкой конечных точек </a></h2>
+<!-- NOTE: remove the style="display: none" when you want to have the forum description on the topic body -->
+<div style="display: none !important;">Question about which tools to 
+use, bugs, the best way to implement a function, etc should go here. 
+Don't forget to see if your question is answered in the wiki first! When
+ in doubt post here.<br></div>
+
+
+<div class="action-bar bar-top">
+	
+			<a href="https://forum.osdev.org/posting.php?mode=reply&amp;t=58015" class="button" title="Оставить ответ">
+							<span>Ответить </span> <i class="icon fa-reply fa-fw" aria-hidden="true"></i>
+					</a>
+	
+			<div class="dropdown-container dropdown-button-control topic-tools">
+		<span title="Тематические инструменты" class="button button-secondary dropdown-trigger dropdown-select dropdown-toggle">
+			<i class="icon fa-wrench fa-fw" aria-hidden="true"></i>
+			<span class="caret"><i class="icon fa-sort-down fa-fw" aria-hidden="true"></i></span>
+		</span>
+		<div class="dropdown">
+			<div class="pointer"><div class="pointer-inner"></div></div>
+			<ul class="dropdown-contents">
+																												<li>
+					<a href="https://forum.osdev.org/viewtopic.php?t=58015&amp;view=print" title="Print view" accesskey="p">
+						<i class="icon fa-print fa-fw" aria-hidden="true"></i><span>Print view</span>
+					</a>
+				</li>
+											</ul>
+		</div>
+	</div>
+	
+			<div class="search-box" role="search">
+			<form method="get" id="topic-search" action="./search.php">
+			<fieldset>
+				<input class="inputbox search tiny" type="search" name="keywords" id="search_keywords" size="20" placeholder="Поиск по этой теме…">
+				<button class="button button-search" type="submit" title="Поиск">
+					<i class="icon fa-search fa-fw" aria-hidden="true"></i><span class="sr-only">Поиск </span>
+				</button>
+				<a href="https://forum.osdev.org/search.php" class="button button-search-end" title="Расширенный поиск">
+					<i class="icon fa-cog fa-fw" aria-hidden="true"></i><span class="sr-only">Расширенный поиск </span>
+				</a>
+				<input type="hidden" name="t" value="58015">
+<input type="hidden" name="sf" value="msgonly">
+
+			</fieldset>
+			</form>
+		</div>
+	
+			<div class="pagination">
+			4 сообщения
+							• Страница <strong> 1 </strong> из <strong> 1 </strong>
+					</div>
+		</div>
+
+
+
+
+			<div id="p353305" class="post has-profile bg2 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile353305">
+			<dt class="has-profile-rank no-avatar">
+				<div class="avatar-container">
+																			</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=17171" class="username">СандерР </a>							</dt>
+
+						<dd class="profile-rank">Член <br><img src="XHCI%20-%20bulk%20endpoint%20problems%20-%20OSDev.org_files/1_zJQc.gif" alt="Член" title="Член"></dd>			
+		<dd class="profile-posts"><strong>Сообщений: </strong> <a href="https://forum.osdev.org/search.php?author_id=17171&amp;sr=posts"> 73 </a></dd>		<dd class="profile-joined"><strong>Зарегистрирован: </strong> Вт, 30 авг 2016 г., 13:31 </dd>		
+		
+											<dd class="profile-custom-field profile-irc"><strong>Libera.chat IRC: </strong> SDR </dd>
+							
+						
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content353305">
+
+						<h3 class="first">
+						<a href="https://forum.osdev.org/viewtopic.php?p=353305#p353305">XHCI - проблемы с массовой обработкой конечных точек </a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=353305" title="Ответьте, прикрепив цитату." class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Цитировать </span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=353305#p353305" title="Почта">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Сообщение </span>
+					</a>
+								<span class="responsive-hide"> от <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=17171" class="username"> SanderR </a></strong> » </span><time datetime="2025-11-23T16:31:04+00:00">Вс, 23 ноября 2025 г., 10:31 утра </time>
+			</p>
+			
+			
+						
+			
+			<div class="content">Добрый день всем! <br>
+<br>
+Я пишу 64-битную операционную систему на языке C, загружаемую через EFI. <br>
+Проблема в том, что при активации групповых конечных точек с помощью 
+CONFIGURE_ENDPOINT я получаю статус 1, но не получаю ответа в кольце 
+событий при фактическом использовании конечной точки. <br>
+<br>
+Во-первых, вот вывод команды lsusb:
+ <div class="codebox"><p>Код: <a href="#" onclick="selectCode(this); return false;"> Выбрать все </a></p><pre><code>sudo lsusb -v
+Bus 004 Device 002: ID 0951:1666 Kingston Technology DataTraveler 100 G3/G4/SE9 G2/50 Kyson
+Device Descriptor:
+  bLength                18
+  bDescriptorType         1
+  bcdUSB               3.20
+  bDeviceClass            0 [unknown]
+  bDeviceSubClass         0 [unknown]
+  bDeviceProtocol         0 
+  bMaxPacketSize0         9
+  idVendor           0x0951 Kingston Technology
+  idProduct          0x1666 DataTraveler 100 G3/G4/SE9 G2/50 Kyson
+  bcdDevice            1.10
+  iManufacturer           2 Kingston
+  iProduct                3 DataTraveler 3.0
+  iSerial                 4 E0D55EA58B281910C82C0026
+  bNumConfigurations      1
+  Configuration Descriptor:
+    bLength                 9
+    bDescriptorType         2
+    wTotalLength       0x002c
+    bNumInterfaces          1
+    bConfigurationValue     1
+    iConfiguration          0 
+    bmAttributes         0x80
+      (Bus Powered)
+    MaxPower              144mA
+    Interface Descriptor:
+      bLength                 9
+      bDescriptorType         4
+      bInterfaceNumber        0
+      bAlternateSetting       0
+      bNumEndpoints           2
+      bInterfaceClass         8 Mass Storage
+      bInterfaceSubClass      6 SCSI
+      bInterfaceProtocol     80 Bulk-Only
+      iInterface              0 
+      Endpoint Descriptor:
+        bLength                 7
+        bDescriptorType         5
+        bEndpointAddress     0x81  EP 1 IN
+        bmAttributes            2
+          Transfer Type            Bulk
+          Synch Type               None
+          Usage Type               Data
+        wMaxPacketSize     0x0400  1x 1024 bytes
+        bInterval               0
+        bMaxBurst               3
+      Endpoint Descriptor:
+        bLength                 7
+        bDescriptorType         5
+        bEndpointAddress     0x02  EP 2 OUT
+        bmAttributes            2
+          Transfer Type            Bulk
+          Synch Type               None
+          Usage Type               Data
+        wMaxPacketSize     0x0400  1x 1024 bytes
+        bInterval               0
+        bMaxBurst               3
+
+</code></pre></div>
+
+Теперь я пытаюсь запустить "конечную точку конфигурации" следующим образом:
+ <div class="codebox"><p>Код: <a href="#" onclick="selectCode(this); return false;"> Выбрать все </a></p><pre><code>#include "xhci.h"
+
+void xhci_activate_endpoints(XHCIControllerSession *session, USBDevice* device)
+{
+    if(device-&gt;configdesc==NULL)
+    {
+        //
+        // we just focus on the MSD
+        return;
+    }
+
+    if(device-&gt;configdesc-&gt;interfacdesc.bNumEndpoints != 2)
+    {
+        printk("XHCI: het apparaat heeft geen 2 endpoints, activatie overgeslagen!\n");
+        return;
+    }
+
+    void* ring_in = alloc_page();
+    void* ring_out = alloc_page();
+
+    device-&gt;infostructures-&gt;icc.Aregisters = 0b1100;//0b1100
+	// device-&gt;infostructures-&gt;slotcontext.RootHubPortNumber = device-&gt;physical_port_id + 1;
+	device-&gt;infostructures-&gt;slotcontext.ContextEntries = 5;
+	// device-&gt;infostructures-&gt;slotcontext.Speed = portspeed;
+	device-&gt;infostructures-&gt;ep1.LSA = 0;
+	device-&gt;infostructures-&gt;ep1.EPType = XHCI_ENDPOINT_TYPE_BULK_OUT; // Bulk OUT
+	device-&gt;infostructures-&gt;ep1.Cerr = 3;
+	device-&gt;infostructures-&gt;ep1.MaxPacketSize = 1024;
+	device-&gt;infostructures-&gt;ep1.TRDequeuePointerLow = ((uint32_t) (uint64_t) ring_out)&gt;&gt;4 ;
+	device-&gt;infostructures-&gt;ep1.TRDequeuePointerHigh = 0;
+	device-&gt;infostructures-&gt;ep1.DequeueCycleState = XHCI_CRCS_DEFAULT_CYCLE_STATE;
+	device-&gt;infostructures-&gt;ep1.MaxBurstSize = 3;
+
+	device-&gt;infostructures-&gt;ep2.LSA = 0;
+	device-&gt;infostructures-&gt;ep2.EPType = XHCI_ENDPOINT_TYPE_BULK_IN; // Bulk IN
+	device-&gt;infostructures-&gt;ep2.Cerr = 3;
+	device-&gt;infostructures-&gt;ep2.MaxPacketSize = 1024;
+	device-&gt;infostructures-&gt;ep2.TRDequeuePointerLow = ((uint32_t) (uint64_t) ring_in)&gt;&gt;4 ;
+	device-&gt;infostructures-&gt;ep2.TRDequeuePointerHigh = 0;
+	device-&gt;infostructures-&gt;ep2.DequeueCycleState = XHCI_CRCS_DEFAULT_CYCLE_STATE;
+	device-&gt;infostructures-&gt;ep2.MaxBurstSize = 3;
+    
+    ConfigureEndpointCommandTRB* trb = (ConfigureEndpointCommandTRB*) xhci_alloc_command_trb(session);
+    trb-&gt;CycleBit = XHCI_CRCS_DEFAULT_CYCLE_STATE; // Cycle Bit instellen
+    trb-&gt;TRBType = XHCI_TRB_CONFIGURE_ENDPOINT_COMMAND_TRB_TYPE; // CONGIGURE ENDPOINT Command TRB Type
+    trb-&gt;SlotID = device-&gt;slot_id; // Slot ID van het apparaat inst
+    trb-&gt;DataBufferPointerLo = (uint32_t)(uint64_t)(device-&gt;infostructures);
+	trb-&gt;DataBufferPointerHi = (uint32_t)0;
+
+    USBRing* in_ring = (USBRing*) alloc_page();
+	in_ring-&gt;ring_trbs = ring_in;
+	in_ring-&gt;ring_size = XHCI_COMMAND_RING_SIZE;
+	in_ring-&gt;enqueue_index = 0;
+	in_ring-&gt;slot_id = device-&gt;slot_id;
+	in_ring-&gt;endpoint_id = 2;
+	in_ring-&gt;cycle_state = XHCI_CRCS_DEFAULT_CYCLE_STATE;
+	device-&gt;ep_ring_in = in_ring;
+
+    USBRing* out_ring = (USBRing*) alloc_page();
+	out_ring-&gt;ring_trbs = ring_out;
+	out_ring-&gt;ring_size = XHCI_COMMAND_RING_SIZE;
+	out_ring-&gt;enqueue_index = 0;
+	out_ring-&gt;slot_id = device-&gt;slot_id;
+	out_ring-&gt;endpoint_id = 3;
+	out_ring-&gt;cycle_state = XHCI_CRCS_DEFAULT_CYCLE_STATE;
+	device-&gt;ep_ring_out = out_ring;
+
+    xhci_thingdong(session, device, (void*)trb, 0, 0);
+
+}
+</code></pre></div>
+
+And this is the headerfile:
+<div class="codebox"><p>Code: <a href="#" onclick="selectCode(this); return false;">Select all</a></p><pre><code>
+typedef struct{
+    uint32_t Dregisters;
+    uint32_t Aregisters;
+    uint32_t reservedA;
+    uint32_t reservedB;
+    uint32_t reservedC;
+    uint32_t reservedD;
+    uint32_t reservedE;
+    uint8_t ConfigurationValue;
+    uint8_t InterfaceNumber;
+    uint8_t AlternateSetting;
+    uint8_t reservedF;
+}__attribute__((packed)) XHCIInputControlContext;
+
+typedef struct{
+    uint32_t RouteString:20;
+    uint8_t Speed:4;
+    uint8_t reservedA:1;
+    uint8_t MTT:1;
+    uint8_t Hub:1;
+    uint8_t ContextEntries:5;
+
+    uint16_t MaxExitLatency;
+    uint8_t RootHubPortNumber;
+    uint8_t NumberOfPorts;
+
+    uint8_t ParentHubSlotID;
+    uint8_t ParentPortNumber;
+    uint8_t TTT:2;
+    uint8_t reservedB:4;
+    uint16_t InterrupterTarget:10;
+
+    uint8_t USBDeviceAddress;
+    uint32_t reservedC:19;
+    uint8_t SlotState:5;
+}__attribute__((packed)) XHCISlotContext;
+
+typedef struct {
+    uint8_t EndpointState:3;
+    uint8_t reservedA:5;
+    uint8_t Mult:2;
+    uint8_t MaxPStreams:5;
+    uint8_t LSA:1;
+    uint8_t Interval;
+    uint8_t MaxESITPayloadHigh;
+
+    uint8_t reservedB:1;
+    uint8_t Cerr:2;
+    uint8_t EPType:3;
+    uint8_t reservedC:1;
+    uint8_t HID:1;
+    uint8_t MaxBurstSize;
+    uint16_t MaxPacketSize;
+
+    uint8_t DequeueCycleState:1;
+    uint8_t reservedD:3;
+    uint32_t TRDequeuePointerLow:28;
+    uint32_t TRDequeuePointerHigh;
+
+    uint16_t AverageTRBLength;
+    uint16_t MaxESITPayloadLow;
+
+    uint8_t padding[0xC];
+}__attribute__((packed)) XHCIEndpointContext;
+
+typedef struct{
+    XHCIInputControlContext icc;
+    XHCISlotContext slotcontext;
+    uint8_t paddingB[0x10];
+    XHCIEndpointContext ep0;
+    XHCIEndpointContext ep1;
+    XHCIEndpointContext ep2;
+    XHCIEndpointContext ep3;
+    XHCIEndpointContext ep4;
+}__attribute__((packed)) XHCIInputContextBuffer;
+</code></pre></div>
+
+And this is the code to execute the TRB 
+<div class="codebox"><p>Code: <a href="#" onclick="selectCode(this); return false;">Select all</a></p><pre><code>void xhci_send_bulk(XHCIControllerSession *session, USBDevice* device, USBRing *ring, uint64_t data_length, void* data){
+    TransferTRB* trb1 = (TransferTRB*) xhci_alloc_trb_ring(ring);
+    trb1-&gt;DataBufferPointerHi = 0;
+    trb1-&gt;DataBufferPointerLo = (uint32_t) (uint64_t) data;
+    trb1-&gt;BlockEventInterrupt = 0;
+    trb1-&gt;Chainbit = 0;
+    trb1-&gt;Cyclebit = 1;
+    trb1-&gt;EvaluateNextTRB = 0;
+    trb1-&gt;ImmediateData = 0;
+    trb1-&gt;InterrupterTarget = 0;
+    trb1-&gt;InterruptOnCompletion = 1;
+    trb1-&gt;InterruptonShortPacket = 1;
+    trb1-&gt;NoSnoop = 0;
+    trb1-&gt;TRBTransferLength = data_length;
+    trb1-&gt;TRBType = 1;
+
+    xhci_ring_trb_ring(session, device, ring, (void*)trb1);
+}
+</code></pre></div>
+
+This is the link to the github of the project: <a href="https://github.com/AdeRegt/FramboOS" class="postlink">https://github.com/AdeRegt/FramboOS</a><br>
+<br>
+Can someone please tell me where my error is?<br>
+I am testing this on real hardware.<br>
+Заранее благодарю! </div>
+
+			
+			
+									
+						
+										
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+				<div id="p353308" class="post has-profile bg1 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile353308">
+			<dt class="has-profile-rank has-avatar">
+				<div class="avatar-container">
+																<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788" class="avatar"><img class="avatar" src="XHCI%20-%20bulk%20endpoint%20problems%20-%20OSDev.org_files/15788_zJQc.png" width="65" height="80" alt="User avatar"></a>														</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788" class="username">BenLunt</a>							</dt>
+
+						<dd class="profile-rank">Member<br><img src="XHCI%20-%20bulk%20endpoint%20problems%20-%20OSDev.org_files/5_zJQc.gif" alt="Member" title="Member"></dd>			
+		<dd class="profile-posts"><strong>Posts:</strong> <a href="https://forum.osdev.org/search.php?author_id=15788&amp;sr=posts">1029</a></dd>		<dd class="profile-joined"><strong>Joined:</strong> Sat Nov 22, 2014 6:33 pm</dd>		
+		
+																<dd class="profile-custom-field profile-phpbb_location"><strong>Location:</strong> USA</dd>
+							
+							<dd class="profile-contact">
+				<strong>Contact:</strong>
+				<div class="dropdown-container dropdown-left">
+					<a href="#" class="dropdown-trigger dropdown-toggle" title="Contact BenLunt">
+						<i class="icon fa-commenting-o fa-fw icon-lg" aria-hidden="true"></i><span class="sr-only">Contact BenLunt</span>
+					</a>
+					<div class="dropdown">
+						<div class="pointer"><div class="pointer-inner"></div></div>
+						<div class="dropdown-contents contact-icons">
+																																								<div>
+																	<a href="http://www.fysnet.net/" title="Website" class="last-cell">
+										<span class="contact-icon phpbb_website-icon">Website</span>									</a>
+																	</div>
+																					</div>
+					</div>
+				</div>
+			</dd>
+				
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content353308">
+
+						<h3>
+						<a href="https://forum.osdev.org/viewtopic.php?p=353308#p353308">Re: XHCI - bulk endpoint problems</a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=353308" title="Reply with quote" class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Quote</span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=353308#p353308" title="Post">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Post</span>
+					</a>
+								<span class="responsive-hide">by <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788" class="username">BenLunt</a></strong> » </span><time datetime="2025-11-24T16:02:12+00:00">Mon Nov 24, 2025 10:02 am</time>
+			</p>
+			
+			
+						
+			
+			<div class="content">HI,
+<div class="codebox"><p>Code: <a href="#" onclick="selectCode(this); return false;">Select all</a></p><pre><code>  if(device-&gt;configdesc==NULL)
+    {
+        //
+        // we just focus on the MSD
+        return;
+    }</code></pre></div>
+Up to this point, have you retrieved the Configuration Descriptor? If not, how have you sent the SetConfiguration() request?<br>
+Then, without getting the Config Descriptor, you can't know which Interface to set using a SetInterface() request.<br>
+<br>
+The USB won't (shouldn't) do much until you send the SetConfiguration() and SetInterface() requests.<br>
+<br>
+If the MSD is a Super-speed device, there is a good chance that it 
+supports both the BBB and the UASP protocols. You have to tell it which 
+one to use.<br>
+<br>
+In general, a USB device usually only has one Configuration Descriptor. 
+However, that doesn't mean you can assume so. Also, you must get the 
+bConfigurationValue from the Configuration Descriptor and send the 
+SetConfiguration(bConfigurationValue) request. <br>
+<br>
+Then, you must choose an interface. In the listing you provide, the 
+device only supports the BBB interface (under that configuration), 
+however, you still have to tell it to use that interface with a 
+SetInterface(bInterfaceNumber) request.<br>
+<br>
+A quick look of your source code, I don't see where you do any of this.<br>
+<br>
+Ben<br>
+ - <a href="https://www.fysnet.net/the_universal_serial_bus.htm" class="postlink">https://www.fysnet.net/the_universal_serial_bus.htm</a></div>
+
+			
+			
+									
+						
+										
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+				<div id="p353309" class="post has-profile bg2 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile353309">
+			<dt class="has-profile-rank no-avatar">
+				<div class="avatar-container">
+																			</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=17171" class="username">SanderR</a>							</dt>
+
+						<dd class="profile-rank">Member<br><img src="XHCI%20-%20bulk%20endpoint%20problems%20-%20OSDev.org_files/1_zJQc.gif" alt="Member" title="Member"></dd>			
+		<dd class="profile-posts"><strong>Posts:</strong> <a href="https://forum.osdev.org/search.php?author_id=17171&amp;sr=posts">73</a></dd>		<dd class="profile-joined"><strong>Joined:</strong> Tue Aug 30, 2016 1:31 pm</dd>		
+		
+											<dd class="profile-custom-field profile-irc"><strong>Libera.chat IRC:</strong> SDR</dd>
+							
+						
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content353309">
+
+						<h3>
+						<a href="https://forum.osdev.org/viewtopic.php?p=353309#p353309">Re: XHCI - bulk endpoint problems</a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=353309" title="Reply with quote" class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Quote</span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=353309#p353309" title="Post">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Post</span>
+					</a>
+								<span class="responsive-hide">by <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=17171" class="username">SanderR</a></strong> » </span><time datetime="2025-11-24T22:22:36+00:00">Mon Nov 24, 2025 4:22 pm</time>
+			</p>
+			
+			
+						
+			
+			<div class="content">Thank you for your answer! <br>
+I just implemented the SET_INTERFACE command as you recommended.<br>
+When I execute this command, the system replies with a Stall Error.<br>
+<br>
+The order I do things at:
+<ul>
+<li> Waiting for Port Status Change Event</li>
+<li> EnableSlot <a href="https://github.com/AdeRegt/FramboOS/blob/main/src/kernel/usb/rings/commandring/xhci_send_enable_slot.c" class="postlink">https://github.com/AdeRegt/FramboOS/blo ... ble_slot.c</a></li>
+<li> Address Device <a href="https://github.com/AdeRegt/FramboOS/blob/main/src/kernel/usb/rings/commandring/xhci_send_set_address.c" class="postlink">https://github.com/AdeRegt/FramboOS/blo ... _address.c</a></li>
+<li> Request Device Descriptor <a href="https://github.com/AdeRegt/FramboOS/blob/main/src/kernel/usb/rings/localring/xhci_send_request_device_descriptor.c" class="postlink">https://github.com/AdeRegt/FramboOS/blo ... scriptor.c</a></li>
+<li> if bDeviceClass!=0 then call request_configuration_descriptor (including the endpoints and interfaces) <a href="https://github.com/AdeRegt/FramboOS/blob/main/src/kernel/usb/rings/localring/xhci_send_request_configuration_descriptor.c" class="postlink">https://github.com/AdeRegt/FramboOS/blo ... scriptor.c</a></li>
+<li> activate endpoints <a href="https://github.com/AdeRegt/FramboOS/blob/main/src/kernel/usb/rings/commandring/xhci_activate_endpoints.c" class="postlink">https://github.com/AdeRegt/FramboOS/blo ... ndpoints.c</a></li>
+<li> set configuration <a href="https://github.com/AdeRegt/FramboOS/blob/main/src/kernel/usb/rings/localring/xhci_send_set_config.c" class="postlink">https://github.com/AdeRegt/FramboOS/blo ... t_config.c</a></li>
+<li> set interface <a href="https://github.com/AdeRegt/FramboOS/blob/main/src/kernel/usb/rings/localring/xhci_send_set_interface.c" class="postlink">https://github.com/AdeRegt/FramboOS/blo ... nterface.c</a></li>
+<li> test bulk events <a href="https://github.com/AdeRegt/FramboOS/blob/main/src/kernel/usb/rings/bulk/xhci_send_bulk.c" class="postlink">https://github.com/AdeRegt/FramboOS/blo ... end_bulk.c</a> and <a href="https://github.com/AdeRegt/FramboOS/blob/main/src/kernel/usb/devices/abstract/xhci_device_event_router.c" class="postlink">https://github.com/AdeRegt/FramboOS/blo ... t_router.c</a></li>
+</ul>
+
+I have a small tread running, who walks over the event ring all the time, and then parsing the items that are in there.<br>
+<a href="https://github.com/AdeRegt/FramboOS/blob/main/src/kernel/usb/rings/eventring/xhci_event_watcher.c" class="postlink">https://github.com/AdeRegt/FramboOS/blo ... _watcher.c</a><br>
+from there it checks if the result TRB is a command completion event (<a href="https://github.com/AdeRegt/FramboOS/blob/main/src/kernel/usb/rings/eventring/xhci_handle_command_completion_event.c" class="postlink">https://github.com/AdeRegt/FramboOS/blo ... on_event.c</a>) or a transfer event (<a href="https://github.com/AdeRegt/FramboOS/blob/main/src/kernel/usb/rings/eventring/xhci_handle_transfer_event.c" class="postlink">https://github.com/AdeRegt/FramboOS/blo ... er_event.c</a>)<br>
+This is the URL to the header: <a href="https://github.com/AdeRegt/FramboOS/blob/main/src/kernel/include/xhci.h" class="postlink">https://github.com/AdeRegt/FramboOS/blo ... ude/xhci.h</a><br>
+<br>
+Am I missing something?</div>
+
+			
+			
+									
+						
+										
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+				<div id="p353310" class="post has-profile bg1 offline">
+		<div class="inner">
+
+		<dl class="postprofile" id="profile353310">
+			<dt class="has-profile-rank has-avatar">
+				<div class="avatar-container">
+																<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788" class="avatar"><img class="avatar" src="XHCI%20-%20bulk%20endpoint%20problems%20-%20OSDev.org_files/15788_zJQc.png" width="65" height="80" alt="User avatar"></a>														</div>
+								<a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788" class="username">BenLunt</a>							</dt>
+
+						<dd class="profile-rank">Member<br><img src="XHCI%20-%20bulk%20endpoint%20problems%20-%20OSDev.org_files/5_zJQc.gif" alt="Member" title="Member"></dd>			
+		<dd class="profile-posts"><strong>Posts:</strong> <a href="https://forum.osdev.org/search.php?author_id=15788&amp;sr=posts">1029</a></dd>		<dd class="profile-joined"><strong>Joined:</strong> Sat Nov 22, 2014 6:33 pm</dd>		
+		
+																<dd class="profile-custom-field profile-phpbb_location"><strong>Location:</strong> USA</dd>
+							
+							<dd class="profile-contact">
+				<strong>Contact:</strong>
+				<div class="dropdown-container dropdown-left">
+					<a href="#" class="dropdown-trigger dropdown-toggle" title="Contact BenLunt">
+						<i class="icon fa-commenting-o fa-fw icon-lg" aria-hidden="true"></i><span class="sr-only">Contact BenLunt</span>
+					</a>
+					<div class="dropdown">
+						<div class="pointer"><div class="pointer-inner"></div></div>
+						<div class="dropdown-contents contact-icons">
+																																								<div>
+																	<a href="http://www.fysnet.net/" title="Website" class="last-cell">
+										<span class="contact-icon phpbb_website-icon">Website</span>									</a>
+																	</div>
+																					</div>
+					</div>
+				</div>
+			</dd>
+				
+		</dl>
+
+		<div class="postbody">
+						<div id="post_content353310">
+
+						<h3>
+						<a href="https://forum.osdev.org/viewtopic.php?p=353310#p353310">Re: XHCI - bulk endpoint problems</a>
+		</h3>
+
+													<ul class="post-buttons">
+																																									<li>
+							<a href="https://forum.osdev.org/posting.php?mode=quote&amp;p=353310" title="Reply with quote" class="button button-icon-only">
+								<i class="icon fa-quote-left fa-fw" aria-hidden="true"></i><span class="sr-only">Quote</span>
+							</a>
+						</li>
+														<li class="responsive-menu hidden dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li></ul>
+							
+						<p class="author">
+									<a class="unread" href="https://forum.osdev.org/viewtopic.php?p=353310#p353310" title="Post">
+						<i class="icon fa-file fa-fw icon-lightgray icon-md" aria-hidden="true"></i><span class="sr-only">Post</span>
+					</a>
+								<span class="responsive-hide">by <strong><a href="https://forum.osdev.org/memberlist.php?mode=viewprofile&amp;u=15788" class="username">BenLunt</a></strong> » </span><time datetime="2025-11-24T23:09:41+00:00">Mon Nov 24, 2025 5:09 pm</time>
+			</p>
+			
+			
+						
+			
+			<div class="content">You should "activate" the endpoints after you set the configuration/interface.<br>
+<br>
+You currently hard-code many of the items. For example, it looks like 
+you are assuming the endpoints are 1, 2, and 3 respectively. You also 
+assume the max packet size is 1024. If the device is using BBB, most 
+likely the max packet size is 512.<br>
+<br>
+All of this is in the Configuration and Interface (which includes the 
+Endpoint) descriptors. It tells you which endpoint is the Bulk IN and 
+which one is the Bulk OUT. It tells you the max packet size of each 
+endpoint.<br>
+<br>
+Granted, you are probably hard-coding them from the listing you 
+received, hopefully temporarily, but you really do need to get this 
+information from the descriptors, the whole reason USB was ever 
+invented.<br>
+<br>
+It is very difficult to start out like this and test with real hardware.
+ It is time consuming and difficult to narrow down the errors. I highly 
+suggest using an emulator, such as Bochs. With debug set to 1, Bochs 
+will give you many warnings and descriptions of the process being made, 
+making it much easier to narrow down the place where it "stops working".<br>
+<br>
+Ben</div>
+
+			
+			
+									
+						
+										
+						</div>
+
+		</div>
+
+				<div class="back2top">
+						<a href="#top" class="top" title="Top">
+				<i class="icon fa-chevron-circle-up fa-fw icon-gray" aria-hidden="true"></i>
+				<span class="sr-only">Top</span>
+			</a>
+					</div>
+		
+		</div>
+	</div>
+
+	
+
+	<div class="action-bar bar-bottom">
+	
+			<a href="https://forum.osdev.org/posting.php?mode=reply&amp;t=58015" class="button" title="Post a reply">
+							<span>Post Reply</span> <i class="icon fa-reply fa-fw" aria-hidden="true"></i>
+					</a>
+		
+		<div class="dropdown-container dropdown-button-control topic-tools">
+		<span title="Topic tools" class="button button-secondary dropdown-trigger dropdown-select dropdown-toggle">
+			<i class="icon fa-wrench fa-fw" aria-hidden="true"></i>
+			<span class="caret"><i class="icon fa-sort-down fa-fw" aria-hidden="true"></i></span>
+		</span>
+		<div class="dropdown">
+			<div class="pointer"><div class="pointer-inner"></div></div>
+			<ul class="dropdown-contents">
+																												<li>
+					<a href="https://forum.osdev.org/viewtopic.php?t=58015&amp;view=print" title="Print view" accesskey="p">
+						<i class="icon fa-print fa-fw" aria-hidden="true"></i><span>Print view</span>
+					</a>
+				</li>
+											</ul>
+		</div>
+	</div>
+
+			<form method="post" action="./viewtopic.php?t=58015">
+		<div class="dropdown-container dropdown-container-left dropdown-button-control sort-tools">
+	<span title="Display and sorting options" class="button button-secondary dropdown-trigger dropdown-select dropdown-toggle">
+		<i class="icon fa-sort-amount-asc fa-fw" aria-hidden="true"></i>
+		<span class="caret"><i class="icon fa-sort-down fa-fw" aria-hidden="true"></i></span>
+	</span>
+	<div class="dropdown hidden">
+		<div class="pointer"><div class="pointer-inner"></div></div>
+		<div class="dropdown-contents">
+			<fieldset class="display-options">
+							<label>Display: <select name="st" id="st"><option value="0" selected="selected">All posts</option><option value="1">1 day</option><option value="7">7 days</option><option value="14">2 weeks</option><option value="30">1 month</option><option value="90">3 months</option><option value="180">6 months</option><option value="365">1 year</option></select></label>
+								<label>Sort by: <select name="sk" id="sk"><option value="a">Author</option><option value="t" selected="selected">Post time</option><option value="s">Subject</option></select></label>
+				<label>Direction: <select name="sd" id="sd"><option value="a" selected="selected">Ascending</option><option value="d">Descending</option></select></label>
+								<hr class="dashed">
+				<input type="submit" class="button2" name="sort" value="Go">
+						</fieldset>
+		</div>
+	</div>
+</div>
+		</form>
+	
+	
+	
+			<div class="pagination">
+			4 posts
+							• Page <strong>1</strong> of <strong>1</strong>
+					</div>
+	</div>
+
+
+<div class="action-bar actions-jump">
+		<p class="jumpbox-return">
+		<a href="https://forum.osdev.org/viewforum.php?f=1" class="left-box arrow-left" accesskey="r">
+			<i class="icon fa-angle-left fa-fw icon-black" aria-hidden="true"></i><span>Return to “OS Development”</span>
+		</a>
+	</p>
+	
+		<div class="jumpbox dropdown-container dropdown-container-right dropdown-up dropdown-left dropdown-button-control" id="jumpbox">
+			<span title="Jump to" class="button button-secondary dropdown-trigger dropdown-select dropdown-toggle">
+				<span>Jump to</span>
+				<span class="caret"><i class="icon fa-sort-down fa-fw" aria-hidden="true"></i></span>
+			</span>
+		<div class="dropdown">
+			<div class="pointer"><div class="pointer-inner"></div></div>
+			<ul class="dropdown-contents">
+																				<li><a href="https://forum.osdev.org/viewforum.php?f=16" class="jumpbox-cat-link"> <span> Operating System Development</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=1" class="jumpbox-sub-link"><span class="spacer"></span> <span>↳ &nbsp; OS Development</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=15" class="jumpbox-sub-link"><span class="spacer"></span> <span>↳ &nbsp; OS Design &amp; Theory</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=2" class="jumpbox-sub-link"><span class="spacer"></span> <span>↳ &nbsp; Announcements, Test Requests, &amp; Job openings</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=17" class="jumpbox-cat-link"> <span> Everything Else</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=13" class="jumpbox-sub-link"><span class="spacer"></span> <span>↳ &nbsp; General Programming</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=11" class="jumpbox-sub-link"><span class="spacer"></span> <span>↳ &nbsp; General Ramblings</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=7" class="jumpbox-sub-link"><span class="spacer"></span> <span>↳ &nbsp; Auto-Delete Forum</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=18" class="jumpbox-cat-link"> <span> OSDev.org</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=8" class="jumpbox-sub-link"><span class="spacer"></span> <span>↳ &nbsp; OSDev Wiki</span></a></li>
+																<li><a href="https://forum.osdev.org/viewforum.php?f=6" class="jumpbox-sub-link"><span class="spacer"></span> <span>↳ &nbsp; About this site</span></a></li>
+											</ul>
+		</div>
+	</div>
+
+	</div>
+
+
+
+			</div>
+
+
+<div id="page-footer" class="page-footer" role="contentinfo">
+	<div class="navbar navbar-bottom" role="navigation">
+	<div class="inner">
+
+	<ul id="nav-footer" class="nav-footer linklist" role="menubar">
+		<li class="breadcrumbs">
+									<span class="crumb"><a href="https://forum.osdev.org/index.php" data-navbar-reference="index" title="Board index"><i class="icon fa-home fa-fw" aria-hidden="true"></i><span>Board index</span></a></span>					</li>
+		
+				
+							<li class="responsive-menu hidden rightside dropdown-container"><a href="javascript:void(0);" class="js-responsive-menu-link responsive-menu-link dropdown-toggle"><i class="icon fa-bars fa-fw" aria-hidden="true"></i></a><div class="dropdown"><div class="pointer"><div class="pointer-inner"></div></div><ul class="dropdown-contents"></ul></div></li><li class="rightside">
+				<a href="https://forum.osdev.org/ucp.php?mode=delete_cookies" data-ajax="true" data-refresh="true" role="menuitem">
+					<i class="icon fa-trash fa-fw" aria-hidden="true"></i><span>Delete cookies</span>
+				</a>
+			</li>
+				
+					</ul>
+
+	</div>
+</div>
+
+	<div class="copyright">
+				<p class="footer-row">
+			<span class="footer-copyright">Flat Style by <a href="http://phpbbstyles.iansvivarium.com/">Ian Bradley</a></span>
+		</p>
+        <p class="footer-row">
+			<span class="footer-copyright">Powered by <a href="https://www.phpbb.com/">phpBB</a>® Forum Software © phpBB Limited</span>
+		</p>
+						<p class="footer-row" role="menu">
+			<a class="footer-link" href="https://forum.osdev.org/ucp.php?mode=privacy" title="Privacy" role="menuitem">
+				<span class="footer-link-text">Privacy</span>
+			</a>
+			|
+			<a class="footer-link" href="https://forum.osdev.org/ucp.php?mode=terms" title="Terms" role="menuitem">
+				<span class="footer-link-text">Terms</span>
+			</a>
+		</p>
+					</div>
+
+	<div id="darkenwrapper" class="darkenwrapper" data-ajax-error-title="AJAX error" data-ajax-error-text="Something went wrong when processing your request." data-ajax-error-text-abort="User aborted request." data-ajax-error-text-timeout="Your request timed out; please try again." data-ajax-error-text-parsererror="Something went wrong with the request and the server returned an invalid reply.">
+		<div id="darken" class="darken">&nbsp;</div>
+	</div>
+
+	<div id="phpbb_alert" class="phpbb_alert" data-l-err="Error" data-l-timeout-processing-req="Request timed out.">
+		<a href="#" class="alert_close">
+			<i class="icon fa-times-circle fa-fw" aria-hidden="true"></i>
+		</a>
+		<h3 class="alert_title">&nbsp;</h3><p class="alert_text"></p>
+	</div>
+	<div id="phpbb_confirm" class="phpbb_alert">
+		<a href="#" class="alert_close">
+			<i class="icon fa-times-circle fa-fw" aria-hidden="true"></i>
+		</a>
+		<div class="alert_text"></div>
+	</div>
+</div>
+
+</div>
+
+<div>
+	<a id="bottom" class="anchor" accesskey="z"></a>
+	<img class="sr-only" aria-hidden="true" src="XHCI%20-%20bulk%20endpoint%20problems%20-%20OSDev.org_files/cron.task.core_zJQc.gif" width="1" height="1" alt="">
+</div>
+
+<script src="XHCI%20-%20bulk%20endpoint%20problems%20-%20OSDev.org_files/jquery-3.7.1.min_zJQc.js"></script>
+<script src="XHCI%20-%20bulk%20endpoint%20problems%20-%20OSDev.org_files/core_zJQc.js"></script>
+
+
+<script>
+(function($) {  // Avoid conflicts with other libraries
+
+'use strict';
+
+	phpbb.addAjaxCallback('reporttosfs', function(data) {
+		if (data.postid !== "undefined") {
+			$('#sfs' + data.postid).hide();
+			phpbb.closeDarkenWrapper(5000);
+		}
+	});
+
+})(jQuery);
+</script>
+<script src="XHCI%20-%20bulk%20endpoint%20problems%20-%20OSDev.org_files/forum_fn_zJQc.js"></script>
+<script src="XHCI%20-%20bulk%20endpoint%20problems%20-%20OSDev.org_files/ajax_zJQc.js"></script>
+
+
+
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a325044d691523dd',t:'MTc4NzkzNzk0Mg=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script><iframe height="1" width="1" style="position: absolute; top: 0px; left: 0px; border: medium; visibility: hidden;"></iframe><script type="module" src="XHCI%20-%20bulk%20endpoint%20problems%20-%20OSDev.org_files/v3d52b47920f24c319d37e2661827c42b1787588026925_zJQc" integrity="sha512-d9sL6GJLXn6fInD1+TVXhTcQOsmxeHfmHAvwGDIxp5TO+uo1fiWW7mHomMj4MLRlCsJDTqXzWLHJFFlPCEIj/A==" data-cf-beacon="{&quot;version&quot;:&quot;2024.11.0&quot;,&quot;token&quot;:&quot;ca8edd89ae604cb093371c5ef552b991&quot;,&quot;r&quot;:1}" crossorigin="anonymous"></script>
+
+
+</body></html>

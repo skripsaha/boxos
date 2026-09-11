@@ -1,23 +1,3 @@
-/* klib_print.c — formatted output for the kernel.
- *
- * Single source of truth for `%`-format parsing lives in `kvformat()`, which
- * runs against a `kfmt_ops_t` callback set. Two callback sets are wired:
- *   SCREEN_OPS  emits to serial + framebuffer with colour and cursor state
- *   BUF_OPS     emits into a bounded char buffer
- *
- * Why callback-driven rather than two parsers: the legacy split parser had
- * silently divergent feature sets — kvsnprintf knew %d/%u/%x/%s/%c only,
- * kprintf knew the full %lx/%p/%zu/%[X] set, and `panic()` calls into
- * kvsnprintf with format strings that include %lx and %p (then kprintf the
- * result). On the legacy code the panic banner contained literal "%lx" in
- * place of an address — fatal for real-HW post-mortem diagnostics. Now both
- * surfaces walk the same parser so feature parity is structural.
- *
- * Locking: kprintf serialises behind `g_kprintf_lock` (IRQ-safe spinlock),
- * which `console_lock_acquire/release` expose so other producers of the
- * framebuffer (HwVga* writes from interrupt handlers) can serialise too.
- * The lock is BSS-zero before mem_init() runs spinlock_init(); BSS-zero
- * happens to mean unlocked for the current spinlock_t layout. */
 #include "klib.h"
 #include "klib_logring.h"
 #include "video.h"
@@ -26,14 +6,11 @@
 #include "atomics.h"
 #include "cpu_calibrate.h"
 
-/* Module-local state — neither escapes outside this TU. */
 static spinlock_t g_kprintf_lock;
 
 void console_lock_acquire(void) { spin_lock(&g_kprintf_lock); }
 void console_lock_release(void) { spin_unlock(&g_kprintf_lock); }
 
-/* mem_init() runs before any kprintf-class call that needs the lock to be
- * formally initialised, so expose a hook it can drive. */
 void klib_print_lock_init(void)
 {
     spinlock_init(&g_kprintf_lock);
@@ -50,10 +27,6 @@ int kputnl(void)
 
 void kputchar(char c)
 {
-    /* Every byte the kernel says passes here — kprintf's characters under the
-     * console lock, the keyboard's echo without it — so this is where the log
-     * ring is fed and there is nowhere else to look. The serial line reads
-     * the ring (the Wire, serial.c): nothing here waits on a UART. */
     LogRingPut(c);
 
     if (c == '\n')
@@ -80,9 +53,6 @@ void kputchar(char c)
     }
 }
 
-/* ============================================================================
- *  Unified formatter
- * ========================================================================== */
 
 typedef int  (*kfmt_emit_t)(void *ctx, char c);
 typedef void (*kfmt_attr_t)(void *ctx, uint8_t attr);
@@ -91,8 +61,8 @@ typedef void (*kfmt_cursor_t)(void *ctx, int x, int y);
 typedef struct
 {
     kfmt_emit_t   emit_char;
-    kfmt_attr_t   set_attr;    /* NULL → attribute escapes are no-ops */
-    kfmt_cursor_t set_cursor;  /* NULL → cursor escapes are no-ops    */
+    kfmt_attr_t   set_attr;
+    kfmt_cursor_t set_cursor;
 } kfmt_ops_t;
 
 static int kvformat(const kfmt_ops_t *ops, void *ctx,
@@ -111,11 +81,8 @@ static int kvformat(const kfmt_ops_t *ops, void *ctx,
             continue;
         }
 
-        ++fmt;  /* past '%' */
+        ++fmt;
 
-        /* BoxOS extensions: %[X] for colour/cursor/codepoint. Buffer-mode
-         * emitters supply NULL set_attr/set_cursor so these escapes drop
-         * silently when formatting into a string. */
         if (*fmt == '[')
         {
             ++fmt;
@@ -174,22 +141,7 @@ static int kvformat(const kfmt_ops_t *ops, void *ctx,
             ++fmt;
         }
 
-        /* Precision. It existed in ten format strings across the ACPI driver
-         * before it existed here, and every one of them printed the literal
-         * ".4s" and then handed the NEXT argument to the wrong conversion —
-         * so "[ACPI] Table %.4s checksum failed (len=%u)" reported a length
-         * that was really a pointer. Diagnostics that lie are worse than
-         * diagnostics that are missing, and these are the diagnostics of the
-         * subsystem you reach for when a machine you have never seen refuses
-         * to boot.
-         *
-         * For %s it is what makes a four-character ACPI signature printable
-         * at all: those are four bare bytes with no NUL after them, so the
-         * length must come from the format and not from the data. For the
-         * numeric conversions the value is parsed and ignored, which is still
-         * strictly better than leaving the '.' to fall through into the
-         * conversion switch as if it were one. */
-        int precision = -1;                     /* -1 = unspecified */
+        int precision = -1;
         if (*fmt == '.')
         {
             ++fmt;
@@ -263,7 +215,6 @@ static int kvformat(const kfmt_ops_t *ops, void *ctx,
         }
         case 'X':
             hex_upper = 1;
-            /* fallthrough */
         case 'x':
         {
             unsigned long long v;
@@ -296,10 +247,6 @@ static int kvformat(const kfmt_ops_t *ops, void *ctx,
             if (!str) str = "(null)";
             if (precision >= 0)
             {
-                /* Bounded, and it must NOT walk off looking for a NUL: the
-                 * argument is allowed to have none. Stop at the precision or
-                 * at a terminator, whichever comes first — which is exactly
-                 * what C requires of "%.Ns". */
                 str_len = 0;
                 while (str_len < (size_t)precision && str[str_len] != '\0')
                     ++str_len;
@@ -328,7 +275,6 @@ static int kvformat(const kfmt_ops_t *ops, void *ctx,
         }
         case 'f':
         {
-            /* Kernel: -mno-sse, no FPU state in printf path. */
             str = "<no-float>";
             str_len = strlen(str);
             break;
@@ -383,17 +329,12 @@ static int kvformat(const kfmt_ops_t *ops, void *ctx,
     return count;
 }
 
-/* --- Screen ops: drives kputchar + colour/cursor state for kprintf. --- */
 static int screen_emit(void *ctx, char c)
 {
     (void)ctx;
     kputchar(c);
     return 1;
 }
-/* The attribute escape drives the live video colour.  This used to write a
- * module-local shadow that nothing ever read — %[E]/%[S]/%[W] had silently
- * stopped colouring kernel output (the panic banner printed in whatever
- * colour the last user op happened to leave behind). */
 static void screen_set_attr(void *ctx, uint8_t attr)
 {
     (void)ctx;
@@ -410,7 +351,6 @@ static const kfmt_ops_t SCREEN_OPS = {
     .set_cursor = screen_set_cursor,
 };
 
-/* --- Buffer ops: drives a bounded char buffer for ksnprintf/kvsnprintf. --- */
 typedef struct { char *buf; size_t pos; size_t size; } kfmt_buf_ctx_t;
 
 static int buf_emit(void *ctx, char c)
@@ -421,7 +361,7 @@ static int buf_emit(void *ctx, char c)
         b->buf[b->pos++] = c;
         return 1;
     }
-    return 0;  /* buffer full — parser will stop */
+    return 0;
 }
 static const kfmt_ops_t BUF_OPS = {
     .emit_char  = buf_emit,
@@ -434,9 +374,6 @@ int kprintf(const char *format, ...)
     va_list args;
     va_start(args, format);
     spin_lock(&g_kprintf_lock);
-    /* Wrap the per-char emit loop in one Canvas batch.  A multi-line
-     * banner used to fire one full-frame blit per '\n'-induced scroll;
-     * batched, the whole banner ends in a single coalesced blit. */
     VideoBatchBegin();
     int n = kvformat(&SCREEN_OPS, NULL, format, args);
     VideoBatchEnd();
@@ -465,14 +402,7 @@ int ksnprintf(char *buf, size_t size, const char *fmt, ...)
 
 __attribute__((noreturn)) void panic(const char *message, ...)
 {
-    /* Defensive lock break BEFORE the first kprintf — see klib.h
-     * console-lock invariant. spin_force_release skips the saved-flags
-     * restore; that is fine here because we never return, and IPI_PANIC
-     * (sent from exception_handler) halts peer cores before they ever
-     * spin_unlock again. */
     spin_force_release(&g_kprintf_lock);
-    /* Discard any pending Canvas batch state left by an interrupted
-     * Manifest op so the panic banner commits on its first kprintf. */
     CanvasForceReset();
 
     asm volatile("cli");
@@ -492,13 +422,9 @@ __attribute__((noreturn)) void panic(const char *message, ...)
 
     va_end(args);
 
-    /* Everything said, onto the wire, before the last breath: the line
-     * drives itself by interrupt and interrupts are off. The locks may be
-     * this core's own from the moment it died. */
     WireForceRelease();
     WireDrain();
 
     while (1)
         asm volatile("hlt");
 }
-

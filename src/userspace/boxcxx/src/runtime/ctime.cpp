@@ -1,10 +1,3 @@
-// boxcxx — <ctime> runtime
-//
-// The calendar arithmetic is <chrono>'s, and deliberately: the tree already had
-// three civil-date conversions when this file was written and did not need a
-// fourth. days_from_civil / civil_from_days / weekday_from_days are the same
-// functions every year_month_day in the library goes through, so a date that
-// prints one way through std::format prints the same way through strftime.
 
 #include <chrono>
 #include <cstring>
@@ -25,9 +18,6 @@ using ::std::chrono::__detail::weekday_from_days;
 
 constexpr long long kSecondsPerDay = 86400;
 
-// Floor division, not truncation: a time_t before the epoch must map to the day
-// that contains it, and C's / rounds toward zero, which would put 1969-12-31
-// 23:59:59 on the wrong day.
 constexpr long long FloorDiv(long long a, long long b) noexcept
 {
     const long long q = a / b;
@@ -39,9 +29,6 @@ constexpr long long FloorMod(long long a, long long b) noexcept
     return a - FloorDiv(a, b) * b;
 }
 
-// Fills a tm from a day number and a second-of-day. Shared by gmtime and by
-// mktime's write-back, so the normalised fields a caller reads after mktime are
-// produced by the same code that gmtime would have produced.
 void FillTm(::std::tm &out, long long days, long long sod) noexcept
 {
     long long y = 0;
@@ -59,10 +46,6 @@ void FillTm(::std::tm &out, long long days, long long sod) noexcept
     out.tm_isdst = 0;
 }
 
-// Per strand, not per process. C makes these buffers process-wide, which in a
-// program running strands over one address space means two calls to gmtime can
-// hand back the same storage — the standard permits it and BoxOS does not have
-// to. Same decision as rand, strtok and the <cuchar> conversion states.
 thread_local ::std::tm g_gmtime;
 thread_local ::std::tm g_localtime;
 thread_local char      g_asctime[32];
@@ -78,16 +61,13 @@ void Put2(char *p, int v, char pad) noexcept
     p[1] = static_cast<char>('0' + v % 10);
 }
 
-} // namespace
+}
 
 namespace std {
 
 clock_t clock() noexcept
 {
-    uint64_t us = 0;   // matches proc_cpu_time's out parameter exactly
-    // The kernel accumulates this at every context switch; a failure here means
-    // the manifest call did not land, and C's answer for that is -1 rather than
-    // a zero that reads like "no time has passed".
+    uint64_t us = 0;
     if (::proc_cpu_time(&us) != 0) return static_cast<clock_t>(-1);
     return static_cast<clock_t>(us);
 }
@@ -119,9 +99,6 @@ tm *gmtime(const time_t *timer) noexcept
 
 tm *localtime(const time_t *timer) noexcept
 {
-    // No timezone database, so local time IS UTC — said plainly rather than
-    // approximated. The separate buffer is not cosmetic: C lets a program hold
-    // the result of one across a call to the other.
     if (!timer) return nullptr;
     const long long t    = *timer;
     const long long days = FloorDiv(t, kSecondsPerDay);
@@ -133,13 +110,9 @@ time_t mktime(tm *timeptr) noexcept
 {
     if (!timeptr) return static_cast<time_t>(-1);
 
-    // Every field may arrive out of range — that is what mktime is FOR, and the
-    // usual caller is "add a month to this date" written as tm_mon += 1.
     long long mon  = timeptr->tm_mon;
     long long year = static_cast<long long>(timeptr->tm_year) + 1900;
 
-    // The month has to be folded into the year first: the length of the others
-    // depends on which month it lands in.
     year += FloorDiv(mon, 12);
     mon = FloorMod(mon, 12);
 
@@ -150,8 +123,6 @@ time_t mktime(tm *timeptr) noexcept
                            static_cast<long long>(timeptr->tm_min) * 60 +
                            static_cast<long long>(timeptr->tm_sec);
 
-    // The caller reads the normalised fields back out of *timeptr, so they are
-    // produced from the result, not from the input.
     FillTm(*timeptr, FloorDiv(secs, kSecondsPerDay), FloorMod(secs, kSecondsPerDay));
     return static_cast<time_t>(secs);
 }
@@ -159,15 +130,8 @@ time_t mktime(tm *timeptr) noexcept
 char *asctime(const tm *timeptr) noexcept
 {
     if (!timeptr) return nullptr;
-    // C fixes the RESULT at 26 bytes, which bounds the year to four digits even
-    // though the year itself is written with %d. Outside that the behaviour is
-    // undefined; returning nullptr is the version of undefined that cannot
-    // write past a buffer whose size C also fixed.
     const int y = timeptr->tm_year + 1900;
     if (y < 0 || y > 9999) return nullptr;
-    // Every field feeds a fixed-width column, so a value that cannot fit one
-    // would write a character that is not a digit. C leaves that undefined;
-    // refusing is the version of undefined that cannot produce a corrupt line.
     if (static_cast<unsigned>(timeptr->tm_wday) > 6u ||
         static_cast<unsigned>(timeptr->tm_mon) > 11u ||
         timeptr->tm_mday < 1 || timeptr->tm_mday > 31 ||
@@ -176,18 +140,12 @@ char *asctime(const tm *timeptr) noexcept
         static_cast<unsigned>(timeptr->tm_sec) > 60u)
         return nullptr;
 
-    // C specifies the result as exactly
-    //     "%.3s %.3s%3d %.2d:%.2d:%.2d %d\n"
-    // and the details matter: the day is %3d, so it carries its OWN leading
-    // space and there is none between the month and it; and the year is %d, NOT
-    // %4d — year 500 prints as "500" and the string is one character shorter.
-    // Zero-padding it to four would be a different string from the one C names.
     char *p = g_asctime;
     ::std::memcpy(p + 0, kWday[timeptr->tm_wday], 3);
     p[3] = ' ';
     ::std::memcpy(p + 4, kMon[timeptr->tm_mon], 3);
-    p[7] = ' ';                            // the first column of %3d
-    Put2(p + 8, timeptr->tm_mday, ' ');    // its other two
+    p[7] = ' ';
+    Put2(p + 8, timeptr->tm_mday, ' ');
     p[10] = ' ';
     Put2(p + 11, timeptr->tm_hour, '0');
     p[13] = ':';
@@ -212,17 +170,11 @@ char *ctime(const time_t *timer) noexcept
     if (!t) return nullptr;
     char *s = asctime(t);
     if (!s) return nullptr;
-    // asctime's buffer belongs to asctime: a program is allowed to hold what
-    // ctime returned across a call to asctime, so this cannot alias it. The
-    // length is not fixed — the year is %d — so it is measured, not assumed.
     const ::std::size_t n = ::std::strlen(s);
     ::std::memcpy(g_ctime, s, n + 1);
     return g_ctime;
 }
 
-// A `tm` said in the vocabulary <chrono>'s renderer speaks. It was written for
-// strftime and is shared with time_put as of Ф43-d-3 — the facet's first draft
-// carried a second copy of it, which is one more than there can be.
 static __chrono_fmt::Parts PartsFromTm(const tm &t) noexcept
 {
     __chrono_fmt::Parts p;
@@ -233,16 +185,14 @@ static __chrono_fmt::Parts PartsFromTm(const tm &t) noexcept
     p.mi        = t.tm_min;
     p.s         = t.tm_sec;
     p.sub       = 0;
-    p.subw      = 0; // a tm has no subsecond, so %S prints no fraction
+    p.subw      = 0;
     p.wd        = static_cast<unsigned>(t.tm_wday);
-    p.yday      = static_cast<long long>(t.tm_yday) + 1; // render counts from 1
+    p.yday      = static_cast<long long>(t.tm_yday) + 1;
     p.have_date = true;
     p.have_time = true;
     p.mon_ok    = static_cast<unsigned>(t.tm_mon) < 12u;
     p.wd_ok     = static_cast<unsigned>(t.tm_wday) < 7u;
     p.date_ok   = true;
-    // localtime is gmtime here, so the zone is not unknown — it is UTC, and %Z
-    // and %z say so rather than throwing or printing nothing.
     p.zone     = "UTC";
     p.has_zone = true;
     p.has_zoff = true;
@@ -252,9 +202,6 @@ static __chrono_fmt::Parts PartsFromTm(const tm &t) noexcept
 
 namespace __timeput {
 
-// The declaration in <__bits/time_render>, and the whole reason it exists:
-// <locale> cannot include <__bits/chrono_format>, because that leaf includes
-// <format> and <format> includes <locale>.
 bool RenderTm(string &out, char spec, char mod, const tm &t) noexcept
 {
     try {
@@ -265,7 +212,7 @@ bool RenderTm(string &out, char spec, char mod, const tm &t) noexcept
     return true;
 }
 
-} // namespace __timeput
+}
 
 size_t strftime(char *s, size_t maxsize, const char *format, const tm *timeptr) noexcept
 {
@@ -275,23 +222,15 @@ size_t strftime(char *s, size_t maxsize, const char *format, const tm *timeptr) 
 
     string out;
     try {
-        // string_view is explicit now that render() is a template over the
-        // format string's character type: strftime's is a narrow C string, and
-        // a const char* does not deduce a basic_string_view.
         __chrono_fmt::render(out, string_view(format), p);
     } catch (...) {
-        // render throws for a conversion it does not know; C calls that
-        // undefined and every implementation returns 0. An exception must not
-        // cross into a C caller.
         return 0;
     }
 
-    // C counts the terminator against maxsize, and on overflow returns 0 with
-    // the buffer left unspecified.
     if (out.size() >= maxsize) return 0;
     ::std::memcpy(s, out.data(), out.size());
     s[out.size()] = '\0';
     return out.size();
 }
 
-} // namespace std
+}

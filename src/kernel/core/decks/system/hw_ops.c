@@ -1,17 +1,3 @@
-/*
- * HW — Manifest opcode handlers for per-process real-HW state.
- *
- * Per-process knobs (LAM mode now; CET SSP / TME context KeyID later)
- * that don't belong under MemTag's region-centric model. Each op acts
- * on the CALLING process's VM context — set returns OK / err, get
- * returns the current value in the out crate.
- *
- *   LAM_GET   no params; out_crate = [u8 lam_mode]
- *   LAM_SET   params = [u8 lam_mode 0=NONE,1=U48,2=U57]
- *
- * Auth model: every op is unprivileged for self-targeted state.
- * Cross-process mutation would require "system" — not added here yet.
- */
 
 #include "system_deck.h"
 #include "op_registry.h"
@@ -24,7 +10,6 @@
 #include "klib.h"
 #include "error.h"
 
-/* ─── SYSTEM_OP_HW_LAM_GET ─────────────────────────────────────────── */
 static int SysHwLamGet(const ManifestOp *op, Crate *crates,
                         uint16_t crate_count, const OpContext *ctx) {
     (void)crate_count;
@@ -47,7 +32,6 @@ static int SysHwLamGet(const ManifestOp *op, Crate *crates,
     return rc;
 }
 
-/* ─── SYSTEM_OP_HW_TME_STATE ───────────────────────────────────────── */
 typedef struct {
     uint8_t   tme_active;
     uint8_t   mk_active;
@@ -83,7 +67,7 @@ static int SysHwTmeState(const ManifestOp *op, Crate *crates,
     kbuf->max_keyid         = g_tme.max_keyid;
     kbuf->pool_programmed   = (uint16_t)g_tme.pool_programmed;
     kbuf->in_use            = (uint16_t)g_tme.in_use;
-    kbuf->per_proc_quota    = 8u;  /* TME_QUOTA_PER_PROC (bay.h) — keep in sync */
+    kbuf->per_proc_quota    = 8u;
     kbuf->reduced_maxphyaddr = g_tme.reduced_maxphyaddr;
     kbuf->this_proc_held    = ctx->proc->cabin ? ctx->proc->cabin->tme_keyids_held : 0;
 
@@ -94,7 +78,6 @@ static int SysHwTmeState(const ManifestOp *op, Crate *crates,
     return rc;
 }
 
-/* ─── SYSTEM_OP_HW_LAM_SET ─────────────────────────────────────────── */
 static int SysHwLamSet(const ManifestOp *op, Crate *crates,
                         uint16_t crate_count, const OpContext *ctx) {
     (void)crates;
@@ -108,9 +91,6 @@ static int SysHwLamSet(const ManifestOp *op, Crate *crates,
     vmm_context_t *vmm = ctx->proc->cabin ? ctx->proc->cabin->vmm : NULL;
     if (!vmm) return ERR_INVALID_STATE;
 
-    /* vmm_set_user_lam validates has_lam + 5-level paging requirements
-     * and updates ctx->lam_mode. The next CR3 reload (scheduler tick or
-     * vmm_switch_context) picks up the new bits. */
     return vmm_set_user_lam(vmm, (vmm_lam_mode_t)mode);
 }
 

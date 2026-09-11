@@ -4,28 +4,15 @@
 #include "process.h"
 #include "vmm.h"
 
-/*
- * Global ManifestTable: a growable slot array plus per-slot generation
- * counters. Handles are encoded as (gen<<32 | slot). Stale handles fail
- * lookup because the slot's generation has advanced.
- *
- * Free slots form a chain rooted at next_free; on alloc we pop, on release
- * we push. When the chain is empty, the table doubles in size.
- *
- * All structural mutation goes through table.lock. Per-slot ref_count is
- * atomic so hot ManifestResolve / ManifestRelease paths don't serialize.
- */
 
 #define MANIFEST_TABLE_INITIAL_CAP 32u
 #define MANIFEST_TABLE_MAX_CAP     (1u << 24)
 
-/* Upper bound on raw Manifest size — shared with guide.c dispatch staging
- * via MANIFEST_RAW_MAX_SIZE in manifest.h. */
 
 typedef struct ManifestSlot {
-    CompiledManifest *manifest;     /* NULL when slot is free */
-    uint32_t          generation;   /* incremented every release */
-    uint32_t          next_free;    /* index of next free slot, or 0xFFFFFFFF */
+    CompiledManifest *manifest;
+    uint32_t          generation;
+    uint32_t          next_free;
 } ManifestSlot;
 
 typedef struct {
@@ -41,16 +28,12 @@ typedef struct {
 
 static ManifestTable g_manifest_table;
 
-/* --------------------------------------------------------------------------
- * Slot management
- * -------------------------------------------------------------------------- */
 
 static void slot_init_range(ManifestSlot *slots, uint32_t from, uint32_t to)
 {
-    /* Build a free-list chain over [from, to). */
     for (uint32_t i = from; i < to; i++) {
         slots[i].manifest   = NULL;
-        slots[i].generation = 1;  /* start at 1 so handle (gen=0) is always invalid */
+        slots[i].generation = 1;
         slots[i].next_free  = (i + 1 < to) ? (i + 1) : MANIFEST_SLOT_NIL;
     }
 }
@@ -70,12 +53,9 @@ static error_t manifest_table_grow_locked(uint32_t new_cap)
         }
     }
 
-    /* Append new free slots to the free list. New range is appended in order
-     * and linked into the existing chain. */
     uint32_t old_cap = g_manifest_table.capacity;
     slot_init_range(new_slots, old_cap, new_cap);
 
-    /* Find tail of existing free list and link to new range, or set head. */
     if (g_manifest_table.first_free == MANIFEST_SLOT_NIL) {
         g_manifest_table.first_free = old_cap;
     } else {
@@ -111,15 +91,12 @@ static error_t manifest_alloc_slot_locked(uint32_t *out_slot, uint32_t *out_gen)
 static void manifest_free_slot_locked(uint32_t slot)
 {
     g_manifest_table.slots[slot].manifest = NULL;
-    g_manifest_table.slots[slot].generation++;  /* invalidates outstanding handles */
+    g_manifest_table.slots[slot].generation++;
     g_manifest_table.slots[slot].next_free = g_manifest_table.first_free;
     g_manifest_table.first_free = slot;
     g_manifest_table.active_count--;
 }
 
-/* --------------------------------------------------------------------------
- * CompiledManifest construction / destruction
- * -------------------------------------------------------------------------- */
 
 static void compiled_manifest_destroy(CompiledManifest *cm)
 {
@@ -144,7 +121,6 @@ static error_t manifest_validate_and_index(const uint8_t *bytes,
     if (hdr->total_size != size)             return ERR_INVALID_ARGUMENT;
     if (hdr->op_count == 0)                  return ERR_INVALID_ARGUMENT;
 
-    /* Walk the op stream once to compute offsets and verify bounds. */
     uint32_t *offsets = kmalloc(sizeof(uint32_t) * hdr->op_count);
     if (!offsets) return ERR_NO_MEMORY;
 
@@ -182,11 +158,6 @@ static error_t manifest_resolve_handlers(const uint8_t           *bytes,
     const OpRegistration **handlers = kmalloc(sizeof(OpRegistration *) * op_count);
     if (!handlers) return ERR_NO_MEMORY;
 
-    /* Synthesize an OpContext so ManifestOpAuthorize can apply the
-     * tag-level policy (OP_AUTH_NONE/APP/UTILITY/SYSTEM/NETWORK) instead of
-     * misinterpreting reg->security_mask as a literal bitfield. owner==NULL
-     * means kernel-internal (selftests) — ManifestOpAuthorize already
-     * fast-paths that to true via the ctx->proc==NULL check. */
     OpContext compile_ctx;
     memset(&compile_ctx, 0, sizeof(compile_ctx));
     compile_ctx.proc = owner;
@@ -212,9 +183,6 @@ static error_t manifest_resolve_handlers(const uint8_t           *bytes,
     return OK;
 }
 
-/* --------------------------------------------------------------------------
- * Public API
- * -------------------------------------------------------------------------- */
 
 error_t ManifestSubsystemInit(void)
 {
@@ -268,20 +236,6 @@ error_t ManifestCompile(struct process_t *owner,
     if (size < sizeof(Manifest))       return ERR_BUFFER_TOO_SMALL;
     if (size > MANIFEST_RAW_MAX_SIZE) return ERR_INVALID_ARGUMENT;
 
-    /*
-     * Step 1: stage the raw Manifest bytes into a kernel-owned buffer.
-     *
-     *   is_kernel_ptr=true  — user_or_kernel already lives in kernel VA
-     *                          (self-tests, boot-time kernel manifests):
-     *                          direct memcpy after kmalloc.
-     *   is_kernel_ptr=false — user_or_kernel is a userland VA in owner's
-     *                          cabin: vmm_user_buf_in walks the user PT
-     *                          one phys page at a time, handling non-
-     *                          contiguous backing + non-page-aligned
-     *                          start/end. The helper does its own kmalloc
-     *                          + cleans up on any partial failure, so we
-     *                          either get a fully populated buffer or NULL.
-     */
     uint8_t *raw = NULL;
     if (is_kernel_ptr) {
         raw = kmalloc(size);
@@ -295,18 +249,15 @@ error_t ManifestCompile(struct process_t *owner,
         if (!raw) return ERR_INVALID_ADDRESS;
     }
 
-    /* Step 2: validate and index ops. */
     uint32_t  op_count = 0;
     uint32_t *offsets  = NULL;
     error_t rc = manifest_validate_and_index(raw, size, &op_count, &offsets);
     if (rc != OK) { kfree(raw); return rc; }
 
-    /* Step 3: resolve handlers and run security gate per op. */
     const OpRegistration **handlers = NULL;
     rc = manifest_resolve_handlers(raw, op_count, offsets, owner, &handlers);
     if (rc != OK) { kfree(offsets); kfree(raw); return rc; }
 
-    /* Step 4: build CompiledManifest. */
     CompiledManifest *cm = kmalloc(sizeof(CompiledManifest));
     if (!cm) { kfree(handlers); kfree(offsets); kfree(raw); return ERR_NO_MEMORY; }
 
@@ -323,7 +274,6 @@ error_t ManifestCompile(struct process_t *owner,
     cm->_pad2       = 0;
     spinlock_init(&cm->lock);
 
-    /* Step 5: allocate slot, install. */
     spin_lock(&g_manifest_table.lock);
     uint32_t slot = 0, gen = 0;
     rc = manifest_alloc_slot_locked(&slot, &gen);
@@ -365,8 +315,6 @@ error_t ManifestRetain(ManifestHandle handle)
 {
     CompiledManifest *cm = ManifestResolve(handle);
     if (!cm) return ERR_INVALID_ARGUMENT;
-    /* ManifestResolve already incremented; the caller's prior pin owned the
-     * baseline ref. We just keep the extra one we got from Resolve. */
     return OK;
 }
 
@@ -405,10 +353,6 @@ void ManifestReleaseAllForOwner(uint32_t owner_pid)
 {
     if (!g_manifest_table.initialized) return;
 
-    /* Stack-bounded batch. A typical cabin holds 0-5 handles; 64 covers
-     * pathological cases without growing kernel stack. The outer
-     * while-loop catches the case where a cabin held > 64 — we keep
-     * draining until a pass finds none. */
     ManifestHandle batch[64];
     uint32_t       collected;
     uint32_t       total_released = 0;

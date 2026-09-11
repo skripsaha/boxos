@@ -16,7 +16,6 @@ int main(void) {
     println("");
     println("Utilities:");
 
-    /* Every utility on the volume, however many there are. */
     uint32_t    *s_file_ids = NULL;
     file_info_t *s_infos    = NULL;
     int count = query_all("utility", &s_file_ids);

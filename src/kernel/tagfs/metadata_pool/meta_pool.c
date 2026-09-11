@@ -3,112 +3,258 @@
 #include "tagfs.h"
 #include "../../lib/kernel/crypto.h"
 
-// Forward declaration - internal function in tagfs.c
-extern int tagfs_alloc_blocks_internal(uint32_t count, uint32_t *out_start_block);
+extern int  tagfs_alloc_blocks_internal(uint32_t count, uint32_t *out_start_block);
+extern void tagfs_free_blocks_internal(uint32_t start_block, uint32_t count);
 
-#define RECORD_HEADER_SIZE  42   // 40 bytes of fields + 2 bytes CRC16
+#define RECORD_HEADER_SIZE  42
 #define MPOOL_BLOCK_HEADER  16
-#define RECORD_CRC_OFFSET   40   // CRC16 stored at bytes [40..41] of packed record
+#define RECORD_CRC_OFFSET   40
 
-// CRC16 wrapper using shared crypto library
 static uint16_t meta_crc16(const uint8_t* data, uint32_t len) {
     return KCrc16(data, len);
 }
 
-static uint32_t     g_first_block      = 0;
-static uint32_t     g_block_count      = 0;
 static MetaPoolBlock g_current_block;
 static uint32_t     g_current_block_num = 0;
 static bool         g_current_dirty    = false;
-// Note: No local lock - use g_state.lock from tagfs.c for all operations
-// static spinlock_t   g_lock;
 
-// Memory Mirror: in-memory cache of all metadata, indexed by file_id
+static MetaPoolBlock g_fresh_block;
+
+typedef struct {
+    uint32_t block;
+    uint16_t kept;
+} MetaPoolLink;
+
+static MetaPoolLink* g_chain     = NULL;
+static uint32_t      g_chain_len = 0;
+static uint32_t      g_chain_cap = 0;
+
+static void chain_release(void) {
+    if (g_chain) kfree(g_chain);
+    g_chain     = NULL;
+    g_chain_len = 0;
+    g_chain_cap = 0;
+}
+
+static int chain_reserve(uint32_t want) {
+    if (want <= g_chain_cap) return 0;
+
+    uint32_t cap = g_chain_cap ? g_chain_cap * 2 : 8;
+    if (cap < want) cap = want;
+
+    MetaPoolLink* grown = kmalloc(sizeof(MetaPoolLink) * cap);
+    if (!grown) return -1;
+
+    if (g_chain && g_chain_len)
+        memcpy(grown, g_chain, sizeof(MetaPoolLink) * g_chain_len);
+    if (g_chain) kfree(g_chain);
+
+    g_chain     = grown;
+    g_chain_cap = cap;
+    return 0;
+}
+
+static int chain_append(uint32_t block, uint16_t kept) {
+    if (chain_reserve(g_chain_len + 1) != 0) return -1;
+    g_chain[g_chain_len].block = block;
+    g_chain[g_chain_len].kept  = kept;
+    g_chain_len++;
+    return 0;
+}
+
+static uint32_t chain_find(uint32_t block) {
+    for (uint32_t i = 0; i < g_chain_len; i++) {
+        if (g_chain[i].block == block) return i;
+    }
+    return g_chain_len;
+}
+
+static void chain_drop(uint32_t index) {
+    if (index >= g_chain_len) return;
+    for (uint32_t i = index; i + 1 < g_chain_len; i++) {
+        g_chain[i] = g_chain[i + 1];
+    }
+    g_chain_len--;
+}
+
+static uint16_t count_kept_records(const MetaPoolBlock* blk) {
+    uint32_t used = blk->used_bytes;
+    if (used > TAGFS_MPOOL_DATA_SIZE) used = TAGFS_MPOOL_DATA_SIZE;
+
+    uint16_t kept = 0;
+    uint32_t pos  = 0;
+    while (pos + RECORD_HEADER_SIZE <= used) {
+        uint16_t record_len;
+        memcpy(&record_len, blk->payload + pos, sizeof(uint16_t));
+        if (record_len < RECORD_HEADER_SIZE || record_len > used - pos) break;
+
+        uint32_t file_id;
+        memcpy(&file_id, blk->payload + pos + 2, sizeof(uint32_t));
+        if (file_id != 0) kept++;
+
+        pos += record_len;
+    }
+    return kept;
+}
+
+typedef struct {
+    uint32_t block;
+    uint32_t offset;
+} MetaPoolRetire;
+
+static MetaPoolRetire* g_retire     = NULL;
+static uint32_t        g_retire_len = 0;
+static uint32_t        g_retire_cap = 0;
+
+static void retire_release(void) {
+    if (g_retire) kfree(g_retire);
+    g_retire     = NULL;
+    g_retire_len = 0;
+    g_retire_cap = 0;
+}
+
+static int retire_owe(uint32_t block, uint32_t offset) {
+    if (g_retire_len == g_retire_cap) {
+        uint32_t cap = g_retire_cap ? g_retire_cap * 2 : 8;
+        MetaPoolRetire* grown = kmalloc(sizeof(MetaPoolRetire) * cap);
+        if (!grown) return -1;
+        if (g_retire && g_retire_len)
+            memcpy(grown, g_retire, sizeof(MetaPoolRetire) * g_retire_len);
+        if (g_retire) kfree(g_retire);
+        g_retire     = grown;
+        g_retire_cap = cap;
+    }
+    g_retire[g_retire_len].block  = block;
+    g_retire[g_retire_len].offset = offset;
+    g_retire_len++;
+    return 0;
+}
+
+static bool retire_owed(uint32_t block, uint32_t offset) {
+    for (uint32_t i = 0; i < g_retire_len; i++) {
+        if (g_retire[i].block == block && g_retire[i].offset == offset) return true;
+    }
+    return false;
+}
+
+static void retire_paid(uint32_t block) {
+    uint32_t w = 0;
+    for (uint32_t r = 0; r < g_retire_len; r++) {
+        if (g_retire[r].block != block) g_retire[w++] = g_retire[r];
+    }
+    g_retire_len = w;
+}
+
+static uint16_t retire_apply(uint32_t block, MetaPoolBlock* blk) {
+    for (uint32_t i = 0; i < g_retire_len; i++) {
+        if (g_retire[i].block != block) continue;
+        uint32_t offset = g_retire[i].offset;
+        if (offset < MPOOL_BLOCK_HEADER ||
+            offset + RECORD_HEADER_SIZE > TAGFS_BLOCK_SIZE) continue;
+        memset((uint8_t*)blk + offset + 2, 0, 4);
+    }
+    return count_kept_records(blk);
+}
+
 static TagFSMetadata* g_mirror          = NULL;
 static uint32_t       g_mirror_capacity = 0;
 static bool*          g_mirror_valid    = NULL;
 
-// Seqlock for mirror: readers are lock-free, writers bump sequence.
-// Odd sequence = write in progress, even = stable.
+typedef struct {
+    uint32_t block;
+    uint32_t offset;
+} MetaPoolWhere;
+
+static MetaPoolWhere* g_mirror_where = NULL;
+
 static volatile uint32_t g_mirror_seq   = 0;
 
-// ---------------------------------------------------------------------------
-// Public: init / shutdown / flush
-// ---------------------------------------------------------------------------
 
-int meta_pool_init(uint32_t first_block, uint32_t block_count) {
-    g_first_block = first_block;
-    g_block_count = block_count;
+int meta_pool_init(uint32_t first_block) {
+    chain_release();
+    retire_release();
 
     memset(&g_current_block, 0, sizeof(MetaPoolBlock));
-    g_current_block.magic        = TAGFS_MPOOL_MAGIC;
-    g_current_block.used_bytes   = 0;
-    g_current_block.record_count = 0;
-    g_current_block.next_block   = 0;
-
     g_current_block_num = first_block;
     g_current_dirty     = false;
 
-    // spinlock_init removed
 
-    /*
-     * ‼ NEITHER OF THESE IS AN EMPTY POOL, AND THIS NO LONGER PRETENDS THEY ARE
-     *
-     * Both used to "start fresh" and return success. This is the record that
-     * holds every file's name, size and extents; a mount that begins it afresh
-     * is a mount that has decided the volume is empty, and the first write
-     * after that allocates over what is still there.
-     *
-     * On the board it looked like this: one boot worked, the next came up with
-     * no files on it, and neither said anything — because it was said with
-     * debug_printf, which compiles to nothing in a shipped build.
-     *
-     * A pool that is unreadable, or that holds something which is not a pool,
-     * means the volume does not mount. Nothing is written to it; whatever is
-     * still on the medium stays there and can be looked at.
-     *
-     * There is no case where an ordinary volume gets here with an empty pool:
-     * the tool that makes a volume writes one, and the kernel does not create
-     * volumes.
-     */
-    int read_result = tagfs_read_block(first_block, &g_current_block);
-    if (read_result < 0) {
-        kprintf("[MetaPool] block %u would not read — this volume's metadata "
-                "cannot be reached, so it is not mounted\n", first_block);
+    TagFSState* fs  = tagfs_get_state();
+    uint32_t    run = fs ? fs->layout.data_blocks : 0;
+    if (run == 0) {
+        kprintf("[MetaPool] this volume states a data run of no blocks at all, "
+                "so there is nowhere for a metadata pool to be — it is not "
+                "mounted\n");
         return -1;
     }
 
-    if (g_current_block.magic != TAGFS_MPOOL_MAGIC) {
-        kprintf("[MetaPool] block %u holds 0x%08x where a metadata pool should "
-                "be — this volume is not mounted, and nothing is written to "
-                "it\n", first_block, g_current_block.magic);
-        return -1;
+    uint32_t block     = first_block;
+    uint32_t hops      = 0;
+    uint32_t disagreed = 0;
+
+    for (;;) {
+        if (block >= run) {
+            kprintf("[MetaPool] the chain points at block %u and this volume's "
+                    "data run is %u blocks — that is outside the volume, so it "
+                    "is not mounted\n", block, run);
+            chain_release();
+            return -1;
+        }
+
+        MetaPoolBlock here;
+        if (tagfs_read_block(block, &here) != OK) {
+            kprintf("[MetaPool] block %u would not read — this volume's "
+                    "metadata cannot be reached, so it is not mounted "
+                    "(%u block(s) of its pool had been read)\n",
+                    block, g_chain_len);
+            chain_release();
+            return -1;
+        }
+
+        if (here.magic != TAGFS_MPOOL_MAGIC) {
+            kprintf("[MetaPool] block %u holds 0x%08x where a metadata pool "
+                    "should be — this volume is not mounted, and nothing is "
+                    "written to it\n", block, here.magic);
+            chain_release();
+            return -1;
+        }
+
+        uint16_t kept = count_kept_records(&here);
+        if (kept != here.kept) disagreed++;
+
+        if (chain_append(block, kept) != 0) {
+            kprintf("[MetaPool] there is no memory to hold this volume's "
+                    "metadata chain at %u blocks — it is not mounted\n",
+                    g_chain_len + 1);
+            chain_release();
+            return -1;
+        }
+
+        g_current_block_num = block;
+        g_current_block     = here;
+        g_current_block.kept = kept;
+
+        if (here.next_block == 0) break;
+
+        if (++hops >= run) {
+            kprintf("[MetaPool] this volume's metadata chain has taken %u hops "
+                    "in a data run of %u blocks, so it is going round in a "
+                    "circle — it is not mounted\n", hops, run);
+            chain_release();
+            return -1;
+        }
+        block = here.next_block;
     }
 
-    uint32_t chain_steps = 0;
-    uint32_t max_chain = g_block_count + 1;
-    while (g_current_block.next_block != 0 && chain_steps < max_chain) {
-        uint32_t next = g_current_block.next_block;
-        MetaPoolBlock next_block_buf;
-        int chain_result = tagfs_read_block(next, &next_block_buf);
-        if (chain_result < 0) {
-            debug_printf("[MetaPool] init: chain read failed at block %u, stopping\n", next);
-            break;
-        }
-        if (next_block_buf.magic != TAGFS_MPOOL_MAGIC) {
-            debug_printf("[MetaPool] init: bad magic in chain at block %u, stopping\n", next);
-            break;
-        }
-        g_current_block_num = next;
-        g_current_block     = next_block_buf;
-        chain_steps++;
-    }
-    if (chain_steps >= max_chain) {
-        debug_printf("[MetaPool] init: chain limit reached (%u), possible circular chain — stopped\n", max_chain);
+    if (disagreed) {
+        kprintf("[MetaPool] %u of this volume's %u metadata block(s) state a "
+                "kept-record count the records themselves do not bear out — "
+                "the records are counted, and that is the number used\n",
+                disagreed, g_chain_len);
     }
 
-    debug_printf("[MetaPool] initialized: first_block=%u block_count=%u last_block=%u\n",
-                 first_block, block_count, g_current_block_num);
+    debug_printf("[MetaPool] initialized: first_block=%u blocks=%u last_block=%u\n",
+                 first_block, g_chain_len, g_current_block_num);
     return 0;
 }
 
@@ -116,10 +262,11 @@ int meta_pool_flush(void) {
     if (!g_current_dirty) {
         return 0;
     }
-    int result = tagfs_write_block(g_current_block_num, &g_current_block);
-    if (result < 0) {
-        debug_printf("[MetaPool] flush: write failed for block %u\n", g_current_block_num);
-        return result;
+    if (tagfs_write_block(g_current_block_num, &g_current_block) != OK) {
+        kprintf("[MetaPool] block %u would not take this volume's newest "
+                "metadata — it stays in memory and is written again at the "
+                "next chance\n", g_current_block_num);
+        return -1;
     }
     g_current_dirty = false;
     return 0;
@@ -144,20 +291,22 @@ void meta_pool_shutdown(bool write_back) {
         kfree(g_mirror_valid);
         g_mirror_valid = NULL;
     }
+    if (g_mirror_where) {
+        kfree(g_mirror_where);
+        g_mirror_where = NULL;
+    }
     g_mirror_capacity = 0;
 
+    chain_release();
+    retire_release();
+
     memset(&g_current_block, 0, sizeof(MetaPoolBlock));
-    g_first_block       = 0;
-    g_block_count       = 0;
     g_current_block_num = 0;
     g_current_dirty     = false;
 
     debug_printf("[MetaPool] shutdown\n");
 }
 
-// ---------------------------------------------------------------------------
-// Public: record size
-// ---------------------------------------------------------------------------
 
 uint32_t meta_pool_record_size(const TagFSMetadata* meta) {
     uint32_t name_len = meta->filename ? (uint32_t)strlen(meta->filename) : 0;
@@ -167,9 +316,6 @@ uint32_t meta_pool_record_size(const TagFSMetadata* meta) {
            + name_len;
 }
 
-// ---------------------------------------------------------------------------
-// Internal: pack / unpack
-// ---------------------------------------------------------------------------
 
 static uint32_t pack_record(const TagFSMetadata* meta, uint8_t* buf) {
     uint32_t name_len   = meta->filename ? (uint32_t)strlen(meta->filename) : 0;
@@ -187,7 +333,6 @@ static uint32_t pack_record(const TagFSMetadata* meta, uint8_t* buf) {
     memcpy(buf + pos, &meta->extent_count,  sizeof(uint16_t));  pos += 2;
     memcpy(buf + pos, &name_len,            sizeof(uint16_t));  pos += 2;
 
-    // CRC16 — zeroed during computation, stamped below
     uint16_t zero_crc = 0;
     memcpy(buf + pos, &zero_crc, sizeof(uint16_t));             pos += 2;
 
@@ -224,7 +369,6 @@ static uint32_t pack_record(const TagFSMetadata* meta, uint8_t* buf) {
         pos += name_len;
     }
 
-    // Stamp CRC16 over the entire record (with CRC field zeroed)
     uint16_t crc = meta_crc16(buf, (uint32_t)record_len);
     memcpy(buf + RECORD_CRC_OFFSET, &crc, sizeof(uint16_t));
 
@@ -237,16 +381,14 @@ static int unpack_record(const uint8_t* buf, TagFSMetadata* out) {
     uint16_t record_len;
     memcpy(&record_len,         buf + pos, sizeof(uint16_t));  pos += 2;
 
-    // Validate record_len sanity before CRC check
     if (record_len < RECORD_HEADER_SIZE || record_len > TAGFS_MPOOL_DATA_SIZE) {
         debug_printf("[MetaPool] unpack: invalid record_len=%u\n", record_len);
         return -1;
     }
 
-    // Verify CRC16 integrity (zero the CRC field for computation)
     uint16_t stored_crc;
     memcpy(&stored_crc, buf + RECORD_CRC_OFFSET, sizeof(uint16_t));
-    if (stored_crc != 0) {
+    {
         uint8_t check_buf[TAGFS_MPOOL_DATA_SIZE];
         memcpy(check_buf, buf, record_len);
         memset(check_buf + RECORD_CRC_OFFSET, 0, 2);
@@ -257,7 +399,6 @@ static int unpack_record(const uint8_t* buf, TagFSMetadata* out) {
             return -1;
         }
     }
-    // stored_crc == 0 accepted for backward compatibility with pre-CRC records
 
     memcpy(&out->file_id,       buf + pos, sizeof(uint32_t));  pos += 4;
     memcpy(&out->flags,         buf + pos, sizeof(uint32_t));  pos += 4;
@@ -270,7 +411,7 @@ static int unpack_record(const uint8_t* buf, TagFSMetadata* out) {
     uint16_t name_len;
     memcpy(&name_len, buf + pos, sizeof(uint16_t));            pos += 2;
 
-    pos += 2;  // Skip CRC16 field (already validated above)
+    pos += 2;
 
     out->tag_ids  = NULL;
     out->extents  = NULL;
@@ -338,9 +479,6 @@ static int unpack_record(const uint8_t* buf, TagFSMetadata* out) {
     return 0;
 }
 
-// ---------------------------------------------------------------------------
-// Public: free
-// ---------------------------------------------------------------------------
 
 void tagfs_metadata_free(TagFSMetadata* meta) {
     if (meta->filename) { kfree(meta->filename); meta->filename = NULL; }
@@ -350,11 +488,7 @@ void tagfs_metadata_free(TagFSMetadata* meta) {
     meta->extent_count = 0;
 }
 
-// ---------------------------------------------------------------------------
-// Internal: deep-copy src into dst (allocates new memory for pointers)
-// ---------------------------------------------------------------------------
 
-// Returns true on success, false if any allocation failed (dst is left clean on failure).
 static bool mirror_deep_copy(const TagFSMetadata* src, TagFSMetadata* dst) {
     dst->file_id       = src->file_id;
     dst->flags         = src->flags;
@@ -397,29 +531,36 @@ static bool mirror_deep_copy(const TagFSMetadata* src, TagFSMetadata* dst) {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Public: mirror init / cached read
-// ---------------------------------------------------------------------------
 
 int meta_pool_mirror_init(uint32_t max_file_id) {
     g_mirror_capacity = max_file_id + 1;
     g_mirror       = kmalloc(sizeof(TagFSMetadata) * g_mirror_capacity);
     g_mirror_valid = kmalloc(sizeof(bool) * g_mirror_capacity);
-    if (!g_mirror || !g_mirror_valid) {
+    g_mirror_where = kmalloc(sizeof(MetaPoolWhere) * g_mirror_capacity);
+    if (!g_mirror || !g_mirror_valid || !g_mirror_where) {
         debug_printf("[MetaPool] Mirror: alloc failed\n");
         return -1;
     }
     memset(g_mirror,       0, sizeof(TagFSMetadata) * g_mirror_capacity);
-    memset(g_mirror_valid, 0, sizeof(bool)           * g_mirror_capacity);
+    memset(g_mirror_valid, 0, sizeof(bool)          * g_mirror_capacity);
+    memset(g_mirror_where, 0, sizeof(MetaPoolWhere) * g_mirror_capacity);
 
-    uint32_t block_num = g_first_block;
-    uint32_t loaded    = 0;
-    while (block_num != 0) {
+    uint32_t loaded = 0;
+    for (uint32_t link = 0; link < g_chain_len; link++) {
         uint8_t buf[TAGFS_BLOCK_SIZE];
-        if (tagfs_read_block(block_num, buf) < 0) break;
+        uint32_t block_num = g_chain[link].block;
+
+        if (block_num == g_current_block_num) {
+            memcpy(buf, &g_current_block, sizeof(MetaPoolBlock));
+        } else if (tagfs_read_block(block_num, buf) != OK) {
+            kprintf("[MetaPool] block %u of this volume's metadata read at "
+                    "mount and will not read now — the files it names are not "
+                    "in the cache\n", block_num);
+            continue;
+        }
 
         MetaPoolBlock* hdr = (MetaPoolBlock*)buf;
-        if (hdr->magic != TAGFS_MPOOL_MAGIC) break;
+        if (hdr->magic != TAGFS_MPOOL_MAGIC) continue;
 
         uint32_t pos = 0;
         while (pos < hdr->used_bytes) {
@@ -439,23 +580,30 @@ int meta_pool_mirror_init(uint32_t max_file_id) {
                     }
                     g_mirror[file_id] = meta;
                     g_mirror_valid[file_id] = true;
+                    g_mirror_where[file_id].block  = block_num;
+                    g_mirror_where[file_id].offset = MPOOL_BLOCK_HEADER + pos;
                     loaded++;
                 }
             }
             pos += record_len;
         }
-        block_num = hdr->next_block;
     }
 
     debug_printf("[MetaPool] Mirror loaded: %u entries\n", loaded);
     return 0;
 }
 
+int meta_pool_mirror_where(uint32_t file_id, uint32_t* out_block, uint32_t* out_offset) {
+    if (!g_mirror_where || !g_mirror_valid || file_id >= g_mirror_capacity)
+        return -1;
+    if (!g_mirror_valid[file_id] || g_mirror_where[file_id].offset == 0)
+        return -1;
+    *out_block  = g_mirror_where[file_id].block;
+    *out_offset = g_mirror_where[file_id].offset;
+    return 0;
+}
+
 int meta_pool_read_cached(uint32_t file_id, TagFSMetadata* out) {
-    // Seqlock read: no spinlock, retry if writer was active.
-    // kfree() in kernel heap doesn't unmap pages, so reading stale
-    // pointers during a concurrent write won't fault — the seqlock
-    // retry detects the race and discards the garbage copy.
     for (;;) {
         uint32_t seq = __atomic_load_n(&g_mirror_seq, __ATOMIC_ACQUIRE);
         if (seq & 1) { __asm__ volatile("pause"); continue; }
@@ -470,14 +618,10 @@ int meta_pool_read_cached(uint32_t file_id, TagFSMetadata* out) {
         if (__atomic_load_n(&g_mirror_seq, __ATOMIC_ACQUIRE) == seq)
             return 0;
 
-        // Writer was active during our copy — discard and retry
         tagfs_metadata_free(out);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public: write
-// ---------------------------------------------------------------------------
 
 int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* out_offset) {
     uint32_t record_size = meta_pool_record_size(meta);
@@ -488,15 +632,25 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
         return -1;
     }
 
-    // spin_lock removed - using g_state.lock
 
-    // Check if we need to chain to a new block
     if (record_size > (uint32_t)(TAGFS_MPOOL_DATA_SIZE - g_current_block.used_bytes)) {
         debug_printf("[MetaPool] CHAINING: block %u full (used=%u need=%u)\n",
                      g_current_block_num, g_current_block.used_bytes, record_size);
 
-        // Allocate new block - caller holds g_state.lock
-        // Use internal version to avoid double-lock
+        if (g_current_block.next_block != 0) {
+            kprintf("[MetaPool] block %u is being appended to and already "
+                    "points at block %u — the pool is not writing over that "
+                    "link, because everything past it would go off the chain "
+                    "for good\n", g_current_block_num, g_current_block.next_block);
+            return -1;
+        }
+
+        if (chain_reserve(g_chain_len + 1) != 0) {
+            kprintf("[MetaPool] there is no memory to lengthen this volume's "
+                    "metadata chain past %u blocks\n", g_chain_len);
+            return -1;
+        }
+
         uint32_t new_block;
         int alloc_ret = tagfs_alloc_blocks_internal(1, &new_block);
         if (alloc_ret != 0) {
@@ -504,31 +658,33 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
             return -1;
         }
 
-        // Link old block to new block and flush
-        debug_printf("[MetaPool] CHAINING: linking block %u -> %u\n", g_current_block_num, new_block);
-        g_current_block.next_block = new_block;
-        int flush_ret = tagfs_write_block(g_current_block_num, &g_current_block);
-        if (flush_ret != 0) {
-            debug_printf("[MetaPool] CHAINING: failed to flush old block %u\n", g_current_block_num);
-            // spin_unlock removed - using g_state.lock
+        memset(&g_fresh_block, 0, sizeof(g_fresh_block));
+        g_fresh_block.magic = TAGFS_MPOOL_MAGIC;
+        if (tagfs_write_block(new_block, &g_fresh_block) != OK) {
+            tagfs_free_blocks_internal(new_block, 1);
+            kprintf("[MetaPool] block %u would not take a metadata pool "
+                    "header, so this volume's chain is left as it was and the "
+                    "record is not written\n", new_block);
             return -1;
         }
 
-        // Move to the new block
+        debug_printf("[MetaPool] CHAINING: linking block %u -> %u\n", g_current_block_num, new_block);
+        g_current_block.next_block = new_block;
+        int flush_ret = tagfs_write_block(g_current_block_num, &g_current_block);
+        if (flush_ret != OK) {
+            g_current_block.next_block = 0;
+            tagfs_free_blocks_internal(new_block, 1);
+            kprintf("[MetaPool] block %u would not take the link to block %u, "
+                    "so the chain is left as it was and the record is not "
+                    "written\n", g_current_block_num, new_block);
+            return -1;
+        }
+
         g_current_block_num = new_block;
-        memset(&g_current_block, 0, sizeof(MetaPoolBlock));
-        g_current_block.magic        = TAGFS_MPOOL_MAGIC;
-        g_current_block.used_bytes   = 0;
-        g_current_block.record_count = 0;
-        g_current_block.next_block   = 0;
+        g_current_block     = g_fresh_block;
         g_current_dirty = true;
+        chain_append(new_block, 0);
         debug_printf("[MetaPool] CHAINING: switched to block %u\n", g_current_block_num);
-        // Write the new block header to disk immediately so that its magic is
-        // persisted before any other subsystem (e.g. CowWriteManifest) can
-        // overwrite the same physical block.  Without this, a crash before
-        // meta_pool_flush() leaves stale data on disk and triggers
-        // "bad magic in chain" on the next boot.
-        tagfs_write_block(g_current_block_num, &g_current_block);
     }
 
     uint8_t* dest = g_current_block.payload + g_current_block.used_bytes;
@@ -546,107 +702,209 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
     g_current_block.record_count++;
     g_current_dirty = true;
 
+    if (meta->file_id != 0) {
+        g_current_block.kept++;
+        if (g_chain_len) g_chain[g_chain_len - 1].kept = g_current_block.kept;
+    }
+
     debug_printf("[MetaPool] write: file_id=%u block=%u offset=%u size=%u\n",
                  meta->file_id, *out_block, *out_offset, record_size);
 
-    // Write-through: update mirror (seqlock write)
     if (g_mirror && meta->file_id < g_mirror_capacity) {
-        __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);  // odd = writing
+        __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);
         if (g_mirror_valid[meta->file_id]) {
             tagfs_metadata_free(&g_mirror[meta->file_id]);
         }
         if (mirror_deep_copy(meta, &g_mirror[meta->file_id])) {
             g_mirror_valid[meta->file_id] = true;
+            if (g_mirror_where) {
+                g_mirror_where[meta->file_id].block  = *out_block;
+                g_mirror_where[meta->file_id].offset = *out_offset;
+            }
         } else {
-            // Allocation failed: mark entry invalid so stale/partial data isn't returned.
             g_mirror_valid[meta->file_id] = false;
             debug_printf("[MetaPool] mirror: kmalloc failed for file_id=%u — entry invalidated\n",
                          meta->file_id);
         }
-        __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);  // even = done
+        __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);
     }
 
-    // Self-Healing: store metadata in mirror for recovery
-    TagFS_SelfHealOnMetadataWrite(*out_block, (const uint8_t*)meta);
+    TagFS_SelfHealOnMetadataWrite(*out_block, (const uint8_t*)&g_current_block);
 
-    // spin_unlock removed - using g_state.lock
     return 0;
 }
 
-// ---------------------------------------------------------------------------
-// Public: read
-// ---------------------------------------------------------------------------
 
 int meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out) {
-    // Current block may have unflushed data — read from in-memory copy
-    // spin_lock removed - using g_state.lock
     if (block == g_current_block_num) {
         int r = unpack_record((uint8_t *)&g_current_block + offset, out);
-        // spin_unlock removed - using g_state.lock
         return r;
     }
-    // spin_unlock removed - using g_state.lock
 
-    // Non-current blocks are always flushed — read from disk
     uint8_t buf[TAGFS_BLOCK_SIZE];
-    int result = tagfs_read_block(block, buf);
-    if (result < 0) {
+    if (tagfs_read_block(block, buf) != OK) {
         debug_printf("[MetaPool] read: tagfs_read_block failed for block %u\n", block);
-        return result;
+        return -1;
     }
     return unpack_record(buf + offset, out);
 }
 
-// ---------------------------------------------------------------------------
-// Public: delete
-// ---------------------------------------------------------------------------
+
+static void mirror_forget(uint32_t file_id) {
+    if (!g_mirror || file_id >= g_mirror_capacity || !g_mirror_valid[file_id])
+        return;
+    __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);
+    tagfs_metadata_free(&g_mirror[file_id]);
+    memset(&g_mirror[file_id], 0, sizeof(TagFSMetadata));
+    g_mirror_valid[file_id] = false;
+    __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);
+}
+
+static bool unlink_empty_block(uint32_t index, uint32_t says_next) {
+    uint32_t block = g_chain[index].block;
+    uint32_t prev  = g_chain[index - 1].block;
+    uint32_t next  = g_chain[index + 1].block;
+
+    if (says_next != next) {
+        kprintf("[MetaPool] block %u points at %u on the medium and at %u on "
+                "the chain this volume was mounted with — nothing is "
+                "unlinked\n", block, says_next, next);
+        return false;
+    }
+
+    MetaPoolBlock* before = kmalloc(sizeof(MetaPoolBlock));
+    if (!before) return false;
+
+    bool done = false;
+    if (tagfs_read_block(prev, before) != OK) {
+        kprintf("[MetaPool] block %u of this volume's metadata is empty and "
+                "block %u in front of it would not read, so it stays on the "
+                "chain\n", block, prev);
+    } else if (before->magic != TAGFS_MPOOL_MAGIC) {
+        kprintf("[MetaPool] block %u in front of the empty block %u holds "
+                "0x%08x instead of a metadata pool — the chain is left "
+                "alone\n", prev, block, before->magic);
+    } else {
+        before->next_block = next;
+        if (tagfs_write_block(prev, before) != OK) {
+            kprintf("[MetaPool] block %u would not take the link past the "
+                    "empty block %u, so that block stays on the chain\n",
+                    prev, block);
+        } else {
+            tagfs_free_blocks_internal(block, 1);
+            chain_drop(index);
+            done = true;
+            debug_printf("[MetaPool] block %u held nothing and went back: %u -> %u\n",
+                         block, prev, next);
+        }
+    }
+
+    kfree(before);
+    return done;
+}
 
 int meta_pool_delete(uint32_t block, uint32_t offset) {
-    // Invalidate mirror + zero file_id in the record
-    // spin_lock removed - using g_state.lock
+    uint32_t index = chain_find(block);
+    if (index == g_chain_len) {
+        kprintf("[MetaPool] a file's metadata is said to be in block %u and "
+                "that block is not on this volume's metadata chain — nothing "
+                "is written to it\n", block);
+        return -1;
+    }
+
     if (block == g_current_block_num) {
-        // Current block lives in memory — modify directly (no disk round-trip)
         uint8_t *rec = (uint8_t *)&g_current_block + offset;
         uint32_t del_file_id;
         memcpy(&del_file_id, rec + 2, sizeof(uint32_t));
-        if (g_mirror && del_file_id < g_mirror_capacity && g_mirror_valid[del_file_id]) {
-            __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);
-            tagfs_metadata_free(&g_mirror[del_file_id]);
-            memset(&g_mirror[del_file_id], 0, sizeof(TagFSMetadata));
-            g_mirror_valid[del_file_id] = false;
-            __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);
+        if (del_file_id == 0) {
+            return 0;
         }
+        mirror_forget(del_file_id);
         memset(rec + 2, 0, 4);
+
+        g_current_block.kept = count_kept_records(&g_current_block);
+        g_chain[index].kept = g_current_block.kept;
         g_current_dirty = true;
-        // spin_unlock removed - using g_state.lock
+
         return 0;
     }
-    // spin_unlock removed - using g_state.lock
 
-    // Non-current block — read from disk, modify, write back
     uint8_t buf[TAGFS_BLOCK_SIZE];
-    int result = tagfs_read_block(block, buf);
-    if (result < 0) {
+    if (tagfs_read_block(block, buf) != OK) {
         debug_printf("[MetaPool] delete: tagfs_read_block failed for block %u\n", block);
-        return result;
+        return -1;
     }
+
+    MetaPoolBlock* here = (MetaPoolBlock*)buf;
 
     uint32_t del_file_id;
     memcpy(&del_file_id, buf + offset + 2, sizeof(uint32_t));
-
-    if (g_mirror && del_file_id < g_mirror_capacity && g_mirror_valid[del_file_id]) {
-        __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);
-        tagfs_metadata_free(&g_mirror[del_file_id]);
-        memset(&g_mirror[del_file_id], 0, sizeof(TagFSMetadata));
-        g_mirror_valid[del_file_id] = false;
-        __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);
+    if (del_file_id == 0) {
+        return 0;
+    }
+    if (retire_owed(block, offset)) {
+        return 0;
     }
 
-    memset(buf + offset + 2, 0, 4);
-    result = tagfs_write_block(block, buf);
-    if (result < 0) {
-        debug_printf("[MetaPool] delete: tagfs_write_block failed for block %u\n", block);
-        return result;
+    if (retire_owe(block, offset) != 0) {
+        kprintf("[MetaPool] there is no memory to record that block %u owes a "
+                "retired record — the record stays as it is\n", block);
+        return -1;
     }
+    mirror_forget(del_file_id);
+
+    g_chain[index].kept = retire_apply(block, here);
     return 0;
+}
+
+int meta_pool_flush_retires(void) {
+    if (g_retire_len == 0) return 0;
+
+    TagFSState* fs = tagfs_get_state();
+    if (!fs) return -1;
+
+    int rc = 0;
+    spin_lock(&fs->lock);
+
+    while (g_retire_len > 0) {
+        uint32_t block = g_retire[0].block;
+
+        uint32_t index = chain_find(block);
+        if (index == g_chain_len || block == g_current_block_num) {
+            retire_paid(block);
+            continue;
+        }
+
+        uint8_t buf[TAGFS_BLOCK_SIZE];
+        if (tagfs_read_block(block, buf) != OK) {
+            kprintf("[MetaPool] block %u would not read, so the records it "
+                    "still owes stay as they are and are retired again at the "
+                    "next chance\n", block);
+            rc = -1;
+            break;
+        }
+
+        MetaPoolBlock* here = (MetaPoolBlock*)buf;
+        here->kept = retire_apply(block, here);
+        g_chain[index].kept = here->kept;
+
+        bool interior = (index > 0) && (index + 1 < g_chain_len);
+        if (here->kept == 0 && interior &&
+            unlink_empty_block(index, here->next_block)) {
+            retire_paid(block);
+            continue;
+        }
+
+        if (tagfs_write_block(block, buf) != OK) {
+            kprintf("[MetaPool] block %u would not take the records it has "
+                    "retired — they stay as they are and are written again at "
+                    "the next chance\n", block);
+            rc = -1;
+            break;
+        }
+        retire_paid(block);
+    }
+
+    spin_unlock(&fs->lock);
+    return rc;
 }

@@ -50,4 +50,4 @@
 #define VIDEO_ATTR_TAG        VIDEO_MAGENTA_ON_BLACK
 #define VIDEO_ATTR_CURSOR     VIDEO_BLUE_ON_BLACK
 
-#endif /* VIDEO_COLORS_H */
+#endif

@@ -1,12 +1,8 @@
 #include "crypto.h"
 #include "klib.h"
 
-// ============================================================================
-// CRC32 (ISO 3309 polynomial)
-// Used for: superblock integrity, disk entries, self-heal mirrors
-// ============================================================================
 
-#define CRC32_POLYNOMIAL 0xEDB88320  // ISO 3309 reversed polynomial
+#define CRC32_POLYNOMIAL 0xEDB88320
 #define CRC32_INIT_VALUE 0xFFFFFFFF
 
 uint32_t KCrc32(const uint8_t *data, uint32_t len)
@@ -25,10 +21,6 @@ uint32_t KCrc32(const uint8_t *data, uint32_t len)
     return ~crc;
 }
 
-// ============================================================================
-// CRC16 (CCITT-FALSE)
-// Used for: metadata pool record integrity
-// ============================================================================
 
 uint16_t KCrc16(const uint8_t *data, uint32_t len)
 {
@@ -46,13 +38,7 @@ uint16_t KCrc16(const uint8_t *data, uint32_t len)
     return crc;
 }
 
-// ============================================================================
-// SHA-256
-// Used for: secure hashing, future cryptographic needs
-// ============================================================================
 
-// SHA-256 constants (first 32 bits of the fractional parts of the cube roots
-// of the first 64 primes 2..311)
 static const uint32_t K_SHA256_K[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
     0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -72,10 +58,8 @@ static const uint32_t K_SHA256_K[64] = {
     0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
 };
 
-// Right rotate for SHA-256
 #define K_ROTR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
 
-// SHA-256 functions
 #define K_CH(x, y, z)  (((x) & (y)) ^ (~(x) & (z)))
 #define K_MAJ(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
 #define K_SIGMA0(x)    (K_ROTR(x, 2) ^ K_ROTR(x, 13) ^ K_ROTR(x, 22))
@@ -89,7 +73,6 @@ static void KSha256Transform(uint32_t *state, const uint8_t *block)
     uint32_t a, b, c, d, e, f, g, h;
     uint32_t t1, t2;
 
-    // Prepare message schedule
     for (int i = 0; i < 16; i++)
     {
         w[i] = ((uint32_t)block[i * 4] << 24) |
@@ -103,7 +86,6 @@ static void KSha256Transform(uint32_t *state, const uint8_t *block)
         w[i] = K_SIGMA3(w[i - 2]) + w[i - 7] + K_SIGMA2(w[i - 15]) + w[i - 16];
     }
 
-    // Initialize working variables
     a = state[0];
     b = state[1];
     c = state[2];
@@ -113,7 +95,6 @@ static void KSha256Transform(uint32_t *state, const uint8_t *block)
     g = state[6];
     h = state[7];
 
-    // Compression function main loop
     for (int i = 0; i < 64; i++)
     {
         t1 = h + K_SIGMA1(e) + K_CH(e, f, g) + K_SHA256_K[i] + w[i];
@@ -128,7 +109,6 @@ static void KSha256Transform(uint32_t *state, const uint8_t *block)
         a = t1 + t2;
     }
 
-    // Add compressed chunk to current hash value
     state[0] += a;
     state[1] += b;
     state[2] += c;
@@ -139,13 +119,8 @@ static void KSha256Transform(uint32_t *state, const uint8_t *block)
     state[7] += h;
 }
 
-/* Streaming SHA-256 — FIPS 180-4. Internal buffer accumulates a single
- * partial block; full 64-byte chunks transform straight from caller's
- * buffer without copy. */
 void KSha256Init(KSha256Ctx *ctx)
 {
-    /* Initial hash values (first 32 bits of the fractional parts of the
-     * square roots of the first 8 primes 2..19). */
     ctx->state[0] = 0x6a09e667;
     ctx->state[1] = 0xbb67ae85;
     ctx->state[2] = 0x3c6ef372;
@@ -162,7 +137,6 @@ void KSha256Update(KSha256Ctx *ctx, const uint8_t *data, uint32_t len)
 {
     ctx->total_bits += (uint64_t)len * 8;
 
-    /* If the internal buffer is partially full, fill it to 64 first. */
     if (ctx->buffer_len > 0) {
         uint32_t want = 64 - ctx->buffer_len;
         if (want > len) want = len;
@@ -176,14 +150,12 @@ void KSha256Update(KSha256Ctx *ctx, const uint8_t *data, uint32_t len)
         }
     }
 
-    /* Hash full blocks directly from caller's buffer. */
     while (len >= 64) {
         KSha256Transform(ctx->state, data);
         data += 64;
         len  -= 64;
     }
 
-    /* Remainder lives in the internal buffer until the next Update or Final. */
     if (len > 0) {
         memcpy(ctx->buffer, data, len);
         ctx->buffer_len = len;
@@ -221,8 +193,6 @@ void KSha256Final(KSha256Ctx *ctx, uint8_t *out_hash)
         out_hash[i * 4 + 3] =  ctx->state[i]        & 0xFF;
     }
 
-    /* Zero state to remove the running hash from kernel memory after
-     * a sensitive operation. Cheap (~32 bytes). */
     memset(ctx, 0, sizeof(*ctx));
 }
 
@@ -234,9 +204,6 @@ void KSha256(const uint8_t *data, uint32_t len, uint8_t *out_hash)
     KSha256Final(&ctx, out_hash);
 }
 
-// ============================================================================
-// Simple Checksums
-// ============================================================================
 
 uint8_t KChecksum8(const uint8_t *data, uint32_t len)
 {
@@ -268,9 +235,6 @@ uint32_t KChecksum32(const uint8_t *data, uint32_t len)
     return sum;
 }
 
-// ============================================================================
-// FNV-1a Hash (fast, non-cryptographic)
-// ============================================================================
 
 #define FNV1A_OFFSET_BASIS 2166136261u
 #define FNV1A_PRIME        16777619u
@@ -288,9 +252,6 @@ uint32_t KFnv1a(const uint8_t *data, uint32_t len)
     return hash;
 }
 
-// ============================================================================
-// MurmurHash3 Finalizer
-// ============================================================================
 
 uint32_t KMurmur3Finalize(uint32_t h)
 {

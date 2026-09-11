@@ -1,34 +1,9 @@
-// boxcxx — <stdbit.h>  ([stdbit.h.syn], C++26 adopting C23 7.18)
-//
-// The C spelling of what <bit> already does. Every function here is one
-// line over a std:: counterpart -- the header exists so C code moved into
-// BoxOS's C++ userspace keeps compiling, and so C23's four-way naming
-// (generic template, _uc/_us/_ui/_ul/_ull suffixes) resolves to the same
-// implementation instead of a second one.
-//
-// Two things are NOT copied from the obvious model:
-//
-//   * stdc_bit_ceil is NOT "msb set => 0". libstdc++ 16.1 writes it that
-//     way, and it is wrong on exactly the powers of two that have the top
-//     bit set: stdc_bit_ceil_uc(0x80) returns 0 there, but 0x80 IS the
-//     minimal power of two not less than 0x80 and IS representable in
-//     unsigned char, so C23 7.18.15.3 asks for 0x80. Measured, not read:
-//     g++-16 prints 0 for both 0x80 (uc) and 0x80000000 (ui). The
-//     representability test is value > msb, not value & msb.
-//
-//   * Nothing here is constexpr. [constexpr.functions] forbids declaring a
-//     standard library signature constexpr unless the standard says so,
-//     and [stdbit.h.syn] does not -- even though every std:: function
-//     underneath is constexpr. A caller who wants the constant-expression
-//     form has <bit>.
 #ifndef BOXCXX_STDBIT_H
 #define BOXCXX_STDBIT_H
 
 #include <bit>
 #include <limits>
 
-// [version.syn] names this header as an owner of the macro below;
-// nothing else here is declared, so nothing else is answered for.
 #define BOXCXX_OWNS_stdbit_h
 #include <__bits/version_stdbit>
 
@@ -38,10 +13,6 @@
 #define __STDC_ENDIAN_LITTLE__ __ORDER_LITTLE_ENDIAN__
 #define __STDC_ENDIAN_NATIVE__ __BYTE_ORDER__
 
-// C23 names these in the global namespace, which is where they are
-// defined; the generic form is a constrained template so that passing a
-// signed type is a substitution failure with a readable message rather
-// than a silent conversion to unsigned.
 
 template <std::__bits::BitOperand T>
 inline unsigned int stdc_leading_zeros(T value)
@@ -147,9 +118,6 @@ inline unsigned int stdc_trailing_ones_ull(unsigned long long value)
     return stdc_trailing_ones(value);
 }
 
-// The four "first_*" functions are 1-based indices from the named end, and
-// return 0 when there is no such bit -- C23's way of folding "not found"
-// into the same unsigned result.
 
 template <std::__bits::BitOperand T>
 inline unsigned int stdc_first_leading_zero(T value)
@@ -391,9 +359,6 @@ inline unsigned long long stdc_bit_floor_ull(unsigned long long value)
     return stdc_bit_floor(value);
 }
 
-// Unlike std::bit_ceil, an unrepresentable result is 0 rather than
-// undefined -- and "unrepresentable" means strictly above the top bit, so
-// the top bit itself still ceils to itself (see the file header).
 template <std::__bits::BitOperand T>
 inline T stdc_bit_ceil(T value)
 {
@@ -421,4 +386,4 @@ inline unsigned long long stdc_bit_ceil_ull(unsigned long long value)
     return stdc_bit_ceil(value);
 }
 
-#endif // BOXCXX_STDBIT_H
+#endif

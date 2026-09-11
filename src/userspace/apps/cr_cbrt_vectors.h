@@ -1,5 +1,3 @@
-// Baked 80-bit (x, MPFR-CR-ref) vectors for cbrt — GENERATED, do not edit.
-// {x mantissa, x se, ref mantissa, ref se}; se = sign<<15 | exp15.
 static const CrVec kCbrtVec[] = {
 {0x8000000000000000ULL,0x3FFFu,0x8000000000000000ULL,0x3FFFu},
 {0x8000000000000000ULL,0x4002u,0x8000000000000000ULL,0x4000u},

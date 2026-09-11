@@ -153,17 +153,14 @@ static void test_large_alloc(void) {
     test_result("large allocation (8KB)", ok);
 }
 
-// ── Tagged malloc tests ───────────────────────────────────────────────────────
 
 static void test_tagged_basic(void) {
     void *p = malloc_tagged(64, "mt:buf");
     if (!p) { test_result("tagged malloc alloc", false); return; }
 
-    // Verify tag registered and counted
     bool ok = (heap_lookup_tag("mt:buf") != HEAP_TAG_NONE) &&
               (heap_count_tag("mt:buf") == 1);
 
-    // Write and verify data still works normally
     memset(p, 0xCC, 64);
     uint8_t *b = (uint8_t *)p;
     for (int i = 0; i < 64 && ok; i++)
@@ -171,7 +168,6 @@ static void test_tagged_basic(void) {
 
     free(p);
 
-    // Tag count must drop to 0 after free
     ok = ok && (heap_count_tag("mt:buf") == 0);
 
     test_result("tagged malloc: alloc+count+free", ok);
@@ -198,7 +194,6 @@ static void test_tagged_multi(void) {
     test_result("tagged malloc: multiple tags + counts", ok);
 }
 
-// Callback used by test_tagged_iterate
 static size_t g_iter_count = 0;
 static void iter_cb(void *ptr, size_t size, const char *tag_name, void *userdata) {
     (void)ptr; (void)size; (void)tag_name; (void)userdata;
@@ -221,7 +216,6 @@ static void test_tagged_iterate(void) {
     if (p2) free(p2);
     if (p3) free(p3);
 
-    // After free, iteration must yield 0
     if (ok) {
         g_iter_count = 0;
         heap_iterate_tag("mt:iter", iter_cb, NULL);
@@ -237,13 +231,11 @@ static void test_tagged_realloc_preserves(void) {
 
     memset(p, 0xAB, 32);
 
-    // Grow — forces relocation, tag must survive
     void *q = realloc(p, 512);
     if (!q) { free(p); test_result("tagged realloc preserves tag", false); return; }
 
     bool ok = (heap_count_tag("mt:realloc") == 1);
 
-    // Data integrity
     uint8_t *b = (uint8_t *)q;
     for (int i = 0; i < 32 && ok; i++)
         if (b[i] != 0xAB) ok = false;
@@ -274,7 +266,6 @@ static void test_tagged_dump(void) {
     void *p1 = malloc_tagged(64,  "mt:dump_a");
     void *p2 = malloc_tagged(128, "mt:dump_b");
 
-    // Just verify dump doesn't crash
     heap_dump_tags();
 
     if (p1) free(p1);

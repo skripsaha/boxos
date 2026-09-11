@@ -1,21 +1,3 @@
-/*
- * htest — exercise the compile-and-reuse path (Item A).
- *
- * Sequence:
- *   1. Build a 2-op Manifest (fill + move).
- *   2. Submit it in BYTES mode N times — establishes baseline correctness
- *      and gives a per-call latency reference.
- *   3. Compile it via ManifestCompileHandle → uint64 handle.
- *   4. Submit it in HANDLE mode N times — same correctness check, latency
- *      comparison.
- *   5. Release the handle.
- *   6. Submit AFTER release — must fail (handle revoked).
- *   7. Print PASS / FAIL + bytes-mode vs handle-mode median tick counts.
- *
- * The fill byte is rotated each iteration so a silent op-shadowing race
- * (e.g. the cached CompiledManifest reusing stale params) would surface
- * as a mismatched output buffer.
- */
 
 #include "box/core/manifest.h"
 #include "box/core/crate.h"
@@ -28,9 +10,9 @@
 
 #define HTEST_ITERS  50u
 #define BUF_BYTES    32u
-#define MBUF_BYTES   (16u + 2u * (12u + 1u))  /* hdr + 2 ops, 1 byte param max */
+#define MBUF_BYTES   (16u + 2u * (12u + 1u))
 
-#define DECK_OPS     0x01u  /* mirror of DECK_OPERATIONS */
+#define DECK_OPS     0x01u
 #define OPS_FILL     0x02u
 #define OPS_MOVE     0x01u
 
@@ -56,7 +38,6 @@ static int verify_buf(const uint8_t *buf, uint8_t expected)
 
 int main(void)
 {
-    /* Standalone — bypass display server IPC. */
     io_set_mode(IO_MODE_VGA);
 
     print("[htest] start — ");
@@ -72,9 +53,8 @@ int main(void)
     uint64_t t_bytes_total  = 0;
     uint64_t t_handle_total = 0;
 
-    /* -------------------------- BYTES mode -------------------------- */
     for (uint32_t i = 0; i < HTEST_ITERS; i++) {
-        uint8_t fill = (uint8_t)(0xA0u + (i & 0x0Fu));   /* rotate */
+        uint8_t fill = (uint8_t)(0xA0u + (i & 0x0Fu));
         if (build_inner_manifest(mbuf, sizeof(mbuf), fill) != 0) {
             println("[htest] FAIL — bytes build");
             exit(1);
@@ -108,11 +88,6 @@ int main(void)
     }
     println("[htest] bytes-mode 50/50 OK");
 
-    /* -------------------------- HANDLE mode -------------------------- *
-     * One handle per iteration so the rotating fill byte goes into the
-     * compiled op-params each time. This proves the compile path
-     * captures the params correctly (a stale-cache regression would
-     * surface as wrong fill byte in buf_b on iteration > 0). */
     for (uint32_t i = 0; i < HTEST_ITERS; i++) {
         uint8_t fill = (uint8_t)(0xA0u + (i & 0x0Fu));
         if (build_inner_manifest(mbuf, sizeof(mbuf), fill) != 0) {
@@ -141,7 +116,6 @@ int main(void)
 
         bool ok = (rc == OK) && (r.error_code == OK) && (verify_buf(buf_b, fill) == 0);
 
-        /* Always release — even on per-iter failure — to avoid leaking. */
         (void)ManifestReleaseHandle(handle);
 
         if (!ok) continue;
@@ -158,9 +132,6 @@ int main(void)
     }
     println("[htest] handle-mode 50/50 OK");
 
-    /* --------------------- Post-release revocation --------------------- *
-     * Compile, release, then attempt submit-handle on the dead handle.
-     * Kernel must reject (generation counter advanced; Resolve fails). */
     {
         uint8_t fill = 0xC3u;
         if (build_inner_manifest(mbuf, sizeof(mbuf), fill) != 0) {
@@ -185,10 +156,6 @@ int main(void)
 
         Result r;
         int rc = ManifestSubmitHandle(handle, crates, 2, &r);
-        /* Either ManifestSubmit's wrapper returns the error code, OR the
-         * Result carries it — both count as "rejected". A success here
-         * means the handle was NOT revoked, which is the bug we're testing
-         * for. */
         bool revoked = (rc != OK) || (r.error_code != OK);
         if (!revoked) {
             println("[htest] FAIL — post-release submit succeeded (handle not revoked)");
@@ -197,7 +164,6 @@ int main(void)
         println("[htest] post-release revocation OK");
     }
 
-    /* --------------------------- Summary --------------------------- */
     print("[htest] bytes total ms=");
     print_int((int)t_bytes_total);
     print(" handle total ms=");

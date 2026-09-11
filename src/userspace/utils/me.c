@@ -2,8 +2,6 @@
 #include "box/system.h"
 #include "box/convert.h"
 
-/* Format a byte count as "X.YY MB" or "X.YY GB" with one decimal place,
- * without floats. Always emits a trailing NUL into buf (>= 24 bytes). */
 static void fmt_bytes(uint64_t bytes, char *buf, size_t buf_size)
 {
     if (buf_size < 16) { if (buf_size) buf[0] = '\0'; return; }
@@ -73,10 +71,6 @@ int main(void) {
            info.cpu_total, info.cpu_total == 1 ? "" : "s",
            info.cpu_k_cores, info.cpu_app_cores,
            info.cpu_app_cores == 1 ? "" : "s");
-    /* Inverted UX: silent when the TSC invariant CPUID bit is set
-     * (the production-correct state), loud when it isn't (timing may
-     * drift with P-states). Previous "(invariant)" tag confused users
-     * into thinking it was a value rather than a feature flag. */
     if (info.tsc_freq_khz)
         printf("  TSC:       %u kHz%s\n",
                (unsigned)info.tsc_freq_khz,

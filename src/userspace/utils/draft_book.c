@@ -1,9 +1,3 @@
-/* draft_book.c — the words themselves: what the draft IS between the file and
- * the glass. It holds the lines, grows and splits and joins them, answers
- * where a byte sits once tabs have had their say, and moves the caret. It
- * knows nothing about how any of it is drawn and nothing about the volume —
- * it is the part that would still be right on a machine with no screen.
- */
 
 #include "box/memory.h"
 #include "box/string.h"
@@ -12,14 +6,10 @@
 
 #include "draft.h"
 
-#define DRAFT_TAB_STOP    8       /* the kernel console's own stop — see kprintf */
+#define DRAFT_TAB_STOP    8
 #define DRAFT_LINE_SEED   32
 #define DRAFT_BOOK_SEED   64
 
-/* ---------------------------------------------------------------------------
- * Saying things into a buffer. printf is forbidden while the screen is ours,
- * so every line the editor shows is built here first and painted as cells.
- * ------------------------------------------------------------------------- */
 
 void say_str(char *buf, size_t cap, const char *s)
 {
@@ -42,15 +32,10 @@ void say_err(char *buf, size_t cap, int rc)
     say_str(buf, cap, ")");
 }
 
-/* Every message replaces the last one whole: a half-old sentence is worse
- * than none, because it will be read as current. */
 void msg_begin(void) { s_msg[0] = '\0'; }
 void msg_add(const char *s) { say_str(s_msg, sizeof(s_msg), s); }
 void msg_num(uint32_t v) { say_uint(s_msg, sizeof(s_msg), v); }
 
-/* ---------------------------------------------------------------------------
- * The book — lines that grow by doubling, and the file they came from.
- * ------------------------------------------------------------------------- */
 
 static int line_reserve(DraftLine *l, uint32_t need)
 {
@@ -96,8 +81,6 @@ static void book_drop_line(uint32_t at)
     g_book.count--;
 }
 
-/* Split at '\n'. A file of N newlines is N+1 lines and no bytes are spent:
- * "a\nb\n" is {"a","b",""} and an empty file is one empty line. */
 int book_load(const char *bytes, uint32_t len)
 {
     uint32_t start = 0;
@@ -145,9 +128,6 @@ char *book_join(uint32_t *out_len)
     return buf;
 }
 
-/* ---------------------------------------------------------------------------
- * Geometry — bytes are not columns, and a tab is the whole difference.
- * ------------------------------------------------------------------------- */
 
 uint32_t col_after(uint32_t col, char c)
 {
@@ -163,9 +143,6 @@ uint32_t width_of(const DraftLine *l, uint32_t nbytes)
     return w;
 }
 
-/* The first byte whose own column has reached `col` — a column that lands
- * inside a tab therefore names the byte after it, which is where the caret
- * would sit if it walked there one step at a time. */
 static uint32_t byte_at_col(const DraftLine *l, uint32_t col)
 {
     uint32_t w = 0;
@@ -178,9 +155,6 @@ static uint32_t byte_at_col(const DraftLine *l, uint32_t col)
 
 uint32_t text_rows(void) { return g_rows - 2; }
 
-/* ---------------------------------------------------------------------------
- * Editing.
- * ------------------------------------------------------------------------- */
 
 void mark_column(void)
 {
@@ -206,8 +180,6 @@ void insert_byte(char c)
     mark_column();
 }
 
-/* The tail is gathered BEFORE the line is opened, so a refused allocation
- * leaves the book exactly as it was — a half-done split is unrecoverable. */
 void split_line(void)
 {
     DraftLine tail = { NULL, 0, 0 };
@@ -260,7 +232,7 @@ void backspace(void)
         g_line = above;
         g_byte = seam;
     } else {
-        return;             /* the very first byte of the draft: nothing behind */
+        return;
     }
     g_dirty = 1;
     mark_column();
@@ -302,8 +274,6 @@ void move_right(void)
     mark_column();
 }
 
-/* Up and Down keep the DISPLAY column, not the byte: a line of tabs and a
- * line of letters must feel like one page under the caret. */
 void move_line(int down)
 {
     if (down) {

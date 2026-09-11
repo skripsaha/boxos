@@ -10,10 +10,6 @@
 #define HID_REQ_SET_IDLE          0x0A
 #define HID_REQ_SET_PROTOCOL      0x0B
 
-/* The boot-protocol keyboard report: eight bytes, and the same eight on every
- * keyboard that claims the boot subclass. That is the whole point of the boot
- * protocol — it is what a BIOS can read without parsing a report descriptor,
- * and it is what this kernel reads for the same reason. */
 typedef struct {
     uint8_t modifiers;
     uint8_t reserved;

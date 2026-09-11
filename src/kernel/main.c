@@ -66,24 +66,15 @@
 #include "manifest_selftest.h"
 #include "crate_io_selftest.h"
 #include "auth_decouple_selftest.h"
-#include "slab.h"   /* slab_identity_selftest */
+#include "slab.h"
 #include "operations_deck.h"
 #include "hardware_deck.h"
 #include "system_deck.h"
 
-/*
- * RFLAGS as the loader left them, captured by _start before its very first
- * cli. Bit 9 (IF) is the whole point: it is the difference between a kernel
- * that is interrupted only when it says so and one that inherits whatever the
- * firmware was doing. Written once, from assembly, after BSS is zeroed.
- */
 uint64_t g_entry_rflags = 0;
 
 void kernel_main(void)
 {
-    /* Before a single byte is said, because a byte said before this is a byte
-     * the next boot will not find. See klib_logring.h for what the window
-     * survives — a warm reset, not a power cut. */
     LogKeepInit();
 
     VideoInit();
@@ -93,21 +84,11 @@ void kernel_main(void)
             CABIN_INFO_ADDR, CABIN_POCKET_RING_ADDR, CABIN_RESULT_RING_ADDR, CABIN_CODE_START_ADDR);
     kprintf("\n");
 
-    /* What state the loader handed over, said out loud.
-     *
-     * IF set here means the loader left interrupts enabled and the kernel has
-     * been running interruptible since its entry point — which is what the
-     * UEFI path did, because TagBootJump never clears IF while stage2.asm
-     * clears it ten times over. _start now clears it unconditionally; this
-     * line reports which of the two the machine came from, because a fix that
-     * makes both paths silent teaches nothing about either. */
     kprintf("[BOOT] the loader handed over RFLAGS=0x%lx (interrupts were %s; "
             "they are off now, and stay off until this kernel says otherwise)\n",
             (unsigned long)g_entry_rflags,
             (g_entry_rflags & (1ULL << 9)) ? "ENABLED" : "disabled");
 
-    /* Whether anything came through the last reset, said early so it is on
-     * the screen even when the machine does not get much further. */
     if (LogKeepWindow(NULL, NULL)) {
         uint64_t carried = LogKeepPreviousBytes();
         if (carried) {
@@ -123,37 +104,12 @@ void kernel_main(void)
     debug_printf("[INIT] CPU Feature Detection (early)...\n");
     cpu_detect_features();
 
-    /* Bit 63 becomes a meaning here, and not one line later.
-     *
-     * Until IA32_EFER.NXE is 1 it is a RESERVED bit (Intel SDM Vol 3A §4.5):
-     * an entry carrying it is malformed, and the first access through it —
-     * read, write or fetch — is a #PF with RSVD set. So the kernel takes it
-     * up before it builds a single page table, and tells the VMM whether it
-     * may compose the bit at all. This used to be the loader's business on
-     * two paths out of three (stage2 set it, the AP trampoline set it, the
-     * UEFI loader deliberately did not) and the kernel's own write sat in
-     * per_core_setup_notify_msrs, seventy-four lines after efi_runtime_init
-     * had already mapped firmware data with bit 63 and called into firmware
-     * through it. Both real boards BoxOS has booted died there. */
     vmm_note_no_execute(CpuTakeUpNoExecute());
 
-    /* Log the BSP's identity + microcode revision once feature detection
-     * is up. Doing it here (instead of inside cpu_detect_features) keeps
-     * the helper purely functional; the operator-visible log lives with
-     * the boot sequence. AP identity is logged from ap_entry_c so each
-     * core's silicon + patch level shows up in the boot log. */
     cpu_log_identity("BSP");
 
-    /* Hypervisor detection must follow cpu_detect_features (so we know
-     * cpuid is usable) and precede everything that asks "are we on
-     * KVM/TCG/Hyper-V?" — currently that's TSC calibration and the
-     * para-virt clock drivers. Idempotent. */
     debug_printf("[INIT] Hypervisor Detection...\n");
     hypervisor_detect();
-    /* User-visible banner so the boot log always carries the
-     * environment ID. Lets the user (and bug reports) immediately
-     * know "running on KVM" vs "QEMU/TCG" vs "bare metal" without
-     * needing DEBUG=on. */
     kprintf("[CPU] Environment: %s%s%s\n",
             hv_vendor_name(),
             g_hypervisor.tsc_khz ? ", hv.tsc=" : "",
@@ -216,13 +172,8 @@ void kernel_main(void)
     debug_printf("[INIT] VMM...\n");
     vmm_init();
 
-    /* vmm_init() removes the identity mapping and activates the pull map.
-     * The earlier bi pointer was the identity address (0x9000) and is now
-     * invalid.  Re-fetch via pull map so all further bi accesses are safe. */
     bi = boot_info_get();
 
-    /* Switch to GOP framebuffer rendering if we booted via UEFI.
-     * Must happen after vmm_init() so vmm_map_mmio() is available. */
     if (bi->version >= BOOT_INFO_VERSION2 && bi->fb_addr) {
         VideoInitFramebuffer(bi->fb_addr, bi->fb_width, bi->fb_height,
                              bi->fb_stride, bi->fb_format);
@@ -232,11 +183,6 @@ void kernel_main(void)
         }
     }
 
-    /* The loader's account of its own journey — which volume this kernel was
-     * read out of, off what medium, by which loader. Read here because the
-     * block sits in memory the loaders own, below the first megabyte, and
-     * because the Boardroom will want the answer long before there is a
-     * filesystem to keep it in. */
     BoardingPassInit();
 
     debug_printf("[INIT] MemTag...\n");
@@ -245,72 +191,29 @@ void kernel_main(void)
         debug_printf("[INIT] WARNING: MemTag init failed: %s (non-fatal)\n", ErrorString(memtag_err));
     }
 
-    /* MemTag Phase 2D M5 — verify PTE bits 52-58 are safely "Ignored"
-     * on the BSP. APs run the same probe from per_core_init_ap after
-     * cpu_intersect_features_ap so a hybrid CPU where the AP exposes
-     * different CR4 state can still be caught. */
     (void)MemTagVerifyPteMetadataBits();
 
-    /* MemTag Phase 2E — BSP-side PAT MSR self-test (sanity: BSP RDMSR
-     * should match the value vmm_pat_init just programmed). APs run
-     * the same probe from per_core_init_ap after their own vmm_pat_init
-     * to catch heterogeneous PAT across coherent CPUs (Intel SDM Vol 3A
-     * §11.12.4). MTRR audit dumps the firmware-programmed MTRR layout
-     * so cache:wb tags can be reconciled with effective memory type
-     * (Intel SDM §11.12.5). Both are non-fatal — informational. */
     (void)MemTagVerifyPatMsr();
     MemTagDumpMtrrLayout();
 
-    /* Phase 2F — Machine Check Architecture bring-up on BSP. Enables
-     * CR4.MCE, programs every reporting bank's IA32_MC<i>_CTL, clears
-     * stale status, and (when supported) lights LMCE. Per-AP init runs
-     * later from per_core_init_ap. The IDT vector 18 handler is already
-     * registered with IST_MACHINE_CHECK by idt_init; mce_handle just
-     * decodes banks + poisons phys pages now that the path is hot. */
     mce_init();
 
-    /* Phase 2H — Protection Keys (PKU/PKS) bring-up on BSP. Sets CR4.PKE
-     * (bit 22), CR4.PKS (bit 24) when supported, and XCR0.PKRU (bit 9)
-     * so XSAVE covers per-thread PKRU. Default PKRU=0 = "all 16 keys
-     * fully accessible" → backward-compatible until userspace writes
-     * PKRU. PTE bits 62:59 (the PKEY field) can now be stamped by
-     * MemTag policy. */
     vmm_pku_init();
 
-    /* Phase 2I — Linear Address Masking BSP probe. Observe-only this
-     * iteration: logs CR3.LAM_U48 / CR3.LAM_U57 / CR4.LAM_SUP state so
-     * operators see the substrate snapshot at boot. Per-process LAM
-     * opt-in (setting CR3.LAM_U48 on a specific process) is deferred
-     * because it requires scheduler-side CR3 build modification —
-     * Phase 2I lays the bit-layer foundation. */
     vmm_lam_probe();
 
-    /* Phase 2J — TME / TME-MK BSP probe (observe-only). Reads firmware-
-     * locked MSRs to log the encryption state: TME on/off, MK enable,
-     * KeyID bit count. */
     vmm_tme_probe();
 
-    /* TME pool init — runtime KeyID allocator on top of the probed
-     * MSR state. Programs every usable KeyID with SET_KEY_RANDOM so
-     * the per-region encryption pool is "warm" by the time any
-     * consumer (encrypted Bay etc.) asks. No-op when TME-MK is
-     * inactive (firmware didn't activate it, or hardware lacks it). */
     {
         extern error_t tme_init_bsp(void);
         (void)tme_init_bsp();
     }
 
-    /* Phase 2K — CET (Control-flow Enforcement Technology) BSP probe.
-     * Detects SHSTK + IBT, reads IA32_S_CET / IA32_U_CET when CR4.CET=1.
-     * Observe-only — per-process shadow-stack allocation + SSP save/
-     * restore via XSAVE component 11 is the lifecycle follow-up. */
     vmm_cet_probe();
 
     pmm_test_high_memory();
     MemTagStressTest();
 
-    /* Subsystem-specific tests (split out of memtag_test.c in the
-     * clean-slate audit so each test lives next to the code it covers). */
     extern void VmmHelperTest(void);
     extern void PmmPoisonTest(void);
     extern void McePresenceTest(void);
@@ -321,15 +224,6 @@ void kernel_main(void)
     VmmHelperTest();
     PmmPoisonTest();
     McePresenceTest();
-    /* IommuPresenceTest is NOT here. It used to be, seventy lines and several
-     * subsystems ahead of iommu_init(), where the only answer it could give
-     * was "dormant" — and it gave it as "no DMAR/IVRS", which is a statement
-     * about the firmware's tables made before those tables had been read. On
-     * the first real machine BoxOS booted, that line said the board had no
-     * IOMMU while the board's DMAR was sitting in its RSDT, and the VT-d code
-     * that later found it crashed. A presence test that runs before the thing
-     * is present tests nothing and misleads twice. It now runs after
-     * iommu_init(); see below. */
     { int p = 0, f = 0; TmeRunTests(&p, &f); (void)p; (void)f; }
     AddrWaitSelfTest();
     XhciRingSelfTest();
@@ -341,51 +235,19 @@ void kernel_main(void)
     debug_printf("[INIT] CPU Capabilities Page...\n");
     cpu_caps_page_init();
 
-    /* EFI runtime services bring-up — must precede ACPI so the kernel can
-     * fall back to EFI ResetSystem when the FADT lacks a reset register
-     * (e.g. ACPI 1.0b firmware, legacy Bochs). Idempotent + non-fatal:
-     * BIOS boots silently return false. Real-HW: maps every
-     * EFI_MEMORY_RUNTIME descriptor at EFI_RT_VA_BASE+phys and calls
-     * SetVirtualAddressMap (UEFI 2.10 §8.4) so subsequent RT calls
-     * dispatch via virtual addresses. */
-    /* Crypto + ASN.1 + RSA + streaming-SHA-256 self-test BEFORE we
-     * start trusting any of those primitives for downstream policy
-     * decisions. A regression in any one of them is fatal to Secure
-     * Boot guarantees; surfacing it at boot beats discovering it
-     * during a customer's first signed-image load. */
     debug_printf("[INIT] EFI crypto self-test...\n");
     if (!efi_selftest_run()) {
         kprintf("[BOOT] EFI self-test FAILED — Secure Boot disabled\n");
-        /* Non-fatal: BoxOS still boots, but Authenticode verification
-         * is unreliable. Production deployments should treat the boot
-         * log as a hard fail. */
     }
 
     debug_printf("[INIT] EFI runtime services...\n");
     if (efi_runtime_init()) {
         efi_runtime_print_info();
 
-        /* EFI System Resource Table — must come after efi_runtime_init
-         * because efi_esrt_init reads boot_info's preserved ESRT copy
-         * (allocated in EfiACPIMemoryNVS by TagBoot). Independent of
-         * SVAM success: ESRT is a plain in-memory copy. Touch publish
-         * matches the acpi_init pattern: emit at boot — late subscribers
-         * can query via efi_esrt_get(). */
         if (efi_esrt_init()) {
             efi_esrt_print();
         }
 
-        /* Secure Boot consumer — reads SecureBoot/SetupMode/PK/KEK/db/dbx
-         * via Variable Services. Safe to call even when firmware reports
-         * SB=0; populates state only and skips databases that are empty.
-         *
-         * NOTE: Touch publishing is deferred to after guide_init below
-         * because TouchInit happens inside guide_init — publishing here
-         * would land before the tag registry is ready, get dropped at
-         * resolve_tag_pair, and userspace subscribers would never see
-         * the boot-time state events. The kernel-internal state is
-         * available immediately via efi_secureboot_get_state() /
-         * efi_esrt_get() so the deferral is purely for Touch consumers. */
         if (efi_secureboot_init()) {
             efi_secureboot_print();
         }
@@ -393,33 +255,18 @@ void kernel_main(void)
         debug_printf("[INIT] EFI runtime services not available\n");
     }
 
-    /* The backstop for the memory held across SetVirtualAddressMap.
-     *
-     * efi_runtime_init releases it the moment that call returns, which is
-     * the tight window we want. But every path that never reaches the call —
-     * a BIOS boot, a firmware with no runtime descriptors, a map that could
-     * not be walked — must give the memory back too, and none of them can be
-     * relied on to remember. Idempotent, and a no-op when nothing was
-     * held. */
     PmmReleaseBootServicesMemory();
 
-    // ACPI must init early so irqchip_init can parse MADT for APIC detection
     debug_printf("[INIT] ACPI Subsystem (early)...\n");
     acpi_error_t acpi_err = acpi_init();
     if (acpi_err == ACPI_OK)
     {
         debug_printf("[INIT] ACPI initialized successfully\n");
-        /* Surface any pre-boot hardware error captured by firmware. */
         acpi_apei_consume();
-        /* Log NUMA topology now that both PMM and ACPI/SRAT are ready. */
         pmm_log_numa_topology();
-        /* IOMMU skeleton — picks backend, runs init stub, does not
-         * enable translation yet. */
         iommu_init();
-        IommuPresenceTest();  /* after init, which is the only time it means anything */
-        iommu_audit_dump();   /* Phase 2G — log MemTag/Touch surface */
-        /* AML interpreter skeleton — currently returns NOT_LOADED.
-         * Hook here lets future implementation tie into boot. */
+        IommuPresenceTest();
+        iommu_audit_dump();
         aml_init();
     }
     else
@@ -427,50 +274,23 @@ void kernel_main(void)
         debug_printf("[INIT] ACPI initialization failed (error %d), shutdown may use fallback methods\n", acpi_err);
     }
 
-    // Detect and initialize interrupt controller (APIC or PIC fallback)
     debug_printf("[INIT] Interrupt Controller...\n");
     irqchip_init();
 
-    /* Register the ACPI SCI handler now that IOAPIC routing is live. */
     if (acpi_err == ACPI_OK) acpi_sci_register();
 
     debug_printf("[INIT] AMP Core Detection...\n");
     amp_init();
 
-    /* The batons, before the sti that opens the machine to interrupts, on
-     * every core count: a park deadline is passed on one from the very first
-     * timed wait, a keystroke knocks on one, and a one-core box has no K-Core
-     * loop to make up for a queue that is not there. */
     debug_printf("[INIT] Baton queues (never-drop, per core)...\n");
     BatonInit();
 
     debug_printf("[INIT] Per-core GDT/TSS/Notify (BSP)...\n");
     per_core_init_bsp();
 
-    /* ClockBoard MUST be initialised before pit_init so the IRQ handler
-     * always finds a valid backing page. Late-boot setters (TSC freq,
-     * RTC unix-secs) are called after their respective inits below. */
     debug_printf("[INIT] ClockBoard...\n");
     clockboard_init();
 
-    /* HPET — high-precision timer.
-     *
-     * Two roles:
-     *   1. Free-running 64-bit main counter — always read-available
-     *      after hpet_init(), used by cpu_calibrate_tsc for the
-     *      measurement window (independent of IRQ0 routing) and by
-     *      pit_get_uptime_us() as the monotonic time source.
-     *   2. Optionally takes over IRQ0 via LegacyReplacement. This is
-     *      production-correct for modern hardware (many post-2018
-     *      server boards ship without an 8254 PIT). Safe to enable
-     *      now because cpu_calibrate_tsc no longer depends on PIT
-     *      channel-0 — see commit history of cpu_calibrate.c.
-     *
-     * The earlier 2026-05-19 regression (TSC-calib mis-read +
-     * bench corruption) was caused by the PIT-only calibration path
-     * being silently broken once HPET stole IRQ0. With the new
-     * CPUID.15h → HPET-counter → PIT preference order, that path
-     * is unreachable. */
     debug_printf("[INIT] HPET...\n");
     if (hpet_init()) {
         if (hpet_start_legacy_tick(CONFIG_SCHED_DEFAULT_TICK_HZ)) {
@@ -484,19 +304,12 @@ void kernel_main(void)
     }
 
     debug_printf("[INIT] PIT...\n");
-    /* PIT and HPET legacy-replacement run at the same rate to keep the
-     * scheduler tick math (idt.c uses SCHEDULER_DEFAULT_TICK_HZ
-     * directly) in sync regardless of who owns IRQ0. */
     pit_init(CONFIG_SCHED_DEFAULT_TICK_HZ);
 
     debug_printf("[INIT] RTC...\n");
     rtc_init();
     clockboard_set_boot_unix_secs(rtc_get_unix64());
 
-    /* Para-virtual clocksources — must come AFTER pmm/vmm (they need
-     * a backing page and a phys→virt mapping) and BEFORE cpu_calibrate
-     * (which prefers pvclock_tsc_khz() as its highest-trust input).
-     * Each call no-ops on hosts that don't advertise the feature. */
     debug_printf("[INIT] kvmclock (pvclock)...\n");
     if (pvclock_init()) {
         debug_printf("[INIT] kvmclock active — TSC calib will use pvclock_tsc_khz\n");
@@ -509,21 +322,6 @@ void kernel_main(void)
 
     debug_printf("[INIT] CPU Calibration...\n");
 #ifdef CONFIG_EARLY_INTERRUPTS_PROOF
-    /* `make EARLYIRQ=on` — the board's window, exactly, and no wider.
-     *
-     * An i5-9400F booting UEFI took its first HPET tick right here, inside
-     * TSC calibration, thirty-six lines before scheduler_init() had allocated
-     * anything for irq_handler to count it into. The machine died writing
-     * through that NULL: #PF at 0x18.
-     *
-     * The flag is opened for this call and closed again after it, which is
-     * the board's failure and not a broader one: leaving interrupts on for
-     * the rest of init is a DIFFERENT state, and a worse one — measured, the
-     * kernel deadlocks later in TouchLogbookResolve, because early init is
-     * not written to be re-entered from an interrupt. That is precisely why
-     * the real fix is that this kernel owns RFLAGS.IF from _start and takes
-     * it back after every firmware call, rather than merely surviving one
-     * tick. See the note in the Makefile. */
     kprintf("[BOOT] EARLYIRQ: opening the interrupt flag for the length of "
             "TSC calibration, which is where the board took its first tick\n");
     asm volatile("sti");
@@ -534,29 +332,12 @@ void kernel_main(void)
 #endif
     clockboard_set_tsc_freq_khz(cpu_get_tsc_freq_khz());
 
-    /* IA32_UMWAIT_CONTROL on the BSP — Intel SDM Vol 4 §2.5.1.
-     * Programs the OS-imposed UMWAIT/TPAUSE residency cap so wait
-     * loops re-poll within a bounded interval even if a monitor wake
-     * is dropped by silicon/microcode quirks. WAITPKG-gated inside;
-     * no-op on AMD or pre-Tremont Intel. APs program their own copy
-     * inside per_core_init_ap (each MSR is per-logical-processor;
-     * see SDM Vol 4 Table 2-2 "Scope: Thread"). */
     cpu_umwait_control_init(cpu_get_tsc_freq_khz());
 
-    /* TEST_CTL bit 29 — Intel SDM Vol 4 Table 2-2. Clear split-lock-#AC
-     * enable on the BSP. Gated on g_cpu_caps.has_split_lock_detect so
-     * we never write the MSR on a CPU that lacks IA32_CORE_CAPABILITIES
-     * (would #GP). APs do the same in per_core_init_ap. Rationale lives
-     * in cpuid.h cpu_test_ctl_init declaration. */
     cpu_test_ctl_init();
 
-    /* Capture the BSP TSC anchor for per-AP TSC sync. Must be after
-     * cpu_calibrate_tsc (we need tsc_freq_khz published) and before
-     * amp_boot_aps (each AP reads the anchor in per_core_init_ap).
-     * Uses the current pit_uptime_us as the wall-clock pinpoint. */
     per_core_record_bsp_tsc_anchor(pit_get_uptime_us());
 
-    // Initialize idle process (PID 0) before process system
     kprintf("[INIT] Idle Process...\n");
     idle_process_init();
 
@@ -573,108 +354,39 @@ void kernel_main(void)
         panic("[PANIC] Scheduler init failed: %s\n", ErrorString(sched_err));
     }
 
-    /* From here this kernel can be interrupted safely.
-     *
-     * The anchor is scheduler_init and not the sti at the bottom of
-     * kernel_main, because the sti is not the moment interrupts become legal
-     * — scheduling the first process turns them on earlier and legitimately,
-     * every user context runs with RFLAGS.IF set. Measured: with the flag on
-     * the sti, an ordinary boot reported a perfectly normal device interrupt
-     * arriving "early", forty lines after userspace started. The question the
-     * board actually raised is narrower and this is where it is answered:
-     * an interrupt before THIS line finds irq_handler with no scheduler state
-     * to record it into, which is what killed an i5-9400F at #PF 0x18. */
     { extern volatile bool g_kernel_ready_for_interrupts;
       g_kernel_ready_for_interrupts = true; }
 
     debug_printf("[INIT] Guide Dispatcher...\n");
     guide_init();
 
-    /* The kernel's own ear, exercised here rather than later on purpose: no
-     * process exists yet, and listening before there is any userspace to
-     * listen for you is the entire reason TouchWatch exists. */
     { extern void TouchWatchSelfTest(void); TouchWatchSelfTest(); }
 
-    /* Touch is up after guide_init — let the Canvas surface broadcast
-     * its readiness so log collectors / power daemons can subscribe. */
     VideoNotifyReady();
 
-    /* MemTag's lifecycle publishes (memtag:region:*, memtag:tag:*) become
-     * live once Touch resolves tags. Until now they silently no-op'd. */
     MemTagEnableTouchPublish();
 
-    /* MCE page migration — Phase 2F shipped #MC bank decode + poison.
-     * mce_migrate adds: after poison, defer a worker that copies the
-     * affected page to a fresh phys + atomically swaps PTEs in every
-     * cabin that mapped the poisoned page. Initialization is gated on
-     * (a) MemTag being up so MemRegion reverse-map is queryable, and
-     * (b) the batons being up so the slot's pass can be made from #MC
-     * IST. Touch resolution happens here so the worker's publish path
-     * uses cached handles. */
     {
         extern void mce_migrate_init(void);
         mce_migrate_init();
-        /* Kernel-side test: exercises the full migrate path
-         * synchronously (no baton hop) so we can observe side
-         * effects on real vmm_context + MemRegion attaches.
-         * Real-HW MCE injection (APEI EINJ) is the integration test;
-         * this validates correctness without real silicon. */
         extern void McMigrationTest(void);
         McMigrationTest();
-        /* Phase 2H+ — tag-driven PKU PTE stamping. Verifies
-         * MemTagApply(rid, "pku:N") auto-stamps PTE bits 62:59 inside
-         * MemRegionAttachCabin + MemTagApplyPkey sweep on tag change.
-         * Userspace WRPKRU itself is unprivileged and tested via
-         * boxlib box/pku.h. */
         extern void PkuStampTest(void);
         PkuStampTest();
 
-        /* APEI/GHES runtime path — bridges firmware-delivered hardware
-         * errors (Memory ECC via SMI → GHES, PCIe AER via GHES, etc.)
-         * into the same mce_migrate + Touch pipeline that handles
-         * architectural #MC events. Per-source registration ran during
-         * acpi_parse_apei via the decode_ghes hook; this call only
-         * resolves Touch tags + arms the periodic poll. Safe to skip
-         * (becomes a no-op) when no GHES sources were discovered. */
         extern void apei_ghes_runtime_init(void);
         apei_ghes_runtime_init();
         extern void ApeiGhesTest(void);
         ApeiGhesTest();
 
-        /* The SCI line opens only now: its handler says events under names
-         * that exist since guide_init, and consults the APEI runtime that
-         * exists since the line above. A level-triggered SCI raised before
-         * this has been waiting in the IOAPIC. */
         if (acpi_err == ACPI_OK) acpi_sci_arm();
 
-        /* Sort the .uaccess_fixup table so the #PF handler can
-         * binary-search instead of linear-scan it. Must run before any
-         * user process spawns + before interrupts are unmasked at the
-         * LAPIC — both conditions hold at this point in main(). The
-         * call is idempotent (re-entry no-ops) and the lookup path
-         * falls back to linear scan if init didn't run, so no boot
-         * ordering dependency is fatal. */
         extern void uaccess_init(void);
         uaccess_init();
 
-        /* Phase 2K+ — CET shadow-stack + IBT lifecycle enable.
-         * Programs CR4.CET=1, IA32_S_CET/IA32_U_CET MSRs, and
-         * registers XSAVE components 11/12 so per-process SSP is
-         * saved + restored on context switch. Per-process SSP
-         * allocation is wired into process_create from inside this
-         * call's after-effects (cet_process_create gates on
-         * g_cpu_caps.has_shstk + CR4.CET=1). Safe to call on CPUs
-         * without CET (becomes a no-op + returns ERR_NOT_SUPPORTED). */
         extern int cet_lifecycle_init_bsp(void);
         (void)cet_lifecycle_init_bsp();
 
-        /* Per-CPU supervisor SSP infrastructure for the BSP. Allocates
-         * PL0_SSP page + IA32_INTERRUPT_SSP_TABLE_ADDR + 5 per-IST SSP
-         * pages, writes the supervisor tokens, programs the MSRs. The
-         * S_CET.SH_STK_EN bit stays 0 — flipping it requires a kernel-
-         * wide CALL/RET pair audit that's a follow-up. The infrastructure
-         * is dormant until then, but the foundation is in place: a single
-         * IA32_S_CET write activates supervisor SHSTK at that point. */
         extern error_t cet_lifecycle_init_supervisor_ssp(uint8_t);
         (void)cet_lifecycle_init_supervisor_ssp(amp_get_core_index());
 
@@ -682,11 +394,6 @@ void kernel_main(void)
         CetLifecycleTest();
     }
 
-    /* TouchInit has now run inside guide_init — replay every EFI boot-
-     * time event so late subscribers (userspace daemons, fleet inventory
-     * tools) actually observe the state instead of losing it to the pre-
-     * TouchInit resolve_tag_pair no-op. Re-publishing is idempotent: the
-     * payload identifies the source state snapshot. */
     if (efi_runtime_available()) {
         if (efi_esrt_available())       efi_esrt_publish_touch();
         if (efi_secureboot_available()) efi_secureboot_publish_touch();
@@ -762,7 +469,6 @@ void kernel_main(void)
         kprintf("[WARN] System Deck register failed: %s\n", ErrorString(sys_reg_err));
     }
 
-    /* Storage Deck registers AFTER storage_deck_init below (TagFS must be up). */
 
     if (g_amp.total_cores > 1)
     {
@@ -775,24 +481,12 @@ void kernel_main(void)
         debug_printf("[INIT] Booting Application Processors...\n");
         amp_boot_aps();
 
-        /* Nightwatch last: it snapshots how many cores actually answered, and
-         * a core the firmware promised but never delivered must not count. */
         nightwatch_init();
     }
     else
     {
         idt_set_syscall_mode(false);
 
-        /* And the watch stands on one core too, now that one core can sleep.
-         *
-         * It used to be armed only for SMP, and the reason was sound at the
-         * time: the verdict runs from cpu_idle, and a uniprocessor never
-         * reached cpu_idle — the strand waiting for a keystroke held the only
-         * core, spinning, so there was never an idle core to look from. Turn In
-         * ended that. A single-core box now genuinely goes to sleep at its
-         * prompt, which is exactly the moment the watch exists for, and leaving
-         * it unarmed here would leave the newest way to sleep unwatched on the
-         * configuration where it is easiest to see. */
         nightwatch_init();
     }
 
@@ -830,9 +524,6 @@ void kernel_main(void)
     debug_printf("[INIT] Async I/O Queue...\n");
     async_io_init();
 
-    /* USB before storage, because a machine that boots from a flash drive has
-     * its filesystem on the USB bus and cannot be asked to find it before the
-     * bus has been asked what is on it. */
     debug_printf("[INIT] USB xHCI Driver...\n");
     if (xhci_init() != 0)
     {
@@ -845,14 +536,8 @@ void kernel_main(void)
     debug_printf("[INIT] Storage Deck & TagFS...\n");
     storage_deck_init();
 
-    /* And whether the medium the volume landed on can be read with nobody
-     * standing over the transfer — asked here, where the volume is known and
-     * the answer is still cheap to act on. */
     BoardroomProveUnattendedRead(tagfs_get_seat());
 
-    /* And what every medium's own ground says it carries. Reads only — and not
-     * the ground the volume above is standing on, which has just been read,
-     * checked and described by the mount that took it up. */
     DeedSurveyAll(tagfs_get_seat(), tagfs_get_volume_base());
 
     debug_printf("[INIT] Storage Deck register (Manifest path)...\n");
@@ -862,30 +547,11 @@ void kernel_main(void)
         kprintf("[WARN] Storage Deck register failed: %s\n", ErrorString(storage_reg_err));
     }
 
-    /* Now that the tag registry exists, resolve the USB Touch tags for real.
-     *
-     * They could not be resolved when the controller came up: tags live in
-     * TagFS, and TagFS lives on a medium the controller had not yet been asked
-     * about. Devices attached at power-on therefore enumerate before anyone can
-     * subscribe to hearing about them — which is why every one of them is also
-     * printed. Hot-plug from here on is announced properly. */
     xhci_interrupt_touch_init();
 
-    /* The keyboard comes up AFTER the tag registry, and it has to.
-     *
-     * It resolves the "keyboard" tag once at init and caches the handle,
-     * because resolving a tag takes the registry lock and the PS/2 interrupt
-     * cannot. A tag resolved before the registry exists comes back invalid and
-     * stays invalid — every keystroke is then published to nothing, and the
-     * shell sits there receiving no input from a keyboard that is working
-     * perfectly. Moving this above TagFS to make room for USB did exactly
-     * that, on every boot path, with nothing anywhere saying why. */
     debug_printf("[INIT] Keyboard...\n");
     keyboard_init();
 
-    /* COM1 serial console: route inbound serial bytes into the keyboard input
-     * ring so a host-side console (headless QEMU/Bochs, or a real serial line)
-     * can drive the shell. Must follow keyboard_init (fills the same ring). */
     debug_printf("[INIT] Serial console (COM1 RX)...\n");
     serial_console_init();
 
@@ -907,20 +573,12 @@ void kernel_main(void)
     kprintf("========================================\n\n");
 #endif
 
-    /* Ф26 BMIDE watchdog TIER-1 proof: mask a channel's IOAPIC pin so a real
-     * disk completion latches BMISR.IRQ with no CPU IRQ, then verify
-     * bmide_watchdog_scan recovers the "lost interrupt". Everything it needs is
-     * up by here (multi-core, BMIDE); skips cleanly on single-core
-     * or when AHCI owns block I/O. */
     {
         extern error_t bmide_watchdog_selftest(void);
         (void)bmide_watchdog_selftest();
     }
 
 #if CONFIG_BMIDE_WEDGE_SELFTEST
-    /* On-demand TIER-2 proof (WEDGETEST=on): drives a synthetic wedge through
-     * the real scan -> K-Core SRST recovery. SRSTs the boot drive — never in a
-     * production build. */
     {
         extern error_t bmide_wedge_selftest(void);
         (void)bmide_wedge_selftest();
@@ -931,18 +589,9 @@ void kernel_main(void)
     kprintf("Starting userspace...\n");
     kprintf("\n");
 
-    // ============================================================
-    // AUTOSTART: Query TagFS for files tagged "autostart" and
-    // spawn them automatically, as specified in the BoxOS tag spec.
-    // ============================================================
-    /* The volume's own programs. Extracted from here into autostart.c, because
-     * it was a hundred and ninety lines executed once at whatever moment this
-     * line happened to be reached — and a machine whose medium finished
-     * enumerating a second later came up empty and stayed that way. */
     process_t *initial_proc = NULL;
     int autostart_count = AutostartLaunchFromVolume(&initial_proc, false);
 
-    // Fallback: if no autostart files found, use embedded shell binary
     if (!initial_proc)
     {
         kprintf("[AUTOSTART] No autostart files found, falling back to embedded shell\n");
@@ -974,9 +623,6 @@ void kernel_main(void)
         initial_proc = shell_proc;
         kprintf("[AUTOSTART] Fallback shell ready (PID %u)\n", shell_proc->pid);
 
-        /* It is standing in, not filling the post. If this machine's own
-         * volume turns up later carrying a display daemon and a shell of its
-         * own, this one hands over rather than sharing a keyboard with it. */
         AutostartNoteStandIn(shell_proc->pid);
     }
     else
@@ -984,24 +630,15 @@ void kernel_main(void)
         AutostartNoteVolumeLaunched();
     }
 
-    /* Listen from here on. Set AFTER the boot has had its go, so it can only
-     * ever catch a volume that arrived too late for it — the boot mount's own
-     * announcement has already been made and gone unheard, deliberately. */
     AutostartWatchVolume();
 
     kprintf("[AUTOSTART] %d process(es) launched\n", autostart_count);
 
     if (g_amp.multicore_active)
     {
-        // ================================================================
-        // Multi-core bootstrap: BSP is a K-Core, processes run on App Cores.
-        // Enqueue all WORKING processes on their home App Core RunQueues,
-        // wake App Cores via IPI, then BSP enters the K-Core guide loop.
-        // ================================================================
         kprintf("[KERNEL] Multi-core mode: %u K-Core(s), %u App Core(s)\n",
                 g_amp.k_count, g_amp.app_count);
 
-        // Enqueue all created processes on their home App Core RunQueues
         process_list_lock();
         process_t *p = process_get_first();
         while (p)
@@ -1009,9 +646,6 @@ void kernel_main(void)
             if (p->magic == PROCESS_MAGIC && p->state == PROC_WORKING &&
                 !process_is_idle(p))
             {
-                /* sched_enqueue returns error_t: 0 = OK, non-zero = failure.
-                 * Earlier `if (sched_enqueue())` was backwards and printed
-                 * "FAILED to enqueue" on SUCCESS — confusing every boot log. */
                 if (sched_enqueue(p) == OK)
                 {
                     debug_printf("[KERNEL] Enqueued PID %u on App Core %u\n",
@@ -1026,7 +660,6 @@ void kernel_main(void)
         }
         process_list_unlock();
 
-        // Wake all App Cores to start scheduling
         for (uint8_t c = 0; c < g_amp.total_cores; c++)
         {
             if (!g_amp.cores[c].is_kcore && amp_core_online(&g_amp.cores[c]))
@@ -1036,35 +669,10 @@ void kernel_main(void)
         }
 
         kprintf("[KERNEL] BSP entering K-Core guide loop...\n");
-        /* Final step on BSP boot path: flip S_CET.SH_STK_EN=1 and JMP
-         * into kcore_run_loop without returning. The activation function
-         * is __noreturn because the current call chain has no matching
-         * pushes on the shadow stack (built up before SH_STK_EN was on),
-         * so any RET past activation would #CP. Dormant on TCG / CPUs
-         * without SHSTK — degrades to a direct kcore_run_loop call. */
         extern void cet_supv_shstk_activate_and_jump(void (*)(void));
         cet_supv_shstk_activate_and_jump(kcore_run_loop);
-        /* unreachable */
     }
 
-    /* ----------------------------------------------------------------
-     * Single-core path: BSP runs every userspace process itself.
-     *
-     * BUG (audit 2026-04-30): the previous code only `process_start_initial`'d
-     * the *initial* autostart process and jumped straight to Ring 3,
-     * leaving every other PROC_WORKING process unrouted into the
-     * scheduler's runqueue. When the BSP timer fired and `schedule()`
-     * looked for the next runnable process, the runqueue was empty —
-     * so the shell, the second utility, etc. never got a slice and the
-     * system silently sat on the initial process forever (display in
-     * the autostart case, which only does `receive_wait` and produces
-     * no output of its own). User-visible symptom: nothing happens
-     * after `[AUTOSTART] launched`, regardless of BIOS or UEFI.
-     *
-     * Fix: enqueue every WORKING non-idle process on this BSP's
-     * runqueue *before* the jump, and skip enqueuing `initial_proc`
-     * itself (it becomes current_process in process_start_initial).
-     * ---------------------------------------------------------------- */
     kprintf("[KERNEL] Single-core mode: BSP scheduling all processes\n");
 
     process_list_lock();
@@ -1094,7 +702,6 @@ void kernel_main(void)
 
     process_start_initial(initial_proc);
 
-    // Should NEVER return from above call
     debug_printf("[KERNEL] ERROR: Returned from userspace! This should never happen!\n");
     panic("Returned from process_start_initial()");
 #else

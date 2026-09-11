@@ -1,41 +1,3 @@
-/*
- * display.c — the console daemon.
- *
- * One event loop, no timeouts: a rotation of try-steps (keys → deaths → lanes
- * → IPC). A pass that moves nothing does not go round again — the daemon turns
- * in and stops costing a core until something arrives for it. Its three
- * delivery surfaces are not alike: the kernel can see a Touch and a Result
- * land, so the sleep watches those cursors itself, but a lane frame is a store
- * into a shared page that the kernel never witnesses. That is what the bell is
- * for: before going down, the daemon hangs its pid on every lane, and a writer
- * that finds one rings. Hang the bells BEFORE the last look, or a frame that
- * arrives in between is seen by nobody.
- *
- * Output arrives as ConsoleRun frames on per-strand Brook lanes. A lane is
- * granted over DISP_CMD_LANE checkroom-style: the daemon opens the READER
- * side of a fresh "console:N" Brook FIRST and only then answers with the
- * tag, so the writer arrives at a laid table. Lane numbers are reused from
- * a free pool — the tag registry grows to the peak number of simultaneous
- * lanes and no further.
- *
- * Input: the daemon is the cabin's ear at the keyboard. It consumes
- * "keyboard" Touch events only while some lane LISTENS, and says each key
- * again as a Touch on the tag of the lane at the top of the listening stack
- * — the program edits its own line and echoes through its own lane. A lane
- * listens for exactly as long as its program reads (DISP_CMD_LISTEN with 1
- * pushes it to the top, with 0 gives the ear back); a lane that closes is
- * dropped wherever it stands, and the one beneath hears again — and so is a
- * lane whose reader nobody can find: the kernel says how many heard each
- * key, and a key nobody heard drops the ear on top and is said again to the
- * next. Keys typed while nobody listens are NOT consumed — the kernel
- * TouchRing and the per-strand tag stash bank them for whoever reads next,
- * so type-ahead needs no third buffer.
- *
- * process:died closes what the dead leave behind: granted-but-never-
- * attached lanes are revoked, attached lanes are drained to the last frame
- * (a dying process' final words reach the screen) and closed on
- * STREAM_CLOSED.
- */
 
 #include "box/print.h"
 #include "box/vga.h"
@@ -43,6 +5,7 @@
 #include "box/ipc.h"
 #include "box/touch.h"
 #include "box/brook.h"
+#include "box/bay.h"
 #include "box/system.h"
 #include "box/memory.h"
 #include "box/convert.h"
@@ -54,19 +17,16 @@
 #include "box/turnin.h"
 #include "box/display.h"
 
-/* ─────────────────────────────────────────────────────────────────────────
- * Lanes
- * ───────────────────────────────────────────────────────────────────────── */
 
 typedef struct ConsoleLane {
     Brook              *brook;
-    uint32_t            owner_pid;   /* the strand the lane was granted to … */
-    uint32_t            owner_gen;   /* … in this incarnation: (pid, generation) */
-    uint32_t            number;      /* N of "console:N" */
-    TouchTagPair        ear;         /* "console:N" as a Touch tag: where its keys are said */
-    bool                closed;      /* drained to STREAM_CLOSED / revoked */
-    bool                has_pending; /* `pending` holds the lane's head frame */
-    ConsoleRun          pending;     /* popped but not yet rendered (merge) */
+    uint32_t            owner_pid;
+    uint32_t            owner_gen;
+    uint32_t            number;
+    TouchTagPair        ear;
+    bool                closed;
+    bool                has_pending;
+    ConsoleRun          pending;
     struct ConsoleLane *next;
 } ConsoleLane;
 
@@ -75,34 +35,26 @@ typedef struct FreeNumber {
     struct FreeNumber *next;
 } FreeNumber;
 
-static ConsoleLane *g_lanes;         /* append at tail — grant order */
-static FreeNumber  *g_free_numbers;  /* reuse pool for lane numbers */
-static uint32_t     g_next_number;   /* fresh numbers when the pool is dry */
+static uint64_t *g_order;
 
-/* The daemon's current on-screen pair — frames set it only when it differs. */
+static ConsoleLane *g_lanes;
+static FreeNumber  *g_free_numbers;
+static uint32_t     g_next_number;
+
 static uint32_t g_cur_fg;
 static uint32_t g_cur_bg;
 static bool     g_cur_set;
 
-/* Touch tags, interned once at startup. */
 static TouchTag g_kb    = TOUCH_TAG_INVALID;
 static TouchTag g_pdied = TOUCH_TAG_INVALID;
 
-/* ─────────────────────────────────────────────────────────────────────────
- * The ear — which lane hears the keyboard
- *
- * A stack of listening lanes; the top hears. Listening pushes a lane to the
- * top (or moves it there), a lane that closes is dropped wherever it stands,
- * and whoever is left on top hears next. Nothing here consults a clock or a
- * pid: a lane is (pid, generation) already.
- * ───────────────────────────────────────────────────────────────────────── */
 
 typedef struct Ear {
     ConsoleLane *lane;
     struct Ear  *below;
 } Ear;
 
-static Ear *g_ear;   /* top of the stack, NULL when nobody listens */
+static Ear *g_ear;
 
 static void EarListen(ConsoleLane *lane)
 {
@@ -118,7 +70,7 @@ static void EarListen(ConsoleLane *lane)
         pp = &(*pp)->below;
     }
     Ear *e = (Ear *)malloc(sizeof(Ear));
-    if (!e) return;   /* nobody listens harder than memory allows; asked again, it is pushed then */
+    if (!e) return;
     e->lane  = lane;
     e->below = g_ear;
     g_ear    = e;
@@ -140,9 +92,6 @@ static void EarDrop(ConsoleLane *lane)
 
 static bool kb_step(void);
 
-/* ─────────────────────────────────────────────────────────────────────────
- * Frame rendering
- * ───────────────────────────────────────────────────────────────────────── */
 
 static void render_run(const ConsoleRun *f)
 {
@@ -154,13 +103,6 @@ static void render_run(const ConsoleRun *f)
         return;
     }
     if (f->kind == CONSOLE_RUN_STEP) {
-        /* One op, in the same batch as the text around it — the kernel is the
-         * only party that knows where the cursor is, so it does the arithmetic
-         * (hardware_ops.c: HwVgaStepCursor). The daemon used to read the
-         * position, work it out here and write it back: three round trips per
-         * keystroke, a flush of the batch in the middle of a render, an answer
-         * that could be stale by the time it was used, and a screen width that
-         * had to be learned in a byte and was wrong past 255 columns. */
         int32_t delta;
         memcpy(&delta, f->text, sizeof(delta));
         vga_step_cursor(delta);
@@ -178,14 +120,6 @@ static void render_run(const ConsoleRun *f)
     uint32_t len = f->len;
     if (len > CONSOLE_RUN_TEXT_MAX) len = CONSOLE_RUN_TEXT_MAX;
 
-    /* One VGA operation for the whole run, newlines inside it. The console
-     * lock is held per operation, so a line's text in one operation and its
-     * newline in the next left a gap for a kprintf from another core to land
-     * in, and the serial account read `…via=printf[6] [ROLLCALL] …` —
-     * MEASURED on BIOS 16c: 184 and 71 lines of 1600 carried somebody else's.
-     * '\n' and '\b' are content (a line end, an erased cell); other control
-     * bytes are dropped (the writer's UTF-8 filter never emits them, so
-     * anything else here is line noise). */
     char     seg[CONSOLE_RUN_TEXT_MAX + 1];
     uint32_t pos = 0;
     for (uint32_t i = 0; i < len; i++) {
@@ -198,20 +132,6 @@ static void render_run(const ConsoleRun *f)
     }
 }
 
-/* ‼ A RENDER THAT WAS REFUSED IS NEWS, AND IT USED TO BE SWALLOWED.
- *
- * vga_commit fires one Manifest carrying a whole burst of output and returns
- * the kernel's answer. Nothing here read it. So a batch the kernel would not
- * finish — an op it refused, a snapshot it had no memory for — went by in
- * silence, and the screen simply had less on it than the machine had said.
- * The ops behind the refusal used to be dropped along with it; they are marked
- * OPTIONAL now (boxlib vga.c) so a refused cell costs its own cell. What is
- * left is the fact of the refusal, and a console that quietly draws less than
- * it was told to is exactly the kind of thing nobody finds by looking.
- *
- * Said once, with the reason and with how many frames were in flight when it
- * happened: a screen that is behind does not need a line per cell, and the
- * first one carries everything the next reader needs. */
 static void render_took(int rc)
 {
     static bool said = false;
@@ -221,9 +141,6 @@ static void render_took(int rc)
                "did not reach the glass", rc);
 }
 
-/* Refill a lane's pending slot from its ring. Marks the lane closed when
- * the drained writer's STREAM_CLOSED surfaces. Returns whether a pending
- * frame is available for the merge. */
 static bool lane_refill(ConsoleLane *ln)
 {
     if (ln->has_pending) return true;
@@ -240,15 +157,6 @@ static bool lane_refill(ConsoleLane *ln)
     return false;
 }
 
-/* Render pending frames across ALL lanes in global push order — always the
- * frame with the smallest push-time TSC first. Causal chains (a child's
- * last words → its death → the shell's next prompt) are milliseconds apart
- * in TSC, so cause order survives any scheduling of the daemon; a lane is
- * never allowed to overtake an older frame parked on another lane. The
- * merge is bounded per call so a firehose writer cannot hold the rotation
- * away from keys and IPC — and fairness needs no per-lane quota at all:
- * an old frame outranks a flooder's ever-newer ones by age alone. Keys
- * are sipped every 32 frames so echo stays live inside a long render. */
 static bool lanes_render(uint32_t budget)
 {
     bool     did      = false;
@@ -260,7 +168,7 @@ static bool lanes_render(uint32_t budget)
         for (ConsoleLane *ln = g_lanes; ln; ln = ln->next) {
             if (lane_refill(ln) &&
                 (!best ||
-                 (int64_t)(ln->pending.tsc - best->pending.tsc) < 0)) {
+                 (int64_t)(ln->pending.order - best->pending.order) < 0)) {
                 best = ln;
             }
         }
@@ -282,11 +190,6 @@ static bool lanes_render(uint32_t budget)
 static void lane_free(ConsoleLane *ln)
 {
     EarDrop(ln);
-    /* A release that failed left the reader claim standing in the kernel,
-     * and a number whose Brook is still claimed must not be granted again:
-     * every open of "console:N" as READER would find it busy, and the pool
-     * is a stack — the number would sit at its top and refuse every lane
-     * from then on. Such a number is retired, and said so. */
     int rc = brook_release(ln->brook);
     if (rc != 0) {
         kdbg_print("[display] lane %u of pid %u: release failed (%d); number retired",
@@ -301,25 +204,10 @@ static void lane_free(ConsoleLane *ln)
         fn->next       = g_free_numbers;
         g_free_numbers = fn;
     }
-    /* malloc failure just retires the number — "console:N" stays interned
-     * (tag registry entries are forever) and a fresh number replaces it. */
     free(ln);
 }
 
-/* ─────────────────────────────────────────────────────────────────────────
- * Deaths
- * ───────────────────────────────────────────────────────────────────────── */
 
-/* Consume banked process:died events. Never unlinks lane nodes (the lane
- * walk owns the list) — it marks never-attached grants closed; attached
- * lanes need nothing here, because the min-TSC merge already renders a
- * dead writer's banked tail before anything a survivor pushes in reaction
- * to the death (the tail's frames carry strictly older stamps).
- *
- * A death names (pid, generation), and so does a lane: the match is exact.
- * A recycled pid is a different generation and matches nothing here, so the
- * CURRENT incarnation keeps the lane it was just granted, and no guess about
- * liveness (proc_info) stands between an event and its lane any more. */
 static bool death_step(void)
 {
     bool  did = false;
@@ -346,20 +234,7 @@ static bool death_step(void)
     return did;
 }
 
-/* ─────────────────────────────────────────────────────────────────────────
- * Lane walk — the only place lane nodes are unlinked.
- * ───────────────────────────────────────────────────────────────────────── */
 
-/* Hang this daemon's pid on every open lane, and take them all in again.
- *
- * Only lanes that still carry frames matter, but hanging on all of them is one
- * store each and spares the walk a liveness argument: a lane the daemon is
- * about to free has its bell taken back before lanes_step ever reaches it,
- * because taking them in happens the instant the sleep ends. A closed lane's
- * writer is gone and will never ring; the store is harmless.
- *
- * New lanes cannot appear behind the daemon's back — grant_lane runs inside
- * ipc_step, which only runs while it is awake. */
 static void lanes_bell_hang(uint32_t me)
 {
     for (ConsoleLane *ln = g_lanes; ln; ln = ln->next)
@@ -376,8 +251,6 @@ static bool lanes_step(void)
 {
     bool did = lanes_render(2u * CONSOLE_LANE_FRAMES);
 
-    /* Unlink lanes that are fully over: STREAM_CLOSED surfaced (or the
-     * grant was revoked) AND the last pending frame has rendered. */
     ConsoleLane **pp = &g_lanes;
     while (*pp) {
         ConsoleLane *ln = *pp;
@@ -391,25 +264,8 @@ static bool lanes_step(void)
     return did;
 }
 
-/* ─────────────────────────────────────────────────────────────────────────
- * Keys — said again on the lane that listens
- * ───────────────────────────────────────────────────────────────────────── */
 
-/* Consume keys ONLY while someone listens — otherwise they stay banked on
- * the TouchRing/stash as type-ahead for whoever listens next. (The stash
- * matters: death_step's tag-selective pop parks any keys it runs into
- * there, so this must always pull by tag, never gate on ring emptiness.)
- * Each key is the daemon's own Touch on the lane's tag, payload as heard.
- *
- * The kernel says how many heard it. Nobody means the lane on top has no
- * reader any more — it died in the middle of its reading, or gave its claim
- * up without giving the ear back — and its ear is dropped right here, before
- * the daemon has heard of the death by any other road. The key is not lost
- * with it: it stays in hand and is said again to whoever is beneath, or, when
- * nobody is, to the next lane that listens — ahead of everything typed after
- * it, which is still banked in the ring. One key in hand at most: the next
- * is not taken until this one has been heard. */
-static Touch g_key;           /* taken from the keyboard, not yet heard by anyone */
+static Touch g_key;
 static bool  g_key_in_hand;
 
 static bool kb_step(void)
@@ -427,29 +283,54 @@ static bool kb_step(void)
             g_key_in_hand = false;
             continue;
         }
-        /* Nobody wears the tag of the lane on top: its reader is gone. The
-         * lane itself closes by its own road (STREAM_CLOSED, process:died);
-         * only the ear goes now, so the key finds the next listener. */
         EarDrop(g_ear->lane);
         did = true;
     }
     return did;
 }
 
-/* ─────────────────────────────────────────────────────────────────────────
- * IPC — grants, input requests, ping.
- * ───────────────────────────────────────────────────────────────────────── */
+
+static int say_to(uint32_t pid, const uint8_t *msg, uint16_t len)
+{
+    int rc = send(pid, msg, len);
+    if (rc == 0) return 0;
+    error_t why = box_errno_of(rc);
+    if (why == ERR_ROUTE_TARGET_FULL || why == ERR_NO_MEMORY) {
+        static bool refused_before = false;
+        if (!refused_before) {
+            refused_before = true;
+            kdbg_print("[display] pid %u would not take its lane answer just "
+                       "now (%s); it was not re-sent, and that cabin waits "
+                       "until it asks again", pid,
+                       why == ERR_ROUTE_TARGET_FULL ? "its ring is full"
+                                                    : "no room for the record");
+        }
+    }
+    return rc;
+}
+
+static bool order_ensure(void)
+{
+    if (g_order) return true;
+    g_order = (uint64_t *)bay_open(CONSOLE_ORDER_TAG, CONSOLE_ORDER_BYTES,
+                                   BAY_CREATE);
+    if (!g_order) {
+        kdbg_print("[display] the console's order could not be made; no lane "
+                   "can be granted just now and every cabin that asks prints "
+                   "straight to the glass");
+        return false;
+    }
+    return true;
+}
 
 static void grant_lane(uint32_t requester, uint32_t generation)
 {
-    /* Idempotent per requester. A strand IS a process here, so one lane per
-     * (pid, generation) is the whole rule — and a writer whose grant reply
-     * was lost (or who simply asked again while the answer was in flight)
-     * must get the SAME lane back, never a second one. Granting twice would
-     * strand the first Brook: the daemon would hold a reader nobody writes
-     * to and the writer would push into whichever tag it learned last,
-     * leaking a lane per re-ask. A recycled pid carries a new generation and
-     * matches no lane of its predecessor. */
+    if (!order_ensure()) {
+        uint8_t refusal = DISP_CMD_LANE;
+        (void)say_to(requester, &refusal, 1);
+        return;
+    }
+
     for (ConsoleLane *ln = g_lanes; ln; ln = ln->next) {
         if (ln->owner_pid != requester || ln->owner_gen != generation ||
             ln->closed)
@@ -461,7 +342,7 @@ static void grant_lane(uint32_t requester, uint32_t generation)
         size_t alen = strlen(again);
         reply[0] = DISP_CMD_LANE;
         memcpy(reply + 1, again, alen + 1);
-        send(requester, reply, (uint16_t)(2 + alen));
+        (void)say_to(requester, reply, (uint16_t)(2 + alen));
         return;
     }
 
@@ -484,12 +365,8 @@ static void grant_lane(uint32_t requester, uint32_t generation)
     ConsoleLane *ln = b ? (ConsoleLane *)malloc(sizeof(ConsoleLane)) : NULL;
     if (!b || !ln) {
         if (b) brook_release(b);
-        /* The number is NOT returned to the pool. An open that failed says
-         * the Brook behind this number is not usable, and a pool that is a
-         * stack would hand the same failure to every requester after this
-         * one. A fresh number replaces it; "console:N" stays interned. */
-        uint8_t refusal = DISP_CMD_LANE;      /* 1-byte reply = honest no */
-        send(requester, &refusal, 1);
+        uint8_t refusal = DISP_CMD_LANE;
+        (void)say_to(requester, &refusal, 1);
         kdbg_print("[display] lane grant failed for pid %u (number %u retired)",
                    requester, number);
         return;
@@ -514,7 +391,7 @@ static void grant_lane(uint32_t requester, uint32_t generation)
     size_t  tlen = strlen(tag);
     reply[0] = DISP_CMD_LANE;
     memcpy(reply + 1, tag, tlen + 1);
-    send(requester, reply, (uint16_t)(2 + tlen));
+    (void)say_to(requester, reply, (uint16_t)(2 + tlen));
 }
 
 
@@ -533,8 +410,6 @@ static bool ipc_step(void)
 
         switch (data[0]) {
         case DISP_CMD_LANE:
-            /* [cmd][u32 generation]: a request without its generation names
-             * nobody and gets nothing. */
             if (len >= 5) {
                 uint32_t gen;
                 memcpy(&gen, data + 1, sizeof(gen));
@@ -542,10 +417,6 @@ static bool ipc_step(void)
             }
             break;
         case DISP_CMD_LISTEN:
-            /* [cmd][u32 generation][u8 listening]: the lane of (sender,
-             * generation) takes the ear or gives it back. A lane must exist
-             * and be open: listening is a property of a lane, and a closed
-             * one cannot hear. */
             if (len >= 6) {
                 uint32_t gen;
                 memcpy(&gen, data + 1, sizeof(gen));
@@ -565,8 +436,6 @@ static bool ipc_step(void)
             break;
         }
         default:
-            /* The render-over-IPC wire is gone; nothing legitimate sends
-             * anything else. Say so once rather than swallow it forever. */
             {
                 static bool warned = false;
                 if (!warned) {
@@ -581,9 +450,6 @@ static bool ipc_step(void)
     return did;
 }
 
-/* ─────────────────────────────────────────────────────────────────────────
- * Main — claim tags, announce, rotate.
- * ───────────────────────────────────────────────────────────────────────── */
 
 int main(void)
 {
@@ -593,6 +459,8 @@ int main(void)
     g_pdied = touch_pair_choose(touch_intern(TOUCH_TAG_PROCESS_DIED));
     if (g_kb    != TOUCH_TAG_INVALID) touch_claim(g_kb,    TOUCH_REST, 0, 0);
     if (g_pdied != TOUCH_TAG_INVALID) touch_claim(g_pdied, TOUCH_REST, 0, 0);
+
+    (void)order_ensure();
 
     CabinInfo *ci = cabin_info();
     if (ci->spawner_pid != 0) {
@@ -610,12 +478,6 @@ int main(void)
         progressed |= ipc_step();
         if (progressed) continue;
 
-        /* Nothing moved. Hang the bells FIRST, then take the mark, then look
-         * one last time — in that order, and the order is the whole proof.
-         * Anything arriving from here on either finds a bell out (and rings,
-         * which is itself an arrival on the Result ring), or moves a cursor
-         * past the mark, or turns up in the look below. There is no fourth
-         * way for it to arrive and no gap between the three. */
         lanes_bell_hang(me);
         TurnInMark mark = box_mark();
 

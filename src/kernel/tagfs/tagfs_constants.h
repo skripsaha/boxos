@@ -1,66 +1,40 @@
 #ifndef TAGFS_CONSTANTS_H
 #define TAGFS_CONSTANTS_H
 
-// ============================================================================
-// TagFS Production Constants
-// All TagFS modules include this file - no circular dependencies
-// ============================================================================
 
 #define TAGFS_VERSION               1
 #define TAGFS_BLOCK_SIZE            4096
 #define TAGFS_SECTOR_SIZE           512
 #define TAGFS_BLOCK_SECTORS         (TAGFS_BLOCK_SIZE / TAGFS_SECTOR_SIZE)
 
-/* No disk layout here any more. Where each part of a volume sits is stated by
- * that volume's own Deed, in blocks counted from its own start, and read at
- * mount — see tagfs.h. These were absolute sectors of the whole medium, which
- * is why a volume could only ever exist in one place. */
 
-// DiskBook journal size on disk (must match disk_book.h CAPACITY × SECTORS_PER_ENTRY)
-#define DISK_BOOK_JOURNAL_SECTORS   1024    /* 512 entries × 2 sectors each */
+#define DISK_BOOK_JOURNAL_SECTORS   1024
 
-// Tag constants
 #define TAGFS_INVALID_TAG_ID        0xFFFF
-/* Volume tag ids stop one short of bit 15. Bit 15 belongs to the kernel's
- * Logbook (core/touch/logbook.h) — the vocabulary of occurrences, which must
- * exist on a machine that never mounted a volume. Capping here is what makes
- * the split an invariant instead of a convention: the volume cannot issue an
- * id that collides with an occurrence even in principle. 32766 distinct tags
- * per volume; the largest volume seen carries ~120. */
 #define TAGFS_MAX_TAG_ID            0x7FFE
 
-// TagRegistryEntry.flags bits.
-//   HAS_VALUE — entry carries a value (bit 0; persisted, value-presence).
-//   SYSTEM    — entry is a reserved-vocabulary key, stamped at every mount
-//               (bit 1; re-derived, never the reason for a disk write).
 #define TAGFS_TAG_FLAG_HAS_VALUE    0x01
 #define TAGFS_TAG_FLAG_SYSTEM       0x02
 
-// File flags
 #define TAGFS_FILE_ACTIVE           (1 << 0)
 #define TAGFS_FILE_TRASHED          (1 << 1)
 #define TAGFS_FILE_HIDDEN           (1 << 2)
 
-// Handle flags
 #define TAGFS_HANDLE_READ           (1 << 0)
 #define TAGFS_HANDLE_WRITE          (1 << 1)
 
-// Registry constants
 #define TAGFS_REG_BUCKETS           512
 #define TAGFS_KEY_BUCKETS           128
 #define TAGFS_REGISTRY_DATA_SIZE    4080
 #define TAGFS_MPOOL_DATA_SIZE       4080
 #define TAGFS_FTABLE_PER_BLOCK      510
 
-// Snapshot limits
 #define TAGFS_MAX_SNAPSHOTS         64
 #define TAGFS_SNAPSHOT_NAME_LEN     32
 
-// Bitmap index initial capacities
 #define TAGFS_BITMAP_INITIAL_TAG_CAP    64
 #define TAGFS_BITMAP_INITIAL_FILE_CAP   256
 
-// Read-ahead cache
 #define TAGFS_READ_AHEAD_BLOCKS         4
 
-#endif // TAGFS_CONSTANTS_H
+#endif

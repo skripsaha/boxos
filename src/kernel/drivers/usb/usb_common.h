@@ -5,15 +5,10 @@
 
 #define USB_CLASS_MASS_STORAGE   0x08
 
-/* Mass storage transports. Bulk-Only is the only one worth implementing: the
- * two older ones (Control/Bulk/Interrupt) predate USB 2 and were dead before
- * most of the hardware this kernel will meet was built. */
 #define USB_MSD_PROTOCOL_CBI_INT 0x00
 #define USB_MSD_PROTOCOL_CBI     0x01
 #define USB_MSD_PROTOCOL_BOT     0x50
 
-/* Subclasses, which say which command set rides the transport. 0x06 is
- * "SCSI transparent" and is what everything modern reports. */
 #define USB_MSD_SUBCLASS_SCSI    0x06
 #define USB_CLASS_HID            0x03
 #define USB_CLASS_HUB            0x09

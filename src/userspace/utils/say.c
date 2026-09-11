@@ -11,8 +11,6 @@ int main(void) {
         return 1;
     }
 
-    /* The rest of the line as typed — spacing and quotes included — which is
-     * the luggage's tail from the first word after the name. */
     println(luggage_tail(1));
 
     exit(0);

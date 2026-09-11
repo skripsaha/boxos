@@ -1,11 +1,3 @@
-/*
- * file.c — userspace file/tag wrappers (Phase 12: Manifest-only).
- *
- * Storage Deck is now fully Manifest-native. Every wrapper builds a 1-op
- * Manifest via MfCall1 with the new param/crate layout — the legacy
- * 168/176-byte payload caps are gone. fread / fwrite now transfer up to the
- * caller's buffer size in a single syscall.
- */
 
 #include "box/file.h"
 #include "box/core/manifest.h"
@@ -14,13 +6,10 @@
 #include "box/string.h"
 #include "box/types.h"
 #include "box/error.h"
-#include "box/memory.h"     /* malloc / free — a crate sized to the ask */
-#include "box/timeouts.h"   /* BOX_ANSWER_GUARANTEED */
-#include "boxos_decks.h"    /* STORAGE_* opcodes + STORAGE_SCOPE_* — single source */
+#include "box/memory.h"
+#include "box/timeouts.h"
+#include "boxos_decks.h"
 
-/* =========================================================================
- *  CREATE / QUERY — inside the Use Context, or everywhere
- * ========================================================================= */
 
 static int create_scoped(const char *filename, const char *tags, uint8_t scope)
 {
@@ -28,12 +17,10 @@ static int create_scoped(const char *filename, const char *tags, uint8_t scope)
     size_t fn_len = strlen(filename);
     if (fn_len >= 32) return -ERR_INVALID_ARGUMENT;
 
-    /* params: 32 bytes of NUL-padded filename, then the scope byte. */
     uint8_t params[33] = {0};
     memcpy(params, filename, fn_len);
     params[32] = scope;
 
-    /* in_crate: tag list (optional). */
     const void *in = NULL;
     uint32_t    in_size = 0;
     if (tags && tags[0] != '\0') {
@@ -61,10 +48,6 @@ int create_everywhere(const char *filename, const char *tags)
     return create_scoped(filename, tags, STORAGE_SCOPE_EVERYWHERE);
 }
 
-/* The kernel answers [u32 delivered][u32 total][u32 ids[delivered]]: how many
- * it handed over, and how many there are. The crate is sized to the caller's
- * room, not to a buffer of ours — what stood here was a 1 KiB stack buffer
- * that quietly cut every ask down to 254 files. */
 static int query_scoped(const char *tags, uint32_t *file_ids, size_t max_files,
                         uint8_t scope, uint32_t *out_total)
 {
@@ -111,9 +94,6 @@ int query_everywhere(const char *tags, uint32_t *file_ids, size_t max_files)
     return query_scoped(tags, file_ids, max_files, STORAGE_SCOPE_EVERYWHERE, NULL);
 }
 
-/* Every match, however many: ask how many there are, then ask for that many.
- * The volume may grow between the two asks — then the second answer says so,
- * and the ask is repeated with room for the new count. */
 static int query_all_scoped(const char *tags, uint32_t **out_ids, uint8_t scope)
 {
     if (!out_ids) return -ERR_INVALID_ARGUMENT;
@@ -146,9 +126,6 @@ int query_all_everywhere(const char *tags, uint32_t **out_ids)
     return query_all_scoped(tags, out_ids, STORAGE_SCOPE_EVERYWHERE);
 }
 
-/* =========================================================================
- *  FILE_INFO — parse the variable-length blob ObjGetInfo writes.
- * ========================================================================= */
 
 int file_info(uint32_t file_id, file_info_t *info)
 {
@@ -188,7 +165,7 @@ int file_info(uint32_t file_id, file_info_t *info)
         uint16_t kl = 0, vl = 0;
         memcpy(&kl, out + pos, 2); pos += 2;
         memcpy(&vl, out + pos, 2); pos += 2;
-        uint8_t type = out[pos]; pos += 1;   /* 1 = system, 0 = user */
+        uint8_t type = out[pos]; pos += 1;
         if (pos + kl + vl > out_actual) break;
 
         if (i < 5) {
@@ -207,22 +184,12 @@ int file_info(uint32_t file_id, file_info_t *info)
     return 0;
 }
 
-/* =========================================================================
- *  READ / WRITE — single syscall, no chunking
- * ========================================================================= */
 
-/* fread / fwrite return the byte count transferred (0 .. 4 GiB) or a negative
- * -error_t on failure. The STORAGE wire field is 32-bit, so a single call moves
- * at most UINT32_MAX bytes; a larger request is capped (a short transfer — the
- * caller loops for more) rather than silently wrapped. The int64 return keeps a
- * 2..4 GiB count on the non-negative side, clear of the -error_t cause channel
- * (every error_t <= 1100); the C++ box::result bridge is box::_detail::from_ret64. */
 int64_t fread(uint32_t file_id, uint64_t offset, void *buffer, size_t size)
 {
     if (!buffer || size == 0) return -ERR_INVALID_ARGUMENT;
     uint32_t req = size > UINT32_MAX ? UINT32_MAX : (uint32_t)size;
 
-    /* params: [u32 file_id][u64 offset]. */
     uint8_t params[12];
     memcpy(params,     &file_id, 4);
     memcpy(params + 4, &offset,  8);
@@ -234,7 +201,7 @@ int64_t fread(uint32_t file_id, uint64_t offset, void *buffer, size_t size)
                      buffer, req, &out_actual,
                      BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
-    return (int64_t)out_actual;            /* 0..req, always >= 0 */
+    return (int64_t)out_actual;
 }
 
 int64_t fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t size)
@@ -242,7 +209,6 @@ int64_t fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t siz
     if (!buffer || size == 0) return -ERR_INVALID_ARGUMENT;
     uint32_t req = size > UINT32_MAX ? UINT32_MAX : (uint32_t)size;
 
-    /* params: [u32 file_id][u64 offset][u32 flags=0]. */
     uint8_t params[16];
     uint32_t flags = 0;
     memcpy(params,      &file_id, 4);
@@ -257,16 +223,13 @@ int64_t fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t siz
                      out, sizeof(out), &out_actual,
                      BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
-    if (out_actual < 8) return (int64_t)req; /* op succeeded; assume full write of the submitted crate */
+    if (out_actual < 8) return (int64_t)req;
 
     uint64_t bytes_written = 0;
     memcpy(&bytes_written, out, 8);
     return (int64_t)bytes_written;
 }
 
-/* =========================================================================
- *  RENAME / DELETE
- * ========================================================================= */
 
 int file_rename(uint32_t file_id, const char *new_filename)
 {
@@ -274,7 +237,6 @@ int file_rename(uint32_t file_id, const char *new_filename)
     size_t fn_len = strlen(new_filename);
     if (fn_len == 0 || fn_len >= 64) return -ERR_INVALID_ARGUMENT;
 
-    /* params: [u32 file_id][u16 name_len][char name[name_len]]. */
     uint8_t params[6 + 64];
     uint16_t name_len = (uint16_t)fn_len;
     memcpy(params,     &file_id,  4);
@@ -299,7 +261,6 @@ int delete(uint32_t file_id)
 
 int file_truncate(uint32_t file_id, uint64_t new_size)
 {
-    /* params: [u32 file_id][u64 new_size]. */
     uint8_t params[12];
     memcpy(params,     &file_id,  4);
     memcpy(params + 4, &new_size, 8);
@@ -311,9 +272,6 @@ int file_truncate(uint32_t file_id, uint64_t new_size)
     return box_fail(rc);
 }
 
-/* =========================================================================
- *  TAGS
- * ========================================================================= */
 
 int tag_add(uint32_t file_id, const char *tag)
 {
@@ -347,12 +305,6 @@ int find_file_by_name(const char *filename, uint32_t *file_ids,
     if (!filename || filename[0] == '\0') return -ERR_INVALID_ARGUMENT;
     if (max > 0 && !file_ids) return -ERR_INVALID_ARGUMENT;
 
-    /* The name is a tag. The volume stamps every file with the stem of its
-     * name — up to the last dot — as its first tag, so the index answers "who
-     * is called this" in one ask, however many files there are. What stood
-     * here walked the first 255 files of the volume and asked each its name.
-     * A stem the tag grammar cannot spell (a ':' or ',' inside it) is asked
-     * the old way: every file in the context, compared by name. */
     char   stem[sizeof(((file_info_t *)0)->filename)];
     size_t len = strlen(filename);
     size_t cut = len;
@@ -386,9 +338,6 @@ int find_file_by_name(const char *filename, uint32_t *file_ids,
     return found;
 }
 
-/* =========================================================================
- *  CoW snapshot wrappers
- * ========================================================================= */
 
 int snap_create(const char *name, uint32_t file_id, uint32_t *out_snap_id)
 {
@@ -452,8 +401,6 @@ int snap_info(uint32_t snap_id, snap_info_t *out)
 {
     if (!out) return -ERR_INVALID_ARGUMENT;
 
-    /* [u32 id][u32 parent_file_id][u64 created_time][u32 file_count]
-     * [u64 total_size][u8 flags][char name[32]] = 61 bytes. */
     uint8_t  buf[61];
     uint32_t out_actual = 0;
     int rc = MfCall1(DECK_STORAGE, STORAGE_SNAP_INFO,
@@ -477,9 +424,6 @@ int snap_info(uint32_t snap_id, snap_info_t *out)
     return 0;
 }
 
-/* =========================================================================
- *  Durability — anchor()
- * ========================================================================= */
 
 int anchor(uint32_t file_id)
 {

@@ -12,71 +12,26 @@
 #include "ahci.h"
 #include "ahci_sync.h"
 
-/* ===========================================================================
- *  Real-HW PATA driver (PIO transfer mode).
- *
- *  Channel discovery comes from PCI: any device with class/subclass 01/01h
- *  is a PCI IDE controller. Its Programming Interface byte (PIF, config 0x09)
- *  per "PCI IDE Controller Specification" §2.1 has:
- *
- *      bit 0   primary native-mode (1) vs compatibility (0)
- *      bit 1   primary native-mode supported AND switchable
- *      bit 2   secondary native-mode (1) vs compatibility (0)
- *      bit 3   secondary native-mode supported AND switchable
- *      bit 7   Bus Master IDE capable (BMIDE at BAR4)
- *
- *  In compatibility mode the I/O bases are ISA-fixed:
- *      primary:   command 0x1F0-0x1F7, control 0x3F6, IRQ14
- *      secondary: command 0x170-0x177, control 0x376, IRQ15
- *
- *  In native mode the I/O bases come from PCI BARs:
- *      BAR0 -> primary   command block (8 ports)
- *      BAR1 -> primary   control block (4 ports; Device Control / Alt
- *                        Status at offset 2)
- *      BAR2 -> secondary command block
- *      BAR3 -> secondary control block (DCR at offset 2)
- *  and the IRQ comes from PCI config Interrupt Line (offset 0x3C);
- *  both channels typically share the same INTx# pin.
- *
- *  IRQ posture: nIEN=1 on every detected drive + IOAPIC pins for
- *  IRQ14/15 left masked. Both PIO and Bus-Master DMA paths busy-poll
- *  completion — fully spec-compliant without an interrupt path. PIO
- *  mode is negotiated to the fastest the drive advertises (4 → 3 →
- *  default); DMA mode similarly (UDMA 6..0 → MDMA 2..0 → none).
- *  Read/write fast path runs through BMIDE when both the controller
- *  (ProgIF bit 7) and the drive (IDENTIFY word 49 bit 8) support it
- *  and the request fits the staging page (count ≤ 8 sectors); larger
- *  or DMA-failing requests transparently fall back to PIO.
- * =========================================================================*/
 
 AtaChannel g_ata_channels[ATA_CHANNEL_COUNT];
 ATADevice  g_ata_devices[ATA_DRIVE_COUNT];
 
-/* Global IDE-controller lock. Serialises command issue across all four
- * drives behind a single ATA controller — the legacy register file is
- * shared so two cores cannot drive different channels concurrently
- * without a re-entrancy story we don't need. */
 static spinlock_t g_ata_lock;
 
-/* ATA register offsets within an 8-byte command block (PCI IDE native
- * layout, identical to legacy 0x1F0+N). */
 #define ATA_REG_DATA            0
-#define ATA_REG_ERROR           1   /* read */
-#define ATA_REG_FEATURES        1   /* write */
+#define ATA_REG_ERROR           1
+#define ATA_REG_FEATURES        1
 #define ATA_REG_SECCOUNT        2
 #define ATA_REG_LBA_LO          3
 #define ATA_REG_LBA_MID         4
 #define ATA_REG_LBA_HI          5
 #define ATA_REG_DRIVE_HEAD      6
-#define ATA_REG_STATUS          7   /* read */
-#define ATA_REG_COMMAND         7   /* write */
+#define ATA_REG_STATUS          7
+#define ATA_REG_COMMAND         7
 
-#define ATA_CTRL_SRST           0x04 /* Device Control register, bit 2 */
-#define ATA_CTRL_nIEN           0x02 /* Device Control register, bit 1 */
+#define ATA_CTRL_SRST           0x04
+#define ATA_CTRL_nIEN           0x02
 
-/* ---------------------------------------------------------------------
- *  Helpers
- * ------------------------------------------------------------------ */
 
 static inline uint8_t drive_channel(uint8_t drive_idx) { return drive_idx >> 1; }
 static inline uint8_t drive_is_slave(uint8_t drive_idx) { return drive_idx & 1; }
@@ -85,9 +40,6 @@ static inline AtaChannel* drive_channel_ptr(uint8_t drive_idx) {
 }
 
 static inline void ata_delay_400ns(uint8_t drive_idx) {
-    /* ATA8-ACS §6.2.1: read Alt-Status 4× after drive-select to give
-     * the new device time to assert BSY/DRDY. Each I/O cycle is
-     * comfortably > 100 ns on every chipset we target. */
     uint16_t ctrl = drive_channel_ptr(drive_idx)->ctrl_reg;
     for (int i = 0; i < 4; i++) (void)inb(ctrl);
 }
@@ -107,8 +59,6 @@ static inline void ata_select_drive(uint8_t drive_idx) {
     ata_delay_400ns(drive_idx);
 }
 
-/* Bounded waits — every register handshake must terminate even if the
- * drive is dead. CONFIG_ATA_TIMEOUT_MS comes from kernel_config.h. */
 static int ata_wait_clear_bsy(uint8_t drive_idx, uint32_t timeout_ms) {
     uint64_t deadline = rdtsc() + cpu_ms_to_tsc(timeout_ms);
     while (rdtsc() < deadline) {
@@ -129,13 +79,6 @@ static int ata_wait_ready(uint8_t drive_idx) {
     return ATA_ERR_TIMEOUT;
 }
 
-/*
- * The drive has been given a command and this waits for it to carry it out, so
- * the patience is the DRIVE'S rather than a register handshake's — see
- * CONFIG_ATA_IO_TIMEOUT_MS. Three facts end it before the clock ever does: the
- * bus reading 0xFF, which is nothing being there at all; the drive raising
- * ERR; and the drive raising DRQ, which is the answer.
- */
 static int ata_wait_drq(uint8_t drive_idx) {
     uint64_t deadline = rdtsc() + cpu_ms_to_tsc(CONFIG_ATA_IO_TIMEOUT_MS);
     while (rdtsc() < deadline) {
@@ -160,7 +103,6 @@ static const char* ata_decode_error(uint8_t error) {
 }
 
 static void ata_string_fixup(char* str, int len) {
-    /* T13: model & serial strings are byte-swapped per 16-bit word. */
     for (int i = 0; i < len; i += 2) {
         char tmp = str[i];
         str[i] = str[i + 1];
@@ -173,20 +115,7 @@ static void ata_string_fixup(char* str, int len) {
     str[len] = '\0';
 }
 
-/* ===========================================================================
- *  BMIDE engine, IRQ-driven DMA submit/wait, DMA-mode negotiation and
- *  every other BMIDE register touch lives in ata_async.{c,h}. ata.c
- *  retains only PIO + IDENTIFY + channel discovery + the legacy sync
- *  read/write entry points, which call into ata_async via ata_dma_sync.
- * =========================================================================*/
 
-/* Submit a SET FEATURES "set transfer mode" command. Mode byte format
- * (ATA-7 §7.41.5):
- *    0x00 + n            -> PIO mode 0 (n must be 0)
- *    0x08 | n            -> PIO mode n (0..4 in practice)
- *    0x20 | n            -> Multiword DMA mode n (0..2)
- *    0x40 | n            -> Ultra DMA mode n (0..6)
- * Returns 0 on success, negative on drive ABORT or timeout. */
 int ata_set_xfer_mode(uint8_t drive_idx, uint8_t mode_byte) {
     AtaChannel* ch = drive_channel_ptr(drive_idx);
     ata_select_drive(drive_idx);
@@ -203,53 +132,26 @@ int ata_set_xfer_mode(uint8_t drive_idx, uint8_t mode_byte) {
     return 0;
 }
 
-/* ---------------------------------------------------------------------
- *  Software reset — one per channel.
- *
- *  ATA-7 §9.2: write SRST=1 (Device Control bit 2) plus nIEN=1, wait
- *  at least 5 µs, then write SRST=0 with nIEN=1 still asserted. BSY
- *  can stay set for up to 31 s while the drive performs internal
- *  recovery; we cap at 2 s — anything longer is treated as a dead
- *  controller. Keeping nIEN=1 throughout means the drive's IRQ line
- *  is silent before, during, and after reset — there is no window in
- *  which a stale IRQ could escape to the IOAPIC.
- * ------------------------------------------------------------------ */
 void ata_channel_soft_reset(uint8_t channel) {
     AtaChannel* ch = &g_ata_channels[channel];
     if (!ch->present) return;
 
     outb(ch->ctrl_reg, ATA_CTRL_SRST | ATA_CTRL_nIEN);
-    for (int i = 0; i < 8; i++) (void)inb(ch->ctrl_reg); /* >5 µs settle */
+    for (int i = 0; i < 8; i++) (void)inb(ch->ctrl_reg);
 
     outb(ch->ctrl_reg, ATA_CTRL_nIEN);
-    for (int i = 0; i < 4; i++) (void)inb(ch->ctrl_reg); /* 400 ns settle */
+    for (int i = 0; i < 4; i++) (void)inb(ch->ctrl_reg);
 
     uint64_t deadline = rdtsc() + cpu_ms_to_tsc(2000);
     while (rdtsc() < deadline) {
         uint8_t s = inb(ch->cmd_base + ATA_REG_STATUS);
-        if (s == 0 || s == 0xFF) return; /* no drives on this channel */
-        if (!(s & ATA_SR_BSY)) return;   /* ready */
+        if (s == 0 || s == 0xFF) return;
+        if (!(s & ATA_SR_BSY)) return;
     }
     debug_printf("[ATA] Channel %u reset BSY timeout (continuing)\n", channel);
 }
 
-/* ---------------------------------------------------------------------
- *  PIO transfer mode negotiation (ATA-7 §7.41).
- *
- *  Drives power up in PIO mode 0 (3.3 MB/s). Modes 3 and 4 are
- *  supported by every PCI IDE controller built since the mid-90s
- *  (PIIX/ICH/SiS/VIA/AMD). Word 64 of IDENTIFY advertises support:
- *    bit 0 = PIO mode 3 supported
- *    bit 1 = PIO mode 4 supported
- *  SET FEATURES with subcmd 0x03 and SECCOUNT = 0x08 | mode picks the
- *  mode. PIO mode 4 = 0x0C, mode 3 = 0x0B. If the drive ABORTs with
- *  ERR, fall back to the next-lower mode; final fallback is "leave at
- *  power-up default" — slow but functionally correct.
- * ------------------------------------------------------------------ */
 static void ata_negotiate_pio(uint8_t drive_idx, const uint16_t* id) {
-    /* IDENTIFY word 64 bits 0..1 = PIO mode 3 / 4 advertised. Tries 4
-     * then 3 via SET FEATURES (SECCOUNT 0x08|mode); leaves drive in
-     * power-up default (mode 0) when neither is supported. */
     uint8_t advertise = (uint8_t)id[64] & 0x03;
     if (advertise & 0x02) {
         if (ata_set_xfer_mode(drive_idx, 0x08 | 4) == 0) {
@@ -266,21 +168,6 @@ static void ata_negotiate_pio(uint8_t drive_idx, const uint16_t* id) {
     g_ata_devices[drive_idx].pio_mode = 0;
 }
 
-/* ---------------------------------------------------------------------
- *  IDENTIFY — spec-ordered ATA/ATAPI discrimination.
- *
- *  ATA-7 §6.20:
- *    1. Select drive, wait 400 ns.
- *    2. Issue IDENTIFY (0xEC).
- *    3. Wait BSY clear (or no-drive sentinel 0/0xFF).
- *    4. Read STATUS:
- *         ERR set    -> read LBA_MID/HI. 0x14/0xEB = ATAPI device:
- *                       label as ATAPI, do not enumerate as HDD.
- *         ERR clear  -> read LBA_MID/HI. Nonzero -> SATA shim or
- *                       other non-ATA device; skip. Zero -> proceed.
- *    5. Wait DRQ set.
- *    6. Read 256 16-bit words of IDENTIFY data.
- * ------------------------------------------------------------------ */
 int ata_identify(uint8_t drive_idx, ATADevice* device) {
     if (drive_idx >= ATA_DRIVE_COUNT || !device) return ATA_ERR_INVALID_ARGS;
 
@@ -310,9 +197,6 @@ int ata_identify(uint8_t drive_idx, ATADevice* device) {
     uint8_t hi     = inb(ch->cmd_base + ATA_REG_LBA_HI);
 
     if (status & ATA_SR_ERR) {
-        /* ATAPI signature: 0x14/0xEB. Mark slot informationally so the
-         * boot log accurately reflects what is on the bus, but leave
-         * exists=0 — we do not provide block I/O on packet devices. */
         if (mid == 0x14 && hi == 0xEB) {
             device->is_atapi = 1;
             debug_printf("[ATA] drv%u (ch%u %s): ATAPI device detected "
@@ -337,11 +221,6 @@ int ata_identify(uint8_t drive_idx, ATADevice* device) {
     uint16_t id[256];
     for (int i = 0; i < 256; i++) id[i] = inw(ch->cmd_base + ATA_REG_DATA);
 
-    /* Logical sector size (ATA8-ACS §7.16.7.74-75): word 106 bit 14=1 +
-     * bit 15=0 marks the field valid; bit 12 = logical sector > 256
-     * words. words 117-118 then hold the size in 16-bit words. The PIO
-     * transfer loop uses 256-word (512-byte) bursts, so refuse anything
-     * else rather than silently corrupt LBA arithmetic. */
     uint32_t logical = 512;
     if ((id[106] & (1u << 14)) && !(id[106] & (1u << 15)) &&
         (id[106] & (1u << 12))) {
@@ -355,10 +234,6 @@ int ata_identify(uint8_t drive_idx, ATADevice* device) {
     }
     device->logical_sector_size = logical;
 
-    /* Word 106 again: bit 13 marks a drive with more than one logical sector
-     * per physical, and bits 3:0 are the exponent. A 512e drive says 512 and
-     * 4096 here, and a volume that was laid out for the smaller of the two
-     * wears it twice as fast for every metadata write. */
     device->physical_sector_size = logical;
     if ((id[106] & (1u << 14)) && !(id[106] & (1u << 15)) &&
         (id[106] & (1u << 13))) {
@@ -387,10 +262,6 @@ int ata_identify(uint8_t drive_idx, ATADevice* device) {
 
     device->exists = 1;
 
-    /* Negotiate PIO mode (used for fallback) and DMA mode (used when
-     * BMIDE is enabled on this channel). exists=1 is published first
-     * so the SET FEATURES helpers' ata_select_drive() does not skip
-     * the slot. */
     ata_negotiate_pio(drive_idx, id);
     ata_async_negotiate_dma_mode(drive_idx, id);
 
@@ -410,11 +281,6 @@ int ata_identify(uint8_t drive_idx, ATADevice* device) {
     return 0;
 }
 
-/* ---------------------------------------------------------------------
- *  Read / Write sectors
- * ------------------------------------------------------------------ */
-/* Non-static — also invoked from ata_async.c::bmide_kick to program the
- * drive side of a DMA submit. */
 int ata_program_lba(uint8_t drive_idx, uint64_t lba, uint16_t count,
                     uint8_t cmd28, uint8_t cmd48)
 {
@@ -427,7 +293,6 @@ int ata_program_lba(uint8_t drive_idx, uint64_t lba, uint16_t count,
     if (use48) {
         outb(ch->cmd_base + ATA_REG_DRIVE_HEAD, 0x40 | drv_bit);
         ata_delay_400ns(drive_idx);
-        /* HOB pair-write per T13 ATA-8 §7.59.4. */
         outb(ch->cmd_base + ATA_REG_SECCOUNT, (uint8_t)((count  >> 8) & 0xFF));
         outb(ch->cmd_base + ATA_REG_LBA_LO,   (uint8_t)((lba    >> 24) & 0xFF));
         outb(ch->cmd_base + ATA_REG_LBA_MID,  (uint8_t)((lba    >> 32) & 0xFF));
@@ -450,24 +315,10 @@ int ata_program_lba(uint8_t drive_idx, uint64_t lba, uint16_t count,
     return 0;
 }
 
-/* AHCI-active routing rule: when AHCI is initialised the SATA stack
- * is the only correct entry point for block I/O. Direct callers of
- * the legacy ata_*_sectors API are a misuse — they have no way to
- * resolve drive_idx to an AHCI port. We refuse cleanly so a regression
- * in dispatch logic is loud, not silently corrupting. */
 static inline bool ata_legacy_path_active(void) {
     return !ahci_is_initialized();
 }
 
-/*
- * A drive that fell back from DMA to PIO, said once per drive.
- *
- * Every transfer is not worth a line — a drive whose DMA is broken would
- * bury the log — and no line at all is how a machine ends up running its
- * whole disk in programmed I/O with nobody aware of it, which on real
- * hardware is the difference between a disk and a bottleneck. So: the
- * first time it happens on a drive, and not again.
- */
 static uint8_t g_ata_dma_fallback_said = 0;
 
 static void ata_note_dma_fallback(uint8_t drive_idx, int rc, uint64_t lba,
@@ -493,11 +344,6 @@ int ata_read_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* b
     if (!d->exists || !ch->present) return ATA_ERR_NO_DEVICE;
     if (lba + count > d->total_sectors) return ATA_ERR_LBA_OUT_OF_BOUNDS;
 
-    /* Fast path: IRQ-driven Bus-Master DMA via ata_async. Run BEFORE
-     * acquiring g_ata_lock — ata_dma_sync may sti;hlt while waiting for
-     * the BMIDE IRQ, and that would violate the spinlock's IRQ-saved
-     * state. The async engine has its own per-channel cmd_lock for
-     * register-file mutual exclusion. */
     if (ata_async_usable(drive_idx) && count <= ATA_ASYNC_MAX_SECTORS) {
         int rc = ata_dma_sync(drive_idx, lba, count, false, buffer);
         if (rc == 0) return 0;
@@ -537,8 +383,6 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
 
     if (!d->exists || !ch->present) return ATA_ERR_NO_DEVICE;
 
-    /* Refuse writes to the bootloader region (sectors 0..399) — the
-     * MBR + stage2 live there; corrupting them bricks the install. */
     #define BOOTLOADER_PROTECTED_SECTORS 400
     if (lba < BOOTLOADER_PROTECTED_SECTORS) {
         debug_printf("[ATA] SECURITY: write to protected LBA %lu blocked\n",
@@ -547,10 +391,6 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
     }
     if (lba + count > d->total_sectors) return ATA_ERR_LBA_OUT_OF_BOUNDS;
 
-    /* DMA fast path — same gate as ata_read_sectors. Run BEFORE acquiring
-     * g_ata_lock so the sti;hlt in ata_dma_sync's wait loop doesn't
-     * collide with the lock's saved-IRQ state. Per-channel cmd_lock in
-     * ata_async covers register serialisation for the DMA path. */
     if (ata_async_usable(drive_idx) && count <= ATA_ASYNC_MAX_SECTORS) {
         int rc = ata_dma_sync(drive_idx, lba, count, true, (void*)buffer);
         if (rc == 0) return 0;
@@ -576,11 +416,6 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
             outw(ch->cmd_base + ATA_REG_DATA, buf16[i]);
     }
 
-    /* Protocol compliance: BSY must clear before the next command goes
-     * out, and ERR must not be set, otherwise the write is uncertain. */
-    /* The write is on the medium when the drive stops being busy, so this is
-     * the drive carrying a command out and not a handshake — the same patience
-     * the read's DRQ wait uses. */
     if (ata_wait_clear_bsy(drive_idx, CONFIG_ATA_IO_TIMEOUT_MS) != 0) {
         debug_printf("[ATA] drv%u: BSY-clear timeout after WRITE @LBA %lu\n",
                      drive_idx, (unsigned long)lba);
@@ -616,12 +451,6 @@ int ata_flush_cache(uint8_t drive_idx) {
             spin_unlock(&g_ata_lock);
             return 0;
         }
-        /* Reset the channel between attempts — a wedged drive that
-         * never asserts DRDY blocks every subsequent write. The reset
-         * runs *inside* the lock so no other core can find the channel
-         * mid-reset; ata_channel_soft_reset only touches I/O ports,
-         * not heap or other locks, so holding g_ata_lock across it is
-         * safe (no lock-order risk). */
         if (retry < CONFIG_ATA_MAX_RETRIES - 1)
             ata_channel_soft_reset(drive_channel(drive_idx));
     }
@@ -630,11 +459,7 @@ int ata_flush_cache(uint8_t drive_idx) {
     return ATA_ERR_FLUSH_FAILED;
 }
 
-/* ---------------------------------------------------------------------
- *  Retry wrappers
- * ------------------------------------------------------------------ */
 static int ata_retry_classify(int rc) {
-    /* Terminal errors — retrying won't help; bubble up immediately. */
     return (rc == ATA_ERR_NO_DEVICE     ||
             rc == ATA_ERR_LBA_OUT_OF_BOUNDS ||
             rc == ATA_ERR_INVALID_ARGS  ||
@@ -661,9 +486,6 @@ uint32_t ata_max_run_sectors(uint8_t drive_idx)
     if (ata_async_usable(drive_idx)) {
         return (uint32_t)ATA_ASYNC_MAX_SECTORS;
     }
-    /* PIO. The count is eight bits on the twenty-eight-bit command (zero
-     * meaning 256) and sixteen on the extended one; 128 stays inside both and
-     * inside every controller's patience. */
     return 128u;
 }
 
@@ -687,14 +509,6 @@ int ata_write_sectors_retry(uint8_t drive_idx, uint64_t lba, uint16_t count, con
     return ATA_ERR_MAX_RETRIES;
 }
 
-/* ---------------------------------------------------------------------
- *  Channel discovery from PCI.
- *
- *  Search every PCI function with class/subclass 01/01h. The first
- *  matching device is used; additional controllers are logged so
- *  real-PC inventory is visible in the boot log even though the
- *  driver only addresses one chip.
- * ------------------------------------------------------------------ */
 static void ata_channels_from_compat(void) {
     g_ata_channels[0] = (AtaChannel){
         .present = true, .native_mode = false,
@@ -706,10 +520,6 @@ static void ata_channels_from_compat(void) {
     };
 }
 
-/* Count additional PCI IDE controllers beyond the first by walking
- * every (bus,dev,fn) directly. The driver only programs the first
- * controller, but real-HW boot diagnostics should report when there
- * are more so installs with add-in IDE cards aren't a silent surprise. */
 static uint32_t ata_count_extra_ide_controllers(const pci_device_t* primary) {
     uint32_t extra = 0;
     for (uint16_t bus = 0; bus < 256; bus++) {
@@ -742,10 +552,6 @@ static void ata_discover_channels(void) {
 
     pci_device_t ide;
     if (pci_find_device_by_class(PCI_CLASS_STORAGE, PCI_SUBCLASS_IDE, 0xFF, &ide) != 0) {
-        /* No PCI IDE controller — but real BIOS-boot PCs may still
-         * have legacy ports wired through Super-I/O or PCMCIA cards
-         * without exposing a PCI class. Seed the channels from compat
-         * bases; IDENTIFY rejects absent slots cleanly. */
         debug_printf("[ATA] No PCI IDE controller; assuming ISA compat ports\n");
         ata_channels_from_compat();
         return;
@@ -762,7 +568,6 @@ static void ata_discover_channels(void) {
                 "used — any disk on them will not appear\n", extra);
     }
 
-    /* Primary channel */
     if (pif & 0x01) {
         uint32_t bar0 = pci_read_bar(&ide, 0) & ~0x3u;
         uint32_t bar1 = pci_read_bar(&ide, 1) & ~0x3u;
@@ -780,7 +585,6 @@ static void ata_discover_channels(void) {
         };
     }
 
-    /* Secondary channel */
     if (pif & 0x04) {
         uint32_t bar2 = pci_read_bar(&ide, 2) & ~0x3u;
         uint32_t bar3 = pci_read_bar(&ide, 3) & ~0x3u;
@@ -798,11 +602,6 @@ static void ata_discover_channels(void) {
         };
     }
 
-    /* Bus-master IDE base — bit 7 of ProgIF advertises capability.
-     * Per Intel BMIDE Spec §2.2 the 16 BAR4 I/O ports are split: primary
-     * channel at offset 0, secondary at offset 8. We enable PCI Bus
-     * Master + I/O Space in the controller's command register so the
-     * device can drive PCI bus master cycles when the engine starts. */
     if (pif & 0x80) {
         uint32_t bar4 = pci_read_bar(&ide, 4) & ~0x3u;
         if (bar4) {
@@ -818,9 +617,6 @@ static void ata_discover_channels(void) {
     }
 }
 
-/* ---------------------------------------------------------------------
- *  Public init
- * ------------------------------------------------------------------ */
 void ata_init(void) {
     debug_printf("[ATA] Initialising legacy ATA/IDE driver...\n");
     spinlock_init(&g_ata_lock);
@@ -829,11 +625,6 @@ void ata_init(void) {
     memset(g_ata_devices, 0, sizeof(g_ata_devices));
 
     if (ahci_is_initialized()) {
-        /* AHCI owns block I/O. Surface a single synthetic record at
-         * slot 0 so legacy callers (HwDiskInfo, boot diagnostics) see
-         * a "device exists" answer; actual reads/writes/flushes return
-         * ATA_ERR_NOT_SUPPORTED — the AHCI sync API is the only valid
-         * path. */
         debug_printf("[ATA] AHCI active; legacy ATA stack is informational only\n");
         g_ata_devices[0].exists           = 1;
         g_ata_devices[0].channel          = 0;
@@ -856,21 +647,12 @@ void ata_init(void) {
                  g_ata_channels[1].cmd_base, g_ata_channels[1].ctrl_reg,
                  g_ata_channels[1].irq_gsi);
 
-    /* Soft reset both channels with nIEN=1 held throughout — the IRQ
-     * line is silent before, during, and after reset. */
     for (uint8_t c = 0; c < ATA_CHANNEL_COUNT; c++) {
         ata_channel_soft_reset(c);
     }
 
-    /* Bring up the BMIDE async engine — per-channel staging + PRD, IRQ
-     * registration on each channel's GSI, nIEN cleared so the drive can
-     * raise INTRQ. ata_identify -> ata_async_negotiate_dma_mode then
-     * picks UDMA/MDMA on detected drives, and ata_read/write_sectors
-     * route through ata_dma_sync for the IRQ-driven fast path. */
     ata_async_init();
 
-    /* Probe every slot. ata_identify labels ATAPI devices for the log
-     * even though they don't become block devices. */
     for (uint8_t drv = 0; drv < ATA_DRIVE_COUNT; drv++) {
         if (!g_ata_channels[drive_channel(drv)].present) continue;
         ata_identify(drv, &g_ata_devices[drv]);

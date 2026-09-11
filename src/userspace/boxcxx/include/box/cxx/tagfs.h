@@ -1,54 +1,3 @@
-// boxcxx — box::tagfs  (the native C++ face of the BoxOS TagFS)
-//
-// BoxOS storage is a tag-named object store, not a path tree (no std::filesystem
-// — that is a deliberate non-goal). A file is identified by a numeric id and
-// carries key:value tags; you find files by querying tags, not by walking
-// directories. This header is the idiomatic C++ surface over the boxlib C API
-// (box/file.h):
-//
-//   * box::tagfs::file — a lightweight, NON-owning handle over a file_id (a file
-//     is persistent shared state, so the handle is a copyable value, not RAII;
-//     deletion is explicit via remove()). It exposes the metadata (info / name /
-//     size / flags / tags), the tag mutations (add_tag / remove_tag / rename),
-//     durability (anchor), and byte I/O in two shapes:
-//       - random access bound to this file_id: read_at / write_at (span or raw)
-//         and typed read_object<T> / write_object<T>,
-//       - a streaming channel through the Current spine: bytes(role) →
-//         box::byte_current (write / read / read_line / seek).
-//     A fallible scalar operation hands back the REAL kernel cause through a
-//     box::result<T> / box::status (info / read_at / write_at / read_object /
-//     write_object return result; add_tag / remove_tag / rename / remove /
-//     anchor return status), instead of collapsing it to bool / -1 / nullopt.
-//     The derived accessors (name / size / flags / tags / has_tag / trashed)
-//     stay plain values: they read info() once and report a sensible neutral on
-//     the error arm. bytes(role) stays a stream (an open channel, not a scalar).
-//
-//   * box::tagfs::create(name, {tags…}) / query(tagspec) / all() / find(name) —
-//     creation and tag-query. The return types are honestly asymmetric: find /
-//     find_all hand back box::tagfs::record — an immutable metadata snapshot,
-//     because the kernel already returned the descriptor — while query / all
-//     hand back live box::tagfs::file handles, because the C query returns ids
-//     only. A record reads its captured fields with zero syscalls; reach a live
-//     handle for mutations or a fresh read through record::live(). Richer
-//     predicates compose over either result with std::views:
-//         for (auto& f : box::tagfs::query("video:cam0")
-//                        | std::views::filter([](auto& f){ return f.size() > 0; }))
-//
-//   * The Use Context (box/cxx/use.h) is the user's, one per machine, and
-//     every query / create above is asked INSIDE it — `use code cpp` makes
-//     query("project") mean code AND cpp AND project, and stamps a created file
-//     code and cpp. query_everywhere / all_everywhere / create_everywhere ask
-//     the same of the whole volume, the context left out.
-//
-//   * box::tagfs::snapshot — an owning RAII handle on a CoW snapshot
-//     (auto-delete unless kept), with box::tagfs::snapshots() listing all ids;
-//     box::tagfs::on_anchor() — a box::touch subscription that delivers
-//     durability (anchor) events, read through box::tagfs::anchor_event.
-//
-// This is a box:: extension, not part of std. The byte-stream bridge resolves by
-// the file's NAME through the "file:" Current scheme; for I/O bound precisely to
-// this file_id use read_at / write_at. query() returns up to 255 files (the
-// boxlib query buffer limit).
 #ifndef BOXCXX_BOX_TAGFS_H
 #define BOXCXX_BOX_TAGFS_H
 
@@ -65,19 +14,17 @@
 #include <vector>
 
 #include "box/file.h"
-#include "box/cxx/current.h"  // box::byte_current, box::role, box::file(), CURRENT_CREATE
-#include "box/cxx/error.h"    // box::result / box::status / box::error / box_errno_of
-#include "box/cxx/touch.h"    // box::tag, box::touch, box::subscription (anchor observer)
-#include "box/memory.h"       // free — query_all hands back a list the caller frees
+#include "box/cxx/current.h"
+#include "box/cxx/error.h"
+#include "box/cxx/touch.h"
+#include "box/memory.h"
 
 namespace box {
 
-class ferry;  // box/cxx/ferry.h — returned by file::read_async / write_async (co_await-able)
+class ferry;
 
 namespace tagfs {
 
-// Read a NUL-terminated fixed-width char field without overrunning it (TagFS
-// metadata fields are capacity-bounded; a missing terminator must not leak).
 inline std::string_view field_view(const char *p, std::size_t cap) noexcept
 {
     std::size_t n = 0;
@@ -85,19 +32,11 @@ inline std::string_view field_view(const char *p, std::size_t cap) noexcept
     return std::string_view(p, n);
 }
 
-// One of a file's tags: key[:value], user or system.
 struct tag {
     std::string key;
     std::string value;
-    bool        system = false;  // true iff this tag is the bare reserved-vocabulary
-                                 // key the kernel stamps system at mount; a
-                                 // value-bearing key (e.g. "system:foo") is never
-                                 // system, nor is an auto-label / user tag
+    bool        system = false;
 
-    // Read the value as an integer (or bool) — the typed inverse of file's
-    // add_tag<T>. On success the parsed T; the error arm carries the cause —
-    // out_of_range for a value the type can't hold, else invalid_argument for a
-    // non-numeric / partly-numeric value (or a bool that is neither "0" nor "1").
     template <class T>
     box::result<T> as() const
     {
@@ -119,10 +58,6 @@ struct tag {
 };
 
 namespace _detail {
-// Find one tag by key inside an already-captured file_info_t — the shared scan
-// behind file::tag_named (after a single info() syscall) and record::tag_named
-// (zero syscalls). tag_not_found when the key is not among the (<=5) tags the
-// descriptor carries.
 inline box::result<tag> tag_from_info(const file_info_t &i, const char *key)
 {
     unsigned n = i.tag_count;
@@ -134,7 +69,7 @@ inline box::result<tag> tag_from_info(const file_info_t &i, const char *key)
                        i.tags[k].type == 1};
     return std::unexpected(box::error{box::errc::tag_not_found});
 }
-}  // namespace _detail
+}
 
 class file {
     std::uint32_t id_ = 0;
@@ -146,11 +81,6 @@ public:
     std::uint32_t id() const noexcept { return id_; }
     explicit operator bool() const noexcept { return id_ != 0; }
 
-    // Full metadata snapshot (one syscall). On success the descriptor; the error
-    // arm carries the recovered cause — invalid_argument for an empty handle, or
-    // the kernel error_t (e.g. object_not_found once the file is gone). The
-    // convenience accessors below each take their own snapshot — call info() once
-    // if you need several fields.
     box::result<file_info_t> info() const
     {
         if (!id_) return std::unexpected(box::error{box::errc::invalid_argument});
@@ -175,7 +105,7 @@ public:
         auto i = info();
         if (!i) return out;
         unsigned n = i->tag_count;
-        if (n > 5) n = 5;  // file_info_t carries at most 5 tags
+        if (n > 5) n = 5;
         out.reserve(n);
         for (unsigned k = 0; k < n; ++k) {
             const tag_t &t = i->tags[k];
@@ -197,10 +127,6 @@ public:
         return false;
     }
 
-    // One named tag, typed-read-ready (pair with tag::as<T>). Takes one info()
-    // snapshot, then scans it; the error arm carries the cause — info()'s error
-    // (empty handle / object_not_found), else tag_not_found when the key isn't
-    // present.
     box::result<tag> tag_named(const char *key) const
     {
         auto i = info();
@@ -208,20 +134,11 @@ public:
         return _detail::tag_from_info(*i, key);
     }
 
-    // ── tag mutations & lifecycle ────────────────────────────────────────
-    // Empty status on success; the error arm carries the real kernel cause
-    // (invalid_argument for an empty handle, else the recovered error_t — e.g.
-    // tag_limit_exceeded, already_exists, object_not_found).
     box::status add_tag(const char *tag)
     {
         return id_ ? box::_detail::from_status(::tag_add(id_, tag))
                    : std::unexpected(box::error{box::errc::invalid_argument});
     }
-    // Typed value write — the inverse of tag::as<T>. Formats the integer (or
-    // bool as "0"/"1") and adds "key:value" through the raw overload above.
-    // buffer_too_small when the formatted value won't fit the tag value field
-    // (11 chars + NUL); the two overloads differ in arity, so this never hijacks
-    // the raw add_tag(const char*).
     template <class T>
     box::status add_tag(const char *key, T v)
     {
@@ -265,26 +182,12 @@ public:
         return id_ ? box::_detail::from_status(::anchor(id_))
                    : std::unexpected(box::error{box::errc::invalid_argument});
     }
-    // Drop everything past `n` bytes. SHRINK ONLY: growing lands in the error
-    // arm as invalid_argument, because TagFS does not zero freshly allocated
-    // blocks and growing here would hand back the previous tenant's content —
-    // a file grows by being written. Refused on a snapshotted file
-    // (invalid_operation): a block not yet copied since the snapshot was taken
-    // is still the snapshot's only copy. Refused on a "system"/"boot" file
-    // (permission_denied), like remove(). Publishes a TRUNCATED Touch event on
-    // every tag of the file.
     box::status truncate(std::uint64_t n)
     {
         return id_ ? box::_detail::from_status(::file_truncate(id_, n))
                    : std::unexpected(box::error{box::errc::invalid_argument});
     }
 
-    // ── random-access byte I/O, bound to this file_id ────────────────────
-    // On success the byte count transferred; the error arm carries the recovered
-    // cause (invalid_argument for an empty handle, else the native fread/fwrite
-    // error_t — e.g. out_of_range, io). The boxlib fread/fwrite hand back an
-    // int64 count >= 0 (up to 4 GiB) or box_fail(rc) < 0, which from_ret64 turns
-    // into value-or-cause without the count ever colliding with the cause sign.
     box::result<std::size_t> read_at(std::uint64_t offset, void *p, std::size_t n) const
     {
         return box::_detail::from_ret64<std::size_t>(
@@ -304,21 +207,11 @@ public:
         return write_at(offset, buf.data(), buf.size());
     }
 
-    // ── async byte I/O — submit now, co_await the returned box::ferry ────────
-    // read_async / write_async submit a storage op WITHOUT blocking and hand back
-    // a box::ferry you co_await on a box::executor for the byte count (or cause).
-    // Several may be in flight at once; each resumes when ITS completion lands.
-    // The DATA buffer must outlive the co_await (the kernel DMAs into it). Defined
-    // out-of-line in box/cxx/ferry.h — include it to use these (keeps <coroutine>
-    // out of this header). An empty handle yields a ready invalid_argument ferry.
     box::ferry read_async(std::uint64_t offset, void *p, std::size_t n) const;
     box::ferry write_async(std::uint64_t offset, const void *p, std::size_t n) const;
     box::ferry read_async(std::uint64_t offset, std::span<std::byte> buf) const;
     box::ferry write_async(std::uint64_t offset, std::span<const std::byte> buf) const;
 
-    // Typed whole-object I/O. On success the T / empty status; the error arm
-    // carries the cause. A short transfer (the op succeeded but moved the wrong
-    // number of bytes) is reported as errc::io rather than a silent truncation.
     template <class T>
     box::result<T> read_object(std::uint64_t offset) const
     {
@@ -341,10 +234,6 @@ public:
         return {};
     }
 
-    // ── streaming byte channel through the Current spine ─────────────────
-    // Opens a byte_current on this file's name via the "file:" scheme
-    // (write/read/read_line/seek). Resolves by NAME; for id-precise I/O use
-    // read_at / write_at.
     box::byte_current bytes(box::role r) const
     {
         auto i = info();
@@ -355,12 +244,6 @@ public:
     }
 };
 
-// ── record — an immutable metadata snapshot (id + an owned file_info_t) ─────
-// Where box::tagfs::file is a live handle whose accessors each take a fresh
-// syscall, a record captures the descriptor once and reads it back with zero
-// syscalls — the speed win when a lookup already returned the metadata (find /
-// find_all do). It is a plain trivially-copyable value; mutate or re-read fresh
-// through live(), and re-capture the snapshot through reread().
 class record {
     std::uint32_t id_ = 0;
     file_info_t   info_{};
@@ -372,12 +255,8 @@ public:
     std::uint32_t id() const noexcept { return id_; }
     explicit operator bool() const noexcept { return id_ != 0; }
 
-    // A live handle on the same file — for mutations or an always-fresh read.
     file live() const noexcept { return file(id_); }
 
-    // Re-capture the descriptor from the kernel. Empty status on success; the
-    // error arm carries the cause (invalid_argument for an empty record, else
-    // the recovered file_info error_t).
     box::status reread()
     {
         if (!id_) return std::unexpected(box::error{box::errc::invalid_argument});
@@ -390,10 +269,6 @@ public:
 
     const file_info_t &raw() const noexcept { return info_; }
 
-    // The captured fields — every read hits the local snapshot, not the kernel
-    // (the speed win is the absent syscall, not an absent copy). name() returns
-    // an owning std::string like file::name() and record's own tags()/tag_named(),
-    // so reading from a temporary record — find("x")->name() — is safe.
     std::string name() const { return std::string(field_view(info_.filename, sizeof(info_.filename))); }
     std::uint64_t    size() const noexcept { return info_.size; }
     std::uint32_t    flags() const noexcept { return info_.flags; }
@@ -432,13 +307,6 @@ inline box::result<tag> record::tag_named(const char *key) const
     return _detail::tag_from_info(info_, key);
 }
 
-// ── creation ────────────────────────────────────────────────────────────
-// create(name, {"key:value", "bare", ...}) — the tag list is joined with the
-// comma separator the TagFS create expects. On success a live file; the error
-// arm carries the recovered cause — invalid_argument for an empty/over-long
-// name (boxlib create() validates it), or the kernel error_t (e.g.
-// already_exists). The boxlib create returns a positive file_id, box_fail(rc)
-// < 0 on failure; id == 0 cannot happen → internal.
 inline box::result<file> create(const char *name, std::initializer_list<const char *> tags)
 {
     std::string spec;
@@ -459,11 +327,6 @@ inline box::result<file> create(const char *name, const char *tagspec = "")
         box::error{id < 0 ? box_errno_of(id) : static_cast<::error_t>(ERR_INTERNAL)});
 }
 
-// ── tag query → range of files ──────────────────────────────────────────
-// tagspec == nullptr lists every file. Compose richer (non-tag) predicates
-// over the result with std::views. Every match: the kernel says how many
-// there are and boxlib sizes the list to that (query_all), so no file is
-// past the end of the answer.
 namespace _detail {
 inline std::vector<file> files_of(int n, std::uint32_t *ids)
 {
@@ -475,7 +338,7 @@ inline std::vector<file> files_of(int n, std::uint32_t *ids)
     ::free(ids);
     return out;
 }
-} // namespace _detail
+}
 inline std::vector<file> query(const char *tagspec)
 {
     std::uint32_t *ids = nullptr;
@@ -484,9 +347,6 @@ inline std::vector<file> query(const char *tagspec)
 }
 inline std::vector<file> all() { return query(nullptr); }
 
-// ── the same, of the whole volume — the user's Use Context left out ─────
-// query / all / create above are asked inside the Use Context; these ask the
-// same question of everything on the volume. See box/cxx/use.h.
 inline std::vector<file> query_everywhere(const char *tagspec)
 {
     std::uint32_t *ids = nullptr;
@@ -515,14 +375,6 @@ inline box::result<file> create_everywhere(const char *name, const char *tagspec
         box::error{id < 0 ? box_errno_of(id) : static_cast<::error_t>(ERR_INTERNAL)});
 }
 
-// ── lookup by name (TagFS names are not unique; find returns the first) ──
-// find / find_all hand back records (the kernel already returned the metadata),
-// so their accessors read with zero syscalls — the asymmetry with query/all
-// (live file handles, since the query op returns ids only) is intentional.
-// On success the first matching record; the error arm separates the two no-result
-// outcomes — a failed lookup (n < 0) surfaces its recovered cause, while a clean
-// "no file by that name" (n == 0) is file_not_found, a queryable cause rather
-// than a transport error. (For every same-named match use find_all.)
 inline box::result<record> find(const char *name)
 {
     std::uint32_t ids[1];
@@ -532,12 +384,6 @@ inline box::result<record> find(const char *name)
     if (n < 0) return std::unexpected(box::error{box_errno_of(n)});
     return std::unexpected(box::error{box::errc::file_not_found});
 }
-// Every same-named match as a record. find_file_by_name returns how many files
-// carry the name and writes as many as there is room for, so the count is asked
-// first and the buffers sized to it; a file created between the two asks makes
-// the second answer larger, and the ask is repeated with room for it. A
-// transport failure is reported as an empty range, consistent with
-// query()/all(); use find() when you need the recovered cause of a lookup.
 inline std::vector<record> find_all(const char *name)
 {
     std::vector<record> out;
@@ -555,11 +401,6 @@ inline std::vector<record> find_all(const char *name)
     return out;
 }
 
-// ── snapshot — an owning RAII handle on a CoW snapshot ─────────────────────
-// snap_create freezes a copy-on-write view of one file (or the whole
-// filesystem) under a unique name; the snapshot's redirected blocks are
-// reclaimed at snap_delete. This handle deletes the snapshot when it goes out
-// of scope unless you keep() it. Move-only (like box::bay / box::brook).
 class snapshot {
     std::uint32_t id_    = 0;
     bool          owned_ = false;
@@ -591,10 +432,6 @@ public:
     }
     ~snapshot() { if (owned_) ::snap_delete(id_); }
 
-    // Factories — a snapshot needs a unique name (1..31 chars). Capture one
-    // file, or the whole filesystem (of_all). On success an owning snapshot; the
-    // error arm carries the recovered cause — invalid_argument for a null name,
-    // else the kernel error_t (e.g. already_exists when the name is taken).
     static box::result<snapshot> of(std::uint32_t file_id, const char *name)
     {
         if (!name) return std::unexpected(box::error{box::errc::invalid_argument});
@@ -609,22 +446,11 @@ public:
     }
     static box::result<snapshot> of_all(const char *name) { return of(0u, name); }
 
-    // Re-own an existing snapshot id (the inverse of keep()) — one from
-    // snapshots() / snapshots_named() or a prior keep() — so its lifetime returns
-    // to RAII. Ownership is handed across (keep → adopt), not duplicated: adopting
-    // an id another handle still owns lets both dtors snap_delete it (the second
-    // is a harmless no-op, but the contract is single-owner). This overload takes
-    // a caller-supplied cosmetic name; the adopt(id) overload fills the real name
-    // from snap_info. id == 0 → invalid_argument.
     static box::result<snapshot> adopt(std::uint32_t id, const char *name)
     {
         if (id == 0) return std::unexpected(box::error{box::errc::invalid_argument});
         return snapshot(id, name ? name : "");
     }
-    // Self-naming adopt — re-own an id and fill name_ from the kernel via
-    // snap_info (the deterministic counterpart to the cosmetic-name overload).
-    // id == 0 → invalid_argument; an unknown id → snap_info's recovered cause
-    // (snapshot_not_found).
     static box::result<snapshot> adopt(std::uint32_t id)
     {
         if (id == 0) return std::unexpected(box::error{box::errc::invalid_argument});
@@ -633,29 +459,18 @@ public:
         if (rc != 0) return std::unexpected(box::error{box_errno_of(rc)});
         return snapshot(id, si.name);
     }
-    // Re-own the snapshot named `name` — the deterministic-cleanup primitive.
-    // Scans snapshots_named() for a name match and hands back an OWNING handle
-    // whose dtor snap_deletes it. snapshot_not_found when no snapshot carries the
-    // name; invalid_argument for a null name. (Defined out-of-line below, once
-    // snapshots_named() is in scope.)
     static box::result<snapshot> reclaim(const char *name);
 
     std::uint32_t    id() const noexcept { return id_; }
     std::string_view name() const noexcept { return name_; }
     explicit operator bool() const noexcept { return owned_; }
 
-    // Detach — the snapshot outlives this handle (no auto-delete). Returns the
-    // id so a caller can record it for a later box::tagfs::snapshots() scan.
     std::uint32_t keep() noexcept
     {
         owned_ = false;
         return id_;
     }
 
-    // Delete now; after this the handle is empty. Empty status on success; the
-    // error arm carries the cause — invalid_operation when the handle owns no
-    // snapshot to drop, else the recovered snap_delete error_t. The snapshot is
-    // always disowned (no double snap_delete from a later dtor).
     box::status drop() noexcept
     {
         if (!owned_) return std::unexpected(box::error{box::errc::invalid_operation});
@@ -665,10 +480,6 @@ public:
     }
 };
 
-// A snapshot's metadata by id — the structured record snap_info() returns, with
-// the name the ids-only snapshots() can't give. created_unix is the kernel's
-// creation time in unix seconds (kernel rtc_get_unix64, NOT microseconds);
-// parent_file_id is 0 for a whole-filesystem snapshot.
 struct snapshot_info {
     std::uint32_t id;
     std::string   name;
@@ -678,7 +489,6 @@ struct snapshot_info {
     std::uint64_t total_size;
 };
 
-// Every CoW snapshot id currently known to the filesystem.
 inline std::vector<std::uint32_t> snapshots()
 {
     std::uint32_t              ids[64];
@@ -691,10 +501,6 @@ inline std::vector<std::uint32_t> snapshots()
     return out;
 }
 
-// Every CoW snapshot with its full metadata (name included) — snap_list for the
-// ids, then snap_info per id. An id that fails snap_info (e.g. deleted between
-// the two calls) is skipped, so the result honestly reflects what is still
-// resolvable rather than carrying a half-filled entry.
 inline std::vector<snapshot_info> snapshots_named()
 {
     std::vector<snapshot_info> out;
@@ -704,7 +510,7 @@ inline std::vector<snapshot_info> snapshots_named()
     out.reserve(n);
     for (std::uint32_t i = 0; i < n; ++i) {
         snap_info_t si{};
-        if (::snap_info(ids[i], &si) != 0) continue;  // skip a vanished id
+        if (::snap_info(ids[i], &si) != 0) continue;
         out.push_back(snapshot_info{si.id,
                                     std::string(field_view(si.name, sizeof(si.name))),
                                     si.created_time,
@@ -724,21 +530,12 @@ inline box::result<snapshot> snapshot::reclaim(const char *name)
     return std::unexpected(box::error{box::errc::snapshot_not_found});
 }
 
-// Flush the whole filesystem to durable storage — the whole-FS counterpart of
-// file::anchor(), over the C anchor(0); parallels snapshot::of_all. Empty status
-// on success; the error arm carries the recovered anchor error_t.
 inline box::status anchor_all() { return box::_detail::from_status(::anchor(0)); }
 
-// ── anchor observer — bridge durability events into box::touch ─────────────
-// anchor() (durability flush) publishes an ANCHOR event on the well-known
-// "anchor" tag, and for a specific file also on each of that file's tags. A
-// monitor subscribes with on_anchor() and reads the delivered box::touch
-// through anchor_event to learn which file became durable.
 
-// The payload anchor() publishes — must match the kernel's ObjAnchor record.
 struct anchor_payload {
-    std::uint32_t file_id;  // 0 == whole-filesystem anchor
-    std::uint8_t  op;       // 2 == ANCHOR (1 == WRITE, on the same file tags)
+    std::uint32_t file_id;
+    std::uint8_t  op;
     std::uint8_t  _pad[3];
     std::uint64_t now_us;
 };
@@ -747,8 +544,6 @@ static_assert(offsetof(anchor_payload, file_id) == 0, "anchor_payload.file_id of
 static_assert(offsetof(anchor_payload, op) == 4, "anchor_payload.op offset");
 static_assert(offsetof(anchor_payload, now_us) == 8, "anchor_payload.now_us offset");
 
-// A typed view over a box::touch delivered on the "anchor" tag (or a file tag).
-// Decodes once; file tags also carry WRITE events (op 1), so check is_anchor().
 class anchor_event {
     std::uint32_t file_id_ = 0;
     std::uint8_t  op_      = 0;
@@ -772,14 +567,12 @@ public:
     explicit operator bool() const noexcept { return valid_; }
 };
 
-// Claim the "anchor" tag; poll() / wait() / co_await next() deliver each anchor
-// as a box::touch you wrap in anchor_event. Returns a RAII box::subscription.
 inline box::subscription on_anchor()
 {
     return box::subscription(box::tag("anchor"));
 }
 
-}  // namespace tagfs
-}  // namespace box
+}
+}
 
-#endif  // BOXCXX_BOX_TAGFS_H
+#endif

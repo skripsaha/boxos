@@ -37,6 +37,442 @@ build() {
     fi
 }
 
+# ===========================================================================
+# THE TREE IS A WITNESS, AND A WITNESS IS RETURNED UNCHANGED
+# ===========================================================================
+#
+# Nearly every oracle below proves its point by MUTATING the source tree —
+# putting the defect back so the check must go red, or making one render cost
+# what a render costs on glass — then building, running, and putting the tree
+# back. What stood here was a pair of shell functions per oracle: one that did
+# `cp file "$SCRATCH/file.bak"` and edited the file, one that copied the backup
+# over it again. That shape lies in three ways.
+#
+#   1. IT IS NOT IDEMPOTENT. Run the _on twice — two oracles in one session, a
+#      re-run after an interrupted one — and the second `cp` saves the ALREADY
+#      MUTATED file as the pristine copy. The restore then restores the
+#      mutation, permanently. This is not hypothetical: display.c carried TWO
+#      copies of the overtake render-cost injection (800000 volatile loop
+#      iterations per rendered frame) for an entire session. Every measurement
+#      taken in that session went through them, a green oracle was called a
+#      regression, and three innocent suspects in print.c were named in a
+#      handoff note.
+#   2. NOTHING RUNS ON THE WAY OUT. A failed build exits, `set -u` exits, ^C
+#      exits, and half the run_* functions `return` early after "never reached
+#      a shell" — every one of those paths leaves the mutation standing, and
+#      the next thing anybody builds is not the tree they believe they built.
+#   3. IT IS SILENT. A mutated tree looks exactly like a clean one.
+#
+# So mutation is ONE mechanism with the three properties those pairs lacked:
+# it REFUSES to mutate a file that is already mutated, it RECORDS what it
+# touched in a manifest that outlives this process, and it is undone by a trap
+# on EXIT, which no early return, no `exit 1` and no ^C can skip. The manifest
+# is read at startup too: one left behind by a run that was killed is restored
+# before this run builds anything, and says so out loud.
+MUT_MANIFEST="$SCRATCH/mutated.list"
+MUT_PRISTINE="$SCRATCH/pristine"
+MUT_DISCARD="$SCRATCH/discard"
+
+# make(1) compares whole-second mtimes, so a file rewritten inside the same
+# second as the object built from it does not rebuild at all. What stood here
+# was `sleep 1` before every touch: a second of wall clock per mutation, and a
+# guess about a filesystem's timestamp granularity dressed as a fact. Instead
+# the file is given an mtime strictly AHEAD of anything that could have been
+# built from it. That is exact, it costs nothing, and it cannot be wrong.
+#
+# The stamp is five seconds into the FUTURE on purpose, and nothing waits for
+# it. The whole price is this: if the object built from the file happens to be
+# written inside those five seconds, the next make rebuilds that ONE file a
+# second time. One file, once. Nothing else in this tree reads the stamp —
+# git compares content whenever an index entry looks racily clean, so `git
+# status` tells the truth either way, and the mutation is off the tree again
+# long before anybody runs it.
+mut_bump() {
+    local when
+    when=$(date -v+5S +%Y%m%d%H%M.%S 2>/dev/null) \
+        || when=$(date -d '+5 seconds' +%Y%m%d%H%M.%S 2>/dev/null) \
+        || { echo "mutate: no usable date(1)"; exit 1; }
+    touch -t "$when" "$1"
+}
+
+# The refusal, in one place, because it is the whole point of the mechanism:
+# a file already under the manifest must never be copied again as its own
+# pristine copy.
+mut_claim() {
+    local f="$1"
+    if [ -f "$MUT_MANIFEST" ] && grep -Fxq "$f" "$MUT_MANIFEST"; then
+        echo "mutate: $f is ALREADY mutated. Refusing to save a mutated file as"
+        echo "        its own pristine copy — that is precisely the bug that let"
+        echo "        an injection survive a whole session of measurements."
+        return 1
+    fi
+    return 0
+}
+
+# Recorded only AFTER the pristine copy exists, so a manifest entry always has
+# something behind it to restore.
+mut_record() { printf '%s\n' "$1" >> "$MUT_MANIFEST"; }
+
+# mutate FILE — take FILE under the manifest, BEFORE it is edited.
+mutate() {
+    local f="$1"
+    [ -f "$f" ] || { echo "mutate: no such file: $f"; exit 1; }
+    mut_claim "$f" || exit 1
+    mkdir -p "$MUT_PRISTINE/$(dirname "$f")" || exit 1
+    cp -p "$f" "$MUT_PRISTINE/$f" || exit 1
+    mut_record "$f"
+}
+
+# mutate_product FILE — the same, for a file `make` produces rather than a file
+# a person wrote. build/boxos.img is a hundred and thirty megabytes of build
+# output: keeping a pristine copy of it per mutation would be hoarding a thing
+# that can simply be MADE again. So a mutated product is answered by DELETING
+# it, and the next build remakes it from clean sources. Same manifest, same
+# refusal, same trap — the only difference is what "put it back" means.
+mutate_product() {
+    local f="$1"
+    [ -f "$f" ] || { echo "mutate_product: no such file: $f"; exit 1; }
+    mut_claim "$f" || exit 1
+    mkdir -p "$MUT_DISCARD/$(dirname "$f")" || exit 1
+    : > "$MUT_DISCARD/$f" || exit 1
+    mut_record "$f"
+}
+
+# mut_done FILE MARKER [COUNT] — the edit is written: prove it landed (an
+# anchor that silently stopped matching is a mutation oracle that quietly
+# tests nothing), then make sure the build cannot miss it. Given COUNT, the
+# marker must appear exactly that many times — the shape a helper that makes
+# more than one edit to one file needs.
+mut_done() {
+    local f="$1" marker="$2" want="${3:-}" got
+    if [ -n "$want" ]; then
+        got=$(grep -c "$marker" "$f")
+        [ "$got" = "$want" ] || {
+            echo "mutate: $f carries $got copy(ies) of '$marker', expected $want — the edit did not land"
+            exit 1; }
+    else
+        grep -q "$marker" "$f" || {
+            echo "mutate: $f does not carry '$marker' — the edit did not land"; exit 1; }
+    fi
+    mut_bump "$f"
+}
+
+# Take one path out of the manifest. `grep -Fxv` exits non-zero when it matched
+# EVERY line — that is the manifest becoming empty, which is the normal end of
+# the last restore and not a failure; an empty manifest and a missing one mean
+# the same thing everywhere here. If the write itself fails the move fails with
+# it and the manifest is left as it was, which is the safe direction: a path
+# still listed is simply restored again, and restoring twice costs nothing.
+mut_forget() {
+    local f="$1"
+    [ -f "$MUT_MANIFEST" ] || return 0
+    grep -Fxv "$f" "$MUT_MANIFEST" > "$MUT_MANIFEST.new"
+    mv -f "$MUT_MANIFEST.new" "$MUT_MANIFEST" 2>/dev/null
+    rm -f "$MUT_MANIFEST.new"
+}
+
+# restore FILE — put one file back and take it off the manifest. Idempotent by
+# construction: a path with nothing held for it is already as it should be, so
+# a second call, or a call on a path an earlier run already put back, does
+# nothing and says nothing.
+restore() {
+    local f="$1"
+    if [ -f "$MUT_DISCARD/$f" ]; then
+        rm -f "$f" "$MUT_DISCARD/$f"
+        mut_forget "$f"
+        return 0
+    fi
+    if [ ! -f "$MUT_PRISTINE/$f" ]; then
+        mut_forget "$f"
+        return 0
+    fi
+    cp -p "$MUT_PRISTINE/$f" "$f" || exit 1
+    rm -f "$MUT_PRISTINE/$f"
+    mut_bump "$f"
+    mut_forget "$f"
+}
+
+# restore_all — put everything back.
+#
+# Read from a SNAPSHOT rather than from the manifest, because `restore` rewrites
+# the manifest as it goes and a loop must not be reading a file that is being
+# rewritten under it. Read a LINE AT A TIME, because a path is a path: the word
+# splitting and globbing of `for f in $(cat ...)` is wrong even where no path
+# here happens to contain a space or a bracket, and a mechanism whose job is to
+# be trusted must not depend on that staying true.
+restore_all() {
+    [ -f "$MUT_MANIFEST" ] || return 0
+    local snap="$MUT_MANIFEST.undo" f
+    cp "$MUT_MANIFEST" "$snap" || return 1
+    while IFS= read -r f; do
+        [ -n "$f" ] && restore "$f"
+    done < "$snap"
+    rm -f "$snap" "$MUT_MANIFEST"
+}
+
+# Two preflights, because the two failures they catch are different. The first
+# is this mechanism's own bookkeeping: a manifest that outlived its run. The
+# second needs no bookkeeping at all and catches what the OLD pairs left
+# behind — every injection and mutation in this file writes a comment carrying
+# one of these two words, so the tree can simply be asked whether it holds one.
+# A tree that does is not a tree any measurement may be taken on.
+if [ -s "$MUT_MANIFEST" ]; then
+    echo "logcheck: a previous run was killed with the tree mutated:"
+    sed 's/^/          /' "$MUT_MANIFEST"
+    restore_all
+    echo "logcheck: the tree has been put back."
+fi
+MUT_LEFTOVER=$(grep -rl -e "logcheck mutation" -e "logcheck injection" src 2>/dev/null || true)
+if [ -n "$MUT_LEFTOVER" ]; then
+    echo "logcheck: REFUSING TO RUN — the source tree still carries a mutation:"
+    printf '          %s\n' $MUT_LEFTOVER
+    echo "          Nothing measured on this tree would mean anything. Put these"
+    echo "          files back (git checkout, or the pristine copies under"
+    echo "          $MUT_PRISTINE) and run again."
+    exit 1
+fi
+
+# ‼ THE EXIT TRAP IS NOT ENOUGH BY ITSELF, AND THAT WAS MEASURED HERE.
+#
+# `#!/bin/bash` on this desk is bash 3.2.57. Two things were measured against
+# it before this was written:
+#
+#   - A script in a tight builtin loop, sent SIGINT, does not run its EXIT trap
+#     and does not even stop. So INT and TERM are trapped by name.
+#   - A script sent SIGINT while waiting on a child DOES leave — through the
+#     EXIT trap, WITHOUT running the INT trap, and with STATUS 0. A harness
+#     that answers 0 after a ^C is a false green, and a false green is the one
+#     thing worse than a red.
+#
+# So the way out is one place, and it refuses to report success for a run that
+# never reached its own summary. Everything else keeps its status: the `exit 1`
+# from inside mutate and mut_done, a failed build, `set -u`, the usage branch.
+LOGCHECK_FINISHED=0
+on_exit() {
+    local rc=$?
+    restore_all
+    if [ "$LOGCHECK_FINISHED" = 0 ] && [ "$rc" = 0 ]; then
+        echo "logcheck: the run ended before its summary. The tree has been put"
+        echo "          back, and this counts as a failure — a run that was cut"
+        echo "          short has judged nothing."
+        exit 1
+    fi
+    exit "$rc"
+}
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap on_exit EXIT
+
+# ===========================================================================
+# A WAIT IS ON A FACT. GIVING UP IS ON SILENCE.
+# ===========================================================================
+#
+# What stood at nearly every wait in this file was "N iterations of sleep 1",
+# and when the loop ran out the scenario announced that the machine "never
+# reached a shell". That sentence is a guess wearing a fact's clothes: N was
+# chosen by whoever wrote the scenario, on the host they had that day, and a
+# loaded build machine or a sixteen-core UEFI boot simply takes longer. Every
+# one of those ceilings can only ever be too small — there is no N that is
+# right, which is why they kept being raised.
+#
+# The serial log is a GROWING FILE, so there is a real fact to wait on instead.
+# "This log has not grown in T seconds" is a statement about the machine: it is
+# not printing, and a machine that is not printing and has not said the thing
+# is wedged. "T seconds have passed" is a statement about the wall clock and
+# says nothing about the machine at all. So a wait here returns the instant the
+# fact appears, however long that takes, and gives up only once the machine has
+# gone SILENT.
+#
+# The quiet window is still a number, and it is a number of a different kind:
+# not "how long can this machine take", which is unbounded, but "how long can
+# this machine say NOTHING and still be working", which is bounded by how
+# talkative it is. A boot narrates itself; a shell echoes what it is given.
+#
+# The one ceiling left is a runaway guard, named as such. A guest that prints
+# for ever without ever saying the thing is neither wedged nor finished, and
+# the harness still has to come back to its caller. When it fires it says which
+# of the two happened, because they are different faults with different cures.
+WAIT_QUIET_S=${WAIT_QUIET_S:-60}
+# A scenario that has deliberately throttled the medium — 128 bytes a second,
+# 64 KiB/s — has a machine that can be honestly silent for a long time while it
+# reads. Those waits say so by name instead of quietly raising the ordinary one.
+WAIT_QUIET_SLOW_S=${WAIT_QUIET_SLOW_S:-240}
+WAIT_RUNAWAY_S=${WAIT_RUNAWAY_S:-900}
+WAIT_LOG=build/serial.log
+# How long a burst of console output may pause and still be the same burst.
+# This is the other kind of number: not "how long does the machine take", which
+# is unbounded, but "how big a gap inside one program's output still counts as
+# the same output", which is a property of the writer. The overtake scenario
+# deliberately slows one render to a crawl, so it needs the more generous end.
+OVERTAKE_DRAIN_QUIET_S=${OVERTAKE_DRAIN_QUIET_S:-8}
+# A keystroke either produces a reaction or it does not; there is no slow path
+# between the two. Scenarios that ask "did the guest react to this key" — and
+# especially the ones that exist to prove it did NOT — use this shorter window,
+# because waiting out the ordinary one would only be waiting.
+REACT_QUIET_S=${REACT_QUIET_S:-20}
+# How many screendumps the paint scenario may take before it accepts what it
+# sees. Not a deadline on the machine: `playtime` pours until it is stopped, so
+# every extra shot can only find MORE of the screen painted, never less. The
+# budget exists so that a machine which never paints at all still returns.
+PAINT_SHOT_TRIES=${PAINT_SHOT_TRIES:-15}
+
+# wait_for_line [-E] FILE PATTERN [QUIET_S] [FROM_LINE]
+#
+# Returns 0 the moment PATTERN appears in FILE — from line FROM_LINE on, if one
+# is given, which is how a scenario asks about the window since it last looked.
+# Returns 1 once FILE has stopped growing for QUIET_S seconds without it, and
+# says which of the two ways it gave up.
+#
+# -E makes PATTERN an extended regular expression, exactly as `grep -E` does.
+# The default is grep's basic syntax, because that is what the call sites that
+# moved in here were written in, and an anchor silently reinterpreted is the
+# failure this whole file exists to prevent.
+wait_for_line() {
+    local _wf_flag=""
+    if [ "$1" = "-E" ]; then _wf_flag="-E"; shift; fi
+    local _wf_file="$1" _wf_pat="$2"
+    local _wf_quiet="${3:-$WAIT_QUIET_S}" _wf_from="${4:-1}"
+    local _wf_size _wf_last="" _wf_still=0 _wf_spent=0
+    while : ; do
+        if [ -f "$_wf_file" ]; then
+            if [ "$_wf_from" -gt 1 ]; then
+                tail -n +"$_wf_from" "$_wf_file" 2>/dev/null \
+                    | grep -q $_wf_flag -- "$_wf_pat" && return 0
+            else
+                grep -q $_wf_flag -- "$_wf_pat" "$_wf_file" 2>/dev/null && return 0
+            fi
+            _wf_size=$(wc -c < "$_wf_file" 2>/dev/null | tr -d ' ')
+        else
+            _wf_size=0
+        fi
+        if [ "$_wf_size" = "$_wf_last" ]; then
+            _wf_still=$((_wf_still + 1))
+            if [ "$_wf_still" -ge "$_wf_quiet" ]; then
+                echo "  (waited for '$_wf_pat': nothing new in $_wf_file for ${_wf_quiet}s — giving up on a machine that has gone quiet)"
+                return 1
+            fi
+        else
+            _wf_still=0; _wf_last="$_wf_size"
+        fi
+        _wf_spent=$((_wf_spent + 1))
+        if [ "$_wf_spent" -ge "$WAIT_RUNAWAY_S" ]; then
+            echo "  (waited for '$_wf_pat': $_wf_file grew for ${WAIT_RUNAWAY_S}s and never said it — giving up on a machine that is still talking)"
+            return 1
+        fi
+        sleep 1
+    done
+}
+
+# wait_until QUIET_S WHAT TEST [FILE] — the same watchdog for a fact that is
+# not one line: a COUNT of banners, a prompt read as the last two bytes of the
+# file, either of two different sentences in two different places. TEST is a
+# shell expression, written in this file and nowhere else, evaluated once a
+# second until it succeeds. The locals here are prefixed so that a TEST may
+# freely mention its caller's MARK, FIRST_LINES, i or t.
+wait_until() {
+    local _wu_quiet="$1" _wu_what="$2" _wu_test="$3" _wu_file="${4:-$WAIT_LOG}"
+    local _wu_size _wu_last="" _wu_still=0 _wu_spent=0
+    while : ; do
+        eval "$_wu_test" && return 0
+        if [ -f "$_wu_file" ]; then
+            _wu_size=$(wc -c < "$_wu_file" 2>/dev/null | tr -d ' ')
+        else
+            _wu_size=0
+        fi
+        if [ "$_wu_size" = "$_wu_last" ]; then
+            _wu_still=$((_wu_still + 1))
+            if [ "$_wu_still" -ge "$_wu_quiet" ]; then
+                echo "  (waited for $_wu_what: nothing new in $_wu_file for ${_wu_quiet}s — giving up on a machine that has gone quiet)"
+                return 1
+            fi
+        else
+            _wu_still=0; _wu_last="$_wu_size"
+        fi
+        _wu_spent=$((_wu_spent + 1))
+        if [ "$_wu_spent" -ge "$WAIT_RUNAWAY_S" ]; then
+            echo "  (waited for $_wu_what: $_wu_file grew for ${WAIT_RUNAWAY_S}s and never showed it — giving up on a machine that is still talking)"
+            return 1
+        fi
+        sleep 1
+    done
+}
+
+# wait_for_quiet SECONDS [FILE] — return once FILE has stopped growing for
+# SECONDS. This is the "the burst is over" fact, and it is the other half of
+# wait_for_line: some scenarios do not wait for a sentence, they wait for the
+# machine to FINISH SAYING one. "Five seconds have passed" would say nothing
+# about that; "the file has not changed in five seconds" says exactly it.
+#
+# ‼ Only ever useful AFTER a fact that proves the burst has begun. Called on a
+# guest that has not started printing yet it returns at once and truthfully —
+# nothing is growing — which is not what the caller meant.
+wait_for_quiet() {
+    local _wq_quiet="${1:-$WAIT_QUIET_S}" _wq_file="${2:-$WAIT_LOG}"
+    local _wq_size _wq_last="" _wq_still=0 _wq_spent=0
+    while : ; do
+        if [ -f "$_wq_file" ]; then
+            _wq_size=$(wc -c < "$_wq_file" 2>/dev/null | tr -d ' ')
+        else
+            _wq_size=0
+        fi
+        if [ "$_wq_size" = "$_wq_last" ]; then
+            _wq_still=$((_wq_still + 1))
+            [ "$_wq_still" -ge "$_wq_quiet" ] && return 0
+        else
+            _wq_still=0; _wq_last="$_wq_size"
+        fi
+        _wq_spent=$((_wq_spent + 1))
+        if [ "$_wq_spent" -ge "$WAIT_RUNAWAY_S" ]; then
+            echo "  (the log has grown without pause for ${WAIT_RUNAWAY_S}s — no burst ever ended)"
+            return 1
+        fi
+        sleep 1
+    done
+}
+
+# ===========================================================================
+# A HARNESS THAT COULD NOT TYPE HAS NOT TESTED ANYTHING
+# ===========================================================================
+#
+# qemu-input.sh fails for reasons that have nothing to do with the machine
+# under test: the monitor socket is not there yet, the path to it is longer
+# than sun_path allows, nc is missing, QEMU is already gone. A hundred and
+# fifty call sites sent both its output and its exit status to /dev/null, so
+# every one of those arrived dressed as "the machine never answered a
+# keystroke" — this script blaming BoxOS for its own inability to speak.
+#
+# They are different faults and they are counted and printed differently now.
+# A FAIL is a verdict on BoxOS. A HARNESS line is a verdict on this script and
+# the desk it is running on, and it makes the whole run inconclusive, because
+# a run that could not talk to the machine judged nothing.
+HARNESS=0
+harness() {
+    printf '  \033[33mHARNESS\033[0m %s\n' "$1"
+    HARNESS=$((HARNESS+1))
+}
+qi_why() { tr '\n' ' ' < "$SCRATCH/qemu-input.err" 2>/dev/null; }
+
+type_cmd() {   # the characters of a command line; NOT the Enter after them
+    ./tools/qemu-input.sh type "$1" >/dev/null 2>"$SCRATCH/qemu-input.err" && return 0
+    harness "could not type '$1' into the machine: $(qi_why)"
+    return 1
+}
+key_press() {
+    ./tools/qemu-input.sh key "$1" >/dev/null 2>"$SCRATCH/qemu-input.err" && return 0
+    harness "could not send the key '$1': $(qi_why)"
+    return 1
+}
+mon_raw() {
+    ./tools/qemu-input.sh raw "$1" >/dev/null 2>"$SCRATCH/qemu-input.err" && return 0
+    harness "the monitor would not take '$1': $(qi_why)"
+    return 1
+}
+mon_shot() {
+    ./tools/qemu-input.sh shot "$1" >/dev/null 2>"$SCRATCH/qemu-input.err" && return 0
+    harness "could not screendump into '$1': $(qi_why)"
+    return 1
+}
+
 # Waits for the SHELL BANNER, not for "userspace is starting".
 #
 # Those are not the same moment and the gap is not small: a machine with no
@@ -47,20 +483,16 @@ build() {
 boot() {
     make run-stop >/dev/null 2>&1
     make run-bg   >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 2; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 3
 
 
     # Type into it. A machine you can look at and not talk to is not a machine
     # that booted — and "can it be typed on" is the only question the board
     # failure was ever really about.
-    ./tools/qemu-input.sh type "help" >/dev/null 2>&1
+    type_cmd "help"
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    key_press ret
     sleep 3
 
     # And then an EXTERNAL utility, which is a different question entirely.
@@ -72,9 +504,9 @@ boot() {
     # parked on a tag nothing published to, and the prompt never came back.
     # Five green scenarios, and the machine was unusable from its second
     # command onward.
-    ./tools/qemu-input.sh type "hw" >/dev/null 2>&1
+    type_cmd "hw"
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    key_press ret
     sleep 4
 
     make run-stop >/dev/null 2>&1
@@ -100,7 +532,7 @@ external_ok() {
 # The probe reports every resolve and which book answered. It is installed
 # only for the run and removed after, so the shipped tree never carries it.
 probe_on() {
-    cp src/kernel/core/touch/logbook.c "$SCRATCH/logbook.c.bak"
+    mutate src/kernel/core/touch/logbook.c
     python3 - <<'EOF'
 p = "src/kernel/core/touch/logbook.c"
 s = open(p).read()
@@ -111,21 +543,20 @@ anchor = """void TouchLogbookResolve(const char *tag, TouchTag *out_full, TouchT
 probed = """void TouchLogbookResolve(const char *tag, TouchTag *out_full, TouchTag *out_bare)
 {
     logbook_resolve(tag, out_full, out_bare, true);
+    /* logcheck injection: the probe says which book answered each resolve */
     kprintf("[PROBE] logbook '%s' full=0x%x bare=0x%x\\n", tag, *out_full, *out_bare);
 }"""
 assert anchor in s, "probe anchor missing"
 open(p, "w").write(s.replace(anchor, probed))
 EOF
-    grep -q "PROBE" src/kernel/core/touch/logbook.c || { echo "probe install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/core/touch/logbook.c
+    mut_done src/kernel/core/touch/logbook.c "logcheck injection"
 }
 probe_off() {
-    cp "$SCRATCH/logbook.c.bak" src/kernel/core/touch/logbook.c
-    sleep 1; touch src/kernel/core/touch/logbook.c
+    restore src/kernel/core/touch/logbook.c
 }
 
 mutate_on() {   # reproduce "no volume on this machine"
-    cp src/kernel/tagfs/tagfs.c "$SCRATCH/tagfs.c.bak"
+    mutate src/kernel/tagfs/tagfs.c
     python3 - <<'EOF'
 p = "src/kernel/tagfs/tagfs.c"
 s = open(p).read()
@@ -134,19 +565,17 @@ assert anchor in s, "mutation anchor missing"
 s = s.replace(anchor, anchor + "    return false;   /* logcheck mutation: this machine mounted nothing */\n", 1)
 open(p, "w").write(s)
 EOF
-    grep -q "logcheck mutation" src/kernel/tagfs/tagfs.c || { echo "mutation install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/tagfs/tagfs.c
+    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation"
 }
 mutate_off() {
-    cp "$SCRATCH/tagfs.c.bak" src/kernel/tagfs/tagfs.c
-    sleep 1; touch src/kernel/tagfs/tagfs.c
+    restore src/kernel/tagfs/tagfs.c
 }
 
 # The boarding pass names a volume that is not in the room, while another
 # perfectly good TagFS volume is. This is the case that used to mount the
 # stranger in silence and then ignore the real medium for the rest of the boot.
 stranger_on() {
-    cp src/kernel/core/boarding/boarding.c "$SCRATCH/boarding.c.bak"
+    mutate src/kernel/core/boarding/boarding.c
     python3 - <<'EOF'
 p = "src/kernel/core/boarding/boarding.c"
 s = open(p).read()
@@ -164,12 +593,10 @@ mutated = """    if (out_uuid) {
 assert anchor in s, "stranger anchor missing"
 open(p, "w").write(s.replace(anchor, mutated, 1))
 EOF
-    grep -q "logcheck mutation" src/kernel/core/boarding/boarding.c || { echo "stranger install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/core/boarding/boarding.c
+    mut_done src/kernel/core/boarding/boarding.c "logcheck mutation"
 }
 stranger_off() {
-    cp "$SCRATCH/boarding.c.bak" src/kernel/core/boarding/boarding.c
-    sleep 1; touch src/kernel/core/boarding/boarding.c
+    restore src/kernel/core/boarding/boarding.c
 }
 
 # The volume turns up AFTER the boot gave up on it — a stick pushed in while
@@ -194,16 +621,15 @@ stranger_off() {
 # END OF THE FILE rather than a line in it — read as hex, because command
 # substitution eats the trailing space that is half the evidence.
 wait_for_prompt() {
-    local i=0
-    while [ $i -lt 300 ]; do
-        if [ "$(tail -c 2 build/serial.log 2>/dev/null | xxd -p)" = "7e20" ]; then
-            sleep 2
-            [ "$(tail -c 2 build/serial.log 2>/dev/null | xxd -p)" = "7e20" ] && return 0
-        fi
-        sleep 1; i=$((i+1))
-    done
-    echo "  (the shell never came back to its prompt)"
-    return 1
+    # The quiet window is the SLOW one on purpose: every caller of this has
+    # throttled the medium first, and a shell reading at 64 KiB/s is honestly
+    # silent for a long time while it is working. Silence is the giving-up
+    # fact, so it has to be long enough to mean what it says.
+    wait_until "$WAIT_QUIET_SLOW_S" "the shell's prompt at the end of the log" \
+        '[ "$(tail -c 2 build/serial.log 2>/dev/null | xxd -p)" = "7e20" ] &&
+          { sleep 2; [ "$(tail -c 2 build/serial.log 2>/dev/null | xxd -p)" = "7e20" ]; }' \
+        || { echo "  (the shell never came back to its prompt)"; return 1; }
+    return 0
 }
 
 # Type a command line and make sure the machine TOOK it.
@@ -220,17 +646,19 @@ wait_for_prompt() {
 # The shell echoes what it was given, so the echo is the fact that it landed.
 # Tried twice, and said out loud if it still did not, because a scenario that
 # quietly tests nothing is worse than one that fails.
+# A shell standing at its prompt echoes what it is given at once, so a log that
+# has gone quiet WITHOUT the echo is a shell that never got the keystrokes —
+# and that is worth one more try. A log still growing is a shell still working
+# through the last command, and the wait simply carries on.
+TYPE_ECHO_QUIET_S=${TYPE_ECHO_QUIET_S:-10}
 type_line() {
-    local cmd="$1" attempt=0 i
+    local cmd="$1" attempt=0
     while [ $attempt -lt 2 ]; do
-        ./tools/qemu-input.sh type "$cmd" >/dev/null 2>&1
-        sleep 1
-        ./tools/qemu-input.sh key ret >/dev/null 2>&1
-        i=0
-        while [ $i -lt 10 ]; do
-            grep -q "~ $cmd" build/serial.log 2>/dev/null && return 0
-            sleep 1; i=$((i+1))
-        done
+        if type_cmd "$cmd"; then
+            sleep 1
+            key_press ret
+            wait_for_line build/serial.log "~ $cmd" "$TYPE_ECHO_QUIET_S" && return 0
+        fi
         attempt=$((attempt+1))
     done
     echo "  (the machine never echoed '$cmd' — the keystrokes did not land)"
@@ -238,7 +666,7 @@ type_line() {
 }
 
 latearrival_on() {
-    cp src/kernel/tagfs/tagfs.c "$SCRATCH/tagfs.late.bak"
+    mutate src/kernel/tagfs/tagfs.c
     python3 - <<'EOF'
 p = "src/kernel/tagfs/tagfs.c"
 s = open(p).read()
@@ -247,12 +675,10 @@ assert anchor in s, "late-arrival anchor missing"
 s = s.replace(anchor, anchor + "    if (BoardroomSeatKind(seat) == BOARD_ATA) return false;   /* logcheck mutation: the internal disk is not this machine's */\n", 1)
 open(p, "w").write(s)
 EOF
-    grep -q "logcheck mutation" src/kernel/tagfs/tagfs.c || { echo "late-arrival install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/tagfs/tagfs.c
+    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation"
 }
 latearrival_off() {
-    cp "$SCRATCH/tagfs.late.bak" src/kernel/tagfs/tagfs.c
-    sleep 1; touch src/kernel/tagfs/tagfs.c
+    restore src/kernel/tagfs/tagfs.c
 }
 
 run_latearrival() {
@@ -265,15 +691,11 @@ run_latearrival() {
 
     make run-stop >/dev/null 2>&1
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 30 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
 
-    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
-    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
+    mon_raw "device_add usb-storage,drive=stick,id=usbstick"
 
     #
     # Waited out to the END of the chain.
@@ -285,11 +707,7 @@ run_latearrival() {
     # was killed mid-launch and the log was then searched for a line it had
     # not had time to print. Measured — it went red on a tree whose kernel had
     # nothing wrong with it.
-    i=0
-    while [ $i -lt 60 ]; do
-        grep -q "hands over" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "hands over" "$WAIT_QUIET_S"
     sleep 2
 
     #
@@ -313,9 +731,9 @@ run_latearrival() {
     # does not.
     if ! grep -q "hands over" build/serial.log 2>/dev/null; then
         echo "-- it did not hand over; asking whether the machine is alive --"
-        ./tools/qemu-input.sh type "help" >/dev/null 2>&1
+        type_cmd "help"
         sleep 1
-        ./tools/qemu-input.sh key ret >/dev/null 2>&1
+        key_press ret
         sleep 3
     fi
 
@@ -386,25 +804,17 @@ run_replug() {
 
     make run-stop >/dev/null 2>&1
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 30 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
 
     # First arrival — the same one latearrival proves.
-    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
-    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
+    mon_raw "device_add usb-storage,drive=stick,id=usbstick"
     # Waited out to the END of the chain, not to its first sign. The stand-in
     # handing over is the last thing the first arrival does; pulling the stick
     # before then tests something else entirely — a medium yanked out from
     # under a program being loaded — and reports it as this.
-    i=0
-    while [ $i -lt 60 ]; do
-        grep -q "hands over" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "hands over" "$WAIT_QUIET_S"
     sleep 2
     # A mark in the log, so the second half is read apart from the first: every
     # line the checks below care about has a twin above it.
@@ -412,22 +822,18 @@ run_replug() {
     FIRST_LINES=$(wc -l < build/serial.log)
 
     # Pulled out.
-    ./tools/qemu-input.sh raw "device_del usbstick" >/dev/null 2>&1
-    i=0
-    while [ $i -lt 20 ]; do
-        grep -q "is empty" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    mon_raw "device_del usbstick"
+    wait_for_line build/serial.log "is empty" "$WAIT_QUIET_S"
     sleep 2
 
     # And now, with the medium out, ask for a program that IS on it and one
     # that is not. Those are different facts and used to print the same
     # sentence — on a live board the machine told the user that a command
     # which exists does not exist, two lines under the kernel saying why.
-    ./tools/qemu-input.sh type "files" >/dev/null 2>&1
-    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 3
-    ./tools/qemu-input.sh type "nosuchthing" >/dev/null 2>&1
-    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 3
+    type_cmd "files"
+    sleep 1; key_press ret; sleep 3
+    type_cmd "nosuchthing"
+    sleep 1; key_press ret; sleep 3
 
     # And pushed back in — the same medium, into the machine it left.
     #
@@ -436,14 +842,10 @@ run_replug() {
     # using it, so the second `device_add` referred to a drive that no longer
     # existed and did nothing at all. It cost a run to find, because a monitor
     # command that fails is silent on the guest's serial line.
-    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
-    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
-    i=0
-    while [ $i -lt 60 ]; do
-        grep -q "the volume is back" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    mon_raw "device_add usb-storage,drive=stick,id=usbstick"
+    wait_for_line build/serial.log "the volume is back" "$WAIT_QUIET_S"
     sleep 3
 
     make run-stop >/dev/null 2>&1
@@ -524,15 +926,11 @@ run_nofsgsbase() {
     build
     make run-stop >/dev/null 2>&1
     make run-bg FSGSBASE=off CORES=4 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 3
     for c in timezone me; do
-        ./tools/qemu-input.sh type "$c" >/dev/null 2>&1
-        sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 4
+        type_cmd "$c"
+        sleep 1; key_press ret; sleep 4
     done
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.nofsgsbase.log"
@@ -731,23 +1129,48 @@ run_healthy() {
 #
 # The damage is done to the IMAGE, not to the code — the same way the deed
 # checks are proven. Nothing here depends on a mutation being installed.
+# ‼ THE IMAGE IS A BUILD PRODUCT, AND A MUTATED PRODUCT IS ANSWERED BY
+# DELETING IT. There is no marker to write into a disk image and the tree-wide
+# preflight cannot see one, so the only thing holding this straight is the
+# manifest and the trap — which is exactly what `mutate_product` puts it under.
+# Restoring it is `rm -f`: the next `build` makes it again from clean sources,
+# which is both cheaper and more honest than keeping a hundred and thirty
+# megabyte copy of something a Makefile can produce on demand.
 badpool_on() {
-    cp build/boxos.img "$SCRATCH/boxos.img.bak"
-    python3 - <<'EOF'
-import struct
+    mutate_product build/boxos.img
+    # ‼ AN IMAGE CARRIES NO COMMENT, so there is no marker for `mut_done` to
+    # find and no preflight that could see this one left behind. The proof it
+    # can give is its own bytes: the four at that offset must NOT already be
+    # the corruption before the write (an image that already holds it is not a
+    # clean image), and they must BE it afterwards. A scenario whose offset has
+    # drifted then says so instead of booting a perfectly healthy volume and
+    # reporting that the kernel failed to notice a corruption nobody made.
+    if ! python3 - <<'EOF'
+import struct, sys
 # ground at 2048, data run begins at volume block 134, the pool is data block 2
 off = (2048 + 136 * 8) * 512
 f = open("build/boxos.img", "r+b")
 f.seek(off)
 was = f.read(4)
+if was == b"\xAA\xBB\xCC\xDD":
+    sys.exit("logcheck: that offset ALREADY holds the corruption — this image is not clean")
 f.seek(off)
 f.write(b"\xAA\xBB\xCC\xDD")
+f.flush()
+f.seek(off)
+now = f.read(4)
 f.close()
+if now != b"\xAA\xBB\xCC\xDD":
+    sys.exit("logcheck: the image did not take the corruption")
 print("logcheck: metadata pool magic %s -> aabbccdd" % was.hex())
 EOF
+    then
+        echo "badpool: the image could not be corrupted where the pool should be"
+        exit 1
+    fi
 }
 badpool_off() {
-    cp "$SCRATCH/boxos.img.bak" build/boxos.img
+    restore build/boxos.img
 }
 
 run_badpool() {
@@ -757,19 +1180,16 @@ run_badpool() {
     # boot() rebuilds nothing — it runs what is on disk now.
     make run-stop >/dev/null 2>&1
     make run-bg   >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 2; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 3
-    ./tools/qemu-input.sh type "help" >/dev/null 2>&1
+    type_cmd "help"
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    key_press ret
     sleep 3
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.badpool.log"
     badpool_off
+    build   # leave the tree with an image built from clean sources
     L="$SCRATCH/serial.badpool.log"
 
     grep -q "where a metadata pool should be" "$L"
@@ -820,11 +1240,7 @@ run_uefi() {
     probe_on; build
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 45 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 2; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 3
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.uefi.log"
@@ -926,11 +1342,7 @@ run_noexec() {
     build
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 45 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 2; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 3
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.noexec.log"
@@ -1012,11 +1424,7 @@ run_noexec() {
     fi
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on NOEXEC=off >/dev/null 2>&1
-    i=0
-    while [ $i -lt 45 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 2; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 3
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.noexec_off.log"
@@ -1069,11 +1477,7 @@ run_earlyirq() {
     build
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 45 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 2; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 3
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.earlyirq.log"
@@ -1093,11 +1497,7 @@ run_earlyirq() {
     # The BIOS half, because the two loaders disagreed and only one was right.
     make run-stop >/dev/null 2>&1
     make run-bg >/dev/null 2>&1
-    i=0
-    while [ $i -lt 45 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 2; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 3
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.earlyirq_bios.log"
@@ -1117,11 +1517,7 @@ run_earlyirq() {
     fi
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on EARLYIRQ=on >/dev/null 2>&1
-    i=0
-    while [ $i -lt 45 ]; do
-        grep -q "BoxOS Shell\|System halted" build/serial.log 2>/dev/null && break
-        sleep 2; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell\|System halted" "$WAIT_QUIET_S"
     sleep 3
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.earlyirq_on.log"
@@ -1170,23 +1566,16 @@ run_lastsaid() {
 
     make run-stop >/dev/null 2>&1
     make run-bg PRINTTOFILE=on >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 45 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 2; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 3
 
     grep -q "nothing came through the last reset" build/serial.log
     chk $? "a cold start says nothing came through"
 
     # Warm reset: devices and CPU reset, guest RAM untouched.
-    ./tools/qemu-input.sh raw "system_reset" >/dev/null 2>&1
-    i=0
-    while [ $i -lt 45 ]; do
-        [ "$(grep -c 'BoxOS Shell' build/serial.log 2>/dev/null)" = "2" ] && break
-        sleep 2; i=$((i+1))
-    done
+    mon_raw "system_reset"
+    wait_until "$WAIT_QUIET_S" "a SECOND shell banner after the warm reset" \
+        '[ "$(grep -c "BoxOS Shell" build/serial.log 2>/dev/null)" = "2" ]'
     sleep 4
 
     grep -qE "the previous run left [0-9]+ byte\(s\) behind" build/serial.log
@@ -1198,9 +1587,12 @@ run_lastsaid() {
     [ -n "$announced" ] && [ "$announced" -gt 0 ]
     chk $? "and it is not an empty window dressed up as a log ($announced bytes)"
 
-    ./tools/qemu-input.sh type "lastsaid" >/dev/null 2>&1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    sleep 6
+    type_cmd "lastsaid"
+    key_press ret
+    # Waited on the sentence each check is about, not on a number of seconds.
+    # Every one of these commands reads a volume, and a volume read is as long
+    # as the medium takes.
+    wait_for_line -E build/serial.log "^-- [0-9]+ byte\(s\) from the previous run --" "$WAIT_QUIET_S"
 
     grep -qE "^-- [0-9]+ byte\(s\) from the previous run --" build/serial.log
     chk $? "lastsaid prints it, which is what a machine with no volume needs"
@@ -1211,15 +1603,15 @@ run_lastsaid() {
     chk $? "and pours exactly what the kernel announced ($poured of $announced)"
 
     # Both tools, still. The point was never to replace one with the other.
-    ./tools/qemu-input.sh type "lastsaid prev.log" >/dev/null 2>&1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    sleep 6
+    type_cmd "lastsaid prev.log"
+    key_press ret
+    wait_for_line -E build/serial.log "byte\(s\) of the previous run written to prev.log" "$WAIT_QUIET_S"
     grep -qE "byte\(s\) of the previous run written to prev.log" build/serial.log
     chk $? "and writes a file when it is given a name"
 
-    ./tools/qemu-input.sh type "logsave now.log" >/dev/null 2>&1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    sleep 6
+    type_cmd "logsave now.log"
+    key_press ret
+    wait_for_line -E build/serial.log "byte\(s\) written to now.log" "$WAIT_QUIET_S"
     grep -qE "byte\(s\) written to now.log" build/serial.log
     chk $? "and logsave still writes this boot's log, untouched"
 
@@ -1230,28 +1622,28 @@ run_lastsaid() {
     # can find none of them — so at the moment the log is worth having,
     # nothing that could write it can be started. `said` is compiled into
     # shell.bin and needs no lookup and no spawn.
-    ./tools/qemu-input.sh type "said" >/dev/null 2>&1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    sleep 8
+    type_cmd "said"
+    key_press ret
+    wait_for_line -E build/serial.log "^-- [0-9]+ byte\(s\): what this boot has said --" "$WAIT_QUIET_S"
     grep -qE "^-- [0-9]+ byte\(s\): what this boot has said --" build/serial.log
     chk $? "the built-in prints this boot's log without loading anything"
 
-    ./tools/qemu-input.sh type "said before" >/dev/null 2>&1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    sleep 8
+    type_cmd "said before"
+    key_press ret
+    wait_for_line -E build/serial.log "^-- [0-9]+ byte\(s\): what the run before this one said --" "$WAIT_QUIET_S"
     grep -qE "^-- [0-9]+ byte\(s\): what the run before this one said --" build/serial.log
     chk $? "and the previous run's, through the same door"
 
-    ./tools/qemu-input.sh type "said kept.log" >/dev/null 2>&1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    sleep 8
+    type_cmd "said kept.log"
+    key_press ret
+    wait_for_line -E build/serial.log "written to kept.log" "$WAIT_QUIET_S"
     grep -qE "written to kept.log" build/serial.log
     chk $? "and files it when given a name"
 
     grep -q "said \[before\]" build/serial.log || {
-        ./tools/qemu-input.sh type "help" >/dev/null 2>&1
-        ./tools/qemu-input.sh key ret >/dev/null 2>&1
-        sleep 4
+        type_cmd "help"
+        key_press ret
+        wait_for_line build/serial.log "said \[before\]" "$REACT_QUIET_S"
     }
     grep -q "said \[before\]" build/serial.log
     chk $? "and help names it, so it can be found without being known"
@@ -1301,16 +1693,12 @@ run_mountfail() {
     # and a bare `make run-bg` rebuilds the whole kernel without it — measured,
     # and it cost a run that looked like the reproduction had failed.
     make run-bg MOUNTFAIL=on >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 45 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 2; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 3
 
-    ./tools/qemu-input.sh type "hw" >/dev/null 2>&1
+    type_cmd "hw"
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    key_press ret
     sleep 4
 
     make run-stop >/dev/null 2>&1
@@ -1376,21 +1764,17 @@ run_logsave() {
 
     make run-stop >/dev/null 2>&1
     make run-bg PRINTTOFILE=on >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 3
 
     # A command FIRST, so the file is asked to carry both what a photograph of
     # the screen would have shown and what it would not: the command that was
     # typed. Userspace output reaches the ring through the Manifest VGA ops,
     # deliberately not through the serial mirror a board build turns off.
-    ./tools/qemu-input.sh type "hw" >/dev/null 2>&1
-    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 4
-    ./tools/qemu-input.sh type "logsave" >/dev/null 2>&1
-    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 8
+    type_cmd "hw"
+    sleep 1; key_press ret; sleep 4
+    type_cmd "logsave"
+    sleep 1; key_press ret; sleep 8
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.logsave.log"
     cp build/boxos.img  "$SCRATCH/logsave.img"
@@ -1429,16 +1813,12 @@ run_logsave() {
     build
     make run-stop >/dev/null 2>&1
     make run-bg >/dev/null 2>&1
-    i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 3
-    ./tools/qemu-input.sh type "logsave" >/dev/null 2>&1
-    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 8
-    ./tools/qemu-input.sh type "lastsaid" >/dev/null 2>&1
-    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 4
+    type_cmd "logsave"
+    sleep 1; key_press ret; sleep 8
+    type_cmd "lastsaid"
+    sleep 1; key_press ret; sleep 4
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.logsave-off.log"
     O="$SCRATCH/serial.logsave-off.log"
@@ -1474,11 +1854,7 @@ run_manyports() {
 
     make run-stop >/dev/null 2>&1
     make run-bg USB=on XHCIPORTS=15 >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 2
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.manyports.log"
@@ -1531,22 +1907,18 @@ run_usbrecover() {
 
     make run-stop >/dev/null 2>&1
     make run-bg USBRECOVER=on CORES=4 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 45 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 2; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 3
 
     # Typed AFTER the controller has been taken down and brought back. The
     # keyboard is on that controller: this is the whole point of the scenario.
-    ./tools/qemu-input.sh type "help" >/dev/null 2>&1
+    type_cmd "help"
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    key_press ret
     sleep 3
-    ./tools/qemu-input.sh type "hw" >/dev/null 2>&1
+    type_cmd "hw"
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    key_press ret
     sleep 4
 
     make run-stop >/dev/null 2>&1
@@ -1628,18 +2000,14 @@ run_yank() {
 
     make run-stop >/dev/null 2>&1
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 2
     local MARK
     MARK=$(wc -l < build/serial.log)
 
-    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
-    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
+    mon_raw "device_add usb-storage,drive=stick,id=usbstick"
 
     # And the MEDIUM must be slow. QEMU answers a read the instant it is asked,
     # so the whole mount burst is over before a poll of the log can see it
@@ -1647,9 +2015,18 @@ run_yank() {
     # of it. Held to 64 KiB/s the same burst takes seconds, which is also what
     # a flash drive on a real bus looks like. Nothing in the guest is touched:
     # this is the emulator being told to behave less like a RAM disk.
-    ./tools/qemu-input.sh raw "block_set_io_throttle stick 0 65536 0 0 0 0" >/dev/null 2>&1
+    mon_raw "block_set_io_throttle stick 0 65536 0 0 0 0"
 
     # Fired off the first sign of the volume being read, not off a clock.
+    #
+    # ‼ THE ONE POLL IN THIS FILE THAT KEEPS ITS CEILING, AND ON PURPOSE.
+    # It is not waiting for the machine to finish something — it is aiming at a
+    # WINDOW: the stick has to be pulled while the read is in flight, so the
+    # poll runs at twenty milliseconds and the ceiling is eight seconds of that
+    # window. It also does not fail anything when it expires; the pull happens
+    # either way and the checks below judge what the machine did. A silence
+    # watchdog is the wrong instrument for a window: the machine is at its most
+    # talkative exactly when this is waiting.
     i=0
     while [ $i -lt 400 ]; do
         tail -n +$((MARK+1)) build/serial.log 2>/dev/null | grep -q "Deed] seat" && break
@@ -1657,7 +2034,7 @@ run_yank() {
         i=$((i+1))
     done
     sleep 1
-    ./tools/qemu-input.sh raw "device_del usbstick" >/dev/null 2>&1
+    mon_raw "device_del usbstick"
 
     # Waited out past XHCI_RETIRE_PATIENCE_MS (15 s), not merely past the
     # departure. The last check below is on the slot service saying it has been
@@ -1758,22 +2135,14 @@ run_holdground() {
     # and a bare `make run-bg` rebuilds the kernel without it. Same trap that
     # cost mountfail a whole run.
     make run-bg HOLDGROUND=on USB=on CORES=4 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
 
     # First arrival: the stick becomes this machine's volume, and the probe
     # opens a file on it.
-    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
-    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
-    i=0
-    while [ $i -lt 60 ]; do
-        grep -q "hands over" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    mon_raw "device_add usb-storage,drive=stick,id=usbstick"
+    wait_for_line build/serial.log "hands over" "$WAIT_QUIET_S"
     sleep 2
 
     local FIRST_LINES
@@ -1781,25 +2150,16 @@ run_holdground() {
 
     # Pulled out — and waited on the PROBE's own line, not on a clock: it is
     # the fact that there is somebody inside the volume to protect.
-    ./tools/qemu-input.sh raw "device_del usbstick" >/dev/null 2>&1
-    i=0
-    while [ $i -lt 30 ]; do
-        grep -q "HOLDGROUND. a caller was inside the volume" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    mon_raw "device_del usbstick"
+    wait_for_line build/serial.log "HOLDGROUND. a caller was inside the volume" "$WAIT_QUIET_S"
     sleep 2
 
     # And pushed back in. drive_add first: an HMP drive is auto-delete and went
     # with the device.
-    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
-    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
-    i=0
-    while [ $i -lt 60 ]; do
-        tail -n +$((FIRST_LINES + 1)) build/serial.log 2>/dev/null | \
-            grep -q "HOLDGROUND. the open-file entry" && break
-        sleep 1; i=$((i+1))
-    done
+    mon_raw "device_add usb-storage,drive=stick,id=usbstick"
+    wait_for_line build/serial.log "HOLDGROUND. the open-file entry" "$WAIT_QUIET_S" $((FIRST_LINES + 1))
     sleep 3
 
     make run-stop >/dev/null 2>&1
@@ -1890,49 +2250,32 @@ run_returnfail() {
 
     make run-stop >/dev/null 2>&1
     make run-bg RETURNFAIL=on USB=on CORES=4 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
 
     # First arrival — the mount that succeeds, and the one the stamp counts.
-    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
-    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
-    i=0
-    while [ $i -lt 60 ]; do
-        grep -q "hands over" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    mon_raw "device_add usb-storage,drive=stick,id=usbstick"
+    wait_for_line build/serial.log "hands over" "$WAIT_QUIET_S"
     sleep 2
 
     local FIRST_LINES
     FIRST_LINES=$(wc -l < build/serial.log)
 
     # Pulled out.
-    ./tools/qemu-input.sh raw "device_del usbstick" >/dev/null 2>&1
-    i=0
-    while [ $i -lt 20 ]; do
-        grep -q "the medium the volume lives on has left" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    mon_raw "device_del usbstick"
+    wait_for_line build/serial.log "the medium the volume lives on has left" "$WAIT_QUIET_S"
     sleep 2
 
     # And pushed back in ONCE. That single arrival is spent on the re-mount
     # this build is told to fail; nothing is plugged in after it.
-    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
-    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
+    mon_raw "device_add usb-storage,drive=stick,id=usbstick"
 
     # Waited on the machine's own words, not a clock: the retry is spaced by
     # TAGFS_MOUNT_RETRY_MS and gets eight attempts, so a pass costs a second.
-    i=0
-    while [ $i -lt 60 ]; do
-        tail -n +$((FIRST_LINES + 1)) build/serial.log 2>/dev/null | \
-            grep -q "asking again for the volume nobody has mounted" && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "asking again for the volume nobody has mounted" "$WAIT_QUIET_S" $((FIRST_LINES + 1))
     sleep 4
 
     make run-stop >/dev/null 2>&1
@@ -2005,20 +2348,12 @@ run_stillthere() {
 
     make run-stop >/dev/null 2>&1
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
 
-    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
-    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
-    i=0
-    while [ $i -lt 60 ]; do
-        grep -q "hands over" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    mon_raw "device_add usb-storage,drive=stick,id=usbstick"
+    wait_for_line build/serial.log "hands over" "$WAIT_QUIET_S"
     sleep 2
 
     # ── the control is the boot itself ──────────────────────────────────────
@@ -2056,7 +2391,7 @@ run_stillthere() {
     local GAVE_UP_BEFORE GAVE_UP_AFTER
     GAVE_UP_BEFORE=$(grep -cE "giving up on the command|no answer in .* at stage" build/serial.log)
     wait_for_prompt
-    ./tools/qemu-input.sh raw "block_set_io_throttle stick 0 512 0 0 0 0" >/dev/null 2>&1
+    mon_raw "block_set_io_throttle stick 0 512 0 0 0 0"
     sleep 1
     type_line "today"
 
@@ -2067,14 +2402,9 @@ run_stillthere() {
     # command that lands in a buffer, and the scenario then reports a machine
     # that was never given a chance as a machine that failed. `today` prints a
     # date, and the date arriving is the fact that it was read.
-    i=0
-    while [ $i -lt 240 ]; do
-        tail -n +$((MARK + 1)) build/serial.log 2>/dev/null | \
-            grep -qE "^20[0-9][0-9]-[0-9][0-9]-[0-9][0-9] " && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line -E build/serial.log "^20[0-9][0-9]-[0-9][0-9]-[0-9][0-9] " "$WAIT_QUIET_SLOW_S" $((MARK + 1))
     GAVE_UP_AFTER=$(grep -cE "giving up on the command|no answer in .* at stage" build/serial.log)
-    ./tools/qemu-input.sh raw "block_set_io_throttle stick 0 0 0 0 0 0" >/dev/null 2>&1
+    mon_raw "block_set_io_throttle stick 0 0 0 0 0 0"
     sleep 2
 
     # ── ‼ WHAT IS NOT TESTED HERE, AND WHY IT IS SAID OUT LOUD ──────────────
@@ -2169,11 +2499,7 @@ run_slowdisk() {
 
     make run-stop >/dev/null 2>&1
     make run-bg AHCI=on CORES=4 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     wait_for_prompt
 
     # 1536 bytes a second puts ONE 4 KiB filesystem block at not quite three
@@ -2184,17 +2510,13 @@ run_slowdisk() {
     # The volume is already mounted, so this is aimed at what a filesystem does
     # afterwards: `files` is a tag query, and a tag query is metadata reads,
     # and metadata reads are the synchronous path.
-    ./tools/qemu-input.sh raw "block_set_io_throttle disk0 0 1536 0 0 0 0" >/dev/null 2>&1
+    mon_raw "block_set_io_throttle disk0 0 1536 0 0 0 0"
     sleep 1
     type_line "files"
 
-    i=0
-    while [ $i -lt 180 ]; do
-        grep -q "^shell.bin " build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "^shell.bin " "$WAIT_QUIET_SLOW_S"
 
-    ./tools/qemu-input.sh raw "block_set_io_throttle disk0 0 0 0 0 0 0" >/dev/null 2>&1
+    mon_raw "block_set_io_throttle disk0 0 0 0 0 0 0"
     sleep 2
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.slowdisk.log"
@@ -2266,25 +2588,16 @@ EOF
 
         make run-stop >/dev/null 2>&1
         make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
-        local i=0
-        while [ $i -lt 40 ]; do
-            grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-            sleep 1; i=$((i+1))
-        done
+        wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
 
         local MARK
         MARK=$(wc -l < build/serial.log)
-        ./tools/qemu-input.sh raw "drive_add 0 if=none,id=gptdisk,file=$img,format=raw" >/dev/null 2>&1
+        mon_raw "drive_add 0 if=none,id=gptdisk,file=$img,format=raw"
         sleep 1
-        ./tools/qemu-input.sh raw "device_add usb-storage,drive=gptdisk,id=gptstick" >/dev/null 2>&1
+        mon_raw "device_add usb-storage,drive=gptdisk,id=gptstick"
 
         # Waited on the survey having spoken, not on a clock.
-        i=0
-        while [ $i -lt 60 ]; do
-            tail -n +$((MARK + 1)) build/serial.log 2>/dev/null | \
-                grep -q "$wait_for" && break
-            sleep 1; i=$((i+1))
-        done
+        wait_for_line build/serial.log "$wait_for" "$WAIT_QUIET_S" $((MARK + 1))
         sleep 2
         make run-stop >/dev/null 2>&1
         tail -n +$((MARK + 1)) build/serial.log > "$log"
@@ -2347,11 +2660,7 @@ run_twoctrl() {
 
     make run-stop >/dev/null 2>&1
     make run-bg USB=on XHCI2=on CORES=4 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 2
     local MARK
     MARK=$(wc -l < build/serial.log)
@@ -2361,11 +2670,11 @@ run_twoctrl() {
     # with it and the next device_add silently does nothing — one cycle
     # pretending to be ten.
     for n in 1 2 3 4 5; do
-        ./tools/qemu-input.sh raw "drive_add 0 if=none,id=st$n,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+        mon_raw "drive_add 0 if=none,id=st$n,file=$SCRATCH/stick.img,format=raw"
         sleep 1
-        ./tools/qemu-input.sh raw "device_add usb-storage,bus=xhci2.0,drive=st$n,id=us" >/dev/null 2>&1
+        mon_raw "device_add usb-storage,bus=xhci2.0,drive=st$n,id=us"
         sleep 4
-        ./tools/qemu-input.sh raw "device_del us" >/dev/null 2>&1
+        mon_raw "device_del us"
         sleep 4
     done
     sleep 4
@@ -2439,7 +2748,7 @@ run_twoctrl() {
 # So the mutation corrupts the pass AFTER it has been sealed. One byte, inside
 # the span the seal covers, in the stamp the kernel leans on hardest.
 seal_on() {
-    cp src/boot/stage2/stage2.asm "$SCRATCH/stage2.seal.bak"
+    mutate src/boot/stage2/stage2.asm
     python3 - <<'EOF'
 p = "src/boot/stage2/stage2.asm"
 s = open(p).read()
@@ -2451,12 +2760,10 @@ s = s.replace(anchor,
               "    ret\n", 1)
 open(p, "w").write(s)
 EOF
-    grep -q "logcheck mutation" src/boot/stage2/stage2.asm || { echo "seal install FAILED"; exit 1; }
-    sleep 1; touch src/boot/stage2/stage2.asm
+    mut_done src/boot/stage2/stage2.asm "logcheck mutation"
 }
 seal_off() {
-    cp "$SCRATCH/stage2.seal.bak" src/boot/stage2/stage2.asm
-    sleep 1; touch src/boot/stage2/stage2.asm
+    restore src/boot/stage2/stage2.asm
 }
 
 # ── a pass from a loader newer than this kernel ────────────────────────────
@@ -2467,7 +2774,7 @@ seal_off() {
 # ladder boarding_pass.h promises not to build. The stamps are self-describing
 # and the header is frozen, so a later loader is readable.
 passver_on() {
-    cp src/boot/stage2/stage2.asm "$SCRATCH/stage2.ver.bak"
+    mutate src/boot/stage2/stage2.asm
     python3 - <<'EOF'
 p = "src/boot/stage2/stage2.asm"
 s = open(p).read()
@@ -2477,12 +2784,10 @@ s = s.replace(anchor,
               "    mov word  [BOARDING_PASS_ADDR+4],   2   ; logcheck mutation: a loader newer than this kernel\n", 1)
 open(p, "w").write(s)
 EOF
-    grep -q "logcheck mutation" src/boot/stage2/stage2.asm || { echo "pass-version install FAILED"; exit 1; }
-    sleep 1; touch src/boot/stage2/stage2.asm
+    mut_done src/boot/stage2/stage2.asm "logcheck mutation"
 }
 passver_off() {
-    cp "$SCRATCH/stage2.ver.bak" src/boot/stage2/stage2.asm
-    sleep 1; touch src/boot/stage2/stage2.asm
+    restore src/boot/stage2/stage2.asm
 }
 
 run_seal() {
@@ -2571,28 +2876,20 @@ run_ctrlgiveup() {
     # one core neither runs.
     make run-stop >/dev/null 2>&1
     make run-bg CTRLGIVEUP=on USB=on CORES=4 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 45 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 2
 
     # USB=on gives this machine a KEYBOARD, not a disk. The proof runs on the
     # first mass-storage device the kernel configures, so one is plugged in —
     # measured: without this the proof never runs and the scenario is vacuous.
-    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
-    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
-    i=0
-    while [ $i -lt 40 ]; do
-        grep -q "xHCI PROOF. the next control transfer" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    mon_raw "device_add usb-storage,drive=stick,id=usbstick"
+    wait_for_line build/serial.log "xHCI PROOF. the next control transfer" "$WAIT_QUIET_S"
     sleep 2
 
-    ./tools/qemu-input.sh type "help" >/dev/null 2>&1
-    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 3
+    type_cmd "help"
+    sleep 1; key_press ret; sleep 3
 
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.ctrlgiveup.log"
@@ -2646,14 +2943,10 @@ run_isoch() {
     build
     make run-stop >/dev/null 2>&1
     make run-bg USB=on ISOCH=on CORES=4 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 45 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 2
-    ./tools/qemu-input.sh type "help" >/dev/null 2>&1
-    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 3
+    type_cmd "help"
+    sleep 1; key_press ret; sleep 3
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.isoch.log"
     local L="$SCRATCH/serial.isoch.log"
@@ -2724,11 +3017,7 @@ run_sleeps() {
 
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=1 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     grep -q "BoxOS Shell" build/serial.log 2>/dev/null || { bad "sleeps: never reached a shell"; make run-stop >/dev/null 2>&1; return; }
 
     # ── IT SLEEPS ───────────────────────────────────────────────────────────
@@ -2748,9 +3037,9 @@ run_sleeps() {
     # ── IT HEARS ────────────────────────────────────────────────────────────
     local MARK EARLY LATE
     MARK=$(wc -l < build/serial.log)
-    ./tools/qemu-input.sh type "quietprint" >/dev/null 2>&1
+    type_cmd "quietprint"
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    key_press ret
 
     # quietprint: line 1, three seconds asleep in brook_pop, line 2, three more
     # in a touch park, done. Measure INSIDE the first silence — that window has
@@ -2781,8 +3070,10 @@ run_sleeps() {
     fi
 
     # And it must all still arrive, in order, and the silences must be the
-    # length they were asked for. 2x here is the touch_await double-deadline.
-    sleep 8
+    # length they were asked for — read off the guest's OWN timestamps below,
+    # never off this script's clock, which is why waiting for the program to
+    # say it is done costs the measurement nothing.
+    wait_for_line build/serial.log "\[QP\] done" "$WAIT_QUIET_S" $((MARK + 1))
     LATE=$(tail -n +$((MARK + 1)) build/serial.log)
     printf '%s\n' "$LATE" > "$SCRATCH/serial.sleeps.log"
     make run-stop >/dev/null 2>&1
@@ -2814,8 +3105,8 @@ run_sleeps() {
 # nothing left to observe. A bell that nobody rings, from anywhere, is the
 # defect this is about.
 bell_off() {
-    cp src/userspace/boxlib/src/brook.c "$SCRATCH/brook.c.bak"
-    cp src/kernel/core/brook/brook.c    "$SCRATCH/kbrook.c.bak"
+    mutate src/userspace/boxlib/src/brook.c
+    mutate src/kernel/core/brook/brook.c
     python3 - <<'EOF'
 p = "src/userspace/boxlib/src/brook.c"
 s = open(p).read()
@@ -2831,15 +3122,13 @@ assert anchor in s, "kernel bell mutation anchor missing"
 s = s.replace(anchor, "    return;   /* logcheck mutation: the kernel never rings either */\n" + anchor, 1)
 open(p, "w").write(s)
 EOF
-    grep -q "logcheck mutation" src/userspace/boxlib/src/brook.c || { echo "bell mutation install FAILED"; exit 1; }
-    grep -q "logcheck mutation" src/kernel/core/brook/brook.c    || { echo "kernel bell mutation install FAILED"; exit 1; }
-    sleep 1; touch src/userspace/boxlib/src/brook.c src/kernel/core/brook/brook.c
+    mut_done src/userspace/boxlib/src/brook.c "logcheck mutation"
+    mut_done src/kernel/core/brook/brook.c "logcheck mutation"
 }
 
 bell_restore() {
-    [ -f "$SCRATCH/brook.c.bak" ]  && cp "$SCRATCH/brook.c.bak"  src/userspace/boxlib/src/brook.c
-    [ -f "$SCRATCH/kbrook.c.bak" ] && cp "$SCRATCH/kbrook.c.bak" src/kernel/core/brook/brook.c
-    sleep 1; touch src/userspace/boxlib/src/brook.c src/kernel/core/brook/brook.c
+    restore src/userspace/boxlib/src/brook.c
+    restore src/kernel/core/brook/brook.c
 }
 
 # ── kcoreclaim ───────────────────────────────────────────────────────────────
@@ -2871,7 +3160,7 @@ bell_restore() {
 # the PING row comes early in a run, and a machine that stops after it has
 # still stopped.
 kcoreclaim_window_on() {
-    cp src/kernel/arch/x86-64/amp/kcore.c "$SCRATCH/kcore.c.bak"
+    mutate src/kernel/arch/x86-64/amp/kcore.c
     python3 - <<'EOF'
 p = "src/kernel/arch/x86-64/amp/kcore.c"
 s = open(p).read()
@@ -2888,14 +3177,12 @@ awake = """            __asm__ volatile("sti");        /* logcheck mutation: the
 s = s.replace(gate, awake, 1)
 open(p, "w").write(s)
 EOF
-    [ "$(grep -c "logcheck mutation" src/kernel/arch/x86-64/amp/kcore.c)" = 2 ] || { echo "kcoreclaim window install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/arch/x86-64/amp/kcore.c
+    mut_done src/kernel/arch/x86-64/amp/kcore.c "logcheck mutation" 2
 }
 
 # Restores the whole file, so it takes the impatient consumer out as well.
 kcoreclaim_window_off() {
-    [ -f "$SCRATCH/kcore.c.bak" ] && cp "$SCRATCH/kcore.c.bak" src/kernel/arch/x86-64/amp/kcore.c
-    sleep 1; touch src/kernel/arch/x86-64/amp/kcore.c
+    restore src/kernel/arch/x86-64/amp/kcore.c
 }
 
 # The consumer that stood here before: it reads the tail, waits on a claimed
@@ -2904,6 +3191,17 @@ kcoreclaim_window_off() {
 # the two-millisecond gap always outlasts it on this stand — the shape is the
 # defect, not the number: any patience loses to a producer delayed longer, and
 # an SMI is not consulted about how long it may take.
+# ‼ THERE IS NO `mutate` HERE, AND THAT IS THE SHAPE, NOT AN OMISSION.
+#
+# This is the SECOND edit to kcore.c: run_kcoreclaimmut installs the claim
+# window first and then stacks the impatient consumer on top of it, so the file
+# is already under the manifest and `mutate` would — rightly — refuse it. The
+# pristine copy taken by the FIRST mutation is the pristine copy of the file,
+# full stop, and restoring it undoes both edits at once. The alternative would
+# be holding two "pristine" copies of one file, the second of which is a
+# mutated file saved as its own original: precisely the bug this mechanism
+# exists to make impossible. `mut_done` is still called, because the second
+# edit has to be proved to have landed exactly like the first.
 impatient_on() {
     python3 - <<'EOF'
 p = "src/kernel/arch/x86-64/amp/kcore.c"
@@ -2930,8 +3228,7 @@ impatient = """    uint32_t h = q->head;
     }"""
 open(p, "w").write(s.replace(anchor, impatient, 1))
 EOF
-    grep -q "logcheck mutation: the impatient consumer" src/kernel/arch/x86-64/amp/kcore.c || { echo "impatient install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/arch/x86-64/amp/kcore.c
+    mut_done src/kernel/arch/x86-64/amp/kcore.c "logcheck mutation: the impatient consumer"
 }
 
 # Sixteen cores, bench three times over. Each run is waited out to the row
@@ -2942,11 +3239,7 @@ EOF
 claim_boot() {
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 90 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 2; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 4
     local run=0
     while [ $run -lt 3 ]; do
@@ -2955,18 +3248,12 @@ claim_boot() {
         # The typer's verdict is read, not thrown away: a line the guest did not
         # take must stop the run and say so — pressing Enter on it would run
         # something else and blame the OS (the stress matrix learned this once).
-        if ! ./tools/qemu-input.sh type "bench" 2>"$SCRATCH/kcoreclaim.typeerr"; then
-            echo "  typing 'bench' failed: $(cat "$SCRATCH/kcoreclaim.typeerr")"
-            break
-        fi
+        if ! type_cmd "bench"; then break; fi
         sleep 1
-        ./tools/qemu-input.sh key ret >/dev/null 2>&1
-        local t=0
-        while [ $t -lt 240 ]; do
-            tail -n +$((MARK + 1)) build/serial.log | grep -q "create+write64+delete" && break
-            grep -qE "POCKET UNSERVED|ANSWER OWED" build/serial.log && break
-            sleep 2; t=$((t+1))
-        done
+        key_press ret
+        wait_until "$WAIT_QUIET_S" "a bench row or a verdict" \
+            'tail -n +$((MARK + 1)) build/serial.log | grep -q "create+write64+delete" ||
+              grep -qE "POCKET UNSERVED|ANSWER OWED" build/serial.log'
         grep -qE "POCKET UNSERVED|ANSWER OWED" build/serial.log && break
         run=$((run+1))
     done
@@ -3044,7 +3331,7 @@ run_kcoreclaimmut() {
 # verdicts before the harness stopped the machine; under the fix none may,
 # and the phases must pass every time.
 slowwalk_on() {
-    cp src/kernel/core/nightwatch/nightwatch.c "$SCRATCH/nightwatch.c.bak"
+    mutate src/kernel/core/nightwatch/nightwatch.c
     python3 - <<'EOF'
 p = "src/kernel/core/nightwatch/nightwatch.c"
 s = open(p).read()
@@ -3060,12 +3347,10 @@ slow = """    process_list_unlock();
     /* What each strand was PROMISED is read with the snapshot above (ChitPeek):"""
 open(p, "w").write(s.replace(anchor, slow, 1))
 EOF
-    [ "$(grep -c "logcheck mutation" src/kernel/core/nightwatch/nightwatch.c)" = 1 ] || { echo "slowwalk install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/core/nightwatch/nightwatch.c
+    mut_done src/kernel/core/nightwatch/nightwatch.c "logcheck mutation" 1
 }
 slowwalk_off() {
-    [ -f "$SCRATCH/nightwatch.c.bak" ] && cp "$SCRATCH/nightwatch.c.bak" src/kernel/core/nightwatch/nightwatch.c
-    sleep 1; touch src/kernel/core/nightwatch/nightwatch.c
+    restore src/kernel/core/nightwatch/nightwatch.c
 }
 
 # The wake that was never rung. The first application wake (pid >= 3 — the
@@ -3078,7 +3363,7 @@ slowwalk_off() {
 # that has moved, the caller sleeps on a done-count that never will, and
 # Nightwatch has to be the one to say which strand and why.
 wakedrop_on() {
-    cp src/kernel/core/decks/system/sync_ops.c "$SCRATCH/sync_ops.c.bak"
+    mutate src/kernel/core/decks/system/sync_ops.c
     python3 - <<'EOF'
 p = "src/kernel/core/decks/system/sync_ops.c"
 s = open(p).read()
@@ -3106,12 +3391,10 @@ dropped = """    {   /* logcheck mutation: the wake that was never rung */
     while (e && (count == 0 || wake_count < count) && wake_count < ADDR_WAKE_MAX_BATCH)"""
 open(p, "w").write(s.replace(anchor, dropped, 1))
 EOF
-    grep -q "logcheck mutation: the wake that was never rung" src/kernel/core/decks/system/sync_ops.c || { echo "wakedrop install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/core/decks/system/sync_ops.c
+    mut_done src/kernel/core/decks/system/sync_ops.c "logcheck mutation: the wake that was never rung"
 }
 wakedrop_off() {
-    [ -f "$SCRATCH/sync_ops.c.bak" ] && cp "$SCRATCH/sync_ops.c.bak" src/kernel/core/decks/system/sync_ops.c
-    sleep 1; touch src/kernel/core/decks/system/sync_ops.c
+    restore src/kernel/core/decks/system/sync_ops.c
 }
 
 # Sixteen cores. cxxtest's two parallel-algorithm phases are run `rounds`
@@ -3128,40 +3411,29 @@ wakedrop_off() {
 # line beginning "~ " since the round was typed is the shell's next prompt,
 # whatever the kernel appended to it.
 lostwake_prompt_back() {
-    local mark=$1 i=0
-    while [ $i -lt 60 ]; do
-        [ "$(tail -n +$((mark + 1)) build/serial.log | grep -c '^~ ')" -ge 2 ] && { sleep 2; return 0; }
-        sleep 1; i=$((i+1))
-    done
-    echo "  (the shell never came back to its prompt)"
-    return 1
+    local mark=$1
+    wait_until "$WAIT_QUIET_S" "the shell's next prompt" \
+        '[ "$(tail -n +$((mark + 1)) build/serial.log | grep -c "^~ ")" -ge 2 ]' \
+        || { echo "  (the shell never came back to its prompt)"; return 1; }
+    sleep 2
+    return 0
 }
 lostwake_boot() {
     local rounds=$2
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 90 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 2; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 4
     local run=0
     while [ $run -lt "$rounds" ]; do
         local MARK
         MARK=$(wc -l < build/serial.log)
-        if ! ./tools/qemu-input.sh type "cxxtest 201-202" 2>"$SCRATCH/lostwake.typeerr"; then
-            echo "  typing 'cxxtest 201-202' failed: $(cat "$SCRATCH/lostwake.typeerr")"
-            break
-        fi
+        if ! type_cmd "cxxtest 201-202"; then break; fi
         sleep 1
-        ./tools/qemu-input.sh key ret >/dev/null 2>&1
-        local t=0
-        while [ $t -lt 150 ]; do
-            tail -n +$((MARK + 1)) build/serial.log | grep -qE "\[CXX\] (SUBSET PASS|TOTAL FAILURES)" && break
-            grep -q "LOST WAKE" build/serial.log && break
-            sleep 2; t=$((t+1))
-        done
+        key_press ret
+        wait_until "$WAIT_QUIET_S" "a cxxtest verdict or a LOST WAKE" \
+            'tail -n +$((MARK + 1)) build/serial.log | grep -qE "\[CXX\] (SUBSET PASS|TOTAL FAILURES)" ||
+              grep -q "LOST WAKE" build/serial.log'
         grep -q "LOST WAKE" build/serial.log && break
         lostwake_prompt_back "$MARK" || break
         run=$((run+1))
@@ -3244,31 +3516,26 @@ run_lostwakemut() {
 chit_boot_and_prompt() {
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 90 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 2; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 4
 }
-# Type one command and wait for either its marker, a Nightwatch verdict, or the
-# ceiling. Returns 0 when the marker came.
+# Type one command and wait for either its marker or a Nightwatch verdict.
+# Returns 0 only when the MARKER came. The ceiling this used to carry is gone:
+# the wait now ends on the machine going quiet, so a slower host no longer
+# turns a command that was merely long into a command that never answered.
 chit_command() {
-    local cmd=$1 marker=$2 ceiling=$3
+    local cmd=$1 marker=$2
     CHIT_MARK=$(wc -l < build/serial.log)
-    if ! ./tools/qemu-input.sh type "$cmd" 2>"$SCRATCH/chit.typeerr"; then
-        echo "  typing '$cmd' failed: $(cat "$SCRATCH/chit.typeerr")"
-        return 1
-    fi
+    type_cmd "$cmd" || return 1
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    local t=0
-    while [ $t -lt "$ceiling" ]; do
-        tail -n +$((CHIT_MARK + 1)) build/serial.log | grep -qE "$marker" && return 0
-        grep -q "ANSWER OWED" build/serial.log && return 1
-        sleep 2; t=$((t+1))
-    done
-    return 1
+    key_press ret
+    # Either the command answered, or the watch convicted somebody. The second
+    # is an answer too — just not the one that was asked for — so both end the
+    # wait and the two are told apart afterwards.
+    wait_until "$WAIT_QUIET_S" "'$marker' or a verdict" \
+        'tail -n +$((CHIT_MARK + 1)) build/serial.log | grep -qE -- "$marker" ||
+          grep -q "ANSWER OWED" build/serial.log' || return 1
+    tail -n +$((CHIT_MARK + 1)) build/serial.log | grep -qE -- "$marker"
 }
 
 run_chit() {
@@ -3277,15 +3544,15 @@ run_chit() {
     chit_boot_and_prompt
     local rounds=0 r
     for r in 1 2; do
-        chit_command "cxxtest 201-202" "\[CXX\] (SUBSET PASS|TOTAL FAILURES)" 150 || break
+        chit_command "cxxtest 201-202" "\[CXX\] (SUBSET PASS|TOTAL FAILURES)" || break
         lostwake_prompt_back "$CHIT_MARK" || break
         rounds=$((rounds+1))
     done
     local strands=0 benches=0
-    if chit_command "strandtest" "STRAND|strandtest" 90; then
+    if chit_command "strandtest" "STRAND|strandtest"; then
         lostwake_prompt_back "$CHIT_MARK" && strands=1
     fi
-    if chit_command "bench" "create\+write64\+delete" 150; then
+    if chit_command "bench" "create\+write64\+delete"; then
         lostwake_prompt_back "$CHIT_MARK" && benches=1
     fi
     sleep 30   # at the prompt: three looks with nothing to accuse
@@ -3309,7 +3576,7 @@ run_chit() {
 # it. The shell waits for a child that has already died, for ever; nothing is
 # queued, nobody is serving it, and the only trace is a chit DUE that stays DUE.
 chitwithhold_on() {
-    cp src/kernel/core/decks/system/sync_ops.c "$SCRATCH/sync_ops.c.chit.bak"
+    mutate src/kernel/core/decks/system/sync_ops.c
     python3 - <<'EOF'
 p = "src/kernel/core/decks/system/sync_ops.c"
 s = open(p).read()
@@ -3335,12 +3602,10 @@ held = """        ChitDue(list->waiter, list->submit_cookie);
 """
 open(p, "w").write(s.replace(anchor, held, 1))
 EOF
-    grep -q "logcheck mutation: the answer is determined" src/kernel/core/decks/system/sync_ops.c || { echo "chitwithhold install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/core/decks/system/sync_ops.c
+    mut_done src/kernel/core/decks/system/sync_ops.c "logcheck mutation: the answer is determined"
 }
 chit_mutation_off() {
-    [ -f "$SCRATCH/sync_ops.c.chit.bak" ] && cp "$SCRATCH/sync_ops.c.chit.bak" src/kernel/core/decks/system/sync_ops.c
-    sleep 1; touch src/kernel/core/decks/system/sync_ops.c
+    restore src/kernel/core/decks/system/sync_ops.c
 }
 
 # The handler that forgot. SysProcessGone raises the async flag the old way,
@@ -3349,7 +3614,7 @@ chit_mutation_off() {
 # wait for its child is deferred, and Nightwatch must convict the shell two
 # looks later: waiting, nothing queued, nobody serving, no chit.
 chitforgot_on() {
-    cp src/kernel/core/decks/system/sync_ops.c "$SCRATCH/sync_ops.c.chit.bak"
+    mutate src/kernel/core/decks/system/sync_ops.c
     python3 - <<'EOF'
 p = "src/kernel/core/decks/system/sync_ops.c"
 s = open(p).read()
@@ -3360,13 +3625,23 @@ forgot = """    if (ctx->async_owns_crates) *ctx->async_owns_crates = true;   /*
 """
 open(p, "w").write(s.replace(anchor, forgot, 1))
 EOF
-    grep -q "logcheck mutation: the handler forgot its chit" src/kernel/core/decks/system/sync_ops.c || { echo "chitforgot install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/core/decks/system/sync_ops.c
+    mut_done src/kernel/core/decks/system/sync_ops.c "logcheck mutation: the handler forgot its chit"
 }
 
 # Wait for Nightwatch to speak: a verdict takes two looks (>= 20 s) after the
 # stall begins; sixty seconds is three looks and a margin, not a deadline on
 # the machine — a healthy one would simply never speak.
+#
+# ‼ THIS ONE KEEPS ITS DEADLINE, AND IT IS THE RIGHT INSTRUMENT HERE.
+#
+# Everything else in this file gave its ceiling up for a silence watchdog,
+# because silence is evidence of being wedged. Here it is the opposite: the
+# machine under test IS stalled — that is the whole scenario — and what is
+# being waited for is the WATCH noticing. A silence watchdog would give up the
+# instant the stall it is measuring took hold. The number is not a guess about
+# speed either; it is counted in Nightwatch's own looks, which are a machine-
+# side interval. If the watch ever starts printing per-look, this becomes a
+# wait on the look count and the number goes with it.
 chit_wait_for_verdict() {
     local t=0
     while [ $t -lt 60 ]; do
@@ -3380,7 +3655,7 @@ run_chitmut() {
     echo "== chitmut: a child's death is determined and its answer withheld — the watch must name the shell and the holder =="
     chitwithhold_on; build
     chit_boot_and_prompt
-    chit_command "say hi" "^hi" 30
+    chit_command "say hi" "^hi"
     chit_wait_for_verdict
     make run-stop >/dev/null 2>&1
     chit_mutation_off
@@ -3405,7 +3680,7 @@ run_chitmissmut() {
     echo "== chitmissmut: a handler raises the async flag and leaves no chit — the guide must say so at once, the watch two looks later =="
     chitforgot_on; build
     chit_boot_and_prompt
-    chit_command "cxxtest" "\[GUIDE\] DEFECT" 30     # the child runs for minutes; the omission is said as it is deferred
+    chit_command "cxxtest" "\[GUIDE\] DEFECT"     # the child runs for minutes; the omission is said as it is deferred
     chit_wait_for_verdict
     make run-stop >/dev/null 2>&1
     chit_mutation_off
@@ -3446,7 +3721,7 @@ run_chitmissmut() {
 # three times over; under the cursor-only sleep (put back by turninmut) the
 # first lane request that meets the window stops the machine.
 turnin_window_on() {
-    cp src/kernel/core/ipc/kring.c "$SCRATCH/kring.c.turnin.bak"
+    mutate src/kernel/core/ipc/kring.c
     python3 - <<'EOF'
 p = "src/kernel/core/ipc/kring.c"
 s = open(p).read()
@@ -3468,13 +3743,11 @@ widened = """    slot->r = *r;
 """
 open(p, "w").write(s.replace(anchor, widened, 1))
 EOF
-    grep -q "logcheck mutation" src/kernel/core/ipc/kring.c || { echo "turnin window install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/core/ipc/kring.c
+    mut_done src/kernel/core/ipc/kring.c "logcheck mutation"
 }
 
 turnin_window_off() {
-    [ -f "$SCRATCH/kring.c.turnin.bak" ] && cp "$SCRATCH/kring.c.turnin.bak" src/kernel/core/ipc/kring.c
-    sleep 1; touch src/kernel/core/ipc/kring.c
+    restore src/kernel/core/ipc/kring.c
 }
 
 # The sleep that stood here before: cursors only, on both sides — exactly the
@@ -3483,9 +3756,9 @@ turnin_window_off() {
 # The re-ask (print.c) would otherwise end the mutation's wedge by itself: a
 # second request is a second push, and a push wakes the sleeper.
 cursoronly_on() {
-    cp src/kernel/core/decks/system/turnin_ops.c "$SCRATCH/turnin_ops.c.bak"
-    cp src/userspace/boxlib/src/turnin.c "$SCRATCH/turnin.c.cursor.bak"
-    cp src/userspace/boxlib/src/print.c "$SCRATCH/print.c.cursor.bak"
+    mutate src/kernel/core/decks/system/turnin_ops.c
+    mutate src/userspace/boxlib/src/turnin.c
+    mutate src/userspace/boxlib/src/print.c
     python3 - <<'EOF'
 p = "src/userspace/boxlib/src/print.c"
 s = open(p).read()
@@ -3514,16 +3787,15 @@ assert anchor in s, "cursoronly boxlib anchor missing"
 blind = """    return box_mark_moved(seen);   /* logcheck mutation: the mark alone */"""
 open(p, "w").write(s.replace(anchor, blind, 1))
 EOF
-    grep -q "logcheck mutation" src/kernel/core/decks/system/turnin_ops.c || { echo "cursoronly install FAILED"; exit 1; }
-    grep -q "logcheck mutation" src/userspace/boxlib/src/print.c || { echo "cursoronly writer install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/core/decks/system/turnin_ops.c src/userspace/boxlib/src/turnin.c src/userspace/boxlib/src/print.c
+    mut_done src/kernel/core/decks/system/turnin_ops.c "logcheck mutation"
+    mut_done src/userspace/boxlib/src/print.c "logcheck mutation"
+    mut_done src/userspace/boxlib/src/turnin.c "logcheck mutation: the mark alone"
 }
 
 cursoronly_off() {
-    [ -f "$SCRATCH/turnin_ops.c.bak" ] && cp "$SCRATCH/turnin_ops.c.bak" src/kernel/core/decks/system/turnin_ops.c
-    [ -f "$SCRATCH/turnin.c.cursor.bak" ] && cp "$SCRATCH/turnin.c.cursor.bak" src/userspace/boxlib/src/turnin.c
-    [ -f "$SCRATCH/print.c.cursor.bak" ] && cp "$SCRATCH/print.c.cursor.bak" src/userspace/boxlib/src/print.c
-    sleep 1; touch src/kernel/core/decks/system/turnin_ops.c src/userspace/boxlib/src/turnin.c src/userspace/boxlib/src/print.c
+    restore src/kernel/core/decks/system/turnin_ops.c
+    restore src/userspace/boxlib/src/turnin.c
+    restore src/userspace/boxlib/src/print.c
 }
 
 # Sixteen cores, `cxxtest 58` three times over. Each run is waited out to its
@@ -3533,32 +3805,17 @@ cursoronly_off() {
 turnin_boot() {
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 90 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 2; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 4
     local run=0
     while [ $run -lt 3 ]; do
         local before
         before=$(grep -c "SUBSET PASS" build/serial.log)
-        if ! ./tools/qemu-input.sh type "cxxtest 58" 2>"$SCRATCH/turnin.typeerr"; then
-            echo "  typing 'cxxtest 58' failed: $(cat "$SCRATCH/turnin.typeerr")"
-            break
-        fi
+        if ! type_cmd "cxxtest 58"; then break; fi
         sleep 1
-        ./tools/qemu-input.sh key ret >/dev/null 2>&1
-        local last quiet t
-        last=$(stat -f%z build/serial.log); quiet=0; t=0
-        while [ $t -lt 240 ]; do
-            [ "$(grep -c "SUBSET PASS" build/serial.log)" -gt "$before" ] && break
-            local size
-            size=$(stat -f%z build/serial.log)
-            if [ "$size" -eq "$last" ]; then quiet=$((quiet+1)); else quiet=0; last=$size; fi
-            [ $quiet -ge 45 ] && break        # 90 s of a frozen serial: the wedge
-            sleep 2; t=$((t+1))
-        done
+        key_press ret
+        wait_until "$WAIT_QUIET_S" "cxxtest 58 to pass its subset" \
+            '[ "$(grep -c "SUBSET PASS" build/serial.log)" -gt "$before" ]'
         [ "$(grep -c "SUBSET PASS" build/serial.log)" -gt "$before" ] || break
         run=$((run+1))
     done
@@ -3597,7 +3854,7 @@ run_turninmut() {
 # And the other half: a box that never turns in. Removing the submit leaves the
 # loop exactly as it was before this work — look, find nothing, look again.
 turnin_off() {
-    cp src/userspace/boxlib/src/turnin.c "$SCRATCH/turnin.c.bak"
+    mutate src/userspace/boxlib/src/turnin.c
     python3 - <<'EOF'
 p = "src/userspace/boxlib/src/turnin.c"
 s = open(p).read()
@@ -3606,13 +3863,11 @@ assert anchor in s, "turnin mutation anchor missing"
 s = s.replace(anchor, "        /* logcheck mutation: never ask to be put down */", 1)
 open(p, "w").write(s)
 EOF
-    grep -q "logcheck mutation" src/userspace/boxlib/src/turnin.c || { echo "turn-in mutation install FAILED"; exit 1; }
-    sleep 1; touch src/userspace/boxlib/src/turnin.c
+    mut_done src/userspace/boxlib/src/turnin.c "logcheck mutation"
 }
 
 turnin_restore() {
-    [ -f "$SCRATCH/turnin.c.bak" ] && cp "$SCRATCH/turnin.c.bak" src/userspace/boxlib/src/turnin.c
-    sleep 1; touch src/userspace/boxlib/src/turnin.c
+    restore src/userspace/boxlib/src/turnin.c
 }
 
 # And the reader's own half: a brook_pop that spins instead of sleeping. This
@@ -3620,7 +3875,7 @@ turnin_restore() {
 # inside Brook goes back to watching a cacheline — so it is the one that says
 # whether the window measurement is about brook_pop or merely about the box.
 brookpop_off() {
-    cp src/userspace/boxlib/src/brook.c "$SCRATCH/brook.c.popbak"
+    mutate src/userspace/boxlib/src/brook.c
     python3 - <<'EOF'
 p = "src/userspace/boxlib/src/brook.c"
 s = open(p).read()
@@ -3629,13 +3884,11 @@ assert anchor in s, "brookpop mutation anchor missing"
 s = s.replace(anchor, "        brook_wait_cycle(&h->tail, &spin, 0);   /* logcheck mutation: spin, do not sleep */", 1)
 open(p, "w").write(s)
 EOF
-    grep -q "logcheck mutation" src/userspace/boxlib/src/brook.c || { echo "brook_pop mutation install FAILED"; exit 1; }
-    sleep 1; touch src/userspace/boxlib/src/brook.c
+    mut_done src/userspace/boxlib/src/brook.c "logcheck mutation"
 }
 
 brookpop_restore() {
-    [ -f "$SCRATCH/brook.c.popbak" ] && cp "$SCRATCH/brook.c.popbak" src/userspace/boxlib/src/brook.c
-    sleep 1; touch src/userspace/boxlib/src/brook.c
+    restore src/userspace/boxlib/src/brook.c
 }
 
 # sleepsmut — the oracle measured against itself.
@@ -3654,17 +3907,13 @@ run_sleepsmut() {
     bell_off; build
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=1 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 4
     local MARK EARLY
     MARK=$(wc -l < build/serial.log)
-    ./tools/qemu-input.sh type "quietprint" >/dev/null 2>&1
+    type_cmd "quietprint"
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    key_press ret
     sleep 2
     EARLY=$(tail -n +$((MARK + 1)) build/serial.log)
     # Long enough for TWO Nightwatch looks. The watch convicts on a delivery
@@ -3696,11 +3945,7 @@ run_sleepsmut() {
     turnin_off; build
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=1 MEM=4G >/dev/null 2>&1
-    i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep $QUIET_SETTLE_S
     local A B USED
     A=$(qemu_cpu_cs); sleep $QUIET_SAMPLE_S; B=$(qemu_cpu_cs)
@@ -3718,20 +3963,16 @@ run_sleepsmut() {
     brookpop_off; build
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=1 MEM=4G >/dev/null 2>&1
-    i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 3
-    ./tools/qemu-input.sh type "quietprint" >/dev/null 2>&1
+    type_cmd "quietprint"
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    key_press ret
     sleep 1
     local WA WB WUSED
     WA=$(qemu_cpu_cs); sleep 2; WB=$(qemu_cpu_cs)
     WUSED=$(( (WB - WA) * 100 / 200 ))
-    sleep 8
+    wait_for_line build/serial.log "\[QP\] done" "$WAIT_QUIET_S"
     cp build/serial.log "$SCRATCH/serial.sleepsmut.brookpop.log"
     make run-stop >/dev/null 2>&1
     brookpop_restore
@@ -3775,24 +4016,15 @@ run_lines() {
 
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     grep -q "BoxOS Shell" build/serial.log 2>/dev/null || { bad "lines: never reached a shell"; make run-stop >/dev/null 2>&1; return; }
 
     local MARK
     MARK=$(wc -l < build/serial.log)
-    ./tools/qemu-input.sh type "print_stress" >/dev/null 2>&1
+    type_cmd "print_stress"
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    i=0
-    while [ $i -lt 60 ]; do
-        sleep 3
-        tail -n +$((MARK + 1)) build/serial.log | grep -q "PS SUMMARY" && break
-        i=$((i+1))
-    done
+    key_press ret
+    wait_for_line build/serial.log "PS SUMMARY" "$WAIT_QUIET_S" $((MARK + 1))
     # The serial line discipline is CRLF, and a trailing \r defeats a `$`
     # anchor on BSD grep — strip it once here rather than have every check
     # below carry the same footnote.
@@ -3823,7 +4055,7 @@ run_lines() {
 # before. Nothing breaks, nothing is lost, and the log becomes unmatchable —
 # which is exactly why this needs an oracle rather than an eye.
 linecut_off() {
-    cp src/userspace/boxlib/src/print.c "$SCRATCH/print.c.bak"
+    mutate src/userspace/boxlib/src/print.c
     python3 - <<'EOF'
 p = "src/userspace/boxlib/src/print.c"
 s = open(p).read()
@@ -3832,13 +4064,11 @@ assert anchor in s, "linecut mutation anchor missing"
 s = s.replace(anchor, "                lane_flush_run(ps);   /* logcheck mutation: cut anywhere */", 1)
 open(p, "w").write(s)
 EOF
-    grep -q "logcheck mutation" src/userspace/boxlib/src/print.c || { echo "linecut mutation install FAILED"; exit 1; }
-    sleep 1; touch src/userspace/boxlib/src/print.c
+    mut_done src/userspace/boxlib/src/print.c "logcheck mutation"
 }
 
 linecut_restore() {
-    [ -f "$SCRATCH/print.c.bak" ] && cp "$SCRATCH/print.c.bak" src/userspace/boxlib/src/print.c
-    sleep 1; touch src/userspace/boxlib/src/print.c
+    restore src/userspace/boxlib/src/print.c
 }
 
 run_linesmut() {
@@ -3847,22 +4077,13 @@ run_linesmut() {
 
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     local MARK
     MARK=$(wc -l < build/serial.log)
-    ./tools/qemu-input.sh type "print_stress" >/dev/null 2>&1
+    type_cmd "print_stress"
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    i=0
-    while [ $i -lt 60 ]; do
-        sleep 3
-        tail -n +$((MARK + 1)) build/serial.log | grep -q "PS SUMMARY" && break
-        i=$((i+1))
-    done
+    key_press ret
+    wait_for_line build/serial.log "PS SUMMARY" "$WAIT_QUIET_S" $((MARK + 1))
     tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.linesmut.log"
     make run-stop >/dev/null 2>&1
     linecut_restore
@@ -3907,11 +4128,7 @@ run_linesmut() {
 rollcall_boot() {
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
@@ -3919,15 +4136,10 @@ rollcall_boot() {
     sleep 3
     local MARK
     MARK=$(wc -l < build/serial.log)
-    ./tools/qemu-input.sh type "rollcall" >/dev/null 2>&1
+    type_cmd "rollcall"
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    i=0
-    while [ $i -lt 60 ]; do
-        sleep 2
-        tail -n +$((MARK + 1)) build/serial.log | grep -q "\[ROLLCALL\] done" && break
-        i=$((i+1))
-    done
+    key_press ret
+    wait_for_line build/serial.log "\[ROLLCALL\] done" "$WAIT_QUIET_S" $((MARK + 1))
     sleep 2
     # CRLF on the wire, and a kdbg line wears the kernel's "[pid] " prefix:
     # strip both once so the shape below is the line's own.
@@ -3971,8 +4183,8 @@ run_rollcall() {
 # leaves without handing in its frame, the daemon draws text and newline as
 # two operations — and each symptom above must come back.
 rollcall_defects_on() {
-    cp src/userspace/boxlib/src/strand.c "$SCRATCH/strand.c.rollcall.bak"
-    cp src/userspace/display/display.c "$SCRATCH/display.c.rollcall.bak"
+    mutate src/userspace/boxlib/src/strand.c
+    mutate src/userspace/display/display.c
     python3 - <<'EOF'
 p = "src/userspace/boxlib/src/strand.c"
 s = open(p).read()
@@ -4002,15 +4214,13 @@ mutated = """    for (uint32_t i = 0; i <= len; i++) {   /* logcheck mutation: t
 """
 open(p, "w").write(s.replace(anchor, mutated, 1))
 EOF
-    grep -q "logcheck mutation" src/userspace/boxlib/src/strand.c || { echo "rollcall strand mutation install FAILED"; exit 1; }
-    grep -q "logcheck mutation" src/userspace/display/display.c || { echo "rollcall display mutation install FAILED"; exit 1; }
-    sleep 1; touch src/userspace/boxlib/src/strand.c src/userspace/display/display.c
+    mut_done src/userspace/boxlib/src/strand.c "logcheck mutation"
+    mut_done src/userspace/display/display.c "logcheck mutation"
 }
 
 rollcall_defects_off() {
-    [ -f "$SCRATCH/strand.c.rollcall.bak" ] && cp "$SCRATCH/strand.c.rollcall.bak" src/userspace/boxlib/src/strand.c
-    [ -f "$SCRATCH/display.c.rollcall.bak" ] && cp "$SCRATCH/display.c.rollcall.bak" src/userspace/display/display.c
-    sleep 1; touch src/userspace/boxlib/src/strand.c src/userspace/display/display.c
+    restore src/userspace/boxlib/src/strand.c
+    restore src/userspace/display/display.c
 }
 
 run_rollcallmut() {
@@ -4051,11 +4261,7 @@ run_rollcallmut() {
 handset_boot() {
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
@@ -4063,17 +4269,17 @@ handset_boot() {
     sleep 3
 
     # 1 + 2: ask, then the line; then `hw` for the shell.
-    ./tools/qemu-input.sh type "handset" >/dev/null 2>&1; sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    i=0; while [ $i -lt 30 ]; do grep -q "\[HANDSET\] ask" build/serial.log && break; sleep 1; i=$((i+1)); done
+    type_cmd "handset"; sleep 1
+    key_press ret
+    wait_for_line build/serial.log "\[HANDSET\] ask" "$WAIT_QUIET_S"
     sleep 1
-    ./tools/qemu-input.sh type "after the ask" >/dev/null 2>&1; sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    i=0; while [ $i -lt 30 ]; do grep -q "\[HANDSET\] got: after the ask" build/serial.log && break; sleep 1; i=$((i+1)); done
+    type_cmd "after the ask"; sleep 1
+    key_press ret
+    wait_for_line build/serial.log "\[HANDSET\] got: after the ask" "$WAIT_QUIET_S"
     sleep 2
-    ./tools/qemu-input.sh type "hw" >/dev/null 2>&1; sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    i=0; while [ $i -lt 30 ]; do grep -q "TSC freq" build/serial.log && break; sleep 1; i=$((i+1)); done
+    type_cmd "hw"; sleep 1
+    key_press ret
+    wait_for_line build/serial.log "TSC freq" "$WAIT_QUIET_S"
     sleep 2
 
     # 3: the line typed before the ask — `handset`, Enter, then the words at
@@ -4084,14 +4290,14 @@ handset_boot() {
     # once the child listens and hide the loss.
     local MARK
     MARK=$(wc -l < build/serial.log)
-    ./tools/qemu-input.sh type "handset" >/dev/null 2>&1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    type_cmd "handset"
+    key_press ret
     local k
     for k in b e f o r e spc t h e spc a s k ret; do
-        ./tools/qemu-input.sh raw "sendkey $k 30" >/dev/null 2>&1
+        mon_raw "sendkey $k 30"
         sleep 0.03
     done
-    i=0; while [ $i -lt 30 ]; do tail -n +$((MARK + 1)) build/serial.log | grep -q "\[HANDSET\] got:" && break; sleep 1; i=$((i+1)); done
+    wait_for_line build/serial.log "\[HANDSET\] got:" "$REACT_QUIET_S" $((MARK + 1))
     sleep 2
 
     tr -d '\r' < build/serial.log > "$SCRATCH/serial.$1.log"
@@ -4123,7 +4329,7 @@ run_handset() {
 # listens — the very thing "keys wait at the daemon for the next reader"
 # forbids — so the line typed before the child asked is gone.
 handset_deaf_on() {
-    cp src/userspace/display/display.c "$SCRATCH/display.c.handset.bak"
+    mutate src/userspace/display/display.c
     python3 - <<'EOF'
 p = "src/userspace/display/display.c"
 s = open(p).read()
@@ -4135,13 +4341,11 @@ assert s.count(anchor2) == 1, "handset mutation anchor 2 missing"
 s = s.replace(anchor2, "        if (g_ear) touch_send(g_ear->lane->ear, t.payload, t.payload_len, 0);\n", 1)
 open(p, "w").write(s)
 EOF
-    grep -q "logcheck mutation" src/userspace/display/display.c || { echo "handset mutation install FAILED"; exit 1; }
-    sleep 1; touch src/userspace/display/display.c
+    mut_done src/userspace/display/display.c "logcheck mutation"
 }
 
 handset_deaf_off() {
-    [ -f "$SCRATCH/display.c.handset.bak" ] && cp "$SCRATCH/display.c.handset.bak" src/userspace/display/display.c
-    sleep 1; touch src/userspace/display/display.c
+    restore src/userspace/display/display.c
 }
 
 run_handsetmut() {
@@ -4196,7 +4400,7 @@ draft_keys() {
     # verifies the guest echo) has nothing to see and would give up.
     local k
     for k in "$@"; do
-        ./tools/qemu-input.sh raw "sendkey $k 30" >/dev/null 2>&1
+        mon_raw "sendkey $k 30"
         sleep 0.06
     done
 }
@@ -4209,11 +4413,7 @@ draft_session() {
     make run-stop >/dev/null 2>&1
     # shellcheck disable=SC2086
     make run-bg $args >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
@@ -4222,9 +4422,9 @@ draft_session() {
     local MARK
     MARK=$(wc -l < build/serial.log)
 
-    ./tools/qemu-input.sh type "draft oracle.txt" >/dev/null 2>&1
+    type_cmd "draft oracle.txt"
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    key_press ret
     sleep 3
 
     draft_keys a b c d e f g h i j
@@ -4236,9 +4436,9 @@ draft_session() {
     draft_keys ctrl-q
     sleep 3
 
-    ./tools/qemu-input.sh type "show oracle.txt" >/dev/null 2>&1
+    type_cmd "show oracle.txt"
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    key_press ret
     sleep 3
 
     tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$name.log"
@@ -4269,7 +4469,7 @@ run_draft() {
 }
 
 draft_notail_on() {
-    cp src/userspace/utils/draft_file.c "$SCRATCH/draft_file.c.bak"
+    mutate src/userspace/utils/draft_file.c
     python3 - <<'EOF2'
 p = "src/userspace/utils/draft_file.c"
 s = open(p).read()
@@ -4278,13 +4478,11 @@ assert s.count(anchor) == 1, "draft mutation anchor missing"
 s = s.replace(anchor, "    int rc = 0;   /* logcheck mutation: the tail is left where it was */\n    (void)len;", 1)
 open(p, "w").write(s)
 EOF2
-    grep -q "logcheck mutation" src/userspace/utils/draft_file.c || { echo "draft mutation install FAILED"; exit 1; }
-    sleep 1; touch src/userspace/utils/draft_file.c
+    mut_done src/userspace/utils/draft_file.c "logcheck mutation"
 }
 
 draft_notail_off() {
-    [ -f "$SCRATCH/draft_file.c.bak" ] && cp "$SCRATCH/draft_file.c.bak" src/userspace/utils/draft_file.c
-    sleep 1; touch src/userspace/utils/draft_file.c
+    restore src/userspace/utils/draft_file.c
 }
 
 run_draftmut() {
@@ -4344,11 +4542,7 @@ paint_boot() {
     make run-stop >/dev/null 2>&1
     # shellcheck disable=SC2086
     make run-bg $args >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
@@ -4356,13 +4550,26 @@ paint_boot() {
     sleep 3
     local MARK
     MARK=$(wc -l < build/serial.log)
-    ./tools/qemu-input.sh type "playtime" >/dev/null 2>&1
+    type_cmd "playtime"
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    sleep 6
-    ./tools/qemu-input.sh shot "$SCRATCH/$name.ppm" >/dev/null 2>&1
+    key_press ret
+    # ‼ THERE IS NOTHING IN THE LOG TO WAIT FOR HERE, AND THAT IS THE SCENARIO.
+    # A painted frame says nothing into the ring — proving that is half of what
+    # this measures — so the fact has to be read off the GLASS instead of the
+    # log: take the screendump, and if it is not a painted screen yet, take
+    # another. `playtime` keeps pouring until a key stops it, so a shot can
+    # only ever be too EARLY, which is the one way a flat six seconds could
+    # fail and did not announce itself.
+    local shot=0
+    while [ $shot -lt "$PAINT_SHOT_TRIES" ]; do
+        mon_shot "$SCRATCH/$name.ppm"
+        case "$(paint_shot_verdict "$SCRATCH/$name.ppm" 2>/dev/null)" in
+            painted*) break ;;
+        esac
+        sleep 1; shot=$((shot+1))
+    done
     sleep 1
-    ./tools/qemu-input.sh key spc >/dev/null 2>&1
+    key_press spc
     sleep 3
     tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$name.log"
     make run-stop >/dev/null 2>&1
@@ -4397,7 +4604,7 @@ run_paint() {
 }
 
 paint_blind_on() {
-    cp src/kernel/core/decks/hardware/hardware_ops.c "$SCRATCH/hardware_ops.c.bak"
+    mutate src/kernel/core/decks/hardware/hardware_ops.c
     python3 - <<'EOF2'
 p = "src/kernel/core/decks/hardware/hardware_ops.c"
 s = open(p).read()
@@ -4406,13 +4613,11 @@ assert s.count(anchor) == 1, "paint mutation anchor missing"
 s = s.replace(anchor, "    bool fit = true;   /* logcheck mutation: the op takes the frame and drops it */", 1)
 open(p, "w").write(s)
 EOF2
-    grep -q "logcheck mutation" src/kernel/core/decks/hardware/hardware_ops.c || { echo "paint mutation install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/core/decks/hardware/hardware_ops.c
+    mut_done src/kernel/core/decks/hardware/hardware_ops.c "logcheck mutation"
 }
 
 paint_blind_off() {
-    [ -f "$SCRATCH/hardware_ops.c.bak" ] && cp "$SCRATCH/hardware_ops.c.bak" src/kernel/core/decks/hardware/hardware_ops.c
-    sleep 1; touch src/kernel/core/decks/hardware/hardware_ops.c
+    restore src/kernel/core/decks/hardware/hardware_ops.c
 }
 
 run_paintmut() {
@@ -4448,11 +4653,7 @@ finish_boot() {
     make run-stop >/dev/null 2>&1
     # shellcheck disable=SC2086
     make run-bg $args >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
@@ -4462,9 +4663,9 @@ finish_boot() {
     MARK=$(wc -l < build/serial.log)
     local cmd
     for cmd in "finish nobody" "finish display" "finish display anyway" "me"; do
-        ./tools/qemu-input.sh type "$cmd" >/dev/null 2>&1
+        type_cmd "$cmd"
         sleep 1
-        ./tools/qemu-input.sh key ret >/dev/null 2>&1
+        key_press ret
         sleep 4
     done
     tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$name.log"
@@ -4500,7 +4701,7 @@ run_finish() {
 }
 
 finish_unguarded_on() {
-    cp src/userspace/utils/finish.c "$SCRATCH/finish.c.bak"
+    mutate src/userspace/utils/finish.c
     python3 - <<'EOF2'
 p = "src/userspace/utils/finish.c"
 s = open(p).read()
@@ -4509,13 +4710,11 @@ assert s.count(anchor) == 1, "finish mutation anchor missing"
 s = s.replace(anchor, "        if (false && wears(crew->mates[i].tags, SYSTEM_TAG)) {   /* logcheck mutation: the guard is gone */", 1)
 open(p, "w").write(s)
 EOF2
-    grep -q "logcheck mutation" src/userspace/utils/finish.c || { echo "finish mutation install FAILED"; exit 1; }
-    sleep 1; touch src/userspace/utils/finish.c
+    mut_done src/userspace/utils/finish.c "logcheck mutation"
 }
 
 finish_unguarded_off() {
-    [ -f "$SCRATCH/finish.c.bak" ] && cp "$SCRATCH/finish.c.bak" src/userspace/utils/finish.c
-    sleep 1; touch src/userspace/utils/finish.c
+    restore src/userspace/utils/finish.c
 }
 
 run_finishmut() {
@@ -4531,6 +4730,333 @@ run_finishmut() {
         ok "finishmut: without the guard nothing is held back - and the oracle sees the silence"
     fi
     build   # leave the tree built from clean sources
+}
+
+# ===========================================================================
+# overtake — a finished program's last words are not overtaken by the prompt
+# ===========================================================================
+#
+# The console daemon merges the lanes by the stamp each frame carries, and the
+# stamp is cpu_rdtsc read on whatever core the writer was running on. Cores
+# agree about that counter only to within what the boot-time sync left them
+# (per_core.c tolerates four microseconds), and a program that lists a volume
+# pushes its whole output in less time than that. So the stamps of one burst
+# and the stamp of a line printed afterwards ON ANOTHER CORE are not reliably
+# ordered — and the shell's next prompt landed INSIDE the listing of the
+# command that had just finished.
+#
+# MEASURED on the board: four listings out of twelve cut open at exactly the
+# same byte, 891 of 4235. The same byte every time is what a FIXED offset
+# between two cores looks like; a race would have scattered. Never once in an
+# emulator, where the cores agree exactly — which is why this scenario has to
+# MAKE them disagree.
+#
+# The injection is one writer's clock running ahead from its eleventh word on.
+# The prompt, stamped normally, is then older than the rest of that writer's
+# burst and the merge puts it in the middle — unless the order comes from the
+# death instead of from the clock, which is the fix under test.
+
+# ‼ TWO CONDITIONS ARE NEEDED TO SEE THIS, AND THE BOARD HAS BOTH: the cores
+# disagree about the counter, AND the daemon is behind the writer. An emulator
+# has neither — the first attempt at this scenario injected only the skew and
+# the listings came out whole, because the daemon had drained every frame long
+# before the shell woke up. So the second condition is injected too, by making
+# one render cost what a render costs on a real framebuffer.
+overtake_slow_on() {
+    mutate src/userspace/display/display.c
+    python3 - <<'EOF2'
+p = "src/userspace/display/display.c"
+s = open(p).read()
+a = "    if (f->kind != CONSOLE_RUN_TEXT) return;"
+assert s.count(a) == 1, "overtake slow anchor missing"
+inject = "\n    /* logcheck injection: a render costs what one costs on glass. */"
+inject += "\n    for (volatile uint32_t z = 0; z < 400000u; z++) { }"
+s = s.replace(a, a + inject, 1)
+open(p, "w").write(s)
+EOF2
+    mut_done src/userspace/display/display.c "logcheck injection"
+}
+
+overtake_slow_off() {
+    restore src/userspace/display/display.c
+}
+
+overtake_clockonly_on() {
+    mutate src/userspace/boxlib/src/print.c
+    python3 - <<'EOF2'
+p = "src/userspace/boxlib/src/print.c"
+s = open(p).read()
+a = "    return __atomic_add_fetch(ps->order, 1u, __ATOMIC_SEQ_CST);"
+assert s.count(a) == 1, "overtake mutation anchor missing"
+m  = "    /* logcheck mutation: the clock decides again, and two cabins' clocks"
+m += "\n     * differ by a fixed amount — which is exactly what an imperfect TSC"
+m += "\n     * sync leaves behind. The shell is pid 2; what it spawns has a higher"
+m += "\n     * one, so this is two processes whose counters disagree. */"
+m += "\n    { static uint32_t n;"
+m += "\n      uint64_t t = cpu_rdtsc();"
+m += "\n      if (cabin_info()->pid > 2u && ++n > 10u) t += 4000000000ull;"
+m += "\n      return t; }"
+s = s.replace(a, m, 1)
+if "box/core/cabin.h" not in s:
+    s = s.replace('#include "box/bay.h"', '#include "box/bay.h"\n#include "box/core/cabin.h"', 1)
+if "box/cpu.h" not in s:
+    s = s.replace('#include "box/bay.h"', '#include "box/cpu.h"\n#include "box/bay.h"', 1)
+open(p, "w").write(s)
+EOF2
+    mut_done src/userspace/boxlib/src/print.c "logcheck mutation"
+}
+
+overtake_clockonly_off() {
+    restore src/userspace/boxlib/src/print.c
+}
+
+overtake_listing() {
+    # overtake_listing NAME — boot, list the volume three times, and report the
+    # shortest run of listing that reached the log before a prompt did.
+    make run-stop >/dev/null 2>&1
+    make run-bg UEFI=on STRICT=on CORES=4 MEM=4G >/dev/null 2>&1
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+        make run-stop >/dev/null 2>&1; return 1
+    fi
+    sleep 3
+    # Three listings, each driven off two facts and no clock. A listing has
+    # STARTED when the utility prints its own heading; it is OVER when the log
+    # stops growing. The gap between "the prompt is back" and "the burst has
+    # drained" is the whole subject of this scenario, so the second fact has to
+    # be the drain and not the prompt.
+    local n MARK
+    for n in 1 2 3; do
+        MARK=$(wc -l < build/serial.log)
+        type_cmd "files"
+        key_press ret
+        wait_for_line build/serial.log "Files:" "$WAIT_QUIET_S" $((MARK + 1))
+        wait_for_quiet "$OVERTAKE_DRAIN_QUIET_S"
+    done
+    cp build/serial.log "$SCRATCH/serial.$1.log"
+    make run-stop >/dev/null 2>&1
+    return 0
+}
+
+# ‼ 4000 WAS A NUMBER TYPED IN ON A DAY THIS VOLUME HELD THE FILES IT HELD.
+#
+# The old verdict was "the shortest listing is at least 4000 bytes long", which
+# is a statement about how many programs happen to be on the medium, not about
+# whether a prompt cut one open. Add a file and the whole listing grows; remove
+# two and a WHOLE listing drops under the line and the oracle reddens against a
+# kernel with nothing wrong with it.
+#
+# The exact fact is in the run itself and needs no constant at all. A listing
+# the prompt did NOT cut has that prompt at its end: nothing of the listing
+# follows it. A listing the prompt landed inside has the rest of its ROWS
+# stranded after it — which is precisely what was measured on the board, 891
+# bytes of 4235 and the other 3344 arriving after the prompt.
+#
+# So: one line per listing, "<bytes before the prompt> <listing rows after it>".
+# A second number of 0 is a whole listing, whatever the volume holds today; a
+# positive one is a cut and says how much was stranded; -1 means no prompt ever
+# followed the listing at all, which is a third thing and not a pass.
+overtake_cuts() {
+    python3 - "$1" <<'EOF2'
+import re, sys
+t = open(sys.argv[1], "rb").read().replace(b"\r", b"")
+row = re.compile(rb"(?m)^[!-~]+ +\[")
+starts = [m.end() for m in re.finditer(rb"Files:\n", t)]
+for k, s in enumerate(starts):
+    end = starts[k + 1] if k + 1 < len(starts) else len(t)
+    body = t[s:end]
+    n = body.find(b"\n~ ")
+    if n < 0:
+        print("%d -1" % len(body))
+        continue
+    # The prompt is two bytes with no newline after it, so whatever the merge
+    # put next lands on the prompt's OWN line. Drop the "~ " and the rest of
+    # that line is read like any other, or a listing stranded by exactly one
+    # row would be counted as a listing that was never cut.
+    after = body[n + 1:]
+    if after.startswith(b"~ "):
+        after = after[2:]
+    print("%d %d" % (n, len(row.findall(after))))
+EOF2
+}
+
+# The three numbers every caller of overtake_cuts wants, read once.
+overtake_tally() {
+    OT_ROWS=$(overtake_cuts "$1")
+    OT_COUNT=$(printf '%s\n' "$OT_ROWS" | grep -c '[0-9]')
+    OT_CUT=$(printf '%s\n' "$OT_ROWS"   | awk '$2 > 0 { n++ } END { print n+0 }')
+    OT_NOPROMPT=$(printf '%s\n' "$OT_ROWS" | awk '$2 < 0 { n++ } END { print n+0 }')
+    OT_SHORTEST=$(printf '%s\n' "$OT_ROWS" | awk 'NF { if (m == "" || $1 < m) m = $1 } END { print (m == "" ? 0 : m) }')
+}
+
+run_overtake() {
+    echo "== overtake: a finished program's last words come before the next prompt =="
+    overtake_slow_on; build
+    local booted=1
+    overtake_listing overtake && booted=0
+    overtake_slow_off
+    if [ $booted -ne 0 ]; then bad "overtake: never reached a shell"; build; return; fi
+
+    overtake_tally "$SCRATCH/serial.overtake.log"
+    if [ "$OT_COUNT" -lt 3 ]; then
+        bad "overtake: only $OT_COUNT of 3 listings reached the log — the machine was not asked what this scenario means to ask"
+    elif [ "$OT_NOPROMPT" -gt 0 ]; then
+        bad "overtake: $OT_NOPROMPT listing(s) were never followed by a prompt at all"
+    elif [ "$OT_CUT" -gt 0 ]; then
+        bad "overtake: a prompt cut $OT_CUT of $OT_COUNT listings open (the shortest ran $OT_SHORTEST bytes before it) — the clock is still deciding the order"
+    else
+        ok "overtake: all $OT_COUNT listings reached the log whole ($OT_SHORTEST bytes) before their prompt, with the daemon left far behind the writer"
+    fi
+    build
+}
+
+run_overtakemut() {
+    echo "== overtakemut: with the clock deciding again, the prompt must cut in =="
+    overtake_clockonly_on; overtake_slow_on; build
+    local booted=1
+    overtake_listing overtakemut && booted=0
+    overtake_clockonly_off; overtake_slow_off
+    if [ $booted -ne 0 ]; then bad "overtakemut: never reached a shell"; build; return; fi
+
+    overtake_tally "$SCRATCH/serial.overtakemut.log"
+    if [ "$OT_COUNT" -lt 3 ]; then
+        bad "overtakemut: only $OT_COUNT of 3 listings reached the log — the scenario proved nothing either way"
+    elif [ "$OT_CUT" -gt 0 ]; then
+        ok "overtakemut: a prompt cut $OT_CUT of $OT_COUNT listings open after $OT_SHORTEST bytes, stranding rows behind it, and the oracle sees it"
+    else
+        bad "overtakemut: the death was taken out of the order and every listing was STILL whole - the oracle cannot see that defect"
+    fi
+    build
+}
+
+# ===========================================================================
+# orderlife — a Bay window outlives the strand that opened it
+# ===========================================================================
+#
+# The console's order is a counter in a Bay, and every printing strand maps it.
+# The question this asks is not about the console at all: it is whether a Bay
+# window survives the STRAND that opened it, because the window lives in the
+# CABIN's address space and every sibling runs in that same space.
+#
+# It used to not survive. A Bay claim belonged to the strand, and the cleanup
+# on strand death unmapped it — out from under siblings still reading through
+# it. The console found it: one shared order pointer, opened by whichever
+# strand printed first, vanished for all of them when that strand finished.
+#
+# ‼ AND THE ORDINARY SHAPE HIDES IT, which is why this scenario exists rather
+# than trusting `lines`. print_stress prints its banner from the MAIN strand
+# before it spawns anybody, so the main strand opens the order and outlives
+# every worker, and nothing ever faults. Remove that one line and the first
+# strand to print is a worker — one that runs its two thousand lines and then
+# exits while fifteen siblings are still printing. That is the shape, and it
+# is one line of difference from a program that has passed for months.
+#
+# The scenario keeps that line removed for BOTH halves, so the two runs differ
+# only by the defect under test and not by what the program does.
+orderlife_shape_on() {
+    mutate src/userspace/apps/print_stress.c
+    python3 - <<'EOF2'
+p = "src/userspace/apps/print_stress.c"
+s = open(p).read()
+a = """    printf("[PS] print_stress starting: %u strands x %u iters each\\n",
+           STRAND_COUNT, ITERS);
+    io_flush();
+"""
+assert s.count(a) == 1, "orderlife shape anchor missing"
+s = s.replace(a, """    /* logcheck mutation: the banner is gone, so the first strand to print is
+     * a spawned worker and not main. */
+""", 1)
+open(p, "w").write(s)
+EOF2
+    mut_done src/userspace/apps/print_stress.c "logcheck mutation"
+}
+
+orderlife_shape_off() { restore src/userspace/apps/print_stress.c; }
+
+# The defect, put back in one line: let ANY strand's death take the whole
+# cabin's Bay windows, which is what strand-scoped claims did to a sibling's
+# window and is the class this is guarding. The real rule is that only the
+# cabin's own teardown may do this (cabin.c, cabin_destroy).
+orderlife_strandkill_on() {
+    mutate src/kernel/core/process/process.c
+    python3 - <<'EOF2'
+p = "src/kernel/core/process/process.c"
+s = open(p).read()
+a = "    BrookCleanupProcess(proc);"
+assert s.count(a) == 1, "orderlife strandkill anchor missing"
+m  = "    /* logcheck mutation: a strand's death takes the cabin's Bay windows,"
+m += "\n     * which is what strand-scoped claims did to a sibling's. */"
+m += "\n    if (proc->cabin) BayCleanupCabin(proc->cabin);"
+m += "\n" + a
+s = s.replace(a, m, 1)
+open(p, "w").write(s)
+EOF2
+    mut_done src/kernel/core/process/process.c "logcheck mutation"
+}
+
+orderlife_strandkill_off() { restore src/kernel/core/process/process.c; }
+
+# orderlife_run NAME — boot sixteen cores, run print_stress, and report what
+# reached the log. Returns 1 if the machine never reached a shell at all.
+orderlife_run() {
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+        make run-stop >/dev/null 2>&1; return 1
+    fi
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+    type_cmd "print_stress"
+    key_press ret
+    wait_for_line build/serial.log "PS SUMMARY" "$WAIT_QUIET_S" $((MARK + 1))
+    tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$1.log"
+    make run-stop >/dev/null 2>&1
+    return 0
+}
+
+run_orderlife() {
+    echo "== orderlife: the strand that opened the console's order finishes first, and the rest keep printing =="
+    orderlife_shape_on; build
+    local booted=1
+    orderlife_run orderlife && booted=0
+    orderlife_shape_off
+    if [ $booted -ne 0 ]; then bad "orderlife: never reached a shell"; build; return; fi
+
+    local WHOLE
+    WHOLE=$(grep -cE '^\[PS-[0-9]{2}\] [0-9]{8}$' "$SCRATCH/serial.orderlife.log" | tr -d ' ')
+    echo "     $WHOLE of 32000 lines whole"
+    if grep -q "PS SUMMARY.*PASS" "$SCRATCH/serial.orderlife.log"; then
+        ok "orderlife: every strand printed to the end though the first one to print had long finished"
+    else
+        bad "orderlife: print_stress never finished — a worker printed first and the survivors lost something"
+    fi
+    if grep -qE "PAGE FAULT|#PF|PANIC" "$SCRATCH/serial.orderlife.log"; then
+        bad "orderlife: the run faulted"
+    else
+        ok "orderlife: and nothing faulted"
+    fi
+    build
+}
+
+run_orderlifemut() {
+    echo "== orderlifemut: let a strand's death take the cabin's windows, and require the oracle to notice =="
+    orderlife_shape_on; orderlife_strandkill_on; build
+    local booted=1
+    orderlife_run orderlifemut && booted=0
+    orderlife_shape_off; orderlife_strandkill_off
+    if [ $booted -ne 0 ]; then
+        ok "orderlifemut: the machine could not even reach a shell with windows pulled from under it, and the oracle sees it"
+        build; return
+    fi
+
+    if grep -q "PS SUMMARY.*PASS" "$SCRATCH/serial.orderlifemut.log" \
+       && ! grep -qE "PAGE FAULT|#PF|PANIC" "$SCRATCH/serial.orderlifemut.log"; then
+        bad "orderlifemut: a strand's death took the cabin's Bay windows and print_stress finished anyway - the oracle cannot see that defect"
+    else
+        ok "orderlifemut: the survivors lost the window under them, and the oracle sees it"
+    fi
+    build
 }
 
 # ===========================================================================
@@ -4556,7 +5082,7 @@ run_finishmut() {
 #   without               : the tail of the burst is gone
 
 batchfail_inject_on() {
-    cp src/kernel/core/decks/hardware/hardware_ops.c "$SCRATCH/hw_ops.batchfail.bak"
+    mutate src/kernel/core/decks/hardware/hardware_ops.c
     python3 - <<'EOF2'
 p = "src/kernel/core/decks/hardware/hardware_ops.c"
 s = open(p).read()
@@ -4576,17 +5102,15 @@ s = s.replace(a, """    /* logcheck injection: one run in sixteen refuses.
 """ + a, 1)
 open(p, "w").write(s)
 EOF2
-    grep -q "logcheck injection" src/kernel/core/decks/hardware/hardware_ops.c || { echo "batchfail injection FAILED"; exit 1; }
-    sleep 1; touch src/kernel/core/decks/hardware/hardware_ops.c
+    mut_done src/kernel/core/decks/hardware/hardware_ops.c "logcheck injection"
 }
 
 batchfail_inject_off() {
-    [ -f "$SCRATCH/hw_ops.batchfail.bak" ] && cp "$SCRATCH/hw_ops.batchfail.bak" src/kernel/core/decks/hardware/hardware_ops.c
-    sleep 1; touch src/kernel/core/decks/hardware/hardware_ops.c
+    restore src/kernel/core/decks/hardware/hardware_ops.c
 }
 
 batchfail_optional_off() {
-    cp src/userspace/boxlib/src/vga.c "$SCRATCH/vga.c.batchfail.bak"
+    mutate src/userspace/boxlib/src/vga.c
     python3 - <<'EOF2'
 p = "src/userspace/boxlib/src/vga.c"
 s = open(p).read()
@@ -4595,36 +5119,46 @@ assert s.count(a) == 1, "batchfail optional anchor missing"
 s = s.replace(a, "    return ManifestBuilderAddOp(&s_mb, DECK_HARDWARE, opcode, 0,   /* logcheck mutation */", 1)
 open(p, "w").write(s)
 EOF2
-    grep -q "logcheck mutation" src/userspace/boxlib/src/vga.c || { echo "batchfail mutation FAILED"; exit 1; }
-    sleep 1; touch src/userspace/boxlib/src/vga.c
+    mut_done src/userspace/boxlib/src/vga.c "logcheck mutation"
 }
 
 batchfail_optional_on() {
-    [ -f "$SCRATCH/vga.c.batchfail.bak" ] && cp "$SCRATCH/vga.c.batchfail.bak" src/userspace/boxlib/src/vga.c
-    sleep 1; touch src/userspace/boxlib/src/vga.c
+    restore src/userspace/boxlib/src/vga.c
 }
 
 batchfail_run() {
     # batchfail_run NAME — boot, list the volume, keep the window of the log.
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on STRICT=on CORES=4 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 60 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1; return 1
     fi
     sleep 3
     local MARK
     MARK=$(wc -l < build/serial.log)
-    ./tools/qemu-input.sh type "files" >/dev/null 2>&1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    sleep 6
+    type_cmd "files"
+    key_press ret
+    # Started when the utility prints its heading, over when the log stops
+    # growing. A flat six seconds was a guess that would cut the very tail this
+    # scenario is about, on any host slower than the one it was written on.
+    wait_for_line build/serial.log "Files:" "$WAIT_QUIET_S" $((MARK + 1))
+    wait_for_quiet "$OVERTAKE_DRAIN_QUIET_S"
     tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$1.log"
+    # The mount line is in the BOOT, before the window — and it is the only
+    # place the guest states how many files the volume holds, which is what the
+    # listing below is measured against.
+    tr -d '\r' < build/serial.log > "$SCRATCH/serial.$1.full.log"
     make run-stop >/dev/null 2>&1
     return 0
+}
+
+# How many files the guest itself says the volume holds, and how many listing
+# rows arrived. A row is a filename, spaces, then the bracket that opens its
+# tags — the shape files.c prints and nothing else in the log has.
+batchfail_tally() {
+    BF_TOTAL=$(grep -oE "MOUNTED — [0-9]+ file" "$2" | tail -1 | grep -oE "[0-9]+")
+    BF_ROWS=$(grep -cE "^[^ ]+ +\[" "$1")
 }
 
 run_batchfail() {
@@ -4636,17 +5170,27 @@ run_batchfail() {
     if [ $booted -ne 0 ]; then bad "batchfail: never reached a shell"; build; return; fi
 
     local L="$SCRATCH/serial.batchfail.log"
-    local N
-    N=$(grep -c "\.elf" "$L" || true)
+    batchfail_tally "$L" "$SCRATCH/serial.batchfail.full.log"
 
-    # The count is the proof, and it is a wide gap: with the ops optional a
-    # refusal costs its own run and the rest of the burst arrives; without,
-    # everything behind the first refusal in each batch is gone. Measured on
-    # the same listing: 60 against 30. Naming a particular line instead would
-    # be too strict — with one run in sixteen refused, the casualty can be any
-    # run, including the last one.
-    [ "$N" -ge 50 ]
-    chk $? "batchfail: $N of the volume's programs reached the log with one run in sixteen refused"
+    # ‼ 50 WAS A NUMBER TYPED IN AGAINST THE FILES THIS VOLUME HELD THAT DAY.
+    #
+    # The quantity is now taken from the run: the guest states how many files
+    # it mounted, and the listing is measured against that. The line between
+    # the two behaviours is not narrow and does not need to be guessed — with
+    # the ops OPTIONAL a refusal costs its own cell and the burst carries on,
+    # so nearly every row arrives; without, each batch dies at its first
+    # refusal and roughly half the listing is gone. Measured on this listing:
+    # 60 rows against 30. Half the volume's own count sits between them and
+    # moves with the volume, which a typed-in 50 could not.
+    #
+    # Naming a PARTICULAR row instead would be too strict: with one run in
+    # sixteen refused the casualty can be any row, the last one included.
+    if [ -z "$BF_TOTAL" ]; then
+        bad "batchfail: the mount never said how many files the volume holds — the harness has nothing to measure the listing against"
+    else
+        [ "$BF_ROWS" -gt $((BF_TOTAL / 2)) ]
+        chk $? "batchfail: $BF_ROWS of the volume's $BF_TOTAL files reached the log with one run in sixteen refused"
+    fi
 
     grep -qE "^~" "$L"
     chk $? "batchfail: and the prompt printed after the burst"
@@ -4662,13 +5206,14 @@ run_batchfailmut() {
     batchfail_inject_off; batchfail_optional_on
     if [ $booted -ne 0 ]; then bad "batchfailmut: never reached a shell"; build; return; fi
 
-    local L N
-    L="$SCRATCH/serial.batchfailmut.log"
-    N=$(grep -c "\.elf" "$L" || true)
-    if [ "$N" -ge 50 ]; then
-        bad "batchfailmut: the ops were made non-optional and $N programs STILL arrived - the oracle cannot see that defect"
+    local L="$SCRATCH/serial.batchfailmut.log"
+    batchfail_tally "$L" "$SCRATCH/serial.batchfailmut.full.log"
+    if [ -z "$BF_TOTAL" ]; then
+        bad "batchfailmut: the mount never said how many files the volume holds — the harness has nothing to measure the listing against"
+    elif [ "$BF_ROWS" -gt $((BF_TOTAL / 2)) ]; then
+        bad "batchfailmut: the ops were made non-optional and $BF_ROWS of $BF_TOTAL rows STILL arrived - the oracle cannot see that defect"
     else
-        ok "batchfailmut: the refusal took the rest of the burst with it — only $N programs reached the log, and the oracle sees it"
+        ok "batchfailmut: the refusal took the rest of the burst with it — $BF_ROWS of the volume's $BF_TOTAL files reached the log, and the oracle sees it"
     fi
     build
 }
@@ -4760,11 +5305,7 @@ EOF2
 caret_boot() {
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on STRICT=on CORES=4 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 60 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 3
     grep -q "BoxOS Shell" build/serial.log 2>/dev/null
 }
@@ -4772,26 +5313,26 @@ caret_boot() {
 caret_run() {
     # caret_run NAME — one scripted editing session; leaves two readings.
     local n=$1
-    ./tools/qemu-input.sh type "abcdef" >/dev/null 2>&1
+    type_cmd "abcdef"
     sleep 1
-    ./tools/qemu-input.sh key left >/dev/null 2>&1
-    ./tools/qemu-input.sh key left >/dev/null 2>&1
+    key_press left
+    key_press left
     sleep 2
-    ./tools/qemu-input.sh shot "$SCRATCH/$n.edit.ppm" >/dev/null 2>&1
+    mon_shot "$SCRATCH/$n.edit.ppm"
     caret_read "$SCRATCH/$n.edit.ppm" > "$SCRATCH/$n.edit.txt" 2>&1
 
     # then a screenful of output and three scrolls, which is what left ghosts
-    ./tools/qemu-input.sh key home >/dev/null 2>&1
-    ./tools/qemu-input.sh key delete >/dev/null 2>&1 || true
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    key_press home
+    key_press delete || true
+    key_press ret
     sleep 2
-    ./tools/qemu-input.sh type "files" >/dev/null 2>&1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    type_cmd "files"
+    key_press ret
     sleep 4
     local i
-    for i in 1 2 3; do ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 1; done
+    for i in 1 2 3; do key_press ret; sleep 1; done
     sleep 2
-    ./tools/qemu-input.sh shot "$SCRATCH/$n.scroll.ppm" >/dev/null 2>&1
+    mon_shot "$SCRATCH/$n.scroll.ppm"
     caret_read "$SCRATCH/$n.scroll.ppm" > "$SCRATCH/$n.scroll.txt" 2>&1
 }
 
@@ -4828,7 +5369,7 @@ run_caret() {
 }
 
 caret_blind_on() {
-    cp src/kernel/drivers/video/canvas.c "$SCRATCH/canvas.c.bak"
+    mutate src/kernel/drivers/video/canvas.c
     python3 - <<'EOF2'
 p = "src/kernel/drivers/video/canvas.c"
 s = open(p).read()
@@ -4842,13 +5383,11 @@ s = s.replace(a, """    /* logcheck mutation: the cursor moves and the glass is 
     c->row = (uint32_t)y < c->rows ? (uint32_t)y : c->rows - 1u;""", 1)
 open(p, "w").write(s)
 EOF2
-    grep -q "logcheck mutation" src/kernel/drivers/video/canvas.c || { echo "caret mutation install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/drivers/video/canvas.c
+    mut_done src/kernel/drivers/video/canvas.c "logcheck mutation"
 }
 
 caret_blind_off() {
-    [ -f "$SCRATCH/canvas.c.bak" ] && cp "$SCRATCH/canvas.c.bak" src/kernel/drivers/video/canvas.c
-    sleep 1; touch src/kernel/drivers/video/canvas.c
+    restore src/kernel/drivers/video/canvas.c
 }
 
 run_caretmut() {
@@ -4917,11 +5456,7 @@ grow_boot() {
     # grow_boot NAME — boot the image as it stands and keep the log window.
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on STRICT=on CORES=4 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 60 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 2
     cp build/serial.log "$SCRATCH/serial.$1.log"
     grep -q "BoxOS Shell" build/serial.log 2>/dev/null
@@ -4944,13 +5479,22 @@ run_grow() {
     rm -f build/boxos.img   # a scenario that measures growth starts from a volume that has not grown
     build
     make run-stop >/dev/null 2>&1
-    cp build/boxos.img "$SCRATCH/grow.pristine"
 
+    # The stretched image goes under the manifest as the build product it is,
+    # so a run that dies anywhere below leaves no stretched image behind for
+    # the next scenario to measure.
+    mutate_product build/boxos.img
     local START
     START=$(grow_stretch build/boxos.img 409600 | cut -d' ' -f1)
-    if [ -z "$START" ]; then bad "grow: the image has no BoxOS partition to stretch"; return; fi
+    if [ -z "$START" ]; then
+        bad "grow: the image has no BoxOS partition to stretch"
+        restore build/boxos.img; build; return
+    fi
 
-    if ! grow_boot grow; then bad "grow: never reached a shell"; make run-stop >/dev/null 2>&1; build; return; fi
+    if ! grow_boot grow; then
+        bad "grow: never reached a shell"
+        make run-stop >/dev/null 2>&1; restore build/boxos.img; build; return
+    fi
     local L="$SCRATCH/serial.grow.log"
 
     grep -q "takes the rest" "$L"
@@ -4984,8 +5528,8 @@ run_grow() {
     # And a file laid down before the growth still reads.
     local MARK
     MARK=$(wc -l < build/serial.log)
-    ./tools/qemu-input.sh type "show hello.txt" >/dev/null 2>&1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    type_cmd "show hello.txt"
+    key_press ret
     sleep 3
     tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' | grep -q "Hello from BoxOS"
     chk $? "grow: a file written before the growth still reads afterwards"
@@ -4999,7 +5543,8 @@ run_grow() {
     fi
 
     make run-stop >/dev/null 2>&1
-    cp "$SCRATCH/grow.pristine" build/boxos.img   # leave an unstretched image behind
+    restore build/boxos.img   # the stretched image is discarded
+    build                     # and an unstretched one is made again
 }
 
 run_growcut() {
@@ -5012,13 +5557,24 @@ run_growcut() {
     rm -f build/boxos.img   # a scenario that measures growth starts from a volume that has not grown
     build
     make run-stop >/dev/null 2>&1
+    # ‼ THIS COPY IS EVIDENCE, NOT A BACKUP. The scenario needs the bytes of the
+    # head deed as they stood BEFORE the growth, because writing them back is
+    # how the power cut between the two writes is reproduced. Putting the image
+    # back afterwards is the manifest's job, below, and it does it by deleting.
     cp build/boxos.img "$SCRATCH/growcut.pristine"
 
+    mutate_product build/boxos.img
     local START
     START=$(grow_stretch build/boxos.img 409600 | cut -d' ' -f1)
-    if [ -z "$START" ]; then bad "growcut: the image has no BoxOS partition to stretch"; return; fi
+    if [ -z "$START" ]; then
+        bad "growcut: the image has no BoxOS partition to stretch"
+        restore build/boxos.img; build; return
+    fi
 
-    if ! grow_boot growcut1; then bad "growcut: never reached a shell"; make run-stop >/dev/null 2>&1; build; return; fi
+    if ! grow_boot growcut1; then
+        bad "growcut: never reached a shell"
+        make run-stop >/dev/null 2>&1; restore build/boxos.img; build; return
+    fi
     grep -q "the volume now runs" "$SCRATCH/serial.growcut1.log"
     chk $? "growcut: the volume grew once, so there is a growth to cut"
 
@@ -5026,7 +5582,10 @@ run_growcut() {
     sleep 1
     grow_rollback_head "$SCRATCH/growcut.pristine" build/boxos.img "$START"
 
-    if ! grow_boot growcut2; then bad "growcut: a half-written growth would not boot"; make run-stop >/dev/null 2>&1; build; return; fi
+    if ! grow_boot growcut2; then
+        bad "growcut: a half-written growth would not boot"
+        make run-stop >/dev/null 2>&1; restore build/boxos.img; build; return
+    fi
     local L="$SCRATCH/serial.growcut2.log"
 
     grep -qE "MOUNTED — [0-9]+ file" "$L"
@@ -5049,11 +5608,12 @@ run_growcut() {
         || ok "growcut: no panic, no fault"
 
     make run-stop >/dev/null 2>&1
-    cp "$SCRATCH/growcut.pristine" build/boxos.img
+    restore build/boxos.img
+    build
 }
 
 grow_blind_on() {
-    cp src/kernel/tagfs/tagfs.c "$SCRATCH/tagfs.c.bak"
+    mutate src/kernel/tagfs/tagfs.c
     python3 - <<'EOF2'
 p = "src/kernel/tagfs/tagfs.c"
 s = open(p).read()
@@ -5062,13 +5622,11 @@ assert s.count(anchor) == 1, "grow mutation anchor missing"
 s = s.replace(anchor, "        (void)ground_run;   /* logcheck mutation: the ground is left unclaimed */", 1)
 open(p, "w").write(s)
 EOF2
-    grep -q "logcheck mutation" src/kernel/tagfs/tagfs.c || { echo "grow mutation install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/tagfs/tagfs.c
+    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation"
 }
 
 grow_blind_off() {
-    [ -f "$SCRATCH/tagfs.c.bak" ] && cp "$SCRATCH/tagfs.c.bak" src/kernel/tagfs/tagfs.c
-    sleep 1; touch src/kernel/tagfs/tagfs.c
+    restore src/kernel/tagfs/tagfs.c
 }
 
 run_growmut() {
@@ -5076,10 +5634,12 @@ run_growmut() {
     rm -f build/boxos.img
     grow_blind_on; build
     make run-stop >/dev/null 2>&1
+    mutate_product build/boxos.img
     grow_stretch build/boxos.img 409600 >/dev/null
     local booted=1
     grow_boot growmut && booted=0
     grow_blind_off
+    restore build/boxos.img
     if [ $booted -ne 0 ]; then bad "growmut: never reached a shell"; build; return; fi
 
     local L="$SCRATCH/serial.growmut.log"
@@ -5094,16 +5654,17 @@ run_growmut() {
 
 
 util_boot() {
-    # util_boot NAME "RUN-BG ARGS" COMMAND DONE_REGEX LOOKS
-    local name=$1 args=$2 cmd=$3 done_re=$4 looks=$5
+    # util_boot NAME "RUN-BG ARGS" COMMAND DONE_REGEX [QUIET_S]
+    #
+    # The fifth argument used to be a number of LOOKS — a ceiling on how long
+    # the command was allowed to take, which is a guess about a machine. It is
+    # now the quiet window: how long the machine may say nothing before this
+    # gives up on it. Left out, it is the ordinary one.
+    local name=$1 args=$2 cmd=$3 done_re=$4 quiet=${5:-$WAIT_QUIET_S}
     make run-stop >/dev/null 2>&1
     # shellcheck disable=SC2086
     make run-bg $args >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
@@ -5111,15 +5672,10 @@ util_boot() {
     sleep 3
     local MARK
     MARK=$(wc -l < build/serial.log)
-    ./tools/qemu-input.sh type "$cmd" >/dev/null 2>&1
+    type_cmd "$cmd"
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    i=0
-    while [ $i -lt "$looks" ]; do
-        sleep 2
-        tail -n +$((MARK + 1)) build/serial.log | grep -qE "$done_re" && break
-        i=$((i+1))
-    done
+    key_press ret
+    wait_for_line -E build/serial.log "$done_re" "$quiet" $((MARK + 1))
     sleep 2
     tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$name.log"
     make run-stop >/dev/null 2>&1
@@ -5129,7 +5685,7 @@ util_boot() {
 run_brigade() {
     echo "== brigade: 300 strands parked on one word, one wake, all 300 back =="
     build
-    if ! util_boot brigade "STRICT=on CORES=16 MEM=8G" strandpark "\[SPK\] (PASS|FAIL): brigade" 60; then
+    if ! util_boot brigade "STRICT=on CORES=16 MEM=8G" strandpark "\[SPK\] (PASS|FAIL): brigade"; then
         bad "brigade: never reached a shell"; return
     fi
     L="$SCRATCH/serial.brigade.log"
@@ -5144,7 +5700,7 @@ run_brigade() {
 # The oracle measured against itself: put the tray of 256 back, and 44
 # sleepers must be left behind — and the oracle must see them.
 brigade_tray_on() {
-    cp src/kernel/core/decks/system/sync_ops.c "$SCRATCH/sync_ops.c.brigade.bak"
+    mutate src/kernel/core/decks/system/sync_ops.c
     python3 - <<'EOF2'
 p = "src/kernel/core/decks/system/sync_ops.c"
 s = open(p).read()
@@ -5153,19 +5709,17 @@ assert s.count(anchor) == 1, "brigade mutation anchor missing"
 s = s.replace(anchor, "    while (e && (count == 0 || wake_count < count) && wake_count < 256u)   /* logcheck mutation: the tray of 256 */\n", 1)
 open(p, "w").write(s)
 EOF2
-    grep -q "logcheck mutation" src/kernel/core/decks/system/sync_ops.c || { echo "brigade mutation install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/core/decks/system/sync_ops.c
+    mut_done src/kernel/core/decks/system/sync_ops.c "logcheck mutation"
 }
 
 brigade_tray_off() {
-    [ -f "$SCRATCH/sync_ops.c.brigade.bak" ] && cp "$SCRATCH/sync_ops.c.brigade.bak" src/kernel/core/decks/system/sync_ops.c
-    sleep 1; touch src/kernel/core/decks/system/sync_ops.c
+    restore src/kernel/core/decks/system/sync_ops.c
 }
 
 run_brigademut() {
     echo "== brigademut: the tray of 256 put back, and 44 sleepers must be left behind =="
     brigade_tray_on; build
-    util_boot brigademut "STRICT=on CORES=16 MEM=8G" strandpark "\[SPK\] (PASS|FAIL): brigade" 60; local booted=$?
+    util_boot brigademut "STRICT=on CORES=16 MEM=8G" strandpark "\[SPK\] (PASS|FAIL): brigade"; local booted=$?
     brigade_tray_off
     if [ $booted -ne 0 ]; then bad "brigademut: never reached a shell"; build; return; fi
     L="$SCRATCH/serial.brigademut.log"
@@ -5191,7 +5745,7 @@ run_brigademut() {
 run_headcount() {
     echo "== headcount: one word to 300 carriers of a tag, 300 answers =="
     build
-    if ! util_boot headcount "STRICT=on CORES=16 MEM=8G" headcount "\[HEADCOUNT\] (PASS|FAIL)" 90; then
+    if ! util_boot headcount "STRICT=on CORES=16 MEM=8G" headcount "\[HEADCOUNT\] (PASS|FAIL)"; then
         bad "headcount: never reached a shell"; return
     fi
     L="$SCRATCH/serial.headcount.log"
@@ -5204,7 +5758,7 @@ run_headcount() {
 }
 
 headcount_tray_on() {
-    cp src/kernel/core/decks/system/system_ops.c "$SCRATCH/system_ops.c.headcount.bak"
+    mutate src/kernel/core/decks/system/system_ops.c
     python3 - <<'EOF2'
 p = "src/kernel/core/decks/system/system_ops.c"
 s = open(p).read()
@@ -5213,19 +5767,17 @@ assert s.count(anchor) == 1, "headcount mutation anchor missing"
 s = s.replace(anchor, "            if (pid_count >= 256u) break;   /* logcheck mutation: the tray of 256 */\n" + anchor, 1)
 open(p, "w").write(s)
 EOF2
-    grep -q "logcheck mutation" src/kernel/core/decks/system/system_ops.c || { echo "headcount mutation install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/core/decks/system/system_ops.c
+    mut_done src/kernel/core/decks/system/system_ops.c "logcheck mutation"
 }
 
 headcount_tray_off() {
-    [ -f "$SCRATCH/system_ops.c.headcount.bak" ] && cp "$SCRATCH/system_ops.c.headcount.bak" src/kernel/core/decks/system/system_ops.c
-    sleep 1; touch src/kernel/core/decks/system/system_ops.c
+    restore src/kernel/core/decks/system/system_ops.c
 }
 
 run_headcountmut() {
     echo "== headcountmut: the tray of 256 put back, and 44 carriers must go untold =="
     headcount_tray_on; build
-    util_boot headcountmut "STRICT=on CORES=16 MEM=8G" headcount "\[HEADCOUNT\] (PASS|FAIL)" 90; local booted=$?
+    util_boot headcountmut "STRICT=on CORES=16 MEM=8G" headcount "\[HEADCOUNT\] (PASS|FAIL)"; local booted=$?
     headcount_tray_off
     if [ $booted -ne 0 ]; then bad "headcountmut: never reached a shell"; build; return; fi
     L="$SCRATCH/serial.headcountmut.log"
@@ -5255,11 +5807,7 @@ byname_session() {
     make run-stop >/dev/null 2>&1
     # shellcheck disable=SC2086
     make run-bg $args >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
@@ -5320,7 +5868,7 @@ run_byname() {
 # The oracle measured against itself: rename leaves the tag where it was, and
 # the renamed file must stop answering to its new name.
 byname_mut_on() {
-    cp src/kernel/tagfs/tagfs.c "$SCRATCH/tagfs.c.byname.bak"
+    mutate src/kernel/tagfs/tagfs.c
     python3 - <<'EOF2'
 p = "src/kernel/tagfs/tagfs.c"
 s = open(p).read()
@@ -5329,13 +5877,11 @@ assert s.count(anchor) == 1, "byname mutation anchor missing"
 s = s.replace(anchor, "    if (old_tag != new_tag && false)   /* logcheck mutation: the tag stays behind */\n    {\n        if (old_tag != TAGFS_INVALID_TAG_ID)\n", 1)
 open(p, "w").write(s)
 EOF2
-    grep -q "logcheck mutation" src/kernel/tagfs/tagfs.c || { echo "byname mutation install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/tagfs/tagfs.c
+    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation"
 }
 
 byname_mut_off() {
-    [ -f "$SCRATCH/tagfs.c.byname.bak" ] && cp "$SCRATCH/tagfs.c.byname.bak" src/kernel/tagfs/tagfs.c
-    sleep 1; touch src/kernel/tagfs/tagfs.c
+    restore src/kernel/tagfs/tagfs.c
 }
 
 run_bynamemut() {
@@ -5366,7 +5912,7 @@ run_bynamemut() {
 run_stash() {
     echo "== stash: 300 events of another tag and 300 messages ahead of a reply, all kept =="
     build
-    if ! util_boot stash "STRICT=on CORES=4 MEM=4G" touch_test "\[TT SUMMARY\]" 60; then
+    if ! util_boot stash "STRICT=on CORES=4 MEM=4G" touch_test "\[TT SUMMARY\]"; then
         bad "stash: never reached a shell"; return
     fi
     L="$SCRATCH/serial.stash.log"
@@ -5384,7 +5930,7 @@ run_stash() {
 # The oracle measured against itself: the stash of 256 put back — with the
 # new rule that an entry with no place stays in the ring, said aloud.
 stash_cap_on() {
-    cp src/userspace/boxlib/src/core/stash.c "$SCRATCH/stash.c.bak"
+    mutate src/userspace/boxlib/src/core/stash.c
     python3 - <<'EOF2'
 p = "src/userspace/boxlib/src/core/stash.c"
 s = open(p).read()
@@ -5393,19 +5939,17 @@ assert s.count(anchor) == 1, "stash mutation anchor missing"
 s = s.replace(anchor, "    if (s->count >= 256u) return false;   /* logcheck mutation: the stash of 256 */\n" + anchor, 1)
 open(p, "w").write(s)
 EOF2
-    grep -q "logcheck mutation" src/userspace/boxlib/src/core/stash.c || { echo "stash mutation install FAILED"; exit 1; }
-    sleep 1; touch src/userspace/boxlib/src/core/stash.c
+    mut_done src/userspace/boxlib/src/core/stash.c "logcheck mutation"
 }
 
 stash_cap_off() {
-    [ -f "$SCRATCH/stash.c.bak" ] && cp "$SCRATCH/stash.c.bak" src/userspace/boxlib/src/core/stash.c
-    sleep 1; touch src/userspace/boxlib/src/core/stash.c
+    restore src/userspace/boxlib/src/core/stash.c
 }
 
 run_stashmut() {
     echo "== stashmut: the stash of 256 put back — TT 23 and TT 24 must go red, and the strand must say why =="
     stash_cap_on; build
-    util_boot stashmut "STRICT=on CORES=4 MEM=4G" touch_test "\[TT SUMMARY\]" 60; local booted=$?
+    util_boot stashmut "STRICT=on CORES=4 MEM=4G" touch_test "\[TT SUMMARY\]"; local booted=$?
     stash_cap_off
     if [ $booted -ne 0 ]; then bad "stashmut: never reached a shell"; build; return; fi
     L="$SCRATCH/serial.stashmut.log"
@@ -5442,25 +5986,17 @@ wire_session() {
     local name=$1
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=4 MEM=4G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     local reached=0
     grep -q "BoxOS Shell" build/serial.log 2>/dev/null && reached=1
     sleep 3
     # Typed through the monitor's keyboard, not the serial line, so the wire's
     # own state cannot stop the command from landing.
-    ./tools/qemu-input.sh type "hw" >/dev/null 2>&1
-    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 4
-    ./tools/qemu-input.sh type "reboot" >/dev/null 2>&1
-    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    i=0
-    while [ $i -lt 20 ]; do
-        grep -q "Rebooting" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    type_cmd "hw"
+    sleep 1; key_press ret; sleep 4
+    type_cmd "reboot"
+    sleep 1; key_press ret
+    wait_for_line build/serial.log "Rebooting" "$WAIT_QUIET_S"
     sleep 2
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.$name.log"
@@ -5502,7 +6038,7 @@ run_wire() {
 # boot still came down the wire). That half is for the board, where a byte
 # takes 87 us and a kick finds the transmitter busy.
 wire_deaf_on() {
-    cp src/kernel/drivers/serial/serial.c "$SCRATCH/serial.c.wire.bak"
+    mutate src/kernel/drivers/serial/serial.c
     python3 - <<'EOF2'
 p = "src/kernel/drivers/serial/serial.c"
 s = open(p).read()
@@ -5511,13 +6047,11 @@ assert s.count(anchor) == 1, "wire mutation anchor missing"
 s = s.replace(anchor, "    return;   /* logcheck mutation: the ring grew and nobody told the line */\n" + anchor, 1)
 open(p, "w").write(s)
 EOF2
-    grep -q "logcheck mutation" src/kernel/drivers/serial/serial.c || { echo "wire mutation install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/drivers/serial/serial.c
+    mut_done src/kernel/drivers/serial/serial.c "logcheck mutation"
 }
 
 wire_deaf_off() {
-    [ -f "$SCRATCH/serial.c.wire.bak" ] && cp "$SCRATCH/serial.c.wire.bak" src/kernel/drivers/serial/serial.c
-    sleep 1; touch src/kernel/drivers/serial/serial.c
+    restore src/kernel/drivers/serial/serial.c
 }
 
 run_wiremut() {
@@ -5555,7 +6089,7 @@ run_wiremut() {
 run_knock() {
     echo "== knock: a keystroke rides the ring and one knock, on 16 cores and on one =="
     build
-    if ! util_boot knock16 "STRICT=on CORES=16 MEM=8G" help "Show available commands" 20; then
+    if ! util_boot knock16 "STRICT=on CORES=16 MEM=8G" help "Show available commands" "$REACT_QUIET_S"; then
         bad "knock: never reached a shell (16c)"; return
     fi
     L="$SCRATCH/serial.knock16.log"
@@ -5572,7 +6106,7 @@ run_knock() {
         && bad "knock (16c): the kernel spoke of a stall or fault" \
         || ok "knock (16c): no verdict, no panic"
 
-    if ! util_boot knock1 "STRICT=on CORES=1 MEM=2G" hw "TSC freq" 20; then
+    if ! util_boot knock1 "STRICT=on CORES=1 MEM=2G" hw "TSC freq" "$REACT_QUIET_S"; then
         bad "knock: never reached a shell (1c)"; return
     fi
     L="$SCRATCH/serial.knock1.log"
@@ -5590,7 +6124,7 @@ run_knock() {
 # The oracle measured against itself: nobody knocks. The event is in the ring
 # and no visit ever comes for it — the machine boots and is deaf.
 knock_deaf_on() {
-    cp src/kernel/core/touch/touch.c "$SCRATCH/touch.c.knock.bak"
+    mutate src/kernel/core/touch/touch.c
     python3 - <<'EOF2'
 p = "src/kernel/core/touch/touch.c"
 s = open(p).read()
@@ -5599,19 +6133,17 @@ assert s.count(anchor) == 1, "knock mutation anchor missing"
 s = s.replace(anchor, "    /* logcheck mutation: nobody knocks */\n}\n", 1)
 open(p, "w").write(s)
 EOF2
-    grep -q "logcheck mutation" src/kernel/core/touch/touch.c || { echo "knock mutation install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/core/touch/touch.c
+    mut_done src/kernel/core/touch/touch.c "logcheck mutation"
 }
 
 knock_deaf_off() {
-    [ -f "$SCRATCH/touch.c.knock.bak" ] && cp "$SCRATCH/touch.c.knock.bak" src/kernel/core/touch/touch.c
-    sleep 1; touch src/kernel/core/touch/touch.c
+    restore src/kernel/core/touch/touch.c
 }
 
 run_knockmut() {
     echo "== knockmut: nobody knocks — the machine must boot and be deaf, and the oracle must see it =="
     knock_deaf_on; build
-    util_boot knockmut "STRICT=on CORES=4 MEM=4G" help "Show available commands" 8; local booted=$?
+    util_boot knockmut "STRICT=on CORES=4 MEM=4G" help "Show available commands" "$REACT_QUIET_S"; local booted=$?
     knock_deaf_off
     if [ $booted -ne 0 ]; then bad "knockmut: never reached a shell"; build; return; fi
     L="$SCRATCH/serial.knockmut.log"
@@ -5645,11 +6177,7 @@ storm_session() {
     make run-stop >/dev/null 2>&1
     # shellcheck disable=SC2086
     make run-bg $args >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
@@ -5657,27 +6185,22 @@ storm_session() {
     sleep 3
     local MARK
     MARK=$(wc -l < build/serial.log)
-    ./tools/qemu-input.sh raw "sendkey a 5000" >/dev/null 2>&1
+    # 5000 is the monitor's own hold time in milliseconds; the seven seconds
+    # are that hold plus its delivery, and they are a property of QEMU rather
+    # than a guess about the guest.
+    mon_raw "sendkey a 5000"
     sleep 7
     # Enter: the line of a's becomes a command nobody knows, and the prompt
     # comes back. Then `reboot`, key by key through the monitor with no echo
     # check — under the mutation the echo lags the keys by design.
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    i=0
-    while [ $i -lt 60 ]; do
-        tail -n +$((MARK + 1)) build/serial.log | grep -q "Unknown command" && break
-        sleep 1; i=$((i+1))
-    done
+    key_press ret
+    wait_for_line build/serial.log "Unknown command" "$WAIT_QUIET_S" $((MARK + 1))
     sleep 1
     local k
     for k in r e b o o t ret; do
-        ./tools/qemu-input.sh key "$k" >/dev/null 2>&1
+        key_press "$k"
     done
-    i=0
-    while [ $i -lt 90 ]; do
-        grep -q "\[HALT\] Rebooting" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "\[HALT\] Rebooting" "$WAIT_QUIET_S"
     sleep 2
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.$name.log"
@@ -5744,7 +6267,7 @@ run_knockstorm() {
 # oldest events are overwritten, and the kernel must say how many — a number
 # the shell's echo and the halt account confirm.
 storm_stall_on() {
-    cp src/kernel/core/touch/touch.c "$SCRATCH/touch.c.storm.bak"
+    mutate src/kernel/core/touch/touch.c
     python3 - <<'EOF2'
 p = "src/kernel/core/touch/touch.c"
 s = open(p).read()
@@ -5758,13 +6281,11 @@ stall = ("    KnockOpen(&g_touch_irq_knock);\n"
 s = s.replace(anchor, stall, 1)
 open(p, "w").write(s)
 EOF2
-    grep -q "logcheck mutation" src/kernel/core/touch/touch.c || { echo "storm mutation install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/core/touch/touch.c
+    mut_done src/kernel/core/touch/touch.c "logcheck mutation"
 }
 
 storm_stall_off() {
-    [ -f "$SCRATCH/touch.c.storm.bak" ] && cp "$SCRATCH/touch.c.storm.bak" src/kernel/core/touch/touch.c
-    sleep 1; touch src/kernel/core/touch/touch.c
+    restore src/kernel/core/touch/touch.c
 }
 
 run_knockstormmut() {
@@ -5805,7 +6326,7 @@ run_knockstormmut() {
 run_deadline() {
     echo "== deadline: 600 timed parks answered at their deadline, on 16 cores and on one =="
     build
-    if ! util_boot deadline16 "STRICT=on CORES=16 MEM=8G" strandpark "\[SPK\] (PASS|FAIL): brigade" 60; then
+    if ! util_boot deadline16 "STRICT=on CORES=16 MEM=8G" strandpark "\[SPK\] (PASS|FAIL): brigade"; then
         bad "deadline: never reached a shell (16c)"; return
     fi
     L="$SCRATCH/serial.deadline16.log"
@@ -5816,7 +6337,7 @@ run_deadline() {
         && bad "deadline (16c): the kernel spoke of a stall or fault" \
         || ok "deadline (16c): no verdict, no panic"
 
-    if ! util_boot deadline1 "STRICT=on CORES=1 MEM=2G" strandpark "\[SPK\] (PASS|FAIL): brigade" 60; then
+    if ! util_boot deadline1 "STRICT=on CORES=1 MEM=2G" strandpark "\[SPK\] (PASS|FAIL): brigade"; then
         bad "deadline: never reached a shell (1c)"; return
     fi
     L="$SCRATCH/serial.deadline1.log"
@@ -5837,7 +6358,7 @@ run_deadline() {
 # is ever delivered. With no clock left in boxlib the timed park never returns,
 # and Nightwatch must name it: the chit fell DUE at the tick and was never kept.
 deadline_drop_on() {
-    cp src/kernel/core/touch/touch_queue.c "$SCRATCH/touch_queue.c.deadline.bak"
+    mutate src/kernel/core/touch/touch_queue.c
     python3 - <<'EOF2'
 p = "src/kernel/core/touch/touch_queue.c"
 s = open(p).read()
@@ -5846,19 +6367,17 @@ assert s.count(anchor) == 1, "deadline mutation anchor missing"
 s = s.replace(anchor, "            process_ref_dec(target);   /* logcheck mutation: the pass is dropped */\n", 1)
 open(p, "w").write(s)
 EOF2
-    grep -q "logcheck mutation" src/kernel/core/touch/touch_queue.c || { echo "deadline mutation install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/core/touch/touch_queue.c
+    mut_done src/kernel/core/touch/touch_queue.c "logcheck mutation"
 }
 
 deadline_drop_off() {
-    [ -f "$SCRATCH/touch_queue.c.deadline.bak" ] && cp "$SCRATCH/touch_queue.c.deadline.bak" src/kernel/core/touch/touch_queue.c
-    sleep 1; touch src/kernel/core/touch/touch_queue.c
+    restore src/kernel/core/touch/touch_queue.c
 }
 
 run_deadlinemut() {
     echo "== deadlinemut: the pass dropped, and the kernel must name the answer it owes =="
     deadline_drop_on; build
-    util_boot deadlinemut "STRICT=on CORES=16 MEM=8G" strandpark "ANSWER OWED|\[SPK\] (PASS|FAIL): brigade" 45; local booted=$?
+    util_boot deadlinemut "STRICT=on CORES=16 MEM=8G" strandpark "ANSWER OWED|\[SPK\] (PASS|FAIL): brigade"; local booted=$?
     deadline_drop_off
     if [ $booted -ne 0 ]; then bad "deadlinemut: never reached a shell"; build; return; fi
     L="$SCRATCH/serial.deadlinemut.log"
@@ -5892,11 +6411,7 @@ run_deadlinemut() {
 handsetdeaf_boot() {
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 40 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 1; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
@@ -5904,17 +6419,17 @@ handsetdeaf_boot() {
     sleep 3
     local MARK
     MARK=$(wc -l < build/serial.log)
-    ./tools/qemu-input.sh type "handset deaf" >/dev/null 2>&1; sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    i=0; while [ $i -lt 30 ]; do grep -q "\[HANDSET\] deaf ear on top" build/serial.log && break; sleep 1; i=$((i+1)); done
+    type_cmd "handset deaf"; sleep 1
+    key_press ret
+    wait_for_line build/serial.log "\[HANDSET\] deaf ear on top" "$WAIT_QUIET_S"
     # RAW keys, no witness: a key nobody echoes is exactly the key this case is
     # about, and the typer would retype it once main listens and hide the loss.
     local k
     for k in a b c ret; do
-        ./tools/qemu-input.sh raw "sendkey $k 30" >/dev/null 2>&1
+        mon_raw "sendkey $k 30"
         sleep 0.05
     done
-    i=0; while [ $i -lt 20 ]; do tail -n +$((MARK + 1)) build/serial.log | grep -q "\[HANDSET\] got:" && break; sleep 1; i=$((i+1)); done
+    wait_for_line build/serial.log "\[HANDSET\] got:" "$REACT_QUIET_S" $((MARK + 1))
     sleep 2
     tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$1.log"
     make run-stop >/dev/null 2>&1
@@ -5937,7 +6452,7 @@ run_handsetdeaf() {
 # The oracle measured against itself: the daemon takes a key nobody heard for
 # heard, so the deaf ear keeps the handset and the line is lost.
 handsetdeaf_blind_on() {
-    cp src/userspace/display/display.c "$SCRATCH/display.c.handsetdeaf.bak"
+    mutate src/userspace/display/display.c
     python3 - <<'EOF2'
 p = "src/userspace/display/display.c"
 s = open(p).read()
@@ -5946,13 +6461,11 @@ assert s.count(anchor) == 1, "handsetdeaf mutation anchor missing"
 s = s.replace(anchor, "        if (heard >= 0) {   /* logcheck mutation: a key nobody heard counts as heard */\n", 1)
 open(p, "w").write(s)
 EOF2
-    grep -q "logcheck mutation" src/userspace/display/display.c || { echo "handsetdeaf mutation install FAILED"; exit 1; }
-    sleep 1; touch src/userspace/display/display.c
+    mut_done src/userspace/display/display.c "logcheck mutation"
 }
 
 handsetdeaf_blind_off() {
-    [ -f "$SCRATCH/display.c.handsetdeaf.bak" ] && cp "$SCRATCH/display.c.handsetdeaf.bak" src/userspace/display/display.c
-    sleep 1; touch src/userspace/display/display.c
+    restore src/userspace/display/display.c
 }
 
 run_handsetdeafmut() {
@@ -5988,15 +6501,11 @@ unattended_boot() {   # $1 = tag, the rest = run-bg arguments
     local tag=$1; shift
     make run-stop >/dev/null 2>&1
     make run-bg "$@" >/dev/null 2>&1
-    local i=0
-    while [ $i -lt 60 ]; do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        sleep 2; i=$((i+1))
-    done
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 3
-    ./tools/qemu-input.sh type "hw" >/dev/null 2>&1
+    type_cmd "hw"
     sleep 1
-    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    key_press ret
     sleep 4
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.$tag.log"
@@ -6039,7 +6548,7 @@ run_unattended() {
 # medium refused — and the machine boots. No clock of the proof's own is
 # involved, which is what the deadline line measures.
 unattended_silence_on() {
-    cp src/kernel/drivers/disk/ahci.c "$SCRATCH/ahci.c.bak"
+    mutate src/kernel/drivers/disk/ahci.c
     python3 - <<'EOF'
 p = "src/kernel/drivers/disk/ahci.c"
 s = open(p).read()
@@ -6050,19 +6559,17 @@ mut = """        if (!port_error && 0) {   /* logcheck mutation: the disk's answ
             uint32_t outstanding = state->ncq"""
 open(p, "w").write(s.replace(anchor, mut, 1))
 EOF
-    grep -q "logcheck mutation: the disk's answer" src/kernel/drivers/disk/ahci.c || { echo "unattended silence install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/drivers/disk/ahci.c
+    mut_done src/kernel/drivers/disk/ahci.c "logcheck mutation: the disk's answer"
 }
 unattended_silence_off() {
-    [ -f "$SCRATCH/ahci.c.bak" ] && cp "$SCRATCH/ahci.c.bak" src/kernel/drivers/disk/ahci.c
-    sleep 1; touch src/kernel/drivers/disk/ahci.c
+    restore src/kernel/drivers/disk/ahci.c
 }
 
 # The wrong block: the unattended read asks for the volume's first sector
 # instead of the one the attended read fetched. The bytes must disagree, and
 # the proof must say at which byte.
 unattended_wrongblock_on() {
-    cp src/kernel/core/boardroom/boardroom.c "$SCRATCH/boardroom.c.bak"
+    mutate src/kernel/core/boardroom/boardroom.c
     python3 - <<'EOF'
 p = "src/kernel/core/boardroom/boardroom.c"
 s = open(p).read()
@@ -6071,12 +6578,10 @@ assert anchor in s, "unattended wrong-block anchor missing"
 mut = """    error_t sub = BoardroomReadAsync(seat, 2048, sectors, dma,   /* logcheck mutation: a different block than the one compared against */"""
 open(p, "w").write(s.replace(anchor, mut, 1))
 EOF
-    grep -q "logcheck mutation: a different block" src/kernel/core/boardroom/boardroom.c || { echo "unattended wrong-block install FAILED"; exit 1; }
-    sleep 1; touch src/kernel/core/boardroom/boardroom.c
+    mut_done src/kernel/core/boardroom/boardroom.c "logcheck mutation: a different block"
 }
 unattended_wrongblock_off() {
-    [ -f "$SCRATCH/boardroom.c.bak" ] && cp "$SCRATCH/boardroom.c.bak" src/kernel/core/boardroom/boardroom.c
-    sleep 1; touch src/kernel/core/boardroom/boardroom.c
+    restore src/kernel/core/boardroom/boardroom.c
 }
 
 run_unattendedmut() {
@@ -6173,6 +6678,10 @@ case "${1:-both}" in
     paintmut) run_paintmut ;;
     finish)   run_finish ;;
     finishmut) run_finishmut ;;
+    overtake) run_overtake ;;
+    overtakemut) run_overtakemut ;;
+    orderlife) run_orderlife ;;
+    orderlifemut) run_orderlifemut ;;
     batchfail) run_batchfail ;;
     batchfailmut) run_batchfailmut ;;
     caret)    run_caret ;;
@@ -6181,10 +6690,15 @@ case "${1:-both}" in
     growcut)  run_growcut ;;
     growmut)  run_growmut ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
+LOGCHECK_FINISHED=1
 echo
 echo "logcheck: $PASS passed, $FAIL failed"
-[ "$FAIL" = 0 ]
+if [ "$HARNESS" != 0 ]; then
+    echo "logcheck: $HARNESS harness failure(s) — this run could not talk to the"
+    echo "          machine it was judging, so its verdicts are not evidence."
+fi
+[ "$FAIL" = 0 ] && [ "$HARNESS" = 0 ]

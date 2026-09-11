@@ -1,4 +1,3 @@
-// FNV-1a checksums over MPFR-CR cos for the deterministic x stream — GENERATED.
 static const unsigned long long kCosN    = 20000ULL;
 static const unsigned long long kCosSeed = 0xC2B2AE3D27D4EB4FULL;
 static const int kCosElo = -20;

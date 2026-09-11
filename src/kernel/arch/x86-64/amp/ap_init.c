@@ -10,83 +10,37 @@
 #include "cpuid.h"
 
 void ap_entry_c(uint64_t core_index, uint64_t stack_top) {
-    // per_core_init_ap sets up:
-    //   - Per-core GDT (with per-core TSS descriptor)
-    //   - Per-core TSS (rsp0, IST stacks with guard pages)
-    //   - FPU/SSE/AVX
-    //   - SYSCALL MSRs (EFER.SCE+NXE, STAR, LSTAR, SFMASK)
-    //   - PerCpuData + MSR_KERNEL_GS_BASE (for swapgs)
-    //   - LAPIC enable + LAPIC timer (100Hz periodic)
     per_core_init_ap((uint8_t)core_index, stack_top);
 
-    /* Apply MADT Local APIC NMI entries to this AP's LVT (mirrors the
-     * BSP step in irqchip_init). Without it, NMI watchdogs only fire on
-     * the BSP. Safe no-op when running on PIC fallback. */
     irqchip_apply_lapic_nmi_self();
 
-    // IDT is shared across all cores (single static table)
     idt_load();
 
-    // Per-core scheduler + idle process.
-    // MUST be before sti — LAPIC timer is already counting and will fire
-    // as soon as interrupts are enabled, calling schedule().
     scheduler_init_core((uint8_t)core_index);
     idle_process_init_core((uint8_t)core_index);
 
-    /* Publish online=true with __ATOMIC_RELEASE so the BSP's amp_boot_aps
-     * acquire-load — and every peer that asks amp_core_online() — observes a
-     * fully-initialized per-core state (GDT/TSS/IST/LAPIC/timer/notify MSRs)
-     * before they see this flag set. On x86 TSO the prior plain stores are
-     * already ordered, but the explicit release pairs with the explicit
-     * acquire on read sites so the discipline is portable and machine-
-     * checkable rather than implicit. */
     __atomic_store_n(&g_amp.cores[core_index].online, (uint8_t)1, __ATOMIC_RELEASE);
 
     kprintf("[AMP] Core %u online (LAPIC ID %u, role=%s)\n",
             (uint32_t)core_index, lapic_get_id(),
             g_amp.cores[core_index].is_kcore ? "K-Core" : "App-Core");
 
-    /* Per-AP CPU identity + microcode revision log. Operator-visible
-     * record of exactly what silicon services this core; lets the boot
-     * log surface heterogeneous packages (different family/model on
-     * different cores) and stale microcode on individual sockets. The
-     * cpu_intersect_features_ap call earlier emits a separate "feature
-     * drop" line if this AP forced any kernel-wide capability off. */
     char prefix[24];
     ksnprintf(prefix, sizeof(prefix), "AP %u [%c]",
               (unsigned)core_index,
               g_amp.cores[core_index].is_kcore ? 'K' : 'A');
     cpu_log_identity(prefix);
 
-    // K-Cores enter the guide loop — processes Pockets from MPSC queue.
-    // App Cores idle until the scheduler assigns user processes.
     if (g_amp.cores[core_index].is_kcore) {
-        /* See main.c BSP path for the activation-handshake rationale.
-         * On real-HW this flips S_CET.SH_STK_EN=1 for this CPU and
-         * JMPs into kcore_run_loop; on TCG it degrades to a direct
-         * call. K-Cores never context switch processes so the per-CPU
-         * PL0_SSP from cet_lifecycle_init_supervisor_ssp is the
-         * permanent supervisor SSP for this core. */
         extern void cet_supv_shstk_activate_and_jump(void (*)(void));
         cet_supv_shstk_activate_and_jump(kcore_run_loop);
-        /* unreachable */
     }
 
-    /* App Core idle hand-off, wrapped in the same SH_STK_EN activation
-     * pattern. The app_core_idle target is __noreturn (sti + hlt-loop);
-     * future LAPIC timer / IPI_WAKE interrupts wake it into the scheduler
-     * which then context-switches via task_switch_to whose SAVE/RESTORE
-     * macros consult ctx.pl0_ssp once g_cet_supv_active=1. */
     extern void cet_supv_shstk_activate_and_jump(void (*)(void));
     extern void app_core_idle_loop(void);
     cet_supv_shstk_activate_and_jump(app_core_idle_loop);
-    /* unreachable */
 }
 
-/* App Core idle target — exposed as a non-static function so the
- * activation handshake's JMP-through-register operand can resolve it.
- * Marked noreturn because the only exit is via interrupt (which IRETQs
- * directly back into the scheduler, not via RET into here). */
 __attribute__((noreturn))
 void app_core_idle_loop(void) {
     __asm__ volatile("sti");

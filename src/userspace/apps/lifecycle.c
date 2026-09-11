@@ -1,11 +1,3 @@
-/*
- * lifecycle — sanity-check for the new kernel-published Touch events:
- *   process:spawned, process:died, system:shutdown/reboot, usb:connect.
- *
- * Subscribes (REST) to the lifecycle tags, spawns a short-lived child,
- * and prints what arrives. End-to-end verification that the kernel
- * publish call sites and userspace tag spelling agree.
- */
 
 #include "box/touch.h"
 #include "box/debug.h"
@@ -14,13 +6,21 @@
 #include "box/core/result.h"
 #include "box/string.h"
 
+#define LIFECYCLE_OWED_QUIET_MS   5000u
+#define LIFECYCLE_USB_LOOK_MS      300u
+
+static bool next_of_two(TouchTag a, TouchTag b, Touch *out, uint32_t quiet_ms)
+{
+    if (touch_try_pop_tag(a, out)) return true;
+    if (touch_try_pop_tag(b, out)) return true;
+    if (touch_await(a, out, quiet_ms) == 0) return true;
+    return touch_try_pop_tag(b, out);
+}
+
 int main(void)
 {
     CabinInfo *ci = cabin_info();
 
-    /* Child role: just exit. The parent's subscribers should observe
-     * a process:spawned (from our own creation) followed by a
-     * process:died when we exit below. */
     if (ci && ci->spawner_pid != 0 && ci->spawner_pid != 2) {
         kdbg_print("[LIFECYCLE child %lu] hello & exit", (unsigned long)ci->spawner_pid);
         exit(0);
@@ -28,11 +28,6 @@ int main(void)
 
     kdbg_print("[LIFECYCLE] subscribing to process:spawned + process:died");
 
-    /* Claimed first and drained last: a Touch nobody holds is a Touch nobody
-     * receives, so the subscription has to exist before the thing it is
-     * waiting for happens. Nothing here fails when no USB device is plugged
-     * during the run — that is the ordinary case, and the point of this claim
-     * is to report an arrival when there is one, not to demand one. */
     TouchTag usb_arrived = TOUCH_TAG_ID(TOUCH_TAG_USB_ARRIVED);
     TouchTag usb_left    = TOUCH_TAG_ID(TOUCH_TAG_USB_LEFT);
     int usb_watching = (touch_claim(usb_arrived, TOUCH_REST, 0, 0) == 0) &&
@@ -63,14 +58,14 @@ int main(void)
     }
     kdbg_print("[LIFECYCLE] spawned child pid=%d", child);
 
-    /* Drain spawned + died for our child (and any unrelated lifecycle
-     * traffic that happens to land in our ring during the window). */
     int saw_spawn = 0, saw_die = 0;
-    for (int i = 0; i < 60 && (!saw_spawn || !saw_die); i++) {
+    while (!saw_spawn || !saw_die) {
         Touch t;
-        int rc = touch_await(spawned_tag, &t, 100);
-        if (rc == 0) {
-            const uint8_t *p = t.payload;
+        if (!next_of_two(spawned_tag, died_tag, &t, LIFECYCLE_OWED_QUIET_MS))
+            break;
+
+        const uint8_t *p = t.payload;
+        if (t.tag_id == spawned_tag) {
             uint32_t pid = 0, parent = 0;
             if (t.payload_len >= 8) {
                 memcpy(&pid,    p + 0, 4);
@@ -79,11 +74,8 @@ int main(void)
             kdbg_print("[LIFECYCLE] saw spawn pid=%u parent=%u tagid=%u",
                        pid, parent, (unsigned)t.tag_id);
             if ((int)pid == child) saw_spawn = 1;
-        }
-        rc = touch_await(died_tag, &t, 100);
-        if (rc == 0) {
-            const uint8_t *p = t.payload;
-            uint32_t pid = 0;
+        } else if (t.tag_id == died_tag) {
+            uint32_t pid   = 0;
             int32_t  exitc = 0;
             if (t.payload_len >= 8) {
                 memcpy(&pid,   p + 0, 4);
@@ -97,24 +89,12 @@ int main(void)
     touch_release(spawned_tag);
     touch_release(died_tag);
 
-    /* Whatever USB arrived or left while the above was running.
-     *
-     * One await, and the label comes from t.tag_id — not from which call
-     * returned. touch_await takes a tag to wait ON, but what it hands back is
-     * the next Touch in this process's ring whichever tag it carries, so a
-     * departure will happily come back out of a call that named usb:arrived.
-     * Labelling by call site produced exactly that: a device being plugged IN
-     * and reported as having left. The event knows what it is; ask it. */
     if (usb_watching) {
         int seen = 0;
-        int quiet = 0;
-        for (int i = 0; i < 32; i++) {
+        for (;;) {
             Touch t;
-            if (touch_await(usb_arrived, &t, 100) != 0) {
-                if (++quiet >= 3) break;
-                continue;
-            }
-            quiet = 0;
+            if (!next_of_two(usb_arrived, usb_left, &t, LIFECYCLE_USB_LOOK_MS))
+                break;
 
             TouchUsbDevice d;
             memset(&d, 0, sizeof(d));

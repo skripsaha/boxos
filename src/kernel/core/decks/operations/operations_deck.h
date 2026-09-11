@@ -7,7 +7,6 @@
 
 #define OPERATIONS_DECK_ID DECK_OPERATIONS
 
-/* Manifest opcodes (used by operations_ops.c handlers + boxlib wrappers). */
 #define OP_BUF_MOVE     0x01
 #define OP_BUF_FILL     0x02
 #define OP_BUF_XOR      0x03
@@ -21,4 +20,4 @@
 
 error_t OperationsDeckRegister(void);
 
-#endif /* OPERATIONS_DECK_H */
+#endif

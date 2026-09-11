@@ -310,7 +310,6 @@ const char* ErrorString(error_t err) {
         case ERR_KERNEL_LOAD_FAILED:
             return "Kernel load failed";
 
-        // TagFS Core Errors
         case ERR_TAGFS_NOT_INITIALIZED:
             return "TagFS not initialized";
         case ERR_TAGFS_CORRUPTED:
@@ -344,7 +343,6 @@ const char* ErrorString(error_t err) {
         case ERR_TAGFS_RECOVERY_FAILED:
             return "TagFS recovery failed";
 
-        // TagFS Module Errors
         case ERR_DISKBOOK_NOT_INITIALIZED:
             return "DiskBook not initialized";
         case ERR_DISKBOOK_FULL:
@@ -363,7 +361,7 @@ const char* ErrorString(error_t err) {
             return "DiskBook write failed";
         case ERR_DISKBOOK_READ_FAILED:
             return "DiskBook read failed";
-        
+
         case ERR_COW_NOT_INITIALIZED:
             return "CoW snapshots not initialized";
         case ERR_COW_SNAPSHOT_EXISTS:
@@ -376,7 +374,7 @@ const char* ErrorString(error_t err) {
             return "CoW allocation failed";
         case ERR_COW_RESTORE_FAILED:
             return "Snapshot restore failed";
-        
+
         case ERR_DEDUP_NOT_INITIALIZED:
             return "Dedup not initialized";
         case ERR_DEDUP_HASH_COLLISION:
@@ -387,7 +385,7 @@ const char* ErrorString(error_t err) {
             return "Dedup GC failed";
         case ERR_DEDUP_REGISTER_FAILED:
             return "Dedup register failed";
-        
+
         case ERR_SELF_HEAL_NOT_INITIALIZED:
             return "Self-heal not initialized";
         case ERR_SELF_HEAL_CORRUPTION_DETECTED:
@@ -398,14 +396,14 @@ const char* ErrorString(error_t err) {
             return "Self-heal mirror failed";
         case ERR_SELF_HEAL_SCRUB_FAILED:
             return "Self-heal scrub failed";
-        
+
         case ERR_BOXHASH_INVALID_CONTEXT:
             return "BoxHash invalid context";
         case ERR_BOXHASH_VERIFICATION_FAILED:
             return "BoxHash verification failed";
         case ERR_BOXHASH_KEY_NOT_SET:
             return "BoxHash key not set";
-        
+
         case ERR_BRAID_NOT_INITIALIZED:
             return "Braid not initialized";
         case ERR_BRAID_DISK_OFFLINE:

@@ -1,22 +1,3 @@
-/*
- * print_stress — concurrent printf stress test for the per-strand print-state
- * fix (boxlib print.c). 16 execution contexts (main, id 0, + 15 spawned
- * strands, id 1..15) synchronize on a busy-spin join-barrier — NOT
- * addr_park, so every core lands in its printf loop at the same instant —
- * then each hammers ITERS printf calls with a strand-unique pattern.
- *
- * Grading is external (serial-log inspection):
- *   (1) no PANIC / #PF anywhere in the run
- *   (2) exactly STRAND_COUNT*ITERS "[PS-*]" lines total (no drops)
- *   (3) each strand's own iteration sequence 0..ITERS-1 is complete, in
- *       order and has no gaps (no intra-strand tearing)
- *
- * printf has no field-width specifiers (BoxOS's printf only parses
- * s/d/i/u/x/X/c/p/%/%color plus the l/ll/z length modifiers), so the fixed
- * 2- and 8-digit columns are zero-padded by hand before being passed
- * through %s — this exercises the exact print.c code path under test
- * without needing (or silently mis-parsing) an unsupported format spec.
- */
 
 #include "box/print.h"
 #include "box/strand.h"
@@ -25,11 +6,11 @@
 #include "box/system.h"
 #include "box/clock.h"
 
-#define STRAND_COUNT 16u   /* main (id 0) + 15 spawned workers (id 1..15) */
+#define STRAND_COUNT 16u
 #define ITERS        2000u
 
-static volatile uint32_t g_barrier_count = 0;   /* join-barrier: busy-spin, not addr_park */
-static volatile uint32_t g_done_count    = 0;   /* strands finished their printf loop */
+static volatile uint32_t g_barrier_count = 0;
+static volatile uint32_t g_done_count    = 0;
 
 static void barrier_wait(void)
 {
@@ -92,17 +73,6 @@ int main(void)
     barrier_wait();
     run_pattern(0);
 
-    /* Join: park until every strand (main included) has recorded done.
-     * Re-read the live value right before each park so a decrement we
-     * missed returns immediately instead of sleeping on a stale count.
-     *
-     * The guard is a SILENCE watchdog on the CLOCK, not an iteration
-     * count: with the console-lane backpressure a strand finishes only
-     * when its output has actually rendered, so on a slow stand (16 TCG
-     * vCPUs on an oversubscribed host) an honest run takes minutes — and
-     * parks return early under wake-bucket noise, so counting parks would
-     * count nothing. Slow-but-moving is progress; only ten real minutes
-     * with NO strand finishing is a hang. */
     uint32_t cur;
     uint32_t last_done      = 0;
     uint64_t last_change_ms = clock_uptime_ms();

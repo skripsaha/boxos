@@ -1,28 +1,10 @@
-/*
- * persist — two-phase TagFS persistence verification.
- *
- * Phase A (no args / "write"):
- *   creates `_persist_test.txt` tagged "persist", writes a known marker
- *   (16 bytes: magic + sequence + checksum), exits. User then runs
- *   `bye` (or `reboot`) and re-launches BoxOS. The disk image is NOT
- *   formatted on boot — TagFS replays from the existing image.
- *
- * Phase B ("verify"):
- *   re-opens the file by name, reads back the 16 bytes, checks magic
- *   and checksum. PASS means TagFS journaling + dirty-page flush
- *   actually committed the writes to the underlying disk before halt.
- *
- * Why this matters: "OS that loses your file on shutdown" is not a
- * production OS. This is the foundation test before async storage —
- * we need to know the existing sync path is correctness-clean.
- */
 
 #include "box/file.h"
 #include "box/debug.h"
 #include "box/string.h"
 
 #define PERSIST_NAME    "_persist_test"
-#define PERSIST_MAGIC   0x42504552u   /* 'BPER' = Box PERsist */
+#define PERSIST_MAGIC   0x42504552u
 #define PERSIST_BYTES   16
 
 typedef struct __attribute__((packed)) {
@@ -34,8 +16,6 @@ typedef struct __attribute__((packed)) {
 
 static uint32_t fold_checksum(uint32_t magic, uint32_t seq)
 {
-    /* Trivial mix — strong enough for "did the bytes survive a reboot
-     * intact?" without dragging in a hash library. */
     uint32_t x = magic ^ (seq * 2654435761u);
     x ^= x >> 16;
     return x * 0x85ebca6b;
@@ -109,18 +89,12 @@ static int do_verify(void)
 
 int main(void)
 {
-    /* No real arg parsing — the shell launches us via `proc_exec` and
-     * doesn't pass argv yet. Mode is decided by whether the marker
-     * already exists: if not, write; if yes, verify. Idempotent enough
-     * for a manual reboot loop. */
     uint32_t   fids[4];
     file_info_t infos[4];
     int found = find_file_by_name(PERSIST_NAME, fids, infos, 4);
 
     if (found <= 0) {
-        /* First run after a fresh boot or after delete — write phase. */
-        return do_write(/*sequence=*/1);
+        return do_write(1);
     }
-    /* File exists — assume reboot has happened, verify phase. */
     return do_verify();
 }

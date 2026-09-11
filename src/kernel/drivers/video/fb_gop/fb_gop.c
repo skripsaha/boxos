@@ -1,29 +1,3 @@
-/*
- * fb_gop.c — UEFI GOP framebuffer backend.
- *
- * Surface model:
- *   shadow buffer (WB DRAM, owned by this TU)
- *      │  rendered glyphs in device pixel format
- *      ▼
- *   VRAM (WC-mapped, owned by firmware/GPU)
- *      • flushed via SSE2 movntdq + sfence
- *
- * All Canvas-visible operations (DrawCells, Scroll, FillRow) write to the
- * shadow only; Present is the single point that touches VRAM.  This keeps
- * the WC sfence stride large (one fence covers an entire damage rectangle)
- * and lets multiple intra-batch ops coalesce into one NT blit.
- *
- * Caret: a 2-pixel underline rendered into shadow at (col, row+FONT_H-2).
- * Canvas already brings the old caret cell into the dirty range before
- * commit, so DrawCells repaints it; DrawCaret then overlays the new caret
- * — both end up in the same Present call.
- *
- * Degraded mode: if shadow allocation fails (low memory, e.g. PMM
- * exhaustion under 64 MB QEMU runs), DrawCells writes directly to VRAM
- * using volatile uint32_t stores.  Present becomes a no-op.  Scroll
- * fallback is a VRAM-to-VRAM memmove (slow but correct).  No SSE NT
- * blits are used in degraded mode because src and dst alias.
- */
 
 #include "fb_gop.h"
 #include "fb_pixel.h"
@@ -35,20 +9,17 @@
 typedef struct {
     DisplayBackend    base;
 
-    volatile uint8_t *vram;        /* VRAM base (WC-mapped)              */
-    uint8_t          *shadow;      /* shadow base (WB, NULL = degraded)  */
+    volatile uint8_t *vram;
+    uint8_t          *shadow;
     uint32_t          width;
     uint32_t          height;
-    uint32_t          stride;       /* bytes per scanline                */
-    uint32_t          format;       /* FB_FORMAT_*                       */
-    uint32_t          text_h;       /* rows*FONT_H — visible text height */
+    uint32_t          stride;
+    uint32_t          format;
+    uint32_t          text_h;
 } FbGopState;
 
 static FbGopState s_gop;
 
-/* =========================================================================
- *  Low-level memory operations
- * ========================================================================= */
 
 static inline void fb_memmove_qw(void *dst, const void *src, size_t bytes)
 {
@@ -76,12 +47,6 @@ static inline void fb_memset32(void *dst, uint32_t value, size_t count)
                      : "memory");
 }
 
-/*
- * fb_blit_nt — SSE2 non-temporal blit shadow → VRAM (4 × movntdq per
- * 64-byte chunk).  Bypasses CPU cache; ideal for WC-mapped framebuffer
- * memory.  Trailing tail under 64 bytes falls back to plain 32/8-bit
- * stores so we keep correctness even at odd stride sizes.
- */
 __attribute__((target("sse2")))
 static void fb_blit_nt(volatile uint8_t *dst, const uint8_t *src, size_t bytes)
 {
@@ -107,9 +72,6 @@ static void fb_blit_nt(volatile uint8_t *dst, const uint8_t *src, size_t bytes)
     __asm__ volatile("sfence" ::: "memory");
 }
 
-/* =========================================================================
- *  Glyph rendering — writes one 8×16 cell into shadow (or VRAM in degraded)
- * ========================================================================= */
 
 static void render_glyph(FbGopState *s, uint32_t col, uint32_t row,
                          char ch, uint32_t fg_rgb, uint32_t bg_rgb)
@@ -178,9 +140,6 @@ static void fill_pixel_strip(FbGopState *s, uint32_t px_x0, uint32_t px_x1,
     }
 }
 
-/* =========================================================================
- *  Backend vtable
- * ========================================================================= */
 
 static void op_DrawCells(DisplayBackend *be,
                          uint32_t row, uint32_t col_lo, uint32_t col_hi,
@@ -221,7 +180,7 @@ static void op_Scroll(DisplayBackend *be, uint32_t dy)
 static void op_FillRow(DisplayBackend *be, uint32_t row, uint32_t fg, uint32_t bg)
 {
     FbGopState *s = (FbGopState *)be;
-    (void)fg;                          /* a filled row is all background */
+    (void)fg;
     if (row >= be->rows) return;
     fill_pixel_strip(s, 0, s->width, row * FONT_H, FONT_H,
                      FbPixelEncode(bg, s->format));
@@ -230,7 +189,7 @@ static void op_FillRow(DisplayBackend *be, uint32_t row, uint32_t fg, uint32_t b
 static void op_Present(DisplayBackend *be, uint32_t row_lo, uint32_t row_hi)
 {
     FbGopState *s = (FbGopState *)be;
-    if (!s->shadow) return;                    /* degraded: writes are direct */
+    if (!s->shadow) return;
     if (row_hi <= row_lo) return;
     if (row_hi > be->rows) row_hi = be->rows;
 
@@ -270,9 +229,6 @@ static void op_DrawCaret(DisplayBackend *be, uint32_t col, uint32_t row, uint32_
     }
 }
 
-/* =========================================================================
- *  Initialisation
- * ========================================================================= */
 
 DisplayBackend *FbGopBackendInit(uint64_t phys_addr,
                                  uint32_t width, uint32_t height,
@@ -297,9 +253,6 @@ DisplayBackend *FbGopBackendInit(uint64_t phys_addr,
     s_gop.base.rows = height / FONT_H;
     s_gop.text_h    = s_gop.base.rows * FONT_H;
 
-    /* Caps stay at 0 for GOP — there is no portable pan-display interface.
-     * Future i915/amdgpu drivers will report DISP_CAP_HW_SCROLL after
-     * binding their KMS plane to this surface. */
     s_gop.base.caps      = 0;
     s_gop.base.DrawCells = op_DrawCells;
     s_gop.base.Scroll    = op_Scroll;

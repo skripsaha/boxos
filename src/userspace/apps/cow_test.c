@@ -1,18 +1,3 @@
-/*
- * cow_test — CoW + snapshot semantic test.
- *
- *   1. create file, write pattern A
- *   2. snap_create — capture frozen view
- *   3. write pattern B (triggers CoW redirect to NEW block)
- *   4. read live file → must be pattern B
- *   5. snap_list  — confirm snapshot present
- *   6. snap_delete → frees redirected OLD blocks
- *   7. snap_list  — confirm gone
- *   8. live read still pattern B
- *
- * Pass means: write paths see fresh content, snapshot list reflects
- * lifecycle, delete completes without corrupting the live file.
- */
 
 #include "box/file.h"
 #include "box/debug.h"
@@ -45,7 +30,6 @@ int main(void)
         return 1;
     }
 
-    /* Snap before second write — second write must CoW. */
     uint32_t snap_id = 0;
     if (snap_create("cow_pre_b", (uint32_t)fid, &snap_id) != 0 || snap_id == 0) {
         kdbg_print("[COW] snap_create FAIL");
@@ -75,10 +59,6 @@ int main(void)
     }
     kdbg_print("[COW] live read returns post-CoW pattern B (OK)");
 
-    /* Buffer sized well above the number of snapshots earlier boot phases
-     * (e.g. the box::tagfs::snapshot CXX tests) may leave in the global
-     * list — an 8-entry window could exclude our own snapshot and spuriously
-     * fail "snap not in list" depending on boot/test ordering (UEFI). */
     uint32_t ids[64];
     uint32_t count = 0;
     if (snap_list(ids, 64, &count) != 0) {
@@ -102,7 +82,6 @@ int main(void)
         return 1;
     }
 
-    /* Live file should still be intact after snapshot deletion. */
     if (fread((uint32_t)fid, 0, rbuf, COW_BYTES) != COW_BYTES) {
         kdbg_print("[COW] read after snap_delete FAIL");
         delete((uint32_t)fid);
@@ -114,7 +93,6 @@ int main(void)
         return 1;
     }
 
-    /* List again — snapshot should be gone. */
     count = 0;
     snap_list(ids, 64, &count);
     bool still_there = false;

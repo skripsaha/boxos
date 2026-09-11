@@ -7,27 +7,16 @@
 #include "../../core/error/error.h"
 #include "../box_hash/box_hash.h"
 
-// Tag-Aware Deduplication with BoxHash Checksums
 
 #define DEDUP_MAGIC              0x44454450
 #define DEDUP_VERSION            1
 #define DEDUP_HASH_BUCKETS       8192
 #define DEDUP_MAX_REFS           0xFFFF
-#define DEDUP_GC_THRESHOLD_SECS  3600   // Evict unreferenced entries older than 1 hour
+#define DEDUP_GC_THRESHOLD_SECS  3600
 
-// Use BoxHash for block identification
 typedef BoxHash DedupHash;
 #define DEDUP_HASH_BYTES      BOX_HASH_BYTES
 
-/* An entry lives in TWO chains at once, because the index is asked two
- * different questions and only ever had an answer for the first:
- *
- *   "which block already holds this content?"  -> keyed by hash   (`next`)
- *   "which entry describes this block?"        -> keyed by block  (`block_next`)
- *
- * The second question is the one every free path asks, and without a key for
- * it the only answer was a scan of all 8192 buckets per block — which is why
- * the delete path never asked it at all. */
 typedef struct DedupEntry {
     DedupHash hash;
     uint32_t physical_block;
@@ -56,9 +45,9 @@ typedef struct {
 typedef struct {
     uint32_t magic;
     uint32_t version;
-    BoxHashContext hash_ctx;      // BoxHash context with salt+key
-    DedupEntry **hash_table;      // keyed by content hash
-    DedupEntry **block_table;     // keyed by physical block, same bucket count
+    BoxHashContext hash_ctx;
+    DedupEntry **hash_table;
+    DedupEntry **block_table;
     uint32_t hash_buckets;
     uint32_t entry_count;
     uint64_t last_gc_time;
@@ -68,29 +57,15 @@ typedef struct {
     bool initialized;
 } DedupState;
 
-// Public API
 error_t TagFS_DedupInit(void);
 void TagFS_DedupShutdown(void);
 
 error_t TagFS_DedupCheck(const uint8_t *block_data, uint32_t *existing_block, bool *is_duplicate);
 
-/* Record `physical_block` as holding `block_data`. Idempotent in the reference
- * count: registering a block that is already indexed re-keys it to the content
- * it now holds and leaves ref_count alone. Growing the count is AddRef's job
- * and nothing else's — a block written twice by its only owner has one owner,
- * and a count that climbed there would pin the entry forever. */
 error_t TagFS_DedupRegister(uint32_t physical_block, const uint8_t *block_data, uint32_t tag_context);
 
-/* Take a second (third, ...) reference on an already-indexed block. Called
- * exactly where a new reference is created: the duplicate branch of
- * TagFS_DedupAllocBlock, where a file is pointed at another file's block. */
 error_t TagFS_DedupAddRef(uint32_t physical_block);
 
-/* Drop one reference to `physical_block`. `may_reclaim` (optional) answers the
- * only question the allocator has: whether the physical block may now be handed
- * back. It is false while another file still shares the block — the index is
- * the sole record of that sharing, so freeing past it would corrupt a live
- * file. Unindexed blocks and a shut-down index both answer true. */
 error_t TagFS_DedupUnregister(uint32_t physical_block, bool *may_reclaim);
 error_t TagFS_DedupAllocBlock(const uint8_t *block_data, uint32_t *allocated_block, int *is_duplicate, uint32_t tag_context);
 
@@ -108,4 +83,4 @@ error_t TagFS_DedupPrintStats(void);
 bool TagFS_DedupIsInitialized(void);
 DedupHash TagFS_DedupComputeHash(const uint8_t *data, uint32_t size);
 
-#endif // DEDUP_H
+#endif

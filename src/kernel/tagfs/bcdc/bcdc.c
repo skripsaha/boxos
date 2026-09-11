@@ -3,50 +3,18 @@
 #include "../../../kernel/drivers/timer/rtc.h"
 #include "../../../kernel/config/kernel_config.h"
 
-/* ============================================================================
- *  BCDC — dynamic redesign (2026-04-29)
- *
- *  RAM model:
- *    • g_dicts[] is a slot-array of POINTERS (256 × 8 B = 2 KB), not 2 MB
- *      of pre-baked structs. Each dictionary is kmalloc'd on first use and
- *      freed on eviction. Unused slots cost zero.
- *    • Policies live in a growable kmalloc'd table (starts at
- *      CONFIG_BCDC_POLICY_INITIAL, doubles on demand up to
- *      CONFIG_BCDC_POLICY_MAX).
- *
- *  Concurrency model:
- *    • g_table_lock: protects ADD/REMOVE on g_dicts[] and the policy table
- *      resize. Compress/decompress callers do NOT hold it for the duration
- *      of compression.
- *    • per-dict spinlock: covers data-buffer mutation (slide, pattern
- *      preservation). The hot path (BcdcLZ_Compress / Decompress) reads the
- *      buffer without taking the lock — buffers are append-only mostly and
- *      only the pattern preservation in BcdcUpdateDictionary needs it.
- *    • stats: every counter is _Atomic, no lock for increment/read.
- *
- *  Speed model:
- *    • LZ77 match finder uses a 4096-bucket hash chain (head[] + chain[])
- *      keyed on a 3-byte fingerprint. Average O(n) per block instead of
- *      the previous O(n²) brute-force scan.
- * ============================================================================ */
 
-/* ------------------------------------------------------------------ */
-/* Global state                                                        */
-/* ------------------------------------------------------------------ */
 
-static BcdcDictionary *g_dicts[CONFIG_BCDC_MAX_DICTS];   /* lazy slots */
+static BcdcDictionary *g_dicts[CONFIG_BCDC_MAX_DICTS];
 static spinlock_t      g_table_lock;
 
-static BcdcPolicy *g_policies          = NULL;           /* kmalloc'd */
+static BcdcPolicy *g_policies          = NULL;
 static uint32_t    g_policy_capacity   = 0;
 static uint32_t    g_policy_count      = 0;
 
 static BcdcStats   g_stats;
 static bool        g_initialized       = false;
 
-/* ------------------------------------------------------------------ */
-/* Checksum (CRC32 — IEEE 802.3 polynomial)                            */
-/* ------------------------------------------------------------------ */
 
 uint32_t BcdcComputeChecksum(const void* data, uint16_t size) {
     const uint32_t poly = 0xEDB88320;
@@ -66,9 +34,6 @@ bool BcdcVerifyChecksum(const void* data, uint16_t size, uint32_t expected) {
     return BcdcComputeChecksum(data, size) == expected;
 }
 
-/* ------------------------------------------------------------------ */
-/* Init / shutdown                                                     */
-/* ------------------------------------------------------------------ */
 
 static error_t bcdc_grow_policies_locked(uint32_t want_cap) {
     if (want_cap <= g_policy_capacity) return OK;
@@ -124,8 +89,6 @@ error_t BcdcInit(void) {
     memset(g_dicts, 0, sizeof(g_dicts));
     memset(&g_stats, 0, sizeof(g_stats));
 
-    /* Default dictionary (slot 0) — eagerly allocated so the legacy
-     * dictionary_id=0 sentinel always resolves to a valid buffer. */
     spin_lock(&g_table_lock);
     error_t err = bcdc_alloc_dict_locked(0, 0, CONFIG_BCDC_DEFAULT_DICT_SIZE);
     if (err != OK) {
@@ -160,27 +123,18 @@ void BcdcShutdown(void) {
     debug_printf("[Bcdc] Shutdown complete\n");
 }
 
-/* ------------------------------------------------------------------ */
-/* Dictionary management                                                */
-/* ------------------------------------------------------------------ */
 
 error_t BcdcCreateDictionary(uint8_t* dict_id, uint16_t tag_id) {
     if (!g_initialized || !dict_id) return ERR_NOT_INITIALIZED;
 
     spin_lock(&g_table_lock);
 
-    /* First, look for an empty slot. Use a sentinel so we can tell apart
-     * "found a slot" from "all slots taken". The previous version
-     * initialised slot=0 and then tested `slot >= MAX`, which never
-     * triggered — meaning a full table silently overwrote slot 0 (the
-     * default dictionary). That bug is fixed here. */
     uint16_t slot = CONFIG_BCDC_MAX_DICTS;
     for (uint16_t i = 1; i < CONFIG_BCDC_MAX_DICTS; i++) {
         if (g_dicts[i] == NULL) { slot = i; break; }
     }
 
     if (slot == CONFIG_BCDC_MAX_DICTS) {
-        /* Pick LRU among slots >0 (slot 0 is the default — never evict). */
         uint64_t oldest = UINT64_MAX;
         uint16_t victim = CONFIG_BCDC_MAX_DICTS;
         for (uint16_t i = 1; i < CONFIG_BCDC_MAX_DICTS; i++) {
@@ -191,7 +145,7 @@ error_t BcdcCreateDictionary(uint8_t* dict_id, uint16_t tag_id) {
         }
         if (victim == CONFIG_BCDC_MAX_DICTS) {
             spin_unlock(&g_table_lock);
-            return ERR_NO_MEMORY;        /* table empty but somehow none active */
+            return ERR_NO_MEMORY;
         }
         bcdc_free_dict_locked(victim);
         slot = victim;
@@ -246,12 +200,8 @@ void BcdcUpdateDictionaryUsage(unsigned int dict_id) {
     __atomic_store_n(&d->last_used, rtc_get_unix64(), __ATOMIC_RELAXED);
 }
 
-/* Slide-window dictionary update. Holds only the per-dict lock. */
 static void BcdcUpdateDictionary(BcdcDictionary *dict, const uint8_t* data, uint16_t size) {
     if (!dict || !dict->data || !data || size < 4) return;
-    /* The earlier "if (size >= BCDC_DICT_SIZE)" branch was dead code:
-     * input_size for compression is bounded by BCDC_BLOCK_SIZE (4096) and
-     * dict->data_size defaults to 8192 — size can never exceed it. */
     if (size > dict->data_size) size = dict->data_size;
 
     spin_lock(&dict->lock);
@@ -261,9 +211,6 @@ static void BcdcUpdateDictionary(BcdcDictionary *dict, const uint8_t* data, uint
     spin_unlock(&dict->lock);
 }
 
-/* ------------------------------------------------------------------ */
-/* Policy management                                                    */
-/* ------------------------------------------------------------------ */
 
 error_t BcdcSetPolicy(const BcdcPolicy* policy) {
     if (!g_initialized || !policy) return ERR_NOT_INITIALIZED;
@@ -304,7 +251,6 @@ error_t BcdcGetPolicy(uint16_t tag_id, BcdcPolicy* out) {
     }
     spin_unlock(&g_table_lock);
 
-    /* Fallback default. */
     out->tag_id             = tag_id;
     out->compression_type   = BCDC_TYPE_LZ;
     out->compression_level  = BCDC_LEVEL_DEFAULT;
@@ -313,40 +259,22 @@ error_t BcdcGetPolicy(uint16_t tag_id, BcdcPolicy* out) {
     return OK;
 }
 
-/* ------------------------------------------------------------------ */
-/* Bcdc-LZ — hash-chain backed LZ77                                    */
-/* ------------------------------------------------------------------ */
 
 #define BCDC_LZ_HASH_SIZE  (1u << CONFIG_BCDC_LZ_HASH_BITS)
 #define BCDC_LZ_HASH_MASK  (BCDC_LZ_HASH_SIZE - 1u)
 
 static inline uint32_t bcdc_lz_hash(const uint8_t *p) {
-    /* 3-byte FNV-ish fingerprint, reduced to HASH_BITS. */
     uint32_t h = (uint32_t)p[0];
     h = (h * 2654435761u) ^ (uint32_t)p[1];
     h = (h * 2654435761u) ^ (uint32_t)p[2];
     return h & BCDC_LZ_HASH_MASK;
 }
 
-/*
- * Compress with hash-chain accelerated match finding. The chain head[h]
- * gives the most recent input position whose 3-byte prefix hashes to h;
- * chain[pos] gives the next-older position with the same hash. We follow
- * the chain and keep the longest match.
- *
- * Stack budget: BCDC_LZ_HASH_SIZE × 2 + BCDC_BLOCK_SIZE ≈ 16 KB at 4096
- * buckets. The kernel stack is 16 KB by default (4 pages), so we
- * heap-allocate the working buffers instead of trying to fit them on the
- * stack.
- */
 typedef struct {
-    int32_t *head;       /* [BCDC_LZ_HASH_SIZE] — newest pos per hash, -1 if empty */
-    int32_t *chain;      /* [BCDC_BLOCK_SIZE]   — predecessor pos per pos */
+    int32_t *head;
+    int32_t *chain;
 } BcdcLZWork;
 
-/* Caller guarantees `pos + 3 <= input_size`. The hash reads three bytes
- * starting at src[pos]; calling without that guarantee corrupts the hash
- * by mixing in past-end memory. */
 static void bcdc_lz_chain_insert(BcdcLZWork *w, const uint8_t *src, uint16_t pos) {
     uint32_t h = bcdc_lz_hash(src + pos);
     w->chain[pos] = w->head[h];
@@ -366,7 +294,6 @@ error_t BcdcLZ_Compress(const void* input, uint16_t input_size,
     uint16_t       in_pos  = 0;
     uint16_t       out_pos = 0;
 
-    /* Working buffers — kmalloc'd to avoid 16 KB on the kernel stack. */
     BcdcLZWork w;
     w.head  = kmalloc(sizeof(int32_t) * BCDC_LZ_HASH_SIZE);
     w.chain = kmalloc(sizeof(int32_t) * BCDC_BLOCK_SIZE);
@@ -379,7 +306,6 @@ error_t BcdcLZ_Compress(const void* input, uint16_t input_size,
 
     while (in_pos < input_size && out_pos < BCDC_MAX_COMPRESSED) {
         if ((int)in_pos + 3 > (int)input_size) {
-            /* Tail bytes — emit as literals. */
             while (in_pos < input_size && out_pos < BCDC_MAX_COMPRESSED)
                 out[out_pos++] = in[in_pos++];
             break;
@@ -390,7 +316,6 @@ error_t BcdcLZ_Compress(const void* input, uint16_t input_size,
         uint32_t h = bcdc_lz_hash(in + in_pos);
         int32_t  cur = w.head[h];
 
-        /* Bound the chain walk so worst-case stays O(n). */
         int chain_budget = 64;
         while (cur >= 0 && cur < (int)in_pos && chain_budget-- > 0) {
             uint16_t offset = (uint16_t)((int)in_pos - cur);
@@ -412,9 +337,6 @@ error_t BcdcLZ_Compress(const void* input, uint16_t input_size,
             cur = w.chain[cur];
         }
 
-        /* Dictionary matches: encoded as `in_pos + (dict_size - p)`. Since
-         * the wire format only carries 13 bits of offset (max 8191), and
-         * dict_size can be up to 8192, we must cap each candidate. */
         if (dictionary && dictionary_size > 0 && best_length < BCDC_LZ_MAX_MATCH) {
             const uint8_t *cur_data = in + in_pos;
             uint16_t max_len = (uint16_t)(input_size - in_pos);
@@ -438,19 +360,10 @@ error_t BcdcLZ_Compress(const void* input, uint16_t input_size,
             }
         }
 
-        /* Encoded offset is 13 bits → 0..8191. Anything past that wraps in
-         * the wire format, which is exactly the corruption that broke the
-         * BCDC tests on real data. Reject the match instead. */
         if (best_length >= BCDC_LZ_MIN_MATCH && best_offset > 0 &&
             best_offset <= 0x1FFF) {
             if (out_pos + 3 > BCDC_MAX_COMPRESSED) break;
 
-            /* 3-byte match token (Bcdc-LZ v2):
-             *   byte 0: 1 LLLLLLL   — flag bit + lower 7 of (len-3)
-             *   byte 1: OOOOOOOO   — lower 8 of offset
-             *   byte 2: L OOOOOOO  — high bit of length + upper 5 of offset
-             *
-             * Length: 8 bits → 3..258. Offset: 13 bits → 0..8191. */
             uint16_t enc_len = (uint16_t)(best_length - BCDC_LZ_MIN_MATCH);
             if (enc_len > 255) enc_len = 255;
 
@@ -468,7 +381,6 @@ error_t BcdcLZ_Compress(const void* input, uint16_t input_size,
         } else {
             if (out_pos + 1 >= BCDC_MAX_COMPRESSED) break;
             out[out_pos++] = in[in_pos];
-            /* in the main loop branch we already verified pos+3 <= size */
             bcdc_lz_chain_insert(&w, in, in_pos);
             in_pos++;
         }
@@ -514,7 +426,6 @@ error_t BcdcLZ_Decompress(const void* input, uint16_t input_size,
             if (match_offset == 0) return ERR_CORRUPTED;
 
             if (match_offset > out_pos) {
-                /* Match crosses into the dictionary. */
                 if (!dictionary || dictionary_size == 0) return ERR_CORRUPTED;
                 uint16_t back = (uint16_t)(match_offset - out_pos);
                 if (back > dictionary_size) return ERR_CORRUPTED;
@@ -546,9 +457,6 @@ error_t BcdcLZ_Decompress(const void* input, uint16_t input_size,
     return OK;
 }
 
-/* ------------------------------------------------------------------ */
-/* Bcdc-RLE                                                              */
-/* ------------------------------------------------------------------ */
 
 error_t BcdcRLE_Compress(const void* input, uint16_t input_size,
                          void* output, uint16_t* output_size) {
@@ -630,9 +538,6 @@ error_t BcdcRLE_Decompress(const void* input, uint16_t input_size,
     return OK;
 }
 
-/* ------------------------------------------------------------------ */
-/* Public compress / decompress                                         */
-/* ------------------------------------------------------------------ */
 
 error_t BcdcCompress(const void* input, uint16_t input_size,
                      void* output, uint16_t* output_size,
@@ -647,9 +552,6 @@ error_t BcdcCompress(const void* input, uint16_t input_size,
     uint8_t         *cdata  = (uint8_t*)output + BCDC_HEADER_SIZE;
     uint16_t         csize  = 0;
 
-    /* Snapshot the dictionary pointer under the table lock; the dict
-     * itself is reference-stable until eviction (which also takes the
-     * table lock). */
     BcdcDictionary *dict = NULL;
     if (dictionary_id < CONFIG_BCDC_MAX_DICTS) {
         spin_lock(&g_table_lock);
@@ -742,8 +644,6 @@ error_t BcdcDecompress(const void* input, uint16_t input_size,
 
     error_t result;
     if (header->compression_type == BCDC_TYPE_NONE) {
-        /* original_size is bounded to BCDC_BLOCK_SIZE by the encoder; the
-         * caller's buffer is its responsibility. Matching legacy behaviour. */
         memcpy(output, cdata, header->original_size);
         *output_size = header->original_size;
         result = OK;
@@ -764,13 +664,9 @@ error_t BcdcDecompress(const void* input, uint16_t input_size,
     return result;
 }
 
-/* ------------------------------------------------------------------ */
-/* Stats                                                                */
-/* ------------------------------------------------------------------ */
 
 void BcdcGetStats(BcdcStats* out) {
     if (!out) return;
-    /* Atomic snapshot — relaxed load is fine; counters are independent. */
     out->blocks_compressed    = __atomic_load_n(&g_stats.blocks_compressed,   __ATOMIC_RELAXED);
     out->blocks_decompressed  = __atomic_load_n(&g_stats.blocks_decompressed, __ATOMIC_RELAXED);
     out->bytes_before         = __atomic_load_n(&g_stats.bytes_before,        __ATOMIC_RELAXED);

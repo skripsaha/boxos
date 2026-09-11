@@ -5,15 +5,15 @@
 #include "box/core/touch_ring.h"
 #include "box/core/notify.h"
 #include "box/core/pocket.h"
-#include "box/core/strand_self.h"  /* strand_info_or_null — per-strand stash selector */
+#include "box/core/strand_self.h"
 #include "box/cpu.h"
 #include "box/clock.h"
 #include "box/string.h"
-#include "box/memory.h"            /* malloc / free — per-strand stash heap-backing */
+#include "box/memory.h"
 #include "box/core/stash.h"
-#include "box/debug.h"             /* kdbg_nowait — no room must be said, not waited on */
+#include "box/debug.h"
 #include "box/error.h"
-#include "boxos_decks.h"  /* DECK_SYSTEM + SYSTEM_OP_TOUCH_* — single source */
+#include "boxos_decks.h"
 
 TouchTagPair touch_intern(const char *tag)
 {
@@ -37,7 +37,6 @@ int touch_claim(TouchTag tag, TouchMode mode, uint64_t manifest_or_handler,
 {
     if (tag == TOUCH_TAG_INVALID) return -ERR_INVALID_ARGS;
 
-    /* params: [u16 tag][u8 mode][mode-specific] */
     uint8_t  params[19];
     uint16_t param_size;
     memcpy(params, &tag, sizeof(uint16_t));
@@ -88,12 +87,10 @@ int touch_send(TouchTagPair pair, const void *payload, uint32_t plen,
         CrateSetInOut(&crates[cc], (void *)payload, plen, plen);
         payload_idx = cc++;
     }
-    /* The count comes back in a crate of its own: how many were handed it. */
     uint32_t handed = 0;
     CrateSetOutput(&crates[cc], &handed, sizeof(handed));
     uint16_t handed_idx = cc++;
 
-    /* params: [u16 full][u16 bare][u32 after_ms] */
     uint8_t params[8];
     memcpy(params,     &pair.full, sizeof(uint16_t));
     memcpy(params + 2, &pair.bare, sizeof(uint16_t));
@@ -106,11 +103,10 @@ int touch_send(TouchTagPair pair, const void *payload, uint32_t plen,
 
     Result r;
     int rc = ManifestSubmitTimeout((Manifest *)mbuf, crates, cc, &r, BOX_ANSWER_GUARANTEED);
-    if (rc != 0) return box_fail(rc);   /* one dialect: a failure is < 0 */
+    if (rc != 0) return box_fail(rc);
     return (int)handed;
 }
 
-/* Diagnostic counters — bumped from touch_await consumer path. */
 static volatile uint32_t g_ta_entries_popped;
 static volatile uint32_t g_ta_touches_returned;
 static volatile uint32_t g_ta_would_blocks_seen;
@@ -130,16 +126,6 @@ void touch_await_stats(uint32_t out[7])
     out[6] = __atomic_load_n(&g_ta_bad_payload,       __ATOMIC_RELAXED);
 }
 
-/* Convert a raw TouchSlot into the userspace-facing Touch struct.
- *
- * Field-by-field copy (NOT memcpy of the slot) — Touch and TouchSlot
- * intentionally have different layouts: TouchSlot ends in a Vyukov seq
- * counter that has no userspace meaning, while Touch has no payload_addr
- * field (the self-pointer footgun, see box/touch.h rationale). The
- * out-payload-bytes are copied only up to slot->payload_len; the
- * remaining bytes of out->payload[] are left untouched (kernel
- * pre-zeroes the slot at cabin init, and producer always overwrites the
- * used prefix, so any leftover bytes are deterministic). */
 static void touch_from_slot(const TouchSlot *slot, Touch *out)
 {
     out->tag_id        = slot->tag_id;
@@ -166,8 +152,6 @@ bool touch_available(void)
 {
     TouchRing *rr = touch_ring();
     if (!rr) return false;
-    /* ACQUIRE on tail pairs with kernel's ACQ_REL fetch_add — see
-     * touch_ring.c consumer comment for the ordering rationale. */
     uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_ACQUIRE);
     uint64_t head = __atomic_load_n(&rr->hdr.head, __ATOMIC_RELAXED);
     return tail != head;
@@ -182,9 +166,6 @@ uint64_t touch_owed(void)
 {
     TouchRing *rr = touch_ring();
     if (!rr) return 0;
-    /* ACQUIRE pairs with the kernel's RELEASE store under owed_lock — see
-     * touch.c TouchOwedHandOver. Non-zero means the kernel accepted events
-     * for this ring that did not fit in it and is holding them in order. */
     return __atomic_load_n(&rr->hdr.owed, __ATOMIC_ACQUIRE);
 }
 
@@ -195,23 +176,14 @@ static inline uint64_t touch_rdtsc(void)
     return ((uint64_t)hi << 32) | lo;
 }
 
-void yield(void);  /* boxlib (yield.c) — declared here to avoid pulling sync.h */
+void yield(void);
 
 static bool touch_wait_umwait(Touch *out, uint32_t timeout_ms)
 {
     TouchRing *rr = touch_ring();
-    /* UMONITOR arms a hardware monitor on the cacheline containing
-     * the supplied address (Intel SDM Vol 2A — UMONITOR/UMWAIT,
-     * granularity from CPUID.05H:EAX[15:0], typically 64 B). We
-     * watch `tail` directly so any KTouchPush fetch_add wakes us. */
     volatile uint64_t *tail_addr = (volatile uint64_t *)
         ((uintptr_t)rr + OFFSETOF(TouchRing, hdr.tail));
 
-    /* Absolute ceiling for the owed-hand-over loop below. The UMWAIT branch
-     * re-arms its own slice each turn and reports the deadline through
-     * umwait's wake reason, but the hand-over branch never reaches UMWAIT —
-     * without this a bounded wait would yield past its own timeout for as long
-     * as the kernel held anything. 0 == wait forever, and forever means it. */
     uint64_t owed_deadline = timeout_ms
                              ? touch_rdtsc() + cpu_ms_to_tsc(timeout_ms) : 0;
 
@@ -224,11 +196,6 @@ static bool touch_wait_umwait(Touch *out, uint32_t timeout_ms)
 
         if (touch_available()) continue;
 
-        /* The ring is empty and the kernel is still holding events for it: it
-         * could not fit them and left the count on this very cacheline. `tail`
-         * cannot move while that is true, so an UMWAIT here would be waiting
-         * for a knock that cannot come. Open the door instead — a yield is a
-         * syscall, and the gate hands the rest over on the way in. */
         if (touch_owed() != 0) {
             if (owed_deadline != 0 && touch_rdtsc() >= owed_deadline) return false;
             yield();
@@ -246,16 +213,11 @@ static bool touch_wait_umwait(Touch *out, uint32_t timeout_ms)
 
         if (wake_reason == 1 && timeout_ms > 0) {
             __sync_synchronize();
-            if (!touch_available()) return false;   /* deadline elapsed */
+            if (!touch_available()) return false;
         }
     }
 }
 
-/* Cooperative pause/yield fallback (no WAITPKG). A sibling strand may be the
- * Touch producer and share this App-Core, so a pure PAUSE-spin would starve it
- * (it can never be scheduled while we hold the core). Pause a small budget, then
- * yield — mirrors brook_wait_cycle and result_wait_ipc_yield so the no-WAITPKG
- * path is single-core-safe, never a hard spin. */
 #define TOUCH_SPIN_BUDGET 2048u
 
 static bool touch_wait_pause(Touch *out, uint32_t timeout_ms)
@@ -271,9 +233,6 @@ static bool touch_wait_pause(Touch *out, uint32_t timeout_ms)
         if (touch_pop(out)) return true;
 
         if (timeout_ms > 0 && touch_rdtsc() >= deadline) return false;
-        /* Same door as the UMWAIT path: events the ring refused are handed
-         * over in the guide, so go there now rather than spend the whole spin
-         * budget waiting for a tail that cannot move. */
         if (touch_owed() != 0) {
             spin = 0;
             yield();
@@ -289,31 +248,12 @@ static bool touch_wait_pause(Touch *out, uint32_t timeout_ms)
 bool touch_wait(Touch *out, uint32_t timeout_ms)
 {
     if (!out) return false;
-    /* Fast initial drain — if a slot is already published, skip the
-     * UMWAIT setup entirely. */
     if (touch_pop(out)) return true;
 
     if (cpu_has_waitpkg()) return touch_wait_umwait(out, timeout_ms);
     return touch_wait_pause(out, timeout_ms);
 }
 
-/* ── Tag-selective consume (box::touch C++ layer, Ф13b) ──────────────────
- *
- * touch_pop / touch_wait are cabin-wide FIFO. To let one tag's consumer pull
- * its next event while leaving the rest for theirs, non-matching events are
- * kept in a per-strand stash; a later call for their tag finds them there
- * (checked before the ring, so per-tag FIFO order holds).
- *
- * The stash grows by the chunk and never drops (box/core/stash.h) — what stood
- * here held 256 events and shed the newest foreign one when full. Room is
- * secured BEFORE an event leaves the ring: touch_try_pop_tag looks at the head
- * of the ring first, and touch_wait_tag reserves a place before it sleeps. When
- * the heap has no room the event stays in the ring and the strand says so.
- *
- * Per-strand, no lock: touch_pop already routes per strand (each strand drains
- * its OWN TouchRing) and each strand keeps its own stash — the main strand the
- * static below, a spawned strand a heap one cached in its StrandInfo. A strand
- * is the single writer of its own stash. */
 static Stash g_touch_stash;
 
 static Stash *touch_stash_self(bool create)
@@ -331,7 +271,6 @@ static Stash *touch_stash_self(bool create)
         }
     }
     if (s->entry_size == 0) {
-        /* A chunk is one ring's worth: the ring's own count, the kernel's number. */
         TouchRing *rr = touch_ring();
         uint32_t cap = rr ? __atomic_load_n(&rr->hdr.slot_count_max, __ATOMIC_RELAXED) : 0;
         stash_init(s, sizeof(Touch), cap);
@@ -344,10 +283,6 @@ static bool touch_tag_is(const void *entry, const void *key)
     return ((const Touch *)entry)->tag_id == *(const TouchTag *)key;
 }
 
-/* Said once per process, without waiting for an answer: the event that could
- * not be kept is at the head of this strand's ring, and the answer to a print
- * comes through the ResultRing that this strand may be draining for a reply
- * that stands behind a record with the same trouble. */
 static bool g_touch_no_room_said;
 
 static void touch_no_room(void)
@@ -370,7 +305,6 @@ bool touch_try_pop_tag(TouchTag tag, Touch *out)
             touch_from_slot(&slot, out);
             return true;
         }
-        /* Not ours: a place for it first, then out of the ring. */
         if (!st) st = touch_stash_self(true);
         if (!st || !stash_reserve(st)) { touch_no_room(); return false; }
         if (!touch_ring_pop_slot(&slot)) return false;
@@ -385,43 +319,33 @@ bool touch_wait_tag(TouchTag tag, Touch *out, uint32_t timeout_ms)
 {
     if (tag == TOUCH_TAG_INVALID || !out) return false;
 
-    /* Absolute deadline (clock_uptime_ms-relative, as in brook.c); 0 == forever.
-     * The loop re-arms the wait for the REMAINING budget after each non-matching
-     * wake, so a bounded wait honors its full timeout for our tag instead of
-     * spending it on the first interleaved foreign event. */
     uint64_t deadline = timeout_ms ? clock_uptime_ms() + timeout_ms : 0;
 
     for (;;) {
         if (touch_try_pop_tag(tag, out)) return true;
 
-        /* A place for one event of another tag BEFORE sleeping: what the wake
-         * hands over is out of the ring, and must have somewhere to go. */
         Stash *st = touch_stash_self(true);
         if (!st || !stash_reserve(st)) { touch_no_room(); return false; }
 
-        uint32_t slice = 0;  /* 0 == block until the next event (forever) */
+        uint32_t slice = 0;
         if (timeout_ms) {
             uint64_t now = clock_uptime_ms();
-            if (now >= deadline) return false;            /* deadline elapsed */
+            if (now >= deadline) return false;
             uint64_t rem = deadline - now;
             slice = rem > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)rem;
-            if (slice == 0) slice = 1;                    /* never pass 0 (=forever) with time left */
+            if (slice == 0) slice = 1;
         }
 
         Touch tmp;
         if (!touch_wait(&tmp, slice)) {
             if (timeout_ms && clock_uptime_ms() >= deadline) return false;
-            continue;  /* slept the slice with no event; re-arm against the deadline */
+            continue;
         }
         if (tmp.tag_id == tag) { *out = tmp; return true; }
-        stash_put(st, &tmp);   /* for its own tag — the place was reserved above */
+        stash_put(st, &tmp);
     }
 }
 
-/* Free this strand's Touch stash at strand exit (mirrors result_stash_free_self).
- * Idempotent; main strand / never-allocated strand are no-ops. A strand that
- * crashes WITHOUT calling strand_exit leaves it to the cabin's heap teardown —
- * a plain heap object with no kernel binding, unlike the StrandPool slab. */
 void touch_stash_free_self(void)
 {
     StrandInfo *si = strand_info_or_null();
@@ -436,34 +360,16 @@ int touch_await(TouchTag tag, Touch *out, uint32_t timeout_ms)
 {
     if (tag == TOUCH_TAG_INVALID || !out) return -ERR_INVALID_ARGS;
 
-    /* Fast path — drain TouchRing for any already-queued event. The
-     * caller's tag claim must already exist (or the kernel has been
-     * publishing to a tag we didn't subscribe to, which is benign —
-     * we just won't get any matching slots). */
-    {
-        Touch t;
-        if (touch_pop(&t)) {
-            __atomic_add_fetch(&g_ta_entries_popped,   1, __ATOMIC_RELAXED);
-            __atomic_add_fetch(&g_ta_touches_returned, 1, __ATOMIC_RELAXED);
-            *out = t;
-            return 0;
-        }
+    if (touch_try_pop_tag(tag, out)) {
+        __atomic_add_fetch(&g_ta_entries_popped,   1, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_ta_touches_returned, 1, __ATOMIC_RELAXED);
+        return 0;
     }
 
-    /* Slow path: submit SYSTEM_OP_TOUCH_AWAIT — this both ensures the
-     * REST claim and parks the process in PROC_WAITING with the kernel
-     * timeout. KTouchPush flips us back to PROC_WORKING the moment a
-     * slot is published into our TouchRing. */
     uint8_t mbuf[200];
     ManifestBuilder mb;
     if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return -ERR_INVALID_ARGS;
 
-    /* params: [u16 tag][u16 _pad][u32 timeout_ms]. Zero goes through as zero:
-     * the kernel arms no timer for it (SysTouchAwait) and the park lasts until
-     * an event is published. It used to be turned into 30 s here, so a strand
-     * that asked to wait forever was woken every half minute for nothing — and
-     * a lost wakeup was blanketed instead of being seen, which Nightwatch does
-     * now (TOUCH UNDELIVERED). */
     uint8_t params[8];
     memset(params, 0, sizeof(params));
     memcpy(params,     &tag,        sizeof(uint16_t));
@@ -474,41 +380,22 @@ int touch_await(TouchTag tag, Touch *out, uint32_t timeout_ms)
         return -ERR_INVALID_ARGS;
     if (ManifestBuilderFinalize(&mb) != 0) return -ERR_INVALID_ARGS;
 
-    /* ONE deadline for the whole call, taken before the park.
-     *
-     * The park below consumes real time — up to the whole timeout — and
-     * touch_wait used to be handed the ORIGINAL figure afterwards, starting a
-     * second clock of the same length. touch_await(tag, out, T) therefore took
-     * 2T, and the second T was not a sleep: the kernel park had already ended,
-     * so those milliseconds were spent in touch_wait's pause-and-yield spin,
-     * burning the core this call exists to give away. MEASURED, not deduced —
-     * quietprint asked for 3000 ms of silence and reported 6004.
-     *
-     * So the deadline is fixed here, and what is left of it after the park is
-     * what touch_wait gets. A park that ran to its own deadline leaves nothing
-     * left, and the timeout is reported at once instead of being spun out. */
     uint64_t began = touch_rdtsc();
 
     int push_rc = ManifestSubmitNoWait((Manifest *)mbuf, NULL, 0, 0);
     if (push_rc != OK) return push_rc;
 
-    /* Wait on TouchRing for an event. The kernel will wake us via
-     * KTouchPush's PROC_WAITING→PROC_WORKING flip; touch_wait covers
-     * both the UMWAIT and pause-spin paths. With no deadline `left` stays 0
-     * and means to touch_wait what it meant to the kernel: until an event. */
     uint32_t left = 0;
     if (timeout_ms != 0) {
         uint64_t spent = cpu_tsc_to_ms(touch_rdtsc() - began);
         if (spent >= (uint64_t)timeout_ms) {
-            /* The park used the entire deadline. A zero must NOT reach
-             * touch_wait, where it would spell "wait forever". */
             __atomic_add_fetch(&g_ta_timeouts, 1, __ATOMIC_RELAXED);
             return -ERR_TIMEOUT;
         }
         left = (uint32_t)((uint64_t)timeout_ms - spent);
     }
 
-    if (!touch_wait(out, left)) {
+    if (!touch_wait_tag(tag, out, left)) {
         __atomic_add_fetch(&g_ta_timeouts, 1, __ATOMIC_RELAXED);
         return -ERR_TIMEOUT;
     }

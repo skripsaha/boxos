@@ -1,29 +1,7 @@
-/*
- * BoxOS — minimal DER parser (ITU-T X.690).
- *
- * Used by efi_secureboot / efi_authenticode for X.509 + PKCS#7 walks.
- * No allocations; every operation produces a slice into the original
- * buffer.
- *
- * Defensive: refuses BER constructs (indefinite length, multi-byte tag),
- * refuses non-canonical length encodings (DER mandates the shortest
- * length form), refuses past-end reads.
- */
 
 #include "efi_asn1.h"
 #include "klib.h"
 
-/* =========================================================================
- * Pre-encoded OID constants. The values are the DER-encoded OID bytes
- * MINUS the leading tag (0x06) + length. asn1_oid_equal compares against
- * these raw OID bytes after asn1_read_typed strips the tag/length.
- *
- * Encoding rule for OID 1.2.840.113549.x:
- *   first byte = 1*40 + 2 = 42 = 0x2A
- *   then 840 = 0x86, 0x48 (variable-length base-128)
- *   then 113549 = 0x86, 0xF7, 0x0D
- *   then 1.x = 0x01, 0xXX (or multi-byte for >127)
- * ========================================================================= */
 
 const uint8_t OID_RSA_ENCRYPTION[] = {
     0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x01,0x01
@@ -40,8 +18,6 @@ const uint8_t OID_SHA384_WITH_RSA[] = {
 };
 const uint32_t OID_SHA384_WITH_RSA_LEN = sizeof(OID_SHA384_WITH_RSA);
 
-/* 2.16.840.1.101.3.4.2.1 → 2*40+16=96=0x60; 0x86,0x48 (840); 0x01; 0x65 (101);
- *   0x03; 0x04; 0x02; 0x01 */
 const uint8_t OID_SHA256[] = {
     0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01
 };
@@ -52,8 +28,6 @@ const uint8_t OID_PKCS7_SIGNED_DATA[] = {
 };
 const uint32_t OID_PKCS7_SIGNED_DATA_LEN = sizeof(OID_PKCS7_SIGNED_DATA);
 
-/* 1.3.6.1.4.1.311.2.1.4 → 1*40+3=43=0x2B; 0x06; 0x01; 0x04; 0x01;
- *   311 = 0x82,0x37; 0x02; 0x01; 0x04 */
 const uint8_t OID_SPC_INDIRECT_DATA[] = {
     0x2B,0x06,0x01,0x04,0x01,0x82,0x37,0x02,0x01,0x04
 };
@@ -69,9 +43,6 @@ const uint8_t OID_PKCS9_CONTENT_TYPE[] = {
 };
 const uint32_t OID_PKCS9_CONTENT_TYPE_LEN = sizeof(OID_PKCS9_CONTENT_TYPE);
 
-/* =========================================================================
- * Reader primitives
- * ========================================================================= */
 
 uint8_t asn1_peek_tag(const Asn1Reader *r)
 {
@@ -79,10 +50,6 @@ uint8_t asn1_peek_tag(const Asn1Reader *r)
     return r->p[0];
 }
 
-/* Parse a DER length field starting at *p, with `remaining` bytes available.
- * On success advances *p, returns true, writes the length to *out_len and
- * the consumed byte count to *out_consumed. Refuses indefinite-length form
- * (0x80) — that's BER-only. */
 static bool read_der_length(const uint8_t *p, uint32_t remaining,
                              uint32_t *out_len, uint32_t *out_consumed)
 {
@@ -90,12 +57,11 @@ static bool read_der_length(const uint8_t *p, uint32_t remaining,
     uint8_t first = p[0];
 
     if ((first & 0x80) == 0) {
-        /* short form */
         *out_len = first;
         *out_consumed = 1;
         return true;
     }
-    if (first == 0x80) return false;     /* indefinite — BER only */
+    if (first == 0x80) return false;
 
     uint32_t nbytes = first & 0x7F;
     if (nbytes == 0 || nbytes > 4) return false;
@@ -105,7 +71,6 @@ static bool read_der_length(const uint8_t *p, uint32_t remaining,
     for (uint32_t i = 0; i < nbytes; i++) {
         v = (v << 8) | p[1 + i];
     }
-    /* DER canonical: forbid leading-zero padding. */
     if (nbytes > 1 && p[1] == 0)   return false;
     *out_len = v;
     *out_consumed = 1 + nbytes;
@@ -120,7 +85,6 @@ bool asn1_read_tlv(Asn1Reader *r, uint8_t expect_tag,
     uint8_t tag = r->p[0];
     if (expect_tag && tag != expect_tag) return false;
 
-    /* Multi-byte tag forms not supported. */
     if ((tag & 0x1F) == 0x1F) return false;
 
     uint32_t vlen = 0, consumed = 0;
@@ -167,7 +131,6 @@ bool asn1_read_bit_string(Asn1Reader *r, const uint8_t **out, uint32_t *out_len)
     uint32_t vlen = 0;
     if (!asn1_read_typed(r, ASN1_TAG_BIT_STRING, &v, &vlen)) return false;
     if (vlen < 1) return false;
-    /* leading byte = unused-bits count; we require 0 (byte-aligned) */
     if (v[0] != 0) return false;
     *out     = v + 1;
     *out_len = vlen - 1;
@@ -180,7 +143,6 @@ bool asn1_read_integer(Asn1Reader *r, const uint8_t **out, uint32_t *out_len)
     uint32_t vlen = 0;
     if (!asn1_read_typed(r, ASN1_TAG_INTEGER, &v, &vlen)) return false;
     if (vlen == 0) return false;
-    /* Strip leading 0x00 sign byte (DER positive-with-high-bit-set rule). */
     if (vlen >= 2 && v[0] == 0x00) {
         v++;
         vlen--;

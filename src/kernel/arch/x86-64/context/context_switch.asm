@@ -4,18 +4,6 @@
 
 section .text
 
-;--------------------------------------------------------------
-; Offsets into ProcessContext (must match C struct in process.h)
-;
-; GPRs:              0..127  (16 x uint64_t)
-; rip:               128     (uint64_t)
-; cs,ds,es,fs,gs,ss: 136..147  (6 x uint16_t)
-; [4-byte padding]:  148..151  (alignment for uint64_t)
-; rflags:            152     (uint64_t)
-; cr3:               160     (uint64_t)
-; fpu_state:         168     (uint8_t* pointer, 8 bytes)
-; fpu_initialized:   176     (bool, 1 byte)
-;--------------------------------------------------------------
 
 %define CTX_RIP      128
 %define CTX_CS       136
@@ -27,40 +15,17 @@ section .text
 %define CTX_RFLAGS   152
 %define CTX_FPU      168
 %define CTX_FPU_INIT 176
-%define CTX_PL0_SSP  184             ; Per-process IA32_PL0_SSP snapshot
-%define CTX_USER_FSBASE 192          ; Per-process user FS base (TLS thread pointer)
+%define CTX_PL0_SSP  184
+%define CTX_USER_FSBASE 192
 
-; Externals from fpu.c
 extern g_use_xsave
 extern g_xsave_mask
 
-; CET supervisor SHSTK activation flag (cet_lifecycle.c). Single byte:
-;   0 = CET supervisor shadow stack inactive (TCG, real-HW pre-activation,
-;       CPUs without SHSTK)
-;   1 = S_CET.SH_STK_EN=1 active on this boot — CALL/RET track PL0_SSP,
-;       context switches MUST swap PL0_SSP via WRMSR (0x6A4)
-;
-; All MSR-touching paths below gate on this flag: when 0, the SAVE/RESTORE
-; macros expand to one CMP + JE, no MSR access — zero TCG overhead and no
-; per-CPU divergence on heterogeneous (P-core + E-core) silicon.
 extern g_cet_supv_active
 
-; User FS base (TLS) context-switch gates (fpu.c):
-;   g_fsgsbase_active  = 1 → CR4.FSGSBASE enabled on every online core;
-;                            use RDFSBASE/WRFSBASE (a few cycles).
-;   g_user_fsbase_used = 1 → some process programmed FS base via the
-;                            kernel op on a pre-FSGSBASE CPU; use MSR
-;                            0xC0000100. Both 0 → skip entirely, so
-;                            legacy configurations pay zero per-switch
-;                            cost until TLS is actually used.
 extern g_fsgsbase_active
 extern g_user_fsbase_used
 
-; ─── PL0_SSP save/restore macros ─────────────────────────────────────
-;
-; SAVE_PL0_SSP rdi:
-;   if g_cet_supv_active: RDMSR IA32_PL0_SSP (0x6A4), store to [rdi+CTX_PL0_SSP]
-;   Clobbers: rax, rcx, rdx (caller saves before invoking)
 %macro SAVE_PL0_SSP 1
     cmp byte [rel g_cet_supv_active], 0
     je %%skip
@@ -72,9 +37,6 @@ extern g_user_fsbase_used
 %%skip:
 %endmacro
 
-; RESTORE_PL0_SSP rdi:
-;   if g_cet_supv_active: load [rdi+CTX_PL0_SSP], WRMSR IA32_PL0_SSP
-;   Clobbers: rax, rcx, rdx
 %macro RESTORE_PL0_SSP 1
     cmp byte [rel g_cet_supv_active], 0
     je %%skip
@@ -86,18 +48,12 @@ extern g_user_fsbase_used
 %%skip:
 %endmacro
 
-; ─── User FS base (TLS) save/restore macros ──────────────────────────
-;
-; SAVE_USER_FSBASE ctx:
-;   Capture the live user FS base into ctx.user_fsbase. ISRs never load
-;   FS, so the value observed here always belongs to the process being
-;   switched out. Clobbers: rax, rcx, rdx.
 %macro SAVE_USER_FSBASE 1
     cmp byte [rel g_fsgsbase_active], 0
     jne %%fast
     cmp byte [rel g_user_fsbase_used], 0
     je %%done
-    mov ecx, 0xC0000100              ; IA32_FS_BASE
+    mov ecx, 0xC0000100
     rdmsr
     shl rdx, 32
     or rax, rdx
@@ -109,11 +65,6 @@ extern g_user_fsbase_used
 %%done:
 %endmacro
 
-; RESTORE_USER_FSBASE ctx:
-;   Load ctx.user_fsbase into the FS base. MUST run after the FS
-;   *selector* restore — `mov fs, ax` reloads the base from the GDT
-;   descriptor (= 0) on real silicon, wiping anything written earlier.
-;   Clobbers: rax, rcx, rdx.
 %macro RESTORE_USER_FSBASE 1
     cmp byte [rel g_fsgsbase_active], 0
     jne %%fast
@@ -122,7 +73,7 @@ extern g_user_fsbase_used
     mov rax, [%1 + CTX_USER_FSBASE]
     mov rdx, rax
     shr rdx, 32
-    mov ecx, 0xC0000100              ; IA32_FS_BASE
+    mov ecx, 0xC0000100
     wrmsr
     jmp %%done
 %%fast:
@@ -131,21 +82,7 @@ extern g_user_fsbase_used
 %%done:
 %endmacro
 
-;--------------------------------------------------------------
-; CET / IBT note for task_* entries:
-;
-; Each of the four globals below is referenced from C scheduler code.
-; While today every call site is a direct call, the C compiler with
-; -fcf-protection=full emits ENDBR64 at every address-taken function
-; entry — we mirror that uniformly here so the symbol set is IBT-clean
-; under S_CET.ENDBR_EN=1. ENDBR64 is a multi-byte NOP without CET, so
-; the cost outside CET is exactly four bytes per entry.
-;--------------------------------------------------------------
 
-;--------------------------------------------------------------
-; task_save_context(ProcessContext* ctx)
-;   rdi = pointer to ProcessContext
-;--------------------------------------------------------------
 global task_save_context
 task_save_context:
     endbr64
@@ -166,7 +103,6 @@ task_save_context:
     mov [rdi + 112], r14
     mov [rdi + 120], r15
 
-    ; Save RIP from return address on stack
     mov rax, [rsp]
     mov [rdi + CTX_RIP], rax
 
@@ -187,8 +123,6 @@ task_save_context:
     mov ax, ss
     mov [rdi + CTX_SS], ax
 
-    ; Save FPU/SSE/AVX state
-    ; Load pointer to FPU buffer and align to 64 bytes
     mov rcx, [rdi + CTX_FPU]
     test rcx, rcx
     jz .save_fpu_done
@@ -198,7 +132,6 @@ task_save_context:
     cmp byte [rel g_use_xsave], 0
     je .save_fxsave
 
-    ; xsave path: EDX:EAX = component mask, [rcx] = destination
     mov eax, dword [rel g_xsave_mask]
     mov edx, dword [rel g_xsave_mask + 4]
     xsave [rcx]
@@ -211,20 +144,13 @@ task_save_context:
     mov byte [rdi + CTX_FPU_INIT], 1
 
 .save_fpu_done:
-    ; Save IA32_PL0_SSP — no-op when CET supervisor SHSTK is inactive.
     SAVE_PL0_SSP rdi
-    ; Save the user FS base (TLS) — no-op until TLS is in use.
     SAVE_USER_FSBASE rdi
     ret
 
-;--------------------------------------------------------------
-; task_restore_context(ProcessContext* ctx)
-;   rdi = pointer to ProcessContext
-;--------------------------------------------------------------
 global task_restore_context
 task_restore_context:
     endbr64
-    ; Restore FPU/SSE/AVX state first (uses rcx, rax, rdx as scratch)
     cmp byte [rdi + CTX_FPU_INIT], 0
     je .skip_fpu_restore
 
@@ -258,9 +184,6 @@ task_restore_context:
     mov ax, [rdi + CTX_SS]
     mov ss, ax
 
-    ; Restore the user FS base AFTER the `mov fs, ax` above — the
-    ; selector load just zeroed the base. Clobbers rax/rcx/rdx (both
-    ; are restored below).
     RESTORE_USER_FSBASE rdi
 
     mov rax, [rdi + CTX_RFLAGS]
@@ -286,25 +209,16 @@ task_restore_context:
     mov rax, [rdi + CTX_RIP]
     push rax
 
-    ; Restore IA32_PL0_SSP BEFORE the final RAX restore — RESTORE_PL0_SSP
-    ; clobbers rax/rcx/rdx. After this WRMSR, the next RET pops the
-    ; supervisor shadow stack at the new ctx.pl0_ssp slot.
     RESTORE_PL0_SSP rdi
 
-    ; Restore rax and rdi last
     mov rax, [rdi + 0]
     mov rdi, [rdi + 40]
 
     ret
 
-;--------------------------------------------------------------
-; task_switch_to(ProcessContext* old, ProcessContext* new)
-;   rdi = old context, rsi = new context
-;--------------------------------------------------------------
 global task_switch_to
 task_switch_to:
     endbr64
-    ; --- Save old context ---
     mov [rdi + 0],  rax
     mov [rdi + 8],  rbx
     mov [rdi + 16], rcx
@@ -342,7 +256,6 @@ task_switch_to:
     mov ax, ss
     mov [rdi + CTX_SS], ax
 
-    ; Save old FPU/SSE/AVX state
     mov rcx, [rdi + CTX_FPU]
     test rcx, rcx
     jz .switch_save_done
@@ -364,13 +277,9 @@ task_switch_to:
     mov byte [rdi + CTX_FPU_INIT], 1
 
 .switch_save_done:
-    ; Save OLD process's IA32_PL0_SSP into old ctx.
     SAVE_PL0_SSP rdi
-    ; Save OLD process's user FS base (TLS) into old ctx.
     SAVE_USER_FSBASE rdi
 
-    ; --- Restore new context ---
-    ; Restore FPU/SSE/AVX state first
     cmp byte [rsi + CTX_FPU_INIT], 0
     je .switch_skip_fpu
 
@@ -404,9 +313,6 @@ task_switch_to:
     mov ax, [rsi + CTX_SS]
     mov ss, ax
 
-    ; Restore NEW process's user FS base AFTER the `mov fs, ax` above
-    ; (selector load zeroes the base). Clobbers rax/rcx/rdx — all three
-    ; are restored below.
     RESTORE_USER_FSBASE rsi
 
     mov rax, [rsi + CTX_RFLAGS]
@@ -431,21 +337,14 @@ task_switch_to:
     mov rax, [rsi + CTX_RIP]
     push rax
 
-    ; Restore NEW process's IA32_PL0_SSP before final scratch restore.
-    ; RESTORE_PL0_SSP clobbers rax/rcx/rdx; rsi still holds new ctx ptr.
     RESTORE_PL0_SSP rsi
 
-    ; Restore rax, rsi, rdi last
     mov rax, [rsi + 0]
     mov rdi, [rsi + 40]
     mov rsi, [rsi + 32]
 
     ret
 
-;--------------------------------------------------------------
-; task_init_context(ProcessContext* ctx, void* entry, void* stack, void* arg)
-;   rdi = context, rsi = entry point, rdx = stack pointer, rcx = argument
-;--------------------------------------------------------------
 global task_init_context
 task_init_context:
     endbr64
@@ -455,9 +354,9 @@ task_init_context:
     mov [rdi + 16], rax
     mov [rdi + 24], rax
     mov [rdi + 32], rax
-    mov [rdi + 40], rcx    ; RDI = argument
+    mov [rdi + 40], rcx
     mov [rdi + 48], rax
-    mov [rdi + 56], rdx    ; RSP = stack pointer
+    mov [rdi + 56], rdx
     mov [rdi + 64], rax
     mov [rdi + 72], rax
     mov [rdi + 80], rax
@@ -467,13 +366,13 @@ task_init_context:
     mov [rdi + 112], rax
     mov [rdi + 120], rax
 
-    mov [rdi + CTX_RIP], rsi   ; RIP = entry point
+    mov [rdi + CTX_RIP], rsi
 
-    mov rax, 0x202             ; IF flag set
+    mov rax, 0x202
     mov [rdi + CTX_RFLAGS], rax
 
     xor rax, rax
-    mov [rdi + CTX_USER_FSBASE], rax   ; fresh context starts with no TLS
+    mov [rdi + CTX_USER_FSBASE], rax
 
     mov ax, GDT_KERNEL_CODE
     mov [rdi + CTX_CS], ax
@@ -484,7 +383,6 @@ task_init_context:
     mov [rdi + CTX_GS], ax
     mov [rdi + CTX_SS], ax
 
-    ; FPU not initialized — caller should use fpu_init_state() from C
     mov byte [rdi + CTX_FPU_INIT], 0
 
     ret

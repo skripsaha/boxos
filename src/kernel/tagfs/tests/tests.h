@@ -6,12 +6,7 @@
 #include "../../core/error/error.h"
 #include "../tagfs_constants.h"
 
-// ============================================================================
-// TagFS Test Framework
-// Comprehensive testing for all TagFS components
-// ============================================================================
 
-// Test result codes
 typedef enum {
     TEST_PASS = 0,
     TEST_FAIL = 1,
@@ -19,25 +14,11 @@ typedef enum {
     TEST_CRASH = 3
 } TestResult;
 
-/*
- * Does this test WRITE to the mounted volume?
- *
- * It matters because the volume a running machine has mounted belongs to
- * whoever is using the machine. A test that creates files, allocates blocks or
- * checkpoints the journal is doing that to their data, on their medium, every
- * time they switch the computer on.
- *
- * Found on the owner's flash drive after two boots: test_file, test_rw,
- * stress_file_0..2 sitting among his own files, next_file_id grown from 57 to
- * 135, nineteen blocks gone, and the metadata pool chained into the data run.
- * None of it visible in QEMU, where the image is rebuilt by every build.
- */
 typedef enum {
     TEST_READS_ONLY = 0,
     TEST_WRITES_TO_VOLUME = 1
 } TestReach;
 
-// Test case structure
 typedef struct {
     const char* name;
     TestResult (*func)(void);
@@ -47,7 +28,6 @@ typedef struct {
     TestReach reach;
 } TestCase;
 
-// Test suite structure
 typedef struct {
     const char* name;
     TestCase* tests;
@@ -57,7 +37,6 @@ typedef struct {
     uint32_t skipped;
 } TestSuite;
 
-// Test statistics
 typedef struct {
     uint32_t total_tests;
     uint32_t total_passed;
@@ -68,9 +47,6 @@ typedef struct {
     uint64_t end_time;
 } TestStats;
 
-// ============================================================================
-// Test Macros
-// ============================================================================
 
 #define TEST_ASSERT(cond, msg) do { \
     if (!(cond)) { \
@@ -95,20 +71,14 @@ typedef struct {
     } \
 } while(0)
 
-// ============================================================================
-// Test Runner API
-// ============================================================================
 
 error_t TagFS_TestsInit(void);
 void TagFS_TestsShutdown(void);
 
-// Run all tests
 error_t TagFS_RunAllTests(TestStats* stats);
 
-// Run specific test suite
 error_t TagFS_RunSuite(const char* suite_name, TestStats* stats);
 
-// Individual test suites
 TestSuite* TagFS_GetCoreTests(void);
 TestSuite* TagFS_GetCompressionTests(void);
 TestSuite* TagFS_GetJournalTests(void);
@@ -116,8 +86,7 @@ TestSuite* TagFS_GetSnapshotTests(void);
 TestSuite* TagFS_GetBraidTests(void);
 TestSuite* TagFS_GetStressTests(void);
 
-// Debug helpers
 void TagFS_PrintTestResults(const TestStats* stats);
 void TagFS_DumpState(void);
 
-#endif // TAGFS_TEST_H
+#endif

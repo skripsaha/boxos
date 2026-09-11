@@ -1,15 +1,3 @@
-/*
- * write_observer — proves that an async ObjWrite publishes a Touch
- * "WROTE" event to every tag of the written file, and that a separate
- * process listening on one of those tags wakes up and receives the
- * payload.
- *
- * Parent role:   subscribe (REST) to tag "obstest", spawn child, wait.
- * Child role:    create file tagged "obstest", write 256 bytes, exit.
- *
- * Pass: parent gets a Touch on "obstest" with payload describing the
- * write (file_id, op=1, offset, bytes, final_size).
- */
 
 #include "box/file.h"
 #include "box/touch.h"
@@ -50,8 +38,6 @@ int main(void)
         return child_role();
     }
 
-    /* Parent. Subscribe BEFORE spawning child so we never miss the
-     * publish. */
     TouchTag tag = TOUCH_TAG_ID(WO_TAG);
     if (touch_claim(tag, TOUCH_REST, 0, 0) != 0) {
         kdbg_print("[WO] claim '%s' FAIL", WO_TAG);
@@ -66,9 +52,6 @@ int main(void)
     }
     kdbg_print("[WO] spawned child pid=%d, awaiting WROTE", kid);
 
-    /* The async ObjWrite path publishes one event per tag of the file.
-     * Child file has at least the system-derived "tag" plus "obstest"
-     * — we only listen on obstest. Bounded poll. */
     Touch t;
     int rc = touch_await(tag, &t, 5000);
     touch_release(tag);

@@ -2,19 +2,9 @@
 #include "box/core/manifest.h"
 #include "box/error.h"
 #include "box/string.h"
-#include "boxos_decks.h"  /* SYSTEM_OP_ADDR_PARK, SYSTEM_OP_ADDR_WAKE */
-#include "box/timeouts.h" /* BOX_ANSWER_GUARANTEED */
+#include "boxos_decks.h"
+#include "box/timeouts.h"
 
-/*
- * addr_park — park until *addr != expected, or timeout.
- *
- * params: [u64 user_va][u64 expected][u32 timeout_ms]  (20 bytes)
- * Returns kernel error code translated to error_t.
- * ERR_WOULD_BLOCK from the kernel means successfully parked and woken —
- * guide.c delivers this as a result with error_code==ERR_WOULD_BLOCK only
- * while parked; on actual wake the scheduler reschedules and the caller
- * gets back OK from the result ring.  We treat OK from MfCall1 as success.
- */
 error_t addr_park(const volatile void *addr, uint64_t expected,
                   uint32_t timeout_ms)
 {
@@ -27,20 +17,6 @@ error_t addr_park(const volatile void *addr, uint64_t expected,
     memcpy(params + 8,  &expected,   sizeof(uint64_t));
     memcpy(params + 16, &timeout_ms, sizeof(uint32_t));
 
-    /* A wait without a deadline is exactly that: the answer is the wake,
-     * whenever it comes, and the kernel arms no timer for it. What stood here
-     * was 30 s "for forever" — a re-arm every half minute that woke the
-     * sleeper for nothing and blanketed a lost wake, which Nightwatch now
-     * names on facts instead.
-     *
-     * A deadline the caller DID set is the kernel's to keep, all of it:
-     * SysAddrPark arms it and delivers ERR_TIMEOUT as this submit's own
-     * Result when it passes (SyncTimeoutDeliver), and that delivery rides the
-     * process's own baton — an embedded node that cannot be dropped for want
-     * of a slot. So the call itself carries no clock: the answer is
-     * guaranteed either way, and a clock of our own over it (there was one,
-     * +100 ms, over an irq_defer hop that admitted it could drop) would only
-     * turn a late answer into a false timeout on a loaded machine. */
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_ADDR_PARK,
                      params, sizeof(params),
                      NULL, 0, NULL, 0, NULL,
@@ -51,11 +27,6 @@ error_t addr_park(const volatile void *addr, uint64_t expected,
     return (error_t)rc;
 }
 
-/*
- * addr_wake — wake up to `count` processes parked on `addr`.
- *
- * params: [u64 user_va][u32 count]  (12 bytes)
- */
 error_t addr_wake(const volatile void *addr, uint32_t count)
 {
     if (!addr) return ERR_INVALID_ARGUMENT;

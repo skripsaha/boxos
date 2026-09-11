@@ -1,52 +1,7 @@
-/*
- * uaccess — implementation of bracketed user-space access primitives.
- *
- * See uaccess.h for the design rationale + threat model.
- *
- * Fixup table layout
- * ------------------
- * Each access primitive emits a (fault_rip, recovery_rip) pair into the
- * `.uaccess_fixup` linker section. Linker bounds:
- *   __uaccess_fixup_start  — first byte of the table (8-byte aligned)
- *   __uaccess_fixup_end    — one past the last entry
- * Pair count: (end - start) / 16.
- *
- * The table is consulted by the VMM page-fault handler on every kernel-
- * mode #PF. A linear scan is acceptable because the table is small
- * (every static call site that does user access contributes one entry,
- * so a real kernel has on the order of dozens). If we ever cross into
- * hundreds, sort at link time + binary search; not now.
- *
- * GCC asm goto
- * ------------
- * The fault path returns control to a C-side label via `asm goto`. The
- * fixup table's recovery RIP is the linker's resolution of `%l[fault]`
- * — a code address inside the function, AFTER the asm block. On fault,
- * the VMM PF handler sets frame->rip to that address and IRETs; CPU
- * resumes execution at the fault label, which executes `clac()` and
- * returns the error code.
- *
- * AC=1 leak risk: between the faulting instruction and the C-side
- * `clac()`, RFLAGS.AC=1. If an interrupt fires in that window, the
- * IRQ handler runs with AC=1 — which is fine for safety because the
- * interrupt frame on iret restores RFLAGS from the saved frame (which
- * had AC=0 at interrupt entry from kernel mode). On a more conservative
- * design we'd `clac()` inside the asm block before jumping out — but
- * that requires an extra section + cross-section jump that's brittle
- * with toolchain versions. The asm-goto pattern is the canonical
- * Linux solution.
- */
 
 #include "uaccess.h"
-#include "klib.h"   /* debug_printf for boot-time fixup table report */
+#include "klib.h"
 
-/*
- * Whether this processor has the instructions at all — see the note in
- * uaccess.h. False until boot says otherwise, which is the safe direction:
- * a kernel that has not yet asked issues no STAC, and the worst that costs is
- * that SMAP is not enforced during early boot, where there is no user space
- * to be protected from yet.
- */
 bool g_uaccess_smap = false;
 
 void uaccess_set_smap(bool present)
@@ -61,18 +16,6 @@ void uaccess_set_smap(bool present)
 extern uintptr_t __uaccess_fixup_start[];
 extern uintptr_t __uaccess_fixup_end[];
 
-/* Sorted-by-fault_rip mirror of the linker-emitted fixup table. Populated
- * by uaccess_init at boot; consulted via binary search from the #PF
- * handler. Sized for plenty of headroom — every fixup-emitting helper
- * (copy_to/from_user, put/get_user_uN, plus any future ones) contributes
- * one entry, so 256 covers the table even after the audit adds another
- * dozen direct user-VA sites. If the actual count exceeds the cap,
- * lookup falls back to the linker-emitted linear scan — slower but
- * correct.
- *
- * Static .bss array (NOT kmalloc) so uaccess_init has no allocator
- * dependency — it runs from main.c before kmalloc's heap is committed
- * via demand-paging. */
 #define UACCESS_FIXUP_CAP   256
 
 static struct {
@@ -89,10 +32,6 @@ void uaccess_init(void) {
 
     size_t pair_count = (size_t)(__uaccess_fixup_end - __uaccess_fixup_start) / 2;
     if (pair_count > UACCESS_FIXUP_CAP) {
-        /* The static buffer can't hold the full table — leave
-         * g_fixup_sorted_ready=false so lookup falls back to the
-         * linker-emitted linear scan. The overflow flag surfaces in
-         * the debug log so an operator can bump UACCESS_FIXUP_CAP. */
         g_fixup_overflowed = true;
         debug_printf("[uaccess] WARN fixup table has %zu entries (cap=%d) — "
                      "lookup falls back to linear scan\n",
@@ -105,11 +44,6 @@ void uaccess_init(void) {
         g_fixup_sorted[i].recovery = __uaccess_fixup_start[i * 2 + 1];
     }
 
-    /* Insertion sort by fault_rip. Pair count is small (~dozens) so the
-     * O(n²) cost is invisible at boot. The simpler algorithm avoids
-     * pulling a generic qsort from kmalloc / libstd; it's also easier
-     * to audit. Stable sort isn't strictly needed (each fault_rip is
-     * unique by construction — emitted by a distinct asm site). */
     for (size_t i = 1; i < pair_count; i++) {
         uintptr_t f = g_fixup_sorted[i].fault;
         uintptr_t r = g_fixup_sorted[i].recovery;
@@ -130,10 +64,6 @@ void uaccess_init(void) {
 }
 
 uintptr_t uaccess_lookup_fixup(uintptr_t fault_rip) {
-    /* Fast path: binary search on the sorted mirror. ACQUIRE on the
-     * ready flag pairs with the RELEASE store at the end of uaccess_init
-     * so a fault that lands the instant init publishes the table sees
-     * the fully-populated array, not a half-written one. */
     if (__atomic_load_n(&g_fixup_sorted_ready, __ATOMIC_ACQUIRE)) {
         size_t lo = 0, hi = g_fixup_sorted_count;
         while (lo < hi) {
@@ -146,25 +76,15 @@ uintptr_t uaccess_lookup_fixup(uintptr_t fault_rip) {
         return 0;
     }
 
-    /* Fallback path: linear scan on the linker-emitted .rodata table.
-     * Triggered for #PFs that fire before uaccess_init runs (early-boot
-     * window) or when the table overflowed UACCESS_FIXUP_CAP. Correct
-     * but slower; the boot window is microseconds and the overflow case
-     * is a soft warning, not a regression. */
     for (uintptr_t *p = __uaccess_fixup_start; p < __uaccess_fixup_end; p += 2) {
         if (p[0] == fault_rip) return p[1];
     }
     return 0;
 }
 
-/* ─── Bulk copies — rep movsb under STAC ──────────────────────────── */
 
 size_t copy_to_user(void *dst, const void *src, size_t n) {
     if (!access_ok(dst, n)) return n;
-    /* rep movsb is the ERMSB fast path on Intel + AMD and is SMAP-aware:
-     * with CR4.SMAP=1 + AC=0 it faults on user-mapped target. We wrap
-     * it in STAC/CLAC so the access succeeds; the fixup catches PF on
-     * a genuinely unmapped page (unmap-while-syscall race). */
     stac();
     __asm__ volatile goto (
         "1: rep movsb\n\t"
@@ -180,9 +100,6 @@ size_t copy_to_user(void *dst, const void *src, size_t n) {
     return 0;
 
 fault:
-    /* `n`, `src`, `dst` are clobbered by `rep movsb`: on fault, RCX has
-     * remaining count, RSI/RDI have advanced. C compiler can't see this
-     * across the goto, so we re-read the count by inline asm. */
     {
         size_t remaining;
         __asm__ volatile ("mov %%rcx, %0" : "=r"(remaining));
@@ -216,7 +133,6 @@ fault:
     }
 }
 
-/* ─── Single-word accessors ───────────────────────────────────────── */
 
 int put_user_u32(uint32_t val, uint32_t *ptr) {
     if (!access_ok(ptr, sizeof(uint32_t))) return -1;

@@ -1,23 +1,3 @@
-/*
- * MemTag — Manifest opcode handlers (RAM region tagging surface).
- *
- * Phase 1 surface is READ-ONLY: userspace observes regions and queries
- * by tag set but cannot apply/clear/register (mutation hooks land in
- * Phase 2 alongside the per-cabin security mask).
- *
- *   QUERY   in_crate = "req\0req\0\x1Fany\0\x1Fexcl\0" tag spec
- *           out_crate = [u32 count][u32 region_ids[]]
- *   INFO    params  = [u32 region_id]; out_crate = MemRegionSnapshot blob
- *   LOOKUP  params  = [u64 phys]; out_crate = [u32 region_id]
- *   TAGS    params  = [u32 region_id]; out_crate = [u32 count][char strs[]]
- *   STATS   out_crate = MemTagStats blob
- *
- * All input/output crates flow through vmm_user_buf_* helpers so they
- * survive multi-page user buffers without aliasing into kernel memory
- * (vmm_translate_user_addr clamps to a single physical page — using it
- * directly with multi-page outputs would write into adjacent physical
- * pages that don't match user's virtual layout).
- */
 
 #include "system_deck.h"
 #include "memtag.h"
@@ -30,7 +10,6 @@
 #include "klib.h"
 #include "error.h"
 
-/* ─── SYSTEM_OP_MEMTAG_QUERY ────────────────────────────────────────── */
 #define MEMTAG_QUERY_SECTION_SEP 0x1F
 
 static int SysMemTagQuery(const ManifestOp *op, Crate *crates,
@@ -45,12 +24,10 @@ static int SysMemTagQuery(const ManifestOp *op, Crate *crates,
     if (in->size == 0 || in->size > 4096) return ERR_INVALID_ARGUMENT;
     if (out->capacity < sizeof(uint32_t)) return ERR_INVALID_ARGUMENT;
 
-    /* Pull the spec into a kernel buffer — page-walk safe. */
     char *spec_k = (char *)vmm_user_buf_in(ctx->proc->cabin->vmm,
                                             (uintptr_t)in->addr, in->size);
     if (!spec_k) return ERR_INVALID_ADDRESS;
 
-    /* Append a guard NUL so SplitColon-style walking never reads past. */
     char *spec = (char *)kmalloc(in->size + 1);
     if (!spec) { vmm_user_buf_free(spec_k); return ERR_NO_MEMORY; }
     memcpy(spec, spec_k, in->size);
@@ -109,7 +86,6 @@ static int SysMemTagQuery(const ManifestOp *op, Crate *crates,
     return OK;
 }
 
-/* ─── SYSTEM_OP_MEMTAG_INFO ─────────────────────────────────────────── */
 static int SysMemTagInfo(const ManifestOp *op, Crate *crates,
                          uint16_t crate_count, const OpContext *ctx) {
     (void)crate_count;
@@ -135,7 +111,6 @@ static int SysMemTagInfo(const ManifestOp *op, Crate *crates,
     return OK;
 }
 
-/* ─── SYSTEM_OP_MEMTAG_LOOKUP ───────────────────────────────────────── */
 static int SysMemTagLookup(const ManifestOp *op, Crate *crates,
                            uint16_t crate_count, const OpContext *ctx) {
     (void)crate_count;
@@ -158,11 +133,6 @@ static int SysMemTagLookup(const ManifestOp *op, Crate *crates,
     return OK;
 }
 
-/* ─── SYSTEM_OP_MEMTAG_LOOKUP_VIRT ──────────────────────────────────── */
-/* params: [u64 virt]; out_crate: u32 region_id. Resolves a virtual address
- * in the CALLER's cabin (virt -> phys via the caller's page tables -> the
- * covering region). This is the only userspace path from an owned pointer to
- * its region_id — pku/sealed_region needs it to stamp a region it allocated. */
 static int SysMemTagLookupVirt(const ManifestOp *op, Crate *crates,
                                uint16_t crate_count, const OpContext *ctx) {
     (void)crate_count;
@@ -185,7 +155,6 @@ static int SysMemTagLookupVirt(const ManifestOp *op, Crate *crates,
     return OK;
 }
 
-/* ─── SYSTEM_OP_MEMTAG_TAGS ─────────────────────────────────────────── */
 static int SysMemTagTags(const ManifestOp *op, Crate *crates,
                          uint16_t crate_count, const OpContext *ctx) {
     (void)crate_count;
@@ -240,7 +209,6 @@ static int SysMemTagTags(const ManifestOp *op, Crate *crates,
     return OK;
 }
 
-/* ─── SYSTEM_OP_MEMTAG_STATS ────────────────────────────────────────── */
 static int SysMemTagStats(const ManifestOp *op, Crate *crates,
                           uint16_t crate_count, const OpContext *ctx) {
     (void)crate_count;
@@ -261,18 +229,7 @@ static int SysMemTagStats(const ManifestOp *op, Crate *crates,
     return OK;
 }
 
-/* ═══════════════════════════════════════════════════════════════════
- *  Phase 2A — Capability mutation handlers (SET_GUARD / GRANT / REVOKE
- *  / CABIN_TAGS / CHECK)
- *
- *  Auth model: SET_GUARD / GRANT / REVOKE require the caller to hold
- *  the TagFS "system" tag — same gate already used by other privileged
- *  ops (proc_kill, etc.). CABIN_TAGS / CHECK are unprivileged (anyone
- *  may observe; mutating requires system).
- * ═══════════════════════════════════════════════════════════════════ */
 
-/* ─── SYSTEM_OP_MEMTAG_SET_GUARD ───────────────────────────────────── */
-/* params: [u8 on/off]; in_crate: tag string. */
 static int SysMemTagSetGuard(const ManifestOp *op, Crate *crates,
                               uint16_t crate_count, const OpContext *ctx) {
     (void)crate_count;
@@ -287,7 +244,6 @@ static int SysMemTagSetGuard(const ManifestOp *op, Crate *crates,
     char *tag = (char *)vmm_user_buf_in(ctx->proc->cabin->vmm,
                                          (uintptr_t)in->addr, in->size);
     if (!tag) return ERR_INVALID_ADDRESS;
-    /* Ensure NUL-terminated */
     char tag_buf[129];
     size_t cp = in->size < 128 ? in->size : 128;
     memcpy(tag_buf, tag, cp);
@@ -298,8 +254,6 @@ static int SysMemTagSetGuard(const ManifestOp *op, Crate *crates,
     return MemTagSetGuard(tag_buf, on);
 }
 
-/* ─── SYSTEM_OP_MEMTAG_GRANT ────────────────────────────────────────── */
-/* params: [u32 pid]; in_crate: tag string. */
 static int SysMemTagGrant(const ManifestOp *op, Crate *crates,
                           uint16_t crate_count, const OpContext *ctx) {
     (void)crate_count;
@@ -322,15 +276,11 @@ static int SysMemTagGrant(const ManifestOp *op, Crate *crates,
     tag_buf[cp] = '\0';
     vmm_user_buf_free(tag);
 
-    /* Intern (creates if missing) — grant of an unknown tag is a no-op
-     * functionally but auto-creates the tag entry so it can be guarded
-     * later. */
     uint16_t tid = MemTagInternStr(tag_buf);
     if (tid == MEMTAG_INVALID_TAG_ID) return ERR_NO_MEMORY;
     return MemCabinGrant(pid, tid);
 }
 
-/* ─── SYSTEM_OP_MEMTAG_REVOKE ───────────────────────────────────────── */
 static int SysMemTagRevoke(const ManifestOp *op, Crate *crates,
                            uint16_t crate_count, const OpContext *ctx) {
     (void)crate_count;
@@ -354,12 +304,10 @@ static int SysMemTagRevoke(const ManifestOp *op, Crate *crates,
     vmm_user_buf_free(tag);
 
     uint16_t tid = MemTagResolveStr(tag_buf);
-    if (tid == MEMTAG_INVALID_TAG_ID) return OK;  /* never interned */
+    if (tid == MEMTAG_INVALID_TAG_ID) return OK;
     return MemCabinRevoke(pid, tid);
 }
 
-/* ─── SYSTEM_OP_MEMTAG_CABIN_TAGS ───────────────────────────────────── */
-/* params: [u32 pid]; out_crate: [u32 count][char strs[]] (same shape as TAGS). */
 static int SysMemTagCabinTags(const ManifestOp *op, Crate *crates,
                               uint16_t crate_count, const OpContext *ctx) {
     (void)crate_count;
@@ -370,7 +318,6 @@ static int SysMemTagCabinTags(const ManifestOp *op, Crate *crates,
     uint32_t pid;
     memcpy(&pid, op->params, sizeof(uint32_t));
 
-    /* List up to 1024 tags (mask cap). */
     uint16_t ids[1024];
     size_t   n = MemCabinListTags(pid, ids, 1024);
 
@@ -411,9 +358,6 @@ static int SysMemTagCabinTags(const ManifestOp *op, Crate *crates,
     return OK;
 }
 
-/* ─── SYSTEM_OP_MEMTAG_CHECK ────────────────────────────────────────── */
-/* params: [u32 pid][u32 region_id]; out_crate: [u8 allowed][u8][u8][u8]
- * [u16 missing_tag_id][u16 reserved] = 8 bytes. */
 static int SysMemTagCheck(const ManifestOp *op, Crate *crates,
                           uint16_t crate_count, const OpContext *ctx) {
     (void)crate_count;
@@ -443,10 +387,7 @@ static int SysMemTagCheck(const ManifestOp *op, Crate *crates,
     return OK;
 }
 
-/* ─── Registration ──────────────────────────────────────────────────── */
 
-/* ─── SYSTEM_OP_MEMTAG_APPLY_PKEY ──────────────────────────────────── */
-/* params: [u32 region_id][u8 pkey 0..15]. No in_crate. */
 static int SysMemTagApplyPkey(const ManifestOp *op, Crate *crates,
                                uint16_t crate_count, const OpContext *ctx) {
     (void)crates;
@@ -460,10 +401,6 @@ static int SysMemTagApplyPkey(const ManifestOp *op, Crate *crates,
     memcpy(&region_id, op->params, sizeof(uint32_t));
     memcpy(&pkey, op->params + sizeof(uint32_t), sizeof(uint8_t));
 
-    /* MemTagApplyPkey clears any prior pku:* on the region, then applies
-     * pku:<pkey>. The apply path triggers MemTagSweepPkey across all
-     * attaches + cross-core TLB shootdown. pkey == 0 is shorthand for
-     * "no pku tag" — clears policy. */
     return MemTagApplyPkey(region_id, pkey);
 }
 

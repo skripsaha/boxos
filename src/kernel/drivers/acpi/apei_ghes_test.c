@@ -1,22 +1,3 @@
-/*
- * APEI/GHES runtime — integration test.
- *
- * Synthesises a Generic Error Status Block in kernel memory + drives
- * apei_ghes_simulate() through the same process_source_gesb() path the
- * production poller uses. Real-HW APEI injection is APEI EINJ — not
- * available in QEMU TCG; this validates the kernel-side state machine.
- *
- * Scenarios:
- *   T1 — empty GESB (block_status=0) → no-op, zero counter delta.
- *   T2 — single Memory Error section with PHYSADDR validation bit + a
- *        recoverable severity → mce_migrate_requests counter increments
- *        (the migrate stat counter is the smoking gun for the bridge).
- *   T3 — multi-section GESB (Memory + Processor) → both section
- *        counters advance.
- *   T4 — corrupt GESB (data_length > region) → corrupt_records++.
- *   T5 — informational severity Memory section → published as event but
- *        does NOT request migration (advisory-only).
- */
 
 #include "apei_ghes_runtime.h"
 #include "memtag.h"
@@ -31,8 +12,6 @@
                 kprintf("[APEI TEST]   %[R]FAIL%[D]: " label "\n"); } \
     } while (0)
 
-/* On-wire layouts duplicated from apei_ghes_runtime.c — keeping the
- * production decoder file free of any test-only public exports. */
 typedef struct {
     uint32_t block_status;
     uint32_t raw_data_offset;
@@ -73,7 +52,6 @@ typedef struct {
     uint8_t  extended[3];
 } __attribute__((packed)) cper_mem_t;
 
-/* Section type GUIDs (same constants the runtime uses). */
 static const uint8_t GUID_MEMORY[16] = {
     0x14,0x11,0xBC,0xA5, 0x64,0x6F, 0xDE,0x4E,
     0xB8,0x63, 0x3E,0x83,0xED,0x7C,0x83,0xB1 };
@@ -100,10 +78,10 @@ static void build_mem_entry(void *buf, uint64_t phys, uint8_t sev, uint16_t bank
     ge->error_data_length  = (uint32_t)sizeof(cper_mem_t);
     cper_mem_t *m = (cper_mem_t *)(ge + 1);
     memset(m, 0, sizeof(*m));
-    m->validation_bits   = (1u << 1);  /* PHYSADDR valid */
+    m->validation_bits   = (1u << 1);
     m->physical_address  = phys;
     m->bank              = bank;
-    m->error_type        = 3;  /* multi-bit ECC */
+    m->error_type        = 3;
 }
 
 static void build_proc_entry(void *buf, uint8_t sev) {
@@ -126,9 +104,6 @@ void ApeiGhesTest(void) {
         return;
     }
 
-    /* Allocate a scratch GESB buffer in kernel memory. simulate() will
-     * cast the gesb_phys arg directly to a kernel VA, so we hand it a
-     * kernel-VA pointer (test convention). */
     void *buf = pmm_alloc_zero(1, PHYS_TAG_USER);
     if (!buf) buf = pmm_alloc_zero(1);
     AGT_CHECK(buf != NULL, "scratch GESB alloc");
@@ -137,7 +112,6 @@ void ApeiGhesTest(void) {
     uintptr_t buf_va = (uintptr_t)vmm_phys_to_virt((uintptr_t)buf);
     uint32_t  buf_len = PMM_PAGE_SIZE;
 
-    /* ── T1: empty GESB ─────────────────────────────────────────── */
     {
         memset((void *)buf_va, 0, buf_len);
         apei_ghes_stats_t s0; apei_ghes_get_stats(&s0);
@@ -150,10 +124,8 @@ void ApeiGhesTest(void) {
                   "T1: memory sections counter unchanged");
     }
 
-    /* ── T2: single recoverable Memory section ─────────────────── */
     {
         memset((void *)buf_va, 0, buf_len);
-        /* Allocate a separate phys page for the simulated bad addr. */
         void *bad_phys = pmm_alloc_zero(1, PHYS_TAG_USER);
         if (!bad_phys) bad_phys = pmm_alloc_zero(1);
         AGT_CHECK(bad_phys != NULL, "T2: bad_phys alloc");
@@ -174,7 +146,6 @@ void ApeiGhesTest(void) {
                   "T2: mce_migrate_requests incremented (bridge active)");
         AGT_CHECK(a.events_processed == b.events_processed + 1,
                   "T2: events_processed incremented");
-        /* After simulate, block_status should be cleared (W1C ack). */
         gesb_header_t *h = (gesb_header_t *)buf_va;
         AGT_CHECK(h->block_status == 0,
                   "T2: block_status cleared (W1C ack)");
@@ -182,7 +153,6 @@ void ApeiGhesTest(void) {
     }
 
 t3:
-    /* ── T3: Memory + Processor in one record ──────────────────── */
     {
         memset((void *)buf_va, 0, buf_len);
         void *bad3 = pmm_alloc_zero(1, PHYS_TAG_USER);
@@ -209,10 +179,9 @@ t3:
     }
 
 t4:
-    /* ── T4: corrupt — data_length exceeds the GESB region ─────── */
     {
         memset((void *)buf_va, 0, buf_len);
-        build_header((void *)buf_va, 0x1, buf_len * 4, 0);  /* lies */
+        build_header((void *)buf_va, 0x1, buf_len * 4, 0);
         apei_ghes_stats_t b; apei_ghes_get_stats(&b);
         uint32_t r = apei_ghes_simulate(buf_va, buf_len);
         apei_ghes_stats_t a; apei_ghes_get_stats(&a);
@@ -221,16 +190,15 @@ t4:
                   "T4: corrupt_records +1");
     }
 
-    /* ── T5: informational Memory section — no migrate request ─── */
     {
         memset((void *)buf_va, 0, buf_len);
         void *bad5 = pmm_alloc_zero(1, PHYS_TAG_USER);
         if (!bad5) bad5 = pmm_alloc_zero(1);
         if (bad5) {
             uint32_t mem_entry_len = (uint32_t)sizeof(gedata_entry_t) + (uint32_t)sizeof(cper_mem_t);
-            build_header((void *)buf_va, 0x2, mem_entry_len, 2);  /* corrected */
+            build_header((void *)buf_va, 0x2, mem_entry_len, 2);
             build_mem_entry((void *)(buf_va + sizeof(gesb_header_t)),
-                            (uint64_t)(uintptr_t)bad5, 2, 3);     /* corrected sev */
+                            (uint64_t)(uintptr_t)bad5, 2, 3);
 
             apei_ghes_stats_t b; apei_ghes_get_stats(&b);
             (void)apei_ghes_simulate(buf_va, buf_len);

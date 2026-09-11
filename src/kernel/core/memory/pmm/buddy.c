@@ -2,7 +2,6 @@
 #include "vmm.h"
 #include "klib.h"
 
-// --- Helpers ---
 
 static inline int pages_to_order(size_t pages) {
     int order = 0;
@@ -35,7 +34,6 @@ static inline bool alloc_map_test(BuddyZone* zone, size_t idx) {
     return (zone->alloc_map[idx / 8] & (1 << (idx % 8))) != 0;
 }
 
-// Mark a range of pages in alloc_map
 static void alloc_map_mark_range(BuddyZone* zone, size_t start_idx, size_t count, bool allocated) {
     for (size_t i = 0; i < count; i++) {
         if (allocated)
@@ -45,17 +43,14 @@ static void alloc_map_mark_range(BuddyZone* zone, size_t start_idx, size_t count
     }
 }
 
-// Get a virtual pointer to access a physical page (works before and after DPM)
 static inline BuddyFreeNode* phys_to_node(uintptr_t phys) {
     return (BuddyFreeNode*)vmm_phys_to_virt(phys);
 }
 
-// Get physical address from a node pointer
 static inline uintptr_t node_to_phys(BuddyFreeNode* node) {
     return vmm_virt_to_phys_direct((void*)node);
 }
 
-// --- Free list operations (doubly-linked, intrusive) ---
 
 static void buddy_list_insert(BuddyFreeList* list, BuddyFreeNode* node, int order) {
     node->order = (uint8_t)order;
@@ -86,7 +81,6 @@ static void buddy_list_remove(BuddyFreeList* list, BuddyFreeNode* node) {
     list->count--;
 }
 
-// --- Buddy core ---
 
 static uintptr_t buddy_address(BuddyZone* zone, uintptr_t block_phys, int order) {
     uintptr_t offset = block_phys - zone->base;
@@ -104,7 +98,6 @@ void buddy_init(BuddyZone* zone, uintptr_t base, size_t total_pages,
     zone->free_count = 0;
     zone->initialized = false;
 
-    // Initialize all free lists to empty
     for (int o = 0; o <= BUDDY_MAX_ORDER; o++) {
         zone->free_lists[o].head = NULL;
         zone->free_lists[o].tail = NULL;
@@ -113,36 +106,28 @@ void buddy_init(BuddyZone* zone, uintptr_t base, size_t total_pages,
 
     spinlock_init(&zone->lock);
 
-    // Mark all pages as allocated initially
     memset(alloc_map, 0xFF, alloc_map_size);
 
     zone->initialized = true;
 }
 
-// Add a range of pages to the buddy free lists.
-// Decomposes [start, end) into naturally-aligned power-of-2 blocks.
 void buddy_free_range(BuddyZone* zone, uintptr_t start, uintptr_t end) {
-    // Align to page boundaries within zone
     if (start < zone->base) start = zone->base;
     uintptr_t zone_end = zone->base + zone->total_pages * BUDDY_PAGE_SIZE;
     if (end > zone_end) end = zone_end;
     if (start >= end) return;
 
-    // Page-align
     start = ALIGN_UP(start, BUDDY_PAGE_SIZE);
     end = ALIGN_DOWN(end, BUDDY_PAGE_SIZE);
     if (start >= end) return;
 
     uintptr_t addr = start;
     while (addr < end) {
-        // Find max order: block must be naturally aligned AND fit within [addr, end)
         int order = 0;
         while (order < BUDDY_MAX_ORDER) {
             size_t next_pages = order_to_pages(order + 1);
             uintptr_t offset = addr - zone->base;
-            // Check alignment for next order
             if (offset % (next_pages * BUDDY_PAGE_SIZE) != 0) break;
-            // Check fit
             if (addr + next_pages * BUDDY_PAGE_SIZE > end) break;
             order++;
         }
@@ -150,11 +135,9 @@ void buddy_free_range(BuddyZone* zone, uintptr_t start, uintptr_t end) {
         size_t block_pages = order_to_pages(order);
         size_t idx = page_index(zone, addr);
 
-        // Mark pages free in alloc_map
         alloc_map_mark_range(zone, idx, block_pages, false);
         zone->free_count += block_pages;
 
-        // Insert into free list
         BuddyFreeNode* node = phys_to_node(addr);
         buddy_list_insert(&zone->free_lists[order], node, order);
 
@@ -162,8 +145,6 @@ void buddy_free_range(BuddyZone* zone, uintptr_t start, uintptr_t end) {
     }
 }
 
-// Reserve a range by marking pages as allocated and removing from free lists.
-// This works by allocating individual pages that fall within the range.
 void buddy_reserve_range(BuddyZone* zone, uintptr_t start, uintptr_t end) {
     start = ALIGN_DOWN(start, BUDDY_PAGE_SIZE);
     end = ALIGN_UP(end, BUDDY_PAGE_SIZE);
@@ -173,10 +154,6 @@ void buddy_reserve_range(BuddyZone* zone, uintptr_t start, uintptr_t end) {
     if (end > zone_end) end = zone_end;
     if (start >= end) return;
 
-    // For each page in the range, if it's free, we need to split blocks
-    // down to order 0 and mark the page as allocated.
-    // Simpler approach: walk all free lists and remove any block that overlaps.
-    // Then re-add the non-overlapping portions.
 
     for (int o = BUDDY_MAX_ORDER; o >= 0; o--) {
         BuddyFreeNode* node = zone->free_lists[o].head;
@@ -186,14 +163,11 @@ void buddy_reserve_range(BuddyZone* zone, uintptr_t start, uintptr_t end) {
             uintptr_t block_end = block_phys + block_pages * BUDDY_PAGE_SIZE;
             BuddyFreeNode* next = node->next;
 
-            // Check if block overlaps with reserved range
             if (block_phys < end && block_end > start) {
-                // Remove from free list
                 buddy_list_remove(&zone->free_lists[o], node);
                 zone->free_count -= block_pages;
                 alloc_map_mark_range(zone, page_index(zone, block_phys), block_pages, true);
 
-                // Re-add non-overlapping portions
                 if (block_phys < start) {
                     buddy_free_range(zone, block_phys, start);
                 }
@@ -215,7 +189,6 @@ void* buddy_alloc(BuddyZone* zone, size_t pages) {
 
     spin_lock(&zone->lock);
 
-    // Find smallest order with a free block
     int o;
     for (o = order; o <= BUDDY_MAX_ORDER; o++) {
         if (zone->free_lists[o].head != NULL) break;
@@ -226,22 +199,18 @@ void* buddy_alloc(BuddyZone* zone, size_t pages) {
         return NULL;
     }
 
-    // Pop block from free list
     BuddyFreeNode* block_node = zone->free_lists[o].head;
     uintptr_t block_phys = node_to_phys(block_node);
     buddy_list_remove(&zone->free_lists[o], block_node);
 
-    // Split down to target order
     while (o > order) {
         o--;
         uintptr_t buddy_phys = block_phys + order_to_pages(o) * BUDDY_PAGE_SIZE;
 
-        // Insert upper half (buddy) into free list at order o
         BuddyFreeNode* buddy_node = phys_to_node(buddy_phys);
         buddy_list_insert(&zone->free_lists[o], buddy_node, o);
     }
 
-    // Mark allocated in alloc_map
     size_t block_pages = order_to_pages(order);
     size_t idx = page_index(zone, block_phys);
     alloc_map_mark_range(zone, idx, block_pages, true);
@@ -278,10 +247,8 @@ void* buddy_alloc_range(BuddyZone* zone, size_t pages, uintptr_t min_phys, uintp
             }
 
             if (block_phys >= min_phys && block_end <= max_phys) {
-                // Found a block in range — remove it
                 buddy_list_remove(list, node);
 
-                // Split down to target order
                 int cur = o;
                 while (cur > order) {
                     cur--;
@@ -329,12 +296,6 @@ void buddy_free(BuddyZone* zone, void* addr, size_t pages) {
 
     spin_lock(&zone->lock);
 
-    // Double-free check — EVERY page in the block must currently be allocated.
-    // Scanning the whole range (not just the first page) also catches a mis-
-    // sized or partially-overlapping free, which would otherwise silently
-    // corrupt the free-lists by marking already-free pages free again and
-    // double-inserting their buddies. Panic with the lock held so no other core
-    // observes a half-updated map.
     for (size_t i = 0; i < block_pages; i++) {
         if (!alloc_map_test(zone, idx + i)) {
             panic("[BUDDY] Double free at phys=0x%lx pages=%lu order=%d (page +%lu already free)",
@@ -342,16 +303,13 @@ void buddy_free(BuddyZone* zone, void* addr, size_t pages) {
         }
     }
 
-    // Mark pages free
     alloc_map_mark_range(zone, idx, block_pages, false);
     zone->free_count += block_pages;
 
-    // Coalesce with buddy
     uintptr_t block = phys;
     while (order < BUDDY_MAX_ORDER) {
         uintptr_t buddy_phys = buddy_address(zone, block, order);
 
-        // Buddy must be within zone
         if (buddy_phys < zone->base ||
             buddy_phys + order_to_pages(order) * BUDDY_PAGE_SIZE >
             zone->base + zone->total_pages * BUDDY_PAGE_SIZE) {
@@ -360,22 +318,17 @@ void buddy_free(BuddyZone* zone, void* addr, size_t pages) {
 
         size_t buddy_idx = page_index(zone, buddy_phys);
 
-        // Buddy's first page must be free
         if (alloc_map_test(zone, buddy_idx)) break;
 
-        // Buddy must be free at the SAME order (check the order field)
         BuddyFreeNode* buddy_node = phys_to_node(buddy_phys);
         if (buddy_node->order != (uint8_t)order) break;
 
-        // Remove buddy from its free list
         buddy_list_remove(&zone->free_lists[order], buddy_node);
 
-        // Merged block starts at min(block, buddy)
         if (buddy_phys < block) block = buddy_phys;
         order++;
     }
 
-    // Insert coalesced block
     BuddyFreeNode* node = phys_to_node(block);
     buddy_list_insert(&zone->free_lists[order], node, order);
 
@@ -383,19 +336,15 @@ void buddy_free(BuddyZone* zone, void* addr, size_t pages) {
 }
 
 void buddy_activate_pull_map(BuddyZone* zone) {
-    // Rebase alloc_map pointer
     zone->alloc_map = (uint8_t*)vmm_phys_to_virt(zone->alloc_map_phys);
 
-    // Rebase all free list pointers from identity to DPM
     for (int o = 0; o <= BUDDY_MAX_ORDER; o++) {
         BuddyFreeList* list = &zone->free_lists[o];
         if (!list->head) continue;
 
-        // Rebase head pointer (currently identity = physical)
         uintptr_t head_phys = (uintptr_t)list->head;
         list->head = (BuddyFreeNode*)vmm_phys_to_virt(head_phys);
 
-        // Walk and rebase all node pointers; track tail for tail-insertion
         BuddyFreeNode* node = list->head;
         BuddyFreeNode* last = NULL;
         while (node) {

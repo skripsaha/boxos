@@ -4,9 +4,6 @@
 #include "ktypes.h"
 #include "klib.h"
 
-// ReadyQueue: global FIFO of processes with pending Pockets.
-// Intrusive linked list via process_t.ready_next — no static capacity limit.
-// Lock ordering: ReadyQueue.lock must NOT be acquired while holding process state_lock.
 
 typedef struct process_t process_t;
 
@@ -25,4 +22,4 @@ process_t *ready_queue_pop(ReadyQueue *rq);
 bool      ready_queue_is_empty(const ReadyQueue *rq);
 uint32_t  ready_queue_count(const ReadyQueue *rq);
 
-#endif // READY_QUEUE_H
+#endif

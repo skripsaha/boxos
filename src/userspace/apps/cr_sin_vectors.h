@@ -1,5 +1,3 @@
-// Baked 80-bit (x, MPFR-CR-ref) vectors for sin — GENERATED, do not edit.
-// {x mantissa, x se, ref mantissa, ref se}; se = sign<<15 | exp15.
 static const CrVec kSinVec[] = {
 {0x8000000000000000ULL,0x3FCEu,0x8000000000000000ULL,0x3FCEu},
 {0x8000000000000000ULL,0x3FCFu,0x8000000000000000ULL,0x3FCFu},

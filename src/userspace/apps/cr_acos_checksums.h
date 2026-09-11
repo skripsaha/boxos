@@ -1,4 +1,3 @@
-// FNV-1a checksums over MPFR-CR acos for the deterministic x stream — GENERATED.
 static const unsigned long long kAcosN    = 20000ULL;
 static const unsigned long long kAcosSeed = 0x2545F4914F6CDD1DULL;
 static const int kAcosElo = -30;

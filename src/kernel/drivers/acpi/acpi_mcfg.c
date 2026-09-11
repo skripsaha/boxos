@@ -1,33 +1,6 @@
 #include "acpi_internal.h"
 #include "klib.h"
 
-/*
- * MCFG (PCI Express Memory-Mapped Configuration Space) parser.
- *
- * Reference: PCI Firmware Specification 3.0 §4.1.2.
- * Layout:
- *   acpi_sdt_header_t   header     (signature "MCFG")
- *   uint64_t            reserved   (must be zero per spec)
- *   acpi_mcfg_segment_t segments[] (16 bytes each)
- *     uint64_t base_address
- *     uint16_t segment_group
- *     uint8_t  start_bus
- *     uint8_t  end_bus
- *     uint32_t reserved
- *
- * MCFG describes the Enhanced Configuration Access Mechanism (ECAM) MMIO
- * region for each PCI segment group. Without it, code can still poke
- * legacy PCI config space at 0xCF8/0xCFC, but extended config (offset
- * 0x100-0xFFF) — required for MSI-X tables, PCIe capability registers,
- * AER and ASPM control — is unreachable. The ECAM layout per spec is:
- *
- *   ecam_va(seg, bus, dev, fn, off) =
- *     segments[seg].base_address +
- *     ((bus - start_bus) << 20) + (dev << 15) + (fn << 12) + off
- *
- * The PCI subsystem driver (separate audit) consumes acpi_get_mcfg() to
- * pick ECAM in preference to 0xCF8/0xCFC when present.
- */
 
 void acpi_parse_mcfg(void) {
     g_acpi.mcfg.present = false;

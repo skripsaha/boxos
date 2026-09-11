@@ -3,11 +3,10 @@
 #include "box/core/manifest.h"
 #include "box/string.h"
 #include "box/error.h"
-#include "boxos_decks.h"  /* SYSTEM_OP_MEMTAG_* opcodes — single source */
+#include "boxos_decks.h"
 
 #define MEMTAG_QUERY_SECTION_SEP 0x1F
 
-/* Build "req\0req\0\x1Fany\0\x1Fexc\0" spec from three NULL-term arrays. */
 static int build_query_spec(const char *const *req,
                              const char *const *any,
                              const char *const *exc,
@@ -48,7 +47,6 @@ int mem_query(const char *const *required,
                               spec, sizeof(spec), &spec_len);
     if (rc != 0) return box_fail(rc);
 
-    /* out format: [u32 count][u32 ids[]] */
     uint32_t out_cap = sizeof(uint32_t) + max_results * sizeof(uint32_t);
     uint8_t  raw[sizeof(uint32_t) + MEMTAG_MAX_QUERY_RESULTS * sizeof(uint32_t)];
     if (out_cap > sizeof(raw)) out_cap = sizeof(raw);
@@ -153,8 +151,6 @@ int mem_region_tags(uint32_t region_id,
     uint8_t params[sizeof(uint32_t)];
     memcpy(params, &region_id, sizeof(uint32_t));
 
-    /* Out is [u32 count][char strs[]]. Read into out_buf with prefix.
-     * Then memmove the strings to the front for caller convenience. */
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_MEMTAG_TAGS,
                      params, sizeof(params),
                      0, 0,
@@ -162,9 +158,6 @@ int mem_region_tags(uint32_t region_id,
                      BOX_ANSWER_GUARANTEED, 0);
     if (rc != 0) return box_fail(rc);
     memcpy(out_count, out_buf, sizeof(uint32_t));
-    /* Shift the string region left over the count prefix. Source comes
-     * AFTER destination so a forward byte loop is safe (no overlap
-     * hazard). */
     uint32_t str_bytes = out_buf_size - sizeof(uint32_t);
     char *dst = out_buf;
     char *src = out_buf + sizeof(uint32_t);
@@ -182,8 +175,6 @@ int mem_stats(mem_stats_t *out)
     return box_fail(rc);
 }
 
-/* ─── Phase 2A — capabilities ───────────────────────────────────────── */
-/* SYSTEM_OP_MEMTAG_* (SET_GUARD..CHECK) come from boxos_decks.h above. */
 
 int mem_set_guard(const char *tag_str, int on)
 {

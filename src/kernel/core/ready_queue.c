@@ -12,7 +12,6 @@ void ready_queue_init(ReadyQueue *rq) {
 bool ready_queue_push(ReadyQueue *rq, process_t *proc) {
     if (!rq || !proc) return false;
 
-    // CAS guard: prevent double-enqueue from concurrent cores
     uint8_t expected = 0;
     if (!__atomic_compare_exchange_n(&proc->in_ready, &expected, 1,
                                      false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {

@@ -2,17 +2,12 @@
 #include "klib.h"
 #include "cpu_calibrate.h"
 #include "boxos_decks.h"
-#include "klib_logring.h"   /* the trace is said into the log ring; the wire carries it */
+#include "klib_logring.h"
 
 #if CONFIG_PERF_TRACE
 
-/* ------------------------------------------------------------------ */
-/* Global ring buffer — lives in BSS, zero-initialized by loader       */
-/* ------------------------------------------------------------------ */
 PerfTraceRing g_perf_ring;
 
-/* Into the log ring only (never the screen): the serial line reads the ring.
-   Handles: %u %d %s %x %llu %llx %02x %% and zero-pad widths. */
 static void ring_print(const char *s)
 {
     while (*s) LogRingPut(*s++);
@@ -28,7 +23,6 @@ static void serial_printf(const char *fmt, ...)
         if (*fmt != '%') { LogRingPut(*fmt++); continue; }
         fmt++;
 
-        /* Parse zero-pad and width */
         int pad_zero = 0, width = 0;
         if (*fmt == '0') { pad_zero = 1; fmt++; }
         while (*fmt >= '0' && *fmt <= '9')
@@ -37,7 +31,6 @@ static void serial_printf(const char *fmt, ...)
             fmt++;
         }
 
-        /* Parse length modifier (l / ll) */
         int ll = 0;
         while (*fmt == 'l') { ll++; fmt++; }
 
@@ -69,7 +62,6 @@ static void serial_printf(const char *fmt, ...)
             char tmp[20];
             if (ll >= 2) utoa64(va_arg(ap, uint64_t), tmp, 16);
             else         utoa(va_arg(ap, unsigned int), tmp, 16);
-            /* zero-pad to requested width */
             int len = 0;
             for (const char *p = tmp; *p; p++) len++;
             while (len < width) { LogRingPut(pad_zero ? '0' : ' '); len++; }
@@ -95,9 +87,6 @@ static void serial_printf(const char *fmt, ...)
     va_end(ap);
 }
 
-/* ------------------------------------------------------------------ */
-/* Deck id -> human-readable name table                                 */
-/* ------------------------------------------------------------------ */
 static const char *deck_name(uint8_t deck_id)
 {
     switch (deck_id)
@@ -117,9 +106,6 @@ static const char *deck_name(uint8_t deck_id)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* perf_trace_init                                                      */
-/* ------------------------------------------------------------------ */
 void perf_trace_init(void)
 {
     memset(&g_perf_ring, 0, sizeof(g_perf_ring));
@@ -128,9 +114,6 @@ void perf_trace_init(void)
                   (uint32_t)sizeof(PerfTraceEntry));
 }
 
-/* ------------------------------------------------------------------ */
-/* Internal: walk entries from oldest to newest and call visitor        */
-/* ------------------------------------------------------------------ */
 typedef void (*entry_visitor_t)(uint32_t seq,
                                 const PerfTraceEntry *e,
                                 uint64_t elapsed_cycles,
@@ -161,9 +144,6 @@ static void walk_ring(entry_visitor_t visitor, void *ctx)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Visitor: print every entry                                           */
-/* ------------------------------------------------------------------ */
 static void visitor_print_all(uint32_t seq,
                               const PerfTraceEntry *e,
                               uint64_t elapsed_cycles,
@@ -176,9 +156,6 @@ static void visitor_print_all(uint32_t seq,
                   (uint32_t)e->error_code, elapsed_us, elapsed_cycles);
 }
 
-/* ------------------------------------------------------------------ */
-/* Visitor: print only entries above a cycle threshold                  */
-/* ------------------------------------------------------------------ */
 static void visitor_print_slow(uint32_t seq,
                                const PerfTraceEntry *e,
                                uint64_t elapsed_cycles,
@@ -194,9 +171,6 @@ static void visitor_print_slow(uint32_t seq,
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Public dump functions                                                */
-/* ------------------------------------------------------------------ */
 void perf_dump(void)
 {
     uint32_t n = (g_perf_ring.total < PERF_TRACE_CAPACITY)
@@ -246,4 +220,4 @@ void perf_reset(void)
     serial_printf("[PERF] Trace ring reset.\n");
 }
 
-#endif /* CONFIG_PERF_TRACE */
+#endif

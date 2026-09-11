@@ -1,28 +1,6 @@
 #include "acpi_internal.h"
 #include "klib.h"
 
-/*
- * HPET (High Precision Event Timer) ACPI description table parser.
- *
- * Reference: IA-PC HPET Specification 1.0a §3.2.4 ("HPET Description Table").
- * Layout:
- *   acpi_sdt_header_t   header     (signature "HPET")
- *   uint32_t            event_timer_block_id
- *                          bits 31:16  Vendor ID (PCI VendorID)
- *                          bits 15     LegacyReplacement IRQ Routing capable
- *                          bits 14     reserved
- *                          bits 13     COUNT_SIZE_CAP — 1 = 64-bit main counter
- *                          bits 12:8   number of comparators minus 1
- *                          bits  7:0   hardware revision ID (non-zero)
- *   acpi_gas_t          base_address
- *   uint8_t             hpet_number
- *   uint16_t            minimum_tick
- *   uint8_t             page_protection
- *
- * The driver layer that actually programs comparators belongs in a
- * separate Timer subsystem audit. This pass parses + validates the
- * table and exports the location into g_acpi.hpet for that driver.
- */
 
 #define HPET_BLOCKID_VENDOR_SHIFT     16
 #define HPET_BLOCKID_LEGACY_REPLACE   (1u << 15)
@@ -40,9 +18,6 @@ void acpi_parse_hpet(void) {
         return;
     }
 
-    /* SystemMemory MMIO required by IA-PC HPET §3.2.4 — anything else is
-     * firmware nonsense. address_space == 0 is SystemMemory per ACPI 6.5
-     * §5.2.3.2. */
     if (hpet->base_address.address_space != 0) {
         debug_printf("[ACPI] HPET base GAS address_space=%u (expected SystemMemory)\n",
                      hpet->base_address.address_space);

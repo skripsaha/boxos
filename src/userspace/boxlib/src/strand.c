@@ -1,36 +1,20 @@
-/*
- * strand.c — userspace strand spawn/exit wrappers.
- *
- * strand_spawn issues SYSTEM_OP_STRAND_SPAWN, which creates a second+
- * execution context sharing the caller's cabin (address space).  The
- * kernel starts the strand at a given entry VA with one argument in rdi;
- * we use a small trampoline so we can carry BOTH the user function and its
- * argument through that single slot and run strand_exit when fn returns.
- */
 
 #include "box/strand.h"
-#include "box/core/manifest.h"   /* MfCall1 */
-#include "box/print.h"           /* io_flush — hand in the staged run */
-#include "box/memory.h"          /* malloc / free */
-#include "box/debug.h"           /* kdbg_print — loud spawn refusal */
-#include "box/touch.h"           /* touch_stash_free_self */
-#include "box/system.h"          /* yield */
-#include "box/timeouts.h"        /* BOX_ANSWER_GUARANTEED */
+#include "box/core/manifest.h"
+#include "box/print.h"
+#include "box/memory.h"
+#include "box/debug.h"
+#include "box/touch.h"
+#include "box/system.h"
+#include "box/timeouts.h"
 #include "box/error.h"
-#include "boxos_decks.h"         /* DECK_SYSTEM, SYSTEM_OP_STRAND_SPAWN, SYSTEM_OP_PROC_KILL */
+#include "boxos_decks.h"
 
-/* Start record: the kernel passes the strand a single argument (rdi); we
- * use it to carry both the user function and its argument through the
- * trampoline.  Freed by the trampoline once unpacked. */
 struct strand_start {
     void (*fn)(void *arg);
     void  *arg;
 };
 
-/* First instruction every spawned strand runs.  Entered by the kernel with
- * the start-record pointer in rdi; unpacks it, runs the user function, then
- * terminates the strand.  MUST NOT return — a fresh strand stack has no
- * caller frame to return into. */
 static void strand_trampoline(void *p)
 {
     struct strand_start *s = (struct strand_start *)p;
@@ -51,32 +35,17 @@ static uint32_t strand_spawn_impl(void (*fn)(void *arg), void *arg, uint8_t join
     s->arg = arg;
 
     uint64_t params[3];
-    params[0] = (uint64_t)(uintptr_t)&strand_trampoline;  /* entry_va             */
-    params[1] = (uint64_t)(uintptr_t)s;                   /* arg -> rdi           */
-    params[2] = (uint64_t)joinable;                       /* 1 = zombie-until-join */
+    params[0] = (uint64_t)(uintptr_t)&strand_trampoline;
+    params[1] = (uint64_t)(uintptr_t)s;
+    params[2] = (uint64_t)joinable;
 
-    /* WITHOUT a deadline, deliberately. The spawn runs entirely in the
-     * kernel — no medium, no other process — so its reply is guaranteed
-     * either way: a pid or a real refusal. A guessed budget here split one
-     * fact into two lies AND a corpse: on a congested box the caller was
-     * told "failed" and freed the start record, while the kernel went on
-     * to run the trampoline — which read the freed (poisoned) record and
-     * called a garbage fn (measured: cxxtest 16c, ghost strands dying at
-     * RIP=0x0/0x1, plus the double-free of `s` corrupting the heap under
-     * whoever allocated next). With no deadline the ownership is single
-     * again: refusal → ours to reclaim; success → the trampoline frees it.
-     * An answer that never comes is a kernel defect Nightwatch names, not
-     * something to paper over. */
     uint32_t pid = 0;
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_STRAND_SPAWN,
                      params, (uint16_t)sizeof(params),
                      NULL, 0,
                      &pid, (uint32_t)sizeof(pid), NULL,
-                     0 /* no deadline */, NULL);
+                     0 , NULL);
     if (rc != 0) {
-        /* Definitive refusal: the kernel never took the entry point, so the
-         * start record is still ours to reclaim. Say so — a silent spawn
-         * refusal already cost one debugging night as a ghost strand. */
         kdbg_print("[strand] spawn refused rc=%d pid_out=%u", rc, pid);
         free(s);
         return 0;
@@ -86,12 +55,12 @@ static uint32_t strand_spawn_impl(void (*fn)(void *arg), void *arg, uint8_t join
 
 uint32_t strand_spawn(void (*fn)(void *arg), void *arg)
 {
-    return strand_spawn_impl(fn, arg, 0);   /* eager-reap worker (raw) */
+    return strand_spawn_impl(fn, arg, 0);
 }
 
 uint32_t strand_spawn_joinable(void (*fn)(void *arg), void *arg)
 {
-    return strand_spawn_impl(fn, arg, 1);   /* zombie-until-join (std::thread) */
+    return strand_spawn_impl(fn, arg, 1);
 }
 
 void strand_release(uint32_t pid)
@@ -106,41 +75,13 @@ void strand_release(uint32_t pid)
 
 void strand_exit(void)
 {
-    /* This strand's own console run first. printf stages text in the strand's
-     * frame and pushes it only when the frame fills, the colour changes or
-     * somebody flushes — a line said just before fn returned would otherwise
-     * die with the strand (MEASURED on BIOS 16c: the last of 400 numbered
-     * lines, every printf strand, every run). The frame is the strand's, not
-     * the cabin's, so it is the strand's to hand in; exit() does the same for
-     * the main strand. */
     io_flush();
 
-    /* Ф20e — return this strand's StrandPool cache to the global heap and free
-     * its slab slot BEFORE we ask the kernel to terminate the strand. The slot's
-     * generation is bumped here, so even if the kernel were to race the orphan
-     * death-stamp it would miss; an orderly exit never leaves an ORPHANED slot. */
     strand_pool_flush_self();
 
-    /* This strand's stashes — Touch, IPC, kernel replies, ferry — back to the
-     * cabin heap (order: flush pool → free stashes → kill). Idempotent; a
-     * strand that never kept anything is a no-op. */
     touch_stash_free_self();
     result_stash_free_self();
 
-    /* Terminate just this strand: SYS_PROC_KILL(target == 0) means self.
-     * No __box_runtime_fini / spawner-notify — those are exit()'s job for the
-     * whole cabin and would wrongly run global teardown on a per-strand exit
-     * (this strand's own console run was handed in above).
-     *
-     * Asked ONCE. Nothing stands between a self-kill and its answer — no
-     * medium, no other process — and a self-kill that was honoured does not
-     * come back: the strand is PROC_DONE before the guide can answer it, and
-     * a corpse still on its core until the next tick only spins below. What
-     * stood here was three tries with a yield between, a counter over a
-     * ring-full refusal that pocket_submit no longer gives (it waits for
-     * room). A refusal that does come back is therefore a kernel defect, not
-     * contention to be out-waited: name it, and stay parked — the trampoline
-     * has no caller frame to return into. */
     uint32_t target = 0;
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_PROC_KILL,
                      &target, (uint16_t)sizeof(target),

@@ -1,11 +1,3 @@
-/*
- * system_error.cpp — category singletons + key functions.
- *
- * The categories are constinit objects (constexpr base ctor, vtable
- * filled at static-init by the compiler-emitted descriptor — no dynamic
- * initializer runs), so error_code construction is safe at any point of
- * static initialization.
- */
 
 #include <system_error>
 
@@ -55,21 +47,12 @@ const char *GenericText(int code)
     case errc::operation_canceled:             return "operation canceled";
     case errc::owner_dead:                     return "owner dead";
     case errc::state_not_recoverable:          return "state not recoverable";
-    // BoxOS is not Unix: std::errc is a thin C++-conformance shim, the real
-    // error path is box/error.h. We name only the conditions BoxOS can
-    // actually surface; the Unix-only socket/network/STREAMS errc values
-    // fall to "generic error N" rather than cargo-culting Linux strings.
     default:                                   return nullptr;
     }
 }
 
-} // namespace
+}
 
-// <cstring>'s strerror answers from THIS table, not a second one. The two must
-// agree — [syserr.errcat.objects] ties errno values to generic_category(), so
-// a program that compares strerror(EDOM) with
-// generic_category().message(EDOM) is entitled to the same words — and the way
-// to make two things agree is to have one of them.
 extern "C" const char *__boxcxx_generic_text(int code) noexcept
 {
     return GenericText(code);
@@ -99,11 +82,6 @@ public:
     }
     error_condition default_error_condition(int code) const noexcept override
     {
-        // BoxOS is not Unix: a system error value is NOT an errno number, so it
-        // must not be reinterpreted as a generic (POSIX) condition — e.g. 7 is
-        // ERR_TIMEOUT here, not E2BIG. Map each code to itself in this category.
-        // The native BoxOS error channel is box::error / box::error_category()
-        // (box/cxx/error.h); std::system_category stays a thin std shim.
         return error_condition(code, system_category());
     }
 };
@@ -111,7 +89,7 @@ public:
 constinit GenericCategory g_generic_category;
 constinit SystemCategory g_system_category;
 
-} // namespace
+}
 
 const error_category &generic_category() noexcept
 {
@@ -123,4 +101,4 @@ const error_category &system_category() noexcept
     return g_system_category;
 }
 
-} // namespace std
+}

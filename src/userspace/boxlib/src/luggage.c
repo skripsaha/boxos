@@ -1,25 +1,10 @@
-/*
- * luggage.c — the line this program was started with, read from its cabin.
- *
- * The kernel wrote the bytes before the first instruction (system.proc.exec,
- * cabin_luggage_give); CabinInfo says where and how many. Nothing here waits
- * and nothing can arrive late. The words are cut once, on the first ask, into
- * two private copies: one cut into NUL-terminated words, one whole for the
- * tails. Strands share the cabin and so the luggage; the first strand to ask
- * does the cutting and the others see it done.
- */
 
 #include "box/luggage.h"
 #include "box/core/cabin.h"
 #include "box/memory.h"
 #include "box/string.h"
 
-/* -------------------------------------------------------------------------
- * The cutter — one rule for the shell and for the luggage
- * ------------------------------------------------------------------------- */
 
-/* Cut in place; `starts`, when given, receives each word's offset in the
- * line as typed, an opening quote included, for the tails. */
 static uint32_t cut_words(char *line, char **words, uint32_t *starts, uint32_t max)
 {
     uint32_t count = 0;
@@ -61,17 +46,14 @@ uint32_t luggage_cut(char *line, char **words, uint32_t max)
     return cut_words(line, words, NULL, max);
 }
 
-/* -------------------------------------------------------------------------
- * The cabin's line, cut once
- * ------------------------------------------------------------------------- */
 
 static struct {
-    volatile uint32_t claimed;   /* the first asker cuts */
-    volatile uint32_t ready;     /* the cut is done */
-    char             *whole;     /* the line as typed, NUL-terminated */
-    char             *cut;       /* the same, separators turned into NULs */
-    char            **words;     /* into `cut` */
-    uint32_t         *starts;    /* offsets into `whole` */
+    volatile uint32_t claimed;
+    volatile uint32_t ready;
+    char             *whole;
+    char             *cut;
+    char            **words;
+    uint32_t         *starts;
     uint32_t          count;
 } g_luggage;
 
@@ -89,7 +71,6 @@ static void luggage_prepare(void)
     if (__atomic_load_n(&g_luggage.ready, __ATOMIC_ACQUIRE)) return;
 
     if (!__sync_bool_compare_and_swap(&g_luggage.claimed, 0u, 1u)) {
-        /* Another strand is cutting; its work is a few microseconds away. */
         while (!__atomic_load_n(&g_luggage.ready, __ATOMIC_ACQUIRE))
             __asm__ volatile("pause");
         return;
@@ -104,8 +85,6 @@ static void luggage_prepare(void)
             whole[l.length] = '\0';
             memcpy(cut, whole, l.length + 1);
 
-            /* Count first, then cut into an array of exactly that size. The
-             * count pass cuts a scratch copy; the real cut runs on `cut`. */
             char *scratch = malloc(l.length + 1);
             if (scratch) {
                 memcpy(scratch, whole, l.length + 1);
@@ -128,8 +107,6 @@ static void luggage_prepare(void)
                 }
             }
         }
-        /* Out of memory: the luggage reads as empty rather than as a crash;
-         * whole/cut are either owned above or freed here. */
         free(whole);
         free(cut);
     }

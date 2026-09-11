@@ -2,24 +2,8 @@
 #include "manifest_auth.h"
 #include "klib.h"
 #include "boxos_manifest.h"
-#include "canvas.h"   /* CanvasBatchBegin/End — coalesce multi-op Manifests into one display commit */
+#include "canvas.h"
 
-/*
- * Sequential executor. Walks the compiled op stream once, dispatching each
- * handler with bounds-checked Crate references.
- *
- * Error handling:
- *   - First non-OK from a handler is recorded as the manifest's error_code.
- *   - If the failing op has OP_FLAG_OPTIONAL, execution continues; otherwise
- *     subsequent ops are skipped unless they have OP_FLAG_SKIP_ON_ERROR
- *     (which means "I expect to be skipped after a prior failure", i.e.,
- *     this op is itself a recovery step that runs only on success path).
- *
- * Note: PARALLEL_OK / TRANSACTIONAL semantics are deferred. Today every
- * Manifest is executed strictly serially. Once the executor handles
- * dependency analysis (data-flow between in_crate/out_crate) and journaling
- * is integrated, those flags will gain teeth.
- */
 
 static inline bool crate_index_in_range(uint16_t idx, uint16_t crate_count)
 {
@@ -37,9 +21,6 @@ static error_t dispatch_op(const OpRegistration *reg,
         return ERR_INVALID_ARGUMENT;
     }
 
-    /* Validate referenced crates if any. NONE means the op needs no crate of
-     * that direction; the handler is responsible for asserting its own
-     * required crates. */
     if (op->in_crate != CRATE_INDEX_NONE && !CrateIsValid(&crates[op->in_crate])) {
         return ERR_INVALID_BUFFER_ID;
     }
@@ -47,9 +28,6 @@ static error_t dispatch_op(const OpRegistration *reg,
         return ERR_INVALID_BUFFER_ID;
     }
 
-    /* Tag-based authorization: deny if the calling process lacks the auth
-     * level the op was registered with. Kernel-internal manifests (proc==NULL)
-     * always pass. */
     if (!ManifestOpAuthorize(op->op_kind, ctx)) {
         return ERR_ACCESS_DENIED;
     }
@@ -79,10 +57,6 @@ error_t ManifestExecute(ManifestHandle           handle,
     bool    prev_failed = false;
     bool    any_executed = false;
 
-    /* One Canvas batch wraps the whole op stream so multi-op Manifests
-     * coalesce into a single backend Present.  Single-op Manifests get
-     * no wrap — the op's own per-call batch already commits at the right
-     * boundary, and an extra begin/end here would just add lock cycles. */
     const bool batch_wrap = (cm->op_count > 1);
     if (batch_wrap) CanvasBatchBegin();
 
@@ -90,14 +64,10 @@ error_t ManifestExecute(ManifestHandle           handle,
         const ManifestOp     *op  = (const ManifestOp *)(cm->raw_bytes + cm->op_offsets[i]);
         const OpRegistration *reg = cm->handlers[i];
 
-        /* Skip ops that explicitly want to be skipped if a prior op failed. */
         if (prev_failed && (op->flags & OP_FLAG_SKIP_ON_ERROR)) {
             continue;
         }
 
-        /* If a prior op failed and this op is not OPTIONAL or SKIP_ON_ERROR,
-         * we abort. Optional ops continue regardless; skip-on-error ops
-         * already handled above. */
         if (prev_failed && !(op->flags & OP_FLAG_OPTIONAL)) {
             break;
         }
@@ -112,7 +82,6 @@ error_t ManifestExecute(ManifestHandle           handle,
                 result.flags         |= EXEC_RESULT_PARTIAL;
             }
             if (op->flags & OP_FLAG_OPTIONAL) {
-                /* Optional failure: don't poison subsequent ops. */
                 result.completed_ops++;
                 continue;
             }

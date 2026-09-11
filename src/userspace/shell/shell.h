@@ -3,18 +3,12 @@
 
 #include "box/defs.h"
 
-/* =========================================================================
- * BoxOS Shell Constants — no magic numbers in code
- * ========================================================================= */
 
-#define SHELL_LINE_MAX          512     /* max input line length (matches LINE_CAPACITY) */
-#define SHELL_MAX_ARGS          64      /* max tokens per command */
-#define SHELL_PROMPT_MAX        128     /* max prompt string */
-#define SHELL_ERROR_MAX         256     /* error message buffer */
+#define SHELL_LINE_MAX          512
+#define SHELL_MAX_ARGS          64
+#define SHELL_PROMPT_MAX        128
+#define SHELL_ERROR_MAX         256
 
-/* =========================================================================
- * Types
- * ========================================================================= */
 
 typedef struct {
     char     prompt[SHELL_PROMPT_MAX];
@@ -36,9 +30,6 @@ typedef struct {
     const char     *description;
 } ShellCommand;
 
-/* =========================================================================
- * Public API
- * ========================================================================= */
 
 void        ShellInit(void);
 void        ShellMainLoop(void);
@@ -46,10 +37,6 @@ void        ShellStop(void);
 ShellState *ShellGetState(void);
 void        ShellUpdatePrompt(void);
 
-/* Drop everything sitting in the IPC mailbox. Use between operations
- * that could otherwise consume a leftover Result (a late display PING
- * reply, stray kernel Touch). See shell.c for the
- * historical "first-command-no-op" race this guards against. */
 void        ShellDrainStaleIpc(void);
 
-#endif /* SHELL_H */
+#endif

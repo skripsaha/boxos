@@ -6,19 +6,9 @@
 #include "boxos_crate.h"
 #include "klib.h"
 
-/*
- * Reserved test opcodes inside DECK_OPERATIONS. These op_kinds are stable
- * for kernel diagnostics; they will never collide with real Operations Deck
- * opcodes (which sit in 0x01..0x7F).
- */
 #define TEST_OP_COPY  0xFE00u
 #define TEST_OP_FILL  0xFE01u
 
-/*
- * For self-test only: the Crate.addr field carries a *kernel* pointer
- * (cast from uintptr_t). Real handlers will translate user vaddr through
- * vmm_translate_user_addr; that path is wired in Phase 6.
- */
 
 static int test_op_copy(const ManifestOp *op,
                         Crate            *crates,
@@ -62,7 +52,6 @@ static int test_op_fill(const ManifestOp *op,
     return OK;
 }
 
-/* ----------------------------------------------------------------------- */
 
 static error_t register_test_ops_once(void)
 {
@@ -78,20 +67,8 @@ static error_t register_test_ops_once(void)
     return OK;
 }
 
-/*
- * Build a Manifest in a kernel buffer:
- *
- *   op[0] = test.fill  out_crate=0  params=[0xAB]
- *   op[1] = test.copy  in_crate=0   out_crate=1
- */
 static error_t build_test_manifest(uint8_t **out_buf, uint32_t *out_size)
 {
-    /* Layout:
-     *   Manifest header (16)
-     *   ManifestOp #1 header (12) + 1 byte param   = 13
-     *   ManifestOp #2 header (12) + 0 byte params  = 12
-     * total = 16 + 13 + 12 = 41
-     */
     const uint32_t total = 16u + 13u + 12u;
     uint8_t *buf = kmalloc(total);
     if (!buf) return ERR_NO_MEMORY;
@@ -133,7 +110,6 @@ error_t ManifestSelfTest(void)
         return rc;
     }
 
-    /* Build raw Manifest. */
     uint8_t *raw      = NULL;
     uint32_t raw_size = 0;
     rc = build_test_manifest(&raw, &raw_size);
@@ -142,16 +118,14 @@ error_t ManifestSelfTest(void)
         return rc;
     }
 
-    /* Compile. */
     ManifestHandle handle = MANIFEST_HANDLE_INVALID;
     rc = ManifestCompile(NULL, raw, raw_size, true, &handle);
-    kfree(raw);  /* Compile copies the bytes; we own raw afterwards. */
+    kfree(raw);
     if (rc != OK) {
         kprintf("[Manifest][selftest] ManifestCompile failed: %s\n", ErrorString(rc));
         return rc;
     }
 
-    /* Allocate two payload buffers and a Crate descriptor array. */
     const uint64_t payload_bytes = 32;
     uint8_t *buf_a = kmalloc(payload_bytes);
     uint8_t *buf_b = kmalloc(payload_bytes);
@@ -161,7 +135,6 @@ error_t ManifestSelfTest(void)
         ManifestRelease(handle);
         return ERR_NO_MEMORY;
     }
-    /* Pre-poison so we can verify writes. */
     for (uint64_t i = 0; i < payload_bytes; i++) buf_a[i] = 0x11u;
     for (uint64_t i = 0; i < payload_bytes; i++) buf_b[i] = 0x22u;
 

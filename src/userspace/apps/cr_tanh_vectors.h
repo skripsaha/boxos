@@ -1,5 +1,3 @@
-// Baked 80-bit (x, MPFR-CR-ref) vectors for tanh — GENERATED, do not edit.
-// {x mantissa, x se, ref mantissa, ref se}; se = sign<<15 | exp15.
 static const CrVec kTanhVec[] = {
 {0x8000000000000000ULL,0x3FFDu,0xFACBF534D0E42F8AULL,0x3FFCu},
 {0x8000000000000000ULL,0x3FFEu,0xEC9A9EBAB4579B29ULL,0x3FFDu},
