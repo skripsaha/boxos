@@ -11,6 +11,7 @@
 #include "boxos_memory.h"
 #include "ahci.h"
 #include "ahci_sync.h"
+#include "hourglass.h"
 
 /* ===========================================================================
  *  Real-HW PATA driver (PIO transfer mode).
@@ -84,12 +85,10 @@ static inline AtaChannel* drive_channel_ptr(uint8_t drive_idx) {
     return &g_ata_channels[drive_channel(drive_idx)];
 }
 
+/* ATA8-ACS §6.2.1's 400 ns after a drive-select. The idiom and the reason four
+ * reads satisfy it live once, in ata.h (ata_settle_400ns). */
 static inline void ata_delay_400ns(uint8_t drive_idx) {
-    /* ATA8-ACS §6.2.1: read Alt-Status 4× after drive-select to give
-     * the new device time to assert BSY/DRDY. Each I/O cycle is
-     * comfortably > 100 ns on every chipset we target. */
-    uint16_t ctrl = drive_channel_ptr(drive_idx)->ctrl_reg;
-    for (int i = 0; i < 4; i++) (void)inb(ctrl);
+    ata_settle_400ns(drive_channel_ptr(drive_idx)->ctrl_reg);
 }
 
 static inline uint8_t ata_read_status(uint8_t drive_idx) {
@@ -203,34 +202,72 @@ int ata_set_xfer_mode(uint8_t drive_idx, uint8_t mode_byte) {
     return 0;
 }
 
+/* The minimum hold on SRST, spent as time instead of counted as reads.
+ *
+ * ATA/ATAPI-6 (T13/1410D r3a) §9.2, host state HSR0:Set_SRST — "The host shall
+ * remain in this state with SRST set to one for at least 5 us." That is a SPEC
+ * quantity and it is five microseconds of real time.
+ *
+ * Eight Alt-Status reads stood here. Eight reads is 3.2 us at the ~400 ns
+ * LPC/eSPI floor that ata_settle_400ns rests on — SHORT of the clause, and
+ * short in the way that is hardest to recognise afterwards, because a reset
+ * that half-takes leaves a drive that mostly works.
+ *
+ * ATA_SRST_HOLD_READS is the fallback for a machine with no time ruler at all,
+ * and it is not a guess either: it is the SAME architectural floor, counted
+ * out. An x86 `IN` is a non-posted bus transaction, so the core stalls until
+ * the legacy port's cycle completes, and 5 us / 400 ns = 12.5 — thirteen reads
+ * clear the clause. A missing ruler never becomes an invented one; it becomes
+ * the one mechanism that is still provable without a clock. */
+#define ATA_SRST_HOLD_US      5u
+#define ATA_SRST_HOLD_READS  13
+
+static void ata_hold_srst(uint16_t ctrl_reg) {
+    HourGlass glass;
+    if (!HourGlassTurn(&glass, ATA_SRST_HOLD_US)) {
+        kprintf("[ATA] no time source — holding SRST with %d non-posted port "
+                "reads instead\n", ATA_SRST_HOLD_READS);
+        for (int i = 0; i < ATA_SRST_HOLD_READS; i++) (void)inb(ctrl_reg);
+        return;
+    }
+    while (!HourGlassRunOut(&glass)) cpu_pause();
+}
+
 /* ---------------------------------------------------------------------
  *  Software reset — one per channel.
  *
- *  ATA-7 §9.2: write SRST=1 (Device Control bit 2) plus nIEN=1, wait
- *  at least 5 µs, then write SRST=0 with nIEN=1 still asserted. BSY
- *  can stay set for up to 31 s while the drive performs internal
- *  recovery; we cap at 2 s — anything longer is treated as a dead
- *  controller. Keeping nIEN=1 throughout means the drive's IRQ line
- *  is silent before, during, and after reset — there is no window in
- *  which a stale IRQ could escape to the IOAPIC.
+ *  ATA/ATAPI-6 (T13/1410D r3a) §9.2: write SRST=1 (Device Control bit 2)
+ *  plus nIEN=1, hold it for at least 5 us, then write SRST=0 with nIEN=1
+ *  still asserted. BSY may then stay set for as long as D0SR3 allows;
+ *  how long THIS caller can afford to wait for it arrives as
+ *  `bsy_patience_ms`, because the answer depends on what the caller is
+ *  holding and not on the drive (see ATA_SRST_BSY_* in ata.h).
+ *
+ *  Keeping nIEN=1 throughout means the drive's IRQ line is silent before,
+ *  during, and after reset — there is no window in which a stale IRQ
+ *  could escape to the IOAPIC.
  * ------------------------------------------------------------------ */
-void ata_channel_soft_reset(uint8_t channel) {
+void ata_channel_soft_reset(uint8_t channel, uint32_t bsy_patience_ms) {
     AtaChannel* ch = &g_ata_channels[channel];
     if (!ch->present) return;
 
     outb(ch->ctrl_reg, ATA_CTRL_SRST | ATA_CTRL_nIEN);
-    for (int i = 0; i < 8; i++) (void)inb(ch->ctrl_reg); /* >5 µs settle */
+    ata_hold_srst(ch->ctrl_reg);
 
     outb(ch->ctrl_reg, ATA_CTRL_nIEN);
-    for (int i = 0; i < 4; i++) (void)inb(ch->ctrl_reg); /* 400 ns settle */
+    ata_settle_400ns(ch->ctrl_reg);
 
-    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(2000);
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(bsy_patience_ms);
     while (rdtsc() < deadline) {
         uint8_t s = inb(ch->cmd_base + ATA_REG_STATUS);
         if (s == 0 || s == 0xFF) return; /* no drives on this channel */
         if (!(s & ATA_SR_BSY)) return;   /* ready */
     }
-    debug_printf("[ATA] Channel %u reset BSY timeout (continuing)\n", channel);
+    /* kprintf, not debug_printf: a channel that never left BSY is a disk this
+     * boot is about to pretend it does not have, and that sentence has to
+     * survive into a shipped build. */
+    kprintf("[ATA] channel %u still BSY %u ms after its reset — continuing "
+            "without it\n", channel, bsy_patience_ms);
 }
 
 /* ---------------------------------------------------------------------
@@ -621,9 +658,16 @@ int ata_flush_cache(uint8_t drive_idx) {
          * runs *inside* the lock so no other core can find the channel
          * mid-reset; ata_channel_soft_reset only touches I/O ports,
          * not heap or other locks, so holding g_ata_lock across it is
-         * safe (no lock-order risk). */
+         * safe (no lock-order risk).
+         *
+         * And that lock is exactly why this caller asks for the SHORT
+         * patience: spin_lock cleared IF on the way in, so every
+         * millisecond spent here is a millisecond with interrupts off on
+         * this core. The spec's 31 s belongs to the boot-time reset,
+         * which holds nothing. */
         if (retry < CONFIG_ATA_MAX_RETRIES - 1)
-            ata_channel_soft_reset(drive_channel(drive_idx));
+            ata_channel_soft_reset(drive_channel(drive_idx),
+                                   ATA_SRST_BSY_HELD_MS);
     }
     spin_unlock(&g_ata_lock);
     debug_printf("[ATA] drv%u: cache flush timeout after retries\n", drive_idx);
@@ -857,9 +901,14 @@ void ata_init(void) {
                  g_ata_channels[1].irq_gsi);
 
     /* Soft reset both channels with nIEN=1 held throughout — the IRQ
-     * line is silent before, during, and after reset. */
+     * line is silent before, during, and after reset.
+     *
+     * This is the one caller that holds nothing — no lock, no K-Core, and
+     * nothing else is running yet — so it is the one that can afford the
+     * patience the spec actually names. A drive doing a legitimate internal
+     * recovery here would otherwise be declared absent for the whole boot. */
     for (uint8_t c = 0; c < ATA_CHANNEL_COUNT; c++) {
-        ata_channel_soft_reset(c);
+        ata_channel_soft_reset(c, ATA_SRST_BSY_SPEC_MS);
     }
 
     /* Bring up the BMIDE async engine — per-channel staging + PRD, IRQ

@@ -2,6 +2,8 @@
 #include "klib.h"
 #include "vmm.h"
 #include "io.h"
+#include "hourglass.h"
+#include "atomics.h"
 
 /*
  * ERST (Error Record Serialization Table) runtime — ACPI 6.5 §18.5.
@@ -123,6 +125,41 @@ static erst_entry_t* erst_entries(uint32_t* count) {
 /* Longest STALL this interpreter will honour, in microseconds. Same value
  * Linux uses, and for the same reason: past it the table is wrong. */
 #define ERST_MAX_STALL_US 32000u
+
+/* How long an ERST poll may spin before the firmware is treated as stuck.
+ *
+ * DECLARED POLICY, not a spec quantity. ACPI 6.5 §18.5 gives neither the
+ * STALL_WHILE_TRUE instruction nor the CHECK_BUSY loop the wrappers run a
+ * maximum time or an iteration count: the table says poll, and that is all it
+ * says. One second is this kernel's patience, written here once. */
+#define ERST_POLL_PATIENCE_US 1000000u
+
+/* Spend `us` microseconds of REAL time.
+ *
+ * Every delay in this interpreter used to be a count of writes to port 0x80,
+ * which is roughly a microsecond on a legacy chipset and roughly nothing at
+ * all on a board where 0x80 is absorbed by the eSPI bridge. A firmware asking
+ * for a settling time got whatever that board happened to give it.
+ *
+ * On a machine with no time ruler the stall is SKIPPED rather than faked, and
+ * said out loud once: a stall has no hardware fact to wait on, so there is
+ * nothing to wait for unbounded, and inventing a spin count is the one thing a
+ * bound must never do. An action whose registers really did need the settling
+ * time then fails at its own CHECK_BUSY or GET_COMMAND_STATUS — which is a
+ * fact, reported as one. */
+static void erst_stall_us(uint64_t us) {
+    static bool said_no_ruler = false;
+    HourGlass glass;
+    if (!HourGlassTurn(&glass, us)) {
+        if (!said_no_ruler) {
+            said_no_ruler = true;
+            kprintf("[ERST] no time source on this machine — firmware STALL "
+                    "instructions are being skipped, not guessed at\n");
+        }
+        return;
+    }
+    while (!HourGlassRunOut(&glass)) cpu_pause();
+}
 
 #define GAS_MAP_SLOTS 8
 static struct {
@@ -275,23 +312,44 @@ int erst_run_action(uint8_t action_id, uint64_t value_in, uint64_t* value_out) {
                  * at 32 ms for the same reason (FIRMWARE_MAX_STALL); a stall
                  * longer than that is a malformed table, not a slow register.
                  *
-                 * The spin itself is `outb 0x80`, which is roughly a
-                 * microsecond on legacy hardware and only roughly anything on
-                 * modern hardware — but ERST stalls exist to let a firmware
-                 * register settle, and erring long is the safe direction. */
+                 * The stall itself is now real time (erst_stall_us) rather
+                 * than a count of writes to port 0x80: a firmware register
+                 * given a settling time is entitled to the time, and on a
+                 * board whose 0x80 is absorbed by the eSPI bridge the old
+                 * count delivered almost none of it. */
                 if (e->value > ERST_MAX_STALL_US) {
                     debug_printf("[ERST] STALL of %lu us at pc=%u exceeds the "
                                  "%u us cap — table is malformed, skipping\n",
                                  (unsigned long)e->value, pc,
                                  (unsigned)ERST_MAX_STALL_US);
                 } else {
-                    for (uint64_t u = 0; u < e->value; u++) outb(0x80, 0);
+                    erst_stall_us(e->value);
                 }
                 break;
             case ERST_INS_STALL_WHILE_TRUE: {
-                uint32_t guard = 1000000;
-                while (guard-- && (gas_read(&e->reg) & e->mask) == e->value) {
-                    outb(0x80, 0);
+                /* Poll the register while it still reads the value the entry
+                 * names (ACPI 6.5 Table 18-402). The exit is that FACT; the
+                 * glass only bounds it, and on a machine with no ruler the
+                 * fact is the only thing left to wait on. */
+                HourGlass glass;
+                if (!HourGlassTurn(&glass, ERST_POLL_PATIENCE_US)) {
+                    kprintf("[ERST] no time source — waiting out a firmware "
+                            "poll at pc=%u on the fact itself, with no "
+                            "bound\n", pc);
+                    while ((gas_read(&e->reg) & e->mask) == e->value)
+                        cpu_pause();
+                    break;
+                }
+                for (;;) {
+                    if ((gas_read(&e->reg) & e->mask) != e->value) break;
+                    if (HourGlassRunOut(&glass)) {
+                        kprintf("[ERST] the register at pc=%u never changed — "
+                                "%lu us on the %s; abandoning this action\n",
+                                pc, (unsigned long)HourGlassElapsedUs(&glass),
+                                HourGlassRulerName(&glass));
+                        return -4;
+                    }
+                    cpu_pause();
                 }
                 break;
             }
@@ -349,10 +407,28 @@ static int erst_pump(uint8_t begin_action, uint64_t record_id,
         return -1;
     if (erst_run_action(ERST_ACT_EXECUTE_OPERATION, 0, &v) < 0)
         return -1;
-    for (int i = 0; i < 1000; i++) {
+    /* CHECK_BUSY until the firmware says it is done. The exit is that FACT;
+     * the glass bounds it. What stood here was a thousand rounds of a thousand
+     * writes to port 0x80 — a number of I/O cycles, not a span of time, and on
+     * a board that absorbs 0x80 the whole loop retires in a blink and calls a
+     * busy firmware finished. */
+    HourGlass glass;
+    bool timed = HourGlassTurn(&glass, ERST_POLL_PATIENCE_US);
+    if (!timed) {
+        kprintf("[ERST] no time source — waiting for the firmware to leave "
+                "BUSY on the fact itself, with no bound\n");
+    }
+    for (;;) {
         if (erst_run_action(ERST_ACT_CHECK_BUSY, 0, &v) < 0) return -1;
         if (v == 0) break;
-        for (uint32_t k = 0; k < 1000; k++) outb(0x80, 0);
+        if (timed && HourGlassRunOut(&glass)) {
+            kprintf("[ERST] the firmware stayed BUSY for %lu us on the %s — "
+                    "reading its command status anyway\n",
+                    (unsigned long)HourGlassElapsedUs(&glass),
+                    HourGlassRulerName(&glass));
+            break;
+        }
+        cpu_pause();
     }
     if (erst_run_action(ERST_ACT_GET_COMMAND_STATUS, 0, out_status) < 0)
         return -1;

@@ -12,6 +12,7 @@
 #include "boxos_memory.h"
 #include "idt.h"
 #include "amp.h"
+#include "hourglass.h"
 
 #define AHCI_TIMEOUT_MS CONFIG_AHCI_CMD_TIMEOUT_MS
 
@@ -753,17 +754,36 @@ static int ahci_port_init(uint8_t port_num) {
     // Clear link errors raised while establishing communication.
     regs->serr = 0xFFFFFFFF;
 
-    // Wait for the device to leave BSY/DRQ (ready for commands), bounded 1s.
-    deadline = rdtsc() + cpu_ms_to_tsc(1000);
-    while (rdtsc() < deadline) {
-        if ((regs->tfd & (AHCI_PTFD_STS_BSY | AHCI_PTFD_STS_DRQ)) == 0) {
-            break;
+    /* Wait for the device to leave BSY/DRQ — AHCI 1.3.1 §10.1.1 step 7, for
+     * the time ATA/ATAPI-6 §9.2 D0SR3 actually names (AHCI_DEVICE_READY_MS).
+     *
+     * The exit is the FACT, and only BSY and DRQ are in it. PxTFD.STS.ERR is
+     * deliberately NOT: a device that presents a stale or benign ERR with BSY
+     * and DRQ already clear passes bring-up today, and folding ERR into the
+     * break would turn those drives into disks this kernel refuses to use. */
+    {
+        HourGlass glass;
+        bool timed = HourGlassTurn(&glass, (uint64_t)AHCI_DEVICE_READY_MS * 1000ULL);
+        if (!timed) {
+            kprintf("[AHCI] no time source — waiting for port %u to leave "
+                    "BSY/DRQ on the fact itself, with no bound\n", port_num);
+            while (regs->tfd & (AHCI_PTFD_STS_BSY | AHCI_PTFD_STS_DRQ))
+                cpu_pause();
+        } else {
+            for (;;) {
+                if ((regs->tfd & (AHCI_PTFD_STS_BSY | AHCI_PTFD_STS_DRQ)) == 0)
+                    break;
+                if (HourGlassRunOut(&glass)) break;
+                cpu_pause();
+            }
         }
-        cpu_pause();
-    }
-    if (regs->tfd & (AHCI_PTFD_STS_BSY | AHCI_PTFD_STS_DRQ)) {
-        debug_printf("[AHCI] Port %u: device not ready (TFD=0x%08x)\n", port_num, regs->tfd);
-        goto fail_free;
+        if (regs->tfd & (AHCI_PTFD_STS_BSY | AHCI_PTFD_STS_DRQ)) {
+            kprintf("[AHCI] port %u: the device never left BSY/DRQ — %lu us on "
+                    "the %s (TFD=0x%08x); not using it\n",
+                    port_num, (unsigned long)HourGlassElapsedUs(&glass),
+                    HourGlassRulerName(&glass), regs->tfd);
+            goto fail_free;
+        }
     }
 
     // Start the command-list engine; commands may now be issued.
@@ -935,32 +955,73 @@ error_t ahci_port_comreset(ahci_port_t* port) {
     sctl = (sctl & ~0xF) | 0x1;
     regs->sctl = sctl;
 
-    uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(AHCI_TIMEOUT_COMRESET_WAIT);
-    while (rdtsc() < timeout_tsc) {
-        cpu_pause();
+    /* Hold DET=1h for the millisecond AHCI 1.3.1 §10.4.2 asks for. There is no
+     * register to watch here — the hold IS the requirement — so the glass runs
+     * out on purpose and nothing exits early. */
+    {
+        HourGlass hold;
+        if (!HourGlassTurn(&hold, AHCI_COMRESET_HOLD_US)) {
+            /* A hold has no hardware fact to wait on, so there is nothing to
+             * wait for unbounded and nothing honest to substitute. The reset is
+             * abandoned — and DET goes back to 0h on the way out, because a
+             * port left at 1h is a port held in COMRESET for the rest of the
+             * boot: the undo matters more here than the diagnosis. */
+            regs->sctl = sctl & ~0xFu;
+            kprintf("[AHCI] no time source — cannot hold PxSCTL.DET=1h for the "
+                    "millisecond AHCI 1.3.1 §10.4.2 requires; port %u reset "
+                    "abandoned and the port released\n", port->port_num);
+            __atomic_fetch_add(&port->stats.comreset_fail_count, 1, __ATOMIC_RELAXED);
+            return ERR_TIMEOUT;
+        }
+        while (!HourGlassRunOut(&hold)) cpu_pause();
     }
 
     sctl = regs->sctl;
     sctl = (sctl & ~0xF);
     regs->sctl = sctl;
 
-    timeout_tsc = rdtsc() + cpu_ms_to_tsc(AHCI_TIMEOUT_COMRESET_WAIT);
-    while (rdtsc() < timeout_tsc) {
-        uint32_t ssts = regs->ssts;
-        uint8_t det = (ssts >> AHCI_SSTS_DET_SHIFT) & AHCI_SSTS_DET_MASK;
-        if (det == AHCI_SSTS_DET_PRESENT) {
-            debug_printf("[AHCI] Port %u: COMRESET successful (SSTS=0x%08x)\n", port->port_num, ssts);
-            regs->serr = 0xFFFFFFFF;
-            regs->is = 0xFFFFFFFF;
-            if (ahci_port_start(port) == 0) {
-                return OK;
-            }
-            break;
+    /* And now the other quantity entirely: how long the link gets to come back.
+     * The exit is PxSSTS.DET reaching 3h and nothing else — no "DET has been 0
+     * for a while" shortcut, because a guessed settling interval is exactly the
+     * kind of number this change exists to remove. */
+    HourGlass link;
+    if (!HourGlassTurn(&link, (uint64_t)AHCI_COMRESET_LINK_MS * 1000ULL)) {
+        kprintf("[AHCI] no time source — waiting for port %u's link on the "
+                "fact itself, with no bound\n", port->port_num);
+        for (;;) {
+            uint32_t ssts = regs->ssts;
+            if (((ssts >> AHCI_SSTS_DET_SHIFT) & AHCI_SSTS_DET_MASK)
+                == AHCI_SSTS_DET_PRESENT) break;
+            cpu_pause();
         }
-        cpu_pause();
+    } else {
+        for (;;) {
+            uint32_t ssts = regs->ssts;
+            if (((ssts >> AHCI_SSTS_DET_SHIFT) & AHCI_SSTS_DET_MASK)
+                == AHCI_SSTS_DET_PRESENT) break;
+            if (HourGlassRunOut(&link)) {
+                kprintf("[AHCI] port %u: the link never came back — %lu us on "
+                        "the %s (SSTS=0x%08x)\n", port->port_num,
+                        (unsigned long)HourGlassElapsedUs(&link),
+                        HourGlassRulerName(&link), regs->ssts);
+                __atomic_fetch_add(&port->stats.comreset_fail_count, 1,
+                                   __ATOMIC_RELAXED);
+                return ERR_TIMEOUT;
+            }
+            cpu_pause();
+        }
     }
 
-    debug_printf("[AHCI] Port %u: COMRESET failed (timeout)\n", port->port_num);
+    debug_printf("[AHCI] Port %u: COMRESET successful (SSTS=0x%08x)\n",
+                 port->port_num, regs->ssts);
+    regs->serr = 0xFFFFFFFF;
+    regs->is = 0xFFFFFFFF;
+    if (ahci_port_start(port) == 0) {
+        return OK;
+    }
+
+    debug_printf("[AHCI] Port %u: COMRESET recovered the link but the engine "
+                 "would not start\n", port->port_num);
     __atomic_fetch_add(&port->stats.comreset_fail_count, 1, __ATOMIC_RELAXED);
     return ERR_TIMEOUT;
 }

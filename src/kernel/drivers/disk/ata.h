@@ -3,6 +3,7 @@
 
 #include "ktypes.h"
 #include "boxos_limits.h"
+#include "io.h"
 
 /* ===========================================================================
  *  ATA / IDE driver
@@ -168,10 +169,52 @@ int  ata_program_lba(uint8_t drive_idx, uint64_t lba, uint16_t count,
                      uint8_t cmd28, uint8_t cmd48);
 int  ata_set_xfer_mode(uint8_t drive_idx, uint8_t mode_byte);
 
+/* The 400 ns settle, in one place instead of three.
+ *
+ * ATA8-ACS §6.2.1 requires 400 ns between selecting a device and believing
+ * anything the Status register says, and the idiom that satisfies it is four
+ * reads of Alt-Status. The reason four reads are ENOUGH is architectural, not
+ * hopeful: an x86 `IN` is a NON-POSTED bus transaction — the core stalls until
+ * the read completes — and the legacy control port decodes over DMI or
+ * LPC/eSPI, where a single cycle costs on the order of 400 ns at the floor.
+ * Four of them therefore clear 400 ns with margin on every chipset this kernel
+ * targets, and they cost nothing when the port is fast because the clause is
+ * about the DEVICE's settling time, not the host's.
+ *
+ * The reads are not optional and must not be optimised away — hence the
+ * `(void)inb(...)`, which is a volatile asm read, and hence this living in a
+ * header rather than being written out a fourth time. */
+static inline void ata_settle_400ns(uint16_t ctrl_reg) {
+    for (int i = 0; i < 4; i++) (void)inb(ctrl_reg);
+}
+
+/* How long the driver waits for BSY to fall after it releases SRST.
+ *
+ * ATA/ATAPI-6 (T13/1410D r3a) §9.2, device state D0SR3:Check_Status, gives the
+ * device up to 31 s to finish its internal reset. That is the SPEC quantity,
+ * and the boot-time reset gets it in full: nothing else is happening during
+ * ata_init, and the only alternative to waiting is declaring a drive that is
+ * legitimately recovering to be absent.
+ *
+ * The other two callers get less, and the reason is the CALLER, not the drive.
+ * ata_flush_cache resets the channel from inside g_ata_lock, and spin_lock in
+ * this kernel is `pushfq; pop; cli` — so the spec's patience there would be
+ * thirty-one seconds with interrupts disabled on that core, which is a far
+ * worse failure than mis-declaring a wedged drive. ata_recover_worker runs on
+ * a K-Core pump shared with every other deferred kernel job and would starve
+ * it for exactly as long. Both take the DECLARED POLICY below — two seconds,
+ * the value this function used to apply to everybody. */
+#define ATA_SRST_BSY_SPEC_MS   31000u
+#define ATA_SRST_BSY_HELD_MS    2000u
+
 /* ATA-7 §9.2 software reset of one channel (SRST pulse with nIEN held =1
  * throughout, so the drive's INTRQ is silenced before/during/after). Exposed
- * for the BMIDE watchdog's K-Core recovery path (ata_recover_worker); busy-
- * waits BSY up to 2 s, so it is only ever called off IRQ/PIT context. */
-void ata_channel_soft_reset(uint8_t channel);
+ * for the BMIDE watchdog's K-Core recovery path (ata_recover_worker).
+ *
+ * `bsy_patience_ms` is how long the caller can afford to wait for BSY to fall
+ * — ATA_SRST_BSY_SPEC_MS when nothing is held, ATA_SRST_BSY_HELD_MS when a
+ * lock or a K-Core is. The loop still exits on the FACTS first: a status of 0
+ * or 0xFF means nothing is on the channel, and BSY clear means ready. */
+void ata_channel_soft_reset(uint8_t channel, uint32_t bsy_patience_ms);
 
 #endif /* ATA_H */

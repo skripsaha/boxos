@@ -312,10 +312,41 @@ typedef struct {
 /* Timeout configuration (ms) — values now sourced from kernel_config.h to
  * avoid the historic dual source of truth (5000 here vs 2000 in config). */
 #define AHCI_TIMEOUT_CMD_DEFAULT     CONFIG_AHCI_CMD_TIMEOUT_MS
-#define AHCI_TIMEOUT_COMRESET_WAIT   1000
 #define AHCI_TIMEOUT_CMD_ENGINE_STOP 500
 #define AHCI_TIMEOUT_MIN             1000
 #define AHCI_TIMEOUT_MAX             30000
+
+/* COMRESET, in the TWO quantities one constant used to stand for.
+ *
+ * AHCI 1.3.1 §10.4.2 ("Port Reset") describes the sequence: software writes
+ * PxSCTL.DET = 1h, waits "at least 1 millisecond", then writes PxSCTL.DET = 0h
+ * and waits for PxSSTS.DET to become 3h.
+ *
+ * Those are not the same kind of number and they were never the same number.
+ * The first is a MINIMUM HOLD with a spec clause behind it — one millisecond,
+ * and the hold is the whole point, so there is no register to poll and nothing
+ * to exit early on. The old code spent AHCI_TIMEOUT_COMRESET_WAIT (a whole
+ * second) in a bare `while (rdtsc() < deadline) cpu_pause();` that read no
+ * register at all: one second of dead spin, per port, on every boot that did a
+ * COMRESET.
+ *
+ * The second is a MAXIMUM WAIT with no spec clause behind it — §10.4.2 names
+ * no bound on how long the link may take to come up — so one second there is a
+ * DECLARED POLICY for how long a port gets before it is called empty. */
+#define AHCI_COMRESET_HOLD_US        1000u
+#define AHCI_COMRESET_LINK_MS        1000u
+
+/* How long a device gets to drop BSY and DRQ during port bring-up.
+ *
+ * AHCI 1.3.1 §10.1.1 step 7 tells software to wait for the device to become
+ * ready and defers the duration to the ATA specification; ATA/ATAPI-6
+ * (T13/1410D r3a) §9.2, device state D0SR3, is 31 s. That is the SPEC
+ * quantity. One second stood here, which is short enough to call a drive doing
+ * a legitimate internal reset absent — and this wait is only reached after
+ * PxSSTS.DET already said a device answered on the link, so it is never spent
+ * on an empty port. Nothing is held across it: ahci_port_init runs at boot
+ * with no lock and no K-Core to starve. */
+#define AHCI_DEVICE_READY_MS         31000u
 
 #define AHCI_MAX_RETRIES             CONFIG_AHCI_MAX_RETRIES
 #define AHCI_MAX_COMRESET_ATTEMPTS   CONFIG_AHCI_MAX_COMRESET_ATTEMPTS

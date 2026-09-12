@@ -3,6 +3,8 @@
 #include "klib.h"
 #include "vmm.h"
 #include "pmm.h"
+#include "hourglass.h"
+#include "atomics.h"
 
 /* =====================================================================
  * Intel VT-d driver — production implementation.
@@ -64,6 +66,9 @@
 #define GSTS_TES    (1u << 31)
 #define GSTS_RTPS   (1u << 30)
 #define GSTS_CFIS   (1u << 23)
+#define GSTS_IRES   (1u << 25)     /* Interrupt Remapping Enable Status */
+#define GSTS_IRTPS  (1u << 24)     /* Interrupt Remap Table Pointer Status */
+#define GSTS_QIES   (1u << 26)     /* Queued Invalidation Enable Status */
 
 /* CCMD bits (§10.4.7). */
 #define CCMD_ICC          (1ULL << 63)
@@ -250,6 +255,92 @@ static int vtd_program_identity_bus(vtd_unit_t* u, uint8_t bus) {
     return 0;
 }
 
+/* ----- Handshakes with the remap unit ----- */
+
+/* How long a remap unit gets to answer one Global Command write.
+ *
+ * DECLARED POLICY, not a spec quantity. VT-d Rev 5.0 §10.4.16 is explicit that
+ * software sets ONE command bit in GCMD and then waits for the matching bit in
+ * GSTS, and it names neither a count nor a maximum anywhere. One second is
+ * this kernel's patience, and it is deliberately THE SAME NUMBER at every
+ * handshake in this file so there is one number to argue with rather than six.
+ *
+ * What it replaces was `for (int i = 0; i < 1000000; i++)` around a single
+ * MMIO read — a few milliseconds on one machine and most of a second on
+ * another, and silence on the log either way. */
+#define VTD_HANDSHAKE_PATIENCE_US   1000000u
+
+/* Wait for one GSTS bit to appear. Returns false when it never did; the caller
+ * then decides what to UNDO, because "carried on as though it worked" is the
+ * one answer a failed handshake must not produce. */
+static bool vtd_await_gsts(vtd_unit_t* u, uint32_t gsts_bit, const char* what)
+{
+    volatile uint32_t* gsts = (volatile uint32_t*)(u->reg + VTD_REG_GSTS);
+    HourGlass glass;
+    if (!HourGlassTurn(&glass, VTD_HANDSHAKE_PATIENCE_US)) {
+        kprintf("[VT-d] no time source — waiting for %s on the fact itself, "
+                "with no bound\n", what);
+        while (!(*gsts & gsts_bit)) cpu_pause();
+        return true;
+    }
+    for (;;) {
+        if (*gsts & gsts_bit) return true;
+        if (HourGlassRunOut(&glass)) break;
+        cpu_pause();
+    }
+    kprintf("[VT-d] %s never latched — %lu us on the %s and the %s\n",
+            what, (unsigned long)HourGlassElapsedUs(&glass),
+            HourGlassRulerName(&glass),
+            HourGlassSourceDied(&glass) ? "ruler died mid-wait"
+                                        : "span ran out");
+    return false;
+}
+
+/* The same wait, for the invalidation registers whose command bit is cleared
+ * BY THE HARDWARE on completion (§6.5.1 CCMD.ICC, §6.5.2 IOTLB.IVT) rather
+ * than mirrored into GSTS. */
+static bool vtd_await_clear64(volatile uint64_t* reg, uint64_t bit,
+                              const char* what)
+{
+    HourGlass glass;
+    if (!HourGlassTurn(&glass, VTD_HANDSHAKE_PATIENCE_US)) {
+        kprintf("[VT-d] no time source — waiting for %s on the fact itself, "
+                "with no bound\n", what);
+        while (*reg & bit) cpu_pause();
+        return true;
+    }
+    for (;;) {
+        if (!(*reg & bit)) return true;
+        if (HourGlassRunOut(&glass)) break;
+        cpu_pause();
+    }
+    kprintf("[VT-d] %s never completed — %lu us on the %s and the %s\n",
+            what, (unsigned long)HourGlassElapsedUs(&glass),
+            HourGlassRulerName(&glass),
+            HourGlassSourceDied(&glass) ? "ruler died mid-wait"
+                                        : "span ran out");
+    return false;
+}
+
+/* Take Queued Invalidation back off.
+ *
+ * GCMD is WRITE-ONLY and every write carries the whole command word, so the
+ * only way to clear one bit without disturbing another is to rebuild the word
+ * from GSTS — which is what VT-d Rev 5.0 §10.4.16 instructs software to do,
+ * and why the GSTS bit positions are aligned with the GCMD ones.
+ *
+ * Only the PERSISTENT enables are carried across. TE, IRE and QIE are ongoing
+ * state and GSTS reports them as such; SRTP, SIRTP, WBF and SFL are one-shot
+ * commands whose GSTS companions report that the LAST one finished, and
+ * writing those back would re-issue a pointer load nobody asked for. */
+static void vtd_qi_disable(vtd_unit_t* u)
+{
+    uint32_t gsts = *(volatile uint32_t*)(u->reg + VTD_REG_GSTS);
+    uint32_t keep = gsts & (GSTS_TES | GSTS_IRES | GSTS_QIES);
+    *(volatile uint32_t*)(u->reg + VTD_REG_GCMD) = keep & ~GCMD_QIE;
+    u->qi_active = false;
+}
+
 /* ----- Queued Invalidation (§6.5.2) ----- */
 
 static void vtd_qi_init(vtd_unit_t* u) {
@@ -262,15 +353,22 @@ static void vtd_qi_init(vtd_unit_t* u) {
      * We use exactly 4 KB → QS=0. */
     *(volatile uint64_t*)(u->reg + VTD_REG_IQA) = u->qi_ring_phys;
     *(volatile uint64_t*)(u->reg + VTD_REG_IQT) = 0;
-    /* Enable QI via GCMD.QIE. */
+    /* Enable QI via GCMD.QIE, then wait for GSTS.QIES to mirror it.
+     *
+     * On failure the enable is TAKEN BACK rather than left half-made. The
+     * hazard here is one-directional: qi_active is set only after QIES has
+     * latched, so the hardware can never have QI on while this kernel thinks
+     * it is off — but leaving GCMD.QIE asserted on a unit whose QIES never
+     * appeared would leave a queue this driver has decided not to use, with an
+     * IQA still pointing at a ring nobody drains. */
     uint32_t gcmd = GCMD_QIE;
     *(volatile uint32_t*)(u->reg + VTD_REG_GCMD) = gcmd;
-    /* Wait QIES = 1 in GSTS bit 26. */
-    for (int i = 0; i < 1000000; i++) {
-        if (*(volatile uint32_t*)(u->reg + VTD_REG_GSTS) & (1u << 26)) {
-            u->qi_active = true;
-            break;
-        }
+    if (vtd_await_gsts(u, GSTS_QIES, "queued invalidation (GCMD.QIE -> GSTS.QIES)")) {
+        u->qi_active = true;
+    } else {
+        kprintf("[VT-d] taking GCMD.QIE back off this unit — invalidation "
+                "falls back to the CCMD/IOTLB registers\n");
+        vtd_qi_disable(u);
     }
 }
 
@@ -281,11 +379,33 @@ static void vtd_qi_submit(vtd_unit_t* u, uint64_t qw0, uint64_t qw1) {
     slot[1] = qw1;
     u->qi_tail = (u->qi_tail + 16) & (VTD_QI_BYTES - 1);
     *(volatile uint64_t*)(u->reg + VTD_REG_IQT) = u->qi_tail;
-    /* Poll head == tail (drained). */
-    for (int i = 0; i < 1000000; i++) {
-        if ((*(volatile uint64_t*)(u->reg + VTD_REG_IQH) & ~0xFULL) ==
-            (uint64_t)u->qi_tail) return;
+
+    /* Drained when the hardware's head catches the tail we just published. */
+    volatile uint64_t* iqh = (volatile uint64_t*)(u->reg + VTD_REG_IQH);
+    HourGlass glass;
+    if (!HourGlassTurn(&glass, VTD_HANDSHAKE_PATIENCE_US)) {
+        kprintf("[VT-d] no time source — waiting for the invalidation queue to "
+                "drain on the fact itself, with no bound\n");
+        while ((*iqh & ~0xFULL) != (uint64_t)u->qi_tail) cpu_pause();
+        return;
     }
+    for (;;) {
+        if ((*iqh & ~0xFULL) == (uint64_t)u->qi_tail) return;
+        if (HourGlassRunOut(&glass)) break;
+        cpu_pause();
+    }
+
+    /* A queue that stops draining does not start again on its own, and every
+     * later submit would spend the same second discovering that. So the
+     * mechanism is withdrawn instead of degraded: QIE comes back off and
+     * vtd_global_flush falls through to the CCMD/IOTLB registers, which are
+     * always present (§6.5.1) and need no queue at all. */
+    kprintf("[VT-d] the invalidation queue stopped draining after %lu us on "
+            "the %s (head=0x%lx tail=0x%x) — withdrawing queued invalidation\n",
+            (unsigned long)HourGlassElapsedUs(&glass),
+            HourGlassRulerName(&glass),
+            (unsigned long)(*iqh & ~0xFULL), u->qi_tail);
+    vtd_qi_disable(u);
 }
 
 /* ----- Interrupt Remap (§5.1) ----- */
@@ -302,12 +422,15 @@ static void vtd_ir_init(vtd_unit_t* u) {
     while (n > 2) { size_enc++; n >>= 1; }
     *(volatile uint64_t*)(u->reg + VTD_REG_IRTA) =
         u->ir_table_phys | size_enc;
+    /* SIRTP is a one-shot: there is nothing to take back when it does not
+     * complete, so the undo is simply refusing to call interrupt remapping
+     * active. GCMD.IRE is never set here, so nothing is remapping either way. */
     *(volatile uint32_t*)(u->reg + VTD_REG_GCMD) = GCMD_SIRTP;
-    for (int i = 0; i < 1000000; i++) {
-        if (*(volatile uint32_t*)(u->reg + VTD_REG_GSTS) & (1u << 24)) {
-            u->ir_active = true;
-            break;
-        }
+    if (vtd_await_gsts(u, GSTS_IRTPS,
+                       "the interrupt-remap table pointer (GCMD.SIRTP -> GSTS.IRTPS)")) {
+        u->ir_active = true;
+    } else {
+        kprintf("[VT-d] this unit keeps no interrupt-remap table\n");
     }
 }
 
@@ -320,21 +443,24 @@ static void vtd_global_flush(vtd_unit_t* u) {
         vtd_qi_submit(u, (2ULL << 4) | (1ULL << 0), 0);     /* IOTLB, global */
         return;
     }
-    /* CCMD: write CIRG=01 (global), then poll ICC until 0 (cleared). */
+    /* CCMD: write CIRG=01 (global), then wait for the hardware to clear ICC.
+     * Nothing to undo on failure — the register invalidation either happened
+     * or the unit is not answering, and in both cases the only honest thing
+     * left is to say so where a shipped build can see it. */
     *(volatile uint64_t*)(u->reg + VTD_REG_CCMD) =
         CCMD_ICC | CCMD_CIRG_GLOBAL;
-    for (int i = 0; i < 1000000; i++) {
-        if (!(*(volatile uint64_t*)(u->reg + VTD_REG_CCMD) & CCMD_ICC)) break;
-    }
+    (void)vtd_await_clear64((volatile uint64_t*)(u->reg + VTD_REG_CCMD),
+                            CCMD_ICC, "the global context-cache invalidate");
+
     /* IOTLB invalidation lives at offset (CAP[16:8] * 16). */
     uint32_t iotlb_off = (uint32_t)(((u->cap >> 8) & 0x3FF) * 16);
-    uint64_t iotlb_reg = (uint64_t)(uintptr_t)(u->reg + iotlb_off + 8);
-    *(volatile uint64_t*)iotlb_reg =
+    volatile uint64_t* iotlb_reg =
+        (volatile uint64_t*)(u->reg + iotlb_off + 8);
+    *iotlb_reg =
         (1ULL << 63)   |              /* IVT (invalidate) */
         (1ULL << 60);                 /* IIRG=01 global */
-    for (int i = 0; i < 1000000; i++) {
-        if (!(*(volatile uint64_t*)iotlb_reg & (1ULL << 63))) break;
-    }
+    (void)vtd_await_clear64(iotlb_reg, (1ULL << 63),
+                            "the global IOTLB invalidate");
 }
 
 /* ----- Per-unit init ----- */
@@ -363,10 +489,18 @@ static int vtd_unit_init(vtd_unit_t* u, uint64_t phys) {
     /* Program RTADDR_REG with the table physical address.
      * Bit 11:10 = TT (translation table type) = 00 (legacy). */
     *(volatile uint64_t*)(u->reg + VTD_REG_RTADDR) = u->root_phys;
-    /* Tell hardware to load the new RTADDR. */
+    /* Tell hardware to load the new RTADDR, and REFUSE THE UNIT if it never
+     * says it did. u->online used to be set regardless, which meant every
+     * later caller — device_attach, map, invalidate — programmed context
+     * entries reachable only through a root table the hardware never latched,
+     * and believed it had done so. A unit this kernel cannot hand a root table
+     * to is a unit this kernel does not have. */
     *(volatile uint32_t*)(u->reg + VTD_REG_GCMD) = GCMD_SRTP;
-    for (int i = 0; i < 1000000; i++) {
-        if (*(volatile uint32_t*)(u->reg + VTD_REG_GSTS) & GSTS_RTPS) break;
+    if (!vtd_await_gsts(u, GSTS_RTPS,
+                        "the root-table pointer (GCMD.SRTP -> GSTS.RTPS)")) {
+        kprintf("[VT-d] remap unit at 0x%lx refused its root table — not "
+                "bringing it online\n", (unsigned long)phys);
+        return -4;
     }
 
     /* Set up advanced features. */
@@ -391,8 +525,18 @@ int vtd_enable_translation(void) {
         if (!u->online) continue;
         vtd_global_flush(u);
         *(volatile uint32_t*)(u->reg + VTD_REG_GCMD) = GCMD_TE;
-        for (int k = 0; k < 1000000; k++) {
-            if (*(volatile uint32_t*)(u->reg + VTD_REG_GSTS) & GSTS_TES) break;
+        if (!vtd_await_gsts(u, GSTS_TES,
+                            "translation (GCMD.TE -> GSTS.TES)")) {
+            /* TES never appeared, so the unit is not translating — and the
+             * command word goes back to what GSTS still reports, so a TE that
+             * is merely late cannot come up under a kernel that has already
+             * counted this unit out. */
+            uint32_t gsts = *(volatile uint32_t*)(u->reg + VTD_REG_GSTS);
+            *(volatile uint32_t*)(u->reg + VTD_REG_GCMD) =
+                gsts & (GSTS_IRES | GSTS_QIES);
+            kprintf("[VT-d] DRHD[%u] did not begin translating — left "
+                    "untranslated\n", i);
+            continue;
         }
         enabled++;
         debug_printf("[VT-d] DRHD[%u] translation enabled (TES=1)\n", i);

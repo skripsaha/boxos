@@ -46,7 +46,11 @@
 #include "ktypes.h"
 #include "error.h"
 
-#define APEI_GHES_MAX_RUNTIME_SOURCES  16u
+/* There is no compile-time source limit any more. The runtime table is sized
+ * from HEST's own ErrorSourceCount at the first registration — see the block
+ * comment on g_sources in apei_ghes_runtime.c for why that is safe against the
+ * NMI walker, and for the ceiling that keeps a corrupt count from sizing an
+ * allocation nothing can serve. */
 
 /* Initialise — registers Touch tag handles, zeroes counters. Safe to
  * call when no GHES source was seen. Must run AFTER:

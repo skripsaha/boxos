@@ -153,8 +153,8 @@ typedef struct AtaAsyncCh {
      * `recovering` 0->1 (coalescing repeat detections into one) and posts
      * `recover_node` to a K-Core via BatonPass — never-drop and
      * allocation-free, exactly as AHCI defers COMRESET — because
-     * ata_channel_soft_reset busy-waits BSY for up to 2 s, far too long for the
-     * tick's IRQ context. While recovering, the IRQ handler / scan / submit all
+     * ata_channel_soft_reset busy-waits BSY for ATA_SRST_BSY_HELD_MS, far too
+     * long for the tick's IRQ context. While recovering, the IRQ handler / scan / submit all
      * stand off the channel. run = ata_recover_worker, ctx = this channel; set
      * once in bmide_init_channel. */
     uint8_t            ch_idx;
@@ -181,9 +181,10 @@ static inline AtaChannel *drive_channel_ptr(uint8_t drive_idx) {
     return &g_ata_channels[drive_channel(drive_idx)];
 }
 
+/* ATA8-ACS §6.2.1's 400 ns after a drive-select — the idiom and the reason
+ * four non-posted reads satisfy it live once, in ata.h. */
 static inline void ata_delay_400ns(uint8_t drive_idx) {
-    uint16_t ctrl = drive_channel_ptr(drive_idx)->ctrl_reg;
-    for (int i = 0; i < 4; i++) (void)inb(ctrl);
+    ata_settle_400ns(drive_channel_ptr(drive_idx)->ctrl_reg);
 }
 
 static inline uint8_t ata_read_status(uint8_t drive_idx) {
@@ -216,7 +217,7 @@ static void ata_set_nien(uint8_t channel, bool masked) {
     AtaChannel *ch = &g_ata_channels[channel];
     if (!ch->present) return;
     outb(ch->ctrl_reg, masked ? ATA_CTRL_nIEN : 0);
-    for (int i = 0; i < 4; i++) (void)inb(ch->ctrl_reg); /* 400 ns settle */
+    ata_settle_400ns(ch->ctrl_reg);
 }
 
 /* SET FEATURES "set transfer mode" — shared with ata.c PIO negotiation
@@ -547,10 +548,11 @@ static void ata_irq_handler(void) {
  *  Watchdog — K-Core SRST recovery of a genuinely wedged channel.
  *
  *  Posted by bmide_watchdog_scan via the channel's never-drop recover_node;
- *  runs on a K-Core pump (BatonPump) where the up-to-2 s BSY wait
- *  in ata_channel_soft_reset is affordable. `recovering` is already 1 (the
- *  scan CAS'd it) and gates the IRQ handler / scan / submit off this channel
- *  for the duration.
+ *  runs on a K-Core pump (BatonPump) where an ATA_SRST_BSY_HELD_MS wait on BSY
+ *  is affordable — and where the spec's full 31 s would NOT be, because that
+ *  pump is shared with every other deferred kernel job. `recovering` is already
+ *  1 (the scan CAS'd it) and gates the IRQ handler / scan / submit off this
+ *  channel for the duration.
  *
  *  Stack-cmd lifetime is the delicate part. The wedged sync cmd lives on its
  *  waiter's stack; the waiter spins until it observes cmd->done. If any other
@@ -583,7 +585,7 @@ static void ata_recover_worker(void *ctx) {
 
     /* Genuine wedge. SRST with nIEN held =1 throughout silences the drive's
      * INTRQ, so the wedged command can raise no further interrupt. */
-    ata_channel_soft_reset(ch_idx);
+    ata_channel_soft_reset(ch_idx, ATA_SRST_BSY_HELD_MS);
 
     /* Retire the wedged cmd out of flight and re-launch the innocent queue
      * (the "re-launch waiting ships" recovery: commands queued behind the

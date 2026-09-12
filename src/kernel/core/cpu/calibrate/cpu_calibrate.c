@@ -182,9 +182,39 @@ static uint32_t known_intel_crystal_hz(void) {
     }
 }
 
+/* CPUID.15h and NOTHING ELSE — the leaf's own three values or no answer.
+ *
+ * EAX = denominator, EBX = numerator, ECX = core crystal in Hz. With all
+ * three non-zero the TSC rate is ECX*EBX/EAX exactly: nothing is measured,
+ * nothing is calibrated, and the answer is available before ACPI, before
+ * the PIT, before anything. That is what makes it usable as a time ruler
+ * during early boot, and it is why the family/model crystal lookup below
+ * is deliberately NOT part of this function: a looked-up crystal is a
+ * guess about the silicon, and a caller asking for a ruler it can trust
+ * unconditionally must not be handed one. See hourglass.c. */
+uint64_t cpu_tsc_architectural_khz(void) {
+    if (g_cpu_caps.max_basic_leaf < 0x15) {
+        return 0;
+    }
+
+    uint32_t eax, ebx, ecx, edx;
+    cpuid(0x15, &eax, &ebx, &ecx, &edx);
+
+    if (eax == 0 || ebx == 0 || ecx == 0) {
+        return 0;
+    }
+
+    return (((uint64_t)ecx * (uint64_t)ebx) / (uint64_t)eax) / 1000;
+}
+
 // Try to get TSC frequency from CPUID leaf 0x15 (Intel: TSC/Core Crystal Clock)
 // Returns frequency in kHz, or 0 if not available
 static uint64_t cpuid_get_tsc_freq_khz(void) {
+    uint64_t exact_khz = cpu_tsc_architectural_khz();
+    if (exact_khz != 0) {
+        return exact_khz;
+    }
+
     if (g_cpu_caps.max_basic_leaf < 0x15) {
         return 0;
     }
@@ -193,18 +223,14 @@ static uint64_t cpuid_get_tsc_freq_khz(void) {
     cpuid(0x15, &eax, &ebx, &ecx, &edx);
 
     // eax = denominator, ebx = numerator, ecx = crystal clock frequency (Hz)
-    // TSC freq = ecx * ebx / eax
     if (eax == 0 || ebx == 0) {
         return 0;
     }
 
-    uint64_t crystal_hz = ecx;
-
-    // ECX = 0 → crystal not enumerated. Use family/model lookup.
-    if (crystal_hz == 0) {
-        crystal_hz = known_intel_crystal_hz();
-        if (crystal_hz == 0) return 0;
-    }
+    // ECX = 0 → crystal not enumerated. Use family/model lookup. Good enough
+    // to CALIBRATE against, not good enough to be a ruler — see above.
+    uint64_t crystal_hz = known_intel_crystal_hz();
+    if (crystal_hz == 0) return 0;
 
     // TSC frequency = crystal_hz * numerator / denominator
     uint64_t tsc_hz = (crystal_hz * (uint64_t)ebx) / (uint64_t)eax;
@@ -348,23 +374,36 @@ void cpu_calibrate_tsc(void) {
     uint64_t pmt_khz = 0;
     if (pmtimer_is_present()) {
         uint64_t samples[HPET_TSC_SAMPLE_COUNT];
+        bool measured = true;
         for (int i = 0; i < HPET_TSC_SAMPLE_COUNT; i++) {
             uint64_t tsc_start = rdtsc_serialized();
-            pmtimer_busy_wait_us((uint64_t)HPET_TSC_SAMPLE_MS * 1000ULL);
+            /* The wait now REPORTS. It returns false when the counter is
+             * absent or when it stopped mid-wait, and a sample taken across
+             * a wait that did not happen is not a measurement of anything —
+             * it used to be counted as one, because the wait returned void
+             * and a dead timer returned instantly. */
+            if (!pmtimer_busy_wait_us((uint64_t)HPET_TSC_SAMPLE_MS * 1000ULL)) {
+                kprintf("[CPU] PM Timer did not keep time during calibration "
+                        "— dropping it as a source\n");
+                measured = false;
+                break;
+            }
             uint64_t cycles = rdtsc_serialized() - tsc_start;
             samples[i] = cycles / (uint64_t)HPET_TSC_SAMPLE_MS;
         }
-        /* Insertion sort + median pick. */
-        for (int i = 1; i < HPET_TSC_SAMPLE_COUNT; i++) {
-            uint64_t v = samples[i];
-            int j = i - 1;
-            while (j >= 0 && samples[j] > v) {
-                samples[j + 1] = samples[j];
-                j--;
+        if (measured) {
+            /* Insertion sort + median pick. */
+            for (int i = 1; i < HPET_TSC_SAMPLE_COUNT; i++) {
+                uint64_t v = samples[i];
+                int j = i - 1;
+                while (j >= 0 && samples[j] > v) {
+                    samples[j + 1] = samples[j];
+                    j--;
+                }
+                samples[j + 1] = v;
             }
-            samples[j + 1] = v;
+            pmt_khz = samples[HPET_TSC_SAMPLE_COUNT / 2];
         }
-        pmt_khz = samples[HPET_TSC_SAMPLE_COUNT / 2];
     }
 
     /* Method 5: PIT channel-0 measurement. Only runs when HPET isn't
@@ -563,6 +602,27 @@ uint64_t cpu_tsc_to_ms(uint64_t cycles) {
     }
 
     return cycles / tsc_freq_khz;
+}
+
+uint64_t cpu_us_to_tsc(uint64_t us) {
+    /* Deliberately does NOT do what cpu_ms_to_tsc does when the TSC has not
+     * been calibrated. That path busy-waits on the PIT and re-measures the
+     * rate ON EVERY CALL — tolerable for the handful of millisecond
+     * conversions that happen during bring-up, ruinous for a function whose
+     * whole purpose is microsecond deadlines inside polling loops, where it
+     * would turn each loop iteration into a one-millisecond PIT wait.
+     *
+     * So: no frequency, no deadline. 0 is unambiguous as a failure because a
+     * successful conversion is floored at 1 below. */
+    uint64_t khz = __atomic_load_n(&tsc_freq_khz, __ATOMIC_RELAXED);
+    if (khz == 0) return 0;
+
+    /* khz is cycles per millisecond, so cycles = us * khz / 1000, rounded UP
+     * — a deadline that rounds down is a deadline that fires early, and a
+     * caller asking for one microsecond must not be handed a zero-length
+     * wait on a part slower than 1 GHz. */
+    uint64_t cycles = (us * khz + 999ULL) / 1000ULL;
+    return cycles ? cycles : 1ULL;
 }
 
 uint64_t cpu_tsc_to_us(uint64_t cycles) {

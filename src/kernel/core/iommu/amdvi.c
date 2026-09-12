@@ -4,6 +4,8 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "touch.h"
+#include "hourglass.h"
+#include "atomics.h"
 
 /* =====================================================================
  * AMD-Vi (AMD IOMMU) driver — production implementation.
@@ -157,19 +159,56 @@ static void amdvi_cmd_push(amdvi_unit_t* u, uint64_t cmd0, uint64_t cmd1) {
     *(volatile uint64_t*)(u->reg + MMIO_CMD_TAIL) = u->cmd_tail;
 }
 
+/* How long the IOMMU gets to store its COMPLETION_WAIT semaphore.
+ *
+ * DECLARED POLICY, not a spec quantity. AMD-Vi §2.4.3 defines COMPLETION_WAIT
+ * as completing once every previously queued command has, and names neither a
+ * maximum time nor an iteration count — there is nothing to quote. One second
+ * is this kernel's patience, and it is deliberately the same number the VT-d
+ * side of this kernel gives its own remap units, so there is one number to
+ * argue with rather than two.
+ *
+ * The million iterations that stood here were not time: that is a couple of
+ * milliseconds of cached loads on a fast part and most of a second on a slow
+ * one, and on expiry it said so only through a debug_printf that a shipped
+ * build compiles away. */
+#define AMDVI_COMPLETION_PATIENCE_US   1000000u
+
 static void amdvi_completion_wait(amdvi_unit_t* u) {
-    /* Op[63:60]=0x1, Store completion bit 0. Use a poll loop on a flag
-     * inside the command buffer itself — bit 0 of qword 1 toggles when
-     * the IOMMU finishes the wait. */
+    /* Op[63:60]=0x1, Store completion bit 0. The flag lives inside the command
+     * buffer itself — bit 0 of qword 1 is set by the IOMMU when the wait
+     * finishes — so the exit is that store and nothing else.
+     *
+     * Nothing is undone on expiry, and that is deliberate: a completion wait
+     * that has not landed does not mean the queued commands failed, only that
+     * they have not finished, and withdrawing anything here would be acting on
+     * a fact this code does not have. What it CAN do is say so where a shipped
+     * build can see it. */
     volatile uint64_t* wait_slot =
         (volatile uint64_t*)((uint8_t*)u->cmd_buf + u->cmd_tail + 8);
     *wait_slot = 0;
     amdvi_cmd_push(u, ((uint64_t)CMD_OP_COMPLETION_WAIT << 60) | (1ULL << 1),
                        (uint64_t)(uintptr_t)wait_slot | 1);
-    for (int i = 0; i < 1000000; i++) {
-        if (*wait_slot & 1) return;
+
+    HourGlass glass;
+    if (!HourGlassTurn(&glass, AMDVI_COMPLETION_PATIENCE_US)) {
+        kprintf("[AMD-Vi] no time source — waiting for the completion "
+                "semaphore on the fact itself, with no bound\n");
+        while (!(*wait_slot & 1)) cpu_pause();
+        return;
     }
-    debug_printf("[AMD-Vi] completion-wait timeout\n");
+    for (;;) {
+        if (*wait_slot & 1) return;
+        if (HourGlassRunOut(&glass)) break;
+        cpu_pause();
+    }
+    kprintf("[AMD-Vi] the completion semaphore never landed — %lu us on the "
+            "%s and the %s; the invalidations it was guarding may still be in "
+            "flight\n",
+            (unsigned long)HourGlassElapsedUs(&glass),
+            HourGlassRulerName(&glass),
+            HourGlassSourceDied(&glass) ? "ruler died mid-wait"
+                                        : "span ran out");
 }
 
 /* ----- Per-unit init ----- */

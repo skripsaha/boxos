@@ -1,6 +1,8 @@
 #include "rtc.h"
 #include "io.h"
 #include "pit.h"
+#include "hourglass.h"
+#include "atomics.h"
 
 #define CMOS_ADDR       0x70
 #define CMOS_DATA       0x71
@@ -61,16 +63,56 @@ static uint8_t cmos_read(uint8_t reg) {
     return inb(CMOS_DATA);
 }
 
-/* Returns true once the RTC clears its Update-In-Progress bit (≤1 ms on real
- * HW), false if the deadline expires — protects against a wedged or absent
- * RTC chip hanging boot indefinitely. The caller proceeds with whatever
- * value is in the BCD/binary registers; rtc_init's two-read consistency
- * check then catches any straddling update. */
+/* The longest the part may legitimately hold UIP, taken from the part itself.
+ *
+ * MC146818A datasheet, "UPDATE CYCLE": driven from the 32.768 kHz time base
+ * the update transfer takes 1984 us, and the UIP status bit is raised 244 us
+ * before that transfer begins. 244 + 1984 = 2228 us is therefore the whole
+ * window in which any reader can find UIP set, and the chip opens that window
+ * once per second, so two of them can never abut.
+ *
+ * The patience is that window taken twice. The second window is a DECLARED
+ * MARGIN, not a spec figure: it pays for the poll's own I/O latency and for an
+ * SMI that steals the core mid-wait, and since the part cannot start a second
+ * update inside it, a wait that outlives it is not a slow RTC — it is an RTC
+ * that is not answering. */
+#define RTC_UIP_WINDOW_US     2228u
+#define RTC_UIP_PATIENCE_US   (2u * RTC_UIP_WINDOW_US)
+
+/* Returns true once the RTC clears its Update-In-Progress bit, false once the
+ * patience above has run out. The caller proceeds with whatever value is in
+ * the BCD/binary registers either way; rtc_init's two-read consistency check
+ * then catches any straddling update.
+ *
+ * The million iterations that stood here were not time at all. On a board
+ * where CMOS port 0x71 does not answer — RTC disabled in firmware, a dead coin
+ * cell, an unclaimed LPC/eSPI cycle reading back 0xFF — register 0x0A reads
+ * 0xFF, UIP is stuck set by definition, and boot spent a million CMOS accesses
+ * discovering it. A million is also not the same amount of time on any two
+ * machines, which is the part that makes it unarguable.
+ *
+ * rtc_init runs after hpet_init, so a ruler exists by now; the branch that
+ * says otherwise is here because a missing ruler must never quietly become an
+ * invented one. */
 static bool wait_not_uip(void) {
-    for (uint32_t i = 0; i < 1000000; i++) {
-        if ((cmos_read(CMOS_REG_STA) & STA_UIP) == 0) return true;
+    HourGlass glass;
+    if (!HourGlassTurn(&glass, RTC_UIP_PATIENCE_US)) {
+        kprintf("[RTC] no time source on this machine — waiting for UIP to "
+                "clear on the fact itself, with no bound\n");
+        while (cmos_read(CMOS_REG_STA) & STA_UIP) cpu_pause();
+        return true;
     }
-    debug_printf("[RTC] WARNING: UIP bit stuck — proceeding with possibly straddled read\n");
+    for (;;) {
+        if ((cmos_read(CMOS_REG_STA) & STA_UIP) == 0) return true;
+        if (HourGlassRunOut(&glass)) break;
+        cpu_pause();
+    }
+    kprintf("[RTC] UIP still set after %lu us on the %s (%s) — the CMOS is not "
+            "answering; proceeding with a possibly straddled read\n",
+            (unsigned long)HourGlassElapsedUs(&glass),
+            HourGlassRulerName(&glass),
+            HourGlassSourceDied(&glass) ? "ruler died mid-wait"
+                                        : "span ran out");
     return false;
 }
 

@@ -2,7 +2,7 @@
  * APEI/GHES runtime path — implementation.
  *
  * See apei_ghes_runtime.h for design + spec citations. This file owns:
- *   1. Per-source runtime descriptor table (16 max, bounded).
+ *   1. Per-source runtime descriptor table, sized from HEST at init.
  *   2. apei_ghes_register_source() — invoked from acpi_apei.c decode_ghes.
  *   3. Generic Error Status Block walker — parses header + Generic Error
  *      Data Entries, routes each section through the proper destination.
@@ -25,6 +25,7 @@
 #include "mce.h"
 #include "baton.h"
 #include "cpuid.h"
+#include "acpi_internal.h"
 
 /* TSC-frequency getter — published by cpu calibration into the cpu_caps
  * shared page; declared here to avoid a per-call lookup. */
@@ -129,8 +130,79 @@ typedef struct {
 
 static void nmi_worker(void *ctx);
 
-static apei_ghes_source_t g_sources[APEI_GHES_MAX_RUNTIME_SOURCES];
-static volatile uint32_t  g_source_count = 0;
+/* The per-source table: ONE allocation, sized by the firmware, never grown.
+ *
+ * It used to be sixteen slots of BSS while HEST.ErrorSourceCount (ACPI 6.5
+ * §18.3, Table 18-2) is a 32-bit field the spec gives no maximum to — so
+ * "sixteen" was a guess about somebody else's machine, and the seventeenth
+ * error source on a large server was dropped with a debug_printf that a
+ * shipped build compiles away. On the machines where GHES matters most, that
+ * is silently losing the DIMM that is failing.
+ *
+ * Heap-backed, and the three rules that make that SAFE are the whole design,
+ * because this table is walked from NMI CONTEXT (idt.c -> apei_ghes_nmi_check)
+ * as well as from the SCI handler and the scheduler tick:
+ *
+ *   1. ONE allocation. Made on the first registration, never grown, never
+ *      moved, never freed. There is no window in which the table's address
+ *      changes under a walker.
+ *   2. PUBLISHED BY ONE RELEASE STORE, and every walker loads the pointer with
+ *      ACQUIRE. A walker that sees the pointer sees a fully built descriptor
+ *      behind it.
+ *   3. NO WALKER RUNS WHILE IT IS BEING BUILT. Every registration comes from
+ *      decode_ghes during acpi_parse_apei, which runs on the BSP inside
+ *      acpi_init; all three entry points return immediately while
+ *      g_initialized is false, and g_initialized is set only by
+ *      apei_ghes_runtime_init, which runs after acpi_init has finished. An NMI
+ *      landing mid-build therefore sees no table at all — never half of one.
+ *
+ * A grow-and-copy table would break rule 1 and could not be freed safely from
+ * under an NMI at all, which is exactly why the count comes from the firmware
+ * once instead of being discovered as sources arrive. */
+static apei_ghes_source_t *g_sources = NULL;
+static uint32_t            g_source_capacity = 0;
+static volatile uint32_t   g_source_count = 0;
+
+/* Make the table exist, sized from the firmware's own count.
+ *
+ * ErrorSourceCount is a CLAIM; the table's length is a FACT. A corrupt or
+ * hostile count — the field is 32 bits and unbounded — would otherwise size an
+ * allocation nothing can serve, and losing GHES entirely to a bad number is
+ * worse than the sixteen-slot guess this replaces. So the claim is capped by
+ * what the HEST body can physically describe: the walk in acpi_parse_apei (the
+ * only thing that ever reaches this function) must read at least a type and a
+ * source id — four bytes — before it can classify an entry at all, so the
+ * table cannot describe more sources than its body holds four-byte steps.
+ * Normal firmware makes the claim the smaller of the two, and the ceiling
+ * never comes into play. */
+static bool ghes_table_ready(void) {
+    if (g_sources) return true;
+
+    uint32_t claimed = g_acpi.apei.hest_error_source_count;
+    if (claimed == 0) return false;
+
+    const acpi_sdt_header_t *hest = acpi_find_table("HEST");
+    if (!hest || hest->length <= sizeof(acpi_hest_t)) return false;
+    uint32_t ceiling = (hest->length - (uint32_t)sizeof(acpi_hest_t)) / 4u;
+    uint32_t slots   = (claimed < ceiling) ? claimed : ceiling;
+    if (slots == 0) return false;
+
+    apei_ghes_source_t *table =
+        (apei_ghes_source_t *)kmalloc((size_t)slots * sizeof(*table));
+    if (!table) {
+        kprintf("[APEI] cannot hold %u GHES source(s) — no memory for the "
+                "runtime table; firmware-delivered errors will not be "
+                "processed on this boot\n", slots);
+        return false;
+    }
+    memset(table, 0, (size_t)slots * sizeof(*table));
+
+    g_source_capacity = slots;
+    __atomic_store_n(&g_sources, table, __ATOMIC_RELEASE);
+    debug_printf("[APEI] runtime source table: %u slot(s) from HEST "
+                 "(claimed=%u, table ceiling=%u)\n", slots, claimed, ceiling);
+    return true;
+}
 
 /* ─── Stats (RELAXED — never load-bearing) ──────────────────────── */
 
@@ -227,6 +299,8 @@ error_t apei_ghes_register_source(uint16_t source_id, bool v2,
     if (gesb_phys == 0 || gesb_len < sizeof(gesb_header_t))
         return ERR_INVALID_ARGUMENT;
 
+    if (!ghes_table_ready()) return ERR_NO_MEMORY;
+
     /* Idempotent refresh — find existing slot for this source_id first. */
     apei_ghes_source_t *slot = NULL;
     for (uint32_t i = 0; i < g_source_count; i++) {
@@ -237,9 +311,13 @@ error_t apei_ghes_register_source(uint16_t source_id, bool v2,
         }
     }
     if (!slot) {
-        if (g_source_count >= APEI_GHES_MAX_RUNTIME_SOURCES) {
-            debug_printf("[APEI] runtime source table full (%u), dropping src=%u\n",
-                         APEI_GHES_MAX_RUNTIME_SOURCES, source_id);
+        if (g_source_count >= g_source_capacity) {
+            /* kprintf, not debug_printf: a source dropped here is a class of
+             * hardware error this machine will never report again, and that
+             * sentence has to survive into a shipped build. */
+            kprintf("[APEI] HEST described more sources than it claimed — no "
+                    "slot for src=%u (capacity %u)\n",
+                    source_id, g_source_capacity);
             return ERR_NO_MEMORY;
         }
         slot = &g_sources[g_source_count];
@@ -472,10 +550,13 @@ void apei_ghes_poll_tick(void) {
     if (!g_initialized) return;
     __atomic_fetch_add(&g_stat_poll_ticks, 1, __ATOMIC_RELAXED);
 
+    apei_ghes_source_t *table = __atomic_load_n(&g_sources, __ATOMIC_ACQUIRE);
+    if (!table) return;
+
     uint64_t now = apei_ghes_rdtsc();
     uint64_t tsc_ms = apei_ghes_tsc_per_ms();
     for (uint32_t i = 0; i < g_source_count; i++) {
-        apei_ghes_source_t *src = &g_sources[i];
+        apei_ghes_source_t *src = &table[i];
         if (!(src->flags & SRC_IN_USE)) continue;
         if (src->notify_type != 0 && src->notify_type != 1) continue;  /* Polled / External-IRQ both polled */
         if (now < src->next_poll_tsc) continue;
@@ -499,9 +580,14 @@ bool apei_ghes_nmi_check(void) {
     if (!g_initialized) return false;
     __atomic_fetch_add(&g_stat_nmi_invocations, 1, __ATOMIC_RELAXED);
 
+    /* ACQUIRE against the single RELEASE store that published the table. This
+     * is NMI context: the only table it can ever see is a finished one. */
+    apei_ghes_source_t *table = __atomic_load_n(&g_sources, __ATOMIC_ACQUIRE);
+    if (!table) return false;
+
     bool any = false;
     for (uint32_t i = 0; i < g_source_count; i++) {
-        apei_ghes_source_t *src = &g_sources[i];
+        apei_ghes_source_t *src = &table[i];
         if (!(src->flags & SRC_IN_USE)) continue;
         if (src->notify_type != 4) continue;
         if (!src->gesb_va) continue;
@@ -520,9 +606,12 @@ bool apei_ghes_nmi_check(void) {
 uint32_t apei_ghes_sci_check(void) {
     if (!g_initialized) return 0;
     __atomic_fetch_add(&g_stat_sci_invocations, 1, __ATOMIC_RELAXED);
+    apei_ghes_source_t *table = __atomic_load_n(&g_sources, __ATOMIC_ACQUIRE);
+    if (!table) return 0;
+
     uint32_t fired = 0;
     for (uint32_t i = 0; i < g_source_count; i++) {
-        apei_ghes_source_t *src = &g_sources[i];
+        apei_ghes_source_t *src = &table[i];
         if (!(src->flags & SRC_IN_USE)) continue;
         if (src->notify_type != 3) continue;
         if (process_source_gesb(src) == 1) fired++;
@@ -555,9 +644,10 @@ uint32_t apei_ghes_simulate(uintptr_t gesb_phys, uint32_t gesb_len) {
 void apei_ghes_get_stats(apei_ghes_stats_t *out) {
     if (!out) return;
     uint32_t polled = 0, nmi = 0, sci = 0, other = 0;
-    for (uint32_t i = 0; i < g_source_count; i++) {
-        if (!(g_sources[i].flags & SRC_IN_USE)) continue;
-        switch (g_sources[i].notify_type) {
+    apei_ghes_source_t *table = __atomic_load_n(&g_sources, __ATOMIC_ACQUIRE);
+    for (uint32_t i = 0; table && i < g_source_count; i++) {
+        if (!(table[i].flags & SRC_IN_USE)) continue;
+        switch (table[i].notify_type) {
             case 0: polled++; break;
             case 3: sci++;    break;
             case 4: nmi++;    break;

@@ -12,6 +12,7 @@
 #include "baton.h"
 #include "atomics.h"
 #include "kernel_config.h"
+#include "hourglass.h"
 
 acpi_state_t g_acpi = {0};
 
@@ -590,6 +591,15 @@ void acpi_sci_arm(void)
     acpi_pm1_arm_power_button();
 }
 
+/* How long the firmware gets to finish the handoff into ACPI mode.
+ *
+ * DECLARED POLICY, not a spec quantity. ACPI 6.5 §16.3.2 tells the OS to write
+ * ACPI_ENABLE to SMI_CMD and then poll PM1a_CNT "until" SCI_EN reads back as
+ * one; it names no maximum anywhere, so there is no number to quote. Three
+ * seconds is this kernel's patience, written once so there is one place to
+ * argue with it. */
+#define ACPI_SCI_HANDOFF_PATIENCE_US   3000000u
+
 /* ACPI 6.5 §16.3.2: many real firmwares boot in PIC/SMI mode (SCI_EN=0).
  * The OS must write FADT.ACPI_ENABLE to FADT.SMI_CMD then poll PM1a_CNT
  * until bit 0 (SCI_EN) becomes 1 before any PM1 write will take effect.
@@ -615,18 +625,55 @@ static void acpi_enable_mode(void) {
                  smi, byte);
     outb((uint16_t)smi, byte);
 
-    /* Spin for SCI_EN bit. Spec gives no max time; we cap at 3 seconds
-     * using a coarse delay so we don't hang the boot on a misbehaved
-     * firmware. */
-    for (uint32_t i = 0; i < 3000; i++) {
+    /* Wait for the firmware's SMI handler to hand the platform over — on the
+     * FACT, bounded by real time.
+     *
+     * What stood here counted three thousand units of "about a millisecond",
+     * where the unit was a thousand `outb %al,$0x80`. On a board where port
+     * 0x80 is absorbed by the eSPI bridge those three million writes retire in
+     * a handful of milliseconds, so a legacy BIOS whose SMI handler needs
+     * forty loses the handoff — and the only complaint was a debug_printf,
+     * which a shipped build compiles to nothing. Everything downstream then
+     * writes PM1 registers the chipset is not honouring: the power button does
+     * nothing and acpi_shutdown's SLP_TYP write is a no-op, so the machine
+     * halts where it should have powered off.
+     *
+     * The ruler is already here. acpi_init calls acpi_parse_tables — which
+     * hands the PM Timer to the timer driver through pmtimer_adopt_from_fadt —
+     * and only then calls this function, so HourGlass has something to measure
+     * with before the first poll. */
+    HourGlass glass;
+    if (!HourGlassTurn(&glass, ACPI_SCI_HANDOFF_PATIENCE_US)) {
+        kprintf("[ACPI] no time source on this machine yet — waiting for "
+                "SCI_EN on the fact itself, with no bound\n");
+        while (!(inw((uint16_t)pm1a) & 0x1)) cpu_pause();
+        kprintf("[ACPI] SCI_EN raised — the platform is in ACPI mode\n");
+        return;
+    }
+    for (;;) {
         if (inw((uint16_t)pm1a) & 0x1) {
-            debug_printf("[ACPI] SCI_EN raised after %u ms\n", i);
+            /* One sample so the elapsed figure below is the time that really
+             * passed rather than whatever the last poll left behind. */
+            (void)HourGlassRunOut(&glass);
+            kprintf("[ACPI] SCI_EN raised after %lu us, measured on the %s\n",
+                    (unsigned long)HourGlassElapsedUs(&glass),
+                    HourGlassRulerName(&glass));
             return;
         }
-        /* ~1 ms IO delay — outb 0x80 is the classic post-port no-op. */
-        for (uint32_t j = 0; j < 1000; j++) outb(0x80, 0);
+        if (HourGlassRunOut(&glass)) break;
+        cpu_pause();
     }
-    debug_printf("[ACPI] timed out waiting for SCI_EN (firmware bug)\n");
+
+    /* kprintf, not debug_printf: this line decides whether the power button,
+     * the sleep states and S5 work at all on this boot, and a line like that
+     * must survive into a shipped build. */
+    kprintf("[ACPI] SCI_EN never rose — %lu us on the %s and the %s. The "
+            "platform stays in SMI mode: PM1 writes (power button, S5) will "
+            "not take effect\n",
+            (unsigned long)HourGlassElapsedUs(&glass),
+            HourGlassRulerName(&glass),
+            HourGlassSourceDied(&glass) ? "ruler died mid-wait"
+                                        : "span ran out");
 }
 
 acpi_error_t acpi_init(void) {

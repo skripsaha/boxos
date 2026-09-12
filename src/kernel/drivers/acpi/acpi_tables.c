@@ -1,6 +1,7 @@
 #include "acpi_internal.h"
 #include "klib.h"
 #include "vmm.h"
+#include "pmtimer.h"
 
 /*
  * ACPI 6.5 §5.2.6 — every System Description Table starts with a header
@@ -344,31 +345,13 @@ acpi_error_t acpi_parse_tables(acpi_rsdp_t* rsdp) {
     g_acpi.pm1a_cnt_blk = fadt->pm1a_control_block;
     g_acpi.pm1b_cnt_blk = fadt->pm1b_control_block;
 
-    /* ACPI 6.5 §4.8.3.3 — Power Management Timer block.
-     *   pm_timer_length == 4 → 24/32-bit I/O port at pm_timer_block.
-     *   FADT.flags bit 8 (TMR_VAL_EXT, 0x100) → 32-bit, else 24-bit.
-     * Prefer X_PM_TIMER_BLOCK GAS when the FADT is long enough and
-     * the GAS is non-zero (ACPI 2.0+); fall back to legacy 32-bit
-     * pm_timer_block I/O port. SystemMemory GAS is rare for PM
-     * Timer; we only consume SystemIO (address_space == 1). */
-    g_acpi.pm_timer_present = false;
-    g_acpi.pm_timer_io      = 0;
-    g_acpi.pm_timer_bits    = 0;
-    if (fadt->pm_timer_length == 4 && fadt->pm_timer_block != 0) {
-        bool use_x = (fadt->header.length >=
-                      offsetof(acpi_fadt_t, x_pm_timer_block) + sizeof(acpi_gas_t)) &&
-                     fadt->x_pm_timer_block.address != 0 &&
-                     fadt->x_pm_timer_block.address_space == 1;  /* SystemIO */
-        uint32_t io_port = use_x ? (uint32_t)fadt->x_pm_timer_block.address
-                                  : fadt->pm_timer_block;
-        g_acpi.pm_timer_io      = io_port;
-        g_acpi.pm_timer_bits    = (fadt->flags & 0x100) ? 32 : 24;
-        g_acpi.pm_timer_present = true;
-        debug_printf("[ACPI] PM Timer: I/O 0x%x, %u-bit, 3.579545 MHz\n",
-                     g_acpi.pm_timer_io, g_acpi.pm_timer_bits);
-    } else {
-        debug_printf("[ACPI] PM Timer not advertised\n");
-    }
+    /* Hand the PM Timer over to the driver that reads it. ACPI holds the
+     * FADT, so this is the one place that can describe the timer — but the
+     * description belongs with the reader, not in g_acpi where it used to
+     * sit half a subsystem away from the only code that consumed it. What
+     * the GAS is allowed to say, and what gets refused rather than
+     * truncated, is pmtimer.c's business now (ACPI 6.5 §4.8.3.3). */
+    pmtimer_adopt_from_fadt(fadt);
 
     debug_printf("[ACPI] FADT rev=%u len=%u PM1a_CNT=0x%x PM1b_CNT=0x%x\n",
                  fadt->header.revision, fadt->header.length,

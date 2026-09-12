@@ -13,6 +13,26 @@ uint64_t cpu_get_tsc_freq_khz(void);
 uint64_t cpu_get_tsc_freq_mhz(void);
 int cpu_tsc_is_calibrated(void);
 
+/* Microseconds → TSC cycles, rounded up, floored at one cycle.
+ *
+ * Returns 0 — and ONLY 0 — when no TSC frequency is known yet, so a caller
+ * building a microsecond deadline can tell "not yet" from a real answer.
+ * Unlike cpu_ms_to_tsc this never falls back to measuring the rate on the
+ * spot: it is meant to be called inside polling loops, where a PIT
+ * busy-wait per call would cost a millisecond per iteration. */
+uint64_t cpu_us_to_tsc(uint64_t us);
+
+/* TSC frequency in kHz from CPUID leaf 0x15 alone — ECX*EBX/EAX with all
+ * three enumerated — or 0 when the leaf does not carry all three values.
+ *
+ * Exact and unmeasured, hence usable as a time ruler before any clock has
+ * been calibrated. Returns 0 rather than substituting a family/model
+ * crystal lookup when ECX is zero (every Skylake / Kaby Lake / Coffee Lake
+ * part): the lookup is a guess about the silicon, fine for seeding a
+ * calibration and not fine for a caller that needs the number to be true.
+ * cpu_calibrate_tsc still applies the lookup for its own purposes. */
+uint64_t cpu_tsc_architectural_khz(void);
+
 /* ----------------------------------------------------------------
  * Periodic TSC recalibration.
  *
