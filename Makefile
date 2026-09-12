@@ -791,7 +791,32 @@ $(SHELL_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
 	@echo "Shell binary: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
 
 # Build apps (proca, procb, today, memtest)
-$(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a
+#
+# ONE recipe, ONE target — and that is the whole point. GNU make reads
+# "a b c: deps" followed by a recipe as "run this recipe FOR EACH of a, b, c",
+# so under -j8 it launched this same sub-make up to thirty times at once,
+# against the same intermediate .o / .elf.pass1 / .np.o files. The failures it
+# produced read exactly like failures of the tree — "nameplate: not an ELF
+# file", "undefined reference to `main'", "bytes 446..509 of the boot sector are
+# not empty" — which is the worst kind of defect a build can have: a race that
+# lies about the source. It cost two agents in one session a false hunt each.
+#
+# The grouped-target form (`&:`) says this directly, but it arrived in GNU make
+# 4.3 and this machine's make is 3.81. So the recipe hangs on a single stamp and
+# every binary simply waits for it. The stamp is distrusted whenever any of the
+# binaries it claims to have built is missing, so deleting one by hand heals
+# itself at the next parse instead of silently doing nothing.
+APP_ELFS := $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN)
+
+APPS_STAMP  := $(APPS_DIR)/.apps.stamp
+APPS_INPUTS := $(wildcard $(APPS_DIR)/*.c) $(wildcard $(APPS_DIR)/*.cpp) \
+               $(wildcard $(APPS_DIR)/*.h) $(APPS_DIR)/Makefile
+
+ifneq ($(words $(wildcard $(APP_ELFS))),$(words $(APP_ELFS)))
+$(shell rm -f $(APPS_STAMP))
+endif
+
+$(APPS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(APPS_INPUTS)
 	@echo "Building apps..."
 	@cd $(APPS_DIR) && $(MAKE)
 	@echo "proca.elf: $$(stat -f%z $(PROCA_BIN) 2>/dev/null || stat -c%s $(PROCA_BIN) 2>/dev/null) bytes"
@@ -801,6 +826,10 @@ $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) 
 	@echo "mtest.elf: $$(stat -f%z $(MTEST_BIN) 2>/dev/null || stat -c%s $(MTEST_BIN) 2>/dev/null) bytes"
 	@echo "chain.elf: $$(stat -f%z $(CHAIN_BIN) 2>/dev/null || stat -c%s $(CHAIN_BIN) 2>/dev/null) bytes"
 	@echo "decks.elf: $$(stat -f%z $(DECKS_BIN) 2>/dev/null || stat -c%s $(DECKS_BIN) 2>/dev/null) bytes"
+	@touch $@
+
+$(APP_ELFS): $(APPS_STAMP)
+	@:
 
 # Build display server
 $(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
@@ -813,10 +842,25 @@ $(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
 # that rule, which would leave every other utility with no recipe at all.
 $(UTILS_DIR)/timezone.elf: $(USERSPACE_DIR)/boxcxx/libboxcxx.a
 
-# Build utilities
-$(UTIL_ELFS): $(USERSPACE_DIR)/boxlib/libbox.a
+# Build utilities — same single-recipe rule as the apps above, and the same
+# reason: one sub-make, not one per utility. This is the rule whose parallel
+# copies produced "undefined reference to `main'" in timezone.elf while three
+# other utilities were being linked.
+UTILS_STAMP  := $(UTILS_DIR)/.utils.stamp
+UTILS_INPUTS := $(wildcard $(UTILS_DIR)/*.c) $(wildcard $(UTILS_DIR)/*.cpp) \
+                $(wildcard $(UTILS_DIR)/*.h) $(UTILS_DIR)/Makefile
+
+ifneq ($(words $(wildcard $(UTIL_ELFS))),$(words $(UTIL_ELFS)))
+$(shell rm -f $(UTILS_STAMP))
+endif
+
+$(UTILS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(UTILS_INPUTS)
 	@echo "Building utilities..."
 	@cd $(UTILS_DIR) && $(MAKE)
+	@touch $@
+
+$(UTIL_ELFS): $(UTILS_STAMP)
+	@:
 
 $(SHELL_ELF): $(SHELL_BIN)
 	@echo "Shell ELF: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
@@ -1507,6 +1551,7 @@ clean:
 	@rm -rf $(BUILDDIR)
 	@rm -f $(TAGFS_TOOL)
 	@rm -f tools/nameplate
+	@rm -f $(APPS_STAMP) $(UTILS_STAMP)
 	@rm -f $(TAGBOOT_SO) $(TAGBOOT_OBJ) $(TAGBOOT_JUMP_OBJ)
 	@cd $(USERSPACE_DIR) && $(MAKE) clean
 	@cd $(SHELL_DIR) && $(MAKE) clean

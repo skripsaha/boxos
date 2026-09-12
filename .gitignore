@@ -35,3 +35,7 @@ tools/nameplate
 # Compiler-generated header-dependency files (-MMD). One per object; they are
 # build output, not source, and every clean target removes them.
 *.d
+
+# Build stamps: one recipe per sub-make, not one per binary (see Makefile).
+src/userspace/apps/.apps.stamp
+src/userspace/utils/.utils.stamp
