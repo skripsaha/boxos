@@ -120,12 +120,18 @@ typedef struct __attribute__((packed)) {
     uint16_t block_count;
 } FileExtent;
 
+/* `kept` sits in two of the four bytes this header set aside and never used, so
+ * the block is the same 4096 bytes it always was. It pairs with record_count —
+ * one counts what was ever written here, the other what is still held. Nothing
+ * is retired at build time, so on a fresh image the two are equal, and the
+ * kernel counts the records rather than believing either of them. */
 typedef struct __attribute__((packed)) {
     uint32_t magic;
     uint32_t next_block;
     uint16_t used_bytes;
     uint16_t record_count;
-    uint8_t  reserved[4];
+    uint16_t kept;
+    uint8_t  reserved[2];
     uint8_t  payload[TAGFS_MPOOL_DATA_SIZE];
 } MetaPoolBlock;
 
@@ -608,7 +614,8 @@ static int compute_layout(uint64_t ground_sectors, VolumeShape* out) {
 
 static int write_deed(FILE* disk, uint32_t role, uint64_t vsector,
                       const uint8_t uuid[16], const VolumeShape* shape,
-                      const VolumeBoot* boot, uint32_t mpool_blocks) {
+                      const VolumeBoot* boot, uint32_t mpool_blocks,
+                      uint32_t ftable_blocks, uint32_t registry_blocks) {
     uint8_t block[TAGFS_BLOCK_SIZE];
     memset(block, 0, sizeof(block));
 
@@ -629,10 +636,25 @@ static int write_deed(FILE* disk, uint32_t role, uint64_t vsector,
     layout.state_block          = shape->ledger_block;
     layout.state_blocks         = VOLUME_LEDGER_COPIES;
     layout.tag_registry_block   = shape->data_block + 0;
-    layout.tag_registry_blocks  = 1;
     layout.file_table_block     = shape->data_block + 1;
-    layout.file_table_blocks    = 1;
     layout.metadata_pool_block  = shape->data_block + 2;
+    /* ‼ HOW LONG THESE THREE CHAINS ARE IS STATED AND NOT BELIEVED.
+     *
+     * A Deed is written once and read for the rest of the volume's life, and
+     * all three of these chains lengthen with ordinary use. file_table_blocks
+     * was a hard-coded 1 here, so a volume that grew past 510 files lost every
+     * entry above that on its next mount; metadata_pool_blocks was right the
+     * day it was written and short of the truth ever after, and the kernel
+     * walking only that far severed the rest of the pool on every boot.
+     * tag_registry_blocks was a hard-coded 1 as well and is now the truth at
+     * birth, on the same terms as the other two.
+     *
+     * The kernel walks all three chains to their end and reads none of these
+     * fields. They are still written, truthfully, because the layout stamp is
+     * shared with anything else that reads a volume — and a number that is
+     * right when the volume is born is worth more than a zero. */
+    layout.tag_registry_blocks  = registry_blocks;
+    layout.file_table_blocks    = ftable_blocks;
     layout.metadata_pool_blocks = mpool_blocks;
     layout.block_bitmap_block   = shape->bitmap_block;
     layout.block_bitmap_blocks  = shape->bitmap_blocks;
@@ -707,25 +729,77 @@ static int write_ledger(FILE* disk, const VolumeShape* shape,
  * Build tag registry block
  * ==================================================================== */
 
-static int build_registry_block(TagRegistryBlock* blk) {
-    memset(blk, 0, sizeof(TagRegistryBlock));
-    blk->magic = TAGFS_REGISTRY_MAGIC;
+/* How many bytes one tag takes in a registry block. One expression, used by
+ * the writer below and by the ground estimate, so the two cannot drift. */
+static uint32_t registry_record_size(const TagEntry* t) {
+    uint32_t key_len   = (uint32_t)strlen(t->key);
+    uint32_t value_len = t->value ? (uint32_t)strlen(t->value) : 0;
+    return 2 + 1 + 1 + 2 + key_len + value_len;   /* tag_id, flags, key_len, value_len */
+}
 
+/*
+ * ‼ THE REGISTRY CHAINS, THE SAME WAY THE POOL AND THE TABLE ALREADY DO.
+ *
+ * It used to be one block, and a vocabulary that outgrew it did not chain — it
+ * printed "Tag registry block overflow" and the build stopped. Measured at 416
+ * tags. Every tag id on a volume is defined in this record, so that was a hard
+ * ceiling on how much a BoxOS image is allowed to be ABOUT, discovered by the
+ * build breaking rather than by anything saying so.
+ *
+ * TagRegistryBlock has carried a next_block field the whole time and the kernel
+ * follows it; nothing ever wrote one. The continuation blocks come out of the
+ * same high-water mark the pool's and the table's do, so the bitmap written
+ * later marks them used.
+ */
+static int write_registry_chain(FILE* disk, uint32_t data_start_block,
+                                uint32_t* next_free, uint32_t total_blocks,
+                                uint32_t* out_blocks) {
+    TagRegistryBlock blk;
+    memset(&blk, 0, sizeof(blk));
+    blk.magic = TAGFS_REGISTRY_MAGIC;
+
+    uint32_t here   = 0;   /* data block 0 — where the Deed says the registry begins */
+    uint32_t blocks = 1;
     uint32_t offset = 0;
 
     for (uint32_t i = 0; i < g_tag_count; i++) {
-        uint8_t key_len   = (uint8_t)strlen(g_tags[i].key);
+        uint8_t  key_len   = (uint8_t)strlen(g_tags[i].key);
         uint16_t value_len = g_tags[i].value ? (uint16_t)strlen(g_tags[i].value) : 0;
-        uint8_t flags      = g_tags[i].value ? 1 : 0;
+        uint8_t  flags     = g_tags[i].value ? 1 : 0;
 
-        uint32_t record_size = 2 + 1 + 1 + 2 + key_len + value_len;
-        if (offset + record_size > TAGFS_REGISTRY_DATA_SIZE) {
-            fprintf(stderr, "Tag registry block overflow (%u tags, %u bytes used)\n",
-                    i, offset);
+        uint32_t record_size = registry_record_size(&g_tags[i]);
+
+        /* A record is never split across blocks — the kernel's loader walks a
+         * block's data[] and stops at its end — so one that cannot fit in an
+         * empty block cannot be stored at all, and chaining will not save it. */
+        if (record_size > TAGFS_REGISTRY_DATA_SIZE) {
+            fprintf(stderr, "The tag '%s' needs %u bytes and a registry block "
+                            "holds %u — it cannot be written\n",
+                    g_tags[i].key, record_size, TAGFS_REGISTRY_DATA_SIZE);
             return -1;
         }
 
-        uint8_t* p = blk->data + offset;
+        if (offset + record_size > TAGFS_REGISTRY_DATA_SIZE) {
+            uint32_t next = (*next_free)++;
+            if (next >= total_blocks) {
+                fprintf(stderr, "Not enough blocks for the tag registry chain\n");
+                return -1;
+            }
+
+            blk.next_block = next;
+            if (write_block(disk, data_start_block, here, &blk) != 0) {
+                fprintf(stderr, "Failed to write tag registry block %u\n", here);
+                return -1;
+            }
+
+            here = next;
+            memset(&blk, 0, sizeof(blk));
+            blk.magic = TAGFS_REGISTRY_MAGIC;
+            offset = 0;
+            blocks++;
+        }
+
+        uint8_t* p = blk.data + offset;
 
         /* tag_id (uint16_t) — the kernel RESTORES the tag at this exact id on
          * load (tag_registry.c intern_with_id_unlocked), so the intern order
@@ -745,10 +819,16 @@ static int build_registry_block(TagRegistryBlock* blk) {
         }
 
         offset += record_size;
+        blk.entry_count++;
+        blk.used_bytes = (uint16_t)offset;
     }
 
-    blk->entry_count = (uint16_t)g_tag_count;
-    blk->used_bytes  = (uint16_t)offset;
+    if (write_block(disk, data_start_block, here, &blk) != 0) {
+        fprintf(stderr, "Failed to write tag registry block %u\n", here);
+        return -1;
+    }
+
+    *out_blocks = blocks;
     return 0;
 }
 
@@ -881,6 +961,12 @@ static int say_the_ground(int pair_count, char* argv[], int first) {
     uint64_t data_blocks = 3;   /* registry, file table, metadata pool */
     data_blocks += GROUND_METADATA_SLACK_BLOCKS;
 
+    /* The file table chains too, now that it is allowed to be longer than 510
+     * entries. File ids run 1..pair_count, so the table is pair_count+1 entries
+     * and everything past the first block is ground this has to ask for. */
+    data_blocks += ((uint64_t)pair_count + 1u + TAGFS_FTABLE_PER_BLOCK - 1u)
+                   / TAGFS_FTABLE_PER_BLOCK;
+
     for (int i = 0; i < pair_count; i++) {
         const char* path = argv[first + i * 2];
         FILE* f = fopen(path, "rb");
@@ -893,6 +979,33 @@ static int say_the_ground(int pair_count, char* argv[], int first) {
         fclose(f);
         if (size < 0) size = 0;
         data_blocks += ((uint64_t)size + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE;
+    }
+
+    /* And the registry, now that it chains as well. It is asked for by
+     * interning the very tags the build is about to write, through the same
+     * routines that write them — a second estimate of how big a vocabulary is
+     * would be a second thing to keep true. A record is never split, so a
+     * block is closed as soon as the next record will not fit, and that is
+     * counted here exactly as write_registry_chain counts it. */
+    seed_reserved_tags();
+    for (int i = 0; i < pair_count; i++) {
+        uint16_t* ids   = NULL;
+        uint16_t  count = 0;
+        parse_tags(argv[first + i * 2 + 1], argv[first + i * 2], &ids, &count);
+        free(ids);
+    }
+    {
+        uint64_t reg_blocks = 1;
+        uint32_t offset     = 0;
+        for (uint32_t i = 0; i < g_tag_count; i++) {
+            uint32_t record_size = registry_record_size(&g_tags[i]);
+            if (offset + record_size > TAGFS_REGISTRY_DATA_SIZE) {
+                reg_blocks++;
+                offset = 0;
+            }
+            offset += record_size;
+        }
+        data_blocks += reg_blocks - 1;   /* block 0 is already in the 3 above */
     }
 
     data_blocks += GROUND_WORKING_ROOM_BLOCKS;
@@ -1054,15 +1167,15 @@ int main(int argc, char* argv[]) {
     printf("  Blocks used:   %u / %u (3 reserved + %u data)\n",
            next_block, total_blocks, next_block - 3);
 
-    /* ---- Write tag registry block (block 0) ---- */
+    /* ---- Write tag registry (block 0, chains if needed) ---- */
     printf("\n[create_tagfs] Writing tag registry...\n");
-    TagRegistryBlock reg_blk;
-    if (build_registry_block(&reg_blk) != 0) {
+    uint32_t reg_blocks = 1;
+    if (write_registry_chain(disk, data_start_block, &next_block,
+                             total_blocks, &reg_blocks) != 0) {
         fclose(disk); return 1;
     }
-    if (write_block(disk, data_start_block, 0, &reg_blk) != 0) {
-        fprintf(stderr, "Failed to write registry block\n");
-        fclose(disk); return 1;
+    if (reg_blocks > 1) {
+        printf("  Tag registry: %u tags over %u blocks\n", g_tag_count, reg_blocks);
     }
 
     /* ---- Write file data (blocks 3+) ---- */
@@ -1090,10 +1203,28 @@ int main(int argc, char* argv[]) {
     uint32_t current_mpool_block = 2;  /* first mpool block */
     uint32_t mpool_block_count   = 1;  /* how many mpool blocks total */
 
-    /* Also build file table entries as we go */
-    FileTableBlock ftable;
-    memset(&ftable, 0, sizeof(FileTableBlock));
-    ftable.magic = TAGFS_FILETBL_MAGIC;
+    /*
+     * ‼ THE FILE TABLE IS AS LONG AS THE FILE IDS NEED, AND IT CHAINS.
+     *
+     * This used to be one FileTableBlock — 510 entries — and a file whose id
+     * fell outside it was simply not written into the table, and its entry
+     * count was clamped on the way out. An image built with more than 510 files
+     * shipped with the surplus already unreachable and said nothing about it.
+     *
+     * So the entries are built in one flat array indexed by file id, and laid
+     * onto as many blocks as that takes, linked the same way the metadata pool
+     * links its own. The continuation blocks come out of the same high-water
+     * mark the pool's do, so the bitmap written below marks them used.
+     */
+    uint32_t ftable_entries = file_count > 0
+                            ? (uint32_t)files[file_count - 1].file_id + 1u
+                            : 0u;
+    FileTableEntry* ftable_all = calloc(ftable_entries ? ftable_entries : 1,
+                                        sizeof(FileTableEntry));
+    if (!ftable_all) {
+        fprintf(stderr, "calloc failed for the file table\n");
+        fclose(disk); return 1;
+    }
 
     for (int i = 0; i < file_count; i++) {
         uint8_t record_buf[4096];
@@ -1117,7 +1248,7 @@ int main(int argc, char* argv[]) {
             mpool.next_block = new_mpool_block;
             if (write_block(disk, data_start_block, current_mpool_block, &mpool) != 0) {
                 fprintf(stderr, "Failed to write metadata pool block %u\n", current_mpool_block);
-                fclose(disk); return 1;
+                free(ftable_all); fclose(disk); return 1;
             }
             printf("  Metadata pool: block %u full (%u records, %u bytes), chaining to block %u\n",
                    current_mpool_block, mpool.record_count, mpool.used_bytes, new_mpool_block);
@@ -1134,35 +1265,68 @@ int main(int argc, char* argv[]) {
         memcpy(mpool.payload + mpool.used_bytes, record_buf, record_size);
         mpool.used_bytes += (uint16_t)record_size;
         mpool.record_count++;
+        mpool.kept++;
 
         /* File table: entry at index file_id */
         uint32_t fid = files[i].file_id;
-        if (fid < TAGFS_FTABLE_PER_BLOCK) {
-            ftable.entries[fid].meta_block  = current_mpool_block;
-            ftable.entries[fid].meta_offset = meta_offset;
+        if (fid < ftable_entries) {
+            ftable_all[fid].meta_block  = current_mpool_block;
+            ftable_all[fid].meta_offset = meta_offset;
         }
-    }
-
-    ftable.entry_count = file_count > 0 ? files[file_count - 1].file_id + 1 : 0;
-    if (ftable.entry_count > TAGFS_FTABLE_PER_BLOCK) {
-        ftable.entry_count = TAGFS_FTABLE_PER_BLOCK;
     }
 
     /* Write final (or only) mpool block */
     if (write_block(disk, data_start_block, current_mpool_block, &mpool) != 0) {
         fprintf(stderr, "Failed to write metadata pool block %u\n", current_mpool_block);
-        fclose(disk); return 1;
+        free(ftable_all); fclose(disk); return 1;
     }
     if (mpool_block_count > 1) {
         printf("  Metadata pool: %u blocks total\n", mpool_block_count);
     }
 
-    /* ---- Write file table (block 1) ---- */
+    /* ---- Write file table (block 1, chains if needed) ---- */
     printf("[create_tagfs] Writing file table...\n");
-    if (write_block(disk, data_start_block, 1, &ftable) != 0) {
-        fprintf(stderr, "Failed to write file table block\n");
-        fclose(disk); return 1;
+    uint32_t ftable_blocks =
+        (ftable_entries + TAGFS_FTABLE_PER_BLOCK - 1) / TAGFS_FTABLE_PER_BLOCK;
+    if (ftable_blocks == 0) ftable_blocks = 1;
+
+    {
+        uint32_t here = 1;   /* the first file table block, where the Deed says */
+        for (uint32_t bi = 0; bi < ftable_blocks; bi++) {
+            uint32_t taken = bi * TAGFS_FTABLE_PER_BLOCK;
+            uint32_t count = ftable_entries > taken ? ftable_entries - taken : 0;
+            if (count > TAGFS_FTABLE_PER_BLOCK) count = TAGFS_FTABLE_PER_BLOCK;
+
+            uint32_t next = 0;
+            if (bi + 1 < ftable_blocks) {
+                next = next_block++;
+                if (next >= total_blocks) {
+                    fprintf(stderr, "Not enough blocks for the file table chain\n");
+                    free(ftable_all); fclose(disk); return 1;
+                }
+            }
+
+            FileTableBlock ftable;
+            memset(&ftable, 0, sizeof(FileTableBlock));
+            ftable.magic       = TAGFS_FILETBL_MAGIC;
+            ftable.next_block  = next;
+            ftable.entry_count = count;
+            for (uint32_t i = 0; i < count; i++) {
+                ftable.entries[i] = ftable_all[taken + i];
+            }
+
+            if (write_block(disk, data_start_block, here, &ftable) != 0) {
+                fprintf(stderr, "Failed to write file table block %u\n", here);
+                free(ftable_all); fclose(disk); return 1;
+            }
+            here = next;
+        }
+        if (ftable_blocks > 1) {
+            printf("  File table: %u entries over %u blocks\n",
+                   ftable_entries, ftable_blocks);
+        }
     }
+    free(ftable_all);
 
     /* ---- Write block bitmap ---- */
     printf("[create_tagfs] Writing block bitmap...\n");
@@ -1170,8 +1334,9 @@ int main(int argc, char* argv[]) {
     uint8_t* bitmap = calloc(1, bitmap_buf_size);
     if (!bitmap) { fprintf(stderr, "calloc failed for bitmap\n"); fclose(disk); return 1; }
 
-    /* Mark all used blocks: 0=registry, 1=ftable, 2=mpool, plus any chained mpool blocks
-       and all file data blocks. next_block tracks the high-water mark. */
+    /* Mark all used blocks: 0=registry, 1=ftable, 2=mpool, plus any chained
+       mpool and file table blocks and all file data blocks. next_block tracks
+       the high-water mark. */
     for (uint32_t b = 0; b < next_block && b < total_blocks; b++) {
         bitmap[b / 8] |= (uint8_t)(1u << (b % 8));
     }
@@ -1273,12 +1438,14 @@ int main(int argc, char* argv[]) {
     }
 
     if (write_deed(disk, VOLUME_DEED_ROLE_HEAD, 0,
-                   volume_uuid, &shape, &boot, mpool_block_count) != 0) {
+                   volume_uuid, &shape, &boot, mpool_block_count,
+                   ftable_blocks, reg_blocks) != 0) {
         fprintf(stderr, "Failed to write the Deed\n");
         fclose(disk); return 1;
     }
     if (write_deed(disk, VOLUME_DEED_ROLE_TAIL, shape.tail_sector,
-                   volume_uuid, &shape, &boot, mpool_block_count) != 0) {
+                   volume_uuid, &shape, &boot, mpool_block_count,
+                   ftable_blocks, reg_blocks) != 0) {
         fprintf(stderr, "Failed to write the far copy of the Deed\n");
         fclose(disk); return 1;
     }

@@ -917,6 +917,23 @@ static void volume_take_more_ground(uint8_t seat, uint64_t ground_sectors,
     void *live = DeedPenFind(&pen, VOLUME_STAMP_LAYOUT, &lay_bytes);
     if (!live || lay_bytes < sizeof(VolumeLayout)) { kfree(keep); return; }
 
+    /*
+     * ‼ TWO FIELDS IN HERE ARE COPIED FORWARD AND MEAN NOTHING.
+     *
+     * `file_table_blocks` and `metadata_pool_blocks` are carried out of the
+     * Deed at mount and put back unchanged here, and both chains have been
+     * lengthening underneath them since the volume was made. Nothing reads
+     * either one any more — the mount walks both chains to their end — so what
+     * is re-committed is a stale number, not a wrong decision.
+     *
+     * They are written rather than zeroed because the stamp is shared: an
+     * older kernel reading this Deed finds the fields where it expects them,
+     * and a 1 it once believed is no worse than the 0 it would find instead.
+     * Stating the truth would mean asking the two subsystems how long their
+     * chains are at this instant and committing that into a record whose whole
+     * point is that it does not change — which is the fault this repair
+     * removed, put back in a different field.
+     */
     VolumeLayout grown;
     memcpy(&grown, &g_state.layout, sizeof(grown));
     grown.total_blocks = vol_want;
@@ -2637,14 +2654,30 @@ error_t tagfs_init(void) {
         return mount_refused("its tag registry would not read", ERR_TAGFS_CORRUPTED);
     }
 
+    /*
+     * ‼ ONLY WHERE THEY START IS TAKEN FROM THE DEED. HOW LONG THEY ARE IS NOT.
+     *
+     * Both of these were handed layout.<thing>_blocks as well, and both of
+     * those numbers are written once by mkfs and raised by nothing — while the
+     * chains they describe are lengthened by ordinary use. The pool walked as
+     * far as the old number allowed and stopped inside itself, and the first
+     * write after that overwrote the link to the rest; the file table read its
+     * later blocks off the medium and threw them away above entry 510.
+     *
+     * Both now walk their own chain to its end, the same ruling the free-block
+     * count is already under ("THE FREE COUNT IS DERIVED, NOT REMEMBERED",
+     * below). The fields stay in the Deed's layout stamp so an older reader
+     * still finds everything after them, and nothing in this kernel reads
+     * either one to decide anything.
+     */
     // --- File Table ---
-    if (file_table_init(data_block_of(g_state.layout.file_table_block), g_state.layout.file_table_blocks) != OK) {
+    if (file_table_init(data_block_of(g_state.layout.file_table_block)) != OK) {
         return mount_refused("its file table would not read",
                              ERR_FILE_TABLE_CORRUPT);
     }
 
     // --- Metadata Pool ---
-    if (meta_pool_init(data_block_of(g_state.layout.metadata_pool_block), g_state.layout.metadata_pool_blocks) != OK) {
+    if (meta_pool_init(data_block_of(g_state.layout.metadata_pool_block)) != OK) {
         return mount_refused("its metadata pool would not read",
                              ERR_METADATA_POOL_FULL);
     }
@@ -2743,6 +2776,26 @@ error_t tagfs_init(void) {
 
     free_list_build();
 
+    /*
+     * ‼ THE POOL IS READ BEFORE THE FSCK, BECAUSE THE FSCK IS WHAT DECIDES.
+     *
+     * This used to run twenty lines below the fsck, and the order was the
+     * whole defect: the fsck answers a file whose metadata will not read by
+     * deleting its file table entry — the file is gone, permanently, and until
+     * now it was gone SILENTLY, because the only line about it was a
+     * debug_printf that compiles to nothing in a shipped build. Meanwhile the
+     * mirror walks the pool in APPEND ORDER, so the last record it sees for a
+     * file id is the newest one on the medium by construction. It knew where
+     * every file's newest metadata actually was — and it learned it after the
+     * decision to throw the file away had already been made.
+     *
+     * So the pool speaks first, and the fsck below corrects the file table
+     * from it rather than merely reporting the disagreement. That is the same
+     * road the free-block count already takes further down: the number that
+     * can be derived wins over the number that was remembered.
+     */
+    meta_pool_mirror_init(g_state.ledger.next_file_id + 64);
+
     // --- Mount-time fsck: cross-check file extents vs bitmap ---
     {
         uint32_t bitmap_bytes_sz = (g_state.layout.data_blocks + 7) / 8;
@@ -2761,6 +2814,8 @@ error_t tagfs_init(void) {
             uint32_t files_checked = 0;
             uint32_t orphan_blocks = 0;
             uint32_t missing_blocks = 0;
+            uint32_t entries_corrected = 0;
+            uint32_t files_lost = 0;
 
             for (uint32_t fid = 1; fid < g_state.ledger.next_file_id; fid++)
             {
@@ -2768,12 +2823,45 @@ error_t tagfs_init(void) {
                 if (file_table_lookup(fid, &mb, &mo) != 0)
                     continue;
 
+                /* ‼ WHERE THE POOL SAYS THE NEWEST RECORD IS, WINS.
+                 *
+                 * The pool is append-only and the mirror walked it in order,
+                 * so its answer is the newest record for this file that ever
+                 * reached the medium. A table naming somewhere else is a table
+                 * that missed a flush the pool did not — the exact state a
+                 * power cut between the two writes of one metadata update
+                 * leaves. Correcting it here is what turns that from a lost
+                 * file into a file one sync behind. */
+                uint32_t pb, po;
+                if (meta_pool_mirror_where(fid, &pb, &po) == 0 &&
+                    (pb != mb || po != mo))
+                {
+                    kprintf("[TagFS FSCK] file %u is named at block %u+%u and "
+                            "this volume's newest metadata for it is at block "
+                            "%u+%u — the pool is the newer of the two, and the "
+                            "table is corrected to it\n",
+                            fid, mb, mo, pb, po);
+                    file_table_update(fid, pb, po);
+                    mb = pb;
+                    mo = po;
+                    entries_corrected++;
+                }
+
                 TagFSMetadata meta;
                 memset(&meta, 0, sizeof(meta));
                 if (meta_pool_read(mb, mo, &meta) != 0)
                 {
-                    // Orphaned file_table entry — metadata is gone or corrupted.
-                    // Clean up the dangling reference.
+                    /* Nothing readable is left for this file anywhere: the
+                     * table's place will not unpack and the pool has no newer
+                     * one to offer. The entry goes, and with it the file — so
+                     * it is said with kprintf and survives into a shipped
+                     * build. This line was the silence that turned a lost file
+                     * into a mystery. */
+                    kprintf("[TagFS FSCK] file %u is named at block %u+%u and "
+                            "there is no readable metadata there or anywhere "
+                            "else in this volume's pool — the file is gone and "
+                            "its name goes with it\n", fid, mb, mo);
+                    files_lost++;
                     file_table_delete(fid);
                     continue;
                 }
@@ -2860,8 +2948,20 @@ error_t tagfs_init(void) {
 
             if (orphan_blocks > 0 || missing_blocks > 0)
             {
-                debug_printf("[TagFS FSCK] Bitmap mismatch: %u orphan, %u missing — additive repair\n",
-                             orphan_blocks, missing_blocks);
+                /* ‼ SAID ALOUD, not to the debug channel. An ORPHAN is a
+                 * block the on-disk bitmap calls used which no chain and no
+                 * file extent reaches — and that is precisely the footprint a
+                 * severed metadata-pool tail leaves behind: correctly
+                 * terminated, shorter than it was, with the lost blocks still
+                 * marked used and nothing pointing at them. This line was a
+                 * debug_printf, which compiles to nothing in a shipped build,
+                 * so every past severing happened in silence on exactly the
+                 * machines that matter. The repair is additive — the blocks
+                 * are kept, never reissued over live metadata — but the COUNT
+                 * is the evidence, and a volume that has lost something should
+                 * say so on the boot that finds it. */
+                kprintf("[TagFS FSCK] Bitmap mismatch: %u orphan, %u missing - additive repair\n",
+                        orphan_blocks, missing_blocks);
                 /* Additive repair: union (on_disk OR computed). Never
                  * release a block on-disk says is used — the chain
                  * walk above is best-effort and a subsystem we don't
@@ -2888,6 +2988,15 @@ error_t tagfs_init(void) {
                         used++;
                 }
                 g_state.ledger.free_blocks = g_state.layout.data_blocks - used;
+            }
+
+            /* Said aloud for the same reason the bitmap mismatch is: a
+             * corrected entry and a lost file are both things that happened to
+             * the user's files, and a shipped build has to say so. */
+            if (entries_corrected || files_lost) {
+                kprintf("[TagFS FSCK] %u file table entry(s) corrected from "
+                        "this volume's metadata pool, %u file(s) lost\n",
+                        entries_corrected, files_lost);
             }
 
             debug_printf("[TagFS FSCK] Checked %u files, bitmap %s\n",
@@ -2946,9 +3055,6 @@ error_t tagfs_init(void) {
     // Populate well-known tag bitmasks for O(1) checks
     tagfs_init_well_known_tags();
 
-    // Load mirror cache so future meta reads skip disk
-    meta_pool_mirror_init(g_state.ledger.next_file_id + 64);
-
     g_state.initialized = true;
 
     /*
@@ -2991,6 +3097,21 @@ error_t tagfs_init(void) {
     kprintf("[TagFS] the volume on seat %u is MOUNTED — %llu file(s)\n",
             g_tagfs_seat, (unsigned long long)g_state.ledger.total_files);
 
+    /*
+     * ‼ AND WHAT THAT MOUNT PROMISES, SAID ONCE, IN PLAIN WORDS.
+     *
+     * Write-through on every metadata edit was measured and rejected: 3.25x the
+     * bytes and 6x the commands per write, all landing on the same three
+     * blocks — the worst pattern there is for the flash this machine boots
+     * from. So the promise is the one the system can actually keep, and a
+     * promise nobody is told is not a promise. It is said here rather than in
+     * a document because the document is not on the screen when the power
+     * goes.
+     */
+    kprintf("[TagFS] what this volume promises: a file's content reaches the "
+            "medium as it is written; its name, the table, the bitmap and the "
+            "ledger are made durable by `anchor` and by an orderly shutdown\n");
+
     TagFSHoldGroundOpenFile();      /* nothing at all unless HOLDGROUND=on */
     return 0;
 }
@@ -3012,8 +3133,25 @@ void tagfs_sync(void)
 static void tagfs_sync_inside(void)
 {
     tag_registry_flush(g_state.registry);
-    file_table_flush();
+
+    /*
+     * ‼ THE RECORD, THEN THE NAME, THEN THE PLACE OF THE RECORD IT REPLACED.
+     *
+     * These were the other way up: the file table went first and published an
+     * entry naming a record at a byte offset the medium's copy of the pool
+     * block had not reached yet. A crash there left a name pointing into the
+     * middle of nothing. A record must exist on the medium before anything
+     * names it.
+     *
+     * The retires come last, after the name is down, because a retire destroys
+     * the only copy of a file's OLD metadata — and until the replacement is
+     * named on the medium, the old copy is the only metadata that file has.
+     * See the note over MetaPoolRetire.
+     */
     meta_pool_flush();
+    file_table_flush();
+    meta_pool_flush_retires();
+
     IntegrityFlush();
     IntegrityDrainReports();   // publish any pending bit-rot Touch events
 
@@ -3538,8 +3676,11 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
     return 0;
 }
 
-// Forward declaration
-static void tagfs_free_blocks_internal(uint32_t start_block, uint32_t count);
+// Forward declaration. Not static: the metadata pool hands a block back when
+// the last record in it is retired, and it is already holding g_state.lock
+// when it does — the same reason tagfs_alloc_blocks_internal is reachable from
+// there.
+void tagfs_free_blocks_internal(uint32_t start_block, uint32_t count);
 
 // ----------------------------------------------------------------------------
 // tagfs_delete_file
@@ -5039,7 +5180,7 @@ static void free_run_locked(uint32_t start_block, uint32_t count)
 // Lock order is g_state.lock -> dedup lock, established here and observed
 // everywhere; TagFS_DedupAllocBlock keeps its allocation outside the dedup lock
 // so the cycle cannot close from the other side.
-static void tagfs_free_blocks_internal(uint32_t start_block, uint32_t count)
+void tagfs_free_blocks_internal(uint32_t start_block, uint32_t count)
 {
     if (count == 0)
         return;
@@ -5421,41 +5562,68 @@ static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
         return -1;
     }
 
-    // Free old fragmented blocks
-    for (uint16_t i = 0; i < meta.extent_count; i++)
-    {
-        for (uint16_t b = 0; b < meta.extents[i].block_count; b++)
-        {
-            bitmap_clear_bit(g_state.block_bitmap.bitmap,
-                             meta.extents[i].start_block + b);
-        }
-        g_state.ledger.free_blocks += meta.extents[i].block_count;
-    }
+    /*
+     * ‼ WRITE, NAME, RETIRE, AND ONLY THEN RELEASE THE OLD GROUND.
+     *
+     * All four of these were in the wrong order, and each one made the next
+     * worse. The old blocks went back to the bitmap first; then the old record
+     * was retired; then the new record was written and its failure THROWN AWAY
+     * — so a refused sector left the file table naming a retired record whose
+     * extents had already been handed to the allocator, with no crash needed
+     * at all. Every other path in this file writes the record, names it, and
+     * retires the one it replaced; this one is now the same, and the ground
+     * the file is moving off is the last thing let go.
+     *
+     * The old extents are held here rather than overwritten in place, because
+     * a failure has to be able to leave the file exactly where it was.
+     */
+    FileExtent* old_extents   = meta.extents;
+    uint16_t    old_extent_ct = meta.extent_count;
 
-    if (meta.extents)
-        kfree(meta.extents);
-
-    // Create new single extent
     meta.extents = kmalloc(sizeof(FileExtent));
     if (!meta.extents)
     {
+        meta.extents      = old_extents;
+        meta.extent_count = old_extent_ct;
         tagfs_metadata_free(&meta);
         spin_unlock(&g_state.lock);
+        tagfs_free_blocks(new_start, total_blocks);
         return -1;
     }
-    
+
     meta.extents[0].start_block = new_start;
     meta.extents[0].block_count = (uint16_t)total_blocks;
     meta.extent_count = 1;
     meta.modified_time = rtc_get_unix64();
 
-    // Update metadata pool
-    meta_pool_delete(meta_block, meta_offset);
     uint32_t new_mb, new_mo;
-    if (meta_pool_write(&meta, &new_mb, &new_mo) == 0)
+    if (meta_pool_write(&meta, &new_mb, &new_mo) != 0)
     {
-        file_table_update(file_id, new_mb, new_mo);
+        kprintf("[TagFS] file %u was copied to block %u to be defragmented "
+                "and this volume would not take the metadata naming it there "
+                "— the file is left exactly where it was, and the copy's "
+                "ground goes back\n", file_id, new_start);
+        kfree(old_extents);
+        tagfs_metadata_free(&meta);
+        spin_unlock(&g_state.lock);
+        tagfs_free_blocks(new_start, total_blocks);
+        return -1;
     }
+
+    file_table_update(file_id, new_mb, new_mo);
+    meta_pool_delete(meta_block, meta_offset);
+
+    // The file is named at its new ground now, so the old ground is nobody's.
+    for (uint16_t i = 0; i < old_extent_ct; i++)
+    {
+        for (uint16_t b = 0; b < old_extents[i].block_count; b++)
+        {
+            bitmap_clear_bit(g_state.block_bitmap.bitmap,
+                             old_extents[i].start_block + b);
+        }
+        g_state.ledger.free_blocks += old_extents[i].block_count;
+    }
+    kfree(old_extents);
 
     tagfs_metadata_free(&meta);
     spin_unlock(&g_state.lock);

@@ -2,6 +2,46 @@
 
 static bool g_registry_dirty = false;
 
+/*
+ * ‼ THE BLOCKS THIS REGISTRY IS WRITTEN INTO ARE THE ONES IT ALREADY OWNS.
+ *
+ * The flush used to call tagfs_alloc_blocks for every continuation of every
+ * flush, so a registry longer than one block handed itself a fresh block each
+ * time it was written and left the previous one marked used with nothing
+ * pointing at it — a block gone per sync, for the life of the boot, and the
+ * mount's additive repair keeps every one of them. The file table had exactly
+ * this defect and was cured exactly this way: keep the chain the load walked,
+ * and allocate only when the registry has genuinely outgrown it.
+ *
+ * It mattered the moment mkfs started chaining the registry instead of dying
+ * at 416 tags, because until then no volume was born with a second block.
+ */
+static uint32_t* g_chain     = NULL;
+static uint32_t  g_chain_len = 0;
+static uint32_t  g_chain_cap = 0;
+
+static void chain_release(void) {
+    if (g_chain) kfree(g_chain);
+    g_chain     = NULL;
+    g_chain_len = 0;
+    g_chain_cap = 0;
+}
+
+static int chain_append(uint32_t block) {
+    if (g_chain_len == g_chain_cap) {
+        uint32_t cap = g_chain_cap ? g_chain_cap * 2 : 8;
+        uint32_t* grown = kmalloc(sizeof(uint32_t) * cap);
+        if (!grown) return -1;
+        if (g_chain && g_chain_len)
+            memcpy(grown, g_chain, sizeof(uint32_t) * g_chain_len);
+        if (g_chain) kfree(g_chain);
+        g_chain     = grown;
+        g_chain_cap = cap;
+    }
+    g_chain[g_chain_len++] = block;
+    return 0;
+}
+
 static uint32_t registry_hash(const char* key, const char* value, uint32_t bucket_count) {
     uint32_t hash = 5381;
     while (*key) {
@@ -324,6 +364,8 @@ void tag_registry_destroy(TagRegistry* reg) {
     kfree(reg->key_buckets);
     reg->key_buckets = NULL;
 
+    chain_release();
+
     debug_printf("[TagRegistry] destroyed\n");
 }
 
@@ -418,13 +460,23 @@ int tag_registry_flush(TagRegistry* reg) {
     TagFSState* state = tagfs_get_state();
     if (!state) return -1;
 
-    /* The Deed states this in blocks of the whole volume; what the registry
-     * reads and writes is a block of the data run. tagfs.c owns that
-     * conversion — see data_block_of() there. */
-    uint32_t current_block = state->layout.tag_registry_block -
-                             state->layout.data_block;
-
     spin_lock(&reg->lock);
+
+    /* The chain the load walked. It is empty only if nothing ever loaded this
+     * registry, which a mount does not allow — but the head is the one block
+     * whose place the Deed states, so it can always be recovered. The Deed
+     * states it in blocks of the whole volume; what the registry reads and
+     * writes is a block of the data run. tagfs.c owns that conversion — see
+     * data_block_of() there. */
+    if (g_chain_len == 0 &&
+        chain_append(state->layout.tag_registry_block -
+                     state->layout.data_block) != 0) {
+        spin_unlock(&reg->lock);
+        return -1;
+    }
+
+    uint32_t link          = 0;
+    uint32_t current_block = g_chain[0];
 
     /* Shares the BSS scratch slot with tag_registry_load (both hold
      * reg->lock for their full duration → mutually exclusive). Keeps
@@ -450,10 +502,17 @@ int tag_registry_flush(TagRegistry* reg) {
 
         if (data_offset + record_size > TAGFS_REGISTRY_DATA_SIZE) {
             uint32_t new_block;
-            int alloc_result = tagfs_alloc_blocks(1, &new_block);
-            if (alloc_result != 0) {
-                spin_unlock(&reg->lock);
-                return -1;
+            if (link + 1 < g_chain_len) {
+                new_block = g_chain[link + 1];
+            } else {
+                if (tagfs_alloc_blocks(1, &new_block) != 0) {
+                    spin_unlock(&reg->lock);
+                    return -1;
+                }
+                if (chain_append(new_block) != 0) {
+                    spin_unlock(&reg->lock);
+                    return -1;
+                }
             }
 
             blkp->next_block = new_block;
@@ -463,6 +522,7 @@ int tag_registry_flush(TagRegistry* reg) {
                 return -1;
             }
 
+            link++;
             current_block = new_block;
             memset(blkp, 0, sizeof(*blkp));
             blkp->magic      = TAGFS_REGISTRY_MAGIC;
@@ -508,12 +568,52 @@ int tag_registry_flush(TagRegistry* reg) {
 int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
     if (!reg) return -1;
 
+    /*
+     * ‼ THE ONLY BOUND ON THIS WALK IS A TERMINATION PROOF, NOT A LENGTH.
+     *
+     * The same rule the metadata pool and the file table are already under. A
+     * chain of distinct blocks cannot be longer than the data run it lives in,
+     * so a walk that takes that many hops has come back to a block it has
+     * already been to: the hop count proves termination AND catches the cycle,
+     * and no visited-set can refuse one hop sooner.
+     *
+     * It had neither bound. A next_block pointing outside the volume was
+     * followed off the end of it — nothing under tagfs_read_block bounds a
+     * block number — and a next_block pointing back into the chain span for
+     * ever with reg->lock held, which is a machine that never finishes
+     * mounting rather than one that says what is wrong. Both are reachable on
+     * a volume whose registry block took a bad sector, and both became
+     * reachable in practice the day mkfs started chaining the registry.
+     *
+     * The registry is NOT read out of layout.tag_registry_blocks for the
+     * reason stated over that field in create_tagfs: a number written once
+     * when the volume was made is not a length that ordinary use keeps true.
+     */
+    TagFSState* fs  = tagfs_get_state();
+    uint32_t    run = fs ? fs->layout.data_blocks : 0;
+    if (run == 0) {
+        kprintf("[TagRegistry] this volume states a data run of no blocks at "
+                "all, so there is nowhere for a tag registry to be — it is not "
+                "mounted\n");
+        return -1;
+    }
+
     spin_lock(&reg->lock);
+    chain_release();
 
     uint32_t block_num = first_block;
+    uint32_t hops      = 0;
 
     /* Read at least the first block (block 0 is valid in our layout) */
     while (1) {
+        if (block_num >= run) {
+            kprintf("[TagRegistry] the chain points at block %u and this "
+                    "volume's data run is %u blocks — that is outside the "
+                    "volume, so it is not mounted\n", block_num, run);
+            spin_unlock(&reg->lock);
+            return -1;
+        }
+
         TagRegistryBlock *blkp = &g_tag_registry_load_blk;
         int read_result = tagfs_read_block(block_num, blkp);
         if (read_result != 0) {
@@ -522,6 +622,17 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
         }
 
         if (blkp->magic != TAGFS_REGISTRY_MAGIC) {
+            spin_unlock(&reg->lock);
+            return -1;
+        }
+
+        /* Kept so a flush writes back into the blocks this registry already
+         * owns instead of taking a fresh one for every continuation. */
+        if (chain_append(block_num) != 0) {
+            kprintf("[TagRegistry] there is no memory to hold this volume's "
+                    "tag registry chain at %u blocks — it is not mounted\n",
+                    g_chain_len + 1);
+            chain_release();
             spin_unlock(&reg->lock);
             return -1;
         }
@@ -573,8 +684,16 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
             offset += record_size;
         }
 
+        if (blkp->next_block == 0) break;  /* end of chain */
+
+        if (++hops >= run) {
+            kprintf("[TagRegistry] this volume's tag registry chain has taken "
+                    "%u hops in a data run of %u blocks, so it is going round "
+                    "in a circle — it is not mounted\n", hops, run);
+            spin_unlock(&reg->lock);
+            return -1;
+        }
         block_num = blkp->next_block;
-        if (block_num == 0) break;  /* end of chain */
     }
 
     spin_unlock(&reg->lock);

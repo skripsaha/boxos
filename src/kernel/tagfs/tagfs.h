@@ -110,19 +110,37 @@ typedef struct __packed {
 
 STATIC_ASSERT(sizeof(FileTableBlock) == 4096, "FileTableBlock must be 4096 bytes");
 
-// Header: 4+4+2+2+4 = 16 bytes. payload[4080] = 4096 total.
+// Header: 4+4+2+2+2+2 = 16 bytes. payload[4080] = 4096 total.
 // Records are packed variable-length in payload[]:
 //   uint16_t record_len | uint32_t file_id | uint32_t flags
 //   uint64_t size | uint64_t created_time | uint64_t modified_time
 //   uint16_t tag_count | uint16_t extent_count | uint16_t name_len
 //   uint16_t tag_ids[tag_count] | FileExtent extents[extent_count]
 //   char filename[name_len]
+//
+// `record_count` counts every record ever appended here; `kept` counts the ones
+// still held by a file. The two words are a pair on purpose — one is what was
+// ever written here, the other is what is still held — and Keep is already this
+// project's word for it (Chit: Give / Due / Keep). A record is retired by
+// zeroing its file_id in place — the pool never moves bytes, because a file
+// table entry is a byte offset into this block and moving a record would strand
+// it — so the two numbers drift apart as files are deleted, and a block whose
+// kept count falls to zero is 4080 bytes of nothing that can be handed back to
+// the bitmap.
+//
+// It sits in two of the four bytes this header set aside and kept for nothing,
+// so the block is the same 4096 bytes it always was and mkfs, the kernel and
+// tools/volume-read.py all still find the payload at byte 16. The count is
+// never believed on its own: the mount walk scans the records and uses what it
+// counts, exactly as the free-block count is derived from the bitmap rather
+// than remembered. An old volume carries zero here and is not harmed by it.
 typedef struct __packed {
     uint32_t magic;
     uint32_t next_block;
     uint16_t used_bytes;
     uint16_t record_count;
-    uint8_t  reserved[4];
+    uint16_t kept;
+    uint8_t  reserved[2];
     uint8_t  payload[TAGFS_MPOOL_DATA_SIZE];
 } MetaPoolBlock;
 
@@ -373,7 +391,7 @@ int             tag_bitmap_tag_count_for_file(TagBitmapIndex* idx, uint32_t file
 // File Table API
 // ----------------------------------------------------------------------------
 
-int  file_table_init(uint32_t first_block, uint32_t block_count);
+int  file_table_init(uint32_t first_block);
 void file_table_shutdown(bool write_back);
 int  file_table_lookup(uint32_t file_id, uint32_t* out_block, uint32_t* out_offset);
 int  file_table_update(uint32_t file_id, uint32_t meta_block, uint32_t meta_offset);
@@ -384,7 +402,7 @@ int  file_table_flush(void);
 // Metadata Pool API
 // ----------------------------------------------------------------------------
 
-int      meta_pool_init(uint32_t first_block, uint32_t block_count);
+int      meta_pool_init(uint32_t first_block);
 void     meta_pool_shutdown(bool write_back);
 int      meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out);
 int      meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* out_offset);

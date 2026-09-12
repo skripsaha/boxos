@@ -3,7 +3,13 @@
 
 #include "../tagfs.h"
 
-int  file_table_init(uint32_t first_block, uint32_t block_count);
+/* Take up the table that starts at `first_block`.
+ *
+ * There is no length parameter and there is not going to be one. The Deed used
+ * to state file_table_blocks, mkfs wrote a 1 into it and nothing has ever
+ * raised it, so the table came up 510 entries long on every volume regardless
+ * of how many files were on it. The length is counted off the chain instead. */
+int  file_table_init(uint32_t first_block);
 
 /*
  * Let the table go.
