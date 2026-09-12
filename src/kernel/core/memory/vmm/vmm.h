@@ -29,10 +29,19 @@
 #define VMM_KERNEL_MMIO_BASE    0xFFFF800040000000ULL  // starts after 1GB heap
 #define VMM_KERNEL_MMIO_SIZE    (3ULL << 30)           // 3GB MMIO region
 
-// Pull Map: all physical RAM mapped at fixed offset in kernel higher-half.
-// Replaces identity mapping. Immutable after boot, uses Global pages.
+// Pull Map: every physical address the memory map names, mapped at a fixed
+// offset in the kernel higher-half. Replaces identity mapping. Immutable
+// after boot, uses Global pages.
+//
+// Not "all physical RAM": device memory is in it too, because the kernel
+// reaches VGA text memory, the AP trampoline page and firmware tables
+// through vmm_phys_to_virt and a hole here is a silent fault there. What
+// distinguishes the two is the TYPE of the leaf, not its presence — RAM is
+// write-back, everything else is uncacheable. See vmm_init.
 #define PULL_MAP_BASE           0xFFFF880000000000ULL
 #define PULL_MAP_PML4_INDEX     272   // (PULL_MAP_BASE >> 39) & 0x1FF
+// One PML4 slot, so 512 GiB of physical space is the whole reach.
+#define PULL_MAP_SPAN           (512ULL << 30)
 
 // CABIN MEMORY MODEL (Snowball Architecture - Flat Binary, NO ELF)
 // Each process lives in isolated Cabin with fixed virtual layout:
@@ -314,6 +323,14 @@ uint8_t      vmm_pte_pat_index(uint64_t pte_val, bool is_huge_leaf);
 uint8_t      vmm_pat_type_at(uint8_t pat_idx);
 const char  *vmm_pte_cache_type_str(uint64_t pte_val, bool is_huge_leaf);
 uint64_t     vmm_get_pat_msr_value(void);
+
+/* The 4 KiB-leaf flag pair that asks for write-combining, or the pair that
+ * asks for strong uncacheable on a machine whose PAT was never programmed.
+ * Callers OR it into their own permission flags. See vmm.c for why asking
+ * for WC unconditionally is a reserved-bit fault waiting for the one board
+ * that reports no PAT. 4 KiB leaves only: in a PDE or PDPT leaf bit 7 is
+ * the page-size bit, not the PAT selector. */
+uint64_t     vmm_wc_pte_flags(void);
 
 /* Phase 2E — CPU consistency probes (renamed in audit pass — these are
  * PURE CPU MSR probes with no MemTag-specific state). Verify the PAT

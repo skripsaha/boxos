@@ -105,14 +105,22 @@ static inline uint64_t efi_pages_to_bytes(uint64_t pages)
  * memory, which is the safe assumption for something that did not claim to
  * be RAM.
  *
- * WC uses the PAT slot vmm_pat_init programs to write-combining (entry 6 =
- * PAT_bit | PCD); the plain PCD+PWT pair below is PAT index 3, which is
- * strong UC under the default IA32_PAT. */
+ * WC comes from vmm_wc_pte_flags, which hands back the PAT slot vmm_pat_init
+ * programs to write-combining (entry 6 = PAT_bit | PCD) only where the PAT
+ * was actually programmed. On a CPU that reports no PAT, bit 7 of a 4 KiB
+ * entry is a RESERVED bit rather than the PAT selector, and an entry that
+ * carries it faults on first touch — so that call returns the strong-UC pair
+ * instead and says so once. Every mapping here is 4 KiB (vmm_map_pages and
+ * vmm_protect both work a page at a time), which is what makes bit 7 the PAT
+ * selector rather than the page-size bit.
+ *
+ * The plain PCD+PWT pair below is PAT index 3, which is strong UC under the
+ * programmed IA32_PAT and under the reset-default one alike. */
 static uint64_t efi_rt_cache_flags(uint64_t attribute)
 {
     if (attribute & EFI_MEMORY_WB) return 0;
     if (attribute & EFI_MEMORY_WT) return VMM_FLAG_WRITE_THROUGH;
-    if (attribute & EFI_MEMORY_WC) return VMM_FLAG_PAT_BIT | VMM_FLAG_CACHE_DISABLE;
+    if (attribute & EFI_MEMORY_WC) return vmm_wc_pte_flags();
     return VMM_FLAG_CACHE_DISABLE | VMM_FLAG_WRITE_THROUGH;   /* UC */
 }
 
@@ -338,6 +346,44 @@ static EfiMemoryDescriptor *efi_find_descriptor(uint8_t *map, uint32_t map_size,
     return NULL;
 }
 
+/* The address this kernel may read a firmware structure at, WITHOUT putting a
+ * second view on its page.
+ *
+ * Every EFI_MEMORY_RUNTIME region is mapped twice and permanently by
+ * efi_map_rt_descriptor above — WRITE-BACK at VA==PA, and WRITE-BACK again at
+ * EFI_RT_VA_BASE+phys — and neither mapping is ever taken down (the identity
+ * one is kept deliberately as the safety net its comment describes). The Pull
+ * Map covers those very same pages as UNCACHED device memory, because the
+ * loader hands runtime regions to the kernel as E820 reserved and vmm.c reads
+ * a non-usable span as a device window. So reaching a firmware table through
+ * vmm_phys_to_virt builds a THIRD view, with a different memory type, over
+ * memory the firmware itself is still writing — the mixed-type alias the SDM
+ * leaves undefined, on exactly the pages least able to afford it.
+ *
+ * The physical address is the answer. It needs no new mapping, and before
+ * SetVirtualAddressMap it is also the more correct pointer on the firmware's
+ * own terms: until that call, UEFI 2.10 §8.4 leaves firmware entitled to have
+ * its pointers read as physical.
+ *
+ * A structure that is NOT in a runtime region this kernel mapped has no VA==PA
+ * window at all, and there the Pull Map is the ONLY view — one view, so no
+ * alias, and the answer stays exactly what it has always been. That covers the
+ * descriptor typed as IO-port space (efi_rt_map_flags returns 0 and no page
+ * was ever made) and a firmware that published a table out of ordinary memory.
+ * Guessing wrong in that direction would be a page fault, so it is decided
+ * from the memory map rather than assumed. */
+static void *efi_firmware_ptr(uint8_t *map, uint32_t map_size,
+                              uint32_t desc_size, uint64_t phys)
+{
+    if (map && desc_size && map_size >= desc_size) {
+        EfiMemoryDescriptor *d =
+            efi_find_descriptor(map, map_size, desc_size, phys);
+        if (d && (d->attribute & EFI_MEMORY_RUNTIME) && efi_rt_map_flags(d) != 0)
+            return (void *)(uintptr_t)phys;
+    }
+    return vmm_phys_to_virt((uintptr_t)phys);
+}
+
 /* =========================================================================
  * EFI_MEMORY_ATTRIBUTES_TABLE (UEFI 2.10 §4.6.4)
  *
@@ -399,8 +445,8 @@ static void efi_apply_memory_attributes(vmm_context_t *kctx, uint8_t *map,
         return;
     }
 
-    EfiMemoryAttributesTable *t =
-        (EfiMemoryAttributesTable *)vmm_phys_to_virt((uintptr_t)raw);
+    EfiMemoryAttributesTable *t = (EfiMemoryAttributesTable *)
+        efi_firmware_ptr(map, map_size, desc_size, (uint64_t)(uintptr_t)raw);
     if (!t) return;
 
     /* A descriptor SMALLER than EfiMemoryDescriptor cannot be read at all; a
@@ -644,8 +690,8 @@ bool efi_runtime_init(void)
      * pointer (firmware is currently in flat-physical mode; the call
      * itself is the transition point). After the call returns, firmware
      * uses virtual addresses. */
-    EfiRuntimeServices *rt_phys = (EfiRuntimeServices *)vmm_phys_to_virt(
-        (uintptr_t)bi->efi_rt_services_phys);
+    EfiRuntimeServices *rt_phys = (EfiRuntimeServices *)efi_firmware_ptr(
+        map, bi->efi_mmap_size, desc_size, bi->efi_rt_services_phys);
     if (!rt_phys || !rt_phys->set_virtual_address_map) {
         kprintf("[EFI] RT services table at 0x%lx has no SVAM entry\n",
                 (unsigned long)bi->efi_rt_services_phys);
@@ -1025,8 +1071,16 @@ EfiConfigurationTable *efi_get_configuration_table(uint32_t *out_count)
         return NULL;
     }
 
+    /* Same rule as every other firmware structure: if the table sits in a
+     * runtime region this kernel mapped write-back at VA==PA, read it there
+     * rather than through the Pull Map's uncached view of the same page. */
+    uint8_t *map = (bi->efi_mmap_phys && bi->efi_mmap_size &&
+                    bi->efi_mmap_desc_size)
+                 ? (uint8_t *)vmm_phys_to_virt((uintptr_t)bi->efi_mmap_phys)
+                 : NULL;
     EfiConfigurationTable *ct = (EfiConfigurationTable *)
-        vmm_phys_to_virt((uintptr_t)bi->efi_cfg_table_phys);
+        efi_firmware_ptr(map, bi->efi_mmap_size, bi->efi_mmap_desc_size,
+                         bi->efi_cfg_table_phys);
     if (!ct) return NULL;
 
     if (out_count) *out_count = bi->efi_cfg_table_count;

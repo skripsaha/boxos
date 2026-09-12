@@ -248,6 +248,52 @@ void vmm_pat_init(void)
 }
 
 /*
+ * vmm_wc_pte_flags — the pair of bits that names write-combining in a 4 KiB
+ * leaf, and what to say instead when this machine cannot be asked.
+ *
+ * Bit 7 of a 4 KiB entry is the PAT selector only where CPUID.1:EDX[16]
+ * reports PAT. Everywhere else it is a RESERVED bit, and an entry carrying
+ * a reserved bit faults on the first access of any kind — read, write or
+ * fetch — with RSVD in the #PF error code (Intel SDM Vol 3A §4.5). So the
+ * callers that want WC used to be betting on a CPU feature nobody checked:
+ * vmm_pat_init returns having done nothing when !has_pat, and the two WC
+ * call sites composed bit 7 regardless.
+ *
+ * The proof asked for here is the MSR value vmm_pat_init publishes. It is
+ * non-zero only after the WRMSR that puts write-combining in PA6, so it
+ * answers both halves of the question at once: PAT exists, and entry 6
+ * means WC. Without it the honest answer is PCD|PWT — PAT index 3, which
+ * is strong UC under the programmed PAT and under the x86 reset-default
+ * PAT alike. Slower than write-combining, and a mapping the machine can
+ * actually use.
+ *
+ * This is NOT a repair of an ordering problem; there is none. vmm_pat_init
+ * runs inside vmm_init, and both callers — the GOP framebuffer mapper and
+ * the EFI runtime mapper — run after vmm_init on every boot path. What is
+ * left is the machine, or the hypervisor, that masks PAT away entirely.
+ */
+uint64_t vmm_wc_pte_flags(void)
+{
+    if (__atomic_load_n(&g_ia32_pat_value, __ATOMIC_ACQUIRE) != 0) {
+        return VMM_FLAG_CACHE_DISABLE | VMM_FLAG_PAT_BIT;   /* PA6 = WC */
+    }
+
+    /* kprintf, not debug_printf: a build that ships compiles debug_printf
+     * into nothing, and a silent demotion from write-combining to strong
+     * uncacheable is exactly the kind of thing an operator reports as "the
+     * screen got slow" with no way to learn why. Said once — the EFI
+     * runtime mapper asks per descriptor. */
+    static bool said_no_pat = false;
+    if (!__atomic_exchange_n(&said_no_pat, true, __ATOMIC_RELAXED)) {
+        kprintf("[VMM] this machine reports no PAT — write-combining mappings "
+                "fall back to strong uncacheable (PCD|PWT = PAT entry 3). "
+                "Bit 7 of a 4 KiB entry is a reserved bit without PAT, and an "
+                "entry carrying it faults on first touch.\n");
+    }
+    return VMM_FLAG_CACHE_DISABLE | VMM_FLAG_WRITE_THROUGH;  /* PA3 = UC */
+}
+
+/*
  * vmm_pte_pat_index — extract the 3-bit PAT selector from a leaf PTE.
  *
  * 4 KiB leaf (level 1): selectors are PWT (bit 3), PCD (bit 4), PAT (bit 7).
@@ -404,16 +450,29 @@ void vmm_dump_mtrr_layout(void) {
                  (int)fix_en, (int)mtrr_en,
                  def_str ? def_str : "RESERVED", (unsigned)def_typ);
 
+    /* The layout above is routine and stays in the debug channel. The two
+     * verdicts below are not routine: they are this kernel saying that the
+     * ground it stands on is not the ground it assumed.
+     *
+     * BoxOS does not program MTRRs — firmware does, and the Pull Map now
+     * marks its own leaves honestly so no device range depends on firmware
+     * to be uncacheable. But the effective type of a page is the MTRR type
+     * combined with the PAT type (Intel SDM Vol 3A §11.12.5), and combining
+     * only ever moves DOWN. A firmware that disables MTRRs, or that leaves
+     * a non-WB default, silently demotes every write-back span this kernel
+     * asked for, and the machine runs correctly at a fraction of its speed
+     * with nothing on the screen to say so. kprintf, because debug_printf
+     * compiles to nothing in the builds that ship. */
     if (!mtrr_en) {
-        debug_printf("[VMM] MTRR audit WARN: MTRRs DISABLED — every "
-                     "range falls back to UC per Intel SDM §11.11.2.1 "
-                     "(MTRR_DEF_TYPE.E=0). Firmware misconfig.\n");
+        kprintf("[VMM] MTRRs are DISABLED (MTRR_DEF_TYPE.E=0) — the whole "
+                "physical space falls back to UC per Intel SDM §11.11.2.1. "
+                "Correct, and as slow as the machine gets.\n");
     }
     if (def_typ != 0x06u && mtrr_en) {
-        debug_printf("[VMM] MTRR audit WARN: DEF_TYPE=%s — non-WB "
-                     "default means PAT cache:wb tags may be silently "
-                     "demoted (Intel SDM §11.12.5 combination table).\n",
-                     def_str ? def_str : "RESERVED");
+        kprintf("[VMM] MTRR default type is %s, not write-back — every span "
+                "no variable MTRR names is demoted below what its page-table "
+                "entry asks for (Intel SDM §11.12.5).\n",
+                def_str ? def_str : "RESERVED");
     }
 
     uint32_t walk_n = vcnt > 8 ? 8 : vcnt;
@@ -2569,9 +2628,12 @@ volatile void *vmm_map_framebuffer(uintptr_t phys_addr, size_t size)
 
     /*
      * WC flag combination: PCD=1 (CACHE_DISABLE), PAT_bit=1, PWT=0 (no WRITE_THROUGH)
-     * → PAT index = (PAT_bit<<2)|(PCD<<1)|PWT = 4|2|0 = 6 = WC (programmed by vmm_pat_init)
+     * → PAT index = (PAT_bit<<2)|(PCD<<1)|PWT = 4|2|0 = 6 = WC (programmed by
+     * vmm_pat_init). vmm_wc_pte_flags hands back that pair only where the PAT
+     * was actually programmed; on a CPU without PAT, bit 7 is reserved and the
+     * pair it returns instead is strong UC.
      */
-    uint64_t wc_flags = VMM_FLAGS_KERNEL_RW | VMM_FLAG_CACHE_DISABLE | VMM_FLAG_PAT_BIT;
+    uint64_t wc_flags = VMM_FLAGS_KERNEL_RW | vmm_wc_pte_flags();
 
     vmm_context_t    *ctx    = vmm_get_kernel_context();
     vmm_map_result_t  result = vmm_map_pages(ctx, virt_base, phys_aligned,
@@ -3092,6 +3154,275 @@ static void vmm_init_maxphyaddr(void)
                  (1ULL << virt_bits) - 1);
 }
 
+/* =========================================================================
+ * Pull Map construction — the map is built FROM the memory map
+ *
+ * The Pull Map used to be laid out from a single number: the top of the
+ * highest usable E820 entry, rounded up to a gigabyte, covered end to end
+ * with write-back leaves. That is one flat run of identical entries across
+ * memory that is not identical at all. On any board with RAM above 4 GiB it
+ * put a write-back window over the PCI hole at 3–4 GiB and over the first
+ * megabyte, which means:
+ *
+ *   • the kernel's own text console writes VGA memory at 0xB8000 through a
+ *     cacheable entry (hw_vga reaches it via vmm_phys_to_virt),
+ *   • every vmm_map_mmio consumer — HPET, xHCI, AHCI, the ACPI operation
+ *     regions, PCI BARs — holds a strong-UC window onto a physical page
+ *     this map simultaneously calls write-back, which Intel SDM Vol 3A
+ *     §11.12.4 names as the one thing a program must not do,
+ *   • and the round-up mapped past the end of what the machine decodes.
+ *
+ * It has not bitten because firmware's MTRRs make the hole uncacheable, and
+ * effective type is MTRR combined with PAT — so the kernel was standing on
+ * a configuration it never programmed and never checked. vmm_dump_mtrr_
+ * layout now says so out loud when the bet fails; this builds the map so
+ * the bet is not needed.
+ *
+ * The rule is one sentence: a span every byte of which is E820 USABLE is
+ * write-back, and everything else is uncacheable. Uncacheable, not absent —
+ * dropping the non-usable leaves would take 0xB8000 out of the address
+ * space and kill the text console on every BIOS boot, and take the AP
+ * trampoline page and the firmware tables with it. A leaf that cannot say
+ * one thing about the whole span it covers is split until it can.
+ *
+ * UC is spelled PCD|PWT, which is PAT entry 3. That entry is strong UC in
+ * the table vmm_pat_init programs AND in the x86 reset-default PAT, which
+ * matters because the Pull Map is installed and first used before
+ * vmm_pat_init runs. The write-back leaves carry no cache bits at all —
+ * PAT entry 0, write-back in both tables.
+ * ========================================================================= */
+
+typedef enum {
+    PULL_SPAN_RAM,      /* every byte of the span is E820 USABLE */
+    PULL_SPAN_DEVICE,   /* no byte of it is */
+    PULL_SPAN_MIXED     /* both, so this leaf is too coarse to tell the truth */
+} PullSpanKind;
+
+/* What the boot line reports: how the map came out, in leaves and tables. */
+typedef struct {
+    size_t gib_leaves;
+    size_t mib_leaves;
+    size_t kib_leaves;
+    size_t device_leaves;
+    size_t tables;
+} PullMapTally;
+
+#define PULL_LEAF_RAM     (VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_GLOBAL)
+#define PULL_LEAF_DEVICE  (PULL_LEAF_RAM | VMM_FLAG_CACHE_DISABLE | VMM_FLAG_WRITE_THROUGH)
+
+/* Classify [start, end) against the memory map.
+ *
+ * Two questions, because overlap is not coverage. First, which kinds of
+ * entry the span meets at all — a span that meets no usable entry is device
+ * memory whatever else it meets, including nothing (an address range the
+ * map never names is a hole, and a hole is not RAM). Second, whether the
+ * usable entries cover the span with no gap: the cursor walks forward, each
+ * step jumping to the far end of whichever usable run contains it, and a
+ * step that cannot move is a cursor standing in a gap.
+ *
+ * A span that meets a non-usable entry is never RAM even if usable entries
+ * appear to cover it. Firmware that publishes a reserved range brushing or
+ * inside a usable one is real — pmm_init carves the same overlaps out of
+ * the buddy — and where the two descriptions disagree the cautious reading
+ * is the one that does not put a cacheable window on a device.
+ *
+ * Terminates: the cursor's next value is always the end of some usable
+ * entry and always strictly greater than the current one, so there are at
+ * most `count` steps before it passes `end` or fails to move. */
+static PullSpanKind pull_span_kind(const e820_entry_t *entries, size_t count,
+                                   uint64_t start, uint64_t end)
+{
+    bool meets_usable = false;
+    bool meets_other  = false;
+
+    for (size_t i = 0; i < count; i++) {
+        uint64_t base = entries[i].base;
+        uint64_t stop = base + entries[i].length;
+        if (entries[i].length == 0 || stop <= base) continue;   /* empty or wrapped */
+        if (start >= stop || base >= end) continue;             /* no overlap */
+        if (entries[i].type == E820_USABLE) meets_usable = true;
+        else                                meets_other  = true;
+    }
+
+    if (!meets_usable) return PULL_SPAN_DEVICE;
+    if (meets_other)   return PULL_SPAN_MIXED;
+
+    uint64_t cursor = start;
+    for (;;) {
+        uint64_t reach = cursor;
+        for (size_t i = 0; i < count; i++) {
+            if (entries[i].type != E820_USABLE || entries[i].length == 0) continue;
+            uint64_t base = entries[i].base;
+            uint64_t stop = base + entries[i].length;
+            if (stop <= base) continue;
+            if (base <= cursor && stop > reach) reach = stop;
+        }
+        if (reach >= end)    return PULL_SPAN_RAM;
+        if (reach == cursor) return PULL_SPAN_MIXED;
+        cursor = reach;
+    }
+}
+
+/* The last physical address the memory map describes, rounded up to a page.
+ * The Pull Map stops here and not a byte later.
+ *
+ * The top of the highest USABLE entry was the wrong bound in both
+ * directions. Rounded up to a gigabyte it named physical addresses nothing
+ * decodes; taken literally it would leave every device range ABOVE the top
+ * of RAM with no window at all, and a driver that hands one of those to
+ * vmm_phys_to_virt gets a fault instead of registers. The top of the WHOLE
+ * map is the honest bound: everything the firmware named, and nothing else.
+ *
+ * pmm_get_total_memory() is folded in as a floor rather than trusted as the
+ * answer — the buddy zone is derived from the same usable entries, so it
+ * can only ever be lower, but a map this kernel reads differently from the
+ * way the PMM read it must not end up smaller than the memory the PMM is
+ * prepared to hand out. */
+static uint64_t pull_map_top(const e820_entry_t *entries, size_t count)
+{
+    uint64_t cpu_limit = (vmm_maxphyaddr >= 64)
+                       ? ~0ULL
+                       : (1ULL << vmm_maxphyaddr);
+
+    uint64_t top = 0;
+    for (size_t i = 0; i < count; i++) {
+        uint64_t base = entries[i].base;
+        uint64_t stop = base + entries[i].length;
+        if (entries[i].length == 0 || stop <= base) continue;
+        if (stop > top) top = stop;
+    }
+
+    uint64_t ram_top = pmm_get_total_memory();
+    if (ram_top > top) top = ram_top;
+
+    /* Clamp before rounding, never after: both clamps land on page-aligned
+     * values, so the round-up that follows cannot push past either of them
+     * and cannot wrap. */
+    if (top > cpu_limit) top = cpu_limit;
+
+    if (top > PULL_MAP_SPAN) {
+        /* One PML4 slot is the whole reach, and physical memory past it has
+         * no Pull Map address. Said out loud because a machine this large
+         * would otherwise lose the top of itself in silence. */
+        kprintf("[VMM] the memory map reaches 0x%lx, past the Pull Map's one "
+                "PML4 slot (512 GiB) — physical space above that has no "
+                "kernel window\n", (unsigned long)top);
+        top = PULL_MAP_SPAN;
+    }
+
+    return (top + VMM_PAGE_SIZE - 1) & ~((uint64_t)VMM_PAGE_SIZE - 1);
+}
+
+/* Build the Pull Map's PDPT and everything under it. Returns the PDPT's
+ * physical address; the caller installs it at PULL_MAP_PML4_INDEX.
+ *
+ * Three fixed levels, largest leaf first: a 1 GiB leaf where the CPU has
+ * PDPE1GB and the whole gigabyte says one thing, a 2 MiB leaf where the
+ * megabyte-pair does, and 4 KiB leaves for the rest. A span that runs past
+ * `top` is always split, which is what keeps the last leaf from reaching
+ * addresses nothing decodes. At 4 KiB there is nowhere finer to go, so a
+ * page that is part RAM and part something else is treated as device
+ * memory — the reading that cannot corrupt anything.
+ *
+ * The tables come from the PMM, which is up: vmm_init runs after pmm_init,
+ * and every page the buddy can hand out at this point is below 4 GiB
+ * (pmm_init defers the high regions until pmm_activate_pull_map, which runs
+ * later). That matters because g_pull_map_active is still false here, so
+ * vmm_phys_to_virt returns the identity address and the boot identity map
+ * only covers the first 4 GiB.
+ *
+ * Cost: one table per gigabyte and per megabyte-pair that straddles a type
+ * boundary, so it is bounded by the number of boundaries in the map — at
+ * most a few dozen on a real board, and at most a couple of hundred for a
+ * map at the 128-entry ceiling. The 2 MiB fallback already allocated up to
+ * 512 tables unconditionally. */
+static uintptr_t pull_map_build(const e820_entry_t *entries, size_t count,
+                                uint64_t top, bool use_1gib_pages,
+                                PullMapTally *tally)
+{
+    uintptr_t pdpt_phys = vmm_alloc_page_table();
+    if (!pdpt_phys) {
+        panic("Failed to allocate Pull Map PDPT");
+    }
+    page_table_t *pdpt = (page_table_t *)vmm_phys_to_virt(pdpt_phys);
+    tally->tables++;
+
+    for (uint32_t gib = 0; gib < 512; gib++) {
+        uint64_t gib_base = (uint64_t)gib << 30;
+        if (gib_base >= top) break;
+        uint64_t gib_end = gib_base + (1ULL << 30);
+
+        if (use_1gib_pages && gib_end <= top) {
+            PullSpanKind kind = pull_span_kind(entries, count, gib_base, gib_end);
+            if (kind != PULL_SPAN_MIXED) {
+                uint64_t flags = (kind == PULL_SPAN_RAM)
+                               ? PULL_LEAF_RAM : PULL_LEAF_DEVICE;
+                pdpt->entries[gib] = vmm_make_pte(gib_base,
+                                                  flags | VMM_FLAG_LARGE_PAGE);
+                tally->gib_leaves++;
+                if (kind == PULL_SPAN_DEVICE) tally->device_leaves++;
+                continue;
+            }
+        }
+
+        uintptr_t pd_phys = vmm_alloc_page_table();
+        if (!pd_phys) {
+            panic("Failed to allocate Pull Map PD for phys 0x%lx",
+                  (unsigned long)gib_base);
+        }
+        page_table_t *pd = (page_table_t *)vmm_phys_to_virt(pd_phys);
+        tally->tables++;
+
+        for (uint32_t mib = 0; mib < 512; mib++) {
+            uint64_t mib_base = gib_base + ((uint64_t)mib << 21);
+            if (mib_base >= top) break;
+            uint64_t mib_end = mib_base + (1ULL << 21);
+
+            if (mib_end <= top) {
+                PullSpanKind kind = pull_span_kind(entries, count,
+                                                   mib_base, mib_end);
+                if (kind != PULL_SPAN_MIXED) {
+                    uint64_t flags = (kind == PULL_SPAN_RAM)
+                                   ? PULL_LEAF_RAM : PULL_LEAF_DEVICE;
+                    pd->entries[mib] = vmm_make_pte(mib_base,
+                                                    flags | VMM_FLAG_LARGE_PAGE);
+                    tally->mib_leaves++;
+                    if (kind == PULL_SPAN_DEVICE) tally->device_leaves++;
+                    continue;
+                }
+            }
+
+            uintptr_t pt_phys = vmm_alloc_page_table();
+            if (!pt_phys) {
+                panic("Failed to allocate Pull Map PT for phys 0x%lx",
+                      (unsigned long)mib_base);
+            }
+            page_table_t *pt = (page_table_t *)vmm_phys_to_virt(pt_phys);
+            tally->tables++;
+
+            for (uint32_t kib = 0; kib < 512; kib++) {
+                uint64_t page = mib_base + ((uint64_t)kib << 12);
+                if (page >= top) break;
+                PullSpanKind kind = pull_span_kind(entries, count,
+                                                   page, page + VMM_PAGE_SIZE);
+                uint64_t flags = (kind == PULL_SPAN_RAM)
+                               ? PULL_LEAF_RAM : PULL_LEAF_DEVICE;
+                pt->entries[kib] = vmm_make_pte(page, flags);
+                tally->kib_leaves++;
+                if (kind != PULL_SPAN_RAM) tally->device_leaves++;
+            }
+
+            pd->entries[mib] = vmm_make_pte(pt_phys,
+                                            VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE);
+        }
+
+        pdpt->entries[gib] = vmm_make_pte(pd_phys,
+                                          VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE);
+    }
+
+    return pdpt_phys;
+}
+
 void vmm_init(void)
 {
     if (vmm_initialized)
@@ -3192,7 +3523,6 @@ void vmm_init(void)
 
     // Higher-half kernel mapping: map kernel code+data+stack at PML4[511] PDPT[510]
     // using 2MB large pages. No identity mapping — kernel runs at 0xFFFFFFFF80100000+
-    uint64_t total_mem = pmm_get_total_memory();
 
 #define LARGE_PAGE_SIZE (2 * 1024 * 1024)
 #define HIGHER_HALF_BASE 0xFFFFFFFF80000000ULL
@@ -3203,6 +3533,22 @@ void vmm_init(void)
     debug_printf("[VMM] Setting up higher-half kernel mapping at 0x%p (%llu MB)...\n",
                  (void *)HIGHER_HALF_BASE, HIGHER_HALF_MAP_SIZE / (1024 * 1024));
 
+    /* ‼ A KNOWN REMAINING ALIAS, left standing deliberately.
+     *
+     * This is a flat write-back run over the first 64 MiB, and the first
+     * megabyte of that is not RAM: 0xA0000-0xFFFFF is the legacy VGA
+     * aperture, the option ROMs and the BIOS area. The Pull Map built below
+     * gives those same physical pages the uncacheable type the memory map
+     * says they deserve, which leaves this run as a SECOND, write-back name
+     * for them — the alias Intel SDM Vol 3A §11.12.4 names.
+     *
+     * Nothing in the kernel reaches VGA or the ROMs through a higher-half
+     * address; hw_vga goes through vmm_phys_to_virt, which is the Pull Map.
+     * So the alias is unused rather than absent, and the question is open
+     * rather than closed. It stays because this run is what the kernel's own
+     * code, data and boot stack execute from before anything else exists,
+     * and carving holes in it is a change with its own ways of going wrong.
+     * Named here so the next reader does not mistake silence for an answer. */
     for (uintptr_t phys = 0; phys < HIGHER_HALF_MAP_SIZE; phys += LARGE_PAGE_SIZE)
     {
         uintptr_t virt = HIGHER_HALF_BASE + phys;
@@ -3222,67 +3568,38 @@ void vmm_init(void)
     debug_printf("[VMM] Higher-half mapped %zu large pages (%zu MB) at PML4[511]\n",
                  large_pages_mapped, large_pages_mapped * 2);
 
-    // Pull Map: map all physical RAM at PULL_MAP_BASE using 1 GB or 2 MB
-    // pages. 1 GB pages collapse a 1 GiB span to a single PDPT leaf (no
-    // per-2 MiB PD walk, fewer TLB entries) — used whenever the CPU
-    // advertises PDPE1GB (CPUID.80000001H:EDX[26]).
+    // Pull Map: every physical address the memory map names, mapped once at
+    // PULL_MAP_BASE with the type that map gives it — write-back for RAM,
+    // uncacheable for everything else. 1 GiB leaves collapse a whole
+    // gigabyte to a single PDPT entry (no per-2 MiB PD walk, fewer TLB
+    // entries) wherever the CPU advertises PDPE1GB (CPUID.80000001H:EDX[26])
+    // AND the gigabyte is of one kind throughout. See the block comment
+    // above pull_span_kind for why the type matters and what it costs.
+    //
+    // g_pull_map_active is false here, so vmm_phys_to_virt returns identity
+    // — the tables below are reached at their physical addresses, which the
+    // boot identity map still covers.
     bool use_1gb_pages = g_cpu_caps.has_1gb_pages;
 
-    uintptr_t pull_pdpt_phys = vmm_alloc_page_table();
-    if (!pull_pdpt_phys)
+    e820_entry_t *pull_entries     = memory_map_get_entries();
+    size_t        pull_entry_count = memory_map_get_entry_count();
+    if (!pull_entries || pull_entry_count == 0)
     {
-        panic("Failed to allocate Pull Map PDPT");
+        panic("Pull Map: no memory map — nothing can tell RAM from device memory");
     }
-    // g_pull_map_active is false, so vmm_phys_to_virt returns identity — safe to access
-    page_table_t *pull_pdpt = (page_table_t *)vmm_phys_to_virt(pull_pdpt_phys);
 
-    if (use_1gb_pages)
-    {
-        size_t num_1gb = (total_mem + (1ULL << 30) - 1) >> 30;
-        if (num_1gb > 512)
-            num_1gb = 512;
+    uint64_t     pull_top = pull_map_top(pull_entries, pull_entry_count);
+    PullMapTally tally    = {0};
 
-        debug_printf("[VMM] Pull Map: using 1GB pages (%zu entries for %llu MB)\n",
-                     num_1gb, total_mem / (1024 * 1024));
+    uintptr_t pull_pdpt_phys = pull_map_build(pull_entries, pull_entry_count,
+                                              pull_top, use_1gb_pages, &tally);
 
-        for (size_t i = 0; i < num_1gb; i++)
-        {
-            uintptr_t phys = (uintptr_t)i << 30;
-            pull_pdpt->entries[i] = vmm_make_pte(phys,
-                                                 VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_GLOBAL | VMM_FLAG_LARGE_PAGE);
-        }
-    }
-    else
-    {
-        size_t num_1gb_ranges = (total_mem + (1ULL << 30) - 1) >> 30;
-        if (num_1gb_ranges > 512)
-            num_1gb_ranges = 512;
-
-        debug_printf("[VMM] Pull Map: using 2MB pages (no 1GB page support), %zu PD tables\n",
-                     num_1gb_ranges);
-
-        for (size_t i = 0; i < num_1gb_ranges; i++)
-        {
-            uintptr_t pd_phys = vmm_alloc_page_table();
-            if (!pd_phys)
-            {
-                panic("Failed to allocate Pull Map PD");
-            }
-            page_table_t *pd = (page_table_t *)vmm_phys_to_virt(pd_phys);
-
-            for (int j = 0; j < 512; j++)
-            {
-                uintptr_t phys = ((uintptr_t)i << 30) + ((uintptr_t)j << 21);
-                if (phys >= total_mem)
-                    break;
-                pd->entries[j] = vmm_make_pte(phys,
-                                              VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_GLOBAL | VMM_FLAG_LARGE_PAGE);
-            }
-
-            pull_pdpt->entries[i] = vmm_make_pte(pd_phys,
-                                                 VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE);
-        }
-    }
+    debug_printf("[VMM] Pull Map: covers phys 0 - 0x%llx from %zu memory-map "
+                 "entries; leaves 1G=%zu 2M=%zu 4K=%zu of which %zu uncached; "
+                 "%zu page tables\n",
+                 (unsigned long long)pull_top, pull_entry_count,
+                 tally.gib_leaves, tally.mib_leaves, tally.kib_leaves,
+                 tally.device_leaves, tally.tables);
 
     /* Pull Map root install. Under 5-level paging, ctx->pml4 is actually
      * the PML5 root — we must descend through PML5[511] (PA of the kernel
@@ -3460,9 +3777,10 @@ void vmm_init(void)
     debug_printf("[VMM]   Kernel heap:      0x%p - 0x%p (on-demand)\n",
                  (void *)VMM_KERNEL_HEAP_BASE,
                  (void *)(VMM_KERNEL_HEAP_BASE + VMM_KERNEL_HEAP_SIZE));
-    debug_printf("[VMM]   Pull Map:        0x%p - 0x%p (%s pages)\n",
+    debug_printf("[VMM]   Pull Map:        0x%p - 0x%p (%s leaves where the "
+                 "span allows)\n",
                  (void *)PULL_MAP_BASE,
-                 (void *)(PULL_MAP_BASE + total_mem),
+                 (void *)(PULL_MAP_BASE + pull_top),
                  use_1gb_pages ? "1GB" : "2MB");
     debug_printf("[VMM]   User base:        0x%p\n", (void *)VMM_USER_BASE);
     debug_printf("[VMM]   User heap:        0x%p\n", (void *)VMM_USER_HEAP_BASE);
