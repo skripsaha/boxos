@@ -19,13 +19,23 @@
 extern uint32_t g_kb_repeat_delay_ticks;
 extern uint32_t g_kb_repeat_rate_ticks;
 
-/* Modifier/lock fields are touched by three different cores:
- *   - PS/2 IRQ1 (always BSP via IO-APIC) — sets shift/ctrl/alt/caps/num/scroll
- *   - xHCI HID IRQ (any LAPIC) — also sets shift/ctrl/alt
- *   - user thread on any app-core — reads via keyboard_get_state /
+/* Modifier/lock fields are touched from more than one core:
+ *   - PS/2 IRQ1 — sets shift/ctrl/alt/caps/num/scroll
+ *   - the xHCI keyboard path — also sets shift/ctrl/alt
+ *   - a user strand on any App-Core — reads via keyboard_get_state /
  *     line_process_char / hw_kb.modifiers
- * A bitfield byte cannot be safely RMW'd from multiple cores, so each
- * field gets its own _Atomic uint8_t storage. Access via __atomic_*. */
+ * A bitfield byte cannot be safely RMW'd from multiple cores, so each field
+ * gets its own _Atomic uint8_t storage. Access via __atomic_*.
+ *
+ * ‼ WHY THE xHCI PATH IS NOT THE BSP'S, WHICH IS NOT WHAT IT LOOKS LIKE.
+ * This used to say "xHCI HID IRQ (any LAPIC)", and read as a statement about
+ * the INTERRUPT it is false: xhci.c aims MSI-X, MSI and the INTx fallback
+ * alike at g_amp.bsp_lapic_id, like every other device in this kernel. The
+ * reason it is true anyway is the event ring, which is ALSO drained
+ * synchronously by whichever core is waiting on it — eight polling sites do
+ * that — and on a machine whose volume is a USB stick, every block read
+ * drains it, keyboard reports included. So a keyboard report really can be
+ * processed on any core; it just does not arrive there as an interrupt. */
 typedef struct {
     _Atomic uint8_t shift_pressed;
     _Atomic uint8_t ctrl_pressed;

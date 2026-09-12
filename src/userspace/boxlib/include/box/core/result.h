@@ -74,13 +74,23 @@ typedef struct PACKED {
      * that is working from one that is waiting for an answer nobody is going
      * to give — see the kernel's result_ring.h for why it cannot infer it. */
     volatile uint64_t awaiting;
-    uint8_t           _pad_line1[48];   /* fill cacheline 1 */
+    /* Answers the kernel took for this ring but could not fit into it — the
+     * Owed queue's depth, written by the kernel (kring.c) and read-only here.
+     * It shares this cacheline with `tail` deliberately: the UMWAIT waits
+     * below arm UMONITOR on &tail, and a full ring's tail does not move, so
+     * the store that records the debt is what stirs the sleeper. The debt is
+     * settled by this cabin's own next entry into the kernel — the syscall
+     * gate hands it over — so nothing here has to act on the number. */
+    volatile uint64_t owed;
+    uint8_t           _pad_line1[40];   /* fill cacheline 1 */
 } ResultRingHeader;
 
 STATIC_ASSERT(sizeof(ResultRingHeader) == 128,
               "ResultRingHeader must be 128 bytes (two cachelines)");
 STATIC_ASSERT(OFFSETOF(ResultRingHeader, awaiting) == 72,
               "ResultRingHeader.awaiting must sit at offset 72 (kernel agrees)");
+STATIC_ASSERT(OFFSETOF(ResultRingHeader, owed) == 80,
+              "ResultRingHeader.owed must sit at offset 80 (kernel agrees)");
 
 typedef struct PACKED {
     ResultRingHeader hdr;
@@ -146,8 +156,13 @@ void result_drain_orphan_replies(void);
  * kernel manifest round-trip. */
 bool result_pop_touch(Result* out);
 
-// Block until ANY result arrives (no filtering).
-// For IPC servers (display daemon, etc.) that receive both IPC and kernel results.
+// Spin until ANY result arrives (no filtering). For IPC servers (the display
+// daemon and box::message) that receive both IPC and kernel results.
+//
+// It spins on PAUSE and nothing else: no WAITPKG arm, no yield, no park. With
+// timeout_ms == 0 that is an unbounded wait that never re-enters the kernel —
+// deliberate, and the reason is written out over result_wait_ipc_turnin in
+// result.c. The name says "wait" where the body says "spin"; see the same note.
 bool result_wait_any(Result* out, uint32_t timeout_ms);
 
 // Block until an IPC message arrives (or timeout). Event-driven: UMWAIT on the

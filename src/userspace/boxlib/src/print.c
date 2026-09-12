@@ -7,8 +7,8 @@
 #include "box/convert.h"
 #include "box/debug.h"
 #include "box/brook.h"
+#include "box/bay.h"
 #include "box/system.h"
-#include "box/cpu.h"
 #include "box/clock.h"
 #include "box/error.h"
 #include "box/core/notify.h"
@@ -59,6 +59,7 @@ enum {
 
 typedef struct StrandPrintState {
     void      *lane;        /* Brook* — this strand's console lane */
+    uint64_t  *order;       /* the console's order, mapped by THIS strand */
     ConsoleRun run;         /* frame under construction; run.len = fill */
     uint32_t   last_fg;     /* VGA-direct colour cache (resolved pair) */
     uint32_t   last_bg;
@@ -140,16 +141,54 @@ uint32_t io_get_display_pid(void)         { return g_display_pid; }
 static void emit_run(StrandPrintState *ps, const char *bytes, int len,
                      Color fg, Color bg);
 
+/* This STRAND's lane is over: it talks straight to the glass from here on.
+ *
+ * ‼ WHAT THIS USED TO DO AND WHY IT WAS WRONG. It also flipped the CABIN onto
+ * the direct road (io_set_mode(IO_MODE_VGA)), and that is a decision about
+ * everybody taken on one strand's evidence. A sibling with a living lane and
+ * frames already banked in it would, on its very next emit, see IO_MODE_VGA
+ * and write straight to the glass — past the order, past the merge — while the
+ * daemon was still rendering what that same strand had pushed a moment
+ * earlier. One strand's broken lane reordered another strand's output.
+ *
+ * A strand's lane failing says nothing about anyone else's. What DOES say
+ * something about everyone is "there is no display at all", and that fact has
+ * its own name and its own door (g_no_daemon, set where it is learned rather
+ * than guessed at from a symptom). So this is now strictly local: LANE_DEAD
+ * makes lane_ensure return false for this strand forever, which is the whole
+ * of what it needs. A cabin with no daemon still converges — every strand
+ * learns it from its own ask, and the ask is answered at once. */
+/* Is this strand about to write straight to the glass? Two ways it can be:
+ * the whole cabin is on the direct road (no daemon was ever found), or this
+ * one strand's lane is over. Both take the same road and both want the same
+ * thing from the caller — one batch around the whole call, so a colour and
+ * the text it applies to cannot be split by another core's kprintf landing
+ * between two operations that each take the console lock on their own. */
+static bool io_direct(const StrandPrintState *ps)
+{
+    return g_io_mode != IO_MODE_IPC || ps->lane_state == LANE_DEAD;
+}
+
 static void lane_fail(StrandPrintState *ps)
 {
-    /* Honest refusal, not silent swallowing: leave one trace, then keep
-     * the machine talking through direct VGA. Process-wide flip mirrors
-     * the shell's own no-daemon fallback; other strands' pushes fail the
-     * same way and converge here on their next emit. */
     ps->lane_state = LANE_DEAD;
-    kdbg_print("[print] console lane unavailable; direct VGA from here on");
-    io_set_mode(IO_MODE_VGA);
+    /* Everything this strand knew about the kernel's current colour was true
+     * of the DAEMON's road, where the daemon has been setting colours of its
+     * own. On the direct road the first run must state its colour again. */
+    ps->last_set   = false;
+    /* The order was mapped for the lane's sake; with no lane there is nothing
+     * left to number, and holding the claim would pin a page for a strand that
+     * will never read through it again. */
+    if (ps->order) { bay_release(ps->order); ps->order = NULL; }
+    kdbg_print("[print] this strand's console lane is unavailable; it prints "
+               "straight to the glass from here on");
 }
+
+/* Learned, never guessed: the kernel answers a broadcast to "display" with
+ * ERR_ROUTE_NO_SUBSCRIBERS the instant nobody wears the tag. THAT is a fact
+ * about the whole cabin, and it is the only thing that may move the whole
+ * cabin onto the direct road. */
+static bool g_no_daemon;
 
 /* Wait for the daemon's DISP_CMD_LANE reply. Messages that are not the
  * grant are HELD aside and restashed after the wait — restashing inside
@@ -231,7 +270,7 @@ static int daemon_say(const uint8_t *req, uint16_t len)
     }
 }
 
-static bool lane_await_grant(char *tag, size_t tag_cap)
+static bool lane_await_grant(char *tag, size_t tag_cap, bool *no_daemon)
 {
     Result  *held     = NULL;
     uint32_t held_n   = 0;
@@ -254,7 +293,10 @@ static bool lane_await_grant(char *tag, size_t tag_cap)
         if (daemon_say(req, sizeof(req)) < 0) done = true;
     } else {
         int rc = broadcast("display", req, sizeof(req));
-        if (rc < 0 && box_errno_of(rc) == ERR_ROUTE_NO_SUBSCRIBERS) done = true;
+        if (rc < 0 && box_errno_of(rc) == ERR_ROUTE_NO_SUBSCRIBERS) {
+            *no_daemon = true;
+            done = true;
+        }
     }
 
     while (!done) {
@@ -285,7 +327,32 @@ static bool lane_await_grant(char *tag, size_t tag_cap)
             if (held_n == held_cap) {
                 uint32_t cap = held_cap ? held_cap * 2 : 8;
                 Result *grown = (Result *)malloc(cap * sizeof(Result));
-                if (!grown) { result_restash(&r); break; }
+                if (!grown) {
+                    /* ‼ THE HOLD COULD NOT GROW, AND THERE IS NO WAY ROUND IT.
+                     *
+                     * What stood here restashed the message and broke the
+                     * receive loop — and `moved` was already true, so the
+                     * outer loop did NOT turn in, came round, and `receive`
+                     * handed back the very message just restashed. A livelock
+                     * at full speed, burning a core until the daemon died.
+                     * Nor can it be cured by parking instead: the grant sits
+                     * BEHIND this message in the ring, and the stash is
+                     * consulted first, so a strand that stops reading past
+                     * the hold can never reach its own grant. The hold is not
+                     * an optimisation, it is the only way to see past.
+                     *
+                     * So this is an honest refusal. A cabin that cannot find
+                     * room for eight Results has troubles far larger than its
+                     * console, and the caller's answer to no grant is the
+                     * direct road, which needs no memory at all. */
+                    result_restash(&r);
+                    kdbg_print("[print] no room to hold what is not the lane "
+                               "grant; this strand gives up the lane and "
+                               "prints straight to the glass");
+                    for (uint32_t i = 0; i < held_n; i++) result_restash(&held[i]);
+                    if (held) free(held);
+                    return false;
+                }
                 if (held) {
                     memcpy(grown, held, held_n * sizeof(Result));
                     free(held);
@@ -328,13 +395,115 @@ static bool lane_await_grant(char *tag, size_t tag_cap)
     return got;
 }
 
+/* ‼ THE CONSOLE'S ORDER IS A NUMBER EVERY WRITER SHARES, NOT A CLOCK.
+ *
+ * Each frame used to carry cpu_rdtsc, taken on whatever core the writer was
+ * running on, and the daemon merged the lanes by it. Cores agree about that
+ * counter only to within what the boot-time sync left them — per_core.c
+ * tolerates four microseconds, and it drifts after that — while a program
+ * that lists a volume pushes its whole output in less time than that. So two
+ * cabins' stamps were not reliably ordered against each other, and the shell's
+ * next prompt was rendered INSIDE the listing of the command that had just
+ * finished.
+ *
+ * MEASURED on the board: four listings out of twelve cut open at exactly the
+ * same byte, 891 of 4235. The same byte every time is what a FIXED offset
+ * between two cores looks like — a race would have scattered — and it never
+ * happened once in an emulator, where the cores agree exactly.
+ *
+ * ‼ A CLOCK CANNOT BE MADE TO WORK HERE, AND TIGHTENING IT WOULD ONLY MOVE
+ * THE FAILURE. What the console needs is not "when did this happen" but "what
+ * came before what", and that is a question about ORDER. One counter, in a
+ * page every printing cabin maps, incremented with a locked add the instant
+ * before the frame is pushed: two writers on two cores get two numbers in the
+ * order their adds happened, and there is no tolerance and nothing to drift.
+ * A prompt printed after a program has ended took its number after that
+ * program took its last one, so it cannot be put in front of it.
+ *
+ * The tried-and-rejected alternative is worth writing down: draining a dead
+ * writer's lane first. It sounds causal and it is too late — the daemon learns
+ * of a death on its next rotation, and the overtaking happens inside a single
+ * render before that. It was written, measured, and taken out again.
+ *
+ * ‼ THERE IS NO FALLBACK HERE, AND THAT IS THE POINT. An earlier version of
+ * this stamped with cpu_rdtsc when the order could not be mapped, and that is
+ * strictly worse than the defect it replaced: a counter near 1 and a clock
+ * near 2^40 are two DOMAINS of numbers, and a merge that sorts across two
+ * domains orders nothing — every clock-stamped frame sinks to the end of the
+ * console. So the order is not something a writer asks for separately and
+ * might not get. It is GRANTED WITH THE LANE (lane_ensure, below): the daemon
+ * refuses to grant a lane it cannot order, and a writer that cannot map the
+ * order gives the lane back and prints straight to the glass — where it is the
+ * only writer, and one writer needs no order. LANE_OPEN therefore implies the
+ * order is mapped, and console_order_next has no branch to take.
+ *
+ * ‼ AND EACH STRAND MAPS ITS OWN, WHICH IS WHY THIS IS A FIELD AND NOT A
+ * FILE-SCOPE POINTER. It was a file-scope pointer first, and that was a page
+ * which VANISHED from under every sibling the moment the strand that opened it
+ * exited — a fault in the print path of a program whose printing was working
+ * perfectly. A Bay claim used to belong to the STRAND that opened it, while
+ * the mapping it carries lives in the CABIN's address space, shared by every
+ * strand in it. The shape that hides that is the common one (the main strand
+ * prints its banner before it spawns anybody, and outlives them all); the
+ * shape that shows it is a spawned strand printing first and finishing early.
+ *
+ * ‼ THE KERNEL'S RULE HAS SINCE BEEN CHANGED AT THE ROOT — a Bay claim is the
+ * CABIN's now, released only by an explicit bay_release or by the cabin's own
+ * teardown, and a strand exiting unmaps nothing (kernel bay.c, BayCleanupCabin,
+ * called from cabin_destroy). So a shared pointer would be safe today. This
+ * stays per-strand anyway, and deliberately: what the console needs to know is
+ * that LANE_OPEN implies a mapped order, and as a field that is true because
+ * the same strand did both. As a shared pointer it would be true only because
+ * of a rule in another subsystem — the rule that had just been found to be the
+ * other way round. The cost of not depending on it is one Manifest call on a
+ * strand's first print, beside the daemon round trip it is already paying for
+ * the lane, and one page table entry onto a page that is the same physical
+ * page for everyone. */
+
+/* Map the console's order for THIS strand. Called only from lane_ensure, and
+ * a false return costs the caller its lane. */
+static bool console_order_ensure(StrandPrintState *ps)
+{
+    if (ps->order) return true;
+
+    /* BAY_OPEN, never BAY_CREATE: the daemon made it before it granted the
+     * lane this call belongs to, so a missing order means the daemon is not
+     * the one that answered — and a writer must not conjure a second console
+     * order into existence. */
+    ps->order = (uint64_t *)bay_open(CONSOLE_ORDER_TAG, 0, BAY_OPEN);
+    if (!ps->order) {
+        kdbg_print("[print] the console granted a lane but no order; this "
+                   "strand gives the lane back and prints straight to the glass");
+        return false;
+    }
+    return true;
+}
+
+/* The next number in the console's one order. LANE_OPEN is the caller's
+ * proof that it is mapped — see console_order_ensure. */
+static uint64_t console_order_next(StrandPrintState *ps)
+{
+    return __atomic_add_fetch(ps->order, 1u, __ATOMIC_SEQ_CST);
+}
+
 static bool lane_ensure(StrandPrintState *ps)
 {
     if (ps->lane_state == LANE_OPEN) return true;
     if (ps->lane_state == LANE_DEAD) return false;
 
+    /* Learned once: with nobody wearing the display tag there is nothing to
+     * ask, and asking again per strand would only repeat the same answer. */
+    if (g_no_daemon) { lane_fail(ps); return false; }
+
     char tag[64];
-    if (!lane_await_grant(tag, sizeof(tag))) {
+    bool no_daemon = false;
+    if (!lane_await_grant(tag, sizeof(tag), &no_daemon)) {
+        if (no_daemon) {
+            /* This one IS about the whole cabin, and it is a fact rather than
+             * an inference: the kernel says nobody wears the tag. */
+            g_no_daemon = true;
+            io_set_mode(IO_MODE_VGA);
+        }
         lane_fail(ps);
         return false;
     }
@@ -347,6 +516,13 @@ static bool lane_ensure(StrandPrintState *ps)
         lane_fail(ps);
         return false;
     }
+    /* The order comes with the lane or the lane does not come at all. */
+    if (!console_order_ensure(ps)) {
+        brook_release(b);
+        lane_fail(ps);
+        return false;
+    }
+
     ps->lane       = b;
     ps->lane_state = LANE_OPEN;
     /* The lane's tag is also where this strand's keys will be said. */
@@ -409,7 +585,7 @@ static void lane_flush_run(StrandPrintState *ps)
     if (ps->run.len == 0) return;
     ps->run.kind      = CONSOLE_RUN_TEXT;
     ps->run._reserved = 0;
-    ps->run.tsc       = cpu_rdtsc();
+    ps->run.order     = console_order_next(ps);
 
     bool    ok  = lane_push(ps, &ps->run);
     uint8_t len = ps->run.len;
@@ -677,7 +853,7 @@ void print(const char* str)
      * vga_begin/vga_commit composes with an outer caller that may itself be
      * batching (printf, shell renderer). */
     bool we_began = false;
-    if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
+    if (io_direct(ps)) { vga_begin(); we_began = true; }
 
     emit_filtered(ps, str, strlen(str), false);
 
@@ -690,7 +866,7 @@ void print_bytes(const char* data, size_t len)
     StrandPrintState *ps = print_state_self();
 
     bool we_began = false;
-    if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
+    if (io_direct(ps)) { vga_begin(); we_began = true; }
 
     emit_filtered(ps, data, len, false);
 
@@ -704,7 +880,7 @@ void println(const char* str)
     /* The newline goes with the text — same frame on the lane, same
      * operation on the direct path — never as an emit of its own. */
     bool we_began = false;
-    if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
+    if (io_direct(ps)) { vga_begin(); we_began = true; }
 
     if (str) emit_filtered(ps, str, strlen(str), true);
     else     emit_run(ps, "\n", 1, ps->color_fg, ps->color_bg);
@@ -728,7 +904,7 @@ void clear(void)
             f.kind = CONSOLE_RUN_CLEAR;
             f.fg   = COLOR_LIGHT_GRAY;
             f.bg   = COLOR_BLACK;
-            f.tsc  = cpu_rdtsc();
+            f.order = console_order_next(ps);
             if (lane_push(ps, &f)) return;
         }
         /* Daemon died on the way — the fallback below still clears. */
@@ -798,7 +974,7 @@ __attribute__((weak)) int printf(const char *fmt, ...)
     /* See print() for rationale — colored runs in VGA mode coalesce
      * into a single Manifest submit instead of N syscalls. */
     bool we_began = false;
-    if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
+    if (io_direct(ps)) { vga_begin(); we_began = true; }
 
     char buf[PRINTF_BUFLEN];
     int  pos       = 0;
@@ -1096,7 +1272,7 @@ void console_step(int32_t delta)
             memcpy(f.text, &delta, sizeof(delta));
             f.fg   = BoxColorResolveFg(ps->color_fg);
             f.bg   = BoxColorResolveBg(ps->color_bg);
-            f.tsc  = cpu_rdtsc();
+            f.order = console_order_next(ps);
             if (lane_push(ps, &f)) return;
         }
         /* The daemon died on the way — the fallback below still steps. */

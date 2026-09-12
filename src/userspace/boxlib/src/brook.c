@@ -113,7 +113,7 @@ struct Brook {
     uint32_t         frame_count;/* immutable after open, power-of-2 */
     uint32_t         role;       /* BROOK_WRITER or BROOK_READER */
     uint32_t         streaming;  /* BROOK_STREAM was set at open: skip EOF/TERM */
-    uint32_t         self_pid;   /* whose bell to hang — resolved once at open */
+    uint32_t         self_pid;   /* whose bell to hang — the CURRENT holder */
 };
 
 /* ─────────────────────────────────────────────────────────────────────
@@ -282,7 +282,11 @@ static void brook_sleep_until(Brook *b, bool (*recheck)(Brook *))
      * store cannot sit in the store buffer while the look below already runs.
      * The peer's half is fenced by its own cursor publish (a locked exchange),
      * so one of the two always sees the other. */
-    __atomic_store_n(mine, b->self_pid, __ATOMIC_SEQ_CST);
+    /* ACQUIRE on self_pid, not a plain read: after a hand-over this field was
+     * written by a DIFFERENT strand, and the sleeper must hang the pid the
+     * kernel stamped on the seat, never the one the opener left behind. */
+    __atomic_store_n(mine, __atomic_load_n(&b->self_pid, __ATOMIC_ACQUIRE),
+                     __ATOMIC_SEQ_CST);
 
     TurnInMark mark = box_mark();
     if (!recheck(b)) box_turn_in(mark);
@@ -325,6 +329,15 @@ static int brook_sys_release(uint64_t va_header)
     uint8_t params[8];
     memcpy(params, &va_header, sizeof(uint64_t));
     return MfCall1(DECK_SYSTEM, SYSTEM_OP_BROOK_RELEASE,
+                   params, sizeof(params), 0, 0, 0, 0, 0, 0 /* no deadline — reply guaranteed */, 0);
+}
+
+static int brook_sys_hand_over(uint64_t va_header, uint32_t to_pid)
+{
+    uint8_t params[12];
+    memcpy(params,     &va_header, sizeof(uint64_t));
+    memcpy(params + 8, &to_pid,    sizeof(uint32_t));
+    return MfCall1(DECK_SYSTEM, SYSTEM_OP_BROOK_HANDOVER,
                    params, sizeof(params), 0, 0, 0, 0, 0, 0 /* no deadline — reply guaranteed */, 0);
 }
 
@@ -377,10 +390,14 @@ Brook *brook_open(const char *tag, uint32_t frame_size, uint32_t frame_count,
     b->frame_count = out_fc;
     b->role        = role;
     b->streaming   = (flags & BROOK_STREAM) ? 1u : 0u;
-    /* Resolved once, here, and never again: a bell has to name a STRAND, and
-     * the strand that opens a Brook is the one that will sleep on it. Asking
-     * for it on the sleeping path instead would put a lookup between hanging
-     * the bell and the last look, which is the one place nothing may go. */
+    /* Whose bell this handle hangs. Resolved here rather than on the sleeping
+     * path, because a lookup between hanging the bell and the last look is the
+     * one place nothing may go.
+     *
+     * It is no longer resolved ONCE. The old comment here said "the strand
+     * that opens a Brook is the one that will sleep on it", and the seat can
+     * now move: brook_hand_over re-points this field, which is the whole
+     * reason that call exists on this side of the boundary. */
     b->self_pid    = strand_self();
     return b;
 }
@@ -412,17 +429,47 @@ static inline bool brook_cas_freeze_peer(volatile uint32_t *peer_alive)
 int brook_release(Brook *b)
 {
     if (!b) return -ERR_INVALID_ARGS;
-    /* Take the bell in on the way out. A side that leaves with its pid still
-     * hanging leaves its peer a cord to pull for somebody who is not there —
-     * one wasted message per lane, and a stale pid on a page the kernel keeps
-     * for as long as the writer holds it. Nothing depends on this being done;
-     * it is done because leaving it undone is untidy in a way that becomes
-     * confusing evidence later. */
-    if (b->hdr)
+
+    /* Take the bell in on the way out — but only OUR bell. A side that leaves
+     * with its pid still hanging leaves its peer a cord to pull for somebody
+     * who is not there: one wasted message per lane, and a stale pid on a page
+     * the kernel keeps for as long as the writer holds it.
+     *
+     * The `self_pid` test is not tidiness, it is the lost wake. Strands share
+     * this handle, so a strand that is not the holder can reach this line
+     * while the holder is asleep in the stream with its bell out; clearing it
+     * would leave the peer nothing to ring and the sleeper asleep on a frame
+     * that arrived. The kernel refuses that release a moment later anyway —
+     * this just makes sure the refusal costs nothing. */
+    if (b->hdr && b->self_pid == strand_self())
         __atomic_store_n(brook_own_bell(b->hdr, b->role), 0u, __ATOMIC_RELEASE);
+
     int rc = brook_sys_release(b->va_header);
+    /* Nothing was given back, so the handle is still live — and it may still
+     * be the HOLDER's, sitting on another strand's stack. Freeing it on a
+     * refusal is a use-after-free in the one address space both strands run
+     * in. */
+    if (rc != 0) return rc;
+
     free(b);
-    return rc;
+    return 0;
+}
+
+int brook_hand_over(Brook *b, uint32_t to_strand_pid)
+{
+    if (!b || to_strand_pid == 0) return -ERR_INVALID_ARGS;
+
+    int rc = brook_sys_hand_over(b->va_header, to_strand_pid);
+    if (rc != 0) return rc;
+
+    /* The kernel has moved the seat, the role pid and the hung bell's pid
+     * together. This is the fourth stamp and it lives out here, because the
+     * kernel cannot reach into a userspace handle — and it is the one that
+     * decides whose pid the NEXT sleep hangs out. Release, so the receiving
+     * strand's first look at the field is ordered after everything the handing
+     * strand did with the stream. */
+    __atomic_store_n(&b->self_pid, to_strand_pid, __ATOMIC_RELEASE);
+    return 0;
 }
 
 /* ─────────────────────────────────────────────────────────────────────

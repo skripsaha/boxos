@@ -25,6 +25,7 @@
 
 #include "box/print.h"
 #include "box/system.h"            /* exit, proc_info, proc_info_t */
+#include "box/clock.h"             /* clock_uptime_ms — the ClockBoard, no syscall */
 #include "box/sync.h"              /* addr_park, addr_wake */
 #include "box/strand.h"            /* strand_spawn */
 #include "box/cpu.h"               /* cpu_has_fsgsbase */
@@ -34,6 +35,55 @@
 #define ITERS     100000u   /* big enough that the two strands' runs overlap   */
 #define NWORKERS  4u        /* concurrent IPC workers in test2                 */
 #define MCALLS    500u      /* syscalls per worker (routing stress)            */
+
+/* How long ANY join in this file lets the machine stand STILL before it
+ * convicts. Not a budget for the work — any progress restarts it — only for
+ * the absence of any.
+ *
+ * The figure is the one these tests always meant: the caps it replaces were
+ * parks of 200 ms counted out 50 times in test1 and 80 in test2 and test3 —
+ * ten to sixteen seconds of nothing happening. Counted in parks that was a lie
+ * in both directions: a park broken early by a spurious wake spent a turn
+ * without spending the time, so "sixteen seconds" could be gone in
+ * milliseconds on a loaded host, while a machine genuinely stuck spent the
+ * full sixteen anyway. Measured on the ClockBoard it is sixteen real seconds —
+ * the longest of the three, for every one of them, since a join that finishes
+ * is never charged for it. */
+#define CHURN_STILL_MS  16000u
+
+/* ‼ Every budget in this file is ELAPSED TIME, and that is the right shape —
+ * a turn count is not time, and a park broken early by a spurious wake spends
+ * a turn without spending a millisecond. But it buys that correctness with a
+ * dependency the old counts did not have: a count always runs out, a clock
+ * only runs out while it is running. On a machine whose ClockBoard has stopped,
+ * `clock_uptime_ms() - started` is forever zero, no budget can ever expire, and
+ * a loop that should have judged the machine spins on it instead — burning
+ * every core it can reach, which is the one failure a parked strand never has
+ * and Nightwatch therefore cannot convict.
+ *
+ * The witness costs nothing and needs no number. addr_park returns ERR_TIMEOUT
+ * only when it slept to its deadline, and sleeping to a deadline is itself
+ * proof that that much real time passed. A clock that did not move across one
+ * such park is not a slow clock; it is a stopped one. ONE observation settles
+ * it — there is no tally here and none is wanted — and the test then reports
+ * the defect it actually found (the clock) instead of the one it was looking
+ * for (the reaper, the workers), which is the whole difference between a
+ * harness that judges and a harness that hangs. */
+static bool clock_stopped_across(error_t park_rc, uint64_t before)
+{
+    return park_rc == ERR_TIMEOUT && clock_uptime_ms() == before;
+}
+
+#define STRAND_CLOCK_CHECK(which, rc, t0)                                     \
+    do {                                                                      \
+        if (clock_stopped_across((rc), (t0))) {                               \
+            printf("[STRAND] FAIL %s: the machine's clock is not advancing — " \
+                   "a park slept its full deadline and uptime did not move; "  \
+                   "no elapsed-time budget in this test can ever expire\n",    \
+                   (which));                                                  \
+            return -1;                                                        \
+        }                                                                     \
+    } while (0)
 
 /* ---- test1: P4 baseline — spawn + concurrent atomics + park→wake ---------- */
 
@@ -64,15 +114,31 @@ static int test1(void)
     for (uint32_t i = 0; i < ITERS; i++)
         __atomic_fetch_add(&g_counter, 1u, __ATOMIC_RELAXED);
 
-    /* Park until the worker signals done. Bounded retries so a genuine hang
-     * fails loudly (and flushes output) instead of wedging the harness. */
-    uint32_t cycles = 0;
+    /* Park until the worker signals done. The park IS the sleep and is
+     * lost-wake-safe (a store that landed before we parked makes it return
+     * VALUE_MISMATCH without sleeping); what convicts is the CLOCK saying
+     * nothing has moved for CHURN_STILL_MS, not a tally of how many times we
+     * parked.
+     *
+     * The progress being watched is the COUNTER, not the flag. main's own ITERS
+     * are already spent by the time we get here, so every further increment is
+     * the worker's and proves it is running — a worker still grinding through
+     * 100000 adds on a starved core restarts the clock and is never convicted,
+     * while a worker that never ran leaves the counter exactly where main left
+     * it and the silence names it. */
+    uint64_t started = clock_uptime_ms();
+    uint64_t seen    = __atomic_load_n(&g_counter, __ATOMIC_ACQUIRE);
     while (__atomic_load_n(&g_done, __ATOMIC_ACQUIRE) == 0) {
-        if (++cycles > 50u) {
-            printf("[STRAND] FAIL test1: worker never finished (%u cycles)\n", cycles);
+        uint64_t t0 = clock_uptime_ms();
+        error_t  pr = addr_park(&g_done, 0, 200);
+        STRAND_CLOCK_CHECK("test1", pr, t0);
+        uint64_t now = __atomic_load_n(&g_counter, __ATOMIC_ACQUIRE);
+        if (now != seen) { seen = now; started = clock_uptime_ms(); }  /* it moved */
+        else if (clock_uptime_ms() - started >= CHURN_STILL_MS) {
+            printf("[STRAND] FAIL test1: worker never finished (%u ms with no progress)\n",
+                   (unsigned)CHURN_STILL_MS);
             return -1;
         }
-        addr_park(&g_done, 0, 200);
     }
 
     uint64_t total   = __atomic_load_n(&g_counter, __ATOMIC_ACQUIRE);
@@ -138,16 +204,24 @@ static int test2(void)
 
     /* Join: park until every worker has decremented g_remaining. Re-read the
      * live value before each park so a decrement we missed returns
-     * ERR_ADDR_VALUE_MISMATCH immediately (lost-wake-safe). Bounded. */
-    uint32_t cycles = 0;
+     * ERR_ADDR_VALUE_MISMATCH immediately (lost-wake-safe). Each decrement is
+     * a worker finishing its MCALLS, so the count falling IS the progress and
+     * it restarts the clock; only CHURN_STILL_MS in which not one of the four
+     * moved convicts — three workers that finish while the fourth grinds
+     * through a contended ring buy the fourth its full margin again. */
+    uint64_t started = clock_uptime_ms();
     uint64_t cur;
     while ((cur = __atomic_load_n(&g_remaining, __ATOMIC_ACQUIRE)) != 0) {
-        if (++cycles > 80u) {
-            printf("[STRAND] FAIL test2: %u worker(s) stuck after %u cycles\n",
-                   (unsigned)cur, cycles);
+        uint64_t t0 = clock_uptime_ms();
+        error_t  pr = addr_park(&g_remaining, cur, 200);
+        STRAND_CLOCK_CHECK("test2", pr, t0);
+        if (__atomic_load_n(&g_remaining, __ATOMIC_ACQUIRE) != cur)
+            started = clock_uptime_ms();          /* it moved — begin again */
+        else if (clock_uptime_ms() - started >= CHURN_STILL_MS) {
+            printf("[STRAND] FAIL test2: %u worker(s) stuck (%u ms with no progress)\n",
+                   (unsigned)cur, (unsigned)CHURN_STILL_MS);
             return -1;
         }
-        addr_park(&g_remaining, cur, 200);
     }
 
     if (__atomic_load_n(&g_worker_fail, __ATOMIC_ACQUIRE) != 0) {
@@ -178,7 +252,16 @@ static int test2(void)
 
 #define CHURN 100u   /* well below MAX_PROCESSES; proof is "count returns to base" */
 
+/* The park that IS the sleep between two looks at the reaper's work. Nothing in
+ * userspace can be woken by the reaper — it runs in the kernel and publishes no
+ * address — so this word is never woken and the park always runs to its own
+ * length. That is the point: the kernel holds the core for those 200 ms, where
+ * the `yield()` this replaces handed it back in under a microsecond and spent no
+ * time at all. Its length only decides how often we ask, never what we decide. */
+#define REAPER_LOOK_MS  200u
+
 static volatile uint64_t g_churn_remaining;
+static volatile uint64_t g_reaper_sleep;   /* park address only; never woken */
 
 static void noop_worker(void *arg)
 {
@@ -210,13 +293,23 @@ static int test3(void)
             printf("[STRAND] FAIL test3: strand_spawn failed at round %u (table exhausted — reaper not reclaiming)\n", r);
             return -1;
         }
-        uint32_t cycles = 0; uint64_t cur;
+        /* Join on the worker's own decrement. The park is the sleep and is
+         * lost-wake-safe (a decrement we missed returns VALUE_MISMATCH at park
+         * time); what convicts is the CLOCK saying the count has not moved for
+         * CHURN_STILL_MS, not a tally of how many times we parked. */
+        uint64_t started = clock_uptime_ms();
+        uint64_t cur;
         while ((cur = __atomic_load_n(&g_churn_remaining, __ATOMIC_ACQUIRE)) != 0) {
-            if (++cycles > 80u) {
-                printf("[STRAND] FAIL test3: join stuck at round %u\n", r);
+            uint64_t t0 = clock_uptime_ms();
+            error_t  pr = addr_park(&g_churn_remaining, cur, 200);
+            STRAND_CLOCK_CHECK("test3", pr, t0);
+            if (__atomic_load_n(&g_churn_remaining, __ATOMIC_ACQUIRE) != cur)
+                started = clock_uptime_ms();          /* it moved — begin again */
+            else if (clock_uptime_ms() - started >= CHURN_STILL_MS) {
+                printf("[STRAND] FAIL test3: join stuck at round %u (%u ms with no progress)\n",
+                       r, (unsigned)CHURN_STILL_MS);
                 return -1;
             }
-            addr_park(&g_churn_remaining, cur, 200);
         }
     }
 
@@ -224,15 +317,20 @@ static int test3(void)
      * were process_destroy'd by the reaper (process_count-- happens only
      * there). A broken reaper leaves it pinned near base+CHURN. */
     uint32_t cnt = base + CHURN;
-    for (uint32_t cyc = 0; cyc < 120u; cyc++) {
+    if (sysinfo(&si) == 0) cnt = si.process_count;
+    uint32_t best    = cnt;                    /* the lowest count seen so far */
+    uint64_t started = clock_uptime_ms();
+    while (cnt > base + 4u) {
+        if (clock_uptime_ms() - started >= CHURN_STILL_MS) {
+            printf("[STRAND] FAIL test3: process_count stuck at %u (base %u, churned %u) — reaper not reclaiming\n",
+                   cnt, base, CHURN);
+            return -1;
+        }
+        uint64_t t0 = clock_uptime_ms();
+        error_t  pr = addr_park(&g_reaper_sleep, 0, REAPER_LOOK_MS);
+        STRAND_CLOCK_CHECK("test3", pr, t0);
         if (sysinfo(&si) == 0) cnt = si.process_count;
-        if (cnt <= base + 4u) break;
-        for (int k = 0; k < 4; k++) yield();
-    }
-    if (cnt > base + 4u) {
-        printf("[STRAND] FAIL test3: process_count stuck at %u (base %u, churned %u) — reaper not reclaiming\n",
-               cnt, base, CHURN);
-        return -1;
+        if (cnt < best) { best = cnt; started = clock_uptime_ms(); }  /* it fell — begin again */
     }
 
     printf("[STRAND] test3 OK: %u spawn+join churn reclaimed (process_count base %u -> %u)\n",

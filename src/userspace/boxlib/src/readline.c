@@ -249,10 +249,12 @@ static void Recall(EditLine *l, bool older)
  * nobody typed, or, with the right bit set, a phantom arrow that moves the
  * caret. Comparing the tag costs nothing and ends that whole class.
  *
- * The event of another tag is still consumed here, exactly as it was before —
- * that part is touch_await's to fix, and it needs a decision about how a bare
- * claim is supposed to hear its own key:value events. It is written down for
- * that conversation rather than guessed at here. */
+ * That guard has since been made unnecessary at its source: touch_await now
+ * answers only with the tag it was asked for, and an event of another tag goes
+ * to the per-strand stash for its own consumer instead of being consumed here
+ * and thrown away. The compare is kept all the same — it costs one integer and
+ * it is the line that states, where a reader will look, that these bytes are a
+ * key because the tag says so and not because the length allows it. */
 static bool NextKey(TouchTag ear, kb_event_t *out)
 {
     for (;;) {

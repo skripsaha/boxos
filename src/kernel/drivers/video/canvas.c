@@ -296,7 +296,49 @@ static void canvas_commit_locked(CanvasState *c)
 
     /* 5. Present the damage rectangle.  A scroll forces full-text present
      *    (all visible rows changed visually); otherwise present the union
-     *    of per-row damage ranges. */
+     *    of per-row damage ranges.
+     *
+     * ‼ A NAMED DEBT: THIS BLIT RUNS WITH INTERRUPTS OFF, AND ON A SCROLL IT
+     * IS THE WHOLE SCREEN. spin_lock does `cli` and holds it to the unlock
+     * (klib.h says so), so everything from step 1 to here is one uninterrupted
+     * run on whichever core is serving the Manifest. The geometry, which is
+     * arithmetic and not an estimate: at 1920x1080x32 the stride is 7680 and
+     * the text area is 67 rows of FONT_H=16, so one scrolled line presents
+     * 1072 * 7680 = 8,232,960 bytes of movntdq into a write-combining
+     * aperture, preceded by an op_Scroll that rep-movsq's 8,110,080 bytes
+     * inside the shadow. The bootloader keeps whatever mode firmware booted,
+     * up to 3840x2160 — where the same line is 2160 * 15360 = 33,177,600
+     * bytes.
+     *
+     * WHAT IT COSTS, and what it does not. Not input: an IOAPIC edge and an
+     * MSI both latch in the LAPIC IRR and are delivered when IF comes back,
+     * and the USB interrupt-IN endpoint is re-armed only after its report has
+     * been consumed, so a delayed drain makes the device NAK and hold rather
+     * than drop. The cost is latency and a visible stutter.
+     *
+     * ‼ THE OBVIOUS FIX IS UNSOUND AND WAS REJECTED WITH A REASON: releasing
+     * the lock and blitting outside it. The shadow is SINGLE-BUFFERED — one
+     * vmalloc'd buffer that op_DrawCells and op_Scroll write and op_Present
+     * reads — so a peer's commit would rep-movsq the entire shadow underneath
+     * a blit in progress, which is the tearing this lock exists to prevent.
+     * Worse, plan_reset has already run below, so a late blit can push a
+     * STALE frame over a newer one and the screen would go backwards. A CAS
+     * presenter token does not help: it serialises presenters against
+     * presenters and does not exclude WRITERS from the shadow, which is the
+     * invariant the lock actually provides. Presenting one text row at a time
+     * inside the lock moves the same bytes through the same window; outside
+     * it, it tears in bands instead of wholesale.
+     *
+     * The only mechanism that keeps the invariant is a SECOND buffer: render
+     * into the shadow under the lock, copy the damaged band into a private
+     * buffer, release, blit from the copy. That costs another framebuffer
+     * (8-33 MB) and one write-back copy per frame, which is a decision about
+     * memory and not a patch — left to the owner, deliberately, and written
+     * down here so the next reader does not re-derive the unsound version.
+     * Measure it on the board first: this tree currently holds two
+     * contradictory unmeasured claims about blit cost, canvas.c's own "<= 1 ms"
+     * at 1024x768 under emulation and tagboot.c's "hundreds of milliseconds"
+     * for 16 MB. */
     if (dy > 0) {
         be->Present(be, 0, c->rows);
     } else if (blit_lo < blit_hi) {

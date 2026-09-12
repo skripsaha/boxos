@@ -436,18 +436,46 @@ int touch_await(TouchTag tag, Touch *out, uint32_t timeout_ms)
 {
     if (tag == TOUCH_TAG_INVALID || !out) return -ERR_INVALID_ARGS;
 
-    /* Fast path — drain TouchRing for any already-queued event. The
-     * caller's tag claim must already exist (or the kernel has been
-     * publishing to a tag we didn't subscribe to, which is benign —
-     * we just won't get any matching slots). */
-    {
-        Touch t;
-        if (touch_pop(&t)) {
-            __atomic_add_fetch(&g_ta_entries_popped,   1, __ATOMIC_RELAXED);
-            __atomic_add_fetch(&g_ta_touches_returned, 1, __ATOMIC_RELAXED);
-            *out = t;
-            return 0;
-        }
+    /* ‼ THE TAG IS THE WHOLE CONTRACT OF THIS CALL, AND IT USED TO GOVERN
+     * EVERYTHING EXCEPT THE ONE MOMENT IT MATTERS.
+     *
+     * Both exits handed back whatever arrived. `tag` built the park op and
+     * nothing else: it was never compared to what came out of the ring. And
+     * the ring is multi-tag BY CONSTRUCTION — every touch_await adds a
+     * permanent REST claim (kernel touch_ops.c, SysTouchAwait) and nothing
+     * releases it, so a strand that has ever awaited two tags is delivered
+     * both from then on.
+     *
+     * What that cost, in callers that had no guard of their own: a Touch
+     * payload is opaque bytes and every interesting payload is LONGER than a
+     * three-byte key event, so a length check cannot tell them apart. A child
+     * dying (a twelve-byte TouchProcessDied) or a stick being plugged in (a
+     * sixteen-byte TouchUsbDevice) was copied into a kb_event_t and acted on —
+     * an animation ended as though a key had been pressed, and in the draft
+     * editor the first three bytes of a usb:arrived event ({port, slot_id,
+     * speed}) were typed into the document.
+     *
+     * ‼ AND THE FEARED COMPLICATION IS NOT REAL. The worry was that a bare tag
+     * must still hear its own key:value events, so strict equality would
+     * silence a wildcard listener. It does not, and the kernel is the reason:
+     * TouchPublishPair calls TouchPublishId ONCE PER BUCKET, full and bare
+     * separately; TouchPublishId passes THAT bucket's tag_id all the way down
+     * to touch_ring.c's `slot->tag_id = tag_id`; and TouchTagResolve leaves the
+     * full id INVALID for the wildcard form "key:...", so a wildcard
+     * subscription IS a subscription to the bare id. A wildcard listener
+     * therefore receives slots stamped with the BARE id — which is exactly the
+     * handle it passed to this function. One integer compare is correct for a
+     * bare name, for a key:value pair and for a wildcard alike: no string rule,
+     * no prefix matching, no special case.
+     *
+     * So this becomes the parked form of the filter that already existed forty
+     * lines above it, and nothing foreign is dropped any more — it goes to the
+     * per-strand stash, for its own consumer, instead of being consumed by a
+     * caller it was never addressed to. */
+    if (touch_try_pop_tag(tag, out)) {
+        __atomic_add_fetch(&g_ta_entries_popped,   1, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_ta_touches_returned, 1, __ATOMIC_RELAXED);
+        return 0;
     }
 
     /* Slow path: submit SYSTEM_OP_TOUCH_AWAIT — this both ensures the
@@ -508,7 +536,11 @@ int touch_await(TouchTag tag, Touch *out, uint32_t timeout_ms)
         left = (uint32_t)((uint64_t)timeout_ms - spent);
     }
 
-    if (!touch_wait(out, left)) {
+    /* And the same filter after the park. A wake carries whatever was
+     * published, not necessarily ours; touch_wait_tag re-arms against the
+     * deadline already fixed above, so a foreign event costs this call none of
+     * its own budget. */
+    if (!touch_wait_tag(tag, out, left)) {
         __atomic_add_fetch(&g_ta_timeouts, 1, __ATOMIC_RELAXED);
         return -ERR_TIMEOUT;
     }

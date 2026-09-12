@@ -1,6 +1,7 @@
 #include "box/timeouts.h"
 #include "box/memtag.h"
 #include "box/core/manifest.h"
+#include "box/memory.h"   /* malloc/free — mem_query_all owns its answer */
 #include "box/string.h"
 #include "box/error.h"
 #include "boxos_decks.h"  /* SYSTEM_OP_MEMTAG_* opcodes — single source */
@@ -35,11 +36,58 @@ static int build_query_spec(const char *const *req,
     return 0;
 }
 
-int mem_query(const char *const *required,
-              const char *const *any,
-              const char *const *excluded,
-              uint32_t *out, uint32_t max_results)
+/*
+ * The MEMTAG_QUERY answer is [u32 total][u32 ids[]], and the two halves
+ * answer different questions:
+ *
+ *   total     — how many regions matched.
+ *   delivered — how many ids the kernel actually wrote, which is
+ *               (bytes_returned - header) / 4, NOT the header field.
+ *
+ * Reading the count from the header and reading the ids from the byte
+ * count is deliberate. The header is a claim about the world; the byte
+ * count is a fact about this buffer. Trusting the header for the array
+ * length is exactly how a clipped answer turns into a read past the ids
+ * that arrived, and trusting the byte count for the total is how "there
+ * are 4000" silently becomes "there are 64".
+ */
+#define MEM_QUERY_HEADER  4u
+
+/* Shared body: runs one QUERY into `raw` and splits the answer. Returns
+ * the kernel rc; on OK, *out_delivered / *out_total are filled. */
+static int mem_query_call(const char *spec, uint32_t spec_len,
+                           uint8_t *raw, uint32_t raw_cap,
+                           uint32_t *out_delivered, uint32_t *out_total)
 {
+    uint32_t got = 0;
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_MEMTAG_QUERY,
+                     0, 0,
+                     spec, spec_len,
+                     raw, raw_cap, &got,
+                     BOX_ANSWER_GUARANTEED, 0);
+    if (rc != 0) return rc;
+    if (got < MEM_QUERY_HEADER) return -ERR_INTERNAL;
+
+    uint32_t total = 0;
+    memcpy(&total, raw, sizeof(uint32_t));
+    uint32_t delivered = (got - MEM_QUERY_HEADER) / sizeof(uint32_t);
+    /* A header below the id count would mean the kernel sent ids it did
+     * not count; take the larger so the caller is never told there are
+     * fewer than it holds. */
+    if (total < delivered) total = delivered;
+
+    *out_delivered = delivered;
+    *out_total     = total;
+    return 0;
+}
+
+int mem_query_ex(const char *const *required,
+                 const char *const *any,
+                 const char *const *excluded,
+                 uint32_t *out, uint32_t max_results,
+                 uint32_t *out_total)
+{
+    if (out_total) *out_total = 0;
     if (!out || max_results == 0) return -ERR_INVALID_ARGS;
 
     char     spec[2048];
@@ -48,24 +96,83 @@ int mem_query(const char *const *required,
                               spec, sizeof(spec), &spec_len);
     if (rc != 0) return box_fail(rc);
 
-    /* out format: [u32 count][u32 ids[]] */
-    uint32_t out_cap = sizeof(uint32_t) + max_results * sizeof(uint32_t);
-    uint8_t  raw[sizeof(uint32_t) + MEMTAG_MAX_QUERY_RESULTS * sizeof(uint32_t)];
+    uint32_t out_cap = MEM_QUERY_HEADER + max_results * sizeof(uint32_t);
+    uint8_t  raw[MEM_QUERY_HEADER + MEMTAG_MAX_QUERY_RESULTS * sizeof(uint32_t)];
     if (out_cap > sizeof(raw)) out_cap = sizeof(raw);
 
-    rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_MEMTAG_QUERY,
-                 0, 0,
-                 spec, spec_len,
-                 raw, out_cap, 0,
-                 BOX_ANSWER_GUARANTEED, 0);
+    uint32_t delivered = 0, total = 0;
+    rc = mem_query_call(spec, spec_len, raw, out_cap, &delivered, &total);
     if (rc != 0) return box_fail(rc);
 
-    uint32_t count = 0;
-    memcpy(&count, raw, sizeof(uint32_t));
-    if (count > max_results) count = max_results;
-    if (count > 0)
-        memcpy(out, raw + sizeof(uint32_t), count * sizeof(uint32_t));
-    return (int)count;
+    if (delivered > max_results) delivered = max_results;
+    if (delivered > 0)
+        memcpy(out, raw + MEM_QUERY_HEADER, delivered * sizeof(uint32_t));
+    if (out_total) *out_total = total;
+    return (int)delivered;
+}
+
+int mem_query(const char *const *required,
+              const char *const *any,
+              const char *const *excluded,
+              uint32_t *out, uint32_t max_results)
+{
+    return mem_query_ex(required, any, excluded, out, max_results, 0);
+}
+
+/* First ask and the ceiling the walk keeps. The first ask holds
+ * MEMTAG_MAX_QUERY_RESULTS ids — the widest single answer the kernel's
+ * QUERY op can return today — so the common case is one syscall and the
+ * doubling below only engages if that op ever learns to say more. The
+ * ceiling is four times that, which is where a caller wanting the whole
+ * RAM region set should be paging by tag instead of asking for it flat. */
+#define MEM_QUERY_FIRST_IDS  MEMTAG_MAX_QUERY_RESULTS
+#define MEM_QUERY_MAX_IDS    (MEMTAG_MAX_QUERY_RESULTS * 4u)
+
+int mem_query_all(const char *const *required,
+                  const char *const *any,
+                  const char *const *excluded,
+                  uint32_t **out_ids, uint32_t *out_total)
+{
+    if (!out_ids) return -ERR_INVALID_ARGS;
+    *out_ids = NULL;
+    if (out_total) *out_total = 0;
+
+    char     spec[2048];
+    uint32_t spec_len = 0;
+    int rc = build_query_spec(required, any, excluded,
+                              spec, sizeof(spec), &spec_len);
+    if (rc != 0) return box_fail(rc);
+
+    uint32_t cap = MEM_QUERY_FIRST_IDS;
+    uint8_t *raw = NULL;
+    uint32_t delivered = 0, total = 0;
+
+    for (;;) {
+        uint32_t bytes = MEM_QUERY_HEADER + cap * sizeof(uint32_t);
+        uint8_t *fresh = (uint8_t *)malloc(bytes);
+        if (!fresh) { free(raw); return -ERR_NO_MEMORY; }
+        free(raw);
+        raw = fresh;
+
+        rc = mem_query_call(spec, spec_len, raw, bytes, &delivered, &total);
+        if (rc != 0) { free(raw); return box_fail(rc); }
+
+        /* Everything that matched is in hand, or the ask is at the
+         * ceiling and what came back is what there was room for — said
+         * as a count either way, never as a silent truncation. */
+        if (delivered >= total || cap >= MEM_QUERY_MAX_IDS) break;
+        cap = cap * 2u > MEM_QUERY_MAX_IDS ? MEM_QUERY_MAX_IDS : cap * 2u;
+    }
+
+    if (out_total) *out_total = total;
+    if (delivered == 0) { free(raw); return 0; }
+
+    uint32_t *ids = (uint32_t *)malloc(delivered * sizeof(uint32_t));
+    if (!ids) { free(raw); return -ERR_NO_MEMORY; }
+    memcpy(ids, raw + MEM_QUERY_HEADER, delivered * sizeof(uint32_t));
+    free(raw);
+    *out_ids = ids;
+    return (int)delivered;
 }
 
 int mem_region_info(uint32_t region_id, mem_region_info_t *out)

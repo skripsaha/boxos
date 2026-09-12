@@ -46,13 +46,21 @@ extern "C" {
  * text (it is content, not a control record). The (fg, bg) pair applies to
  * the whole run; a colour change starts a new frame.
  *
- * `tsc` is the writer's rdtsc at push time. The daemon renders the
- * globally-oldest pending frame first (a min-TSC merge across lanes), so
- * causally-ordered output — a child's dying words, then the death, then
- * the shell's next prompt — renders in cause order no matter which lane
- * each frame rode or when the daemon got scheduled. TSC is AMP-synced on
- * every supported machine; micro-inversions between causally-unrelated
- * writers are the same "no cross-writer promise" the console always had. */
+ * `order` is the number this frame took from the console's ONE order, the
+ * instant before it was pushed. The daemon renders the smallest pending
+ * number first, so causally-ordered output — a child's dying words, then the
+ * death, then the shell's next prompt — renders in cause order no matter
+ * which lane each frame rode or when the daemon got scheduled.
+ *
+ * ‼ THIS FIELD USED TO BE THE WRITER'S rdtsc, AND THAT WAS THE DEFECT. The
+ * header claimed "TSC is AMP-synced on every supported machine". It is not:
+ * per_core.c tolerates four microseconds at boot sync and the cores drift
+ * after that, while a program listing a volume pushes its whole output in
+ * less time than that. MEASURED on the board — four listings of twelve cut
+ * open at byte 891 of 4235, the same byte every time, which is a fixed offset
+ * between two cores and not a race. The prompt of the next command was being
+ * rendered INSIDE the output of the one that had just finished. A counter has
+ * no tolerance and nothing to drift; see CONSOLE_ORDER_TAG below. */
 #define CONSOLE_RUN_TEXT      0x01  /* render text[0..len) in (fg, bg) */
 #define CONSOLE_RUN_CLEAR     0x02  /* clear the screen to (fg, bg) */
 #define CONSOLE_RUN_STEP      0x03  /* move the cursor: text[0..4) = int32 cells, len 4 */
@@ -65,7 +73,8 @@ typedef struct PACKED {
     uint16_t _reserved;
     uint32_t fg;                          /* #RRGGBB, resolved — no sentinels */
     uint32_t bg;
-    uint64_t tsc;                         /* push-time rdtsc — global order */
+    uint64_t order;                       /* the console's shared order — see
+                                           * console_order_next in print.c */
     char     text[CONSOLE_RUN_TEXT_MAX];
 } ConsoleRun;
 
@@ -76,6 +85,24 @@ STATIC_ASSERT(sizeof(ConsoleRun) == 128,
  * Physics of the ring, not a bound on the stream — a writer that outruns
  * the daemon by more than this simply waits its turn. */
 #define CONSOLE_LANE_FRAMES   256u
+
+/* Where the console's one order lives: a single counter in memory every cabin
+ * that prints can see. Not a lane number — lanes are "console:0", "console:1"
+ * and so on, and this is the one name in that family that is not a number.
+ *
+ * The display daemon CREATES it before it grants its first lane and holds it
+ * for as long as it lives (a Bay is refcounted, and a counter that went away
+ * with its last writer would start again at zero, behind everything still
+ * banked in the lanes). A writer maps it as part of taking its lane: having a
+ * lane and not having the order is not a state this console can be in, because
+ * a frame stamped from any other source is a different DOMAIN of numbers and
+ * two domains in one sorted merge order nothing at all.
+ *
+ * One page, because the counter shares its cache line with nothing: sixteen
+ * strands doing a locked add on it is one line moving between cores, and not a
+ * line that also carries something somebody else is reading. */
+#define CONSOLE_ORDER_TAG     "console:order"
+#define CONSOLE_ORDER_BYTES   4096u
 
 #ifdef __cplusplus
 }

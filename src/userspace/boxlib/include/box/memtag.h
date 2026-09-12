@@ -57,12 +57,40 @@ typedef struct {
 
 /* Query regions whose tag set satisfies (required ∧ any ∧ ¬excluded).
  * Each array NUL-terminated (last entry NULL); pass NULL to skip a
- * section. Writes up to `max_results` region_ids into `out`. Returns
- * count, or -error on failure. */
+ * section. Writes up to `max_results` region_ids into `out` and returns
+ * how many it wrote — never a number larger than what it handed over.
+ *
+ * A caller that only uses this form cannot tell a complete answer from a
+ * clipped one. Use mem_query_ex when that distinction matters, or
+ * mem_query_all to stop choosing a buffer size at all. */
 int      mem_query(const char *const *required,
                    const char *const *any,
                    const char *const *excluded,
                    uint32_t *out, uint32_t max_results);
+
+/* mem_query plus the honest denominator: `out_total` (may be NULL)
+ * receives how many regions actually matched. The return value is how
+ * many landed in `out`. total > returned means the rest exist and were
+ * not handed over — "there are 4000 and you were handed 64" rather than
+ * a 64 that looks final. */
+int      mem_query_ex(const char *const *required,
+                      const char *const *any,
+                      const char *const *excluded,
+                      uint32_t *out, uint32_t max_results,
+                      uint32_t *out_total);
+
+/* Ask, grow, ask again — same shape as proc_crew in box/system.h. On
+ * success *out_ids points at one malloc'd array the caller frees once,
+ * *out_total (may be NULL) carries the match count the kernel reported,
+ * and the return value is how many ids the array holds. A return equal to
+ * *out_total means the whole set is in hand; a smaller one means the
+ * kernel's query surface stopped there, and the caller is told so instead
+ * of guessing. Returns 0 with *out_ids == NULL when nothing matched, or
+ * -error on failure. */
+int      mem_query_all(const char *const *required,
+                       const char *const *any,
+                       const char *const *excluded,
+                       uint32_t **out_ids, uint32_t *out_total);
 
 /* Snapshot a region by id. Returns 0 on success, -error otherwise. */
 int      mem_region_info(uint32_t region_id, mem_region_info_t *out);

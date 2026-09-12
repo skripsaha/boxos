@@ -81,6 +81,43 @@ typedef struct {
 
 static KbRepeatState kb_repeat = {0};
 
+/* ‼ THE REPEAT IS WRITTEN FROM MORE THAN ONE CORE, AND HAD NOTHING HOLDING IT.
+ *
+ * The obvious reading is that all three touchers run on the BSP — PS/2 IRQ1,
+ * the PIT's IRQ0, and the xHCI interrupt, which xhci.c points at
+ * g_amp.bsp_lapic_id for MSI-X, MSI and the INTx fallback alike. It is wrong,
+ * and the way it is wrong is specific to this machine: the xHCI EVENT RING IS
+ * ALSO DRAINED SYNCHRONOUSLY, by whichever core is waiting for something on
+ * it, from eight polling sites (xhci_command.c, xhci_msd.c, xhci_endpoint.c,
+ * xhci_enumeration.c, xhci.c, boardroom.c). msd_gate_enter says so in words:
+ * the holder is waiting for an answer off the event ring "on a core that is
+ * not the one taking the controller's interrupt". And on this system the
+ * VOLUME IS A USB STICK, so every block read drains that ring on the core
+ * doing the reading — and the drain delivers keyboard transfer events with it.
+ *
+ * So: a writer on any core against a reader-writer on the BSP, with the event
+ * ring's own lock between drains and NOTHING between a drain and the PIT.
+ *
+ * Two things come out of that, and the second is the serious one.
+ *   - kb_event_t is three PACKED bytes, so held_event is written as sub-word
+ *     stores and can be read half-updated: a new scancode with an old ascii,
+ *     one wrong character at the moment a key is pressed.
+ *   - `active` is written 1 by the arm and 0 by the release. A press and its
+ *     release can be drained by two different cores, and if the arm's 1 lands
+ *     after the release's 0, `active` stays 1 WITH NO KEY HELD — and the tick
+ *     republishes it about thirty times a second until something else is
+ *     pressed. A key that repeats forever while nobody is touching the
+ *     keyboard, with nothing unplugged and no scan code lost.
+ *
+ * A leaf spinlock is the whole answer. It guards this record and nothing else,
+ * it calls nothing, every one of its three holders already runs with interrupts
+ * off, and the tick copies the event out before it publishes so the lock is
+ * never held across the Touch ring. `active` is also stored LAST in the arm,
+ * after the fields a reader would use — under the lock that is belt and
+ * braces, but it means the publication order is right by construction rather
+ * than by the lock's grace. */
+static spinlock_t kb_repeat_lock;
+
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Internal helpers
@@ -126,24 +163,39 @@ static char translate_key(uint8_t key)
 static void kb_arm_repeat(uint8_t key, uint8_t is_extended,
                           const kb_event_t *event)
 {
-    kb_repeat.active         = 1;
-    kb_repeat.held_key       = key;
+    spin_lock(&kb_repeat_lock);
+    kb_repeat.held_key         = key;
     kb_repeat.held_is_extended = is_extended;
-    kb_repeat.held_event     = *event;
-    kb_repeat.delay_passed   = 0;
+    kb_repeat.held_event       = *event;
+    kb_repeat.delay_passed     = 0;
     kb_repeat.next_repeat_tick = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED)
                                  + g_kb_repeat_delay_ticks;
+    kb_repeat.active           = 1;   /* last: nothing may be seen half-armed */
+    spin_unlock(&kb_repeat_lock);
 }
 
 /* Cancel repeat if the released key matches the currently repeating key. */
 static void kb_release_repeat(uint8_t key, uint8_t is_extended)
 {
+    spin_lock(&kb_repeat_lock);
     if (kb_repeat.active &&
         kb_repeat.held_key == key &&
         kb_repeat.held_is_extended == is_extended)
     {
         kb_repeat.active = 0;
     }
+    spin_unlock(&kb_repeat_lock);
+}
+
+/* Everything about the repeat is now unknown — used where the transport says
+ * it lost bytes. Silence is the only honest state after that: a repeat whose
+ * break code may never come is the one shape this record cannot recover from
+ * on its own. */
+static void kb_forget_repeat(void)
+{
+    spin_lock(&kb_repeat_lock);
+    kb_repeat.active = 0;
+    spin_unlock(&kb_repeat_lock);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -194,6 +246,7 @@ void keyboard_set_leds(uint8_t caps, uint8_t num, uint8_t scroll)
 void keyboard_init(void)
 {
     memset(&kb_state, 0, sizeof(kb_state));
+    spinlock_init(&kb_repeat_lock);
     memset(&kb_repeat, 0, sizeof(kb_repeat));
     kb_e0_pending = 0;
     kb_led_state  = 0;
@@ -284,9 +337,26 @@ void keyboard_handle_scancode(uint8_t scancode)
     switch (scancode) {
         case 0xFA: return;   /* ACK           */
         case 0xFE: return;   /* Resend        */
-        case 0x00: return;   /* Error/overrun */
-        case 0xFF: return;   /* Error         */
         case 0xEE: return;   /* Echo response */
+        case 0x00:           /* Error / buffer overrun */
+        case 0xFF:           /* Error                  */
+            /* ‼ THIS IS THE KEYBOARD SAYING IT DROPPED SCAN CODES, and it used
+             * to be discarded like an ACK. Everything derived from codes that
+             * did not arrive is now a guess: a break code may be among them, so
+             * a repeat could be armed on a key nobody is holding; the second
+             * byte of an 0xE0 pair may be among them, so the next ordinary key
+             * would read as extended; and a modifier's release may be among
+             * them, so every following letter would come out shifted. None of
+             * those heal by themselves — the evidence that would have healed
+             * them is exactly what was lost. So the state that depends on codes
+             * is cleared here, and the cost of an overrun becomes one report of
+             * unknown modifiers instead of a repeat nothing can silence. */
+            kb_e0_pending = 0;
+            kb_forget_repeat();
+            __atomic_store_n(&kb_state.shift_pressed, 0, __ATOMIC_RELAXED);
+            __atomic_store_n(&kb_state.ctrl_pressed,  0, __ATOMIC_RELAXED);
+            __atomic_store_n(&kb_state.alt_pressed,   0, __ATOMIC_RELAXED);
+            return;
     }
 
     uint8_t is_release = scancode & 0x80;
@@ -396,22 +466,26 @@ void keyboard_handle_scancode(uint8_t scancode)
 
 void keyboard_timer_tick(void)
 {
-    if (!kb_repeat.active) return;
+    uint64_t   now = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
+    kb_event_t say;
+    bool       due = false;
 
-    uint64_t now = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
-    if (now < kb_repeat.next_repeat_tick) return;
-
-    /* Fire repeat */
-    /* A repeat says the same key again — the same event, an arrow included.
-     * Building it afresh from the poll-ring bytes once turned a held arrow
-     * into a stream of ESC characters. */
-    kb_publish_event(&kb_repeat.held_event);
-
-    /* After initial delay, switch to fast repeat rate */
-    if (!kb_repeat.delay_passed) {
-        kb_repeat.delay_passed = 1;
+    /* Decide and take a COPY under the lock; publish outside it. The Touch IRQ
+     * ring is not a place to stand holding a leaf lock, and the copy is what
+     * makes the lock a leaf at all. */
+    spin_lock(&kb_repeat_lock);
+    if (kb_repeat.active && now >= kb_repeat.next_repeat_tick) {
+        /* A repeat says the same key again — the same event, an arrow
+         * included. Building it afresh from the poll-ring bytes once turned a
+         * held arrow into a stream of ESC characters. */
+        say = kb_repeat.held_event;
+        due = true;
+        kb_repeat.delay_passed     = 1;   /* the initial delay is behind us */
+        kb_repeat.next_repeat_tick = now + g_kb_repeat_rate_ticks;
     }
-    kb_repeat.next_repeat_tick = now + g_kb_repeat_rate_ticks;
+    spin_unlock(&kb_repeat_lock);
+
+    if (due) kb_publish_event(&say);
 }
 
 keyboard_state_t* keyboard_get_state(void)

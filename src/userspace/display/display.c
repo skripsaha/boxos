@@ -43,6 +43,7 @@
 #include "box/ipc.h"
 #include "box/touch.h"
 #include "box/brook.h"
+#include "box/bay.h"
 #include "box/system.h"
 #include "box/memory.h"
 #include "box/convert.h"
@@ -74,6 +75,52 @@ typedef struct FreeNumber {
     uint32_t           number;
     struct FreeNumber *next;
 } FreeNumber;
+
+/* ‼ THE CONSOLE'S ORDER — ONE NUMBER, OWNED BY THE DAEMON, GRANTED WITH THE LANE.
+ *
+ * The daemon merges the lanes by the number each frame carries. That number
+ * used to be cpu_rdtsc, read on whatever core the writer happened to be on,
+ * and cores agree about that counter only to within what the boot-time sync
+ * left them (per_core.c tolerates four microseconds, and it drifts after
+ * that) — while a program that lists a volume pushes its whole output in
+ * less time than that. So two cabins' stamps were not ordered against each
+ * other at all, and the shell's next prompt was rendered INSIDE the listing
+ * of the command that had just finished. MEASURED on the board: four listings
+ * of twelve cut open at exactly the same byte, 891 of 4235. The same byte
+ * every time is a FIXED offset between two cores; a race would have
+ * scattered, and an emulator, whose cores agree exactly, never showed it.
+ *
+ * The console does not need to know WHEN something happened. It needs to
+ * know WHAT CAME BEFORE WHAT, and that is a question about order, which a
+ * clock cannot answer and a counter answers exactly. So: one counter, in one
+ * page every printing cabin maps, incremented with a locked add the instant
+ * before a frame is pushed. Two writers on two cores get two numbers in the
+ * order their two adds happened. No tolerance, nothing to drift.
+ *
+ * ‼ WHY THE DAEMON HOLDS IT AND NOT THE WRITERS. A Bay is refcounted: when
+ * the last cabin releases its claim the pages go back to PMM, and the next
+ * cabin to create the tag would start counting from zero again — putting its
+ * first frame BEHIND everything still banked in the lanes. The counter must
+ * therefore outlive every writer, and exactly one party does: the daemon.
+ * It creates the order before it grants its first lane and holds it for as
+ * long as it lives, so the counter's lifetime IS the console's lifetime.
+ *
+ * ‼ AND WHY IT IS GRANTED WITH THE LANE. A writer that has a lane but no
+ * order would have to stamp with something else, and anything else is a
+ * DIFFERENT DOMAIN of numbers — a counter near 1 against a clock near 2^40 —
+ * in one sorted merge, which is worse than the defect it replaces. So there
+ * is no such state to be in: the daemon refuses to grant a lane it cannot
+ * order (below, in grant_lane), and a writer that cannot map the order gives
+ * its lane back and prints straight to the glass (boxlib print.c,
+ * lane_ensure). A cabin printing straight to the glass is the only writer
+ * there is, and one writer needs no order.
+ *
+ * The rejected alternative is written down so it is not invented again:
+ * "drain a dead writer's lane first". It sounds causal and it is too late —
+ * the daemon learns of a death on its next rotation, and the overtaking
+ * happens inside a single render before that. It was written, measured
+ * against the oracle, and taken out again. */
+static uint64_t *g_order;            /* the console's one order, held for life */
 
 static ConsoleLane *g_lanes;         /* append at tail — grant order */
 static FreeNumber  *g_free_numbers;  /* reuse pool for lane numbers */
@@ -241,10 +288,10 @@ static bool lane_refill(ConsoleLane *ln)
 }
 
 /* Render pending frames across ALL lanes in global push order — always the
- * frame with the smallest push-time TSC first. Causal chains (a child's
- * last words → its death → the shell's next prompt) are milliseconds apart
- * in TSC, so cause order survives any scheduling of the daemon; a lane is
- * never allowed to overtake an older frame parked on another lane. The
+ * frame carrying the smallest order first. A frame pushed after another one
+ * took a larger number than it (g_order, above), so cause order is not a
+ * question of when the daemon happens to look; a lane is never allowed to
+ * overtake an older frame parked on another lane. The
  * merge is bounded per call so a firehose writer cannot hold the rotation
  * away from keys and IPC — and fairness needs no per-lane quota at all:
  * an old frame outranks a flooder's ever-newer ones by age alone. Keys
@@ -258,9 +305,12 @@ static bool lanes_render(uint32_t budget)
     while (rendered < budget) {
         ConsoleLane *best = NULL;
         for (ConsoleLane *ln = g_lanes; ln; ln = ln->next) {
+            /* Ordered by the number every writer shares (boxlib print.c:
+             * console_order_next), so a frame pushed after another cannot be
+             * rendered before it — whatever the two cores' clocks say. */
             if (lane_refill(ln) &&
                 (!best ||
-                 (int64_t)(ln->pending.tsc - best->pending.tsc) < 0)) {
+                 (int64_t)(ln->pending.order - best->pending.order) < 0)) {
                 best = ln;
             }
         }
@@ -312,9 +362,10 @@ static void lane_free(ConsoleLane *ln)
 
 /* Consume banked process:died events. Never unlinks lane nodes (the lane
  * walk owns the list) — it marks never-attached grants closed; attached
- * lanes need nothing here, because the min-TSC merge already renders a
- * dead writer's banked tail before anything a survivor pushes in reaction
- * to the death (the tail's frames carry strictly older stamps).
+ * lanes need nothing here, because the merge already renders a dead writer's
+ * banked tail before anything a survivor pushes in reaction to the death:
+ * every frame of that tail took its number before the death happened, and
+ * the survivor's reaction takes its number after.
  *
  * A death names (pid, generation), and so does a lane: the match is exact.
  * A recycled pid is a different generation and matches nothing here, so the
@@ -440,8 +491,93 @@ static bool kb_step(void)
  * IPC — grants, input requests, ping.
  * ───────────────────────────────────────────────────────────────────────── */
 
+/* Say something to one cabin — ONCE, and never waiting for it.
+ *
+ * ‼ THIS WAITED FOR ROOM, AND THAT IS A DEADLOCK IN THIS PARTICULAR CABIN.
+ * `send` used to be refused for a reason that said nothing about whether the
+ * requester existed — its reply ring was momentarily full — and the writer's
+ * side of this (boxlib print.c, daemon_say) waits such a refusal out. So the
+ * same shape was put here, and it was wrong here for a reason that has nothing
+ * to do with `send`: THE DAEMON IS ITS OWN ROTATION. While it stands in a
+ * retry loop it is not stepping keys, not draining lanes, not answering IPC —
+ * the whole console stops, and the machine goes silent with nothing in the log
+ * to say why. A writer that stalls stalls one cabin; the daemon that stalls
+ * stalls every cabin there is.
+ *
+ * MEASURED, and it is why this note survives the fix: with the wait in place
+ * the six-config matrix failed twice, in two different configurations both
+ * times (a prompt that never came back after a program ended, and a parked
+ * subscriber that stopped being drained fast enough for its publisher) — while
+ * the same matrix on the tree without it passed all six.
+ *
+ * ‼ THE DEBT NAMED HERE IS PAID, AND NOT THE WAY THIS NOTE GUESSED. It asked
+ * for a pending reply the rotation carries and retries, and said the missing
+ * piece was a bell on somebody else's ring. There is no bell and none was
+ * needed: the KERNEL now takes an answer its target's ring cannot hold and
+ * keeps it as a debt, which the target settles itself at its own next syscall
+ * gate (kring.c, Owed). A full ring is therefore no longer a refusal at all —
+ * ERR_ROUTE_TARGET_FULL is unreachable for a live target — and nothing is left
+ * for this daemon to carry, retry or be woken for. One call, one answer, and
+ * the rotation never stops.
+ *
+ * What can still come back is ERR_NO_MEMORY: no room to copy the payload into
+ * the requester's cabin, or no room for the kernel to hold the promise. That
+ * is a machine out of memory, not a busy consumer, and there is nothing to
+ * wait for — the requester's own re-ask finds the same lane, because grant_lane
+ * is idempotent per (pid, generation). */
+static int say_to(uint32_t pid, const uint8_t *msg, uint16_t len)
+{
+    int rc = send(pid, msg, len);
+    if (rc == 0) return 0;
+    if (box_errno_of(rc) == ERR_NO_MEMORY) {
+        /* Said once per daemon: until this was written down nobody knew it
+         * happened at all, and a writer whose grant went missing waits for it
+         * without a deadline, which is correct and therefore silent. */
+        static bool refused_before = false;
+        if (!refused_before) {
+            refused_before = true;
+            kdbg_print("[display] pid %u could not be given its lane answer "
+                       "just now (no room for the record); it was not re-sent, "
+                       "and that cabin waits until it asks again", pid);
+        }
+    }
+    return rc;
+}
+
+/* The console's order, made on demand rather than only at boot.
+ *
+ * It used to be made exactly once, in main, and a Bay that could not be
+ * created in that one instant left the daemon unable to grant ANY lane for
+ * the rest of its life — the whole machine on the direct road, permanently,
+ * because of one transient shortage at boot. Making it here costs one
+ * Manifest call on a path that is already a round trip, only ever runs while
+ * there is no order, and turns a permanent verdict into a momentary one. */
+static bool order_ensure(void)
+{
+    if (g_order) return true;
+    g_order = (uint64_t *)bay_open(CONSOLE_ORDER_TAG, CONSOLE_ORDER_BYTES,
+                                   BAY_CREATE);
+    if (!g_order) {
+        kdbg_print("[display] the console's order could not be made; no lane "
+                   "can be granted just now and every cabin that asks prints "
+                   "straight to the glass");
+        return false;
+    }
+    return true;
+}
+
 static void grant_lane(uint32_t requester, uint32_t generation)
 {
+    /* No order, no lane. A granted lane whose frames cannot be numbered would
+     * force its writer to stamp with something else, and two domains of
+     * numbers in one merge order NOTHING. The requester takes the honest
+     * one-byte refusal and prints straight to the glass instead. */
+    if (!order_ensure()) {
+        uint8_t refusal = DISP_CMD_LANE;
+        (void)say_to(requester, &refusal, 1);
+        return;
+    }
+
     /* Idempotent per requester. A strand IS a process here, so one lane per
      * (pid, generation) is the whole rule — and a writer whose grant reply
      * was lost (or who simply asked again while the answer was in flight)
@@ -461,7 +597,7 @@ static void grant_lane(uint32_t requester, uint32_t generation)
         size_t alen = strlen(again);
         reply[0] = DISP_CMD_LANE;
         memcpy(reply + 1, again, alen + 1);
-        send(requester, reply, (uint16_t)(2 + alen));
+        (void)say_to(requester, reply, (uint16_t)(2 + alen));
         return;
     }
 
@@ -489,7 +625,7 @@ static void grant_lane(uint32_t requester, uint32_t generation)
          * stack would hand the same failure to every requester after this
          * one. A fresh number replaces it; "console:N" stays interned. */
         uint8_t refusal = DISP_CMD_LANE;      /* 1-byte reply = honest no */
-        send(requester, &refusal, 1);
+        (void)say_to(requester, &refusal, 1);
         kdbg_print("[display] lane grant failed for pid %u (number %u retired)",
                    requester, number);
         return;
@@ -514,7 +650,7 @@ static void grant_lane(uint32_t requester, uint32_t generation)
     size_t  tlen = strlen(tag);
     reply[0] = DISP_CMD_LANE;
     memcpy(reply + 1, tag, tlen + 1);
-    send(requester, reply, (uint16_t)(2 + tlen));
+    (void)say_to(requester, reply, (uint16_t)(2 + tlen));
 }
 
 
@@ -593,6 +729,12 @@ int main(void)
     g_pdied = touch_pair_choose(touch_intern(TOUCH_TAG_PROCESS_DIED));
     if (g_kb    != TOUCH_TAG_INVALID) touch_claim(g_kb,    TOUCH_REST, 0, 0);
     if (g_pdied != TOUCH_TAG_INVALID) touch_claim(g_pdied, TOUCH_REST, 0, 0);
+
+    /* Before the first grant can be asked for, and before this cabin says it
+     * is ready: the console's order exists, or this daemon grants no lanes.
+     * BAY_CREATE of a page the kernel zeroes — the first number handed out is
+     * one, and zero is therefore a number no frame can carry. */
+    (void)order_ensure();
 
     CabinInfo *ci = cabin_info();
     if (ci->spawner_pid != 0) {

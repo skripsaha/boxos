@@ -184,6 +184,26 @@ int touch_release(TouchTag tag);
 int touch_send(TouchTagPair pair, const void *payload, uint32_t plen,
                uint32_t after_ms);
 
+/* Wait for an event OF THIS TAG, parking the strand until one is published.
+ *
+ * The tag is the contract: what comes back carries the handle that was asked
+ * for, and nothing else. An event of another tag that arrives meanwhile is put
+ * in this strand's stash for its own consumer — it is not consumed, not
+ * dropped, and not handed back here. (It used to be handed back: `tag` built
+ * the park and was never compared to what arrived, so a child's death or a
+ * stick's arrival was delivered to a caller expecting a keystroke, and every
+ * payload of interest is longer than a key event, so no length check could
+ * tell them apart.)
+ *
+ * A wildcard listener is not silenced by that rule. The kernel publishes to the
+ * bare bucket and the key:value bucket separately and stamps each slot with the
+ * id of the bucket it fanned out of, and a "key:..." subscription resolves to
+ * the BARE id — so a wildcard listener's events carry exactly the handle it
+ * passed here.
+ *
+ * timeout_ms is the CALLER'S deadline for the whole call: 0 waits until an
+ * event, and a bounded wait is not restarted by a foreign event arriving in
+ * the middle of it. Returns 0, or -ERR_TIMEOUT. */
 int touch_await(TouchTag tag, Touch *out, uint32_t timeout_ms);
 int touch_irq_return(void);
 int touch_register(TouchTag tag, TouchPolicy policy, TouchCapability capability);

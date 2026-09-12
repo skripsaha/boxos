@@ -14,6 +14,42 @@
 #include "box/core/result.h"
 #include "box/string.h"
 
+/* How long this diagnostic may stand in SILENCE before it says so.
+ *
+ * Neither of these is a guess about how fast the machine is, and neither ends
+ * a wait that is making progress — each round that hears something resets the
+ * clock, so a slow board takes longer and still passes. They bound only the
+ * case where NOTHING arrives at all.
+ *
+ * The two differ because what they wait for differs. process:spawned and
+ * process:died are OWED: the child was spawned successfully, so both events
+ * will be published, and silence here means a delivery was lost — which is a
+ * fact worth reporting rather than waiting out. A USB event is owed by nobody:
+ * the ordinary run has no device plugged in during the window, so that budget
+ * is simply how long this program looks for something that may not exist. */
+#define LIFECYCLE_OWED_QUIET_MS   5000u
+#define LIFECYCLE_USB_LOOK_MS      300u
+
+/* The next event of EITHER of two tags.
+ *
+ * touch_await answers only with the tag it was named — an event of any other
+ * tag goes to this strand's stash rather than being handed back. That is the
+ * correct contract and it is what this program used to lean against: it waited
+ * on usb:arrived, received a usb:left, and worked out which it was from
+ * t.tag_id. So a wait for either of two tags is now written as what it is.
+ *
+ * Each round looks at both without blocking first — the stash is where the
+ * previous blocking wait put the other tag's events — and only the last look
+ * blocks. When that one times out the other tag is checked once more, because
+ * an event of it may have arrived and been stashed during exactly that wait. */
+static bool next_of_two(TouchTag a, TouchTag b, Touch *out, uint32_t quiet_ms)
+{
+    if (touch_try_pop_tag(a, out)) return true;
+    if (touch_try_pop_tag(b, out)) return true;
+    if (touch_await(a, out, quiet_ms) == 0) return true;
+    return touch_try_pop_tag(b, out);
+}
+
 int main(void)
 {
     CabinInfo *ci = cabin_info();
@@ -66,11 +102,13 @@ int main(void)
     /* Drain spawned + died for our child (and any unrelated lifecycle
      * traffic that happens to land in our ring during the window). */
     int saw_spawn = 0, saw_die = 0;
-    for (int i = 0; i < 60 && (!saw_spawn || !saw_die); i++) {
+    while (!saw_spawn || !saw_die) {
         Touch t;
-        int rc = touch_await(spawned_tag, &t, 100);
-        if (rc == 0) {
-            const uint8_t *p = t.payload;
+        if (!next_of_two(spawned_tag, died_tag, &t, LIFECYCLE_OWED_QUIET_MS))
+            break;   /* nothing at all for the whole quiet budget */
+
+        const uint8_t *p = t.payload;
+        if (t.tag_id == spawned_tag) {
             uint32_t pid = 0, parent = 0;
             if (t.payload_len >= 8) {
                 memcpy(&pid,    p + 0, 4);
@@ -79,11 +117,8 @@ int main(void)
             kdbg_print("[LIFECYCLE] saw spawn pid=%u parent=%u tagid=%u",
                        pid, parent, (unsigned)t.tag_id);
             if ((int)pid == child) saw_spawn = 1;
-        }
-        rc = touch_await(died_tag, &t, 100);
-        if (rc == 0) {
-            const uint8_t *p = t.payload;
-            uint32_t pid = 0;
+        } else if (t.tag_id == died_tag) {
+            uint32_t pid   = 0;
             int32_t  exitc = 0;
             if (t.payload_len >= 8) {
                 memcpy(&pid,   p + 0, 4);
@@ -99,22 +134,17 @@ int main(void)
 
     /* Whatever USB arrived or left while the above was running.
      *
-     * One await, and the label comes from t.tag_id — not from which call
-     * returned. touch_await takes a tag to wait ON, but what it hands back is
-     * the next Touch in this process's ring whichever tag it carries, so a
-     * departure will happily come back out of a call that named usb:arrived.
-     * Labelling by call site produced exactly that: a device being plugged IN
-     * and reported as having left. The event knows what it is; ask it. */
+     * The label comes from t.tag_id, not from which call returned — the event
+     * knows what it is, so ask it. That was true even when a wait handed back
+     * any tag at all, and it stays true now that a wait answers only with the
+     * tag it was named: next_of_two asks for both, and each answer still says
+     * for itself which of the two it is. */
     if (usb_watching) {
         int seen = 0;
-        int quiet = 0;
-        for (int i = 0; i < 32; i++) {
+        for (;;) {
             Touch t;
-            if (touch_await(usb_arrived, &t, 100) != 0) {
-                if (++quiet >= 3) break;
-                continue;
-            }
-            quiet = 0;
+            if (!next_of_two(usb_arrived, usb_left, &t, LIFECYCLE_USB_LOOK_MS))
+                break;
 
             TouchUsbDevice d;
             memset(&d, 0, sizeof(d));

@@ -22,10 +22,28 @@ extern "C" {
  *   Cabin B:  void *fb = bay_open("video:frame:0", 0, BAY_OPEN);
  *             ... read from fb (same physical pages) ...
  *
- * Cleanup is automatic on process_destroy — leaked claims do not
- * starve PMM. Explicit bay_release(ptr) drops the per-cabin claim;
- * when the last claim across all cabins drops, the backing pages
- * return to PMM.
+ * THE CLAIM IS THE CABIN'S, NOT THE STRAND'S. A pointer from bay_open
+ * stays mapped for as long as the cabin lives, and exactly two things
+ * end it: an explicit bay_release(ptr) — which any strand of the cabin
+ * may call, on any window any strand of the cabin opened — and the
+ * cabin's own teardown, when its last strand is gone. Nothing else does,
+ * and in particular a strand exiting unmaps nothing. So one strand may
+ * open a Bay and hand the pointer to its siblings, and it may finish
+ * first; they keep reading.
+ *
+ * It is the cabin's because the mapping is: a Bay window is a range of
+ * the cabin's address space, which every strand in the cabin runs in.
+ * Unmapping it because one occupant moved out is a fault in the next
+ * sibling to touch it — code that did nothing wrong, in a place with no
+ * clue why. The console is where this was found: one shared print order,
+ * opened by whichever strand happened to print first, disappeared from
+ * under all of them the moment that strand finished.
+ *
+ * The counterpart of the rule is that a release is a decision for the
+ * whole cabin. Call bay_release only when no sibling is still reading
+ * through the pointer; otherwise just let the cabin's exit take it, and
+ * nothing leaks — when the last claim across all cabins drops, the
+ * backing pages return to PMM either way.
  *
  * Allocations ≥ 2 MB are silently backed by 2 MB pages (one PDE per
  * 512 × 4 KB unit) for TLB efficiency. The userspace API has no knob
@@ -78,13 +96,15 @@ extern "C" {
  * (the existing Bay's size wins). */
 void   *bay_open(const char *tag, uint64_t size, uint32_t flags);
 
-/* Release this cabin's claim on the Bay. Drops one ref; if the last
+/* Release this cabin's claim on the Bay, unmapping the window for every
+ * strand in the cabin — not just the caller. Drops one ref; if the last
  * cabin releases, the backing pages return to PMM. Returns 0 on
- * success, -ERR_NOT_FOUND if ptr does not name an open Bay claim. */
+ * success, -ERR_NOT_FOUND if ptr does not name an open Bay claim of
+ * this cabin. */
 int     bay_release(void *ptr);
 
 /* Query the Bay's user-visible size (in bytes). Returns 0 if ptr is
- * not a live claim. */
+ * not a live claim of this cabin. */
 uint64_t bay_size(void *ptr);
 
 #ifdef __cplusplus

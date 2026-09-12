@@ -42,8 +42,8 @@ extern "C" {
  * brook_try_push for drop-on-full or brook_push_timeout for bounded
  * waits. Reader-side mirrors.
  *
- * Peer death: when one side releases (or its cabin is destroyed), the
- * surviving peer's next blocking call returns:
+ * Peer death: when one side releases, or the STRAND holding it exits,
+ * the surviving peer's next blocking call returns:
  *   - writer: -ERR_PROCESS_TERMINATED  (reader gone — no further drain)
  *   - reader: -ERR_STREAM_CLOSED       (writer gone AND ring empty)
  *   - reader: still OK while frames remain in the ring after writer
@@ -96,11 +96,37 @@ Brook *brook_open(const char *tag,
                   uint32_t    frame_count,
                   uint32_t    flags);
 
-/* Release this cabin's claim on the Brook. After release the Brook
- * pointer is invalid. If both peers have released, backing pages
- * return to PMM; if a peer is still attached, its next blocking
- * push/pop sees peer-death and returns the appropriate error code. */
+/* Release this cabin's claim on the Brook: the mapping goes, and with it
+ * the writer/reader seat. Returns 0, and only then is the Brook pointer
+ * invalid — a non-zero return leaves the handle usable, because nothing
+ * was given back.
+ *
+ * Only the strand HOLDING the seat may release it (-ERR_PERMISSION_DENIED
+ * otherwise); on a single-occupancy stream, letting a bystander hand the
+ * seat back would lose it for the lifetime of the tag. Once the holder has
+ * exited, its seat is already vacated and any strand of the cabin may give
+ * the mapping back.
+ *
+ * If both peers have released, backing pages return to PMM; if a peer is
+ * still attached, its next blocking push/pop sees peer-death and returns
+ * the appropriate error code. */
 int brook_release(Brook *b);
+
+/* Hand the writer/reader seat to a sibling strand of the SAME cabin. The
+ * mapping does not move — it never was this strand's to move — so the
+ * handle stays valid and the receiving strand uses this very same Brook*
+ * (strands share one address space).
+ *
+ * This exists because a handle carries one cached fact that stops being
+ * true the moment another strand takes over: whose bell to hang. On
+ * success the handle is re-pointed at `to_strand_pid`, which is what keeps
+ * a sleeping receiver reachable.
+ *
+ * Returns 0, or -ERR_PERMISSION_DENIED if the caller is not the holder,
+ * -ERR_NOT_MAPPED if the target is in another cabin (where this stream has
+ * no mapping at all — that is brook_open, not this), -ERR_PROCESS_NOT_FOUND
+ * / -ERR_PROCESS_DESTROYING for a target that is gone or going. */
+int brook_hand_over(Brook *b, uint32_t to_strand_pid);
 
 /* Push one frame_size-byte frame. Blocking on full ring.
  * Returns:

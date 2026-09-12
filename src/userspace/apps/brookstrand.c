@@ -24,6 +24,7 @@
 #include "box/print.h"
 #include "box/brook.h"
 #include "box/system.h"
+#include "box/clock.h"            /* clock_uptime_ms — the ClockBoard, no syscall */
 #include "box/sync.h"
 #include "box/strand.h"
 #include "box/cpu.h"
@@ -72,9 +73,17 @@ static void sib_writer(void *arg)
 static void sib_reader(void *arg)
 {
     Rdv *rv = (Rdv *)arg;
-    /* spin until the creator (main) has made the brook */
-    Brook *r = 0;
-    for (int t = 0; t < 200 && !r; t++) { r = brook_open(rv->tag, FS, FC, BROOK_READER); if (!r) { uint8_t junk; (void)junk; for (volatile int k=0;k<50000;k++){} } }
+    /* One attempt decides. T4 — this role's only caller — creates the brook and
+     * only then spawns this strand, so the brook exists before this strand does
+     * and there is no race to lose: a refusal here is a real failure.
+     *
+     * What stood here was 200 retries separated by a 50000-iteration busy spin:
+     * a wait for a fact that had already happened, charged to the CPU. If a
+     * future caller ever spawns this role BEFORE creating the brook it must
+     * publish that creation as a word this strand can park on, the way
+     * stress_reader parks on the writer's `wopened` — never as a retry budget,
+     * which burns out on a fast core long before a slow kernel commits. */
+    Brook *r = brook_open(rv->tag, FS, FC, BROOK_READER);
     if (!r) { __atomic_store_n(&rv->state, 2u, __ATOMIC_RELEASE); addr_wake(&rv->state, 0); return; }
     rv->va_header = brook_handle_header_va(r);
     uint32_t got = 0;
@@ -91,12 +100,22 @@ static void sib_reader(void *arg)
     for (;;) yield();
 }
 
+/* Wait for the sibling's verdict. `state` leaving 0 is a FACT that is coming:
+ * every path through sib_writer and sib_reader stores 1 or 2 before it returns,
+ * and their brook calls all carry their own deadlines, so neither can end
+ * without speaking. The park is therefore unbounded and lost-wake-safe (a store
+ * that landed first returns VALUE_MISMATCH without sleeping). A sibling that
+ * never speaks is a wedge, and a parked main is exactly how Nightwatch proves
+ * one — the 400 parks of 50 ms this replaces made it a twenty-second guess that
+ * printed "writer timeout" about a host that was merely loaded.
+ *
+ * Returns 0 when the sibling did its work, -2 when it could not open the brook. */
 static int wait_done(Rdv *rv)
 {
-    uint32_t cyc = 0;
     while (__atomic_load_n(&rv->state, __ATOMIC_ACQUIRE) == 0) {
-        if (++cyc > 400u) return -1;
-        addr_park(&rv->state, 0, 50);
+        error_t prc = addr_park(&rv->state, 0, 0);
+        if (prc != OK && prc != ERR_ADDR_VALUE_MISMATCH)
+            yield();     /* park unavailable — stay correct the slow way */
     }
     return (__atomic_load_n(&rv->state, __ATOMIC_ACQUIRE) == 2u) ? -2 : 0;
 }
@@ -104,9 +123,7 @@ static int wait_done(Rdv *rv)
 /* main = READER for a sibling writer; verify it drains `pushed`. */
 static void main_reads(const char *name, Rdv *rv)
 {
-    int rc = wait_done(rv);
-    if (rc == -1) { no(name, "sibling writer never finished"); return; }
-    if (rc == -2) { no(name, "sibling writer open failed"); return; }
+    if (wait_done(rv) == -2) { no(name, "sibling writer open failed"); return; }
 
     uint32_t pushed = __atomic_load_n(&rv->pushed, __ATOMIC_RELAXED);
     uint32_t wav    = __atomic_load_n(&rv->avail_after, __ATOMIC_RELAXED);
@@ -152,11 +169,56 @@ typedef struct {
     const char       *tag;
     volatile uint32_t wready, rready;   /* each strand parked AT the barrier      */
     volatile uint64_t go;               /* main releases both → concurrent open   */
-    volatile uint32_t wopened, ropened; /* 0 running, 1 ok, 2 fail                */
+    /* wopened is 64-bit because the READER PARKS on it when it loses the open
+     * race: addr_park compares the parked-on word as a uint64_t and buckets it
+     * at 8-byte granularity (box/sync.h), so a 32-bit word would have the
+     * kernel compare the bytes behind it. ropened has no waiter. */
+    volatile uint64_t wopened;          /* 0 running, 1 ok, 2 fail                */
+    volatile uint32_t ropened;          /* 0 running, 1 ok, 2 fail                */
     volatile uint32_t pushed, popped;
     volatile uint32_t order_ok;         /* 1 iff every popped idx == expected      */
     volatile uint64_t done;             /* reader finished                         */
 } Stress;
+
+/* Everything T5 publishes, folded into one word. wopened and ropened are 0/1/2
+ * and pushed and popped never exceed STRESS_FRAMES, which fits in fourteen
+ * bits, so the four sit side by side with no overlap and no loss. A change in
+ * any of them is proof the pair is moving and restarts the watchdog's clock. */
+static uint64_t t5_progress(Stress *s)
+{
+    return  (uint64_t)__atomic_load_n(&s->wopened, __ATOMIC_ACQUIRE)
+         | ((uint64_t)__atomic_load_n(&s->ropened, __ATOMIC_ACQUIRE) <<  2)
+         | ((uint64_t)__atomic_load_n(&s->pushed,  __ATOMIC_ACQUIRE) <<  4)
+         | ((uint64_t)__atomic_load_n(&s->popped,  __ATOMIC_ACQUIRE) << 32);
+}
+
+/* How often the watchdog LOOKS — not what it decides. Nothing wakes `done`
+ * except the reader's own store, so this park normally runs to its own length;
+ * its size sets the granularity of the answer and nothing else. */
+#define T5_LOOK_MS   50u
+
+/* How long T5 may say NOTHING AT ALL before the watchdog convicts. Any of the
+ * four things it publishes moving restarts it (t5_progress above), so this is a
+ * SILENCE budget — but T5 is also the one place in this file where silence can
+ * be lawful for a long stretch: between the two opens and the two final counts
+ * the hammer publishes nothing at all, so the budget has to outlast a whole
+ * lawful run of 10000 frames through a 16-slot ring.
+ *
+ * It stays BOUNDED, alone in this file, because it is the only thing that can
+ * end T5 in the doubly-broken case: stress_reader's park on `wopened` is
+ * deliberately unbounded — the writer's published open is the one fact that can
+ * lawfully end it — so a writer that never reaches that store leaves the reader
+ * asleep and `done` forever 0, with nothing else in the program to notice.
+ *
+ * The figure is the one this watchdog always meant: the cap it replaces was
+ * 1200 parks of 50 ms, sixty seconds. Counted in parks that was a lie in both
+ * directions — a park broken early by a spurious wake spent a turn without
+ * spending the time — while measured on the ClockBoard it is sixty real
+ * seconds. It is also twelve times the 5000 ms deadline every blocking step in
+ * T5 carries (brook_push_timeout / brook_pop_timeout below), so a peer that is
+ * merely stuck always convicts itself, and its partner after it, long before
+ * the watchdog has to. */
+#define T5_STILL_MS  60000u
 
 /* Barrier wait: tight pause-spin on multicore (so two strands charge brook_open
  * within the same narrow window), but yield every 64 spins so a SINGLE App-Core
@@ -177,8 +239,12 @@ static void stress_writer(void *arg)
     __atomic_store_n(&s->wready, 1u, __ATOMIC_RELEASE);
     bs_barrier_wait(&s->go);
     Brook *w = brook_open(s->tag, FS, FC, BROOK_WRITER | BROOK_CREATE);
-    if (!w) { __atomic_store_n(&s->wopened, 2u, __ATOMIC_RELEASE); for(;;) yield(); }
+    /* Either way the answer is published AND woken: this store is the only fact
+     * that can end a reader that lost the open race (see stress_reader). */
+    if (!w) { __atomic_store_n(&s->wopened, 2u, __ATOMIC_RELEASE);
+              addr_wake(&s->wopened, 0); for(;;) yield(); }
     __atomic_store_n(&s->wopened, 1u, __ATOMIC_RELEASE);
+    addr_wake(&s->wopened, 0);
     uint32_t n = 0;
     for (uint32_t i = 0; i < STRESS_FRAMES; i++) {
         uint8_t f[FS]; memset(f, 0, sizeof(f)); memcpy(f, &i, 4);
@@ -195,9 +261,31 @@ static void stress_reader(void *arg)
     Stress *s = (Stress *)arg;
     __atomic_store_n(&s->rready, 1u, __ATOMIC_RELEASE);
     bs_barrier_wait(&s->go);
-    /* reader may win the race and beat the writer's CREATE — bounded retry. */
-    Brook *r = 0;
-    for (int t = 0; t < 2000 && !r; t++) { r = brook_open(s->tag, FS, FC, BROOK_READER); if (!r) yield(); }
+    /* THE charge — the one this test exists for. It leaves the barrier with
+     * nothing in front of it, so it lands in the same narrow window as the
+     * writer's and races the kernel registry insert-vs-lookup on two cores. */
+    Brook *r = brook_open(s->tag, FS, FC, BROOK_READER);
+    /* Losing that race is lawful: until the writer's CREATE returns there is no
+     * brook to attach to. What ends the wait is the writer saying its open is
+     * DONE — a fact, published and woken — not a retry budget. The budget was
+     * 2000 yields, and a yield on an idle core returns in well under a
+     * microsecond, so the whole of it could burn out before the writer had even
+     * entered brook_open: the test then reported a concurrent-open failure the
+     * kernel had never had a chance to commit. The park is lost-wake-safe (a
+     * store that lands first makes it return VALUE_MISMATCH without sleeping),
+     * so it has no clock of its own. */
+    if (!r) {
+        uint64_t wo;
+        while ((wo = __atomic_load_n(&s->wopened, __ATOMIC_ACQUIRE)) == 0u) {
+            error_t prc = addr_park(&s->wopened, 0u, 0);
+            if (prc != OK && prc != ERR_ADDR_VALUE_MISMATCH)
+                yield();     /* park unavailable — stay correct the slow way */
+        }
+        /* wo == 2: the writer could not create it, so nothing will ever appear.
+         * wo == 1: it exists — one attempt decides, and a refusal now is a real
+         * failure rather than a lost race. */
+        if (wo == 1u) r = brook_open(s->tag, FS, FC, BROOK_READER);
+    }
     if (!r) { __atomic_store_n(&s->ropened, 2u, __ATOMIC_RELEASE);
               __atomic_store_n(&s->done, 1u, __ATOMIC_RELEASE); addr_wake(&s->done, 0); for(;;) yield(); }
     __atomic_store_n(&s->ropened, 1u, __ATOMIC_RELEASE);
@@ -237,8 +325,7 @@ int main(void)
       else {
         if (strand_spawn(sib_writer, &rv)==0) { no("T3","spawn"); brook_release(r); }
         else {
-          int rc = wait_done(&rv);
-          if (rc != 0) { no("T3", rc==-2 ? "sibling writer open failed (BUSY?)" : "writer timeout"); brook_release(r); }
+          if (wait_done(&rv) != 0) { no("T3", "sibling writer open failed (BUSY?)"); brook_release(r); }
           else {
             uint32_t pushed = __atomic_load_n(&rv.pushed, __ATOMIC_RELAXED);
             printf("[BS] T3 writer_va=0x%lx pushed=%u wavail=%u | reader_va=0x%lx ravail=%u\n",
@@ -264,7 +351,7 @@ int main(void)
           if (brook_push_timeout(w, f, 2000)==0) n++; else break; }
         int rc = wait_done(&rv);
         brook_release(w);
-        if (rc!=0) { no("T4", rc==-2?"sibling reader open failed":"reader timeout"); }
+        if (rc!=0) { no("T4", "sibling reader open failed"); }
         else {
           uint32_t got = __atomic_load_n(&rv.popped,__ATOMIC_RELAXED);
           printf("[BS] T4 main pushed=%u | sibling(reader) va=0x%lx popped=%u\n",
@@ -291,19 +378,26 @@ int main(void)
                 yield();
             }
             __atomic_store_n(&s.go, 1u, __ATOMIC_RELEASE);          /* concurrent open */
-            /* Watchdog: a stuck peer FAILS the test, never hangs the suite. */
-            uint32_t cyc = 0; int timedout = 0;
+            /* Watchdog: a stuck peer FAILS the test, never hangs the suite. The
+             * park is the sleep; what convicts is the CLOCK saying T5 has
+             * published nothing for T5_STILL_MS, not a tally of how many times
+             * main parked. */
+            uint64_t started = clock_uptime_ms();
+            uint64_t mark    = t5_progress(&s);
+            int timedout = 0;
             while (__atomic_load_n(&s.done, __ATOMIC_ACQUIRE) == 0) {
-                if (++cyc > 1200u) { timedout = 1; break; }         /* ~60s cap */
-                addr_park(&s.done, 0, 50);
+                addr_park(&s.done, 0, T5_LOOK_MS);
+                uint64_t now = t5_progress(&s);
+                if (now != mark) { mark = now; started = clock_uptime_ms(); }
+                else if (clock_uptime_ms() - started >= T5_STILL_MS) { timedout = 1; break; }
             }
-            uint32_t wo = __atomic_load_n(&s.wopened, __ATOMIC_ACQUIRE);
+            uint64_t wo = __atomic_load_n(&s.wopened, __ATOMIC_ACQUIRE);
             uint32_t ro = __atomic_load_n(&s.ropened, __ATOMIC_ACQUIRE);
             uint32_t pu = __atomic_load_n(&s.pushed,  __ATOMIC_ACQUIRE);
             uint32_t po = __atomic_load_n(&s.popped,  __ATOMIC_ACQUIRE);
             uint32_t od = __atomic_load_n(&s.order_ok, __ATOMIC_ACQUIRE);
-            printf("[BS] T5 concurrent: wopened=%u ropened=%u pushed=%u popped=%u order_ok=%u timedout=%d (expect %u)\n",
-                   wo, ro, pu, po, od, timedout, STRESS_FRAMES);
+            printf("[BS] T5 concurrent: wopened=%lu ropened=%u pushed=%u popped=%u order_ok=%u timedout=%d (expect %u)\n",
+                   (unsigned long)wo, ro, pu, po, od, timedout, STRESS_FRAMES);
             if (timedout)                no("T5", "concurrent hammer HUNG");
             else if (wo != 1 || ro != 1) no("T5", "concurrent brook_open FAILED");
             else if (pu != STRESS_FRAMES || po != STRESS_FRAMES) no("T5", "frame loss under concurrent hammer");

@@ -14,10 +14,9 @@
 
 #include "box/bay.h"
 #include "box/file.h"
-#include "box/touch.h"
 #include "box/system.h"
+#include "box/luggage.h"
 #include "box/core/cabin.h"
-#include "box/core/result.h"
 #include "box/debug.h"
 #include "box/string.h"
 
@@ -27,6 +26,21 @@
 #define PAGE_SIZE     4096
 #define CHILD_COUNT   2
 #define CHILD_LOOPS   50
+
+/* A child's role is its LUGGAGE — the line it was started with, in its cabin
+ * before its first instruction.
+ *
+ * This used to be "my spawner's pid is not 2, so I must be a child": the
+ * shell's seat number written as a literal, standing in for the question
+ * actually being asked. The shell is a program like any other and its pid is
+ * whatever the boot happened to hand it, so any boot that seats it elsewhere
+ * turns the parent run into a child run — a child that creates the file, the
+ * claim Bay and children of its OWN while the real parent waits on it. Word 1
+ * is there or this program is the parent, and there is nothing in between; the
+ * matrix starts `write_concurrent` with no second word, and only this file
+ * adds one. */
+#define LINE_CHILD       "write_concurrent slice"
+#define ROLE_WORD_SLICE  "slice"
 
 static char wbuf[PAGE_SIZE];
 static char rbuf[PAGE_SIZE];
@@ -87,13 +101,16 @@ static int child_role(uint32_t my_pid)
 
 int main(void)
 {
-    CabinInfo *ci = cabin_info();
-    uint32_t my_pid = ci ? ci->pid : 0;
+    uint32_t my_pid = cabin_info()->pid;
 
-    /* Child branch — spawned by another instance. Shell PID is 2; if
-     * spawner is anything else (and not zero) we're a child. */
-    if (ci && ci->spawner_pid != 0 && ci->spawner_pid != 2) {
-        return child_role(my_pid);
+    /* Word 1 of the luggage names the role, and it is already there. A word we
+     * do not know is a caller's mistake — say so and end, rather than run the
+     * parent half a second time inside a child. */
+    const char *role = luggage_word(1);
+    if (role) {
+        if (strcmp(role, ROLE_WORD_SLICE) == 0) return child_role(my_pid);
+        kdbg_print("[WC C-?] unknown role '%s'", role);
+        return 255;
     }
 
     /* Parent. Pre-create the file with N×PAGE_SIZE bytes by writing once
@@ -125,56 +142,42 @@ int main(void)
     }
     *claim = 0;
 
-    /* Subscribe to process:died so we know when children finish. */
-    TouchTag died_tag = TOUCH_TAG_ID(TOUCH_TAG_PROCESS_DIED);
-    if (touch_claim(died_tag, TOUCH_REST, 0, 0) != 0) {
-        kdbg_print("[WC] claim process:died FAIL");
-        bay_release(claim);
-        delete(fid);
-        return 1;
-    }
-
-    int kids[CHILD_COUNT];
-    int kids_alive = 0;
+    /* Each child is spawned as an INCARNATION — (pid, generation) — because a
+     * pid alone names a seat and seats are re-let. */
+    int      kids[CHILD_COUNT];
+    uint32_t gens[CHILD_COUNT];
     for (int i = 0; i < CHILD_COUNT; i++) {
-        kids[i] = proc_exec("write_concurrent");
-        if (kids[i] < 0) {
+        kids[i] = proc_exec_gen(LINE_CHILD, NULL, &gens[i]);
+        if (kids[i] <= 0) {
             kdbg_print("[WC] spawn child %d rc=%d", i, kids[i]);
-            touch_release(died_tag);
             bay_release(claim);
             delete(fid);
             return 1;
         }
-        kids_alive++;
     }
 
-    /* Wait for all children to die. Bounded poll with deadline. */
-    int seen[CHILD_COUNT] = {0};
-    for (int spin = 0; spin < 200 && kids_alive > 0; spin++) {
-        Touch t;
-        int rc = touch_await(died_tag, &t, 200);
-        if (rc != 0) continue;
-        const uint8_t *p = t.payload;
-        if (t.payload_len < 8) continue;
-        uint32_t dead_pid;
-        memcpy(&dead_pid, p, 4);
-        for (int i = 0; i < CHILD_COUNT; i++) {
-            if (kids[i] == (int)dead_pid && !seen[i]) {
-                seen[i] = 1;
-                kids_alive--;
-                kdbg_print("[WC] child %d (pid=%u) exited", i, dead_pid);
-                break;
-            }
-        }
-    }
-
-    touch_release(died_tag);
-
-    if (kids_alive > 0) {
-        kdbg_print("[WC] FAIL: %d children still alive after timeout", kids_alive);
-        bay_release(claim);
-        delete(fid);
-        return 1;
+    /* Wait for each child as a STATE, one after the other.
+     *
+     * This was a claim on the process:died multicast drained by 200 turns of a
+     * 200 ms await — a forty-second guess that printed "children still alive
+     * after timeout" on a host that was merely loaded, and that could also
+     * simply MISS a death: a multicast is best-effort, and a claim armed after
+     * a death never sees it at all. process_gone asks the child's own record
+     * instead: a child that has already finished answers at once, a live one is
+     * parked on, and there is no window between asking and being registered.
+     * A death that never comes is now a wedge Nightwatch convicts on facts,
+     * not a red run on a busy machine.
+     *
+     * The claim Bay and the file stay held across every one of these waits —
+     * a child still writing must not find either re-keyed under it. */
+    for (int i = 0; i < CHILD_COUNT; i++) {
+        int32_t child_exit = 0;
+        int     gone       = process_gone((uint32_t)kids[i], gens[i], &child_exit);
+        if (gone != 0)
+            kdbg_print("[WC] child %d (pid=%d gen=%u): process.gone refused rc=%d",
+                       i, kids[i], gens[i], gone);
+        else
+            kdbg_print("[WC] child %d (pid=%d) ended with %d", i, kids[i], (int)child_exit);
     }
 
     uint32_t claimed = *claim;

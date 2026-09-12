@@ -430,7 +430,21 @@ static bool result_wait_umwait(Result* out, uint32_t timeout_ms) {
     }
 }
 
-static bool result_wait_yield(Result* out, uint32_t timeout_ms) {
+/* The WAITPKG-less fallback for a synchronous submit's reply: a hot spin on
+ * PAUSE, never a yield.
+ *
+ * It was called result_wait_yield and it never yielded once — the name was a
+ * description of the OTHER fallback shape in this file (result_wait_ipc_yield,
+ * which really does hand the core back) pasted onto a loop that only ever
+ * spins. A name that says the loop re-enters the kernel when it does not is
+ * worse than no name at all: it invites the reader to account for a syscall
+ * per turn that is not there, and to look elsewhere for the spin that is.
+ *
+ * The spin is correct here and the yield would not be: the answer is written
+ * by a K-Core on another core, so nothing this strand can be scheduled behind
+ * is in the way, and the reply lands whether this core gives itself away or
+ * not. Every caller of this path is a submit already in flight. */
+static bool result_wait_spin(Result* out, uint32_t timeout_ms) {
     uint64_t deadline = 0;
     if (timeout_ms > 0) {
         deadline = rdtsc() + cpu_ms_to_tsc(timeout_ms);
@@ -445,8 +459,6 @@ static bool result_wait_yield(Result* out, uint32_t timeout_ms) {
 
         if (timeout_ms > 0 && rdtsc() >= deadline) return false;
 
-        /* Pause keeps multi-core friendly: K-Core writes Result directly;
-         * we just spin until it appears. No kernel re-entry needed. */
         __asm__ volatile("pause");
     }
 }
@@ -461,7 +473,7 @@ static bool result_wait_raw(Result* out, uint32_t timeout_ms) {
     if (result_pop_non_ipc(out)) return true;
 
     if (cpu_has_waitpkg()) return result_wait_umwait(out, timeout_ms);
-    return result_wait_yield(out, timeout_ms);
+    return result_wait_spin(out, timeout_ms);
 }
 
 /* Replies dropped because their cloakroom token answered an EARLIER,
@@ -535,10 +547,23 @@ bool result_wait(Result* out, uint32_t expect_cookie, uint32_t timeout_ms) {
     return ok;
 }
 
-/* Block until ANY result arrives — no IPC/non-IPC filtering.
- * For IPC servers (display daemon) that receive both kernel results
- * (from their own VGA/keyboard calls) and IPC messages.
- * Drains both stashes first, then pops from the ring. */
+/* Spin until ANY result arrives — no IPC/non-IPC filtering. For IPC servers
+ * (the display daemon) that receive both kernel results, from their own calls,
+ * and IPC messages. Drains both stashes first, then pops from the ring.
+ *
+ * "Spin", and the name should say so: this is the same hot PAUSE loop as
+ * result_wait_spin above, with no WAITPKG arm, no yield and no park — with
+ * timeout_ms == 0 it is an UNBOUNDED wait that never once re-enters the kernel.
+ * That is deliberate and ruled on, for the reason written out over
+ * result_wait_ipc_turnin below: Turn In is the sleep for a strand waiting on
+ * traffic nobody has asked for, and giving it to a caller that already has a
+ * request in flight was measured to degrade into a yield per iteration.
+ *
+ * ‼ The name still says "wait" where the static half of this pair has learned
+ * to say "spin". It is public API — box/core/result.h declares it and
+ * box::message (boxcxx) calls it by this name — so making it honest is one
+ * rename across three files at once, not something to leave half-applied
+ * behind a second spelling. */
 bool result_wait_any(Result* out, uint32_t timeout_ms) {
     if (!out) return false;
     if (result_pop_ipc(out))     return true;
@@ -626,7 +651,7 @@ static bool result_wait_ipc_yield(Result* out, uint32_t timeout_ms) {
     }
 }
 
-/* The unbounded wait — and the only one that sleeps.
+/* The only wait in this file that sleeps — and NOT the only unbounded one.
  *
  * A wait with no deadline is a wait that may last a week: the shell's readline
  * sits here from one prompt to the next keystroke. Every one of those seconds
@@ -639,6 +664,19 @@ static bool result_wait_ipc_yield(Result* out, uint32_t timeout_ms) {
  * break sixteen-core runs — a child's exit racing its own kill, process:died
  * lost for three seconds. A bounded wait is also, by construction, short: the
  * strand that set the deadline expects to be back soon. It keeps its spin.
+ *
+ * ‼ AND THE UNBOUNDED WAITS THAT ARE NOT THIS ONE KEEP THEIR SPIN TOO. This
+ * used to claim it was the only wait without a deadline; it is not. A
+ * synchronous submit with timeout_ms == 0 (result_wait → result_wait_raw →
+ * umwait or result_wait_spin) waits with no deadline and does not sleep, and
+ * neither does result_wait_any. That is a RULING, not an omission: Turn In
+ * asks for sleep only when the POCKET ring is empty, and inside a synchronous
+ * submit the caller has just put its own request there — so the ask never
+ * qualifies and the park degrades into one yield per turn of the loop.
+ * MEASURED on the attempt that proved it (turnin.c): 5505 parks for the
+ * display daemon and 21 for the shell against NINE deliveries, and a machine
+ * that stopped dead. An unbounded wait for an answer already in flight is not
+ * an idle strand; only a wait for traffic nobody has asked for is.
  *
  * The mark is taken BEFORE the look, every round: what arrives after the mark
  * either turns up in the look (and we return it) or refuses the sleep. */
