@@ -38,8 +38,11 @@
  * ever calls print/printf needs one. 280 → 160 when the io_buf telegram
  * buffer gave way to the console-lane frame: the block now carries a lane
  * handle, one ConsoleRun under construction and the colour state (S2+S3 of
- * the console-stream epic). */
-#define STRAND_PRINT_BYTES     160u
+ * the console-stream epic). 160 -> 168 when the console's order became the
+ * STRAND's claim rather than one pointer shared by the cabin: a Bay claim
+ * belongs to the strand that opened it, so a shared pointer is unmapped under
+ * every sibling the moment that strand exits. */
+#define STRAND_PRINT_BYTES     168u
 
 typedef struct StrandInfo {
     uint64_t tcb_self;        /* @0  — System V variant-2 TCB self-pointer (fs:0) */

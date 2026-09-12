@@ -12,6 +12,8 @@
 #include "use_context.h"
 #include "auth_tags.h"
 #include "atomics.h"
+#include "bay.h"       /* BayCleanupCabin — the claims are the cabin's */
+#include "brook.h"     /* BrookCleanupCabin — the mapping half of a Brook claim */
 
 /*
  * cabin_set_tag_bit — intern a single tag id into the cabin's fast-path
@@ -212,6 +214,39 @@ void cabin_destroy(cabin_t *cabin)
         }
         cabin->tag_overflow_retired = NULL;
     }
+
+    /* Every Bay window this cabin holds goes now, while its page tables are
+     * still standing. It cannot go at strand death: the window is in an
+     * address space the siblings are still running in. And it cannot go after
+     * the line below: vmm_destroy_context would walk Bay-owned pages as though
+     * they were this cabin's alone and hand them back to the PMM while another
+     * cabin still holds the same tag. */
+    BayCleanupCabin(cabin);
+
+    /* Brook's mapping half, for the same reason and with the same deadline.
+     * Its seats are already vacated — each strand did that as it died — but
+     * the header and slot pages are still in these page tables, and they are
+     * shared with whatever cabin holds the other end of the stream. Left for
+     * vmm_destroy_context they would be handed back to the PMM under a live
+     * peer. */
+    BrookCleanupCabin(cabin);
+
+    /* The leaves of the MemTag held-tag set. Unlike Bay and Brook above
+     * these are plain kernel-heap bitmaps with no relationship to this
+     * cabin's page tables, so vmm_destroy_context is not a deadline they
+     * race — but they go here rather than earlier because everything
+     * above still gets to ask what this cabin held while it unwinds
+     * (Bay and Brook gate their windows on memtag guards), and they go
+     * before vmm_destroy_context so all of the cabin's heap-side
+     * bookkeeping is released in one place ahead of the point where the
+     * address space stops existing.
+     *
+     * Freeing at all is safe only here: a leaf is install-once precisely
+     * so the lock-free readers (MemRegionAccessAllowed, reached from #PF)
+     * may dereference one without a lock, and strand_count has already
+     * reached 0, so no strand remains that could resolve this cabin
+     * through process_find_ref and start such a read. */
+    MemTagHeldSetRelease(cabin->active_memtags);
 
     if (cabin->vmm)
     {

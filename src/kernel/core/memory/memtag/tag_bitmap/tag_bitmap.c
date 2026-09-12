@@ -102,6 +102,7 @@ static void CacheClearEntry(MemTagQueryCacheEntry *e) {
     if (e->result_ids) { kfree(e->result_ids); e->result_ids = NULL; }
     if (e->tag_key)    { kfree(e->tag_key);    e->tag_key    = NULL; }
     e->result_count = 0;
+    e->result_total = 0;
     e->tag_count    = 0;
     e->used         = 0;
     e->gen_snapshot = 0;
@@ -141,14 +142,15 @@ static uint64_t CacheHash(const uint16_t *sorted_tags, uint16_t count,
     return h;
 }
 
-/* Look up cache. On hit, writes up to max into out, updates LRU, returns
- * actual result count. On miss, returns SIZE_MAX (sentinel). */
+/* Look up cache. On hit, writes up to max into out, sets *out_emitted to
+ * how many were written, updates LRU, and returns the TRUE match total.
+ * On miss, returns SIZE_MAX (sentinel). */
 #define MEMTAG_CACHE_MISS  ((size_t)-1)
 
 static size_t CacheLookup(MemTagBitmapIndex *idx, uint64_t hash,
                            const uint16_t *sorted_tags, uint16_t count,
                            uint8_t query_type,
-                           uint32_t *out, size_t max) {
+                           uint32_t *out, size_t max, size_t *out_emitted) {
     for (int i = 0; i < MEMTAG_QUERY_CACHE_SLOTS; i++) {
         MemTagQueryCacheEntry *e = &idx->cache[i];
         if (!e->used) continue;
@@ -158,12 +160,19 @@ static size_t CacheLookup(MemTagBitmapIndex *idx, uint64_t hash,
         if (e->query_type != query_type) continue;
         if (count > 0 && memcmp(e->tag_key, sorted_tags,
                                  count * sizeof(uint16_t)) != 0) continue;
+        /* The slot was filled by a caller with a smaller buffer than the
+         * match set, and THIS caller has room for more than it holds.
+         * Serving the hit would hand back fewer ids than the caller could
+         * take, purely because someone earlier asked for less. Recompute
+         * instead — the store below then upgrades the slot. */
+        if (e->result_count < e->result_total && max > e->result_count) break;
         /* Hit */
         size_t n = e->result_count < max ? e->result_count : max;
         if (n > 0) memcpy(out, e->result_ids, n * sizeof(uint32_t));
         e->last_used = ++idx->cache_counter;
         idx->cache_hits++;
-        return e->result_count;
+        if (out_emitted) *out_emitted = n;
+        return e->result_total;
     }
     idx->cache_misses++;
     return MEMTAG_CACHE_MISS;
@@ -172,7 +181,8 @@ static size_t CacheLookup(MemTagBitmapIndex *idx, uint64_t hash,
 static void CacheStore(MemTagBitmapIndex *idx, uint64_t hash,
                         const uint16_t *sorted_tags, uint16_t count,
                         uint8_t query_type,
-                        const uint32_t *result, uint32_t result_count) {
+                        const uint32_t *result, uint32_t result_count,
+                        uint32_t result_total) {
     /* Find empty slot or LRU victim */
     int victim = 0;
     uint64_t oldest = ~0ULL;
@@ -202,6 +212,7 @@ static void CacheStore(MemTagBitmapIndex *idx, uint64_t hash,
     }
 
     e->result_count = result_count;
+    e->result_total = result_total;
     e->tag_count    = count;
     e->key_hash     = hash;
     e->query_type   = query_type;
@@ -323,26 +334,78 @@ bool MemTagBitmapHas(MemTagBitmapIndex *idx,
 
 /* ─── Query engines ──────────────────────────────────────────────────── */
 
-/* Scan workspace bitmap and emit set bits as region_ids into out[]. */
+/* Scan workspace bitmap and emit set bits as region_ids into out[].
+ * Writes at most `max`, sets *out_emitted to how many it wrote, and
+ * RETURNS the total number of set bits — the scan runs to the end of the
+ * workspace even after out[] fills, because a caller that cannot be told
+ * how many matches it missed cannot tell truncation from an exact answer.
+ * The tail costs one clear-lowest-bit step per set bit; the ids
+ * themselves are only materialised while there is room for them.
+ * (Deliberately NOT __builtin_popcountll: on this target GCC lowers it to
+ * a libgcc __popcountdi2 call, and the kernel links no libgcc.) */
 static size_t EmitFromBitmap(const uint8_t *bits, uint32_t bit_count,
-                              uint32_t *out, size_t max) {
-    size_t n = 0;
+                              uint32_t *out, size_t max, size_t *out_emitted) {
+    size_t n = 0, total = 0;
     /* Walk 8 bytes at a time, then trailing bytes */
     uint32_t word_count = bit_count / 64;
     const uint64_t *words = (const uint64_t *)bits;
-    for (uint32_t w = 0; w < word_count && n < max; w++) {
+    for (uint32_t w = 0; w < word_count; w++) {
         uint64_t v = words[w];
-        while (v && n < max) {
-            int bit = __builtin_ctzll(v);
-            uint32_t region_id = w * 64 + (uint32_t)bit;
-            out[n++] = region_id;
+        while (v) {
+            if (n < max) out[n++] = w * 64 + (uint32_t)__builtin_ctzll(v);
+            total++;
             v &= v - 1;
         }
     }
     /* Trailing bits in the last partial word */
-    for (uint32_t b = word_count * 64; b < bit_count && n < max; b++) {
-        if (BitsTest(bits, b)) out[n++] = b;
+    for (uint32_t b = word_count * 64; b < bit_count; b++) {
+        if (!BitsTest(bits, b)) continue;
+        if (n < max) out[n++] = b;
+        total++;
     }
+    if (out_emitted) *out_emitted = n;
+    return total;
+}
+
+/* ─── Streaming walk over one tag's region set ───────────────────────── */
+
+size_t MemTagBitmapWalkTag(MemTagBitmapIndex *idx, uint16_t tag_id,
+                            uint32_t from_region_id,
+                            uint32_t *out, size_t max) {
+    if (!idx || !out || !max) return 0;
+
+    spin_lock(&idx->lock);
+    if (tag_id >= idx->bitmap_cap || !idx->bitmaps[tag_id]) {
+        spin_unlock(&idx->lock);
+        return 0;
+    }
+    MemTagBitmap *bm = idx->bitmaps[tag_id];
+    size_t n = 0;
+    if (bm->bits && from_region_id < bm->bit_count) {
+        uint32_t word_count = bm->bit_count / 64;
+        const uint64_t *words = (const uint64_t *)bm->bits;
+        uint32_t w = from_region_id >> 6;
+        for (; w < word_count && n < max; w++) {
+            uint64_t v = words[w];
+            /* First word of the resume: drop the bits we already handed
+             * out on the previous batch, so the cursor is half-open at
+             * from_region_id without a second pass over them. */
+            if (w == (from_region_id >> 6) && (from_region_id & 63))
+                v &= ~((1ULL << (from_region_id & 63)) - 1ULL);
+            while (v && n < max) {
+                int bit = __builtin_ctzll(v);
+                out[n++] = w * 64 + (uint32_t)bit;
+                v &= v - 1;
+            }
+        }
+        /* Trailing bits past the last whole word. */
+        uint32_t b = word_count * 64;
+        if (b < from_region_id) b = from_region_id;
+        for (; b < bm->bit_count && n < max; b++) {
+            if (BitsTest(bm->bits, b)) out[n++] = b;
+        }
+    }
+    spin_unlock(&idx->lock);
     return n;
 }
 
@@ -439,7 +502,8 @@ static size_t QueryCore(MemTagBitmapIndex *idx,
                          const uint16_t *any,      uint16_t n_any,
                          const uint16_t *excl,     uint16_t n_excl,
                          uint8_t query_type,
-                         uint32_t *out, size_t max) {
+                         uint32_t *out, size_t max, size_t *out_total) {
+    if (out_total) *out_total = 0;
     if (!idx || !out || !max) return 0;
 
     /* Build cache key from sorted required+any+excluded tag arrays.
@@ -465,10 +529,13 @@ static size_t QueryCore(MemTagBitmapIndex *idx,
     uint64_t hash = CacheHash(key_tags_buf, key_n, query_type);
 
     spin_lock(&idx->lock);
-    size_t cached = CacheLookup(idx, hash, key_tags_buf, key_n, query_type, out, max);
+    size_t emitted = 0;
+    size_t cached = CacheLookup(idx, hash, key_tags_buf, key_n, query_type,
+                                 out, max, &emitted);
     if (cached != MEMTAG_CACHE_MISS) {
         spin_unlock(&idx->lock);
-        return cached;
+        if (out_total) *out_total = cached;
+        return emitted;
     }
 
     /* Cache miss → compute. */
@@ -507,38 +574,45 @@ static size_t QueryCore(MemTagBitmapIndex *idx,
             SubtractExcluded(idx, excl, n_excl, workspace, effective_bits);
     }
 
-    size_t count = EmitFromBitmap(workspace, effective_bits, out, max);
+    size_t total = EmitFromBitmap(workspace, effective_bits, out, max, &emitted);
 
-    /* Store full result in cache (may be larger than `max`; for cache we
-     * store what we have — partial truncation acceptable per TagFS pattern). */
-    CacheStore(idx, hash, key_tags_buf, key_n, query_type, out, (uint32_t)count);
+    /* Cache the ids we materialised AND the total we counted. Storing the
+     * total is what lets a later caller with a bigger buffer be told the
+     * slot is short and get a recompute (CacheLookup) rather than inherit
+     * this caller's truncation. */
+    CacheStore(idx, hash, key_tags_buf, key_n, query_type,
+                out, (uint32_t)emitted, (uint32_t)total);
 
     kfree(workspace);
     spin_unlock(&idx->lock);
-    return count;
+    if (out_total) *out_total = total;
+    return emitted;
 }
 
 size_t MemTagBitmapQueryAnd(MemTagBitmapIndex *idx,
                              const uint16_t *tag_ids, uint16_t tag_count,
-                             uint32_t *out, size_t max_results) {
+                             uint32_t *out, size_t max_results,
+                             size_t *out_total) {
     return QueryCore(idx, tag_ids, tag_count, NULL, 0, NULL, 0,
-                     MEMTAG_QUERY_TYPE_AND, out, max_results);
+                     MEMTAG_QUERY_TYPE_AND, out, max_results, out_total);
 }
 
 size_t MemTagBitmapQueryOr(MemTagBitmapIndex *idx,
                             const uint16_t *tag_ids, uint16_t tag_count,
-                            uint32_t *out, size_t max_results) {
+                            uint32_t *out, size_t max_results,
+                            size_t *out_total) {
     return QueryCore(idx, NULL, 0, tag_ids, tag_count, NULL, 0,
-                     MEMTAG_QUERY_TYPE_OR, out, max_results);
+                     MEMTAG_QUERY_TYPE_OR, out, max_results, out_total);
 }
 
 size_t MemTagBitmapQueryMixed(MemTagBitmapIndex *idx,
                                const uint16_t *required, uint16_t n_req,
                                const uint16_t *any,      uint16_t n_any,
                                const uint16_t *excluded, uint16_t n_excl,
-                               uint32_t *out, size_t max_results) {
+                               uint32_t *out, size_t max_results,
+                               size_t *out_total) {
     return QueryCore(idx, required, n_req, any, n_any, excluded, n_excl,
-                     MEMTAG_QUERY_TYPE_MIXED, out, max_results);
+                     MEMTAG_QUERY_TYPE_MIXED, out, max_results, out_total);
 }
 
 /* ─── Stats ───────────────────────────────────────────────────────────── */

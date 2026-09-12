@@ -4,14 +4,15 @@
  *
  * Wrappers translate boxlib API calls into Brook* kernel internals:
  *
- *   SYSTEM_OP_BROOK_OPEN     boxlib brook_open()    → BrookOpenInternal
- *   SYSTEM_OP_BROOK_RELEASE  boxlib brook_release() → BrookReleaseInternal
- *   SYSTEM_OP_BROOK_INFO     diagnostic stats snapshot
+ *   SYSTEM_OP_BROOK_OPEN      boxlib brook_open()      → BrookOpenInternal
+ *   SYSTEM_OP_BROOK_RELEASE   boxlib brook_release()   → BrookReleaseInternal
+ *   SYSTEM_OP_BROOK_HANDOVER  boxlib brook_hand_over() → BrookHandOver
+ *   SYSTEM_OP_BROOK_INFO      diagnostic stats snapshot
  *
  * The wait/wake path runs entirely in userspace (pause / UMWAIT / yield
  * on the shared BrookHeader). Peer death is detected by reading the
  * kernel-managed *_alive flag — set in BrookOpenInternal, cleared in
- * BrookReleaseInternal / BrookCleanupProcess. No additional syscalls
+ * BrookReleaseInternal / BrookCleanupStrand. No additional syscalls
  * are needed for blocking.
  *
  * Crate convention follows bay_ops.c / touch_ops.c: the tag in_crate is
@@ -113,6 +114,29 @@ static int SysBrookRelease(const ManifestOp *op, Crate *crates,
 }
 
 /* ─────────────────────────────────────────────────────────────────────
+ * SYSTEM_OP_BROOK_HANDOVER
+ *   params: [u64 va_header][u32 to_pid]  (12 bytes)
+ *
+ * Moves the writer/reader seat to a sibling strand; the mapping stays
+ * with the cabin. No crate: nothing is returned but the verdict, and the
+ * caller already knows both the VA it handed over and the strand it
+ * handed it to.
+ * ───────────────────────────────────────────────────────────────────── */
+static int SysBrookHandOver(const ManifestOp *op, Crate *crates,
+                            uint16_t crate_count, const OpContext *ctx)
+{
+    (void)crates; (void)crate_count;
+    if (!ctx || !ctx->proc)  return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 12) return ERR_INVALID_ARGUMENT;
+
+    uint64_t va_header;
+    uint32_t to_pid;
+    memcpy(&va_header, op->params,     sizeof(uint64_t));
+    memcpy(&to_pid,    op->params + 8, sizeof(uint32_t));
+    return BrookHandOver(ctx->proc, va_header, to_pid);
+}
+
+/* ─────────────────────────────────────────────────────────────────────
  * SYSTEM_OP_BROOK_INFO — diagnostic snapshot.
  *   out_crate: 32 bytes — [u64 objects][u64 claims][u64 pages][u64 releases]
  * ───────────────────────────────────────────────────────────────────── */
@@ -143,9 +167,10 @@ error_t BrookOpsRegister(void)
         uint32_t    auth;
         const char *name;
     } table[] = {
-        { SYSTEM_OP_BROOK_OPEN,    SysBrookOpen,    OP_AUTH_APP, "system.brook.open"    },
-        { SYSTEM_OP_BROOK_RELEASE, SysBrookRelease, OP_AUTH_APP, "system.brook.release" },
-        { SYSTEM_OP_BROOK_INFO,    SysBrookInfo,    OP_AUTH_APP, "system.brook.info"    },
+        { SYSTEM_OP_BROOK_OPEN,     SysBrookOpen,     OP_AUTH_APP, "system.brook.open"     },
+        { SYSTEM_OP_BROOK_RELEASE,  SysBrookRelease,  OP_AUTH_APP, "system.brook.release"  },
+        { SYSTEM_OP_BROOK_HANDOVER, SysBrookHandOver, OP_AUTH_APP, "system.brook.handover" },
+        { SYSTEM_OP_BROOK_INFO,     SysBrookInfo,     OP_AUTH_APP, "system.brook.info"     },
     };
 
     for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {

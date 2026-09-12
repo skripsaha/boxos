@@ -93,8 +93,15 @@ static int SysMemTagQuery(const ManifestOp *op, Crate *crates,
 
     uint8_t *kbuf = (uint8_t *)vmm_user_buf_alloc_out(need_bytes);
     if (!kbuf) { kfree(spec); return ERR_NO_MEMORY; }
-    uint32_t count_u32 = (uint32_t)r.count;
-    memcpy(kbuf, &count_u32, sizeof(uint32_t));
+    /* The header word is the TRUE total, not what fitted. `r.count` is how
+     * many ids follow — the caller derives that from the byte count anyway —
+     * while `r.total` is how many exist. Sending `count` here made the two
+     * indistinguishable, so a caller could not tell "there are 64 regions"
+     * from "there are 4000 and you were handed 64", and every query that hit
+     * the ceiling lied by omission. The clamp above still governs how many
+     * ids are copied; only the number the caller is told changed. */
+    uint32_t total_u32 = (uint32_t)r.total;
+    memcpy(kbuf, &total_u32, sizeof(uint32_t));
     if (r.count > 0)
         memcpy(kbuf + sizeof(uint32_t), r.region_ids,
                r.count * sizeof(uint32_t));

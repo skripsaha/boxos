@@ -78,7 +78,22 @@ typedef struct __packed {
      * about itself, which is why the verdict convicts on facts and never on
      * this token alone. It costs the waiter two stores per submit. */
     volatile uint64_t awaiting;
-    uint8_t           _pad_line1[48];   /* fill cacheline 1                */
+    /* Answers the kernel ACCEPTED for this ring but could not fit into it —
+     * the Owed queue's depth (kring.c). Written by the kernel under the
+     * owner's result_owed_lock, read-only for userspace.
+     *
+     * It sits HERE, on the producer cacheline, for the same reason
+     * TouchRingHeader.owed does: that is the line the consumer already
+     * watches. boxlib's bounded waits arm UMONITOR on &tail and then UMWAIT
+     * (result.c, result_wait_umwait / result_wait_ipc_umwait), and a ring that
+     * is full has a tail that will not move — a consumer that drained its
+     * slots and went back to sleep would never learn the kernel is still
+     * holding answers for it. Writing this counter writes that line, so the
+     * store that records the debt is also what stirs the sleeper; no bell had
+     * to be invented for it. The debt itself is settled by the owner at the
+     * syscall gate, not by anyone reading this number. */
+    volatile uint64_t owed;
+    uint8_t           _pad_line1[40];   /* fill cacheline 1                */
 } ResultRingHeader;
 
 _Static_assert(sizeof(ResultRingHeader) == 128,
@@ -90,6 +105,9 @@ _Static_assert(__builtin_offsetof(ResultRingHeader, tail) == 64,
 _Static_assert(__builtin_offsetof(ResultRingHeader, awaiting) == 72,
                "ResultRingHeader.awaiting must sit at offset 72 — both sides "
                "of the boundary agree on it by number, not by luck");
+_Static_assert(__builtin_offsetof(ResultRingHeader, owed) == 80,
+               "ResultRingHeader.owed must share cacheline 1 with tail — the "
+               "consumer's UMONITOR watches that line and nothing else");
 
 /* Per-slot Vyukov-style envelope: payload + generation counter.
  * Lives at slots_base + (idx % slot_count_max) * RESULT_SLOT_SIZE. */

@@ -681,6 +681,7 @@ static size_t ResolveTagStrs(const char *const *strs, uint16_t *out, size_t max)
 void MemTagQueryAndInto_(const char *const *tag_strs, MemTagResult *out) {
     if (!out) return;
     out->count = 0;
+    out->total = 0;
     if (!g_memtag_initialized) return;
 
     uint16_t ids[64];
@@ -691,13 +692,13 @@ void MemTagQueryAndInto_(const char *const *tag_strs, MemTagResult *out) {
     }
     out->count = MemTagBitmapQueryAnd(&g_bitmap_index, ids, (uint16_t)n,
                                        out->region_ids,
-                                       sizeof(out->region_ids) /
-                                       sizeof(out->region_ids[0]));
+                                       MEMTAG_QUERY_MAX_IDS, &out->total);
 }
 
 void MemTagQueryOrInto_(const char *const *tag_strs, MemTagResult *out) {
     if (!out) return;
     out->count = 0;
+    out->total = 0;
     if (!g_memtag_initialized) return;
 
     uint16_t ids[64];
@@ -708,8 +709,7 @@ void MemTagQueryOrInto_(const char *const *tag_strs, MemTagResult *out) {
     if (kn == 0) return;
     out->count = MemTagBitmapQueryOr(&g_bitmap_index, known, kn,
                                       out->region_ids,
-                                      sizeof(out->region_ids) /
-                                      sizeof(out->region_ids[0]));
+                                      MEMTAG_QUERY_MAX_IDS, &out->total);
 }
 
 void MemTagQueryMixedInto_(const char *const *required,
@@ -718,6 +718,7 @@ void MemTagQueryMixedInto_(const char *const *required,
                             MemTagResult *out) {
     if (!out) return;
     out->count = 0;
+    out->total = 0;
     if (!g_memtag_initialized) return;
 
     uint16_t req[64], an[64], ex[64];
@@ -739,8 +740,7 @@ void MemTagQueryMixedInto_(const char *const *required,
                                          a2,  na2,
                                          e2,  ne2,
                                          out->region_ids,
-                                         sizeof(out->region_ids) /
-                                         sizeof(out->region_ids[0]));
+                                         MEMTAG_QUERY_MAX_IDS, &out->total);
 }
 
 /* Return-by-value compat shims — kept for source compat with callers
@@ -836,48 +836,131 @@ void MemTagPmmFreed(uintptr_t base_phys, size_t pages) {
  *  Phase 2A — Enforcement infrastructure
  * ═══════════════════════════════════════════════════════════════════ */
 
-/* Per-cabin active mask: 1024 bits = 16 words. tag_id N → word N/64 bit N%64. */
-#define MEMTAG_MASK_WORDS  16
-#define MEMTAG_MASK_BITS   (MEMTAG_MASK_WORDS * 64)
+/* ─── Phase 2C enforcement walk batches ────────────────────────────── */
 
-/* ─── Phase 2C enforcement buffer caps ─────────────────────────────── */
+/* These are BATCH sizes for streaming cursors, not ceilings on the sets
+ * being walked. The enforcement walks below take one batch under the
+ * index (or bucket) lock, release it, do the PTE work with no memtag lock
+ * held, and come back for the next batch keyed by the last value they
+ * saw. Nothing is dropped for being past a limit; the limits are only how
+ * much stack one hop is allowed to borrow, which matters because the
+ * build runs -Wstack-usage=8192 and enforcement can run on the 16 KiB
+ * per-core kernel stack under a nested IRQ frame. */
 
-/* Max regions per single guard tag the enforcement walks see in one
- * EnforceForCabinTag call. Production-typical region count per tag is
- * <50 (Bay/Brook per cabin). Stack-budgeted ~1 KiB. Overflow drops the
- * tail — silent under load by design, but enforcement re-runs on every
- * Grant/Revoke/SetGuard so coverage is eventually-consistent. */
-#define MEMTAG_ENFORCE_REGIONS_PER_CALL   256u
+/* One 64-bit bitmap word carries exactly 64 region_ids, so a 64-id batch
+ * is the widest run MemTagBitmapWalkTag can lift out of a single word
+ * without re-reading it. 64 × 4 B = 256 B. */
+#define MEMTAG_WALK_REGIONS_BATCH   64u
 
-/* Max attach snapshots per region in one enforce iteration. Bay/Brook
- * typically have 1-2 attachments per region (cabin-pair max). 32 covers
- * any production-scale shared mapping with headroom. */
-#define MEMTAG_ENFORCE_ATTACHES_PER_REGION  32u
+/* sizeof(MemRegionAttach) is 48 B, so 8 per batch is 384 B — one batch of
+ * regions and one of attaches together stay under half a kilobyte of the
+ * enforcement frame. */
+#define MEMTAG_WALK_ATTACHES_BATCH   8u
 
-/* Max guards per region the access-check considers. Region multi-guard
- * count is bounded by tag_count which is typically <8. 64 is the
- * Phase 1 query-array convention. */
+/* Sizes the per-region TAG-LIST snapshots: the guard filter in
+ * GuardsOnRegion and the pku:N scans. A region's tag_ids[] is a sorted
+ * set the region itself owns, and 64 matches the width every other
+ * tag-array in this file uses (ResolveTagStrs, the query key buffers). */
 #define MEMTAG_GUARDS_PER_REGION  64u
 
-/* Max PIDs sampled in MemTagSweepGuard. Live process count in production
- * is typically <100. Stack-budgeted at 1 KiB (256 × 4 B). */
-#define MEMTAG_SWEEP_PIDS_PER_CALL  256u
+/* ─── The held-tag set a cabin carries ─────────────────────────────────
+ *
+ * memtag.h carries the shape and the geometry's derivation. What matters
+ * here: the table is a plain uint64_t[MEMTAG_HELD_L1_ENTRIES] living in
+ * cabin_t whose slots hold leaf ADDRESSES, because process.c's
+ * process_active_memtags — the only handle this file has on a cabin's
+ * set — hands the table out as uint64_t*. The two casts below are the
+ * whole cost of that, and they are exact on LP64 x86_64.
+ *
+ * The bound on a tag id is the id space's own: tag_id is uint16_t and
+ * MEMTAG_INVALID_TAG_ID (0xFFFF) is the one value above MEMTAG_MAX_TAG_ID,
+ * so rejecting the invalid id is rejecting everything out of range. There
+ * is no second, smaller ceiling any more.
+ * ──────────────────────────────────────────────────────────────────── */
 
-static inline bool MaskHas(const uint64_t *mask, uint16_t tag_id) {
-    if (tag_id >= MEMTAG_MASK_BITS) return false;
-    return (mask[tag_id >> 6] >> (tag_id & 63)) & 1ULL;
+static inline uint32_t HeldWindow(uint16_t tag_id) {
+    return (uint32_t)tag_id / MEMTAG_HELD_LEAF_IDS;
 }
 
-static inline void MaskSetAtomic(uint64_t *mask, uint16_t tag_id) {
-    if (tag_id >= MEMTAG_MASK_BITS) return;
-    __atomic_or_fetch(&mask[tag_id >> 6], (1ULL << (tag_id & 63)),
+static inline uint32_t HeldWord(uint16_t tag_id) {
+    return ((uint32_t)tag_id % MEMTAG_HELD_LEAF_IDS) >> 6;
+}
+
+/* One ACQUIRE load. NULL means the window has no leaf, which is the
+ * truthful answer "this cabin holds no tag in it" — never a reason to
+ * allocate, so every reader below is allocation-free by construction. */
+static inline uint64_t *HeldLeaf(const uint64_t *held_l1, uint16_t tag_id) {
+    return (uint64_t *)(uintptr_t)__atomic_load_n(&held_l1[HeldWindow(tag_id)],
+                                                   __ATOMIC_ACQUIRE);
+}
+
+static inline bool HeldHas(const uint64_t *held_l1, uint16_t tag_id) {
+    if (!held_l1 || tag_id == MEMTAG_INVALID_TAG_ID) return false;
+    const uint64_t *leaf = HeldLeaf(held_l1, tag_id);
+    if (!leaf) return false;
+    uint64_t w = __atomic_load_n(&leaf[HeldWord(tag_id)], __ATOMIC_ACQUIRE);
+    return (w >> (tag_id & 63)) & 1ULL;
+}
+
+/* Grant path only. CAS-install with loser-frees, the pattern
+ * touch_bucket_get_or_create uses over this same id space: two strands
+ * granting different ids in the same window race on one word and the
+ * loser hands its leaf back, so no lock is introduced over the table and
+ * no new nesting with it. Returns the installed leaf, or NULL only when
+ * the kernel heap is out. */
+static uint64_t *HeldLeafInstall(uint64_t *held_l1, uint16_t tag_id) {
+    uint32_t  win  = HeldWindow(tag_id);
+    uint64_t *leaf = (uint64_t *)(uintptr_t)__atomic_load_n(&held_l1[win],
+                                                            __ATOMIC_ACQUIRE);
+    if (leaf) return leaf;
+
+    uint64_t *fresh = (uint64_t *)kmalloc(MEMTAG_HELD_LEAF_WORDS * sizeof(uint64_t));
+    if (!fresh) return NULL;
+    memset(fresh, 0, MEMTAG_HELD_LEAF_WORDS * sizeof(uint64_t));
+
+    uint64_t expected = 0;
+    if (!__atomic_compare_exchange_n(&held_l1[win], &expected,
+                                     (uint64_t)(uintptr_t)fresh, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        kfree(fresh);
+        return (uint64_t *)(uintptr_t)expected;
+    }
+    return fresh;
+}
+
+/* false only when the leaf could not be installed — the cabin's set is
+ * unchanged in that case, so the caller may report the failure honestly
+ * rather than leave a half-granted capability behind. */
+static bool HeldSet(uint64_t *held_l1, uint16_t tag_id) {
+    if (!held_l1 || tag_id == MEMTAG_INVALID_TAG_ID) return false;
+    uint64_t *leaf = HeldLeafInstall(held_l1, tag_id);
+    if (!leaf) return false;
+    __atomic_or_fetch(&leaf[HeldWord(tag_id)], (1ULL << (tag_id & 63)),
                       __ATOMIC_ACQ_REL);
+    return true;
 }
 
-static inline void MaskClearAtomic(uint64_t *mask, uint16_t tag_id) {
-    if (tag_id >= MEMTAG_MASK_BITS) return;
-    __atomic_and_fetch(&mask[tag_id >> 6], ~(1ULL << (tag_id & 63)),
+/* Never installs: a window with no leaf holds no tag, so a clear there
+ * has nothing to clear. That keeps revoke allocation-free too, which
+ * matters because revoke must not be able to fail for memory. */
+static void HeldClear(uint64_t *held_l1, uint16_t tag_id) {
+    if (!held_l1 || tag_id == MEMTAG_INVALID_TAG_ID) return;
+    uint64_t *leaf = HeldLeaf(held_l1, tag_id);
+    if (!leaf) return;
+    __atomic_and_fetch(&leaf[HeldWord(tag_id)], ~(1ULL << (tag_id & 63)),
                        __ATOMIC_ACQ_REL);
+}
+
+void MemTagHeldSetRelease(uint64_t *held_l1) {
+    if (!held_l1) return;
+    for (uint32_t i = 0; i < MEMTAG_HELD_L1_ENTRIES; i++) {
+        /* Exchange rather than load-then-store: the slot is emptied and
+         * the leaf taken in one step, so this is idempotent and a second
+         * call frees nothing. */
+        uint64_t *leaf = (uint64_t *)(uintptr_t)__atomic_exchange_n(&held_l1[i], 0,
+                                                                     __ATOMIC_ACQ_REL);
+        if (leaf) kfree(leaf);
+    }
 }
 
 /* ─── Guard flag mutation ─────────────────────────────────────────── */
@@ -929,47 +1012,34 @@ void       process_ref_dec(process_t *proc);
 extern uint64_t *process_active_memtags(process_t *proc);
 extern void     *process_get_cabin(process_t *proc);
 
-/* Forward declarations for Phase 2C engine — defined later in the file
+/* Forward declaration for the Phase 2C engine — defined later in the file
  * after MemRegionAccessAllowed / GuardsOnRegion, but called from Grant/
  * Revoke right below. */
-static void   SnapshotMask(const uint64_t *mask, uint64_t *mask_snap);
 static size_t EnforceForCabinTag(vmm_context_t *target_ctx,
-                                  const uint64_t *mask,
+                                  const uint64_t *held_l1,
                                   uint16_t tag_id, bool revoke);
-
-/* Internal: copy cabin's mask into mask_snap (zeroed if mask is NULL).
- * Snapshot under the assumption caller holds proc ref so mask memory
- * stays alive. */
-static void SnapshotMask(const uint64_t *mask, uint64_t *mask_snap) {
-    if (mask) {
-        for (uint32_t i = 0; i < MEMTAG_MASK_WORDS; i++)
-            mask_snap[i] = __atomic_load_n(&mask[i], __ATOMIC_ACQUIRE);
-    } else {
-        for (uint32_t i = 0; i < MEMTAG_MASK_WORDS; i++) mask_snap[i] = 0;
-    }
-}
 
 error_t MemCabinGrant(uint32_t pid, uint16_t tag_id) {
     if (!g_memtag_initialized || tag_id == MEMTAG_INVALID_TAG_ID)
         return ERR_INVALID_ARGUMENT;
-    if (tag_id >= MEMTAG_MASK_BITS) return ERR_NO_MEMORY;  /* over inline cap */
 
     process_t *proc = process_find_ref(pid);
     if (!proc) return ERR_OBJECT_NOT_FOUND;
-    uint64_t *mask = process_active_memtags(proc);
-    bool already_held = mask ? MaskHas(mask, tag_id) : false;
-    if (mask && !already_held) MaskSetAtomic(mask, tag_id);
+    uint64_t *held = process_active_memtags(proc);
+    bool already_held = HeldHas(held, tag_id);
+    if (held && !already_held && !HeldSet(held, tag_id)) {
+        /* The window's leaf could not be installed. The set is untouched,
+         * so say so rather than publish a grant that did not happen. */
+        process_ref_dec(proc);
+        return ERR_NO_MEMORY;
+    }
 
     /* Phase 2C — restore PTEs for previously revoked mappings now that
      * this cabin gained the guard. We hold the proc ref through enforcement
      * so the cabin's vmm_context_t stays alive across the PTE walk. */
     if (!already_held && MemTagRegistryIsGuard(&g_tag_registry, tag_id)) {
         vmm_context_t *ctx = (vmm_context_t *)process_get_cabin(proc);
-        if (ctx) {
-            uint64_t mask_snap[MEMTAG_MASK_WORDS];
-            SnapshotMask(mask, mask_snap);
-            (void)EnforceForCabinTag(ctx, mask_snap, tag_id, false);
-        }
+        if (ctx) (void)EnforceForCabinTag(ctx, held, tag_id, false);
     }
     process_ref_dec(proc);
 
@@ -984,24 +1054,19 @@ error_t MemCabinGrant(uint32_t pid, uint16_t tag_id) {
 error_t MemCabinRevoke(uint32_t pid, uint16_t tag_id) {
     if (!g_memtag_initialized || tag_id == MEMTAG_INVALID_TAG_ID)
         return ERR_INVALID_ARGUMENT;
-    if (tag_id >= MEMTAG_MASK_BITS) return OK;  /* never could have been set */
 
     process_t *proc = process_find_ref(pid);
     if (!proc) return ERR_OBJECT_NOT_FOUND;
-    uint64_t *mask = process_active_memtags(proc);
-    bool was_held = mask ? MaskHas(mask, tag_id) : false;
-    if (mask && was_held) MaskClearAtomic(mask, tag_id);
+    uint64_t *held = process_active_memtags(proc);
+    bool was_held = HeldHas(held, tag_id);
+    if (was_held) HeldClear(held, tag_id);
 
     /* Phase 2C — invalidate any live PTEs that were granted under
      * this capability. Hold proc ref through enforcement (same reason
      * as Grant). No-op if cabin never held it or tag not guard. */
     if (was_held && MemTagRegistryIsGuard(&g_tag_registry, tag_id)) {
         vmm_context_t *ctx = (vmm_context_t *)process_get_cabin(proc);
-        if (ctx) {
-            uint64_t mask_snap[MEMTAG_MASK_WORDS];
-            SnapshotMask(mask, mask_snap);
-            (void)EnforceForCabinTag(ctx, mask_snap, tag_id, true);
-        }
+        if (ctx) (void)EnforceForCabinTag(ctx, held, tag_id, true);
     }
     process_ref_dec(proc);
 
@@ -1015,25 +1080,38 @@ error_t MemCabinRevoke(uint32_t pid, uint16_t tag_id) {
 
 bool MemCabinHolds(uint32_t pid, uint16_t tag_id) {
     if (!g_memtag_initialized || tag_id == MEMTAG_INVALID_TAG_ID) return false;
-    if (tag_id >= MEMTAG_MASK_BITS) return false;
     process_t *proc = process_find_ref(pid);
     if (!proc) return false;
-    uint64_t *mask = process_active_memtags(proc);
-    bool h = mask ? MaskHas(mask, tag_id) : false;
+    bool h = HeldHas(process_active_memtags(proc), tag_id);
     process_ref_dec(proc);
     return h;
 }
 
 size_t MemCabinListTags(uint32_t pid, uint16_t *out, size_t max) {
-    if (!g_memtag_initialized || !out) return 0;
+    if (!g_memtag_initialized || !out || max == 0) return 0;
     process_t *proc = process_find_ref(pid);
     if (!proc) return 0;
-    uint64_t *mask = process_active_memtags(proc);
+    uint64_t *held = process_active_memtags(proc);
     size_t n = 0;
-    if (mask) {
-        for (uint16_t i = 0; i < MEMTAG_MASK_BITS && n < max; i++) {
-            uint64_t w = __atomic_load_n(&mask[i >> 6], __ATOMIC_ACQUIRE);
-            if ((w >> (i & 63)) & 1ULL) out[n++] = i;
+    if (held) {
+        /* Walks what the cabin HAS, not the id space it could have used:
+         * an uninstalled window costs one load and a zero word costs one
+         * load, and the set bits inside a word are lifted by ctz rather
+         * than probed one id at a time. The old flat loop asked the mask
+         * once per id and so cost 1024 loads to report a single tag; over
+         * the full 16-bit space that shape would have cost 65535. */
+        for (uint32_t win = 0; win < MEMTAG_HELD_L1_ENTRIES && n < max; win++) {
+            uint64_t *leaf = (uint64_t *)(uintptr_t)__atomic_load_n(&held[win],
+                                                                    __ATOMIC_ACQUIRE);
+            if (!leaf) continue;
+            for (uint32_t w = 0; w < MEMTAG_HELD_LEAF_WORDS && n < max; w++) {
+                uint64_t bits = __atomic_load_n(&leaf[w], __ATOMIC_ACQUIRE);
+                while (bits && n < max) {
+                    uint32_t b = (uint32_t)__builtin_ctzll(bits);
+                    bits &= bits - 1;
+                    out[n++] = (uint16_t)(win * MEMTAG_HELD_LEAF_IDS + w * 64u + b);
+                }
+            }
         }
     }
     process_ref_dec(proc);
@@ -1049,7 +1127,9 @@ size_t MemCabinListTags(uint32_t pid, uint16_t *out, size_t max) {
  * Hot-path properties:
  *   - region tag list snapshot via MemRegionRegistryListTags (bucket lock)
  *   - guard-flag check via tag registry single-bit read (registry lock)
- *   - mask read is atomic load, no lock
+ *   - held-set read is two dependent atomic loads (L1 slot, then leaf
+ *     word), no lock — and no allocation, since an empty slot already
+ *     answers "not held"
  * Total: ≤2 lock acquisitions per access. Acceptable for soft check;
  * Phase 2B will need a faster path via cached per-region guard summary. */
 /* Helper: filter region's tag list to guard-flagged tags only. Returns
@@ -1078,14 +1158,14 @@ bool MemRegionAccessAllowed(uint32_t pid, uint32_t region_id) {
     size_t ng = GuardsOnRegion(region_id, guards, MEMTAG_GUARDS_PER_REGION);
     if (ng == 0) return true;  /* no guards → no enforcement, allow */
 
-    /* Region has guards — need the cabin's mask. Missing process → deny. */
+    /* Region has guards — need the cabin's held set. Missing process → deny. */
     process_t *proc = process_find_ref(pid);
     if (!proc) return false;
-    uint64_t *mask = process_active_memtags(proc);
+    uint64_t *held = process_active_memtags(proc);
 
     bool allowed = true;
     for (size_t i = 0; i < ng; i++) {
-        if (!mask || !MaskHas(mask, guards[i])) { allowed = false; break; }
+        if (!HeldHas(held, guards[i])) { allowed = false; break; }
     }
     process_ref_dec(proc);
     return allowed;
@@ -1136,13 +1216,13 @@ uint16_t MemRegionFirstMissingGuard(uint32_t pid, uint32_t region_id) {
     if (ng == 0) return MEMTAG_INVALID_TAG_ID;
 
     /* Region has guards. If pid invalid, the FIRST guard is implicitly
-     * missing — report it. Real process: check actual mask. */
+     * missing — report it. Real process: check the actual held set. */
     process_t *proc = process_find_ref(pid);
-    uint64_t *mask = proc ? process_active_memtags(proc) : NULL;
+    uint64_t *held = proc ? process_active_memtags(proc) : NULL;
 
     uint16_t missing = MEMTAG_INVALID_TAG_ID;
     for (size_t i = 0; i < ng; i++) {
-        if (!mask || !MaskHas(mask, guards[i])) { missing = guards[i]; break; }
+        if (!HeldHas(held, guards[i])) { missing = guards[i]; break; }
     }
     if (proc) process_ref_dec(proc);
     return missing;
@@ -1389,92 +1469,145 @@ static bool RestoreAttachRange(const MemRegionAttach *att) {
 
 /* ─── Cabin-bound enforcement ─────────────────────────────────────── */
 
-/* Helper: does a cabin (identified by its already-fetched mask + pid)
+/* Helper: does a cabin (identified by its already-fetched held set)
  * satisfy ALL guard tags on a region? Stand-alone path bypassing the
  * process_find_ref lookup so we don't ref-bounce inside enforcement
  * loops. */
-static bool CabinSatisfiesRegion(const uint64_t *mask, uint32_t region_id) {
+static bool CabinSatisfiesRegion(const uint64_t *held_l1, uint32_t region_id) {
     uint16_t guards[MEMTAG_GUARDS_PER_REGION];
     size_t ng = GuardsOnRegion(region_id, guards, MEMTAG_GUARDS_PER_REGION);
     if (ng == 0) return true;
-    if (!mask) return false;
+    if (!held_l1) return false;
     for (size_t i = 0; i < ng; i++) {
-        if (!MaskHas(mask, guards[i])) return false;
+        if (!HeldHas(held_l1, guards[i])) return false;
     }
     return true;
 }
 
-/* Walk regions carrying `tag_id`, snapshot each region's attach list,
- * and for any attach matching `target_ctx`:
- *   - revoke=true  → clear PTE.P + shootdown + mark REVOKED
- *   - revoke=false → restore PTE.P only if cabin satisfies ALL guards
- *                    on the region → mark ACTIVE
+/* ─── Lock order the enforcement walks below rely on ───────────────────
  *
- * Returns count of attachments transitioned. `mask` is the cabin's
- * memtag mask snapshot (caller's lifetime). */
-static size_t EnforceForCabinTag(vmm_context_t *target_ctx,
-                                  const uint64_t *mask,
-                                  uint16_t tag_id, bool revoke) {
-    if (!target_ctx) return 0;
+ * Outermost to innermost, and every one of them is taken AND released
+ * inside the leaf call that needs it:
+ *
+ *   process_lock            (process_find_ref)
+ *   g_bitmap_index.lock     (MemTagBitmapWalkTag)
+ *   region bucket lock      (MemRegionRegistryWalkAttachs / ListTags /
+ *                            SetAttachState)
+ *   tag registry lock       (MemTagRegistryIsGuard)
+ *   vmm_context_t.lock + the shootdown IPI  (vmm_get_leaf_pte,
+ *                                            vmm_shootdown_pages)
+ *
+ * The enforcement engine holds NONE of them across a call into another
+ * subsystem, which is the whole reason the walks are resumable cursors
+ * instead of callbacks. A callback fired from inside the bitmap index
+ * would put the VMM context lock and the TLB shootdown IPI underneath
+ * g_bitmap_index.lock — a nesting that exists nowhere in this tree today
+ * and would have to be proved deadlock-free against every other path
+ * that takes those two in the other order. Taking a batch and letting go
+ * introduces no edge at all: the order above is exactly the order that
+ * was already there before this file learned to stream.
+ * ──────────────────────────────────────────────────────────────────── */
 
-    /* Query regions carrying tag_id. Bounded by MEMTAG_ENFORCE_REGIONS_PER_CALL
-     * (~1 KiB stack). SECURITY: if MORE regions carry this tag than the
-     * buffer holds, the bitmap query writes the first N and silently
-     * drops the rest. For a guard revoke this would leave PTEs live for
-     * the dropped regions — defeating the capability. We log a kernel
-     * warning so operators see when their tag-region density exceeds
-     * the enforcement budget. Bumping the constant + recompile is the
-     * production response (1 region_id = 4 B; even at 4096 we're 16 KiB
-     * stack — manageable since enforcement is off-the-hot-path). */
-    uint32_t region_ids[MEMTAG_ENFORCE_REGIONS_PER_CALL];
-    size_t nr = MemTagBitmapQueryAnd(&g_bitmap_index, &tag_id, 1,
-                                      region_ids,
-                                      MEMTAG_ENFORCE_REGIONS_PER_CALL);
-    if (nr == MEMTAG_ENFORCE_REGIONS_PER_CALL) {
-        /* Best-effort warning — the underlying bitmap doesn't expose a
-         * "total count" so we can't say "X dropped"; the hit-cap is the
-         * signal that there MAY be more. */
-        debug_printf("[MEMTAG] WARN: EnforceForCabinTag hit region cap "
-                     "(%u) for tag_id=%u — bump "
-                     "MEMTAG_ENFORCE_REGIONS_PER_CALL\n",
-                     (unsigned)MEMTAG_ENFORCE_REGIONS_PER_CALL,
-                     (unsigned)tag_id);
-    }
-    if (nr == 0) return 0;
+/* Apply one revoke/restore decision to every attach of `rid` owned by
+ * `target_ctx`, streaming the attach chain so a long chain is walked to
+ * its end rather than cut at a buffer's edge.
+ *
+ * The guard decision is taken ONCE per region: every attach of this
+ * region into this cabin answers CabinSatisfiesRegion identically (same
+ * held set, same region), and asking per attach only re-takes the bucket
+ * and registry locks for an answer that cannot differ. Asking first also
+ * means a region with nothing to do costs no chain walk at all. */
+static size_t EnforceRegionAttachesForCabin(uint32_t rid,
+                                             vmm_context_t *target_ctx,
+                                             const uint64_t *held_l1,
+                                             bool revoke) {
+    bool satisfies = CabinSatisfiesRegion(held_l1, rid);
+    /* Revoking a region the cabin still fully satisfies (it holds the
+     * region's other guards) would tear down a mapping policy still
+     * permits; restoring one it does not satisfy would hand back a
+     * mapping policy still denies. Either way: nothing to do. */
+    if (revoke == satisfies) return 0;
 
     size_t transitioned = 0;
-    MemRegionAttach snap[MEMTAG_ENFORCE_ATTACHES_PER_REGION];
-    for (size_t i = 0; i < nr; i++) {
-        uint32_t rid = region_ids[i];
-        size_t ns = MemRegionRegistrySnapshotAttachs(&g_region_registry,
-                                                      rid, snap,
-                                                      MEMTAG_ENFORCE_ATTACHES_PER_REGION);
-        for (size_t j = 0; j < ns; j++) {
-            MemRegionAttach *att = &snap[j];
+    MemRegionAttach batch[MEMTAG_WALK_ATTACHES_BATCH];
+    uintptr_t   cur_va  = 0;
+    const void *cur_ctx = NULL;
+    for (;;) {
+        size_t na = MemRegionRegistryWalkAttachs(&g_region_registry, rid,
+                                                  cur_va, cur_ctx, batch,
+                                                  MEMTAG_WALK_ATTACHES_BATCH);
+        if (na == 0) break;
+        for (size_t j = 0; j < na; j++) {
+            MemRegionAttach *att = &batch[j];
             if ((vmm_context_t *)att->ctx != target_ctx) continue;
 
             if (revoke) {
                 if (att->state != MEMTAG_ATTACH_ACTIVE) continue;
-                /* Optimisation: if cabin still satisfies all guards on
-                 * THIS region (i.e. region has multiple guards and cabin
-                 * holds the rest), skip the revoke. */
-                if (CabinSatisfiesRegion(mask, rid)) continue;
                 if (ClearAttachRange(att)) transitioned++;
                 MemRegionRegistrySetAttachState(&g_region_registry, rid,
                                                  att->ctx, att->va_base,
                                                  MEMTAG_ATTACH_REVOKED);
             } else {
                 if (att->state != MEMTAG_ATTACH_REVOKED) continue;
-                /* Only restore if cabin now satisfies ALL guards on the
-                 * region — restoring otherwise would create an inconsistent
-                 * state. */
-                if (!CabinSatisfiesRegion(mask, rid)) continue;
                 if (RestoreAttachRange(att)) transitioned++;
                 MemRegionRegistrySetAttachState(&g_region_registry, rid,
                                                  att->ctx, att->va_base,
                                                  MEMTAG_ATTACH_ACTIVE);
             }
         }
+        cur_va  = batch[na - 1].va_base;
+        cur_ctx = batch[na - 1].ctx;
+    }
+    return transitioned;
+}
+
+/* Walk EVERY region carrying `tag_id` and, for each attach belonging to
+ * `target_ctx`:
+ *   - revoke=true  → clear PTE.P + shootdown + mark REVOKED
+ *   - revoke=false → restore PTE.P if the cabin satisfies ALL guards on
+ *                    the region → mark ACTIVE
+ *
+ * Streams the region set a batch at a time and resumes by region id, so
+ * the number of regions carrying a guard tag is not a quantity this
+ * function has an opinion about. What happens when the set changes
+ * between batches is spelled out at MemTagBitmapWalkTag.
+ *
+ * Returns count of attachments transitioned.
+ *
+ * `held_l1` is the cabin's LIVE held-tag set, not a copy of it. Every
+ * caller used to hand down a sixteen-word copy taken before the walk;
+ * a sparse set has no fixed width to copy into, and the copy was never
+ * worth its cost anyway. It was sixteen independent ACQUIRE loads with
+ * no generation or seqlock around them, so it was never a consistent
+ * view of the set — only a stale one. Reading live is strictly fresher,
+ * and safe on both counts that matter: the caller holds a process ref,
+ * so the cabin (and therefore the table) outlives the walk; and a leaf
+ * is install-once, freed only by MemTagHeldSetRelease at cabin teardown,
+ * so a pointer read out of the table here can never be freed under this
+ * walk. A grant or revoke landing mid-walk runs its own enforcement pass
+ * for its own tag, which is what makes either interleaving converge on
+ * the same PTE state. */
+static size_t EnforceForCabinTag(vmm_context_t *target_ctx,
+                                  const uint64_t *held_l1,
+                                  uint16_t tag_id, bool revoke) {
+    if (!target_ctx) return 0;
+
+    size_t   transitioned = 0;
+    uint32_t batch[MEMTAG_WALK_REGIONS_BATCH];
+    uint32_t cursor = 0;
+    for (;;) {
+        size_t nr = MemTagBitmapWalkTag(&g_bitmap_index, tag_id, cursor,
+                                         batch, MEMTAG_WALK_REGIONS_BATCH);
+        if (nr == 0) break;
+        for (size_t i = 0; i < nr; i++) {
+            transitioned += EnforceRegionAttachesForCabin(batch[i], target_ctx,
+                                                           held_l1, revoke);
+        }
+        /* MEMTAG_REGION_MAX_CAP holds ids under 2^20, so the increment
+         * cannot wrap; the guard is here so raising that cap can never
+         * silently turn an overflow into an endless walk. */
+        if (batch[nr - 1] == UINT32_MAX) break;
+        cursor = batch[nr - 1] + 1u;
     }
     return transitioned;
 }
@@ -1487,10 +1620,8 @@ size_t MemCabinEnforceRevokePost(uint32_t pid, uint16_t tag_id) {
     process_t *proc = process_find_ref(pid);
     if (!proc) return 0;
     vmm_context_t *ctx = (vmm_context_t *)process_get_cabin(proc);
-    uint64_t *mask = process_active_memtags(proc);
-    uint64_t mask_snap[MEMTAG_MASK_WORDS];
-    SnapshotMask(mask, mask_snap);
-    size_t n = ctx ? EnforceForCabinTag(ctx, mask_snap, tag_id, true) : 0;
+    size_t n = ctx ? EnforceForCabinTag(ctx, process_active_memtags(proc),
+                                        tag_id, true) : 0;
     process_ref_dec(proc);
     return n;
 }
@@ -1503,40 +1634,45 @@ size_t MemCabinEnforceGrantPost(uint32_t pid, uint16_t tag_id) {
     process_t *proc = process_find_ref(pid);
     if (!proc) return 0;
     vmm_context_t *ctx = (vmm_context_t *)process_get_cabin(proc);
-    uint64_t *mask = process_active_memtags(proc);
-    uint64_t mask_snap[MEMTAG_MASK_WORDS];
-    SnapshotMask(mask, mask_snap);
-    size_t n = ctx ? EnforceForCabinTag(ctx, mask_snap, tag_id, false) : 0;
+    size_t n = ctx ? EnforceForCabinTag(ctx, process_active_memtags(proc),
+                                        tag_id, false) : 0;
     process_ref_dec(proc);
     return n;
 }
 
 /* ─── Global sweep on SetGuard flip ───────────────────────────────── */
 
-/* Iterate all processes (snapshot of PIDs) and for each call the
- * cabin-bound enforcement. Used by MemTagSweepGuard. */
-extern uint32_t process_snapshot_pids(uint32_t *out, uint32_t max);
-
 size_t MemTagSweepGuard(uint16_t tag_id, bool guard_on) {
     if (!g_memtag_initialized) return 0;
     if (tag_id == MEMTAG_INVALID_TAG_ID) return 0;
 
-    /* Snapshot live PID set — stack-budgeted at MEMTAG_SWEEP_PIDS_PER_CALL
-     * × 4 B = 1 KiB. SweepGuard fires only on policy flips, not in any hot
-     * path; if production process counts approach the cap, switch to
-     * kmalloc/kfree. */
-    uint32_t pids[MEMTAG_SWEEP_PIDS_PER_CALL];
-    uint32_t n = process_snapshot_pids(pids, MEMTAG_SWEEP_PIDS_PER_CALL);
-
+    /* Walk the pid SPACE, not a sample of the pid set.
+     *
+     * pid_alloc hands out index+1 over exactly MAX_PROCESSES slots
+     * (allocator/pid_allocator.h), so 1..MAX_PROCESSES is every pid that
+     * can exist — the shelf itself. Walking it needs no buffer, so there
+     * is no cap to be enforced-on-a-sample behind, and no pid is ever
+     * carried across a gap: each one is resolved to a ref'd process_t at
+     * the moment it is used. That closes the re-let race a pid LIST has —
+     * a snapshotted pid whose process dies and whose slot is re-issued
+     * before the walk reaches it would otherwise silently redirect one
+     * cabin's enforcement at another cabin's address space. Here the
+     * held set and the context always come from the same process_t under
+     * the same ref, so the pair can never be mismatched.
+     *
+     * Liveness is process_find_ref plus a non-NULL cabin — the same
+     * definition MemCabinGrant / MemCabinRevoke / MemRegionAccessAllowed
+     * already enforce on. Empty slots cost one hash miss each, and this
+     * runs only when MemTagSetGuard actually flips a tag's guard bit. */
     size_t total = 0;
-    for (uint32_t i = 0; i < n; i++) {
-        process_t *proc = process_find_ref(pids[i]);
+    for (uint32_t pid = 1; pid <= MAX_PROCESSES; pid++) {
+        process_t *proc = process_find_ref(pid);
         if (!proc) continue;
         vmm_context_t *ctx = (vmm_context_t *)process_get_cabin(proc);
-        uint64_t *mask = process_active_memtags(proc);
-        uint64_t mask_snap[MEMTAG_MASK_WORDS];
-        SnapshotMask(mask, mask_snap);
-        if (ctx) total += EnforceForCabinTag(ctx, mask_snap, tag_id, guard_on);
+        if (ctx) {
+            total += EnforceForCabinTag(ctx, process_active_memtags(proc),
+                                        tag_id, guard_on);
+        }
         process_ref_dec(proc);
     }
     return total;
@@ -1646,7 +1782,7 @@ static size_t StampPtePkeyRange(vmm_context_t *ctx, uintptr_t va_base,
 
 uint8_t MemRegionEffectivePkey(uint32_t region_id) {
     if (!g_memtag_initialized) return 0;
-    uint16_t buf[MEMTAG_ENFORCE_ATTACHES_PER_REGION];   /* reuse budget */
+    uint16_t buf[MEMTAG_GUARDS_PER_REGION];
     size_t n = MemRegionRegistryListTags(&g_region_registry, region_id,
                                           buf, sizeof(buf)/sizeof(buf[0]));
     for (size_t i = 0; i < n; i++) {
@@ -1661,26 +1797,36 @@ size_t MemTagSweepPkey(uint32_t region_id, uint8_t new_pkey) {
     if (region_id == MEMTAG_INVALID_REGION_ID) return 0;
     if (new_pkey > VMM_PTE_PKEY_MAX) return 0;
 
-    MemRegionAttach snap[MEMTAG_ENFORCE_ATTACHES_PER_REGION];
-    size_t n = MemRegionRegistrySnapshotAttachs(&g_region_registry,
-                                                  region_id, snap,
-                                                  MEMTAG_ENFORCE_ATTACHES_PER_REGION);
-    if (n == 0) return 0;
-
     __atomic_fetch_add(&g_pku_sweep_count, 1, __ATOMIC_RELAXED);
 
+    /* Streams the attach chain for the same reason the guard enforcement
+     * does: a key stamped on some of a region's mappings and not the
+     * others is a region whose pages disagree about which PKRU pair
+     * gates them. Every attach gets the stamp or none does. The PTE work
+     * and the shootdown run with the bucket lock released. */
     size_t total = 0;
-    for (size_t i = 0; i < n; i++) {
-        MemRegionAttach *att = &snap[i];
-        if (!att->ctx) continue;
-        size_t s = StampPtePkeyRange((vmm_context_t *)att->ctx,
-                                      att->va_base, att->pages,
-                                      new_pkey, att->page_class);
-        if (s) {
-            vmm_shootdown_pages((vmm_context_t *)att->ctx,
-                                 att->va_base, (size_t)att->pages);
-            total += s;
+    MemRegionAttach batch[MEMTAG_WALK_ATTACHES_BATCH];
+    uintptr_t   cur_va  = 0;
+    const void *cur_ctx = NULL;
+    for (;;) {
+        size_t n = MemRegionRegistryWalkAttachs(&g_region_registry, region_id,
+                                                 cur_va, cur_ctx, batch,
+                                                 MEMTAG_WALK_ATTACHES_BATCH);
+        if (n == 0) break;
+        for (size_t i = 0; i < n; i++) {
+            MemRegionAttach *att = &batch[i];
+            if (!att->ctx) continue;
+            size_t s = StampPtePkeyRange((vmm_context_t *)att->ctx,
+                                          att->va_base, att->pages,
+                                          new_pkey, att->page_class);
+            if (s) {
+                vmm_shootdown_pages((vmm_context_t *)att->ctx,
+                                     att->va_base, (size_t)att->pages);
+                total += s;
+            }
         }
+        cur_va  = batch[n - 1].va_base;
+        cur_ctx = batch[n - 1].ctx;
     }
     return total;
 }
@@ -1692,7 +1838,7 @@ error_t MemTagApplyPkey(uint32_t region_id, uint8_t pkey) {
 
     /* Find + clear any existing pku:N tag first so the region carries
      * at most one. Walk region's tag list, drop any pku:* we find. */
-    uint16_t buf[MEMTAG_ENFORCE_ATTACHES_PER_REGION];
+    uint16_t buf[MEMTAG_GUARDS_PER_REGION];
     size_t   n = MemRegionRegistryListTags(&g_region_registry, region_id,
                                             buf, sizeof(buf)/sizeof(buf[0]));
     for (size_t i = 0; i < n; i++) {
@@ -1827,7 +1973,14 @@ bool MemTagVerifyPteMetadataBits_OLD(void) {
  * (vmm_verify_pat_msr / vmm_dump_mtrr_layout) because they are pure
  * CPU MSR probes with no MemTag-specific state. The names below are
  * retained as thin wrappers for backward source compatibility — they
- * just forward to the VMM implementations. */
+ * just forward to the VMM implementations.
+ *
+ * The two verdicts that matter — MTRRs disabled, or a non-WB default
+ * type — now speak through kprintf inside vmm_dump_mtrr_layout, not
+ * debug_printf. Effective memory type is MTRR combined with PAT
+ * (Intel SDM Vol 3A §11.12.5), so either condition silently demotes
+ * every cache:wb tag this module hands out, and a build that ships
+ * compiles debug_printf into nothing. */
 bool MemTagVerifyPatMsr(void)  { return vmm_verify_pat_msr(); }
 void MemTagDumpMtrrLayout(void) { vmm_dump_mtrr_layout(); }
 

@@ -17,7 +17,7 @@
  * event drives userspace subscribers and Phase 2 PTE-shadow hooks.
  *
  * Real-HW integration (Phase 2 — additive on top of this Phase 1 ABI):
- *   - VMM #PF tag-check via id_by_page → region.tag_ids → cabin active mask
+ *   - VMM #PF tag-check via id_by_page → region.tag_ids → cabin held-tag set
  *   - PTE bits 52-58 as optional region_id cache (Intel SDM Vol 3A §4.5)
  *   - NUMA / PAT / MCE / IOMMU / PKU / PKS / LAM / UAI / TME-MK / CET tags
  *     applied automatically by the relevant driver subsystem
@@ -108,10 +108,27 @@ size_t        MemRegionListTags(uint32_t region_id, uint16_t *out, size_t max);
 
 /* ─── Set-algebra queries (TagFS-shaped) ──────────────────────────── */
 
-/* Result container. Stays consistent with old API for migration ease. */
+/* Result container.
+ *
+ * `count` is how many ids region_ids[] actually holds; `total` is how many
+ * regions matched. They differ exactly when the match set outgrew the
+ * inline array, and reporting both is the only way a caller — kernel or,
+ * through the MEMTAG_QUERY op, userspace — can tell "there are 64" from
+ * "there are 4000 and you were handed 512". A caller that ignores `total`
+ * behaves exactly as before.
+ *
+ * MEMTAG_QUERY_MAX_IDS is the inline array's length, and it is a stack
+ * budget, not a policy: these functions are returned BY VALUE, so the
+ * struct lands on the caller's frame — 512 × 4 B + header = 2056 B, and
+ * the build runs -Wstack-usage=8192, which a call chain of two such
+ * temporaries already nearly fills. Growing it is not the way to serve a
+ * bigger answer; reading `total` and paging is. */
+#define MEMTAG_QUERY_MAX_IDS  512u
+
 typedef struct {
-    uint32_t    region_ids[512];
+    uint32_t    region_ids[MEMTAG_QUERY_MAX_IDS];
     size_t      count;
+    size_t      total;
 } MemTagResult;
 
 /* AND of all listed tags. NULL-terminated tag string array. */
@@ -164,8 +181,8 @@ void          MemTagPmmFreed(uintptr_t base_phys, size_t pages);
  *
  *  Tags can be marked MEMTAG_FLAG_GUARD via MemTagSetGuard(). Guarded
  *  tags act as capability tokens: a region carrying a guard tag is
- *  accessible only to cabins whose `active_memtags` mask holds that
- *  tag_id. Non-guarded tags remain pure metadata (current behavior).
+ *  accessible only to cabins whose held-tag set holds that tag_id.
+ *  Non-guarded tags remain pure metadata (current behavior).
  *
  *  Default: zero guards in registry → zero enforcement → all access
  *  succeeds. Userspace opts into enforcement per-tag via MEMTAG_SET_GUARD
@@ -180,8 +197,56 @@ void          MemTagPmmFreed(uintptr_t base_phys, size_t pages);
 error_t       MemTagSetGuard(const char *tag_str, bool guard);
 bool          MemTagIsGuard(uint16_t tag_id);
 
+/* ─── The held-tag set a cabin carries ───────────────────────────────
+ *
+ * A cabin's capability set has to answer for every id the registry can
+ * mint. MEMTAG_MAX_TAG_ID is 0xFFFE (tag_registry.h) and ids are interned
+ * monotonically from data-driven strings, so the set spans sixteen bits
+ * whether or not any one cabin uses them — and a flat bitmap over that
+ * span is either 8 KiB in every cabin_t or, as it was, a 1024-bit cap
+ * that an ordinary system interning ordinary strings walks straight into
+ * and never walks back out of.
+ *
+ * So it is two levels, the same shape touch.c already carries over this
+ * same id space: an always-resident L1 table of MEMTAG_HELD_L1_ENTRIES
+ * slots living inside cabin_t, each slot the address of a leaf bitmap
+ * installed lazily by CAS with loser-frees. One leaf is never replaced
+ * once installed, which is what lets a reader dereference it with no lock
+ * and no reference count.
+ *
+ * An absent leaf is not a missing answer — it IS the answer: this cabin
+ * holds no tag in that window. So the read path (MemCabinHolds,
+ * MemRegionAccessAllowed, and the #PF check behind it) never allocates
+ * and has no failure mode to invent a policy for. Only a grant can
+ * allocate, and only the first grant into a given window.
+ *
+ * The three numbers below are geometry — how the id space is carved —
+ * not a limit on what may be held. Sixteen L1 slots is the carve that
+ * leaves the table inside cabin_t at exactly the 128 bytes the old flat
+ * mask already occupied, so cabin_t's "fits in one page" assertion is
+ * untouched and no cabin got bigger for gaining the other 64512 ids.
+ * 2^16 / 16 then fixes a leaf at 4096 ids = 512 bytes, which is one of
+ * the slab allocator's size classes verbatim (SLAB_SIZES, lib/kernel/
+ * slab.c), so a leaf is one slab slot rather than a page-granular
+ * allocation with 3.5 KiB of waste behind it. */
+#define MEMTAG_HELD_L1_ENTRIES   16u
+#define MEMTAG_HELD_LEAF_IDS     (65536u / MEMTAG_HELD_L1_ENTRIES)
+#define MEMTAG_HELD_LEAF_WORDS   (MEMTAG_HELD_LEAF_IDS / 64u)
+
+/* Free every leaf a cabin installed, and empty its L1 table.
+ *
+ * Belongs to cabin_destroy and nowhere else: leaves are install-once
+ * precisely so lock-free readers may hold one, so the single moment it
+ * is safe to free them is when no strand can reach the cabin any more.
+ * Idempotent — each slot is taken by exchange, so a second call frees
+ * nothing. */
+void          MemTagHeldSetRelease(uint64_t *held_l1);
+
 /* Grant / revoke a guard capability to a specific process (by PID).
- * Both ends atomic — single bit set/clear on process_t.active_memtags.
+ * A revoke is one atomic bit clear. A grant is one atomic bit set, plus
+ * — for the first tag a cabin holds in a 4096-id window — installing
+ * that window's leaf, which is the only way either can answer
+ * ERR_NO_MEMORY.
  * Caller must have already authorized the operation; this is the
  * unconditional kernel-side primitive. */
 error_t       MemCabinGrant(uint32_t pid, uint16_t tag_id);

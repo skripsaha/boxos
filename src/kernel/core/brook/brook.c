@@ -16,7 +16,40 @@
  *   - per-cabin VA reservation inside CABIN_BROOK_BASE..CABIN_BROOK_END
  *   - hard SPSC enforcement
  *   - wait/wake syscalls' kernel side
- *   - peer-death wake on process_destroy
+ *   - peer-death wake on strand death
+ *
+ * Two lifetimes, and the seat is vacated before the room is given back
+ * ────────────────────────────────────────────────────────────────────
+ * A claim's SEAT (writer/reader role) is the strand's and a claim's
+ * MAPPING is the cabin's — brook.h argues why. The consequence that
+ * shapes every function below is an ordering one: a BrookObject is kept
+ * addressable by the MAPPING references on it, so any path that ends
+ * both must end the seat FIRST and drop the mapping reference LAST.
+ * Reversed, the last reference frees the object and the seat is vacated
+ * through a dangling pointer.
+ *
+ * Lock order
+ * ----------
+ * Two locks, and they are NEVER NESTED:
+ *
+ *   cabin->brook_lock  guards the cabin's claim list AND the `holder`
+ *                      field on every row of it.
+ *   bucket->lock       guards the BrookObject — its role pids, its
+ *                      ref_count, and the shared header page's alive
+ *                      flags and bells.
+ *
+ * Every path is therefore written as short alternating sections: locate
+ * or unlink the row under brook_lock, do the BrookObject work under the
+ * bucket lock, ring outside both. What makes that safe without a nested
+ * hold is `holder`: while it is non-zero the row is pinned (no sibling
+ * may release it, and cabin teardown cannot run while a strand lives),
+ * so a pointer taken under brook_lock is still good when the bucket
+ * lock is taken a moment later.
+ *
+ * The rejected alternative was to take the bucket lock inside
+ * brook_lock and re-stamp everything in one breath. It is simpler to
+ * read and it introduces the file's first lock nesting, for a window
+ * that `holder` already closes.
  */
 
 #include "brook.h"
@@ -294,12 +327,17 @@ static error_t brook_alloc_slot_chunks(uint64_t total_size,
     return OK;
 }
 
-/* Map slot chunks into proc->cabin at user_va_base. Unwinds on failure. */
+/* Map slot chunks into the cabin at user_va_base. Unwinds on failure.
+ *
+ * These take the CABIN and not a strand, and that is the change made
+ * structural: the page tables being written are the cabin's and outlive
+ * any one strand, and BrookCleanupCabin runs when there is no strand
+ * left to pass. */
 /* Phase 2C — register MemRegionAttach bookkeeping for the Brook header
  * (1 page) + each slot chunk. Mirror flag set used in brook_map_*_into_cabin
  * verbatim (USER_RW | NX). Best-effort per-chunk; future enforcement
  * walks tolerate missing entries. */
-static void brook_memtag_attach_all(struct process_t *proc,
+static void brook_memtag_attach_all(cabin_t *cabin,
                                      uint64_t hdr_phys,
                                      uint64_t va_header,
                                      uint64_t *slot_chunks,
@@ -312,7 +350,7 @@ static void brook_memtag_attach_all(struct process_t *proc,
     if (hdr_phys != 0) {
         uint32_t hdr_rid = MemRegionFromPhys((uintptr_t)hdr_phys);
         if (hdr_rid != MEMTAG_INVALID_REGION_ID) {
-            MemRegionAttachCabin(hdr_rid, (void *)proc->cabin->vmm,
+            MemRegionAttachCabin(hdr_rid, (void *)cabin->vmm,
                                   va_header, 1,
                                   MEMTAG_ATTACH_CLASS_4K, att_flags);
         }
@@ -327,14 +365,14 @@ static void brook_memtag_attach_all(struct process_t *proc,
         uint64_t att_va = va_slots + (uint64_t)i * slot_cs;
         uint32_t rid    = MemRegionFromPhys((uintptr_t)slot_chunks[i]);
         if (rid != MEMTAG_INVALID_REGION_ID) {
-            MemRegionAttachCabin(rid, (void *)proc->cabin->vmm, att_va,
+            MemRegionAttachCabin(rid, (void *)cabin->vmm, att_va,
                                   pages_per_chunk, pc, att_flags);
         }
     }
 }
 
 /* Inverse — detach header + every slot chunk. Idempotent. */
-static void brook_memtag_detach_all(struct process_t *proc,
+static void brook_memtag_detach_all(cabin_t *cabin,
                                      uint64_t hdr_phys,
                                      uint64_t va_header,
                                      uint64_t *slot_chunks,
@@ -345,7 +383,7 @@ static void brook_memtag_detach_all(struct process_t *proc,
     if (hdr_phys != 0) {
         uint32_t hdr_rid = MemRegionFromPhys((uintptr_t)hdr_phys);
         if (hdr_rid != MEMTAG_INVALID_REGION_ID) {
-            MemRegionDetachCabin(hdr_rid, (void *)proc->cabin->vmm, va_header);
+            MemRegionDetachCabin(hdr_rid, (void *)cabin->vmm, va_header);
         }
     }
     for (uint32_t i = 0; i < slot_cc; i++) {
@@ -353,18 +391,18 @@ static void brook_memtag_detach_all(struct process_t *proc,
         uint64_t att_va = va_slots + (uint64_t)i * slot_cs;
         uint32_t rid    = MemRegionFromPhys((uintptr_t)slot_chunks[i]);
         if (rid != MEMTAG_INVALID_REGION_ID) {
-            MemRegionDetachCabin(rid, (void *)proc->cabin->vmm, att_va);
+            MemRegionDetachCabin(rid, (void *)cabin->vmm, att_va);
         }
     }
 }
 
-static error_t brook_map_slots_into_cabin(struct process_t *proc,
+static error_t brook_map_slots_into_cabin(cabin_t *cabin,
                                           uint64_t user_va_base,
                                           uint64_t *chunks,
                                           uint32_t chunk_count,
                                           uint64_t chunk_size)
 {
-    if (!proc || !proc->cabin) return ERR_INVALID_ARGUMENT;
+    if (!cabin || !cabin->vmm) return ERR_INVALID_ARGUMENT;
 
     /* RW + NX — Brook payload is data, not code. Both peers always get
      * RW; there is no read-only-reader flag (the kernel cannot enforce
@@ -378,17 +416,17 @@ static error_t brook_map_slots_into_cabin(struct process_t *proc,
 
         bool ok;
         if (chunk_size == BROOK_HUGE_SIZE) {
-            ok = vmm_map_huge_2m(proc->cabin->vmm, va, pa, vmm_flags);
+            ok = vmm_map_huge_2m(cabin->vmm, va, pa, vmm_flags);
         } else {
-            vmm_map_result_t r = vmm_map_page(proc->cabin->vmm, va, pa, vmm_flags);
+            vmm_map_result_t r = vmm_map_page(cabin->vmm, va, pa, vmm_flags);
             ok = r.success;
         }
 
         if (!ok) {
             for (uint32_t j = 0; j < i; j++) {
                 uint64_t uva = user_va_base + (uint64_t)j * chunk_size;
-                if (chunk_size == BROOK_HUGE_SIZE) vmm_unmap_huge_2m(proc->cabin->vmm, uva);
-                else                               vmm_unmap_page(proc->cabin->vmm, uva);
+                if (chunk_size == BROOK_HUGE_SIZE) vmm_unmap_huge_2m(cabin->vmm, uva);
+                else                               vmm_unmap_page(cabin->vmm, uva);
             }
             return ERR_NO_MEMORY;
         }
@@ -396,36 +434,36 @@ static error_t brook_map_slots_into_cabin(struct process_t *proc,
     return OK;
 }
 
-static void brook_unmap_slots_from_cabin(struct process_t *proc,
+static void brook_unmap_slots_from_cabin(cabin_t *cabin,
                                          uint64_t user_va_base,
                                          uint32_t chunk_count,
                                          uint64_t chunk_size)
 {
-    if (!proc || !proc->cabin) return;
+    if (!cabin || !cabin->vmm) return;
     for (uint32_t i = 0; i < chunk_count; i++) {
         uint64_t uva = user_va_base + (uint64_t)i * chunk_size;
-        if (chunk_size == BROOK_HUGE_SIZE) vmm_unmap_huge_2m(proc->cabin->vmm, uva);
-        else                               vmm_unmap_page(proc->cabin->vmm, uva);
+        if (chunk_size == BROOK_HUGE_SIZE) vmm_unmap_huge_2m(cabin->vmm, uva);
+        else                               vmm_unmap_page(cabin->vmm, uva);
     }
 }
 
 /* Map / unmap the 4 KiB BrookHeader page. */
-static bool brook_map_header_into_cabin(struct process_t *proc,
+static bool brook_map_header_into_cabin(cabin_t *cabin,
                                         uint64_t user_va_header,
                                         uint64_t header_phys)
 {
-    if (!proc || !proc->cabin) return false;
+    if (!cabin || !cabin->vmm) return false;
     const uint64_t vmm_flags = VMM_FLAGS_USER_RW | VMM_FLAG_NO_EXECUTE;
-    vmm_map_result_t r = vmm_map_page(proc->cabin->vmm, user_va_header,
+    vmm_map_result_t r = vmm_map_page(cabin->vmm, user_va_header,
                                       header_phys, vmm_flags);
     return r.success;
 }
 
-static void brook_unmap_header_from_cabin(struct process_t *proc,
+static void brook_unmap_header_from_cabin(cabin_t *cabin,
                                           uint64_t user_va_header)
 {
-    if (!proc || !proc->cabin) return;
-    vmm_unmap_page(proc->cabin->vmm, user_va_header);
+    if (!cabin || !cabin->vmm) return;
+    vmm_unmap_page(cabin->vmm, user_va_header);
 }
 
 /* Free every backing chunk + the header page via PMM. */
@@ -457,19 +495,19 @@ static void brook_free_backing(BrookObject *brook)
  * (one PMM_PAGE_SIZE), the slot region is aligned to slot_chunk_size
  * so huge-page mappings land on PDE boundaries.
  * ───────────────────────────────────────────────────────────────────── */
-static error_t brook_reserve_user_va(struct process_t *proc,
+static error_t brook_reserve_user_va(cabin_t *cabin,
                                      uint64_t slot_total_size,
                                      uint64_t slot_chunk_size,
                                      uint64_t *out_va_header,
                                      uint64_t *out_va_slots)
 {
-    if (!proc) return ERR_INVALID_ARGUMENT;
+    if (!cabin) return ERR_INVALID_ARGUMENT;
     if (slot_chunk_size < PMM_PAGE_SIZE) slot_chunk_size = PMM_PAGE_SIZE;
 
-    spin_lock(&proc->cabin->brook_lock);
+    spin_lock(&cabin->brook_lock);
 
     /* Page-align cursor for the header. */
-    uint64_t cur = (proc->cabin->brook_va_next + (PMM_PAGE_SIZE - 1))
+    uint64_t cur = (cabin->brook_va_next + (PMM_PAGE_SIZE - 1))
                    & ~(PMM_PAGE_SIZE - 1);
     uint64_t va_header = cur;
 
@@ -489,13 +527,13 @@ static error_t brook_reserve_user_va(struct process_t *proc,
         va_slots >= CABIN_BROOK_END ||
         slot_total_size > CABIN_BROOK_END - va_slots ||
         va_slots + slot_total_size < va_slots) {
-        spin_unlock(&proc->cabin->brook_lock);
+        spin_unlock(&cabin->brook_lock);
         return ERR_NO_MEMORY;
     }
 
-    proc->cabin->brook_va_next = va_slots + slot_total_size;
+    cabin->brook_va_next = va_slots + slot_total_size;
 
-    spin_unlock(&proc->cabin->brook_lock);
+    spin_unlock(&cabin->brook_lock);
 
     *out_va_header = va_header;
     *out_va_slots  = va_slots;
@@ -503,37 +541,60 @@ static error_t brook_reserve_user_va(struct process_t *proc,
 }
 
 /* ─────────────────────────────────────────────────────────────────────
- * Claim list helpers — proc->cabin->brook_claims_head singly-linked.
+ * Claim list helpers — cabin->brook_claims_head singly-linked.
  * Identical shape to Bay's claim list.
  * ───────────────────────────────────────────────────────────────────── */
-static bool brook_link_claim(struct process_t *proc, BrookClaim *claim)
+/* Linking cannot fail. It used to: a claim opened while its strand was
+ * being destroyed had to be refused, because the strand-death hook
+ * drained the whole list and a row linked past it would leak. That
+ * drain is gone — strand death now vacates seats and touches no row's
+ * link — and the only drain left, BrookCleanupCabin, cannot run while a
+ * strand exists to be calling this. */
+static void brook_link_claim(cabin_t *cabin, BrookClaim *claim)
 {
-    spin_lock(&proc->cabin->brook_lock);
-    if (proc->destroying) {
-        spin_unlock(&proc->cabin->brook_lock);
-        return false;
-    }
-    claim->proc_next = (BrookClaim *)proc->cabin->brook_claims_head;
-    proc->cabin->brook_claims_head = claim;
-    spin_unlock(&proc->cabin->brook_lock);
-    return true;
+    spin_lock(&cabin->brook_lock);
+    claim->cabin_next = (BrookClaim *)cabin->brook_claims_head;
+    cabin->brook_claims_head = claim;
+    spin_unlock(&cabin->brook_lock);
 }
 
-static BrookClaim *brook_unlink_claim_by_va(struct process_t *proc,
-                                            uint64_t user_va_header)
+/* Unlink the claim at this VA on behalf of `by_pid`, or refuse.
+ *
+ * The VA alone is not enough, and this is the one place Brook parts
+ * company with Bay. A claim whose seat is still warm may only be handed
+ * back by the strand sitting in it: unlinking somebody else's row
+ * unmaps the pages and leaves the seat stamped on a BrookObject that no
+ * longer has a claim to vacate it — a role slot lost for the lifetime
+ * of the tag, on a single-occupancy stream. A vacated claim
+ * (holder == 0) is nothing but the cabin's mapping, and then any strand
+ * of the cabin may give it back, exactly as in Bay.
+ *
+ * *why distinguishes the two failures for the caller; the claim is left
+ * on the list in both. */
+static BrookClaim *brook_unlink_claim_by_va(cabin_t *cabin,
+                                            uint64_t user_va_header,
+                                            uint32_t by_pid,
+                                            error_t *why)
 {
-    spin_lock(&proc->cabin->brook_lock);
-    BrookClaim **p = (BrookClaim **)&proc->cabin->brook_claims_head;
+    spin_lock(&cabin->brook_lock);
+    BrookClaim **p = (BrookClaim **)&cabin->brook_claims_head;
     while (*p) {
         if ((*p)->user_va_header == user_va_header) {
             BrookClaim *hit = *p;
-            *p = hit->proc_next;
-            spin_unlock(&proc->cabin->brook_lock);
+            if (hit->holder != 0 && hit->holder != by_pid) {
+                spin_unlock(&cabin->brook_lock);
+                *why = ERR_PERMISSION_DENIED;
+                return NULL;
+            }
+            *p = hit->cabin_next;
+            spin_unlock(&cabin->brook_lock);
+            *why = OK;
             return hit;
         }
-        p = &(*p)->proc_next;
+        p = &(*p)->cabin_next;
     }
-    spin_unlock(&proc->cabin->brook_lock);
+    spin_unlock(&cabin->brook_lock);
+    *why = ERR_TAG_NOT_FOUND;
     return NULL;
 }
 
@@ -564,9 +625,15 @@ static inline uint64_t brook_total_pages(const BrookObject *brook)
     return slot_pages + 1;  /* +1 for header */
 }
 
-/* Drop one ref. Caller MUST hold b->lock on entry; releases the lock
- * before returning. If ref_count hits zero, BrookObject is unlinked,
- * backing pages return to PMM, and the struct is freed. */
+/* Drop one MAPPING reference. Caller MUST hold b->lock on entry;
+ * releases the lock before returning. If ref_count hits zero, the
+ * BrookObject is unlinked, backing pages return to PMM, and the struct
+ * is freed.
+ *
+ * Zero here means no cabin maps these pages any more — which is a
+ * stronger fact than "both peers left", and deliberately so: roles end
+ * when strands do, mappings when cabins do, and only the second is a
+ * safe moment to hand the ring back to the PMM. */
 static void brook_drop_ref_locked(BrookBucket *b, BrookObject *brook)
 {
     brook->ref_count--;
@@ -628,6 +695,53 @@ static inline bool brook_is_pow2(uint32_t x)
 }
 
 /* ─────────────────────────────────────────────────────────────────────
+ * Vacate ONE seat. Takes and drops the bucket lock itself; returns the
+ * pid whose bell is to be rung, or 0 if nobody on the far side is
+ * asleep. The ring happens in the caller, outside every lock, because
+ * ringing walks the target's page tables.
+ *
+ * `holder` is who is being lifted out of the seat — the claim's, never
+ * the caller's, because after a hand-over those are different strands
+ * and it is the claim that knows which.
+ *
+ * ‼ The caller must still be holding this claim's MAPPING reference. It
+ * is what keeps `brook` addressable: drop it first and the last
+ * reference frees the object, and this function then clears a role pid
+ * through a dangling pointer. Every caller below is written seat-first,
+ * reference-last for that reason.
+ * ───────────────────────────────────────────────────────────────────── */
+static uint32_t brook_role_end(BrookObject *brook, uint32_t role, uint32_t holder)
+{
+    if (!brook || holder == 0) return 0;
+
+    BrookBucket *b = &g_brook_buckets[brook_bucket_index(brook->tag_id)];
+    spin_lock(&b->lock);
+
+    /* Mark our side dead in the shared header. CAS expected=1→0 so a
+     * concurrent FROZEN set by the surviving peer (its single-session EOF
+     * decision) is preserved — alive becomes sticky FROZEN, blocking any
+     * future attach to this session. */
+    BrookHeader *kh = brook_kernel_header(brook);
+    volatile uint32_t *alive = (role == BROOK_WRITER) ? &kh->writer_alive
+                                                      : &kh->reader_alive;
+    uint32_t one = 1u;
+    __atomic_compare_exchange_n(alive, &one, 0u, false,
+                                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+
+    /* The seat is cleared only if it still names the strand we are
+     * lifting out. Anything else means the seat has already moved on and
+     * is not ours to vacate. */
+    uint32_t *seat = (role == BROOK_WRITER) ? &brook->writer_pid
+                                            : &brook->reader_pid;
+    if (*seat == holder) *seat = 0;
+
+    uint32_t ring_pid = brook_take_survivor_bell_locked(kh, role);
+
+    spin_unlock(&b->lock);
+    return ring_pid;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
  * BrookOpenInternal
  * ───────────────────────────────────────────────────────────────────── */
 error_t BrookOpenInternal(struct process_t *proc,
@@ -645,6 +759,12 @@ error_t BrookOpenInternal(struct process_t *proc,
         return ERR_INVALID_ARGUMENT;
 
     if (proc->destroying) return ERR_INVALID_STATE;
+
+    /* Everything below the tag lookup is the cabin's — the VA window, the
+     * page tables, the claim row. The strand is kept for the two things
+     * that are genuinely its own: the pid the MemTag gate judges, and the
+     * pid that goes into the seat. */
+    cabin_t *cabin = proc->cabin;
 
     if (flags & ~BROOK_FLAGS_MASK)                   return ERR_INVALID_ARGUMENT;
     uint32_t role = flags & (BROOK_WRITER | BROOK_READER);
@@ -727,8 +847,6 @@ error_t BrookOpenInternal(struct process_t *proc,
         fresh->writer_pid       = 0;
         fresh->reader_pid       = 0;
         fresh->ref_count        = 0;
-        fresh->create_pid       = proc->pid;
-        fresh->create_tsc       = rdtsc();
 
         brook_header_init(brook_kernel_header(fresh), frame_size, frame_count);
 
@@ -802,6 +920,10 @@ error_t BrookOpenInternal(struct process_t *proc,
         }
         brook->reader_pid = proc->pid;
     }
+    /* The reference taken here is the MAPPING's — the one we are on our
+     * way to building. Taking it under the same lock that stamps the seat
+     * is what stops a peer's concurrent release from freeing the object
+     * out from under the rest of this function. */
     brook->ref_count++;
 
     uint32_t out_fs = brook->frame_size;
@@ -814,7 +936,7 @@ error_t BrookOpenInternal(struct process_t *proc,
 
     /* Reserve VA window. */
     uint64_t va_header = 0, va_slots = 0;
-    error_t rc = brook_reserve_user_va(proc, slot_total, slot_cs,
+    error_t rc = brook_reserve_user_va(cabin, slot_total, slot_cs,
                                        &va_header, &va_slots);
     if (rc != OK) goto rollback_ref;
 
@@ -827,42 +949,42 @@ error_t BrookOpenInternal(struct process_t *proc,
     }
 
     /* Map header. */
-    if (!brook_map_header_into_cabin(proc, va_header, hdr_phys)) {
+    if (!brook_map_header_into_cabin(cabin, va_header, hdr_phys)) {
         rc = ERR_NO_MEMORY;
         goto rollback_ref;
     }
 
     /* Map slot chunks. */
-    rc = brook_map_slots_into_cabin(proc, va_slots, brook->slot_chunks,
+    rc = brook_map_slots_into_cabin(cabin, va_slots, brook->slot_chunks,
                                     slot_cc, slot_cs);
     if (rc != OK) {
-        brook_unmap_header_from_cabin(proc, va_header);
+        brook_unmap_header_from_cabin(cabin, va_header);
         goto rollback_ref;
     }
 
     /* Phase 2C — attach bookkeeping for header + each slot chunk so
      * future revoke/grant sweeps can locate Brook's PTEs without scanning
      * the page table. */
-    brook_memtag_attach_all(proc, hdr_phys, va_header,
+    brook_memtag_attach_all(cabin, hdr_phys, va_header,
                              brook->slot_chunks, slot_cc, va_slots, slot_cs);
 
     /* Allocate claim and link. */
     BrookClaim *claim = (BrookClaim *)kmalloc(sizeof(BrookClaim));
     if (!claim) {
-        brook_memtag_detach_all(proc, hdr_phys, va_header,
+        brook_memtag_detach_all(cabin, hdr_phys, va_header,
                                  brook->slot_chunks, slot_cc, va_slots, slot_cs);
-        brook_unmap_slots_from_cabin(proc, va_slots, slot_cc, slot_cs);
-        brook_unmap_header_from_cabin(proc, va_header);
+        brook_unmap_slots_from_cabin(cabin, va_slots, slot_cc, slot_cs);
+        brook_unmap_header_from_cabin(cabin, va_header);
         rc = ERR_NO_MEMORY;
         goto rollback_ref;
     }
     memset(claim, 0, sizeof(*claim));
     claim->brook           = brook;
-    claim->proc            = proc;
     claim->user_va_header  = va_header;
     claim->user_va_slots   = va_slots;
     claim->role            = role;
     claim->flags           = flags;
+    claim->holder          = proc->pid;   /* whose hand is on the seat */
 
     /* Publish peer-alive bit. CAS expected=0, new=1 — if the surviving
      * peer has already FROZEN this side (single-session EOF/
@@ -893,10 +1015,10 @@ error_t BrookOpenInternal(struct process_t *proc,
             /* Either FROZEN (peer EOF'd this session — terminal) or 1
              * (shouldn't happen under bucket_lock + pid check). Roll
              * back: detach memtag, unmap, free claim, drop ref. */
-            brook_memtag_detach_all(proc, hdr_phys, va_header,
+            brook_memtag_detach_all(cabin, hdr_phys, va_header,
                                      brook->slot_chunks, slot_cc, va_slots, slot_cs);
-            brook_unmap_slots_from_cabin(proc, va_slots, slot_cc, slot_cs);
-            brook_unmap_header_from_cabin(proc, va_header);
+            brook_unmap_slots_from_cabin(cabin, va_slots, slot_cc, slot_cs);
+            brook_unmap_header_from_cabin(cabin, va_header);
             kfree(claim);
             rc = (expected == BROOK_ALIVE_FROZEN) ? ERR_INVALID_STATE
                                                   : ERR_BUSY;
@@ -905,23 +1027,10 @@ error_t BrookOpenInternal(struct process_t *proc,
         __atomic_store_n(ever_ptr, 1u, __ATOMIC_RELEASE);
     }
 
-    /* Link claim AFTER alive published. The destroying-check inside
-     * brook_link_claim closes the window where BrookCleanupProcess
-     * might have drained the list while we were busy. */
-    if (!brook_link_claim(proc, claim)) {
-        /* Undo alive flag (CAS 1→0; if reader concurrently FROZEN'd,
-         * leave it FROZEN). */
-        uint32_t one = 1u;
-        __atomic_compare_exchange_n(alive_ptr, &one, 0u, false,
-                                    __ATOMIC_RELEASE, __ATOMIC_RELAXED);
-        brook_memtag_detach_all(proc, hdr_phys, va_header,
-                                 brook->slot_chunks, slot_cc, va_slots, slot_cs);
-        brook_unmap_slots_from_cabin(proc, va_slots, slot_cc, slot_cs);
-        brook_unmap_header_from_cabin(proc, va_header);
-        kfree(claim);
-        rc = ERR_INVALID_STATE;
-        goto rollback_ref;
-    }
+    /* Link claim AFTER alive published, and it cannot fail — see
+     * brook_link_claim. The window it used to guard belonged to a drain
+     * that no longer happens at strand death. */
+    brook_link_claim(cabin, claim);
 
     atomic_fetch_add_u64(&g_stat_claims, 1);
 
@@ -932,7 +1041,10 @@ error_t BrookOpenInternal(struct process_t *proc,
     return OK;
 
 rollback_ref:
-    /* Drop the role we just claimed + the ref. Same-bucket; re-lock. */
+    /* Give the seat back and drop the mapping reference in one hold —
+     * the only place in the file where that is right, because the claim
+     * was never published: no list holds it, so nothing else can be
+     * looking at either half. */
     spin_lock(&b->lock);
     if (role == BROOK_WRITER && brook->writer_pid == proc->pid) {
         brook->writer_pid = 0;
@@ -944,60 +1056,52 @@ rollback_ref:
 }
 
 /* ─────────────────────────────────────────────────────────────────────
- * Release — drop this cabin's claim. If both peers gone, destroy.
- * Wakes the surviving peer (if any) so it sees peer_alive=0 immediately.
+ * Release — the cabin hands a mapping back, and with it the seat if the
+ * caller is the one sitting in it.
+ *
+ * Order is load-bearing: seat first, mapping-reference last. See
+ * brook_role_end.
  * ───────────────────────────────────────────────────────────────────── */
 error_t BrookReleaseInternal(struct process_t *proc, uint64_t user_va_header)
 {
-    if (!proc || user_va_header == 0) return ERR_INVALID_ARGUMENT;
+    if (!proc || !proc->cabin || user_va_header == 0) return ERR_INVALID_ARGUMENT;
 
-    BrookClaim *claim = brook_unlink_claim_by_va(proc, user_va_header);
-    if (!claim) return ERR_TAG_NOT_FOUND;
+    cabin_t *cabin = proc->cabin;
+
+    error_t     why   = OK;
+    BrookClaim *claim = brook_unlink_claim_by_va(cabin, user_va_header,
+                                                 proc->pid, &why);
+    if (!claim) return why;
 
     BrookObject *brook = claim->brook;
     if (!brook) { kfree(claim); return ERR_INVALID_STATE; }
 
+    /* Vacate the seat FIRST, while this claim's own mapping reference is
+     * still holding the BrookObject up, and ring the survivor outside the
+     * bucket lock. A vacated claim (holder == 0 — its strand already died)
+     * skips straight past: there is no seat left to give up. */
+    uint32_t ring_pid = brook_role_end(brook, claim->role, claim->holder);
+    brook_ring_pid(ring_pid);
+
     /* Phase 2C — detach memtag attachments before the PTEs go away. */
-    brook_memtag_detach_all(proc, brook->header_phys, claim->user_va_header,
+    brook_memtag_detach_all(cabin, brook->header_phys, claim->user_va_header,
                              brook->slot_chunks, brook->slot_chunk_count,
                              claim->user_va_slots, brook->slot_chunk_size);
 
-    /* Unmap from this cabin first. */
-    brook_unmap_slots_from_cabin(proc, claim->user_va_slots,
+    /* Unmap from this cabin. After this no strand of THIS cabin still has
+     * a valid PTE pointing into the Brook — which is the whole weight of
+     * an explicit release: the caller speaks for every strand in the flat,
+     * so it must be sure none of them is still reading. */
+    brook_unmap_slots_from_cabin(cabin, claim->user_va_slots,
                                  brook->slot_chunk_count,
                                  brook->slot_chunk_size);
-    brook_unmap_header_from_cabin(proc, claim->user_va_header);
+    brook_unmap_header_from_cabin(cabin, claim->user_va_header);
 
     BrookBucket *b = &g_brook_buckets[brook_bucket_index(brook->tag_id)];
-
     spin_lock(&b->lock);
-
-    /* Mark our side dead in the shared header BEFORE dropping the pid.
-     * Use CAS expected=1→0 so a concurrent FROZEN set by the surviving
-     * peer (single-session EOF decision) is preserved — alive becomes
-     * sticky FROZEN, blocking any future attach to this session. */
-    BrookHeader *kh = brook_kernel_header(brook);
-    if (claim->role == BROOK_WRITER) {
-        uint32_t one = 1u;
-        __atomic_compare_exchange_n(&kh->writer_alive, &one, 0u, false,
-                                    __ATOMIC_RELEASE, __ATOMIC_RELAXED);
-        if (brook->writer_pid == proc->pid) brook->writer_pid = 0;
-    } else {
-        uint32_t one = 1u;
-        __atomic_compare_exchange_n(&kh->reader_alive, &one, 0u, false,
-                                    __ATOMIC_RELEASE, __ATOMIC_RELAXED);
-        if (brook->reader_pid == proc->pid) brook->reader_pid = 0;
-    }
-    /* Take the survivor's bell HERE, under the lock that guards the header;
-     * the ring itself waits until the lock is dropped (BrookRingPeer). */
-    uint32_t ring_pid = brook_take_survivor_bell_locked(kh, claim->role);
-
     brook_drop_ref_locked(b, brook);
-    /* `brook` may have been freed inside brook_drop_ref_locked when
-     * ref_count hit zero — do NOT touch it past this point. */
-
-    /* Lock is gone (drop_ref_locked releases it either way): ring now. */
-    brook_ring_pid(ring_pid);
+    /* `brook` may have been freed inside brook_drop_ref_locked when the
+     * last mapping went — do NOT touch it past this point. */
 
     kfree(claim);
     if (g_stat_claims > 0) atomic_fetch_sub_u64(&g_stat_claims, 1);
@@ -1006,74 +1110,225 @@ error_t BrookReleaseInternal(struct process_t *proc, uint64_t user_va_header)
 }
 
 /* ─────────────────────────────────────────────────────────────────────
- * BrookCleanupProcess — process_destroy hook. Drains the per-cabin
- * claim list, drops every role, wakes peers with peer-alive=0.
+ * BrookHandOver — the seat moves to a sibling, the room does not.
+ *
+ * A watch being handed over. `pass` was the obvious word and it is taken:
+ * this tree already has a Baton.
+ *
+ * The three stamps that used to be able to disagree — the claim's holder,
+ * the BrookObject's role pid, and the header bell that names the same
+ * sleeper — move here as one act. The bell is the subtle one: it is hung
+ * by USERSPACE, with the sleeper's own pid, so nothing the kernel does can
+ * make the two writes atomic with each other. What it can do is carry the
+ * pid across with the seat, which is what closes the gap where a sibling's
+ * bell hung under the opener's name.
  * ───────────────────────────────────────────────────────────────────── */
-void BrookCleanupProcess(struct process_t *proc)
+
+/* Carry a hung bell's pid across with the seat it names, under the bucket
+ * lock. The RUNG mark is preserved and the word is never cleared: only the
+ * sleeper's own hand clears a bell (see BROOK_BELL_RUNG in brook.h), and a
+ * bell already taken must stay taken or the peer would ring twice.
+ *
+ * A bell hung by anyone else — or not hung at all, which is the common
+ * case, since the strand doing the handing is running and therefore not
+ * asleep — is left exactly as found. The CAS loop re-reads on failure
+ * because the peer may set RUNG underneath us; it terminates because the
+ * only other writer is the sleeper taking its own bell down. */
+static void brook_bell_carry_locked(BrookHeader *kh, uint32_t role,
+                                    uint32_t from_pid, uint32_t to_pid)
+{
+    if (!kh) return;
+    volatile uint32_t *bell = (role == BROOK_WRITER) ? &kh->writer_bell
+                                                     : &kh->reader_bell;
+    uint32_t v = __atomic_load_n(bell, __ATOMIC_ACQUIRE);
+    while (BROOK_BELL_PID(v) == from_pid) {
+        uint32_t want = to_pid | (v & BROOK_BELL_RUNG);
+        if (__atomic_compare_exchange_n(bell, &v, want, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return;
+    }
+}
+
+error_t BrookHandOver(struct process_t *from, uint64_t user_va_header,
+                      uint32_t to_pid)
+{
+    if (!from || !from->cabin || user_va_header == 0 || to_pid == 0)
+        return ERR_INVALID_ARGUMENT;
+    if (to_pid == from->pid)   return ERR_INVALID_ARGUMENT;
+    if (from->destroying)      return ERR_INVALID_STATE;
+
+    cabin_t *cabin = from->cabin;
+
+    /* The target must share this cabin, because the seat is bolted to a
+     * mapping that exists in this address space and nowhere else. Handing
+     * it to a strand elsewhere would seat somebody at a table they cannot
+     * reach; building them one is brook_open, with its own VA reservation,
+     * page-table work and MemTag gate, and its own way of failing. */
+    process_t *target = process_find_ref(to_pid);
+    if (!target) return ERR_PROCESS_NOT_FOUND;
+    if (target->destroying)    { process_ref_dec(target); return ERR_PROCESS_DESTROYING; }
+    if (target->cabin != cabin) { process_ref_dec(target); return ERR_NOT_MAPPED; }
+
+    /* Locate the row and prove the caller is the one in the seat. We do
+     * NOT unlink it and we do NOT clear `holder` yet: holder == from->pid
+     * is what pins the row (and, through its mapping reference, the
+     * BrookObject) across the bucket-lock section below, so the two locks
+     * are taken one after the other and never one inside the other. */
+    spin_lock(&cabin->brook_lock);
+    BrookClaim *claim = (BrookClaim *)cabin->brook_claims_head;
+    while (claim && claim->user_va_header != user_va_header)
+        claim = claim->cabin_next;
+    if (!claim) {
+        spin_unlock(&cabin->brook_lock);
+        process_ref_dec(target);
+        return ERR_TAG_NOT_FOUND;
+    }
+    if (claim->holder != from->pid) {
+        spin_unlock(&cabin->brook_lock);
+        process_ref_dec(target);
+        return ERR_PERMISSION_DENIED;
+    }
+    BrookObject *brook = claim->brook;
+    uint32_t     role  = claim->role;
+    spin_unlock(&cabin->brook_lock);
+
+    if (!brook) { process_ref_dec(target); return ERR_INVALID_STATE; }
+
+    BrookBucket *b = &g_brook_buckets[brook_bucket_index(brook->tag_id)];
+    spin_lock(&b->lock);
+
+    /* Compare before stamping, and the compare is an interlock rather
+     * than a formality: the seat is only ever written under THIS lock, so
+     * reading it here and finding a different name means something vacated
+     * it between the two locks — a kill that reached BrookCleanupStrand
+     * first — and stamping the target onto it would seat them at a stream
+     * whose alive flag has already gone to 0. */
+    uint32_t *seat = (role == BROOK_WRITER) ? &brook->writer_pid
+                                            : &brook->reader_pid;
+    if (*seat != from->pid) {
+        spin_unlock(&b->lock);
+        process_ref_dec(target);
+        return ERR_INVALID_STATE;
+    }
+    *seat = to_pid;
+    brook_bell_carry_locked(brook_kernel_header(brook), role,
+                            from->pid, to_pid);
+
+    spin_unlock(&b->lock);
+
+    spin_lock(&cabin->brook_lock);
+    claim->holder = to_pid;
+    spin_unlock(&cabin->brook_lock);
+
+    process_ref_dec(target);
+    return OK;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * BrookCleanupStrand — the ROLE half of teardown, from process_destroy.
+ *
+ * It ends seats and nothing else. The mapping each seat sat on stays
+ * exactly where it is, in an address space this strand's siblings are
+ * still executing in; it goes at cabin teardown, with the cabin that owns
+ * it. The code that used to stand here spliced rows out by a back-pointer
+ * to the opening strand and cleared PTEs under those siblings' feet.
+ *
+ * One row per pass, re-scanning from the head each time. The list is
+ * single-digit and this runs once per strand death, so the cost is
+ * nothing; what it buys is that `holder` is only ever read or written
+ * inside a brook_lock section, while the BrookObject work happens inside a
+ * bucket-lock section, and neither lock is ever held across the other.
+ *
+ * The order within a pass is the same one release uses and for the same
+ * reason: the row keeps its mapping reference throughout, and `holder` is
+ * cleared LAST — until it is, no sibling may release the row out from
+ * under the seat we are still vacating.
+ * ───────────────────────────────────────────────────────────────────── */
+void BrookCleanupStrand(struct process_t *proc)
 {
     if (!proc || !proc->cabin) return;
+    /* 0 is the vacated marker, never a strand. Scanning for it would match
+     * every already-vacated row and clear nothing, and the pass-per-row
+     * loop below would not terminate — a hang inside process_destroy. */
+    if (proc->pid == 0) return;
 
-    /* Splice out only THIS strand's claims (claim->proc == proc); claims
-     * held by sibling strands of the same cabin stay mapped and keep their
-     * peer-alive flags set.  Pointer surgery runs under brook_lock (so
-     * concurrent opens, which check proc->destroying first, cannot race-link
-     * past us); the heavy release runs outside it.  For a single-strand
-     * cabin every claim matches — identical to the old wholesale drain. */
-    BrookClaim *to_free = NULL;
-    spin_lock(&proc->cabin->brook_lock);
-    BrookClaim **pp = (BrookClaim **)&proc->cabin->brook_claims_head;
-    while (*pp) {
-        BrookClaim *c = *pp;
-        if (c->proc == proc) {
-            *pp = c->proc_next;
-            c->proc_next = to_free;
-            to_free = c;
-        } else {
-            pp = &c->proc_next;
+    cabin_t *cabin = proc->cabin;
+
+    for (;;) {
+        spin_lock(&cabin->brook_lock);
+        BrookClaim *claim = (BrookClaim *)cabin->brook_claims_head;
+        while (claim && claim->holder != proc->pid) claim = claim->cabin_next;
+        if (!claim) {
+            spin_unlock(&cabin->brook_lock);
+            return;
         }
+        BrookObject *brook = claim->brook;
+        uint32_t     role  = claim->role;
+        spin_unlock(&cabin->brook_lock);
+
+        /* A strand that DIES holding one end is the commonest way a stream
+         * ends, and the sleeper on the other end has even less to go on
+         * than after an orderly release — nobody called anything. */
+        uint32_t ring_pid = brook_role_end(brook, role, proc->pid);
+        brook_ring_pid(ring_pid);
+
+        spin_lock(&cabin->brook_lock);
+        if (claim->holder == proc->pid) claim->holder = 0;
+        spin_unlock(&cabin->brook_lock);
     }
-    spin_unlock(&proc->cabin->brook_lock);
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * BrookCleanupCabin — the MAPPING half, and the only automatic release
+ * there is. The cabin's last strand has been reaped and its address space
+ * is about to go, so every row still on the list goes with it — the whole
+ * list, unconditionally, because every row on it is this cabin's. Nothing
+ * can link a new one: linking needs a strand, and there is none left to
+ * have called us.
+ *
+ * It must run BEFORE vmm_destroy_context. That walk frees every mapped
+ * user data page as though it were the cabin's alone, and a Brook's ring
+ * is shared with whatever cabin holds the other end — the pages would go
+ * back to the PMM under a live peer.
+ *
+ * A seat found still warm means a strand was reaped without
+ * BrookCleanupStrand reaching it. Vacate it here rather than free a
+ * BrookObject with a live role stamped on it; the row's own mapping
+ * reference is still held at that point, which is what makes the object
+ * safe to touch.
+ * ───────────────────────────────────────────────────────────────────── */
+void BrookCleanupCabin(struct cabin_t *cabin)
+{
+    if (!cabin) return;
+
+    spin_lock(&cabin->brook_lock);
+    BrookClaim *to_free = (BrookClaim *)cabin->brook_claims_head;
+    cabin->brook_claims_head = NULL;
+    spin_unlock(&cabin->brook_lock);
 
     while (to_free) {
-        BrookClaim *next = to_free->proc_next;
+        BrookClaim  *next  = to_free->cabin_next;
         BrookObject *brook = to_free->brook;
 
         if (brook) {
-            brook_memtag_detach_all(proc, brook->header_phys, to_free->user_va_header,
+            uint32_t ring_pid = brook_role_end(brook, to_free->role,
+                                               to_free->holder);
+            brook_ring_pid(ring_pid);
+
+            brook_memtag_detach_all(cabin, brook->header_phys,
+                                     to_free->user_va_header,
                                      brook->slot_chunks, brook->slot_chunk_count,
-                                     to_free->user_va_slots, brook->slot_chunk_size);
-            brook_unmap_slots_from_cabin(proc, to_free->user_va_slots,
+                                     to_free->user_va_slots,
+                                     brook->slot_chunk_size);
+            brook_unmap_slots_from_cabin(cabin, to_free->user_va_slots,
                                          brook->slot_chunk_count,
                                          brook->slot_chunk_size);
-            brook_unmap_header_from_cabin(proc, to_free->user_va_header);
+            brook_unmap_header_from_cabin(cabin, to_free->user_va_header);
 
             BrookBucket *b = &g_brook_buckets[brook_bucket_index(brook->tag_id)];
             spin_lock(&b->lock);
-
-            BrookHeader *kh = brook_kernel_header(brook);
-            if (to_free->role == BROOK_WRITER) {
-                uint32_t one = 1u;
-                __atomic_compare_exchange_n(&kh->writer_alive, &one, 0u,
-                                            false, __ATOMIC_RELEASE,
-                                            __ATOMIC_RELAXED);
-                if (brook->writer_pid == proc->pid) brook->writer_pid = 0;
-            } else {
-                uint32_t one = 1u;
-                __atomic_compare_exchange_n(&kh->reader_alive, &one, 0u,
-                                            false, __ATOMIC_RELEASE,
-                                            __ATOMIC_RELAXED);
-                if (brook->reader_pid == proc->pid) brook->reader_pid = 0;
-            }
-            /* A strand that DIES holding one end is the commonest way a stream
-             * ends, and the sleeper on the other end has even less to go on
-             * than after an orderly release — nobody called anything. Take the
-             * bell here, ring below the lock. */
-            uint32_t ring_pid = brook_take_survivor_bell_locked(kh, to_free->role);
-
             brook_drop_ref_locked(b, brook);
             /* `brook` may be freed past this point — don't touch it. */
-
-            brook_ring_pid(ring_pid);
 
             if (g_stat_claims > 0) atomic_fetch_sub_u64(&g_stat_claims, 1);
             atomic_fetch_add_u64(&g_stat_releases, 1);

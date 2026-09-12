@@ -202,14 +202,44 @@ error_t          MemRegionRegistryDetach(MemRegionRegistry *reg,
                                           void *ctx,
                                           uintptr_t va_base);
 
-/* Snapshot all attaches of `region_id` into a caller buffer. Lock-protected
- * shallow copy of the linked list. Returns the actual count (capped by
- * `max`). Used by enforcement walks that need to drop the bucket lock
- * before doing PTE manipulation + cross-core TLB shootdowns. */
+/* Snapshot the first `max` attaches of `region_id` into a caller buffer, in
+ * chain order. Lock-protected shallow copy. Returns the count written.
+ * A chain longer than `max` is silently cut — use this only where a
+ * bounded sample is the honest answer (diagnostics, tests). Enforcement
+ * walks, which must see EVERY attach, use MemRegionRegistryWalkAttachs. */
 size_t           MemRegionRegistrySnapshotAttachs(MemRegionRegistry *reg,
                                                    uint32_t region_id,
                                                    MemRegionAttach *out,
                                                    size_t max);
+
+/* Resumable cursor over a region's attach chain. Copies out the `max`
+ * smallest attaches whose (va_base, ctx) key is strictly above
+ * (after_va, after_ctx), in ascending key order, and returns how many it
+ * wrote. Zero ends the walk. Start with (0, NULL): MemRegionRegistryAttach
+ * refuses a NULL ctx, so that key sits strictly below every real one.
+ * Resume by passing the last written entry's va_base and ctx.
+ *
+ * WHY A KEY AND NOT A NODE POINTER: the chain is kmalloc'd and a
+ * concurrent detach frees nodes, so a pointer held across the unlocked
+ * enforcement work would dangle. (va_base, ctx) is the same pair
+ * MemRegionRegistryAttach treats as an attach's identity, so it is unique
+ * and stays meaningful when the chain is mutated under the walk — an
+ * attach added mid-walk above the cursor is seen, one removed mid-walk is
+ * simply absent, and neither can make the cursor lose its place.
+ *
+ * Each call re-walks the chain to select its batch, so a full sweep costs
+ * O(A²/max) pointer hops for a chain of A attaches. Accepted: per region
+ * A is the number of live cabin mappings of that one region, and every
+ * caller is a cold policy path (grant / revoke / guard flip / pkey
+ * change), never a fault or map hot path. The alternative — holding the
+ * bucket lock across the whole walk — would nest the VMM context locks
+ * and the TLB shootdown IPI inside the region bucket lock. */
+size_t           MemRegionRegistryWalkAttachs(MemRegionRegistry *reg,
+                                               uint32_t region_id,
+                                               uintptr_t after_va,
+                                               const void *after_ctx,
+                                               MemRegionAttach *out,
+                                               size_t max);
 
 /* Update state of a specific attach matching (ctx, va_base). No-op if
  * attach not found (race with detach). Idempotent. */

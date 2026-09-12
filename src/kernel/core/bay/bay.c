@@ -6,14 +6,35 @@
  * physical pages shared with every other cabin that opened the same
  * tag.
  *
+ * Ownership — a claim belongs to the CABIN, never to the strand that
+ * opened it. The mapping a claim carries lives in the cabin's address
+ * space, which every strand of that cabin runs in and can already hold a
+ * pointer into; tearing it down because one strand finished pulls the
+ * floor out from under siblings that did nothing wrong. The key to the
+ * shared room is issued to the flat, not to one occupant: when one of
+ * them moves out, the door is not bricked up. Exactly two doors lead out
+ * of a claim and there is no third — an explicit BayReleaseInternal, and
+ * the cabin's own teardown (BayCleanupCabin).
+ *
+ * The rejected alternative was the one that used to stand here: record
+ * the opening strand on the claim and, at strand death, splice out just
+ * its rows. It reads like tidy bookkeeping and it is an unmap of live
+ * memory. The console found it the hard way — one cabin-wide pointer to
+ * the shared print order, opened by whichever strand happened to print
+ * first, vanished under all its siblings the moment that strand finished,
+ * and the next print faulted in code that had been working perfectly.
+ * Since the opener is never consulted again, the claim does not carry it.
+ *
  * Concurrency model:
  *   - bay_buckets[]: hash table keyed by tag_id. Each bucket has its
  *     own spinlock; cross-tag operations never serialize.
  *   - BayObject.ref_count: atomic. Drop-to-zero is detected inside the
  *     bucket lock so revive-during-destroy races are impossible (the
  *     destroyer holds the lock that any opener must take).
- *   - Per-cabin claim list: protected by proc->cabin->bay_lock. Walks are
+ *   - Per-cabin claim list: protected by cabin->bay_lock. Walks are
  *     O(N_claims_in_this_cabin) which is small (single-digit typical).
+ *   - Lock order is cabin->bay_lock and bucket->lock, never nested: the
+ *     list surgery runs under bay_lock, the heavy release outside it.
  *
  * Page-class policy:
  *   - size >= 2 MB: pmm_alloc(512) per chunk, vmm_map_huge_2m
@@ -212,10 +233,11 @@ error_t bay_alloc_chunks_4k(uint64_t total_size,
                                       out_chunk_count, out_chunks);
 }
 
-/* Map every chunk into proc->cabin starting at user_va_base. Returns
- * the number of chunks mapped on success or 0 on failure (any partial
- * progress is rolled back internally before returning). */
-static error_t bay_map_into_cabin(struct process_t *proc,
+/* Map every chunk into the cabin starting at user_va_base. Returns OK on
+ * success (any partial progress is rolled back internally before
+ * returning). The cabin, not a strand, is what these take: the page
+ * tables being written are the cabin's and outlive any one strand. */
+static error_t bay_map_into_cabin(cabin_t *cabin,
                                   uint64_t user_va_base,
                                   uint64_t *chunks,
                                   uint32_t chunk_count,
@@ -223,7 +245,7 @@ static error_t bay_map_into_cabin(struct process_t *proc,
                                   uint32_t flags,
                                   uint16_t tme_keyid)
 {
-    if (!proc || !proc->cabin) return ERR_INVALID_ARGUMENT;
+    if (!cabin || !cabin->vmm) return ERR_INVALID_ARGUMENT;
 
     uint64_t vmm_flags = VMM_FLAGS_USER_RW;
     if (flags & BAY_RO) {
@@ -247,18 +269,18 @@ static error_t bay_map_into_cabin(struct process_t *proc,
         if (chunk_size == BAY_HUGE_SIZE) {
             if (encrypted) {
                 uint64_t pa_with_keyid = tme_phys_with_keyid(pa, tme_keyid);
-                ok = vmm_map_huge_2m_with_keyid(proc->cabin->vmm, va,
+                ok = vmm_map_huge_2m_with_keyid(cabin->vmm, va,
                                                  pa_with_keyid, vmm_flags);
             } else {
-                ok = vmm_map_huge_2m(proc->cabin->vmm, va, pa, vmm_flags);
+                ok = vmm_map_huge_2m(cabin->vmm, va, pa, vmm_flags);
             }
         } else if (encrypted) {
             uint64_t pa_with_keyid = tme_phys_with_keyid(pa, tme_keyid);
-            vmm_map_result_t r = vmm_map_page_with_keyid(proc->cabin->vmm, va,
+            vmm_map_result_t r = vmm_map_page_with_keyid(cabin->vmm, va,
                                                          pa_with_keyid, vmm_flags);
             ok = r.success;
         } else {
-            vmm_map_result_t r = vmm_map_page(proc->cabin->vmm, va, pa, vmm_flags);
+            vmm_map_result_t r = vmm_map_page(cabin->vmm, va, pa, vmm_flags);
             ok = r.success;
         }
 
@@ -267,9 +289,9 @@ static error_t bay_map_into_cabin(struct process_t *proc,
             for (uint32_t j = 0; j < i; j++) {
                 uint64_t uva = user_va_base + (uint64_t)j * chunk_size;
                 if (chunk_size == BAY_HUGE_SIZE) {
-                    vmm_unmap_huge_2m(proc->cabin->vmm, uva);
+                    vmm_unmap_huge_2m(cabin->vmm, uva);
                 } else {
-                    vmm_unmap_page(proc->cabin->vmm, uva);
+                    vmm_unmap_page(cabin->vmm, uva);
                 }
             }
             return ERR_NO_MEMORY;
@@ -284,7 +306,7 @@ static error_t bay_map_into_cabin(struct process_t *proc,
  * effort: any per-chunk failure is silently skipped (region creation
  * race only — extremely rare; future enforcement walks will simply miss
  * that one chunk, never corrupt). */
-static void bay_memtag_attach_all(struct process_t *proc,
+static void bay_memtag_attach_all(cabin_t *cabin,
                                    uint64_t *chunks,
                                    uint32_t chunk_count,
                                    uint64_t va_base,
@@ -304,7 +326,7 @@ static void bay_memtag_attach_all(struct process_t *proc,
         uint64_t att_va = va_base + (uint64_t)i * chunk_size;
         uint32_t rid    = MemRegionFromPhys((uintptr_t)chunks[i]);
         if (rid != MEMTAG_INVALID_REGION_ID) {
-            MemRegionAttachCabin(rid, (void *)proc->cabin->vmm, att_va,
+            MemRegionAttachCabin(rid, (void *)cabin->vmm, att_va,
                                   pages_per_chunk, page_class, att_flags);
         }
     }
@@ -312,7 +334,7 @@ static void bay_memtag_attach_all(struct process_t *proc,
 
 /* Inverse of bay_memtag_attach_all — detach every chunk's attach record.
  * Idempotent; safe to call when no attach was registered for a chunk. */
-static void bay_memtag_detach_all(struct process_t *proc,
+static void bay_memtag_detach_all(cabin_t *cabin,
                                    uint64_t *chunks,
                                    uint32_t chunk_count,
                                    uint64_t va_base,
@@ -323,23 +345,23 @@ static void bay_memtag_detach_all(struct process_t *proc,
         uint64_t att_va = va_base + (uint64_t)i * chunk_size;
         uint32_t rid    = MemRegionFromPhys((uintptr_t)chunks[i]);
         if (rid != MEMTAG_INVALID_REGION_ID) {
-            MemRegionDetachCabin(rid, (void *)proc->cabin->vmm, att_va);
+            MemRegionDetachCabin(rid, (void *)cabin->vmm, att_va);
         }
     }
 }
 
-static void bay_unmap_from_cabin(struct process_t *proc,
+static void bay_unmap_from_cabin(cabin_t *cabin,
                                  uint64_t user_va_base,
                                  uint32_t chunk_count,
                                  uint64_t chunk_size)
 {
-    if (!proc || !proc->cabin) return;
+    if (!cabin || !cabin->vmm) return;
     for (uint32_t i = 0; i < chunk_count; i++) {
         uint64_t uva = user_va_base + (uint64_t)i * chunk_size;
         if (chunk_size == BAY_HUGE_SIZE) {
-            vmm_unmap_huge_2m(proc->cabin->vmm, uva);
+            vmm_unmap_huge_2m(cabin->vmm, uva);
         } else {
-            vmm_unmap_page(proc->cabin->vmm, uva);
+            vmm_unmap_page(cabin->vmm, uva);
         }
     }
 }
@@ -369,7 +391,7 @@ static void bay_free_chunks(BayObject *bay)
  * Each allocation aligns up to the page class so 2 MB chunks land on
  * 2 MB-aligned VAs (mandatory for vmm_map_huge_2m).
  * ───────────────────────────────────────────────────────────────────── */
-static uint64_t bay_reserve_user_va(struct process_t *proc,
+static uint64_t bay_reserve_user_va(cabin_t *cabin,
                                     uint64_t size,
                                     uint64_t page_align)
 {
@@ -378,66 +400,69 @@ static uint64_t bay_reserve_user_va(struct process_t *proc,
     uint64_t base;
     /* atomic_fetch_add with alignment requires explicit serialization;
      * the bay_lock is enough since reservations are off the hot path. */
-    spin_lock(&proc->cabin->bay_lock);
-    uint64_t cur = (proc->cabin->bay_va_next + page_align - 1) & ~(page_align - 1);
+    spin_lock(&cabin->bay_lock);
+    uint64_t cur = (cabin->bay_va_next + page_align - 1) & ~(page_align - 1);
     /* Wrap-safe bounds check: `cur + size` could overflow if size is
      * close to UINT64_MAX (the boxlib boundary already caps at
      * BAY_MAX_OPEN_SIZE but a kernel-internal caller might not). */
     if (size > CABIN_BAY_END - cur) {
-        spin_unlock(&proc->cabin->bay_lock);
+        spin_unlock(&cabin->bay_lock);
         return 0;
     }
     base = cur;
-    proc->cabin->bay_va_next = cur + size;
-    spin_unlock(&proc->cabin->bay_lock);
+    cabin->bay_va_next = cur + size;
+    spin_unlock(&cabin->bay_lock);
     return base;
 }
 
 /* ─────────────────────────────────────────────────────────────────────
- * Claim list helpers — singly-linked off proc->cabin->bay_claims_head.
+ * Claim list helpers — singly-linked off cabin->bay_claims_head.
  * ───────────────────────────────────────────────────────────────────── */
-/* Returns true on success, false if proc is already being destroyed —
- * in which case BayCleanupProcess has either drained the list or is
- * about to, and linking a fresh claim would leak it (and the underlying
- * BayObject ref). The caller must roll back its ref_count++ on false. */
-static bool bay_link_claim(struct process_t *proc, BayClaim *claim)
+/* Linking cannot fail. It used to: a claim opened while its strand was
+ * being destroyed had to be refused, because the strand-death drain had
+ * either already run or was about to, and a row linked past it would
+ * leak. With the drain moved to cabin teardown that window is gone — the
+ * only drain left runs when the cabin's last strand is already reaped,
+ * and a strand executing this call is itself the proof that the cabin
+ * still has one. */
+static void bay_link_claim(cabin_t *cabin, BayClaim *claim)
 {
-    spin_lock(&proc->cabin->bay_lock);
-    if (proc->destroying) {
-        spin_unlock(&proc->cabin->bay_lock);
-        return false;
-    }
-    claim->proc_next = (BayClaim *)proc->cabin->bay_claims_head;
-    proc->cabin->bay_claims_head = claim;
-    spin_unlock(&proc->cabin->bay_lock);
-    return true;
+    spin_lock(&cabin->bay_lock);
+    claim->cabin_next = (BayClaim *)cabin->bay_claims_head;
+    cabin->bay_claims_head = claim;
+    spin_unlock(&cabin->bay_lock);
 }
 
 /* Unlink claim with matching user_va_base. Returns the claim or NULL
- * if not found. Caller is responsible for kfree. */
-static BayClaim *bay_unlink_claim_by_va(struct process_t *proc, uint64_t user_va)
+ * if not found. Caller is responsible for kfree.
+ *
+ * The VA alone decides, and that is deliberate: any strand of the cabin
+ * may hand back a window any strand of the cabin opened, because the
+ * window is the cabin's. Matching an opener here would re-introduce, in
+ * the release path, exactly the strand ownership this file rejects. */
+static BayClaim *bay_unlink_claim_by_va(cabin_t *cabin, uint64_t user_va)
 {
-    spin_lock(&proc->cabin->bay_lock);
-    BayClaim **p = (BayClaim **)&proc->cabin->bay_claims_head;
+    spin_lock(&cabin->bay_lock);
+    BayClaim **p = (BayClaim **)&cabin->bay_claims_head;
     while (*p) {
         if ((*p)->user_va_base == user_va) {
             BayClaim *hit = *p;
-            *p = hit->proc_next;
-            spin_unlock(&proc->cabin->bay_lock);
+            *p = hit->cabin_next;
+            spin_unlock(&cabin->bay_lock);
             return hit;
         }
-        p = &(*p)->proc_next;
+        p = &(*p)->cabin_next;
     }
-    spin_unlock(&proc->cabin->bay_lock);
+    spin_unlock(&cabin->bay_lock);
     return NULL;
 }
 
-static BayClaim *bay_find_claim_by_va(struct process_t *proc, uint64_t user_va)
+static BayClaim *bay_find_claim_by_va(cabin_t *cabin, uint64_t user_va)
 {
-    spin_lock(&proc->cabin->bay_lock);
-    BayClaim *c = (BayClaim *)proc->cabin->bay_claims_head;
-    while (c && c->user_va_base != user_va) c = c->proc_next;
-    spin_unlock(&proc->cabin->bay_lock);
+    spin_lock(&cabin->bay_lock);
+    BayClaim *c = (BayClaim *)cabin->bay_claims_head;
+    while (c && c->user_va_base != user_va) c = c->cabin_next;
+    spin_unlock(&cabin->bay_lock);
     return c;
 }
 
@@ -479,7 +504,7 @@ static inline uint64_t bay_total_pages(const BayObject *bay)
  * opener would block on the same lock.
  *
  * This used to be inlined four times across BayOpenInternal's failure
- * paths, BayReleaseInternal, and BayCleanupProcess — extracting it
+ * paths, BayReleaseInternal, and BayCleanupCabin — extracting it
  * killed 60+ lines of cleanup duplication. */
 static void bay_drop_ref_locked(BayBucket *b, BayObject *bay)
 {
@@ -536,10 +561,11 @@ error_t BayOpenInternal(struct process_t *proc,
     if (!proc || !proc->cabin || !tag || !out_user_va || !out_actual_size)
         return ERR_INVALID_ARGUMENT;
 
-    /* Fast-path: don't bother allocating chunks if the cabin is already
-     * being torn down. The authoritative re-check happens inside
-     * bay_link_claim under proc->cabin->bay_lock to close the late-set race. */
-    if (proc->destroying) return ERR_INVALID_STATE;
+    /* Everything below the tag lookup is the cabin's — the VA window, the
+     * page tables, the claim row, the encryption quota. The strand is kept
+     * only for the two things that are genuinely its own: the pid the
+     * MemTag gate judges, and the pid stamped on a freshly created Bay. */
+    cabin_t *cabin = proc->cabin;
 
     /* Reject unknown flag bits early — they almost certainly indicate a
      * caller bug or an ABI mismatch with userspace, and silently
@@ -581,26 +607,26 @@ error_t BayOpenInternal(struct process_t *proc,
          * before touching any global state so a misbehaving cabin
          * can't drain the global KeyID pool. The KeyID reservation
          * + quota-counter increment happen as a single atomic step
-         * under proc->cabin->bay_lock so the quota is observed correctly
+         * under cabin->bay_lock so the quota is observed correctly
          * under concurrent BayOpen calls from the same cabin. */
         uint16_t alloc_keyid = 0;
         if (flags & BAY_ENCRYPTED) {
             if (!g_tme.mk_active) return ERR_UNSUPPORTED;
-            spin_lock(&proc->cabin->bay_lock);
-            if (proc->cabin->tme_keyids_held >= TME_QUOTA_PER_PROC) {
-                spin_unlock(&proc->cabin->bay_lock);
+            spin_lock(&cabin->bay_lock);
+            if (cabin->tme_keyids_held >= TME_QUOTA_PER_PROC) {
+                spin_unlock(&cabin->bay_lock);
                 return ERR_QUOTA_EXCEEDED;
             }
             /* Take a quota slot tentatively. If KeyID alloc fails
              * below we roll back. */
-            proc->cabin->tme_keyids_held++;
-            spin_unlock(&proc->cabin->bay_lock);
+            cabin->tme_keyids_held++;
+            spin_unlock(&cabin->bay_lock);
 
             error_t krc = tme_keyid_alloc(&alloc_keyid);
             if (krc != OK) {
-                spin_lock(&proc->cabin->bay_lock);
-                if (proc->cabin->tme_keyids_held > 0) proc->cabin->tme_keyids_held--;
-                spin_unlock(&proc->cabin->bay_lock);
+                spin_lock(&cabin->bay_lock);
+                if (cabin->tme_keyids_held > 0) cabin->tme_keyids_held--;
+                spin_unlock(&cabin->bay_lock);
                 return krc;
             }
         }
@@ -618,9 +644,9 @@ error_t BayOpenInternal(struct process_t *proc,
         if (rc != OK) {
             if (alloc_keyid) {
                 (void)tme_keyid_free(alloc_keyid);
-                spin_lock(&proc->cabin->bay_lock);
-                if (proc->cabin->tme_keyids_held > 0) proc->cabin->tme_keyids_held--;
-                spin_unlock(&proc->cabin->bay_lock);
+                spin_lock(&cabin->bay_lock);
+                if (cabin->tme_keyids_held > 0) cabin->tme_keyids_held--;
+                spin_unlock(&cabin->bay_lock);
             }
             return rc;
         }
@@ -650,9 +676,9 @@ error_t BayOpenInternal(struct process_t *proc,
                     }
                     kfree(chunks);
                     (void)tme_keyid_free(alloc_keyid);
-                    spin_lock(&proc->cabin->bay_lock);
-                    if (proc->cabin->tme_keyids_held > 0) proc->cabin->tme_keyids_held--;
-                    spin_unlock(&proc->cabin->bay_lock);
+                    spin_lock(&cabin->bay_lock);
+                    if (cabin->tme_keyids_held > 0) cabin->tme_keyids_held--;
+                    spin_unlock(&cabin->bay_lock);
                     return zrc;
                 }
             }
@@ -667,9 +693,9 @@ error_t BayOpenInternal(struct process_t *proc,
             kfree(chunks);
             if (alloc_keyid) {
                 (void)tme_keyid_free(alloc_keyid);
-                spin_lock(&proc->cabin->bay_lock);
-                if (proc->cabin->tme_keyids_held > 0) proc->cabin->tme_keyids_held--;
-                spin_unlock(&proc->cabin->bay_lock);
+                spin_lock(&cabin->bay_lock);
+                if (cabin->tme_keyids_held > 0) cabin->tme_keyids_held--;
+                spin_unlock(&cabin->bay_lock);
             }
             return ERR_NO_MEMORY;
         }
@@ -699,9 +725,9 @@ error_t BayOpenInternal(struct process_t *proc,
             kfree(fresh);
             if (alloc_keyid) {
                 (void)tme_keyid_free(alloc_keyid);
-                spin_lock(&proc->cabin->bay_lock);
-                if (proc->cabin->tme_keyids_held > 0) proc->cabin->tme_keyids_held--;
-                spin_unlock(&proc->cabin->bay_lock);
+                spin_lock(&cabin->bay_lock);
+                if (cabin->tme_keyids_held > 0) cabin->tme_keyids_held--;
+                spin_unlock(&cabin->bay_lock);
                 alloc_keyid = 0;
             }
             spin_lock(&b->lock);
@@ -757,7 +783,7 @@ error_t BayOpenInternal(struct process_t *proc,
     spin_unlock(&b->lock);
 
     /* Reserve per-cabin VA and map. */
-    uint64_t va = bay_reserve_user_va(proc, total_size, chunk_size);
+    uint64_t va = bay_reserve_user_va(cabin, total_size, chunk_size);
     if (va == 0) {
         spin_lock(&b->lock);
         bay_drop_ref_locked(b, bay);
@@ -774,7 +800,6 @@ error_t BayOpenInternal(struct process_t *proc,
     }
     memset(claim, 0, sizeof(*claim));
     claim->bay          = bay;
-    claim->proc         = proc;
     claim->user_va_base = va;
     claim->flags        = flags;
 
@@ -790,7 +815,7 @@ error_t BayOpenInternal(struct process_t *proc,
         }
     }
 
-    error_t rc = bay_map_into_cabin(proc, va, bay->chunks,
+    error_t rc = bay_map_into_cabin(cabin, va, bay->chunks,
                                     chunk_count, chunk_size, flags,
                                     bay->tme_keyid);
     if (rc != OK) {
@@ -803,19 +828,11 @@ error_t BayOpenInternal(struct process_t *proc,
     /* Phase 2C — register attachment bookkeeping per chunk so future
      * revoke/grant sweeps can locate this cabin's PTEs without scanning
      * the page table. */
-    bay_memtag_attach_all(proc, bay->chunks, chunk_count, va, chunk_size, flags);
+    bay_memtag_attach_all(cabin, bay->chunks, chunk_count, va, chunk_size, flags);
 
-    /* Final link. The destroying-check inside bay_link_claim closes the
-     * window where BayCleanupProcess might have drained the list while
-     * we were busy with the bucket/PMM/VMM work above. */
-    if (!bay_link_claim(proc, claim)) {
-        bay_memtag_detach_all(proc, bay->chunks, chunk_count, va, chunk_size);
-        bay_unmap_from_cabin(proc, va, chunk_count, chunk_size);
-        kfree(claim);
-        spin_lock(&b->lock);
-        bay_drop_ref_locked(b, bay);
-        return ERR_INVALID_STATE;
-    }
+    /* Final link, and it cannot fail — see bay_link_claim. The window it
+     * used to guard belonged to a drain that no longer happens here. */
+    bay_link_claim(cabin, claim);
     atomic_fetch_add_u64(&g_stat_claims, 1);
 
     *out_user_va     = va;
@@ -825,9 +842,11 @@ error_t BayOpenInternal(struct process_t *proc,
 
 error_t BayReleaseInternal(struct process_t *proc, uint64_t user_va)
 {
-    if (!proc || user_va == 0) return ERR_INVALID_ARGUMENT;
+    if (!proc || !proc->cabin || user_va == 0) return ERR_INVALID_ARGUMENT;
 
-    BayClaim *claim = bay_unlink_claim_by_va(proc, user_va);
+    cabin_t *cabin = proc->cabin;
+
+    BayClaim *claim = bay_unlink_claim_by_va(cabin, user_va);
     if (!claim) return ERR_TAG_NOT_FOUND;
 
     BayObject *bay = claim->bay;
@@ -838,13 +857,15 @@ error_t BayReleaseInternal(struct process_t *proc, uint64_t user_va)
     }
 
     /* Phase 2C — detach attachment bookkeeping before the PTE goes away. */
-    bay_memtag_detach_all(proc, bay->chunks, bay->chunk_count,
+    bay_memtag_detach_all(cabin, bay->chunks, bay->chunk_count,
                           claim->user_va_base, bay->chunk_size);
 
     /* Unmap from this cabin first. After this the pages are exclusively
-     * owned by other cabins (if any) — no chance the current proc still
-     * has a valid PTE pointing into the Bay. */
-    bay_unmap_from_cabin(proc, claim->user_va_base,
+     * owned by other cabins (if any) — no strand of THIS cabin still has
+     * a valid PTE pointing into the Bay. That is the whole weight of an
+     * explicit release: the caller is speaking for every strand in the
+     * flat, so it must be sure none of them is still reading. */
+    bay_unmap_from_cabin(cabin, claim->user_va_base,
                          bay->chunk_count, bay->chunk_size);
 
     BayBucket *b = &g_bay_buckets[bay_bucket_index(bay->tag_id)];
@@ -859,45 +880,37 @@ error_t BayReleaseInternal(struct process_t *proc, uint64_t user_va)
 
 uint64_t BaySizeInternal(struct process_t *proc, uint64_t user_va)
 {
-    BayClaim *c = bay_find_claim_by_va(proc, user_va);
+    if (!proc || !proc->cabin) return 0;
+    BayClaim *c = bay_find_claim_by_va(proc->cabin, user_va);
     return c ? c->bay->user_size : 0;
 }
 
-void BayCleanupProcess(struct process_t *proc)
+void BayCleanupCabin(struct cabin_t *cabin)
 {
-    if (!proc || !proc->cabin) return;
+    if (!cabin) return;
 
-    /* Splice out only THIS strand's claims (claim->proc == proc).  A Bay
-     * window belongs to the strand that opened it, so claims opened by
-     * sibling strands sharing the cabin stay mapped.  Pointer surgery runs
-     * under bay_lock; the heavy release (detach/unmap/drop_ref — which take
-     * the bucket lock) runs OUTSIDE bay_lock to preserve bay_lock →
-     * bucket-lock ordering.  For a single-strand cabin every claim matches,
-     * so this behaves exactly like the old wholesale drain.  New opens
-     * cannot race in: process_destroy already set proc->destroying. */
-    BayClaim *to_free = NULL;
-    spin_lock(&proc->cabin->bay_lock);
-    BayClaim **pp = (BayClaim **)&proc->cabin->bay_claims_head;
-    while (*pp) {
-        BayClaim *c = *pp;
-        if (c->proc == proc) {
-            *pp = c->proc_next;
-            c->proc_next = to_free;
-            to_free = c;
-        } else {
-            pp = &c->proc_next;
-        }
-    }
-    spin_unlock(&proc->cabin->bay_lock);
+    /* The cabin's last strand has been reaped and its address space is
+     * about to go, so every claim still on the list goes with it — the
+     * whole list, unconditionally, because every row on it is this
+     * cabin's. Nothing can link a new one: linking needs a strand, and
+     * there is none left to have called us.
+     *
+     * The list is taken in one move under bay_lock and the heavy release
+     * (detach / unmap / drop_ref, all of which take a bucket lock) runs
+     * outside it — bay_lock and the bucket locks are never nested. */
+    spin_lock(&cabin->bay_lock);
+    BayClaim *to_free = (BayClaim *)cabin->bay_claims_head;
+    cabin->bay_claims_head = NULL;
+    spin_unlock(&cabin->bay_lock);
 
     while (to_free) {
-        BayClaim *next = to_free->proc_next;
+        BayClaim *next = to_free->cabin_next;
         BayObject *bay = to_free->bay;
 
         if (bay) {
-            bay_memtag_detach_all(proc, bay->chunks, bay->chunk_count,
+            bay_memtag_detach_all(cabin, bay->chunks, bay->chunk_count,
                                    to_free->user_va_base, bay->chunk_size);
-            bay_unmap_from_cabin(proc, to_free->user_va_base,
+            bay_unmap_from_cabin(cabin, to_free->user_va_base,
                                  bay->chunk_count, bay->chunk_size);
 
             BayBucket *b = &g_bay_buckets[bay_bucket_index(bay->tag_id)];

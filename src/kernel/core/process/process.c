@@ -269,6 +269,12 @@ static void process_init_strand_fields(process_t *proc)
     proc->owed_draining = 0;
     spinlock_init(&proc->owed_lock);
 
+    proc->result_owed_head     = NULL;
+    proc->result_owed_tail     = NULL;
+    proc->result_owed_count    = 0;
+    proc->result_owed_draining = 0;
+    spinlock_init(&proc->result_owed_lock);
+
     proc->gone_waiters    = NULL;
     spinlock_init(&proc->gone_lock);
     ChitInit(&proc->chit);
@@ -842,9 +848,15 @@ void process_destroy(process_t *proc)
         }
     }
 
-    BayCleanupProcess(proc);
-
-    BrookCleanupProcess(proc);
+    /* Bay is NOT cleaned here any more. A Bay claim carries a window of the
+     * CABIN's address space, which every sibling strand still runs in, so
+     * dropping it when one strand exits unmaps memory out from under code that
+     * did nothing wrong. It goes at cabin_destroy instead — the one moment the
+     * last strand is gone and the page tables still stand. (Brook splits the
+     * difference, because a Brook claim carries a writer/reader seat as well as
+     * a mapping: the seat IS this strand's and ends here, the mapping is the
+     * cabin's and goes at cabin_destroy with Bay's.) */
+    BrookCleanupStrand(proc);
 
     cet_process_destroy(proc);
     cet_process_destroy_kernel_ssp(proc);
@@ -1986,6 +1998,14 @@ static void process_cleanup_immediate(process_t *proc)
      * a main strand that ring page is the cabin's, freed by the cabin_ref_dec
      * below. */
     TouchOwedRelease(proc);
+
+    /* And the reply ring's half. Every node here also owns the cabin-heap
+     * deposit its answer names, so this is where those frames come back; the
+     * cabin is still up because cabin_ref_dec is below, and for a strand that
+     * shares a cabin with living siblings nothing else would ever reclaim
+     * them. Same ordering reason as above: the sweep clears the ring's slip,
+     * and a main strand's ring page belongs to the cabin. */
+    ResultOwedRelease(proc);
 
     /* Reclaim this strand's per-strand IPC rings + StrandInfo and its hammock
      * user stack (both no-ops for the main strand) while the cabin's address

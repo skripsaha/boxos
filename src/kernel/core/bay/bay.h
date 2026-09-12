@@ -17,9 +17,18 @@
  * Lifetime is refcounted on the per-cabin "claim". Each bay_open in a
  * cabin adds one claim; bay_release drops it. When the last claim across
  * all cabins drops, the physical pages return to PMM and the BayObject
- * is freed. process_destroy auto-releases every Bay claim the cabin
- * holds (BayCleanupProcess) so a crashing app never leaks the backing
- * pages.
+ * is freed.
+ *
+ * A claim is the CABIN's, not the strand's that opened it, and it lives
+ * as long as the cabin does. Exactly two things end one: an explicit
+ * bay_release from any strand of that cabin, and the cabin's own
+ * teardown (BayCleanupCabin, called when the last strand is reaped) —
+ * so a crashing app still never leaks the backing pages. A strand
+ * exiting unmaps nothing: the mapping is in an address space its
+ * siblings are still running in, and pulling it out from under them
+ * faults code that did nothing wrong. This is not hypothetical — the
+ * console's shared print order, opened by whichever strand printed
+ * first, vanished under every sibling the moment that strand finished.
  *
  * Page-class selection is implicit: ≥ 2 MB allocations try 2 MB pages
  * via PMM buddy order-9; smaller allocations use 4 KB pages. 1 GB pages
@@ -85,8 +94,8 @@
  * exhaust the pool and DoS every other cabin's encryption requests.
  * 8 per cabin is enough for typical use (model weights, secret
  * config, framebuffer, IPC scratch) while leaving headroom for
- * concurrent processes. Counter lives on process_t.tme_keyids_held
- * (process.h) and is enforced inside BayOpenInternal. */
+ * concurrent cabins. Counter lives on cabin_t.tme_keyids_held
+ * (cabin.h) and is enforced inside BayOpenInternal. */
 #define TME_QUOTA_PER_PROC  8u
 
 /* Mask of all defined flag bits — used by BayOpenInternal to reject
@@ -104,6 +113,7 @@
 typedef struct BayClaim BayClaim;
 typedef struct BayObject BayObject;
 struct process_t;
+struct cabin_t;
 
 /* BayObject — one per-tag physical-memory region.
  *
@@ -151,19 +161,27 @@ struct BayObject {
 
 /* BayClaim — one per cabin-open of a Bay. Lives in two places:
  *   - bucket-side: hangs off BayObject only via the ref_count
- *   - process-side: linked into proc->bay_claims_head (singly-linked)
+ *   - cabin-side: linked into cabin->bay_claims_head (singly-linked)
  *
  * Records the user-VA window inside the cabin and the per-claim flags
- * (RO vs RW). bay_release(user_va) walks the process list to find the
+ * (RO vs RW). bay_release(user_va) walks the cabin list to find the
  * claim, unmaps its pages from the cabin, drops ref_count, and free()s.
+ *
+ * There is deliberately no opener on this struct. A back-pointer to the
+ * strand that called bay_open was what let strand death unmap a window
+ * its siblings were still reading, and once the claim is the cabin's the
+ * opener is never a legitimate input to any decision — release, size and
+ * teardown all judge by VA and by cabin alone. Keeping it "just for the
+ * record" would also mean holding a process_t pointer that goes stale
+ * the moment that strand exits, which is the same class of landmine one
+ * indirection further away.
  */
 struct BayClaim {
     BayObject  *bay;                /* upstream BayObject */
-    BayClaim   *proc_next;          /* process claim list link */
+    BayClaim   *cabin_next;         /* cabin claim list link */
     uint64_t    user_va_base;       /* per-cabin VA window start */
     uint32_t    flags;              /* claim-specific flags (BAY_RO) */
     uint32_t    _pad;
-    struct process_t *proc;         /* back-pointer for sanity check */
 };
 
 void BayInit(void);
@@ -185,21 +203,29 @@ error_t BayOpenInternal(struct process_t *proc,
                         uint64_t *out_user_va,
                         uint64_t *out_actual_size);
 
-/* bay_release semantics: walk proc->bay_claims_head, find claim where
- * user_va_base == user_va, unmap the pages from the cabin, drop
- * ref_count, free claim. If ref_count drops to 0, the underlying
- * BayObject is destroyed and its chunks return to PMM. */
+/* bay_release semantics: walk proc->cabin->bay_claims_head, find the
+ * claim where user_va_base == user_va, unmap the pages from the cabin,
+ * drop ref_count, free claim. If ref_count drops to 0, the underlying
+ * BayObject is destroyed and its chunks return to PMM.
+ *
+ * Any strand of the cabin may release any of the cabin's claims — the
+ * window is the cabin's, so the caller speaks for all of them and must
+ * be sure no sibling is still reading through the pointer. */
 error_t BayReleaseInternal(struct process_t *proc, uint64_t user_va);
 
-/* bay_size: O(N_claims_in_proc) lookup of the BayClaim by user_va. */
+/* bay_size: O(N_claims_in_this_cabin) lookup of the BayClaim by user_va. */
 uint64_t BaySizeInternal(struct process_t *proc, uint64_t user_va);
 
-/* Process teardown hook. MUST be called from process_destroy BEFORE
- * vmm_destroy_context — otherwise the destroy walk frees Bay-owned
- * pages as if they were exclusive process pages (leading to refcount
- * underflow + PMM double-free on the next bay_release). Idempotent;
- * safe to call multiple times. */
-void BayCleanupProcess(struct process_t *proc);
+/* Cabin teardown hook — the only automatic release there is. MUST be
+ * called from cabin_destroy BEFORE vmm_destroy_context: otherwise the
+ * destroy walk frees Bay-owned pages as if they were the cabin's own
+ * exclusive pages, which is a refcount underflow plus a PMM double-free
+ * on the next bay_release from any other cabin holding the same tag.
+ *
+ * It hangs off cabin_destroy and not off process_destroy because a
+ * strand exiting is not the end of the address space the claims are
+ * mapped into; the last strand's cabin_ref_dec is. */
+void BayCleanupCabin(struct cabin_t *cabin);
 
 /* Diagnostic snapshot — used by perf dump / future bay_info ops.
  *   out[0] = live BayObject count

@@ -118,9 +118,12 @@
 
 /* ─── Brook — SPSC ordered streaming (0x75 – 0x7A) ─────────────────── */
 /* open attaches with role + maps header/slots; release drops the claim
- * (last release destroys backing); info snapshots live stats. */
+ * (last release destroys backing); handover moves the writer/reader seat
+ * to a sibling strand of the SAME cabin, leaving the mapping where it is;
+ * info snapshots live stats. */
 #define SYSTEM_OP_BROOK_OPEN        0x75
 #define SYSTEM_OP_BROOK_RELEASE     0x76
+#define SYSTEM_OP_BROOK_HANDOVER    0x77  /* (u64 va_header)(u32 to_pid)   */
 #define SYSTEM_OP_BROOK_INFO        0x7A
 
 /* ─── Manifest compile-and-reuse (0x80 – 0x81) ─────────────────────── */

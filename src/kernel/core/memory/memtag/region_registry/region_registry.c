@@ -586,6 +586,57 @@ size_t MemRegionRegistrySnapshotAttachs(MemRegionRegistry *reg,
     return n;
 }
 
+/* Lexicographic (va_base, ctx) comparisons. Pointers are compared as
+ * uintptr_t because the nodes belong to unrelated kmalloc objects — the
+ * value, not the provenance, is what orders them. */
+static inline bool AttachKeyAbove(const MemRegionAttach *a,
+                                   uintptr_t va, const void *ctx) {
+    if (a->va_base != va) return a->va_base > va;
+    return (uintptr_t)a->ctx > (uintptr_t)ctx;
+}
+
+static inline bool AttachKeyLess(const MemRegionAttach *a,
+                                  const MemRegionAttach *b) {
+    if (a->va_base != b->va_base) return a->va_base < b->va_base;
+    return (uintptr_t)a->ctx < (uintptr_t)b->ctx;
+}
+
+size_t MemRegionRegistryWalkAttachs(MemRegionRegistry *reg,
+                                     uint32_t region_id,
+                                     uintptr_t after_va,
+                                     const void *after_ctx,
+                                     MemRegionAttach *out,
+                                     size_t max) {
+    if (!reg || region_id == MEMTAG_INVALID_REGION_ID || !out || !max) return 0;
+    if (region_id >= reg->slot_count) return 0;
+
+    spin_lock(BucketLock(reg, region_id));
+    MemRegion *r = &reg->slots[region_id];
+    size_t n = 0;
+    if (r->flags & MEMTAG_REGION_FLAG_ACTIVE) {
+        for (MemRegionAttach *a = r->attach_head; a; a = a->next) {
+            if (!AttachKeyAbove(a, after_va, after_ctx)) continue;
+            /* out[] holds the smallest `max` keys seen so far, sorted.
+             * A full batch only accepts a candidate that displaces its
+             * current largest — the displaced one is picked up by the
+             * next batch, whose cursor is out[n-1]. */
+            if (n == max && !AttachKeyLess(a, &out[n - 1])) continue;
+            size_t pos = (n < max) ? n : n - 1;
+            while (pos > 0 && AttachKeyLess(a, &out[pos - 1])) {
+                out[pos] = out[pos - 1];
+                pos--;
+            }
+            out[pos] = *a;
+            /* Clear `next` — the copy must not hand the caller a pointer
+             * into registry-owned memory it will read after the unlock. */
+            out[pos].next = NULL;
+            if (n < max) n++;
+        }
+    }
+    spin_unlock(BucketLock(reg, region_id));
+    return n;
+}
+
 error_t MemRegionRegistrySetAttachState(MemRegionRegistry *reg,
                                          uint32_t region_id,
                                          void *ctx,

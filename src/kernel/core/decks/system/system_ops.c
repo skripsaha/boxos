@@ -93,6 +93,19 @@ static bool target_alive(process_t *t)
     return s != PROC_CRASHED && s != PROC_DONE;
 }
 
+/* Hand the message to the target — into its reply ring if there is a slot, and
+ * onto its Owed queue if there is not.
+ *
+ * A refusal here used to be the end of the message AND the end of the payload:
+ * ipc_copy_to_heap has already deposited it into the target's own cabin heap
+ * by the time this is called, and the abandoned deposit was mapped, paid for,
+ * and pointed at by nothing. KResultPushOrOwe (kring.c) takes the answer as a
+ * DEBT instead, so a full ring costs the message nothing and the payload stays
+ * attached to it until it is delivered.
+ *
+ * True means the message was TAKEN — in the ring, or held for the target's
+ * next entry into the kernel. False means it was not taken at all, and the
+ * caller still owns the deposit and must give it back. */
 static bool push_ipc_result(process_t *target,
                             uint32_t   sender_pid,
                             uint64_t   target_data_addr,
@@ -104,7 +117,25 @@ static bool push_ipc_result(process_t *target,
     r.data_addr   = target_data_addr;
     r.sender_pid  = sender_pid;
     r.context     = KCTX_IPC;
-    return KResultPush(target, &r);
+    return KResultPushOrOwe(target, &r);
+}
+
+/* Give back a deposit whose message was not taken. The inverse of
+ * cabin_heap_deposit (system_deck.c): one frame per page, translated, unmapped
+ * and freed. The bump-allocated VA is deliberately NOT reclaimed — buf_heap_next
+ * only goes forward, and a reused deposit address would alias a payload the
+ * guest may still be reading through an older Result. */
+static void ipc_deposit_release(process_t *target, uint64_t addr, uint32_t length)
+{
+    if (!target || !target->cabin || addr == 0 || length == 0) return;
+
+    uint32_t pages = (length + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+    for (uint32_t i = 0; i < pages; i++) {
+        uintptr_t va   = (uintptr_t)addr + (uintptr_t)i * PMM_PAGE_SIZE;
+        uintptr_t phys = vmm_virt_to_phys(target->cabin->vmm, va);
+        vmm_unmap_page(target->cabin->vmm, va);
+        if (phys) pmm_free((void *)(phys & ~(uintptr_t)(PMM_PAGE_SIZE - 1)), 1);
+    }
 }
 
 /* =========================================================================
@@ -144,8 +175,15 @@ static int SysRoute(const ManifestOp *op, Crate *crates, uint16_t crate_count,
         }
     }
 
+    /* A full ring is no longer a refusal: the kernel takes the message as a
+     * debt the target settles itself at its next syscall gate. What is left to
+     * fail is the debt itself — kmalloc refusing the node — and that is
+     * ERR_NO_MEMORY, not ERR_ROUTE_TARGET_FULL, because the target's ring is
+     * not what ran out. The deposit goes back rather than being abandoned in a
+     * cabin nobody will ever point at it from. */
     if (rc == OK && !push_ipc_result(target, ctx->proc->pid, target_addr, length)) {
-        rc = ERR_ROUTE_TARGET_FULL;
+        ipc_deposit_release(target, target_addr, length);
+        rc = ERR_NO_MEMORY;
     }
 
     process_ref_dec(target);
@@ -251,6 +289,10 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
         }
         if (push_ipc_result(target, ctx->proc->pid, target_addr, length)) {
             delivered++;
+        } else {
+            /* Same leak, same fix: this subscriber's copy of the payload is
+             * already in its cabin heap and nothing will ever name it again. */
+            ipc_deposit_release(target, target_addr, length);
         }
         process_ref_dec(target);
     }

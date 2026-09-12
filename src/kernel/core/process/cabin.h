@@ -5,6 +5,7 @@
 #include "atomics.h"
 #include "klib.h"
 #include "vmm.h"
+#include "memtag.h"   /* MEMTAG_HELD_L1_ENTRIES — the held-tag set's geometry */
 
 /*
  * cabin_t — shared address-space object.
@@ -59,8 +60,22 @@ typedef struct cabin_t
     uint16_t  tag_overflow_capacity;
     TagOverflowRetired *tag_overflow_retired;  /* old buffers, freed at cabin_destroy */
 
-    /* MemTag per-cabin capability bitmask — 1024 bits (tag_ids 0..1023). */
-    uint64_t active_memtags[16];
+    /* MemTag held-tag set, level 1 — see the block above MemCabinGrant in
+     * memtag.h for the shape and why it is two levels. Each slot carries
+     * the address of a leaf bitmap covering MEMTAG_HELD_LEAF_IDS
+     * consecutive tag_ids; the sixteen together span the registry's whole
+     * 16-bit id space. Zero means "no leaf yet", which reads as "this
+     * cabin holds nothing in that window" — the read path never installs
+     * one. Leaves are CAS-installed by MemCabinGrant and freed by
+     * MemTagHeldSetRelease in cabin_destroy.
+     *
+     * Typed uint64_t rather than as a leaf-pointer array because
+     * process.c's process_active_memtags hands this table out as
+     * uint64_t* and that file is owned elsewhere; on LP64 x86_64 a leaf
+     * address is exactly a uint64_t, so the slot carries the pointer
+     * itself rather than an index into some second table that would then
+     * have to be kept in step with this one. */
+    uint64_t active_memtags[MEMTAG_HELD_L1_ENTRIES];
 
     uintptr_t code_start;
     size_t    code_size;

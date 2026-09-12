@@ -58,9 +58,12 @@
  *
  * Peer death
  * ----------
- * When one side releases (or its cabin is destroyed), the kernel flips
- * the matching `*_alive` flag to 0 in the shared header. The surviving
- * peer's wait-loop re-reads it on every iteration:
+ * When one side releases, or the STRAND holding it dies, the kernel
+ * flips the matching `*_alive` flag to 0 in the shared header. The
+ * strand is the unit here and not the cabin: a stream ends when its
+ * named occupant leaves, even if the flat it printed from goes on
+ * living. The surviving peer's wait-loop re-reads it on every
+ * iteration:
  *   - writer: full ring + reader_alive==0 + reader_ever_attached==1
  *             → -ERR_PROCESS_TERMINATED
  *   - reader: empty ring + writer_alive==0 + writer_ever_attached==1
@@ -72,17 +75,56 @@
  * any writer from returning EOF on its first pop. Set on first attach,
  * never cleared.
  *
+ * Two lifetimes, two owners
+ * -------------------------
+ * A Brook claim carries two different things and they do NOT end at the
+ * same moment.
+ *
+ *   The ROLE — the writer's or the reader's seat on a globally
+ *   tag-named, single-occupancy stream — belongs to the STRAND that
+ *   took it. A strand that finishes printing and exits MUST vacate its
+ *   seat: the writer-leave terminal is the only signal that ENDS a
+ *   session, and a seat left warm by a dead strand poisons the tag for
+ *   whoever comes next.
+ *
+ *   The MAPPING — the header page and the slot region, in the cabin's
+ *   address space — belongs to the CABIN. Every sibling strand runs in
+ *   that address space and can already hold a pointer into it, so
+ *   tearing it down because one strand finished pulls the floor out
+ *   from under siblings that did nothing wrong.
+ *
+ * The room is rented to the flat, but one named occupant is sitting at
+ * the table and the lease names them. When the occupant leaves the
+ * lease ends — the flat does not lose the room.
+ *
+ * Bay's cure (make the whole claim the cabin's, drop the opener
+ * entirely) was rejected here for exactly that reason: a Bay window
+ * carries only memory, so a stale one costs pages; a Brook claim
+ * carries memory AND a seat.
+ *
  * Lifecycle
  * ---------
- * BrookObject.ref_count counts how many roles are still claimed
- * (writer + reader). When BOTH peers have released (ref_count == 0),
- * the BrookObject unlinks from the bucket and its backing chunks
- * return to PMM. Either side releasing alone keeps the Brook alive so
- * the surviving peer can still drain residual frames.
+ * BrookObject.ref_count counts MAPPINGS — one per live BrookClaim,
+ * across every cabin — and never roles. That is the whole difficulty of
+ * splitting the two lifetimes: a refcount that counted seats would
+ * reach zero the moment both strands exited and free the ring out from
+ * under cabins that still have its pages in their page tables. When the
+ * last claim anywhere drops, the BrookObject unlinks from its bucket
+ * and the backing chunks return to PMM.
  *
- * process_destroy auto-releases every Brook claim the cabin holds
- * (BrookCleanupProcess) so a crashing app never leaks backing pages
- * AND its peer is notified within one wait-cycle.
+ *   INVARIANT: a role is only ever held by a claim that is still on a
+ *   cabin's list, and every such claim holds exactly one mapping
+ *   reference. So ref_count == 0 proves both that no cabin maps these
+ *   pages and that no strand holds a seat on them — which is why the
+ *   role paths below always vacate the seat BEFORE dropping the
+ *   mapping reference that keeps the BrookObject addressable.
+ *
+ * Two hooks, one per lifetime. BrookCleanupStrand runs from
+ * process_destroy and ends only the ROLES the dying strand held — its
+ * peer is notified within one wait-cycle and the mapping is left
+ * standing. BrookCleanupCabin runs from cabin_destroy, when the last
+ * strand is already reaped, and takes down every mapping the cabin
+ * still holds, so a crashing app never leaks backing pages.
  *
  * Memory ordering
  * ---------------
@@ -137,6 +179,7 @@
 typedef struct BrookClaim BrookClaim;
 typedef struct BrookObject BrookObject;
 struct process_t;
+struct cabin_t;
 
 /* ─────────────────────────────────────────────────────────────────────
  * BrookHeader — shared (mapped read-write into both cabins).
@@ -255,6 +298,11 @@ _Static_assert(__builtin_offsetof(BrookHeader, writer_bell) < 64,
  * frame_size, frame_count, slot allocation are immutable after create.
  * The bucket lock serialises writer_pid/reader_pid/ref_count mutations
  * and the create-or-attach race.
+ *
+ * writer_pid / reader_pid name the STRAND sitting in each seat, and they
+ * move with the seat: BrookHandOver re-stamps one of them, the header
+ * bell that names the same sleeper, and the claim's `holder`, so the
+ * three can never drift apart.
  * ───────────────────────────────────────────────────────────────────── */
 struct BrookObject {
     BrookObject  *bucket_next;         /* hash-bucket collision chain */
@@ -277,30 +325,55 @@ struct BrookObject {
      * mutations happen under the bucket lock. */
     uint32_t      writer_pid;
     uint32_t      reader_pid;
-    uint32_t      ref_count;           /* (writer_pid?1:0) + (reader_pid?1:0) */
+    /* One per live BrookClaim — a MAPPING count, not a seat count. See the
+     * lifecycle note at the top of this file for why the distinction is the
+     * difference between a freed page and a use-after-free. */
+    uint32_t      ref_count;
     uint32_t      _pad1;
-
-    uint64_t      create_pid;
-    uint64_t      create_tsc;
 };
 
 /* ─────────────────────────────────────────────────────────────────────
  * BrookClaim — one per cabin-open of a Brook. Lives in two places:
  *   - bucket-side: BrookObject->{writer,reader}_pid + ref_count
- *   - process-side: proc->brook_claims_head singly-linked list
+ *   - cabin-side: cabin->brook_claims_head singly-linked list
  *
  * user_va_header identifies the claim for release ops (it is unique
  * per Brook open within a cabin and easy to derive from the boxlib
  * opaque handle).
+ *
+ * `holder` is the pid of the strand whose hand is on the seat right now
+ * — not the strand that opened it, which is a different question the
+ * moment BrookHandOver moves the seat to a sibling. It is guarded by
+ * cabin->brook_lock, the same lock that guards the list this row sits
+ * on, and it does two jobs:
+ *
+ *   it PINS the row. While it is non-zero no sibling may release this
+ *   claim, which is what lets the seat-vacating paths drop brook_lock,
+ *   take a bucket lock, and still find the row (and its BrookObject)
+ *   where they left it — with no lock nested inside another.
+ *
+ *   it ANSWERS "is this claim's seat still live". A bare pid cannot:
+ *   after a seat is vacated the same seat may be taken by a different
+ *   claim in a different cabin, so comparing against the BrookObject's
+ *   role pid would call a long-dead claim the holder. holder == 0 says
+ *   the seat is over and the mapping is the cabin's alone — any strand
+ *   of the cabin may then hand it back.
+ *
+ * The rejected alternative was a back-pointer to the opening strand,
+ * which is what used to stand here. Nothing else in this file consulted
+ * it (release already matched by VA alone), and strand death used it to
+ * splice claims out and clear PTEs in an address space the dying
+ * strand's SIBLINGS were still executing in.
  * ───────────────────────────────────────────────────────────────────── */
 struct BrookClaim {
     BrookObject  *brook;
-    BrookClaim   *proc_next;
+    BrookClaim   *cabin_next;          /* cabin claim list link */
     uint64_t      user_va_header;      /* mapped BrookHeader page VA */
     uint64_t      user_va_slots;       /* mapped slot region VA */
     uint32_t      role;                /* BROOK_WRITER or BROOK_READER */
     uint32_t      flags;
-    struct process_t *proc;
+    uint32_t      holder;              /* strand pid in the seat; 0 = vacated */
+    uint32_t      _pad;
 };
 
 void BrookInit(void);
@@ -339,18 +412,72 @@ error_t BrookOpenInternal(struct process_t *proc,
                           uint32_t *out_frame_size,
                           uint32_t *out_frame_count);
 
-/* Release this cabin's claim. Drops the matching role's pid + the
- * BrookObject ref. If ref hits zero the Brook is destroyed (chunks →
- * PMM). The surviving peer (if any) sees its peer_alive flag go to 0
- * on the next wait-loop iteration and returns the appropriate error. */
+/* Hand this cabin's claim over to a sibling strand: the seat moves, the
+ * mapping does not (it was never the strand's to move). The BrookObject
+ * role pid, the header bell that names the same sleeper, and the
+ * claim's holder are re-stamped as one act, so the three cannot drift
+ * apart — the defect where a sibling hung its own pid on a bell while
+ * the seat still named the opener.
+ *
+ * Only the current holder may hand a seat over, and only to a strand of
+ * the SAME cabin: the mapping the seat sits on exists in this cabin's
+ * address space and nowhere else. Making one in another cabin is a
+ * different operation with a different failure set (VA reservation,
+ * page-table work, MemTag capability) — it is brook_open, and this op
+ * refuses rather than pretending to be it.
+ *
+ * Errors:
+ *   ERR_INVALID_ARGUMENT    — NULL proc/cabin, zero VA, to_pid == 0, or
+ *                             to_pid == the caller (a seat cannot be
+ *                             handed to the strand already in it)
+ *   ERR_TAG_NOT_FOUND       — no claim at that VA in this cabin
+ *   ERR_PERMISSION_DENIED   — the caller is not the holder
+ *   ERR_PROCESS_NOT_FOUND   — to_pid names no live strand
+ *   ERR_PROCESS_DESTROYING  — the target is being torn down
+ *   ERR_NOT_MAPPED          — the target is in another cabin, where this
+ *                             Brook has no mapping at all
+ *   ERR_INVALID_STATE       — the seat was vacated underneath us */
+error_t BrookHandOver(struct process_t *from,
+                      uint64_t user_va_header,
+                      uint32_t to_pid);
+
+/* Release this cabin's claim: the mapping goes AND, if it is still
+ * seated, the role. Drops the BrookObject's mapping ref; if that ref
+ * hits zero the Brook is destroyed (chunks → PMM). The surviving peer
+ * (if any) sees its peer_alive flag go to 0 on the next wait-loop
+ * iteration and returns the appropriate error.
+ *
+ * A strand that is not the holder is REFUSED. Bay deliberately went the
+ * other way — any strand of the cabin may hand back any of the cabin's
+ * windows — and that was right for Bay, whose claim carries only
+ * memory. Here the same rule would unmap the pages and leave the seat
+ * stamped on a BrookObject with no claim left to vacate it: a role slot
+ * lost for the lifetime of the tag. Once the seat IS vacated
+ * (holder == 0) the claim is nothing but the cabin's mapping and any
+ * strand of the cabin may release it, exactly as in Bay. */
 error_t BrookReleaseInternal(struct process_t *proc,
                              uint64_t user_va_header);
 
-/* Process teardown hook. MUST run from process_destroy BEFORE
- * vmm_destroy_context. Drains proc->brook_claims_head, drops each
- * role, flips header.*_alive=0 so peer notices, returns chunks if
- * both peers are gone. */
-void BrookCleanupProcess(struct process_t *proc);
+/* Strand teardown hook — the ROLE half. Runs from process_destroy and
+ * vacates every seat this strand still holds: header.*_alive → 0 so the
+ * peer notices within one wait-cycle, the role pid cleared, the
+ * survivor's bell rung. It unmaps NOTHING and drops no reference: the
+ * mapping lives in an address space this strand's siblings are still
+ * executing in.
+ *
+ * "Strand", not "Process", because process_t IS a strand here and
+ * "Process" is now the word that misleads. */
+void BrookCleanupStrand(struct process_t *proc);
+
+/* Cabin teardown hook — the MAPPING half, and the only automatic one.
+ * MUST be called from cabin_destroy BEFORE vmm_destroy_context:
+ * otherwise the destroy walk frees Brook-owned ring pages as if they
+ * were the cabin's own exclusive pages, while the peer cabin still has
+ * them mapped. Takes down every claim the cabin still holds; a seat
+ * found still warm (a strand reaped without the hook above running) is
+ * vacated first, because the BrookObject must not be freed with a live
+ * role stamped on it. */
+void BrookCleanupCabin(struct cabin_t *cabin);
 
 /* Diagnostic snapshot.
  *   out[0] = live BrookObject count

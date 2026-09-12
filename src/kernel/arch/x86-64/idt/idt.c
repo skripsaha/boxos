@@ -1105,6 +1105,18 @@ void irq_handler(interrupt_frame_t *frame)
     if (vector == IPI_PANIC_VECTOR)
     {
         lapic_send_eoi();
+        /* Say so before stopping. The initiator (system_halt, panic) used to
+         * wait a guessed few milliseconds and then assume every core had
+         * arrived; this release store is the core's own word that it did, and
+         * it pairs with the initiator's acquire load. Written LAST, after the
+         * EOI, so the flag means "nothing of mine is still in flight". Reaching
+         * this branch also proves this core held no spin_lock — spin_lock runs
+         * its whole critical section with IF=0, so the IPI could not have been
+         * delivered inside one; it waited in the LAPIC IRR until the lock was
+         * released. That is precisely what makes a complete roll call on the
+         * other side worth having. */
+        __atomic_store_n(&g_amp.cores[amp_get_core_index()].halted, (uint8_t)1,
+                         __ATOMIC_RELEASE);
         while (1)
         {
             asm volatile("cli; hlt");
@@ -1426,6 +1438,17 @@ void syscall_handler(interrupt_frame_t *frame)
      * so it can never push more than the consumer just drained. */
     if (__atomic_load_n(&proc->owed_count, __ATOMIC_RELAXED) != 0)
         TouchOwedHandOver(proc);
+
+    /* The same door, for the reply ring. An answer somebody sent this strand
+     * that its ResultRing had no slot for is held by the kernel (kring.c) and
+     * handed over right here, for every reason the Touch hand-over above stands
+     * at this line rather than in the guide. The strand is the only thing that
+     * can make room in its own reply ring, and it made that room by running, so
+     * the moment it comes back in is exactly when what did not fit before fits
+     * now. Self-limiting the same way: the drainer stops at the first refusal,
+     * so one visit never pushes more than the consumer just drained. */
+    if (__atomic_load_n(&proc->result_owed_count, __ATOMIC_RELAXED) != 0)
+        ResultOwedHandOver(proc);
 
     /* The yield. A strand that says GATE_YIELD in RDI is giving its core
      * away — that is the whole request, and it is answered here, not by the

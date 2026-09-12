@@ -43,6 +43,10 @@ struct process_t;
  * in it. Defined in touch.c — nothing outside Touch takes it apart. */
 struct TouchOwed;
 
+/* One answer the kernel accepted for a strand's REPLY ring but could not fit
+ * in it. Defined in kring.c — the same shape one ring over. */
+struct ResultOwed;
+
 /* One strand waiting for a named incarnation to be gone (SysProcessGone).
  * Allocated by the waiter, owned by the awaited process's gone list, freed by
  * whoever delivers the answer — the death that drains the list, or the waiter
@@ -233,6 +237,27 @@ typedef struct process_t
     spinlock_t        owed_lock;
     volatile uint32_t owed_count;
     volatile uint32_t owed_draining;
+
+    /* Owed, the reply ring's half — answers ACCEPTED for THIS strand's
+     * ResultRing that did not fit in it (kring.c). Same mechanism, same word,
+     * a second queue because it is a second ring with a second order.
+     *
+     * The one difference is the bound, and it is deliberate: there is none.
+     * The Touch queue holds the event itself, so kernel memory grows with its
+     * depth and a ring's worth is where that stops. Here the payload was
+     * already deposited into the TARGET'S OWN cabin heap before the push was
+     * refused (system_ops.c, ipc_copy_to_heap) — what is held is a 24-byte
+     * Result descriptor, and its bound is kmalloc saying no. A depth number on
+     * top of that would be a second, invented limit on a resource that already
+     * has a real one. See the block comment in kring.c.
+     *
+     * Each node OWNS the cabin-heap deposit its Result names, so a queue that
+     * dies with its strand takes those pages with it (ResultOwedRelease). */
+    struct ResultOwed *result_owed_head;
+    struct ResultOwed *result_owed_tail;
+    spinlock_t        result_owed_lock;
+    volatile uint32_t result_owed_count;
+    volatile uint32_t result_owed_draining;
 
     /* Phase 2K+ — CET shadow stack per-process state. */
     uintptr_t         user_ssp_phys;

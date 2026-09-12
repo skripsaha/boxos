@@ -517,3 +517,234 @@ bool KResultPush(process_t *target, const Result *r)
     kring_wake_remote(target);
     return true;
 }
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Owed — an answer that will not fit is a DEBT, not a loss.
+ *
+ * A full reply ring used to end the story: KResultPush said no, SysRoute
+ * turned that into ERR_ROUTE_TARGET_FULL, and the payload it had already
+ * deposited in the target's cabin heap was simply abandoned there — mapped,
+ * paid for, and pointed at by nothing. The sender was told to come back later,
+ * which for a daemon answering a request means either standing in a retry loop
+ * (the display daemon's own rotation stops, measured: two matrix failures) or
+ * dropping the answer and hoping the asker asks again.
+ *
+ * So the kernel TAKES the answer instead and holds it, in the order the ring
+ * would have carried it, and hands it over at the next door the target itself
+ * comes to. Nobody waits, and nothing is woken for it: the debtor settles its
+ * own debt by walking in. The waiter does not stand at a busy table and does
+ * not bin the plate; he leaves it on the pass, and the guest picks it up next
+ * time he comes by.
+ *
+ * This is Touch's Owed queue (touch.c), one ring over and with the same word
+ * for it on purpose — whoever learns one already knows the other. The same
+ * three decisions hold, for the same reasons:
+ *
+ *   WHERE IT HANGS. On the ring's owner (process_t). It is the RING that is
+ *   full; one ring is one stream with one order.
+ *
+ *   WHICH LOCK. result_owed_lock, a LEAF: held only to link or unlink one node
+ *   and to publish the depth into the ring's slip. KResultPush is never called
+ *   under it — that call walks the VMM and CASes a shared cursor, and a
+ *   producer on another core must not queue behind it for a lock whose whole
+ *   job is to move a pointer.
+ *
+ *   THE SINGLE-DRAINER TOKEN. Order is the whole value of the queue, and two
+ *   drainers popping concurrently would interleave it.
+ *
+ * ‼ WHERE IT DIFFERS FROM TOUCH: THERE IS NO DEPTH BOUND, AND THAT IS NOT AN
+ * OVERSIGHT. Touch's queue is bounded at one ring depth because a TouchOwed
+ * node carries the EVENT ITSELF — its 96-byte payload included — so the queue's
+ * depth IS kernel memory, and a subscriber that has consumed nothing for a
+ * whole ring's worth of events is a stopped consumer, not a congested one.
+ *
+ * Here the payload is already gone from the kernel's books. ipc_copy_to_heap
+ * (system_ops.c) deposited it into the TARGET'S OWN cabin heap before the push
+ * was ever attempted, and that resource is already bounded by the only bound
+ * that means anything: the deposit failing with ERR_NO_MEMORY, which the
+ * sender is told about. What is left to hold is a 24-byte Result descriptor
+ * plus a next pointer, and its bound is kmalloc refusing. Inventing a depth
+ * number on top would be a SECOND limit on a resource that already has a real
+ * one — and a number chosen for a rate nobody measured. When the node cannot
+ * be allocated the answer is dropped, loudly (krp_refused, this file's own
+ * announcer) and the sender is told ERR_NO_MEMORY, which is the truth: the
+ * kernel had no room to hold the promise.
+ *
+ * Each node OWNS the deposit its Result names. That ownership is what closes
+ * the leak: a debt that cannot be taken releases the deposit before returning,
+ * and a strand that dies owing answers takes every deposit down with it.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+typedef struct ResultOwed {
+    struct ResultOwed *next;
+    Result             r;
+} ResultOwed;
+
+static ResultRing *result_owed_ring(process_t *proc)
+{
+    if (!proc || !proc->result_ring_phys) return NULL;
+    return (ResultRing *)vmm_phys_to_virt(proc->result_ring_phys);
+}
+
+/* Publish the depth into the ring header's slip. Called only with
+ * result_owed_lock held: two writers racing here could leave 0 behind while an
+ * answer is still owed, and the slip's whole job is to be a true statement
+ * about what the kernel is holding. The store also writes the cacheline the
+ * consumer's UMONITOR is armed on (result_ring.h) — a full ring's tail does
+ * not move, so this is the only thing that can stir a bounded wait that has
+ * drained everything and gone back to sleep. */
+static void result_owed_slip_locked(process_t *proc, uint32_t depth)
+{
+    ResultRing *rr = result_owed_ring(proc);
+    if (rr) __atomic_store_n(&rr->hdr.owed, (uint64_t)depth, __ATOMIC_RELEASE);
+}
+
+/* Give back the cabin-heap deposit an undeliverable answer was carrying.
+ *
+ * cabin_heap_deposit (system_deck.c) bump-allocates the VA and maps one fresh
+ * frame per page, so the release is the exact inverse: translate, unmap, free
+ * the frame. The VA itself is not reclaimed — buf_heap_next only ever goes
+ * forward — and that is deliberate: a reused deposit address would alias a
+ * payload the guest may still be reading through an older Result. The frames
+ * are what cost RAM, and the frames come back.
+ *
+ * A zero data_addr means the send carried no payload; there is nothing to
+ * release and nothing to say about it. */
+static void result_owed_deposit_release(process_t *target, const Result *r)
+{
+    if (!target || !target->cabin || !r || r->data_addr == 0 || r->data_length == 0)
+        return;
+
+    uint32_t pages = (r->data_length + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+    for (uint32_t i = 0; i < pages; i++) {
+        uintptr_t va   = (uintptr_t)r->data_addr + (uintptr_t)i * PMM_PAGE_SIZE;
+        uintptr_t phys = vmm_virt_to_phys(target->cabin->vmm, va);
+        vmm_unmap_page(target->cabin->vmm, va);
+        if (phys) pmm_free((void *)(phys & ~(uintptr_t)(PMM_PAGE_SIZE - 1)), 1);
+    }
+}
+
+/* Take the answer onto the queue's tail. False only when kmalloc refuses — the
+ * one case that is a real loss, and the caller still owns the deposit then. */
+static bool result_owed_append(process_t *proc, const Result *r)
+{
+    ResultOwed *n = (ResultOwed *)kmalloc(sizeof(ResultOwed));
+    if (!n) return false;
+    n->next = NULL;
+    n->r    = *r;
+
+    spin_lock(&proc->result_owed_lock);
+    if (proc->result_owed_tail) proc->result_owed_tail->next = n;
+    else                        proc->result_owed_head       = n;
+    proc->result_owed_tail = n;
+    uint32_t depth = __atomic_add_fetch(&proc->result_owed_count, 1, __ATOMIC_ACQ_REL);
+    result_owed_slip_locked(proc, depth);
+    spin_unlock(&proc->result_owed_lock);
+
+    /* No wake. The strand that owes itself this answer is the same strand that
+     * must drain the ring to make room for it, so the only thing that can
+     * resolve the situation is that strand running — and it is running, or it
+     * is parked on something the ring's own unread head already refuses to
+     * sleep across (KResultRingHasUnreadAtHead, turnin_ops.c). Stirring it here
+     * would be inventing a wake for a consumer that is on its way anyway; the
+     * slip's cacheline store above is the whole of what this costs. */
+    return true;
+}
+
+void ResultOwedHandOver(process_t *proc)
+{
+    if (!proc) return;
+    if (__atomic_load_n(&proc->result_owed_count, __ATOMIC_RELAXED) == 0) return;
+
+    /* One hand-over at a time. A caller that loses the token does not wait for
+     * it: its own answer goes behind the drainer's on the tail, which is the
+     * same order either way. */
+    uint32_t expected = 0;
+    if (!__atomic_compare_exchange_n(&proc->result_owed_draining, &expected, 1u,
+                                     false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return;
+
+    for (;;) {
+        spin_lock(&proc->result_owed_lock);
+        ResultOwed *n = proc->result_owed_head;
+        if (n) {
+            proc->result_owed_head = n->next;
+            if (!proc->result_owed_head) proc->result_owed_tail = NULL;
+            n->next = NULL;
+        }
+        spin_unlock(&proc->result_owed_lock);
+        if (!n) break;
+
+        /* result_owed_count is NOT decremented here. It counts what is still
+         * owed — the queue plus the one node in this drainer's hand — so a
+         * producer reading it can never see 0 while an answer is still
+         * undelivered and jump the queue into the ring. */
+        if (!KResultPush(proc, &n->r)) {
+            /* Still no room. Back to the head it goes, exactly where it was.
+             * This is what makes a visit self-limiting: it can never push more
+             * than the consumer just drained. */
+            spin_lock(&proc->result_owed_lock);
+            n->next = proc->result_owed_head;
+            proc->result_owed_head = n;
+            if (!proc->result_owed_tail) proc->result_owed_tail = n;
+            spin_unlock(&proc->result_owed_lock);
+            break;
+        }
+
+        kfree(n);
+        spin_lock(&proc->result_owed_lock);
+        uint32_t left = __atomic_sub_fetch(&proc->result_owed_count, 1, __ATOMIC_ACQ_REL);
+        result_owed_slip_locked(proc, left);
+        spin_unlock(&proc->result_owed_lock);
+    }
+
+    __atomic_store_n(&proc->result_owed_draining, 0u, __ATOMIC_RELEASE);
+}
+
+void ResultOwedRelease(process_t *proc)
+{
+    if (!proc) return;
+
+    spin_lock(&proc->result_owed_lock);
+    ResultOwed *n = proc->result_owed_head;
+    proc->result_owed_head = NULL;
+    proc->result_owed_tail = NULL;
+    __atomic_store_n(&proc->result_owed_count, 0u, __ATOMIC_RELEASE);
+    result_owed_slip_locked(proc, 0u);
+    spin_unlock(&proc->result_owed_lock);
+
+    while (n) {
+        ResultOwed *next = n->next;
+        /* The deposit goes with the answer. For a main strand the cabin's
+         * address space is about to be torn down and would have reclaimed it
+         * anyway; for a spawned strand the cabin outlives it, and these frames
+         * would be the leak nobody ever comes back for. */
+        result_owed_deposit_release(proc, &n->r);
+        kfree(n);
+        n = next;
+    }
+}
+
+bool KResultPushOrOwe(process_t *target, const Result *r)
+{
+    if (!target || !r) return false;
+
+    /* Anything already owed to this ring comes first: the queue IS the ring's
+     * order, and an answer that went round it into a slot the queue was waiting
+     * for would arrive before answers accepted earlier. Settle the debt, and if
+     * it does not settle, join its tail. */
+    if (__atomic_load_n(&target->result_owed_count, __ATOMIC_RELAXED) != 0) {
+        ResultOwedHandOver(target);
+        if (__atomic_load_n(&target->result_owed_count, __ATOMIC_RELAXED) != 0) {
+            if (result_owed_append(target, r)) return true;
+            krp_refused(target, r, "the kernel had no room to hold it as a debt");
+            return false;
+        }
+    }
+
+    if (KResultPush(target, r)) return true;
+    if (result_owed_append(target, r)) return true;
+
+    krp_refused(target, r, "the kernel had no room to hold it as a debt");
+    return false;
+}

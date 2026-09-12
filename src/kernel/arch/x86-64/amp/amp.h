@@ -27,6 +27,19 @@ typedef struct {
      * though it were. Written and read only by the BSP during amp_boot_aps,
      * so it needs no atomics. */
     uint8_t  counted_at_boot;
+    /* halted: this core's OWN word that it took the halt/panic IPI and is
+     * about to cli;hlt. Written by the target from the IPI_PANIC branch of
+     * irq_handler with __ATOMIC_RELEASE, read by the initiator (system_halt's
+     * roll call) with __ATOMIC_ACQUIRE. It exists so a shutdown waits on the
+     * FACT of each core's arrival instead of sleeping a guessed few
+     * milliseconds and assuming: a core that answers late is not a core that
+     * never answered, and a core that never answers can then be NAMED rather
+     * than silently folded into the assumption. Cleared by the initiator
+     * before it broadcasts, so an answer to an earlier broadcast cannot be
+     * mistaken for an answer to this one. Plain uint8_t for the same reason
+     * `online` is — every access goes through the C11 atomic builtins, and
+     * `volatile` would order the compiler without ordering the CPUs. */
+    uint8_t  halted;
 } CoreDescriptor;
 
 typedef struct {

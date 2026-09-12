@@ -180,24 +180,55 @@ _Static_assert(CONFIG_KERNEL_STACK_PAGES * CONFIG_PAGE_SIZE >=
 
 /* Software typematic timing. Override at build with -DCONFIG_KB_REPEAT_*.
  *
- * Defaults are deliberately conservative — typing a key for under one
- * second should NEVER produce more than one character. Past values
- * (500 ms delay / 33 ms rate ≈ Windows-style aggressive) caused
- * complaints on slower-emulated targets (Bochs ips=50M) where a
- * sub-second hold yielded 5-10 chars.
+ * ‼ THE PARAGRAPH THAT USED TO STAND HERE DESCRIBED A CHANGE NOBODY MADE.
+ * It said the defaults were "deliberately conservative — typing a key for
+ * under one second should NEVER produce more than one character", and named
+ * "500 ms delay / 33 ms rate" as the PAST values that had caused complaints.
+ * The constants under it were 500 and 33. Both arrived in the same commit,
+ * already contradicting each other, so for as long as anyone has read this
+ * file it has documented a fix that was never applied — and at 500/33 a
+ * 900 ms hold yields about thirteen characters, not one.
  *
- *   CONFIG_KB_REPEAT_DELAY_MS  initial delay before repeat starts
- *   CONFIG_KB_REPEAT_RATE_MS   interval between repeats while held
+ * A comment cannot be trusted to stay true, so the promise is not a comment
+ * any more. It is a NAMED NUMBER and a compile-time check:
  *
- * Both are wall-clock ms (converted to ticks at runtime against the
- * actual timer frequency, so they stay correct even after periodic
- * TSC recalibration changes timing). */
+ *   CONFIG_KB_HOLD_ONE_CHAR_MS  a hold SHORTER than this yields exactly one
+ *                               character. This is the behaviour being
+ *                               promised, stated once, in the only place
+ *                               anything reads it.
+ *   CONFIG_KB_REPEAT_DELAY_MS   how long a key must be held before repeating
+ *                               starts. The promise above is precisely the
+ *                               statement that this is not smaller.
+ *   CONFIG_KB_REPEAT_RATE_MS    interval between repeats once it has started.
+ *
+ * The static assert below is what makes the promise durable: change either
+ * number in a direction that breaks it and the build stops, here, with the
+ * reason. That is the whole difference between a guarantee and a paragraph.
+ *
+ * The values are Windows-class, which is what the two inline comments and the
+ * constants have always agreed on between themselves, and the rhythm most
+ * people's hands already expect. Anyone who wants a gentler machine raises
+ * BOTH the delay and the promise together — and the assert will say so if
+ * they raise only one.
+ *
+ * Both are wall-clock ms (converted to ticks at runtime against the actual
+ * timer frequency, so they stay correct even after periodic TSC recalibration
+ * changes timing). */
 #ifndef CONFIG_KB_REPEAT_DELAY_MS
 #define CONFIG_KB_REPEAT_DELAY_MS  500   /* Windows-class initial delay */
 #endif
 #ifndef CONFIG_KB_REPEAT_RATE_MS
 #define CONFIG_KB_REPEAT_RATE_MS    33   /* ~30 chars/sec while held */
 #endif
+#ifndef CONFIG_KB_HOLD_ONE_CHAR_MS
+#define CONFIG_KB_HOLD_ONE_CHAR_MS 500   /* a shorter hold is one character */
+#endif
+_Static_assert(CONFIG_KB_REPEAT_DELAY_MS >= CONFIG_KB_HOLD_ONE_CHAR_MS,
+               "keyboard repeat starts before the hold this file promises "
+               "yields one character: raise CONFIG_KB_REPEAT_DELAY_MS or "
+               "lower CONFIG_KB_HOLD_ONE_CHAR_MS, and say which you meant");
+_Static_assert(CONFIG_KB_REPEAT_RATE_MS > 0,
+               "a repeat interval of zero is a key that never stops");
 
 /* ACPI 6.5 §5.2.5.3: when RSDP revision >= 2 and XsdtAddress != 0 the OS
  * MUST use XSDT (32-bit RSDT may be stale on those firmwares). Selection

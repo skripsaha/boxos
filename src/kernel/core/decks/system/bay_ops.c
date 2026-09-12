@@ -81,7 +81,10 @@ static int SysBayOpen(const ManifestOp *op, Crate *crates,
 
     Crate *out = &crates[op->out_crate];
     if (crate_write(out, ctx, blob, 16) != OK) {
-        /* Caller's out_crate is unwritable — roll back the open. */
+        /* Caller's out_crate is unwritable — roll back the open. Safe to
+         * unmap even though the window is now the cabin's: we are the
+         * only code that has ever held this VA, and the caller never got
+         * to see it. */
         BayReleaseInternal(ctx->proc, user_va);
         return ERR_INVALID_ADDRESS;
     }
@@ -91,6 +94,14 @@ static int SysBayOpen(const ManifestOp *op, Crate *crates,
 /* ─────────────────────────────────────────────────────────────────────
  * SYSTEM_OP_BAY_RELEASE
  *   params: [u64 user_va]  (8 bytes)
+ *
+ * The VA names a claim of the CALLER'S CABIN, and that is the whole
+ * authority check there is: a claim belongs to the cabin, so any strand
+ * of it may hand any of its windows back. There is deliberately no
+ * "only the strand that opened it may close it" rule — that rule is what
+ * made strand death unmap memory its siblings were still using. The VA
+ * is looked up in the caller's own claim list, so one cabin can never
+ * name another cabin's window.
  * ───────────────────────────────────────────────────────────────────── */
 static int SysBayRelease(const ManifestOp *op, Crate *crates,
                          uint16_t crate_count, const OpContext *ctx)
@@ -142,9 +153,11 @@ static int SysBaySize(const ManifestOp *op, Crate *crates,
  * VA range is fully resident on return.
  *
  * Cleanup: backing pages are reclaimed by vmm_destroy_context when the
- * process dies (the LARGE_PAGE walker in vmm.c sees VMM_FLAG_USER and
- * calls pmm_free(phys, VMM_LARGE_PAGE_2M_PAGES)). No per-process
- * tracker needed.
+ * CABIN dies — its last strand, not the strand that asked for the
+ * prefault (the LARGE_PAGE walker in vmm.c sees VMM_FLAG_USER and calls
+ * pmm_free(phys, VMM_LARGE_PAGE_2M_PAGES)). No per-strand tracker
+ * needed, and none would be right: a prefaulted page is heap the whole
+ * cabin allocates out of. Bay claims are held on the same terms.
  *
  * VA bounds: we reject anything below CABIN_CODE_START_ADDR — the NULL
  * trap and Cabin metadata pages (PocketRing/ResultRing/TouchRing/
