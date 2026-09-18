@@ -646,17 +646,23 @@ static void vmm_tme_probe_inner(const char *who) {
 
     bool   locked       = (act & VMM_TME_ACT_LOCK)        != 0;
     bool   tme_enabled  = (act & VMM_TME_ACT_TME_EN)      != 0;
-    bool   mk_enabled   = (act & VMM_TME_ACT_TME_MK_EN)   != 0;
+    /* TME-MK is active iff LOCK + TME_EN + MK_TME_KEYID_BITS != 0 — the
+     * conditions PCONFIG itself enforces. There is no enable bit. */
+    bool   mk_enabled   = vmm_tme_act_mk_active(act);
     uint8_t num_keyid_bits = (uint8_t)((act & VMM_TME_ACT_KEYID_BITS_MASK)
                                        >> VMM_TME_ACT_KEYID_BITS_SHIFT);
+    uint16_t crypto_algs = (uint16_t)((act & VMM_TME_ACT_ALGS_MASK)
+                                      >> VMM_TME_ACT_ALGS_SHIFT);
 
     debug_printf("[VMM/%s] TME probe: cap=0x%016lx act=0x%016lx "
-                 "lock=%d TME_EN=%d MK_EN=%d num_keyid_bits=%u "
+                 "lock=%d TME_EN=%d MK_active=%d num_keyid_bits=%u "
+                 "crypto_algs=0x%04x "
                  "MAXPHYADDR=%u → KeyID window bits %u:%u\n",
                  who,
                  (unsigned long)cap, (unsigned long)act,
                  (int)locked, (int)tme_enabled, (int)mk_enabled,
                  (unsigned)num_keyid_bits,
+                 (unsigned)crypto_algs,
                  (unsigned)vmm_maxphyaddr,
                  num_keyid_bits > 0
                      ? (unsigned)(vmm_maxphyaddr - 1)
@@ -5012,7 +5018,7 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code)
         if (pku_ctx) {
             uint8_t lvl = 0;
             pte_t *p = vmm_get_leaf_pte(pku_ctx, fault_addr & ~(VMM_PAGE_SIZE - 1), &lvl);
-            if (p) pkey = vmm_pte_pkey_effective(__atomic_load_n(p, __ATOMIC_ACQUIRE));
+            if (p) pkey = vmm_pte_pkey(__atomic_load_n(p, __ATOMIC_ACQUIRE));
         }
         struct { uint32_t pid; uint32_t pkey; uint64_t va; uint32_t pkru; uint32_t pad; } ev = {
             .pid = pku_pid, .pkey = pkey, .va = fault_addr,

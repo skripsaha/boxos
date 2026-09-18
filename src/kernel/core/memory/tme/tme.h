@@ -71,30 +71,50 @@
 
 #define TME_MAX_KEYIDS  256u
 
-/* PCONFIG commands (KEY_CTRL bits [3:0]) — Intel SDM Vol 2D. */
+/* PCONFIG key-programming commands — MKTME_KEY_PROGRAM_STRUCT.KEYID_CTRL
+ * bits 7:0 (COMMAND), Intel SDM Vol 2D PCONFIG Table 4-15. */
 #define TME_CMD_SET_KEY_DIRECT  0u
 #define TME_CMD_SET_KEY_RANDOM  1u
 #define TME_CMD_CLEAR_KEY       2u
 #define TME_CMD_NO_ENCRYPT      3u
 
-/* PCONFIG return codes. */
+/* PCONFIG return codes (EAX).
+ *
+ * Current silicon returns only these three: everything the pre-2023
+ * revision of the manual described as a returned error — bad command,
+ * bad KeyID, bad ENC_ALG, reserved bits set — is a #GP(0) today, not a
+ * status in EAX. The instruction cannot be asked to report those; it
+ * must not be issued in a state that would provoke them.
+ *
+ * TME_PCONFIG_INVALID_ENC_ALG is kept for one BoxOS-side use: the
+ * PCONFIG wrapper returns it ITSELF, without executing the instruction,
+ * when no encryption algorithm is available to put in ENC_ALG. Taking
+ * that refusal as a value beats taking it as a #GP(0) at CPL 0.
+ *
+ * Both of the two the hardware does report are ones the manual asks
+ * software to take again — the key table is left untouched in each
+ * case. The wrapper re-issues on them, so a caller that sees either
+ * value has already had the retries spent on its behalf. */
 #define TME_PCONFIG_SUCCESS                0u
-#define TME_PCONFIG_INVALID_PROG_CMD       1u
 #define TME_PCONFIG_ENTROPY_ERROR          2u
-#define TME_PCONFIG_INVALID_KEYID          3u
 #define TME_PCONFIG_INVALID_ENC_ALG        4u
 #define TME_PCONFIG_DEVICE_BUSY            5u
 
 typedef struct {
-    bool      mk_active;            /* TME-MK enabled and locked */
+    bool      mk_active;            /* TME-MK usable: LOCK + TME_EN +
+                                     * MK_TME_KEYID_BITS != 0, and an
+                                     * algorithm available for PCONFIG */
     bool      tme_active;           /* TME baseline enabled */
     uint8_t   num_keyid_bits;       /* size of KeyID field in PA */
-    uint16_t  max_keyid;            /* highest valid KeyID slot in pool */
-    uint16_t  reserved;
     uint8_t   reduced_maxphyaddr;   /* PA bit where KeyID field starts */
-    uint8_t   activated_alg;        /* IA32_TME_ACTIVATE.ALGS_ENABLED */
-    uint8_t   pconfig_alg;          /* PCONFIG-format alg bitmask */
+    uint16_t  max_keyid;            /* highest valid KeyID slot in pool */
+    uint8_t   activated_alg;        /* IA32_TME_ACTIVATE[7:4] TME_POLICY —
+                                     * the TME baseline algorithm firmware
+                                     * chose. NOT the PCONFIG field. */
     uint8_t   pad;
+    uint16_t  pconfig_alg;          /* PCONFIG KEYID_CTRL.ENC_ALG: one-hot
+                                     * within IA32_TME_ACTIVATE[63:48] */
+    uint16_t  reserved;
     uint32_t  pool_size;            /* number of usable KeyID slots */
     uint32_t  pool_programmed;      /* number successfully SET_KEY_RANDOM'd */
     uint32_t  in_use;               /* current reservation count */

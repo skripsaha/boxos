@@ -355,48 +355,31 @@ void         vmm_dump_mtrr_layout(void);
 bool         vmm_verify_pte_metadata_bits_52_58(void);
 
 /* Phase 2H — Protection Keys (Intel SDM Vol 3A §4.6.2 / §4.6.3).
- * Bits 62:59 of every leaf PTE form a 4-bit PKEY. The same field is
+ * Bits 62:59 of every leaf PTE form a 4-bit PKEY — always four bits,
+ * always in the same place. Table 4-19 (4 KiB leaf) gives the field as
+ * "Protection key; if CR4.PKE = 1 or CR4.PKS = 1, this may control the
+ * page's access rights; otherwise, it is ignored", with no CET-dependent
+ * reinterpretation of any bit inside it; Linux names the same four bits
+ * one by one, _PAGE_BIT_PKEY_BIT0..BIT3 = 59, 60, 61, 62. The key is
  * checked against IA32_PKRU for user pages (U=1) and against IA32_PKRS
- * for supervisor pages (U=0) — orthogonal to NX (bit 63), Phase 2D's
- * region id (bits 58:52), and CET (bit 60 — only when CR4.CET=1; we
- * verify gating in vmm_pku_init). */
+ * for supervisor pages (U=0) — orthogonal to NX (bit 63) and to Phase
+ * 2D's region id (bits 58:52).
+ *
+ * Bit 60 is NOT a shadow-stack indicator in ordinary paging. That
+ * meaning belongs to EPT paging-structure entries only (Vol 3C §29.3.2).
+ * See the CET block further down for the encoding ordinary paging does
+ * honour. Decoding the key therefore never consults CR4.CET: there is
+ * one decoder, vmm_pte_pkey, and it reads all four bits. */
 #define VMM_PTE_PKEY_SHIFT    59
 #define VMM_PTE_PKEY_BITS     4
 #define VMM_PTE_PKEY_MAX      ((1u << VMM_PTE_PKEY_BITS) - 1u)
 #define VMM_PTE_PKEY_MASK     (((uint64_t)VMM_PTE_PKEY_MAX) << VMM_PTE_PKEY_SHIFT)
 
-/* PKEY semantics depend on CR4.CET (Intel SDM Vol 3D §17): when CET
- * is enabled, bit 60 of leaf PTEs is the supervisor shadow-stack
- * indicator, NOT part of the PKEY field. The raw extractor below reads
- * all 4 bits; cet_aware reads only bits 62, 61, 59 (mask out bit 60).
- * Stamping code must call vmm_pte_assert_no_cet_conflict to prevent
- * accidentally setting both a non-trivial PKEY and CET supv SS on the
- * same page. */
 static inline uint64_t vmm_pte_encode_pkey(uint8_t pkey) {
     return (((uint64_t)pkey) & VMM_PTE_PKEY_MAX) << VMM_PTE_PKEY_SHIFT;
 }
 static inline uint8_t vmm_pte_pkey(uint64_t pte_val) {
     return (uint8_t)((pte_val >> VMM_PTE_PKEY_SHIFT) & VMM_PTE_PKEY_MAX);
-}
-/* Returns true when stamping `new_flags` (low + high PTE bits) onto a
- * 4 KiB leaf would set both a non-zero PKEY field AND the CET supv-SS
- * bit. Phase 2K + Phase 2H policy: never combine. Callers should
- * assert/log/refuse when this returns true. */
-static inline bool vmm_pte_pkey_cet_conflict(uint64_t flags) {
-    bool any_pkey = (flags & VMM_PTE_PKEY_MASK & ~(1ULL << 60)) != 0ULL;
-    bool cet_ss   = (flags & (1ULL << 60)) != 0ULL;
-    return any_pkey && cet_ss;
-}
-/* CET-aware PKEY decoder. Reads CR4.CET; when set, masks bit 60 out of
- * the PKEY field (bit 60 = CET supv SS, NOT PKEY). Returns a 3-bit
- * effective PKEY (bits 62, 61, 59) under CET-on; 4-bit otherwise. */
-static inline uint8_t vmm_pte_pkey_effective(uint64_t pte_val) {
-    uint64_t cr4;
-    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
-    uint64_t mask = (cr4 & (1ULL << 23))
-                    ? (VMM_PTE_PKEY_MASK & ~(1ULL << 60))
-                    : VMM_PTE_PKEY_MASK;
-    return (uint8_t)((pte_val & mask) >> VMM_PTE_PKEY_SHIFT);
 }
 
 /* BSP-side PKU/PKS bring-up: sets CR4.PKE (bit 22) when has_pku, CR4.PKS
@@ -479,29 +462,52 @@ error_t vmm_set_user_lam(vmm_context_t *ctx, vmm_lam_mode_t mode);
  *   IA32_TME_CAPABILITY (0x981) — supported algorithms + max KeyID bits
  *   IA32_TME_ACTIVATE   (0x982) — firmware-programmed activation
  *
- * IA32_TME_ACTIVATE layout:
- *   bit 0   LOCK         — register is RO after firmware sets this
- *   bit 1   TME enable
- *   bits 4-7 TME_POLICY  — encryption algorithm selection
- *   bits 32-35 NUM_KEYID_BITS
- *   bit 36  TME_MK_EN    — Multi-Key extension active
+ * IA32_TME_ACTIVATE layout (Intel 336907-004US Table 4-2):
+ *   bit 0      LOCK           — register is RO after firmware sets this
+ *   bit 1      TME_EN         — Hardware Encryption Enable; also enables
+ *                               the Multi-Key extension
+ *   bits 3:2   key select / save-key-for-standby
+ *   bits 7:4   TME_POLICY     — TME baseline encryption algorithm
+ *   bits 30:8  Reserved
+ *   bit 31     TME_BYPASS
+ *   bits 35:32 MK_TME_KEYID_BITS
+ *   bits 47:36 Reserved       — there is NO "MK enable" bit here
+ *   bits 63:48 MK_TME_CRYPTO_ALGS — bitmap of algorithms firmware allows
+ *                               for TME-MK: bit 48 AES-XTS-128, bit 49
+ *                               AES-XTS-128 with integrity, bit 50
+ *                               AES-XTS-256, bits 63:51 reserved
  *
- * When TME-MK is active, the top NUM_KEYID_BITS of every phys address
+ * TME-MK is active exactly when LOCK = 1, TME_EN = 1 and
+ * MK_TME_KEYID_BITS != 0 — the same three conditions PCONFIG itself
+ * tests before it will program a key ("IF IA32_TME_ACTIVATE[0] = 0 OR
+ * IA32_TME_ACTIVATE[1] = 0 OR IA32_TME_ACTIVATE[35:32] = 0 THEN
+ * #GP(0)", Vol 2D PCONFIG Operation), and the same three Linux uses in
+ * detect_tme_early(). Use vmm_tme_act_mk_active below; do not invent a
+ * bit-36 flag, bit 36 is architecturally Reserved and reads 0 on every
+ * machine that actually has TME-MK.
+ *
+ * When TME-MK is active, the top MK_TME_KEYID_BITS of every phys address
  * become the KeyID. The CPU reports MAXPHYADDR REDUCED accordingly via
  * CPUID.80000008:EAX, so PMM already sees the smaller usable range.
- *
- * Phase 2J is observe-only: detect, decode, log. Per-region encryption
- * (allocating with a specific KeyID and ORing into PTE phys bits) is
- * the lifecycle follow-up.
  */
 #define VMM_MSR_IA32_TME_CAPABILITY  0x981U
 #define VMM_MSR_IA32_TME_ACTIVATE    0x982U
 
 #define VMM_TME_ACT_LOCK             (1ULL << 0)
 #define VMM_TME_ACT_TME_EN           (1ULL << 1)
-#define VMM_TME_ACT_TME_MK_EN        (1ULL << 36)
 #define VMM_TME_ACT_KEYID_BITS_MASK  (0xFULL << 32)
 #define VMM_TME_ACT_KEYID_BITS_SHIFT 32
+#define VMM_TME_ACT_ALGS_MASK        (0xFFFFULL << 48)
+#define VMM_TME_ACT_ALGS_SHIFT       48
+
+/* The three conditions PCONFIG tests before programming a KeyID. Any
+ * caller about to execute PCONFIG, and any caller reporting TME-MK
+ * state, must agree with this predicate. */
+static inline bool vmm_tme_act_mk_active(uint64_t act) {
+    return (act & VMM_TME_ACT_LOCK) != 0ULL &&
+           (act & VMM_TME_ACT_TME_EN) != 0ULL &&
+           (act & VMM_TME_ACT_KEYID_BITS_MASK) != 0ULL;
+}
 
 void vmm_tme_probe(void);
 void vmm_tme_ap_probe(void);
@@ -515,17 +521,25 @@ void vmm_tme_ap_probe(void);
  *   IA32_U_CET (0x6A0)  — user-side controls
  *   IA32_PL0_SSP (0x6A4) / PL1_SSP / PL2_SSP / PL3_SSP — shadow stack pointers
  *
- * Leaf PTE bit 60 = supervisor shadow-stack indicator (Intel SDM Vol 3A
- * §4.5.1 Table 4-19). On a 4 KiB writable PTE with CR4.CET=1 +
- * IA32_S_CET.SH_STK_EN=1, the page is marked supervisor SS. Bit 61 is
- * the user SS analogue.
+ * ‼ How a shadow-stack page is ACTUALLY marked in ordinary paging:
+ * R/W = 0 together with Dirty = 1, and U/S picking supervisor vs user
+ * (Intel SDM Vol 1 §18.2.2; Linux states it as "The hardware requires
+ * shadow stack to be Write=0,Dirty=1"). There is no shadow-stack FLAG
+ * bit in a 4 KiB leaf PTE: Table 4-19 has bit 60 inside the 4-bit
+ * protection-key field (bits 62:59) and nowhere else. A bit-60
+ * "supervisor shadow stack" DOES exist, but only in an EPT
+ * paging-structure entry (Vol 3C §29.3.2) — a different table this
+ * kernel does not build.
+ *
+ * The two constants below therefore do NOT mark a page as shadow stack
+ * on this hardware. Setting VMM_PTE_CET_SS_SUPV stamps protection key
+ * bit 1 (key |= 2); setting VMM_PTE_CET_SS_USER stamps protection key
+ * bit 2 (key |= 4). cet_lifecycle.c still uses them that way and the
+ * real encoding it needs is an owner decision, not a rename — see the
+ * note at the top of cet_lifecycle.c.
  *
  * SSP register saved via XSAVE component 11 (XCR0.CET_S / CET_U at
  * bits 11/12 of XCR0).
- *
- * Phase 2K is observe-only foundation: detect, probe, log, expose
- * encoding helpers + reserved namespace. Per-process shadow stack
- * lifecycle (SSP allocate, IRET-on-SS, set CR4.CET) is the follow-up.
  */
 #define VMM_CR4_CET_BIT          (1ULL << 23)
 #define VMM_MSR_IA32_U_CET       0x6A0U

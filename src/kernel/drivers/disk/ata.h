@@ -203,7 +203,19 @@ static inline void ata_settle_400ns(uint16_t ctrl_reg) {
  * worse failure than mis-declaring a wedged drive. ata_recover_worker runs on
  * a K-Core pump shared with every other deferred kernel job and would starve
  * it for exactly as long. Both take the DECLARED POLICY below — two seconds,
- * the value this function used to apply to everybody. */
+ * the value this function used to apply to everybody.
+ *
+ * ‼ That is a statement about the RESET, which is recovery, and not about the
+ * command being recovered. The flush itself is owed what §8.13.8 warns of
+ * ("may take longer than 30 s to complete"), it is paid in full from
+ * CONFIG_ATA_IO_TIMEOUT_MS, and ata_flush_cache spends that budget ONCE across
+ * all of its attempts rather than per attempt — a flush abandoned early is a
+ * durability barrier that did not happen, which is the failure this driver
+ * exists to make impossible. What keeps a wait that long legal while IF is
+ * zero is not its length but ata_poll_pause (ata.c): every poll loop in this
+ * driver services a cross-core TLB shootdown for its own core inline, exactly
+ * as spin_lock's contended path does, so no initiator is ever left waiting on
+ * an ACK this core cannot send. */
 #define ATA_SRST_BSY_SPEC_MS   31000u
 #define ATA_SRST_BSY_HELD_MS    2000u
 

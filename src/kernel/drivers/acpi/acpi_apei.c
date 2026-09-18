@@ -2,6 +2,7 @@
 #include "apei_ghes_runtime.h"
 #include "klib.h"
 #include "vmm.h"
+#include "io.h"
 #include "touch.h"
 
 /* ACPI 6.5 §18.3.2 — Boot Error Region.
@@ -198,9 +199,12 @@ static void cper_decode_region(volatile uint8_t* region,
  * or persistent log regions surface them through these tables.
  */
 
-/* HEST error source type codes (ACPI 6.5 §18.3.2.1). The header common
- * to every type starts with: type(2), source_id(2). Subsequent fields
- * vary by type, so we only step using the runtime-declared length. */
+/* HEST error source type codes (ACPI 6.5 §18.3.2, Table 18.2). Every
+ * type begins with the same 4-byte header: type(2), source_id(2). A HEST
+ * entry carries no length field of its own — there is nothing
+ * runtime-declared to step by — so the walker derives each entry's length
+ * from the layout the spec gives that type, and for the three IA-32 types
+ * from the bank count stored inside the entry. See hest_entry_len. */
 #define HEST_TYPE_IA32_MCE         0
 #define HEST_TYPE_IA32_CMCI        1
 #define HEST_TYPE_IA32_NMI         2
@@ -211,9 +215,11 @@ static void cper_decode_region(volatile uint8_t* region,
 #define HEST_TYPE_GHESV2           10
 #define HEST_TYPE_IA32_DMC         11
 
-/* HW Error Notification Structure — embedded in GHES at offset 0x40
- * (ACPI 6.5 §18.3.2.7). 28 bytes. The Type field tells the OS how the
- * platform signals an error to us. */
+/* Hardware Error Notification Structure — ACPI 6.5 §18.3.2.9, Table
+ * 18.14. 28 bytes, embedded in a GHES entry at byte offset 32 (0x20) per
+ * Table 18.10, and in the IA-32 Corrected/Deferred Machine Check
+ * structures at offset 16. The Type field tells the OS how the platform
+ * signals an error to us. */
 typedef struct {
     uint8_t  type;           /* 0=Polled, 1=External-IRQ, 2=Local-IRQ,
                                 3=SCI, 4=NMI, 5=CMCI, 6=MCE, 7=GPIO,
@@ -228,6 +234,46 @@ typedef struct {
     uint32_t error_threshold_window;
 } __attribute__((packed)) ghes_notification_t;
 _Static_assert(sizeof(ghes_notification_t) == 28, "GHES notification = 28 bytes");
+
+/* Generic Hardware Error Source — ACPI 6.5 §18.3.2.7, Table 18.10.
+ * The byte offsets are the spec's own: Type@0, Source Id@2, Related
+ * Source Id@4, Flags@6, Enabled@7, Records To Pre-allocate@8, Max
+ * Sections Per Record@12, Max Raw Data Length@16, Error Status
+ * Address@20 (GAS, 12 B), Notification Structure@32 (28 B), Error Status
+ * Block Length@60 — 64 bytes in total. The static assert below is the
+ * whole point of spelling the layout out as a structure: every offset in
+ * this file now comes from one place the compiler checks. */
+typedef struct {
+    uint16_t            type;
+    uint16_t            source_id;
+    uint16_t            related_source_id;
+    uint8_t             reserved;
+    uint8_t             enabled;
+    uint32_t            records_to_preallocate;
+    uint32_t            max_sections_per_record;
+    uint32_t            max_raw_data_length;
+    acpi_gas_t          error_status_address;
+    ghes_notification_t notify;
+    uint32_t            error_status_block_length;
+} __attribute__((packed)) HestGenericSource;
+_Static_assert(sizeof(HestGenericSource) == 64,
+               "GHES structure = 64 bytes (ACPI 6.5 Table 18.10)");
+
+/* GHESv2 — ACPI 6.5 §18.3.2.8, Table 18.13: the GHES structure followed
+ * by Read Ack Register@64 (GAS, 12 B), Read Ack Preserve@76 and Read Ack
+ * Write@84 — 92 bytes in total. */
+typedef struct {
+    HestGenericSource generic;
+    acpi_gas_t        read_ack_register;
+    uint64_t          read_ack_preserve;
+    uint64_t          read_ack_write;
+} __attribute__((packed)) HestGenericSourceV2;
+_Static_assert(sizeof(HestGenericSourceV2) == 92,
+               "GHESv2 structure = 92 bytes (ACPI 6.5 Table 18.13)");
+
+/* GAS address space identifiers used by this file (ACPI 6.5 §5.2.3.2). */
+#define GAS_AS_SYSTEM_MEMORY  0
+#define GAS_AS_SYSTEM_IO      1
 
 static const char* ghes_notify_name(uint8_t t) {
     switch (t) {
@@ -247,53 +293,140 @@ static const char* ghes_notify_name(uint8_t t) {
     }
 }
 
-/* Decode the GHES-specific tail of a HEST entry (after the common 12
- * bytes shared with simpler types). Layout per ACPI 6.5 §18.3.2.7:
- *   +12   related source ID (2)
- *   +14   reserved (1)
- *   +15   enabled (1)
- *   +16   records to preallocate (4)
- *   +20   max sections per record (4)
- *   +24   max raw data length (4)
- *   +28   error status address GAS (12)
- *   +40   notification structure (28)
- *   +68   error status block length (4)
- * Total 92 bytes (GHES) or 116 for GHESv2 (adds Read-Ack registers).
- */
+/* Read the register named by a GHES Error Status Address and return the
+ * physical address of the Generic Error Status Block it holds.
+ *
+ * ACPI 6.5 §18.3.2.7, Table 18.10, Error Status Address: "This field
+ * specifies the location of a register that contains the physical address
+ * of a block of memory that holds the error status data for this error
+ * source", and after the table: "the Error Status Address field specifies
+ * the location of an 8-byte memory-mapped register that holds the
+ * physical address of the error status block". The GAS address is
+ * therefore NOT the status block — there is one level of indirection, and
+ * a kernel that skips it maps the pointer register as if it were the
+ * block and, on acknowledgement, writes zero over the firmware's own
+ * pointer. Linux performs the same read in
+ * drivers/acpi/apei/ghes.c::__ghes_peek_estatus().
+ *
+ * The register is read once, here, while the HEST is being walked, and
+ * only the value is carried into the runtime. A firmware that republishes
+ * a different block address later in the boot would not be followed; that
+ * re-read belongs to the runtime path (apei_ghes_runtime.c), which owns
+ * the per-source descriptor and the polling, and it needs the register
+ * itself — not just its value — to get there.
+ *
+ * Returns false and says so out loud when the register cannot be read;
+ * *out_phys is 0 in that case. A register that reads back 0 is not an
+ * error here: it means the firmware has published no status block for
+ * this source. */
+static bool ghes_read_status_block_pointer(const acpi_gas_t* gas,
+                                           uint16_t source_id,
+                                           uint64_t* out_phys) {
+    *out_phys = 0;
+    if (gas->address == 0) {
+        kprintf("[APEI] GHES src=%u: error status address register is null "
+                "in HEST\n", source_id);
+        return false;
+    }
+
+    /* The register is 8 bytes by definition. Firmware that publishes a bit
+     * width of 0 — or any width that is not an access size the CPU has —
+     * is honoured as the spec's 8 bytes rather than refused, the same
+     * fixup Linux applies in apei_check_gar(). */
+    uint8_t width = gas->bit_width;
+    if (width != 8 && width != 16 && width != 32 && width != 64) width = 64;
+
+    if (gas->address_space == GAS_AS_SYSTEM_MEMORY) {
+        /* Mapped read-only: this register belongs to the firmware and the
+         * OS has no business writing it, ever. Unmapped again immediately
+         * — one boot-time read per source, not a permanent window. */
+        volatile void* reg = vmm_map_mmio((uintptr_t)gas->address, 8,
+                                          VMM_FLAGS_KERNEL_RO);
+        if (!reg) {
+            kprintf("[APEI] GHES src=%u: cannot map error status address "
+                    "register 0x%lx\n",
+                    source_id, (unsigned long)gas->address);
+            return false;
+        }
+        uint64_t value;
+        switch (width) {
+            case 8:  value = *(volatile uint8_t*)reg;  break;
+            case 16: value = *(volatile uint16_t*)reg; break;
+            case 32: value = *(volatile uint32_t*)reg; break;
+            default: value = *(volatile uint64_t*)reg; break;
+        }
+        vmm_unmap_mmio(reg, 8);
+        *out_phys = value;
+        return true;
+    }
+
+    if (gas->address_space == GAS_AS_SYSTEM_IO) {
+        uint16_t port = (uint16_t)gas->address;
+        switch (width) {
+            case 8:  *out_phys = inb(port); return true;
+            case 16: *out_phys = inw(port); return true;
+            case 32: *out_phys = inl(port); return true;
+            default: break;
+        }
+        /* No 64-bit port access exists on x86; a table asking for one is
+         * describing a register the CPU cannot read. */
+        kprintf("[APEI] GHES src=%u: error status address register is a "
+                "%u-bit I/O port (0x%x) — unreadable on this CPU\n",
+                source_id, width, port);
+        return false;
+    }
+
+    kprintf("[APEI] GHES src=%u: error status address register lives in "
+            "address space %u, which this kernel cannot read\n",
+            source_id, gas->address_space);
+    return false;
+}
+
+/* Decode one GHES / GHESv2 HEST entry (ACPI 6.5 Tables 18.10 / 18.13)
+ * and hand the source to the runtime. */
 static void decode_ghes(uint8_t* entry, bool v2) {
-    uint16_t source_id  = *(uint16_t*)(entry + 2);
-    uint8_t  enabled    = entry[15];
-    uint32_t records    = *(uint32_t*)(entry + 16);
-    uint32_t max_sect   = *(uint32_t*)(entry + 20);
-    ghes_notification_t* n = (ghes_notification_t*)(entry + 40);
-    /* Error Status Address GAS at offset 28..39, followed by the
-     * notification structure at 40 and finally an Error Status Block
-     * Length field at offset 68 (both GHES and GHESv2). We carry the
-     * Address.address field through to the runtime path so GHES
-     * processing knows where to read the GESB. */
-    uint64_t gesb_addr = *(uint64_t*)(entry + 28 + 4); /* GAS.Address @ off+4 */
-    uint32_t gesb_len  = *(uint32_t*)(entry + 68);
-    /* GHESv2 extends the entry with three 12-byte GAS blocks for the
-     * Read-Ack Register at offsets 72, 84 and two scalars at 96 + 104
-     * (preserve/write). v1 leaves those zero. */
+    const HestGenericSource* g = (const HestGenericSource*)entry;
+    const ghes_notification_t* n = &g->notify;
+
     uint64_t ack_addr = 0, ack_preserve = 0, ack_write = 0;
     if (v2) {
-        ack_addr     = *(uint64_t*)(entry + 72 + 4);   /* GAS.Address */
-        ack_preserve = *(uint64_t*)(entry + 96);
-        ack_write    = *(uint64_t*)(entry + 104);
+        const HestGenericSourceV2* g2 = (const HestGenericSourceV2*)entry;
+        ack_addr     = g2->read_ack_register.address;
+        ack_preserve = g2->read_ack_preserve;
+        ack_write    = g2->read_ack_write;
     }
-    debug_printf("[APEI]   GHES%s src=%u enabled=%u records=%u sections=%u "
-                 "notify=%s vector=%u poll=%u gesb=0x%lx len=%u\n",
-                 v2 ? "v2" : "", source_id, enabled, records, max_sect,
-                 ghes_notify_name(n->type), n->vector, n->poll_interval,
-                 (unsigned long)gesb_addr, gesb_len);
 
-    if (enabled) {
-        (void)apei_ghes_register_source(source_id, v2, n->type, n->vector,
-                                         n->poll_interval, gesb_addr,
-                                         gesb_len, ack_addr, ack_preserve,
-                                         ack_write);
+    debug_printf("[APEI]   GHES%s src=%u enabled=%u records=%u sections=%u "
+                 "notify=%s vector=%u poll=%u status-reg=0x%lx len=%u\n",
+                 v2 ? "v2" : "", g->source_id, g->enabled,
+                 g->records_to_preallocate, g->max_sections_per_record,
+                 ghes_notify_name(n->type), n->vector, n->poll_interval,
+                 (unsigned long)g->error_status_address.address,
+                 g->error_status_block_length);
+
+    if (!g->enabled) return;
+
+    uint64_t gesb_phys = 0;
+    if (!ghes_read_status_block_pointer(&g->error_status_address,
+                                        g->source_id, &gesb_phys) ||
+        gesb_phys == 0) {
+        /* kprintf, not debug_printf: an enabled source the kernel cannot
+         * follow is a class of hardware error this machine will never
+         * report, and that sentence has to survive into a shipped build. */
+        kprintf("[APEI] GHES src=%u is enabled, but its error status address "
+                "register (0x%lx) names no status block — this source cannot "
+                "report a hardware error\n",
+                g->source_id, (unsigned long)g->error_status_address.address);
+        return;
     }
+
+    debug_printf("[APEI]   GHES src=%u status block at 0x%lx\n",
+                 g->source_id, (unsigned long)gesb_phys);
+
+    (void)apei_ghes_register_source(g->source_id, v2, n->type, n->vector,
+                                     n->poll_interval, gesb_phys,
+                                     g->error_status_block_length,
+                                     ack_addr, ack_preserve, ack_write);
 }
 
 static const char* hest_type_name(uint16_t t) {
@@ -311,20 +444,50 @@ static const char* hest_type_name(uint16_t t) {
     }
 }
 
-/* Length of each HEST error-source entry, per spec. Returns 0 for
- * unknown types so the walker can fall back to "scan rest of table". */
-static uint16_t hest_entry_len(uint16_t t) {
+/* Machine Check Bank Structure — ACPI 6.5 §18.3.2.1.1, Table 18.4. */
+#define HEST_MC_BANK_LEN         28
+/* IA-32 Machine Check Exception — Table 18.3: 40 fixed bytes, then one
+ * bank structure per Number Of Hardware Banks, which sits at offset 32. */
+#define HEST_IA32_MCE_FIXED      40
+#define HEST_IA32_MCE_BANKS_OFF  32
+/* IA-32 Corrected Machine Check (Table 18.5) and IA-32 Deferred Machine
+ * Check (§18.3.2.10, Table 18.15) share a layout: 48 fixed bytes, bank
+ * count at offset 44, then one bank structure each. */
+#define HEST_IA32_CMC_FIXED      48
+#define HEST_IA32_CMC_BANKS_OFF  44
+
+/* Byte length of one HEST error-source entry.
+ *
+ * A HEST entry does not carry its own length, so the length comes from
+ * the layout ACPI 6.5 gives its type — and for the three IA-32 types,
+ * which end in an array of machine-check bank structures, from the bank
+ * count inside the entry itself. Fixed sizes: IA-32 NMI 20 (Table 18.6),
+ * AER root port 48 / endpoint 44 / bridge 56 (Tables 18.7, 18.8, 18.9),
+ * GHES 64 and GHESv2 92 (Tables 18.10, 18.13, taken from the structures
+ * above so there is one source of truth). Linux computes exactly the same
+ * lengths in drivers/acpi/apei/hest.c::hest_esrc_len().
+ *
+ * `avail` is how many bytes of the table remain at `entry`; 0 is returned
+ * when the type is unknown or when the entry's own fixed part does not
+ * fit in what is left, and the caller stops walking. */
+static uint32_t hest_entry_len(uint16_t t, const uint8_t* entry, size_t avail) {
     switch (t) {
-        case HEST_TYPE_IA32_MCE:      return 264;
-        case HEST_TYPE_IA32_CMCI:     return 60;
-        case HEST_TYPE_IA32_NMI:      return 24;
-        case HEST_TYPE_AER_ROOT_PORT: return 80;
-        case HEST_TYPE_AER_ENDPOINT:  return 80;
-        case HEST_TYPE_AER_BRIDGE:    return 88;
-        case HEST_TYPE_GHES:          return 92;
-        case HEST_TYPE_GHESV2:        return 116;
-        case HEST_TYPE_IA32_DMC:      return 60;
-        default:                       return 0;
+        case HEST_TYPE_IA32_MCE:
+            if (avail < HEST_IA32_MCE_FIXED) return 0;
+            return HEST_IA32_MCE_FIXED +
+                   (uint32_t)entry[HEST_IA32_MCE_BANKS_OFF] * HEST_MC_BANK_LEN;
+        case HEST_TYPE_IA32_CMCI:
+        case HEST_TYPE_IA32_DMC:
+            if (avail < HEST_IA32_CMC_FIXED) return 0;
+            return HEST_IA32_CMC_FIXED +
+                   (uint32_t)entry[HEST_IA32_CMC_BANKS_OFF] * HEST_MC_BANK_LEN;
+        case HEST_TYPE_IA32_NMI:      return 20;
+        case HEST_TYPE_AER_ROOT_PORT: return 48;
+        case HEST_TYPE_AER_ENDPOINT:  return 44;
+        case HEST_TYPE_AER_BRIDGE:    return 56;
+        case HEST_TYPE_GHES:          return (uint32_t)sizeof(HestGenericSource);
+        case HEST_TYPE_GHESV2:        return (uint32_t)sizeof(HestGenericSourceV2);
+        default:                      return 0;
     }
 }
 
@@ -345,10 +508,20 @@ void acpi_parse_apei(void) {
         while (ptr + 4 <= end && walked < hest->error_source_count) {
             uint16_t type = *(uint16_t*)ptr;
             uint16_t srcid = *(uint16_t*)(ptr + 2);
-            uint16_t step = hest_entry_len(type);
-            if (step == 0 || ptr + step > end) {
-                debug_printf("[ACPI] HEST: unknown type %u at off %lu, stopping\n",
-                             type, (unsigned long)(ptr - (uint8_t*)hest));
+            size_t   avail = (size_t)(end - ptr);
+            uint32_t step  = hest_entry_len(type, ptr, avail);
+            if (step == 0 || step > avail) {
+                /* kprintf, not debug_printf: the walk has lost its place in
+                 * the table, and every error source behind this point is a
+                 * class of hardware failure this machine will never report.
+                 * That sentence has to survive into a shipped build. */
+                kprintf("[APEI] HEST: entry %u at offset %lu declares type %u "
+                        "the kernel cannot size (step=%u, %lu bytes left) — "
+                        "%u of %u error sources abandoned\n",
+                        walked, (unsigned long)(ptr - (uint8_t*)hest), type,
+                        step, (unsigned long)avail,
+                        hest->error_source_count - walked,
+                        hest->error_source_count);
                 break;
             }
             debug_printf("[ACPI]   HEST[%u]: %s (type=%u, src=%u)\n",

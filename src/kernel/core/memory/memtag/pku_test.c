@@ -11,8 +11,7 @@
  *   T3. MemTagApplyPkey(rid, 7) on a live attach → sweep updates PTE
  *   T4. MemTagApplyPkey(rid, 0) clears existing pku tag, PTE → 0
  *   T5. MemTagApplyPkey replace (pku:3 → pku:11) — old tag dropped
- *   T6. CET conflict: stamping skipped if bit 60 already set (smoke test
- *       — won't actually trigger here since CR4.CET=0 in BoxOS today)
+ *   T6. MemTagApplyPkey rejects a pkey outside 0..15
  *
  * Builds on Phase 2D test patterns (memtag_test.c Phase 14C).
  */

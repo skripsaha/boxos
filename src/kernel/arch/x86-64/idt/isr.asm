@@ -54,20 +54,11 @@ irq%1:
 
 ; --- Paranoid-entry variants for IST exceptions (#DB/#NMI/#DF/#SS/#MC) ---
 ;
-; The standard isr_common decides "swap GS or not" from CS.RPL on the saved
-; frame. For these five vectors that path is unsafe: SDM Vol 3A §6.14.5 hands
-; the handler an IST stack regardless of source CPL, so the handler can
-; nest INSIDE another interrupt's swapgs window. In that window, CS has
-; already been pushed as kernel CS by the CPU's gate transition but the
-; outer handler has not yet run its `swapgs` — active GS.base is still the
-; user value. A CS.RPL check would then leave the handler running with the
-; wrong GS.base.
-;
-; The race-free probe is to read IA32_GS_BASE via RDMSR and test the high
-; half: kernel base is canonical-high (bit 63 set, EDX negative), user/zero
-; is canonical-low (EDX non-negative). This is the same shape as the Linux
-; `paranoid_entry` pattern. See SDM Vol 3A §3.4.3 (IA32_GS_BASE) and §6.7
-; (NMI handling considerations).
+; SDM Vol 3A §6.14.5 hands these five vectors an IST stack regardless of the
+; interrupted CPL, so they arrive from ring 3 as readily as from ring 0 — and
+; the two origins want opposite handling. paranoid_isr_common splits them; the
+; block in front of it says why, and what its ring-0 probe can and cannot
+; decide.
 %macro ISR_PARANOID_NOERROR 1
 isr%1:
     endbr64
@@ -275,18 +266,35 @@ isr_common:
 ; =============================================================================
 ; paranoid_isr_common — entry pipeline for IST vectors (#DB/#NMI/#DF/#SS/#MC).
 ;
-; Probes IA32_GS_BASE via RDMSR instead of trusting CS.RPL, so a nested IST
-; that lands inside another interrupt's swapgs window still computes the right
-; GS state. The swap decision made on entry is carried to exit through a
-; dedicated stack slot pushed just below the standard interrupt_frame_t, then
-; reversed before iretq so a nested IST cannot strand the outer interrupt with
-; a flipped GS base. The C handler sees the same interrupt_frame_t* as the
-; normal path; it never observes the smuggled flag.
+; An IST vector taken from ring 3 is not a paranoid case at all. Ring 3 may
+; write its own GS base — WRGSBASE lists no privilege condition (#UD only for
+; the LOCK prefix, CR4.FSGSBASE=0 or the missing CPUID bit), and fpu.c sets
+; CR4.FSGSBASE on every core that enumerates it — so the base itself proves
+; nothing. But ring 3 cannot touch the swapgs shadow: IA32_KERNEL_GS_BASE is
+; reachable only through WRMSR, at CPL 0. By the invariant in notify.h that
+; shadow holds this core's per-cpu base for as long as a ring-3 context runs,
+; so for those entries CS.RPL is the whole truth and swapgs is right at both
+; ends. Hand them to isr_common, which tests the CURRENT frame's CS at entry
+; AND at exit — which is what matters, because exception_handler reschedules
+; for exactly these vectors and context_restore_to_frame rewrites frame->cs,
+; so the ring returned to is not always the ring that was interrupted. Linux
+; routes user-mode #DB/#MC away from its paranoid path the same way:
+; idtentry_mce_db does `testb $3, CS-ORIG_RAX(%rsp); jnz ...switch_stack` into
+; the noist body (arch/x86/entry/entry_64.S).
+;
+; From ring 0, CS.RPL is worthless: the CPU stamps a kernel CS the instant the
+; gate is taken, so an IST vector landing inside another stub's swapgs window
+; sees RPL 0 while the active base is still the ring-3 one. That is what the
+; RDMSR probe below is for.
+;
+; The entry decision is carried to the exit in a dedicated stack slot pushed
+; just below the standard interrupt_frame_t. The C handler sees the same
+; interrupt_frame_t* as the normal path and never observes the smuggled flag.
 ;
 ; Spec refs:
-;   Intel SDM Vol 3A §3.4.3   — IA32_GS_BASE (MSR 0xC0000101)
-;   Intel SDM Vol 3A §6.7     — NMI handling; recommends paranoid GS probe
-;   Intel SDM Vol 3A §6.14.5  — IST mechanism in IA-32e mode
+;   Intel SDM Vol 2B "SWAPGS"            — exchanges GS base with MSR C0000102H
+;   Intel SDM Vol 2  "WRFSBASE/WRGSBASE" — exception list; no CPL condition
+;   Intel SDM Vol 3A §6.14.5             — IST delivery, whatever the CPL
 ; =============================================================================
 paranoid_isr_common:
     ; Stack on entry:
@@ -298,7 +306,13 @@ paranoid_isr_common:
     ;   rsp+40  rsp
     ;   rsp+48  ss
 
-    ; ---- Probe GS.base ----
+    ; ---- Ring-3 entries leave here ----
+    ; They are decided by CS.RPL at both ends, and isr_common does exactly
+    ; that. Its stack layout is the one we already have.
+    test byte [rsp + 24], 3
+    jnz isr_common
+
+    ; ---- Probe GS.base (ring-0 entry only) ----
     ; Save scratch regs (RDMSR uses RAX/RCX/RDX).
     push rax
     push rcx
@@ -309,6 +323,14 @@ paranoid_isr_common:
 
     ; Kernel GS.base is canonical-high (bit 63 set → EDX < 0).
     ; User / zero base is canonical-low (EDX >= 0). Need swap iff base is low.
+    ;
+    ; The sign is evidence only because ring-3 entries never reach here: a
+    ; process that sets its own canonical-high base with WRGSBASE would read as
+    ; the kernel otherwise. One case stays unresolvable — an IST vector landing
+    ; inside a swapgs window opened for such a process, where the active base is
+    ; that forged high value. Deciding it needs this core's TRUE kernel GS base,
+    ; and that cannot be derived without GS: Linux reads it with RDGSBASE +
+    ; GET_PERCPU_BASE off the per-cpu offset table.
     xor eax, eax
     test edx, edx
     setns al                ; al = 1 if EDX non-negative (user/zero) → swap needed
@@ -377,14 +399,29 @@ paranoid_isr_common:
     pop rax
     add rsp, rax            ; undo alignment correction
 
-    pop rax                 ; rax = swap_flag
+    pop rax                 ; rax = entry swap_flag
 
-    ; ---- Mirror the entry swap on exit, BEFORE restoring GPRs. ----
-    ; This deliberately runs before pop r15..rax so the eventual register
-    ; restore can clobber any temporary we used here. swapgs is a hardware
-    ; instruction that affects MSR state only, not GPRs.
+    ; ---- Leave the GS state the FRAME is about to return to. ----
+    ; Two facts, not one. Replaying the entry decision is only sound where the
+    ; handler cannot change the ring it returns to, which is why Linux's
+    ; paranoid_exit carries "this code does not execute at all for exceptions
+    ; from user mode". Here exception_handler DOES reschedule — the #DF/#SS
+    ; kernel-stack-overflow recovery in idt.c calls schedule(frame), and
+    ; context_restore_to_frame writes frame->cs — so a kernel-mode entry can
+    ; come out as a ring-3 frame.
+    ;   returning to ring 3 -> the user base must be active: swap.
+    ;   returning to ring 0 -> keep the per-cpu base, unless we swapped on
+    ;     entry, in which case we are handing back the swapgs window we
+    ;     interrupted and must return it exactly as we found it.
+    ; This runs before pop r15..rax so the register restore may clobber the
+    ; flag; swapgs touches MSR state only, not GPRs. After the flag pop the CPU
+    ; frame sits at: r15(+0) .. rax(+112) vector(+120) err(+128) rip(+136)
+    ; cs(+144).
+    test byte [rsp + 144], 3
+    jnz .par_exit_swap_gs
     test al, al
     jz .par_exit_keep_gs
+.par_exit_swap_gs:
     swapgs
 .par_exit_keep_gs:
 

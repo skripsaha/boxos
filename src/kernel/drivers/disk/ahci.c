@@ -736,19 +736,102 @@ static int ahci_port_init(uint8_t port_num) {
         mfence();
     }
 
-    // Wait for PHY communication established (PxSSTS.DET == 3), bounded 1s.
-    uint8_t det = 0;
-    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(1000);
-    while (rdtsc() < deadline) {
-        det = (regs->ssts >> AHCI_SSTS_DET_SHIFT) & AHCI_SSTS_DET_MASK;
-        if (det == AHCI_SSTS_DET_PRESENT) {
-            break;
+    /* Wait for the link — on real time, and on the register's own fact.
+     *
+     * Every implemented port reaches this wait, because the value PxSSTS.DET
+     * held before it is not evidence of anything. AHCI 1.3.1 §10.4.3: "If the
+     * HBA does not support staggered spin-up, the HBA reset shall cause a
+     * COMRESET to be sent on the port" — and a COMRESET is exactly what wipes
+     * this register: §3.3.10, "When the HBA transmits a COMRESET to the
+     * device, this register is updated to its reset values" (DET's reset value
+     * is 0), and §7.3, "When a COMRESET is sent to the device the PxSSTS.DET
+     * field shall be cleared to 0h". So on a CAP.SSS=0 HBA — the ordinary
+     * consumer chipset — DET reads 0h for the whole of the OOB handshake that
+     * ahci_init's GHC.HR just started, and any port judged by a single read
+     * taken at that instant is a port with a disk on it, thrown away.
+     *
+     * The exit is the fact and only the fact: DET = 3h, "device presence
+     * detected and Phy communication established" (§3.3.10) — which is also
+     * precisely what §10.1.2 requires before PxCMD.ST may be set to '1'. 1h,
+     * "device presence detected but Phy communication not established", is the
+     * middle of that handshake and never ends this wait, in either direction.
+     * 0h ends it only once it has stood still for AHCI_LINK_QUIET_MS, which is
+     * what separates an empty port from one still negotiating. */
+    {
+        uint8_t det = 0;
+        HourGlass link;
+        if (!HourGlassTurn(&link, (uint64_t)AHCI_COMRESET_LINK_MS * 1000ULL)) {
+            /* Telling an empty port from a link still coming up is a question
+             * only a clock answers: waiting on the fact would wait forever on
+             * a port with nothing attached. So this one refuses instead of
+             * waiting unbounded, and says which of the two it could not do. */
+            kprintf("[AHCI] no time source — port %u's link cannot be told from "
+                    "an empty one; not using it\n", port_num);
+            goto fail_free;
         }
-        cpu_pause();
-    }
-    if (det != AHCI_SSTS_DET_PRESENT) {
-        debug_printf("[AHCI] Port %u: no device after spin-up (DET=%u)\n", port_num, det);
-        goto fail_free;
+        uint8_t  seen    = 0xFF;   /* not a DET value, so the first read reads as a change */
+        uint64_t settled = 0;      /* us on the glass when DET last changed */
+        bool     quiet   = false;  /* DET stood at 0h long enough to call the port empty */
+        for (;;) {
+            det = (uint8_t)((regs->ssts >> AHCI_SSTS_DET_SHIFT) & AHCI_SSTS_DET_MASK);
+            if (det == AHCI_SSTS_DET_PRESENT) break;
+            /* 4h is not a stage of the handshake and waiting does not move it:
+             * §3.3.10, "Phy in offline mode as a result of the interface being
+             * disabled or running in a BIST loopback mode". Nobody but
+             * software puts a Phy there, and this driver never does — so it
+             * was firmware, and the answer is already final. Spending the
+             * whole window on it would buy nothing but a wrong reason on the
+             * console: the port would time out and be reported as a device
+             * that answered and never came up, when nothing answered at all. */
+            if (det == AHCI_SSTS_DET_OFFLINE) break;
+            bool out = HourGlassRunOut(&link);
+            uint64_t now = HourGlassElapsedUs(&link);
+            if (det != seen) {
+                seen    = det;
+                settled = now;
+            }
+            if (det == AHCI_SSTS_DET_NONE &&
+                now - settled >= (uint64_t)AHCI_LINK_QUIET_MS * 1000ULL) {
+                quiet = true;
+                break;
+            }
+            if (out) break;
+            cpu_pause();
+        }
+        if (det != AHCI_SSTS_DET_PRESENT) {
+            if (quiet) {
+                /* Nothing is attached to this port. Not a refusal — no disk
+                 * was taken away from anyone — so it belongs with the rest of
+                 * the port enumeration rather than on the operator's console. */
+                debug_printf("[AHCI] port %u: nothing on the link — DET held 0h "
+                             "for %u ms\n", port_num, AHCI_LINK_QUIET_MS);
+            } else if (det == AHCI_SSTS_DET_OFFLINE) {
+                /* Said out loud, and said correctly: a port whose Phy firmware
+                 * switched off looks exactly like a dead port to whoever
+                 * plugged a disk into it. This is the one thing the operator
+                 * can act on — it is undone in the firmware setup, not here. */
+                kprintf("[AHCI] port %u: its Phy is offline (DET=4h) — the "
+                        "interface is disabled in firmware or held in BIST "
+                        "loopback; not using it\n", port_num);
+            } else if (HourGlassSourceDied(&link)) {
+                kprintf("[AHCI] port %u: the %s stopped ticking mid-wait, so an "
+                        "empty link cannot be told from one still coming up "
+                        "(DET=%uh); not using it\n",
+                        port_num, HourGlassRulerName(&link), det);
+            } else if (det == AHCI_SSTS_DET_COMINIT) {
+                kprintf("[AHCI] port %u: a device answered but the link never "
+                        "came up — %lu us on the %s (DET=1h, SSTS=0x%08x); "
+                        "not using it\n", port_num,
+                        (unsigned long)HourGlassElapsedUs(&link),
+                        HourGlassRulerName(&link), regs->ssts);
+            } else {
+                kprintf("[AHCI] port %u: the link never settled — %lu us on the "
+                        "%s and DET is still %uh (SSTS=0x%08x); not using it\n",
+                        port_num, (unsigned long)HourGlassElapsedUs(&link),
+                        HourGlassRulerName(&link), det, regs->ssts);
+            }
+            goto fail_free;
+        }
     }
 
     // Clear link errors raised while establishing communication.
@@ -796,7 +879,6 @@ static int ahci_port_init(uint8_t port_num) {
     if (port->signature != AHCI_SIG_ATA) {
         debug_printf("[AHCI] Port %u: non-ATA device (sig=0x%08x), skipping\n",
                      port_num, port->signature);
-        ahci_port_stop(port);
         goto fail_free;
     }
 
@@ -804,7 +886,6 @@ static int ahci_port_init(uint8_t port_num) {
     uint16_t id[256];
     if (ahci_port_identify(port, id) != OK) {
         debug_printf("[AHCI] Port %u: IDENTIFY DEVICE failed\n", port_num);
-        ahci_port_stop(port);
         goto fail_free;
     }
 
@@ -862,7 +943,6 @@ static int ahci_port_init(uint8_t port_num) {
         kprintf("[AHCI] port %u: %u-byte logical sectors, and this stack is "
                 "built on 512 — not using it\n",
                 port_num, port->logical_sector_size);
-        ahci_port_stop(port);
         goto fail_free;
     }
 
@@ -885,12 +965,58 @@ static int ahci_port_init(uint8_t port_num) {
     return 0;
 
 fail_free:
+    /* The controller is made to let go of this memory BEFORE the PMM is told
+     * to take it back.
+     *
+     * Everything that jumps here has already run `regs->cmd |= AHCI_PCMD_FRE`
+     * with PxFB holding the physical address of clb_page + 1024, and AHCI
+     * 1.3.1 §3.3.7 makes that bit exactly the controller's permission to write
+     * there: "FIS Receive Enable (FRE): When set, the HBA may post received
+     * FISes into the FIS receive area pointed to by PxFB (and for 64-bit HBAs,
+     * PxFBU)." A drive that finishes its OOB handshake a moment after this
+     * driver stopped waiting for it sends its D2H Register FIS anyway, and
+     * nothing ever reprograms this port's registers again — so the page would
+     * be written by the controller long after the PMM handed it to somebody
+     * else. That is not a leak, it is memory corruption arriving over SATA.
+     *
+     * The order is the spec's, §10.3.2: "Software shall not clear this bit
+     * while PxCMD.ST or PxCMD.CR is set to '1'", and "When this bit is cleared
+     * to '0', software must first wait for PxCMD.FR to clear to '0', indicating
+     * that the DMA engine for FIS reception is in an idle condition. When
+     * PxCMD.FR and PxCMD.FRE are both cleared to '0', software may update the
+     * values of PxFB and PxFBU." ahci_port_stop() is precisely that walk — ST
+     * down, CR observed at 0, FRE down, FR observed at 0 — which is why the
+     * addresses below may be erased only after it returns, and never before.
+     *
+     * And if the port will not stop, the pages are not returned at all. A page
+     * the controller may still write to is not a page this kernel owns; the
+     * cheap half of that trade is holding AHCI_MAX_SLOTS+1 of them. */
+    if (ahci_port_stop(port) != 0) {
+        kprintf("[AHCI] port %u: will not stop receiving FIS (CMD=0x%08x), so "
+                "its command list and FIS page stay with the controller — "
+                "%u pages held, not freed\n",
+                port_num, regs->cmd, (unsigned)(AHCI_MAX_SLOTS + 1));
+        return -1;
+    }
+
+    regs->clb  = 0;
+    regs->clbu = 0;
+    regs->fb   = 0;
+    regs->fbu  = 0;
+    mfence();
+
     for (uint8_t i = 0; i < AHCI_MAX_SLOTS; i++) {
         if (port->ctba_phys[i]) {
             pmm_free((void*)port->ctba_phys[i], 1);
+            port->ctba_phys[i] = 0;
+            port->ctba_virt[i] = NULL;
         }
     }
     pmm_free(clb_page, 1);
+    port->clb_virt = NULL;
+    port->clb_phys = 0;
+    port->fis_virt = NULL;
+    port->fis_phys = 0;
     return -1;
 }
 
@@ -906,19 +1032,22 @@ static int ahci_init_ports(void) {
     for (uint8_t i = 0; i < AHCI_MAX_PORTS; i++) {
         if (!(pi & (1U << i))) continue;
 
-        /* Fast-skip empty ports on non-SSS HBAs where DET is already
-         * meaningful. On staggered-spin-up controllers the device reports
-         * DET=0/1 until ahci_port_init() spins it up, so we must attempt
-         * full bring-up there rather than skip. */
-        if (!(ahci_ctrl.cap & AHCI_CAP_SSS)) {
-            volatile ahci_port_regs_t* regs = ahci_get_port_regs(i);
-            uint8_t det = (regs->ssts >> AHCI_SSTS_DET_SHIFT) & AHCI_SSTS_DET_MASK;
-            if (det != AHCI_SSTS_DET_PRESENT) {
-                debug_printf("[AHCI] Port %u: No device present (DET=%u)\n", i, det);
-                continue;
-            }
-        }
-
+        /* Every implemented port is brought up. There is deliberately no
+         * "is anything there?" pre-check here, and the one that used to stand
+         * in this spot had the spec exactly backwards: it read PxSSTS.DET once,
+         * with no delay, and skipped the port unless it already read 3h — and
+         * it did that ONLY when CAP.SSS was clear, calling DET "already
+         * meaningful" there. AHCI 1.3.1 §10.4.3 says the opposite: "If the HBA
+         * does not support staggered spin-up, the HBA reset shall cause a
+         * COMRESET to be sent on the port", and §7.3 says that COMRESET clears
+         * PxSSTS.DET to 0h. So on every ordinary desktop HBA that read landed
+         * microseconds after ahci_init's GHC.HR, on a register the reset had
+         * just zeroed, and skipped every port on the controller — the machine
+         * came up with no disk and (debug_printf compiling to nothing) no
+         * reason given. QEMU cannot show this: its SCR_STAT read handler
+         * synthesises DET=3h whenever a drive is attached, whatever the link
+         * is doing. The link is judged where the waiting is done, in
+         * ahci_port_init, against a clock. */
         debug_printf("[AHCI] Port %u: bringing up...\n", i);
 
         if (ahci_port_init(i) == 0) {

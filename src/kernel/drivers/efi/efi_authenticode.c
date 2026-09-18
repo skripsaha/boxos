@@ -152,6 +152,25 @@ static bool pe_parse(const uint8_t *buf, uint32_t len, PeView *out)
     if (out->size_of_headers > len) return false;
 
     out->certtable_dd_offset = dd_off + CERT_TABLE_DD_INDEX * 8;
+
+    /* SizeOfHeaders is attacker-controlled and is used as the END of the
+     * third hashed header region (Authenticode v1.0, "Calculating the PE
+     * Image Hash" step 7: hash from the end of the Certificate Table entry
+     * to the end of the image header, Section Table included). An upper
+     * bound alone is not enough: a SizeOfHeaders below the start of that
+     * region underflows its length into ~4 GiB. Require the region to
+     * exist and the whole section table to lie inside the headers —
+     * PE/COFF defines SizeOfHeaders as covering the DOS stub, the PE
+     * header AND the section headers, and Linux's pefile_parse_binary
+     * enforces the same two bounds (`cursor >= header_size` and
+     * `n_sections > (header_size - cursor) / sizeof(*sec)`). 64-bit
+     * throughout so no bound can wrap. */
+    if ((uint64_t)out->size_of_headers <
+        (uint64_t)out->certtable_dd_offset + 8) return false;
+    if ((uint64_t)out->size_of_headers <
+        (uint64_t)out->section_table_offset +
+        (uint64_t)out->section_count * SECTION_HEADER_SIZE) return false;
+
     out->attr_cert_table_offset = rd32(buf + out->certtable_dd_offset);
     out->attr_cert_table_size   = rd32(buf + out->certtable_dd_offset + 4);
 

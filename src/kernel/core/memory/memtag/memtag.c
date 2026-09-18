@@ -249,9 +249,11 @@ static void SeedReservedTags(void) {
     MarkInternReserved("tme:keyid:14"); MarkInternReserved("tme:keyid:15");
     /* Phase 2K — CET (Control-flow Enforcement) namespace.
      * cet:ready signals probe completion; cet:shstk:supervisor /
-     * cet:shstk:user mark a phys range stamped with PTE bit 60 / 61
-     * as shadow-stack memory; cet:fault:cp captures #CP (vector 21)
-     * Control-Protection Exception events for telemetry. */
+     * cet:shstk:user name a phys range the CET lifecycle allocated as
+     * shadow stack (the PTE bits 60 / 61 it sets there are protection-key
+     * bits, not a shadow-stack attribute — see vmm.h's CET block);
+     * cet:fault:cp captures #CP (vector 21) Control-Protection
+     * Exception events for telemetry. */
     MarkInternReserved("cet:ready");
     MarkInternReserved("cet:shstk:supervisor");
     MarkInternReserved("cet:shstk:user");
@@ -1280,10 +1282,9 @@ error_t MemRegionAttachCabin(uint32_t region_id, void *ctx,
                         region_id, page_class);
         /* Phase 2H+ — tag-driven PKU stamping. If region carries a
          * pku:N tag, stamp PTE bits 62:59 with that key value. No-op
-         * when region has no pku tag (effective pkey = 0). Refuses
-         * gracefully if proposed PTE would conflict with CET supv-SS
-         * (bit 60) via vmm_pte_pkey_cet_conflict — attach itself still
-         * succeeds, the PTE keeps its existing PKEY field. */
+         * when region has no pku tag (effective pkey = 0). Every key
+         * 0..15 stamps; the field is four plain bits and no value of
+         * it is reserved for anything else. */
         uint8_t pkey = MemRegionEffectivePkey(region_id);
         (void)StampPtePkeyRange((vmm_context_t *)ctx, va_base, pages,
                                  pkey, page_class);
@@ -1682,14 +1683,9 @@ size_t MemTagSweepGuard(uint16_t tag_id, bool guard_on) {
  *  Phase 2H+ — Tag-driven PKU PTE stamping
  *
  *  See memtag.h "Phase 2H+" block for the spec + policy citations.
- *  Auto-stamp on attach + sweep on tag mutation. Refuses stamps that
- *  would collide with CET supv-SS (bit 60) per the policy decision.
+ *  Auto-stamp on attach + sweep on tag mutation. Every key 0..15 is
+ *  stampable — the PTE field is four plain bits (Vol 3A Table 4-19).
  * ═══════════════════════════════════════════════════════════════════ */
-
-/* RELAXED telemetry — never load-bearing, used by tests + dump only. */
-static volatile uint64_t g_pku_stamp_count    = 0;
-static volatile uint64_t g_pku_conflict_count = 0;
-static volatile uint64_t g_pku_sweep_count    = 0;
 
 static void ResolvePkuTagIdsIfNeeded(void) {
     if (g_pku_tag_ids_resolved) return;
@@ -1718,15 +1714,15 @@ static int PkuValueFromTagId(uint16_t tag_id) {
     return -1;
 }
 
-/* Stamp PTE.PKEY bits 62:59 atomically. The CET conflict policy
- * (vmm_pte_pkey_cet_conflict) is meaningful only when CR4.CET=1, where
- * bit 60 reinterprets as the supervisor shadow-stack indicator. With
- * CR4.CET=0 (BoxOS today — Phase 2K is observe-only), bit 60 IS part
- * of the PKEY field, so stamping pkey ≥ 4 legitimately sets it. Read
- * CR4.CET once per call and gate the conflict refusal accordingly.
+/* Stamp PTE.PKEY bits 62:59 atomically. All four bits are the key, on
+ * every machine, whatever CR4.CET says (Intel SDM Vol 3A Table 4-19 —
+ * the field is a plain 4-bit protection key; the bit-60 shadow-stack
+ * meaning belongs to EPT entries, Vol 3C §29.3.2). No key value is
+ * refused: keys 2, 3, 6, 7, 10, 11, 14, 15 set bit 60 because that is
+ * what those keys ARE.
  *
  * Returns true if any bit was actually toggled (false on idempotent
- * stamp matching current value, on absent PTE, or on CET refusal). */
+ * stamp matching current value, or on absent PTE). */
 static bool StampPtePkeyLeaf(vmm_context_t *ctx, uintptr_t va,
                               uint8_t pkey, bool is_2m) {
     uint8_t level = 0;
@@ -1735,27 +1731,14 @@ static bool StampPtePkeyLeaf(vmm_context_t *ctx, uintptr_t va,
     if (is_2m  && level != 2) return false;
     if (!is_2m && level != 1) return false;
 
-    /* Read CR4.CET once. CR4 bit 23 = CET enable. */
-    uint64_t cr4;
-    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
-    bool cet_active = (cr4 & (1ULL << 23)) != 0;
-
     uint64_t new_pkey_field = vmm_pte_encode_pkey(pkey);
     pte_t old = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
     for (;;) {
         pte_t new_val = (old & ~VMM_PTE_PKEY_MASK) | new_pkey_field;
-        /* Conflict only matters under CR4.CET=1: bit 60 then encodes
-         * the supv-SS indicator, NOT a PKEY bit. Without CET, the
-         * policy helper would falsely refuse pkey ∈ {4..7,12..15}. */
-        if (cet_active && vmm_pte_pkey_cet_conflict(new_val)) {
-            __atomic_fetch_add(&g_pku_conflict_count, 1, __ATOMIC_RELAXED);
-            return false;
-        }
         if (new_val == old) return true;     /* already stamped */
         if (__atomic_compare_exchange_n(pte, &old, new_val, false,
                                          __ATOMIC_ACQ_REL,
                                          __ATOMIC_ACQUIRE)) {
-            __atomic_fetch_add(&g_pku_stamp_count, 1, __ATOMIC_RELAXED);
             return true;
         }
         /* old refreshed; loop. */
@@ -1796,8 +1779,6 @@ size_t MemTagSweepPkey(uint32_t region_id, uint8_t new_pkey) {
     if (!g_memtag_initialized) return 0;
     if (region_id == MEMTAG_INVALID_REGION_ID) return 0;
     if (new_pkey > VMM_PTE_PKEY_MAX) return 0;
-
-    __atomic_fetch_add(&g_pku_sweep_count, 1, __ATOMIC_RELAXED);
 
     /* Streams the attach chain for the same reason the guard enforcement
      * does: a key stamped on some of a region's mappings and not the

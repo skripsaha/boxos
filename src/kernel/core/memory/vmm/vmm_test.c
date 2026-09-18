@@ -65,30 +65,12 @@ void VmmHelperTest(void) {
         VT_CHECK(vmm_pte_pat_index(pte_wc, false) == 6, "PAT index = 6");
     }
 
-    /* ── D: PKU PTE bits 62:59 encoder + CR4.CET-gated decoder ────── */
-    kprintf("[VMM TEST] D: PKU bit-62:59 encoder + effective decoder\n");
+    /* ── D: PKU PTE bits 62:59 encoder + decoder ──────────────────── */
+    kprintf("[VMM TEST] D: PKU bit-62:59 encoder + decoder\n");
     for (uint8_t k = 0; k <= VMM_PTE_PKEY_MAX; k++) {
         uint64_t enc = vmm_pte_encode_pkey(k);
         VT_CHECK(vmm_pte_pkey(enc | VMM_FLAG_PRESENT) == k,
                  "vmm_pte_encode_pkey ↔ vmm_pte_pkey round-trip");
-    }
-    /* vmm_pte_pkey_cet_conflict — flag has bits outside-of-60 in the
-     * pkey window AND bit 60 set. Use pkey=1 (bit 59 only, no bit 60)
-     * for the "pkey-only no-conflict" baseline and pkey=1 + CET for
-     * the conflict case. Pkey values 2,3,6,7,10,11,14,15 use bit 60
-     * intrinsically — those are inherently CET-conflicting; the helper
-     * flags them correctly. */
-    {
-        uint64_t pkey1     = vmm_pte_encode_pkey(1);   /* bit 59 only */
-        uint64_t cet_only  = VMM_PTE_CET_SS_SUPV;
-        uint64_t both      = pkey1 | VMM_PTE_CET_SS_SUPV;
-        VT_CHECK(!vmm_pte_pkey_cet_conflict(0), "no conflict on zero flags");
-        VT_CHECK(!vmm_pte_pkey_cet_conflict(pkey1),
-                 "no conflict on pkey=1 alone (bit 60 unused)");
-        VT_CHECK(!vmm_pte_pkey_cet_conflict(cet_only),
-                 "no conflict on CET-only");
-        VT_CHECK(vmm_pte_pkey_cet_conflict(both),
-                 "conflict on pkey=1 + CET bit 60");
     }
     if (g_cpu_caps.has_pku) {
         (void)vmm_read_pkru();  /* gate test — no #GP after vmm_pku_init */
@@ -151,8 +133,8 @@ void VmmHelperTest(void) {
                  "CET SS bit 60 outside phys mask");
         VT_CHECK((MEMTAG_PTE_REGION_MASK & VMM_PTE_CET_SS_SUPV) == 0,
                  "CET SS bit 60 outside Phase 2D region bits");
-        /* Phase 2H PKEY field (bits 62:59) INTENTIONALLY overlaps bit 60.
-         * Documented in vmm_pte_pkey_cet_conflict — not asserted here. */
+        /* Bit 60 IS protection-key bit 1 (Table 4-19); VMM_PTE_CET_SS_SUPV
+         * names it, it does not own it. */
     }
 
     if (fail == 0)

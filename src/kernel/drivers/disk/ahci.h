@@ -146,6 +146,15 @@
 #define AHCI_SSTS_DET_MASK  0xF
 #define AHCI_SSTS_DET_NONE  0x0
 #define AHCI_SSTS_DET_PRESENT 0x3
+/* The rest of the DET vocabulary, so a port that is in none of the two states
+ * above can still be named instead of guessed at. AHCI 1.3.1 §3.3.10: 1h,
+ * "Device presence detected but Phy communication not established" — the
+ * middle of the OOB handshake, a stage that passes; 4h, "Phy in offline mode
+ * as a result of the interface being disabled or running in a BIST loopback
+ * mode" — not a stage of anything, a place software put the Phy, which no
+ * amount of waiting moves. */
+#define AHCI_SSTS_DET_COMINIT 0x1
+#define AHCI_SSTS_DET_OFFLINE 0x4
 
 // Signature values
 #define AHCI_SIG_ATA        0x00000101
@@ -335,6 +344,31 @@ typedef struct {
  * DECLARED POLICY for how long a port gets before it is called empty. */
 #define AHCI_COMRESET_HOLD_US        1000u
 #define AHCI_COMRESET_LINK_MS        1000u
+
+/* And a third quantity, which is neither of those two: how long PxSSTS.DET
+ * must read 0h WITHOUT CHANGING before a port is called empty.
+ *
+ * AHCI 1.3.1 §7.3 gives the link its whole vocabulary: "When a COMRESET is
+ * sent to the device the PxSSTS.DET field shall be cleared to 0h. When a
+ * COMINIT is received, the PxSSTS.DET field shall be set to 1h. When the
+ * communication negotiation sequence is complete and PhyRdy is true the
+ * PxSSTS.DET field shall be set to 3h." So 0h says two different things —
+ * "nothing is attached to this port" and "a COMRESET went out just now and
+ * the device's COMINIT has not come back yet" — and only elapsed time tells
+ * them apart. One read cannot; that is the whole defect this constant exists
+ * to close.
+ *
+ * The spec names no interval: §10.1.1 step 5 defers the presence-indication
+ * maximum to Serial ATA Revision 2.6. So this is a DECLARED POLICY, and the
+ * number is the reference implementation's own — Linux libata debounces
+ * SStatus with sata_deb_timing_normal = { 5, 100, 2000 } (interval, duration,
+ * timeout in ms) and calls the link settled once DET has held one value for
+ * the 100 ms duration.
+ *
+ * It can only END a wait early, and only on 0h. A port reading 1h — device
+ * detected, Phy not up yet — is mid-handshake and is never cut short by it:
+ * that port gets the whole of AHCI_COMRESET_LINK_MS to reach 3h. */
+#define AHCI_LINK_QUIET_MS           100u
 
 /* How long a device gets to drop BSY and DRQ during port bring-up.
  *

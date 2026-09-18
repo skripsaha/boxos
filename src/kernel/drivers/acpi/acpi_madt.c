@@ -1,6 +1,7 @@
 #include "acpi_madt.h"
 #include "acpi_internal.h"
 #include "ioapic.h"
+#include "lapic.h"        /* IA32_APIC_BASE / EXTD, for detect_bsp_apic_id */
 #include "cpuid.h"
 #include "klib.h"
 #include "vmm.h"
@@ -24,18 +25,63 @@ static uint8_t expected_entry_length(uint8_t type) {
 
 /*
  * ACPI 6.5 §5.2.12.2: the OSPM determines the BSP at runtime — it is the
- * processor that is currently executing OS init code. CPUID(1).EBX[31:24]
- * yields the local APIC ID of the executing CPU on every x86_64 part that
- * supports the APIC, which is universal for our target hardware (real CPUs
- * shipping with x86_64 always have an integrated LAPIC). Using this
- * instead of "first enabled MADT entry" avoids the trap of MADTs whose
- * Local APIC list is sorted by ACPI processor ID rather than by which
- * core booted first.
+ * processor that is currently executing OS init code. Asking "which
+ * processor am I" instead of taking the first enabled MADT entry avoids
+ * the trap of MADTs whose Local APIC list is sorted by ACPI processor ID
+ * rather than by which core booted first.
+ *
+ * The question must be asked at FULL WIDTH. CPUID.01H:EBX[31:24] is the
+ * 8-bit *initial* APIC ID and cannot name a processor whose APIC ID has
+ * any bit set above bit 7 — which is precisely the machine class that
+ * publishes its processors as MADT Type 9 (Processor Local x2APIC, 32-bit
+ * X2APIC ID, ACPI 6.5 §5.2.12.12) and whose firmware hands the OS over
+ * already in x2APIC mode. On such a machine the 8-bit answer matches the
+ * wrong Type 0 entry, or no entry at all, and the BSP's ACPI processor ID
+ * is never resolved — so its MADT-declared NMI (LINT0/LINT1) is never
+ * programmed and the firmware's watchdog line never reaches the OS.
+ *
+ * CPUID.0BH:EDX is the full 32-bit x2APIC ID of the executing logical
+ * processor and is valid whether or not x2APIC mode is currently enabled.
+ * EDK2's GetInitialApicId() (UefiCpuPkg BaseXApicX2ApicLib) reads it in
+ * two cases, and so do we:
+ *
+ *   - the APIC is already in x2APIC mode. Then leaf 0BH is the ONLY
+ *     honest answer, and the fallback is actively wrong: CPUID.01H:EBX
+ *     [31:24] is eight bits wide, so a processor whose initial APIC ID is
+ *     255 or more reports 0xFF there — the very machine class that gets
+ *     handed over in x2APIC mode would name itself 0xFF and match either
+ *     nothing or the wrong entry.
+ *   - the APIC is not in x2APIC mode but leaf 0BH reports a non-zero
+ *     level in CPUID.0BH:EBX[15:0], i.e. the leaf is meaningfully
+ *     populated. Otherwise the 8-bit form is all there is.
+ *
+ * The mode is read straight from IA32_APIC_BASE.EXTD rather than asked of
+ * lapic_is_x2apic_active(), because that cache is filled by lapic_init()
+ * and lapic_init() has not run: acpi_parse_madt() is what TELLS it where
+ * the APIC lives. For the same reason lapic_get_id() cannot be used here
+ * either, though it would answer correctly.
  */
-static uint8_t detect_bsp_apic_id(void) {
+#define CPUID_LEAF_EXTENDED_TOPOLOGY 0x0000000Bu
+
+static inline uint64_t madt_rdmsr(uint32_t msr) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static uint32_t detect_bsp_apic_id(void) {
     uint32_t eax, ebx, ecx, edx;
+    bool x2apic_live = (madt_rdmsr(MSR_APIC_BASE) & MSR_APIC_BASE_EXTD) != 0;
+
+    cpuid(CPUID_LEAF_VENDOR, &eax, &ebx, &ecx, &edx);
+    if (eax >= CPUID_LEAF_EXTENDED_TOPOLOGY) {
+        cpuid_count(CPUID_LEAF_EXTENDED_TOPOLOGY, 0, &eax, &ebx, &ecx, &edx);
+        if (x2apic_live || (ebx & 0xFFFFu) != 0)
+            return edx;                 /* full 32-bit x2APIC ID */
+    }
+
     cpuid(CPUID_LEAF_FEATURES, &eax, &ebx, &ecx, &edx);
-    return (uint8_t)((ebx >> 24) & 0xFF);
+    return (ebx >> 24) & 0xFFu;         /* 8-bit initial APIC ID */
 }
 
 acpi_error_t acpi_parse_madt(madt_info_t* info) {
@@ -62,10 +108,19 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
 
     info->lapic_address = madt->local_apic_address;
     info->has_pic = (madt->flags & MADT_FLAG_PCAT_COMPAT) != 0;
-    info->bsp_lapic_id = detect_bsp_apic_id();
+    /* The full-width ID is what the MADT entries below are matched against.
+     * info->bsp_lapic_id keeps only the low 8 bits because that is all an
+     * IOAPIC redirection-table physical destination can carry — it is an
+     * 8-bit field by format, not by our choice. */
+    uint32_t bsp_apic_id = detect_bsp_apic_id();
+    info->bsp_lapic_id = (uint8_t)bsp_apic_id;
     info->bsp_lapic_found = true;
-    debug_printf("[MADT] BSP LAPIC ID (CPUID.1.EBX[31:24]): %u\n",
-                 info->bsp_lapic_id);
+    if (bsp_apic_id > 0xFFu) {
+        kprintf("[MADT] BSP APIC ID %u does not fit the 8-bit IOAPIC "
+                "destination field — legacy IRQs cannot be routed to this "
+                "CPU without interrupt remapping\n", bsp_apic_id);
+    }
+    debug_printf("[MADT] BSP APIC ID: %u\n", bsp_apic_id);
 
     uint8_t* ptr = (uint8_t*)madt + sizeof(acpi_madt_t);
     uint8_t* end = (uint8_t*)madt + madt->header.length;
@@ -103,7 +158,7 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
                  * that CPUID reported for the running CPU. */
                 if (info->bsp_lapic_found &&
                     !info->bsp_acpi_id_resolved &&
-                    lapic->apic_id == info->bsp_lapic_id) {
+                    (uint32_t)lapic->apic_id == bsp_apic_id) {
                     info->bsp_acpi_processor_id = lapic->acpi_processor_id;
                     info->bsp_acpi_id_resolved  = true;
                 }
@@ -178,7 +233,7 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
                              enabled ? "enabled" : "disabled");
                 if (info->bsp_lapic_found &&
                     !info->bsp_acpi_id_resolved &&
-                    x->x2apic_id == info->bsp_lapic_id) {
+                    x->x2apic_id == bsp_apic_id) {
                     info->bsp_acpi_processor_id =
                         (uint8_t)(x->acpi_processor_uid & 0xFF);
                     info->bsp_acpi_id_resolved = true;

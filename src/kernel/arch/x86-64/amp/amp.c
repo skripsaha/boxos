@@ -218,29 +218,52 @@ void amp_init(void)
 
 /* INIT and SIPI delivery to a single AP, mode-correct on both xAPIC
  * and x2APIC. lapic_icr_write picks the right path (legacy MMIO with
- * delivery-status polling, or single wrmsr on 0x830). Writing the
- * legacy MMIO ICR offsets directly on an x2APIC-enabled CPU is
- * reserved (Intel SDM Vol 3A §10.12.9) and produces #GP — observed on
- * STRICT mode with -cpu max prior to this refactor.
+ * delivery-status polling, or single wrmsr on 0x830) and returns false
+ * when the IPI could not be handed to the APIC at all.
+ *
+ * The destination is uint32_t and must stay that way. CoreDescriptor
+ * carries the full-width ID the MADT gave us — 32 bits for a Type 9
+ * (Processor Local x2APIC) entry, ACPI 6.5 §5.2.12.12 — and Intel SDM
+ * Vol 3A, "ICR Operation in x2APIC Mode", puts the destination in the
+ * upper 32 bits of MSR 0x830 at full width. Narrowing it here, as an
+ * earlier uint8_t parameter did, turns an INIT meant for x2APIC ID 256
+ * into an INIT to ID 0 — the BSP itself, mid-bring-up — and turns ID
+ * 256+k into an INIT-reset of the already-running core k. The xAPIC
+ * branch of lapic_icr_write does its own 8-bit masking, which is where
+ * that masking belongs: in the mode that actually has an 8-bit field.
+ *
+ * Note on what a wrong ICR access does NOT do: writing the legacy MMIO
+ * ICR offsets on an x2APIC-enabled CPU does not fault. Intel SDM Vol 3A,
+ * table "MSR/MMIO Interface of a Local x2APIC in Different Modes of
+ * Operation", says MMIO in x2APIC mode behaves identically to an xAPIC
+ * in globally disabled state: the store is dropped in silence. The #GP
+ * runs the other way — RDMSR/WRMSR in 0800H-0BFFH while NOT in x2APIC
+ * mode. That is why the dispatch has to be deliberate: a mistake on
+ * this path announces itself with a machine that simply never boots
+ * its APs, not with an exception.
  *
  * Spec note on the missing INIT-DEASSERT: the level-deassert phase is
- * required ONLY for the discrete 82489DX APIC (Intel SDM Vol 3A
- * §9.4.1). Pentium and later integrated APICs treat any INIT IPI as
+ * required ONLY for the discrete 82489DX APIC (Intel SDM Vol 3A, "MP
+ * Initialization Protocol Requirements and Expectations"). Pentium and
+ * later integrated APICs treat any INIT IPI as
  * edge-triggered and ignore the deassert form — sending it just burns
- * an ICR write (and on x2APIC a wrmsr round-trip). The §9.4.4 "MP
+ * an ICR write (and on x2APIC a wrmsr round-trip). The "MP
  * Initialization Example" pseudo-code wraps the deassert in
  * `if (APIC_VERSION is an 82489DX)` for this exact reason. BoxOS
  * targets x86_64 (P6-era and later integrated APIC mandatory), so
  * the deassert is dead code on every supported part. */
-static void send_init_ipi(uint8_t dest_lapic_id)
+static bool send_init_ipi(uint32_t dest_lapic_id)
 {
-    lapic_icr_write((uint32_t)dest_lapic_id, LAPIC_IPI_INIT);
+    if (!lapic_icr_write(dest_lapic_id, LAPIC_IPI_INIT))
+        return false;
     amp_delay_us(10000); // 10ms per Intel MP boot sequence
+    return true;
 }
 
-static void send_sipi(uint8_t dest_lapic_id, uint8_t vector_page)
+static bool send_sipi(uint32_t dest_lapic_id, uint8_t vector_page)
 {
-    lapic_icr_write((uint32_t)dest_lapic_id, LAPIC_IPI_SIPI | (uint32_t)vector_page);
+    return lapic_icr_write(dest_lapic_id,
+                           LAPIC_IPI_SIPI | (uint32_t)vector_page);
 }
 
 void amp_boot_aps(void)
@@ -294,6 +317,23 @@ void amp_boot_aps(void)
         CoreDescriptor *c = &g_amp.cores[i];
         if (c->is_bsp)
             continue;
+
+        /* A destination this APIC mode cannot name. The xAPIC ICR carries
+         * eight bits of physical destination, so an ID with any bit above
+         * bit 7 is not merely hard to reach: lapic_icr_write masks it and
+         * the INIT lands on id & 0xFF — a DIFFERENT core, already running
+         * kernel code, which is INIT-reset out from under itself. Widening
+         * the descriptor's ID to 32 bits carried the truth down to the ICR;
+         * one layer further the field really is eight bits wide, and the
+         * only cure there is not to send. Such an ID can only be addressed
+         * in x2APIC mode, where the ICR destination is the full 32 bits. */
+        if (!lapic_is_x2apic_active() && c->lapic_id > 0xFFu) {
+            kprintf("[AMP] %[E]Core %u: APIC ID %u does not fit the 8-bit "
+                    "xAPIC ICR destination — not started, because sending "
+                    "would INIT-reset the core with ID %u instead%[D]\n",
+                    c->core_index, c->lapic_id, c->lapic_id & 0xFFu);
+            continue;
+        }
 
         kprintf("[AMP] Booting AP %u (LAPIC ID %u)...\n", c->core_index, c->lapic_id);
 
@@ -355,16 +395,34 @@ void amp_boot_aps(void)
         // Memory fence before SIPI
         mfence();
 
-        send_init_ipi(c->lapic_id);
+        if (!send_init_ipi(c->lapic_id)) {
+            /* The INIT never left this APIC, so the AP is still in whatever
+             * state firmware parked it in and a SIPI would be addressed at
+             * nobody. Its stack stays allocated for the same reason a late
+             * core's does — see the note further down.
+             *
+             * The `continue` skips the long wait AND the "has not responded"
+             * line that ends it, so this is the only word this core gets;
+             * it is a truer one, because the core did not fail to answer,
+             * it was never asked. The counting stays right either way:
+             * `booted` and counted_at_boot are left untouched, and the
+             * re-derivation after the loop reads `online`. */
+            kprintf("[AMP] %[E]Core %u (LAPIC %u): INIT IPI was not delivered "
+                    "— core not started%[D]\n", c->core_index, c->lapic_id);
+            continue;
+        }
 
-        /* Intel SDM Vol 3A §9.4.4 example loop: send SIPI, poll briefly,
+        /* Intel SDM Vol 3A, "MP Initialization Example" loop: send SIPI,
+         * poll briefly,
          * if AP didn't acknowledge send SIPI #2, then long-wait. Skipping
          * the second SIPI on responsive APs saves ~200 µs per AP (visible
          * at high core counts). The poll-window between SIPIs must be at
          * least 200 µs (the SDM "BSP DELAYs (200 µSEC)" requirement); we
          * use that as the floor and bail early as soon as online flips. */
         amp_delay_us(200);
-        send_sipi(c->lapic_id, sipi_vector);
+        if (!send_sipi(c->lapic_id, sipi_vector))
+            kprintf("[AMP] Core %u (LAPIC %u): first SIPI was not delivered\n",
+                    c->core_index, c->lapic_id);
 
         uint32_t sipi1_polls = 0;
         const uint32_t SIPI1_POLL_MAX = 1; /* >=200 µs minimum window */
@@ -376,7 +434,9 @@ void amp_boot_aps(void)
         }
 
         if (!ap_up) {
-            send_sipi(c->lapic_id, sipi_vector);
+            if (!send_sipi(c->lapic_id, sipi_vector))
+                kprintf("[AMP] Core %u (LAPIC %u): second SIPI was not "
+                        "delivered\n", c->core_index, c->lapic_id);
             amp_delay_us(200);
         }
 
@@ -384,8 +444,8 @@ void amp_boot_aps(void)
          * loops, microcode reload, and PLL relock on physically cold
          * cores routinely exceed the old 200 ms ceiling on real boards.
          * Iterating at LONG_WAIT_GRANULARITY_US keeps the wait
-         * responsive once the AP actually comes up. Intel SDM Vol 3A §9.4
-         * gives no upper bound — the OS is told to retry/wait "as long
+         * responsive once the AP actually comes up. The SDM's MP
+         * initialization protocol gives no upper bound — the OS is told to retry/wait "as long
          * as practical". */
         const uint32_t LONG_WAIT_MS            = 1000;
         const uint32_t LONG_WAIT_GRANULARITY_US = 1000;     /* 1 ms */

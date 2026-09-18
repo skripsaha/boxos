@@ -60,11 +60,19 @@
 #define CMD_OP_INVALIDATE_IOTLB_PG  0x04
 #define CMD_OP_INVALIDATE_ALL       0x08
 
-/* DEV_TAB_BAR low bits encode size class:
- *   0x0 = 4 KB (256 entries, single bus), 0xF = 1 MB (64 K entries).
- * We choose 0xF (full segment) for production. */
-#define DEV_TAB_SIZE_CLASS  0xF
+/* Device Table Base Address Register, bits 8:0 = Size: the table the IOMMU
+ * will fetch DTEs from spans 4 KiB x (Size + 1). One full PCI segment is
+ * 64 K device IDs of 32 bytes = 2 MiB = 512 pages, so Size = 0x1FF. Linux
+ * writes the same quantity as `entry |= (dev_table_size >> 12) - 1`
+ * (drivers/iommu/amd/init.c, iommu_set_device_table) and FreeBSD as
+ * `rval = phys | (atop(seg_sz) - 1)` (sys/x86/iommu/amd_drv.c).
+ *
+ * The 0xF that stood here, with the comment calling it "1 MB (64 K entries)",
+ * described 16 pages = 64 KiB = 2048 entries. The DTE of every device whose
+ * devid was 2048 or higher would have been fetched from past the end of the
+ * only region the IOMMU had been told about. */
 #define DEV_TAB_BYTES       (256ULL * 1024 * 8)   /* 2 MiB total */
+#define DEV_TAB_SIZE_CLASS  ((DEV_TAB_BYTES / 4096) - 1)   /* 0x1FF */
 
 #define CMD_BUF_BYTES       4096u
 #define EVT_LOG_BYTES       4096u
@@ -79,6 +87,13 @@ typedef struct {
     uint32_t  cmd_tail;
     void*     evt_log;
     uint64_t  evt_log_phys;
+    /* The COMPLETION_WAIT semaphore: the IOMMU stores into it by physical
+     * address, this kernel reads it through the pull map, and every wait
+     * stores a fresh sequence number so a late store cannot satisfy the
+     * wait that came after it. */
+    volatile uint64_t* sem;
+    uint64_t  sem_phys;
+    uint64_t  sem_seq;
     uint16_t  pci_segment;
     bool      online;
 } amdvi_unit_t;
@@ -89,33 +104,88 @@ static uint8_t      g_unit_count = 0;
 static uint64_t*    g_id_root      = NULL;
 static uint64_t     g_id_root_phys = 0;
 
+/*
+ * An AMD-Vi structure is two addresses, and they are not the same number.
+ *
+ * The IOMMU walks the device table, the command buffer and the I/O page
+ * tables with its own engine, which knows nothing of the kernel's page
+ * tables: it is given the PHYSICAL address. The CPU must use the kernel's
+ * alias for that memory, and after vmm_init the identity window is gone --
+ * the only alias left is the pull map at PULL_MAP_BASE (vmm.h, vmm.c
+ * "After this: identity mapping is GONE"). pmm_alloc returns physical.
+ *
+ * This function used to return that physical value as the CPU pointer and
+ * memset through it. That is the defect the VT-d side of this kernel carried
+ * until a Gigabyte B365 took a kernel #PF inside memset on 2026-08-24 (the
+ * story is written out in vtd.c above alloc_table_4k); it survived here for
+ * the same reason it survived there -- QEMU exposes no AMD IOMMU unless it is
+ * started with -device amd-iommu, so the first AMD board with an IVRS in its
+ * firmware would have been the first machine ever to run this line.
+ */
 static void* alloc_aligned_4k(uint64_t* phys_out, size_t size_bytes) {
     /* Round up to 4 KB. */
     size_t pages = (size_bytes + 4095) / 4096;
     void* p = pmm_alloc(pages);
     if (!p) { *phys_out = 0; return NULL; }
-    *phys_out = (uint64_t)(uintptr_t)p;
-    memset(p, 0, pages * 4096);
-    return p;
+
+    uintptr_t phys = (uintptr_t)p;
+    void*     virt = vmm_phys_to_virt(phys);
+    if (!virt) { pmm_free(p, pages); *phys_out = 0; return NULL; }
+
+    *phys_out = (uint64_t)phys;
+    memset(virt, 0, pages * 4096);
+    return virt;
 }
 
-/* AMD-Vi long-mode page-table entries share the bit layout with x86_64
- * paging. Reuse the canonical bits. */
-#define AMD_PTE_P  (1ULL << 0)
-#define AMD_PTE_W  (1ULL << 1)
-#define AMD_PTE_U  (1ULL << 2)
+/* An AMD-Vi v1 host I/O page-table entry is not an x86_64 page-table entry.
+ *
+ * The spec does bless handing an AMD64 long-mode table to the IOMMU, but only
+ * "provided the Next Level fields ... are properly initialized according to
+ * their level" -- and the permission bits do not coincide at all. Of the low
+ * bits only PR (bit 0) sits where x86_64 keeps P; bits 4:1, where x86_64
+ * keeps R/W and U/S, are Ignored. Permission lives at the top of the entry:
+ * IW is bit 62, IR bit 61, FC bit 60, U bit 59. Which level the entry points
+ * at lives in bits 11:9 (NextLevel); an entry whose NextLevel is 0 or 7 is a
+ * page TRANSLATION entry, and the hardware stops walking there.
+ *
+ * IR and IW are ANDed at every step of the walk and with the DTE's own IR/IW,
+ * so a zero anywhere along the path target-aborts the transaction: writing
+ * permission into bits 1 and 2, as this file did, grants nothing at all.
+ *
+ * Cross-checked against Linux (IOMMU_PTE_PR/IR/IW, PM_LEVEL_ENC, PM_PTE_LEVEL
+ * in drivers/iommu/amd/amd_iommu_types.h) and FreeBSD (AMDIOMMU_PTE_IR/IW,
+ * AMDIOMMU_PTE_NLVL_MASK in sys/x86/iommu/amd_reg.h). */
+#define AMD_PTE_PR          (1ULL << 0)
+#define AMD_PTE_IR          (1ULL << 61)
+#define AMD_PTE_IW          (1ULL << 62)
+#define AMD_PTE_ADDR_MASK   0x000FFFFFFFFFF000ULL
+#define AMD_PTE_NEXT_LVL(l) (((uint64_t)(l) << 9) & 0xE00ULL)
+#define AMD_PTE_LEVEL_OF(e) (((e) >> 9) & 0x7ULL)
 
-static uint64_t* amd_pt_walk(uint64_t* parent, unsigned idx, bool create) {
+/* The DTE Mode field names the number of levels. Mode = 4 is a 4-level table:
+ * entries in the root carry NextLevel = 3, their children 2, theirs 1, and
+ * only the page translation entries at the bottom carry 0. */
+#define AMD_PT_MODE         4u
+
+/* Descend one level. `next_level` is what a directory entry at THIS level
+ * must carry in bits 11:9 -- AMD_PT_MODE-1 under the root, then one less per
+ * level. An entry already there with a different level is not a directory
+ * this walk can follow, and there is nothing below it to hand back. */
+static uint64_t* amd_pt_walk(uint64_t* parent, unsigned idx,
+                             unsigned next_level, bool create) {
     uint64_t e = parent[idx];
-    if (!(e & AMD_PTE_P)) {
+    if (!(e & AMD_PTE_PR)) {
         if (!create) return NULL;
         uint64_t child_phys;
         void* child = alloc_aligned_4k(&child_phys, 4096);
         if (!child) return NULL;
-        parent[idx] = child_phys | AMD_PTE_P | AMD_PTE_W | AMD_PTE_U;
+        parent[idx] = (child_phys & AMD_PTE_ADDR_MASK)
+                    | AMD_PTE_NEXT_LVL(next_level)
+                    | AMD_PTE_PR | AMD_PTE_IR | AMD_PTE_IW;
         return (uint64_t*)child;
     }
-    return (uint64_t*)(uintptr_t)(e & ~0xFFFULL);
+    if (AMD_PTE_LEVEL_OF(e) != next_level) return NULL;
+    return (uint64_t*)vmm_phys_to_virt((uintptr_t)(e & AMD_PTE_ADDR_MASK));
 }
 
 static int amd_identity_build(void) {
@@ -129,20 +199,42 @@ static int amd_identity_build(void) {
         unsigned i3 = (unsigned)((a >> 30) & 0x1FF);
         unsigned i2 = (unsigned)((a >> 21) & 0x1FF);
         unsigned i1 = (unsigned)((a >> 12) & 0x1FF);
-        uint64_t* l3 = amd_pt_walk(g_id_root, i4, true); if (!l3) return -1;
-        uint64_t* l2 = amd_pt_walk(l3, i3, true);         if (!l2) return -1;
-        uint64_t* l1 = amd_pt_walk(l2, i2, true);         if (!l1) return -1;
-        l1[i1] = a | AMD_PTE_P | AMD_PTE_W | AMD_PTE_U;
+        uint64_t* l3 = amd_pt_walk(g_id_root, i4, AMD_PT_MODE - 1, true);
+        if (!l3) return -1;
+        uint64_t* l2 = amd_pt_walk(l3, i3, AMD_PT_MODE - 2, true);
+        if (!l2) return -1;
+        uint64_t* l1 = amd_pt_walk(l2, i2, AMD_PT_MODE - 3, true);
+        if (!l1) return -1;
+        /* Page translation entry: NextLevel stays 0, read and write granted. */
+        l1[i1] = (a & AMD_PTE_ADDR_MASK) | AMD_PTE_PR | AMD_PTE_IR | AMD_PTE_IW;
     }
     return 0;
 }
 
-/* Encode a DTE: V=1, TV=1, host page table = caller-supplied,
- * mode = 4 (4-level), caller-supplied DomainID. AMD-Vi §2.2.2.1. */
+/* Device Table Entry field bits (AMD-Vi Table 7 "Device Table Entry (DTE)
+ * Field Definitions"); the same four Linux calls DTE_FLAG_V / _TV / _IR / _IW
+ * in drivers/iommu/amd/amd_iommu_types.h. */
+#define DTE_FLAG_V   (1ULL << 0)
+#define DTE_FLAG_TV  (1ULL << 1)
+#define DTE_FLAG_IR  (1ULL << 61)
+#define DTE_FLAG_IW  (1ULL << 62)
+
+/* Encode a DTE: V=1, TV=1, host page table = caller-supplied, mode = 4
+ * (4-level), read and write permitted, caller-supplied DomainID.
+ *
+ * IR and IW are not optional decoration. Table 7 on bit 61: "0 = Device
+ * initiated DMA read transactions are target aborted"; on bit 62 the same for
+ * writes and atomics. The IOMMU evaluates the DTE before it ever consults a
+ * page table, so a DTE written without them makes an attached device's every
+ * transaction abort -- and this entry says V=1/TV=1, so the abort is what the
+ * device gets instead of the untranslated pass-through it had before. Linux
+ * ORs DTE_FLAG_IR|DTE_FLAG_IW into every entry it writes, unconditionally. */
 static void amdvi_dte_program(uint8_t* dte_base, uint16_t devid,
                                 uint64_t host_pt_phys, uint16_t domain_id) {
     uint64_t* dte = (uint64_t*)(dte_base + (size_t)devid * 32);
-    dte[0] = (host_pt_phys & ~0xFFFULL) | (4ULL << 9) | (1ULL << 1) | (1ULL << 0);
+    dte[0] = (host_pt_phys & AMD_PTE_ADDR_MASK)
+           | ((uint64_t)AMD_PT_MODE << 9)
+           | DTE_FLAG_IR | DTE_FLAG_IW | DTE_FLAG_TV | DTE_FLAG_V;
     dte[1] = (uint64_t)domain_id;
     dte[2] = 0;
     dte[3] = 0;
@@ -174,31 +266,50 @@ static void amdvi_cmd_push(amdvi_unit_t* u, uint64_t cmd0, uint64_t cmd1) {
  * build compiles away. */
 #define AMDVI_COMPLETION_PATIENCE_US   1000000u
 
+/* COMPLETION_WAIT, 128 bits: bit 0 of qword 0 is Store (s), bit 1 is
+ * Completion Interrupt (i), bits 51:3 are the SPA the IOMMU stores to, bits
+ * 63:60 are the opcode -- and qword 1 is the VALUE that gets stored. Linux's
+ * build_completion_wait (data[0] = lower_32(paddr) | CMD_COMPL_WAIT_STORE_MASK,
+ * data[1] = upper_32(paddr) | op<<28, data[2..3] = the value) and FreeBSD's
+ * struct amdiommu_cmd_completion_wait (s:1, i:1, f:1, address0:29,
+ * address1:20, rsrv:8, op:4, data0:32, data1:32) agree bit for bit.
+ *
+ * What stood here asked for the completion INTERRUPT, never set Store, and put
+ * the semaphore's address in qword 1 -- the value field. The IOMMU was given
+ * no address to store to, so the store could never happen and the wait could
+ * only ever run out. The semaphore also pointed into the command buffer at the
+ * exact qword the command about to be pushed would occupy. */
+#define AMDVI_CW_STORE       (1ULL << 0)
+#define AMDVI_CW_ADDR_MASK   0x000FFFFFFFFFFFF8ULL   /* bits 51:3 */
+
 static void amdvi_completion_wait(amdvi_unit_t* u) {
-    /* Op[63:60]=0x1, Store completion bit 0. The flag lives inside the command
-     * buffer itself — bit 0 of qword 1 is set by the IOMMU when the wait
-     * finishes — so the exit is that store and nothing else.
+    /* The exit is the IOMMU's store into this unit's semaphore and nothing
+     * else. Each wait stores a sequence number that has never been stored
+     * before, so a store that lands after its own wait gave up cannot be
+     * mistaken for the next wait's answer.
      *
      * Nothing is undone on expiry, and that is deliberate: a completion wait
      * that has not landed does not mean the queued commands failed, only that
      * they have not finished, and withdrawing anything here would be acting on
      * a fact this code does not have. What it CAN do is say so where a shipped
      * build can see it. */
-    volatile uint64_t* wait_slot =
-        (volatile uint64_t*)((uint8_t*)u->cmd_buf + u->cmd_tail + 8);
-    *wait_slot = 0;
-    amdvi_cmd_push(u, ((uint64_t)CMD_OP_COMPLETION_WAIT << 60) | (1ULL << 1),
-                       (uint64_t)(uintptr_t)wait_slot | 1);
+    if (!u->cmd_buf || !u->sem) return;
+
+    uint64_t want = ++u->sem_seq;
+    amdvi_cmd_push(u,
+        ((uint64_t)CMD_OP_COMPLETION_WAIT << 60)
+            | (u->sem_phys & AMDVI_CW_ADDR_MASK) | AMDVI_CW_STORE,
+        want);
 
     HourGlass glass;
     if (!HourGlassTurn(&glass, AMDVI_COMPLETION_PATIENCE_US)) {
         kprintf("[AMD-Vi] no time source — waiting for the completion "
                 "semaphore on the fact itself, with no bound\n");
-        while (!(*wait_slot & 1)) cpu_pause();
+        while (*u->sem != want) cpu_pause();
         return;
     }
     for (;;) {
-        if (*wait_slot & 1) return;
+        if (*u->sem == want) return;
         if (HourGlassRunOut(&glass)) break;
         cpu_pause();
     }
@@ -229,6 +340,12 @@ static int amdvi_unit_init(amdvi_unit_t* u, uint64_t reg_phys,
     if (!u->cmd_buf) return -3;
     u->evt_log = alloc_aligned_4k(&u->evt_log_phys, EVT_LOG_BYTES);
     if (!u->evt_log) return -4;
+    /* The completion semaphore gets a page of its own: the IOMMU stores into
+     * it by physical address while this unit's command buffer keeps being
+     * written by the CPU, and the two must not share a qword. */
+    u->sem = (volatile uint64_t*)alloc_aligned_4k(&u->sem_phys, sizeof(uint64_t));
+    if (!u->sem) return -5;
+    u->sem_seq = 0;
 
     /* Pre-fill DTE with V=0 (not valid) — devices become valid on
      * device_attach(). For an initial pass-everything-through model
@@ -361,6 +478,11 @@ static int amdvi_map(iommu_domain_t* d, uint64_t iova, uint64_t phys,
         if (iova != phys) return -1;
         return 0;
     }
+    /* A present entry granting neither read nor write is not a permissive
+     * mapping, it is one that target-aborts everything that touches it, so a
+     * request that names no permission is refused rather than written. */
+    if (!(perm & (IOMMU_PERM_READ | IOMMU_PERM_WRITE))) return -1;
+
     /* Per-domain map: walk d->host_pt; reuse amd_pt_walk. */
     uint64_t end = iova + sz;
     for (uint64_t a = iova & ~0xFFFULL; a < end; a += 4096) {
@@ -368,12 +490,16 @@ static int amdvi_map(iommu_domain_t* d, uint64_t iova, uint64_t phys,
         unsigned i3 = (unsigned)((a >> 30) & 0x1FF);
         unsigned i2 = (unsigned)((a >> 21) & 0x1FF);
         unsigned i1 = (unsigned)((a >> 12) & 0x1FF);
-        uint64_t* l3 = amd_pt_walk(d->host_pt, i4, true); if (!l3) return -1;
-        uint64_t* l2 = amd_pt_walk(l3, i3, true);         if (!l2) return -1;
-        uint64_t* l1 = amd_pt_walk(l2, i2, true);         if (!l1) return -1;
-        uint64_t pte = (phys + (a - (iova & ~0xFFFULL))) & ~0xFFFULL;
-        pte |= AMD_PTE_P | AMD_PTE_U;
-        if (perm & IOMMU_PERM_WRITE) pte |= AMD_PTE_W;
+        uint64_t* l3 = amd_pt_walk(d->host_pt, i4, AMD_PT_MODE - 1, true);
+        if (!l3) return -1;
+        uint64_t* l2 = amd_pt_walk(l3, i3, AMD_PT_MODE - 2, true);
+        if (!l2) return -1;
+        uint64_t* l1 = amd_pt_walk(l2, i2, AMD_PT_MODE - 3, true);
+        if (!l1) return -1;
+        uint64_t pte = (phys + (a - (iova & ~0xFFFULL))) & AMD_PTE_ADDR_MASK;
+        pte |= AMD_PTE_PR;
+        if (perm & IOMMU_PERM_READ)  pte |= AMD_PTE_IR;
+        if (perm & IOMMU_PERM_WRITE) pte |= AMD_PTE_IW;
         l1[i1] = pte;
     }
     return 0;
@@ -381,8 +507,9 @@ static int amdvi_map(iommu_domain_t* d, uint64_t iova, uint64_t phys,
 /* TME-MK aware map. AMD-Vi rev 4 "Cache Coherent Memory" mode uses the
  * same SL-PTE phys-field layout as the CPU PTE — bits [51:12] hold the
  * phys with the upper num_keyid_bits portion encoding the KeyID. The
- * existing amdvi_map preserves all upper bits via `phys & ~0xFFF`, so
- * we just route through it for non-identity domains. Identity domain
+ * existing amdvi_map keeps that whole field via `phys & AMD_PTE_ADDR_MASK`
+ * (51:12 — the bits above it are the entry's own IR/IW/FC/U, not address),
+ * so we just route through it for non-identity domains. Identity domain
  * is rejected: per-KeyID DMA only makes sense in a per-device domain. */
 static int amdvi_map_with_keyid(iommu_domain_t* d, uint64_t iova,
                                   uint64_t phys_with_keyid, uint64_t sz,
@@ -399,9 +526,12 @@ static int amdvi_unmap(iommu_domain_t* d, uint64_t iova, uint64_t size) {
         unsigned i3 = (unsigned)((a >> 30) & 0x1FF);
         unsigned i2 = (unsigned)((a >> 21) & 0x1FF);
         unsigned i1 = (unsigned)((a >> 12) & 0x1FF);
-        uint64_t* l3 = amd_pt_walk(d->host_pt, i4, false); if (!l3) continue;
-        uint64_t* l2 = amd_pt_walk(l3, i3, false);         if (!l2) continue;
-        uint64_t* l1 = amd_pt_walk(l2, i2, false);         if (!l1) continue;
+        uint64_t* l3 = amd_pt_walk(d->host_pt, i4, AMD_PT_MODE - 1, false);
+        if (!l3) continue;
+        uint64_t* l2 = amd_pt_walk(l3, i3, AMD_PT_MODE - 2, false);
+        if (!l2) continue;
+        uint64_t* l1 = amd_pt_walk(l2, i2, AMD_PT_MODE - 3, false);
+        if (!l1) continue;
         l1[i1] = 0;
     }
     return 0;

@@ -7,6 +7,29 @@
  *   3. XSAVE component 11 / 12 registration via fpu_xsave_register_extension.
  *   4. Per-process shadow stack allocation + free.
  *   5. Telemetry + Touch publish on lifecycle events.
+ *
+ * ‼ OPEN, OWNER DECISION PENDING — how a page is marked shadow stack.
+ *
+ * This file marks its SSP pages by setting PTE bit 60 (supervisor) or
+ * bit 61 (user). That marks nothing. In ordinary paging bits 62:59 are
+ * the 4-bit protection key and bit 60 is simply key bit 1 (Intel SDM
+ * Vol 3A Table 4-19; Linux: _PAGE_BIT_PKEY_BIT1 = 60). The bit-60
+ * "supervisor shadow stack" attribute exists only in EPT
+ * paging-structure entries (Vol 3C §29.3.2), which this kernel does
+ * not build. The encoding real silicon honours is R/W = 0 with
+ * Dirty = 1, U/S selecting supervisor or user (Vol 1 §18.2.2).
+ *
+ * So today: every supervisor SSP page below is stamped protection key
+ * 2 and every user SSP page protection key 4, and none of them is a
+ * shadow stack to the CPU. Nothing faults yet only because
+ * IA32_S_CET.SH_STK_EN stays 0 and PKRU/PKRS are left at 0 — the
+ * moment either changes, these pages behave as ordinary writable
+ * memory carrying an unintended key. Switching the marking to
+ * W=0/D=1 changes how the pages are mapped, how the pre-flip token
+ * write below works (a read-only page cannot take a normal store) and
+ * how they are torn down; that is a redesign, and the owner decides
+ * it, not this file. Until then nothing here claims the bits mean
+ * what they do not.
  */
 
 #include "cet_lifecycle.h"
@@ -39,15 +62,20 @@
 
 /* WRSSQ — Write 8 bytes to a supervisor-shadow-stack page.
  *
- * Intel SDM Vol 2 §WRSSQ: writes a 64-bit value to memory whose PTE has
- * the supervisor-SS bit (60) set. CPL=0 + CR4.CET=1 +
- * IA32_S_CET.WR_SHSTK_EN=1 required.
+ * Intel SDM Vol 2 §WRSSQ: writes a 64-bit value to memory the CPU sees
+ * as a supervisor shadow stack, i.e. a page mapped R/W = 0 with
+ * Dirty = 1 and U/S = 0. CPL=0 + CR4.CET=1 + IA32_S_CET.WR_SHSTK_EN=1
+ * required.
  *
- * Critical: a NORMAL store to a bit-60 page FAULTS — only WRSSQ /
+ * Critical: a NORMAL store to such a page FAULTS — only WRSSQ /
  * WRUSS / SETSSBSY / RSTORSSP are allowed write paths into shadow stack
  * memory. The kernel must use this primitive when initialising supervisor
  * SSP tokens and when pushing the first synthetic entry during the
  * SH_STK_EN activation handshake.
+ *
+ * See the shadow-stack marking note at the top of this file: the pages
+ * this kernel hands to WRSSQ today are not marked that way, so WRSSQ
+ * against them is inert rather than protective.
  *
  * Why raw byte encoding: older binutils don't accept the `wrssq`
  * mnemonic; raw bytes are portable. REX.W + 0F 38 F6 /r is the encoding;
@@ -65,9 +93,8 @@ static inline void cet_wrssq8(uint64_t val, uintptr_t addr) {
 }
 
 /* INVLPG — flush a single page's TLB entry on the current CPU. Needed
- * after toggling PTE.bit60 so subsequent accesses see the new attribute
- * (otherwise stale TLB would let normal stores succeed on a page now
- * marked shadow-stack, or reject WRSSQ on a page seen as non-SS). */
+ * after any change to a leaf PTE's upper bits so subsequent accesses
+ * see the new entry rather than a cached copy of the old one. */
 static inline void cet_invlpg(uintptr_t addr) {
     __asm__ volatile("invlpg (%0)" :: "r"(addr) : "memory");
 }
@@ -310,11 +337,13 @@ error_t cet_process_create(struct process_t *proc) {
     }
 
     /* Map into the process's vmm_context at a fixed user VA below the
-     * data stack. Use the user-SS PTE bit so CPU recognises the page
-     * as a shadow stack target (Intel SDM Vol 3A §4.5.1 Table 4-19).
-     * We map writable so WRUSS instructions can prime the SSP slot;
-     * runtime user code reaches the page only via CALL/RET shadow ops.
-     */
+     * data stack, writable, with VMM_PTE_CET_SS_USER.
+     *
+     * That last flag is bit 61, which Table 4-19 places inside the
+     * protection-key field: the page ends up carrying protection key 4,
+     * and the CPU does not treat it as a user shadow stack. The
+     * encoding it would honour is R/W = 0 + Dirty = 1 + U/S = 1 — see
+     * the note at the top of this file. */
     uintptr_t user_ssp_va = process_user_ssp_va_for(proc);  /* fixed VA per process */
     uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE |
                      VMM_FLAG_USER    | VMM_PTE_CET_SS_USER;
@@ -490,21 +519,21 @@ error_t cet_lifecycle_init_supervisor_ssp(uint8_t core_idx)
      *
      * Token placement, ordering, and access path:
      *
-     *   1. Write the token via NORMAL store BEFORE the PTE flips to
-     *      shadow-stack. A normal store to a non-SS page is unrestricted;
-     *      a normal store to a bit-60 page faults (only WRSSQ/RSTORSSP
-     *      may write to shadow-stack memory per Intel SDM §17.2.1).
-     *      We exploit the pre-flip window so init works without depending
-     *      on WRSSQ availability at this stage.
+     *   1. Write the token via NORMAL store BEFORE the PTE is stamped.
+     *      A normal store to a page the CPU sees as a shadow stack
+     *      faults (only WRSSQ/RSTORSSP may write there per Intel SDM
+     *      §17.2.1), so init runs in the pre-stamp window and does not
+     *      depend on WRSSQ availability at this stage.
      *
-     *   2. Flip PTE bit 60 (VMM_PTE_CET_SS_SUPV) — Intel SDM Vol 3A §4.5
-     *      requires the supervisor-SS bit for any page consumed by
-     *      RDSSP/RSTORSSP/SETSSBSY/etc.
+     *   2. Set PTE bit 60 (VMM_PTE_CET_SS_SUPV). This is the marking
+     *      the file-header note calls out: bit 60 is protection-key
+     *      bit 1 in ordinary paging, so the page comes out carrying
+     *      key 2 and the CPU still sees ordinary supervisor memory.
+     *      Real supervisor shadow stacks are R/W = 0 + Dirty = 1.
      *
      *   3. INVLPG to drop any stale TLB entry from earlier kernel writes
-     *      (Pull Map zero-fill, etc.). Without the flush, a stale TLB
-     *      entry without bit 60 set could let a NORMAL store succeed
-     *      after the flip — defeating the protection.
+     *      (Pull Map zero-fill, etc.), so later accesses resolve against
+     *      the entry as written rather than a cached copy.
      *
      * Token format (Intel SDM Vol 1 §17.2.3): bits 63:3 = SSP value
      * (token's own VA, 8B-aligned), bit 0 = 1 (supervisor mode bit).
@@ -519,10 +548,11 @@ error_t cet_lifecycle_init_supervisor_ssp(uint8_t core_idx)
             (uint64_t)ist_top[i] | CET_SUPV_TOKEN_MODE_BIT;
     }
 
-    /* Flip PTE bit 60 for every SSP page (token already written above
-     * via the pre-flip normal-store window). The ISST page does NOT
-     * get the bit — the CPU reads it via normal loads, not via
-     * shadow-stack instructions. */
+    /* Set PTE bit 60 on every SSP page (token already written above via
+     * the pre-stamp normal-store window). The ISST page does NOT get
+     * the bit — the CPU reads it via normal loads. On this hardware the
+     * bit is protection-key bit 1, not a shadow-stack attribute; see
+     * the note at the top of this file. */
     vmm_context_t *kctx = vmm_get_kernel_context();
     if (kctx) {
         pte_t *p = vmm_get_or_create_pte(kctx, pl0_va);
@@ -632,13 +662,13 @@ error_t cet_process_create_kernel_ssp(struct process_t *proc, uintptr_t entry_ri
     }
     uintptr_t top = va + (PMM_PAGE_SIZE - 8);
 
-    /* Pre-flip window: write supervisor token via NORMAL store before the
-     * PTE flips to bit-60 (shadow-stack-only). This avoids a WRSSQ
-     * dependency for the very first write. */
+    /* Pre-stamp window: write supervisor token via NORMAL store before
+     * the PTE is stamped. This avoids a WRSSQ dependency for the very
+     * first write. */
     *(volatile uint64_t *)top = (uint64_t)top | CET_SUPV_TOKEN_MODE_BIT;
 
-    /* Flip PTE bit 60 + INVLPG so subsequent WRSSQ recognises the page
-     * as supervisor shadow stack. */
+    /* Set PTE bit 60 + INVLPG. Bit 60 is protection-key bit 1 here, not
+     * a shadow-stack attribute — see the note at the top of this file. */
     vmm_context_t *kctx = vmm_get_kernel_context();
     if (kctx) {
         pte_t *p = vmm_get_or_create_pte(kctx, va);

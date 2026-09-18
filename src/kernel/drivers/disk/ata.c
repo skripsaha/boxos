@@ -106,6 +106,32 @@ static inline void ata_select_drive(uint8_t drive_idx) {
     ata_delay_400ns(drive_idx);
 }
 
+/* One turn of any busy-poll loop in this driver.
+ *
+ * Every wait below turns while this core holds g_ata_lock, and spin_lock in
+ * this kernel is `pushfq; pop; cli` — so these loops run with INTERRUPTS OFF,
+ * for as long as the drive takes. That is not a number this driver gets to
+ * choose: ATA/ATAPI-6 (T13/1410D r3a) §8.13.8 says a cache flush alone "may
+ * take longer than 30 s to complete", and a command abandoned early is a
+ * command whose outcome nobody knows.
+ *
+ * Exactly one thing in this kernel cannot wait that long for this core: a
+ * cross-core TLB shootdown. Its initiator holds every other core to an ACK and
+ * calls a missing one a deadlock after CONFIG_TLB_SHOOTDOWN_PANIC_MS — and the
+ * ACK cannot arrive here as an IPI, because IF is zero.
+ *
+ * So the wait answers it by hand, which is what spin_lock's contended path
+ * already does with this same function (vmm registers it as klib's wait-service
+ * hook). vmm_tlb_shootdown_poll is the idempotent, generation-gated, lock-free
+ * handler the IPI vector runs: a no-op when nothing is pending for this core,
+ * and a no-op again when the real IPI lands afterwards. THIS is what makes a
+ * long ATA wait legal on a multi-core machine — not a shorter timeout, which
+ * would only trade a panic for a command given up on. */
+static inline void ata_poll_pause(void) {
+    vmm_tlb_shootdown_poll();
+    cpu_pause();
+}
+
 /* Bounded waits — every register handshake must terminate even if the
  * drive is dead. CONFIG_ATA_TIMEOUT_MS comes from kernel_config.h. */
 static int ata_wait_clear_bsy(uint8_t drive_idx, uint32_t timeout_ms) {
@@ -114,6 +140,7 @@ static int ata_wait_clear_bsy(uint8_t drive_idx, uint32_t timeout_ms) {
         uint8_t s = ata_read_status(drive_idx);
         if (s == 0xFF) return ATA_ERR_NO_DEVICE;
         if (!(s & ATA_SR_BSY)) return 0;
+        ata_poll_pause();
     }
     return ATA_ERR_TIMEOUT;
 }
@@ -124,6 +151,38 @@ static int ata_wait_ready(uint8_t drive_idx) {
         uint8_t s = ata_read_status(drive_idx);
         if (s == 0xFF) return ATA_ERR_NO_DEVICE;
         if (!(s & ATA_SR_BSY) && (s & ATA_SR_DRDY)) return 0;
+        ata_poll_pause();
+    }
+    return ATA_ERR_TIMEOUT;
+}
+
+/*
+ * The device is in a state to be GIVEN a command — all of what ATA/ATAPI-6
+ * (T13/1410D r3a) requires before the Command register is written, rather than
+ * the part of it ata_wait_ready covers.
+ *
+ * §9.4 host state HI1:Check_Status is where a host sits before issuing:
+ * "Transition HI1:HI1: When the status read indicates that either BSY or DRQ
+ * is set to one, the host shall make a transition to the HI1: Check_Status
+ * state to recheck the status of the selected device", and only "when the
+ * status read indicates that both BSY and DRQ are cleared to zero and the
+ * correct device is selected" does it move on to write parameters (HI3). On
+ * top of that §8.13.7 Prerequisites for FLUSH CACHE EXT reads, in full,
+ * "DRDY set to one."
+ *
+ * DRQ is the half ata_wait_ready does not test, and it is the half that
+ * matters after a reset: ata_channel_soft_reset returns the instant BSY falls
+ * (or the instant the port reads 0) and never waits for DRDY at all, so an
+ * attempt issued straight after one can otherwise land on a device that is
+ * still coming back.
+ */
+static int ata_wait_command_ready(uint8_t drive_idx, uint32_t timeout_ms) {
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(timeout_ms);
+    while (rdtsc() < deadline) {
+        uint8_t s = ata_read_status(drive_idx);
+        if (s == 0xFF) return ATA_ERR_NO_DEVICE;
+        if (!(s & (ATA_SR_BSY | ATA_SR_DRQ)) && (s & ATA_SR_DRDY)) return 0;
+        ata_poll_pause();
     }
     return ATA_ERR_TIMEOUT;
 }
@@ -142,6 +201,7 @@ static int ata_wait_drq(uint8_t drive_idx) {
         if (s == 0xFF) return ATA_ERR_NO_DEVICE;
         if (s & ATA_SR_ERR) return ATA_ERR_DRIVE_FAULT;
         if (!(s & ATA_SR_BSY) && (s & ATA_SR_DRQ)) return 0;
+        ata_poll_pause();
     }
     return ATA_ERR_TIMEOUT;
 }
@@ -262,6 +322,7 @@ void ata_channel_soft_reset(uint8_t channel, uint32_t bsy_patience_ms) {
         uint8_t s = inb(ch->cmd_base + ATA_REG_STATUS);
         if (s == 0 || s == 0xFF) return; /* no drives on this channel */
         if (!(s & ATA_SR_BSY)) return;   /* ready */
+        ata_poll_pause();
     }
     /* kprintf, not debug_printf: a channel that never left BSY is a disk this
      * boot is about to pretend it does not have, and that sentence has to
@@ -613,8 +674,8 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
             outw(ch->cmd_base + ATA_REG_DATA, buf16[i]);
     }
 
-    /* Protocol compliance: BSY must clear before the next command goes
-     * out, and ERR must not be set, otherwise the write is uncertain. */
+    /* Protocol compliance: BSY must clear before the next command goes out,
+     * and neither ERR nor DF may be set, otherwise the write is uncertain. */
     /* The write is on the medium when the drive stops being busy, so this is
      * the drive carrying a command out and not a handshake — the same patience
      * the read's DRQ wait uses. */
@@ -624,15 +685,105 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
         spin_unlock(&g_ata_lock);
         return ATA_ERR_TIMEOUT;
     }
-    if (ata_read_status(drive_idx) & ATA_SR_ERR) {
+    /* ERR and DF are two DIFFERENT ways the write ended badly, and ATA/ATAPI-6
+     * (T13/1410D r3a) §8.62.6 and §8.63.6 name them separately in the error
+     * outputs of WRITE SECTOR(S) and WRITE SECTOR(S) EXT: "DF (Device Fault)
+     * shall be set to one if a device fault has occurred" alongside "ERR shall
+     * be set to one if an Error register bit is set to one". A device fault
+     * need not put anything in the Error register, so testing ERR alone lets a
+     * faulted write report success. */
+    uint8_t status = ata_read_status(drive_idx);
+    if (status & (ATA_SR_ERR | ATA_SR_DF)) {
         uint8_t e = ata_read_error(drive_idx);
-        debug_printf("[ATA] drv%u: ERR=0x%02x (%s) after WRITE @LBA %lu\n",
-                     drive_idx, e, ata_decode_error(e), (unsigned long)lba);
+        debug_printf("[ATA] drv%u: STATUS=0x%02x%s ERR=0x%02x (%s) after "
+                     "WRITE @LBA %lu\n",
+                     drive_idx, status,
+                     (status & ATA_SR_DF) ? " DEVICE-FAULT" : "",
+                     e, ata_decode_error(e), (unsigned long)lba);
         spin_unlock(&g_ata_lock);
         return ATA_ERR_DRIVE_FAULT;
     }
 
     spin_unlock(&g_ata_lock);
+    return 0;
+}
+
+/*
+ * One FLUSH CACHE attempt, issued and then JUDGED.
+ *
+ * This is the volume's only durability barrier, so it is the one command whose
+ * refusal must not be able to look like its success — and on this command the
+ * two look almost identical. ATA/ATAPI-6 (T13/1410D r3a) covers it twice,
+ * §8.12 for FLUSH CACHE (E7h) and §8.13 for FLUSH CACHE EXT (EAh, the one this
+ * driver issues on any LBA48 drive), and both run the Non-data protocol of
+ * §9.4. The two output clauses differ in ONE bit:
+ *
+ *   §8.13.5 Normal outputs  "BSY shall be cleared to zero indicating command
+ *                           completion. DRDY shall be set to one. DF (Device
+ *                           Fault) shall be cleared to zero. DRQ shall be
+ *                           cleared to zero. ERR shall be cleared to zero."
+ *   §8.13.6 Error outputs   "BSY shall be cleared to zero indicating command
+ *                           completion. DRDY shall be set to one. DF (Device
+ *                           Fault) shall be set to one if a device fault has
+ *                           occurred. DRQ shall be cleared to zero. ERR shall
+ *                           be set to one if an Error register bit is set to
+ *                           one." — with "ABRT shall be set to one if the
+ *                           device is not able to complete the action
+ *                           requested by the command" (§8.12.6 says "may";
+ *                           §8.13.6, the clause that governs EAh, says
+ *                           "shall")
+ *
+ * So `!BSY && DRDY` is not completion — it is the END of the command, success
+ * and failure alike, and the verdict is in ERR and DF. §9.4 transition
+ * HND1:HI0 states the duty outright: "If status indicates that an error has
+ * occured, the host shall take appropriate error recovery action."
+ *
+ * Which is why the test below is the WHOLE of those clauses and not the half
+ * of them that ERR and DF occupy. Both require DRDY set and DRQ clear, so a
+ * status that has neither an error bit nor DRDY — 0x00 from a device still
+ * coming back out of a reset, say — is not this command's success either. It
+ * is the same silent success in a different disguise, and it is reachable on
+ * the very path the retry loop below creates.
+ *
+ * Two more clauses of the same protocol are honoured here. §9.4 state HND1:
+ * "When entering this state from another state other than when an interrupt
+ * has occurred, the host shall wait 400 ns before reading the Status
+ * register" — without it the first read can still be the drive's PRE-command
+ * idle status, which is BSY=0/DRDY=1 and reads as a finished flush. And
+ * §8.12.8 and §8.13.8 both carry "NOTE − This command may take longer than
+ * 30 s to complete", so the patience owed is the DRIVE CARRYING A COMMAND OUT
+ * and not a register handshake — it arrives as `patience_ms`, what is left of
+ * the one budget ata_flush_cache spends on the whole call.
+ *
+ * Returns 0 only when the device ended the command with nothing to say. On
+ * ATA_ERR_DRIVE_FAULT the ending status and Error register are handed back for
+ * the caller to report; nothing is printed from in here, because this runs
+ * under g_ata_lock with interrupts off and the caller can say it once, after.
+ */
+static int ata_flush_once(uint8_t drive_idx, uint8_t cmd, uint32_t patience_ms,
+                          uint8_t* out_status, uint8_t* out_error) {
+    AtaChannel* ch = drive_channel_ptr(drive_idx);
+
+    ata_select_drive(drive_idx);
+
+    /* §9.4 HI1→HI3 and §8.13.7 Prerequisites, before the Command register is
+     * written at all — see ata_wait_command_ready. */
+    int rc = ata_wait_command_ready(drive_idx, patience_ms);
+    if (rc != 0) return rc;
+
+    outb(ch->cmd_base + ATA_REG_COMMAND, cmd);
+    ata_delay_400ns(drive_idx);   /* §9.4, HND1: before the first Status read */
+
+    rc = ata_wait_clear_bsy(drive_idx, patience_ms);
+    if (rc != 0) return rc;
+
+    uint8_t status = ata_read_status(drive_idx);
+    if ((status & (ATA_SR_ERR | ATA_SR_DF | ATA_SR_DRQ)) ||
+        !(status & ATA_SR_DRDY)) {
+        *out_status = status;
+        *out_error  = ata_read_error(drive_idx);
+        return ATA_ERR_DRIVE_FAULT;
+    }
     return 0;
 }
 
@@ -645,32 +796,87 @@ int ata_flush_cache(uint8_t drive_idx) {
 
     uint8_t cmd = d->lba48_supported ? ATA_CMD_CACHE_FLUSH_EXT : ATA_CMD_CACHE_FLUSH;
 
+    /* ONE budget for the whole call — the retries share it, they are not each
+     * handed a fresh one.
+     *
+     * CONFIG_ATA_IO_TIMEOUT_MS is this kernel's answer to §8.13.8's "may take
+     * longer than 30 s": it is how long the DRIVE may take to put its write
+     * cache on the medium. Handing that to each attempt in turn would not be
+     * more patient with the drive — it would be a minute and a half of this
+     * core with interrupts disabled, holding g_ata_lock, because a retry only
+     * happens after the drive has already refused or gone silent once. So each
+     * attempt gets what the previous ones left, and what a channel reset costs
+     * comes out of the same purse. */
+    uint32_t budget_ms = CONFIG_ATA_IO_TIMEOUT_MS;
+    uint8_t  status = 0, error = 0;
+    int      rc = ATA_ERR_FLUSH_FAILED;
+
     spin_lock(&g_ata_lock);
     for (int retry = 0; retry < CONFIG_ATA_MAX_RETRIES; retry++) {
-        ata_select_drive(drive_idx);
-        outb(ch->cmd_base + ATA_REG_COMMAND, cmd);
-        if (ata_wait_ready(drive_idx) == 0) {
+        uint64_t attempt_start = rdtsc();
+
+        rc = ata_flush_once(drive_idx, cmd, budget_ms, &status, &error);
+        if (rc == 0) {
             spin_unlock(&g_ata_lock);
             return 0;
         }
-        /* Reset the channel between attempts — a wedged drive that
-         * never asserts DRDY blocks every subsequent write. The reset
-         * runs *inside* the lock so no other core can find the channel
-         * mid-reset; ata_channel_soft_reset only touches I/O ports,
-         * not heap or other locks, so holding g_ata_lock across it is
-         * safe (no lock-order risk).
+        /* The bus reads back 0xFF — there is nothing on this channel to flush
+         * and nothing a reset would bring back. */
+        if (rc == ATA_ERR_NO_DEVICE) break;
+
+        /* ATA_ERR_TIMEOUT — the command never ended at all. Reset the channel
+         * between attempts: a wedged drive blocks every subsequent write. The
+         * reset runs *inside* the lock so no other core can find the channel
+         * mid-reset; ata_channel_soft_reset only touches I/O ports, not heap
+         * or other locks, so holding g_ata_lock across it is safe (no
+         * lock-order risk).
          *
-         * And that lock is exactly why this caller asks for the SHORT
-         * patience: spin_lock cleared IF on the way in, so every
-         * millisecond spent here is a millisecond with interrupts off on
-         * this core. The spec's 31 s belongs to the boot-time reset,
-         * which holds nothing. */
-        if (retry < CONFIG_ATA_MAX_RETRIES - 1)
+         * And that lock is why this caller asks for the SHORT patience: the
+         * budget above is what the FLUSH ITSELF is owed by the spec, and the
+         * reset is recovery on top of it — every millisecond spent here is
+         * another millisecond with interrupts off on this core, buying nothing
+         * the volume asked for. The spec's 31 s belongs to the boot-time
+         * reset, which holds nothing.
+         *
+         * ATA_ERR_DRIVE_FAULT takes neither branch: a flush the device ENDED
+         * with an error wants another flush, not a reset. §8.13.6 — "Subsequent
+         * FLUSH CACHE EXT commands continue the process of flushing the cache
+         * starting with the first sector after the sector in error" (§8.12.6
+         * says the same of FLUSH CACHE). The drive is idle with DRDY set;
+         * there is nothing for SRST to unstick, and resetting a drive that is
+         * still holding dirty cache is the opposite of what is wanted here. */
+        if (rc == ATA_ERR_TIMEOUT && retry < CONFIG_ATA_MAX_RETRIES - 1)
             ata_channel_soft_reset(drive_channel(drive_idx),
                                    ATA_SRST_BSY_HELD_MS);
+
+        uint32_t spent = (uint32_t)cpu_tsc_to_ms(rdtsc() - attempt_start);
+        if (spent >= budget_ms) break;
+        budget_ms -= spent;
     }
     spin_unlock(&g_ata_lock);
-    debug_printf("[ATA] drv%u: cache flush timeout after retries\n", drive_idx);
+
+    /* Said once, out here, with the lock released and interrupts back on — and
+     * said with kprintf rather than debug_printf, which compiles to nothing in
+     * a shipped build. Six of this flush's callers discard its return value, so
+     * for them this line is the only thing that will ever report that the drive
+     * is still holding data the volume has already been told is on the medium.
+     * Every failed flush is a separate broken promise and gets its own line;
+     * the driver does not get to decide that the volume's lies became boring. */
+    if (rc == ATA_ERR_DRIVE_FAULT) {
+        kprintf("[ATA] drv%u: FLUSH CACHE%s refused — STATUS=0x%02x%s%s%s "
+                "ERROR=0x%02x (%s); the write cache is NOT on the medium\n",
+                drive_idx, (cmd == ATA_CMD_CACHE_FLUSH_EXT) ? " EXT" : "",
+                status,
+                (status & ATA_SR_DF)   ? " DEVICE-FAULT" : "",
+                (status & ATA_SR_DRQ)  ? " DRQ-SET"      : "",
+                (status & ATA_SR_DRDY) ? ""              : " NOT-READY",
+                error,
+                error ? ata_decode_error(error) : "no Error-register bits set");
+    } else {
+        kprintf("[ATA] drv%u: FLUSH CACHE%s never ended (rc=%d) — the write "
+                "cache is NOT on the medium\n",
+                drive_idx, (cmd == ATA_CMD_CACHE_FLUSH_EXT) ? " EXT" : "", rc);
+    }
     return ATA_ERR_FLUSH_FAILED;
 }
 

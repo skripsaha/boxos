@@ -126,15 +126,24 @@ bool asn1_read_tlv(Asn1Reader *r, uint8_t expect_tag,
     uint32_t vlen = 0, consumed = 0;
     if (!read_der_length(r->p + 1, r->len - 1, &vlen, &consumed)) return false;
 
+    /* X.690 §8.1.3.5 permits a 4-byte long-form length, i.e. a vlen of up
+     * to 0xFFFFFFFF — exactly the width of the accumulator above. Summing
+     * header + vlen and comparing against r->len would therefore wrap in
+     * uint32 (6 + 0xFFFFFFFF = 5) and hand out a 4 GiB slice. Compare what
+     * REMAINS in the slice against the value length instead: no sum, no
+     * wrap, whatever the encoded length claims. */
     uint32_t header = 1 + consumed;
-    if (header + vlen > r->len) return false;
+    if (header > r->len)        return false;
+    if (vlen > r->len - header) return false;
 
     if (out_tag)       *out_tag       = tag;
     if (out_value)     *out_value     = r->p + header;
     if (out_value_len) *out_value_len = vlen;
 
-    r->p   += header + vlen;
-    r->len -= header + vlen;
+    /* header + vlen ≤ r->len was just established, so this cannot wrap. */
+    uint32_t total = header + vlen;
+    r->p   += total;
+    r->len -= total;
     return true;
 }
 

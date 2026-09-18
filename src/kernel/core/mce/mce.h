@@ -6,8 +6,13 @@
  *     stale IA32_MC<i>_STATUS clear, optional LMCE (Local MCE) gate.
  *   - #MC handler (vector 18) walks every reporting bank, decodes
  *     VAL/UC/PCC/S/AR/ADDRV per Intel SDM Vol 3B §15.3.2, classifies
- *     severity (CE / UCR / UC), poisons affected phys pages via PMM
- *     bitmap + MemTag `mce:poisoned` tag.
+ *     severity (CE / UCR / UC), and sets the PMM poison bit on affected
+ *     phys pages — the one poisoning that takes no lock. The
+ *     `mce:poisoned` MemTag and the console line come afterwards, from a
+ *     K-Core off the record's baton, because both of them take locks the
+ *     interrupted frame may already hold. The one road where the handler
+ *     says the record itself is the road where no K-Core will ever run it:
+ *     a kernel-mode fatal verdict, which halts every core.
  *   - Touch publish `mce:fault:detected` / `mce:fault:recovered` /
  *     `mce:fault:fatal` so userspace can observe + react.
  *
@@ -93,9 +98,36 @@ void          mce_init(void);
 void          mce_ap_init(void);
 
 /* #MC handler — called from idt.c exception_handler when vector == 18.
- * Returns true if the error was recoverable (caller IRET-restarts),
- * false if fatal (caller falls through to system_halt). Walks every
- * bank, poisons phys pages, publishes Touch events. */
+ * Runs in abort context on the IST stack: for as long as MCIP is set it
+ * takes no lock, allocates nothing and says nothing (see mce.c's file
+ * header).
+ *
+ * Returns true — the caller IRET-restarts — ONLY when all three hold:
+ *   - MCG_STATUS.MCIP = 1 (this handler is standing in the event the
+ *     processor is reporting);
+ *   - MCG_STATUS.RIPV = 1. SDM Vol 3B §15.10.4.1: "If the RIPV flag is not
+ *     set, program execution cannot be restarted reliably." This is a
+ *     property of the event and of THIS logical processor, so it outranks
+ *     any single bank's severity;
+ *   - every bank record it decoded was recoverable (UC=0, or UC=1 with
+ *     PCC=0).
+ *
+ * An empty walk — no bank with VAL=1 — is deliberately NOT a verdict of its
+ * own. Without LMCE every Intel #MC is broadcast to every logical processor
+ * and only one of them wins the shared bank, so an empty walk is the normal
+ * answer on every core but one; calling it fatal would let a recoverable
+ * memory error take the machine down. Linux's "Fatal machine check from
+ * unknown source" is a monarch's verdict after a rendezvous this kernel does
+ * not have. The empty walk is said out loud and judged by RIPV alone.
+ *
+ * Returns false otherwise, and the caller then falls through to the
+ * generic exception path: kill the process from ring 3, halt from ring 0.
+ *
+ * Walks every bank, sets the PMM poison bit on affected pages, queues their
+ * migration, publishes Touch events, and delivers one record per decoded
+ * bank: to a K-Core, which says it and applies the `mce:poisoned` tag, or —
+ * when the verdict is fatal in kernel mode and every core is about to halt
+ * without draining anything — from the handler itself. */
 bool          mce_handle(interrupt_frame_t *frame);
 
 /* True after mce_init has completed (so callers know whether per-AP

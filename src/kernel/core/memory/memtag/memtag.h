@@ -356,8 +356,11 @@ size_t        MemTagSweepGuard(uint16_t tag_id, bool guard_on);
  *
  *  Intel SDM Vol 3A §4.6.2 (Protection Keys): bits 62..59 form PKEY
  *  when CR4.PKE=1 — orthogonal to 52-58.
- *  Intel SDM Vol 3D §17 (CET): bit 60 selects supervisor shadow stack
- *  when CR4.CET=1 — also outside 52-58.
+ *  CET takes no leaf-PTE bit at all: a shadow stack is encoded R/W=0 +
+ *  Dirty=1 (Intel SDM Vol 1 §18.2.2), bits 1 and 6, both outside 52-58.
+ *  (Bit 60 is protection-key bit 1, covered by the line above; the
+ *  bit-60 supervisor-shadow-stack attribute belongs to EPT entries,
+ *  Vol 3C §29.3.2.)
  *  AMD APM Vol 2 §5.4.1: bits 52-58 "Available to software" (AVL bits).
  *
  *  Encoding:  PTE bits 52-58 = region_id & 0x7F  (7 bits → 128 slots).
@@ -409,9 +412,18 @@ bool          MemTagVerifyPteMetadataBits(void);
  *    Q2 — Sweep all attaches + cross-core TLB shootdown when a
  *         `pku:N` tag is added or removed on a region with live
  *         attaches (Phase 2C-style enforcement). MemTagSweepPkey.
- *    Q3 — Refuse stamp when proposed PTE would carry both a non-zero
- *         PKEY field AND the CET supv-SS bit (bit 60). Detected via
- *         existing vmm_pte_pkey_cet_conflict().
+ *    Q3 — WITHDRAWN. The 2026-06-07 answer refused a stamp whose PTE
+ *         would carry both a non-zero PKEY field and "the CET supv-SS
+ *         bit (bit 60)", and named a detector to do it with. Both the
+ *         rule and the detector are gone: bit 60 is not a CET bit in
+ *         ordinary paging. Intel SDM Vol 3A Table 4-19 places it inside
+ *         the 4-bit protection key (bits 62:59) — Linux names the same
+ *         bit _PAGE_BIT_PKEY_BIT1 — and the bit-60 "supervisor shadow
+ *         stack" meaning exists only in EPT entries (Vol 3C §29.3.2).
+ *         Keys 2, 3, 6, 7, 10, 11, 14 and 15 set bit 60 because that is
+ *         what those keys ARE. Every key 0..15 stamps; nothing is
+ *         refused. See the CET block in vmm.h for the encoding ordinary
+ *         paging does honour (R/W=0 + Dirty=1).
  *
  *  Region carries AT MOST ONE pku:N tag — adding a second one is
  *  treated as a replace (old cleared automatically by MemTagApplyPkey

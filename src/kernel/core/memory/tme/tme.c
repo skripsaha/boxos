@@ -41,30 +41,40 @@ static TouchTag   g_tme_tag_rekey_failed  = TOUCH_TAG_INVALID;
 
 /* ─── PCONFIG operand ──────────────────────────────────────────────── */
 
-/* Intel TME-MK Spec 1.4 §4.2 "MKTME_KEY_PROGRAM_STRUCT":
+/* Intel SDM Vol 2D, PCONFIG leaf MKTME_KEY_PROGRAM, Table 4-15
+ * "MKTME_KEY_PROGRAM_STRUCT" (= Intel 336907 §6.2.1.1 Table 6-4):
  *   off    size  field
  *     0    2     KEYID
- *     2    4     KEYID_CTRL  (bits[3:0]=command, bits[31:24]=enc_alg)
- *     6   58     Reserved
- *    64   64     KEY_FIELD_1 (data key)
- *   128   64     KEY_FIELD_2 (tweak key)
- *   192   64     Reserved
- *   --- 256 total, 256-byte aligned --------
+ *     2    4     KEYID_CTRL  (bits 7:0 COMMAND, bits 23:8 ENC_ALG,
+ *                             bits 31:24 RSVD — must be zero)
+ *     6   58     Ignored
+ *    64   64     KEY_FIELD_1 (data key or entropy)
+ *   128   64     KEY_FIELD_2 (tweak key or entropy)
+ *   --- 192 bytes are loaded; the operand must be 256-byte ALIGNED ----
+ *
+ * The architectural operand is 192 bytes ("Load TMP_KEY_PROGRAM_STRUCT
+ * from 192 bytes at linear address DS:RBX"); it is the ALIGNMENT that is
+ * 256. The trailing 64 bytes below are ours, not the CPU's — they cost
+ * nothing and keep the object a whole alignment granule.
+ *
+ * Bytes 63:6 are Ignored, not reserved: the manual retracted the older
+ * claim that a non-zero value there would #GP. We zero them anyway, so
+ * nothing stale reaches the instruction.
  *
  * SET_KEY_RANDOM ignores KEY_FIELD_1/2 (CPU generates key internally);
- * SET_KEY_DIRECT reads them. We zero everything outside the keyid and
- * key_ctrl fields so unintended state doesn't leak in.
+ * SET_KEY_DIRECT reads them.
  */
 typedef struct __attribute__((packed)) {
     uint16_t  keyid;                  /* +0   */
-    uint32_t  key_ctrl;               /* +2   bits[3:0]=cmd, bits[31:24]=alg */
-    uint8_t   reserved_6[58];         /* +6..+63 */
+    uint32_t  key_ctrl;               /* +2   bits 7:0 cmd, 23:8 enc_alg */
+    uint8_t   ignored_6[58];          /* +6..+63 */
     uint8_t   key_field_1[64];        /* +64..+127  data key */
     uint8_t   key_field_2[64];        /* +128..+191 tweak key */
-    uint8_t   reserved_192[64];       /* +192..+255 */
+    uint8_t   tail_pad[64];           /* +192..+255 BoxOS padding */
 } MktmeKeyProgram;
 _Static_assert(sizeof(MktmeKeyProgram) == 256,
-               "MKTME_KEY_PROGRAM struct must be exactly 256 bytes");
+               "MKTME_KEY_PROGRAM operand: 192 architectural bytes plus "
+               "BoxOS padding to one 256-byte alignment granule");
 
 /* 256-byte-aligned BSS pool — Intel SDM requires 256-byte alignment on
  * the operand. One per BSP-side critical section (g_tme_lock serializes
@@ -93,33 +103,101 @@ static inline uint64_t pconfig_invoke(uint64_t leaf, void *operand) {
     return result;
 }
 
+/* Both failure reasons PCONFIG can REPORT are ones it asks software to
+ * take again, and in both the key table is left untouched:
+ *
+ *   DEVICE_BUSY (5) — "An execution of the leaf function may fail to
+ *   acquire the lock if it is already in use... indicating that software
+ *   must retry"; "the key table is not updated, and software should
+ *   retry execution of PCONFIG". The lock is held for the length of one
+ *   PCONFIG, and the holder can be another core or another package's
+ *   agent — g_tme_lock is a BoxOS lock and does not reach it.
+ *
+ *   ENTROPY_ERROR (2) — "If there was insufficient entropy for the
+ *   random-number generator". The on-die DRNG reseeds on its own; the
+ *   shortage is momentary.
+ *
+ * So the answer to either is to ask again, not to lose the slot. There
+ * is nothing here to time and nothing to wait for: we hand the core back
+ * with PAUSE and re-issue. The attempt budget follows Intel's own DRNG
+ * guidance for the same class of transient refusal (retry ten times,
+ * separated by PAUSE); a refusal that survives that is not transient,
+ * and the caller has to hear about it rather than spin forever. */
+#define TME_PCONFIG_RETRIES  10u
+
+static inline bool pconfig_rc_is_retryable(uint64_t rc) {
+    return rc == TME_PCONFIG_DEVICE_BUSY || rc == TME_PCONFIG_ENTROPY_ERROR;
+}
+
 /* Program KeyID `keyid` with a CPU-generated random key. Returns
  * TME_PCONFIG_SUCCESS on success; one of the TME_PCONFIG_* error codes
- * on hardware-reported failure. Clobbers g_pconfig_op (caller must
- * hold g_tme_lock or be on the BSP init path). */
+ * on hardware-reported failure, after exhausting the retry budget for
+ * the two retryable ones. Clobbers g_pconfig_op (caller must hold
+ * g_tme_lock or be on the BSP init path). */
 static uint64_t pconfig_set_key_random(uint16_t keyid) {
-    /* Zero entire operand including key-field bytes. SET_KEY_RANDOM
-     * does not READ key_field_1/2 (CPU sources entropy internally) but
-     * Intel SDM still requires the operand to be well-formed — any
-     * non-reserved field set in violation could yield
-     * TME_PCONFIG_INVALID_PROG_CMD. */
-    memset(&g_pconfig_op, 0, sizeof(g_pconfig_op));
-    g_pconfig_op.keyid    = keyid;
-    /* command in bits [3:0]; alg bitmask in bits [31:24]. The alg
-     * value matches IA32_TME_ACTIVATE's per-KeyID algorithm field
-     * format. We program with the same algorithm firmware activated
-     * (mirroring the TME baseline). */
-    g_pconfig_op.key_ctrl = TME_CMD_SET_KEY_RANDOM |
-                            ((uint32_t)g_tme.pconfig_alg << 24);
+    /* ENC_ALG must set EXACTLY ONE bit, and that bit must also be set in
+     * IA32_TME_ACTIVATE[63:48], or PCONFIG raises #GP(0) — not a status
+     * in EAX. Refuse here rather than execute an instruction that is
+     * guaranteed to fault at CPL 0. tme_init_bsp already declines to arm
+     * the pool in this state, so this is the second line of defence. */
+    if (g_tme.pconfig_alg == 0) return TME_PCONFIG_INVALID_ENC_ALG;
 
-    uint64_t rc = pconfig_invoke(0, &g_pconfig_op);
+    uint64_t rc = TME_PCONFIG_SUCCESS;
 
-    /* Scrub the operand on the way out — key_field_1/2 were zero on
-     * entry, but defensive zero suppresses any compiler-inserted spill
-     * + future SET_KEY_DIRECT path reuse from carrying sensitive
-     * material. */
-    memset(&g_pconfig_op, 0, sizeof(g_pconfig_op));
+    for (unsigned attempt = 0; ; attempt++) {
+        /* Rebuild the operand every attempt: the scrub at the bottom of
+         * the previous one wiped it, and PCONFIG may have written to it.
+         * Zeroing covers the key-field and the bytes the manual marks
+         * Ignored, so nothing stale reaches the instruction.
+         * SET_KEY_RANDOM does not READ key_field_1/2 — the CPU sources
+         * entropy internally. */
+        memset(&g_pconfig_op, 0, sizeof(g_pconfig_op));
+        g_pconfig_op.keyid    = keyid;
+        /* KEYID_CTRL: COMMAND in bits 7:0, ENC_ALG in bits 23:8, bits
+         * 31:24 RSVD and left zero. ENC_ALG is the 16-bit one-hot
+         * selection drawn from the IA32_TME_ACTIVATE[63:48] algorithm
+         * bitmap — not the 4-bit TME_POLICY nibble, which encodes the
+         * TME BASELINE algorithm and means nothing in this field. */
+        g_pconfig_op.key_ctrl = (uint32_t)TME_CMD_SET_KEY_RANDOM |
+                                ((uint32_t)g_tme.pconfig_alg << 8);
+
+        rc = pconfig_invoke(0, &g_pconfig_op);
+
+        /* Scrub the operand on the way out — key_field_1/2 were zero on
+         * entry, but defensive zero suppresses any compiler-inserted
+         * spill + future SET_KEY_DIRECT path reuse from carrying
+         * sensitive material. */
+        memset(&g_pconfig_op, 0, sizeof(g_pconfig_op));
+
+        if (!pconfig_rc_is_retryable(rc)) break;
+        if (attempt >= TME_PCONFIG_RETRIES) {
+            debug_printf("[TME] KeyID %u: PCONFIG still rc=%lu after %u "
+                         "retries — treating as permanent\n",
+                         (unsigned)keyid, (unsigned long)rc,
+                         (unsigned)TME_PCONFIG_RETRIES);
+            break;
+        }
+        cpu_pause();
+    }
+
     return rc;
+}
+
+/* ─── Encryption-algorithm selection ───────────────────────────────── */
+
+/* Pick the ENC_ALG value for KEYID_CTRL bits 23:8 out of the
+ * IA32_TME_ACTIVATE[63:48] bitmap of algorithms firmware allows.
+ *
+ * The 16-bit ENC_ALG field lines up bit-for-bit with that window: its
+ * bit 0 is MSR bit 48 (AES-XTS-128), bit 1 is MSR bit 49 (AES-XTS-128
+ * with integrity), bit 2 is MSR bit 50 (AES-XTS-256); the rest are
+ * reserved. PCONFIG requires EXACTLY ONE bit set and that bit present
+ * in the bitmap, so we hand back the lowest allowed one. Returns 0 when
+ * firmware allowed nothing — the caller must then not issue PCONFIG. */
+static uint16_t tme_pick_enc_alg(uint64_t act) {
+    uint32_t algs = (uint32_t)((act & VMM_TME_ACT_ALGS_MASK)
+                               >> VMM_TME_ACT_ALGS_SHIFT);
+    return (uint16_t)(algs & (~algs + 1u));   /* lowest set bit, 0 if none */
 }
 
 /* ─── Bitmap helpers ───────────────────────────────────────────────── */
@@ -172,8 +250,7 @@ error_t tme_init_bsp(void) {
                      : "c"(VMM_MSR_IA32_TME_ACTIVATE));
     uint64_t act = ((uint64_t)hi << 32) | lo;
 
-    g_tme.tme_active = (act & VMM_TME_ACT_TME_EN)    != 0;
-    g_tme.mk_active  = (act & VMM_TME_ACT_TME_MK_EN) != 0;
+    g_tme.tme_active = (act & VMM_TME_ACT_TME_EN) != 0;
 
     if (!g_tme.tme_active) {
         debug_printf("[TME] IA32_TME_ACTIVATE.TME_EN=0 — firmware did not "
@@ -186,19 +263,59 @@ error_t tme_init_bsp(void) {
     g_tme.num_keyid_bits = (uint8_t)((act & VMM_TME_ACT_KEYID_BITS_MASK)
                                      >> VMM_TME_ACT_KEYID_BITS_SHIFT);
     g_tme.reduced_maxphyaddr = vmm_maxphyaddr;
-    /* IA32_TME_ACTIVATE bits [7:4] = algorithm selected by firmware. */
+    /* IA32_TME_ACTIVATE[7:4] TME_POLICY — the TME BASELINE algorithm
+     * firmware chose. Reported for diagnostics; it is not what PCONFIG
+     * wants. */
     g_tme.activated_alg = (uint8_t)((act >> 4) & 0xFu);
-    /* PCONFIG encryption algorithm field uses the same encoding as
-     * IA32_TME_ACTIVATE.ALGS_ENABLED bits [7:4]. We mirror it. */
-    g_tme.pconfig_alg = g_tme.activated_alg;
+    /* PCONFIG KEYID_CTRL.ENC_ALG is a 16-bit one-hot selection out of
+     * IA32_TME_ACTIVATE[63:48] (bit 48 AES-XTS-128, bit 49 AES-XTS-128
+     * with integrity, bit 50 AES-XTS-256). Take the lowest algorithm
+     * firmware allows. */
+    g_tme.pconfig_alg = tme_pick_enc_alg(act);
 
-    if (!g_tme.mk_active || g_tme.num_keyid_bits == 0) {
-        debug_printf("[TME] TME baseline active but MK extension off "
-                     "(MK_EN=%d, keyid_bits=%u) — per-KeyID pool dormant; "
-                     "platform-key encryption still in effect for ALL RAM\n",
-                     (int)g_tme.mk_active, (unsigned)g_tme.num_keyid_bits);
+    /* TME-MK is active iff LOCK=1, TME_EN=1 and MK_TME_KEYID_BITS != 0 —
+     * exactly what PCONFIG checks before it will program anything. There
+     * is no MK enable bit; bits 47:36 are Reserved. */
+    g_tme.mk_active = vmm_tme_act_mk_active(act);
+
+    if (!g_tme.mk_active) {
+        debug_printf("[TME] TME baseline active but MK extension not usable "
+                     "(lock=%d TME_EN=1 keyid_bits=%u) — per-KeyID pool "
+                     "dormant; platform-key encryption still in effect for "
+                     "ALL RAM\n",
+                     (int)((act & VMM_TME_ACT_LOCK) != 0),
+                     (unsigned)g_tme.num_keyid_bits);
         g_tme_initialized = true;
         return OK;
+    }
+
+    if (g_tme.pconfig_alg == 0) {
+        /* Firmware activated TME-MK but allowed no algorithm. Every
+         * PCONFIG would #GP(0) at CPL 0 on the ENC_ALG check, so the pool
+         * stays dormant. Visible on the board: this is a firmware state
+         * an operator has to see, not a debug detail. */
+        kprintf("[TME] MK active but IA32_TME_ACTIVATE[63:48]=0 — firmware "
+                "allows no encryption algorithm; KeyID pool stays dormant "
+                "(act=0x%016lx)\n", (unsigned long)act);
+        g_tme.mk_active = false;
+        g_tme_initialized = true;
+        return OK;
+    }
+
+    /* More than one algorithm allowed means the cipher every KeyID gets
+     * was a CHOICE, and the lowest allowed bit is not the strongest one
+     * (bit 48 AES-XTS-128 sorts below bit 50 AES-XTS-256). The policy
+     * itself is the owner's to set; what must not happen is it being
+     * made invisibly. debug_printf compiles to nothing, so this one goes
+     * through kprintf — an operator on the board has to be able to read
+     * which cipher the pool was keyed with. */
+    {
+        uint16_t allowed = (uint16_t)((act & VMM_TME_ACT_ALGS_MASK)
+                                      >> VMM_TME_ACT_ALGS_SHIFT);
+        if ((allowed & (uint16_t)(allowed - 1u)) != 0u)
+            kprintf("[TME] firmware allows algorithms 0x%04x; keying the "
+                    "pool with 0x%04x (lowest allowed)\n",
+                    (unsigned)allowed, (unsigned)g_tme.pconfig_alg);
     }
 
     /* mk_tme_max_keys from IA32_TME_CAPABILITY bits [50:36]. */
@@ -267,13 +384,14 @@ error_t tme_init_bsp(void) {
                      (unsigned)raw_maxphyaddr);
     }
 
-    debug_printf("[TME] cap=0x%016lx act=0x%016lx tme_en=1 mk_en=1 "
-                 "keyid_bits=%u max_keyid=%u alg=%u "
+    debug_printf("[TME] cap=0x%016lx act=0x%016lx tme_en=1 mk_active=1 "
+                 "keyid_bits=%u max_keyid=%u policy=%u enc_alg=0x%04x "
                  "reduced_maxphyaddr=%u → KeyID at PA bits [%u:%u]\n",
                  (unsigned long)cap, (unsigned long)act,
                  (unsigned)g_tme.num_keyid_bits,
                  (unsigned)g_tme.max_keyid,
                  (unsigned)g_tme.activated_alg,
+                 (unsigned)g_tme.pconfig_alg,
                  (unsigned)g_tme.reduced_maxphyaddr,
                  (unsigned)(g_tme.reduced_maxphyaddr + g_tme.num_keyid_bits - 1),
                  (unsigned)g_tme.reduced_maxphyaddr);
@@ -289,6 +407,8 @@ error_t tme_init_bsp(void) {
             bitmap_clear_local(k);  /* mark free */
             g_tme.pool_programmed++;
         } else {
+            /* The wrapper already re-issued on the two retryable
+             * reasons, so this failure is the permanent kind. */
             debug_printf("[TME] KeyID %u PCONFIG SET_KEY_RANDOM failed: "
                          "rc=%lu (slot dropped from pool)\n",
                          (unsigned)k, (unsigned long)rc);
@@ -360,9 +480,13 @@ error_t tme_keyid_free(uint16_t keyid) {
 
     uint64_t rc = pconfig_set_key_random(keyid);
     if (rc != TME_PCONFIG_SUCCESS) {
-        /* Slot is now in an undefined state — leave it marked in-use
-         * forever so no future allocation can reach it. Better to
-         * lose one slot than risk programming-failure plus key reuse. */
+        /* The wrapper already re-issued on DEVICE_BUSY and
+         * ENTROPY_ERROR — the two reasons the manual says to retry, and
+         * the two a contending key-table holder produces. Reaching here
+         * means the refusal outlived the budget or was never retryable,
+         * so the slot is in an undefined state: leave it marked in-use
+         * forever so no future allocation can reach it. Better to lose
+         * one slot than risk programming-failure plus key reuse. */
         spin_unlock(&g_tme_lock);
         debug_printf("[TME] KeyID %u re-key failed (rc=%lu); slot lost\n",
                      (unsigned)keyid, (unsigned long)rc);
@@ -482,7 +606,7 @@ bool tme_is_safe_for_dma(uintptr_t phys_with_keyid) {
 
 void tme_dump_state(void) {
     debug_printf("[TME] state: initialized=%d tme_active=%d mk_active=%d "
-                 "num_keyid_bits=%u max_keyid=%u alg=%u "
+                 "num_keyid_bits=%u max_keyid=%u policy=%u enc_alg=0x%04x "
                  "reduced_maxphyaddr=%u pool=%u programmed=%u in_use=%u\n",
                  (int)g_tme_initialized,
                  (int)g_tme.tme_active,
@@ -490,6 +614,7 @@ void tme_dump_state(void) {
                  (unsigned)g_tme.num_keyid_bits,
                  (unsigned)g_tme.max_keyid,
                  (unsigned)g_tme.activated_alg,
+                 (unsigned)g_tme.pconfig_alg,
                  (unsigned)g_tme.reduced_maxphyaddr,
                  (unsigned)g_tme.pool_size,
                  (unsigned)g_tme.pool_programmed,
