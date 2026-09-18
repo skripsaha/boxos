@@ -134,7 +134,16 @@ bool BatonPass(Baton *n)
     uint8_t drain = g_amp.bsp_index;
     BatonQueue *q = &g_baton[drain];
 
+    /* Snapshot the continuation BEFORE the link, for the same reason BatonPump
+     * copies run/ctx before the call: once linked, this node is reachable by
+     * the consumer, which may pop it and let its continuation free the whole
+     * container — including the node — before we get another instruction. The
+     * value is a plain function pointer, never dereferenced here, so holding
+     * it after the container dies is safe; reading n->run then would not. */
+    void (*pushed_run)(void *) = n->run;
+
     baton_link(q, n);
+    q->last_push_run = pushed_run;
     atomic_fetch_add_u64(&q->pushed, 1);
 
     uint8_t me = amp_get_core_index();
@@ -171,6 +180,11 @@ uint32_t BatonPump(uint8_t core_idx)
          * Once popped, n is unreachable from the queue, so both are safe. */
         void (*run)(void *) = n->run;
         void  *ctx          = n->ctx;
+
+        /* Recorded BEFORE the call, not after, because the case this exists to
+         * report is the continuation that never returns: a queue that will not
+         * go quiet must be able to name the work standing in it. */
+        q->last_pop_run = run;
 
         run(ctx);
         /* Count AFTER the continuation returns: BatonOutstanding
@@ -217,6 +231,61 @@ bool BatonOutstanding(uint8_t core_idx)
 
     BatonQueue *q = &g_baton[core_idx];
     return atomic_load_u64(&q->pushed) != atomic_load_u64(&q->popped);
+}
+
+/* ==========================================================================
+ *  Halt-drain helper — BatonDepth()
+ *
+ *  What BatonOutstanding could not say: HOW MUCH. The counters were always
+ *  there; collapsing them to a bool is what made a shutdown report "one unit
+ *  of storage work" when it had no idea whether that was one pass or a
+ *  thousand, and a measure that cannot fall cannot show progress either.
+ *
+ *  POPPED IS READ FIRST, and that ordering is the whole correctness argument.
+ *  Both counters only ever rise, and a pass raises `pushed` strictly before
+ *  its own `popped`. Sampling `popped` first can therefore only make the
+ *  difference too LARGE — never negative, which in unsigned arithmetic would
+ *  not be a small error but a depth of eighteen quintillion. A depth that errs
+ *  high errs toward looking again; the other way errs toward a lie.
+ * ========================================================================== */
+uint64_t BatonDepth(uint8_t core_idx)
+{
+    if (!__atomic_load_n(&g_baton_ready, __ATOMIC_ACQUIRE)) return 0;
+    if (core_idx >= g_amp.total_cores) return 0;
+
+    BatonQueue *q = &g_baton[core_idx];
+    uint64_t popped = atomic_load_u64(&q->popped);
+    uint64_t pushed = atomic_load_u64(&q->pushed);
+    return pushed - popped;
+}
+
+/* ==========================================================================
+ *  Diagnostics — BatonLastSeen()
+ *
+ *  The continuation most recently pushed to, and most recently popped from,
+ *  this core's queue. Both are plain function pointers snapshotted into the
+ *  queue itself and NEVER dereferenced here — which is the point. The obvious
+ *  alternative, reading `head->run` to see what is stuck, is not available to
+ *  a core that does not own the queue: the node lives inside the caller's job
+ *  and a continuation is entitled to free that job the moment it runs, so a
+ *  foreign reader following head would be reading freed memory precisely when
+ *  the machine is already in trouble.
+ *
+ *  The caller turns these into names through the Nameplate.
+ * ========================================================================== */
+void BatonLastSeen(uint8_t core_idx,
+                   void (**out_pushed)(void *ctx),
+                   void (**out_popped)(void *ctx))
+{
+    if (out_pushed) *out_pushed = NULL;
+    if (out_popped) *out_popped = NULL;
+
+    if (!__atomic_load_n(&g_baton_ready, __ATOMIC_ACQUIRE)) return;
+    if (core_idx >= g_amp.total_cores) return;
+
+    BatonQueue *q = &g_baton[core_idx];
+    if (out_pushed) *out_pushed = q->last_push_run;
+    if (out_popped) *out_popped = q->last_pop_run;
 }
 
 /* ==========================================================================

@@ -124,6 +124,17 @@ typedef struct BatonQueue {
      * counted, so at quiescence pushed == popped == real completions. */
     volatile uint64_t  pushed;
     volatile uint64_t  popped;
+
+    /* Also telemetry, and for one question only: when a queue will not go
+     * quiet, WHOSE work is sitting in it. The continuation pointer is enough
+     * to answer that, because the Nameplate can turn it back into the name of
+     * the function that was going to run — so a stuck queue can be reported as
+     * "a write's commit" or "an xHCI transfer" instead of as a number. Plain
+     * volatile stores beside pushed/popped: a torn read would misname a line
+     * of diagnostics and nothing else, which is why this is not worth an
+     * atomic on the push path. */
+    void (*volatile last_push_run)(void *ctx);
+    void (*volatile last_pop_run)(void *ctx);
 } BatonQueue;
 
 /* Sized to g_amp.total_cores at init. */
@@ -157,6 +168,19 @@ bool BatonPass(Baton *n);
  * does): the node it is running under was popped before it ran, so the
  * nested drain sees a consistent head. Returns the number run. */
 uint32_t BatonPump(uint8_t core_idx);
+
+/* How many passes this core's queue is still holding. BatonOutstanding only
+ * ever said WHETHER a queue was busy, which made "one unit of work" mean "one
+ * core has something" and hid how much — the shutdown drain reported a single
+ * unit stalled when it had no idea whether that was one pass or a thousand. */
+uint64_t BatonDepth(uint8_t core_idx);
+
+/* The continuation most recently PUSHED to, and most recently POPPED from,
+ * this core's queue. Diagnostics only; NULL when the queue has never been
+ * used. Pass them to the Nameplate to get a name. */
+void BatonLastSeen(uint8_t core_idx,
+                   void (**out_pushed)(void *ctx),
+                   void (**out_popped)(void *ctx));
 
 /* HLT-gate helper: true iff `core_idx`'s queue has a real (non-stub) node
  * awaiting drain. Must be called by the owning core (it reads `head`).

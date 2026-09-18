@@ -19,6 +19,8 @@
 #include "amp.h"
 #include "hourglass.h"
 #include "kernel_config.h"
+#include "nameplate.h"        /* nameplate_name_at_kernel — name a stuck continuation */
+#include "nameplate_format.h" /* NameplateHeader — the table's own minimum size */
 
 /* The only bound in the drain below, and it judges a DEVICE, not a shutdown.
  * CONFIG_AHCI_IO_TIMEOUT_MS is this kernel's already-written answer to "how
@@ -37,6 +39,28 @@
  * that lacks SSE4.2, which is a worse trade for a path that runs once, at
  * poweroff, over at most 32 ports. The classic SWAR fold is branch-free,
  * constant-time and needs nothing from the CPU beyond shifts and adds. */
+/* The kernel's own name table, and the one question asked of it here: given a
+ * continuation's address, what was it going to run? The panic path does the
+ * same lookup for the same reason (idt.c) — a machine in trouble must name
+ * what it is holding rather than print a number and leave the reader guessing
+ * which of a dozen subsystems owns it. Never fails loudly: a table that is
+ * absent or too small simply yields the honest placeholder. */
+extern const char __nameplate_start[];
+extern const char __nameplate_end[];
+
+static const char *halt_name_of(void (*run)(void *ctx), NameplateName *scratch)
+{
+    if (!run) return "nothing";
+
+    uint64_t bytes = (uint64_t)(__nameplate_end - __nameplate_start);
+    if (bytes >= sizeof(NameplateHeader) &&
+        nameplate_name_at_kernel((uintptr_t)__nameplate_start, bytes,
+                                 (uintptr_t)run, scratch))
+        return scratch->Text;
+
+    return "an unnamed continuation";
+}
+
 static inline uint32_t halt_bits_set(uint32_t v)
 {
     v = v - ((v >> 1) & 0x55555555u);
@@ -51,23 +75,24 @@ static inline uint32_t halt_bits_set(uint32_t v)
  *      state-machine continuations the AHCI IRQ hands on, plus every other
  *      pass an interrupt made (SCI/GPE, AHCI recovery, the Touch IRQ ring's
  *      knock). A pending WRITE completion still owes its tagfs commit, so one
- *      of these dropped is user data lost. BatonOutstanding is PRESENCE, not
- *      depth — pushed != popped is all a queue offers a core that does not own
- *      it — so a busy core contributes exactly 1. The measure is coarser than
- *      the truth but still reaches zero only when every queue is drained.
+ *      of these dropped is user data lost. This is a real DEPTH: BatonDepth
+ *      subtracts the queue's own counters, so a core holding a thousand passes
+ *      contributes a thousand. It used to contribute 1, because presence was
+ *      all that was asked for — which is how a board came to report "1 unit(s)
+ *      of storage work stalled" while saying nothing about how much that was,
+ *      and why a measure meant to show PROGRESS could sit still while a queue
+ *      genuinely drained from nine hundred passes to one.
  *   2. AHCI command issue, which is a real depth: one bit per occupied slot in
  *      PxCI (AHCI 1.3.1 §3.3.14) and PxSACT (§3.3.13), each cleared by the
  *      controller when that command completes.
  * Both terms are non-negative and fall as the machine finishes work — which is
  * exactly what lets the drain below run without a deadline while they fall. */
-static uint32_t halt_async_work_owed(void)
+static uint64_t halt_async_work_owed(void)
 {
-    uint32_t work = 0;
+    uint64_t work = 0;
 
-    for (uint8_t i = 0; i < g_amp.total_cores; i++) {
-        if (BatonOutstanding(i))
-            work++;
-    }
+    for (uint8_t i = 0; i < g_amp.total_cores; i++)
+        work += BatonDepth(i);
 
     if (ahci_is_initialized()) {
         uint32_t mask = ahci_get_active_port_mask();
@@ -118,7 +143,7 @@ static void halt_drain_async_writes(void)
     kprintf("[HALT] Draining async writes...\n");
 
     uint8_t   me    = amp_get_core_index();
-    uint32_t  best  = UINT32_MAX;   /* lowest work owed ever seen — the witness */
+    uint64_t  best  = UINT64_MAX;   /* lowest work owed ever seen — the witness */
     bool      stuck = false;        /* the last pass failed to beat `best`      */
     bool      ruled = false;        /* the stall glass turned on a real ruler   */
     bool      said  = false;        /* the no-ruler line is said exactly once   */
@@ -138,7 +163,7 @@ static void halt_drain_async_writes(void)
          * pumping their own queues from their guide loops. */
         BatonPump(me);
 
-        uint32_t work = halt_async_work_owed();
+        uint64_t work = halt_async_work_owed();
         if (work == 0)
             break;
 
@@ -159,11 +184,34 @@ static void halt_drain_async_writes(void)
                 said = true;
             }
         } else if (ruled && HourGlassRunOut(&stall)) {
-            kprintf("[HALT] %u unit(s) of storage work stalled for %lu us (%s) "
-                    "— giving up; a pending write's commit may be lost\n",
-                    work, HourGlassElapsedUs(&stall),
+            kprintf("[HALT] storage work has not moved for %lu us (%s) — "
+                    "%lu unit(s) still owed\n",
+                    HourGlassElapsedUs(&stall),
                     HourGlassSourceDied(&stall) ? "ruler died"
-                                                : HourGlassRulerName(&stall));
+                                                : HourGlassRulerName(&stall),
+                    work);
+
+            /* WHICH core, HOW MANY, and WHOSE work — the three things the old
+             * line could not say. A stuck queue names the continuation it is
+             * standing in, so the next reader starts at a function instead of
+             * at a number. */
+            for (uint8_t i = 0; i < g_amp.total_cores; i++) {
+                uint64_t depth = BatonDepth(i);
+                if (depth == 0) continue;
+
+                void (*handed_in)(void *ctx) = NULL;
+                void (*last_run)(void *ctx)  = NULL;
+                BatonLastSeen(i, &handed_in, &last_run);
+
+                NameplateName in_name, run_name;
+                kprintf("[HALT]   core %u holds %lu pass(es); last handed in "
+                        "%s, last run %s\n",
+                        i, depth,
+                        halt_name_of(handed_in, &in_name),
+                        halt_name_of(last_run, &run_name));
+            }
+
+            kprintf("[HALT] giving up; a pending write's commit may be lost\n");
             return;                 /* do not claim a drain that did not happen */
         }
 
