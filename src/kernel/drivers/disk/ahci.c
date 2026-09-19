@@ -19,6 +19,11 @@
 
 static ahci_controller_t ahci_ctrl;
 
+/* This controller's link on its INTx line, for the fallback path. One node,
+ * because there is one controller record; a shared wire chains it to the
+ * nodes of whatever else sits on the same pin. */
+static SummonsResponder ahci_intx_responder;
+
 static inline ahci_port_regs_t* ahci_get_port_regs(uint8_t port_num) {
     uintptr_t port_base = (uintptr_t)ahci_ctrl.hba_mem + 0x100 + (port_num * 0x80);
     return (ahci_port_regs_t*)port_base;
@@ -458,17 +463,53 @@ void ahci_init_irq(void) {
         return;
     }
 
-    /* Fallback: legacy INTx via the PCI interrupt line (an IOAPIC GSI). */
-    if (ahci_ctrl.irq_vector == 0xFF || ahci_ctrl.irq_vector >= IRQ_MAX_COUNT) {
-        debug_printf("[AHCI] No MSI capability and no usable INTx line; polling mode\n");
+    /* Fallback: INTx, and it arrives DESCRIBED.
+     *
+     * What used to happen here was the defect the comment above warns about,
+     * committed rather than avoided: a byte read from config offset 0x3C went
+     * straight into irq_register_handler and irqchip_enable_irq, which armed
+     * an open-drain level-sensitive wire (PCI 3.0 §2.2.6) as an edge, active
+     * high, with room for exactly one driver on a line the same specification
+     * requires every driver to share. PciSummons applies the bus rule, asks
+     * the Interrupt Pin register whether there is a wire at all, and marks
+     * where the GSI came from so _PRT can be seen to beat it later. */
+    Summons line;
+    if (!PciSummons(ahci_ctrl.pci_dev.bus, ahci_ctrl.pci_dev.device,
+                    ahci_ctrl.pci_dev.function, &line)) {
+        kprintf("[AHCI] no MSI capability and no INTx line to arm — this "
+                "controller's completions are found by the overdue sweep, "
+                "not by an interrupt\n");
+        ahci_ctrl.irq_vector  = 0xFF;
         ahci_ctrl.irq_enabled = false;
         return;
     }
 
-    irq_register_handler(ahci_ctrl.irq_vector, ahci_irq_handler);
-    irqchip_enable_irq(ahci_ctrl.irq_vector);
+    if (!SummonsAnswer(&line, &ahci_intx_responder, ahci_irq_handler, "AHCI") ||
+        !SummonsArm(&line)) {
+        kprintf("[AHCI] INTx line refused — this controller's completions are "
+                "found by the overdue sweep, not by an interrupt\n");
+        ahci_ctrl.irq_vector  = 0xFF;
+        ahci_ctrl.irq_enabled = false;
+        return;
+    }
+
+    /* SummonsArm has replaced `line` with what was actually programmed —
+     * the pin may already have been carrying a vector and a wiring of its
+     * own, and this driver joined them. So the wire is PRINTED FROM THE
+     * DESCRIPTION rather than asserted from the PCI bus rule: a link's _CRS
+     * may state active high (QEMU's q35 GSIA..GSID do), and a sentence
+     * claiming "level-triggered and active low" on a pin programmed active
+     * high is the operator's only evidence, saying the opposite of the
+     * truth. */
+    ahci_ctrl.irq_vector  = line.vector;
     ahci_ctrl.irq_enabled = true;
-    debug_printf("[AHCI] INTx IRQ %u registered (MSI unavailable)\n", ahci_ctrl.irq_vector);
+    kprintf("[AHCI] INTx INT%c# on GSI %u (vector %u), %s and %s, %s "
+            "(MSI unavailable)\n",
+            'A' + (line.intx_pin - 1), line.gsi, line.vector,
+            line.trigger == SUMMONS_LEVEL ? "level-triggered" : "edge-triggered",
+            line.polarity == SUMMONS_ACTIVE_LOW ? "active low" : "active high",
+            line.shared ? "shared with whatever else is on the wire"
+                        : "and this kernel holds it alone");
 }
 
 int ahci_alloc_slot(uint8_t port_num) {
@@ -2086,21 +2127,13 @@ int ahci_init(void) {
                  ahci_ctrl.pci_dev.device,
                  ahci_ctrl.pci_dev.function);
 
-    // IRQ line is at PCI config offset 0x3C (BIOS-assigned IRQ / GSI)
-    uint8_t irq_line = pci_config_read_byte(ahci_ctrl.pci_dev.bus,
-                                             ahci_ctrl.pci_dev.device,
-                                             ahci_ctrl.pci_dev.function,
-                                             0x3C);
-    ahci_ctrl.irq_vector = irq_line;
+    /* No interrupt yet, and no guess at one. The Interrupt Line byte used to
+     * be read here and kept as though it were an answer; how this controller
+     * signals is decided in ahci_init_irq, where MSI is tried first and an
+     * INTx line, if it comes to that, arrives as a Summons. */
+    ahci_ctrl.irq_vector = 0xFF;
     ahci_ctrl.irq_enabled = false;
     ahci_ctrl.total_interrupts = 0;
-
-    if (irq_line == 0xFF || irq_line >= IRQ_MAX_COUNT) {
-        debug_printf("[AHCI] WARNING: Invalid IRQ line %u, IRQ disabled\n", irq_line);
-        ahci_ctrl.irq_vector = 0xFF;  // Mark as invalid
-    } else {
-        debug_printf("[AHCI] IRQ line: %u\n", ahci_ctrl.irq_vector);
-    }
 
     uint16_t cmd = pci_config_read_word(ahci_ctrl.pci_dev.bus,
                                         ahci_ctrl.pci_dev.device,

@@ -17,27 +17,45 @@
  * PackageOp check, returning false instead of programming bogus PM1 values.
  */
 
-/* AML package length encoding — ACPI 6.5 §20.2.4. */
-#define AML_MAX_SANE_PKG_LENGTH (1024u * 1024u)  /* 1 MiB cap; sanity only */
+/*
+ * AML package length encoding — ACPI 6.5 §20.2.4.
+ *
+ * `*bytes_consumed == 0` means "this is not a package length that fits in
+ * what is left of the table", and the caller must treat it as a refusal.
+ *
+ * What stood here was a 1 MiB ceiling with "sanity only" written beside it,
+ * and a malformed length was CLAMPED to it — a number from nobody, applied
+ * on the live path that decides how this machine powers off. The bound is
+ * not a number to pick: §20.2.4 has the PkgLength count from its own first
+ * byte, and the table says how long it is in its own header, so a package
+ * that claims to run past the end of the bytes handed to this scanner is
+ * malformed and there is nothing to salvage by shortening it. `remaining` is
+ * that fact, carried in from the table header.
+ */
+static uint32_t decode_pkg_length(const uint8_t* aml, uint32_t remaining,
+                                   uint32_t* bytes_consumed) {
+    if (remaining == 0) { *bytes_consumed = 0; return 0; }
 
-static uint32_t decode_pkg_length(const uint8_t* aml, uint32_t* bytes_consumed) {
     uint8_t lead_byte = aml[0];
     uint8_t follow_count = (uint8_t)((lead_byte >> 6) & 0x03);
+    if ((uint32_t)follow_count + 1u > remaining) { *bytes_consumed = 0; return 0; }
 
-    *bytes_consumed = 1u + follow_count;
-
-    if (follow_count == 0)
-        return lead_byte & 0x3F;
-
-    uint32_t length = lead_byte & 0x0F;
-    for (uint8_t i = 0; i < follow_count; i++)
-        length |= ((uint32_t)aml[1 + i]) << (4 + 8 * i);
-
-    if (length > AML_MAX_SANE_PKG_LENGTH) {
-        debug_printf("[ACPI] _S5 package length %u exceeds %u, clamping\n",
-                     length, AML_MAX_SANE_PKG_LENGTH);
-        length = AML_MAX_SANE_PKG_LENGTH;
+    uint32_t length;
+    if (follow_count == 0) {
+        length = lead_byte & 0x3F;
+    } else {
+        length = lead_byte & 0x0F;
+        for (uint8_t i = 0; i < follow_count; i++)
+            length |= ((uint32_t)aml[1 + i]) << (4 + 8 * i);
     }
+
+    if (length > remaining) {
+        debug_printf("[ACPI] _S5 package claims %u bytes with %u left in the "
+                     "table — rejected, not shortened\n", length, remaining);
+        *bytes_consumed = 0;
+        return 0;
+    }
+    *bytes_consumed = 1u + follow_count;
     return length;
 }
 
@@ -120,24 +138,32 @@ bool acpi_search_s5_in_aml(uint8_t* aml, uint32_t aml_len) {
         }
         pos++;
 
-        /* Worst case after PackageOp: pkglen(4) + numelem(1) +
-         * 2 * extract_integer(max 5) = 15. Bound it. */
-        if (pos + 1 > aml_len) continue;
-        uint32_t pkg_bytes = 0;
-        uint32_t pkg_len = decode_pkg_length(&aml[pos], &pkg_bytes);
-        (void)pkg_len;
-        if (pkg_bytes == 0 || pos + pkg_bytes >= aml_len) continue;
-        pos += pkg_bytes;
-
+        /* The package's own length, bounded by what is left of the table —
+         * and USED, where it was decoded and thrown away. A _S5 package that
+         * runs past the end of the bytes this scanner was given describes
+         * nothing readable, and reading its elements anyway is how a
+         * fabricated SLP_TYP reaches PM1a_CNT. */
         if (pos >= aml_len) continue;
+        uint32_t pkg_bytes = 0;
+        uint32_t pkg_len = decode_pkg_length(&aml[pos], aml_len - pos,
+                                             &pkg_bytes);
+        if (pkg_bytes == 0) continue;
+        const uint32_t pkg_end = pos + pkg_len;   /* §20.2.4: counts itself */
+        pos += pkg_bytes;
+        if (pkg_end <= pos || pkg_end > aml_len) continue;
+
+        if (pos >= pkg_end) continue;
         uint8_t num_elements = aml[pos++];
         if (num_elements == 0) {
             debug_printf("[ACPI] _S5_ package is empty\n");
             continue;
         }
 
+        /* Elements are read inside the package the firmware declared, not up
+         * to the end of the table: a truncated package must not be completed
+         * out of whatever bytes follow it. */
         uint32_t value_bytes = 0;
-        uint32_t a_val = extract_integer_value(&aml[pos], aml_len - pos,
+        uint32_t a_val = extract_integer_value(&aml[pos], pkg_end - pos,
                                                &value_bytes);
         if (value_bytes == 0) continue;
         pos += value_bytes;
@@ -154,8 +180,8 @@ bool acpi_search_s5_in_aml(uint8_t* aml, uint32_t aml_len) {
             b_val = a_val >> 8;
         } else {
             /* The vendor form most BIOSes emit: one Integer per port. */
-            if (pos >= aml_len) continue;
-            b_val = extract_integer_value(&aml[pos], aml_len - pos,
+            if (pos >= pkg_end) continue;
+            b_val = extract_integer_value(&aml[pos], pkg_end - pos,
                                           &value_bytes);
             if (value_bytes == 0) continue;
         }

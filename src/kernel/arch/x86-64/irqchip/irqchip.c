@@ -3,6 +3,7 @@
 #include "lapic.h"
 #include "ioapic.h"
 #include "acpi_madt.h"
+#include "idt.h"        /* SummonsPost — the registry keeps the line it was given */
 #include "cpuid.h"
 #include "klib.h"
 #include "io.h"
@@ -13,14 +14,6 @@ static irq_chip_t* active_chip = NULL;
 static madt_info_t madt_info;
 
 // --- PIC backend (wraps existing pic.c functions) ---
-
-static void pic_chip_enable(uint8_t gsi) {
-    if (gsi < 16) pic_enable_irq(gsi);
-}
-
-static void pic_chip_disable(uint8_t gsi) {
-    if (gsi < 16) pic_disable_irq(gsi);
-}
 
 static void pic_chip_eoi(uint8_t gsi) {
     if (gsi < 16) pic_send_eoi(gsi);
@@ -36,8 +29,6 @@ static uint32_t pic_chip_get_irr(void) {
 
 static irq_chip_t pic_chip = {
     .name       = "8259A PIC",
-    .enable_irq = pic_chip_enable,
-    .disable_irq = pic_chip_disable,
     .send_eoi   = pic_chip_eoi,
     .get_isr    = pic_chip_get_isr,
     .get_irr    = pic_chip_get_irr,
@@ -46,28 +37,23 @@ static irq_chip_t pic_chip = {
 
 // --- APIC backend (LAPIC + IO-APIC) ---
 
-/* The BSP's APIC ID is handed down at full width. Whether it fits the
- * eight destination bits of a redirection entry is the IOAPIC's own
- * question, answered — and refused aloud, per line — in ioapic.c, where
- * the field is. Narrowing it here with a cast would put the loss at a
- * call site that the entry itself can never inspect. */
-static void apic_chip_enable(uint8_t irq) {
-    if (irq < IRQ_MAX_COUNT) {
-        // Apply ISA-to-GSI mapping (e.g., MADT says IRQ 0 -> GSI 2 for PIT)
-        uint32_t gsi = ioapic_isa_to_gsi(irq);
-        // Vector is based on IRQ number, not GSI — so IRQ handler maps back correctly
-        uint8_t vector = IRQ_VECTOR_BASE + irq;
-        ioapic_enable_irq((uint8_t)gsi, vector, madt_info.bsp_lapic_id);
-    }
-}
-
-static void apic_chip_disable(uint8_t irq) {
-    if (irq < IRQ_MAX_COUNT) {
-        uint32_t gsi = ioapic_isa_to_gsi(irq);
-        ioapic_disable_irq((uint8_t)gsi);
-    }
-}
-
+/* One LAPIC EOI, and for a LEVEL line that is not the whole of it.
+ *
+ * Intel SDM Vol 3A, "EOI Register": "Upon receiving an EOI, the APIC clears
+ * the highest priority bit in the ISR and dispatches the next highest
+ * priority interrupt to the processor. If the terminated interrupt was a
+ * level-triggered interrupt, the local APIC also sends an end-of-interrupt
+ * message to all I/O APICs." That broadcast is what clears the redirection
+ * entry's Remote IRR — set, per the same chapter, "when the local APIC
+ * accepts the interrupt for servicing and ... reset when an EOI command is
+ * received" — and a pin whose Remote IRR stays set never delivers again.
+ *
+ * So the one write below IS the level path, on the single condition that the
+ * broadcast has not been suppressed. irqchip_init makes sure of that on the
+ * BSP; see the SVR bit 12 sentence there. The gsi is unused because the
+ * broadcast names the vector, not the pin — the alternative, a directed EOI
+ * to one IOAPIC's own EOI register, is what SDM offers to software that HAS
+ * suppressed the broadcast, and this kernel has not. */
 static void apic_chip_eoi(uint8_t gsi) {
     (void)gsi;
     lapic_send_eoi();
@@ -85,8 +71,6 @@ static uint32_t apic_chip_get_irr(void) {
 
 static irq_chip_t apic_chip = {
     .name       = "APIC (LAPIC + IO-APIC)",
-    .enable_irq = apic_chip_enable,
-    .disable_irq = apic_chip_disable,
     .send_eoi   = apic_chip_eoi,
     .get_isr    = apic_chip_get_isr,
     .get_irr    = apic_chip_get_irr,
@@ -188,6 +172,47 @@ void irqchip_init(void) {
                      "all-processor NMI rules were applied\n");
     }
 
+    /* Step 4.7: let a level-triggered EOI reach the IOAPIC.
+     *
+     * Intel SDM Vol 3A, "EOI Register": "Software can inhibit the broadcast
+     * of EOI message by setting bit 12 of the Spurious Interrupt Vector
+     * Register ... If this bit is set, a broadcast EOI is not generated on an
+     * EOI cycle even if the associated TMR bit indicates that the current
+     * interrupt was level-triggered. The default value for the bit is 0."
+     *
+     * Default, not guaranteed: lapic_init composes SVR with a read-modify-
+     * write, so whatever state the APIC was handed over in survives into bit
+     * 12. With every line this kernel armed being edge triggered, a set bit
+     * there changed nothing and could sit unnoticed for ever. From this
+     * commit PCI INTx lines are level, and on a machine that arrives with the
+     * bit set each of them would deliver exactly ONE interrupt and then stop:
+     * the EOI would clear the local ISR and never reach the redirection
+     * entry, whose Remote IRR would stay set for the rest of the session.
+     * That is a disk that answers once and a keyboard that types one letter.
+     *
+     * The alternative SDM offers is the directed EOI — keep the suppression
+     * and write each IOAPIC's own EOI register per interrupt. It buys nothing
+     * here (one IOAPIC, and the broadcast costs a 14-cycle message on a bus
+     * no modern part even uses serially) and it would put a second, easily
+     * forgotten write on the hot path of every level line. So the broadcast
+     * is what this kernel relies on, and this is where it is made true.
+     *
+     * The BSP only, deliberately: every redirection entry programmed below
+     * carries madt_info.bsp_lapic_id as its destination, so the BSP is the
+     * only core that ever acknowledges a level line. An AP that starts with
+     * the bit set suppresses a broadcast it would never have sent. */
+    {
+        const uint32_t svr_eoi_broadcast_suppress = 1u << 12;
+        uint32_t svr = lapic_read(LAPIC_REG_SVR);
+        if (svr & svr_eoi_broadcast_suppress) {
+            lapic_write(LAPIC_REG_SVR, svr & ~svr_eoi_broadcast_suppress);
+            kprintf("[IRQCHIP] this machine handed over its local APIC with "
+                    "EOI-broadcast suppression on (SVR=0x%08x); cleared, or "
+                    "every level-triggered line would have delivered once and "
+                    "then held its Remote IRR for ever\n", svr);
+        }
+    }
+
     // Step 5: Initialize IO-APIC
     ioapic_init(madt_info.ioapic_address, madt_info.ioapic_gsi_base);
 
@@ -257,16 +282,14 @@ void irqchip_apply_lapic_nmi_self(void) {
     lapic_apply_madt_nmi(&madt_info, uid, uid_known);
 }
 
-void irqchip_enable_irq(uint8_t gsi) {
-    if (active_chip) {
-        active_chip->enable_irq(gsi);
-    }
+void irqchip_enable_irq(uint8_t irq) {
+    Summons line = SummonsForIsaLine(irq);
+    SummonsArm(&line);
 }
 
-void irqchip_disable_irq(uint8_t gsi) {
-    if (active_chip) {
-        active_chip->disable_irq(gsi);
-    }
+void irqchip_disable_irq(uint8_t irq) {
+    Summons line = SummonsForIsaLine(irq);
+    SummonsDisarm(&line);
 }
 
 void irqchip_send_eoi(uint8_t gsi) {
@@ -293,4 +316,319 @@ const char* irqchip_get_name(void) {
 
 uint8_t irqchip_max_irqs(void) {
     return active_chip ? active_chip->max_irqs : 0;
+}
+
+/* ===========================================================================
+ * Summons
+ * ========================================================================= */
+
+const char *SummonsSourceName(SummonsSource from) {
+    switch (from) {
+    case SUMMONS_FROM_BUS_RULE:          return "the rule of its bus";
+    case SUMMONS_FROM_INTERRUPT_LINE:    return "the byte the firmware wrote "
+                                                "for the 8259";
+    case SUMMONS_FROM_FIRMWARE_OVERRIDE: return "the firmware's own override";
+    case SUMMONS_FROM_ROUTING_TABLE:     return "the ACPI routing table";
+    case SUMMONS_FROM_NOBODY:            break;
+    }
+    return "nobody";
+}
+
+Summons SummonsForIsaLine(uint8_t isa_irq) {
+    /* The ISA rule, said out loud instead of arrived at by omission. ACPI 6.5
+     * §5.2.12.5 Table 5.26 names this bus when it defines the trigger default:
+     * "00 Conforms to specifications of the bus (For example, ISA is
+     * edge-triggered)", and the polarity default in the same table: "00
+     * Conforms to the specifications of the bus (for example, EISA is
+     * active-low for level-triggered interrupts)" — active high for the
+     * edge-triggered ISA line this is. Exclusive, because an ISA interrupt is
+     * one wire from one device: there is no open-drain wire-OR to share. */
+    uint32_t gsi = ioapic_isa_to_gsi(isa_irq);
+
+    Summons line = {
+        .gsi         = gsi,
+        /* The vector follows the IRQ NUMBER and not the pin, because
+         * irq_handler turns a vector back into the key handlers registered
+         * under. Changing that would move every ISA driver's registration. */
+        .vector      = irq_gsi_to_vector(isa_irq),
+        .intx_pin    = 0,
+        .polarity    = SUMMONS_ACTIVE_HIGH,
+        .trigger     = SUMMONS_EDGE,
+        .shared      = false,
+        /* An override that maps a line onto its own number is
+         * indistinguishable here from no override at all, and reads as the
+         * bus rule. That is harmless in a way the wiring case is not: both
+         * name the same pin, so nothing is programmed differently — only the
+         * sentence in the log is less specific than it could be. */
+        .gsi_from    = (gsi == isa_irq) ? SUMMONS_FROM_BUS_RULE
+                                        : SUMMONS_FROM_FIRMWARE_OVERRIDE,
+        .wiring_from = SUMMONS_FROM_BUS_RULE,
+        .bus         = "ISA",
+    };
+    return line;
+}
+
+Summons SummonsForAcpiSci(uint8_t sci_int) {
+    /* ACPI 6.5 §5.2.9, Table 5.9, SCI_INT: "System vector the SCI interrupt
+     * is wired to in 8259 mode. On systems that do not contain the 8259,
+     * this field contains the Global System interrupt number of the SCI
+     * interrupt. OSPM is required to treat the ACPI SCI interrupt as a
+     * shareable, level, active low interrupt."
+     *
+     * ‼ SHAREABLE IS THE WORD THAT WAS BEING DROPPED. The SCI reached the
+     * registry through irq_register_handler, i.e. through SummonsForIsaLine,
+     * which states the ISA rule — edge, active high, EXCLUSIVE — and
+     * acpi_sci_register then corrected the first two by planting an override
+     * in the table SummonsResolve reads. Nothing corrected the third,
+     * because sharing is not in the MPS INTI word at all. So on a board
+     * where _PRT routes a PCI function onto the SCI's pin, which is the
+     * ordinary PIRQ outcome on IRQ 9, 10 or 11, that function was refused
+     * the line and dropped to polling — over a default belonging to a bus
+     * whose rule the specification here overrides by name.
+     *
+     * Trigger and polarity are stated here too, for the same reason and
+     * from the same sentence, rather than being left to the override
+     * acpi_sci_register writes: the requirement is unconditional, and a
+     * description that depends on another function having run first is not
+     * a description.
+     *
+     * The number in SCI_INT is an 8259 IRQ on every machine that has an
+     * 8259, so the pin is ioapic_isa_to_gsi(SCI_INT) — the canonical PCAT
+     * case being the SCI on IRQ 9 remapped to INTIN 11. Above 15 there is no
+     * 8259 input for it to be and the field is already a GSI. */
+    uint32_t gsi = (sci_int < 16) ? ioapic_isa_to_gsi(sci_int) : sci_int;
+
+    Summons line = {
+        .gsi         = gsi,
+        .vector      = irq_gsi_to_vector(sci_int),
+        .intx_pin    = 0,
+        .polarity    = SUMMONS_ACTIVE_LOW,
+        .trigger     = SUMMONS_LEVEL,
+        .shared      = true,
+        .gsi_from    = SUMMONS_FROM_FIRMWARE_OVERRIDE,
+        .wiring_from = SUMMONS_FROM_FIRMWARE_OVERRIDE,
+        .bus         = "ACPI",
+    };
+    return line;
+}
+
+void SummonsResolve(Summons *line) {
+    if (!line) return;
+
+    /* ‼ FIRMWARE'S TABLE, NOT THIS KERNEL'S OWN CONCLUSION. ioapic_gsi_flags
+     * falls through to the resolved description SummonsArm writes, so asking
+     * it here read back what this kernel had stored moments before and
+     * stamped it SUMMONS_FROM_FIRMWARE_OVERRIDE. See the note above
+     * SummonsFirmwareSaid in ioapic.c. */
+    uint16_t said = 0;
+    if (!SummonsFirmwareSaid(line->gsi, &said)) return;
+
+    /* ‼ THE ORDER OF SOURCES IS ENFORCED HERE, not merely written down.
+     *
+     * A MADT Interrupt Source Override is the FIRMWARE OVERRIDE rung, and the
+     * ACPI routing table stands above it: _PRT names the line for the mode
+     * this kernel is actually running in, and a link's _CRS describes the
+     * very wire the line arrives on. Applying an override on top of that
+     * would let the weaker statement win by running later, which is how a
+     * source order becomes decoration.
+     *
+     * It should never happen — an ISO describes an ISA source (acpi_madt.c
+     * now refuses one that names another bus) and a PCI line has no ISA
+     * number — so when it does, that is worth a sentence rather than a silent
+     * skip: it means the board has described the same pin twice, in two
+     * tables, and this kernel is telling the operator which one it believed. */
+    if (line->wiring_from > SUMMONS_FROM_FIRMWARE_OVERRIDE) {
+        static bool outranked_said = false;
+        if (!outranked_said) {
+            outranked_said = true;
+            kprintf("[IRQCHIP] GSI %u is described both by a MADT override "
+                    "and by %s; the routing table is the later and more "
+                    "specific statement and it stands\n",
+                    line->gsi, SummonsSourceName(line->wiring_from));
+        }
+        return;
+    }
+
+    /* ACPI 6.5 §5.2.12.5, Table 5.26. Polarity is bits 1:0 and trigger is
+     * bits 3:2, and in BOTH fields 00 means "Conforms to the specifications
+     * of the bus" — the firmware declining to answer, not an answer of
+     * "high" and "edge". Reading 00 as an answer is what programmed every
+     * PCI line edge/active-high; here 00 leaves the bus rule standing.
+     *
+     * 10 is Reserved in both fields. A reserved encoding is not a
+     * description, so it is named and the bus rule stands — the alternative,
+     * silently treating it as "not low" and "not level", is the same mistake
+     * with a different input. */
+    uint16_t polarity = said & 0x3u;
+    uint16_t trigger  = (uint16_t)((said >> 2) & 0x3u);
+
+    if (polarity == 0x1u || polarity == 0x3u) {
+        line->polarity    = (polarity == 0x3u) ? SUMMONS_ACTIVE_LOW
+                                               : SUMMONS_ACTIVE_HIGH;
+        line->wiring_from = SUMMONS_FROM_FIRMWARE_OVERRIDE;
+    } else if (polarity == 0x2u) {
+        /* Once. This runs again every time the same line is resolved — at
+         * registration and again at arming — and a board that writes one
+         * malformed field writes it in one table it will not rewrite. */
+        static bool polarity_said = false;
+        if (!polarity_said) {
+            polarity_said = true;
+            kprintf("[IRQCHIP] %[E]GSI %u: the firmware states polarity 10, "
+                    "which ACPI 6.5 Table 5.26 reserves — the %s rule stands; "
+                    "further lines like it go unremarked%[D]\n",
+                    line->gsi, line->bus);
+        }
+    }
+
+    if (trigger == 0x1u || trigger == 0x3u) {
+        line->trigger     = (trigger == 0x3u) ? SUMMONS_LEVEL : SUMMONS_EDGE;
+        line->wiring_from = SUMMONS_FROM_FIRMWARE_OVERRIDE;
+    } else if (trigger == 0x2u) {
+        static bool trigger_said = false;
+        if (!trigger_said) {
+            trigger_said = true;
+            kprintf("[IRQCHIP] %[E]GSI %u: the firmware states trigger mode "
+                    "10, which ACPI 6.5 Table 5.26 reserves — the %s rule "
+                    "stands; further lines like it go unremarked%[D]\n",
+                    line->gsi, line->bus);
+        }
+    }
+
+    /* Sharing is not in the MPS INTI word at all, so firmware never overrides
+     * it. It follows the bus rule and nothing else — which is why an ISA line
+     * that firmware has re-described as level is still not a line two drivers
+     * may answer. */
+}
+
+uint16_t SummonsMpsFlags(const Summons *line) {
+    /* 01 and 11, never 00: a resolved description states its answer rather
+     * than deferring to a bus whose rule the reader would then have to know.
+     * This is the word handed to ioapic_describe_gsi, and it is the reason
+     * ioapic_enable_irq can program a redirection entry without guessing. */
+    uint16_t flags = 0;
+    flags |= (line->polarity == SUMMONS_ACTIVE_LOW) ? 0x3u : 0x1u;
+    flags |= (uint16_t)(((line->trigger == SUMMONS_LEVEL) ? 0x3u : 0x1u) << 2);
+    return flags;
+}
+
+bool SummonsArm(Summons *line) {
+    if (!line || !active_chip) return false;
+
+    uint8_t key = irq_vector_to_gsi(line->vector);
+    if (key >= IRQ_MAX_COUNT) {
+        kprintf("[IRQCHIP] %[E]%s GSI %u not armed: vector %u is outside the "
+                "%u hardware IRQ vectors this kernel dispatches%[D]\n",
+                line->bus, line->gsi, line->vector, IRQ_MAX_COUNT);
+        return false;
+    }
+
+    Summons resolved = *line;
+    SummonsResolve(&resolved);
+
+    /* ‼ SETTLE BEFORE ANYTHING IS WRITTEN. The pin is the resource, and the
+     * registry is the only record of who holds it. Without this, a second
+     * line whose vector differs but whose pin coincides rewrote the first
+     * line's redirection entry — new vector, new flags — and the first
+     * line's answerers were never called again, on a wire its device goes on
+     * holding. Settling makes the newcomer join that pin's vector and accept
+     * the wire already cut for it, or be refused aloud. */
+    if (!SummonsSettleOnPin(&resolved)) return false;
+
+    /* The caller is told what was ACTUALLY programmed, not what it asked
+     * for: a driver that prints its line's wiring must print the wire, and
+     * one that records a vector must record the one its interrupts arrive
+     * on. */
+    *line = resolved;
+
+    if (active_type == IRQCHIP_APIC) {
+        /* Asked BEFORE anything is written or recorded, because the answer
+         * decides what the caller does next: a driver that is told its line
+         * is armed stops polling, and a driver told the truth keeps its
+         * fallback. The refusal itself is printed inside. */
+        if (!SummonsPinIsReachable(resolved.gsi, madt_info.bsp_lapic_id)) {
+            return false;
+        }
+
+        /* The registry and the redirection entry are told the same thing, in
+         * that order, so that a line which is armed is always a line
+         * irq_handler can describe — including one nobody has answered yet. */
+        SummonsPost(&resolved);
+        ioapic_describe_gsi(resolved.gsi, SummonsMpsFlags(&resolved));
+        ioapic_enable_irq((uint8_t)resolved.gsi, resolved.vector,
+                          madt_info.bsp_lapic_id);
+    } else {
+        if (resolved.gsi >= 16) {
+            kprintf("[IRQCHIP] %[E]%s GSI %u not armed: the 8259 has sixteen "
+                    "inputs and this machine offered no MADT, so there is no "
+                    "controller input with that number%[D]\n",
+                    resolved.bus, resolved.gsi);
+            return false;
+        }
+        /* The 8259 takes polarity and trigger from the chipset's Edge/Level
+         * Control Register, not from anything this kernel writes to the PIC
+         * itself, so a level line here is left as the firmware wired it.
+         * Said once rather than per line: on a machine with no MADT there is
+         * no PCI INTx line to arm in the first place, and the sentence exists
+         * so that if one ever is, the reader is not left to deduce why it
+         * behaves as an edge. */
+        if (resolved.trigger == SUMMONS_LEVEL) {
+            static bool elcr_said = false;
+            if (!elcr_said) {
+                elcr_said = true;
+                kprintf("[IRQCHIP] GSI %u is level-triggered and this machine "
+                        "is on the 8259 fallback — its trigger mode is the "
+                        "chipset ELCR's, which this kernel does not "
+                        "restate\n", resolved.gsi);
+            }
+        }
+        SummonsPost(&resolved);
+        pic_enable_irq((uint8_t)resolved.gsi);
+    }
+
+    /* ‼ A LINE THAT SOMETHING OTHER THAN ITS BUS RULE DECIDED SAYS SO ON THE
+     * BOARD, not only in a debug build.
+     *
+     * This is what the provenance fields are FOR, and it is the reason they
+     * are not decoration. When _PRT lands, a PCI line's pin stops coming from
+     * "the byte the firmware wrote for the 8259" and starts coming from "the
+     * ACPI routing table", and that change has to be VISIBLE on the machine
+     * where it matters rather than inferred from the fact that a disk started
+     * working. The same sentence is what tells an operator today that a GSI
+     * came from a byte the specification reserves.
+     *
+     * A plain ISA line whose bus rule nobody touched stays in the debug log:
+     * it is the default case, it was silent before, and six identical lines
+     * of "edge, active high, from the rule of its bus" would bury the two
+     * that carry information. */
+    if (resolved.wiring_from != SUMMONS_FROM_BUS_RULE ||
+        resolved.gsi_from    != SUMMONS_FROM_BUS_RULE) {
+        kprintf("[IRQCHIP] %s GSI %u armed on vector %u: %s, %s, %s; wiring "
+                "from %s, pin from %s\n",
+                resolved.bus, resolved.gsi, resolved.vector,
+                resolved.trigger == SUMMONS_LEVEL ? "level" : "edge",
+                resolved.polarity == SUMMONS_ACTIVE_LOW ? "active low"
+                                                        : "active high",
+                resolved.shared ? "shareable" : "exclusive",
+                SummonsSourceName(resolved.wiring_from),
+                SummonsSourceName(resolved.gsi_from));
+    } else {
+        debug_printf("[IRQCHIP] %s GSI %u armed on vector %u: %s, %s, %s "
+                     "(bus rule throughout)\n",
+                     resolved.bus, resolved.gsi, resolved.vector,
+                     resolved.trigger == SUMMONS_LEVEL ? "level" : "edge",
+                     resolved.polarity == SUMMONS_ACTIVE_LOW ? "active low"
+                                                             : "active high",
+                     resolved.shared ? "shareable" : "exclusive");
+    }
+    return true;
+}
+
+void SummonsDisarm(const Summons *line) {
+    if (!line || !active_chip) return;
+
+    if (active_type == IRQCHIP_APIC) {
+        ioapic_disable_irq((uint8_t)line->gsi);
+    } else if (line->gsi < 16) {
+        pic_disable_irq((uint8_t)line->gsi);
+    }
 }

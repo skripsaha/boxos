@@ -1,5 +1,11 @@
 #include "iommu.h"
 #include "acpi.h"
+/* acpi_find_table — the DMAR's RMRR entries are read HERE rather than in the
+ * ACPI parser, because acpi_dmar_info_t stores DRHDs and nothing else, and a
+ * reserved region this driver does not map is a device that stops the instant
+ * GCMD.TE goes on. The parser walks the same table for its own reasons; this
+ * walk asks it a different question and keeps nothing. */
+#include "acpi_internal.h"
 #include "klib.h"
 #include "vmm.h"
 #include "pmm.h"
@@ -23,17 +29,20 @@
  *     handed over as the root — and refuse a unit that reports neither
  *   * Where a unit does not snoop the structures it walks (ECAP.C = 0),
  *     put every structure this driver writes back to memory itself
- *   * Build a *single* second-level page table that identity-maps the
- *     first 4 GiB of physical RAM, and no more than that — the two
- *     comments that named a `vtd_identity_extend()` for larger systems
- *     named a function that has never existed in this tree
+ *   * Build a *single* second-level page table that identity-maps every
+ *     physical address a device on this machine can name: the top of the
+ *     memory map (pmm_get_mem_end()), never below the whole of what a Single
+ *     Address Cycle can address, and every reserved region the DMAR's own
+ *     RMRR entries publish — read out of the table, not assumed
  *   * Allocate one root table per remap unit; populate every context
  *     entry of buses we have devices on to point at the shared SLPT
  *   * Set RTADDR_REG, drain context cache + IOTLB
- *   * `vtd_enable_translation()` flips GCMD.TE — only callers that
- *     have explicitly opted-in to DMA translation should call this.
- *     init() does NOT enable translation by default, so booting with
- *     untranslated DMA remains the safe path.
+ *   * `vtd_take_the_wheel()` flips GCMD.TE on every online unit, and only
+ *     after every PCI function on the machine has a context entry. It is
+ *     ALL-OR-NOTHING: a unit that will not begin translating takes the
+ *     others back off with it, because half a machine translating is worse
+ *     than none of it. iommu.c is the only caller and it seats the devices
+ *     first; see iommu_take_the_wheel.
  *
  * Public surface (iommu_ops_t) is in iommu.h; we register `vtd_ops`
  * at the bottom of this file.
@@ -174,6 +183,84 @@
 #define CAP_DWD           (1ULL << 54)
 #define CAP_DRD           (1ULL << 55)
 
+/* CAP.SSLPS, bits 37:34 — "Second Stage Large Page Support" (§11.4.2): "A
+ * value of 1 in any of these bits indicates the corresponding large-page size
+ * is supported. ... 0: 21-bit offset to page frame (2MB) ... 1: 30-bit offset
+ * to page frame (1GB)".
+ *
+ * Only the 2 MiB bit is read. A 2 MiB leaf already takes the identity map of
+ * a 16 GiB machine from 4194304 entries in 8192 leaf tables down to 8192
+ * entries in 16 page directories; 1 GiB would take 8192 down to 16, which is
+ * no longer a cost anyone can measure, and every added granularity is another
+ * set of reserved-address bits to get right in an entry the hardware faults
+ * on rather than complains about. */
+#define CAP_SSLPS_2M      (1ULL << 34)
+
+/* CAP.CM, bit 7 — "Caching Mode" (§11.4.2), and CAP.ND, bits 2:0 — "Number of
+ * domains supported".
+ *
+ * These two decide which domain-id a context entry may legally carry, and
+ * getting it wrong is not a diagnostic problem — it is a device whose every
+ * transaction is tagged with the number the hardware reserves for the entries
+ * it intends to FAULT.
+ *
+ * §6.2.2: "For implementations reporting Caching Mode (CM) as 1 in the
+ * Capability Register, the implementation may cache entries that would result
+ * in a fault, such as entries with P=0. ... In legacy mode, the reserved
+ * domain-id value of 0 is used to tag the cached context entries that would
+ * result in a fault."
+ *
+ * §6.2.2.1, in the list of what software must do in Legacy Mode: "Software
+ * must not use domain-id value of 0 on when programming context-entries on
+ * implementations reporting CM=1 in the Capability register."
+ *
+ * So on a CM=1 part every domain-id this driver writes is shifted up by one
+ * (g_did_bias), and the shift is global rather than per unit because a
+ * domain-id names the same domain wherever it appears. QEMU's intel-iommu
+ * reports CM=1 by default, which is precisely the part this path would first
+ * be exercised on.
+ *
+ * ND is a code, not a count: 000b is 4-bit domain-ids (16 domains) and each
+ * step adds two bits, up to 110b = 16-bit (64K); 111b is Reserved and this
+ * driver treats it as a unit it cannot size. A domain-id at or above what a
+ * unit supports is a reserved-field violation in the context entry (LCT.3),
+ * so it is refused rather than written. */
+#define CAP_CM            (1ULL << 7)
+#define CAP_ND_CODE(c)    ((unsigned)((c) & 0x7ULL))
+
+/* The interrupt address range, §3.15: "On Intel architecture platforms,
+ * physical address range FEEx_xxxxh is designated as the interrupt address
+ * range. Single-DWORD length write requests without PASID to this range are
+ * treated as interrupt requests and are not subjected to DMA remapping (even
+ * if translation structures specify a mapping for this range)."
+ *
+ * That sentence is why MSI still reaches a LAPIC with GCMD.TE set and
+ * interrupt remapping off — the writes never enter the second-level walk. The
+ * NEXT sentence is why this range is cut out of the identity map anyway:
+ * "Software must not program paging-structure entries to remap any address to
+ * the interrupt address range." An identity entry for FEE00000h remaps an
+ * address TO that range, which is the thing the specification forbids, and
+ * nothing legitimate ever walks it. */
+#define VTD_INTR_RANGE_BASE  0xFEE00000ULL
+#define VTD_INTR_RANGE_END   0xFEF00000ULL
+
+/* The whole of what a PCI master can address in one address phase.
+ *
+ * This is the identity map's FLOOR, and it is a property of the bus rather
+ * than a choice. PCI Local Bus Specification Rev. 3.0 §3.9 "64-Bit Bus
+ * Extension": "The standard PCI bus transaction supports a 32-bit address,
+ * Single Address Cycle (SAC), where the address is valid for a single clock
+ * when FRAME# is first sampled asserted", and "Devices that support only
+ * 32-bit addresses are mapped into the low 4 GB of the address space". Thirty-
+ * two address bits is 2^32 bytes: every address a device without Dual Address
+ * Cycle can ever put on the bus lies below this line, and none above it.
+ *
+ * So below this line the map must be complete whatever the memory map says,
+ * because a 32-bit master can name any of it and this kernel does not know
+ * which of them will. Above it, what a device may be pointed at is what the
+ * memory map and the RMRR entries say, and both are read rather than assumed. */
+#define VTD_SAC_SPAN         (1ULL << 32)
+
 /* GCMD bits (VT-d Rev 5.x §11.4.4.1 "Global Command Register";
  * §10.4.4 in the Rev 3.x numbering). GSTS reports the persistent ones at
  * the same bit positions, which is what makes the shadow below possible. */
@@ -207,6 +294,12 @@
 /* ----- Per-DRHD state ----- */
 typedef struct {
     uint64_t  reg_phys;
+    /* The PCI segment this DRHD belongs to (DMAR §8.3, the DRHD's own Segment
+     * Number field). A context entry is reachable only through the root table
+     * of a unit in the same segment, so seating a device means finding the
+     * units whose segment matches it — and on a single-segment machine, which
+     * is nearly all of them, that is every unit. */
+    uint16_t  segment;
     volatile uint8_t* reg;
     /* How much of the register block is mapped at u->reg. It starts at one
      * page — the only length that can be assumed before CAP and ECAP are
@@ -255,14 +348,31 @@ static uint8_t    g_unit_count = 0;
 
 /* ----- Shared identity-map second-level page tables -----
  *
- * One PML4 (the "top level") covers the entire DMA address space. We
- * lazily allocate lower levels and use 2-MiB super-pages where the
- * controller advertises support, otherwise 4-KiB pages.
+ * One PML4 (the "top level") covers the entire DMA address space. Lower
+ * levels are allocated as the walk reaches them.
  *
  * The page tables themselves come from PMM physical pages mapped into
  * the kernel via vmm_phys_to_virt (provided by the VMM). */
 static uint64_t* g_id_pml4    = NULL;
 static uint64_t  g_id_pml4_phys = 0;
+/* The leaf this machine's units can all walk: 21 when every one of them
+ * reports CAP.SSLPS 2 MiB, 12 otherwise. Not a tuning knob — a unit told to
+ * walk a size it does not report faults the transaction (LSS.2, a reserved
+ * field set in a second-stage paging entry), so the answer is the AND over
+ * the units and nothing else. */
+static unsigned  g_id_leaf_shift = 12;
+
+/* What every domain-id this driver writes is shifted by: 1 where any online
+ * unit reports CAP.CM, 0 otherwise. See CAP_CM above for the two sentences
+ * that require it. Settled once, in vtd_build_identity, after every unit has
+ * spoken and before a single context entry is written. */
+static unsigned  g_did_bias = 0;
+
+/* Pages the PMM has handed this driver for translation structures. Not a
+ * limit and not a budget — the identity build reports what it cost, because a
+ * machine whose units cannot walk a 2 MiB leaf pays for the same coverage in
+ * 4 KiB leaves and the difference is four orders of magnitude. */
+static uint64_t  g_tables_bought = 0;
 
 /* ----- Putting a structure where a unit that does not snoop can see it -----
  *
@@ -350,6 +460,7 @@ static void* alloc_table_4k(uint64_t* phys_out) {
     if (!virt) { pmm_free(p, 1); *phys_out = 0; return NULL; }
 
     *phys_out = (uint64_t)phys;
+    g_tables_bought++;
     memset(virt, 0, 4096);
     /* The zeroes are as much a structure as the entries written into them
      * later: a unit that does not snoop would otherwise walk whatever the
@@ -380,70 +491,294 @@ static uint64_t* slpte_walk(uint64_t* parent, unsigned idx, bool create) {
     return (uint64_t*)vtd_table_virt(e);
 }
 
-/* Identity-map [phys, phys+size) at IOVA == phys with R+W. */
+#define VTD_2M   0x200000ULL
+
+/* Identity-map [phys, phys+size) at IOVA == phys with R+W, at whatever leaf
+ * every unit on this machine can walk.
+ *
+ * Two things are skipped rather than mapped, and both are skips the hardware
+ * asks for:
+ *   - the interrupt address range (§3.15, see VTD_INTR_RANGE_BASE);
+ *   - an address a 2 MiB leaf already covers identically, which is how the
+ *     incremental path (vtd_map on the identity domain) stays correct after
+ *     the bulk build has laid super-pages down. A super-page at A maps
+ *     A..A+2MiB to itself; a later request to identity-map any part of that
+ *     range is already satisfied, and descending into it is impossible
+ *     (§9.1, PS at the page-directory level ends the walk).
+ *
+ * A request whose WHOLE range falls in the interrupt hole is refused, not
+ * reported as done. The skip is the specification's; telling the caller its
+ * mapping exists when this function deliberately declined to write one is
+ * this file's, and it would be a lie the caller cannot detect. */
 static int vtd_identity_map(uint64_t phys, uint64_t size) {
-    if (!g_id_pml4) return -1;
-    uint64_t end = phys + size;
+    if (!g_id_pml4 || !size) return -1;
+    const uint64_t end = phys + size;
+    bool anything_covered = false;
     /* Leaf writes are handed back to memory a RUN at a time rather than one
      * entry at a time: the walk is linear, so consecutive entries share a
      * cache line and a whole leaf table is one run. Linux batches the same
      * way (domain_flush_cache over first_pte..pte). */
     const uint64_t* run_from = NULL;
     const uint64_t* run_to   = NULL;
-    /* 4-KiB granularity for safety. Production tuning would slot in
-     * 2 MiB and 1 GiB super-pages for the bulk of RAM. */
-    for (uint64_t a = phys & ~0xFFFULL; a < end; a += 4096) {
+    int rc = 0;
+
+    uint64_t a = phys & ~0xFFFULL;
+    while (a < end) {
+        if (a >= VTD_INTR_RANGE_BASE && a < VTD_INTR_RANGE_END) {
+            vtd_structure_flush_run(run_from, run_to);
+            run_from = run_to = NULL;
+            a = VTD_INTR_RANGE_END;
+            continue;
+        }
+
         unsigned pml4_i = (unsigned)((a >> 39) & 0x1FF);
         unsigned pdpt_i = (unsigned)((a >> 30) & 0x1FF);
         unsigned pd_i   = (unsigned)((a >> 21) & 0x1FF);
         unsigned pt_i   = (unsigned)((a >> 12) & 0x1FF);
 
         uint64_t* pdpt = slpte_walk(g_id_pml4, pml4_i, true);
-        if (!pdpt) { vtd_structure_flush_run(run_from, run_to); return -2; }
+        if (!pdpt) { rc = -2; break; }
         uint64_t* pd   = slpte_walk(pdpt, pdpt_i, true);
-        if (!pd)   { vtd_structure_flush_run(run_from, run_to); return -2; }
-        uint64_t* pt   = slpte_walk(pd, pd_i, true);
-        if (!pt)   { vtd_structure_flush_run(run_from, run_to); return -2; }
-        pt[pt_i] = a | SLPTE_R | SLPTE_W;
-        if (run_to != &pt[pt_i]) {
+        if (!pd)   { rc = -2; break; }
+
+        uint64_t  pde  = pd[pd_i];
+
+        if ((pde & SLPTE_R) && (pde & SLPTE_PS)) {
+            /* Already a 2 MiB leaf. It is this map's own, so it identity-maps
+             * its own base; anything else came from somewhere this function
+             * cannot speak for and is refused rather than written over. */
+            if ((pde & ~0xFFFULL) != (a & ~(VTD_2M - 1))) { rc = -2; break; }
             vtd_structure_flush_run(run_from, run_to);
-            run_from = &pt[pt_i];
+            run_from = run_to = NULL;
+            a = (a & ~(VTD_2M - 1)) + VTD_2M;
+            anything_covered = true;
+            continue;
         }
-        run_to = &pt[pt_i] + 1;
+
+        uint64_t* slot;
+        /* A 2 MiB leaf cannot straddle the interrupt range: that range begins
+         * at FEE00000h, which is itself 2 MiB aligned, so the walk arrives at
+         * its first byte and the skip above takes it. */
+        if (g_id_leaf_shift == 21 && !(pde & SLPTE_R) &&
+            (a & (VTD_2M - 1)) == 0 && (end - a) >= VTD_2M) {
+            pd[pd_i] = a | SLPTE_R | SLPTE_W | SLPTE_PS;
+            slot = &pd[pd_i];
+            a += VTD_2M;
+        } else {
+            uint64_t* pt = slpte_walk(pd, pd_i, true);
+            if (!pt) { rc = -2; break; }
+            pt[pt_i] = a | SLPTE_R | SLPTE_W;
+            slot = &pt[pt_i];
+            a += 4096;
+        }
+        anything_covered = true;
+
+        if (run_to != slot) {
+            vtd_structure_flush_run(run_from, run_to);
+            run_from = slot;
+        }
+        run_to = slot + 1;
     }
     vtd_structure_flush_run(run_from, run_to);
-    return 0;
+    if (rc == 0 && !anything_covered) {
+        kprintf("[VT-d] a mapping of 0x%lx..0x%lx was asked for and every byte "
+                "of it lies in the interrupt address range FEEx_xxxxh, which "
+                "§3.15 forbids a paging-structure entry from naming — nothing "
+                "was written and the request is refused rather than reported "
+                "as done\n", (unsigned long)phys, (unsigned long)end);
+        rc = -3;
+    }
+    return rc;
 }
 
-/* The coverage, whole: the bottom 4 GiB, mapped once, never extended. RAM
- * above 4 GiB has no identity entry, so a device pointed at it would fault
- * the moment translation were switched on. */
+/* Does the table the hardware will walk actually translate this address?
+ *
+ * This is a READ of what was written, through the same levels and the same
+ * present bits the remap unit uses, and it is the only coverage claim this
+ * driver makes that can come back false. It replaces a comparison of the
+ * build's own span against the number the build was given, which was the same
+ * number rounded up and could never disagree with itself.
+ *
+ * The interrupt address range answers false, and truthfully: §3.15 has this
+ * driver leave a hole there on purpose. The caller decides whether a hole at
+ * that address is expected (the identity build) or a contradiction (an RMRR
+ * that names it). */
+static bool vtd_identity_covers(uint64_t addr) {
+    if (!g_id_pml4) return false;
+    uint64_t* pdpt = slpte_walk(g_id_pml4, (unsigned)((addr >> 39) & 0x1FF),
+                                false);
+    if (!pdpt) return false;
+    uint64_t* pd = slpte_walk(pdpt, (unsigned)((addr >> 30) & 0x1FF), false);
+    if (!pd) return false;
+    uint64_t pde = pd[(addr >> 21) & 0x1FF];
+    if (!(pde & SLPTE_R)) return false;
+    if (pde & SLPTE_PS) return true;          /* 2 MiB leaf covers it */
+    uint64_t* pt = (uint64_t*)vtd_table_virt(pde);
+    if (!pt) return false;
+    return (pt[(addr >> 12) & 0x1FF] & SLPTE_R) != 0;
+}
+
+/* ----- What firmware says a device still needs to reach -----
+ *
+ * §3.16 Handling Requests to Reserved System Memory, and §8.4: "BIOS may
+ * report each such reserved memory region through the RMRR structures, along
+ * with the devices that requires access to the specified reserved memory
+ * region", and those regions are "expected to be used for legacy usages (such
+ * as USB, UMA Graphics, etc.) requiring reserved memory".
+ *
+ * A region named there and not present in the second-level tables is a device
+ * that works until GCMD.TE goes on and stops the instant it does — the exact
+ * failure this whole ordering exists to avoid, and the one place where the
+ * machine has already written down the answer.
+ *
+ * The walk is a callback rather than an array because the number of RMRRs is
+ * the firmware's to decide and no ceiling here could be sourced. It is run
+ * twice: once to map, once to verify what was mapped.
+ *
+ * Structure layout, §8.4 Table: Type at +0 (1 = RMRR), Length at +2, Segment
+ * Number at +6, Reserved Memory Region Base Address at +8 and Limit Address
+ * at +16 — the LAST address of the region, not one past it. */
+typedef void (*VtdRmrrFn)(uint64_t base, uint64_t limit, uint16_t segment,
+                          void* ctx);
+
+static void vtd_walk_rmrr(VtdRmrrFn fn, void* ctx) {
+    acpi_sdt_header_t* hdr = acpi_find_table("DMAR");
+    if (!hdr) return;
+    acpi_dmar_t* dmar = (acpi_dmar_t*)hdr;
+    uint8_t* ptr = (uint8_t*)dmar + sizeof(acpi_dmar_t);
+    uint8_t* end = (uint8_t*)dmar + dmar->header.length;
+
+    while (ptr + sizeof(dmar_entry_header_t) <= end) {
+        dmar_entry_header_t* eh = (dmar_entry_header_t*)ptr;
+        if (eh->length < sizeof(dmar_entry_header_t)) break;
+        if (ptr + eh->length > end) break;
+        /* 24 bytes is the fixed part: the Device Scope entries that follow it
+         * say WHICH devices need the region, and this driver seats every
+         * device in the segment into one domain, so the region is needed by
+         * whatever is in that domain and the scope adds nothing here. */
+        if (eh->type == DMAR_TYPE_RMRR && eh->length >= 24) {
+            uint16_t seg   = *(uint16_t*)(ptr + 6);
+            uint64_t base  = *(uint64_t*)(ptr + 8);
+            uint64_t limit = *(uint64_t*)(ptr + 16);
+            if (limit >= base) fn(base, limit, seg, ctx);
+        }
+        ptr += eh->length;
+    }
+}
+
+/* The coverage, whole — and every dimension of it is a fact from somewhere
+ * outside this file.
+ *
+ * EXTENT, two facts and no constant of ours. pmm_get_mem_end() is one past
+ * the last byte of the highest usable E820 region, clamped to this part's
+ * MAXPHYADDR: the top of the RAM a device can be handed a pointer into.
+ * VTD_SAC_SPAN is the whole of what a device without Dual Address Cycle can
+ * put on the bus at all (PCI 3.0 §3.9, quoted at the define), so the map is
+ * complete below that line whatever the memory map happens to say.
+ *
+ * RESERVED REGIONS, read rather than assumed. Everything a device still needs
+ * outside RAM is in the DMAR's RMRR entries (§3.16, §8.4) — legacy USB
+ * emulation buffers, graphics stolen memory — and those fields are 64-bit, so
+ * one of them can sit above both lines above. They are mapped by name here,
+ * not covered by hoping a floor reaches them.
+ *
+ * GRANULARITY, the units' own answer. 2 MiB where every unit reports
+ * CAP.SSLPS bit 34, 4 KiB otherwise, and the AND is not a preference: a unit
+ * told to walk a size it does not report faults the transaction (LSS.2).
+ *
+ * Called AFTER the units have been brought up, which is the only order in
+ * which it can know the three things it needs: whether any unit fails to
+ * snoop what it walks (ECAP.C), whether every unit can walk a 2 MiB leaf
+ * (CAP.SSLPS), and whether any unit reserves domain-id 0 (CAP.CM). Nothing in
+ * vtd_unit_init reads these tables, so nothing is lost by building them
+ * second. */
+static void vtd_map_rmrr(uint64_t base, uint64_t limit, uint16_t segment,
+                         void* ctx) {
+    int* rc = (int*)ctx;
+    uint64_t first = base & ~(uint64_t)0xFFF;
+    uint64_t last  = limit | (uint64_t)0xFFF;
+    kprintf("[VT-d] DMAR names reserved region 0x%lx-0x%lx in segment %u as a "
+            "DMA target — mapping it identically, because a device that "
+            "reaches it after GCMD.TE with no entry simply stops\n",
+            (unsigned long)base, (unsigned long)limit, (unsigned)segment);
+    int r = vtd_identity_map(first, last - first + 1);
+    /* -3 is "every byte of it is in the interrupt address range", which is a
+     * contradiction between §3.15 and §3.16 in the firmware's own table, not
+     * a failure of this build. It is left to vtd_check_rmrr, which refuses
+     * the wheel and names both sections — tearing the whole backend down
+     * here would leave the machine with no protection at all instead. */
+    if (r < 0 && r != -3) *rc = -1;
+}
+
+static void vtd_check_rmrr(uint64_t base, uint64_t limit, uint16_t segment,
+                           void* ctx) {
+    bool* ok = (bool*)ctx;
+    if ((base < VTD_INTR_RANGE_END && limit >= VTD_INTR_RANGE_BASE)) {
+        kprintf("[VT-d] the DMAR names reserved region 0x%lx-0x%lx (segment "
+                "%u), which overlaps the interrupt address range FEEx_xxxxh. "
+                "§3.15 forbids a paging-structure entry naming that range and "
+                "§3.16 requires this region to be reachable; the two cannot "
+                "both be honoured, so translation stays OFF\n",
+                (unsigned long)base, (unsigned long)limit, (unsigned)segment);
+        *ok = false;
+        return;
+    }
+    if (!vtd_identity_covers(base & ~(uint64_t)0xFFF) ||
+        !vtd_identity_covers(limit | (uint64_t)0xFFF)) {
+        kprintf("[VT-d] reserved region 0x%lx-0x%lx (segment %u) is NOT in the "
+                "second-level tables the units are about to walk — the device "
+                "that needs it would stop the instant GCMD.TE goes on, so "
+                "translation stays OFF everywhere\n",
+                (unsigned long)base, (unsigned long)limit, (unsigned)segment);
+        *ok = false;
+    }
+}
+
 static int vtd_build_identity(void) {
     if (g_id_pml4) return 0;
+
+    bool every_unit_walks_2m = (g_unit_count > 0);
+    bool any_unit_reserves_did0 = false;
+    for (uint8_t i = 0; i < g_unit_count; i++) {
+        if (!(g_units[i].cap & CAP_SSLPS_2M)) every_unit_walks_2m = false;
+        if (g_units[i].cap & CAP_CM)          any_unit_reserves_did0 = true;
+    }
+    g_id_leaf_shift = every_unit_walks_2m ? 21u : 12u;
+    g_did_bias      = any_unit_reserves_did0 ? 1u : 0u;
+    if (g_did_bias)
+        kprintf("[VT-d] a unit on this machine reports CAP.CM — §6.2.2.1: "
+                "\"Software must not use domain-id value of 0 on when "
+                "programming context-entries on implementations reporting "
+                "CM=1\", because §6.2.2 has the hardware use that value to tag "
+                "the context entries it means to FAULT. Every domain-id this "
+                "driver writes is shifted up by one; the identity domain is "
+                "domain-id 1\n");
+
+    uint64_t span = pmm_get_mem_end();
+    if (span < VTD_SAC_SPAN) span = VTD_SAC_SPAN;
+    span = (span + (VTD_2M - 1)) & ~(VTD_2M - 1);
+
+    uint64_t before = g_tables_bought;
     void* p = alloc_table_4k(&g_id_pml4_phys);
     if (!p) return -1;
     g_id_pml4 = (uint64_t*)p;
-    return vtd_identity_map(0, 1ULL << 32);
-}
+    if (vtd_identity_map(0, span) < 0) return -1;
 
-/* Hand a whole second-level tree back to memory.
- *
- * The identity tables are built before any unit's ECAP has been read, so the
- * flushes inside vtd_identity_map cannot know yet whether this machine holds
- * a unit that fails to snoop them. vtd_init calls this once, after the units
- * have answered and only if one of them has. The walk visits exactly the
- * pages the tree owns: four levels deep, and only entries that are present
- * and are not super-pages have anything below them. */
-static void vtd_flush_slpt_tree(uint64_t* table, unsigned levels)
-{
-    if (!table) return;
-    vtd_structure_flush(table, 4096);
-    if (levels <= 1) return;
-    for (unsigned i = 0; i < 512; i++) {
-        uint64_t e = table[i];
-        if (!(e & SLPTE_R) || (e & SLPTE_PS)) continue;
-        vtd_flush_slpt_tree((uint64_t*)vtd_table_virt(e), levels - 1);
+    int rmrr_rc = 0;
+    vtd_walk_rmrr(vtd_map_rmrr, &rmrr_rc);
+    if (rmrr_rc < 0) {
+        kprintf("[VT-d] a reserved region the DMAR names could not be mapped — "
+                "the identity tables are incomplete and no unit will be "
+                "switched on\n");
+        return -1;
     }
+
+    kprintf("[VT-d] identity map covers 0x0-0x%lx plus every RMRR region, at "
+            "%s leaves, for %lu page(s) of tables — the top of the memory map "
+            "or the reach of a Single Address Cycle, whichever is higher\n",
+            (unsigned long)span, g_id_leaf_shift == 21 ? "2 MiB" : "4 KiB",
+            (unsigned long)(g_tables_bought - before));
+    return 0;
 }
 
 /* ----- Root/context table helpers ----- */
@@ -490,8 +825,38 @@ static uint64_t vtd_slpt_root_for(const vtd_unit_t* u, uint64_t top_phys)
     return phys;
 }
 
+/* How many domain-ids this unit will accept, from CAP.ND (§11.4.2): 000b is
+ * 4-bit ids and every step adds two bits, so the count is 1 << (4 + 2*code).
+ * 111b is Reserved — a unit whose ND this driver cannot read is a unit it
+ * cannot size a domain-id for, and 0 is how that is said. */
+/* The domain-id the hardware sees for a domain this driver numbers `id`.
+ * Anything that names a domain to hardware — a context entry, or an
+ * invalidation descriptor's DID field — must go through this, or the
+ * invalidation names a domain nothing is tagged with. */
+static inline uint32_t vtd_hw_did(uint32_t id) { return id + g_did_bias; }
+
+static uint32_t vtd_domains_supported(const vtd_unit_t* u) {
+    unsigned code = CAP_ND_CODE(u->cap);
+    if (code > 6u) return 0;
+    return 1u << (4u + 2u * code);
+}
+
 static int vtd_program_context(vtd_unit_t* u, uint8_t bus, uint8_t devfn,
                                 uint64_t slpt_phys, uint32_t domain_id) {
+    /* The domain-id the HARDWARE is given is not the one the caller names:
+     * on a CM=1 part 0 belongs to the entries the unit intends to fault
+     * (§6.2.2), so every id is shifted past it. The shift is settled once, in
+     * vtd_build_identity, from the CAP of every unit on the machine. */
+    uint32_t did = vtd_hw_did(domain_id);
+    uint32_t nd  = vtd_domains_supported(u);
+    if (did >= nd) {
+        kprintf("[VT-d] the unit at 0x%lx supports %u domain-id(s) (CAP.ND) "
+                "and this context entry would carry %u — that is a reserved "
+                "value in the entry (LCT.3), so the entry is not written\n",
+                (unsigned long)u->reg_phys, (unsigned)nd, (unsigned)did);
+        return -1;
+    }
+
     /* The address this unit is given is the level it can walk, which is not
      * always the level this driver built (vtd_slpt_root_for). */
     uint64_t asr = vtd_slpt_root_for(u, slpt_phys);
@@ -511,7 +876,7 @@ static int vtd_program_context(vtd_unit_t* u, uint8_t bus, uint8_t devfn,
     if (!ctx) return -1;
     uint8_t aw = (uint8_t)(u->sagaw_levels - 2);
     ctx[devfn].lo = asr | 1;
-    ctx[devfn].hi = ((uint64_t)domain_id << 8) | ((uint64_t)aw & 0x7);
+    ctx[devfn].hi = ((uint64_t)did << 8) | ((uint64_t)aw & 0x7);
     vtd_structure_flush(&ctx[devfn], sizeof(ctx[devfn]));
     return 0;
 }
@@ -1049,8 +1414,15 @@ static void vtd_ir_init(vtd_unit_t* u) {
 #define IOTLB_DR            (1ULL << 49)
 #define IOTLB_DW            (1ULL << 48)
 
-/* Drain context cache + global IOTLB after table changes (§6.5.5). */
-static void vtd_global_flush(vtd_unit_t* u) {
+/* Drain context cache + global IOTLB after table changes (§6.5.5).
+ *
+ * Returns whether the hardware said both COMPLETED. That answer is not a
+ * diagnostic: §6.6 makes this pair the precondition for translating at all on
+ * a part that does not report ESRTPS, so a unit whose CCMD.ICC never cleared
+ * would begin translating through whatever firmware left cached. It used to
+ * be discarded — `(void)vtd_await_clear64(...)` twice — and the caller was
+ * then free to set GCMD.TE on a unit that had invalidated nothing. */
+static bool vtd_global_flush(vtd_unit_t* u) {
     if (u->qi_active) {
         /* Context cache first, then the IOTLB at a granularity no smaller —
          * the order §6.5.2.1 requires of the pair. */
@@ -1064,7 +1436,7 @@ static void vtd_global_flush(vtd_unit_t* u) {
          * descriptor. The `&& done` is bookkeeping, not a second attempt. */
         done = vtd_qi_submit(u, vtd_qi_iotlb_desc(u, QI_GRAN_GLOBAL, 0), 0)
                && done;
-        if (done) return;
+        if (done) return true;
         /* vtd_qi_submit withdraws queued invalidation from a unit whose queue
          * stopped finishing, and every submit after that returns having done
          * nothing. The flush itself is not optional, so a unit that lost its
@@ -1076,16 +1448,21 @@ static void vtd_global_flush(vtd_unit_t* u) {
                 "registers\n");
     }
     /* CCMD: write CIRG=01 (global), then wait for the hardware to clear ICC.
-     * Nothing to undo on failure — the register invalidation either happened
-     * or the unit is not answering, and in both cases the only honest thing
-     * left is to say so where a shipped build can see it. */
+     * There is nothing to undo on failure — the register invalidation either
+     * happened or the unit is not answering — but the answer is carried back
+     * to the caller, because what the caller does next is decide whether this
+     * unit may begin translating. */
     *(volatile uint64_t*)(u->reg + VTD_REG_CCMD) =
         CCMD_ICC | CCMD_CIRG_GLOBAL;
-    (void)vtd_await_clear64((volatile uint64_t*)(u->reg + VTD_REG_CCMD),
-                            CCMD_ICC, "the global context-cache invalidate");
+    bool ok = vtd_await_clear64((volatile uint64_t*)(u->reg + VTD_REG_CCMD),
+                                CCMD_ICC, "the global context-cache invalidate");
 
     /* IVA_REG lives at ECAP.IRO * 16 and IOTLB_REG one qword past it
-     * (§11.4.3); a global invalidate needs no IVA_REG write. */
+     * (§11.4.3); a global invalidate needs no IVA_REG write.
+     *
+     * Issued even when the context-cache invalidate did not complete: §6.6
+     * names the order, not a permission to stop, and the caller is told the
+     * whole pair failed either way. */
     uint32_t iotlb_off = ECAP_IRO_OFF(u->ecap);
     volatile uint64_t* iotlb_reg =
         (volatile uint64_t*)(u->reg + iotlb_off + 8);
@@ -1093,8 +1470,8 @@ static void vtd_global_flush(vtd_unit_t* u) {
     if (u->cap & CAP_DWD) iotlb_cmd |= IOTLB_DW;
     if (u->cap & CAP_DRD) iotlb_cmd |= IOTLB_DR;
     *iotlb_reg = iotlb_cmd;
-    (void)vtd_await_clear64(iotlb_reg, IOTLB_IVT,
-                            "the global IOTLB invalidate");
+    return vtd_await_clear64(iotlb_reg, IOTLB_IVT,
+                             "the global IOTLB invalidate") && ok;
 }
 
 /* ----- Per-unit init ----- */
@@ -1116,8 +1493,8 @@ static void vtd_global_flush(vtd_unit_t* u) {
  * vtd_adopt_from_firmware, which returns true only with GSTS.TES clear:
  * either it was never set or the hardware was watched clearing it. So the
  * unit is not translating, and RTADDR is walked only under GCMD.TE. Nothing
- * sets TE afterwards either — vtd_enable_translation walks the online units
- * and this one never becomes one.
+ * sets TE afterwards either — vtd_take_the_wheel walks the online units and
+ * this one never becomes one.
  *
  * The struct is left blank, because vtd_init hands the same slot to the next
  * DRHD — g_unit_count only moves on success — and a half-filled one would
@@ -1129,8 +1506,9 @@ static void vtd_unit_unwind(vtd_unit_t* u) {
     memset(u, 0, sizeof(*u));
 }
 
-static int vtd_unit_init(vtd_unit_t* u, uint64_t phys) {
+static int vtd_unit_init(vtd_unit_t* u, uint64_t phys, uint16_t segment) {
     u->reg_phys = phys;
+    u->segment  = segment;
     u->reg = (volatile uint8_t*)vmm_map_mmio((uintptr_t)phys, 4096,
                                              VTD_MMIO_FLAGS);
     if (!u->reg) { vtd_unit_unwind(u); return -1; }
@@ -1186,11 +1564,11 @@ static int vtd_unit_init(vtd_unit_t* u, uint64_t phys) {
      * told 39-bit, and a 39-bit-only unit was told 000b, which §9.3 lists as
      * Reserved).
      *
-     * Widening what is accepted does not widen what is switched on. The unit
-     * comes up exactly as a 48-bit one does — firmware's tables off, this
-     * kernel's root table published, translation left off — so on a machine
-     * whose units are 39-bit-only the change is between "no unit is driven"
-     * and "every unit is driven with translation off". */
+     * Widening what is accepted widens what is DRIVEN. The unit comes up
+     * exactly as a 48-bit one does — firmware's tables off, this kernel's
+     * root table published — and vtd_take_the_wheel then switches it on with
+     * the rest, so on a machine whose units are 39-bit-only the change is
+     * between "no unit is driven" and "every unit translates". */
     uint8_t sagaw = (uint8_t)((u->cap >> CAP_SAGAW_SHIFT) & CAP_SAGAW_MASK);
     if (sagaw & (1u << VTD_AGAW_48BIT)) {
         u->sagaw_levels = VTD_AGAW_48BIT + 2;
@@ -1199,7 +1577,7 @@ static int vtd_unit_init(vtd_unit_t* u, uint64_t phys) {
         kprintf("[VT-d] remap unit at 0x%lx reports SAGAW=0x%02x — 39-bit "
                 "AGAW only, so it gets the second level of this kernel's "
                 "table as its root and AW=001b, and comes up like every "
-                "other unit: off firmware's tables, translation left off\n",
+                "other unit: off firmware's tables, ready for the wheel\n",
                 (unsigned long)phys, sagaw);
     } else {
         kprintf("[VT-d] remap unit at 0x%lx reports SAGAW=0x%02x — neither the "
@@ -1263,34 +1641,180 @@ static int vtd_unit_init(vtd_unit_t* u, uint64_t phys) {
     return 0;
 }
 
-/* Public: enable DMA translation on every initialised remap unit.
- * Safe iff every PCI(e) function the system uses has a context entry
- * pointing at an identity-map SLPT. Until callers explicitly opt in,
- * leave translation off so untranslated DMA works normally. */
-int vtd_enable_translation(void) {
-    int enabled = 0;
+/* ----- Seating devices, and taking the wheel ----- */
+
+static uint8_t vtd_units_online(void) {
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < g_unit_count; i++)
+        if (g_units[i].online) n++;
+    return n;
+}
+
+/* The PCI segment of the index-th online unit. iommu.c walks config space
+ * once per distinct segment a unit lives in, and nowhere else: a segment with
+ * no remap unit has nothing to seat devices into. */
+static bool vtd_unit_segment(uint8_t index, uint16_t* seg_out) {
+    uint8_t seen = 0;
+    for (uint8_t i = 0; i < g_unit_count; i++) {
+        if (!g_units[i].online) continue;
+        if (seen == index) { *seg_out = g_units[i].segment; return true; }
+        seen++;
+    }
+    return false;
+}
+
+/* Write this function's context entry into every unit of its segment, and
+ * invalidate NOTHING.
+ *
+ * That is the whole difference from vtd_device_attach, and it is the reason
+ * this exists beside it. Seating the machine means several dozen functions;
+ * doing a context-cache and an IOTLB invalidation per function is several
+ * dozen round trips through the invalidation queue to reach a state that one
+ * global invalidation — the one §6.6 requires between the root-table pointer
+ * and GCMD.TE anyway — reaches in one. vtd_take_the_wheel issues it.
+ *
+ * Nothing is cached yet in any case: every unit here has RTPS latched on a
+ * root table this kernel wrote and GCMD.TE clear, so the hardware has never
+ * walked one of these entries. The invalidation before TE is for what
+ * firmware may have left cached, not for what this loop writes. */
+static int vtd_seat_device(uint16_t seg, uint8_t bus, uint8_t devfn) {
+    for (uint8_t i = 0; i < g_unit_count; i++) {
+        vtd_unit_t* u = &g_units[i];
+        if (!u->online || u->segment != seg) continue;
+        /* Domain 0 is this driver's identity domain; what reaches the entry
+         * is vtd_hw_did(0), which is 1 on a CM=1 part (§6.2.2.1). */
+        if (vtd_program_context(u, bus, devfn, g_id_pml4_phys, 0) < 0)
+            return -1;
+    }
+    return 0;
+}
+
+/* Take translation back off every unit that has it. The undo half of
+ * all-or-nothing: a machine where some units translate and others do not is a
+ * machine where a driver's DMA works or aborts depending on which root port
+ * its device hangs off, and that is a worse failure than no translation at
+ * all because it looks like a device fault. */
+static void vtd_wheel_release(void) {
+    for (uint8_t i = 0; i < g_unit_count; i++) {
+        vtd_unit_t* u = &g_units[i];
+        if (!u->online || !(u->gcmd & GCMD_TE)) continue;
+        u->gcmd &= ~GCMD_TE;
+        vtd_gcmd_publish(u, 0);
+        (void)vtd_await_gsts_gone(u, GSTS_TES,
+                                  "translation going back off "
+                                  "(GCMD.TE -> GSTS.TES)");
+    }
+}
+
+/* Switch DMA translation on, on every online unit, or on none of them.
+ *
+ * Order, and every step of it is the specification's:
+ *
+ *   1. The root-table pointer is already published and acknowledged —
+ *      vtd_unit_init writes RTADDR_REG, issues GCMD.SRTP and refuses the unit
+ *      unless GSTS.RTPS answers. §6.6: "Software must always perform a Set
+ *      Root-Table Pointer operation before enabling or re-enabling (after
+ *      disabling) remapping hardware."
+ *   2. Every PCI function on the machine has a context entry by now: iommu.c
+ *      walks config space and calls vtd_seat_device for each one BEFORE
+ *      calling this. A function with no present context entry faults the
+ *      instant TE goes on (LCT.2), which for a live disk controller is a
+ *      machine that stops mid-boot with no explanation.
+ *   3. A global context-cache invalidation, then a global IOTLB invalidation,
+ *      in that order. §6.6 for implementations reporting ESRTPS clear:
+ *      "software must perform a global invalidate of the context-cache,
+ *      PASID-cache (if applicable), IOTLB, and HPT-cache (if applicable), in
+ *      that order." vtd_global_flush issues exactly that pair, and the order
+ *      is also §11.4.9.2's own: "software must perform domain-selective (or
+ *      global) invalidation of IOTLB after the context-cache invalidation has
+ *      completed". Issued unconditionally rather than under ESRTPS, because a
+ *      unit that does it in hardware loses nothing by being asked again.
+ *      This is also what discharges §6.8: on a part reporting RWBF, hardware
+ *      "must implicitly perform a write buffer flush before invalidating the
+ *      context-cache", so the tables written above are visible without a
+ *      separate GCMD.WBF. The unit's ANSWER to that pair is required, not
+ *      merely requested: a unit whose CCMD.ICC or IOTLB IVT never cleared
+ *      takes the whole machine's translation down with it rather than begin
+ *      translating through what it still holds.
+ *   4. GCMD.TE, one field through the shadow, answered by GSTS.TES.
+ *
+ * Returns the number of units translating, which is either every online unit
+ * or, on any refusal, a negative number with nothing left switched on. */
+static int vtd_take_the_wheel(uint8_t* units_total) {
+    uint8_t online = vtd_units_online();
+    if (units_total) *units_total = online;
+
+    if (online == 0) {
+        kprintf("[VT-d] no remap unit is online — nothing to switch on\n");
+        return -1;
+    }
+    if (!g_id_pml4) {
+        kprintf("[VT-d] no identity map was built — translation stays off\n");
+        return -1;
+    }
+
+    /* Is the table the hardware is about to walk actually populated where it
+     * has to be? The question is answered by READING the entries, through the
+     * same levels and present bits the unit uses, at the three addresses that
+     * bound what a device can name: the bottom, the top of what a Single
+     * Address Cycle reaches, and the top of the memory map. Then at both ends
+     * of every region the DMAR reserves.
+     *
+     * What stood here compared the span the build recorded against the number
+     * the build had been given — the same call, rounded up, in the same boot.
+     * It could not come back false, and a check that cannot fail is not a
+     * proof of anything. These can: a level the PMM refused, an RMRR above
+     * the map, a hole left by an earlier partial build all show up as a
+     * missing present bit at one of these addresses. */
+    uint64_t top = pmm_get_mem_end();
+    if (top < VTD_SAC_SPAN) top = VTD_SAC_SPAN;
+    if (!vtd_identity_covers(0) ||
+        !vtd_identity_covers(VTD_SAC_SPAN - 4096) ||
+        !vtd_identity_covers(top - 4096)) {
+        kprintf("[VT-d] the second-level tables do not translate one of 0x0, "
+                "0x%lx or 0x%lx — the map is not what this kernel believes it "
+                "built, so translation stays OFF everywhere rather than run a "
+                "device into a hole\n",
+                (unsigned long)(VTD_SAC_SPAN - 4096),
+                (unsigned long)(top - 4096));
+        return -1;
+    }
+    bool reserved_ok = true;
+    vtd_walk_rmrr(vtd_check_rmrr, &reserved_ok);
+    if (!reserved_ok) return -1;
+
+    uint8_t on = 0;
     for (uint8_t i = 0; i < g_unit_count; i++) {
         vtd_unit_t* u = &g_units[i];
         if (!u->online) continue;
-        vtd_global_flush(u);
+        if (!vtd_global_flush(u)) {
+            kprintf("[VT-d] DRHD[%u] did not finish the global invalidation "
+                    "§6.6 requires before translation may be enabled — it "
+                    "would begin translating through whatever it still has "
+                    "cached, so translation is switched on NOWHERE\n", i);
+            vtd_wheel_release();
+            return -1;
+        }
         u->gcmd |= GCMD_TE;
         vtd_gcmd_publish(u, 0);
         if (!vtd_await_gsts(u, GSTS_TES,
                             "translation (GCMD.TE -> GSTS.TES)")) {
-            /* TES never appeared, so the unit is not translating — and TE comes
-             * back out of the command word, so a TE that is merely late cannot
-             * come up under a kernel that has already counted this unit out.
-             * Everything else the unit had stays exactly where it was. */
+            /* TES never appeared, so the unit is not translating — and TE
+             * comes back out of the command word, so a TE that is merely late
+             * cannot come up under a kernel that has counted this unit out. */
             u->gcmd &= ~GCMD_TE;
             vtd_gcmd_publish(u, 0);
-            kprintf("[VT-d] DRHD[%u] did not begin translating — left "
-                    "untranslated\n", i);
-            continue;
+            kprintf("[VT-d] DRHD[%u] would not begin translating — taking "
+                    "translation back off the %u unit(s) that had already "
+                    "started, so this machine translates nowhere rather than "
+                    "in places\n", i, on);
+            vtd_wheel_release();
+            return -1;
         }
-        enabled++;
+        on++;
         debug_printf("[VT-d] DRHD[%u] translation enabled (TES=1)\n", i);
     }
-    return enabled;
+    return on;
 }
 
 /* ----- Primary fault logging: what a unit refused, and why (§7.2.1) -----
@@ -1662,13 +2186,10 @@ static int vtd_init(void) {
     const acpi_dmar_info_t* d = acpi_get_dmar();
     if (!d) return -1;
     g_unit_count = 0;
-    if (vtd_build_identity() < 0) {
-        debug_printf("[VT-d] identity-map build failed\n");
-        return -1;
-    }
     for (uint8_t i = 0; i < d->drhd_count && g_unit_count < VTD_MAX_UNITS; i++) {
         vtd_unit_t* u = &g_units[g_unit_count];
-        if (vtd_unit_init(u, d->drhd[i].register_base) == 0) {
+        if (vtd_unit_init(u, d->drhd[i].register_base,
+                          d->drhd[i].segment) == 0) {
             g_unit_count++;
             debug_printf("[VT-d] DRHD[%u] online: seg=%u base=0x%lx levels=%u\n",
                          i, d->drhd[i].segment,
@@ -1676,19 +2197,48 @@ static int vtd_init(void) {
                          u->sagaw_levels);
         }
     }
-    /* Built before the first CAP was read; flushed now that the units have
-     * said whether anything on this machine walks them without snooping. */
+    if (g_unit_count == 0) return -2;
+
+    /* Root tables were bought one unit at a time, so a unit that reported
+     * ECAP.C = 0 may have arrived after an earlier unit's root page had
+     * already been zeroed under the assumption that everything here snoops.
+     * That page is walked by hardware, so it goes back to memory now that the
+     * answer is final. The second-level tables need no such repair: they are
+     * built below, after every unit has spoken. */
     if (!g_walk_snooped)
-        vtd_flush_slpt_tree(g_id_pml4, VTD_AGAW_48BIT + 2);
+        for (uint8_t i = 0; i < g_unit_count; i++)
+            vtd_structure_flush(g_units[i].root_table, 4096);
+
+    if (vtd_build_identity() < 0) {
+        /* This is the one refusal that arrives AFTER the units were taken
+         * over, and taking a unit over is what ends firmware's pre-boot DMA
+         * protection. Returning here with the units half-held would leave
+         * every MMIO window mapped, every root page out of the PMM's hands,
+         * every unit off firmware's tables and on ours with nothing walking
+         * them — and iommu.c would then find no backend and say nothing at
+         * all. So the units are handed back, one by one, and the state the
+         * machine is left in is named rather than inferred. */
+        kprintf("[VT-d] the identity second-level tables could not be built. "
+                "%u unit(s) had already been taken off firmware's tables; "
+                "they are being released now, and this machine runs with NO "
+                "DMA protection at all — neither firmware's, which ended when "
+                "the first unit was adopted, nor this kernel's, which is not "
+                "going to start\n", g_unit_count);
+        for (uint8_t i = 0; i < g_unit_count; i++)
+            vtd_unit_unwind(&g_units[i]);
+        g_unit_count = 0;
+        return -2;
+    }
 
     g_domains[0].id          = 0;
     g_domains[0].slpt        = g_id_pml4;
     g_domains[0].slpt_phys   = g_id_pml4_phys;
     g_domains[0].is_identity = true;
     g_domain_count           = 1;
-    debug_printf("[VT-d] %u remap unit(s) ready; translation NOT enabled "
-                 "(call vtd_enable_translation())\n", g_unit_count);
-    return (g_unit_count > 0) ? 0 : -2;
+    debug_printf("[VT-d] %u remap unit(s) ready; translation waits on "
+                 "iommu_take_the_wheel(), after PCI is enumerated\n",
+                 g_unit_count);
+    return 0;
 }
 
 static iommu_domain_t* vtd_domain_alloc(void) {
@@ -1712,17 +2262,25 @@ static void vtd_domain_free(iommu_domain_t* d) {
 
 static int vtd_device_attach(iommu_domain_t* d, uint16_t seg,
                               uint8_t bus, uint8_t devfn) {
-    (void)seg;
     if (!d) return -1;
     uint64_t slpt = d->slpt_phys ? d->slpt_phys : g_id_pml4_phys;
-    uint32_t did  = d->id;
+    /* The number the DESCRIPTORS below must carry is the one the hardware was
+     * given, not the one this driver counts with — vtd_program_context shifts
+     * it past the reserved 0 on a CM=1 part, and a domain-selective
+     * invalidation naming the unshifted id would name a domain nothing is
+     * tagged with. */
+    uint32_t did  = vtd_hw_did(d->id);
     int rc = -1;
     for (uint8_t i = 0; i < g_unit_count; i++) {
-        if (!g_units[i].online) continue;
+        /* A context entry is reachable only through the root table of a unit
+         * in the SAME segment (DMAR §8.3), which is what vtd_seat_device has
+         * always honoured and this had not. */
+        if (!g_units[i].online || g_units[i].segment != seg) continue;
         if (devfn == 0xFFu) {
             /* Wildcard: identity-map every devfn on this bus. */
             if (vtd_program_identity_bus(&g_units[i], bus) == 0) rc = 0;
-        } else if (vtd_program_context(&g_units[i], bus, devfn, slpt, did) == 0) {
+        } else if (vtd_program_context(&g_units[i], bus, devfn, slpt,
+                                       d->id) == 0) {
             rc = 0;
         }
         if (g_units[i].qi_active) {
@@ -1758,16 +2316,16 @@ static int vtd_device_attach(iommu_domain_t* d, uint16_t seg,
              * be told the device is attached. vtd_qi_submit has already taken
              * the queue off this unit and said why, so the global flush below
              * goes through the CCMD/IOTLB registers and finishes the job. */
-            if (!done) vtd_global_flush(&g_units[i]);
+            if (!done) (void)vtd_global_flush(&g_units[i]);
         }
     }
     return rc;
 }
 static int vtd_device_detach(iommu_domain_t* d, uint16_t seg,
                               uint8_t bus, uint8_t devfn) {
-    (void)d; (void)seg;
+    (void)d;
     for (uint8_t i = 0; i < g_unit_count; i++) {
-        if (!g_units[i].online) continue;
+        if (!g_units[i].online || g_units[i].segment != seg) continue;
         vtd_program_context(&g_units[i], bus, devfn, g_id_pml4_phys, 0);
     }
     return 0;
@@ -1859,7 +2417,7 @@ static int vtd_unmap(iommu_domain_t* d, uint64_t iova, uint64_t size) {
 static void vtd_invalidate(iommu_domain_t* d) {
     (void)d;
     for (uint8_t i = 0; i < g_unit_count; i++)
-        if (g_units[i].online) vtd_global_flush(&g_units[i]);
+        if (g_units[i].online) (void)vtd_global_flush(&g_units[i]);
 }
 
 /* Phase 2G — opaque domain → ID accessor. Trivial field read. */
@@ -1880,4 +2438,7 @@ const iommu_ops_t vtd_ops = {
     .domain_id      = vtd_domain_id,
     .map_with_keyid = vtd_map_with_keyid,
     .drain_faults   = vtd_drain_faults,
+    .unit_segment   = vtd_unit_segment,
+    .seat_device    = vtd_seat_device,
+    .take_the_wheel = vtd_take_the_wheel,
 };

@@ -2,6 +2,7 @@
 #define PCI_H
 
 #include "ktypes.h"
+#include "irqchip.h"   /* Summons — the described form of an INTx line */
 
 #define PCI_CONFIG_ADDRESS  0xCF8
 #define PCI_CONFIG_DATA     0xCFC
@@ -24,6 +25,8 @@
 #define PCI_BAR3                0x1C
 #define PCI_BAR4                0x20
 #define PCI_BAR5                0x24
+#define PCI_INTERRUPT_LINE      0x3C
+#define PCI_INTERRUPT_PIN       0x3D
 
 #define PCI_CMD_IO_SPACE        0x0001
 #define PCI_CMD_MEM_SPACE       0x0002
@@ -173,6 +176,42 @@ uint64_t pci_read_bar64(pci_device_t* device, uint8_t bar_num);
 // or I/O-space BAR. Use this instead of deducing an extent from offsets the
 // device published — those give a lower bound, not a size.
 uint64_t pci_bar_size(pci_device_t* device, uint8_t bar_num);
+
+/* ===========================================================================
+ * The INTx line of one function, described.
+ *
+ * ‼ THE BUS RULE, QUOTED, because everything below is built on it.
+ * PCI Local Bus 3.0 §2.2.6: "Interrupts on PCI are optional and defined as
+ * 'level sensitive,' asserted low (negative true), using open drain output
+ * drivers. ... A device asserts its INTx# line when requesting attention from
+ * its device driver ... Once the INTx# signal is asserted, it remains
+ * asserted until the device driver clears the pending request."
+ * And, one page later: "This means the device driver may not make any
+ * assumptions about interrupt sharing. All PCI device drivers must be able to
+ * share an interrupt (chaining) with any other logical device including
+ * devices in the same multi-function package."
+ * So: level, active low, shareable. Not per board, not per chipset — that is
+ * what an INTx wire is.
+ *
+ * ‼ AND THE WEAKNESS OF THE NUMBER, also quoted, because it is the reason the
+ * Summons carries a provenance at all. §6.2.4, footnote 43: "For x86 based
+ * PCs, the values in this register correspond to IRQ numbers (0-15) of the
+ * standard dual 8259 configuration. The value 255 is defined as meaning
+ * 'unknown' or 'no connection' to the interrupt controller. Values between 15
+ * and 254 are reserved." The Interrupt Line register describes a machine
+ * running its 8259s. This one is running its IOAPIC, and the byte is taken
+ * only because the answer that would displace it — ACPI _PRT — is not built
+ * yet. It arrives marked SUMMONS_FROM_INTERRUPT_LINE so that when _PRT does
+ * arrive, it is SEEN to override it.
+ *
+ * False, with the reason printed, when this function has no INTx line to
+ * arm — which is a real and common answer, not a failure: the caller polls or
+ * stays on MSI. On true, the function's Interrupt Disable bit has been
+ * cleared, because per §6.2.2 Table 6-1 bit 10 "disables the device/function
+ * from asserting INTx#", and a line nothing can assert is not armed by
+ * unmasking a pin.
+ * ========================================================================= */
+bool PciSummons(uint8_t bus, uint8_t device, uint8_t function, Summons *out);
 
 void pci_init(void);
 

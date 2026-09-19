@@ -817,6 +817,25 @@ void kernel_main(void)
     debug_printf("[INIT] PCI Subsystem...\n");
     pci_init();
 
+    /* The IOMMU takes the wheel HERE, and the position is the whole design.
+     *
+     * One line earlier there is no complete account of what is on the buses:
+     * the walk that gives every present function a context entry (VT-d) or a
+     * device-table entry (AMD-Vi) needs the ECAM windows pci_init has just
+     * mapped, and a function with no entry either loses its DMA outright or
+     * stays quietly outside the protection everything else just got.
+     *
+     * One line later is too late in the other direction: ahci_init, ata_init
+     * and xhci_init all follow, and each of them starts real transfers. A
+     * controller whose DMA is in flight when the tables under it change is
+     * exactly the failure this ordering exists to prevent.
+     *
+     * All-or-nothing, and it never refuses a boot: on anything that does not
+     * add up it leaves the machine as untranslated as it found it and says
+     * through kprintf which thing it was. `make IOMMU=off` builds a kernel
+     * where it declines on purpose. */
+    iommu_take_the_wheel();
+
 #ifdef CONFIG_AHCI_DRIVER
     debug_printf("[INIT] AHCI Driver...\n");
     if (ahci_init() == 0)

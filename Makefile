@@ -367,6 +367,30 @@ endif
 
 EARLYIRQ_MARK = $(BUILDDIR)/.earlyirq.$(if $(filter on,$(EARLYIRQ)),on,off)
 
+# The way back from DMA translation.
+#
+# Translation is ON by default: straight after pci_init, every PCI function on
+# the machine is given an identity-map entry and then every remap unit is
+# switched on — or none of them is, and the kernel says why. That is the
+# owner's decision, taken knowing the risk it carries: the first board to run
+# this is the first machine on which all DMA has ever gone through tables this
+# kernel wrote, and if one of them is wrong the symptom is a screen that never
+# comes back rather than a message.
+#
+# `make IOMMU=off` builds the kernel that does not throw that switch.
+# iommu_take_the_wheel declines out loud and every device reaches memory
+# untranslated exactly as it did before the wheel existed. The units still come
+# up, the tables are still written, the fault channel is still read — only the
+# last step is skipped, so the difference between a board that boots and a
+# board that does not is one build key and nothing else.
+#
+# Not a reproduction and not a test key: this is the way back.
+ifeq ($(IOMMU),off)
+CFLAGS += -DCONFIG_IOMMU_TRANSLATION_OFF=1
+endif
+
+IOMMU_MARK = $(BUILDDIR)/.iommu.$(if $(filter off,$(IOMMU)),off,on)
+
 # Fail the FIRST mount of the volume, once, halfway through.
 #
 # tagfs_init brings up eleven things in order, and until this key existed no
@@ -708,6 +732,10 @@ $(EARLYIRQ_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.earlyirq.*
 	@touch $@
 
+$(IOMMU_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.iommu.*
+	@touch $@
+
 $(MOUNTFAIL_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.mountfail.*
 	@touch $@
@@ -720,12 +748,12 @@ $(RETURNFAIL_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.returnfail.*
 	@touch $@
 
-$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) | $(BUILDDIR)
+$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) $(IOMMU_MARK) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -Os -c $< -o $@
 
-$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) | $(BUILDDIR)
+$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) $(IOMMU_MARK) | $(BUILDDIR)
 	@echo "Compiling $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -c $< -o $@

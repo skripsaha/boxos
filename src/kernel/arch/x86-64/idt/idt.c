@@ -36,7 +36,31 @@
 static idt_entry_t idt[IDT_ENTRIES];
 static idt_descriptor_t idt_desc;
 
-static irq_callback_t irq_callbacks[IRQ_MAX_COUNT] = {NULL};
+/* One record per IOAPIC input: what the line IS, and who answers it.
+ *
+ * The array is IRQ_MAX_COUNT long because that is the number of inputs a
+ * standard IOAPIC has and therefore the number of distinct lines this kernel
+ * can dispatch — a count of pins, not a budget. `builtin` is the one answerer
+ * a line is born with, for callers of the ISA-era irq_register_handler that
+ * have nowhere of their own to keep a link; every further answerer on a
+ * shareable line brings its own node, so nothing here caps how many devices
+ * may sit on one wire. */
+typedef struct {
+    Summons           line;
+    SummonsResponder *answerers;     /* head; release-stored, acquire-read */
+    SummonsResponder  builtin;
+    bool              posted;        /* a Summons has described this line */
+    bool              unanswered_said;
+    /* Said once per PIN, not once per settling. A line is settled twice by
+     * every driver that answers it and then arms it, and ata_async re-arms
+     * its own on every lost-INTRQ reconcile; the facts these two name are
+     * properties of the pin, and repeating them on a live console would bury
+     * everything else. */
+    bool              join_said;
+    bool              wiring_said;
+} IrqLine;
+
+static IrqLine irq_lines[IRQ_MAX_COUNT];
 
 static volatile uint64_t exception_count = 0;
 static volatile uint64_t irq_count[IRQ_MAX_COUNT] = {0};
@@ -144,33 +168,218 @@ void idt_init(void)
     debug_printf("[IDT] IDT loaded successfully at 0x%lx (limit=%d)\n", idt_desc.base, idt_desc.limit);
 }
 
+bool SummonsSettleOnPin(Summons *line)
+{
+    if (!line) return false;
+
+    /* Who already holds this PIN? The registry is indexed by vector, so this
+     * is a walk — over IRQ_MAX_COUNT entries, at registration time only, and
+     * it is the only place in the kernel that knows the answer. */
+    for (uint32_t k = 0; k < IRQ_MAX_COUNT; k++)
+    {
+        IrqLine *l = &irq_lines[k];
+        if (!l->posted || l->line.gsi != line->gsi) continue;
+
+        uint8_t held = irq_gsi_to_vector((uint8_t)k);
+        if (held != line->vector)
+        {
+            if (!l->join_said)
+            {
+                l->join_said = true;
+                kprintf("[IRQ] %s GSI %u already delivers under vector %u, "
+                        "so this line joins it there instead of on vector "
+                        "%u — one pin has one redirection entry and "
+                        "therefore one vector\n",
+                        line->bus, line->gsi, held, line->vector);
+            }
+            line->vector = held;
+        }
+
+        if (l->answerers == NULL)
+        {
+            /* Described but unanswered: nothing depends on the wire yet, so
+             * the newcomer's description stands as it is. */
+            return true;
+        }
+
+        if ((l->line.polarity != line->polarity ||
+             l->line.trigger  != line->trigger) && !l->wiring_said)
+        {
+            l->wiring_said = true;
+            kprintf("[IRQ] %[E]%s GSI %u is already driven %s, %s on behalf "
+                    "of %s, and this line describes it as %s, %s — the pin "
+                    "keeps the wire it was given, because a redirection entry "
+                    "other drivers depend on is not re-cut for a device that "
+                    "arrived second%[D]\n",
+                    line->bus, line->gsi,
+                    l->line.trigger == SUMMONS_LEVEL ? "level" : "edge",
+                    l->line.polarity == SUMMONS_ACTIVE_LOW ? "active low"
+                                                           : "active high",
+                    l->answerers->who ? l->answerers->who : "another driver",
+                    line->trigger == SUMMONS_LEVEL ? "level" : "edge",
+                    line->polarity == SUMMONS_ACTIVE_LOW ? "active low"
+                                                         : "active high");
+        }
+
+        /* Shareable only if EVERYONE describing the pin says so. Everything
+         * else is the incumbent's, because it is what the hardware is
+         * already programmed with. */
+        bool shared = l->line.shared && line->shared;
+        uint8_t pin = line->intx_pin;
+        *line = l->line;
+        line->shared   = shared;
+        line->intx_pin = pin;   /* the newcomer's own (device, pin) key */
+        return true;
+    }
+
+    /* Nobody holds the pin. Can this vector carry it? */
+    uint8_t key = irq_vector_to_gsi(line->vector);
+    if (key >= IRQ_MAX_COUNT)
+    {
+        kprintf("[IRQ] %[E]%s GSI %u cannot be settled: vector %u is outside "
+                "the %u hardware IRQ vectors this kernel dispatches%[D]\n",
+                line->bus, line->gsi, line->vector, IRQ_MAX_COUNT);
+        return false;
+    }
+
+    IrqLine *l = &irq_lines[key];
+    if (l->posted && l->line.gsi != line->gsi)
+    {
+        /* Two pins, one vector. irq_handler is handed the vector and nothing
+         * else, so it could not tell the two apart, and one LAPIC EOI would
+         * clear Remote IRR on both. There is no join that fixes this. */
+        kprintf("[IRQ] %[E]%s GSI %u cannot be settled: vector %u already "
+                "delivers GSI %u, and a vector cannot name two pins%[D]\n",
+                line->bus, line->gsi, line->vector, l->line.gsi);
+        return false;
+    }
+    return true;
+}
+
+void SummonsPost(const Summons *line)
+{
+    if (!line) return;
+
+    uint8_t key = irq_vector_to_gsi(line->vector);
+    if (key >= IRQ_MAX_COUNT) return;   /* named by whoever tried to arm it */
+
+    IrqLine *l = &irq_lines[key];
+    if (l->posted && l->line.gsi != line->gsi)
+    {
+        /* Unreachable through SummonsArm, which settles first. Enforced
+         * rather than assumed, because "the registry and the redirection
+         * entry can never disagree about what the line is" is an invariant
+         * this function is the last to be able to hold. */
+        kprintf("[IRQ] %[E]%s GSI %u not recorded on vector %u: that vector "
+                "already describes GSI %u%[D]\n",
+                line->bus, line->gsi, line->vector, l->line.gsi);
+        return;
+    }
+
+    l->line   = *line;
+    l->posted = true;
+}
+
+bool SummonsAnswer(const Summons *line, SummonsResponder *node,
+                   irq_callback_t answer, const char *who)
+{
+    if (!line || !node || !answer) return false;
+
+    const char *name = who ? who : "an answerer that did not name itself";
+
+    uint8_t key = irq_vector_to_gsi(line->vector);
+    if (key >= IRQ_MAX_COUNT)
+    {
+        kprintf("[IRQ] %[E]%s cannot answer %s GSI %u: vector %u is outside "
+                "the %u hardware IRQ vectors this kernel dispatches%[D]\n",
+                name, line->bus, line->gsi, line->vector, IRQ_MAX_COUNT);
+        return false;
+    }
+
+    Summons described = *line;
+    SummonsResolve(&described);
+    if (!SummonsSettleOnPin(&described)) return false;
+
+    /* The key is the SETTLED vector, which is the incumbent's when this line
+     * is joining a pin somebody already holds. Taking it before settling is
+     * how the ACPI SCI (ISA IRQ 9, pin 11, vector 41) and a PCI function
+     * _PRT puts on GSI 11 (vector 43) came to occupy two separate chains for
+     * one wire. */
+    key = irq_vector_to_gsi(described.vector);
+    IrqLine *l = &irq_lines[key];
+
+    SummonsResponder *head = l->answerers;
+    if (head != NULL)
+    {
+        /* A second answerer is ordinary on a PCI INTx line and a mistake on
+         * an ISA one, and the description is what tells them apart. Refusing
+         * BOTH used to be the behaviour, except that it refused by
+         * overwriting: the warning went to debug_printf and the first
+         * driver's handler was simply gone. */
+        if (!described.shared || !l->line.shared)
+        {
+            kprintf("[IRQ] %[E]%s cannot answer %s GSI %u: %s already does, "
+                    "and this line is exclusive — %s says one device drives "
+                    "it%[D]\n",
+                    name, described.bus, described.gsi,
+                    head->who ? head->who : "another driver", described.bus);
+            return false;
+        }
+    }
+
+    /* A node can be on a line once. Registering the same one twice would
+     * link it to itself and turn the walk in irq_handler into a loop the core
+     * never leaves — and the ISA-era form hands out a node the registry owns,
+     * so a driver calling irq_register_handler twice would do exactly that on
+     * a line that ever became shareable. */
+    for (SummonsResponder *seen = head; seen; seen = seen->next) {
+        if (seen == node) {
+            kprintf("[IRQ] %[E]%s already answers %s GSI %u — registering the "
+                    "same link twice would close the chain on itself%[D]\n",
+                    name, described.bus, described.gsi);
+            return false;
+        }
+    }
+
+    node->answer = answer;
+    node->who    = name;
+    node->next   = NULL;
+
+    l->line   = described;
+    l->posted = true;
+
+    /* Appended at the tail, so answerers are offered the interrupt in the
+     * order they arrived. The release store is what makes the node's fields
+     * visible to a handler running on another core the instant the link is;
+     * registration itself is single-threaded boot work, so nothing needs to
+     * be serialised against another registration. */
+    if (head == NULL)
+    {
+        __atomic_store_n(&l->answerers, node, __ATOMIC_RELEASE);
+    }
+    else
+    {
+        SummonsResponder *tail = head;
+        while (tail->next) tail = tail->next;
+        __atomic_store_n(&tail->next, node, __ATOMIC_RELEASE);
+    }
+
+    debug_printf("[IRQ] %s answers %s GSI %u (vector %u)\n",
+                 name, described.bus, described.gsi, described.vector);
+    return true;
+}
+
 void irq_register_handler(uint8_t irq, irq_callback_t callback)
 {
     if (irq >= IRQ_MAX_COUNT)
     {
-        debug_printf("[IDT] ERROR: Invalid IRQ/GSI %u (max %u)\n", irq, IRQ_MAX_COUNT - 1);
+        kprintf("[IRQ] %[E]no handler registered for IRQ %u: this kernel "
+                "dispatches IRQ 0 to %u%[D]\n", irq, IRQ_MAX_COUNT - 1);
         return;
     }
 
-    if (irq_callbacks[irq] != NULL)
-    {
-        debug_printf("[IDT] WARNING: Overwriting existing handler for IRQ %u\n", irq);
-    }
-
-    irq_callbacks[irq] = callback;
-    debug_printf("[IDT] Registered callback for IRQ %u\n", irq);
-}
-
-void irq_unregister_handler(uint8_t irq)
-{
-    if (irq >= IRQ_MAX_COUNT)
-    {
-        debug_printf("[IDT] ERROR: Invalid IRQ/GSI %u (max %u)\n", irq, IRQ_MAX_COUNT - 1);
-        return;
-    }
-
-    irq_callbacks[irq] = NULL;
-    debug_printf("[IDT] Unregistered callback for IRQ %u\n", irq);
+    Summons line = SummonsForIsaLine(irq);
+    SummonsAnswer(&line, &irq_lines[irq].builtin, callback, NULL);
 }
 
 static process_t *find_process_by_kernel_stack_overflow(uint64_t rsp)
@@ -1431,9 +1640,57 @@ void irq_handler(interrupt_frame_t *frame)
     }
     atomic_fetch_add_u64(&irq_count[irq], 1);
 
-    if (irq_callbacks[irq] != NULL)
+    IrqLine *l = &irq_lines[irq];
+    SummonsResponder *r = __atomic_load_n(&l->answerers, __ATOMIC_ACQUIRE);
+
+    if (r != NULL)
     {
-        irq_callbacks[irq]();
+        /* Everyone on the wire is offered it, in the order they arrived.
+         * Each looks at its own device and does nothing if the device is
+         * silent — which is what "PCI device drivers are required to support
+         * shared interrupts" (PCI 3.0 §6.5) asks of a driver, and what every
+         * handler in this kernel already did when it was the only one.
+         *
+         * EOI comes after the last of them, once, and that order is the
+         * level-triggered rule: the pin is still asserted until the device
+         * that raised it has been cleared, so acknowledging first would
+         * re-deliver the same interrupt for as long as the line is held. */
+        do
+        {
+            r->answer();
+            r = __atomic_load_n(&r->next, __ATOMIC_ACQUIRE);
+        } while (r != NULL);
+
+        irqchip_send_eoi(irq);
+        return;
+    }
+
+    /* A LEVEL LINE WITH NOBODY ON IT IS A WEDGE, NOT A STRAY INTERRUPT.
+     *
+     * An edge-triggered line that fires with no answerer costs one EOI and is
+     * over. A level-triggered one is held low by its device until a driver
+     * clears it (PCI 3.0 §2.2.6: "Once the INTx# signal is asserted, it
+     * remains asserted until the device driver clears the pending request"),
+     * so the EOI below hands it straight back and the core re-enters this
+     * handler for ever, at interrupt priority, with nothing else able to run.
+     * The machine does not crash; it stops, in a way that leaves no evidence.
+     *
+     * So the pin is masked. The fact that decides it is "this line fired and
+     * has no answerer at all" — not a count of how many times, which would be
+     * a number standing in for the fact. Masking is also exactly recoverable:
+     * a driver that arrives later arms the line again through SummonsArm. */
+    if (l->posted && l->line.trigger == SUMMONS_LEVEL)
+    {
+        SummonsDisarm(&l->line);
+        if (!l->unanswered_said)
+        {
+            l->unanswered_said = true;
+            kprintf("[IRQ] %s GSI %u asserted and no driver answers it — "
+                    "masked at the pin, because a level-triggered line is "
+                    "held asserted until somebody clears the device and this "
+                    "core would otherwise never leave the handler\n",
+                    l->line.bus, l->line.gsi);
+        }
         irqchip_send_eoi(irq);
         return;
     }

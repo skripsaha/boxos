@@ -13,6 +13,8 @@
 #include "kernel_config.h"
 #include "hourglass.h"
 #include "vmm.h"
+#include "aml.h"       /* AmlRoutingAdopt — \_PIC is owed to the platform
+                        * before this kernel asks it for its first interrupt */
 
 acpi_state_t g_acpi = {0};
 
@@ -978,9 +980,22 @@ static void acpi_power_button_answer_knocked(void *ctx)
 #define PM1_STS_RTC     (1u << 10)
 #define PM1_STS_WAK     (1u << 15)
 
+/* ‼ THIS HANDLER OWES NO EOI, AND USED TO SEND ONE ANYWAY.
+ *
+ * A responder is offered the interrupt and reads its own device; the single
+ * EOI for the line is sent by irq_handler after the LAST responder, which is
+ * the order a level-triggered line requires — the pin is held asserted until
+ * a driver clears the device, so acknowledging before that re-delivers. This
+ * function sent one of its own as well, so every SCI cost TWO LAPIC EOIs.
+ * Intel SDM Vol 3A, "EOI Register": an EOI "clears the highest priority bit
+ * in the ISR", so the second one did not un-acknowledge the SCI — it cleared
+ * the ISR bit of whatever lower-priority interrupt the SCI had preempted,
+ * ending that handler's service early and, if it was a level line, releasing
+ * a pin its device was still holding. Harmless-looking for as long as the
+ * SCI was the only thing on its wire; not something to keep now that it is
+ * shareable and level by description. */
 static void acpi_sci_handler(void) {
     if (!g_acpi.initialized || !g_acpi.fadt) {
-        irqchip_send_eoi(g_acpi.fadt ? g_acpi.fadt->sci_interrupt : 9);
         return;
     }
     /* Both halves of the pair. PM1b is not a spare copy of PM1a: a chipset
@@ -1088,12 +1103,35 @@ gpe_blocks:
      * acpi_sci_arm before this line was ever unmasked. */
     gpe_block_service(&g_gpe0);
     gpe_block_service(&g_gpe1);
-
-    irqchip_send_eoi(g_acpi.fadt->sci_interrupt);
 }
+
+/* The SCI's own link into the responder chain. One node, because there is
+ * one SCI; it lives here rather than in the registry's built-in slot
+ * because this line is described by the FADT and not by irq_register_handler
+ * — see SummonsForAcpiSci. */
+static SummonsResponder g_sci_responder;
 
 void acpi_sci_register(void) {
     if (!g_acpi.initialized || !g_acpi.fadt) return;
+
+    /* ‼ THE PLATFORM IS TOLD WHICH INTERRUPT CONTROLLER IT IS TALKING TO,
+     * HERE, BEFORE THIS KERNEL ASKS IT FOR ANYTHING.
+     *
+     * ACPI 6.5 §5.8.1, \_PIC: "This optional object is a control method that
+     * OSPM must call to indicate the interrupt model being used ... If the
+     * platform does not implement the \_PIC method, OSPM assumes the platform
+     * is in PIC mode." A board that is never told hands back the description
+     * it prepared for the 8259s — routing entries whose numbers are ISA
+     * interrupts behind a PIRQ router, meaning nothing as GSIs — and on some
+     * boards more than the routing changes.
+     *
+     * This is the instant for it: irqchip_init has just chosen the controller
+     * (so there is a true answer to give), and the SCI registered below is
+     * the first interrupt this kernel takes from the platform (so nothing has
+     * been asked for yet). Reading the routing tables follows in the same
+     * call, because they are what the announcement is for. */
+    AmlRoutingAdopt();
+
     uint16_t sci = g_acpi.fadt->sci_interrupt;
     if (sci == 0) {
         debug_printf("[ACPI] FADT advertises no SCI GSI\n");
@@ -1139,8 +1177,16 @@ void acpi_sci_register(void) {
      * polarity or a trigger for its own SCI keeps it.
      */
     uint32_t gsi = (sci < 16) ? ioapic_isa_to_gsi((uint8_t)sci) : sci;
+    /* FIRMWARE'S table, not the resolved one. The question asked here is
+     * literally "did the board describe this line", and ioapic_gsi_flags
+     * falls through to the descriptions this kernel writes itself — which
+     * would make the sentence printed below report this kernel's own
+     * conclusion as the firmware's. Unreachable today, because nothing has
+     * described a line by the time acpi_sci_register runs; asked correctly
+     * anyway, since the whole point of the provenance is that it cannot be
+     * fabricated. */
     uint16_t said = 0;
-    bool described = ioapic_gsi_flags(gsi, &said);
+    bool described = SummonsFirmwareSaid(gsi, &said);
     uint16_t forced = said;
     if ((forced & 0x0003u) == 0) forced |= 0x0003u;   /* polarity 11: active low */
     if ((forced & 0x000Cu) == 0) forced |= 0x000Cu;   /* trigger  11: level      */
@@ -1160,7 +1206,19 @@ void acpi_sci_register(void) {
                 sci, gsi, described ? "" : "nothing, i.e. ", said, forced);
     }
 
-    irq_register_handler((uint8_t)sci, acpi_sci_handler);
+    /* ‼ THE SCI IS DESCRIBED BY ITS SPECIFICATION, NOT BY THE ISA BUS RULE
+     * ITS NUMBER CAME FROM. irq_register_handler builds SummonsForIsaLine,
+     * which states edge, active high and EXCLUSIVE; the override planted
+     * above corrects the first two and cannot touch the third, because
+     * sharing is not a field of the MPS INTI word. §5.2.9 says "shareable,
+     * level, active low" in one breath, so all three are stated in one
+     * place — SummonsForAcpiSci — and a PCI function that _PRT routes onto
+     * this same pin can now join the line instead of being refused it. */
+    Summons line = SummonsForAcpiSci((uint8_t)sci);
+    if (!SummonsAnswer(&line, &g_sci_responder, acpi_sci_handler,
+                       "the ACPI SCI")) {
+        return;
+    }
     kprintf("[ACPI] SCI handler on GSI %u — the line opens when its names "
             "exist (acpi_sci_arm)\n", sci);
 }
@@ -1195,8 +1253,16 @@ void acpi_sci_arm(void)
      * survives the scrub. */
     acpi_gpe_blocks_scrub();
 
-    irqchip_enable_irq((uint8_t)sci);
-    kprintf("[ACPI] SCI on GSI %u\n", sci);
+    /* Armed from the same description the handler was registered against,
+     * so the pin's redirection entry and the registry cannot say different
+     * things about a line this kernel is about to start taking. */
+    Summons line = SummonsForAcpiSci((uint8_t)sci);
+    if (!SummonsArm(&line)) {
+        kprintf("[ACPI] %[E]the SCI line could not be armed — no ACPI event, "
+                "no power button, and no GPE will be delivered%[D]\n");
+        return;
+    }
+    kprintf("[ACPI] SCI on GSI %u\n", line.gsi);
 
     acpi_pm1_events_locate();
     acpi_pm1_arm_power_button();

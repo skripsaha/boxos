@@ -13,6 +13,11 @@ static uint8_t ioapic_max_entry = 0;
 #define ISO_TABLE_SIZE 16
 static ioapic_iso_t iso_table[ISO_TABLE_SIZE];
 
+/* The resolved description of a line — defined below, beside the table it
+ * reads, and declared here because arming a pin is the first thing that
+ * needs it. */
+static bool ioapic_gsi_resolved(uint32_t gsi, uint16_t *out_flags);
+
 /*
  * One selector, one transaction.
  *
@@ -145,12 +150,34 @@ void ioapic_init(uintptr_t base_addr, uint8_t gsi_base) {
     debug_printf("[IOAPIC] ID=%u, Version=0x%x, MaxEntry=%u (%u pins)\n",
                  id, ver & 0xFF, ioapic_max_entry, ioapic_max_entry + 1);
 
-    // Mask all entries by default
-    for (uint8_t i = 0; i <= ioapic_max_entry && i < IOAPIC_MAX_PINS; i++) {
-        ioapic_mask_redir(i);
+    /* Mask every input this chip HAS, counted from the chip's own VER
+     * register rather than from a number written here. `uint32_t` and not
+     * `uint8_t`: the Maximum Redirection Entry field is eight bits, so a part
+     * reporting 255 would make `i <= ioapic_max_entry` a loop with no end. */
+    for (uint32_t i = 0; i <= ioapic_max_entry; i++) {
+        ioapic_mask_redir((uint8_t)i);
     }
 
     debug_printf("[IOAPIC] All %u pins masked\n", ioapic_max_entry + 1);
+
+    /* ‼ A CHIP WITH MORE INPUTS THAN THIS KERNEL HAS VECTORS SAYS SO.
+     *
+     * IRQ_MAX_COUNT is the width of the vector window idt_init installs gates
+     * for, and it is the 82093AA's twenty-four entries. A PCH or a server
+     * part may present more, and the lines past the window are not armed
+     * wrongly — they are not armed at all, and every refusal downstream says
+     * "past the interrupt inputs this kernel dispatches" without the reader
+     * being able to tell whether the chip even has them. This is the one
+     * place that knows both numbers, so this is where the difference is
+     * named. */
+    if ((uint32_t)ioapic_max_entry + 1u > (uint32_t)IRQ_MAX_COUNT) {
+        kprintf("[IOAPIC] %[E]this IOAPIC presents %u inputs (GSI %u to %u) "
+                "and this kernel installs interrupt gates for %u of them — "
+                "GSI %u upwards can be described but never armed%[D]\n",
+                (unsigned)ioapic_max_entry + 1u, ioapic_gsi_base,
+                ioapic_gsi_base + ioapic_max_entry, (unsigned)IRQ_MAX_COUNT,
+                ioapic_gsi_base + (unsigned)IRQ_MAX_COUNT);
+    }
     debug_printf("[IOAPIC] %[S]IO-APIC initialized successfully%[D]\n");
 }
 
@@ -226,19 +253,18 @@ static bool ioapic_dest_is_nameable(uint32_t dest_lapic_id, uint32_t gsi,
     return false;
 }
 
-void ioapic_enable_irq(uint8_t gsi, uint8_t vector, uint32_t dest_lapic_id) {
-    if (!ioapic_dest_is_nameable(dest_lapic_id, gsi, "IRQ")) return;
+bool SummonsPinIsReachable(uint32_t gsi, uint32_t dest_lapic_id) {
+    if (!ioapic_dest_is_nameable(dest_lapic_id, gsi, "IRQ")) return false;
 
     /* ioapic_init() returns on a failed mapping and irqchip_init() selects
      * the APIC backend regardless, so this is reachable with no window to
-     * write through. Without the test the very next line indexes off a null
+     * write through. Without the test ioapic_write_redir indexes off a null
      * base and the machine takes a page fault at IOREGSEL instead of saying
-     * which line it could not arm. ioapic_program_nmi_source() asks exactly
-     * this question a few lines below; the arming path did not. */
+     * which line it could not arm. */
     if (!ioapic_base_virt) {
         kprintf("[IOAPIC] %[E]IRQ GSI %u not programmed: no IOAPIC is "
                 "mapped%[D]\n", gsi);
-        return;
+        return false;
     }
 
     /* Below this IOAPIC's first GSI there is no pin to subtract towards.
@@ -246,37 +272,68 @@ void ioapic_enable_irq(uint8_t gsi, uint8_t vector, uint32_t dest_lapic_id) {
      * refused — by the pin test below, naming a pin number that was never
      * asked for and a reason that is not the real one. A refusal that
      * misnames its own cause sends the next reader to look for a pin count
-     * problem on a machine whose IOAPICs are simply numbered from elsewhere.
-     * ioapic_program_nmi_source has asked this question all along. */
+     * problem on a machine whose IOAPICs are simply numbered from elsewhere. */
     if (gsi < ioapic_gsi_base) {
         kprintf("[IOAPIC] %[E]IRQ GSI %u not programmed: it is below this "
                 "IOAPIC's GSI base %u, so this line belongs to another "
                 "IOAPIC%[D]\n", gsi, ioapic_gsi_base);
-        return;
+        return false;
     }
 
-    uint8_t pin = gsi - ioapic_gsi_base;
-
+    uint32_t pin = gsi - ioapic_gsi_base;
     if (pin > ioapic_max_entry) {
         kprintf("[IOAPIC] %[E]IRQ GSI %u not programmed: pin %u is past this "
                 "IOAPIC's last pin %u (GSI base %u)%[D]\n",
                 gsi, pin, ioapic_max_entry, ioapic_gsi_base);
+        return false;
+    }
+
+    return true;
+}
+
+void ioapic_enable_irq(uint8_t gsi, uint8_t vector, uint32_t dest_lapic_id) {
+    /* SummonsArm asks this same question before it gets here, and returns
+     * false to its caller when the answer is no — so on that path this is a
+     * second, cheap confirmation rather than the place the refusal is
+     * printed. It stays because the pin count and the destination width are
+     * this chip's facts and an entry must never be written without them
+     * having been checked, whoever the caller turns out to be. */
+    if (!SummonsPinIsReachable(gsi, dest_lapic_id)) return;
+
+    uint8_t pin = (uint8_t)(gsi - ioapic_gsi_base);
+
+    /* ‼ THE ENTRY IS WRITTEN FROM A DESCRIPTION, OR IT IS NOT WRITTEN.
+     *
+     * This used to ask ioapic_gsi_flags and, on a miss, arm the pin anyway
+     * with neither POLARITY_LOW nor TRIGGER_LEVEL — edge triggered, active
+     * high. That is the ISA bus's default, and the table it had just asked
+     * answers only about ISA sources, so every PCI INTx line missed and every
+     * PCI INTx line was armed with the wrong electrical contract: a
+     * level-sensitive open-drain wire (PCI 3.0 §2.2.6) programmed as an edge.
+     * Nothing said so, and the device was simply quiet.
+     *
+     * A pin with no description is now a refusal spoken aloud. The caller
+     * that arms anything is SummonsArm, which describes the line immediately
+     * before this call, so reaching the refusal means a route into the IOAPIC
+     * that bypassed the description — and a device that does not interrupt is
+     * worth more than a device that interrupts wrongly. */
+    uint16_t flags = 0;
+    if (!ioapic_gsi_resolved(gsi, &flags)) {
+        kprintf("[IOAPIC] %[E]IRQ GSI %u not programmed: nothing describes "
+                "this line's polarity or trigger mode, and the bus default "
+                "this used to fall back to is the ISA one — on a PCI line it "
+                "programs a level-sensitive wire as an edge and the device "
+                "goes silent%[D]\n", gsi);
         return;
     }
 
     uint32_t redir_flags = IOAPIC_REDIR_DELMOD_FIXED | IOAPIC_REDIR_DESTMOD_PHYS;
 
-    uint16_t flags = 0;
-    if (ioapic_gsi_flags(gsi, &flags)) {
-        // Polarity: bits 0-1 (00=bus default, 01=active high, 11=active low)
-        if ((flags & 0x03) == 0x03) {
-            redir_flags |= IOAPIC_REDIR_POLARITY_LOW;
-        }
-        // Trigger: bits 2-3 (00=bus default, 01=edge, 11=level)
-        if ((flags & 0x0C) == 0x0C) {
-            redir_flags |= IOAPIC_REDIR_TRIGGER_LEVEL;
-        }
-    }
+    /* ACPI 6.5 §5.2.12.5 Table 5.26: polarity is bits 1:0 (11 = active low),
+     * trigger is bits 3:2 (11 = level-triggered). A resolved description
+     * never carries 00 in either field, so there is nothing here to defer. */
+    if ((flags & 0x03u) == 0x03u) redir_flags |= IOAPIC_REDIR_POLARITY_LOW;
+    if ((flags & 0x0Cu) == 0x0Cu) redir_flags |= IOAPIC_REDIR_TRIGGER_LEVEL;
 
     uint32_t low = (vector & IOAPIC_REDIR_VECTOR_MASK) | redir_flags;
     uint32_t high = dest_lapic_id << 24;
@@ -316,62 +373,132 @@ void ioapic_disable_irq(uint8_t gsi) {
 }
 
 /*
- * A line the firmware did not describe, described by whoever does know.
+ * WHAT A LINE IS, once somebody has worked it out.
  *
- * The override table above answers for ISA interrupts and is indexed by ISA
- * IRQ, because there are sixteen of those. Not every line that needs
- * describing is one of them: the ACPI SCI is level-triggered and active low by
- * specification rather than by bus default, and its GSI is whatever the FADT
- * says — on some boards well past fifteen. Firmware usually supplies an
- * override for it and usually does not have to.
+ * The override table above is FIRMWARE'S WORD, indexed by ISA IRQ because
+ * that is what a MADT Interrupt Source Override is about. This one is the
+ * RESOLVED answer for a line — bus rule, then whatever better source spoke —
+ * and it is what a redirection entry is programmed from. The two are
+ * different things and must stay apart: an override may legitimately say 00
+ * in either field, which ACPI 6.5 Table 5.26 defines as "Conforms to the
+ * specifications of the bus", i.e. an explicit deferral. Programming a pin
+ * from firmware's word directly is how that deferral became "not level, not
+ * low" and every PCI INTx line came up edge-triggered and active high.
  *
- * Firmware wins where it spoke: it knows its own board, and this is only for
- * the lines it left unsaid.
+ * Whoever resolves a line calls ioapic_describe_gsi with the answer — see
+ * SummonsArm, which is the one caller that arms anything. Flags written here
+ * are therefore always 01 or 11 in both fields; nothing stored here defers.
+ *
+ * ‼ ONE SLOT PER PIN, ADDRESSED BY THE PIN. There is no search and no
+ * allocation: a redirection entry belongs to exactly one input, so its
+ * description belongs in that input's slot, and the question "how many
+ * descriptions may exist" stops being asked.
+ *
+ * How many slots THIS chip uses is ioapic_max_entry + 1, read from its own
+ * IOAPICVER register in ioapic_init, and that is what every bound and every
+ * refusal below is written against. The array's declared length is not a
+ * choice either: the Maximum Redirection Entry field is IOAPICVER bits
+ * 23:16 — eight bits, as ioapic.h records and ioapic_init reads — so no
+ * IOAPIC can state a size above 256 inputs however many it has. The
+ * encoding sets the ceiling; the chip sets the limit.
+ *
+ * This replaces eight slots that nothing chose, and then twenty-four that
+ * were one part's input count asserted of every part — including in the
+ * refusal message, which told the operator "this IOAPIC has 24 inputs" on
+ * chips where that was untrue. Past the last slot the original code armed
+ * the line by bus default: the exact outcome this table exists to prevent.
  */
-#define GSI_DESCRIBED_MAX 8
+#define IOAPIC_REDIR_ENTRY_CEILING 256
 
 typedef struct {
-    uint32_t gsi;
     uint16_t flags;
     bool     active;
 } ioapic_gsi_desc_t;
 
-static ioapic_gsi_desc_t gsi_desc_table[GSI_DESCRIBED_MAX];
+static ioapic_gsi_desc_t gsi_desc_table[IOAPIC_REDIR_ENTRY_CEILING];
 
-bool ioapic_gsi_flags(uint32_t gsi, uint16_t *out_flags) {
+/* Which slot of this chip's table describes that GSI, or false when the GSI
+ * is not one of this chip's inputs at all. The two tests are the same two
+ * SummonsPinIsReachable makes, and they are here rather than borrowed from
+ * it because this path must answer without printing: a GSI belonging to an
+ * IOAPIC this kernel has not brought up is a question, not yet a refusal. */
+static bool ioapic_desc_slot(uint32_t gsi, uint32_t *out_pin) {
+    if (gsi < ioapic_gsi_base) return false;
+    uint32_t pin = gsi - ioapic_gsi_base;
+    if (pin > ioapic_max_entry) return false;
+    if (out_pin) *out_pin = pin;
+    return true;
+}
+
+/* The resolved description alone, which is what a redirection entry needs.
+ * Deliberately NOT firmware's word: an override may say 00 in either field,
+ * which ACPI 6.5 Table 5.26 defines as a deferral to the bus, and a
+ * redirection entry cannot be programmed from a deferral. */
+static bool ioapic_gsi_resolved(uint32_t gsi, uint16_t *out_flags) {
+    uint32_t pin;
+    if (!ioapic_desc_slot(gsi, &pin)) return false;
+    if (!gsi_desc_table[pin].active) return false;
+    if (out_flags) *out_flags = gsi_desc_table[pin].flags;
+    return true;
+}
+
+/* ‼ FIRMWARE'S WORD AND NOTHING ELSE.
+ *
+ * SummonsResolve asks this, and asking ioapic_gsi_flags instead — which it
+ * did — meant reading back THIS KERNEL'S OWN CONCLUSION and stamping it as
+ * the firmware's. ioapic_gsi_flags falls through to the resolved table that
+ * SummonsArm writes, so from the second time any GSI was armed or answered
+ * the "override" it found was the flag word this kernel had stored moments
+ * before. Two things came of it, and neither is cosmetic. The provenance
+ * line printed on the board said "wiring from the firmware's own override"
+ * on machines that published no override — a fabrication, printed as
+ * evidence, by the very field the Summons exists to keep honest. And once
+ * _PRT could describe a wire, a line first described from a link's _CRS as
+ * active HIGH left 0x0D in the resolved table, which the NEXT line on that
+ * same GSI then read back as firmware's word and was programmed by, against
+ * its own bus rule.
+ *
+ * So the question "what did firmware say" is answered from firmware's table
+ * alone — here, and by every caller that ever asks it.
+ *
+ * ‼ ioapic_gsi_flags below, which answers the wider "whatever is known about
+ * this line", now has NO CALLER ANYWHERE IN THE TREE: acpi.c's SCI path was
+ * the last one and it asks this instead, for the same reason. It is left
+ * standing only because deleting it means deleting its declaration in
+ * ioapic.h, and that file is outside this change. It should go with it.
+ */
+bool SummonsFirmwareSaid(uint32_t gsi, uint16_t *out_flags) {
     for (int i = 0; i < ISO_TABLE_SIZE; i++) {
         if (iso_table[i].active && iso_table[i].gsi == gsi) {
             if (out_flags) *out_flags = iso_table[i].flags;
             return true;
         }
     }
-    for (int i = 0; i < GSI_DESCRIBED_MAX; i++) {
-        if (gsi_desc_table[i].active && gsi_desc_table[i].gsi == gsi) {
-            if (out_flags) *out_flags = gsi_desc_table[i].flags;
-            return true;
-        }
-    }
     return false;
 }
 
+bool ioapic_gsi_flags(uint32_t gsi, uint16_t *out_flags) {
+    if (SummonsFirmwareSaid(gsi, out_flags)) return true;
+    return ioapic_gsi_resolved(gsi, out_flags);
+}
+
 void ioapic_describe_gsi(uint32_t gsi, uint16_t flags) {
-    for (int i = 0; i < GSI_DESCRIBED_MAX; i++) {
-        if (gsi_desc_table[i].active && gsi_desc_table[i].gsi == gsi) {
-            gsi_desc_table[i].flags = flags;
-            return;
-        }
+    uint32_t pin;
+    if (!ioapic_desc_slot(gsi, &pin)) {
+        /* Reachable only on a machine with more than one IOAPIC, where the
+         * GSIs of a second chip land outside this one's range. That kernel
+         * does not exist yet — irqchip_init programs a single IOAPIC — and
+         * when it does, each chip brings its own table. Until then this
+         * refusal is the honest end of the road rather than a silent fall
+         * back to the bus default. */
+        kprintf("[IOAPIC] %[E]GSI %u cannot be described: this IOAPIC answers "
+                "for GSI %u to %u, so GSI %u belongs to an IOAPIC this kernel "
+                "has not brought up%[D]\n",
+                gsi, ioapic_gsi_base, ioapic_gsi_base + ioapic_max_entry, gsi);
+        return;
     }
-    for (int i = 0; i < GSI_DESCRIBED_MAX; i++) {
-        if (!gsi_desc_table[i].active) {
-            gsi_desc_table[i].gsi    = gsi;
-            gsi_desc_table[i].flags  = flags;
-            gsi_desc_table[i].active = true;
-            return;
-        }
-    }
-    kprintf("[IOAPIC] %[E]GSI %u left undescribed: all %d description slots "
-            "are taken, so this line is routed by bus default%[D]\n",
-            gsi, GSI_DESCRIBED_MAX);
+    gsi_desc_table[pin].flags  = flags;
+    gsi_desc_table[pin].active = true;
 }
 
 void ioapic_register_iso(uint8_t isa_irq, uint32_t gsi, uint16_t flags) {

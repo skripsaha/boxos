@@ -4,6 +4,9 @@
 #include "acpi.h"
 #include "vmm.h"
 #include "touch.h"
+#include "aml.h"       /* AmlRouteForPciPin — the ACPI routing table, the
+                        * only source here written about THIS machine in
+                        * THIS interrupt mode */
 #include "lapic.h"     /* LAPIC_XAPIC_DEST_MAX — an MSI destination is an
                         * APIC destination, and there is one width for both */
 
@@ -826,6 +829,250 @@ int pci_msix_enable_vector(uint8_t bus, uint8_t device, uint8_t function,
     mc &= ~(uint16_t)0x4000u;               /* function mask = 0 */
     pci_config_write_word(bus, device, function, (uint8_t)(cap + 2), mc);
     return 0;
+}
+
+/*
+ * The bridge that owns `bus`, or false when nothing does.
+ *
+ * Two facts bound this search, and neither is a guess. PCI-to-PCI Bridge
+ * Architecture Specification 1.2 §3.2.5.5: "the secondary bus number must be
+ * greater than the primary bus number" — so bus 0 is never behind a bridge
+ * at all, and a bridge that owns bus B is always on a bus numbered below B.
+ * Everything above B is therefore not searched, and for the common case of a
+ * device on bus 0 nothing is searched.
+ */
+static bool PciParentBridgeOf(uint8_t bus, uint8_t *pbus, uint8_t *pdev,
+                               uint8_t *pfn) {
+    if (bus == 0) return false;
+    for (uint32_t b = 0; b < bus; b++) {
+        for (uint8_t d = 0; d < 32; d++) {
+            if (pci_config_read_word((uint8_t)b, d, 0, PCI_VENDOR_ID) ==
+                PCI_INVALID_VENDOR)
+                continue;
+            uint8_t hdr0 = pci_config_read_byte((uint8_t)b, d, 0,
+                                                PCI_HEADER_TYPE);
+            uint8_t fn_count = (hdr0 & PCI_HEADER_TYPE_MF) ? 8u : 1u;
+            for (uint8_t f = 0; f < fn_count; f++) {
+                if (f && pci_config_read_word((uint8_t)b, d, f,
+                                              PCI_VENDOR_ID) ==
+                         PCI_INVALID_VENDOR)
+                    continue;
+                uint8_t hdr = pci_config_read_byte((uint8_t)b, d, f,
+                                                   PCI_HEADER_TYPE);
+                if ((hdr & PCI_HEADER_TYPE_MASK) != PCI_HEADER_TYPE_BRIDGE)
+                    continue;
+                if (pci_config_read_byte((uint8_t)b, d, f,
+                                         PCI_BRIDGE_SECONDARY_BUS) != bus)
+                    continue;
+                *pbus = (uint8_t)b;
+                *pdev = d;
+                *pfn  = f;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/*
+ * Ask the ACPI routing table where this function's INTx pin goes.
+ *
+ * _PRT describes the bus directly beneath the object that carries it, so the
+ * question cannot be asked with a bus number alone: the path from the root
+ * bus down to this function is what decides which table answers and how many
+ * times the pin is rotated on the way. That path is a fact about config
+ * space, which is this file's to read; which namespace object describes each
+ * level is aml.c's to know.
+ *
+ * The walk goes UP — this function, then the bridge that owns its bus, and so
+ * on — and the array is reversed before it is handed over. It cannot run
+ * away: every step marks a bus in the same visited bitmap the scanner uses,
+ * a bus already marked is a loop in the bridge graph and is refused aloud,
+ * and a PCI bus number is eight bits (PCI 3.0 §3.2.2.3.2) so there are 256 of
+ * them and no step can be taken twice.
+ */
+#define PCI_BUS_NUMBER_COUNT 256   /* the bus number field is eight bits */
+
+static bool PciRouteFor(uint8_t bus, uint8_t device, uint8_t function,
+                         uint8_t intx_pin, AmlRoute *out) {
+    AmlPciStep step[PCI_BUS_NUMBER_COUNT];
+    uint32_t   depth = 0;
+    uint64_t   visited[4];
+    pci_visited_clear(visited);
+
+    uint8_t cur_bus = bus, cur_dev = device, cur_fn = function;
+    for (;;) {
+        if (pci_visited_test_set(visited, cur_bus)) {
+            kprintf("[PCI] %[E]the bridge graph leads back to bus %u — this "
+                    "function's path to a root bus is a loop, and its "
+                    "interrupt routing is refused rather than followed "
+                    "round%[D]\n", cur_bus);
+            return false;
+        }
+        step[depth].device   = cur_dev;
+        step[depth].function = cur_fn;
+        depth++;
+
+        uint8_t pb = 0, pd = 0, pf = 0;
+        if (!PciParentBridgeOf(cur_bus, &pb, &pd, &pf)) break;
+        cur_bus = pb;
+        cur_dev = pd;
+        cur_fn  = pf;
+    }
+
+    for (uint32_t i = 0, j = depth - 1; i < j; i++, j--) {
+        AmlPciStep swap = step[i];
+        step[i] = step[j];
+        step[j] = swap;
+    }
+
+    /* Segment 0: the legacy 0xCF8/0xCFC door and the ECAM window this file
+     * maps for it address one segment group, and the PCI Firmware
+     * Specification 3.0 §4.1.2 gives every other segment its own base. A
+     * root bridge that declares a different _SEG will not match, which is
+     * the right answer rather than a wrong one. */
+    return AmlRouteForPciPin(0, cur_bus, step, depth, intx_pin, out);
+}
+
+bool PciSummons(uint8_t bus, uint8_t device, uint8_t function, Summons *out) {
+    if (!out) return false;
+
+    /* §6.2.4, Interrupt Pin: "A value of 1 corresponds to INTA#. A value of 2
+     * corresponds to INTB#. A value of 3 corresponds to INTC#. A value of 4
+     * corresponds to INTD#. Devices (or device functions) that do not use an
+     * interrupt pin must put a 0 in this register. The values 05h through FFh
+     * are reserved."
+     *
+     * Asked FIRST, and it never was before. A function that reports 0 has no
+     * INTx wire at all, and its Interrupt Line byte means nothing — whatever
+     * POST happened to leave there was read as a GSI and a pin was unmasked
+     * for a device that can never drive it. */
+    uint8_t pin = pci_config_read_byte(bus, device, function,
+                                       PCI_INTERRUPT_PIN);
+    if (pin == 0) {
+        kprintf("[PCI] %02x:%02x.%u has no INTx line: its Interrupt Pin "
+                "register reads 0, which PCI 3.0 §6.2.4 defines as a function "
+                "that does not use an interrupt pin\n", bus, device, function);
+        return false;
+    }
+    if (pin > 4) {
+        kprintf("[PCI] %[E]%02x:%02x.%u reports Interrupt Pin %u, which PCI "
+                "3.0 §6.2.4 reserves — there is no INTx# wire that value "
+                "names%[D]\n", bus, device, function, pin);
+        return false;
+    }
+
+    /* ‼ THE ROUTING TABLE FIRST, because it is the only source here that was
+     * written about THIS machine in THIS interrupt mode. Everything below is
+     * the fallback, and it stays exactly as strict as it was: a board that
+     * does not answer leaves this function reading the byte the firmware
+     * wrote for the 8259, and the refusal is printed by the code that
+     * refused. Nothing is silently substituted in either direction. */
+    uint32_t        gsi      = 0;
+    SummonsSource   gsi_from = SUMMONS_FROM_NOBODY;
+    SummonsPolarity polarity = SUMMONS_ACTIVE_LOW;
+    SummonsTrigger  trigger  = SUMMONS_LEVEL;
+    SummonsSource   wiring_from = SUMMONS_FROM_BUS_RULE;
+
+    AmlRoute route;
+    if (PciRouteFor(bus, device, function, pin, &route)) {
+        gsi      = route.gsi;
+        gsi_from = SUMMONS_FROM_ROUTING_TABLE;
+        if (route.wiring_known) {
+            /* Only a link's own _CRS describes the wire. A directly numbered
+             * entry says which GSI and nothing else, and the PCI bus rule
+             * already answers the rest — inventing a polarity from silence
+             * is the defect the Summons exists to close. */
+            polarity    = route.active_low ? SUMMONS_ACTIVE_LOW
+                                           : SUMMONS_ACTIVE_HIGH;
+            trigger     = route.level ? SUMMONS_LEVEL : SUMMONS_EDGE;
+            wiring_from = SUMMONS_FROM_ROUTING_TABLE;
+        }
+        kprintf("[PCI] %02x:%02x.%u INT%c# is routed to GSI %u by %s\n",
+                bus, device, function, 'A' + (pin - 1), gsi,
+                route.named_by ? route.named_by : "the ACPI routing table");
+    } else {
+        uint8_t line = pci_config_read_byte(bus, device, function,
+                                            PCI_INTERRUPT_LINE);
+        if (line == 0xFF) {
+            kprintf("[PCI] %02x:%02x.%u drives INT%c# but its Interrupt Line "
+                    "byte is 255, which PCI 3.0 §6.2.4 footnote 43 defines as "
+                    "\"unknown\" or \"no connection\" — the firmware is saying "
+                    "it does not know where this wire goes\n",
+                    bus, device, function, 'A' + (pin - 1));
+            return false;
+        }
+        if (line > 15) {
+            /* Footnote 43 again: "Values between 15 and 254 are reserved."
+             * Taken anyway, and said out loud, because firmware on an APIC
+             * machine routinely writes the resolved GSI into a field the
+             * specification only defines for the 8259s. This is the one value
+             * in the whole description with no document behind it, which is
+             * precisely why the Summons records where it came from — and why
+             * _PRT, when a board answers it, is believed over this. */
+            kprintf("[PCI] %02x:%02x.%u: Interrupt Line reads %u, a value PCI "
+                    "3.0 §6.2.4 footnote 43 reserves — read as a GSI because "
+                    "firmware on an APIC machine writes one there, and only "
+                    "because the routing table did not answer\n",
+                    bus, device, function, line);
+        }
+        gsi      = line;
+        gsi_from = SUMMONS_FROM_INTERRUPT_LINE;
+    }
+
+    /* One range test for both sources, and it is a test against THIS
+     * KERNEL, not against the machine. The routing table may legitimately
+     * name a pin on a second IOAPIC or on a part with more than twenty-four
+     * inputs; what stops the line here is that idt_init installs interrupt
+     * gates for IRQ_MAX_COUNT vectors, so there is no vector for it to be
+     * delivered on. Whether the CHIP has such a pin is the IOAPIC's own
+     * question, answered from its VER register in ioapic_init, which names
+     * the same boundary from the other side. Said, not truncated. */
+    if (gsi >= IRQ_MAX_COUNT) {
+        kprintf("[PCI] %[E]%02x:%02x.%u drives INT%c# and %s puts it on GSI "
+                "%u, past the %u interrupt vectors this kernel installs gates "
+                "for — there is nowhere to deliver it%[D]\n",
+                bus, device, function, 'A' + (pin - 1),
+                SummonsSourceName(gsi_from), gsi, IRQ_MAX_COUNT);
+        return false;
+    }
+
+    /* §6.2.2, Table 6-1, bit 10: "This bit disables the device/function from
+     * asserting INTx#. A value of 0 enables the assertion of its INTx#
+     * signal. A value of 1 disables the assertion of its INTx# signal."
+     * Unmasking an IOAPIC pin for a function that cannot drive its wire arms
+     * nothing, and both callers reach this only after an MSI attempt — the
+     * one path in this file that deliberately sets that bit. */
+    uint16_t cmd = pci_config_read_word(bus, device, function, PCI_COMMAND);
+    if (cmd & PCI_CMD_INT_DISABLE) {
+        pci_config_write_word(bus, device, function, PCI_COMMAND,
+                              (uint16_t)(cmd & ~(uint16_t)PCI_CMD_INT_DISABLE));
+    }
+
+    Summons line_desc = {
+        .gsi         = gsi,
+        /* No ISA override is applied to this number. The MADT Interrupt
+         * Source Override table describes ISA sources — the kernel's own
+         * ioapic.c says so where it keeps it — and remapping a PCI line
+         * through it would land the pin wherever some unrelated legacy IRQ
+         * was moved to. The honest translation from (device, pin) to GSI is
+         * _PRT's, and it is the one asked for above. */
+        .vector      = irq_gsi_to_vector((uint8_t)gsi),
+        .intx_pin    = pin,
+        .polarity    = polarity,
+        .trigger     = trigger,
+        /* Shareable whatever the source says. A link's _CRS may state
+         * "exclusive", and PCI 3.0 §6.5 states the opposite about every INTx
+         * wire: "PCI interrupts are shareable. PCI device drivers are
+         * required to support shared interrupts". The descriptor describes
+         * one link's allocation; the bus rule describes the wire. */
+        .shared      = true,
+        .gsi_from    = gsi_from,
+        .wiring_from = wiring_from,
+        .bus         = "PCI",
+    };
+    *out = line_desc;
+    return true;
 }
 
 /* Decode a PCIe Express capability (cap 0x10) to a one-line summary

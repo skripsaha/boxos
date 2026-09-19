@@ -36,6 +36,12 @@
 static xhci_controller_t g_controllers[XHCI_MAX_CONTROLLERS];
 static uint8_t           g_controller_count = 0;
 
+/* One link per controller record, for the INTx path. It lives beside the
+ * records rather than inside them because the answerer owns its node and this
+ * file owns the records; a shared PCI line threads these together with the
+ * nodes of whatever else sits on the same wire. */
+static SummonsResponder  g_intx_responder[XHCI_MAX_CONTROLLERS];
+
 uint8_t xhci_controller_count(void) {
     return g_controller_count;
 }
@@ -437,21 +443,45 @@ static void xhci_setup_interrupts(xhci_controller_t* ctrl)
         return;
     }
 
-    ctrl->irq_line = pci_config_read_byte(ctrl->pci_dev.bus, ctrl->pci_dev.device,
-                                          ctrl->pci_dev.function, 0x3C);
-
-    if (ctrl->irq_line == 0xFF || ctrl->irq_line >= IRQ_MAX_COUNT) {
-        kprintf("[xHCI] no MSI capability and no usable INTx line "
-                "(0x%02x) — events will be polled from the timer tick\n",
-                ctrl->irq_line);
+    /* INTx, and it arrives DESCRIBED. The bare Interrupt Line byte used to go
+     * straight into irq_register_handler and irqchip_enable_irq, which armed
+     * an open-drain level-sensitive wire as an edge and gave the line room
+     * for exactly one driver. PciSummons reads the Interrupt Pin register
+     * first — a function reporting no pin has no line to arm, whatever byte
+     * sits at 0x3C — applies the PCI bus rule, and marks the GSI as having
+     * come from the weakest source there is. */
+    uint8_t index = xhci_controller_index(ctrl);
+    Summons line;
+    if (index >= XHCI_MAX_CONTROLLERS ||
+        !PciSummons(ctrl->pci_dev.bus, ctrl->pci_dev.device,
+                    ctrl->pci_dev.function, &line)) {
+        kprintf("[xHCI %s] no MSI capability and no INTx line to arm — "
+                "events will be polled from the timer tick\n", ctrl->name);
         ctrl->use_polling = true;
         return;
     }
 
-    irq_register_handler(ctrl->irq_line, xhci_irq_handler);
-    irqchip_enable_irq(ctrl->irq_line);
+    if (!SummonsAnswer(&line, &g_intx_responder[index], xhci_irq_handler,
+                       ctrl->name) ||
+        !SummonsArm(&line)) {
+        kprintf("[xHCI %s] INTx line refused — events will be polled from the "
+                "timer tick\n", ctrl->name);
+        ctrl->use_polling = true;
+        return;
+    }
+
+    /* Printed from the description SummonsArm handed back, not from the bus
+     * rule. The pin may already have been carrying a wiring of its own — a
+     * link's _CRS can state active high — and this line joined it. */
+    ctrl->irq_line    = (uint8_t)line.gsi;
     ctrl->use_polling = false;
-    kprintf("[xHCI] INTx IRQ %u registered (MSI unavailable)\n", ctrl->irq_line);
+    kprintf("[xHCI %s] INTx INT%c# on GSI %u (vector %u), %s and %s, %s "
+            "(MSI unavailable)\n",
+            ctrl->name, 'A' + (line.intx_pin - 1), line.gsi, line.vector,
+            line.trigger == SUMMONS_LEVEL ? "level-triggered" : "edge-triggered",
+            line.polarity == SUMMONS_ACTIVE_LOW ? "active low" : "active high",
+            line.shared ? "shared with whatever else is on the wire"
+                        : "and this kernel holds it alone");
 }
 
 /*

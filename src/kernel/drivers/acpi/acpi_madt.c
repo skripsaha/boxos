@@ -304,6 +304,34 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
                 madt_iso_t* iso = (madt_iso_t*)entry;
                 debug_printf("[MADT]   ISO: bus=%u, source IRQ %u -> GSI %u, flags=0x%04x\n",
                              iso->bus, iso->source, iso->gsi, iso->flags);
+
+                /* AN OVERRIDE IS ABOUT AN ISA SOURCE, AND THE TABLE SAYS SO
+                 * IN THE FIELD ITSELF. ACPI 6.5 §5.2.12.5, Table 5.25 gives
+                 * the Bus byte exactly one legal value and spells out what it
+                 * means: "0 Constant, meaning ISA", and Source as
+                 * "Bus-relative interrupt source (IRQ)".
+                 *
+                 * This byte was read, printed and then ignored. It matters
+                 * because the table it feeds is indexed BY ISA IRQ and is
+                 * consulted for every line this kernel arms: an entry whose
+                 * bus is not ISA would answer, under an ISA number, for a
+                 * source on some other bus — handing one line's polarity and
+                 * trigger to a different wire entirely. The constant has one
+                 * value, so an entry carrying another is a malformed entry
+                 * and there is nothing to salvage from it. Named rather than
+                 * dropped in silence: on a board that writes one, this line
+                 * is the only thing that will ever say why some device is
+                 * described the way it is. */
+                if (iso->bus != 0) {
+                    kprintf("[MADT] %[E]interrupt source override for source "
+                            "%u -> GSI %u ignored: it names bus %u, and ACPI "
+                            "6.5 Table 5.25 gives that field one value, 0 "
+                            "meaning ISA — this entry describes no source "
+                            "this kernel can place%[D]\n",
+                            iso->source, iso->gsi, iso->bus);
+                    break;
+                }
+
                 ioapic_register_iso(iso->source, iso->gsi, iso->flags);
                 break;
             }
