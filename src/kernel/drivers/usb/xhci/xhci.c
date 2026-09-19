@@ -42,6 +42,71 @@ static uint8_t           g_controller_count = 0;
  * nodes of whatever else sits on the same wire. */
 static SummonsResponder  g_intx_responder[XHCI_MAX_CONTROLLERS];
 
+#if CONFIG_XHCI_INTX_PROOF
+/* ‼ THE ONLY WITNESS THIS MACHINE HAS THAT THE WIRE DELIVERED.
+ *
+ * "The keyboard still types" does not say it, and believing that it did cost
+ * this scenario three checks that were green on a kernel whose interrupts did
+ * nothing at all. Two reasons, either one of them enough:
+ *
+ *   - xhci_tick drains every controller's event ring once per timer tick
+ *     whether or not it has an interrupt, deliberately, and the comment there
+ *     says why. A device on a line that fired once and was never re-armed
+ *     goes on working off the tick, a few milliseconds later than it should.
+ *   - the emulated i8042 feeds the same key ring over IRQ1, an ISA edge line
+ *     that has nothing to do with this one, so the shell echoes even with the
+ *     USB keyboard unplugged. The scenario takes that chip out of the machine
+ *     for its own run; this witness is what makes the run mean something even
+ *     if it ever comes back.
+ *
+ * So the line itself says when it fires, through kprintf, because a witness
+ * compiled out is no witness. Every call, not a tally at the end: the claim
+ * is that the line delivered AGAIN long after the first time, and only a
+ * count that can be read at two moments shows that. The EOI-broadcast defect
+ * this key exists to watch for shows up here and nowhere else — the line
+ * fires once and is never heard from again, while the machine looks well.
+ *
+ * ONE ENTRY POINT PER CONTROLLER, and that is the second thing being watched.
+ * An irq_callback_t carries no argument, so a single shared function could
+ * not say WHICH answerer on the chain was called — and "the pin's chain holds
+ * two and calls both" is exactly what SummonsSettleOnPin fixed and what a
+ * rewritten redirection entry would break. A thunk apiece gives each node on
+ * the wire a name in the log.
+ *
+ * Under the proof key alone. An interrupt that prints is not an interrupt any
+ * shipped kernel should take. */
+static volatile uint32_t g_intx_proof_calls;
+
+static void xhci_intx_proof_fired(uint8_t index)
+{
+    xhci_controller_t *ctrl = xhci_controller_at(index);
+    kprintf("[xHCI %s] INTx wire fired: this controller's answerer was called "
+            "(call #%u on the line)\n",
+            ctrl ? ctrl->name : "?",
+            __atomic_add_fetch(&g_intx_proof_calls, 1, __ATOMIC_RELAXED));
+    xhci_irq_handler();
+}
+
+#define XHCI_INTX_PROOF_THUNK(n) \
+    static void xhci_intx_proof_answer_##n(void) { xhci_intx_proof_fired(n); }
+XHCI_INTX_PROOF_THUNK(0)
+XHCI_INTX_PROOF_THUNK(1)
+XHCI_INTX_PROOF_THUNK(2)
+XHCI_INTX_PROOF_THUNK(3)
+XHCI_INTX_PROOF_THUNK(4)
+XHCI_INTX_PROOF_THUNK(5)
+XHCI_INTX_PROOF_THUNK(6)
+XHCI_INTX_PROOF_THUNK(7)
+#undef XHCI_INTX_PROOF_THUNK
+
+static const irq_callback_t g_intx_proof_answer[XHCI_MAX_CONTROLLERS] = {
+    xhci_intx_proof_answer_0, xhci_intx_proof_answer_1,
+    xhci_intx_proof_answer_2, xhci_intx_proof_answer_3,
+    xhci_intx_proof_answer_4, xhci_intx_proof_answer_5,
+    xhci_intx_proof_answer_6, xhci_intx_proof_answer_7,
+};
+#endif /* CONFIG_XHCI_INTX_PROOF */
+
 uint8_t xhci_controller_count(void) {
     return g_controller_count;
 }
@@ -416,6 +481,29 @@ static void xhci_setup_interrupts(xhci_controller_t* ctrl)
      * cached handles already populated or the first hot-plug event is lost. */
     xhci_interrupt_touch_init();
 
+#if CONFIG_XHCI_INTX_PROOF
+    /* `make INTX=on`. Both message-signalled paths are skipped, so this
+     * controller goes down the wire.
+     *
+     * Not a fault being injected: a controller whose MSI capability is absent
+     * or unusable is an ordinary machine, and it is the only machine on which
+     * the Summons work does anything at all. Everything below this point runs
+     * exactly as it would on that board — same PciSummons, same _PRT lookup,
+     * same SummonsAnswer, same SummonsArm. What the key removes is the two
+     * shortcuts that make QEMU never arrive there.
+     *
+     * Said through kprintf, not debug_printf: the scenario that turns this on
+     * has to be able to tell a boot that took the wire from a boot where the
+     * key silently did nothing. */
+    kprintf("[xHCI %s] INTX=on: MSI-X and MSI declined on purpose — this boot "
+            "arms the INTx wire\n", ctrl->name);
+    /* The vector this controller would have signalled on is not printed. It
+     * is not the vector the wire ends up delivering under, and two different
+     * numbers for one controller in neighbouring lines is a question an
+     * operator on a board should never have to answer. The cast keeps the
+     * helper referenced under the key, which is all the print was doing. */
+    (void)xhci_vector_for;
+#else
     /* MSI-X before MSI, because that is the order in which controllers
      * actually implement them. QEMU's xHCI offers MSI-X and no MSI at all; the
      * PCH offers both. Trying only MSI meant the emulated controller — the one
@@ -442,6 +530,7 @@ static void xhci_setup_interrupts(xhci_controller_t* ctrl)
                 xhci_vector_for(ctrl), g_amp.bsp_lapic_id);
         return;
     }
+#endif /* CONFIG_XHCI_INTX_PROOF */
 
     /* INTx, and it arrives DESCRIBED. The bare Interrupt Line byte used to go
      * straight into irq_register_handler and irqchip_enable_irq, which armed
@@ -461,7 +550,12 @@ static void xhci_setup_interrupts(xhci_controller_t* ctrl)
         return;
     }
 
-    if (!SummonsAnswer(&line, &g_intx_responder[index], xhci_irq_handler,
+#if CONFIG_XHCI_INTX_PROOF
+    irq_callback_t answer = g_intx_proof_answer[index];
+#else
+    irq_callback_t answer = xhci_irq_handler;
+#endif
+    if (!SummonsAnswer(&line, &g_intx_responder[index], answer,
                        ctrl->name) ||
         !SummonsArm(&line)) {
         kprintf("[xHCI %s] INTx line refused — events will be polled from the "

@@ -923,6 +923,19 @@ void kernel_main(void)
     debug_printf("[INIT] Serial console (COM1 RX)...\n");
     serial_console_init();
 
+    /* Every controller on this machine has now come up and moved its first
+     * bytes, and every one of those addresses was walked by the tables
+     * iommu_take_the_wheel switched on above. This is the line at which the
+     * units can be asked what that cost.
+     *
+     * It is the only read of the fault channel that can see a fault a DRIVER
+     * caused: a hole in the identity map — an address above what it covers,
+     * an RMRR the DMAR named and the map left out — is recorded in the units'
+     * Fault Recording registers and nowhere else, and the two earlier reads
+     * both happen before any driver has started a transfer. Without this one
+     * the record stays in hardware, unsaid, and the machine looks alive. */
+    iommu_sweep_faults();
+
     kprintf("Kernel initialization complete!\n");
     kprintf("\n");
 

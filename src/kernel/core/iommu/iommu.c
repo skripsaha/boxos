@@ -25,9 +25,11 @@
  * further down this file, is the second step -- it seats every device PCI
  * reports and then throws the switch, or refuses and throws nothing.
  *
- * Their fault channel is read once, at the handover from firmware, by
+ * Their fault channel is read at the handover from firmware by
  * iommu_publish_touch -- which kernel_main calls after guide_init, because
- * before guide_init there is no Touch to say it on. On VT-d that channel is
+ * before guide_init there is no Touch to say it on -- then again the instant
+ * the switch is thrown, and once more by iommu_sweep_faults at the line
+ * where the last driver has finished coming up behind the tables. On VT-d that channel is
  * live and holds whatever firmware left in it; on AMD-Vi it is inert until
  * IommuEn, and the AMD side says so on the board rather than reading an
  * empty ring in silence.
@@ -120,14 +122,33 @@ int iommu_init(void) {
  *
  * Switching translation on IS an event, and iommu_take_the_wheel answers to
  * it: it reads this same channel once more the instant the switch is thrown,
- * which is the first instant a fault can exist at all. What still has no
- * reader is a fault raised later, under a running driver -- the unit's own
+ * which is the first instant a fault can exist at all. Every driver on the
+ * machine having come up behind those tables is a third event, and
+ * iommu_sweep_faults answers to that one. What still has no reader is a
+ * fault raised after the boot, on a machine already running -- the unit's own
  * Fault Event interrupt is the answer to that one, not a timer, and no
  * vector is armed for it in this tree. */
 void iommu_publish_touch(void) {
     if (!g_ops) return;
     TouchPublish("iommu:ready", g_ops->name, 0);
     if (g_ops->drain_faults) g_ops->drain_faults();
+}
+
+/* The same channel, read once more at the end of the bring-up. iommu.h says
+ * why this call exists and why it speaks even when it finds nothing; what is
+ * here is only the doing of it.
+ *
+ * The sentence goes FIRST and the records follow it, so the log reads as a
+ * question and its answer: everything a unit had is printed under the line
+ * that says it was asked. A boot with nothing to report prints the one line
+ * and stops, and that line is what tells a reader -- or an oracle -- that the
+ * silence underneath it was measured rather than assumed. */
+void iommu_sweep_faults(void) {
+    if (!g_ops || !g_ops->drain_faults) return;
+    kprintf("[IOMMU] fault channel read again with every driver up: whatever "
+            "any unit recorded while the controllers came up behind the "
+            "tables is on the lines under this one\n");
+    g_ops->drain_faults();
 }
 
 /* ───── Taking the wheel: seat every device, then switch translation on ─────
@@ -369,10 +390,11 @@ int iommu_take_the_wheel(void) {
     /* The first instant an I/O page fault can exist is the instant above.
      * Reading the channel here is not a poll on an interval — it answers to
      * that event and to nothing else, the same way the read in
-     * iommu_publish_touch answers to the handover from firmware. A fault
-     * raised later, while a driver is running, still has no reader: the
-     * unit's own Fault Event interrupt is what answers that one, and no
-     * vector is armed for it in this tree. */
+     * iommu_publish_touch answers to the handover from firmware. What a
+     * driver then causes is read by iommu_sweep_faults, at the line where the
+     * last of them has come up; only a fault raised after the boot is still
+     * without a reader, and the unit's own Fault Event interrupt is what
+     * answers that one, not a timer, and no vector is armed for it here. */
     if (g_ops->drain_faults) g_ops->drain_faults();
     return 0;
 #endif

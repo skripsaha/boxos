@@ -210,6 +210,64 @@ restore_all() {
     rm -f "$snap" "$MUT_MANIFEST"
 }
 
+# ===========================================================================
+# A BUILD KEY IS A MUTATION TOO, AND IT IS THE ONE GIT CANNOT SEE
+# ===========================================================================
+#
+# `make IOMMU=off` leaves a tree whose kernel is not the one anybody else
+# expects, and unlike a mutated source file it leaves NOTHING for `git status`
+# to show: every file is clean and only build/.iommu.off says which kernel is
+# on the disk. A scenario that builds with a key and puts it back on its last
+# line puts it back on exactly one path out of the function — not on ^C, not
+# on `set -u`, not on an early `return` after "never reached a shell", and not
+# on a failed build. The next `make run` then boots the other kernel, silently,
+# and the person at the desk has no way to notice.
+#
+# So a build key is taken under the doctrine the mutated files already live
+# under: recorded where the record outlives this process, undone by the EXIT
+# trap that no early return can skip, and answered at startup when a killed
+# run left one behind.
+BUILDKEY_MANIFEST="$SCRATCH/buildkey"
+
+# build_with_key KEY=VALUE... — build under the key and record that the tree is
+# not the ordinary one. The record is written BEFORE make runs, because a build
+# that fails half way through has already replaced objects.
+#
+# Returns make's status rather than exiting, which is the difference from
+# build(): a scenario that builds twice has to be able to say WHICH build
+# failed.
+build_with_key() {
+    printf '%s\n' "$*" > "$BUILDKEY_MANIFEST"
+    make "$@" >"$SCRATCH/build.log" 2>&1
+}
+
+# Put the ordinary kernel back on the disk. Idempotent by construction: with
+# nothing recorded there is nothing to undo, so the EXIT trap may call it after
+# a scenario already has.
+buildkey_restore() {
+    [ -f "$BUILDKEY_MANIFEST" ] || return 0
+    local key
+    key=$(cat "$BUILDKEY_MANIFEST")
+    echo "logcheck: the tree was built with '$key' — rebuilding it plain, because"
+    echo "          the kernel on this disk is not the one the next run expects"
+    echo "          and no file in git says so."
+    if make >"$SCRATCH/build.restore.log" 2>&1; then
+        rm -f "$BUILDKEY_MANIFEST"
+        return 0
+    fi
+    # The record is KEPT, and the status is non-zero. Both were measured: a
+    # second agent building into the same build/ tore the image out from under
+    # this rebuild, the restore failed, and the run still printed "24 passed, 0
+    # failed" over a tree that was carrying the other kernel. A run that leaves
+    # the tree wrong is not a green run, and the record left behind is what
+    # makes the next run of this file put it right before it measures anything.
+    echo "logcheck: THE REBUILD FAILED — the tree still carries '$key'. The"
+    echo "          record is kept, so the next run puts it back first."
+    echo "          tail: $SCRATCH/build.restore.log"
+    tail -10 "$SCRATCH/build.restore.log" | sed 's/^/          /'
+    return 1
+}
+
 # Three preflights, because the three failures they catch are different. The
 # first is this mechanism's own bookkeeping: a manifest that outlived its run.
 # The second needs no bookkeeping at all and catches what the OLD pairs left
@@ -224,6 +282,10 @@ if [ -s "$MUT_MANIFEST" ]; then
     sed 's/^/          /' "$MUT_MANIFEST"
     restore_all
     echo "logcheck: the tree has been put back."
+fi
+if [ -s "$BUILDKEY_MANIFEST" ]; then
+    echo "logcheck: a previous run was killed with the tree built under a key."
+    buildkey_restore
 fi
 MUT_LEFTOVER=$(grep -rl -e "logcheck mutation" -e "logcheck injection" src 2>/dev/null || true)
 if [ -n "$MUT_LEFTOVER" ]; then
@@ -292,6 +354,10 @@ LOGCHECK_FINISHED=0
 on_exit() {
     local rc=$?
     restore_all
+    # After restore_all, never before: the rebuild has to be made from sources
+    # that are already back to what they were. A rebuild that fails takes the
+    # whole run down with it — the tree is not the one it was handed.
+    buildkey_restore || rc=1
     if [ "$LOGCHECK_FINISHED" = 0 ] && [ "$rc" = 0 ]; then
         echo "logcheck: the run ended before its summary. The tree has been put"
         echo "          back, and this counts as a failure — a run that was cut"
@@ -351,6 +417,12 @@ OVERTAKE_DRAIN_QUIET_S=${OVERTAKE_DRAIN_QUIET_S:-8}
 # especially the ones that exist to prove it did NOT — use this shorter window,
 # because waiting out the ordinary one would only be waiting.
 REACT_QUIET_S=${REACT_QUIET_S:-20}
+# The banner is not the prompt: a boot goes on printing after "BoxOS Shell".
+# This is how long that burst may pause and still be the same burst — the same
+# kind of number as OVERTAKE_DRAIN_QUIET_S, a property of the writer, not a
+# guess at how long a boot takes. A log that has been quiet this long is a
+# machine sitting at its prompt.
+BOOT_BURST_QUIET_S=${BOOT_BURST_QUIET_S:-3}
 # How many screendumps the paint scenario may take before it accepts what it
 # sees. Not a deadline on the machine: `playtime` pours until it is stopped, so
 # every extra shot can only find MORE of the screen painted, never less. The
@@ -493,8 +565,36 @@ harness() {
 }
 qi_why() { tr '\n' ' ' < "$SCRATCH/qemu-input.err" 2>/dev/null; }
 
+# ‼ A GUEST THAT WILL NOT ECHO IS NOT A HARNESS FAILURE, AND CALLING IT ONE
+#   POINTS THE OPERATOR AT THE WRONG MACHINE.
+#
+# qemu-input.sh verifies the echo per character itself and gives up with
+# "guest echoed N of M characters ... keystrokes are being dropped".
+# Everything else it can fail with — no monitor socket, a socket path longer
+# than sun_path, no nc, QEMU already gone — is this desk. That one sentence is
+# the GUEST: a shell that takes characters and prints nothing is exactly what
+# a controller whose rings nobody translates looks like, and it is a verdict
+# on BoxOS.
+#
+# Measured, on a kernel with the write bit taken out of the identity map:
+# three correct FAILs about the keyboard and the volume, and beside them a
+# yellow HARNESS line saying the run "could not talk to the machine it was
+# judging, so its verdicts are not evidence" — the opposite of what happened.
+#
+# OPT-IN per scenario, and off by default on purpose: a scenario that does not
+# go on to judge the keystroke itself would otherwise have NO count for a
+# guest that went deaf, and a run with nothing counted must never be green. A
+# scenario turns this on exactly when a check of its own answers for it.
+TYPE_SILENCE_IS_JUDGED=${TYPE_SILENCE_IS_JUDGED:-0}
 type_cmd() {   # the characters of a command line; NOT the Enter after them
     ./tools/qemu-input.sh type "$1" >/dev/null 2>"$SCRATCH/qemu-input.err" && return 0
+    if [ "$TYPE_SILENCE_IS_JUDGED" = 1 ] \
+       && grep -q "guest echoed" "$SCRATCH/qemu-input.err" 2>/dev/null; then
+        echo "  (the machine took '$1' and echoed nothing back: $(qi_why))"
+        echo "   That is this kernel, not this desk. The keystroke check below is"
+        echo "   where it is counted."
+        return 1
+    fi
     harness "could not type '$1' into the machine: $(qi_why)"
     return 1
 }
@@ -1688,6 +1788,588 @@ run_earlyirq() {
     chk $? "and the machine boots through it to a shell"
 
     make >"$SCRATCH/build.log" 2>&1
+}
+
+# ── iommu: the machine runs its DMA through tables this kernel wrote ───────
+#
+# DMA translation is ON by default since dd871b4: straight after pci_init
+# every PCI function on the machine is given an identity-map entry and then
+# every remap unit is switched on, or none of them is and the kernel says
+# why. Not one line of that had ever executed. QEMU publishes no DMAR unless
+# it is asked to, so every run this tree has ever done ended at
+#
+#   [IOMMU] ACPI describes neither DMAR nor IVRS
+#
+# and the identity tables, the seating of every function, the switch itself
+# and the fault channel were all shipped unexecuted towards a board on which
+# the failure mode is a screen that never comes back.
+#
+# `-device intel-iommu` on a q35 machine is what asks QEMU for the hardware.
+# It goes in through QEMUEXTRA rather than a key of its own — see the
+# Makefile for why that hook exists.
+#
+# ‼ WHY UEFI AND NOT THE ORDINARY BIOS BOOT. The MBR path does not mount its
+#   volume on q35 at all, and that is nothing to do with translation:
+#   measured on a plain `-machine q35` boot with no remap hardware anywhere
+#   near it, TagFS says "no volume found on any of the 1 seated medium(s)"
+#   just the same. It is a separate defect of the BIOS path on q35 and not
+#   this scenario's business. What this scenario needs is a machine that has
+#   a DMAR and mounts, and UEFI+q35 is it — which is also how the owner's
+#   board boots.
+#
+# ‼ intremap IS DELIBERATELY NOT ASKED FOR. QEMU's interrupt remapping wants
+#   kernel-irqchip=split, which is a KVM setting and means nothing under the
+#   TCG this desk runs, and this kernel writes no interrupt-remap table: it
+#   prints "unit at 0x... arrived REMAPPING INTERRUPTS" and takes the unit
+#   off that mode. The claim here is about DMA. DMA is what is switched on.
+#
+# What is asked, and what each answer is worth:
+#
+#   1. THE MACHINE REALLY HAS THE HARDWARE. Without this one line every check
+#      below is a check on a machine with no IOMMU — the kernel prints "ACPI
+#      describes neither DMAR nor IVRS", takes no wheel, boots, mounts, types,
+#      and this scenario goes green having proved nothing whatever. It is the
+#      first check for exactly that reason.
+#   2. The units came up.
+#   3. The contexts were populated BEFORE the switch. That is an ORDER, and
+#      the log carries it: iommu_init prints "translation still OFF at this
+#      line", the switch prints how many functions it seated and how many
+#      units of how many are translating, and every driver on the machine
+#      prints after it.
+#   4. The machine survives its own switch. It reaches a shell, it answers a
+#      keystroke — xHCI's event and transfer rings are reached by DMA — and
+#      it mounts its volume, which is AHCI's command list and FIS reached by
+#      DMA. THIS IS THE SCENARIO. Everything above it is arrangement.
+#   5. Nothing in the fault channel — asked of the units AFTER the drivers
+#      have run, which is the only moment at which the answer is worth
+#      anything. It was not, once: see the note over that check.
+#
+# And then the way back: `make IOMMU=off` on the same machine, with the same
+# DMAR in front of it, must build, boot, mount, and SAY that it is not
+# translating.
+
+# The WHOLE boot log, because every fact judged here is printed long before
+# the shell exists. util_boot keeps only the tail after the banner, which is
+# why it is not used.
+iommu_boot() {
+    local name=$1 args=$2 extra=$3
+    make run-stop >/dev/null 2>&1
+    # ‼ THE LOG OF THE RUN BEFORE IS A TRAP, AND IT SPRANG ONCE HERE.
+    #
+    # run-bg removes build/serial.log itself — but only if it gets that far.
+    # When it did not (a build that failed underneath it, a machine that was
+    # already running), the previous half's log was still on disk with its
+    # banner and its mount in it, wait_for_line returned instantly, and this
+    # scenario judged the SECOND kernel by the FIRST one's boot: four greens
+    # from a machine that was never started. Measured, first try.
+    #
+    # So the log is taken away here, and the machine's existence is a fact
+    # this function checks rather than assumes. Neither is a verdict on
+    # BoxOS, which is why the second one is a harness failure: a run that
+    # could not start the machine it was judging judged nothing.
+    rm -f build/serial.log
+    # shellcheck disable=SC2086
+    make run-bg $args QEMUEXTRA="$extra" >"$SCRATCH/runbg.log" 2>&1
+    if [ ! -S build/qemu.mon ]; then
+        harness "no machine was started for '$name' ($args QEMUEXTRA=$extra): $(tail -3 "$SCRATCH/runbg.log" | tr '\n' ' ')"
+        make run-stop >/dev/null 2>&1
+        return 1
+    fi
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+        make run-stop >/dev/null 2>&1
+        return 1
+    fi
+    # The banner is not the prompt — the boot goes on printing after it. The
+    # fact worth waiting on is that the machine has STOPPED talking; the
+    # window is named where the other windows of its kind are named.
+    wait_for_quiet "$BOOT_BURST_QUIET_S"
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+    # type_line, not a copy of it. What stood here was its three lines written
+    # out again — type, pause, Enter — which threw away the two things it is
+    # for: the retry when a shell at its prompt has echoed nothing, and the
+    # plain sentence saying the keystrokes did not land. The comment beside
+    # the copy claimed the shell does not echo what it is typed. It does: the
+    # log of every run here carries `~ help`, and qemu-input.sh checks that
+    # echo character by character.
+    #
+    # And a shell that stays silent is BoxOS's answer, not this desk's, which
+    # is what the flag says — see type_cmd. It is turned off again straight
+    # after, so nothing outside this function inherits it.
+    TYPE_SILENCE_IS_JUDGED=1
+    type_line "help"
+    TYPE_SILENCE_IS_JUDGED=0
+    wait_for_line build/serial.log "Show available commands" "$REACT_QUIET_S" $((MARK + 1))
+    tr -d '\r' < build/serial.log > "$SCRATCH/serial.$name.log"
+    make run-stop >/dev/null 2>&1
+    return 0
+}
+
+run_iommu() {
+    echo "== iommu: every DMA on this machine goes through tables this kernel wrote =="
+
+    local DEV="-device intel-iommu"
+    local MACHINE="UEFI=on STRICT=on CORES=4 MEM=4G"
+
+    # ── half one: the wheel is taken ───────────────────────────────────────
+    build
+    if ! iommu_boot iommu "$MACHINE" "$DEV"; then
+        bad "iommu: never reached a shell with an IOMMU on the machine"; return
+    fi
+    local L="$SCRATCH/serial.iommu.log"
+
+    # (1) The hardware is there. Red the moment the device key stops reaching
+    #     QEMU — a typo in QEMUEXTRA, the hook dropped out of the run recipe,
+    #     a machine type without a DMAR — which is the one way this whole
+    #     scenario could be green and worthless.
+    grep -qE '^\[ACPI\] tables:.*DMAR' "$L"
+    chk $? "the firmware publishes a DMAR — there is remap hardware to drive"
+
+    # (2) Red if the DMAR is there and every unit refused: a register window
+    #     the kernel cannot map, a SAGAW it does not speak, a root table the
+    #     unit would not take. Then the backend is never registered and the
+    #     audit says so instead.
+    grep -q "^\[IOMMU\] backend=Intel VT-d, units up, translation still OFF at this line" "$L"
+    chk $? "the remap unit(s) came up under the VT-d backend"
+    ! grep -q "not one unit came online" "$L"
+    chk $? "and not one of them refused on the way up"
+
+    local on_line init_line drv_line mount_line units_on units_all seated
+    on_line=$(grep -n "^\[IOMMU\] translation ON:" "$L" | head -1 | cut -d: -f1)
+    [ -n "$on_line" ]
+    chk $? "translation is switched ON"
+
+    # (3) Both counts, because "some units translating" is the state that
+    #     stops the DMA of everything behind the ones that are not, and the
+    #     kernel's own contract is all-or-nothing. Red if take_the_wheel ever
+    #     returns a partial success instead of refusing.
+    units_on=$(sed -nE 's/^\[IOMMU\] translation ON:.*, ([0-9]+) of ([0-9]+) unit\(s\) translating.*/\1/p' "$L" | head -1)
+    units_all=$(sed -nE 's/^\[IOMMU\] translation ON:.*, ([0-9]+) of ([0-9]+) unit\(s\) translating.*/\2/p' "$L" | head -1)
+    [ -n "$units_all" ] && [ "$units_all" -ge 1 ] && [ "$units_on" = "$units_all" ]
+    chk $? "every unit on the machine is translating (${units_on:-?} of ${units_all:-?})"
+
+    # And the table is not empty. A unit switched on over a context table
+    # with no present entries translates every request to nothing, which is
+    # the exact shape of "the board never came back".
+    seated=$(sed -nE 's/^\[IOMMU\] translation ON:.*translating, ([0-9]+) PCI function\(s\) seated.*/\1/p' "$L" | head -1)
+    [ -n "$seated" ] && [ "$seated" -gt 0 ]
+    chk $? "with ${seated:-0} PCI function(s) seated in the identity domain, not an empty table"
+
+    # (4) THE ORDER, by line number, because the order IS the property. The
+    #     seating happens inside the same call that throws the switch, so
+    #     what the log can show is the bracket around it: the units were up
+    #     and NOT translating at iommu_init, and the switch came later. Red
+    #     if anybody ever moves the switch up into iommu_init, where there is
+    #     no PCI enumeration yet and every context table is empty.
+    init_line=$(grep -n "^\[IOMMU\] backend=.*translation still OFF at this line" "$L" | head -1 | cut -d: -f1)
+    [ -n "$init_line" ] && [ -n "$on_line" ] && [ "$init_line" -lt "$on_line" ]
+    chk $? "the units were up and not translating first (${init_line:-?} < ${on_line:-?})"
+
+    # And red the other way: if the switch is ever moved to the end of the
+    # boot, after the drivers have already done their DMA, then "the machine
+    # reached a shell" says nothing about surviving translation. Every
+    # controller on this machine must come up behind the tables.
+    drv_line=$(grep -n "^\[xHCI [0-9a-f:.]*\] register space:" "$L" | head -1 | cut -d: -f1)
+    [ -n "$drv_line" ] && [ -n "$on_line" ] && [ "$on_line" -lt "$drv_line" ]
+    chk $? "and the drivers start their DMA behind the tables (${on_line:-?} < ${drv_line:-?})"
+
+    # (5) The scenario itself. A controller whose rings the unit does not
+    #     translate is a controller that does nothing and says nothing.
+    grep -q "BoxOS Shell" "$L"
+    chk $? "the machine reaches a shell with translation on"
+    typed_ok "$L"
+    chk $? "and answers a keystroke — xHCI reaches its rings through the tables"
+
+    mount_line=$(grep -n "^\[TagFS\] the volume on seat .* is MOUNTED" "$L" | head -1 | cut -d: -f1)
+    [ -n "$mount_line" ]
+    chk $? "and mounts its volume — AHCI reaches its command list through them too"
+    [ -n "$mount_line" ] && [ -n "$on_line" ] && [ "$on_line" -lt "$mount_line" ]
+    chk $? "and the volume was read after the switch, not before it (${on_line:-?} < ${mount_line:-?})"
+
+    # (6) The units' own account of what they refused — and FIRST, that
+    #     anybody asked them after the drivers ran.
+    #
+    # ‼ THIS PAIR OF CHECKS WAS DECORATIVE, AND IT WAS PROVED SO BY MUTATION.
+    #   The write bit was taken out of both leaves of the identity map: every
+    #   device write to memory faulted, the keyboard died, TagFS found no
+    #   volume at all — and "not one I/O page fault recorded by any unit (0)"
+    #   went GREEN, with zero lines matching in the whole log. Nothing had
+    #   looked. The last read of the fault channel was inside
+    #   iommu_take_the_wheel itself, one line after "translation ON", and
+    #   every driver on the machine starts AFTER it; no Fault Event vector is
+    #   armed, so the records sat in the units' registers, unsaid.
+    #
+    #   A count of zero from a channel nobody reads is not evidence, it is
+    #   false comfort, and false comfort in front of a board run is worse than
+    #   no check at all. So the kernel now reads the channel a third time, at
+    #   the line where the last driver has come up (iommu_sweep_faults, called
+    #   from kernel_main), and it SAYS that it read even when it finds
+    #   nothing — because a silent reader cannot be told from no reader, which
+    #   is the whole of how this check came to lie.
+    #
+    #   The marker is therefore checked BEFORE the count, and the count means
+    #   nothing without it. Red if anybody removes that call, or moves it back
+    #   above the drivers.
+    local sweep_line
+    sweep_line=$(grep -n "^\[IOMMU\] fault channel read again with every driver up" "$L" | head -1 | cut -d: -f1)
+    [ -n "$sweep_line" ]
+    chk $? "the fault channel was read again with the drivers up — somebody looked"
+    [ -n "$sweep_line" ] && [ -n "$mount_line" ] && [ "$mount_line" -gt 0 ] && [ "$mount_line" -lt "$sweep_line" ]
+    chk $? "and looked AFTER the mount, so a fault the mount caused is inside the window (${mount_line:-?} < ${sweep_line:-?})"
+
+    #     Now the count is worth taking. Red if the identity map has a hole in
+    #     it — a region above the ceiling it covers, an RMRR the DMAR named
+    #     and the map left out — because a device DMA to an address with no
+    #     entry is recorded there and nowhere else.
+    #
+    # ‼ Anchored at the start of the line on purpose. The audit line at
+    #   iommu_init QUOTES the words "[VT-d] fault" and "[AMD-Vi] event" while
+    #   explaining where they would appear, and an unanchored pattern matches
+    #   that sentence on every single boot.
+    local faults
+    faults=$(grep -cE '^\[VT-d\] DRHD\[[0-9]+\] fault |^\[AMD-Vi\] event' "$L")
+    [ "$faults" = 0 ]
+    chk $? "not one I/O page fault recorded by any unit ($faults)"
+    [ "$faults" != 0 ] && grep -E '^\[VT-d\] DRHD\[[0-9]+\] fault |^\[AMD-Vi\] event' "$L" \
+        | head -3 | sed 's/^/       /'
+
+    ! grep -q "fault log OVERFLOWED" "$L"
+    chk $? "and no unit's fault log overflowed, so that count is the whole count"
+    ! grep -q "KERNEL PANIC" "$L"
+    chk $? "and the machine did not panic"
+
+    # ── half two: the way back ─────────────────────────────────────────────
+    #
+    # The owner's escape hatch, on the SAME machine with the SAME DMAR in
+    # front of it — otherwise "it is not translating" is true of any machine
+    # that has no IOMMU and the half proves nothing.
+    #
+    # ‼ AND THE TREE IS PUT BACK EVEN IF THIS HALF NEVER FINISHES. The key
+    #   leaves no trace in git — every file is clean and only build/.iommu.off
+    #   says which kernel is on the disk — so it is taken under the EXIT trap
+    #   the same way a mutated source file is. See build_with_key.
+    echo "-- and the way back: IOMMU=off, same machine, same DMAR --"
+    if ! build_with_key IOMMU=off; then
+        echo "BUILD FAILED (IOMMU=off) — tail:"; tail -25 "$SCRATCH/build.log"
+        bad "iommu: IOMMU=off does not build"
+        buildkey_restore; return
+    fi
+    # IOMMU=off is passed to run-bg as well, and it has to be: the key owns a
+    # rebuild marker, so a run-bg without it names a marker that does not
+    # exist, rebuilds every object, and boots the translating kernel while
+    # the scenario believes it is judging the other one.
+    if ! iommu_boot iommu_off "$MACHINE IOMMU=off" "$DEV"; then
+        bad "iommu: IOMMU=off never reached a shell"
+        buildkey_restore; return
+    fi
+    local N="$SCRATCH/serial.iommu_off.log"
+
+    grep -qE '^\[ACPI\] tables:.*DMAR' "$N"
+    chk $? "off: the machine still has the remap hardware in front of it"
+    grep -q "^\[IOMMU\] built with IOMMU=off" "$N"
+    chk $? "off: and the kernel says out loud which build this is"
+    ! grep -q "^\[IOMMU\] translation ON:" "$N"
+    chk $? "off: nothing was switched on"
+    grep -q "BoxOS Shell" "$N"
+    chk $? "off: the machine boots"
+    typed_ok "$N"
+    chk $? "off: and answers a keystroke"
+    grep -q "^\[TagFS\] the volume on seat .* is MOUNTED" "$N"
+    chk $? "off: and mounts its volume untranslated"
+    ! grep -q "KERNEL PANIC" "$N"
+    chk $? "off: and does not panic"
+
+    # Give the tree back the kernel it had. The trap would do it anyway; doing
+    # it here means the rest of an `all` run builds on the ordinary tree
+    # instead of discovering the key one object at a time.
+    buildkey_restore
+}
+
+# ── intx: the interrupt arrives on a WIRE, and the wire is described ───────
+#
+# ‼ THE WHOLE Summons IS DEAD CODE ON THIS DESK, AND THAT IS WHY THIS EXISTS.
+#
+# A line that arrives described — its trigger, its polarity, whether anything
+# else may answer it, and WHERE each of those four facts came from — is a
+# statement about PCI INTx and about nothing else. MSI carries its vector in
+# the message; there is no pin to describe and no roster to keep.
+#
+# And no test on this desk has ever reached that code. QEMU's xHCI offers
+# MSI-X, QEMU's AHCI offers MSI, and both drivers take what they are offered.
+# Measured on the `dd871b4` run, which is the run that shipped the Summons:
+# exactly ONE line was armed in the whole boot — the ACPI SCI on GSI 9 — and
+# not one PCI function ever reached PciSummons. Four defects were closed in
+# that commit and all four could have been left standing, with every scenario
+# in this file green:
+#
+#   - a PCI line programmed edge/active-high from the ISA default, on a wire
+#     PCI 3.0 §2.2.6 defines as open-drain, level sensitive and asserted low
+#   - one answerer per line, on a bus where §6.5 makes sharing mandatory
+#   - the GSI taken from config byte 0x3C, which footnote 43 defines for the
+#     8259 pair, on a machine running its IOAPIC
+#   - the EOI broadcast suppressed in the LAPIC SVR, which would let a level
+#     line fire exactly ONCE and then hold Remote IRR for the rest of the boot
+#
+# `make INTX=on` makes the xHCI driver decline both message-signalled paths,
+# which is not a fault injected but a machine this kernel must work on: a
+# controller behind a bridge that does not forward MSI, a function with the
+# capability fused off, a firmware that left it unusable. Everything after
+# that point runs exactly as it would there.
+#
+# ‼ AND THE KEYBOARD IS THE ORACLE FOR THE FOURTH DEFECT. It is on the first
+# controller, it is answered from the wire, and it is asked TWICE, minutes of
+# machine time apart. A level line that fires once and never again types the
+# first thing and then nothing — which is the one failure a boot log full of
+# correct-looking description cannot show.
+#
+# The second half is the roster. Two controllers are put in PCI slots four
+# apart, which on this machine type is what puts two functions' INTA# on one
+# interrupt link, so the line really is shared and the registry really is
+# asked to hold two answerers for one pin. Measured: 00:04.0 and 00:08.0 both
+# arm GSI 11 on vector 43, and the keyboard on 00:04.0 still types afterwards
+# — which it would not, if the newcomer had rewritten the pin's entry.
+run_intx() {
+    echo "== intx: the interrupt arrives on a wire, and the wire is described =="
+
+    # build_with_key, not a bare make: the tree is left carrying a kernel no
+    # file in git names, and only the record this writes puts it back when this
+    # function returns early, is killed, or the build itself fails.
+    if ! build_with_key INTX=on; then
+        echo "BUILD FAILED (INTX=on) — tail:"; tail -25 "$SCRATCH/build.log"
+        bad "INTX=on build"; return
+    fi
+
+    # Four cores for the reason latearrival and replug give: this kernel's
+    # deferred work runs from the K-Core guide loop and from cpu_idle, and on
+    # one core neither runs. STRICT=on for the reason every other scenario
+    # that programs hardware has it: it is what puts `-d guest_errors,unimp`
+    # on the command line, so QEMU's own complaint about a redirection entry
+    # or an INTx routing this kernel got wrong is kept instead of thrown away.
+    #
+    # XHCI2ADDR=0x08 is not a decoration. QEMU puts the first controller at
+    # slot 4; four slots on is the next slot whose INTA# the board's PIRQ
+    # router sends to the same link, and without naming it the second
+    # controller lands on a line of its own and the roster is never asked a
+    # question it could get wrong.
+    local MACHINE="INTX=on USB=on XHCI2=on XHCI2ADDR=0x08 STRICT=on CORES=4 MEM=4G"
+
+    # ‼ THE PS/2 CHIP IS TAKEN OUT OF THIS MACHINE, AND THAT IS THE WHOLE
+    #   REASON THE KEYSTROKE CHECKS BELOW ARE WORTH ANYTHING.
+    #
+    # `qemu-input.sh type` sends `sendkey` to the monitor, and QEMU hands
+    # those keys to the emulated i8042 — ISA IRQ1, an edge line with nothing
+    # whatever to do with the PCI wire this scenario is about. BoxOS feeds one
+    # key ring from two transports (keyboard.c says so in as many words), so
+    # the shell echoes either way. Measured by a reviewer: with xhci's
+    # interrupt handler stubbed out entirely, and again with the USB keyboard
+    # removed from the machine, `help` still printed its command list. Three
+    # checks here were green on a kernel that took no USB interrupt at all.
+    #
+    # With the chip gone the only keyboard on the machine is the USB one.
+    local EXTRA="-machine pc,i8042=off"
+
+    make run-stop >/dev/null 2>&1
+    # ‼ THE LOG OF THE RUN BEFORE IS A TRAP, AND IT SPRANG ONCE IN THIS FILE
+    # ALREADY — see iommu_boot, which has this paragraph for the same reason.
+    # run-bg removes build/serial.log itself, but only after two guards it can
+    # exit on: an image that would not build, and a QEMU already running. When
+    # it takes either, the PREVIOUS intx run's log is still on disk, with its
+    # banner and its armed line and its wire fires in it, and every check below
+    # reads that instead — a green scenario over a machine nobody started.
+    rm -f build/serial.log
+    # shellcheck disable=SC2086
+    make run-bg $MACHINE QEMUEXTRA="$EXTRA" >"$SCRATCH/runbg.log" 2>&1
+    if [ ! -S build/qemu.mon ]; then
+        harness "no machine was started for intx ($MACHINE QEMUEXTRA=$EXTRA): $(tail -3 "$SCRATCH/runbg.log" | tr '\n' ' ')"
+        make run-stop >/dev/null 2>&1; buildkey_restore; return
+    fi
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+        bad "intx: never reached a shell with its interrupts on a wire"
+        make run-stop >/dev/null 2>&1; buildkey_restore; return
+    fi
+
+    # The banner is not the prompt — a boot goes on printing after it. MARK is
+    # taken once the machine has stopped talking, so everything after it in the
+    # log was caused by a keystroke and by nothing else. That division is what
+    # makes "the line delivered AGAIN" a fact rather than a wish.
+    wait_for_quiet "$BOOT_BURST_QUIET_S"
+    local MARK
+    MARK=$(wc -l < build/serial.log | tr -d ' ')
+
+    # Two commands, not one, and the second only after the first has been
+    # answered. A shell that goes deaf is BoxOS's answer here, not this desk's
+    # — the keystroke checks below are where it is counted.
+    #
+    # ‼ type_cmd and not type_line, and the reason is this boot in particular.
+    # type_line confirms a command landed by waiting for the contiguous string
+    # "~ help" on one line, and under the proof key the wire prints a sentence
+    # of its own between every two characters the shell echoes — the echo is
+    # real and complete, but it is never contiguous, so that wait can only
+    # ever time out and type the command a second time. qemu-input.sh's own
+    # check, which type_cmd already makes, matches the echo as a SUBSEQUENCE
+    # of what the guest wrote and is unaffected; what is waited on here is the
+    # command's output, which is the fact the checks below read anyway.
+    TYPE_SILENCE_IS_JUDGED=1
+    type_cmd "help" && key_press ret
+    wait_for_line build/serial.log "Show available commands" "$REACT_QUIET_S" $((MARK + 1))
+    type_cmd "hw" && key_press ret
+    TYPE_SILENCE_IS_JUDGED=0
+    wait_for_line build/serial.log "CPU features" "$REACT_QUIET_S" $((MARK + 1))
+    wait_for_prompt
+
+    make run-stop >/dev/null 2>&1
+    tr -d '\r' < build/serial.log > "$SCRATCH/serial.intx.log"
+    local L="$SCRATCH/serial.intx.log"
+
+    # ── the key did what it says, and nothing below judges an MSI machine ──
+    #
+    # Without this the whole scenario is decoration: a stale object file, a
+    # marker not wired into the rebuild, a key renamed — every one of those
+    # leaves a kernel that takes MSI-X, arms no wire at all, and still types.
+    grep -q "INTX=on: MSI-X and MSI declined on purpose" "$L"
+    chk $? "the driver declined the message-signalled paths on purpose"
+    ! grep -qE "MSI-X enabled|MSI enabled \(vector" "$L"
+    chk $? "and took neither of them behind its own back"
+
+    # ── the line was ARMED, and armed as PCI rather than as ISA ───────────
+    #
+    # This is the first defect. ioapic_enable_irq used to ask the MADT
+    # override table — which by construction describes ISA sources — find
+    # nothing for a PCI line, and program the redirection entry with neither
+    # POLARITY_LOW nor TRIGGER_LEVEL: edge triggered, active high, and a
+    # single handler. Put that back and this line reads "edge, active high,
+    # exclusive", or the bus reads ISA, and all three go red.
+    grep -qE "\[IRQCHIP\] PCI GSI [0-9]+ armed on vector [0-9]+: level, " "$L"
+    chk $? "the wire is level-triggered, because PCI 3.0 §2.2.6 says it is"
+    grep -qE "\[IRQCHIP\] PCI GSI [0-9]+ armed on vector [0-9]+: [a-z]+, [a-z ]+, shareable" "$L"
+    chk $? "and shareable, because §6.5 makes every INTx line shareable"
+    ! grep -qE "\[IRQCHIP\] PCI GSI [0-9]+ armed on vector [0-9]+: edge" "$L"
+    chk $? "and no PCI line was armed as an edge"
+
+    # The provenance is SPOKEN, not merely stored. It is printed by kprintf
+    # for exactly this reason: moved back under debug_printf — where the old
+    # form of this sentence lived — it compiles to nothing and a board that
+    # took its pin from the wrong place says so nowhere at all.
+    grep -qE "\[IRQCHIP\] PCI GSI [0-9]+ armed .*; wiring from .*, pin from " "$L"
+    chk $? "and the line names where each half of its description came from"
+
+    # ── ‼ THE TWO CHECKS THAT ARE THE POINT, AND THEY JUDGE _PRT ──────────
+    #
+    # _PRT is the only source written about THIS machine in THIS interrupt
+    # mode, and it outranks the byte at 0x3C for the pin and the bus rule for
+    # the wiring. QEMU's board publishes one. So on this desk the pin must
+    # come from the routing table, and the wiring must be active low — a PCI
+    # interrupt link's _CRS says IRQ(Level, ActiveLow, Shared) and nothing
+    # else does.
+    #
+    # ‼ THESE ARE NOT TO BE RELAXED IF THEY GO RED. Red here means _PRT was
+    # not read or was not believed, and the fallback that answered instead is
+    # the 8259 byte — a number that means an ISA IRQ, which is then matched
+    # against the MADT's ISA overrides and comes back active HIGH. One root,
+    # two red checks; softening either one hides it.
+    grep -qE "\[IRQCHIP\] PCI GSI [0-9]+ armed .*pin from the ACPI routing table" "$L"
+    chk $? "the pin came from the ACPI routing table, not from the 8259 byte"
+    grep -qE "\[IRQCHIP\] PCI GSI [0-9]+ armed on vector [0-9]+: level, active low" "$L"
+    chk $? "and the wire is active low, as a PCI interrupt link describes it"
+    if grep -q "pin from the byte the firmware wrote for the 8259" "$L"; then
+        echo "       ‼ the pin came from config byte 0x3C. _PRT did not answer —"
+        echo "         see the [AML] lines in $L for which step declined."
+        grep -m3 "^\[AML\]" "$L" | sed 's/^/         /'
+    fi
+
+    # ── it was not quietly dropped to polling ─────────────────────────────
+    ! grep -q "events will be polled from the timer tick" "$L"
+    chk $? "no controller fell back to polling the timer tick"
+    ! grep -q "INTx line refused" "$L"
+    chk $? "and no INTx line was refused"
+    grep -q "controller ready: .* INTx interrupts" "$L"
+    chk $? "the driver says it is running on INTx"
+
+    # ── ‼ THE WIRE DELIVERED, AND DELIVERED AGAIN ─────────────────────────
+    #
+    # This is the block that judges delivery, and it judges it by counting the
+    # answerers the LINE called — not by watching the machine behave, which it
+    # does either way. xhci_tick drains every event ring once per timer tick
+    # whether or not the controller has an interrupt, so a device on a line
+    # that fired exactly once and was never re-armed still enumerates and still
+    # types. That is the EOI-broadcast defect's whole disguise, and the only
+    # thing that sees through it is a count read at two moments.
+    #
+    # MARK divides the log at "the boot stopped talking". Fires before it are
+    # the line working at all; fires after it were caused by keystrokes and by
+    # nothing else, so they are the line having been re-armed after its EOI,
+    # over and over, long after the first time.
+    local fired_boot fired_after
+    fired_boot=$(head -n "$MARK" "$L" | grep -c "INTx wire fired")
+    fired_after=$(tail -n +$((MARK + 1)) "$L" | grep -c "INTx wire fired")
+    [ "$fired_boot" -ge 1 ]
+    chk $? "the wire delivered while the machine was booting ($fired_boot call(s))"
+    [ "$fired_after" -ge 1 ]
+    chk $? "and delivered again after the boot went quiet ($fired_after more) — so the line was re-armed after its EOI"
+
+    # ‼ AND THE PIN'S CHAIN HELD BOTH, AND CALLED BOTH.
+    #
+    # Each controller answers through a thunk of its own under the proof key,
+    # for this check and no other reason: an irq_callback_t carries no
+    # argument, so one shared function could say the line fired but never say
+    # WHICH node on the chain was called. Rewriting the pin's redirection
+    # entry instead of joining its chain — what happened before
+    # SummonsSettleOnPin — leaves exactly one name here for the rest of the
+    # boot, and the machine goes on working, because either xHCI answerer
+    # services every controller. Nothing else in this scenario can tell those
+    # two apart.
+    local answerers arrived
+    answerers=$(tail -n +$((MARK + 1)) "$L" \
+                | grep -oE "\[xHCI [0-9a-f:.]+\] INTx wire fired" | sort -u | wc -l | tr -d ' ')
+    arrived=$(grep -oE "\[xHCI [0-9a-f:.]+\] INTx INT[A-D]# on GSI" "$L" | sort -u | wc -l | tr -d ' ')
+    [ "$answerers" -ge 2 ] && [ "$answerers" = "$arrived" ]
+    chk $? "and every answerer on the pin was called, not just the first ($answerers of $arrived)"
+
+    # ── the device WORKS, and the keyboard IS the USB one ─────────────────
+    #
+    # The guard first, because without it this block is back to judging a PS/2
+    # chip. BoxOS says out loud when the 8042 is not there — this line is the
+    # kernel's own, through kprintf — so a QEMUEXTRA that stopped reaching
+    # QEMU, a machine type that ignores the property, a QEMU too old for it:
+    # all of them turn up here rather than quietly restoring the second
+    # keyboard nobody wanted.
+    grep -q "\[KEYBOARD\] 8042 .*PS/2 port left untouched" "$L"
+    chk $? "there is no working PS/2 keyboard in this machine to answer for the USB one"
+    typed_ok "$L"
+    chk $? "the USB keyboard answers a keystroke"
+    grep -q "CPU features" "$L"
+    chk $? "and answers a second command, after the first was served"
+    external_ok "$L"
+    chk $? "and the prompt came back after the utility it ran"
+
+    # ── two devices, one wire, one roster ─────────────────────────────────
+    local intx_lines intx_gsis
+    intx_lines=$(grep -cE "\] INTx INT[A-D]# on GSI [0-9]+" "$L")
+    intx_gsis=$(grep -oE "\] INTx INT[A-D]# on GSI [0-9]+" "$L" \
+                | grep -oE "GSI [0-9]+" | sort -u | wc -l | tr -d ' ')
+    [ "$intx_lines" = 2 ]
+    chk $? "two controllers came up on INTx ($intx_lines)"
+    [ "$intx_lines" = 2 ] && [ "$intx_gsis" = 1 ]
+    chk $? "and both are on the SAME wire ($intx_gsis distinct GSI)"
+
+    # A second answerer on a line the description calls exclusive is refused
+    # aloud, and that refusal is what the old ISA-default wiring would have
+    # produced here.
+    ! grep -q "and this line is exclusive" "$L"
+    chk $? "the second answerer was not refused as if the line were exclusive"
+
+    grep -q "BoxOS Shell" "$L"
+    chk $? "the machine reaches a shell with its interrupts on a wire"
+    grep -q "\[TagFS\] the volume on seat .* is MOUNTED" "$L"
+    chk $? "and mounts its volume"
+    ! grep -q "KERNEL PANIC" "$L"
+    chk $? "and does not panic"
+
+    # Give the tree back the kernel it had. The EXIT trap does this too — this
+    # is only so that a suite does not carry INTX=on into the next scenario.
+    buildkey_restore
 }
 
 # ── lastsaid: the account survives the reset that ended the run ─────────────
@@ -6823,6 +7505,8 @@ case "${1:-both}" in
     isoch)    run_isoch ;;
     noexec)   run_noexec ;;
     earlyirq) run_earlyirq ;;
+    intx)     run_intx ;;
+    iommu)    run_iommu ;;
     lastsaid) run_lastsaid ;;
     draft)    run_draft ;;
     draftmut) run_draftmut ;;
@@ -6842,8 +7526,8 @@ case "${1:-both}" in
     growcut)  run_growcut ;;
     growmut)  run_growmut ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 LOGCHECK_FINISHED=1

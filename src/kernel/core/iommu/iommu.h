@@ -221,10 +221,11 @@ void            iommu_audit_dump(void);
  *
  * Translation goes on LATER, in iommu_take_the_wheel, and that IS an event:
  * it is the first instant a fault can be recorded, so that function reads
- * this channel once more the moment the switch is thrown. What no event
- * covers yet is a fault raised later, while a driver is running -- the
- * unit's own Fault Event interrupt is what answers that, and no vector is
- * armed for it in this tree.
+ * this channel once more the moment the switch is thrown. And the drivers
+ * coming up behind those tables is a third event, answered by
+ * iommu_sweep_faults below. What no event covers even then is a fault raised
+ * on a machine already running -- the unit's own Fault Event interrupt is
+ * what answers that, and no vector is armed for it in this tree.
  *
  * Silent and side-effect-free on a machine with no remap hardware, on a
  * backend that publishes no drain, and on a unit with nothing recorded. It
@@ -232,6 +233,35 @@ void            iommu_audit_dump(void);
  * publishes on Touch (`iommu:fault`, payload = the sixteen bytes the hardware
  * wrote) and the AMD-Vi side waits on EventLogRun with an HourGlass. */
 void            iommu_publish_touch(void);
+
+/* The third read of the fault channel, and the only one that can see a fault
+ * a DRIVER caused.
+ *
+ * The two reads above answer to the two events that come before any driver
+ * exists: the handover from firmware, and the throw of the switch. Between
+ * that switch and this call every controller on the machine comes up and
+ * moves its first bytes -- AHCI's command list, FIS and PRDTs, xHCI's event
+ * and transfer rings, the mount that reads the volume -- and every one of
+ * those addresses is now walked by tables this kernel wrote. A hole in them
+ * is recorded in the units' Fault Recording registers and NOWHERE else, and
+ * until this call nothing read those registers a second time: the record sat
+ * in hardware, unsaid, while the machine looked alive in a photograph.
+ *
+ * "Every driver has come up" is an EVENT, not an interval. kernel_main calls
+ * this once, at the line where the last of them has finished, and nothing is
+ * scheduled after it.
+ *
+ * It SAYS that it read, on an empty channel as much as on a full one, and
+ * that sentence is the point of the function as much as the read is: a reader
+ * that is silent when it finds nothing cannot be told apart from no reader at
+ * all. That is not hypothetical -- an oracle asking this log for "not one I/O
+ * page fault" passed, with a count of zero, on a kernel whose every device
+ * write was faulting, because nothing had looked.
+ *
+ * Silent and side-effect-free where no backend came up. Never refuses a boot.
+ * Not callable from an interrupt handler, for iommu_publish_touch's reasons.
+ */
+void            iommu_sweep_faults(void);
 
 /* ----- What each backend exports beyond the vtable -----
  *

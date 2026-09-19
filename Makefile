@@ -232,6 +232,17 @@ endif
 # hot-plugged onto it with bus=xhci2.0.
 XHCI2 ?= off
 
+# WHICH PCI SLOT the second controller sits in. Empty means "wherever QEMU
+# puts it", which is what twoctrl wants: that scenario cares about there being
+# two controllers, not about where they are.
+#
+# The intx scenario cares about exactly that. Two functions share an INTx wire
+# when the board's routing table sends their (slot, pin) to the same interrupt
+# link, and on this machine type that is a function of the slot number — so
+# the only way to ASK for a shared line rather than hope for one is to name
+# the slot. `make run-bg USB=on XHCI2=on XHCI2ADDR=0x08`
+XHCI2ADDR ?=
+
 # An isochronous device on the bus. This kernel configures no isochronous
 # endpoint — it has nothing that would read one — and the point of being able
 # to attach one is to prove that it SAYS so instead of dropping that half of
@@ -255,6 +266,32 @@ ISOCH ?= off
 # Empty means "whatever QEMU defaults to", which is four of each.
 XHCIPORTS ?=
 XHCI_PORT_ARGS = $(if $(XHCIPORTS),$(comma)p2=$(XHCIPORTS)$(comma)p3=$(XHCIPORTS))
+
+# HARDWARE THIS FILE DOES NOT NAME.
+#
+# Every key above adds a piece of emulated hardware this tree has a reason to
+# ask for by name, and each one is a line in the run recipes. That works right
+# up to the first piece of hardware nobody has a key for — and the IOMMU was
+# exactly that: the whole DMA-translation path shipped without ever having
+# executed, because QEMU publishes no DMAR table unless it is asked to and
+# there was no way to ask from here. `[IOMMU] ACPI describes neither DMAR nor
+# IVRS` was the entire result of every run this tree has ever done.
+#
+# So: whatever is put here is appended verbatim to the END of the QEMU command
+# line, after everything the keys above built. Verbatim, because a device
+# string is QEMU's language and not this file's, and anything that parsed it
+# here would only be a second parser to be wrong.
+#
+#   make run-bg UEFI=on QEMUEXTRA="-device intel-iommu"
+#
+# ‼ No rebuild marker, and that is not an omission. The markers above exist
+# for keys that change CFLAGS, where a stale object file would silently boot
+# the kernel you did not build. This changes nothing about the kernel — it is
+# a key of the same kind as USB, AHCI, XHCI2 and ISOCH, which describe the
+# MACHINE the already-built image is booted on, and none of them has one
+# either. The build key for the IOMMU side is IOMMU=on|off, and that one does
+# have its marker.
+QEMUEXTRA ?=
 
 # A switch that changes CFLAGS has to change what gets rebuilt, or it does
 # nothing on a tree that is already built — `make VOLUME_TESTS=on` would print
@@ -324,6 +361,41 @@ CFLAGS += -DCONFIG_XHCI_CTRL_GIVEUP_PROOF=1
 endif
 
 CTRLGIVEUP_MARK = $(BUILDDIR)/.ctrlgiveup.$(if $(filter on,$(CTRLGIVEUP)),on,off)
+
+# ── INTX=on ────────────────────────────────────────────────────────────────
+#
+# Make the xHCI driver decline MSI-X and MSI, so the boot arms the PCI INTx
+# line instead.
+#
+# The Summons work — a line that arrives described, with its polarity, its
+# trigger, its shareability and the PROVENANCE of each of those — exists for
+# INTx and only for INTx. And on every machine this kernel is tested on, that
+# path is dead code: QEMU's xHCI offers MSI-X, QEMU's AHCI offers MSI, and a
+# controller that takes a message-signalled interrupt never touches a wire.
+# Measured on the `dd871b4` run: exactly ONE line was armed in the whole boot,
+# the ACPI SCI, and not one PCI function reached PciSummons.
+#
+# So the four defects that work closed — an open-drain level-sensitive wire
+# programmed edge/active-high from the ISA default, one handler per line on a
+# bus where sharing is mandatory, a GSI taken from the byte firmware wrote for
+# the 8259 instead of from _PRT, and a suppressed EOI broadcast that would let
+# a level line fire exactly once — could all still be there and every test
+# would be green.
+#
+# This key is not a reproduction of a bug: it is the machine being asked to
+# use the wire it has. Real boards do — an xHCI behind a bridge that does not
+# forward MSI, a chipset function with the capability fused off, a firmware
+# that leaves MSI unusable — and this is the only way to be one of them here.
+#
+# ‼ It costs nothing but the delivery mechanism: with the line armed the
+# keyboard still types, which is exactly the claim the intx scenario makes.
+#
+# `make INTX=on` / `tools/logcheck.sh intx`
+ifeq ($(INTX),on)
+CFLAGS += -DCONFIG_XHCI_INTX_PROOF=1
+endif
+
+INTX_MARK = $(BUILDDIR)/.intx.$(if $(filter on,$(INTX)),on,off)
 
 # Boot the way both real boards booted: with IA32_EFER.NXE off.
 #
@@ -748,12 +820,16 @@ $(RETURNFAIL_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.returnfail.*
 	@touch $@
 
-$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) $(IOMMU_MARK) | $(BUILDDIR)
+$(INTX_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.intx.*
+	@touch $@
+
+$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) $(IOMMU_MARK) $(INTX_MARK) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -Os -c $< -o $@
 
-$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) $(IOMMU_MARK) | $(BUILDDIR)
+$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) $(IOMMU_MARK) $(INTX_MARK) | $(BUILDDIR)
 	@echo "Compiling $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
@@ -1353,7 +1429,8 @@ else
 		$(if $(filter on,$(FULLSCREEN)),$(if $(filter Darwin,$(UNAME_S)),-display cocoa$(comma)full-screen=on$(comma)zoom-to-fit=on,-full-screen)) \
 		$(if $(filter on,$(USB)),-device qemu-xhci -device usb-kbd) \
 		$(if $(filter on,$(LOG)),-d int$(comma)cpu_reset -no-reboot -no-shutdown -D boxos_qemu.log) \
-		$(if $(filter on,$(GDB)),-s -S)
+		$(if $(filter on,$(GDB)),-s -S) \
+		$(QEMUEXTRA)
 endif
 
 # ===================================================================
@@ -1402,9 +1479,10 @@ run-bg: $(IMAGE)
 		-display none \
 		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(CORES)$(comma)threads=1$(comma)sockets=1) \
 		$(if $(filter on,$(USB)),-device qemu-xhci$(comma)id=xhci1$(XHCI_PORT_ARGS) -device usb-kbd$(comma)bus=xhci1.0) \
-		$(if $(filter on,$(XHCI2)),-device qemu-xhci$(comma)id=xhci2) \
+		$(if $(filter on,$(XHCI2)),-device qemu-xhci$(comma)id=xhci2$(if $(XHCI2ADDR),$(comma)addr=$(XHCI2ADDR))) \
 		$(if $(filter on,$(ISOCH)),-audiodev none$(comma)id=isoa -device usb-audio$(comma)audiodev=isoa) \
 		-pidfile $(BUILDDIR)/qemu.pid \
+		$(QEMUEXTRA) \
 		-daemonize
 	@i=0; while [ ! -S $(BUILDDIR)/qemu.mon ] && [ $$i -lt 50 ]; do sleep 0.1; i=$$((i+1)); done
 	@if [ -f $(BUILDDIR)/qemu.pid ]; then \
