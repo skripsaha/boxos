@@ -452,7 +452,6 @@ typedef struct {
 /* ============================================================
  * AML opcodes — minimal set for _S5 parsing
  * ============================================================ */
-#define AML_SCOPE_OP        0x10
 #define AML_NAME_OP         0x08
 #define AML_PACKAGE_OP      0x12
 #define AML_BYTE_PREFIX     0x0A
@@ -486,8 +485,9 @@ void acpi_sci_arm(void);
 
 /* Ask the platform for a sleep state through the PM1 control PAIR.
  *
- * `slp_typa` / `slp_typb` are the two three-bit SLP_TYP values of the
- * matching \_Sx object. Both blocks receive their sleep type before either
+ * In this kernel the state is always S5 — see acpi_pm1_request_sleep's
+ * definition for why there is no other. `slp_typa` / `slp_typb` are the two
+ * three-bit SLP_TYP values the firmware put in the matching \_Sx object. Both blocks receive their sleep type before either
  * receives SLP_EN, which is what ACPI 6.5 §4.8 legislates: "OSPM will always
  * write the SLP_TYPa value to the 'A' register block followed by the
  * SLP_TYPb value within the field to the 'B' register block."
@@ -502,21 +502,6 @@ void acpi_sci_arm(void);
  * Returns false when neither half of the pair is a register this kernel can
  * reach — no write was attempted and nothing was guessed at. */
 bool acpi_pm1_request_sleep(uint8_t slp_typa, uint8_t slp_typb);
-
-/* Enter ACPI sleep state `s` ∈ {1..5}. Reads \_Sx package from AML
- * namespace to derive SLP_TYPa/SLP_TYPb, calls _PTS(s) and _BFS(s)
- * (when present) before writing PM1a/b CNT with SLP_TYP + SLP_EN.
- * S5 is implemented via acpi_shutdown(); other states return.
- * Returns 0 on success or negative on missing prerequisites.
- *
- * ‼ NOT IN SERVICE. Nothing in this tree calls it — `grep -rn
- * acpi_enter_sleep src/` finds this declaration and the definition in
- * acpi.c, and no third line. The whole S1-S4 path, and with it every
- * aml_call_int in the kernel, is therefore unreachable: the AML executor
- * has no live caller. What is missing is the WIRING — who decides the
- * machine should sleep and on what event — and in BoxOS that question
- * belongs to Turn In and Bell, not to this function. */
-int acpi_enter_sleep(uint8_t state);
 
 /* GPE (General Purpose Event) handler registry. Each GPE bit may have
  * one C-callback. When the SCI handler observes the bit fire, the
@@ -541,9 +526,11 @@ int acpi_enter_sleep(uint8_t state);
  * (AcpiEvGpeDispatch does the same), so a level source cannot hold the SCI
  * asserted for the life of the machine.
  *
- * Future AML interpreter audit will wire the firmware-defined
- * `\_GPE._Lxx` / `\_GPE._Exx` methods through the same dispatcher by
- * registering an AML-callback wrapper as the handler. */
+ * The firmware's own `\_GPE._Lxx` / `\_GPE._Exx` methods are NOT run, and
+ * there is nothing in this kernel that could run them: the AML executor that
+ * once existed served the S1-S4 sleep path alone and was removed with it.
+ * A GPE this kernel cares about gets a C handler registered here, written
+ * against what that event actually is. */
 typedef void (*acpi_gpe_handler_t)(uint16_t gpe);
 #define ACPI_MAX_GPES  256
 int  acpi_gpe_register(uint16_t gpe, acpi_gpe_handler_t cb);

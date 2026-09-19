@@ -502,6 +502,31 @@ static bool icr_send(uint32_t dest_id, uint32_t cmd, bool may_refuse) {
          * x2apic_send_IPI). lapic_write fences its own x2APIC writes; this
          * path bypasses it because the ICR is one MSR rather than two
          * registers, so the fence is spelled out here. */
+        /* The one 32-bit destination that names no single processor.
+         *
+         * x2APIC's destination is wide enough for every APIC ID a machine
+         * can have, with exactly one exception: all-ones is the broadcast
+         * (see LAPIC_X2APIC_DEST_BROADCAST). Sending here is not a send to
+         * a core that turns out to be missing — it is a send to EVERY core,
+         * and the command that reaches this function first during bring-up
+         * is INIT. A MADT Type 9 entry carrying that ID, taken at face
+         * value, therefore resets the whole machine mid-boot.
+         *
+         * Judged only when the command carries no destination shorthand.
+         * SDM Vol 3A, "Interrupt Command Register (ICR)", Destination
+         * Shorthand field: "00: No Shorthand" — any other encoding makes
+         * the APIC ignore the destination field, which is how
+         * lapic_send_ipi_all_excluding_self broadcasts on purpose, with a
+         * destination of zero. */
+        if (((cmd >> 18) & 0x3u) == 0u &&
+            dest_id == LAPIC_X2APIC_DEST_BROADCAST) {
+            kprintf("[LAPIC] %[E]APIC ID 0xFFFFFFFF is the broadcast "
+                    "destination of the 32-bit x2APIC ICR, not a core — "
+                    "IPI 0x%x NOT sent, because sending would deliver it to "
+                    "EVERY processor%[D]\n", cmd);
+            return false;
+        }
+
         __asm__ volatile("mfence" ::: "memory");
         wrmsr(MSR_X2APIC_ICR, ((uint64_t)dest_id << 32) | (uint64_t)cmd);
         return true;
@@ -521,11 +546,27 @@ static bool icr_send(uint32_t dest_id, uint32_t cmd, bool may_refuse) {
      * same reason; this is the floor under that decision, for every path
      * that did not ask first. Such an ID is addressable only in x2APIC
      * mode, where the destination is the full 32 bits of MSR 0x830. */
-    if (dest_id > 0xFFu) {
-        kprintf("[LAPIC] %[E]APIC ID %u does not fit the 8-bit xAPIC ICR "
-                "destination — IPI 0x%x NOT sent, because sending would "
-                "deliver it to the core with ID %u instead%[D]\n",
-                dest_id, cmd, dest_id & 0xFFu);
+    if (dest_id > LAPIC_XAPIC_DEST_MAX) {
+        /* Told apart, because they are two different accidents. An ID above
+         * 0xFF loses its high bits and lands on another core; an ID of
+         * exactly 0xFF keeps every bit and means something else entirely —
+         * SDM Vol 3A, section "Physical Destination Mode", reserves FFH in
+         * physical destination mode for "a broadcast to all APICs", so an
+         * INIT addressed there resets the whole machine and a wake addressed
+         * there wakes all of it. (Cited by title: see LAPIC_XAPIC_DEST_MAX
+         * in lapic.h for the full quote and for why the section NUMBER is
+         * not written here.) */
+        if (dest_id == LAPIC_XAPIC_DEST_BROADCAST) {
+            kprintf("[LAPIC] %[E]APIC ID 255 is the broadcast destination of "
+                    "the 8-bit xAPIC ICR field, not a core — IPI 0x%x NOT "
+                    "sent, because sending would deliver it to EVERY "
+                    "processor%[D]\n", cmd);
+        } else {
+            kprintf("[LAPIC] %[E]APIC ID %u does not fit the 8-bit xAPIC ICR "
+                    "destination — IPI 0x%x NOT sent, because sending would "
+                    "deliver it to the core with ID %u instead%[D]\n",
+                    dest_id, cmd, dest_id & 0xFFu);
+        }
         return false;
     }
 
@@ -622,32 +663,39 @@ static uint32_t mps_flags_to_lvt(uint16_t mps_flags) {
     return lvt;
 }
 
+/* One rule, on the LVT pin it names, on the core that is running. */
+static void lapic_apply_one_nmi(const MadtNmiRule *rule, void *ctx) {
+    uint8_t *applied = (uint8_t *)ctx;
+
+    uint32_t lvt = LAPIC_LVT_DELIVERY_NMI | mps_flags_to_lvt(rule->mps_flags);
+    uint32_t reg = (rule->lint == 0) ? LAPIC_REG_LINT0_LVT
+                                     : LAPIC_REG_LINT1_LVT;
+    lapic_write(reg, lvt);
+    applied[rule->lint] = 1;
+
+    debug_printf("[LAPIC] LINT%u programmed NMI (mps=0x%04x lvt=0x%08x) for "
+                 "%s%u\n", rule->lint, rule->mps_flags, lvt,
+                 rule->all_processors ? "all processors, rule uid=" : "proc=",
+                 rule->acpi_processor_uid);
+}
+
 void lapic_apply_madt_nmi(const struct madt_info *info,
-                          uint8_t acpi_processor_id) {
+                          uint32_t acpi_processor_uid, bool uid_known) {
     if (!lapic_enabled || !info) return;
 
-    uint8_t applied[2] = { 0, 0 };  /* LINT0, LINT1 — track which we wrote */
+    /* LINT0, LINT1 — which of the two this core's rules actually wrote. The
+     * rules come from the MADT itself rather than from a copy of it, so
+     * there is no entry limit to exceed and a machine that wires NMI to
+     * every core individually gets every core programmed. */
+    uint8_t applied[2] = { 0, 0 };
 
-    for (uint8_t i = 0; i < info->nmi_count; i++) {
-        const madt_nmi_entry_t *e = &info->nmi[i];
-        if (!e->valid) continue;
-        if (e->acpi_processor_id != MADT_NMI_PROCESSOR_ALL &&
-            e->acpi_processor_id != acpi_processor_id)
-            continue;
-        if (e->lint > 1) continue;
-
-        uint32_t lvt = LAPIC_LVT_DELIVERY_NMI | mps_flags_to_lvt(e->mps_flags);
-        uint32_t reg = (e->lint == 0) ? LAPIC_REG_LINT0_LVT
-                                      : LAPIC_REG_LINT1_LVT;
-        lapic_write(reg, lvt);
-        applied[e->lint] = 1;
-
-        debug_printf("[LAPIC] LINT%u programmed NMI (mps=0x%04x lvt=0x%08x) for proc=%u\n",
-                     e->lint, e->mps_flags, lvt, e->acpi_processor_id);
-    }
+    madt_for_each_nmi_rule(info, acpi_processor_uid, uid_known,
+                           lapic_apply_one_nmi, applied);
 
     if (!applied[0] && !applied[1]) {
-        debug_printf("[LAPIC] No MADT NMI entry matched proc=%u (LINT0/LINT1 stay masked)\n",
-                     acpi_processor_id);
+        debug_printf("[LAPIC] No MADT NMI rule matched %s%u "
+                     "(LINT0/LINT1 stay masked)\n",
+                     uid_known ? "proc=" : "an unknown UID, last asked=",
+                     acpi_processor_uid);
     }
 }

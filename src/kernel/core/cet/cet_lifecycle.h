@@ -191,18 +191,31 @@ void cet_lifecycle_release_supervisor_ssp(uint8_t core_idx);
 /* ─── Per-process kernel shadow stack ───
  *
  * cet_process_create_kernel_ssp allocates a 4 KiB supervisor SSP page
- * for `proc`, writes the supervisor SSP token (own address, BUSY clear)
- * at the page top and PRE-PUSHES `entry_rip` one slot below it, then
- * seals the page R/W=0 + Dirty=1 via vmm_shadow_stack_seal. Sets
- * proc->kernel_ssp_phys / kernel_ssp_va_top and
+ * for `proc` and maps it into the process's own BUNK — the kernel
+ * shadow-stack row at VMM_SHADOW_BUNK_BASE, where the bunk is the pid
+ * and the page is born R/W=0 + Dirty=1 on a 4 KiB leaf. Before the map
+ * it writes the supervisor SSP token (the BUNK's own address, BUSY
+ * clear) at the page top and PRE-PUSHES `entry_rip` one slot below it.
+ * Sets proc->kernel_ssp_phys / kernel_ssp_va_top and
  * proc->context.pl0_ssp = top - 8.
  *
- * Both writes are plain stores and both precede the seal. They have to:
- * a sealed page rejects normal stores, and WRSS — the instruction that
+ * Both writes are plain stores through the frame's Pull Map alias and
+ * both precede the bunk mapping. They have to: a page carrying the
+ * encoding rejects normal stores, and WRSS — the instruction that
  * exists for writing shadow stacks — is #UD at CPL < 3 while
  * IA32_S_CET.SH_STK_EN is 0, which is exactly the window this function
  * runs in. Intel SDM Vol 2D, WRSSD/WRSSQ; the quotation is in the
  * cet_lifecycle.c header.
+ *
+ * vmm_shadow_stack_seal is still called on the bunk, and it changes
+ * nothing: it is there for the half of SDM Vol 3A §4.6 a leaf cannot
+ * express — R/W = 1 in every entry above it. A refusal is reported and
+ * the process runs without a supervisor shadow stack.
+ *
+ * Called twice for the same process it refuses the second call with
+ * ERR_ALREADY_MAPPED and leaves the first stack exactly as it was: the
+ * bunk is the pid, so there is no second bunk to give, and taking a
+ * frame only to hand it back would be the noisy way to say so.
  *
  * Why pre-push? For a dispatcher that enters a process by `push
  * entry_rip; RET` on its own kernel shadow stack: the regular-stack pop
@@ -220,18 +233,48 @@ void cet_lifecycle_release_supervisor_ssp(uint8_t core_idx);
  * ring-3 → ring-0 entry therefore takes its supervisor SSP from
  * IA32_PL0_SSP, which holds THIS CORE's token from
  * cet_lifecycle_init_supervisor_ssp, and the page this function
- * allocates, seals and frees is never seen by the processor. It is not
- * free: the seal demotes whichever Pull Map huge leaf covers the page
- * (vmm_shadow_stack_seal) and the unseal does not put it back. Whether
- * the frame path gains a per-process PL0_SSP swap or this per-process
- * kernel shadow stack goes away is the owner's call; until then this is
- * what it costs and what it does.
+ * allocates and frees is never seen by the processor. What it costs is
+ * now one frame and one PTE for the life of the process: the bunk row
+ * has no huge leaf to demote, so a spawn no longer degrades the Pull
+ * Map's granularity, which is what it used to do and never undo.
+ * Whether the frame path gains a per-process PL0_SSP swap or this
+ * per-process kernel shadow stack goes away is still the owner's call.
  *
- * Returns OK on success; ERR_UNSUPPORTED when CET is dormant on this CPU
- * (proc gets zero SSP fields and runs without per-process supv SHSTK —
- * acceptable when SH_STK_EN is also off, fatal if it's on); ERR_NO_MEMORY
- * on alloc failure or on a refused seal (the frame is handed back and
- * the SSP fields are zeroed, so the caller sees the CET-dormant shape).
+ * ‼ TWO THINGS HAVE TO BE ANSWERED BEFORE IT BECOMES LIVE, and both are
+ * the owner's, not this file's:
+ *
+ *   1. The writable Pull Map alias. The frame is a shadow stack at its
+ *      bunk and ordinary writable kernel memory at PULL_MAP_BASE +
+ *      phys, because removing or sealing that alias is the very huge-
+ *      leaf demotion the row exists to avoid. Dormant this protects
+ *      nothing and costs nothing; live it would be a supervisor shadow
+ *      stack a stray kernel write could still reach by its other name.
+ *      The three ways out are spelled out in vmm.c above
+ *      vmm_shadow_bunk_va.
+ *
+ *   2. The page's layout does not match the hardware's way in. Both
+ *      hardware entries to a supervisor shadow stack read the token AT
+ *      the address in IA32_PL0_SSP (Intel SDM Vol 3A §6.12.1.1 for a
+ *      ring transition, Vol 2B SETSSBSY Operation for the instruction).
+ *      This page has the token at `top` and PL0_SSP at `top - 8` — the
+ *      pre-push discipline above, which is a different, self-consistent
+ *      arrangement that no hardware path enters. Whichever discipline
+ *      this stack is meant to serve, loading the MSR without choosing
+ *      one first would #CP on the first entry.
+ *
+ * Returns OK on success, AND on a CPU where CET is dormant — there the
+ * three SSP fields are left zero and the process runs without a
+ * per-process supervisor shadow stack, which is correct while
+ * SH_STK_EN is also off. Refusals, each of them reported on the
+ * console by the code that found it: ERR_INVALID_ARGUMENT for a null
+ * proc, ERR_ALREADY_MAPPED for a process that already holds one,
+ * ERR_INVALID_PID for a pid the bunk row has no bunk for,
+ * ERR_NO_MEMORY when no frame is to be had, ERR_INVALID_ADDRESS when
+ * the frame has no Pull Map address to be seeded through,
+ * ERR_MAPPING_FAILED when the row's mapper refused, and
+ * ERR_PERMISSION_DENIED_MEM when an entry above the leaf denies the
+ * bunk shadow-stack rights. Every one of them leaves the process in
+ * the CET-dormant shape — three zeroed fields, no frame, no bunk.
  *
  * Must be called AFTER proc->context.rip is fixed (entry_rip has to be
  * that same value) and AFTER cet_lifecycle_init_bsp /

@@ -20,6 +20,13 @@
  * builds. What iommu_init still does not do is turn translation on: the
  * units come up with it off, and it stays off until something calls the
  * backend's own enable, which nothing in this tree does.
+ *
+ * Their fault channel is read once, at the handover from firmware, by
+ * iommu_publish_touch -- which kernel_main calls after guide_init, because
+ * before guide_init there is no Touch to say it on. On VT-d that channel is
+ * live and holds whatever firmware left in it; on AMD-Vi it is inert until
+ * IommuEn, and the AMD side says so on the board rather than reading an
+ * empty ring in silence.
  */
 
 static const iommu_ops_t* g_ops = NULL;
@@ -69,11 +76,49 @@ int iommu_init(void) {
         return -2;
     }
     g_outcome = IommuOutcomeUp;
-    /* Tell userspace which IOMMU backend is online so DMA-buffer
-     * services (`iommu:ready` subscriber) know whether they need to
-     * route allocations through a domain or can DMA directly. */
-    TouchPublish("iommu:ready", g_ops->name, 0);
+    /* Nothing is said on Touch from here, and the two things this function
+     * has to say are both said later, from iommu_publish_touch.
+     *
+     * TouchInit runs inside guide_init, which is a long way further down
+     * kernel_main than this call. A TouchPublish issued here finds an empty
+     * tag registry, is dropped at resolve_tag_pair, and reaches nobody --
+     * not now and not retroactively. main.c already carries that lesson in
+     * full over efi_secureboot_init, which defers its publishes for exactly
+     * this reason; the `iommu:ready` publish that used to stand on the next
+     * line had been going nowhere all along. */
     return 0;
+}
+
+/* Everything this subsystem has to SAY, said at the first moment anyone can
+ * hear it. Called from kernel_main once guide_init has brought Touch up.
+ *
+ * Order inside matters and is the reason these two are one call: the sixteen
+ * bytes a fault record carries have a different shape per backend, so a
+ * subscriber has to know WHICH backend is on the machine before the first
+ * record arrives. `iommu:ready` names it, and goes first.
+ *
+ * Then the units are asked, once, what they recorded while they were still
+ * firmware's -- and it is cleared, which on VT-d is the difference between a
+ * unit that can report a fault and one that will never report another
+ * (§11.4.7.1: while PFO stands "hardware does not record any new faults";
+ * §7.3: while any status bit stands "the Fault Event interrupt is not
+ * generated").
+ *
+ * This is not a poll and it is not on a clock. The handover from firmware is
+ * the fact, and it happens exactly once. Nothing is scheduled to look again,
+ * because with translation off (GCMD.TE clear on every VT-d unit) and
+ * interrupt remapping off, no new fault recording entry can be produced for
+ * anyone to miss -- and the one channel that CAN move while translation is
+ * off, the invalidation queue's IQE/ICE/ITE, already has its own event:
+ * vtd_qi_submit reads FSTS on every turn of its own wait and reports there,
+ * at the moment the error is caused rather than some interval later. A
+ * periodic look would be an interval standing in for an event that cannot
+ * happen. When translation IS switched on, the thing to add is the unit's own
+ * Fault Event interrupt, not a timer. */
+void iommu_publish_touch(void) {
+    if (!g_ops) return;
+    TouchPublish("iommu:ready", g_ops->name, 0);
+    if (g_ops->drain_faults) g_ops->drain_faults();
 }
 
 iommu_domain_t* iommu_domain_alloc(void) {
@@ -354,10 +399,20 @@ void iommu_audit_dump(void) {
         kprintf("[IOMMU] backend=%s, units up, and iommu_init left "
                 "translation OFF — the domains, page tables and device "
                 "entries this kernel wrote are not consulted by the hardware "
-                "yet, so DMA still reaches memory untranslated. Touch "
-                "subjects: iommu:ready, iommu:domain:attached, "
-                "iommu:dma:mapped, iommu:dma:unmapped; MemTag labels every "
-                "mapped page iommu:domain:N\n", g_ops->name);
+                "yet, so DMA still reaches memory untranslated. Their fault "
+                "channel has NOT been read at this point in the boot and is "
+                "read once, BELOW, by iommu_publish_touch -- Touch does not "
+                "exist until guide_init, and a fault said before it would be "
+                "said to nobody. Every line further down beginning [VT-d] "
+                "fault or [AMD-Vi] is what firmware left in these units. "
+                "After that one read nothing looks again, and nothing needs "
+                "to while translation is off: that channel only fills once "
+                "GCMD.TE is set, and the thing to add then is the unit's own "
+                "Fault Event interrupt, which no vector exists for yet. "
+                "Touch subjects: iommu:ready, iommu:fault, "
+                "iommu:domain:attached, iommu:dma:mapped, iommu:dma:unmapped; "
+                "MemTag labels every mapped page iommu:domain:N\n",
+                g_ops->name);
         return;
     }
 }

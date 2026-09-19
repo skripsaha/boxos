@@ -6,6 +6,7 @@
 #include "process.h"
 #include "scheduler.h"
 #include "tagfs.h"
+#include "boardroom.h"    /* the seat, so a lost commit can be named */
 #include "ata.h"
 #include "acpi.h"
 #include "klib.h"
@@ -468,15 +469,62 @@ static void halt_terminate_all_processes(void)
         kprintf("\n");
 }
 
+/*
+ * ‼ THE LAST THING THIS MACHINE DOES FOR ITS DATA, AND IT USED TO SAY
+ * "COMPLETE" WHETHER OR NOT IT WAS.
+ *
+ * "Flushing disk cache...", the answer dropped, "Storage sync complete", and
+ * then the power goes. A drive that had refused the flush — or one whose port
+ * was being flushed for somebody else at that instant and so was never asked
+ * — went dark with the commit still in its cache, and the last line on the
+ * screen said the opposite. On a machine that is read by photographing its
+ * screen, that line was the only evidence there was, and it was false.
+ *
+ * ‼ AND THE ANSWER THAT LOOKS LIKE "TRY AGAIN IN A MOMENT" MUST NOT BE
+ * TREATED AS ONE HERE, BECAUSE OF WHERE THIS STANDS.
+ *
+ * This runs after `cli` and after halt_all_ap_cores(), so there is exactly
+ * one core executing on this machine and it is the one inside this function.
+ * ERR_BUSY means another core holds the port's whole-port door — and every
+ * other core has already been stopped, so that door would never be given
+ * back. A retry loop here, however it were bounded, would be a wait for an
+ * event that cannot happen, ending by abandoning the work. That is the
+ * defect, not the repair.
+ *
+ * What it gets instead is a fact, and the fact is taken care of one level
+ * down: ahci_port_take_whole records WHICH CORE holds the door and asks
+ * amp_core_online() about it, so a door held by a core that is no longer
+ * running is not "busy" at all — it is abandoned, and once the device owes
+ * nothing it is taken over on the spot. So the single call below is the
+ * whole of the asking, and an ERR_BUSY that survives it is a genuine
+ * surprise: a door held by a core this shutdown believes is still running.
+ * It is said out loud like any other refusal rather than waited on.
+ *
+ * Either way the line that follows says what actually happened. A shutdown
+ * that could not make the volume durable is not a failed shutdown — the
+ * machine still has to power off — but it is a shutdown that owes the
+ * operator the truth about what may not be on the disk when it comes back.
+ */
 static void halt_sync_storage(void)
 {
     kprintf("[HALT] Syncing TagFS...\n");
     tagfs_shutdown();
 
     kprintf("[HALT] Flushing disk cache...\n");
-    tagfs_flush_cache();
 
-    kprintf("[HALT] Storage sync complete\n");
+    error_t flushed = tagfs_flush_cache();
+
+    if (flushed == OK) {
+        kprintf("[HALT] Storage sync complete\n");
+        return;
+    }
+
+    kprintf("[HALT] ‼ THE VOLUME ON SEAT %u (%s) WAS NOT MADE DURABLE "
+            "(error %u) — everything committed to it since its last "
+            "successful flush may not be there when this machine comes "
+            "back\n",
+            tagfs_get_seat(), BoardroomSeatName(tagfs_get_seat()),
+            (unsigned)flushed);
 }
 
 static void halt_stop_hardware(void)

@@ -72,6 +72,14 @@ typedef struct iommu_ops {
      * id. Used by the iommu_map wrapper to derive `iommu:domain:N` tag
      * strings without leaking backend struct layout to MemTag. */
     uint32_t (*domain_id)(iommu_domain_t*);
+    /* Read this backend's fault channel, say every record out loud and
+     * clear it. The two backends keep that channel in different places --
+     * VT-d in the unit's own fault recording registers, AMD-Vi in a ring in
+     * system memory -- so only the backend can do it, and
+     * iommu_publish_touch is how the rest of the kernel asks. Never called
+     * from an interrupt handler: both publish on Touch and both may wait on
+     * a status bit. */
+    void (*drain_faults)(void);
 } iommu_ops_t;
 
 /* Probe ACPI; pick backend; call ops->init. Returns 0 if any IOMMU
@@ -107,6 +115,36 @@ uint32_t        iommu_domain_id(iommu_domain_t*);
  * nobody on a board whether their DMA is translated. */
 void            iommu_audit_dump(void);
 
+/* Say who the backend is, then ask every unit that came online what it
+ * recorded, say that too, and clear it.
+ *
+ * Called from kernel_main AFTER guide_init, and the ordering is not a
+ * preference. TouchInit runs inside guide_init; a publish issued before it
+ * is dropped at resolve_tag_pair and reaches no subscriber, now or ever --
+ * the same trap main.c already documents over efi_secureboot_init. So this
+ * is where `iommu:ready` is said and where the fault channel is read, and
+ * `iommu:ready` goes first so a subscriber knows which backend's sixteen-byte
+ * record shape is about to arrive on `iommu:fault`.
+ *
+ * Reading the channel is not merely informative on VT-d: whatever firmware
+ * left standing in it is both the only account of what happened before this
+ * kernel existed AND a gag on everything that would be recorded or signalled
+ * after it (§11.4.7.1 PFO, §7.3).
+ *
+ * It runs ONCE. Nothing periodic follows it, and nothing needs to: with
+ * GCMD.TE clear on every unit and interrupt remapping off, no new fault
+ * recording entry can be produced; the invalidation queue's IQE/ICE/ITE,
+ * which can move with translation off, is read by vtd_qi_submit on every
+ * turn of its own wait, at the moment the error is caused. An interval here
+ * would be a number standing in for an event that cannot happen.
+ *
+ * Silent and side-effect-free on a machine with no remap hardware, on a
+ * backend that publishes no drain, and on a unit with nothing recorded. It
+ * never refuses a boot. Not callable from an interrupt handler -- it
+ * publishes on Touch (`iommu:fault`, payload = the sixteen bytes the hardware
+ * wrote) and the AMD-Vi side waits on EventLogRun with an HourGlass. */
+void            iommu_publish_touch(void);
+
 /* ----- What each backend exports beyond the vtable -----
  *
  * These three are defined by their backends and, until now, declared
@@ -124,14 +162,56 @@ void            iommu_audit_dump(void);
  *
  * amdvi_poll_events drains each AMD-Vi unit's event log, which is the only
  * channel the hardware has for IO_PAGE_FAULT, ILLEGAL_DEV_TABLE_ENTRY,
- * DEV_TAB_HARDWARE_ERROR and the rest. amdvi_init arms that log on every AMD
- * board with an IVRS, so it fills whether or not anybody drains it, and once
- * it overflows the unit writes no further entry until the log is restarted.
- * It is NOT callable from an interrupt handler: it publishes on Touch and it
- * waits on EventLogRun with an HourGlass. */
+ * DEV_TAB_HARDWARE_ERROR and the rest. It is reached through the vtable, as
+ * this backend's drain_faults. It is NOT callable from an interrupt handler:
+ * it publishes on Touch and it waits on EventLogRun with an HourGlass.
+ *
+ * What it will find while amdvi_enable has not been called is NOTHING, and
+ * the sentence that used to stand here -- that amdvi_init arms the log so it
+ * fills whether or not anybody drains it -- was wrong. 48882 Rev 3.05-PUB,
+ * MMIO Offset 0018h bit 2 EventLogEn: "all events detected are written to the
+ * event log WHEN IommuEn HAS ALSO BEEN SET". The same register's bit 12
+ * CmdBufEn: "When CmdBufEn = 1b and IommuEn = 1b, the IOMMU starts fetching
+ * commands". amdvi_init deliberately leaves IommuEn clear, so on AMD both the
+ * event log and the command processor are inert, and giving that backend eyes
+ * and switching the unit on are the same act.
+ *
+ * That is why this function is NOT this backend's drain_faults. Calling it
+ * with IommuEn clear would walk a ring the hardware cannot have written --
+ * amdvi_unit_init has just zeroed EvtHeadPtr and EvtTailPtr and cleared
+ * EventOverflow, so head equals tail, the overflow branch is unreachable, and
+ * the whole call is a provable no-op dressed as an inspection. The slot holds
+ * amdvi_drain_faults instead, which reads IommuEn out of MMIO Offset 0018h
+ * and SAYS that the channel is off on a board where it is, rather than
+ * returning empty-handed in silence; it calls this function for the units
+ * where the bit is actually set.
+ *
+ * They are NOT the same act as switching TRANSLATION on, which is worth
+ * saying because it is the reason a first step exists at all. Translation on
+ * AMD-Vi is per device, in the DTE's V and TV bits, and Table 8 on V = 0 is
+ * unambiguous: "All addresses are forwarded without translation; individual
+ * control fields are ignored." amdvi_unit_init leaves the whole device table
+ * zeroed and nothing calls iommu_device_attach, so every entry reads V = 0.
+ * IommuEn = 1 over that table starts the event log and the command engine and
+ * translates nothing. Table 10 says the same of interrupts at IV = 0: LINT0,
+ * LINT1, SMI, NMI, INIT and ExtInt "are passed through unmapped". */
+/* vtd_drain_faults is the VT-d half of the same channel, and it is the half
+ * that has something to read TODAY. Its records live in the unit's own fault
+ * recording registers rather than in a ring in system memory, so what
+ * firmware recorded is still there after this kernel takes the unit over --
+ * and §11.4.7.1 makes reading it load-bearing rather than merely informative:
+ * an inherited PFO stops the unit recording anything ever again, and §7.3
+ * stops it signalling anything ever again. Same contract as its AMD-Vi
+ * counterpart: not from an interrupt handler.
+ *
+ * Both are reached through the vtable, as each backend's drain_faults, and
+ * iommu_publish_touch is the door. They are named here because the header
+ * describes what each backend exports, not because anything calls them by
+ * name. */
 int  vtd_enable_translation(void);
 int  amdvi_enable(void);
 void amdvi_poll_events(void);
+void vtd_drain_faults(void);
 
 /* Phase 2G — DMA buffer auto-allocation wrapper.
  *

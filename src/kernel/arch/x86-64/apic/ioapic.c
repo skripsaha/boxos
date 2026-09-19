@@ -1,5 +1,6 @@
 #include "ioapic.h"
 #include "irqchip.h"
+#include "lapic.h"      /* LAPIC_XAPIC_DEST_MAX — the one destination width */
 #include "io.h"
 #include "klib.h"
 #include "vmm.h"
@@ -156,14 +157,41 @@ void ioapic_init(uintptr_t base_addr, uint8_t gsi_base) {
 /*
  * Can this APIC ID be named in a redirection entry at all?
  *
- * Intel 82093AA §3.2.4, IOREDTBLx Destination Field: in Physical Mode the
- * entry's destination is an APIC ID held in the high dword — eight bits on
- * every part BoxOS runs on. An APIC ID above 255 has no representation
- * there, and truncating it to its low eight bits does not merely fail to
- * route the line: it routes the line to a DIFFERENT, running processor,
- * which then takes an interrupt under a vector whose handler expects
- * different hardware. A machine whose BSP is x2APIC ID 0x100 would send
- * every legacy IRQ to the core with ID 0.
+ * TWO DOCUMENTS DESCRIBE THIS FIELD AND THEY DO NOT AGREE ON ITS WIDTH, so
+ * say which one rules before using either. Intel 82093AA §3.2.4, IOREDTBLx
+ * Destination Field, describes the DISCRETE chip: "If the Destination Mode
+ * of this entry is Physical Mode ... bits [59:56] contain an APIC ID" —
+ * four bits, because the discrete IOAPIC was paired with discrete local
+ * APICs whose IDs were four bits wide, and no ID above 0x0F existed on such
+ * a board to be lost. The width that governs the IOAPIC integrated into
+ * every chipset this kernel runs on is xAPIC's, and that is Intel SDM Vol
+ * 3A's to state: "The destination ID corresponds to bits 63:56 of the I/O
+ * APIC Redirection Table Entry if the IOAPIC is used to dispatch the
+ * interrupt to the processor(s)" — the same eight bits the MSI Message
+ * Address carries, the whole high byte of the entry rather than half of it.
+ *
+ * SDM is therefore the authority here, and 82093AA is quoted in this file
+ * only for the parts the integrated IOAPIC inherited unchanged: the
+ * IOREGSEL/IOWIN transaction and the position of the mask bit. Taking the
+ * narrower reading would refuse MORE IDs, never fewer, so the test below is
+ * correct under either document; what would be wrong is leaving both widths
+ * standing side by side with no word about which one the field has.
+ *
+ * Those eight bits stop one short of 256. SDM Vol 3A, chapter "ADVANCED
+ * PROGRAMMABLE INTERRUPT CONTROLLER (APIC)", section "Physical Destination
+ * Mode": "either a single destination (local APIC IDs 00H through FEH) or a
+ * broadcast to all APICs (the APIC ID is FFH) may be specified in physical
+ * destination mode." (Cited by title; the section number differs between
+ * SDM revisions — see LAPIC_XAPIC_DEST_MAX in lapic.h.) So there are two
+ * ways to get this wrong, and they fail differently. An APIC ID above 255 has no
+ * representation here at all, and truncating it routes the line to a
+ * DIFFERENT, running processor, which takes an interrupt under a vector
+ * whose handler expects other hardware — a machine whose BSP is x2APIC ID
+ * 0x100 would send every legacy IRQ to the core with ID 0. An APIC ID of
+ * exactly 255 survives the field intact and still does not mean that core:
+ * it is the broadcast, and the line would be asserted on EVERY processor,
+ * each of which would run the handler and, on a level-triggered line, race
+ * to EOI it. LAPIC_XAPIC_DEST_MAX is where both of those begin.
  *
  * The refusal lives here, at the field, and not in the caller. A
  * caller-side test is a test this file cannot see, and an eight-bit
@@ -182,12 +210,19 @@ void ioapic_init(uintptr_t base_addr, uint8_t gsi_base) {
  */
 static bool ioapic_dest_is_nameable(uint32_t dest_lapic_id, uint32_t gsi,
                                     const char *what) {
-    if (dest_lapic_id <= 0xFFu) return true;
+    if (dest_lapic_id <= LAPIC_XAPIC_DEST_MAX) return true;
 
-    kprintf("[IOAPIC] %[E]%s GSI %u not programmed: APIC ID %u does not fit "
-            "the 8-bit destination of the redirection entry, and the low "
-            "eight bits name the core with ID %u instead%[D]\n",
-            what, gsi, dest_lapic_id, dest_lapic_id & 0xFFu);
+    if (dest_lapic_id == LAPIC_XAPIC_DEST_BROADCAST) {
+        kprintf("[IOAPIC] %[E]%s GSI %u not programmed: APIC ID 255 is the "
+                "broadcast destination of the redirection entry's 8-bit "
+                "physical destination, so this line would be asserted on "
+                "EVERY processor instead of on one%[D]\n", what, gsi);
+    } else {
+        kprintf("[IOAPIC] %[E]%s GSI %u not programmed: APIC ID %u does not "
+                "fit the 8-bit destination of the redirection entry, and the "
+                "low eight bits name the core with ID %u instead%[D]\n",
+                what, gsi, dest_lapic_id, dest_lapic_id & 0xFFu);
+    }
     return false;
 }
 
@@ -203,6 +238,20 @@ void ioapic_enable_irq(uint8_t gsi, uint8_t vector, uint32_t dest_lapic_id) {
     if (!ioapic_base_virt) {
         kprintf("[IOAPIC] %[E]IRQ GSI %u not programmed: no IOAPIC is "
                 "mapped%[D]\n", gsi);
+        return;
+    }
+
+    /* Below this IOAPIC's first GSI there is no pin to subtract towards.
+     * Without this test `gsi - ioapic_gsi_base` wraps and the line is still
+     * refused — by the pin test below, naming a pin number that was never
+     * asked for and a reason that is not the real one. A refusal that
+     * misnames its own cause sends the next reader to look for a pin count
+     * problem on a machine whose IOAPICs are simply numbered from elsewhere.
+     * ioapic_program_nmi_source has asked this question all along. */
+    if (gsi < ioapic_gsi_base) {
+        kprintf("[IOAPIC] %[E]IRQ GSI %u not programmed: it is below this "
+                "IOAPIC's GSI base %u, so this line belongs to another "
+                "IOAPIC%[D]\n", gsi, ioapic_gsi_base);
         return;
     }
 
@@ -243,6 +292,13 @@ void ioapic_disable_irq(uint8_t gsi) {
      * line either, so there is no work being dropped — only a null base to
      * keep out of ioapic_read_held(). */
     if (!ioapic_base_virt) return;
+
+    /* Same underflow as the arming path, and here it is worse than a wrong
+     * message: a wrapped pin that happens to land within ioapic_max_entry
+     * masks a DIFFERENT line on this IOAPIC, and the device that owned it
+     * goes quiet with nothing said. Silent, like the rest of this function:
+     * a line this IOAPIC never armed has nothing to disarm. */
+    if (gsi < ioapic_gsi_base) return;
 
     uint8_t pin = gsi - ioapic_gsi_base;
 

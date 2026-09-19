@@ -4,111 +4,83 @@
 #include "ktypes.h"
 
 /*
- * AML interpreter — production subset of ACPI 6.5 §20.
+ * AML table reader — ACPI 6.5 §20, namespace only.
  *
- * Supported opcodes (real-HW core surface):
- *   Namespace:    NameOp, ScopeOp, MethodOp, DeviceOp, OpRegionOp,
- *                 FieldOp, IndexFieldOp, BankFieldOp, AliasOp
- *   Data:         ZeroOp/OneOp/OnesOp, BytePrefix, WordPrefix,
- *                 DWordPrefix, QWordPrefix, StringPrefix, BufferOp,
- *                 PackageOp, VarPackageOp
- *   Arithmetic:   AddOp, SubtractOp, MultiplyOp, DivideOp, IncrementOp,
- *                 DecrementOp, AndOp, OrOp, XorOp, NotOp, ShiftLeftOp,
- *                 ShiftRightOp, ModOp
- *   Logical:      LAndOp, LOrOp, LNotOp, LEqualOp, LGreaterOp,
- *                 LLessOp, LGreaterEqualOp, LLessEqualOp, LNotEqualOp
- *   Control:      IfOp, ElseOp, WhileOp, ReturnOp, BreakOp, ContinueOp
- *   Reference:    StoreOp, RefOfOp, DerefOfOp, IndexOp, SizeOfOp
- *   Extended:     Stall, Sleep, Acquire, Release, Signal, Wait, Reset,
- *                 CondRefOf, FromBCD, ToBCD, Fatal (ExtOpPrefix 0x5B).
- *                 Every other defined 0x5B opcode has its operands
- *                 consumed exactly and is then refused out loud — the
- *                 stream is never re-entered at a sub-opcode byte.
- *   Field access: through OpRegion address-space handlers for SystemIO,
- *                 SystemMemory and PCI_Config only; IndexField goes
- *                 through its Index/Data register pair and BankField
- *                 selects its bank before every access
+ * ‼ THERE IS NO INTERPRETER HERE, AND NONE IS MISSING.
  *
- * ‼ AN UNSERVED ADDRESS SPACE IS A REFUSAL, NOT A ZERO
+ * This file parses the DSDT and every SSDT and builds the namespace: named
+ * objects, their types, and what the firmware declared about them. It never
+ * runs a Method, never touches an OperationRegion, and never performs an
+ * I/O, MMIO or PCI-config access. Nothing was forgotten and nothing is
+ * half-finished — an executor was here and was REMOVED, deliberately.
  *
- * ACPI 6.5 §20.2.5.2 defines eleven RegionSpace values — EmbeddedControl
- * (0x03), SMBus (0x04), SystemCMOS (0x05), PciBarTarget (0x06), IPMI (0x07),
- * GeneralPurposeIO (0x08), GenericSerialBus (0x09), PCC (0x0A) beyond the
- * three served here — plus the OEM range from 0x80.
+ * Why: the only thing that ever reached it was the ACPI S1-S4 sleep path,
+ * and BoxOS does not sleep through ACPI. "How the machine goes to sleep" is
+ * already answered here in BoxOS's own words — Turn In and Bell: the machine
+ * sleeps WHOLE, a strand is laid down until its event rather than polled, and
+ * the idle path measured 100% -> 0%. An ACPI S-state would be a second answer
+ * to a question that already has one, which is mimicry of a paradigm this
+ * project rejects on purpose, and the code behind it was unreachable in the
+ * bargain. Powering OFF is a different question with a different answer:
+ * acpi_shutdown() is live, and the _S5 values it writes come from the
+ * standalone scanner in acpi_dsdt.c, not from anything in this file.
  *
- * Every one of them used to be admitted to the namespace looking exactly
- * like a serviceable region: the RegionSpace byte was not validated at
- * parse time, aml_region_read ended in `default: return 0`, aml_region_write
- * had no default at all, and neither field_read/field_write nor exec_store
- * had a status channel to carry a refusal even if one were raised. So a read
- * of an EmbeddedControl field yielded zero — indistinguishable, to the AML,
- * from an EC that answered zero — and a write to one was dropped while the
- * method ran on and the executor returned AML_OK.
+ * ‼ AND NOTHING READS THE NAMESPACE TODAY. aml_init() is the whole surface:
+ * it builds the objects and announces them on "aml:ready". The lookup calls
+ * that used to sit here went out with the sleep path, because that path was
+ * their only caller and a function with no caller is garbage. When a real
+ * reader arrives — GPE handlers, an embedded controller, a thermal zone —
+ * it gets the accessors it actually needs, written then; keeping empty ones
+ * warm on spec is the "code for the future" this project refuses. So the
+ * open question in this file is not what is missing from it, it is whether
+ * a namespace nobody reads should be built at all.
  *
- * Both halves are closed. The RegionSpace byte is checked where the
- * OperationRegion is declared: an unserved space is named once, by name, on
- * the console, and the region is marked unusable. And the whole path —
- * aml_region_read / aml_region_write -> field_read / field_write ->
- * exec_store -> exec_term -> aml_call_int — now carries aml_status_t, so a
- * refused access stops the method and reaches the caller as AML_ERR_REGION,
- * the value this enum has always had for it. Every arm that used to answer
- * zero (a width with no instruction behind it, an unmappable System Memory
- * region, a PCI register out of reach of this machine's config mechanism)
- * answers AML_ERR_REGION instead.
+ * Supported declarations (real-HW core surface):
+ *   Namespace:  NameOp, ScopeOp, MethodOp, DeviceOp, OpRegionOp, FieldOp,
+ *               IndexFieldOp, BankFieldOp, AliasOp, MutexOp, EventOp,
+ *               ProcessorOp, PowerResOp, ThermalZoneOp
+ *   Data:       ZeroOp/OneOp/OnesOp, BytePrefix, WordPrefix, DWordPrefix,
+ *               QWordPrefix, StringPrefix, BufferOp, PackageOp, VarPackageOp
  *
- * AML_ERR_BAD_OPCODE was never a substitute, and not because it is absent:
- * the executor raises it in a dozen places — an extended opcode whose
- * operands cannot be stepped over, a SuperName that resolves to nothing —
- * and exec_termlist and aml_call_int hand it straight back. What it never
- * means is an address space; the one thing it tells a caller is that a byte
- * of the method could not be decoded. On the parse side it does not even
- * survive: parse_term_list swallows it to resynchronise the stream and
- * returns AML_OK, so aml_init never reports one.
+ * A Method is recorded with its flags and the byte range of its TermList, so
+ * the object describes the firmware faithfully; it is not run. An
+ * OperationRegion is recorded with its address space, base and length, and
+ * each Field with its bit offset, width and access rule; none of them is
+ * accessed.
  *
- * The executor itself still has no live caller — aml_call_int is reached
- * only from acpi_enter_sleep and aml_call_pic, and neither is called from
- * anywhere; the one live entry, aml_init() from main.c, only builds the
- * namespace. What changes here is that the first caller that needs an EC
- * will be TOLD it cannot have one.
+ * How exact the walk is depends on WHERE a term stands, and the boundary
+ * matters more than the word "exact" does:
+ *   - IN AN OPERAND — RegionOffset, RegionLen, BankValue, the arguments of
+ *     CreateField — an executable term IS measured and stepped over exactly.
+ *     Add, Divide, Store, the logical and reference operators and every
+ *     sub-opcode under ExtOpPrefix (a closed set, Table 20.2) have known
+ *     operand shapes, and that is what keeps a declaration's operands from
+ *     being mistaken for declarations. An extended opcode this pass cannot
+ *     measure says so on the console and resynchronises.
+ *   - AT TERMOBJ LEVEL the scan knows only the declarations listed above.
+ *     An If, While or Return standing there is NOT measured: the TermList
+ *     steps ONE BYTE and tries again until a declaration opcode lands, and
+ *     that resync is silent. It is a known limit of this pass — declarations
+ *     nested behind control flow can be missed — not a property of it.
  *
- * Out of scope for this audit (deferred to ACPICA/uACPI follow-up):
- *   Contended Mutex/Event semantics — nothing in the tree evaluates AML
- *     on two cores, so Acquire always succeeds and Wait always reports
- *     the timeout it is asked to report
- *   Power/Thermal/Processor object semantics beyond namespace insertion
- *   Buffer fields (CreateBitField/CreateByteField/...)
- *   Reference counting + GC of objects across method boundaries
- *   Notify dispatch (the byte is parsed but no listeners run yet)
- *   ToBuffer/ToHexString/ToInteger generic conversion suite
- *   ConcatOp, MatchOp, ObjectTypeOp
- *
- * Designed to be safe to call from kernel context: every executor frame is
- * bounded, every Buffer/Package is hard-capped to 1 MiB, and every While is
- * bounded by REAL TIME — thirty seconds on HourGlass, which is
- * ACPI_MAX_LOOP_TIMEOUT and ACPICA's AE_AML_LOOP_TIMEOUT, not a count of
- * iterations. A loop that outlives it aborts the method out loud; it does
- * not fall out quietly with AML_OK, which is what the iteration count did.
+ * Bounded by construction: the object pool is a chain of chunks that grows
+ * with the firmware (an ASRock B365M Pro4-F declares 4615 objects) and says
+ * out loud when the heap cannot follow; scope nesting is capped; a Buffer is
+ * capped at 1 MiB.
  */
 
 typedef enum {
     AML_OK = 0,
     AML_ERR_NOT_LOADED = -1,
-    AML_ERR_NOT_FOUND  = -2,
-    AML_ERR_BAD_OPCODE = -3,
-    AML_ERR_DEEP_NEST  = -4,
-    AML_ERR_TYPE       = -5,
-    AML_ERR_BOUNDS     = -6,
-    AML_ERR_NOMEM      = -7,
-    AML_ERR_REGION     = -8,
-    /* Method execution was abandoned on purpose and the interpreter has
-     * already said why on the console: a divide by zero (ACPI 6.5
-     * §19.6.32, ACPICA AE_AML_DIVIDE_BY_ZERO), a Fatal() from the
-     * firmware, an opcode this executor refuses to guess at, or a delay
-     * it could not honour. A partial ret_value is not to be trusted. */
-    AML_ERR_ABORT      = -9,
+    AML_ERR_BAD_OPCODE = -2,
+    AML_ERR_DEEP_NEST  = -3,
+    AML_ERR_BOUNDS     = -4,
+    AML_ERR_NOMEM      = -5,
 } aml_status_t;
 
 typedef enum {
+    /* Zero on purpose: an object that has been allocated and zeroed is
+     * UNTYPED, not an Integer. Do not renumber this away. */
     AML_OBJ_UNINIT = 0,
     AML_OBJ_INTEGER,
     AML_OBJ_STRING,
@@ -130,25 +102,7 @@ typedef enum {
 
 typedef struct aml_object aml_object_t;
 
+/* Parse the DSDT and every SSDT into the namespace, once. */
 aml_status_t aml_init(void);
-aml_status_t aml_call_pic(uint32_t mode);
-aml_status_t aml_eval(const char* path, aml_object_t** args, int argc,
-                       aml_object_t** ret);
-aml_status_t aml_find(const char* path, aml_object_t** out);
-aml_status_t aml_eval_crs(const char* path, void* buf, size_t buf_len,
-                          size_t* used);
-
-/* Read 64-bit integer from a named object (Name, return value, etc.).
- * Convenience for callers like the shutdown path that only need _S5
- * elements. Returns AML_ERR_TYPE if the object isn't an integer. */
-aml_status_t aml_read_integer(const char* path, uint64_t* out);
-
-/* Invoke a Method by absolute path with up to 7 integer arguments.
- * Returns the integer return value via `*ret_value` (zero when the
- * method returns no value or a non-integer). The full ASL value model
- * collapses to integers here — sufficient for _PTS / _BFS / _PIC /
- * _STA / _INI which take and return integers. */
-aml_status_t aml_call_int(const char* path, uint64_t* args, int argc,
-                           uint64_t* ret_value);
 
 #endif /* ACPI_AML_H */

@@ -1,5 +1,4 @@
 #include "acpi_internal.h"
-#include "aml.h"
 #include "io.h"
 #include "klib.h"
 #include "idt.h"
@@ -420,10 +419,10 @@ void acpi_gpe_unregister(uint16_t gpe) {
  *
  * Two places in this file used to take the legacy 32-bit field as the whole
  * answer and reach it with inw/outw regardless: the SCI_EN test of the
- * ACPI-mode handoff, and the sleep vector of acpi_enter_sleep. On a FADT
- * where the extended descriptor supersedes the legacy one — a different
- * address, or the register in System Memory — both addressed something that
- * is not PM1a_CNT. A port nothing decodes answers inw with 0xFFFF, and bit 0
+ * ACPI-mode handoff, and the sleep vector written on the way to soft-off. On
+ * a FADT where the extended descriptor supersedes the legacy one — a
+ * different address, or the register in System Memory — both addressed
+ * something that is not PM1a_CNT. A port nothing decodes answers inw with 0xFFFF, and bit 0
  * of that word is SCI_EN's: the handoff read it as "already in ACPI mode",
  * returned without ever writing SMI_CMD, and left the platform in SMI mode
  * with the power button unarmed and S5 a no-op. Every step of that is
@@ -665,9 +664,13 @@ static AcpiSciEnState pm1_sci_en_state(void)
  * names the one that matters most here: bit 0 is SCI_EN, which "OSPM always
  * preserves". The word written used to be synthesised whole — (SLP_TYP << 10)
  * | SLP_EN — so it drove SCI_EN and BM_RLD to zero along with every reserved
- * bit, and a machine resumed from S1/S3 would have come back with its PM
- * events and every GPE routed to SMI instead of to the SCI handler below.
- * ACPICA masks off SLP_TYP and SLP_EN and nothing else (acpi_hw_legacy_sleep).
+ * bit. S5 is the only state this kernel asks for and a successful one never
+ * comes back, but a REFUSED one does: the platform that declines the request
+ * leaves the machine running, and it would be running with SCI_EN cleared,
+ * its PM events and every GPE routed to SMI instead of to the SCI handler
+ * below — the power button included, so the second press could not work
+ * either. ACPICA masks off SLP_TYP and SLP_EN and nothing else
+ * (acpi_hw_legacy_sleep).
  *
  * Only the word is built here. Who writes it, and in what order against the
  * other block, is the caller's business: §4.8 puts the A block's SLP_TYP down
@@ -701,8 +704,10 @@ static bool pm1_control_sleep_word(const AcpiPm1Control *r, uint8_t slp_typ,
  * SLP_EN in A while B still holds the previous type is exactly what that
  * sentence forbids.
  *
- * Declared in acpi.h; acpi_shutdown() (the live S5 path) and
- * acpi_enter_sleep() (S1-S4, not in service) are its two callers. */
+ * Declared in acpi.h. acpi_shutdown() is its one caller, and S5 is the one
+ * sleep state BoxOS asks the platform for: S1-S4 were removed with the AML
+ * executor that served them, because BoxOS puts the machine down through
+ * Turn In and Bell rather than through an ACPI S-state. */
 bool acpi_pm1_request_sleep(uint8_t slp_typa, uint8_t slp_typb)
 {
     uint16_t word_a = 0, word_b = 0;
@@ -719,92 +724,6 @@ bool acpi_pm1_request_sleep(uint8_t slp_typa, uint8_t slp_typb)
     if (has_b) pm1_control_write(&g_pm1b_control,
                                  (uint16_t)(word_b | PM1_CNT_SLP_EN));
     return true;
-}
-
-/*
- * ACPI sleep entry. ACPI 6.5 §16.1.
- *
- * ‼ NOT IN SERVICE. Nothing in this tree calls it: S1-S4 have no entry point
- * yet, and a request for S5 is forwarded to acpi_shutdown() below before any
- * register here is touched. So the \_PTS / \_BFS calls in this function are
- * the sleep path's alone — no AML method is executed on any boot today.
- *
- *   1. Resolve \_S<state> from the AML namespace (Package of bytes;
- *      [0] = SLP_TYPa, [1] = SLP_TYPb).
- *   2. Call \_PTS(state) and \_BFS(state) if present — the AML executor
- *      runs integer-result methods (aml_call_int), so these are evaluated
- *      and not merely found.
- *   3. Replace SLP_TYP in PM1a_CNT and set SLP_EN, preserving every other
- *      bit (and PM1b if PM1b_CNT != 0).
- *   4. For S1 the CPU immediately enters low-power state; on wake the
- *      firmware clears SLP_EN, runs \_WAK and returns control here.
- *   5. S5 path delegates to acpi_shutdown() so the dedicated soft-off
- *      sequence runs (it also masks IRQs etc.).
- */
-int acpi_enter_sleep(uint8_t state) {
-    if (state < 1 || state > 5) return -1;
-    if (!g_acpi.initialized || !g_acpi.fadt) return -2;
-    if (state == 5) acpi_shutdown();   /* noreturn */
-
-    char path[6] = { '\\', '_', 'S', '0' + (char)state, '_', 0 };
-    uint64_t typa = 0;
-    extern aml_status_t aml_read_integer(const char*, uint64_t*);
-    if (aml_read_integer(path, &typa) != 0) {
-        debug_printf("[ACPI] \\_S%u not found in namespace\n", state);
-        return -3;
-    }
-    /* For SLP_TYPb we'd need a second integer; the namespace builder
-     * only captures the first int of a Package. Most platforms use
-     * the same value for both ports, which is the safe default. */
-    uint16_t slp_typa = (uint16_t)(typa & 0x7);
-    uint16_t slp_typb = slp_typa;
-
-    debug_printf("[ACPI] entering S%u (SLP_TYPa=0x%x)\n", state, slp_typa);
-
-    /* Invoke \_PTS(state) and \_BFS(state) if present. */
-    {
-        uint64_t arg = state;
-        uint64_t ret = 0;
-        if (aml_call_int("\\_PTS", &arg, 1, &ret) == AML_OK) {
-            debug_printf("[ACPI] \\_PTS(%u) returned %lu\n",
-                         state, (unsigned long)ret);
-        }
-        if (aml_call_int("\\_BFS", &arg, 1, &ret) == AML_OK) {
-            debug_printf("[ACPI] \\_BFS(%u) returned %lu\n",
-                         state, (unsigned long)ret);
-        }
-    }
-
-    /* Broadcast to subscribers before we tip the platform into the
-     * sleep state. Daemons can flush, persist, drop hardware claims.
-     * The hardware-halt path in system_halt.c already drained the
-     * deferred work for S5; for S1/S2/S3 this is the canonical event
-     * that says "going down". */
-    struct { uint8_t state; uint16_t slp_typa; uint16_t slp_typb; } ev =
-        { state, slp_typa, slp_typb };
-    static const char *sleep_tags[] = {
-        "acpi:sleep:s1", "acpi:sleep:s2", "acpi:sleep:s3", "acpi:sleep:s4"
-    };
-    if (state >= 1 && state <= 4) {
-        TouchPublish(sleep_tags[state - 1], &ev, sizeof(ev));
-    }
-
-    /* Through the resolved registers, not through the legacy FADT field with
-     * outw: this used to take pm1a_control_block for the address and an I/O
-     * port for the kind of register, which is the same assumption the
-     * ACPI-mode handoff was making one block up. One resolver, one writer —
-     * the same call acpi_shutdown() makes for S5. */
-    if (!acpi_pm1_request_sleep((uint8_t)slp_typa, (uint8_t)slp_typb)) {
-        kprintf("[ACPI] S%u: neither half of the PM1 control pair is a "
-                "register this kernel can reach — no sleep vector written\n",
-                state);
-        return -4;
-    }
-
-    /* On S1, control returns here on wake. Other states either reset
-     * the CPU (S2-S3) or never return (S4-S5). */
-    debug_printf("[ACPI] resumed from S%u\n", state);
-    return 0;
 }
 
 /* One fired GPE, served in the order ACPI 6.5 §5.6.4 lays down.
@@ -1045,10 +964,11 @@ static void acpi_power_button_answer_knocked(void *ctx)
  *      (W1C semantics on PM1_STS — required to clear the SCI line),
  *   3. Serves both GPE blocks in the order ACPI 6.5 §5.6.4 gives.
  *
- * The per-bit \_GPE._Lxx / _Exx methods are still not run. The AML executor
- * exists and this driver calls it (aml_call_int, above), so what is missing
- * is the walk of the \_GPE scope that says which method belongs to which
- * bit — not an interpreter.
+ * The per-bit \_GPE._Lxx / _Exx methods are not run, and there is no AML
+ * executor in this kernel to run them with: the one that existed served the
+ * S1-S4 sleep path alone, was reachable from nowhere, and was removed. A GPE
+ * is heard, acknowledged and said out loud under "acpi:gpe"; what the
+ * firmware's method would have done about it, nothing here does.
  *
  * The PM1 STATUS block is at PM1a_CNT - PM1_EVENT_LENGTH/2, but the
  * canonical FADT layout puts it in `pm1a_event_block`. We use that.
@@ -1418,9 +1338,9 @@ static void acpi_enable_mode(void) {
         cpu_pause();
     }
 
-    /* kprintf, not debug_printf: this line decides whether the power button,
-     * the sleep states and S5 work at all on this boot, and a line like that
-     * must survive into a shipped build. */
+    /* kprintf, not debug_printf: this line decides whether the power button
+     * and S5 work at all on this boot, and a line like that must survive
+     * into a shipped build. */
     kprintf("[ACPI] SCI_EN never rose — %lu us on the %s and the %s. The "
             "platform stays in SMI mode: PM1 writes (power button, S5) will "
             "not take effect\n",
@@ -1454,7 +1374,7 @@ acpi_error_t acpi_init(void) {
 
     /* Where the PM1 control registers are — X_ first, with a FADT-length
      * guard, and in whatever address space the descriptor names. The handoff
-     * below reads SCI_EN out of them and acpi_enter_sleep writes its sleep
+     * below reads SCI_EN out of them and acpi_shutdown() writes its S5 sleep
      * vector to them, so this has to stand before either. */
     acpi_pm1_control_locate();
 
@@ -1474,8 +1394,8 @@ acpi_error_t acpi_init(void) {
                  g_acpi.s5_found     ? "yes" : "no");
 
     /* Broadcast capability bitmap so userspace daemons can decide what
-     * features to bring up (battery service only matters if S3 works,
-     * IOMMU service only if DMAR/IVRS exposed something, etc.).
+     * features to bring up (an IOMMU service only if DMAR/IVRS exposed
+     * something, a power daemon only if _S5 was found, etc.).
      * Bits are stable across boots: this is the wire format that
      * userspace subscribers see. */
     uint32_t caps =

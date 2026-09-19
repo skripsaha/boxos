@@ -4,6 +4,8 @@
 #include "acpi.h"
 #include "vmm.h"
 #include "touch.h"
+#include "lapic.h"     /* LAPIC_XAPIC_DEST_MAX — an MSI destination is an
+                        * APIC destination, and there is one width for both */
 
 /* Configuration space has two doors, and only one of them needs a lock.
  *
@@ -650,7 +652,13 @@ static inline uint32_t msi_data(uint8_t vector) {
  * The message address, or the reason there is none.
  *
  * Bits 19:12 of the Message Address are the whole Destination ID in this
- * format — eight bits, the same field the xAPIC ICR has. Linux spells the
+ * format — eight bits, and Intel SDM Vol 3A, "Message Address Register
+ * Format", says they are the same eight the IOAPIC uses: "Destination ID —
+ * This field contains an 8-bit destination ID. It identifies the message's
+ * target processor(s). The destination ID corresponds to bits 63:56 of the
+ * I/O APIC Redirection Table Entry if the IOAPIC is used to dispatch the
+ * interrupt to the processor(s)." It is also the same field the xAPIC ICR
+ * has. Linux spells the
  * layout out as a bitfield (arch/x86/include/asm/msi.h: `destid_0_7 : 8`
  * in x86_msi_addr_lo, `destid_8_31 : 24` only in x86_msi_addr_hi) and
  * says in __irq_msi_compose_msg what the high bits cost: "Only the IOMMU
@@ -681,13 +689,36 @@ static inline uint32_t msi_data(uint8_t vector) {
 static bool msi_address_for(uint32_t dest_lapic_id, const char *what,
                             uint8_t bus, uint8_t device, uint8_t function,
                             uint32_t *out_addr_lo) {
-    if (dest_lapic_id > 0xFFu) {
-        kprintf("[PCI] %[E]%s not armed on %02x:%02x.%u: APIC ID %u does not "
-                "fit the 8-bit Destination ID of the compatibility message "
-                "address, and the low eight bits name the core with ID %u "
-                "instead%[D]\n",
-                what, bus, device, function, dest_lapic_id,
-                dest_lapic_id & 0xFFu);
+    if (dest_lapic_id > LAPIC_XAPIC_DEST_MAX) {
+        /* Two different accidents, told apart. Above 0xFF the high bits are
+         * simply gone; at exactly 0xFF every bit survives and the field
+         * means something else — SDM Vol 3A, section "Physical Destination
+         * Mode", gives FFH in physical destination mode to "a broadcast to
+         * all APICs", so the device would interrupt every processor on this
+         * machine at once, on a vector whose handler is written for one.
+         * The MSI text confirms in its own words that FFH is not any one
+         * processor's ID — "Message Address Register Format", field 3 (RH):
+         * "When RH is 1 and the physical destination mode is used, the
+         * Destination ID field must not be set to FFH; it must point to a
+         * processor that is present and enabled to receive the interrupt."
+         * This composer leaves RH clear, so that sentence is not the rule
+         * being enforced here; it is a second statement, from the MSI
+         * chapter itself, of what FFH is. (Cited by title; see
+         * LAPIC_XAPIC_DEST_MAX in lapic.h for the editions.) */
+        if (dest_lapic_id == LAPIC_XAPIC_DEST_BROADCAST) {
+            kprintf("[PCI] %[E]%s not armed on %02x:%02x.%u: APIC ID 255 is "
+                    "the broadcast Destination ID of the compatibility "
+                    "message address, so this device would interrupt EVERY "
+                    "processor instead of one%[D]\n",
+                    what, bus, device, function);
+        } else {
+            kprintf("[PCI] %[E]%s not armed on %02x:%02x.%u: APIC ID %u does "
+                    "not fit the 8-bit Destination ID of the compatibility "
+                    "message address, and the low eight bits name the core "
+                    "with ID %u instead%[D]\n",
+                    what, bus, device, function, dest_lapic_id,
+                    dest_lapic_id & 0xFFu);
+        }
         return false;
     }
 

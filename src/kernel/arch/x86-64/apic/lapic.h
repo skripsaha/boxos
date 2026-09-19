@@ -24,6 +24,75 @@
 // SVR flags
 #define LAPIC_SVR_ENABLE        (1 << 8)    // APIC Software Enable
 
+/* The highest APIC ID an eight-bit physical destination can NAME.
+ *
+ * Every field that carries a destination in the compatibility formats is the
+ * same eight bits: the xAPIC ICR's destination (bits 63:56), the IOAPIC
+ * redirection entry's destination in physical mode (also bits 63:56), and
+ * the MSI/MSI-X Message Address bits 19:12 — Intel SDM Vol 3A, "MESSAGE
+ * SIGNALLED INTERRUPTS" / "Message Address Register Format": "Destination
+ * ID — This field contains an 8-bit destination ID. It identifies the
+ * message's target processor(s). The destination ID corresponds to bits
+ * 63:56 of the I/O APIC Redirection Table Entry if the IOAPIC is used to
+ * dispatch the interrupt to the processor(s)."
+ *
+ * Those eight bits do not hold 256 processors. Intel SDM Vol 3A, chapter
+ * "ADVANCED PROGRAMMABLE INTERRUPT CONTROLLER (APIC)", section "Physical
+ * Destination Mode": "For Pentium 4 and Intel Xeon processors, either a
+ * single destination (local APIC IDs 00H through FEH) or a broadcast to all
+ * APICs (the APIC ID is FFH) may be specified in physical destination mode."
+ * FFH is not processor 255 — it is EVERY processor. Writing it as a
+ * destination does not fail to reach one core, it reaches all of them: an
+ * INIT so addressed resets the machine, and a device line so addressed is
+ * asserted on every core at once.
+ *
+ * CITED BY TITLE RATHER THAN BY SECTION NUMBER, and deliberately. Intel
+ * renumbers this chapter between revisions of Volume 3A: the paragraph above
+ * is §10.6.2.1 in the older three-part System Programming Guide, §11.6.2.1
+ * in order number 253668-082US (December 2023), and §13.6.2.1 in the merged
+ * guide, order number 325384-092US (June 2026). The last two were both read
+ * to write this comment and their text is identical word for word. A bare
+ * section number sends the next reader to whatever happens to sit at that
+ * number in the edition on their desk; the chapter and section TITLES have
+ * not moved in any of them. Every citation of this chapter in this kernel is
+ * written that way for that reason.
+ *
+ * The same paragraph's rule appears a second time in "Message Address
+ * Register Format", field 3 (RH): "When RH is 1 and the physical destination
+ * mode is used, the Destination ID field must not be set to FFH; it must
+ * point to a processor that is present and enabled to receive the
+ * interrupt." FFH is the value that does not point to a processor.
+ *
+ * ACPI agrees on the boundary and states it as a requirement on firmware
+ * (6.5 §5.2.12.12, "Processor Local x2APIC Structure"): "Logical processors
+ * with APIC ID values 255 and greater must use the Processor Local x2APIC
+ * structure". 255 is already outside the nameable range, which is why the
+ * spec starts the wide form there. */
+#define LAPIC_XAPIC_DEST_MAX        0xFEu
+#define LAPIC_XAPIC_DEST_BROADCAST  0xFFu
+
+/* The same word at the other width.
+ *
+ * x2APIC widened the destination to 32 bits and gave the all-ones value the
+ * same job — Intel SDM Vol 3A, chapter "ADVANCED PROGRAMMABLE INTERRUPT
+ * CONTROLLER (APIC)", section "ICR Operation in x2APIC Mode" (§11.12.9 in
+ * 253668-082US, §13.12.9 in 325384-092US): "A destination ID value of
+ * FFFF_FFFFH is used for broadcast of interrupts in both logical destination
+ * and physical destination modes."
+ *
+ * So 0xFFFFFFFF does not mean "no processor here", and a MADT entry carrying
+ * it is not thereby an empty seat. It is the one 32-bit ID that names ALL
+ * processors: an INIT sent to it in x2APIC mode resets every core on the
+ * machine, this one included. Whether a seat holds a usable processor is a
+ * question the firmware answers in that entry's FLAGS — ACPI 6.5 Table 5.23:
+ * "If this bit is clear and the Online Capable bit is also clear, this
+ * processor is unusable, and OSPM shall ignore the contents of the Processor
+ * Local APIC Structure" — and never in its ID. This constant exists so that
+ * an ID which cannot name one processor is REFUSED and said out loud, the
+ * way LAPIC_XAPIC_DEST_BROADCAST is at eight bits, instead of being skipped
+ * as if the firmware had meant nothing by it. */
+#define LAPIC_X2APIC_DEST_BROADCAST 0xFFFFFFFFu
+
 // LVT flags (Intel SDM Vol 3A, "Local Vector Table")
 #define LAPIC_LVT_MASKED            (1u << 16)   // Interrupt masked
 #define LAPIC_LVT_TIMER_PERIODIC    (1u << 17)   // Periodic timer mode (bits 18:17 = 01)
@@ -174,12 +243,20 @@ bool lapic_icr_write(uint32_t dest_id, uint32_t cmd);
  * provided NMI source (watchdog, IPMI alert, server PSU fault) never
  * reaches the OS.
  *
- * `acpi_processor_id` is the ACPI processor ID of THIS CPU (from the
- * matching MADT_TYPE_LOCAL_APIC entry); the function only programs
- * entries whose processor_id is 0xFF or matches.
+ * `acpi_processor_uid` is the ACPI Processor UID of THIS CPU, at the full
+ * 32 bits Table 5.34 gives it — the Type 9 machine class is the one that
+ * needs these entries most (ACPI 6.5 §5.2.12.13: on a machine with any
+ * x2APIC ID of 255 or greater "the Local X2APIC NMI structure must be used
+ * to specify global LINTx for ALL logical processors"), and it is exactly
+ * the class whose UIDs do not fit a byte.
+ *
+ * `uid_known` false means the caller could not find itself in the MADT at
+ * all. Then only the rules the firmware marked as applying to every
+ * processor are programmed: a rule addressed to one UID cannot be claimed by
+ * a processor that does not know whether it is the one addressed.
  */
 struct madt_info; /* forward decl — full definition in acpi_madt.h */
 void lapic_apply_madt_nmi(const struct madt_info *info,
-                          uint8_t acpi_processor_id);
+                          uint32_t acpi_processor_uid, bool uid_known);
 
 #endif // LAPIC_H

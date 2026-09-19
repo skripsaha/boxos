@@ -107,58 +107,74 @@ typedef struct {
 } __attribute__((packed)) madt_lx2apic_nmi_t;
 _Static_assert(sizeof(madt_lx2apic_nmi_t) == 12, "MADT Type 10 = 12 bytes");
 
-/* Per-CPU LAPIC NMI assignment captured during MADT parse, applied to LVT
- * during LAPIC bring-up. ACPI 6.5 §5.2.12.7: OSPM uses this to wire the
- * Local APIC NMI source. Without it, NMI watchdogs cannot fire. */
-#define MADT_NMI_PROCESSOR_ALL  0xFFu
-#define MADT_MAX_NMI_ENTRIES    16u
-#define MADT_MAX_NMI_SOURCES     8u
+/* What the MADT said is NOT copied into arrays here, and that is deliberate.
+ *
+ * ACPI 6.5 §5.2.12.13: "Each NMI connection to a processor requires a
+ * separate NMI structure", and on a machine that has any logical processor
+ * with an x2APIC ID of 255 or greater, "the Local X2APIC NMI structure must
+ * be used to specify global LINTx for ALL logical processors". So the number
+ * of NMI rules is a number the FIRMWARE states, once, in the table it wrote.
+ * A fixed array sized here has no honest value to take: the previous 16 NMI
+ * rules, 8 NMI sources and 64 processors were three ceilings invented by this
+ * kernel, and on a large machine each one dropped the tail of the list in
+ * silence — the per-core NMI rule that was never programmed, the processor
+ * whose ACPI UID could no longer be found.
+ *
+ * So madt_info_t carries WHERE the table is, and every later question is put
+ * to the table itself: madt_for_each_nmi_rule, madt_for_each_nmi_source,
+ * madt_uid_for_apic_id, madt_name_unreachable_processors. Each walk is
+ * bounded by the length the table declares in its own header — firmware's
+ * number, checked against firmware's own end pointer, not ours.
+ *
+ * NOTHING WAS GIVEN UP BY DROPPING THE COPY, including the question the copy
+ * was kept for. "Which APIC IDs did the firmware reserve for sockets that
+ * can be filled during OS runtime" is answered by walking Type 0 and Type 9
+ * for entries whose flags are Online-Capable, and those entries are still
+ * there, in the table, complete — where the 64-entry copy would have
+ * answered it only for the first sixty-four. The two places that ask it
+ * today ask it that way: acpi_parse_madt names every such seat as it goes
+ * past, and madt_name_unreachable_processors says which of them no device
+ * interrupt could ever reach. A hot-add path, when there is one, adds a walk
+ * of its own beside those; it does not need a cache to walk, and a cache is
+ * what would make its answer short. */
 
+/* One Local APIC NMI rule, in whichever of the two forms the firmware used:
+ * the 8-bit Local APIC NMI (ACPI 6.5 §5.2.12.7, Table 5.28) or the 32-bit
+ * Local x2APIC NMI (§5.2.12.13, Table 5.35).
+ *
+ * `all_processors` is a fact the firmware stated, carried as a fact. Both
+ * forms spell "everyone" with an all-ones UID — Table 5.28: "A value of 0xFF
+ * signifies that this applies to all processors in the machine"; Table 5.35:
+ * "A value of 0xFFFFFFFF signifies that this applies to all processors in
+ * the machine" — but those are two different numbers, and 0xFF is also a UID
+ * a 32-bit entry may legitimately carry for processor 255. Folding both into
+ * one sentinel is how a rule meant for one processor becomes a rule for the
+ * whole machine, or the other way round. */
 typedef struct {
-    uint8_t  acpi_processor_id;   /* 0xFF = broadcast to all */
+    uint32_t acpi_processor_uid;
+    bool     all_processors;
     uint8_t  lint;                /* LINT0 or LINT1 */
-    uint16_t mps_flags;           /* polarity / trigger bits */
-    bool     valid;
-} madt_nmi_entry_t;
+    uint16_t mps_flags;           /* MPS INTI: polarity[1:0], trigger[3:2] */
+} MadtNmiRule;
 
-typedef struct {
-    uint32_t gsi;                 /* Global System Interrupt */
-    uint16_t mps_flags;           /* polarity / trigger bits */
-    bool     valid;
-} madt_nmi_source_info_t;
-
-/* Bounded so madt_info_t (which lives on the stack in some callers) stays
- * under ~1 KB. BoxOS does not currently scale past this CPU count; the
- * limit can be raised when the scheduler / per-core data path supports
- * larger fleets. */
-#define MADT_MAX_CPU_MAP    64
-
-/* One processor entry the MADT published, in the three states Table 5.23
- * allows it to be in.
- *
- * `enabled` is Local APIC Flags bit 0 and nothing else: it means the
- * processor is ready for use NOW, and it is the only state this kernel
- * starts. `online_capable` is bit 1, honoured only on a FADT that is
- * version 6.3 or newer (see madt_online_capable_is_meaningful in
- * acpi_madt.c) — it means the seat exists and hardware can fill it during
- * OS runtime, which is a hot-add candidate, not a processor. Both clear
- * means the entry is unusable and Table 5.23 tells OSPM to ignore it.
- *
- * Kept apart rather than collapsed into one bool so the seat survives the
- * parse: a hot-add path has to be able to ask which APIC IDs the firmware
- * reserved, and "not enabled" on its own cannot answer that. */
-typedef struct {
-    uint32_t apic_id;
-    uint32_t acpi_processor_id;
-    bool     enabled;
-    bool     online_capable;
-} madt_cpu_map_t;
+typedef void (*MadtNmiRuleFn)(const MadtNmiRule *rule, void *ctx);
+typedef void (*MadtNmiSourceFn)(uint32_t gsi, uint16_t mps_flags, void *ctx);
 
 typedef struct madt_info {
     uintptr_t lapic_address;
     uintptr_t ioapic_address;
     uint8_t   ioapic_id;
     uint32_t  ioapic_gsi_base;
+
+    /* The parsed table itself, at the address acpi_find_table mapped it to.
+     * Kept so the walkers above can re-read it without going back through
+     * the ACPI table subsystem: acpi_find_table() fills a global map cache
+     * and can call the mapper, neither of which an AP may do concurrently
+     * during bring-up, while a read-only walk of memory that is already
+     * mapped is safe from any core at any time. NULL when no MADT was
+     * parsed, which every walker treats as "no entries". */
+    const acpi_madt_t *table;
+
     /* The BSP's APIC ID at FULL width, as CPUID.0BH:EDX reports it (falling
      * back to the 8-bit CPUID.01H:EBX[31:24] initial ID only on parts with
      * no leaf 0BH) — see detect_bsp_apic_id in acpi_madt.c. It is stored
@@ -169,28 +185,53 @@ typedef struct madt_info {
      * not fit rather than truncate it: the low eight bits name a different,
      * running processor. */
     uint32_t  bsp_lapic_id;
-    uint8_t   bsp_acpi_processor_id;    /* matching MADT entry, used for NMI lookup */
+
+    /* The BSP's ACPI Processor UID, at the full 32 bits Table 5.34 gives it.
+     * Truncating it to a byte, as this field used to, is the same defect as
+     * truncating a destination: on a machine that lists its processors as
+     * Type 9, UID 0x100 becomes UID 0 and the BSP is handed the NMI rule
+     * written for somebody else. */
+    uint32_t  bsp_acpi_processor_uid;
     bool      bsp_lapic_found;
-    bool      bsp_acpi_id_resolved;
+    bool      bsp_acpi_uid_resolved;
     bool      has_pic;
     bool      valid;
-
-    madt_nmi_entry_t nmi[MADT_MAX_NMI_ENTRIES];
-    uint8_t          nmi_count;
-
-    madt_nmi_source_info_t nmi_sources[MADT_MAX_NMI_SOURCES];
-    uint8_t                 nmi_source_count;
-
-    /* APIC ID ⇄ ACPI processor ID mapping captured from Type 0 (LAPIC)
-     * and Type 9 (x2APIC) MADT entries. Used to apply per-CPU NMI rules
-     * on APs without re-walking the table. */
-    madt_cpu_map_t cpu_map[MADT_MAX_CPU_MAP];
-    uint16_t       cpu_map_count;
 } madt_info_t;
 
 acpi_error_t acpi_parse_madt(madt_info_t* info);
 
 /* Collect all enabled LAPIC IDs from MADT. Returns count written. */
 uint8_t amp_collect_lapics(uint32_t* ids_out, uint8_t max_count);
+
+/* Hand every Local APIC NMI rule that applies to one processor to `fn`.
+ *
+ * A rule applies when the firmware named that processor's ACPI UID, or when
+ * it said the rule is for every processor. `uid_known` false means the
+ * caller could not find its own UID in the table at all — then only the
+ * every-processor rules apply, because a rule addressed to a UID cannot be
+ * claimed by a processor that does not know it is the one addressed. */
+void madt_for_each_nmi_rule(const madt_info_t *info,
+                            uint32_t acpi_processor_uid, bool uid_known,
+                            MadtNmiRuleFn fn, void *ctx);
+
+/* Hand every MADT NMI Source (Type 3, ACPI 6.5 §5.2.12.6) to `fn`. These are
+ * platform lines wired into an IOAPIC input as NMI — watchdog, chassis
+ * intrusion, PSU fault — which OSPM must program with Delivery Mode 100. */
+void madt_for_each_nmi_source(const madt_info_t *info,
+                              MadtNmiSourceFn fn, void *ctx);
+
+/* Which ACPI Processor UID the firmware gave the processor with this APIC
+ * ID, from Type 0 (8-bit APIC ID / Processor ID) or Type 9 (32-bit X2APIC ID
+ * / Processor UID). False when the table names no such processor — which is
+ * an answer, not a failure: it means no UID-addressed rule is this core's. */
+bool madt_uid_for_apic_id(const madt_info_t *info, uint32_t apic_id,
+                          uint32_t *out_uid);
+
+/* Name, once per boot, every logical processor — and every Online-Capable
+ * seat — this machine cannot deliver a legacy IRQ or an MSI to as it is
+ * configured now, with its APIC ID and its ACPI processor UID. Prints
+ * nothing when every one of them can be named, which is every machine whose
+ * APIC IDs stay below 255. */
+void madt_name_unreachable_processors(const madt_info_t *info);
 
 #endif // ACPI_MADT_H

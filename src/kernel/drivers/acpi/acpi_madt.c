@@ -176,8 +176,25 @@ static uint32_t detect_bsp_apic_id(void) {
  * tell that from two real seats. Said on the first parse, once. */
 static bool g_seats_named = false;
 
+/* One Online-Capable seat, said out loud with the APIC ID the firmware
+ * reserved for it. kprintf, not debug_printf: the number of processors this
+ * kernel starts is smaller than the number the MADT lists, and an operator
+ * counting cores in front of the machine needs the reason and the IDs — a
+ * hot-add path, when there is one, starts from exactly this list. */
+static void name_online_capable_seat(uint32_t apic_id, uint32_t acpi_uid) {
+    kprintf("[MADT] APIC ID %u (ACPI processor %u) is an Online-Capable "
+            "seat: the firmware says hardware can enable it during OS "
+            "runtime, not that a processor is there now — not started\n",
+            apic_id, acpi_uid);
+}
+
 acpi_error_t acpi_parse_madt(madt_info_t* info) {
     if (!info) return ACPI_ERR_INVALID_TABLE;
+
+    /* Sampled before the walk and acted on during it, so the seats are
+     * named in table order by whichever caller parses first and by nobody
+     * after. g_seats_named is raised when this walk ends. */
+    const bool name_seats = !g_seats_named;
 
     memset(info, 0, sizeof(madt_info_t));
 
@@ -198,6 +215,12 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
                  madt->flags,
                  (madt->flags & MADT_FLAG_PCAT_COMPAT) ? "yes" : "no");
 
+    /* Where the table is, kept for every question this parse does not
+     * answer on the spot — the NMI rules, the UID of a processor an AP finds
+     * itself to be, the roll call of processors no destination field can
+     * name. Copying those into arrays needed a ceiling; asking the table
+     * needs none. */
+    info->table = madt;
     info->lapic_address = madt->local_apic_address;
     info->has_pic = (madt->flags & MADT_FLAG_PCAT_COMPAT) != 0;
     /* The full-width ID is what the MADT entries below are matched against,
@@ -210,12 +233,12 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
     uint32_t bsp_apic_id = detect_bsp_apic_id();
     info->bsp_lapic_id = bsp_apic_id;
     info->bsp_lapic_found = true;
-    if (bsp_apic_id > 0xFFu) {
-        kprintf("[MADT] BSP APIC ID %u does not fit the 8-bit IOAPIC "
-                "destination field — legacy IRQs cannot be routed to this "
-                "CPU without interrupt remapping\n", bsp_apic_id);
-    }
     debug_printf("[MADT] BSP APIC ID: %u\n", bsp_apic_id);
+    /* The BSP being unreachable is not said here. It is said once, in
+     * madt_name_unreachable_processors, beside every other processor in the
+     * same condition — this function runs twice per boot and would say it
+     * twice, and a machine that cannot route to its BSP almost certainly
+     * cannot route to its other processors either. One list, or none. */
 
     uint8_t* ptr = (uint8_t*)madt + sizeof(acpi_madt_t);
     uint8_t* end = (uint8_t*)madt + madt->header.length;
@@ -244,26 +267,20 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
         switch (entry->type) {
             case MADT_TYPE_LOCAL_APIC: {
                 madt_local_apic_t* lapic = (madt_local_apic_t*)entry;
-                bool enabled = lapic_flags_enabled(lapic->flags);
                 debug_printf("[MADT]   LAPIC: ACPI ID=%u, APIC ID=%u, %s\n",
                              lapic->acpi_processor_id, lapic->apic_id,
                              lapic_flags_text(lapic->flags));
-                /* Resolve BSP ACPI processor ID by matching the APIC ID
-                 * that CPUID reported for the running CPU. */
+                /* Resolve the BSP's ACPI Processor UID by matching the APIC
+                 * ID CPUID reported for the running CPU. */
                 if (info->bsp_lapic_found &&
-                    !info->bsp_acpi_id_resolved &&
+                    !info->bsp_acpi_uid_resolved &&
                     (uint32_t)lapic->apic_id == bsp_apic_id) {
-                    info->bsp_acpi_processor_id = lapic->acpi_processor_id;
-                    info->bsp_acpi_id_resolved  = true;
+                    info->bsp_acpi_processor_uid = lapic->acpi_processor_id;
+                    info->bsp_acpi_uid_resolved  = true;
                 }
-                if (info->cpu_map_count < MADT_MAX_CPU_MAP) {
-                    madt_cpu_map_t* m = &info->cpu_map[info->cpu_map_count++];
-                    m->apic_id           = lapic->apic_id;
-                    m->acpi_processor_id = lapic->acpi_processor_id;
-                    m->enabled           = enabled;
-                    m->online_capable    =
-                        lapic_flags_online_capable(lapic->flags);
-                }
+                if (name_seats && lapic_flags_online_capable(lapic->flags))
+                    name_online_capable_seat(lapic->apic_id,
+                                             lapic->acpi_processor_id);
                 break;
             }
 
@@ -292,22 +309,11 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
             }
 
             case MADT_TYPE_LOCAL_APIC_NMI: {
+                /* Not copied out: madt_for_each_nmi_rule reads this entry
+                 * from the table when a processor asks which rules are its
+                 * own. Nothing here can be dropped for want of room. */
                 madt_lapic_nmi_t* nmi = (madt_lapic_nmi_t*)entry;
-                if (nmi->lint > 1) {
-                    debug_printf("[MADT]   LAPIC NMI: invalid LINT%u, dropping\n",
-                                 nmi->lint);
-                    break;
-                }
-                if (info->nmi_count >= MADT_MAX_NMI_ENTRIES) {
-                    debug_printf("[MADT]   LAPIC NMI: storage full, dropping\n");
-                    break;
-                }
-                madt_nmi_entry_t* slot = &info->nmi[info->nmi_count++];
-                slot->acpi_processor_id = nmi->acpi_processor_id;
-                slot->lint              = nmi->lint;
-                slot->mps_flags         = nmi->flags;
-                slot->valid             = true;
-                debug_printf("[MADT]   LAPIC NMI: proc=%u LINT%u flags=0x%04x stored\n",
+                debug_printf("[MADT]   LAPIC NMI: proc=%u LINT%u flags=0x%04x\n",
                              nmi->acpi_processor_id, nmi->lint, nmi->flags);
                 break;
             }
@@ -322,57 +328,41 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
 
             case MADT_TYPE_LX2APIC: {
                 madt_lx2apic_t* x = (madt_lx2apic_t*)entry;
-                bool enabled = lapic_flags_enabled(x->flags);
                 debug_printf("[MADT]   x2APIC: UID=%u APIC ID=%u %s\n",
                              x->acpi_processor_uid, x->x2apic_id,
                              lapic_flags_text(x->flags));
+                /* The UID is taken whole. This is the entry type a machine
+                 * with 255-or-more processors MUST use (ACPI 6.5 §5.2.12.12),
+                 * so it is exactly the entry whose UID does not fit a byte. */
                 if (info->bsp_lapic_found &&
-                    !info->bsp_acpi_id_resolved &&
+                    !info->bsp_acpi_uid_resolved &&
                     x->x2apic_id == bsp_apic_id) {
-                    info->bsp_acpi_processor_id =
-                        (uint8_t)(x->acpi_processor_uid & 0xFF);
-                    info->bsp_acpi_id_resolved = true;
+                    info->bsp_acpi_processor_uid = x->acpi_processor_uid;
+                    info->bsp_acpi_uid_resolved = true;
                 }
-                if (info->cpu_map_count < MADT_MAX_CPU_MAP) {
-                    madt_cpu_map_t* m = &info->cpu_map[info->cpu_map_count++];
-                    m->apic_id           = x->x2apic_id;
-                    m->acpi_processor_id = x->acpi_processor_uid;
-                    m->enabled           = enabled;
-                    m->online_capable    = lapic_flags_online_capable(x->flags);
-                }
+                if (name_seats && lapic_flags_online_capable(x->flags))
+                    name_online_capable_seat(x->x2apic_id,
+                                             x->acpi_processor_uid);
                 break;
             }
 
             case MADT_TYPE_LX2APIC_NMI: {
+                /* Likewise read from the table, at the full 32 bits Table
+                 * 5.35 gives the UID. This used to be truncated to a byte
+                 * on the way into a cache, which on the one machine class
+                 * that publishes these entries — any with an x2APIC ID of
+                 * 255 or greater — handed one processor's NMI rule to
+                 * another whose UID happened to share the low eight bits. */
                 madt_lx2apic_nmi_t* n = (madt_lx2apic_nmi_t*)entry;
-                if (n->lint > 1) break;
-                if (info->nmi_count >= MADT_MAX_NMI_ENTRIES) break;
-                madt_nmi_entry_t* slot = &info->nmi[info->nmi_count++];
-                /* Truncate UID to one byte for our processor-ID match
-                 * — adequate until BoxOS supports >255 CPUs. */
-                slot->acpi_processor_id = (n->acpi_processor_uid == 0xFFFFFFFFu)
-                                          ? MADT_NMI_PROCESSOR_ALL
-                                          : (uint8_t)(n->acpi_processor_uid & 0xFF);
-                slot->lint      = n->lint;
-                slot->mps_flags = n->flags;
-                slot->valid     = true;
-                debug_printf("[MADT]   x2APIC NMI: UID=%u LINT%u flags=0x%04x stored\n",
+                debug_printf("[MADT]   x2APIC NMI: UID=%u LINT%u flags=0x%04x\n",
                              n->acpi_processor_uid, n->lint, n->flags);
                 break;
             }
 
             case MADT_TYPE_NMI_SOURCE: {
+                /* Read from the table by madt_for_each_nmi_source. */
                 madt_nmi_source_t* src = (madt_nmi_source_t*)entry;
-                if (info->nmi_source_count >= MADT_MAX_NMI_SOURCES) {
-                    debug_printf("[MADT]   NMI Source: storage full, dropping\n");
-                    break;
-                }
-                madt_nmi_source_info_t* slot =
-                    &info->nmi_sources[info->nmi_source_count++];
-                slot->gsi       = src->gsi;
-                slot->mps_flags = src->flags;
-                slot->valid     = true;
-                debug_printf("[MADT]   NMI Source: GSI %u flags=0x%04x stored\n",
+                debug_printf("[MADT]   NMI Source: GSI %u flags=0x%04x\n",
                              src->gsi, src->flags);
                 break;
             }
@@ -386,30 +376,13 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
         ptr += entry->length;
     }
 
-    /* The seats, said out loud with the APIC IDs the firmware reserved for
-     * them. kprintf, not debug_printf: the number of processors this kernel
-     * starts is smaller than the number the MADT lists, and an operator
-     * counting cores in front of the machine needs the reason and the IDs —
-     * a hot-add path, when there is one, starts from exactly this list.
-     * Once per boot, not once per caller of this parser. */
-    if (!g_seats_named) {
-        g_seats_named = true;
-        for (uint16_t i = 0; i < info->cpu_map_count; i++) {
-            if (!info->cpu_map[i].online_capable) continue;
-            kprintf("[MADT] APIC ID %u (ACPI processor %u) is an "
-                    "Online-Capable seat: the firmware says hardware can "
-                    "enable it during OS runtime, not that a processor is "
-                    "there now — not started\n",
-                    info->cpu_map[i].apic_id,
-                    info->cpu_map[i].acpi_processor_id);
-        }
-    }
+    g_seats_named = true;
 
     if (info->lapic_address && info->ioapic_address) {
         info->valid = true;
-        debug_printf("[MADT] %[S]MADT parsed: LAPIC=0x%lx IOAPIC=0x%lx BSP=%u NMI=%u%[D]\n",
+        debug_printf("[MADT] %[S]MADT parsed: LAPIC=0x%lx IOAPIC=0x%lx BSP=%u%[D]\n",
                      info->lapic_address, info->ioapic_address,
-                     info->bsp_lapic_id, info->nmi_count);
+                     info->bsp_lapic_id);
     } else {
         debug_printf("[MADT] %[E]MADT incomplete: LAPIC=0x%lx IOAPIC=0x%lx%[D]\n",
                      info->lapic_address, info->ioapic_address);
@@ -454,28 +427,55 @@ uint8_t amp_collect_lapics(uint32_t* ids_out, uint8_t max_count) {
         if (entry->length < sizeof(madt_entry_header_t)) break;
         if (ptr + entry->length > end) break;
 
-        uint32_t id = 0xFFFFFFFFu;   /* sentinel: "no usable id from this entry" */
+        /* "This entry yielded a processor to start" is a fact of its own,
+         * not a reserved value of the id: every 32-bit pattern is a legal
+         * APIC ID somewhere, and the one that is not — all-ones, the x2APIC
+         * broadcast — is refused below on its own terms rather than doubling
+         * as the marker for "nothing here". */
+        uint32_t id = 0;
+        bool have_id = false;
 
         if (entry->type == MADT_TYPE_LOCAL_APIC &&
             entry->length >= sizeof(madt_local_apic_t)) {
             madt_local_apic_t* lapic = (madt_local_apic_t*)entry;
-            if (lapic_flags_enabled(lapic->flags))
+            if (lapic_flags_enabled(lapic->flags)) {
                 id = lapic->apic_id;                 /* 8-bit xAPIC id */
-            else if (lapic_flags_online_capable(lapic->flags))
+                have_id = true;
+            } else if (lapic_flags_online_capable(lapic->flags)) {
                 deferred++;
+            }
         } else if (entry->type == MADT_TYPE_LX2APIC &&
                    entry->length >= sizeof(madt_lx2apic_t)) {
             madt_lx2apic_t* x2 = (madt_lx2apic_t*)entry;
-            /* x2apic_id == 0xFFFFFFFF marks an unusable slot — skip it. */
-            if (x2->x2apic_id != 0xFFFFFFFFu) {
-                if (lapic_flags_enabled(x2->flags))
+            if (lapic_flags_enabled(x2->flags)) {
+                /* An all-ones ID used to be skipped here as "an unusable
+                 * slot", which is a reading of the ID that no specification
+                 * supports: ACPI 6.5 Table 5.34 reserves no such value, and
+                 * whether a seat holds a processor is what the FLAGS above
+                 * just answered. What all-ones really is, is the x2APIC
+                 * broadcast destination (LAPIC_X2APIC_DEST_BROADCAST) — an
+                 * ID that names every processor and therefore none. Starting
+                 * it would send INIT to the whole machine, so it is refused;
+                 * refused ALOUD, because a processor the firmware marked
+                 * Enabled and this kernel will not start is exactly what
+                 * this wave exists to stop hiding. */
+                if (x2->x2apic_id == LAPIC_X2APIC_DEST_BROADCAST) {
+                    kprintf("[MADT] %[E]ACPI processor %u is listed as "
+                            "Enabled with APIC ID 0xFFFFFFFF, which is the "
+                            "x2APIC broadcast destination and names every "
+                            "processor at once — not started, because an "
+                            "INIT sent there would reset this machine%[D]\n",
+                            x2->acpi_processor_uid);
+                } else {
                     id = x2->x2apic_id;              /* 32-bit x2APIC id */
-                else if (lapic_flags_online_capable(x2->flags))
-                    deferred++;
+                    have_id = true;
+                }
+            } else if (lapic_flags_online_capable(x2->flags)) {
+                deferred++;
             }
         }
 
-        if (id != 0xFFFFFFFFu) {
+        if (have_id) {
             /* A processor is listed in exactly one of Type 0 / Type 9, but be
              * defensive against firmware that double-lists it. */
             bool dup = false;
@@ -501,4 +501,296 @@ uint8_t amp_collect_lapics(uint32_t* ids_out, uint8_t max_count) {
     }
 
     return count;
+}
+
+/* ======================================================================
+ * Questions put to the table, not to a copy of it.
+ *
+ * Everything below walks the MADT that acpi_parse_madt() recorded in
+ * madt_info_t::table. The walk is bounded by the length the table declares
+ * in its own ACPI header and by the end pointer derived from it, so there is
+ * no entry ceiling to exceed and no tail to drop: the firmware said how much
+ * it wrote, and that is the only number involved.
+ *
+ * All four are read-only over memory that is already mapped, take no lock
+ * and call nothing in the ACPI table subsystem. That is what makes them safe
+ * on an AP in the middle of bring-up, where acpi_find_table() — which fills
+ * a global cache and may map — is not.
+ * ====================================================================== */
+
+static bool madt_walk_begin(const madt_info_t *info,
+                            const uint8_t **cursor, const uint8_t **end) {
+    if (!info || !info->table) return false;
+    const acpi_madt_t *m = info->table;
+    if (m->header.length < sizeof(acpi_madt_t)) return false;
+    *cursor = (const uint8_t *)m + sizeof(acpi_madt_t);
+    *end    = (const uint8_t *)m + m->header.length;
+    return true;
+}
+
+/* The next entry, or NULL at the end of the table — and NULL also for an
+ * entry whose declared length is impossible or reaches past the table's own
+ * end, because past that point the bytes are not entries and walking them is
+ * reading whatever follows the table in memory. */
+static const madt_entry_header_t *madt_walk_next(const uint8_t **cursor,
+                                                 const uint8_t *end) {
+    if (*cursor + sizeof(madt_entry_header_t) > end) return NULL;
+    const madt_entry_header_t *e = (const madt_entry_header_t *)*cursor;
+    if (e->length < sizeof(madt_entry_header_t)) return NULL;
+    if (*cursor + e->length > end) return NULL;
+    *cursor += e->length;
+    return e;
+}
+
+void madt_for_each_nmi_rule(const madt_info_t *info,
+                            uint32_t acpi_processor_uid, bool uid_known,
+                            MadtNmiRuleFn fn, void *ctx) {
+    const uint8_t *cursor, *end;
+    if (!fn || !madt_walk_begin(info, &cursor, &end)) return;
+
+    const madt_entry_header_t *e;
+    while ((e = madt_walk_next(&cursor, end)) != NULL) {
+        MadtNmiRule rule;
+
+        if (e->type == MADT_TYPE_LOCAL_APIC_NMI &&
+            e->length >= sizeof(madt_lapic_nmi_t)) {
+            const madt_lapic_nmi_t *n = (const madt_lapic_nmi_t *)e;
+            rule.acpi_processor_uid = n->acpi_processor_id;
+            rule.all_processors     = (n->acpi_processor_id == 0xFFu);
+            rule.lint               = n->lint;
+            rule.mps_flags          = n->flags;
+        } else if (e->type == MADT_TYPE_LX2APIC_NMI &&
+                   e->length >= sizeof(madt_lx2apic_nmi_t)) {
+            const madt_lx2apic_nmi_t *n = (const madt_lx2apic_nmi_t *)e;
+            rule.acpi_processor_uid = n->acpi_processor_uid;
+            rule.all_processors     = (n->acpi_processor_uid == 0xFFFFFFFFu);
+            rule.lint               = n->lint;
+            rule.mps_flags          = n->flags;
+        } else {
+            continue;
+        }
+
+        /* A LAPIC has LINT0 and LINT1 and nothing else; an entry naming any
+         * other pin describes hardware that is not there. */
+        if (rule.lint > 1) continue;
+
+        if (!rule.all_processors &&
+            (!uid_known || rule.acpi_processor_uid != acpi_processor_uid))
+            continue;
+
+        fn(&rule, ctx);
+    }
+}
+
+void madt_for_each_nmi_source(const madt_info_t *info,
+                              MadtNmiSourceFn fn, void *ctx) {
+    const uint8_t *cursor, *end;
+    if (!fn || !madt_walk_begin(info, &cursor, &end)) return;
+
+    const madt_entry_header_t *e;
+    while ((e = madt_walk_next(&cursor, end)) != NULL) {
+        if (e->type != MADT_TYPE_NMI_SOURCE) continue;
+        if (e->length < sizeof(madt_nmi_source_t)) continue;
+        const madt_nmi_source_t *src = (const madt_nmi_source_t *)e;
+        fn(src->gsi, src->flags, ctx);
+    }
+}
+
+bool madt_uid_for_apic_id(const madt_info_t *info, uint32_t apic_id,
+                          uint32_t *out_uid) {
+    const uint8_t *cursor, *end;
+    if (!out_uid || !madt_walk_begin(info, &cursor, &end)) return false;
+
+    const madt_entry_header_t *e;
+    while ((e = madt_walk_next(&cursor, end)) != NULL) {
+        if (e->type == MADT_TYPE_LOCAL_APIC &&
+            e->length >= sizeof(madt_local_apic_t)) {
+            const madt_local_apic_t *l = (const madt_local_apic_t *)e;
+            if ((uint32_t)l->apic_id == apic_id) {
+                *out_uid = l->acpi_processor_id;
+                return true;
+            }
+        } else if (e->type == MADT_TYPE_LX2APIC &&
+                   e->length >= sizeof(madt_lx2apic_t)) {
+            const madt_lx2apic_t *x = (const madt_lx2apic_t *)e;
+            if (x->x2apic_id == apic_id) {
+                *out_uid = x->acpi_processor_uid;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/*
+ * The processors this machine cannot hand a device interrupt to, named.
+ *
+ * Two fields decide it, and they are the same eight bits twice. Intel SDM
+ * Vol 3A, "Message Address Register Format": "Destination ID — This field
+ * contains an 8-bit destination ID. It identifies the message's target
+ * processor(s). The destination ID corresponds to bits 63:56 of the I/O APIC
+ * Redirection Table Entry if the IOAPIC is used to dispatch the interrupt to
+ * the processor(s)." So a legacy IRQ line and an MSI message reach a
+ * processor by exactly the same eight-bit name, and the section "Physical
+ * Destination Mode" says what those eight bits can spell: "either a single
+ * destination (local APIC IDs 00H through FEH) or a broadcast to all APICs
+ * (the APIC ID is FFH)". 255 processors, and one word for everybody. (Both
+ * cited by title; the section numbers move between SDM revisions — see
+ * LAPIC_XAPIC_DEST_MAX in lapic.h, where the full quotes and the editions
+ * they were read from are kept.)
+ *
+ * ACPI draws the line in the same place and for the same reason — §5.2.12.12:
+ * "Logical processors with APIC ID values 255 and greater must use the
+ * Processor Local x2APIC structure" — so this list is, exactly, the Type 9
+ * entries whose X2APIC ID reached that far.
+ *
+ * Said ONCE, here, where the machine's composition is already known: the
+ * MADT is the complete list of the processors the firmware published, and it
+ * is known before the first AP is started and long before the first MSI is
+ * armed. The alternative — a line each time a destination is refused — is
+ * one line per device per boot for the same handful of processors, and it
+ * arrives too late to be a description of the machine.
+ *
+ * What the named processors DO get: everything that does not go through an
+ * eight-bit destination. In x2APIC mode the ICR carries a 32-bit destination
+ * (MSR 0x830), so IPIs, the scheduler wake, TLB shootdown and the panic
+ * broadcast all reach them, and their own LAPIC timer is their own. They run
+ * — they just cannot be the target of a device's interrupt.
+ *
+ * What would lift it is interrupt remapping (VT-d IR / AMD-Vi), whose IRTE
+ * carries the destination at full width and turns both of those fields into
+ * an index. It is not armed in this kernel, so the refusal stands and is
+ * named rather than guessed around.
+ *
+ * HOT-ADD SEATS ARE IN THIS LIST TOO, and that is the point of naming it at
+ * boot rather than at the first refused line. An Online-Capable entry is a
+ * socket the firmware says hardware can fill during OS runtime (ACPI 6.5
+ * Table 5.23); if the APIC ID it reserved for that socket is one the
+ * destination fields cannot spell, the operator wants to know BEFORE a
+ * processor goes into it, not after the machine is running and the new core
+ * takes no device interrupt. An entry the firmware marked neither Enabled
+ * nor Online-Capable is skipped, because the same table tells OSPM to
+ * "ignore the contents of the Processor Local APIC Structure" — with one
+ * exception, the processor executing this code, which is there whatever the
+ * table says about it.
+ */
+void madt_name_unreachable_processors(const madt_info_t *info) {
+    static bool named = false;
+
+    const uint8_t *cursor, *end;
+    if (named || !madt_walk_begin(info, &cursor, &end)) return;
+    named = true;
+
+    uint32_t count = 0;
+    bool bsp_listed = false;
+
+    const madt_entry_header_t *e;
+    while ((e = madt_walk_next(&cursor, end)) != NULL) {
+        uint32_t apic_id, uid, flags;
+
+        if (e->type == MADT_TYPE_LOCAL_APIC &&
+            e->length >= sizeof(madt_local_apic_t)) {
+            /* A Type 0 APIC ID is one byte by format (Table 5.23), so the
+             * width test below can only catch it at one value: 0xFF, which
+             * is the broadcast and not processor 255. Firmware that puts a
+             * processor there is already outside ACPI 6.5 §5.2.12.12 ("255
+             * and greater must use the Processor Local x2APIC structure"),
+             * and it is named like any other processor we cannot address.
+             * Walked rather than assumed for that reason: the test belongs
+             * to the field, not to the entry type — and this is also where
+             * the BSP of every machine we have is found and confirmed
+             * reachable. */
+            const madt_local_apic_t *l = (const madt_local_apic_t *)e;
+            apic_id = l->apic_id;
+            uid     = l->acpi_processor_id;
+            flags   = l->flags;
+        } else if (e->type == MADT_TYPE_LX2APIC &&
+                   e->length >= sizeof(madt_lx2apic_t)) {
+            const madt_lx2apic_t *x = (const madt_lx2apic_t *)e;
+            apic_id = x->x2apic_id;
+            uid     = x->acpi_processor_uid;
+            flags   = x->flags;
+        } else {
+            continue;
+        }
+
+        /* Whether this entry is the processor running the kernel is asked
+         * of the ID alone, before anything is decided about the flags. It
+         * used to be asked only of Enabled entries, so a firmware that
+         * lists its BSP with Enabled clear — broken, but real — made the
+         * fallback below announce that the MADT "does not list it at all".
+         * A roll call that exists to name things truthfully cannot carry a
+         * sentence that the table in front of it contradicts. */
+        const bool is_bsp = info->bsp_lapic_found &&
+                            apic_id == info->bsp_lapic_id;
+        if (is_bsp) bsp_listed = true;
+
+        const bool enabled = lapic_flags_enabled(flags);
+        const bool seat    = lapic_flags_online_capable(flags);
+
+        /* ACPI 6.5 Table 5.23, with neither bit set: "this processor is
+         * unusable, and OSPM shall ignore the contents of the Processor
+         * Local APIC Structure". There is nobody to name. The exception is
+         * the processor executing this code, which is demonstrably here
+         * whatever its entry claims. */
+        if (!enabled && !seat && !is_bsp) continue;
+
+        const char *who = is_bsp ? " — the BSP, this CPU —" : "";
+
+        /* All-ones is not an empty socket; it is the x2APIC broadcast
+         * destination, so this entry names every processor and therefore
+         * none of them. Named here rather than skipped, because a seat the
+         * firmware published and this kernel can never address is exactly
+         * what this list is for. */
+        if (apic_id == LAPIC_X2APIC_DEST_BROADCAST) {
+            count++;
+            kprintf("[MADT] %[E]ACPI processor %u%s is listed with APIC ID "
+                    "0xFFFFFFFF, the x2APIC broadcast destination: that ID "
+                    "names every processor at once, so nothing — no device "
+                    "interrupt and no IPI — can be addressed to this one "
+                    "alone%[D]\n", uid, who);
+            continue;
+        }
+
+        if (apic_id <= LAPIC_XAPIC_DEST_MAX) continue;
+
+        count++;
+        if (enabled || is_bsp) {
+            kprintf("[MADT] %[E]APIC ID %u (ACPI processor %u)%s receives no "
+                    "legacy IRQ and no MSI: both name their target with the "
+                    "same eight bits, which reach 254 and then mean "
+                    "broadcast%[D]\n", apic_id, uid, who);
+        } else {
+            kprintf("[MADT] %[E]APIC ID %u (ACPI processor %u) is an "
+                    "Online-Capable seat that no device interrupt could ever "
+                    "reach: a processor put there would run and take IPIs, "
+                    "but the eight bits a redirection entry and an MSI "
+                    "message address carry reach 254 and then mean "
+                    "broadcast%[D]\n", apic_id, uid);
+        }
+    }
+
+    /* The running processor, when the firmware's list does not contain it.
+     * detect_bsp_apic_id() asked the CPU itself, so this ID is real whatever
+     * the table says; a machine whose MADT omits the processor executing the
+     * kernel is broken, and if that ID is also too wide to name, it is
+     * broken in the way that costs it every device interrupt. */
+    if (!bsp_listed && info->bsp_lapic_found &&
+        info->bsp_lapic_id > LAPIC_XAPIC_DEST_MAX) {
+        count++;
+        kprintf("[MADT] %[E]APIC ID %u — the BSP, this CPU — receives no "
+                "legacy IRQ and no MSI, and the MADT does not list it at "
+                "all, so it has no ACPI processor UID to name it by%[D]\n",
+                info->bsp_lapic_id);
+    }
+
+    if (count) {
+        kprintf("[MADT] %[E]%u processor(s) and hot-add seat(s) above cannot "
+                "be the target of a device interrupt on this machine. The "
+                "ones that are running still run and still take IPIs in "
+                "x2APIC mode; only the IOAPIC redirection entry and the MSI "
+                "message address are too narrow to name them, and only "
+                "interrupt remapping (VT-d IR / AMD-Vi), which this kernel "
+                "does not arm, would widen them%[D]\n", count);
+    }
 }

@@ -66,7 +66,25 @@
  *
  * ‼ Teardown unseals before the frame goes back to the PMM. The next
  * pmm_alloc_zero of that frame memsets it through the kernel window and
- * would fault on a sealed leaf.
+ * would fault on a sealed leaf. That applies to the per-core PL0 / IST
+ * stacks, which ARE the Pull Map page they are sealed in.
+ *
+ * Where each kind of shadow stack lives
+ * -------------------------------------
+ *   per-core PL0 + IST   sealed in place in the Pull Map. One mapping,
+ *                        and after the seal it is not writable by
+ *                        anyone. Allocated once per core at bring-up,
+ *                        so the leaf it demotes is a bill paid once.
+ *   per-process (this    its own bunk in the kernel shadow-stack row,
+ *   file's kernel SSP)   VMM_SHADOW_BUNK_BASE + (pid - 1) pages, born
+ *                        with the encoding on a 4 KiB leaf. Nothing is
+ *                        demoted and nothing is unsealed at teardown.
+ *                        The full reasoning, including what the frame's
+ *                        surviving writable Pull Map alias does and does
+ *                        not protect, is in vmm.c above
+ *                        vmm_shadow_bunk_va.
+ *   per-process user     mapped into the cabin already carrying the
+ *                        encoding, same shape as a bunk.
  */
 
 #include "cet_lifecycle.h"
@@ -885,33 +903,87 @@ void cet_lifecycle_release_supervisor_ssp(uint8_t core_idx)
 
 /* ─── Per-process kernel SSP ──────────────────────────────────────── */
 
+/* One bunk holds exactly one frame. The row is cut in VMM_PAGE_SIZE
+ * steps and the frame comes from pmm_alloc_zero(1), which counts in
+ * PMM_PAGE_SIZE. Both are the architectural 4 KiB page, but they are two
+ * macros in two headers, so the compiler holds them to each other rather
+ * than a comment claiming they agree. */
+_Static_assert(PMM_PAGE_SIZE == VMM_PAGE_SIZE,
+               "a shadow-stack bunk is exactly one PMM frame: the row's "
+               "page size and the frame allocator's must be the same page");
+
 error_t cet_process_create_kernel_ssp(struct process_t *proc, uintptr_t entry_rip)
 {
     if (!proc) return ERR_INVALID_ARGUMENT;
-    if (!g_cet_enabled || !g_cpu_caps.has_shstk) {
-        proc->kernel_ssp_phys = 0;
-        proc->kernel_ssp_va_top = 0;
-        proc->context.pl0_ssp = 0;
-        return OK;
+
+    /* One process, one bunk, and the bunk IS the pid — so a second call
+     * for a process that already holds a stack cannot be served: the
+     * bunk it would want is occupied by its own first one. Answer from
+     * that fact here, not from the mapper's refusal further down, which
+     * would arrive after a frame had been taken and would leave this
+     * function undoing state the first call owns. The stack that exists
+     * stands, untouched. */
+    if (proc->kernel_ssp_phys) {
+        kprintf("[CET] proc=%u already holds a kernel shadow stack at 0x%lx "
+                "— second request refused, the first one stands\n",
+                proc->pid, (unsigned long)proc->kernel_ssp_va_top);
+        return ERR_ALREADY_MAPPED;
     }
+
+    /* From here down the process has no supervisor shadow stack until
+     * the last lines of this function say it does. Clearing the three
+     * fields once, here, is what makes that true of EVERY refusal below
+     * without each one having to remember to repeat it. */
+    proc->kernel_ssp_phys   = 0;
+    proc->kernel_ssp_va_top = 0;
+    proc->context.pl0_ssp   = 0;
+
+    if (!g_cet_enabled || !g_cpu_caps.has_shstk) return OK;
+
+    /* Where this stack will live is decided before anything is taken:
+     * the bunk is the pid, so there is nothing to search for and nothing
+     * to roll back if the answer is no. A pid outside the row is a pid
+     * the PID allocator could not have issued — refuse it by name rather
+     * than fold it back into somebody else's bunk. */
+    uintptr_t va = vmm_shadow_bunk_va(proc->pid);
+    if (!va) {
+        kprintf("[CET] proc=%u has no shadow-stack bunk — pid outside the "
+                "row cut to the PID allocator's range; process not given a "
+                "supervisor shadow stack\n", proc->pid);
+        return ERR_INVALID_PID;
+    }
+    uintptr_t top = va + (VMM_PAGE_SIZE - 8);
 
     void *phys = pmm_alloc_zero(1);
     if (!phys) return ERR_NO_MEMORY;
 
-    uintptr_t va = (uintptr_t)vmm_phys_to_virt((uintptr_t)phys);
-    if (!va) {
+    uintptr_t seed = (uintptr_t)vmm_phys_to_virt((uintptr_t)phys);
+    if (!seed) {
+        kprintf("[CET] proc=%u kernel shadow-stack frame 0x%lx has no Pull "
+                "Map address to seed it through — process not given a "
+                "supervisor shadow stack\n",
+                proc->pid, (unsigned long)(uintptr_t)phys);
         pmm_free(phys, 1);
-        return ERR_NO_MEMORY;
+        return ERR_INVALID_ADDRESS;
     }
-    uintptr_t top = va + (PMM_PAGE_SIZE - 8);
 
-    /* Both writes happen here, while the page is still ordinary
-     * writable kernel memory, because after the seal below neither is
-     * possible: a normal store faults on R/W = 0, and WRSS is #UD until
-     * S_CET.SH_STK_EN is up. The file header carries the SDM quote.
+    /* Seed the page through the Pull Map alias, which the frame already
+     * has and which stays writable: the bunk mapping below is born with
+     * the shadow-stack encoding, and neither of these writes is possible
+     * through it — a normal store faults on R/W = 0, and WRSS is #UD
+     * until S_CET.SH_STK_EN is up. The file header carries the SDM quote.
+     *
+     * Both offsets are taken from `top`, the address the page will be
+     * known by, so the two slots are named once and the alias is only
+     * ever the route the store travels.
      *
      *   [top]     the supervisor SSP token — its own linear address,
      *             BUSY clear; the processor claims the token, not us.
+     *             "Its own" is the BUNK address: a token's value is the
+     *             linear address the processor reads the token AT (the
+     *             note above CET_SUPV_TOKEN_FLAG_MASK has the SDM on
+     *             this), which is the bunk, never the Pull Map alias
+     *             this particular store happens to travel through.
      *   [top - 8] the pre-pushed entry RIP, for a dispatcher that enters
      *             the process with `push entry_rip; RET` on this stack:
      *             that RET pops entry_rip from the regular stack AND
@@ -920,40 +992,67 @@ error_t cet_process_create_kernel_ssp(struct process_t *proc, uintptr_t entry_ri
      *
      * ‼ No such dispatcher exists today — see the note on
      * cet_process_create_kernel_ssp in cet_lifecycle.h. The live frame
-     * dispatch never loads proc->context.pl0_ssp, so this page is built,
-     * sealed and freed without the processor ever seeing it. */
-    *(volatile uint64_t *)top         = cet_supv_token_free(top);
-    *(volatile uint64_t *)(top - 8)   = (uint64_t)entry_rip;
+     * dispatch never loads proc->context.pl0_ssp, so this page is built
+     * and freed without the processor ever seeing it.
+     *
+     * ‼ And as it stands it could not simply be loaded, which is worth
+     * saying plainly rather than leaving for whoever tries. Both
+     * hardware ways INTO a supervisor shadow stack read the token at
+     * the address held in IA32_PL0_SSP: a ring transition verifies "a
+     * supervisor shadow stack token at the address pointed to by the
+     * SSP" (Intel SDM Vol 3A §6.12.1.1), and SETSSBSY computes "SSP_LA
+     * = IA32_PL0_SSP … expected_token_value = SSP_LA" (Vol 2B,
+     * SETSSBSY, Operation). This page puts the token at `top` and
+     * PL0_SSP at `top - 8` — the pre-push discipline, not the token
+     * discipline. Each is coherent; one page cannot serve both at once.
+     * Which one this per-process stack is for is the open question
+     * named in cet_lifecycle.h, and nothing here decides it. Nothing
+     * loads the MSR either, so nothing faults meanwhile. */
+    uintptr_t seed_top = seed + (top - va);
+    *(volatile uint64_t *)seed_top       = cet_supv_token_free(top);
+    *(volatile uint64_t *)(seed_top - 8) = (uint64_t)entry_rip;
 
-    /* Seal. A process whose kernel shadow stack could not be sealed must
-     * not start once anything loads that stack: on a core with SH_STK_EN
-     * up, the first shadow-stack access through it would land on a page
-     * the processor does not consider a shadow stack. Hand the frame
-     * back and refuse — a refused seal writes nothing (vmm.c checks
-     * §4.6 condition (2) before it touches the leaf), so the frame goes
-     * back to the PMM exactly as it came out. */
-    vmm_context_t *kctx = vmm_get_kernel_context();
-    if (!kctx || !vmm_shadow_stack_seal(kctx, va)) {
-        kprintf("[CET] proc=%u kernel shadow-stack seal refused at 0x%lx — "
-                "process not given a supervisor shadow stack\n",
-                proc->pid, (unsigned long)va);
+    /* The row names its own refusals on the console — a pid it has no
+     * bunk for, a bunk still occupied, a mapper that said no — so the
+     * code it returns is passed straight up rather than flattened into
+     * one. Nothing of this process's state has been written yet, so
+     * there is nothing to undo but the frame. */
+    uintptr_t bunk = 0;
+    error_t map_err = vmm_shadow_bunk_map(proc->pid, (uintptr_t)phys, &bunk);
+    if (map_err != OK) {
         pmm_free(phys, 1);
-        proc->kernel_ssp_phys   = 0;
-        proc->kernel_ssp_va_top = 0;
-        proc->context.pl0_ssp   = 0;
-        return ERR_NO_MEMORY;
+        return map_err;
+    }
+
+    /* Verified the same way the user side is (see cet_process_create):
+     * the leaf already carries R/W = 0 + Dirty = 1, so this changes
+     * nothing and sends no shootdown; what it does is walk SDM Vol 3A
+     * §4.6 condition (2) — R/W = 1 in every entry ABOVE the leaf — which
+     * no leaf flag can express. A process whose kernel shadow stack is
+     * not a shadow-stack address must not be given one: on a core with
+     * SH_STK_EN up, the first shadow-stack access through it would land
+     * on a page the processor does not regard as a shadow stack. */
+    vmm_context_t *kctx = vmm_get_kernel_context();
+    if (!kctx || !vmm_shadow_stack_seal(kctx, bunk)) {
+        kprintf("[CET] proc=%u kernel shadow-stack bunk at 0x%lx is not a "
+                "shadow-stack address — an entry above the leaf denies it; "
+                "process not given a supervisor shadow stack\n",
+                proc->pid, (unsigned long)bunk);
+        (void)vmm_shadow_bunk_unmap(bunk);
+        pmm_free(phys, 1);
+        return ERR_PERMISSION_DENIED_MEM;
     }
 
     proc->kernel_ssp_phys   = (uintptr_t)phys;
     proc->kernel_ssp_va_top = top;
     proc->context.pl0_ssp   = top - 8;
 
-    debug_printf("[CET] proc=%u kernel SSP allocated: phys=0x%lx top=0x%lx "
-                 "pl0_ssp=0x%lx (entry_rip=0x%lx pre-pushed, leaf sealed "
-                 "R/W=0 D=1)\n",
+    debug_printf("[CET] proc=%u kernel SSP allocated: phys=0x%lx bunk=0x%lx "
+                 "top=0x%lx pl0_ssp=0x%lx (entry_rip=0x%lx pre-pushed, bunk "
+                 "born R/W=0 D=1)\n",
                  proc->pid, (unsigned long)(uintptr_t)phys,
-                 (unsigned long)top, (unsigned long)(top - 8),
-                 (unsigned long)entry_rip);
+                 (unsigned long)bunk, (unsigned long)top,
+                 (unsigned long)(top - 8), (unsigned long)entry_rip);
     return OK;
 }
 
@@ -962,14 +1061,16 @@ void cet_process_destroy_kernel_ssp(struct process_t *proc)
     if (!proc) return;
     if (!proc->kernel_ssp_phys) return;
 
-    /* Unseal before the frame returns to the buddy — the next
-     * pmm_alloc_zero writes it through this same kernel window and a
-     * sealed leaf would fault inside the allocator. */
-    vmm_context_t *kctx = vmm_get_kernel_context();
-    if (kctx) {
-        uintptr_t va = (uintptr_t)vmm_phys_to_virt(proc->kernel_ssp_phys);
-        if (va) (void)vmm_shadow_stack_unseal(kctx, va);
-    }
+    /* The bunk is named by the VA this process was given, not recomputed
+     * from its pid: teardown must free the bunk that was mapped even if
+     * the pid field has moved on. The row takes any address inside the
+     * page, so the stack's top serves directly and this file keeps no
+     * arithmetic that could drift from the row's own. No unseal — the
+     * encoding lived in the bunk mapping alone, and the Pull Map alias
+     * the PMM writes through was never sealed, so the frame goes back to
+     * the buddy exactly as it came out. */
+    if (proc->kernel_ssp_va_top)
+        (void)vmm_shadow_bunk_unmap(proc->kernel_ssp_va_top);
 
     pmm_free((void *)proc->kernel_ssp_phys, 1);
     proc->kernel_ssp_phys = 0;

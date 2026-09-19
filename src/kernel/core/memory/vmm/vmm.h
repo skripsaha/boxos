@@ -4,6 +4,7 @@
 #include "klib.h"
 #include "error.h"
 #include "cabin_layout.h"
+#include "boxos_limits.h"   /* MAX_PROCESSES — the shadow bunk row is cut to it */
 
 #define VMM_PAGE_SIZE           4096
 #define VMM_PAGE_MASK           0xFFFFFFFFFFFFF000ULL
@@ -28,6 +29,22 @@
 
 #define VMM_KERNEL_MMIO_BASE    0xFFFF800040000000ULL  // starts after 1GB heap
 #define VMM_KERNEL_MMIO_SIZE    (3ULL << 30)           // 3GB MMIO region
+
+// Shadow-stack bunk row: the kernel window for supervisor shadow stacks that
+// come and go with processes. 4 KiB-granular from its very first page, so a
+// shadow stack never has to be carved out of a leaf somebody else is using.
+// The whole rationale is in vmm.c above vmm_shadow_bunk_va.
+//
+// Nothing here is a chosen address or a chosen width. The row BEGINS where the
+// MMIO window ends, the way the MMIO window begins where the heap ends, and it
+// HOLDS one 4 KiB bunk per pid the PID allocator can hold at once — the same
+// MAX_PROCESSES ceiling pid_alloc and process_create refuse at — so it cannot
+// run out before pids do. A window added after this one starts at
+// VMM_SHADOW_BUNK_END; resizing any window ahead of it moves it along.
+#define VMM_SHADOW_BUNK_BASE    (VMM_KERNEL_MMIO_BASE + VMM_KERNEL_MMIO_SIZE)
+#define VMM_SHADOW_BUNK_COUNT   ((uintptr_t)MAX_PROCESSES)
+#define VMM_SHADOW_BUNK_SIZE    (VMM_SHADOW_BUNK_COUNT * VMM_PAGE_SIZE)
+#define VMM_SHADOW_BUNK_END     (VMM_SHADOW_BUNK_BASE + VMM_SHADOW_BUNK_SIZE)
 
 // Pull Map: every physical address the memory map names, mapped at a fixed
 // offset in the kernel higher-half. Replaces identity mapping. Immutable
@@ -624,6 +641,44 @@ bool vmm_shadow_stack_seal(vmm_context_t* ctx, uintptr_t virt_addr);
  * writes it through the kernel window and would fault on a sealed leaf.
  * Returns false when the page is not mapped. */
 bool vmm_shadow_stack_unseal(vmm_context_t* ctx, uintptr_t virt_addr);
+
+/* ─── The bunk row: a kernel shadow stack's own address ──────────────
+ *
+ * A supervisor shadow stack that belongs to a PROCESS gets a bunk here
+ * instead of being sealed in place in the Pull Map. Which bunk is not a
+ * question the row answers by searching: the bunk IS the pid, so no
+ * allocator, no bitmap and no lock stands between a process and its
+ * shadow stack, and the row cannot run out before the PID allocator
+ * does — it is cut to exactly the pids that allocator can hold at once.
+ *
+ *   vmm_shadow_bunk_va    — the bunk a pid owns, or 0 if that pid is
+ *                           outside the range the row is cut to (the
+ *                           caller reports it; nothing is guessed).
+ *   vmm_shadow_bunk_map   — map `phys_addr` into that bunk already
+ *                           carrying the supervisor shadow-stack
+ *                           encoding, and write the bunk VA to *out_va.
+ *                           Every refusal is named: ERR_INVALID_PID for
+ *                           a pid the row has no bunk for,
+ *                           ERR_ALREADY_MAPPED when the bunk is still
+ *                           occupied (its pid was reissued before its
+ *                           bunk was given back — the one ordering the
+ *                           row depends on), ERR_MAPPING_FAILED for
+ *                           anything the mapper itself refused.
+ *   vmm_shadow_bunk_unmap — give back the bunk CONTAINING `va_in_bunk`,
+ *                           so a caller holding a pointer into the page
+ *                           (its top, say) needs no arithmetic of its
+ *                           own. Takes a VA, not a pid, so teardown
+ *                           does not depend on the pid field still
+ *                           holding what it held at map time. False
+ *                           when the address is outside the row or the
+ *                           bunk was not mapped.
+ *
+ * ‼ The frame keeps its ordinary writable Pull Map alias — see the note
+ * on aliases in vmm.c. */
+uintptr_t vmm_shadow_bunk_va(uint32_t pid);
+error_t   vmm_shadow_bunk_map(uint32_t pid, uintptr_t phys_addr,
+                              uintptr_t *out_va);
+bool      vmm_shadow_bunk_unmap(uintptr_t va_in_bunk);
 
 /* Compose KeyID into the upper bits of a phys address. Pure function;
  * caller must ensure `phys` doesn't already use the bits and that the

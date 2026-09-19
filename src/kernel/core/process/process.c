@@ -16,7 +16,6 @@
 #include "tss.h"
 #include "userspace.h"
 #include "atomics.h"
-#include "async_io.h"
 #include "pid_allocator.h"
 #include "cpu_caps_page.h"
 #include "fpu.h"
@@ -782,13 +781,6 @@ void process_destroy(process_t *proc)
      * its home core. Sweeping every core closes the dangling-slot window that
      * would otherwise dispatch the freed struct (the recycle-race). */
     sched_dequeue_all_cores(proc);
-
-    uint32_t cancelled = async_io_cancel_by_pid(proc->pid);
-    if (cancelled > 0)
-    {
-        debug_printf("[PROCESS] Cancelled %u pending async I/O for PID %u\n",
-                     cancelled, proc->pid);
-    }
 
     ManifestReleaseAllForOwner(proc->pid);
 

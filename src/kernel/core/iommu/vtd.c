@@ -5,6 +5,7 @@
 #include "pmm.h"
 #include "hourglass.h"
 #include "atomics.h"
+#include "touch.h"  /* iommu:fault — the units' own account of what they refused */
 #include "cpu.h"     /* cpu_cpuid — the CLFLUSH line size, for ECAP.C = 0 */
 
 /* =====================================================================
@@ -76,6 +77,58 @@
 #define IQERCD_IQEI(r)    ((unsigned)((r) & 0xFULL))
 #define IQERCD_ITESID(r)  ((unsigned)(((r) >> 32) & 0xFFFFULL))
 #define IQERCD_ICESID(r)  ((unsigned)(((r) >> 48) & 0xFFFFULL))
+
+/* The OTHER half of the Fault Status Register: primary fault logging
+ * (§7.2.1), which is the channel every non-recoverable translation fault and
+ * every interrupt-remapping fault arrives on. Nothing in this driver read it
+ * until now, and two of its properties make that a silence that lasts:
+ *
+ *   PFO (bit 0, RW1CS) — §11.4.7.1: "Hardware sets this field to indicate
+ *   overflow of the fault recording registers. When this field is Set,
+ *   hardware does not record any new faults until software clears this
+ *   field." A PFO this kernel inherits from firmware and never clears is a
+ *   unit that will record nothing for the rest of the machine's life.
+ *
+ *   PPF (bit 1, ROS) — the logical OR of the F fields across every fault
+ *   recording register. It is READ-ONLY: it goes away when the F bits do and
+ *   not before, so it is never written back. (Linux writes PPF and the
+ *   deprecated PRO alongside PFO; rev 5.0 has retired PRO from bit 7 and
+ *   calls that bit RsvdZ, which software writes as zero, so neither is
+ *   written here.)
+ *
+ * And §7.3 makes the pair load-bearing for the interrupt that does not exist
+ * yet: "Hardware checks if there are any previously reported interrupt
+ * conditions that are yet to be serviced by software ... If hardware detects
+ * any interrupt condition yet to be serviced by software, the Fault Event
+ * interrupt is not generated." A stale PFO or F bit therefore also gags the
+ * Fault Event the moment anybody arms it. */
+#define FSTS_PFO          (1u << 0)
+#define FSTS_PPF          (1u << 1)
+#define FSTS_FRI(s)       ((uint32_t)(((s) >> 8) & 0xFFu))
+
+/* A Fault Recording Register (§11.4.7.6) is 128 bits, and its fields do not
+ * line up with the two qwords. Read as three pieces, which is also the order
+ * the register's own footnote 1 demands: "software may read the highest
+ * doubleword in a fault recording register and check if the Fault (F) field
+ * is Set before reading the rest of the data fields in that register",
+ * because "hardware updates to this register may be disassembled as multiple
+ * doubleword writes".
+ *
+ *   +0Ch, bits 127:96 — F (127), T1 (126), AT (125:124), PV (123:104),
+ *                       FR (103:96)
+ *   +08h, bits  95:64 — PP (95), EXE (94), PRIV (93), T2 (92), SID (79:64)
+ *   +00h, bits  63:0  — FI (63:12), the faulting page address
+ *
+ * T1 and T2 together name the request (§11.4.7.6, T2's table): 00 write,
+ * 01 page request, 10 read, 11 AtomicOp. */
+#define FRCD_HI_F         (1u << 31)                        /* bit 127      */
+#define FRCD_HI_T1(d)     (((d) >> 30) & 1u)                /* bit 126      */
+#define FRCD_HI_FR(d)     ((uint8_t)((d) & 0xFFu))          /* bits 103:96  */
+#define FRCD_HI_PV(d)     (((d) >> 8) & 0xFFFFFu)           /* bits 123:104 */
+#define FRCD_MID_SID(d)   ((uint16_t)((d) & 0xFFFFu))       /* bits  79:64  */
+#define FRCD_MID_PP(d)    (((d) >> 31) & 1u)                /* bit 95       */
+#define FRCD_MID_T2(d)    (((d) >> 28) & 1u)                /* bit 92       */
+#define FRCD_FI_MASK      0xFFFFFFFFFFFFF000ULL             /* bits  63:12  */
 
 /* The IOTLB registers have no fixed offset: ECAP.IRO (bits 17:8, §11.4.3)
  * reports it — "If the register base address is X, and the value reported in
@@ -1240,6 +1293,358 @@ int vtd_enable_translation(void) {
     return enabled;
 }
 
+/* ----- Primary fault logging: what a unit refused, and why (§7.2.1) -----
+ *
+ * The fault recording registers are the only channel this hardware has for a
+ * non-recoverable translation or interrupt-remapping fault, and nothing in
+ * this driver had ever read one. That is not merely a missing diagnostic.
+ *
+ * §11.4.7.1 on PFO: "When this field is Set, hardware does not record any new
+ * faults until software clears this field." §7.3 on the fault event: "If
+ * hardware detects any interrupt condition yet to be serviced by software,
+ * the Fault Event interrupt is not generated." So a unit handed over by
+ * firmware with an overflow, or with one F bit standing, is a unit that will
+ * record nothing and signal nothing for the rest of the boot -- and it stays
+ * that way through whoever arms the Fault Event and whoever finally sets
+ * GCMD.TE. Reading and clearing the channel at the handover is what makes the
+ * unit able to speak at all.
+ *
+ * Registers, not memory: unlike AMD-Vi's event log, these live inside the
+ * unit's own MMIO block, so what firmware recorded survives this kernel
+ * taking the unit over and is still there to be read.
+ */
+
+/* Is this fault reason one of the interrupt-remapping conditions?
+ *
+ * Table 15 (§5.1.4.1) occupies 20h-2Bh; Table 30 (§7.1.3) occupies the codes
+ * below 20h for legacy mode and 30h and above for scalable mode. The split
+ * matters for more than the name: §11.4.7.6 gives the FI field a different
+ * meaning on each side, so a driver that does not know which side it is on
+ * prints an address where there is an interrupt index, or an index where
+ * there is an address. */
+static bool vtd_fault_is_intr_remap(uint8_t fr) {
+    return fr >= 0x20u && fr <= 0x2Bu;
+}
+
+/* Does FI carry the interrupt_index for this interrupt-remapping reason?
+ *
+ * §11.4.7.6, FI: "When the Fault Reason (FR) field indicates interrupt-
+ * remapping Fault Reason 20h, 25h, 29h, 2Ah, and 2Bh, contents of this field
+ * is undefined. When the Fault Reason (FR) field indicates interrupt-
+ * remapping fault conditions other than [those], bits 63:48 of this field
+ * indicate the interrupt_index computed for the faulted interrupt request,
+ * and bits 47:12 are cleared." Printing an index out of an undefined field
+ * would be inventing one. */
+static bool vtd_fault_has_intr_index(uint8_t fr) {
+    switch (fr) {
+    case 0x20: case 0x25: case 0x29: case 0x2A: case 0x2B:
+        return false;
+    default:
+        return true;
+    }
+}
+
+/* The fault reason, in the specification's own words.
+ *
+ * The wording is the condition text of Table 30 (§7.1.3) and Table 15
+ * (§5.1.4.1), and each legacy row carries the table's own condition code so
+ * the row can be found again. Only the legacy-mode rows are named: this
+ * driver programs RTADDR_REG.TTM = 00b and builds nothing else, so the
+ * scalable-mode reasons at 30h and above cannot come from its own tables --
+ * but firmware's may still be sitting in the register, so those are reported
+ * by number rather than guessed at. Two codes have no row at all in either
+ * table (0h and 0Fh-1Fh), and they get the same treatment.
+ *
+ * This function makes no claim about what the specification does or does not
+ * contain: it reports only whether THIS driver has a name. */
+static const char* vtd_fault_reason_name(uint8_t fr) {
+    switch (fr) {
+    /* Table 30, legacy root-table faults. */
+    case 0x8: return "LRT.1: a hardware attempt to access a root-entry "
+                     "referenced through RTADDR_REG resulted in an error";
+    case 0x1: return "LRT.2: the Present field in the root-entry used to "
+                     "process the request is 0";
+    case 0xA: return "LRT.3: non-zero reserved field in a root-entry with "
+                     "Present set";
+    /* Table 30, legacy context-table faults. */
+    case 0x9: return "LCT.1: a hardware attempt to access a context-entry "
+                     "referenced through the CTP field of a root-entry "
+                     "resulted in an error";
+    case 0x2: return "LCT.2: the Present field in the context-entry used to "
+                     "process the request is 0";
+    case 0xB: return "LCT.3: non-zero reserved field in a context-entry with "
+                     "Present set";
+    case 0x3: return "LCT.4: invalid programming of the context-entry used "
+                     "to process the request (an Address-Width or "
+                     "Translation-Type the unit does not support, or an "
+                     "error reaching the table its SSPTPTR names)";
+    case 0xD: return "LCT.5: the Translation-Type of a present context-entry "
+                     "blocks translation requests without PASID and "
+                     "translated requests";
+    /* Table 30, legacy second-stage table faults. */
+    case 0x7: return "LSS.1: a hardware attempt to access a second-stage "
+                     "paging entry referenced through a preceding one "
+                     "resulted in an error";
+    case 0xC: return "LSS.2: non-zero reserved field in a second-stage "
+                     "paging entry with Read or Write set";
+    /* Table 30, legacy general faults. */
+    case 0x4: return "LGN.1: address overflow in second-stage translation";
+    case 0x5: return "LGN.2: a write or AtomicOp request encountered lack of "
+                     "write permission";
+    case 0x6: return "LGN.3: a read or AtomicOp request encountered lack of "
+                     "read permission";
+    case 0xE: return "LGN.4: the address after remapping fell in the "
+                     "interrupt address range FEEx_xxxxh";
+    /* Table 15, interrupt-remapping faults. */
+    case 0x20: return "decoding the remappable interrupt request found one "
+                      "or more reserved fields set";
+    case 0x21: return "the interrupt_index computed for the request is "
+                      "greater than the interrupt-remapping table size, or "
+                      "its IRTE lies above the Host Address Width";
+    case 0x22: return "the Present field in the IRTE for this "
+                      "interrupt_index is clear";
+    case 0x23: return "a hardware attempt to access the interrupt-remapping "
+                      "table through IRTA_REG resulted in an error";
+    case 0x24: return "one or more reserved fields not initialized to zero "
+                      "in an IRTE with Present set";
+    case 0x25: return "a compatibility-format interrupt request was blocked "
+                      "(EIME set in IRTA_REG, or CFIS clear in GSTS)";
+    case 0x26: return "a remappable interrupt request was blocked because "
+                      "the requester's source-id failed the SID/SVT/SQ "
+                      "verification in its IRTE";
+    case 0x27: return "a hardware attempt to access the Posted Interrupt "
+                      "Descriptor named by an IRTE resulted in an error";
+    case 0x28: return "one or more reserved fields not initialized to zero "
+                      "in a Posted Interrupt Descriptor";
+    case 0x29: return "an untranslated request-without-PASID to the "
+                      "interrupt address range FEEx_xxxxh that does not meet "
+                      "the requirements of a valid interrupt";
+    case 0x2A: return "EIME is 0 in IRTA_REG on an implementation that "
+                      "reports Extended Interrupt Mode Enable Required";
+    case 0x2B: return "an MSI request arrived while interrupt remapping is "
+                      "disabled on an implementation that reports Interrupt "
+                      "Remapping Required";
+    default:   return "(this driver has no name for this fault reason)";
+    }
+}
+
+/* Does this fault reason name one of the address translation conditions?
+ *
+ * The question is not cosmetic. §11.4.7.6 makes T1, T2 and AT "relevant only
+ * when the F field is Set, and when the fault reason (FR) indicates one of
+ * the address translation fault conditions", so calling a record a "read
+ * request" on the strength of a bit that the specification does not say
+ * carries one is inventing the answer.
+ *
+ * True for exactly the codes vtd_fault_reason_name has a legacy Table 30 row
+ * for -- 1h through Eh. Not for the scalable-mode rows at 30h and above:
+ * those ARE translation conditions, but this driver programs legacy mode and
+ * has no table of their reasons, so a record carrying one came from
+ * somewhere this driver cannot speak for and is reported raw instead. */
+static bool vtd_fault_is_addr_translation(uint8_t fr) {
+    return fr >= 0x1u && fr <= 0xEu;
+}
+
+/* T1 and T2 together (§11.4.7.6, the T2 table). Relevant only when the fault
+ * reason names an address translation condition, which is why the caller asks
+ * only then. */
+static const char* vtd_fault_request_kind(uint32_t t1, uint32_t t2) {
+    if (!t1) return t2 ? "page request" : "write request";
+    return t2 ? "AtomicOp request" : "read request";
+}
+
+/* Read, say and clear one unit's fault recording registers.
+ *
+ * And, on a unit whose invalidation queue never came up, its queue-error bits
+ * as well -- because §7.3 does not gate the Fault Event on the fault records
+ * alone: hardware decides "by evaluating if any of the PPF, PFO, IQE, ICE and
+ * ITE fields in the Fault Status Register is Set", and "if hardware detects
+ * any interrupt condition yet to be serviced by software, the Fault Event
+ * interrupt is not generated". One IQE left standing by firmware therefore
+ * silences this unit's every future fault report, records and all.
+ *
+ * On a unit where the queue IS active those three bits are not this
+ * function's to touch: vtd_qi_submit reads FSTS on every turn of its own
+ * wait, names the error out of IQERCD while IQH still points at the
+ * descriptor that caused it (§6.5.2.11), and clears it there. Clearing them
+ * from here would steal that report and leave the submitter looking at a
+ * queue that failed for no stated reason. Where the queue never came up --
+ * ECAP.QI clear, or vtd_qi_init out of pages for the ring or the wait status
+ * word -- nobody will ever clear them, and nobody has read them either. */
+static void vtd_unit_drain_faults(vtd_unit_t* u, uint8_t idx) {
+    volatile uint32_t* fsts = (volatile uint32_t*)(u->reg + VTD_REG_FSTS);
+    uint32_t status = *fsts;
+
+    if (!u->qi_active) {
+        uint32_t stuck = status & FSTS_QI_ERRORS;
+        if (stuck) {
+            /* IQERCD only, never the ring: u->qi_ring is NULL on precisely
+             * the units this branch is for, and the descriptor the bits
+             * refer to was firmware's in any case. */
+            uint64_t rec = *(volatile uint64_t*)(u->reg + VTD_REG_IQERCD);
+            kprintf("[VT-d] DRHD[%u] carries invalidation queue error bits "
+                    "0x%x with no queue of this kernel's running -- nothing "
+                    "else will ever clear them, and §7.3 has the unit "
+                    "withhold its Fault Event interrupt while any of them "
+                    "stands\n", idx, stuck);
+            if (stuck & FSTS_IQE)
+                kprintf("[VT-d]   IQE - a descriptor was refused, IQEI=%u\n",
+                        IQERCD_IQEI(rec));
+            if (stuck & FSTS_ITE)
+                kprintf("[VT-d]   ITE - a device-TLB invalidation timed out, "
+                        "source id 0x%04x\n", IQERCD_ITESID(rec));
+            if (stuck & FSTS_ICE)
+                kprintf("[VT-d]   ICE - an invalid device-TLB invalidation "
+                        "completion arrived, source id 0x%04x\n",
+                        IQERCD_ICESID(rec));
+            *fsts = stuck;   /* RW1C; every other bit written 0 */
+        }
+    }
+
+    if (!(status & (FSTS_PFO | FSTS_PPF))) return;
+
+    /* How many registers there are, and where they begin, is what CAP.NFR and
+     * CAP.FRO say -- no ceiling of this driver's choosing is involved, and
+     * CAP.NFR is a count minus one so the loop bound is at least 1. The whole
+     * register block out to CAP_FAULT_REG_END was mapped in vtd_unit_init for
+     * exactly this. */
+    const uint32_t nfr  = CAP_NUM_FAULT_REGS(u->cap);
+    const uint32_t base = CAP_FRO_OFF(u->cap);
+    const bool overflowed = (status & FSTS_PFO) != 0;
+
+    if (overflowed) {
+        kprintf("[VT-d] DRHD[%u] fault log OVERFLOWED — every fault after it "
+                "filled was discarded, and §11.4.7.1 has the unit record "
+                "nothing further while the bit stands\n", idx);
+    }
+
+    /* Where to start. §7.2.1 for the ordinary case: "Software is expected to
+     * process the non-recoverable faults reported through the Fault Recording
+     * Registers in a circular FIFO fashion starting from the Fault Recording
+     * Register referenced by the Fault Recording Index (FRI) field, until it
+     * finds a Fault Recording Register with no faults (F field Clear)."
+     *
+     * Under overflow that walk is not enough: recovery there is "software
+     * must first process the pending faults in EACH of the Fault Recording
+     * Registers, Clear the Fault (F) field in all those registers, and Clear
+     * the overflow status" -- so every register is visited, and a clear one
+     * is skipped rather than taken as the end. FRI is not consulted either:
+     * §11.4.7.1 says "The value read from this field is undefined when the
+     * PPF field is Clear", and an overflow with every F already processed can
+     * present exactly that. */
+    uint32_t i = overflowed ? 0u : FSTS_FRI(status);
+    /* FRI is eight bits and NFR need not fill them. An index past the last
+     * fault recording register would have this loop read -- and then RW1C a
+     * bit into -- a register that is not one, somewhere else in the block
+     * this unit published. The bound is the unit's own CAP.NFR; nothing here
+     * is chosen. */
+    if (i >= nfr) i = 0u;
+    uint32_t said = 0;
+
+    for (uint32_t visited = 0; visited < nfr; visited++, i = (i + 1u) % nfr) {
+        volatile uint8_t* rec = u->reg + base + (size_t)i * 16u;
+
+        /* The highest doubleword first, and the rest only once F reads set --
+         * §11.4.7.6 footnote 1, because "hardware updates to this register
+         * may be disassembled as multiple doubleword writes". */
+        uint32_t hi = *(volatile uint32_t*)(rec + 12);
+        if (!(hi & FRCD_HI_F)) {
+            if (overflowed) continue;
+            break;
+        }
+
+        uint32_t mid = *(volatile uint32_t*)(rec + 8);
+        uint64_t fi  = *(volatile uint64_t*)rec;
+
+        uint8_t  fr  = FRCD_HI_FR(hi);
+        uint16_t sid = FRCD_MID_SID(mid);
+
+        if (vtd_fault_is_intr_remap(fr)) {
+            if (vtd_fault_has_intr_index(fr)) {
+                kprintf("[VT-d] DRHD[%u] fault 0x%02x from %02x:%02x.%x on "
+                        "interrupt index %u — %s\n",
+                        idx, fr, sid >> 8, (sid >> 3) & 0x1Fu, sid & 0x7u,
+                        (unsigned)(fi >> 48), vtd_fault_reason_name(fr));
+            } else {
+                kprintf("[VT-d] DRHD[%u] fault 0x%02x from %02x:%02x.%x — "
+                        "%s\n",
+                        idx, fr, sid >> 8, (sid >> 3) & 0x1Fu, sid & 0x7u,
+                        vtd_fault_reason_name(fr));
+            }
+        } else if (vtd_fault_is_addr_translation(fr)) {
+            /* PASID is said only when the register says it is there: PV is
+             * "relevant only when the PP field is Set" (§11.4.7.6). */
+            if (FRCD_MID_PP(mid)) {
+                kprintf("[VT-d] DRHD[%u] fault 0x%02x from %02x:%02x.%x "
+                        "PASID 0x%x, %s at 0x%lx — %s\n",
+                        idx, fr, sid >> 8, (sid >> 3) & 0x1Fu, sid & 0x7u,
+                        (unsigned)FRCD_HI_PV(hi),
+                        vtd_fault_request_kind(FRCD_HI_T1(hi),
+                                               FRCD_MID_T2(mid)),
+                        (unsigned long)(fi & FRCD_FI_MASK),
+                        vtd_fault_reason_name(fr));
+            } else {
+                kprintf("[VT-d] DRHD[%u] fault 0x%02x from %02x:%02x.%x, "
+                        "%s at 0x%lx — %s\n",
+                        idx, fr, sid >> 8, (sid >> 3) & 0x1Fu, sid & 0x7u,
+                        vtd_fault_request_kind(FRCD_HI_T1(hi),
+                                               FRCD_MID_T2(mid)),
+                        (unsigned long)(fi & FRCD_FI_MASK),
+                        vtd_fault_reason_name(fr));
+            }
+        } else {
+            /* A reason this driver cannot place: it is neither an interrupt-
+             * remapping condition nor one of the legacy translation rows, so
+             * nothing here knows what FI holds or whether T1/T2 mean
+             * anything. The record goes out as the hardware wrote it, which
+             * is the whole of what it has to say. */
+            kprintf("[VT-d] DRHD[%u] fault 0x%02x from %02x:%02x.%x — %s; "
+                    "record 0x%lx 0x%lx\n",
+                    idx, fr, sid >> 8, (sid >> 3) & 0x1Fu, sid & 0x7u,
+                    vtd_fault_reason_name(fr),
+                    (unsigned long)fi,
+                    (unsigned long)(((uint64_t)hi << 32) | (uint64_t)mid));
+        }
+
+        /* The register as the hardware wrote it, for whoever subscribed. The
+         * subject is the one AMD-Vi already publishes on; which of the two
+         * shapes the sixteen bytes carry is settled by the backend named in
+         * iommu:ready, and a machine has one backend. */
+        struct { uint64_t lo; uint64_t hi; } raw = {
+            .lo = fi,
+            .hi = ((uint64_t)hi << 32) | (uint64_t)mid,
+        };
+        TouchPublish("iommu:fault", &raw, sizeof(raw));
+
+        /* F is RW1C and clearing it is what lets PPF -- which is read-only
+         * and computed as the OR of every F -- fall. */
+        *(volatile uint32_t*)(rec + 12) = FRCD_HI_F;
+        said++;
+    }
+
+    if (overflowed) {
+        /* §7.2.1, and only now that every F is clear: "Clear the overflow
+         * status by writing a 1 to the Primary Fault Overflow (PFO) field.
+         * Once the PFO field is cleared by software, hardware continues to
+         * record new faults." Every other bit of the word is written 0: the
+         * RW1C bits ignore that, PPF is read-only, and bit 7 is RsvdZ. */
+        *fsts = FSTS_PFO;
+        kprintf("[VT-d] DRHD[%u] fault recording restarted after %u record(s) "
+                "— what stood before the overflow is all there is of what was "
+                "lost\n", idx, said);
+    }
+}
+
+/* Public: read every online unit's fault recording registers, say what is in
+ * them and clear them. Silent and harmless on a machine with no units, and on
+ * a unit with nothing recorded. */
+void vtd_drain_faults(void) {
+    for (uint8_t i = 0; i < g_unit_count; i++) {
+        if (!g_units[i].online) continue;
+        vtd_unit_drain_faults(&g_units[i], i);
+    }
+}
+
 /* ----- ops vtable bodies ----- */
 
 struct iommu_domain {
@@ -1474,4 +1879,5 @@ const iommu_ops_t vtd_ops = {
     .invalidate     = vtd_invalidate,
     .domain_id      = vtd_domain_id,
     .map_with_keyid = vtd_map_with_keyid,
+    .drain_faults   = vtd_drain_faults,
 };

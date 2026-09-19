@@ -32,6 +32,25 @@
  *     whose firmware hands the IOMMU over already running is the ordinary
  *     case, and its tables cannot be swapped underneath it
  *
+ * What IommuEn gates, and what it does not
+ * ----------------------------------------
+ * IommuEn is not the translation switch; it is the unit's power switch, and
+ * everything else in this driver hangs off it. §3.4.1 bit 2 EventLogEn: "all
+ * events detected are written to the event log when IommuEn has also been
+ * set"; bit 12 CmdBufEn: "When CmdBufEn = 1b and IommuEn = 1b, the IOMMU
+ * starts fetching commands". So with IommuEn clear this unit logs nothing and
+ * executes nothing -- the event log below is a channel the hardware never
+ * writes to, and every amdvi_completion_wait would run its full span out.
+ *
+ * Translation is per DEVICE, in the DTE. Table 8, V = 0: "All addresses are
+ * forwarded without translation; individual control fields are ignored."
+ * Table 10, IV = 0: LINT0, LINT1, SMI, NMI, INIT and ExtInt "are passed
+ * through unmapped". amdvi_unit_init leaves the device table zeroed and
+ * nothing in this tree calls iommu_device_attach, so every entry reads V = 0
+ * and IV = 0 today: IommuEn = 1 over this table would start the log and the
+ * command engine and translate nothing at all. Whether to take that step is
+ * the owner's call, not this file's.
+ *
  * The DTE format used is "V=1, host-page-table set to identity-map"
  * (DTE bits 1:0 = 11, DomainID=0, host page table pointer = SLPT root,
  * mode=4 for 4-level paging). This is the same model used by Linux's
@@ -328,7 +347,16 @@ static void amdvi_completion_wait(amdvi_unit_t* u) {
      * that has not landed does not mean the queued commands failed, only that
      * they have not finished, and withdrawing anything here would be acting on
      * a fact this code does not have. What it CAN do is say so where a shipped
-     * build can see it. */
+     * build can see it.
+     *
+     * One caller-visible trap, and it is the hardware's, not this wait's:
+     * §3.4.1 bit 12 has the IOMMU fetch commands only "When CmdBufEn = 1b and
+     * IommuEn = 1b". Every path into this function except amdvi_enable --
+     * attach, detach, invalidate -- runs with IommuEn still clear, so the
+     * command is written into a buffer nobody reads and this wait can only
+     * ever run its span out and say the semaphore never landed. That is a
+     * true report of a real condition, which is why it is left to say it
+     * rather than short-circuited on a bit read here. */
     if (!u->cmd_buf || !u->sem) return;
 
     uint64_t want = ++u->sem_seq;
@@ -843,10 +871,20 @@ static bool amdvi_event_has_devid(uint32_t code) {
  * Not callable from an interrupt handler: TouchPublish is not IRQ-safe
  * (touch.h -- interrupt context uses TouchPublishIrqPair), and this routine
  * waits on EventLogRun with an HourGlass. The comment that stood here said
- * "callers run this from the SCI handler or as a periodic poll"; there are
- * no callers at all, and an SCI handler is the one place it may not run
- * from. The event log IS armed by amdvi_unit_init on every AMD board with an
- * IVRS, so the log fills whether or not anybody drains it. */
+ * "callers run this from the SCI handler or as a periodic poll"; an SCI
+ * handler is the one place it may not run from. It is reached now as this
+ * backend's drain_faults, by way of amdvi_drain_faults.
+ *
+ * It is reached through amdvi_drain_faults, and only for the units whose
+ * IommuEn is actually set, because with that bit clear this function has
+ * provably nothing to do -- see amdvi_drain_faults for the proof, which is
+ * in this file and not in the specification. The sentence that stood here --
+ * that amdvi_unit_init arms the log so it fills whether or not anybody
+ * drains it -- was wrong. MMIO Offset 0018h bit 2 EventLogEn: "all events
+ * detected are written to the event log when IommuEn has also been set", and
+ * "Events are discarded when the event log is not enabled". amdvi_unit_init
+ * sets EventLogEn and deliberately leaves IommuEn clear, so on AMD the eyes
+ * do not open until IommuEn does. */
 void amdvi_poll_events(void) {
     for (uint8_t i = 0; i < g_unit_count; i++) {
         amdvi_unit_t* u = &g_units[i];
@@ -945,6 +983,55 @@ static uint32_t amdvi_domain_id(iommu_domain_t* d) {
     return d ? ((struct iommu_domain*)d)->id : 0xFFFFFFFFu;
 }
 
+/* This backend's drain_faults.
+ *
+ * What it exists to avoid is a call that LOOKS like an inspection and is a
+ * no-op by construction. Wiring amdvi_poll_events straight into the vtable
+ * would be exactly that, and the proof is three lines of this file rather
+ * than anything in the specification:
+ *
+ *   - amdvi_unit_init writes 0 to MMIO_EVT_HEAD and 0 to MMIO_EVT_TAIL, so
+ *     on entry head == tail and the drain loop does not run once;
+ *   - amdvi_unit_init writes STATUS_EVT_OVERFLOW (W1C) before it brings the
+ *     unit online, so firmware's overflow is already gone and the overflow
+ *     branch -- the one that stops the log and waits on EventLogRun -- is
+ *     unreachable from here;
+ *   - the hardware cannot have refilled either, because amdvi_unit_init
+ *     leaves IommuEn clear and MMIO Offset 0018h bit 2 EventLogEn says the
+ *     events are written "when IommuEn has also been set", with "events are
+ *     discarded when the event log is not enabled".
+ *
+ * So on every AMD board today this channel is empty, and it is empty for a
+ * reason the board should hear said out loud rather than infer from a
+ * missing line. That is what this does: it reads the bit -- not a guess, not
+ * a cached flag, the live IommuEn out of the unit's own control register --
+ * and reports the unit as deaf by configuration. Where the bit IS set, which
+ * is only after amdvi_enable, the log is real and amdvi_poll_events reads
+ * it. */
+static void amdvi_drain_faults(void) {
+    bool any_live = false;
+
+    for (uint8_t i = 0; i < g_unit_count; i++) {
+        amdvi_unit_t* u = &g_units[i];
+        if (!u->online) continue;
+        if (*(volatile uint64_t*)(u->reg + MMIO_CTRL) & CTRL_IOMMU_EN) {
+            any_live = true;
+            continue;
+        }
+        kprintf("[AMD-Vi] IVHD[%u] has nothing to report and cannot have: "
+                "IommuEn is clear in its control register, and 0018h[2] "
+                "writes events to the log only \"when IommuEn has also been "
+                "set\" -- everything this unit detects is discarded before "
+                "it is written. This is not an empty log, it is a closed "
+                "eye, and amdvi_enable is what opens it\n", i);
+    }
+
+    /* Nothing calls amdvi_enable in this tree yet, so today this is where
+     * the AMD path ends. The moment one does, the same call reads a channel
+     * that is genuinely filling. */
+    if (any_live) amdvi_poll_events();
+}
+
 const iommu_ops_t amdvi_ops = {
     .name           = "AMD-Vi",
     .init           = amdvi_init,
@@ -957,4 +1044,5 @@ const iommu_ops_t amdvi_ops = {
     .invalidate     = amdvi_invalidate,
     .domain_id      = amdvi_domain_id,
     .map_with_keyid = amdvi_map_with_keyid,
+    .drain_faults   = amdvi_drain_faults,
 };

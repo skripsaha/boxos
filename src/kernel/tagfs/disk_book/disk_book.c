@@ -6,6 +6,7 @@
 #include "../../../kernel/drivers/timer/rtc.h"
 #include "../../../kernel/drivers/disk/ahci.h"
 #include "boardroom.h"
+#include "atomics.h"      /* cpu_pause — the one instruction a re-ask spends */
 
 // Sector I/O through the volume's own door (tagfs_volume_read/write), not the
 // Boardroom directly: the DiskBook lives in a run of the volume named by its
@@ -191,6 +192,54 @@ error_t DiskBookValidateAndReplay(void) {
     return OK;
 }
 
+/*
+ * ‼ A FLUSH THAT DID NOT HAPPEN MUST NOT BE COUNTED AS ONE — AND THE THING
+ * IT COSTS IS NOT A COUNT.
+ *
+ * g_appends_since_flush answers one question: when does this book push itself
+ * out. Both places below zero it BEFORE the flush, on the promise of a flush,
+ * and when the flush refused the answer used to be thrown away — so the book
+ * had forgotten that sixty-odd redirects were still only in the drive's
+ * cache, and nothing anywhere remembered it.
+ *
+ * Winding the counter back to the threshold is NOT the repair, and was tried:
+ * it makes the very next append cross the threshold again, and the one after
+ * that, and every one after that, so a sick medium turns one refused flush
+ * into a whole-port FLUSH CACHE EXT attempt — patience window, retries,
+ * COMRESETs — on EVERY redirect, for ever. A storm dressed as diligence.
+ *
+ * What a refused flush actually costs is not a number of appends, it is a
+ * CLAIM: this book can no longer say its on-disk records have reached the
+ * media. That is one bit, it is sticky, and it is cleared by the next flush
+ * that does succeed — because FLUSH CACHE EXT empties the whole write cache,
+ * not the part of it this book wrote, so ONE later success makes every
+ * earlier redirect durable at once. Which is also why asking again
+ * immediately buys nothing: the scheduled push sixty-four appends from now
+ * covers exactly the same bytes.
+ */
+static bool g_not_proven_durable = false;
+
+static void disk_book_flush_did_not_happen(error_t why, const char* what)
+{
+    __atomic_store_n(&g_not_proven_durable, true, __ATOMIC_RELEASE);
+
+    /* A port held for somebody else's flush is not the medium refusing
+     * anything and is ordinary traffic on a busy volume: the claim is dropped
+     * — nothing was pushed — but no alarm is raised. tagfs_flush_cache keeps
+     * the same silence on ERR_BUSY for the same reason, and a line that cries
+     * out on ordinary traffic is a line nobody reads when it matters. */
+    if (why == ERR_BUSY) {
+        return;
+    }
+
+    /* tagfs_flush_cache has already named the volume; this says the part only
+     * the book knows: what is riding on it. */
+    kprintf("[DiskBook] %s: the medium did not take its cache to the media "
+            "(error %u) — the redirects written since the last flush that did "
+            "succeed are not proven durable until one does\n",
+            what, (unsigned)why);
+}
+
 // ----------------------------------------------------------------------------
 // Append one redirect (durable mirror of the in-memory CoW redirect list)
 // ----------------------------------------------------------------------------
@@ -240,8 +289,19 @@ error_t DiskBookLogRedirect(uint32_t snapshot_id, uint32_t old_block,
 
     spin_unlock(&g_lock);
 
-    if (do_flush)
-        tagfs_flush_cache();
+    /* The entry IS written and this function's word is "logged", not
+     * "durable" — its own comment above says so ("durable on next flush").
+     * So the answer changes the BOOK'S STATE rather than this return value:
+     * what a refusal costs is the promise that the periodic push happened,
+     * and that promise is the count. */
+    if (do_flush) {
+        error_t flushed = tagfs_flush_cache();
+        if (flushed != OK) {
+            disk_book_flush_did_not_happen(flushed, "redirect log");
+        } else {
+            __atomic_store_n(&g_not_proven_durable, false, __ATOMIC_RELEASE);
+        }
+    }
     return OK;
 }
 
@@ -271,19 +331,68 @@ error_t DiskBookCheckpoint(void) {
     error_t err = write_superblock_locked();
     g_appends_since_flush = 0;
     spin_unlock(&g_lock);
-    if (err == OK)
-        tagfs_flush_cache();
-    return err;
+    if (err != OK)
+        return err;
+
+    /* ‼ THIS ONE IS A DURABILITY CLAIM, AND IT USED TO RETURN SOMEBODY ELSE'S
+     * ANSWER. The value handed back was write_superblock_locked's — "the
+     * sectors were accepted" — while the flush that decides whether they are
+     * on the media had its answer dropped. A checkpoint whose whole purpose
+     * is the sentence "this is now safe against the power going away"
+     * returned OK when it was not.
+     *
+     * ‼ ERR_BUSY IS NOT ONE OF THOSE REFUSALS AND IS NOT RETURNED. It says
+     * another whole-port command holds this medium's port at this instant —
+     * two flushes of the same disk meeting — and a checkpoint is asked for
+     * precisely when somebody needs an answer about the media, not about the
+     * traffic. Returning it would also have made this function fail at
+     * random on a busy volume, which the checkpoint test in
+     * tagfs/tests/tests.c would see as a red run with nothing wrong.
+     *
+     * So it asks again, and the asking ends on a fact rather than a clock:
+     * the holder's own command is bounded, and a holder that stops being a
+     * running core has its door taken over on the spot
+     * (ahci_port_take_whole). The argument is written out once, above
+     * tagfs_flush_cache_insisting in tagfs.c. */
+    error_t flushed = tagfs_flush_cache();
+    while (flushed == ERR_BUSY) {
+        cpu_pause();
+        flushed = tagfs_flush_cache();
+    }
+    if (flushed != OK) {
+        disk_book_flush_did_not_happen(flushed, "checkpoint");
+        return flushed;
+    }
+    __atomic_store_n(&g_not_proven_durable, false, __ATOMIC_RELEASE);
+    return OK;
 }
 
 void DiskBookShutdown(void) {
     if (!g_initialized)
         return;
-    DiskBookCheckpoint();
+    /* Said out loud rather than dropped for the same reason as everything
+     * above: this is the last checkpoint this book ever gets, and if it did
+     * not stick, the only place that can still be known is here.
+     *
+     * And what is said is the book's WHOLE debt, not this call's: a periodic
+     * push that refused an hour ago left redirects in the drive's cache that
+     * every checkpoint since may have failed to cover, and
+     * g_not_proven_durable is the one bit that remembers it. */
+    error_t sealed = DiskBookCheckpoint();
+    bool    owed   = __atomic_load_n(&g_not_proven_durable, __ATOMIC_ACQUIRE);
+
     spin_lock(&g_lock);
+    uint32_t held = g_sb.count;      /* read under the lock that guards it */
     g_initialized = false;
     spin_unlock(&g_lock);
-    debug_printf("[DiskBook] Shutdown complete (%u redirects retained)\n", g_sb.count);
+
+    if (sealed != OK || owed) {
+        kprintf("[DiskBook] shutting down with %u redirects that were not "
+                "proven to reach the media (error %u) — a snapshot read after "
+                "the next boot may fall back to live data\n",
+                held, (unsigned)sealed);
+    }
+    debug_printf("[DiskBook] Shutdown complete (%u redirects retained)\n", held);
 }
 
 // ----------------------------------------------------------------------------

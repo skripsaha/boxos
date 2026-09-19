@@ -1393,7 +1393,54 @@ static int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
      * inline so caller's fwrite-then-anchor is durable without a
      * shutdown. */
     tagfs_sync();
-    tagfs_flush_cache();
+
+    /*
+     * ‼ THIS IS THE OPERATION AN APPLICATION USES TO SAY "MAKE MY WRITE
+     * DURABLE", AND IT USED TO THROW THE ANSWER AWAY.
+     *
+     * The flush was called, its result dropped on the floor, the "anchor"
+     * event published on every tag of the file, and OK returned — so a
+     * program that wrote, anchored, and was told yes had the kernel's word
+     * that its bytes would survive the power going away, while they sat in a
+     * cache the drive can lose. Every observer woken by the Touch event was
+     * told the same thing. There is no worse lie this kernel can tell.
+     *
+     * A flush that did not happen buys no right to the word "anchored": on
+     * any refusal the event is NOT published — an observer that never hears
+     * is an observer that has not been misled — and the refusal goes back to
+     * the caller as the medium's own word.
+     *
+     * ‼ WITH ONE EXCEPTION, AND IT IS NOT A REFUSAL AT ALL: ERR_BUSY.
+     *
+     * That says another whole-port command holds this medium's port at this
+     * instant — two flushes of the same disk meeting, which on a busy volume
+     * is ordinary traffic and says nothing about the disk. Handing it to the
+     * application would make anchor() a call that fails for a reason the
+     * application cannot see, understand or act on better than the kernel
+     * can. So it is asked again here, and the asking ends on a fact rather
+     * than a clock: the holder's own command is bounded, and a holder that
+     * stops being a running core has its door taken over on the spot
+     * (ahci_port_take_whole). The full argument is written once, above
+     * tagfs_flush_cache_insisting in tagfs.c; this loop is that argument
+     * spelled where a static in another file cannot be called.
+     *
+     * anchor() therefore keeps exactly the two answers it always had —
+     * durable, or a named refusal of the medium — and neither of them is a
+     * lie any more.
+     */
+    error_t flushed = tagfs_flush_cache();
+    while (flushed == ERR_BUSY) {
+        cpu_pause();
+        flushed = tagfs_flush_cache();
+    }
+    if (flushed != OK) {
+        kprintf("[Storage] anchor of file %u: the medium did not make it "
+                "durable (error %u) — no anchor event is published and the "
+                "caller is told, because a file that was not made durable "
+                "must not be announced as one\n",
+                file_id, (unsigned)flushed);
+        return (int)flushed;
+    }
 
     /* Touch fan-out. For file_id == 0 we publish on a special "anchor"
      * tag (registered well-known); for a specific fid, publish on every

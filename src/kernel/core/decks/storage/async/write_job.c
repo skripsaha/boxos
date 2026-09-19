@@ -295,7 +295,15 @@ static bool w_cow_before(WriteJob *j)
  * allocation, or a slot freed in the gap is a wake nobody receives
  * (ahci_async.h), and the job must carry the deadline that bounds the wait
  * (write_job.h). A retry built without them is either a spin on the drain
- * core or a coin-flip; refusing with the port's own word is neither. */
+ * core or a coin-flip; refusing with the port's own word is neither.
+ *
+ * The DURABILITY point (w_commit_txn, below) does re-present on ERR_BUSY,
+ * and the difference is not inconsistency — it is what the two are waiting
+ * for. There, one thing holds the port and it is a single command with a
+ * device deadline on it, so the wait has a named end and the job can simply
+ * go to the back of the drain queue until it comes. Here, what is waited on
+ * is any one of up to thirty-two commands freeing a tag, with no single
+ * owner to ask about and nobody to hand a waiter to. */
 
 /* W_COW_READ_OLD — async read of (now-redirected) NEW block content
  * into DMA. CowBeforeWrite already populated NEW on disk with the OLD
@@ -477,15 +485,53 @@ static bool w_cow_after(WriteJob *j)
  * which is why the change is still announced on the file's tags, and why the
  * caller is told the byte count that is really in the file rather than a
  * zero it would answer by writing the same payload a second time. The one
- * thing it must not be told is "durable". */
+ * thing it must not be told is "durable".
+ *
+ * ‼ AND ONE OF THOSE REFUSALS IS NOT A REFUSAL AT ALL: A PORT HELD FOR
+ * SOMEBODY ELSE'S FLUSH AT THIS INSTANT.
+ *
+ * It arrives now as ERR_BUSY instead of ERR_IO, which is the whole of the
+ * wave before this one — but a distinct word is only half a mechanism, and
+ * the half that was missing is the one that matters here. The commonest
+ * meeting on a busy volume is two writes reaching their durability point at
+ * the same moment: one takes the port whole for its FLUSH CACHE EXT, the
+ * other finds the door shut. The port used to make the second one WAIT, and
+ * both writes succeeded. Simply handing ERR_BUSY to the process would turn
+ * that meeting into a failed write — a regression wearing the right word.
+ *
+ * SO THE JOB COMES BACK, AND IT COMES BACK THE WAY EVERY OTHER STEP OF THIS
+ * STATE MACHINE COMES BACK: its own baton, to the drain core. Not a spin —
+ * this runs inside BatonPump on the drain core, and spinning here would stop
+ * every other job on that core, which is exactly why this file refused to
+ * invent one. Re-linking the node puts it at the TAIL of that core's queue,
+ * so everything already waiting runs first and this job is retried in its
+ * turn: a yield, spelled with the mechanism the file already uses.
+ *
+ * And it ends on a fact, never on a clock. The holder's own command is
+ * bounded by the device (AHCI_CMD_PATIENCE_MS), a holder that stops being a
+ * running core has its door taken over on the spot (ahci_port_take_whole),
+ * and a medium that genuinely refuses, or leaves, answers with a different
+ * error_t — which falls through below and fails the write out loud. Nothing
+ * here abandons the job after a deadline.
+ *
+ * Nothing is said on the console for this: a meeting is ordinary traffic,
+ * and it repeats, so a line per attempt is how a log stops being read. */
 static bool w_commit_txn(WriteJob *j)
 {
     error_t flushed = tagfs_flush_cache();
+
+    if (flushed == ERR_BUSY) {
+        cpu_pause();
+        atomic_store_u32((volatile uint32_t *)&j->state, W_COMMIT_TXN);
+        BatonPass(&j->cq_node);   /* never-drop; back of the drain queue */
+        return false;
+    }
+
     if (flushed != OK) {
-        kprintf("[Storage] write to file %u: the medium would not flush its "
-                "write cache (%u) — the bytes are in the file but not proven "
-                "to survive power loss, so the write is refused rather than "
-                "reported done\n",
+        kprintf("[Storage] write to file %u: the medium would not flush "
+                "its write cache (%u) — the bytes are in the file but not "
+                "proven to survive power loss, so the write is refused "
+                "rather than reported done\n",
                 j->file_id, (unsigned)flushed);
         wjob_publish_change(j);
         wjob_finalize(j, flushed);

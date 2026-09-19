@@ -929,7 +929,12 @@ bool vmm_shadow_stack_seal(vmm_context_t *ctx, uintptr_t virt_addr)
      * hands out 1 GiB and 2 MiB leaves for kernel windows; going through
      * vmm_get_or_create_pte splits whichever huge leaf covers this
      * address (vmm_demote_large_entry) so this one page can carry a
-     * permission its neighbours must not. */
+     * permission its neighbours must not.
+     *
+     * That split is a cost, and it is why the shadow stacks that come
+     * and go with processes do not live in the Pull Map at all but in
+     * the bunk row below, which has no huge leaf to split. On a bunk
+     * address this walk finds the PT entry the map already made. */
     pte_t *pte = vmm_get_or_create_pte(ctx, virt_addr);
     if (!pte)
     {
@@ -989,10 +994,11 @@ bool vmm_shadow_stack_seal(vmm_context_t *ctx, uintptr_t virt_addr)
      * stale entry does not see a shadow-stack address at all — §4.6
      * condition (1) is read from the entry, and the cached copy still
      * says R/W = 1 — so its shadow-stack access to the page faults and
-     * an ordinary kernel store to it succeeds. Not hypothetical:
-     * cet_process_create_kernel_ssp seals a process's PL0 shadow stack
-     * on the SPAWNING core, and the process then runs on whichever core
-     * the scheduler gives it.
+     * an ordinary kernel store to it succeeds. The caller that needs it
+     * is any future one that seals a Pull Map page after the machine is
+     * multicore; the sealers in the tree today are the per-core
+     * supervisor stacks, which seal during their own core's bring-up,
+     * and two verification calls that change nothing (see below).
      *
      * The INVLPG of this 4 KiB address also drops the stale 1 GiB /
      * 2 MiB entry covering it, which is the other half of what the
@@ -1008,9 +1014,14 @@ bool vmm_shadow_stack_seal(vmm_context_t *ctx, uintptr_t virt_addr)
      * exactly those pages, because a core's own PL0 / IST stacks are
      * named by that core's MSRs alone, so no sibling ever makes a
      * shadow-stack access to them and no kernel pointer into them
-     * exists for an ordinary write. The seal that DOES cross cores, the
-     * per-process one above, runs long after multicore_active is up and
-     * gets the full broadcast.
+     * exists for an ordinary write.
+     *
+     * The two callers that DO run after multicore_active is up —
+     * cet_process_create for a cabin's user shadow stack and
+     * cet_process_create_kernel_ssp for a process's bunk — map their
+     * pages already carrying the encoding, so they reach here with
+     * nothing to change and leave no stale writable entry to chase.
+     * They call in for the parent walk above, not for the CAS.
      *
      * Nothing changed → nothing to invalidate: a page that was already
      * sealed left no stale writable entry anywhere. */
@@ -1072,6 +1083,219 @@ bool vmm_shadow_stack_unseal(vmm_context_t *ctx, uintptr_t virt_addr)
     if (changed)
         vmm_shootdown_page(ctx, virt_addr);
     return true;
+}
+
+/* ─── The bunk row — where a process's supervisor shadow stack lives ──
+ *
+ * Why it exists
+ * -------------
+ * A supervisor shadow stack is one 4 KiB page carrying an encoding no
+ * neighbour may share (R/W = 0, Dirty = 1). Sealed in place in the Pull
+ * Map, every such page costs the demotion of whichever 1 GiB or 2 MiB
+ * leaf covers it — vmm_get_or_create_pte splits it — and nothing puts
+ * that leaf back: vmm_shadow_stack_unseal restores R/W and stops there,
+ * because a demoted leaf can only be recombined when all 512 of its
+ * children agree again, and proving that costs a sweep of the table on
+ * every free. A per-CORE shadow stack pays that once at bring-up and the
+ * bill is closed. A per-PROCESS one pays it per spawn, at addresses the
+ * buddy allocator scatters across all of RAM, so a machine that has been
+ * up long enough ends with a Pull Map that is 4 KiB-granular everywhere:
+ * the page tables grow toward 2 MiB per gigabyte of RAM and every huge-
+ * page TLB entry that used to cover a gigabyte is gone with them.
+ *
+ * The row removes the split at its root rather than paying for it more
+ * cleverly. It is a stretch of kernel VA that has no huge leaf to begin
+ * with — nothing maps 1 GiB or 2 MiB pages here, so a page mapped here
+ * is born on a 4 KiB leaf, and a shadow stack costs the page table its
+ * own PD/PT would have cost anyway. There is nothing left to demote, and
+ * vmm_shadow_stack_seal on a bunk address therefore walks to a PT entry
+ * that already exists and changes nothing: it is kept in the path purely
+ * as the check of SDM Vol 3A §4.6 condition (2) — R/W = 1 in every entry
+ * ABOVE the leaf — which no leaf flag can express.
+ *
+ * How wide it is, and why that is not a number
+ * --------------------------------------------
+ * One bunk per pid. Not "enough bunks" — exactly the pids the PID
+ * allocator can hold at once, PID_MAX_COUNT == MAX_PROCESSES, which is
+ * the same ceiling process_create refuses at. A pid is issued as
+ * index + 1 and released by pid_free, and a process's bunk is given
+ * back (cet_process_destroy_kernel_ssp) strictly before its pid is
+ * (process_cleanup), so two live processes can never name one bunk. The
+ * row therefore cannot be exhausted by anything except a pid that does
+ * not exist, and that case is refused by name rather than wrapped.
+ *
+ * That is also why there is no allocator here. The bunk IS the pid:
+ * base + (pid - 1) pages. The PID allocator already did the only
+ * search anyone has to do.
+ *
+ * Fully populated the row costs one PD, plus one PT for each 2 MiB of
+ * it — 2 MiB being what one page table spans, because "a page table
+ * comprises 512 64-bit entries (PTEs)" (Intel SDM Vol 3A §4.5.5,
+ * 4-Level Paging) and each maps 4 KiB — and those tables are the row's
+ * for good. The figure stops growing once every bunk has been used
+ * once. What it replaces had no bound at all: a spawn demoted a 1 GiB
+ * leaf into a PD and a 2 MiB leaf into a PT, anywhere in RAM the buddy
+ * happened to land, and neither was ever recombined.
+ *
+ * ‼ WHAT THIS COSTS IN PROTECTION, AND WHY IT IS THE OWNER'S CALL
+ * ---------------------------------------------------------------
+ * Sealed in place in the Pull Map, a per-process supervisor shadow
+ * stack had exactly ONE name, and that name was not writable: no kernel
+ * pointer could touch it by an ordinary store. In the row it has two —
+ * the bunk (R/W = 0) and the Pull Map alias (writable, as it always
+ * was). The frame is reachable at PULL_MAP_BASE + phys whatever else
+ * names it, and taking THAT mapping away for one page, or sealing it,
+ * is the very demotion the row exists to avoid. So the two properties
+ * cannot both be had this way round: keeping the Pull Map leaf whole
+ * and keeping the frame single-named are the same action with opposite
+ * signs.
+ *
+ * The aliasing itself is architecturally sound — access rights belong
+ * to the translation an access actually uses (Intel SDM Vol 3A §5.6.1)
+ * — and it is already the state of every USER shadow stack here:
+ * cet_process_create seals the cabin's mapping and leaves the Pull Map
+ * alias of the same frames writable. But that is a ring-0 alias of a
+ * ring-3 asset, where ring 0 is trusted anyway; this is a ring-0 asset
+ * whose whole point is to survive a ring-0 bug, so the two are not the
+ * same trade and this one is not settled by precedent.
+ *
+ * It costs nothing today: no core ever loads proc->context.pl0_ssp, so
+ * the processor never treats this page as a shadow stack at all. It
+ * would start costing something the day the frame path gains a
+ * per-process IA32_PL0_SSP swap, and that is the day the question has
+ * to be answered rather than noted. The three answers that exist, so
+ * whoever gets there does not have to find them again:
+ *   (a) leave it as it is — the row, with the writable alias;
+ *   (b) go back to sealing in the Pull Map and pay the demotion per
+ *       spawn, which is what this change removed;
+ *   (c) carve the shadow frames out of a SMALL reserved run of physical
+ *       memory whose Pull Map leaf is demoted once, for good, and seal
+ *       them in place inside it — one name, no writable alias, and a
+ *       demotion bounded like the per-core one. That needs a frame
+ *       source of its own in the PMM, which is why it is not what is
+ *       here.
+ *
+ * The per-core PL0 / IST stacks — the only supervisor shadow stacks the
+ * processor loads today — deliberately do NOT live in the row for the
+ * same reason: sealed in the Pull Map their single mapping is writable
+ * by nobody, and their demotion is paid once per core at bring-up and
+ * never again. Moving them here would trade that away for nothing.
+ */
+/* The row's base, width and end are expressions in vmm.h, not addresses
+ * anyone picked, so overlapping the MMIO window ahead of it is not a
+ * thing a future edit can do. What an expression cannot say is where the
+ * row lands in the page tables, and both of those facts matter: */
+
+/* Same PML4 slot as the rest of the kernel window. vmm_create_context
+ * copies PML4[256..511] BY VALUE (see vmm_create_context), so the PDPT
+ * page a bunk's tables hang off is shared with every context, including
+ * ones created before the first bunk existed. A row in a slot of its own
+ * would be invisible in those. */
+_Static_assert(VMM_PML4_INDEX(VMM_SHADOW_BUNK_BASE) ==
+               VMM_PML4_INDEX(VMM_KERNEL_BASE) &&
+               VMM_PML4_INDEX(VMM_SHADOW_BUNK_END - 1) ==
+               VMM_PML4_INDEX(VMM_KERNEL_BASE),
+               "shadow bunk row must share the kernel window's PML4 slot, "
+               "which vmm_create_context copies into every context");
+
+/* One PDPT slot from end to end, so the row needs a single PD and no
+ * part of it can reach into a 1 GiB slot another window already owns.
+ * Combined with the PML4 assert above this is exact: an equal PDPT index
+ * 512 GiB away is excluded by the PML4 index already being pinned. */
+_Static_assert(VMM_PDPT_INDEX(VMM_SHADOW_BUNK_END - 1) ==
+               VMM_PDPT_INDEX(VMM_SHADOW_BUNK_BASE),
+               "shadow bunk row must not leave the 1 GiB slot it starts in");
+
+uintptr_t vmm_shadow_bunk_va(uint32_t pid)
+{
+    if (pid == 0 || (uintptr_t)pid > VMM_SHADOW_BUNK_COUNT)
+        return 0;
+    return VMM_SHADOW_BUNK_BASE + (((uintptr_t)pid - 1u) * VMM_PAGE_SIZE);
+}
+
+error_t vmm_shadow_bunk_map(uint32_t pid, uintptr_t phys_addr,
+                            uintptr_t *out_va)
+{
+    if (!out_va) return ERR_INVALID_ARGUMENT;
+    *out_va = 0;
+
+    uintptr_t va = vmm_shadow_bunk_va(pid);
+    if (!va)
+    {
+        kprintf("[VMM] shadow bunk refused: pid %u is outside the %lu bunks "
+                "the row is cut to\n",
+                pid, (unsigned long)VMM_SHADOW_BUNK_COUNT);
+        return ERR_INVALID_PID;
+    }
+
+    vmm_context_t *ctx = vmm_get_kernel_context();
+    if (!ctx) return ERR_INVALID_ADDRESS;
+
+    /* An occupied bunk is the one way this row can go wrong, so it is
+     * read out loud rather than left to be inferred from a mapper error
+     * string. It means a pid was handed out again before its previous
+     * owner's bunk came back — the ordering the row rests on (the bunk
+     * is released in cet_process_destroy_kernel_ssp, the pid later in
+     * process_cleanup) has been broken somewhere. Saying so here is what
+     * turns that into a named refusal instead of a page quietly staying
+     * mapped for the rest of the uptime.
+     *
+     * This read is the reporter, not the guard: vmm_map_page re-checks
+     * the same entry under ctx->lock and refuses a conflicting one, so
+     * nothing is decided on a value that could change underneath. */
+    uintptr_t occupant = vmm_virt_to_phys(ctx, va);
+    if (occupant)
+    {
+        kprintf("[VMM] shadow bunk %u at 0x%lx is still occupied by frame "
+                "0x%lx — a pid was reissued before its bunk was given back; "
+                "refusing rather than overwriting\n",
+                pid, (unsigned long)va, (unsigned long)occupant);
+        return ERR_ALREADY_MAPPED;
+    }
+
+    /* Born a shadow stack, not made into one afterwards: the encoding is
+     * in the flags of the page's FIRST mapping here, so no CAS turns a
+     * writable leaf into a sealed one and no core can be holding a
+     * writable translation of this bunk to shoot down. NO_EXECUTE on top
+     * of the encoding — a shadow stack holds return addresses and is
+     * never fetched from; vmm_make_pte drops the bit by itself on a
+     * machine that has not taken NX up. */
+    vmm_map_result_t r = vmm_map_page(ctx, va, phys_addr,
+                                      VMM_FLAGS_SHADOW_STACK_SUPV |
+                                      VMM_FLAG_NO_EXECUTE);
+    if (!r.success)
+    {
+        kprintf("[VMM] shadow bunk for pid %u at 0x%lx refused: %s\n",
+                pid, (unsigned long)va,
+                r.error_msg ? r.error_msg : "map failed");
+        return ERR_MAPPING_FAILED;
+    }
+
+    *out_va = va;
+    return OK;
+}
+
+bool vmm_shadow_bunk_unmap(uintptr_t va_in_bunk)
+{
+    if (va_in_bunk < VMM_SHADOW_BUNK_BASE || va_in_bunk >= VMM_SHADOW_BUNK_END)
+        return false;
+
+    /* The bunk is the page the address is in. Rounding here rather than
+     * at the caller means the one place that knows the row's geometry is
+     * the row, and a caller that holds the stack's top — an address
+     * inside the page, never its base — needs no arithmetic that could
+     * drift from it. */
+    uintptr_t bunk_va = vmm_page_align_down(va_in_bunk);
+
+    vmm_context_t *ctx = vmm_get_kernel_context();
+    if (!ctx)
+        return false;
+
+    /* No unseal step, and that is the point: the encoding lived in this
+     * mapping only. The Pull Map alias the PMM writes through was never
+     * touched, so the frame goes back to the buddy exactly as ordinary
+     * writable memory, and the next pmm_alloc_zero of it cannot fault. */
+    return vmm_unmap_page(ctx, bunk_va);
 }
 
 typedef struct vmalloc_entry
@@ -4072,6 +4296,17 @@ void vmm_init(void)
     debug_printf("[VMM] Kernel MMIO region: %p - %p (on-demand)\n",
                  (void *)VMM_KERNEL_MMIO_BASE,
                  (void *)(VMM_KERNEL_MMIO_BASE + VMM_KERNEL_MMIO_SIZE));
+
+    /* The shadow bunk row is declared here beside the heap and the MMIO
+     * window because that is what makes a kernel VA window exist in this
+     * kernel: a BASE/SIZE pair in vmm.h and a line here saying which
+     * stretch is spoken for. It maps nothing at boot — one bunk appears
+     * when a process is given a supervisor shadow stack and goes when
+     * the process does. */
+    debug_printf("[VMM] Shadow bunk row: %p - %p (%lu bunks, one per pid, "
+                 "on-demand)\n",
+                 (void *)VMM_SHADOW_BUNK_BASE, (void *)VMM_SHADOW_BUNK_END,
+                 (unsigned long)VMM_SHADOW_BUNK_COUNT);
 
     // Save values that will be inaccessible after identity mapping is removed.
     // kernel_context was kmalloc'd at identity address — will be a dangling pointer after switch.

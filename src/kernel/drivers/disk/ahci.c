@@ -13,6 +13,7 @@
 #include "idt.h"
 #include "amp.h"
 #include "hourglass.h"
+#include "boardroom.h"   /* a port that does not come back gives up its seat */
 
 #define AHCI_TIMEOUT_MS CONFIG_AHCI_CMD_TIMEOUT_MS
 
@@ -109,14 +110,28 @@ static int ahci_port_start(ahci_port_t* port) {
     return 0;
 }
 
+static void ahci_port_readmit(ahci_port_t* port);
+
 /* K-Core bottom-half: full port recovery (COMRESET) after a fatal error.
  * Posted to a K-Core via the port's embedded never-drop recovery node
  * (BatonPass) because COMRESET busy-waits for hundreds of ms,
  * far too long for interrupt context. The IRQ path already failed the
- * port's outstanding async slots with ERR_IO before scheduling this. */
+ * port's outstanding async slots with ERR_IO before scheduling this.
+ *
+ * ‼ AND THE SAME NODE CARRIES THE OTHER LONG JOB THIS PORT CAN NEED: being
+ * BUILT AGAIN after it left the machine. One node and one `recovering` claim
+ * for both, deliberately — a port cannot be recovered and re-admitted at the
+ * same time, and giving the second job a node of its own would allow exactly
+ * that ordering. Which of the two this is is not remembered when the baton is
+ * posted but READ HERE, from the port's standing at the moment it runs, so a
+ * port that changed its mind in between gets the job it actually needs. */
 static void ahci_deferred_recover(void* ctx) {
     ahci_port_t* port = (ahci_port_t*)ctx;
-    ahci_port_recover(port);
+    if (__atomic_load_n(&port->standing, __ATOMIC_ACQUIRE) == AHCI_STANDING_LEFT) {
+        ahci_port_readmit(port);
+    } else {
+        ahci_port_recover(port);
+    }
     __atomic_store_n(&port->recovering, 0, __ATOMIC_RELEASE);
 }
 
@@ -280,6 +295,11 @@ void ahci_irq_handler(void) {
  * read's completion comes in at all. Same core, interrupts closed: the
  * exclusion above holds there too.
  *
+ *   TIER 0 — a port that LEFT the machine, asking to come back. Its
+ *     PxSERR.DIAG.X latch says a COMINIT arrived since it was retired, which
+ *     is the same event bring-up reads to decide a port is occupied at all.
+ *     The rebuild is posted to a K-Core; see ahci_port_readmit.
+ *
  *   TIER 1 — lost-edge reconcile. Re-read the completion LEVEL (PxSACT for NCQ,
  *     PxCI otherwise — AHCI 1.3.1 §5.5.3 / §5.3.x). A slot whose level bit has
  *     already cleared completed on the device but its MSI edge was lost or
@@ -306,7 +326,30 @@ void ahci_watchdog_scan(void) {
 
     for (uint8_t i = 0; i < AHCI_MAX_PORTS; i++) {
         ahci_port_t* state = &ahci_ctrl.ports[i];
-        if (!state->active) continue;
+        if (!state->active) {
+            /* ‼ TIER 0 — A PORT THAT LEFT, ASKING TO COME BACK.
+             *
+             * The only port this looks at is one that was IN SERVICE and was
+             * retired (AHCI_STANDING_LEFT); a port that never came up at boot
+             * is not a port waiting for a disk. The question asked of it is
+             * the same event bring-up asks: has a COMINIT arrived? Its
+             * interrupt is disarmed, so nothing will tell us — but
+             * PxSERR.DIAG.X is a LATCH (AHCI 1.3.1 §3.3.12) and was cleared
+             * on the way out, so one glance a tick cannot miss it and no
+             * clock is involved anywhere.
+             *
+             * The work itself is a COMRESET, an IDENTIFY and a mount, so it
+             * goes where every other long job from this scan goes: the port's
+             * own never-drop node, on a K-Core. The same `recovering` claim
+             * keeps one in flight at a time. */
+            if (__atomic_load_n(&state->standing, __ATOMIC_ACQUIRE)
+                    == AHCI_STANDING_LEFT &&
+                (ahci_get_port_regs(i)->serr & AHCI_SERR_DIAG_X) != 0 &&
+                __sync_bool_compare_and_swap(&state->recovering, 0, 1)) {
+                BatonPass(&state->recover_node);   /* never-drop */
+            }
+            continue;
+        }
 
         uint32_t snapshot = __atomic_load_n(&state->issued_mask, __ATOMIC_ACQUIRE);
         if (snapshot == 0) continue;   /* free early-out — the common (idle) case */
@@ -499,53 +542,172 @@ bool ahci_can_submit_port(uint8_t port_num) {
  * The condition is a fact and the whole fact: every legal slot free — which is
  * also the proof that no submitter is sitting between ahci_alloc_slot and its
  * PxCI store — with PxSACT and PxCI agreeing that the HBA has nothing
- * outstanding either. The clock is the last resort and it returns a REFUSAL,
- * never a shrug: a port whose queue never goes quiet is a port where this
- * command must not be issued, and the caller is told so.
+ * outstanding either.
  *
- * Returns the slot the caller then owns, or -1. */
-int ahci_port_take_whole(uint8_t port_num, uint32_t patience_ms) {
+ * ‼ AND THE TWO WAYS OF NOT GETTING IT ARE DIFFERENT FACTS.
+ *
+ * They were one answer — -1 — and everything above turned that into ERR_IO,
+ * so a machine whose disk was perfectly healthy reported a durability failure
+ * because two flushes of the same medium overlapped by a microsecond.
+ *
+ *   THE DOOR IS HELD. Another whole-port command has it right now. That is
+ *   knowable in one look under the port's own lock, it is true or false at
+ *   this instant, and no amount of clock makes it truer — so no clock is
+ *   turned: AHCI_TAKE_HELD goes back immediately and the caller, who still
+ *   holds its bytes, decides whether to come again.
+ *
+ *   THE DEVICE OWES WORK. Slots are out with commands that have not been
+ *   retired. That is the one thing here a clock may judge, because what is
+ *   being waited on is a device answering, and a device that never answers is
+ *   a device that has failed: AHCI_TAKE_SILENT, said out loud.
+ *
+ *   AND A THIRD, WHICH LOOKS LIKE THE FIRST AND IS NOT: THE DOOR IS HELD BY
+ *   A CORE THAT IS NO LONGER RUNNING. "Come back later" is only an answer
+ *   when somebody is left to open the door, and at shutdown nobody is —
+ *   halt_sync_storage() flushes after `cli` and after every AP has been
+ *   stopped, so a door held there would never be given back and a caller
+ *   told to come again would spin out a whole patience window for nothing.
+ *   Who holds it is recorded when it is taken (port->door_holder) and
+ *   amp_core_online() is this kernel's own answer to whether that core still
+ *   runs, so the abandoned door is a FACT too and no clock decides it. Once
+ *   the device also owes nothing — the same condition a first take is
+ *   granted on, PxSACT and PxCI both clear — the door is simply taken over.
+ *   If the device DOES still owe work, that is the second case above and the
+ *   clock judges it as it judges any unanswered command.
+ *
+ * Waiting for the second costs nobody anything — while this spins, every
+ * other flow allocates and completes as usual, and only the flush waits. */
+AhciTake ahci_port_take_whole(uint8_t port_num, uint32_t patience_ms,
+                              uint8_t* slot_out) {
     ahci_port_t* port = ahci_get_port(port_num);
-    if (!port) return -1;
+    if (!port || !slot_out) return AHCI_TAKE_NO_PORT;
 
     volatile ahci_port_regs_t* regs = port->regs;
 
     HourGlass glass;
-    if (!HourGlassTurn(&glass, (uint64_t)patience_ms * 1000ULL)) {
-        kprintf("[AHCI] no time source — there is no clock to wait out port "
-                "%u's queue on, and issuing a non-queued command beside queued "
-                "ones is what AHCI 1.3.1 §1.7 forbids; not issuing it\n",
-                port_num);
-        return -1;
-    }
+    bool      timing = false;
+
+    uint8_t me = amp_get_core_index();
+
+    /* Carried between passes: the previous pass found the door held by a core
+     * that is gone AND the device owing nothing, so this pass may take it
+     * over. Established outside the lock, one MMIO read, and only ever while
+     * a door is actually orphaned — the ordinary spin below reads no register
+     * it did not read before. It cannot go stale in the wrong direction: with
+     * the door shut nobody can allocate a slot, so a port that is quiet under
+     * a held door stays quiet. */
+    bool orphan_and_quiet = false;
 
     for (;;) {
-        bool shut = false;
+        bool    held      = false;
+        bool    orphan    = false;
+        bool    abandoned = false;
+        bool    shut      = false;
+        uint8_t was_held_by = 0;
+
         spin_lock(&port->lock);
-        if (!port->slot_held && port->slot_bitmap == port->slot_mask) {
+        if (port->slot_held) {
+            /* ‼ TWO DOORS THAT LOOK IDENTICAL AND ARE NOT.
+             *
+             * One is held by a core that is running and will give it back.
+             * The other is held by a core this machine has already stopped —
+             * every AP once halt_all_ap_cores() has swept, and any core that
+             * died holding it. Waiting on the second is waiting for an event
+             * that cannot happen, and the shutdown path is exactly where it
+             * is reached: halt_sync_storage() flushes after `cli` and after
+             * the APs are down, so "come back later" there means "never".
+             *
+             * The question is not how long to wait. It is WHO, and
+             * amp_core_online() already answers it. */
+            if (port->door_holder == me ||
+                amp_core_online(&g_amp.cores[port->door_holder])) {
+                held = true;
+            } else if (orphan_and_quiet) {
+                /* The holder is gone and the device owes nothing, so there is
+                 * nothing outstanding for a new command to be issued beside —
+                 * the same fact a first-time take is granted on. The door is
+                 * taken over rather than waited on. */
+                was_held_by       = port->door_holder;
+                port->door_holder = me;
+                port->slot_bitmap = 0;
+                abandoned = true;
+                shut      = true;
+            } else {
+                orphan = true;
+            }
+        } else if (port->slot_bitmap == port->slot_mask) {
             port->slot_held   = true;
+            port->door_holder = me;
             port->slot_bitmap = 0;
             shut = true;
         }
         spin_unlock(&port->lock);
 
+        /* Not a wait and not a failure: somebody else's whole-port command is
+         * running on this port at this moment, and it will end. Said back as
+         * itself, without a syllable on the console — two flushes of the same
+         * medium meeting is ordinary, and a line per meeting is how a log
+         * stops being read. */
+        if (held) return AHCI_TAKE_HELD;
+
+        /* An orphaned door: its holder is not running. Whether it may be
+         * taken over is the same question a first take asks — does the device
+         * owe anything — and that is one register read, taken here rather
+         * than under the port's lock, and acted on by the next pass. If the
+         * device DOES still owe work, nothing is taken and the clock below
+         * judges it as it judges any device that was given a command and has
+         * not answered. */
+        orphan_and_quiet = orphan &&
+                           (regs->sact & port->slot_mask) == 0 &&
+                           (regs->ci   & port->slot_mask) == 0;
+
+        if (abandoned) {
+            kprintf("[AHCI] port %u: its whole-port door was held by core %u, "
+                    "which is no longer running, and the device owes nothing "
+                    "— the door is taken over rather than waited for\n",
+                    port_num, was_held_by);
+        }
+
         if (shut) {
             if ((regs->sact & port->slot_mask) == 0 &&
                 (regs->ci   & port->slot_mask) == 0) {
-                return (int)__builtin_ctz(port->slot_mask);
+                *slot_out = (uint8_t)__builtin_ctz(port->slot_mask);
+                return AHCI_TAKE_GOT;
             }
             /* Every slot was free and the HBA still shows work outstanding:
              * open the door again rather than issue beside it. */
             ahci_port_give_back(port_num);
         }
 
+        /* A port can also LEAVE while this waits — its own recovery, or the
+         * watchdog's on another core, retires it and empties its slot pool.
+         * That looks from here exactly like a port that never goes quiet, and
+         * spinning out the whole of `patience_ms` on a port that is not in
+         * the machine any more is a wait with no possible end. One look, no
+         * clock. */
+        if (!ahci_get_port(port_num)) return AHCI_TAKE_NO_PORT;
+
+        /* From here the port is busy with the DEVICE, and only now is there
+         * anything a clock is entitled to judge. */
+        if (!timing) {
+            if (!HourGlassTurn(&glass, (uint64_t)patience_ms * 1000ULL)) {
+                kprintf("[AHCI] no time source — there is no clock to wait out "
+                        "port %u's outstanding commands on, and issuing a "
+                        "non-queued command beside queued ones is what AHCI "
+                        "1.3.1 §1.7 forbids; not issuing it\n", port_num);
+                return AHCI_TAKE_SILENT;
+            }
+            timing = true;
+        }
+
         if (HourGlassRunOut(&glass)) {
-            kprintf("[AHCI] port %u: %lu us on the %s and it never went quiet "
-                    "(SACT=0x%08x CI=0x%08x) — a non-queued command cannot be "
-                    "issued beside queued ones, so it is not issued\n",
+            kprintf("[AHCI] port %u: %lu us on the %s and the commands it was "
+                    "given never came back (SACT=0x%08x CI=0x%08x) — the "
+                    "device has stopped answering, so nothing more is issued "
+                    "to it\n",
                     port_num, (unsigned long)HourGlassElapsedUs(&glass),
                     HourGlassRulerName(&glass), regs->sact, regs->ci);
-            return -1;
+            return AHCI_TAKE_SILENT;
         }
         cpu_pause();
     }
@@ -734,7 +896,54 @@ static int ahci_port_init(uint8_t port_num) {
     }
 
     ahci_port_t* port = &ahci_ctrl.ports[port_num];
+
+    /*
+     * ‼ A PORT CAN BE BUILT MORE THAN ONCE, AND ITS DMA PAGES OUTLIVE EVERY
+     * BUILD BUT THE FIRST.
+     *
+     * A port that lost its link leaves the machine (ahci_port_retire) and
+     * comes back through this same function when a COMINIT says a device is
+     * there again — which is the only honest way back, because it is the only
+     * path that re-reads IDENTIFY: the disk on the cable after a reseat may
+     * not be the disk that was on it before, and its size, its sector
+     * geometry and its queue depth are all its own.
+     *
+     * What does NOT go round again is the memory. The command list and the
+     * command tables are freed only by a port that never entered service;
+     * once one has, its pages stay its own for the life of the machine. That
+     * is not thrift, it is the absence of a race: a submitter that read the
+     * port an instant before it was retired can still be writing into those
+     * pages, and there is no moment at which this code can prove otherwise.
+     * Thirty-three pages held per port is the price of never handing the PMM
+     * a page somebody is still writing to.
+     */
+    void*     held_clb_virt = port->clb_virt;
+    uintptr_t held_clb_phys = port->clb_phys;
+    void*     held_ctba_virt[AHCI_MAX_SLOTS];
+    uintptr_t held_ctba_phys[AHCI_MAX_SLOTS];
+    memcpy(held_ctba_virt, port->ctba_virt, sizeof(held_ctba_virt));
+    memcpy(held_ctba_phys, port->ctba_phys, sizeof(held_ctba_phys));
+
+    /* True for a port coming BACK, false for one being built the first time.
+     * The only thing it decides is who owns the pages on the failure path. */
+    bool rebuilt = (held_clb_virt != NULL);
+
+    /* And the recovery claim, which is HELD BY THE CALLER while a re-admission
+     * runs: ahci_deferred_recover took it before it got here and gives it back
+     * when it returns. Zeroing it in the middle would let a second deferred
+     * job be posted onto a port that is half built. */
+    uint32_t held_claim = port->recovering;
+
     memset(port, 0, sizeof(ahci_port_t));
+
+    port->recovering = held_claim;
+
+    port->clb_virt = held_clb_virt;
+    port->clb_phys = held_clb_phys;
+    port->fis_virt = held_clb_virt ? (uint8_t*)held_clb_virt + 1024 : NULL;
+    port->fis_phys = held_clb_phys ? held_clb_phys + 1024 : 0;
+    memcpy(port->ctba_virt, held_ctba_virt, sizeof(held_ctba_virt));
+    memcpy(port->ctba_phys, held_ctba_phys, sizeof(held_ctba_phys));
 
     port->port_num = port_num;
     port->regs = ahci_get_port_regs(port_num);
@@ -746,8 +955,6 @@ static int ahci_port_init(uint8_t port_num) {
     port->recover_node.run = ahci_deferred_recover;
     port->recover_node.ctx = port;
 
-    port->status = AHCI_PORT_FAILED;
-
     volatile ahci_port_regs_t* regs = port->regs;
 
     if (ahci_port_stop(port) != 0) {
@@ -758,38 +965,37 @@ static int ahci_port_init(uint8_t port_num) {
 
     // CLB (1KB) + received-FIS (256B) share one DMA32 page; both are DMA
     // targets that must sit below 4GB (PHYS_TAG_DMA32 == [0,1GB)).
-    void* clb_page = pmm_alloc(1, PHYS_TAG_DMA32);
-    if (!clb_page) {
-        kprintf("[AHCI] port %u: no DMA32 page for its command list — "
-                "no disk on it\n", port_num);
-        return -1;
-    }
-
-    uintptr_t clb_phys = (uintptr_t)clb_page;
-    void* clb_virt = vmm_phys_to_virt(clb_phys);
-    memset(clb_virt, 0, 4096);
-
-    port->clb_virt = clb_virt;
-    port->clb_phys = clb_phys;
-    port->fis_virt = (uint8_t*)clb_virt + 1024;
-    port->fis_phys = clb_phys + 1024;
-
-    for (uint8_t slot = 0; slot < AHCI_MAX_SLOTS; slot++) {
-        void* ctba_page = pmm_alloc(1, PHYS_TAG_DMA32);
-        if (!ctba_page) {
-            debug_printf("[AHCI] Port %u: Failed to allocate CTBA for slot %u\n", port_num, slot);
-            for (uint8_t i = 0; i < slot; i++) {
-                pmm_free((void*)port->ctba_phys[i], 1);
-            }
-            pmm_free(clb_page, 1);
+    // Allocated only if this port does not already hold one — see the note on
+    // rebuilt ports above. Wiped either way: a rebuilt port must not inherit
+    // a command header or a received FIS from the disk that used to be here.
+    if (!port->clb_virt) {
+        void* clb_page = pmm_alloc(1, PHYS_TAG_DMA32);
+        if (!clb_page) {
+            kprintf("[AHCI] port %u: no DMA32 page for its command list — "
+                    "no disk on it\n", port_num);
             return -1;
         }
+        port->clb_phys = (uintptr_t)clb_page;
+        port->clb_virt = vmm_phys_to_virt(port->clb_phys);
+        port->fis_virt = (uint8_t*)port->clb_virt + 1024;
+        port->fis_phys = port->clb_phys + 1024;
+    }
+    memset(port->clb_virt, 0, 4096);
 
-        uintptr_t ctba_phys = (uintptr_t)ctba_page;
-        void* ctba_virt = vmm_phys_to_virt(ctba_phys);
-        memset(ctba_virt, 0, 4096);
-        port->ctba_virt[slot] = ctba_virt;
-        port->ctba_phys[slot] = ctba_phys;
+    for (uint8_t slot = 0; slot < AHCI_MAX_SLOTS; slot++) {
+        if (!port->ctba_virt[slot]) {
+            void* ctba_page = pmm_alloc(1, PHYS_TAG_DMA32);
+            if (!ctba_page) {
+                debug_printf("[AHCI] Port %u: Failed to allocate CTBA for slot %u\n", port_num, slot);
+                /* Whatever this port already holds, it goes on holding: the
+                 * pages are not the controller's to be surprised by, and the
+                 * next attempt at this port starts from what is here. */
+                return -1;
+            }
+            port->ctba_phys[slot] = (uintptr_t)ctba_page;
+            port->ctba_virt[slot] = vmm_phys_to_virt(port->ctba_phys[slot]);
+        }
+        memset(port->ctba_virt[slot], 0, 4096);
 
         ahci_cmd_header_t* cmdheader = (ahci_cmd_header_t*)port->clb_virt;
         cmdheader[slot].prdtl = 0;
@@ -803,9 +1009,27 @@ static int ahci_port_init(uint8_t port_num) {
     regs->fb   = (uint32_t)port->fis_phys;
     regs->fbu  = (uint32_t)(port->fis_phys >> 32);
 
-    // Clear stale interrupt/error state before bring-up.
+    /* Clear stale interrupt state before bring-up.
+     *
+     * ‼ PxSERR IS NOT CLEARED HERE, AND THAT IS THE SPEC'S OWN ORDER.
+     * AHCI 1.3.1 §10.1.1 puts "Clear the PxSERR register, by writing '1s' to
+     * each implemented bit location" at step 6 — AFTER step 5, "Wait for a
+     * positive indication that a device is attached to the port". It used to
+     * be done here, at step 3/4, which wiped PxSERR.DIAG.X — the LATCH that
+     * says a COMINIT arrived — microseconds before the one wait that reads
+     * it. On an ordinary CAP.SSS=0 chipset, where the COMRESET was emitted by
+     * ahci_init's GHC.HR long before this line, that left the presence test
+     * with nothing but a live poll of PxSSTS.DET and no latch at all. The
+     * clear now stands where the specification puts it, below.
+     *
+     * Nothing stale survives that: GHC.HR resets every port register field
+     * that is not HwInit and not PxCLB/PxFB (§10.4.3), PxSERR among them, so
+     * a bit standing here was set after the reset this driver performed.
+     *
+     * PxIS may still be cleared now, and is: §3.3.5 makes PxIS.PCS a
+     * reflection of PxSERR.DIAG.X that "is only cleared when PxSERR.DIAG.X is
+     * cleared", so a W1C of the whole of PxIS cannot take the latch with it. */
     regs->is   = 0xFFFFFFFF;
-    regs->serr = 0xFFFFFFFF;
 
     // Enable FIS receive so the device's initial D2H register FIS lands.
     regs->cmd |= AHCI_PCMD_FRE;
@@ -841,8 +1065,9 @@ static int ahci_port_init(uint8_t port_num) {
      * precisely what §10.1.2 requires before PxCMD.ST may be set to '1'. 1h,
      * "device presence detected but Phy communication not established", is the
      * middle of that handshake and never ends this wait, in either direction.
-     * 0h ends it only once it has stood still for AHCI_LINK_QUIET_MS, which is
-     * what separates an empty port from one still negotiating. */
+     * And 0h does not end it by standing still for any length of time: what
+     * separates an empty port from one still negotiating is whether a COMINIT
+     * ever arrived — see AHCI_PRESENCE_WINDOW_MS. */
     {
         uint8_t det = 0;
         HourGlass link;
@@ -855,11 +1080,29 @@ static int ahci_port_init(uint8_t port_num) {
                     "an empty one; not using it\n", port_num);
             goto fail_free;
         }
-        uint8_t  seen    = 0xFF;   /* not a DET value, so the first read reads as a change */
-        uint64_t settled = 0;      /* us on the glass when DET last changed */
-        bool     quiet   = false;  /* DET stood at 0h long enough to call the port empty */
+        /* THE ARRIVAL, AND THE TWO PLACES IT SHOWS.
+         *
+         * PxSSTS.DET leaving 0h is the event live — AHCI 1.3.1 §7.3, "When a
+         * COMINIT is received, the PxSSTS.DET field shall be set to 1h" — and
+         * PxSERR.DIAG.X is the same event LATCHED (§3.3.12), which matters
+         * because DET is a state and states come back: an HBA that answers a
+         * COMINIT with another COMRESET puts DET back to 0h, and a reader
+         * watching DET alone would see nothing but zeroes on a port with a
+         * disk on it.
+         *
+         * The latch is intact when this is reached. PxSERR is cleared at the
+         * step the specification puts it at — §10.1.1 step 6, BELOW this
+         * wait — and everything before it was wiped by ahci_init's GHC.HR
+         * (§10.4.3). So DIAG.X standing here means: a COMINIT arrived on this
+         * port since this driver reset the controller.
+         *
+         * The window is not this driver's: AHCI_PRESENCE_WINDOW_MS carries
+         * the clause AHCI §10.1.1 step 5 defers to, quoted. */
+        bool answered = false;
+        bool empty    = false;
         for (;;) {
-            det = (uint8_t)((regs->ssts >> AHCI_SSTS_DET_SHIFT) & AHCI_SSTS_DET_MASK);
+            uint32_t ssts = regs->ssts;
+            det = (uint8_t)((ssts >> AHCI_SSTS_DET_SHIFT) & AHCI_SSTS_DET_MASK);
             if (det == AHCI_SSTS_DET_PRESENT) break;
             /* 4h is not a stage of the handshake and waiting does not move it:
              * §3.3.10, "Phy in offline mode as a result of the interface being
@@ -870,27 +1113,37 @@ static int ahci_port_init(uint8_t port_num) {
              * console: the port would time out and be reported as a device
              * that answered and never came up, when nothing answered at all. */
             if (det == AHCI_SSTS_DET_OFFLINE) break;
-            bool out = HourGlassRunOut(&link);
-            uint64_t now = HourGlassElapsedUs(&link);
-            if (det != seen) {
-                seen    = det;
-                settled = now;
+
+            if (!answered &&
+                (det != AHCI_SSTS_DET_NONE ||
+                 (regs->serr & AHCI_SERR_DIAG_X) != 0)) {
+                /* A COMINIT reached this port. From here on the presence
+                 * window has nothing left to say: whatever DET does next,
+                 * this port has a device on it and gets the whole link
+                 * window to finish negotiating. */
+                answered = true;
             }
-            if (det == AHCI_SSTS_DET_NONE &&
-                now - settled >= (uint64_t)AHCI_LINK_QUIET_MS * 1000ULL) {
-                quiet = true;
+
+            bool out = HourGlassRunOut(&link);
+            if (!answered &&
+                HourGlassElapsedUs(&link)
+                    >= (uint64_t)AHCI_PRESENCE_WINDOW_MS * 1000ULL) {
+                empty = true;
                 break;
             }
             if (out) break;
             cpu_pause();
         }
         if (det != AHCI_SSTS_DET_PRESENT) {
-            if (quiet) {
+            if (empty) {
                 /* Nothing is attached to this port. Not a refusal — no disk
                  * was taken away from anyone — so it belongs with the rest of
                  * the port enumeration rather than on the operator's console. */
-                debug_printf("[AHCI] port %u: nothing on the link — DET held 0h "
-                             "for %u ms\n", port_num, AHCI_LINK_QUIET_MS);
+                debug_printf("[AHCI] port %u: nothing on the link — no COMINIT "
+                             "in the %u ms Serial ATA 2.6 §15.2.2.2 allows one "
+                             "(SSTS=0x%08x SERR=0x%08x)\n",
+                             port_num, AHCI_PRESENCE_WINDOW_MS,
+                             regs->ssts, regs->serr);
             } else if (det == AHCI_SSTS_DET_OFFLINE) {
                 /* Said out loud, and said correctly: a port whose Phy firmware
                  * switched off looks exactly like a dead port to whoever
@@ -920,7 +1173,10 @@ static int ahci_port_init(uint8_t port_num) {
         }
     }
 
-    // Clear link errors raised while establishing communication.
+    /* AHCI 1.3.1 §10.1.1 step 6, in its place: "Clear the PxSERR register, by
+     * writing '1s' to each implemented bit location." The link is up, so the
+     * errors it raised on the way — and the presence latch this wait has now
+     * finished reading — are spent. */
     regs->serr = 0xFFFFFFFF;
 
     /* Wait for the device to leave BSY/DRQ — AHCI 1.3.1 §10.1.1 step 7, for
@@ -1071,7 +1327,6 @@ static int ahci_port_init(uint8_t port_num) {
     port->slot_mask   = port->ncq ? usable : 0x1u;
     port->slot_bitmap = port->slot_mask;
 
-    port->status = AHCI_PORT_ACTIVE;
     port->active = 1;
 
     debug_printf("[AHCI] Port %u: ATA disk, %llu sectors, sec=%uB, LBA%s, NCQ=%s (sig=0x%08x)\n",
@@ -1107,12 +1362,24 @@ fail_free:
      *
      * And if the port will not stop, the pages are not returned at all. A page
      * the controller may still write to is not a page this kernel owns; the
-     * cheap half of that trade is holding AHCI_MAX_SLOTS+1 of them. */
+     * cheap half of that trade is holding AHCI_MAX_SLOTS+1 of them.
+     *
+     * ‼ NOR ARE THEY RETURNED BY A PORT THAT IS BEING BUILT AGAIN. Only a
+     * port that never entered service gives its memory back here: a port that
+     * once was in service may still be named by a submitter that read it an
+     * instant before it was retired, and the pages it is writing into must
+     * not be handed to anybody else. See the note at the head of this
+     * function. The engine is still stopped either way — that is what keeps
+     * the controller out of them. */
     if (ahci_port_stop(port) != 0) {
         kprintf("[AHCI] port %u: will not stop receiving FIS (CMD=0x%08x), so "
                 "its command list and FIS page stay with the controller — "
                 "%u pages held, not freed\n",
                 port_num, regs->cmd, (unsigned)(AHCI_MAX_SLOTS + 1));
+        return -1;
+    }
+
+    if (rebuilt) {
         return -1;
     }
 
@@ -1129,7 +1396,9 @@ fail_free:
             port->ctba_virt[i] = NULL;
         }
     }
-    pmm_free(clb_page, 1);
+    if (port->clb_phys) {
+        pmm_free((void*)port->clb_phys, 1);
+    }
     port->clb_virt = NULL;
     port->clb_phys = 0;
     port->fis_virt = NULL;
@@ -1294,6 +1563,213 @@ error_t ahci_port_comreset(ahci_port_t* port) {
     return ERR_TIMEOUT;
 }
 
+/*
+ * ‼ A PORT THAT DID NOT COME BACK STOPS PRETENDING TO BE ONE.
+ *
+ * What used to happen here was `port->status = AHCI_PORT_ERROR` — a field
+ * with four writes in this file and NOT ONE READ anywhere in the tree. So a
+ * port whose link was gone for good stayed `active`, ahci_get_port went on
+ * handing it out, the Boardroom went on offering its seat, and the filesystem
+ * on it went on issuing commands that could only fail: every read a full
+ * patience window long, every write the same, for the rest of the boot.
+ *
+ * A medium leaving is not a new idea in this kernel and does not need a new
+ * mechanism. A USB stick that is pulled out calls BoardroomNoteDeparture, the
+ * room empties its chair and says "seat N is empty" on Touch, and TagFS is
+ * already listening for exactly that — so a port that has died goes out the
+ * same door, and everything that already knows how to lose a medium loses
+ * this one too, unchanged.
+ *
+ * The order matters and is the order below:
+ *
+ *   1. The retirement is CLAIMED under the port's own lock, by clearing
+ *      `active` and reading what it was. Two cores can reach here for the
+ *      same port at the same instant — this one's recovery and the
+ *      watchdog's — and only the core that found it in service goes on, so
+ *      the room is told exactly once and the count below moves exactly once.
+ *      From that store onwards every ahci_* entry point, all of which go
+ *      through ahci_get_port, answers as it does for a port that was never
+ *      there.
+ *   2. Every slot still in flight is then FAILED, through the same
+ *      claim-checked retire the IRQ path uses, so a waiter parked on a
+ *      callback is woken with ERR_IO rather than left waiting on a port that
+ *      no longer exists. ahci_claim makes that exactly-once even against the
+ *      MSI handler retiring the same slots on the BSP. The ahci_free_slot
+ *      inside it is a no-op by now, which costs nothing: the pool was emptied
+ *      in step 1 and nothing may draw from it again.
+ *   3. ‼ THE PORT'S INTERRUPT IS DISARMED, AND NOTHING ELSE IN THIS KERNEL
+ *      WOULD EVER HAVE DONE IT AGAIN. Both readers of PxIS — ahci_irq_handler
+ *      and ahci_watchdog_scan — skip a port that is not `active`, and the
+ *      handler's last act is `GHC.IS = is`. A port that dies with PxIS.TFES
+ *      standing and PxIE.TFES enabled therefore re-raises its bit in GHC.IS
+ *      the instant it is cleared, for ever: AHCI 1.3.1 §10.7.2.1, "If
+ *      software clears IS register only, leaving the level of the virtual
+ *      wire from the PxIS register set, the resulting level of '1' shall
+ *      cause the IS register bit to be re-set", and "any change to the IS
+ *      register that doesn't result in the register being all cleared shall
+ *      cause an MSI to be sent". That is an interrupt storm on MSI and a
+ *      permanently asserted line on INTx — and it is reachable, because
+ *      ahci_port_comreset only W1Cs PxIS on the path where it SUCCEEDED, and
+ *      the only way here is the path where it did not. PxIE first, then PxIS,
+ *      then this port's bit in GHC.IS: the level is taken down before the
+ *      latch, so nothing can re-raise it behind us.
+ *   4. The engine is stopped, which is both the end of the port's DMA and the
+ *      one thing that makes a later rebuild possible (ahci_port_init begins
+ *      by stopping it too). The command list and FIS pages are NOT given
+ *      back; see the note at the head of ahci_port_init for why a port that
+ *      has been in service keeps them for good.
+ *   5. The room is told LAST, and outside the port lock: BoardroomNoteDeparture
+ *      takes a lock of its own and publishes a Touch event. Nothing of this
+ *      port is passed to it — only the kind and the index — so there is
+ *      nothing for anybody downstream to dereference. It is said HERE rather
+ *      than deferred to a K-Core on purpose: the Boardroom's own contract
+ *      says a departure must not be deferred, because a seat holds a
+ *      controller index and a deferred announcement can name a chair that
+ *      has since been taken by something else. What makes saying it from a
+ *      driver's own I/O path safe is the listener: seat:emptied reaches
+ *      TagFSNoteMediumGone, which reads seat state, forgets the read-ahead
+ *      and prints one line — no disk I/O and no TagFS lock. The half that
+ *      DOES mount and read sectors hangs off seat:taken, and that one is
+ *      already two-step by design (BoardroomNoteArrival raises a flag; the
+ *      guide loop does the work). Anyone making that listener heavier is
+ *      changing this, and should read this paragraph first.
+ *
+ * The port structure itself is never freed — it is a member of
+ * ahci_ctrl.ports[] — so a pointer anybody still holds stays a pointer to
+ * memory, and every function that takes one re-asks ahci_get_port.
+ */
+static void ahci_port_retire(ahci_port_t* port) {
+    uint8_t idx = port->port_num;
+
+    spin_lock(&port->lock);
+    bool mine = port->active != 0;
+    port->active      = 0;
+    port->slot_bitmap = 0;
+    port->slot_held   = false;
+    spin_unlock(&port->lock);
+
+    if (!mine) return;
+
+    uint32_t stuck = __atomic_load_n(&port->issued_mask, __ATOMIC_ACQUIRE);
+    if (stuck) {
+        uint32_t won = ahci_claim(port, stuck);
+        if (won) ahci_retire_slots(port, idx, won, ERR_IO);
+    }
+
+    /* Step 3 — the virtual wire is taken down before the latch it comes from,
+     * and then this port's bit in GHC.IS (AHCI 1.3.1 §10.7.2.1, quoted
+     * above). Nobody clears PxIS for an inactive port, so leaving either of
+     * these standing is a bit that re-raises itself for the rest of the
+     * boot. */
+    volatile ahci_port_regs_t* regs = port->regs;
+    regs->ie = 0;
+    mfence();
+    regs->is = 0xFFFFFFFF;
+    ahci_ctrl.hba_mem->is = (1U << idx);
+
+    /* And PxSERR with them, which is not tidiness: it ARMS THE WAY BACK. The
+     * disconnect this port just died of has left PxSERR.DIAG.X standing, and
+     * that latch is exactly what the watchdog reads to decide a device has
+     * arrived. Left as it is, the very next tick would read the departure as
+     * an arrival and spend a K-Core on a bring-up of a port with no cable in
+     * it. Cleared, the next X on this register is a COMINIT that genuinely
+     * happened after the port left. */
+    regs->serr = 0xFFFFFFFF;
+
+    /* Step 4 — the engine down, the pages kept. A port whose engine will not
+     * stop is said out loud and left alone: ahci_port_init begins with the
+     * same walk, so a rebuild of it refuses itself rather than issuing into
+     * a controller that never let go. */
+    if (ahci_port_stop(port) != 0) {
+        kprintf("[AHCI] port %u: it is leaving with its command engine still "
+                "running (CMD=0x%08x) — its pages stay with the controller\n",
+                idx, regs->cmd);
+    }
+
+    /* One down, without a lock of its own: ahci_init_ports counts up on the
+     * BSP before any of this can run, and from then on this is the only
+     * writer — but there can be two of it at once, on two dying ports. */
+    uint8_t seen = __atomic_load_n(&ahci_ctrl.num_active_ports, __ATOMIC_RELAXED);
+    while (seen > 0 &&
+           !__atomic_compare_exchange_n(&ahci_ctrl.num_active_ports, &seen,
+                                        (uint8_t)(seen - 1), true,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+        /* seen was refreshed by the exchange; try again. */
+    }
+
+    BoardroomNoteDeparture(BOARD_AHCI, idx);
+
+    /* LAST of all, and that order is the whole of it: this store is what
+     * makes the port eligible to come back, and a port may not be seated
+     * again before the room has heard that it left. Set any earlier, a
+     * COMINIT landing in the microsecond between could have the watchdog
+     * post a re-admission that announces an ARRIVAL into a room still
+     * holding this port's old chair. */
+    __atomic_store_n(&port->standing, (uint8_t)AHCI_STANDING_LEFT,
+                     __ATOMIC_RELEASE);
+}
+
+/*
+ * ‼ AND THE WAY BACK, WHICH IS THE SAME ROAD IN THE OTHER DIRECTION.
+ *
+ * A port leaving is only half a mechanism. A USB stick has both halves — it
+ * goes out through BoardroomNoteDeparture and comes back through
+ * BoardroomNoteArrival — and a SATA port with only the first half turns every
+ * link glitch that outlasts AHCI_MAX_COMRESET_ATTEMPTS into a disk this
+ * machine has lost until somebody power-cycles it. A yanked cable pushed back
+ * in, a drive that browned out, a backplane reseated: all of those used to
+ * come back, because the old code left the port in service and the next
+ * command's recovery found the link again.
+ *
+ * WHAT SAYS IT CAME BACK IS THE SAME EVENT THAT SAID IT WAS THERE AT BOOT: a
+ * COMINIT, read off the latch PxSERR.DIAG.X (AHCI 1.3.1 §3.3.12, "shall
+ * always be set to one anytime a COMINIT signal is received"). The latch is
+ * why nothing has to be armed or watched for: the port's interrupt was
+ * disarmed when it left, and a bit that stays set until software clears it
+ * cannot be missed by a glance once a tick.
+ *
+ * And the way back is ahci_port_init itself, not a shortcut through it. The
+ * drive on that cable after a reseat may not be the drive that was on it
+ * before, so its IDENTIFY — size, sector geometry, queue depth — has to be
+ * asked again from the beginning. An attempt that fails costs nothing and
+ * leaves the port where it was: the next COMINIT brings it back here.
+ */
+static void ahci_port_readmit(ahci_port_t* port) {
+    uint8_t idx = port->port_num;
+
+    kprintf("[AHCI] port %u: a COMINIT arrived on a port that had left the "
+            "machine — trying to bring it back\n", idx);
+
+    /* The latch is spent the moment it is acted on. Left standing it would
+     * summon this again on the next tick, whatever the outcome below. */
+    port->regs->serr = 0xFFFFFFFF;
+
+    if (ahci_port_init(idx) != 0) {
+        /* ahci_port_init zeroed the struct, so the port's standing has to be
+         * said again — otherwise the scan that found this COMINIT would never
+         * look at this port a second time. */
+        __atomic_store_n(&port->standing, (uint8_t)AHCI_STANDING_LEFT,
+                         __ATOMIC_RELEASE);
+        kprintf("[AHCI] port %u: it did not come back up; it stays out of the "
+                "machine until the link says something again\n", idx);
+        return;
+    }
+
+    __atomic_fetch_add(&ahci_ctrl.num_active_ports, 1, __ATOMIC_RELAXED);
+
+    /* Its interrupt is armed again — ahci_port_enable_irq goes through
+     * ahci_get_port, so this could not have been done before `active`. */
+    ahci_port_enable_irq(idx);
+
+    kprintf("[AHCI] port %u: back in the machine, %llu sectors — the room is "
+            "told so its seat can be taken again\n",
+            idx, (unsigned long long)port->total_sectors);
+
+    /* The room, the same way a USB stick announces itself: a flag here, the
+     * seating itself in the guide loop where reading sectors is allowed. */
+    BoardroomNoteArrival();
+}
+
 error_t ahci_port_recover(ahci_port_t* port) {
     if (!port || !port->regs) {
         return ERR_NULL_POINTER;
@@ -1308,7 +1784,6 @@ error_t ahci_port_recover(ahci_port_t* port) {
         if (result == OK) {
             debug_printf("[AHCI] Port %u: Recovery successful (attempt %d/%d)\n",
                          port->port_num, attempt + 1, AHCI_MAX_COMRESET_ATTEMPTS);
-            port->status = AHCI_PORT_ACTIVE;
             return OK;
         }
 
@@ -1322,10 +1797,10 @@ error_t ahci_port_recover(ahci_port_t* port) {
      * build — so on real hardware the operator saw commands fail one by one
      * with no reason ever named. */
     kprintf("[AHCI] port %u: its link did not come back after %d COMRESETs — "
-            "the port stays in service and its commands will keep failing "
-            "until a later recovery gets the link back\n",
+            "it is leaving the machine; nothing more will be read from it or "
+            "written to it until the link says a device is there again\n",
             port->port_num, AHCI_MAX_COMRESET_ATTEMPTS);
-    port->status = AHCI_PORT_ERROR;
+    ahci_port_retire(port);
     return ERR_IO;
 }
 

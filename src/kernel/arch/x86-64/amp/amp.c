@@ -321,10 +321,19 @@ void amp_boot_aps(void)
             continue;
 
         /* A destination this APIC mode cannot name. The xAPIC ICR carries
-         * eight bits of physical destination, so an ID with any bit above
-         * bit 7 is not merely hard to reach: the only eight-bit thing that
-         * could be sent is id & 0xFF — a DIFFERENT core, already running
-         * kernel code, which would be INIT-reset out from under itself.
+         * eight bits of physical destination, and those eight bits name
+         * 00H through FEH — Intel SDM Vol 3A, section "Physical Destination
+         * Mode", keeps FFH for "a broadcast to all APICs" (cited by title;
+         * the quote, the editions it was read from and why the section
+         * number is not written here are all at LAPIC_XAPIC_DEST_MAX in
+         * lapic.h). So there are
+         * two ways to be unreachable here and both end in an INIT that hits
+         * the wrong processor. An ID above 0xFF loses its high bits and the
+         * INIT resets a DIFFERENT core, already running kernel code. An ID
+         * of exactly 0xFF keeps every bit and is worse: it is the
+         * broadcast, and the INIT resets every processor on the machine,
+         * including this one, mid-bring-up.
+         *
          * Widening the descriptor's ID to 32 bits carried the truth down to
          * the ICR; one layer further the field really is eight bits wide,
          * and the only cure there is not to send. lapic_icr_write refuses
@@ -333,11 +342,21 @@ void amp_boot_aps(void)
          * left unstarted, which the ICR, seeing only an ID, cannot. Such an
          * ID can only be addressed in x2APIC mode, where the ICR
          * destination is the full 32 bits. */
-        if (!lapic_is_x2apic_active() && c->lapic_id > 0xFFu) {
-            kprintf("[AMP] %[E]Core %u: APIC ID %u does not fit the 8-bit "
-                    "xAPIC ICR destination — not started, because sending "
-                    "would INIT-reset the core with ID %u instead%[D]\n",
-                    c->core_index, c->lapic_id, c->lapic_id & 0xFFu);
+        if (!lapic_is_x2apic_active() &&
+            c->lapic_id > LAPIC_XAPIC_DEST_MAX) {
+            if (c->lapic_id == LAPIC_XAPIC_DEST_BROADCAST) {
+                kprintf("[AMP] %[E]Core %u: APIC ID 255 is the broadcast "
+                        "destination of the 8-bit xAPIC ICR, not a core — "
+                        "not started, because the INIT would reset EVERY "
+                        "processor including this one%[D]\n",
+                        c->core_index);
+            } else {
+                kprintf("[AMP] %[E]Core %u: APIC ID %u does not fit the "
+                        "8-bit xAPIC ICR destination — not started, because "
+                        "sending would INIT-reset the core with ID %u "
+                        "instead%[D]\n",
+                        c->core_index, c->lapic_id, c->lapic_id & 0xFFu);
+            }
             continue;
         }
 

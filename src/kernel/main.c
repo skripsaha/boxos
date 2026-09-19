@@ -28,7 +28,6 @@
 #include "scheduler.h"
 #include "keyboard.h"
 #include "ata.h"
-#include "async_io.h"
 #include "pci.h"
 #include "storage_deck.h"
 #include "kernel_config.h"
@@ -413,8 +412,12 @@ void kernel_main(void)
         acpi_apei_consume();
         /* Log NUMA topology now that both PMM and ACPI/SRAT are ready. */
         pmm_log_numa_topology();
-        /* IOMMU skeleton — picks backend, runs init stub, does not
-         * enable translation yet. */
+        /* IOMMU — picks backend, brings the units up, does not enable
+         * translation. It says nothing on Touch here and reads nothing out
+         * of the units here: TouchInit is inside guide_init, still hundreds
+         * of lines away, and a publish made now would be dropped at
+         * resolve_tag_pair exactly as the Secure Boot note above describes.
+         * Both happen in iommu_publish_touch, after guide_init. */
         iommu_init();
         IommuPresenceTest();  /* after init, which is the only time it means anything */
         iommu_audit_dump();   /* Phase 2G — log MemTag/Touch surface */
@@ -692,6 +695,21 @@ void kernel_main(void)
         if (efi_secureboot_available()) efi_secureboot_publish_touch();
     }
 
+    /* The IOMMU is in the same position and for the same reason, with one
+     * difference: it is not only a replay. iommu_init above chose the
+     * backend and brought the units up but said nothing and read nothing,
+     * because a publish before TouchInit reaches no subscriber. This is
+     * where `iommu:ready` names the backend and where every unit's fault
+     * channel is read, said and cleared -- what firmware left standing in
+     * it, and on VT-d a gag on everything the unit would otherwise report
+     * later (§11.4.7.1 PFO, §7.3). It runs once: the handover from firmware
+     * is the fact it answers to, translation is still off, and nothing can
+     * put a new record in that channel for a periodic look to find.
+     *
+     * Harmless on a machine with no DMAR and no IVRS, and it cannot refuse
+     * a boot. */
+    iommu_publish_touch();
+
     debug_printf("[INIT] OpRegistry...\n");
     error_t op_reg_err = OpRegistryInit();
     if (op_reg_err != OK)
@@ -826,9 +844,6 @@ void kernel_main(void)
 
     debug_printf("[INIT] ATA Driver...\n");
     ata_init();
-
-    debug_printf("[INIT] Async I/O Queue...\n");
-    async_io_init();
 
     /* USB before storage, because a machine that boots from a flash drive has
      * its filesystem on the USB bus and cannot be asked to find it before the

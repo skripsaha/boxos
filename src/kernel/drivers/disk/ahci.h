@@ -156,6 +156,20 @@
 #define AHCI_PIS_PSS        (1U << 1)
 #define AHCI_PIS_DHRS       (1U << 0)
 
+/* PxSERR bits (offset 30h) — AHCI 1.3.1 §3.3.12. Only the one bit that
+ * ANSWERS A QUESTION is named; the rest are decoded positionally by
+ * ahci_decode_serr, which is a printer and not a decision.
+ *
+ * §3.3.12, DIAG bit 26, verbatim: "Exchanged (X): When set to one this bit
+ * indicates that a change in device presence has been detected since the last
+ * time this bit was cleared... This bit shall always be set to one anytime a
+ * COMINIT signal is received. This bit is reflected in the PxIS.PCS bit."
+ *
+ * That last sentence is why AHCI_PIS_PCS is not read anywhere below: PCS is
+ * this bit seen through another register, so asking both would be asking the
+ * same question twice. */
+#define AHCI_SERR_DIAG_X    (1U << 26)
+
 // PxSSTS bits
 #define AHCI_SSTS_IPM_SHIFT 8
 #define AHCI_SSTS_IPM_MASK  0xF
@@ -364,30 +378,71 @@ typedef struct {
 #define AHCI_COMRESET_HOLD_US        1000u
 #define AHCI_COMRESET_LINK_MS        1000u
 
-/* And a third quantity, which is neither of those two: how long PxSSTS.DET
- * must read 0h WITHOUT CHANGING before a port is called empty.
+/* And a third question, which is neither of those two: is there anything on
+ * this port at all?
  *
- * AHCI 1.3.1 §7.3 gives the link its whole vocabulary: "When a COMRESET is
- * sent to the device the PxSSTS.DET field shall be cleared to 0h. When a
- * COMINIT is received, the PxSSTS.DET field shall be set to 1h. When the
- * communication negotiation sequence is complete and PhyRdy is true the
- * PxSSTS.DET field shall be set to 3h." So 0h says two different things —
- * "nothing is attached to this port" and "a COMRESET went out just now and
- * the device's COMINIT has not come back yet" — and only elapsed time tells
- * them apart. One read cannot; that is the whole defect this constant exists
- * to close.
+ * PxSSTS.DET reading 0h says two different things — "nothing is attached to
+ * this port" and "a COMRESET went out just now and the device's COMINIT has
+ * not come back yet" — and what used to tell them apart was a hundred
+ * milliseconds of DET standing still. That interval was the reference
+ * implementation's (Linux libata debounces SStatus with
+ * sata_deb_timing_normal = { 5, 100, 2000 }), and a number another kernel
+ * happens to use is not a fact about this port.
  *
- * The spec names no interval: §10.1.1 step 5 defers the presence-indication
- * maximum to Serial ATA Revision 2.6. So this is a DECLARED POLICY, and the
- * number is the reference implementation's own — Linux libata debounces
- * SStatus with sata_deb_timing_normal = { 5, 100, 2000 } (interval, duration,
- * timeout in ms) and calls the link settled once DET has held one value for
- * the 100 ms duration.
+ * THE FACT IS AN EVENT, AND BOTH SPECIFICATIONS NAME IT. AHCI 1.3.1 §7.3:
+ * "When a COMRESET is sent to the device the PxSSTS.DET field shall be
+ * cleared to 0h. When a COMINIT is received, the PxSSTS.DET field shall be
+ * set to 1h." §3.3.10, note 1: "device presence shall always be indicated
+ * anytime a COMINIT signal is received." And the event LATCHES, so it cannot
+ * fall between two reads: §3.3.12 has PxSERR.DIAG.X "always set to one
+ * anytime a COMINIT signal is received", and only software clears it. So
+ * presence is "a COMINIT arrived" — DET off 0h, or DIAG.X standing — and it
+ * is known the instant it happens.
  *
- * It can only END a wait early, and only on 0h. A port reading 1h — device
- * detected, Phy not up yet — is mid-handshake and is never cut short by it:
- * that port gets the whole of AHCI_COMRESET_LINK_MS to reach 3h. */
-#define AHCI_LINK_QUIET_MS           100u
+ * ABSENCE IS THE ABSENCE OF THAT EVENT, and only the absence needs a bound,
+ * because nothing on an empty wire will ever answer. AHCI 1.3.1 §10.1.1 step
+ * 5 says so and hands the bound on: "Wait for a positive indication that a
+ * device is attached to the port (the maximum amount of time to wait for
+ * presence indication is specified in the Serial ATA Revision 2.6
+ * specification). This is done by polling PxSSTS.DET."
+ *
+ * Serial ATA Revision 2.6 (15-February-2007) — THE EDITION THAT SENTENCE
+ * NAMES, not an earlier one that happens to say something similar —
+ * §15.2.2.2 "OOB signaling sequence failure", verbatim: "The Phy does not
+ * have any timeout conditions for the interface OOB reset signaling sequence
+ * as defined in section 8.1. If a device is present, the Phy shall detect
+ * device presence within 10 ms of a power-on reset (i.e. COMINIT shall be
+ * returned within 10 ms of an issued COMRESET). If a device is not present,
+ * the Phy is not required to time-out and may remain in the reset state
+ * indefinitely until host software intervenes."
+ *
+ * The device side of the same requirement is stated again in the Phy state
+ * machine, rev 2.6 DP2:DR_COMINIT note 2: "As indicated in section 13.1,
+ * devices shall respond with a COMINIT signal within 10 ms of the negation of
+ * power-on reset or de-qualification of a received COMRESET signal." Note 1
+ * of the same state — "COMINIT transmitted for a 6 bursts duration" — and
+ * DP3:DR_AwaitCOMWAKE after it are why the event has to be read from a LATCH
+ * and not polled for: the device sends COMINIT once and then waits.
+ *
+ * Ten milliseconds, quoted, from the specification AHCI sends the reader to —
+ * and the last sentence of that clause is also the reason software has to
+ * hold the clock at all: on an empty wire no fact will ever arrive.
+ *
+ * ‼ AND THE CLAUSE BOUNDS "10 ms FROM AN ISSUED COMRESET", WHICH IS NOT WHERE
+ * THIS WINDOW STARTS — it starts later, when the bring-up loop is reached,
+ * and later is the SAFE direction. Presence, once indicated, does not expire:
+ * PxSSTS.DET stays at 1h/3h until the next COMRESET (§7.3) and PxSERR.DIAG.X
+ * stays set until software clears it (§3.3.12). So a device whose COMINIT
+ * landed before this window opened is already standing in both places on the
+ * first read; the window only has to cover the case where the COMRESET is
+ * concurrent with it, which is the staggered-spin-up path where our own
+ * PxCMD.SUD write is what emits it (§10.10.1).
+ *
+ * A port that raised no COMINIT inside that window is empty as a matter of
+ * specification; a port that DID raise one is never judged by this window
+ * again, and gets the whole of AHCI_COMRESET_LINK_MS to finish negotiating,
+ * however long DET sits at 0h or 1h on the way. */
+#define AHCI_PRESENCE_WINDOW_MS      10u
 
 /* How long a device gets to drop BSY and DRQ during port bring-up.
  *
@@ -424,6 +479,25 @@ typedef struct {
     uint64_t tsc;
     const char* description;
 } ahci_error_detail_t;
+
+/* WHERE A PORT STANDS WITH RESPECT TO THE MACHINE.
+ *
+ * A port that stopped answering used to be marked AHCI_PORT_ERROR in a field
+ * nothing read, so it stayed in service and went on being handed out. It now
+ * LEAVES — it gives up its Boardroom seat the same way a USB stick that is
+ * pulled out does — and this says whether that leaving is final.
+ *
+ * And leaving is not final. A pulled cable, a drive that browned out, a
+ * backplane reseated: the link says so with a COMINIT, exactly the event
+ * bring-up reads to decide a port is occupied at all, and the port is built
+ * again and takes its seat back — BoardroomNoteArrival, the same road a USB
+ * stick returns by. So this is read by the watchdog's return scan, not merely
+ * written: it is what tells a port that LEFT from a port that was never
+ * there, and only the first of those may come back. */
+typedef enum {
+    AHCI_STANDING_IN_SERVICE = 0,  /* the ordinary state; `active` agrees */
+    AHCI_STANDING_LEFT             /* gone, and a COMINIT may bring it back */
+} AhciPortStanding;
 
 typedef struct {
     ahci_port_regs_t* regs;
@@ -513,12 +587,24 @@ typedef struct {
     spinlock_t lock;
     ahci_port_stats_t stats;
     uint8_t port_num;
-    enum {
-        AHCI_PORT_EMPTY = 0,
-        AHCI_PORT_ACTIVE = 1,
-        AHCI_PORT_FAILED = 2,
-        AHCI_PORT_ERROR = 3
-    } status;
+
+    /* WHO IS HOLDING THE WHOLE-PORT DOOR, while slot_held is true.
+     *
+     * Not bookkeeping: it is the only thing that tells a door which will be
+     * given back from a door which will not. A core that is stopped while it
+     * holds this port — every AP at shutdown, once halt_all_ap_cores has run
+     * — can never reach ahci_port_give_back, and a waiter that does not ask
+     * WHO is waiting on an event that cannot happen. amp_core_online() is
+     * this kernel's own answer to "is that core still running", and
+     * ahci_port_take_whole asks it rather than counting seconds. */
+    uint8_t door_holder;
+
+    /* WHETHER THIS PORT IS STILL IN THE MACHINE, and if it left, whether it
+     * can come back. Written by ahci_port_retire / ahci_port_init, read by
+     * the watchdog's return scan and by ahci_deferred_recover — a value with
+     * readers, unlike the `status` field this replaces, which had four writes
+     * and no reader anywhere in the tree. */
+    volatile uint8_t standing;   /* AhciPortStanding */
 
     /* Never-drop recovery node (Ф26 M4): a fatal-error or watchdog-wedge
      * IRQ posts COMRESET to a K-Core via BatonPass with no
@@ -569,6 +655,21 @@ int ahci_alloc_slot(uint8_t port_num);
 void ahci_free_slot(uint8_t port_num, uint8_t slot);
 bool ahci_can_submit_port(uint8_t port_num);
 
+/* WHY A WHOLE-PORT COMMAND COULD NOT BE ISSUED — three answers, and only one
+ * of them is a clock.
+ *
+ * These used to be one answer: -1. So a port whose door was being held by
+ * another flush AT THAT INSTANT, and a device that had been given commands
+ * and never answered them, reached the filesystem wearing the same word, and
+ * the filesystem turned both into ERR_IO. One of those is a transient the
+ * caller should come back from; the other is a medium that is failing. */
+typedef enum {
+    AHCI_TAKE_GOT = 0,   /* the port is the caller's; *slot_out is its slot */
+    AHCI_TAKE_HELD,      /* another whole-port command holds the door NOW */
+    AHCI_TAKE_SILENT,    /* work outstanding to the device never came back */
+    AHCI_TAKE_NO_PORT    /* there is no such port in service */
+} AhciTake;
+
 /* Take every command slot of a port for ONE non-queued command, and give them
  * back when it has finished. AHCI 1.3.1 §1.7: "System software is responsible
  * to ensure that queued and non-queued commands are not mixed in the command
@@ -578,11 +679,18 @@ bool ahci_can_submit_port(uint8_t port_num);
  * instant it is found completely idle, and only for as long as that one
  * command needs — a caller that retries it, and recovers the port between
  * tries, holds across both, because those are the same command still.
- * Returns the command slot the caller then owns, or -1 when the port
- * never went quiet within `patience_ms` — said on the console, and in that
- * case nothing is held and no command may be issued. A successful take must be
- * paired with exactly one give-back. */
-int  ahci_port_take_whole(uint8_t port_num, uint32_t patience_ms);
+ *
+ * `patience_ms` bounds ONE of the two ways this can fail to get the port, and
+ * the enum above says which. A door already held is answered AHCI_TAKE_HELD
+ * on the spot, with no clock turned at all: that is a fact about this instant
+ * and waiting cannot make it truer. The clock is spent only on work the
+ * DEVICE owes — commands issued and not yet retired — and running it out is
+ * AHCI_TAKE_SILENT, which is a device that stopped answering.
+ *
+ * Every outcome but AHCI_TAKE_GOT holds nothing and issues nothing. A
+ * successful take must be paired with exactly one give-back. */
+AhciTake ahci_port_take_whole(uint8_t port_num, uint32_t patience_ms,
+                              uint8_t* slot_out);
 void ahci_port_give_back(uint8_t port_num);
 
 /* Build a read/write command for `slot`. Picks FPDMA QUEUED (NCQ) or
@@ -607,6 +715,20 @@ uint8_t ahci_get_active_port_count(void);
 uint32_t ahci_get_active_port_mask(void);
 
 error_t ahci_port_comreset(ahci_port_t* port);
+
+/* Get the port's link back, or take the port out of the machine.
+ *
+ * Returns OK when a COMRESET brought the link up again. On ERR_IO the port has
+ * LEFT: it is no longer handed out by ahci_get_port, its outstanding commands
+ * have been failed, its interrupt is disarmed and its engine stopped, and the
+ * Boardroom has been told its seat is empty the same way a USB stick's
+ * departure is told. Nothing may be issued on it afterwards, and every ahci_*
+ * call that names it answers as it does for a port that was never there.
+ *
+ * Leaving is not final. The watchdog watches a departed port's PxSERR.DIAG.X
+ * latch, and a COMINIT on it brings the port through bring-up again — full
+ * IDENTIFY, because the disk on that cable may not be the one that left — and
+ * back into the room through BoardroomNoteArrival. */
 error_t ahci_port_recover(ahci_port_t* port);
 
 void ahci_get_port_stats(uint8_t port_num, ahci_port_stats_t* stats_out);

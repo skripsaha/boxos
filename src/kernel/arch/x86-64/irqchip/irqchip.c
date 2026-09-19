@@ -110,6 +110,15 @@ static void pic_disable_for_apic(void) {
     debug_printf("[IRQCHIP] Legacy PIC masked for APIC mode\n");
 }
 
+/* One MADT NMI Source, routed to the destination the caller chose. The
+ * destination travels as the context because ioapic_program_nmi_source
+ * takes it at full width and refuses it there if the redirection entry
+ * cannot name it — this function has no opinion of its own to add. */
+static void irqchip_program_nmi_source(uint32_t gsi, uint16_t mps_flags,
+                                       void *ctx) {
+    ioapic_program_nmi_source(gsi, mps_flags, *(const uint32_t *)ctx);
+}
+
 // --- Public API ---
 
 void irqchip_init(void) {
@@ -130,6 +139,27 @@ void irqchip_init(void) {
         goto use_pic;
     }
 
+    /* Step 2.5: name the processors no device interrupt can reach.
+     *
+     * Here, and not later, because here is the first moment the machine's
+     * composition is known and nothing has been armed yet: the MADT is the
+     * firmware's complete list of processors, this runs before the first AP
+     * is started and long before the first MSI. The answer does not depend
+     * on which backend is chosen below — an IOAPIC redirection entry and an
+     * MSI message address carry the same eight destination bits whatever
+     * this kernel does with them — so a fall back to the PIC after this
+     * point changes nothing about who is named.
+     *
+     * The two exits ABOVE are a different matter and this list cannot cover
+     * them: a CPU with no APIC at all and a machine with no MADT both leave
+     * by `goto use_pic` before this line, and in neither case is there a
+     * list of processors to read names out of. There is no processor to
+     * name in the first (one CPU, one PIC, sixteen lines) and no firmware
+     * statement to name one from in the second.
+     *
+     * Prints nothing on a machine whose APIC IDs all fit. */
+    madt_name_unreachable_processors(&madt_info);
+
     // Step 3: Disable legacy PIC (mask all, but keep initialized for spurious handling)
     pic_disable_for_apic();
 
@@ -140,15 +170,22 @@ void irqchip_init(void) {
         goto use_pic;
     }
 
-    /* Step 4.5: Program LVT LINT0/LINT1 from MADT NMI entries on the BSP.
+    /* Step 4.5: Program LVT LINT0/LINT1 from MADT NMI rules on the BSP.
      * ACPI 6.5 §5.2.12.7 makes this OSPM's responsibility — without it the
      * firmware-asserted NMI source (watchdog, IPMI alert) never reaches
-     * us. AP cores apply the same table during their bring-up. */
-    if (madt_info.bsp_acpi_id_resolved) {
-        lapic_apply_madt_nmi(&madt_info, madt_info.bsp_acpi_processor_id);
-    } else {
-        debug_printf("[IRQCHIP] BSP ACPI processor ID unresolved; "
-                     "skipping LAPIC NMI programming\n");
+     * us. AP cores apply the same rules during their bring-up.
+     *
+     * An unresolved UID is not a reason to skip the step, as it used to be:
+     * the firmware may have written one rule for every processor, and that
+     * rule is this core's whether or not the table also names it
+     * individually. What the unresolved case must NOT do is claim a
+     * UID-addressed rule, and `uid_known` says so rather than leaving it to
+     * a sentinel that could collide with a real UID. */
+    lapic_apply_madt_nmi(&madt_info, madt_info.bsp_acpi_processor_uid,
+                         madt_info.bsp_acpi_uid_resolved);
+    if (!madt_info.bsp_acpi_uid_resolved) {
+        debug_printf("[IRQCHIP] BSP ACPI processor UID unresolved; only "
+                     "all-processor NMI rules were applied\n");
     }
 
     // Step 5: Initialize IO-APIC
@@ -161,11 +198,10 @@ void irqchip_init(void) {
      * Delivery Mode = 100 (NMI). Route to the BSP; servers that need
      * cluster-wide NMI broadcast will be revisited when the SMP audit
      * adds multi-IOAPIC and cluster mode. */
-    for (uint8_t i = 0; i < madt_info.nmi_source_count; i++) {
-        const madt_nmi_source_info_t* s = &madt_info.nmi_sources[i];
-        if (!s->valid) continue;
-        ioapic_program_nmi_source(s->gsi, s->mps_flags,
-                                   madt_info.bsp_lapic_id);
+    {
+        uint32_t nmi_source_dest = madt_info.bsp_lapic_id;
+        madt_for_each_nmi_source(&madt_info, irqchip_program_nmi_source,
+                                 &nmi_source_dest);
     }
 
     // Step 6: Activate APIC backend
@@ -193,22 +229,32 @@ const struct madt_info *irqchip_get_madt(void) {
 
 void irqchip_apply_lapic_nmi_self(void) {
     if (active_type != IRQCHIP_APIC) return;
-    uint32_t my_apic_id = lapic_get_id();
-    uint8_t  acpi_pid   = 0xFF;
-    bool found = false;
-    for (uint16_t i = 0; i < madt_info.cpu_map_count; i++) {
-        if (madt_info.cpu_map[i].apic_id == my_apic_id) {
-            acpi_pid = (uint8_t)(madt_info.cpu_map[i].acpi_processor_id & 0xFF);
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
-        /* Fall back to the broadcast key (0xFF). MADT NMI entries with
-         * processor_id == 0xFF still apply. */
-        acpi_pid = MADT_NMI_PROCESSOR_ALL;
-    }
-    lapic_apply_madt_nmi(&madt_info, acpi_pid);
+
+    /* Which processor this core is, asked of the MADT itself. The answer
+     * used to come from a 64-entry copy of the table made during the parse,
+     * which meant that on a machine with more processors than that the
+     * cores past the sixty-fourth could not find themselves and silently
+     * took only the all-processor rules. The table has no such limit, and
+     * reading it here is safe on an AP: madt_uid_for_apic_id only walks
+     * memory the BSP already mapped.
+     *
+     * WHAT IT COSTS, said plainly because it is not free. ACPI tables are
+     * mapped uncacheable (acpi_map_physical -> vmm_map_mmio, PCD+PWT), so
+     * these are uncached reads, and there are two walks per core: this one
+     * for the UID, then another inside lapic_apply_madt_nmi for the rules.
+     * On a 300-processor machine with a MADT of several hundred entries
+     * that is two full table passes per core during bring-up — the one
+     * class of machine where the price is highest is the same class this
+     * walk exists for. It is paid once per core, on a path that already
+     * sends an INIT and two SIPIs and waits for the core to answer, and the
+     * copy it replaced bought its speed by dropping every processor past
+     * the sixty-fourth. A cache of the whole table would be the honest
+     * alternative if this ever shows up in bring-up time; a ceiling on how
+     * much of it to cache would not. */
+    uint32_t uid = 0;
+    bool uid_known = madt_uid_for_apic_id(&madt_info, lapic_get_id(), &uid);
+
+    lapic_apply_madt_nmi(&madt_info, uid, uid_known);
 }
 
 void irqchip_enable_irq(uint8_t gsi) {

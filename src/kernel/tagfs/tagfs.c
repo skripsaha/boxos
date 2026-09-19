@@ -1039,6 +1039,11 @@ static void volume_take_more_ground(uint8_t seat, uint64_t ground_sectors,
         }
         kfree(blank);
     }
+    /* The one flush on this path whose answer is deliberately dropped, and it
+     * stays dropped. The volume was committed at the head-deed write above;
+     * everything since is bookkeeping whose own failure has already been said
+     * out loud two lines up, and which the next file to land on that block
+     * undoes anyway. There is no claim here for a refused flush to falsify. */
     (void)BoardroomFlush(seat);
 }
 
@@ -1261,9 +1266,127 @@ static error_t volume_take_ground(uint8_t seat)
  * the wrong device leaves every "durable" commit sitting in the right one's
  * cache.
  */
+static void volume_would_not_flush(error_t why)
+{
+    static const char hex[] = "0123456789abcdef";
+    char uuid[33];
+    const char* text = "a volume that has not said its name";
+
+    if (g_volume_uuid_known) {
+        for (int i = 0; i < 16; i++) {
+            uuid[i * 2]     = hex[(g_volume_uuid[i] >> 4) & 0xF];
+            uuid[i * 2 + 1] = hex[g_volume_uuid[i] & 0xF];
+        }
+        uuid[32] = '\0';
+        text = uuid;
+    }
+    /* The buffer is sized for the one thing it holds — 32 hex digits and a
+     * terminator — and the other name is a constant, so it is pointed at
+     * rather than copied in. It used to be printed THROUGH that buffer, which
+     * is four characters too small for it: the most important line this
+     * kernel prints came out cut off mid-word. */
+
+    /* NAMED, because a durability failure that does not say WHICH volume is a
+     * line nobody can act on. Two names, and they answer different questions:
+     * the seat is where the operator will find the hardware, and the UUID is
+     * what the volume calls itself — the machine may carry more than one. */
+    kprintf("[TagFS] the volume %s, on seat %u (%s), would not flush its write "
+            "cache (error %u) — everything committed to it since the last "
+            "flush that did succeed is in a cache the device loses when the "
+            "power goes\n",
+            text, g_tagfs_seat, BoardroomSeatName(g_tagfs_seat),
+            (unsigned)why);
+}
+
 error_t tagfs_flush_cache(void)
 {
-    return (BoardroomFlush(g_tagfs_seat) == 0) ? OK : ERR_IO;
+    int said = BoardroomFlush(g_tagfs_seat);
+    if (said == 0) {
+        return OK;
+    }
+
+    /*
+     * ‼ "BUSY" AND "BROKEN" ARRIVE HERE AS DIFFERENT NUMBERS, AND USED TO
+     * LEAVE AS THE SAME ONE.
+     *
+     * Every refusal became ERR_IO, so a flush that was not issued because
+     * another flush of the SAME medium held the port for a microsecond
+     * reached the write path wearing the word for a failing disk — and the
+     * write path, which already knows how to come back from ERR_BUSY, had no
+     * way to tell that this was one.
+     *
+     * The two vocabularies that meet here cannot be confused. A seat whose
+     * medium can name its refusal answers with an `error_t`, and every
+     * error_t is positive; the media that can only say "no" answer with zero
+     * or a negative code of their own (ATA_ERR_*, or a plain -1). So a
+     * positive answer is the medium's own word, carried through
+     * BoardroomFlush untouched, and anything else is a refusal with no more
+     * detail than that.
+     */
+    error_t why = (said > 0) ? (error_t)said : ERR_IO;
+
+    /* ‼ AND ONE REFUSAL THE ROOM ITSELF MAKES, WHICH IS NOT A BROKEN DISK
+     * EITHER. BoardroomFlush answers -1 for a seat with nobody in it, and a
+     * seat empties exactly when a medium leaves — the commonest way for that
+     * to happen now being an AHCI port that retired itself. Flattened into
+     * ERR_IO that reads as "this disk is failing" for the rest of the boot,
+     * when the truth is "this medium is not here any more", which is the one
+     * thing a caller can act on differently. The room is asked rather than
+     * guessed at. */
+    if (said < 0 && !BoardroomSeatOccupied(g_tagfs_seat)) {
+        why = ERR_DEVICE_NOT_READY;
+    }
+
+    /* A door held for a flush that is already running is not a medium
+     * refusing anything, and it is ordinary traffic on a busy volume — so it
+     * is not announced. Whoever asked is the one who knows whether coming
+     * back is possible where it stands, and it is told. */
+    if (why != ERR_BUSY) {
+        volume_would_not_flush(why);
+    }
+    return why;
+}
+
+/*
+ * ‼ COME BACK UNTIL THERE IS A REAL ANSWER — AND WHY THAT TERMINATES.
+ *
+ * ERR_BUSY from the flush is not an answer about the medium at all. It says
+ * one thing: another whole-port command holds this port AT THIS INSTANT. Two
+ * flushes of the same volume meeting is ordinary traffic, and the wave that
+ * taught the flush to refuse turned that meeting into a failed write for one
+ * of the two — where before it simply waited and both succeeded. Propagating
+ * it was half a mechanism.
+ *
+ * So a caller whose whole purpose is durability asks again, and this is not a
+ * clock and not a count: it ends on a FACT, three of which are reachable and
+ * all of which are terminal.
+ *
+ *   - The door opens. The holder's command is itself bounded — a device that
+ *     never answers is declared non-completing by AHCI_CMD_PATIENCE_MS — so
+ *     the hold ends whether the flush under it succeeded or failed.
+ *   - The holder stops being a running core. ahci_port_take_whole asks
+ *     amp_core_online() and takes an abandoned door over on the spot, which
+ *     is what makes this safe at shutdown, where the holder can be a core
+ *     that has already been stopped.
+ *   - The medium refuses, or leaves. Either is a different error_t and comes
+ *     straight back out.
+ *
+ * Nothing here abandons the work it was given after a deadline — which is the
+ * defect this is the opposite of — and nothing here invents a number.
+ *
+ * It is NOT used by the async write path: that runs on the drain core, where
+ * a spin would stop every other job from making progress, so w_commit_txn
+ * hands the job back to the same core through its own baton instead. Same
+ * mechanism, spelled the way that place can spell it.
+ */
+static error_t tagfs_flush_cache_insisting(void)
+{
+    error_t flushed = tagfs_flush_cache();
+    while (flushed == ERR_BUSY) {
+        cpu_pause();
+        flushed = tagfs_flush_cache();
+    }
+    return flushed;
 }
 
 /*
@@ -3220,8 +3343,25 @@ static void tagfs_sync_inside(void)
      *
      * Cost: ~5-15 ms per call on a spinning drive, ~50 µs on NVMe
      * via SATA. tagfs_sync is called on user-initiated shutdown
-     * and on metadata-pool checkpoint, both rare. */
-    tagfs_flush_cache();
+     * and on metadata-pool checkpoint, both rare.
+     *
+     * ‼ AND THE ANSWER IS HEARD. It was thrown away, so a sync that wrote
+     * every one of the records above and then could not get one of them onto
+     * the media returned exactly as a sync that had — and tagfs_sync is void,
+     * which means the only place that fact can still be told is here.
+     * tagfs_flush_cache has already named the volume; what is added is what
+     * it means for the records this particular call just wrote.
+     *
+     * It INSISTS rather than reporting a busy port: a sync is asked for
+     * exactly when somebody needs these records on the media, and "somebody
+     * else is flushing this instant" is not an answer to that. See
+     * tagfs_flush_cache_insisting for why the asking ends. */
+    error_t flushed = tagfs_flush_cache_insisting();
+    if (flushed != OK) {
+        kprintf("[TagFS] sync: the registry, the pool, the file table, the "
+                "bitmap and the ledger are all written, and none of them is "
+                "proven durable\n");
+    }
 }
 
 /*

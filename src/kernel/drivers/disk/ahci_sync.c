@@ -6,6 +6,7 @@
 #include "klib.h"
 #include "atomics.h"
 #include "hourglass.h"
+#include "error.h"
 
 /*
  * ‼ HOW LONG A DISK IS GIVEN TO ANSWER, AND WHY IT IS NOT TWO SECONDS.
@@ -121,6 +122,20 @@ static int ahci_draw_slot(uint8_t port)
     int slot = ahci_alloc_slot(port);
     if (slot >= 0) return slot;
 
+    /* ‼ A PORT THAT HAS LEFT THE MACHINE IS NOT A BUSY PORT.
+     *
+     * ahci_alloc_slot answers -1 for both, and once ahci_port_recover could
+     * retire a dead port the second meaning arrived here: the glass below
+     * would be turned and spun out in full on a port that has no device, no
+     * link and no slots, once per command, for as long as anything kept
+     * asking. The two are told apart by asking the room the port is in, which
+     * is one look and no clock at all. */
+    if (!ahci_get_port_state(port)) {
+        kprintf("[AHCI] port %u has left the machine — the command is not "
+                "issued\n", port);
+        return -1;
+    }
+
     HourGlass glass;
     if (!HourGlassTurn(&glass, (uint64_t)AHCI_CMD_PATIENCE_MS * 1000ULL)) {
         kprintf("[AHCI] port %u: every command slot is busy and there is no "
@@ -131,6 +146,11 @@ static int ahci_draw_slot(uint8_t port)
     for (;;) {
         slot = ahci_alloc_slot(port);
         if (slot >= 0) return slot;
+        if (!ahci_get_port_state(port)) {
+            kprintf("[AHCI] port %u left the machine while a command waited "
+                    "for a slot on it — the command is not issued\n", port);
+            return -1;
+        }
         if (HourGlassRunOut(&glass)) {
             kprintf("[AHCI] port %u: every command slot was still busy after "
                     "%lu us on the %s — the command is not issued\n",
@@ -182,6 +202,16 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
         }
 
         volatile ahci_port_regs_t* regs = ahci_get_port_regs_pub(port);
+        if (!regs) {
+            /* The port left the machine between drawing the slot and arming
+             * it — ahci_port_recover can retire one now, from this core or
+             * from the watchdog's. */
+            kprintf("[AHCI] port %u left the machine before its command could "
+                    "be issued\n", port);
+            ahci_free_slot(port, slot);
+            pmm_free(dma_page, pages_needed);
+            return -1;
+        }
         /* Submit per AHCI 1.3.1 §10.3.2: write CI / SACT as a direct
          * store with ONLY the new slot bit set, never RMW. The HBA
          * clears bits independently as commands complete; a `|=` reads
@@ -224,7 +254,10 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
                          retry + 1, AHCI_MAX_RETRIES);
         }
         if (retry < AHCI_MAX_RETRIES - 1) {
-            ahci_port_recover(port_state);
+            /* A recovery that could not get the link back has taken the port
+             * out of the machine (see ahci_port_recover). Asking it again
+             * would be asking a port that is no longer there. */
+            if (ahci_port_recover(port_state) != OK) break;
         }
     }
 
@@ -275,6 +308,16 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
         }
 
         volatile ahci_port_regs_t* regs = ahci_get_port_regs_pub(port);
+        if (!regs) {
+            /* The port left the machine between drawing the slot and arming
+             * it — ahci_port_recover can retire one now, from this core or
+             * from the watchdog's. */
+            kprintf("[AHCI] port %u left the machine before its command could "
+                    "be issued\n", port);
+            ahci_free_slot(port, slot);
+            pmm_free(dma_page, pages_needed);
+            return -1;
+        }
         /* Direct store, not RMW — see read path above for the spec
          * reference. Re-arming a completed slot via stale-read OR
          * corrupts NCQ on real Intel/AMD HBAs (hidden on QEMU). */
@@ -306,7 +349,10 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
                          retry + 1, AHCI_MAX_RETRIES);
         }
         if (retry < AHCI_MAX_RETRIES - 1) {
-            ahci_port_recover(port_state);
+            /* A recovery that could not get the link back has taken the port
+             * out of the machine (see ahci_port_recover). Asking it again
+             * would be asking a port that is no longer there. */
+            if (ahci_port_recover(port_state) != OK) break;
         }
     }
 
@@ -316,10 +362,30 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
     return -1;
 }
 
+/*
+ * ‼ WHAT THIS RETURNS, AND WHY IT IS NOT A BARE -1 ANY MORE.
+ *
+ * Zero on success; otherwise an `error_t` value, carried out through the
+ * `int` that ahci_sync.h declares and BoardroomFlush hands along untouched.
+ * error_t values are positive and the other two media answer with zero or a
+ * negative code of their own, so the two vocabularies cannot be confused
+ * where they meet (tagfs_flush_cache).
+ *
+ *   OK                    the drive's write cache has reached the media.
+ *   ERR_BUSY              another whole-port command holds this port AT THIS
+ *                         INSTANT. The medium is healthy, nothing was issued,
+ *                         and the caller — who still holds its bytes — may
+ *                         come again. This is the outcome the whole change
+ *                         exists for: it used to arrive as ERR_IO, and every
+ *                         caller above read that as a failing disk.
+ *   ERR_DEVICE_NOT_READY  there is no such port in this machine any more.
+ *   ERR_IO                the device did not answer, or answered with an
+ *                         error, or the link went away under the command.
+ */
 int ahci_flush_cache_sync(uint8_t port) {
     ahci_port_t* port_state = ahci_get_port_state(port);
     if (!port_state) {
-        return -1;
+        return ERR_DEVICE_NOT_READY;
     }
 
     /* THE PORT, NOT A SLOT — AND ONCE FOR THE WHOLE CALL, NOT PER ATTEMPT.
@@ -344,24 +410,41 @@ int ahci_flush_cache_sync(uint8_t port) {
      * much "this command alone on the port" as the first attempt was, and
      * re-opening the door between attempts would let the queue refill under
      * the one command that must not share the list. The second reason is the
-     * clock. Waiting for quiet is bounded by how long an outstanding command
-     * may take, which is the same AHCI_CMD_PATIENCE_MS the command itself
-     * gets; paid once per call the worst case of this function is one wait
-     * plus AHCI_MAX_RETRIES commands, where paying it per attempt would have
-     * made it AHCI_MAX_RETRIES of each — and this runs at halt_sync_storage(),
-     * where every second is a second the machine will not shut down in. */
-    int slot = ahci_port_take_whole(port, AHCI_CMD_PATIENCE_MS);
-    if (slot < 0) {
-        /* ahci_port_take_whole has already said on the console which of the
-         * two it could not do, and nothing is held. A flush that was not
-         * issued is not a flush that failed quietly: the caller is told, and
-         * asking again here would only re-run the same wait on the same busy
-         * port. */
-        return -1;
+     * clock. Waiting for a device to retire what it was given is bounded by
+     * how long one command may take, which is the same AHCI_CMD_PATIENCE_MS
+     * the command itself gets; paid once per call the worst case of this
+     * function is one wait plus AHCI_MAX_RETRIES commands, where paying it
+     * per attempt would have made it AHCI_MAX_RETRIES of each — and this runs
+     * at halt_sync_storage(), where every second is a second the machine will
+     * not shut down in. */
+    uint8_t slot = 0;
+    AhciTake took = ahci_port_take_whole(port, AHCI_CMD_PATIENCE_MS, &slot);
+    if (took != AHCI_TAKE_GOT) {
+        /* Nothing is held and nothing was issued in any of the three cases.
+         * AHCI_TAKE_HELD said nothing on the console on purpose — two flushes
+         * of one medium meeting is ordinary traffic, and the caller is the
+         * one who knows whether coming back is possible where it stands. The
+         * other two have already said what they could not do. */
+        switch (took) {
+        case AHCI_TAKE_HELD:    return ERR_BUSY;
+        case AHCI_TAKE_NO_PORT: return ERR_DEVICE_NOT_READY;
+        default:                return ERR_IO;
+        }
     }
 
-    int result = -1;
+    error_t result = ERR_IO;
     for (int retry = 0; retry < AHCI_MAX_RETRIES; retry++) {
+        volatile ahci_port_regs_t* regs = ahci_get_port_regs_pub(port);
+        if (!regs) {
+            /* The port was taken out of the machine under this command —
+             * by this loop's own recovery, or by the watchdog on another
+             * core. Its command list is still mapped, but nothing may be
+             * issued into it. */
+            kprintf("[AHCI] port %u left the machine while its cache flush "
+                    "was being retried\n", port);
+            break;
+        }
+
         ahci_cmd_header_t* cmdheader = (ahci_cmd_header_t*)port_state->clb_virt;
         cmdheader[slot].cfl = sizeof(fis_reg_h2d_t) / sizeof(uint32_t);
         cmdheader[slot].w = 0;
@@ -380,7 +463,6 @@ int ahci_flush_cache_sync(uint8_t port) {
 
         mfence();
 
-        volatile ahci_port_regs_t* regs = ahci_get_port_regs_pub(port);
         /* FLUSH CACHE EXT is always non-queued — issue via PxCI only with a
          * direct single-bit store (PxCI is write-1-to-set; an RMW could
          * re-arm a slot the HBA just cleared). PxSACT is not touched, and now
@@ -391,11 +473,10 @@ int ahci_flush_cache_sync(uint8_t port) {
         spin_unlock(&port_state->lock);
 
         /* FLUSH CACHE EXT is never queued, so PxSACT says nothing about it. */
-        AhciSlotEnd how = ahci_wait_for_slot(port_state, regs, (uint8_t)slot,
-                                             false);
+        AhciSlotEnd how = ahci_wait_for_slot(port_state, regs, slot, false);
 
         if (how == AHCI_SLOT_DONE) {
-            result = 0;
+            result = OK;
             break;
         }
         if (how == AHCI_SLOT_GONE) {
@@ -408,19 +489,21 @@ int ahci_flush_cache_sync(uint8_t port) {
         }
         /* The hold survives the recovery: ahci_port_recover drives PxCMD.ST
          * and PxSCTL.DET and never touches the slot pool, so the port comes
-         * back still closed to everyone but this command. */
+         * back still closed to everyone but this command — unless it comes
+         * back not at all, which is the one case that ends the retries. */
         if (retry < AHCI_MAX_RETRIES - 1) {
-            ahci_port_recover(port_state);
+            if (ahci_port_recover(port_state) != OK) break;
         }
     }
 
     ahci_port_give_back(port);
 
-    if (result != 0) {
-        kprintf("[AHCI] port %u: a cache flush failed after %d attempts\n",
+    if (result != OK) {
+        kprintf("[AHCI] port %u: a cache flush failed after %d attempts — the "
+                "writes behind it are not proven to have reached the media\n",
                 port, AHCI_MAX_RETRIES);
     }
-    return result;
+    return (int)result;
 }
 
 /* 128 KiB — thirty-two contiguous DMA32 pages, an order the buddy allocator
