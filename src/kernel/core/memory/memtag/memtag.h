@@ -478,9 +478,13 @@ size_t        MemTagSweepPkey(uint32_t region_id, uint8_t new_pkey);
  *    own MSR copy.
  *
  *  MTRR audit:
- *    Intel SDM Vol 3A §11.12.5 — effective memory type = MTRR ∩ PAT.
- *    BoxOS doesn't reprogram MTRRs (firmware sets them), but logs the
- *    layout once at boot so operators see when MTRR_DEF_TYPE != WB.
+ *    Intel SDM Vol 3A §11.5.2.2, Table 11-7 — effective memory type =
+ *    MTRR ∩ PAT. For a cache:wb region (PAT entry 0) that combination IS
+ *    the MTRR type, so a non-WB MTRR default demotes every one of them;
+ *    a cache:wc region is the exception the table makes, WC under every
+ *    MTRR type including UC. BoxOS doesn't reprogram MTRRs (firmware sets
+ *    them), but logs the layout once at boot so operators see when
+ *    MTRR_DEF_TYPE != WB.
  * ═══════════════════════════════════════════════════════════════════ */
 
 /* AP-side IA32_PAT consistency probe. Returns true on match with BSP

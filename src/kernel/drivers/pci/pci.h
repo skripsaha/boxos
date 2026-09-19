@@ -141,15 +141,25 @@ uint16_t pci_find_ext_capability(uint16_t segment, uint8_t bus,
 
 /* MSI / MSI-X programming helpers.
  *
- * Both functions configure the device to deliver one vector to the BSP
+ * Both functions configure the device to deliver one vector to one LAPIC
  * (single-vector mode). They disable INTx legacy on the device, write
- * the message address/data per Intel SDM §11.11, and enable the cap.
- * Returns 0 on success, negative on absent capability or BAR failure. */
+ * the message address/data in the xAPIC compatibility format, and enable
+ * the cap. Returns 0 on success, negative on absent capability, BAR
+ * failure, or a destination the compatibility format cannot name.
+ *
+ * `dest_lapic_id` is a FULL-WIDTH APIC ID and the parameter is uint32_t
+ * for that reason. Every caller passes g_amp.bsp_lapic_id, which is
+ * uint32_t because a Processor Local x2APIC entry (ACPI 6.5 §5.2.12.12)
+ * carries 32 bits; an eight-bit parameter here made the narrowing happen
+ * silently at the call, where no check inside pci.c could ever see it.
+ * The compatibility Message Address carries only the low eight bits of
+ * the ID (bits 19:12), so an ID above 0xFF is REFUSED here rather than
+ * truncated onto a different, running processor — see pci.c. */
 int pci_msi_enable(uint8_t bus, uint8_t device, uint8_t function,
-                    uint8_t vector, uint8_t dest_lapic_id);
+                    uint8_t vector, uint32_t dest_lapic_id);
 int pci_msix_enable_vector(uint8_t bus, uint8_t device, uint8_t function,
                             uint16_t table_index, uint8_t vector,
-                            uint8_t dest_lapic_id);
+                            uint32_t dest_lapic_id);
 
 // Legacy 32-bit BAR read (for I/O space BARs and backward compatibility)
 uint32_t pci_read_bar(pci_device_t* device, uint8_t bar_num);

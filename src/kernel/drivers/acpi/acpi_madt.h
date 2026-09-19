@@ -133,10 +133,25 @@ typedef struct {
  * larger fleets. */
 #define MADT_MAX_CPU_MAP    64
 
+/* One processor entry the MADT published, in the three states Table 5.23
+ * allows it to be in.
+ *
+ * `enabled` is Local APIC Flags bit 0 and nothing else: it means the
+ * processor is ready for use NOW, and it is the only state this kernel
+ * starts. `online_capable` is bit 1, honoured only on a FADT that is
+ * version 6.3 or newer (see madt_online_capable_is_meaningful in
+ * acpi_madt.c) — it means the seat exists and hardware can fill it during
+ * OS runtime, which is a hot-add candidate, not a processor. Both clear
+ * means the entry is unusable and Table 5.23 tells OSPM to ignore it.
+ *
+ * Kept apart rather than collapsed into one bool so the seat survives the
+ * parse: a hot-add path has to be able to ask which APIC IDs the firmware
+ * reserved, and "not enabled" on its own cannot answer that. */
 typedef struct {
     uint32_t apic_id;
     uint32_t acpi_processor_id;
     bool     enabled;
+    bool     online_capable;
 } madt_cpu_map_t;
 
 typedef struct madt_info {

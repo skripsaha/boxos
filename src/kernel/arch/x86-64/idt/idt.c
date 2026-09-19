@@ -513,9 +513,13 @@ static void handle_nmi(interrupt_frame_t *frame)
     /* Firmware first, and silent. apei_ghes_nmi_check reads each NMI-notify
      * GHES source's Error Status Address register — mapped once at
      * registration, so the read can neither fault nor take a lock — and
-     * knocks a K-Core for every source that named a status block. True means
-     * a source owned this NMI; the K-Core that was knocked is what reports
-     * the error, at a moment when printing is allowed. */
+     * knocks a K-Core for a source that holds a record nobody has consumed,
+     * or whose register names a block this kernel has no window for. A
+     * source whose block IS mapped and whose Block Status reads zero is
+     * passed over untouched, which is what keeps the unclaimed branch below
+     * reachable at all. True means a source owned this NMI; the K-Core that
+     * was knocked is what reports the error, at a moment when printing is
+     * allowed. */
     extern bool apei_ghes_nmi_check(void);
     if (apei_ghes_nmi_check())
         return;
@@ -1265,6 +1269,14 @@ void exception_handler(interrupt_frame_t *frame)
  */
 volatile bool g_kernel_ready_for_interrupts = false;
 
+/* 8042 status register (port 0x64), the two bits IRQ1 has to read before it
+ * touches the output register at 0x60. Values per Linux include/linux/
+ * i8042.h — I8042_STR_OBF 0x01, I8042_STR_AUXDATA 0x20 — which is the
+ * reference every PC keyboard controller is built against. Named here rather
+ * than pulled from keyboard.c, where the full set is file-local. */
+#define KBC_STR_OBF      0x01  /* 0x60 holds a byte for the system        */
+#define KBC_STR_AUXDATA  0x20  /* that byte came from the second port     */
+
 void irq_handler(interrupt_frame_t *frame)
 {
     uint8_t vector = frame->vector;
@@ -1536,8 +1548,69 @@ void irq_handler(interrupt_frame_t *frame)
 
     case 1:
     {
-        uint8_t scancode = inb(0x60);
-        keyboard_handle_scancode(scancode);
+        /* Ask the controller WHICH byte is in the output register before
+         * taking it. One register at 0x60 serves both 8042 ports, and IRQ1
+         * says only that the controller raised a line — not what put the
+         * byte there, nor that there is one.
+         *
+         * Bit 0 (OBF) says a byte is there at all. IRQ1 can arrive with the
+         * register already emptied: a shared level line, a second edge for a
+         * byte keyboard_init's polling loop took during bring-up, a spurious
+         * delivery. Reading 0x60 then re-reads whatever the controller last
+         * left there and types that key a second time. Nothing about an
+         * unconditional read makes the register refill.
+         *
+         * Bit 5 (AUXDATA) says the byte came from the second port. Scan-code
+         * set 1 and a mouse packet share the same byte values, so a packet
+         * fed to the decoder types characters nobody pressed. keyboard_init
+         * drives that port down (AUX_DISABLE plus AUXDIS in the command
+         * byte), so this should never fire; it is here because the read is
+         * what clears OBF, and a byte that reached the register by some
+         * other route — firmware, a warm handover, a controller quirk —
+         * must be consumed and discarded rather than decoded, or it blocks
+         * the keyboard's next byte forever. Discarding it is not silent:
+         * see the line below.
+         *
+         * Bit values are the reference every PC controller is built
+         * against: Linux include/linux/i8042.h, I8042_STR_OBF 0x01 and
+         * I8042_STR_AUXDATA 0x20. i8042_interrupt makes these same two
+         * decisions in this same order.
+         *
+         * `break`, not `return`: the EOI at the bottom of this function is
+         * owed either way — an IRQ the kernel declines to act on still has
+         * to be acknowledged, or the line stays asserted. */
+        uint8_t status = inb(KEYBOARD_STATUS_PORT);
+        if (!(status & KBC_STR_OBF))
+            break;
+        uint8_t byte = inb(KEYBOARD_DATA_PORT);
+        if (status & KBC_STR_AUXDATA)
+        {
+            /* A dropped byte is a keystroke nobody will ever see, so it is
+             * said out loud. What it distinguishes is not guessable from a
+             * dead keyboard: either something really is talking on a port
+             * this kernel powered down, or this controller does not mean
+             * "second port" by bit 5 — the pre-PS/2 AT parts and a few
+             * emulated KBCs use it for a transmit timeout instead, and on
+             * those the byte being thrown away is the operator's.
+             *
+             * Once, not per byte. This runs inside IRQ1 with interrupts
+             * off; a controller stuck with the bit asserted would turn the
+             * console itself into the fault. One line names the condition,
+             * and the status byte in it is what tells the two cases
+             * apart. */
+            static volatile bool aux_byte_said = false;
+            if (!aux_byte_said)
+            {
+                aux_byte_said = true;
+                kprintf("[IRQ] the 8042 handed IRQ1 the byte 0x%02x marked as "
+                        "the second port's (status 0x%02x) although "
+                        "keyboard_init powered that port down — dropped, not "
+                        "decoded; further ones go unremarked\n",
+                        byte, status);
+            }
+            break;
+        }
+        keyboard_handle_scancode(byte);
         break;
     }
 

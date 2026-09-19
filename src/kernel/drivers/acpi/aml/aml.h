@@ -29,40 +29,47 @@
  *                 through its Index/Data register pair and BankField
  *                 selects its bank before every access
  *
- * ‼ AN UNHANDLED ADDRESS SPACE IS SILENT, AND THERE IS NO STATUS TO CHECK
+ * ‼ AN UNSERVED ADDRESS SPACE IS A REFUSAL, NOT A ZERO
  *
- * What stood here claimed that address spaces other than the three above
- * are "reported as BAD_OPCODE so callers can detect unsupported HW". No
- * such report exists, and none of the API can carry one. ACPI 6.5 §20.2.5.2
- * defines eleven RegionSpace values — EmbeddedControl (0x03), SMBus (0x04),
- * System CMOS (0x05), PciBarTarget (0x06), IPMI (0x07), GeneralPurposeIO
- * (0x08), GenericSerialBus (0x09), PCC (0x0A) beyond the three served here
- * — and every one of them is admitted to the namespace looking exactly like
- * a serviceable region: the RegionSpace byte is not validated at parse time,
- * aml_region_read ends in `default: return 0`, aml_region_write's switch has
- * no default at all, and neither field_read/field_write nor exec_store has a
- * status channel to carry a refusal even if one were raised. So a read of an
- * EmbeddedControl field yields zero — indistinguishable, to the AML, from an
- * EC that answered zero — and a write to one is dropped while the method
- * runs on and the executor returns AML_OK.
+ * ACPI 6.5 §20.2.5.2 defines eleven RegionSpace values — EmbeddedControl
+ * (0x03), SMBus (0x04), SystemCMOS (0x05), PciBarTarget (0x06), IPMI (0x07),
+ * GeneralPurposeIO (0x08), GenericSerialBus (0x09), PCC (0x0A) beyond the
+ * three served here — plus the OEM range from 0x80.
  *
- * AML_ERR_BAD_OPCODE could not serve that purpose either, and not because
- * it never appears: the executor raises it in a dozen places — an extended
- * opcode whose operands cannot be stepped over, a SuperName that resolves to
- * nothing — and exec_termlist and aml_call_int hand it straight back, so a
- * caller of this header's aml_call_int can and does receive it. What it
- * never means is an address space. No region path raises it; the one thing
- * it tells a caller is that a byte of the method could not be decoded. On
- * the parse side it does not even survive: parse_term_list swallows it to
- * resynchronise the stream and returns AML_OK, so aml_init never reports
- * one. AML_ERR_REGION exists in the enum below, and is the value this would
- * need — nothing produces it.
+ * Every one of them used to be admitted to the namespace looking exactly
+ * like a serviceable region: the RegionSpace byte was not validated at
+ * parse time, aml_region_read ended in `default: return 0`, aml_region_write
+ * had no default at all, and neither field_read/field_write nor exec_store
+ * had a status channel to carry a refusal even if one were raised. So a read
+ * of an EmbeddedControl field yielded zero — indistinguishable, to the AML,
+ * from an EC that answered zero — and a write to one was dropped while the
+ * method ran on and the executor returned AML_OK.
  *
- * Nothing at HEAD suffers from this — the two entry points that can reach a
- * region access, aml_call_int via acpi_enter_sleep and aml_call_pic, have no
- * callers, and the one live entry, aml_init() from main.c, only builds the
- * namespace. Giving the region path a status return is the work that must
- * come before the first caller that needs an EC.
+ * Both halves are closed. The RegionSpace byte is checked where the
+ * OperationRegion is declared: an unserved space is named once, by name, on
+ * the console, and the region is marked unusable. And the whole path —
+ * aml_region_read / aml_region_write -> field_read / field_write ->
+ * exec_store -> exec_term -> aml_call_int — now carries aml_status_t, so a
+ * refused access stops the method and reaches the caller as AML_ERR_REGION,
+ * the value this enum has always had for it. Every arm that used to answer
+ * zero (a width with no instruction behind it, an unmappable System Memory
+ * region, a PCI register out of reach of this machine's config mechanism)
+ * answers AML_ERR_REGION instead.
+ *
+ * AML_ERR_BAD_OPCODE was never a substitute, and not because it is absent:
+ * the executor raises it in a dozen places — an extended opcode whose
+ * operands cannot be stepped over, a SuperName that resolves to nothing —
+ * and exec_termlist and aml_call_int hand it straight back. What it never
+ * means is an address space; the one thing it tells a caller is that a byte
+ * of the method could not be decoded. On the parse side it does not even
+ * survive: parse_term_list swallows it to resynchronise the stream and
+ * returns AML_OK, so aml_init never reports one.
+ *
+ * The executor itself still has no live caller — aml_call_int is reached
+ * only from acpi_enter_sleep and aml_call_pic, and neither is called from
+ * anywhere; the one live entry, aml_init() from main.c, only builds the
+ * namespace. What changes here is that the first caller that needs an EC
+ * will be TOLD it cannot have one.
  *
  * Out of scope for this audit (deferred to ACPICA/uACPI follow-up):
  *   Contended Mutex/Event semantics — nothing in the tree evaluates AML
@@ -75,9 +82,12 @@
  *   ToBuffer/ToHexString/ToInteger generic conversion suite
  *   ConcatOp, MatchOp, ObjectTypeOp
  *
- * Designed to be safe to call from kernel context: every executor
- * frame is bounded (256 max), every Buffer/Package is hard-capped to
- * 1 MiB, every While bound to 4 million iterations.
+ * Designed to be safe to call from kernel context: every executor frame is
+ * bounded, every Buffer/Package is hard-capped to 1 MiB, and every While is
+ * bounded by REAL TIME — thirty seconds on HourGlass, which is
+ * ACPI_MAX_LOOP_TIMEOUT and ACPICA's AE_AML_LOOP_TIMEOUT, not a count of
+ * iterations. A loop that outlives it aborts the method out loud; it does
+ * not fall out quietly with AML_OK, which is what the iteration count did.
  */
 
 typedef enum {

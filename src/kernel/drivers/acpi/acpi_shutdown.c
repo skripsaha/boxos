@@ -144,72 +144,6 @@ static bool gas_pci_decode(uint64_t address, GasPciAddress *out) {
     return true;
 }
 
-/* gas_write_word — write a 16-bit value through a Generic Address Structure.
- *
- * GAS address_space dispatch matches the ACPI spec rather than assuming I/O.
- * On consumer/desktop x86 PM1 CNT lives at I/O 0x604-class ports; on some
- * server boards and embedded SoCs (ACPI 2.0+) it can be memory-mapped, where
- * `outw` would silently miss the register. UEFI machines occasionally route
- * the reset register via PCI config space. Handle all three.
- *
- * For MMIO we map the register UC via vmm_map_mmio so the access is
- * uncached + write-through (PCD=1, PWT=1) and visible to the chipset
- * regardless of MTRR state — same correctness path as the VGA framebuffer.
- */
-static int gas_write_word(const acpi_gas_t *gas, uint16_t value) {
-    if (!gas || gas->address == 0) return -1;
-
-    switch (gas->address_space) {
-        case GAS_AS_SYSTEM_IO:
-            outw((uint16_t)gas->address, value);
-            return 0;
-
-        case GAS_AS_SYSTEM_MEMORY: {
-            volatile void *vmap = vmm_map_mmio((uintptr_t)gas->address,
-                                               sizeof(uint16_t),
-                                               VMM_FLAGS_KERNEL_RW);
-            if (!vmap) {
-                debug_printf("[ACPI] GAS MMIO map failed for 0x%lx\n",
-                             (unsigned long)gas->address);
-                return -1;
-            }
-            *(volatile uint16_t *)vmap = value;
-            /* Don't unmap — we're on a one-way path to power off / reset. */
-            return 0;
-        }
-
-        case GAS_AS_PCI_CONFIG: {
-            /* Segment and bus are not fields of the address: Table 5.2 fixes
-             * both at zero for this address space. ECAM unlocks the extended
-             * (12-bit) offsets; the 0xCF8/0xCFC fallback stops at 0xFE for a
-             * word. */
-            GasPciAddress pci;
-            if (!gas_pci_decode(gas->address, &pci)) return -1;
-
-            debug_printf("[ACPI] GAS PCI_CONFIG 0000:00:%02x.%x off=0x%x val=0x%x\n",
-                         pci.device, pci.function, pci.offset, value);
-
-            if (pci_has_ecam()) {
-                pci_ecam_write_word(0, 0, pci.device, pci.function,
-                                    pci.offset, value);
-                return 0;
-            }
-            if (pci.offset <= 0xFEu) {
-                pci_config_write_word(0, pci.device, pci.function,
-                                      (uint8_t)pci.offset, value);
-                return 0;
-            }
-            kprintf("[ACPI] GAS PCI_CONFIG offset 0x%x needs extended config "
-                    "space and this machine published no MCFG\n", pci.offset);
-            return -1;
-        }
-
-        default:
-            debug_printf("[ACPI] GAS unknown address_space=%u\n", gas->address_space);
-            return -1;
-    }
-}
-
 static int gas_write_byte(const acpi_gas_t *gas, uint8_t value) {
     if (!gas || gas->address == 0) return -1;
 
@@ -258,171 +192,6 @@ static int gas_write_byte(const acpi_gas_t *gas, uint8_t value) {
     }
 }
 
-/* Read a 16-bit register through the same GAS its write will use.
- *
- * PM1_CNT is a control register, and ACPI 6.5 §4.6.1 is explicit about those:
- * "OSPM implementations must write zeros to reserved bits in enable and status
- * registers and preserve bits in control registers"; §4.6.2 says the same for
- * ignored bit fields. A sleep request is therefore a read-modify-write, and
- * this is the read half of it. */
-static int gas_read_word(const acpi_gas_t *gas, uint16_t *out) {
-    if (!gas || !out || gas->address == 0) return -1;
-
-    switch (gas->address_space) {
-        case GAS_AS_SYSTEM_IO:
-            *out = inw((uint16_t)gas->address);
-            return 0;
-
-        case GAS_AS_SYSTEM_MEMORY: {
-            volatile void *vmap = vmm_map_mmio((uintptr_t)gas->address,
-                                               sizeof(uint16_t),
-                                               VMM_FLAGS_KERNEL_RW);
-            if (!vmap) {
-                debug_printf("[ACPI] GAS MMIO map failed for 0x%lx\n",
-                             (unsigned long)gas->address);
-                return -1;
-            }
-            *out = *(volatile uint16_t *)vmap;
-            return 0;
-        }
-
-        case GAS_AS_PCI_CONFIG: {
-            GasPciAddress pci;
-            if (!gas_pci_decode(gas->address, &pci)) return -1;
-
-            if (pci_has_ecam()) {
-                *out = pci_ecam_read_word(0, 0, pci.device, pci.function,
-                                          pci.offset);
-                return 0;
-            }
-            if (pci.offset <= 0xFEu) {
-                *out = pci_config_read_word(0, pci.device, pci.function,
-                                            (uint8_t)pci.offset);
-                return 0;
-            }
-            return -1;
-        }
-
-        default:
-            debug_printf("[ACPI] GAS unknown address_space=%u\n",
-                         gas->address_space);
-            return -1;
-    }
-}
-
-/* Pick the live PM1 control GAS:
- *   1. ACPI 2.0+ X_ variant if the FADT is long enough to actually contain
- *      it AND it has a non-zero address — spec-preferred descriptor.
- *   2. Synthesise a legacy I/O GAS from the 32-bit FADT field otherwise.
- *
- * The length check matters on real hardware: every ACPI 1.0b firmware (and
- * QEMU's default i440fx FADT) ships rev=1, len=116, where `x_pm1a_*` lives
- * past EOT and `*x_gas` reads garbage. Trusting it sends PM1 writes to a
- * random MMIO address and shutdown silently fails.
- */
-static acpi_gas_t resolve_pm1_gas(const acpi_gas_t *x_gas, uint32_t legacy_port,
-                                  uint32_t fadt_len, size_t x_field_end) {
-    acpi_gas_t out = {0};
-    if (x_gas && fadt_field_present(fadt_len, x_field_end) &&
-        x_gas->address != 0) {
-        out = *x_gas;
-        return out;
-    }
-    if (legacy_port != 0) {
-        out.address_space = GAS_AS_SYSTEM_IO;
-        out.bit_width     = 16;
-        out.bit_offset    = 0;
-        out.access_size   = 2;
-        out.address       = legacy_port;
-    }
-    return out;
-}
-
-/* PM1 control register fields — ACPI 6.5 §4.8.3.2.1, Table 4.13. */
-#define PM1_CNT_SLP_TYP_SHIFT  10
-#define PM1_CNT_SLP_TYP_MASK   0x1C00u   /* bits 12:10 */
-#define PM1_CNT_SLP_EN         0x2000u   /* bit 13     */
-
-/* Ask the platform for a sleep state through one PM1 control register.
- *
- * Everything but SLP_TYP and SLP_EN is preserved, because §4.6.1 has OSPM
- * preserve the bits of a control register and Table 4.13 names one of them in
- * particular: bit 0 is SCI_EN, "the responsibility of the hardware to set or
- * reset", which OSPM always preserves.
- *
- * The word written here used to be built from nothing — (SLP_TYP << 10) |
- * SLP_EN — so it drove SCI_EN and BM_RLD to zero along with every reserved
- * bit, handing the PM event decoder back to the SMI arbiter that
- * acpi_enable_mode() had just spent up to three seconds taking it from, on
- * exactly the legacy-BIOS boards that need that handoff. Nothing in the tree
- * ever put SCI_EN back, so on every path where the write does not immediately
- * kill power — the PM1b retry, the halt below — PM1 events and GPEs were
- * routed to SMI for the rest of the machine's life. ACPICA masks off the same
- * two fields and no others (acpi_hw_legacy_sleep).
- *
- * The request is split in two because the write order across the PAIR of
- * blocks is what §4.8 legislates, not the order within one of them: "OSPM
- * will always write the SLP_TYPa value to the 'A' register block followed by
- * the SLP_TYPb value within the field to the 'B' register block." A block
- * carried all the way to SLP_EN before its partner has even been given a
- * sleep type asserts the transition in A while B still holds a stale type.
- * So the word is prepared per block and written in two passes over both. */
-typedef struct {
-    const acpi_gas_t *gas;
-    const char       *tag;
-    uint16_t          word;   /* SLP_TYP in place, SLP_EN still clear */
-    bool              ready;
-} Pm1SleepRequest;
-
-static void pm1_sleep_prepare(Pm1SleepRequest *req, const acpi_gas_t *gas,
-                              uint16_t slp_typ, const char *tag) {
-    req->gas   = gas;
-    req->tag   = tag;
-    req->word  = 0;
-    req->ready = false;
-
-    if (gas->address == 0) return;
-
-    uint16_t cur = 0;
-    if (gas_read_word(gas, &cur) != 0) {
-        kprintf("[ACPI] %s control register cannot be read; a sleep vector "
-                "written blind would clear SCI_EN with it, so it is not "
-                "written\n", tag);
-        return;
-    }
-    if (cur == 0xFFFFu) {
-        /* Table 4.13 gives PM1_CNT reserved bits that read zero, so an
-         * all-ones word is a port answering nothing, not a register. */
-        kprintf("[ACPI] %s control register reads 0xFFFF — nothing is decoding "
-                "that address, so there is no register to ask for sleep\n",
-                tag);
-        return;
-    }
-
-    uint16_t keep = (uint16_t)(cur & ~(PM1_CNT_SLP_TYP_MASK | PM1_CNT_SLP_EN));
-    req->word = (uint16_t)(keep |
-                           (((uint16_t)(slp_typ << PM1_CNT_SLP_TYP_SHIFT)) &
-                            PM1_CNT_SLP_TYP_MASK));
-    req->ready = true;
-
-    debug_printf("[ACPI] %s shutdown via GAS as=%u addr=0x%lx cur=0x%04x "
-                 "SLP_TYP=0x%x -> 0x%04x then 0x%04x\n",
-                 tag, gas->address_space, (unsigned long)gas->address,
-                 cur, slp_typ, req->word,
-                 (uint16_t)(req->word | PM1_CNT_SLP_EN));
-}
-
-static void pm1_sleep_write(Pm1SleepRequest *req, bool with_enable) {
-    if (!req->ready) return;
-
-    uint16_t value = with_enable ? (uint16_t)(req->word | PM1_CNT_SLP_EN)
-                                 : req->word;
-    if (gas_write_word(req->gas, value) != 0) {
-        kprintf("[ACPI] %s %s write failed\n", req->tag,
-                with_enable ? "SLP_EN" : "SLP_TYP");
-        req->ready = false;
-    }
-}
 
 static void attempt_acpi_reset(void) {
     if (!g_acpi.initialized || !g_acpi.fadt) return;
@@ -489,33 +258,27 @@ void acpi_shutdown(void) {
                 "vector to write and none will be guessed\n");
     }
 
+    /* Through acpi_pm1_request_sleep(), which is the kernel's ONLY resolver
+     * of the PM1 control pair and its only writer.
+     *
+     * A second resolver lived here — resolve_pm1_gas() feeding gas_read_word
+     * / gas_write_word — and it was this one, not acpi.c's, that the live S5
+     * path used. They agreed on preferring the X_ descriptor and disagreed on
+     * everything after that: an X_ descriptor naming an address space OSPM
+     * cannot reach was handed straight to gas_read_word here and refused,
+     * while acpi.c read the same descriptor as §5.2.9's "non zero value which
+     * can be used by the OSPM" failing and went back to the legacy address.
+     * So on one board the ACPI-mode handoff found a PM1 register and the
+     * shutdown found none. One register, one resolver.
+     *
+     * It also stops this path from calling vmm_map_mmio: a System Memory PM1
+     * register is mapped once, in acpi_init, long before halt_stop_hardware
+     * has run and the kernel is asked to allocate on a one-way path. */
     if (g_acpi.initialized && g_acpi.fadt && g_acpi.s5_found) {
-        uint32_t flen = g_acpi.fadt->header.length;
-        acpi_gas_t pm1a = resolve_pm1_gas(&g_acpi.fadt->x_pm1a_control_block,
-                                          g_acpi.pm1a_cnt_blk,
-                                          flen,
-                                          offsetof(acpi_fadt_t, x_pm1a_control_block) +
-                                              sizeof(acpi_gas_t));
-        acpi_gas_t pm1b = resolve_pm1_gas(&g_acpi.fadt->x_pm1b_control_block,
-                                          g_acpi.pm1b_cnt_blk,
-                                          flen,
-                                          offsetof(acpi_fadt_t, x_pm1b_control_block) +
-                                              sizeof(acpi_gas_t));
-
-        Pm1SleepRequest req_a, req_b;
-        pm1_sleep_prepare(&req_a, &pm1a, g_acpi.slp_typa, "PM1a");
-        pm1_sleep_prepare(&req_b, &pm1b, g_acpi.slp_typb, "PM1b");
-
-        /* Both sleep types down first, then the transition the chipset
-         * sequences on — ACPI 6.5 §4.8, and the shape of ACPICA's
-         * acpi_hw_legacy_sleep (two passes over the pair, not one block
-         * finished before the other is begun). */
-        pm1_sleep_write(&req_a, false);
-        pm1_sleep_write(&req_b, false);
-        pm1_sleep_write(&req_a, true);
-        pm1_sleep_write(&req_b, true);
-
-        if (req_a.ready || req_b.ready) delay_ms(100);
+        if (acpi_pm1_request_sleep((uint8_t)g_acpi.slp_typa,
+                                   (uint8_t)g_acpi.slp_typb)) {
+            delay_ms(100);
+        }
     }
 
     /* Soft poweroff exhausted. ACPI S5 is the only standardised way to

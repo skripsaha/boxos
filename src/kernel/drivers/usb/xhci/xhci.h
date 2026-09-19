@@ -371,4 +371,18 @@ bool xhci_put_back_in_service(xhci_controller_t* ctrl);
 uint8_t            xhci_controller_count(void);
 xhci_controller_t* xhci_controller_at(uint8_t index);
 
+/*
+ * Ask the hub that translates for this device to let go of the buffer a
+ * halted Control or Bulk pipe left busy in it (xHCI 1.2 §4.6.8, USB 2.0
+ * §11.17.5 and §11.24.2.3). Costs nothing on a device nothing translates for.
+ *
+ * Lives in xhci_transfer.c and is declared here rather than beside the other
+ * transfer calls because it is a control transfer to a THIRD device — the
+ * hub — and both the class drivers and the generic control path need it. It
+ * therefore may only be called from somewhere allowed to wait, never from the
+ * event drain.
+ */
+void xhci_clear_tt_buffer(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
+                          uint8_t dci, uint32_t timeout_ms);
+
 #endif

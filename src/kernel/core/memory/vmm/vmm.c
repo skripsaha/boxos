@@ -178,6 +178,12 @@ static spinlock_t kernel_mmio_lock = {0};
  * ========================================================================= */
 
 #define MSR_IA32_PAT   0x277U
+
+/* CR4.PGE — Intel SDM Vol 3A §2.5. Named here because vmm_pat_init toggles
+ * it to satisfy §11.12.4's "including global entries"; the two shootdown
+ * sites below spell the same bit as (1ULL << 7) inline. */
+#define VMM_CR4_PGE_BIT (1ULL << 7)
+
 #define PAT_TYPE_WB    0x06U
 #define PAT_TYPE_WT    0x04U
 #define PAT_TYPE_UCM   0x07U   /* UC- (weakly uncacheable) */
@@ -230,19 +236,64 @@ void vmm_pat_init(void)
      * see the BSP-programmed value. */
     __atomic_store_n(&g_ia32_pat_value, pat, __ATOMIC_RELEASE);
 
-    /* TLB invalidation after PAT change. Intel SDM Vol 3A §11.11.8: PAT
-     * entries are cached in the TLB along with the page-walk results, so
-     * a PAT update doesn't take effect for pre-existing TLB entries
-     * until a CR3 reload (or per-page INVLPG). On the BSP this hits
-     * before any WC mapping exists so the flush is purely defensive; on
-     * APs it ensures a framebuffer touched between vmm_pat_init() and
-     * the first context switch sees the new WC encoding rather than the
-     * AP's reset-default UC-. Clear the NOFLUSH bit (bit 63) before
-     * writing CR3 — see vmm_flush_tlb for the full story. */
-    uintptr_t cr3;
-    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
-    cr3 &= ~(1ULL << 63);
-    __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+    /* TLB invalidation after the PAT change. Intel SDM Vol 3A §11.12.4
+     * ("Programming the PAT") states the duty and then the sequence:
+     * "It requires the OS to invalidate all affected TLB entries
+     * (including global entries) and all entries in all paging-structure
+     * caches. ... 1. If the PCIDE or PGE flag is set in CR4, flush TLBs by
+     * clearing one of those flags (then restore the flag via a subsequent
+     * CR4 write). Otherwise, flush TLBs by executing a MOV from control
+     * register CR3 to another register and then a MOV from that register
+     * back to CR3."
+     *
+     * Which branch this is, is not a choice. CR4.PGE is 1 on every core by
+     * the time this runs — the BSP sets it in enable_fpu before vmm_init,
+     * each AP in ap_trampoline.asm and again in enable_fpu before
+     * per_core_init_ap calls this — and the Pull Map's RAM leaves all carry
+     * VMM_FLAG_GLOBAL. A CR3 round trip is the "Otherwise" branch: §4.10.4.1
+     * says MOV to CR3 "invalidates all TLB entries associated with PCID
+     * 000H except those for global pages", so taking it with PGE set left
+     * every global entry — which here is every kernel RAM translation —
+     * holding its pre-PAT memory type, and the comment recorded that as
+     * sufficient.
+     *
+     * PGE is the flag toggled and not PCIDE, on purpose: restoring PCIDE is
+     * the half that can fail. §4.10.1: "MOV to CR4 causes a general-
+     * protection exception (#GP) if it would change CR4.PCIDE from 0 to 1
+     * and either IA32_EFER.LMA = 0 or CR3[11:0] ≠ 000H" — so a core
+     * carrying a non-zero PCID could clear PCIDE and never get it back. Clearing CR4.PGE has no such restriction and is strictly the
+     * bigger hammer: it drops global entries too, which is exactly what
+     * §11.12.4 asks for. The instruction pair is the one pcid_alloc_safe and
+     * vmm_tlb_shootdown_handler already use.
+     *
+     * The CR3 round trip stays as the branch the spec names for a core with
+     * neither flag set. There, no entry is global (a page is global only
+     * while CR4.PGE is 1) and PCID 000H is the only tagged set in use, so
+     * the reload reaches everything this core holds.
+     *
+     * Step 2 of the sequence — CLFLUSH/WBINVD — is not performed and does
+     * not need to be: it is scoped to "changes to memory-type mappings for
+     * which cache self-snooping behavior would be problematic given the
+     * existing mappings (e.g. changing a cache line's memory type from WB to
+     * UC...)". This call changes PA6 alone, from UC- to WC, and nothing has
+     * yet selected PA6: vmm_map_framebuffer and the EFI runtime mapper are
+     * its only users and both run after vmm_init. */
+    {
+        uint64_t cr4;
+        __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+        if (cr4 & VMM_CR4_PGE_BIT) {
+            __asm__ volatile("mov %0, %%cr4"
+                             : : "r"(cr4 & ~VMM_CR4_PGE_BIT) : "memory");
+            __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+        } else {
+            /* Clear the NOFLUSH bit (bit 63) before writing CR3 — see
+             * vmm_flush_tlb for the full story. */
+            uintptr_t cr3;
+            __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+            cr3 &= ~(1ULL << 63);
+            __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+        }
+    }
 
     debug_printf("[VMM] PAT MSR programmed: PA6=WC (framebuffer Write Combining enabled)\n");
 }
@@ -425,9 +476,44 @@ static const char *vmm_mtrr_type_str(uint8_t t) {
     }
 }
 
+/* Does THIS logical processor implement MTRRs at all?
+ *
+ * Intel SDM Vol 3A §11.11.1 "MTRR Feature Identification": "The
+ * availability of the MTRR feature is model-specific. Software can
+ * determine if MTRRs are supported on a processor by executing the CPUID
+ * instruction and reading the state of the MTRR flag (bit 12) in the
+ * feature information register (EDX). If the MTRR flag is set (indicating
+ * that the processor implements MTRRs), additional information about MTRRs
+ * can be obtained from the 64-bit IA32_MTRRCAP MSR."
+ *
+ * Bit 12, therefore — not bit 16. The gate that stood here was
+ * g_cpu_caps.has_pat, i.e. CPUID.01H:EDX[16], which answers whether the
+ * page-attribute table exists and says nothing about IA32_MTRRCAP,
+ * IA32_MTRR_DEF_TYPE or the PHYSBASE/PHYSMASK pairs this function reads.
+ * Every other MSR probe in this kernel is gated on its own CPUID bit —
+ * 0xCF on EDX[30], 0xE1 on WAITPKG, 0x981/0x982 on ECX[13], 0x87 on the
+ * CPUID.21H string — and this was the one outlier.
+ *
+ * Asked of the running core with CPUID rather than of g_cpu_caps, because
+ * cpu_capabilities_t carries no MTRR field and the MSRs below are this
+ * core's own; a hybrid part answers for the core that is reading them. */
+static bool vmm_cpu_has_mtrr(void) {
+    uint32_t eax, ebx, ecx, edx;
+    cpuid(CPUID_LEAF_FEATURES, &eax, &ebx, &ecx, &edx);
+    return ((edx >> 12) & 1u) != 0;
+}
+
 void vmm_dump_mtrr_layout(void) {
-    if (!g_cpu_caps.has_pat) {
-        debug_printf("[VMM] MTRR audit SKIP: CPU lacks PAT/MSRs\n");
+    if (!vmm_cpu_has_mtrr()) {
+        /* kprintf, like the two verdicts below: the alternative used to be
+         * reading MSRs this CPU does not implement and then telling the
+         * operator "MTRRs are DISABLED" on a part that has none to disable.
+         * A refusal said out loud is the honest replacement for a verdict
+         * this kernel has no way to reach. */
+        kprintf("[VMM] MTRR audit SKIP: CPUID.01H:EDX[12] is clear — this "
+                "processor implements no MTRRs (Intel SDM §11.11.1), so "
+                "nothing here can say what effective memory type firmware "
+                "gave any span.\n");
         return;
     }
     uint64_t cap = vmm_rdmsr_local(VMM_MSR_IA32_MTRRCAP);
@@ -457,21 +543,50 @@ void vmm_dump_mtrr_layout(void) {
      * BoxOS does not program MTRRs — firmware does, and the Pull Map now
      * marks its own leaves honestly so no device range depends on firmware
      * to be uncacheable. But the effective type of a page is the MTRR type
-     * combined with the PAT type (Intel SDM Vol 3A §11.12.5), and combining
-     * only ever moves DOWN. A firmware that disables MTRRs, or that leaves
-     * a non-WB default, silently demotes every write-back span this kernel
-     * asked for, and the machine runs correctly at a fraction of its speed
-     * with nothing on the screen to say so. kprintf, because debug_printf
-     * compiles to nothing in the builds that ship. */
+     * combined with the PAT type, and the rule for that is Table 11-7 in
+     * Intel SDM Vol 3A §11.5.2.2 "Selecting Memory Types for Pentium III and
+     * More Recent Processor Families". (§11.12.5, cited here before, is "PAT
+     * Compatibility with Earlier IA-32 Processors" — a different subject
+     * entirely.)
+     *
+     * What Table 11-7 gives, said the way it actually reads rather than as
+     * "combining only ever moves DOWN":
+     *   - for a PAT-WB page, which is every RAM leaf of the Pull Map (PAT
+     *     entry 0), the effective type IS the MTRR type, in every row. So a
+     *     disabled or non-WB MTRR default does demote all of them, and that
+     *     is the whole of what the two verdicts below are about;
+     *   - for a PAT-UC page, which is every device leaf here (PCD|PWT, PAT
+     *     entry 3), the effective type is UC under every MTRR type — the
+     *     uncacheability this kernel asks for cannot be taken away;
+     *   - for a PAT-WC page the effective type is WC under EVERY MTRR type,
+     *     UC included. That is the one column where the combination is
+     *     weaker than the MTRR type, and it is the column the GOP
+     *     framebuffer stands in: firmware that leaves the aperture MTRR-UC
+     *     does NOT cost vmm_map_framebuffer its write-combining.
+     * The old sentence said the opposite of that last row, in a comment and
+     * in an operator-visible line, and would have sent someone hunting an
+     * MTRR cause for a slow console that has none.
+     *
+     * kprintf, because debug_printf compiles to nothing in the builds that
+     * ship. */
     if (!mtrr_en) {
-        kprintf("[VMM] MTRRs are DISABLED (MTRR_DEF_TYPE.E=0) — the whole "
-                "physical space falls back to UC per Intel SDM §11.11.2.1. "
-                "Correct, and as slow as the machine gets.\n");
+        kprintf("[VMM] MTRRs are DISABLED (MTRR_DEF_TYPE.E=0) — \"all MTRRs "
+                "are disabled ... and the UC memory type is applied to all of "
+                "physical memory\" (Intel SDM §11.11.2.1). Every write-back "
+                "leaf this kernel asked for is uncacheable; only a PAT-WC "
+                "page keeps its type, which Table 11-7 gives WC even under "
+                "an MTRR type of UC. Correct, and as slow as the machine "
+                "gets.\n");
     }
     if (def_typ != 0x06u && mtrr_en) {
-        kprintf("[VMM] MTRR default type is %s, not write-back — every span "
-                "no variable MTRR names is demoted below what its page-table "
-                "entry asks for (Intel SDM §11.12.5).\n",
+        kprintf("[VMM] MTRR default type is %s, not write-back — a span no "
+                "variable MTRR names takes that type combined with its PAT "
+                "entry (Intel SDM §11.5.2.2, Table 11-7), and for a "
+                "write-back page the combination IS the MTRR type, so every "
+                "such leaf is %s. A PAT-WC page is the exception Table 11-7 "
+                "makes: WC under every MTRR type, so the framebuffer keeps "
+                "write-combining.\n",
+                def_str ? def_str : "RESERVED",
                 def_str ? def_str : "RESERVED");
     }
 

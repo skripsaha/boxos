@@ -35,6 +35,10 @@
 
 #include "efi.h"
 #include "efi_secureboot.h"
+/* For EFI_SB_HASH_KIND_BITS / EFI_SB_HASH_KIND_X509 — the one place the
+ * encoding this file writes into EfiSbHashEntry.hash_kind is spelled out,
+ * shared with the consumer that reads it back. */
+#include "efi_authenticode.h"
 #include "efi_runtime_internal.h"
 #include "klib.h"
 #include "crypto.h"
@@ -307,7 +311,7 @@ static void walk_signature_list(EfiSbDb kind, const uint8_t *blob, uint32_t blob
                 EfiSbHashEntry *h = &g_hashes[g_hash_count++];
                 h->owner = owner;
                 h->db_kind   = (uint16_t)kind;
-                h->hash_kind = (uint16_t)hash_bits | 0x8000;
+                h->hash_kind = (uint16_t)hash_bits | EFI_SB_HASH_KIND_X509;
                 uint32_t copy_len = payload_len > EFI_SB_MAX_HASH_LEN
                                   ? EFI_SB_MAX_HASH_LEN : payload_len;
                 memset(h->hash, 0, sizeof(h->hash));
@@ -375,12 +379,27 @@ void efi_secureboot_publish_touch(void)
         TouchPublish(tag, digest, sizeof(digest));
     }
 
-    /* Per-hash tags (only SHA-256 raw hashes; SHA-384/512 skipped to
-     * keep the index small — authenticode currently uses SHA-256 only). */
+    /* Per-hash tags, raw SHA-256 image hashes only.
+     *
+     * This is a limit of the Touch SURFACE, not of verification, and the
+     * distinction matters because the comment here used to claim the
+     * opposite ("authenticode currently uses SHA-256 only"). It does not:
+     * efi_authenticode.c matches EFI_CERT_X509_SHA256/384/512 records
+     * against a certificate's TBSCertificate and EFI_CERT_SHA256/384/512
+     * records against the image digest, reading this inventory directly
+     * through efi_secureboot_hash_get(). Every parsed record is consulted.
+     *
+     * What is not published is the wide ones: secureboot:<db>-hash:<hex>
+     * carries 64 hex characters today, and a SHA-512 value needs 128 —
+     * a longer tag AND a subscriber that can tell the widths apart by
+     * length. An EFI_CERT_X509_SHA* record is a third thing again: a hash
+     * of a CERTIFICATE, which under a tag that has always meant "image
+     * hash" would say something false. Widening the surface is a decision
+     * about the tag namespace, so it is asked rather than assumed. */
     for (uint32_t i = 0; i < g_hash_count; i++) {
         const EfiSbHashEntry *h = &g_hashes[i];
-        if ((h->hash_kind & 0x7FFF) != 256) continue;
-        if (h->hash_kind & 0x8000)          continue;   /* x509+hash kind */
+        if ((h->hash_kind & EFI_SB_HASH_KIND_BITS) != 256) continue;
+        if (h->hash_kind & EFI_SB_HASH_KIND_X509)          continue;
         char hex[65];
         hash_to_hex(h->hash, 32, hex, sizeof(hex));
         char tag[96];
@@ -659,8 +678,8 @@ static const EfiSbHashEntry *find_hash_sha256(EfiSbDb kind, const uint8_t hash[3
     for (uint32_t i = 0; i < g_hash_count; i++) {
         const EfiSbHashEntry *h = &g_hashes[i];
         if (h->db_kind != kind) continue;
-        if ((h->hash_kind & 0x7FFF) != 256) continue;
-        if (h->hash_kind & 0x8000)          continue;
+        if ((h->hash_kind & EFI_SB_HASH_KIND_BITS) != 256) continue;
+        if (h->hash_kind & EFI_SB_HASH_KIND_X509)          continue;
         if (memcmp(h->hash, hash, 32) == 0) return h;
     }
     return NULL;

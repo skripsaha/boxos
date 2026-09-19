@@ -48,6 +48,7 @@
 #include "cpu_calibrate.h"
 #include "atomics.h"
 #include "crypto.h"   /* KCrc32 — shared CRC32(IEEE 802.3) implementation */
+#include "fpu.h"      /* fpu_save / fpu_restore around every firmware entry */
 
 #define EFI_PAGE_SIZE      4096ULL
 #define EFI_PAGE_SHIFT     12
@@ -66,6 +67,12 @@ static EfiRuntimeServices *g_rt           = NULL;   /* live (virtual) pointer */
 static bool                g_rt_available = false;
 static spinlock_t          g_rt_lock;
 static bool                g_rt_lock_init = false;
+
+/* The caller's x87/SSE/AVX register file, parked across every firmware
+ * entry. Allocated once in efi_runtime_init, owned by whoever holds
+ * g_rt_lock — see efi_rt_fpu_enter for why it exists and why one shared
+ * area is safe. */
+static uint8_t            *g_rt_fpu_area  = NULL;
 
 /* Every descriptor carrying EFI_MEMORY_RUNTIME — which is exactly what the
  * SetVirtualAddressMap array must contain, and NOT the same number as the
@@ -698,6 +705,33 @@ bool efi_runtime_init(void)
      * unguarded. */
     if (!g_rt_lock_init) { spinlock_init(&g_rt_lock); g_rt_lock_init = true; }
 
+    /* And the place the caller's floating-point registers go while the
+     * firmware has the machine — allocated here for the same reason the
+     * lock is built here: SetVirtualAddressMap goes through efi_rt_lock a
+     * few dozen lines down, and that door may not open without it.
+     *
+     * Zeroed, and that is load-bearing rather than tidy: XSAVE writes
+     * XSTATE_BV but does NOT write XCOMP_BV (Intel SDM Vol 1 §13.7), and
+     * XRSTOR in the standard format takes #GP unless XCOMP_BV is zero. The
+     * memset is the only thing that establishes it before the first restore.
+     *
+     * No fallback. Without somewhere to park the register file, entering
+     * firmware means returning to a process with silently different XMM
+     * registers, so this joins the file's contract — every failure path
+     * leaves efi_runtime_available() false and acpi_reboot's 0xCF9 / 8042 /
+     * triple-fault chain carries the machine down. */
+    if (!g_rt_fpu_area) {
+        uint32_t fpu_bytes = fpu_alloc_size();
+        g_rt_fpu_area = kmalloc(fpu_bytes);
+        if (!g_rt_fpu_area) {
+            kprintf("[EFI] cannot allocate %u byte(s) to park the caller's "
+                    "FPU state across firmware calls — no EFI runtime "
+                    "services on this boot\n", fpu_bytes);
+            return false;
+        }
+        memset(g_rt_fpu_area, 0, fpu_bytes);
+    }
+
     /* Stage 1: map every EFI_MEMORY_RUNTIME descriptor. The same map is
      * used as input to SetVirtualAddressMap below, so the patch to
      * virtual_start happens inside efi_map_rt_descriptor. */
@@ -1059,21 +1093,39 @@ static bool g_rt_if_violation_said = false;
  * direction flag is clear on entry to any compiled C function by the System V
  * x86-64 ABI, which is the only way this function is reached.
  *
- * The saved pair lives in file scope rather than on the caller's stack
- * because the callers are in other translation units and their signatures
- * are fixed; the lock is what makes that safe — efi_rt_lock owns g_rt_lock
- * until efi_rt_unlock gives it back, so exactly one call owns these two words
- * at a time, and SVAM (which goes through this same door) is BSP-only anyway.
+ * ‼ And the two control words are not the whole exposure. The x87 and
+ * XMM/YMM/ZMM REGISTER FILE crosses into firmware live. FCW and MXCSR were
+ * saved and put back here; the registers they govern were not saved at all,
+ * and they belong to whichever process the kernel is running on behalf of —
+ * the scheduler writes them to that process's XSAVE area on a context
+ * switch, not on a firmware call. The UEFI x64 calling convention makes
+ * XMM0-XMM5 volatile, so firmware is ENTITLED to return having clobbered
+ * them, and a process whose XMM0 changed across an unrelated syscall has no
+ * way to see why. efi_reset_system reaches this door from system_halt(),
+ * i.e. from process context, and it returns whenever the firmware refuses
+ * the reset. Linux wraps its runtime calls in kernel_fpu_begin/end for
+ * exactly this, and the whole state now goes through fpu_save/fpu_restore
+ * here — which subsumes the FCW/MXCSR pair this code used to keep by hand,
+ * so that pair is gone rather than saved twice.
  *
- * FNSTCW and STMXCSR do not wait on a pending x87 exception, and FLDCW raises
- * none of its own — SDM Vol 2A, FLDCW, "Floating-Point Exceptions: None;
- * however, this operation might unmask a pending exception in the FPU status
- * word. That exception is then generated upon execution of the next 'waiting'
- * floating-point instruction." So the restore can only deliver an exception
- * where it would have been delivered without this code at all.
+ * The save area lives in file scope rather than on the caller's stack
+ * because the callers are in other translation units and their signatures
+ * are fixed, and because its size is g_xsave_area_size — a runtime number
+ * no stack frame under -Wstack-usage=8192 may assume. The lock is what makes
+ * one shared area safe: efi_rt_lock owns g_rt_lock until efi_rt_unlock gives
+ * it back, interrupts are off for the whole window, so exactly one call owns
+ * the area at a time, and SVAM (which goes through this same door) is
+ * BSP-only anyway. (Declared with the rest of the driver state at the top
+ * of this file, because efi_runtime_init allocates it before it opens this
+ * door for the SetVirtualAddressMap call.)
+ *
+ * FLDCW raises no exception of its own — SDM Vol 2A, FLDCW, "Floating-Point
+ * Exceptions: None; however, this operation might unmask a pending exception
+ * in the FPU status word. That exception is then generated upon execution of
+ * the next 'waiting' floating-point instruction." And the status word the
+ * restore puts back is the one the save took, so the restore can only deliver
+ * an exception where it would have been delivered without this code at all.
  */
-static uint16_t g_rt_saved_fcw;
-static uint32_t g_rt_saved_mxcsr;
 
 /* The two values §2.3.4 names, held as objects because FLDCW and LDMXCSR
  * take a memory operand and no immediate. */
@@ -1082,19 +1134,15 @@ static const uint32_t g_rt_mxcsr_uefi = 0x1F80u;
 
 static void efi_rt_fpu_enter(void)
 {
-    __asm__ volatile("fnstcw %0\n\t"
-                     "stmxcsr %1\n\t"
-                     "fldcw %2\n\t"
-                     "ldmxcsr %3"
-                     : "=m"(g_rt_saved_fcw), "=m"(g_rt_saved_mxcsr)
-                     : "m"(g_rt_fcw_uefi), "m"(g_rt_mxcsr_uefi));
+    fpu_save(g_rt_fpu_area);
+    __asm__ volatile("fldcw %0\n\t"
+                     "ldmxcsr %1"
+                     :: "m"(g_rt_fcw_uefi), "m"(g_rt_mxcsr_uefi));
 }
 
 static void efi_rt_fpu_leave(void)
 {
-    __asm__ volatile("fldcw %0\n\t"
-                     "ldmxcsr %1"
-                     :: "m"(g_rt_saved_fcw), "m"(g_rt_saved_mxcsr));
+    fpu_restore(g_rt_fpu_area);
 }
 
 void efi_rt_lock(uint64_t *saved_rflags)

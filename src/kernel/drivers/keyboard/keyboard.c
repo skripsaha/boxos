@@ -85,6 +85,49 @@ static volatile uint8_t kb_e1_swallow[MAX_CORES];
 
 /* ─── LED state ─────────────────────────────────────────────────────────── */
 
+/* ‼ THE LAMP COMMAND IS TWO BYTES ON ONE LINE, AND TWO CORES CAN BEGIN IT AT
+ * THE SAME INSTANT.
+ *
+ * keyboard_set_leds reads like the BSP's alone and is not, for the reason the
+ * prefix state above is per-core: a USB lock key reaches it. Usage 0x39 maps
+ * to set-1 0x3A in usb_to_ps2 (keymaps.h), xhci_hid.c hands that scancode to
+ * keyboard_handle_scancode, and a report is decoded by whichever core drains
+ * the xHCI event ring — every block read off a USB volume does that. So PS/2
+ * IRQ1 on the BSP and a USB report on any other core can both be in here.
+ *
+ * With nothing between them the two writes to 0x60 interleave as 0xED / 0xED
+ * / bitmap / bitmap, and the keyboard takes the second 0xED as the FIRST
+ * command's lamp argument and the bitmaps as commands of their own —
+ * Chapweske, Command Set: a command that takes "one more byte" takes whatever
+ * the next byte on the line is. The lamps then disagree with the driver AND
+ * the scan code stream carries the answers to two undefined commands.
+ *
+ * A leaf spinlock owns the conversation, taken with spin_trylock and never
+ * spin_lock: the loser must not stand in IRQ context behind a holder that may
+ * be inside kb_wait_input_buffer's 50 ms. It does not need to. The wish is
+ * published BEFORE the lock is attempted, the holder re-reads it after every
+ * exchange, and the loop re-checks once more after the unlock — so a wish
+ * raised while the lock is held is carried out by whoever holds it, and one
+ * raised in the instant between the holder's last read and its unlock is
+ * picked up by that same holder's next turn round the loop. Nothing is
+ * dropped and no core waits on another.
+ *
+ * ‼ WHAT IS LEFT, NAMED: the 0xFA between the two halves is not seen here.
+ * Once IRQ1 is live the keyboard's answers arrive as interrupts and are
+ * dropped by keyboard_handle_scancode's response filter, so a 0xFE ("could
+ * not read that, send it again") is lost and that lamp stays wrong until the
+ * key is pressed again. Polling 0x60 for it is not available — it would take
+ * keystrokes out of the stream the shell is reading. Closing it means the
+ * decoder, which already hears those bytes, driving the conversation; which
+ * mechanism that is, is the owner's to pick. */
+static spinlock_t kb_led_lock;
+
+/* What the lock keys ask the lamps to show. Written by any core, before it
+ * attempts kb_led_lock. */
+static uint8_t kb_led_wanted = 0;
+
+/* What the keyboard was last told to show. Written only under kb_led_lock;
+ * read outside it by the loop condition in keyboard_set_leds. */
 static uint8_t kb_led_state = 0;
 
 /* ─── Publishing a key ──────────────────────────────────────────────────── */
@@ -458,15 +501,38 @@ static bool kb_read_ccb(uint8_t *out)
 
 void keyboard_set_leds(uint8_t caps, uint8_t num, uint8_t scroll)
 {
-    uint8_t bits = (scroll ? 0x01 : 0) | (num ? 0x02 : 0) | (caps ? 0x04 : 0);
-    if (bits == kb_led_state) return;
+    uint8_t bits = (uint8_t)((scroll ? 0x01 : 0) | (num ? 0x02 : 0) |
+                             (caps ? 0x04 : 0));
+
+    /* The wish goes up first, so a core that cannot get the lock has still
+     * said what it wants and the holder will carry it out. */
+    __atomic_store_n(&kb_led_wanted, bits, __ATOMIC_RELEASE);
+
     if (!g_kb_8042_alive) return;
 
-    /* The remembered state follows what actually went out: a command the
-     * controller never took must be tried again, not counted as done. */
-    if (!kb_send(KEYBOARD_DATA_PORT, KBC_CMD_SET_LEDS)) return;
-    if (!kb_send(KEYBOARD_DATA_PORT, bits)) return;
-    kb_led_state = bits;
+    while (__atomic_load_n(&kb_led_wanted, __ATOMIC_ACQUIRE) !=
+           __atomic_load_n(&kb_led_state,  __ATOMIC_ACQUIRE)) {
+
+        /* Held means another core is mid-conversation and has already been
+         * told, by the store above, what this one wants. */
+        if (!spin_trylock(&kb_led_lock)) return;
+
+        uint8_t want = __atomic_load_n(&kb_led_wanted, __ATOMIC_ACQUIRE);
+        bool    sent = kb_send(KEYBOARD_DATA_PORT, KBC_CMD_SET_LEDS) &&
+                       kb_send(KEYBOARD_DATA_PORT, want);
+
+        /* What is remembered follows what actually went out: a byte the
+         * controller never took must be tried again, not counted as done. */
+        if (sent) __atomic_store_n(&kb_led_state, want, __ATOMIC_RELEASE);
+        spin_unlock(&kb_led_lock);
+
+        if (!sent) {
+            kprintf("[KEYBOARD] the 8042 never freed its input buffer for the "
+                    "lamp command; Caps/Num/Scroll lamps now disagree with the "
+                    "driver until a lock key is pressed again\n");
+            return;
+        }
+    }
 }
 
 /* The 8042's own half of the driver's start: everything that only a
@@ -696,10 +762,12 @@ void keyboard_init(void)
 {
     memset(&kb_state, 0, sizeof(kb_state));
     spinlock_init(&kb_repeat_lock);
+    spinlock_init(&kb_led_lock);
     memset(&kb_repeat, 0, sizeof(kb_repeat));
     memset((void *)kb_e0_pending, 0, sizeof(kb_e0_pending));
     memset((void *)kb_e1_swallow, 0, sizeof(kb_e1_swallow));
     kb_led_state  = 0;
+    kb_led_wanted = 0;
 
     /* ‼ THE DRIVER'S OWN STATE COMES FIRST, AND NOT FOR TIDINESS.
      *
@@ -869,29 +937,42 @@ void keyboard_handle_scancode(uint8_t scancode)
         return;
     }
 
-    /* Toggle keys — act on press only. Toggle is a load+xor+store (3 ops);
-     * since IRQ1 is the sole writer (BSP) and toggles arrive serialised by
-     * the IRQ disable in spinlock paths used by readers, the load-then-store
-     * pattern is safe. Snapshot the post-toggle vector for keyboard_set_leds. */
+    /* Toggle keys — act on press only.
+     *
+     * ‼ THIS USED TO SAY "IRQ1 IS THE SOLE WRITER (BSP)", AND IT WAS FALSE ON
+     * BOTH COUNTS. The same decoder is fed by xhci_hid.c, whose reports are
+     * processed by whichever core drains the xHCI event ring (see the block
+     * on kb_e0_pending), so two cores can be here at once; and no lock is
+     * taken anywhere on this path — the only lock the readers hold is not
+     * this driver's, and kb_repeat_lock is never held here. A load, an xor
+     * and a store from two cores loses one of two presses, and the lamp
+     * bitmap sent afterwards is then built from a state nobody asked for.
+     *
+     * A single fetch_xor is the whole answer: the field is already
+     * _Atomic uint8_t and only ever holds 0 or 1, so flipping bit 0 in one
+     * instruction is the toggle, and the value it returns is the state BEFORE
+     * the flip — the post-toggle state is that, inverted. The other two locks
+     * are read as they are, which is what the lamps are: a picture of the
+     * moment this key was pressed. */
     if (key == 0x3A && !is_release) {      /* Caps Lock */
-        uint8_t caps = !__atomic_load_n(&kb_state.caps_lock, __ATOMIC_RELAXED);
-        __atomic_store_n(&kb_state.caps_lock, caps, __ATOMIC_RELAXED);
+        uint8_t caps = (uint8_t)(__atomic_fetch_xor(&kb_state.caps_lock, 1,
+                                                    __ATOMIC_RELAXED) ^ 1);
         keyboard_set_leds(caps,
                           __atomic_load_n(&kb_state.num_lock,    __ATOMIC_RELAXED),
                           __atomic_load_n(&kb_state.scroll_lock, __ATOMIC_RELAXED));
         return;
     }
     if (key == 0x45 && !is_release) {      /* Num Lock */
-        uint8_t num = !__atomic_load_n(&kb_state.num_lock, __ATOMIC_RELAXED);
-        __atomic_store_n(&kb_state.num_lock, num, __ATOMIC_RELAXED);
+        uint8_t num = (uint8_t)(__atomic_fetch_xor(&kb_state.num_lock, 1,
+                                                   __ATOMIC_RELAXED) ^ 1);
         keyboard_set_leds(__atomic_load_n(&kb_state.caps_lock,   __ATOMIC_RELAXED),
                           num,
                           __atomic_load_n(&kb_state.scroll_lock, __ATOMIC_RELAXED));
         return;
     }
     if (key == 0x46 && !is_release) {      /* Scroll Lock */
-        uint8_t scroll = !__atomic_load_n(&kb_state.scroll_lock, __ATOMIC_RELAXED);
-        __atomic_store_n(&kb_state.scroll_lock, scroll, __ATOMIC_RELAXED);
+        uint8_t scroll = (uint8_t)(__atomic_fetch_xor(&kb_state.scroll_lock, 1,
+                                                      __ATOMIC_RELAXED) ^ 1);
         keyboard_set_leds(__atomic_load_n(&kb_state.caps_lock, __ATOMIC_RELAXED),
                           __atomic_load_n(&kb_state.num_lock,  __ATOMIC_RELAXED),
                           scroll);

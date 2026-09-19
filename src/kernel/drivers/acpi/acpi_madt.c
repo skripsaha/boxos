@@ -60,8 +60,44 @@ static bool lapic_flags_enabled(uint32_t flags) {
     return (flags & MADT_LAPIC_ENABLED) != 0;
 }
 
+/* Bit 1 carries "Online Capable" only on a FADT that knows the bit exists.
+ *
+ * ACPI 6.3 is the revision that defined it; before that the bit was RESERVED
+ * in Table 5.23, and a reserved bit is one the firmware was never asked to
+ * clear. Reading a stray 1 there as a hot-add seat describes a processor the
+ * firmware said nothing about — and by the PRE-6.3 rule that entry is simply
+ * unusable: "If this bit is clear ... this processor is unusable, and OSPM
+ * shall ignore the contents of the Processor Local APIC Structure."
+ *
+ * Which revision the table was written to is FADT Major.Minor, and the minor
+ * half is the byte at offset 131 that this kernel used to carry as padding
+ * (acpi.h, ACPI_FADT_MINOR_VERSION). Linux draws the same line in
+ * acpi_parse_madt: `acpi_support_online_capable = (revision > 6 || (revision
+ * == 6 && minor_revision >= 3))`.
+ *
+ * Linux then adds a second rule this kernel does NOT copy — under a
+ * hypervisor it treats every not-Enabled entry as usable anyway, "QEMU
+ * expects legacy Enabled=0 LAPIC entries to be counted as usable in order to
+ * support CPU hotplug in guests". BoxOS starts no processor the firmware did
+ * not mark Enabled on any machine, guest or not, so there is nothing for that
+ * exception to buy.
+ *
+ * No FADT at all (a MADT parsed before acpi_init finished, which cannot
+ * happen on the boot path but is not this function's to assume) is the
+ * conservative answer: the bit means nothing. */
+static bool madt_online_capable_is_meaningful(void) {
+    const acpi_fadt_t *f = g_acpi.fadt;
+    if (!f) return false;
+    if (f->header.length < offsetof(acpi_fadt_t, minor_revision) + 1)
+        return false;
+    if (f->header.revision > 6) return true;
+    return f->header.revision == 6 && ACPI_FADT_MINOR_VERSION(f) >= 3;
+}
+
 static bool lapic_flags_online_capable(uint32_t flags) {
-    return !lapic_flags_enabled(flags) && (flags & MADT_LAPIC_ONLINE_CAP) != 0;
+    return !lapic_flags_enabled(flags) &&
+           (flags & MADT_LAPIC_ONLINE_CAP) != 0 &&
+           madt_online_capable_is_meaningful();
 }
 
 static const char* lapic_flags_text(uint32_t flags) {
@@ -131,6 +167,14 @@ static uint32_t detect_bsp_apic_id(void) {
     cpuid(CPUID_LEAF_FEATURES, &eax, &ebx, &ecx, &edx);
     return (ebx >> 24) & 0xFFu;         /* 8-bit initial APIC ID */
 }
+
+/* The MADT is parsed more than once per boot — irqchip_init takes the
+ * interrupt half of it and amp_init takes the processor half, and each calls
+ * acpi_parse_madt with its own madt_info_t. The parse is pure and may repeat;
+ * the SENTENCE about Online-Capable seats may not. Printed per call, an
+ * operator counting cores would read every APIC ID twice and have no way to
+ * tell that from two real seats. Said on the first parse, once. */
+static bool g_seats_named = false;
 
 acpi_error_t acpi_parse_madt(madt_info_t* info) {
     if (!info) return ACPI_ERR_INVALID_TABLE;
@@ -217,6 +261,8 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
                     m->apic_id           = lapic->apic_id;
                     m->acpi_processor_id = lapic->acpi_processor_id;
                     m->enabled           = enabled;
+                    m->online_capable    =
+                        lapic_flags_online_capable(lapic->flags);
                 }
                 break;
             }
@@ -292,6 +338,7 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
                     m->apic_id           = x->x2apic_id;
                     m->acpi_processor_id = x->acpi_processor_uid;
                     m->enabled           = enabled;
+                    m->online_capable    = lapic_flags_online_capable(x->flags);
                 }
                 break;
             }
@@ -337,6 +384,25 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
         }
 
         ptr += entry->length;
+    }
+
+    /* The seats, said out loud with the APIC IDs the firmware reserved for
+     * them. kprintf, not debug_printf: the number of processors this kernel
+     * starts is smaller than the number the MADT lists, and an operator
+     * counting cores in front of the machine needs the reason and the IDs —
+     * a hot-add path, when there is one, starts from exactly this list.
+     * Once per boot, not once per caller of this parser. */
+    if (!g_seats_named) {
+        g_seats_named = true;
+        for (uint16_t i = 0; i < info->cpu_map_count; i++) {
+            if (!info->cpu_map[i].online_capable) continue;
+            kprintf("[MADT] APIC ID %u (ACPI processor %u) is an "
+                    "Online-Capable seat: the firmware says hardware can "
+                    "enable it during OS runtime, not that a processor is "
+                    "there now — not started\n",
+                    info->cpu_map[i].apic_id,
+                    info->cpu_map[i].acpi_processor_id);
+        }
     }
 
     if (info->lapic_address && info->ioapic_address) {

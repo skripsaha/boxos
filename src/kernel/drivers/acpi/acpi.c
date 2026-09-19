@@ -351,7 +351,21 @@ static void acpi_gpe_blocks_scrub(void)
 }
 
 int acpi_gpe_register(uint16_t gpe, acpi_gpe_handler_t cb) {
-    if (gpe >= ACPI_MAX_GPES || !cb) return -1;
+    /* Said out loud like every other refusal here. A bare -1 leaves the
+     * caller holding a GPE it believes is armed and no sentence anywhere
+     * saying it is not. */
+    if (!cb) {
+        kprintf("[ACPI] GPE %u cannot be registered: no handler was given, "
+                "and registering is arming — there would be nothing to run "
+                "when the bit fires\n", gpe);
+        return -1;
+    }
+    if (gpe >= ACPI_MAX_GPES) {
+        kprintf("[ACPI] GPE %u is past the %u this registry holds — no "
+                "handler installed and no enable bit set\n",
+                gpe, (unsigned)ACPI_MAX_GPES);
+        return -1;
+    }
 
     /* Told apart so the refusal below is never a lie: before acpi_init the
      * blocks are not described because nothing has read the FADT yet, which
@@ -418,17 +432,24 @@ void acpi_gpe_unregister(uint16_t gpe) {
  * the legacy field at zero and only X_PM1a_CNT_BLK filled in never reached
  * the read at all.
  *
- * acpi_shutdown.c carries a SECOND resolver for the same register pair —
- * resolve_pm1_gas() with gas_read/gas_write — and that one, not this one, is
- * what the live S5 path uses. The two prefer the X_ descriptor alike, but
- * they are not the same policy: resolve_pm1_gas() synthesises the legacy I/O
- * GAS only when the X_ descriptor is absent or zero, and hands an X_
- * descriptor in a space it cannot reach straight to gas_read, which refuses
- * it; the resolver here treats an X_ description OSPM cannot use as the
- * §5.2.9 condition it is and goes back to the legacy address. One register
- * with two resolvers in one kernel is one too many, and which of them
- * survives is not a question this file can answer alone: acpi_shutdown.c is
- * where the sleep vector lives.
+ * This is the ONLY resolver for the pair. acpi_shutdown.c used to carry a
+ * second one — resolve_pm1_gas() with gas_read_word/gas_write_word — and that
+ * one, not this one, was what the live S5 path used. The two preferred the X_
+ * descriptor alike but were not the same policy: resolve_pm1_gas() synthesised
+ * the legacy I/O GAS only when the X_ descriptor was absent or zero, and handed
+ * an X_ descriptor in a space it cannot reach straight to gas_read_word, which
+ * refused it; the resolver here treats an X_ description OSPM cannot use as the
+ * §5.2.9 condition it is and goes back to the legacy address. On a board that
+ * ships such a descriptor the handoff and the shutdown disagreed about whether
+ * the register exists at all — one of them wrote it, the other did not. Both
+ * paths now come through acpi_pm1_request_sleep() below.
+ *
+ * Address spaces other than System I/O and System Memory are refused here and
+ * were accepted there (PCI config, via gas_write_word). That refusal is the
+ * reference behaviour, not a narrowing: ACPICA's AcpiHwValidateRegister rejects
+ * every register whose SpaceId is neither ACPI_ADR_SPACE_SYSTEM_MEMORY nor
+ * ACPI_ADR_SPACE_SYSTEM_IO with AE_SUPPORT, and §4.8.3.2.1 gives PM1 control
+ * exactly those two.
  * ============================================================ */
 typedef struct {
     bool               described; /* the FADT names this block at all */
@@ -652,7 +673,7 @@ static AcpiSciEnState pm1_sci_en_state(void)
  * other block, is the caller's business: §4.8 puts the A block's SLP_TYP down
  * first and the B block's second, and only then the transition both blocks
  * sequence on. */
-static bool pm1_control_sleep_word(const AcpiPm1Control *r, uint16_t slp_typ,
+static bool pm1_control_sleep_word(const AcpiPm1Control *r, uint8_t slp_typ,
                                    const char *which, uint16_t *word)
 {
     if (!r->present) return false;
@@ -666,8 +687,37 @@ static bool pm1_control_sleep_word(const AcpiPm1Control *r, uint16_t slp_typ,
 
     uint16_t keep = (uint16_t)(cur & ~(PM1_CNT_SLP_TYP_MASK | PM1_CNT_SLP_EN));
     *word = (uint16_t)(keep |
-                       (((uint16_t)(slp_typ << PM1_CNT_SLP_TYP_SHIFT)) &
+                       (((uint16_t)((uint16_t)slp_typ <<
+                                    PM1_CNT_SLP_TYP_SHIFT)) &
                         PM1_CNT_SLP_TYP_MASK));
+    return true;
+}
+
+/* The one place in this kernel that asks the platform to sleep.
+ *
+ * Both blocks receive their sleep type before either receives SLP_EN —
+ * ACPI 6.5 §4.8, and the shape of ACPICA's acpi_hw_legacy_sleep: two passes
+ * over the pair, not one block finished before the other is begun. Driving
+ * SLP_EN in A while B still holds the previous type is exactly what that
+ * sentence forbids.
+ *
+ * Declared in acpi.h; acpi_shutdown() (the live S5 path) and
+ * acpi_enter_sleep() (S1-S4, not in service) are its two callers. */
+bool acpi_pm1_request_sleep(uint8_t slp_typa, uint8_t slp_typb)
+{
+    uint16_t word_a = 0, word_b = 0;
+    bool has_a = pm1_control_sleep_word(&g_pm1a_control, slp_typa, "PM1a",
+                                        &word_a);
+    bool has_b = pm1_control_sleep_word(&g_pm1b_control, slp_typb, "PM1b",
+                                        &word_b);
+    if (!has_a && !has_b) return false;
+
+    if (has_a) pm1_control_write(&g_pm1a_control, word_a);
+    if (has_b) pm1_control_write(&g_pm1b_control, word_b);
+    if (has_a) pm1_control_write(&g_pm1a_control,
+                                 (uint16_t)(word_a | PM1_CNT_SLP_EN));
+    if (has_b) pm1_control_write(&g_pm1b_control,
+                                 (uint16_t)(word_b | PM1_CNT_SLP_EN));
     return true;
 }
 
@@ -742,26 +792,14 @@ int acpi_enter_sleep(uint8_t state) {
     /* Through the resolved registers, not through the legacy FADT field with
      * outw: this used to take pm1a_control_block for the address and an I/O
      * port for the kind of register, which is the same assumption the
-     * ACPI-mode handoff was making one block up. */
-    uint16_t word_a = 0, word_b = 0;
-    bool has_a = pm1_control_sleep_word(&g_pm1a_control, slp_typa, "PM1a",
-                                        &word_a);
-    bool has_b = pm1_control_sleep_word(&g_pm1b_control, slp_typb, "PM1b",
-                                        &word_b);
-
-    /* ACPI 6.5 §4.8: "OSPM will always write the SLP_TYPa value to the 'A'
-     * register block followed by the SLP_TYPb value within the field to the
-     * 'B' register block." Both types stand before either SLP_EN goes down —
-     * the order acpi_hw_legacy_sleep uses, two passes over the pair rather
-     * than one block finished before the other is started. Driving SLP_EN in
-     * A while B still holds the previous type is the thing that sentence is
-     * there to forbid. */
-    if (has_a) pm1_control_write(&g_pm1a_control, word_a);
-    if (has_b) pm1_control_write(&g_pm1b_control, word_b);
-    if (has_a) pm1_control_write(&g_pm1a_control,
-                                 (uint16_t)(word_a | PM1_CNT_SLP_EN));
-    if (has_b) pm1_control_write(&g_pm1b_control,
-                                 (uint16_t)(word_b | PM1_CNT_SLP_EN));
+     * ACPI-mode handoff was making one block up. One resolver, one writer —
+     * the same call acpi_shutdown() makes for S5. */
+    if (!acpi_pm1_request_sleep((uint8_t)slp_typa, (uint8_t)slp_typb)) {
+        kprintf("[ACPI] S%u: neither half of the PM1 control pair is a "
+                "register this kernel can reach — no sleep vector written\n",
+                state);
+        return -4;
+    }
 
     /* On S1, control returns here on wake. Other states either reset
      * the CPU (S2-S3) or never return (S4-S5). */

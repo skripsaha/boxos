@@ -36,7 +36,24 @@
  * over one byte at a time and reported as success.
  * ===================================================================== */
 
-#define AML_MAX_NAMESPACE_OBJ   4096
+/* How many namespace objects come out of one allocation.
+ *
+ * What stood here was AML_MAX_NAMESPACE_OBJ = 4096 backing a single static
+ * array, and it is not a theoretical ceiling: the DSDT + SSDTs of an ASRock
+ * B365M Pro4-F build 4615 objects. The 519th object past the wall got NULL
+ * from obj_alloc, obj_create_child passed the NULL up, the caller answered
+ * AML_ERR_NOMEM, and parse_term_list resynchronised and carried on — so the
+ * tail of that firmware's namespace simply did not exist, silently, and any
+ * method naming something in it resolved to nothing.
+ *
+ * The namespace is as big as the firmware makes it, so the pool is a CHAIN of
+ * chunks rather than an array with a number on it. Chunks are never resized
+ * and never moved: every aml_object_t holds parent/child/sibling pointers
+ * into the pool, so an object's address must outlive every later allocation.
+ * The first chunk is static, which keeps the DSDT walk working whatever state
+ * the heap is in; the rest come from kmalloc, and running out of heap is said
+ * out loud instead of quietly truncating the machine's namespace. */
+#define AML_POOL_CHUNK_OBJS     512
 #define AML_MAX_SCOPE_DEPTH     32
 #define AML_MAX_BUFFER_BYTES    (1u << 20)
 #define AML_MAX_PACKAGE_LEN     1024
@@ -131,10 +148,25 @@
 #define ReturnOp         0xA4
 #define BreakOp          0xA5
 
-/* Address spaces. */
-#define REGION_SYSTEM_MEMORY  0
-#define REGION_SYSTEM_IO      1
-#define REGION_PCI_CONFIG     2
+/* Address spaces — ACPI 6.5 §20.2.5.2, RegionSpace, and Table 5.2.
+ *
+ * The three this kernel serves, then the eight the specification defines and
+ * this kernel does not, then the OEM range. Named rather than left as bare
+ * numbers because the parse-time check below has to SAY which space a region
+ * lives in: "EmbeddedControl" tells the reader that the board's EC is out of
+ * reach, "3" tells them nothing. */
+#define REGION_SYSTEM_MEMORY     0x00
+#define REGION_SYSTEM_IO         0x01
+#define REGION_PCI_CONFIG        0x02
+#define REGION_EMBEDDED_CONTROL  0x03
+#define REGION_SMBUS             0x04
+#define REGION_SYSTEM_CMOS       0x05
+#define REGION_PCI_BAR_TARGET    0x06
+#define REGION_IPMI              0x07
+#define REGION_GENERAL_PURPOSE_IO 0x08
+#define REGION_GENERIC_SERIAL_BUS 0x09
+#define REGION_PCC               0x0A
+#define REGION_OEM_FIRST         0x80
 
 /* ===========================================================
  * Namespace data structures
@@ -193,14 +225,65 @@ struct aml_object {
     } v;
 };
 
+typedef struct AmlPoolChunk {
+    struct AmlPoolChunk* next;
+    uint32_t             used;
+    aml_object_t         obj[AML_POOL_CHUNK_OBJS];
+} AmlPoolChunk;
+
 static aml_object_t  g_root_obj;
-static aml_object_t  g_pool[AML_MAX_NAMESPACE_OBJ];
-static uint32_t      g_pool_used = 0;
-static bool          g_loaded    = false;
+static AmlPoolChunk  g_pool_first;          /* static: no heap needed to start */
+static AmlPoolChunk* g_pool_tail      = NULL;
+static uint32_t      g_pool_used      = 0;  /* objects across the whole chain */
+static bool          g_pool_exhausted = false;
+static bool          g_loaded         = false;
+
+/* Drop every heap chunk and start the chain over at the static one. Called
+ * once per aml_init, so a build that failed part-way does not hand its
+ * half-built objects to the next attempt. */
+static void pool_reset(void) {
+    AmlPoolChunk* c = g_pool_first.next;
+    while (c) {
+        AmlPoolChunk* next = c->next;
+        kfree(c);
+        c = next;
+    }
+    g_pool_first.next = NULL;
+    g_pool_first.used = 0;
+    g_pool_tail       = &g_pool_first;
+    g_pool_used       = 0;
+    g_pool_exhausted  = false;
+}
 
 static aml_object_t* obj_alloc(void) {
-    if (g_pool_used >= AML_MAX_NAMESPACE_OBJ) return NULL;
-    aml_object_t* o = &g_pool[g_pool_used++];
+    if (!g_pool_tail) pool_reset();
+
+    if (g_pool_tail->used >= AML_POOL_CHUNK_OBJS) {
+        AmlPoolChunk* c = (AmlPoolChunk*)kmalloc(sizeof(AmlPoolChunk));
+        if (!c) {
+            /* Once, not per object: a firmware whose namespace does not fit
+             * would otherwise say this thousands of times. kprintf, because
+             * everything the truncated tail declares is missing for the rest
+             * of the machine's life and nothing downstream can tell that from
+             * a firmware that never declared it. */
+            if (!g_pool_exhausted) {
+                g_pool_exhausted = true;
+                kprintf("[AML] the namespace reached %u objects and the heap "
+                        "has no room for the next %u — every object past this "
+                        "point is LOST, and a method that names one will not "
+                        "find it\n",
+                        g_pool_used, (unsigned)AML_POOL_CHUNK_OBJS);
+            }
+            return NULL;
+        }
+        c->next = NULL;
+        c->used = 0;
+        g_pool_tail->next = c;
+        g_pool_tail       = c;
+    }
+
+    aml_object_t* o = &g_pool_tail->obj[g_pool_tail->used++];
+    g_pool_used++;
     memset(o, 0, sizeof(*o));
     return o;
 }
@@ -285,6 +368,36 @@ static aml_object_t* resolve_name(const uint8_t** p, const uint8_t* end,
         cur = next;
     }
     return cur;
+}
+
+/* Spell a NameString back out for a refusal message, in the notation the
+ * ASL used: '\' for RootChar, one '^' per ParentPrefix, then the four-byte
+ * segments separated by '.' (§20.2.2). A refusal that does not name what it
+ * refused is worth nothing on a board — every other refusal in this file
+ * prints the object it is about, and an unresolved name is exactly the case
+ * where the operator has to know WHICH name the firmware asked for. */
+static void name_string_text(const uint8_t* p, const uint8_t* end,
+                             char* buf, uint32_t cap) {
+    uint32_t n = 0;
+    if (cap == 0) return;
+    if (p < end && *p == RootChar) { if (n + 1 < cap) buf[n++] = '\\'; p++; }
+    while (p < end && *p == ParentPrefixChar) {
+        if (n + 1 < cap) buf[n++] = '^';
+        p++;
+    }
+    int segs = 1;
+    if (p < end && *p == DualNamePrefix)       { p++; segs = 2; }
+    else if (p < end && *p == MultiNamePrefix) {
+        p++;
+        segs = (p < end) ? (int)*p++ : 0;
+    } else if (p < end && *p == 0)             { p++; segs = 0; }
+    for (int i = 0; i < segs && p + 4 <= end; i++) {
+        if (i && n + 1 < cap) buf[n++] = '.';
+        for (int c = 0; c < 4; c++)
+            if (n + 1 < cap) buf[n++] = (char)p[c];
+        p += 4;
+    }
+    buf[n] = '\0';
 }
 
 /* ===========================================================
@@ -857,13 +970,52 @@ static aml_status_t handle_extended(const uint8_t** p, const uint8_t* end,
         o->v.region.space = space;
         o->v.region.base  = base;
         o->v.region.len   = len;
-        o->v.region.usable = have_base && have_len && len != 0;
-        if (!o->v.region.usable)
+
+        /* The RegionSpace byte was never checked, and the access path had no
+         * default: a region declared in EmbeddedControl, SMBus, IPMI,
+         * GeneralPurposeIO, GenericSerialBus, PCC, SystemCMOS, PciBarTarget
+         * or an OEM space was admitted to the namespace looking exactly like
+         * a serviceable one. A read of one of its fields then answered zero —
+         * indistinguishable, to the AML, from an EC that answered zero — and
+         * a write was dropped while the method ran on.
+         *
+         * Three spaces have drivers behind them here. Every other value is
+         * refused at PARSE time, once, by name, and the region is marked
+         * unusable so each later access is refused with a status the caller
+         * can see (AML_ERR_REGION) rather than a fabricated zero. */
+        const char* unserved = NULL;
+        switch (space) {
+            case REGION_SYSTEM_MEMORY:
+            case REGION_SYSTEM_IO:
+            case REGION_PCI_CONFIG:        break;
+            case REGION_EMBEDDED_CONTROL:  unserved = "EmbeddedControl"; break;
+            case REGION_SMBUS:             unserved = "SMBus"; break;
+            case REGION_SYSTEM_CMOS:       unserved = "SystemCMOS"; break;
+            case REGION_PCI_BAR_TARGET:    unserved = "PciBarTarget"; break;
+            case REGION_IPMI:              unserved = "IPMI"; break;
+            case REGION_GENERAL_PURPOSE_IO: unserved = "GeneralPurposeIO"; break;
+            case REGION_GENERIC_SERIAL_BUS: unserved = "GenericSerialBus"; break;
+            case REGION_PCC:               unserved = "PCC"; break;
+            default:
+                unserved = (space >= REGION_OEM_FIRST) ? "an OEM-defined space"
+                                                       : "a reserved space";
+                break;
+        }
+
+        o->v.region.usable = (unserved == NULL) && have_base && have_len &&
+                             len != 0;
+        if (unserved) {
+            kprintf("[AML] OperationRegion %s lives in %s (RegionSpace 0x%02x), "
+                    "which this kernel has no driver for — every access to it "
+                    "is refused, not answered with zero\n",
+                    o->name, unserved, (unsigned)space);
+        } else if (!o->v.region.usable) {
             kprintf("[AML] OperationRegion %s: %s — every access refused\n",
                     o->name,
                     (!have_base || !have_len)
                         ? "offset/length is not a constant this pass can evaluate"
                         : "declared length is zero");
+        }
         if (!measured) {
             kprintf("[AML] OperationRegion %s: its operand bytes cannot be "
                     "measured by this pass — TermList resyncing\n", o->name);
@@ -1073,16 +1225,40 @@ static bool region_access_ok(aml_object_t* region, uint64_t offset,
     return true;
 }
 
-uint64_t aml_region_read(aml_object_t* region, uint64_t offset, uint8_t bits) {
+/* An access this kernel cannot perform, named once per region.
+ *
+ * Every arm below that used to `return 0` or fall off the end now comes
+ * here. A zero returned from a region read is indistinguishable, to the AML
+ * that asked for it, from a device that answered zero — and a dropped write
+ * is indistinguishable from a write that happened. AML_ERR_REGION is the
+ * value the enum has always carried for exactly this and nothing produced. */
+static aml_status_t region_refuse(aml_object_t* region, const char* why,
+                                  uint8_t bytes) {
+    if (region && !region->v.region.refused) {
+        region->v.region.refused = true;
+        kprintf("[AML] region %s: %s (%u-byte access) — refused\n",
+                region->name, why, (unsigned)bytes);
+    }
+    return AML_ERR_REGION;
+}
+
+static aml_status_t aml_region_read(aml_object_t* region, uint64_t offset,
+                                    uint8_t bits, uint64_t* out) {
+    *out = 0;
     uint8_t bytes = (uint8_t)((bits + 7) / 8);
-    if (!region_access_ok(region, offset, bytes)) return 0;
+    if (!region_access_ok(region, offset, bytes)) return AML_ERR_REGION;
     uint64_t addr = region->v.region.base + offset;
     switch (region->v.region.space) {
         case REGION_SYSTEM_IO:
-            if (bytes == 1) return inb((uint16_t)addr);
-            if (bytes == 2) return inw((uint16_t)addr);
-            if (bytes == 4) return inl((uint16_t)addr);
-            return 0;
+            /* x86 IN is 1, 2 or 4 bytes wide. §20.2.5.2 lets a field ask for
+             * eight over a SystemIO region and the instruction does not
+             * exist; splitting it into two INs is a different bus
+             * transaction, which is not this driver's to invent. */
+            if (bytes == 1) { *out = inb((uint16_t)addr); return AML_OK; }
+            if (bytes == 2) { *out = inw((uint16_t)addr); return AML_OK; }
+            if (bytes == 4) { *out = inl((uint16_t)addr); return AML_OK; }
+            return region_refuse(region, "System I/O has no instruction of "
+                                         "this width", bytes);
         case REGION_SYSTEM_MEMORY: {
             /* O(1) hot path: first access maps the whole region UC and
              * caches the VA; subsequent reads dereference directly with
@@ -1093,14 +1269,16 @@ uint64_t aml_region_read(aml_object_t* region, uint64_t offset, uint8_t bits) {
                                   region->v.region.len ? region->v.region.len
                                                        : 4096,
                                   VMM_FLAGS_KERNEL_RW);
-                if (!region->v.region.mapped_virt) return 0;
+                if (!region->v.region.mapped_virt)
+                    return region_refuse(region, "System Memory region cannot "
+                                                 "be mapped", bytes);
             }
             volatile uint8_t* p = region->v.region.mapped_virt + offset;
-            if (bytes == 1) return *(volatile uint8_t*)p;
-            if (bytes == 2) return *(volatile uint16_t*)p;
-            if (bytes == 4) return *(volatile uint32_t*)p;
-            if (bytes == 8) return *(volatile uint64_t*)p;
-            return 0;
+            if (bytes == 1) { *out = *(volatile uint8_t*)p;  return AML_OK; }
+            if (bytes == 2) { *out = *(volatile uint16_t*)p; return AML_OK; }
+            if (bytes == 4) { *out = *(volatile uint32_t*)p; return AML_OK; }
+            if (bytes == 8) { *out = *(volatile uint64_t*)p; return AML_OK; }
+            return region_refuse(region, "no load of this width", bytes);
         }
         case REGION_PCI_CONFIG: {
             uint16_t seg = (uint16_t)((region->v.region.base >> 48) & 0xFFFFu);
@@ -1109,31 +1287,41 @@ uint64_t aml_region_read(aml_object_t* region, uint64_t offset, uint8_t bits) {
             uint8_t  fn  = (uint8_t)((region->v.region.base >> 16) & 0x07u);
             uint16_t off = (uint16_t)offset;
             if (pci_has_ecam()) {
-                if (bytes == 1) return pci_ecam_read_byte(seg, bus, dev, fn, off);
-                if (bytes == 2) return pci_ecam_read_word(seg, bus, dev, fn, off);
-                if (bytes == 4) return pci_ecam_read_dword(seg, bus, dev, fn, off);
+                if (bytes == 1) { *out = pci_ecam_read_byte(seg, bus, dev, fn, off);  return AML_OK; }
+                if (bytes == 2) { *out = pci_ecam_read_word(seg, bus, dev, fn, off);  return AML_OK; }
+                if (bytes == 4) { *out = pci_ecam_read_dword(seg, bus, dev, fn, off); return AML_OK; }
             } else if (seg == 0 && off <= 0xFC) {
-                if (bytes == 1) return pci_config_read_byte(bus, dev, fn, (uint8_t)off);
-                if (bytes == 2) return pci_config_read_word(bus, dev, fn, (uint8_t)off);
-                if (bytes == 4) return pci_config_read_dword(bus, dev, fn, (uint8_t)off);
+                if (bytes == 1) { *out = pci_config_read_byte(bus, dev, fn, (uint8_t)off);  return AML_OK; }
+                if (bytes == 2) { *out = pci_config_read_word(bus, dev, fn, (uint8_t)off);  return AML_OK; }
+                if (bytes == 4) { *out = pci_config_read_dword(bus, dev, fn, (uint8_t)off); return AML_OK; }
             }
-            return 0;
+            /* Segment != 0 or offset past 0xFC with no MCFG: the legacy
+             * 0xCF8/0xCFC window cannot name this register at all. */
+            return region_refuse(region, "PCI config register is out of reach "
+                                         "of this machine's config mechanism",
+                                 bytes);
         }
-        default: return 0;
+        default:
+            /* handle_extended refuses an unserviceable RegionSpace at parse
+             * time, so a region reaching here is one whose space byte this
+             * switch and that check disagree about. */
+            return region_refuse(region, "address space is not one this "
+                                         "kernel serves", bytes);
     }
 }
 
-void aml_region_write(aml_object_t* region, uint64_t offset, uint8_t bits,
-                       uint64_t value) {
+static aml_status_t aml_region_write(aml_object_t* region, uint64_t offset,
+                                     uint8_t bits, uint64_t value) {
     uint8_t bytes = (uint8_t)((bits + 7) / 8);
-    if (!region_access_ok(region, offset, bytes)) return;
+    if (!region_access_ok(region, offset, bytes)) return AML_ERR_REGION;
     uint64_t addr = region->v.region.base + offset;
     switch (region->v.region.space) {
         case REGION_SYSTEM_IO:
-            if (bytes == 1) outb((uint16_t)addr, (uint8_t)value);
-            if (bytes == 2) outw((uint16_t)addr, (uint16_t)value);
-            if (bytes == 4) outl((uint16_t)addr, (uint32_t)value);
-            return;
+            if (bytes == 1) { outb((uint16_t)addr, (uint8_t)value);  return AML_OK; }
+            if (bytes == 2) { outw((uint16_t)addr, (uint16_t)value); return AML_OK; }
+            if (bytes == 4) { outl((uint16_t)addr, (uint32_t)value); return AML_OK; }
+            return region_refuse(region, "System I/O has no instruction of "
+                                         "this width", bytes);
         case REGION_SYSTEM_MEMORY: {
             if (!region->v.region.mapped_virt) {
                 region->v.region.mapped_virt = (volatile uint8_t*)
@@ -1141,14 +1329,16 @@ void aml_region_write(aml_object_t* region, uint64_t offset, uint8_t bits,
                                   region->v.region.len ? region->v.region.len
                                                        : 4096,
                                   VMM_FLAGS_KERNEL_RW);
-                if (!region->v.region.mapped_virt) return;
+                if (!region->v.region.mapped_virt)
+                    return region_refuse(region, "System Memory region cannot "
+                                                 "be mapped", bytes);
             }
             volatile uint8_t* p = region->v.region.mapped_virt + offset;
-            if (bytes == 1) *(volatile uint8_t*)p  = (uint8_t)value;
-            if (bytes == 2) *(volatile uint16_t*)p = (uint16_t)value;
-            if (bytes == 4) *(volatile uint32_t*)p = (uint32_t)value;
-            if (bytes == 8) *(volatile uint64_t*)p = value;
-            return;
+            if (bytes == 1) { *(volatile uint8_t*)p  = (uint8_t)value;  return AML_OK; }
+            if (bytes == 2) { *(volatile uint16_t*)p = (uint16_t)value; return AML_OK; }
+            if (bytes == 4) { *(volatile uint32_t*)p = (uint32_t)value; return AML_OK; }
+            if (bytes == 8) { *(volatile uint64_t*)p = value;           return AML_OK; }
+            return region_refuse(region, "no store of this width", bytes);
         }
         case REGION_PCI_CONFIG: {
             uint16_t seg = (uint16_t)((region->v.region.base >> 48) & 0xFFFFu);
@@ -1157,16 +1347,21 @@ void aml_region_write(aml_object_t* region, uint64_t offset, uint8_t bits,
             uint8_t  fn  = (uint8_t)((region->v.region.base >> 16) & 0x07u);
             uint16_t off = (uint16_t)offset;
             if (pci_has_ecam()) {
-                if (bytes == 1) pci_ecam_write_byte(seg, bus, dev, fn, off, (uint8_t)value);
-                if (bytes == 2) pci_ecam_write_word(seg, bus, dev, fn, off, (uint16_t)value);
-                if (bytes == 4) pci_ecam_write_dword(seg, bus, dev, fn, off, (uint32_t)value);
+                if (bytes == 1) { pci_ecam_write_byte(seg, bus, dev, fn, off, (uint8_t)value);   return AML_OK; }
+                if (bytes == 2) { pci_ecam_write_word(seg, bus, dev, fn, off, (uint16_t)value);  return AML_OK; }
+                if (bytes == 4) { pci_ecam_write_dword(seg, bus, dev, fn, off, (uint32_t)value); return AML_OK; }
             } else if (seg == 0 && off <= 0xFC) {
-                if (bytes == 1) pci_config_write_byte(bus, dev, fn, (uint8_t)off, (uint8_t)value);
-                if (bytes == 2) pci_config_write_word(bus, dev, fn, (uint8_t)off, (uint16_t)value);
-                if (bytes == 4) pci_config_write_dword(bus, dev, fn, (uint8_t)off, (uint32_t)value);
+                if (bytes == 1) { pci_config_write_byte(bus, dev, fn, (uint8_t)off, (uint8_t)value);   return AML_OK; }
+                if (bytes == 2) { pci_config_write_word(bus, dev, fn, (uint8_t)off, (uint16_t)value);  return AML_OK; }
+                if (bytes == 4) { pci_config_write_dword(bus, dev, fn, (uint8_t)off, (uint32_t)value); return AML_OK; }
             }
-            return;
+            return region_refuse(region, "PCI config register is out of reach "
+                                         "of this machine's config mechanism",
+                                 bytes);
         }
+        default:
+            return region_refuse(region, "address space is not one this "
+                                         "kernel serves", bytes);
     }
 }
 
@@ -1179,7 +1374,7 @@ aml_status_t aml_init(void) {
     memset(&g_root_obj, 0, sizeof(g_root_obj));
     g_root_obj.type = AML_OBJ_SCOPE;
     g_root_obj.name[0] = '\\';
-    g_pool_used = 0;
+    pool_reset();
 
     if (!g_acpi.initialized || !g_acpi.fadt) return AML_ERR_NOT_LOADED;
     uint64_t dsdt_addr =
@@ -1204,8 +1399,14 @@ aml_status_t aml_init(void) {
     acpi_for_each_table("SSDT", ssdt_cb, NULL);
 
     g_loaded = true;
-    debug_printf("[AML] namespace loaded: %u objects across DSDT + SSDTs\n",
-                 g_pool_used);
+    /* kprintf: the object count is the first thing to compare against the
+     * same firmware's namespace on another OS when a method cannot be found,
+     * and it is how a truncated build is spotted from a photograph of the
+     * screen. */
+    kprintf("[AML] namespace loaded: %u objects across DSDT + SSDTs%s\n",
+            g_pool_used,
+            g_pool_exhausted ? " (TRUNCATED — the heap ran out, see above)"
+                             : "");
     /* Daemons that need the AML namespace (power manager, EC subscriber,
      * thermal monitor) wait on this tag. The payload is the object
      * count so subscribers can size their caches. */
@@ -1315,7 +1516,26 @@ aml_status_t aml_eval_crs(const char* path, void* buf, size_t buf_len,
  * ===================================================================== */
 
 #define EXEC_MAX_DEPTH    16
-#define EXEC_MAX_WHILE    (1u << 22)
+
+/* How long one While may run before the interpreter calls it a loop that
+ * will not end.
+ *
+ * What stood here was EXEC_MAX_WHILE = 1 << 22 — a count of iterations, which
+ * is the pattern this project does not allow a wait to use: four million
+ * turns of a body that reads one I/O port is seconds, four million turns of
+ * an empty body is microseconds, and neither number says anything about the
+ * firmware. It also ENDED THE LOOP SILENTLY: the `while (iters++ < ...)`
+ * simply fell out with s == AML_OK, so a method whose loop never converged
+ * reported success with whatever its locals happened to hold.
+ *
+ * ACPICA bounds the same construct by real time and answers a real error.
+ * AcpiDsExecBeginControlOp sets `ControlState->Control.LoopTimeout =
+ * AcpiOsGetTimer() + ((UINT64) AcpiGbl_MaxLoopIterations *
+ * ACPI_100NSEC_PER_SEC)`, and the end-op compares against it and breaks with
+ * AE_AML_LOOP_TIMEOUT. AcpiGbl_MaxLoopIterations defaults to
+ * ACPI_MAX_LOOP_TIMEOUT, which is 30 seconds. The same thirty seconds, on
+ * HourGlass — the ruler this kernel has proven — and the same refusal. */
+#define EXEC_WHILE_PATIENCE_US   (30u * 1000u * 1000u)
 
 typedef struct exec_frame {
     aml_object_t*  scope;             /* current namespace scope */
@@ -1327,10 +1547,6 @@ typedef struct exec_frame {
     bool           break_flag;
     bool           continue_flag;
 } exec_frame_t;
-
-uint64_t aml_region_read(aml_object_t* r, uint64_t off, uint8_t bits);
-void     aml_region_write(aml_object_t* r, uint64_t off, uint8_t bits,
-                            uint64_t v);
 
 static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
                                exec_frame_t* fr, uint64_t* out, int depth);
@@ -1345,8 +1561,17 @@ static aml_status_t exec_termarg(const uint8_t** p, const uint8_t* end,
     return exec_term(p, end, fr, out, depth);
 }
 
-static uint64_t field_read(aml_object_t* f);
-static void     field_write(aml_object_t* f, uint64_t v);
+/* The region path carries a status, all the way up.
+ *
+ * These used to be `uint64_t field_read(f)` and `void field_write(f, v)`,
+ * and there was nowhere for a refusal to go: an unreachable region, an
+ * address space this kernel does not serve, a datum width with no
+ * instruction behind it — every one of them produced a zero on read and a
+ * dropped write, with the method running on and the caller receiving AML_OK.
+ * AML_ERR_REGION has been in the enum from the start with nothing producing
+ * it; this is the chain that produces it. */
+static aml_status_t field_read(aml_object_t* f, uint64_t* out);
+static aml_status_t field_write(aml_object_t* f, uint64_t v);
 
 /* An IndexField moves its data through the Data register one datum at a
  * time, and the datum is exactly as wide as that register was declared.
@@ -1375,9 +1600,18 @@ static uint64_t field_update_base(uint8_t flags, uint64_t preserved) {
  * across the read of Data, so one write of Index serves a
  * read-modify-write of the same datum.
  */
-static uint64_t index_field_gather(aml_object_t* f, uint32_t bits) {
+static aml_status_t index_field_datum_refuse(aml_object_t* f) {
+    kprintf("[AML] IndexField %s: its Data register is %u bits wide, which is "
+            "not a datum width — no access is attempted\n", f->name,
+            f->v.field.data ? f->v.field.data->v.field.bit_width : 0);
+    return AML_ERR_REGION;
+}
+
+static aml_status_t index_field_gather(aml_object_t* f, uint32_t bits,
+                                       uint64_t* out) {
+    *out = 0;
     uint32_t dbits = index_field_datum_bits(f);
-    if (!dbits) return 0;
+    if (!dbits) return index_field_datum_refuse(f);
     uint32_t dbytes  = dbits / 8;
     uint32_t bit_off = f->v.field.bit_offset;
     uint64_t v   = 0;
@@ -1390,17 +1624,22 @@ static uint64_t index_field_gather(aml_object_t* f, uint32_t bits) {
         if (take > bits - got) take = bits - got;
         uint64_t mask = (take >= 64) ? ~0ULL : ((1ULL << take) - 1);
 
-        field_write(f->v.field.index, doff);
-        uint64_t d = field_read(f->v.field.data);
+        aml_status_t s = field_write(f->v.field.index, doff);
+        if (s != AML_OK) return s;
+        uint64_t d = 0;
+        s = field_read(f->v.field.data, &d);
+        if (s != AML_OK) return s;
         v |= ((d >> shift) & mask) << got;
         got += take;
     }
-    return v;
+    *out = v;
+    return AML_OK;
 }
 
-static void index_field_scatter(aml_object_t* f, uint32_t bits, uint64_t v) {
+static aml_status_t index_field_scatter(aml_object_t* f, uint32_t bits,
+                                        uint64_t v) {
     uint32_t dbits = index_field_datum_bits(f);
-    if (!dbits) return;
+    if (!dbits) return index_field_datum_refuse(f);
     uint32_t dbytes  = dbits / 8;
     uint32_t bit_off = f->v.field.bit_offset;
     uint32_t done = 0;
@@ -1413,79 +1652,144 @@ static void index_field_scatter(aml_object_t* f, uint32_t bits, uint64_t v) {
         uint64_t mask  = (take >= 64) ? ~0ULL : ((1ULL << take) - 1);
         uint64_t piece = (v >> done) & mask;
 
-        field_write(f->v.field.index, doff);
+        aml_status_t s = field_write(f->v.field.index, doff);
+        if (s != AML_OK) return s;
         uint64_t datum;
         if (take == dbits) {
             datum = piece;
         } else {
-            datum = field_update_base(f->v.field.access,
-                                      field_read(f->v.field.data));
+            uint64_t cur = 0;
+            /* Only the Preserve rule has to read the datum back; under
+             * WriteAsOnes / WriteAsZeros the neighbouring bits are dictated
+             * and a read would be an access §20.2.5.2 does not ask for. */
+            if (((f->v.field.access >> 5) & 0x3) == 0) {
+                s = field_read(f->v.field.data, &cur);
+                if (s != AML_OK) return s;
+            }
+            datum = field_update_base(f->v.field.access, cur);
             datum = (datum & ~(mask << shift)) | (piece << shift);
         }
-        field_write(f->v.field.data, datum);
+        s = field_write(f->v.field.data, datum);
+        if (s != AML_OK) return s;
         done += take;
     }
+    return AML_OK;
 }
 
 /* BankField — §20.2.5.2: the selector chooses which bank answers at the
  * region's addresses, so it must carry this block's BankValue before
  * the data is touched. ACPICA writes it ahead of every datum access. */
-static void field_select_bank(aml_object_t* f) {
-    if (f->v.field.bank)
-        field_write(f->v.field.bank, f->v.field.bank_value);
+static aml_status_t field_select_bank(aml_object_t* f) {
+    if (!f->v.field.bank) return AML_OK;
+    return field_write(f->v.field.bank, f->v.field.bank_value);
 }
 
 /* Read one Field, with proper bit-level alignment, via OpRegion. */
-static uint64_t field_read(aml_object_t* f) {
-    if (!f || f->type != AML_OBJ_FIELD) return 0;
+static aml_status_t field_read(aml_object_t* f, uint64_t* out) {
+    *out = 0;
+    if (!f || f->type != AML_OBJ_FIELD) return AML_ERR_TYPE;
     uint32_t bits = f->v.field.bit_width;
-    if (bits == 0) return 0;
+    if (bits == 0) return AML_ERR_TYPE;   /* a field of no bits has no value */
     if (bits > 64) bits = 64;
-    if (f->v.field.index) return index_field_gather(f, bits);
-    if (!f->v.field.region) return 0;
-    field_select_bank(f);
+    if (f->v.field.index) return index_field_gather(f, bits, out);
+    if (!f->v.field.region) return AML_ERR_REGION;
+
+    aml_status_t s = field_select_bank(f);
+    if (s != AML_OK) return s;
 
     uint32_t bit_off = f->v.field.bit_offset;
     /* For aligned byte/word/dword/qword we can read in one shot. */
     if ((bit_off & 7) == 0 && (bits == 8 || bits == 16 || bits == 32 || bits == 64)) {
-        return aml_region_read(f->v.field.region, bit_off / 8, (uint8_t)bits);
+        return aml_region_read(f->v.field.region, bit_off / 8, (uint8_t)bits,
+                               out);
     }
-    /* Slow path: gather bits. */
+    /* Unaligned path: a BYTE at a time, not a bit at a time. Asking the
+     * region for the same byte once per bit is eight bus transactions where
+     * one is needed, and on the very regions unaligned fields describe —
+     * a SystemIO port that is read-to-clear, a FIFO, a status register with
+     * side effects on read — those eight reads are eight DIFFERENT answers
+     * and the value assembled from them never existed in the device. One
+     * access per byte touched, same as the write path below. */
     uint64_t v = 0;
-    for (uint32_t i = 0; i < bits; i++) {
-        uint64_t byte_off = (bit_off + i) / 8;
-        uint8_t  shift    = (bit_off + i) % 8;
-        uint64_t b = aml_region_read(f->v.field.region, byte_off, 8);
-        if ((b >> shift) & 1) v |= (1ULL << i);
+    uint64_t first = bit_off / 8;
+    uint64_t last  = (uint64_t)(bit_off + bits - 1) / 8;
+    for (uint64_t byte = first; byte <= last; byte++) {
+        uint32_t span_lo = (uint32_t)(byte * 8);
+        uint32_t start   = (bit_off > span_lo) ? bit_off : span_lo;
+        uint32_t last_of = span_lo + 7;
+        uint32_t end     = (bit_off + bits - 1 < last_of)
+                               ? (bit_off + bits - 1) : last_of;
+        uint32_t width   = end - start + 1;
+        uint32_t lo      = start - span_lo;
+        uint64_t b = 0;
+        s = aml_region_read(f->v.field.region, byte, 8, &b);
+        if (s != AML_OK) return s;
+        v |= ((b >> lo) & (uint64_t)((1u << width) - 1u))
+             << (start - bit_off);
     }
-    return v;
+    *out = v;
+    return AML_OK;
 }
 
-/* The unaligned path over a region preserves the bits around the field,
- * i.e. it implements the Preserve update rule; WriteAsOnes and
- * WriteAsZeros over a region are not honoured here. */
-static void field_write(aml_object_t* f, uint64_t v) {
-    if (!f || f->type != AML_OBJ_FIELD) return;
+/* The unaligned path over a region honours the UpdateRule for the bits
+ * around the field: Preserve reads the byte back and keeps its neighbours,
+ * WriteAsOnes and WriteAsZeros dictate them without reading (§20.2.5.2,
+ * FieldFlags bits 6:5, and the shape of ACPICA's AcpiExWriteWithUpdateRule).
+ *
+ * The ALIGNED path is a single whole-width access and never touches a bit
+ * outside the field, so no update rule applies to it; splitting it into
+ * byte-wide accesses to apply one would break a 32-bit MMIO register that
+ * must be written whole. */
+static aml_status_t field_write(aml_object_t* f, uint64_t v) {
+    if (!f || f->type != AML_OBJ_FIELD) return AML_ERR_TYPE;
     uint32_t bits = f->v.field.bit_width;
-    if (bits == 0) return;
+    if (bits == 0) return AML_ERR_TYPE;
     if (bits > 64) bits = 64;
-    if (f->v.field.index) { index_field_scatter(f, bits, v); return; }
-    if (!f->v.field.region) return;
-    field_select_bank(f);
+    if (f->v.field.index) return index_field_scatter(f, bits, v);
+    if (!f->v.field.region) return AML_ERR_REGION;
+
+    aml_status_t s = field_select_bank(f);
+    if (s != AML_OK) return s;
 
     uint32_t bit_off = f->v.field.bit_offset;
     if ((bit_off & 7) == 0 && (bits == 8 || bits == 16 || bits == 32 || bits == 64)) {
-        aml_region_write(f->v.field.region, bit_off / 8, (uint8_t)bits, v);
-        return;
+        return aml_region_write(f->v.field.region, bit_off / 8, (uint8_t)bits,
+                                v);
     }
-    for (uint32_t i = 0; i < bits; i++) {
-        uint64_t byte_off = (bit_off + i) / 8;
-        uint8_t  shift    = (bit_off + i) % 8;
-        uint64_t cur = aml_region_read(f->v.field.region, byte_off, 8);
-        if ((v >> i) & 1) cur |= (1ULL << shift);
-        else              cur &= ~(1ULL << shift);
-        aml_region_write(f->v.field.region, byte_off, 8, cur);
+
+    /* A BYTE at a time, not a bit at a time. The bits of one byte that
+     * belong to the field have to go down together: under WriteAsOnes the
+     * base is all ones, so a bit written as zero in one pass would be put
+     * back as a one by the next pass over the same byte. (It is also one
+     * bus transaction per byte instead of eight, which matters on a register
+     * whose reads have side effects.) */
+    bool preserve = (((f->v.field.access >> 5) & 0x3) == 0);
+    uint64_t first = bit_off / 8;
+    uint64_t last  = (uint64_t)(bit_off + bits - 1) / 8;
+    for (uint64_t byte = first; byte <= last; byte++) {
+        uint32_t span_lo = (uint32_t)(byte * 8);
+        uint32_t start   = (bit_off > span_lo) ? bit_off : span_lo;
+        uint32_t last_of = span_lo + 7;
+        uint32_t end     = (bit_off + bits - 1 < last_of)
+                               ? (bit_off + bits - 1) : last_of;
+        uint32_t width   = end - start + 1;
+        uint32_t lo      = start - span_lo;
+        uint8_t  mask    = (uint8_t)(((1u << width) - 1u) << lo);
+        uint8_t  piece   = (uint8_t)((((v >> (start - bit_off)) &
+                                       ((1u << width) - 1u)) << lo) & 0xFFu);
+
+        uint64_t cur = 0;
+        if (preserve) {
+            s = aml_region_read(f->v.field.region, byte, 8, &cur);
+            if (s != AML_OK) return s;
+        } else {
+            cur = field_update_base(f->v.field.access, 0) & 0xFFu;
+        }
+        cur = (uint8_t)(((uint8_t)cur & (uint8_t)~mask) | piece);
+        s = aml_region_write(f->v.field.region, byte, 8, cur);
+        if (s != AML_OK) return s;
     }
+    return AML_OK;
 }
 
 /* resolve_target kinds. 0/1/2/3 are load-bearing at every call site;
@@ -1556,13 +1860,14 @@ static aml_object_t* resolve_target(const uint8_t** p, const uint8_t* end,
  * 1/2 are never passed in. This helper covers the NamePath case —
  * Name objects, raw Integer slots, and OpRegion-backed Fields.
  */
-static void exec_store(uint64_t value, aml_object_t* target,
-                        exec_frame_t* fr, uint8_t kind) {
+static aml_status_t exec_store(uint64_t value, aml_object_t* target,
+                                exec_frame_t* fr, uint8_t kind) {
     (void)fr;
-    if (!target || kind == 0) return;
-    if (target->type == AML_OBJ_NAME)    { target->v.integer = value; return; }
-    if (target->type == AML_OBJ_INTEGER) { target->v.integer = value; return; }
-    if (target->type == AML_OBJ_FIELD)   { field_write(target, value); return; }
+    if (!target || kind == 0) return AML_OK;
+    if (target->type == AML_OBJ_NAME)    { target->v.integer = value; return AML_OK; }
+    if (target->type == AML_OBJ_INTEGER) { target->v.integer = value; return AML_OK; }
+    if (target->type == AML_OBJ_FIELD)   { return field_write(target, value); }
+    return AML_OK;
 }
 
 /*
@@ -1705,7 +2010,10 @@ static aml_status_t exec_ext_term(uint8_t sub, const uint8_t** p,
         if (kind == AML_TGT_ERROR) return AML_ERR_BAD_OPCODE;
         if (kind == AML_TGT_LOCAL)    fr->locals[tgt_op - 0x60] = r;
         else if (kind == AML_TGT_ARG) fr->args[tgt_op - 0x68]   = r;
-        else if (tgt)                 exec_store(r, tgt, fr, kind);
+        else if (tgt) {
+            aml_status_t ws = exec_store(r, tgt, fr, kind);
+            if (ws != AML_OK) return ws;
+        }
         *out = r;
         return AML_OK;
     }
@@ -1777,14 +2085,16 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
         *out = r;                                                             \
         if (tgt_kind == 1) fr->locals[tgt_op - 0x60] = r;                     \
         else if (tgt_kind == 2) fr->args[tgt_op - 0x68] = r;                  \
-        else if (tgt) exec_store(r, tgt, fr, tgt_kind);                       \
+        else if (tgt) {                                                       \
+            aml_status_t ws = exec_store(r, tgt, fr, tgt_kind);               \
+            if (ws != AML_OK) return ws;                                      \
+        }                                                                     \
         return AML_OK;                                                        \
     }
 
     BIN_OP(AddOp,        a + b)
     BIN_OP(SubtractOp,   a - b)
     BIN_OP(MultiplyOp,   a * b)
-    BIN_OP(ModOp,        b ? a % b : 0)
     BIN_OP(AndOp,        a & b)
     BIN_OP(OrOp,         a | b)
     BIN_OP(XorOp,        a ^ b)
@@ -1792,6 +2102,43 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
     BIN_OP(NorOp,        ~(a | b))
     BIN_OP(ShiftLeftOp,  a << (b & 63))
     BIN_OP(ShiftRightOp, a >> (b & 63))
+
+    /* Mod does not fit BIN_OP for the same reason Divide does not fit it:
+     * the zero divisor is fatal, not a value.
+     *
+     * ACPI 6.5 §19.6.83 gives DefMod the same divisor rule as DefDivide, and
+     * ACPICA routes both through AcpiUtDivide, which answers
+     * AE_AML_DIVIDE_BY_ZERO. What stood here was `b ? a % b : 0` inside
+     * BIN_OP — a quiet zero, stored into the Target, returned as the
+     * expression's value, with AML_OK behind it. That zero is a number this
+     * machine invented, and the AML cannot tell it from a remainder of zero.
+     * The Divide arm below already refuses; this is the same refusal. */
+    if (op == ModOp) {
+        (*p)++;
+        uint64_t a, b;
+        aml_status_t s = exec_termarg(p, end, fr, &a, depth + 1);
+        if (s != AML_OK) return s;
+        s = exec_termarg(p, end, fr, &b, depth + 1);
+        if (s != AML_OK) return s;
+        if (b == 0) {
+            kprintf("[AML] Mod by zero — method aborted\n");
+            return AML_ERR_ABORT;
+        }
+        uint8_t tgt_kind = 0;
+        const uint8_t* tgt_p = *p;
+        uint8_t tgt_op = (tgt_p < end) ? *tgt_p : 0;
+        aml_object_t* tgt = resolve_target(p, end, fr, &tgt_kind);
+        if (tgt_kind == AML_TGT_ERROR) return AML_ERR_BAD_OPCODE;
+        uint64_t r = a % b;
+        *out = r;
+        if (tgt_kind == AML_TGT_LOCAL)    fr->locals[tgt_op - 0x60] = r;
+        else if (tgt_kind == AML_TGT_ARG) fr->args[tgt_op - 0x68]   = r;
+        else if (tgt) {
+            aml_status_t ws = exec_store(r, tgt, fr, tgt_kind);
+            if (ws != AML_OK) return ws;
+        }
+        return AML_OK;
+    }
 
     /*
      * Divide is the one arithmetic op that does NOT fit BIN_OP:
@@ -1829,7 +2176,10 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
         if (rk == AML_TGT_ERROR) return AML_ERR_BAD_OPCODE;
         if (rk == AML_TGT_LOCAL)    fr->locals[rop - 0x60] = rem;
         else if (rk == AML_TGT_ARG) fr->args[rop - 0x68]   = rem;
-        else if (rtgt)              exec_store(rem, rtgt, fr, rk);
+        else if (rtgt) {
+            aml_status_t ws = exec_store(rem, rtgt, fr, rk);
+            if (ws != AML_OK) return ws;
+        }
 
         uint8_t qk = 0;
         const uint8_t* qp = *p;
@@ -1838,7 +2188,10 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
         if (qk == AML_TGT_ERROR) return AML_ERR_BAD_OPCODE;
         if (qk == AML_TGT_LOCAL)    fr->locals[qop - 0x60] = quo;
         else if (qk == AML_TGT_ARG) fr->args[qop - 0x68]   = quo;
-        else if (qtgt)              exec_store(quo, qtgt, fr, qk);
+        else if (qtgt) {
+            aml_status_t ws = exec_store(quo, qtgt, fr, qk);
+            if (ws != AML_OK) return ws;
+        }
 
         *out = quo;          /* the expression's value is the quotient */
         return AML_OK;
@@ -1859,7 +2212,10 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
         *out = r;
         if (kind == 1) fr->locals[tgt_op - 0x60] = r;
         else if (kind == 2) fr->args[tgt_op - 0x68] = r;
-        else if (tgt) exec_store(r, tgt, fr, kind);
+        else if (tgt) {
+            aml_status_t ws = exec_store(r, tgt, fr, kind);
+            if (ws != AML_OK) return ws;
+        }
         return AML_OK;
     }
     if (op == IncrementOp || op == DecrementOp) {
@@ -1875,7 +2231,10 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
         v = (op == IncrementOp) ? v + 1 : v - 1;
         if (kind == 1) fr->locals[tgt_op - 0x60] = v;
         else if (kind == 2) fr->args[tgt_op - 0x68] = v;
-        else if (tgt) exec_store(v, tgt, fr, kind);
+        else if (tgt) {
+            aml_status_t ws = exec_store(v, tgt, fr, kind);
+            if (ws != AML_OK) return ws;
+        }
         *out = v;
         return AML_OK;
     }
@@ -1930,7 +2289,10 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
         else if (kind == 2) fr->args[tgt_op - 0x68] = v;
         else if (kind == AML_TGT_DEBUG)
             debug_printf("[AML] Store -> Debug: 0x%lx\n", (unsigned long)v);
-        else if (tgt) exec_store(v, tgt, fr, kind);
+        else if (tgt) {
+            aml_status_t ws = exec_store(v, tgt, fr, kind);
+            if (ws != AML_OK) return ws;
+        }
         *out = v;
         return AML_OK;
     }
@@ -1990,9 +2352,28 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
         const uint8_t* body = *p + pklen_bytes;
         const uint8_t* body_end = *p + pklen;
         if (body_end > end) return AML_ERR_BOUNDS;
-        uint32_t iters = 0;
+        /* The glass is turned ONCE, outside the loop, so the deadline is the
+         * loop's total running time and not a fresh grant per iteration.
+         * A machine with no ruler yet gets no bound: an AML While ends on its
+         * own predicate, and a made-up spin count is not a substitute for a
+         * clock (the same answer erst_stall_us gives). Said once, out loud —
+         * and said plainly, because this is a change of failure class and not
+         * only an improvement: the old iteration counter always ended, but it
+         * ended by returning AML_OK on a loop that had not converged, so the
+         * caller was handed a lie. Without a ruler this one hangs instead,
+         * visibly and with the reason on the console. aml_init runs long
+         * after the timer is proven, so this branch is not reachable on a
+         * machine that has one. */
+        HourGlass glass;
+        bool bounded = HourGlassTurn(&glass, EXEC_WHILE_PATIENCE_US);
+        if (!bounded) {
+            kprintf("[AML] While: no time ruler on this machine yet — the "
+                    "loop runs on its own predicate only, and if that "
+                    "predicate never goes false this method does not "
+                    "return\n");
+        }
         aml_status_t s = AML_OK;
-        while (iters++ < EXEC_MAX_WHILE) {
+        for (;;) {
             const uint8_t* cur = body;
             uint64_t cond;
             s = exec_termarg(&cur, body_end, fr, &cond, depth + 1);
@@ -2001,6 +2382,17 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
             fr->break_flag    = false;
             s = exec_termlist(cur, (uint32_t)(body_end - cur), fr, depth + 1);
             if (s != AML_OK || fr->returned || fr->break_flag) break;
+            if (bounded && HourGlassRunOut(&glass)) {
+                /* ACPICA's AE_AML_LOOP_TIMEOUT: the method is abandoned, and
+                 * the caller is told so rather than handed the locals this
+                 * loop happened to stop on. */
+                kprintf("[AML] While has run %lu us on the %s without its "
+                        "predicate going false — method aborted\n",
+                        (unsigned long)HourGlassElapsedUs(&glass),
+                        HourGlassRulerName(&glass));
+                *p = body_end;
+                return AML_ERR_ABORT;
+            }
         }
         /* §19.6.8: Break ends the INNERMOST While and execution resumes
          * with the statement that follows it. The flag must not outlive
@@ -2048,10 +2440,28 @@ static aml_status_t exec_term(const uint8_t** p, const uint8_t* end,
     if (op == RootChar || op == ParentPrefixChar ||
         op == DualNamePrefix || op == MultiNamePrefix ||
         (op >= 'A' && op <= 'Z') || op == '_') {
+        const uint8_t* name_at = *p;
         aml_object_t* o = resolve_name(p, end, fr->scope, false, NULL);
-        if (!o) { *out = 0; return AML_OK; }
+        if (!o) {
+            /* A NameString in TermArg position that resolves to nothing is
+             * ACPICA's AE_NOT_FOUND (AcpiDsLoad2EndOp / AcpiExResolveNode),
+             * not the value zero. Answering 0 with AML_OK handed the method
+             * a number the namespace never contained: `If (\_SB.FOO)` took
+             * the false branch, `Store (\_SB.FOO, Local0)` stored a zero, and
+             * the caller saw a successful evaluation. The stream position is
+             * already past the NameString, so the refusal is exact — this is
+             * a name that is not there, not a byte that could not be decoded
+             * (which is what AML_ERR_BAD_OPCODE means). */
+            char spelled[48];
+            name_string_text(name_at, end, spelled, sizeof(spelled));
+            kprintf("[AML] %s resolves to nothing in the namespace (searched "
+                    "from scope %s) — method aborted rather than answered "
+                    "with zero\n",
+                    spelled, fr->scope ? fr->scope->name : "\\");
+            return AML_ERR_NOT_FOUND;
+        }
         if (o->type == AML_OBJ_INTEGER) { *out = o->v.integer; return AML_OK; }
-        if (o->type == AML_OBJ_FIELD)   { *out = field_read(o); return AML_OK; }
+        if (o->type == AML_OBJ_FIELD)   return field_read(o, out);
         if (o->type == AML_OBJ_NAME)    { *out = o->v.integer; return AML_OK; }
         if (o->type == AML_OBJ_METHOD) {
             uint8_t argc = (uint8_t)(o->v.method.flags & 0x7);

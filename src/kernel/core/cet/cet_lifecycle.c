@@ -177,18 +177,13 @@ static volatile bool g_ibt_active      = false;
 static volatile bool g_xsave_cet_s     = false;
 static volatile bool g_xsave_cet_u     = false;
 
-/* Public flag — read from context_switch.asm SAVE_PL0_SSP / RESTORE_PL0_SSP
- * macros. Set to 1 by cet_supv_shstk_activate_and_jump when S_CET.SH_STK_EN
- * flips on (per BSP / per AP). Stays 0 in two cases that the asm path
- * skips MSR access for:
- *   - CPU lacks SHSTK (TCG, AMD Zen 1/2/3, pre-Tiger Lake Intel)
- *   - has_shstk=true but activation hasn't run yet on this CPU
- * Single byte + RELAXED-OR-ZERO semantics: asm does `cmp byte [..], 0` →
- * no atomics needed, the read becomes consistent at the next context
- * switch on this CPU which is always after the activation completes.
- * 8-byte alignment leaves the surrounding 7 bytes safe for unrelated
- * single-byte loads. */
-volatile uint8_t g_cet_supv_active __attribute__((aligned(8))) = 0;
+/* There was a g_cet_supv_active byte here — set when S_CET.SH_STK_EN flipped
+ * on this core, read by context_switch.asm's SAVE_PL0_SSP / RESTORE_PL0_SSP
+ * to gate the per-process IA32_PL0_SSP swap. Those four asm entry points had
+ * no caller left once the scheduler moved to the IRQ-frame dispatch and were
+ * removed with the file; the byte went with them rather than waiting for a
+ * reader that may never exist. A frame-path PL0_SSP swap, if the owner calls
+ * for one, needs a gate written against the state it actually has. */
 
 static volatile uint64_t g_stat_cp_faults  = 0;
 static volatile uint64_t g_stat_ssp_allocs = 0;
@@ -844,18 +839,22 @@ error_t cet_process_create_kernel_ssp(struct process_t *proc, uintptr_t entry_ri
      *
      *   [top]     the supervisor SSP token — its own linear address,
      *             BUSY clear; the processor claims the token, not us.
-     *   [top - 8] the pre-pushed entry RIP. The very first
-     *             task_restore_context for this process does
-     *               push entry_rip; RET
-     *             and that RET pops entry_rip from the regular stack AND
+     *   [top - 8] the pre-pushed entry RIP, for a dispatcher that enters
+     *             the process with `push entry_rip; RET` on this stack:
+     *             that RET pops entry_rip from the regular stack AND
      *             from the shadow stack at PL0_SSP = top - 8. Match → no
-     *             #CP and the process runs at entry_rip. */
+     *             #CP and the process runs at entry_rip.
+     *
+     * ‼ No such dispatcher exists today — see the note on
+     * cet_process_create_kernel_ssp in cet_lifecycle.h. The live frame
+     * dispatch never loads proc->context.pl0_ssp, so this page is built,
+     * sealed and freed without the processor ever seeing it. */
     *(volatile uint64_t *)top         = cet_supv_token_free(top);
     *(volatile uint64_t *)(top - 8)   = (uint64_t)entry_rip;
 
     /* Seal. A process whose kernel shadow stack could not be sealed must
-     * not start: on a core with SH_STK_EN up, its first
-     * task_restore_context would make a shadow-stack access to a page
+     * not start once anything loads that stack: on a core with SH_STK_EN
+     * up, the first shadow-stack access through it would land on a page
      * the processor does not consider a shadow stack. Hand the frame
      * back and refuse — a refused seal writes nothing (vmm.c checks
      * §4.6 condition (2) before it touches the leaf), so the frame goes
@@ -921,25 +920,17 @@ void cet_supv_shstk_activate_and_jump(void (*target)(void))
     /* The activation MSR write must happen with no possibility of a
      * RET firing on a shadow stack that has nothing matching. Order:
      *
-     *   1. Mark g_cet_supv_active = 1 — any context switch that runs
-     *      during the brief window between here and the WRMSR below
-     *      will RESTORE_PL0_SSP based on ctx.pl0_ssp. That MSR write
-     *      lands on a CPU where SH_STK_EN is still 0, so the MSR
-     *      just updates IA32_PL0_SSP with no enforcement — harmless.
-     *      Once SH_STK_EN flips, future switches behave correctly.
-     *
-     *   2. WRMSR IA32_S_CET with SH_STK_EN OR-merged into the existing
+     *   1. WRMSR IA32_S_CET with SH_STK_EN OR-merged into the existing
      *      policy. We RDMSR-then-OR-WRMSR rather than recomputing the
      *      whole policy from scratch — preserves whatever bits any
      *      future config tweak might have written between init_bsp
      *      and now.
      *
-     *   3. JMP target. JMP doesn't push to the shadow stack (unlike
+     *   2. JMP target. JMP doesn't push to the shadow stack (unlike
      *      CALL), so target starts with the per-CPU PL0_SSP at the
      *      token slot — clean state. target's first CALL pushes one
      *      below the token; subsequent CALL/RET balance. */
     __asm__ volatile(
-        "movb $1, g_cet_supv_active(%%rip)\n\t"
         "movl $0x6A2, %%ecx\n\t"           /* IA32_S_CET */
         "rdmsr\n\t"
         "orl  $1, %%eax\n\t"                /* SH_STK_EN = bit 0 */

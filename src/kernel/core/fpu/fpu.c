@@ -16,6 +16,13 @@ uint64_t g_xsave_mask = 0;
 #define XCR0_ZMM_HI256  (1ULL << 6)  // AVX-512 upper ZMM halves (ZMM0-15)
 #define XCR0_HI16_ZMM   (1ULL << 7)  // AVX-512 ZMM16-31
 
+/* The components enable_fpu decides for itself, once per core, from that
+ * core's own capabilities. Everything OUTSIDE this set that is present in
+ * g_xsave_mask got there through fpu_xsave_register_extension and belongs to
+ * the subsystem that registered it — see the inheritance step in enable_fpu. */
+#define XCR0_BASE_SET   (XCR0_X87 | XCR0_SSE | XCR0_AVX | \
+                         XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM)
+
 static inline void xsetbv(uint32_t index, uint64_t value) {
     uint32_t lo = (uint32_t)value;
     uint32_t hi = (uint32_t)(value >> 32);
@@ -43,40 +50,61 @@ static inline void xsetbv(uint32_t index, uint64_t value) {
  * MUST be called BEFORE any process is spawned, because the FPU area
  * size in process_t is sized at allocation time from g_xsave_area_size. */
 bool fpu_xsave_register_extension(uint64_t xcr0_bit, const char *name) {
+    /* Both refusals speak, and they speak with kprintf. A registration that
+     * does not happen is exactly the failure this door exists to expose: the
+     * component stays out of g_xsave_mask, so no context switch saves or
+     * restores it and every process inherits the previous one's copy of that
+     * register. The caller does not print either — vmm_pku_init drops the
+     * result — so silence here is indistinguishable from success. */
     if (!g_use_xsave) {
-        debug_printf("[FPU] xsave_register(%s): SKIP — XSAVE off\n",
-                     name ? name : "?");
+        kprintf("[FPU] xsave_register(%s): REFUSED — this processor has no "
+                "XSAVE, so the component is never saved or restored and each "
+                "process inherits the previous one's register\n",
+                name ? name : "?");
         return false;
     }
     if (!(g_cpu_caps.xcr0_supported & xcr0_bit)) {
-        debug_printf("[FPU] xsave_register(%s): SKIP — XCR0 bit not supported\n",
-                     name ? name : "?");
+        kprintf("[FPU] xsave_register(%s): REFUSED — CPUID.(EAX=0DH,ECX=0) "
+                "does not enumerate XCR0 component 0x%lx, so the component is "
+                "never saved or restored and each process inherits the "
+                "previous one's register\n",
+                name ? name : "?", (unsigned long)xcr0_bit);
         return false;
     }
-    if (g_xsave_mask & xcr0_bit) {
+    if (__atomic_load_n(&g_xsave_mask, __ATOMIC_RELAXED) & xcr0_bit) {
         return true;  /* already registered */
     }
 
     /* Set the XCR0 bit alongside the existing mask. */
-    uint64_t new_mask = g_xsave_mask | xcr0_bit;
+    uint64_t new_mask = __atomic_load_n(&g_xsave_mask, __ATOMIC_RELAXED) |
+                        xcr0_bit;
     xsetbv(0, new_mask);
 
     /* Recompute area size for the new component set. */
     uint32_t eax, ebx, ecx, edx;
     cpuid_count(0xD, 0, &eax, &ebx, &ecx, &edx);
 
-    g_xsave_mask = new_mask;
-    g_xsave_area_size = ebx;
+    __atomic_store_n(&g_xsave_mask, new_mask, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_xsave_area_size, ebx, __ATOMIC_RELAXED);
 
-    /* debug_printf, deliberately: this runs on every AP inside
-     * per_core_init_ap (vmm_pku_ap_init), where enable_fpu has just
-     * republished g_xsave_mask without PKRU, so the registration is a real
-     * one on each core and not a no-op that could be filtered out. Nothing
-     * else in that stretch of AP bring-up writes to the console. */
-    debug_printf("[FPU] xsave_register(%s): XCR0=0x%lx area_size=%u\n",
-                 name ? name : "?",
-                 (unsigned long)g_xsave_mask,
-                 (unsigned)g_xsave_area_size);
+    /* kprintf, and it costs one line for the whole boot: only the core that
+     * registers a component first gets this far. Every later core finds the
+     * bit already in g_xsave_mask and returns above — enable_fpu inherits
+     * registered components into that core's XCR0, so there is nothing left
+     * for the AP to do here.
+     *
+     * It has to be visible on a board because this is the LAST word on the
+     * per-process FPU buffer. enable_fpu prints the area size it computed,
+     * but that line is printed before any extension is registered, so the
+     * number an operator reads there is not the one process_create will use
+     * — and the crossing of SLAB_LARGE_THRESHOLD that the note in enable_fpu
+     * describes is decided by the number printed HERE. */
+    kprintf("[FPU] xsave_register(%s): XCR0=0x%lx area_size=%u "
+            "(per-process buffer %u)\n",
+            name ? name : "?",
+            (unsigned long)new_mask,
+            (unsigned)ebx,
+            (unsigned)ebx + 63u);
     return true;
 }
 
@@ -161,6 +189,23 @@ void enable_fpu(void) {
 
     // Step 4: Configure XCR0 if XSAVE available
     if (g_cpu_caps.has_xsave) {
+        /* THIS core's XSAVE enumeration, read before XCR0 is touched.
+         * CPUID.(EAX=0DH,ECX=0) EDX:EAX is the set of state components this
+         * processor will accept in XCR0, and XSETBV raises #GP(0) for a bit
+         * outside it (Intel SDM Vol 1 §13.3).
+         *
+         * g_cpu_caps.xcr0_supported is NOT that set on an AP:
+         * cpu_intersect_features_ap deliberately leaves the field at the
+         * BSP's reading, calling it a descriptor of the current core rather
+         * than a kernel-wide capability. Every per-core decision below that
+         * has no intersected boolean of its own has to use this word
+         * instead — an XSETBV that faults here happens before idt_load:
+         * triple fault, and a core that never reports in. */
+        uint32_t sup_eax, sup_ebx, sup_ecx, sup_edx;
+        cpuid_count(0xD, 0, &sup_eax, &sup_ebx, &sup_ecx, &sup_edx);
+        const uint64_t xcr0_this_core =
+            ((uint64_t)sup_edx << 32) | (uint64_t)sup_eax;
+
         uint64_t xcr0 = XCR0_X87 | XCR0_SSE; // always enable x87 + SSE
 
         // Enable AVX if supported
@@ -190,6 +235,48 @@ void enable_fpu(void) {
             xcr0 |= XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM;
         }
 
+        /* Carry over every component another subsystem has already
+         * registered through fpu_xsave_register_extension.
+         *
+         * g_xsave_mask is one word read by every core — fpu_save,
+         * fpu_restore and the SAVE/RESTORE macros in context_switch.asm
+         * load it on every switch. Bit 9 (PKRU) is not this function's to
+         * decide; it arrives through that door, on whichever core called
+         * it. Until this step existed an AP's XCR0 never carried it, so the
+         * AP went on to publish a kernel-wide mask one component short of
+         * what the BSP had arranged. vmm_pku_ap_init put the bit back into
+         * this AP's XCR0 some thirty lines later in per_core_init_ap, and
+         * on the happy path that closed the gap before anything looked.
+         *
+         * It does not close for an AP that comes up, runs this function,
+         * and then stops or falls over before reaching vmm_pku_ap_init:
+         * amp_boot_aps gives a core a deadline to report in and carries on
+         * without one that misses it, and nothing rewrites the word
+         * afterwards. The kernel then runs for the rest of its life with
+         * PKRU out of the mask while CR4.PKE stays set on the cores that
+         * did reach it — every context switch from then on leaves PKRU
+         * unsaved and unrestored, and each process inherits the
+         * protection-key register of the one before it.
+         *
+         * Only registered components are inherited. The base set stays a
+         * per-core decision on purpose: a core that lost AVX in
+         * cpu_intersect_features_ap must not be handed it back here.
+         *
+         * The gate is xcr0_this_core and not the kernel-wide
+         * g_cpu_caps.xcr0_supported the AVX gates above lean on. Those gates
+         * carry an intersected per-core boolean as well; this one has none,
+         * so the BSP's enumeration on its own would be strictly weaker —
+         * and a component the BSP enumerates while this core does not is
+         * precisely the XSETBV #GP that read exists to prevent. No
+         * dependency rule can be broken by this OR either: the base set is
+         * subtracted explicitly, and what comes through the extension door
+         * is an independent component. PKRU has no prerequisite of its own
+         * — in particular not CR4.PKE, which this AP has not set yet
+         * (vmm_pku_ap_init does that later): CR4.PKE gates RDPKRU/WRPKRU,
+         * XCR0[9] gates only whether XSAVE manages the register. */
+        xcr0 |= __atomic_load_n(&g_xsave_mask, __ATOMIC_RELAXED) &
+                ~(uint64_t)XCR0_BASE_SET & xcr0_this_core;
+
         xsetbv(0, xcr0);
 
         // Re-query CPUID.0xD:0 with the actual XCR0 to get the correct size
@@ -198,20 +285,71 @@ void enable_fpu(void) {
         cpuid_count(0xD, 0, &eax, &ebx, &ecx, &edx);
 
         g_use_xsave = true;
-        g_xsave_mask = xcr0;
-        g_xsave_area_size = ebx; // size for currently enabled features
 
-        /* kprintf: this number sets the per-process FPU buffer, and once it
-         * passes SLAB_LARGE_THRESHOLD every process allocates out of the
-         * fixed kernel pool instead of the growable slab.  That crossing is
-         * invisible unless the number itself is on the console.
+        /* Publish. The kernel-wide mask is the INTERSECTION of what the
+         * cores enabled, never the opinion of whichever core ran last.
          *
-         * Once, not once per core: every AP runs enable_fpu and reaches the
-         * same CPUID answer, so the other N-1 lines say nothing new. */
-        static volatile uint8_t xsave_line_done = 0;
-        if (__atomic_exchange_n(&xsave_line_done, 1, __ATOMIC_RELAXED) == 0)
+         * It has to be a subset of every core's XCR0. XSAVE and XRSTOR use
+         * RFBM = EDX:EAX & XCR0, so a mask wider than some core's XCR0 is a
+         * component silently dropped on that core — and worse, XRSTOR
+         * raises #GP(0) when the saved XSTATE_BV names a component that
+         * core's XCR0 lacks (Intel SDM Vol 1 §13.8). A narrow core
+         * publishing and a wide core publishing after it used to arrange
+         * exactly that fault. An intersection cannot produce either, and it
+         * does not depend on the order the cores came up in.
+         *
+         * The area size belongs to the FIRST publisher and is never touched
+         * again here. It was computed for that core's whole XCR0, the mask
+         * only ever narrows from there, and component offsets in the
+         * standard XSAVE layout are architectural — so that size still
+         * covers every later, smaller set. Raising it afterwards would be a
+         * buffer overflow rather than a fix: process FPU areas are sized
+         * from this word when they are allocated, and idle_process_init has
+         * already run by the time any AP gets here. Growing it belongs to
+         * fpu_xsave_register_extension alone, which runs on the BSP before
+         * any process exists. */
+        static volatile uint8_t xsave_published = 0;
+        if (__atomic_exchange_n(&xsave_published, 1, __ATOMIC_RELAXED) == 0) {
+            __atomic_store_n(&g_xsave_mask, xcr0, __ATOMIC_RELAXED);
+            __atomic_store_n(&g_xsave_area_size, ebx, __ATOMIC_RELAXED);
+
+            /* kprintf, and the same core that publishes the number is the
+             * one that says it: this number sets the per-process FPU
+             * buffer, and once it passes SLAB_LARGE_THRESHOLD every process
+             * allocates out of the fixed kernel pool instead of the
+             * growable slab. That crossing is invisible unless the number
+             * itself is on the console.
+             *
+             * It is the BASE size — no extension is registered this early
+             * in boot. The final number, the one process_create actually
+             * uses, is printed by fpu_xsave_register_extension at the
+             * moment it changes. A later core has nothing to add here; if
+             * it has anything to say at all it says it below. */
             kprintf("[FPU] XSAVE enabled: XCR0=0x%lx, area_size=%u bytes (per-process buffer %u)\n",
-                    xcr0, g_xsave_area_size, g_xsave_area_size + 63);
+                    xcr0, ebx, ebx + 63);
+        } else {
+            uint64_t before = __atomic_fetch_and(&g_xsave_mask, xcr0,
+                                                 __ATOMIC_RELAXED);
+            uint64_t lost = before & ~xcr0;
+            if (lost) {
+                /* Heterogeneous silicon, and it is not a detail to swallow.
+                 * The cores that came up before this one still have these
+                 * components enabled in their own XCR0 — user code there
+                 * may still execute the instructions — while the kernel has
+                 * just stopped carrying that state across a switch.
+                 * Narrowing is the only mask that is safe everywhere, and
+                 * from this core the older ones cannot be re-programmed, so
+                 * naming it on the console is the rest of the answer. */
+                kprintf("[FPU] XCR0 components 0x%lx are absent on this core "
+                        "and have left the kernel-wide save set (0x%lx -> "
+                        "0x%lx) — the cores already online keep them enabled "
+                        "and their state is no longer carried across a "
+                        "context switch\n",
+                        (unsigned long)lost, (unsigned long)before,
+                        (unsigned long)(before & xcr0));
+            }
+        }
+
         if (xcr0 & XCR0_AVX)
             debug_printf("[FPU]   AVX: enabled\n");
         if (xcr0 & XCR0_OPMASK)

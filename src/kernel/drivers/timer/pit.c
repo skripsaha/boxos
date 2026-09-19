@@ -116,11 +116,21 @@ void pit_tick(void) {
 }
 
 uint64_t pit_get_uptime_ms(void) {
-    /* When HPET is online its 10 ns-class main counter is monotonic with
-     * sub-microsecond resolution — use it transparently behind the
-     * legacy PIT uptime API so every caller automatically gets the
-     * higher-resolution clock. Falls back to PIT-accumulated us on
-     * boards without HPET (pre-PIIX4 etc.). */
+    /* When HPET is online its main counter is monotonic and finer than a
+     * microsecond — use it transparently behind the legacy PIT uptime
+     * API so every caller automatically gets the higher-resolution
+     * clock. Falls back to PIT-accumulated us on boards without HPET
+     * (pre-PIIX4 etc.).
+     *
+     * The tick is not the "10 ns" this comment used to name: that is
+     * QEMU's period and no shipping part's. The controller states its
+     * own period in femtoseconds in GCAP_ID[63:32], HPET 1.0a §2.3.4
+     * permits anything up to 0x05F5E100 fs (10^8 fs = 100 ns), and
+     * every IA-PC part carries the canonical 69,841,279 fs — 69.84 ns
+     * at 14.31818 MHz. Sub-microsecond is true of all of them, which is
+     * the whole of what this choice rests on; a named tick length is
+     * not, and hpet_now_us() divides by the reported period rather than
+     * by any constant (see hpet.c, hpet_ticks_to_us). */
     if (hpet_is_present()) return hpet_now_us() / 1000ULL;
     return __atomic_load_n(&pit_uptime_us, __ATOMIC_RELAXED) / 1000ULL;
 }

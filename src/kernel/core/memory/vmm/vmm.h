@@ -340,7 +340,9 @@ uint64_t     vmm_wc_pte_flags(void);
 /* Phase 2E — CPU consistency probes (renamed in audit pass — these are
  * PURE CPU MSR probes with no MemTag-specific state). Verify the PAT
  * MSR is identical across coherent CPUs per Intel SDM Vol 3A §11.12.4;
- * dump firmware-programmed MTRR layout per Intel SDM §11.11/§11.12.5. */
+ * dump firmware-programmed MTRR layout per Intel SDM §11.11, and judge it
+ * against the MTRR∩PAT combination table — §11.5.2.2, Table 11-7, NOT
+ * §11.12.5, which is "PAT Compatibility with Earlier IA-32 Processors". */
 bool         vmm_verify_pat_msr(void);
 void         vmm_dump_mtrr_layout(void);
 

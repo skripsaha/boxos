@@ -229,8 +229,10 @@ void amp_init(void)
  * earlier uint8_t parameter did, turns an INIT meant for x2APIC ID 256
  * into an INIT to ID 0 — the BSP itself, mid-bring-up — and turns ID
  * 256+k into an INIT-reset of the already-running core k. The xAPIC
- * branch of lapic_icr_write does its own 8-bit masking, which is where
- * that masking belongs: in the mode that actually has an 8-bit field.
+ * branch of lapic_icr_write does its own REFUSAL of such an ID, which is
+ * where that refusal belongs: in the mode that actually has an 8-bit
+ * field. It masks nothing — masking is how the misdelivery happens, not
+ * how it is avoided.
  *
  * Note on what a wrong ICR access does NOT do: writing the legacy MMIO
  * ICR offsets on an x2APIC-enabled CPU does not fault. Intel SDM Vol 3A,
@@ -320,13 +322,17 @@ void amp_boot_aps(void)
 
         /* A destination this APIC mode cannot name. The xAPIC ICR carries
          * eight bits of physical destination, so an ID with any bit above
-         * bit 7 is not merely hard to reach: lapic_icr_write masks it and
-         * the INIT lands on id & 0xFF — a DIFFERENT core, already running
-         * kernel code, which is INIT-reset out from under itself. Widening
-         * the descriptor's ID to 32 bits carried the truth down to the ICR;
-         * one layer further the field really is eight bits wide, and the
-         * only cure there is not to send. Such an ID can only be addressed
-         * in x2APIC mode, where the ICR destination is the full 32 bits. */
+         * bit 7 is not merely hard to reach: the only eight-bit thing that
+         * could be sent is id & 0xFF — a DIFFERENT core, already running
+         * kernel code, which would be INIT-reset out from under itself.
+         * Widening the descriptor's ID to 32 bits carried the truth down to
+         * the ICR; one layer further the field really is eight bits wide,
+         * and the only cure there is not to send. lapic_icr_write refuses
+         * such an ID in its own right, so this test is not the only floor
+         * under the send — it is the one that can say WHICH core is being
+         * left unstarted, which the ICR, seeing only an ID, cannot. Such an
+         * ID can only be addressed in x2APIC mode, where the ICR
+         * destination is the full 32 bits. */
         if (!lapic_is_x2apic_active() && c->lapic_id > 0xFFu) {
             kprintf("[AMP] %[E]Core %u: APIC ID %u does not fit the 8-bit "
                     "xAPIC ICR destination — not started, because sending "

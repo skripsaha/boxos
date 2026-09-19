@@ -384,6 +384,37 @@ static bool amdvi_await_status_clear(amdvi_unit_t* u, uint64_t bits,
     return false;
 }
 
+/* Give back everything amdvi_unit_init took, in the reverse order it took it.
+ *
+ * Every failure after vmm_map_mmio used to return with the register window
+ * still mapped and whatever tables had already been bought still out of the
+ * PMM's hands -- as much as 2 MiB of device table plus three pages, per failed
+ * IVHD, on a machine that is then told it has no IOMMU there. Nothing else in
+ * this driver ever comes back for them: a unit that does not reach
+ * `u->online = true` is not counted, not indexed and not reachable.
+ *
+ * The tables are safe to hand back at every one of those points because none
+ * of them has been published to the hardware yet: DEV_TAB_BAR, CMD_BUF_BAR
+ * and EVT_LOG_BAR are written further down, and until they are the IOMMU is
+ * still fetching from whatever firmware gave it. That holds for the quiesce
+ * failure too -- the unit would not stop, but what it would not stop USING is
+ * firmware's buffers, not ours.
+ *
+ * The struct is left blank, because amdvi_init hands the same slot to the next
+ * IVHD and a half-filled one would give that attempt the last one's pointers
+ * on any path that returns before overwriting them. */
+static void amdvi_unit_unwind(amdvi_unit_t* u) {
+    if (u->sem)     pmm_free((void*)(uintptr_t)u->sem_phys, 1);
+    if (u->evt_log) pmm_free((void*)(uintptr_t)u->evt_log_phys,
+                             EVT_LOG_BYTES / 4096);
+    if (u->cmd_buf) pmm_free((void*)(uintptr_t)u->cmd_buf_phys,
+                             CMD_BUF_BYTES / 4096);
+    if (u->dev_tab) pmm_free((void*)(uintptr_t)u->dev_tab_phys,
+                             (size_t)(DEV_TAB_BYTES / 4096));
+    if (u->reg)     vmm_unmap_mmio(u->reg, 16384);
+    memset(u, 0, sizeof(*u));
+}
+
 static int amdvi_unit_init(amdvi_unit_t* u, uint64_t reg_phys,
                             uint16_t seg) {
     u->reg_phys     = reg_phys;
@@ -391,20 +422,20 @@ static int amdvi_unit_init(amdvi_unit_t* u, uint64_t reg_phys,
     u->reg = (volatile uint8_t*)vmm_map_mmio((uintptr_t)reg_phys, 16384,
                   VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE |
                   VMM_FLAG_CACHE_DISABLE);
-    if (!u->reg) return -1;
+    if (!u->reg) return -1;   /* nothing taken yet but the failed mapping */
 
     /* Allocate tables. */
     u->dev_tab = alloc_aligned_4k(&u->dev_tab_phys, (size_t)DEV_TAB_BYTES);
-    if (!u->dev_tab) return -2;
+    if (!u->dev_tab) { amdvi_unit_unwind(u); return -2; }
     u->cmd_buf = alloc_aligned_4k(&u->cmd_buf_phys, CMD_BUF_BYTES);
-    if (!u->cmd_buf) return -3;
+    if (!u->cmd_buf) { amdvi_unit_unwind(u); return -3; }
     u->evt_log = alloc_aligned_4k(&u->evt_log_phys, EVT_LOG_BYTES);
-    if (!u->evt_log) return -4;
+    if (!u->evt_log) { amdvi_unit_unwind(u); return -4; }
     /* The completion semaphore gets a page of its own: the IOMMU stores into
      * it by physical address while this unit's command buffer keeps being
      * written by the CPU, and the two must not share a qword. */
     u->sem = (volatile uint64_t*)alloc_aligned_4k(&u->sem_phys, sizeof(uint64_t));
-    if (!u->sem) return -5;
+    if (!u->sem) { amdvi_unit_unwind(u); return -5; }
     u->sem_seq = 0;
 
     /* Pre-fill DTE with V=0 (not valid) — devices become valid on
@@ -452,6 +483,7 @@ static int amdvi_unit_init(amdvi_unit_t* u, uint64_t reg_phys,
         kprintf("[AMD-Vi] seg=%u base=0x%lx: left disabled rather than have "
                 "its base registers moved while it is still using them\n",
                 (unsigned)seg, (unsigned long)reg_phys);
+        amdvi_unit_unwind(u);
         return -6;
     }
 

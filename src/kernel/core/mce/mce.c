@@ -118,19 +118,47 @@ static bool mce_supported_local(void) {
     return mce && mca;
 }
 
-/* Intel bank-0 historical hazard. P54C/P55C and a handful of early P-IV
- * SKUs hang or report spurious errors when bank 0 CTL is written all-1s.
- * Linux mce/intel.c skips bank 0 on those families. Modern Intel (Family
- * 6 Model >= 0x0F, all family >= 0xF after Tejas) handles bank 0
- * normally. We detect by family/model. AMD: no equivalent hazard. */
+/* Bank 0 on the parts where IA32_MC0_CTL is not a bank control at all.
+ *
+ * SDM Vol 3B §15.3.2.1, the NOTE under Figure 15-5: "For P6 family
+ * processors, processors based on Intel Core microarchitecture (excluding
+ * those on which CPUID reports DisplayFamily_DisplayModel as 06H_1AH and
+ * onward): the operating system or executive software must not modify the
+ * contents of the IA32_MC0_CTL MSR. This MSR is internally aliased to the
+ * EBL_CR_POWERON MSR and controls platform-specific error handling
+ * features. System specific firmware (the BIOS) is responsible for the
+ * appropriate initialization of the IA32_MC0_CTL MSR."
+ *
+ * The initialization pseudocode draws the same line and no other: "IF
+ * (Processor Family is 6H and Processor EXTMODEL:MODEL is less than 1AH)
+ * THEN (* Enable logging of all errors except for MC0_CTL register *) FOR
+ * error-reporting banks (1 through MAX_BANK_NUMBER)". So does Linux, whose
+ * quirk clears bank 0's `init` below family 6 model 1AH (INTEL_NEHALEM_EP)
+ * with the comment "it's not aliased anymore on model 0x1a+ ... merely
+ * don't write CTL0".
+ *
+ * 06H_1AH is the cutoff, and id.model is exactly what it names: the
+ * effective DisplayModel, with EXTMODEL already folded in by
+ * cpu_read_identity. The cutoff standing here before was model < 0x0E,
+ * thirteen models early, so every Core-microarchitecture part in
+ * 06_0EH..06_19H — Yonah 0x0E, Merom/Conroe 0x0F, Penryn 0x17 and 0x1D —
+ * fell through and had all-ones written into EBL_CR_POWERON: bus-error
+ * signalling and response error checking, a register the NOTE says firmware
+ * owns, rewritten by the BSP and again by every AP.
+ *
+ * There was also a family-0FH (NetBurst) arm. The NOTE names P6 and Core
+ * only, the pseudocode tests family 6 only, and Linux carries no bank-0
+ * quirk for NetBurst — nothing sources it, so it is gone rather than kept
+ * on a guess. AMD has no equivalent alias.
+ *
+ * What this gates is the CTL WRITE alone. mce_program_banks still clears
+ * bank 0's IA32_MCi_STATUS on these parts — see the loop for why. */
 static bool mce_skip_bank_zero(void) {
     cpu_identity_t id;
     cpu_read_identity(&id);
     if (id.vendor[0] != 'G') return false;  /* "GenuineIntel" check */
     /* Pre-Pentium-Pro families had no MCA; we don't reach here on them. */
-    if (id.family == 0x0F && id.model < 0x03) return true;  /* Willamette/Northwood */
-    if (id.family == 0x06 && id.model < 0x0E) return true;  /* Pre-Core (Banias/Dothan) */
-    return false;
+    return id.family == 0x06 && id.model < 0x1A;
 }
 
 /* Does this vendor encode IA32_MC<i>_STATUS[15:0] with Intel's compound
@@ -268,13 +296,24 @@ static void mce_lmce_fleet_disarm(const char *why) {
 
 static void mce_program_banks(uint32_t count, uint64_t skip_mask) {
     for (uint32_t i = 0; i < count && i < MCE_MAX_BANKS; i++) {
-        if (skip_mask & (1ULL << i)) continue;
-        /* Enable all error sources on this bank. SDM Vol 3B §15.3.2.1:
-         * IA32_MCi_CTL is bank-specific; writing 0xFFFFFFFFFFFFFFFF is
-         * the canonical "enable everything" pattern. */
-        mce_wrmsr(MCE_MSR_MC_CTL_BASE + i * 4, 0xFFFFFFFFFFFFFFFFULL);
-        /* Clear any stale status the firmware left behind. SDM §15.3.2.2
-         * notes that BIOS POST may have left UC errors logged. */
+        if (!(skip_mask & (1ULL << i))) {
+            /* Enable all error sources on this bank. SDM Vol 3B §15.3.2.1:
+             * IA32_MCi_CTL is bank-specific; writing 0xFFFFFFFFFFFFFFFF is
+             * the canonical "enable everything" pattern. */
+            mce_wrmsr(MCE_MSR_MC_CTL_BASE + i * 4, 0xFFFFFFFFFFFFFFFFULL);
+        }
+
+        /* Clear any stale status the firmware left behind — for EVERY bank,
+         * including one whose CTL the alias above forbids us to write. The
+         * initialization pseudocode splits exactly there: the CTL loop runs
+         * "1 through MAX_BANK_NUMBER" on an aliased part, while the status
+         * loop runs "FOR error-reporting banks (0 through MAX_BANK_NUMBER) DO
+         * ... (OS only) IA32_MCi_STATUS ← 0" in both arms. §15.3.2.2 says
+         * why: "Software is responsible for clearing IA32_MCi_STATUS MSRs by
+         * explicitly writing 0s to them", and BIOS POST leaves entries there.
+         * Skipping this write with the CTL write left bank 0's firmware-era
+         * record standing, so the first #MC walked past it, decoded a POST
+         * entry as a live one and poisoned the page its stale ADDR named. */
         mce_wrmsr(MCE_MSR_MC_STATUS_BASE + i * 4, 0ULL);
     }
 }

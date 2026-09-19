@@ -42,9 +42,21 @@
  *        - The parent cert may be in the embedded SignedData.certificates
  *          list OR in the platform db.  A chain that terminates inside
  *          db == trusted.
- *  11. Final check: SHA-256 of any chain cert appearing in dbx → image
- *      is revoked.  SHA-256 of the computed Authenticode hash appearing
- *      in dbx → image is revoked.
+ *  11. Final check, three dbx questions asked of every chain step
+ *      (UEFI 2.10 §32.4.1 signature types, §32.6.1 forbidden rules):
+ *        - SHA-256 of the whole certificate DER in dbx (EFI_CERT_X509
+ *          entries, matched by digest) → revoked.
+ *        - SHA-256/384/512 of the certificate's TBSCertificate in dbx
+ *          (EFI_CERT_X509_SHA256/384/512 entries) → revoked. The
+ *          TimeOfRevocation carried by those records is not consulted:
+ *          §32.6.1 forbids the image outright when the firmware "does not
+ *          support timestamp verification", and this kernel reads no
+ *          RFC 3161 counter-signature.
+ *        - The Authenticode image digest in dbx (EFI_CERT_SHA256/384/512
+ *          entries) → revoked. The 384/512 digests are the same region
+ *          walk under a wider algorithm and are computed only when dbx
+ *          actually holds a record of that width, so an ordinary board
+ *          pays for SHA-256 alone.
  *
  * Touch surface:
  *
@@ -97,5 +109,68 @@ bool efi_authenticode_compute_pe_hash(const uint8_t *buf, uint32_t len,
 /* Convert an EfiAuthenticodeResult to a stable string slug used in
  * authenticode:fail:<slug> Touch tag. */
 const char *efi_authenticode_result_slug(EfiAuthenticodeResult r);
+
+/* =========================================================================
+ * EfiSbHashEntry.hash_kind encoding — ONE definition site.
+ *
+ * efi_secureboot.c packs two facts into that uint16_t: the digest width in
+ * bits, and whether the record is an EFI_CERT_X509_SHA{256,384,512} entry
+ * (a hash of a CERTIFICATE's TBS contents) or an EFI_CERT_SHA{256,384,512}
+ * entry (a hash of an IMAGE) — UEFI 2.10 §32.4.1 Table 32-5. The two are
+ * not interchangeable: searching one set for the other finds nothing and
+ * fails OPEN, which is exactly how both kinds came to be parsed, counted
+ * and never consulted.
+ *
+ * The names belong next to the struct in efi_secureboot.h, which describes
+ * the field as "256, 384, 512 — alg in bits" and does not mention the flag
+ * at all. They are here because both the producer (efi_secureboot.c) and
+ * the consumer (efi_authenticode.c) include this header, so the bit has one
+ * spelling that the compiler checks instead of four bare literals that
+ * agree by coincidence.
+ * ========================================================================= */
+#define EFI_SB_HASH_KIND_BITS  0x7FFFu
+#define EFI_SB_HASH_KIND_X509  0x8000u
+
+/* =========================================================================
+ * SHA-384 / SHA-512 (FIPS 180-4 §4.1.3, §5.1.2, §6.4, §6.5)
+ *
+ * Exported from this module rather than from src/lib/kernel/crypto.h
+ * because Secure Boot is the only thing in this kernel that asks for them:
+ * dbx carries EFI_CERT_X509_SHA384/512 revocations of certificates and
+ * EFI_CERT_SHA384/512 revocations of images, and a revocation this kernel
+ * cannot hash is a revocation it silently ignores.
+ *
+ * Exported at all — rather than kept static beside their only caller —
+ * because a digest that decides whether a revoked certificate is honoured
+ * must be provable at boot: efi_selftest.c's T6 runs published FIPS
+ * vectors through these entry points. A dbx with SHA-384 records exists on
+ * no machine the project can boot in QEMU, so the self-test is the only
+ * thing that will ever execute this code before a real board does.
+ *
+ * Streaming as well as one-shot: a TBSCertificate is one contiguous slice,
+ * but an Authenticode image digest is a walk over disjoint regions of a PE
+ * that is never copied into one buffer.
+ *
+ *   efi_sha512_init   — reset for SHA-384 (sha384 = true) or SHA-512.
+ *   efi_sha512_update — absorb len bytes; any number of calls.
+ *   efi_sha512_final  — write 48 bytes (SHA-384) or 64 (SHA-512). The
+ *                       context is spent afterwards: re-init to reuse it.
+ *   efi_sha512        — one shot, same output sizes.
+ *
+ * No allocation, no locks, IRQ-safe; klib memcpy/memset is the only
+ * dependency.
+ * ========================================================================= */
+typedef struct {
+    uint64_t h[8];        /* running chaining value */
+    uint64_t total;       /* message bytes absorbed so far */
+    uint32_t buf_len;     /* bytes held in buf (< 128) */
+    bool     sha384;      /* truncate to 48 bytes and use the SHA-384 IV */
+    uint8_t  buf[128];    /* partial block */
+} EfiSha512Ctx;
+
+void efi_sha512_init(EfiSha512Ctx *ctx, bool sha384);
+void efi_sha512_update(EfiSha512Ctx *ctx, const uint8_t *data, uint32_t len);
+void efi_sha512_final(EfiSha512Ctx *ctx, uint8_t *out);
+void efi_sha512(const uint8_t *data, uint32_t len, bool sha384, uint8_t *out);
 
 #endif /* EFI_AUTHENTICODE_H */

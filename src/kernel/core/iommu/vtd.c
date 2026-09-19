@@ -42,7 +42,6 @@
 #define VTD_REG_RTADDR    0x020
 #define VTD_REG_CCMD      0x028
 #define VTD_REG_FSTS      0x034
-#define VTD_REG_PRECTL    0x028
 
 /* Fault Status Register bits (§11.4.7.1). All three are RW1C: a 1 written
  * back into one is how it is cleared, and nothing else clears it.
@@ -142,6 +141,12 @@
 typedef struct {
     uint64_t  reg_phys;
     volatile uint8_t* reg;
+    /* How much of the register block is mapped at u->reg. It starts at one
+     * page — the only length that can be assumed before CAP and ECAP are
+     * read — and becomes whatever those two say the block is. Whoever gives
+     * the window back has to give back the length that was taken, and after
+     * the remap below that is no longer 4096. */
+    size_t    reg_size;
     uint64_t  cap;
     uint64_t  ecap;
     uint32_t  gcmd;                /* shadow of GCMD's persistent fields */
@@ -820,6 +825,31 @@ static void vtd_ir_init(vtd_unit_t* u) {
     }
 }
 
+/* IOTLB Invalidate Register (§11.4.8.1) — the register path's half of the
+ * same operation vtd_qi_iotlb_desc builds as a descriptor, and its bits are
+ * NOT in the descriptor's places: IVT is bit 63, IIRG 61:60, and the drain
+ * bits are DR at 49 and DW at 48, where the descriptor keeps DR at 7 and DW
+ * at 6.
+ *
+ * The drain bits are what make "the old mapping is gone" true rather than
+ * merely started — without them the unit may report the invalidation done
+ * while reads and writes issued under the old translation are still in the
+ * fabric. §11.4.8.1 has a unit that does not report DRD/DWD in CAP treat the
+ * matching field as reserved, so both ride on the same CAP_DRD/CAP_DWD the
+ * queued descriptor consults, and this path asks for exactly what that one
+ * asks for. It used to ask for neither, which made the fallback a WEAKER
+ * invalidation than the queue it stands in for — on precisely the units whose
+ * queue had just been withdrawn.
+ *
+ * (Linux's __iommu_flush_iotlb sets only DMA_TLB_WRITE_DRAIN, from
+ * cap_write_drain, and does not ask for read draining at all. The spec allows
+ * both; this driver asks for both, here and in the descriptor, so the two
+ * halves of one operation cannot differ in what they promise.) */
+#define IOTLB_IVT           (1ULL << 63)
+#define IOTLB_IIRG_GLOBAL   (1ULL << 60)
+#define IOTLB_DR            (1ULL << 49)
+#define IOTLB_DW            (1ULL << 48)
+
 /* Drain context cache + global IOTLB after table changes (§6.5.5). */
 static void vtd_global_flush(vtd_unit_t* u) {
     if (u->qi_active) {
@@ -860,10 +890,11 @@ static void vtd_global_flush(vtd_unit_t* u) {
     uint32_t iotlb_off = ECAP_IRO_OFF(u->ecap);
     volatile uint64_t* iotlb_reg =
         (volatile uint64_t*)(u->reg + iotlb_off + 8);
-    *iotlb_reg =
-        (1ULL << 63)   |              /* IVT (invalidate) */
-        (1ULL << 60);                 /* IIRG=01 global */
-    (void)vtd_await_clear64(iotlb_reg, (1ULL << 63),
+    uint64_t iotlb_cmd = IOTLB_IVT | IOTLB_IIRG_GLOBAL;
+    if (u->cap & CAP_DWD) iotlb_cmd |= IOTLB_DW;
+    if (u->cap & CAP_DRD) iotlb_cmd |= IOTLB_DR;
+    *iotlb_reg = iotlb_cmd;
+    (void)vtd_await_clear64(iotlb_reg, IOTLB_IVT,
                             "the global IOTLB invalidate");
 }
 
@@ -872,11 +903,39 @@ static void vtd_global_flush(vtd_unit_t* u) {
 #define VTD_MMIO_FLAGS  (VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | \
                          VMM_FLAG_CACHE_DISABLE)
 
+/* Give back everything vtd_unit_init took, in the reverse order it took it.
+ *
+ * Every refusal after the register window was mapped used to return with that
+ * window still mapped — up to 16 KiB of it, once ECAP.IRO has been read and
+ * the block remapped to its real length — and the root-table page, when one
+ * had been bought, still out of the PMM's hands. Nothing comes back for them
+ * later: a unit that does not reach `u->online = true` is not counted, not
+ * indexed and not reachable through g_units.
+ *
+ * The root table is safe to hand back at the one refusal that holds one —
+ * the root-table pointer the unit would not acknowledge. That point is past
+ * vtd_adopt_from_firmware, which returns true only with GSTS.TES clear:
+ * either it was never set or the hardware was watched clearing it. So the
+ * unit is not translating, and RTADDR is walked only under GCMD.TE. Nothing
+ * sets TE afterwards either — vtd_enable_translation walks the online units
+ * and this one never becomes one.
+ *
+ * The struct is left blank, because vtd_init hands the same slot to the next
+ * DRHD — g_unit_count only moves on success — and a half-filled one would
+ * give that attempt this one's CAP, ECAP and pointers on any path that
+ * returns before overwriting them. */
+static void vtd_unit_unwind(vtd_unit_t* u) {
+    if (u->root_table) pmm_free((void*)(uintptr_t)u->root_phys, 1);
+    if (u->reg)        vmm_unmap_mmio(u->reg, u->reg_size);
+    memset(u, 0, sizeof(*u));
+}
+
 static int vtd_unit_init(vtd_unit_t* u, uint64_t phys) {
     u->reg_phys = phys;
     u->reg = (volatile uint8_t*)vmm_map_mmio((uintptr_t)phys, 4096,
                                              VTD_MMIO_FLAGS);
-    if (!u->reg) return -1;
+    if (!u->reg) { vtd_unit_unwind(u); return -1; }
+    u->reg_size = 4096;
     u->cap  = *(volatile uint64_t*)(u->reg + VTD_REG_CAP);
     u->ecap = *(volatile uint64_t*)(u->reg + VTD_REG_ECAP);
 
@@ -893,14 +952,18 @@ static int vtd_unit_init(vtd_unit_t* u, uint64_t phys) {
     size_t regs_size = ((size_t)block_end + 0xFFFu) & ~(size_t)0xFFFu;
     if (regs_size > 4096) {
         vmm_unmap_mmio(u->reg, 4096);
+        u->reg      = NULL;
+        u->reg_size = 0;
         u->reg = (volatile uint8_t*)vmm_map_mmio((uintptr_t)phys, regs_size,
                                                  VTD_MMIO_FLAGS);
         if (!u->reg) {
             kprintf("[VT-d] remap unit at 0x%lx publishes a 0x%lx-byte register "
                     "block this kernel could not map — leaving it alone\n",
                     (unsigned long)phys, (unsigned long)regs_size);
+            vtd_unit_unwind(u);
             return -1;
         }
+        u->reg_size = regs_size;
     }
 
     /* SAGAW (CAP bits 12:8, §11.4.2): bit N set means the unit supports the
@@ -923,6 +986,7 @@ static int vtd_unit_init(vtd_unit_t* u, uint64_t phys) {
         kprintf("[VT-d] remap unit at 0x%lx reports SAGAW=0x%02x — no 48-bit "
                 "AGAW, and this driver builds only 4-level tables; leaving the "
                 "unit alone\n", (unsigned long)phys, sagaw);
+        vtd_unit_unwind(u);
         return -2;
     }
     u->sagaw_levels = VTD_AGAW_48BIT + 2;
@@ -933,12 +997,13 @@ static int vtd_unit_init(vtd_unit_t* u, uint64_t phys) {
     if (!vtd_adopt_from_firmware(u)) {
         kprintf("[VT-d] remap unit at 0x%lx would not come off firmware's "
                 "tables — leaving it exactly as it was\n", (unsigned long)phys);
+        vtd_unit_unwind(u);
         return -5;
     }
 
     /* Allocate root table. */
     u->root_table = alloc_table_4k(&u->root_phys);
-    if (!u->root_table) return -3;
+    if (!u->root_table) { vtd_unit_unwind(u); return -3; }
 
     /* Program RTADDR_REG with the table physical address.
      * Bit 11:10 = TT (translation table type) = 00 (legacy). */
@@ -954,6 +1019,7 @@ static int vtd_unit_init(vtd_unit_t* u, uint64_t phys) {
                         "the root-table pointer (GCMD.SRTP -> GSTS.RTPS)")) {
         kprintf("[VT-d] remap unit at 0x%lx refused its root table — not "
                 "bringing it online\n", (unsigned long)phys);
+        vtd_unit_unwind(u);
         return -4;
     }
 

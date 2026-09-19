@@ -691,6 +691,15 @@ void acpi_apei_consume(void) {
         debug_printf("[APEI] BERT: no error recorded from previous boot\n");
     }
 
+    /* The Boot Error Region is read ONCE, here, and never again: ACPI 6.5
+     * §18.3 has the firmware fill it before OSPM runs, and the blocks are
+     * acknowledged above by clearing their Block Status. Keeping the window
+     * open for the life of the kernel — which is what this used to do —
+     * spends kernel virtual address space and the page-table pages under it
+     * on a region nothing will ever look at again, and leaves a writable
+     * mapping of firmware memory standing for no reason. */
+    vmm_unmap_mmio(region, g_acpi.apei.bert_region_length);
+
     if (g_acpi.apei.hest_present) {
         debug_printf("[APEI] HEST exposes %u error sources for runtime dispatch\n",
                      g_acpi.apei.hest_error_source_count);

@@ -1235,10 +1235,19 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
     proc->context.rsp = stack_top - 8;
     proc->context.rdi = arg;
 
-    /* Per-strand CET shadow stacks.  cet_process_create maps the user SSP at
+    /* Per-strand CET shadow stacks.  cet_process_create maps the USER SSP at
      * THIS strand's hammock SSP VA (process_user_ssp_va_for derives it from
-     * hammock_base, so sibling strands never collide).  Both are dormant on
-     * TCG; this is real-HW correctness. */
+     * hammock_base, so sibling strands never collide);
+     * cet_process_create_kernel_ssp builds the supervisor half.
+     * ‼ NEITHER IS LOADED FOR A STRAND.  IA32_PL3_SSP is written only by
+     * cet_load_user_ssp_for_iretq, reachable only through
+     * process_start_initial, which only the single-core boot branch calls and
+     * only for the initial process; a strand reaches ring 3 through the
+     * scheduler's frame iretq, which writes no CET MSR.  IA32_PL0_SSP keeps
+     * this CORE's token.  Both pages are still allocated here and freed in
+     * teardown so the per-process pair stays symmetric — what that costs and
+     * whose decision it is, is on cet_process_create_kernel_ssp in
+     * cet_lifecycle.h.  Both are dormant on TCG. */
     (void)cet_process_create(proc);
     (void)cet_process_create_kernel_ssp(proc, entry_va);
 

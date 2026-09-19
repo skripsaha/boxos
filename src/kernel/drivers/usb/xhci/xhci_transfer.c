@@ -81,6 +81,158 @@ int xhci_alloc_ep0_ring(xhci_controller_t* ctrl, xhci_device_slot_t* slot) {
 }
 
 /*
+ * ── the step of "reset a pipe" that is addressed to the HUB ────────────────
+ *
+ * xHCI 1.2 §4.6.8, the Note at the end: "Software shall execute the following
+ * sequence to 'reset a pipe' ... Also, if the device was behind a TT, the TT
+ * buffer would also need to be cleared. • Reset Endpoint Command (TSP = '0').
+ * • If the device was behind a TT and it is a Control or Bulk endpoint: •
+ * Issue a ClearFeature(CLEAR_TT_BUFFER) request to the hub. • If not a Control
+ * endpoint: • Issue a ClearFeature(ENDPOINT_HALT) request to device. • Issue a
+ * Set TR Dequeue Pointer Command ..."
+ *
+ * What the hub is left holding is a buffer, and USB 2.0 §11.17.5 says what
+ * becomes of it: the split transaction that failed leaves the buffer busy, and
+ * the hub will not allow it to be reused for other bulk or control split
+ * transactions. §11.17.4 gives a transaction translator at least two
+ * non-periodic buffers, so nothing breaks at the first halt — it is one buffer
+ * lost per unrepaired halt until the translator has none left and stops
+ * carrying bulk and control traffic for everything below it.
+ *
+ * ‼ AND IT IS NOT A ClearFeature, WHATEVER THE xHCI SPECIFICATION CALLS IT.
+ * USB 2.0 §11.24.2.3 and Table 11-18: bmRequestType 00100011B, bRequest
+ * CLEAR_TT_BUFFER (8), wLength zero, no data stage, and the endpoint is named
+ * in wValue rather than by a feature selector —
+ *
+ *   wValue  [3:0]   Endpoint Number
+ *           [10:4]  Device Address
+ *           [12:11] Endpoint Type, in the numbering of bmAttributes
+ *           [15]    Direction, 1 = IN
+ *   wIndex          the TT port — except that §11.24.2.3 adds "If the hub
+ *                   provides only a single TT, then wIndex must be set to
+ *                   one", so sending the real port to a single-TT hub whose
+ *                   device hangs off port 2 or higher is a Request Error and
+ *                   not a harmless overshoot. Linux writes the same
+ *                   expression: tt->multi ? udev->ttport : 1.
+ *
+ * The device address is the CONTROLLER'S, not this driver's: the xHC assigns
+ * it and writes it into the Output Slot Context, which is where it is read
+ * from here.
+ *
+ * Reached only from the waitable side of the driver: this is a control
+ * transfer to a THIRD device, and the event drain cannot make one.
+ *
+ * ‼ WHICH ENDPOINTS, AND WHY EP0 IS HERE AT ALL. §4.6.8 names "a Control or
+ * Bulk endpoint", so an interrupt pipe is refused below — a periodic split is
+ * re-offered in the next microframe and leaves nothing in the translator, and
+ * Linux excludes it in the same condition (`!usb_pipeint(td->urb->pipe)` in
+ * xhci_clear_hub_tt_buffer). The default control pipe is NOT excluded here,
+ * only at the one call site where it must be: after a protocol stall, which is
+ * the device ANSWERING, the split transaction that carried the refusal
+ * completed and the hub released the buffer. Linux draws that line in one
+ * condition, drivers/usb/host/xhci-ring.c, verbatim: "Hub TT buffer should
+ * only be cleared for FS/LS devices behind HS hubs for functional stalls."
+ * followed by
+ *
+ *     if (!(ep->ep_index == 0 && trb_comp_code == COMP_STALL_ERROR))
+ *             xhci_clear_hub_tt_buffer(xhci, td, ep);
+ *
+ * — ep_index 0 being EP0. An EP0 halted by a babble or by a transaction error
+ * the controller gave up on is the other half of that condition, and it leaves
+ * a split transaction genuinely unfinished in the translator.
+ */
+#define HUB_REQ_CLEAR_TT_BUFFER   8
+#define TT_BUFFER_EP_NUM_SHIFT    0
+#define TT_BUFFER_DEV_ADDR_SHIFT  4
+#define TT_BUFFER_EP_TYPE_SHIFT   11
+#define TT_BUFFER_DIRECTION_IN    (1u << 15)
+#define TT_BUFFER_EP_TYPE_CONTROL 0u      /* USB 2.0 Table 9-13 bmAttributes */
+#define TT_BUFFER_EP_TYPE_BULK    2u
+
+void xhci_clear_tt_buffer(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
+                          uint8_t dci, uint32_t timeout_ms)
+{
+    if (!ctrl || !slot || !slot->endpoints || dci < 1 || dci > XHCI_MAX_DCI) {
+        return;
+    }
+    if (slot->tt_slot_id == 0) {
+        return;                 /* nothing translating: no buffer to clear */
+    }
+
+    uint32_t ep_type;
+    switch (slot->endpoints[dci].type) {
+        case XHCI_EP_TYPE_CONTROL:
+            ep_type = TT_BUFFER_EP_TYPE_CONTROL;
+            break;
+        case XHCI_EP_TYPE_BULK_IN:
+        case XHCI_EP_TYPE_BULK_OUT:
+            ep_type = TT_BUFFER_EP_TYPE_BULK;
+            break;
+        default:
+            return;             /* periodic: the translator holds nothing */
+    }
+
+    xhci_device_slot_t* tt = xhci_get_device_slot_by_id(ctrl, slot->tt_slot_id);
+    if (!tt || !xhci_slot_enter(tt)) {
+        kprintf("[xHCI %s] slot %u: the hub translating for it is no longer "
+                "there, so the transaction buffer it is holding cannot be "
+                "cleared\n", ctrl->name, slot->slot_id);
+        return;
+    }
+
+    uint8_t address = xhci_slot_context_address(slot);
+    if (address == 0) {
+        /* The controller has not said what address it gave this device, and a
+         * request naming address zero would clear somebody else's buffer. */
+        kprintf("[xHCI %s] slot %u: the controller gives it no address, so the "
+                "transaction buffer its hub is holding cannot be named\n",
+                ctrl->name, slot->slot_id);
+        xhci_slot_leave(tt);
+        return;
+    }
+
+    uint8_t  ep_addr = slot->endpoints[dci].addr;
+    uint16_t value   = (uint16_t)(((uint16_t)(ep_addr & 0x0Fu)
+                                        << TT_BUFFER_EP_NUM_SHIFT)
+                                | ((uint16_t)(address & 0x7Fu)
+                                        << TT_BUFFER_DEV_ADDR_SHIFT)
+                                | ((uint16_t)ep_type
+                                        << TT_BUFFER_EP_TYPE_SHIFT)
+                                | ((ep_addr & 0x80u) ? TT_BUFFER_DIRECTION_IN
+                                                     : 0u));
+
+    usb_setup_packet_t setup = {
+        .bmRequestType = 0x23,      /* host to device, class, other */
+        .bRequest = HUB_REQ_CLEAR_TT_BUFFER,
+        .wValue = value,
+        .wIndex = tt->multi_tt ? slot->tt_port : 1,
+        .wLength = 0
+    };
+
+    /* Two different failures, and saying the first as if it were the second
+     * would be a false statement about the hardware. A negative answer means
+     * the request never reached the wire — the hub's own EP0 was already
+     * carrying a transfer, or the caller turned out to be inside the event
+     * drain — and the hub has said nothing at all. Only a completion code
+     * that is not Success is the hub refusing. */
+    int rc = xhci_control_transfer_sync(ctrl, tt, &setup, 0, 0, false,
+                                        timeout_ms);
+    if (rc < 0) {
+        kprintf("[xHCI %s] slot %u: the hub translating for it could not be "
+                "asked to let go of the buffer for endpoint 0x%02x (%d), so "
+                "that translator has one fewer to give out\n",
+                ctrl->name, slot->slot_id, ep_addr, rc);
+    } else if (rc != TRB_COMPLETION_SUCCESS) {
+        kprintf("[xHCI %s] slot %u: the hub translating for it would not let "
+                "go of the buffer for endpoint 0x%02x — that translator has "
+                "one fewer to give out\n",
+                ctrl->name, slot->slot_id, ep_addr);
+    }
+
+    xhci_slot_leave(tt);
+}
+
+/*
  * A control transfer with somebody waiting for the answer.
  *
  * Enumeration never needs this: each of its steps is driven by the completion
@@ -136,8 +288,31 @@ int xhci_control_transfer_sync(xhci_controller_t* ctrl, xhci_device_slot_t* slot
      * left EP0 halted and every request after it — from any driver, for the
      * rest of that device's life — failed against a pipe nobody had reopened.
      * The hub class asks a great many questions a hub is entitled to refuse.
+     *
+     * ‼ AND A REFUSAL IS NOT THE ONLY THING THAT HALTS IT. This asked about
+     * Stall Error alone, and Stall Error is the one halting code that means
+     * the device is WELL. Babble Detected (xHCI 1.2b §4.10.2.4 "halt the
+     * endpoint") and a USB Transaction Error with the error count spent
+     * (§4.10.2.7 "the TD is aborted, the endpoint is Halted") leave EP0 in
+     * exactly the same state and were walked away from — so one disturbed
+     * answer on a marginal cable cost the device every control transfer it
+     * would ever be asked for, silently. Which codes those are is not listed
+     * here: the controller keeps the endpoint's state in the Output Endpoint
+     * Context and updates it as it goes, so it is ASKED.
      */
-    if (code == TRB_COMPLETION_STALL) {
+    if (code > 0 && code != TRB_COMPLETION_SUCCESS &&
+        code != TRB_COMPLETION_SHORT_PKT &&
+        xhci_ep_context_state(ctrl, slot, 1) == XHCI_EP_STATE_HALTED) {
+
+        /* §4.6.8's hub-side step, for the halts that are NOT the device
+         * answering — see xhci_clear_tt_buffer for why a protocol stall is
+         * excluded and these are not. Issued before the ring is repositioned,
+         * so the translator has the buffer back by the time the doorbell
+         * rings. Costs nothing on a device that is not behind a translator. */
+        if (code != TRB_COMPLETION_STALL) {
+            xhci_clear_tt_buffer(ctrl, slot, 1, timeout_ms);
+        }
+
         xhci_ep_recover(ctrl, slot, 1);
         xhci_command_wait_idle(ctrl, timeout_ms);
     }
@@ -644,7 +819,7 @@ void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
         }
 
         /*
-         * ‼ THE ANSWER TO "STOP", WHICH IS NOT THE ANSWER TO THE TRANSFER.
+         * ‼ WHILE A STOP IS OUTSTANDING, NO TRANSFER EVENT IS AN ANSWER.
          *
          * Stop Endpoint reports the transfer it stopped on, and it reports it
          * as a Transfer Event — code Stopped, or Stopped with the length not
@@ -652,13 +827,31 @@ void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
          * a device failing anything, and enumeration is being carried forward
          * by the COMMAND's completion rather than by this.
          *
-         * Without this line the block below reads it as a step that failed and
-         * releases the slot — which is exactly the device the stop was issued
-         * to save.
+         * ‼ AND THE OTHER CODES BELONG TO THE SAME MOMENT. This state is
+         * entered by the watchdog for a step that went UNANSWERED, and the
+         * commonest reason a step goes unanswered is that the pipe halted
+         * while it was being answered. That late answer — Stall Error, Babble
+         * Detected, USB Transaction Error — is drained after the Stop has been
+         * posted and before its completion arrives, and it names a transfer
+         * the controller has already been told to let go of. Neither
+         * xhci_enum_stall_is_tolerable nor xhci_enum_step_can_be_asked_again
+         * answers true for this state, and rightly so — sending
+         * xhci_enum_recover_ep0 in with it would loop STOP → RESET → DEQUEUE →
+         * STOP — so the block below read it as a step that failed and released
+         * the slot. That is exactly the device the stop was issued to save,
+         * and for one behind a hub it is gone for good: born_port is zero, so
+         * there is no port retry, and hub_scan_ports has already marked its
+         * port as answered.
+         *
+         * Nothing is lost by swallowing it. The halt itself is not missed: the
+         * Stop Endpoint answers Context State Error for exactly this race
+         * (§4.6.9, the Note before Table 4-2), and xhci_enum_advance_state
+         * reads the EP0 context there and routes a Halted pipe to Reset
+         * Endpoint. An answer that arrives complete is not lost either — the
+         * step is simply asked again on a repositioned ring, which is what the
+         * watchdog already wrote down when it entered this state.
          */
-        if (slot->state == ENUM_STATE_WAIT_EP0_STOP &&
-            (code == TRB_COMPLETION_STOPPED ||
-             code == TRB_COMPLETION_STOPPED_LENGTH)) {
+        if (slot->state == ENUM_STATE_WAIT_EP0_STOP) {
             return;
         }
 

@@ -642,15 +642,65 @@ uint16_t pci_find_ext_capability(uint16_t segment, uint8_t bus, uint8_t device,
  *   +12  vector control (bit 0 = masked)
  * ============================================================ */
 
-static inline uint32_t msi_addr_lo(uint8_t dest_lapic_id) {
-    return 0xFEE00000u | ((uint32_t)dest_lapic_id << 12);
-}
 static inline uint32_t msi_data(uint8_t vector) {
     return (uint32_t)vector;       /* fixed delivery, edge, physical, no RH */
 }
 
+/*
+ * The message address, or the reason there is none.
+ *
+ * Bits 19:12 of the Message Address are the whole Destination ID in this
+ * format — eight bits, the same field the xAPIC ICR has. Linux spells the
+ * layout out as a bitfield (arch/x86/include/asm/msi.h: `destid_0_7 : 8`
+ * in x86_msi_addr_lo, `destid_8_31 : 24` only in x86_msi_addr_hi) and
+ * says in __irq_msi_compose_msg what the high bits cost: "Only the IOMMU
+ * itself can use the trick of putting destination APIC ID into the high
+ * bits of the address. Anything else would just be writing to memory if
+ * it tried that, and needs IR to address APICs which can't be addressed
+ * in the normal 32-bit address range at 0xFFExxxxx." Its own compatibility
+ * path ends in `WARN_ON_ONCE(cfg->dest_apicid > 0xFF)`.
+ *
+ * Truncating such an ID does not lose the interrupt, it MISDELIVERS it:
+ * the low eight bits name a different, running processor, which takes a
+ * vector whose handler belongs to somebody else's device — while the
+ * device that was armed waits for an interrupt that is answered elsewhere.
+ * Shifting it in whole is worse still: `0xFEE00000 | (0x100 << 12)` is
+ * 0xFEF00000, outside the message window entirely, and the device's write
+ * lands on whatever decodes that address.
+ *
+ * Refusal and composition are ONE function for that reason. The test and
+ * the arithmetic are the same statement about the same eight bits, and
+ * splitting them leaves an address-builder that a later caller can reach
+ * without passing the test — the invariant would then rest on discipline
+ * instead of on there being no other way in. There is no other way in.
+ *
+ * Lifting the refusal takes interrupt remapping (VT-d IR / AMD-Vi), whose
+ * IRTE carries the full 32-bit destination and turns this address into an
+ * index. Until that is armed there is no honest eight-bit answer here.
+ */
+static bool msi_address_for(uint32_t dest_lapic_id, const char *what,
+                            uint8_t bus, uint8_t device, uint8_t function,
+                            uint32_t *out_addr_lo) {
+    if (dest_lapic_id > 0xFFu) {
+        kprintf("[PCI] %[E]%s not armed on %02x:%02x.%u: APIC ID %u does not "
+                "fit the 8-bit Destination ID of the compatibility message "
+                "address, and the low eight bits name the core with ID %u "
+                "instead%[D]\n",
+                what, bus, device, function, dest_lapic_id,
+                dest_lapic_id & 0xFFu);
+        return false;
+    }
+
+    *out_addr_lo = 0xFEE00000u | (dest_lapic_id << 12);
+    return true;
+}
+
 int pci_msi_enable(uint8_t bus, uint8_t device, uint8_t function,
-                    uint8_t vector, uint8_t dest_lapic_id) {
+                    uint8_t vector, uint32_t dest_lapic_id) {
+    uint32_t addr_lo;
+    if (!msi_address_for(dest_lapic_id, "MSI", bus, device, function, &addr_lo))
+        return -5;
+
     uint8_t cap = pci_find_capability(bus, device, function, PCI_CAP_ID_MSI);
     if (cap == 0) return -1;
 
@@ -663,8 +713,7 @@ int pci_msi_enable(uint8_t bus, uint8_t device, uint8_t function,
     uint16_t mc = pci_config_read_word(bus, device, function, (uint8_t)(cap + 2));
     bool is64 = (mc & (1u << 7)) != 0;
 
-    pci_config_write_dword(bus, device, function, (uint8_t)(cap + 4),
-                            msi_addr_lo(dest_lapic_id));
+    pci_config_write_dword(bus, device, function, (uint8_t)(cap + 4), addr_lo);
     if (is64) {
         pci_config_write_dword(bus, device, function, (uint8_t)(cap + 8), 0);
         pci_config_write_word(bus, device, function, (uint8_t)(cap + 12),
@@ -683,7 +732,12 @@ int pci_msi_enable(uint8_t bus, uint8_t device, uint8_t function,
 
 int pci_msix_enable_vector(uint8_t bus, uint8_t device, uint8_t function,
                             uint16_t table_index, uint8_t vector,
-                            uint8_t dest_lapic_id) {
+                            uint32_t dest_lapic_id) {
+    uint32_t addr_lo;
+    if (!msi_address_for(dest_lapic_id, "MSI-X", bus, device, function,
+                         &addr_lo))
+        return -5;
+
     uint8_t cap = pci_find_capability(bus, device, function, PCI_CAP_ID_MSIX);
     if (cap == 0) return -1;
 
@@ -726,7 +780,7 @@ int pci_msix_enable_vector(uint8_t bus, uint8_t device, uint8_t function,
     }
 
     volatile uint32_t *entry = (volatile uint32_t *)(table + table_index * 16u);
-    entry[0] = msi_addr_lo(dest_lapic_id);  /* addr lo */
+    entry[0] = addr_lo;                      /* addr lo */
     entry[1] = 0;                            /* addr hi */
     entry[2] = msi_data(vector);             /* data */
     entry[3] = 0;                            /* vector control: unmasked */

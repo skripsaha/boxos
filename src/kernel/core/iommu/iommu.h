@@ -13,17 +13,30 @@
  * top of a per-segment domain table; each PCI(e) function lives in
  * exactly one domain at any time.
  *
- * Current status: skeleton + VT-d register-level helpers + identity-map
- * scaffolding. Translation is NOT enabled until the follow-up audit
- * implements:
- *   - second-level page table builder (4 KB / 2 MB / 1 GB)
- *   - root + context entry programming
- *   - invalidation queue + completion polling
- *   - interrupt remap table
+ * What is built, and what that still leaves
+ * -----------------------------------------
+ * Neither backend is scaffolding any more. Each one builds its own
+ * second-level page tables, programs the per-device structure the
+ * hardware walks (VT-d root + context entries, AMD-Vi device table
+ * entries), and runs its invalidation channel to a COMPLETION rather
+ * than to a submit -- VT-d's invalidation queue with a wait descriptor
+ * whose status DWORD is the exit, AMD-Vi's command buffer with a
+ * COMPLETION_WAIT whose semaphore store is. VT-d also publishes an
+ * interrupt-remap table. Mapping granularity is 4 KiB throughout:
+ * neither walker emits a 2 MiB or a 1 GiB entry, so an identity map of
+ * the bottom 4 GiB costs 1048576 iterations and 2054 pages of tables —
+ * 2048 leaf tables of 512 eight-byte entries, four page directories, a
+ * PDPT and the top level, a little over 8 MiB.
  *
- * The skeleton lets driver code call `iommu_map(domain, iova, phys,
- * size, perm)` against an abstract handle without caring which vendor
- * sits behind it; the real backends fill in the table walks later.
+ * What is NOT done is switching translation ON. iommu_init() brings the
+ * units up with it off, deliberately, and nothing in this tree calls
+ * vtd_enable_translation() or amdvi_enable(). Until something does,
+ * every structure named above is written and never consulted, and DMA
+ * reaches memory untranslated exactly as it did before boot.
+ *
+ * The vtable lets driver code call `iommu_map(domain, iova, phys, size,
+ * perm)` against an abstract handle without caring which vendor sits
+ * behind it, and get the same answer when no IOMMU sits behind it at all.
  */
 
 #define IOMMU_PERM_READ    (1u << 0)
@@ -82,11 +95,16 @@ int             iommu_unmap(iommu_domain_t*, uint64_t iova, uint64_t size);
  * domain or when no backend is active. */
 uint32_t        iommu_domain_id(iommu_domain_t*);
 
-/* Phase 2G — boot-time audit. Logs the active backend name, # of
- * remap units, # of domains carved, and identity-map state. Idempotent
- * and free of side effects beyond debug_printf. Called from main.c
- * right after iommu_init so the boot log carries the current IOMMU
- * landscape next to the existing iommu:ready Touch event. */
+/* Boot-time audit. Says which of the four things happened: iommu_init not
+ * run, no DMAR/IVRS, hardware described and none of it brought online, or a
+ * backend driving with translation left off — and in the last case which
+ * Touch subjects the subsystem publishes on. "No remap hardware" and "the
+ * remap hardware did not come up" are different machines and it never
+ * reports one as the other.
+ * Idempotent and free of side effects beyond the print. Called from main.c
+ * right after iommu_init, and it prints through kprintf rather than
+ * debug_printf because a boot log that a shipped build compiles away tells
+ * nobody on a board whether their DMA is translated. */
 void            iommu_audit_dump(void);
 
 /* Phase 2G — DMA buffer auto-allocation wrapper.

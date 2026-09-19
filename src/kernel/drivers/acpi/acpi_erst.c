@@ -142,9 +142,21 @@ static erst_entry_t* erst_entries(uint32_t* count) {
  *
  * Not freed, deliberately: these registers are firmware-owned and live for the
  * kernel's lifetime, exactly like the ACPI tables themselves. */
-/* Longest STALL this interpreter will honour, in microseconds. Same value
- * Linux uses, and for the same reason: past it the table is wrong. */
-#define ERST_MAX_STALL_US 32000u
+/* Longest STALL this interpreter will honour, in microseconds.
+ *
+ * The value that stood here was 32000 with a comment claiming it was "the
+ * same value Linux uses". It is not. drivers/acpi/apei/erst.c defines
+ * SPIN_UNIT as 100 (nanoseconds), FIRMWARE_TIMEOUT as 1 * NSEC_PER_MSEC,
+ * and FIRMWARE_MAX_STALL as 50 — fifty, with the comment "50us" beside it.
+ * Fifty MICROseconds, not thirty-two MILLIseconds: the cap was 640 times more
+ * generous than the reference it named, so a corrupt table bought itself
+ * 32 ms of busy-waiting per STALL instruction with the kernel's own comment
+ * vouching for it.
+ *
+ * ACPI 6.5 §18.5 names no maximum for the STALL instruction at all, so this
+ * is a DECLARED POLICY and the policy is Linux's: past fifty microseconds
+ * the table is describing something other than a register settling. */
+#define ERST_MAX_STALL_US 50u
 
 /* How long an ERST poll may spin before the firmware is treated as stuck.
  *
@@ -442,19 +454,29 @@ int erst_run_action(uint8_t action_id, uint64_t value_in, uint64_t* value_out) {
                  * run; it says nothing about how long ONE of them takes, and
                  * an unbounded spin here is a table entry away from a machine
                  * that never finishes booting. Linux caps the same instruction
-                 * at 32 ms for the same reason (FIRMWARE_MAX_STALL); a stall
-                 * longer than that is a malformed table, not a slow register.
+                 * at FIRMWARE_MAX_STALL — fifty microseconds, see the define
+                 * above — and a stall longer than that is a malformed table,
+                 * not a slow register.
                  *
-                 * The stall itself is now real time (erst_stall_us) rather
-                 * than a count of writes to port 0x80: a firmware register
-                 * given a settling time is entitled to the time, and on a
-                 * board whose 0x80 is absorbed by the eSPI bridge the old
-                 * count delivered almost none of it. */
+                 * Over the cap the stall is CLAMPED, not dropped, which is
+                 * what erst_exec_stall does: `stall_time = FIRMWARE_MAX_STALL`
+                 * after the warning, then udelay(stall_time). Skipping it
+                 * outright — what stood here — gives the register no settling
+                 * time at all, and the settling time is the one thing the
+                 * instruction exists to ask for.
+                 *
+                 * The stall itself is real time (erst_stall_us) rather than a
+                 * count of writes to port 0x80: a firmware register given a
+                 * settling time is entitled to the time, and on a board whose
+                 * 0x80 is absorbed by the eSPI bridge the old count delivered
+                 * almost none of it. */
                 if (e->value > ERST_MAX_STALL_US) {
-                    debug_printf("[ERST] STALL of %lu us at pc=%u exceeds the "
-                                 "%u us cap — table is malformed, skipping\n",
-                                 (unsigned long)e->value, pc,
-                                 (unsigned)ERST_MAX_STALL_US);
+                    kprintf("[ERST] STALL of %lu us at pc=%u is past the %u us "
+                            "cap — the table is malformed; stalling for the "
+                            "cap instead\n",
+                            (unsigned long)e->value, pc,
+                            (unsigned)ERST_MAX_STALL_US);
+                    erst_stall_us(ERST_MAX_STALL_US);
                 } else {
                     erst_stall_us(e->value);
                 }
@@ -486,11 +508,11 @@ int erst_run_action(uint8_t action_id, uint64_t value_in, uint64_t* value_out) {
                  * to wait on. */
                 uint64_t gap = var1;
                 if (gap > ERST_MAX_STALL_US) {
-                    debug_printf("[ERST] STALL_WHILE_TRUE at pc=%u asks %lu us "
-                                 "between comparisons, past the %u us cap — "
-                                 "polling at the cap\n",
-                                 pc, (unsigned long)gap,
-                                 (unsigned)ERST_MAX_STALL_US);
+                    kprintf("[ERST] STALL_WHILE_TRUE at pc=%u asks %lu us "
+                            "between comparisons, past the %u us cap — "
+                            "polling at the cap\n",
+                            pc, (unsigned long)gap,
+                            (unsigned)ERST_MAX_STALL_US);
                     gap = ERST_MAX_STALL_US;
                 }
 

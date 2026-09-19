@@ -121,7 +121,16 @@ typedef struct {
     uint32_t flags;
     acpi_gas_t reset_reg;
     uint8_t reset_value;
-    uint8_t reserved3[3];
+    /* Offsets 129..131 were carried as `reserved3[3]`, which is the ACPI
+     * 1.0b/2.0 shape. ACPI 6.5 Table 5.9 names both of them:
+     *   129 (2 bytes) ARM_BOOT_ARCH — ARM boot architecture flags
+     *   131 (1 byte)  FADT Minor Version
+     * The minor version is the only way to ask a FADT which revision of
+     * the specification it was written to, and a kernel that cannot ask
+     * cannot tell a field the revision defined from one it left reserved.
+     * MADT's Online Capable bit (ACPI 6.3) is the case that needs it. */
+    uint16_t arm_boot_arch;
+    uint8_t minor_revision;
     uint64_t x_firmware_control;
     uint64_t x_dsdt;
     acpi_gas_t x_pm1a_event_block;
@@ -134,6 +143,26 @@ typedef struct {
     acpi_gas_t x_gpe1_block;
 } __attribute__((packed)) acpi_fadt_t;
 _Static_assert(sizeof(acpi_fadt_t) >= 244, "acpi_fadt_t too short for ACPI 2.0");
+_Static_assert(offsetof(acpi_fadt_t, reset_value) == 128,
+               "FADT RESET_VALUE is at offset 128 (ACPI 6.5 Table 5.9)");
+_Static_assert(offsetof(acpi_fadt_t, arm_boot_arch) == 129,
+               "FADT ARM_BOOT_ARCH is at offset 129 (ACPI 6.5 Table 5.9)");
+_Static_assert(offsetof(acpi_fadt_t, minor_revision) == 131,
+               "FADT Minor Version is at offset 131 (ACPI 6.5 Table 5.9)");
+_Static_assert(offsetof(acpi_fadt_t, x_firmware_control) == 132,
+               "FADT X_FIRMWARE_CTRL is at offset 132 (ACPI 6.5 Table 5.9)");
+
+/* ACPI 6.5 Table 5.9, "FADT Minor Version": "Bits 0-3 - The low order bits
+ * correspond to the minor version of the specification version... Bits 4-7 -
+ * The high order bits correspond to the version of the ACPI Specification
+ * errata this table complies with."
+ *
+ * So the minor version is four bits, not the whole byte. Linux compares the
+ * byte whole (acpi_gbl_FADT.minor_revision >= 3), which reads an errata
+ * revision as a minor version — harmless on every shipping table, wrong by
+ * the text. The mask is the text. */
+#define ACPI_FADT_MINOR_VERSION(fadt)  ((uint8_t)((fadt)->minor_revision & 0x0Fu))
+#define ACPI_FADT_ERRATA_REVISION(fadt) ((uint8_t)((fadt)->minor_revision >> 4))
 
 /* ============================================================
  * HPET (Intel HPET Specification 1.0a, IA-PC HPET ACPI table)
@@ -441,11 +470,38 @@ void acpi_sci_register(void);
  * this waits in the IOAPIC. Also arms the power button. */
 void acpi_sci_arm(void);
 
+/* Ask the platform for a sleep state through the PM1 control PAIR.
+ *
+ * `slp_typa` / `slp_typb` are the two three-bit SLP_TYP values of the
+ * matching \_Sx object. Both blocks receive their sleep type before either
+ * receives SLP_EN, which is what ACPI 6.5 §4.8 legislates: "OSPM will always
+ * write the SLP_TYPa value to the 'A' register block followed by the
+ * SLP_TYPb value within the field to the 'B' register block."
+ *
+ * The registers are the ones acpi_init resolved out of the FADT — X_
+ * descriptor first, in whichever of System I/O and System Memory it names,
+ * falling back to the 32-bit field when the extended one describes something
+ * OSPM cannot use (§5.2.9). That resolution happens once, at init, so this
+ * function allocates nothing and maps nothing: it is safe on the shutdown
+ * path, after the hardware has been stopped.
+ *
+ * Returns false when neither half of the pair is a register this kernel can
+ * reach — no write was attempted and nothing was guessed at. */
+bool acpi_pm1_request_sleep(uint8_t slp_typa, uint8_t slp_typb);
+
 /* Enter ACPI sleep state `s` ∈ {1..5}. Reads \_Sx package from AML
  * namespace to derive SLP_TYPa/SLP_TYPb, calls _PTS(s) and _BFS(s)
  * (when present) before writing PM1a/b CNT with SLP_TYP + SLP_EN.
  * S5 is implemented via acpi_shutdown(); other states return.
- * Returns 0 on success or negative on missing prerequisites. */
+ * Returns 0 on success or negative on missing prerequisites.
+ *
+ * ‼ NOT IN SERVICE. Nothing in this tree calls it — `grep -rn
+ * acpi_enter_sleep src/` finds this declaration and the definition in
+ * acpi.c, and no third line. The whole S1-S4 path, and with it every
+ * aml_call_int in the kernel, is therefore unreachable: the AML executor
+ * has no live caller. What is missing is the WIRING — who decides the
+ * machine should sleep and on what event — and in BoxOS that question
+ * belongs to Turn In and Bell, not to this function. */
 int acpi_enter_sleep(uint8_t state);
 
 /* GPE (General Purpose Event) handler registry. Each GPE bit may have
@@ -454,6 +510,22 @@ int acpi_enter_sleep(uint8_t state);
  *
  * `gpe` is the global GPE index: 0..(gpe0_length/2*8 - 1) live in GPE0
  * block, the rest in GPE1.
+ *
+ * acpi_gpe_register returns 0 once the handler is installed AND the GPE's
+ * hardware enable bit is set — registering is arming, not book-keeping, and
+ * the bit's stale status is cleared first so a latch from before the handler
+ * existed is not delivered to it. It returns -1, having said why on the
+ * console, in four cases: `cb` is NULL; `gpe` is past ACPI_MAX_GPES;
+ * acpi_init has not run, so no FADT has been read and no block is described
+ * yet; or the firmware describes no GPE block carrying that index, so there
+ * is no enable bit to set. All four are told apart deliberately, and each
+ * prints its own sentence — "no handler given", "index past the registry",
+ * "not described yet" and "not described at all" are four different faults
+ * and a caller that gets -1 can read which one it hit.
+ *
+ * A GPE that fires with no handler registered is switched off permanently
+ * (AcpiEvGpeDispatch does the same), so a level source cannot hold the SCI
+ * asserted for the life of the machine.
  *
  * Future AML interpreter audit will wire the firmware-defined
  * `\_GPE._Lxx` / `\_GPE._Exx` methods through the same dispatcher by

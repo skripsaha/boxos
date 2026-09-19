@@ -1932,9 +1932,12 @@ bool MemTagVerifyPteMetadataBits(void) { return vmm_verify_pte_metadata_bits_52_
  *
  * The two verdicts that matter — MTRRs disabled, or a non-WB default
  * type — now speak through kprintf inside vmm_dump_mtrr_layout, not
- * debug_printf. Effective memory type is MTRR combined with PAT
- * (Intel SDM Vol 3A §11.12.5), so either condition silently demotes
- * every cache:wb tag this module hands out, and a build that ships
- * compiles debug_printf into nothing. */
+ * debug_printf. Effective memory type is MTRR combined with PAT (Intel SDM
+ * Vol 3A §11.5.2.2, Table 11-7 — not §11.12.5, which is PAT compatibility
+ * with earlier processors), and for a PAT write-back page that combination
+ * is the MTRR type itself, so either condition silently demotes every
+ * cache:wb tag this module hands out — while a cache:wc tag survives both,
+ * WC being the one column the table gives under every MTRR type. A build
+ * that ships compiles debug_printf into nothing. */
 bool MemTagVerifyPatMsr(void)  { return vmm_verify_pat_msr(); }
 void MemTagDumpMtrrLayout(void) { vmm_dump_mtrr_layout(); }

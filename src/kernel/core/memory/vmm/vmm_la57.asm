@@ -41,8 +41,8 @@
 ;   "Preserve top half of RSP in a legacy mode GPR to avoid truncation"
 ;
 ; RSP is the one that would kill us: the caller's stack lives at a kernel
-; high VA, so its upper half is 0xFFFFFFFF, and the first thing the 64-bit
-; half of this trampoline does is write a far-return frame through it. We
+; high VA, so its upper half is 0xFFFFFFFF, and every callee-saved register
+; this function owes its caller is popped back off it. We
 ; therefore stash the caller's full RSP in a static slot (reached by its PA
 ; alias while paging is still on) and reload it from that slot — by a
 ; RIP-relative high-VA load — the moment we are back in 64-bit mode. For
@@ -275,17 +275,18 @@ vmm_la57_runtime_enable:
     ; branch tracker is unsuppressed and goes to WAIT_FOR_ENDBRANCH. Near
     ; indirect call/jmp: ... active indirect branch tracker goes to
     ; WAIT_FOR_ENDBRANCH." In that state the next instruction decoded must
-    ; be an ENDBRANCH or the processor raises #CP. Three of this file's
-    ; control transfers are triggers, so three landing sites carry a marker:
+    ; be an ENDBRANCH or the processor raises #CP. Every control transfer in
+    ; this file is one of those triggers, so every landing site carries a
+    ; marker:
     ;   .low32               far jmp through memory   → endbr32 (compat mode)
     ;   .low_64_trampoline   far jmp through memory   → endbr64
     ;   .high64              near indirect `jmp rax`  → endbr64
-    ; .reload_cs deliberately carries none: it is reached by `retfq`, and the
-    ; tracker state machine in §3.4 lists only indirect call/jmp, far
-    ; call/jmp, INT3/INT1 and ENDBRANCH as triggers — a far RET is not one.
-    ; (A far RET does touch the SHSTK side, which is a separate mechanism.)
+    ;   .reload_cs           far jmp through memory   → endbr64
+    ; The CS reload at the end of .high64 is a far JMP and not a far RET for
+    ; the shadow-stack reason spelled out there; a far JMP is an IBT trigger,
+    ; so .reload_cs needs its marker like the rest.
     ; Today the trampoline runs inside vmm_init long before CR4.CET is set,
-    ; so all three are the 4-byte NOP they are on every pre-CET CPU; they
+    ; so all four are the 4-byte NOP they are on every pre-CET CPU; they
     ; cost nothing and they keep this file correct if that order ever moves.
     endbr64
 
@@ -321,16 +322,41 @@ vmm_la57_runtime_enable:
     mov es, ax
     mov ss, ax
 
-    ; Reload CS to kernel's GDT_KERNEL_CODE (0x08) via far return. RIP comes
-    ; from .reload_cs label; SS:RSP is the original caller stack (still mapped
-    ; via boot tables' higher-half PD).
-    sub rsp, 16
+    ; Reload CS to the kernel's GDT_KERNEL_CODE (0x08). A far JMP through
+    ; memory — m16:64, REX.W + FF /5 — and deliberately NOT a far RET.
+    ;
+    ; A far RET here would have no far CALL behind it. Intel CET
+    ; Specification 334525-003 §2.4 "Far CALL and RET": "On a far CALL to the
+    ; same privilege level, the processor pushes the CS, LIP (linear address
+    ; of the return address) and the SSP on the shadow stack and on a far RET
+    ; pops the SSP, LIP and the CS from the shadow stack. If the CS and LIP do
+    ; not match the return address as determined by popping the CS and EIP
+    ; from the data stack, the processor causes a #CP(FAR-RET/IRET)
+    ; exception." The RET pseudocode in the same document gates that pop on
+    ; nothing but ShadowStackEnabled(CPL): it loads three quadwords from SSP,
+    ; advances SSP by 24 and compares. An unpaired far RET therefore eats 24
+    ; bytes of whatever the supervisor shadow stack holds and then faults on
+    ; the compare. BoxOS raises IA32_S_CET.SH_STK_EN on every core
+    ; (cet_supv_shstk_activate_and_jump). What kept the old far RET out of
+    ; reach was ordering alone: this file's caller invariant is BSP only,
+    ; once, from vmm_init, and vmm_init runs long before
+    ; cet_lifecycle_init_bsp. Ordering is not a mechanism, and a global
+    ; function must not depend on when the kernel happens to call it.
+    ;
+    ; A far JMP costs the shadow stack nothing: the JMP operation in the same
+    ; specification touches only the indirect-branch tracker, never SSP. It
+    ; does arm that tracker (§3.3.2 Case 1 above), which is why .reload_cs
+    ; starts with ENDBR64. The target lives in memory as offset (8 bytes)
+    ; then selector (2 bytes), the same slot shape as the two jump slots the
+    ; dance already builds. Paging is on again and DS is flat, so the slot is
+    ; written and read at its high VA.
     lea rax, [rel .reload_cs]
-    mov [rsp], rax
-    mov qword [rsp + 8], KERNEL_CODE
-    retfq
+    mov [rel vmm_la57_jmp_cs], rax
+    mov word [rel vmm_la57_jmp_cs + 8], KERNEL_CODE
+    jmp far qword [rel vmm_la57_jmp_cs]
 
 .reload_cs:
+    endbr64
     pop r15
     pop r14
     pop r13
@@ -392,3 +418,7 @@ vmm_la57_jmp32:
 global vmm_la57_jmp64
 vmm_la57_jmp64:
     resb 8                                 ; 4-byte offset + 2-byte selector + 2 pad
+
+global vmm_la57_jmp_cs
+vmm_la57_jmp_cs:
+    resb 16                                ; 8-byte offset + 2-byte selector + pad

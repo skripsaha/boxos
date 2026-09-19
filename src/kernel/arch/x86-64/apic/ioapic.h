@@ -41,11 +41,15 @@ typedef struct {
 } ioapic_iso_t;
 
 void ioapic_init(uintptr_t base_addr, uint8_t gsi_base);
-void ioapic_enable_irq(uint8_t gsi, uint8_t vector, uint8_t dest_lapic_id);
+
+/* `dest_lapic_id` is a FULL-WIDTH APIC ID. The redirection entry carries
+ * eight bits of it (Intel 82093AA §3.2.4, high dword), so an ID above 0xFF
+ * is REFUSED and named inside ioapic.c rather than truncated onto a
+ * different, running core. The parameter is uint32_t for that reason: an
+ * eight-bit parameter puts the narrowing at the call site, where nothing
+ * inside the IOAPIC can see it. */
+void ioapic_enable_irq(uint8_t gsi, uint8_t vector, uint32_t dest_lapic_id);
 void ioapic_disable_irq(uint8_t gsi);
-void ioapic_set_irq(uint8_t gsi, uint8_t vector, uint8_t dest, uint32_t flags);
-uint8_t ioapic_get_max_entries(void);
-uintptr_t ioapic_get_base(void);
 
 // Interrupt Source Override management
 void ioapic_register_iso(uint8_t isa_irq, uint32_t gsi, uint16_t flags);
@@ -68,10 +72,6 @@ uint16_t ioapic_get_iso_flags(uint8_t isa_irq);
  * 82093AA §3.2.4; polarity and trigger come from the MPS INTI flag bits
  * provided in the MADT NMI Source structure. */
 void ioapic_program_nmi_source(uint32_t gsi, uint16_t mps_flags,
-                                uint8_t dest_lapic_id);
-
-// Register access
-uint32_t ioapic_read(uint32_t reg);
-void ioapic_write(uint32_t reg, uint32_t value);
+                                uint32_t dest_lapic_id);
 
 #endif // IOAPIC_H

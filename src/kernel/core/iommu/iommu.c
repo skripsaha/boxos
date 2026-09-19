@@ -11,13 +11,37 @@
  *   - VT-d  when ACPI DMAR is present (Intel)
  *   - AMD-Vi when ACPI IVRS is present (AMD)
  *
- * Backends register themselves through `iommu_set_ops()`. At present
- * both backends are skeletons (no translation enabled); the chosen
- * ops vtable lets future PCIe drivers compile against a stable API
- * while we flesh the backends out.
+ * The backend is chosen HERE, out of the two vtables declared below.
+ * There is no `iommu_set_ops()` in this kernel and there never was, so a
+ * backend does not register itself and a third one cannot arrive without
+ * a line in iommu_init.
+ *
+ * Neither backend is a skeleton either -- iommu.h says what each one
+ * builds. What iommu_init still does not do is turn translation on: the
+ * units come up with it off, and it stays off until something calls the
+ * backend's own enable, which nothing in this tree does.
  */
 
 static const iommu_ops_t* g_ops = NULL;
+
+/* What iommu_init ended on. `g_ops == NULL` is two different machines: one
+ * where ACPI described no remap hardware at all, and one where it described
+ * some, the backend touched it, and not a single unit came up. The second is
+ * the worse machine of the two — bringing a unit up is what takes firmware's
+ * pre-boot DMA protection off, and a failed bring-up takes it off and leaves
+ * nothing in its place — so the boot line must not report it as the first.
+ * The pointer alone cannot tell them apart, so the outcome is kept. */
+typedef enum {
+    IommuOutcomeNotRun = 0,      /* iommu_init has not been called */
+    IommuOutcomeNoTables,        /* no DMAR and no IVRS in ACPI */
+    IommuOutcomeBackendFailed,   /* described, and no unit came online */
+    IommuOutcomeUp               /* backend chosen and initialised */
+} IommuOutcome;
+
+static IommuOutcome g_outcome  = IommuOutcomeNotRun;
+/* The backend ACPI named, kept whether or not it then came up, so the failed
+ * case can say WHICH hardware was described and left unarmed. */
+static const char*  g_described = NULL;
 
 const iommu_ops_t* iommu_get_ops(void) { return g_ops; }
 bool iommu_present(void)               { return g_ops != NULL; }
@@ -34,13 +58,17 @@ int iommu_init(void) {
         debug_printf("[IOMMU] backend = AMD-Vi (IVRS present)\n");
     } else {
         debug_printf("[IOMMU] no DMAR/IVRS — running without IOMMU\n");
+        g_outcome = IommuOutcomeNoTables;
         return -1;
     }
+    g_described = g_ops->name;
     if (g_ops->init && g_ops->init() < 0) {
         debug_printf("[IOMMU] backend init failed — disabling\n");
-        g_ops = NULL;
+        g_ops     = NULL;
+        g_outcome = IommuOutcomeBackendFailed;
         return -2;
     }
+    g_outcome = IommuOutcomeUp;
     /* Tell userspace which IOMMU backend is online so DMA-buffer
      * services (`iommu:ready` subscriber) know whether they need to
      * route allocations through a domain or can DMA directly. */
@@ -142,10 +170,6 @@ int iommu_unmap(iommu_domain_t* d, uint64_t iova, uint64_t size) {
     return r;
 }
 
-/* Phase 2G — boot-time audit. The IOMMU backends (vtd.c / amdvi.c) log
- * their own per-DRHD/IVHD bring-up; this wrapper adds a one-line
- * summary at the iommu_init call site so the boot log records the
- * MemTag/Touch surface state next to the backend log. */
 void *iommu_dma_alloc(iommu_domain_t *domain, size_t pages, uint32_t perm) {
     if (!pages) return NULL;
     /* Default to read|write when caller passes 0. */
@@ -292,15 +316,48 @@ void iommu_dma_free_with_keyid(iommu_domain_t *domain, void *phys,
     pmm_free_with_keyid(phys, pages, keyid);
 }
 
+/* Boot-time audit. The backends log their own per-DRHD/IVHD bring-up; this
+ * adds the one line that says what the machine as a whole ended up with, at
+ * the iommu_init call site.
+ *
+ * It reports the outcome iommu_init recorded, and nothing wider than that.
+ * "DMA is untranslated" is a statement about the path this line stands at
+ * the end of; "this machine has no IOMMU" is a statement about the hardware,
+ * and only one of the four outcomes below is entitled to make it.
+ *
+ * kprintf, not debug_printf: this line exists to be read on a board, and
+ * debug_printf compiles to nothing in a shipped build. */
 void iommu_audit_dump(void) {
-    if (!g_ops) {
-        debug_printf("[IOMMU] audit: no backend active (DMA bypasses IOMMU)\n");
+    switch (g_outcome) {
+    case IommuOutcomeNotRun:
+        kprintf("[IOMMU] iommu_init has not run, so nothing is known about "
+                "this machine's remap hardware yet\n");
+        return;
+    case IommuOutcomeNoTables:
+        kprintf("[IOMMU] ACPI describes neither DMAR nor IVRS — there is no "
+                "remap hardware here to drive, and every device's DMA "
+                "reaches memory untranslated\n");
+        return;
+    case IommuOutcomeBackendFailed:
+        /* The hardware exists. It was reached, and it did not come up — and
+         * the first thing a bring-up does is take the unit off whatever
+         * firmware left running on it, so this machine's pre-boot DMA
+         * protection is not something the rest of the boot may count on. */
+        kprintf("[IOMMU] ACPI describes %s hardware and not one unit came "
+                "online — the lines above say which refused and why. DMA "
+                "reaches memory untranslated, and firmware's pre-boot DMA "
+                "protection is not to be counted on: bringing a unit up "
+                "starts by taking it off firmware's tables\n",
+                g_described ? g_described : "remap");
+        return;
+    case IommuOutcomeUp:
+        kprintf("[IOMMU] backend=%s, units up, and iommu_init left "
+                "translation OFF — the domains, page tables and device "
+                "entries this kernel wrote are not consulted by the hardware "
+                "yet, so DMA still reaches memory untranslated. Touch "
+                "subjects: iommu:ready, iommu:domain:attached, "
+                "iommu:dma:mapped, iommu:dma:unmapped; MemTag labels every "
+                "mapped page iommu:domain:N\n", g_ops->name);
         return;
     }
-    debug_printf("[IOMMU] audit: backend=%s domain_id getter=%s "
-                 "TouchPublish surface active (iommu:domain:N / "
-                 "iommu:dma:mapped / iommu:dma:unmapped / "
-                 "iommu:domain:attached)\n",
-                 g_ops->name,
-                 g_ops->domain_id ? "yes" : "no");
 }

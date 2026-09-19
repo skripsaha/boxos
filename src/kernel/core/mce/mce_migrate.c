@@ -159,11 +159,15 @@ void mce_migrate_init(void) {
  * It is checked inside the CAS loop, and this is what makes the swap the
  * replacement of ONE frame rather than the overwrite of whatever happens to
  * be there. Two things make that address arrive twice:
- *   - one physical error is reported twice. Without LMCE armed (this kernel
- *     never writes IA32_MCG_EXT_CTL) every Intel #MC is broadcast to every
- *     logical processor, so N cores read the same shared bank and queue N
- *     requests for it; and the same DIMM address can arrive a second time
- *     through APEI/GHES firmware-first reporting.
+ *   - one physical error is reported twice. An #MC that is not LMCE is
+ *     broadcast to every logical processor, so N cores read the same shared
+ *     bank and queue N requests for it. mce_lmce_arm narrows that — it
+ *     writes IA32_MCG_EXT_CTL.LMCE_EN on every core whose three gates allow
+ *     it — but narrows is not closes: a fleet where one core could not arm
+ *     it is broadcast again, and §15.9.3.1 promises only that "some errors
+ *     ... may be delivered to only a single logical processor". And the same
+ *     DIMM address can arrive a second time through APEI/GHES firmware-first
+ *     reporting.
  *   - one migration does not reach every mapping. 2 MiB attaches are
  *     skipped, non-ACTIVE attaches are skipped, and the attach snapshot is
  *     bounded. A cabin left behind still maps the poisoned frame, touches

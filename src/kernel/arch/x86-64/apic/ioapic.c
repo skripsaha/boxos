@@ -5,7 +5,6 @@
 #include "vmm.h"
 
 static volatile uint32_t* ioapic_base_virt = NULL;
-static uintptr_t ioapic_base_phys = 0;
 static uint8_t ioapic_gsi_base = 0;
 static uint8_t ioapic_max_entry = 0;
 
@@ -53,17 +52,11 @@ static inline void ioapic_write_held(uint32_t reg, uint32_t value) {
     ioapic_base_virt[IOAPIC_IOWIN / 4] = value;
 }
 
-uint32_t ioapic_read(uint32_t reg) {
+static uint32_t ioapic_read(uint32_t reg) {
     spin_lock(&ioapic_reg_lock);
     uint32_t value = ioapic_read_held(reg);
     spin_unlock(&ioapic_reg_lock);
     return value;
-}
-
-void ioapic_write(uint32_t reg, uint32_t value) {
-    spin_lock(&ioapic_reg_lock);
-    ioapic_write_held(reg, value);
-    spin_unlock(&ioapic_reg_lock);
 }
 
 /*
@@ -122,7 +115,6 @@ static void ioapic_mask_redir(uint8_t entry) {
 }
 
 void ioapic_init(uintptr_t base_addr, uint8_t gsi_base) {
-    ioapic_base_phys = base_addr;
     ioapic_gsi_base = gsi_base;
 
     debug_printf("[IOAPIC] Initializing IO-APIC at phys 0x%lx, GSI base=%u\n",
@@ -160,7 +152,47 @@ void ioapic_init(uintptr_t base_addr, uint8_t gsi_base) {
     debug_printf("[IOAPIC] %[S]IO-APIC initialized successfully%[D]\n");
 }
 
-void ioapic_enable_irq(uint8_t gsi, uint8_t vector, uint8_t dest_lapic_id) {
+/*
+ * Can this APIC ID be named in a redirection entry at all?
+ *
+ * Intel 82093AA §3.2.4, IOREDTBLx Destination Field: in Physical Mode the
+ * entry's destination is an APIC ID held in the high dword — eight bits on
+ * every part BoxOS runs on. An APIC ID above 255 has no representation
+ * there, and truncating it to its low eight bits does not merely fail to
+ * route the line: it routes the line to a DIFFERENT, running processor,
+ * which then takes an interrupt under a vector whose handler expects
+ * different hardware. A machine whose BSP is x2APIC ID 0x100 would send
+ * every legacy IRQ to the core with ID 0.
+ *
+ * The refusal lives here, at the field, and not in the caller. A
+ * caller-side test is a test this file cannot see, and an eight-bit
+ * parameter would put the narrowing at the call where nothing here could
+ * ever notice it — the same shape that let MSI arm a truncated
+ * destination for as long as it did.
+ *
+ * So the pin is left masked and the refusal is named. Naming it per line
+ * rather than once is deliberate: each refused line is one device that
+ * will not raise an interrupt, and the operator needs to know WHICH.
+ *
+ * What would lift the refusal is interrupt remapping (VT-d IR / AMD-Vi),
+ * whose IRTE carries a 32-bit destination and turns the redirection entry
+ * into an index. Until that is armed there is no honest 8-bit answer, and
+ * inventing one is exactly the failure this refuses.
+ */
+static bool ioapic_dest_is_nameable(uint32_t dest_lapic_id, uint32_t gsi,
+                                    const char *what) {
+    if (dest_lapic_id <= 0xFFu) return true;
+
+    kprintf("[IOAPIC] %[E]%s GSI %u not programmed: APIC ID %u does not fit "
+            "the 8-bit destination of the redirection entry, and the low "
+            "eight bits name the core with ID %u instead%[D]\n",
+            what, gsi, dest_lapic_id, dest_lapic_id & 0xFFu);
+    return false;
+}
+
+void ioapic_enable_irq(uint8_t gsi, uint8_t vector, uint32_t dest_lapic_id) {
+    if (!ioapic_dest_is_nameable(dest_lapic_id, gsi, "IRQ")) return;
+
     uint8_t pin = gsi - ioapic_gsi_base;
 
     if (pin > ioapic_max_entry) {
@@ -184,7 +216,7 @@ void ioapic_enable_irq(uint8_t gsi, uint8_t vector, uint8_t dest_lapic_id) {
     }
 
     uint32_t low = (vector & IOAPIC_REDIR_VECTOR_MASK) | redir_flags;
-    uint32_t high = ((uint32_t)dest_lapic_id) << 24;
+    uint32_t high = dest_lapic_id << 24;
 
     ioapic_write_redir(pin, low, high);
 
@@ -206,27 +238,6 @@ void ioapic_disable_irq(uint8_t gsi) {
     uint32_t low = ioapic_read_held(reg);
     ioapic_write_held(reg, low | IOAPIC_REDIR_MASKED);
     spin_unlock(&ioapic_reg_lock);
-}
-
-void ioapic_set_irq(uint8_t gsi, uint8_t vector, uint8_t dest, uint32_t flags) {
-    uint8_t pin = gsi - ioapic_gsi_base;
-
-    if (pin > ioapic_max_entry) {
-        return;
-    }
-
-    uint32_t low = (vector & IOAPIC_REDIR_VECTOR_MASK) | flags;
-    uint32_t high = ((uint32_t)dest) << 24;
-
-    ioapic_write_redir(pin, low, high);
-}
-
-uint8_t ioapic_get_max_entries(void) {
-    return ioapic_max_entry + 1;
-}
-
-uintptr_t ioapic_get_base(void) {
-    return ioapic_base_phys;
 }
 
 /*
@@ -317,7 +328,9 @@ uint16_t ioapic_get_iso_flags(uint8_t isa_irq) {
 }
 
 void ioapic_program_nmi_source(uint32_t gsi, uint16_t mps_flags,
-                                uint8_t dest_lapic_id) {
+                                uint32_t dest_lapic_id) {
+    if (!ioapic_dest_is_nameable(dest_lapic_id, gsi, "NMI Source")) return;
+
     if (!ioapic_base_virt) {
         debug_printf("[IOAPIC] NMI source request but IOAPIC not mapped\n");
         return;
@@ -349,7 +362,7 @@ void ioapic_program_nmi_source(uint32_t gsi, uint16_t mps_flags,
 
     /* Vector is don't-care for NMI delivery, but Intel SDM advises leaving
      * a sentinel for analysis; 0x00 is fine. */
-    uint32_t high = ((uint32_t)dest_lapic_id) << 24;
+    uint32_t high = dest_lapic_id << 24;
     ioapic_write_redir(pin, redir, high);
 
     debug_printf("[IOAPIC] NMI Source: GSI %u pin %u mps=0x%04x dest=%u low=0x%08x\n",
