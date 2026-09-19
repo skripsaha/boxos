@@ -43,10 +43,16 @@
  * the IRQ path is not viable and routes to the polled fallback. */
 void ata_async_init(void);
 
-/* Per-drive DMA-mode negotiation (SET FEATURES 0xEF/0x03). Walks UDMA 6..0
- * then MDMA 2..0, stops on the first the drive accepts. Called from
- * ata_identify after PIO mode is set so the DMA-fast-path gate
- * (ata_async_usable) flips true on success. */
+/* Per-drive DMA-mode negotiation (SET FEATURES 0xEF/0x03). Walks UDMA down
+ * from the highest mode the CABLE is proven to carry, then MDMA 2..0, and
+ * stops on the first the drive accepts. The walk starts at UDMA 6 only when
+ * an 80-conductor cable assembly is established — ATA/ATAPI-6 (T13/1410D r3a)
+ * §8.46.11: "the host shall detect that an 80-conductor cable assembly is
+ * connecting the host with the device(s) before enabling any Ultra DMA mode
+ * greater than 2" — and at UDMA 2 otherwise, which is the whole of the
+ * difference between this and "walks UDMA 6..0". Called from ata_identify
+ * after PIO mode is set so the DMA-fast-path gate (ata_async_usable) flips
+ * true on success. */
 void ata_async_negotiate_dma_mode(uint8_t drive_idx, const uint16_t *id);
 
 /* True when both controller-side BMIDE and the drive's IDENTIFY advertise

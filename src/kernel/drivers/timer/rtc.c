@@ -357,7 +357,27 @@ void rtc_init(void) {
      * "year += CMOS_EPOCH - 1900", CMOS_EPOCH = 2000), and it is bounded:
      * it is wrong only for a part whose two-digit year has rolled past 2099,
      * and it never turns into a refusal, because 20 is in range by
-     * construction. */
+     * construction.
+     *
+     * When there IS one, taking it raw in binary mode is a decode and not
+     * an omission, because the byte itself carries the century in both
+     * encodings. ACPI 6.5 §4.8.2.4, RTC-CMOS registers, CENTURY: "8-bit BCD
+     * or binary value. This value indicates the thousand year and hundred
+     * year (Centenary) variables of the date in BCD (19 for this century,
+     * 20 for the next) or binary (x13 for this century, x14 for the next)."
+     * Raw 0x14 is 20 and bcd_to_bin(0x20) is 20 — the same century by two
+     * spellings.
+     *
+     * WHICH spelling a platform used is a question ACPI does not answer: it
+     * names both and no selector, and this byte lives in CMOS RAM at an
+     * index the FADT gives rather than among the part's own calendar
+     * registers, which is what Status B bit 2 governs in MC146818A. Reading
+     * it under that bit anyway is what the reference implementation does —
+     * linux decodes the century inside the very same gate as the calendar
+     * fields (drivers/rtc/rtc-mc146818-lib.c: "if (!(p.ctrl &
+     * RTC_DM_BINARY) || RTC_ALWAYS_BCD) { ... p.century = bcd2bin(
+     * p.century); }") — and it is the only statement about encoding the
+     * machine makes anywhere. */
     uint8_t century = (cent != 0) ? cent : 20;
     if (!binary_mode && cent != 0) {
         century = bcd_to_bin(cent);

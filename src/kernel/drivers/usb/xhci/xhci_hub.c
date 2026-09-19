@@ -1165,11 +1165,27 @@ int xhci_hub_attach(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
         return -1;
     }
 
-    /* One translator per port is a mode to be entered, not a capability to be
-     * reported. A hub that is not asked stays on the one it starts with. */
-    slot->multi_tt = false;
-    if (protocol == HUB_PROTOCOL_MULTI_TT) {
-        hub_select_multi_tt(h);
+    /*
+     * One translator per port is a mode to be entered, not a capability to be
+     * reported. A hub that is not asked stays on the one it starts with.
+     *
+     * ‼ AND ONLY A HUB THAT HAS TRANSLATORS OF ITS OWN ANSWERS FOR THIS BIT.
+     *
+     * slot->multi_tt is the MTT field of xHCI 1.2 Table 6-4, and that field
+     * says two things with one bit: a high-speed hub running its Multiple TT
+     * Interface, and a slower device reached THROUGH such a hub. A full-speed
+     * hub plugged into a multi-TT high-speed hub is the second kind — the
+     * enumerator worked its bit out when it inherited the translator, and
+     * clearing it unconditionally here told the controller the opposite of
+     * what the parent had just enabled. A hub with translators of its own is
+     * reached at high speed and therefore never stands behind one, so
+     * tt_slot_id tells the two apart with nothing left over.
+     */
+    if (slot->tt_slot_id == 0) {
+        slot->multi_tt = false;
+        if (protocol == HUB_PROTOCOL_MULTI_TT) {
+            hub_select_multi_tt(h);
+        }
     }
 
     /* The controller has to be told this device is a hub before it can address
@@ -1226,7 +1242,8 @@ int xhci_hub_attach(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
             protocol == HUB_PROTOCOL_FULL_SPEED ? "full-speed hub"
                                                 : "high-speed hub",
             h->ports, h->power_on_delay_ms,
-            slot->multi_tt ? ", one translator per port" : "");
+            (slot->tt_slot_id == 0 && slot->multi_tt)
+                ? ", one translator per port" : "");
 
     /* Power every port, then wait once for all of them. No longer the only
      * place this happens — a port the hub switches off for an over-current is

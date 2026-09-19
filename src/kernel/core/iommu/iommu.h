@@ -107,6 +107,32 @@ uint32_t        iommu_domain_id(iommu_domain_t*);
  * nobody on a board whether their DMA is translated. */
 void            iommu_audit_dump(void);
 
+/* ----- What each backend exports beyond the vtable -----
+ *
+ * These three are defined by their backends and, until now, declared
+ * nowhere: any caller would have been compiling against an implicit
+ * int-returning stranger, which -Werror=implicit-function-declaration turns
+ * into a failed build rather than a wrong call. They are declared here so
+ * that the decision to call one is the only thing still missing.
+ *
+ * vtd_enable_translation / amdvi_enable switch DMA translation ON for every
+ * unit that came online and return how many began translating. Nothing in
+ * this tree calls either, deliberately: a device only survives that switch
+ * once it has a context entry (VT-d) or a device-table entry (AMD-Vi), and
+ * the bus walk that would attach every function lives in pci.c and reaches
+ * iommu_device_attach from nowhere.
+ *
+ * amdvi_poll_events drains each AMD-Vi unit's event log, which is the only
+ * channel the hardware has for IO_PAGE_FAULT, ILLEGAL_DEV_TABLE_ENTRY,
+ * DEV_TAB_HARDWARE_ERROR and the rest. amdvi_init arms that log on every AMD
+ * board with an IVRS, so it fills whether or not anybody drains it, and once
+ * it overflows the unit writes no further entry until the log is restarted.
+ * It is NOT callable from an interrupt handler: it publishes on Touch and it
+ * waits on EventLogRun with an HourGlass. */
+int  vtd_enable_translation(void);
+int  amdvi_enable(void);
+void amdvi_poll_events(void);
+
 /* Phase 2G — DMA buffer auto-allocation wrapper.
  *
  * Combines pmm_alloc(pages, PHYS_TAG_DMA32) + iommu_map(domain, iova,

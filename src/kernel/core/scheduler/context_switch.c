@@ -8,6 +8,7 @@
 #include "fpu.h"
 #include "notify.h"
 #include "per_core.h"
+#include "cet_lifecycle.h"
 
 /* The non-frame context_save / context_restore / context_switch helpers
  * have been removed. The scheduler dispatches exclusively via the IRQ
@@ -85,6 +86,15 @@ void context_save_from_frame(process_t* proc, interrupt_frame_t* frame) {
 
     // Capture this strand's user FS base (TLS) before it is switched out.
     ctx_save_user_fsbase(proc, ctx);
+
+    /* Capture this strand's user shadow-stack pointer. The processor put
+     * the live SSP in IA32_PL3_SSP when the event that brought us here
+     * left ring 3; it is one register per core, so the incoming strand's
+     * restore below would otherwise overwrite it and this strand would
+     * come back on a neighbour's shadow stack. Same shape, same reason
+     * and the same place as the FS base above. No-op unless the CPU has
+     * SHSTK and CR4.CET is up (cet_lifecycle.c). */
+    cet_save_user_ssp_after_entry(proc);
 
     ctx->rax = frame->rax;
     ctx->rbx = frame->rbx;
@@ -179,4 +189,12 @@ void context_restore_to_frame(process_t* proc, interrupt_frame_t* frame) {
     // not reload the FS selector, so this is the only place per-strand TLS is
     // switched on the live scheduler dispatch.
     ctx_restore_user_fsbase(proc, ctx);
+
+    /* Install the incoming strand's user shadow-stack pointer, so the
+     * iretq that ends this dispatch reloads SSP from ITS shadow stack and
+     * not from whatever the outgoing strand left in IA32_PL3_SSP. The
+     * write also covers a strand that has no shadow stack at all — it
+     * gets 0 rather than the register it did not earn. See
+     * cet_load_user_ssp_for_iretq. */
+    cet_load_user_ssp_for_iretq(proc);
 }

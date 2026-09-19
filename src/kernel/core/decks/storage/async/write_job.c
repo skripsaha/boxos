@@ -52,6 +52,7 @@
 /* ---- forward decls ---- */
 static void wjob_pump(void *job_);
 static void wjob_finalize(WriteJob *j, int rc);
+static void wjob_publish_change(WriteJob *j);
 static void wjob_ahci_complete(uint8_t port, uint8_t slot, error_t status, void *ctx);
 
 /* =========================================================================
@@ -272,6 +273,66 @@ static bool w_cow_before(WriteJob *j)
     return true;
 }
 
+/* "Every command slot on the port is taken" is NOT "the disk failed", and
+ * this is where the two used to become the same sentence.
+ *
+ * ahci_submit_read_async / ahci_submit_write_async answer ERR_BUSY when the
+ * port's slot pool has nothing to give: every tag outstanding at once, or the
+ * pool shut whole for a FLUSH CACHE EXT (ahci_port_take_whole — AHCI 1.3.1
+ * §1.7 forbids issuing a non-queued command beside queued ones, and this very
+ * state machine's W_COMMIT_TXN is one of the flushers, so one write's
+ * durability point is exactly what makes another write's submit find the door
+ * shut). It is also the answer on the narrow race where the port goes
+ * inactive between ahci_async.c's check and ahci_alloc_slot's — a port that
+ * is going away, which the next attempt names properly as
+ * ERR_DEVICE_NOT_READY. Folding all of that into ERR_IO ended a perfectly
+ * healthy write with a disk error and left the caller nothing to tell "busy,
+ * come back" apart from "the medium is broken".
+ *
+ * So the job is not failed on the spot: it keeps its state and is PRESENTED
+ * AGAIN at the back of the drain core's queue, which is what libata does with
+ * a command its port defers (ata_std_qc_defer / ATA_DEFER_PORT) — the qc is
+ * re-presented, never completed with an error.
+ *
+ * But it is presented again only while the queue holds work that has not run
+ * yet, and that condition is the whole of the design rather than a nicety.
+ * On the drain core this runs INSIDE BatonPump, which does not return to
+ * kcore_run_loop until its queue is empty: a node that unconditionally put
+ * itself back would OWN the core — the process pockets, the USB hubs and the
+ * machine's own idle unreachable for as long as the port stayed shut, and a
+ * flush is given AHCI_CMD_PATIENCE_MS to shut it. Queued work is therefore
+ * the event this waits on, and a real one: the completions standing in that
+ * queue are exactly what free the slots this job wants, and every one of them
+ * runs before this job's next turn. When the queue holds nothing else,
+ * nothing is going to free a slot before the next attempt either — so there
+ * is nothing to wait for, and the job is refused with the word the port
+ * itself used, out loud, instead of spun on.
+ *
+ * Off the drain core — the first pump runs in the submitting thread's own
+ * syscall context — the pass is not a retry at all: it hands the job over and
+ * this core returns to its caller. The re-presentation rule above then
+ * applies on the core that does the pumping.
+ *
+ * The other refusal is a pass the baton queue will not take (a pass before
+ * BatonInit), and it ends the same way: ERR_BUSY, which now reaches the
+ * caller as itself. */
+static bool wjob_present_again_for_a_slot(WriteJob *j)
+{
+    uint8_t drain = g_amp.bsp_index;
+
+    if (amp_get_core_index() != drain || BatonPending(drain)) {
+        if (BatonPass(&j->cq_node))
+            return false;   /* parked in the queue; the same state runs again */
+    }
+
+    kprintf("[Storage] write to file %u: port %u had no command slot free and "
+            "nothing is queued that would free one — the write is refused as "
+            "busy, not as a disk error\n",
+            j->file_id, (unsigned)BoardroomSeatIndex(tagfs_get_seat()));
+    wjob_finalize(j, ERR_BUSY);
+    return false;
+}
+
 /* W_COW_READ_OLD — async read of (now-redirected) NEW block content
  * into DMA. CowBeforeWrite already populated NEW on disk with the OLD
  * bytes; we just need them into DMA so the user overlay can fold over.
@@ -286,8 +347,10 @@ static bool w_cow_read_old(WriteJob *j)
     uint8_t  slot;
     error_t  err = ahci_submit_read_async(BoardroomSeatIndex(tagfs_get_seat()), lba, 8, j->dma_phys,
                                            wjob_cow_read_complete, j, &slot);
+    if (err == ERR_BUSY)
+        return wjob_present_again_for_a_slot(j);
     if (err != OK) {
-        wjob_finalize(j, ERR_IO);
+        wjob_finalize(j, err);
         return false;
     }
     return false;  /* parked until IRQ */
@@ -311,8 +374,10 @@ static bool w_ahci_submit(WriteJob *j)
     uint8_t  slot;
     error_t  err = ahci_submit_write_async(BoardroomSeatIndex(tagfs_get_seat()), lba, 8, j->dma_phys,
                                             wjob_ahci_complete, j, &slot);
+    if (err == ERR_BUSY)
+        return wjob_present_again_for_a_slot(j);
     if (err != OK) {
-        wjob_finalize(j, ERR_IO);
+        wjob_finalize(j, err);
         return false;
     }
     return false;  /* parked until IRQ */
@@ -433,21 +498,49 @@ static bool w_cow_after(WriteJob *j)
     return true;
 }
 
-/* W_COMMIT_TXN — close out the journal txn. */
+/* W_COMMIT_TXN — the durability point, and it is only a durability point if
+ * somebody listens to the answer.
+ *
+ * Forcing the data blocks written above out of the drive's volatile write
+ * cache to media is what makes them survive the power going away. The call
+ * was made and its result thrown away, so a medium that REFUSED the flush —
+ * a device that has no FLUSH CACHE EXT to give, a port that could not be
+ * taken whole for it, a link that went down between the last write and here —
+ * moved the job straight to W_PUBLISH: the write was announced on every tag
+ * of the file and reported back as done, while the bytes were still in a
+ * cache the drive can lose. The kernel would have told the truth about the
+ * write and a lie about its durability in the same breath.
+ *
+ * A refused flush therefore fails the write. Nothing is rolled back, and
+ * nothing is hidden either: the blocks are on the medium and the metadata
+ * that names them is committed, so the file HAS changed for every reader —
+ * which is why the change is still announced on the file's tags, and why the
+ * caller is told the byte count that is really in the file rather than a
+ * zero it would answer by writing the same payload a second time. The one
+ * thing it must not be told is "durable". */
 static bool w_commit_txn(WriteJob *j)
 {
-    /* Force the data blocks written above out of the drive's volatile write
-     * cache to media (routes to the probed AHCI port / ATA drive). This is the
-     * durability point for an async write. */
-    tagfs_flush_cache();
+    error_t flushed = tagfs_flush_cache();
+    if (flushed != OK) {
+        kprintf("[Storage] write to file %u: the medium would not flush its "
+                "write cache (%u) — the bytes are in the file but not proven "
+                "to survive power loss, so the write is refused rather than "
+                "reported done\n",
+                j->file_id, (unsigned)flushed);
+        wjob_publish_change(j);
+        wjob_finalize(j, flushed);
+        return false;
+    }
     atomic_store_u32((volatile uint32_t *)&j->state, W_PUBLISH);
     return true;
 }
 
-/* W_PUBLISH — emit Touch event "WROTE" to all of the file's tags so
- * tag-listening processes wake up. Best-effort: a publish failure does
- * not abort the write. */
-static bool w_publish(WriteJob *j)
+/* Say what happened to the file on every tag it carries. Separate from the
+ * W_PUBLISH state because the change is a fact about the file, not about how
+ * the job ended: a write whose cache flush was refused has still changed the
+ * file for every reader, and the listeners have to hear that from the same
+ * place a successful one tells them. */
+static void wjob_publish_change(WriteJob *j)
 {
     if (j->bytes_done > 0 && TouchHasAnyListeners()) {
         TagFSMetadata wmeta;
@@ -475,7 +568,13 @@ static bool w_publish(WriteJob *j)
             tagfs_metadata_free(&wmeta);
         }
     }
+}
 
+/* W_PUBLISH — the file's tags hear about the write, then the token moves on.
+ * Best-effort: a publish failure does not abort the write. */
+static bool w_publish(WriteJob *j)
+{
+    wjob_publish_change(j);
     atomic_store_u32((volatile uint32_t *)&j->state, W_RELEASE_TOKEN);
     return true;
 }
@@ -516,7 +615,17 @@ static void wjob_finalize(WriteJob *j, int rc)
      * is pinned for the job's lifetime and commit_out walks the page tables
      * physically (no target CR3 switch) — same model as the
      * crate_stage_commit_and_release below. */
-    uint64_t bytes_written = (rc == OK) ? j->bytes_done : 0;
+    /* The count the caller is given is the count that is IN the file. Every
+     * failure before the metadata commit leaves its bytes in blocks no file
+     * names yet, so the honest answer there is zero. The one failure that can
+     * happen after it — the refused cache flush, which is the only way out of
+     * W_COMMIT_TXN other than forward — leaves them written, named and
+     * readable, and answering "0 bytes" to an appending writer is exactly
+     * what would make it write the same payload into the file twice. */
+    bool bytes_are_in_the_file =
+        (rc == OK) ||
+        atomic_load_u32((volatile uint32_t *)&j->state) == (uint32_t)W_COMMIT_TXN;
+    uint64_t bytes_written = bytes_are_in_the_file ? j->bytes_done : 0;
     uint64_t final_size    = j->handle ? j->handle->file_size : 0;
     if (j->out_crate && j->out_crate->capacity >= 16 &&
         j->target && j->target->cabin) {
@@ -545,7 +654,13 @@ static void wjob_finalize(WriteJob *j, int rc)
 
     Result r;
     memset(&r, 0, sizeof(r));
-    r.error_code  = (rc == OK) ? OK : (uint32_t)ERR_IO;
+    /* The error the job actually ended on, not a blanket ERR_IO. Every exit
+     * above already carries a distinct one — ERR_BUSY (the port's slots, and
+     * the caller may simply come back), ERR_NO_MEMORY (this machine, not this
+     * disk), the status the AHCI completion reported, the refusal of the
+     * cache flush — and flattening them here is what left the caller unable
+     * to tell "try again" from "the medium is broken". */
+    r.error_code  = (uint32_t)rc;
     r.data_length = (uint32_t)bytes_written;
     r.sender_pid  = 0;
     /* Ф26e: a waybilled (box::ferry) write echoes its correlation token in

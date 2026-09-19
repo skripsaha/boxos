@@ -241,6 +241,18 @@ volatile void* vmm_map_framebuffer(uintptr_t phys_addr, size_t size);
 void* vmm_alloc_pages(vmm_context_t* ctx, size_t page_count, uint64_t flags);
 void vmm_free_pages(vmm_context_t* ctx, void* virt_addr, size_t page_count);
 
+/* Queries about whichever LEAF covers `virt_addr` — a 4 KiB PT entry, a
+ * 2 MiB PD leaf or a 1 GiB PDPT leaf alike. They walk vmm_get_leaf_pte, so
+ * a huge mapping answers as the mapping it is; the earlier vmm_get_pte walk
+ * stopped at the LARGE_PAGE bit and reported a live Bay or Brook leaf
+ * absent. vmm_virt_to_phys adds the offset within the leaf's OWN page size,
+ * so the answer is the exact physical byte. vmm_get_page_flags returns
+ * VMM_FLAG_LARGE_PAGE set on a huge leaf — the caller needs it to read bit
+ * 7 right, which is PS on a huge leaf and PAT on a 4 KiB entry.
+ *
+ * ‼ A phys address from a huge leaf names a byte inside an order-9 or
+ * order-18 PMM block, NOT a 4 KiB allocation. Never hand one to pmm_free
+ * with a count of 1. */
 uintptr_t vmm_virt_to_phys(vmm_context_t* ctx, uintptr_t virt_addr);
 bool vmm_is_mapped(vmm_context_t* ctx, uintptr_t virt_addr);
 uint64_t vmm_get_page_flags(vmm_context_t* ctx, uintptr_t virt_addr);

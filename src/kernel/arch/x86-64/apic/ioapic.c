@@ -127,7 +127,8 @@ void ioapic_init(uintptr_t base_addr, uint8_t gsi_base) {
     );
 
     if (!ioapic_base_virt) {
-        debug_printf("[IOAPIC] %[E]Failed to map IO-APIC MMIO%[D]\n");
+        kprintf("[IOAPIC] %[E]phys 0x%lx could not be mapped — this IOAPIC "
+                "programs no line at all%[D]\n", base_addr);
         return;
     }
 
@@ -193,11 +194,24 @@ static bool ioapic_dest_is_nameable(uint32_t dest_lapic_id, uint32_t gsi,
 void ioapic_enable_irq(uint8_t gsi, uint8_t vector, uint32_t dest_lapic_id) {
     if (!ioapic_dest_is_nameable(dest_lapic_id, gsi, "IRQ")) return;
 
+    /* ioapic_init() returns on a failed mapping and irqchip_init() selects
+     * the APIC backend regardless, so this is reachable with no window to
+     * write through. Without the test the very next line indexes off a null
+     * base and the machine takes a page fault at IOREGSEL instead of saying
+     * which line it could not arm. ioapic_program_nmi_source() asks exactly
+     * this question a few lines below; the arming path did not. */
+    if (!ioapic_base_virt) {
+        kprintf("[IOAPIC] %[E]IRQ GSI %u not programmed: no IOAPIC is "
+                "mapped%[D]\n", gsi);
+        return;
+    }
+
     uint8_t pin = gsi - ioapic_gsi_base;
 
     if (pin > ioapic_max_entry) {
-        debug_printf("[IOAPIC] %[E]GSI %u out of range (pin=%u, max=%u)%[D]\n",
-                     gsi, pin, ioapic_max_entry);
+        kprintf("[IOAPIC] %[E]IRQ GSI %u not programmed: pin %u is past this "
+                "IOAPIC's last pin %u (GSI base %u)%[D]\n",
+                gsi, pin, ioapic_max_entry, ioapic_gsi_base);
         return;
     }
 
@@ -225,6 +239,11 @@ void ioapic_enable_irq(uint8_t gsi, uint8_t vector, uint32_t dest_lapic_id) {
 }
 
 void ioapic_disable_irq(uint8_t gsi) {
+    /* Silent, unlike the arming path: an unmapped IOAPIC never armed the
+     * line either, so there is no work being dropped — only a null base to
+     * keep out of ioapic_read_held(). */
+    if (!ioapic_base_virt) return;
+
     uint8_t pin = gsi - ioapic_gsi_base;
 
     if (pin > ioapic_max_entry) {
@@ -294,12 +313,16 @@ void ioapic_describe_gsi(uint32_t gsi, uint16_t flags) {
             return;
         }
     }
-    debug_printf("[IOAPIC] %[E]no room left to describe GSI %u%[D]\n", gsi);
+    kprintf("[IOAPIC] %[E]GSI %u left undescribed: all %d description slots "
+            "are taken, so this line is routed by bus default%[D]\n",
+            gsi, GSI_DESCRIBED_MAX);
 }
 
 void ioapic_register_iso(uint8_t isa_irq, uint32_t gsi, uint16_t flags) {
     if (isa_irq >= ISO_TABLE_SIZE) {
-        debug_printf("[IOAPIC] %[E]ISO: ISA IRQ %u out of range%[D]\n", isa_irq);
+        kprintf("[IOAPIC] %[E]override for ISA IRQ %u dropped: there are only "
+                "%d ISA interrupts, so the firmware named one that cannot "
+                "exist%[D]\n", isa_irq, ISO_TABLE_SIZE);
         return;
     }
 
@@ -332,19 +355,20 @@ void ioapic_program_nmi_source(uint32_t gsi, uint16_t mps_flags,
     if (!ioapic_dest_is_nameable(dest_lapic_id, gsi, "NMI Source")) return;
 
     if (!ioapic_base_virt) {
-        debug_printf("[IOAPIC] NMI source request but IOAPIC not mapped\n");
+        kprintf("[IOAPIC] %[E]NMI Source GSI %u not programmed: this IOAPIC "
+                "is not mapped%[D]\n", gsi);
         return;
     }
 
     if (gsi < ioapic_gsi_base) {
-        debug_printf("[IOAPIC] NMI Source GSI %u below this IOAPIC base %u\n",
-                     gsi, ioapic_gsi_base);
+        kprintf("[IOAPIC] %[E]NMI Source GSI %u not programmed: it is below "
+                "this IOAPIC's GSI base %u%[D]\n", gsi, ioapic_gsi_base);
         return;
     }
     uint32_t pin32 = gsi - ioapic_gsi_base;
     if (pin32 > ioapic_max_entry) {
-        debug_printf("[IOAPIC] NMI Source GSI %u beyond max pin %u\n",
-                     gsi, ioapic_max_entry);
+        kprintf("[IOAPIC] %[E]NMI Source GSI %u not programmed: it is past "
+                "this IOAPIC's last pin %u%[D]\n", gsi, ioapic_max_entry);
         return;
     }
     uint8_t pin = (uint8_t)pin32;

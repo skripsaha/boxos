@@ -72,10 +72,11 @@ void guide_dispatch_stats(uint64_t out[2])
  *   1. Validate envelope sizes against MANIFEST_RAW_MAX_SIZE. No cap on
  *      crate_count — CrateStage handles arbitrary sizes safely.
  *   2. Take the Manifest BYTES onto the kernel side. An ENCLOSED envelope
- *      carries them in its own ring slot — one bounded memcpy out of the
- *      already-translated Pocket, no cabin-memory read at all, and the
- *      copy is taken before validation so a cabin scribbling on its slot
- *      mid-dispatch races only with itself. An addressed envelope stages
+ *      carries them inside the envelope itself — one bounded memcpy out of
+ *      the guide's OWN copy of the ring slot (guide_process_pocket took the
+ *      whole 128 bytes before dispatch), no cabin-memory read at all, so a
+ *      cabin scribbling on its slot mid-dispatch races only with itself and
+ *      never with a validation already passed. An addressed envelope stages
  *      them into this K-Core's ManifestStage scratch via
  *      vmm_user_buf_in_into — that cabin memory must still be alive, which
  *      is the submitter's side of the contract (it waits, or it owns the
@@ -152,15 +153,12 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
             return;
         }
     } else if (enclosed) {
-        /* The letter is in the envelope. Copy it out of the (user-writable)
-         * ring slot ONCE, into this K-Core's staging scratch, then validate
-         * and execute only the copy — a cabin rewriting its slot
-         * mid-dispatch can corrupt nothing but its own request. The slot
-         * itself cannot be reused under us: the producer may not touch it
-         * until KPocketPopAt moves head, which happens after this dispatch
-         * returns. Staging (rather than a guide stack buffer) keeps the
-         * dispatch frame small and the manifest lifetime identical to the
-         * addressed path. */
+        /* The letter is in the envelope, and the envelope is already the
+         * guide's own copy of the ring slot — the cabin cannot reach it any
+         * more, so validation and execution cannot be raced. It moves once
+         * more, into this K-Core's staging scratch, so that the manifest's
+         * home and lifetime are identical to the addressed path and the
+         * dispatch frame stays small. */
         if (manifest_size < sizeof(Manifest) || manifest_size > POCKET_ENCLOSURE_MAX) {
             pocket->error_code = ERR_INVALID_ARGUMENT;
             execution_deck_handler(pocket, proc);
@@ -332,33 +330,59 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
     execution_deck_handler(pocket, proc);
 }
 
-/* Process one Pocket from a process's PocketRing. */
+/*
+ * Process one Pocket from a process's PocketRing.
+ *
+ * The guide TAKES the pocket; it does not borrow the cabin's slot. What
+ * KPocketPeek hands back is the READ form of vmm_translate_user_addr — a
+ * supervisor-writable Pull Map alias of the cabin's page, and vmm.h is
+ * explicit that a store through it "consults neither the cabin's own R/W
+ * bit, nor CR0.WP, nor CR4.SMAP", so it is "safe for reads and unsafe as a
+ * write channel". The three fields the guide used to stamp into that slot —
+ * pid, error_code, and later the cleared envelope — were exactly such
+ * stores, and the address they landed at is not the kernel's to trust: a
+ * slot vaddr is slots_base + (idx % slot_count_max) * slot_size, and all
+ * three of those live in the ring header page the cabin can write. A cabin
+ * that names its own read-only text there gets the kernel to scribble on a
+ * page it is not allowed to write, and one shared with every other process
+ * running the same image.
+ *
+ * Copying the whole 128-byte slot once closes the other half of it too. The
+ * slot stays user-writable for as long as the dispatch runs, so every field
+ * read twice could be two different values; the enclosure was already copied
+ * out for that exact reason (see guide_process_manifest_pocket), and now the
+ * envelope travels the same way. Nothing downstream needs the cabin to see
+ * these writes: the answer goes back through the ResultRing, and boxlib
+ * never reads a submitted slot again.
+ */
 static void guide_process_pocket(process_t *proc)
 {
     if (!proc || !proc->cabin) return;
 
     uint64_t pos;
-    Pocket  *pocket = KPocketPeek(proc, &pos);
-    if (!pocket) return;
+    const Pocket *slot = KPocketPeek(proc, &pos);
+    if (!slot) return;
 
-    /* Kernel sets pid (security: userspace can't forge it). Only the guide
-     * reads pockets, so this slot is ours. */
-    pocket->pid = proc->pid;
-    pocket->error_code = OK;
+    Pocket pocket;
+    memcpy(&pocket, slot, sizeof(pocket));
+
+    /* Kernel sets pid (security: userspace can't forge it). */
+    pocket.pid = proc->pid;
+    pocket.error_code = OK;
 
     /* Every pocket carries the Manifest flag since Phase 12. */
-    if (pocket->flags & POCKET_FLAG_MANIFEST) {
-        guide_process_manifest_pocket(pocket, proc);
+    if (pocket.flags & POCKET_FLAG_MANIFEST) {
+        guide_process_manifest_pocket(&pocket, proc);
         (void)KPocketPopAt(proc, pos);
         return;
     }
 
     /* Malformed pocket — neither yield nor manifest. Deliver an error
      * Result to the sender and drop. */
-    pocket->error_code = ERR_INVALID_POCKET;
+    pocket.error_code = ERR_INVALID_POCKET;
     debug_printf("[GUIDE] PID %u sent non-manifest pocket (flags=0x%x)\n",
-                 proc->pid, pocket->flags);
-    execution_deck_handler(pocket, proc);
+                 proc->pid, pocket.flags);
+    execution_deck_handler(&pocket, proc);
     (void)KPocketPopAt(proc, pos);
 }
 

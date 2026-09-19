@@ -2095,10 +2095,31 @@ static uint64_t g_stack_base = 0;
  *
  * The cost of asking the wide question is zero: PD0..PD3 are allocated
  * unconditionally either way (16 KB of the 32 KB block), and 2048 entries is
- * exactly what fills them. Mapping MMIO write-back here is harmless — the
- * firmware's MTRRs still mark those ranges UC, and UC wins over the PAT type
- * of the page (Intel SDM Vol 3A §11.5.2, "Effective Memory Type"). These
- * tables live only until vmm_init builds the kernel's own.
+ * exactly what fills them.
+ *
+ * Mapping MMIO write-back here is harmless, but for a narrower reason than
+ * "UC wins", which is what this note used to say under a section number that
+ * names a table column rather than a section. The MTRR type does not simply
+ * beat the page's: Intel SDM Vol 3A §11.5.2.2, "Selecting Memory Types for
+ * Pentium III and More Recent Processor Families", Table 11-7, gives MTRR UC
+ * an effective type of UC against PAT entries UC, UC-, WT, WB and WP — and
+ * WC against a PAT entry of WC. A page that asked for write-combining would
+ * override the firmware's UC.
+ *
+ * These entries ask for nothing. They carry neither PAT nor PCD nor PWT,
+ * which selects PAT entry 0 ("Selecting a Memory Type from the PAT",
+ * Table 11-11), whose type after power-up or reset is WB ("Programming the
+ * PAT", Table 11-12) and which this loader never rewrites — it issues no
+ * WRMSR at all, here or anywhere else. WB against a UC MTRR is UC, so the
+ * firmware's MTRRs do decide these ranges.
+ *
+ * The one thing not established in this tree is the PAT the firmware hands
+ * over. Every entry value but WC lands on UC anyway, and PAT0 is the type
+ * ordinary RAM gets on a page with no attribute bits, so a firmware setting
+ * it to WC would have mis-typed its own memory long before this line ran.
+ * Nothing here may start setting PAT/PCD/PWT without revisiting that.
+ *
+ * These tables live only until vmm_init builds the kernel's own.
  */
 static uint32_t CalculateIdentityMapPages(void)
 {

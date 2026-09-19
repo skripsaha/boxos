@@ -722,16 +722,44 @@ latearrival_off() {
     restore src/kernel/tagfs/tagfs.c
 }
 
+# ── the stick has to BE this machine's volume, and that is sixteen bytes ──
+#
+# ‼ TAKEN AFTER `make run-bg`, NEVER BEFORE IT, AND THAT IS THE WHOLE POINT.
+#
+# create_tagfs stamps a FRESH identity into every volume it lays down, and the
+# image is laid down again by every single `make`: src/userspace/boxlib/libbox.a
+# is .PHONY, so shell.bin is always remade, and through shell_embed.o ->
+# kernel.bin -> build/boxos.img so is the image. `make -n --debug=b
+# build/boxos.img` on a tree that was just built says so in as many words.
+#
+# So a copy taken between `build` and `make run-bg` is a copy of a volume that
+# no longer exists anywhere. run-bg lays the image down again with a new
+# identity, the loader reads THAT one and stamps it on the boarding pass, and
+# the Boardroom then looks at the stick, sees sixteen bytes belonging to some
+# other volume and declines it — correctly, and saying so out loud:
+#
+#   [Boardroom] the loader came from the volume <uuid>, and no seat is carrying it
+#   [Boardroom] 1 volume(s) are here and none of them is this machine's
+#
+# The machine ends up with no filesystem at all, and every scenario below that
+# needed one on the stick was judging a machine that never mounted anything —
+# six of them, silently, for as long as the copy has been taken where it was.
+#
+# Nothing in the guest writes to the image while this runs: every caller here
+# carries the late-arrival mutation, so the internal disk is never mounted.
+stick_from_boot_image() {
+    cp build/boxos.img "$SCRATCH/stick.img"
+}
+
 run_latearrival() {
     echo "== latearrival: the volume arrives after the boot gave up =="
     # The mutation stays installed until the run is over: `make run-bg` has the
     # image as a prerequisite and will rebuild it, so restoring the source
     # first quietly boots an unmutated kernel. Cost an entire run to learn.
     latearrival_on; build
-    cp build/boxos.img "$SCRATCH/stick.img"
-
     make run-stop >/dev/null 2>&1
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
+    stick_from_boot_image
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
 
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
@@ -841,10 +869,9 @@ run_latearrival() {
 run_replug() {
     echo "== replug: the volume leaves and comes home to the same chair =="
     latearrival_on; build
-    cp build/boxos.img "$SCRATCH/stick.img"
-
     make run-stop >/dev/null 2>&1
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
+    stick_from_boot_image
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
 
     # First arrival — the same one latearrival proves.
@@ -2037,10 +2064,9 @@ run_yank() {
     # is on ATA. Same mutation late-arrival uses, and it stays installed for
     # the whole run, for the reason written there.
     latearrival_on; build
-    cp build/boxos.img "$SCRATCH/stick.img"
-
     make run-stop >/dev/null 2>&1
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
+    stick_from_boot_image
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 2
     local MARK
@@ -2169,13 +2195,12 @@ run_holdground() {
         echo "BUILD FAILED (HOLDGROUND=on) — tail:"; tail -25 "$SCRATCH/build.log"
         latearrival_off; bad "HOLDGROUND=on build"; return
     fi
-    cp build/boxos.img "$SCRATCH/stick.img"
-
     make run-stop >/dev/null 2>&1
     # ‼ The key goes on run-bg TOO: it decides which mark file the tree carries,
     # and a bare `make run-bg` rebuilds the kernel without it. Same trap that
     # cost mountfail a whole run.
     make run-bg HOLDGROUND=on USB=on CORES=4 MEM=4G >/dev/null 2>&1
+    stick_from_boot_image
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
 
     # First arrival: the stick becomes this machine's volume, and the probe
@@ -2287,10 +2312,9 @@ run_returnfail() {
         echo "BUILD FAILED (RETURNFAIL=on) — tail:"; tail -25 "$SCRATCH/build.log"
         latearrival_off; bad "RETURNFAIL=on build"; return
     fi
-    cp build/boxos.img "$SCRATCH/stick.img"
-
     make run-stop >/dev/null 2>&1
     make run-bg RETURNFAIL=on USB=on CORES=4 MEM=4G >/dev/null 2>&1
+    stick_from_boot_image
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
 
     # First arrival — the mount that succeeds, and the one the stamp counts.
@@ -2385,10 +2409,9 @@ run_stillthere() {
     # line to the last, and every check is about what the driver did to a
     # device that was there the whole time.
     latearrival_on; build
-    cp build/boxos.img "$SCRATCH/stick.img"
-
     make run-stop >/dev/null 2>&1
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
+    stick_from_boot_image
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
 
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"

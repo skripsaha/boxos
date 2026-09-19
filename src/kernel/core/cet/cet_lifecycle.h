@@ -55,31 +55,29 @@
  *     pages; the 4 is locked by the hammock slot map, so growing it is
  *     the owner's call. Counted in full at CET_USER_SSP_PAGES in
  *     cet_lifecycle.c.
- *     Stores the SSP value in process_t (user_ssp_va / user_ssp_phys).
+ *     Stores the live SSP in process_t (user_ssp_va / user_ssp_phys);
+ *     user_ssp_va starts at the top of the region and thereafter tracks
+ *     whatever the processor last had in IA32_PL3_SSP for this strand.
+ *     The region's BASE is never read back out of it — that is
+ *     process_user_ssp_va_for(proc), which teardown uses.
  *   - cet_process_destroy frees the pages on process teardown.
- *   - IA32_PL3_SSP is written in exactly ONE place in the kernel:
- *     cet_load_user_ssp_for_iretq, whose only caller is
- *     process_start_initial, whose only caller is the single-core boot
- *     branch of main.c, for the initial process alone.
- *     ‼ Nothing else ever writes it, and nothing reloads it. A strand
- *     reaches ring 3 through the scheduler's frame iretq, and
- *     context_restore_to_frame (scheduler/context_switch.c) touches no
- *     CET MSR; the multicore boot branch jumps into kcore_run_loop and
- *     never calls process_start_initial at all. CET_U is an IA32_XSS
- *     state component and this kernel does not enable IA32_XSS, so
- *     XSAVE does not carry the MSR either. U_CET.SH_STK_EN is set
- *     unconditionally whenever the CPU has SHSTK (see the U policy in
- *     cet_lifecycle.c), so on such silicon a user process enters ring 3
- *     on whatever IA32_PL3_SSP holds — the previous process's SSP, or
- *     the reset value 0 on a core that never ran process_start_initial,
- *     and then the first user CALL pushes below it and faults. On a
- *     multicore boot that is EVERY user process, not just the second
- *     one: this is a boot-killer on SHSTK hardware, not an overlap.
- *     Closing it needs the MSR saved into the outgoing strand and
- *     written for the incoming one, in context_save_from_frame /
- *     context_restore_to_frame, exactly where that file already swaps
- *     the per-strand FS base. Not in this file, and not done anywhere
- *     yet.
+ *   - IA32_PL3_SSP is swapped per strand by the pair
+ *     cet_save_user_ssp_after_entry / cet_load_user_ssp_for_iretq. The
+ *     scheduler's frame dispatch calls both — context_save_from_frame
+ *     and context_restore_to_frame in scheduler/context_switch.c, beside
+ *     the per-strand FS-base swap that has the same shape and the same
+ *     reason — and process_start_initial calls the load half alone, to
+ *     prime the MSR for the initial process's first iretq on the
+ *     single-core boot branch before the scheduler has run.
+ *     The swap has to be the kernel's own work: CET_U is an IA32_XSS
+ *     supervisor state component (Intel SDM Vol 1 §13.5), this kernel
+ *     programs no IA32_XSS and issues no XSAVES, so no FPU-context path
+ *     carries the register. U_CET.SH_STK_EN is set unconditionally
+ *     whenever the CPU has SHSTK (see the U policy in cet_lifecycle.c),
+ *     so without the swap every user strand on a multicore boot — not
+ *     just the second one — would enter ring 3 on the previous strand's
+ *     SSP or on the reset value 0. That was a boot-killer on SHSTK
+ *     silicon, and it is what this pair closes.
  *
  * Codegen compatibility
  * ---------------------
@@ -215,8 +213,9 @@ void cet_lifecycle_release_supervisor_ssp(uint8_t core_idx);
  *
  * ‼ NOTHING LOADS proc->context.pl0_ssp TODAY. The live scheduler
  * dispatch is the IRQ-frame path — context_save_from_frame /
- * context_restore_to_frame in scheduler/context_switch.c — and it
- * touches no CET MSR. The asm entry points that once swapped
+ * context_restore_to_frame in scheduler/context_switch.c — and the only
+ * CET MSR it swaps is the USER one, IA32_PL3_SSP; the supervisor side is
+ * untouched there. The asm entry points that once swapped
  * IA32_PL0_SSP per process were dead code and have been removed. Every
  * ring-3 → ring-0 entry therefore takes its supervisor SSP from
  * IA32_PL0_SSP, which holds THIS CORE's token from
@@ -271,8 +270,12 @@ void cet_process_destroy_kernel_ssp(struct process_t *proc);
  *     §2.4 — a far RET pops CS, LIP and SSP and faults
  *     #CP(FAR-RET/IRET) on a mismatch)
  *   - Nothing swaps IA32_PL0_SSP per process: this core keeps the token
- *     cet_lifecycle_init_supervisor_ssp put in the MSR, and the frame
- *     dispatch that replaced the asm context switch touches no CET MSR
+ *     cet_lifecycle_init_supervisor_ssp put in the MSR. The frame
+ *     dispatch that replaced the asm context switch swaps IA32_PL3_SSP
+ *     per strand and nothing else, which is correct for this design:
+ *     the kernel call chain a strand raises on entry unwinds on the same
+ *     core before the iretq that leaves it, so one supervisor shadow
+ *     stack per CORE stays balanced
  */
 __attribute__((noreturn))
 void cet_supv_shstk_activate_and_jump(void (*target)(void));
@@ -286,8 +289,9 @@ void cet_supv_shstk_activate_and_jump(void (*target)(void));
  * this is the pages' first mapping in that context, so they are born
  * with the encoding, and a user shadow stack carries nothing until its
  * first CALL. Records the SSP in proc->user_ssp_va / user_ssp_phys /
- * user_ssp_size. The SSP value starts at user_ssp_va + size - 8 so the
- * first CALL has room to push.
+ * user_ssp_size. The mapping goes at process_user_ssp_va_for(proc) and
+ * the initial SSP is that base + size - 8, so the first CALL has room to
+ * push; user_ssp_va then follows the live register from there.
  *
  * Safe to call when CET is unsupported (sets ssp fields to 0 and
  * returns OK — process_create can proceed without CET). */
@@ -298,35 +302,43 @@ error_t cet_process_create(struct process_t *proc);
 void cet_process_destroy(struct process_t *proc);
 
 /* True when cet_lifecycle_init_bsp completed and CR4.CET is set. The
- * shadow-stack-related paths (jump_to_userspace WRMSR IA32_PL3_SSP)
- * gate on this rather than on g_cpu_caps directly so a future runtime
- * disable still works. */
+ * shadow-stack-related paths (the IA32_PL3_SSP swap below) gate on this
+ * rather than on g_cpu_caps directly so a future runtime disable still
+ * works. */
 bool cet_is_enabled(void);
 
-/* Program IA32_PL3_SSP with the per-process initial SSP value just
- * before iretq drops to ring 3. The caller MUST hold interrupts off
- * (CLI) — between the WRMSR and the iretq there must be no possibility
- * of a context switch onto a different process. One caller:
- * process_start_initial in process.c, immediately before
- * jump_to_userspace.
+/* ─── IA32_PL3_SSP, saved out of a strand and loaded back into one ───
  *
- * No-op when:
- *   - CET is dormant (g_cet_enabled=false / no SHSTK on the CPU)
- *   - proc has no allocated SSP (proc->user_ssp_va == 0)
+ * The processor keeps ONE IA32_PL3_SSP per logical processor: it stores
+ * the live SSP there when an event takes the core out of CPL 3, and
+ * reloads SSP from it on the IRET back (Intel CET Specification
+ * 334525-003 §6.2 / §6.3). That covers a ring crossing; it does not
+ * cover a ring crossing that comes back up as a DIFFERENT strand, which
+ * is what the scheduler's frame dispatch does. These two close that gap,
+ * and they are the only writers/readers of the MSR in the kernel.
  *
- * After the iretq, the CPU's PL3_SSP is the user-mode SSP. The first
- * CALL pushes its return address to *PL3_SSP--.
+ * cet_save_user_ssp_after_entry records the register into `proc`. Valid
+ * only after a ring-3 → ring-0 entry on this core, which is where the
+ * scheduler calls it (context_save_from_frame). It accepts the register
+ * only when it points inside THAT strand's own shadow-stack region, so a
+ * strand that has not been to ring 3 since its SSP was installed keeps
+ * the SSP it was given instead of inheriting a neighbour's.
  *
- * ‼ This call is the kernel's ONLY write of IA32_PL3_SSP, and its one
- * caller runs only on the single-core boot branch, only for the initial
- * process. Subsequent kernel ↔ user crossings do not restore the MSR:
- * CET_U is an IA32_XSS supervisor state component (Intel SDM Vol 1
- * §13.5), not an XCR0 one, so the kernel's XSAVE/XRSTOR context-switch
- * path cannot carry it and never did — CPUID.(EAX=0DH,ECX=0) does not
- * even report bit 11 — and the frame dispatch writes no CET MSR. Every
- * other process, and every process at all on a multicore boot, therefore
- * enters ring 3 on a stale or zero PL3_SSP with U_CET.SH_STK_EN up. See
- * the per-process lifecycle note at the top of this file. */
+ * cet_load_user_ssp_for_iretq installs `proc`'s SSP so the next iretq to
+ * ring 3 runs on it. Two callers: context_restore_to_frame, and
+ * process_start_initial immediately before jump_to_userspace. The latter
+ * MUST hold interrupts off (CLI) — between the WRMSR and the iretq there
+ * must be no possibility of a switch onto a different process.
+ *
+ * A strand with NO shadow stack (cet_process_create degraded under
+ * memory pressure, user_ssp_va == 0) gets 0 written, not the register
+ * left alone: U_CET.SH_STK_EN is up on all SHSTK silicon, so leaving it
+ * alone would have that strand push into the previous strand's shadow
+ * stack. 0 makes its first CALL fault inside itself instead.
+ *
+ * Both are no-ops when CET is dormant (g_cet_enabled=false, or the CPU
+ * has no SHSTK) — no RDMSR and no WRMSR is issued at all. */
+void cet_save_user_ssp_after_entry(struct process_t *proc);
 void cet_load_user_ssp_for_iretq(struct process_t *proc);
 
 /* Increments the #CP fault counter — called from idt.c paranoid vector

@@ -47,6 +47,10 @@
 #define MMIO_CMD_BUF_BAR     0x0008
 #define MMIO_EVT_LOG_BAR     0x0010
 #define MMIO_CTRL            0x0018
+/* 0020h/0028h are the Exclusion Base and Exclusion Range Limit registers —
+ * except on a part that supports SNP, where §2.12.2.2 "Completion Wait Store
+ * Restrictions" re-purposes the same pair as the Completion Store Base and
+ * Limit and the exclusion range does not exist at all. */
 #define MMIO_EXCL_BASE       0x0020
 #define MMIO_EXCL_LIMIT      0x0028
 #define MMIO_EXT_FEAT        0x0030
@@ -55,6 +59,15 @@
 #define MMIO_EVT_HEAD        0x2010
 #define MMIO_EVT_TAIL        0x2018
 #define MMIO_STATUS          0x2020
+
+/* Extended Feature Register (0030h), SNPSup. Linux reads the same bit as
+ * FEATURE_SNP = BIT_ULL(63). */
+#define EFR_SNP_SUP          (1ULL << 63)
+
+/* Exclusion/Completion-Store Base and Limit carry an address in bits 51:12;
+ * the low bits are the exclusion range's own Enable and Allow, which stay 0
+ * here. Linux masks with PM_ADDR_MASK, the same 0x000ffffffffff000. */
+#define AMDVI_STORE_ADDR_MASK  0x000FFFFFFFFFF000ULL
 
 /* CTRL bits (§3.4.1 "MMIO Offset 0018h IOMMU Control Register"). */
 #define CTRL_IOMMU_EN        (1ULL << 0)
@@ -520,6 +533,39 @@ static int amdvi_unit_init(amdvi_unit_t* u, uint64_t reg_phys,
     *(volatile uint64_t*)(u->reg + MMIO_EVT_HEAD) = 0;
     *(volatile uint64_t*)(u->reg + MMIO_EVT_TAIL) = 0;
     u->cmd_tail = 0;
+
+    /* Where this unit is allowed to store a COMPLETION_WAIT.
+     *
+     * §2.12.2.2 "Completion Wait Store Restrictions": on a part that supports
+     * SNP the exclusion range is gone and the Exclusion Base / Exclusion
+     * Range Limit registers ARE the Completion Store Base and Limit. A
+     * COMPLETION_WAIT whose store address falls outside that window is not
+     * stored, and this driver's whole exit from amdvi_completion_wait is that
+     * store: every invalidation would spend a full second discovering that
+     * the semaphore never landed, and say so, on every AMD board with SNP
+     * silicon. Firmware's window is not ours — the semaphore is a page this
+     * kernel bought a moment ago.
+     *
+     * Base equal to Limit names exactly one 4 KiB page, which is exactly what
+     * the semaphore was given. Linux writes the same two registers with the
+     * same masked address in iommu_set_cwwb_range, and keys it off the same
+     * EFR bit rather than off any MSR: the register pair belongs to the
+     * IOMMU, and the IOMMU's own feature register is what says the pair has
+     * changed meaning.
+     *
+     * The write is harmless where SNPSup is set but SNP is not in force: the
+     * low bits of the Exclusion Base carry ExEn and Allow, both left 0 here,
+     * so read as an exclusion range the pair is disabled. */
+    uint64_t efr = *(volatile uint64_t*)(u->reg + MMIO_EXT_FEAT);
+    if (efr & EFR_SNP_SUP) {
+        uint64_t store = u->sem_phys & AMDVI_STORE_ADDR_MASK;
+        *(volatile uint64_t*)(u->reg + MMIO_EXCL_BASE)  = store;
+        *(volatile uint64_t*)(u->reg + MMIO_EXCL_LIMIT) = store;
+        kprintf("[AMD-Vi] seg=%u base=0x%lx: SNPSup — completion store window "
+                "set to the one page holding this unit's semaphore "
+                "(0x%lx)\n", (unsigned)seg, (unsigned long)reg_phys,
+                (unsigned long)store);
+    }
 
     /* §2.5.1, before the log is restarted: "Write the IOMMU Status Register
      * with EventOverflow = 1b to clear the bit (W1C)." An EventOverflow left

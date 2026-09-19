@@ -1,5 +1,6 @@
 #include "xhci_device.h"
 #include "xhci_enumeration.h"
+#include "xhci_port.h"
 #include "klib.h"
 
 /*
@@ -26,11 +27,33 @@ void xhci_fill_slot_context(xhci_slot_context_t* slot_ctx,
                         | ((uint32_t)slot->speed << 20)
                         | (slot->route_string & 0x000FFFFFu);
 
+    /*
+     * ‼ MTT IS NOT A PROPERTY OF BEING A HUB, AND KEEPING IT UNDER THE HUB
+     * TEST MISDESCRIBED EVERY SLOW DEVICE BEHIND A MULTI-TT HUB.
+     *
+     * xHCI 1.2 Table 6-4 gives the MTT field two occasions, and only one of
+     * them is a hub: a high-speed hub whose Multiple TT Interface software
+     * has enabled, AND a low- or full-speed device connected through such a
+     * hub. Linux writes both from the one fact — xhci_setup_addressable_virt_
+     * dev does `if (udev->tt->multi) slot_ctx->dev_info |= DEV_MTT` for a
+     * device that merely HAS a translator, and xhci_update_hub_device does
+     * the same for the hub itself.
+     *
+     * Trapped under `hub_ports > 0`, the bit was emitted for hubs alone, so a
+     * keyboard on a multi-TT hub was described to the controller as sharing
+     * the single translator that hub does not use — one split-transaction
+     * queue scheduled where the hardware has one per port.
+     *
+     * So the field means exactly one thing here: the MTT bit this slot is
+     * owed. Whoever fills the record decides it — the hub that entered the
+     * mode for itself, or the device that inherited that hub as its
+     * translator.
+     */
+    if (slot->multi_tt) {
+        slot_ctx->dwords[0] |= (1u << 25);      /* one translator per port */
+    }
     if (slot->hub_ports > 0) {
-        slot_ctx->dwords[0] |= (1u << 26);              /* this device is a hub */
-        if (slot->multi_tt) {
-            slot_ctx->dwords[0] |= (1u << 25);          /* one translator per port */
-        }
+        slot_ctx->dwords[0] |= (1u << 26);      /* this device is a hub */
     }
 
     slot_ctx->dwords[1] = ((uint32_t)slot->port_num << 16)
@@ -43,7 +66,15 @@ void xhci_fill_slot_context(xhci_slot_context_t* slot_ctx,
         slot_ctx->dwords[2] = (uint32_t)slot->tt_slot_id
                             | ((uint32_t)slot->tt_port << 8);
     }
-    if (slot->hub_ports > 0) {
+    /* And how long that translator needs between transactions — a number that
+     * exists only for a hub that HAS translators. Table 6-6: "If this is a
+     * High-speed hub (Hub = '1' and Speed = High-Speed), then this field shall
+     * be set by software to identify the time the TT of the hub requires to
+     * proceed to the next full-/low-speed transaction." A full-speed hub is a
+     * hub with no TT at all, and it reports those two bits of
+     * wHubCharacteristics as reserved — believing them would hand the
+     * controller a think time for a translator that does not exist. */
+    if (slot->hub_ports > 0 && slot->speed == XHCI_PORT_SPEED_HIGH) {
         slot_ctx->dwords[2] |= ((uint32_t)(slot->tt_think_time & 0x3) << 16);
     }
 }

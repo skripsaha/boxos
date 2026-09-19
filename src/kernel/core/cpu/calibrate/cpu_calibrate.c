@@ -29,10 +29,12 @@
  *   2. CPUID.15h    Intel canonical TSC / Core Crystal Clock ratio.
  *                   On Skylake-and-later this is the bit-exact rate.
  *                   ECX=0 → fall back to a known-crystal lookup keyed
- *                   on family/model (24 MHz on most Core, 19.2 MHz on
- *                   Atom Goldmont, 25 MHz on Denverton), and for a
- *                   model the table does not name, to the crystal
- *                   derived from CPUID.16h base frequency.
+ *                   on family/model, which names ONLY the signatures a
+ *                   first source names (24 MHz on 6th/7th generation
+ *                   Core, 19.2 MHz on Goldmont 06_5CH, 25 MHz on
+ *                   Skylake-X and Denverton), and for every other
+ *                   model — named by nobody — to the crystal derived
+ *                   from CPUID.16h base frequency.
  *
  *   3. CPUID.16h    Intel base frequency (in MHz). Not exactly TSC
  *                   under turbo, but close enough for sanity checks
@@ -191,33 +193,69 @@ static uint32_t known_intel_crystal_hz(void) {
          * derivation rounded through whole-MHz base frequency. */
         case 0x55:
             return 25000000u;          /* 25 MHz */
-        /* Goldmont (0x5C) and Goldmont Plus (0x7A) — Atom client.
-         * Tremont-D / Snow Ridge (0x86) is deliberately NOT here: no
-         * reference implementation assigns it a crystal, so if it ever
-         * reports ECX = 0 the honest answer is the one derived from
-         * CPUID.16h below, not a number carried over from a different
-         * microarchitecture. */
-        case 0x5C: case 0x7A:
+        /* Goldmont (0x5C) — Atom client, the ONE model Intel SDM
+         * Vol. 3B Table 20-91 names for 19.2 MHz: "Next Generation Intel
+         * Atom processors based on Goldmont Microarchitecture with CPUID
+         * signature 06_5CH (does not include Intel Xeon processors)".
+         *
+         * Goldmont Plus / Gemini Lake (0x7A) sat here until 2026-09 and is
+         * gone for the reason Tremont-D / Snow Ridge (0x86) was never
+         * added: neither the SDM table nor any linux revision that still
+         * carried a table assigns it a crystal, so if it ever reports
+         * ECX = 0 the honest answer is the one derived from CPUID.16h
+         * below, not a number carried over from a neighbouring part. */
+        case 0x5C:
             return 19200000u;          /* 19.2 MHz */
-        /* Skylake, Kaby Lake, Comet Lake, Ice Lake, Tiger Lake, ... */
+        /* Skylake client (0x4E, 0x5E) and Kaby/Coffee Lake (0x8E, 0x9E) —
+         * and NOTHING ELSE. Intel SDM Vol. 3B Table 20-91 gives 24 MHz to
+         * exactly one row, "6th and 7th generation Intel Core processors
+         * and Intel Xeon W Processor Family", which is these four
+         * signatures; the linux revisions that still carried a table named
+         * the same four (v4.14 arch/x86/kernel/tsc.c: SKYLAKE_MOBILE,
+         * SKYLAKE_DESKTOP, KABYLAKE_MOBILE, KABYLAKE_DESKTOP).
+         *
+         * Cannon Lake (0x66), Ice Lake client (0x7D, 0x7E), Ice Lake
+         * server (0x6A, 0x6C), Tiger Lake (0x8C, 0x8D) and Comet Lake
+         * (0xA5, 0xA6) stood in this list until 2026-09 and were named by
+         * no source at all — Ice Lake and Tiger Lake in fact run a 38.4 MHz
+         * crystal and Ice Lake-SP a 25 MHz one, so the entry was not merely
+         * unverified but wrong by a third. It slept only because those
+         * parts publish the crystal in CPUID.15h.ECX and never reach this
+         * table; the first one that reports ECX = 0 would have been
+         * calibrated off an invented number. They now fall through to
+         * cpuid16_derived_crystal_hz(), which is where upstream leaves
+         * them. */
         case 0x4E: case 0x5E:                /* Skylake client */
-        case 0x66:                            /* Cannon Lake */
-        case 0x7D: case 0x7E:                /* Ice Lake client */
-        case 0x6A: case 0x6C:                /* Ice Lake server */
-        case 0x8C: case 0x8D:                /* Tiger Lake */
         case 0x8E: case 0x9E:                /* Kaby/Coffee Lake */
-        case 0xA5: case 0xA6:                /* Comet Lake */
             return 24000000u;          /* 24 MHz */
-        /* Haswell, Broadwell — including Bochs's default
-         * corei7_haswell_4770 emulation. Pre-Skylake, the canonical
-         * crystal was 100 MHz BCLK (TSC = 100 MHz × ratio_from_CPUID.15h).
-         * Real Haswell silicon doesn't always publish CPUID.15h with
-         * useful values; this lookup is the canonical fallback. */
-        case 0x3C: case 0x45: case 0x46:    /* Haswell */
-        case 0x3F:                          /* Haswell EP/EX */
-        case 0x3D: case 0x47:               /* Broadwell client */
-        case 0x4F: case 0x56:               /* Broadwell EP/DE */
-            return 100000000u;         /* 100 MHz BCLK */
+        /* Haswell and Broadwell (0x3C, 0x45, 0x46, 0x3F, 0x3D, 0x47, 0x4F,
+         * 0x56) answered 100 MHz here until 2026-09 and are gone, because
+         * 100 MHz is not a crystal and nothing could ever read the entry.
+         *
+         * Not a crystal: Intel SDM Vol. 3B §20.7.3.1 puts these
+         * microarchitectures on a different path entirely — "The scalable
+         * bus frequency is encoded in the bit field MSR_PLATFORM_INFO[15:8]
+         * and the nominal TSC frequency can be determined by multiplying
+         * this number by a bus speed of 100 MHz" — an MSR and a BUS speed,
+         * with no CPUID.15h and no core crystal anywhere in it. The entry
+         * spelled a bus speed where a crystal goes.
+         *
+         * Never read: this lookup runs only after CPUID.15h answered with
+         * EAX,EBX non-zero and ECX = 0, and leaf 15H does not exist on
+         * Haswell or Broadwell — those parts stop at basic leaf 0x0D — so
+         * the caller returns before the switch. Nor does the emulated
+         * Haswell this kernel is tested on reach it: Bochs's
+         * corei7_haswell_4770 sets max_std_leaf = 0xD
+         * (cpu/cpudb/intel/corei7_haswell_4770.cc), which is the same
+         * refusal. A stand-in number on a path nothing walks is only a trap
+         * for the first machine that does walk it. Pre-Skylake calibration
+         * goes where it already went: HPET or PIT measurement.
+         *
+         * §20.7.3.1's MSR is a source in its own right, not a crystal for
+         * this table: a rate read from MSR_PLATFORM_INFO belongs in the
+         * order of preference at the top of this file, beside CPUID.15h and
+         * the HPET, not inside a lookup whose whole job is to name the
+         * crystal a CPUID.15h ratio multiplies. */
         default:
             return 0;
     }

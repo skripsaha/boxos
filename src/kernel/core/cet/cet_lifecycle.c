@@ -511,9 +511,14 @@ void cet_process_destroy(struct process_t *proc) {
     uintptr_t phys = process_get_user_ssp_phys(proc);
     if (phys == 0) return;
     vmm_context_t *ctx = proc->cabin ? proc->cabin->vmm : NULL;
-    /* Recover the base of the mapped range from the initial SSP value,
-     * which cet_process_create set to base + SIZE - 8. */
-    uintptr_t va_base = (process_get_user_ssp_va(proc) + 8) - CET_USER_SSP_SIZE;
+    /* The base of the mapped range is the strand's own SSP anchor, not
+     * anything derived from user_ssp_va: that field now tracks the LIVE
+     * SSP (cet_save_user_ssp_after_entry moves it down as ring 3 calls),
+     * so deriving a base from it would unmap the wrong pages after the
+     * first user CALL. process_user_ssp_va_for returns exactly the VA
+     * cet_process_create mapped, for the main strand and for a hammock
+     * strand alike. */
+    uintptr_t va_base = process_user_ssp_va_for(proc);
     if (ctx) {
         for (uint32_t i = 0; i < CET_USER_SSP_PAGES; i++) {
             vmm_unmap_page(ctx, va_base + i * PMM_PAGE_SIZE);
@@ -526,23 +531,91 @@ void cet_process_destroy(struct process_t *proc) {
 
 bool cet_is_enabled(void) { return g_cet_enabled; }
 
-/* ─── PL3_SSP prime for first iretq → ring 3 ──────────────────────── */
+/* ─── IA32_PL3_SSP — the per-strand half of the shadow-stack swap ─────
+ *
+ * IA32_PL3_SSP is one register per LOGICAL PROCESSOR, and the processor
+ * already does half the work: on delivery of an event that leaves CPL 3
+ * it stores the current SSP there, and on the IRET back to CPL 3 it
+ * loads SSP from it (Intel CET Specification 334525-003 §6.2 / §6.3).
+ * What the hardware cannot know is that the frame the kernel is about to
+ * IRET through belongs to a DIFFERENT strand than the one that entered.
+ * Across a scheduler switch the MSR therefore has to be swapped by the
+ * kernel, exactly like the per-strand FS base — and for the same reason:
+ * CET_U is an IA32_XSS supervisor state component (Intel SDM Vol 1
+ * §13.5), this kernel programs no IA32_XSS and issues no XSAVES, so no
+ * FPU-context path carries it.
+ *
+ * The pair below is that swap. Its callers are the scheduler's frame
+ * dispatch (context_save_from_frame / context_restore_to_frame in
+ * scheduler/context_switch.c, beside the FS-base pair) and
+ * process_start_initial, which primes the MSR for the initial process's
+ * first iretq before the scheduler has ever run.
+ *
+ * Both are quiet on every dormancy case: no CR4.CET, or no SHSTK on this
+ * CPU, and neither instruction is issued at all. */
+
+void cet_save_user_ssp_after_entry(struct process_t *proc) {
+    if (!proc) return;
+    if (!g_cet_enabled) return;
+    if (!g_cpu_caps.has_shstk) return;
+
+    uint32_t size = process_get_user_ssp_size(proc);
+    if (size == 0) return;                 /* strand runs without a shadow stack */
+
+    uint64_t live = cet_rdmsr(VMM_MSR_IA32_PL3_SSP);
+
+    /* Accept the register only when it points inside THIS strand's shadow
+     * stack. The hardware wrote it when this strand left ring 3, so that is
+     * the normal case; anything else means the strand has not been to ring 3
+     * since its SSP was installed and the register still carries a
+     * neighbour's value (or the reset 0). Storing that would hand this
+     * strand somebody else's shadow stack on its next dispatch — the very
+     * defect this pair exists to close — so the recorded SSP is left alone
+     * instead. A push that ran off the bottom cannot appear here either: it
+     * faults in the guard page below the region before the value is ever
+     * written back. */
+    uintptr_t base = process_user_ssp_va_for(proc);
+    if (live < (uint64_t)base || live >= (uint64_t)base + size) return;
+
+    process_set_user_ssp(proc, process_get_user_ssp_phys(proc),
+                         (uintptr_t)live, size);
+}
 
 void cet_load_user_ssp_for_iretq(struct process_t *proc) {
     /* Skip every dormancy case quietly — no log spam in the hot path. */
     if (!proc) return;
     if (!g_cet_enabled) return;
     if (!g_cpu_caps.has_shstk) return;
+
     uintptr_t ssp = process_get_user_ssp_va(proc);
-    if (ssp == 0) return;
-    /* WRMSR IA32_PL3_SSP — must be 8-byte aligned per SDM Vol 3D §17.2.3,
-     * which cet_process_create's "base+SIZE-8" guarantees by construction.
-     * Asserting cheaply rather than letting a future change drift. */
+
+    /* WRMSR IA32_PL3_SSP requires an 8-byte-aligned canonical value; the
+     * initial "base + SIZE - 8" and every value the processor itself writes
+     * back satisfy both by construction. A misaligned one can only come from
+     * a bug, and writing it would #GP inside the scheduler, so it is refused
+     * the same way a missing shadow stack is. */
     if ((ssp & 0x7u) != 0) {
-        debug_printf("[CET] proc=%u SSP misaligned (0x%lx) — skipping WRMSR\n",
-                     proc->pid, (unsigned long)ssp);
-        return;
+        kprintf("[CET] PID %u: shadow-stack pointer 0x%lx is misaligned — "
+                "ring 3 entered with shadow stack disarmed\n",
+                proc->pid, (unsigned long)ssp);
+        /* Said once, not once per dispatch: zeroing the recorded SSP makes
+         * every later switch of this strand take the aligned path below in
+         * silence. The save half will not resurrect the bad value either —
+         * 0 is outside the strand's region, so its range check refuses it.
+         * phys and size are kept so teardown still unmaps and frees the
+         * pages this strand was given. */
+        ssp = 0;
+        process_set_user_ssp(proc, process_get_user_ssp_phys(proc), 0,
+                             process_get_user_ssp_size(proc));
     }
+
+    /* ssp == 0 is written, not skipped. U_CET.SH_STK_EN is up on every core
+     * whose CPU has SHSTK (see the U policy in cet_program_msrs), so a strand
+     * with no shadow stack of its own — cet_process_create degraded under
+     * memory pressure — would otherwise enter ring 3 on whatever the previous
+     * strand left in the register and push its return addresses into that
+     * strand's shadow stack. Writing 0 turns a silent cross-strand corruption
+     * into an immediate #PF inside the offending strand on its first CALL. */
     cet_wrmsr(VMM_MSR_IA32_PL3_SSP, (uint64_t)ssp);
 }
 

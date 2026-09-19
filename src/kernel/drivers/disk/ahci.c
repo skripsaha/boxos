@@ -1316,8 +1316,15 @@ error_t ahci_port_recover(ahci_port_t* port) {
                      port->port_num, attempt + 1, AHCI_MAX_COMRESET_ATTEMPTS);
     }
 
-    debug_printf("[AHCI] Port %u: Recovery failed after %d attempts\n",
-                 port->port_num, AHCI_MAX_COMRESET_ATTEMPTS);
+    /* kprintf, on this file's own rule (see the 512-byte-sector refusal): a
+     * port that failed every COMRESET it is given is a disk this boot has
+     * effectively lost, and debug_printf compiles to nothing in a shipped
+     * build — so on real hardware the operator saw commands fail one by one
+     * with no reason ever named. */
+    kprintf("[AHCI] port %u: its link did not come back after %d COMRESETs — "
+            "the port stays in service and its commands will keep failing "
+            "until a later recovery gets the link back\n",
+            port->port_num, AHCI_MAX_COMRESET_ATTEMPTS);
     port->status = AHCI_PORT_ERROR;
     return ERR_IO;
 }

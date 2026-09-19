@@ -72,19 +72,19 @@ static bool t1_sha256_vectors(void)
 
     KSha256((const uint8_t *)"abc", 3, out);
     if (memcmp(out, SHA256_VEC_ABC, 32) != 0) {
-        debug_printf("[SELFTEST] T1 sha256(abc) mismatch\n");
+        kprintf("[SELFTEST] T1 sha256(abc) mismatch\n");
         return false;
     }
 
     KSha256((const uint8_t *)"", 0, out);
     if (memcmp(out, SHA256_VEC_EMPTY, 32) != 0) {
-        debug_printf("[SELFTEST] T1 sha256(empty) mismatch\n");
+        kprintf("[SELFTEST] T1 sha256(empty) mismatch\n");
         return false;
     }
 
     KSha256(SHA256_VEC_LONG_INPUT, sizeof(SHA256_VEC_LONG_INPUT) - 1, out);
     if (memcmp(out, SHA256_VEC_LONG, 32) != 0) {
-        debug_printf("[SELFTEST] T1 sha256(long) mismatch\n");
+        kprintf("[SELFTEST] T1 sha256(long) mismatch\n");
         return false;
     }
     return true;
@@ -123,7 +123,7 @@ static bool t2_streaming_consistency(void)
         uint8_t got[32];
         KSha256Final(&ctx, got);
         if (memcmp(got, ref, 32) != 0) {
-            debug_printf("[SELFTEST] T2 streaming chunk=%u diverged\n", cs);
+            kprintf("[SELFTEST] T2 streaming chunk=%u diverged\n", cs);
             return false;
         }
     }
@@ -154,26 +154,26 @@ static bool t3_asn1_basic(void)
     Asn1Reader root = asn1_reader(der, sizeof(der));
     Asn1Reader seq;
     if (!asn1_open(&root, ASN1_TAG_SEQUENCE, &seq)) {
-        debug_printf("[SELFTEST] T3 open SEQUENCE failed\n");
+        kprintf("[SELFTEST] T3 open SEQUENCE failed\n");
         return false;
     }
     const uint8_t *intval = NULL; uint32_t intlen = 0;
     if (!asn1_read_integer(&seq, &intval, &intlen)) {
-        debug_printf("[SELFTEST] T3 read INTEGER failed\n");
+        kprintf("[SELFTEST] T3 read INTEGER failed\n");
         return false;
     }
     if (intlen != 1 || intval[0] != 0x2A) {
-        debug_printf("[SELFTEST] T3 INTEGER value mismatch (len=%u val=0x%x)\n",
-                     intlen, intval ? intval[0] : 0);
+        kprintf("[SELFTEST] T3 INTEGER value mismatch (len=%u val=0x%x)\n",
+                intlen, intval ? intval[0] : 0);
         return false;
     }
     const uint8_t *oidval = NULL; uint32_t oidlen = 0;
     if (!asn1_read_typed(&seq, ASN1_TAG_OID, &oidval, &oidlen)) {
-        debug_printf("[SELFTEST] T3 read OID failed\n");
+        kprintf("[SELFTEST] T3 read OID failed\n");
         return false;
     }
     if (oidlen != 7 || oidval[0] != 0x2A) {
-        debug_printf("[SELFTEST] T3 OID value mismatch\n");
+        kprintf("[SELFTEST] T3 OID value mismatch\n");
         return false;
     }
     return true;
@@ -271,13 +271,13 @@ static bool t4_rsa_refusals(void)
         .exponent_len = sizeof(SELFTEST_RSA_EXPONENT),
     };
     if (efi_rsa_verify_pkcs1_sha256(&k, hash, bad_sig, sizeof(bad_sig))) {
-        debug_printf("[SELFTEST] T4 RSA accepted a signature >= modulus\n");
+        kprintf("[SELFTEST] T4 RSA accepted a signature >= modulus\n");
         return false;
     }
 
     /* Wrong signature length. */
     if (efi_rsa_verify_pkcs1_sha256(&k, hash, bad_sig, sizeof(bad_sig) / 2)) {
-        debug_printf("[SELFTEST] T4 RSA accepted truncated signature\n");
+        kprintf("[SELFTEST] T4 RSA accepted truncated signature\n");
         return false;
     }
 
@@ -290,7 +290,7 @@ static bool t4_rsa_refusals(void)
         .exponent_len = sizeof(SELFTEST_RSA_EXPONENT),
     };
     if (efi_rsa_verify_pkcs1_sha256(&zk, hash, bad_sig, sizeof(bad_sig))) {
-        debug_printf("[SELFTEST] T4 RSA accepted zero-modulus key\n");
+        kprintf("[SELFTEST] T4 RSA accepted zero-modulus key\n");
         return false;
     }
     return true;
@@ -325,7 +325,7 @@ static bool t5_rsa_known_good(void)
 
     if (!efi_rsa_verify_pkcs1_sha256(&k, hash, SELFTEST_RSA_SIGNATURE,
                                       sizeof(SELFTEST_RSA_SIGNATURE))) {
-        debug_printf("[SELFTEST] T5 RSA rejected a known-good signature\n");
+        kprintf("[SELFTEST] T5 RSA rejected a known-good signature\n");
         return false;
     }
 
@@ -335,8 +335,8 @@ static bool t5_rsa_known_good(void)
     memcpy(tampered, SELFTEST_RSA_SIGNATURE, sizeof(tampered));
     tampered[sizeof(tampered) / 2] ^= 0x01;
     if (efi_rsa_verify_pkcs1_sha256(&k, hash, tampered, sizeof(tampered))) {
-        debug_printf("[SELFTEST] T5 RSA accepted a one-bit-corrupted "
-                     "signature\n");
+        kprintf("[SELFTEST] T5 RSA accepted a one-bit-corrupted "
+                "signature\n");
         return false;
     }
 
@@ -346,8 +346,8 @@ static bool t5_rsa_known_good(void)
     wrong_hash[31] ^= 0x01;
     if (efi_rsa_verify_pkcs1_sha256(&k, wrong_hash, SELFTEST_RSA_SIGNATURE,
                                      sizeof(SELFTEST_RSA_SIGNATURE))) {
-        debug_printf("[SELFTEST] T5 RSA accepted a signature over a "
-                     "different digest\n");
+        kprintf("[SELFTEST] T5 RSA accepted a signature over a "
+                "different digest\n");
         return false;
     }
     return true;
@@ -374,10 +374,16 @@ static bool t5_rsa_known_good(void)
  * 112-byte message forces), the exact 128-byte multiple, the multi-block
  * loop, and update() calls that split a block.
  *
- * Failures here print with kprintf, not debug_printf, unlike T1-T5: this
- * is the test whose subject cannot be exercised any other way on this
- * hardware, and a production boot (DEBUG=off) must be able to say WHICH
- * vector broke, not only that something did.
+ * Failures here print with kprintf. So do T1-T5's now: the argument that
+ * was written for this test alone — a production boot (DEBUG=off) must be
+ * able to say WHICH vector broke, not only that something did — never
+ * distinguished between them. debug_printf compiles to nothing at DEBUG=off,
+ * so on the boot that matters every T1-T5 failure was silent and all the
+ * operator saw was main.c's "EFI self-test FAILED", with the name of the
+ * broken primitive left in a build they were not running. The PASS lines
+ * and the per-test FAIL echo in efi_selftest_run stay on debug_printf: a
+ * healthy boot owes the console nothing, and the echo says no more than the
+ * named line above it already did.
  * ========================================================================= */
 
 static const uint8_t SHA_VEC_MSG_112[] =

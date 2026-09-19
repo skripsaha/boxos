@@ -5,6 +5,7 @@
 #include "pmm.h"
 #include "hourglass.h"
 #include "atomics.h"
+#include "cpu.h"     /* cpu_cpuid — the CLFLUSH line size, for ECAP.C = 0 */
 
 /* =====================================================================
  * Intel VT-d driver — production implementation.
@@ -15,12 +16,16 @@
  * Responsibilities
  * ----------------
  *   * Map each DRHD register block — as long as the unit says it is
- *   * Read CAP/ECAP; require the 48-bit adjusted guest address width,
- *     because the second-level walkers here build 4-level tables and
- *     nothing else, and refuse a unit that does not report it
+ *   * Read CAP/ECAP; take the widest adjusted guest address width this
+ *     driver can serve out of the unit's SAGAW — 48-bit with the 4-level
+ *     table built below, or 39-bit with that table's own second level
+ *     handed over as the root — and refuse a unit that reports neither
+ *   * Where a unit does not snoop the structures it walks (ECAP.C = 0),
+ *     put every structure this driver writes back to memory itself
  *   * Build a *single* second-level page table that identity-maps the
- *     first 4 GiB of physical RAM (covers every consumer DMA target);
- *     larger systems extend this through `vtd_identity_extend()`
+ *     first 4 GiB of physical RAM, and no more than that — the two
+ *     comments that named a `vtd_identity_extend()` for larger systems
+ *     named a function that has never existed in this tree
  *   * Allocate one root table per remap unit; populate every context
  *     entry of buses we have devices on to point at the shared SLPT
  *   * Set RTADDR_REG, drain context cache + IOTLB
@@ -99,6 +104,15 @@
 /* AGAW index 2 — 48-bit adjusted guest address width, a 4-level second-level
  * table, and AW = 010b in the context entry (§11.4.2 SAGAW, §9.3 AW). */
 #define VTD_AGAW_48BIT    2u
+/* AGAW index 1 — 39-bit, a 3-level table, AW = 001b. The levels this driver
+ * builds are always four; a unit that can only walk three is given the
+ * SECOND level of that same table as its root (vtd_slpt_root_for). */
+#define VTD_AGAW_39BIT    1u
+
+/* ECAP.C, bit 0 — "Page-walk Coherency" (§11.4.3): whether this unit's walks
+ * of the root, context, second-level paging and interrupt-remap structures
+ * are snooped. Linux reads the same bit as ecap_coherent(e) = (e) & 1. */
+#define ECAP_C            (1ULL << 0)
 
 /* CAP.DWD (bit 54) and CAP.DRD (bit 55), §11.4.2: this unit can drain
  * in-flight writes / reads as part of an IOTLB invalidation. Asking a unit
@@ -197,6 +211,66 @@ static uint8_t    g_unit_count = 0;
 static uint64_t* g_id_pml4    = NULL;
 static uint64_t  g_id_pml4_phys = 0;
 
+/* ----- Putting a structure where a unit that does not snoop can see it -----
+ *
+ * ECAP.C (bit 0, "Page-walk Coherency") says whether a unit's walks of the
+ * root, context, second-level paging and interrupt-remap structures are
+ * coherent with the processor caches. Where it reads 0 they are not: a store
+ * this kernel makes can sit in a cache line the remap unit never looks in
+ * while the unit walks whatever DRAM holds — a root entry that reads
+ * not-present, a leaf that reads as the zero it was allocated with. Software
+ * has to put the line back itself, which is exactly what Linux does
+ * (__iommu_flush_cache: `if (!ecap_coherent(iommu->ecap)) clflush_cache_range`).
+ *
+ * The flag is ONE for the whole driver, not one per unit, because the
+ * second-level tables are SHARED by every unit on the machine: a structure
+ * must be flushed if ANY unit that walks it fails to snoop. Flushing for a
+ * unit that does snoop costs a few cache lines and changes nothing else.
+ *
+ * The invalidation queue is deliberately not flushed. This field is about the
+ * structures hardware WALKS, the descriptor ring is not one of them, and
+ * Linux's qi_submit_sync does not flush its descriptors either. */
+static bool g_walk_snooped = true;
+
+/* The CLFLUSH line size, CPUID.01H:EBX bits 15:8 counted in eight-byte
+ * quantums. Read once. A part that answers 0 — which no x86_64 part does —
+ * gets this kernel's declared line size rather than a number invented here. */
+static size_t vtd_clflush_line(void)
+{
+    static size_t line = 0;
+    if (!line) {
+        uint32_t a = 0, b = 0, c = 0, d = 0;
+        cpu_cpuid(1, 0, &a, &b, &c, &d);
+        size_t said = (size_t)((b >> 8) & 0xFFu) * 8u;
+        line = said ? said : (size_t)CONFIG_CACHE_LINE_SIZE;
+    }
+    return line;
+}
+
+/* Hand `bytes` at `addr` back to memory for a unit that will not snoop them.
+ * A no-op on a machine whose every unit reports ECAP.C. The MFENCE either
+ * side is the ordering CLFLUSH has (Intel SDM: CLFLUSH is ordered by MFENCE),
+ * and the shape of Linux's clflush_cache_range. */
+static void vtd_structure_flush(const void* addr, size_t bytes)
+{
+    if (g_walk_snooped || !addr || !bytes) return;
+    size_t    line = vtd_clflush_line();
+    uintptr_t p    = (uintptr_t)addr & ~(uintptr_t)(line - 1);
+    uintptr_t end  = (uintptr_t)addr + bytes;
+    __asm__ volatile ("mfence" ::: "memory");
+    for (; p < end; p += line)
+        __asm__ volatile ("clflush (%0)" :: "r"((const void*)p) : "memory");
+    __asm__ volatile ("mfence" ::: "memory");
+}
+
+/* One run of entries just written into the same leaf, [from, to). */
+static void vtd_structure_flush_run(const uint64_t* from, const uint64_t* to)
+{
+    if (from && to > from)
+        vtd_structure_flush(from, (size_t)((const uint8_t*)to -
+                                           (const uint8_t*)from));
+}
+
 /*
  * A VT-d table is two addresses, and they are not the same number.
  *
@@ -224,6 +298,10 @@ static void* alloc_table_4k(uint64_t* phys_out) {
 
     *phys_out = (uint64_t)phys;
     memset(virt, 0, 4096);
+    /* The zeroes are as much a structure as the entries written into them
+     * later: a unit that does not snoop would otherwise walk whatever the
+     * PMM's previous owner left in DRAM. */
+    vtd_structure_flush(virt, 4096);
     return virt;
 }
 
@@ -244,6 +322,7 @@ static uint64_t* slpte_walk(uint64_t* parent, uint64_t parent_phys,
         void* child = alloc_table_4k(&child_phys);
         if (!child) return NULL;
         parent[idx] = child_phys | SLPTE_R | SLPTE_W;
+        vtd_structure_flush(&parent[idx], sizeof(parent[idx]));
         return (uint64_t*)child;
     }
     if (e & SLPTE_PS) return NULL;       /* super-page; cannot descend */
@@ -254,6 +333,12 @@ static uint64_t* slpte_walk(uint64_t* parent, uint64_t parent_phys,
 static int vtd_identity_map(uint64_t phys, uint64_t size) {
     if (!g_id_pml4) return -1;
     uint64_t end = phys + size;
+    /* Leaf writes are handed back to memory a RUN at a time rather than one
+     * entry at a time: the walk is linear, so consecutive entries share a
+     * cache line and a whole leaf table is one run. Linux batches the same
+     * way (domain_flush_cache over first_pte..pte). */
+    const uint64_t* run_from = NULL;
+    const uint64_t* run_to   = NULL;
     /* 4-KiB granularity for safety. Production tuning would slot in
      * 2 MiB and 1 GiB super-pages for the bulk of RAM. */
     for (uint64_t a = phys & ~0xFFFULL; a < end; a += 4096) {
@@ -263,24 +348,51 @@ static int vtd_identity_map(uint64_t phys, uint64_t size) {
         unsigned pt_i   = (unsigned)((a >> 12) & 0x1FF);
 
         uint64_t* pdpt = slpte_walk(g_id_pml4, g_id_pml4_phys, pml4_i, true);
-        if (!pdpt) return -2;
+        if (!pdpt) { vtd_structure_flush_run(run_from, run_to); return -2; }
         uint64_t* pd   = slpte_walk(pdpt, 0, pdpt_i, true);
-        if (!pd)   return -2;
+        if (!pd)   { vtd_structure_flush_run(run_from, run_to); return -2; }
         uint64_t* pt   = slpte_walk(pd, 0, pd_i, true);
-        if (!pt)   return -2;
+        if (!pt)   { vtd_structure_flush_run(run_from, run_to); return -2; }
         pt[pt_i] = a | SLPTE_R | SLPTE_W;
+        if (run_to != &pt[pt_i]) {
+            vtd_structure_flush_run(run_from, run_to);
+            run_from = &pt[pt_i];
+        }
+        run_to = &pt[pt_i] + 1;
     }
+    vtd_structure_flush_run(run_from, run_to);
     return 0;
 }
 
-/* Initial coverage: bottom 4 GiB. Real-HW callers wanting larger
- * coverage call vtd_identity_extend(end_phys). */
+/* The coverage, whole: the bottom 4 GiB, mapped once, never extended. RAM
+ * above 4 GiB has no identity entry, so a device pointed at it would fault
+ * the moment translation were switched on. */
 static int vtd_build_identity(void) {
     if (g_id_pml4) return 0;
     void* p = alloc_table_4k(&g_id_pml4_phys);
     if (!p) return -1;
     g_id_pml4 = (uint64_t*)p;
     return vtd_identity_map(0, 1ULL << 32);
+}
+
+/* Hand a whole second-level tree back to memory.
+ *
+ * The identity tables are built before any unit's ECAP has been read, so the
+ * flushes inside vtd_identity_map cannot know yet whether this machine holds
+ * a unit that fails to snoop them. vtd_init calls this once, after the units
+ * have answered and only if one of them has. The walk visits exactly the
+ * pages the tree owns: four levels deep, and only entries that are present
+ * and are not super-pages have anything below them. */
+static void vtd_flush_slpt_tree(uint64_t* table, unsigned levels)
+{
+    if (!table) return;
+    vtd_structure_flush(table, 4096);
+    if (levels <= 1) return;
+    for (unsigned i = 0; i < 512; i++) {
+        uint64_t e = table[i];
+        if (!(e & SLPTE_R) || (e & SLPTE_PS)) continue;
+        vtd_flush_slpt_tree((uint64_t*)vtd_table_virt(e), levels - 1);
+    }
 }
 
 /* ----- Root/context table helpers ----- */
@@ -298,8 +410,42 @@ vtd_root_entry_t;
 typedef struct { uint64_t lo; uint64_t hi; } __attribute__((packed))
 vtd_context_entry_t;
 
+/* The table this unit must actually be given as its second-level root.
+ *
+ * Every table this driver builds has four levels, AGAW index 2. A unit whose
+ * SAGAW offers only the 39-bit width walks three, and §9.3 requires the
+ * context entry's AW to name a width the unit's own SAGAW reports — so such a
+ * unit cannot be given the top of the table. It is given the table's SECOND
+ * level instead: entry 0 of a 4-level top covers IOVA 0 through 512 GiB, and
+ * a 39-bit unit cannot produce an address above 512 GiB, so the two describe
+ * exactly the same translations for every address that unit can ask about.
+ * Linux performs the identical descent in domain_context_mapping_one —
+ * `for (agaw = domain->agaw; agaw > iommu->agaw; agaw--)
+ *      pgd = phys_to_virt(dma_pte_addr(pgd));`
+ *
+ * Returns 0 when the level cannot be reached: the descent has to create the
+ * level if the table does not have it yet, and the PMM can refuse. */
+static uint64_t vtd_slpt_root_for(const vtd_unit_t* u, uint64_t top_phys)
+{
+    if (!top_phys) return 0;
+    uint64_t phys = top_phys;
+    for (unsigned levels = VTD_AGAW_48BIT + 2;
+         levels > u->sagaw_levels; levels--) {
+        uint64_t* table = (uint64_t*)vtd_table_virt(phys);
+        if (!table) return 0;
+        if (!slpte_walk(table, phys, 0, true)) return 0;
+        phys = table[0] & ~0xFFFULL;
+    }
+    return phys;
+}
+
 static int vtd_program_context(vtd_unit_t* u, uint8_t bus, uint8_t devfn,
                                 uint64_t slpt_phys, uint32_t domain_id) {
+    /* The address this unit is given is the level it can walk, which is not
+     * always the level this driver built (vtd_slpt_root_for). */
+    uint64_t asr = vtd_slpt_root_for(u, slpt_phys);
+    if (!asr) return -1;
+
     vtd_root_entry_t* root = (vtd_root_entry_t*)u->root_table;
     vtd_root_entry_t* re = &root[bus];
     if (!(re->lo & 1)) {
@@ -308,12 +454,14 @@ static int vtd_program_context(vtd_unit_t* u, uint8_t bus, uint8_t devfn,
         if (!ctx) return -1;
         re->lo = ctx_phys | 1;
         re->hi = 0;
+        vtd_structure_flush(re, sizeof(*re));
     }
     vtd_context_entry_t* ctx = (vtd_context_entry_t*)vtd_table_virt(re->lo);
     if (!ctx) return -1;
     uint8_t aw = (uint8_t)(u->sagaw_levels - 2);
-    ctx[devfn].lo = slpt_phys | 1;
+    ctx[devfn].lo = asr | 1;
     ctx[devfn].hi = ((uint64_t)domain_id << 8) | ((uint64_t)aw & 0x7);
+    vtd_structure_flush(&ctx[devfn], sizeof(ctx[devfn]));
     return 0;
 }
 
@@ -975,21 +1123,50 @@ static int vtd_unit_init(vtd_unit_t* u, uint64_t phys) {
      * exactly that many levels.
      *
      * This driver's second-level walkers index a>>39, a>>30, a>>21, a>>12 —
-     * four levels, unconditionally. So there is exactly one width it can tell
-     * the truth about: 48-bit, AGAW index 2, AW = 010b. A unit that does not
-     * report it is refused out loud rather than handed an AW absent from its
-     * own SAGAW (the old bit table was one arm low throughout: a 48-bit-only
-     * unit was told 39-bit, and a 39-bit-only unit was told 000b, which §9.3
-     * lists as Reserved). */
+     * four levels, unconditionally — so the width it can tell the whole truth
+     * about is 48-bit, AGAW index 2, AW = 010b. It can tell a narrower truth
+     * as well: a unit reporting only the 39-bit width is given the SECOND
+     * level of that same table and AW = 001b (vtd_slpt_root_for), which is
+     * what Linux does with an iommu whose agaw is below the domain's. What
+     * cannot be served is a unit reporting neither — a 57-bit-only SAGAW
+     * would need a fifth level that does not exist here — and that one is
+     * refused out loud rather than handed an AW absent from its own SAGAW
+     * (the old bit table was one arm low throughout: a 48-bit-only unit was
+     * told 39-bit, and a 39-bit-only unit was told 000b, which §9.3 lists as
+     * Reserved).
+     *
+     * Widening what is accepted does not widen what is switched on. The unit
+     * comes up exactly as a 48-bit one does — firmware's tables off, this
+     * kernel's root table published, translation left off — so on a machine
+     * whose units are 39-bit-only the change is between "no unit is driven"
+     * and "every unit is driven with translation off". */
     uint8_t sagaw = (uint8_t)((u->cap >> CAP_SAGAW_SHIFT) & CAP_SAGAW_MASK);
-    if (!(sagaw & (1u << VTD_AGAW_48BIT))) {
-        kprintf("[VT-d] remap unit at 0x%lx reports SAGAW=0x%02x — no 48-bit "
-                "AGAW, and this driver builds only 4-level tables; leaving the "
-                "unit alone\n", (unsigned long)phys, sagaw);
+    if (sagaw & (1u << VTD_AGAW_48BIT)) {
+        u->sagaw_levels = VTD_AGAW_48BIT + 2;
+    } else if (sagaw & (1u << VTD_AGAW_39BIT)) {
+        u->sagaw_levels = VTD_AGAW_39BIT + 2;
+        kprintf("[VT-d] remap unit at 0x%lx reports SAGAW=0x%02x — 39-bit "
+                "AGAW only, so it gets the second level of this kernel's "
+                "table as its root and AW=001b\n",
+                (unsigned long)phys, sagaw);
+    } else {
+        kprintf("[VT-d] remap unit at 0x%lx reports SAGAW=0x%02x — neither the "
+                "48-bit nor the 39-bit adjusted guest address width, and this "
+                "driver has no table of any other depth; leaving the unit "
+                "alone\n", (unsigned long)phys, sagaw);
         vtd_unit_unwind(u);
         return -2;
     }
-    u->sagaw_levels = VTD_AGAW_48BIT + 2;
+
+    /* Whether this unit snoops the structures it walks. One unit that does
+     * not is enough: the second-level tables are shared, so from here on
+     * every structure this driver writes is handed back to memory. */
+    if (!(u->ecap & ECAP_C) && g_walk_snooped) {
+        g_walk_snooped = false;
+        kprintf("[VT-d] remap unit at 0x%lx reports ECAP.C = 0 — it does not "
+                "snoop the structures it walks, so this kernel flushes every "
+                "one it writes\n", (unsigned long)phys);
+    }
 
     /* Whatever firmware left running on this unit comes off before anything of
      * ours is published, and u->gcmd starts mirroring the hardware here. Every
@@ -1095,6 +1272,11 @@ static int vtd_init(void) {
                          u->sagaw_levels);
         }
     }
+    /* Built before the first CAP was read; flushed now that the units have
+     * said whether anything on this machine walks them without snooping. */
+    if (!g_walk_snooped)
+        vtd_flush_slpt_tree(g_id_pml4, VTD_AGAW_48BIT + 2);
+
     g_domains[0].id          = 0;
     g_domains[0].slpt        = g_id_pml4;
     g_domains[0].slpt_phys   = g_id_pml4_phys;
@@ -1192,22 +1374,32 @@ static int domain_slpt_map(struct iommu_domain* d, uint64_t iova,
                              uint64_t phys, uint64_t size, uint32_t perm) {
     if (!d || !d->slpt) return -1;
     uint64_t end = iova + size;
+    const uint64_t* run_from = NULL;
+    const uint64_t* run_to   = NULL;
     for (uint64_t a = iova & ~0xFFFULL; a < end; a += 4096) {
         unsigned i4 = (unsigned)((a >> 39) & 0x1FF);
         unsigned i3 = (unsigned)((a >> 30) & 0x1FF);
         unsigned i2 = (unsigned)((a >> 21) & 0x1FF);
         unsigned i1 = (unsigned)((a >> 12) & 0x1FF);
         uint64_t* l3 = slpte_walk(d->slpt, d->slpt_phys, i4, true);
-        if (!l3) return -2;
-        uint64_t* l2 = slpte_walk(l3, 0, i3, true); if (!l2) return -2;
-        uint64_t* l1 = slpte_walk(l2, 0, i2, true); if (!l1) return -2;
+        if (!l3) { vtd_structure_flush_run(run_from, run_to); return -2; }
+        uint64_t* l2 = slpte_walk(l3, 0, i3, true);
+        if (!l2) { vtd_structure_flush_run(run_from, run_to); return -2; }
+        uint64_t* l1 = slpte_walk(l2, 0, i2, true);
+        if (!l1) { vtd_structure_flush_run(run_from, run_to); return -2; }
         uint64_t pte = (phys + (a - (iova & ~0xFFFULL))) & ~0xFFFULL;
         if (perm & IOMMU_PERM_READ)  pte |= SLPTE_R;
         if (perm & IOMMU_PERM_WRITE) pte |= SLPTE_W;
         if (!(perm & (IOMMU_PERM_READ | IOMMU_PERM_WRITE)))
             pte |= SLPTE_R | SLPTE_W;
         l1[i1] = pte;
+        if (run_to != &l1[i1]) {
+            vtd_structure_flush_run(run_from, run_to);
+            run_from = &l1[i1];
+        }
+        run_to = &l1[i1] + 1;
     }
+    vtd_structure_flush_run(run_from, run_to);
     return 0;
 }
 
@@ -1250,6 +1442,10 @@ static int vtd_unmap(iommu_domain_t* d, uint64_t iova, uint64_t size) {
             uint64_t* l2 = slpte_walk(l3, 0, i3, false); if (!l2) continue;
             uint64_t* l1 = slpte_walk(l2, 0, i2, false); if (!l1) continue;
             l1[i1] = 0;
+            /* Per entry rather than per run: an unmap walks a range the
+             * caller chose, skips whatever is not mapped, and is nothing
+             * like the linear fill the identity map performs. */
+            vtd_structure_flush(&l1[i1], sizeof(l1[i1]));
         }
         return 0;
     }

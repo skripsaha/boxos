@@ -3272,17 +3272,58 @@ void vfree(void *addr)
 
     debug_printf("[VMM] vfree: allocation not found in list, fallback free at %p\n", addr);
 
-    uintptr_t phys = vmm_virt_to_phys(vmm_get_current_context(), (uintptr_t)addr);
-    if (phys)
+    /* The fallback returns ONE 4 KiB frame, so it must see a 4 KiB leaf and
+     * nothing else. vmm_virt_to_phys answers for a 2 MiB / 1 GiB leaf too
+     * (see its note in vmm.h), and that answer names a byte inside an
+     * order-9 or order-18 PMM block: giving it to pmm_free with a count of 1
+     * would hand the buddy allocator a fragment of a block it still owns
+     * whole. Walk the leaf here so the page size is part of the decision. */
+    vmm_context_t *free_ctx = vmm_get_current_context();
+    uint8_t leaf_level = 0;
+    pte_t *leaf = vmm_get_leaf_pte(free_ctx, (uintptr_t)addr, &leaf_level);
+    if (leaf && leaf_level == 1 && (*leaf & VMM_FLAG_PRESENT))
     {
+        uintptr_t phys = vmm_pte_to_phys(*leaf) & VMM_PAGE_MASK;
         debug_printf("[VMM] vfree: unmapped single page virt=%p phys=%p\n", addr, (void *)phys);
-        vmm_unmap_page(vmm_get_current_context(), (uintptr_t)addr);
+        vmm_unmap_page(free_ctx, (uintptr_t)addr);
         pmm_free((void *)phys, 1);
+    }
+    else if (leaf && leaf_level > 1 && (*leaf & VMM_FLAG_PRESENT))
+    {
+        kprintf("[VMM] vfree: %p is covered by a %s leaf, not a vmalloc page "
+                "— refusing to free\n",
+                addr, leaf_level == 2 ? "2 MiB" : "1 GiB");
     }
     else
     {
         debug_printf("[VMM] vfree: WARNING: could not resolve physical address for %p\n", addr);
     }
+}
+
+/*
+ * The three queries below answer about whichever leaf covers the address:
+ * a 4 KiB PT entry, a 2 MiB PD leaf or a 1 GiB PDPT leaf.
+ *
+ * They used to walk vmm_get_pte, which stops at a LARGE_PAGE bit and hands
+ * back NULL, so every one of them answered "nothing is mapped here" about a
+ * live huge mapping. That answer was not merely incomplete, it was acted on:
+ * vmm_find_free_region handed out VAs inside a live 2 MiB Bay leaf,
+ * vmm_is_user_accessible called a cabin's own Bay page inaccessible, and the
+ * demand-paging arms of vmm_handle_page_fault took "unmapped" as licence to
+ * pmm_alloc and vmm_map_page over it — which demotes the huge leaf and
+ * shadows one of its 4 KiB slices with a fresh frame.
+ *
+ * Reading the leaf's physical base needs the leaf's own mask, not the 4 KiB
+ * one: in a PDE with PS=1 bit 12 is PAT and bits 20:13 are reserved, and in a
+ * PDPTE with PS=1 bit 12 is PAT and bits 29:13 are reserved (Intel SDM Vol 3A
+ * Tables 4-17 and 4-18). Masking with the page size clears the PAT bit along
+ * with the reserved ones and leaves the address.
+ */
+static inline uintptr_t vmm_leaf_size_for_level(uint8_t level)
+{
+    if (level == 3) return 512ULL * VMM_LARGE_PAGE_2M_SIZE;   /* 1 GiB */
+    if (level == 2) return VMM_LARGE_PAGE_2M_SIZE;            /* 2 MiB */
+    return VMM_PAGE_SIZE;                                     /* 4 KiB */
 }
 
 uintptr_t vmm_virt_to_phys(vmm_context_t *ctx, uintptr_t virt_addr)
@@ -3292,15 +3333,17 @@ uintptr_t vmm_virt_to_phys(vmm_context_t *ctx, uintptr_t virt_addr)
 
     spin_lock(&ctx->lock);
 
-    pte_t *pte = vmm_get_pte(ctx, virt_addr);
-    if (!pte || !(*pte & VMM_FLAG_PRESENT))
+    uint8_t level = 0;
+    pte_t *leaf = vmm_get_leaf_pte(ctx, virt_addr, &level);
+    if (!leaf || level == 0 || !(*leaf & VMM_FLAG_PRESENT))
     {
         spin_unlock(&ctx->lock);
         return 0;
     }
 
-    uintptr_t phys_base = vmm_pte_to_phys(*pte);
-    uintptr_t offset = virt_addr & VMM_PAGE_OFFSET_MASK;
+    uintptr_t leaf_size = vmm_leaf_size_for_level(level);
+    uintptr_t phys_base = vmm_pte_to_phys(*leaf) & ~(leaf_size - 1);
+    uintptr_t offset = virt_addr & (leaf_size - 1);
 
     spin_unlock(&ctx->lock);
 
@@ -3398,14 +3441,20 @@ uint64_t vmm_get_page_flags(vmm_context_t *ctx, uintptr_t virt_addr)
 
     spin_lock(&ctx->lock);
 
-    pte_t *pte = vmm_get_pte(ctx, virt_addr);
-    if (!pte || !(*pte & VMM_FLAG_PRESENT))
+    uint8_t level = 0;
+    pte_t *leaf = vmm_get_leaf_pte(ctx, virt_addr, &level);
+    if (!leaf || level == 0 || !(*leaf & VMM_FLAG_PRESENT))
     {
         spin_unlock(&ctx->lock);
         return 0;
     }
 
-    uint64_t flags = vmm_pte_to_flags(*pte);
+    /* VMM_FLAG_LARGE_PAGE comes back set on a 2 MiB / 1 GiB leaf, which is
+     * how a caller tells the permission bits apart from a 4 KiB entry's:
+     * bit 7 is PS on a huge leaf and PAT on a 4 KiB one. Everything else
+     * VMM_PTE_FLAGS_MASK keeps — P, R/W, U/S, PWT, PCD, A, D, G, NX — means
+     * the same at every level. */
+    uint64_t flags = vmm_pte_to_flags(*leaf);
     spin_unlock(&ctx->lock);
 
     return flags;

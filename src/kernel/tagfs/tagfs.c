@@ -2461,6 +2461,33 @@ error_t tagfs_init(void) {
     TagFSProbeDrive();
 
     /*
+     * ‼ 0xFF IS NOT A SEAT, AND IT USED TO BE READ FROM ANYWAY.
+     *
+     * The survey above answers BOARDROOM_NO_SEAT when nothing on the bus
+     * carries this machine's volume — and it has already said so, naming how
+     * many media it asked. That sentinel was then carried straight into
+     * volume_take_ground, which handed it to GroundSurvey, which asked the
+     * Boardroom for sector zero of a chair that does not exist. The room
+     * refused, as it must, and the machine printed two more lines blaming a
+     * seat 255 that was never in it:
+     *
+     *   [Ground] seat 255: could not be read at all
+     *   [TagFS] seat 255 claims no ground for BoxOS
+     *
+     * Both are false, and on the machine this matters on they are the last
+     * thing on the screen — so the one true sentence, printed one line
+     * earlier, is the one that scrolls away. A sentinel taken for a value is
+     * an invented answer, and an invented answer is worse than none.
+     *
+     * The refusal is the same one volume_take_ground gave, so nothing above
+     * this sees a different outcome: the boot stands a shell in for the
+     * volume it has not got, and the arrival of a medium runs this again.
+     */
+    if (g_tagfs_seat == BOARDROOM_NO_SEAT) {
+        return ERR_FILE_NOT_FOUND;
+    }
+
+    /*
      * ‼ THREE LINES USED TO STAND HERE, AND THEY BELONGED TO THE MACHINE.
      *
      *     spinlock_init(&g_state.lock);

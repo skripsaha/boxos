@@ -824,6 +824,24 @@ int xhci_enumerate_behind_hub(xhci_controller_t* ctrl,
         slot->tt_port    = hub->tt_port;
     }
 
+    /*
+     * And WHICH KIND of translator it is, which the Slot Context asks for in
+     * a field of its own.
+     *
+     * xHCI 1.2 Table 6-4: MTT is set not only for a multi-TT hub but for a
+     * low- or full-speed device reached THROUGH one. Nothing set it here, so
+     * every such device was described as sharing a single translator the hub
+     * had already been switched away from — the controller then scheduled its
+     * split transactions through a queue the hardware does not have.
+     *
+     * One line because there is one rule: the mode belongs to the translator,
+     * and this slot's translator is either the hub in front of it or the one
+     * that hub already had. `hub->multi_tt` is that same field on the parent
+     * and carries whichever of the two it is. A device that needs no
+     * translator has none of this, and the gate says so.
+     */
+    slot->multi_tt = (slot->tt_slot_id != 0) && hub->multi_tt;
+
     slot->timestamp_started = rdtsc();
 
     debug_printf("[xHCI ENUM] device on hub slot %u port %u, route 0x%05x, "
@@ -2144,9 +2162,29 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
          *                      in both, so the shared branch below is entered
          *                      straight away.
          *
-         * Anything else — Running, Disabled — is not the race the Note
-         * describes, and there is no repair here that can reason about it; it
-         * takes the release below, as before.
+         *   Running          — the same race, read a moment too early. The
+         *                      command was rejected, so SOMETHING about the
+         *                      endpoint was not what this driver thought;
+         *                      Running is the one state in which Stop
+         *                      Endpoint is legal (§4.6.9), so a context that
+         *                      still reads it is a context the controller has
+         *                      not written back yet — it is entitled to work
+         *                      from a cached copy and update the Output
+         *                      Context when it chooses. The command is simply
+         *                      made again, which is what Linux does with it
+         *                      (xhci_handle_cmd_stop_ep, case
+         *                      EP_STATE_RUNNING: "Race, HW handled stop ep
+         *                      cmd before ep was running", followed by
+         *                      another xhci_queue_stop_endpoint). Bounded by
+         *                      the step budget the watchdog already spends on
+         *                      this slot, so a controller that answers this
+         *                      way for ever still loses the device — after
+         *                      the same number of tries as every other road
+         *                      out of a step that will not finish, and not
+         *                      before the first of them.
+         *
+         * Disabled is not the race the Note describes and there is no repair
+         * here that can reason about it; it takes the release below.
          */
         if (slot->state == ENUM_STATE_WAIT_EP0_STOP &&
             completion_code == TRB_COMPLETION_CONTEXT_STATE) {
@@ -2171,6 +2209,26 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
                 xhci_enum_advance_state(ctrl, slot, slot_id,
                                         TRB_COMPLETION_SUCCESS);
                 return;
+            }
+
+            if (ep0 == XHCI_EP_STATE_RUNNING) {
+                if (slot->step_retry < XHCI_STEP_RETRIES) {
+                    slot->step_retry++;
+                    kprintf("[xHCI %s] port %u: the controller would not stop "
+                            "a control pipe it still reports as Running — "
+                            "asking it again (attempt %u of %u)\n",
+                            ctrl->name, slot->port_num, slot->step_retry,
+                            XHCI_STEP_RETRIES);
+                    if (xhci_post_stop_endpoint_cmd(ctrl, slot,
+                                                    slot->slot_id, 1) < 0) {
+                        xhci_slot_retire(ctrl, slot);
+                    }
+                    return;
+                }
+                kprintf("[xHCI %s] port %u: the control pipe still reads "
+                        "Running after %u attempts to take the transfer back "
+                        "— the transfer cannot be recovered\n",
+                        ctrl->name, slot->port_num, XHCI_STEP_RETRIES);
             }
         }
 

@@ -1239,15 +1239,16 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
      * THIS strand's hammock SSP VA (process_user_ssp_va_for derives it from
      * hammock_base, so sibling strands never collide);
      * cet_process_create_kernel_ssp builds the supervisor half.
-     * ‼ NEITHER IS LOADED FOR A STRAND.  IA32_PL3_SSP is written only by
-     * cet_load_user_ssp_for_iretq, reachable only through
-     * process_start_initial, which only the single-core boot branch calls and
-     * only for the initial process; a strand reaches ring 3 through the
-     * scheduler's frame iretq, which writes no CET MSR.  IA32_PL0_SSP keeps
-     * this CORE's token.  Both pages are still allocated here and freed in
-     * teardown so the per-process pair stays symmetric — what that costs and
-     * whose decision it is, is on cet_process_create_kernel_ssp in
-     * cet_lifecycle.h.  Both are dormant on TCG. */
+     * The USER half is live for a strand: the scheduler's frame dispatch
+     * swaps IA32_PL3_SSP per strand (context_save_from_frame /
+     * context_restore_to_frame), so this strand reaches ring 3 on the shadow
+     * stack mapped here and no other.
+     * ‼ The SUPERVISOR half is still not loaded for anyone.  IA32_PL0_SSP
+     * keeps this CORE's token; the page allocated here is never seen by the
+     * processor.  It is still allocated and freed so the per-process pair
+     * stays symmetric — what that costs and whose decision it is, is on
+     * cet_process_create_kernel_ssp in cet_lifecycle.h.  Both are dormant on
+     * TCG, which advertises no SHSTK. */
     (void)cet_process_create(proc);
     (void)cet_process_create_kernel_ssp(proc, entry_va);
 
