@@ -18,7 +18,6 @@
 #define CMOS_REG_STA    0x0A
 #define CMOS_REG_STB    0x0B
 #define CMOS_REG_STD    0x0D
-#define CMOS_REG_CENT   0x32
 
 #define STA_UIP         0x80
 #define STB_BIN         0x04
@@ -176,6 +175,30 @@ static bool acpi_says_no_cmos_rtc(void) {
     return (g_acpi.fadt->boot_arch_flags & FADT_NO_CMOS_RTC) != 0;
 }
 
+/* The CMOS register index that holds the century, as named by the platform.
+ *
+ * ACPI 6.5 §5.2.9, FADT `century` (offset 108, one byte, immediately before
+ * the boot_arch_flags read above): "The RTC CMOS RAM index to the century of
+ * data value (hundred and thousand year decimals). If this field contains a
+ * zero, then the RTC centenary feature is not supported." The index belongs
+ * to the platform; 0x32 is only what PC firmware has usually chosen, and this
+ * driver used to read it unconditionally. That was survivable while a nonsense
+ * century merely shifted the year, and stopped being survivable the moment the
+ * reading is range-checked: an arbitrary byte of CMOS RAM that decodes above 99
+ * would now cost the machine its entire wall clock. Linux reads
+ * acpi_gbl_FADT.century and reads no century register at all when the field is
+ * zero (arch/x86/kernel/rtc.c, mach_get_cmos_time).
+ *
+ * Returns 0 when the platform names no index: no ACPI, a FADT too short to hold
+ * the field, or the field itself zero. */
+static uint8_t acpi_century_index(void) {
+    if (!g_acpi.initialized || !g_acpi.fadt) return 0;
+    size_t need = __builtin_offsetof(acpi_fadt_t, century)
+                + sizeof(((acpi_fadt_t *)0)->century);
+    if (g_acpi.fadt->header.length < need) return 0;
+    return g_acpi.fadt->century;
+}
+
 /* This kernel has no wall clock, and says so once, loudly, on the board.
  *
  * Everything the RTC would have published is left at zero — which is not a
@@ -234,6 +257,10 @@ void rtc_init(void) {
         return;
     }
 
+    /* Asked before the reads begin: it is a look at a mapped ACPI table, not
+     * a CMOS cycle, and it has no business inside the update window. */
+    uint8_t cent_index = acpi_century_index();
+
     if (!wait_not_uip()) {
         rtc_declare_no_wall_clock("UIP never cleared — the CMOS is not "
                                   "answering at ports 0x70/0x71");
@@ -246,7 +273,7 @@ void rtc_init(void) {
     uint8_t day  = cmos_read(CMOS_REG_DAY);
     uint8_t mon  = cmos_read(CMOS_REG_MON);
     uint8_t year = cmos_read(CMOS_REG_YEAR);
-    uint8_t cent = cmos_read(CMOS_REG_CENT);
+    uint8_t cent = (cent_index != 0) ? cmos_read(cent_index) : 0;
     uint8_t stb  = cmos_read(CMOS_REG_STB);
 
     if (!wait_not_uip()) {
@@ -296,6 +323,13 @@ void rtc_init(void) {
         }
     }
 
+    /* No century register — the platform named no index, or named one that
+     * reads back zero — means the year is taken as 20xx. That is the same
+     * assumption linux makes in the same situation (arch/x86/kernel/rtc.c:
+     * "year += CMOS_EPOCH - 1900", CMOS_EPOCH = 2000), and it is bounded:
+     * it is wrong only for a part whose two-digit year has rolled past 2099,
+     * and it never turns into a refusal, because 20 is in range by
+     * construction. */
     uint8_t century = (cent != 0) ? cent : 20;
     if (!binary_mode && cent != 0) {
         century = bcd_to_bin(cent);
@@ -348,6 +382,23 @@ void rtc_init(void) {
 }
 
 void rtc_get_boxtime(BoxTime* out) {
+    /* The refusal rtc_get_unix64() makes, in the shape this accessor can make
+     * it. BoxTime is the 20-byte crate userspace reads and it carries no
+     * "unknown" flag, so the refusal IS the value: every field zero. It cannot
+     * be mistaken for a reading — a reading that got past rtc_reading_is_sane()
+     * has month 1..12 and day 1..31, so month == 0 is reachable from here and
+     * nowhere else — and seconds == 0 is the signal the rest of the tree
+     * already understands, the same one boxlib's clock.c reads off a
+     * ClockBoard whose boot_unix_secs is zero.
+     *
+     * Copying the fields out unguarded produced those zeros by accident of
+     * rtc_state having been memset, and presented them as a date read from a
+     * part. The accident is now the contract. */
+    if (!rtc_state.wall_known) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
+
     out->year    = rtc_state.year;
     out->month   = rtc_state.month;
     out->day     = rtc_state.day;

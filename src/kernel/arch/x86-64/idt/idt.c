@@ -416,6 +416,57 @@ static bool panic_probe_range(uint64_t va, uint64_t len)
 #define NMI_REASON_CLEAR_MASK  0x0F /* the writable half, preserved verbatim */
 #define NMI_REASON_CLEAR_SERR  0x04 /* write 1: clear + disable SERR# NMI    */
 #define NMI_REASON_CLEAR_IOCHK 0x08 /* write 1: clear + disable IOCHK# NMI   */
+#define NMI_REASON_FLOATING    0xFF /* nothing answering the port at all     */
+
+/*
+ * How loud an NMI is allowed to be.
+ *
+ * kprintf takes a non-recursive console lock with interrupts off. An NMI that
+ * lands in the middle of this core's own kprintf and then calls kprintf hangs
+ * that core for good, and an NMI source that re-fires — a chassis pin nothing
+ * de-asserts, a BMC watchdog held down, a board that does not answer port
+ * 0x61 — offers the machine that dice roll again on every single delivery.
+ * An NMI handler that prints once per delivery is therefore not a handler
+ * with a cosmetic problem; it is a handler that turns a repeating source into
+ * a hang.
+ *
+ * So a core describes each KIND of NMI once and stays silent about that kind
+ * afterwards. Deliberately not a budget of N lines and not a time window:
+ * both are numbers picked out of the air, and both still allow an unbounded
+ * count of console-lock acquisitions over a long enough run. A kind this core
+ * has never seen still gets its full line — a new cause is always worth the
+ * risk once — and a kind that repeats gets nothing.
+ *
+ * What replaces the repeated lines is the count. Every NMI a core answers is
+ * counted, and whichever line does get printed carries that number, so the
+ * operator reads the rate off the message instead of off the flood.
+ *
+ * The state is per core and touched only by its own core — an NMI cannot
+ * migrate mid-handler — so the counter needs no atomic and the record needs
+ * no lock, which is what makes it usable from NMI context at all.
+ * amp_get_core_index returns uint8_t, so the index cannot leave the array.
+ */
+#define NMI_KIND_SERR      0x01 /* PCI SERR# latch, port 0x61 bit 7  */
+#define NMI_KIND_IOCHK     0x02 /* IOCHK# latch, port 0x61 bit 6     */
+#define NMI_KIND_UNCLAIMED 0x04 /* nobody owned it                   */
+
+typedef struct NmiVoice
+{
+    uint64_t answered; /* every NMI this core has taken               */
+    uint8_t  said;     /* NMI_KIND_* this core has already described  */
+} NmiVoice;
+
+static NmiVoice g_nmi_voice[MAX_CORES];
+
+/* True exactly once per core per kind — and it closes that kind's mouth in
+ * the same breath in which it answers. */
+static bool nmi_first_of_kind(NmiVoice *voice, uint8_t kind)
+{
+    if (voice->said & kind)
+        return false;
+    voice->said |= kind;
+    return true;
+}
 
 /*
  * NMI (vector 2) — answered here, and returned from. It never falls through.
@@ -449,64 +500,125 @@ static bool panic_probe_range(uint64_t va, uint64_t len)
  * handler then returns through a frame that is no longer its own. So this
  * handler touches no user pointer, walks no table, takes no scheduler
  * decision, and returns.
+ *
+ * The one thing left in here that can still block is the console lock, and it
+ * is why nothing below prints twice for the same reason — see NmiVoice.
  */
 static void handle_nmi(interrupt_frame_t *frame)
 {
-    /* Firmware first. Reads each NMI-notify GHES source's Error Status
-     * Address register — mapped once at registration, so the read can neither
-     * fault nor take a lock — and knocks a K-Core for every source that named
-     * a status block. True means at least one source owned this NMI. */
+    uint32_t  core  = (uint32_t)amp_get_core_index();
+    NmiVoice *voice = &g_nmi_voice[core];
+    uint64_t  count = ++voice->answered;
+
+    /* Firmware first, and silent. apei_ghes_nmi_check reads each NMI-notify
+     * GHES source's Error Status Address register — mapped once at
+     * registration, so the read can neither fault nor take a lock — and
+     * knocks a K-Core for every source that named a status block. True means
+     * a source owned this NMI; the K-Core that was knocked is what reports
+     * the error, at a moment when printing is allowed. */
     extern bool apei_ghes_nmi_check(void);
-    bool claimed = apei_ghes_nmi_check();
+    if (apei_ghes_nmi_check())
+        return;
 
+    /* Only an NMI nobody owned reaches the chipset latch, which is also what
+     * Linux's default_do_nmi does and for the same reason: BoxOS never clears
+     * port 0x61 at boot, so a SERR#/IOCHK bit firmware left set before the
+     * kernel existed would otherwise be read during the first unrelated GHES
+     * NMI, announced as a live bus error that is not happening, and that
+     * source disabled for the rest of the run on the strength of it. The
+     * latch belongs to the delivery that has no other explanation. */
     uint8_t reason = inb(NMI_REASON_PORT);
-    uint32_t core = (uint32_t)amp_get_core_index();
 
-    if (reason & (NMI_REASON_SERR | NMI_REASON_IOCHK))
+    /* 0xFF is a floating bus, not a status. That byte says bits 7 and 6 are
+     * latched while bits 2 and 3 of the very same byte assert the disables
+     * that hold exactly those two bits at zero — a state the port's own
+     * definition forbids. So nothing is answering at 0x61 on this board, and
+     * there is no legacy latch to clear. Costs nothing if some chipset ever
+     * does return it honestly: the unclaimed line below prints the raw byte
+     * either way. */
+    uint8_t latched = (reason == NMI_REASON_FLOATING)
+                          ? 0
+                          : (uint8_t)(reason & (NMI_REASON_SERR | NMI_REASON_IOCHK));
+
+    if (latched)
     {
         uint8_t ctrl = (uint8_t)(reason & NMI_REASON_CLEAR_MASK);
-
-        if (reason & NMI_REASON_SERR)
-        {
-            kprintf("[NMI] Core %u: PCI SERR# asserted (port 0x61 = 0x%02x) — "
-                    "a device reported a system error.\n",
-                    core, (unsigned)reason);
+        if (latched & NMI_REASON_SERR)
             ctrl |= NMI_REASON_CLEAR_SERR;
-        }
-        if (reason & NMI_REASON_IOCHK)
-        {
-            kprintf("[NMI] Core %u: IOCHK# asserted (port 0x61 = 0x%02x) — a "
-                    "bus device raised channel check.\n",
-                    core, (unsigned)reason);
+        if (latched & NMI_REASON_IOCHK)
             ctrl |= NMI_REASON_CLEAR_IOCHK;
+
+        /* Silence the hardware before saying a word about it: the latch is
+         * level-held and re-delivers for as long as the machine runs. */
+        outb(NMI_REASON_PORT, ctrl);
+
+        /* Then ASK the port whether that worked, instead of announcing that
+         * it did. This is a read-modify-write of a byte two other subsystems
+         * also read-modify-write: amp_udelay's PIT gate path (amp.c caches
+         * `tmp = inb(0x61)`, issues four other port writes, then writes that
+         * stale byte back twice) and hourglass's pit2_start. An NMI landing
+         * inside one of those windows has its disable bit overwritten by the
+         * cached byte and the source comes back armed. Serializing it means a
+         * lock both sides take — amp.c and hourglass.c, not this file — and a
+         * lock acquired from NMI context is a hazard of its own. What this
+         * file can do is not lie: the status is read back and the line reports
+         * what the port actually says. A clear that lost the race needs no
+         * retry loop here, because the source that survived it will deliver
+         * the NMI again and be cleared again. */
+        uint8_t after = inb(NMI_REASON_PORT);
+        bool    spoke = false;
+
+        if ((latched & NMI_REASON_SERR) && nmi_first_of_kind(voice, NMI_KIND_SERR))
+        {
+            kprintf("[NMI] Core %u: PCI SERR# asserted — a device reported a "
+                    "system error (port 0x61 = 0x%02x, NMI #%lu on this core).\n",
+                    core, (unsigned)reason, count);
+            spoke = true;
+        }
+        if ((latched & NMI_REASON_IOCHK) && nmi_first_of_kind(voice, NMI_KIND_IOCHK))
+        {
+            kprintf("[NMI] Core %u: IOCHK# asserted — a bus device raised "
+                    "channel check (port 0x61 = 0x%02x, NMI #%lu on this core).\n",
+                    core, (unsigned)reason, count);
+            spoke = true;
         }
 
-        /* The latch is level-held: until this write it re-delivers the NMI
-         * for as long as the machine runs. Writing the disable bit clears it
-         * and leaves that source OFF, and off is where it stays. Re-arming
-         * means driving the bit low again once the device has stopped
-         * asserting, and the only way to learn that is to wait — which is not
-         * something an NMI handler may do. So the source is disabled, and the
-         * line below says so rather than letting the operator discover it.
-         *
-         * Two cores latching the same event race here harmlessly: both read
-         * the same status, both write the same disable bit. */
-        outb(NMI_REASON_PORT, ctrl);
-        kprintf("[NMI] Core %u: legacy NMI source cleared and left DISABLED "
-                "(port 0x61 <- 0x%02x). The machine continues.\n",
-                core, (unsigned)ctrl);
-        claimed = true;
+        if (spoke && (after & latched) == 0)
+        {
+            /* Re-arming means driving the disable low again once the device
+             * has stopped asserting, and the only way to learn that is to
+             * wait — which is not something an NMI handler may do. So the
+             * source stays off, and that is said out loud rather than left
+             * for the operator to discover. */
+            kprintf("[NMI] Core %u: source cleared and left DISABLED (port "
+                    "0x61 <- 0x%02x, reads back 0x%02x). The machine "
+                    "continues; this core reports each NMI cause once.\n",
+                    core, (unsigned)ctrl, (unsigned)after);
+        }
+        else if (spoke)
+        {
+            kprintf("[NMI] Core %u: the clear did NOT take (port 0x61 <- "
+                    "0x%02x, still reads 0x%02x) — the device is holding the "
+                    "line, or another port 0x61 writer overwrote the disable. "
+                    "The NMI will be delivered again and cleared again.\n",
+                    core, (unsigned)ctrl, (unsigned)after);
+        }
+        return;
     }
 
-    if (!claimed)
+    if (nmi_first_of_kind(voice, NMI_KIND_UNCLAIMED))
     {
         /* Nobody owned it, and that is one line of fact, not a crash: a
          * watchdog, an IPMI diagnostic interrupt, a performance-counter
          * overflow, or a GHES source whose status block another core drained
-         * before this one looked. */
+         * before this one looked. Once per core — an unclaimed source is the
+         * one kind here that nothing in this handler can switch off, so it is
+         * also the one kind that could otherwise print forever. */
         kprintf("[NMI] Core %u: unclaimed — no APEI source and no legacy latch "
-                "(port 0x61 = 0x%02x). RIP=0x%lx CS=0x%lx. Continuing.\n",
-                core, (unsigned)reason, frame->rip, frame->cs);
+                "(port 0x61 = 0x%02x). RIP=0x%lx CS=0x%lx, NMI #%lu on this "
+                "core. Nothing to kill and nothing to halt; continuing, and "
+                "counting the rest in silence.\n",
+                core, (unsigned)reason, frame->rip, frame->cs, count);
     }
 }
 

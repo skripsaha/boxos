@@ -379,8 +379,14 @@ int erst_run_action(uint8_t action_id, uint64_t value_in, uint64_t* value_out) {
         /* A Bit Offset of 64 or more names no bit of any register the CPU
          * can address, and the shifts §18.5.1.2 asks for would be
          * undefined. The table is malformed; the action is refused rather
-         * than executed against a guessed bit position. */
-        if (e->reg.address != 0 && e->reg.bit_offset >= 64) {
+         * than executed against a guessed bit position.
+         *
+         * The offset is a property of the TABLE, not of the register, so a
+         * zero address does not excuse it: gas_read/gas_write return early
+         * on address 0, but the shift in erst_region_read/erst_region_write
+         * is computed before either is called and would be undefined all
+         * the same. */
+        if (e->reg.bit_offset >= 64) {
             kprintf("[ERST] entry %u of action 0x%02x puts its register "
                     "region at bit %u — no register has one; action "
                     "refused\n", pc, action_id, e->reg.bit_offset);

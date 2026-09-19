@@ -245,11 +245,16 @@ uintptr_t vmm_virt_to_phys(vmm_context_t* ctx, uintptr_t virt_addr);
 bool vmm_is_mapped(vmm_context_t* ctx, uintptr_t virt_addr);
 uint64_t vmm_get_page_flags(vmm_context_t* ctx, uintptr_t virt_addr);
 
-/* Ensure that the page covering `user_vaddr` is mapped user RW (and NX) in
- * `ctx`. If already mapped, returns 0 immediately. If unmapped, allocates a
- * zeroed phys page and maps it. Used by the kernel-side ResultRing producer
- * (see kring.c) to map slot pages on demand without triggering a kernel
- * page fault. Returns 0 on success, -1 on failure. */
+/* Ensure that the page covering `user_vaddr` is mapped into `ctx` as user memory
+ * (NX, and writable when `writable`). Unmapped → allocate a zeroed phys page and
+ * map it on those terms. Already mapped ON THOSE TERMS → 0. Already mapped but
+ * NOT on those terms — not user-accessible, or read-only while a writable page
+ * was asked for — → -1: the caller's next move is a store through the
+ * supervisor-writable Pull Map alias, which the hardware will not refuse on the
+ * cabin's behalf, and the slot address the caller derived comes from a ring
+ * header the cabin itself can write. Used by the kernel-side ResultRing and
+ * TouchRing producers (kring.c, touch_ring.c) to map slot pages on demand
+ * without taking a kernel page fault. Returns 0 on success, -1 on failure. */
 int vmm_ensure_user_page(vmm_context_t* ctx, uintptr_t user_vaddr, bool writable);
 
 void* vmalloc(size_t size);
@@ -723,19 +728,24 @@ int vmm_map_touch_ring(vmm_context_t* ctx, uintptr_t phys_page);
 // user's virtual range may be contiguous while the frames behind it are not. Callers with
 // multi-leaf payloads use the vmm_user_buf_* helpers below, which walk leaf by leaf.
 //
-// READ form. The kernel pointer is a supervisor WRITABLE alias (Pull Map), so a store
-// through it bypasses the cabin's own R/W bit, CR0.WP and CR4.SMAP — access rights belong
-// to the translation the store uses (Intel SDM Vol 3A §5.6/§5.6.1). Never write through
-// this pointer. A kernel write into cabin memory goes through vmm_translate_user_addr_w,
-// which additionally requires VMM_FLAG_WRITABLE on the cabin's leaf, or through
-// vmm_user_buf_commit_out, which uses that write form per leaf.
+// READ form, and the only form. The kernel pointer is a supervisor WRITABLE alias (Pull
+// Map: PRESENT|WRITABLE|GLOBAL, no U/S), so a store through it consults neither the
+// cabin's own R/W bit, nor CR0.WP, nor CR4.SMAP — access rights belong to the translation
+// the store actually uses (Intel SDM Vol 3A §5.6/§5.6.1), and this alias is not the
+// cabin's. That makes the function safe for reads and unsafe as a write channel: it
+// deliberately does NOT require VMM_FLAG_WRITABLE, because the kernel legitimately reads
+// a cabin's read-only pages (its .rodata and .text, its CabinInfo).
+//
+// A kernel WRITE into cabin memory therefore never starts here. It goes one of two ways:
+//   • a payload → vmm_user_buf_commit_out, which demands VMM_FLAG_WRITABLE on each leaf
+//     it crosses and answers ERR_INVALID_ADDRESS on a leaf the cabin holds read-only;
+//   • a ring slot at an address derived from user data → vmm_ensure_user_page(writable=1)
+//     first, which now refuses a page the cabin holds read-only instead of reporting it
+//     "already mapped"; only then this translation, for the store.
+// The rule exists because the addresses are not the kernel's: a ring slot VA is
+// hdr.slots_base + (idx % hdr.slot_count_max) * hdr.slot_size, and all three fields sit in
+// a header page the cabin can write.
 void* vmm_translate_user_addr(vmm_context_t* ctx, uintptr_t user_vaddr, size_t size);
-
-// WRITE form of the above: same walk and same single-leaf rule, plus the cabin's leaf must
-// carry VMM_FLAG_WRITABLE. Returns NULL for a page the cabin holds read-only — its
-// ClockBoard and cpu_caps pages, its CabinInfo, its own ELF text — which the hardware
-// would not protect on this path, because the write lands on the supervisor alias.
-void* vmm_translate_user_addr_w(vmm_context_t* ctx, uintptr_t user_vaddr, size_t size);
 
 /*
  * Multi-page user buffer in/out via a kmalloc'd kernel bounce buffer.

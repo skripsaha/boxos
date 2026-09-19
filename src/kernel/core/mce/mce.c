@@ -342,26 +342,35 @@ typedef struct {
  * model-specific when TES_P is clear.
  *
  * With SER_P set the record is read the way Table 15-6 writes it:
- *   OVER=1 with UC=1 → a second uncorrected error landed in this bank
- *                      before we read it, and its address is gone for good.
- *                      The SRAR row: "If OVER=1, reset system."
- *   EN=0             → every UCR row requires EN=1, so this entry did not
- *                      signal this #MC. Log it, clear it, act on nothing.
- *                      Only legal to skip BECAUSE SER_P is set: §15.10.4.1
- *                      says that without it even a UC=1/EN=0 entry is fatal.
- *   S=0              → UCNA, or an entry the hardware reported through CMC.
- *                      "System software is not required to take any recovery
- *                      action" (§15.6.2).
- *   S=1              → SRAO (AR=0) or SRAR (AR=1). The caller decides what
- *                      may actually be done about it from the MCA error
- *                      code — see mce_ucr_action. */
+ *   EN=0 → every UCR row requires EN=1, so this entry did not signal this
+ *          #MC. Log it, clear it, act on nothing. Only legal to skip
+ *          BECAUSE SER_P is set: §15.10.4.1 says that without it even a
+ *          UC=1/EN=0 entry is fatal.
+ *   S=0  → UCNA, or an entry the hardware reported through CMC. "System
+ *          software is not required to take any recovery action" (§15.6.2).
+ *   S=1  → SRAO (AR=0) or SRAR (AR=1). What may be done about it follows
+ *          from AR, from OVER and from the MCA error code — all three are
+ *          read together in mce_ucr_action.
+ *
+ * OVER is deliberately NOT read here, and its place in the order is the
+ * whole point. Table 15-6 attaches "If OVER=1, reset system" to the SRAR
+ * row — to a record that is enabled, signalled and action-required — not
+ * to every uncorrected record carrying the bit. A not-enabled or UCNA entry
+ * sits in its bank until somebody polls it, and this kernel has no CMCI
+ * handler yet, so that entry is precisely the one most likely to have
+ * overflowed by the time an unrelated #MC walks past it: grading it fatal
+ * here would halt a healthy machine over an error that never signalled
+ * anything. Linux reads the same bits in the same order — "Not enabled" is
+ * the second rule of its severity table, its UCNA rule carries the comment
+ * "ignore OVER for UCNA", and its generic "Overflowed uncorrected" PANIC
+ * rule is the last rule of all. Here that last rule lives in the SER_P=0
+ * arm below, where every uncorrected record is fatal already. */
 static mce_severity_t mce_classify(uint64_t status) {
     if (!(status & MCE_MC_STATUS_VAL)) return MCE_SEV_NONE;
     if (!(status & MCE_MC_STATUS_UC))  return MCE_SEV_CORRECTED;
     if (status & MCE_MC_STATUS_PCC)    return MCE_SEV_UC;
 
     if (!(g_mce_mcg_cap & MCE_CAP_MCG_SER_P)) return MCE_SEV_UC;
-    if (status & MCE_MC_STATUS_OVER)          return MCE_SEV_UC;
     if (!(status & MCE_MC_STATUS_EN))         return MCE_SEV_UCNA;
     if (!(status & MCE_MC_STATUS_S))          return MCE_SEV_UCNA;
     return MCE_SEV_UCR;
@@ -455,14 +464,30 @@ typedef enum {
  * one action this kernel has is offlining the page, so a SRAR whose page
  * cannot be named is a SRAR whose recovery cannot be completed.
  *
+ * OVER is read here and nowhere else, because Table 15-6 scopes it to this
+ * row: "If OVER=1, reset system, else take specific recovery action." A
+ * second uncorrected error reached the bank before the handler read it, so
+ * the address still in ADDR names one of the two and nothing says which —
+ * the one action this kernel has cannot cover an event whose location the
+ * processor already threw away.
+ *
  * SRAO (AR=0) is action OPTIONAL: the error was not consumed, so an
  * unreadable address or an unknown code costs nothing but the page. Log it
  * and keep running — turning it fatal would take the machine down for an
- * error the processor itself said could be deferred. */
+ * error the processor itself said could be deferred. OVER does not change
+ * that row either: the record's own address is still the address the
+ * processor logged, and retiring that one frame is the whole of the
+ * optional action. (Linux grades this combination "Action optional with
+ * lost events" and takes no action at all. The divergence is deliberate:
+ * its action is unmapping and signalling a process, which cannot be undone,
+ * while ours is moving a page to a fresh frame, which costs the page and
+ * nothing else.) */
 static MceUcrAction mce_ucr_action(uint64_t status, uintptr_t phys) {
     bool ar = (status & MCE_MC_STATUS_AR) != 0;
 
     if (ar) {
+        if (status & MCE_MC_STATUS_OVER) return MCE_UCR_BUGCHECK;
+
         bool known = !g_mce_cod_intel ||
                      (status & MCE_MCACOD_MASK) == MCE_MCACOD_DATA ||
                      (status & MCE_MCACOD_MASK) == MCE_MCACOD_INSTR;
@@ -687,6 +712,7 @@ bool mce_handle(interrupt_frame_t *frame) {
      * there. */
     uint64_t mcg_status = mce_rdmsr(MCE_MSR_MCG_STATUS);
     bool     ripv       = (mcg_status & MCE_MCG_STATUS_RIPV) != 0;
+    bool     eipv       = (mcg_status & MCE_MCG_STATUS_EIPV) != 0;
     bool     mcip       = (mcg_status & MCE_MCG_STATUS_MCIP) != 0;
 
     /* Asked once, for every deferral below — the Touch publish, the
@@ -716,19 +742,39 @@ bool mce_handle(interrupt_frame_t *frame) {
             switch (mce_ucr_action(status, poisoned_phys)) {
                 case MCE_UCR_OFFLINE:
                     offline = true;
-                    /* SRAR is the error raised where the poison was
-                     * CONSUMED, and §15.6.2's required action is to stop the
-                     * consumer before any further work is scheduled here.
-                     * When the consumer was ring 0 there is nothing to stop
-                     * but the machine: this kernel has no recoverable-copy
-                     * region to resume a poisoned load into, so IRETing
-                     * would re-execute it. Linux grades the same
-                     * combination PANIC "Uncorrected in kernel". A ring-3
-                     * consumer is stopped for us — idt.c kills the process
-                     * on the fatal road, and on the recoverable one the page
-                     * is gone from under it before it runs again. */
-                    if ((status & MCE_MC_STATUS_AR) &&
-                        (frame->cs & 3) == 0) {
+                    /* SRAR (AR=1) is the error raised where the poison was
+                     * CONSUMED. §15.6.2 requires its recovery action to be
+                     * "completed successfully before any additional work is
+                     * scheduled for this processor", and this handler
+                     * cannot complete it here: the replacement page, the
+                     * copy, the PTE swap and the shootdown all take locks
+                     * the interrupted frame on this very core may already
+                     * hold, so they ride a baton to a K-Core and finish
+                     * well after IRET. The one way to honour the ordering
+                     * is therefore not to schedule that context again at
+                     * all — the record is fatal for the consumer, and idt.c
+                     * decides what that costs: the process is killed when
+                     * the #MC came from ring 3, the machine halts when it
+                     * came from ring 0 (no recoverable-copy region exists
+                     * to resume a poisoned kernel load into, and Linux
+                     * grades the same combination PANIC "Uncorrected in
+                     * kernel"). The migration still runs, for every OTHER
+                     * cabin that maps the frame.
+                     *
+                     * WHICH processor is the consumer is MCG_STATUS's to
+                     * say, not cs's. Without LMCE armed every #MC is
+                     * broadcast, so N-1 logical processors walk this same
+                     * shared bank having consumed nothing at all, and SDM
+                     * Table 15-21 says how they read: an SRAR's non-
+                     * affected processors "should find that the RIPV flag
+                     * ... is set and the EIPV flag ... is cleared". That
+                     * pair, and only that pair, is allowed to keep running
+                     * — Linux's rule "Action required but unaffected thread
+                     * is continuable" is the same test. Judging by cs
+                     * instead would halt the whole machine every time a
+                     * broadcast SRAR happened to interrupt one innocent
+                     * core in ring 0. */
+                    if ((status & MCE_MC_STATUS_AR) && !(ripv && !eipv)) {
                         sev = MCE_SEV_UC;
                     }
                     break;
@@ -784,13 +830,15 @@ bool mce_handle(interrupt_frame_t *frame) {
              * Whether a failure to queue is survivable is the bank's to say,
              * not ours. For an action-OPTIONAL error it is: the page stays
              * poisoned in the PMM bitmap, so no future allocation takes it,
-             * and the cabin that still maps it will #PF and die cleanly. For
-             * an action-REQUIRED error (AR=1) §15.6.2 is explicit — when the
+             * and the cabin that still maps it will #PF and die cleanly. An
+             * action-REQUIRED error reaches this line only on a processor
+             * that did not consume it — the consumer's record was graded
+             * fatal above — and even there §15.6.2 is explicit: when the
              * recovery action cannot be successfully completed, the system
              * must be shut down. Queuing it IS the action; a saturated ring,
              * or a #MC before the baton queues exist, means it never
-             * started, and IRETing there would re-execute the same load on
-             * the same poisoned frame. */
+             * started, and the frame stays live under every cabin that maps
+             * it. */
             bool queued = deferral_open &&
                           mce_migrate_request(poisoned_phys, sev, status);
             if (!queued && (status & MCE_MC_STATUS_AR) &&

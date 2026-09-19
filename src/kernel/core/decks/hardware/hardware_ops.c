@@ -22,8 +22,6 @@
 #include "pit.h"
 #include "rtc.h"
 #include "keyboard.h"
-#include "io.h"
-#include "irqchip.h"
 #include "ata.h"
 #include "tagfs.h"
 #include "boardroom.h"
@@ -46,11 +44,6 @@
 static inline void HwVgaMirrorChar(char ch)
 {
     LogRingPut(ch);
-}
-
-static bool hw_irq_is_valid(uint8_t irq)
-{
-    return irq < irqchip_max_irqs() && irq != 0 && irq != 2;
 }
 
 /* Colours arrive as unaligned little-endian u32 inside op->params. */
@@ -201,7 +194,17 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
  * One op is also one Canvas commit and therefore one Present: the whole
  * frame reaches the glass in a single blit, with no tear down its middle.
  * Painted through vga_putchar_at it would have been 6144 ops, ~141 KB of
- * Manifest, and — past boxlib's 4 KiB builder — a dozen separate blits. */
+ * Manifest, and — past boxlib's 4 KiB builder — a dozen separate blits.
+ *
+ * UTILITY, where every other VGA op on this deck is NONE, and the difference
+ * is the crate. The others cost the kernel a cell, a line, or at most the one
+ * page HwVgaPutString snapshots. This one is told its geometry in four bytes
+ * and must then take the whole rectangle in: 255 × 255 cells of sizeof(TextCell)
+ * is 780300 bytes of kernel memory, held for the length of one call, on the
+ * word of the caller. The programs that legitimately need it are the ones that
+ * own the whole screen and redraw it — draft, playtime, lavalamp, the display
+ * daemon — and every one of them carries `utility`. A program that is only
+ * saying something still has putchar, putstring and newline, unchanged. */
 static int HwVgaPaint(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                       const OpContext *ctx)
 {
@@ -588,169 +591,52 @@ static int HwRtcGetUptime(const ManifestOp *op, Crate *crates, uint16_t crate_co
 }
 
 /* =========================================================================
- *  Port I/O
+ *  ‼ WHAT THIS DECK DELIBERATELY NO LONGER OFFERS
+ *
+ *  Fourteen opcodes are withdrawn and their numbers retired for ever — see
+ *  hardware_deck.h. A deck answers for the hardware with NAMED operations the
+ *  kernel understands and can carry through properly: hw.usb.reset is the
+ *  whole eleven-step repair of a controller, hw.disk.info is the drive as the
+ *  driver knows it, hw.vga.paint lays down a finished frame in one commit.
+ *  None of the fourteen was one of those.
+ *
+ *  hw.port.inb/outb/inw/outw/inl/outl (0x20-0x25) were the `in` and `out`
+ *      instructions with a name put on them — the screwdriver taken out of the
+ *      lock, with which every other lock in the house can be worked. The port
+ *      was assembled from two parameter bytes, so all 65536 of them were
+ *      reachable, and not one of the six ever looked at the address it was
+ *      handed. One call rewrote BAR0 of an xHCI controller, which the driver
+ *      reads exactly once at bring-up and never again (xhci.c): the silicon
+ *      then decodes a new window while the driver keeps writing to the old
+ *      one, and the USB volume is simply gone with nothing in the log to say
+ *      so. One call cleared the NMI mask through bit 7 of port 0x70 — a
+ *      register the RTC never reads back and therefore tracks only as a
+ *      variable of its own (rtc.c), so the kernel would go on believing NMI
+ *      was armed. Three calls were the chipset reset sequence on 0xCF9. A
+ *      fixed list of permitted ports could not have helped: five of the
+ *      twenty ranges this kernel drives — BMIDE from BAR4, and SMI_CMD,
+ *      PM1a/PM1b, PM_TMR, GPE0/GPE1 from the FADT — are not known until the
+ *      machine is running and differ from board to board.
+ *
+ *  hw.irq.register/unregister/enable/disable/isr/irr/eoi (0x30-0x36) were the
+ *      same hole one storey up. The check they shared refused line 0 and line
+ *      2 and nothing else, so every other line could be masked from outside:
+ *      the keyboard on 1, the Wire on 4, the disk on 14 and 15 — or somebody
+ *      else's EOI could be sent through the middle of their handler. Two of
+ *      the seven, 0x30 and 0x31, never had a handler at all: they were names
+ *      in a header and nothing else, and the registry had never heard of them.
+ *
+ *  hw.cpu.halt (0x40) could not be made honest. A Manifest arrives through
+ *      SYSCALL with IF clear — SFMASK clears it (amp/per_core.c) and nothing
+ *      between there and a handler raises it again (idt.c says so of the
+ *      dispatch itself) — so the bare `hlt` this op ran was a halt with
+ *      interrupts masked: on a single-core machine the kernel stopped there
+ *      until an NMI. What it was reaching for exists already and is woken by a
+ *      real event rather than a guess: system.turn_in (SYSTEM_OP_TURN_IN,
+ *      boxos_decks.h) lays a strand down until something addressed to it moves
+ *      a cursor, and the machine as a whole goes quiet through Turn In and the
+ *      Bell without anybody having to ask it to.
  * ========================================================================= */
-
-static int HwPortInb(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                     const OpContext *ctx)
-{
-    (void)crate_count;
-    if (op->param_size < 2) return ERR_INVALID_ARGUMENT;
-    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-
-    uint16_t port = (uint16_t)op->params[0] | ((uint16_t)op->params[1] << 8);
-    Crate *out = &crates[op->out_crate];
-    if (out->capacity < 1) return ERR_BUFFER_TOO_SMALL;
-
-    uint8_t value = inb(port);
-    if (crate_write(out, ctx, &value, 1) != OK) return ERR_INVALID_ADDRESS;
-    return OK;
-}
-
-static int HwPortOutb(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                      const OpContext *ctx)
-{
-    (void)crates; (void)crate_count; (void)ctx;
-    if (op->param_size < 3) return ERR_INVALID_ARGUMENT;
-
-    uint16_t port  = (uint16_t)op->params[0] | ((uint16_t)op->params[1] << 8);
-    uint8_t  value = op->params[2];
-    outb(port, value);
-    return OK;
-}
-
-static int HwPortInw(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                     const OpContext *ctx)
-{
-    (void)crate_count;
-    if (op->param_size < 2) return ERR_INVALID_ARGUMENT;
-    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-
-    uint16_t port = (uint16_t)op->params[0] | ((uint16_t)op->params[1] << 8);
-    Crate *out = &crates[op->out_crate];
-    if (out->capacity < sizeof(uint16_t)) return ERR_BUFFER_TOO_SMALL;
-
-    uint16_t value = inw(port);
-    if (crate_write(out, ctx, &value, sizeof(uint16_t)) != OK) return ERR_INVALID_ADDRESS;
-    return OK;
-}
-
-static int HwPortOutw(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                      const OpContext *ctx)
-{
-    (void)crates; (void)crate_count; (void)ctx;
-    if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
-
-    uint16_t port  = (uint16_t)op->params[0] | ((uint16_t)op->params[1] << 8);
-    uint16_t value;
-    memcpy(&value, &op->params[2], sizeof(uint16_t));
-    outw(port, value);
-    return OK;
-}
-
-static int HwPortInl(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                     const OpContext *ctx)
-{
-    (void)crate_count;
-    if (op->param_size < 2) return ERR_INVALID_ARGUMENT;
-    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-
-    uint16_t port = (uint16_t)op->params[0] | ((uint16_t)op->params[1] << 8);
-    Crate *out = &crates[op->out_crate];
-    if (out->capacity < sizeof(uint32_t)) return ERR_BUFFER_TOO_SMALL;
-
-    uint32_t value = inl(port);
-    if (crate_write(out, ctx, &value, sizeof(uint32_t)) != OK) return ERR_INVALID_ADDRESS;
-    return OK;
-}
-
-static int HwPortOutl(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                      const OpContext *ctx)
-{
-    (void)crates; (void)crate_count; (void)ctx;
-    if (op->param_size < 6) return ERR_INVALID_ARGUMENT;
-
-    uint16_t port = (uint16_t)op->params[0] | ((uint16_t)op->params[1] << 8);
-    uint32_t value;
-    memcpy(&value, &op->params[2], sizeof(uint32_t));
-    outl(port, value);
-    return OK;
-}
-
-/* =========================================================================
- *  IRQ
- * ========================================================================= */
-
-static int HwIrqEnable(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                       const OpContext *ctx)
-{
-    (void)crates; (void)crate_count; (void)ctx;
-    if (op->param_size < 1) return ERR_INVALID_ARGUMENT;
-    uint8_t irq = op->params[0];
-    if (!hw_irq_is_valid(irq)) return ERR_ACCESS_DENIED;
-    irqchip_enable_irq(irq);
-    return OK;
-}
-
-static int HwIrqDisable(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                        const OpContext *ctx)
-{
-    (void)crates; (void)crate_count; (void)ctx;
-    if (op->param_size < 1) return ERR_INVALID_ARGUMENT;
-    uint8_t irq = op->params[0];
-    if (!hw_irq_is_valid(irq)) return ERR_ACCESS_DENIED;
-    irqchip_disable_irq(irq);
-    return OK;
-}
-
-static int HwIrqSendEoi(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                        const OpContext *ctx)
-{
-    (void)crates; (void)crate_count; (void)ctx;
-    if (op->param_size < 1) return ERR_INVALID_ARGUMENT;
-    uint8_t irq = op->params[0];
-    if (!hw_irq_is_valid(irq)) return ERR_ACCESS_DENIED;
-    irqchip_send_eoi(irq);
-    return OK;
-}
-
-static int HwIrqGetIsr(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                       const OpContext *ctx)
-{
-    (void)crate_count;
-    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-    Crate *out = &crates[op->out_crate];
-    if (out->capacity < sizeof(uint32_t)) return ERR_BUFFER_TOO_SMALL;
-
-    uint32_t isr = irqchip_get_isr();
-    if (crate_write(out, ctx, &isr, sizeof(uint32_t)) != OK) return ERR_INVALID_ADDRESS;
-    return OK;
-}
-
-static int HwIrqGetIrr(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                       const OpContext *ctx)
-{
-    (void)crate_count;
-    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-    Crate *out = &crates[op->out_crate];
-    if (out->capacity < sizeof(uint32_t)) return ERR_BUFFER_TOO_SMALL;
-
-    uint32_t irr = irqchip_get_irr();
-    if (crate_write(out, ctx, &irr, sizeof(uint32_t)) != OK) return ERR_INVALID_ADDRESS;
-    return OK;
-}
-
-/* =========================================================================
- *  CPU
- * ========================================================================= */
-
-static int HwCpuHalt(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                     const OpContext *ctx)
-{
-    (void)op; (void)crates; (void)crate_count; (void)ctx;
-    hlt();
-    return OK;
-}
 
 /* =========================================================================
  *  Disk (ATA primary master/slave info + cache flush)
@@ -784,14 +670,20 @@ static int HwDiskInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 
 /* HW_DISK_FLUSH  params:[u8 is_master]
  *
- * The userspace ABI still carries the legacy 0/1 master/slave flag,
- * but the only durable thing it can mean today is "flush the TagFS
- * volume" — that is the device any commit really cares about. Route
- * through tagfs_flush_cache(), which resolves the volume location
- * (AHCI port number or ATA drive index) at the storage layer and
- * therefore stays correct on every (ATA, AHCI) × (boot port) combo.
- * The is_master parameter is preserved for ABI stability and logged
- * for diagnostics.
+ * The ABI still carries the legacy 0/1 master/slave flag, but the only durable
+ * thing it can mean today is "commit the TagFS volume" — that is the device
+ * any commit really cares about. tagfs_flush_cache() resolves where the volume
+ * lives (AHCI port number or ATA drive index) at the storage layer, so this
+ * stays correct on every (ATA, AHCI) × (boot port) combination. The parameter
+ * itself names nothing this op can act on and is read only to keep the wire
+ * shape.
+ *
+ * UTILITY, not NONE. It takes no file and names nothing belonging to the
+ * caller: it makes the WHOLE medium commit, and every program on the machine
+ * pays for the pause. A program that wants its own writing to be durable has
+ * the operation that was built for it — storage.anchor (OP_AUTH_APP) does
+ * tagfs_sync() and this flush together and then tells the file's watchers —
+ * so nothing an app can legitimately want is behind this level.
  */
 static int HwDiskFlush(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
@@ -1062,17 +954,30 @@ void HardwareDeckUsbRecoverProof(void)
     kprintf("[USB RECOVER TEST] begin — a controller in service and a volume "
             "on seat %u\n", tagfs_get_seat());
 
-    /* The two that were withdrawn. Their numbers are spent for ever, so the
-     * only right answer the registry can give about them is "no such op". */
-    int gone = 0;
-    if (!OpRegistryLookup(OP_KIND(HARDWARE_DECK_ID, 0x90u))) gone++;
-    if (!OpRegistryLookup(OP_KIND(HARDWARE_DECK_ID, 0x93u))) gone++;
-    if (gone == 2) {
-        kprintf("[USB RECOVER TEST] PASS: the two withdrawn opcodes answer to "
-                "nothing\n");
-    } else {
-        kprintf("[USB RECOVER TEST] FAIL: a withdrawn opcode is registered "
-                "again\n");
+    /* Every number this deck has withdrawn, not just the USB pair — the ports,
+     * the lines and the halt went the same way and are spent for the same
+     * reason (see the account above the Disk section). The only right answer
+     * the registry can give about any of them is "no such op", and the one
+     * that matters is the number, so they are written out as numbers here:
+     * the names are gone from the header on purpose and must not come back
+     * just to be tested against. */
+    static const uint16_t retired[] = {
+        0x20u, 0x21u, 0x22u, 0x23u, 0x24u, 0x25u,        /* hw.port.*   */
+        0x30u, 0x31u, 0x32u, 0x33u, 0x34u, 0x35u, 0x36u, /* hw.irq.*    */
+        0x40u,                                           /* hw.cpu.halt */
+        0x90u, 0x93u,                                    /* hw.usb.init, .stop */
+    };
+    size_t reissued = 0;
+    for (size_t i = 0; i < sizeof(retired) / sizeof(retired[0]); i++) {
+        if (OpRegistryLookup(OP_KIND(HARDWARE_DECK_ID, retired[i]))) {
+            kprintf("[USB RECOVER TEST] FAIL: retired opcode 0x%x is "
+                    "registered again\n", (unsigned)retired[i]);
+            reissued++;
+        }
+    }
+    if (reissued == 0) {
+        kprintf("[USB RECOVER TEST] PASS: all %zu withdrawn opcodes answer to "
+                "nothing\n", sizeof(retired) / sizeof(retired[0]));
     }
 
     const OpRegistration *reg =
@@ -1119,6 +1024,16 @@ void HardwareDeckUsbRecoverProof(void)
 /* =========================================================================
  *  Debug print — serial output from userspace via kernel kprintf
  *  HW_DEBUG_PRINT  in_crate: NUL-terminated string (max 256 bytes)
+ *
+ *  APP, not NONE. What this writes goes into the same log ring the kernel
+ *  writes its own account into, and that ring is what the Wire reads out of
+ *  COM1 and what `logsave` writes down — on a board it is the only report
+ *  that comes back. Every boxlib program can reach it, because boxlib's own
+ *  refusal paths speak through kdbg_print and the plainest program on the
+ *  volume carries `app`; nothing below that has any business in the kernel's
+ *  record of itself, and a frozen process (AUTH_TAG_STOPPED) now cannot write
+ *  there at all, which at NONE it could — auth_level_permits answers a NONE
+ *  op before it ever looks at the stopped bit.
  * ========================================================================= */
 
 static int HwDebugPrint(const ManifestOp *op, Crate *crates, uint16_t crate_count,
@@ -1242,26 +1157,13 @@ error_t HardwareDeckRegister(void)
         { HW_RTC_GET_TIME,       HwRtcGetTime,       OP_AUTH_NONE,   "hw.rtc.time"      },
         { HW_RTC_GET_UNIX64,     HwRtcGetUnix64,     OP_AUTH_NONE,   "hw.rtc.unix64"    },
         { HW_RTC_GET_UPTIME,     HwRtcGetUptime,     OP_AUTH_NONE,   "hw.rtc.uptime"    },
-        /* Port I/O: arbitrary I/O space access — system+ only. */
-        { HW_PORT_INB,           HwPortInb,          OP_AUTH_SYSTEM, "hw.port.inb"      },
-        { HW_PORT_OUTB,          HwPortOutb,         OP_AUTH_SYSTEM, "hw.port.outb"     },
-        { HW_PORT_INW,           HwPortInw,          OP_AUTH_SYSTEM, "hw.port.inw"      },
-        { HW_PORT_OUTW,          HwPortOutw,         OP_AUTH_SYSTEM, "hw.port.outw"     },
-        { HW_PORT_INL,           HwPortInl,          OP_AUTH_SYSTEM, "hw.port.inl"      },
-        { HW_PORT_OUTL,          HwPortOutl,         OP_AUTH_SYSTEM, "hw.port.outl"     },
-        /* IRQ control: privileged. */
-        { HW_IRQ_ENABLE,         HwIrqEnable,        OP_AUTH_SYSTEM, "hw.irq.enable"    },
-        { HW_IRQ_DISABLE,        HwIrqDisable,       OP_AUTH_SYSTEM, "hw.irq.disable"   },
-        { HW_IRQ_GET_ISR,        HwIrqGetIsr,        OP_AUTH_SYSTEM, "hw.irq.isr"       },
-        { HW_IRQ_GET_IRR,        HwIrqGetIrr,        OP_AUTH_SYSTEM, "hw.irq.irr"       },
-        { HW_IRQ_SEND_EOI,       HwIrqSendEoi,       OP_AUTH_SYSTEM, "hw.irq.eoi"       },
-        /* CPU halt: privileged (would freeze the system if app called it). */
-        { HW_CPU_HALT,           HwCpuHalt,          OP_AUTH_SYSTEM, "hw.cpu.halt"      },
-        /* Disk: info is read-only; flush is cooperative — both NONE. */
+        /* Disk: info is the drive as the driver already knows it, so anyone
+         * may ask. flush commits the whole medium on one caller's say-so —
+         * see HwDiskFlush for why that is a utility's act and not an app's. */
         { HW_DISK_INFO,          HwDiskInfo,         OP_AUTH_NONE,   "hw.disk.info"     },
-        { HW_DISK_FLUSH,         HwDiskFlush,        OP_AUTH_NONE,   "hw.disk.flush"    },
-        /* Keyboard: anyone reading their own focused input. */
-        /* VGA: cosmetic, anyone. */
+        { HW_DISK_FLUSH,         HwDiskFlush,        OP_AUTH_UTILITY,"hw.disk.flush"    },
+        /* VGA: cosmetic and bounded, so anyone — except paint, which is
+         * neither. See HwVgaPaint. */
         { HW_VGA_PUTCHAR,        HwVgaPutChar,       OP_AUTH_NONE,   "hw.vga.putchar"   },
         { HW_VGA_PUTSTRING,      HwVgaPutString,     OP_AUTH_NONE,   "hw.vga.putstring" },
         { HW_VGA_CLEAR_SCREEN,   HwVgaClearScreen,   OP_AUTH_NONE,   "hw.vga.clear"     },
@@ -1274,12 +1176,12 @@ error_t HardwareDeckRegister(void)
         { HW_VGA_SCROLL_UP,      HwVgaScrollUp,      OP_AUTH_NONE,   "hw.vga.scroll"    },
         { HW_VGA_NEWLINE,        HwVgaNewline,       OP_AUTH_NONE,   "hw.vga.newline"   },
         { HW_VGA_GET_DIMENSIONS, HwVgaGetDimensions, OP_AUTH_NONE,   "hw.vga.dims"      },
-        { HW_VGA_PAINT,          HwVgaPaint,         OP_AUTH_NONE,   "hw.vga.paint"     },
+        { HW_VGA_PAINT,          HwVgaPaint,         OP_AUTH_UTILITY,"hw.vga.paint"     },
         { HW_VGA_STEP_CURSOR,    HwVgaStepCursor,    OP_AUTH_NONE,   "hw.vga.step"      },
         /* System power: only system-tagged processes can reboot/shutdown. */
         { HW_SYSTEM_REBOOT,      HwSystemReboot,     OP_AUTH_SYSTEM, "hw.system.reboot"  },
         { HW_SYSTEM_SHUTDOWN,    HwSystemShutdown,   OP_AUTH_SYSTEM, "hw.system.shutdown"},
-        { HW_DEBUG_PRINT,        HwDebugPrint,       OP_AUTH_NONE,   "hw.debug.print"    },
+        { HW_DEBUG_PRINT,        HwDebugPrint,       OP_AUTH_APP,    "hw.debug.print"    },
         { HW_LOG_READ,           HwLogRead,          OP_AUTH_UTILITY,"hw.log.read"       },
         { HW_LOG_PREVIOUS,       HwLogPrevious,      OP_AUTH_UTILITY,"hw.log.previous"   },
         /* USB: hardware control, system+. Nothing here can leave a controller
@@ -1305,7 +1207,7 @@ error_t HardwareDeckRegister(void)
             return rc;
         }
     }
-    debug_printf("[HardwareDeck] registered %zu ops (full surface, gated)\n",
+    debug_printf("[HardwareDeck] registered %zu named operations\n",
                  sizeof(table) / sizeof(table[0]));
     return OK;
 }

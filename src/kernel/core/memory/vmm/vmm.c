@@ -2968,13 +2968,64 @@ bool vmm_is_mapped(vmm_context_t *ctx, uintptr_t virt_addr)
     return vmm_virt_to_phys(ctx, virt_addr) != 0;
 }
 
+/*
+ * vmm_user_page_state — what already lives at `page_addr` in a cabin, judged
+ * against the terms `vmm_ensure_user_page` was asked for.
+ *
+ *    1  a present leaf maps it, user-accessible, and writable if that was asked
+ *    0  nothing maps it — the caller may map it
+ *   -1  something maps it, but NOT on those terms
+ *
+ * The walk is vmm_get_leaf_pte, not vmm_get_pte, so a 2 MiB or 1 GiB leaf
+ * counts as the mapping it is instead of being reported absent — reporting it
+ * absent is what would send vmm_get_or_create_pte into vmm_demote_large_entry
+ * and split a live huge mapping on a path meant only to fill a hole.
+ *
+ * The -1 case is the one that matters for safety. `writable` is not decoration:
+ * the caller's next move is to write into that page through the Pull Map alias,
+ * which is supervisor-writable and carries no U/S, so the hardware checks
+ * neither the cabin's R/W bit nor CR0.WP nor CR4.SMAP on that store (Intel SDM
+ * Vol 3A §5.6/§5.6.1 — access rights belong to the translation the store
+ * actually uses). Answering "already there" for a page the cabin holds
+ * read-only therefore hands the kernel's own pen to whoever chose the address.
+ * Both callers choose it from a ring header the cabin can write: the slot VA is
+ * hdr.slots_base + (idx % hdr.slot_count_max) * hdr.slot_size, and all three of
+ * those fields live in the header page that vmm_map_result_ring /
+ * vmm_map_touch_ring map PRESENT|WRITABLE|USER. A cabin that points slots_base
+ * at its ClockBoard page (PRESENT|USER, deliberately not WRITABLE, one physical
+ * frame shared by every cabin and written by the timer) would otherwise have
+ * the kernel publish a 32-byte slot straight into it.
+ */
+static int vmm_user_page_state(vmm_context_t *ctx, uintptr_t page_addr, bool writable)
+{
+    uint8_t level = 0;
+    pte_t *leaf = vmm_get_leaf_pte(ctx, page_addr, &level);
+    if (!leaf || level == 0) return 0;
+
+    pte_t entry = __atomic_load_n(leaf, __ATOMIC_ACQUIRE);
+    if (!(entry & VMM_FLAG_PRESENT)) return 0;
+    if (!(entry & VMM_FLAG_USER)) return -1;
+    if (writable && !(entry & VMM_FLAG_WRITABLE)) return -1;
+    return 1;
+}
+
 int vmm_ensure_user_page(vmm_context_t *ctx, uintptr_t user_vaddr, bool writable)
 {
     if (!ctx) return -1;
 
     uintptr_t page_addr = user_vaddr & ~(VMM_PAGE_SIZE - 1);
-    if (vmm_is_mapped(ctx, page_addr)) {
-        return 0;
+    int state = vmm_user_page_state(ctx, page_addr, writable);
+    if (state == 1) return 0;
+    if (state < 0) {
+        /* Mapped, but not on the terms asked for. Refuse rather than map over
+         * it or write through it: see vmm_user_page_state. Quiet on release —
+         * an unprivileged cabin can provoke this at will by pointing its ring
+         * header at a page it holds read-only, and the caller says the refusal
+         * out loud in its own words (krp_refused / g_ktr_map_fail). */
+        debug_printf("[VMM] ensure-user-page refuse: cabin page 0x%lx is mapped but not %s\n",
+                     (unsigned long)page_addr,
+                     writable ? "user-writable" : "user-accessible");
+        return -1;
     }
 
     void *phys = pmm_alloc_zero(1);
@@ -2985,16 +3036,13 @@ int vmm_ensure_user_page(vmm_context_t *ctx, uintptr_t user_vaddr, bool writable
 
     vmm_map_result_t r = vmm_map_page(ctx, page_addr, (uintptr_t)phys, flags);
     if (!r.success) {
-        /* Race tolerance: another producer mapped the same page between
-         * our vmm_is_mapped probe and vmm_map_page. vmm_map_page rejects
-         * the duplicate; free our spare phys page and report success if
-         * the page is now genuinely mapped. Without this, MPSC producers
-         * landing on a fresh slot page will see spurious failures. */
+        /* Race tolerance: another producer mapped the same page between our
+         * probe and vmm_map_page. vmm_map_page rejects the duplicate; free our
+         * spare phys page and report success only if what the winner installed
+         * carries the same terms. Without this, MPSC producers landing on a
+         * fresh slot page will see spurious failures. */
         pmm_free(phys, 1);
-        if (vmm_is_mapped(ctx, page_addr)) {
-            return 0;
-        }
-        return -1;
+        return vmm_user_page_state(ctx, page_addr, writable) == 1 ? 0 : -1;
     }
     return 0;
 }
@@ -4425,26 +4473,6 @@ void *vmm_translate_user_addr(vmm_context_t *ctx, uintptr_t user_vaddr, size_t s
          * NULL). Canary is debug-gated: quiet on release, and NOT a production
          * tripwire precisely because the selftest deliberately exercises it. */
         debug_printf("[VMM] straddle-reject: vaddr=0x%lx size=%zu leaves its mapping after %zu bytes; use crate_read/crate_write or vmm_user_buf_* (page-walked)\n",
-                     (unsigned long)user_vaddr, size, span);
-        return NULL;
-    }
-
-    return kaddr;
-}
-
-void *vmm_translate_user_addr_w(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size)
-{
-    if (size == 0)
-        return NULL;
-
-    size_t span = 0;
-    void *kaddr = vmm_user_window(ctx, user_vaddr, true, &span);
-    if (!kaddr)
-        return NULL;
-
-    if (size > span)
-    {
-        debug_printf("[VMM] straddle-reject (write): vaddr=0x%lx size=%zu leaves its mapping after %zu bytes; use vmm_user_buf_commit_out (page-walked)\n",
                      (unsigned long)user_vaddr, size, span);
         return NULL;
     }

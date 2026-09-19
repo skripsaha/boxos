@@ -59,7 +59,7 @@ typedef struct __attribute__((packed, aligned(4))) {
 
 /* Backing pages — kept across the kernel lifetime. */
 static uint64_t                   s_pvti_page_phys   = 0;
-static pvclock_vcpu_time_info_t  *s_pvti_array       = NULL;  /* size = MAX_CORES */
+static pvclock_vcpu_time_info_t  *s_pvti_array       = NULL;  /* PVCLOCK_MAX_SLOTS entries */
 static uint64_t                   s_wall_page_phys   = 0;
 static pvclock_wall_clock_t      *s_wall             = NULL;
 

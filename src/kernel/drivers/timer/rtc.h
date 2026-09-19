@@ -30,7 +30,16 @@ typedef struct __attribute__((packed)) {
 _Static_assert(sizeof(BoxTime) == 20, "BoxTime must be 20 bytes");
 
 void     rtc_init(void);
+
+/* The calendar fields, or the declared absence of them. On a machine with no
+ * wall clock — the FADT says there is no CMOS RTC, Register D says the part
+ * lost power, the CMOS never answered, or what it answered did not decode
+ * inside the registers' own ranges — every field is written zero. Month 0 is
+ * not a date any reading can produce, and seconds == 0 is the same "unknown"
+ * the whole tree already reads off boot_unix_secs. */
 void     rtc_get_boxtime(BoxTime* out);
+
+/* Seconds since 1970, or 0 when this machine has no wall clock. */
 uint64_t rtc_get_unix64(void);
 uint64_t rtc_get_uptime_ns(void);
 

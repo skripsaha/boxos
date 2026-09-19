@@ -457,14 +457,62 @@ error_t ProcAuthSelfTest(void)
     return OK;
 }
 
-/* SysProcSpawn loads a process from a caller-supplied physical-address ELF blob
- * with caller-supplied tags. proc_authorize_tag_grant gates those tags so a
- * spawned child can never gain an auth privilege the spawner itself lacks
- * (child auth-level ⊆ spawner auth-level; god may grant anything). Without this
- * a utility caller could spawn a "god" child (a phys address is obtainable via
- * the app-level MEMTAG_INFO base_phys field), i.e. utility→god escalation. */
+/* One voice for the refusal, because the spawn asks the same question twice —
+ * once of the image's head before it commits any memory, once of the whole
+ * range afterwards — and a caller that is told "not yours" should hear it said
+ * the same way whichever ask caught it. kprintf, not debug_printf: on a board
+ * this is the only trace that ring 3 reached for memory it does not hold. */
+static error_t SpawnRefuseForeignMemory(const process_t *proc, uint64_t va,
+                                        uint64_t size, error_t why)
+{
+    kprintf("[Spawn] pid %u may not spawn from 0x%llx..0x%llx: that is not "
+            "its cabin's memory\n",
+            proc->pid, (unsigned long long)va,
+            (unsigned long long)(va + size));
+    return why;
+}
+
+/* SysProcSpawn starts a process from an ELF image the caller is holding IN ITS
+ * OWN CABIN, with caller-supplied tags. Two gates, and each answers a different
+ * question about the same call:
+ *
+ *   MAY YOU CONFER THIS?  proc_authorize_tag_grant, so a spawned child can never
+ *   gain an auth privilege the spawner itself lacks (child auth-level ⊆ spawner
+ *   auth-level; god may grant anything) — otherwise a utility caller mints a
+ *   "god" child and that is utility→god escalation.
+ *
+ *   IS THIS YOURS?  the calling cabin's own page tables. The image is named by a
+ *   VIRTUAL address in that cabin and taken through vmm_user_buf_in_into, which
+ *   walks those tables leaf by leaf and stops on the first leaf the cabin does
+ *   not hold with the USER bit. What ring 3 cannot reach by running, it cannot
+ *   name here either — the check needs no list and cannot go stale, because it
+ *   consults the same structure the hardware consults.
+ *
+ * ‼ WHY THE ADDRESS IS NO LONGER PHYSICAL. This op used to take a physical
+ * address straight out of the op parameters, check only its page alignment and
+ * a 4 GiB ceiling, and hand vmm_phys_to_virt() of it to the ELF parser. Nothing
+ * asked whose memory it was. Ring 3 can read any region's base_phys through the
+ * app-level MEMTAG_INFO, so a utility process could aim the spawn at kernel
+ * memory and receive it mapped into a child it owns: kernel memory read out of
+ * ring 3 in three operations. A physical address is not a name ring 3 is
+ * entitled to speak. A virtual address in its own cabin is the only naming it
+ * owns, and that naming is self-limiting, which is why the parameter is now one.
+ *
+ * MemTag was the other candidate and answers a different question. Cabin pages
+ * reach the registry through MemTagApplyByPhys, which creates regions with
+ * ctx == NULL and MEMTAG_REGION_FLAG_PHYSICAL (memtag.c), so MemRegion.ctx never
+ * names a cabin and could not be compared against this caller's. And
+ * MemRegionAccessAllowed is guard-tag policy, which by construction permits
+ * everything while no tag is a guard ("zero guards → zero enforcement",
+ * memtag.h) — fail-open, i.e. on a stock boot it would be a check that refuses
+ * nothing. The page tables are the record of ownership that is always populated
+ * and always fails closed. */
 /* SYSTEM_OP_PROC_SPAWN
- *   params:  [u64 binary_phys][u64 binary_size]
+ *   params:  [u64 binary_va][u64 binary_size] — binary_va is an address in the
+ *            CALLING cabin, at any alignment; the whole range must be mapped to
+ *            it. Not page-aligned by requirement: the walk copies a partial
+ *            first and last leaf, so alignment buys nothing and would only
+ *            force callers to move an image they already hold.
  *   in_crate: tags string (NUL-bounded)
  *   out_crate (optional): u32 new_pid
  *   A blob spawn carries no Luggage: nobody types a line at a binary in
@@ -473,19 +521,29 @@ static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_coun
                         const OpContext *ctx)
 {
     (void)crate_count;
-    if (!ctx || !ctx->proc)               return ERR_INVALID_ARGUMENT;
+    if (!ctx || !ctx->proc || !ctx->proc->cabin || !ctx->proc->cabin->vmm)
+        return ERR_INVALID_ARGUMENT;
     if (op->param_size < 16)              return ERR_INVALID_ARGUMENT;
     if (op->in_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
 
-    uint64_t binary_phys, binary_size;
-    memcpy(&binary_phys, op->params,     sizeof(uint64_t));
+    uint64_t binary_va, binary_size;
+    memcpy(&binary_va,   op->params,     sizeof(uint64_t));
     memcpy(&binary_size, op->params + 8, sizeof(uint64_t));
 
-    if (binary_phys == 0 || binary_size == 0)            return ERR_INVALID_ARGUMENT;
-    if (binary_phys & 0xFFF)                              return ERR_ALIGNMENT;
-    if (binary_phys > 0x100000000ULL)                     return ERR_INVALID_ARGUMENT;
-    if (binary_size > CONFIG_PROC_MAX_BINARY_SIZE)        return ERR_BINARY_TOO_LARGE;
-    if (process_get_count() >= PROCESS_MAX_COUNT)         return ERR_PROCESS_LIMIT_EXCEEDED;
+    if (binary_size == 0)                          return ERR_INVALID_ARGUMENT;
+    if (binary_size > CONFIG_PROC_MAX_BINARY_SIZE) return ERR_BINARY_TOO_LARGE;
+    /* The whole image lies inside the cabin's canonical user half — the same
+     * range SysStrandPoolBind holds a pool VA to, and bounded the same way:
+     * the address is pinned inside the half ON ITS OWN, before anything is
+     * added to it. Capping only the size would not do it — 0xFFFF...FFC0 plus
+     * 64 is 0, which is below every ceiling, so a sum-only test hands ring 3
+     * a kernel address it chose. The length is then asked as a subtraction
+     * from the ceiling, which cannot wrap because binary_va is already under
+     * it. */
+    if (binary_va <= CABIN_NULL_TRAP_END ||
+        binary_va >= CABIN_USER_VA_CANONICAL_END)              return ERR_INVALID_ADDRESS;
+    if (binary_size > CABIN_USER_VA_CANONICAL_END - binary_va) return ERR_INVALID_ADDRESS;
+    if (process_get_count() >= PROCESS_MAX_COUNT)  return ERR_PROCESS_LIMIT_EXCEEDED;
 
     char tags[PROCESS_TAG_SIZE];
     error_t srcrc = sys_crate_string(&crates[op->in_crate], ctx, tags, sizeof(tags));
@@ -496,18 +554,55 @@ static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     error_t gate = proc_authorize_tag_grant(tags, ctx->proc);
     if (gate != OK) return gate;
 
+    /* LOOK AT THE HEAD BEFORE MAKING ROOM FOR THE WHOLE. Both questions this
+     * answers cost one page-table walk and allocate nothing: does the caller
+     * hold the address it named, and is what it holds an ELF at all? Asked in
+     * this order, a caller cannot make the kernel commit up to 64 MiB of
+     * contiguous pages against a size it invented at an address it never
+     * mapped — the staging below is reached only by a call that has already
+     * shown an image. */
+    uint8_t head[16];   /* an ELF opens with a 16-byte e_ident */
+    if (binary_size < sizeof(head)) return ERR_INVALID_ELF;
+
+    error_t peek = vmm_user_buf_in_into(ctx->proc->cabin->vmm,
+                                        (uintptr_t)binary_va,
+                                        sizeof(head), head);
+    if (peek != OK) return SpawnRefuseForeignMemory(ctx->proc, binary_va, binary_size, peek);
+
+    if (head[0] != 0x7F || head[1] != 'E' || head[2] != 'L' || head[3] != 'F')
+        return ERR_INVALID_ELF;
+
+    /* Stage the image out of the caller's cabin. PMM pages rather than kmalloc:
+     * the ceiling is 64 MiB, which is pages, not a slab — the same staging the
+     * volume path (SysProcExecNamed) uses for a file of the same size. The walk
+     * is where ownership is decided, and it happens before any process exists,
+     * so a refusal leaves nothing behind. */
+    size_t   pages      = (size_t)((binary_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
+    void    *stage_phys = pmm_alloc_zero(pages);
+    if (!stage_phys) return ERR_NO_MEMORY;
+    uint8_t *elf = (uint8_t *)vmm_phys_to_virt((uintptr_t)stage_phys);
+
+    /* The head translated, but the tail is a separate claim: a cabin holding
+     * one mapped page does not thereby hold the megabytes behind it. */
+    error_t take = vmm_user_buf_in_into(ctx->proc->cabin->vmm,
+                                        (uintptr_t)binary_va,
+                                        (size_t)binary_size, elf);
+    if (take != OK) {
+        pmm_free(stage_phys, pages);
+        return SpawnRefuseForeignMemory(ctx->proc, binary_va, binary_size, take);
+    }
+
     process_t *new_proc = process_create(tags);
-    if (!new_proc) return ERR_SPAWN_FAILED;
+    if (!new_proc) {
+        pmm_free(stage_phys, pages);
+        return ERR_SPAWN_FAILED;
+    }
     new_proc->cabin->spawner_pid = ctx->proc->pid;
     new_proc->cabin->spawner_gen = pid_generation(ctx->proc->pid);
 
-    const uint8_t *elf = (const uint8_t *)vmm_phys_to_virt(binary_phys);
-    if (binary_size < 16 || elf[0] != 0x7F || elf[1] != 'E' ||
-        elf[2] != 'L' || elf[3] != 'F') {
-        process_destroy(new_proc);
-        return ERR_INVALID_ELF;
-    }
-    if (process_load_binary(new_proc, (void *)elf, (size_t)binary_size) != 0) {
+    int load = process_load_binary(new_proc, elf, (size_t)binary_size);
+    pmm_free(stage_phys, pages);
+    if (load != 0) {
         process_destroy(new_proc);
         return ERR_SPAWN_FAILED;
     }

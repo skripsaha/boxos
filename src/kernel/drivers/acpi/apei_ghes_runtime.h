@@ -21,9 +21,10 @@
  *                            the per-tick cost is one branch when no
  *                            source is due.
  *   NMI    (notify type 4) — apei_ghes_nmi_check() invoked from the NMI
- *                            entry in exception_handler. IRQ-safe;
- *                            defers the actual GESB walk to a K-Core
- *                            worker on the source's knock (baton.h).
+ *                            entry in exception_handler. Reads only what
+ *                            is permanently mapped; defers the actual
+ *                            GESB walk to a K-Core worker on the source's
+ *                            knock (baton.h).
  *   SCI    (notify type 3) — apei_ghes_sci_check() invoked from
  *                            acpi_sci_handler alongside the GPE drain.
  *
@@ -102,13 +103,20 @@ error_t apei_ghes_register_source(uint16_t source_id, bool v2,
  * nothing is due. */
 void apei_ghes_poll_tick(void);
 
-/* NMI-context entry. Walks NMI-notify sources, defers GESB processing
- * on the source's knock (NMI is even more restrictive than #MC IST — must not
- * take spinlocks held by interrupted code, and must not touch a mapping the
- * drain core may be releasing). It reads each source's Error Status Address
- * register and nothing else, so what it returns is "a source names a status
- * block", not "a record is pending" — that question is answered by the walk
- * the knock brings. */
+/* NMI-context entry. Walks NMI-notify sources and defers every GESB WALK
+ * to the source's knock (NMI is even more restrictive than #MC IST — it
+ * must not take a spinlock the interrupted code holds, and it must not
+ * map anything).
+ *
+ * It answers the only question vector 2 needs: DOES A SOURCE HOLD A RECORD
+ * NOBODY HAS CONSUMED. It reads the Error Status Address register, and,
+ * when that register names the block this source already has a window on,
+ * the block's Block Status — two loads that cannot fault, because the
+ * register is mapped once at registration and a window, once published, is
+ * never released. Block Status zero means this NMI belongs to something
+ * else, and the caller is free to say so.
+ *
+ * True therefore means "at least one APEI source owned this NMI". */
 bool apei_ghes_nmi_check(void);
 
 /* SCI-context entry. Called from acpi_sci_handler alongside the GPE

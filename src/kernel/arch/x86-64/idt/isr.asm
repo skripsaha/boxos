@@ -1,9 +1,21 @@
 [BITS 64]
 
+; IA32_GS_BASE — the active GS base, the register RDGSBASE/WRGSBASE reach when
+; CR4.FSGSBASE is on. RDMSR/WRMSR reach it on every long-mode CPU.
+MSR_IA32_GS_BASE equ 0xC0000101
+
 section .text
 
 extern exception_handler
 extern irq_handler
+; Set with RELEASE at the bottom of per_core_init_bsp, i.e. after that core's
+; LTR. Read here as "this core's task register names a PerCoreData TSS" — see
+; the block above paranoid_isr_common.
+extern g_per_core_active
+; const uint64_t in per_core.c = offsetof(PerCoreData, tss). A symbol, not a
+; build-time -D: the struct is the only place that number is written, so this
+; subtrahend cannot drift away from the layout it belongs to.
+extern PER_CORE_TSS_OFFSET
 
 global isr_table
 
@@ -57,8 +69,8 @@ irq%1:
 ; SDM Vol 3A §6.14.5 hands these five vectors an IST stack regardless of the
 ; interrupted CPL, so they arrive from ring 3 as readily as from ring 0 — and
 ; the two origins want opposite handling. paranoid_isr_common splits them; the
-; block in front of it says why, and what its ring-0 probe can and cannot
-; decide.
+; block in front of it says why, and how a ring-0 entry finds this core's
+; true kernel GS base without asking GS.
 %macro ISR_PARANOID_NOERROR 1
 isr%1:
     endbr64
@@ -284,16 +296,62 @@ isr_common:
 ;
 ; From ring 0, CS.RPL is worthless: the CPU stamps a kernel CS the instant the
 ; gate is taken, so an IST vector landing inside another stub's swapgs window
-; sees RPL 0 while the active base is still the ring-3 one. That is what the
-; RDMSR probe below is for.
+; sees RPL 0 while the active base is still the ring-3 one. And no test on the
+; BASE can separate the two either — a process that writes a canonical-high
+; value with WRGSBASE reads exactly like the kernel. So this path tests
+; nothing about GS. It asks the PROCESSOR where it is:
 ;
-; The entry decision is carried to the exit in a dedicated stack slot pushed
-; just below the standard interrupt_frame_t. The C handler sees the same
-; interrupt_frame_t* as the normal path and never observes the smuggled flag.
+;   STR   this core's task-register selector. Ring 3 cannot write it — LTR is
+;         a CPL-0 instruction and no ring-3 path reloads TR — which is what
+;         makes it an anchor where the GS base is not one.
+;   SGDT  the GDT that selector indexes. Also a register, not memory.
+;
+; The selector names a 64-bit TSS descriptor whose base is &g_per_core[i].tss;
+; PER_CORE_TSS_OFFSET turns that into &g_per_core[i], which IS this core's
+; kernel GS base. Nothing on the way is loaded through an address ring 3 can
+; write: TR and GDTR come out of the CPU, the GDT they name is per-core kernel
+; memory, and PER_CORE_TSS_OFFSET is kernel .rodata.
+;
+; With the true base in hand the entry stops deciding anything: it saves the
+; base as found and installs the kernel one UNCONDITIONALLY, and the exit
+; replays a fact instead of repeating a verdict — Linux's FSGSBASE
+; paranoid_entry / paranoid_exit pair.
+;
+; Not RDGSBASE/WRGSBASE, and not RDPID:
+;   - RDGSBASE/WRGSBASE #UD unless CR4.FSGSBASE=1, and fpu.c sets that bit only
+;     on silicon that enumerates the feature (g_fsgsbase_active mirrors it), so
+;     a pre-Ivy-Bridge board or a QEMU model without FSGSBASE would #UD on its
+;     first NMI. IA32_GS_BASE reached by RDMSR/WRMSR is the same architectural
+;     register and exists on every long-mode CPU. These five vectors are rare;
+;     the MSR cost buys a path with no feature gate in it.
+;   - Linux derives the per-cpu base with RDPID out of TSC_AUX
+;     (GET_PERCPU_BASE). BoxOS never writes TSC_AUX, so that road is closed
+;     here. Do not reopen it without giving TSC_AUX an owner first.
+;
+; Before g_per_core_active the anchor does not exist yet: the BSP still runs on
+; the static GDT/TSS of gdt.c/tss.c, whose base is not inside a PerCoreData at
+; all, and subtracting PER_CORE_TSS_OFFSET from it would name memory that is
+; not per-cpu data. In that window the entry leaves GS alone — and that is not
+; a hole, because no ring-3 context has ever run yet: there is no forged base
+; to mistake for the kernel's and no swapgs window to land in, so the active
+; base is the kernel's by construction. An AP cannot reach this code before its
+; own LTR either: every vector routed here has a non-zero IST in idt_init, and
+; the CPU cannot read an IST pointer through a null task register.
+;
+; The two facts the exit needs — the base as found, and this core's kernel base
+; — ride in two stack slots pushed just below the standard interrupt_frame_t.
+; The C handler sees the same interrupt_frame_t* as the normal path and never
+; observes them.
 ;
 ; Spec refs:
 ;   Intel SDM Vol 2B "SWAPGS"            — exchanges GS base with MSR C0000102H
 ;   Intel SDM Vol 2  "WRFSBASE/WRGSBASE" — exception list; no CPL condition
+;   Intel SDM Vol 2B "STR" / "SGDT"      — task register / GDTR read back
+;   Intel SDM Vol 3A §8.2.3 Figure 8-4   — 64-bit TSS descriptor: base 15:0 at
+;                                          byte 2, base 23:16 at byte 4, base
+;                                          31:24 at byte 7, base 63:32 at bytes
+;                                          8..11 (the same field order
+;                                          per_core_gdt_set_tss writes)
 ;   Intel SDM Vol 3A §6.14.5             — IST delivery, whatever the CPL
 ; =============================================================================
 paranoid_isr_common:
@@ -312,47 +370,9 @@ paranoid_isr_common:
     test byte [rsp + 24], 3
     jnz isr_common
 
-    ; ---- Probe GS.base (ring-0 entry only) ----
-    ; Save scratch regs (RDMSR uses RAX/RCX/RDX).
-    push rax
-    push rcx
-    push rdx
-
-    mov ecx, 0xC0000101     ; IA32_GS_BASE
-    rdmsr                   ; EDX:EAX = current GS.base
-
-    ; Kernel GS.base is canonical-high (bit 63 set → EDX < 0).
-    ; User / zero base is canonical-low (EDX >= 0). Need swap iff base is low.
-    ;
-    ; The sign is evidence only because ring-3 entries never reach here: a
-    ; process that sets its own canonical-high base with WRGSBASE would read as
-    ; the kernel otherwise. One case stays unresolvable — an IST vector landing
-    ; inside a swapgs window opened for such a process, where the active base is
-    ; that forged high value. Deciding it needs this core's TRUE kernel GS base,
-    ; and that cannot be derived without GS: Linux reads it with RDGSBASE +
-    ; GET_PERCPU_BASE off the per-cpu offset table.
-    xor eax, eax
-    test edx, edx
-    setns al                ; al = 1 if EDX non-negative (user/zero) → swap needed
-
-    ; Smuggle the swap flag into the high 32 bits of the saved error_code
-    ; (now at rsp+32 after 3 scratch pushes). The low 32 bits hold the actual
-    ; error code (always fits in 32 bits for #DB/#NMI/#DF/#SS/#MC), the high
-    ; half is currently zero in every case (dummy push from the NOERROR macro
-    ; or zero pushed by the CPU for #DF). We restore the high half before the
-    ; C handler sees the frame.
-    mov [rsp + 32 + 4], eax
-
-    test al, al
-    jz .par_entry_keep_gs
-    swapgs
-.par_entry_keep_gs:
-
-    pop rdx
-    pop rcx
-    pop rax
-
     ; ---- Build interrupt_frame_t (same layout as isr_common) ----
+    ; Nothing below reads %gs, so the GS repair waits until the general
+    ; registers are saved and there is somewhere to work.
     push rax
     push rbx
     push rcx
@@ -369,24 +389,65 @@ paranoid_isr_common:
     push r14
     push r15
 
-    ; Stack now: r15(+0) ... rax(+112) vector(+120) error_code(+128) rip(+136) ...
+    ; Stack now: r15(+0) ... rax(+112) vector(+120) error_code(+128) rip(+136)
+    ;            cs(+144)
 
-    ; Recover the swap flag from the smuggled high half of error_code, then
-    ; zero the high half so the C handler sees a clean 32-bit error code.
-    ; (Using `and qword, 0xFFFFFFFF` would sign-extend the 32-bit immediate
-    ;  to 0xFFFFFFFFFFFFFFFF — a no-op.)
-    mov eax, [rsp + 128 + 4]
-    mov dword [rsp + 128 + 4], 0
+    xor ebx, ebx                    ; rbx = this core's kernel GS base,
+                                    ;       0 = "GS was left as found"
+    xor esi, esi                    ; rsi = GS base as found
+    cmp byte [rel g_per_core_active], 0
+    je .par_gs_settled
 
-    ; Push swap flag as a dedicated slot directly below the frame.
-    ; After this push: [rsp+0] = swap_flag, [rsp+8] = r15, ...
-    push rax
+    ; ---- This core's kernel GS base, out of the CPU's own registers ----
+    str ax                          ; ax = task-register selector
+    test ax, ax
+    jz .par_gs_settled              ; no task loaded: there is no TSS base to
+                                    ; anchor on, and a null selector would name
+                                    ; the null descriptor. Unreachable in
+                                    ; practice — every vector routed here has a
+                                    ; non-zero IST and the CPU cannot read an
+                                    ; IST pointer through a null TR — but the
+                                    ; check costs two bytes and turns that
+                                    ; argument into a fact.
+    movzx eax, ax
+    and eax, 0xFFF8                 ; byte offset of the descriptor in the GDT
+    sub rsp, 16                     ; SGDT stores 10 bytes; 16 keeps rsp even
+    sgdt [rsp]                      ; [rsp] = limit, [rsp+2] = GDT base
+    add rax, [rsp + 2]              ; rax = &TSS descriptor
+    add rsp, 16
 
-    lea rdi, [rsp + 8]      ; arg0 = interrupt_frame_t* (skip the flag slot)
+    movzx ecx, word [rax + 2]       ; base 15:0
+    movzx edx, byte [rax + 4]       ; base 23:16
+    shl edx, 16
+    or ecx, edx
+    movzx edx, byte [rax + 7]       ; base 31:24
+    shl edx, 24
+    or ecx, edx
+    mov edx, [rax + 8]              ; base 63:32
+    shl rdx, 32
+    or rcx, rdx                     ; rcx = &g_per_core[i].tss
+    sub rcx, [rel PER_CORE_TSS_OFFSET]  ; rcx = &g_per_core[i] = kernel GS base
+    mov rbx, rcx
 
-    ; 16-byte align per SysV AMD64 ABI §3.2 before `call`. After 16 qword
-    ; pushes (15 GPRs + flag) on top of an already-aligned CPU frame, we are
-    ; aligned; the dynamic correction below is defensive and zero-cost.
+    ; ---- Save the base as found, install the kernel one unconditionally ----
+    mov ecx, MSR_IA32_GS_BASE
+    rdmsr                           ; EDX:EAX = GS base at the moment of entry
+    shl rdx, 32
+    or rax, rdx
+    mov rsi, rax
+
+    mov rax, rbx
+    mov rdx, rbx
+    shr rdx, 32
+    wrmsr                           ; active GS base = this core's PerCoreData
+
+.par_gs_settled:
+    push rbx                        ; slot: kernel GS base (0 = left as found)
+    push rsi                        ; slot: GS base as found
+
+    lea rdi, [rsp + 16]     ; arg0 = interrupt_frame_t* (skip the two slots)
+
+    ; 16-byte align per SysV AMD64 ABI §3.2 before `call`.
     mov rax, rsp
     and rax, 15
     sub rsp, rax
@@ -399,7 +460,8 @@ paranoid_isr_common:
     pop rax
     add rsp, rax            ; undo alignment correction
 
-    pop rax                 ; rax = entry swap_flag
+    pop rsi                 ; rsi = GS base as found at entry
+    pop rbx                 ; rbx = this core's kernel GS base
 
     ; ---- Leave the GS state the FRAME is about to return to. ----
     ; Two facts, not one. Replaying the entry decision is only sound where the
@@ -409,21 +471,46 @@ paranoid_isr_common:
     ; kernel-stack-overflow recovery in idt.c calls schedule(frame), and
     ; context_restore_to_frame writes frame->cs — so a kernel-mode entry can
     ; come out as a ring-3 frame.
-    ;   returning to ring 3 -> the user base must be active: swap.
-    ;   returning to ring 0 -> keep the per-cpu base, unless we swapped on
-    ;     entry, in which case we are handing back the swapgs window we
-    ;     interrupted and must return it exactly as we found it.
-    ; This runs before pop r15..rax so the register restore may clobber the
-    ; flag; swapgs touches MSR state only, not GPRs. After the flag pop the CPU
-    ; frame sits at: r15(+0) .. rax(+112) vector(+120) err(+128) rip(+136)
-    ; cs(+144).
+    ;   ring 0 -> the interrupted code owns whatever base it had: write back
+    ;     exactly what was found and leave the shadow alone. A swapgs window we
+    ;     landed inside is handed back open, as we found it. If the entry took
+    ;     no base (rbx = 0) there is nothing to put back either.
+    ;   ring 3 -> the crossing must end with the user base active and the
+    ;     kernel base in the shadow (notify.h). Out of ordinary kernel context
+    ;     (found base == kernel base) the shadow holds the user base and
+    ;     swapgs is the crossing — and that is also the case when the entry
+    ;     took no base at all, because then GS was never disturbed and the
+    ;     shadow still holds what the last crossing parked there. Out of an
+    ;     interrupted swapgs window (found base != kernel base) the shadow
+    ;     ALREADY holds the kernel base and the found base IS the user one, so
+    ;     writing it back is the whole crossing — a swapgs there would hand
+    ;     ring 3 this core's per-cpu data.
+    ; The ring is therefore decided FIRST: a frame rewritten to ring 3 must
+    ; cross whatever the entry did or did not do to GS.
+    ; This runs before pop r15..rax so the register restore may clobber
+    ; rsi/rbx; swapgs and WRMSR touch MSR state only, not the frame. After the
+    ; two slot pops the CPU frame sits at: r15(+0) .. rax(+112) vector(+120)
+    ; err(+128) rip(+136) cs(+144).
     test byte [rsp + 144], 3
-    jnz .par_exit_swap_gs
-    test al, al
-    jz .par_exit_keep_gs
-.par_exit_swap_gs:
+    jz .par_exit_ring0
+    test rbx, rbx
+    jz .par_exit_swapgs     ; entry left GS as found; the shadow is untouched
+    cmp rsi, rbx
+    je .par_exit_swapgs     ; ordinary kernel context
+    jmp .par_exit_restore   ; interrupted swapgs window: found base is the user one
+.par_exit_ring0:
+    test rbx, rbx
+    jz .par_exit_gs_done    ; entry left GS as found; so does the exit
+.par_exit_restore:
+    mov ecx, MSR_IA32_GS_BASE
+    mov rax, rsi
+    mov rdx, rsi
+    shr rdx, 32
+    wrmsr
+    jmp .par_exit_gs_done
+.par_exit_swapgs:
     swapgs
-.par_exit_keep_gs:
+.par_exit_gs_done:
 
     pop r15
     pop r14

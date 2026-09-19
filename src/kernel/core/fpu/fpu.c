@@ -65,26 +65,18 @@ bool fpu_xsave_register_extension(uint64_t xcr0_bit, const char *name) {
     uint32_t eax, ebx, ecx, edx;
     cpuid_count(0xD, 0, &eax, &ebx, &ecx, &edx);
 
-    uint32_t old_size = g_xsave_area_size;
     g_xsave_mask = new_mask;
     g_xsave_area_size = ebx;
 
-    /* kprintf, not debug_printf: this is the same number enable_fpu puts on
-     * the console and for the same reason — it sizes every per-process FPU
-     * buffer, and once the buffer passes SLAB_LARGE_THRESHOLD the allocation
-     * moves from the growable slab to the fixed kernel pool. Registering a
-     * component here SUPERSEDES the number enable_fpu printed, so leaving the
-     * new one in debug_printf means the board only ever shows the stale one.
-     * Printed only when the size actually moves, so a no-op re-registration
-     * on a later core stays quiet. */
-    if (g_xsave_area_size != old_size) {
-        kprintf("[FPU] XSAVE component %s registered: XCR0=0x%lx, "
-                "area_size=%u bytes (per-process buffer %u)\n",
-                name ? name : "?",
-                (unsigned long)g_xsave_mask,
-                (unsigned)g_xsave_area_size,
-                (unsigned)g_xsave_area_size + 63u);
-    }
+    /* debug_printf, deliberately: this runs on every AP inside
+     * per_core_init_ap (vmm_pku_ap_init), where enable_fpu has just
+     * republished g_xsave_mask without PKRU, so the registration is a real
+     * one on each core and not a no-op that could be filtered out. Nothing
+     * else in that stretch of AP bring-up writes to the console. */
+    debug_printf("[FPU] xsave_register(%s): XCR0=0x%lx area_size=%u\n",
+                 name ? name : "?",
+                 (unsigned long)g_xsave_mask,
+                 (unsigned)g_xsave_area_size);
     return true;
 }
 

@@ -169,6 +169,20 @@ static uint32_t known_intel_crystal_hz(void) {
          * CPUID_LEAF_FREQ for the calculation below, so hardcode the
          * 25MHz crystal clock." */
         case 0x5F:
+        /* Skylake server / Xeon Scalable (0x55) — 25 MHz, and NOT the
+         * 24 MHz of the Skylake CLIENT parts below, which is where this
+         * entry sat until 2026-09 and calibrated every Xeon SP that
+         * reports ECX = 0 four per cent low. Upstream grouped it with
+         * Denverton for exactly that reason while it still carried a
+         * table (linux v4.14 arch/x86/kernel/tsc.c: "case
+         * INTEL_FAM6_SKYLAKE_X: case INTEL_FAM6_ATOM_DENVERTON:
+         * crystal_khz = 25000;"), and Intel SDM Vol. 3B, Nominal Core
+         * Crystal Clock Frequency, names 25 MHz for CPUID signature
+         * 06_55H. Current linux carries no table and derives this part
+         * from CPUID.16h instead; the entry stays because this driver
+         * consults the table first, where a named exact number beats a
+         * derivation rounded through whole-MHz base frequency. */
+        case 0x55:
             return 25000000u;          /* 25 MHz */
         /* Goldmont (0x5C) and Goldmont Plus (0x7A) — Atom client.
          * Tremont-D / Snow Ridge (0x86) is deliberately NOT here: no
@@ -180,7 +194,6 @@ static uint32_t known_intel_crystal_hz(void) {
             return 19200000u;          /* 19.2 MHz */
         /* Skylake, Kaby Lake, Comet Lake, Ice Lake, Tiger Lake, ... */
         case 0x4E: case 0x5E:                /* Skylake client */
-        case 0x55:                            /* Skylake server (Xeon SP) */
         case 0x66:                            /* Cannon Lake */
         case 0x7D: case 0x7E:                /* Ice Lake client */
         case 0x6A: case 0x6C:                /* Ice Lake server */

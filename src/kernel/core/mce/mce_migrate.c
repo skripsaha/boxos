@@ -167,14 +167,15 @@ void mce_migrate_init(void) {
  *     skipped, non-ACTIVE attaches are skipped, and the attach snapshot is
  *     bounded. A cabin left behind still maps the poisoned frame, touches
  *     it, and raises a fresh #MC on the same address minutes later.
- * Either way the second migration copies the STILL-POISONED old frame into
- * a fresh page and, unchecked, would CAS it over PTEs that have pointed at
- * the first replacement ever since — reverting every write the cabin made
- * in between and orphaning the first replacement, which nothing would then
- * free. With the check, the second migration's swaps all fail, it counts
- * zero cabins, returns its replacement page to the PMM and says so. The
- * same check is what keeps an unrelated mapping safe when a cabin unmapped
- * and remapped that VA between the snapshot and this call.
+ * Either way the second migration reads the STILL-POISONED old frame and,
+ * unchecked, would CAS a copy of it over PTEs that have pointed at the
+ * first replacement ever since — reverting every write the cabin made in
+ * between and orphaning the first replacement, which nothing would then
+ * free. With the check, no swap of a frame that has already moved can
+ * succeed. The same check is what keeps an unrelated mapping safe when a
+ * cabin unmapped and remapped that VA between the snapshot and this call.
+ * mce_pte_names_frame below asks the same question one step earlier, so
+ * that such a report also costs no page and no read of the bad line.
  */
 static bool mce_swap_pte(void *ctx_ptr, uintptr_t va, uintptr_t expect_phys,
                           uintptr_t new_phys, bool *out_was_2m) {
@@ -211,6 +212,42 @@ static bool mce_swap_pte(void *ctx_ptr, uintptr_t va, uintptr_t expect_phys,
         }
         /* CAS failed; `old` now reflects the latest PTE — retry. */
     }
+}
+
+/* Does the leaf PTE at (ctx, va) name `phys` right now?
+ *
+ * The same question mce_swap_pte asks inside its CAS, asked once BEFORE a
+ * replacement page is allocated. The CAS check is what makes a duplicate
+ * report harmless; this one is what makes it cheap. One physical error is
+ * reported more than once as a matter of course — the reasons are listed
+ * above mce_swap_pte — and without this question every repeat allocates a
+ * page and runs mce_safe_page_copy across the still-poisoned frame, i.e.
+ * reads the bad cache line 4096 bytes' worth again, before every swap fails
+ * and the page is handed straight back. On a broadcast #MC that is N-1
+ * pointless reads of a line the processor has already said it cannot read.
+ *
+ * The answer can go stale between here and the swap. That is exactly what
+ * the expected-frame check inside the CAS loop is for; this one decides
+ * only whether there is any work worth preparing for. */
+static bool mce_pte_names_frame(void *ctx_ptr, uintptr_t va, uintptr_t phys,
+                                bool *out_was_2m) {
+    vmm_context_t *ctx = (vmm_context_t *)ctx_ptr;
+    if (!ctx) return false;
+    if (out_was_2m) *out_was_2m = false;
+
+    uint8_t level = 0;
+    pte_t *pte = vmm_get_leaf_pte(ctx, va, &level);
+    if (!pte) return false;
+
+    if (level != 1) {
+        if (out_was_2m) *out_was_2m = true;
+        return false;
+    }
+
+    const uint64_t addr_mask = vmm_get_addr_mask();
+    pte_t cur = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
+    if (!(cur & VMM_FLAG_PRESENT)) return false;
+    return ((uint64_t)cur & addr_mask) == ((uint64_t)phys & addr_mask);
 }
 
 /* ─── Safe-copy with nested-#MC detection ───────────────────────── */
@@ -322,36 +359,16 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
         return 0;
     }
 
-    /* 3. Allocate ONE replacement phys page. Same page for every
-     * attached cabin — preserves Bay shared semantics by construction.
-     * We use PHYS_TAG_USER (mid zone) which is where typical Bay/Brook
-     * buffers live. Falling back to any-zone alloc would still work but
-     * crosses NUMA domains. */
-    void *new_phys_ptr = pmm_alloc(1, PHYS_TAG_USER);
-    if (!new_phys_ptr) {
-        /* Try any zone before giving up. */
-        new_phys_ptr = pmm_alloc(1);
-    }
-    if (!new_phys_ptr) {
-        __atomic_fetch_add(&g_stat_failed, 1, __ATOMIC_RELAXED);
-        mce_migrate_payload_t ev = {0};
-        ev.old_phys  = phys;
-        ev.status    = status;
-        ev.region_id = region_id;
-        ev.severity  = (uint8_t)sev;
-        if (g_tag_failed != TOUCH_TAG_INVALID) {
-            TouchPublishId(g_tag_failed, &ev, sizeof(ev), 0u, 0u);
-        }
-        return 0;
-    }
-    uintptr_t new_phys = (uintptr_t)new_phys_ptr;
-
-    /* 4. Safe-copy old → new with nested-#MC abort. */
-    bool copy_clean = mce_safe_page_copy(phys, new_phys);
-
-    /* 5. Walk attachments, swap PTEs in-place. Same new_phys for all
-     * (Bay-correct). Per-attach state machine: 2 MiB leaves are
-     * counted but skipped (Phase 1 only handles 4 KiB).
+    /* 3. Walk attachments, swap PTEs in-place. Per-attach state machine:
+     * 2 MiB leaves are counted but skipped (Phase 1 only handles 4 KiB).
+     *
+     * The replacement page is allocated on the FIRST attach found still
+     * naming the poisoned frame, and one page serves every attach after it
+     * — same frame for all, which is what keeps Bay's shared semantics
+     * intact. Allocating there rather than up front is what makes a
+     * duplicate report free: a frame an earlier migration already moved is
+     * named by no PTE any more, so this run allocates nothing, copies
+     * nothing, and never touches the bad cache line at all.
      *
      * Two migrations of one frame never interleave here: every baton routes
      * to the drain core and that core is the single consumer of its own
@@ -359,8 +376,12 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
      * and the second one finds every PTE already naming the first one's
      * replacement. */
     size_t page_index = (phys - region_base) / PMM_PAGE_SIZE;
-    uint32_t cabins_touched = 0;
-    uint32_t skipped_2m = 0;
+    uint32_t  cabins_touched = 0;
+    uint32_t  skipped_2m     = 0;
+    void     *new_phys_ptr   = NULL;
+    uintptr_t new_phys       = 0;
+    bool      copy_clean     = false;
+    bool      alloc_failed   = false;
 
     for (size_t i = 0; i < n_attach; i++) {
         MemRegionAttach *att = &snap[i];
@@ -379,6 +400,31 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
         uintptr_t target_va = att->va_base + page_index * PMM_PAGE_SIZE;
 
         bool was_2m = false;
+        if (!mce_pte_names_frame(att->ctx, target_va, phys, &was_2m)) {
+            if (was_2m) skipped_2m++;
+            continue;
+        }
+
+        if (new_phys == 0) {
+            /* 3a. ONE replacement phys page for the whole region. We use
+             * PHYS_TAG_USER (mid zone) which is where typical Bay/Brook
+             * buffers live. Falling back to any-zone alloc would still work
+             * but crosses NUMA domains. */
+            new_phys_ptr = pmm_alloc(1, PHYS_TAG_USER);
+            if (!new_phys_ptr) {
+                /* Try any zone before giving up. */
+                new_phys_ptr = pmm_alloc(1);
+            }
+            if (!new_phys_ptr) {
+                alloc_failed = true;
+                break;
+            }
+            new_phys = (uintptr_t)new_phys_ptr;
+
+            /* 3b. Safe-copy old → new with nested-#MC abort. */
+            copy_clean = mce_safe_page_copy(phys, new_phys);
+        }
+
         if (mce_swap_pte(att->ctx, target_va, phys, new_phys, &was_2m)) {
             vmm_shootdown_pages((vmm_context_t *)att->ctx, target_va, 1);
             cabins_touched++;
@@ -391,12 +437,50 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
         __atomic_fetch_add(&g_stat_skipped_2m, skipped_2m, __ATOMIC_RELAXED);
     }
 
+    if (alloc_failed) {
+        /* No page to move the data into. Nothing was swapped: the
+         * allocation is attempted before the first swap and never between
+         * two of them, so the region is left exactly as it was found —
+         * every cabin still maps the poisoned frame, and the PMM poison bit
+         * the #MC handler set is all that stands between that frame and a
+         * future allocation. The failure is counted and published; it is
+         * not silent. */
+        __atomic_fetch_add(&g_stat_failed, 1, __ATOMIC_RELAXED);
+        mce_migrate_payload_t ev = {0};
+        ev.old_phys  = phys;
+        ev.status    = status;
+        ev.region_id = region_id;
+        ev.severity  = (uint8_t)sev;
+        if (g_tag_failed != TOUCH_TAG_INVALID) {
+            TouchPublishId(g_tag_failed, &ev, sizeof(ev), 0u, 0u);
+        }
+        return 0;
+    }
+
+    if (new_phys == 0) {
+        /* The region is alive and attached, but not one attach still maps
+         * this frame — the same fact the n_attach == 0 branch above reports,
+         * found one level deeper. This is where a duplicate report lands:
+         * the first migration moved the frame, every PTE names ITS
+         * replacement, and this run has cost neither a page nor a read of
+         * the poisoned line. */
+        __atomic_fetch_add(&g_stat_no_owner, 1, __ATOMIC_RELAXED);
+        mce_migrate_payload_t ev = {0};
+        ev.old_phys         = phys;
+        ev.status           = status;
+        ev.region_id        = region_id;
+        ev.severity         = (uint8_t)sev;
+        ev.pages_skipped_2m = (uint8_t)(skipped_2m > 255 ? 255 : skipped_2m);
+        if (g_tag_unmapped != TOUCH_TAG_INVALID) {
+            TouchPublishId(g_tag_unmapped, &ev, sizeof(ev), 0u, 0u);
+        }
+        return 0;
+    }
+
     if (cabins_touched == 0) {
-        /* Nothing swapped — return the unused replacement. This is also
-         * where a duplicate report for a frame an earlier migration already
-         * moved lands: every PTE now names that earlier replacement, so
-         * every expected-frame check fails and this run costs one page that
-         * is handed straight back. */
+        /* A page was prepared and every swap still failed: each of those
+         * translations changed between the probe above and the CAS. Return
+         * the unused replacement. */
         pmm_free(new_phys_ptr, 1);
         __atomic_fetch_add(&g_stat_failed, 1, __ATOMIC_RELAXED);
         mce_migrate_payload_t ev = {0};
@@ -413,7 +497,7 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
         return 0;
     }
 
-    /* 6. Publish completed event. */
+    /* 4. Publish completed event. */
     __atomic_fetch_add(&g_stat_completed,      1,              __ATOMIC_RELAXED);
     __atomic_fetch_add(&g_stat_pages_migrated, 1,              __ATOMIC_RELAXED);
     __atomic_fetch_add(&g_stat_cabins_touched, cabins_touched, __ATOMIC_RELAXED);

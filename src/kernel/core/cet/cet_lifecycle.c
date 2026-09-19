@@ -176,10 +176,29 @@ static inline void cet_invlpg(uintptr_t addr) {
 #define CET_U_POLICY_BITS \
     (CET_MSR_SH_STK_EN | CET_MSR_ENDBR_EN | CET_MSR_NO_TRACK_EN)
 
-/* Per-process user shadow stack size. SDM recommends ≥ data stack. Our
- * user stack is currently 16 KiB (4 pages) — SSP matches that ceiling
- * so any depth a process can reach on its data stack is mirrored on
- * its shadow stack without ENDBR-failure overflow. */
+/* Per-process user shadow stack size — 16 KiB, and SMALLER than the data
+ * stack it mirrors. The numbers, checked rather than assumed:
+ *
+ *   data stack   CONFIG_USER_STACK_SIZE_KB = 64 → 16 pages (kernel_config.h)
+ *   shadow stack CET_USER_SSP_PAGES        = 4  → 16 KiB = 2048 slots
+ *
+ * Intel SDM recommends sizing the shadow stack for the deepest call chain
+ * the data stack admits. One 8-byte return address per CALL lands on each
+ * stack, so the shadow stack runs out first whenever the average data-stack
+ * frame is under 32 bytes — a chain of small leafless frames reaches 2048
+ * deep inside 64 KiB. Past that the push lands in the unmapped guard page
+ * below the SSP region (PROCESS_USER_SSP_GUARD_LO_BASE in process.c, and
+ * the [mid guard] page of a strand's hammock slot in cabin_layout.h), so
+ * the failure is a fault on a shadow-stack access, not silent corruption
+ * of a neighbour — but it is a fault the data stack would not have taken.
+ *
+ * 4 is not a free knob: PROCESS_USER_SSP_REGION_SIZE, the hammock slot map
+ * in cabin_layout.h and the ring offsets derived in strand_rings.c all
+ * encode it, with _Static_asserts in process.c holding them together.
+ * Growing the shadow stack to 16 pages is a layout change in those files,
+ * and it is an open question for the owner — not something this constant
+ * can decide alone. Dormant until SHSTK silicon: U_CET.SH_STK_EN only
+ * matters where the CPU advertises shadow stacks. */
 #define CET_USER_SSP_PAGES        4u
 #define CET_USER_SSP_SIZE         (CET_USER_SSP_PAGES * PMM_PAGE_SIZE)
 
@@ -620,8 +639,9 @@ error_t cet_lifecycle_init_supervisor_ssp(uint8_t core_idx)
      *      the entry as written rather than a cached copy.
      *
      * Token contents: the token's own linear address with the BUSY bit
-     * clear — see CET_SUPV_TOKEN_BUSY_BIT above for why "clear" is the
-     * only value a token the processor has not claimed may hold.
+     * clear — cet_supv_token_free() and the supervisor-token note above
+     * CET_SUPV_TOKEN_FLAG_MASK say why "clear" is the only value a token
+     * the processor has not claimed may hold.
      */
     uintptr_t pl0_top = pl0_va + (PMM_PAGE_SIZE - 8);
     *(volatile uint64_t *)pl0_top = cet_supv_token_free(pl0_top);

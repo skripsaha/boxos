@@ -67,6 +67,44 @@ static void acpi_publish_irq(const AcpiTagPair *t, uint16_t word)
 static acpi_gpe_handler_t g_gpe_handlers[ACPI_MAX_GPES];
 
 /* ============================================================
+ * Firmware-described register blocks: the extended descriptor wins.
+ *
+ * ACPI 6.5 §5.2.9 says of every X_ field of the FADT that "if this field
+ * contains a nonzero value which can be used by OSPM, then OSPM must use this
+ * information instead of the [32-bit] field". A board that publishes a block
+ * only through its GAS — legacy field zero, which ACPI 2.0+ firmware is
+ * entitled to do — is fully described by the extended one, and a kernel that
+ * reads only the legacy pair concludes the block does not exist at all.
+ *
+ * The length check is not decoration: an ACPI 1.0b FADT is 116 bytes and its
+ * x_ fields lie past the end of the table, where the struct reads whatever
+ * memory follows it.
+ *
+ * These blocks are reached with inb/outb, so a GAS naming any space but
+ * System I/O is said out loud and the legacy address used instead of quietly
+ * addressing the wrong thing with the wrong instruction.
+ * ============================================================ */
+#define GAS_AS_SYSTEM_IO 1
+
+static bool fadt_has_field(uint32_t len, size_t field_end) {
+    return len >= field_end;
+}
+
+static uint16_t fadt_block_port(const acpi_gas_t *x, uint32_t legacy,
+                                uint32_t fadt_len, size_t x_field_end,
+                                const char *which)
+{
+    if (fadt_has_field(fadt_len, x_field_end) && x->address != 0) {
+        if (x->address_space == GAS_AS_SYSTEM_IO) {
+            return (uint16_t)x->address;
+        }
+        kprintf("[ACPI] %s lives in address space %u, not I/O — falling back "
+                "to the legacy address\n", which, x->address_space);
+    }
+    return (uint16_t)legacy;
+}
+
+/* ============================================================
  * The GPE blocks themselves.
  *
  * ACPI 6.5 §4.8.4.1: a GPE block is GPEx_BLK_LEN bytes wide, the first half
@@ -106,6 +144,50 @@ typedef struct {
 static AcpiGpeBlock g_gpe0;
 static AcpiGpeBlock g_gpe1;
 
+/* The one lock over a GPE enable register.
+ *
+ * Three places move an enable bit: a driver registering a handler, a driver
+ * dropping one, and the SCI handler quieting the byte it is about to serve.
+ * Each is a read-modify-write of the same I/O byte; two run on whatever core
+ * their caller sits on and the third runs in an interrupt. An SCI landing
+ * between a registration's read and its write loses §5.6.4's first step
+ * outright — the handler's "disable the fired bits" is overwritten by the
+ * stale word, and a level GPE with nobody to serve it is left enabled with
+ * its source still asserting, which is the unbounded storm this whole block
+ * exists to prevent. The cross-core form is the same on any AP registering
+ * while the BSP serves.
+ *
+ * spin_lock holds interrupts off for the whole hold (klib.h), so the SCI
+ * cannot land on the core holding this, and the hold is a pair of port
+ * accesses with nothing else inside it: no handler call, no kprintf, no Touch
+ * publish. All of those happen outside. BSS-zero is an unlocked lock. */
+static spinlock_t g_gpe_lock;
+
+static void gpe_enable_bit(const AcpiGpeBlock *blk, uint8_t byte, uint8_t mask,
+                           bool on)
+{
+    spin_lock(&g_gpe_lock);
+    uint8_t en = inb((uint16_t)(blk->enable + byte));
+    outb((uint16_t)(blk->enable + byte),
+         on ? (uint8_t)(en | mask) : (uint8_t)(en & ~mask));
+    spin_unlock(&g_gpe_lock);
+}
+
+/* One byte's fired GPEs, taken off the line as they are read: §5.6.4's first
+ * step ("disables the interrupt source") happens under the same hold that
+ * read the enable half, so nothing can put those bits back between the
+ * decision and the write. */
+static uint8_t gpe_byte_take_fired(const AcpiGpeBlock *blk, uint8_t byte)
+{
+    spin_lock(&g_gpe_lock);
+    uint8_t s = inb((uint16_t)(blk->status + byte));
+    uint8_t e = inb((uint16_t)(blk->enable + byte));
+    uint8_t fired = (uint8_t)(s & e);
+    if (fired) outb((uint16_t)(blk->enable + byte), (uint8_t)(e & ~fired));
+    spin_unlock(&g_gpe_lock);
+    return fired;
+}
+
 /* A GPE switched off for good is said once, not on every re-arm the firmware
  * performs behind the kernel's back. */
 static uint8_t g_gpe_quieted[ACPI_GPE_MAX_BYTES];
@@ -142,14 +224,22 @@ static AcpiGpeBlock *gpe_block_of(uint16_t gpe, uint8_t *byte, uint8_t *bit)
     return NULL;
 }
 
-static void gpe_block_locate(AcpiGpeBlock *blk, uint32_t port, uint8_t len,
-                             uint16_t base, const char *which)
+static void gpe_block_locate(AcpiGpeBlock *blk, const acpi_gas_t *x,
+                             uint32_t legacy, uint8_t len, uint16_t base,
+                             uint32_t fadt_len, size_t x_field_end,
+                             const char *which)
 {
     blk->status = 0;
     blk->enable = 0;
     blk->bytes  = 0;
     blk->base   = base;
 
+    /* X_GPEx_BLK before GPEx_BLK, §5.2.9, the same preference resolve_pm1_gas
+     * gives the PM1 blocks. The WIDTH still comes from GPEx_BLK_LEN and not
+     * from the GAS bit_width: a GPE block is two registers inside one span
+     * and the spec measures that span in bytes, which is why ACPICA carries
+     * the GPE blocks as the named exception in acpi_tb_convert_fadt. */
+    uint16_t port = fadt_block_port(x, legacy, fadt_len, x_field_end, which);
     if (port == 0 || len < 2) return;
 
     /* Every index this block can produce has to land inside the handler
@@ -162,6 +252,13 @@ static void gpe_block_locate(AcpiGpeBlock *blk, uint32_t port, uint8_t len,
                                             : (ACPI_MAX_GPES - base) / 8u;
     if (room > ACPI_GPE_MAX_BYTES) room = ACPI_GPE_MAX_BYTES;
 
+    if (room == 0) {
+        kprintf("[ACPI] %s at 0x%x starts at GPE %u, past the last GPE this "
+                "kernel keeps a handler slot for (%u); none of the block is "
+                "followed\n", which, port, base,
+                (unsigned)(ACPI_MAX_GPES - 1));
+        return;
+    }
     if (half > room) {
         kprintf("[ACPI] %s is %u bytes wide from GPE %u; this kernel follows "
                 "the first %u byte(s) of it, which is GPE %u..%u\n",
@@ -171,40 +268,92 @@ static void gpe_block_locate(AcpiGpeBlock *blk, uint32_t port, uint8_t len,
     }
     if (half == 0) return;
 
-    blk->status = (uint16_t)port;
+    blk->status = port;
     blk->enable = (uint16_t)(port + half);
     blk->bytes  = half;
 }
 
-/* Nothing the firmware armed for itself is inherited as an SCI source. */
+/* The enable mask this kernel would choose for one byte: exactly the bits a
+ * handler has been registered for. */
+static uint8_t gpe_handler_mask(const AcpiGpeBlock *blk, uint8_t byte)
+{
+    uint8_t mask = 0;
+    for (uint8_t bit = 0; bit < 8; bit++) {
+        if (g_gpe_handlers[blk->base + byte * 8 + bit]) {
+            mask = (uint8_t)(mask | (1u << bit));
+        }
+    }
+    return mask;
+}
+
+/* Nothing the firmware armed for itself is inherited as an SCI source — and
+ * nothing this kernel armed for itself is thrown out with it. A driver that
+ * registered a GPE handler during its own init did so before the line ever
+ * opened; its enable bit goes back inside the same hold that cleared the
+ * byte, so the block never passes through a state where a registered handler
+ * is disarmed and no arming is silently undone. */
 static void gpe_block_scrub(const AcpiGpeBlock *blk, const char *which)
 {
     if (blk->status == 0) return;
 
+    bool kept = false;
     for (uint8_t b = 0; b < blk->bytes; b++) {
+        uint8_t want = gpe_handler_mask(blk, b);
+        spin_lock(&g_gpe_lock);
         outb((uint16_t)(blk->enable + b), 0x00);
         outb((uint16_t)(blk->status + b), 0xFF);
+        if (want) outb((uint16_t)(blk->enable + b), want);
+        spin_unlock(&g_gpe_lock);
+        if (want) kept = true;
     }
     kprintf("[ACPI] %s at 0x%x: %u byte(s) disabled and cleared before the SCI "
-            "opens (GPE %u..%u)\n", which, blk->status, blk->bytes,
-            blk->base, (unsigned)(blk->base + blk->bytes * 8 - 1));
+            "opens (GPE %u..%u)%s\n", which, blk->status, blk->bytes,
+            blk->base, (unsigned)(blk->base + blk->bytes * 8 - 1),
+            kept ? "; the bits this kernel already holds handlers for are "
+                   "re-armed" : "");
 }
 
-static void acpi_gpe_blocks_locate_and_scrub(void)
+/* Where the blocks are — answered out of the FADT with no register touched,
+ * which is why it runs in acpi_init rather than at arm time. A driver that
+ * registers a GPE handler during its own init must find its block already
+ * described; the alternative is telling it "GPE %u is in no block this
+ * firmware describes" when the firmware describes it perfectly well and the
+ * kernel had simply not looked yet. */
+static void acpi_gpe_blocks_locate(void)
 {
     if (!g_acpi.fadt) return;
 
-    gpe_block_locate(&g_gpe0, g_acpi.fadt->gpe0_block,
-                     g_acpi.fadt->gpe0_length, 0, "GPE0");
-    gpe_block_locate(&g_gpe1, g_acpi.fadt->gpe1_block,
-                     g_acpi.fadt->gpe1_length, g_acpi.fadt->gpe1_base, "GPE1");
+    uint32_t flen = g_acpi.fadt->header.length;
 
-    gpe_block_scrub(&g_gpe0, "GPE0");
-    gpe_block_scrub(&g_gpe1, "GPE1");
+    gpe_block_locate(&g_gpe0, &g_acpi.fadt->x_gpe0_block,
+                     g_acpi.fadt->gpe0_block, g_acpi.fadt->gpe0_length, 0,
+                     flen,
+                     offsetof(acpi_fadt_t, x_gpe0_block) + sizeof(acpi_gas_t),
+                     "GPE0 block");
+    gpe_block_locate(&g_gpe1, &g_acpi.fadt->x_gpe1_block,
+                     g_acpi.fadt->gpe1_block, g_acpi.fadt->gpe1_length,
+                     g_acpi.fadt->gpe1_base, flen,
+                     offsetof(acpi_fadt_t, x_gpe1_block) + sizeof(acpi_gas_t),
+                     "GPE1 block");
+}
+
+static void acpi_gpe_blocks_scrub(void)
+{
+    gpe_block_scrub(&g_gpe0, "GPE0 block");
+    gpe_block_scrub(&g_gpe1, "GPE1 block");
 }
 
 int acpi_gpe_register(uint16_t gpe, acpi_gpe_handler_t cb) {
     if (gpe >= ACPI_MAX_GPES || !cb) return -1;
+
+    /* Told apart so the refusal below is never a lie: before acpi_init the
+     * blocks are not described because nothing has read the FADT yet, which
+     * is a different fact from the firmware describing no such block. */
+    if (!g_acpi.initialized) {
+        kprintf("[ACPI] GPE %u cannot be registered before acpi_init — no "
+                "FADT has been read, so no block is described yet\n", gpe);
+        return -1;
+    }
 
     uint8_t byte = 0, bit = 0;
     AcpiGpeBlock *blk = gpe_block_of(gpe, &byte, &bit);
@@ -219,8 +368,7 @@ int acpi_gpe_register(uint16_t gpe, acpi_gpe_handler_t cb) {
     /* A latch from before this handler existed is not an event for it to
      * answer, so the status bit is cleared before the source is armed. */
     outb((uint16_t)(blk->status + byte), (uint8_t)(1u << bit));
-    uint8_t en = inb((uint16_t)(blk->enable + byte));
-    outb((uint16_t)(blk->enable + byte), (uint8_t)(en | (1u << bit)));
+    gpe_enable_bit(blk, byte, (uint8_t)(1u << bit), true);
     gpe_quiet_unmark(gpe);
     return 0;
 }
@@ -230,10 +378,7 @@ void acpi_gpe_unregister(uint16_t gpe) {
 
     uint8_t byte = 0, bit = 0;
     AcpiGpeBlock *blk = gpe_block_of(gpe, &byte, &bit);
-    if (blk) {
-        uint8_t en = inb((uint16_t)(blk->enable + byte));
-        outb((uint16_t)(blk->enable + byte), (uint8_t)(en & ~(1u << bit)));
-    }
+    if (blk) gpe_enable_bit(blk, byte, (uint8_t)(1u << bit), false);
     g_gpe_handlers[gpe] = NULL;
 }
 
@@ -242,7 +387,7 @@ void acpi_gpe_unregister(uint16_t gpe) {
 #define PM1_CNT_SLP_TYP_MASK   0x1C00u   /* bits 12:10 */
 #define PM1_CNT_SLP_EN         0x2000u   /* bit 13     */
 
-/* One PM1 control port, asked for a sleep state.
+/* The word one PM1 control port must be given to be asked for a sleep state.
  *
  * §4.6.1 has OSPM preserve the bits of a control register, and Table 4.13
  * names the one that matters most here: bit 0 is SCI_EN, which "OSPM always
@@ -250,25 +395,27 @@ void acpi_gpe_unregister(uint16_t gpe) {
  * | SLP_EN — so it drove SCI_EN and BM_RLD to zero along with every reserved
  * bit, and a machine resumed from S1/S3 would have come back with its PM
  * events and every GPE routed to SMI instead of to the SCI handler below.
- * ACPICA masks off SLP_TYP and SLP_EN and nothing else (acpi_hw_legacy_sleep),
- * and writes the type first so it is already standing when the SLP_EN
- * transition the chipset sequences on arrives. */
-static void pm1_control_request_sleep(uint16_t port, uint16_t slp_typ)
+ * ACPICA masks off SLP_TYP and SLP_EN and nothing else (acpi_hw_legacy_sleep).
+ *
+ * Only the word is built here. Who writes it, and in what order against the
+ * other block, is the caller's business: §4.8 puts the A block's SLP_TYP down
+ * first and the B block's second, and only then the transition both blocks
+ * sequence on. */
+static bool pm1_control_sleep_word(uint16_t port, uint16_t slp_typ,
+                                   uint16_t *word)
 {
     uint16_t cur = inw(port);
     if (cur == 0xFFFFu) {
         kprintf("[ACPI] PM1 control at 0x%x reads 0xFFFF — nothing decodes "
                 "that port, so there is no register to ask for sleep\n", port);
-        return;
+        return false;
     }
 
     uint16_t keep = (uint16_t)(cur & ~(PM1_CNT_SLP_TYP_MASK | PM1_CNT_SLP_EN));
-    uint16_t typ  = (uint16_t)(keep |
-                               (((uint16_t)(slp_typ << PM1_CNT_SLP_TYP_SHIFT)) &
-                                PM1_CNT_SLP_TYP_MASK));
-
-    outw(port, typ);
-    outw(port, (uint16_t)(typ | PM1_CNT_SLP_EN));
+    *word = (uint16_t)(keep |
+                       (((uint16_t)(slp_typ << PM1_CNT_SLP_TYP_SHIFT)) &
+                        PM1_CNT_SLP_TYP_MASK));
+    return true;
 }
 
 /*
@@ -341,8 +488,23 @@ int acpi_enter_sleep(uint8_t state) {
 
     uint32_t pm1a = g_acpi.fadt->pm1a_control_block;
     uint32_t pm1b = g_acpi.fadt->pm1b_control_block;
-    if (pm1a) pm1_control_request_sleep((uint16_t)pm1a, slp_typa);
-    if (pm1b) pm1_control_request_sleep((uint16_t)pm1b, slp_typb);
+    uint16_t word_a = 0, word_b = 0;
+    bool has_a = (pm1a != 0) &&
+                 pm1_control_sleep_word((uint16_t)pm1a, slp_typa, &word_a);
+    bool has_b = (pm1b != 0) &&
+                 pm1_control_sleep_word((uint16_t)pm1b, slp_typb, &word_b);
+
+    /* ACPI 6.5 §4.8: "OSPM will always write the SLP_TYPa value to the 'A'
+     * register block followed by the SLP_TYPb value within the field to the
+     * 'B' register block." Both types stand before either SLP_EN goes down —
+     * the order acpi_hw_legacy_sleep uses, two passes over the pair rather
+     * than one block finished before the other is started. Driving SLP_EN in
+     * A while B still holds the previous type is the thing that sentence is
+     * there to forbid. */
+    if (has_a) outw((uint16_t)pm1a, word_a);
+    if (has_b) outw((uint16_t)pm1b, word_b);
+    if (has_a) outw((uint16_t)pm1a, (uint16_t)(word_a | PM1_CNT_SLP_EN));
+    if (has_b) outw((uint16_t)pm1b, (uint16_t)(word_b | PM1_CNT_SLP_EN));
 
     /* On S1, control returns here on wake. Other states either reset
      * the CPU (S2-S3) or never return (S4-S5). */
@@ -397,8 +559,7 @@ static void gpe_serve_one(const AcpiGpeBlock *blk, uint8_t byte, uint8_t bit,
         return;
     }
 
-    uint8_t en = inb((uint16_t)(blk->enable + byte));
-    outb((uint16_t)(blk->enable + byte), (uint8_t)(en | (1u << bit)));
+    gpe_enable_bit(blk, byte, (uint8_t)(1u << bit), true);
 }
 
 static void gpe_block_service(const AcpiGpeBlock *blk)
@@ -406,14 +567,11 @@ static void gpe_block_service(const AcpiGpeBlock *blk)
     if (blk->status == 0) return;
 
     for (uint8_t b = 0; b < blk->bytes; b++) {
-        uint8_t s = inb((uint16_t)(blk->status + b));
-        uint8_t e = inb((uint16_t)(blk->enable + b));
-        uint8_t fired = (uint8_t)(s & e);
+        /* §5.6.4 step one, for the whole byte at once and under the enable
+         * register's lock: the sources go quiet before any of them is
+         * served, and no concurrent registration can put them back. */
+        uint8_t fired = gpe_byte_take_fired(blk, b);
         if (!fired) continue;
-
-        /* §5.6.4 step one, for the whole byte at once: the sources go quiet
-         * before any of them is served. */
-        outb((uint16_t)(blk->enable + b), (uint8_t)(e & ~fired));
 
         debug_printf("[ACPI] GPE block 0x%x byte %u: fired=0x%02x\n",
                      blk->status, b, fired);
@@ -443,7 +601,6 @@ static void gpe_block_service(const AcpiGpeBlock *blk)
  * button down for four seconds, which is the chipset doing it without asking
  * anybody, and is exactly what the owner of this board had to do.
  */
-#define GAS_AS_SYSTEM_IO 1
 #define PM1_EN_PWRBTN    (1u << 8)
 
 typedef struct {
@@ -453,28 +610,6 @@ typedef struct {
 
 static AcpiPm1Event g_pm1a_event;
 static AcpiPm1Event g_pm1b_event;
-
-
-static bool fadt_has_field(uint32_t len, size_t field_end) {
-    return len >= field_end;
-}
-
-/* An I/O port for a PM1 event block, preferring what the extended field says.
- * Every x86 firmware puts these in I/O space; one that does not is one this
- * kernel would silently read the wrong bytes from, so it says so instead. */
-static uint16_t pm1_event_port(const acpi_gas_t *x, uint32_t legacy,
-                               uint32_t fadt_len, size_t x_field_end,
-                               const char *which)
-{
-    if (fadt_has_field(fadt_len, x_field_end) && x->address != 0) {
-        if (x->address_space == GAS_AS_SYSTEM_IO) {
-            return (uint16_t)x->address;
-        }
-        kprintf("[ACPI] %s event block lives in address space %u, not I/O — "
-                "falling back to the legacy port\n", which, x->address_space);
-    }
-    return (uint16_t)legacy;
-}
 
 static void acpi_pm1_events_locate(void)
 {
@@ -492,14 +627,14 @@ static void acpi_pm1_events_locate(void)
         return;
     }
 
-    uint16_t a = pm1_event_port(&g_acpi.fadt->x_pm1a_event_block,
-                                g_acpi.fadt->pm1a_event_block, flen,
-                                offsetof(acpi_fadt_t, x_pm1a_event_block) +
-                                    sizeof(acpi_gas_t), "PM1a");
-    uint16_t b = pm1_event_port(&g_acpi.fadt->x_pm1b_event_block,
-                                g_acpi.fadt->pm1b_event_block, flen,
-                                offsetof(acpi_fadt_t, x_pm1b_event_block) +
-                                    sizeof(acpi_gas_t), "PM1b");
+    uint16_t a = fadt_block_port(&g_acpi.fadt->x_pm1a_event_block,
+                                 g_acpi.fadt->pm1a_event_block, flen,
+                                 offsetof(acpi_fadt_t, x_pm1a_event_block) +
+                                     sizeof(acpi_gas_t), "PM1a event block");
+    uint16_t b = fadt_block_port(&g_acpi.fadt->x_pm1b_event_block,
+                                 g_acpi.fadt->pm1b_event_block, flen,
+                                 offsetof(acpi_fadt_t, x_pm1b_event_block) +
+                                     sizeof(acpi_gas_t), "PM1b event block");
 
     if (a) {
         g_pm1a_event.status = a;
@@ -734,8 +869,8 @@ gpe_blocks:
         (void)apei_ghes_sci_check();
     }
 
-    /* Both GPE blocks, located and scrubbed by acpi_sci_arm before this line
-     * was ever unmasked. */
+    /* Both GPE blocks, located in acpi_init out of the FADT and scrubbed by
+     * acpi_sci_arm before this line was ever unmasked. */
     gpe_block_service(&g_gpe0);
     gpe_block_service(&g_gpe1);
 
@@ -839,8 +974,11 @@ void acpi_sci_arm(void)
 
     /* Before the door, not after: a GPE the firmware left armed and asserting
      * would otherwise be delivered the instant the line is unmasked, and this
-     * kernel could only acknowledge it, never quiet it. */
-    acpi_gpe_blocks_locate_and_scrub();
+     * kernel could only acknowledge it, never quiet it. Where the blocks ARE
+     * was settled back in acpi_init, so a driver that registered a handler
+     * during its own init found its block described; what that driver armed
+     * survives the scrub. */
+    acpi_gpe_blocks_scrub();
 
     irqchip_enable_irq((uint8_t)sci);
     kprintf("[ACPI] SCI on GSI %u\n", sci);
@@ -960,6 +1098,11 @@ acpi_error_t acpi_init(void) {
      * legacy/SMI mode. Must happen after FADT is captured but BEFORE
      * any PM1 write is attempted. */
     acpi_enable_mode();
+
+    /* Out of the FADT, before anything can ask to register a GPE handler.
+     * Arming the line, and scrubbing whatever the firmware left armed, is a
+     * separate and much later step (acpi_sci_arm). */
+    acpi_gpe_blocks_locate();
 
     debug_printf("[ACPI] Initialization complete (HPET=%s MCFG=%s S5=%s)\n",
                  g_acpi.hpet.present ? "yes" : "no",

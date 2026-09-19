@@ -94,7 +94,10 @@ static void build_mem_entry(void *buf, uint64_t phys, uint8_t sev, uint16_t bank
     gedata_entry_t *ge = (gedata_entry_t *)buf;
     for (int i = 0; i < 16; i++) ge->section_type[i] = GUID_MEMORY[i];
     ge->error_severity     = sev;
-    ge->revision           = 0x0202;
+    /* 0x300 and nothing less: this fixture lays the Timestamp field out
+     * (Table 18.12), and that field exists only from Revision 0x300, so a
+     * lower revision would declare a 64-byte header over a 72-byte one. */
+    ge->revision           = 0x0300;
     ge->validation_bits    = 0;
     ge->flags              = 0;
     ge->error_data_length  = (uint32_t)sizeof(cper_mem_t);
@@ -110,7 +113,10 @@ static void build_proc_entry(void *buf, uint8_t sev) {
     gedata_entry_t *ge = (gedata_entry_t *)buf;
     for (int i = 0; i < 16; i++) ge->section_type[i] = GUID_PROC[i];
     ge->error_severity     = sev;
-    ge->revision           = 0x0202;
+    /* 0x300 and nothing less: this fixture lays the Timestamp field out
+     * (Table 18.12), and that field exists only from Revision 0x300, so a
+     * lower revision would declare a 64-byte header over a 72-byte one. */
+    ge->revision           = 0x0300;
     ge->validation_bits    = 0;
     ge->flags              = 0;
     ge->error_data_length  = 32;

@@ -93,9 +93,12 @@
  * Busy (BOHC.BB) bit has not been set to '1', then the OS can assume control
  * and perform whatever cleanup is necessary."
  *
- * The one second that used to stand in their place was neither of them, and it
- * was spent watching the wrong bit: BOHC.BB, which §10.6.4 has the firmware
- * clear at step 7 — one step BEFORE it releases BOHC.BOS at step 8. */
+ * The one second that used to stand in their place is neither of them. It was
+ * spun on BOHC.BOS — the right bit, for a length the specification never
+ * names — and the two-second wait that FOLLOWED it watched the wrong one:
+ * BOHC.BB, which §10.6.4 has the firmware clear at step 7, one step BEFORE it
+ * releases BOHC.BOS at step 8. So that second wait could end, and did end
+ * silently, with the firmware still owning the controller. */
 #define AHCI_BOH_BUSY_WINDOW_MS  25u
 #define AHCI_BOH_GRANT_MS        2000u
 
@@ -572,8 +575,10 @@ bool ahci_can_submit_port(uint8_t port_num);
  * list for the same device with the exception of the NCQ Unload command."
  *
  * The wait costs no other flow anything: the port is only closed at the
- * instant it is found completely idle, and only for as long as the one command
- * takes. Returns the command slot the caller then owns, or -1 when the port
+ * instant it is found completely idle, and only for as long as that one
+ * command needs — a caller that retries it, and recovers the port between
+ * tries, holds across both, because those are the same command still.
+ * Returns the command slot the caller then owns, or -1 when the port
  * never went quiet within `patience_ms` — said on the console, and in that
  * case nothing is held and no command may be issued. A successful take must be
  * paired with exactly one give-back. */

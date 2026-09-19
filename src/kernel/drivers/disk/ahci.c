@@ -490,7 +490,9 @@ bool ahci_can_submit_port(uint8_t port_num) {
  * There is no new queue or flag invented for that. The port's slot pool
  * already is the door every submission goes through, so closing it IS the
  * hold: the door is shut only at the instant the port is found completely
- * idle, and it is shut for exactly as long as the one command takes. Waiting
+ * idle, and it is shut for exactly as long as that one command needs — its
+ * retries, and the port recovery between them, being the same command still
+ * and needing the same empty list. Waiting
  * for that instant costs nobody anything — while this spins, every other flow
  * allocates and completes as usual, and only the flush waits.
  *
@@ -1400,9 +1402,27 @@ void ahci_get_port_stats(uint8_t port_num, ahci_port_stats_t* stats_out) {
  * the whole matter — "Ownership is obtained when this bit [OOS] reads '1' and
  * the BOS bit reads '0'" — was never evaluated once.
  *
- * Returns true when this kernel may drive the HBA: either ownership as §3.1.11
- * defines it, or the case §10.6.3 step 5 expressly permits taking control in.
- * False is a refusal with a reason already on the console. */
+ * So it now evaluates that condition and reports it: true when this kernel may
+ * drive the HBA with the specification behind it — either ownership as
+ * §3.1.11 defines it, or the case §10.6.3 step 5 expressly permits taking
+ * control in — and false with the reason already on the console otherwise.
+ *
+ * WHAT IT IS NOT IS A VETO. §10.6.3 step 4 calls two seconds "a minimum"; it
+ * names no upper bound and nowhere says to abandon the controller, so firmware
+ * that legitimately needs longer — spinning drives down — is inside the
+ * specification, and giving up the HBA over it would cost this machine the
+ * only disks it has, boot volume included, with nothing to fall back on. The
+ * field agrees: mainline Linux performs no AHCI handoff at all and resets the
+ * controller unconditionally, and on the analogous EHCI and xHCI BIOS handoffs
+ * it warns, takes ownership by force and carries on. So this asks properly,
+ * waits out the windows the specification does name, and hands the caller the
+ * truth to say out loud. */
+/* §3.1.11, verbatim: "Ownership is obtained when this bit [OOS] reads '1' and
+ * the BOS bit reads '0'." One question, asked in one place. */
+static bool ahci_boh_owned(uint32_t bohc) {
+    return (bohc & (AHCI_BOHC_BOS | AHCI_BOHC_OOS)) == AHCI_BOHC_OOS;
+}
+
 static bool ahci_bios_handoff(void) {
     if (!(ahci_ctrl.hba_mem->cap2 & AHCI_CAP2_BOH)) {
         /* §10.6.1: BOS and OOS are '0' out of reset, and a controller with no
@@ -1421,18 +1441,22 @@ static bool ahci_bios_handoff(void) {
      * the point — BOS is the bit §3.1.11 defines ownership by. */
     HourGlass window;
     if (!HourGlassTurn(&window, (uint64_t)AHCI_BOH_BUSY_WINDOW_MS * 1000ULL)) {
-        kprintf("[AHCI] no time source — the 25 ms AHCI 1.3.1 §10.6.3 gives "
-                "the firmware to hand this controller over cannot be measured, "
-                "so ownership cannot be claimed; the AHCI disks are not "
-                "used\n");
-        return false;
+        /* No clock yet means no window can be held open — it does not mean the
+         * register cannot be read. One honest reading, said out loud, beats
+         * both a silent assumption and an unbounded spin. */
+        uint32_t once = ahci_ctrl.hba_mem->bohc;
+        kprintf("[AHCI] no time source — the %u ms AHCI 1.3.1 §10.6.3 gives the "
+                "firmware to answer cannot be held open, so the handoff is one "
+                "reading and no wait (BOHC=0x%08x)\n",
+                AHCI_BOH_BUSY_WINDOW_MS, once);
+        return ahci_boh_owned(once);
     }
 
     uint32_t bohc  = 0;
     bool     busy  = false;
     for (;;) {
         bohc = ahci_ctrl.hba_mem->bohc;
-        if ((bohc & (AHCI_BOHC_BOS | AHCI_BOHC_OOS)) == AHCI_BOHC_OOS) {
+        if (ahci_boh_owned(bohc)) {
             debug_printf("[AHCI] BIOS/OS handoff: owned (BOHC=0x%08x)\n", bohc);
             return true;
         }
@@ -1446,13 +1470,15 @@ static bool ahci_bios_handoff(void) {
 
     if (!busy) {
         if (!(bohc & AHCI_BOHC_OOS)) {
-            /* The request itself did not stick, so there is nothing to assume
-             * control ON: §10.6.3 step 5 permits taking the HBA from a
-             * firmware that never answered, not driving a register that did
-             * not take the write. */
-            kprintf("[AHCI] the controller did not accept the OS ownership "
-                    "request (BOHC=0x%08x) — the AHCI disks are not used\n",
-                    bohc);
+            /* The request did not stick: the controller advertises CAP2.BOH
+             * and yet BOHC.OOS does not read back as written, so there is no
+             * semaphore protocol running on this board to obtain anything
+             * from. Nothing is gained by waiting on it and nothing is gained
+             * by refusing the disks over it — no firmware is holding them.
+             * It is said, and the driver goes on. */
+            kprintf("[AHCI] the controller advertises the BIOS/OS handoff but "
+                    "did not take the ownership request (BOHC=0x%08x) — there "
+                    "is no semaphore here to obtain\n", bohc);
             return false;
         }
         /* §10.6.3 step 5, verbatim: "If after 25 milliseconds the BIOS Busy
@@ -1474,14 +1500,15 @@ static bool ahci_bios_handoff(void) {
                  bohc, AHCI_BOH_GRANT_MS);
     HourGlass grant;
     if (!HourGlassTurn(&grant, (uint64_t)AHCI_BOH_GRANT_MS * 1000ULL)) {
-        kprintf("[AHCI] no time source — the firmware asked for time to "
-                "finish its outstanding commands on this controller and there "
-                "is no clock to give it; the AHCI disks are not used\n");
+        kprintf("[AHCI] no time source — the firmware declared itself busy on "
+                "this controller and there is no clock to measure the %u ms "
+                "AHCI 1.3.1 §10.6.3 step 4 owes it (BOHC=0x%08x)\n",
+                AHCI_BOH_GRANT_MS, bohc);
         return false;
     }
     for (;;) {
         bohc = ahci_ctrl.hba_mem->bohc;
-        if ((bohc & (AHCI_BOHC_BOS | AHCI_BOHC_OOS)) == AHCI_BOHC_OOS) {
+        if (ahci_boh_owned(bohc)) {
             debug_printf("[AHCI] BIOS/OS handoff: owned after the grant "
                          "(BOHC=0x%08x)\n", bohc);
             return true;
@@ -1491,10 +1518,11 @@ static bool ahci_bios_handoff(void) {
     }
 
     kprintf("[AHCI] the firmware declared itself busy and still owns this "
-            "controller after %u ms (BOHC=0x%08x) — ownership is OOS=1 with "
-            "BOS=0 (AHCI 1.3.1 §3.1.11) and it was never obtained, so the "
-            "controller is left to the firmware and the AHCI disks are not "
-            "used\n", AHCI_BOH_GRANT_MS, bohc);
+            "controller %u ms later (BOHC=0x%08x) — ownership is OOS=1 with "
+            "BOS=0 (AHCI 1.3.1 §3.1.11) and it was never obtained; those two "
+            "seconds are a MINIMUM the specification names no upper bound for, "
+            "so what ends here is the wait, not the boot\n",
+            AHCI_BOH_GRANT_MS, bohc);
     return false;
 }
 
@@ -1579,16 +1607,20 @@ int ahci_init(void) {
      * BOH bit and must be read before the handoff below. */
     ahci_ctrl.cap = ahci_ctrl.hba_mem->cap;
 
-    /* AHCI 1.3.1 §10.6.3: take the HBA away from BIOS before driving it — and
-     * if it was not given, drive nothing. The next two writes are GHC.AE and
-     * GHC.HR, and §10.4.3 makes GHC.HR a reset of GHC.AE, GHC.IE, the IS
-     * register and every non-HwInit port register field: pulling that out from
-     * under an SMI handler that still owns the controller is the hazard this
-     * handoff exists to avoid, so a refusal here ends the driver. */
+    /* AHCI 1.3.1 §10.6.3: ask the firmware for the HBA before driving it — and
+     * SAY what the answer was. The next two writes are GHC.AE and GHC.HR, and
+     * §10.4.3 makes GHC.HR a reset of GHC.AE, GHC.IE, the IS register and
+     * every non-HwInit port register field: pulling that out from under an SMI
+     * handler that still believes it owns the controller is the hazard this
+     * handoff exists to avoid, and it is the lesser of the two here. The
+     * greater is a machine with no disk at all — this kernel reaches its
+     * volume through no other controller, §10.6.3 sets no upper bound on the
+     * grant and never says to abandon the HBA, and mainline Linux resets this
+     * same controller without asking anybody. So the driver proceeds, and the
+     * board is told on which terms. */
     if (!ahci_bios_handoff()) {
-        vmm_unmap_mmio(ahci_ctrl.hba_mem, AHCI_ABAR_SPAN);
-        ahci_ctrl.hba_mem = NULL;
-        return -1;
+        kprintf("[AHCI] proceeding without the firmware's handoff: the "
+                "controller is reset and driven from here\n");
     }
 
     /* §5.3.2.3: GHC.AE must be set before accessing other AHCI registers.

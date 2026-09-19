@@ -223,6 +223,11 @@ vmm_la57_runtime_enable:
 
 [BITS 32]
 .low32:
+    ; Far-jmp landing site — see the ENDBRANCH note above .low_64_trampoline.
+    ; 32 here, not 64: the marker the tracker demands follows the mode of the
+    ; machine, and this side of the far jmp is compatibility mode.
+    endbr32
+
     ; ----- 32-bit compatibility mode (CS.D=1, L=0). EFER.LMA still 1 -----
     ; Reload the data segments this window actually uses — DS/ES for data,
     ; SS because the `jmp far dword [ebp]` below addresses through EBP,
@@ -264,6 +269,26 @@ vmm_la57_runtime_enable:
 
 [BITS 64]
 .low_64_trampoline:
+    ; ENDBRANCH markers in this file — Intel CET Specification 334525-003
+    ; §3.3.2 "Control Transfers within CPL 3 or CPL < 3", Case 1: "FAR
+    ; CALL/JMP: If indirect branch tracking is enabled, active indirect
+    ; branch tracker is unsuppressed and goes to WAIT_FOR_ENDBRANCH. Near
+    ; indirect call/jmp: ... active indirect branch tracker goes to
+    ; WAIT_FOR_ENDBRANCH." In that state the next instruction decoded must
+    ; be an ENDBRANCH or the processor raises #CP. Three of this file's
+    ; control transfers are triggers, so three landing sites carry a marker:
+    ;   .low32               far jmp through memory   → endbr32 (compat mode)
+    ;   .low_64_trampoline   far jmp through memory   → endbr64
+    ;   .high64              near indirect `jmp rax`  → endbr64
+    ; .reload_cs deliberately carries none: it is reached by `retfq`, and the
+    ; tracker state machine in §3.4 lists only indirect call/jmp, far
+    ; call/jmp, INT3/INT1 and ENDBRANCH as triggers — a far RET is not one.
+    ; (A far RET does touch the SHSTK side, which is a separate mechanism.)
+    ; Today the trampoline runs inside vmm_init long before CR4.CET is set,
+    ; so all three are the 4-byte NOP they are on every pre-CET CPU; they
+    ; cost nothing and they keep this file correct if that order ever moves.
+    endbr64
+
     ; ----- Now in 64-bit mode at LOW PA (CS=DANCE_CS64) -----
     ; Jump to .high64 (high VA) via 64-bit absolute jmp. `mov rax, .high64`
     ; emits `48 B8 imm64` — full 64-bit absolute address resolved by linker.
@@ -273,6 +298,9 @@ vmm_la57_runtime_enable:
     jmp rax
 
 .high64:
+    ; Near-indirect-jmp landing site — see the ENDBRANCH note above.
+    endbr64
+
     ; ----- Back in 64-bit mode at HIGH VA on dance CS64 (selector 0x10) -----
     ; RSP first, before anything writes through the stack: the upper half of
     ; every GPR — RSP included — is undefined after the 64→32→64 round trip

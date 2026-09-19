@@ -48,8 +48,17 @@ typedef struct {
 } __attribute__((packed)) gesb_header_t;
 _Static_assert(sizeof(gesb_header_t) == 20, "GESB header = 20 B");
 
+/* ACPI 6.5 §18.3.2.7.1, Table 18.12 — Generic Error Data Entry.
+ *
+ * The Timestamp at offset 64 exists only from Revision 0x300 onwards, so
+ * the header is 72 bytes at revision >= 0x300 and 64 bytes before it.
+ * Linux draws the same line in acpi_hest_get_size(). Reading a pre-0x300
+ * entry as 72 bytes puts every section body eight bytes early and shifts
+ * the NEXT entry's Section Type GUID out from under the comparison — which
+ * on this path means a real ECC error reaches the generic branch instead
+ * of mce_migrate_request. */
 typedef struct {
-    uint8_t  section_type[16];    /* GUID */
+    uint8_t  section_type[16];
     uint32_t error_severity;
     uint16_t revision;
     uint8_t  validation_bits;
@@ -59,7 +68,16 @@ typedef struct {
     char     fru_text[20];
     uint8_t  timestamp[8];
 } __attribute__((packed)) gedata_entry_t;
-_Static_assert(sizeof(gedata_entry_t) == 72, "Generic Error Data Entry = 72 B");
+_Static_assert(sizeof(gedata_entry_t) == 72,
+               "Generic Error Data Entry = 72 B at revision 0x300");
+#define GEDATA_HEADER_PRE_V300  64u
+
+/* Byte length of one Generic Error Data Entry header. Revision is packed
+ * major.minor; Linux compares the same way in acpi_hest_get_version(). */
+static uint32_t gedata_header_len(uint16_t revision) {
+    return ((revision >> 8) >= 3) ? (uint32_t)sizeof(gedata_entry_t)
+                                  : GEDATA_HEADER_PRE_V300;
+}
 
 /* Memory Error CPER section — UEFI 2.10 §N.2.5 r2 layout (80 bytes). */
 typedef struct {
@@ -109,7 +127,8 @@ static inline bool guid_eq(const uint8_t *a, const uint8_t *b) {
 typedef struct {
     uint16_t  source_id;
     uint8_t   notify_type;
-    uint8_t   flags;              /* bit 0: in_use, 1: v2, 2: unmappable */
+    uint8_t   flags;              /* bit 0: in_use, 1: v2, 2: unmappable,
+                                   * 3: window moved once already */
     uint32_t  gsiv;
     uint32_t  poll_interval_ms;
     uint32_t  gesb_len;
@@ -122,7 +141,8 @@ typedef struct {
     uint8_t   status_reg_space;
     uint8_t   status_reg_width;   /* bits, after the spec's 8-byte fixup */
     uint64_t  gesb_phys;
-    void     *gesb_va;            /* mapped where mapping is allowed */
+    void     *gesb_va;            /* mapped where mapping is allowed, and
+                                   * never released — ghes_point_at_block */
     uint64_t  next_poll_tsc;
     /* GHESv2 read-ack registers (zero for v1). */
     uint64_t  read_ack_addr;
@@ -143,6 +163,9 @@ typedef struct {
 /* Set when the block this source's register names could not be mapped, so
  * the refusal is said once and not once per attempt. */
 #define SRC_UNMAPPABLE  (1u << 2)
+/* Set the first time the firmware republished the block somewhere else, so
+ * that too is said once. See ghes_point_at_block. */
+#define SRC_WINDOW_MOVED (1u << 3)
 
 static void ghes_walk_worker(void *ctx);
 
@@ -503,12 +526,16 @@ static bool process_memory_section(const apei_ghes_source_t *src,
  * Returns total bytes consumed (entry header + data) or 0 on corrupt. */
 static uint32_t process_entry(const apei_ghes_source_t *src,
                                const uint8_t *entry, uint32_t avail) {
-    if (avail < sizeof(gedata_entry_t)) return 0;
+    /* Revision sits at offset 20, inside the shorter of the two headers, so
+     * it can be read before the header's own length is known. */
+    if (avail < GEDATA_HEADER_PRE_V300) return 0;
     const gedata_entry_t *ge = (const gedata_entry_t *)entry;
+    uint32_t hdr_len  = gedata_header_len(ge->revision);
+    if (avail < hdr_len) return 0;
     uint32_t data_len = ge->error_data_length;
-    if ((uint64_t)data_len + sizeof(gedata_entry_t) > avail) return 0;
+    if ((uint64_t)data_len + hdr_len > avail) return 0;
 
-    const uint8_t *body = entry + sizeof(gedata_entry_t);
+    const uint8_t *body = entry + hdr_len;
 
     apei_event_payload_t generic = {0};
     generic.source_id        = src->source_id;
@@ -539,7 +566,7 @@ static uint32_t process_entry(const apei_ghes_source_t *src,
         __atomic_fetch_add(&g_stat_generic_sections, 1, __ATOMIC_RELAXED);
     }
 
-    return (uint32_t)sizeof(gedata_entry_t) + data_len;
+    return hdr_len + data_len;
 }
 
 /* GHESv2 read-ack flow (ACPI 6.5 §18.3.2.7.2). Read the register, mask
@@ -592,19 +619,35 @@ static uint64_t ghes_read_status_register(const apei_ghes_source_t *src) {
  *
  * Mapping takes kernel locks and may allocate page tables, so this runs
  * ONLY where that is allowed — the K-Core walk behind the source's knock.
- * The window is unpublished BEFORE the old one is released, so a tick or an
- * SCI landing on this core mid-swap finds no window to read rather than one
- * that is being torn down; both of those, and this worker, run on the drain
- * core (BSP), and the NMI path never dereferences the window at all. */
+ *
+ * A WINDOW THIS FUNCTION HAS PUBLISHED IS NEVER RELEASED, and that is a
+ * decision, not an oversight. An NMI on any core reads the window to learn
+ * whether the source holds an unconsumed record — that is the question
+ * vector 2 must answer to know whether the interrupt was its own — and an
+ * NMI cannot be held off while this core tears a mapping down. Unmapping
+ * here would leave a window in which an NMI that had already loaded the
+ * old address dereferences a page that no longer maps, and a #PF taken
+ * inside an NMI handler is not survivable: the fault's IRET unblocks NMIs
+ * while the handler is still on its IST stack. Keeping the old window
+ * costs one MMIO mapping per DISTINCT block address a source ever
+ * publishes — firmware publishes one and keeps it, which is why the
+ * pre-allocation fields exist in Table 18.10 at all — and buys an NMI path
+ * that cannot fault by construction.
+ *
+ * The pair (gesb_phys, gesb_va) is published va-first so a reader that
+ * sees the new address also sees the window that maps it: gesb_va with a
+ * release store, then gesb_phys with a release store, and readers load
+ * gesb_phys with acquire before gesb_va. */
 static bool ghes_point_at_block(apei_ghes_source_t *src, uint64_t phys) {
     void *old = src->gesb_va;
-    __atomic_store_n(&src->gesb_va, (void *)NULL, __ATOMIC_RELEASE);
-    if (old) vmm_unmap_mmio((volatile void *)old, src->gesb_len);
 
     void *va = (void *)(uintptr_t)vmm_map_mmio(phys, src->gesb_len,
                                                 VMM_FLAGS_KERNEL_RW);
     if (!va) {
-        src->gesb_phys = 0;
+        /* The old window stays mapped and stays readable; what stops it
+         * being read is that gesb_phys no longer matches any address the
+         * register can name. */
+        __atomic_store_n(&src->gesb_phys, (uint64_t)0, __ATOMIC_RELEASE);
         __atomic_fetch_add(&g_stat_map_failures, 1, __ATOMIC_RELAXED);
         /* Said once per source: the firmware keeps signalling and the poll
          * keeps coming, and a line per attempt would bury the console under
@@ -619,10 +662,20 @@ static bool ghes_point_at_block(apei_ghes_source_t *src, uint64_t phys) {
         return false;
     }
     src->flags &= (uint8_t)~SRC_UNMAPPABLE;
-    src->gesb_phys = phys;
     __atomic_store_n(&src->gesb_va, va, __ATOMIC_RELEASE);
+    __atomic_store_n(&src->gesb_phys, phys, __ATOMIC_RELEASE);
     debug_printf("[APEI] GHES src=%u now points at status block 0x%lx\n",
                  src->source_id, (unsigned long)phys);
+    /* Said once per source, because a firmware that moves the block is
+     * telling the operator something about itself, and because the mapping
+     * the move leaves behind is kept for the life of the machine. */
+    if (old && old != va && !(src->flags & SRC_WINDOW_MOVED)) {
+        src->flags |= SRC_WINDOW_MOVED;
+        kprintf("[APEI] GHES src=%u: firmware republished its error status "
+                "block at 0x%lx; the previous window stays mapped because an "
+                "NMI on another core may be reading it\n",
+                src->source_id, (unsigned long)phys);
+    }
     return true;
 }
 
@@ -646,14 +699,16 @@ static int process_source_gesb(apei_ghes_source_t *src, bool may_map) {
     if (src->status_reg_addr != 0) {
         uint64_t phys = ghes_read_status_register(src);
         if (phys == 0) return 0;          /* no block published right now */
-        if (phys != src->gesb_phys || !src->gesb_va) {
+        if (phys != __atomic_load_n(&src->gesb_phys, __ATOMIC_ACQUIRE) ||
+            !__atomic_load_n(&src->gesb_va, __ATOMIC_ACQUIRE)) {
             if (!may_map) { KnockOn(&src->knock); return 0; }
             if (!ghes_point_at_block(src, phys)) return -1;
         }
     }
 
-    if (!src->gesb_va) return 0;
-    volatile gesb_header_t *hdr = (volatile gesb_header_t *)src->gesb_va;
+    void *window = __atomic_load_n(&src->gesb_va, __ATOMIC_ACQUIRE);
+    if (!window) return 0;
+    volatile gesb_header_t *hdr = (volatile gesb_header_t *)window;
     uint32_t status = __atomic_load_n((uint32_t *)&hdr->block_status, __ATOMIC_ACQUIRE);
     if (status == 0) return 0;          /* no error pending */
 
@@ -669,10 +724,10 @@ static int process_source_gesb(apei_ghes_source_t *src, bool may_map) {
     /* Iterate Generic Error Data Entries. Bit 13:4 of block_status
      * reports entry count but we walk via byte budget so a stale count
      * cannot drive us off the end. */
-    const uint8_t *p   = (const uint8_t *)(uintptr_t)(src->gesb_va) + sizeof(gesb_header_t);
+    const uint8_t *p   = (const uint8_t *)window + sizeof(gesb_header_t);
     uint32_t remaining = data_len;
     uint32_t entries   = 0;
-    while (remaining >= sizeof(gedata_entry_t)) {
+    while (remaining >= GEDATA_HEADER_PRE_V300) {
         uint32_t step = process_entry(src, p, remaining);
         if (step == 0) {
             __atomic_fetch_add(&g_stat_corrupt_records, 1, __ATOMIC_RELAXED);
@@ -749,21 +804,43 @@ bool apei_ghes_nmi_check(void) {
         if (!(src->flags & SRC_IN_USE)) continue;
         if (src->notify_type != 4) continue;
         if (src->status_reg_addr == 0) continue;
-        /* NMI context asks the REGISTER and nothing else. The register is
-         * mapped once at registration and never remapped, so reading it here
-         * can neither fault nor take a lock; the WINDOW, by contrast, can be
-         * released by the K-Core walk on the drain core the moment the
-         * firmware republishes the block elsewhere, and an NMI on another
-         * core that dereferenced it in that window would page-fault inside
-         * an NMI. So the question this handler answers is only "does this
-         * source name a block" — whether that block still holds an
-         * unconsumed record is for the walk to decide, where reading it is
-         * safe, and where a block already acknowledged costs one load. */
-        if (ghes_read_status_register(src) == 0) continue;
-        any = true;
-        /* The source's own knock: allocation-free, never dropped, and a
-         * burst of NMIs for one block is one walk. */
+
+        /* Two loads, both of which an NMI may make: the register (mapped
+         * once at registration, never remapped) and the window (published
+         * once per block address and never released — see
+         * ghes_point_at_block). Neither can fault and neither takes a lock. */
+        uint64_t phys = ghes_read_status_register(src);
+        if (phys == 0) continue;      /* no block published: not this source */
+
+        uint64_t mapped = __atomic_load_n(&src->gesb_phys, __ATOMIC_ACQUIRE);
+        void    *window = __atomic_load_n(&src->gesb_va,   __ATOMIC_ACQUIRE);
+        if (phys == mapped && window) {
+            /* The question vector 2 actually has to answer: does this source
+             * hold a record nobody has consumed? Block Status zero means the
+             * firmware has armed nothing, so this NMI came from somewhere
+             * else and must be left to the handler's other branches — that
+             * is the whole point of the "unclaimed" line in idt.c. */
+            volatile gesb_header_t *hdr = (volatile gesb_header_t *)window;
+            uint32_t status = __atomic_load_n((uint32_t *)&hdr->block_status,
+                                               __ATOMIC_ACQUIRE);
+            if (status == 0) continue;
+            any = true;
+            /* The source's own knock: allocation-free, never dropped, and a
+             * burst of NMIs for one block is one walk. */
+            KnockOn(&src->knock);
+            continue;
+        }
+
+        /* The register names a block this kernel has no window for: either
+         * the source was registered before the firmware published one, or
+         * the firmware has just republished it elsewhere. Both are the
+         * firmware speaking, so the NMI is claimed and the K-Core walk maps
+         * the block and reads it. A source whose block could not be mapped
+         * is the exception — it has already said so once, and claiming every
+         * NMI forever on its behalf would hide every other NMI reason for
+         * the life of the machine. */
         KnockOn(&src->knock);
+        if (!(src->flags & SRC_UNMAPPABLE)) any = true;
     }
     return any;
 }

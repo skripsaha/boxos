@@ -5,6 +5,7 @@
 #include "cpu_calibrate.h"
 #include "klib.h"
 #include "atomics.h"
+#include "hourglass.h"
 
 /*
  * ‼ HOW LONG A DISK IS GIVEN TO ANSWER, AND WHY IT IS NOT TWO SECONDS.
@@ -96,6 +97,51 @@ static AhciSlotEnd ahci_wait_for_slot(ahci_port_t* port_state,
     }
 }
 
+/*
+ * Draw a command slot — WAITED FOR, not gambled on.
+ *
+ * `ahci_alloc_slot` answers about this instant only, and both callers below
+ * used to treat "no free slot right now" as a failed attempt: `continue`, one
+ * of AHCI_MAX_RETRIES spent in nanoseconds, and a debug_printf that compiles
+ * to nothing. Three of those in a row and a perfectly healthy disk reported a
+ * read failure without a single command ever reaching it. Two things fill a
+ * port: thirty-two NCQ tags all outstanding at once, and — since FLUSH CACHE
+ * EXT started taking the port whole, as AHCI 1.3.1 §1.7 requires — a cache
+ * flush running on it.
+ *
+ * Both of those are transient by construction: they end when commands
+ * complete. So this waits for the FACT of a slot coming free, and the clock is
+ * the last resort behind it — the same AHCI_CMD_PATIENCE_MS one command is
+ * given, because what is being waited out is exactly one command's worth of
+ * port. A slot that never comes is said out loud and refused; it is not a
+ * retry, and it does not spend one.
+ */
+static int ahci_draw_slot(uint8_t port)
+{
+    int slot = ahci_alloc_slot(port);
+    if (slot >= 0) return slot;
+
+    HourGlass glass;
+    if (!HourGlassTurn(&glass, (uint64_t)AHCI_CMD_PATIENCE_MS * 1000ULL)) {
+        kprintf("[AHCI] port %u: every command slot is busy and there is no "
+                "clock to wait one out on — the command is not issued\n", port);
+        return -1;
+    }
+
+    for (;;) {
+        slot = ahci_alloc_slot(port);
+        if (slot >= 0) return slot;
+        if (HourGlassRunOut(&glass)) {
+            kprintf("[AHCI] port %u: every command slot was still busy after "
+                    "%lu us on the %s — the command is not issued\n",
+                    port, (unsigned long)HourGlassElapsedUs(&glass),
+                    HourGlassRulerName(&glass));
+            return -1;
+        }
+        cpu_pause();
+    }
+}
+
 int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
                            uint16_t sector_count, void* buffer) {
     if (!buffer || sector_count == 0) return -1;
@@ -119,10 +165,11 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
     memset(dma_virt, 0, pages_needed * 4096);
 
     for (int retry = 0; retry < AHCI_MAX_RETRIES; retry++) {
-        int slot = ahci_alloc_slot(port);
+        /* A busy port is not a failed attempt — see ahci_draw_slot. */
+        int slot = ahci_draw_slot(port);
         if (slot < 0) {
-            debug_printf("[AHCI Sync] No free slots (retry %d/%d)\n", retry + 1, AHCI_MAX_RETRIES);
-            continue;
+            pmm_free(dma_page, pages_needed);
+            return -1;
         }
 
         __atomic_fetch_add(&port_state->stats.cmd_count, 1, __ATOMIC_RELAXED);
@@ -211,10 +258,11 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
     mfence();
 
     for (int retry = 0; retry < AHCI_MAX_RETRIES; retry++) {
-        int slot = ahci_alloc_slot(port);
+        /* A busy port is not a failed attempt — see ahci_draw_slot. */
+        int slot = ahci_draw_slot(port);
         if (slot < 0) {
-            debug_printf("[AHCI Sync] No free slots (retry %d/%d)\n", retry + 1, AHCI_MAX_RETRIES);
-            continue;
+            pmm_free(dma_page, pages_needed);
+            return -1;
         }
 
         __atomic_fetch_add(&port_state->stats.cmd_count, 1, __ATOMIC_RELAXED);
@@ -274,35 +322,46 @@ int ahci_flush_cache_sync(uint8_t port) {
         return -1;
     }
 
-    for (int retry = 0; retry < AHCI_MAX_RETRIES; retry++) {
-        /* THE PORT, NOT A SLOT.
-         *
-         * FLUSH CACHE EXT has no queued form, and AHCI 1.3.1 §1.7 is flat
-         * about what that means: "System software is responsible to ensure
-         * that queued and non-queued commands are not mixed in the command
-         * list for the same device with the exception of the NCQ Unload
-         * command." This used to draw an ordinary slot, which on an NCQ port
-         * put a non-queued command in the list beside live FPDMA tags — and
-         * that is the one thing the commit point of a write must not do: the
-         * drive aborts the flush and aborts the queue with it, so every write
-         * in flight on the port fails and the link is reset, at the exact
-         * moment those writes were being made durable.
-         *
-         * So the port is taken WHOLE: this waits for the port to go quiet —
-         * every slot free, PxSACT and PxCI both empty — and only then closes
-         * it, for exactly as long as the flush takes. The slot below is one
-         * this caller alone owns. On a non-NCQ port the port's only slot is
-         * the whole of it, so this is the same walk it always was. */
-        int slot = ahci_port_take_whole(port, AHCI_CMD_PATIENCE_MS);
-        if (slot < 0) {
-            /* ahci_port_take_whole has already said on the console which of
-             * the two it could not do, and nothing is held. A flush that was
-             * not issued is not a flush that failed quietly: the caller is
-             * told, and asking again here would only re-run the same wait on
-             * the same busy port. */
-            return -1;
-        }
+    /* THE PORT, NOT A SLOT — AND ONCE FOR THE WHOLE CALL, NOT PER ATTEMPT.
+     *
+     * FLUSH CACHE EXT has no queued form, and AHCI 1.3.1 §1.7 is flat about
+     * what that means: "System software is responsible to ensure that queued
+     * and non-queued commands are not mixed in the command list for the same
+     * device with the exception of the NCQ Unload command." This used to draw
+     * an ordinary slot, which on an NCQ port put a non-queued command in the
+     * list beside live FPDMA tags — and that is the one thing the commit
+     * point of a write must not do: the drive aborts the flush and aborts the
+     * queue with it, so every write in flight on the port fails and the link
+     * is reset, at the exact moment those writes were being made durable.
+     *
+     * So the port is taken WHOLE: this waits for the port to go quiet — every
+     * slot free, PxSACT and PxCI both empty — and only then closes it. The
+     * slot below is one this caller alone owns. On a non-NCQ port the port's
+     * only slot is the whole of it, so this is the same walk it always was.
+     *
+     * It is taken OUTSIDE the retry loop, and §1.7 is the first reason: a
+     * retry, and the COMRESET between it and the attempt that failed, are as
+     * much "this command alone on the port" as the first attempt was, and
+     * re-opening the door between attempts would let the queue refill under
+     * the one command that must not share the list. The second reason is the
+     * clock. Waiting for quiet is bounded by how long an outstanding command
+     * may take, which is the same AHCI_CMD_PATIENCE_MS the command itself
+     * gets; paid once per call the worst case of this function is one wait
+     * plus AHCI_MAX_RETRIES commands, where paying it per attempt would have
+     * made it AHCI_MAX_RETRIES of each — and this runs at halt_sync_storage(),
+     * where every second is a second the machine will not shut down in. */
+    int slot = ahci_port_take_whole(port, AHCI_CMD_PATIENCE_MS);
+    if (slot < 0) {
+        /* ahci_port_take_whole has already said on the console which of the
+         * two it could not do, and nothing is held. A flush that was not
+         * issued is not a flush that failed quietly: the caller is told, and
+         * asking again here would only re-run the same wait on the same busy
+         * port. */
+        return -1;
+    }
 
+    int result = -1;
+    for (int retry = 0; retry < AHCI_MAX_RETRIES; retry++) {
         ahci_cmd_header_t* cmdheader = (ahci_cmd_header_t*)port_state->clb_virt;
         cmdheader[slot].cfl = sizeof(fis_reg_h2d_t) / sizeof(uint32_t);
         cmdheader[slot].w = 0;
@@ -334,10 +393,10 @@ int ahci_flush_cache_sync(uint8_t port) {
         /* FLUSH CACHE EXT is never queued, so PxSACT says nothing about it. */
         AhciSlotEnd how = ahci_wait_for_slot(port_state, regs, (uint8_t)slot,
                                              false);
-        ahci_port_give_back(port);
 
         if (how == AHCI_SLOT_DONE) {
-            return 0;
+            result = 0;
+            break;
         }
         if (how == AHCI_SLOT_GONE) {
             break;
@@ -347,14 +406,21 @@ int ahci_flush_cache_sync(uint8_t port) {
                     "%u ms (attempt %d of %d)\n", port, AHCI_CMD_PATIENCE_MS,
                     retry + 1, AHCI_MAX_RETRIES);
         }
+        /* The hold survives the recovery: ahci_port_recover drives PxCMD.ST
+         * and PxSCTL.DET and never touches the slot pool, so the port comes
+         * back still closed to everyone but this command. */
         if (retry < AHCI_MAX_RETRIES - 1) {
             ahci_port_recover(port_state);
         }
     }
 
-    kprintf("[AHCI] port %u: a cache flush failed after %d attempts\n",
-            port, AHCI_MAX_RETRIES);
-    return -1;
+    ahci_port_give_back(port);
+
+    if (result != 0) {
+        kprintf("[AHCI] port %u: a cache flush failed after %d attempts\n",
+                port, AHCI_MAX_RETRIES);
+    }
+    return result;
 }
 
 /* 128 KiB — thirty-two contiguous DMA32 pages, an order the buddy allocator

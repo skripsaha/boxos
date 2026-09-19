@@ -109,10 +109,23 @@ bool hv_has_kvmclock(void);
 /* True iff the Hyper-V reference TSC page is available. */
 bool hv_has_hyperv_tsc_page(void);
 
-/* True iff Hyper-V exposes the FrequencyMsrs facility (CPUID
- * 0x40000003:EDX[8]). When set the guest may RDMSR MSR
- * HV_X64_MSR_TSC_FREQUENCY (0x40000022) and HV_X64_MSR_APIC_FREQUENCY
- * (0x40000023) to read exact TSC / APIC bus frequencies in Hz. */
+/* True iff RDMSR of HV_X64_MSR_TSC_FREQUENCY (0x40000022) and
+ * HV_X64_MSR_APIC_FREQUENCY (0x40000023) is legal for this guest, which
+ * takes BOTH halves of CPUID leaf 0x40000003 and they say different things:
+ *
+ *   EAX[11] AccessFrequencyRegs — the PRIVILEGE, granted to this partition
+ *   through HvPartitionPropertyPrivilegeFlags. This is the bit that makes
+ *   the RDMSR legal; without it the hypervisor injects #GP and a #GP in
+ *   kernel mode here is a panic.
+ *
+ *   EDX[8] FrequencyMsrsAvailable — the CAPABILITY of the hypervisor build:
+ *   the MSRs exist at all. It confers no right to read them.
+ *
+ * Neither half implies the other, in either direction: a Hyper-V build can
+ * expose the facility to a partition that was never granted the privilege,
+ * and Xen in viridian mode grants EAX[11] while never setting EDX[8]. The
+ * implementation requires both, exactly as linux's mshyperv.c does before
+ * it installs hv_get_tsc_khz. */
 bool hv_has_hyperv_frequency_msrs(void);
 
 /* Hyper-V MSR-supplied TSC frequency in kHz. Returns 0 if the MSR

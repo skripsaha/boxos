@@ -20,6 +20,7 @@
 #include "box/core/notify.h"
 #include "box/string.h"
 #include "box/convert.h"
+#include "box/error.h"
 
 #define DECK_OPS_FILL   0x02
 #define DECK_OPS_MOVE   0x01
@@ -154,29 +155,70 @@ static bool test_storage_getinfo(void)
 }
 
 /* -------------------------------------------------------------------------
- *  Security gate — DENY a system-only op (HW_PORT_OUTB) for our utility tag
+ *  Two different refusals, and telling them apart is the point
+ *
+ *  ‼ THE ERROR CODE IS THE ASSERTION, NOT "SOMETHING WENT WRONG". A test that
+ *  accepts any non-zero answer passes for the wrong reason the moment the op
+ *  it names stops existing — which is exactly what happened to the op this
+ *  pair replaces. It aimed at hw.port.outb, and when hw.port.outb was
+ *  withdrawn the test went on passing while proving nothing about the gate.
+ *  So each of these two names the code it expects:
+ *
+ *    ERR_ACCESS_DENIED   — the op is there, and the gate would not let US
+ *                          have it. That is the gate working.
+ *    ERR_INVALID_OPCODE  — there is no such op on this deck at all, and there
+ *                          never will be again. That is a retired number
+ *                          staying retired.
  * ------------------------------------------------------------------------- */
 
-static bool test_auth_denies_port_io(void)
+static bool test_auth_denies_system_op(void)
 {
-    /* hw.port.outb is registered with OP_AUTH_SYSTEM; decks.elf has app+utility,
-     * so the kernel must refuse with ERR_ACCESS_DENIED. */
+    /* hw.usb.port.query is registered with OP_AUTH_SYSTEM; decks.elf carries
+     * app+utility, so the kernel must refuse it. Chosen because it is
+     * read-only and takes the controller number in one byte: if the gate ever
+     * DID fail open, the worst that happens is five bytes written into our own
+     * crate — and the answer would then not be ERR_ACCESS_DENIED, so this
+     * still fails, loudly, which is what a negative test is for. */
+    static uint8_t  mbuf[64];
+    static uint8_t  out[8];
+    ManifestBuilder mb;
+    if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return false;
+
+    uint8_t params[1] = { 0 };                 /* the first controller */
+    if (ManifestBuilderAddOp(&mb, DECK_HARDWARE, 0x98 /* hw.usb.port.query */, 0,
+                             CRATE_INDEX_NONE, 0,
+                             params, sizeof(params)) != 0) return false;
+    if (ManifestBuilderFinalize(&mb) != 0) return false;
+
+    Crate crates[1];
+    CrateSetOutput(&crates[0], out, sizeof(out));
+
+    Result r;
+    int rc = ManifestSubmit((Manifest *)mbuf, crates, 1, &r);
+    if (rc < 0) return false;                  /* never reached the gate */
+    return r.error_code == (uint32_t)ERR_ACCESS_DENIED;
+}
+
+static bool test_retired_opcode_is_unknown(void)
+{
+    /* 0x21 was hw.port.outb. It is withdrawn and its number is spent for ever
+     * (hardware_deck.h), so the deck must answer that there is no such op —
+     * a different refusal from the one above, and the difference is the whole
+     * reason both tests exist. */
     static uint8_t mbuf[64];
     ManifestBuilder mb;
     if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return false;
 
-    uint8_t params[3] = { 0x80, 0x00, 0x00 };  /* port 0x80 (POST), value 0 */
-    if (ManifestBuilderAddOp(&mb, DECK_HARDWARE, 0x21 /* HW_PORT_OUTB */, 0,
+    uint8_t params[3] = { 0x80, 0x00, 0x00 };  /* port 0x80, value 0 */
+    if (ManifestBuilderAddOp(&mb, DECK_HARDWARE, 0x21 /* retired */, 0,
                              CRATE_INDEX_NONE, CRATE_INDEX_NONE,
                              params, sizeof(params)) != 0) return false;
     if (ManifestBuilderFinalize(&mb) != 0) return false;
 
     Result r;
     int rc = ManifestSubmit((Manifest *)mbuf, NULL, 0, &r);
-    /* Either ManifestSubmit returns non-zero or error_code is non-zero —
-     * the gate must refuse. */
-    if (rc == 0 && r.error_code == 0) return false;   /* gate failed open — bad */
-    return true;
+    if (rc < 0) return false;
+    return r.error_code == (uint32_t)ERR_INVALID_OPCODE;
 }
 
 /* -------------------------------------------------------------------------
@@ -199,7 +241,8 @@ int main(void)
     check("System:     tag.check (-)", test_sys_tag_check_negative());
     check("Storage:    query all",     test_storage_query());
     check("Storage:    getinfo",       test_storage_getinfo());
-    check("Auth gate:  deny port.outb",test_auth_denies_port_io());
+    check("Auth gate:  deny usb.port.query", test_auth_denies_system_op());
+    check("Retired:    port.outb is no op",  test_retired_opcode_is_unknown());
 
     print("[decks] ");
     print_int(g_passed);

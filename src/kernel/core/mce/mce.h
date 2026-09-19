@@ -135,15 +135,21 @@ typedef enum {
     MCE_SEV_UCR       = 2,  /* Uncorrected RECOVERABLE. Every one of these
                              * must hold: MCG_CAP.MCG_SER_P=1 (the part
                              * implements software error recovery at all),
-                             * UC=1, PCC=0, OVER=0, EN=1, S=1. Table 15-6
-                             * then splits it by AR: SRAO (AR=0, action
-                             * optional) and SRAR (AR=1, action required). */
-    MCE_SEV_UC        = 3,  /* Fatal. PCC=1; or OVER=1 alongside UC=1 (an
-                             * uncorrected error whose twin was lost); or
-                             * ANY UC=1 on a part without MCG_SER_P, where
-                             * §15.6.1 leaves the handler nothing but "log
-                             * and shut the system down"; or a UCR row whose
-                             * MCACOD names no recovery this handler has. */
+                             * UC=1, PCC=0, EN=1, S=1. Table 15-6 then
+                             * splits it by AR: SRAO (AR=0, action optional)
+                             * and SRAR (AR=1, action required). OVER is not
+                             * part of this test — Table 15-6 attaches it to
+                             * the SRAR row alone, so it is read there. */
+    MCE_SEV_UC        = 3,  /* Fatal. PCC=1; or ANY UC=1 on a part without
+                             * MCG_SER_P, where §15.6.1 leaves the handler
+                             * nothing but "log and shut the system down";
+                             * or a SRAR with OVER=1, whose twin error was
+                             * lost and cannot be acted on ("If OVER=1,
+                             * reset system"); or a UCR row whose MCACOD
+                             * names no recovery this handler has; or a
+                             * SRAR on the processor that CONSUMED the
+                             * poison, which must not be restarted at the
+                             * instruction that consumed it. */
     MCE_SEV_UCNA      = 4,  /* UC=1, PCC=0, S=0 on a SER part: the hardware
                              * logged it and never signalled it to us —
                              * Table 15-6, "Ok to keep the system running".
@@ -181,10 +187,18 @@ void          mce_ap_init(void);
  *     any single bank's severity;
  *   - no bank record it decoded was fatal. Fatal is what §15.6.1 and
  *     Table 15-6 make fatal, not merely PCC: an uncorrected error on a
- *     part without MCG_SER_P, an uncorrected error with OVER=1 (its twin
- *     was lost, so nobody can say where it was), and a UCR row whose
- *     MCACOD names no recovery — "for unknown MCACOD, must bugcheck" —
- *     or whose required action this kernel could not start.
+ *     part without MCG_SER_P; a SRAR with OVER=1 (its twin was lost, so
+ *     nobody can say where it was); a UCR row whose MCACOD names no
+ *     recovery — "for unknown MCACOD, must bugcheck" — or whose required
+ *     action this kernel could not start;
+ *   - the #MC was not a SRAR taken on the processor that consumed the
+ *     poison. §15.6.2 wants that recovery "completed successfully before
+ *     any additional work is scheduled for this processor", and the
+ *     migration this kernel performs finishes on a K-Core long after IRET
+ *     would return — so the consuming context is not resumed at all. The
+ *     processors that merely took the broadcast are told apart from the
+ *     consumer by MCG_STATUS the way SDM Table 15-21 says: RIPV=1 with
+ *     EIPV=0 is a thread that consumed nothing, and it keeps running.
  *
  * An empty walk — no bank with VAL=1 — is deliberately NOT a verdict of its
  * own. Without LMCE every Intel #MC is broadcast to every logical processor

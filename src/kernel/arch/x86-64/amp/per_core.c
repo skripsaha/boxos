@@ -18,6 +18,13 @@
 PerCoreData g_per_core[MAX_CORES] __attribute__((aligned(64)));
 volatile bool g_per_core_active = false;
 
+/* Read by the paranoid IST entry in isr.asm, which derives this core's true
+ * kernel GS base from the TSS base the CPU itself holds in TR. Defined here
+ * rather than handed to NASM as a build-time -D so that the assembler and the
+ * struct cannot hold two different numbers: there is only one, and it is the
+ * struct's own. */
+const uint64_t PER_CORE_TSS_OFFSET = __builtin_offsetof(PerCoreData, tss);
+
 /* TSC-sync anchor captured by the BSP at calibration time. The triple
  * (anchor_tsc, anchor_us, anchor_khz) must be read as a CONSISTENT
  * snapshot — the periodic recalibrator can republish tsc_freq_khz at

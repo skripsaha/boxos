@@ -15,22 +15,20 @@
 #define HW_RTC_GET_UNIX64     0x16
 #define HW_RTC_GET_UPTIME     0x17
 
-#define HW_PORT_INB           0x20
-#define HW_PORT_OUTB          0x21
-#define HW_PORT_INW           0x22
-#define HW_PORT_OUTW          0x23
-#define HW_PORT_INL           0x24
-#define HW_PORT_OUTL          0x25
-
-#define HW_IRQ_REGISTER       0x30
-#define HW_IRQ_UNREGISTER     0x31
-#define HW_IRQ_ENABLE         0x32
-#define HW_IRQ_DISABLE        0x33
-#define HW_IRQ_GET_ISR        0x34
-#define HW_IRQ_GET_IRR        0x35
-#define HW_IRQ_SEND_EOI       0x36
-
-#define HW_CPU_HALT           0x40
+/*
+ * ‼ FOURTEEN NUMBERS ARE SPENT HERE, AND NONE OF THEM COMES BACK.
+ *
+ * 0x20-0x25 were hw.port.inb/outb/inw/outw/inl/outl, 0x30-0x36 were
+ * hw.irq.register/unregister/enable/disable/isr/irr/eoi, and 0x40 was
+ * hw.cpu.halt. Not one of them was an operation. The first thirteen were this
+ * kernel's own `in`, `out` and interrupt-controller writes published outside
+ * under a name, and the last was a bare `hlt` reached with interrupts already
+ * masked — hardware_ops.c, above the Disk section, says what each of them
+ * actually did and what it cost. Their numbers stay spent, so an old caller
+ * that still knows one of them can only ever be told there is no such op,
+ * never handed a different one. The same rule, and the same reason, as 0x90
+ * and 0x93 below.
+ */
 
 #define HW_DISK_FLUSH         0x52
 #define HW_DISK_INFO          0x53

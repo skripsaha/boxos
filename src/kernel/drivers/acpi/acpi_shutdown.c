@@ -358,8 +358,29 @@ static acpi_gas_t resolve_pm1_gas(const acpi_gas_t *x_gas, uint32_t legacy_port,
  * ever put SCI_EN back, so on every path where the write does not immediately
  * kill power — the PM1b retry, the halt below — PM1 events and GPEs were
  * routed to SMI for the rest of the machine's life. ACPICA masks off the same
- * two fields and no others (acpi_hw_legacy_sleep). */
-static void attempt_acpi_pm1(const acpi_gas_t *gas, uint16_t slp_typ, const char *tag) {
+ * two fields and no others (acpi_hw_legacy_sleep).
+ *
+ * The request is split in two because the write order across the PAIR of
+ * blocks is what §4.8 legislates, not the order within one of them: "OSPM
+ * will always write the SLP_TYPa value to the 'A' register block followed by
+ * the SLP_TYPb value within the field to the 'B' register block." A block
+ * carried all the way to SLP_EN before its partner has even been given a
+ * sleep type asserts the transition in A while B still holds a stale type.
+ * So the word is prepared per block and written in two passes over both. */
+typedef struct {
+    const acpi_gas_t *gas;
+    const char       *tag;
+    uint16_t          word;   /* SLP_TYP in place, SLP_EN still clear */
+    bool              ready;
+} Pm1SleepRequest;
+
+static void pm1_sleep_prepare(Pm1SleepRequest *req, const acpi_gas_t *gas,
+                              uint16_t slp_typ, const char *tag) {
+    req->gas   = gas;
+    req->tag   = tag;
+    req->word  = 0;
+    req->ready = false;
+
     if (gas->address == 0) return;
 
     uint16_t cur = 0;
@@ -379,27 +400,28 @@ static void attempt_acpi_pm1(const acpi_gas_t *gas, uint16_t slp_typ, const char
     }
 
     uint16_t keep = (uint16_t)(cur & ~(PM1_CNT_SLP_TYP_MASK | PM1_CNT_SLP_EN));
-    uint16_t typ  = (uint16_t)(keep |
-                               (((uint16_t)(slp_typ << PM1_CNT_SLP_TYP_SHIFT)) &
-                                PM1_CNT_SLP_TYP_MASK));
+    req->word = (uint16_t)(keep |
+                           (((uint16_t)(slp_typ << PM1_CNT_SLP_TYP_SHIFT)) &
+                            PM1_CNT_SLP_TYP_MASK));
+    req->ready = true;
 
     debug_printf("[ACPI] %s shutdown via GAS as=%u addr=0x%lx cur=0x%04x "
                  "SLP_TYP=0x%x -> 0x%04x then 0x%04x\n",
                  tag, gas->address_space, (unsigned long)gas->address,
-                 cur, slp_typ, typ, (uint16_t)(typ | PM1_CNT_SLP_EN));
+                 cur, slp_typ, req->word,
+                 (uint16_t)(req->word | PM1_CNT_SLP_EN));
+}
 
-    /* Two writes, as ACPICA does: the sleep type first, then the same word
-     * with SLP_EN set. The chipset sequences on the SLP_EN transition, and a
-     * separate write means the type is already standing when it arrives. */
-    if (gas_write_word(gas, typ) != 0) {
-        kprintf("[ACPI] %s SLP_TYP write failed\n", tag);
-        return;
+static void pm1_sleep_write(Pm1SleepRequest *req, bool with_enable) {
+    if (!req->ready) return;
+
+    uint16_t value = with_enable ? (uint16_t)(req->word | PM1_CNT_SLP_EN)
+                                 : req->word;
+    if (gas_write_word(req->gas, value) != 0) {
+        kprintf("[ACPI] %s %s write failed\n", req->tag,
+                with_enable ? "SLP_EN" : "SLP_TYP");
+        req->ready = false;
     }
-    if (gas_write_word(gas, (uint16_t)(typ | PM1_CNT_SLP_EN)) != 0) {
-        kprintf("[ACPI] %s SLP_EN write failed\n", tag);
-        return;
-    }
-    delay_ms(100);
 }
 
 static void attempt_acpi_reset(void) {
@@ -479,8 +501,21 @@ void acpi_shutdown(void) {
                                           flen,
                                           offsetof(acpi_fadt_t, x_pm1b_control_block) +
                                               sizeof(acpi_gas_t));
-        if (pm1a.address) attempt_acpi_pm1(&pm1a, g_acpi.slp_typa, "PM1a");
-        if (pm1b.address) attempt_acpi_pm1(&pm1b, g_acpi.slp_typb, "PM1b");
+
+        Pm1SleepRequest req_a, req_b;
+        pm1_sleep_prepare(&req_a, &pm1a, g_acpi.slp_typa, "PM1a");
+        pm1_sleep_prepare(&req_b, &pm1b, g_acpi.slp_typb, "PM1b");
+
+        /* Both sleep types down first, then the transition the chipset
+         * sequences on — ACPI 6.5 §4.8, and the shape of ACPICA's
+         * acpi_hw_legacy_sleep (two passes over the pair, not one block
+         * finished before the other is begun). */
+        pm1_sleep_write(&req_a, false);
+        pm1_sleep_write(&req_b, false);
+        pm1_sleep_write(&req_a, true);
+        pm1_sleep_write(&req_b, true);
+
+        if (req_a.ready || req_b.ready) delay_ms(100);
     }
 
     /* Soft poweroff exhausted. ACPI S5 is the only standardised way to

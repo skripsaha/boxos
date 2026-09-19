@@ -46,10 +46,17 @@
  * Per-process lifecycle
  * ---------------------
  *   - cet_process_create allocates the user shadow stack (16 KiB, four
- *     pages — CET_USER_SSP_PAGES — matching the 16 KiB user data stack so
- *     any depth the data stack can reach is mirrored) and sets
- *     VMM_PTE_CET_SS_USER (bit 61) on it, which marks nothing to the
- *     CPU — see the open-defect note at the top of cet_lifecycle.c.
+ *     pages — CET_USER_SSP_PAGES). That is a QUARTER of the 64 KiB user
+ *     data stack it mirrors (CONFIG_USER_STACK_SIZE_KB = 64, 16 pages),
+ *     so a call chain whose frames average under 32 bytes exhausts the
+ *     shadow stack while the data stack still has room; the push then
+ *     faults in the guard page below the region rather than corrupting a
+ *     neighbour. Accepted, and explained in full at CET_USER_SSP_PAGES
+ *     in cet_lifecycle.c — the 4 is locked by the hammock slot map, so
+ *     growing it is the owner's call, not this file's.
+ *     The pages also get VMM_PTE_CET_SS_USER (bit 61), which marks
+ *     nothing to the CPU — see the open-defect note at the top of
+ *     cet_lifecycle.c.
  *     Stores the SSP value in process_t (user_ssp_va / user_ssp_phys).
  *   - cet_process_destroy frees the pages on process teardown.
  *   - The iretq to user mode loads IA32_PL3_SSP via WRMSR

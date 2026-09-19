@@ -24,8 +24,13 @@
  *   0x108  T0_CMP     Timer 0 Comparator
  *   ...    Timer n at 0x100 + 0x20*n
  *
- * The main counter period is reported in femtoseconds (10^-15 s); we
- * convert to a ticks-per-microsecond ratio at init.
+ * The main counter period is reported in femtoseconds (10^-15 s), and it
+ * is kept exactly as the controller reports it: every conversion divides
+ * by that period where it is needed (hpet_ticks_to_us). There is NO
+ * ticks-per-microsecond ratio, and there deliberately is none — the
+ * canonical period 69,841,279 fs is 14.31818 ticks/us, an integer ratio
+ * truncates it to 14, and that made every HPET-derived time in this
+ * kernel 2.27 % short on real Intel and AMD silicon.
  */
 
 #define HPET_REG_GCAP_ID         0x000

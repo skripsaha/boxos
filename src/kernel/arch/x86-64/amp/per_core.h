@@ -73,6 +73,30 @@ typedef struct {
     uint8_t             _pad1[7];
 } __attribute__((aligned(64))) PerCoreData;
 
+/* Offset of the TSS inside PerCoreData — the one number isr.asm needs from
+ * this header, published as a linker symbol so the assembler reads the very
+ * value the compiler computed instead of a second spelling of it.
+ *
+ * A paranoid IST entry taken from ring 0 cannot ask %gs where it is: the
+ * active GS base may still be a ring-3 one, and ring 3 may write itself a
+ * canonical-high base with WRGSBASE, so no test on the base is evidence. The
+ * anchor the processor keeps for the kernel alone is the task register — ring
+ * 3 cannot load it. STR gives this core's TSS selector, SGDT the GDT that
+ * selector indexes, and the descriptor's base is &g_per_core[i].tss;
+ * subtracting this offset yields &g_per_core[i], this core's true kernel GS
+ * base, derived without GS.
+ *
+ * Why a symbol and not a -D threaded through the Makefile the way
+ * BOOT_INFO_ADDR is: that number is a layout the build CHOOSES, and both ends
+ * have to be told it. This one the struct already knows. Writing it a second
+ * time in the Makefile would create a value that can drift from the struct,
+ * caught only by an assertion someone must remember to arm. Here a field added
+ * above `tss` moves the assembler's subtrahend in the same rebuild — the two
+ * cannot disagree, because there is only one of them. per_core.c holds the
+ * definition; the load costs the paranoid entry one read of kernel .rodata,
+ * which ring 3 cannot write. */
+extern const uint64_t PER_CORE_TSS_OFFSET;
+
 extern PerCoreData g_per_core[MAX_CORES];
 extern volatile bool g_per_core_active;
 
