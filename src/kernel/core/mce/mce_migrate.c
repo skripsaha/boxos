@@ -153,9 +153,31 @@ void mce_migrate_init(void) {
  * the PTE no longer exists (vmm_unmap raced) or is a 2 MiB leaf
  * (Phase 1 migration is 4 KiB-only — log via stats and let caller
  * decide).
+ *
+ * `expect_phys` is the frame the attach snapshot said this (ctx, va) maps.
+ * It is checked inside the CAS loop, and this is what makes the swap the
+ * replacement of ONE frame rather than the overwrite of whatever happens to
+ * be there. Two things make that address arrive twice:
+ *   - one physical error is reported twice. Without LMCE armed (this kernel
+ *     never writes IA32_MCG_EXT_CTL) every Intel #MC is broadcast to every
+ *     logical processor, so N cores read the same shared bank and queue N
+ *     requests for it; and the same DIMM address can arrive a second time
+ *     through APEI/GHES firmware-first reporting.
+ *   - one migration does not reach every mapping. 2 MiB attaches are
+ *     skipped, non-ACTIVE attaches are skipped, and the attach snapshot is
+ *     bounded. A cabin left behind still maps the poisoned frame, touches
+ *     it, and raises a fresh #MC on the same address minutes later.
+ * Either way the second migration copies the STILL-POISONED old frame into
+ * a fresh page and, unchecked, would CAS it over PTEs that have pointed at
+ * the first replacement ever since — reverting every write the cabin made
+ * in between and orphaning the first replacement, which nothing would then
+ * free. With the check, the second migration's swaps all fail, it counts
+ * zero cabins, returns its replacement page to the PMM and says so. The
+ * same check is what keeps an unrelated mapping safe when a cabin unmapped
+ * and remapped that VA between the snapshot and this call.
  */
-static bool mce_swap_pte(void *ctx_ptr, uintptr_t va, uintptr_t new_phys,
-                          bool *out_was_2m) {
+static bool mce_swap_pte(void *ctx_ptr, uintptr_t va, uintptr_t expect_phys,
+                          uintptr_t new_phys, bool *out_was_2m) {
     vmm_context_t *ctx = (vmm_context_t *)ctx_ptr;
     if (!ctx) return false;
     if (out_was_2m) *out_was_2m = false;
@@ -177,6 +199,10 @@ static bool mce_swap_pte(void *ctx_ptr, uintptr_t va, uintptr_t new_phys,
     pte_t old = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
     for (;;) {
         if (!(old & VMM_FLAG_PRESENT)) return false;
+        if (((uint64_t)old & addr_mask) != ((uint64_t)expect_phys & addr_mask)) {
+            /* This translation is no longer the one we were asked to move. */
+            return false;
+        }
         pte_t new_val = (old & ~addr_mask) | (new_phys & addr_mask);
         if (__atomic_compare_exchange_n(pte, &old, new_val, false,
                                          __ATOMIC_ACQ_REL,
@@ -325,7 +351,13 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
 
     /* 5. Walk attachments, swap PTEs in-place. Same new_phys for all
      * (Bay-correct). Per-attach state machine: 2 MiB leaves are
-     * counted but skipped (Phase 1 only handles 4 KiB). */
+     * counted but skipped (Phase 1 only handles 4 KiB).
+     *
+     * Two migrations of one frame never interleave here: every baton routes
+     * to the drain core and that core is the single consumer of its own
+     * queue (baton.h), so performs for the same phys run one after another,
+     * and the second one finds every PTE already naming the first one's
+     * replacement. */
     size_t page_index = (phys - region_base) / PMM_PAGE_SIZE;
     uint32_t cabins_touched = 0;
     uint32_t skipped_2m = 0;
@@ -347,7 +379,7 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
         uintptr_t target_va = att->va_base + page_index * PMM_PAGE_SIZE;
 
         bool was_2m = false;
-        if (mce_swap_pte(att->ctx, target_va, new_phys, &was_2m)) {
+        if (mce_swap_pte(att->ctx, target_va, phys, new_phys, &was_2m)) {
             vmm_shootdown_pages((vmm_context_t *)att->ctx, target_va, 1);
             cabins_touched++;
         } else if (was_2m) {
@@ -360,7 +392,11 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
     }
 
     if (cabins_touched == 0) {
-        /* Nothing swapped — return the unused replacement. */
+        /* Nothing swapped — return the unused replacement. This is also
+         * where a duplicate report for a frame an earlier migration already
+         * moved lands: every PTE now names that earlier replacement, so
+         * every expected-frame check fails and this run costs one page that
+         * is handed straight back. */
         pmm_free(new_phys_ptr, 1);
         __atomic_fetch_add(&g_stat_failed, 1, __ATOMIC_RELAXED);
         mce_migrate_payload_t ev = {0};
@@ -467,7 +503,19 @@ bool mce_migrate_request(uintptr_t phys, mce_severity_t sev, uint64_t status) {
             slot->rsv0     = 0;
             slot->rsv1     = 0;
 
-            BatonPass(&slot->baton);
+            if (!BatonPass(&slot->baton)) {
+                /* Refused — a pass before BatonInit, the one refusal
+                 * BatonPass has. Nobody will run this slot's continuation,
+                 * so nobody will release it: kept, the slot would bleed the
+                 * pool one entry per machine check until no migration could
+                 * ever be requested again. baton.h states the duty plainly —
+                 * a gate that let the pass through must reopen on a refusal.
+                 * Hand the slot back and count the request where every other
+                 * lost one is counted; the next worker says the total. */
+                __atomic_store_n(&slot->in_use, 0, __ATOMIC_RELEASE);
+                __atomic_fetch_add(&g_stat_drops, 1, __ATOMIC_RELAXED);
+                return false;
+            }
             __atomic_fetch_add(&g_stat_requests, 1, __ATOMIC_RELAXED);
             return true;
         }

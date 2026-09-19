@@ -42,6 +42,13 @@ static volatile uint16_t g_kbd_touch_bare = TOUCH_TAG_INVALID;
 
 static volatile uint8_t kb_e0_pending = 0;
 
+/* ─── Pause burst (0xE1) state ──────────────────────────────────────────── */
+
+/* How many bytes of an 0xE1 group are still to be swallowed. Pause is the
+ * only key that carries this prefix, and its bytes must never reach the
+ * modifier, lock or repeat logic — see keyboard_handle_scancode. */
+static volatile uint8_t kb_e1_swallow = 0;
+
 /* ─── LED state ─────────────────────────────────────────────────────────── */
 
 static uint8_t kb_led_state = 0;
@@ -202,27 +209,65 @@ static void kb_forget_repeat(void)
    8042 PS/2 controller helpers
    ═══════════════════════════════════════════════════════════════════════════ */
 
-static void kb_wait_input_buffer(void)
+/* Commands, command-byte bits and status bits under the names the reference
+ * implementation gives them (Linux include/linux/i8042.h). */
+#define KBC_CMD_AUX_DISABLE  0xA7   /* second port off, its clock driven low */
+#define KBC_CMD_KBD_DISABLE  0xAD   /* sets command-byte bit 4               */
+#define KBC_CMD_KBD_ENABLE   0xAE   /* clears command-byte bit 4             */
+#define KBC_CMD_READ_CTR     0x20   /* read the command byte                 */
+#define KBC_CMD_WRITE_CTR    0x60   /* write the command byte                */
+#define KBC_CMD_RESET_KBD    0xFF   /* to the device: reset and self-test    */
+#define KBC_CMD_SET_LEDS     0xED   /* to the device: the three lock lamps   */
+
+#define KBC_CTR_KBDINT       0x01   /* first port raises IRQ1                */
+#define KBC_CTR_AUXINT       0x02   /* second port raises IRQ12              */
+#define KBC_CTR_KBDDIS       0x10   /* first port disabled                   */
+#define KBC_CTR_AUXDIS       0x20   /* second port disabled                  */
+
+#define KBC_STR_OBF          0x01   /* 0x60 holds a byte for the system      */
+#define KBC_STR_IBF          0x02   /* 0x60/0x64 still holds one of ours     */
+
+/* The controller answered at init and is configured as this driver wants it.
+ * Nothing may be sent to the 8042 until it is true: a lock key pressed on a
+ * USB keyboard must not spend 50 ms in IRQ context waiting on a controller
+ * that is not there. */
+static bool g_kb_8042_alive = false;
+
+/* The input buffer is free, so the next byte written is the controller's to
+ * read. False when it never frees — and then NOTHING is written, because a
+ * controller still holding the previous byte swallows this one whole and the
+ * answer we would go on to wait for never comes. */
+static bool kb_wait_input_buffer(void)
 {
     uint64_t deadline = rdtsc() + cpu_ms_to_tsc(50);
-    while ((inb(KEYBOARD_STATUS_PORT) & 0x02) && rdtsc() < deadline) {
+    while ((inb(KEYBOARD_STATUS_PORT) & KBC_STR_IBF) && rdtsc() < deadline) {
         __asm__ volatile("pause");
     }
+    return (inb(KEYBOARD_STATUS_PORT) & KBC_STR_IBF) == 0;
+}
+
+/* One byte to the command port (0x64) or to the data port (0x60), once the
+ * controller can take it. False = not sent. */
+static bool kb_send(uint16_t port, uint8_t byte)
+{
+    if (!kb_wait_input_buffer()) return false;
+    outb(port, byte);
+    return true;
 }
 
 static bool kb_wait_output_buffer(void)
 {
     uint64_t deadline = rdtsc() + cpu_ms_to_tsc(50);
-    while (!(inb(KEYBOARD_STATUS_PORT) & 0x01) && rdtsc() < deadline) {
+    while (!(inb(KEYBOARD_STATUS_PORT) & KBC_STR_OBF) && rdtsc() < deadline) {
         __asm__ volatile("pause");
     }
-    return (inb(KEYBOARD_STATUS_PORT) & 0x01) != 0;
+    return (inb(KEYBOARD_STATUS_PORT) & KBC_STR_OBF) != 0;
 }
 
 static void kb_flush_output(void)
 {
     uint32_t timeout = 16;
-    while ((inb(KEYBOARD_STATUS_PORT) & 0x01) && timeout--) {
+    while ((inb(KEYBOARD_STATUS_PORT) & KBC_STR_OBF) && timeout--) {
         inb(KEYBOARD_DATA_PORT);
     }
 }
@@ -235,56 +280,98 @@ void keyboard_set_leds(uint8_t caps, uint8_t num, uint8_t scroll)
 {
     uint8_t bits = (scroll ? 0x01 : 0) | (num ? 0x02 : 0) | (caps ? 0x04 : 0);
     if (bits == kb_led_state) return;
-    kb_led_state = bits;
+    if (!g_kb_8042_alive) return;
 
-    kb_wait_input_buffer();
-    outb(KEYBOARD_DATA_PORT, 0xED);
-    kb_wait_input_buffer();
-    outb(KEYBOARD_DATA_PORT, bits);
+    /* The remembered state follows what actually went out: a command the
+     * controller never took must be tried again, not counted as done. */
+    if (!kb_send(KEYBOARD_DATA_PORT, KBC_CMD_SET_LEDS)) return;
+    if (!kb_send(KEYBOARD_DATA_PORT, bits)) return;
+    kb_led_state = bits;
 }
 
-void keyboard_init(void)
+/* The 8042's own half of the driver's start: everything that only a
+ * controller answering can finish. Nothing here may take the rest of the
+ * driver down with it — by the time this runs, the "keyboard" tag handles
+ * and the repeat tick counts are already published, so a silent controller
+ * costs the PS/2 port and nothing else.
+ *
+ * The 0xAD that opens the sequence stops the keyboard talking over the
+ * configuration, and it is a debt: after 0xAD the first port stays disabled
+ * until either 0xAE or a command byte written with bit 4 clear (Linux
+ * I8042_CMD_KBD_ENABLE / I8042_CTR_KBDDIS; EDK2's Ps2KbdCtrller re-enables
+ * by writing the command byte alone). A return that does neither leaves the
+ * port dead for the rest of the boot, so every exit path below pays it or
+ * says out loud why it cannot. */
+static bool kb_8042_init(void)
 {
-    memset(&kb_state, 0, sizeof(kb_state));
-    spinlock_init(&kb_repeat_lock);
-    memset(&kb_repeat, 0, sizeof(kb_repeat));
-    kb_e0_pending = 0;
-    kb_led_state  = 0;
-
-    debug_printf("[KEYBOARD] Initializing 8042 PS/2 controller...\n");
-
-    kb_wait_input_buffer();
-    outb(KEYBOARD_STATUS_PORT, 0xAD);   /* Disable keyboard */
+    if (!kb_send(KEYBOARD_STATUS_PORT, KBC_CMD_KBD_DISABLE)) {
+        kprintf("[KEYBOARD] 8042 never freed its input buffer; "
+                "PS/2 port left untouched, other input sources unaffected\n");
+        return false;
+    }
 
     kb_flush_output();
 
-    kb_wait_input_buffer();
-    outb(KEYBOARD_STATUS_PORT, 0x20);   /* Read CCB */
-
-    if (!kb_wait_output_buffer()) {
-        debug_printf("[KEYBOARD] ERROR: Timeout reading CCB\n");
-        return;
+    if (!kb_send(KEYBOARD_STATUS_PORT, KBC_CMD_READ_CTR) ||
+        !kb_wait_output_buffer()) {
+        kprintf("[KEYBOARD] 8042 did not answer the command-byte read; "
+                "re-enabling the PS/2 port and giving it up\n");
+        (void)kb_send(KEYBOARD_STATUS_PORT, KBC_CMD_KBD_ENABLE);
+        return false;
     }
 
     uint8_t ccb = inb(KEYBOARD_DATA_PORT);
-    ccb |= 0x01;    /* Enable keyboard interrupt (IRQ1) */
-    ccb &= ~0x10;   /* Clear "keyboard disabled" flag   */
+    ccb |=  KBC_CTR_KBDINT;   /* first port: IRQ1 on   */
+    ccb &= ~KBC_CTR_KBDDIS;   /* first port: clock on  */
 
-    kb_wait_input_buffer();
-    outb(KEYBOARD_STATUS_PORT, 0x60);   /* Write CCB */
-    kb_wait_input_buffer();
-    outb(KEYBOARD_DATA_PORT, ccb);
+    /* ‼ THE SECOND PORT IS NOT OURS TO LEAVE RUNNING.
+     *
+     * One output register at 0x60 serves both ports. Nothing in this kernel
+     * serves the second one: there is no IRQ12 handler and that line is never
+     * unmasked. Firmware, though, does leave it running — EDK2's Ps2MouseDxe
+     * enables the auxiliary interface and turns mouse reporting on, and
+     * registers no ExitBootServices callback to turn either back off — so on
+     * a board with a PS/2 mouse or a PS/2-attached touchpad the first
+     * movement parks a byte in that register with OBF set. The controller
+     * then cannot load the keyboard's next byte, IRQ1 stops firing, and the
+     * keyboard is dead until reboot with nothing said. Linux states the
+     * mechanism in i8042_check_aux in as many words — "otherwise keyboard may
+     * not work" — and leaves an unserved port exactly as this does:
+     * `i8042_ctr |= I8042_CTR_AUXDIS; i8042_ctr &= ~I8042_CTR_AUXINT;`. */
+    ccb &= ~KBC_CTR_AUXINT;
+    ccb |=  KBC_CTR_AUXDIS;
 
-    kb_wait_input_buffer();
-    outb(KEYBOARD_STATUS_PORT, 0xAE);   /* Re-enable keyboard port */
+    if (!kb_send(KEYBOARD_STATUS_PORT, KBC_CMD_WRITE_CTR)) {
+        kprintf("[KEYBOARD] 8042 would not take the command-byte write; "
+                "re-enabling the PS/2 port and giving it up\n");
+        (void)kb_send(KEYBOARD_STATUS_PORT, KBC_CMD_KBD_ENABLE);
+        return false;
+    }
+    if (!kb_send(KEYBOARD_DATA_PORT, ccb)) {
+        /* 0x60 was taken and the controller is waiting for its parameter.
+         * Anything sent now is read as that parameter, so there is no
+         * command left that could re-enable the port: say so and stop. */
+        kprintf("[KEYBOARD] 8042 took the command-byte write and never asked "
+                "for its value; PS/2 port left disabled\n");
+        return false;
+    }
+
+    /* The command byte above already says it; the command says it again to
+     * controllers that act on the command alone (EDK2 KbcDisableAux). */
+    (void)kb_send(KEYBOARD_STATUS_PORT, KBC_CMD_AUX_DISABLE);
+
+    if (!kb_send(KEYBOARD_STATUS_PORT, KBC_CMD_KBD_ENABLE)) {
+        kprintf("[KEYBOARD] 8042 would not re-enable the PS/2 port\n");
+        return false;
+    }
 
     kb_flush_output();
+    g_kb_8042_alive = true;
 
     irqchip_enable_irq(1);
     debug_printf("[KEYBOARD] IRQ1 enabled\n");
 
-    kb_wait_input_buffer();
-    outb(KEYBOARD_DATA_PORT, 0xFF);     /* Reset command */
+    (void)kb_send(KEYBOARD_DATA_PORT, KBC_CMD_RESET_KBD);
 
     /* Wait ~50 ms for ACK (0xFA) and self-test result (0xAA) */
     {
@@ -297,14 +384,43 @@ void keyboard_init(void)
     /* Ensure all LEDs start off */
     keyboard_set_leds(0, 0, 0);
 
-    /* Calculate repeat timing based on actual timer frequency */
+    debug_printf("[KEYBOARD] 8042 initialization complete\n");
+    return true;
+}
+
+void keyboard_init(void)
+{
+    memset(&kb_state, 0, sizeof(kb_state));
+    spinlock_init(&kb_repeat_lock);
+    memset(&kb_repeat, 0, sizeof(kb_repeat));
+    kb_e0_pending = 0;
+    kb_e1_swallow = 0;
+    kb_led_state  = 0;
+
+    /* ‼ THE DRIVER'S OWN STATE COMES FIRST, AND NOT FOR TIDINESS.
+     *
+     * The two tag handles below are the only ones in the tree: the xHCI-HID
+     * path (keyboard_handle_scancode) and the COM1 wire (keyboard_inject)
+     * both publish through them, and nothing else ever writes them. They used
+     * to be resolved at the END of this function, downstream of the whole
+     * 8042 sequence — so a controller that did not answer returned early and
+     * left both at TOUCH_TAG_INVALID, on which TouchPublishIrqPair returns at
+     * once: every USB keystroke and every byte off the serial line published
+     * to nothing. A shell taking no input at all on a machine whose keyboard
+     * works perfectly is the exact failure main.c's contract above this call
+     * says must never happen again. A PS/2 controller's silence may cost the
+     * PS/2 port and nothing more.
+     *
+     * The repeat tick counts move up for the same reason: they are read by
+     * the PIT tick for repeats armed on ANY input path. */
     g_kb_repeat_delay_ticks = (KB_REPEAT_DELAY_MS * g_timer_frequency) / 1000;
     g_kb_repeat_rate_ticks  = (KB_REPEAT_RATE_MS * g_timer_frequency) / 1000;
 
-    debug_printf("[KEYBOARD] 8042 initialization complete\n");
-    debug_printf("[KEYBOARD] Repeat: delay=%u ticks (%u ms), rate=%u ticks (%u ms)\n",
-                 g_kb_repeat_delay_ticks, KB_REPEAT_DELAY_MS,
-                 g_kb_repeat_rate_ticks, KB_REPEAT_RATE_MS);
+    /* A count that rounds down to zero ticks is a repeat republished on every
+     * single tick. One tick is the shortest interval this timer can express,
+     * so it is the floor. */
+    if (g_kb_repeat_delay_ticks == 0) g_kb_repeat_delay_ticks = 1;
+    if (g_kb_repeat_rate_ticks  == 0) g_kb_repeat_rate_ticks  = 1;
 
     /* Resolve and cache the "keyboard" Touch tag while we are still in
      * non-IRQ context. TouchInit ran inside guide_init earlier in the
@@ -321,6 +437,12 @@ void keyboard_init(void)
     __atomic_store_n(&g_kbd_touch_bare, bare, __ATOMIC_RELEASE);
     debug_printf("[KEYBOARD] Touch tag handles: full=%u bare=%u\n",
                  (unsigned)full, (unsigned)bare);
+    debug_printf("[KEYBOARD] Repeat: delay=%u ticks (%u ms), rate=%u ticks (%u ms)\n",
+                 g_kb_repeat_delay_ticks, KB_REPEAT_DELAY_MS,
+                 g_kb_repeat_rate_ticks, KB_REPEAT_RATE_MS);
+
+    debug_printf("[KEYBOARD] Initializing 8042 PS/2 controller...\n");
+    (void)kb_8042_init();
 }
 
 /* ─── Scancode handler (called from IRQ1) ──────────────────────────────── */
@@ -330,6 +452,24 @@ void keyboard_handle_scancode(uint8_t scancode)
     /* ── 0xE0 prefix: mark and wait for next byte ── */
     if (scancode == 0xE0) {
         kb_e0_pending = 1;
+        return;
+    }
+
+    /* ── 0xE1 prefix: the Pause burst, which is no key this driver reports ──
+     *
+     * Set 1 — what the 8042 delivers with translation on — sends Pause as six
+     * bytes, E1 1D 45 E1 9D C5, all of them at make time and nothing at all
+     * on release (Brouwer, "Keyboard scancodes": "e1 1d 45 e1 9d c5 … nothing
+     * at all upon release"). Read one byte at a time with no prefix state the
+     * 0x1D lands on Left Ctrl and the 0x45 on Num Lock, so a single Pause
+     * press used to invert kb_state.num_lock and fire an 0xED LED command
+     * from inside IRQ1, in the middle of the burst. Each 0xE1 group is
+     * swallowed whole — two bytes, exactly as Linux's atkbd does it with
+     * `atkbd->emul = 2`, and the second 0xE1 re-arms the same count. EDK2's
+     * Ps2KbdCtrller guards its entire modifier/lock switch with `if
+     * (!Extend1)` for this one key. */
+    if (scancode == 0xE1) {
+        kb_e1_swallow = 2;
         return;
     }
 
@@ -352,11 +492,19 @@ void keyboard_handle_scancode(uint8_t scancode)
              * is cleared here, and the cost of an overrun becomes one report of
              * unknown modifiers instead of a repeat nothing can silence. */
             kb_e0_pending = 0;
+            kb_e1_swallow = 0;
             kb_forget_repeat();
             __atomic_store_n(&kb_state.shift_pressed, 0, __ATOMIC_RELAXED);
             __atomic_store_n(&kb_state.ctrl_pressed,  0, __ATOMIC_RELAXED);
             __atomic_store_n(&kb_state.alt_pressed,   0, __ATOMIC_RELAXED);
             return;
+    }
+
+    /* Inside an 0xE1 group: the byte belongs to Pause, not to the key its
+     * value would otherwise name. */
+    if (kb_e1_swallow) {
+        kb_e1_swallow--;
+        return;
     }
 
     uint8_t is_release = scancode & 0x80;

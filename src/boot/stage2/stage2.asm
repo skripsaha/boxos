@@ -665,33 +665,49 @@ enable_a20_enhanced:
     call test_a20
     jnc .a20_done
 
-    ; Method 2: Keyboard controller
-    call a20_wait
-    mov al, 0xAD
+    ; Method 2: the keyboard controller, written blind.
+    ;
+    ; Linux writes the output port and never reads it — enable_a20_kbc() in
+    ; arch/x86/boot/a20.c is `0xD1 to port 0x64, then a fixed 0xDF to port
+    ; 0x60`, with a drain between. What stood here instead issued 0xD0 (read
+    ; output port), took the answer out of port 0x60 and wrote that byte back
+    ; with only bit 1 forced. Nothing drained the output buffer first, so the
+    ; byte read could just as easily be a keystroke from POST or a mouse
+    ; packet — and bit 0 of the 8042's output port is the System reset line
+    ; (QEMU hw/input/pckbd.c: `#define KBD_OUT_RESET 0x01 /* 1=normal mode,
+    ; 0=reset */`, and outport_write() requests a system reset whenever it is
+    ; written clear). Any such byte with bit 0 clear — scancode 0x1E, 0x2C,
+    ; 0xF0, a mouse lead byte with the left button up — reset the machine
+    ; part way through boot, silently, and then did it again on the next try.
+    ; 0xDF carries bit 1 (A20 on) and bit 0 (reset line held high) and is a
+    ; constant, not a byte from somewhere else.
+    ;
+    ; The BIOS keyboard interrupt is held off across the sequence: INT 09h
+    ; talks to this same controller, and a command byte separated from its
+    ; data byte by someone else's command is neither command.
+    pushf
+    cli
+
+    call a20_kbc_settle
+    jc .a20_kbc_done
+    mov al, 0xD1                ; write output port
     out 0x64, al
 
-    call a20_wait
-    mov al, 0xD0
-    out 0x64, al
-
-    call a20_wait2
-    in al, 0x60
-    push ax
-
-    call a20_wait
-    mov al, 0xD1
-    out 0x64, al
-
-    call a20_wait
-    pop ax
-    or al, 2
+    call a20_kbc_settle
+    jc .a20_kbc_done
+    mov al, 0xDF                ; A20 on, reset line high
     out 0x60, al
 
-    call a20_wait
-    mov al, 0xAE
+    call a20_kbc_settle
+    jc .a20_kbc_done
+    mov al, 0xFF                ; null command — UHCI legacy emulation wants it
     out 0x64, al
 
-    call a20_wait
+    call a20_kbc_settle
+
+.a20_kbc_done:
+    popf
+
     call test_a20
     jnc .a20_done
 
@@ -721,6 +737,8 @@ enable_a20_enhanced:
     call print_string_16
     cli
     hlt
+    jmp $                       ; an NMI or #MC resumes past hlt, and what
+                                ; follows here is test_a20's body
 
 ; Returns CF=0 if A20 enabled, CF=1 if disabled
 test_a20:
@@ -771,16 +789,111 @@ test_a20:
     stc
     ret
 
-a20_wait:
-    in al, 0x64
-    test al, 2
-    jnz a20_wait
+; ---------------------------------------------------------------------------
+; a20_pit_now — the current count of 8254 channel 0, in AX.
+;
+; The counter-latch command — 0x00 to port 0x43, which is SC=00 (counter 0)
+; and RW=00 (latch) in the Intel 8254 control word — copies the live count
+; into a holding register without disturbing the count itself, so the
+; firmware's own timekeeping is untouched by being read. The BIOS programs
+; channel 0 lobyte/hibyte, so the latched value comes back LSB first.
+;
+; Clobbers: AX, flags.
+; ---------------------------------------------------------------------------
+a20_pit_now:
+    mov al, 0
+    out 0x43, al
+    in al, 0x40                 ; LSB
+    mov ah, al
+    in al, 0x40                 ; MSB
+    xchg al, ah
     ret
 
-a20_wait2:
+; How long the controller is given to go quiet, and how many all-ones status
+; reads are taken as proof that there is no controller at all.
+;
+; 8254 channel 0 counts down at 1.193182 MHz, so 119318 of its ticks is
+; 100 ms: four orders of magnitude more than the tens of microseconds an 8042
+; needs to empty its input buffer, and still a tenth of a second on a board
+; that has none. It is a span of real time, not a number of iterations — the
+; same instructions on a 500 MHz part and on a 5 GHz one wait exactly as long,
+; and the count is read straight from the chip, so holding off interrupts for
+; the sequence cannot stop the clock the way the BIOS tick at 0x46C would be
+; stopped.
+;
+; The 0xFF count is Linux's MAX_8042_FF (arch/x86/boot/a20.c): an all-ones
+; status is a possible, if unlikely, reading from a real controller, so one is
+; no verdict — but a bus with nothing driving it returns nothing else, and
+; thirty-two of them end the wait in microseconds rather than at the deadline.
+A20_KBC_DEADLINE_TICKS  equ 119318
+A20_KBC_FF_READS        equ 32
+
+; ---------------------------------------------------------------------------
+; a20_kbc_settle — drain whatever the 8042 has to say, wait until it will take
+; a byte, and RETURN whether it ever got there.
+;
+; This is Linux's empty_8042() with its iteration ceiling replaced by a clock.
+; What stood here was `in al, 0x64 / test al, 2 / jnz` and its twin for the
+; output-buffer bit. Neither had a bound, a 0xFF check, or any way to say no,
+; and there is no value port 0x64 can return for an absent controller that
+; lets the old sequence finish: a bus that floats high reads 0xFF, whose bit 1
+; is set, and the first wait never returned; a chipset that answers 0x00 for
+; an unclaimed port passed that wait and stopped in the second one, which
+; waited for an output byte that was never coming. Either way the board sat
+; with 'BoxKernel Stage2 Started' as the last thing on its screen, and the
+; '[FATAL] A20 enable failed' arm written for exactly that board was
+; unreachable, because control never came back to reach it.
+;
+; Returns: CF=0 — the input buffer is empty; the controller will take a byte.
+;          CF=1 — it never emptied, or there is no controller here.
+; Clobbers: AX, flags.
+; ---------------------------------------------------------------------------
+a20_kbc_settle:
+    push ebx
+    push ecx
+    push si
+    push di
+
+    mov di, A20_KBC_FF_READS
+    call a20_pit_now
+    mov si, ax                  ; the previous sample
+    xor ebx, ebx                ; ticks elapsed since entry
+
+.poll:
     in al, 0x64
+    cmp al, 0xFF
+    jne .drain
+    dec di
+    jz .fail                    ; nothing is driving this bus
+.drain:
     test al, 1
-    jz a20_wait2
+    jz .input_free
+    in al, 0x60                 ; it had a byte to say; discard it and look again
+    jmp .elapsed
+.input_free:
+    test al, 2
+    jz .ready
+
+.elapsed:
+    call a20_pit_now
+    mov cx, si
+    mov si, ax                  ; this sample becomes the previous one
+    sub cx, ax                  ; the count runs down, and the subtraction
+    movzx ecx, cx               ;  wraps with it, so one wrap is one delta
+    add ebx, ecx
+    cmp ebx, A20_KBC_DEADLINE_TICKS
+    jb .poll
+
+.fail:
+    stc
+    jmp .out
+.ready:
+    clc
+.out:
+    pop di
+    pop si
+    pop ecx
+    pop ebx
     ret
 
 ; =============================================================

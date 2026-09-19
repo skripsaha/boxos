@@ -14,9 +14,10 @@
  *
  * Responsibilities
  * ----------------
- *   * Map each DRHD register block (one MMIO page per remap unit)
- *   * Read CAP/ECAP, derive SAGAW (supported adjusted guest address
- *     widths) and pick a 48-bit address width when available
+ *   * Map each DRHD register block — as long as the unit says it is
+ *   * Read CAP/ECAP; require the 48-bit adjusted guest address width,
+ *     because the second-level walkers here build 4-level tables and
+ *     nothing else, and refuse a unit that does not report it
  *   * Build a *single* second-level page table that identity-maps the
  *     first 4 GiB of physical RAM (covers every consumer DMA target);
  *     larger systems extend this through `vtd_identity_extend()`
@@ -44,12 +45,42 @@
 #define VTD_REG_FECTL     0x038
 #define VTD_REG_FEDATA    0x03C
 #define VTD_REG_FEADDR    0x040
-#define VTD_REG_IOTLB_OFF (((cap_reg >> 8) & 0x3FF) * 16)  /* macro-style helper below */
 #define VTD_REG_PRECTL    0x028
+
+/* The IOTLB registers have no fixed offset: ECAP.IRO (bits 17:8, §11.4.3)
+ * reports it — "If the register base address is X, and the value reported in
+ * this field is Y, the address for the IOTLB registers is calculated as
+ * X+(16*Y)". IVA_REG sits at that offset and IOTLB_REG at +8.
+ *
+ * The field lives in ECAP and nowhere else. CAP bits 17:8 are SAGAW[12:8],
+ * three reserved bits and the bottom two bits of MGAW, so reading the offset
+ * out of CAP yields a number that grows with the unit's address width — on a
+ * part reporting MGAW=39 and 48-bit AGAW it comes to 0x2040, past the end of
+ * any grant this driver ever asked for. */
+#define ECAP_IRO_OFF(e)        ((uint32_t)((((e) >> 8) & 0x3FFu) * 16u))
+#define ECAP_IOTLB_REG_END(e)  (ECAP_IRO_OFF(e) + 16u)
+
+/* CAP.FRO (bits 33:24) and CAP.NFR (bits 47:40, the count minus one), §11.4.2:
+ * where the fault-recording registers start and how many there are. Together
+ * with the IOTLB block they say how long this unit's register block is, which
+ * is legitimately more than one page. */
+#define CAP_FRO_OFF(c)         ((uint32_t)((((c) >> 24) & 0x3FFu) * 16u))
+#define CAP_NUM_FAULT_REGS(c)  ((uint32_t)((((c) >> 40) & 0xFFu) + 1u))
+#define CAP_FAULT_REG_END(c)   (CAP_FRO_OFF(c) + CAP_NUM_FAULT_REGS(c) * 16u)
 
 /* CAP bits we read. */
 #define CAP_SAGAW_SHIFT   8        /* bits 12:8 */
 #define CAP_SAGAW_MASK    0x1Fu
+/* AGAW index 2 — 48-bit adjusted guest address width, a 4-level second-level
+ * table, and AW = 010b in the context entry (§11.4.2 SAGAW, §9.3 AW). */
+#define VTD_AGAW_48BIT    2u
+
+/* CAP.DWD (bit 54) and CAP.DRD (bit 55), §11.4.2: this unit can drain
+ * in-flight writes / reads as part of an IOTLB invalidation. Asking a unit
+ * that does not report them for a drain sets a field it treats as reserved, so
+ * both ride on the capability. */
+#define CAP_DWD           (1ULL << 54)
+#define CAP_DRD           (1ULL << 55)
 
 /* GCMD bits (VT-d Rev 5.x §11.4.4.1 "Global Command Register";
  * §10.4.4 in the Rev 3.x numbering). GSTS reports the persistent ones at
@@ -88,7 +119,7 @@ typedef struct {
     uint64_t  cap;
     uint64_t  ecap;
     uint32_t  gcmd;                /* shadow of GCMD's persistent fields */
-    uint8_t   sagaw_levels;        /* 4 (48-bit) or 3 (39-bit) */
+    uint8_t   sagaw_levels;        /* second-level table levels; AW = this - 2 */
     void*     root_table;          /* virt; 4 KB phys */
     uint64_t  root_phys;
     bool      online;
@@ -443,6 +474,41 @@ static void vtd_qi_disable(vtd_unit_t* u)
 
 /* ----- Queued Invalidation (§6.5.2) ----- */
 
+/* Invalidation descriptors. The Type field is seven bits — qw0 bits 11:9
+ * concatenated with bits 3:0 — and every descriptor this driver issues has 0h
+ * in the upper half, so the type is carried by bits 3:0 alone. G (granularity)
+ * is at bits 5:4 in both descriptors below, DID at 31:16, SID at 47:32. */
+#define QI_TYPE_CC        0x1ULL      /* Context-cache Invalidate (§6.5.2.1) */
+#define QI_TYPE_IOTLB     0x2ULL      /* IOTLB Invalidate (§6.5.2.3) */
+#define QI_GRAN_GLOBAL    (1ULL << 4)
+#define QI_GRAN_DOMAIN    (2ULL << 4)
+#define QI_GRAN_DEVICE    (3ULL << 4) /* context-cache; page-selective in IOTLB */
+#define QI_DID(did)       (((uint64_t)(did) & 0xFFFFULL) << 16)
+#define QI_SID(sid)       (((uint64_t)(sid) & 0xFFFFULL) << 32)
+#define QI_IOTLB_DW       (1ULL << 6) /* drain in-flight writes */
+#define QI_IOTLB_DR       (1ULL << 7) /* drain in-flight reads */
+
+/* One IOTLB Invalidate descriptor (§6.5.2.3).
+ *
+ * The type belongs in bits 3:0 and the granularity in 5:4, and swapping the
+ * two does not produce a malformed descriptor — it produces a well-formed
+ * DIFFERENT one: 0x21 is a domain-selective context-cache invalidate for
+ * domain 0, which the hardware retires without complaint while the IOTLB keeps
+ * every translation the caller believed it had just dropped.
+ *
+ * DR/DW ask the unit to drain reads/writes already in the fabric before it
+ * reports the invalidation done, which is what makes "the old mapping is gone"
+ * true rather than merely started; both are legal only on a unit that reports
+ * them, so both ride on CAP. */
+static uint64_t vtd_qi_iotlb_desc(const vtd_unit_t* u, uint64_t gran,
+                                  uint32_t did)
+{
+    uint64_t qw0 = QI_TYPE_IOTLB | gran | QI_DID(did);
+    if (u->cap & CAP_DWD) qw0 |= QI_IOTLB_DW;
+    if (u->cap & CAP_DRD) qw0 |= QI_IOTLB_DR;
+    return qw0;
+}
+
 static void vtd_qi_init(vtd_unit_t* u) {
     /* ECAP.QI bit 1 — queued invalidation supported. */
     if (!(u->ecap & (1ULL << 1))) return;
@@ -539,11 +605,19 @@ static void vtd_ir_init(vtd_unit_t* u) {
 /* Drain context cache + global IOTLB after table changes (§6.5.5). */
 static void vtd_global_flush(vtd_unit_t* u) {
     if (u->qi_active) {
-        /* QI context-cache global invalidate. */
-        vtd_qi_submit(u, (1ULL << 4) | (1ULL << 0), 0);     /* CC, global */
-        /* QI IOTLB global invalidate. */
-        vtd_qi_submit(u, (2ULL << 4) | (1ULL << 0), 0);     /* IOTLB, global */
-        return;
+        /* Context cache first, then the IOTLB at a granularity no smaller —
+         * the order §6.5.2.1 requires of the pair. */
+        vtd_qi_submit(u, QI_TYPE_CC | QI_GRAN_GLOBAL, 0);
+        vtd_qi_submit(u, vtd_qi_iotlb_desc(u, QI_GRAN_GLOBAL, 0), 0);
+        if (u->qi_active) return;
+        /* vtd_qi_submit withdraws queued invalidation from a unit whose queue
+         * stopped draining, and every submit after that returns having done
+         * nothing. The flush itself is not optional, so a unit that lost its
+         * queue halfway finishes through the registers below — which is what
+         * vtd_qi_submit's own comment promises and what this function used to
+         * return without doing. */
+        kprintf("[VT-d] the invalidation queue went away mid-flush — finishing "
+                "the global invalidate through the CCMD/IOTLB registers\n");
     }
     /* CCMD: write CIRG=01 (global), then wait for the hardware to clear ICC.
      * Nothing to undo on failure — the register invalidation either happened
@@ -554,8 +628,9 @@ static void vtd_global_flush(vtd_unit_t* u) {
     (void)vtd_await_clear64((volatile uint64_t*)(u->reg + VTD_REG_CCMD),
                             CCMD_ICC, "the global context-cache invalidate");
 
-    /* IOTLB invalidation lives at offset (CAP[16:8] * 16). */
-    uint32_t iotlb_off = (uint32_t)(((u->cap >> 8) & 0x3FF) * 16);
+    /* IVA_REG lives at ECAP.IRO * 16 and IOTLB_REG one qword past it
+     * (§11.4.3); a global invalidate needs no IVA_REG write. */
+    uint32_t iotlb_off = ECAP_IRO_OFF(u->ecap);
     volatile uint64_t* iotlb_reg =
         (volatile uint64_t*)(u->reg + iotlb_off + 8);
     *iotlb_reg =
@@ -567,22 +642,63 @@ static void vtd_global_flush(vtd_unit_t* u) {
 
 /* ----- Per-unit init ----- */
 
+#define VTD_MMIO_FLAGS  (VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | \
+                         VMM_FLAG_CACHE_DISABLE)
+
 static int vtd_unit_init(vtd_unit_t* u, uint64_t phys) {
     u->reg_phys = phys;
     u->reg = (volatile uint8_t*)vmm_map_mmio((uintptr_t)phys, 4096,
-                  VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE |
-                  VMM_FLAG_CACHE_DISABLE);
+                                             VTD_MMIO_FLAGS);
     if (!u->reg) return -1;
     u->cap  = *(volatile uint64_t*)(u->reg + VTD_REG_CAP);
     u->ecap = *(volatile uint64_t*)(u->reg + VTD_REG_ECAP);
 
-    /* SAGAW: bits 12:8 of CAP. We prefer 4-level (48-bit) — bit 11
-     * (1 << 3) in SAGAW. Fall back to 3-level (39-bit, bit 10). */
+    /* How long this unit's register block actually is. CAP and ECAP sit in the
+     * first page and are read above; the IOTLB registers (ECAP.IRO) and the
+     * fault-recording registers (CAP.FRO/CAP.NFR) are wherever the unit says,
+     * and either block can begin past the first page — IRO is ten bits, so the
+     * IOTLB registers can legally sit up to 0x3FF0 into the block. One page was
+     * mapped to learn that; the rest is mapped now, before anything outside the
+     * first page is touched. */
+    uint32_t block_end = ECAP_IOTLB_REG_END(u->ecap);
+    uint32_t fault_end = CAP_FAULT_REG_END(u->cap);
+    if (fault_end > block_end) block_end = fault_end;
+    size_t regs_size = ((size_t)block_end + 0xFFFu) & ~(size_t)0xFFFu;
+    if (regs_size > 4096) {
+        vmm_unmap_mmio(u->reg, 4096);
+        u->reg = (volatile uint8_t*)vmm_map_mmio((uintptr_t)phys, regs_size,
+                                                 VTD_MMIO_FLAGS);
+        if (!u->reg) {
+            kprintf("[VT-d] remap unit at 0x%lx publishes a 0x%lx-byte register "
+                    "block this kernel could not map — leaving it alone\n",
+                    (unsigned long)phys, (unsigned long)regs_size);
+            return -1;
+        }
+    }
+
+    /* SAGAW (CAP bits 12:8, §11.4.2): bit N set means the unit supports the
+     * adjusted guest address width whose index is N, and that width's page
+     * table has N + 2 levels — bit 1 is 39-bit/3-level, bit 2 is 48-bit/4-level,
+     * bit 3 is 57-bit/5-level. The context entry's AW field (§9.3, bits 66:64)
+     * carries that same index and "must match an AGAW value supported by
+     * hardware", so AW = levels - 2, and the table handed to the unit must have
+     * exactly that many levels.
+     *
+     * This driver's second-level walkers index a>>39, a>>30, a>>21, a>>12 —
+     * four levels, unconditionally. So there is exactly one width it can tell
+     * the truth about: 48-bit, AGAW index 2, AW = 010b. A unit that does not
+     * report it is refused out loud rather than handed an AW absent from its
+     * own SAGAW (the old bit table was one arm low throughout: a 48-bit-only
+     * unit was told 39-bit, and a 39-bit-only unit was told 000b, which §9.3
+     * lists as Reserved). */
     uint8_t sagaw = (uint8_t)((u->cap >> CAP_SAGAW_SHIFT) & CAP_SAGAW_MASK);
-    if (sagaw & (1 << 3))       u->sagaw_levels = 4;
-    else if (sagaw & (1 << 2))  u->sagaw_levels = 3;
-    else if (sagaw & (1 << 1))  u->sagaw_levels = 2;
-    else                         return -2;
+    if (!(sagaw & (1u << VTD_AGAW_48BIT))) {
+        kprintf("[VT-d] remap unit at 0x%lx reports SAGAW=0x%02x — no 48-bit "
+                "AGAW, and this driver builds only 4-level tables; leaving the "
+                "unit alone\n", (unsigned long)phys, sagaw);
+        return -2;
+    }
+    u->sagaw_levels = VTD_AGAW_48BIT + 2;
 
     /* Whatever firmware left running on this unit comes off before anything of
      * ours is published, and u->gcmd starts mirroring the hardware here. Every
@@ -731,10 +847,29 @@ static int vtd_device_attach(iommu_domain_t* d, uint16_t seg,
             rc = 0;
         }
         if (g_units[i].qi_active) {
-            /* QI device-level invalidation: source-id = (bus<<8)|devfn. */
-            uint64_t sid = ((uint64_t)bus << 8) | devfn;
-            vtd_qi_submit(&g_units[i],
-                (1ULL << 4) | (1ULL << 0) | (sid << 32) | (1ULL << 1), 0);
+            /* The context entries just rewritten are still cached in the unit,
+             * so the context cache is invalidated for exactly what changed and
+             * the IOTLB follows at a granularity no smaller, as §6.5.2.1
+             * requires. What stood here was a type-03h descriptor — a
+             * Device-TLB invalidate for IOVA 0 with a reserved bit set — which
+             * invalidated no context cache at all and stalled the queue.
+             *
+             * The wildcard rewrote every devfn on the bus into the identity
+             * domain; no device-selective descriptor covers that, so it is
+             * invalidated globally. */
+            if (devfn == 0xFFu) {
+                vtd_qi_submit(&g_units[i], QI_TYPE_CC | QI_GRAN_GLOBAL, 0);
+                vtd_qi_submit(&g_units[i],
+                              vtd_qi_iotlb_desc(&g_units[i],
+                                                QI_GRAN_GLOBAL, 0), 0);
+            } else {
+                uint64_t sid = ((uint64_t)bus << 8) | devfn;
+                vtd_qi_submit(&g_units[i], QI_TYPE_CC | QI_GRAN_DEVICE |
+                                           QI_DID(did) | QI_SID(sid), 0);
+                vtd_qi_submit(&g_units[i],
+                              vtd_qi_iotlb_desc(&g_units[i],
+                                                QI_GRAN_DOMAIN, did), 0);
+            }
         }
     }
     return rc;

@@ -479,6 +479,90 @@ bool ahci_can_submit_port(uint8_t port_num) {
     return __atomic_load_n(&port->slot_bitmap, __ATOMIC_RELAXED) != 0;
 }
 
+/* Take the port WHOLE, for the one command class that cannot share it.
+ *
+ * AHCI 1.3.1 §1.7: "System software is responsible to ensure that queued and
+ * non-queued commands are not mixed in the command list for the same device
+ * with the exception of the NCQ Unload command." FLUSH CACHE EXT is not that
+ * exception, so on a port running FPDMA QUEUED it may only be issued with the
+ * queue empty — and with nothing able to refill it while it runs.
+ *
+ * There is no new queue or flag invented for that. The port's slot pool
+ * already is the door every submission goes through, so closing it IS the
+ * hold: the door is shut only at the instant the port is found completely
+ * idle, and it is shut for exactly as long as the one command takes. Waiting
+ * for that instant costs nobody anything — while this spins, every other flow
+ * allocates and completes as usual, and only the flush waits.
+ *
+ * The condition is a fact and the whole fact: every legal slot free — which is
+ * also the proof that no submitter is sitting between ahci_alloc_slot and its
+ * PxCI store — with PxSACT and PxCI agreeing that the HBA has nothing
+ * outstanding either. The clock is the last resort and it returns a REFUSAL,
+ * never a shrug: a port whose queue never goes quiet is a port where this
+ * command must not be issued, and the caller is told so.
+ *
+ * Returns the slot the caller then owns, or -1. */
+int ahci_port_take_whole(uint8_t port_num, uint32_t patience_ms) {
+    ahci_port_t* port = ahci_get_port(port_num);
+    if (!port) return -1;
+
+    volatile ahci_port_regs_t* regs = port->regs;
+
+    HourGlass glass;
+    if (!HourGlassTurn(&glass, (uint64_t)patience_ms * 1000ULL)) {
+        kprintf("[AHCI] no time source — there is no clock to wait out port "
+                "%u's queue on, and issuing a non-queued command beside queued "
+                "ones is what AHCI 1.3.1 §1.7 forbids; not issuing it\n",
+                port_num);
+        return -1;
+    }
+
+    for (;;) {
+        bool shut = false;
+        spin_lock(&port->lock);
+        if (!port->slot_held && port->slot_bitmap == port->slot_mask) {
+            port->slot_held   = true;
+            port->slot_bitmap = 0;
+            shut = true;
+        }
+        spin_unlock(&port->lock);
+
+        if (shut) {
+            if ((regs->sact & port->slot_mask) == 0 &&
+                (regs->ci   & port->slot_mask) == 0) {
+                return (int)__builtin_ctz(port->slot_mask);
+            }
+            /* Every slot was free and the HBA still shows work outstanding:
+             * open the door again rather than issue beside it. */
+            ahci_port_give_back(port_num);
+        }
+
+        if (HourGlassRunOut(&glass)) {
+            kprintf("[AHCI] port %u: %lu us on the %s and it never went quiet "
+                    "(SACT=0x%08x CI=0x%08x) — a non-queued command cannot be "
+                    "issued beside queued ones, so it is not issued\n",
+                    port_num, (unsigned long)HourGlassElapsedUs(&glass),
+                    HourGlassRulerName(&glass), regs->sact, regs->ci);
+            return -1;
+        }
+        cpu_pause();
+    }
+}
+
+/* Open the door again. A hold is only ever taken on a port with every slot
+ * free, so this restores exactly what it took. */
+void ahci_port_give_back(uint8_t port_num) {
+    ahci_port_t* port = ahci_get_port(port_num);
+    if (!port) return;
+
+    spin_lock(&port->lock);
+    if (port->slot_held) {
+        port->slot_bitmap |= port->slot_mask;
+        port->slot_held    = false;
+    }
+    spin_unlock(&port->lock);
+}
+
 error_t ahci_build_io(uint8_t port_num, uint8_t slot, uint64_t lba,
                       uint16_t sector_count, void* buffer_phys, bool write) {
     if (slot >= AHCI_MAX_SLOTS) return ERR_INVALID_ARGUMENT;
@@ -946,13 +1030,44 @@ static int ahci_port_init(uint8_t port_num) {
         goto fail_free;
     }
 
-    /* Command slots: cap to the HBA's advertised count; for non-NCQ ports
-     * allow only one outstanding command (non-queued commands may not
-     * overlap on a port). slot_bitmap: 1 = free. */
+    /* Command slots: the LOWER BOUND of what the HBA offers and what the drive
+     * will queue, which is what AHCI 1.3.1 §5.6.4.1 asks for in as many words:
+     * "System software must determine the maximum tag allowed by the device
+     * and the HBA and it must use the lower bound of the two. For example, if
+     * the HBA has 8 entries in its command list, and the SATA device only has
+     * 4, only tags 0 - 3 in the device may be used, and only command list
+     * entries 0 - 3 may be used in the HBA."
+     *
+     * The HBA's half was here already (CAP.NCS + 1). The drive's half was
+     * never asked for, and on this driver the two are the same question: the
+     * same section requires that "software must match the tag number it uses
+     * to the slot it is placing the command in", and ahci_build_io does —
+     * `cmdfis->countl = slot << 3`. So a slot the drive has no queue entry for
+     * is issued as a tag it has no queue entry for, the drive aborts that
+     * command, and a task-file error on an NCQ port takes the whole queue with
+     * it: every other command in flight on this port fails and the link is
+     * reset.
+     *
+     * The drive's answer is IDENTIFY DEVICE word 75 bits 4:0, "maximum queue
+     * depth minus one" (ACS-3 §7.12.7.33) — the same word Linux reads in
+     * ata_id_queue_depth(). For non-NCQ ports only one command may be
+     * outstanding at all. slot_bitmap: 1 = free. */
     uint32_t usable = (ahci_ctrl.num_slots >= 32)
                       ? 0xFFFFFFFFu
                       : ((1u << ahci_ctrl.num_slots) - 1u);
-    port->slot_bitmap = port->ncq ? usable : 0x1u;
+    if (port->ncq) {
+        uint32_t dev_depth = (uint32_t)(id[75] & 0x1Fu) + 1u;
+        if (dev_depth < ahci_ctrl.num_slots) {
+            kprintf("[AHCI] port %u: the drive queues %u commands and this HBA "
+                    "has %u slots — tags %u and above are the drive's to "
+                    "refuse, so only %u are used\n",
+                    port_num, dev_depth, ahci_ctrl.num_slots,
+                    dev_depth, dev_depth);
+            usable = (1u << dev_depth) - 1u;
+        }
+    }
+    port->slot_mask   = port->ncq ? usable : 0x1u;
+    port->slot_bitmap = port->slot_mask;
 
     port->status = AHCI_PORT_ACTIVE;
     port->active = 1;
@@ -1072,10 +1187,32 @@ error_t ahci_port_comreset(ahci_port_t* port) {
 
     __atomic_fetch_add(&port->stats.comreset_count, 1, __ATOMIC_RELAXED);
 
+    /* A command engine that will not stop is not a reason to abandon the
+     * reset — it is the case the reset exists for. AHCI 1.3.1 §10.4.2: "It
+     * must first clear PxCMD.ST, and wait for PxCMD.CR to clear to '0' before
+     * re-initializing communication. However, if PxCMD.CR does not clear
+     * within a reasonable time (500 milliseconds), it may assume the interface
+     * is in a hung condition and may continue with issuing the port reset."
+     *
+     * This used to return ERR_IO here, before PxSCTL.DET had been written even
+     * once — so the one action that clears a hung interface was never taken,
+     * on the one port that needed it. And ahci_port_stop leaves PxCMD.ST at 0
+     * on its way out while nothing outside ahci_port_init ever sets it again:
+     * a transient wedge was turned into a port that could not run another
+     * command for the rest of the boot, by the routine whose job was to
+     * recover it. Every later command sat in PxCI with the engine stopped
+     * until its own patience ran out.
+     *
+     * So the failure is said out loud — kprintf, because the debug_printf that
+     * stood here compiles to nothing in every shipped build — and the reset
+     * goes ahead. Whether the engine came back is not assumed either: it is
+     * decided at the end by ahci_port_start, which returns a refusal of its
+     * own if PxCMD.CR is still set. */
     if (ahci_port_stop(port) != 0) {
-        debug_printf("[AHCI] Port %u: Failed to stop engine for COMRESET\n", port->port_num);
-        __atomic_fetch_add(&port->stats.comreset_fail_count, 1, __ATOMIC_RELAXED);
-        return ERR_IO;
+        kprintf("[AHCI] port %u: its command engine will not stop "
+                "(CMD=0x%08x) — AHCI 1.3.1 §10.4.2 calls that a hung "
+                "interface and resets the port through it\n",
+                port->port_num, regs->cmd);
     }
 
     regs->serr = 0xFFFFFFFF;
@@ -1244,52 +1381,121 @@ void ahci_get_port_stats(uint8_t port_num, ahci_port_stats_t* stats_out) {
     stats_out->last_tfd            = __atomic_load_n(&port->stats.last_tfd,            __ATOMIC_RELAXED);
 }
 
-/* AHCI 1.3.1 §10.6.3 — BIOS/OS handoff. On platforms that share the HBA
- * with SMM firmware (CAP2.BOH set — common on real laptops/desktops), the
- * OS must request ownership before touching the controller, otherwise BIOS
- * SMI code and the OS fight over the registers (hangs / corruption). This
- * is a true no-op on QEMU, which never advertises BOH. Requires hba_mem
- * already mapped. */
-static void ahci_bios_handoff(void) {
+/* AHCI 1.3.1 §10.6.3 — BIOS/OS handoff, and the one question it exists to
+ * answer: does this kernel own the HBA yet?
+ *
+ * On platforms that share the controller with SMM firmware (CAP2.BOH set —
+ * common on real laptops and desktops) the OS asks for ownership before
+ * touching anything else, otherwise BIOS SMI code and this driver drive the
+ * same registers at the same time. A true no-op on QEMU, which never
+ * advertises BOH. Requires hba_mem already mapped.
+ *
+ * What it used to do was ask and never listen: it returned void, so the caller
+ * could not act; it spun one second — a number §10.6.3 never names — on
+ * BOHC.BOS and then said "continuing" through a debug_printf that compiles to
+ * nothing in every shipped build; it watched BOHC.BB afterwards, which §10.6.4
+ * has the firmware clear at step 7, one step BEFORE it releases BOS at step 8,
+ * so that wait could end with the firmware still owning the controller; and it
+ * printed "handoff complete" either way. The §3.1.11 condition that decides
+ * the whole matter — "Ownership is obtained when this bit [OOS] reads '1' and
+ * the BOS bit reads '0'" — was never evaluated once.
+ *
+ * Returns true when this kernel may drive the HBA: either ownership as §3.1.11
+ * defines it, or the case §10.6.3 step 5 expressly permits taking control in.
+ * False is a refusal with a reason already on the console. */
+static bool ahci_bios_handoff(void) {
     if (!(ahci_ctrl.hba_mem->cap2 & AHCI_CAP2_BOH)) {
-        return;  // handoff unsupported — OS already owns the HBA
+        /* §10.6.1: BOS and OOS are '0' out of reset, and a controller with no
+         * handoff mechanism has no BIOS semaphore to wait on. */
+        return true;
     }
 
     debug_printf("[AHCI] BIOS/OS handoff: requesting OS ownership...\n");
 
-    // Request OS ownership (set OOS); other bits preserved.
+    /* §10.6.3 step 1. Other bits preserved. */
     ahci_ctrl.hba_mem->bohc |= AHCI_BOHC_OOS;
     mfence();
 
-    /* Poll the BIOS Owned Semaphore until firmware releases it, bounded
-     * to 1s so a misbehaving BIOS cannot hang the boot. */
-    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(1000);
-    while (rdtsc() < deadline) {
-        if ((ahci_ctrl.hba_mem->bohc & AHCI_BOHC_BOS) == 0) {
+    /* §10.6.3 steps 3-5: the firmware has 25 ms to either release the
+     * semaphore or declare itself busy. Watching BOS here and not BB alone is
+     * the point — BOS is the bit §3.1.11 defines ownership by. */
+    HourGlass window;
+    if (!HourGlassTurn(&window, (uint64_t)AHCI_BOH_BUSY_WINDOW_MS * 1000ULL)) {
+        kprintf("[AHCI] no time source — the 25 ms AHCI 1.3.1 §10.6.3 gives "
+                "the firmware to hand this controller over cannot be measured, "
+                "so ownership cannot be claimed; the AHCI disks are not "
+                "used\n");
+        return false;
+    }
+
+    uint32_t bohc  = 0;
+    bool     busy  = false;
+    for (;;) {
+        bohc = ahci_ctrl.hba_mem->bohc;
+        if ((bohc & (AHCI_BOHC_BOS | AHCI_BOHC_OOS)) == AHCI_BOHC_OOS) {
+            debug_printf("[AHCI] BIOS/OS handoff: owned (BOHC=0x%08x)\n", bohc);
+            return true;
+        }
+        if (bohc & AHCI_BOHC_BB) {
+            busy = true;
             break;
         }
+        if (HourGlassRunOut(&window)) break;
         cpu_pause();
     }
 
-    if (ahci_ctrl.hba_mem->bohc & AHCI_BOHC_BOS) {
-        debug_printf("[AHCI] WARNING: BIOS did not release HBA within 1s (continuing)\n");
-    }
-
-    /* If BIOS Busy is still set, firmware is finishing cleanup (e.g.
-     * spinning drives down); spec recommends granting up to 2s more. */
-    if (ahci_ctrl.hba_mem->bohc & AHCI_BOHC_BB) {
-        debug_printf("[AHCI] BIOS busy after handoff; waiting up to 2s...\n");
-        deadline = rdtsc() + cpu_ms_to_tsc(2000);
-        while (rdtsc() < deadline) {
-            if ((ahci_ctrl.hba_mem->bohc & AHCI_BOHC_BB) == 0) {
-                break;
-            }
-            cpu_pause();
+    if (!busy) {
+        if (!(bohc & AHCI_BOHC_OOS)) {
+            /* The request itself did not stick, so there is nothing to assume
+             * control ON: §10.6.3 step 5 permits taking the HBA from a
+             * firmware that never answered, not driving a register that did
+             * not take the write. */
+            kprintf("[AHCI] the controller did not accept the OS ownership "
+                    "request (BOHC=0x%08x) — the AHCI disks are not used\n",
+                    bohc);
+            return false;
         }
+        /* §10.6.3 step 5, verbatim: "If after 25 milliseconds the BIOS Busy
+         * (BOHC.BB) bit has not been set to '1', then the OS can assume
+         * control and perform whatever cleanup is necessary." Said out loud
+         * all the same: the machine is about to be reset underneath firmware
+         * that still holds its semaphore, and that is worth knowing. */
+        kprintf("[AHCI] the firmware still holds this controller "
+                "(BOHC=0x%08x) and did not declare itself busy within %u ms — "
+                "taking control, as AHCI 1.3.1 §10.6.3 step 5 allows\n",
+                bohc, AHCI_BOH_BUSY_WINDOW_MS);
+        return true;
     }
 
-    debug_printf("[AHCI] BIOS/OS handoff complete (BOHC=0x%08x)\n",
-                 ahci_ctrl.hba_mem->bohc);
+    /* §10.6.3 step 4: the firmware declared itself busy, so it gets the two
+     * seconds the specification calls a minimum — and what is watched is BOS,
+     * because BB goes down one step before it (§10.6.4 steps 7 and 8). */
+    debug_printf("[AHCI] BIOS busy (BOHC=0x%08x); granting %u ms\n",
+                 bohc, AHCI_BOH_GRANT_MS);
+    HourGlass grant;
+    if (!HourGlassTurn(&grant, (uint64_t)AHCI_BOH_GRANT_MS * 1000ULL)) {
+        kprintf("[AHCI] no time source — the firmware asked for time to "
+                "finish its outstanding commands on this controller and there "
+                "is no clock to give it; the AHCI disks are not used\n");
+        return false;
+    }
+    for (;;) {
+        bohc = ahci_ctrl.hba_mem->bohc;
+        if ((bohc & (AHCI_BOHC_BOS | AHCI_BOHC_OOS)) == AHCI_BOHC_OOS) {
+            debug_printf("[AHCI] BIOS/OS handoff: owned after the grant "
+                         "(BOHC=0x%08x)\n", bohc);
+            return true;
+        }
+        if (HourGlassRunOut(&grant)) break;
+        cpu_pause();
+    }
+
+    kprintf("[AHCI] the firmware declared itself busy and still owns this "
+            "controller after %u ms (BOHC=0x%08x) — ownership is OOS=1 with "
+            "BOS=0 (AHCI 1.3.1 §3.1.11) and it was never obtained, so the "
+            "controller is left to the firmware and the AHCI disks are not "
+            "used\n", AHCI_BOH_GRANT_MS, bohc);
+    return false;
 }
 
 int ahci_init(void) {
@@ -1373,8 +1579,17 @@ int ahci_init(void) {
      * BOH bit and must be read before the handoff below. */
     ahci_ctrl.cap = ahci_ctrl.hba_mem->cap;
 
-    /* AHCI 1.3.1 §10.6.3: take the HBA away from BIOS before driving it. */
-    ahci_bios_handoff();
+    /* AHCI 1.3.1 §10.6.3: take the HBA away from BIOS before driving it — and
+     * if it was not given, drive nothing. The next two writes are GHC.AE and
+     * GHC.HR, and §10.4.3 makes GHC.HR a reset of GHC.AE, GHC.IE, the IS
+     * register and every non-HwInit port register field: pulling that out from
+     * under an SMI handler that still owns the controller is the hazard this
+     * handoff exists to avoid, so a refusal here ends the driver. */
+    if (!ahci_bios_handoff()) {
+        vmm_unmap_mmio(ahci_ctrl.hba_mem, AHCI_ABAR_SPAN);
+        ahci_ctrl.hba_mem = NULL;
+        return -1;
+    }
 
     /* §5.3.2.3: GHC.AE must be set before accessing other AHCI registers.
      * Set it, issue the HBA reset (which clears AE), then set it again —

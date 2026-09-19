@@ -38,6 +38,22 @@
 #define HUB_REQ_SET_DEPTH        0x0C
 #define USB_REQ_SET_INTERFACE    0x0B
 
+/* Features of the HUB itself, which are a different list from a port's and are
+ * cleared with a different request. USB 2.0 §11.24.2.1: ClearHubFeature "is
+ * used to clear either the C_HUB_LOCAL_POWER or C_HUB_OVER_CURRENT features",
+ * and those two are all there are. */
+#define HUB_FEAT_C_LOCAL_POWER   0
+#define HUB_FEAT_C_OVER_CURRENT  1
+
+/* wHubStatus and wHubChange, USB 2.0 Tables 11-19 and 11-20. Bit 0 of the
+ * status is the local supply — 1 means LOST, which is the way round it reads
+ * on the wire — and bit 1 is an over-current the hub reports on its own
+ * behalf rather than on any port's. */
+#define HUB_STAT_LOCAL_POWER_LOST (1u << 0)
+#define HUB_STAT_OVERCURRENT      (1u << 1)
+#define HUB_CHG_LOCAL_POWER       (1u << 0)
+#define HUB_CHG_OVERCURRENT       (1u << 1)
+
 /* Features of a downstream port, as SET_FEATURE and CLEAR_FEATURE name them.
  * The numbering is shared; which of them exist is not. */
 #define PORT_FEAT_ENABLE         1
@@ -396,6 +412,65 @@ static int hub_port_status(XhciHub* h, uint8_t port,
 }
 
 /*
+ * The hub's own status, which nothing here used to ask for.
+ *
+ * USB 2.0 §11.24.2.6: bmRequestType 10100000B, GET_STATUS, wValue and wIndex
+ * zero, four bytes back — wHubStatus, then wHubChange. It is a different
+ * request from hub_port_status above, which is class-to-OTHER with the port in
+ * wIndex, and it answers a question no port can: §11.12.5 says that a hub with
+ * over-current detection on a hub basis puts every port into Powered-off and
+ * that "neither C_PORT_OVER_CURRENT nor PORT_OVER_CURRENT is set for the
+ * affected ports". Pulling the brick out of a self-powered hub is the same
+ * shape — the ports go dark and only this word says why.
+ */
+static int hub_status(XhciHub* h, uint16_t* out_status, uint16_t* out_change)
+{
+    usb_setup_packet_t setup = {
+        .bmRequestType = 0xA0,          /* device to host, class, device */
+        .bRequest = HUB_REQ_GET_STATUS,
+        .wValue = 0,
+        .wIndex = 0,
+        .wLength = 4
+    };
+
+    memset(h->buf_virt, 0, 4);
+    int code = xhci_control_transfer_sync(h->ctrl, h->slot, &setup,
+                                          h->buf_phys, 4, true,
+                                          HUB_CTRL_TIMEOUT_MS);
+    if (code != TRB_COMPLETION_SUCCESS && code != TRB_COMPLETION_SHORT_PKT) {
+        return -1;
+    }
+
+    const uint8_t* d = (const uint8_t*)h->buf_virt;
+    if (out_status) *out_status = (uint16_t)(d[0] | ((uint16_t)d[1] << 8));
+    if (out_change) *out_change = (uint16_t)(d[2] | ((uint16_t)d[3] << 8));
+    return 0;
+}
+
+/*
+ * Acknowledge something the hub said about itself.
+ *
+ * USB 2.0 §11.24.2.1: bmRequestType 00100000B, CLEAR_FEATURE, the selector in
+ * wValue, wIndex and wLength zero. Both selectors are changes, and §11.12.2 is
+ * why leaving one standing is not a cosmetic omission: "While a change bit is
+ * set, the hub continues to report a status change when polled until all
+ * change bits have been cleared by the USB System Software."
+ */
+static int hub_clear_feature(XhciHub* h, uint8_t feature)
+{
+    usb_setup_packet_t setup = {
+        .bmRequestType = 0x20,          /* host to device, class, device */
+        .bRequest = USB_REQ_CLEAR_FEATURE,
+        .wValue = feature,
+        .wIndex = 0,
+        .wLength = 0
+    };
+    int code = xhci_control_transfer_sync(h->ctrl, h->slot, &setup, 0, 0, false,
+                                          HUB_CTRL_TIMEOUT_MS);
+    return (code == TRB_COMPLETION_SUCCESS) ? 0 : -1;
+}
+
+/*
  * Acknowledge everything the port has to say.
  *
  * A change bit nobody clears is a hub that never stops talking: the status
@@ -625,6 +700,62 @@ static void hub_port_forget(XhciHub* h, uint8_t port)
 }
 
 /*
+ * Switch power back on, which is the ONLY way a port leaves Powered-off.
+ *
+ * USB 2.0 §11.5.1.3 enumerates the transitions out of that state, and exactly
+ * one of them is something software can cause: "From the Powered-off state
+ * when the hub receives a SetPortFeature(PORT_POWER) request". §11.5.1.2 is
+ * why nothing else will ever do it for us — in Powered-off "the port's
+ * differential and single-ended transmitters and receivers are disabled", so
+ * the port cannot detect a connection and can never become interesting again
+ * on its own.
+ *
+ * The delay afterwards is the hub's own number, bPwrOn2PwrGood, and it is the
+ * only clock here. Whether the power took is then ASKED rather than assumed:
+ * a port still over its limit is left off and said out loud, because
+ * re-powering into a short over and over is not a repair.
+ */
+static int hub_repower_port(XhciHub* h, uint8_t port, uint16_t* out_status)
+{
+    if (hub_port_feature(h, port, PORT_FEAT_POWER, true) != 0) {
+        kprintf("[USB hub slot %u] port %u would not take power again\n",
+                h->slot->slot_id, port);
+        return -1;
+    }
+    hub_pause_ms(h->power_on_delay_ms);
+
+    uint16_t status = 0, change = 0;
+    if (hub_port_status(h, port, &status, &change) != 0) {
+        return -1;
+    }
+    hub_clear_changes(h, port, change);
+
+    if (status & PORT_STAT_OVERCURRENT) {
+        kprintf("[USB hub slot %u] port %u is still over its current limit — "
+                "it stays off until whatever is drawing it is taken out\n",
+                h->slot->slot_id, port);
+        return -1;
+    }
+
+    if (out_status) {
+        *out_status = status;
+    }
+    return 0;
+}
+
+/* Every port at once, and one wait for all of them. Used when the hub itself
+ * has been the thing that went down: §11.12.5 step 4 asks the host to cycle
+ * "power on to all of the necessary ports", and a hub-basis event names none
+ * of them, so that is every port it has. */
+static void hub_power_all_ports(XhciHub* h)
+{
+    for (uint8_t port = 1; port <= h->ports; port++) {
+        hub_port_feature(h, port, PORT_FEAT_POWER, true);
+    }
+    hub_pause_ms(h->power_on_delay_ms);
+}
+
+/*
  * Listen for the next thing the hub has to say.
  *
  * Armed here and nowhere else, and in particular never from the interrupt
@@ -632,19 +763,175 @@ static void hub_port_forget(XhciHub* h, uint8_t port)
  * change is cleared by the scan below. Arming before the scan is asking it to
  * repeat itself, at interrupt rate, into a core that will then never get far
  * enough to answer.
+ *
+ * ‼ AND A PIPE THE DEVICE HALTED IS REPAIRED HERE, BEFORE IT IS RUNG FOR.
+ *
+ * USB 2.0 §11.12.1: the host learns of a port or hub change only through this
+ * endpoint, and only while an IN is outstanding on it — "If no hub or port
+ * status change bits are set, then the hub returns an NAK when the Status
+ * Change endpoint is polled." §11.12.3's Figure 11-21 accordingly ends its
+ * handling loop with "Re-initialize Interrupt Pipe for Status Change
+ * endpoint" before returning to the beginning. A hub that is not re-armed is
+ * a hub that has stopped reporting, and nothing below it will ever be noticed
+ * arriving or leaving again.
+ *
+ * The codes that get it into that state — Stall Error, Babble Detected, a USB
+ * Transaction Error with the error count spent — all leave the endpoint
+ * HALTED in the controller as well (xHCI 1.2b §4.10.2.1, §4.10.2.4,
+ * §4.10.2.7), and §4.7 says "The xHC shall ignore doorbell references to
+ * endpoints in the Halted or Error state". So a bare re-arm would put a
+ * report on the ring that nothing would ever be asked for, and leave the
+ * endpoint IN_FLIGHT — which makes this function itself return early for the
+ * rest of the boot. The two-step repair §4.10.2.1 defines is done first, in
+ * the order §4.10.2.1.1 gives it, and both steps are things this context is
+ * allowed to do and the event drain is not.
  */
 static void hub_arm_status(XhciHub* h)
 {
     if (!h->slot->ep_interrupt_in || !h->slot->endpoints) {
         return;
     }
-    xhci_endpoint_t* ep = &h->slot->endpoints[h->slot->ep_interrupt_in];
+    uint8_t dci = h->slot->ep_interrupt_in;
+    xhci_endpoint_t* ep = &h->slot->endpoints[dci];
     if (ep->xfer_state == XHCI_XFER_IN_FLIGHT) {
         return;
     }
+
+    if (xhci_ep_context_state(h->ctrl, h->slot, dci) == XHCI_EP_STATE_HALTED) {
+        /* The controller's half, and its completion waited for: §4.10.2.1
+         * wants the Reset Endpoint Command to "complete successfully ...
+         * before attempting to restart the Transfer Ring by ringing its
+         * doorbell", and posting one is not the same as its having happened. */
+        xhci_ep_recover(h->ctrl, h->slot, dci);
+        xhci_command_wait_idle(h->ctrl, HUB_CTRL_TIMEOUT_MS);
+
+        uint8_t state = xhci_ep_context_state(h->ctrl, h->slot, dci);
+        if (state == XHCI_EP_STATE_HALTED) {
+            kprintf("[USB hub slot %u] its status endpoint is still %s after a "
+                    "Reset Endpoint — it cannot report anything below it until "
+                    "the hub itself is replugged\n",
+                    h->slot->slot_id, xhci_ep_state_name(state));
+            return;
+        }
+
+        /* And the device's half, which §4.10.2.1.1 places after the endpoint
+         * reaches Stopped and before any doorbell. Leaving it out is what made
+         * the controller and the hub disagree about whether the pipe was
+         * usable — and it is also what made the Reset Endpoint's cleared TSP
+         * flag undefined rather than merely blunt (§4.6.8). */
+        usb_setup_packet_t setup = {
+            .bmRequestType = 0x02,      /* host to device, endpoint */
+            .bRequest = USB_REQ_CLEAR_FEATURE,
+            .wValue = USB_FEATURE_ENDPOINT_HALT,
+            .wIndex = ep->addr,
+            .wLength = 0
+        };
+        if (xhci_control_transfer_sync(h->ctrl, h->slot, &setup, 0, 0, false,
+                                       HUB_CTRL_TIMEOUT_MS)
+            != TRB_COMPLETION_SUCCESS) {
+            kprintf("[USB hub slot %u] would not clear the halt on its own "
+                    "status endpoint — it cannot report anything below it "
+                    "until the hub itself is replugged\n", h->slot->slot_id);
+            return;
+        }
+    }
+
     ep->xfer_state = XHCI_XFER_IDLE;
-    xhci_ep_submit(h->ctrl, h->slot, h->slot->ep_interrupt_in,
-                   ep->buffer_phys, ep->max_packet);
+    xhci_ep_submit(h->ctrl, h->slot, dci, ep->buffer_phys, ep->max_packet);
+}
+
+/*
+ * What the HUB has to say about ITSELF, which nothing here used to ask.
+ *
+ * USB 2.0 §11.12.4: "The hub reports any changes in hub status in bit zero of
+ * the Hub and Port Status Change Bitmap." That bit was never read and the word
+ * behind it was never fetched, so the two events that live in it were invisible
+ * — and, worse, unclearable: §11.12.2 says "While a change bit is set, the hub
+ * continues to report a status change when polled until all change bits have
+ * been cleared by the USB System Software", so the hub reported, the service
+ * pass walked every port and found nothing, re-armed, and was reported to
+ * again, for the rest of the boot.
+ *
+ * The two events both take every device below the hub with them:
+ *
+ *   an over-current the hub reports on a hub basis. §11.12.5: "If the hub has
+ *   over-current detection on a hub basis, then an over-current condition on
+ *   the hub will cause all ports to enter the Powered-off state. However, in
+ *   this case, neither C_PORT_OVER_CURRENT nor PORT_OVER_CURRENT is set for
+ *   the affected ports" — so the per-port branch in the scan below cannot see
+ *   it, and every port goes dark with nothing saying why;
+ *
+ *   the local supply lost, which is the brick pulled out of a self-powered
+ *   hub. §11.5.1.2 makes the hub put every port in Powered-off for it.
+ *
+ * ‼ AND THE ORDER MATTERS. §11.11: "the power to a port is not turned on by a
+ * SetPortFeature(PORT_POWER) if both C_HUB_LOCAL_POWER and Local Power Status
+ * (in wHubStatus) are set to 1B at the time when the request is executed".
+ * Acknowledging the change is therefore not bookkeeping to be done afterwards
+ * — it is what makes the re-powering below happen at all.
+ */
+static void hub_service_own_status(XhciHub* h)
+{
+    uint16_t status = 0, change = 0;
+    if (hub_status(h, &status, &change) != 0) {
+        return;
+    }
+    if (!(change & (HUB_CHG_LOCAL_POWER | HUB_CHG_OVERCURRENT))) {
+        return;
+    }
+
+    if (change & HUB_CHG_LOCAL_POWER) {
+        kprintf("[USB hub slot %u] its own supply has changed — local power is "
+                "%s\n", h->slot->slot_id,
+                (status & HUB_STAT_LOCAL_POWER_LOST) ? "lost" : "good again");
+        hub_clear_feature(h, HUB_FEAT_C_LOCAL_POWER);
+    }
+    if (change & HUB_CHG_OVERCURRENT) {
+        kprintf("[USB hub slot %u] drew more current than its supply will "
+                "give — it has switched off every one of its ports\n",
+                h->slot->slot_id);
+        hub_clear_feature(h, HUB_FEAT_C_OVER_CURRENT);
+    }
+
+    /* What went down with it is NOT guessed at here. A port that really
+     * entered Powered-off reads as disconnected (§11.5.1.2 disables its
+     * transmitters and receivers), and the scan that runs straight after this
+     * retires exactly those and says so per port. Tearing the tree down from
+     * here instead would also tear it down for a hub that merely reported a
+     * stale power-source change on the way up, which some do.
+     *
+     * §11.12.5 step 4, and only once the hub says it has power to give —
+     * otherwise §11.11 has the request ignored and the next report is what
+     * brings this round again. */
+    if (hub_status(h, &status, NULL) != 0) {
+        kprintf("[USB hub slot %u] would not say whether it has power of its "
+                "own — its ports are left as they are\n", h->slot->slot_id);
+        return;
+    }
+    if (status & HUB_STAT_LOCAL_POWER_LOST) {
+        kprintf("[USB hub slot %u] has no local power of its own to give its "
+                "ports — they stay off until it says it has\n",
+                h->slot->slot_id);
+        return;
+    }
+
+    hub_power_all_ports(h);
+
+    /* Asked, not assumed: the condition lasts as long as whatever caused it,
+     * and a hub still over its limit has switched the ports straight back off
+     * (§11.5.1.2). It reports again when that changes, which brings this pass
+     * round once more — so there is nothing here to wait on. */
+    if (hub_status(h, &status, NULL) != 0) {
+        kprintf("[USB hub slot %u] would not say whether it is still over its "
+                "current limit after its ports were powered\n",
+                h->slot->slot_id);
+    } else if (status & HUB_STAT_OVERCURRENT) {
+        kprintf("[USB hub slot %u] is still over its current limit with the "
+                "ports powered — they stay off until it is not\n",
+                h->slot->slot_id);
+    }
+
+    /* Step 5 is the scan that runs straight after this. */
 }
 
 static int hub_scan_ports(XhciHub* h, bool announce_only_changes)
@@ -659,15 +946,51 @@ static int hub_scan_ports(XhciHub* h, bool announce_only_changes)
 
         hub_clear_changes(h, port, change);
 
-        if (status & PORT_STAT_OVERCURRENT) {
-            /* The hub has already cut power to it, and will not restore it
-             * while the condition lasts. There is nothing to bring up. */
-            kprintf("[USB hub slot %u] port %u draws more current than the hub "
-                    "will supply — it has switched the port off\n",
-                    h->slot->slot_id, port);
+        /*
+         * A port the hub has switched off, and the one thing that brings it
+         * back.
+         *
+         * The hub has indeed cut power to it and will not restore that while
+         * the condition lasts — but it will not restore it afterwards either.
+         * §11.5.1.3 gives SetPortFeature(PORT_POWER) as the only exit from
+         * Powered-off, and this driver used to issue that in exactly one
+         * place, the one-shot loop in xhci_hub_attach. So the old "there is
+         * nothing to bring up" read as a statement about the hub when it was
+         * really a statement about this omission: a port that tripped once
+         * was dark for the whole of that hub's attachment, and §11.5.1.2's
+         * disabled receivers meant it could not even report the offending
+         * device being unplugged.
+         *
+         * §11.12.5's recovery is followed here: the change is acknowledged
+         * (hub_clear_changes, above), the port is given up, power is cycled,
+         * and the port is read back — which is how "wait for the over-current
+         * status bit to be cleared to 0" is answered without a clock. What
+         * answers is then let through to the ordinary path below, so the
+         * device on it is enumerated in this same pass.
+         *
+         * ‼ THE CHANGE BIT ALONE IS ENOUGH TO HAVE LOST THE PORT. §11.12.5,
+         * on a limiter shared with a neighbour: "the affected port is placed
+         * in the Powered-off state and C_PORT_OVER_CURRENT is set for the
+         * port, but PORT_OVER_CURRENT is not set". Such a port took no branch
+         * at all here and was never re-powered, so one trip killed several
+         * ports and complained about one.
+         */
+        if ((status & PORT_STAT_OVERCURRENT) ||
+            (change & PORT_CHG_OVERCURRENT)) {
+            if (status & PORT_STAT_OVERCURRENT) {
+                kprintf("[USB hub slot %u] port %u draws more current than the "
+                        "hub will supply — it has switched the port off\n",
+                        h->slot->slot_id, port);
+            } else {
+                kprintf("[USB hub slot %u] port %u was switched off by an "
+                        "over-current elsewhere on the hub\n",
+                        h->slot->slot_id, port);
+            }
             hub_port_forget(h, port);
             acted++;
-            continue;
+            if (hub_repower_port(h, port, &status) != 0) {
+                continue;       /* still dark; the hub says when it is not */
+            }
         }
 
         bool connected = (status & PORT_STAT_CONNECTION) != 0;
@@ -817,11 +1140,10 @@ int xhci_hub_attach(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
             h->ports, h->power_on_delay_ms,
             slot->multi_tt ? ", one translator per port" : "");
 
-    /* Power every port, then wait once for all of them. */
-    for (uint8_t port = 1; port <= h->ports; port++) {
-        hub_port_feature(h, port, PORT_FEAT_POWER, true);
-    }
-    hub_pause_ms(h->power_on_delay_ms);
+    /* Power every port, then wait once for all of them. No longer the only
+     * place this happens — a port the hub switches off for an over-current is
+     * brought back by the same request, and §11.5.1.3 has no other way. */
+    hub_power_all_ports(h);
 
     h->attached = true;
 
@@ -951,11 +1273,31 @@ int xhci_hub_service(xhci_controller_t* ctrl)
     }
 
     for (XhciHub* h = g_hubs; h; h = h->next) {
-        if (!h->attached || !h->change_pending) {
+        if (!h->attached) {
             continue;
         }
-        h->change_pending = false;
-        acted += hub_scan_ports(h, true);
+
+        if (h->change_pending) {
+            h->change_pending = false;
+            /* The hub's own word first: a hub-basis over-current or a lost
+             * local supply shows in nothing a port says, and re-powering the
+             * ports is what has to happen before the scan can find anything
+             * on them. */
+            hub_service_own_status(h);
+            acted += hub_scan_ports(h, true);
+        }
+
+        /*
+         * ‼ ARMED ON EVERY PASS, NOT ONLY AFTER A CHANGE WAS ACTED ON.
+         *
+         * This used to sit behind the `change_pending` test above, and
+         * change_pending is raised in exactly one place — the good-completion
+         * arm of the transfer handler. A status transfer that came back
+         * halted therefore left the endpoint idle AND the hub unflagged, so
+         * this loop skipped it for ever and nothing below it was ever noticed
+         * again. Arming unconditionally costs nothing for a hub that is
+         * already listening: the function returns at once on IN_FLIGHT.
+         */
         hub_arm_status(h);
     }
 

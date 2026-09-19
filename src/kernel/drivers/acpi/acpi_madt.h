@@ -144,7 +144,16 @@ typedef struct madt_info {
     uintptr_t ioapic_address;
     uint8_t   ioapic_id;
     uint32_t  ioapic_gsi_base;
-    uint8_t   bsp_lapic_id;             /* from CPUID(1).EBX[31:24] */
+    /* The BSP's APIC ID at FULL width, as CPUID.0BH:EDX reports it (falling
+     * back to the 8-bit CPUID.01H:EBX[31:24] initial ID only on parts with
+     * no leaf 0BH) — see detect_bsp_apic_id in acpi_madt.c. It is stored
+     * whole because that is what the MADT Type 9 (Processor Local x2APIC,
+     * 32-bit X2APIC ID, ACPI 6.5 §5.2.12.12) entries must be matched
+     * against. Consumers whose destination field is narrower — the IOAPIC
+     * redirection entry carries eight bits — must REFUSE an ID that does
+     * not fit rather than truncate it: the low eight bits name a different,
+     * running processor. */
+    uint32_t  bsp_lapic_id;
     uint8_t   bsp_acpi_processor_id;    /* matching MADT entry, used for NMI lookup */
     bool      bsp_lapic_found;
     bool      bsp_acpi_id_resolved;

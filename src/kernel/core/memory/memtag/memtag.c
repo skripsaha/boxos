@@ -157,9 +157,15 @@ static void SeedReservedTags(void) {
     MarkInternReserved("cache:wp");
     /* Phase 2F — Machine Check Architecture (Intel SDM Vol 3B §15)
      * event + state namespace. Reserved so userspace can't shadow.
-     * mce:poisoned auto-applied by mce_handle() on the page from
-     * IA32_MC<i>_ADDR; PMM also tracks it in pmm_poisoned_bitmap so the
-     * allocator refuses to hand the page back out. */
+     * mce:poisoned is NOT applied by the #MC handler: that handler may
+     * take no lock while MCIP is set, and the MemTag registry is a
+     * lock-taker. It goes on the page named by IA32_MC<i>_ADDR from a
+     * K-Core, off the record slot's own baton (mce_note_worker), or —
+     * on a fatal kernel-mode verdict, where no core lives to pump that
+     * baton — from the dying core itself. APEI GHES applies it too, for
+     * a memory error the firmware reports. PMM tracks the same page in
+     * pmm_poisoned_bitmap from the handler, so the allocator refuses to
+     * hand it back out even if no tag ever lands. */
     MarkInternReserved("mce:poisoned");
     MarkInternReserved("mce:corrected");
     MarkInternReserved("mce:fault:detected");
@@ -1917,38 +1923,6 @@ uint32_t MemRegionFromPte(uint64_t pte_value, uintptr_t phys) {
  * AP after cpu_intersect_features_ap (per_core_init_ap call site). */
 bool MemTagVerifyPteMetadataBits(void) { return vmm_verify_pte_metadata_bits_52_58(); }
 
-#if 0  /* dead — original impl moved to vmm.c (clean-slate audit) */
-bool MemTagVerifyPteMetadataBits_OLD(void) {
-    extern uint8_t vmm_maxphyaddr;
-
-    /* Bits 52-58 are "Ignored" only when MAXPHYADDR ≤ 52. On any future
-     * silicon that bumps MAXPHYADDR past 52, bits 52..(M-1) become real
-     * phys-address bits and stamping them would corrupt mappings. */
-    if (vmm_maxphyaddr > 52) {
-        debug_printf("[MEMTAG] M5 ABORT: MAXPHYADDR=%u > 52 — "
-                     "bits 52-58 are phys, NOT ignored\n",
-                     (unsigned)vmm_maxphyaddr);
-        return false;
-    }
-
-    uint64_t cr4;
-    __asm__ volatile ("mov %%cr4, %0" : "=r"(cr4));
-    bool cr4_pke = ((cr4 >> 22) & 1u) != 0;   /* Protection Keys for User */
-    bool cr4_pks = ((cr4 >> 24) & 1u) != 0;   /* Protection Keys for Sup. */
-    bool cr4_cet = ((cr4 >> 23) & 1u) != 0;   /* CET (shadow stack)        */
-
-    /* All three features touch bits OUTSIDE 52-58:
-     *   PKE / PKS → PKEY field at bits 62..59 (Intel SDM Vol 3A §4.6.2)
-     *   CET       → supervisor-shadow-stack indicator at bit 60 (§17)
-     * Logged for telemetry — never causes ABORT on current silicon. */
-    debug_printf("[MEMTAG] M5 PTE-metadata probe: MAXPHYADDR=%u "
-                 "CR4.PKE=%d CR4.PKS=%d CR4.CET=%d → bits 52-58 SAFE\n",
-                 (unsigned)vmm_maxphyaddr,
-                 (int)cr4_pke, (int)cr4_pks, (int)cr4_cet);
-    return true;
-}
-#endif /* dead — moved to vmm.c */
-
 /* Phase 2E originally implemented PAT MSR consistency probe + MTRR
  * audit here. The audit pass after Phase 2K moved them to vmm.c
  * (vmm_verify_pat_msr / vmm_dump_mtrr_layout) because they are pure
@@ -1964,126 +1938,3 @@ bool MemTagVerifyPteMetadataBits_OLD(void) {
  * compiles debug_printf into nothing. */
 bool MemTagVerifyPatMsr(void)  { return vmm_verify_pat_msr(); }
 void MemTagDumpMtrrLayout(void) { vmm_dump_mtrr_layout(); }
-
-#if 0  /* dead — original impls moved to vmm.c */
-bool MemTagVerifyPatMsr_OLD(void) {
-    /* CPUID-gated. If PAT isn't supported (and so vmm_pat_init no-op'd),
-     * the BSP snapshot stays 0 and RDMSR(0x277) would #GP. Skip
-     * verification entirely — return true so non-PAT systems pass. */
-    if (!g_cpu_caps.has_pat) {
-        debug_printf("[MEMTAG] PAT MSR verify SKIP: CPU lacks PAT (has_pat=0)\n");
-        return true;
-    }
-
-    uint64_t bsp = vmm_get_pat_msr_value();
-    if (bsp == 0) {
-        /* Probe ran before vmm_pat_init on BSP. Not a real failure;
-         * just not yet ready. Returning true keeps the AP boot
-         * non-fatal — the BSP probe (after vmm_pat_init) is the
-         * authoritative check. */
-        debug_printf("[MEMTAG] PAT MSR verify SKIP: BSP snapshot not yet captured\n");
-        return true;
-    }
-
-    uint64_t local = MtagRdmsr(MEMTAG_MSR_IA32_PAT);
-    if (local != bsp) {
-        debug_printf("[MEMTAG] PAT MSR ABORT: local=0x%016lx bsp=0x%016lx "
-                     "— Intel SDM Vol 3A §11.12.4 violation (heterogeneous "
-                     "PAT across coherent CPUs)\n",
-                     (unsigned long)local, (unsigned long)bsp);
-        return false;
-    }
-
-    debug_printf("[MEMTAG] PAT MSR verify OK: 0x%016lx (matches BSP)\n",
-                 (unsigned long)local);
-    return true;
-}
-
-/* Decode an MTRR memory type byte to a stable string. Returns NULL for
- * truly invalid encodings (per Intel SDM Vol 3A Table 11-8: types 2/3 are
- * RESERVED — never produced by valid firmware). */
-static const char *MtrrTypeStr(uint8_t t) {
-    switch (t) {
-        case 0x00: return "UC";
-        case 0x01: return "WC";
-        case 0x04: return "WT";
-        case 0x05: return "WP";
-        case 0x06: return "WB";
-        default:   return NULL;
-    }
-}
-
-void MemTagDumpMtrrLayout(void) {
-    if (!g_cpu_caps.has_pat) {
-        /* has_pat is the closest proxy we have for "real x86_64 with MSRs".
-         * Skip on the (theoretical) Pentium-less CPU. */
-        debug_printf("[MEMTAG] MTRR audit SKIP: CPU lacks PAT/MSRs\n");
-        return;
-    }
-
-    uint64_t cap = MtagRdmsr(MEMTAG_MSR_IA32_MTRRCAP);
-    uint64_t def = MtagRdmsr(MEMTAG_MSR_MTRR_DEF_TYPE);
-
-    /* IA32_MTRRCAP layout (Intel SDM Vol 3A Table 11-3):
-     *   bits 7:0 → VCNT  — number of variable-range MTRR register pairs
-     *   bit 8    → FIX   — fixed-range MTRRs supported
-     *   bit 10   → WC    — write-combining type supported
-     *   bit 11   → SMRR  — System-Management-Range Registers supported
-     *
-     * IA32_MTRR_DEF_TYPE layout (Table 11-4):
-     *   bits 7:0 → Type  — default memory type for unmatched ranges
-     *   bit 10   → FE    — fixed-range MTRRs enabled
-     *   bit 11   → E     — MTRRs globally enabled
-     */
-    uint8_t  vcnt    = (uint8_t)(cap & 0xFFu);
-    bool     fix_sup = (cap >> 8) & 1u;
-    bool     wc_sup  = (cap >> 10) & 1u;
-    bool     smrr    = (cap >> 11) & 1u;
-    uint8_t  def_typ = (uint8_t)(def & 0xFFu);
-    bool     fix_en  = (def >> 10) & 1u;
-    bool     mtrr_en = (def >> 11) & 1u;
-    const char *def_str = MtrrTypeStr(def_typ);
-
-    debug_printf("[MEMTAG] MTRR audit: cap=0x%016lx def=0x%016lx VCNT=%u "
-                 "FIX_sup=%d WC_sup=%d SMRR=%d FIX_en=%d MTRR_en=%d "
-                 "DEF_TYPE=%s(0x%02x)\n",
-                 (unsigned long)cap, (unsigned long)def,
-                 (unsigned)vcnt, (int)fix_sup, (int)wc_sup, (int)smrr,
-                 (int)fix_en, (int)mtrr_en,
-                 def_str ? def_str : "RESERVED", (unsigned)def_typ);
-
-    if (!mtrr_en) {
-        debug_printf("[MEMTAG] MTRR audit WARN: MTRRs DISABLED — every "
-                     "range falls back to UC per Intel SDM §11.11.2.1 "
-                     "(MTRR_DEF_TYPE.E=0). Firmware misconfig.\n");
-    }
-    if (def_typ != 0x06u && mtrr_en) {
-        /* WB is the production-typical default. Anything else means the
-         * unmapped phys space is non-WB, which silently changes the
-         * effective type of any region whose MTRR didn't explicitly
-         * override. */
-        debug_printf("[MEMTAG] MTRR audit WARN: DEF_TYPE=%s — non-WB "
-                     "default means PAT cache:wb tags may be silently "
-                     "demoted (Intel SDM §11.12.5 combination table).\n",
-                     def_str ? def_str : "RESERVED");
-    }
-
-    /* Variable-range MTRRs (up to VCNT pairs). Each pair is one MTRR
-     * region: PHYSBASE (type + base phys) + PHYSMASK (mask + valid).
-     * Cap at 8 to bound the log; typical FW programs 2-4. */
-    uint32_t walk_n = vcnt > 8 ? 8 : vcnt;
-    for (uint32_t i = 0; i < walk_n; i++) {
-        uint64_t base = MtagRdmsr(MEMTAG_MSR_MTRR_PHYSBASE0 + i * 2);
-        uint64_t mask = MtagRdmsr(MEMTAG_MSR_MTRR_PHYSMASK0 + i * 2);
-        if (!((mask >> 11) & 1u)) continue;  /* not valid */
-        uint8_t  ty   = (uint8_t)(base & 0xFFu);
-        uint64_t phys = base & ~0xFFFULL;
-        uint64_t mphys = mask & ~0xFFFULL;
-        const char *ts = MtrrTypeStr(ty);
-        debug_printf("[MEMTAG]   MTRR var[%u]: base=0x%016lx mask=0x%016lx "
-                     "type=%s(0x%02x)\n",
-                     i, (unsigned long)phys, (unsigned long)mphys,
-                     ts ? ts : "RESERVED", (unsigned)ty);
-    }
-}
-#endif  /* dead — moved to vmm.c */

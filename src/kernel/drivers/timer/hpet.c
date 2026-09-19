@@ -8,8 +8,11 @@
  *
  * Layout in g_hpet:
  *   base_virt     — UC MMIO mapping of the HPET register block
- *   period_fs     — femtoseconds per main-counter tick
- *   ticks_per_us  — pre-computed conversion factor (always >= 1)
+ *   period_fs     — femtoseconds per main-counter tick, exactly as the
+ *                   controller reports it. Every conversion in this file
+ *                   goes through this number; nothing is pre-divided into
+ *                   a ratio, because the canonical IA-PC period does not
+ *                   divide evenly and a ratio throws the remainder away
  *   counter64     — true when the controller's main counter is 64-bit
  *   num_timers    — comparator count (n+1 in spec)
  *
@@ -23,8 +26,7 @@
 
 typedef struct {
     volatile uint8_t *base_virt;
-    uint64_t period_fs;
-    uint64_t ticks_per_us;     /* main-counter ticks in one microsecond */
+    uint64_t period_fs;        /* femtoseconds per main-counter tick */
     uint64_t origin_ticks;     /* main-counter value captured at init */
     uint8_t  num_timers;
     bool     counter64;
@@ -47,6 +49,35 @@ static inline uint64_t hpet_read64(uint32_t off) {
 }
 static inline void hpet_write64(uint32_t off, uint64_t v) {
     *(volatile uint64_t *)(g_hpet.base_virt + off) = v;
+}
+
+/* One microsecond, in the femtoseconds the controller reports its period in. */
+#define HPET_FS_PER_US   1000000000ULL
+
+/* Main-counter ticks → microseconds, exactly, in 64-bit arithmetic.
+ *
+ * us = ticks * period_fs / 1e9. This used to be pre-divided into an integer
+ * ticks-per-microsecond, and on every IA-PC board in existence — period
+ * 69,841,279 fs, 14.31818 MHz, four times the NTSC colour subcarrier —
+ * 1e9 / 69,841,279 truncates to 14 against a true 14.31818. That threw away
+ * 22,727 ppm of a field the HPET specification (1.0a §2.3.4) expresses in
+ * femtoseconds expressly "in order to achieve a resolution of 50 ppm", on
+ * silicon §2.2 holds to 500 ppm. QEMU hid it: its period is exactly 10 ns
+ * and divides 1e9 without remainder.
+ *
+ * The split keeps the product inside 64 bits with no 128-bit divide:
+ *
+ *   ticks * P / 1e9  =  (ticks / 1e9) * P  +  ((ticks % 1e9) * P) / 1e9
+ *
+ * The left term cannot overflow — P <= 1e8 by the spec bound checked at
+ * init, so it would take more than 2^64 ticks — and the right term is
+ * bounded by 1e9 * 1e8 = 1e17. Exact across the whole 64-bit tick range,
+ * which at 14.318 MHz is some forty thousand years. */
+static uint64_t hpet_ticks_to_us(uint64_t ticks) {
+    uint64_t whole = ticks / HPET_FS_PER_US;
+    uint64_t rem   = ticks % HPET_FS_PER_US;
+    return whole * g_hpet.period_fs
+         + (rem * g_hpet.period_fs) / HPET_FS_PER_US;
 }
 
 /* Read the 64-bit main counter, safe against split reads on 32-bit-only
@@ -93,9 +124,11 @@ bool hpet_init(void) {
     g_hpet.base_virt = (volatile uint8_t *)map;
 
     /* Read general capabilities. Period is encoded in bits 63:32 of GCAP.
-     * Per spec it must be 1..0x05F5E100 femtoseconds (i.e. <=10 ns); any
-     * other value means the firmware did not initialise the controller
-     * and we should not trust it. */
+     * Per spec §2.3.4 it must be 1..0x05F5E100 femtoseconds — 0x05F5E100
+     * is 10^8 fs, which is 100 ns, not the 10 ns this comment claimed; the
+     * bound was always right and the parenthetical was off by ten. Any
+     * other value means the firmware did not initialise the controller and
+     * we should not trust it. */
     uint64_t gcap = hpet_read64(HPET_REG_GCAP_ID);
     uint64_t period = gcap >> HPET_GCAP_PERIOD_SHIFT;
     if (period == 0 || period > 0x05F5E100ULL) {
@@ -109,13 +142,6 @@ bool hpet_init(void) {
     g_hpet.leg_rt_cap   = (gcap & HPET_GCAP_LEG_RT_CAP) != 0;
     g_hpet.num_timers   = (uint8_t)(((gcap >> HPET_GCAP_NUM_TIM_SHIFT)
                                      & HPET_GCAP_NUM_TIM_MASK) + 1);
-
-    /* Pre-compute ticks-per-microsecond. One microsecond = 1e9 fs, so
-     *   ticks/us = 1_000_000_000 / period_fs
-     * Period is bounded by 0x05F5E100 = 100,000,000 fs => ratio >= 10.
-     * Period >= 1 fs => ratio <= 1e9. Both fit in uint64_t. */
-    g_hpet.ticks_per_us = 1000000000ULL / period;
-    if (g_hpet.ticks_per_us == 0) g_hpet.ticks_per_us = 1;   /* sanity */
 
     /* Disable, clear, then enable the main counter. We do NOT enable
      * LegacyReplacement Mode — that takes over IRQ0/IRQ8 routing and
@@ -146,9 +172,12 @@ bool hpet_init(void) {
     g_hpet.origin_ticks = hpet_read_mcnt();
     g_hpet.present      = true;
 
-    debug_printf("[HPET] online: period=%lu fs (%lu MHz), %u timers, %s counter\n",
+    /* Frequency for the log line is 1e15 fs/s divided by the period — in
+     * kHz, so the canonical part reads 14318 kHz and not the "0 MHz" the
+     * old line printed by deriving it from the same truncated 1e9 ratio. */
+    debug_printf("[HPET] online: period=%lu fs (%lu kHz), %u timers, %s counter\n",
                  (unsigned long)g_hpet.period_fs,
-                 (unsigned long)(1000000000ULL / g_hpet.period_fs / 1000ULL),
+                 (unsigned long)(1000000000000000ULL / g_hpet.period_fs / 1000ULL),
                  g_hpet.num_timers,
                  g_hpet.counter64 ? "64-bit" : "32-bit");
     return true;
@@ -173,10 +202,7 @@ bool hpet_counter_is_64bit(void) {
 uint64_t hpet_now_us(void) {
     if (!g_hpet.present) return 0;
     uint64_t now = hpet_read_mcnt();
-    uint64_t delta = now - g_hpet.origin_ticks;
-    /* delta / ticks_per_us — division by a >=10 divisor, never overflows
-     * because delta is bounded by uint64_t and ticks_per_us >= 10. */
-    return delta / g_hpet.ticks_per_us;
+    return hpet_ticks_to_us(now - g_hpet.origin_ticks);
 }
 
 void hpet_busy_wait_us(uint64_t us) {
@@ -220,12 +246,16 @@ bool hpet_start_legacy_tick(uint32_t hz) {
         return false;
     }
 
-    /* Compute interval. ticks_per_us is bounded; 1_000_000/hz fits a
-     * uint32_t for any reasonable hz; product fits uint64. Avoid
-     * divide-by-zero: hz >= 1 ensured above. */
+    /* Compute the interval in main-counter ticks: ticks = us * 1e9 / period_fs,
+     * rounded to NEAREST so the tick carries no systematic lead or lag. The
+     * truncated ticks-per-microsecond this used to multiply by made a 250 Hz
+     * request arrive at 255.68 Hz on canonical silicon while pit_tick went on
+     * crediting 4000 us per interrupt. hz >= 1 is ensured above, so period_us
+     * is at most 1e6 and the product at most 1e15 — no overflow. */
     uint64_t period_us = 1000000ULL / (uint64_t)hz;
     if (period_us == 0) period_us = 1;
-    uint64_t interval = period_us * g_hpet.ticks_per_us;
+    uint64_t interval = (period_us * HPET_FS_PER_US + g_hpet.period_fs / 2)
+                        / g_hpet.period_fs;
     if (interval == 0) return false;
 
     /* Step 1 — halt counter, clearing LEG_RT as a side effect so we

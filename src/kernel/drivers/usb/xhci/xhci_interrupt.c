@@ -362,11 +362,19 @@ void xhci_touch_device_left(const xhci_device_slot_t* slot)
  *
  * So it is asked here instead, in the drain, which runs continuously while
  * devices are being enumerated. One register read per pass.
+ *
+ * ‼ TAKES THE SAMPLE RATHER THAN READING IT, and that is the whole of the
+ * second defect. Host System Error is write-one-to-clear (xHCI 1.2 §5.4.2,
+ * USBSTS bit 2) and §5.4.1 bit 3 says the controller's out-of-band fatal signal
+ * "is acknowledged by software clearing the HSE bit" — so a caller that has
+ * already sampled USBSTS and is about to acknowledge the bits it consumes must
+ * hand that sample here FIRST. Reading the register a second time after such an
+ * acknowledgement reads a latch that has just been destroyed, and a halted
+ * controller does no further DMA and never sets it again: the error would be
+ * gone for good, unlooked at.
  */
-static bool xhci_controller_stopped(xhci_controller_t* ctrl)
+static bool xhci_controller_stopped_in(xhci_controller_t* ctrl, uint32_t usbsts)
 {
-    uint32_t usbsts = ctrl->op_regs->usbsts;
-
     if (usbsts == 0xFFFFFFFFu) {
         if (!ctrl->error_state) {
             kprintf("[xHCI %s] the controller has stopped answering its own "
@@ -401,6 +409,12 @@ static bool xhci_controller_stopped(xhci_controller_t* ctrl)
     ctrl->error_state = true;
     ctrl->running     = false;
     return true;
+}
+
+/* The same question asked of a controller nobody has sampled yet. */
+static bool xhci_controller_stopped(xhci_controller_t* ctrl)
+{
+    return xhci_controller_stopped_in(ctrl, ctrl->op_regs->usbsts);
 }
 
 /* One controller's event ring. Draining is per-controller because the ring,
@@ -693,9 +707,26 @@ static void xhci_irq_handler_on(xhci_controller_t* ctrl) {
 
     uint32_t usbsts = ctrl->op_regs->usbsts;
 
-    /* Clear W1C status bits immediately before processing. */
-    ctrl->op_regs->usbsts = usbsts & (XHCI_STS_HSE | XHCI_STS_EINT |
-                                      XHCI_STS_PCD);
+    /*
+     * Read what this sample says BEFORE acknowledging any of it.
+     *
+     * Host System Error is the controller's out-of-band way of saying it has
+     * halted itself — xHCI 1.2 §5.4.2 has the xHC clear Run/Stop on its own
+     * when it sets HSE — and §5.4.1 makes clearing the bit the acknowledgement
+     * of that signal. This handler used to acknowledge it in its first
+     * statement and only then go looking for it, in a function that re-read the
+     * register: the one bit worth having was written away before anything had
+     * looked at it, the controller never re-set it because a halted controller
+     * does no DMA, and USB went quiet with nothing in the log. Linux orders it
+     * the other way round for the same reason — the STS_HCE and STS_FATAL tests
+     * come first in xhci_irq() and the writeback afterwards is STS_EINT alone.
+     */
+    xhci_controller_stopped_in(ctrl, usbsts);
+
+    /* And now acknowledge only what this handler consumes. HSE is not in that
+     * list: it belongs to the fatal path above, which clears it at the one
+     * place that has read it and said what it was. */
+    ctrl->op_regs->usbsts = usbsts & (XHCI_STS_EINT | XHCI_STS_PCD);
 
     /*
      * Acknowledge the interrupt BEFORE reading the ring, not after.
@@ -709,8 +740,6 @@ static void xhci_irq_handler_on(xhci_controller_t* ctrl) {
      * a register write — and loses none.
      */
     ctrl->runtime_regs->interrupters[0].iman |= XHCI_IMAN_IP;
-
-    xhci_controller_stopped(ctrl);
 
     /* Everything the controller has to say arrives on the event ring, port
      * changes included. Port Change Detect above is acknowledged, not acted

@@ -88,6 +88,12 @@ typedef enum {
 #define ATA_ERR_FLUSH_FAILED       -7
 #define ATA_ERR_MAX_RETRIES        -8
 #define ATA_ERR_NOT_SUPPORTED      -9
+/* The channel's async queue is full — back-pressure, not a broken drive.
+ * It exists so the DMA fast path can tell "this transfer has nowhere to go
+ * right now" apart from "this drive's DMA does not work", which is the one
+ * verdict ata_read_sectors / ata_write_sectors act on permanently. Never
+ * escapes the driver: both entry points consume it by taking the PIO path. */
+#define ATA_ERR_BUSY              -10
 
 /* A physical IDE channel (primary or secondary). Bases come from PCI: in
  * compatibility mode they are the ISA-fixed ports, in PCI-native mode

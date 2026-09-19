@@ -149,7 +149,12 @@ typedef struct __attribute__((packed)) {
     uint32_t fb_width;        /* +48 */
     uint32_t fb_height;       /* +52 */
     uint32_t fb_stride;       /* +56 bytes per row */
-    uint32_t fb_format;       /* +60 0=RGB,1=BGR,2=BGRX */
+    uint32_t fb_format;       /* +60 0=RGB, 1=BGR. This loader writes nothing
+                               * else: a mode it cannot name in those terms is
+                               * refused outright (GopDescribePixels) rather
+                               * than published as the "2 = BGRX / other" the
+                               * kernel header still lists and the kernel's
+                               * encoder reads as plain BGR. */
     uint8_t  boot_method;     /* +64 1=UEFI */
     uint8_t  reserved_v2[3];  /* +65 */
     uint64_t rsdp_addr;       /* +68 ACPI RSDP physical address (0 if not found) */
@@ -1066,18 +1071,34 @@ static uint64_t TagFsLoadKernel(uint32_t volume_block,
                                              pages,
                                              &load_addr);
     if (EFI_ERROR(status)) {
-        /* Address not free — try to free and reallocate */
-        g_bs->free_pages(KERNEL_LOAD_ADDR, pages);
-        status = g_bs->allocate_pages(AllocateAddress,
-                                      EfiLoaderData,
-                                      pages,
-                                      &load_addr);
-        if (EFI_ERROR(status)) {
-            Print("TagBoot: cannot allocate ");
-            PrintDec(pages);
-            Print(" pages at 0x100000\r\n");
-            return 0;
-        }
+        /*
+         * ‼ A refusal here is somebody else's range, and it is NOT freed.
+         *
+         * This loader has never allocated 0x100000 at this point —
+         * ClaimHandoffPages asks for 0x0000, 0x1000 and 0xA000 and nothing
+         * else — so there is nothing here to re-claim. EDK2's
+         * CoreInternalFreePages performs no ownership check whatsoever: it
+         * finds the descriptor covering the address and calls
+         * CoreConvertPages(..., EfiConventionalMemory), so a free would hand
+         * up to KERNEL_MAX_SIZE of memory some firmware driver is holding
+         * back to the allocator and then write the kernel image over it.
+         * AllocatePages' own EFI_NOT_FOUND (UEFI 2.10 §7.2.1, "The requested
+         * pages could not be found") is exactly the answer EDK2 gives when
+         * the range IS held — "the pages to allocate have been allocated" —
+         * so no status code here distinguishes ours from theirs.
+         *
+         * Saying so and stopping is the whole of the right answer. The
+         * caller panics with a sentence on the screen, which is a boot that
+         * did not happen instead of a boot that corrupts firmware memory and
+         * fails somewhere else entirely.
+         */
+        Print("TagBoot: cannot allocate ");
+        PrintDec(pages);
+        Print(" pages at 0x100000 (status=");
+        PrintHex64((uint64_t)status);
+        Print(") — something already holds that range and it is not ours "
+              "to take back\r\n");
+        return 0;
     }
 
     uint8_t *dst = (uint8_t *)(uintptr_t)KERNEL_LOAD_ADDR;
@@ -1106,8 +1127,67 @@ typedef struct {
     uint32_t width;
     uint32_t height;
     uint32_t stride;
-    uint32_t format;  /* 0=RGB, 1=BGR, 2=BGRX */
+    uint32_t format;  /* 0=RGB, 1=BGR — the only two GopDescribePixels emits */
 } FbInfo;
+
+/*
+ * ── what one pixel of a GOP mode is, in the only two orders this loader can
+ *    tell the kernel about
+ *
+ * UEFI 2.10 §12.9.2: PixelFormat says how a pixel is laid out, and only the
+ * two 8-bit-per-colour formats are a fixed four bytes. PixelBitMask means
+ * "read PixelInformation" — "This bit-mask is only valid if PixelFormat is
+ * set to PixelPixelBitMask. A bit being set defines what bits are used for
+ * what purpose such as Red, Green, Blue, or Reserved." PixelBltOnly means
+ * there is no linear framebuffer at all, and anything at or past
+ * PixelFormatMax is not a format.
+ *
+ * The depth of a bit-mask mode is the span of its four masks, which is the
+ * arithmetic Linux does in drivers/firmware/efi/libstub/gop.c (find_bits,
+ * pixel_bpp, setup_screen_info): lfb_linelength = pixels_per_scan_line *
+ * depth / 8, and ONLY the two enumerated formats get pixels_per_scan_line *
+ * 4. OVMF's QemuVideoDxe ships live 8 bpp and 24 bpp bit-mask modes, so a
+ * pixel that does not measure four bytes is a real mode, not a hypothesis.
+ *
+ * boot_info carries one number for pixel order (fb_format) and the kernel's
+ * encoder (fb_pixel.h) knows exactly two layouts, both four bytes to a
+ * pixel: byte 0 red, or byte 0 blue. So a bit-mask mode is taken up only
+ * when its masks ARE one of those two layouts, and every other shape is
+ * refused rather than published as a lie. What this replaces folded all of
+ * them into format 2 — which the kernel reads as plain BGR — and multiplied
+ * the scan line by four whatever the pixel actually measured.
+ */
+static int GopDescribePixels(const EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info,
+                             uint32_t *out_format, uint32_t *out_pixel_bytes)
+{
+    if (!info) return 0;
+
+    switch (info->pixel_format) {
+        case PixelRedGreenBlueReserved8BitPerColor:
+            *out_format = 0; *out_pixel_bytes = 4; return 1;
+        case PixelBlueGreenRedReserved8BitPerColor:
+            *out_format = 1; *out_pixel_bytes = 4; return 1;
+        case PixelBitMask:
+            break;
+        default:
+            return 0;   /* PixelBltOnly, and anything >= PixelFormatMax */
+    }
+
+    /* Masks are over the 32-bit pixel value; written little-endian, bits
+     * 0..7 are byte 0. Eight bits of reserved at the top is what makes the
+     * span 32 — a mask set without it measures 24 bits per pixel by the
+     * same arithmetic Linux uses, and its scan line is three bytes wide. */
+    const EFI_PIXEL_BITMASK *m = &info->pixel_info;
+    if (m->green_mask != 0x0000FF00U || m->reserved_mask != 0xFF000000U)
+        return 0;
+    if (m->red_mask == 0x00FF0000U && m->blue_mask == 0x000000FFU) {
+        *out_format = 1; *out_pixel_bytes = 4; return 1;   /* B,G,R,X in memory */
+    }
+    if (m->red_mask == 0x000000FFU && m->blue_mask == 0x00FF0000U) {
+        *out_format = 0; *out_pixel_bytes = 4; return 1;   /* R,G,B,X in memory */
+    }
+    return 0;
+}
 
 /*
  * Target resolution for SelectGopBestMode.
@@ -1161,17 +1241,23 @@ static int FbModeInBand(uint32_t w, uint32_t h)
  *      (best clarity without huge framebuffer cost).
  *   3. If still nothing matches, accept the largest mode ≤ MAX.
  *   4. Last resort: smallest available mode (better than nothing).
- *   5. PixelBltOnly modes are skipped (no linear framebuffer).
+ *   5. Modes whose pixels this loader cannot describe are skipped — see
+ *      GopDescribePixels. PixelBltOnly has no linear framebuffer, and a
+ *      bit-mask layout the kernel's encoder does not know is worse than no
+ *      framebuffer at all.
  */
 static void SelectGopBestMode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop)
 {
     if (!gop || !gop->mode) return;
 
-    /* (1) Firmware-current mode in band? Keep it. */
+    uint32_t mode_format = 0;
+    uint32_t mode_bytes  = 0;
+
+    /* (1) Firmware-current mode in band and describable? Keep it. */
     if (gop->mode->info) {
         uint32_t w = gop->mode->info->horizontal_resolution;
         uint32_t h = gop->mode->info->vertical_resolution;
-        if (gop->mode->info->pixel_format != PixelBltOnly &&
+        if (GopDescribePixels(gop->mode->info, &mode_format, &mode_bytes) &&
             FbModeInBand(w, h)) {
             return;
         }
@@ -1190,13 +1276,14 @@ static void SelectGopBestMode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop)
 
     uint32_t small_mode       = gop->mode->mode;
     uint32_t small_pixels     = 0xFFFFFFFFU;
+    int      found_small      = 0;
 
     for (uint32_t m = 0; m < gop->mode->max_mode; m++) {
         UINTN size_of_info = 0;
         EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
         if (EFI_ERROR(gop->query_mode(gop, m, &size_of_info, &info))) continue;
         if (!info) continue;
-        if (info->pixel_format == PixelBltOnly) continue;
+        if (!GopDescribePixels(info, &mode_format, &mode_bytes)) continue;
 
         uint32_t w = info->horizontal_resolution;
         uint32_t h = info->vertical_resolution;
@@ -1205,6 +1292,7 @@ static void SelectGopBestMode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop)
         if (pixels < small_pixels) {
             small_pixels = pixels;
             small_mode   = m;
+            found_small  = 1;
         }
 
         /* Largest within [MIN, PREFERRED]. */
@@ -1226,9 +1314,17 @@ static void SelectGopBestMode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop)
     }
 
     uint32_t best_mode;
-    if (found_pref)      best_mode = best_mode_pref;
-    else if (found_max)  best_mode = best_mode_max;
-    else                 best_mode = small_mode;
+    if (found_pref)        best_mode = best_mode_pref;
+    else if (found_max)    best_mode = best_mode_max;
+    else if (found_small)  best_mode = small_mode;
+    else {
+        /* Not one describable mode on this adapter. Leave the firmware's own
+         * mode where it is — QueryGopFramebuffer refuses it and says why, and
+         * the kernel comes up on text rather than on wrong colours at wrong
+         * offsets. Falling back to gop->mode->mode here is what used to hand
+         * a PixelBltOnly mode's undefined FrameBufferBase to the kernel. */
+        return;
+    }
 
     if (best_mode != gop->mode->mode) {
         Print("TagBoot: GOP switching to mode ");
@@ -1260,24 +1356,69 @@ static FbInfo QueryGopFramebuffer(void)
     EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *mode = gop->mode;
     if (!mode->info) return fb;
 
+    uint32_t format      = 0;
+    uint32_t pixel_bytes = 0;
+    if (!GopDescribePixels(mode->info, &format, &pixel_bytes)) {
+        Print("TagBoot: GOP pixel format ");
+        PrintDec((uint64_t)mode->info->pixel_format);
+        Print(" (masks r=");
+        PrintHex64(mode->info->pixel_info.red_mask);
+        Print(" g=");
+        PrintHex64(mode->info->pixel_info.green_mask);
+        Print(" b=");
+        PrintHex64(mode->info->pixel_info.blue_mask);
+        Print(" x=");
+        PrintHex64(mode->info->pixel_info.reserved_mask);
+        Print(") is not a layout this loader can hand over — no framebuffer, "
+              "the kernel comes up on text\r\n");
+        return fb;
+    }
+
+    uint64_t stride = (uint64_t)mode->info->pixels_per_scan_line * pixel_bytes;
+    uint64_t span   = stride * (uint64_t)mode->info->vertical_resolution;
+
+    if (mode->frame_buffer_base == 0 || span == 0) {
+        Print("TagBoot: GOP reports no framebuffer for its own mode — "
+              "the kernel comes up on text\r\n");
+        return fb;
+    }
+
+    /*
+     * UEFI 2.10 §12.9.2 defines FrameBufferSize as PixelsPerScanLine ×
+     * VerticalResolution × PixelElementSize — the one number the firmware
+     * publishes that can catch a pixel size this loader derived wrongly.
+     *
+     * It is asked only of a bit-mask mode, because that is the only branch
+     * where the size WAS derived; for the two enumerated formats four bytes
+     * is the format itself, and a firmware that under-reports its aperture
+     * there would cost a working console for nothing.
+     */
+    if (mode->info->pixel_format == PixelBitMask &&
+        mode->frame_buffer_size != 0 &&
+        span > (uint64_t)mode->frame_buffer_size) {
+        Print("TagBoot: GOP's aperture is smaller than the scan lines it "
+              "describes — refusing the framebuffer\r\n");
+        return fb;
+    }
+
     fb.addr   = mode->frame_buffer_base;
     fb.width  = mode->info->horizontal_resolution;
     fb.height = mode->info->vertical_resolution;
-    fb.stride = mode->info->pixels_per_scan_line * 4;  /* 4 bytes/pixel */
+    fb.stride = (uint32_t)stride;
+    fb.format = format;
 
-    switch (mode->info->pixel_format) {
-        case PixelRedGreenBlueReserved8BitPerColor: fb.format = 0; break;
-        case PixelBlueGreenRedReserved8BitPerColor: fb.format = 1; break;
-        default:                                    fb.format = 2; break;
-    }
-
+    /* The order and the scan line go on the line as well. They are what this
+     * loader decided rather than read, and a wrong one shows as inverted
+     * colours or diagonal text with nothing else on screen to explain it. */
     Print("TagBoot: GOP ");
     PrintDec(fb.width);
     Print("x");
     PrintDec(fb.height);
     Print(" fb=");
     PrintHex64(fb.addr);
-    Print("\r\n");
+    Print(" stride=");
+    PrintDec(fb.stride);
+    Print(fb.format == 0 ? " order=RGBX\r\n" : " order=BGRX\r\n");
 
     return fb;
 }
@@ -1316,9 +1457,10 @@ typedef struct {
     uint32_t  e820_count;
 } MemMapResult;
 
-/* Set by EmitE820 when a map did not fit the table at 0x500. Read while
- * the console still works — the second EmitE820 runs after
- * ExitBootServices, where nothing can be printed. */
+/* Set by EmitE820 when a map did not fit the table at 0x500. Read after BOTH
+ * calls, and each call answers only for its own map: the pre-EBS one over the
+ * firmware console, the post-EBS one over COM1, whose ports this loader drives
+ * itself and which is the one voice that outlives ExitBootServices. */
 static int g_e820_truncated = 0;
 
 /*
@@ -1579,11 +1721,19 @@ static uint64_t CopyEsrtToNvs(uint64_t esrt_phys, uint32_t esrt_size)
  *   0x1000  the tail of that map — 128 entries of 24 bytes end at 0x1104
  *   0xA000  boot_info v4 (140 bytes) and the boarding pass (512 at 0xA600)
  *
- * ‼ WHAT THIS DOES NOT DO IS free_pages FIRST. The two AllocateAddress sites
- * further down do, because they may be re-claiming a range this loader already
- * owns. These pages it has never owned: a refusal here means the FIRMWARE has
- * them, and handing firmware memory back is not a retry, it is a corruption
- * with a spec section against it.
+ * ‼ WHAT THIS DOES NOT DO IS free_pages FIRST — and neither does any other
+ * AllocateAddress site in this file. There are three of them (the kernel image,
+ * the page tables + stack, the BSS tail) and all three used to free the range
+ * the firmware had just refused them, two of them behind a guard on
+ * EFI_NOT_FOUND. That guard read FreePages' EFI_NOT_FOUND ("The requested
+ * memory pages were not allocated with AllocatePages()", UEFI 2.10 §7.2.2)
+ * into a status that came back from AllocatePages, where §7.2.1 says only
+ * "The requested pages could not be found" — and where EDK2 returns it
+ * precisely BECAUSE somebody holds the range ("the pages to allocate have
+ * been allocated", CoreConvertPagesEx). The guard admitted exactly the
+ * dangerous case. Handing firmware memory back is not a retry; it is a
+ * corruption with a spec section against it, and no status code tells this
+ * loader's own pages apart from the firmware's.
  *
  * A refusal is not fatal either. The addresses are a contract with the kernel
  * and with stage2 — they cannot move — so the loader writes there regardless
@@ -1665,8 +1815,14 @@ static EFI_STATUS BuildMemoryMap(MemMapResult *out)
     out->map_buf      = NULL;
     out->e820_count   = count;
 
+    /* The ceiling goes on the line too. It is what turns "126" into a fact an
+     * operator can act on, and it is the only headroom figure anyone gets:
+     * the map rebuilt after ExitBootServices is a different map, and this one
+     * does not bound it. */
     Print("TagBoot: memory map ");
     PrintDec(count);
+    Print(" of ");
+    PrintDec(E820_MAX_ENTRIES);
     Print(" entries\r\n");
 
     return EFI_SUCCESS;
@@ -1859,38 +2015,27 @@ static EFI_STATUS SetupPageTables(uint64_t kernel_phys_end)
                                              &pt_alloc);
     if (EFI_ERROR(status)) {
         /*
-         * ‼ The retry only frees what THIS LOADER may already own.
+         * ‼ NOTHING IS FREED HERE, and there is no retry.
          *
-         * The range starts at the kernel's own physical end, so the usual
-         * reason AllocateAddress refuses is that we allocated it ourselves a
-         * moment ago while reserving the BSS. Handing that back and asking
-         * again is a legitimate re-claim.
+         * This range begins one guard page past the kernel's physical end,
+         * which is past everything this loader has ever asked for — the BSS
+         * reservation stops at that end. So a refusal is somebody else's
+         * range, and EDK2's CoreInternalFreePages would release it without
+         * one ownership check, putting firmware memory into the pool this
+         * loader is about to hand the kernel as free RAM.
          *
-         * EFI_NOT_FOUND is exactly the answer that says "not allocated the
-         * way you think" (UEFI 2.10 §7.2, FreePages) and it is the ONLY
-         * refusal for which a blind free is safe. Any other status means the
-         * firmware holds these pages as its own — and EDK2's CoreFreePages
-         * will happily release a range that firmware allocated as
-         * EfiBootServicesData, which would put firmware memory into the pool
-         * this loader is about to hand the kernel as free RAM. That is not a
-         * retry; it is corruption with a spec section against it.
+         * The guard this replaces tested for EFI_NOT_FOUND, reading
+         * FreePages' meaning of that code (UEFI 2.10 §7.2.2) into a status
+         * that came back from AllocatePages. §7.2.1 gives it the opposite
+         * sense, and EDK2 returns it exactly when the pages ARE allocated to
+         * someone. The guard fired only in the case it was written to stop.
          */
-        if (status == EFI_NOT_FOUND) {
-            g_bs->free_pages(pt_alloc, alloc_pages);
-            pt_alloc = (EFI_PHYSICAL_ADDRESS)g_pt_base;
-            status = g_bs->allocate_pages(AllocateAddress,
-                                          EfiLoaderData,
-                                          alloc_pages,
-                                          &pt_alloc);
-        }
-        if (EFI_ERROR(status)) {
-            Print("TagBoot: cannot allocate page tables + stack at ");
-            PrintHex64(g_pt_base);
-            Print(" (status=");
-            PrintHex64((uint64_t)status);
-            Print(")\r\n");
-            return status;
-        }
+        Print("TagBoot: cannot allocate page tables + stack at ");
+        PrintHex64(g_pt_base);
+        Print(" (status=");
+        PrintHex64((uint64_t)status);
+        Print(") — that range is held by something else\r\n");
+        return status;
     }
 
     uint64_t *pt = (uint64_t *)(uintptr_t)g_pt_base;
@@ -2148,6 +2293,30 @@ static void PostEbsPatchBootInfo(void)
                               g_efi_mmap_copy_size,
                               g_efi_mmap_desc_size);
         bi->e820_count = (uint16_t)n;
+
+        /*
+         * ‼ And if THIS map did not fit, it has to be said here — not left to
+         * the warning printed before ExitBootServices, which answered for a
+         * different map and could not have known about this one.
+         *
+         * Boot services are gone and Print() is gone with them. COM1 is not:
+         * those are port writes this loader does itself, the same ones that
+         * announced its entry before g_st was even read. The UART is
+         * re-programmed first because the firmware's own console driver owned
+         * it in between and may have left it at another divisor.
+         *
+         * The count is not printed because there is only one value it can
+         * have: EmitE820 stops at E820_MAX_ENTRIES, so a cut map is a full
+         * table by construction. What is not known — and is the whole of the
+         * damage — is how much memory lay past the cut.
+         */
+        if (g_e820_truncated) {
+            Com1Init();
+            Com1Str("\r\n[TAGBOOT] the final memory map did not fit the E820 "
+                    "table: the entries past the cut are gone, and memory they "
+                    "described is neither usable to the kernel nor carved out "
+                    "of what it will hand away\r\n");
+        }
     }
 }
 
@@ -2420,29 +2589,36 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     uint64_t kernel_end_phys = KERNEL_LOAD_ADDR + loaded_bytes;
 
     if (header_phys_end > (uint32_t)kernel_end_phys && header_phys_end < 0x10000000U) {
-        /* The BSS extends past the loaded file data.  Reserve those pages so
+        /* The BSS extends past the loaded file data. Reserve those pages so
          * UEFI does not allocate them for its own use before ExitBootServices.
-         * UEFI allocate_pages returns zeroed pages (EFI spec §7.2), so BSS
-         * will be zero without any explicit memset by the bootloader. */
+         *
+         * Nothing here relies on what the pages contain: §7.2.1 says nothing
+         * about the contents of a page AllocatePages hands back (EDK2 clears
+         * pages only under DEBUG_CLEAR_MEMORY, a debug-build macro), and the
+         * kernel's own entry zeroes __bss_start..__bss_end with rep stosb
+         * before it runs a line of C. A comment here used to claim the spec
+         * promised zeroed pages. It does not.
+         *
+         * A refusal is NOT followed by free_pages. This loader has not
+         * allocated this range — the kernel image allocation stops at the
+         * end of the file data — so a refusal is somebody else's range, and
+         * EDK2 frees without one ownership check. The guard this replaces
+         * tested AllocatePages' EFI_NOT_FOUND against FreePages' meaning of
+         * the code (§7.2.2 vs §7.2.1) and so fired only when the pages WERE
+         * held by someone. */
         EFI_PHYSICAL_ADDRESS bss_pa  = (EFI_PHYSICAL_ADDRESS)kernel_end_phys;
         UINTN bss_pages = ((uint64_t)header_phys_end - kernel_end_phys + PAGE_4KB - 1)
                           / PAGE_4KB;
         EFI_STATUS bss_status = g_bs->allocate_pages(AllocateAddress, EfiLoaderData,
                                                       bss_pages, &bss_pa);
-        if (bss_status == EFI_NOT_FOUND) {
-            /* Same rule as the page-table allocation below: only EFI_NOT_FOUND
-             * says "you do not own this the way you think", and only then is
-             * giving it back and re-asking a re-claim rather than a release of
-             * somebody else's memory. UEFI 2.10 §7.2 (FreePages). */
-            g_bs->free_pages(bss_pa, bss_pages);
-            bss_pa = (EFI_PHYSICAL_ADDRESS)kernel_end_phys;
-            bss_status = g_bs->allocate_pages(AllocateAddress, EfiLoaderData,
-                                              bss_pages, &bss_pa);
-        }
         kernel_end_phys = (uint64_t)header_phys_end;
         Print("TagBoot: kernel phys end (BSS) ");
         PrintHex64(kernel_end_phys);
-        if (EFI_ERROR(bss_status)) Print(" (BSS alloc warn)");
+        if (EFI_ERROR(bss_status)) {
+            Print(" (BSS pages not set aside, status=");
+            PrintHex64((uint64_t)bss_status);
+            Print(")");
+        }
         Print("\r\n");
     }
 
@@ -2457,10 +2633,21 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
 
     /* A memory map that did not fit is a map that stops describing memory
      * partway through — and everything past the cut is unclaimed as far as
-     * the kernel is concerned, including regions that were RESERVED. The
-     * second pass runs after ExitBootServices where nothing can be printed,
-     * so the only place this can be reported is here, on the first pass;
-     * a firmware whose map overflows here will overflow there too. */
+     * the kernel is concerned, including regions that were RESERVED. Worse
+     * than unclaimed: pmm_buddy_free_carved carves the USABLE runs against
+     * the non-USABLE entries in this same table, so a RESERVED or ACPI_NVS
+     * entry dropped past the cut stops being carved out of a USABLE run
+     * below it, and the buddy hands out firmware-owned pages.
+     *
+     * ‼ This speaks for THIS map and no other. It is not a prediction about
+     * the map rebuilt after ExitBootServices: between here and there this
+     * loader asks the firmware for the ESRT copy and for the buffer the final
+     * map is staged in, and an NVS island carved out of a conventional run
+     * splits one merged USABLE run into as many as three — while the pool
+     * freed in BuildMemoryMap can just as well make the second map shorter.
+     * Two different maps, neither bounding the other, which is why Linux's
+     * stub budgets EFI_MMAP_NR_SLACK_SLOTS between its own two. The second
+     * pass says its own piece, over COM1, in PostEbsPatchBootInfo. */
     if (g_e820_truncated) {
         Print("TagBoot: WARNING — the memory map does not fit ");
         PrintDec(E820_MAX_ENTRIES);

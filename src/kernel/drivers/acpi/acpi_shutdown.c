@@ -89,6 +89,61 @@ static void attempt_cf9_reset(void) {
     delay_ms(100);
 }
 
+/* ACPI 6.5 §5.2.3.2, Table 5.2, address space 2 "PCI Configuration Space".
+ *
+ * "PCI Configuration space addresses must be confined to devices on PCI
+ * Segment Group 0, bus 0." The 64-bit address is four 16-bit words:
+ *
+ *   [63:48]  reserved, must be 0
+ *   [47:32]  PCI device number on bus 0
+ *   [31:16]  PCI function number
+ *   [15:0]   offset in the configuration space header
+ *
+ * The spec's own worked example settles the bit positions beyond argument:
+ * offset 23h of function 2 on device 7 is 0x0000000700020023.
+ *
+ * What stood here read the bus from [31:24] and the device from [23:19] and
+ * claimed "ACPI 6.5 §5.2.3.2 + edk2 layout" for it. Neither source says that:
+ * §5.2.3.2 is the table above, and edk2's PCI_SEGMENT_LIB_ADDRESS puts
+ * function at 14:12, device at 19:15, bus at 27:20 and segment at 47:32.
+ * Under the old packing the device word was never read at all, so every
+ * conformant address decoded to device 0 — bus and function survived only by
+ * coincidence — and the FADT reset register, which §4.8.3.6 expressly allows
+ * to sit on a device such as the LPC bridge at 00:1F.0, was written into the
+ * host bridge at 00:00.0 while acpi_reboot() moved on to the next method with
+ * nothing said.
+ *
+ * A word that is not in Table 5.2 form is refused out loud rather than
+ * decoded into a plausible BDF: the device and function words are sixteen
+ * bits wide here and five and three bits wide in PCI, so a value that does
+ * not fit is firmware saying something this kernel has not understood.
+ */
+typedef struct {
+    uint8_t  device;
+    uint8_t  function;
+    uint16_t offset;
+} GasPciAddress;
+
+static bool gas_pci_decode(uint64_t address, GasPciAddress *out) {
+    uint64_t reserved = (address >> 48) & 0xFFFFu;
+    uint64_t device   = (address >> 32) & 0xFFFFu;
+    uint64_t function = (address >> 16) & 0xFFFFu;
+
+    if (reserved != 0 || device > 31 || function > 7) {
+        kprintf("[ACPI] GAS PCI-config address 0x%lx is not the form ACPI 6.5 "
+                "Table 5.2 defines (reserved=0x%lx device=%lu function=%lu); "
+                "refusing the access rather than inventing a BDF for it\n",
+                (unsigned long)address, (unsigned long)reserved,
+                (unsigned long)device, (unsigned long)function);
+        return false;
+    }
+
+    out->device   = (uint8_t)device;
+    out->function = (uint8_t)function;
+    out->offset   = (uint16_t)(address & 0xFFFFu);
+    return true;
+}
+
 /* gas_write_word — write a 16-bit value through a Generic Address Structure.
  *
  * GAS address_space dispatch matches the ACPI spec rather than assuming I/O.
@@ -124,34 +179,28 @@ static int gas_write_word(const acpi_gas_t *gas, uint16_t value) {
         }
 
         case GAS_AS_PCI_CONFIG: {
-            /* ACPI 6.5 §5.2.3.2 + edk2 layout for PCI Configuration Space:
-             *   address[63:48] PCI segment
-             *   address[31:24] PCI bus
-             *   address[23:19] device   (5 bits)
-             *   address[18:16] function (3 bits)
-             *   address[15:0]  register offset
-             * ECAM unlocks segments != 0 + extended (12-bit) offsets; the
-             * 0xCF8/0xCFC fallback is limited to segment 0, offset <= 0xFC. */
-            uint16_t segment = (uint16_t)((gas->address >> 48) & 0xFFFFu);
-            uint8_t  bus     = (uint8_t)((gas->address >> 24) & 0xFFu);
-            uint8_t  device  = (uint8_t)((gas->address >> 19) & 0x1Fu);
-            uint8_t  function = (uint8_t)((gas->address >> 16) & 0x07u);
-            uint16_t reg     = (uint16_t)(gas->address & 0xFFFFu);
+            /* Segment and bus are not fields of the address: Table 5.2 fixes
+             * both at zero for this address space. ECAM unlocks the extended
+             * (12-bit) offsets; the 0xCF8/0xCFC fallback stops at 0xFE for a
+             * word. */
+            GasPciAddress pci;
+            if (!gas_pci_decode(gas->address, &pci)) return -1;
 
-            debug_printf("[ACPI] GAS PCI_CONFIG seg=%u %02x:%02x.%x off=0x%x val=0x%x\n",
-                         segment, bus, device, function, reg, value);
+            debug_printf("[ACPI] GAS PCI_CONFIG 0000:00:%02x.%x off=0x%x val=0x%x\n",
+                         pci.device, pci.function, pci.offset, value);
 
             if (pci_has_ecam()) {
-                pci_ecam_write_word(segment, bus, device, function,
-                                     reg, value);
+                pci_ecam_write_word(0, 0, pci.device, pci.function,
+                                    pci.offset, value);
                 return 0;
             }
-            if (segment == 0 && reg <= 0xFEu) {
-                pci_config_write_word(bus, device, function,
-                                       (uint8_t)reg, value);
+            if (pci.offset <= 0xFEu) {
+                pci_config_write_word(0, pci.device, pci.function,
+                                      (uint8_t)pci.offset, value);
                 return 0;
             }
-            debug_printf("[ACPI] GAS PCI_CONFIG: no ECAM and seg!=0/off>0xFE\n");
+            kprintf("[ACPI] GAS PCI_CONFIG offset 0x%x needs extended config "
+                    "space and this machine published no MCFG\n", pci.offset);
             return -1;
         }
 
@@ -179,26 +228,84 @@ static int gas_write_byte(const acpi_gas_t *gas, uint8_t value) {
         }
 
         case GAS_AS_PCI_CONFIG: {
-            uint16_t segment = (uint16_t)((gas->address >> 48) & 0xFFFFu);
-            uint8_t  bus     = (uint8_t)((gas->address >> 24) & 0xFFu);
-            uint8_t  device  = (uint8_t)((gas->address >> 19) & 0x1Fu);
-            uint8_t  function = (uint8_t)((gas->address >> 16) & 0x07u);
-            uint16_t reg     = (uint16_t)(gas->address & 0xFFFFu);
+            GasPciAddress pci;
+            if (!gas_pci_decode(gas->address, &pci)) return -1;
+
+            /* Said out loud, not with debug_printf: this is the reset
+             * register, it is written once in the machine's life, and which
+             * function it actually reached is the whole question when the
+             * board does not reset. */
+            kprintf("[ACPI] GAS PCI_CONFIG 0000:00:%02x.%x off=0x%x val=0x%x\n",
+                    pci.device, pci.function, pci.offset, value);
 
             if (pci_has_ecam()) {
-                pci_ecam_write_byte(segment, bus, device, function,
-                                     reg, value);
+                pci_ecam_write_byte(0, 0, pci.device, pci.function,
+                                    pci.offset, value);
                 return 0;
             }
-            if (segment == 0 && reg <= 0xFFu) {
-                pci_config_write_byte(bus, device, function,
-                                       (uint8_t)reg, value);
+            if (pci.offset <= 0xFFu) {
+                pci_config_write_byte(0, pci.device, pci.function,
+                                      (uint8_t)pci.offset, value);
+                return 0;
+            }
+            kprintf("[ACPI] GAS PCI_CONFIG offset 0x%x needs extended config "
+                    "space and this machine published no MCFG\n", pci.offset);
+            return -1;
+        }
+
+        default:
+            return -1;
+    }
+}
+
+/* Read a 16-bit register through the same GAS its write will use.
+ *
+ * PM1_CNT is a control register, and ACPI 6.5 §4.6.1 is explicit about those:
+ * "OSPM implementations must write zeros to reserved bits in enable and status
+ * registers and preserve bits in control registers"; §4.6.2 says the same for
+ * ignored bit fields. A sleep request is therefore a read-modify-write, and
+ * this is the read half of it. */
+static int gas_read_word(const acpi_gas_t *gas, uint16_t *out) {
+    if (!gas || !out || gas->address == 0) return -1;
+
+    switch (gas->address_space) {
+        case GAS_AS_SYSTEM_IO:
+            *out = inw((uint16_t)gas->address);
+            return 0;
+
+        case GAS_AS_SYSTEM_MEMORY: {
+            volatile void *vmap = vmm_map_mmio((uintptr_t)gas->address,
+                                               sizeof(uint16_t),
+                                               VMM_FLAGS_KERNEL_RW);
+            if (!vmap) {
+                debug_printf("[ACPI] GAS MMIO map failed for 0x%lx\n",
+                             (unsigned long)gas->address);
+                return -1;
+            }
+            *out = *(volatile uint16_t *)vmap;
+            return 0;
+        }
+
+        case GAS_AS_PCI_CONFIG: {
+            GasPciAddress pci;
+            if (!gas_pci_decode(gas->address, &pci)) return -1;
+
+            if (pci_has_ecam()) {
+                *out = pci_ecam_read_word(0, 0, pci.device, pci.function,
+                                          pci.offset);
+                return 0;
+            }
+            if (pci.offset <= 0xFEu) {
+                *out = pci_config_read_word(0, pci.device, pci.function,
+                                            (uint8_t)pci.offset);
                 return 0;
             }
             return -1;
         }
 
         default:
+            debug_printf("[ACPI] GAS unknown address_space=%u\n",
+                         gas->address_space);
             return -1;
     }
 }
@@ -231,17 +338,65 @@ static acpi_gas_t resolve_pm1_gas(const acpi_gas_t *x_gas, uint32_t legacy_port,
     return out;
 }
 
+/* PM1 control register fields — ACPI 6.5 §4.8.3.2.1, Table 4.13. */
+#define PM1_CNT_SLP_TYP_SHIFT  10
+#define PM1_CNT_SLP_TYP_MASK   0x1C00u   /* bits 12:10 */
+#define PM1_CNT_SLP_EN         0x2000u   /* bit 13     */
+
+/* Ask the platform for a sleep state through one PM1 control register.
+ *
+ * Everything but SLP_TYP and SLP_EN is preserved, because §4.6.1 has OSPM
+ * preserve the bits of a control register and Table 4.13 names one of them in
+ * particular: bit 0 is SCI_EN, "the responsibility of the hardware to set or
+ * reset", which OSPM always preserves.
+ *
+ * The word written here used to be built from nothing — (SLP_TYP << 10) |
+ * SLP_EN — so it drove SCI_EN and BM_RLD to zero along with every reserved
+ * bit, handing the PM event decoder back to the SMI arbiter that
+ * acpi_enable_mode() had just spent up to three seconds taking it from, on
+ * exactly the legacy-BIOS boards that need that handoff. Nothing in the tree
+ * ever put SCI_EN back, so on every path where the write does not immediately
+ * kill power — the PM1b retry, the halt below — PM1 events and GPEs were
+ * routed to SMI for the rest of the machine's life. ACPICA masks off the same
+ * two fields and no others (acpi_hw_legacy_sleep). */
 static void attempt_acpi_pm1(const acpi_gas_t *gas, uint16_t slp_typ, const char *tag) {
     if (gas->address == 0) return;
 
-    uint16_t value = (uint16_t)((slp_typ << 10) | (1u << 13));   /* SLP_TYP | SLP_EN */
+    uint16_t cur = 0;
+    if (gas_read_word(gas, &cur) != 0) {
+        kprintf("[ACPI] %s control register cannot be read; a sleep vector "
+                "written blind would clear SCI_EN with it, so it is not "
+                "written\n", tag);
+        return;
+    }
+    if (cur == 0xFFFFu) {
+        /* Table 4.13 gives PM1_CNT reserved bits that read zero, so an
+         * all-ones word is a port answering nothing, not a register. */
+        kprintf("[ACPI] %s control register reads 0xFFFF — nothing is decoding "
+                "that address, so there is no register to ask for sleep\n",
+                tag);
+        return;
+    }
 
-    debug_printf("[ACPI] %s shutdown via GAS as=%u addr=0x%lx SLP_TYP=0x%x val=0x%x\n",
-                 tag, gas->address_space,
-                 (unsigned long)gas->address, slp_typ, value);
+    uint16_t keep = (uint16_t)(cur & ~(PM1_CNT_SLP_TYP_MASK | PM1_CNT_SLP_EN));
+    uint16_t typ  = (uint16_t)(keep |
+                               (((uint16_t)(slp_typ << PM1_CNT_SLP_TYP_SHIFT)) &
+                                PM1_CNT_SLP_TYP_MASK));
 
-    if (gas_write_word(gas, value) != 0) {
-        debug_printf("[ACPI] %s write failed\n", tag);
+    debug_printf("[ACPI] %s shutdown via GAS as=%u addr=0x%lx cur=0x%04x "
+                 "SLP_TYP=0x%x -> 0x%04x then 0x%04x\n",
+                 tag, gas->address_space, (unsigned long)gas->address,
+                 cur, slp_typ, typ, (uint16_t)(typ | PM1_CNT_SLP_EN));
+
+    /* Two writes, as ACPICA does: the sleep type first, then the same word
+     * with SLP_EN set. The chipset sequences on the SLP_EN transition, and a
+     * separate write means the type is already standing when it arrives. */
+    if (gas_write_word(gas, typ) != 0) {
+        kprintf("[ACPI] %s SLP_TYP write failed\n", tag);
+        return;
+    }
+    if (gas_write_word(gas, (uint16_t)(typ | PM1_CNT_SLP_EN)) != 0) {
+        kprintf("[ACPI] %s SLP_EN write failed\n", tag);
         return;
     }
     delay_ms(100);
@@ -302,7 +457,17 @@ void acpi_shutdown(void) {
         efi_reset_system(EFI_RESET_SHUTDOWN, EFI_STATUS_SUCCESS, 0, NULL);
     }
 
-    if (g_acpi.initialized && g_acpi.fadt) {
+    /* ACPI 6.5 §7.1: "If _S5 is not specified, alternative methods are used to
+     * turn-off the system." No \_S5 means no sleep vector and no default to
+     * put in its place — the 0x05 that used to be invented here is S3 on an
+     * Intel PCH, so the machine asked to power off would have suspended to RAM
+     * with every core halted. The PM1 write is skipped instead. */
+    if (g_acpi.initialized && g_acpi.fadt && !g_acpi.s5_found) {
+        kprintf("[ACPI] this firmware published no \\_S5, so there is no sleep "
+                "vector to write and none will be guessed\n");
+    }
+
+    if (g_acpi.initialized && g_acpi.fadt && g_acpi.s5_found) {
         uint32_t flen = g_acpi.fadt->header.length;
         acpi_gas_t pm1a = resolve_pm1_gas(&g_acpi.fadt->x_pm1a_control_block,
                                           g_acpi.pm1a_cnt_blk,
@@ -323,7 +488,11 @@ void acpi_shutdown(void) {
      * NEVER reset/triple-fault here: those reboot the machine, which is
      * the wrong semantics for shutdown. Park the CPU and let the operator
      * pull power. */
-    debug_printf("[ACPI] Soft poweroff failed; halting CPU. Power off manually.\n");
+    /* kprintf, not debug_printf: this is the last thing the machine says
+     * before it parks forever, and the operator standing in front of a box
+     * with its fans still running is the one person who needs to read it. A
+     * shipped build compiles debug_printf into nothing. */
+    kprintf("[ACPI] Soft poweroff failed; halting CPU. Power off manually.\n");
     while (1) {
         __asm__ volatile("cli; hlt");
     }
@@ -395,7 +564,7 @@ void acpi_print_info(void) {
 
     debug_printf("\n_S5 Object:\n");
     debug_printf("  Found: %s\n",
-                 g_acpi.s5_found ? "Yes" : "No (using fallback)");
+                 g_acpi.s5_found ? "Yes" : "No (no sleep vector; PM1 skipped)");
     debug_printf("  SLP_TYPa: 0x%x\n", g_acpi.slp_typa);
     debug_printf("  SLP_TYPb: 0x%x\n", g_acpi.slp_typb);
 

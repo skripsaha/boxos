@@ -59,6 +59,14 @@ static uint32_t  g_mce_bank_count  = 0;
 static uint64_t  g_mce_mcg_cap     = 0;
 static uint64_t  g_mce_ban_mask    = 0;  /* bit i set ⇒ bank i CTL skipped */
 
+/* Whether the MCA error code field may be read with Intel's compound-code
+ * tables (SDM §15.9.2). Zhaoxin implements the same encoding and Linux
+ * decodes it with the same rules; AMD puts the error type in MCA_IPID bank
+ * types instead, which this kernel has no table for — see
+ * mce_record_names_memory. Sampled once by mce_init, before the handler can
+ * run. */
+static bool      g_mce_cod_intel   = false;
+
 /* Pre-resolved Touch tag handles. The #MC handler runs on the IST stack
  * (non-maskable, even more restrictive than IRQ context). Per touch.h
  * §IRQ-Publishers, ISR-context code MUST NOT call TouchPublish/TouchPublishId
@@ -118,6 +126,20 @@ static bool mce_skip_bank_zero(void) {
     return false;
 }
 
+/* Does this vendor encode IA32_MC<i>_STATUS[15:0] with Intel's compound
+ * error codes? Intel does by definition; Zhaoxin/Centaur clone the same
+ * encoding and Linux dispatches both to the same decoder. AMD and Hygon do
+ * not — modern AMD names the error through the SMCA bank type in MCA_IPID,
+ * which this kernel does not read, so their codes are left undecoded rather
+ * than run through a table that was not written for them. */
+static bool mce_vendor_uses_intel_codes(void) {
+    cpu_identity_t id;
+    cpu_read_identity(&id);
+    return __builtin_memcmp(id.vendor, "GenuineIntel", 12) == 0 ||
+           __builtin_memcmp(id.vendor, "CentaurHauls", 12) == 0 ||
+           __builtin_memcmp(id.vendor, "  Shanghai  ", 12) == 0;
+}
+
 /* ─── CR4.MCE bit toggle ──────────────────────────────────────────── */
 
 #define CR4_MCE_BIT (1ULL << 6)
@@ -139,7 +161,12 @@ static bool mce_enable_lmce_if_supported(uint64_t mcg_cap) {
     /* LMCE requires IA32_FEATURE_CONTROL.LOCK=1 AND LMCE_EN=1. If the
      * firmware hasn't enabled LMCE in IA32_FEATURE_CONTROL we leave it
      * off (writing those bits ourselves would conflict with TXT/VMX
-     * negotiation done by firmware). */
+     * negotiation done by firmware).
+     *
+     * What this returns is PERMISSION, not arming: the bit that actually
+     * delivers a machine check to one logical processor is
+     * IA32_MCG_EXT_CTL.LMCE_EN (SDM §15.3.1.5), and nothing in this kernel
+     * writes that MSR. Every #MC here is still broadcast. */
     uint64_t feat = mce_rdmsr(MCE_MSR_IA32_FEATURE_CONTROL);
     if ((feat & MCE_MSR_FEAT_LOCK_BIT) &&
         (feat & MCE_MSR_FEAT_LMCE_BIT)) {
@@ -202,17 +229,33 @@ void mce_init(void) {
     g_mce_mcg_cap    = cap;
     g_mce_ban_mask   = skip;
     g_mce_bank_count = bank_count;
+    g_mce_cod_intel  = mce_vendor_uses_intel_codes();
     g_mce_lmce_on    = mce_enable_lmce_if_supported(cap);
 
-    debug_printf("[MCE] BSP init: banks=%u MCG_CTL_P=%d CMCI_P=%d LMCE_P=%d "
-                 "LMCE_active=%d skip_mask=0x%lx cap=0x%016lx\n",
-                 (unsigned)bank_count,
-                 (int)((cap >> 8)  & 1u),
-                 (int)((cap >> 10) & 1u),
-                 (int)((cap >> 27) & 1u),
-                 (int)g_mce_lmce_on,
+    /* SER_P is said out loud, not merely traced: it is the one bit that
+     * decides whether ANY uncorrected error on this machine can be survived.
+     * With it clear, §15.6.1 leaves the handler one duty — log the error and
+     * shut the system down — and the operator should know that before the
+     * first #MC, not from the panic that follows it. */
+    kprintf("[MCE] banks=%u SER_P=%d TES_P=%d CMCI_P=%d LMCE_P=%d "
+            "LMCE_permitted=%d cap=0x%016lx%s\n",
+            (unsigned)bank_count,
+            (int)((cap >> 24) & 1u),
+            (int)((cap >> 11) & 1u),
+            (int)((cap >> 10) & 1u),
+            (int)((cap >> 27) & 1u),
+            (int)g_mce_lmce_on,
+            (unsigned long)cap,
+            (cap & MCE_CAP_MCG_SER_P)
+                ? ""
+                : " — no software error recovery on this part: every "
+                  "uncorrected error is fatal");
+
+    debug_printf("[MCE] BSP init: MCG_CTL_P=%d skip_mask=0x%lx "
+                 "intel_error_codes=%d\n",
+                 (int)((cap >> 8) & 1u),
                  (unsigned long)skip,
-                 (unsigned long)cap);
+                 (int)g_mce_cod_intel);
 
     /* Pre-resolve Touch tag handles for the IST-safe publish path. Done
      * here (outside IRQ context) because TouchLogbookIntern takes
@@ -281,10 +324,46 @@ typedef struct {
     uint16_t  pad;
 } mce_event_payload_t;
 
+/* What one bank record is, judged against what THIS processor implements.
+ *
+ * Called only from the #MC handler, i.e. always in exception context — the
+ * EN rule below is an exception-context rule and would be wrong for a poll.
+ *
+ * The gate that used to be missing is MCG_CAP.MCG_SER_P (bit 24). SDM
+ * §15.6.1: software must use it to detect the presence of software error
+ * recovery support, and when it is clear there is no recovery on this
+ * processor — the handler's whole duty is to log the error and shut the
+ * system down. §15.6: the first part to set it is DisplayFamily_DisplayModel
+ * 06_2EH, so every older Intel, and any part that leaves it clear, is such a
+ * processor. Table 15-6 says the same from the other side: its UCNA, SRAO
+ * and SRAR rows exist "only when IA32_MCG_CAP[24] (MCG_SER_P) is set".
+ * Reading S and AR without that bit reads bits that hold nothing —
+ * §15.3.1.1 makes 56:55 reserved when TES_P is set without SER_P, and 56:53
+ * model-specific when TES_P is clear.
+ *
+ * With SER_P set the record is read the way Table 15-6 writes it:
+ *   OVER=1 with UC=1 → a second uncorrected error landed in this bank
+ *                      before we read it, and its address is gone for good.
+ *                      The SRAR row: "If OVER=1, reset system."
+ *   EN=0             → every UCR row requires EN=1, so this entry did not
+ *                      signal this #MC. Log it, clear it, act on nothing.
+ *                      Only legal to skip BECAUSE SER_P is set: §15.10.4.1
+ *                      says that without it even a UC=1/EN=0 entry is fatal.
+ *   S=0              → UCNA, or an entry the hardware reported through CMC.
+ *                      "System software is not required to take any recovery
+ *                      action" (§15.6.2).
+ *   S=1              → SRAO (AR=0) or SRAR (AR=1). The caller decides what
+ *                      may actually be done about it from the MCA error
+ *                      code — see mce_ucr_action. */
 static mce_severity_t mce_classify(uint64_t status) {
     if (!(status & MCE_MC_STATUS_VAL)) return MCE_SEV_NONE;
     if (!(status & MCE_MC_STATUS_UC))  return MCE_SEV_CORRECTED;
     if (status & MCE_MC_STATUS_PCC)    return MCE_SEV_UC;
+
+    if (!(g_mce_mcg_cap & MCE_CAP_MCG_SER_P)) return MCE_SEV_UC;
+    if (status & MCE_MC_STATUS_OVER)          return MCE_SEV_UC;
+    if (!(status & MCE_MC_STATUS_EN))         return MCE_SEV_UCNA;
+    if (!(status & MCE_MC_STATUS_S))          return MCE_SEV_UCNA;
     return MCE_SEV_UCR;
 }
 
@@ -294,16 +373,108 @@ static const char *mce_sev_str(mce_severity_t s) {
         case MCE_SEV_CORRECTED: return "CORRECTED";
         case MCE_SEV_UCR:       return "UCR";
         case MCE_SEV_UC:        return "UC";
+        case MCE_SEV_UCNA:      return "UCNA";
         default:                return "?";
     }
 }
 
-/* Page-aligned phys address recovered from a bank's ADDR register +
- * the granularity hint in MISC.LSB (bits 5:0 of MISC, when MISCV=1).
- * SDM §15.3.2.4. Return 0 if ADDRV not set. */
-static uintptr_t mce_extract_phys_page(uint64_t status, uint64_t addr) {
-    if (!(status & MCE_MC_STATUS_ADDRV)) return 0;
-    return addr & ~(uintptr_t)(PMM_PAGE_SIZE - 1);
+/* The physical page this bank record names — or 0, meaning it names none
+ * that may be acted on.
+ *
+ * SDM §15.3.2.3 about IA32_MC<i>_ADDR: "The address returned is an offset
+ * into a segment, linear address, or physical address. This depends on the
+ * error encountered." So the register alone never says which address space
+ * it is in. §15.3.2.4 is where that is said — MISC[8:6] Address Mode and
+ * MISC[5:0] Recoverable Address LSB — and it defines that layout only when
+ * MISCV and IA32_MCG_CAP[24] are BOTH set. Without SER_P the register is
+ * model-specific end to end.
+ *
+ * Hence all five conditions, which are exactly Linux's
+ * intel_mce_usable_address plus the SER gate its mce_read_aux masking
+ * carries: ADDRV, SER_P, MISCV, mode == 010b (physical), and an LSB no
+ * coarser than a 4 KiB page. A memory-controller bank that is only valid to
+ * rank or row granularity reports LSB > 12; its low bits are noise, and
+ * taking them as a page number offlines and MIGRATES a healthy page that
+ * belongs to a running cabin — losing every write made to it inside the
+ * shootdown window — while the page that actually failed stays in service.
+ * A record we cannot read is logged and left alone. */
+static uintptr_t mce_extract_phys_page(uint64_t status, uint64_t addr,
+                                       uint64_t misc) {
+    if (!(status & MCE_MC_STATUS_ADDRV))       return 0;
+    if (!(g_mce_mcg_cap & MCE_CAP_MCG_SER_P))  return 0;
+    if (!(status & MCE_MC_STATUS_MISCV))       return 0;
+
+    uint32_t mode = (uint32_t)((misc >> MCE_MC_MISC_ADDR_MODE_SHIFT) &
+                               MCE_MC_MISC_ADDR_MODE_MASK);
+    if (mode != MCE_MC_MISC_ADDR_MODE_PHYS) return 0;
+
+    uint32_t lsb = (uint32_t)(misc & MCE_MC_MISC_ADDR_LSB_MASK);
+    if (lsb > (uint32_t)__builtin_ctz(PMM_PAGE_SIZE)) return 0;
+
+    /* Drop the bits the bank itself declares invalid, then the rest of the
+     * page offset. With LSB no greater than the 4 KiB page shift the second
+     * mask subsumes the first; both are written because both are what the
+     * spec asks for, in the order it asks for them. */
+    uintptr_t phys = (uintptr_t)((addr >> lsb) << lsb);
+    return phys & ~(uintptr_t)(PMM_PAGE_SIZE - 1);
+}
+
+/* Does this record name a piece of MEMORY? SDM §15.9.2 (Compound Error
+ * Codes) puts a memory-controller error at bit 7 of the MCA error code, a
+ * cache-hierarchy error at bit 8, and the generic memory-hierarchy error at
+ * 0b11LL. A TLB error, a bus/interconnect error or an internal-timer error
+ * names no page; offlining the address such a bank happens to carry would
+ * take a page out of service for a fault that does not live in it.
+ *
+ * Only asked where Intel's tables apply. On AMD/Hygon the answer would have
+ * to come from the SMCA bank type in MCA_IPID, which this kernel does not
+ * read — so there the question is not asked and the record is judged by its
+ * address alone, as it was before. A guessed decode would be worse than an
+ * absent one. */
+static bool mce_record_names_memory(uint64_t status) {
+    if (!g_mce_cod_intel) return true;
+    return (status & MCE_MCACOD_MEMCTL_MASK) == MCE_MCACOD_MEMCTL ||
+           (status & MCE_MCACOD_CACHE_MASK)  == MCE_MCACOD_CACHE  ||
+           (status & MCE_MCACOD_MEMGEN_MASK) == MCE_MCACOD_MEMGEN;
+}
+
+/* What Table 15-6 lets this handler DO with a UCR record. */
+typedef enum {
+    MCE_UCR_LOG_ONLY = 0,  /* say it; there is nothing here to act on */
+    MCE_UCR_OFFLINE  = 1,  /* take the page out of service and migrate it */
+    MCE_UCR_BUGCHECK = 2,  /* the row leaves no recovery — fatal */
+} MceUcrAction;
+
+/* `phys` is what mce_extract_phys_page could make of the bank's address —
+ * 0 when the bank named no page this handler may trust.
+ *
+ * SRAR (AR=1) is the error raised at the point of consumption. Table 15-6:
+ * "For known MCACOD, take specific recovery action; For unknown MCACOD, must
+ * bugcheck", and §15.6.2 adds that when the required action "cannot be
+ * successfully completed, system software must shut down the system". The
+ * one action this kernel has is offlining the page, so a SRAR whose page
+ * cannot be named is a SRAR whose recovery cannot be completed.
+ *
+ * SRAO (AR=0) is action OPTIONAL: the error was not consumed, so an
+ * unreadable address or an unknown code costs nothing but the page. Log it
+ * and keep running — turning it fatal would take the machine down for an
+ * error the processor itself said could be deferred. */
+static MceUcrAction mce_ucr_action(uint64_t status, uintptr_t phys) {
+    bool ar = (status & MCE_MC_STATUS_AR) != 0;
+
+    if (ar) {
+        bool known = !g_mce_cod_intel ||
+                     (status & MCE_MCACOD_MASK) == MCE_MCACOD_DATA ||
+                     (status & MCE_MCACOD_MASK) == MCE_MCACOD_INSTR;
+        if (!known || phys == 0) return MCE_UCR_BUGCHECK;
+        return MCE_UCR_OFFLINE;
+    }
+
+    bool known = !g_mce_cod_intel ||
+                 (status & MCE_MCACOD_SCRUB_MASK) == MCE_MCACOD_SCRUB ||
+                 (status & MCE_MCACOD_MASK)       == MCE_MCACOD_L3WB;
+    if (!known || phys == 0) return MCE_UCR_LOG_ONLY;
+    return MCE_UCR_OFFLINE;
 }
 
 /* ─── What the #MC saw: the record, and who is left to say it ───────── */
@@ -533,7 +704,52 @@ bool mce_handle(interrupt_frame_t *frame) {
 
         mce_severity_t sev = mce_classify(status);
 
-        uintptr_t poisoned_phys = mce_extract_phys_page(status, addr);
+        /* The page this record names, and whether it may be acted on. Both
+         * questions, not one: a record may name a page it has no licence to
+         * offline (an unknown MCACOD, an error that is not a memory error at
+         * all), and a record may have a licence and no readable address —
+         * which for an action-REQUIRED error is itself fatal. */
+        uintptr_t poisoned_phys = mce_extract_phys_page(status, addr, misc);
+        bool      offline       = false;
+
+        if (sev == MCE_SEV_UCR) {
+            switch (mce_ucr_action(status, poisoned_phys)) {
+                case MCE_UCR_OFFLINE:
+                    offline = true;
+                    /* SRAR is the error raised where the poison was
+                     * CONSUMED, and §15.6.2's required action is to stop the
+                     * consumer before any further work is scheduled here.
+                     * When the consumer was ring 0 there is nothing to stop
+                     * but the machine: this kernel has no recoverable-copy
+                     * region to resume a poisoned load into, so IRETing
+                     * would re-execute it. Linux grades the same
+                     * combination PANIC "Uncorrected in kernel". A ring-3
+                     * consumer is stopped for us — idt.c kills the process
+                     * on the fatal road, and on the recoverable one the page
+                     * is gone from under it before it runs again. */
+                    if ((status & MCE_MC_STATUS_AR) &&
+                        (frame->cs & 3) == 0) {
+                        sev = MCE_SEV_UC;
+                    }
+                    break;
+                case MCE_UCR_BUGCHECK:
+                    sev     = MCE_SEV_UC;
+                    offline = (poisoned_phys != 0) &&
+                              mce_record_names_memory(status);
+                    break;
+                case MCE_UCR_LOG_ONLY:
+                default:
+                    break;
+            }
+        } else if (sev == MCE_SEV_UC) {
+            /* PCC=1, or an uncorrected error on a part with no recovery at
+             * all. The machine may still live — idt.c kills the process when
+             * the #MC came from ring 3 — so the page is only taken out of
+             * service when the record actually names memory. */
+            offline = (poisoned_phys != 0) && mce_record_names_memory(status);
+        }
+
+        if (!offline) poisoned_phys = 0;
 
         decoded++;
 
@@ -557,18 +773,29 @@ bool mce_handle(interrupt_frame_t *frame) {
          * mappings keep working until the owning process exits OR until the
          * deferred migration worker (queued below) swaps the PTE to a fresh
          * phys page. */
-        if (poisoned_phys != 0 &&
-            (sev == MCE_SEV_UCR || sev == MCE_SEV_UC)) {
+        if (poisoned_phys != 0) {
             pmm_set_poisoned(poisoned_phys);
 
             /* Queue a deferred migration. The actual copy + PTE swap +
              * TLB shootdown runs in K-Core context off the slot's baton (the
              * #MC IST stack can't safely take pmm_alloc / region-bucket
-             * locks). Failure to queue (ring saturation) is non-fatal:
-             * the page stays poisoned in the PMM bitmap, so the owning
-             * process will eventually #PF on access and die cleanly. */
-            if (deferral_open) {
-                (void)mce_migrate_request(poisoned_phys, sev, status);
+             * locks).
+             *
+             * Whether a failure to queue is survivable is the bank's to say,
+             * not ours. For an action-OPTIONAL error it is: the page stays
+             * poisoned in the PMM bitmap, so no future allocation takes it,
+             * and the cabin that still maps it will #PF and die cleanly. For
+             * an action-REQUIRED error (AR=1) §15.6.2 is explicit — when the
+             * recovery action cannot be successfully completed, the system
+             * must be shut down. Queuing it IS the action; a saturated ring,
+             * or a #MC before the baton queues exist, means it never
+             * started, and IRETing there would re-execute the same load on
+             * the same poisoned frame. */
+            bool queued = deferral_open &&
+                          mce_migrate_request(poisoned_phys, sev, status);
+            if (!queued && (status & MCE_MC_STATUS_AR) &&
+                sev == MCE_SEV_UCR) {
+                sev = MCE_SEV_UC;
             }
         }
 
@@ -608,6 +835,15 @@ bool mce_handle(interrupt_frame_t *frame) {
                     any_fatal = true;
                     pub_tag = g_mce_tag_fatal;
                 }
+                break;
+            case MCE_SEV_UCNA:
+                /* Uncorrected, but the processor never signalled it to us —
+                 * or never enabled it. Nothing was acted on and nothing is
+                 * fatal; it is still published, because a subscriber counting
+                 * UCNAs on a DIMM is exactly how the next SRAR is seen
+                 * coming. */
+                ev.recovered = 1;
+                pub_tag = g_mce_tag_detected;
                 break;
             case MCE_SEV_CORRECTED:
                 ev.recovered = 1;

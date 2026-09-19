@@ -76,12 +76,28 @@
 #define AHCI_CAP2_APST      (1U << 2)   // Automatic Partial to Slumber
 
 // BOHC register bits (offset 0x28) — BIOS/OS Handoff Control & Status
-// AHCI 1.3.1 §3.1.18
+// AHCI 1.3.1 §3.1.11 ("Offset 28h: BOHC"). The §3.1.18 that stood here names
+// no section of that specification: §3.1 ends at 3.1.11, and §3.2 is Vendor
+// Specific Registers.
 #define AHCI_BOHC_BOS       (1U << 0)   // BIOS Owned Semaphore
 #define AHCI_BOHC_OOS       (1U << 1)   // OS Owned Semaphore
 #define AHCI_BOHC_SOOE      (1U << 2)   // SMI on OS Ownership Change Enable
 #define AHCI_BOHC_OOC       (1U << 3)   // OS Ownership Change (W1C)
 #define AHCI_BOHC_BB        (1U << 4)   // BIOS Busy
+
+/* The two windows AHCI 1.3.1 §10.6.3 ("OS declares ownership request") names.
+ * Both are the specification's own numbers, not a policy of ours: step 4, "If
+ * the BIOS Busy (BOHC.BB) has been set to '1' within 25 milliseconds, then the
+ * OS driver shall provide the BIOS a minimum of two seconds for finishing
+ * outstanding commands on the HBA"; step 5, "If after 25 milliseconds the BIOS
+ * Busy (BOHC.BB) bit has not been set to '1', then the OS can assume control
+ * and perform whatever cleanup is necessary."
+ *
+ * The one second that used to stand in their place was neither of them, and it
+ * was spent watching the wrong bit: BOHC.BB, which §10.6.4 has the firmware
+ * clear at step 7 — one step BEFORE it releases BOHC.BOS at step 8. */
+#define AHCI_BOH_BUSY_WINDOW_MS  25u
+#define AHCI_BOH_GRANT_MS        2000u
 
 // PxCMD register bits
 #define AHCI_PCMD_ICC_SHIFT 28
@@ -419,13 +435,37 @@ typedef struct {
     uintptr_t ctba_phys[AHCI_MAX_SLOTS];
 
     uint32_t  slot_bitmap;  // 1 = free, 0 = used
+
+    /* Every command slot this port may legally use (1 = exists), fixed at
+     * bring-up; slot_bitmap is the free subset of it. It is the LOWER BOUND of
+     * what the HBA offers (CAP.NCS + 1) and what the device will queue
+     * (IDENTIFY DEVICE word 75 bits 4:0, plus one), because AHCI 1.3.1
+     * §5.6.4.1 asks for exactly that bound — and because the same section
+     * makes the slot index the NCQ tag ("software must match the tag number it
+     * uses to the slot it is placing the command in"), this is also the set of
+     * tags the device has queue entries for. */
+    uint32_t  slot_mask;
+
+    /* A whole-port hold, for the one command class that cannot share the port
+     * (AHCI 1.3.1 §1.7). ahci_port_take_whole raises it at the instant every
+     * slot is free and empties slot_bitmap, so ahci_alloc_slot has nothing to
+     * hand out for as long as that one command runs; ahci_port_give_back
+     * lowers it and puts the slots back. */
+    bool      slot_held;
     uint8_t   active;
     uint32_t  signature;
 
     /* Per-port device geometry/capability from IDENTIFY DEVICE. The command
      * class is decided per port (AHCI/SATA forbids mixing queued and
      * non-queued commands outstanding on one port): ncq -> FPDMA QUEUED with
-     * PxSACT completion; !ncq -> READ/WRITE DMA EXT with PxCI completion. */
+     * PxSACT completion; !ncq -> READ/WRITE DMA EXT with PxCI completion.
+     *
+     * That settles reads and writes, and it is not the whole story: FLUSH
+     * CACHE EXT has no queued form at all, so on an NCQ port it is the one
+     * command that can only be issued with the queue already empty. It is not
+     * an exception to the rule above but the reason the rule needs a second
+     * mechanism — ahci_port_take_whole — which ahci_flush_cache_sync uses
+     * instead of drawing one slot beside live NCQ tags. */
     uint32_t  logical_sector_size;     // bytes; only 512 is supported by the stack
     /* What the drive is BUILT from, as opposed to what it is addressed in.
      * A 512e disk is addressed in 512-byte sectors and made of 4096-byte
@@ -525,6 +565,20 @@ void ahci_watchdog_scan(void);
 int ahci_alloc_slot(uint8_t port_num);
 void ahci_free_slot(uint8_t port_num, uint8_t slot);
 bool ahci_can_submit_port(uint8_t port_num);
+
+/* Take every command slot of a port for ONE non-queued command, and give them
+ * back when it has finished. AHCI 1.3.1 §1.7: "System software is responsible
+ * to ensure that queued and non-queued commands are not mixed in the command
+ * list for the same device with the exception of the NCQ Unload command."
+ *
+ * The wait costs no other flow anything: the port is only closed at the
+ * instant it is found completely idle, and only for as long as the one command
+ * takes. Returns the command slot the caller then owns, or -1 when the port
+ * never went quiet within `patience_ms` — said on the console, and in that
+ * case nothing is held and no command may be issued. A successful take must be
+ * paired with exactly one give-back. */
+int  ahci_port_take_whole(uint8_t port_num, uint32_t patience_ms);
+void ahci_port_give_back(uint8_t port_num);
 
 /* Build a read/write command for `slot`. Picks FPDMA QUEUED (NCQ) or
  * READ/WRITE DMA EXT (non-queued) based on the port's command class, so the

@@ -4,7 +4,7 @@
  * See cet_lifecycle.h for design + spec citations. This file owns:
  *   1. BSP + AP CR4.CET enable.
  *   2. IA32_S_CET + IA32_U_CET MSR programming.
- *   3. XSAVE component 11 / 12 registration via fpu_xsave_register_extension.
+ *   3. Probing whether the silicon offers the CET XSAVE state components.
  *   4. Per-process shadow stack allocation + free.
  *   5. Telemetry + Touch publish on lifecycle events.
  *
@@ -21,15 +21,26 @@
  *
  * So today: every supervisor SSP page below is stamped protection key
  * 2 and every user SSP page protection key 4, and none of them is a
- * shadow stack to the CPU. Nothing faults yet only because
- * IA32_S_CET.SH_STK_EN stays 0 and PKRU/PKRS are left at 0 — the
- * moment either changes, these pages behave as ordinary writable
- * memory carrying an unintended key. Switching the marking to
- * W=0/D=1 changes how the pages are mapped, how the pre-flip token
- * write below works (a read-only page cannot take a normal store) and
- * how they are torn down; that is a redesign, and the owner decides
- * it, not this file. Until then nothing here claims the bits mean
- * what they do not.
+ * shadow stack to the CPU.
+ *
+ * ‼ And this is not dormant. An earlier version of this note said
+ * nothing faults because IA32_S_CET.SH_STK_EN stays 0. It does not stay
+ * 0: cet_supv_shstk_activate_and_jump ORs SH_STK_EN in on every core
+ * (main.c for the BSP, ap_init.c for each AP) as its last act before
+ * entering the run loop, and cet_program_msrs already puts SH_STK_EN in
+ * IA32_U_CET. On a CPU that advertises SHSTK — Tiger Lake and later,
+ * Zen 3 and later — that means the processor begins pushing and popping
+ * return addresses against pages it does not regard as shadow stacks,
+ * and a shadow-stack access to a page without the encoding faults. The
+ * same applies to the WRSSQ in cet_process_create_kernel_ssp. Nothing
+ * has shown up because every board this has run on so far reports no
+ * SHSTK; the first machine that reports it will not boot.
+ *
+ * Switching the marking to W=0/D=1 changes how the pages are mapped, how
+ * the pre-flip token write below works (a read-only page cannot take a
+ * normal store), and how they are torn down; that is a redesign, and the
+ * owner decides it, not this file. Until then nothing here claims the
+ * bits mean what they do not.
  */
 
 #include "cet_lifecycle.h"
@@ -37,7 +48,6 @@
 #include "cpuid.h"
 #include "vmm.h"
 #include "pmm.h"
-#include "fpu.h"
 #include "touch.h"
 #include "logbook.h"
 #include "process.h"
@@ -54,11 +64,37 @@
  * PL0_SSP, entries 1..7 are per-IST. We populate 1..5 here. */
 #define CET_SUPV_IST_LEVELS         5
 
-/* Supervisor SSP token mode bit (Intel SDM Vol 1 §17.2.3). Token format:
- *   bits 63:3  — the SSP value (token's own VA, 8-byte aligned)
- *   bit 2:1    — 0 (reserved)
- *   bit 0      — 1 for supervisor token, 0 for user token */
-#define CET_SUPV_TOKEN_MODE_BIT     0x1ULL
+/* Supervisor shadow-stack token — Intel SDM Vol 1 "Supervisor Shadow Stack
+ * Token" (§18.2.3 in the current numbering, §17.2.3 in the revision this
+ * file was first written against). Format:
+ *   bits 63:3  — the linear address of the token itself, 8-byte aligned
+ *   bits 2:1   — reserved, must be 0
+ *   bit 0      — BUSY. 0 = this shadow stack is not in use by any logical
+ *                processor; 1 = it is.
+ *
+ * Bit 0 is NOT a supervisor/user mode selector. It is a lock, and the
+ * processor is the only party that is supposed to set it:
+ *
+ *   - SETSSBSY computes expected_token_value = IA32_PL0_SSP and
+ *     new_token_value = IA32_PL0_SSP | BUSY, then does a locked compare-
+ *     exchange against the token. "If busy bit in token is set" → #CP.
+ *   - An event delivered to CPL 0 that switches shadow stacks (any IST
+ *     vector, or any entry from CPL 3) reads the token at the new SSP,
+ *     requires its busy bit CLEAR, and sets it. A token that is already
+ *     busy faults instead of running the handler.
+ *
+ * So a freshly minted token must be written with busy = 0 — the plain
+ * address of its own slot. Writing address|1 hands the CPU a shadow stack
+ * that claims to be in use by someone else; the first IST delivery after
+ * S_CET.SH_STK_EN goes to 1 lands on #DF / NMI / #MC and escalates with
+ * nothing on the console. */
+#define CET_SUPV_TOKEN_FLAG_MASK    0x7ULL   /* bit 0 BUSY + bits 2:1 rsvd */
+
+/* The value to place in a supervisor shadow-stack token slot at `top`:
+ * its own linear address with BUSY and the reserved bits cleared. */
+static inline uint64_t cet_supv_token_free(uintptr_t top) {
+    return (uint64_t)top & ~CET_SUPV_TOKEN_FLAG_MASK;
+}
 
 /* WRSSQ — Write 8 bytes to a supervisor-shadow-stack page.
  *
@@ -112,12 +148,17 @@ static inline void cet_invlpg(uintptr_t addr) {
 
 /* CET policy — split S/U side per ring needs (Intel SDM Vol 3D §17.2.1).
  *
- * Supervisor (IA32_S_CET): we INTENTIONALLY omit SH_STK_EN. Enabling
- * supervisor shadow stack would require an allocated supervisor SSP per
- * CPU and an IA32_PL0_SSP MSR write before any kernel RET — without
+ * Supervisor (IA32_S_CET): SH_STK_EN is omitted HERE and only here.
+ * Enabling the supervisor shadow stack requires an allocated supervisor
+ * SSP per CPU and an IA32_PL0_SSP write before any kernel RET — without
  * those, the very first ring-0 RET (e.g. the one that returns from
  * cet_program_msrs into per_core_init_bsp) fires #CP and the kernel
- * dies. Per-CPU PL0_SSP infrastructure is deferred to a follow-up.
+ * dies. That infrastructure exists: cet_lifecycle_init_supervisor_ssp
+ * runs later in per-core bring-up, and cet_supv_shstk_activate_and_jump
+ * is what finally ORs SH_STK_EN in — from main.c on the BSP and from
+ * ap_init.c on every AP, as the last act before the core stops being
+ * able to return. So this mask is the pre-activation policy, not the
+ * kernel's final S_CET.
  * What we KEEP supervisor-side is ENDBR_EN + NO_TRACK_EN: IBT defends
  * the kernel against JOP/COP without needing a supervisor shadow stack.
  * WR_SHSTK_EN here lets us execute WRUSS at CPL=0 if a future caller
@@ -221,11 +262,22 @@ static bool cet_program_msrs(const char *who) {
         return false;
     }
 
-    /* Program IA32_S_CET (supervisor) and IA32_U_CET (user). The
-     * MSRs are only accessible after CR4.CET=1; set CR4.CET first.
-     * The MSR access ordering matters under hardware that strict-
-     * checks: writing IA32_*_CET before CR4.CET=1 raises #GP per SDM
-     * Vol 4 IA32_S_CET description. */
+    /* CR4.CET first, then the two MSRs.
+     *
+     * Not because the order is mandated — an earlier version of this
+     * comment claimed IA32_*_CET is inaccessible until CR4.CET=1 and that
+     * writing it first raises #GP. That is not so: the MSRs exist whenever
+     * CPUID.07H.0:ECX[CET_SS] or EDX[CET_IBT] is set, independent of CR4,
+     * and Linux writes MSR_IA32_S_CET BEFORE cr4_set_bits(X86_CR4_CET) in
+     * setup_cet(). Either order works; this one keeps the enable in one
+     * place.
+     *
+     * The rule that DOES bind here is the other one: CR4.CET may be set
+     * only while CR0.WP = 1, and a MOV to CR4 that sets CET with WP clear
+     * raises #GP(0) (the same rule forbids clearing CR0.WP afterwards).
+     * enable_fpu sets CR0.WP and runs before this on both paths — main.c
+     * calls it long before cet_lifecycle_init_bsp, and per_core_init_ap
+     * calls it before cet_lifecycle_init_ap. */
     uint64_t cr4 = cet_read_cr4();
     if (!(cr4 & VMM_CR4_CET_BIT)) {
         cr4 |= VMM_CR4_CET_BIT;
@@ -246,6 +298,51 @@ static bool cet_program_msrs(const char *who) {
     return true;
 }
 
+/* ─── CET state in the XSAVE feature set ─────────────────────────────
+ *
+ * ‼ The CET registers are NOT XCR0 material, and this kernel does not
+ * carry them across a context switch.
+ *
+ * Component 11 (CET_U — IA32_U_CET and IA32_PL3_SSP) and component 12
+ * (CET_S — IA32_PL{0,1,2}_SSP) are SUPERVISOR state components. Intel SDM
+ * Vol 1 §13.5: supervisor state components are enumerated in
+ * CPUID.(EAX=0DH,ECX=1):ECX/EDX and are enabled through the IA32_XSS MSR
+ * (0xDA0), and only XSAVES / XRSTORS touch them. XCR0 carries USER state
+ * components only, and CPUID.(EAX=0DH,ECX=0) — the leaf g_cpu_caps
+ * .xcr0_supported is read from — never reports bits 11 or 12 at all.
+ *
+ * So the previous shape of this function, which called
+ * fpu_xsave_register_extension for both bits, could not have worked on any
+ * processor ever built: the call was refused by the xcr0_supported test on
+ * every machine, through a debug_printf that compiles to nothing. What it
+ * left behind was a promise in cet_lifecycle.h that IA32_PL3_SSP rides
+ * along in the XSAVE area. It does not. BoxOS programs no IA32_XSS and
+ * issues no XSAVES, so the kernel owns IA32_PL3_SSP itself — see the
+ * PL3_SSP note in cet_lifecycle.h.
+ *
+ * What we can honestly report is whether THIS CPU offers the components,
+ * so `hw cet status` distinguishes "silicon has no CET state components"
+ * from "it has them and we do not manage them". */
+#define CET_XSS_CET_U_BIT   (1u << 11)
+#define CET_XSS_CET_S_BIT   (1u << 12)
+
+static void cet_probe_xsave_components(void) {
+    g_xsave_cet_s = false;
+    g_xsave_cet_u = false;
+    if (!g_cpu_caps.has_xsave)             return;
+    if (g_cpu_caps.max_basic_leaf < 0x0D)  return;
+
+    uint32_t eax, ebx, ecx, edx;
+    cpuid_count(0x0D, 1, &eax, &ebx, &ecx, &edx);
+    g_xsave_cet_u = (ecx & CET_XSS_CET_U_BIT) != 0;
+    g_xsave_cet_s = (ecx & CET_XSS_CET_S_BIT) != 0;
+
+    debug_printf("[CET] XSAVE state components offered via IA32_XSS: "
+                 "CET_U(11)=%d CET_S(12)=%d — IA32_XSS is not programmed by "
+                 "this kernel, so neither is saved on a context switch\n",
+                 (int)g_xsave_cet_u, (int)g_xsave_cet_s);
+}
+
 /* ─── BSP init ──────────────────────────────────────────────────── */
 
 error_t cet_lifecycle_init_bsp(void) {
@@ -261,18 +358,8 @@ error_t cet_lifecycle_init_bsp(void) {
     g_tag_shstk_active = TouchLogbookIntern("shstk:enabled");
     g_tag_ibt_active   = TouchLogbookIntern("ibt:enabled");
 
-    /* Register XSAVE components 11 (CET_S) + 12 (CET_U) so per-process
-     * SSP is saved + restored on context switch. fpu_xsave_register_extension
-     * grows g_xsave_area_size atomically; subsequent process FPU areas
-     * allocate at the new size. */
-    if (g_cpu_caps.has_shstk) {
-        bool s_ok = fpu_xsave_register_extension(VMM_XCR0_CET_S_BIT, "CET_S");
-        bool u_ok = fpu_xsave_register_extension(VMM_XCR0_CET_U_BIT, "CET_U");
-        g_xsave_cet_s = s_ok;
-        g_xsave_cet_u = u_ok;
-        debug_printf("[CET] BSP: XSAVE registered CET_S=%d CET_U=%d\n",
-                     (int)s_ok, (int)u_ok);
-    }
+    /* Record whether the silicon offers the CET XSAVE state components. */
+    cet_probe_xsave_components();
 
     /* Enable CR4.CET + program MSRs. */
     (void)cet_program_msrs("BSP");
@@ -389,10 +476,8 @@ void cet_process_destroy(struct process_t *proc) {
     uintptr_t phys = process_get_user_ssp_phys(proc);
     if (phys == 0) return;
     vmm_context_t *ctx = proc->cabin ? proc->cabin->vmm : NULL;
-    uintptr_t va = process_get_user_ssp_va(proc) & ~(uintptr_t)0xFFF;
-    /* Recover the page base from the initial SSP value (top of page
-     * minus 8) by masking. The base of the mapped range is
-     * (ssp_va + 8) - SIZE. */
+    /* Recover the base of the mapped range from the initial SSP value,
+     * which cet_process_create set to base + SIZE - 8. */
     uintptr_t va_base = (process_get_user_ssp_va(proc) + 8) - CET_USER_SSP_SIZE;
     if (ctx) {
         for (uint32_t i = 0; i < CET_USER_SSP_PAGES; i++) {
@@ -402,7 +487,6 @@ void cet_process_destroy(struct process_t *proc) {
     pmm_free((void *)phys, CET_USER_SSP_PAGES);
     process_set_user_ssp(proc, 0, 0, 0);
     __atomic_fetch_add(&g_stat_ssp_frees, 1, __ATOMIC_RELAXED);
-    (void)va;
 }
 
 bool cet_is_enabled(void) { return g_cet_enabled; }
@@ -446,7 +530,7 @@ void cet_lifecycle_get_stats(cet_lifecycle_stats_t *out) {
 void cet_lifecycle_dump(void) {
     cet_lifecycle_stats_t s;
     cet_lifecycle_get_stats(&s);
-    debug_printf("[CET] stats: enabled=%d SHSTK=%d IBT=%d XSAVE{S=%d U=%d} "
+    debug_printf("[CET] stats: enabled=%d SHSTK=%d IBT=%d XSS_offered{S=%d U=%d} "
                  "S_CET=0x%lx U_CET=0x%lx cp_faults=%lu ssp{alloc=%lu free=%lu}\n",
                  (int)s.enabled, (int)s.shstk_active, (int)s.ibt_active,
                  (int)s.xsave_cet_s, (int)s.xsave_cet_u,
@@ -535,17 +619,17 @@ error_t cet_lifecycle_init_supervisor_ssp(uint8_t core_idx)
      *      (Pull Map zero-fill, etc.), so later accesses resolve against
      *      the entry as written rather than a cached copy.
      *
-     * Token format (Intel SDM Vol 1 §17.2.3): bits 63:3 = SSP value
-     * (token's own VA, 8B-aligned), bit 0 = 1 (supervisor mode bit).
+     * Token contents: the token's own linear address with the BUSY bit
+     * clear — see CET_SUPV_TOKEN_BUSY_BIT above for why "clear" is the
+     * only value a token the processor has not claimed may hold.
      */
     uintptr_t pl0_top = pl0_va + (PMM_PAGE_SIZE - 8);
-    *(volatile uint64_t *)pl0_top = (uint64_t)pl0_top | CET_SUPV_TOKEN_MODE_BIT;
+    *(volatile uint64_t *)pl0_top = cet_supv_token_free(pl0_top);
 
     uintptr_t ist_top[CET_SUPV_IST_LEVELS];
     for (int i = 0; i < CET_SUPV_IST_LEVELS; i++) {
         ist_top[i] = ist_va[i] + (PMM_PAGE_SIZE - 8);
-        *(volatile uint64_t *)ist_top[i] =
-            (uint64_t)ist_top[i] | CET_SUPV_TOKEN_MODE_BIT;
+        *(volatile uint64_t *)ist_top[i] = cet_supv_token_free(ist_top[i]);
     }
 
     /* Set PTE bit 60 on every SSP page (token already written above via
@@ -573,9 +657,10 @@ error_t cet_lifecycle_init_supervisor_ssp(uint8_t core_idx)
      * would land on a zeroed SSP, faulting fast rather than silently
      * corrupting a shared stack.
      *
-     * Entry 0 mirrors IA32_PL0_SSP so an interrupt with IST=0 sees the
-     * same SSP whether the CPU consults PL0_SSP directly or the table
-     * (some micro-architectures choose between the two paths). */
+     * Entry 0 is never consulted: an IDT gate's IST field of 0 means no
+     * IST stack switch at all, and such a delivery takes its SSP from
+     * IA32_PL0_SSP. We fill it with the same token anyway so the table
+     * holds no slot that is neither a valid token nor zero. */
     uint64_t *table = (uint64_t *)isst_va;
     table[0] = (uint64_t)pl0_top;
     for (int i = 0; i < CET_SUPV_IST_LEVELS; i++) {
@@ -587,10 +672,10 @@ error_t cet_lifecycle_init_supervisor_ssp(uint8_t core_idx)
     /* ─── Program the MSRs ───
      *
      * Writing PL0_SSP and ISST does NOT activate supervisor SHSTK —
-     * activation is gated by IA32_S_CET.SH_STK_EN. Until that bit
-     * flips in a follow-up commit (after the assembly audit), the MSRs
-     * sit dormant. Programming them now means the SH_STK_EN flip is a
-     * one-MSR-write change instead of a sequenced page-then-MSR dance. */
+     * activation is gated by IA32_S_CET.SH_STK_EN, which this core flips
+     * later in its own bring-up, inside cet_supv_shstk_activate_and_jump.
+     * Both MSRs must already hold valid token addresses by then, which is
+     * why they are programmed here and not there. */
     cet_wrmsr(VMM_MSR_IA32_PL0_SSP, (uint64_t)pl0_top);
     cet_wrmsr(VMM_MSR_IA32_INTERRUPT_SSP_TABLE_ADDR, (uint64_t)isst_va);
 
@@ -606,7 +691,8 @@ error_t cet_lifecycle_init_supervisor_ssp(uint8_t core_idx)
     pc->cet_supv_ready = true;
 
     debug_printf("[CET/core %u] supervisor SSP infra ready: PL0=0x%lx ISST=0x%lx "
-                 "(IST 1..5 SSPs allocated, S_CET.SH_STK_EN remains 0 — dormant)\n",
+                 "(IST 1..5 SSPs allocated, tokens free; S_CET.SH_STK_EN still 0 "
+                 "until cet_supv_shstk_activate_and_jump)\n",
                  core_idx, (unsigned long)pl0_top, (unsigned long)isst_va);
     return OK;
 }
@@ -664,8 +750,8 @@ error_t cet_process_create_kernel_ssp(struct process_t *proc, uintptr_t entry_ri
 
     /* Pre-stamp window: write supervisor token via NORMAL store before
      * the PTE is stamped. This avoids a WRSSQ dependency for the very
-     * first write. */
-    *(volatile uint64_t *)top = (uint64_t)top | CET_SUPV_TOKEN_MODE_BIT;
+     * first write. BUSY clear — the processor claims the token, not us. */
+    *(volatile uint64_t *)top = cet_supv_token_free(top);
 
     /* Set PTE bit 60 + INVLPG. Bit 60 is protection-key bit 1 here, not
      * a shadow-stack attribute — see the note at the top of this file. */

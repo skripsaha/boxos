@@ -37,6 +37,17 @@
 #define BN_MAX_LIMBS    128
 #define BN_MAX_LIMBS_2  256
 
+/* Largest public exponent we will run a modexp on, in bytes.
+ *
+ * RFC 8017 §3.1 bounds e by the modulus alone ("an integer between 3 and
+ * n - 1"). OpenSSL bounds it a second time at OPENSSL_RSA_MAX_PUBEXP_BITS
+ * = 64 (include/openssl/rsa.h, "exponent limit enforced for large modulus
+ * only" — n above OPENSSL_RSA_SMALL_MODULUS_BITS = 3072). We enforce the
+ * 64-bit limit for every modulus size, because this is a verify-only path
+ * for firmware-signed images where e is 3, 17 or 65537, and the cap is
+ * what puts a hard ceiling on the work one crafted certificate can buy. */
+#define RSA_MAX_PUBEXP_BYTES  8
+
 typedef struct {
     uint32_t v[BN_MAX_LIMBS];
 } BnNum;
@@ -299,11 +310,43 @@ bool efi_rsa_verify_pkcs1_sha256(const EfiRsaPublicKey *key,
     /* Spec sanity: signature must be in range [0, n-1]. */
     if (bn_cmp(s_bn.v, m_bn.v, k) >= 0) return false;
 
+    /* Validate the public exponent before it becomes a loop bound.
+     *
+     * RFC 8017 §3.1: "the RSA public exponent e is an integer between 3
+     * and n - 1 satisfying GCD(e,\lambda(n)) = 1". OpenSSL enforces the
+     * upper bound unconditionally inside its own verification primitive
+     * (rsa_ossl_public_decrypt: BN_ucmp(rsa->n, rsa->e) <= 0 raises
+     * RSA_R_BAD_E_VALUE), and adds the size cap documented at
+     * RSA_MAX_PUBEXP_BYTES above.
+     *
+     * Without these checks bn_mod_exp is the attacker's loop: it walks
+     * 8 * exponent_len bits with one or two bn_mod_mul each, and e comes
+     * straight from a certificate whose length is bounded only by the
+     * image being verified. A multi-megabyte publicExponent turns a
+     * single verify into hours of arithmetic on whichever core runs it,
+     * and a chain walk re-runs it once per candidate parent.
+     *
+     * The lower bound matters too: with e = 1 the primitive degenerates
+     * to s^1 mod n = s, so it hands back the caller's own bytes as the
+     * encoded message and every signature verifies against such a key. */
+    const uint8_t *e_be  = key->exponent;
+    uint32_t       e_len = key->exponent_len;
+    if (!e_be) return false;
+    while (e_len > 0 && e_be[0] == 0) { e_be++; e_len--; }
+    if (e_len == 0)                   return false;   /* e = 0 */
+    if (e_len > RSA_MAX_PUBEXP_BYTES) return false;   /* e >= 2^64 */
+    if (e_len == 1 && e_be[0] < 3)    return false;   /* e = 1 or e = 2 */
+
+    /* e < n. Not implied by the length cap: modulus_len counts leading
+     * zero bytes too, so a 62-byte modulus may still hold a tiny n. */
+    BnNum e_bn;
+    if (!bn_load_be(&e_bn, e_be, e_len)) return false;
+    if (bn_cmp(e_bn.v, m_bn.v, k) >= 0)  return false;
+
     /* RSAVP1: em_int = s^e mod n */
     BnNum em_bn;
     bn_zero(&em_bn);
-    bn_mod_exp(em_bn.v, s_bn.v, key->exponent, key->exponent_len,
-                m_bn.v, k);
+    bn_mod_exp(em_bn.v, s_bn.v, e_be, e_len, m_bn.v, k);
 
     /* Convert em_int → byte string of exact modulus length. */
     uint8_t em[BN_MAX_LIMBS * 4];

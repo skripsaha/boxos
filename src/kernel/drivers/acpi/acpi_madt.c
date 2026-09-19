@@ -108,12 +108,15 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
 
     info->lapic_address = madt->local_apic_address;
     info->has_pic = (madt->flags & MADT_FLAG_PCAT_COMPAT) != 0;
-    /* The full-width ID is what the MADT entries below are matched against.
-     * info->bsp_lapic_id keeps only the low 8 bits because that is all an
-     * IOAPIC redirection-table physical destination can carry — it is an
-     * 8-bit field by format, not by our choice. */
+    /* The full-width ID is what the MADT entries below are matched against,
+     * and it is what is handed on. Narrowing it here — as this did, to the
+     * eight bits an IOAPIC redirection-table physical destination carries —
+     * loses the only information a consumer needs in order to know it
+     * cannot route to this CPU. The field is 8 bits by format; the ANSWER
+     * to "which processor am I" is not, and a consumer that cannot carry
+     * the answer has to refuse, not round it off. */
     uint32_t bsp_apic_id = detect_bsp_apic_id();
-    info->bsp_lapic_id = (uint8_t)bsp_apic_id;
+    info->bsp_lapic_id = bsp_apic_id;
     info->bsp_lapic_found = true;
     if (bsp_apic_id > 0xFFu) {
         kprintf("[MADT] BSP APIC ID %u does not fit the 8-bit IOAPIC "

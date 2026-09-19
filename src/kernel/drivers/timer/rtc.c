@@ -3,6 +3,8 @@
 #include "pit.h"
 #include "hourglass.h"
 #include "atomics.h"
+#include "acpi_internal.h"   /* g_acpi.fadt — the platform's word on whether
+                              * there is a CMOS RTC at 0x70/0x71 at all */
 
 #define CMOS_ADDR       0x70
 #define CMOS_DATA       0x71
@@ -10,17 +12,41 @@
 #define CMOS_REG_SEC    0x00
 #define CMOS_REG_MIN    0x02
 #define CMOS_REG_HOUR   0x04
-#define CMOS_REG_WDAY   0x06
 #define CMOS_REG_DAY    0x07
 #define CMOS_REG_MON    0x08
 #define CMOS_REG_YEAR   0x09
 #define CMOS_REG_STA    0x0A
 #define CMOS_REG_STB    0x0B
+#define CMOS_REG_STD    0x0D
 #define CMOS_REG_CENT   0x32
 
 #define STA_UIP         0x80
 #define STB_BIN         0x04
 #define STB_24H         0x02
+
+/* MC146818A, REGISTER D ($0D), bit 7: "VRT — The valid RAM and time (VRT)
+ * bit indicates the status of the contents of the RAM... A '0' appears in
+ * the VRT bit when the power-sense pin is low... VRT is a read only bit
+ * which is not modified by the RESET pin. The VRT bit can only be set by
+ * reading Register D." It is the part's own statement that its RAM and its
+ * time survived since they were last set — and it is the ONLY way to tell
+ * a dead coin cell apart from a working clock, because a part on a dead
+ * cell still answers while the machine is powered and hands back an
+ * in-range, entirely meaningless reset date that no range check can catch.
+ *
+ * Because reading Register D is what sets VRT back to 1, the register is
+ * read exactly once, at init, before anything else touches the CMOS. */
+#define STD_VRT         0x80
+
+/* ACPI 6.5 §5.2.9.3, IA-PC Boot Architecture Flags, bit 5, "CMOS RTC Not
+ * Present": "If set, indicates that the CMOS RTC is either not implemented,
+ * or does not exist at the legacy addresses. OSPM uses the Control Method
+ * Time and Alarm Namespace device instead." Linux acts on the same bit —
+ * arch/x86/kernel/acpi/boot.c clears x86_platform.legacy.rtc on it and the
+ * platform device is never registered. BoxOS has no Time and Alarm device,
+ * so on such a board there is no wall clock at all: a fact to state, not a
+ * pair of ports to read anyway. */
+#define FADT_NO_CMOS_RTC   (1u << 5)
 
 typedef struct {
     uint64_t base_seconds;
@@ -32,6 +58,11 @@ typedef struct {
     uint8_t  minute;
     uint8_t  second;
     uint8_t  weekday;
+    /* False until a reading has been proven to come from a real, powered,
+     * answering RTC and to decode inside the fields' own ranges. While it
+     * is false this kernel HAS NO WALL CLOCK, and every accessor says so
+     * instead of handing out a plausible number. */
+    bool     wall_known;
 } rtc_state_t;
 
 static rtc_state_t rtc_state;
@@ -80,9 +111,12 @@ static uint8_t cmos_read(uint8_t reg) {
 #define RTC_UIP_PATIENCE_US   (2u * RTC_UIP_WINDOW_US)
 
 /* Returns true once the RTC clears its Update-In-Progress bit, false once the
- * patience above has run out. The caller proceeds with whatever value is in
- * the BCD/binary registers either way; rtc_init's two-read consistency check
- * then catches any straddling update.
+ * patience above has run out. A false is REFUSAL, and rtc_init treats it as
+ * one: on a part whose UIP never clears there is no reading to be had, which
+ * is what linux's mc146818_get_time() says by zeroing the time and returning
+ * -ETIMEDOUT. The two-read consistency check in rtc_init is not a safety net
+ * for this case and never was — on a board where port 0x71 answers 0xFF both
+ * reads return 0xFF, compare equal, and the check passes.
  *
  * The million iterations that stood here were not time at all. On a board
  * where CMOS port 0x71 does not answer — RTC disabled in firmware, a dead coin
@@ -108,7 +142,7 @@ static bool wait_not_uip(void) {
         cpu_pause();
     }
     kprintf("[RTC] UIP still set after %lu us on the %s (%s) — the CMOS is not "
-            "answering; proceeding with a possibly straddled read\n",
+            "answering; the reading is refused\n",
             (unsigned long)HourGlassElapsedUs(&glass),
             HourGlassRulerName(&glass),
             HourGlassSourceDied(&glass) ? "ruler died mid-wait"
@@ -130,43 +164,109 @@ static uint64_t days_since_epoch(uint16_t y, uint8_t m, uint8_t d) {
     return era * 146097 + doe - 719468ULL;
 }
 
-static uint64_t calendar_to_unix(uint16_t y, uint8_t mo, uint8_t d,
-                                  uint8_t h, uint8_t mi, uint8_t s) {
-    return days_since_epoch(y, mo, d) * 86400ULL
-         + (uint64_t)h * 3600
-         + (uint64_t)mi * 60
-         + s;
+/* Does the platform itself say there is no CMOS RTC at the legacy ports?
+ * boot_arch_flags sits at FADT offset 109 and exists from FADT revision 3;
+ * the length test is what keeps a short table from being read past its own
+ * end, and a firmware that predates the field simply does not answer. */
+static bool acpi_says_no_cmos_rtc(void) {
+    if (!g_acpi.initialized || !g_acpi.fadt) return false;
+    size_t need = __builtin_offsetof(acpi_fadt_t, boot_arch_flags)
+                + sizeof(((acpi_fadt_t *)0)->boot_arch_flags);
+    if (g_acpi.fadt->header.length < need) return false;
+    return (g_acpi.fadt->boot_arch_flags & FADT_NO_CMOS_RTC) != 0;
+}
+
+/* This kernel has no wall clock, and says so once, loudly, on the board.
+ *
+ * Everything the RTC would have published is left at zero — which is not a
+ * placeholder date but the tree's existing signal for "unknown": boxlib's
+ * clock.c already refuses a ClockBoard whose boot_unix_secs is zero, and
+ * main.c hands it exactly what rtc_get_unix64() returns. The alternative
+ * this replaces was a decoded 0xFF reading that yielded the year 25755 and
+ * unix second 751,276,322,355, passed every downstream guard because it was
+ * non-zero, and was written into TagFS metadata, DiskBook last_seen, COW
+ * created_time and self-heal records, where no later boot corrects it. */
+static void rtc_declare_no_wall_clock(const char *why) {
+    memset(&rtc_state, 0, sizeof(rtc_state));
+    rtc_state.base_pit_ticks = pit_get_ticks();
+    kprintf("[RTC] no wall clock on this machine: %s. Boot time is unknown "
+            "and will be reported as unknown — nothing is invented.\n", why);
+}
+
+/* Every decoded field against the range of the register it came from, plus
+ * the one bound the representation imposes.
+ *
+ * MC146818A, TABLE 2 (TIME, CALENDAR AND ALARM DATA MODES): Seconds 0-59,
+ * Minutes 0-59, Hours 0-23 in the 24-hour mode, Date of Month 1-31, Month
+ * 1-12, Year 0-99. A decode outside those is not a strange date, it is a
+ * register that did not answer: bcd_to_bin(0xFF) is 165, and that is how an
+ * unclaimed LPC/eSPI cycle used to reach the calendar arithmetic and come
+ * back with the year 25755.
+ *
+ * The last bound is ours rather than the part's. The value is published as
+ * a count of seconds since 1970 and days_since_epoch() computes it in
+ * unsigned arithmetic, so a year before the epoch does not yield a wrong
+ * date -- it yields a wrap. */
+static bool rtc_reading_is_sane(uint8_t sec, uint8_t min, uint8_t hour,
+                                uint8_t day, uint8_t mon, uint8_t year2,
+                                uint8_t century, uint16_t full_year) {
+    if (sec > 59 || min > 59 || hour > 23) return false;
+    if (day < 1 || day > 31)               return false;
+    if (mon < 1 || mon > 12)               return false;
+    if (year2 > 99 || century > 99)        return false;
+    if (full_year < 1970)                  return false;
+    return true;
 }
 
 void rtc_init(void) {
-    wait_not_uip();
+    rtc_state.wall_known = false;
+
+    if (acpi_says_no_cmos_rtc()) {
+        rtc_declare_no_wall_clock("the FADT sets IA-PC Boot Architecture "
+                                  "flag bit 5, CMOS RTC Not Present");
+        return;
+    }
+
+    /* Register D first and once — reading it is what sets VRT back. */
+    if ((cmos_read(CMOS_REG_STD) & STD_VRT) == 0) {
+        rtc_declare_no_wall_clock("Register D reports VRT = 0 — the RTC lost "
+                                  "power, so its RAM and its time are void");
+        return;
+    }
+
+    if (!wait_not_uip()) {
+        rtc_declare_no_wall_clock("UIP never cleared — the CMOS is not "
+                                  "answering at ports 0x70/0x71");
+        return;
+    }
 
     uint8_t sec  = cmos_read(CMOS_REG_SEC);
     uint8_t min  = cmos_read(CMOS_REG_MIN);
     uint8_t hour = cmos_read(CMOS_REG_HOUR);
-    uint8_t wday = cmos_read(CMOS_REG_WDAY);
     uint8_t day  = cmos_read(CMOS_REG_DAY);
     uint8_t mon  = cmos_read(CMOS_REG_MON);
     uint8_t year = cmos_read(CMOS_REG_YEAR);
     uint8_t cent = cmos_read(CMOS_REG_CENT);
     uint8_t stb  = cmos_read(CMOS_REG_STB);
 
-    wait_not_uip();
+    if (!wait_not_uip()) {
+        rtc_declare_no_wall_clock("UIP never cleared between the two reads — "
+                                  "the CMOS stopped answering mid-init");
+        return;
+    }
 
     uint8_t sec2  = cmos_read(CMOS_REG_SEC);
     uint8_t min2  = cmos_read(CMOS_REG_MIN);
     uint8_t hour2 = cmos_read(CMOS_REG_HOUR);
-    uint8_t wday2 = cmos_read(CMOS_REG_WDAY);
     uint8_t day2  = cmos_read(CMOS_REG_DAY);
     uint8_t mon2  = cmos_read(CMOS_REG_MON);
     uint8_t year2 = cmos_read(CMOS_REG_YEAR);
 
     if (sec2 != sec || min2 != min || hour2 != hour ||
-        wday2 != wday || day2 != day || mon2 != mon || year2 != year) {
+        day2 != day || mon2 != mon || year2 != year) {
         sec  = sec2;
         min  = min2;
         hour = hour2;
-        wday = wday2;
         day  = day2;
         mon  = mon2;
         year = year2;
@@ -187,7 +287,6 @@ void rtc_init(void) {
         day  = bcd_to_bin(day);
         mon  = bcd_to_bin(mon);
         year = bcd_to_bin(year);
-        wday = bcd_to_bin(wday);
     } else {
         if (!mode_24h) {
             bool pm = (hour & 0x80) != 0;
@@ -204,8 +303,13 @@ void rtc_init(void) {
 
     uint16_t full_year = (uint16_t)century * 100 + year;
 
-    if (wday == 0) wday = 7;
-    uint8_t weekday_0sun = wday - 1;
+    if (!rtc_reading_is_sane(sec, min, hour, day, mon, year, century, full_year)) {
+        kprintf("[RTC] CMOS decoded to %u-%u-%u %u:%u:%u (century %u) — "
+                "outside the registers' own ranges\n",
+                full_year, mon, day, hour, min, sec, century);
+        rtc_declare_no_wall_clock("the CMOS registers did not decode to a date");
+        return;
+    }
 
     rtc_state.year    = full_year;
     rtc_state.month   = mon;
@@ -213,10 +317,24 @@ void rtc_init(void) {
     rtc_state.hour    = hour;
     rtc_state.minute  = min;
     rtc_state.second  = sec;
-    rtc_state.weekday = weekday_0sun;
 
-    rtc_state.base_seconds  = calendar_to_unix(full_year, mon, day, hour, min, sec);
+    /* The weekday comes from the date, not from CMOS register 0x06. That
+     * register is not maintained by every part — linux refuses to read it
+     * for exactly that reason ("Even though the RTC has RTC_DAY_OF_WEEK, we
+     * ignore it, as it is only updated by the RTC when initially set to a
+     * non-zero value", drivers/rtc/rtc-mc146818-lib.c) — and alone among
+     * the fields its value cannot be range-checked into correctness: a
+     * stale weekday is in range and still wrong. 1970-01-01 was a Thursday,
+     * so epoch day 0 is weekday 4 counting Sunday as 0. */
+    uint64_t epoch_days = days_since_epoch(full_year, mon, day);
+    rtc_state.weekday   = (uint8_t)((epoch_days + 4ULL) % 7ULL);
+
+    rtc_state.base_seconds   = epoch_days * 86400ULL
+                             + (uint64_t)hour * 3600
+                             + (uint64_t)min * 60
+                             + sec;
     rtc_state.base_pit_ticks = pit_get_ticks();
+    rtc_state.wall_known     = true;
 
     /* Leave the index register at CMOS_REG_SEC (0x00) with the
      * current NMI mask state so any subsequent port-0x71 reader
@@ -242,6 +360,13 @@ void rtc_get_boxtime(BoxTime* out) {
 }
 
 uint64_t rtc_get_unix64(void) {
+    /* No wall clock means no wall clock. Returning seconds-since-boot here
+     * would hand every caller a 1970 date that looks like one and gets
+     * written to the medium; zero is both the truth and the signal the tree
+     * already understands — boxlib's clock.c refuses a ClockBoard whose
+     * boot_unix_secs is zero. */
+    if (!rtc_state.wall_known) return 0;
+
     uint32_t freq = pit_get_frequency();
     if (freq == 0) {
         return rtc_state.base_seconds;

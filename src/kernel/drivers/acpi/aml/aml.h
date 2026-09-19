@@ -8,7 +8,7 @@
  *
  * Supported opcodes (real-HW core surface):
  *   Namespace:    NameOp, ScopeOp, MethodOp, DeviceOp, OpRegionOp,
- *                 FieldOp, AliasOp
+ *                 FieldOp, IndexFieldOp, BankFieldOp, AliasOp
  *   Data:         ZeroOp/OneOp/OnesOp, BytePrefix, WordPrefix,
  *                 DWordPrefix, QWordPrefix, StringPrefix, BufferOp,
  *                 PackageOp, VarPackageOp
@@ -19,12 +19,21 @@
  *                 LLessOp, LGreaterEqualOp, LLessEqualOp, LNotEqualOp
  *   Control:      IfOp, ElseOp, WhileOp, ReturnOp, BreakOp, ContinueOp
  *   Reference:    StoreOp, RefOfOp, DerefOfOp, IndexOp, SizeOfOp
+ *   Extended:     Stall, Sleep, Acquire, Release, Signal, Wait, Reset,
+ *                 CondRefOf, FromBCD, ToBCD, Fatal (ExtOpPrefix 0x5B).
+ *                 Every other defined 0x5B opcode has its operands
+ *                 consumed exactly and is then refused out loud — the
+ *                 stream is never re-entered at a sub-opcode byte.
  *   Field access: through OpRegion address-space handlers (SystemIO,
  *                 SystemMemory, PCI_Config — others reported as
- *                 BAD_OPCODE so callers can detect unsupported HW)
+ *                 BAD_OPCODE so callers can detect unsupported HW);
+ *                 IndexField goes through its Index/Data register pair
+ *                 and BankField selects its bank before every access
  *
  * Out of scope for this audit (deferred to ACPICA/uACPI follow-up):
- *   Mutex/Event synchronisation primitives beyond stub
+ *   Contended Mutex/Event semantics — nothing in the tree evaluates AML
+ *     on two cores, so Acquire always succeeds and Wait always reports
+ *     the timeout it is asked to report
  *   Power/Thermal/Processor object semantics beyond namespace insertion
  *   Buffer fields (CreateBitField/CreateByteField/...)
  *   Reference counting + GC of objects across method boundaries
@@ -47,6 +56,12 @@ typedef enum {
     AML_ERR_BOUNDS     = -6,
     AML_ERR_NOMEM      = -7,
     AML_ERR_REGION     = -8,
+    /* Method execution was abandoned on purpose and the interpreter has
+     * already said why on the console: a divide by zero (ACPI 6.5
+     * §19.6.32, ACPICA AE_AML_DIVIDE_BY_ZERO), a Fatal() from the
+     * firmware, an opcode this executor refuses to guess at, or a delay
+     * it could not honour. A partial ret_value is not to be trusted. */
+    AML_ERR_ABORT      = -9,
 } aml_status_t;
 
 typedef enum {

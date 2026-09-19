@@ -713,14 +713,29 @@ int vmm_map_result_ring(vmm_context_t* ctx, uintptr_t phys_page);
 int vmm_map_touch_ring(vmm_context_t* ctx, uintptr_t phys_page);
 
 // Translate a user virtual address in a process's page table to a kernel-accessible pointer.
-// Walks the process's page tables, resolves the physical address, and returns it as a
-// kernel pointer via Pull Map. Returns NULL if the address is not mapped.
+// Walks the process's page tables to whichever entry is the LEAF for the address — 4 KiB
+// PTE, 2 MiB PDE or 1 GiB PDPTE — and returns the frame it maps as a kernel pointer via
+// Pull Map. Returns NULL if nothing maps the address, if the leaf is not user-accessible,
+// or if the requested range leaves that leaf.
 //
-// LIMITATION: works only within ONE physical page. The user's virtual range may be
-// contiguous, but the underlying physical pages need not be — so a multi-page request
-// gets clamped to the first page. Callers needing multi-page payloads must use the
-// vmm_user_buf_* helpers below, which copy through a kernel-side bounce buffer.
+// LIMITATION: the pointer is good only to the end of the ONE leaf that maps the address.
+// A range that crosses into the next mapping is REFUSED (NULL), never truncated: the
+// user's virtual range may be contiguous while the frames behind it are not. Callers with
+// multi-leaf payloads use the vmm_user_buf_* helpers below, which walk leaf by leaf.
+//
+// READ form. The kernel pointer is a supervisor WRITABLE alias (Pull Map), so a store
+// through it bypasses the cabin's own R/W bit, CR0.WP and CR4.SMAP — access rights belong
+// to the translation the store uses (Intel SDM Vol 3A §5.6/§5.6.1). Never write through
+// this pointer. A kernel write into cabin memory goes through vmm_translate_user_addr_w,
+// which additionally requires VMM_FLAG_WRITABLE on the cabin's leaf, or through
+// vmm_user_buf_commit_out, which uses that write form per leaf.
 void* vmm_translate_user_addr(vmm_context_t* ctx, uintptr_t user_vaddr, size_t size);
+
+// WRITE form of the above: same walk and same single-leaf rule, plus the cabin's leaf must
+// carry VMM_FLAG_WRITABLE. Returns NULL for a page the cabin holds read-only — its
+// ClockBoard and cpu_caps pages, its CabinInfo, its own ELF text — which the hardware
+// would not protect on this path, because the write lands on the supervisor alias.
+void* vmm_translate_user_addr_w(vmm_context_t* ctx, uintptr_t user_vaddr, size_t size);
 
 /*
  * Multi-page user buffer in/out via a kmalloc'd kernel bounce buffer.
@@ -731,8 +746,14 @@ void* vmm_translate_user_addr(vmm_context_t* ctx, uintptr_t user_vaddr, size_t s
  *   vmm_user_buf_free      — release the kernel buffer
  *
  * Each helper handles arbitrary cross-page user ranges by walking the
- * page table per-page and memcpy'ing chunk by chunk. NULL means a fault
- * mid-walk (unmapped, non-user, or alloc failure).
+ * page table leaf by leaf and memcpy'ing chunk by chunk — a 4 KiB page,
+ * a 2 MiB PDE leaf and a 1 GiB PDPTE leaf are all one chunk. NULL means
+ * a fault mid-walk (unmapped, non-user, or alloc failure).
+ *
+ * vmm_user_buf_commit_out is the WRITE direction and refuses, with
+ * ERR_INVALID_ADDRESS, any leaf the cabin holds read-only: the copy goes
+ * through the supervisor-writable Pull Map alias, where the hardware
+ * checks nothing on the cabin's behalf.
  */
 void *vmm_user_buf_in(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size);
 

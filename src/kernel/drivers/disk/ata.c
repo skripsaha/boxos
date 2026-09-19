@@ -43,7 +43,9 @@
  *  IRQ14/15 left masked. Both PIO and Bus-Master DMA paths busy-poll
  *  completion — fully spec-compliant without an interrupt path. PIO
  *  mode is negotiated to the fastest the drive advertises (4 → 3 →
- *  default); DMA mode similarly (UDMA 6..0 → MDMA 2..0 → none).
+ *  default); DMA mode similarly (UDMA 6..0 → MDMA 2..0 → none), except
+ *  that Ultra DMA above mode 2 needs an 80-conductor cable established
+ *  first — ATA/ATAPI-6 §8.46.11 — or the walk starts at mode 2.
  *  Read/write fast path runs through BMIDE when both the controller
  *  (ProgIF bit 7) and the drive (IDENTIFY word 49 bit 8) support it
  *  and the request fits the staging page (count ≤ 8 sectors); larger
@@ -256,6 +258,35 @@ int ata_set_xfer_mode(uint8_t drive_idx, uint8_t mode_byte) {
     outb(ch->cmd_base + ATA_REG_SECCOUNT, mode_byte);
     outb(ch->cmd_base + ATA_REG_COMMAND,  ATA_CMD_SET_FEATURES);
 
+    /*
+     * The settle is what makes every line below it MEAN anything.
+     *
+     * SET FEATURES is a non-data command, so ATA/ATAPI-6 (T13/1410D r3a) §9.4
+     * governs it twice over. Device state DND0:Command_Execution gives the
+     * drive up to 400 ns to raise BSY at all — "the device shall set BSY to
+     * one within 400 ns of the writing of the Command register" — and host
+     * state HND1:Check_Status spends exactly that on the other side: "When
+     * entering this state from another state other than when an interrupt has
+     * occurred, the host shall wait 400 ns before reading the Status
+     * register."
+     *
+     * Without it the first status read can still be the drive's PRE-command
+     * idle taskfile, which is BSY=0 with ERR clear — so ata_wait_clear_bsy
+     * returns on a byte the command never touched and the ERR test below
+     * passes on that same stale byte. A mode the drive ABORTED is then
+     * recorded as set: the boot log names a PIO or Ultra DMA mode nobody
+     * proved, and ata_async_usable() opens the DMA path on the strength of it.
+     * Worse, the function can return while the drive is still BSY, and the
+     * very next ata_select_drive writes the Device register during BSY, which
+     * §7.15.3 puts outside the register's defined behaviour: "The contents of
+     * this register, except for BSY, shall be ignored when BSY is set to one."
+     *
+     * With it, BSY is up before the first read, ata_wait_clear_bsy waits for
+     * the command to actually end, and the ERR test below reads the ENDING
+     * status — the one §8.46.6 puts the abort in.
+     */
+    ata_delay_400ns(drive_idx);
+
     if (ata_wait_clear_bsy(drive_idx, CONFIG_ATA_TIMEOUT_MS) != 0)
         return ATA_ERR_TIMEOUT;
     if (ata_read_status(drive_idx) & ATA_SR_ERR) return ATA_ERR_NOT_SUPPORTED;
@@ -293,12 +324,72 @@ static void ata_hold_srst(uint16_t ctrl_reg) {
     while (!HourGlassRunOut(&glass)) cpu_pause();
 }
 
+/* The OTHER half of the same clause: the 2 ms the host owes after it RELEASES
+ * SRST, before it is allowed to look at the drive at all.
+ *
+ * ATA/ATAPI-6 (T13/1410D r3a) §9.2, host state HSR1:Clear_wait — "When in
+ * this state, the host shall clear SRST in the Device Control register to
+ * zero. The host shall remain in this state for at least 2 ms", and transition
+ * HSR1:HSR2 — "When SRST has been cleared to zero for at least 2 ms, the host
+ * shall make a transition to the HSR2: Check_status state." HSR2 is the FIRST
+ * state in which "the host shall read the Status or Alternate Status
+ * register"; there is no earlier state in which a Status byte means anything.
+ *
+ * Four Alt-Status reads stood here — ata_settle_400ns, the settle owed after a
+ * drive SELECT, borrowed for a clause three orders of magnitude longer. The
+ * consequence was not a slightly-early read: it was that the single sample
+ * taken at ~1.6 µs was TERMINAL on two byte values, so a 0x00 or 0xFF read from
+ * a register file still in its reset protocol ended the wait with "no drives
+ * on this channel" and no line in the log. Spending the clause HERE, before
+ * the loop, is what makes that exit honest again: every sample the loop takes
+ * is now one the standard says is worth reading, and no single byte seen
+ * before the 2 ms boundary can end anything.
+ *
+ * The no-ruler fallback is the same architectural floor ata_hold_srst counts
+ * out, counted out for this clause instead: an x86 `IN` is a non-posted bus
+ * transaction, a legacy-port cycle costs ~400 ns at the floor, and
+ * 2 ms / 400 ns = 5000. Reading Alt-Status to spend it is free of side effects
+ * by §7.3.4 — "Reading this register shall not clear a pending interrupt." A
+ * missing ruler never becomes an invented one. */
+#define ATA_SRST_CLEAR_WAIT_US   2000u
+#define ATA_SRST_CLEAR_READS     5000
+
+static void ata_srst_clear_reads(uint16_t ctrl_reg) {
+    for (int i = 0; i < ATA_SRST_CLEAR_READS; i++) (void)inb(ctrl_reg);
+}
+
+static void ata_wait_srst_cleared(uint16_t ctrl_reg) {
+    HourGlass glass;
+    if (!HourGlassTurn(&glass, ATA_SRST_CLEAR_WAIT_US)) {
+        kprintf("[ATA] no time source — spending the post-SRST 2 ms with %d "
+                "non-posted port reads instead\n", ATA_SRST_CLEAR_READS);
+        ata_srst_clear_reads(ctrl_reg);
+        return;
+    }
+    while (!HourGlassRunOut(&glass)) ata_poll_pause();
+
+    /* A glass that ran out because its RULER stopped, rather than because the
+     * span ended, has not spent the clause — and a mandatory wait that only
+     * looks spent is the defect this function exists to remove. Say which of
+     * the two happened and spend the clause the way a machine with no ruler
+     * spends it. */
+    if (HourGlassSourceDied(&glass)) {
+        kprintf("[ATA] %s died %lu us into the post-SRST 2 ms — finishing it "
+                "with %d non-posted port reads\n",
+                HourGlassRulerName(&glass),
+                (unsigned long)HourGlassElapsedUs(&glass),
+                ATA_SRST_CLEAR_READS);
+        ata_srst_clear_reads(ctrl_reg);
+    }
+}
+
 /* ---------------------------------------------------------------------
  *  Software reset — one per channel.
  *
  *  ATA/ATAPI-6 (T13/1410D r3a) §9.2: write SRST=1 (Device Control bit 2)
- *  plus nIEN=1, hold it for at least 5 us, then write SRST=0 with nIEN=1
- *  still asserted. BSY may then stay set for as long as D0SR3 allows;
+ *  plus nIEN=1, hold it for at least 5 us (HSR0), then write SRST=0 with
+ *  nIEN=1 still asserted and remain there for at least 2 ms (HSR1) before the
+ *  first Status read. BSY may then stay set for as long as D0SR3 allows;
  *  how long THIS caller can afford to wait for it arrives as
  *  `bsy_patience_ms`, because the answer depends on what the caller is
  *  holding and not on the drive (see ATA_SRST_BSY_* in ata.h).
@@ -315,7 +406,7 @@ void ata_channel_soft_reset(uint8_t channel, uint32_t bsy_patience_ms) {
     ata_hold_srst(ch->ctrl_reg);
 
     outb(ch->ctrl_reg, ATA_CTRL_nIEN);
-    ata_settle_400ns(ch->ctrl_reg);
+    ata_wait_srst_cleared(ch->ctrl_reg);
 
     uint64_t deadline = rdtsc() + cpu_ms_to_tsc(bsy_patience_ms);
     while (rdtsc() < deadline) {
@@ -558,20 +649,48 @@ static inline bool ata_legacy_path_active(void) {
 }
 
 /*
- * A drive that fell back from DMA to PIO, said once per drive.
+ * A drive that fell back from DMA to PIO — DEMOTED once, said once.
  *
- * Every transfer is not worth a line — a drive whose DMA is broken would
- * bury the log — and no line at all is how a machine ends up running its
- * whole disk in programmed I/O with nobody aware of it, which on real
- * hardware is the difference between a disk and a bottleneck. So: the
- * first time it happens on a drive, and not again.
+ * The demotion is the substance and the line is the receipt, in that order.
+ * This used to be the receipt alone: dma_type stayed whatever negotiation put
+ * there, ata_async_usable() therefore stayed true, and every later transfer
+ * paid a full failed DMA round trip — a wedged engine on a K-Core costs an
+ * SRST of the whole channel per 4 KB — before the PIO path underneath rescued
+ * it. The drive did not "run in PIO from here"; it ran in PIO after a toll,
+ * forever, while the log said the matter was settled.
+ *
+ * Clearing dma_type is the one write that makes the sentence true, because it
+ * is what ata_async_usable() reads (ata_async.c) and therefore what the DMA
+ * gate in ata_read_sectors / ata_write_sectors reads. It also delivers the
+ * contract ata.h states for ata_max_run_sectors and could never keep: "A drive
+ * with no usable DMA path is in PIO whatever it answers, and there a longer
+ * run is a real saving" — the 128-sector PIO branch was unreachable while
+ * dma_type never changed, so Boardroom kept chopping PIO traffic into runs
+ * sized for a DMA path that was not working.
+ *
+ * dma_mode goes with it: a mode number belonging to a transfer kind that is
+ * now NONE is a number the boot log would still print.
+ *
+ * Only a verdict about THIS DRIVE demotes it. ATA_ERR_BUSY — the channel's
+ * async queue full — is back-pressure and is filtered out by the two callers
+ * before they get here, so a momentary queue does not cost a drive its DMA
+ * path for the rest of the boot.
+ *
+ * The line itself stays once-per-drive: every transfer is not worth a line,
+ * and no line at all is how a machine ends up running its whole disk in
+ * programmed I/O with nobody aware of it, which on real hardware is the
+ * difference between a disk and a bottleneck.
  */
 static uint8_t g_ata_dma_fallback_said = 0;
 
 static void ata_note_dma_fallback(uint8_t drive_idx, int rc, uint64_t lba,
                                   bool write)
 {
-    if (drive_idx >= 8) return;
+    if (drive_idx >= ATA_DRIVE_COUNT) return;
+
+    g_ata_devices[drive_idx].dma_type = ATA_DMA_TYPE_NONE;
+    g_ata_devices[drive_idx].dma_mode = 0;
+
     if (g_ata_dma_fallback_said & (uint8_t)(1u << drive_idx)) return;
     g_ata_dma_fallback_said |= (uint8_t)(1u << drive_idx);
 
@@ -599,7 +718,9 @@ int ata_read_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* b
     if (ata_async_usable(drive_idx) && count <= ATA_ASYNC_MAX_SECTORS) {
         int rc = ata_dma_sync(drive_idx, lba, count, false, buffer);
         if (rc == 0) return 0;
-        ata_note_dma_fallback(drive_idx, rc, lba, false);
+        /* ATA_ERR_BUSY is the channel's queue, not the drive's DMA — this
+         * transfer goes the slow way, and the path keeps its reputation. */
+        if (rc != ATA_ERR_BUSY) ata_note_dma_fallback(drive_idx, rc, lba, false);
     }
 
     spin_lock(&g_ata_lock);
@@ -652,7 +773,9 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
     if (ata_async_usable(drive_idx) && count <= ATA_ASYNC_MAX_SECTORS) {
         int rc = ata_dma_sync(drive_idx, lba, count, true, (void*)buffer);
         if (rc == 0) return 0;
-        ata_note_dma_fallback(drive_idx, rc, lba, true);
+        /* ATA_ERR_BUSY is the channel's queue, not the drive's DMA — this
+         * transfer goes the slow way, and the path keeps its reputation. */
+        if (rc != ATA_ERR_BUSY) ata_note_dma_fallback(drive_idx, rc, lba, true);
     }
 
     spin_lock(&g_ata_lock);

@@ -507,12 +507,65 @@ static bool icr_send(uint32_t dest_id, uint32_t cmd, bool may_refuse) {
         return true;
     }
 
-    if (!icr_wait_for_previous(dest_id, cmd, may_refuse))
+    /* A destination the xAPIC ICR cannot name.
+     *
+     * The xAPIC ICR destination field is eight bits (Intel SDM Vol 3A,
+     * "Interrupt Command Register (ICR)": bits 56 through 63 of the ICR
+     * hold the APIC ID of the target processor). Masking an ID of 0x100
+     * down to 0x00 does not lose the interrupt — it DELIVERS it, to a
+     * different, running processor. An IPI_WAKE that arrives at the wrong
+     * core leaves the intended one asleep over queued work and gives the
+     * wrong one a wake it never needed; an INIT would reset a live core.
+     * Neither is something to do quietly, so the send is refused and
+     * named. amp_boot_aps already declines to start such a core for the
+     * same reason; this is the floor under that decision, for every path
+     * that did not ask first. Such an ID is addressable only in x2APIC
+     * mode, where the destination is the full 32 bits of MSR 0x830. */
+    if (dest_id > 0xFFu) {
+        kprintf("[LAPIC] %[E]APIC ID %u does not fit the 8-bit xAPIC ICR "
+                "destination — IPI 0x%x NOT sent, because sending would "
+                "deliver it to the core with ID %u instead%[D]\n",
+                dest_id, cmd, dest_id & 0xFFu);
         return false;
+    }
 
-    lapic_write(LAPIC_REG_ICR_HIGH, (dest_id & 0xFFu) << 24);
-    lapic_write(LAPIC_REG_ICR_LOW,  cmd);
-    return true;
+    /* ICR_HIGH then ICR_LOW is one indivisible send, and the pair must not
+     * be split by an interrupt.
+     *
+     * Intel SDM Vol 3A, "Interrupt Command Register (ICR)": "The act of
+     * writing to the low doubleword of the ICR causes the IPI to be sent",
+     * and the destination it is sent to is whatever ICR_HIGH holds AT THAT
+     * MOMENT. An interrupt taken between the two writes whose handler
+     * sends its own directed IPI leaves ICR_HIGH holding the handler's
+     * destination; our ICR_LOW write then delivers our command to the
+     * handler's core, and ours never hears it. That is live on the BSP,
+     * which runs kcore_run_loop with interrupts enabled and is also the
+     * core that takes IRQ0 — whose tick path sends directed wakes of its
+     * own.
+     *
+     * Linux brackets exactly this pair the same way: default_send_IPI_
+     * single_phys wraps __default_send_IPI_dest_field (the idle wait plus
+     * the ICR2/ICR writes) in local_irq_save/local_irq_restore.
+     *
+     * The wait for the previous IPI is INSIDE the region on purpose: the
+     * delivery-status bit it polls is the same ICR, so observing it idle
+     * and then being preempted before the write buys nothing. The waits
+     * are on free-running counters (HourGlass reads TSC / PM-timer / PIT
+     * counters directly), so none of them needs an interrupt to advance.
+     *
+     * The x2APIC branch above returns before this: one WRMSR carries
+     * destination and command together and cannot be split. */
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+
+    bool sent = icr_wait_for_previous(dest_id, cmd, may_refuse);
+    if (sent) {
+        lapic_write(LAPIC_REG_ICR_HIGH, dest_id << 24);
+        lapic_write(LAPIC_REG_ICR_LOW,  cmd);
+    }
+
+    __asm__ volatile("push %0; popfq" :: "r"(flags) : "memory", "cc");
+    return sent;
 }
 
 bool lapic_icr_write(uint32_t dest_id, uint32_t cmd) {

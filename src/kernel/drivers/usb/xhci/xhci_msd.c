@@ -170,22 +170,39 @@ static uint32_t msd_patience_ms(uint32_t bytes)
  * come up was a stick this machine refused — and on a machine that boots from
  * one, refusing it is the whole boot.
  *
- * So the loop runs while the device says it is coming up and stops the moment
- * it says anything else. The clock below is the last resort, for a device that
- * says it is coming up for ever, and its size is the class's: Linux gives a
- * disk tens of seconds to spin up before it gives in.
+ * So the loop runs while the device says it is coming up, or while it says it
+ * has just changed state, and stops the moment it says anything else. The
+ * clock below is the last resort for both, and its size is the class's: Linux
+ * gives a disk tens of seconds to spin up before it gives in.
+ *
+ * ‼ BOTH OF THOSE WAITS GO THROUGH THE CLOCK, AND ONE OF THEM DID NOT.
+ *
+ * UNIT ATTENTION used to jump straight back to the top of the loop, below
+ * neither the clock nor the pause — so a device that re-established one on
+ * every command (a card reader with a marginal card-detect switch; firmware
+ * that re-reports POWER ON, RESET per command) was asked TEST UNIT READY and
+ * REQUEST SENSE as fast as the bulk pipe would carry them, for ever, on the
+ * core running the attendance pass. On the BSP during boot that is a machine
+ * that never reaches the shell, and the sentence above was simply false about
+ * it. Linux bounds the same wait explicitly — sd_spinup_disk() gives a UNIT
+ * ATTENTION with ASC 0x28 five seconds and a full second between tries, and
+ * its comment names the cause: "Wait for USB flash devices with slow
+ * firmware. Yes, this sense key/ASC combination shouldn't occur here. It's
+ * characteristic of these devices."
  */
 #define MSD_READY_PATIENCE_MS 30000
 #define MSD_READY_WAIT_MS     50
 
 /* The sense keys this driver acts on, by the names SPC gives them. */
 #define SENSE_NOT_READY       0x02
+#define SENSE_ILLEGAL_REQUEST 0x05
 #define SENSE_UNIT_ATTENTION  0x06
 
 /* And the additional codes that turn "not ready" into an answer. */
 #define ASC_NOT_READY         0x04    /* ASCQ says which kind */
 #define ASCQ_BECOMING_READY   0x01
 #define ASCQ_START_NEEDED     0x02
+#define ASC_INVALID_OPCODE    0x20    /* INVALID COMMAND OPERATION CODE */
 #define ASC_NO_MEDIUM         0x3A
 
 struct MsdAsyncReq;
@@ -1185,6 +1202,7 @@ static int msd_wait_ready(XhciMsdUnit* u)
     uint8_t cdb[6] = { SCSI_TEST_UNIT_READY, 0, 0, 0, 0, 0 };
     uint64_t give_up_at = rdtsc() + cpu_ms_to_tsc(MSD_READY_PATIENCE_MS);
     bool said_coming_up = false;
+    bool said_settling  = false;
 
     for (;;) {
         int rc = msd_command(u, cdb, sizeof(cdb), 0, 0, false, NULL);
@@ -1211,9 +1229,38 @@ static int msd_wait_ready(XhciMsdUnit* u)
         }
 
         /* A state change — a medium arriving, a reset, a power-on — is not a
-         * refusal, it is the device clearing its throat. Asked again at once
-         * rather than after a pause. */
+         * refusal, it is the device clearing its throat. Asked again, under
+         * the same pause and the same clock as everything else in this loop:
+         * a device is entitled to clear its throat, and not entitled to do it
+         * for ever at the speed of the bus. */
         if (key == SENSE_UNIT_ATTENTION) {
+            /* Except for the one that is not a throat being cleared at all.
+             * MEDIUM NOT PRESENT arrives as a unit attention on a card reader
+             * with an empty slot, and waiting changes nothing — which is why
+             * Linux lists UNIT ATTENTION / 0x3A under "Do not retry Medium
+             * Not Present" in exactly this loop (sd.c, sd_spinup_disk). The
+             * NOT READY arm below has always had this exit; this arm had
+             * none, so an empty reader hung the boot. */
+            if (asc == ASC_NO_MEDIUM) {
+                kprintf("[USB disk %u] no medium\n", u->number);
+                return -1;
+            }
+
+            if (!said_settling) {
+                said_settling = true;
+                kprintf("[USB disk %u] keeps reporting a state change "
+                        "(code 0x%02x/0x%02x) — waiting for it to settle\n",
+                        u->number, asc, ascq);
+            }
+
+            if ((int64_t)(rdtsc() - give_up_at) >= 0) {
+                kprintf("[USB disk %u] has been reporting a state change for "
+                        "%u ms and has not settled — not using it\n",
+                        u->number, MSD_READY_PATIENCE_MS);
+                return -1;
+            }
+
+            msd_pause_ms(MSD_READY_WAIT_MS);
             continue;
         }
 
@@ -2058,6 +2105,106 @@ int xhci_msd_write(uint8_t unit, uint64_t lba, uint32_t count, const void* buffe
     return msd_rw(unit, lba, count, (void*)buffer, true);
 }
 
+/*
+ * ‼ A BARRIER THAT CANNOT SAY NO IS NOT A BARRIER.
+ *
+ * msd_command answers 0 when the device carried the command out, a POSITIVE
+ * value when it answered and refused, and a negative one when the conversation
+ * itself broke down. The refusal is the device setting bCSWStatus to 01h —
+ * Bulk-Only Transport 1.0 §5.2, Table 5.3 "Command Block Status Values", and
+ * §6.6.4: "After recognizing that a CBW is valid and meaningful, the device
+ * may still fail in its attempt to satisfy the command. The device shall
+ * report this condition by returning a Command Failed status (bCSWStatus =
+ * 01h)."
+ *
+ * This used to end in `return (rc >= 0) ? 0 : -1`, so EVERY refusal the device
+ * made was reported upwards as a flush that had happened, and the comment
+ * justified it with "a device that does not implement it refuses, and a
+ * refusal here is not a failure". That conclusion cannot be reached from the
+ * status byte: the byte says the command failed and nothing more. Telling "I
+ * do not implement this" apart from "I could not commit your data" takes a
+ * REQUEST SENSE, and this path never issued one — which is exactly what the
+ * reference implementation of this transport does for the same byte
+ * (drivers/usb/storage/transport.c turns bCSWStatus 01h into a failure and
+ * asks for sense before anything upstairs interprets it).
+ *
+ * The cost of the old answer is that BoardroomFlush — the durability barrier
+ * the storage deck uses, on the medium this kernel boots from — could not
+ * fail. A worn stick answering SYNCHRONIZE CACHE with MEDIUM ERROR, and a
+ * device answering a UNIT ATTENTION after any transport reset without having
+ * run the command at all, both reported the transaction durable.
+ *
+ * So the device is asked why, the way msd_run_blocks in this same file already
+ * asks, and only the answers that mean "there was nothing to synchronise" are
+ * success. The list is closed, and is the one Linux's sd_sync_cache() keeps
+ * under its own comment "this is no error here": ILLEGAL REQUEST, ASC 0x20
+ * INVALID COMMAND OPERATION CODE, and ASC 0x3A MEDIUM NOT PRESENT. Everything
+ * else — MEDIUM ERROR, HARDWARE ERROR, ABORTED COMMAND — is a flush that did
+ * not happen, said out loud and returned as one.
+ */
+static int msd_flush_held(XhciMsdUnit* u, const uint8_t* cdb, uint8_t cdb_len)
+{
+    uint64_t give_up_at = rdtsc() + cpu_ms_to_tsc(MSD_READY_PATIENCE_MS);
+    bool said_settling = false;
+
+    for (;;) {
+        int rc = msd_command(u, cdb, cdb_len, 0, 0, false, NULL);
+        if (rc == 0) {
+            return 0;
+        }
+        if (rc < 0) {
+            kprintf("[USB disk %u] the transport broke down while its cache "
+                    "was being committed — nothing it holds is known to be on "
+                    "the medium\n", u->number);
+            return -1;
+        }
+
+        uint8_t key = 0, asc = 0, ascq = 0;
+        if (msd_request_sense(u, &key, &asc, &ascq) != 0) {
+            kprintf("[USB disk %u] refused to commit its cache and would not "
+                    "say why\n", u->number);
+            return -1;
+        }
+
+        /* The refusals that ARE an answer: a device with nothing to
+         * synchronise, or no medium to synchronise to. */
+        if (key == SENSE_ILLEGAL_REQUEST || asc == ASC_INVALID_OPCODE ||
+            asc == ASC_NO_MEDIUM) {
+            return 0;
+        }
+
+        if (key != SENSE_UNIT_ATTENTION) {
+            kprintf("[USB disk %u] could not commit its cache to the medium "
+                    "(sense key 0x%x, code 0x%02x/0x%02x)\n",
+                    u->number, key, asc, ascq);
+            return -1;
+        }
+
+        /*
+         * A unit attention is neither of those. SPC has the device reject the
+         * command BEFORE executing it, so the cache was not synchronised and
+         * the remedy is to ask again — and this driver knows the condition
+         * arises here, because msd_bot_reset sits on three error paths in this
+         * file and the first command after one is answered exactly this way.
+         * Bounded by the same real clock and the same pause as msd_wait_ready,
+         * for the same reason.
+         */
+        if (!said_settling) {
+            said_settling = true;
+            kprintf("[USB disk %u] reported a state change instead of "
+                    "committing its cache (code 0x%02x/0x%02x) — asking "
+                    "again\n", u->number, asc, ascq);
+        }
+        if ((int64_t)(rdtsc() - give_up_at) >= 0) {
+            kprintf("[USB disk %u] has reported a state change instead of "
+                    "committing its cache for %u ms — what it holds is NOT on "
+                    "the medium\n", u->number, MSD_READY_PATIENCE_MS);
+            return -1;
+        }
+        msd_pause_ms(MSD_READY_WAIT_MS);
+    }
+}
+
 int xhci_msd_flush(uint8_t unit)
 {
     XhciMsdUnit* u = msd_take(unit);
@@ -2065,9 +2212,7 @@ int xhci_msd_flush(uint8_t unit)
         return -1;
     }
 
-    /* SYNCHRONIZE CACHE with a zero block count means "all of it". A device
-     * that does not implement it refuses, and a refusal here is not a failure:
-     * a device with no write cache has nothing to synchronise. */
+    /* SYNCHRONIZE CACHE with a zero block count means "all of it". */
     uint8_t cdb[16] = {0};
     uint8_t cdb_len;
     if (u->blocks > 0x100000000ULL) {
@@ -2079,9 +2224,9 @@ int xhci_msd_flush(uint8_t unit)
     }
 
     msd_gate_enter(u);
-    int rc = msd_command(u, cdb, cdb_len, 0, 0, false, NULL);
+    int result = msd_flush_held(u, cdb, cdb_len);
     msd_gate_leave(u);
     msd_give_back(u);
 
-    return (rc >= 0) ? 0 : -1;
+    return result;
 }

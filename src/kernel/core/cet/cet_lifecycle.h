@@ -1,10 +1,12 @@
 /*
  * CET — Control-flow Enforcement Technology lifecycle (Phase 2K+).
  *
- * Intel SDM Vol 1 §17, Vol 3A §7.4 + §4.5, Vol 3D §17. Production-grade
- * CR4.CET enablement, IA32_S_CET / IA32_U_CET MSR programming, XSAVE
- * component 11 (CET_S) + 12 (CET_U) registration, per-process shadow
- * stack allocation + lifecycle.
+ * Intel SDM Vol 1 "Control-flow Enforcement Technology (CET)" (§18 in
+ * the current numbering, §17 in the revision this file was written
+ * against — cite the title, the number moves between revisions) and
+ * Vol 3A "Control-flow Enforcement Technology". Production-grade
+ * CR4.CET enablement, IA32_S_CET / IA32_U_CET MSR programming,
+ * per-process shadow stack allocation + lifecycle.
  *
  * Why CET matters in production
  * -----------------------------
@@ -27,10 +29,12 @@
  *      CPUID.07H.0:ECX[7] and EDX[20] respectively (existing).
  *   2. vmm_cet_probe logs the BSP state (existing observe-only).
  *   3. cet_lifecycle_init_bsp (this file):
- *        - register XSAVE components 11 + 12 via
- *          fpu_xsave_register_extension (grows the per-process FPU area
- *          so XSAVE save/restore covers CET_S + CET_U) — must run
- *          before any process spawn.
+ *        - probe whether this CPU offers the CET XSAVE state components
+ *          (CPUID.(EAX=0DH,ECX=1):ECX bits 11 and 12). They are
+ *          SUPERVISOR state components, reached only through IA32_XSS and
+ *          XSAVES — never through XCR0. BoxOS programs no IA32_XSS, so
+ *          the probe is telemetry, not an enable: no CET register is
+ *          carried by the FPU context-switch path.
  *        - enable CR4.CET=1 if any of (has_shstk, has_ibt) detected.
  *        - program IA32_S_CET + IA32_U_CET with SH_STK_EN | ENDBR_EN |
  *          NO_TRACK_EN bits per the kernel's CET policy.
@@ -41,15 +45,22 @@
  *
  * Per-process lifecycle
  * ---------------------
- *   - cet_process_create allocates the user shadow-stack page (4 KiB,
- *     matches user stack depth budget for first-launch processes) and
- *     sets VMM_PTE_CET_SS_USER (bit 61) on it, which marks nothing to
- *     the CPU — see the open-defect note at the top of cet_lifecycle.c.
+ *   - cet_process_create allocates the user shadow stack (16 KiB, four
+ *     pages — CET_USER_SSP_PAGES — matching the 16 KiB user data stack so
+ *     any depth the data stack can reach is mirrored) and sets
+ *     VMM_PTE_CET_SS_USER (bit 61) on it, which marks nothing to the
+ *     CPU — see the open-defect note at the top of cet_lifecycle.c.
  *     Stores the SSP value in process_t (user_ssp_va / user_ssp_phys).
- *   - cet_process_destroy frees the page on process teardown.
- *   - First iretq to user mode loads IA32_PL3_SSP via WRMSR (handled
- *     in jump_to_userspace); subsequent context switches restore
- *     PL3_SSP from the XSAVE area's CET_U component (no kernel work).
+ *   - cet_process_destroy frees the pages on process teardown.
+ *   - The iretq to user mode loads IA32_PL3_SSP via WRMSR
+ *     (cet_load_user_ssp_for_iretq, called from process.c).
+ *     ‼ Nothing reloads it afterwards. CET_U is an IA32_XSS state
+ *     component and this kernel does not enable IA32_XSS, so XSAVE
+ *     does NOT carry IA32_PL3_SSP across a context switch. On silicon
+ *     where U_CET.SH_STK_EN is live, the second process to return to
+ *     ring 3 on a given core runs on whatever SSP the previous one
+ *     left. Closing that needs a PL3_SSP reload on every user return,
+ *     which lives in the context-switch path, not in this file.
  *
  * Codegen compatibility
  * ---------------------
@@ -81,9 +92,9 @@ struct process_t;
  *   - cpu_detect_features  (g_cpu_caps.has_shstk / has_ibt populated)
  *   - vmm_cet_probe        (cet:fault:cp Touch tag pre-resolved)
  *   - MemTagInit + SeedReservedTags (cet:enabled etc. reserved)
- *   - fpu_init             (XSAVE area exists so we can grow it)
- * Must run BEFORE any process_create — XSAVE component growth must
- * settle into g_xsave_area_size before process FPU areas allocate.
+ * Must run BEFORE any process_create — cet_process_create gates on the
+ * CR4.CET state this function establishes, so a process spawned earlier
+ * would silently get no shadow stack.
  *
  * Returns OK on success or ERR_UNSUPPORTED when the CPU lacks both
  * SHSTK and IBT (still safe to call). */
@@ -114,16 +125,19 @@ void cet_lifecycle_init_ap(void);
  *      60 is protection-key bit 1, and the only encoding silicon
  *      honours is R/W=0 with Dirty=1. See the open-defect note at the
  *      top of cet_lifecycle.c.
- *   5. Writes the supervisor SSP token (SSP|0x1) at the top of each
- *      SSP page (Intel SDM Vol 1 §17.2.3).
+ *   5. Writes the supervisor shadow-stack token at the top of each SSP
+ *      page: the token's own linear address with bit 0 (BUSY) CLEAR.
+ *      Bit 0 is the busy flag, not a supervisor/user selector — the
+ *      processor sets it when it claims the stack (SETSSBSY, or an event
+ *      delivery to CPL 0 that switches shadow stacks) and faults if it
+ *      finds it already set.
  *   6. WRMSRs IA32_PL0_SSP + IA32_INTERRUPT_SSP_TABLE_ADDR.
  *   7. Records the bookkeeping in PerCoreData[core_idx].
  *
- * S_CET.SH_STK_EN stays 0 — flipping it requires a kernel-wide audit of
- * every assembly RET / IRET / LRET to ensure they pair with matching
- * CALL / interrupt-frame-push on the shadow stack. The audit is a
- * follow-up commit; until then this infrastructure is dormant but
- * complete (one S_CET MSR rewrite is enough to activate).
+ * S_CET.SH_STK_EN is still 0 when this function returns. It is flipped
+ * later in the same core's bring-up by cet_supv_shstk_activate_and_jump
+ * (main.c on the BSP, ap_init.c on every AP), which is why both MSRs must
+ * already hold valid token addresses when this function returns.
  *
  * Returns OK on success. ERR_UNSUPPORTED when CET is dormant on this
  * CPU (caller treats as no-op). ERR_NO_MEMORY on alloc failure (the
@@ -142,7 +156,8 @@ void cet_lifecycle_release_supervisor_ssp(uint8_t core_idx);
  * cet_process_create_kernel_ssp allocates a 4 KiB supervisor SSP page
  * for `proc`, sets PTE bit 60 (VMM_PTE_CET_SS_SUPV) on it — which marks
  * nothing to the CPU, see the note at the top of cet_lifecycle.c — writes
- * the supervisor SSP token at the page top, and PRE-PUSHES `entry_rip`
+ * the supervisor SSP token (own address, BUSY clear) at the page top,
+ * and PRE-PUSHES `entry_rip`
  * one slot below via WRSSQ. Sets proc->kernel_ssp_phys / kernel_ssp_va_top
  * and proc->context.pl0_ssp = top - 8.
  *
@@ -199,8 +214,9 @@ __attribute__((noreturn))
 void cet_supv_shstk_activate_and_jump(void (*target)(void));
 
 /* Per-process shadow-stack alloc. Called from process_create after the
- * user VA layout is fixed. Allocates a 4 KiB page from PMM, maps it
- * into the process's vmm_context with VMM_FLAG_PRESENT |
+ * user VA layout is fixed. Allocates CET_USER_SSP_PAGES (4) contiguous
+ * pages from PMM — 16 KiB — and maps them into the process's
+ * vmm_context with VMM_FLAG_PRESENT |
  * VMM_FLAG_WRITABLE | VMM_PTE_CET_SS_USER + VMM_FLAG_USER. ‼ Bit 61
  * does not mark a user shadow stack in ordinary paging — it is
  * protection-key bit 2 (Intel SDM Vol 3A Table 4-19); a user shadow
@@ -234,10 +250,15 @@ bool cet_is_enabled(void);
  *   - proc has no allocated SSP (proc->user_ssp_va == 0)
  *
  * After the iretq, the CPU's PL3_SSP is the user-mode SSP. The first
- * CALL pushes its return address to *PL3_SSP--. Subsequent kernel ↔ user
- * crossings save/restore PL3_SSP through XSAVE component 12 (CET_U)
- * without further WRMSR — the XSAVE bitmap was opted into during BSP
- * init via fpu_xsave_register_extension. */
+ * CALL pushes its return address to *PL3_SSP--.
+ *
+ * ‼ Subsequent kernel ↔ user crossings do NOT restore PL3_SSP. CET_U is
+ * an IA32_XSS supervisor state component (Intel SDM Vol 1 §13.5), not an
+ * XCR0 one, so the kernel's XSAVE/XRSTOR context-switch path cannot carry
+ * it and never did — CPUID.(EAX=0DH,ECX=0) does not even report bit 11.
+ * Until a PL3_SSP reload is added to the user-return path, a core that
+ * has run two processes with user shadow stacks hands the second one the
+ * first one's SSP. */
 void cet_load_user_ssp_for_iretq(struct process_t *proc);
 
 /* Increments the #CP fault counter — called from idt.c paranoid vector
@@ -249,8 +270,12 @@ typedef struct {
     bool     enabled;            /* CR4.CET=1 + at least one of SHSTK/IBT */
     bool     shstk_active;
     bool     ibt_active;
-    bool     xsave_cet_s;        /* XCR0 bit 11 published */
-    bool     xsave_cet_u;        /* XCR0 bit 12 published */
+    /* CPUID.(EAX=0DH,ECX=1):ECX — does the silicon OFFER the CET state
+     * components? Both are IA32_XSS components and BoxOS enables no
+     * IA32_XSS, so "true" means "available and unmanaged", never
+     * "saved on context switch". */
+    bool     xsave_cet_s;        /* component 12 (IA32_PL{0,1,2}_SSP) */
+    bool     xsave_cet_u;        /* component 11 (IA32_U_CET, PL3_SSP) */
     uint64_t s_cet_msr;          /* IA32_S_CET — supervisor controls */
     uint64_t u_cet_msr;          /* IA32_U_CET — user controls */
     uint64_t cp_faults;          /* count of #CP exceptions observed */

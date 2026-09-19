@@ -4331,50 +4331,125 @@ int vmm_map_touch_ring(vmm_context_t *ctx, uintptr_t phys_page)
     return 0;
 }
 
+/*
+ * vmm_user_window — the one walk behind every kernel access to cabin
+ * memory. Returns the Pull Map pointer for `user_vaddr` and, in
+ * *out_span, how many bytes of the user's range that pointer is good
+ * for: the distance from the address to the end of the leaf that maps
+ * it. NULL means the address is not user memory the caller may touch.
+ *
+ * Two hardware facts decide what this function must do.
+ *
+ * 1. PAGE SIZE. A PDE with PS=1 (bit 7) is a LEAF mapping a 2 MiB page,
+ *    and a PDPTE with PS=1 is a leaf mapping a 1 GiB page — Intel SDM
+ *    Vol 3A §5.5, Tables 5-18 and 5-16. Such an entry is a present
+ *    translation for every linear address in its range, not an absent
+ *    mapping. The kernel installs exactly those leaves for a cabin
+ *    itself (SysHeapPrefault for malloc >= 2 MiB, Bay claims, Brook
+ *    streams), so a walker that stops at the PS bit — vmm_get_pte — says
+ *    "not mapped" about memory this kernel mapped user-RW one syscall
+ *    earlier. vmm_get_leaf_pte finds the leaf at whatever level it lives
+ *    and reports that level. The frame is then the leaf's OWN aligned
+ *    field: bit 12 of a 2 MiB or 1 GiB leaf is PAT, not an address bit
+ *    (the same split Linux draws with _PAGE_BIT_PAT_LARGE=12 and
+ *    PHYSICAL_PMD_PAGE_MASK), so the phys base is masked to the leaf's
+ *    own size, never to 4 KiB.
+ *
+ * 2. WRITE PERMISSION. The pointer handed back is the Pull Map alias —
+ *    PULL_LEAF_RAM: PRESENT|WRITABLE|GLOBAL and no U/S. Access rights
+ *    are a property of the translation the store actually uses (SDM
+ *    Vol 3A §5.6): with CR0.WP=1 a supervisor write is permitted only
+ *    "with a translation for which the R/W flag (bit 1) is 1 in every
+ *    paging-structure entry controlling the translation" (§5.6.1), and
+ *    SMAP is scoped to user-mode addresses, which this supervisor alias
+ *    is not. So a memcpy through this pointer consults neither the
+ *    cabin's R/W bit, nor CR0.WP, nor CR4.SMAP: this check is the only
+ *    thing standing between a user-supplied address and a kernel store.
+ *    `for_write` therefore demands VMM_FLAG_WRITABLE on the cabin's own
+ *    leaf. Without it a Crate aimed at the machine-wide ClockBoard, the
+ *    cpu_caps page, the read-only CabinInfo or the cabin's own
+ *    non-writable ELF text has the kernel overwrite it on the app's
+ *    behalf — a W^X and shared-page bypass needing no privilege.
+ */
+static void *vmm_user_window(vmm_context_t *ctx, uintptr_t user_vaddr,
+                             bool for_write, size_t *out_span)
+{
+    if (out_span) *out_span = 0;
+    if (!ctx) return NULL;
+
+    uint8_t level = 0;
+    pte_t *leaf = vmm_get_leaf_pte(ctx, user_vaddr, &level);
+    if (!leaf || level == 0) return NULL;
+
+    /* One read of the entry: a concurrent unmap on another core must not
+     * split the permission checks from the frame this call returns. */
+    pte_t entry = __atomic_load_n(leaf, __ATOMIC_ACQUIRE);
+    if (!(entry & VMM_FLAG_PRESENT) || !(entry & VMM_FLAG_USER))
+        return NULL;
+    if (for_write && !(entry & VMM_FLAG_WRITABLE))
+        return NULL;
+
+    uintptr_t page_size = (level == 3) ? (1ULL << 30)   /* 1 GiB PDPT leaf */
+                        : (level == 2) ? (1ULL << 21)   /* 2 MiB PD leaf   */
+                                       : (1ULL << 12);  /* 4 KiB PT leaf   */
+    uintptr_t page_off_mask = page_size - 1;
+
+    uintptr_t frame  = vmm_pte_to_phys(entry) & ~page_off_mask;
+    uintptr_t offset = user_vaddr & page_off_mask;
+
+    if (out_span) *out_span = (size_t)(page_size - offset);
+    return vmm_phys_to_virt(frame + offset);
+}
+
 void *vmm_translate_user_addr(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size)
 {
-    if (!ctx || size == 0)
+    if (size == 0)
         return NULL;
 
-    // Validate that the entire range falls within a single page
-    // (cross-page translations require per-page walks)
-    uintptr_t page_start = user_vaddr & VMM_PAGE_MASK;
-    uintptr_t end_addr = user_vaddr + size - 1;
-    uintptr_t page_end = end_addr & VMM_PAGE_MASK;
+    size_t span = 0;
+    void *kaddr = vmm_user_window(ctx, user_vaddr, false, &span);
+    if (!kaddr)
+        return NULL;
 
-    if (page_start != page_end)
+    if (size > span)
     {
-        // Fail-closed backstop. A range that crosses a page boundary cannot be
-        // served by a single-page translation: silently truncating it (the old
-        // behaviour) corrupted a foreign frame whenever the next VA was backed
-        // by a non-adjacent physical page. Refuse instead. Page-walking callers
-        // (crate_read/crate_write, vmm_user_buf_*) chunk per page and never
-        // reach here; the IPC/Touch ring slot accessors are straddle-safe by
-        // geometry (slot size divides the page, slot base is page-aligned).
-        /* Fail-closed backstop: refuse a page-crossing range instead of the old
-         * silent truncation that corrupted a foreign frame. Page-walking callers
-         * (crate_read/write, vmm_user_buf_*) chunk per page, and the ring slot
-         * accessors are straddle-safe by geometry, so no production caller reaches
-         * here. Coverage is proven by the per-subsystem audits plus CrateIoSelfTest
-         * (which intentionally trips this path to verify the backstop returns NULL).
-         * Canary is debug-gated: quiet on release, and NOT a production tripwire
-         * precisely because the selftest deliberately exercises it. */
-        debug_printf("[VMM] straddle-reject: vaddr=0x%lx size=%zu crosses a page boundary; use crate_read/crate_write or vmm_user_buf_* (page-walked)\n",
-                     (unsigned long)user_vaddr, size);
+        /* Fail-closed backstop: refuse a range that leaves the leaf instead of
+         * the old silent truncation that corrupted a foreign frame. The limit is
+         * the leaf's own size, so a 2 MiB-backed buffer is served whole rather
+         * than chopped at an imaginary 4 KiB edge. Page-walking callers
+         * (crate_read/write, vmm_user_buf_*) chunk per leaf, and the ring slot
+         * accessors are straddle-safe by geometry (slot size divides the page,
+         * slot base is page-aligned), so no production caller reaches here.
+         * Coverage is proven by the per-subsystem audits plus CrateIoSelfTest
+         * (which intentionally trips this path to verify the backstop returns
+         * NULL). Canary is debug-gated: quiet on release, and NOT a production
+         * tripwire precisely because the selftest deliberately exercises it. */
+        debug_printf("[VMM] straddle-reject: vaddr=0x%lx size=%zu leaves its mapping after %zu bytes; use crate_read/crate_write or vmm_user_buf_* (page-walked)\n",
+                     (unsigned long)user_vaddr, size, span);
         return NULL;
     }
 
-    // Check that the page is user-accessible (not just present)
-    pte_t *pte = vmm_get_pte(ctx, user_vaddr);
-    if (!pte || !(*pte & VMM_FLAG_PRESENT) || !(*pte & VMM_FLAG_USER))
+    return kaddr;
+}
+
+void *vmm_translate_user_addr_w(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size)
+{
+    if (size == 0)
+        return NULL;
+
+    size_t span = 0;
+    void *kaddr = vmm_user_window(ctx, user_vaddr, true, &span);
+    if (!kaddr)
+        return NULL;
+
+    if (size > span)
     {
+        debug_printf("[VMM] straddle-reject (write): vaddr=0x%lx size=%zu leaves its mapping after %zu bytes; use vmm_user_buf_commit_out (page-walked)\n",
+                     (unsigned long)user_vaddr, size, span);
         return NULL;
     }
 
-    uintptr_t phys = vmm_pte_to_phys(*pte);
-    uintptr_t offset = user_vaddr & VMM_PAGE_OFFSET_MASK;
-
-    return vmm_phys_to_virt(phys + offset);
+    return kaddr;
 }
 
 int vmm_setup_null_trap(vmm_context_t *ctx)
@@ -4591,14 +4666,17 @@ uintptr_t vmm_virt_to_phys_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr)
 /*
  * vmm_user_buf_in / vmm_user_buf_alloc_out / vmm_user_buf_commit_out / vmm_user_buf_free
  *
- * The single-page guarantee of vmm_translate_user_addr is correct (its
- * kernel pointer covers exactly one phys page). For multi-page user
- * buffers we need to walk the user PT page-by-page and either copy into
- * a freshly-kmalloc'd kernel buffer (for input crates) or copy out from
- * one (for output crates).
+ * The single-leaf guarantee of vmm_translate_user_addr is correct (its
+ * kernel pointer covers exactly one mapped frame — 4 KiB, 2 MiB or
+ * 1 GiB). For user buffers that span more than one leaf we walk the
+ * cabin's page tables leaf by leaf and either copy into a freshly-
+ * kmalloc'd kernel buffer (for input crates) or copy out from one (for
+ * output crates).
  *
- * Page-by-page walk handles non-contiguous physical pages, partial first
- * page (offset != 0), and partial last page (size not a page multiple).
+ * The leaf-by-leaf walk handles non-contiguous physical frames, a
+ * partial first leaf (offset != 0) and a partial last leaf (size not a
+ * multiple of the leaf size). The OUT direction additionally requires
+ * R/W on each leaf it writes: see vmm_user_window.
  */
 
 /*
@@ -4620,14 +4698,18 @@ error_t vmm_user_buf_in_into(vmm_context_t *ctx, uintptr_t user_vaddr,
 
     size_t copied = 0;
     while (copied < size) {
-        uintptr_t off_in_page = (user_vaddr + copied) & VMM_PAGE_OFFSET_MASK;
-        size_t this_page = VMM_PAGE_SIZE - off_in_page;
-        if (this_page > size - copied) this_page = size - copied;
+        /* Chunk by the LEAF that maps this address, not by 4 KiB: a
+         * 2 MiB-backed buffer is one window, and a 4 KiB one is still
+         * exactly one page. vmm_user_window reports the span. */
+        size_t span = 0;
+        void *src = vmm_user_window(ctx, user_vaddr + copied, false, &span);
+        if (!src || span == 0) return ERR_INVALID_ADDRESS;
 
-        void *src = vmm_translate_user_addr(ctx, user_vaddr + copied, this_page);
-        if (!src) return ERR_INVALID_ADDRESS;
-        memcpy((uint8_t *)kbuf + copied, src, this_page);
-        copied += this_page;
+        size_t chunk = size - copied;
+        if (chunk > span) chunk = span;
+
+        memcpy((uint8_t *)kbuf + copied, src, chunk);
+        copied += chunk;
     }
     return OK;
 }
@@ -4661,14 +4743,19 @@ error_t vmm_user_buf_commit_out(vmm_context_t *ctx, uintptr_t user_vaddr,
 
     size_t copied = 0;
     while (copied < size) {
-        uintptr_t off_in_page = (user_vaddr + copied) & VMM_PAGE_OFFSET_MASK;
-        size_t this_page = VMM_PAGE_SIZE - off_in_page;
-        if (this_page > size - copied) this_page = size - copied;
+        /* The WRITE window: the cabin's own leaf must carry R/W. The Pull
+         * Map alias this memcpy goes through is supervisor-writable, so
+         * the hardware will not refuse a store into a page the cabin gave
+         * away read-only — see vmm_user_window. */
+        size_t span = 0;
+        void *dst = vmm_user_window(ctx, user_vaddr + copied, true, &span);
+        if (!dst || span == 0) return ERR_INVALID_ADDRESS;
 
-        void *dst = vmm_translate_user_addr(ctx, user_vaddr + copied, this_page);
-        if (!dst) return ERR_INVALID_ADDRESS;
-        memcpy(dst, (const uint8_t *)kbuf + copied, this_page);
-        copied += this_page;
+        size_t chunk = size - copied;
+        if (chunk > span) chunk = span;
+
+        memcpy(dst, (const uint8_t *)kbuf + copied, chunk);
+        copied += chunk;
     }
     return OK;
 }

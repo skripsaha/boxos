@@ -12,6 +12,7 @@
 #include "vmm.h"
 #include "klib.h"
 #include "atomics.h"
+#include "baton.h"
 
 static uint64_t pack_setup_packet(usb_setup_packet_t* setup) {
     uint64_t param = 0;
@@ -427,6 +428,149 @@ void xhci_ctrl_giveup_proof(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
 }
 #endif /* CONFIG_XHCI_CTRL_GIVEUP_PROOF */
 
+/*
+ * ── a halted report endpoint, repaired where waiting is allowed ────────────
+ *
+ * A doorbell cannot restart a pipe the device halted. xHCI 1.2b §4.7:
+ * "The xHC shall ignore doorbell references to endpoints in the Halted or
+ * Error state" — a `shall`, beside a `may` for the Disabled case one line
+ * above it, so this is not a race that a fast enough driver wins. And every
+ * completion code that reaches the failure arm below leaves the endpoint in
+ * exactly that state: Stall Error (§4.10.2.1 "set the associated Endpoint
+ * State (EP State) field to Halted"), Babble Detected (§4.10.2.4 "halt the
+ * endpoint"), and a USB Transaction Error with the error count spent
+ * (§4.10.2.7 "the TD is aborted, the endpoint is Halted").
+ *
+ * Getting it back is two halves with an order between them. §4.10.2.1:
+ * "The Reset Endpoint Command for the endpoint shall complete successfully
+ * and the halt condition on the USB device shall be successfully cleared
+ * before attempting to restart the Transfer Ring by ringing its doorbell."
+ * §4.10.2.1.1: the device-side half "shall be invoked after the pipe has been
+ * transitioned to the Stopped state by a successful Reset Endpoint Command,
+ * but before writing to the Doorbell register of the Endpoint".
+ *
+ * Neither half can be done from the event drain. Waiting for a command
+ * completion is waiting for a pass that cannot run until this one returns,
+ * and the device-side half is a control transfer, which is the one thing this
+ * context is defined not to do. The drain used to post the two commands
+ * without waiting and then ring anyway: the ring was left holding a report
+ * the controller would never be asked for, and the only place that re-arms
+ * the endpoint is the handler for an event that could now never come. One
+ * stall and the keyboard was silent for the rest of the boot.
+ *
+ * So the drain knocks, and the repair happens on a K-Core — the one road out
+ * of an interrupt this kernel has (baton.h). The knock carries no list
+ * because it needs none: which endpoints want repairing is a fact the
+ * CONTROLLER holds, and asking it is cheaper and truer than remembering.
+ */
+static void kbd_repair_knocked(void* ctx);
+static Knock g_kbd_repair_knock = {
+    .baton  = { .next = NULL, .run = kbd_repair_knocked, .ctx = NULL },
+    .raised = 0,
+};
+
+/* USB 2.0 §9.2.6.4 gives a standard request with no data stage 50 ms. A
+ * second is generous for the one below. */
+#define XHCI_HALT_CLEAR_TIMEOUT_MS 1000
+
+/*
+ * The whole of §4.6.8 and §4.10.2.1.1 for one interrupt IN endpoint, in the
+ * order the specification gives, and then the transfer that puts the pipe
+ * back to work. Returns 0 when the endpoint is listening again.
+ */
+static int kbd_repair_one(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
+{
+    uint8_t dci = slot->ep_interrupt_in;
+    xhci_endpoint_t* ep = &slot->endpoints[dci];
+
+    if (xhci_ep_context_state(ctrl, slot, dci) == XHCI_EP_STATE_HALTED) {
+        /* The controller's half, and its completion WAITED FOR. Posting a
+         * command is not the same as its having happened, and until it has,
+         * the doorbell at the bottom of this function is dropped. */
+        xhci_ep_recover(ctrl, slot, dci);
+        xhci_command_wait_idle(ctrl, XHCI_HALT_CLEAR_TIMEOUT_MS);
+
+        uint8_t state = xhci_ep_context_state(ctrl, slot, dci);
+        if (state == XHCI_EP_STATE_HALTED) {
+            kprintf("[xHCI %s] slot %u: the keyboard's report endpoint is "
+                    "still %s after a Reset Endpoint — not ringing for it\n",
+                    ctrl->name, slot->slot_id, xhci_ep_state_name(state));
+            return -1;
+        }
+
+        /*
+         * And the device's half, which nothing in this driver used to send to
+         * anything but a disk. The controller agreeing that the pipe is
+         * usable does not make the DEVICE agree, and §4.6.8 adds a second
+         * consequence to leaving it out: the Reset Endpoint is posted with
+         * Transfer State Preserve cleared, and "Undefined behavior may occur
+         * if this command is executed with TSP = '0' and the associated
+         * device endpoint is not successfully reset by system software. For
+         * example, the Data Toggle may not be synchronized between the xHC
+         * and a USB2 device."
+         */
+        usb_setup_packet_t setup = {
+            .bmRequestType = 0x02,      /* host to device, endpoint */
+            .bRequest = USB_REQ_CLEAR_FEATURE,
+            .wValue = USB_FEATURE_ENDPOINT_HALT,
+            .wIndex = ep->addr,
+            .wLength = 0
+        };
+        if (xhci_control_transfer_sync(ctrl, slot, &setup, 0, 0, false,
+                                       XHCI_HALT_CLEAR_TIMEOUT_MS)
+            != TRB_COMPLETION_SUCCESS) {
+            kprintf("[xHCI %s] slot %u: the keyboard would not clear the halt "
+                    "on its own report endpoint — not ringing for it\n",
+                    ctrl->name, slot->slot_id);
+            return -1;
+        }
+    }
+
+    ep->xfer_state = XHCI_XFER_IDLE;
+    return xhci_ep_submit(ctrl, slot, dci, ep->buffer_phys, ep->max_packet);
+}
+
+/*
+ * The visit the knock brings, on a K-Core.
+ *
+ * Every keyboard whose report endpoint has nothing outstanding is one that
+ * stopped listening, because the drain re-arms the good path itself and
+ * leaves exactly the endpoints it could not restart idle. A burst of errors
+ * is one knock and one visit, and an error that lands after the door opens
+ * brings the next one.
+ */
+static void kbd_repair_knocked(void* ctx)
+{
+    (void)ctx;
+    KnockOpen(&g_kbd_repair_knock);
+
+    for (uint8_t i = 0; i < xhci_controller_count(); i++) {
+        xhci_controller_t* ctrl = xhci_controller_at(i);
+        if (!ctrl) {
+            continue;
+        }
+        for (uint8_t id = 1; id < 255; id++) {
+            xhci_device_slot_t* slot = xhci_get_device_slot_by_id(ctrl, id);
+            if (!slot || slot->driver != XHCI_DRIVER_KEYBOARD ||
+                !slot->endpoints || !slot->ep_interrupt_in) {
+                continue;
+            }
+            if (slot->endpoints[slot->ep_interrupt_in].xfer_state ==
+                XHCI_XFER_IN_FLIGHT) {
+                continue;           /* it is listening; nothing is wrong */
+            }
+            /* Held for the length of the repair: it is made of a command and
+             * a control transfer, and the rings both of those walk belong to
+             * a device that may be pulled out in the middle of them. */
+            if (!xhci_slot_enter(slot)) {
+                continue;
+            }
+            kbd_repair_one(ctrl, slot);
+            xhci_slot_leave(slot);
+        }
+    }
+}
+
 void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
     if (!ctrl || !event) {
         return;
@@ -590,14 +734,36 @@ void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
          * interrupt storm that starves the only context able to end it.
          *
          * The endpoint is re-armed by the service pass, once it has something
-         * new to say. */
+         * new to say.
+         *
+         * ‼ AND THE SERVICE PASS IS ASKED FOR ON EVERY COMPLETION, NOT ONLY
+         * ON A GOOD ONE.
+         *
+         * `ok` is Success and Short Packet. Every other code used to come
+         * through here, set the endpoint idle and raise NOTHING — and the
+         * only flag that makes the service pass look at a hub is the one
+         * xhci_hub_note_change raises. So a single Stall Error, Babble
+         * Detected or USB Transaction Error left that hub with no transfer
+         * queued and nothing that would ever queue one: deaf to every plug
+         * and unplug below it for the rest of its attachment, silently. USB
+         * 2.0 §11.12.1 is why silence is total — the host learns of a change
+         * only while an IN is outstanding on the status endpoint — and
+         * §11.12.3's Figure 11-21 makes "Re-initialize Interrupt Pipe for
+         * Status Change endpoint" a step of the loop rather than an option.
+         *
+         * The repair such a pipe needs is a command completion and a control
+         * transfer (xHCI §4.10.2.1.1), so it belongs in the service pass and
+         * not here. What belongs here is making sure somebody goes and looks.
+         */
         xhci_endpoint_t* ep = &slot->endpoints[endpoint_id];
-        if (code == TRB_COMPLETION_STALL) {
-            xhci_ep_recover(ctrl, slot, endpoint_id);
-        }
         ep->xfer_state = XHCI_XFER_IDLE;
         if (ok) {
             xhci_hub_note_change(slot);
+        } else {
+            kprintf("[xHCI %s] slot %u: a hub's status endpoint answered %s — "
+                    "its pipe is being put back in order\n",
+                    ctrl->name, slot_id, xhci_completion_name(code));
+            xhci_hub_note_work();
         }
         return;
     }
@@ -610,24 +776,34 @@ void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
         endpoint_id == slot->ep_interrupt_in) {
 
         xhci_endpoint_t* ep = &slot->endpoints[endpoint_id];
+        ep->xfer_state = XHCI_XFER_IDLE;
 
         if (ok) {
+            /* The report, and the endpoint held open again. Nothing halted it
+             * and nothing has to be cleared, so the doorbell is rung from
+             * here — this is the hot path and the keystroke is waiting on it. */
             xhci_process_keyboard_report(
                 (usb_boot_keyboard_report_t*)ep->buffer_virt);
-        } else if (code == TRB_COMPLETION_STALL) {
-            xhci_ep_recover(ctrl, slot, endpoint_id);
-        } else {
-            /* Transaction errors are what a marginal cable looks like, and the
-             * controller has already retried them CErr times. Re-arming is the
-             * right answer; going quiet is not. */
-            debug_printf("[xHCI] slot %u keyboard completion %u\n", slot_id, code);
+            xhci_ep_submit(ctrl, slot, endpoint_id, ep->buffer_phys,
+                           ep->max_packet);
+            return;
         }
 
-        /* Re-arm after any recovery above, never before it: a Set TR Dequeue
-         * names where the controller resumes, and the transfer queued here
-         * lands on exactly that TRB. */
-        ep->xfer_state = XHCI_XFER_IDLE;
-        xhci_ep_submit(ctrl, slot, endpoint_id, ep->buffer_phys, ep->max_packet);
+        /*
+         * ‼ AND NOT RE-ARMED FROM HERE, WHICH IS THE WHOLE OF THE REPAIR.
+         *
+         * Transaction errors are what a marginal cable looks like, and the
+         * controller has already retried them CErr times — at which point
+         * xHCI §4.10.2.7 has it abort the TD and HALT the endpoint, exactly
+         * as a stall does. Re-arming is still the right answer and going
+         * quiet is still wrong, but a doorbell is not how a halted endpoint
+         * is restarted: §4.7 says the xHC shall ignore one. The knock hands
+         * the repair to a context that can do the two things it is made of —
+         * wait for a Reset Endpoint to complete, and send the device the
+         * ClearFeature(ENDPOINT_HALT) that §4.10.2.1.1 places between that
+         * completion and the doorbell.
+         */
+        KnockOn(&g_kbd_repair_knock);
         return;
     }
 

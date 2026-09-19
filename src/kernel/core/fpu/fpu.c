@@ -32,9 +32,13 @@ static inline void xsetbv(uint32_t index, uint64_t value) {
  *   - The bit is not declared supported in CPUID.0xD:0 (xcr0_supported)
  *   - Already registered
  *
- * Used by Phase 2H (PKRU bit 9), Phase 2K (CET_S bit 11 / CET_U bit 12)
- * to wire their per-thread state into the existing FPU context-switch
- * machinery without forking a parallel save/restore path.
+ * This is the XCR0 door, and only user state components come through it.
+ * PKRU (bit 9) is one. CET's two components are NOT: CET_U (11) and CET_S
+ * (12) are SUPERVISOR state components, enumerated in CPUID.(EAX=0DH,ECX=1)
+ * and enabled through IA32_XSS, never through XCR0 (Intel SDM Vol 1 §13.5).
+ * CPUID.0DH:0 never reports them, so a caller asking for bit 11 or 12 is
+ * refused here by the xcr0_supported test below — see the note in
+ * cet_lifecycle.c.
  *
  * MUST be called BEFORE any process is spawned, because the FPU area
  * size in process_t is sized at allocation time from g_xsave_area_size. */
@@ -61,13 +65,26 @@ bool fpu_xsave_register_extension(uint64_t xcr0_bit, const char *name) {
     uint32_t eax, ebx, ecx, edx;
     cpuid_count(0xD, 0, &eax, &ebx, &ecx, &edx);
 
+    uint32_t old_size = g_xsave_area_size;
     g_xsave_mask = new_mask;
     g_xsave_area_size = ebx;
 
-    debug_printf("[FPU] xsave_register(%s): XCR0=0x%lx area_size=%u\n",
-                 name ? name : "?",
-                 (unsigned long)g_xsave_mask,
-                 (unsigned)g_xsave_area_size);
+    /* kprintf, not debug_printf: this is the same number enable_fpu puts on
+     * the console and for the same reason — it sizes every per-process FPU
+     * buffer, and once the buffer passes SLAB_LARGE_THRESHOLD the allocation
+     * moves from the growable slab to the fixed kernel pool. Registering a
+     * component here SUPERSEDES the number enable_fpu printed, so leaving the
+     * new one in debug_printf means the board only ever shows the stale one.
+     * Printed only when the size actually moves, so a no-op re-registration
+     * on a later core stays quiet. */
+    if (g_xsave_area_size != old_size) {
+        kprintf("[FPU] XSAVE component %s registered: XCR0=0x%lx, "
+                "area_size=%u bytes (per-process buffer %u)\n",
+                name ? name : "?",
+                (unsigned long)g_xsave_mask,
+                (unsigned)g_xsave_area_size,
+                (unsigned)g_xsave_area_size + 63u);
+    }
     return true;
 }
 
@@ -159,8 +176,22 @@ void enable_fpu(void) {
             xcr0 |= XCR0_AVX;
         }
 
-        // Enable AVX-512 if all three components are supported
+        /* AVX-512 needs all three of its own components AND the AVX
+         * component underneath them. Intel SDM Vol 1 §13.3: XSETBV raises
+         * #GP(0) "if ECX = 0, EAX[7:5] is not 000b, and any bit is clear in
+         * EAX[2:1] or EAX[7:5]" — asking for opmask / ZMM_Hi256 / Hi16_ZMM
+         * while XCR0[2] stays clear is not a weaker configuration, it is a
+         * fault.
+         *
+         * So the gate is `xcr0 & XCR0_AVX` — what this XSETBV will actually
+         * carry — and not has_avx512 alone. A core that keeps
+         * CPUID.07H.0:EBX[16] while losing CPUID.01H:ECX[28] (CPUID masking,
+         * a firmware-masked or heterogeneous AP whose has_avx was cleared by
+         * cpu_intersect_features_ap) would otherwise #GP right here. On an AP
+         * that happens before its IDT is any use: triple fault, and a core
+         * that never reports in. */
         if (g_cpu_caps.has_avx512 &&
+            (xcr0 & XCR0_AVX) &&
             (g_cpu_caps.xcr0_supported & XCR0_OPMASK) &&
             (g_cpu_caps.xcr0_supported & XCR0_ZMM_HI256) &&
             (g_cpu_caps.xcr0_supported & XCR0_HI16_ZMM)) {

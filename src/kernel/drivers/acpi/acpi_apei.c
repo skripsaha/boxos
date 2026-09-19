@@ -5,54 +5,49 @@
 #include "io.h"
 #include "touch.h"
 
-/* ACPI 6.5 §18.3.2 — Boot Error Region.
- * 32 byte header followed by CPER records. Block Status flags the kind
- * of error captured at the previous boot. */
+/* ACPI 6.5 §18.3.2.7.1, Table 18.11 — Generic Error Status Block.
+ *
+ * This is also the layout of the Boot Error Region: §18.3.1 says "the
+ * format of the Boot Error Region follows that of an Error Status Block, as
+ * defined in the Generic Hardware Error Source Structure". Twenty bytes of
+ * header, then Data Length bytes of Generic Error Data Entries — there is
+ * no CPER record header and no "CPER" signature anywhere in it. */
 typedef struct {
-    uint32_t block_status;          /* bits: 0 uncorr, 1 corr, 2 multi-uncorr, 3 multi-corr */
+    uint32_t block_status;          /* bit 0 uncorrectable valid, 1 correctable
+                                     * valid, 2 multiple uncorrectable, 3
+                                     * multiple correctable, bits 13:4 entry
+                                     * count */
     uint32_t raw_data_offset;
     uint32_t raw_data_length;
     uint32_t data_length;
-    uint32_t error_severity;        /* 0=recoverable, 1=fatal, 2=corrected, 3=none */
-} __attribute__((packed)) acpi_bert_region_t;
+    uint32_t error_severity;        /* 0=recoverable, 1=fatal, 2=corrected,
+                                     * 3=none (Table 18.11; UEFI CPER calls
+                                     * the same code informational) */
+} __attribute__((packed)) GenericErrorStatusBlock;
+_Static_assert(sizeof(GenericErrorStatusBlock) == 20,
+               "Generic Error Status Block header = 20 bytes (Table 18.11)");
 
-/* UEFI Spec Appendix N — Common Platform Error Record.
- * Header is fixed 128 bytes followed by N section descriptors (72 each)
- * and the section data they point to.
- */
+/* ACPI 6.5 §18.3.2.7.1, Table 18.12 — Generic Error Data Entry.
+ *
+ * The header is followed by Error Data Length bytes of section body, and
+ * "it is valid to have a Data Length of zero". The Timestamp at offset 64
+ * exists only from Revision 0x300 onwards, so the header is 72 bytes at
+ * revision >= 0x300 and 64 before it — Linux draws the same line in
+ * acpi_hest_get_size(). */
 typedef struct {
-    char     signature[4];          /* "CPER" */
-    uint16_t revision;
-    uint32_t signature_end;         /* 0xFFFFFFFF */
-    uint16_t section_count;
+    uint8_t  section_type[16];
     uint32_t error_severity;
-    uint32_t validation_bits;
-    uint32_t record_length;
-    uint64_t timestamp;
-    uint8_t  platform_id[16];
-    uint8_t  partition_id[16];
-    uint8_t  creator_id[16];
-    uint8_t  notification_type[16];
-    uint64_t record_id;
-    uint32_t flags;
-    uint64_t persistence_info;
-    uint8_t  reserved[12];
-} __attribute__((packed)) cper_record_header_t;
-_Static_assert(sizeof(cper_record_header_t) == 128, "CPER header = 128 bytes");
-
-typedef struct {
-    uint32_t section_offset;
-    uint32_t section_length;
     uint16_t revision;
     uint8_t  validation_bits;
-    uint8_t  reserved;
-    uint32_t flags;
-    uint8_t  section_type[16];
+    uint8_t  flags;
+    uint32_t error_data_length;
     uint8_t  fru_id[16];
-    uint32_t section_severity;
     char     fru_text[20];
-} __attribute__((packed)) cper_section_desc_t;
-_Static_assert(sizeof(cper_section_desc_t) == 72, "CPER section desc = 72 bytes");
+    uint8_t  timestamp[8];
+} __attribute__((packed)) GenericErrorDataEntry;
+_Static_assert(sizeof(GenericErrorDataEntry) == 72,
+               "Generic Error Data Entry = 72 bytes at revision 0x300");
+#define GEDATA_HEADER_PRE_V300  64u
 
 /* Section Type GUIDs (UEFI Spec Appendix N). Stored little-endian wire
  * format (data1..data4 LE, the byte tail as-is). */
@@ -73,115 +68,163 @@ static const uint8_t SECT_GUID_GENERIC[16] = {
     0xB6,0x5E, 0x16,0xF1,0x93,0xC4,0xF3,0xDB
 };
 
-static const char* section_type_name(const uint8_t* guid) {
-    for (int i = 0; i < 16; i++) {
-        if (guid[i] != SECT_GUID_PROCESSOR[i]) goto try_mem;
-    }
-    return "Processor";
-try_mem:
-    for (int i = 0; i < 16; i++) {
-        if (guid[i] != SECT_GUID_MEMORY[i]) goto try_pcie;
-    }
-    return "Memory";
-try_pcie:
-    for (int i = 0; i < 16; i++) {
-        if (guid[i] != SECT_GUID_PCIE[i]) goto try_generic;
-    }
-    return "PCIe";
-try_generic:
-    for (int i = 0; i < 16; i++) {
-        if (guid[i] != SECT_GUID_GENERIC[i]) return "Unknown";
-    }
-    return "Generic";
+/* The four section kinds this kernel names, and the Touch tag each one is
+ * published under. -1 from section_type_kind is a GUID we do not know. */
+static const char* const SECTION_KIND_NAME[4] = {
+    "Processor", "Memory", "PCIe", "Generic"
+};
+static const char* const SECTION_KIND_TAG[4] = {
+    "acpi:cper:processor", "acpi:cper:memory",
+    "acpi:cper:pcie",      "acpi:cper:generic"
+};
+
+static bool guid_eq(const uint8_t* a, const uint8_t* b) {
+    for (int i = 0; i < 16; i++) if (a[i] != b[i]) return false;
+    return true;
 }
 
-static const char* cper_severity_text(uint32_t sev) {
+static int section_type_kind(const uint8_t* guid) {
+    if (guid_eq(guid, SECT_GUID_PROCESSOR)) return 0;
+    if (guid_eq(guid, SECT_GUID_MEMORY))    return 1;
+    if (guid_eq(guid, SECT_GUID_PCIE))      return 2;
+    if (guid_eq(guid, SECT_GUID_GENERIC))   return 3;
+    return -1;
+}
+
+/* ACPI 6.5 Table 18.11 / Table 18.12 Error Severity. Code 3 is "None" in
+ * the ACPI tables and "Informational" in the UEFI CPER wording; it is the
+ * same code and this kernel says "none". */
+static const char* severity_text(uint32_t sev) {
     switch (sev) {
         case 0: return "recoverable";
         case 1: return "fatal";
         case 2: return "corrected";
-        case 3: return "informational";
+        case 3: return "none";
         default: return "unknown";
     }
 }
 
-/* Decode the CPER record(s) that follow the BERT header. Logs the
- * record header + a one-line summary of every section descriptor.
- * `region` is the full BERT region MMIO map; `region_len` is its
- * declared length. */
-static void cper_decode_region(volatile uint8_t* region,
-                                uint32_t region_len,
-                                uint32_t data_length) {
-    /* The first CPER record sits immediately after the 32-byte BERT
-     * header. data_length tells us how many CPER bytes follow. */
-    if (data_length < sizeof(cper_record_header_t)) {
-        debug_printf("[APEI] BERT data_length %u below CPER header size\n",
-                     data_length);
-        return;
-    }
-    if (sizeof(acpi_bert_region_t) + data_length > region_len) {
-        debug_printf("[APEI] BERT data_length %u exceeds region (%u)\n",
-                     data_length, region_len);
-        return;
+/* Byte length of one Generic Error Data Entry header (Table 18.12). */
+static uint32_t gedata_header_len(uint16_t revision) {
+    /* Revision is packed major.minor; the Timestamp arrived at 0x300.
+     * Linux compares the same way in acpi_hest_get_version(). */
+    return ((revision >> 8) >= 3) ? (uint32_t)sizeof(GenericErrorDataEntry)
+                                  : GEDATA_HEADER_PRE_V300;
+}
+
+/* Decode ONE Generic Error Status Block of the Boot Error Region and say
+ * what it holds: a one-line summary of the block, one line per Generic
+ * Error Data Entry, and a Touch publish for each so a logger can persist
+ * the prior-boot failure before the next one.
+ *
+ * `blk` is the block; `avail` is how many bytes of the region remain at
+ * that point. Returns the block's total length so the caller can step to
+ * the next block, or 0 when there is no further record (Block Status 0) or
+ * the block does not fit what is left.
+ *
+ * What stood here read `blk + 20` as a 128-byte CPER record header and
+ * demanded a "CPER" signature. No such header exists in the Boot Error
+ * Region: the bytes at +20 are the first entry's Section Type GUID (for a
+ * memory error, 14 11 BC A5 ...), so the signature test failed on every
+ * real machine and not one section was ever decoded — silently, because
+ * every print on that path compiles out of a shipped build. */
+static uint32_t bert_decode_block(volatile uint8_t* blk, uint32_t avail) {
+    if (avail < sizeof(GenericErrorStatusBlock)) return 0;
+
+    volatile GenericErrorStatusBlock* hdr = (volatile GenericErrorStatusBlock*)blk;
+    uint32_t status = hdr->block_status;
+    if (status == 0) return 0;           /* no more records in the region */
+
+    uint32_t data_length = hdr->data_length;
+    uint32_t raw_offset  = hdr->raw_data_offset;
+    uint32_t raw_length  = hdr->raw_data_length;
+
+    /* A block ends after its raw data when it carries any, and after its
+     * entries otherwise — the same length Linux computes in
+     * cper_estatus_len(). */
+    uint64_t block_len = raw_length
+        ? (uint64_t)raw_offset + raw_length
+        : (uint64_t)sizeof(GenericErrorStatusBlock) + data_length;
+
+    if (block_len < sizeof(GenericErrorStatusBlock) || block_len > avail ||
+        (uint64_t)sizeof(GenericErrorStatusBlock) + data_length > avail) {
+        /* kprintf, not debug_printf: the machine is holding a record of the
+         * failure that ended its previous boot and cannot read it. That
+         * sentence has to survive into a shipped build. */
+        kprintf("[APEI] BERT: a status block claims %lu bytes (%u of entries, "
+                "%u of raw data at +%u) with %u left in the region — the "
+                "prior-boot record cannot be read\n",
+                (unsigned long)block_len, data_length, raw_length,
+                raw_offset, avail);
+        return 0;
     }
 
-    volatile cper_record_header_t* rec =
-        (volatile cper_record_header_t*)(region + sizeof(acpi_bert_region_t));
+    kprintf("[APEI] BERT: %s error from the previous boot, severity=%s, "
+            "%u byte(s) of error data\n",
+            (status & 0x1) ? "uncorrectable" :
+            (status & 0x2) ? "correctable"   :
+            (status & 0x4) ? "multiple uncorrectable" :
+            (status & 0x8) ? "multiple correctable"   : "unclassified",
+            severity_text(hdr->error_severity), data_length);
 
-    if (rec->signature[0] != 'C' || rec->signature[1] != 'P' ||
-        rec->signature[2] != 'E' || rec->signature[3] != 'R') {
-        debug_printf("[APEI] BERT record missing CPER signature (got %.4s)\n",
-                     (const char*)rec->signature);
-        return;
-    }
-    if (rec->signature_end != 0xFFFFFFFFu) {
-        debug_printf("[APEI] BERT CPER signature_end mismatch (0x%x)\n",
-                     rec->signature_end);
-        return;
-    }
+    /* Broadcast the block so a userspace logger / telemetry daemon (anyone
+     * subscribing to `acpi:boot-error`) can persist it before the next
+     * crash. */
+    struct { uint32_t status; uint32_t severity; uint32_t data_length; } ev =
+        { status, hdr->error_severity, data_length };
+    TouchPublish("acpi:boot-error", &ev, sizeof(ev));
 
-    debug_printf("[APEI]   CPER rev=0x%x sections=%u severity=%s flags=0x%x len=%u\n",
-                 rec->revision, rec->section_count,
-                 cper_severity_text(rec->error_severity),
-                 rec->flags, rec->record_length);
-
-    static const char* sect_tag[] = {
-        [0] = "acpi:cper:processor",
-        [1] = "acpi:cper:memory",
-        [2] = "acpi:cper:pcie",
-        [3] = "acpi:cper:generic",
-    };
-    volatile cper_section_desc_t* desc =
-        (volatile cper_section_desc_t*)(rec + 1);
-    for (uint16_t i = 0; i < rec->section_count; i++) {
-        /* Bound the descriptor walk to record_length so a bad firmware
-         * cannot drive us off the end of the region. */
-        uint32_t off = (uint32_t)((uintptr_t)(desc + i + 1)
-                                 - (uintptr_t)rec);
-        if (off > rec->record_length) {
-            debug_printf("[APEI]     section desc %u beyond record len\n", i);
+    /* Generic Error Data Entries: header (64 or 72 bytes by revision) then
+     * Error Data Length bytes of section body, repeated until Data Length
+     * is spent. A zero-length body is legal and still advances by a
+     * header. */
+    volatile uint8_t* p   = blk + sizeof(GenericErrorStatusBlock);
+    uint32_t remaining    = data_length;
+    uint32_t index        = 0;
+    while (remaining >= GEDATA_HEADER_PRE_V300) {
+        volatile GenericErrorDataEntry* ge = (volatile GenericErrorDataEntry*)p;
+        uint32_t hlen = gedata_header_len(ge->revision);
+        uint32_t dlen = ge->error_data_length;
+        if (hlen > remaining || (uint64_t)hlen + dlen > remaining) {
+            kprintf("[APEI] BERT: error data entry %u claims %u+%u bytes with "
+                    "%u left — the rest of this record is unreadable\n",
+                    index, hlen, dlen, remaining);
             break;
         }
-        uint8_t guid_buf[16];
-        for (int j = 0; j < 16; j++) guid_buf[j] = desc[i].section_type[j];
-        const char* tname = section_type_name(guid_buf);
-        debug_printf("[APEI]   section[%u] type=%s sev=%s len=%u off=%u\n",
-                     i, tname,
-                     cper_severity_text(desc[i].section_severity),
-                     desc[i].section_length, desc[i].section_offset);
-        /* Per-section tag broadcast: subscribers can scope their
-         * interest (e.g. only memory or only PCIe). */
-        int kind = (tname[0] == 'P' && tname[1] == 'r') ? 0
-                 : (tname[0] == 'M') ? 1
-                 : (tname[0] == 'P') ? 2
-                 : (tname[0] == 'G') ? 3 : -1;
+
+        uint8_t guid[16];
+        for (int j = 0; j < 16; j++) guid[j] = ge->section_type[j];
+        int kind = section_type_kind(guid);
+        uint32_t sev = ge->error_severity;
+        uint32_t body_off = (uint32_t)((uintptr_t)(p + hlen) - (uintptr_t)blk);
+
+        kprintf("[APEI] BERT:   section[%u] %s, severity=%s, %u byte(s) at "
+                "+%u of the block\n",
+                index, (kind >= 0) ? SECTION_KIND_NAME[kind] : "unrecognised",
+                severity_text(sev), dlen, body_off);
+
+        /* Per-section tag broadcast: subscribers can scope their interest
+         * (e.g. only memory or only PCIe). */
         if (kind >= 0) {
-            struct { uint32_t sev; uint32_t len; uint32_t off; } sev_ev =
-                { desc[i].section_severity, desc[i].section_length,
-                  desc[i].section_offset };
-            TouchPublish(sect_tag[kind], &sev_ev, sizeof(sev_ev));
+            struct { uint32_t sev; uint32_t len; uint32_t off; } sect_ev =
+                { sev, dlen, body_off };
+            TouchPublish(SECTION_KIND_TAG[kind], &sect_ev, sizeof(sect_ev));
         }
+
+        p         += hlen + dlen;
+        remaining -= hlen + dlen;
+        index++;
     }
+
+    /* The Boot Error Region is a ONE-TIME source: what it holds describes
+     * the boot before this one. Clearing Block Status is how OSPM says the
+     * record has been consumed — left set, the same prior-boot error is
+     * re-announced at every boot from here on and the firmware has no room
+     * to record the next one. Linux clears the same field in
+     * bert_print_all() for the same reason. */
+    hdr->block_status = 0;
+
+    return (uint32_t)block_len;
 }
 
 /*
@@ -308,17 +351,27 @@ static const char* ghes_notify_name(uint8_t t) {
  * pointer. Linux performs the same read in
  * drivers/acpi/apei/ghes.c::__ghes_peek_estatus().
  *
- * The register is read once, here, while the HEST is being walked, and
- * only the value is carried into the runtime. A firmware that republishes
- * a different block address later in the boot would not be followed; that
- * re-read belongs to the runtime path (apei_ghes_runtime.c), which owns
- * the per-source descriptor and the polling, and it needs the register
- * itself — not just its value — to get there.
+ * This read is the boot-time LOOK — it says where the block is while the
+ * HEST is being walked. The register itself, not its value, is what the
+ * runtime is handed (apei_ghes_register_source below), and the runtime
+ * re-reads it before every walk, so a firmware that republishes the block
+ * elsewhere is followed. Linux performs the same read at the same place in
+ * __ghes_peek_estatus().
  *
  * Returns false and says so out loud when the register cannot be read;
  * *out_phys is 0 in that case. A register that reads back 0 is not an
  * error here: it means the firmware has published no status block for
- * this source. */
+ * this source yet. */
+/* The register is 8 bytes by definition. Firmware that publishes a bit
+ * width of 0 — or any width that is not an access size the CPU has — is
+ * honoured as the spec's 8 bytes rather than refused, the same fixup Linux
+ * applies in apei_check_gar(). The runtime is handed this width, not the
+ * raw one, so both ends read the register the same way. */
+static uint8_t ghes_status_register_width(const acpi_gas_t* gas) {
+    uint8_t w = gas->bit_width;
+    return (w == 8 || w == 16 || w == 32 || w == 64) ? w : 64;
+}
+
 static bool ghes_read_status_block_pointer(const acpi_gas_t* gas,
                                            uint16_t source_id,
                                            uint64_t* out_phys) {
@@ -329,12 +382,7 @@ static bool ghes_read_status_block_pointer(const acpi_gas_t* gas,
         return false;
     }
 
-    /* The register is 8 bytes by definition. Firmware that publishes a bit
-     * width of 0 — or any width that is not an access size the CPU has —
-     * is honoured as the spec's 8 bytes rather than refused, the same
-     * fixup Linux applies in apei_check_gar(). */
-    uint8_t width = gas->bit_width;
-    if (width != 8 && width != 16 && width != 32 && width != 64) width = 64;
+    uint8_t width = ghes_status_register_width(gas);
 
     if (gas->address_space == GAS_AS_SYSTEM_MEMORY) {
         /* Mapped read-only: this register belongs to the firmware and the
@@ -408,23 +456,31 @@ static void decode_ghes(uint8_t* entry, bool v2) {
 
     uint64_t gesb_phys = 0;
     if (!ghes_read_status_block_pointer(&g->error_status_address,
-                                        g->source_id, &gesb_phys) ||
-        gesb_phys == 0) {
-        /* kprintf, not debug_printf: an enabled source the kernel cannot
-         * follow is a class of hardware error this machine will never
-         * report, and that sentence has to survive into a shipped build. */
+                                        g->source_id, &gesb_phys)) {
+        /* kprintf, not debug_printf: an enabled source whose register the
+         * kernel cannot read at all is a class of hardware error this
+         * machine will never report, and that sentence has to survive into
+         * a shipped build. */
         kprintf("[APEI] GHES src=%u is enabled, but its error status address "
-                "register (0x%lx) names no status block — this source cannot "
-                "report a hardware error\n",
+                "register (0x%lx) cannot be read — this source cannot report "
+                "a hardware error\n",
                 g->source_id, (unsigned long)g->error_status_address.address);
         return;
     }
 
+    /* A register that reads 0 right now is NOT a source to throw away: it
+     * means the firmware has published no status block yet. The runtime
+     * reads the register again before every walk and follows it then. */
     debug_printf("[APEI]   GHES src=%u status block at 0x%lx\n",
                  g->source_id, (unsigned long)gesb_phys);
 
     (void)apei_ghes_register_source(g->source_id, v2, n->type, n->vector,
-                                     n->poll_interval, gesb_phys,
+                                     n->poll_interval,
+                                     g->error_status_address.address,
+                                     g->error_status_address.address_space,
+                                     ghes_status_register_width(
+                                         &g->error_status_address),
+                                     gesb_phys,
                                      g->error_status_block_length,
                                      ack_addr, ack_preserve, ack_write);
 }
@@ -586,62 +642,43 @@ const acpi_apei_info_t *acpi_get_apei(void) {
     return NULL;
 }
 
-static const char* severity_text(uint32_t sev) {
-    switch (sev) {
-        case 0: return "recoverable";
-        case 1: return "fatal";
-        case 2: return "corrected";
-        case 3: return "none";
-        default: return "unknown";
-    }
-}
-
-/* Read the BERT region (if present) and print a one-line summary so a
- * prior-boot uncorrectable error is visible in serial. The actual CPER
- * decode + dispatch into a runtime RAS pipeline belongs to a future
- * APEI/WHEA driver — at this layer we just surface the fact. */
+/* Read the Boot Error Region (if present) and say what the previous boot
+ * left in it. The region holds a sequence of Generic Error Status Blocks
+ * (ACPI 6.5 §18.3.1) and ends at the first block whose Block Status is
+ * zero; each block is decoded, published and then acknowledged by clearing
+ * that field. */
 void acpi_apei_consume(void) {
     if (!g_acpi.apei.bert_present) return;
-    if (g_acpi.apei.bert_region_length < sizeof(acpi_bert_region_t)) {
+    if (g_acpi.apei.bert_region_length < sizeof(GenericErrorStatusBlock)) {
         debug_printf("[APEI] BERT region length %u below header size\n",
                      g_acpi.apei.bert_region_length);
         return;
     }
-    volatile acpi_bert_region_t* rg = (volatile acpi_bert_region_t*)
+    volatile uint8_t* region = (volatile uint8_t*)
         vmm_map_mmio((uintptr_t)g_acpi.apei.bert_region_address,
                       g_acpi.apei.bert_region_length,
                       VMM_FLAGS_KERNEL_RW);
-    if (!rg) {
-        debug_printf("[APEI] BERT region map failed (addr=0x%lx len=%u)\n",
-                     (unsigned long)g_acpi.apei.bert_region_address,
-                     g_acpi.apei.bert_region_length);
+    if (!region) {
+        kprintf("[APEI] BERT: region 0x%lx (%u bytes) cannot be mapped — "
+                "whatever ended the previous boot cannot be read\n",
+                (unsigned long)g_acpi.apei.bert_region_address,
+                g_acpi.apei.bert_region_length);
         return;
     }
 
-    uint32_t status = rg->block_status;
-    if (status == 0) {
+    volatile uint8_t* p = region;
+    uint32_t remaining  = g_acpi.apei.bert_region_length;
+    uint32_t blocks     = 0;
+    while (remaining >= sizeof(GenericErrorStatusBlock)) {
+        uint32_t len = bert_decode_block(p, remaining);
+        if (len == 0) break;
+        p         += len;
+        remaining -= len;
+        blocks++;
+    }
+    if (blocks == 0) {
         debug_printf("[APEI] BERT: no error recorded from previous boot\n");
-        return;
     }
-    debug_printf("[APEI] BERT: %s previous-boot error, severity=%s, data_len=%u\n",
-                 (status & 0x1) ? "uncorrectable" :
-                 (status & 0x2) ? "correctable"   :
-                 (status & 0x4) ? "multi-uncorr"  :
-                 (status & 0x8) ? "multi-corr"    : "unknown",
-                 severity_text(rg->error_severity),
-                 rg->data_length);
-
-    /* Broadcast the prior-boot error so a userspace logger / telemetry
-     * daemon (anyone subscribing to `acpi:boot-error`) can persist it
-     * before the next crash. */
-    struct { uint32_t status; uint32_t severity; uint32_t data_length; } ev =
-        { status, rg->error_severity, rg->data_length };
-    TouchPublish("acpi:boot-error", &ev, sizeof(ev));
-
-    /* Decode the embedded CPER record + each section. */
-    cper_decode_region((volatile uint8_t*)rg,
-                       g_acpi.apei.bert_region_length,
-                       rg->data_length);
 
     if (g_acpi.apei.hest_present) {
         debug_printf("[APEI] HEST exposes %u error sources for runtime dispatch\n",

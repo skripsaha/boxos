@@ -26,8 +26,9 @@
  * the bytes it never got, so the gap is a number on the wire and not a seam
  * nobody can see.
  *
- * There is no wire when the UART does not answer the loopback at init: then
- * the ring keeps everything and nothing waits.
+ * There is no wire when nothing answers at init — no UART in the slot, or
+ * one that does not close the modem loopback: then the ring keeps everything,
+ * nothing waits, and the reason is said once on whatever console there is.
  */
 #include "serial.h"
 #include "io.h"
@@ -57,6 +58,19 @@
 #define IIR_RX_TIMEOUT       0x0C
 #define IIR_LINE_STATUS      0x06
 #define IIR_FIFO_ENABLED     0xC0   /* bits 7:6 = 11 — a 16550A with its FIFO on */
+
+/* PC16550D §8.8 Modem Control Register, §8.9 Modem Status Register. */
+#define MCR_DTR              0x01
+#define MCR_RTS              0x02
+#define MCR_OUT1             0x04
+#define MCR_OUT2             0x08
+#define MCR_LOOP             0x10
+#define MCR_RUNNING          (MCR_DTR | MCR_RTS | MCR_OUT1 | MCR_OUT2)
+#define MSR_CTS              0x10
+#define MSR_DSR              0x20
+#define MSR_RI               0x40
+#define MSR_DCD              0x80
+#define MSR_STATUS_BITS      (MSR_CTS | MSR_DSR | MSR_RI | MSR_DCD)
 
 #define SERIAL_COM1_GSI  4   /* legacy ISA IRQ4 = COM1, identity-mapped GSI */
 
@@ -93,6 +107,21 @@ static inline void put_wire(char c)
 void serial_init(void)
 {
     spinlock_init(&g_serial_lock);
+    g_wire_idle = 1u;
+
+    /* An empty slot floats every register high. Linux calls the same read its
+     * "LSR safety check" (8250_port.c, serial8250_do_startup: `serial_port_in
+     * (port, UART_LSR) == 0xff` -> -ENODEV) and it is the one check that
+     * survives a board with no UART at all — there is nothing to program and
+     * nothing to ask. */
+    if (inb(SERIAL_PORT_COM1 + SERIAL_LINE_STATUS) == 0xFF) {
+        g_wire_present = false;
+        kprintf("[SERIAL] COM1 at 0x%x: LSR reads 0xFF, no UART there. "
+                "The log ring keeps everything; nothing goes out on the line "
+                "and nothing waits for it.\n",
+                (unsigned)SERIAL_PORT_COM1);
+        return;
+    }
 
     outb(SERIAL_PORT_COM1 + SERIAL_INT_ENABLE, 0x00);
     outb(SERIAL_PORT_COM1 + SERIAL_LINE_CTRL, 0x80);   /* DLAB on               */
@@ -102,19 +131,48 @@ void serial_init(void)
     outb(SERIAL_PORT_COM1 + SERIAL_FIFO_CTRL, 0xC7);   /* FIFO on and cleared   */
     outb(SERIAL_PORT_COM1 + SERIAL_MODEM_CTRL, 0x0B);
 
-    /* The loopback: the fact that a UART is there. It used to be tested and
-     * the answer thrown away. */
-    outb(SERIAL_PORT_COM1 + SERIAL_MODEM_CTRL, 0x1E);
-    outb(SERIAL_PORT_COM1 + SERIAL_DATA, 0xAE);
-    g_wire_present = inb(SERIAL_PORT_COM1 + SERIAL_DATA) == 0xAE;
-    outb(SERIAL_PORT_COM1 + SERIAL_MODEM_CTRL, 0x0F);
+    /* ‼ THE LOOPBACK IS ASKED WITH THE MODEM LINES, NOT WITH A CHARACTER.
+     *
+     * What stood here wrote 0xAE to the transmitter and read the receiver
+     * buffer on the very next instruction. §8.8 bit 4 loops the transmitter
+     * SHIFT register into the receiver shift register — the byte is still
+     * serialised at the programmed rate, and §8.4 sets DR only "whenever a
+     * COMPLETE incoming character has been received and transferred into the
+     * Receiver Buffer Register". At the divisor just written, 1, that is
+     * 86.8 us away; the read followed one I/O cycle later, so on real silicon
+     * it returned whatever the FIFO reset left behind and the whole wire was
+     * declared absent. Linux concedes the same character time in code —
+     * size_fifo() loops back at divisor 1, writes its bytes and waits
+     * mdelay(20) before it looks at UART_LSR_DR. Only QEMU and Bochs hid it,
+     * both handing the loopback byte to the receiver inside the THR write.
+     *
+     * The modem loop costs no time at all: in loopback the four modem control
+     * outputs are tied to the four status inputs (§8.8 bit 4), and §8.9 names
+     * the two this asks for — MCR.RTS reads back as MSR.CTS, MCR.OUT2 as
+     * MSR.DCD, while DTR and OUT1, left clear, must read back as DSR and RI
+     * clear. That is exactly Linux autoconfig()'s test, down to the compared
+     * value. */
+    outb(SERIAL_PORT_COM1 + SERIAL_MODEM_CTRL, MCR_LOOP | MCR_OUT2 | MCR_RTS);
+    uint8_t msr = (uint8_t)(inb(SERIAL_PORT_COM1 + SERIAL_MODEM_STATUS) &
+                            MSR_STATUS_BITS);
+    outb(SERIAL_PORT_COM1 + SERIAL_MODEM_CTRL, MCR_RUNNING);
+    g_wire_present = (msr == (MSR_DCD | MSR_CTS));
+
+    if (!g_wire_present) {
+        kprintf("[SERIAL] COM1 at 0x%x: the UART did not close the modem "
+                "loopback (MSR 0x%02x, expected 0x%02x). The log ring keeps "
+                "everything; nothing goes out on the line and nothing waits "
+                "for it.\n",
+                (unsigned)SERIAL_PORT_COM1, (unsigned)msr,
+                (unsigned)(MSR_DCD | MSR_CTS));
+        return;
+    }
 
     /* How much the transmitter takes when it says it is empty: a 16550A with
      * its FIFO on answers IIR[7:6] = 11 and takes sixteen; anything else
      * takes one. Read from the part, not assumed. */
     uint8_t iir = inb(SERIAL_PORT_COM1 + SERIAL_INT_ID);
     g_wire_fifo = ((iir & IIR_FIFO_ENABLED) == IIR_FIFO_ENABLED) ? 16u : 1u;
-    g_wire_idle = 1u;
 }
 
 /* ── the pump ─────────────────────────────────────────────────────────── */

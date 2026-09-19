@@ -66,27 +66,226 @@ static void acpi_publish_irq(const AcpiTagPair *t, uint16_t word)
  * ============================================================ */
 static acpi_gpe_handler_t g_gpe_handlers[ACPI_MAX_GPES];
 
+/* ============================================================
+ * The GPE blocks themselves.
+ *
+ * ACPI 6.5 §4.8.4.1: a GPE block is GPEx_BLK_LEN bytes wide, the first half
+ * status and the second half enable, one bit per event.
+ *
+ * Two halves of one omission lived here. §16.3.1 says "the SCI interrupt can
+ * only be signaled after OSPM has enabled one of the GPE/PM1 enable bits",
+ * and nothing in this kernel had ever written a GPE enable bit — the walk in
+ * the SCI handler READ the enable half and masked status against it, so
+ * `s & e` was identically zero forever and no lid, thermal, EC or hotplug
+ * event could ever be delivered.
+ *
+ * The other half is what happens when firmware hands one over already armed,
+ * which §4.8.4.1 permits a design to do across a reset and which a warm
+ * reboot out of another OS does routinely. acpi_enable_mode() raises SCI_EN
+ * and every GPE the firmware had enabled for its own SMI use becomes an SCI
+ * source with nothing in this kernel able to service it: the handler used to
+ * acknowledge the status bit and leave the source enabled, so a level GPE
+ * re-latched at once, the SCI never de-asserted, and the IOAPIC re-delivered
+ * the instant EOI returned — the BSP pinned by a storm it could only ack.
+ *
+ * So: every block is disabled and cleared before the line opens (ACPICA's
+ * AcpiDisableAllGpes, for the same reason), a GPE is armed only when a
+ * handler is registered for it, and a GPE that fires with nobody to serve it
+ * is switched off and stays off — "if there is no handler or method to run,
+ * just disable the GPE and leave it disabled permanently", AcpiEvGpeDispatch.
+ * ============================================================ */
+#define ACPI_GPE_MAX_BYTES  (ACPI_MAX_GPES / 8)
+
+typedef struct {
+    uint16_t status;   /* I/O port of the status half; 0 when there is none */
+    uint16_t enable;   /* I/O port of the enable half */
+    uint8_t  bytes;    /* width of each half, in bytes */
+    uint16_t base;     /* GPE index carried by bit 0 of byte 0 */
+} AcpiGpeBlock;
+
+static AcpiGpeBlock g_gpe0;
+static AcpiGpeBlock g_gpe1;
+
+/* A GPE switched off for good is said once, not on every re-arm the firmware
+ * performs behind the kernel's back. */
+static uint8_t g_gpe_quieted[ACPI_GPE_MAX_BYTES];
+
+static bool gpe_quiet_mark(uint16_t gpe)
+{
+    uint8_t prev = __atomic_fetch_or(&g_gpe_quieted[gpe / 8],
+                                     (uint8_t)(1u << (gpe % 8)),
+                                     __ATOMIC_RELAXED);
+    return (prev & (uint8_t)(1u << (gpe % 8))) == 0;
+}
+
+static void gpe_quiet_unmark(uint16_t gpe)
+{
+    __atomic_fetch_and(&g_gpe_quieted[gpe / 8],
+                       (uint8_t)~(1u << (gpe % 8)), __ATOMIC_RELAXED);
+}
+
+/* Which block owns `gpe`, and where in it. NULL when this firmware describes
+ * no block that carries the index. */
+static AcpiGpeBlock *gpe_block_of(uint16_t gpe, uint8_t *byte, uint8_t *bit)
+{
+    AcpiGpeBlock *blocks[2] = { &g_gpe0, &g_gpe1 };
+
+    for (int i = 0; i < 2; i++) {
+        AcpiGpeBlock *blk = blocks[i];
+        if (blk->status == 0 || gpe < blk->base) continue;
+        uint32_t off = (uint32_t)gpe - blk->base;
+        if (off >= (uint32_t)blk->bytes * 8) continue;
+        *byte = (uint8_t)(off / 8);
+        *bit  = (uint8_t)(off % 8);
+        return blk;
+    }
+    return NULL;
+}
+
+static void gpe_block_locate(AcpiGpeBlock *blk, uint32_t port, uint8_t len,
+                             uint16_t base, const char *which)
+{
+    blk->status = 0;
+    blk->enable = 0;
+    blk->bytes  = 0;
+    blk->base   = base;
+
+    if (port == 0 || len < 2) return;
+
+    /* Every index this block can produce has to land inside the handler
+     * registry, which is what makes `base + b*8 + bit` safe to use as a
+     * subscript further down. GPE1 starts at gpe1_base, so its width is
+     * clamped against what is left of the registry rather than against the
+     * registry's size. */
+    uint8_t half  = (uint8_t)(len / 2);
+    uint32_t room = (base >= ACPI_MAX_GPES) ? 0u
+                                            : (ACPI_MAX_GPES - base) / 8u;
+    if (room > ACPI_GPE_MAX_BYTES) room = ACPI_GPE_MAX_BYTES;
+
+    if (half > room) {
+        kprintf("[ACPI] %s is %u bytes wide from GPE %u; this kernel follows "
+                "the first %u byte(s) of it, which is GPE %u..%u\n",
+                which, half, base, (unsigned)room,
+                base, (unsigned)(base + room * 8 - 1));
+        half = (uint8_t)room;
+    }
+    if (half == 0) return;
+
+    blk->status = (uint16_t)port;
+    blk->enable = (uint16_t)(port + half);
+    blk->bytes  = half;
+}
+
+/* Nothing the firmware armed for itself is inherited as an SCI source. */
+static void gpe_block_scrub(const AcpiGpeBlock *blk, const char *which)
+{
+    if (blk->status == 0) return;
+
+    for (uint8_t b = 0; b < blk->bytes; b++) {
+        outb((uint16_t)(blk->enable + b), 0x00);
+        outb((uint16_t)(blk->status + b), 0xFF);
+    }
+    kprintf("[ACPI] %s at 0x%x: %u byte(s) disabled and cleared before the SCI "
+            "opens (GPE %u..%u)\n", which, blk->status, blk->bytes,
+            blk->base, (unsigned)(blk->base + blk->bytes * 8 - 1));
+}
+
+static void acpi_gpe_blocks_locate_and_scrub(void)
+{
+    if (!g_acpi.fadt) return;
+
+    gpe_block_locate(&g_gpe0, g_acpi.fadt->gpe0_block,
+                     g_acpi.fadt->gpe0_length, 0, "GPE0");
+    gpe_block_locate(&g_gpe1, g_acpi.fadt->gpe1_block,
+                     g_acpi.fadt->gpe1_length, g_acpi.fadt->gpe1_base, "GPE1");
+
+    gpe_block_scrub(&g_gpe0, "GPE0");
+    gpe_block_scrub(&g_gpe1, "GPE1");
+}
+
 int acpi_gpe_register(uint16_t gpe, acpi_gpe_handler_t cb) {
-    if (gpe >= ACPI_MAX_GPES) return -1;
+    if (gpe >= ACPI_MAX_GPES || !cb) return -1;
+
+    uint8_t byte = 0, bit = 0;
+    AcpiGpeBlock *blk = gpe_block_of(gpe, &byte, &bit);
+    if (!blk) {
+        kprintf("[ACPI] GPE %u is in no block this firmware describes — there "
+                "is no enable bit to set for it\n", gpe);
+        return -1;
+    }
+
     g_gpe_handlers[gpe] = cb;
+
+    /* A latch from before this handler existed is not an event for it to
+     * answer, so the status bit is cleared before the source is armed. */
+    outb((uint16_t)(blk->status + byte), (uint8_t)(1u << bit));
+    uint8_t en = inb((uint16_t)(blk->enable + byte));
+    outb((uint16_t)(blk->enable + byte), (uint8_t)(en | (1u << bit)));
+    gpe_quiet_unmark(gpe);
     return 0;
 }
 
 void acpi_gpe_unregister(uint16_t gpe) {
     if (gpe >= ACPI_MAX_GPES) return;
+
+    uint8_t byte = 0, bit = 0;
+    AcpiGpeBlock *blk = gpe_block_of(gpe, &byte, &bit);
+    if (blk) {
+        uint8_t en = inb((uint16_t)(blk->enable + byte));
+        outb((uint16_t)(blk->enable + byte), (uint8_t)(en & ~(1u << bit)));
+    }
     g_gpe_handlers[gpe] = NULL;
+}
+
+/* PM1 control register fields — ACPI 6.5 §4.8.3.2.1, Table 4.13. */
+#define PM1_CNT_SLP_TYP_SHIFT  10
+#define PM1_CNT_SLP_TYP_MASK   0x1C00u   /* bits 12:10 */
+#define PM1_CNT_SLP_EN         0x2000u   /* bit 13     */
+
+/* One PM1 control port, asked for a sleep state.
+ *
+ * §4.6.1 has OSPM preserve the bits of a control register, and Table 4.13
+ * names the one that matters most here: bit 0 is SCI_EN, which "OSPM always
+ * preserves". The word written used to be synthesised whole — (SLP_TYP << 10)
+ * | SLP_EN — so it drove SCI_EN and BM_RLD to zero along with every reserved
+ * bit, and a machine resumed from S1/S3 would have come back with its PM
+ * events and every GPE routed to SMI instead of to the SCI handler below.
+ * ACPICA masks off SLP_TYP and SLP_EN and nothing else (acpi_hw_legacy_sleep),
+ * and writes the type first so it is already standing when the SLP_EN
+ * transition the chipset sequences on arrives. */
+static void pm1_control_request_sleep(uint16_t port, uint16_t slp_typ)
+{
+    uint16_t cur = inw(port);
+    if (cur == 0xFFFFu) {
+        kprintf("[ACPI] PM1 control at 0x%x reads 0xFFFF — nothing decodes "
+                "that port, so there is no register to ask for sleep\n", port);
+        return;
+    }
+
+    uint16_t keep = (uint16_t)(cur & ~(PM1_CNT_SLP_TYP_MASK | PM1_CNT_SLP_EN));
+    uint16_t typ  = (uint16_t)(keep |
+                               (((uint16_t)(slp_typ << PM1_CNT_SLP_TYP_SHIFT)) &
+                                PM1_CNT_SLP_TYP_MASK));
+
+    outw(port, typ);
+    outw(port, (uint16_t)(typ | PM1_CNT_SLP_EN));
 }
 
 /*
  * ACPI sleep entry. ACPI 6.5 §16.1.
  *
+ * ‼ NOT IN SERVICE. Nothing in this tree calls it: S1-S4 have no entry point
+ * yet, and a request for S5 is forwarded to acpi_shutdown() below before any
+ * register here is touched. So the \_PTS / \_BFS calls in this function are
+ * the sleep path's alone — no AML method is executed on any boot today.
+ *
  *   1. Resolve \_S<state> from the AML namespace (Package of bytes;
  *      [0] = SLP_TYPa, [1] = SLP_TYPb).
- *   2. Call \_PTS(state) if present — gives firmware a chance to
- *      prepare. We only *find* the method today; full TermList
- *      execution belongs to the AML executor that lives next to
- *      `aml_call_method` (Phase DD).
- *   3. Write SLP_TYP|SLP_EN to PM1a_CNT (and PM1b if PM1b_CNT != 0).
+ *   2. Call \_PTS(state) and \_BFS(state) if present — the AML executor
+ *      runs integer-result methods (aml_call_int), so these are evaluated
+ *      and not merely found.
+ *   3. Replace SLP_TYP in PM1a_CNT and set SLP_EN, preserving every other
+ *      bit (and PM1b if PM1b_CNT != 0).
  *   4. For S1 the CPU immediately enters low-power state; on wake the
  *      firmware clears SLP_EN, runs \_WAK and returns control here.
  *   5. S5 path delegates to acpi_shutdown() so the dedicated soft-off
@@ -112,8 +311,7 @@ int acpi_enter_sleep(uint8_t state) {
 
     debug_printf("[ACPI] entering S%u (SLP_TYPa=0x%x)\n", state, slp_typa);
 
-    /* Invoke \_PTS(state) and \_BFS(state) if present — the AML
-     * executor now handles integer-result methods. */
+    /* Invoke \_PTS(state) and \_BFS(state) if present. */
     {
         uint64_t arg = state;
         uint64_t ret = 0;
@@ -143,10 +341,8 @@ int acpi_enter_sleep(uint8_t state) {
 
     uint32_t pm1a = g_acpi.fadt->pm1a_control_block;
     uint32_t pm1b = g_acpi.fadt->pm1b_control_block;
-    uint16_t va = (uint16_t)((slp_typa << 10) | (1u << 13));
-    uint16_t vb = (uint16_t)((slp_typb << 10) | (1u << 13));
-    if (pm1a) outw((uint16_t)pm1a, va);
-    if (pm1b) outw((uint16_t)pm1b, vb);
+    if (pm1a) pm1_control_request_sleep((uint16_t)pm1a, slp_typa);
+    if (pm1b) pm1_control_request_sleep((uint16_t)pm1b, slp_typb);
 
     /* On S1, control returns here on wake. Other states either reset
      * the CPU (S2-S3) or never return (S4-S5). */
@@ -154,31 +350,80 @@ int acpi_enter_sleep(uint8_t state) {
     return 0;
 }
 
-/* Dispatch every fired bit in `block_base..block_base+half_len`. Two
- * fan-outs in priority order:
- *   1. The C-callback registry (`acpi_gpe_register`) — fast in-kernel
- *      handlers (EC, thermal-zone). Runs first because subscribers there
- *      need the lowest latency.
- *   2. A Touch publish on "acpi:gpe" with the bit's index as the payload
- *      word — userspace daemons can hear GPE bits without writing kernel
- *      code. The publish is a ring claim and a knock (zero blocking), so it
- *      doesn't slow the IRQ path beyond the registry call.
- */
-static void gpe_dispatch_block(uint8_t* fired_bytes, uint8_t bytes,
-                                uint16_t gpe_base) {
-    for (uint8_t b = 0; b < bytes; b++) {
-        uint8_t f = fired_bytes[b];
+/* One fired GPE, served in the order ACPI 6.5 §5.6.4 lays down.
+ *
+ * Its enable bit is already clear: the caller dropped every fired bit of the
+ * byte before serving any of them, which is the spec's first step ("disables
+ * the interrupt source (GPEx_BLK EN bit)") and the only thing that keeps a
+ * level source from re-delivering while it is being served.
+ *
+ * Two fan-outs, in priority order: the C-callback registry
+ * (`acpi_gpe_register`) for in-kernel handlers that need the lowest latency,
+ * then a Touch publish on "acpi:gpe" carrying the bit's index, so userspace
+ * can hear GPEs without kernel code. The publish is said from a K-Core —
+ * TouchPublish takes kmalloc and walks the process list, both forbidden in an
+ * interrupt — so the index rides the Touch IRQ ring under the one GPE name.
+ *
+ * The status bit is cleared AFTER the handler, which is the sequence §5.6.4
+ * gives for a level event. The spec clears an edge event's status before
+ * dispatch instead, and this kernel cannot yet tell the two apart: which one a
+ * GPE is, is written in the name of the method that serves it (\_GPE._Lxx
+ * level, _Exx edge) and nothing here walks the \_GPE scope. The level order
+ * is the one that is unsafe to get wrong — clearing a level status bit while
+ * its source still asserts re-latches it at once — so that is the order used,
+ * and an edge GPE pays for it only by losing a re-edge that arrived while its
+ * own handler was running.
+ *
+ * A GPE nobody serves stays disabled. After the bring-up scrub the only way
+ * one can fire is firmware arming it behind the kernel's back, and switching
+ * it off for good is what AcpiEvGpeDispatch does with the same case. */
+static void gpe_serve_one(const AcpiGpeBlock *blk, uint8_t byte, uint8_t bit,
+                          uint16_t idx)
+{
+    /* gpe_block_locate() clamps every block so `idx` is inside the registry. */
+    acpi_gpe_handler_t cb = g_gpe_handlers[idx];
+
+    if (cb) cb(idx);
+    acpi_publish_irq(&g_acpi_tag_gpe, idx);
+
+    outb((uint16_t)(blk->status + byte), (uint8_t)(1u << bit));
+
+    if (!cb) {
+        if (gpe_quiet_mark(idx)) {
+            kprintf("[ACPI] GPE %u fired with nobody to serve it — the source "
+                    "is switched off and stays off; a level GPE left enabled "
+                    "here holds the SCI asserted for good\n", idx);
+        }
+        return;
+    }
+
+    uint8_t en = inb((uint16_t)(blk->enable + byte));
+    outb((uint16_t)(blk->enable + byte), (uint8_t)(en | (1u << bit)));
+}
+
+static void gpe_block_service(const AcpiGpeBlock *blk)
+{
+    if (blk->status == 0) return;
+
+    for (uint8_t b = 0; b < blk->bytes; b++) {
+        uint8_t s = inb((uint16_t)(blk->status + b));
+        uint8_t e = inb((uint16_t)(blk->enable + b));
+        uint8_t fired = (uint8_t)(s & e);
+        if (!fired) continue;
+
+        /* §5.6.4 step one, for the whole byte at once: the sources go quiet
+         * before any of them is served. */
+        outb((uint16_t)(blk->enable + b), (uint8_t)(e & ~fired));
+
+        debug_printf("[ACPI] GPE block 0x%x byte %u: fired=0x%02x\n",
+                     blk->status, b, fired);
+
+        uint8_t f = fired;
         while (f) {
             int bit = __builtin_ctz(f);
-            uint16_t idx = (uint16_t)(gpe_base + b * 8 + bit);
-            if (idx < ACPI_MAX_GPES && g_gpe_handlers[idx]) {
-                g_gpe_handlers[idx](idx);
-            }
-            /* Said from a K-Core (TouchPublish takes kmalloc and walks the
-             * process list, both forbidden here): the index rides the Touch
-             * IRQ ring under the one GPE name. */
-            acpi_publish_irq(&g_acpi_tag_gpe, idx);
             f = (uint8_t)(f & ~(1u << bit));
+            gpe_serve_one(blk, b, (uint8_t)bit,
+                          (uint16_t)(blk->base + b * 8 + bit));
         }
     }
 }
@@ -364,12 +609,16 @@ static void acpi_power_button_answer_knocked(void *ctx)
  *   - GPE block status (each device-described event)
  *   - GHES SCI-class notifications (fixed-source RAS errors)
  *
- * Without a full AML interpreter we cannot dispatch GPE handlers, so
- * this stub:
- *   1. Reads PM1a status,
+ * What it does:
+ *   1. Reads both PM1 status halves and masks each against its enable half,
  *   2. Acknowledges every set status bit by writing the same value back
  *      (W1C semantics on PM1_STS — required to clear the SCI line),
- *   3. Logs the power-button / sleep-button bits for visibility.
+ *   3. Serves both GPE blocks in the order ACPI 6.5 §5.6.4 gives.
+ *
+ * The per-bit \_GPE._Lxx / _Exx methods are still not run. The AML executor
+ * exists and this driver calls it (aml_call_int, above), so what is missing
+ * is the walk of the \_GPE scope that says which method belongs to which
+ * bit — not an interpreter.
  *
  * The PM1 STATUS block is at PM1a_CNT - PM1_EVENT_LENGTH/2, but the
  * canonical FADT layout puts it in `pm1a_event_block`. We use that.
@@ -391,7 +640,10 @@ static void acpi_sci_handler(void) {
     uint16_t sts_a = g_pm1a_event.status ? inw(g_pm1a_event.status) : 0;
     uint16_t sts_b = g_pm1b_event.status ? inw(g_pm1b_event.status) : 0;
 
-    if (g_pm1a_event.status == 0 && g_pm1b_event.status == 0) goto eoi;
+    /* No PM1 event block on this machine — but a GPE block may still be
+     * asserting, and jumping to the EOI from here left its status bit
+     * un-acknowledged, which on a level GPE is a line that never drops. */
+    if (g_pm1a_event.status == 0 && g_pm1b_event.status == 0) goto gpe_blocks;
 
     /*
      * ‼ AN EVENT IS A STATUS BIT **AND** ITS ENABLE BIT (ACPI 6.5 §4.8.3.1.1)
@@ -416,7 +668,7 @@ static void acpi_sci_handler(void) {
     if (sts_a == 0xFFFF && sts_b == 0xFFFF) {
         kprintf("[ACPI] both PM1 status ports read 0xFFFF — that is a port "
                 "answering nothing, not every event at once; ignoring\n");
-        goto eoi;
+        goto gpe_blocks;
     }
 
     uint16_t en_a = g_pm1a_event.enable ? inw(g_pm1a_event.enable) : 0;
@@ -476,54 +728,17 @@ static void acpi_sci_handler(void) {
      * publishes Touch events for every other section. Production
      * server firmware uses this delivery mode for SMI-correlated
      * MCE events. */
+gpe_blocks:
     {
         extern uint32_t apei_ghes_sci_check(void);
         (void)apei_ghes_sci_check();
     }
 
-    /* GPE0 / GPE1 drain. The status and enable blocks live back-to-back
-     * inside each GPE block: STS at offset 0, EN at offset length/2.
-     * Walk byte-by-byte, mask STS against EN so we only clear events we
-     * armed, and W1C any bit that fired. Without an AML interpreter we
-     * cannot run the per-bit _Lxx / _Exx methods, so this acks the
-     * event and logs visibility but does not dispatch device-level
-     * work. That dispatch belongs to a future AML interpreter audit. */
-    uint32_t gpe0 = g_acpi.fadt->gpe0_block;
-    uint8_t  gpe0_len = g_acpi.fadt->gpe0_length;
-    if (gpe0 && gpe0_len >= 2) {
-        uint8_t half = (uint8_t)(gpe0_len / 2);
-        uint8_t fired_buf[32] = {0};
-        if (half > 32) half = 32;
-        for (uint8_t b = 0; b < half; b++) {
-            uint8_t s = inb((uint16_t)(gpe0 + b));
-            uint8_t e = inb((uint16_t)(gpe0 + half + b));
-            fired_buf[b] = (uint8_t)(s & e);
-            if (fired_buf[b]) {
-                debug_printf("[ACPI] GPE0 byte %u: fired=0x%02x\n", b, fired_buf[b]);
-                outb((uint16_t)(gpe0 + b), fired_buf[b]);
-            }
-        }
-        gpe_dispatch_block(fired_buf, half, 0);
-    }
-    uint32_t gpe1 = g_acpi.fadt->gpe1_block;
-    uint8_t  gpe1_len = g_acpi.fadt->gpe1_length;
-    if (gpe1 && gpe1_len >= 2) {
-        uint8_t half = (uint8_t)(gpe1_len / 2);
-        uint8_t fired_buf[32] = {0};
-        if (half > 32) half = 32;
-        for (uint8_t b = 0; b < half; b++) {
-            uint8_t s = inb((uint16_t)(gpe1 + b));
-            uint8_t e = inb((uint16_t)(gpe1 + half + b));
-            fired_buf[b] = (uint8_t)(s & e);
-            if (fired_buf[b]) {
-                debug_printf("[ACPI] GPE1 byte %u: fired=0x%02x\n", b, fired_buf[b]);
-                outb((uint16_t)(gpe1 + b), fired_buf[b]);
-            }
-        }
-        gpe_dispatch_block(fired_buf, half, g_acpi.fadt->gpe1_base);
-    }
+    /* Both GPE blocks, located and scrubbed by acpi_sci_arm before this line
+     * was ever unmasked. */
+    gpe_block_service(&g_gpe0);
+    gpe_block_service(&g_gpe1);
 
-eoi:
     irqchip_send_eoi(g_acpi.fadt->sci_interrupt);
 }
 
@@ -539,22 +754,60 @@ void acpi_sci_register(void) {
         return;
     }
     /*
-     * ACPI 6.5 §5.2.15: the SCI is a level-sensitive, shareable, active-low
-     * interrupt — and that is not the ISA bus default the IOAPIC applies to a
-     * line nobody described. Firmware usually supplies an Interrupt Source
-     * Override saying so, and is not required to.
+     * ACPI 6.5 §5.2.9, Table 5.9, SCI_INT (offset 46): "System vector the SCI
+     * interrupt is wired to in 8259 mode. On systems that do not contain the
+     * 8259, this field contains the Global System interrupt number of the SCI
+     * interrupt. OSPM is required to treat the ACPI SCI interrupt as a
+     * shareable, level, active low interrupt." (The citation that stood here,
+     * §5.2.15, is the Embedded Controller Boot Resources Table and says
+     * nothing about the SCI.)
      *
-     * Without one the line was programmed edge-triggered and active high,
-     * which on a level, active-low line reads as asserted the moment it is
-     * unmasked and never asserts again after the first event is cleared. QEMU
-     * forgives it. A chipset does not.
+     * Two things follow from that sentence, and neither was done.
+     *
+     * SCI_INT is an 8259 IRQ number on every machine that has an 8259, so the
+     * line to describe is ioapic_isa_to_gsi(SCI_INT). The canonical PCAT case
+     * is the SCI on IRQ 9 remapped to INTIN 11 (§5.2.12.5): asking
+     * ioapic_gsi_flags about 9 there asks about a pin belonging to somebody
+     * else, and describing 9 hangs a level/active-low description on that
+     * other device while irqchip_enable_irq programs 11 from the firmware's
+     * own flags.
+     *
+     * And "required to treat as level, active low" is unconditional — not a
+     * default that firmware's silence selects. §5.2.12.5, Table 5.26 encodes
+     * polarity 00 and trigger 00 as "conforms to the specifications of the
+     * bus", which for ISA means active high and edge, so an override that
+     * exists and defers to the bus describes the SCI wrongly just as loudly as
+     * no override at all. The guard here fired only on total silence, so a
+     * board publishing {source 9, GSI 9, flags 0x0000} got an edge,
+     * active-high SCI: the line idles high and asserts low, the IOAPIC never
+     * latches that falling edge, the status bit is never cleared, and no ACPI
+     * event is delivered for the rest of the session. Linux normalises exactly
+     * these two fields in acpi_sci_ioapic_setup ("compatible SCI trigger is
+     * level" / "compatible SCI polarity is low").
+     *
+     * Only fields firmware left at 00 are replaced; a board that states a
+     * polarity or a trigger for its own SCI keeps it.
      */
-    if (!ioapic_gsi_flags(sci, NULL)) {
-        /* polarity 11 = active low, trigger 11 = level */
-        ioapic_describe_gsi(sci, 0x000F);
-        kprintf("[ACPI] firmware described no override for the SCI — GSI %u "
-                "programmed level-triggered and active low, as the "
-                "specification requires\n", sci);
+    uint32_t gsi = (sci < 16) ? ioapic_isa_to_gsi((uint8_t)sci) : sci;
+    uint16_t said = 0;
+    bool described = ioapic_gsi_flags(gsi, &said);
+    uint16_t forced = said;
+    if ((forced & 0x0003u) == 0) forced |= 0x0003u;   /* polarity 11: active low */
+    if ((forced & 0x000Cu) == 0) forced |= 0x000Cu;   /* trigger  11: level      */
+
+    if (!described || forced != said) {
+        if (sci < 16) {
+            /* The correction has to live where the lookup looks first, which
+             * for an ISA line is the Interrupt Source Override table — the
+             * very place a firmware override that defers to the bus sits. */
+            ioapic_register_iso((uint8_t)sci, gsi, forced);
+        } else {
+            ioapic_describe_gsi(gsi, forced);
+        }
+        kprintf("[ACPI] SCI is IRQ %u on GSI %u; firmware said %s0x%04x — "
+                "programmed 0x%04x, level-triggered and active low, as "
+                "ACPI 6.5 §5.2.9 requires\n",
+                sci, gsi, described ? "" : "nothing, i.e. ", said, forced);
     }
 
     irq_register_handler((uint8_t)sci, acpi_sci_handler);
@@ -583,6 +836,11 @@ void acpi_sci_arm(void)
     acpi_tag_resolve(&g_acpi_tag_rtc_alarm,    "acpi:rtc-alarm");
     acpi_tag_resolve(&g_acpi_tag_wake,         "acpi:wake");
     acpi_tag_resolve(&g_acpi_tag_gpe,          "acpi:gpe");
+
+    /* Before the door, not after: a GPE the firmware left armed and asserting
+     * would otherwise be delivered the instant the line is unmasked, and this
+     * kernel could only acknowledge it, never quiet it. */
+    acpi_gpe_blocks_locate_and_scrub();
 
     irqchip_enable_irq((uint8_t)sci);
     kprintf("[ACPI] SCI on GSI %u\n", sci);
@@ -706,7 +964,7 @@ acpi_error_t acpi_init(void) {
     debug_printf("[ACPI] Initialization complete (HPET=%s MCFG=%s S5=%s)\n",
                  g_acpi.hpet.present ? "yes" : "no",
                  g_acpi.mcfg.present ? "yes" : "no",
-                 g_acpi.s5_found     ? "yes" : "fallback");
+                 g_acpi.s5_found     ? "yes" : "no");
 
     /* Broadcast capability bitmap so userspace daemons can decide what
      * features to bring up (battery service only matters if S3 works,

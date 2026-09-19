@@ -13,24 +13,84 @@ static uint8_t ioapic_max_entry = 0;
 #define ISO_TABLE_SIZE 16
 static ioapic_iso_t iso_table[ISO_TABLE_SIZE];
 
-uint32_t ioapic_read(uint32_t reg) {
+/*
+ * One selector, one transaction.
+ *
+ * The IOAPIC has no addressable registers of its own on the bus. Intel
+ * 82093AA §3.0: "To reference an IOAPIC register, a byte memory write that
+ * the PIIX3 decodes for the IOAPIC loads the IOREGSEL Register with an
+ * 8-bit value that specifies the IOAPIC register ... to be accessed. The
+ * IOWIN Register is then used to read/write the desired data from/to the
+ * IOAPIC register specified by bits [7:0] of the IOREGSEL Register." The
+ * index write and the data access are therefore ONE transaction against a
+ * single shared piece of state, and a second core that lands between them
+ * does not corrupt its own access — it silently redirects ours.
+ *
+ * The same section makes the read-modify-write explicit: "to modify a
+ * field (e.g., bit, byte), the whole 32 bit register must be read, the
+ * field modified, and the 32 bits written back." That is three accesses
+ * across two transactions, and masking a pin is exactly that shape.
+ *
+ * So the lock is held across the WHOLE operation, not around each access:
+ * both halves of a redirection entry, and the read and the write-back of a
+ * mask. This is the scope of Linux's ioapic_lock (arch/x86/kernel/apic/
+ * io_apic.c), which its ioapic_read_entry / ioapic_write_entry take with
+ * raw_spinlock_irqsave while the low-level io_apic_read / io_apic_write
+ * stay bare. spin_lock() here disables interrupts for the same reason
+ * Linux's irqsave form does: an interrupt handler that touches the IOAPIC
+ * between our index and our data is the single-core version of the same
+ * interleaving.
+ */
+static spinlock_t ioapic_reg_lock;
+
+static inline uint32_t ioapic_read_held(uint32_t reg) {
     ioapic_base_virt[IOAPIC_IOREGSEL / 4] = reg;
     return ioapic_base_virt[IOAPIC_IOWIN / 4];
 }
 
-void ioapic_write(uint32_t reg, uint32_t value) {
+static inline void ioapic_write_held(uint32_t reg, uint32_t value) {
     ioapic_base_virt[IOAPIC_IOREGSEL / 4] = reg;
     ioapic_base_virt[IOAPIC_IOWIN / 4] = value;
 }
 
-static void ioapic_write_redir(uint8_t entry, uint32_t low, uint32_t high) {
-    uint32_t reg = IOAPIC_REG_REDTBL + entry * 2;
-    ioapic_write(reg, low);
-    ioapic_write(reg + 1, high);
+uint32_t ioapic_read(uint32_t reg) {
+    spin_lock(&ioapic_reg_lock);
+    uint32_t value = ioapic_read_held(reg);
+    spin_unlock(&ioapic_reg_lock);
+    return value;
 }
 
-static uint32_t ioapic_read_redir_low(uint8_t entry) {
-    return ioapic_read(IOAPIC_REG_REDTBL + entry * 2);
+void ioapic_write(uint32_t reg, uint32_t value) {
+    spin_lock(&ioapic_reg_lock);
+    ioapic_write_held(reg, value);
+    spin_unlock(&ioapic_reg_lock);
+}
+
+/*
+ * The high dword goes first, and that order is the whole point.
+ *
+ * A redirection entry is 64 bits reached as two 32-bit registers. The mask
+ * bit lives in the LOW dword (82093AA §3.2.4, IOREDTBLx bit 16: "When this
+ * bit is 1, the interrupt signal is masked ... When this bit is 0, the
+ * interrupt is not masked"); the destination lives in the HIGH dword (bits
+ * 63:56, "If the Destination Mode of this entry is Physical Mode ... bits
+ * [59:56] contain an APIC ID"). Writing the low dword first therefore arms
+ * the line — new vector, mask cleared — while the destination is still
+ * whatever the previous programming left there, and an assertion inside
+ * that window is delivered to the wrong LAPIC under the new vector.
+ *
+ * Linux states it in the same words above __ioapic_write_entry: "When we
+ * write a new IO APIC routing entry, we need to write the high word first!
+ * If the mask bit in the low word is clear, we will enable the interrupt,
+ * and we need to make sure the entry is fully populated before that
+ * happens."
+ */
+static void ioapic_write_redir(uint8_t entry, uint32_t low, uint32_t high) {
+    uint32_t reg = IOAPIC_REG_REDTBL + entry * 2;
+    spin_lock(&ioapic_reg_lock);
+    ioapic_write_held(reg + 1, high);
+    ioapic_write_held(reg, low);
+    spin_unlock(&ioapic_reg_lock);
 }
 
 void ioapic_init(uintptr_t base_addr, uint8_t gsi_base) {
@@ -111,9 +171,13 @@ void ioapic_disable_irq(uint8_t gsi) {
         return;
     }
 
-    uint32_t low = ioapic_read_redir_low(pin);
-    low |= IOAPIC_REDIR_MASKED;
-    ioapic_write(IOAPIC_REG_REDTBL + pin * 2, low);
+    /* Read-modify-write of one 32-bit register: read and write-back are a
+     * single operation, not two transactions that may be interleaved. */
+    uint32_t reg = IOAPIC_REG_REDTBL + pin * 2;
+    spin_lock(&ioapic_reg_lock);
+    uint32_t low = ioapic_read_held(reg);
+    ioapic_write_held(reg, low | IOAPIC_REDIR_MASKED);
+    spin_unlock(&ioapic_reg_lock);
 }
 
 void ioapic_set_irq(uint8_t gsi, uint8_t vector, uint8_t dest, uint32_t flags) {

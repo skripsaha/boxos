@@ -74,11 +74,23 @@ bool apei_ghes_runtime_is_initialized(void);
  *
  * v2 reads from read_ack_* registers (zero if not v2).
  *
- * Returns OK or ERR_NO_MEMORY (table full). */
+ * status_reg_* is the Error Status Address GAS of ACPI 6.5 Table 18.10 —
+ * the REGISTER that holds the status block's physical address, not the
+ * block. The runtime re-reads it before every walk, exactly as Linux does
+ * in __ghes_peek_estatus(), so a block the firmware republishes elsewhere
+ * is followed; `gesb_phys` is only what that register said at boot and may
+ * legitimately be 0 ("no block published yet").
+ *
+ * Returns OK, ERR_INVALID_ARGUMENT (no register / block too small to be a
+ * status block) or ERR_NO_MEMORY (table full, or a register that cannot be
+ * mapped). */
 error_t apei_ghes_register_source(uint16_t source_id, bool v2,
                                    uint8_t  notify_type,
                                    uint32_t vector,
                                    uint32_t poll_interval_ms,
+                                   uint64_t status_reg_addr,
+                                   uint8_t  status_reg_space,
+                                   uint8_t  status_reg_width,
                                    uint64_t gesb_phys,
                                    uint32_t gesb_len,
                                    uint64_t read_ack_addr,
@@ -92,8 +104,11 @@ void apei_ghes_poll_tick(void);
 
 /* NMI-context entry. Walks NMI-notify sources, defers GESB processing
  * on the source's knock (NMI is even more restrictive than #MC IST — must not
- * take spinlocks held by interrupted code). Returns true if any source
- * advertised a pending error. */
+ * take spinlocks held by interrupted code, and must not touch a mapping the
+ * drain core may be releasing). It reads each source's Error Status Address
+ * register and nothing else, so what it returns is "a source names a status
+ * block", not "a record is pending" — that question is answered by the walk
+ * the knock brings. */
 bool apei_ghes_nmi_check(void);
 
 /* SCI-context entry. Called from acpi_sci_handler alongside the GPE

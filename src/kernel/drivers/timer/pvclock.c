@@ -4,6 +4,7 @@
 #include "vmm.h"
 #include "klib.h"
 #include "atomics.h"
+#include "amp.h"          // amp_get_core_index() — whose slot this core reads
 
 /*
  * kvmclock implementation.
@@ -15,9 +16,21 @@
  * address of that VCPU's slot + bit 0 (enable). After enable, the
  * struct is updated by the hypervisor whenever the VCPU is scheduled.
  *
- * For TSC frequency calibration we use VCPU 0's slot. That value is
- * package-wide on every KVM build (KVM normalises pvclock across
- * VCPUs by design — guest-visible TSC is rate-synchronised).
+ * A READING BELONGS TO THE VCPU THAT TOOK IT. tsc_timestamp is, in the
+ * words of Documentation/virt/kvm/x86/msr.rst, "the tsc value at the
+ * current VCPU at the time of the update of this structure" — an epoch
+ * private to one VCPU, published when THAT VCPU was last entered. So
+ * pvclock_now_ns() reads the slot of the core it is executing on, exactly
+ * as linux's kvmclock.c does through this_cpu_pvti(). Reading slot 0 from
+ * core 3 subtracted core 0's epoch from core 3's rdtsc and produced a
+ * nanosecond value wrong by the difference of their TSC offsets plus the
+ * whole interval since vCPU 0 was last scheduled — and readings taken from
+ * different cores went backwards against each other.
+ *
+ * The RATE is the one thing that is package-wide: KVM rate-synchronises
+ * guest-visible TSC across VCPUs, so the (mul, shift) pair is identical in
+ * every slot. That is why pvclock_tsc_khz() may read slot 0 from anywhere,
+ * and why it is the only function here that does.
  *
  * Per-VCPU init is performed by pvclock_init_ap() from per_core.c,
  * which is invoked from each AP after lapic_enable but before any
@@ -26,12 +39,6 @@
 
 #define MSR_KVM_SYSTEM_TIME_NEW   0x4b564d01u
 #define MSR_KVM_WALL_CLOCK_NEW    0x4b564d00u
-
-/* PVCLOCK_TSC_STABLE_BIT (linux/include/uapi/linux/pvclock-abi.h):
- * bit 0 in pvti->flags asserts "the TSC behind this pvclock is
- * synchronised across every VCPU and not affected by C-states". When
- * set, a guest may read pvclock without coordinating across CPUs. */
-#define PVCLOCK_TSC_STABLE_BIT    (1u << 0)
 
 typedef struct __attribute__((packed, aligned(32))) {
     volatile uint32_t version;
@@ -58,11 +65,13 @@ static pvclock_wall_clock_t      *s_wall             = NULL;
 
 static volatile bool s_available = false;
 
-/* MAX_CORES is defined in amp.h; we don't include amp.h here to keep
- * this driver layer-free. The PMM page allocated below is 4 KB, big
- * enough for 128 VCPU slots × 32 bytes — more than any plausible
- * BoxOS deployment. */
+/* The PMM page allocated below is 4 KB, which holds exactly 128 VCPU
+ * slots of 32 bytes. Both pvclock_init_ap() and pvclock_now_ns() hold to
+ * this bound: a core numbered past it simply has no pvclock, which is a
+ * fact to report rather than a page to read past. */
 #define PVCLOCK_MAX_SLOTS  128
+_Static_assert(PVCLOCK_MAX_SLOTS * sizeof(pvclock_vcpu_time_info_t) <= 4096u,
+               "pvclock slots must fit the single page they are allocated in");
 
 /* Hypervisor latency on the populate-after-WRMSR write: KVM updates
  * the pvti slot synchronously inside the WRMSR exit handler, so a few
@@ -211,11 +220,19 @@ uint64_t pvclock_now_ns(void)
 {
     if (!s_available) return 0;
 
+    /* This core's own slot — the one pvclock_init_ap() registered for it,
+     * and the only one whose tsc_timestamp is an epoch on this core's TSC.
+     * A core past the slot array has no slot registered (pvclock_init_ap
+     * declines it with the same bound), so it has no pvclock reading to
+     * give and says so rather than reading a neighbour's page. */
+    uint8_t core = amp_get_core_index();
+    if (core >= PVCLOCK_MAX_SLOTS) return 0;
+
     /* Per Linux Documentation/virt/kvm/x86/msr.rst recommended-read:
      * read version → barrier → fields → barrier → version. If version
      * changed (or is odd), retry. Odd value = update in progress on
      * the hypervisor side; even = consistent snapshot. */
-    pvclock_vcpu_time_info_t *pvti = &s_pvti_array[0];
+    pvclock_vcpu_time_info_t *pvti = &s_pvti_array[core];
 
     uint64_t ns;
     for (int attempts = 0; attempts < PVCLOCK_SEQLOCK_RETRY_MAX; attempts++) {
@@ -279,6 +296,8 @@ uint64_t pvclock_tsc_khz(void)
 {
     if (!s_available) return 0;
 
+    /* Slot 0 from any core, deliberately: this reads the (mul, shift) RATE,
+     * which KVM keeps identical in every slot, never the per-VCPU epoch. */
     pvclock_vcpu_time_info_t *pvti = &s_pvti_array[0];
     uint32_t mul   = pvti->tsc_to_system_mul;
     int8_t   shift = pvti->tsc_shift;

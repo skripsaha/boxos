@@ -75,6 +75,34 @@ xhci_controller_t* xhci_get_controller(void) {
 #define XHCI_READY_TIMEOUT_MS    1000
 #define XHCI_START_TIMEOUT_MS    100
 
+/*
+ * And the one number here that is not a timeout at all: how long the
+ * controller is left alone after being told to reset itself.
+ *
+ * Writing USBCMD.HCRST and reading a register back in the same breath hangs
+ * some machines outright. Linux carries it as a quirk — "Existing Intel xHCI
+ * controllers require a delay of 1 mS, after setting the CMD_RESET bit, and
+ * before accessing any HC registers ... Without this delay, the subsequent HC
+ * register access, may result in a system hang very rarely" — applied to every
+ * Intel-vendor xHCI with no device filter, which is precisely the silicon this
+ * kernel is brought up on. EDK2 does not gate it on a vendor at all: XhcResetHC
+ * stalls PcdDelayXhciHCReset, default 2000 us, between the HCRST write and its
+ * first read back, because "PHY transition from P3 to P0 can take around 1.3ms
+ * and the xHCI reset can take around 1.5ms".
+ *
+ * Two milliseconds, unconditionally, for the EDK2 reason: the firmware on this
+ * class of board already waits that long before this kernel ever runs, and
+ * whether a given part needs it is not something a driver can ask. It is spent
+ * inside the reset budget above, not on top of it — a controller that resets in
+ * microseconds still leaves after two milliseconds, and one that does not was
+ * never going to leave sooner.
+ *
+ * This is a settling time the hardware requires, not a wait on something the
+ * controller will eventually say. There is nothing to receive and nothing to
+ * give up on: the wait below cannot fail and cannot return early.
+ */
+#define XHCI_RESET_QUIET_MS      2
+
 /* Wait for a bit in a controller register to reach a value.
  *
  * Every wait in this driver is a wait on hardware that offers no event to
@@ -135,6 +163,16 @@ int xhci_reset(xhci_controller_t* ctrl) {
     debug_printf("[xHCI] Controller halted\n");
 
     ctrl->op_regs->usbcmd |= XHCI_CMD_RESET;
+
+    /* Nothing is said to this controller for the next two milliseconds — see
+     * XHCI_RESET_QUIET_MS. The write above is posted; the read that would
+     * follow it is not, and on the parts that carry this erratum that read is
+     * the one that hangs the machine. Both bring-up and the recovery path come
+     * through here, so both are covered by it. */
+    uint64_t quiet_until = rdtsc() + cpu_ms_to_tsc(XHCI_RESET_QUIET_MS);
+    while ((int64_t)(rdtsc() - quiet_until) < 0) {
+        cpu_pause();
+    }
 
     if (!xhci_wait_bit(&ctrl->op_regs->usbcmd, XHCI_CMD_RESET, false,
                        XHCI_RESET_TIMEOUT_MS)) {

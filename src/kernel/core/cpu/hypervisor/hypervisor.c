@@ -65,9 +65,40 @@ static const hv_signature_t g_signatures[] = {
  * tlfs.h (HV_MSR_REFERENCE_TSC_AVAILABLE = BIT(9)). */
 #define HV_PARTITION_ACCESS_REFERENCE_TSC (1u << 9)
 
-/* CPUID 0x40000003:EDX["enlightenment info"] bit 8: FrequencyMsrsAvailable.
- * When set, MSR_HV_TSC_FREQUENCY (0x40000022) and MSR_HV_APIC_FREQUENCY
- * (0x40000023) are readable from the guest (TLFS §2.4.4). */
+/* The frequency MSRs need BOTH halves of CPUID leaf 0x40000003, and the two
+ * halves are different kinds of statement. TLFS, "Feature and Interface
+ * Discovery" → "Hypervisor Feature Identification - 0x40000003", and the
+ * HV_PARTITION_PRIVILEGE_MASK datatype page.
+ *
+ *   EAX is HV_PARTITION_PRIVILEGE_MASK — what THIS partition was granted by
+ *   its parent through HvPartitionPropertyPrivilegeFlags. Bit 11 is
+ *   AccessFrequencyRegs: "The partition has access to the synthetic MSRs
+ *   that supply the TSC and APIC frequencies, if supported." It is the bit
+ *   that makes RDMSR 0x40000022 legal. Without it the hypervisor injects
+ *   #GP, and a #GP in kernel mode here is a panic: the only fault fixup
+ *   table in this tree covers user-memory copies, not this.
+ *
+ *   EDX bit 8 is FrequencyMsrsAvailable, a hypervisor BUILD capability —
+ *   "Support for determining timer frequencies is available". It says the
+ *   frequencies exist, not that this partition may read them. EDX of this
+ *   leaf is not "enlightenment info" either; that name belongs to leaf
+ *   0x40000004, "Implementation Recommendations".
+ *
+ * Gating on one bit alone is wrong in both directions and both directions
+ * are live. A partition with EDX[8] set and AccessFrequencyRegs withheld
+ * panics on the RDMSR. Xen with viridian enlightenments — which answers to
+ * the "Microsoft Hv" signature above — grants AccessFrequencyRegs by
+ * default and never sets EDX bit 8, so a gate on EDX alone silently throws
+ * away the only exact TSC frequency the interface offers and falls back to
+ * measuring one. Linux requires both (arch/x86/kernel/cpu/mshyperv.c):
+ *
+ *   if (ms_hyperv.features & HV_ACCESS_FREQUENCY_MSRS &&
+ *       ms_hyperv.misc_features & HV_FEATURE_FREQUENCY_MSRS_AVAILABLE)
+ *
+ * Bit positions verified against linux include/hyperv/hvgdk_mini.h:
+ * HV_ACCESS_FREQUENCY_MSRS = BIT(11) in the EAX privilege mask,
+ * HV_FEATURE_FREQUENCY_MSRS_AVAILABLE = BIT(8) in EDX. */
+#define HV_PARTITION_ACCESS_FREQUENCY_MSRS   (1u << 11)
 #define HV_FEATURE_FREQUENCY_MSRS_AVAILABLE  (1u << 8)
 
 #define MSR_HV_TSC_FREQUENCY    0x40000022u
@@ -206,6 +237,7 @@ bool hv_has_hyperv_tsc_page(void)
 bool hv_has_hyperv_frequency_msrs(void)
 {
     return g_hypervisor.vendor == HV_VENDOR_HYPERV &&
+           (g_hypervisor.hyperv_privileges_eax & HV_PARTITION_ACCESS_FREQUENCY_MSRS) != 0 &&
            (g_hypervisor.hyperv_privileges_edx & HV_FEATURE_FREQUENCY_MSRS_AVAILABLE) != 0;
 }
 

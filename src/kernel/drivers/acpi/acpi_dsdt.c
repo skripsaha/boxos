@@ -41,7 +41,11 @@ static uint32_t decode_pkg_length(const uint8_t* aml, uint32_t* bytes_consumed) 
     return length;
 }
 
-/* AML integer encoding — ACPI 6.5 §20.2.3. */
+/* AML integer encoding — ACPI 6.5 §20.2.3.
+ *
+ * `*bytes_consumed == 0` means "this is not a constant integer". The
+ * caller must treat that as a refusal: a fabricated 0 here would become
+ * a fabricated SLP_TYP written to PM1a_CNT. */
 static uint32_t extract_integer_value(const uint8_t* aml,
                                        uint32_t aml_remaining,
                                        uint32_t* bytes_consumed) {
@@ -53,17 +57,17 @@ static uint32_t extract_integer_value(const uint8_t* aml,
 
     switch (prefix) {
         case AML_BYTE_PREFIX:
-            if (aml_remaining < 2) { *bytes_consumed = 1; return 0; }
+            if (aml_remaining < 2) { *bytes_consumed = 0; return 0; }
             *bytes_consumed = 2;
             return aml[1];
 
         case AML_WORD_PREFIX:
-            if (aml_remaining < 3) { *bytes_consumed = 1; return 0; }
+            if (aml_remaining < 3) { *bytes_consumed = 0; return 0; }
             *bytes_consumed = 3;
             return (uint32_t)aml[1] | ((uint32_t)aml[2] << 8);
 
         case AML_DWORD_PREFIX:
-            if (aml_remaining < 5) { *bytes_consumed = 1; return 0; }
+            if (aml_remaining < 5) { *bytes_consumed = 0; return 0; }
             *bytes_consumed = 5;
             return (uint32_t)aml[1]         |
                    ((uint32_t)aml[2] <<  8) |
@@ -76,7 +80,7 @@ static uint32_t extract_integer_value(const uint8_t* aml,
                 *bytes_consumed = 1;
                 return prefix;
             }
-            *bytes_consumed = 1;
+            *bytes_consumed = 0;
             return 0;
     }
 }
@@ -85,11 +89,12 @@ bool acpi_search_s5_in_aml(uint8_t* aml, uint32_t aml_len) {
     if (!aml) return false;
 
     /* Need at least: NameOp + (\\)? + (^*)? + "_S5_" + PackageOp + pkglen(1)
-     * + numelem(1) + 2 * minimal integer (1) = 9 bytes worst case. Reject
+     * + numelem(1) + one minimal integer (1) = 8 bytes. That is the
+     * spec form of §7.4.2 — a Package holding a single Integer. Reject
      * shorter buffers before the loop so the bound is sane. */
-    if (aml_len < 9) return false;
+    if (aml_len < 8) return false;
 
-    for (uint32_t i = 0; i + 8 < aml_len; i++) {
+    for (uint32_t i = 0; i + 7 < aml_len; i++) {
         if (aml[i] != AML_NAME_OP)
             continue;
 
@@ -126,21 +131,34 @@ bool acpi_search_s5_in_aml(uint8_t* aml, uint32_t aml_len) {
 
         if (pos >= aml_len) continue;
         uint8_t num_elements = aml[pos++];
-        if (num_elements < 2) {
-            debug_printf("[ACPI] _S5_ package has %u elements (<2)\n",
-                         num_elements);
+        if (num_elements == 0) {
+            debug_printf("[ACPI] _S5_ package is empty\n");
             continue;
         }
 
         uint32_t value_bytes = 0;
         uint32_t a_val = extract_integer_value(&aml[pos], aml_len - pos,
                                                &value_bytes);
-        if (value_bytes == 0 || pos + value_bytes >= aml_len) continue;
+        if (value_bytes == 0) continue;
         pos += value_bytes;
 
-        uint32_t b_val = extract_integer_value(&aml[pos], aml_len - pos,
-                                               &value_bytes);
-        if (value_bytes == 0) continue;
+        uint32_t b_val;
+        if (num_elements == 1) {
+            /* ACPI 6.5 §7.4.2 / Table 7.11: the _Sx package is defined as
+             * ONE Integer whose byte 0 is the PM1a_CNT.SLP_TYP value and
+             * byte 1 the PM1b_CNT.SLP_TYP value (bytes 2-3 reserved).
+             * ACPICA's AcpiGetSleepTypeData does exactly this split in
+             * its one-element case. Firmware that emits the spec form
+             * used to be discarded here, leaving the shutdown path with
+             * a fabricated SLP_TYP. */
+            b_val = a_val >> 8;
+        } else {
+            /* The vendor form most BIOSes emit: one Integer per port. */
+            if (pos >= aml_len) continue;
+            b_val = extract_integer_value(&aml[pos], aml_len - pos,
+                                          &value_bytes);
+            if (value_bytes == 0) continue;
+        }
 
         g_acpi.slp_typa = (uint16_t)(a_val & 0x07);   /* SLP_TYP is 3 bits */
         g_acpi.slp_typb = (uint16_t)(b_val & 0x07);

@@ -22,7 +22,6 @@
 #include "context_switch.h"
 #include "keyboard.h"
 #include "ahci.h"
-#include "idle.h"
 #include "amp.h"
 #include "kcore.h"
 #include "xhci_interrupt.h"
@@ -401,6 +400,116 @@ static bool panic_probe_range(uint64_t va, uint64_t len)
            panic_probe_present(va + len - 1);
 }
 
+/* Port 0x61 — System Control Port B, the legacy chipset's NMI status and
+ * control latch. Bits 7 and 6 are READ-ONLY status and stay asserted until
+ * the matching disable bit is written 1, which both clears the latch and
+ * turns that source off. The low nibble is the writable half, and two of its
+ * bits are not ours to invent: bit 0 is the PIT channel-2 gate and bit 1 the
+ * speaker enable, both driven elsewhere in this kernel. So the clear writes
+ * back the nibble it just read with one bit added, never a constant.
+ *
+ * Values match the reference every PC chipset is built against — Linux
+ * arch/x86/include/asm/mach_traps.h (NMI_REASON_*). */
+#define NMI_REASON_PORT        0x61
+#define NMI_REASON_SERR        0x80 /* PCI SERR# latched  (read-only status) */
+#define NMI_REASON_IOCHK       0x40 /* IOCHK# latched     (read-only status) */
+#define NMI_REASON_CLEAR_MASK  0x0F /* the writable half, preserved verbatim */
+#define NMI_REASON_CLEAR_SERR  0x04 /* write 1: clear + disable SERR# NMI    */
+#define NMI_REASON_CLEAR_IOCHK 0x08 /* write 1: clear + disable IOCHK# NMI   */
+
+/*
+ * NMI (vector 2) — answered here, and returned from. It never falls through.
+ *
+ * An NMI is not a fault. Nothing about the interrupted instruction is wrong,
+ * there is no faulting address to name, and the interrupted process did
+ * nothing. It is the platform speaking: firmware-first error reporting (ACPI
+ * 6.5 Table 18.14 — notification type 4 is NMI; §18.4.1: "the OSPM NMI handler
+ * scans the list of generic error sources to find the error source that
+ * reported the error and processes the error report", and then carries on), or
+ * a platform NMI pin (ACPI 6.5 §5.2.12.7 Local APIC NMI and §5.2.12.6 NMI
+ * Source — the watchdogs, chassis alerts and BMC diagnostic buttons that
+ * irqchip_init programs onto LINT0/LINT1 and the IOAPIC, and that every AP
+ * repeats), or a legacy chipset SERR#/IOCHK latch. Not one of those is a
+ * reason to kill the interrupted process or to halt the machine — and until
+ * this function existed, every one of them did exactly that: vector 2 read the
+ * APEI sources, threw the answer away, and walked on into the ring-3 kill
+ * branch or the kernel-panic block below.
+ *
+ * It is also why vector 2 must return from HERE and from nothing further down.
+ * NMIs are blocked only until the next IRET, not until the IRET that ends this
+ * handler (SDM Vol 2, IRET: "execution of the IRET instruction unblocks NMIs",
+ * and "this unblocking occurs even if the instruction causes a fault"; Vol 3A,
+ * "Handling Multiple NMIs"). The ring-3 dump path below walks the user RBP
+ * chain with get_user_u64 and reads the faulting process's Nameplate — loads
+ * that are MEANT to fault and be recovered by the uaccess fixup, and that
+ * recovery returns by IRET. One such fixup taken inside NMI context unblocks
+ * NMIs for the whole remainder of the handler; vector 2 is an IST vector
+ * (IST_NMI, idt_init), so the next NMI reloads RSP from that same fixed
+ * TSS.IST2 pointer and pushes its frame over the live one, and the first
+ * handler then returns through a frame that is no longer its own. So this
+ * handler touches no user pointer, walks no table, takes no scheduler
+ * decision, and returns.
+ */
+static void handle_nmi(interrupt_frame_t *frame)
+{
+    /* Firmware first. Reads each NMI-notify GHES source's Error Status
+     * Address register — mapped once at registration, so the read can neither
+     * fault nor take a lock — and knocks a K-Core for every source that named
+     * a status block. True means at least one source owned this NMI. */
+    extern bool apei_ghes_nmi_check(void);
+    bool claimed = apei_ghes_nmi_check();
+
+    uint8_t reason = inb(NMI_REASON_PORT);
+    uint32_t core = (uint32_t)amp_get_core_index();
+
+    if (reason & (NMI_REASON_SERR | NMI_REASON_IOCHK))
+    {
+        uint8_t ctrl = (uint8_t)(reason & NMI_REASON_CLEAR_MASK);
+
+        if (reason & NMI_REASON_SERR)
+        {
+            kprintf("[NMI] Core %u: PCI SERR# asserted (port 0x61 = 0x%02x) — "
+                    "a device reported a system error.\n",
+                    core, (unsigned)reason);
+            ctrl |= NMI_REASON_CLEAR_SERR;
+        }
+        if (reason & NMI_REASON_IOCHK)
+        {
+            kprintf("[NMI] Core %u: IOCHK# asserted (port 0x61 = 0x%02x) — a "
+                    "bus device raised channel check.\n",
+                    core, (unsigned)reason);
+            ctrl |= NMI_REASON_CLEAR_IOCHK;
+        }
+
+        /* The latch is level-held: until this write it re-delivers the NMI
+         * for as long as the machine runs. Writing the disable bit clears it
+         * and leaves that source OFF, and off is where it stays. Re-arming
+         * means driving the bit low again once the device has stopped
+         * asserting, and the only way to learn that is to wait — which is not
+         * something an NMI handler may do. So the source is disabled, and the
+         * line below says so rather than letting the operator discover it.
+         *
+         * Two cores latching the same event race here harmlessly: both read
+         * the same status, both write the same disable bit. */
+        outb(NMI_REASON_PORT, ctrl);
+        kprintf("[NMI] Core %u: legacy NMI source cleared and left DISABLED "
+                "(port 0x61 <- 0x%02x). The machine continues.\n",
+                core, (unsigned)ctrl);
+        claimed = true;
+    }
+
+    if (!claimed)
+    {
+        /* Nobody owned it, and that is one line of fact, not a crash: a
+         * watchdog, an IPMI diagnostic interrupt, a performance-counter
+         * overflow, or a GHES source whose status block another core drained
+         * before this one looked. */
+        kprintf("[NMI] Core %u: unclaimed — no APEI source and no legacy latch "
+                "(port 0x61 = 0x%02x). RIP=0x%lx CS=0x%lx. Continuing.\n",
+                core, (unsigned)reason, frame->rip, frame->cs);
+    }
+}
+
 void exception_handler(interrupt_frame_t *frame)
 {
     /* Scoped to THIS invocation. A kernel #PF claims the dump at the [VMM]
@@ -446,28 +555,27 @@ void exception_handler(interrupt_frame_t *frame)
         bringup_hold_forever(); /* the screen already holds the fault that matters */
 #endif
 
-    /* NMI (vector 2) — server-class firmware can deliver APEI/GHES
-     * notifications via NMI when a HEST source's notify type == 4. The
-     * GHES runtime walks its NMI-notify sources, defers GESB processing
-     * to a K-Core on each source's knock, and returns true if any source had a
-     * pending block_status. We don't `return` after a consumed NMI —
-     * the kernel still needs to clear the NMI source on the LAPIC/PIC
-     * path (if any) and fall through to the standard NMI logging
-     * below for non-APEI NMI causes (watchdog, performance counters,
-     * etc.). */
+    /* NMI (vector 2) is answered in full by handle_nmi and returns from here.
+     * Nothing below this line may run in NMI context — see the block in front
+     * of handle_nmi for why the return is the whole point. */
     if (frame->vector == 2)
     {
-        extern bool apei_ghes_nmi_check(void);
-        (void)apei_ghes_nmi_check();
-        /* fall through to generic NMI logging */
+        handle_nmi(frame);
+        return;
     }
 
-    /* Phase 2F — #MC (vector 18) routes to MCE subsystem. The handler
+    /* Phase 2F — #MC (vector 18) routes to the MCE subsystem. The handler
      * runs on the IST_MACHINE_CHECK stack (set by idt_init), walks every
-     * IA32_MC<i>_STATUS bank, poisons phys pages, publishes Touch
-     * events, and returns true if the error was recoverable (UC=0 or
-     * UCR with RIPV=1). On unrecoverable error: fall through to the
-     * standard kill-process / system_halt path below. */
+     * IA32_MC<i>_STATUS bank, poisons phys pages and publishes Touch events.
+     *
+     * It returns true — this handler IRET-restarts — only when MCG_STATUS.MCIP
+     * and MCG_STATUS.RIPV are both 1 AND no bank record it decoded was fatal;
+     * the full contract is in mce.h above mce_handle. An EMPTY bank walk is
+     * deliberately not a verdict of its own any more: without LMCE a #MC is
+     * broadcast to every logical processor and only one wins the shared bank,
+     * so an empty walk is the normal answer on every core but one, and it is
+     * judged by RIPV alone. False means fall through to the standard
+     * kill-process (ring 3) / panic-and-halt (ring 0) path below. */
     if (frame->vector == 18)
     {
         extern bool mce_handle(interrupt_frame_t *);
@@ -799,27 +907,36 @@ void exception_handler(interrupt_frame_t *frame)
         }
     }
 
-    // Kernel stack overflow recovery via double fault / stack fault
+    /* Kernel stack overflow recovery via double fault / stack fault.
+     *
+     * The guard page is the entire evidence, and the recovery runs ONLY when
+     * the saved RSP actually landed in one. It used to run when it had not:
+     * a miss substituted process_get_current() as the "overflow" victim, and
+     * then announced a stack overflow the evidence had just disproved, killed
+     * whichever process this core happened to be serving, force-released a
+     * scheduler lock nothing had established the holder of, and IRETed — with
+     * the real cause (a corrupt descriptor, a stale TSS.RSP0, an exhausted IST
+     * stack) untouched, so the next delivery double-faulted again. Worse, the
+     * substitute itself took a lock: process_get_current() acquires this core's
+     * scheduler_lock, which is non-recursive and spun on with IRQs off, so a
+     * #DF taken inside schedule() hung the core silently and printed nothing
+     * at all.
+     *
+     * A miss now falls through to the kernel panic, which is where the
+     * evidence points and what Linux does for every #DF (arch/x86/kernel/
+     * traps.c, exc_double_fault, whose comment on the identical guard-page
+     * heuristic ends "we're going to panic one way or another"). Intel SDM
+     * Vol 3A, Exception and Interrupt Reference, "Double Fault Exception
+     * (#DF)": exception class Abort, the saved CS:RIP is undefined and the
+     * program cannot be resumed or restarted. A guard-page HIT still recovers,
+     * because that path does not resume the aborted context — it discards it
+     * (PROC_CRASHED) and schedules another, which is the one action the SDM
+     * does leave open. Vector 12 is a Fault, not an Abort, and is unaffected
+     * by that reading; for it the defect was purely the false cause and the
+     * innocent victim. */
     if (frame->vector == 8 || frame->vector == 12)
     {
         process_t *overflow_proc = find_process_by_kernel_stack_overflow(frame->rsp);
-        if (!overflow_proc)
-        {
-            overflow_proc = process_get_current();
-            if (overflow_proc && process_is_idle(overflow_proc))
-            {
-                // idle process stack overflow is fatal — it cannot be killed
-                kprintf("\n");
-                kprintf("================================================================\n");
-                kprintf("FATAL: Idle process (PID 0) kernel stack overflow\n");
-                kprintf("  Exception #%u  RSP: 0x%lx  RIP: 0x%lx\n",
-                        frame->vector, frame->rsp, frame->rip);
-                kprintf("================================================================\n");
-                overflow_proc = NULL;
-                // fall through to kernel panic
-            }
-        }
-
         if (overflow_proc)
         {
             kprintf("\n");
@@ -842,12 +959,21 @@ void exception_handler(interrupt_frame_t *frame)
 
             process_set_state(overflow_proc, PROC_CRASHED);
 
-            // If the faulting code held the scheduler lock, force-release it
-            // so schedule() can acquire it without deadlock.
-            // We use spin_force_release (NOT spin_unlock) because we're on an
-            // IST stack — the original holder's saved_flags are meaningless here.
-            // Safety: scheduler_get_state() returns THIS core's state (IST never
-            // migrates to another core), so we always release our own lock.
+            /* If the faulting code held the scheduler lock, force-release it
+             * so schedule() can acquire it without deadlock. spin_force_release
+             * (NOT spin_unlock) because we are on an IST stack — the original
+             * holder's saved_flags are meaningless here.
+             *
+             * What this can and cannot claim: scheduler_get_state() returns
+             * THIS core's state, and an IST stack never migrates, so the STATE
+             * is certainly ours. The HOLDER need not be. scheduler_recalc_
+             * parameters walks every core and takes each one's scheduler_lock
+             * (scheduler.c, the g_core_sched scan), so a peer core can be
+             * inside this lock at this instant, and force-releasing then cuts
+             * its critical section in half. It is taken anyway because the
+             * alternative on a guard-page hit is a certain deadlock against a
+             * holder that no longer exists; the peer case is a window, not the
+             * common one. Naming it here rather than claiming it away. */
             scheduler_state_t *sched = scheduler_get_state();
             if (sched->scheduler_lock.locked)
             {
@@ -890,6 +1016,20 @@ void exception_handler(interrupt_frame_t *frame)
                 "in atomic-target alignment or TEST_CTL bit 29 was re-asserted "
                 "by firmware after boot. Fix the alignment in the offending "
                 "atomic, don't mask the detection.\n");
+    }
+    if (frame->vector == 8 || frame->vector == 12)
+    {
+        /* Reaching the panic with these two vectors means one thing exactly:
+         * the saved RSP matched no kernel-stack guard page, so the recovery
+         * above declined it. Say what was tested, so nobody reads the banner
+         * as "stack overflow" — and say what the test cannot see, so nobody
+         * reads it as "certainly not one" either. */
+        kprintf("Saved RSP 0x%lx is inside no kernel-stack guard page, so this "
+                "is not the stack overflow the recovery path handles.\n"
+                "Two blind spots of that test, for the operator: an idle "
+                "process's stack is not in the process list, and a push that "
+                "crosses the guard boundary in one step leaves the saved RSP "
+                "just above the guard rather than inside it.\n", frame->rsp);
     }
     kprintf("Exception count: %lu  Core: %u\n", atomic_load_u64(&exception_count), (uint32_t)amp_get_core_index());
 

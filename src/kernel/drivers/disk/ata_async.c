@@ -755,7 +755,11 @@ int ata_dma_sync(uint8_t drive_idx, uint64_t lba, uint16_t count,
     /* IRQ-driven path. submit, then wait on done via sti;hlt. */
     error_t srq = submit_internal(&cmd);
     if (srq != OK) {
-        if (srq == ERR_BUSY)         return ATA_ERR_TIMEOUT;
+        /* The channel's queue is full. Nothing timed out and nothing about
+         * this drive is broken, so it is said as what it is — the caller
+         * takes the PIO path for this one transfer and leaves the DMA path's
+         * standing alone (ata_note_dma_fallback in ata.c). */
+        if (srq == ERR_BUSY)         return ATA_ERR_BUSY;
         if (srq == ERR_INVALID_ARGUMENT) return ATA_ERR_INVALID_ARGS;
         return ATA_ERR_DRIVE_FAULT;
     }
@@ -861,6 +865,57 @@ static void bmide_init_channel(uint8_t ch_idx) {
 /* ---------------------------------------------------------------------
  *  DMA-mode negotiation (UDMA preferred, MDMA fallback)
  * ------------------------------------------------------------------ */
+/* IDENTIFY word 93 — the cable evidence, and the only kind a host without
+ * CBLID- sensing circuitry can have (ATA/ATAPI-6 r3a §8.15.49, Annex B).
+ * Bit 15 = 0 and bit 14 = 1 mark the word valid; bit 13 is what the device saw
+ * on PDIAG-:CBLID- during its own IDENTIFY: set means the line was above VIH,
+ * which is the 80-conductor assembly leaving it disconnected and pulled up.
+ * Bits (15:13) = 011b is the "80" row of §5.2.11 Table 8, and it is the same
+ * (word93 & 0xE000) == 0x6000 Linux tests in ata_drive_40wire(). */
+#define ATA_ID_CABLE_WORD          93
+#define ATA_ID_CABLE_MASK          0xE000u
+#define ATA_ID_CABLE_80_CONDUCTOR  0x6000u
+#define ATA_ID_MAJOR_VERSION_WORD  80
+#define ATA_ID_MAJOR_VERSION_ATA5  0x0020
+
+/* The highest Ultra DMA mode a system with no proof of an 80-conductor cable
+ * may put a device into. ATA/ATAPI-6 (T13/1410D r3a) §8.46.11, the description
+ * of the very subcommand ata_set_xfer_mode issues: "For systems using a cable
+ * assembly, the host shall detect that an 80-conductor cable assembly is
+ * connecting the host with the device(s) before enabling any Ultra DMA mode
+ * greater than 2 in the device(s) (see Annex B)." §6.7 says it again of the
+ * system as a whole, and §5.2.11 Table 8 Notes 1 and 2 say what to do when the
+ * evidence is missing or contradictory: "host should not use Ultra DMA modes
+ * higher than mode 2 without using other means to confirm presence of
+ * 80-conductor cable." */
+#define ATA_UDMA_MAX_40_CONDUCTOR  2
+
+/* Does this drive prove the cable can carry Ultra DMA above mode 2?
+ *
+ * Two ways it can, and no third. Serial ATA behind a legacy/compatibility-mode
+ * controller — the configuration that puts a modern board on this driver at
+ * all — has no ribbon to be wrong about, and it says so by reporting word 93
+ * as zero while word 80 claims ATA-5 or later (the same pair Linux's
+ * ata_id_is_sata() reads; the signed test on word 80 throws out the reserved
+ * 0000h and FFFFh). Otherwise the device's own CBLID- sample decides, per
+ * Annex B, and anything short of the 011b row is NOT proof: an invalid word,
+ * a device that does not implement the test, or a device that saw the line
+ * pulled low through a 40-conductor cable all come out the same — unproven,
+ * and therefore capped.
+ *
+ * Host-side detection (§6.7's CBLID- sense at the host connector) is the
+ * method the standard puts first, but it lives in a per-chipset register this
+ * driver has no table for; leaving the cap on when it cannot be read is the
+ * conservative half of the same rule, not a shortcut around it. */
+static bool ata_cable_carries_fast_udma(const uint16_t *id)
+{
+    if (id[ATA_ID_CABLE_WORD] == 0 &&
+        (int16_t)id[ATA_ID_MAJOR_VERSION_WORD] >= ATA_ID_MAJOR_VERSION_ATA5)
+        return true;   /* Serial ATA — no cable assembly to qualify */
+
+    return (id[ATA_ID_CABLE_WORD] & ATA_ID_CABLE_MASK) == ATA_ID_CABLE_80_CONDUCTOR;
+}
+
 void ata_async_negotiate_dma_mode(uint8_t drive_idx, const uint16_t *id) {
     ATADevice *dev = &g_ata_devices[drive_idx];
     dev->dma_type = ATA_DMA_TYPE_NONE;
@@ -870,7 +925,20 @@ void ata_async_negotiate_dma_mode(uint8_t drive_idx, const uint16_t *id) {
 
     if (id[53] & (1u << 2)) {
         uint16_t udma_sup = id[88] & 0x7Fu;
-        for (int mode = 6; mode >= 0; mode--) {
+        int top = 6;
+        if (!ata_cable_carries_fast_udma(id)) {
+            top = ATA_UDMA_MAX_40_CONDUCTOR;
+            /* Only worth a line when the drive would otherwise have gone
+             * faster — and it is a kprintf, because a disk running at a third
+             * of its rated speed for a cable reason is exactly the thing an
+             * operator on real hardware has to be able to see. */
+            if (udma_sup >> (ATA_UDMA_MAX_40_CONDUCTOR + 1))
+                kprintf("[ATA] drv%u: no 80-conductor cable proof (IDENTIFY "
+                        "word 93 = 0x%04x) — Ultra DMA held at mode %d\n",
+                        drive_idx, id[ATA_ID_CABLE_WORD],
+                        ATA_UDMA_MAX_40_CONDUCTOR);
+        }
+        for (int mode = top; mode >= 0; mode--) {
             if (!(udma_sup & (1u << mode))) continue;
             if (ata_set_xfer_mode(drive_idx, (uint8_t)(0x40 | mode)) == 0) {
                 dev->dma_type = ATA_DMA_TYPE_UDMA;

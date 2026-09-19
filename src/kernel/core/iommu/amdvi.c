@@ -22,10 +22,15 @@
  *   * Allocate Command Buffer + Event Log (4 KB each, ring buffers)
  *   * Build a single second-level Long-Mode page table identity-mapping
  *     the bottom 4 GiB (shared across all DTEs in "passthrough" mode)
- *   * Program IOMMU base registers (DEV_TAB_BAR, CMD_BUF_BAR, EVT_LOG_BAR)
+ *   * Stop the unit, then program its base registers (DEV_TAB_BAR,
+ *     CMD_BUF_BAR, EVT_LOG_BAR) and their head/tail pointers while it is
+ *     stopped -- §2.4 and §2.5.1 permit those registers to move only while
+ *     the matching Run bit in MMIO 2020h reads 0
  *   * Issue COMPLETION_WAIT to drain command buffer
- *   * `amdvi_enable()` flips IOMMU_CTRL.IommuEn; init() leaves it off
- *     so untranslated DMA continues to work without OS intervention
+ *   * `amdvi_enable()` flips IOMMU_CTRL.IommuEn. init() CLEARS it, together
+ *     with CmdBufEn, EventLogEn and the PPR/GA log enables: an AMD board
+ *     whose firmware hands the IOMMU over already running is the ordinary
+ *     case, and its tables cannot be swapped underneath it
  *
  * The DTE format used is "V=1, host-page-table set to identity-map"
  * (DTE bits 1:0 = 11, DomainID=0, host page table pointer = SLPT root,
@@ -47,11 +52,25 @@
 #define MMIO_EVT_TAIL        0x2018
 #define MMIO_STATUS          0x2020
 
-/* CTRL bits. */
+/* CTRL bits (§3.4.1 "MMIO Offset 0018h IOMMU Control Register"). */
 #define CTRL_IOMMU_EN        (1ULL << 0)
 #define CTRL_HT_TUN_EN       (1ULL << 1)
 #define CTRL_EVT_LOG_EN      (1ULL << 2)
+#define CTRL_EVT_INT_EN      (1ULL << 3)
 #define CTRL_CMD_BUF_EN      (1ULL << 12)
+#define CTRL_PPR_LOG_EN      (1ULL << 13)
+#define CTRL_PPR_INT_EN      (1ULL << 14)
+#define CTRL_GA_LOG_EN       (1ULL << 28)
+#define CTRL_GA_INT_EN       (1ULL << 29)
+
+/* IOMMU Status Register bits (§3.4.16 "Command and Event Status Register",
+ * MMIO Offset 2020h). The two Run bits say whether the IOMMU is still using
+ * the buffer whose base register is about to move; EventOverflow is RW1C and
+ * §2.5.1 has software clear it as part of restarting the log, because while
+ * it stands "no new event log entries are written". */
+#define STATUS_EVT_OVERFLOW  (1ULL << 0)
+#define STATUS_EVT_LOG_RUN   (1ULL << 3)
+#define STATUS_CMD_BUF_RUN   (1ULL << 4)
 
 /* Command opcodes. */
 #define CMD_OP_COMPLETION_WAIT      0x01
@@ -324,6 +343,43 @@ static void amdvi_completion_wait(amdvi_unit_t* u) {
 
 /* ----- Per-unit init ----- */
 
+/* How long a unit that has just been told to stop gets to finish the commands
+ * it had already fetched and the log entry it was already writing.
+ *
+ * DECLARED POLICY, not a spec quantity. §2.4 and §2.5.1 say to wait for the
+ * Run bits and name no bound; one second is this kernel's patience, and it is
+ * deliberately the same second AMDVI_COMPLETION_PATIENCE_US gives the
+ * completion semaphore and VTD_HANDSHAKE_PATIENCE_US gives the remap units, so
+ * there is one number to argue with rather than three. */
+#define AMDVI_QUIESCE_PATIENCE_US   1000000u
+
+/* Wait for status bits to read 0. Returns false when they never did, and the
+ * caller must then refuse the unit: moving a base register out from under a
+ * running IOMMU is what the spec calls undefined, so "carried on as though it
+ * had stopped" is the one answer this wait must not produce. */
+static bool amdvi_await_status_clear(amdvi_unit_t* u, uint64_t bits,
+                                     const char* what) {
+    volatile uint64_t* status = (volatile uint64_t*)(u->reg + MMIO_STATUS);
+    HourGlass glass;
+    if (!HourGlassTurn(&glass, AMDVI_QUIESCE_PATIENCE_US)) {
+        kprintf("[AMD-Vi] no time source — waiting for %s on the fact itself, "
+                "with no bound\n", what);
+        while (*status & bits) cpu_pause();
+        return true;
+    }
+    for (;;) {
+        if (!(*status & bits)) return true;
+        if (HourGlassRunOut(&glass)) break;
+        cpu_pause();
+    }
+    kprintf("[AMD-Vi] %s never cleared — %lu us on the %s and the %s\n",
+            what, (unsigned long)HourGlassElapsedUs(&glass),
+            HourGlassRulerName(&glass),
+            HourGlassSourceDied(&glass) ? "ruler died mid-wait"
+                                        : "span ran out");
+    return false;
+}
+
 static int amdvi_unit_init(amdvi_unit_t* u, uint64_t reg_phys,
                             uint16_t seg) {
     u->reg_phys     = reg_phys;
@@ -352,18 +408,93 @@ static int amdvi_unit_init(amdvi_unit_t* u, uint64_t reg_phys,
      * we could instead V=1 every entry now; we keep V=0 to avoid
      * surprising firmware before drivers are ready. */
 
-    /* Program base registers. */
+    /* Stop the unit before any of its tables move.
+     *
+     * §2.4 for the command buffer ("CmdBufRun must be 0b to modify the command
+     * buffer registers properly") and §2.5.1 for the event log ("EventLogRun
+     * must be 0b to modify the event log registers safely") both require it,
+     * and MMIO Offset 0010h carries the note in its own right: "If EventLen or
+     * EventBase is changed while the EventLogRun = 1, the IOMMU behavior is
+     * undefined."
+     *
+     * Both procedures are written for a unit the hardware has ALREADY halted,
+     * so they read "wait for the Run bit, then clear the enable". A unit
+     * firmware hands over running never halts by itself — 2020h[CmdBufRun]:
+     * "once set to 1, it does not change to 0 until command processing stops
+     * for cause" — and the cause software has is 0018h[CmdBufEn] = 0, which
+     * "causes the IOMMU to cease fetching new commands although commands
+     * previously fetched are completed". So the enables are cleared first and
+     * the wait follows them; that write is what lets the wait terminate.
+     *
+     * What stood here did neither. It wrote the three base registers first and
+     * only then read CTRL and ORed two enable bits into it, so a firmware-set
+     * IommuEn survived untouched and every base register was reprogrammed on a
+     * live IOMMU. The header of this file claimed init left translation off; it
+     * could not, because nothing here ever cleared bit 0. */
+    uint64_t ctrl = *(volatile uint64_t*)(u->reg + MMIO_CTRL);
+    if (ctrl & CTRL_IOMMU_EN) {
+        kprintf("[AMD-Vi] seg=%u base=0x%lx: firmware handed this IOMMU over "
+                "ENABLED — stopping it to install this kernel's tables; the "
+                "DMA protection firmware had established ends here\n",
+                (unsigned)seg, (unsigned long)reg_phys);
+    }
+    ctrl &= ~(CTRL_IOMMU_EN | CTRL_CMD_BUF_EN | CTRL_EVT_LOG_EN |
+              CTRL_EVT_INT_EN | CTRL_PPR_LOG_EN | CTRL_PPR_INT_EN |
+              CTRL_GA_LOG_EN | CTRL_GA_INT_EN);
+    *(volatile uint64_t*)(u->reg + MMIO_CTRL) = ctrl;
+
+    if (!amdvi_await_status_clear(u, STATUS_CMD_BUF_RUN | STATUS_EVT_LOG_RUN,
+                                  "CmdBufRun and EventLogRun")) {
+        kprintf("[AMD-Vi] seg=%u base=0x%lx: left disabled rather than have "
+                "its base registers moved while it is still using them\n",
+                (unsigned)seg, (unsigned long)reg_phys);
+        return -6;
+    }
+
+    /* Program base registers on a stopped unit.
+     *
+     * ComLen and EventLen are bits 59:56, not a low-order size class, and they
+     * count ENTRIES in powers of two rather than encoding log2 of a byte count:
+     * §3.4.1 gives 1000b = 256 entries = 4 Kbytes as the minimum, and values
+     * below 1000b as reserved. 8 is that minimum, which is what both buffers
+     * are. */
     *(volatile uint64_t*)(u->reg + MMIO_DEV_TAB_BAR) =
         u->dev_tab_phys | DEV_TAB_SIZE_CLASS;
-    /* CMD_BUF_BAR: size class in low 4 bits (encoded log2(size) - 12). */
-    /* 4 KB = log2(4096)-12 = 0. */
     *(volatile uint64_t*)(u->reg + MMIO_CMD_BUF_BAR) =
-        u->cmd_buf_phys | (8ULL << 56);    /* size = 8 -> 2^8 entries * 16 = 4 KB */
+        u->cmd_buf_phys | (8ULL << 56);
     *(volatile uint64_t*)(u->reg + MMIO_EVT_LOG_BAR) =
         u->evt_log_phys | (8ULL << 56);
 
-    /* Enable command buffer + event log; keep IOMMU_EN off. */
-    uint64_t ctrl = *(volatile uint64_t*)(u->reg + MMIO_CTRL);
+    /* The head and tail pointers belong to the same two procedures as the base
+     * registers, and the two buffers are not in the same position here.
+     *
+     * The command buffer's pair is reset by the write just above -- §2.4: "When
+     * the Command Buffer Base Address Register [MMIO Offset 0008h] register is
+     * written, the Command Buffer Head Pointer Register [MMIO Offset 2000h] and
+     * the Command Buffer Tail Pointer Register [MMIO Offset 2008h] are reset to
+     * the 0." Writing them is the procedure's own step and costs nothing, and
+     * the mirror in u->cmd_tail must be brought to the same 0 in any case.
+     *
+     * The event log's pair carries no such sentence, and EvtHeadPtr keeps
+     * firmware's offset into a buffer that no longer exists. That one has to be
+     * zeroed by hand, which is why §2.5.1 lists both pointers beside the base
+     * and why Linux writes them explicitly (iommu_enable_event_buffer). */
+    *(volatile uint64_t*)(u->reg + MMIO_CMD_HEAD) = 0;
+    *(volatile uint64_t*)(u->reg + MMIO_CMD_TAIL) = 0;
+    *(volatile uint64_t*)(u->reg + MMIO_EVT_HEAD) = 0;
+    *(volatile uint64_t*)(u->reg + MMIO_EVT_TAIL) = 0;
+    u->cmd_tail = 0;
+
+    /* §2.5.1, before the log is restarted: "Write the IOMMU Status Register
+     * with EventOverflow = 1b to clear the bit (W1C)." An EventOverflow left
+     * standing by firmware would keep the IOMMU from writing a single new entry
+     * however EventLogRun reads. Every other bit written here is 0: the RW1C
+     * bits ignore it and the RO bits cannot be written at all. */
+    *(volatile uint64_t*)(u->reg + MMIO_STATUS) = STATUS_EVT_OVERFLOW;
+
+    /* Now the enables, onto the value this function stopped the unit with —
+     * never onto a fresh read, which is how IommuEn survived before. IommuEn
+     * stays clear: amdvi_enable() is the only place this kernel sets it. */
     ctrl |= CTRL_CMD_BUF_EN | CTRL_EVT_LOG_EN;
     *(volatile uint64_t*)(u->reg + MMIO_CTRL) = ctrl;
 

@@ -275,9 +275,32 @@ int ahci_flush_cache_sync(uint8_t port) {
     }
 
     for (int retry = 0; retry < AHCI_MAX_RETRIES; retry++) {
-        int slot = ahci_alloc_slot(port);
+        /* THE PORT, NOT A SLOT.
+         *
+         * FLUSH CACHE EXT has no queued form, and AHCI 1.3.1 §1.7 is flat
+         * about what that means: "System software is responsible to ensure
+         * that queued and non-queued commands are not mixed in the command
+         * list for the same device with the exception of the NCQ Unload
+         * command." This used to draw an ordinary slot, which on an NCQ port
+         * put a non-queued command in the list beside live FPDMA tags — and
+         * that is the one thing the commit point of a write must not do: the
+         * drive aborts the flush and aborts the queue with it, so every write
+         * in flight on the port fails and the link is reset, at the exact
+         * moment those writes were being made durable.
+         *
+         * So the port is taken WHOLE: this waits for the port to go quiet —
+         * every slot free, PxSACT and PxCI both empty — and only then closes
+         * it, for exactly as long as the flush takes. The slot below is one
+         * this caller alone owns. On a non-NCQ port the port's only slot is
+         * the whole of it, so this is the same walk it always was. */
+        int slot = ahci_port_take_whole(port, AHCI_CMD_PATIENCE_MS);
         if (slot < 0) {
-            continue;
+            /* ahci_port_take_whole has already said on the console which of
+             * the two it could not do, and nothing is held. A flush that was
+             * not issued is not a flush that failed quietly: the caller is
+             * told, and asking again here would only re-run the same wait on
+             * the same busy port. */
+            return -1;
         }
 
         ahci_cmd_header_t* cmdheader = (ahci_cmd_header_t*)port_state->clb_virt;
@@ -301,7 +324,9 @@ int ahci_flush_cache_sync(uint8_t port) {
         volatile ahci_port_regs_t* regs = ahci_get_port_regs_pub(port);
         /* FLUSH CACHE EXT is always non-queued — issue via PxCI only with a
          * direct single-bit store (PxCI is write-1-to-set; an RMW could
-         * re-arm a slot the HBA just cleared). */
+         * re-arm a slot the HBA just cleared). PxSACT is not touched, and now
+         * that is true of the register as well as of this store: the hold
+         * above ended on PxSACT reading zero. */
         spin_lock(&port_state->lock);
         regs->ci = (1U << slot);
         spin_unlock(&port_state->lock);
@@ -309,7 +334,7 @@ int ahci_flush_cache_sync(uint8_t port) {
         /* FLUSH CACHE EXT is never queued, so PxSACT says nothing about it. */
         AhciSlotEnd how = ahci_wait_for_slot(port_state, regs, (uint8_t)slot,
                                              false);
-        ahci_free_slot(port, slot);
+        ahci_port_give_back(port);
 
         if (how == AHCI_SLOT_DONE) {
             return 0;

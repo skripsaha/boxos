@@ -26,6 +26,11 @@
 #include "baton.h"
 #include "cpuid.h"
 #include "acpi_internal.h"
+#include "io.h"
+
+/* GAS address space identifiers (ACPI 6.5 §5.2.3.2) this file can read. */
+#define GAS_AS_SYSTEM_MEMORY  0
+#define GAS_AS_SYSTEM_IO      1
 
 /* TSC-frequency getter — published by cpu calibration into the cpu_caps
  * shared page; declared here to avoid a per-call lookup. */
@@ -104,12 +109,20 @@ static inline bool guid_eq(const uint8_t *a, const uint8_t *b) {
 typedef struct {
     uint16_t  source_id;
     uint8_t   notify_type;
-    uint8_t   flags;              /* bit 0: in_use, bit 1: v2 */
+    uint8_t   flags;              /* bit 0: in_use, 1: v2, 2: unmappable */
     uint32_t  gsiv;
     uint32_t  poll_interval_ms;
     uint32_t  gesb_len;
+    /* ACPI 6.5 §18.3.2.7, Table 18.10 Error Status Address: the GAS of an
+     * 8-byte register that HOLDS the status block's physical address. The
+     * register is the source of truth and is read before every walk; the
+     * pair below is only the block this source is pointed at right now. */
+    uint64_t  status_reg_addr;
+    void     *status_reg_va;      /* permanent read-only map (SystemMemory) */
+    uint8_t   status_reg_space;
+    uint8_t   status_reg_width;   /* bits, after the spec's 8-byte fixup */
     uint64_t  gesb_phys;
-    void     *gesb_va;            /* mapped at register-time */
+    void     *gesb_va;            /* mapped where mapping is allowed */
     uint64_t  next_poll_tsc;
     /* GHESv2 read-ack registers (zero for v1). */
     uint64_t  read_ack_addr;
@@ -125,10 +138,13 @@ typedef struct {
     Knock     knock;
 } apei_ghes_source_t;
 
-#define SRC_IN_USE   (1u << 0)
-#define SRC_V2       (1u << 1)
+#define SRC_IN_USE      (1u << 0)
+#define SRC_V2          (1u << 1)
+/* Set when the block this source's register names could not be mapped, so
+ * the refusal is said once and not once per attempt. */
+#define SRC_UNMAPPABLE  (1u << 2)
 
-static void nmi_worker(void *ctx);
+static void ghes_walk_worker(void *ctx);
 
 /* The per-source table: ONE allocation, sized by the firmware, never grown.
  *
@@ -291,13 +307,28 @@ error_t apei_ghes_register_source(uint16_t source_id, bool v2,
                                    uint8_t  notify_type,
                                    uint32_t vector,
                                    uint32_t poll_interval_ms,
+                                   uint64_t status_reg_addr,
+                                   uint8_t  status_reg_space,
+                                   uint8_t  status_reg_width,
                                    uint64_t gesb_phys,
                                    uint32_t gesb_len,
                                    uint64_t read_ack_addr,
                                    uint64_t read_ack_preserve,
                                    uint64_t read_ack_write) {
-    if (gesb_phys == 0 || gesb_len < sizeof(gesb_header_t))
+    /* The REGISTER is what a source needs to exist; the block address is
+     * only what that register happened to say at boot, and 0 there means
+     * "the firmware has published no block yet" — not a broken source.
+     * Refusing on it, as this function used to, threw away every source
+     * whose block arrives after we looked. */
+    if (status_reg_addr == 0 || gesb_len < sizeof(gesb_header_t))
         return ERR_INVALID_ARGUMENT;
+    if (status_reg_space != GAS_AS_SYSTEM_MEMORY &&
+        status_reg_space != GAS_AS_SYSTEM_IO) {
+        kprintf("[APEI] GHES src=%u: error status address register lives in "
+                "address space %u, which this kernel cannot read\n",
+                source_id, status_reg_space);
+        return ERR_INVALID_ARGUMENT;
+    }
 
     if (!ghes_table_ready()) return ERR_NO_MEMORY;
 
@@ -324,20 +355,50 @@ error_t apei_ghes_register_source(uint16_t source_id, bool v2,
         g_source_count++;
     }
 
-    /* Map the GESB once. Read/write so we can W1C block_status to ack.
-     * vmm_map_mmio returns volatile void* (MMIO accesses must not be
-     * cached or reordered by the compiler); we store the address as
-     * plain void* in the slot and re-apply the volatile qualifier at
-     * every dereference site (see process_source_gesb / ghes_read_ack
-     * which cast to `volatile <type>*`). The explicit cast here makes
-     * the qualifier drop intentional rather than implicit. */
-    void *gesb_va = (void *)(uintptr_t)vmm_map_mmio(gesb_phys, gesb_len, VMM_FLAGS_KERNEL_RW);
-    if (!gesb_va) {
-        debug_printf("[APEI] GESB map failed for src=%u (phys=0x%lx len=%u)\n",
-                     source_id, (unsigned long)gesb_phys, gesb_len);
-        __atomic_fetch_add(&g_stat_map_failures, 1, __ATOMIC_RELAXED);
-        slot->flags = 0;
-        return ERR_NO_MEMORY;
+    /* Map the status-address REGISTER once, read-only: it belongs to the
+     * firmware and the OS has no business writing it, ever. This mapping is
+     * what makes the re-read before every walk possible from NMI context,
+     * where no mapping may be made — the same reason the read-ack register
+     * below is mapped here. An I/O-port register needs no mapping. */
+    void *status_reg_va = NULL;
+    if (status_reg_space == GAS_AS_SYSTEM_MEMORY) {
+        if (slot->status_reg_va && slot->status_reg_addr == status_reg_addr) {
+            status_reg_va = slot->status_reg_va;      /* re-registration */
+        } else {
+            status_reg_va = (void *)(uintptr_t)
+                vmm_map_mmio(status_reg_addr, 8, VMM_FLAGS_KERNEL_RO);
+        }
+        if (!status_reg_va) {
+            kprintf("[APEI] GHES src=%u: cannot map error status address "
+                    "register 0x%lx — this source cannot report a hardware "
+                    "error\n", source_id, (unsigned long)status_reg_addr);
+            __atomic_fetch_add(&g_stat_map_failures, 1, __ATOMIC_RELAXED);
+            slot->flags = 0;
+            return ERR_NO_MEMORY;
+        }
+    }
+
+    /* Map the block the register named at boot, when it named one. Read and
+     * write, so we can W1C block_status to acknowledge. vmm_map_mmio returns
+     * volatile void* (MMIO accesses must not be cached or reordered by the
+     * compiler); we store the address as plain void* in the slot and
+     * re-apply the volatile qualifier at every dereference site (see
+     * process_source_gesb / ghes_read_ack which cast to `volatile <type>*`).
+     * The explicit cast here makes the qualifier drop intentional rather
+     * than implicit. A source whose register still reads 0 is registered
+     * without a window; the first walk that finds an address maps it. */
+    void *gesb_va = NULL;
+    if (gesb_phys != 0) {
+        gesb_va = (void *)(uintptr_t)vmm_map_mmio(gesb_phys, gesb_len,
+                                                   VMM_FLAGS_KERNEL_RW);
+        if (!gesb_va) {
+            kprintf("[APEI] GHES src=%u: error status block at 0x%lx (%u B) "
+                    "cannot be mapped — this source cannot report a hardware "
+                    "error\n", source_id, (unsigned long)gesb_phys, gesb_len);
+            __atomic_fetch_add(&g_stat_map_failures, 1, __ATOMIC_RELAXED);
+            slot->flags = 0;
+            return ERR_NO_MEMORY;
+        }
     }
 
     slot->source_id          = source_id;
@@ -345,6 +406,10 @@ error_t apei_ghes_register_source(uint16_t source_id, bool v2,
     slot->flags              = SRC_IN_USE | (v2 ? SRC_V2 : 0);
     slot->gsiv               = vector;
     slot->poll_interval_ms   = poll_interval_ms ? poll_interval_ms : 1000u;
+    slot->status_reg_addr    = status_reg_addr;
+    slot->status_reg_va      = status_reg_va;
+    slot->status_reg_space   = status_reg_space;
+    slot->status_reg_width   = status_reg_width;
     slot->gesb_phys          = gesb_phys;
     slot->gesb_va            = gesb_va;
     slot->gesb_len           = gesb_len;
@@ -364,7 +429,7 @@ error_t apei_ghes_register_source(uint16_t source_id, bool v2,
     slot->read_ack_write     = read_ack_write;
     slot->events             = 0;
     slot->errors             = 0;
-    KnockInit(&slot->knock, nmi_worker, slot);
+    KnockInit(&slot->knock, ghes_walk_worker, slot);
 
     debug_printf("[APEI] runtime source registered: id=%u %s notify=%u "
                  "poll=%u ms gesb=0x%lx (%u B) v2=%d\n",
@@ -495,11 +560,99 @@ static void ghes_read_ack(const apei_ghes_source_t *src) {
     (void)*reg;            /* read-back to enforce ordering */
 }
 
+/* Read the Error Status Address register and return the physical address of
+ * the status block it currently names. 0 means the firmware has published
+ * no block for this source right now — a normal answer, not a fault
+ * (Linux's __ghes_peek_estatus returns -ENOENT for the same value).
+ *
+ * Lock-free and allocation-free by construction: the register was mapped
+ * once at registration, or it is an I/O port. That is what lets the NMI path
+ * ask this question where nothing else may be done. */
+static uint64_t ghes_read_status_register(const apei_ghes_source_t *src) {
+    if (src->status_reg_space == GAS_AS_SYSTEM_IO) {
+        uint16_t port = (uint16_t)src->status_reg_addr;
+        switch (src->status_reg_width) {
+            case 8:  return inb(port);
+            case 16: return inw(port);
+            case 32: return inl(port);
+            default: return 0;    /* no 64-bit port access exists on x86 */
+        }
+    }
+    if (!src->status_reg_va) return 0;
+    volatile void *reg = src->status_reg_va;
+    switch (src->status_reg_width) {
+        case 8:  return *(volatile uint8_t  *)reg;
+        case 16: return *(volatile uint16_t *)reg;
+        case 32: return *(volatile uint32_t *)reg;
+        default: return *(volatile uint64_t *)reg;
+    }
+}
+
+/* Point a source at the block its register now names.
+ *
+ * Mapping takes kernel locks and may allocate page tables, so this runs
+ * ONLY where that is allowed — the K-Core walk behind the source's knock.
+ * The window is unpublished BEFORE the old one is released, so a tick or an
+ * SCI landing on this core mid-swap finds no window to read rather than one
+ * that is being torn down; both of those, and this worker, run on the drain
+ * core (BSP), and the NMI path never dereferences the window at all. */
+static bool ghes_point_at_block(apei_ghes_source_t *src, uint64_t phys) {
+    void *old = src->gesb_va;
+    __atomic_store_n(&src->gesb_va, (void *)NULL, __ATOMIC_RELEASE);
+    if (old) vmm_unmap_mmio((volatile void *)old, src->gesb_len);
+
+    void *va = (void *)(uintptr_t)vmm_map_mmio(phys, src->gesb_len,
+                                                VMM_FLAGS_KERNEL_RW);
+    if (!va) {
+        src->gesb_phys = 0;
+        __atomic_fetch_add(&g_stat_map_failures, 1, __ATOMIC_RELAXED);
+        /* Said once per source: the firmware keeps signalling and the poll
+         * keeps coming, and a line per attempt would bury the console under
+         * the same sentence. The counter above keeps the tally. */
+        if (!(src->flags & SRC_UNMAPPABLE)) {
+            src->flags |= SRC_UNMAPPABLE;
+            kprintf("[APEI] GHES src=%u: the error status block its register "
+                    "names (0x%lx, %u B) cannot be mapped — this source "
+                    "cannot report a hardware error\n",
+                    src->source_id, (unsigned long)phys, src->gesb_len);
+        }
+        return false;
+    }
+    src->flags &= (uint8_t)~SRC_UNMAPPABLE;
+    src->gesb_phys = phys;
+    __atomic_store_n(&src->gesb_va, va, __ATOMIC_RELEASE);
+    debug_printf("[APEI] GHES src=%u now points at status block 0x%lx\n",
+                 src->source_id, (unsigned long)phys);
+    return true;
+}
+
 /* Process one source's GESB. Returns 1 if an event was acked, 0 if no
  * pending error, -1 on corrupt. Safe to call from K-Core context;
- * uses non-blocking primitives in the hot path. */
-static int process_source_gesb(apei_ghes_source_t *src) {
-    if (!src || !(src->flags & SRC_IN_USE) || !src->gesb_va) return 0;
+ * uses non-blocking primitives in the hot path.
+ *
+ * `may_map` says whether this caller stands where a mapping may be made.
+ * Only the K-Core walk does; the PIT tick and the SCI handler do not, and
+ * when one of them finds the register naming a block that is not the mapped
+ * one it knocks instead of reading the wrong memory. */
+static int process_source_gesb(apei_ghes_source_t *src, bool may_map) {
+    if (!src || !(src->flags & SRC_IN_USE)) return 0;
+
+    /* The block address is read from the register EVERY time, because that
+     * is what the register is for (ACPI 6.5 Table 18.10: "a register that
+     * contains the physical address of a block of memory that holds the
+     * error status data"). A snapshot taken once while walking HEST follows
+     * a firmware that republishes the block nowhere. Linux re-reads the same
+     * register in __ghes_peek_estatus() before every parse. */
+    if (src->status_reg_addr != 0) {
+        uint64_t phys = ghes_read_status_register(src);
+        if (phys == 0) return 0;          /* no block published right now */
+        if (phys != src->gesb_phys || !src->gesb_va) {
+            if (!may_map) { KnockOn(&src->knock); return 0; }
+            if (!ghes_point_at_block(src, phys)) return -1;
+        }
+    }
+
+    if (!src->gesb_va) return 0;
     volatile gesb_header_t *hdr = (volatile gesb_header_t *)src->gesb_va;
     uint32_t status = __atomic_load_n((uint32_t *)&hdr->block_status, __ATOMIC_ACQUIRE);
     if (status == 0) return 0;          /* no error pending */
@@ -561,7 +714,10 @@ void apei_ghes_poll_tick(void) {
         if (src->notify_type != 0 && src->notify_type != 1) continue;  /* Polled / External-IRQ both polled */
         if (now < src->next_poll_tsc) continue;
         src->next_poll_tsc = now + (uint64_t)src->poll_interval_ms * tsc_ms;
-        (void)process_source_gesb(src);
+        /* The PIT tick may have interrupted kernel code holding the very
+         * locks a mapping needs, so this caller never maps: a block that
+         * moved is walked by the K-Core behind the source's knock. */
+        (void)process_source_gesb(src, false);
     }
 }
 
@@ -569,11 +725,13 @@ void apei_ghes_poll_tick(void) {
 
 /* The walk, on a K-Core, once per knock on the source. The door opens
  * first: an NMI that lands during the walk brings another visit, and a visit
- * that finds the block already acknowledged returns at once. */
-static void nmi_worker(void *ctx) {
+ * that finds the block already acknowledged returns at once. This is the one
+ * caller that stands where a mapping may be made, so it is also where a
+ * block the firmware has republished elsewhere is followed. */
+static void ghes_walk_worker(void *ctx) {
     apei_ghes_source_t *src = (apei_ghes_source_t *)ctx;
     KnockOpen(&src->knock);
-    (void)process_source_gesb(src);
+    (void)process_source_gesb(src, true);
 }
 
 bool apei_ghes_nmi_check(void) {
@@ -590,9 +748,18 @@ bool apei_ghes_nmi_check(void) {
         apei_ghes_source_t *src = &table[i];
         if (!(src->flags & SRC_IN_USE)) continue;
         if (src->notify_type != 4) continue;
-        if (!src->gesb_va) continue;
-        volatile gesb_header_t *hdr = (volatile gesb_header_t *)src->gesb_va;
-        if (__atomic_load_n((uint32_t *)&hdr->block_status, __ATOMIC_ACQUIRE) == 0) continue;
+        if (src->status_reg_addr == 0) continue;
+        /* NMI context asks the REGISTER and nothing else. The register is
+         * mapped once at registration and never remapped, so reading it here
+         * can neither fault nor take a lock; the WINDOW, by contrast, can be
+         * released by the K-Core walk on the drain core the moment the
+         * firmware republishes the block elsewhere, and an NMI on another
+         * core that dereferenced it in that window would page-fault inside
+         * an NMI. So the question this handler answers is only "does this
+         * source name a block" — whether that block still holds an
+         * unconsumed record is for the walk to decide, where reading it is
+         * safe, and where a block already acknowledged costs one load. */
+        if (ghes_read_status_register(src) == 0) continue;
         any = true;
         /* The source's own knock: allocation-free, never dropped, and a
          * burst of NMIs for one block is one walk. */
@@ -614,7 +781,10 @@ uint32_t apei_ghes_sci_check(void) {
         apei_ghes_source_t *src = &table[i];
         if (!(src->flags & SRC_IN_USE)) continue;
         if (src->notify_type != 3) continue;
-        if (process_source_gesb(src) == 1) fired++;
+        /* The SCI handler is an interrupt too: it never maps. A source
+         * whose block moved is handed to the K-Core walk by the knock
+         * process_source_gesb raises. */
+        if (process_source_gesb(src, false) == 1) fired++;
     }
     return fired;
 }
@@ -635,7 +805,9 @@ uint32_t apei_ghes_simulate(uintptr_t gesb_phys, uint32_t gesb_len) {
     /* The simulate caller hands a kernel-VA buffer via gesb_phys
      * (we don't actually map mmio in test mode). Reuse it directly. */
     local.gesb_va = (void *)gesb_phys;
-    int r = process_source_gesb(&local);
+    /* No status register: the caller hands the block itself, so nothing is
+     * re-read and nothing is mapped. */
+    int r = process_source_gesb(&local, false);
     return (r > 0) ? 1u : 0u;
 }
 

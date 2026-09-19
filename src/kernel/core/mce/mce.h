@@ -5,9 +5,11 @@
  *   - BSP + per-AP init enables CR4.MCE, per-bank IA32_MC<i>_CTL,
  *     stale IA32_MC<i>_STATUS clear, optional LMCE (Local MCE) gate.
  *   - #MC handler (vector 18) walks every reporting bank, decodes
- *     VAL/UC/PCC/S/AR/ADDRV per Intel SDM Vol 3B §15.3.2, classifies
- *     severity (CE / UCR / UC), and sets the PMM poison bit on affected
- *     phys pages — the one poisoning that takes no lock. The
+ *     VAL/OVER/UC/EN/MISCV/ADDRV/PCC/S/AR and the MCA error code per Intel
+ *     SDM Vol 3B §15.3.2 + §15.9.2, classifies severity against
+ *     MCG_CAP.MCG_SER_P (CE / UCNA / UCR / UC), and sets the PMM poison bit
+ *     on the phys pages the banks can actually NAME — the one poisoning
+ *     that takes no lock. The
  *     `mce:poisoned` MemTag and the console line come afterwards, from a
  *     K-Core off the record's baton, because both of them take locks the
  *     interrupted frame may already hold. The one road where the handler
@@ -73,15 +75,83 @@
 #define MCE_MC_STATUS_S              (1ULL << 56) /* Signalled */
 #define MCE_MC_STATUS_AR             (1ULL << 55) /* Action Required */
 
+/* ─── MCA error code, IA32_MC<i>_STATUS[15:0] (Vol 3B §15.9.2) ───────
+ *
+ * Bit 12 is the threshold-based "filtered" marker (MCG_TES_P), not part of
+ * the code, so every comparison mask below leaves it out.
+ *
+ * The three compound shapes that name a piece of MEMORY — the only ones for
+ * which taking a page out of service means anything:
+ *   0000 1MMM CCCC       memory controller error  → bit 7 set
+ *   000F 0001 RRRR TTLL  cache hierarchy error    → bit 8 set
+ *   0000 0000 0000 11LL  generic memory hierarchy error
+ * A TLB code, a bus/interconnect code or an internal-timer code names no
+ * page at all; the address such a bank happens to carry is not a licence to
+ * offline one. */
+#define MCE_MCACOD_MASK              0xEFFFULL
+#define MCE_MCACOD_MEMCTL_MASK       0xEF80ULL
+#define MCE_MCACOD_MEMCTL            0x0080ULL
+#define MCE_MCACOD_CACHE_MASK        0xEF00ULL
+#define MCE_MCACOD_CACHE             0x0100ULL
+#define MCE_MCACOD_MEMGEN_MASK       0xEFFCULL
+#define MCE_MCACOD_MEMGEN            0x000CULL
+
+/* The codes Table 15-6's UCR rows call "known MCACOD" — the ones for which
+ * a specific recovery action exists. The rows say plainly what to do with
+ * the rest: "For unknown MCACOD, must bugcheck."
+ *   SRAO (S=1, AR=0): patrol-scrub error, last-level-cache writeback
+ *   SRAR (S=1, AR=1): data load, instruction fetch */
+#define MCE_MCACOD_SCRUB_MASK        0xEFF0ULL
+#define MCE_MCACOD_SCRUB             0x00C0ULL
+#define MCE_MCACOD_L3WB              0x017AULL
+#define MCE_MCACOD_DATA              0x0134ULL
+#define MCE_MCACOD_INSTR             0x0150ULL
+
+/* ─── IA32_MC<i>_MISC layout for UCR errors (Vol 3B §15.3.2.4) ───────
+ *
+ * These fields exist ONLY when MISCV and IA32_MCG_CAP[24] (MCG_SER_P) are
+ * both set. Without SER_P the register is model-specific end to end and
+ * nothing in it may be read as a mode or as a shift.
+ *   bits 5:0  Recoverable Address LSB — the lowest VALID bit of the address
+ *             in IA32_MC<i>_ADDR. Everything below it is noise, so an LSB
+ *             above 12 means the bank cannot even name a 4 KiB page.
+ *   bits 8:6  Address Mode — which address space ADDR is in at all. */
+#define MCE_MC_MISC_ADDR_LSB_MASK     0x3FULL
+#define MCE_MC_MISC_ADDR_MODE_SHIFT   6u
+#define MCE_MC_MISC_ADDR_MODE_MASK    0x7ULL
+#define MCE_MC_MISC_ADDR_MODE_SEGOFF  0u  /* segment offset */
+#define MCE_MC_MISC_ADDR_MODE_LINEAR  1u  /* linear address */
+#define MCE_MC_MISC_ADDR_MODE_PHYS    2u  /* physical address */
+#define MCE_MC_MISC_ADDR_MODE_MEM     3u  /* memory address (rank/row/bank) */
+#define MCE_MC_MISC_ADDR_MODE_GENERIC 7u  /* generic */
+
 #define MCE_MAX_BANKS                64u  /* SDM architectural max = 32, +slack */
 
 /* ─── Severity classification ──────────────────────────────────────── */
 
 typedef enum {
     MCE_SEV_NONE      = 0,  /* VAL=0 — bank reports nothing */
-    MCE_SEV_CORRECTED = 1,  /* UC=0  — hardware already fixed */
-    MCE_SEV_UCR       = 2,  /* UC=1, PCC=0, S=1 — recoverable */
-    MCE_SEV_UC        = 3,  /* UC=1, PCC=1 — fatal, context corrupt */
+    MCE_SEV_CORRECTED = 1,  /* UC=0 — hardware already fixed it */
+    MCE_SEV_UCR       = 2,  /* Uncorrected RECOVERABLE. Every one of these
+                             * must hold: MCG_CAP.MCG_SER_P=1 (the part
+                             * implements software error recovery at all),
+                             * UC=1, PCC=0, OVER=0, EN=1, S=1. Table 15-6
+                             * then splits it by AR: SRAO (AR=0, action
+                             * optional) and SRAR (AR=1, action required). */
+    MCE_SEV_UC        = 3,  /* Fatal. PCC=1; or OVER=1 alongside UC=1 (an
+                             * uncorrected error whose twin was lost); or
+                             * ANY UC=1 on a part without MCG_SER_P, where
+                             * §15.6.1 leaves the handler nothing but "log
+                             * and shut the system down"; or a UCR row whose
+                             * MCACOD names no recovery this handler has. */
+    MCE_SEV_UCNA      = 4,  /* UC=1, PCC=0, S=0 on a SER part: the hardware
+                             * logged it and never signalled it to us —
+                             * Table 15-6, "Ok to keep the system running".
+                             * An EN=0 entry on a SER part lands here too:
+                             * every UCR row requires EN=1, so such an entry
+                             * is not the error that raised this #MC and is
+                             * not ours to act on. Logged, cleared, and
+                             * nothing else. */
 } mce_severity_t;
 
 /* ─── Public API ───────────────────────────────────────────────────── */
@@ -109,8 +179,12 @@ void          mce_ap_init(void);
  *     set, program execution cannot be restarted reliably." This is a
  *     property of the event and of THIS logical processor, so it outranks
  *     any single bank's severity;
- *   - every bank record it decoded was recoverable (UC=0, or UC=1 with
- *     PCC=0).
+ *   - no bank record it decoded was fatal. Fatal is what §15.6.1 and
+ *     Table 15-6 make fatal, not merely PCC: an uncorrected error on a
+ *     part without MCG_SER_P, an uncorrected error with OVER=1 (its twin
+ *     was lost, so nobody can say where it was), and a UCR row whose
+ *     MCACOD names no recovery — "for unknown MCACOD, must bugcheck" —
+ *     or whose required action this kernel could not start.
  *
  * An empty walk — no bank with VAL=1 — is deliberately NOT a verdict of its
  * own. Without LMCE every Intel #MC is broadcast to every logical processor
@@ -137,7 +211,13 @@ bool          mce_is_initialized(void);
 /* Bank count reported by IA32_MCG_CAP. Useful for telemetry. */
 uint32_t      mce_bank_count(void);
 
-/* True if LMCE is enabled (Intel SDM §15.3.1.4). */
+/* True when the firmware PERMITS Local MCE: MCG_CAP.LMCE_P is set and
+ * IA32_FEATURE_CONTROL carries LOCK=1 with LMCE_EN=1. It is not a claim
+ * that LMCE is armed. Arming it means writing IA32_MCG_EXT_CTL.LMCE_EN
+ * (SDM §15.3.1.4/§15.3.1.5), which this kernel never does — so
+ * MCG_STATUS.LMCE_S is never set and every #MC here reaches every logical
+ * processor, which is why the handler treats an empty bank walk as the
+ * normal answer on all but one of them. */
 bool          mce_lmce_enabled(void);
 
 #endif /* MCE_H */

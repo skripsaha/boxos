@@ -410,12 +410,33 @@ acpi_error_t acpi_parse_tables(acpi_rsdp_t* rsdp) {
     }
 
     if (!s5.found) {
-        /* ACPI 1.0 default for SLP_TYPa/b when no _S5 is available.
-         * This is a last-resort guess; soft-off may not work on the
-         * board but at least PM1 won't be programmed with garbage. */
-        debug_printf("[ACPI] _S5 not found anywhere; using SLP_TYP=0x05\n");
-        g_acpi.slp_typa = 0x05;
-        g_acpi.slp_typb = 0x05;
+        /* No \_S5, and therefore no sleep vector for this machine.
+         *
+         * ACPI 6.5 §4.8.3.2.1, Table 4.13, SLP_TYPx: "The _Sx object contains
+         * 3-bit binary values associated with the respective sleeping state
+         * ... OSPM takes the two values from the _Sx object and programs each
+         * value into the respective SLP_TYPx field." The encodings belong to
+         * the chipset and no ACPI revision defines a default for them. §7.1
+         * says the same from the other side: "If _S5 is not specified,
+         * alternative methods are used to turn-off the system."
+         *
+         * What stood here programmed 0x05 and called it "the ACPI 1.0 default
+         * for SLP_TYPa/b". No revision defines such a default — the only
+         * default Table 4.13 names for PM1_CNT is its reset value, 00h — and
+         * 0x05 is not a harmless guess either: on an Intel PCH 101b is S3, so
+         * a machine asked to power off would have suspended to RAM with every
+         * core halted and no waking vector installed, to be woken by the next
+         * USB or RTC event into a dead system. The comment promised "at least
+         * PM1 won't be programmed with garbage" while writing exactly that.
+         *
+         * An invented value is worse than none. s5_found stays false, the
+         * fields stay zero, and acpi_shutdown() skips the PM1 write rather
+         * than guessing what this chipset calls soft-off. */
+        kprintf("[ACPI] no \\_S5 in the DSDT or in any SSDT — this firmware "
+                "publishes no soft-off sleep vector, so the PM1 sleep write "
+                "will not be attempted\n");
+        g_acpi.slp_typa = 0;
+        g_acpi.slp_typb = 0;
         g_acpi.s5_found = false;
     }
 

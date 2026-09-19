@@ -30,7 +30,9 @@
  *                   On Skylake-and-later this is the bit-exact rate.
  *                   ECX=0 → fall back to a known-crystal lookup keyed
  *                   on family/model (24 MHz on most Core, 19.2 MHz on
- *                   Atom Goldmont).
+ *                   Atom Goldmont, 25 MHz on Denverton), and for a
+ *                   model the table does not name, to the crystal
+ *                   derived from CPUID.16h base frequency.
  *
  *   3. CPUID.16h    Intel base frequency (in MHz). Not exactly TSC
  *                   under turbo, but close enough for sanity checks
@@ -154,8 +156,27 @@ static uint32_t known_intel_crystal_hz(void) {
     if (family != 0x06) return 0;  /* only Intel Core/Atom family 6 documented */
 
     switch (model) {
-        /* Goldmont, Goldmont Plus, Tremont — Atom. */
-        case 0x5C: case 0x5F: case 0x7A: case 0x86:
+        /* Goldmont-D / Denverton — the Atom C3000 server parts. THE ONE
+         * model that answers neither leaf: CPUID.15h reports ECX = 0 and
+         * CPUID.16h is absent, so there is nothing to read and nothing to
+         * derive from, and the crystal has to be named outright. It is
+         * 25 MHz — NOT the 19.2 MHz of the Goldmont client parts below,
+         * which this entry claimed until 2026-09 and which calibrated
+         * every Denverton board 23 % low for the whole boot. Linux
+         * hardcodes this single model for exactly this reason
+         * (arch/x86/kernel/tsc.c, native_calibrate_tsc): "Denverton SoCs
+         * don't report crystal clock, and also don't support
+         * CPUID_LEAF_FREQ for the calculation below, so hardcode the
+         * 25MHz crystal clock." */
+        case 0x5F:
+            return 25000000u;          /* 25 MHz */
+        /* Goldmont (0x5C) and Goldmont Plus (0x7A) — Atom client.
+         * Tremont-D / Snow Ridge (0x86) is deliberately NOT here: no
+         * reference implementation assigns it a crystal, so if it ever
+         * reports ECX = 0 the honest answer is the one derived from
+         * CPUID.16h below, not a number carried over from a different
+         * microarchitecture. */
+        case 0x5C: case 0x7A:
             return 19200000u;          /* 19.2 MHz */
         /* Skylake, Kaby Lake, Comet Lake, Ice Lake, Tiger Lake, ... */
         case 0x4E: case 0x5E:                /* Skylake client */
@@ -180,6 +201,42 @@ static uint32_t known_intel_crystal_hz(void) {
         default:
             return 0;
     }
+}
+
+/* The core crystal DERIVED from CPUID.16h, for a part that enumerates the
+ * CPUID.15h ratio but not the crystal itself and is not named in the table
+ * above.
+ *
+ * Leaf 0x16 EAX is the processor base frequency in MHz; leaf 0x15 says the
+ * TSC runs at crystal × numerator / denominator. The base frequency is the
+ * frequency the TSC ticks at on every part that publishes both, so the
+ * crystal producing it is base_MHz × denominator / numerator. That is
+ * arithmetic on two things the silicon said about itself rather than a
+ * guess about which silicon it is, which is why Linux
+ * (arch/x86/kernel/tsc.c, native_calibrate_tsc) prefers it to any table:
+ * "Some Intel SoCs like Skylake and Kabylake don't report the crystal
+ * clock, but we can easily calculate it to a high degree of accuracy by
+ * considering the crystal ratio and the CPU speed."
+ *
+ * It is tried AFTER the table, not before — which is where this departs
+ * from Linux, and deliberately. Leaf 0x16 reports whole megahertz, and the
+ * base frequency it rounds to is not exactly the TSC rate under any given
+ * ratio, so on a part whose crystal is a known exact number the derived
+ * figure is the worse of the two by a fraction of a percent. A table entry
+ * that names the crystal outright therefore wins; for a part the table does
+ * not name, this is the best the machine can say, and it is still an answer
+ * instead of a guess. */
+static uint64_t cpuid16_derived_crystal_hz(uint32_t denominator,
+                                           uint32_t numerator) {
+    if (g_cpu_caps.max_basic_leaf < 0x16) return 0;
+    if (denominator == 0 || numerator == 0) return 0;
+
+    uint32_t eax, ebx, ecx, edx;
+    cpuid(0x16, &eax, &ebx, &ecx, &edx);
+    if (eax == 0) return 0;
+
+    return ((uint64_t)eax * 1000000ULL * (uint64_t)denominator)
+           / (uint64_t)numerator;
 }
 
 /* CPUID.15h and NOTHING ELSE — the leaf's own three values or no answer.
@@ -227,9 +284,13 @@ static uint64_t cpuid_get_tsc_freq_khz(void) {
         return 0;
     }
 
-    // ECX = 0 → crystal not enumerated. Use family/model lookup. Good enough
-    // to CALIBRATE against, not good enough to be a ruler — see above.
+    // ECX = 0 → crystal not enumerated. Two answers, in Linux's order of
+    // trust: the per-model constant for the parts whose crystal is a known
+    // exact number, then the crystal derived from CPUID.16h for everything
+    // else. Good enough to CALIBRATE against, not good enough to be a
+    // ruler — see above.
     uint64_t crystal_hz = known_intel_crystal_hz();
+    if (crystal_hz == 0) crystal_hz = cpuid16_derived_crystal_hz(eax, ebx);
     if (crystal_hz == 0) return 0;
 
     // TSC frequency = crystal_hz * numerator / denominator
@@ -343,8 +404,11 @@ void cpu_calibrate_tsc(void) {
 
     /* Method 1b: Hyper-V MSR_TSC_FREQUENCY (0x40000022). Hyper-V doesn't
      * expose CPUID leaf 0x40000010 — it publishes the frequency through
-     * a dedicated MSR gated on CPUID 0x40000003:EDX[8]. Same trust
-     * level as CPUID.40000010h elsewhere. */
+     * a dedicated MSR gated on BOTH halves of CPUID 0x40000003: the
+     * AccessFrequencyRegs privilege in EAX[11], which is what makes the
+     * RDMSR legal for this partition, and the FrequencyMsrsAvailable
+     * build capability in EDX[8]. Same trust level as CPUID.40000010h
+     * elsewhere. See hv_has_hyperv_frequency_msrs(). */
     uint64_t hv_msr_khz = hv_hyperv_tsc_khz_from_msr();
 
     /* Method 2: CPUID.15h (Intel canonical TSC ratio). */

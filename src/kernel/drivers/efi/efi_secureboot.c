@@ -231,9 +231,12 @@ static void walk_signature_list(EfiSbDb kind, const uint8_t *blob, uint32_t blob
         if (sig_size <= sizeof(EfiGuid))           goto next_list;
         if (sig_size > EFI_SB_MAX_CERT_LEN)        goto next_list;
 
+        /* Remainder, not sum: signature_header_size is firmware-supplied
+         * and a value near UINT32_MAX would wrap `28 + header_size` back
+         * into a small uint32_t that passes a `fixed > list_size` test. */
         uint32_t header_size = sl->signature_header_size;
-        uint32_t fixed = sizeof(EfiSignatureList) + header_size;
-        if (fixed > list_size)                     goto next_list;
+        if (header_size > list_size - sizeof(EfiSignatureList)) goto next_list;
+        uint32_t fixed = (uint32_t)sizeof(EfiSignatureList) + header_size;
 
         uint32_t entries_bytes = list_size - fixed;
         if (entries_bytes % sig_size)              goto next_list;

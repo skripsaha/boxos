@@ -46,13 +46,46 @@ static irq_chip_t pic_chip = {
 
 // --- APIC backend (LAPIC + IO-APIC) ---
 
+/*
+ * Can the BSP be named in an IOAPIC redirection entry at all?
+ *
+ * Intel 82093AA §3.2.4, IOREDTBLx Destination Field: in Physical Mode the
+ * entry's destination is an APIC ID held in the high dword — eight bits on
+ * every part BoxOS runs on. An APIC ID above 255 has no representation
+ * there, and truncating it to its low eight bits does not merely fail to
+ * route the line: it routes the line to a DIFFERENT, running processor,
+ * which then takes an interrupt under a vector whose handler expects
+ * different hardware. A machine whose BSP is x2APIC ID 0x100 would send
+ * every legacy IRQ to the core with ID 0.
+ *
+ * So the pin is left masked and the refusal is named. Naming it per line
+ * rather than once is deliberate: each refused line is one device that
+ * will not raise an interrupt, and the operator needs to know WHICH.
+ *
+ * What would lift the refusal is interrupt remapping (VT-d IR / AMD-Vi),
+ * whose IRTE carries a 32-bit destination and turns the redirection entry
+ * into an index. Until that is armed there is no honest 8-bit answer, and
+ * inventing one is exactly the failure this refuses.
+ */
+static bool bsp_reachable_from_ioapic(uint32_t gsi, const char *what) {
+    if (madt_info.bsp_lapic_id <= 0xFFu) return true;
+
+    kprintf("[IRQCHIP] %[E]%s GSI %u not programmed: BSP APIC ID %u does not "
+            "fit the 8-bit IOAPIC destination, and the low eight bits name "
+            "the core with ID %u instead%[D]\n",
+            what, gsi, madt_info.bsp_lapic_id, madt_info.bsp_lapic_id & 0xFFu);
+    return false;
+}
+
 static void apic_chip_enable(uint8_t irq) {
     if (irq < IRQ_MAX_COUNT) {
         // Apply ISA-to-GSI mapping (e.g., MADT says IRQ 0 -> GSI 2 for PIT)
         uint32_t gsi = ioapic_isa_to_gsi(irq);
         // Vector is based on IRQ number, not GSI — so IRQ handler maps back correctly
         uint8_t vector = IRQ_VECTOR_BASE + irq;
-        ioapic_enable_irq((uint8_t)gsi, vector, madt_info.bsp_lapic_id);
+        if (!bsp_reachable_from_ioapic(gsi, "IRQ")) return;
+        ioapic_enable_irq((uint8_t)gsi, vector,
+                          (uint8_t)madt_info.bsp_lapic_id);
     }
 }
 
@@ -159,8 +192,9 @@ void irqchip_init(void) {
     for (uint8_t i = 0; i < madt_info.nmi_source_count; i++) {
         const madt_nmi_source_info_t* s = &madt_info.nmi_sources[i];
         if (!s->valid) continue;
+        if (!bsp_reachable_from_ioapic(s->gsi, "NMI Source")) continue;
         ioapic_program_nmi_source(s->gsi, s->mps_flags,
-                                   madt_info.bsp_lapic_id);
+                                   (uint8_t)madt_info.bsp_lapic_id);
     }
 
     // Step 6: Activate APIC backend

@@ -121,7 +121,12 @@ bool lapic_is_x2apic_active(void);
  *
  *   xAPIC:  wait for the delivery-status bit of the PREVIOUS IPI to clear,
  *           write ICR_HIGH (dest<<24), write ICR_LOW (cmd) — the LOW write
- *           triggers the send.
+ *           triggers the send. All three happen with interrupts disabled
+ *           and the caller's flags restored afterwards: ICR_HIGH holds the
+ *           destination the LOW write sends to, so an interrupt handler
+ *           that sends its own IPI in between would redirect ours. Linux
+ *           brackets the same pair in local_irq_save
+ *           (default_send_IPI_single_phys).
  *   x2APIC: a memory fence, then one wrmsr(0x830, (dest << 32) | cmd).
  *           Nothing is waited for, and not because the write completes the
  *           delivery: the delivery-status bit was REMOVED in x2APIC mode,
@@ -141,6 +146,14 @@ bool lapic_is_x2apic_active(void);
  * destination that never accepts may simply not exist. The runtime senders
  * below have void callers that could not act on a refusal, so they wait
  * for the ICR instead of dropping the interrupt.
+ *
+ * The one refusal NO caller can opt out of is a destination wider than the
+ * eight bits the xAPIC ICR carries. There the choice is not "send or lose
+ * it" but "send it to somebody else": the masked ID names a different,
+ * running processor. Every xAPIC send refuses such an ID and says so,
+ * including the void senders below, because delivering an INIT or a wake
+ * to the wrong core is worse than not delivering it. Only x2APIC mode can
+ * name those processors, with the full 32-bit destination of MSR 0x830.
  *
  * Writing the legacy MMIO offsets (ICR_HIGH=0x310, ICR_LOW=0x300) on an
  * x2APIC-enabled CPU does NOT fault: Intel SDM Vol 3A, table "MSR/MMIO
