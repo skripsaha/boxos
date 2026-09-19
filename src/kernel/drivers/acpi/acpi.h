@@ -390,6 +390,20 @@ typedef struct {
 } __attribute__((packed)) ivrs_ivhd_t;
 _Static_assert(sizeof(ivrs_ivhd_t) == 24, "IVRS IVHD core = 24 bytes");
 
+/* How many IVHDs this kernel keeps room for. The number has no source: IVRS
+ * gives one IVHD per IOMMU and names no ceiling on how many a platform may
+ * publish, and the reference driver keeps a list rather than an array. Any
+ * constant here is therefore a choice, and the form the project actually
+ * wants — a list that grows with the table — belongs to the parser that
+ * fills this one, in acpi_ivrs.c.
+ *
+ * It is not only the parser's ceiling: amdvi.c defines AMDVI_MAX_UNITS as
+ * this, so an IVHD past the fourth is neither recorded nor driven. A
+ * two-socket part publishing eight IOMMUs loses four of them, and every
+ * device behind those four stays outside the translation the rest of the
+ * machine believes is in force. That loss is spoken, not swallowed:
+ * acpi_parse_ivrs names the segment and base it had no room for through
+ * kprintf. */
 #define ACPI_IVRS_MAX_IVHD  4
 
 typedef struct {

@@ -1089,12 +1089,24 @@ void exception_handler(interrupt_frame_t *frame)
              * its critical section in half. It is taken anyway because the
              * alternative on a guard-page hit is a certain deadlock against a
              * holder that no longer exists; the peer case is a window, not the
-             * common one. Naming it here rather than claiming it away. */
+             * common one. Naming it here rather than claiming it away.
+             *
+             * And naming it OUT LOUD. Every other line of this dump is a
+             * kprintf; this one was a debug_printf, which compiles to
+             * nothing in the build that ships, so on a board the one action
+             * in the whole recovery that can damage a core other than the
+             * dead one left no trace at all. An operator reading the dump
+             * afterwards has to be able to tell a clean guard-page recovery
+             * from one that reached into a peer's critical section, because
+             * the two have different consequences for everything that runs
+             * after the machine "continues". */
             scheduler_state_t *sched = scheduler_get_state();
             if (sched->scheduler_lock.locked)
             {
-                debug_printf("[IST] Core %u: force-releasing scheduler lock for crashed PID %u\n",
-                             amp_get_core_index(), overflow_proc->pid);
+                kprintf("[IST] Core %u forced the scheduler lock open for dead "
+                        "PID %u — if a peer core was inside it, its critical "
+                        "section was cut.\n",
+                        amp_get_core_index(), overflow_proc->pid);
                 spin_force_release(&sched->scheduler_lock);
             }
             __asm__ volatile("cli");

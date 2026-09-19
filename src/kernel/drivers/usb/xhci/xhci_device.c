@@ -31,21 +31,48 @@ void xhci_fill_slot_context(xhci_slot_context_t* slot_ctx,
      * ‼ MTT IS NOT A PROPERTY OF BEING A HUB, AND KEEPING IT UNDER THE HUB
      * TEST MISDESCRIBED EVERY SLOW DEVICE BEHIND A MULTI-TT HUB.
      *
-     * xHCI 1.2 Table 6-4 gives the MTT field two occasions, and only one of
-     * them is a hub: a high-speed hub whose Multiple TT Interface software
-     * has enabled, AND a low- or full-speed device connected through such a
-     * hub. Linux writes both from the one fact — xhci_setup_addressable_virt_
-     * dev does `if (udev->tt->multi) slot_ctx->dev_info |= DEV_MTT` for a
-     * device that merely HAS a translator, and xhci_update_hub_device does
-     * the same for the hub itself.
+     * xHCI 1.2 Table 6-4, bit 25, names two occasions and only one of them is
+     * a high-speed hub: "set to '1' by software if this is a High-speed hub
+     * that supports Multiple TTs and the Multiple TT Interface has been
+     * enabled by software, or if this is a Low-/Full-speed device or
+     * Full-speed hub and connected to the xHC through a parent High-speed hub
+     * that supports Multiple TTs and the Multiple TT Interface of the parent
+     * hub has been enabled by software".
      *
      * Trapped under `hub_ports > 0`, the bit was emitted for hubs alone, so a
      * keyboard on a multi-TT hub was described to the controller as sharing
      * the single translator that hub does not use — one split-transaction
-     * queue scheduled where the hardware has one per port.
+     * queue scheduled where the hardware has one per port. That is not a
+     * refinement: §4.5.2, listing what an Input Slot Context for an Address
+     * Device Command shall carry, has "If the device is a Low-/Full-speed
+     * function or hub accessed through a High-speed hub, then the following
+     * values are derived from the 'parent' High-speed hub ...: MTT = '1' if
+     * the Multi-TT Interface of the hub has been enabled with a Set Interface
+     * request, otherwise '0'", and §6.2.2.1 counts a context without it as
+     * not 'valid' for the command.
      *
-     * So the field means exactly one thing here: the MTT bit this slot is
-     * owed. Whoever fills the record decides it — the hub that entered the
+     * ‼ AND THE SECOND OCCASION SAYS "or hub" ON PURPOSE, WHICH IS WHERE
+     * LINUX AND THE SPECIFICATION PART COMPANY.
+     *
+     * Linux sets this bit for a full-speed hub when it addresses it
+     * (xhci_setup_addressable_virt_dev, `if (udev->tt->multi)`) and clears it
+     * again when it configures it — xhci_update_hub_device: `else if
+     * (hdev->speed == USB_SPEED_FULL) dev_info &= ~DEV_MTT`, under a comment
+     * citing "section 6.2.2". That section does not say it. §6.2.2.2 says only
+     * "If Hub = '1' and Speed = High-Speed, then the TT Think Time (TTT) and
+     * Multi-TT (MTT) fields shall be initialized", and its very next sentence
+     * shows the form this specification uses when it does mean a zero: "If
+     * Hub = '1', then the Number of Ports field shall be initialized, else
+     * Number of Ports = '0'". Table 6-6 spells the same negative out for the
+     * think time. Nothing spells one out for MTT, and the reading Linux acts
+     * on would leave the words "or Full-speed hub" in Table 6-4 unreachable,
+     * because a hub carries Hub = '1' by the definition of bit 26 two lines
+     * below it. So the table is followed, for every command, and the bit says
+     * what is true: a full-speed hub behind a multi-TT hub does have one
+     * translator to itself.
+     *
+     * The field therefore means exactly one thing here: the MTT bit this slot
+     * is owed. Whoever fills the record decides it — the hub that entered the
      * mode for itself, or the device that inherited that hub as its
      * translator.
      */
@@ -67,13 +94,18 @@ void xhci_fill_slot_context(xhci_slot_context_t* slot_ctx,
                             | ((uint32_t)slot->tt_port << 8);
     }
     /* And how long that translator needs between transactions — a number that
-     * exists only for a hub that HAS translators. Table 6-6: "If this is a
+     * exists only for a hub that HAS translators, and the one field here whose
+     * negative the specification writes out itself. Table 6-6: "If this is a
      * High-speed hub (Hub = '1' and Speed = High-Speed), then this field shall
      * be set by software to identify the time the TT of the hub requires to
-     * proceed to the next full-/low-speed transaction." A full-speed hub is a
-     * hub with no TT at all, and it reports those two bits of
-     * wHubCharacteristics as reserved — believing them would hand the
-     * controller a think time for a translator that does not exist. */
+     * proceed to the next full-/low-speed transaction. ... If this device is
+     * not a High-speed hub (Hub = '0' or Speed != High-speed), then this field
+     * shall be '0'." A full-speed hub has no transaction translator at all —
+     * there is nothing slower on the other side of it to translate for — so
+     * repeating its think time would hand the controller the pacing of
+     * hardware that does not exist. Linux draws the line in the same place:
+     * xhci_update_hub_device writes TT_THINK_TIME only `if (xhci->hci_version
+     * < 0x100 || hdev->speed == USB_SPEED_HIGH)`. */
     if (slot->hub_ports > 0 && slot->speed == XHCI_PORT_SPEED_HIGH) {
         slot_ctx->dwords[2] |= ((uint32_t)(slot->tt_think_time & 0x3) << 16);
     }

@@ -207,12 +207,29 @@ static uint32_t known_intel_crystal_hz(void) {
         case 0x5C:
             return 19200000u;          /* 19.2 MHz */
         /* Skylake client (0x4E, 0x5E) and Kaby/Coffee Lake (0x8E, 0x9E) —
-         * and NOTHING ELSE. Intel SDM Vol. 3B Table 20-91 gives 24 MHz to
-         * exactly one row, "6th and 7th generation Intel Core processors
-         * and Intel Xeon W Processor Family", which is these four
-         * signatures; the linux revisions that still carried a table named
-         * the same four (v4.14 arch/x86/kernel/tsc.c: SKYLAKE_MOBILE,
-         * SKYLAKE_DESKTOP, KABYLAKE_MOBILE, KABYLAKE_DESKTOP).
+         * and NOTHING ELSE. Two sources, and they answer two different
+         * questions, so neither is quoted for the other's.
+         *
+         * WHICH signatures: the linux revisions that still carried a table
+         * (v4.14 arch/x86/kernel/tsc.c) name exactly these four —
+         * SKYLAKE_MOBILE 0x4E, SKYLAKE_DESKTOP 0x5E, KABYLAKE_MOBILE 0x8E,
+         * KABYLAKE_DESKTOP 0x9E — and the KABYLAKE_* models are the Coffee
+         * Lake parts as well, which share those two model numbers.
+         *
+         * WHAT number: Intel SDM Vol. 3B Table 20-91 gives 24 MHz to
+         * exactly one row, "6th and 7th generation Intel® Core™ processors
+         * and Intel® Xeon® W Processor Family". That row is NOT a spelling
+         * of the four, and this comment used to claim it was. It names no
+         * CPUID signature at all; it reaches Xeon W, which in that
+         * generation is Skylake-W — 06_55H silicon, the signature the row
+         * ABOVE it gives 25 MHz to, a conflict this file settles at 0x55 in
+         * favour of 25 MHz on the strength of that 06_55H row and of
+         * linux's SKYLAKE_X; and it stops at the 7th generation, while 0x8E
+         * and 0x9E carry 8th and 9th generation Coffee Lake parts the row
+         * never mentions — the board this kernel is developed against, an
+         * i5-9400F, is 06_9EH and is one of them. The models therefore rest
+         * on linux, which names silicon; the SDM row is what fixes the rate
+         * those models run at.
          *
          * Cannon Lake (0x66), Ice Lake client (0x7D, 0x7E), Ice Lake
          * server (0x6A, 0x6C), Tiger Lake (0x8C, 0x8D) and Comet Lake
@@ -243,11 +260,18 @@ static uint32_t known_intel_crystal_hz(void) {
          * Never read: this lookup runs only after CPUID.15h answered with
          * EAX,EBX non-zero and ECX = 0, and leaf 15H does not exist on
          * Haswell or Broadwell — those parts stop at basic leaf 0x0D — so
-         * the caller returns before the switch. Nor does the emulated
-         * Haswell this kernel is tested on reach it: Bochs's
-         * corei7_haswell_4770 sets max_std_leaf = 0xD
-         * (cpu/cpudb/intel/corei7_haswell_4770.cc), which is the same
-         * refusal. A stand-in number on a path nothing walks is only a trap
+         * the caller returns before the switch. Nor does any stand this
+         * kernel is tested on reach it, and that was checked by reading
+         * rather than by running, because the answer is in a source file:
+         * Bochs's corei7_haswell_4770, the one emulated Haswell in the tree
+         * (Makefile BOCHS_CPU, tools/make_bochsrc.sh), sets max_std_leaf =
+         * 0xD in cpu/cpudb/intel/corei7_haswell_4770.cc and defines no leaf
+         * 0x15 — the same refusal the silicon makes — and QEMU is run with
+         * -cpu max or -cpu qemu64 (Makefile), neither of which reports a
+         * Haswell or Broadwell MODEL, so this switch never selects the row
+         * whatever leaves those models publish.
+         *
+         * A stand-in number on a path nothing walks is only a trap
          * for the first machine that does walk it. Pre-Skylake calibration
          * goes where it already went: HPET or PIT measurement.
          *

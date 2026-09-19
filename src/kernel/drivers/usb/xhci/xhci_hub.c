@@ -1174,12 +1174,21 @@ int xhci_hub_attach(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
      * slot->multi_tt is the MTT field of xHCI 1.2 Table 6-4, and that field
      * says two things with one bit: a high-speed hub running its Multiple TT
      * Interface, and a slower device reached THROUGH such a hub. A full-speed
-     * hub plugged into a multi-TT high-speed hub is the second kind — the
-     * enumerator worked its bit out when it inherited the translator, and
-     * clearing it unconditionally here told the controller the opposite of
-     * what the parent had just enabled. A hub with translators of its own is
-     * reached at high speed and therefore never stands behind one, so
-     * tt_slot_id tells the two apart with nothing left over.
+     * hub plugged into a multi-TT high-speed hub is the second kind, and the
+     * specification names it in so many words — §4.5.2, on the Input Slot
+     * Context of an Address Device Command: "If the device is a Low-/Full-speed
+     * function OR HUB accessed through a High-speed hub ... MTT = '1' if the
+     * Multi-TT Interface of the hub has been enabled". The enumerator worked
+     * that bit out when it inherited the translator; clearing it here told the
+     * controller the opposite of what the parent had just enabled. A hub with
+     * translators of its own is reached at high speed and therefore never
+     * stands behind one, so tt_slot_id tells the two apart with nothing left
+     * over.
+     *
+     * Linux differs here, and knowingly: it keeps the bit for the Address
+     * Device and drops it again for this Configure Endpoint when the hub is
+     * full-speed. Nothing in the specification asks for that — the reasoning
+     * is written out over xhci_fill_slot_context, where the bit is emitted.
      */
     if (slot->tt_slot_id == 0) {
         slot->multi_tt = false;

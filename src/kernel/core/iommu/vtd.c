@@ -312,9 +312,7 @@ static inline void* vtd_table_virt(uint64_t entry) {
     return vmm_phys_to_virt((uintptr_t)(entry & ~0xFFFULL));
 }
 
-static uint64_t* slpte_walk(uint64_t* parent, uint64_t parent_phys,
-                             unsigned idx, bool create) {
-    (void)parent_phys;
+static uint64_t* slpte_walk(uint64_t* parent, unsigned idx, bool create) {
     uint64_t e = parent[idx];
     if (!(e & SLPTE_R)) {
         if (!create) return NULL;
@@ -347,11 +345,11 @@ static int vtd_identity_map(uint64_t phys, uint64_t size) {
         unsigned pd_i   = (unsigned)((a >> 21) & 0x1FF);
         unsigned pt_i   = (unsigned)((a >> 12) & 0x1FF);
 
-        uint64_t* pdpt = slpte_walk(g_id_pml4, g_id_pml4_phys, pml4_i, true);
+        uint64_t* pdpt = slpte_walk(g_id_pml4, pml4_i, true);
         if (!pdpt) { vtd_structure_flush_run(run_from, run_to); return -2; }
-        uint64_t* pd   = slpte_walk(pdpt, 0, pdpt_i, true);
+        uint64_t* pd   = slpte_walk(pdpt, pdpt_i, true);
         if (!pd)   { vtd_structure_flush_run(run_from, run_to); return -2; }
-        uint64_t* pt   = slpte_walk(pd, 0, pd_i, true);
+        uint64_t* pt   = slpte_walk(pd, pd_i, true);
         if (!pt)   { vtd_structure_flush_run(run_from, run_to); return -2; }
         pt[pt_i] = a | SLPTE_R | SLPTE_W;
         if (run_to != &pt[pt_i]) {
@@ -433,7 +431,7 @@ static uint64_t vtd_slpt_root_for(const vtd_unit_t* u, uint64_t top_phys)
          levels > u->sagaw_levels; levels--) {
         uint64_t* table = (uint64_t*)vtd_table_virt(phys);
         if (!table) return 0;
-        if (!slpte_walk(table, phys, 0, true)) return 0;
+        if (!slpte_walk(table, 0, true)) return 0;
         phys = table[0] & ~0xFFFULL;
     }
     return phys;
@@ -1147,7 +1145,8 @@ static int vtd_unit_init(vtd_unit_t* u, uint64_t phys) {
         u->sagaw_levels = VTD_AGAW_39BIT + 2;
         kprintf("[VT-d] remap unit at 0x%lx reports SAGAW=0x%02x — 39-bit "
                 "AGAW only, so it gets the second level of this kernel's "
-                "table as its root and AW=001b\n",
+                "table as its root and AW=001b, and comes up like every "
+                "other unit: off firmware's tables, translation left off\n",
                 (unsigned long)phys, sagaw);
     } else {
         kprintf("[VT-d] remap unit at 0x%lx reports SAGAW=0x%02x — neither the "
@@ -1381,11 +1380,11 @@ static int domain_slpt_map(struct iommu_domain* d, uint64_t iova,
         unsigned i3 = (unsigned)((a >> 30) & 0x1FF);
         unsigned i2 = (unsigned)((a >> 21) & 0x1FF);
         unsigned i1 = (unsigned)((a >> 12) & 0x1FF);
-        uint64_t* l3 = slpte_walk(d->slpt, d->slpt_phys, i4, true);
+        uint64_t* l3 = slpte_walk(d->slpt, i4, true);
         if (!l3) { vtd_structure_flush_run(run_from, run_to); return -2; }
-        uint64_t* l2 = slpte_walk(l3, 0, i3, true);
+        uint64_t* l2 = slpte_walk(l3, i3, true);
         if (!l2) { vtd_structure_flush_run(run_from, run_to); return -2; }
-        uint64_t* l1 = slpte_walk(l2, 0, i2, true);
+        uint64_t* l1 = slpte_walk(l2, i2, true);
         if (!l1) { vtd_structure_flush_run(run_from, run_to); return -2; }
         uint64_t pte = (phys + (a - (iova & ~0xFFFULL))) & ~0xFFFULL;
         if (perm & IOMMU_PERM_READ)  pte |= SLPTE_R;
@@ -1437,10 +1436,10 @@ static int vtd_unmap(iommu_domain_t* d, uint64_t iova, uint64_t size) {
             unsigned i3 = (unsigned)((a >> 30) & 0x1FF);
             unsigned i2 = (unsigned)((a >> 21) & 0x1FF);
             unsigned i1 = (unsigned)((a >> 12) & 0x1FF);
-            uint64_t* l3 = slpte_walk(d->slpt, d->slpt_phys, i4, false);
+            uint64_t* l3 = slpte_walk(d->slpt, i4, false);
             if (!l3) continue;
-            uint64_t* l2 = slpte_walk(l3, 0, i3, false); if (!l2) continue;
-            uint64_t* l1 = slpte_walk(l2, 0, i2, false); if (!l1) continue;
+            uint64_t* l2 = slpte_walk(l3, i3, false); if (!l2) continue;
+            uint64_t* l1 = slpte_walk(l2, i2, false); if (!l1) continue;
             l1[i1] = 0;
             /* Per entry rather than per run: an unmap walks a range the
              * caller chose, skips whatever is not mapped, and is nothing

@@ -282,56 +282,20 @@ static bool w_cow_before(WriteJob *j)
  * §1.7 forbids issuing a non-queued command beside queued ones, and this very
  * state machine's W_COMMIT_TXN is one of the flushers, so one write's
  * durability point is exactly what makes another write's submit find the door
- * shut). It is also the answer on the narrow race where the port goes
- * inactive between ahci_async.c's check and ahci_alloc_slot's — a port that
- * is going away, which the next attempt names properly as
- * ERR_DEVICE_NOT_READY. Folding all of that into ERR_IO ended a perfectly
- * healthy write with a disk error and left the caller nothing to tell "busy,
- * come back" apart from "the medium is broken".
+ * shut). Both submit sites below folded that into ERR_IO, so a write refused
+ * by a momentarily full port came back from the kernel wearing the same word
+ * as a write the medium had actually failed, and the caller had no way to
+ * tell "come back" from "this disk is broken". It now comes back as ERR_BUSY,
+ * which is the whole of what the caller was missing: the decision to try the
+ * same write again belongs to whoever issued it and still holds the bytes.
  *
- * So the job is not failed on the spot: it keeps its state and is PRESENTED
- * AGAIN at the back of the drain core's queue, which is what libata does with
- * a command its port defers (ata_std_qc_defer / ATA_DEFER_PORT) — the qc is
- * re-presented, never completed with an error.
- *
- * But it is presented again only while the queue holds work that has not run
- * yet, and that condition is the whole of the design rather than a nicety.
- * On the drain core this runs INSIDE BatonPump, which does not return to
- * kcore_run_loop until its queue is empty: a node that unconditionally put
- * itself back would OWN the core — the process pockets, the USB hubs and the
- * machine's own idle unreachable for as long as the port stayed shut, and a
- * flush is given AHCI_CMD_PATIENCE_MS to shut it. Queued work is therefore
- * the event this waits on, and a real one: the completions standing in that
- * queue are exactly what free the slots this job wants, and every one of them
- * runs before this job's next turn. When the queue holds nothing else,
- * nothing is going to free a slot before the next attempt either — so there
- * is nothing to wait for, and the job is refused with the word the port
- * itself used, out loud, instead of spun on.
- *
- * Off the drain core — the first pump runs in the submitting thread's own
- * syscall context — the pass is not a retry at all: it hands the job over and
- * this core returns to its caller. The re-presentation rule above then
- * applies on the core that does the pumping.
- *
- * The other refusal is a pass the baton queue will not take (a pass before
- * BatonInit), and it ends the same way: ERR_BUSY, which now reaches the
- * caller as itself. */
-static bool wjob_present_again_for_a_slot(WriteJob *j)
-{
-    uint8_t drain = g_amp.bsp_index;
-
-    if (amp_get_core_index() != drain || BatonPending(drain)) {
-        if (BatonPass(&j->cq_node))
-            return false;   /* parked in the queue; the same state runs again */
-    }
-
-    kprintf("[Storage] write to file %u: port %u had no command slot free and "
-            "nothing is queued that would free one — the write is refused as "
-            "busy, not as a disk error\n",
-            j->file_id, (unsigned)BoardroomSeatIndex(tagfs_get_seat()));
-    wjob_finalize(j, ERR_BUSY);
-    return false;
-}
+ * The job is not re-presented here. Waiting for a slot inside the state
+ * machine needs two things this file cannot give it — the submit call must
+ * hand the port a waiter to link under the same lock that failed the
+ * allocation, or a slot freed in the gap is a wake nobody receives
+ * (ahci_async.h), and the job must carry the deadline that bounds the wait
+ * (write_job.h). A retry built without them is either a spin on the drain
+ * core or a coin-flip; refusing with the port's own word is neither. */
 
 /* W_COW_READ_OLD — async read of (now-redirected) NEW block content
  * into DMA. CowBeforeWrite already populated NEW on disk with the OLD
@@ -347,8 +311,6 @@ static bool w_cow_read_old(WriteJob *j)
     uint8_t  slot;
     error_t  err = ahci_submit_read_async(BoardroomSeatIndex(tagfs_get_seat()), lba, 8, j->dma_phys,
                                            wjob_cow_read_complete, j, &slot);
-    if (err == ERR_BUSY)
-        return wjob_present_again_for_a_slot(j);
     if (err != OK) {
         wjob_finalize(j, err);
         return false;
@@ -374,8 +336,6 @@ static bool w_ahci_submit(WriteJob *j)
     uint8_t  slot;
     error_t  err = ahci_submit_write_async(BoardroomSeatIndex(tagfs_get_seat()), lba, 8, j->dma_phys,
                                             wjob_ahci_complete, j, &slot);
-    if (err == ERR_BUSY)
-        return wjob_present_again_for_a_slot(j);
     if (err != OK) {
         wjob_finalize(j, err);
         return false;
@@ -620,8 +580,9 @@ static void wjob_finalize(WriteJob *j, int rc)
      * names yet, so the honest answer there is zero. The one failure that can
      * happen after it — the refused cache flush, which is the only way out of
      * W_COMMIT_TXN other than forward — leaves them written, named and
-     * readable, and answering "0 bytes" to an appending writer is exactly
-     * what would make it write the same payload into the file twice. */
+     * readable, and answering "0 bytes" in the stats crate to an appending
+     * writer is exactly what would make it write the same payload into the
+     * file twice. */
     bool bytes_are_in_the_file =
         (rc == OK) ||
         atomic_load_u32((volatile uint32_t *)&j->state) == (uint32_t)W_COMMIT_TXN;

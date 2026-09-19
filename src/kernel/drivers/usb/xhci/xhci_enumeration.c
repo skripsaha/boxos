@@ -2175,13 +2175,26 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
          *                      (xhci_handle_cmd_stop_ep, case
          *                      EP_STATE_RUNNING: "Race, HW handled stop ep
          *                      cmd before ep was running", followed by
-         *                      another xhci_queue_stop_endpoint). Bounded by
-         *                      the step budget the watchdog already spends on
-         *                      this slot, so a controller that answers this
-         *                      way for ever still loses the device — after
-         *                      the same number of tries as every other road
-         *                      out of a step that will not finish, and not
-         *                      before the first of them.
+         *                      another xhci_queue_stop_endpoint, unbounded).
+         *                      Here it is bounded, and by the budget that
+         *                      already exists rather than a second one: the
+         *                      watchdog spends slot->step_retry to rescue a
+         *                      step, and this is the same rescue still in
+         *                      progress, so it draws on the same allowance.
+         *                      One consequence, said plainly because the
+         *                      board is read off the screen: the allowance is
+         *                      shared, so every Stop reposted here is one
+         *                      rescue the watchdog will not get, and a rescue
+         *                      that arrives with the allowance already spent
+         *                      gives up at this point instead of reposting.
+         *                      The two messages are worded apart for that
+         *                      reason — the watchdog says it is taking the
+         *                      transfer back, this says it is posting the Stop
+         *                      again. A controller that answers this way for
+         *                      ever still loses the device, after the same
+         *                      total number of tries as every other road out
+         *                      of a step that will not finish, and not before
+         *                      the first of them.
          *
          * Disabled is not the race the Note describes and there is no repair
          * here that can reason about it; it takes the release below.
@@ -2216,7 +2229,8 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
                     slot->step_retry++;
                     kprintf("[xHCI %s] port %u: the controller would not stop "
                             "a control pipe it still reports as Running — "
-                            "asking it again (attempt %u of %u)\n",
+                            "posting the Stop again (%u of the %u tries this "
+                            "slot is allowed for the step)\n",
                             ctrl->name, slot->port_num, slot->step_retry,
                             XHCI_STEP_RETRIES);
                     if (xhci_post_stop_endpoint_cmd(ctrl, slot,
@@ -2226,8 +2240,8 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
                     return;
                 }
                 kprintf("[xHCI %s] port %u: the control pipe still reads "
-                        "Running after %u attempts to take the transfer back "
-                        "— the transfer cannot be recovered\n",
+                        "Running and the %u tries this slot is allowed for the "
+                        "step are spent — the transfer cannot be recovered\n",
                         ctrl->name, slot->port_num, XHCI_STEP_RETRIES);
             }
         }

@@ -706,6 +706,12 @@ type_line() {
     return 1
 }
 
+# The one string that says the late-arrival mutation is standing in the tree.
+# mut_done proves it landed right after the edit; stick_from_boot_image asks the
+# same question much later, and one variable is what keeps the two from drifting
+# apart into a guard that has quietly stopped guarding.
+LATEARRIVAL_MARK="logcheck mutation: the internal disk is not this machine's"
+
 latearrival_on() {
     mutate src/kernel/tagfs/tagfs.c
     python3 - <<'EOF'
@@ -716,7 +722,7 @@ assert anchor in s, "late-arrival anchor missing"
 s = s.replace(anchor, anchor + "    if (BoardroomSeatKind(seat) == BOARD_ATA) return false;   /* logcheck mutation: the internal disk is not this machine's */\n", 1)
 open(p, "w").write(s)
 EOF
-    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation"
+    mut_done src/kernel/tagfs/tagfs.c "$LATEARRIVAL_MARK"
 }
 latearrival_off() {
     restore src/kernel/tagfs/tagfs.c
@@ -726,29 +732,105 @@ latearrival_off() {
 #
 # ‼ TAKEN AFTER `make run-bg`, NEVER BEFORE IT, AND THAT IS THE WHOLE POINT.
 #
-# create_tagfs stamps a FRESH identity into every volume it lays down, and the
-# image is laid down again by every single `make`: src/userspace/boxlib/libbox.a
-# is .PHONY, so shell.bin is always remade, and through shell_embed.o ->
-# kernel.bin -> build/boxos.img so is the image. `make -n --debug=b
-# build/boxos.img` on a tree that was just built says so in as many words.
-#
-# So a copy taken between `build` and `make run-bg` is a copy of a volume that
-# no longer exists anywhere. run-bg lays the image down again with a new
-# identity, the loader reads THAT one and stamps it on the boarding pass, and
-# the Boardroom then looks at the stick, sees sixteen bytes belonging to some
-# other volume and declines it — correctly, and saying so out loud:
+# create_tagfs stamps a FRESH identity into every volume it lays down
+# (tools/create_tagfs.c, generate_uuid), so laying the same content down twice
+# makes two DIFFERENT volumes. Take the stick off an image that is about to be
+# laid down again and the copy is a volume that exists nowhere: the loader
+# reads the new one and stamps THAT on the boarding pass, the Boardroom looks
+# at the stick, sees sixteen bytes belonging to somebody else, and declines it
+# — correctly, and out loud:
 #
 #   [Boardroom] the loader came from the volume <uuid>, and no seat is carrying it
 #   [Boardroom] 1 volume(s) are here and none of them is this machine's
 #
-# The machine ends up with no filesystem at all, and every scenario below that
-# needed one on the stick was judging a machine that never mounted anything —
-# six of them, silently, for as long as the copy has been taken where it was.
+# The machine then has no filesystem at all, and every scenario below that
+# needed one on the stick was judging a machine that never mounted anything.
+# Six of them were, silently, for as long as the copy was taken where it was.
 #
-# Nothing in the guest writes to the image while this runs: every caller here
-# carries the late-arrival mutation, so the internal disk is never mounted.
+# WHAT LAYS THE IMAGE DOWN AGAIN IS THE MUTATION, NOT `make`.
+#
+# An idle `make` does NOT re-lay it, and the two ways of asking that suggest
+# otherwise are both wrong. $(SHELL_BIN) has a .PHONY prerequisite, so its
+# recipe does run on every make — but the sub-make writes nothing, shell.bin's
+# mtime does not move, make re-stats it, and $(IMAGE) is left alone. And
+# `make -n` / `make -q` are not evidence at all: under both, make still runs
+# the $(MAKE) lines of a recipe and then counts that target remade, so a dry
+# run always draws the whole chain. Measured on this make (GNU Make 3.81) with
+# that exact shape in isolation — the recipe ran three times, the image was
+# laid down once.
+#
+# The real churn is mut_bump, and the comment on mut_bump names its own price:
+# the mutated source is stamped five seconds into the FUTURE, so "the next make
+# rebuilds that ONE file a second time". Here that one file is the kernel's,
+# and the second rebuild walks the whole way down:
+#
+#   latearrival_on   src/kernel/tagfs/tagfs.c := now + 5s
+#   build            the tree is already built, so that one file is all there
+#                    is to compile and tagfs.o lands inside those five seconds
+#                    — finished, and already older than its own source
+#   make run-bg      tagfs.o -> kernel.bin -> $(IMAGE) -> create_tagfs writes
+#                    a NEW identity, and any copy taken before this is stale
+#
+# Read off the wreckage rather than argued: the stick left behind by the
+# failing yank run carries the Deed uuid 890dcdee75f04e6babb9349821944ffe,
+# while that same run's boarding pass named c1969b4289324e618829f74488a5e73b.
+# One `cp`, two volumes — the image WAS laid down again in between, and this
+# is the only thing in the run that lays it down. Which is also why the
+# scenarios that mutate no source (grow, growcut, ctrlgiveup) were never hit.
+#
+# So the placement is the fix, and the three things it depends on are checked
+# here rather than believed: the machine is already up (or the copy is being
+# taken too early again), the late-arrival mutation is standing (or the guest
+# mounts the internal disk and writes to the image while it is being copied,
+# and the stick is torn), and the copy came out carrying a readable Deed whose
+# sixteen bytes are this machine's.
+
+# The sixteen bytes themselves, read off a raw image, so a claim about which
+# volume something is stops being an assumption. The Deed sits at the head of
+# the volume's ground; the ground is MBR entry 0, which is the one the image
+# rule writes first (`make_mbr.py $@ $$START,$$GROUND,7f,boot ...`); and the
+# uuid is at offset 16 of the Deed — the offset src/kernel/tagfs/deed/deed.h
+# pins with a STATIC_ASSERT and stage2 reads by hand. Says nothing and fails
+# when there is no readable Deed there, which is the honest answer for a copy
+# that came out short or torn.
+deed_uuid() {
+    python3 - "$1" <<'PY'
+import sys
+with open(sys.argv[1], "rb") as f:
+    f.seek(446 + 8)                      # MBR entry 0, its first LBA
+    lba = int.from_bytes(f.read(4), "little")
+    if lba == 0:
+        sys.exit(1)
+    f.seek(lba * 512)
+    deed = f.read(32)
+if len(deed) < 32 or deed[:8] != b"BOXDEED\0":
+    sys.exit(1)
+print(deed[16:32].hex())
+PY
+}
+
 stick_from_boot_image() {
-    cp build/boxos.img "$SCRATCH/stick.img"
+    local stick boot
+    if ! grep -q "$LATEARRIVAL_MARK" src/kernel/tagfs/tagfs.c; then
+        bad "stick_from_boot_image: the late-arrival mutation is not installed, so this machine mounts its internal disk and writes to build/boxos.img while it is being copied"
+        return 1
+    fi
+    if [ ! -f build/qemu.pid ] || ! kill -0 "$(cat build/qemu.pid)" 2>/dev/null; then
+        bad "stick_from_boot_image: no machine is running — the copy has to be taken AFTER 'make run-bg', which is the one thing this helper exists to get right"
+        return 1
+    fi
+    if ! cp build/boxos.img "$SCRATCH/stick.img"; then
+        bad "stick_from_boot_image: could not copy build/boxos.img to $SCRATCH/stick.img"
+        return 1
+    fi
+    stick=$(deed_uuid "$SCRATCH/stick.img") || stick=""
+    boot=$(deed_uuid build/boxos.img)       || boot=""
+    if [ -z "$stick" ] || [ "$stick" != "$boot" ]; then
+        bad "stick_from_boot_image: the copy is not this machine's volume (stick '${stick:-no readable Deed}', image '${boot:-no readable Deed}')"
+        return 1
+    fi
+    echo "  (the stick carries this machine's volume $stick)"
+    return 0
 }
 
 run_latearrival() {
@@ -759,7 +841,8 @@ run_latearrival() {
     latearrival_on; build
     make run-stop >/dev/null 2>&1
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
-    stick_from_boot_image
+    stick_from_boot_image \
+        || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
 
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
@@ -871,7 +954,8 @@ run_replug() {
     latearrival_on; build
     make run-stop >/dev/null 2>&1
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
-    stick_from_boot_image
+    stick_from_boot_image \
+        || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
 
     # First arrival — the same one latearrival proves.
@@ -2066,7 +2150,8 @@ run_yank() {
     latearrival_on; build
     make run-stop >/dev/null 2>&1
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
-    stick_from_boot_image
+    stick_from_boot_image \
+        || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 2
     local MARK
@@ -2200,7 +2285,8 @@ run_holdground() {
     # and a bare `make run-bg` rebuilds the kernel without it. Same trap that
     # cost mountfail a whole run.
     make run-bg HOLDGROUND=on USB=on CORES=4 MEM=4G >/dev/null 2>&1
-    stick_from_boot_image
+    stick_from_boot_image \
+        || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
 
     # First arrival: the stick becomes this machine's volume, and the probe
@@ -2314,7 +2400,8 @@ run_returnfail() {
     fi
     make run-stop >/dev/null 2>&1
     make run-bg RETURNFAIL=on USB=on CORES=4 MEM=4G >/dev/null 2>&1
-    stick_from_boot_image
+    stick_from_boot_image \
+        || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
 
     # First arrival — the mount that succeeds, and the one the stamp counts.
@@ -2411,7 +2498,8 @@ run_stillthere() {
     latearrival_on; build
     make run-stop >/dev/null 2>&1
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
-    stick_from_boot_image
+    stick_from_boot_image \
+        || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
 
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
