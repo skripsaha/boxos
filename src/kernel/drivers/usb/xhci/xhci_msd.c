@@ -593,6 +593,152 @@ static void msd_note_gone(XhciMsdUnit* u, const char* what)
 /* ── endpoint recovery ──────────────────────────────────────────────────── */
 
 /*
+ * ‼ THE STEP OF "RESET A PIPE" THIS DRIVER HAS NEVER TAKEN, AND THE ONLY ONE
+ * THAT IS NOT ADDRESSED TO THE DEVICE.
+ *
+ * xHCI 1.2 §4.6.8, the Note at the end: "Software shall execute the following
+ * sequence to 'reset a pipe' ... Also, if the device was behind a TT, the TT
+ * buffer would also need to be cleared. • Reset Endpoint Command (TSP = '0').
+ * • If the device was behind a TT and it is a Control or Bulk endpoint: •
+ * Issue a ClearFeature(CLEAR_TT_BUFFER) request to the hub. • If not a Control
+ * endpoint: • Issue a ClearFeature(ENDPOINT_HALT) request to device. • Issue a
+ * Set TR Dequeue Pointer Command ..."
+ *
+ * What the hub is left holding is a buffer, and USB 2.0 §11.17.5 says what
+ * becomes of it: the split transaction that failed leaves the buffer busy, and
+ * the hub "will not allow the buffer to be reused for other bulk/control split
+ * transactions". §11.17.4 gives a transaction translator at least two
+ * non-periodic buffers, so nothing breaks at the first halt — it is one buffer
+ * lost per unrepaired halt until the translator has none left and stops
+ * carrying bulk and control traffic for everything below it. A full-speed
+ * stick in a high-speed hub then loops through "resetting the transport",
+ * where the same stick in a root port recovers on the first try. This is a
+ * mainstream desktop topology and nothing in this driver gates on speed.
+ *
+ * ‼ AND IT IS NOT A ClearFeature, WHATEVER THE xHCI SPECIFICATION CALLS IT.
+ * USB 2.0 §11.24.2.3 and Table 11-18: bmRequestType 00100011B, bRequest
+ * CLEAR_TT_BUFFER (8), wLength zero, no data stage, and the endpoint is named
+ * in wValue rather than by a feature selector —
+ *
+ *   wValue  [3:0]   Endpoint Number
+ *           [10:4]  Device Address
+ *           [12:11] Endpoint Type
+ *           [15]    Direction, 1 = IN
+ *   wIndex          the TT port — except that §11.24.2.3 adds "If the hub
+ *                   provides only a single TT, then wIndex must be set to
+ *                   one", so sending the real port to a single-TT hub whose
+ *                   device hangs off port 2 or higher is a Request Error and
+ *                   not a harmless overshoot. Linux writes the same
+ *                   expression: tt->multi ? udev->ttport : 1.
+ *
+ * The device address is the CONTROLLER'S, not this driver's: the xHC assigns
+ * it and writes it into the Output Slot Context, which is where it is read
+ * from here.
+ *
+ * Reached from the waitable side of the driver rather than from
+ * xhci_ep_recover, whose other callers are in the event drain: this is a
+ * control transfer to a third device and the drain cannot make one.
+ *
+ * ‼ AND NOT FOR THE DEFAULT CONTROL PIPE, WHICH IS A RULE AND NOT AN
+ * OMISSION. §4.6.8 names "a Control or Bulk endpoint", and the only control
+ * endpoint this driver ever clears a halt on is EP0 after the device has
+ * ANSWERED — a protocol stall on GET_MAX_LUN, which every flash drive that
+ * carries one logical unit replies with. The split transaction that carried
+ * that answer completed: the hub relayed a STALL handshake and released the
+ * buffer, so there is nothing stuck in the translator to clear, and a request
+ * naming EP0 would be asking the hub to undo something that never happened.
+ * Linux draws the same line in one condition, drivers/usb/host/xhci-ring.c,
+ * verbatim: "Hub TT buffer should only be cleared for FS/LS devices behind HS
+ * hubs for functional stalls." followed by
+ *
+ *     if (!(ep->ep_index == 0 && trb_comp_code == COMP_STALL_ERROR))
+ *             xhci_clear_hub_tt_buffer(xhci, td, ep);
+ *
+ * — ep_index 0 being EP0. What is left after that door is closed is the bulk
+ * pair and nothing else, which is why the Endpoint Type field below is Bulk
+ * as a fact about the callers rather than as an assumption about the argument:
+ * msd_clear_halt is reached with `ep_bulk_in`, `ep_bulk_out`, or the DCI of
+ * the job that stalled, and that job's DCI is one of those two.
+ */
+#define HUB_REQ_CLEAR_TT_BUFFER   8
+#define TT_BUFFER_EP_NUM_SHIFT    0
+#define TT_BUFFER_DEV_ADDR_SHIFT  4
+#define TT_BUFFER_EP_TYPE_SHIFT   11
+#define TT_BUFFER_DIRECTION_IN    (1u << 15)
+#define TT_BUFFER_EP_TYPE_BULK    2u      /* USB 2.0 Table 9-13 bmAttributes */
+
+static void msd_clear_tt_buffer(XhciMsdUnit* u, uint8_t dci)
+{
+    xhci_device_slot_t* dev = u->slot;
+    if (!dev || dev->tt_slot_id == 0) {
+        return;                 /* nothing translating: no buffer to clear */
+    }
+
+    if (dci == 1) {
+        return;                 /* the default pipe answered — see above */
+    }
+
+    xhci_device_slot_t* tt = xhci_get_device_slot_by_id(u->ctrl,
+                                                        dev->tt_slot_id);
+    if (!tt || !xhci_slot_enter(tt)) {
+        kprintf("[USB disk %u] the hub translating for it is no longer there, "
+                "so the transaction buffer it is holding cannot be cleared\n",
+                u->number);
+        return;
+    }
+
+    uint8_t address = xhci_slot_context_address(dev);
+    if (address == 0) {
+        /* The controller has not said what address it gave this device, and a
+         * request naming address zero would clear somebody else's buffer. */
+        kprintf("[USB disk %u] the controller gives it no address, so the "
+                "transaction buffer its hub is holding cannot be named\n",
+                u->number);
+        xhci_slot_leave(tt);
+        return;
+    }
+
+    uint8_t  ep_addr = dev->endpoints[dci].addr;
+    uint16_t value   = (uint16_t)(((uint16_t)(ep_addr & 0x0Fu)
+                                        << TT_BUFFER_EP_NUM_SHIFT)
+                                | ((uint16_t)(address & 0x7Fu)
+                                        << TT_BUFFER_DEV_ADDR_SHIFT)
+                                | ((uint16_t)TT_BUFFER_EP_TYPE_BULK
+                                        << TT_BUFFER_EP_TYPE_SHIFT)
+                                | ((ep_addr & 0x80u) ? TT_BUFFER_DIRECTION_IN
+                                                     : 0u));
+
+    usb_setup_packet_t setup = {
+        .bmRequestType = 0x23,      /* host to device, class, other */
+        .bRequest = HUB_REQ_CLEAR_TT_BUFFER,
+        .wValue = value,
+        .wIndex = tt->multi_tt ? dev->tt_port : 1,
+        .wLength = 0
+    };
+
+    /* Two different failures, and saying the first as if it were the second
+     * would be a false statement about the hardware. A negative answer means
+     * the request never reached the wire — the hub's own EP0 was already
+     * carrying a transfer, or the caller turned out to be inside the event
+     * drain — and the hub has said nothing at all. Only a completion code
+     * that is not Success is the hub refusing. */
+    int rc = xhci_control_transfer_sync(u->ctrl, tt, &setup, 0, 0, false,
+                                        MSD_CTRL_TIMEOUT_MS);
+    if (rc < 0) {
+        kprintf("[USB disk %u] the hub translating for it could not be asked "
+                "to let go of the buffer for endpoint 0x%02x (%d), so that "
+                "translator has one fewer to give out\n",
+                u->number, ep_addr, rc);
+    } else if (rc != TRB_COMPLETION_SUCCESS) {
+        kprintf("[USB disk %u] the hub translating for it would not let go of "
+                "the buffer for endpoint 0x%02x — that translator has one "
+                "fewer to give out\n", u->number, ep_addr);
+    }
+
+    xhci_slot_leave(tt);
+}
+
+/*
  * A stalled bulk endpoint has to be cleared on both sides of the wire: the
  * device is told with CLEAR_FEATURE(ENDPOINT_HALT) and the controller with
  * Reset Endpoint, and doing only one of them leaves the two disagreeing about
@@ -624,6 +770,12 @@ static void msd_clear_halt(XhciMsdUnit* u, uint8_t dci)
         msd_note_gone(u, "the pipe would not clear");
         return;
     }
+
+    /* And the half of §4.6.8 that is addressed to the hub rather than to the
+     * device — see msd_clear_tt_buffer. Issued before the ring is
+     * repositioned, so the translator has the buffer back by the time the
+     * doorbell rings. Costs nothing on a device that is not behind one. */
+    msd_clear_tt_buffer(u, dci);
 
     xhci_ep_recover(u->ctrl, u->slot, dci);
     xhci_command_wait_idle(u->ctrl, MSD_CTRL_TIMEOUT_MS);
@@ -755,7 +907,23 @@ static void msd_job_finish(MsdJob* j, int status)
     }
 }
 
-static void msd_job_begin(MsdJob* j)
+/*
+ * Put the first transfer of a job on the wire.
+ *
+ * ‼ RETURNS TRUE WHEN THIS CALL ITSELF ENDED THE JOB, AND THAT IS THE ONLY
+ * THING A CALLER MAY KNOW ABOUT THE JOB AFTERWARDS.
+ *
+ * A submission that cannot be made finishes the job inside this call, and for
+ * an asynchronous request finishing the job runs msd_async_done, which frees
+ * the MsdAsyncReq the job is embedded in. The caller that wanted to know "did
+ * it finish?" used to read j->finished afterwards — out of memory the slab
+ * allocator had already taken back. Nor is the false answer an invitation to
+ * look: a transfer that was accepted belongs to whoever answers it, and that
+ * may be another core finishing and freeing it before this even returns. So
+ * nothing touches the job after this call, and the one fact worth having
+ * comes back in the return value.
+ */
+static bool msd_job_begin(MsdJob* j)
 {
     XhciMsdUnit* u = j->u;
     MsdCbw* cbw = (MsdCbw*)u->cmd_virt;
@@ -790,7 +958,9 @@ static void msd_job_begin(MsdJob* j)
     if (msd_job_submit(j, u->slot->ep_bulk_out, u->cmd_phys,
                        sizeof(MsdCbw)) != 0) {
         msd_job_finish(j, -1);
+        return true;            /* `j` may already be freed; say so and stop */
     }
+    return false;
 }
 
 /*
@@ -1827,9 +1997,24 @@ static void msd_async_done(void* ctx, int status, uint32_t transferred);
 /*
  * Start whatever is at the head of the queue, if the turn is free.
  *
- * Written as a loop rather than as a call from the completion path: a request
- * whose submission fails finishes immediately, which frees the turn again, and
- * a chain of those would otherwise recurse as deep as the queue is long.
+ * ‼ THE LINE THAT USED TO STAND HERE CLAIMED THE LOOP REMOVED A RECURSION.
+ * IT DOES NOT, AND THE RECURSION IT NAMED IS STILL HERE, ONE DOOR ALONG: a
+ * request whose submission fails finishes inside msd_job_begin below, the
+ * finish runs msd_async_done, and msd_async_done calls msd_gate_leave, which
+ * calls this function again. So a run of synchronously-failing submissions
+ * still nests, one frame's worth per queued request, and by the time the
+ * innermost call returns the whole queue has already been dealt with. The
+ * loop is what makes the OUTER call correct after that, not what prevents it.
+ *
+ * msd_gate_leave cannot simply stop calling here: it is also the road out of
+ * an ordinary synchronous command (msd_rw), and a queued asynchronous request
+ * has nobody to come back for it — xhci_msd.h promises its callback WILL run.
+ *
+ * What is no longer done is reading the request after it has been started.
+ * Line for line that was the fault: msd_job_begin could have finished the job,
+ * msd_async_done could have kfree()d the MsdAsyncReq the job sits inside, and
+ * the load that followed came out of memory the slab allocator already owned.
+ * msd_job_begin answers the question itself now.
  */
 static void msd_start_queued(XhciMsdUnit* u)
 {
@@ -1863,11 +2048,12 @@ static void msd_start_queued(XhciMsdUnit* u)
 
         r->next = NULL;
         msd_watch_arm(u, &r->job);
-        msd_job_begin(&r->job);
 
-        /* If it finished inside that call (a submission that could not be
-         * made), the turn is free again and the next one may go now. */
-        if (!__atomic_load_n(&r->job.finished, __ATOMIC_ACQUIRE)) {
+        /* `r` is not touched again after this line, whichever way it goes:
+         * see msd_job_begin. If the job ended inside the call the turn is
+         * free once more and the next request may go now; otherwise the turn
+         * is held and whoever answers the transfer hands it on. */
+        if (!msd_job_begin(&r->job)) {
             return;
         }
     }

@@ -234,8 +234,17 @@ bool efi_authenticode_compute_pe_hash(const uint8_t *buf, uint32_t len,
     if (!hash_update(&h, buf + pv.certtable_dd_offset + 8,
                       pv.size_of_headers - (pv.certtable_dd_offset + 8))) goto fail;
 
-    /* Section data, sorted by PointerToRawData ascending. */
-    static uint16_t order[96];
+    /* Section data, sorted by PointerToRawData ascending.
+     *
+     * ‼ A PLAIN LOCAL, and that is the whole point. It was `static`, so the
+     * per-image table Authenticode v1.0 steps 8-13 describe — built from THIS
+     * image's NumberOfSections, sorted by THIS image's PointerToRawData — was
+     * one array shared by every core. Two verifications at once interleaved
+     * their filter loop, their insertion sort and their hashing walk over the
+     * same 96 entries, and a genuinely valid signed image came back
+     * `bad-pe` or `hash-mismatch` on one run and `ok` on the next. 192 bytes
+     * on a 16 KiB kernel stack buys determinism. */
+    uint16_t order[96];
     uint32_t nsec = pv.section_count;
     if (nsec > 96) goto fail;
     uint32_t nused = 0;
@@ -261,6 +270,10 @@ bool efi_authenticode_compute_pe_hash(const uint8_t *buf, uint32_t len,
     uint32_t sum_hashed = pv.size_of_headers;
     for (uint32_t i = 0; i < nused; i++) {
         uint32_t s = order[i];
+        /* The index is about to become a subscript into the section table
+         * that pe_parse bounded against `len`; it is checked here rather
+         * than assumed from how `order` was filled ten lines up. */
+        if (s >= pv.section_count) goto fail;
         uint32_t raw_off  = rd32(buf + pv.section_table_offset +
                                   s * SECTION_HEADER_SIZE + 20);
         uint32_t raw_size = rd32(buf + pv.section_table_offset +
@@ -1036,11 +1049,26 @@ EfiAuthenticodeResult efi_authenticode_verify_pe(const uint8_t *buf,
         return EFI_AC_RESULT_BAD_PE;
     }
 
-    if (pv.attr_cert_table_size == 0) {
-        publish_result_touch(EFI_AC_RESULT_NO_CERT_TABLE, NULL, NULL, len);
-        return EFI_AC_RESULT_NO_CERT_TABLE;
-    }
-
+    /* The image hash is computed FIRST — before the attribute certificate
+     * table is even looked at.
+     *
+     * UEFI 2.10 §32.6.3.3: "the security database db must either contain an
+     * entry with a hash value of the image (with a supported hash type), or
+     * it must contain an entry with a certificate against which an entry in
+     * the image's certificate table can be verified", and "Only one hash or
+     * signature is required to be present in db in order to pass validation,
+     * so long as neither the hash of the binary nor any present signature is
+     * reflected in dbx." Two arms authorise an image, and BoxOS ran only one
+     * of them: efi_secureboot_find_db_hash_sha256 existed, the header
+     * advertised it as part of this file's lookup surface, and nothing ever
+     * called it. An image enrolled by digest — the AMI/Insyde setup item that
+     * adds a chosen EFI file's hash to db, or an sbsiglist/KeyTool write —
+     * came back `no-cert-table` while the platform's own db said it was
+     * trusted, and the caller got an all-zero pe_sha256 to boot, because the
+     * old order returned before the hash was computed.
+     *
+     * EDK2 runs it in this order too (DxeImageVerificationLib: the image
+     * digest against dbx, then against db, then the certificate walk). */
     uint8_t pe_hash[32];
     if (!efi_authenticode_compute_pe_hash(buf, len, pe_hash)) {
         publish_result_touch(EFI_AC_RESULT_BAD_PE, NULL, NULL, len);
@@ -1048,10 +1076,20 @@ EfiAuthenticodeResult efi_authenticode_verify_pe(const uint8_t *buf,
     }
     if (out_pe_hash) memcpy(out_pe_hash, pe_hash, 32);
 
-    /* dbx PE-hash revocation: short-circuit. */
+    /* dbx PE-hash revocation vetoes both arms; it goes first. */
     if (efi_secureboot_find_dbx_hash_sha256(pe_hash)) {
         publish_result_touch(EFI_AC_RESULT_REVOKED_BY_DBX, pe_hash, NULL, len);
         return EFI_AC_RESULT_REVOKED_BY_DBX;
+    }
+
+    if (pv.attr_cert_table_size == 0) {
+        /* Unsigned: the db image-hash arm is the only one there is. */
+        if (efi_secureboot_find_db_hash_sha256(pe_hash)) {
+            publish_result_touch(EFI_AC_RESULT_VALID, pe_hash, NULL, len);
+            return EFI_AC_RESULT_VALID;
+        }
+        publish_result_touch(EFI_AC_RESULT_NO_CERT_TABLE, pe_hash, NULL, len);
+        return EFI_AC_RESULT_NO_CERT_TABLE;
     }
 
     const uint8_t *pkcs7 = NULL;
@@ -1114,11 +1152,31 @@ EfiAuthenticodeResult efi_authenticode_verify_pe(const uint8_t *buf,
     /* Cert chain. */
     bool revoked = false;
     if (!chain_validates_to_db(&signer_cv, cs.certs, cs.cert_count, &revoked)) {
-        EfiAuthenticodeResult r = revoked
-            ? EFI_AC_RESULT_REVOKED_BY_DBX
-            : EFI_AC_RESULT_CHAIN_UNTRUSTED;
-        publish_result_touch(r, pe_hash, signer_hash, len);
-        return r;
+        if (revoked) {
+            publish_result_touch(EFI_AC_RESULT_REVOKED_BY_DBX, pe_hash,
+                                  signer_hash, len);
+            return EFI_AC_RESULT_REVOKED_BY_DBX;
+        }
+        /* The chain reaches no db anchor — but §32.6.3.3's other arm is
+         * still open: "Only one hash or signature is required to be present
+         * in db in order to pass validation." A signed image whose digest is
+         * in db is authorised even when its signer is not, and both things
+         * this arm authorises have already faced dbx: the image digest, at
+         * the dbx-hash test above, and the signer, which
+         * chain_validates_to_db puts through cert_is_in_dbx at step 0 before
+         * it looks for a parent. (Only those two. The walk stops at the
+         * first cert whose parent it cannot find, so an intermediate above
+         * the break was never tested — which is why this arm authorises on
+         * the DIGEST and not on anything the walk failed to reach.) EDK2
+         * reaches the same verdict by checking the image digest against db
+         * in the signed path, not only the unsigned one. */
+        if (efi_secureboot_find_db_hash_sha256(pe_hash)) {
+            publish_result_touch(EFI_AC_RESULT_VALID, pe_hash, signer_hash, len);
+            return EFI_AC_RESULT_VALID;
+        }
+        publish_result_touch(EFI_AC_RESULT_CHAIN_UNTRUSTED, pe_hash,
+                              signer_hash, len);
+        return EFI_AC_RESULT_CHAIN_UNTRUSTED;
     }
 
     publish_result_touch(EFI_AC_RESULT_VALID, pe_hash, signer_hash, len);

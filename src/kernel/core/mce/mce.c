@@ -3,7 +3,7 @@
  *
  * See mce.h for spec citations. Code paths:
  *   mce_init()        — BSP bring-up (CR4.MCE, MCG_CAP, per-bank CTL+CLEAR,
- *                       LMCE gate, telemetry)
+ *                       LMCE arming, telemetry)
  *   mce_ap_init()     — same minus IDT
  *   mce_handle(frame) — runs in #MC ABORT context: the IST stack, MCIP=1,
  *                       delivered whatever IF says and whatever the frame it
@@ -50,11 +50,18 @@
 #include "touch.h"
 #include "logbook.h"
 #include "baton.h"
+#include "amp.h"
 
 /* ─── State ────────────────────────────────────────────────────────── */
 
 static bool      g_mce_initialized = false;
-static bool      g_mce_lmce_on     = false;
+
+/* LMCE is armed per LOGICAL PROCESSOR — IA32_MCG_EXT_CTL is not shared — so
+ * this says the FLEET: true only while every core that has run MCA init read
+ * IA32_MCG_EXT_CTL.LMCE_EN back as set. The first core that cannot arm it
+ * takes it back to false, because one unarmed core is enough to put a
+ * broadcast back on the table. */
+static bool      g_mce_lmce_armed  = false;
 static uint32_t  g_mce_bank_count  = 0;
 static uint64_t  g_mce_mcg_cap     = 0;
 static uint64_t  g_mce_ban_mask    = 0;  /* bit i set ⇒ bank i CTL skipped */
@@ -153,26 +160,108 @@ static inline void mce_cr4_enable(void) {
     }
 }
 
-/* ─── LMCE bring-up (Intel SDM §15.3.1.4) ──────────────────────────── */
+/* ─── LMCE arming (Intel SDM Vol 3B §15.3.1.4, §15.3.1.5) ──────────── */
 
-static bool mce_enable_lmce_if_supported(uint64_t mcg_cap) {
-    if (!(mcg_cap & MCE_CAP_MCG_LMCE_P)) return false;
-
-    /* LMCE requires IA32_FEATURE_CONTROL.LOCK=1 AND LMCE_EN=1. If the
-     * firmware hasn't enabled LMCE in IA32_FEATURE_CONTROL we leave it
-     * off (writing those bits ourselves would conflict with TXT/VMX
-     * negotiation done by firmware).
-     *
-     * What this returns is PERMISSION, not arming: the bit that actually
-     * delivers a machine check to one logical processor is
-     * IA32_MCG_EXT_CTL.LMCE_EN (SDM §15.3.1.5), and nothing in this kernel
-     * writes that MSR. Every #MC here is still broadcast. */
-    uint64_t feat = mce_rdmsr(MCE_MSR_IA32_FEATURE_CONTROL);
-    if ((feat & MCE_MSR_FEAT_LOCK_BIT) &&
-        (feat & MCE_MSR_FEAT_LMCE_BIT)) {
-        return true;
+/* Arm Local Machine Check on THIS logical processor, and answer with the
+ * fact of it.
+ *
+ * Why it is worth arming: §15.9.3.2 — "MCE signal is broadcast to all
+ * logical processors on the system on which the UCR errors are supported,
+ * except when the processor supports LMCE and LMCE is enabled by system
+ * software". Unarmed, one failing DIMM line interrupts every core at once,
+ * they race for one shared bank, and all but one walk away holding nothing;
+ * that is the case the verdict at the bottom of mce_handle is built around.
+ * Armed, the hardware may hand such an event to a single core, which then
+ * has the whole record and no peers to reason about.
+ *
+ * Three gates, every one of them the spec's:
+ *   §15.3.1.4: "The IA32_MCG_EXT_CTL MSR is present if the capability flag
+ *   MCG_LMCE_P is set in the IA32_MCG_CAP MSR", and "If MCG_LMCE_P is not
+ *   set in IA32_MCG_CAP, or platform software has not enabled LMCE by
+ *   setting IA32_FEATURE_CONTROL.LMCE_ENABLED (bit 20), any attempt to write
+ *   or read IA32_MCG_EXT_CTL will result in #GP."
+ *   §15.3.1.5: "System software must ensure that both
+ *   IA32_FEATURE_CONTROL.Lock (bit 0) and IA32_FEATURE_CONTROL.LMCE_ENABLED
+ *   (bit 20) are set before attempting to set IA32_MCG_EXT_CTL.LMCE_EN (bit
+ *   0)."
+ * The order below is that sentence's order, not a taste: the #GP clause
+ * names LMCE_P and LMCE_ENABLED, and it covers the READ as well as the
+ * write, so both are asked before the read-modify-write can be reached. LOCK
+ * is asked next because it gates only the write. A #GP here would be taken
+ * during bring-up, on a kernel with no fixup for it and no console line to
+ * explain it.
+ *
+ * Which is also why gate 1 alone is what stands in front of the rdmsr of
+ * IA32_FEATURE_CONTROL (3AH), a register the SDM does not otherwise promise
+ * on every part: §15.3.1.5 defines the LMCE enable protocol entirely in
+ * terms of it — "Platform software can turn LMCE on by setting bit 20
+ * (LMCE_ENABLED) in IA32_FEATURE_CONTROL MSR (MSR address 3AH)" — so a
+ * processor that sets LMCE_P and implements no 3AH would have published a
+ * feature with no way to be enabled. No vendor test is added in front of it:
+ * mce_vendor_uses_intel_codes() answers a different question (how
+ * MCA error codes are encoded) and would refuse LMCE on any vendor that
+ * implements the architecture correctly. What keeps this line unreached on
+ * AMD and Hygon today is that MCG_CAP bit 27 is reserved-zero there.
+ *
+ * The write is the one the initialization pseudocode (SDM Vol 3B, "Machine-
+ * Check Initialization Pseudocode") writes: "IA32_MCG_EXT_CTL ←
+ * IA32_MCG_EXT_CTL | 01H" — a read-modify-write, so whatever a later
+ * processor generation defines beside LMCE_EN survives us.
+ *
+ * Then it is READ BACK, and only the read-back counts. Reporting capability
+ * as if it were state is exactly the lie this function used to tell: it
+ * asked IA32_FEATURE_CONTROL, never touched IA32_MCG_EXT_CTL, and answered
+ * "enabled" — so mce_lmce_enabled() said "active" on a machine where every
+ * single machine check was still going to every single core.
+ *
+ * `why` names the gate that refused, for the caller to say out loud. */
+static bool mce_lmce_arm(uint64_t mcg_cap, const char **why) {
+    if (!(mcg_cap & MCE_CAP_MCG_LMCE_P)) {
+        *why = "IA32_MCG_CAP.LMCE_P (bit 27) is clear — this part has no "
+               "IA32_MCG_EXT_CTL and no local delivery to arm";
+        return false;
     }
-    return false;
+
+    uint64_t feat = mce_rdmsr(MCE_MSR_IA32_FEATURE_CONTROL);
+
+    if (!(feat & MCE_MSR_FEAT_LMCE_BIT)) {
+        *why = "IA32_FEATURE_CONTROL.LMCE_ENABLED (bit 20) is clear — "
+               "platform firmware did not turn LMCE on, and even READING "
+               "IA32_MCG_EXT_CTL without it raises #GP";
+        return false;
+    }
+    if (!(feat & MCE_MSR_FEAT_LOCK_BIT)) {
+        *why = "IA32_FEATURE_CONTROL.LOCK (bit 0) is clear — firmware left "
+               "the register open, so the LMCE_ENABLED beside it is not the "
+               "platform's final word and §15.3.1.5 forbids the write";
+        return false;
+    }
+
+    mce_wrmsr(MCE_MSR_MCG_EXT_CTL,
+              mce_rdmsr(MCE_MSR_MCG_EXT_CTL) | MCE_MCG_EXT_CTL_LMCE_EN);
+
+    if (!(mce_rdmsr(MCE_MSR_MCG_EXT_CTL) & MCE_MCG_EXT_CTL_LMCE_EN)) {
+        *why = "IA32_MCG_EXT_CTL.LMCE_EN (bit 0) read back clear after the "
+               "write — the processor kept local delivery off";
+        return false;
+    }
+
+    *why = NULL;
+    return true;
+}
+
+/* One logical processor could not arm LMCE: the fleet answer stops claiming
+ * otherwise, and the exchange both publishes that and elects the single
+ * speaker — when the answer was already false this stays quiet, because the
+ * reason was said once at boot and sixteen copies of it say nothing more. */
+static void mce_lmce_fleet_disarm(const char *why) {
+    if (!__atomic_exchange_n(&g_mce_lmce_armed, false, __ATOMIC_ACQ_REL)) {
+        return;
+    }
+    kprintf("[MCE] core %u: LMCE not armed: %s. The BSP armed it, so delivery "
+            "is uneven from here on and every machine check is treated as "
+            "broadcast again\n",
+            (unsigned)amp_get_core_index(), why);
 }
 
 /* ─── Bank programming (used by BSP + per-AP) ──────────────────────── */
@@ -194,7 +283,9 @@ static void mce_program_banks(uint32_t count, uint64_t skip_mask) {
 
 bool mce_is_initialized(void) { return g_mce_initialized; }
 uint32_t mce_bank_count(void) { return g_mce_bank_count; }
-bool mce_lmce_enabled(void)   { return g_mce_lmce_on; }
+bool mce_lmce_enabled(void)   {
+    return __atomic_load_n(&g_mce_lmce_armed, __ATOMIC_ACQUIRE);
+}
 
 void mce_init(void) {
     if (g_mce_initialized) return;
@@ -230,7 +321,10 @@ void mce_init(void) {
     g_mce_ban_mask   = skip;
     g_mce_bank_count = bank_count;
     g_mce_cod_intel  = mce_vendor_uses_intel_codes();
-    g_mce_lmce_on    = mce_enable_lmce_if_supported(cap);
+
+    const char *lmce_why = NULL;
+    bool lmce_armed = mce_lmce_arm(cap, &lmce_why);
+    __atomic_store_n(&g_mce_lmce_armed, lmce_armed, __ATOMIC_RELEASE);
 
     /* SER_P is said out loud, not merely traced: it is the one bit that
      * decides whether ANY uncorrected error on this machine can be survived.
@@ -238,18 +332,30 @@ void mce_init(void) {
      * shut the system down — and the operator should know that before the
      * first #MC, not from the panic that follows it. */
     kprintf("[MCE] banks=%u SER_P=%d TES_P=%d CMCI_P=%d LMCE_P=%d "
-            "LMCE_permitted=%d cap=0x%016lx%s\n",
+            "LMCE_armed=%d cap=0x%016lx%s\n",
             (unsigned)bank_count,
             (int)((cap >> 24) & 1u),
             (int)((cap >> 11) & 1u),
             (int)((cap >> 10) & 1u),
             (int)((cap >> 27) & 1u),
-            (int)g_mce_lmce_on,
+            (int)lmce_armed,
             (unsigned long)cap,
             (cap & MCE_CAP_MCG_SER_P)
                 ? ""
                 : " — no software error recovery on this part: every "
                   "uncorrected error is fatal");
+
+    /* Not armed is not a detail to trace away: it decides whether the next
+     * uncorrected error interrupts one core or all of them, and it is the
+     * premise the handler's verdict rests on. Said with the gate that
+     * refused, because "LMCE off" on its own is a line nobody can act on —
+     * a clear LOCK or LMCE_ENABLED is firmware the operator can change, a
+     * clear LMCE_P is silicon they cannot. */
+    if (!lmce_armed) {
+        kprintf("[MCE] LMCE not armed: %s. Every machine check on this "
+                "machine is broadcast to every logical processor\n",
+                lmce_why);
+    }
 
     debug_printf("[MCE] BSP init: MCG_CTL_P=%d skip_mask=0x%lx "
                  "intel_error_codes=%d\n",
@@ -288,8 +394,22 @@ void mce_ap_init(void) {
      * On a hybrid CPU where an AP reports different MCG_CAP, we trust
      * the AP's CPUID gate to keep us from #GPing on bank registers it
      * doesn't have. */
-    if (!g_mce_initialized) return;          /* BSP refused — skip AP */
-    if (!mce_supported_local()) return;      /* this AP lacks MCA */
+
+    /* The BSP refused, so nothing was ever armed and the fleet answer is
+     * already false — there is nothing here to take back. */
+    if (!g_mce_initialized) return;
+
+    /* This logical processor has no MCA at all, so it has no
+     * IA32_MCG_EXT_CTL to arm. It must still take the fleet answer back:
+     * mce_lmce_enabled() promises the fact of the write on every core that
+     * has run MCA init, and a core that ran this function and armed nothing
+     * would otherwise leave that promise standing on the BSP's write alone. */
+    if (!mce_supported_local()) {
+        mce_lmce_fleet_disarm("CPUID on this logical processor reports no "
+                              "MCE/MCA, so there is no IA32_MCG_EXT_CTL here "
+                              "to arm");
+        return;
+    }
 
     mce_cr4_enable();
 
@@ -306,6 +426,21 @@ void mce_ap_init(void) {
     }
 
     mce_wrmsr(MCE_MSR_MCG_STATUS, 0ULL);
+
+    /* LMCE_EN lives in IA32_MCG_EXT_CTL, which is per logical processor: the
+     * BSP's write armed the BSP and nothing else, so every AP must ask the
+     * three gates for itself against its OWN MCG_CAP — on a hybrid part an
+     * E-core need not carry LMCE_P at all.
+     *
+     * An AP that cannot arm it while the fleet was believed armed is the one
+     * asymmetry worth a line: from that moment a broadcast is possible
+     * again, and mce_lmce_enabled() must stop claiming otherwise — that is
+     * mce_lmce_fleet_disarm's whole job. An AP that DID arm while the BSP
+     * could not keeps its own LMCE_EN: local delivery on one core is never
+     * worse than broadcast on all, and the fleet-wide answer stays honest at
+     * false. */
+    const char *why = NULL;
+    if (!mce_lmce_arm(cap, &why)) mce_lmce_fleet_disarm(why);
 }
 
 /* ─── #MC handler ─────────────────────────────────────────────────── */
@@ -346,8 +481,24 @@ typedef struct {
  *          #MC. Log it, clear it, act on nothing. Only legal to skip
  *          BECAUSE SER_P is set: §15.10.4.1 says that without it even a
  *          UC=1/EN=0 entry is fatal.
- *   S=0  → UCNA, or an entry the hardware reported through CMC. "System
- *          software is not required to take any recovery action" (§15.6.2).
+ *   S=0  → the hardware logged this entry and never signalled it, so AR
+ *          decides what it is. AR=0 is UCNA: "System software is not
+ *          required to take any recovery action" (§15.6.2), and the handler
+ *          pseudocode sends it straight to CONTINUE. AR=1 is a combination
+ *          the architecture does not allow to exist — an action is REQUIRED
+ *          for an error the processor says it never signalled — and the
+ *          pseudocode answers it in one line: "ELSE RESTARTABILITY = FALSE;
+ *          (* S=0, AR=1 is illegal *)", followed by "IF RESTARTABILITY =
+ *          FALSE THEN ... NOERROR = FALSE". Fatal, therefore, and for the
+ *          reason the pair itself gives: AR=1 demands an action for an error
+ *          S=0 says was never signalled to anyone, so no row of Table 15-6
+ *          names what that action would be — and §15.6.2 is explicit that
+ *          when the required action cannot be completed, the system must be
+ *          shut down. The page such a record names is still taken out of
+ *          service when it names one readably, exactly as for every other
+ *          fatal record: the verdict is about this thread, not about the
+ *          frame. Linux spells the same rule PANIC "Illegal combination
+ *          (UCNA with AR=1)".
  *   S=1  → SRAO (AR=0) or SRAR (AR=1). What may be done about it follows
  *          from AR, from OVER and from the MCA error code — all three are
  *          read together in mce_ucr_action.
@@ -372,7 +523,9 @@ static mce_severity_t mce_classify(uint64_t status) {
 
     if (!(g_mce_mcg_cap & MCE_CAP_MCG_SER_P)) return MCE_SEV_UC;
     if (!(status & MCE_MC_STATUS_EN))         return MCE_SEV_UCNA;
-    if (!(status & MCE_MC_STATUS_S))          return MCE_SEV_UCNA;
+    if (!(status & MCE_MC_STATUS_S)) {
+        return (status & MCE_MC_STATUS_AR) ? MCE_SEV_UC : MCE_SEV_UCNA;
+    }
     return MCE_SEV_UCR;
 }
 
@@ -593,26 +746,36 @@ static void mce_record_say(const MceRecord *r) {
     int ripv = (r->mcg_status & MCE_MCG_STATUS_RIPV) ? 1 : 0;
     int eipv = (r->mcg_status & MCE_MCG_STATUS_EIPV) ? 1 : 0;
     int mcip = (r->mcg_status & MCE_MCG_STATUS_MCIP) ? 1 : 0;
+    /* LMCE_S is printed on every record because it is the one bit that says
+     * whether this event had peers at all, and the verdict's whole argument
+     * for having no rendezvous turns on that. */
+    int lmce = (r->mcg_status & MCE_MCG_STATUS_LMCE_S) ? 1 : 0;
 
     if (r->bank == MCE_NOTE_NO_BANK) {
         kprintf("[MCE] #MC with no valid bank on this logical processor. "
-                "MCG_STATUS=0x%016lx (RIPV=%d EIPV=%d MCIP=%d) RIP=0x%016lx. "
-                "Either the record sits in a bank this CPU does not walk, or "
-                "another logical processor took the same broadcast signal and "
-                "cleared the shared bank first. RIPV decides what happens to "
-                "this thread; the record itself is somebody else's to say\n",
-                (unsigned long)r->mcg_status, ripv, eipv, mcip,
-                (unsigned long)r->rip);
+                "MCG_STATUS=0x%016lx (RIPV=%d EIPV=%d MCIP=%d LMCE_S=%d) "
+                "RIP=0x%016lx. %s RIPV=1 together with EIPV=0 decides what "
+                "happens to this thread; the record itself is somebody "
+                "else's to say\n",
+                (unsigned long)r->mcg_status, ripv, eipv, mcip, lmce,
+                (unsigned long)r->rip,
+                lmce ? "LMCE_S is set, so this event was delivered to this "
+                       "processor ALONE — no peer can be holding the record, "
+                       "and it is either in a bank this CPU does not walk or "
+                       "was taken by firmware-first reporting."
+                     : "Either the record sits in a bank this CPU does not "
+                       "walk, or another logical processor took the same "
+                       "broadcast signal and cleared the shared bank first.");
         return;
     }
 
     kprintf("[MCE] bank[%u] %s status=0x%016lx addr=0x%016lx misc=0x%016lx "
-            "page=0x%lx MCG_STATUS=0x%016lx (RIPV=%d EIPV=%d MCIP=%d) "
-            "RIP=0x%016lx%s\n",
+            "page=0x%lx MCG_STATUS=0x%016lx (RIPV=%d EIPV=%d MCIP=%d "
+            "LMCE_S=%d) RIP=0x%016lx%s\n",
             (unsigned)r->bank, mce_sev_str((mce_severity_t)r->severity),
             (unsigned long)r->status, (unsigned long)r->addr,
             (unsigned long)r->misc, (unsigned long)r->phys,
-            (unsigned long)r->mcg_status, ripv, eipv, mcip,
+            (unsigned long)r->mcg_status, ripv, eipv, mcip, lmce,
             (unsigned long)r->rip,
             r->nested ? " [nested #MC consumed by an in-flight migration: "
                         "that copy zero-fills its tail]" : "");
@@ -699,6 +862,31 @@ static void mce_note_deliver(MceNoteSlot *slot, bool say_here) {
 bool mce_handle(interrupt_frame_t *frame) {
     bool     any_fatal = false;
     uint32_t decoded   = 0;          /* banks that held a valid record */
+
+    /* SDM's NOERROR, kept from the other side — the verdict at the bottom
+     * needs it. In the handler pseudocode ("Machine-Check Error Handler
+     * Pseudocode Supporting UCR") every record inside `IF UC Flag ... = 1`
+     * ends at NOERROR = FALSE except three that leave before reaching it:
+     * "IF EN Flag ... = 0 AND OVER Flag ... = 0 THEN (* It is a spurious MCA
+     * Log ... *) CLEAR_MC_BANK = TRUE; GOTO LOG MCA REGISTER", and "IF AR
+     * Flag ... = 0 THEN (* It is a uncorrected no action required (UCNA)
+     * error *) GOTO CONTINUE", plus the corrected arm's own CONTINUE. The
+     * walk grades those CORRECTED and UCNA, and grades everything else UCR
+     * or UC — including the S=0/AR=1 record the pseudocode calls illegal,
+     * which reaches NOERROR = FALSE through "IF RESTARTABILITY = FALSE THEN
+     * ... NOERROR = FALSE". So `uncorrected_seen` false is NOERROR true.
+     *
+     * With one divergence, stated rather than glossed: mce_classify grades
+     * EN=0 UCNA whatever OVER says, where the pseudocode's spurious exit
+     * wants OVER=0 too and carries an EN=0/OVER=1 record onward to NOERROR =
+     * FALSE. A record whose reporting was never enabled did not raise this
+     * #MC, whatever later overflowed on top of it — that is Linux's "Not
+     * enabled" rule and mce_classify argues it there. What that rule costs
+     * at the RECORD level is argued at mce_classify; what it costs HERE is
+     * nothing, in the safe direction: keeping NOERROR true leaves the EIPV
+     * term below LIVE, so on this half the divergence can only make the
+     * walk more fatal, never less. */
+    bool     uncorrected_seen = false;
 
     /* Records claimed during the walk. They are held, not passed, until the
      * verdict below knows whether a K-Core will still be there to run them.
@@ -847,6 +1035,8 @@ bool mce_handle(interrupt_frame_t *frame) {
             }
         }
 
+        if (sev == MCE_SEV_UCR || sev == MCE_SEV_UC) uncorrected_seen = true;
+
         /* Touch payload — copied onto IRQ pocket inline. */
         mce_event_payload_t ev = {
             .status     = status,
@@ -965,31 +1155,140 @@ bool mce_handle(interrupt_frame_t *frame) {
      * MCESEV(PANIC, "MCIP not set in MCA handler", MCGMASK(
      * MCG_STATUS_MCIP, 0)).
      *
-     * An EMPTY WALK IS NOT A VERDICT, in either direction, and this is the
-     * one place where copying Linux's answer would be wrong. On this kernel
-     * IA32_MCG_EXT_CTL[LMCE_EN] is never written, so every Intel #MC is
-     * broadcast to every logical processor (SDM §15.10.4.1: "an MCA signal
-     * is broadcast to all logical processors in the system"). They race for
-     * one shared bank; exactly one wins and clears it, and every other core
-     * finds nothing. Linux answers the empty walk with mce_panic("Fatal
-     * machine check from unknown source") — but that is the MONARCH's
-     * verdict after mce_start/mce_end have rendezvoused all of them and
-     * found that NO core had a record. Taking that verdict locally, per
-     * core, would mean every loser of a perfectly recoverable memory error
-     * kills the machine, which is precisely what mce_migrate,
-     * mce_safe_page_copy and mce_swap_pte exist to prevent. This kernel has
-     * no rendezvous — one cannot be built without a wait bounded by a
-     * guessed number, which this project does not allow — so the empty walk
-     * is answered with the one fact that is genuinely local and genuinely
-     * authoritative: RIPV. The record is still said, loudly, by the
-     * MCE_NOTE_NO_BANK line, so an unexplained #MC is never silent.
+     * A WALK THAT FOUND NOTHING UNCORRECTED IS NOT A VERDICT, in either
+     * direction, and this is the one place where copying Linux's answer
+     * would be wrong. An event that is not LMCE is broadcast to every
+     * logical processor (§15.10.4.1: "an MCA signal is broadcast to all
+     * logical processors in the system"); they race for one shared bank,
+     * exactly one wins and clears it, and every other core finds nothing.
+     * Linux answers that with mce_panic("Fatal machine check from unknown
+     * source") — but that is the MONARCH's verdict, taken after
+     * mce_start/mce_end have rendezvoused every processor and established
+     * that NO core had a record. Taken locally, per core, it would mean
+     * every loser of the race kills the machine over a perfectly
+     * recoverable memory error, which is exactly what mce_migrate,
+     * mce_safe_page_copy and mce_swap_pte exist to prevent.
+     *
+     * ─── WHY THERE IS NO MONARCH/SUBJECT RENDEZVOUS HERE ───
+     *
+     * Not an omission, and not a corner cut. A rendezvous is a wait for
+     * cores that may never arrive, and the only way to end such a wait is a
+     * guessed number — Linux spells it `mca_cfg.monarch_timeout` and simply
+     * abandons the wait when it expires. A wait that gives up is this
+     * project's definition of a defect, so the three things a rendezvous
+     * would buy are bought another way:
+     *
+     *   1. FEWER SUBJECTS TO BEGIN WITH. LMCE is now armed on every logical
+     *      processor whose gates allow it (mce_lmce_arm above), and
+     *      §15.9.3.2 says what that buys: "MCE signal is broadcast to all
+     *      logical processors ... except when the processor supports LMCE
+     *      and LMCE is enabled by system software". An event that arrives
+     *      with MCG_STATUS.LMCE_S set went to this processor ALONE and has
+     *      no subjects to rendezvous with. Fewer, though, is not none:
+     *      §15.9.3.1 says only that "some errors (not limited to UCR
+     *      errors) may be delivered to only a single logical processor" and
+     *      §15.3.1.5 warns that "software should make no assumptions about
+     *      the type of error that hardware can choose to deliver as LMCE".
+     *      So the broadcast case stays, and it stays first.
+     *
+     *   2. TELLING SUBJECT FROM SOURCE WITHOUT ASKING ANYONE. The bits that
+     *      say it were latched in THIS core's MCG_STATUS at delivery, and
+     *      the SDM's own handler pseudocode reads exactly them for exactly
+     *      this case: "IF NOERROR = TRUE THEN IF NOT (MCG_RIPV = 1 AND
+     *      MCG_EIPV = 0) THEN RESTARTABILITY = FALSE". Table 15-21 states
+     *      it from the SRAR side — the non-affected logical processors are
+     *      the ones with RIPV=1 and EIPV=0.
+     *      RIPV alone is NOT that test, and the difference is the hole this
+     *      verdict used to carry: Table 15-21 gives the AFFECTED processor
+     *      of a recoverable-CONTINUABLE SRAR RIPV=1 with EIPV=1. Let another
+     *      core win the shared bank and the one core that actually consumed
+     *      the poison walks away with an empty hand, RIPV=1, and used to be
+     *      IRETed straight back onto the load that consumed it — onto a
+     *      frame whose migration had not even started. EIPV closes that, and
+     *      closes it with a fact, not with a wait.
+     *
+     *   3. MAKING THE MACHINE STOP WHEN SOMEBODY ELSE HELD THE FATAL
+     *      RECORD. A core that grades its own walk fatal returns false and
+     *      idt.c stops the machine: panic_claim_or_halt → the dump →
+     *      IPI_PANIC to every other core → `cli; hlt`. That is an EVENT, and
+     *      the LAPIC's IRR makes it one that cannot be lost — but be exact
+     *      about where it lands. IPI_PANIC is vector 0xF2 behind an ordinary
+     *      interrupt gate, and vector 18 is an interrupt gate too, so a core
+     *      standing right here has IF=0 and does NOT take it here. It waits
+     *      in that core's IRR exactly as it waits out any spin_lock critical
+     *      section, and is taken the instant IRET restores IF. The subject
+     *      therefore resumes, runs briefly, and then halts: the stop arrives
+     *      late, never by a deadline, and fails to arrive only for a core
+     *      that never enables interrupts again — which is a property of
+     *      every panic on this kernel, not of this handler.
+     *
+     * The record is still said, loudly, by the MCE_NOTE_NO_BANK line, so an
+     * unexplained #MC is never silent.
+     *
+     * ─── WHAT DECLINING THE RENDEZVOUS STILL COSTS ───
+     *
+     * Three things bought another way is not four. What the same pseudocode
+     * buys and this handler does not is named here rather than left for the
+     * next reader to find. SDM Example 15-4 ("Machine-Check Error Handler
+     * Pseudocode Supporting UCR") builds the broadcast case out of two
+     * constructs, and the verdict above answers only the second of them:
+     *
+     *   - "Acquire SpinLock; ProcessorCount++; (* Allowing one logical
+     *     processor at a time to examine machine check registers *)".
+     *     An MCA-private spinlock is not one the interrupted frame can be
+     *     holding, so the file header's deadlock argument does not reach
+     *     it. What reaches it is that a core waiting on it waits with MCIP
+     *     STILL SET, and a peer that dies inside its own walk leaves that
+     *     core waiting until the next machine-check event turns into the
+     *     architectural shutdown state (§15.3.1.2) — a wait with no event
+     *     to end it, which is the very thing a deadline would then be
+     *     invented for. So it is declined, and the price is stated: two
+     *     logical processors that share a bank both decode it, so one
+     *     failure can be said twice and its page migrated twice. Neither
+     *     loses anything — pmm_set_poisoned is an atomic OR and
+     *     mce_swap_pte is a CAS — but the ORDER of the two walks is not
+     *     architecturally guaranteed, and a bank the peer clears between
+     *     this core's STATUS read and its ADDR read hands this core an
+     *     address §15.3.2.3 no longer calls valid. That window is open on
+     *     every broadcast #MC and closed on every LMCE one, which is the
+     *     other half of why arming LMCE above is worth the three gates.
+     *
+     *   - "IF ProcessorCount = MAX_PROCESSORS AND NOERROR = TRUE THEN
+     *     Report RESTARTABILITY to console; Reset system", reached only
+     *     after "Wait till ProcessorCount = MAX_PROCESSRS on system;
+     *     (* implement a timeout and abort function if necessary *)".
+     *     The wait IS the guessed number, in the SDM's own hand, and its
+     *     whole yield is the machine-wide statement "nobody found a
+     *     record". This handler makes no such statement and does not need
+     *     to: the per-core question — may THIS thread be restarted — is
+     *     answered by RIPV and EIPV above, from bits latched on this core
+     *     at delivery. A #MC that no core on the machine can explain is
+     *     therefore said and survived here where the SDM's pseudocode
+     *     would reset; that is a deliberate divergence, not an oversight,
+     *     and the MCE_NOTE_NO_BANK line is what makes it visible.
+     *
+     * A third divergence from the same Example belongs in the same list,
+     * because it too is about a core that is not the source. Its SRAR arm
+     * reads "IF MCACOD ... is recognized AND Current Processor is an
+     * Affected Processor THEN Implement MCACOD specific recovery action ...
+     * ELSE RESTARTABILITY = FALSE", which taken literally stops any core
+     * that merely OBSERVED the broadcast and still found the bank. The walk
+     * above lets that core continue on RIPV=1 with EIPV=0, because §15.9.3
+     * says so in prose about the same error: the processors "that observed
+     * but not affected by an SRAR error should find that the RIPV flag ...
+     * is set and the EIPV flag ... is cleared, indicating that it is safe to
+     * restart the execution ... after the recovery action is successfully
+     * taken by system software" — and when this handler cannot START that
+     * action the record is graded fatal above anyway. The pseudocode branch
+     * is the outlier against its own chapter; Linux reads it the same way.
      *
      * Returning false hands the frame to idt.c's generic exception path,
      * which kills the process when the #MC came from ring 3 and halts when
      * it came from ring 0 — the two outcomes §15.10.4.1 leaves open when
      * the interrupted stream cannot be restarted.
      */
-    bool fatal = (!mcip) || (!ripv) || any_fatal;
+    bool fatal = (!mcip) || (!ripv) || any_fatal ||
+                 (!uncorrected_seen && eipv);
 
     if (decoded == 0) {
         MceRecord r = {

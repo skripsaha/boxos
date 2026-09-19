@@ -23,6 +23,54 @@ static uint8_t expected_entry_length(uint8_t type) {
     }
 }
 
+/* Which of the two Local APIC Flags a processor entry carries.
+ *
+ * ACPI 6.5 §5.2.12.2, Table 5.23 keeps them apart and this kernel used to
+ * OR them together:
+ *
+ *   bit 0 Enabled       — "If this bit is set the processor is ready for
+ *                          use. If this bit is clear and the Online Capable
+ *                          bit is set, system hardware supports enabling
+ *                          this processor during OS runtime. If this bit is
+ *                          clear and the Online Capable bit is also clear,
+ *                          this processor is unusable, and OSPM shall
+ *                          ignore the contents of the Processor Local APIC
+ *                          Structure."
+ *   bit 1 Online Capable — reserved and zero while Enabled is set;
+ *                          otherwise "system hardware supports enabling
+ *                          this processor during OS runtime".
+ *
+ * So Online Capable means CAN BE ADDED LATER, never READY NOW. A Cloud
+ * Hypervisor guest started `--cpus boot=2,max=8` publishes six Type 9
+ * entries with Flags = 0x00000002 for sockets that hold nothing yet; a
+ * server board with populated-later sockets publishes the same shape. The
+ * OR handed every one of those APIC IDs to the SMP bring-up, which spent a
+ * kernel stack, an INIT, two SIPIs and a full second of waiting on each
+ * processor the firmware had just said is not there, and carried the
+ * phantoms inside the core count that decides the K-Core split.
+ *
+ * Linux draws the line in the same place: acpi_is_processor_usable() may
+ * register a not-Enabled processor as POSSIBLE, but what it passes as
+ * `enabled` to topology_register_apic() is `lapic_flags & ACPI_MADT_ENABLED`
+ * and nothing else, and only an enabled processor is started at boot.
+ *
+ * BoxOS has no hot-add path to hand an Online-Capable slot to, so the slot
+ * is named out loud and left alone rather than booted. */
+static bool lapic_flags_enabled(uint32_t flags) {
+    return (flags & MADT_LAPIC_ENABLED) != 0;
+}
+
+static bool lapic_flags_online_capable(uint32_t flags) {
+    return !lapic_flags_enabled(flags) && (flags & MADT_LAPIC_ONLINE_CAP) != 0;
+}
+
+static const char* lapic_flags_text(uint32_t flags) {
+    if (lapic_flags_enabled(flags))        return "enabled";
+    if (lapic_flags_online_capable(flags)) return "not enabled, online-capable "
+                                                  "(hot-add slot)";
+    return "unusable";
+}
+
 /*
  * ACPI 6.5 §5.2.12.2: the OSPM determines the BSP at runtime — it is the
  * processor that is currently executing OS init code. Asking "which
@@ -152,11 +200,10 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
         switch (entry->type) {
             case MADT_TYPE_LOCAL_APIC: {
                 madt_local_apic_t* lapic = (madt_local_apic_t*)entry;
-                bool enabled = (lapic->flags & MADT_LAPIC_ENABLED) ||
-                               (lapic->flags & MADT_LAPIC_ONLINE_CAP);
+                bool enabled = lapic_flags_enabled(lapic->flags);
                 debug_printf("[MADT]   LAPIC: ACPI ID=%u, APIC ID=%u, %s\n",
                              lapic->acpi_processor_id, lapic->apic_id,
-                             enabled ? "enabled" : "disabled");
+                             lapic_flags_text(lapic->flags));
                 /* Resolve BSP ACPI processor ID by matching the APIC ID
                  * that CPUID reported for the running CPU. */
                 if (info->bsp_lapic_found &&
@@ -229,11 +276,10 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
 
             case MADT_TYPE_LX2APIC: {
                 madt_lx2apic_t* x = (madt_lx2apic_t*)entry;
-                bool enabled = (x->flags & MADT_LAPIC_ENABLED) ||
-                               (x->flags & MADT_LAPIC_ONLINE_CAP);
+                bool enabled = lapic_flags_enabled(x->flags);
                 debug_printf("[MADT]   x2APIC: UID=%u APIC ID=%u %s\n",
                              x->acpi_processor_uid, x->x2apic_id,
-                             enabled ? "enabled" : "disabled");
+                             lapic_flags_text(x->flags));
                 if (info->bsp_lapic_found &&
                     !info->bsp_acpi_id_resolved &&
                     x->x2apic_id == bsp_apic_id) {
@@ -314,6 +360,14 @@ uint8_t amp_collect_lapics(uint32_t* ids_out, uint8_t max_count) {
     if (!madt) return 0;
 
     uint8_t count = 0;
+    /* MADT ENTRIES, not processors: a firmware that double-lists one
+     * not-Enabled processor as both Type 0 and Type 9 contributes two of
+     * them, and unlike the accepted ids below there is nothing to compare a
+     * rejected entry against — its id is exactly what this kernel refuses to
+     * take. Counted in 32 bits because the MADT's own length is, and a table
+     * with more than 255 such entries would otherwise wrap the count to
+     * silence. */
+    uint32_t deferred = 0;
     uint8_t* ptr = (uint8_t*)madt + sizeof(acpi_madt_t);
     uint8_t* end = (uint8_t*)madt + madt->header.length;
 
@@ -321,7 +375,14 @@ uint8_t amp_collect_lapics(uint32_t* ids_out, uint8_t max_count) {
      * (Processor Local x2APIC, 32-bit id). ACPI 6.5 §5.2.12.2 / §5.2.12.12:
      * a logical processor with id < 255 is listed via Type 0 (even in x2APIC
      * mode), and any processor with id >= 255 MUST be listed via Type 9. A
-     * machine with >254 logical processors therefore interleaves both. */
+     * machine with >254 logical processors therefore interleaves both.
+     *
+     * Only Enabled processors, per Table 5.23 — see lapic_flags_enabled
+     * above. This list is what amp_boot_aps() sends INIT and SIPI to and
+     * what amp_init() derives the K-Core split from, so an Online-Capable
+     * slot in it is a processor the firmware said is not there being given a
+     * kernel stack, two IPIs and a second of waiting, and a core count with
+     * nothing behind it. */
     while (ptr + sizeof(madt_entry_header_t) <= end && count < max_count) {
         madt_entry_header_t* entry = (madt_entry_header_t*)ptr;
         if (entry->length < sizeof(madt_entry_header_t)) break;
@@ -332,17 +393,20 @@ uint8_t amp_collect_lapics(uint32_t* ids_out, uint8_t max_count) {
         if (entry->type == MADT_TYPE_LOCAL_APIC &&
             entry->length >= sizeof(madt_local_apic_t)) {
             madt_local_apic_t* lapic = (madt_local_apic_t*)entry;
-            if ((lapic->flags & MADT_LAPIC_ENABLED) ||
-                (lapic->flags & MADT_LAPIC_ONLINE_CAP))
+            if (lapic_flags_enabled(lapic->flags))
                 id = lapic->apic_id;                 /* 8-bit xAPIC id */
+            else if (lapic_flags_online_capable(lapic->flags))
+                deferred++;
         } else if (entry->type == MADT_TYPE_LX2APIC &&
                    entry->length >= sizeof(madt_lx2apic_t)) {
             madt_lx2apic_t* x2 = (madt_lx2apic_t*)entry;
             /* x2apic_id == 0xFFFFFFFF marks an unusable slot — skip it. */
-            if (((x2->flags & MADT_LAPIC_ENABLED) ||
-                 (x2->flags & MADT_LAPIC_ONLINE_CAP)) &&
-                x2->x2apic_id != 0xFFFFFFFFu)
-                id = x2->x2apic_id;                  /* 32-bit x2APIC id */
+            if (x2->x2apic_id != 0xFFFFFFFFu) {
+                if (lapic_flags_enabled(x2->flags))
+                    id = x2->x2apic_id;              /* 32-bit x2APIC id */
+                else if (lapic_flags_online_capable(x2->flags))
+                    deferred++;
+            }
         }
 
         if (id != 0xFFFFFFFFu) {
@@ -355,6 +419,19 @@ uint8_t amp_collect_lapics(uint32_t* ids_out, uint8_t max_count) {
                 ids_out[count++] = id;
         }
         ptr += entry->length;
+    }
+
+    /* kprintf, not debug_printf: on a board with hot-add sockets the number
+     * of processors this kernel starts is smaller than the number the MADT
+     * lists, and the operator counting cores in front of the machine is the
+     * one person who needs to read why. */
+    if (deferred) {
+        kprintf("[MADT] %u of this MADT's processor entries are "
+                "Online-Capable but not Enabled — firmware says those "
+                "processors can be added during OS runtime, not that they "
+                "are here now; the %u Enabled processor(s) are what this "
+                "kernel starts\n",
+                (unsigned)deferred, count);
     }
 
     return count;

@@ -190,13 +190,41 @@ static bool acpi_says_no_cmos_rtc(void) {
  * zero (arch/x86/kernel/rtc.c, mach_get_cmos_time).
  *
  * Returns 0 when the platform names no index: no ACPI, a FADT too short to hold
- * the field, or the field itself zero. */
+ * the field, a table too old for the field to be trusted, the field itself
+ * zero, or an index this driver must not address. */
+#define FADT2_REVISION_ID   3
+
 static uint8_t acpi_century_index(void) {
     if (!g_acpi.initialized || !g_acpi.fadt) return 0;
     size_t need = __builtin_offsetof(acpi_fadt_t, century)
                 + sizeof(((acpi_fadt_t *)0)->century);
     if (g_acpi.fadt->header.length < need) return 0;
-    return g_acpi.fadt->century;
+
+    /* The field is inside even a 116-byte ACPI 1.0 FADT, so the length test
+     * above cannot tell a named index from a byte an old firmware never
+     * filled in. Linux draws the line at the table's revision — "if
+     * (acpi_gbl_FADT.header.revision >= FADT2_REVISION_ID &&
+     * acpi_gbl_FADT.century)", with FADT2_REVISION_ID 3 in
+     * include/acpi/actbl.h — and so does this driver. Below that revision
+     * the century is taken as 20 further down, which is right until 2100
+     * and never a refusal. */
+    if (g_acpi.fadt->header.revision < FADT2_REVISION_ID) return 0;
+
+    uint8_t index = g_acpi.fadt->century;
+
+    /* An index with bit 7 set cannot be read here without a side effect on
+     * something else entirely: cmos_read() ORs the index into port 0x70,
+     * whose bit 7 is the system-wide NMI mask this file is careful with.
+     * Reading the date would silently switch NMI off and leave it off. Xen
+     * guards the same read the same way: "acpi_gbl_FADT.century &&
+     * acpi_gbl_FADT.century < 0x80" in __get_cmos_time(). */
+    if (index >= 0x80) {
+        kprintf("[RTC] FADT names century index 0x%x, which carries the NMI "
+                "mask bit of port 0x70 — not reading it; the century is "
+                "taken as 20\n", (unsigned)index);
+        return 0;
+    }
+    return index;
 }
 
 /* This kernel has no wall clock, and says so once, loudly, on the board.

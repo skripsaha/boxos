@@ -39,7 +39,8 @@
 ;
 ; Layout it depends on — the same map stage2 declares, and the two must agree:
 ;   0x00500..0x01103  E820 memory map, written later by stage2
-;   0x01200..0x01217  scratch (ours; drive number, EDD flag, geometry, DAP)
+;   0x01200..0x0121B  scratch (ours; drive number, EDD flag, geometry, DAP,
+;                     and read_sectors' own loop state)
 ;   0x07000           stage2's 16-bit stack top, grows down
 ;   0x07C00           this sector, as loaded by the firmware
 ;   0x08000..0x09FFF  stage2, 16 sectors from LBA 1
@@ -63,7 +64,17 @@ S_EDD           equ SCRATCH + 0x01      ; byte  — 1 = EDD usable on this drive
 S_SPT           equ SCRATCH + 0x02      ; word  — sectors per track (CHS)
 S_HEADS         equ SCRATCH + 0x04      ; word  — heads (CHS)
 S_DAP           equ SCRATCH + 0x08      ; 16 bytes — EDD Disk Address Packet
-SCRATCH_WORDS   equ 12                  ; 24 bytes, covering everything above
+;--- read_sectors' loop state. It is here for the same reason the packet is:
+;--- every one of these three is live ACROSS a BIOS call. rs_left is written
+;--- before the loop and read back after every INT 13h; rs_try is decremented
+;--- on the instruction after one returns and carried across the AH=00h reset;
+;--- rs_err is carried across that reset and across the INT 10h inside putc.
+;--- They used to live inside the boot sector, which is the exact exposure the
+;--- 2026-08-23 rewrite moved S_DRIVE out of the sector to avoid.
+S_LEFT          equ SCRATCH + 0x18      ; word  — sectors still owed to the caller
+S_TRY           equ SCRATCH + 0x1A      ; byte  — attempts left on the sector in flight
+S_ERR           equ SCRATCH + 0x1B      ; byte  — last BIOS status; 0xFF = never got one
+SCRATCH_WORDS   equ 14                  ; 28 bytes, covering everything above
 
 STAGE2_SEG      equ 0x0000
 STAGE2_OFF      equ 0x8000
@@ -109,6 +120,12 @@ start:
     mov di, SCRATCH
     mov cx, SCRATCH_WORDS
     rep stosw
+
+    ; One field means something else by absence: 0x00 is a BIOS status a read
+    ; can really return ("the firmware agreed and moved nothing", written by
+    ; .short), so the "no INT 13h ever answered" value has to be one no status
+    ; is — which is the 0xFF the failure message prints as "DFF".
+    mov byte [S_ERR], 0xFF
 
     ; DL is the only thing the firmware tells us and the only thing we cannot
     ; recompute. Save it first, before any call that might disturb memory, and
@@ -232,7 +249,7 @@ start:
 ;
 ; Input:  EAX = starting LBA, CX = sector count, DX:BX = destination seg:off
 ; Output: CF = 0 on success, CF = 1 when every attempt failed
-;         rs_err = last BIOS status byte, or 0xFF if no call ever returned one
+;         S_ERR = last BIOS status byte, or 0xFF if no call ever returned one
 ; Clobbers: nothing the caller needs (all saved)
 ;=============================================================================
 read_sectors:
@@ -240,14 +257,14 @@ read_sectors:
     push es
 
     mov [S_DAP + 8], eax            ; LBA — and the loop's position in it
-    mov [rs_left], cx
+    mov [S_LEFT], cx
     mov [S_DAP + 4], bx             ; destination offset, fixed for the transfer
     mov [S_DAP + 6], dx             ; destination segment, stepped per sector
     mov byte [S_DAP + 0], 0x10      ; +1 and +12..15 are already zero: scratch
-    mov byte [rs_try], RETRIES      ; was wiped before any of this ran
+    mov byte [S_TRY], RETRIES       ; was wiped before any of this ran
 
 .next:
-    cmp word [rs_left], 0
+    cmp word [S_LEFT], 0
     je .done
 
     cmp byte [S_EDD], 1
@@ -308,8 +325,8 @@ read_sectors:
     ; give the following sector a full budget of its own.
     inc dword [S_DAP + 8]
     add word [S_DAP + 6], 0x20      ; 0x20 of segment = 512 bytes of address
-    dec word [rs_left]
-    mov byte [rs_try], RETRIES
+    dec word [S_LEFT]
+    mov byte [S_TRY], RETRIES
     jmp .next
 
 .short:
@@ -317,8 +334,8 @@ read_sectors:
     ; can tell "the firmware refused" from "the firmware agreed and lied".
     xor ah, ah
 .retry:
-    mov [rs_err], ah                ; BIOS status, for the failure message
-    dec byte [rs_try]
+    mov [S_ERR], ah                 ; BIOS status, for the failure message
+    dec byte [S_TRY]
     jz .exhausted
     xor ax, ax                      ; AH=00h — reset the controller
     mov dl, [S_DRIVE]
@@ -339,7 +356,7 @@ read_sectors:
     cmp byte [S_EDD], 1
     jne .give_up
     mov byte [S_EDD], 0
-    mov byte [rs_try], RETRIES
+    mov byte [S_TRY], RETRIES
     jmp .next
 .give_up:
     pop es
@@ -376,7 +393,7 @@ puthex:                             ; AL = byte, printed as two hex digits
 
 die_status:                         ; AL = stage letter, then the BIOS status
     call putc
-    mov al, [rs_err]
+    mov al, [S_ERR]
     call puthex
     jmp hang
 die_char:                           ; AL = stage letter alone
@@ -386,13 +403,6 @@ hang:
 .spin:
     hlt
     jmp .spin
-
-;--- read_sectors working storage. These live in the sector because they are
-;--- only touched between our own instructions, never across a BIOS call —
-;--- the packet the firmware reads is in scratch for exactly that reason.
-rs_left         dw 0                ; sectors still owed to the caller
-rs_try          db 0                ; attempts left on the sector in flight
-rs_err          db 0xFF             ; last BIOS status; 0xFF = never got one
 
 ;=============================================================================
 ; Bytes 446..509 are the MBR partition table. Nothing of ours may live there:

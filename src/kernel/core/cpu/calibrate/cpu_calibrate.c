@@ -41,15 +41,22 @@
  *
  *   4. HPET counter Free-running HPET main counter is wall-clock
  *      measurement  monotonic; rdtsc() against a HPET-measured 100 ms
- *                   window yields the TSC rate. ONLY usable when the
- *                   guest's TSC is host-clock-bound — under QEMU TCG
- *                   the TSC is an instruction counter and this method
- *                   returns garbage like the user-reported 71/40 kHz.
- *                   Gated by hv_tsc_is_wallclock().
+ *                   window yields the TSC rate. UNGATED — no
+ *                   hv_tsc_is_wallclock() check stands anywhere in this
+ *                   file; the one that did was removed for disabling the
+ *                   method on default QEMU TCG, where it is correct (see
+ *                   hpet_measure_tsc_khz). Under `-icount` the TSC is an
+ *                   instruction counter and the result lands in the
+ *                   hundreds of kHz, where freq_is_strict_sane() rejects
+ *                   it and selection moves on. The rejection, not a gate,
+ *                   is what protects this method.
  *
- *   5. PIT channel 0 Legacy 8254 PIT measurement. Same TCG limitation
- *      measurement   as HPET — gated by hv_tsc_is_wallclock(). Only
- *                    runs when HPET is absent (rare on real HW).
+ *   5. PIT channel 0 Legacy 8254 measurement, equally ungated and
+ *      measurement   equally protected. It runs whenever the HPET is not
+ *                    SOURCING IRQ0 (`!hpet_tick_active()`), which is not
+ *                    the same as the HPET being absent: a controller
+ *                    without LegacyReplacement leaves the 8254 on the pin
+ *                    while hpet_is_present() is true.
  *
  *   6. CPUID.16h    Promoted to fallback even when not selected as
  *      promoted     a primary — best informational guess of TSC rate.
@@ -439,12 +446,17 @@ void cpu_calibrate_tsc(void) {
     /* Method 4b: ACPI PM Timer measurement. Multi-sample median, same
      * shape as the HPET path — protects against a one-off host
      * scheduler hiccup landing in any single window. Five 20 ms
-     * samples = 100 ms total; well below the PM timer's 24-bit
-     * (~14 s) wrap budget.
+     * samples = 100 ms total, against a wrap budget of 4.687 s: the
+     * counter is 24 bits clocked at 3.579545 MHz (ACPI 6.5 §4.8.2.1),
+     * and pmtimer_busy_wait_us() derives and enforces that bound
+     * itself. The "~14 s" this comment used to give was 2^24/1193182,
+     * the 8254's rate and not this timer's — a window sized against
+     * it would land past the wrap, where pmtimer_busy_wait_us()
+     * clamps the request to one lap and still reports success.
      *
      * Critical under QEMU TCG: PMT's lower poll rate (~3.6k MMIO
      * reads/ms vs HPET's ~14k) gives less emulator-overhead bias
-     * than HPET under host contention, but a single 50 ms sample is
+     * than HPET under host contention, but a single 20 ms sample is
      * still vulnerable to one large host-scheduler stall. Median-of-
      * five evens that out — observed bias drops from ~2 % to <0.5 %
      * under 16-core macOS host load. */

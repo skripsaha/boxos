@@ -183,9 +183,33 @@ typedef struct {
 #define XHCI_IMAN_IP             (1 << 0)
 #define XHCI_IMAN_IE             (1 << 1)
 
-/* Interrupt Moderation Interval, in 250 ns units. Left at reset (zero) the
- * controller interrupts for every event; 4000 = 1 ms is the value the
- * specification names as the default. */
+/*
+ * Interrupt Moderation Interval, in 250 ns units.
+ *
+ * ‼ THE FIRST HALF OF THIS COMMENT USED TO SAY THE REGISTER RESETS TO ZERO. IT
+ * DOES NOT, AND ZERO IS THE OPPOSITE OF WHAT IT WAS TAKEN FOR. xHCI 1.2
+ * §4.17.2: "The IMODI field shall default to 4000 (1 ms.) upon initialization
+ * and reset. It may be loaded with an alternative value by software when the
+ * Interrupter is initialized." §5.5.2.2 Table 5-39 says the same and adds what
+ * zero means: "Default = '4000' (~1ms) ... A value of '0' disables interrupt
+ * throttling logic and interrupts shall be generated immediately if IP = '0',
+ * EHB = '0', and the Event Ring is not empty."
+ *
+ * So writing 4000 restates the hardware default rather than rescuing the
+ * machine from an unthrottled controller — on conforming silicon. It is
+ * written anyway, and deliberately: IMOD is a Runtime register, and HCRST's
+ * own text (Table 5-20, bit 1) promises only that "All operational registers
+ * ... are set to their initial values", which does not cover it; and emulated
+ * controllers do come up at zero — QEMU's model zeroes IMOD on reset — where
+ * the write is what installs the 1 ms interval instead of an interrupt per
+ * event. Linux programs it after reset for the same reason.
+ *
+ * The store is 32 bits wide, so it also puts zero in IMODC (bits 31:16), whose
+ * value Table 5-39 leaves undefined at reset and which the same table says
+ * "may be directly written by software at any time to alter the interrupt
+ * rate". Starting the down-counter from zero at initialisation is the point,
+ * not a side effect.
+ */
 #define XHCI_IMOD_DEFAULT        4000
 
 #define XHCI_ERDP_DESI_MASK      0x7

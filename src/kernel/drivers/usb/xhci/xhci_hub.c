@@ -103,15 +103,37 @@
 #define SS_LINK_COMPLIANCE       10
 
 /*
- * Fifteen ports, and the number is not this driver's choice.
+ * Thirty-one ports, and the number is this driver's own arrays rather than
+ * anything the bus says.
  *
- * A device below a hub is reached by a route string that spends four bits on
- * each tier naming the port taken there, so port 16 has no way of being named.
- * The old code clamped a larger port number to 15 — which does not address port
- * 16, it addresses port 15, and quietly hands whatever is plugged into that one
- * the transfers meant for its neighbour.
+ * ‼ THE BLOCK THAT USED TO STAND HERE SAID FIFTEEN, AND GAVE A REASON THAT IS
+ * IN NO SPECIFICATION: "a device below a hub is reached by a route string that
+ * spends four bits on each tier naming the port taken there, so port 16 has no
+ * way of being named". xHCI 1.2 Table 6-4, Route String, footnote 106 says the
+ * opposite for the hubs this concerns: "If HS or FS hub in the path supports
+ * more than 14 ports the associated Route String Port field shall be set to
+ * 15." A USB 2.0 hub does not route by the route string at all — it repeats
+ * downstream and the device address picks the device out — so the nibble is a
+ * placeholder for such a tier, and the port above it is perfectly reachable.
+ * bNbrPorts is an eight-bit field (USB 2.0 Table 11-13) with no fifteen-port
+ * limit on it; the fifteen-port cap belongs to USB 3.x SuperSpeed hubs alone,
+ * and one of those cannot exceed it in the first place.
+ *
+ * Clamping on that false reason cost the ports themselves. Everything below
+ * loops to h->ports, so ports above the clamp were never powered, never
+ * polled, never reset and never named in a single line of the log: a device in
+ * one of them was invisible for the life of the machine.
+ *
+ * What genuinely bounds this driver is two bitmaps of its own — `present` and
+ * `occupied` below are uint32_t addressed as `1u << port`, which is undefined
+ * from port 32 upwards. So the bound is thirty-one, it is named for what it
+ * actually is, and it is the same number and the same reason as Linux's
+ * USB_MAXCHILDREN ("Because the arrays need to add a bit for hub status data,
+ * we use 31"). What the hub SAID is kept separately and is what the controller
+ * is told, because xHCI 1.2 §4.5.2 and Table 6-5 want Number of Ports to be
+ * bNbrPorts and not a number this driver preferred.
  */
-#define HUB_MAX_ROUTABLE_PORTS   15
+#define HUB_MAX_TRACKED_PORTS    31
 
 #define HUB_CTRL_TIMEOUT_MS      1000
 
@@ -130,10 +152,20 @@
 
 typedef struct XhciHub {
     struct XhciHub* next;
+    /* The queue of hubs that have left g_hubs and are waiting to be freed. A
+     * chain of its own, so that `next` keeps pointing where it did and a
+     * service walk standing on a node when it was unlinked carries on over
+     * the live list rather than into the queue. */
+    struct XhciHub* released_next;
     xhci_controller_t*  ctrl;
     xhci_device_slot_t* slot;
 
+    /* `ports` is how many of them this driver scans and keeps bits for;
+     * `ports_reported` is bNbrPorts exactly as the hub descriptor gave it,
+     * which is what the Slot Context's Number of Ports field is owed. They
+     * differ only on a hub with more ports than HUB_MAX_TRACKED_PORTS. */
     uint8_t  ports;
+    uint8_t  ports_reported;
     bool     superspeed;
     bool     attached;
 
@@ -171,6 +203,46 @@ static bool g_hubs_lock_ready = false;
 static volatile uint32_t g_hub_work = 0;
 
 /*
+ * ‼ A HUB IS UNLINKED WHERE IT IS RELEASED AND FREED SOMEWHERE ELSE, AND THAT
+ * IS THE WHOLE OF IT.
+ *
+ * g_hubs is inserted and unlinked under g_hubs_lock, and its nodes used to be
+ * kfree()d the instant after the unlink, outside it. Two readers walk the list
+ * and neither took the lock:
+ *
+ *   hub_for_slot, reached from the transfer-event handler on the BSP. It
+ *   stands on a node while another core unlinks and frees it, reads h->next
+ *   out of the freed object — sizeof(XhciHub) puts it in the 64-byte slab
+ *   class, whose free path writes a uint16_t head offset over its first two
+ *   bytes, so only the low half of that pointer is corrupted and the walk
+ *   usually carries on into unrelated memory rather than faulting — compares
+ *   h->slot against arbitrary bytes, and on a match writes change_pending into
+ *   something else's object.
+ *
+ *   xhci_hub_service, which is far worse: it holds `h` across hub_scan_ports,
+ *   which is per port a GET_STATUS and a CLEAR_FEATURE at HUB_CTRL_TIMEOUT_MS
+ *   apiece, a HUB_DEBOUNCE_MS pause and up to HUB_RESET_TIMEOUT_MS of reset
+ *   polling, and only then reads h->next. That is hundreds of milliseconds
+ *   with a pointer held live, and the node is reachable: hub_scan_ports ->
+ *   hub_port_forget -> hub_port_gone -> xhci_slot_retire retires a child that
+ *   may itself be a hub, and another core's xhci_slot_service then takes it
+ *   down and releases it. It needs a second core, because MSI is targeted at
+ *   the BSP alone — so this is a 4c/16c and live-board defect, not a
+ *   single-core one.
+ *
+ * Locking the long walk is not the answer: g_hubs_lock masks interrupts, and
+ * holding it across seconds of control transfers would stop the machine. So
+ * the LIST is locked and the FREEING is moved. Every walk of g_hubs is now
+ * under g_hubs_lock or is the service pass itself; xhci_hub_release unlinks
+ * under the lock and leaves the node here instead of freeing it; and the next
+ * service pass frees the queue as its first act, under g_hub_busy, at the one
+ * moment when no walker of any kind can be standing on a node that has left
+ * the list. An unlink leaves h->next pointing where it did, so a service walk
+ * that was standing on the node when it went carries on over the live ones.
+ */
+static XhciHub* g_hubs_released = NULL;
+
+/*
  * One core services the hubs at a time.
  *
  * This is reached from the idle loop, and on a multi-core machine EVERY idle
@@ -201,6 +273,10 @@ static void hub_pause_ms(uint32_t ms)
     }
 }
 
+/* Caller holds g_hubs_lock. The list is unlinked under that lock and this is
+ * reached from the transfer-event handler, so a walk that does not hold it is
+ * a walk standing on a node another core is taking away — see the note on
+ * g_hubs_released. */
 static XhciHub* hub_for_slot(xhci_device_slot_t* slot)
 {
     for (XhciHub* h = g_hubs; h; h = h->next) {
@@ -273,13 +349,14 @@ static int hub_get_descriptor_once(XhciHub* h)
         return -1;
     }
 
-    h->ports = d[2];
-    if (h->ports > HUB_MAX_ROUTABLE_PORTS) {
-        kprintf("[USB hub slot %u] says it has %u ports; the route string has "
-                "room to name %u, so the rest cannot be reached and are left "
+    h->ports_reported = d[2];
+    h->ports          = d[2];
+    if (h->ports > HUB_MAX_TRACKED_PORTS) {
+        kprintf("[USB hub slot %u] says it has %u ports; this driver keeps one "
+                "bit per port and has room for %u, so the rest are left "
                 "alone\n",
-                h->slot->slot_id, h->ports, HUB_MAX_ROUTABLE_PORTS);
-        h->ports = HUB_MAX_ROUTABLE_PORTS;
+                h->slot->slot_id, h->ports, HUB_MAX_TRACKED_PORTS);
+        h->ports = HUB_MAX_TRACKED_PORTS;
     }
 
     /* wHubCharacteristics: bits 6:5 are the think time in units of eight full
@@ -1032,7 +1109,13 @@ static int hub_scan_ports(XhciHub* h, bool announce_only_changes)
 
 bool xhci_hub_slot_attached(xhci_device_slot_t* slot)
 {
-    return hub_for_slot(slot) != NULL;
+    if (!g_hubs_lock_ready) {
+        return false;
+    }
+    spin_lock(&g_hubs_lock);
+    bool found = hub_for_slot(slot) != NULL;
+    spin_unlock(&g_hubs_lock);
+    return found;
 }
 
 int xhci_hub_attach(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
@@ -1093,7 +1176,12 @@ int xhci_hub_attach(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
      * anything below it: a slot context without the Hub bit is scheduled as an
      * endpoint device, and the ports underneath do not exist as far as it is
      * concerned. The context is rewritten and re-evaluated. */
-    slot->hub_ports = h->ports;
+    /* What the hub said, not what this driver can keep bits for: xHCI 1.2
+     * §4.5.2 has Number of Ports = bNbrPorts from the USB Hub Descriptor, and
+     * Table 6-5 points straight at USB 2.0 Table 11-13, which puts no ceiling
+     * on it. The controller schedules for the hub it is behind; how many of
+     * those ports this driver polls is a separate question. */
+    slot->hub_ports = h->ports_reported;
 
     uint32_t pages = xhci_input_ctx_pages(ctrl);
     void* input_phys = pmm_alloc_zero(pages, PHYS_TAG_DMA32);
@@ -1169,6 +1257,11 @@ void xhci_hub_release(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
         if ((*link)->slot == slot) {
             h = *link;
             *link = h->next;
+            /* Off the list, and said so: a service walk that was standing on
+             * this node when it went reads the flag before it does anything
+             * else with it. `next` is deliberately left pointing where it did
+             * so that such a walk finishes over the live list. */
+            h->attached = false;
             break;
         }
         link = &(*link)->next;
@@ -1187,10 +1280,20 @@ void xhci_hub_release(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
         }
     }
 
-    if (h->buf_phys) {
-        pmm_free((void*)h->buf_phys, 1);
-    }
-    kfree(h);
+    /*
+     * And the memory is NOT given back here — see the note on g_hubs_released.
+     * Another core may be inside the service pass with this very node in hand,
+     * milliseconds deep in a control transfer that is reading h->buf_virt. The
+     * queue is emptied at the top of the next pass, which is the one moment
+     * nobody can be.
+     */
+    spin_lock(&g_hubs_lock);
+    h->released_next = g_hubs_released;
+    g_hubs_released  = h;
+    spin_unlock(&g_hubs_lock);
+
+    /* So that a pass comes for it even on a machine with nothing else to do. */
+    xhci_hub_note_work();
     (void)ctrl;
 }
 
@@ -1211,11 +1314,24 @@ void xhci_hub_release(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
  */
 void xhci_hub_note_change(xhci_device_slot_t* slot)
 {
+    if (!g_hubs_lock_ready) {
+        return;
+    }
+
+    /* Under the lock, flag and all: this runs in the transfer-event handler,
+     * and the node it finds is one another core is entitled to be unlinking.
+     * The lock masks interrupts, so taking it from here is safe, and the walk
+     * it covers is a few pointers long. */
+    spin_lock(&g_hubs_lock);
     XhciHub* h = hub_for_slot(slot);
+    if (h) {
+        h->change_pending = true;
+    }
+    spin_unlock(&g_hubs_lock);
+
     if (!h) {
         return;
     }
-    h->change_pending = true;
     __atomic_store_n(&g_hub_work, 1, __ATOMIC_RELEASE);
 }
 
@@ -1240,6 +1356,30 @@ int xhci_hub_service(xhci_controller_t* ctrl)
     }
 
     __atomic_store_n(&g_hub_work, 0, __ATOMIC_RELEASE);
+
+    /*
+     * The hubs that have left, freed FIRST and only here.
+     *
+     * This is the one place in the driver where nothing can be standing on a
+     * node that is off the list: g_hub_busy makes the long walk below
+     * single-entry, so the previous pass has finished, and every other walk of
+     * g_hubs is under g_hubs_lock and can only ever have seen live nodes. See
+     * the note on g_hubs_released for why the release path leaves them here
+     * instead of calling kfree with another core inside them.
+     */
+    spin_lock(&g_hubs_lock);
+    XhciHub* dead   = g_hubs_released;
+    g_hubs_released = NULL;
+    spin_unlock(&g_hubs_lock);
+
+    while (dead) {
+        XhciHub* next = dead->released_next;
+        if (dead->buf_phys) {
+            pmm_free((void*)dead->buf_phys, 1);
+        }
+        kfree(dead);
+        dead = next;
+    }
 
     int acted = 0;
 
@@ -1272,7 +1412,40 @@ int xhci_hub_service(xhci_controller_t* ctrl)
         acted++;
     }
 
-    for (XhciHub* h = g_hubs; h; h = h->next) {
+    /*
+     * The long walk, and the only one that is not under g_hubs_lock.
+     *
+     * It cannot be: each node is held across hub_scan_ports, which is control
+     * transfers, a debounce and reset polling — hundreds of milliseconds with
+     * interrupts masked if the lock were held. What makes it safe instead is
+     * that nothing frees a node behind it (the queue above is the only freer,
+     * and it runs before this walk begins, under the same g_hub_busy), and
+     * that an unlink leaves `next` pointing where it did — so a node released
+     * mid-walk is still a valid node and the walk carries on from it onto the
+     * live list.
+     *
+     * ‼ THAT IS A GUARANTEE ABOUT MEMORY AND NOT ABOUT WORK, AND THE
+     * DIFFERENCE MATTERS. `attached` is read once, at the top of each
+     * iteration; a hub released while this core is already inside
+     * hub_scan_ports for it is NOT skipped, and the scan goes on issuing
+     * control transfers down a hub whose ports xhci_hub_release is taking
+     * apart at the same moment. Those transfers fail against a slot that is
+     * being retired, which is an answer and not a fault — every one of them
+     * is waited for and every failure is reported — and the pass ends. What
+     * the deferred free buys is that none of it touches freed memory. Making
+     * the walk stop mid-scan would mean asking `attached` between every
+     * control transfer inside hub_scan_ports, which is a different change
+     * from this one and is not made here.
+     *
+     * Nothing inserts behind it either: the only insert is in
+     * xhci_hub_attach, which is reached from the loop above and therefore
+     * from this core, under this same g_hub_busy, before the head is read.
+     */
+    spin_lock(&g_hubs_lock);
+    XhciHub* first = g_hubs;
+    spin_unlock(&g_hubs_lock);
+
+    for (XhciHub* h = first; h; h = h->next) {
         if (!h->attached) {
             continue;
         }

@@ -55,13 +55,24 @@ static bool fadt_has(const acpi_fadt_t *fadt, size_t end_offset)
 
 static bool adopt_gas(const acpi_gas_t *gas)
 {
-    /* ACPI 6.5 §5.2.9: X_PM_TMR_BLK's register bit width must be 32 —
-     * the REGISTER is 32 bits wide even where the counter inside it is 24.
-     * A GAS that says otherwise is not describing this register. */
+    /* A bit width other than 32 is firmware sloppiness, not a different
+     * register — and it is not grounds to drop the timer.
+     *
+     * ACPI 6.5 §5.2.9, Table 5.9 imposes a width where it means to: RESET_REG
+     * and the sleep registers carry "Register_Bit_Width must be 8 and
+     * Register_Bit_Offset must be 0", and X_GPE0_BLK/X_GPE1_BLK explicitly
+     * waive one ("the OSPM ignores Register_Bit_Width, Register_Bit_Offset
+     * and Access_Size"). X_PM_TMR_BLK's entry carries neither sentence; the
+     * "must be 32" this code used to cite is not in that section. Both
+     * reference implementations agree: ACPICA repairs the field in place —
+     * AcpiTbSetupFadtRegisters() rewrites a disagreeing BitWidth to
+     * FadtInfoTable's DefaultLength, ACPI_PM_TIMER_WIDTH = 32, because
+     * AcpiGbl_UseDefaultRegisterWidths defaults to TRUE — and linux's
+     * acpi_parse_fadt() never reads the field at all. */
     if (gas->bit_width != 32) {
-        kprintf("[PMT] X_PM_TIMER_BLOCK bit_width %u, expected 32 — refused\n",
+        kprintf("[PMT] X_PM_TIMER_BLOCK bit_width %u where the register is 32 "
+                "— taking the address anyway, as ACPICA and linux do\n",
                 (unsigned)gas->bit_width);
-        return false;
     }
 
     if (gas->address_space == GAS_SPACE_SYSTEM_IO) {
@@ -71,7 +82,7 @@ static bool adopt_gas(const acpi_gas_t *gas)
          * dead-counter case this driver exists to refuse. */
         if (gas->address > 0xFFFFu) {
             kprintf("[PMT] X_PM_TIMER_BLOCK SystemIO address 0x%lx exceeds "
-                    "16-bit I/O space — refused\n", (unsigned long)gas->address);
+                    "16-bit I/O space — unusable\n", (unsigned long)gas->address);
             return false;
         }
         g_pmt.mmio = false;
@@ -88,7 +99,7 @@ static bool adopt_gas(const acpi_gas_t *gas)
                                           VMM_FLAG_PRESENT);
         if (!map) {
             kprintf("[PMT] X_PM_TIMER_BLOCK SystemMemory 0x%lx failed to map "
-                    "— refused\n", (unsigned long)gas->address);
+                    "— unusable\n", (unsigned long)gas->address);
             return false;
         }
         g_pmt.mmio = true;
@@ -97,7 +108,7 @@ static bool adopt_gas(const acpi_gas_t *gas)
     }
 
     kprintf("[PMT] X_PM_TIMER_BLOCK address space %u is neither SystemMemory "
-            "nor SystemIO — refused\n", (unsigned)gas->address_space);
+            "nor SystemIO — unusable\n", (unsigned)gas->address_space);
     return false;
 }
 
@@ -125,22 +136,33 @@ bool pmtimer_adopt_from_fadt(const acpi_fadt_t *fadt)
         return false;
     }
 
-    /* Precedence: the extended GAS is the firmware's own statement of where
-     * the timer is, so when there is one it decides — including deciding
-     * that the timer is in SystemMemory, in which case the legacy port is
-     * NOT consulted afterwards. Falling back to the legacy port against a
-     * SystemMemory declaration is how the previous code read an address the
-     * firmware never pointed at. The legacy field is consulted only when
-     * there is no GAS at all. */
+    /* Precedence, in the spec's own words. ACPI 6.5 §5.2.9, X_PM_TMR_BLK:
+     * "If this field contains a nonzero value WHICH CAN BE USED BY THE OSPM,
+     * then the PM_TMR_BLK field must be ignored by the OSPM." The override
+     * is conditioned on the extended block being usable, so a GAS we could
+     * NOT use is not the end of the timer — it is the spec's own trigger to
+     * consult PM_TMR_BLK. That is what linux's acpi_parse_fadt() does:
+     * "'X' fields are optional extensions to the original V1.0 fields, so we
+     * must selectively expand V1.0 fields if the corresponding X field is
+     * zero." A GAS we CAN use decides everything, including deciding that
+     * the timer lives in SystemMemory — reading the legacy port against a
+     * usable SystemMemory declaration is how the previous code polled an
+     * address the firmware never pointed at. */
     bool have_gas = fadt_has(fadt, offsetof(acpi_fadt_t, x_pm_timer_block) +
                                    sizeof(acpi_gas_t)) &&
                     fadt->x_pm_timer_block.address != 0;
+    bool adopted = have_gas && adopt_gas(&fadt->x_pm_timer_block);
 
-    if (have_gas) {
-        if (!adopt_gas(&fadt->x_pm_timer_block))
+    if (!adopted) {
+        if (fadt->pm_timer_length != PM_TMR_LEN_SUPPORTED ||
+            fadt->pm_timer_block == 0) {
+            if (have_gas)
+                kprintf("[PMT] X_PM_TIMER_BLOCK is unusable and PM_TMR_BLK "
+                        "names no port — this machine has no PM Timer\n");
+            else
+                debug_printf("[PMT] FADT advertises no PM Timer\n");
             return false;
-    } else if (fadt->pm_timer_length == PM_TMR_LEN_SUPPORTED &&
-               fadt->pm_timer_block != 0) {
+        }
         if (fadt->pm_timer_block > 0xFFFFu) {
             kprintf("[PMT] legacy PM_TMR_BLK 0x%x exceeds 16-bit I/O space "
                     "— refused\n", (unsigned)fadt->pm_timer_block);
@@ -148,9 +170,9 @@ bool pmtimer_adopt_from_fadt(const acpi_fadt_t *fadt)
         }
         g_pmt.mmio = false;
         g_pmt.port = (uint16_t)fadt->pm_timer_block;
-    } else {
-        debug_printf("[PMT] FADT advertises no PM Timer\n");
-        return false;
+        if (have_gas)
+            kprintf("[PMT] X_PM_TIMER_BLOCK unusable — falling back to the "
+                    "legacy PM_TMR_BLK port 0x%x\n", (unsigned)g_pmt.port);
     }
 
     g_pmt.ext_claimed = (fadt->flags & FADT_FLAG_TMR_VAL_EXT) != 0;

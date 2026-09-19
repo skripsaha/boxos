@@ -17,9 +17,15 @@
  *     expose the UI for it but the variable is always readable.
  *
  *   * The dbx variable on Microsoft-signed Windows boards has grown
- *     past 4 KB on many systems; our GetVariable retry path handles
- *     up to 256 KB which exceeds the largest dbx Microsoft has ever
- *     shipped (the August 2025 dbx revision was 116 KB).
+ *     past 4 KB on many systems; our GetVariable retry path accepts up
+ *     to EFI_SB_MAX_DB_BYTES. That cap exists to refuse a firmware that
+ *     answers with a nonsense size (a chip returning 0xFFFFFFFF), not to
+ *     predict how large a shipping dbx is — this note used to name a byte
+ *     count for "the August 2025 dbx revision" that nothing in this tree
+ *     ever measured, and a revocation list nobody measured is not a fact.
+ *     A dbx that does not fit, or that cannot be read for any other
+ *     reason, is now fatal to efi_secureboot_init rather than silently
+ *     indistinguishable from an empty one (see stage_read_db).
  *
  *   * EFI_VARIABLE_AUTHENTICATION_2 wrappers are NOT synthesised here.
  *     A future SetVariable-on-auth-var path (e.g. for our own deploy
@@ -102,6 +108,25 @@ typedef struct {
 } EfiSbDbBlob;
 
 static EfiSbDbBlob   g_db_blobs[EFI_SB_DB_COUNT];   /* indexed by EfiSbDb */
+
+/* What the firmware actually answered for each database, kept because
+ * "absent" and "unreadable" are different answers and collapsing them into
+ * one NULL blob is a fail-OPEN on exactly one of the six.
+ *
+ * UEFI 2.10 §32.6.3.3 makes dbx a must-not-succeed condition: verification
+ * must not succeed if dbx contains a matching record. A consumer that could
+ * not READ dbx has not evaluated that condition, so it may not answer as
+ * though dbx were empty. §8.2.1 gives GetVariable the vocabulary for the
+ * difference — EFI_NOT_FOUND is "the variable was not found", while
+ * EFI_DEVICE_ERROR ("The variable could not be retrieved due to a hardware
+ * error") and EFI_SECURITY_VIOLATION are failures to read one that may well
+ * exist, and the size cap and the allocation failure in efi_sb_read_var are
+ * failures of the same kind.
+ *
+ * Only dbx is fatal. An unreadable db fails CLOSED on its own: with no
+ * anchors, cert_terminates_chain and find_parent find nothing and the
+ * verifier answers chain-untrusted. */
+static EfiStatus     g_db_read_status[EFI_SB_DB_COUNT];
 
 /* Inventory arrays are LAZY-ALLOCATED with exact sizes after the
  * two-pass scan in efi_secureboot_init. A system with no Secure Boot
@@ -377,8 +402,19 @@ static void stage_read_db(EfiSbDb kind, const char *name, const EfiGuid *vendor)
     uint32_t len = 0;
     uint32_t attrs = 0;
     EfiStatus s = efi_sb_read_var(name, vendor, &buf, &len, &attrs);
+    g_db_read_status[kind] = s;
     if (EFI_IS_ERROR(s)) {
-        debug_printf("[SB] %s: not present (status 0x%lx)\n", name, (unsigned long)s);
+        if (s == EFI_STATUS_NOT_FOUND) {
+            debug_printf("[SB] %s: not present\n", name);
+        } else {
+            /* kprintf, not debug_printf: debug_printf compiles to nothing in
+             * a production build, and this is the one line that separates
+             * "this platform enrolled nothing" from "this kernel never got
+             * to look". The old code said "not present" for both. */
+            kprintf("[SB] %s could not be read (status 0x%lx) — this is not "
+                    "the same as an empty %s\n",
+                    name, (unsigned long)s, name);
+        }
         return;
     }
     if (!buf || len == 0) {
@@ -388,6 +424,17 @@ static void stage_read_db(EfiSbDb kind, const char *name, const EfiGuid *vendor)
     g_db_blobs[kind].blob     = buf;
     g_db_blobs[kind].blob_len = len;
     debug_printf("[SB] %s: %u bytes attrs=0x%x staged\n", name, len, attrs);
+}
+
+/* Give the staged blobs back. The inventory points INTO them, so this may
+ * only run on a path that abandons the inventory entirely. */
+static void release_staged_blobs(void)
+{
+    for (uint32_t k = 0; k < EFI_SB_DB_COUNT; k++) {
+        if (g_db_blobs[k].blob) kfree(g_db_blobs[k].blob);
+        g_db_blobs[k].blob     = NULL;
+        g_db_blobs[k].blob_len = 0;
+    }
 }
 
 bool efi_secureboot_init(void)
@@ -425,6 +472,65 @@ bool efi_secureboot_init(void)
     stage_read_db(EFI_SB_DB_DBT, "dbt", &EFI_IMAGE_SECURITY_DATABASE_GUID);
     stage_read_db(EFI_SB_DB_DBR, "dbr", &EFI_IMAGE_SECURITY_DATABASE_GUID);
 
+    /* An unreadable dbx is where this driver stops.
+     *
+     * Every revocation check in efi_authenticode.c — find_dbx_hash_sha256,
+     * find_dbx_cert_sha256 — answers from this inventory, so a dbx that was
+     * never read makes each of them return "not revoked" for every input.
+     * A Microsoft-revoked bootloader would then walk the chain to a db
+     * anchor and come back `ok`, with nothing in the state blob or the boot
+     * log to say the revocation list had never been opened. UEFI 2.10
+     * §32.6.3.3 does not allow that answer: the dbx test is a condition
+     * verification MUST NOT succeed against, and a consumer that could not
+     * evaluate it has to refuse rather than guess.
+     *
+     * So g_ready stays false. efi_secureboot_available() then reports the
+     * service as unavailable, efi_authenticode_verify_pe returns
+     * EFI_AC_RESULT_SB_UNAVAILABLE at its first line, SYSTEM_OP_EFI_INFO
+     * hands back a zeroed state with available=false, and boxcxx's
+     * box::efi::verified() — which is already written to fail closed when
+     * Secure Boot is unavailable — gets the answer its own design expects.
+     * Linux takes the same shape of decision, clearing the capability rather
+     * than serving a half-read one.
+     *
+     * ‼ And it costs more than the verdict, which has to be said rather
+     * than discovered: efi_secureboot_get_state() memsets the whole blob
+     * when g_ready is false, so on a board that is ENFORCING Secure Boot
+     * but cannot hand over dbx, the operator loses the PK/KEK/db inventory
+     * and the SecureBoot / SetupMode / AuditMode / DeployedMode flags too —
+     * the state is erased, not qualified. That is a consequence of the
+     * shape, not of the finding: EfiSecureBootState has no field in which a
+     * per-database read status could be carried instead, and giving it one
+     * is a change to efi_secureboot.h. Until it has one, refusing is the
+     * only answer here that is not a guess.
+     *
+     * Two statuses are NOT this case, and both have to be let through by
+     * name rather than by being errors that happen not to matter:
+     *
+     *   - EFI_NOT_FOUND. §8.2.1: "the variable was not found." The
+     *     platform enrolled no revocation list. That is an answer, and an
+     *     empty dbx is what it means.
+     *
+     *   - EFI_UNSUPPORTED. §8.2.1: after ExitBootServices() GetVariable is
+     *     unsupported "if no variable storage is supported". A board with
+     *     no runtime variable store cannot hand over db either, so the
+     *     verifier already fails closed on its own — no anchor reaches
+     *     cert_terminates_chain and every image comes back
+     *     chain-untrusted. Refusing here would take Secure Boot state,
+     *     efi_secureboot_print and the Touch publication away from a
+     *     platform that was never fail-open to begin with. */
+    if (EFI_IS_ERROR(g_db_read_status[EFI_SB_DB_DBX]) &&
+        g_db_read_status[EFI_SB_DB_DBX] != EFI_STATUS_NOT_FOUND &&
+        g_db_read_status[EFI_SB_DB_DBX] != EFI_STATUS_UNSUPPORTED) {
+        kprintf("[SB] dbx could not be read (status 0x%lx) — refusing to "
+                "serve Secure Boot state: an unreadable revocation list is "
+                "not an empty one, and every image would verify against a "
+                "dbx this kernel never saw\n",
+                (unsigned long)g_db_read_status[EFI_SB_DB_DBX]);
+        release_staged_blobs();
+        return false;
+    }
+
     /* Stage 2: counting pass — walk each preserved blob to compute the
      * exact cert+hash totals. Per-DB counters drive both the lazy alloc
      * and the diagnostic state struct. */
@@ -453,6 +559,7 @@ bool efi_secureboot_init(void)
         g_certs = kmalloc(sizeof(EfiSbCertEntry) * total_certs);
         if (!g_certs) {
             debug_printf("[SB] cert inventory alloc failed (%u entries)\n", total_certs);
+            release_staged_blobs();
             return false;
         }
         g_certs_cap = total_certs;
@@ -462,6 +569,7 @@ bool efi_secureboot_init(void)
         if (!g_hashes) {
             debug_printf("[SB] hash inventory alloc failed (%u entries)\n", total_hashes);
             if (g_certs) { kfree(g_certs); g_certs = NULL; g_certs_cap = 0; }
+            release_staged_blobs();
             return false;
         }
         g_hashes_cap = total_hashes;

@@ -46,16 +46,14 @@
  * Per-process lifecycle
  * ---------------------
  *   - cet_process_create allocates the user shadow stack (16 KiB, four
- *     pages — CET_USER_SSP_PAGES). That is a QUARTER of the 64 KiB user
- *     data stack it mirrors (CONFIG_USER_STACK_SIZE_KB = 64, 16 pages),
- *     so a call chain whose frames average under 32 bytes exhausts the
- *     shadow stack while the data stack still has room; the push then
- *     faults in the guard page below the region rather than corrupting a
- *     neighbour. Accepted, and explained in full at CET_USER_SSP_PAGES
- *     in cet_lifecycle.c — the 4 is locked by the hammock slot map, so
- *     growing it is the owner's call, not this file's.
- *     The pages also get VMM_PTE_CET_SS_USER (bit 61), which marks
- *     nothing to the CPU — see the open-defect note at the top of
+ *     pages — CET_USER_SSP_PAGES) and maps it R/W=0 + Dirty=1 + U/S=1,
+ *     the encoding that makes a page a user shadow stack. The 64 KiB
+ *     user data stack it mirrors admits 4096 frames at the ABI's 16-byte
+ *     minimum; 16 KiB of shadow stack holds 2048 slots, so it runs out
+ *     at half that depth and the push faults in the guard page below the
+ *     region rather than corrupting a neighbour. The matching size is 8
+ *     pages; the 4 is locked by the hammock slot map, so growing it is
+ *     the owner's call. Counted in full at CET_USER_SSP_PAGES in
  *     cet_lifecycle.c.
  *     Stores the SSP value in process_t (user_ssp_va / user_ssp_phys).
  *   - cet_process_destroy frees the pages on process teardown.
@@ -127,17 +125,18 @@ void cet_lifecycle_init_ap(void);
  *      populates ISST[0]=PL0_SSP, ISST[1..5]=per-IST SSPs.
  *   3. Allocates 5 per-IST SSP pages (one each for IST 1..5 — #DF / NMI /
  *      #MC / #DB / #SS in BoxOS).
- *   4. Sets PTE bit 60 (VMM_PTE_CET_SS_SUPV) on every SSP page. ‼ That
- *      does NOT make them shadow-stack memory — in ordinary paging bit
- *      60 is protection-key bit 1, and the only encoding silicon
- *      honours is R/W=0 with Dirty=1. See the open-defect note at the
- *      top of cet_lifecycle.c.
- *   5. Writes the supervisor shadow-stack token at the top of each SSP
+ *   4. Writes the supervisor shadow-stack token at the top of each SSP
  *      page: the token's own linear address with bit 0 (BUSY) CLEAR.
  *      Bit 0 is the busy flag, not a supervisor/user selector — the
  *      processor sets it when it claims the stack (SETSSBSY, or an event
  *      delivery to CPL 0 that switches shadow stacks) and faults if it
- *      finds it already set.
+ *      finds it already set. This happens BEFORE step 5, because a
+ *      sealed page takes no store and WRSS is #UD until SH_STK_EN.
+ *   5. Seals every SSP page via vmm_shadow_stack_seal — R/W=0 with
+ *      Dirty=1, the encoding the processor honours. The ISST page is
+ *      NOT sealed; it is read with ordinary loads. A seal that is
+ *      refused hands every frame back and returns ERR_NO_MEMORY, so no
+ *      core ever activates against pages that are not shadow stacks.
  *   6. WRMSRs IA32_PL0_SSP + IA32_INTERRUPT_SSP_TABLE_ADDR.
  *   7. Records the bookkeeping in PerCoreData[core_idx].
  *
@@ -161,28 +160,35 @@ void cet_lifecycle_release_supervisor_ssp(uint8_t core_idx);
 /* ─── Per-process kernel shadow stack ───
  *
  * cet_process_create_kernel_ssp allocates a 4 KiB supervisor SSP page
- * for `proc`, sets PTE bit 60 (VMM_PTE_CET_SS_SUPV) on it — which marks
- * nothing to the CPU, see the note at the top of cet_lifecycle.c — writes
- * the supervisor SSP token (own address, BUSY clear) at the page top,
- * and PRE-PUSHES `entry_rip`
- * one slot below via WRSSQ. Sets proc->kernel_ssp_phys / kernel_ssp_va_top
- * and proc->context.pl0_ssp = top - 8.
+ * for `proc`, writes the supervisor SSP token (own address, BUSY clear)
+ * at the page top and PRE-PUSHES `entry_rip` one slot below it, then
+ * seals the page R/W=0 + Dirty=1 via vmm_shadow_stack_seal. Sets
+ * proc->kernel_ssp_phys / kernel_ssp_va_top and
+ * proc->context.pl0_ssp = top - 8.
+ *
+ * Both writes are plain stores and both precede the seal. They have to:
+ * a sealed page rejects normal stores, and WRSS — the instruction that
+ * exists for writing shadow stacks — is #UD at CPL < 3 while
+ * IA32_S_CET.SH_STK_EN is 0, which is exactly the window this function
+ * runs in. Intel SDM Vol 2D, WRSSD/WRSSQ; the quotation is in the
+ * cet_lifecycle.c header.
  *
  * Why pre-push? When task_restore_context first scheduling this process
  * does `push entry_rip; RET`, the regular-stack pop gives entry_rip;
- * the shadow-stack pop gives the value at PL0_SSP — which we made equal
- * to entry_rip via the WRSSQ. Mismatch → #CP. The pre-push is the
- * canonical "first frame" pattern (Linux uses the same shape for fork()
- * shadow-stack hand-off).
+ * the shadow-stack pop gives the value at PL0_SSP — which the pre-push
+ * made equal to entry_rip. Mismatch → #CP. It is the canonical "first
+ * frame" pattern (Linux uses the same shape for fork() shadow-stack
+ * hand-off).
  *
  * Returns OK on success; ERR_UNSUPPORTED when CET is dormant on this CPU
  * (proc gets zero SSP fields and runs without per-process supv SHSTK —
  * acceptable when SH_STK_EN is also off, fatal if it's on); ERR_NO_MEMORY
- * on alloc failure.
+ * on alloc failure or on a refused seal (the frame is handed back and
+ * the SSP fields are zeroed, so the caller sees the CET-dormant shape).
  *
  * Must be called AFTER task_init_context (so entry_rip == ctx.rip) and
  * AFTER cet_lifecycle_init_bsp / cet_lifecycle_init_supervisor_ssp on
- * the calling CPU (so CR4.CET=1 + S_CET.WR_SHSTK_EN=1 for WRSSQ to work). */
+ * the calling CPU. */
 error_t cet_process_create_kernel_ssp(struct process_t *proc, uintptr_t entry_rip);
 
 /* Free the per-process kernel SSP page. Idempotent on a process with no
@@ -223,14 +229,14 @@ void cet_supv_shstk_activate_and_jump(void (*target)(void));
 /* Per-process shadow-stack alloc. Called from process_create after the
  * user VA layout is fixed. Allocates CET_USER_SSP_PAGES (4) contiguous
  * pages from PMM — 16 KiB — and maps them into the process's
- * vmm_context with VMM_FLAG_PRESENT |
- * VMM_FLAG_WRITABLE | VMM_PTE_CET_SS_USER + VMM_FLAG_USER. ‼ Bit 61
- * does not mark a user shadow stack in ordinary paging — it is
- * protection-key bit 2 (Intel SDM Vol 3A Table 4-19); a user shadow
- * stack is R/W=0 + Dirty=1 + U/S=1 (Vol 1 §18.2.2). See the open-defect
- * note at the top of cet_lifecycle.c. Records the SSP in
- * proc->user_ssp_va / user_ssp_phys / user_ssp_size. The SSP value
- * starts at user_ssp_va + size - 8 so the first CALL has room to push.
+ * vmm_context with VMM_FLAGS_SHADOW_STACK_USER: PRESENT | DIRTY | USER
+ * and NOT WRITABLE, which is what makes a page a user shadow stack
+ * (Intel SDM Vol 3A §4.6, quoted in vmm.h). No seal step and no token:
+ * this is the pages' first mapping in that context, so they are born
+ * with the encoding, and a user shadow stack carries nothing until its
+ * first CALL. Records the SSP in proc->user_ssp_va / user_ssp_phys /
+ * user_ssp_size. The SSP value starts at user_ssp_va + size - 8 so the
+ * first CALL has room to push.
  *
  * Safe to call when CET is unsupported (sets ssp fields to 0 and
  * returns OK — process_create can proceed without CET). */

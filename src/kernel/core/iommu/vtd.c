@@ -42,10 +42,36 @@
 #define VTD_REG_RTADDR    0x020
 #define VTD_REG_CCMD      0x028
 #define VTD_REG_FSTS      0x034
-#define VTD_REG_FECTL     0x038
-#define VTD_REG_FEDATA    0x03C
-#define VTD_REG_FEADDR    0x040
 #define VTD_REG_PRECTL    0x028
+
+/* Fault Status Register bits (§11.4.7.1). All three are RW1C: a 1 written
+ * back into one is how it is cleared, and nothing else clears it.
+ *
+ *   IQE — hardware would not take a descriptor this driver wrote. §6.5.2.11:
+ *         "The Head pointer Register is not incremented, and references the
+ *         descriptor associated with the queue error. No new descriptors are
+ *         fetched from the Invalidation Queue until software clears the IQE
+ *         field in the Fault Status Register. Tail pointer Register updates
+ *         by software while the IQE field is Set does not cause descriptor
+ *         fetches by hardware." An IQE nobody clears is a queue that is dead
+ *         for the rest of the machine's life, including for whoever enables
+ *         it next.
+ *   ICE — a device answered a Device-TLB invalidation with an invalid
+ *         completion.
+ *   ITE — a Device-TLB invalidation timed out, and every invalidation wait
+ *         still outstanding is abandoned with it.
+ *
+ * Which descriptor, and why, is in IQERCD (§11.4.9.9): IQEI in bits 3:0, the
+ * timed-out source id in 47:32, the offending completion's source id in
+ * 63:48. EDK2 names the same three bits B_FSTS_REG_IQE/ICE/ITE at BIT4/5/6
+ * and the record register R_IQERCD_REG at 0xB0. */
+#define FSTS_IQE          (1u << 4)
+#define FSTS_ICE          (1u << 5)
+#define FSTS_ITE          (1u << 6)
+#define FSTS_QI_ERRORS    (FSTS_IQE | FSTS_ICE | FSTS_ITE)
+#define IQERCD_IQEI(r)    ((unsigned)((r) & 0xFULL))
+#define IQERCD_ITESID(r)  ((unsigned)(((r) >> 32) & 0xFFFFULL))
+#define IQERCD_ICESID(r)  ((unsigned)(((r) >> 48) & 0xFFFFULL))
 
 /* The IOTLB registers have no fixed offset: ECAP.IRO (bits 17:8, §11.4.3)
  * reports it — "If the register base address is X, and the value reported in
@@ -128,6 +154,13 @@ typedef struct {
     void*     qi_ring;             /* 4 KB QI descriptor ring */
     uint64_t  qi_ring_phys;
     uint32_t  qi_tail;             /* in bytes; ring is 256 × 16 */
+    /* The Invalidation Wait Descriptor's landing place: the unit writes the
+     * descriptor's Status Data DWORD here, by physical address, once every
+     * invalidation queued ahead of it has COMPLETED. It gets a page of its
+     * own because the ring is exactly the 4 KiB the hardware was given and
+     * has no spare qword in it. */
+    volatile uint32_t* qi_status;
+    uint64_t  qi_status_phys;
     void*     ir_table;            /* 4 KB Interrupt Remap Table */
     uint64_t  ir_table_phys;
     uint16_t  ir_entries;          /* number of remap entries */
@@ -141,6 +174,7 @@ typedef struct {
 #define VTD_REG_IQH      0x080
 #define VTD_REG_IQT      0x088
 #define VTD_REG_IQA      0x090
+#define VTD_REG_IQERCD   0x0B0
 #define VTD_REG_IRTA     0x0B8
 
 #define VTD_MAX_UNITS  ACPI_DMAR_MAX_DRHD
@@ -480,6 +514,7 @@ static void vtd_qi_disable(vtd_unit_t* u)
  * is at bits 5:4 in both descriptors below, DID at 31:16, SID at 47:32. */
 #define QI_TYPE_CC        0x1ULL      /* Context-cache Invalidate (§6.5.2.1) */
 #define QI_TYPE_IOTLB     0x2ULL      /* IOTLB Invalidate (§6.5.2.3) */
+#define QI_TYPE_WAIT      0x5ULL      /* Invalidation Wait (§6.5.2.9) */
 #define QI_GRAN_GLOBAL    (1ULL << 4)
 #define QI_GRAN_DOMAIN    (2ULL << 4)
 #define QI_GRAN_DEVICE    (3ULL << 4) /* context-cache; page-selective in IOTLB */
@@ -487,6 +522,26 @@ static void vtd_qi_disable(vtd_unit_t* u)
 #define QI_SID(sid)       (((uint64_t)(sid) & 0xFFFFULL) << 32)
 #define QI_IOTLB_DW       (1ULL << 6) /* drain in-flight writes */
 #define QI_IOTLB_DR       (1ULL << 7) /* drain in-flight reads */
+
+/* Invalidation Wait Descriptor fields (§6.5.2.9). SW at bit 5 asks hardware
+ * to "indicate the invalidation wait descriptor completion by performing a
+ * coherent DWORD write of the value in the Status Data field to the address
+ * specified in the Status Address field"; Status Data is qw0 bits 63:32 and
+ * the Status Address is qw1 bits 63:2. The other two flags are deliberately
+ * left clear: IF (bit 4) asks for an interrupt this kernel has not armed, and
+ * FN (bit 6) orders descriptors AFTER the wait, which is not what is being
+ * asked for here — everything this driver submits is ahead of its own wait.
+ * Linux and EDK2 build the same word: QI_IWD_STATUS_DATA(d) << 32,
+ * QI_IWD_STATUS_WRITE = 1 << 5, QI_IWD_TYPE = 0x5. */
+#define QI_IWD_SW         (1ULL << 5)
+#define QI_IWD_STATUS(d)  (((uint64_t)(d)) << 32)
+
+/* The two values the status DWORD ever holds. Any non-zero Status Data would
+ * do; these are the ones Linux uses (QI_FREE / QI_DONE), and the word is put
+ * back to PENDING before every submit so a store that lands after its own
+ * wait gave up cannot be read as the next wait's answer. */
+#define VTD_QI_WAIT_PENDING  0u
+#define VTD_QI_WAIT_DONE     2u
 
 /* One IOTLB Invalidate descriptor (§6.5.2.3).
  *
@@ -509,12 +564,102 @@ static uint64_t vtd_qi_iotlb_desc(const vtd_unit_t* u, uint64_t gran,
     return qw0;
 }
 
+/* Which of this unit's queue-error bits are standing right now. */
+static uint32_t vtd_qi_fault_bits(vtd_unit_t* u)
+{
+    return *(volatile uint32_t*)(u->reg + VTD_REG_FSTS) & FSTS_QI_ERRORS;
+}
+
+static void vtd_qi_clear_faults(vtd_unit_t* u, uint32_t bits)
+{
+    *(volatile uint32_t*)(u->reg + VTD_REG_FSTS) = bits;   /* RW1C */
+}
+
+/* Everything the unit is willing to say about a queue error, said out loud.
+ *
+ * This register is the difference between "the queue is slow" and "the
+ * hardware refused the descriptor this driver wrote, froze its head on it and
+ * will not fetch another until someone clears a bit". Without reading it the
+ * second is reported as the first, which is the wrong cause, the wrong fix and
+ * a second of the boot spent finding it out.
+ *
+ * Read before the queue is switched off, because IQH points at the offending
+ * descriptor only until then (§6.5.2.11), and disabling QIE resets it. */
+static void vtd_qi_say_faults(vtd_unit_t* u, uint32_t bits, const char* when)
+{
+    uint64_t rec  = *(volatile uint64_t*)(u->reg + VTD_REG_IQERCD);
+    uint32_t head = (uint32_t)(*(volatile uint64_t*)(u->reg + VTD_REG_IQH)
+                               & (uint64_t)(VTD_QI_BYTES - 1));
+    const uint64_t* bad = (const uint64_t*)((const uint8_t*)u->qi_ring + head);
+
+    if (bits & FSTS_IQE)
+        kprintf("[VT-d] the unit at 0x%lx REFUSED an invalidation descriptor "
+                "%s — IQEI=%u at queue offset 0x%x, qw0=0x%lx qw1=0x%lx\n",
+                (unsigned long)u->reg_phys, when, IQERCD_IQEI(rec), head,
+                (unsigned long)bad[0], (unsigned long)bad[1]);
+    if (bits & FSTS_ITE)
+        kprintf("[VT-d] the unit at 0x%lx timed out on a device-TLB "
+                "invalidation %s — source id 0x%04x; every invalidation wait "
+                "still outstanding is abandoned with it\n",
+                (unsigned long)u->reg_phys, when, IQERCD_ITESID(rec));
+    if (bits & FSTS_ICE)
+        kprintf("[VT-d] the unit at 0x%lx got an invalid device-TLB "
+                "invalidation completion %s — source id 0x%04x\n",
+                (unsigned long)u->reg_phys, when, IQERCD_ICESID(rec));
+}
+
 static void vtd_qi_init(vtd_unit_t* u) {
     /* ECAP.QI bit 1 — queued invalidation supported. */
     if (!(u->ecap & (1ULL << 1))) return;
     u->qi_ring = alloc_table_4k(&u->qi_ring_phys);
     if (!u->qi_ring) return;
+    /* No status word, no way to learn that an invalidation finished — and
+     * "submitted" is not "finished". A queue that cannot be waited on is not
+     * enabled at all; the CCMD/IOTLB registers do the same work synchronously
+     * and need nothing allocated. */
+    u->qi_status = (volatile uint32_t*)alloc_table_4k(&u->qi_status_phys);
+    if (!u->qi_status) {
+        pmm_free((void*)(uintptr_t)u->qi_ring_phys, 1);
+        u->qi_ring = NULL;
+        u->qi_ring_phys = 0;
+        kprintf("[VT-d] no page for the invalidation wait status word on the "
+                "unit at 0x%lx — leaving queued invalidation off\n",
+                (unsigned long)u->reg_phys);
+        return;
+    }
+    *u->qi_status = VTD_QI_WAIT_PENDING;
     u->qi_tail = 0;
+
+    /* A queue error outlives the queue that caused it: IQE/ICE/ITE are sticky
+     * RW1C, and §6.5.2.11 makes an IQE left standing by firmware block every
+     * descriptor fetch on this unit — ours included, and the IQT write that
+     * would have started them included. So whatever is standing goes now,
+     * before our ring is published. The descriptor it refers to was in
+     * firmware's ring, which is not ours to read or print. */
+    uint32_t stale = vtd_qi_fault_bits(u);
+    if (stale) {
+        uint64_t rec = *(volatile uint64_t*)(u->reg + VTD_REG_IQERCD);
+        kprintf("[VT-d] the unit at 0x%lx arrived with invalidation queue "
+                "error bits 0x%x standing — clearing them before publishing "
+                "this kernel's ring\n", (unsigned long)u->reg_phys, stale);
+        /* One IQERCD field answers for one bit and for no other (§11.4.9.9):
+         * IQEI says why a descriptor was refused, ITESID names the device
+         * that timed out, ICESID the one that answered badly. Quoting IQEI
+         * under an ITE or an ICE would be reading a field the hardware did
+         * not write for that event and calling the number a cause. */
+        if (stale & FSTS_IQE)
+            kprintf("[VT-d]   IQE — a descriptor was refused, IQEI=%u\n",
+                    IQERCD_IQEI(rec));
+        if (stale & FSTS_ITE)
+            kprintf("[VT-d]   ITE — a device-TLB invalidation timed out, "
+                    "source id 0x%04x\n", IQERCD_ITESID(rec));
+        if (stale & FSTS_ICE)
+            kprintf("[VT-d]   ICE — an invalid device-TLB invalidation "
+                    "completion arrived, source id 0x%04x\n",
+                    IQERCD_ICESID(rec));
+        vtd_qi_clear_faults(u, stale);
+    }
+
     /* IQA: low bits encode Queue Size = ring size in 4 KB units - 1.
      * We use exactly 4 KB → QS=0. */
     *(volatile uint64_t*)(u->reg + VTD_REG_IQA) = u->qi_ring_phys;
@@ -535,43 +680,116 @@ static void vtd_qi_init(vtd_unit_t* u) {
         kprintf("[VT-d] taking GCMD.QIE back off this unit — invalidation "
                 "falls back to the CCMD/IOTLB registers\n");
         vtd_qi_disable(u);
+        /* The ring and the wait status word were bought for a queue that
+         * never came up, and nothing later in this driver's life comes back
+         * for them. They go to the PMM here — but only once the unit itself
+         * says QIES is gone, because IQA still holds the ring's physical
+         * address and a queue somehow still running would be fetching
+         * descriptors out of a page the PMM has since re-issued. Two leaked
+         * pages are cheaper than that, and the leak is said out loud. */
+        if (!(*(volatile uint32_t*)(u->reg + VTD_REG_GSTS) & GSTS_QIES)) {
+            pmm_free((void*)(uintptr_t)u->qi_ring_phys, 1);
+            pmm_free((void*)(uintptr_t)u->qi_status_phys, 1);
+            u->qi_ring        = NULL;
+            u->qi_ring_phys   = 0;
+            u->qi_status      = NULL;
+            u->qi_status_phys = 0;
+        } else {
+            kprintf("[VT-d] the unit at 0x%lx still reports GSTS.QIES with "
+                    "GCMD.QIE off — its invalidation ring and wait status "
+                    "page stay allocated rather than be handed back under a "
+                    "queue that may still be fetching from them\n",
+                    (unsigned long)u->reg_phys);
+        }
     }
 }
 
-static void vtd_qi_submit(vtd_unit_t* u, uint64_t qw0, uint64_t qw1) {
-    if (!u->qi_active) return;
+/* Submit one invalidation descriptor and wait until the unit says it
+ * COMPLETED. Returns false when it never did.
+ *
+ * IQH catching IQT was never that proof. §6.5.2: the Invalidation Queue Head
+ * Register is incremented by hardware after FETCHING a descriptor, and the
+ * queue counts as quiesced only when head equals tail AND "the last descriptor
+ * completed is an Invalidation Wait Descriptor (which indicates no
+ * invalidation requests are pending in hardware)". The comment that stood
+ * here — "Drained when the hardware's head catches the tail we just
+ * published" — asserted the spec's insufficient condition as hardware fact,
+ * and on that basis this function returned while the context-cache
+ * invalidate, the IOTLB invalidate and any device-TLB round trip were still
+ * in flight inside the remap unit. A caller that then hands the page back to
+ * the PMM has a device still translating through the entry it just dropped.
+ *
+ * So a submit is a pair: the caller's descriptor, then an Invalidation Wait
+ * Descriptor (§6.5.2.9) with SW=1, whose Status Data the unit writes into
+ * this unit's status DWORD once everything ahead of it has completed. That
+ * word is the exit, and the only one. Linux ends every qi_submit_sync the
+ * same way, and reads FSTS on every turn of the poll for the same reason this
+ * does: a descriptor the hardware refuses stops the queue dead, and no amount
+ * of further waiting will change it. */
+static bool vtd_qi_submit(vtd_unit_t* u, uint64_t qw0, uint64_t qw1) {
+    if (!u->qi_active) return false;
+
     uint64_t* slot = (uint64_t*)((uint8_t*)u->qi_ring + u->qi_tail);
     slot[0] = qw0;
     slot[1] = qw1;
     u->qi_tail = (u->qi_tail + 16) & (VTD_QI_BYTES - 1);
+
+    *u->qi_status = VTD_QI_WAIT_PENDING;
+    uint64_t* wait = (uint64_t*)((uint8_t*)u->qi_ring + u->qi_tail);
+    wait[0] = QI_TYPE_WAIT | QI_IWD_SW | QI_IWD_STATUS(VTD_QI_WAIT_DONE);
+    wait[1] = u->qi_status_phys;
+    u->qi_tail = (u->qi_tail + 16) & (VTD_QI_BYTES - 1);
+
+    /* The two descriptors and the cleared status word are ordinary writeback
+     * stores and the tail is a store to uncached MMIO, which x86 will not
+     * move ahead of them. The unit cannot be handed a tail that points past a
+     * descriptor it has not been given. */
     *(volatile uint64_t*)(u->reg + VTD_REG_IQT) = u->qi_tail;
 
-    /* Drained when the hardware's head catches the tail we just published. */
-    volatile uint64_t* iqh = (volatile uint64_t*)(u->reg + VTD_REG_IQH);
     HourGlass glass;
-    if (!HourGlassTurn(&glass, VTD_HANDSHAKE_PATIENCE_US)) {
-        kprintf("[VT-d] no time source — waiting for the invalidation queue to "
-                "drain on the fact itself, with no bound\n");
-        while ((*iqh & ~0xFULL) != (uint64_t)u->qi_tail) cpu_pause();
-        return;
-    }
+    bool bounded = HourGlassTurn(&glass, VTD_HANDSHAKE_PATIENCE_US);
+    if (!bounded)
+        kprintf("[VT-d] no time source — waiting for the invalidation wait "
+                "descriptor on the fact itself, with no bound\n");
+
     for (;;) {
-        if ((*iqh & ~0xFULL) == (uint64_t)u->qi_tail) return;
-        if (HourGlassRunOut(&glass)) break;
+        if (*u->qi_status == VTD_QI_WAIT_DONE) return true;
+
+        uint32_t bad = vtd_qi_fault_bits(u);
+        if (bad) {
+            /* Said first, because IQH still points at the offending
+             * descriptor; the queue switched off next, so the hardware cannot
+             * re-fetch that descriptor and re-raise the bit behind the clear;
+             * and the bit cleared last, because §6.5.2.11 makes an IQE left
+             * standing block every fetch this unit will ever be asked for,
+             * long after this call is forgotten. */
+            vtd_qi_say_faults(u, bad, "while an invalidation was in flight");
+            vtd_qi_disable(u);
+            vtd_qi_clear_faults(u, bad);
+            kprintf("[VT-d] queued invalidation withdrawn from the unit at "
+                    "0x%lx — invalidation falls back to the CCMD/IOTLB "
+                    "registers\n", (unsigned long)u->reg_phys);
+            return false;
+        }
+        if (bounded && HourGlassRunOut(&glass)) break;
         cpu_pause();
     }
 
-    /* A queue that stops draining does not start again on its own, and every
+    /* A queue that stops finishing does not start again on its own, and every
      * later submit would spend the same second discovering that. So the
-     * mechanism is withdrawn instead of degraded: QIE comes back off and
-     * vtd_global_flush falls through to the CCMD/IOTLB registers, which are
-     * always present (§6.5.1) and need no queue at all. */
-    kprintf("[VT-d] the invalidation queue stopped draining after %lu us on "
-            "the %s (head=0x%lx tail=0x%x) — withdrawing queued invalidation\n",
+     * mechanism is withdrawn instead of degraded: QIE comes back off and the
+     * caller falls through to the CCMD/IOTLB registers, which are always
+     * present (§6.5.1) and need no queue at all. */
+    kprintf("[VT-d] the invalidation wait descriptor never landed after %lu us "
+            "on the %s (head=0x%lx tail=0x%x) and the unit reports no queue "
+            "error — withdrawing queued invalidation\n",
             (unsigned long)HourGlassElapsedUs(&glass),
             HourGlassRulerName(&glass),
-            (unsigned long)(*iqh & ~0xFULL), u->qi_tail);
+            (unsigned long)(*(volatile uint64_t*)(u->reg + VTD_REG_IQH)
+                            & ~0xFULL),
+            u->qi_tail);
     vtd_qi_disable(u);
+    return false;
 }
 
 /* ----- Interrupt Remap (§5.1) ----- */
@@ -607,17 +825,26 @@ static void vtd_global_flush(vtd_unit_t* u) {
     if (u->qi_active) {
         /* Context cache first, then the IOTLB at a granularity no smaller —
          * the order §6.5.2.1 requires of the pair. */
-        vtd_qi_submit(u, QI_TYPE_CC | QI_GRAN_GLOBAL, 0);
-        vtd_qi_submit(u, vtd_qi_iotlb_desc(u, QI_GRAN_GLOBAL, 0), 0);
-        if (u->qi_active) return;
+        bool done = vtd_qi_submit(u, QI_TYPE_CC | QI_GRAN_GLOBAL, 0);
+        /* Both results are folded into one flag rather than short-circuited,
+         * because that flag is what decides whether the register path below
+         * runs at all. There is no case in which the first fails and the
+         * second still reaches hardware: every false return from
+         * vtd_qi_submit has already taken the queue off this unit, so the
+         * second call returns at its first line without writing a
+         * descriptor. The `&& done` is bookkeeping, not a second attempt. */
+        done = vtd_qi_submit(u, vtd_qi_iotlb_desc(u, QI_GRAN_GLOBAL, 0), 0)
+               && done;
+        if (done) return;
         /* vtd_qi_submit withdraws queued invalidation from a unit whose queue
-         * stopped draining, and every submit after that returns having done
+         * stopped finishing, and every submit after that returns having done
          * nothing. The flush itself is not optional, so a unit that lost its
          * queue halfway finishes through the registers below — which is what
          * vtd_qi_submit's own comment promises and what this function used to
          * return without doing. */
-        kprintf("[VT-d] the invalidation queue went away mid-flush — finishing "
-                "the global invalidate through the CCMD/IOTLB registers\n");
+        kprintf("[VT-d] the invalidation queue did not finish the global "
+                "invalidate — finishing it through the CCMD/IOTLB "
+                "registers\n");
     }
     /* CCMD: write CIRG=01 (global), then wait for the hardware to clear ICC.
      * Nothing to undo on failure — the register invalidation either happened
@@ -857,19 +1084,29 @@ static int vtd_device_attach(iommu_domain_t* d, uint16_t seg,
              * The wildcard rewrote every devfn on the bus into the identity
              * domain; no device-selective descriptor covers that, so it is
              * invalidated globally. */
+            bool done;
             if (devfn == 0xFFu) {
-                vtd_qi_submit(&g_units[i], QI_TYPE_CC | QI_GRAN_GLOBAL, 0);
-                vtd_qi_submit(&g_units[i],
-                              vtd_qi_iotlb_desc(&g_units[i],
-                                                QI_GRAN_GLOBAL, 0), 0);
+                done = vtd_qi_submit(&g_units[i], QI_TYPE_CC | QI_GRAN_GLOBAL,
+                                     0);
+                done = vtd_qi_submit(&g_units[i],
+                                     vtd_qi_iotlb_desc(&g_units[i],
+                                                       QI_GRAN_GLOBAL, 0), 0)
+                       && done;
             } else {
                 uint64_t sid = ((uint64_t)bus << 8) | devfn;
-                vtd_qi_submit(&g_units[i], QI_TYPE_CC | QI_GRAN_DEVICE |
-                                           QI_DID(did) | QI_SID(sid), 0);
-                vtd_qi_submit(&g_units[i],
-                              vtd_qi_iotlb_desc(&g_units[i],
-                                                QI_GRAN_DOMAIN, did), 0);
+                done = vtd_qi_submit(&g_units[i], QI_TYPE_CC | QI_GRAN_DEVICE |
+                                                  QI_DID(did) | QI_SID(sid), 0);
+                done = vtd_qi_submit(&g_units[i],
+                                     vtd_qi_iotlb_desc(&g_units[i],
+                                                       QI_GRAN_DOMAIN, did), 0)
+                       && done;
             }
+            /* An invalidation that did not complete leaves the entries just
+             * rewritten still cached in the unit, and the caller is about to
+             * be told the device is attached. vtd_qi_submit has already taken
+             * the queue off this unit and said why, so the global flush below
+             * goes through the CCMD/IOTLB registers and finishes the job. */
+            if (!done) vtd_global_flush(&g_units[i]);
         }
     }
     return rc;

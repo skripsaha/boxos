@@ -266,7 +266,7 @@ uint32_t async_io_expire_stale(uint64_t timeout_ticks) {
 
     spin_lock(&g_async_queue.lock);
 
-    uint32_t expired = 0;
+    uint32_t expired_total = 0;
     uint64_t now = kernel_tick_get();
 
     for (int l = 0; l < ASYNC_IO_LANE_COUNT; l++) {
@@ -277,6 +277,15 @@ uint32_t async_io_expire_stale(uint64_t timeout_ticks) {
         async_io_request_t* kept = kmalloc(sizeof(async_io_request_t) * cur);
         if (!kept) continue;
 
+        /* Per LANE, not per call. A single counter shared across the loop made
+         * every lane after the first one to drop a request take the compaction
+         * branch with nothing of its own dropped — kept_count == cur — and a
+         * lane that happened to be exactly full then had capacity written into
+         * tail, an index one past its last slot. The next submit after any
+         * dequeue would store a request through it, past the end of the
+         * allocation, and the head = 0 written beside it would hand the
+         * already-dequeued slots[0] out a second time. */
+        uint32_t expired    = 0;
         uint32_t kept_count = 0;
 
         for (uint32_t i = 0; i < cur; i++) {
@@ -298,8 +307,12 @@ uint32_t async_io_expire_stale(uint64_t timeout_ticks) {
             for (uint32_t i = 0; i < kept_count; i++) {
                 lq->slots[i] = kept[i];
             }
-            lq->tail = kept_count;
+            /* Reduced modulo capacity like every other index written back into
+             * this ring (the enqueue and dequeue paths above), because the
+             * submit path indexes slots[tail] without masking first. */
+            lq->tail = kept_count & lq->mask;
             atomic_store_u32(&lq->count, kept_count);
+            expired_total += expired;
         }
 
         kfree(kept);
@@ -307,5 +320,5 @@ uint32_t async_io_expire_stale(uint64_t timeout_ticks) {
 
     spin_unlock(&g_async_queue.lock);
 
-    return expired;
+    return expired_total;
 }

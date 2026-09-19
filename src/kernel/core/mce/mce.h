@@ -2,8 +2,11 @@
  * MCE — Machine Check Architecture (x86_64)
  *
  * Production-grade #MC handling for BoxOS:
- *   - BSP + per-AP init enables CR4.MCE, per-bank IA32_MC<i>_CTL,
- *     stale IA32_MC<i>_STATUS clear, optional LMCE (Local MCE) gate.
+ *   - BSP + per-AP init enables CR4.MCE, per-bank IA32_MC<i>_CTL, clears
+ *     stale IA32_MC<i>_STATUS, and — on every logical processor whose three
+ *     gates allow it — ARMS LMCE (Local MCE) by writing
+ *     IA32_MCG_EXT_CTL.LMCE_EN, so that some errors reach one core instead
+ *     of all of them.
  *   - #MC handler (vector 18) walks every reporting bank, decodes
  *     VAL/OVER/UC/EN/MISCV/ADDRV/PCC/S/AR and the MCA error code per Intel
  *     SDM Vol 3B §15.3.2 + §15.9.2, classifies severity against
@@ -43,8 +46,19 @@
 #define MCE_MSR_MC_CTL2_BASE         0x280U   /* +i  — CMCI threshold/enable */
 
 #define MCE_MSR_IA32_FEATURE_CONTROL 0x3AU
-#define MCE_MSR_FEAT_LOCK_BIT        (1ULL << 0)
-#define MCE_MSR_FEAT_LMCE_BIT        (1ULL << 20)
+#define MCE_MSR_FEAT_LOCK_BIT        (1ULL << 0)   /* LOCK */
+#define MCE_MSR_FEAT_LMCE_BIT        (1ULL << 20)  /* LMCE_ENABLED */
+
+/* IA32_MCG_EXT_CTL (Vol 3B §15.3.1.4). Present only when MCG_CAP.LMCE_P is
+ * set, and touchable only once platform firmware has set
+ * IA32_FEATURE_CONTROL.LMCE_ENABLED: "If MCG_LMCE_P is not set in
+ * IA32_MCG_CAP, or platform software has not enabled LMCE by setting
+ * IA32_FEATURE_CONTROL.LMCE_ENABLED (bit 20), any attempt to write or read
+ * IA32_MCG_EXT_CTL will result in #GP." Both halves of that sentence bind —
+ * the READ is as forbidden as the write — so nothing here reads this MSR
+ * before both gates have answered. */
+#define MCE_MSR_MCG_EXT_CTL          0x4D0U
+#define MCE_MCG_EXT_CTL_LMCE_EN      (1ULL << 0)
 
 /* ─── IA32_MCG_CAP layout (Intel SDM Vol 3B §15.3.1.1) ──────────────── */
 
@@ -149,10 +163,18 @@ typedef enum {
                              * names no recovery this handler has; or a
                              * SRAR on the processor that CONSUMED the
                              * poison, which must not be restarted at the
-                             * instruction that consumed it. */
-    MCE_SEV_UCNA      = 4,  /* UC=1, PCC=0, S=0 on a SER part: the hardware
-                             * logged it and never signalled it to us —
-                             * Table 15-6, "Ok to keep the system running".
+                             * instruction that consumed it; or the pair S=0
+                             * with AR=1, which the handler pseudocode calls
+                             * illegal outright — "(* S=0, AR=1 is illegal
+                             * *)" — and answers with RESTARTABILITY = FALSE
+                             * and NOERROR = FALSE: an action is REQUIRED
+                             * for an error the processor says it never
+                             * signalled, so no Table 15-6 row names that
+                             * action and §15.6.2 leaves only shutdown. */
+    MCE_SEV_UCNA      = 4,  /* UC=1, PCC=0, S=0, AR=0 on a SER part: the
+                             * hardware logged it and never signalled it to
+                             * us — Table 15-6, "Ok to keep the system
+                             * running".
                              * An EN=0 entry on a SER part lands here too:
                              * every UCR row requires EN=1, so such an entry
                              * is not the error that raised this #MC and is
@@ -178,19 +200,27 @@ void          mce_ap_init(void);
  * takes no lock, allocates nothing and says nothing (see mce.c's file
  * header).
  *
- * Returns true — the caller IRET-restarts — ONLY when all three hold:
+ * Returns true — the caller IRET-restarts — ONLY when all of these hold:
  *   - MCG_STATUS.MCIP = 1 (this handler is standing in the event the
  *     processor is reporting);
  *   - MCG_STATUS.RIPV = 1. SDM Vol 3B §15.10.4.1: "If the RIPV flag is not
  *     set, program execution cannot be restarted reliably." This is a
  *     property of the event and of THIS logical processor, so it outranks
  *     any single bank's severity;
+ *   - MCG_STATUS.EIPV = 0, whenever the walk found nothing uncorrected. SDM
+ *     Vol 3B, "Machine-Check Error Handler Pseudocode Supporting UCR": "IF
+ *     NOERROR = TRUE THEN IF NOT (MCG_RIPV = 1 AND MCG_EIPV = 0) THEN
+ *     RESTARTABILITY = FALSE". A thread that found no uncorrected record and
+ *     carries EIPV=1 is the thread the error belongs to — whichever core won
+ *     the race for the shared bank cleared it out from under this one — so
+ *     RIPV alone must not restart it;
  *   - no bank record it decoded was fatal. Fatal is what §15.6.1 and
  *     Table 15-6 make fatal, not merely PCC: an uncorrected error on a
  *     part without MCG_SER_P; a SRAR with OVER=1 (its twin was lost, so
- *     nobody can say where it was); a UCR row whose MCACOD names no
- *     recovery — "for unknown MCACOD, must bugcheck" — or whose required
- *     action this kernel could not start;
+ *     nobody can say where it was); a record carrying S=0 with AR=1, the
+ *     combination the handler pseudocode calls illegal; a UCR row whose
+ *     MCACOD names no recovery — "for unknown MCACOD, must bugcheck" — or
+ *     whose required action this kernel could not start;
  *   - the #MC was not a SRAR taken on the processor that consumed the
  *     poison. §15.6.2 wants that recovery "completed successfully before
  *     any additional work is scheduled for this processor", and the
@@ -200,13 +230,17 @@ void          mce_ap_init(void);
  *     consumer by MCG_STATUS the way SDM Table 15-21 says: RIPV=1 with
  *     EIPV=0 is a thread that consumed nothing, and it keeps running.
  *
- * An empty walk — no bank with VAL=1 — is deliberately NOT a verdict of its
- * own. Without LMCE every Intel #MC is broadcast to every logical processor
- * and only one of them wins the shared bank, so an empty walk is the normal
- * answer on every core but one; calling it fatal would let a recoverable
- * memory error take the machine down. Linux's "Fatal machine check from
- * unknown source" is a monarch's verdict after a rendezvous this kernel does
- * not have. The empty walk is said out loud and judged by RIPV alone.
+ * A walk that found nothing uncorrected — no bank with VAL=1, or only
+ * corrected and UCNA entries — is deliberately NOT a verdict of its own. An
+ * event that is not LMCE is broadcast to every logical processor and only
+ * one of them wins the shared bank, so such a walk is the normal answer on
+ * every core but one; calling it fatal would let a recoverable memory error
+ * take the machine down. Linux's "Fatal machine check from unknown source"
+ * is a monarch's verdict after a rendezvous this kernel does not have — see
+ * the verdict block in mce.c for the whole argument: what answers the
+ * per-core question instead, why no wait on a guessed number is involved in
+ * replacing it, and what declining the rendezvous still costs.
+ * Such a walk is said out loud and judged by the pair RIPV=1 and EIPV=0.
  *
  * Returns false otherwise, and the caller then falls through to the
  * generic exception path: kill the process from ring 3, halt from ring 0.
@@ -225,13 +259,27 @@ bool          mce_is_initialized(void);
 /* Bank count reported by IA32_MCG_CAP. Useful for telemetry. */
 uint32_t      mce_bank_count(void);
 
-/* True when the firmware PERMITS Local MCE: MCG_CAP.LMCE_P is set and
- * IA32_FEATURE_CONTROL carries LOCK=1 with LMCE_EN=1. It is not a claim
- * that LMCE is armed. Arming it means writing IA32_MCG_EXT_CTL.LMCE_EN
- * (SDM §15.3.1.4/§15.3.1.5), which this kernel never does — so
- * MCG_STATUS.LMCE_S is never set and every #MC here reaches every logical
- * processor, which is why the handler treats an empty bank walk as the
- * normal answer on all but one of them. */
+/* True when LMCE is ARMED on every logical processor that has run mce_init
+ * or mce_ap_init — including one that left mce_ap_init early for lack of MCA
+ * altogether, which arms nothing and so takes this answer back like any
+ * other core that could not arm it. The fact of the write, never the
+ * permission to make it. Each core asks
+ * MCG_CAP.LMCE_P and the two gates of SDM §15.3.1.5 — "System software must
+ * ensure that both IA32_FEATURE_CONTROL.Lock (bit 0) and
+ * IA32_FEATURE_CONTROL.LMCE_ENABLED (bit 20) are set before attempting to
+ * set IA32_MCG_EXT_CTL.LMCE_EN (bit 0)" — then writes LMCE_EN and READS IT
+ * BACK; only a read-back carrying the bit counts as armed. One core that
+ * cannot arm it takes this answer back to false and says why, because a
+ * fleet armed unevenly is a fleet where the handler may still meet a
+ * broadcast.
+ *
+ * True is still not a promise that nothing is broadcast. §15.9.3.1: "If LMCE
+ * is supported and enabled, some errors (not limited to UCR errors) may be
+ * delivered to only a single logical processor" — SOME, chosen by hardware,
+ * and §15.3.1.5 adds that "software should make no assumptions about the
+ * type of error that hardware can choose to deliver as LMCE". What says it
+ * for one particular event is MCG_STATUS.LMCE_S, which the handler prints on
+ * every record; this says only that such events are possible at all. */
 bool          mce_lmce_enabled(void);
 
 #endif /* MCE_H */

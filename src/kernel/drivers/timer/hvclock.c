@@ -8,7 +8,10 @@
 /*
  * Hyper-V reference TSC page driver.
  *
- * Spec: Microsoft TLFS §10.7.2, "Partition Reference TSC Page". The
+ * Spec: Microsoft TLFS, Timers → Partition Reference Time Stamp Counter
+ * Page. (The section numbers this file used to give, §10.7.2 and
+ * §10.7.2.3, are not where that material lives; the published TLFS is
+ * navigated by that heading path.) The
  * page is allocated by us, registered with the hypervisor via
  * HV_X64_MSR_REFERENCE_TSC, then updated by the hypervisor whenever
  * the underlying TSC frequency or offset changes (live migration,
@@ -91,12 +94,25 @@ bool hvclock_init(void)
     s_page      = (hv_reference_tsc_page_t *)vmm_phys_to_virt(s_page_phys);
     vmm_register_shared_phys(s_page_phys);
 
-    /* MSR layout (TLFS §10.7.2.3):
-     *   bit 0       enable
-     *   bits 11:1   reserved (preserve)
-     *   bits 63:12  guest physical page number */
-    uint64_t enable = (s_page_phys & ~0xFFFULL) | 1ULL;
-    wrmsr_hv(MSR_HV_REFERENCE_TSC, enable);
+    /* MSR layout, TLFS, Timers → Partition Reference Time Stamp Counter
+     * Page → Reference Time Stamp Counter (TSC) Page Register → Register
+     * Layout:
+     *   bits 63:12  GPA Page Number            (Read / Write)
+     *   bits 11:1   RsvdP (value should be preserved)  (Read / Write)
+     *   bit 0       Enable                     (Read / Write)
+     * followed by "When modifying the register, guests should preserve the
+     * value of the reserved bits (1 through 11) for future compatibility."
+     *
+     * So the value is not composed from scratch. It is read first and only
+     * the two fields that are ours are replaced — the same read-modify-write
+     * linux performs in hv_init_tsc_clocksource(). Composing it discarded
+     * whatever the hypervisor had put in 11:1, silently and with no way for
+     * the guest to notice; nothing populates those bits on a shipping build
+     * today, which is exactly what RsvdP reserves the right to change. */
+    uint64_t reference_tsc = rdmsr_hv(MSR_HV_REFERENCE_TSC);
+    reference_tsc &= ~0xFFFFFFFFFFFFF001ULL;          /* keep RsvdP 11:1 */
+    reference_tsc |= (s_page_phys & ~0xFFFULL) | 1ULL;
+    wrmsr_hv(MSR_HV_REFERENCE_TSC, reference_tsc);
 
     /* Hyper-V populates the page synchronously on the WRMSR; spin
      * briefly looking for a non-zero TscSequence. */

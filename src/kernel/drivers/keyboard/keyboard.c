@@ -8,6 +8,7 @@
 #include "scheduler.h"   /* g_global_tick, g_timer_frequency */
 #include "touch.h"
 #include "logbook.h"
+#include "amp.h"         /* amp_get_core_index, MAX_CORES — per-core prefix state */
 #include "kb_event.h"    /* kb_event_t + KB_MOD_* — shared keyboard ABI */
 
 /* Runtime repeat timing (calculated from ms based on timer frequency) */
@@ -38,16 +39,49 @@ static keyboard_state_t kb_state = {0};
 static volatile uint16_t g_kbd_touch_full = TOUCH_TAG_INVALID;
 static volatile uint16_t g_kbd_touch_bare = TOUCH_TAG_INVALID;
 
-/* ─── Extended scancode (0xE0) state ────────────────────────────────────── */
+/* ─── Prefix state (0xE0 extended, 0xE1 Pause) — ONE SLOT PER CORE ────────
+ *
+ * ‼ A PREFIX BELONGS TO THE STREAM THAT SENT IT, AND THIS USED TO BE ONE BYTE.
+ *
+ * The 0xE0 prefix and the byte after it are one indivisible scan code
+ * (Chapweske, "The PS/2 Keyboard Interface", Scan Codes: extended make codes
+ * "can be identified by the fact that their first byte is E0h"). Two
+ * independent transports feed keyboard_handle_scancode, and the header block
+ * above says why they are not the same core: PS/2 IRQ1 is aimed at the BSP
+ * alone (irqchip's IOAPIC destination is g_amp.bsp_lapic_id, and the PIC
+ * fallback delivers to the BSP too), while a USB HID report is decoded by
+ * whichever core drains the xHCI event ring — every block read off a USB
+ * volume does that.
+ *
+ * With one shared byte the two streams consumed each other's prefixes. A PS/2
+ * extended key delivers its two bytes as two separate IRQ1s paced by the PS/2
+ * link (11-bit frames at 10-16.7 kHz, so ~0.66-1.1 ms apart), and any USB
+ * report drained on another core inside that window took the prefix: the PS/2
+ * letter published as an extended key and armed the repeat with
+ * is_extended = 1, its genuine break code then failed the
+ * `held_is_extended == is_extended` test in kb_release_repeat, and the phantom
+ * extended key repeated at the typematic rate until some other key overwrote
+ * the record. Both keystrokes destroyed, and one of them stuck.
+ *
+ * A lock does not fix that — it makes each access atomic, which a single byte
+ * on x86 already is, and still lets a USB byte pair with a PS/2 prefix. A slot
+ * per core does: the PS/2 stream lives on the BSP's slot and nothing else
+ * writes it, and a USB report's two calls are adjacent on the draining core
+ * with IF=0 (the xHCI event lock holds `cli` across the drain), so that pair
+ * cannot be cut into at all. Linux keeps the same state per device rather than
+ * per machine — `u8 emul` inside `struct atkbd`.
+ *
+ * ‼ WHAT IS LEFT, NAMED: a USB report drained ON THE BSP, between a PS/2
+ * extended key's two IRQ1s, still shares the BSP's slot with the PS/2 stream
+ * and takes its prefix. Closing that needs a prefix instance per TRANSPORT,
+ * i.e. a second entry point for the USB path — keyboard.h and xhci_hid.c, not
+ * this file. */
+static volatile uint8_t kb_e0_pending[MAX_CORES];
 
-static volatile uint8_t kb_e0_pending = 0;
-
-/* ─── Pause burst (0xE1) state ──────────────────────────────────────────── */
-
-/* How many bytes of an 0xE1 group are still to be swallowed. Pause is the
- * only key that carries this prefix, and its bytes must never reach the
+/* How many bytes of an 0xE1 group are still to be swallowed, per core. Pause
+ * is the only key that carries this prefix, and its bytes must never reach the
  * modifier, lock or repeat logic — see keyboard_handle_scancode. */
-static volatile uint8_t kb_e1_swallow = 0;
+static volatile uint8_t kb_e1_swallow[MAX_CORES];
 
 /* ─── LED state ─────────────────────────────────────────────────────────── */
 
@@ -218,19 +252,60 @@ static void kb_forget_repeat(void)
 #define KBC_CMD_WRITE_CTR    0x60   /* write the command byte                */
 #define KBC_CMD_RESET_KBD    0xFF   /* to the device: reset and self-test    */
 #define KBC_CMD_SET_LEDS     0xED   /* to the device: the three lock lamps   */
+#define KBC_CMD_SET_SCANSET  0xF0   /* to the device: which scan code set    */
 
 #define KBC_CTR_KBDINT       0x01   /* first port raises IRQ1                */
 #define KBC_CTR_AUXINT       0x02   /* second port raises IRQ12              */
 #define KBC_CTR_KBDDIS       0x10   /* first port disabled                   */
 #define KBC_CTR_AUXDIS       0x20   /* second port disabled                  */
+#define KBC_CTR_XLATE        0x40   /* set 2 off the wire, set 1 at 0x60     */
 
 #define KBC_STR_OBF          0x01   /* 0x60 holds a byte for the system      */
 #define KBC_STR_IBF          0x02   /* 0x60/0x64 still holds one of ours     */
 
-/* The controller answered at init and is configured as this driver wants it.
- * Nothing may be sent to the 8042 until it is true: a lock key pressed on a
- * USB keyboard must not spend 50 ms in IRQ context waiting on a controller
- * that is not there. */
+/* The keyboard's own vocabulary back to the host. */
+#define KB_RSP_ACK           0xFA   /* the byte was taken                    */
+#define KB_RSP_RESEND        0xFE   /* could not read it — send it again     */
+#define KB_RSP_ECHO          0xEE   /* answer to 0xEE                        */
+#define KB_RSP_BAT_OK        0xAA   /* self-test passed                      */
+#define KB_RSP_BAT_FAIL      0xFC   /* self-test failed                      */
+#define KB_RSP_OVERRUN       0x00   /* scan codes were dropped               */
+#define KB_RSP_ERROR         0xFF   /* scan codes were dropped               */
+
+#define KB_SCANSET_1         0x01   /* argument to 0xF0: scan code set 1     */
+#define KB_SCANSET_2         0x02   /* argument to 0xF0: scan code set 2     */
+
+/* ─── How long an answer is waited for ────────────────────────────────────
+ *
+ * Both numbers come from the reference implementation rather than from this
+ * file's judgement (Linux drivers/input/serio/libps2.c, __ps2_command): every
+ * byte goes out as `ps2_do_sendbyte(ps2dev, ..., 200, 2)`, and the wait for
+ * the reset's result is `msecs_to_jiffies(command == PS2_CMD_RESET_BAT ? 4000
+ * : 500)`. Linux raises the ACK wait to 1000 ms for the reset byte alone, and
+ * says why in the comment above it: "Some devices (Synaptics) perform the
+ * reset before ACKing the reset command" — an AUX-port touchpad, which cannot
+ * be the device here because the second port is disabled in the command byte
+ * and nothing but the first port is ever addressed. The reset's
+ * acknowledgement therefore keeps the ordinary 200 ms, and that 200 ms is the
+ * entire cost of a controller whose first port has nothing plugged into it.
+ *
+ * Neither number is a guess at how long the work takes. Every wait below ends
+ * on the BYTE; the number is only the point at which the device is declared
+ * absent, and that verdict is said out loud through kprintf rather than
+ * folded into "initialization complete". */
+#define KB_ACK_MS            200
+#define KB_BAT_MS           4000
+
+/* The controller answered at init, is configured as this driver wants it, and
+ * this driver has finished talking to the keyboard. Nothing may be sent to the
+ * 8042 until it is true, for two reasons. A lock key pressed on a USB keyboard
+ * must not spend 50 ms in IRQ context waiting on a controller that is not
+ * there — and it must not drop its 0xED and a bitmap into 0x60 in the middle
+ * of the reset/self-test/scan-set exchange at the end of kb_8042_init, whose
+ * polls would then read the acknowledgements of those bytes as the answers to
+ * their own. xhci_init runs before keyboard_init (main.c), so that path is
+ * live throughout; the flag is therefore raised at the very END of
+ * kb_8042_init, not as soon as the controller is configured. */
 static bool g_kb_8042_alive = false;
 
 /* The input buffer is free, so the next byte written is the controller's to
@@ -270,6 +345,111 @@ static void kb_flush_output(void)
     while ((inb(KEYBOARD_STATUS_PORT) & KBC_STR_OBF) && timeout--) {
         inb(KEYBOARD_DATA_PORT);
     }
+}
+
+/* ─── Talking to the keyboard, not to the controller ──────────────────────
+ *
+ * Chapweske, "The PS/2 Keyboard Interface", Command Set: "Every byte sent to
+ * the keyboard gets a response of 0xFA ('acknowledge') from the keyboard. The
+ * only exceptions to this are the keyboard's response to the 'Resend' and
+ * 'Echo' commands. The host should wait for an 'acknowledge' before sending
+ * the next byte to the keyboard." So a device command is a conversation, and
+ * the 8042's input-buffer bit is no part of it: that bit says the CONTROLLER
+ * took the byte, and says nothing about whether the keyboard did.
+ *
+ * ‼ THESE TWO ARE USABLE ONLY WHILE IRQ1 IS STILL MASKED. Once the line is
+ * unmasked the same answers arrive as interrupts, and a poll here would take
+ * bytes out of the stream the shell is reading. Every caller is inside
+ * kb_8042_init, ahead of its irqchip_enable_irq(1). */
+
+/* The next thing the keyboard says. False = it said nothing before the
+ * deadline, and then there is no byte — an invented one is worse than none.
+ * Scan codes seen on the way are dropped on purpose: no decoder is running
+ * yet, and a keystroke decoded out of order is worse than a keystroke a user
+ * lost by leaning on a key while the port came up. */
+static bool kb_await_response(uint8_t *out, uint32_t ms)
+{
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(ms);
+    do {
+        if (inb(KEYBOARD_STATUS_PORT) & KBC_STR_OBF) {
+            uint8_t b = inb(KEYBOARD_DATA_PORT);
+            if (b == KB_RSP_ACK || b == KB_RSP_RESEND ||
+                b == KB_RSP_BAT_OK || b == KB_RSP_BAT_FAIL ||
+                b == KB_RSP_ECHO) {
+                *out = b;
+                return true;
+            }
+            /* Not an answer, and the deadline is still the bound: a port
+             * whose output register floats 0xFF would otherwise hand back a
+             * byte every time round and this would never end. */
+            continue;
+        }
+        __asm__ volatile("pause");
+    } while (rdtsc() < deadline);
+    return false;
+}
+
+/* One byte to the keyboard, acknowledged. A 0xFE means the keyboard could not
+ * read it and wants it again (Chapweske, Resend), so it goes out once more —
+ * two attempts in all, which is what Linux's ps2_do_sendbyte allows. False =
+ * the keyboard never took it, and the caller says so rather than proceeding
+ * as though it had.
+ *
+ * ‼ A FAILURE CLEARS THE OUTPUT REGISTER, AND THAT IS NOT TIDINESS.
+ *
+ * The deadline expiring does not mean the answer will never come; it means it
+ * had not come yet. A keyboard that finishes its self-test one millisecond
+ * after the wait gave up leaves its 0xAA sitting at 0x60, where the NEXT
+ * command's wait reads it as ITS answer — and from there every verdict in the
+ * sequence is one step out of phase: a healthy keyboard reported as refusing
+ * scan code set 2, and a lamp command reported as taken when its bitmap never
+ * went out. One late byte would falsify everything after it, so the register
+ * is emptied at the point the conversation is known to have broken. */
+static bool kb_device_byte(uint8_t byte, uint32_t ms)
+{
+    for (unsigned attempt = 0; attempt < 2; attempt++) {
+        if (!kb_send(KEYBOARD_DATA_PORT, byte)) break;
+        uint8_t answer;
+        if (!kb_await_response(&answer, ms)) break;
+        if (answer == KB_RSP_ACK)    return true;
+        if (answer != KB_RSP_RESEND) break;
+    }
+    kb_flush_output();
+    return false;
+}
+
+/* A two-byte device command: 0xED + its lamp bitmap, 0xF0 + its set number.
+ *
+ * ‼ THE ARGUMENT IS NOT OPTIONAL, EVEN WHEN THE COMMAND BYTE WENT UNANSWERED.
+ *
+ * Chapweske's Command Set describes these as commands that take "one more
+ * byte": once the command byte has reached the keyboard, the keyboard waits
+ * and takes the NEXT byte on the line as that argument, whatever it is.
+ * Withholding the argument because the command byte drew no acknowledgement
+ * therefore leaves the device mid-command with IRQ1 about to go live, and the
+ * first key the user presses is eaten as the missing parameter. So the
+ * argument always goes out. On a device that was NOT waiting for one, the
+ * argument is read as a command of its own, both values (0x01/0x02 for a set,
+ * a lamp bitmap of 0x00-0x07) are undefined commands, and an undefined
+ * command draws a 0xFE that the flush inside kb_device_byte discards.
+ *
+ * False = the keyboard did not acknowledge both halves, so what it is now set
+ * to is unknown and the caller must say so. */
+static bool kb_device_command(uint8_t cmd, uint8_t arg, uint32_t ms)
+{
+    bool cmd_ok = kb_device_byte(cmd, ms);
+    bool arg_ok = kb_device_byte(arg, ms);
+    return cmd_ok && arg_ok;
+}
+
+/* The controller's command byte, as the controller itself reports it. False =
+ * it did not answer, and then there is no value — see kb_await_response. */
+static bool kb_read_ccb(uint8_t *out)
+{
+    if (!kb_send(KEYBOARD_STATUS_PORT, KBC_CMD_READ_CTR)) return false;
+    if (!kb_wait_output_buffer()) return false;
+    *out = inb(KEYBOARD_DATA_PORT);
+    return true;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -312,15 +492,14 @@ static bool kb_8042_init(void)
 
     kb_flush_output();
 
-    if (!kb_send(KEYBOARD_STATUS_PORT, KBC_CMD_READ_CTR) ||
-        !kb_wait_output_buffer()) {
+    uint8_t ccb;
+    if (!kb_read_ccb(&ccb)) {
         kprintf("[KEYBOARD] 8042 did not answer the command-byte read; "
                 "re-enabling the PS/2 port and giving it up\n");
         (void)kb_send(KEYBOARD_STATUS_PORT, KBC_CMD_KBD_ENABLE);
         return false;
     }
 
-    uint8_t ccb = inb(KEYBOARD_DATA_PORT);
     ccb |=  KBC_CTR_KBDINT;   /* first port: IRQ1 on   */
     ccb &= ~KBC_CTR_KBDDIS;   /* first port: clock on  */
 
@@ -340,6 +519,40 @@ static bool kb_8042_init(void)
      * `i8042_ctr |= I8042_CTR_AUXDIS; i8042_ctr &= ~I8042_CTR_AUXINT;`. */
     ccb &= ~KBC_CTR_AUXINT;
     ccb |=  KBC_CTR_AUXDIS;
+
+    /* ‼ THE DECODER IS SET 1, AND NOTHING USED TO SAY SO.
+     *
+     * keymaps.h is a set-1 table (0x1E = 'a', 0x1C = Enter, 0x2A = Left
+     * Shift) and keyboard_handle_scancode reads bit 7 as the release bit,
+     * which is the set-1 convention. The keyboard itself does not speak set 1:
+     * it speaks set 2, and after the reset this function sends it is set 2 by
+     * definition (Chapweske, Reset — the defaults reloaded include "Scan code
+     * set 2"). Set-1 bytes appear at 0x60 only because the controller
+     * translates them, and that is command-byte bit 6 (Linux
+     * include/linux/i8042.h: I8042_CTR_XLATE 0x40; EDK2's Ps2KbdCtrller writes
+     * 0x67 under the comment "6: PC/XT translation mode"; coreboot writes
+     * 0x65).
+     *
+     * This driver used to leave that bit at whatever firmware wrote, without
+     * reading it, let alone asserting it — so the whole keymap rested on an
+     * inherited setting. A machine handing over with translation clear is the
+     * case Linux carries i8042_direct for, and there it would have fed raw set
+     * 2 into a set-1 table: 0x1C decoding as Enter instead of 'a', and every
+     * break code arriving as the prefix 0xF0, which falls through to the
+     * release branch as a release of key 0x70 and leaves the next byte to be
+     * read as a make.
+     *
+     * Asserting the bit is what every firmware named above already does — but
+     * writing a bit is not the same as knowing it took, and the finding asks
+     * the driver to KNOW the set rather than inherit it. A clone controller
+     * that has no translator drops bit 6 on the floor, and a driver that
+     * assumed it had stuck would then ask the device for set 2 and feed raw
+     * set 2 to a set-1 table with its own hands. So the command byte is read
+     * back below and the set asked of the keyboard follows what the
+     * controller actually reports: set 2 when it translates, set 1 when it
+     * does not — and set 1 straight off the wire is what this decoder reads
+     * anyway, make codes with bit 7 as the release bit. */
+    ccb |=  KBC_CTR_XLATE;
 
     if (!kb_send(KEYBOARD_STATUS_PORT, KBC_CMD_WRITE_CTR)) {
         kprintf("[KEYBOARD] 8042 would not take the command-byte write; "
@@ -366,23 +579,114 @@ static bool kb_8042_init(void)
     }
 
     kb_flush_output();
-    g_kb_8042_alive = true;
 
-    irqchip_enable_irq(1);
-    debug_printf("[KEYBOARD] IRQ1 enabled\n");
+    /* What the controller says it took, not what was written into it. The
+     * flush above is why this reads the command byte and not a scan code: the
+     * port is enabled from the moment the value landed, so a key struck in
+     * that window would otherwise be sitting at 0x60 ahead of the answer. */
+    uint8_t want_set = KB_SCANSET_2;
+    uint8_t ccb_now;
+    if (!kb_read_ccb(&ccb_now)) {
+        kprintf("[KEYBOARD] the 8042 would not read its command byte back; "
+                "translation is taken to be on because that is what was "
+                "written, and the keyboard is asked for scan code set 2\n");
+    } else if (!(ccb_now & KBC_CTR_XLATE)) {
+        want_set = KB_SCANSET_1;
+        kprintf("[KEYBOARD] the 8042 did not take translation (command byte "
+                "reads back 0x%02X); the keyboard is asked for scan code set "
+                "1 instead, which this decoder reads untranslated\n",
+                (unsigned)ccb_now);
+    }
 
-    (void)kb_send(KEYBOARD_DATA_PORT, KBC_CMD_RESET_KBD);
+    /* ── The keyboard itself, while IRQ1 is still masked ──
+     *
+     * ‼ THE RESET IS NOT OVER WHEN THE BYTE HAS BEEN WRITTEN, AND THIS USED
+     * TO SLEEP 50 ms AND CALL IT DONE. 0xFF is answered with 0xFA, then the
+     * keyboard runs its Basic Assurance Test and sends 0xAA (passed) or 0xFC
+     * (failed). Chapweske, Reset: that completion code "must be sent 500~750
+     * milliseconds after power-on", and "most keyboards ignore their CLOCK
+     * and DATA lines until after the BAT completion code has been sent" —
+     * so 50 ms was short of it by an order of magnitude, and every byte the
+     * old code sent next went into a keyboard that was not listening.
+     *
+     * ‼ AND A DEVICE THAT DID NOT ANSWER IS NOT ASKED AGAIN. Each byte below
+     * costs its own KB_ACK_MS when nothing answers, so a run that carried on
+     * regardless would charge a controller with an empty first port three
+     * unanswered exchanges instead of one — the very boot time this finding
+     * is about. The gates are therefore facts, not tidiness: nothing is sent
+     * after a reset that drew no acknowledgement, and nothing is sent after a
+     * self-test whose completion code never arrived, because until that code
+     * has gone out the keyboard is not listening and both commands would be
+     * ignored anyway. The whole cost of a first port with nothing on it is
+     * the one KB_ACK_MS of the unanswered reset. */
+    if (!kb_device_byte(KBC_CMD_RESET_KBD, KB_ACK_MS)) {
+        kprintf("[KEYBOARD] nothing on the PS/2 port acknowledged a reset "
+                "inside %u ms; no further byte is sent to a device that is "
+                "not answering. The port stays open and whatever arrives on "
+                "it later is decoded as set 1\n", (unsigned)KB_ACK_MS);
+    } else {
+        uint8_t bat;
+        bool bat_done = kb_await_response(&bat, KB_BAT_MS);
+        if (!bat_done) {
+            /* The self-test result may yet be one instruction away, and read
+             * as the answer to the next command it would put every verdict
+             * after it out of phase. */
+            kb_flush_output();
+            kprintf("[KEYBOARD] the keyboard acknowledged its reset and then "
+                    "sent no self-test result inside %u ms (the spec puts it "
+                    "500-750 ms after power-on); nothing further is sent, "
+                    "because a keyboard ignores its CLOCK and DATA lines "
+                    "until that code has gone out. The port stays open and "
+                    "the device's scan code set is whatever the reset left "
+                    "it in\n", (unsigned)KB_BAT_MS);
+        } else if (bat != KB_RSP_BAT_OK) {
+            kprintf("[KEYBOARD] keyboard self-test answered 0x%02X, not 0xAA "
+                    "(passed)\n", (unsigned)bat);
+        }
 
-    /* Wait ~50 ms for ACK (0xFA) and self-test result (0xAA) */
-    {
-        uint64_t deadline = rdtsc() + cpu_ms_to_tsc(50);
-        while (rdtsc() < deadline) {
-            __asm__ volatile("pause");
+        if (bat_done) {
+            /* Which set the decoder reads is now stated at both ends: the
+             * command byte was read back above, and this says the matching
+             * set to the device. EDK2's InitKeyboard does exactly this pair
+             * after its own reset ("Set Keyboard to use Scan Code Set 2":
+             * 0xF0 then 0x02), and coreboot the same. A keyboard that will
+             * not take it is named, because from then on the bytes at 0x60
+             * are of an unknown set and the keymap is a guess. */
+            if (!kb_device_command(KBC_CMD_SET_SCANSET, want_set, KB_ACK_MS)) {
+                kprintf("[KEYBOARD] the keyboard would not take 'scan code "
+                        "set %u'; its output is decoded as set 1 regardless, "
+                        "and if the device is speaking another set the keys "
+                        "will be wrong\n", (unsigned)want_set);
+            }
+
+            /* The lamps and kb_led_state have to agree from the first
+             * instant. A reset that completed leaves all three dark by itself
+             * (Chapweske: the keyboard "enables its three LED indicators" on
+             * entering BAT "and turns them off when BAT has completed"), but
+             * that is the device's word for it and kb_led_state = 0 would
+             * otherwise be an assumption. So the command goes out for real —
+             * with the 0xFA between its two halves that the spec asks for,
+             * which is the one thing keyboard_set_leds cannot do once IRQ1
+             * is live. */
+            if (!kb_device_command(KBC_CMD_SET_LEDS, 0x00, KB_ACK_MS)) {
+                kprintf("[KEYBOARD] the keyboard would not take the lamp "
+                        "command; Caps/Num/Scroll lamps may disagree with the "
+                        "driver until each is pressed once\n");
+            }
         }
     }
 
-    /* Ensure all LEDs start off */
-    keyboard_set_leds(0, 0, 0);
+    /* ‼ LAST, AND THE ORDER IS THE POINT. Everything above polls 0x60 for the
+     * keyboard's own answers, and keyboard_set_leds — reachable from a USB
+     * lock key the whole time, since xhci_init runs before keyboard_init —
+     * would drop an 0xED and a bitmap into the middle of that conversation
+     * and have its acknowledgements read as the answers to somebody else's
+     * bytes. The flag is what keeps it out, so it is raised only once there
+     * is nothing left to interrupt, and IRQ1 is unmasked in the same breath:
+     * from here on the answers arrive as interrupts and nothing polls. */
+    g_kb_8042_alive = true;
+    irqchip_enable_irq(1);
+    debug_printf("[KEYBOARD] IRQ1 enabled\n");
 
     debug_printf("[KEYBOARD] 8042 initialization complete\n");
     return true;
@@ -393,8 +697,8 @@ void keyboard_init(void)
     memset(&kb_state, 0, sizeof(kb_state));
     spinlock_init(&kb_repeat_lock);
     memset(&kb_repeat, 0, sizeof(kb_repeat));
-    kb_e0_pending = 0;
-    kb_e1_swallow = 0;
+    memset((void *)kb_e0_pending, 0, sizeof(kb_e0_pending));
+    memset((void *)kb_e1_swallow, 0, sizeof(kb_e1_swallow));
     kb_led_state  = 0;
 
     /* ‼ THE DRIVER'S OWN STATE COMES FIRST, AND NOT FOR TIDINESS.
@@ -449,9 +753,15 @@ void keyboard_init(void)
 
 void keyboard_handle_scancode(uint8_t scancode)
 {
+    /* Which stream's prefix state this byte belongs to — see the comment on
+     * kb_e0_pending. amp_get_core_index() is one %gs read once per-core data
+     * is live and a table scan before that, and it is valid in every kernel
+     * context including this one. */
+    uint8_t core = amp_get_core_index();
+
     /* ── 0xE0 prefix: mark and wait for next byte ── */
     if (scancode == 0xE0) {
-        kb_e0_pending = 1;
+        kb_e0_pending[core] = 1;
         return;
     }
 
@@ -469,17 +779,17 @@ void keyboard_handle_scancode(uint8_t scancode)
      * Ps2KbdCtrller guards its entire modifier/lock switch with `if
      * (!Extend1)` for this one key. */
     if (scancode == 0xE1) {
-        kb_e1_swallow = 2;
+        kb_e1_swallow[core] = 2;
         return;
     }
 
     /* ── Filter controller response codes ── */
     switch (scancode) {
-        case 0xFA: return;   /* ACK           */
-        case 0xFE: return;   /* Resend        */
-        case 0xEE: return;   /* Echo response */
-        case 0x00:           /* Error / buffer overrun */
-        case 0xFF:           /* Error                  */
+        case KB_RSP_ACK:     return;   /* ACK           */
+        case KB_RSP_RESEND:  return;   /* Resend        */
+        case KB_RSP_ECHO:    return;   /* Echo response */
+        case KB_RSP_OVERRUN:           /* Error / buffer overrun */
+        case KB_RSP_ERROR:             /* Error                  */
             /* ‼ THIS IS THE KEYBOARD SAYING IT DROPPED SCAN CODES, and it used
              * to be discarded like an ACK. Everything derived from codes that
              * did not arrive is now a guess: a break code may be among them, so
@@ -491,8 +801,8 @@ void keyboard_handle_scancode(uint8_t scancode)
              * them is exactly what was lost. So the state that depends on codes
              * is cleared here, and the cost of an overrun becomes one report of
              * unknown modifiers instead of a repeat nothing can silence. */
-            kb_e0_pending = 0;
-            kb_e1_swallow = 0;
+            kb_e0_pending[core] = 0;
+            kb_e1_swallow[core] = 0;
             kb_forget_repeat();
             __atomic_store_n(&kb_state.shift_pressed, 0, __ATOMIC_RELAXED);
             __atomic_store_n(&kb_state.ctrl_pressed,  0, __ATOMIC_RELAXED);
@@ -502,8 +812,8 @@ void keyboard_handle_scancode(uint8_t scancode)
 
     /* Inside an 0xE1 group: the byte belongs to Pause, not to the key its
      * value would otherwise name. */
-    if (kb_e1_swallow) {
-        kb_e1_swallow--;
+    if (kb_e1_swallow[core]) {
+        kb_e1_swallow[core]--;
         return;
     }
 
@@ -513,8 +823,8 @@ void keyboard_handle_scancode(uint8_t scancode)
     /* ══════════════════════════════════════════════
        Extended key (0xE0 prefix was received)
        ══════════════════════════════════════════════ */
-    if (kb_e0_pending) {
-        kb_e0_pending = 0;
+    if (kb_e0_pending[core]) {
+        kb_e0_pending[core] = 0;
 
         /* Extended modifiers */
         if (key == 0x1D) {   /* Right Ctrl */

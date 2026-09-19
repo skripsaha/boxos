@@ -422,8 +422,10 @@ bool          MemTagVerifyPteMetadataBits(void);
  *         stack" meaning exists only in EPT entries (Vol 3C §29.3.2).
  *         Keys 2, 3, 6, 7, 10, 11, 14 and 15 set bit 60 because that is
  *         what those keys ARE. Every key 0..15 stamps; nothing is
- *         refused. See the CET block in vmm.h for the encoding ordinary
- *         paging does honour (R/W=0 + Dirty=1).
+ *         refused. The encoding ordinary paging DOES honour is R/W=0 +
+ *         Dirty=1, quoted from the SDM above VMM_FLAGS_SHADOW_STACK_SUPV
+ *         in vmm.h — bits 1 and 6, so stamping a key can never make a
+ *         page a shadow stack nor stop one from being one.
  *
  *  Region carries AT MOST ONE pku:N tag — adding a second one is
  *  treated as a replace (old cleared automatically by MemTagApplyPkey

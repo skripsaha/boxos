@@ -16,12 +16,24 @@
  *   counter64     — true when the controller's main counter is 64-bit
  *   num_timers    — comparator count (n+1 in spec)
  *
- * Atomicity: the main counter is monotonic and free-running. On real HW
- * a 64-bit MMIO read can be split (e.g. UEFI vmware/qemu mappings sometimes
- * tear), but Intel's spec mandates the upper half stays stable as long as
- * the lower half wraps less than once per read pair. We implement the
- * canonical "lo, hi, lo' — retry if hi changed" guard so the public API
- * never returns a non-monotonic sample.
+ * Atomicity: the main counter is free-running, and how it must be read
+ * depends on its WIDTH — the opposite way round from what stood here.
+ *
+ *   64-bit counter. HPET 1.0a §2.4.7, closing Note: "On a 64-bit platform,
+ *   if software attempts a 64 bit read of the 64-bit counter, software must
+ *   be aware that some platforms may break the 64 bit read into two 32 bit
+ *   reads, and therefore the read may be inaccurate if the low 32 bits roll
+ *   over between the high and low part reads." That is where the spec's own
+ *   "high, low, high again" retry belongs, and that is where hpet_read_mcnt()
+ *   now puts it. No sentence in the specification promises that the upper
+ *   half of a 64-bit MMIO read stays stable; the promise this comment used
+ *   to make was invented, and the guard it justified sat on the one branch
+ *   where the spec says it can never fire.
+ *
+ *   32-bit counter. §2.3.7 rule 4: "32-bit counters will always return 0 for
+ *   the upper 32-bits of this register." There is nothing to retry against —
+ *   the upper half never changes. What such a counter does instead is wrap,
+ *   every 2^32 ticks, and the laps are carried in software by hpet_extend32().
  */
 
 typedef struct {
@@ -80,22 +92,83 @@ static uint64_t hpet_ticks_to_us(uint64_t ticks) {
          + (rem * g_hpet.period_fs) / HPET_FS_PER_US;
 }
 
-/* Read the 64-bit main counter, safe against split reads on 32-bit-only
- * controllers and against torn MMIO mappings. The "lo, hi, lo' compare"
- * pattern is the canonical x86 way (Intel SDM Vol 3 §17.17.2 uses the same
- * trick for TSC, the HPET applies identically). */
-static uint64_t hpet_read_mcnt(void) {
-    if (g_hpet.counter64) {
-        return hpet_read64(HPET_REG_MCNT);
-    }
+/* Software 64-bit extension of a 32-bit main counter.
+ *
+ * A controller that reports GCAP.COUNT_SIZE_CAP = 0 — AMD SB/FCH
+ * southbridges ship exactly that, and Linux prints them as "32-bit
+ * 14.318180 MHz counter" — rolls over every 2^32 ticks, which is 299.96 s
+ * of uptime. Subtracting two raw samples across that point is what turned
+ * this kernel's only monotonic clock into a ~1.3e18 us spike followed by
+ * five minutes of time running BACKWARDS, with any hpet_busy_wait_us() in
+ * flight spinning out the whole lap on the core that called it.
+ *
+ * Every sample is folded into a 64-bit accumulator as a delta taken in
+ * 32-bit arithmetic — the same contract Linux's clocksource layer keeps for
+ * the HPET with .mask = CLOCKSOURCE_MASK(32). It carries one obligation,
+ * and the obligation belongs to the counter rather than to this code:
+ * SOMETHING must read the counter more than once per wrap, because a
+ * counter that is 32 bits wide cannot say how many laps it ran unobserved.
+ * Linux names the same bound clocksource.max_idle_ns and caps how long the
+ * tick may sleep at it. Here a gap wider than half a wrap cannot be told
+ * apart from a sample taken behind the accumulator, so it is reported as no
+ * advance: the clock stands still for that read rather than jumping, in
+ * either direction. A 64-bit counter has no such ceiling and does not go
+ * through here at all.
+ *
+ * Lock-free because every core reads this clock: the accumulator only ever
+ * moves forward, by a CAS whose candidate was computed from the very value
+ * it replaces. A core that loses the race recomputes against the winner's
+ * value instead of overwriting it. */
+#define HPET_EXT_HALF_LAP   0x80000000ULL
+
+static uint64_t g_hpet_ext = 0;
+
+static uint64_t hpet_extend32(uint32_t now_lo) {
+    uint64_t last = __atomic_load_n(&g_hpet_ext, __ATOMIC_ACQUIRE);
     for (;;) {
-        uint32_t hi  = hpet_read32(HPET_REG_MCNT + 4);
-        uint32_t lo  = hpet_read32(HPET_REG_MCNT);
-        uint32_t hi2 = hpet_read32(HPET_REG_MCNT + 4);
-        if (hi == hi2) {
-            return ((uint64_t)hi << 32) | (uint64_t)lo;
+        uint32_t delta = now_lo - (uint32_t)last;
+        if (delta == 0 || (uint64_t)delta >= HPET_EXT_HALF_LAP) {
+            return last;
+        }
+        uint64_t next = last + (uint64_t)delta;
+        if (__atomic_compare_exchange_n(&g_hpet_ext, &last, next, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            return next;
         }
     }
+}
+
+/* The main counter exactly as the hardware holds it. This is the value a
+ * comparator must be programmed against, because Tn_CMP is compared with
+ * the hardware counter and knows nothing of the software laps. */
+static uint64_t hpet_read_mcnt_raw(void) {
+    if (g_hpet.counter64) {
+        /* HPET 1.0a §2.4.7: "Software can read the high 32 bits, then the
+         * low 32 bits, then the high 32 bits again. If the high 32 bits have
+         * not changed between the two reads, then a rollover has not
+         * happened and the low 32 bits are valid." Three 32-bit reads rather
+         * than one 64-bit load because of that section's closing Note: it is
+         * the platform, not the instruction, that decides whether a 64-bit
+         * read of this register stays whole. */
+        for (;;) {
+            uint32_t hi  = hpet_read32(HPET_REG_MCNT + 4);
+            uint32_t lo  = hpet_read32(HPET_REG_MCNT);
+            uint32_t hi2 = hpet_read32(HPET_REG_MCNT + 4);
+            if (hi == hi2) {
+                return ((uint64_t)hi << 32) | (uint64_t)lo;
+            }
+        }
+    }
+    /* §2.3.7 rule 4: the upper half of a 32-bit counter is architecturally
+     * zero. Reading it proves nothing. */
+    return (uint64_t)hpet_read32(HPET_REG_MCNT);
+}
+
+/* The main counter as a 64-bit tick count that never goes backwards: the
+ * hardware value at 64 bits, the software lap count at 32. */
+static uint64_t hpet_read_mcnt(void) {
+    uint64_t raw = hpet_read_mcnt_raw();
+    return g_hpet.counter64 ? raw : hpet_extend32((uint32_t)raw);
 }
 
 bool hpet_init(void) {
@@ -143,9 +216,14 @@ bool hpet_init(void) {
     g_hpet.num_timers   = (uint8_t)(((gcap >> HPET_GCAP_NUM_TIM_SHIFT)
                                      & HPET_GCAP_NUM_TIM_MASK) + 1);
 
-    /* Disable, clear, then enable the main counter. We do NOT enable
-     * LegacyReplacement Mode — that takes over IRQ0/IRQ8 routing and
-     * would conflict with the existing PIT and RTC drivers. */
+    /* Disable, clear, then enable the main counter. hpet_init() itself
+     * leaves LEG_RT_CNF clear — at this point the 8254 still owns IRQ0 and
+     * the RTC still owns IRQ8, and the decision to take those pins belongs
+     * to hpet_start_legacy_tick() further down this file, which is what
+     * sets the bit. HPET 1.0a §2.4.2.1 is why that is a decision and not a
+     * collision: with LEG_RT_CNF set, timer 0 is forced onto IRQ0/INTI2 and
+     * "the 8254 timer will not cause any interrupts", timer 1 onto IRQ8 and
+     * "the RTC will not cause any interrupts". */
     uint32_t gconf = hpet_read32(HPET_REG_GCONF);
     hpet_write32(HPET_REG_GCONF, gconf & ~(HPET_GCONF_ENABLE | HPET_GCONF_LEG_RT));
 
@@ -157,6 +235,10 @@ bool hpet_init(void) {
         hpet_write32(HPET_REG_MCNT, 0);
         hpet_write32(HPET_REG_MCNT + 4, 0);
     }
+
+    /* The software lap counter starts where the hardware counter was just
+     * put, so the first extended read is the first tick after zero. */
+    __atomic_store_n(&g_hpet_ext, 0, __ATOMIC_RELEASE);
 
     /* Mask every comparator so a leftover firmware programmation cannot
      * fire a stale interrupt. INT_ENB bit 2 cleared. */
@@ -201,6 +283,10 @@ bool hpet_counter_is_64bit(void) {
 
 uint64_t hpet_now_us(void) {
     if (!g_hpet.present) return 0;
+    /* The subtraction is safe at both widths because hpet_read_mcnt() never
+     * goes backwards: on a 64-bit counter origin_ticks is a value the
+     * hardware already passed, and on a 32-bit one it is a value the
+     * accumulator already held. */
     uint64_t now = hpet_read_mcnt();
     return hpet_ticks_to_us(now - g_hpet.origin_ticks);
 }
@@ -276,8 +362,11 @@ bool hpet_start_legacy_tick(uint32_t hz) {
     hpet_write64(HPET_REG_TIMER_CNF(0), new_t0cnf);
 
     /* Steps 3-4 — write comparator twice. First write seeds the deadline
-     * (current + interval); second write seeds the periodic increment. */
-    uint64_t now = hpet_read_mcnt();
+     * (current + interval); second write seeds the periodic increment. The
+     * counter is taken RAW here: Tn_CMP is matched against the hardware
+     * counter, so the software lap count hpet_read_mcnt() carries on a
+     * 32-bit controller would seed a deadline the comparator never meets. */
+    uint64_t now = hpet_read_mcnt_raw();
     hpet_write64(HPET_REG_TIMER_CMP(0), now + interval);
     hpet_write64(HPET_REG_TIMER_CMP(0), interval);
 

@@ -5,9 +5,20 @@
  *   T1  SHA-256 against FIPS 180-4 test vectors (one-shot + streaming).
  *   T2  Streaming SHA-256 matches one-shot for randomized chunk splits.
  *   T3  ASN.1 DER parser round-trips a known SEQUENCE { INTEGER, OID }.
- *   T4  Bigint modular exponentiation: standard mathematical identities.
- *   T5  RSA-PKCS1-v1.5 SHA-256 verify against an end-to-end vector
- *       (kernel-internal hand-built signature).
+ *   T4  RSA-PKCS1-v1.5 verify REJECTS: a non-signature, a wrong length,
+ *       and a zero modulus. All three return before the bigint core runs.
+ *   T5  RSA-PKCS1-v1.5 SHA-256 verify ACCEPTS a real 2048-bit signature
+ *       and rejects a one-bit corruption of it and of the digest.
+ *
+ * ‼ T5 is the one that covers anything. This list used to claim a T5 that
+ * did not exist and a T4 that "exercises bigint modular exponentiation" —
+ * and T4's three assertions all return inside efi_rsa_verify_pkcs1_sha256's
+ * argument checks, before bn_mod_exp is ever reached. bn_mul, bn_mod,
+ * bn_mod_mul, bn_mod_exp and bn_store_be had exactly zero coverage, so a
+ * verifier that returned false unconditionally passed the whole self-test
+ * and the breakage showed up only as every signed image coming back
+ * "signature invalid" — indistinguishable from a genuinely untrusted image.
+ * A positive vector is the only assertion that can tell those apart.
  *
  * The aim is not to substitute for real-platform Authenticode validation
  * but to ensure the primitives themselves are correct after every code
@@ -166,75 +177,88 @@ static bool t3_asn1_basic(void)
 }
 
 /* =========================================================================
- * T4 — Bigint exponentiation identity check via the public RSA verify.
+ * RSA test vector — a real 2048-bit key, a real PKCS#1 v1.5 SHA-256
+ * signature, and the fixed message they were made over.
  *
- * Builds a tiny "RSA" key with public exponent e=3 and modulus n with
- * known factorisation, then verifies that a PKCS1-v1.5 SHA-256 signature
- * constructed with the matching private key returns SUCCESS, while a
- * one-bit corruption returns FAILURE.
+ * Produced once, offline, with OpenSSL 3.6.2:
  *
- * The vector below was produced offline with OpenSSL 3.2:
- *
- *   openssl genrsa 1024 > sk.pem
- *   openssl rsa -in sk.pem -pubout > pk.pem
- *   echo -n "BoxOS-selftest" > msg.bin
+ *   openssl genrsa -out sk.pem 2048
+ *   printf 'BoxOS EFI self-test vector v1' > msg.bin
  *   openssl dgst -sha256 -sign sk.pem -out sig.bin msg.bin
- *   xxd -i pk.pem sig.bin
+ *   openssl rsa -in sk.pem -pubout | openssl rsa -pubin -noout -modulus
  *
- * For correctness of the verifier itself, having a known-valid sig+key+
- * msg triple proves: SHA-256 streams correctly, ASN.1 + RSA modexp +
- * PKCS1-v1.5 padding decode all coordinate end-to-end. The trade-off is
- * a ~512-byte payload in .rodata; reasonable for a boot-time self-test.
+ * The private key was never kept and is not needed: verification uses the
+ * public half only, and a public modulus plus a signature over a published
+ * message are not secrets. sk.pem existed for the length of that shell
+ * pipeline and nothing about this key protects anything.
  *
- * The modulus and signature below are 1024-bit; large enough to satisfy
- * the verifier's PKCS1-v1.5 PS≥8 byte requirement, small enough that
- * the modexp completes in microseconds.
+ * e = 65537, which is what firmware-signed certificates use in practice, so
+ * bn_mod_exp walks all 24 bit positions of the three-byte exponent instead
+ * of the short ladder a small e would give it. 2048 bits is 64 limbs through
+ * bn_mod_mul — the same arithmetic an Authenticode chain walk performs.
+ * Cost: 512 bytes of .rodata.
  * ========================================================================= */
 
-/* A 1024-bit RSA modulus + e=65537. To keep the vector small AND
- * deterministic, the modulus and signature here are generated for the
- * fixed message "BoxOS-selftest". This is purely a regression-detection
- * vector — not a security claim about this key. */
-static const uint8_t SELFTEST_RSA_MODULUS[128] = {
-    /* generated to satisfy: n = p*q where p,q ≈ 512-bit primes */
-    0xb8,0x47,0xfa,0x82,0x40,0xa2,0x2b,0x1d, 0xc8,0xc7,0xa9,0x46,0x71,0xf1,0xa6,0xd5,
-    0x07,0x29,0x35,0x49,0xdc,0x4e,0xfd,0xc2, 0x52,0xfa,0xc4,0xc1,0x83,0xed,0x05,0xf8,
-    0x47,0x39,0x21,0x9e,0xd5,0xa8,0x9b,0xae, 0xe5,0x35,0xee,0x53,0xcd,0xd9,0x4c,0xfc,
-    0xfe,0x49,0x10,0xc9,0xfa,0xc0,0xc6,0x71, 0xeb,0x14,0xbe,0xa1,0x7e,0xe5,0x4b,0x1a,
-    0x4d,0x29,0x5c,0xa5,0x69,0xee,0x76,0xc1, 0x1f,0xed,0xf8,0xa1,0x82,0x7a,0xfb,0x7b,
-    0x4e,0xf8,0x66,0x40,0x29,0x40,0x35,0x10, 0x44,0xa7,0xcc,0x37,0x05,0x09,0xb9,0xd1,
-    0xed,0xf3,0xe5,0x06,0x33,0x40,0x35,0x9a, 0x4b,0x69,0xc3,0x82,0xea,0x3a,0xa0,0x6c,
-    0xa5,0xb9,0x88,0xe8,0x42,0x10,0x4f,0xd3, 0xae,0x7f,0x44,0x49,0xfa,0xb6,0xb2,0x67
+static const uint8_t SELFTEST_RSA_MSG[] = "BoxOS EFI self-test vector v1";
+
+static const uint8_t SELFTEST_RSA_MODULUS[256] = {
+    0xea,0x59,0x6c,0x00,0xda,0xce,0x1f,0x04, 0xe3,0xaf,0x64,0x7f,0x27,0x81,0x61,0xcc,
+    0xde,0xbf,0x81,0x91,0x59,0x71,0x93,0x20, 0xb5,0xf6,0x7e,0x53,0x89,0xca,0xc7,0xe7,
+    0xf7,0xa4,0x38,0x23,0xcf,0xbd,0xd4,0x47, 0xc8,0x2e,0x33,0x26,0xfa,0x23,0x48,0xac,
+    0xf0,0x2c,0x1a,0x5b,0xe0,0xea,0x57,0x47, 0x56,0x52,0xb9,0x89,0x65,0x4a,0x75,0xd0,
+    0x61,0x58,0x31,0xa0,0xeb,0x20,0xde,0x3b, 0xa2,0xb3,0xf4,0x6d,0x22,0xfb,0x46,0xde,
+    0x0a,0x4b,0xba,0xbc,0xa2,0x8a,0x3b,0xf9, 0x69,0xd8,0x2e,0x69,0x98,0x76,0x0a,0xfd,
+    0xb3,0xf0,0x58,0xe0,0x1e,0x56,0xe4,0x85, 0xd6,0x83,0x44,0x9b,0xe7,0x67,0xf1,0xe9,
+    0xb6,0x88,0x9d,0x0a,0xc0,0xdc,0xbf,0x39, 0x02,0x1d,0xb3,0x54,0xce,0xc8,0x3d,0x2c,
+    0x2d,0x8d,0xef,0xd5,0x68,0xcb,0x7b,0x58, 0x37,0x01,0xac,0xb2,0x0f,0xab,0xf4,0x53,
+    0xd8,0x0b,0xde,0xf5,0x83,0x0c,0x89,0xeb, 0x5f,0xa2,0x43,0x9d,0xb6,0x65,0x02,0x06,
+    0x01,0xc7,0xa5,0x14,0x7f,0x58,0xc5,0x6c, 0x22,0x1f,0xdb,0xb8,0x7e,0x71,0xca,0x0f,
+    0x89,0x0c,0x5e,0x94,0x16,0x40,0xde,0xf4, 0x8b,0xde,0x66,0xd2,0x97,0xde,0x22,0x0c,
+    0x49,0xcc,0x63,0xd3,0xde,0xed,0x46,0xe1, 0xc3,0xba,0x07,0xf1,0x1c,0x1f,0x76,0xe0,
+    0x5d,0x09,0xd4,0xd4,0x0a,0xa8,0x46,0x53, 0x25,0x17,0xba,0x15,0x95,0x5f,0xa1,0x1c,
+    0x4f,0xdf,0x50,0x8b,0xb5,0xdc,0x23,0x47, 0x9e,0x42,0xb3,0xee,0xc3,0xb6,0xa7,0x3e,
+    0xa5,0xe5,0x59,0xb6,0xd6,0xff,0x33,0x2c, 0xc7,0x06,0xb0,0x74,0xb8,0x80,0xb4,0x81,
 };
 
 static const uint8_t SELFTEST_RSA_EXPONENT[3] = { 0x01, 0x00, 0x01 };  /* 65537 */
 
-/* T4 doesn't ship with a real signature — generating one in-kernel requires
- * the private key, which we cannot embed in a public-source self-test
- * without leaking it. Instead T4 exercises the math by encoding-decoding:
- *
- *   1. Construct EM = 0x00 0x01 0xFF*N 0x00 || DigestInfo(SHA-256, hash).
- *   2. Pack EM as a big-endian integer m.
- *   3. Use the modular property: c = m mod n (since gcd(m,n)=1 with high
- *      probability and we just exercise modexp with e=1 implicitly).
- *
- * Effectively this is a smoke test: ensures the verifier rejects a
- * non-signature byte string (which it must — return false from EMSA
- * decode). True positive end-to-end verification requires a real
- * signature, deferred to real-HW testing. */
+static const uint8_t SELFTEST_RSA_SIGNATURE[256] = {
+    0x89,0x77,0xdb,0x4c,0x49,0x97,0x91,0x18, 0x7e,0xcb,0x40,0x45,0x68,0x8e,0xd7,0x46,
+    0xf3,0xfe,0x32,0x60,0xcf,0xb4,0xc7,0x69, 0x92,0x86,0xad,0x1a,0xd8,0x70,0xc6,0x42,
+    0x0c,0x6c,0xcd,0x29,0xd3,0xed,0xbc,0xdd, 0xcc,0x32,0xfd,0x41,0xbd,0x00,0xb5,0x77,
+    0xb0,0xe8,0x5e,0x2f,0x2b,0xb7,0x43,0x6b, 0x89,0x6c,0xf2,0xbe,0xaf,0x9f,0x08,0xc4,
+    0xbb,0x4f,0xb7,0x00,0xf0,0x44,0x2c,0x38, 0xf9,0x1c,0x54,0xe0,0x37,0x1f,0x7b,0x8c,
+    0xf4,0xaf,0x57,0xcd,0xd0,0x6f,0x71,0x6c, 0x51,0x5c,0x3d,0x97,0x7c,0xba,0x63,0x5b,
+    0x74,0x4c,0x9d,0x5d,0xac,0xcc,0x78,0x22, 0xc7,0xe4,0x4e,0x71,0x57,0x8b,0xa8,0x7e,
+    0x00,0x75,0x79,0xa5,0xcd,0xd2,0x91,0xb8, 0xa1,0x25,0x0f,0x2a,0x2f,0x28,0xa9,0xf0,
+    0x94,0x58,0x33,0xcd,0xb0,0x46,0xc1,0x9b, 0x7c,0x70,0xdb,0x48,0x9c,0x62,0xe0,0x31,
+    0xe6,0x61,0x68,0xbe,0xb8,0xab,0xd6,0x44, 0x04,0x51,0x26,0xcb,0xa1,0x27,0x75,0x6f,
+    0x0f,0x2d,0x6b,0xec,0xd5,0x0c,0x25,0xaa, 0x72,0x45,0x85,0xd3,0x30,0x49,0x87,0xb6,
+    0xb4,0xc9,0x29,0xfa,0x84,0x9a,0xd7,0xbc, 0xb7,0x99,0xac,0x92,0x6d,0xcb,0x26,0x16,
+    0x06,0xaf,0xe8,0x06,0x53,0x02,0x30,0xd9, 0x95,0xc0,0xb9,0x9c,0xd4,0x28,0xd2,0x15,
+    0x94,0x67,0x8e,0x42,0xf9,0xd0,0x16,0x96, 0xc1,0x68,0x52,0x4d,0x6c,0x7d,0xf6,0x81,
+    0xd9,0xa8,0xd7,0x3c,0x32,0x9e,0x02,0x99, 0x30,0xc9,0x75,0x4b,0x3f,0x01,0x92,0x36,
+    0xce,0xc3,0x37,0x76,0x66,0x0e,0x31,0xe9, 0x0a,0x09,0xbb,0x28,0xc4,0xa3,0x52,0x03,
+};
 
-static bool t4_rsa_smoke(void)
+/* =========================================================================
+ * T4 — the verifier's refusals.
+ *
+ * Three inputs it must reject, and all three are rejected by the argument
+ * checks at the top of efi_rsa_verify_pkcs1_sha256 — before bn_mod_exp.
+ * That is worth saying out loud, because this test used to be described as
+ * exercising modular exponentiation and it does not touch it. T5 is what
+ * covers the bigint core.
+ * ========================================================================= */
+
+static bool t4_rsa_refusals(void)
 {
-    /* Build a buffer that decodes to a valid PKCS1-v1.5 envelope WITHOUT
-     * being a signature — the verifier should still reject because
-     * c >= n (raw EM, not s^e). This proves the bounds check at the
-     * top of efi_rsa_verify_pkcs1_sha256 is active. */
-    uint8_t hash[32] = {0};
-    KSha256((const uint8_t *)"BoxOS-selftest", 14, hash);
+    uint8_t hash[32];
+    KSha256(SELFTEST_RSA_MSG, sizeof(SELFTEST_RSA_MSG) - 1, hash);
 
-    /* sig_len == modulus_len. Fill with 0xFF — guaranteed >= modulus
-     * because top byte 0xFF > top byte of modulus 0xB8. */
-    uint8_t bad_sig[128];
+    /* sig_len == modulus_len, but the value is >= n (top byte 0xFF beats the
+     * modulus's 0xEA), which RFC 8017 forbids as a signature representative. */
+    uint8_t bad_sig[sizeof(SELFTEST_RSA_MODULUS)];
     memset(bad_sig, 0xFF, sizeof(bad_sig));
 
     EfiRsaPublicKey k = {
@@ -244,18 +268,18 @@ static bool t4_rsa_smoke(void)
         .exponent_len = sizeof(SELFTEST_RSA_EXPONENT),
     };
     if (efi_rsa_verify_pkcs1_sha256(&k, hash, bad_sig, sizeof(bad_sig))) {
-        debug_printf("[SELFTEST] T4 RSA accepted obviously-bad signature\n");
+        debug_printf("[SELFTEST] T4 RSA accepted a signature >= modulus\n");
         return false;
     }
 
-    /* Also test: wrong sig length is rejected. */
-    if (efi_rsa_verify_pkcs1_sha256(&k, hash, bad_sig, 64)) {
+    /* Wrong signature length. */
+    if (efi_rsa_verify_pkcs1_sha256(&k, hash, bad_sig, sizeof(bad_sig) / 2)) {
         debug_printf("[SELFTEST] T4 RSA accepted truncated signature\n");
         return false;
     }
 
-    /* And: zero modulus is rejected (post-audit guard). */
-    uint8_t zero_mod[128] = {0};
+    /* Zero modulus. */
+    uint8_t zero_mod[sizeof(SELFTEST_RSA_MODULUS)] = {0};
     EfiRsaPublicKey zk = {
         .modulus      = zero_mod,
         .modulus_len  = sizeof(zero_mod),
@@ -264,6 +288,63 @@ static bool t4_rsa_smoke(void)
     };
     if (efi_rsa_verify_pkcs1_sha256(&zk, hash, bad_sig, sizeof(bad_sig))) {
         debug_printf("[SELFTEST] T4 RSA accepted zero-modulus key\n");
+        return false;
+    }
+    return true;
+}
+
+/* =========================================================================
+ * T5 — the verifier ACCEPTS a genuine signature, and only that one.
+ *
+ * This is the assertion the whole self-test was missing. It runs the entire
+ * chain end to end: KSha256 over the message, bn_load_be of modulus and
+ * signature, bn_mod_exp with e=65537 over 64 limbs, bn_store_be of the
+ * result, and the EMSA-PKCS1-v1.5 decode of EM = 0x00 0x01 PS 0x00
+ * DigestInfo(SHA-256, hash) against the expected DigestInfo envelope
+ * (RFC 8017 §9.2 step 4). A regression anywhere on that path — including a
+ * verifier that simply returns false — fails here and only here.
+ *
+ * Then the two negatives that make the positive mean something: one flipped
+ * bit in the signature, and one flipped bit in the digest.
+ * ========================================================================= */
+
+static bool t5_rsa_known_good(void)
+{
+    uint8_t hash[32];
+    KSha256(SELFTEST_RSA_MSG, sizeof(SELFTEST_RSA_MSG) - 1, hash);
+
+    EfiRsaPublicKey k = {
+        .modulus      = SELFTEST_RSA_MODULUS,
+        .modulus_len  = sizeof(SELFTEST_RSA_MODULUS),
+        .exponent     = SELFTEST_RSA_EXPONENT,
+        .exponent_len = sizeof(SELFTEST_RSA_EXPONENT),
+    };
+
+    if (!efi_rsa_verify_pkcs1_sha256(&k, hash, SELFTEST_RSA_SIGNATURE,
+                                      sizeof(SELFTEST_RSA_SIGNATURE))) {
+        debug_printf("[SELFTEST] T5 RSA rejected a known-good signature\n");
+        return false;
+    }
+
+    /* One bit of the signature, in the middle where the modexp result
+     * differs wholesale rather than in a padding byte. */
+    uint8_t tampered[sizeof(SELFTEST_RSA_SIGNATURE)];
+    memcpy(tampered, SELFTEST_RSA_SIGNATURE, sizeof(tampered));
+    tampered[sizeof(tampered) / 2] ^= 0x01;
+    if (efi_rsa_verify_pkcs1_sha256(&k, hash, tampered, sizeof(tampered))) {
+        debug_printf("[SELFTEST] T5 RSA accepted a one-bit-corrupted "
+                     "signature\n");
+        return false;
+    }
+
+    /* One bit of the digest — the signature is intact, the message is not. */
+    uint8_t wrong_hash[32];
+    memcpy(wrong_hash, hash, sizeof(wrong_hash));
+    wrong_hash[31] ^= 0x01;
+    if (efi_rsa_verify_pkcs1_sha256(&k, wrong_hash, SELFTEST_RSA_SIGNATURE,
+                                     sizeof(SELFTEST_RSA_SIGNATURE))) {
+        debug_printf("[SELFTEST] T5 RSA accepted a signature over a "
+                     "different digest\n");
         return false;
     }
     return true;
@@ -285,8 +366,11 @@ bool efi_selftest_run(void)
     if (!t3_asn1_basic())           { ok = false; debug_printf("[SELFTEST] T3 FAIL\n"); }
     else                              debug_printf("[SELFTEST] T3 asn1 parse PASS\n");
 
-    if (!t4_rsa_smoke())            { ok = false; debug_printf("[SELFTEST] T4 FAIL\n"); }
-    else                              debug_printf("[SELFTEST] T4 rsa smoke PASS\n");
+    if (!t4_rsa_refusals())         { ok = false; debug_printf("[SELFTEST] T4 FAIL\n"); }
+    else                              debug_printf("[SELFTEST] T4 rsa refusals PASS\n");
+
+    if (!t5_rsa_known_good())       { ok = false; debug_printf("[SELFTEST] T5 FAIL\n"); }
+    else                              debug_printf("[SELFTEST] T5 rsa known-good vector PASS\n");
 
     debug_printf("[SELFTEST] Overall: %s\n", ok ? "PASS" : "FAIL");
     return ok;

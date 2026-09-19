@@ -13,6 +13,7 @@
 #include "atomics.h"
 #include "kernel_config.h"
 #include "hourglass.h"
+#include "vmm.h"
 
 acpi_state_t g_acpi = {0};
 
@@ -80,11 +81,17 @@ static acpi_gpe_handler_t g_gpe_handlers[ACPI_MAX_GPES];
  * x_ fields lie past the end of the table, where the struct reads whatever
  * memory follows it.
  *
- * These blocks are reached with inb/outb, so a GAS naming any space but
- * System I/O is said out loud and the legacy address used instead of quietly
- * addressing the wrong thing with the wrong instruction.
+ * The blocks fadt_block_port resolves — the GPE pair and the PM1 event pair
+ * — are reached with inb/outb, so a GAS naming any space but System I/O is
+ * said out loud and the legacy address used instead of quietly addressing
+ * the wrong thing with the wrong instruction. That policy is this function's
+ * alone: the PM1 CONTROL registers, resolved further down by
+ * pm1_control_locate, are read and written in whichever of System I/O and
+ * System Memory §4.8.3.2.1 allows them, and only a third space sends that
+ * resolver back to the legacy address.
  * ============================================================ */
-#define GAS_AS_SYSTEM_IO 1
+#define GAS_AS_SYSTEM_MEMORY 0
+#define GAS_AS_SYSTEM_IO     1
 
 static bool fadt_has_field(uint32_t len, size_t field_end) {
     return len >= field_end;
@@ -383,11 +390,255 @@ void acpi_gpe_unregister(uint16_t gpe) {
 }
 
 /* PM1 control register fields — ACPI 6.5 §4.8.3.2.1, Table 4.13. */
+#define PM1_CNT_SCI_EN         0x0001u   /* bit 0      */
 #define PM1_CNT_SLP_TYP_SHIFT  10
 #define PM1_CNT_SLP_TYP_MASK   0x1C00u   /* bits 12:10 */
 #define PM1_CNT_SLP_EN         0x2000u   /* bit 13     */
 
-/* The word one PM1 control port must be given to be asked for a sleep state.
+/* ============================================================
+ * Where the PM1 control registers ARE — resolved once, out of the FADT.
+ *
+ * PM1a_CNT is not a port by definition. ACPI 6.5 §4.8.3.2.1 gives the PM1
+ * control registers "System I/O or Memory Space", and §5.2.9 says of the
+ * 32-bit PM1a_CNT_BLK field that "if the X_PM1a_CNT_BLK field contains a non
+ * zero value which can be used by the OSPM, then this field must be ignored
+ * by the OSPM".
+ *
+ * Two places in this file used to take the legacy 32-bit field as the whole
+ * answer and reach it with inw/outw regardless: the SCI_EN test of the
+ * ACPI-mode handoff, and the sleep vector of acpi_enter_sleep. On a FADT
+ * where the extended descriptor supersedes the legacy one — a different
+ * address, or the register in System Memory — both addressed something that
+ * is not PM1a_CNT. A port nothing decodes answers inw with 0xFFFF, and bit 0
+ * of that word is SCI_EN's: the handoff read it as "already in ACPI mode",
+ * returned without ever writing SMI_CMD, and left the platform in SMI mode
+ * with the power button unarmed and S5 a no-op. Every step of that is
+ * silent, because the only thing it said was a debug_printf, which a shipped
+ * build compiles to nothing. The mirror case is just as quiet: a FADT with
+ * the legacy field at zero and only X_PM1a_CNT_BLK filled in never reached
+ * the read at all.
+ *
+ * acpi_shutdown.c carries a SECOND resolver for the same register pair —
+ * resolve_pm1_gas() with gas_read/gas_write — and that one, not this one, is
+ * what the live S5 path uses. The two prefer the X_ descriptor alike, but
+ * they are not the same policy: resolve_pm1_gas() synthesises the legacy I/O
+ * GAS only when the X_ descriptor is absent or zero, and hands an X_
+ * descriptor in a space it cannot reach straight to gas_read, which refuses
+ * it; the resolver here treats an X_ description OSPM cannot use as the
+ * §5.2.9 condition it is and goes back to the legacy address. One register
+ * with two resolvers in one kernel is one too many, and which of them
+ * survives is not a question this file can answer alone: acpi_shutdown.c is
+ * where the sleep vector lives.
+ * ============================================================ */
+typedef struct {
+    bool               described; /* the FADT names this block at all */
+    bool               present;   /* and this kernel can reach it */
+    uint8_t            space;     /* GAS_AS_SYSTEM_IO or GAS_AS_SYSTEM_MEMORY */
+    uint16_t           port;      /* System I/O */
+    volatile uint16_t *reg;       /* System Memory, mapped once */
+} AcpiPm1Control;
+
+static AcpiPm1Control g_pm1a_control;
+static AcpiPm1Control g_pm1b_control;
+
+/* Read one PM1 control register in its own address space.
+ *
+ * A word of all ones is not a register's answer. PM1_CNT has reserved bits
+ * (Table 4.13), and ACPI 6.5 §4.6.1 is explicit about those: "ACPI hardware
+ * registers are designed such that reserved bits always return zero, and
+ * data writes to them have no side affects." So 0xFFFF is a decode that
+ * never happened — the same reading the SCI handler gives an all-ones PM1
+ * status word. False is returned and *out is left untouched. */
+static bool pm1_control_read(const AcpiPm1Control *r, uint16_t *out)
+{
+    if (!r->present) return false;
+    uint16_t v = (r->space == GAS_AS_SYSTEM_MEMORY) ? *r->reg : inw(r->port);
+    if (v == 0xFFFFu) return false;
+    *out = v;
+    return true;
+}
+
+static void pm1_control_write(const AcpiPm1Control *r, uint16_t v)
+{
+    if (!r->present) return;
+    if (r->space == GAS_AS_SYSTEM_MEMORY) *r->reg = v;
+    else                                  outw(r->port, v);
+}
+
+/* Bind one candidate description into `out`. False means this is not a
+ * register this kernel can reach, and the caller may have another candidate
+ * to try. */
+static bool pm1_control_bind(AcpiPm1Control *out, uint8_t space,
+                             uint64_t address, const char *which,
+                             const char *whence)
+{
+    if (space == GAS_AS_SYSTEM_IO) {
+        /* A GAS address is 64 bits wide and the x86 I/O space is 16. Casting
+         * the wide one down would name a DIFFERENT, arbitrary port and then
+         * READ it, here, during acpi_init — which is exactly the shape of
+         * the boards Linux ships acpi_force_32bit_fadt_addr for, where the
+         * X_ descriptor holds an address that was never an I/O address at
+         * all. There is no port to probe, so the candidate is refused and
+         * the caller goes on to the next one. */
+        if (address > 0xFFFFu) {
+            kprintf("[ACPI] %s control register (%s) names I/O address "
+                    "0x%lx, past the 16-bit I/O space this machine has\n",
+                    which, whence, (unsigned long)address);
+            return false;
+        }
+        out->space   = GAS_AS_SYSTEM_IO;
+        out->port    = (uint16_t)address;
+        out->reg     = NULL;
+        out->present = true;
+        return true;
+    }
+
+    if (space == GAS_AS_SYSTEM_MEMORY) {
+        volatile void *va = vmm_map_mmio((uintptr_t)address, sizeof(uint16_t),
+                                          VMM_FLAGS_KERNEL_RW);
+        if (!va) {
+            kprintf("[ACPI] %s control register at 0x%lx (%s) is in System "
+                    "Memory and cannot be mapped\n",
+                    which, (unsigned long)address, whence);
+            return false;
+        }
+        out->space   = GAS_AS_SYSTEM_MEMORY;
+        out->port    = 0;
+        out->reg     = (volatile uint16_t *)va;
+        out->present = true;
+        return true;
+    }
+
+    /* §4.8.3.2.1 gives these registers System I/O or System Memory and
+     * nothing else. A GAS naming another space describes a register this
+     * kernel has no instruction for, and taking its address for a port would
+     * address some other device entirely. */
+    kprintf("[ACPI] %s control register (%s) lives in address space %u; ACPI "
+            "6.5 §4.8.3.2.1 puts PM1 control in System I/O or System "
+            "Memory\n", which, whence, space);
+    return false;
+}
+
+/* Undo a bind, mapping and all, so the next candidate starts from nothing.
+ * `described` is what the FIRMWARE said and survives. */
+static void pm1_control_release(AcpiPm1Control *r)
+{
+    if (r->space == GAS_AS_SYSTEM_MEMORY && r->reg)
+        vmm_unmap_mmio(r->reg, sizeof(uint16_t));
+    r->present = false;
+    r->space   = GAS_AS_SYSTEM_IO;
+    r->port    = 0;
+    r->reg     = NULL;
+}
+
+static void pm1_control_locate(AcpiPm1Control *out, const acpi_gas_t *x,
+                               uint32_t legacy, uint32_t fadt_len,
+                               size_t x_field_end, const char *which)
+{
+    out->described = false;
+    out->present   = false;
+    out->space     = GAS_AS_SYSTEM_IO;
+    out->port      = 0;
+    out->reg       = NULL;
+
+    /* The length guard is not decoration: an ACPI 1.0b FADT is 116 bytes and
+     * x_pm1a_control_block lies past its end, where the struct reads whatever
+     * memory follows the table. */
+    bool have_x      = fadt_has_field(fadt_len, x_field_end) && x->address != 0;
+    bool have_legacy = (legacy != 0);
+
+    out->described = have_x || have_legacy;
+    if (!out->described) return;     /* this firmware describes no such block */
+
+    /* §5.2.9 makes the extended descriptor supersede the 32-bit field only
+     * when it "contains a non zero value WHICH CAN BE USED BY THE OSPM". Two
+     * things make an X_ description one OSPM cannot use, and on both of them
+     * the 32-bit field is still a description of the same register and is
+     * still worth asking — the same answer fadt_block_port gives for the GPE
+     * and PM1 event blocks, and the one Linux reaches from the other side
+     * with acpi_force_32bit_fadt_addr on boards that ship an invalid X_PM1*
+     * address. */
+    if (have_x) {
+        if (pm1_control_bind(out, x->address_space, x->address, which,
+                             "the X_ descriptor")) {
+            uint16_t probe = 0;
+            if (pm1_control_read(out, &probe)) return;
+
+            /* Nothing decodes there. If the 32-bit field names the very same
+             * port, there is no second candidate and the register simply
+             * does not answer — pm1_sci_en_state will say so. */
+            if (!have_legacy ||
+                (out->space == GAS_AS_SYSTEM_IO &&
+                 out->port == (uint16_t)legacy))
+                return;
+
+            kprintf("[ACPI] %s control register at 0x%lx (the X_ descriptor) "
+                    "answers nothing that decodes; this FADT's 32-bit field "
+                    "names 0x%x instead — falling back to the legacy "
+                    "address\n", which, (unsigned long)x->address, legacy);
+            pm1_control_release(out);
+        } else if (have_legacy) {
+            kprintf("[ACPI] %s: falling back to the legacy address 0x%x\n",
+                    which, legacy);
+        }
+    }
+
+    if (!have_legacy) return;        /* described, and out of reach */
+
+    (void)pm1_control_bind(out, GAS_AS_SYSTEM_IO, legacy, which,
+                           "this FADT's 32-bit field");
+}
+
+static void acpi_pm1_control_locate(void)
+{
+    if (!g_acpi.fadt) return;
+
+    uint32_t flen = g_acpi.fadt->header.length;
+
+    pm1_control_locate(&g_pm1a_control, &g_acpi.fadt->x_pm1a_control_block,
+                       g_acpi.pm1a_cnt_blk, flen,
+                       offsetof(acpi_fadt_t, x_pm1a_control_block) +
+                           sizeof(acpi_gas_t), "PM1a");
+    pm1_control_locate(&g_pm1b_control, &g_acpi.fadt->x_pm1b_control_block,
+                       g_acpi.pm1b_cnt_blk, flen,
+                       offsetof(acpi_fadt_t, x_pm1b_control_block) +
+                           sizeof(acpi_gas_t), "PM1b");
+}
+
+/* What the pair says about SCI_EN. */
+typedef enum {
+    ACPI_SCI_EN_CLEAR = 0,   /* a register answered; SCI_EN is not set */
+    ACPI_SCI_EN_SET,         /* a register answered; SCI_EN is set */
+    ACPI_SCI_EN_NO_BLOCK,    /* this firmware describes no PM1 control block */
+    ACPI_SCI_EN_UNREADABLE,  /* described, and no half of it answers */
+} AcpiSciEnState;
+
+/* ACPI 6.5 §4.8.3.2: the PM1 control bits "can be split between two
+ * registers: PM1a_CNT or PM1b_CNT", and "the register block with
+ * unimplemented bits ... always returns zeros", so the answer is the OR of
+ * whichever halves answer — the shape of ACPICA's acpi_hw_read_multiple,
+ * which reads xpm1a_control_block and xpm1b_control_block and ORs them.
+ * Only PM1a was ever consulted here.
+ *
+ * "Nobody answered" is told apart from "SCI_EN is clear" and from "no such
+ * block exists", because the three call for three different sentences and
+ * the old code collapsed all of them into "already in ACPI mode". */
+static AcpiSciEnState pm1_sci_en_state(void)
+{
+    if (!g_pm1a_control.described && !g_pm1b_control.described)
+        return ACPI_SCI_EN_NO_BLOCK;
+
+    uint16_t a = 0, b = 0;
+    bool got_a = pm1_control_read(&g_pm1a_control, &a);
+    bool got_b = pm1_control_read(&g_pm1b_control, &b);
+    if (!got_a && !got_b) return ACPI_SCI_EN_UNREADABLE;
+
+    uint16_t merged = (uint16_t)((got_a ? a : 0) | (got_b ? b : 0));
+    return (merged & PM1_CNT_SCI_EN) ? ACPI_SCI_EN_SET : ACPI_SCI_EN_CLEAR;
+}
+
+/* The word one PM1 control register must be given to be asked for a sleep
+ * state.
  *
  * §4.6.1 has OSPM preserve the bits of a control register, and Table 4.13
  * names the one that matters most here: bit 0 is SCI_EN, which "OSPM always
@@ -401,13 +652,15 @@ void acpi_gpe_unregister(uint16_t gpe) {
  * other block, is the caller's business: §4.8 puts the A block's SLP_TYP down
  * first and the B block's second, and only then the transition both blocks
  * sequence on. */
-static bool pm1_control_sleep_word(uint16_t port, uint16_t slp_typ,
-                                   uint16_t *word)
+static bool pm1_control_sleep_word(const AcpiPm1Control *r, uint16_t slp_typ,
+                                   const char *which, uint16_t *word)
 {
-    uint16_t cur = inw(port);
-    if (cur == 0xFFFFu) {
-        kprintf("[ACPI] PM1 control at 0x%x reads 0xFFFF — nothing decodes "
-                "that port, so there is no register to ask for sleep\n", port);
+    if (!r->present) return false;
+
+    uint16_t cur = 0;
+    if (!pm1_control_read(r, &cur)) {
+        kprintf("[ACPI] %s control register answers nothing that decodes, so "
+                "there is no register to ask for sleep\n", which);
         return false;
     }
 
@@ -486,13 +739,15 @@ int acpi_enter_sleep(uint8_t state) {
         TouchPublish(sleep_tags[state - 1], &ev, sizeof(ev));
     }
 
-    uint32_t pm1a = g_acpi.fadt->pm1a_control_block;
-    uint32_t pm1b = g_acpi.fadt->pm1b_control_block;
+    /* Through the resolved registers, not through the legacy FADT field with
+     * outw: this used to take pm1a_control_block for the address and an I/O
+     * port for the kind of register, which is the same assumption the
+     * ACPI-mode handoff was making one block up. */
     uint16_t word_a = 0, word_b = 0;
-    bool has_a = (pm1a != 0) &&
-                 pm1_control_sleep_word((uint16_t)pm1a, slp_typa, &word_a);
-    bool has_b = (pm1b != 0) &&
-                 pm1_control_sleep_word((uint16_t)pm1b, slp_typb, &word_b);
+    bool has_a = pm1_control_sleep_word(&g_pm1a_control, slp_typa, "PM1a",
+                                        &word_a);
+    bool has_b = pm1_control_sleep_word(&g_pm1b_control, slp_typb, "PM1b",
+                                        &word_b);
 
     /* ACPI 6.5 §4.8: "OSPM will always write the SLP_TYPa value to the 'A'
      * register block followed by the SLP_TYPb value within the field to the
@@ -501,10 +756,12 @@ int acpi_enter_sleep(uint8_t state) {
      * than one block finished before the other is started. Driving SLP_EN in
      * A while B still holds the previous type is the thing that sentence is
      * there to forbid. */
-    if (has_a) outw((uint16_t)pm1a, word_a);
-    if (has_b) outw((uint16_t)pm1b, word_b);
-    if (has_a) outw((uint16_t)pm1a, (uint16_t)(word_a | PM1_CNT_SLP_EN));
-    if (has_b) outw((uint16_t)pm1b, (uint16_t)(word_b | PM1_CNT_SLP_EN));
+    if (has_a) pm1_control_write(&g_pm1a_control, word_a);
+    if (has_b) pm1_control_write(&g_pm1b_control, word_b);
+    if (has_a) pm1_control_write(&g_pm1a_control,
+                                 (uint16_t)(word_a | PM1_CNT_SLP_EN));
+    if (has_b) pm1_control_write(&g_pm1b_control,
+                                 (uint16_t)(word_b | PM1_CNT_SLP_EN));
 
     /* On S1, control returns here on wake. Other states either reset
      * the CPU (S2-S3) or never return (S4-S5). */
@@ -989,34 +1246,81 @@ void acpi_sci_arm(void)
 
 /* How long the firmware gets to finish the handoff into ACPI mode.
  *
- * DECLARED POLICY, not a spec quantity. ACPI 6.5 §16.3.2 tells the OS to write
- * ACPI_ENABLE to SMI_CMD and then poll PM1a_CNT "until" SCI_EN reads back as
- * one; it names no maximum anywhere, so there is no number to quote. Three
- * seconds is this kernel's patience, written once so there is one place to
- * argue with it. */
+ * DECLARED POLICY, not a spec quantity. ACPI 6.5 §16.3.1 "Placing the System
+ * in ACPI Mode" has OSPM "generat[e] a write of the ACPI_ENABLE value to the
+ * SMI_CMD port (as described in the FADT)" and then says only that "the
+ * hardware platform will set the SCI_EN bit to indicate to OSPM that the
+ * hardware platform is now configured for ACPI". It names no deadline, and it
+ * does not prescribe polling at all — polling is ACPICA's practice, not spec
+ * text. Three seconds is this kernel's patience, written once so there is one
+ * place to argue with it. (The citation that stood here, §16.3.2, is
+ * "Platform Boot Firmware Initialization of Memory" and mentions none of
+ * SMI_CMD, ACPI_ENABLE or SCI_EN.) */
 #define ACPI_SCI_HANDOFF_PATIENCE_US   3000000u
 
-/* ACPI 6.5 §16.3.2: many real firmwares boot in PIC/SMI mode (SCI_EN=0).
- * The OS must write FADT.ACPI_ENABLE to FADT.SMI_CMD then poll PM1a_CNT
- * until bit 0 (SCI_EN) becomes 1 before any PM1 write will take effect.
- * UEFI implementations usually have SCI_EN=1 already; legacy BIOS often
- * doesn't. Idempotent. */
+/* ACPI 6.5 §5.2.9, FADT Flags, HW_REDUCED_ACPI: "If set, indicates that the
+ * ACPI Hardware Interface is not implemented." That is the one shape in
+ * which a FADT legitimately describes no PM1 control block at all. */
+#define FADT_FLAG_HW_REDUCED_ACPI   (1u << 20)
+
+/* ACPI 6.5 §16.3.1: many real firmwares boot in PIC/SMI mode (SCI_EN=0).
+ * The OS writes FADT.ACPI_ENABLE to FADT.SMI_CMD and the platform raises
+ * SCI_EN when it has handed the machine over; no PM1 write takes effect
+ * before that. UEFI implementations usually have SCI_EN=1 already; legacy
+ * BIOS often doesn't. Idempotent.
+ *
+ * SCI_EN is read through the PM1 control registers resolved out of the FADT
+ * (acpi_pm1_control_locate, above) and from BOTH halves of the pair — not
+ * out of the legacy PM1a_CNT_BLK field with a bare inw, which is what used to
+ * make an undecoded port's 0xFFFF look like "already in ACPI mode". */
 static void acpi_enable_mode(void) {
     if (!g_acpi.fadt) return;
     uint32_t smi   = g_acpi.fadt->smi_command_port;
     uint8_t  byte  = g_acpi.fadt->acpi_enable;
-    uint32_t pm1a  = g_acpi.pm1a_cnt_blk;
 
-    if (smi == 0 || byte == 0 || pm1a == 0) {
-        debug_printf("[ACPI] SCI handoff not needed (smi=%u en=0x%x pm1a=0x%x)\n",
-                     smi, byte, pm1a);
+    switch (pm1_sci_en_state()) {
+        case ACPI_SCI_EN_SET:
+            debug_printf("[ACPI] SCI_EN already set — platform in ACPI mode\n");
+            return;
+        case ACPI_SCI_EN_NO_BLOCK:
+            /* No PM1 control block is described at all. On a
+             * hardware-reduced platform that is the whole truth — §4.8's
+             * fixed hardware is not implemented and there is no SCI_EN to
+             * hand over. On anything else it is a malformed FADT, and it
+             * costs this boot the power button and S5, so the flag is
+             * consulted instead of assumed and both sentences are kprintf:
+             * a debug_printf is nothing in a shipped build. */
+            if (g_acpi.fadt->flags & FADT_FLAG_HW_REDUCED_ACPI) {
+                kprintf("[ACPI] hardware-reduced platform (FADT "
+                        "HW_REDUCED_ACPI): no PM1 control register exists "
+                        "and there is no SCI_EN to hand over\n");
+            } else {
+                kprintf("[ACPI] this FADT names no PM1 control register in "
+                        "either the X_ descriptor or the 32-bit field, yet "
+                        "HW_REDUCED_ACPI is clear — ACPI 6.5 §4.8 requires "
+                        "the register on such a platform. SCI_EN cannot be "
+                        "read or handed over: PM1 writes (the power button, "
+                        "S5) will not take effect\n");
+            }
+            return;
+        case ACPI_SCI_EN_UNREADABLE:
+            kprintf("[ACPI] the PM1 control register this FADT describes "
+                    "answers nothing that decodes — SCI_EN cannot be read, so "
+                    "the ACPI-mode handoff is not attempted. PM1 writes (the "
+                    "power button, S5) may not take effect on this boot\n");
+            return;
+        case ACPI_SCI_EN_CLEAR:
+            break;
+    }
+
+    if (smi == 0 || byte == 0) {
+        kprintf("[ACPI] SCI_EN is clear and this FADT names no way to raise "
+                "it (SMI_CMD=0x%x, ACPI_ENABLE=0x%x) — the platform stays in "
+                "SMI mode: PM1 writes (the power button, S5) will not take "
+                "effect\n", smi, byte);
         return;
     }
-    uint16_t sts = inw((uint16_t)pm1a);
-    if (sts & 0x1) {
-        debug_printf("[ACPI] SCI_EN already set — platform in ACPI mode\n");
-        return;
-    }
+
     debug_printf("[ACPI] handing off to ACPI mode (smi=0x%x byte=0x%x)\n",
                  smi, byte);
     outb((uint16_t)smi, byte);
@@ -1042,12 +1346,28 @@ static void acpi_enable_mode(void) {
     if (!HourGlassTurn(&glass, ACPI_SCI_HANDOFF_PATIENCE_US)) {
         kprintf("[ACPI] no time source on this machine yet — waiting for "
                 "SCI_EN on the fact itself, with no bound\n");
-        while (!(inw((uint16_t)pm1a) & 0x1)) cpu_pause();
-        kprintf("[ACPI] SCI_EN raised — the platform is in ACPI mode\n");
-        return;
+        for (;;) {
+            AcpiSciEnState st = pm1_sci_en_state();
+            if (st == ACPI_SCI_EN_SET) {
+                kprintf("[ACPI] SCI_EN raised — the platform is in ACPI "
+                        "mode\n");
+                return;
+            }
+            /* The wait ends on a fact or on the loss of the fact. A register
+             * that answered a moment ago and answers nothing now is not a
+             * reason to spin for the life of the machine. */
+            if (st != ACPI_SCI_EN_CLEAR) {
+                kprintf("[ACPI] the PM1 control register stopped answering "
+                        "while the handoff was in flight — SCI_EN can no "
+                        "longer be read and the platform's mode is "
+                        "unknown\n");
+                return;
+            }
+            cpu_pause();
+        }
     }
     for (;;) {
-        if (inw((uint16_t)pm1a) & 0x1) {
+        if (pm1_sci_en_state() == ACPI_SCI_EN_SET) {
             /* One sample so the elapsed figure below is the time that really
              * passed rather than whatever the last poll left behind. */
             (void)HourGlassRunOut(&glass);
@@ -1093,6 +1413,12 @@ acpi_error_t acpi_init(void) {
     }
 
     g_acpi.initialized = true;
+
+    /* Where the PM1 control registers are — X_ first, with a FADT-length
+     * guard, and in whatever address space the descriptor names. The handoff
+     * below reads SCI_EN out of them and acpi_enter_sleep writes its sleep
+     * vector to them, so this has to stand before either. */
+    acpi_pm1_control_locate();
 
     /* Switch the platform into ACPI mode if firmware booted us in
      * legacy/SMI mode. Must happen after FADT is captured but BEFORE

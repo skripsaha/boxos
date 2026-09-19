@@ -148,8 +148,9 @@ void mce_migrate_init(void) {
 /*
  * Replace PHYS bits of the leaf PTE at (ctx, va) with `new_phys`,
  * preserving everything else: low-12 flag bits, NX (bit 63), Phase 2D
- * region_id (bits 52-58), Phase 2H PKEY (bits 62:59), Phase 2K CET
- * supv-SS (bit 60 when CR4.CET=1). Returns true on swap, false if
+ * region_id (bits 52-58) and Phase 2H PKEY (bits 62:59). A shadow
+ * stack survives this untouched for the same reason: its encoding is
+ * R/W=0 + D=1, both inside the preserved low-12. Returns true on swap, false if
  * the PTE no longer exists (vmm_unmap raced) or is a 2 MiB leaf
  * (Phase 1 migration is 4 KiB-only — log via stats and let caller
  * decide).

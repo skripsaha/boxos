@@ -507,8 +507,9 @@ bool vmm_verify_pte_metadata_bits_52_58(void) {
     bool cr4_pks = ((cr4 >> 24) & 1u) != 0;
     bool cr4_cet = ((cr4 >> 23) & 1u) != 0;
 
-    /* PKU (bits 62:59) / CET (bit 60) live OUTSIDE bits 52-58. Logged
-     * for telemetry — never causes ABORT on current silicon. */
+    /* PKU (bits 62:59) lives OUTSIDE bits 52-58, and CET takes no leaf
+     * bit at all — a shadow stack is R/W=0 + Dirty=1, bits 1 and 6.
+     * Logged for telemetry — never causes ABORT on current silicon. */
     debug_printf("[VMM] PTE-metadata-52-58 probe: MAXPHYADDR=%u "
                  "CR4.PKE=%d CR4.PKS=%d CR4.CET=%d → bits 52-58 SAFE\n",
                  (unsigned)vmm_maxphyaddr,
@@ -729,6 +730,234 @@ void vmm_cet_probe(void) {
                  (unsigned)g_vmm_tag_cet_cp_fault);
 }
 void vmm_cet_ap_probe(void) { vmm_cet_probe_inner("AP"); }
+
+/* ─── Shadow-stack pages (Intel SDM Vol 3A §4.6) ──────────────────────
+ *
+ * The quotation and the rules are in vmm.h next to
+ * VMM_FLAGS_SHADOW_STACK_SUPV. These two functions are the only place in
+ * the kernel that puts the R/W=0 + Dirty=1 combination onto a leaf.
+ */
+
+/* §4.6 condition (2): "the R/W flag is 1 in every other paging-structure
+ * entry controlling the translation of the linear address". A read-only
+ * parent makes the address an ordinary read-only address no matter what
+ * the leaf says, and the first shadow-stack access to it is a #PF with
+ * the SS error bit set — a fault with no obvious cause. Every parent
+ * this VMM creates is writable (vmm_get_or_create_table and
+ * vmm_demote_large_entry both publish VMM_FLAGS_KERNEL_RW | USER, and
+ * the Pull Map's own PDPT/PD entries are PRESENT | WRITABLE), so this
+ * walk is expected to pass; it exists so that the day it does not, the
+ * caller gets a refusal instead of a shadow stack that is not one.
+ *
+ * Stops at whichever level holds the leaf, because the leaf is the one
+ * entry condition (2) does NOT apply to. */
+static bool vmm_shadow_stack_parents_writable(vmm_context_t *ctx,
+                                              uintptr_t virt_addr)
+{
+    if (!ctx || !ctx->pml4)
+        return false;
+
+    /* Under 5-level paging the PML5 entry is a parent too, and
+     * vmm_walk_pml5_to_pml4 hides it — check it before descending. */
+    if (g_vmm_paging_levels == 5)
+    {
+        pte_t pml5e = ctx->pml4->entries[VMM_PML5_INDEX(virt_addr)];
+        if (!(pml5e & VMM_FLAG_PRESENT) || !(pml5e & VMM_FLAG_WRITABLE))
+            return false;
+    }
+
+    page_table_t *pml4 = vmm_walk_pml5_to_pml4(ctx, virt_addr, false);
+    if (!pml4)
+        return false;
+
+    pte_t pml4e = pml4->entries[VMM_PML4_INDEX(virt_addr)];
+    if (!(pml4e & VMM_FLAG_PRESENT) || !(pml4e & VMM_FLAG_WRITABLE))
+        return false;
+
+    page_table_t *pdpt =
+        (page_table_t *)vmm_phys_to_virt(vmm_pte_to_phys(pml4e));
+    pte_t pdpte = pdpt->entries[VMM_PDPT_INDEX(virt_addr)];
+    if (!(pdpte & VMM_FLAG_PRESENT))
+        return false;
+    if (pdpte & VMM_FLAG_LARGE_PAGE)
+        return true;                     /* 1 GiB leaf — no parent left */
+    if (!(pdpte & VMM_FLAG_WRITABLE))
+        return false;
+
+    page_table_t *pd =
+        (page_table_t *)vmm_phys_to_virt(vmm_pte_to_phys(pdpte));
+    pte_t pde = pd->entries[VMM_PD_INDEX(virt_addr)];
+    if (!(pde & VMM_FLAG_PRESENT))
+        return false;
+    if (pde & VMM_FLAG_LARGE_PAGE)
+        return true;                     /* 2 MiB leaf — no parent left */
+    return (pde & VMM_FLAG_WRITABLE) != 0;
+}
+
+bool vmm_shadow_stack_seal(vmm_context_t *ctx, uintptr_t virt_addr)
+{
+    if (!ctx || !vmm_is_page_aligned(virt_addr))
+        return false;
+
+    bool changed = false;
+
+    /* ctx->lock across the walk and the leaf write, released before the
+     * shootdown — the same discipline, in the same order, as
+     * vmm_map_page. The walk is not a read: it can allocate a page table
+     * and it can demote a huge leaf, so two cores sealing two pages of
+     * the same 1 GiB Pull Map leaf meet inside vmm_get_or_create_table.
+     * Holding a lock across an IPI broadcast is what vmm_map_page
+     * avoids, and so does this. */
+    spin_lock(&ctx->lock);
+
+    /* A 4 KiB leaf, always. The encoding is per page and the Pull Map
+     * hands out 1 GiB and 2 MiB leaves for kernel windows; going through
+     * vmm_get_or_create_pte splits whichever huge leaf covers this
+     * address (vmm_demote_large_entry) so this one page can carry a
+     * permission its neighbours must not. */
+    pte_t *pte = vmm_get_or_create_pte(ctx, virt_addr);
+    if (!pte)
+    {
+        spin_unlock(&ctx->lock);
+        return false;
+    }
+
+    if (!(__atomic_load_n(pte, __ATOMIC_ACQUIRE) & VMM_FLAG_PRESENT))
+    {
+        spin_unlock(&ctx->lock);
+        return false;
+    }
+
+    /* §4.6 condition (2) is checked BEFORE the leaf is touched, not
+     * after. A refusal has to leave the page exactly as it was found:
+     * every caller hands the frame straight back to the PMM, and a frame
+     * that goes back with R/W = 0 in the direct map faults the next
+     * pmm_alloc_zero inside the allocator's own memset. Checking first
+     * means no failure remains after the CAS, so there is no rollback
+     * that can be got wrong. The check runs after the walk because the
+     * walk is what demotes the huge leaf, and the demotion is what
+     * publishes the PD/PT parents this condition is about. */
+    if (!vmm_shadow_stack_parents_writable(ctx, virt_addr))
+    {
+        spin_unlock(&ctx->lock);
+        return false;
+    }
+
+    pte_t old = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
+    for (;;)
+    {
+        pte_t sealed = (old | VMM_FLAG_DIRTY) & ~VMM_FLAG_WRITABLE;
+        if (sealed == old)
+            break;                       /* already sealed */
+        if (__atomic_compare_exchange_n(pte, &old, sealed, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        {
+            changed = true;
+            break;
+        }
+        if (!(old & VMM_FLAG_PRESENT))   /* entry vanished under us */
+        {
+            spin_unlock(&ctx->lock);
+            return false;
+        }
+        /* old refreshed by the failed CAS — retry. */
+    }
+
+    spin_unlock(&ctx->lock);
+
+    /* Cross-core, because this is a permission DOWNGRADE on a mapping
+     * other cores share. Supervisor shadow stacks live in the Pull Map,
+     * whose leaves are PRESENT | WRITABLE | GLOBAL and whose PML4 entry
+     * is copied by value into every cabin context; a GLOBAL entry
+     * survives a CR3 load, so a sibling keeps its writable translation
+     * until something invalidates it. A core translating through that
+     * stale entry does not see a shadow-stack address at all — §4.6
+     * condition (1) is read from the entry, and the cached copy still
+     * says R/W = 1 — so its shadow-stack access to the page faults and
+     * an ordinary kernel store to it succeeds. Not hypothetical:
+     * cet_process_create_kernel_ssp seals a process's PL0 shadow stack
+     * on the SPAWNING core, and the process then runs on whichever core
+     * the scheduler gives it.
+     *
+     * The INVLPG of this 4 KiB address also drops the stale 1 GiB /
+     * 2 MiB entry covering it, which is the other half of what the
+     * demotion in the walk above needs: vmm_demote_large_entry
+     * deliberately leaves the cross-core flush of the changed leaf to
+     * the caller that changed it, and this is that caller.
+     *
+     * On the AP bring-up path this call sends no IPI and cannot block:
+     * g_amp.multicore_active is set only at the very end of
+     * amp_boot_aps, and vmm_shootdown_pages answers that with a plain
+     * local invlpg. Cores already running then do keep a stale writable
+     * entry for the pages sealed there — and that is harmless for
+     * exactly those pages, because a core's own PL0 / IST stacks are
+     * named by that core's MSRs alone, so no sibling ever makes a
+     * shadow-stack access to them and no kernel pointer into them
+     * exists for an ordinary write. The seal that DOES cross cores, the
+     * per-process one above, runs long after multicore_active is up and
+     * gets the full broadcast.
+     *
+     * Nothing changed → nothing to invalidate: a page that was already
+     * sealed left no stale writable entry anywhere. */
+    if (changed)
+        vmm_shootdown_page(ctx, virt_addr);
+    return true;
+}
+
+bool vmm_shadow_stack_unseal(vmm_context_t *ctx, uintptr_t virt_addr)
+{
+    if (!ctx || !vmm_is_page_aligned(virt_addr))
+        return false;
+
+    bool changed = false;
+
+    spin_lock(&ctx->lock);
+
+    /* No demotion here: a sealed page necessarily already has a 4 KiB
+     * leaf, because vmm_shadow_stack_seal made one. */
+    pte_t *pte = vmm_get_pte(ctx, virt_addr);
+    if (!pte)
+    {
+        spin_unlock(&ctx->lock);
+        return false;
+    }
+
+    pte_t old = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
+    for (;;)
+    {
+        if (!(old & VMM_FLAG_PRESENT))
+        {
+            spin_unlock(&ctx->lock);
+            return false;
+        }
+        pte_t plain = old | VMM_FLAG_WRITABLE;
+        if (plain == old)
+            break;
+        if (__atomic_compare_exchange_n(pte, &old, plain, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        {
+            changed = true;
+            break;
+        }
+    }
+
+    spin_unlock(&ctx->lock);
+
+    /* Broadcast, the mirror of the seal's reason: the core that sealed
+     * this page is not necessarily the core freeing it, and every core
+     * that translated it while it was sealed holds a read-only entry
+     * that would fault the next writer of the recycled frame. On the one
+     * path that runs before the machine is multicore — the out-of-memory
+     * rollback in cet_lifecycle.c during AP bring-up — this is the same
+     * local invlpg the seal did there, by the same test inside
+     * vmm_shootdown_pages: no IPI is sent, no core is waited on.
+     *
+     * Dirty stays set — it is what it always meant, "this page was
+     * written", and leaving it costs nothing. */
+    if (changed)
+        vmm_shootdown_page(ctx, virt_addr);
+    return true;
+}
 
 typedef struct vmalloc_entry
 {

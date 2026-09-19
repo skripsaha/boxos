@@ -235,11 +235,22 @@ static uint32_t bert_decode_block(volatile uint8_t* blk, uint32_t avail) {
  *   BERT — Boot Error Record Table (one-shot record carried across reboot)
  *   ERST — Error Record Serialization Table (persistent error log API)
  *
- * BoxOS does not yet act as a full WHEA-style RAS consumer. This pass
- * only records presence + handful of top-level fields so a future RAS
- * subsystem can find the descriptors without re-walking the firmware
- * tables. Server boards that expose machine-check details, IPMI alerts,
- * or persistent log regions surface them through these tables.
+ * What each one costs this pass is no longer the same, and the comment
+ * that stood here — "only records presence + handful of top-level fields
+ * so a future RAS subsystem can find the descriptors" — has not been true
+ * of two of the three for some time:
+ *
+ *   HEST is walked entry by entry, and every enabled GHES / GHESv2 source
+ *        is handed to the runtime (decode_ghes -> apei_ghes_register_source),
+ *        which is what makes an SCI-, NMI- or polled-notification hardware
+ *        error reach this kernel at all.
+ *   BERT is read, decoded down to its Generic Error Data Entries,
+ *        published on Touch and acknowledged (acpi_apei_consume).
+ *   ERST is bound only: acpi_erst_bind records where the table is, and no
+ *        serialization instruction of it is executed on any boot today.
+ *
+ * Server boards that expose machine-check details, IPMI alerts, or
+ * persistent log regions surface them through these tables.
  */
 
 /* HEST error source type codes (ACPI 6.5 §18.3.2, Table 18.2). Every

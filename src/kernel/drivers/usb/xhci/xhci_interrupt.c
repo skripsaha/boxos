@@ -723,21 +723,47 @@ static void xhci_irq_handler_on(xhci_controller_t* ctrl) {
      */
     xhci_controller_stopped_in(ctrl, usbsts);
 
-    /* And now acknowledge only what this handler consumes. HSE is not in that
+    /*
+     * And now acknowledge only what this handler consumes. HSE is not in that
      * list: it belongs to the fatal path above, which clears it at the one
-     * place that has read it and said what it was. */
+     * place that has read it and said what it was.
+     *
+     * ‼ THIS WRITE COMES BEFORE THE IMAN.IP WRITE BELOW, AND THAT ORDER IS THE
+     * ONE THING HERE THE SPECIFICATION ACTUALLY REQUIRES. xHCI 1.2 §5.4.2,
+     * Table 5-21, bit 3 (EINT): "Software that uses EINT shall clear it prior
+     * to clearing any IP flags. A race condition may occur if software clears
+     * the IP flags then clears the EINT flag, and between the operations
+     * another IP '0' to '1' transition occurs. In this case the new IP
+     * transition shall be lost."
+     */
     ctrl->op_regs->usbsts = usbsts & (XHCI_STS_EINT | XHCI_STS_PCD);
 
     /*
      * Acknowledge the interrupt BEFORE reading the ring, not after.
      *
-     * xHCI 1.2 §4.17.5 puts it in this order for a reason: the controller
-     * raises Interrupt Pending again the moment it adds an event, and an
-     * acknowledgement written after the ring has been read clears a flag that
-     * was raised by an event arriving during the read. That event is still on
-     * the ring, but nothing will interrupt to say so. Clearing it first costs
-     * a spurious interrupt at worst — the drain finds nothing and says so with
-     * a register write — and loses none.
+     * ‼ THE SENTENCE THAT USED TO STAND HERE CITED §4.17.5 FOR THIS AND SAID
+     * "the controller raises Interrupt Pending again the moment it adds an
+     * event". Both halves were false. §4.17.5 is "Interrupt Blocking" — the
+     * BEI flag, the internal IPE flag and the IP-management rules — and says
+     * nothing about the order in which software writes USBSTS, IMAN.IP and the
+     * event ring; and §4.17.2 has IP and EHB set together, with IP raised only
+     * "When IPE transitions to '1': If ... IMODC = '0' and EHB = '0'", so
+     * while this handler is draining with EHB set the controller does NOT
+     * raise IP at all.
+     *
+     * The real window is smaller and later, and it is why the acknowledgement
+     * still belongs here: the drain clears EHB itself, in the ERDP write it
+     * makes every XHCI_ERDP_BATCH events, and from that instant the controller
+     * may raise IP again for an event that arrives while the drain is still
+     * running. An acknowledgement written after the ring had been read would
+     * clear exactly that flag, and the event behind it would sit on the ring
+     * with nothing left to interrupt about it.
+     *
+     * Ack-before-drain is a driver convention rather than a rule out of the
+     * specification — Linux does the same, for its own reason ("so we can
+     * receive interrupts from other MSI-X interrupters") — and it costs a
+     * spurious interrupt at worst: the drain finds nothing and says so with a
+     * register write.
      */
     ctrl->runtime_regs->interrupters[0].iman |= XHCI_IMAN_IP;
 

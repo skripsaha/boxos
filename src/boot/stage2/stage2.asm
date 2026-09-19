@@ -15,7 +15,8 @@ DEFAULT ABS
 ; The assertions at the bottom of this file enforce the map rather than
 ; describe it.
 ; 0x00500..0x01103    - E820 memory map (header + up to 128 x 24-byte entries)
-; 0x01200..0x01217    - Stage1 scratch (drive, EDD flag, geometry, DAP)
+; 0x01200..0x0121B    - Stage1 scratch (drive, EDD flag, geometry, DAP, and
+;                       the state of stage1's own read loop)
 ; 0x07000             - 16-bit stack top, grows down
 ; 0x07C00             - Stage1 (512 bytes)
 ; 0x08000..0x09FFF    - Stage2 (16 sectors — the whole window, always loaded)
@@ -1795,10 +1796,24 @@ find_kernel_in_deed:
 ; deed pointing at the wrong blocks), jumping to it would triple-fault
 ; silently — so halt here with a clear message instead.
 ;
-; Requires: Unreal Mode active (a32 access to 0x100000 needed).
+; ‼ It restores unreal mode itself. The three reads below are the only a32
+; accesses in this file that are NOT immediately preceded by disk_read_dap,
+; whose exit paths restore it for every caller; what runs before this is
+; load_kernel_tagfs' closing print_string_16, a run of INT 10h teletype calls.
+; A firmware whose INT 10h handler returns through a 64 KB-limit data
+; descriptor — which is what SeaBIOS's transition16 does deliberately, "Reset
+; data segment limits" — leaves the cached ES limit at 0xFFFF, and the `mov es,
+; ax` below cannot repair it: a real-mode segment load refreshes the base and
+; nothing else. The first a32 read then addresses past the cached limit, which
+; per the i386 PRM §14.1 raises a pseudo-protection fault through the real-mode
+; IVT, where the BIOS's IRQ5 stub EOIs and IRETs straight back onto the
+; faulting instruction — an endless fault loop with the last line of output
+; still on the screen and nothing said about why.
 validate_kernel_magic:
     push eax
     push edi
+
+    call restore_unreal_mode        ; clobbers AX and flags; nothing live yet
 
     xor eax, eax
     mov es, ax
@@ -2868,17 +2883,6 @@ boot_drive_saved:       db 0
 ; Twelve bytes, NUL-padded, copied verbatim onto the boarding pass so the
 ; kernel can say which loader produced the image it is running.
 boarding_loader_name:   db 'stage2', 0, 0, 0, 0, 0, 0
-
-; Drive-select base byte for raw ATA PIO LBA28. Computed once on first call
-; from boot_drive_saved (BIOS DL = 0x80 master, 0x81 slave). Bits encoded:
-;   0xE0 = 1110_xxxx = master + LBA mode
-;   0xF0 = 1111_xxxx = slave  + LBA mode
-; The low nibble carries LBA[27:24] at issue time and is OR-ed in per sector.
-align 4
-dap_work_lba:           dd 0
-dap_work_count:         dd 0
-dap_work_seg:           dw 0
-dap_work_off:           dw 0
 
 align 4
 dynamic_pt_base:        dd 0            ; computed page table base (after kernel)

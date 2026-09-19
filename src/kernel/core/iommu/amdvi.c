@@ -38,7 +38,11 @@
  * "iommu=pt" mode.
  * ===================================================================== */
 
-/* IOMMU MMIO registers (AMD-Vi §3.1.6). */
+/* IOMMU MMIO registers (AMD-Vi §3.4 "MMIO Registers": the 0000h-0030h block
+ * is §3.4.1 "Control and Status Registers", and the buffer head/tail pointers
+ * and the status register at 2000h-2020h are later subsections of the same
+ * §3.4). The "§3.1.6" that stood here names nothing in this specification:
+ * §3.1 has a single subsection, "Accessing MSI Capability Block Registers". */
 #define MMIO_DEV_TAB_BAR     0x0000   /* 64-bit */
 #define MMIO_CMD_BUF_BAR     0x0008
 #define MMIO_EVT_LOG_BAR     0x0010
@@ -668,20 +672,165 @@ static int amdvi_unmap(iommu_domain_t* d, uint64_t iova, uint64_t size) {
     return 0;
 }
 
-/* Drain the event log on every IOMMU. AMD-Vi §3.1.6 event entries are
- * 16 bytes; type code lives in bits 31:28 of qword 0. We log every
- * pending event then advance the head to the tail. Callers run this
- * from the SCI handler or as a periodic poll. */
+/* The 4-bit EventCode of an event log entry, named.
+ *
+ * The names come from the per-event figures (§2.5.2 Figure 52 through §2.5.15
+ * Figure 66), not from Table 42 "Event Type Summary", because Table 42 is
+ * stale inside its own document: it gives EVENT_COUNTER_ZERO the same 1001b
+ * as INVALID_PPR_REQUEST, and it calls "1010b-1111b Reserved; not used" while
+ * five of those codes have a figure and a field table of their own -- 1010b
+ * EVENT_COUNTER_ZERO (Figure 62), 1011b GUEST_EVENT_FAULT (Figure 63), 1100b
+ * VIOMMU_HARDWARE_ERROR (Figure 64), 1101b RMP_PAGE_FAULT (Figure 65), 1110b
+ * RMP_HARDWARE_ERROR (Figure 66). The figure is normative for the entry it
+ * describes; the summary row is not.
+ *
+ * The name printed is the spec's own spelling, not an abbreviation borrowed
+ * from another driver. Two codes no figure defines are left unnamed -- 0000b,
+ * which Table 42 does call Reserved, and 1111b, which nothing in the document
+ * mentions -- and for those the number is all that is said. This function
+ * makes no claim about what the specification does or does not contain: it
+ * reports only whether THIS driver has a name. */
+static const char* amdvi_event_name(uint32_t code) {
+    switch (code) {
+    case 0x1: return "ILLEGAL_DEV_TABLE_ENTRY";   /* Figure 52 */
+    case 0x2: return "IO_PAGE_FAULT";             /* Figure 53 */
+    case 0x3: return "DEV_TAB_HARDWARE_ERROR";    /* Figure 54 */
+    case 0x4: return "PAGE_TAB_HARDWARE_ERROR";   /* Figure 55 */
+    case 0x5: return "ILLEGAL_COMMAND_ERROR";     /* Figure 56 */
+    case 0x6: return "COMMAND_HARDWARE_ERROR";    /* Figure 57 */
+    case 0x7: return "IOTLB_INV_TIMEOUT";         /* Figure 58 */
+    case 0x8: return "INVALID_DEVICE_REQUEST";    /* Figure 59 */
+    case 0x9: return "INVALID_PPR_REQUEST";       /* Figures 60, 61 */
+    case 0xA: return "EVENT_COUNTER_ZERO";        /* Figure 62 */
+    case 0xB: return "GUEST_EVENT_FAULT";         /* Figure 63 */
+    case 0xC: return "VIOMMU_HARDWARE_ERROR";     /* Figure 64 */
+    case 0xD: return "RMP_PAGE_FAULT";            /* Figure 65 */
+    case 0xE: return "RMP_HARDWARE_ERROR";        /* Figure 66 */
+    default:  return "(this driver has no name for this code)";
+    }
+}
+
+/* Whether dword +00 bits 15:0 of an entry with this EventCode is a DeviceID.
+ *
+ * Figure 51 calls that dword nothing more specific than "First event code
+ * dependent operand [31:0]", and for five codes it is not a device:
+ * ILLEGAL_COMMAND_ERROR (Figure 56 / Table 61) and COMMAND_HARDWARE_ERROR
+ * (Figure 57 / Table 62) leave +00 entirely Reserved and put the offending
+ * command's system physical address in +04/+08; EVENT_COUNTER_ZERO (Figure 62
+ * / Table 67) and GUEST_EVENT_FAULT (Figure 63) leave it Reserved as well;
+ * and VIOMMU_HARDWARE_ERROR (Figure 64) puts a GuestID in those sixteen bits,
+ * which is not a device at all. Printing a bus:dev.fn for any of them names a
+ * device that did nothing -- in practice 00:00.0, the host bridge -- while
+ * hiding the operand that actually says what happened. */
+static bool amdvi_event_has_devid(uint32_t code) {
+    switch (code) {
+    case 0x1: case 0x2: case 0x3: case 0x4:   /* Figures 52, 53, 54, 55 */
+    case 0x7: case 0x8: case 0x9:             /* Figures 58, 59, 60/61   */
+    case 0xD: case 0xE:                       /* Figures 65, 66          */
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* Drain the event log on every IOMMU.
+ *
+ * An entry is 16 bytes and its EventCode is the top nibble of the SECOND
+ * dword -- AMD-Vi §2.5 "Generic Event Log Buffer Entry" (Figure 51 in
+ * revision 3.06): dword +00 carries "First event code dependent operand
+ * [31:0]" and nothing more specific than that, and dword +04 carries
+ * EventCode in bits 31:28 above the rest of that operand. What the first
+ * operand MEANS is settled by the figure for the individual event and by
+ * nothing else, which is why amdvi_event_has_devid exists rather than a
+ * blanket devid read. The top nibble of
+ * dword +00, which this code used to read, is a set of operand-validity
+ * flags -- so a real ILLEGAL_DEV_TABLE_ENTRY with one of them set decoded
+ * here as 0x2, which is the EventCode of IO_PAGE_FAULT. Not a nonsense
+ * number: a plausible, wrong event. Linux reads the nibble this reads now:
+ * `type = (event[1] >> EVENT_TYPE_SHIFT) & EVENT_TYPE_MASK` with
+ * EVENT_TYPE_SHIFT = 28. (The "§3.1.6" the old comment cited names nothing
+ * in this specification.)
+ *
+ * EventOverflow is the other half of the channel, and it is the half that
+ * decides how long the channel lasts. §3.4.16, MMIO 2020h bit 0: "No new
+ * event log entries are written while this bit is set." §2.5.1 restarts the
+ * log -- clear EventOverflow (W1C) and take 0018h[EventLogEn] back to 1, and
+ * the hardware wants that bit driven to 0 first, which is what Linux's
+ * amd_iommu_restart_event_logging does. A 4 KiB log holds 255 usable
+ * entries, so one misconfigured device faulting at DMA rate fills it in
+ * microseconds; without this, the IOMMU's only way of reporting
+ * IO_PAGE_FAULT, ILLEGAL_DEV_TABLE_ENTRY and DEV_TAB_HARDWARE_ERROR is dead
+ * for the rest of the boot and nothing says so.
+ *
+ * Not callable from an interrupt handler: TouchPublish is not IRQ-safe
+ * (touch.h -- interrupt context uses TouchPublishIrqPair), and this routine
+ * waits on EventLogRun with an HourGlass. The comment that stood here said
+ * "callers run this from the SCI handler or as a periodic poll"; there are
+ * no callers at all, and an SCI handler is the one place it may not run
+ * from. The event log IS armed by amdvi_unit_init on every AMD board with an
+ * IVRS, so the log fills whether or not anybody drains it. */
 void amdvi_poll_events(void) {
     for (uint8_t i = 0; i < g_unit_count; i++) {
         amdvi_unit_t* u = &g_units[i];
         if (!u->online) continue;
+
+        volatile uint64_t* status = (volatile uint64_t*)(u->reg + MMIO_STATUS);
+        bool     overflowed = (*status & STATUS_EVT_OVERFLOW) != 0;
+        uint64_t ctrl       = 0;
+
+        if (overflowed) {
+            kprintf("[AMD-Vi] IVHD[%u] event log OVERFLOWED — every fault the "
+                    "IOMMU tried to report after it filled was discarded, and "
+                    "it has written nothing since\n", i);
+            /* The log is restarted around the drain, and the enable goes off
+             * first for the reason amdvi_unit_init spells out: EventLogRun
+             * does not fall until the IOMMU has a cause to stop, and
+             * 0018h[EventLogEn] = 0 is the cause software has. */
+            ctrl = *(volatile uint64_t*)(u->reg + MMIO_CTRL);
+            *(volatile uint64_t*)(u->reg + MMIO_CTRL) = ctrl & ~CTRL_EVT_LOG_EN;
+            if (!amdvi_await_status_clear(u, STATUS_EVT_LOG_RUN,
+                                          "EventLogRun")) {
+                /* EventLogEn goes back exactly as it was found. A routine
+                 * whose whole job is to READ the log must not be the thing
+                 * that switches the log off: the drain is given up, but the
+                 * unit is left in the configuration it arrived in. The
+                 * channel stays silent all the same, because EventOverflow
+                 * is still standing and §3.4.16 says no new entry is written
+                 * while it is -- that is the IOMMU's doing, not ours. */
+                *(volatile uint64_t*)(u->reg + MMIO_CTRL) = ctrl;
+                kprintf("[AMD-Vi] IVHD[%u] would not stop writing its event "
+                        "log — the head pointer is left where it is rather "
+                        "than moved under a running IOMMU, EventLogEn is put "
+                        "back as it was, and this unit reports no further "
+                        "faults while EventOverflow stands\n", i);
+                continue;
+            }
+        }
+
         uint64_t head = *(volatile uint64_t*)(u->reg + MMIO_EVT_HEAD);
         uint64_t tail = *(volatile uint64_t*)(u->reg + MMIO_EVT_TAIL);
         while (head != tail) {
-            uint8_t* slot = (uint8_t*)u->evt_log + (head & (EVT_LOG_BYTES - 1));
-            uint32_t code = ((*(uint32_t*)slot) >> 28) & 0xF;
-            debug_printf("[AMD-Vi] IVHD[%u] event code=0x%x\n", i, code);
+            const uint8_t* slot =
+                (const uint8_t*)u->evt_log + (head & (EVT_LOG_BYTES - 1));
+            uint32_t code  = (*(const uint32_t*)(slot + 4) >> 28) & 0xFu;
+            if (amdvi_event_has_devid(code)) {
+                unsigned devid = *(const uint32_t*)slot & 0xFFFFu;
+                kprintf("[AMD-Vi] IVHD[%u] event 0x%x %s from %02x:%02x.%x\n",
+                        i, code, amdvi_event_name(code),
+                        devid >> 8, (devid >> 3) & 0x1Fu, devid & 0x7u);
+            } else {
+                /* No device to name, so the two operands are said as the
+                 * hardware wrote them. For ILLEGAL_COMMAND_ERROR and
+                 * COMMAND_HARDWARE_ERROR the second one is the system
+                 * physical address of the command the IOMMU choked on
+                 * (Figures 56, 57) -- the whole of what the entry has to
+                 * tell, and what naming a bus:dev.fn used to hide. */
+                kprintf("[AMD-Vi] IVHD[%u] event 0x%x %s — operands "
+                        "0x%lx 0x%lx\n",
+                        i, code, amdvi_event_name(code),
+                        (unsigned long)*(const uint64_t*)slot,
+                        (unsigned long)*(const uint64_t*)(slot + 8));
+            }
             /* Per-event broadcast — userspace logger / fault recoverer
              * subscribes by `iommu:fault` and decodes the 16-byte slot
              * we shipped as payload. */
@@ -689,6 +838,18 @@ void amdvi_poll_events(void) {
             head = (head + 16) & (EVT_LOG_BYTES - 1);
         }
         *(volatile uint64_t*)(u->reg + MMIO_EVT_HEAD) = tail;
+
+        if (overflowed) {
+            /* §2.5.1, in this order: the overflow bit cleared (W1C) now that
+             * the log is empty, then EventLogEn asserted again. Every other
+             * bit written to 2020h is 0 — the RW1C bits ignore it and the RO
+             * bits cannot be written at all. */
+            *status = STATUS_EVT_OVERFLOW;
+            *(volatile uint64_t*)(u->reg + MMIO_CTRL) = ctrl | CTRL_EVT_LOG_EN;
+            kprintf("[AMD-Vi] IVHD[%u] event log restarted; what it held "
+                    "before the overflow is all there is of what was lost\n",
+                    i);
+        }
     }
 }
 static void amdvi_invalidate(iommu_domain_t* d) {

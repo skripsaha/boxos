@@ -31,6 +31,14 @@ static const uint8_t g_boxos_type_guid[16] = {
  * entry is: status, three bytes of CHS nobody has used in thirty years, the
  * type byte, three more CHS, then the two numbers that matter — first LBA and
  * sector count, both little-endian 32-bit.
+ *
+ * Those two are in the medium's own logical blocks, exactly as a GPT's are —
+ * and unlike a GPT, an MBR carries nothing that states which size those are
+ * and no checksum to check a guess against. So a medium addressed in blocks
+ * larger than a sector can be read here only if the room is told the size,
+ * and the room does not hold it. Reached only by a disk with no protective
+ * entry, i.e. one that is not a GPT disk: every 4Kn medium in use carries a
+ * GPT, and that path settles the unit off the table itself.
  * ──────────────────────────────────────────────────────────────────────── */
 #define MBR_TABLE_OFFSET     446u
 #define MBR_ENTRY_BYTES      16u
@@ -74,6 +82,44 @@ static const uint8_t g_boxos_type_guid[16] = {
  * or an overflowing multiply. */
 #define GPT_ARRAY_MAX_BYTES     (128u * 1024u)
 #define GPT_ENTRY_MIN_BYTES     128u
+
+/*
+ * ‼ AND IN WHOSE UNITS THE WHOLE TABLE IS WRITTEN.
+ *
+ * Every LBA in a GPT — where the header lives, where the entry array starts,
+ * where a partition begins and ends — is one LOGICAL BLOCK OF THE MEDIUM, and
+ * UEFI 2.10 §5.3 says so wherever it has to put a number to it: "If the block
+ * size is 512, the First Usable LBA must be greater than or equal to 34",
+ * "if the logical block size is 4096, the First Useable LBA must be greater
+ * than or equal to 6". The size is the medium's to choose — "The device may
+ * present a logical block size that is not 512 bytes long" — and a 4Kn disk
+ * or enclosure chooses 4096.
+ *
+ * This room is addressed in 512-byte sectors on every seat, and a medium that
+ * addresses itself in larger blocks is translated by the driver that knows
+ * about it: a 4Kn stick is seated as eight times as many sectors and each
+ * read is turned back into the device's own blocks. That translation is exact
+ * and linear, and it is invisible here — what it leaves behind is a table
+ * whose every number is in 4096-byte units being read by a reader whose every
+ * number is in 512-byte ones. The header would be looked for at byte 512 and
+ * be at byte 4096, and the disk would be reported as carrying no BoxOS ground
+ * at all: not mounted, and nothing said beyond "no ground".
+ *
+ * The room cannot be asked which unit a seat is addressed in. What it hands
+ * out is the PHYSICAL block size, which is 4096 on the 512-byte-addressed
+ * flash everybody owns, so it cannot tell the two apart. But the table states
+ * it itself: a GPT header carries the number of the block it is IN, under its
+ * own CRC — so a header found at byte offset B saying it lives at block 1 is a
+ * header on a medium whose blocks are B bytes long, and nothing about it has
+ * been guessed. That is the same field that already catches a primary header
+ * copied to the wrong sector, used for the other thing it knows.
+ *
+ * The sizes tried are the powers of two from one sector up to 4096, where ATA
+ * and SCSI stop: 4Kn is the largest logical block either presents, and a
+ * medium addressed in anything that is not a whole number of 512-byte sectors
+ * is refused by the driver and never reaches a seat.
+ */
+#define GPT_BLOCK_MAX_BYTES     4096u
 
 static const uint8_t g_gpt_signature[8] = { 'E','F','I',' ','P','A','R','T' };
 
@@ -248,71 +294,103 @@ typedef enum {
 } GptVerdict;
 
 /*
- * Read the GPT whose header sits at `header_lba`, and say what came of it.
+ * Read the GPT whose header sits at block `header_block` of a medium whose
+ * blocks are `block_bytes` long, and say what came of it.
  *
  * Both checksums are verified because both exist for a reason: a header that
  * passes its own CRC can still point at an entry array that was interrupted
  * mid-write, and mounting out of that array is mounting out of whatever was
  * there before.
  *
- * `medium_sectors` is how far the disk runs, or zero when it would not say.
- * Every bound below is skipped when it is zero rather than guessed at — but
- * when it is known, a table that names sectors past the end of the medium is
- * refused, because following it is this kernel reading where there is nothing.
+ * `medium_sectors` is how far the disk runs IN THIS ROOM'S SECTORS, or zero
+ * when it would not say. Every bound below is skipped when it is zero rather
+ * than guessed at — but when it is known, a table that names blocks past the
+ * end of the medium is refused, because following it is this kernel reading
+ * where there is nothing.
+ *
+ * Everything the table states is in the medium's blocks and everything handed
+ * back is in the room's sectors; the two meet here and nowhere else.
  */
-static GptVerdict gpt_read_one(uint8_t seat, uint64_t header_lba,
-                               uint64_t medium_sectors,
+static GptVerdict gpt_read_one(uint8_t seat, uint64_t header_block,
+                               uint32_t block_bytes, uint64_t medium_sectors,
                                MediumGround *out, uint8_t max, uint8_t *found)
 {
     *found = 0;
 
-    uint8_t header[BOARDROOM_SECTOR_BYTES];
-    if (BoardroomRead(seat, header_lba, 1, header) != 0) {
-        kprintf("[Ground] seat %u: sector %llu would not be read\n",
-                seat, (unsigned long long)header_lba);
+    const uint64_t ratio         = block_bytes / BOARDROOM_SECTOR_BYTES;
+    const uint64_t medium_blocks = medium_sectors / ratio;   /* 0 = unknown */
+    const uint64_t header_sector = header_block * ratio;
+
+    /* A logical block does not fit on the stack the way a sector did, and
+     * this runs on the mount path. The heap already carries the entry array
+     * for the same reason. */
+    uint8_t *header = (uint8_t *)kmalloc(block_bytes);
+    if (!header) {
+        kprintf("[Ground] seat %u: no memory to read its GPT header\n", seat);
         return GPT_TABLE_DAMAGED;
+    }
+
+    uint8_t   *array   = NULL;
+    GptVerdict verdict = GPT_TABLE_READ;
+
+    if (BoardroomRead(seat, header_sector, (uint32_t)ratio, header) != 0) {
+        kprintf("[Ground] seat %u: sector %llu would not be read\n",
+                seat, (unsigned long long)header_sector);
+        verdict = GPT_TABLE_DAMAGED;
+        goto done;
     }
 
     if (memcmp(header + GPT_SIG_OFFSET, g_gpt_signature, 8) != 0) {
-        return GPT_TABLE_ABSENT;
+        verdict = GPT_TABLE_ABSENT;
+        goto done;
     }
 
     uint32_t header_bytes = le32(header + GPT_HEADER_SIZE_OFFSET);
-    if (header_bytes < GPT_HEADER_MIN_BYTES ||
-        header_bytes > BOARDROOM_SECTOR_BYTES) {
+    /* UEFI 2.10 §5.3.2: "The HeaderSize must be greater than or equal to 92
+     * and must be less than or equal to the logical block size." */
+    if (header_bytes < GPT_HEADER_MIN_BYTES || header_bytes > block_bytes) {
         kprintf("[Ground] seat %u: the GPT header at sector %llu states a "
                 "length of %u, which cannot be one\n",
-                seat, (unsigned long long)header_lba, header_bytes);
-        return GPT_TABLE_DAMAGED;
+                seat, (unsigned long long)header_sector, header_bytes);
+        verdict = GPT_TABLE_DAMAGED;
+        goto done;
     }
 
     /* The header's own checksum is taken over `header_bytes` with the checksum
-     * field itself zeroed (UEFI 2.10 §5.3.2). Copied rather than patched in
-     * place so the buffer still holds what the medium holds. */
-    uint8_t  probe[BOARDROOM_SECTOR_BYTES];
-    memcpy(probe, header, header_bytes);
-    memset(probe + GPT_HEADER_CRC_OFFSET, 0, 4);
+     * field itself zeroed (UEFI 2.10 §5.3.2). The field is taken out first and
+     * then zeroed where it lies: nothing below reads those four bytes again,
+     * and a second buffer a whole logical block wide is an allocation for
+     * four bytes. */
     uint32_t want_header_crc = le32(header + GPT_HEADER_CRC_OFFSET);
-    uint32_t have_header_crc = KCrc32(probe, header_bytes);
+    memset(header + GPT_HEADER_CRC_OFFSET, 0, 4);
+    uint32_t have_header_crc = KCrc32(header, header_bytes);
     if (have_header_crc != want_header_crc) {
         kprintf("[Ground] seat %u: the GPT header at sector %llu does not "
                 "match its own checksum (0x%08x against 0x%08x)\n",
-                seat, (unsigned long long)header_lba,
+                seat, (unsigned long long)header_sector,
                 have_header_crc, want_header_crc);
-        return GPT_TABLE_DAMAGED;
+        verdict = GPT_TABLE_DAMAGED;
+        goto done;
     }
 
-    /* ‼ A header states where it lives, and a copy of one that has been put
-     * somewhere else says so in that field. Without this a primary header
-     * duplicated into the last sector — which is what a naive imaging tool
-     * produces — reads as a valid backup and hands out the wrong array. */
+    /* ‼ A header states which BLOCK it lives in, and a copy of one that has
+     * been put somewhere else says so in that field. Without this a primary
+     * header duplicated into the last sector — which is what a naive imaging
+     * tool produces — reads as a valid backup and hands out the wrong array.
+     * It is also what settles the unit: a header of a 4096-byte-block medium,
+     * read as though the blocks were 512 bytes, is asked about block 8 and
+     * answers 1. */
     uint64_t my_lba = le64(header + GPT_MY_LBA_OFFSET);
-    if (my_lba != header_lba) {
-        kprintf("[Ground] seat %u: the GPT header at sector %llu says it "
-                "lives at %llu — it is a copy of one from somewhere else\n",
-                seat, (unsigned long long)header_lba,
+    if (my_lba != header_block) {
+        kprintf("[Ground] seat %u: the GPT header at sector %llu is block "
+                "%llu of %u bytes and says it lives at block %llu — it is a "
+                "copy of one from somewhere else, or from a medium addressed "
+                "differently\n",
+                seat, (unsigned long long)header_sector,
+                (unsigned long long)header_block, block_bytes,
                 (unsigned long long)my_lba);
-        return GPT_TABLE_DAMAGED;
+        verdict = GPT_TABLE_DAMAGED;
+        goto done;
     }
 
     /*
@@ -332,13 +410,13 @@ static GptVerdict gpt_read_one(uint8_t seat, uint64_t header_lba,
      * is knowable at all.
      */
     uint64_t alt_lba = le64(header + GPT_ALT_LBA_OFFSET);
-    if (medium_sectors != 0 && header_lba == GPT_HEADER_LBA &&
-        alt_lba != medium_sectors - 1) {
-        kprintf("[Ground] seat %u: its GPT keeps the far copy at sector %llu "
+    if (medium_blocks != 0 && header_block == GPT_HEADER_LBA &&
+        alt_lba != medium_blocks - 1) {
+        kprintf("[Ground] seat %u: its GPT keeps the far copy at block %llu "
                 "and the medium runs to %llu — this table was made for a "
                 "smaller disk and copied onto this one\n",
                 seat, (unsigned long long)alt_lba,
-                (unsigned long long)(medium_sectors - 1));
+                (unsigned long long)(medium_blocks - 1));
     }
 
     uint64_t entry_lba   = le64(header + GPT_ENTRY_LBA_OFFSET);
@@ -346,39 +424,60 @@ static GptVerdict gpt_read_one(uint8_t seat, uint64_t header_lba,
     uint32_t entry_bytes = le32(header + GPT_ENTRY_BYTES_OFFSET);
     uint32_t want_array_crc = le32(header + GPT_ENTRY_CRC_OFFSET);
 
-    if (entry_bytes < GPT_ENTRY_MIN_BYTES || entry_count == 0 ||
+    /* UEFI 2.10 §5.3.2 on SizeOfPartitionEntry: "This field shall be set to a
+     * value of 128 x 2^n where n is an integer greater than or equal to zero
+     * (e.g., 128, 256, 512, etc.). NOTE: Previous versions of this
+     * specification allowed any multiple of 8." The values that satisfy it
+     * are exactly the powers of two from 128 up, which is what is tested —
+     * and it is the stride this reader walks the array by, so a size that is
+     * none of them is a reader wrong about every entry after the first. */
+    if (entry_bytes < GPT_ENTRY_MIN_BYTES ||
+        (entry_bytes & (entry_bytes - 1u)) != 0u || entry_count == 0 ||
         entry_bytes > GPT_ARRAY_MAX_BYTES ||
         entry_count > GPT_ARRAY_MAX_BYTES / entry_bytes) {
         kprintf("[Ground] seat %u: its GPT states %u entries of %u bytes, "
                 "which is not a table this reads\n",
                 seat, entry_count, entry_bytes);
-        return GPT_TABLE_DAMAGED;
+        verdict = GPT_TABLE_DAMAGED;
+        goto done;
     }
 
     uint32_t array_bytes = entry_count * entry_bytes;
     uint32_t array_secs  = (array_bytes + BOARDROOM_SECTOR_BYTES - 1) /
                            BOARDROOM_SECTOR_BYTES;
 
+    /* Where the array is, in this room's sectors. The block number came off
+     * the medium, so the multiplication that turns it into one is checked
+     * rather than assumed. */
+    if (entry_lba > (~(uint64_t)0) / ratio) {
+        kprintf("[Ground] seat %u: its GPT puts the entry array at block "
+                "%llu, which is not a place on any medium\n",
+                seat, (unsigned long long)entry_lba);
+        verdict = GPT_TABLE_DAMAGED;
+        goto done;
+    }
+    uint64_t array_sector = entry_lba * ratio;
+
     if (medium_sectors != 0 &&
-        (entry_lba >= medium_sectors ||
-         entry_lba + array_secs > medium_sectors)) {
+        (array_sector >= medium_sectors ||
+         array_sector + array_secs > medium_sectors)) {
         kprintf("[Ground] seat %u: its GPT puts the entry array at sectors "
                 "%llu..%llu and the medium has %llu — not reading it\n",
-                seat, (unsigned long long)entry_lba,
-                (unsigned long long)(entry_lba + array_secs - 1),
+                seat, (unsigned long long)array_sector,
+                (unsigned long long)(array_sector + array_secs - 1),
                 (unsigned long long)medium_sectors);
-        return GPT_TABLE_DAMAGED;
+        verdict = GPT_TABLE_DAMAGED;
+        goto done;
     }
 
-    uint8_t *array = (uint8_t *)kmalloc(array_secs * BOARDROOM_SECTOR_BYTES);
+    array = (uint8_t *)kmalloc(array_secs * BOARDROOM_SECTOR_BYTES);
     if (!array) {
         kprintf("[Ground] seat %u: no memory to read its GPT entries\n", seat);
-        return GPT_TABLE_DAMAGED;
+        verdict = GPT_TABLE_DAMAGED;
+        goto done;
     }
 
-    GptVerdict verdict = GPT_TABLE_READ;
-
-    if (BoardroomRead(seat, entry_lba, array_secs, array) != 0) {
+    if (BoardroomRead(seat, array_sector, array_secs, array) != 0) {
         kprintf("[Ground] seat %u: would not give up its GPT entries\n", seat);
         verdict = GPT_TABLE_DAMAGED;
         goto done;
@@ -390,7 +489,7 @@ static GptVerdict gpt_read_one(uint8_t seat, uint64_t header_lba,
     if (have_array_crc != want_array_crc) {
         kprintf("[Ground] seat %u: the GPT entries at sector %llu do not match "
                 "their own checksum (0x%08x against 0x%08x)\n",
-                seat, (unsigned long long)entry_lba,
+                seat, (unsigned long long)array_sector,
                 have_array_crc, want_array_crc);
         verdict = GPT_TABLE_DAMAGED;
         goto done;
@@ -413,20 +512,31 @@ static GptVerdict gpt_read_one(uint8_t seat, uint64_t header_lba,
         /* ‼ AND IT HAS TO FIT ON THE DISK. A table is bytes off a medium, and
          * one that claims a run reaching past the end of it would have this
          * kernel reading where there is nothing. Nothing checked before,
-         * because there was nobody to ask how far the medium ran. */
-        if (medium_sectors != 0 && last >= medium_sectors) {
-            kprintf("[Ground] seat %u: GPT entry %u claims sectors %llu..%llu "
+         * because there was nobody to ask how far the medium ran. When the
+         * medium still will not say, the only bound left is the one the
+         * arithmetic itself has: a block number whose sector number does not
+         * exist in sixty-four bits. */
+        if (medium_blocks != 0 && last >= medium_blocks) {
+            kprintf("[Ground] seat %u: GPT entry %u claims blocks %llu..%llu "
                     "and the medium has %llu — not using it\n",
                     seat, i, (unsigned long long)first,
                     (unsigned long long)last,
-                    (unsigned long long)medium_sectors);
+                    (unsigned long long)medium_blocks);
+            continue;
+        }
+        if (medium_blocks == 0 && last > ((~(uint64_t)0) - (ratio - 1)) / ratio) {
+            kprintf("[Ground] seat %u: GPT entry %u ends at block %llu, which "
+                    "is not a place on any medium\n",
+                    seat, i, (unsigned long long)last);
             continue;
         }
 
         if (!ground_room(*found, max, seat)) break;
 
-        out[*found].start_sector = first;
-        out[*found].sectors      = last - first + 1;   /* GPT's last is inclusive */
+        /* Blocks into sectors, which is the unit everything above this reads
+         * in. GPT's last is inclusive. */
+        out[*found].start_sector = first * ratio;
+        out[*found].sectors      = (last - first + 1) * ratio;
         out[*found].origin       = GROUND_FROM_GPT;
         out[*found].entry        = (uint8_t)i;
         (*found)++;
@@ -434,10 +544,23 @@ static GptVerdict gpt_read_one(uint8_t seat, uint64_t header_lba,
 
 done:
     kfree(array);
+    kfree(header);
     if (verdict != GPT_TABLE_READ) {
         *found = 0;
     }
     return verdict;
+}
+
+/* Said once, when a table turns out to be written in the medium's own larger
+ * blocks: which grid the numbers on that disk are on is the kind of fact a
+ * person standing at the machine has to be able to read off the screen. */
+static void ground_say_unit(uint8_t seat, uint32_t block_bytes)
+{
+    kprintf("[Ground] seat %u: its GPT is written in %u-byte blocks — that is "
+            "how the medium addresses itself, this room addresses it in "
+            "512-byte sectors, and every number in that table is multiplied "
+            "by %u (UEFI 2.10 5.3)\n",
+            seat, block_bytes, block_bytes / BOARDROOM_SECTOR_BYTES);
 }
 
 /*
@@ -454,57 +577,84 @@ done:
  * far the medium runs. When it still cannot, that is SAID: a disk whose table
  * is damaged and whose size is unknown is one where nothing more can be tried,
  * and a person reading the screen should be told which of the two it was.
+ *
+ * And both copies are looked for in each unit the medium could be addressing
+ * itself in, finest first — see GPT_BLOCK_MAX_BYTES above for why that is a
+ * question at all, and why the medium's own table is what answers it.
  */
 static uint8_t ground_survey_gpt(uint8_t seat, MediumGround *out, uint8_t max)
 {
-    uint64_t medium = BoardroomSeatSectors(seat);
-    uint8_t  found  = 0;
+    const uint64_t medium   = BoardroomSeatSectors(seat);
+    uint8_t        found    = 0;
+    bool           said_far = false;
 
-    GptVerdict v = gpt_read_one(seat, GPT_HEADER_LBA, medium, out, max, &found);
-    if (v == GPT_TABLE_READ) {
-        return found;
+    for (uint32_t block = BOARDROOM_SECTOR_BYTES;
+         block <= GPT_BLOCK_MAX_BYTES;
+         block *= 2u) {
+        const uint64_t ratio = block / BOARDROOM_SECTOR_BYTES;
+
+        /* A medium with no room for a block 1 is not addressed in blocks this
+         * large, and asking a driver to read past the end of it is not a way
+         * to find that out. */
+        if (medium != 0 && medium < 2u * ratio) break;
+
+        found = 0;
+        GptVerdict v = gpt_read_one(seat, GPT_HEADER_LBA, block, medium,
+                                    out, max, &found);
+        if (v == GPT_TABLE_READ) {
+            if (block != BOARDROOM_SECTOR_BYTES) ground_say_unit(seat, block);
+            return found;
+        }
+
+        /*
+         * ‼ A HEADER THAT IS NOT THERE IS AS MUCH DAMAGE AS ONE THAT IS WRONG.
+         *
+         * This is only reached because sector 0 carries a protective entry,
+         * which is the disk saying "my real table is a GPT". If the header is
+         * then missing, the disk is contradicting itself — and that is exactly
+         * what one dead erase block under sector 1 looks like, which is the
+         * commonest way a GPT is lost. Treating it as "no GPT here" and
+         * stopping would leave the good copy at the other end unread, which is
+         * the whole fault this was written to close.
+         *
+         * The far copy is in the last BLOCK of the medium, so where it is
+         * depends on the unit being tried — which is why it is tried here,
+         * beside the primary of the same unit, and not in a pass of its own.
+         */
+        if (medium == 0) continue;
+
+        if (!said_far) {
+            /* A disk whose table was made for a smaller medium keeps its copy
+             * somewhere else — said by the primary read above while it could
+             * still be read, and unknowable once it cannot. */
+            kprintf("[Ground] seat %u: its GPT %s — reading the copy at the "
+                    "far end, sector %llu (UEFI 2.10 5.3.2)\n", seat,
+                    (v == GPT_TABLE_ABSENT) ? "is not where the disk says it is"
+                                            : "is damaged",
+                    (unsigned long long)(medium - ratio));
+            said_far = true;
+        }
+
+        found = 0;
+        v = gpt_read_one(seat, medium / ratio - 1, block, medium,
+                         out, max, &found);
+        if (v == GPT_TABLE_READ) {
+            kprintf("[Ground] seat %u: the copy at the far end is good — this "
+                    "disk is readable after all\n", seat);
+            if (block != BOARDROOM_SECTOR_BYTES) ground_say_unit(seat, block);
+            return found;
+        }
     }
 
-    /*
-     * ‼ A HEADER THAT IS NOT THERE IS AS MUCH DAMAGE AS ONE THAT IS WRONG.
-     *
-     * This is only reached because sector 0 carries a protective entry, which
-     * is the disk saying "my real table is a GPT". If the header is then
-     * missing, the disk is contradicting itself — and that is exactly what one
-     * dead erase block under sector 1 looks like, which is the commonest way a
-     * GPT is lost. Treating it as "no GPT here" and stopping would leave the
-     * good copy at the other end unread, which is the whole fault this was
-     * written to close.
-     */
     if (medium == 0) {
         kprintf("[Ground] seat %u: its GPT is damaged, and the medium will not "
                 "say how far it runs — so the copy at the far end cannot be "
                 "found\n", seat);
-        return 0;
+    } else {
+        kprintf("[Ground] seat %u: neither copy of its GPT could be read, in "
+                "any unit this medium could be addressed in — it has no table "
+                "left to read\n", seat);
     }
-
-
-    /* The specification puts the far copy in the last sector of the medium,
-     * and that is where this looks. A disk whose table was made for a smaller
-     * medium keeps it somewhere else — said above while the primary could
-     * still be read, and unknowable once it cannot. */
-    kprintf("[Ground] seat %u: its GPT %s — reading the copy at the far end, "
-            "sector %llu (UEFI 2.10 5.3.2)\n", seat,
-            (v == GPT_TABLE_ABSENT) ? "is not where the disk says it is"
-                                    : "is damaged",
-            (unsigned long long)(medium - 1));
-
-    found = 0;
-    v = gpt_read_one(seat, medium - 1, medium, out, max, &found);
-    if (v == GPT_TABLE_READ) {
-        kprintf("[Ground] seat %u: the copy at the far end is good — this disk "
-                "is readable after all\n", seat);
-        return found;
-    }
-
-    kprintf("[Ground] seat %u: the copy at the far end is %s — this disk has "
-            "no table left to read\n", seat,
-            (v == GPT_TABLE_ABSENT) ? "not there either" : "damaged too");
     return 0;
 }
 

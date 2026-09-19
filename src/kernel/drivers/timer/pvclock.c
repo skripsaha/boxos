@@ -80,11 +80,23 @@ _Static_assert(PVCLOCK_MAX_SLOTS * sizeof(pvclock_vcpu_time_info_t) <= 4096u,
  * on real KVM hosts and still bails before the boot timer matters. */
 #define PVCLOCK_POPULATE_SPIN_MAX  1000u
 
-/* Seqlock-read retry bound. Linux uses an unbounded loop; we cap to
- * keep the kernel responsive if the hypervisor wedges the version
- * field updating. The cap is "Linux's typical iteration count plus
- * one slack order of magnitude" — observed: 1-2 retries under load,
- * never seen >10. */
+/* Seqlock-read retry bound.
+ *
+ * Linux's loop is unbounded, and msr.rst says why: "guest has to check
+ * version before and after grabbing time information and check that they
+ * are both equal and even. An odd version indicates an in-progress update."
+ * There is no sanctioned way to consume any field without a matching even
+ * pair, so a reading that never settles is not a reading.
+ *
+ * The bound here exists so that the kernel's lock-free clock read cannot
+ * wedge the core that takes it, and it is an ITERATION count rather than a
+ * span on a clock for the one reason that cannot be argued with: this IS a
+ * clock, and it has nothing else to ask. What the bound must never do is
+ * invent a time when it expires — see the end of pvclock_now_ns(), where
+ * exhaustion is reported as "no reading" and nothing else. The previous
+ * justification for the number claimed field telemetry ("observed: 1-2
+ * retries under load, never seen >10") that nothing in this project
+ * measured. */
 #define PVCLOCK_SEQLOCK_RETRY_MAX  1024
 
 static inline uint64_t rdmsr_pv(uint32_t msr)
@@ -130,11 +142,6 @@ bool pvclock_init(void)
     s_wall_page_phys = (uint64_t)wall_phys;
     s_wall           = (pvclock_wall_clock_t *)vmm_phys_to_virt(s_wall_page_phys);
 
-    /* Register both pages as shared so vmm_destroy_context never frees
-     * them — they live for the kernel lifetime. */
-    vmm_register_shared_phys(s_pvti_page_phys);
-    vmm_register_shared_phys(s_wall_page_phys);
-
     /* Enable per-BSP. The MSR write installs the VCPU-0 slot. APs are
      * activated by pvclock_init_ap() — see per_core.c.
      *
@@ -148,10 +155,13 @@ bool pvclock_init(void)
     /* Activate wall clock. */
     wrmsr_pv(MSR_KVM_WALL_CLOCK_NEW, s_wall_page_phys);
 
-    /* Spin briefly waiting for the hypervisor to populate VCPU 0 — the
-     * MSR write triggers the update on the next entry which, for KVM,
-     * happens on return from this WRMSR. The spin cap is bounded so a
-     * hypervisor that silently ignores the MSR write can't hang boot. */
+    /* Spin briefly waiting for the hypervisor to populate VCPU 0. Linux's
+     * KVM performs the update inside the WRMSR exit, so in practice the
+     * slot is filled by the time that instruction retires — but msr.rst
+     * declines to promise it ("The interval between updates of this
+     * structure is arbitrary and implementation-dependent"), so a slot
+     * still empty here is a conforming hypervisor and not a broken one.
+     * The branch below treats it as "no pvclock on this machine". */
     for (unsigned i = 0; i < PVCLOCK_POPULATE_SPIN_MAX && s_pvti_array[0].version == 0; i++)
         __asm__ volatile("pause");
 
@@ -171,6 +181,19 @@ bool pvclock_init(void)
         s_wall           = NULL;
         return false;
     }
+
+    /* Register both pages as shared, and not one line earlier. The
+     * shared-phys registry is append-only — vmm.h declares
+     * vmm_register_shared_phys and vmm_is_shared_phys and no way to undo
+     * one — and its meaning is "this frame lives for the kernel lifetime",
+     * which vmm_destroy_context() honours by clearing the PTE and NOT
+     * returning the frame to the buddy. Registered before the populate
+     * check, the two frames the branch above hands back to the allocator
+     * kept their entries: the first cabin to be given one of them as an
+     * ordinary page would lose it for good at teardown. Nothing has entered
+     * the registry until the pages are certainly ours to keep. */
+    vmm_register_shared_phys(s_pvti_page_phys);
+    vmm_register_shared_phys(s_wall_page_phys);
 
     s_available = true;
     debug_printf("[PVCLOCK] kvmclock active: tsc_to_ns_mul=0x%x shift=%d flags=0x%x\n",
@@ -263,9 +286,21 @@ uint64_t pvclock_now_ns(void)
         ns = mul_shift_32(delta, mul) + system_time;
         return ns;
     }
-    /* Hypervisor stuck updating — return last known system_time best-
-     * effort. Better than 0 for monotonicity. */
-    return pvti->system_time;
+    /* No consistent snapshot. There is nothing here to hand back: the only
+     * value in reach is pvti->system_time, and reading it is precisely what
+     * msr.rst forbids — no version pair, from a structure the exit condition
+     * says is being rewritten. It is also not what it used to claim to be.
+     * It is the update ANCHOR, without the mul_shift_32(delta, mul) term
+     * every successful return above adds, so it can sit up to a full
+     * hypervisor update interval behind the value this function last
+     * returned — "last known system_time ... better than 0 for monotonicity"
+     * was wrong on all three counts.
+     *
+     * 0 is the answer this function's contract already has for "no reading"
+     * (pvclock.h: "Returns 0 if pvclock is not initialised"), and a caller
+     * that gets it falls back to another clocksource instead of trusting a
+     * number nobody stands behind. */
+    return 0;
 }
 
 bool pvclock_walltime(uint64_t *out_sec, uint32_t *out_nsec)

@@ -525,38 +525,12 @@ void vmm_tme_ap_probe(void);
  *   IA32_S_CET (0x6A2)  — supervisor-side controls
  *   IA32_U_CET (0x6A0)  — user-side controls
  *   IA32_PL0_SSP (0x6A4) / PL1_SSP / PL2_SSP / PL3_SSP — shadow stack pointers
- *
- * ‼ How a shadow-stack page is ACTUALLY marked in ordinary paging:
- * R/W = 0 together with Dirty = 1, and U/S picking supervisor vs user
- * (Intel SDM Vol 1 §18.2.2; Linux states it as "The hardware requires
- * shadow stack to be Write=0,Dirty=1"). There is no shadow-stack FLAG
- * bit in a 4 KiB leaf PTE: Table 4-19 has bit 60 inside the 4-bit
- * protection-key field (bits 62:59) and nowhere else. A bit-60
- * "supervisor shadow stack" DOES exist, but only in an EPT
- * paging-structure entry (Vol 3C §29.3.2) — a different table this
- * kernel does not build.
- *
- * The two constants below therefore do NOT mark a page as shadow stack
- * on this hardware. Setting VMM_PTE_CET_SS_SUPV stamps protection key
- * bit 1 (key |= 2); setting VMM_PTE_CET_SS_USER stamps protection key
- * bit 2 (key |= 4). cet_lifecycle.c still uses them that way and the
- * real encoding it needs is an owner decision, not a rename — see the
- * note at the top of cet_lifecycle.c.
- *
- * SSP register saved via XSAVE component 11 (XCR0.CET_S / CET_U at
- * bits 11/12 of XCR0).
  */
 #define VMM_CR4_CET_BIT          (1ULL << 23)
 #define VMM_MSR_IA32_U_CET       0x6A0U
 #define VMM_MSR_IA32_S_CET       0x6A2U
 #define VMM_MSR_IA32_PL0_SSP     0x6A4U
 #define VMM_MSR_IA32_PL3_SSP     0x6A7U
-
-#define VMM_PTE_CET_SS_SUPV      (1ULL << 60)
-#define VMM_PTE_CET_SS_USER      (1ULL << 61)
-
-#define VMM_XCR0_CET_S_BIT       (1ULL << 11)
-#define VMM_XCR0_CET_U_BIT       (1ULL << 12)
 
 void vmm_cet_probe(void);
 void vmm_cet_ap_probe(void);
@@ -568,12 +542,74 @@ void vmm_cet_ap_probe(void);
  * underlying type) to avoid pulling touch.h into vmm.h. */
 uint16_t vmm_get_cet_cp_tag(void);
 
-static inline uint64_t vmm_pte_with_cet_supv_ss(uint64_t pte) {
-    return pte | VMM_PTE_CET_SS_SUPV;
-}
-static inline bool vmm_pte_is_supv_ss(uint64_t pte) {
-    return (pte & VMM_PTE_CET_SS_SUPV) != 0;
-}
+/* ─── Shadow-stack pages ───────────────────────────────────────────
+ *
+ * There is no shadow-stack FLAG bit in an ordinary leaf PTE. The whole
+ * encoding is two bits every other kind of page also carries, in a
+ * combination no other kind of page is allowed to hold. Intel SDM
+ * Vol 3A §4.6, "Access Rights", verbatim:
+ *
+ *   "Shadow-stack accesses are allowed only to shadow-stack addresses.
+ *    A linear address is a shadow-stack address if the following are
+ *    true of the translation of the linear address: (1) the R/W flag
+ *    (bit 1) is 0 and the dirty flag (bit 6) is 1 in the paging-
+ *    structure entry that maps the page containing the linear address;
+ *    and (2) the R/W flag is 1 in every other paging-structure entry
+ *    controlling the translation of the linear address."
+ *
+ * U/S then picks the ring, by the ordinary rule: an address is a
+ * supervisor-mode address when U/S is 0 in at least one entry of its
+ * translation, a user-mode address otherwise. Linux says the same
+ * thing in arch/x86/include/asm/pgtable_types.h: "The hardware
+ * requires shadow stack to be Write=0,Dirty=1."
+ *
+ * Two consequences the rest of the kernel has to respect:
+ *
+ *   • Software must put the Dirty bit there. The processor will not.
+ *     SDM Vol 3A §4.8: "a processor that supports CET will never set
+ *     the dirty flag in a paging-structure entry in which the R/W flag
+ *     is clear." Map the page dirty, or it is not a shadow stack.
+ *
+ *   • A normal store to one of these pages faults, because R/W is 0 in
+ *     the leaf (§4.6, data writes under CR0.WP=1). Anything that has to
+ *     seed a shadow stack has to do it BEFORE the page is sealed — see
+ *     the token-write note in cet_lifecycle.c for why WRSS cannot do it
+ *     afterwards during bring-up.
+ *
+ * ‼ Any future sweep over PTEs that clears Dirty, clears Writable, or
+ * rebuilds a leaf from remembered flags destroys the encoding silently:
+ * the page becomes ordinary read-only memory and the next shadow-stack
+ * access to it is a #PF with the SS error bit set. Today no such sweep
+ * exists — nothing in this kernel clears A/D, there is no paging-level
+ * copy-on-write, and MemTag's PKEY/region stamps touch only bits 52-62.
+ * MemTag's revoke/grant pair rebuilds a leaf from the `orig_flags` its
+ * caller recorded at attach time, so a caller that ever attaches a
+ * shadow-stack range must record these flags and no others. */
+#define VMM_FLAGS_SHADOW_STACK_SUPV  (VMM_FLAG_PRESENT | VMM_FLAG_DIRTY)
+#define VMM_FLAGS_SHADOW_STACK_USER  (VMM_FLAG_PRESENT | VMM_FLAG_DIRTY | \
+                                      VMM_FLAG_USER)
+
+/* Turn the page already mapped at `virt_addr` into a shadow-stack page:
+ * verify §4.6 condition (2) on every entry above the leaf, then clear
+ * R/W and set Dirty on the leaf itself. Splits a 1 GiB / 2 MiB leaf
+ * first, so a single Pull Map page can differ from its neighbours, and
+ * shoots the changed leaf down across every core that could hold it.
+ *
+ * Returns false when the page is not mapped, when the leaf cannot be
+ * reached, or when a parent entry is read-only — a refusal the caller
+ * reports, never a silently unprotected stack. A refusal changes
+ * nothing: the check precedes the write, so the caller may hand the
+ * frame straight back to the PMM. Idempotent on an already-sealed page,
+ * which makes it the verification step for a page mapped with
+ * VMM_FLAGS_SHADOW_STACK_* from the start. */
+bool vmm_shadow_stack_seal(vmm_context_t* ctx, uintptr_t virt_addr);
+
+/* Undo vmm_shadow_stack_seal: restore R/W on the leaf and shoot the
+ * translation down across every core that could hold it. MUST run before
+ * the page goes back to the PMM — the next pmm_alloc_zero of that frame
+ * writes it through the kernel window and would fault on a sealed leaf.
+ * Returns false when the page is not mapped. */
+bool vmm_shadow_stack_unseal(vmm_context_t* ctx, uintptr_t virt_addr);
 
 /* Compose KeyID into the upper bits of a phys address. Pure function;
  * caller must ensure `phys` doesn't already use the bits and that the

@@ -557,16 +557,78 @@ int ata_identify(uint8_t drive_idx, ATADevice* device) {
         }
     }
 
-    device->lba48_supported = (id[83] & (1u << 10)) ? 1 : 0;
-    if (device->lba48_supported) {
-        uint64_t lba48 = 0;
+    /* How big the medium is, asked of the words the standard says are worth
+     * reading and of no others.
+     *
+     * Word 83 bit 10 is the whole answer to "does this device do LBA48" —
+     * ATA/ATAPI-6 (T13/1410D r3a) §8.15.42, "If bit 10 of word 83 is set to
+     * one, the 48-bit Address feature set is supported" — but only once the
+     * word is VALID, which the same section decides two paragraphs earlier:
+     * "If bit 14 of word 83 is set to one and bit 15 of word 83 is cleared to
+     * zero, the contents of words (83:82) contain valid support information.
+     * If not, support information is not valid in these words."
+     *
+     * Bit 10 alone was read here. On a device that leaves words 82-84
+     * unimplemented and floats them to FFFFh — a CompactFlash card in True
+     * IDE mode, a DOM, a PATA-bridge board — bits (15:14) read 11b, so the
+     * word means nothing, and bit 10 within it reads as one all the same. The
+     * capacity then came from words (103:100), FFFFh apiece on the same
+     * device, and this driver seated a disk of 2^64 sectors: the bounds checks
+     * in ata_read_sectors and ata_write_sectors can never refuse an LBA past
+     * the end of the medium after that, and the seat the Boardroom publishes
+     * from it is what TagFS sizes the volume's ground against.
+     *
+     * The bounds are the standard's too, and a value outside them is a field
+     * this device did not fill in rather than a number to carry forward.
+     * §8.15.52: words (103:100) "contain a value that is one greater than the
+     * maximum LBA in used addressable space... The maximum value that shall be
+     * placed in this field is 0000FFFFFFFFFFFFh." §6.2.1 item 1, for the LBA28
+     * pair: words (61:60) "shall not exceed 0FFFFFFFh. The content of words
+     * (61:60) shall be greater than or equal to one and less than or equal to
+     * 268,435,455."
+     *
+     * The zero test on words (103:100) is NOT the standard's — §6.2.1 item 4
+     * says the opposite in letter, "The contents of words (61:60) and
+     * (103:100) shall not be used to determine if 48-bit addressing is
+     * supported" — it is Linux's deliberate real-hardware deviation
+     * (ata_id_has_lba48 in include/linux/ata.h), written for drives that
+     * assert bit 10 and report a 48-bit capacity of zero. Without it such a
+     * drive is seated with total_sectors = 0 and every I/O on it, down to
+     * Boardroom's one-sector probe, is refused as out of bounds; with it the
+     * drive keeps the LBA28 capacity it does report, which is what Linux
+     * mounts it on. */
+    #define ATA_LBA48_MAX_SECTORS  0x0000FFFFFFFFFFFFULL
+    #define ATA_LBA28_MAX_SECTORS  0x0FFFFFFFUL
+
+    uint64_t lba48 = 0;
+    if ((id[83] & 0xC000u) == 0x4000u && (id[83] & (1u << 10))) {
         memcpy(&lba48, &id[100], sizeof(uint64_t));
-        device->total_sectors = lba48;
+        if (lba48 > ATA_LBA48_MAX_SECTORS) lba48 = 0;
+    }
+
+    if (lba48 != 0) {
+        device->lba48_supported = 1;
+        device->total_sectors   = lba48;
     } else {
         uint32_t lba28 = 0;
         memcpy(&lba28, &id[60], sizeof(uint32_t));
-        device->total_sectors = lba28;
+        if (lba28 > ATA_LBA28_MAX_SECTORS) lba28 = 0;
+        device->lba48_supported = 0;
+        device->total_sectors   = lba28;
     }
+
+    if (device->total_sectors == 0) {
+        /* kprintf, not debug_printf: this is a drive that answered IDENTIFY
+         * and is still not being used, and the reason has to reach a shipped
+         * build's console — otherwise the board simply comes up one disk
+         * short with nothing said. */
+        kprintf("[ATA] drive %u: IDENTIFY gives no usable capacity "
+                "(word83=0x%04x, words 103:100 and 61:60 both outside the "
+                "ranges ATA/ATAPI-6 §6.2.1 defines) — not using it\n",
+                drive_idx, id[83]);
+        return ATA_ERR_NO_DEVICE;
+    }
+
     device->size_mb = device->total_sectors / 2048;
 
     memcpy(device->model, &id[27], 40);

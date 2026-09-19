@@ -8,39 +8,65 @@
  *   4. Per-process shadow stack allocation + free.
  *   5. Telemetry + Touch publish on lifecycle events.
  *
- * ‼ OPEN, OWNER DECISION PENDING — how a page is marked shadow stack.
+ * How a page here is marked a shadow stack
+ * ----------------------------------------
+ * R/W = 0 and Dirty = 1 on the leaf, R/W = 1 on every entry above it,
+ * U/S picking the ring. That is the whole encoding and the only one the
+ * processor honours. The verbatim rule from Intel SDM Vol 3A §4.6 sits
+ * in vmm.h above VMM_FLAGS_SHADOW_STACK_SUPV, and vmm_shadow_stack_seal
+ * / vmm_shadow_stack_unseal are the only two functions that apply and
+ * remove it.
  *
- * This file marks its SSP pages by setting PTE bit 60 (supervisor) or
- * bit 61 (user). That marks nothing. In ordinary paging bits 62:59 are
- * the 4-bit protection key and bit 60 is simply key bit 1 (Intel SDM
- * Vol 3A Table 4-19; Linux: _PAGE_BIT_PKEY_BIT1 = 60). The bit-60
- * "supervisor shadow stack" attribute exists only in EPT
- * paging-structure entries (Vol 3C §29.3.2), which this kernel does
- * not build. The encoding real silicon honours is R/W = 0 with
- * Dirty = 1, U/S selecting supervisor or user (Vol 1 §18.2.2).
+ * Earlier revisions set PTE bit 60 (supervisor) or bit 61 (user)
+ * instead. Those bits mark nothing: in ordinary paging bits 62:59 are
+ * the 4-bit protection key and bit 60 is key bit 1 (Vol 3A Table 4-19;
+ * Linux names it _PAGE_BIT_PKEY_BIT1), and the bit-60 "supervisor
+ * shadow stack" attribute exists only in EPT paging-structure entries
+ * (Vol 3C §29.3.2), a table this kernel does not build. Every
+ * supervisor SSP page came out carrying protection key 2 and none of
+ * them was a shadow stack to the CPU. The user-side stamp never even
+ * reached the entry: vmm_make_pte masks incoming flags with
+ * vmm_pte_flags_mask (bits 11:0 plus bit 63), so bit 61 was dropped on
+ * the way in.
  *
- * So today: every supervisor SSP page below is stamped protection key
- * 2 and every user SSP page protection key 4, and none of them is a
- * shadow stack to the CPU.
+ * That was never dormant. cet_supv_shstk_activate_and_jump ORs
+ * S_CET.SH_STK_EN in on every core (main.c for the BSP, ap_init.c for
+ * each AP) and cet_program_msrs puts SH_STK_EN in IA32_U_CET. On a CPU
+ * that advertises SHSTK the processor would have pushed and popped
+ * return addresses against pages it does not regard as shadow stacks.
  *
- * ‼ And this is not dormant. An earlier version of this note said
- * nothing faults because IA32_S_CET.SH_STK_EN stays 0. It does not stay
- * 0: cet_supv_shstk_activate_and_jump ORs SH_STK_EN in on every core
- * (main.c for the BSP, ap_init.c for each AP) as its last act before
- * entering the run loop, and cet_program_msrs already puts SH_STK_EN in
- * IA32_U_CET. On a CPU that advertises SHSTK — Tiger Lake and later,
- * Zen 3 and later — that means the processor begins pushing and popping
- * return addresses against pages it does not regard as shadow stacks,
- * and a shadow-stack access to a page without the encoding faults. The
- * same applies to the WRSSQ in cet_process_create_kernel_ssp. Nothing
- * has shown up because every board this has run on so far reports no
- * SHSTK; the first machine that reports it will not boot.
+ * Why the tokens are written before the seal, and not with WRSS
+ * -------------------------------------------------------------
+ * A supervisor SSP page needs a token in it before the processor may
+ * switch to it, and a sealed page takes no normal store. WRSSQ is the
+ * instruction for writing a shadow stack, and it is unavailable in this
+ * window. Intel SDM Vol 2D, WRSSD/WRSSQ, Operation, the CPL < 3 arm:
  *
- * Switching the marking to W=0/D=1 changes how the pages are mapped, how
- * the pre-flip token write below works (a read-only page cannot take a
- * normal store), and how they are torn down; that is a redesign, and the
- * owner decides it, not this file. Until then nothing here claims the
- * bits mean what they do not.
+ *     IF (CR4.CET & IA32_S_CET.SH_STK_EN) = 0
+ *           THEN #UD; FI;
+ *     IF (IA32_S_CET.WR_SHSTK_EN) = 0
+ *           THEN #UD; FI;
+ *
+ * WRSS at CPL < 3 needs S_CET.SH_STK_EN — the one bit this kernel holds
+ * at 0 until cet_supv_shstk_activate_and_jump, because turning it on
+ * before a valid PL0_SSP exists kills the next kernel RET. Every token
+ * write happens inside that window, so WRSS is #UD for all of it. The
+ * same page also requires the destination to be a shadow stack already
+ * ("#PF ... if destination is ... not a supervisor shadow stack when
+ * CPL < 3"), so WRSS could never have written the FIRST token either
+ * way — only added to a page that had one.
+ *
+ * The other option is taken, in its cheapest form: the token goes in
+ * through the mapping the page already has, while that mapping is still
+ * writable, and the page is sealed afterwards. No second alias is
+ * opened and none has to be torn down — pmm_alloc_zero wrote the frame
+ * through the same kernel window microseconds earlier, so this write
+ * inherits a window rather than creating one. After the seal the only
+ * writer left is the processor's own shadow-stack machinery.
+ *
+ * ‼ Teardown unseals before the frame goes back to the PMM. The next
+ * pmm_alloc_zero of that frame memsets it through the kernel window and
+ * would fault on a sealed leaf.
  */
 
 #include "cet_lifecycle.h"
@@ -96,45 +122,6 @@ static inline uint64_t cet_supv_token_free(uintptr_t top) {
     return (uint64_t)top & ~CET_SUPV_TOKEN_FLAG_MASK;
 }
 
-/* WRSSQ — Write 8 bytes to a supervisor-shadow-stack page.
- *
- * Intel SDM Vol 2 §WRSSQ: writes a 64-bit value to memory the CPU sees
- * as a supervisor shadow stack, i.e. a page mapped R/W = 0 with
- * Dirty = 1 and U/S = 0. CPL=0 + CR4.CET=1 + IA32_S_CET.WR_SHSTK_EN=1
- * required.
- *
- * Critical: a NORMAL store to such a page FAULTS — only WRSSQ /
- * WRUSS / SETSSBSY / RSTORSSP are allowed write paths into shadow stack
- * memory. The kernel must use this primitive when initialising supervisor
- * SSP tokens and when pushing the first synthetic entry during the
- * SH_STK_EN activation handshake.
- *
- * See the shadow-stack marking note at the top of this file: the pages
- * this kernel hands to WRSSQ today are not marked that way, so WRSSQ
- * against them is inert rather than protective.
- *
- * Why raw byte encoding: older binutils don't accept the `wrssq`
- * mnemonic; raw bytes are portable. REX.W + 0F 38 F6 /r is the encoding;
- * here we use a r/m memory operand with a register source. */
-static inline void cet_wrssq8(uint64_t val, uintptr_t addr) {
-    __asm__ volatile(
-        /* wrssq %rax, (%rbx) — REX.W=1, opcode 0F 38 F6 /r, ModR/M=03 */
-        "movq %0, %%rax\n\t"
-        "movq %1, %%rbx\n\t"
-        ".byte 0x48, 0x0f, 0x38, 0xf6, 0x03\n\t"  /* wrssq %rax, (%rbx) */
-        :
-        : "r"(val), "r"(addr)
-        : "rax", "rbx", "memory"
-    );
-}
-
-/* INVLPG — flush a single page's TLB entry on the current CPU. Needed
- * after any change to a leaf PTE's upper bits so subsequent accesses
- * see the new entry rather than a cached copy of the old one. */
-static inline void cet_invlpg(uintptr_t addr) {
-    __asm__ volatile("invlpg (%0)" :: "r"(addr) : "memory");
-}
-
 /* ─── IA32_S_CET / IA32_U_CET bits (Intel SDM Vol 3D §17.2.1) ─── */
 
 #define CET_MSR_SH_STK_EN        (1ULL <<  0)   /* Shadow Stack Enable */
@@ -146,59 +133,38 @@ static inline void cet_invlpg(uintptr_t addr) {
 #define CET_MSR_SUPPRESS         (1ULL << 10)   /* WAIT-FOR-ENDBRANCH state */
 #define CET_MSR_TRACKER_IDLE     (1ULL << 11)   /* WAIT-FOR-ENDBRANCH idle */
 
-/* CET policy — split S/U side per ring needs (Intel SDM Vol 3D §17.2.1).
- *
- * Supervisor (IA32_S_CET): SH_STK_EN is omitted HERE and only here.
- * Enabling the supervisor shadow stack requires an allocated supervisor
- * SSP per CPU and an IA32_PL0_SSP write before any kernel RET — without
- * those, the very first ring-0 RET (e.g. the one that returns from
- * cet_program_msrs into per_core_init_bsp) fires #CP and the kernel
- * dies. That infrastructure exists: cet_lifecycle_init_supervisor_ssp
- * runs later in per-core bring-up, and cet_supv_shstk_activate_and_jump
- * is what finally ORs SH_STK_EN in — from main.c on the BSP and from
- * ap_init.c on every AP, as the last act before the core stops being
- * able to return. So this mask is the pre-activation policy, not the
- * kernel's final S_CET.
- * What we KEEP supervisor-side is ENDBR_EN + NO_TRACK_EN: IBT defends
- * the kernel against JOP/COP without needing a supervisor shadow stack.
- * WR_SHSTK_EN here lets us execute WRUSS at CPL=0 if a future caller
- * primes a user SSP token (Intel SDM Vol 2B WRUSS — CPL=0 only,
- * IA32_U_CET.SH_STK_EN must be 1; S_CET.WR_SHSTK_EN gates the access).
- *
- * User (IA32_U_CET): full SHSTK + IBT. User code returns through its
- * own per-process shadow stack, indirect calls land on ENDBR64. WRUSS
- * gate is NOT user-accessible — WRUSS is a CPL=0 instruction. We omit
- * WR_SHSTK_EN here so user code cannot execute WRSS to forge its own
- * shadow-stack entries.
- */
-#define CET_S_POLICY_BITS \
-    (CET_MSR_WR_SHSTK_EN | CET_MSR_ENDBR_EN | CET_MSR_NO_TRACK_EN)
-#define CET_U_POLICY_BITS \
-    (CET_MSR_SH_STK_EN | CET_MSR_ENDBR_EN | CET_MSR_NO_TRACK_EN)
-
-/* Per-process user shadow stack size — 16 KiB, and SMALLER than the data
- * stack it mirrors. The numbers, checked rather than assumed:
+/* Per-process user shadow stack — 4 pages, 16 KiB, against a 64 KiB user
+ * data stack. Counted, not guessed:
  *
  *   data stack   CONFIG_USER_STACK_SIZE_KB = 64 → 16 pages (kernel_config.h)
  *   shadow stack CET_USER_SSP_PAGES        = 4  → 16 KiB = 2048 slots
  *
- * Intel SDM recommends sizing the shadow stack for the deepest call chain
- * the data stack admits. One 8-byte return address per CALL lands on each
- * stack, so the shadow stack runs out first whenever the average data-stack
- * frame is under 32 bytes — a chain of small leafless frames reaches 2048
- * deep inside 64 KiB. Past that the push lands in the unmapped guard page
- * below the SSP region (PROCESS_USER_SSP_GUARD_LO_BASE in process.c, and
- * the [mid guard] page of a strand's hammock slot in cabin_layout.h), so
- * the failure is a fault on a shadow-stack access, not silent corruption
- * of a neighbour — but it is a fault the data stack would not have taken.
+ * One call costs the shadow stack exactly 8 bytes: the return address,
+ * and nothing else ever lands there. One call costs the DATA stack 16
+ * bytes at the very least — the 8-byte return address plus the 8 the
+ * System V AMD64 ABI forces on any function that goes on to call
+ * another. RSP is 16-byte aligned at a call site, so at entry it sits 8
+ * bytes off alignment and a non-leaf must push or subtract 8 before its
+ * own call. Anything cheaper than 16 belongs to a leaf, and a leaf is
+ * the end of the chain.
  *
- * 4 is not a free knob: PROCESS_USER_SSP_REGION_SIZE, the hammock slot map
- * in cabin_layout.h and the ring offsets derived in strand_rings.c all
- * encode it, with _Static_asserts in process.c holding them together.
- * Growing the shadow stack to 16 pages is a layout change in those files,
- * and it is an open question for the owner — not something this constant
- * can decide alone. Dormant until SHSTK silicon: U_CET.SH_STK_EN only
- * matters where the CPU advertises shadow stacks. */
+ * So the deepest chain 64 KiB of data stack admits is 65536 / 16 = 4096
+ * frames, and the shadow stack holds 2048 of them. It runs out first, at
+ * exactly half the depth, and on ANY chain of small non-leaf frames —
+ * not a contrived one. The number that matches the data stack is 8
+ * pages, CONFIG_USER_STACK_PAGES / 2, and that ratio survives any resize
+ * of the data stack.
+ *
+ * It stays 4 because 4 is not this file's number. The hammock slot map
+ * in cabin_layout.h puts the SSP at slot pages 18..21 with the
+ * Pocket/Result/Touch rings starting at 23, PROCESS_USER_SSP_REGION_SIZE
+ * in process.c hard-codes four pages behind a _Static_assert, and
+ * strand_rings.c derives its ring offsets from the same layout. Growing
+ * to 8 shifts every page above it in the slot. Raised with the owner.
+ *
+ * Running out is a fault, not corruption: the push lands in the unmapped
+ * guard page below the region (PROCESS_USER_SSP_GUARD_LO_BASE in
+ * process.c, the [mid guard] page of a strand's hammock slot). */
 #define CET_USER_SSP_PAGES        4u
 #define CET_USER_SSP_SIZE         (CET_USER_SSP_PAGES * PMM_PAGE_SIZE)
 
@@ -260,15 +226,39 @@ static inline void cet_write_cr4(uint64_t v) {
 /* ─── CR4.CET + MSR setup, BSP + AP shared ─────────────────────── */
 
 static bool cet_program_msrs(const char *who) {
-    /* SHSTK enable only when CPU advertises shadow-stack; IBT enable
-     * only when CPU advertises ENDBR/NOTRACK enforcement. Each MSR
-     * bit gates on the corresponding CPUID feature, AND each side
-     * (S/U) uses its own policy mask (see CET_{S,U}_POLICY_BITS). */
+    /* SHSTK enable only when the CPU advertises shadow stacks; IBT
+     * enable only when it advertises ENDBR/NOTRACK enforcement. The two
+     * sides differ on one bit and it matters.
+     *
+     * Supervisor (IA32_S_CET): SH_STK_EN is withheld HERE and only
+     * here. Turning it on requires an allocated supervisor SSP on this
+     * core and an IA32_PL0_SSP holding its token, or the very first
+     * ring-0 RET after the WRMSR — the one that leaves this function —
+     * fires #CP and the kernel dies. cet_lifecycle_init_supervisor_ssp
+     * builds that infrastructure later in per-core bring-up, and
+     * cet_supv_shstk_activate_and_jump is what finally ORs SH_STK_EN
+     * in, from main.c on the BSP and ap_init.c on every AP, as the last
+     * act before the core stops being able to return. What the kernel
+     * does keep supervisor-side before then is ENDBR_EN + NO_TRACK_EN:
+     * IBT defends against JOP/COP with no shadow stack needed.
+     *
+     * WR_SHSTK_EN, supervisor side: this is the WRSS gate, and WRSS is
+     * the one instruction that can forge a shadow-stack entry from
+     * ring 0. It is set because the next stage of the CET work (the
+     * user-return PL3_SSP reload in the context-switch path) needs it;
+     * nothing in this file executes WRSS, and nothing can until
+     * SH_STK_EN goes up, since WRSS at CPL < 3 is #UD without it —
+     * Intel SDM Vol 2D, WRSSD/WRSSQ. It is NOT the WRUSS gate: WRUSS
+     * requires only CR4.CET=1 and CPL=0 (same volume, WRUSSD/WRUSSQ,
+     * Operation), and an earlier version of this comment had that
+     * wrong.
+     *
+     * User (IA32_U_CET): full SHSTK. User code returns through its own
+     * per-process shadow stack. WR_SHSTK_EN is omitted so ring 3 cannot
+     * execute WRSS and write its own return addresses. */
     uint64_t s_policy = 0;
     uint64_t u_policy = 0;
     if (g_cpu_caps.has_shstk) {
-        /* Supervisor side: never SH_STK_EN (no PL0_SSP) — only the
-         * WRUSS gate. User side: full shadow stack. */
         s_policy |= CET_MSR_WR_SHSTK_EN;
         u_policy |= CET_MSR_SH_STK_EN;
     }
@@ -443,16 +433,22 @@ error_t cet_process_create(struct process_t *proc) {
     }
 
     /* Map into the process's vmm_context at a fixed user VA below the
-     * data stack, writable, with VMM_PTE_CET_SS_USER.
+     * data stack, as a user shadow stack: PRESENT | DIRTY | USER, and
+     * pointedly NOT WRITABLE. That combination — R/W = 0 with Dirty = 1
+     * and U/S = 1 — is the whole of what makes these pages shadow
+     * stacks to the processor (Intel SDM Vol 3A §4.6, quoted in vmm.h).
      *
-     * That last flag is bit 61, which Table 4-19 places inside the
-     * protection-key field: the page ends up carrying protection key 4,
-     * and the CPU does not treat it as a user shadow stack. The
-     * encoding it would honour is R/W = 0 + Dirty = 1 + U/S = 1 — see
-     * the note at the top of this file. */
+     * No token here, unlike the supervisor side: a user shadow stack
+     * carries nothing before its first CALL, and the token business
+     * belongs to supervisor stacks, which the processor has to claim on
+     * event delivery. The pages are born with the encoding because this
+     * is their first mapping in this context, so the seal below only
+     * has to verify it — see there.
+     * pmm_alloc_zero already zeroed the frames through the kernel
+     * window, which is a different linear address and stays writable —
+     * so the PMM can still recycle them when the process dies. */
     uintptr_t user_ssp_va = process_user_ssp_va_for(proc);  /* fixed VA per process */
-    uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE |
-                     VMM_FLAG_USER    | VMM_PTE_CET_SS_USER;
+    uint64_t flags = VMM_FLAGS_SHADOW_STACK_USER;
     for (uint32_t i = 0; i < CET_USER_SSP_PAGES; i++) {
         vmm_map_result_t r = vmm_map_page(ctx,
                                             user_ssp_va + i * PMM_PAGE_SIZE,
@@ -470,6 +466,31 @@ error_t cet_process_create(struct process_t *proc) {
             process_set_user_ssp(proc, 0, 0, 0);
             return OK;
         }
+    }
+
+    /* Verified the same way, and refused as loudly, as the supervisor
+     * side. The leaves already carry R/W = 0 + Dirty = 1, so the seal's
+     * CAS is a no-op and it sends no shootdown; what it does do is walk
+     * SDM Vol 3A §4.6 condition (2) — R/W = 1 in every entry ABOVE the
+     * leaf. That is the half of the rule leaf flags cannot express, and
+     * a cabin whose PML4E / PDPTE / PDE came out read-only would leave
+     * the process holding ordinary read-only pages: its first ring-3
+     * CALL takes #CP and nothing on the console says why. Degrading is
+     * this path's policy for every other failure too, so degrade — but
+     * say it on the console, because this one is structural. */
+    for (uint32_t i = 0; i < CET_USER_SSP_PAGES; i++) {
+        uintptr_t page_va = user_ssp_va + i * PMM_PAGE_SIZE;
+        if (vmm_shadow_stack_seal(ctx, page_va)) continue;
+
+        kprintf("[CET] proc=%u user shadow-stack page %u at 0x%lx is not a "
+                "shadow-stack address — process runs without SHSTK\n",
+                proc->pid, i, (unsigned long)page_va);
+        for (uint32_t k = 0; k < CET_USER_SSP_PAGES; k++) {
+            vmm_unmap_page(ctx, user_ssp_va + k * PMM_PAGE_SIZE);
+        }
+        pmm_free(ssp_phys, CET_USER_SSP_PAGES);
+        process_set_user_ssp(proc, 0, 0, 0);
+        return OK;
     }
 
     /* Initial SSP value: top of the SSP region minus 8 bytes — points
@@ -566,18 +587,45 @@ void cet_lifecycle_record_cp_fault(void) {
 
 /* ─── Supervisor SSP infrastructure (PL0_SSP + ISST) ───────────────── */
 
-/* Roll back a partial supervisor SSP setup. Returns ERR_NO_MEMORY so the
- * caller can propagate. Safe to call with any subset of pointers zeroed. */
-static error_t cet_supv_alloc_rollback(void *pl0_phys, void *isst_phys,
-                                        void *ist_phys[CET_SUPV_IST_LEVELS],
-                                        int allocated_ist_count)
+/* The page set one core's supervisor shadow-stack infrastructure is made
+ * of, carried as one value while it is being built so that a failure at
+ * any step can hand back exactly what was taken — including the leaves
+ * that already carry the shadow-stack encoding, which must be unsealed
+ * before their frames go anywhere near the PMM. */
+typedef struct {
+    void      *pl0_phys;
+    uintptr_t  pl0_va;
+    bool       pl0_sealed;
+    void      *isst_phys;
+    uintptr_t  isst_va;
+    void      *ist_phys[CET_SUPV_IST_LEVELS];
+    uintptr_t  ist_va[CET_SUPV_IST_LEVELS];
+    int        ist_allocated;   /* ist_phys[0 .. n) hold live frames   */
+    int        ist_sealed;      /* ist_va[0 .. n) are sealed leaves    */
+} CetSupvSspSet;
+
+/* Give the whole set back and return `err` so a caller can write
+ * `return CetSupvSspSetRelease(&set, ERR_NO_MEMORY);`. Unseal first,
+ * free second, in that order and never the other way round. */
+static error_t CetSupvSspSetRelease(CetSupvSspSet *set, error_t err)
 {
-    for (int i = 0; i < allocated_ist_count; i++) {
-        if (ist_phys[i]) pmm_free(ist_phys[i], 1);
+    vmm_context_t *kctx = vmm_get_kernel_context();
+
+    if (kctx) {
+        for (int i = 0; i < set->ist_sealed; i++) {
+            (void)vmm_shadow_stack_unseal(kctx, set->ist_va[i]);
+        }
+        if (set->pl0_sealed) {
+            (void)vmm_shadow_stack_unseal(kctx, set->pl0_va);
+        }
     }
-    if (isst_phys) pmm_free(isst_phys, 1);
-    if (pl0_phys)  pmm_free(pl0_phys, 1);
-    return ERR_NO_MEMORY;
+
+    for (int i = 0; i < set->ist_allocated; i++) {
+        if (set->ist_phys[i]) pmm_free(set->ist_phys[i], 1);
+    }
+    if (set->isst_phys) pmm_free(set->isst_phys, 1);
+    if (set->pl0_phys)  pmm_free(set->pl0_phys, 1);
+    return err;
 }
 
 error_t cet_lifecycle_init_supervisor_ssp(uint8_t core_idx)
@@ -588,85 +636,52 @@ error_t cet_lifecycle_init_supervisor_ssp(uint8_t core_idx)
     PerCoreData *pc = &g_per_core[core_idx];
     if (pc->cet_supv_ready) return OK;  /* idempotent */
 
+    CetSupvSspSet set = {0};
+
     /* ─── Allocate the page set ─── */
-    void *pl0_phys  = pmm_alloc_zero(1);
-    if (!pl0_phys) return ERR_NO_MEMORY;
+    set.pl0_phys = pmm_alloc_zero(1);
+    if (!set.pl0_phys) return ERR_NO_MEMORY;
 
-    void *isst_phys = pmm_alloc_zero(1);
-    if (!isst_phys) {
-        void *empty[CET_SUPV_IST_LEVELS] = {0};
-        return cet_supv_alloc_rollback(pl0_phys, NULL, empty, 0);
-    }
+    set.isst_phys = pmm_alloc_zero(1);
+    if (!set.isst_phys) return CetSupvSspSetRelease(&set, ERR_NO_MEMORY);
 
-    void *ist_phys[CET_SUPV_IST_LEVELS] = {0};
     for (int i = 0; i < CET_SUPV_IST_LEVELS; i++) {
-        ist_phys[i] = pmm_alloc_zero(1);
-        if (!ist_phys[i]) {
-            return cet_supv_alloc_rollback(pl0_phys, isst_phys, ist_phys, i);
-        }
+        set.ist_phys[i] = pmm_alloc_zero(1);
+        if (!set.ist_phys[i]) return CetSupvSspSetRelease(&set, ERR_NO_MEMORY);
+        set.ist_allocated = i + 1;
     }
 
     /* ─── Resolve kernel-VA aliases ─── */
-    uintptr_t pl0_va  = (uintptr_t)vmm_phys_to_virt((uintptr_t)pl0_phys);
-    uintptr_t isst_va = (uintptr_t)vmm_phys_to_virt((uintptr_t)isst_phys);
-    uintptr_t ist_va[CET_SUPV_IST_LEVELS];
+    set.pl0_va  = (uintptr_t)vmm_phys_to_virt((uintptr_t)set.pl0_phys);
+    set.isst_va = (uintptr_t)vmm_phys_to_virt((uintptr_t)set.isst_phys);
     for (int i = 0; i < CET_SUPV_IST_LEVELS; i++) {
-        ist_va[i] = (uintptr_t)vmm_phys_to_virt((uintptr_t)ist_phys[i]);
+        set.ist_va[i] = (uintptr_t)vmm_phys_to_virt((uintptr_t)set.ist_phys[i]);
+        if (!set.ist_va[i]) return CetSupvSspSetRelease(&set, ERR_NO_MEMORY);
     }
-    if (!pl0_va || !isst_va) {
-        return cet_supv_alloc_rollback(pl0_phys, isst_phys, ist_phys,
-                                       CET_SUPV_IST_LEVELS);
+    if (!set.pl0_va || !set.isst_va) {
+        return CetSupvSspSetRelease(&set, ERR_NO_MEMORY);
     }
 
-    /* ─── Write supervisor SSP tokens via WRSSQ ───
+    /* ─── Every plain store happens here, before anything is sealed ───
      *
-     * Token placement, ordering, and access path:
-     *
-     *   1. Write the token via NORMAL store BEFORE the PTE is stamped.
-     *      A normal store to a page the CPU sees as a shadow stack
-     *      faults (only WRSSQ/RSTORSSP may write there per Intel SDM
-     *      §17.2.1), so init runs in the pre-stamp window and does not
-     *      depend on WRSSQ availability at this stage.
-     *
-     *   2. Set PTE bit 60 (VMM_PTE_CET_SS_SUPV). This is the marking
-     *      the file-header note calls out: bit 60 is protection-key
-     *      bit 1 in ordinary paging, so the page comes out carrying
-     *      key 2 and the CPU still sees ordinary supervisor memory.
-     *      Real supervisor shadow stacks are R/W = 0 + Dirty = 1.
-     *
-     *   3. INVLPG to drop any stale TLB entry from earlier kernel writes
-     *      (Pull Map zero-fill, etc.), so later accesses resolve against
-     *      the entry as written rather than a cached copy.
+     * The tokens go in through the kernel window the frames already
+     * have, while it is still writable. Once a page is sealed its leaf
+     * is R/W = 0 and a normal store to it faults; WRSS cannot take over
+     * because it is #UD until S_CET.SH_STK_EN is up, which is precisely
+     * what this function has to happen before. The reasoning, with the
+     * SDM quoted, is in the file header.
      *
      * Token contents: the token's own linear address with the BUSY bit
      * clear — cet_supv_token_free() and the supervisor-token note above
      * CET_SUPV_TOKEN_FLAG_MASK say why "clear" is the only value a token
-     * the processor has not claimed may hold.
-     */
-    uintptr_t pl0_top = pl0_va + (PMM_PAGE_SIZE - 8);
+     * the processor has not claimed may hold. */
+    uintptr_t pl0_top = set.pl0_va + (PMM_PAGE_SIZE - 8);
     *(volatile uint64_t *)pl0_top = cet_supv_token_free(pl0_top);
 
     uintptr_t ist_top[CET_SUPV_IST_LEVELS];
     for (int i = 0; i < CET_SUPV_IST_LEVELS; i++) {
-        ist_top[i] = ist_va[i] + (PMM_PAGE_SIZE - 8);
+        ist_top[i] = set.ist_va[i] + (PMM_PAGE_SIZE - 8);
         *(volatile uint64_t *)ist_top[i] = cet_supv_token_free(ist_top[i]);
-    }
-
-    /* Set PTE bit 60 on every SSP page (token already written above via
-     * the pre-stamp normal-store window). The ISST page does NOT get
-     * the bit — the CPU reads it via normal loads. On this hardware the
-     * bit is protection-key bit 1, not a shadow-stack attribute; see
-     * the note at the top of this file. */
-    vmm_context_t *kctx = vmm_get_kernel_context();
-    if (kctx) {
-        pte_t *p = vmm_get_or_create_pte(kctx, pl0_va);
-        if (p) *p |= VMM_PTE_CET_SS_SUPV;
-        cet_invlpg(pl0_va);
-        for (int i = 0; i < CET_SUPV_IST_LEVELS; i++) {
-            p = vmm_get_or_create_pte(kctx, ist_va[i]);
-            if (p) *p |= VMM_PTE_CET_SS_SUPV;
-            cet_invlpg(ist_va[i]);
-        }
     }
 
     /* ─── Populate IA32_INTERRUPT_SSP_TABLE_ADDR table ───
@@ -680,14 +695,47 @@ error_t cet_lifecycle_init_supervisor_ssp(uint8_t core_idx)
      * Entry 0 is never consulted: an IDT gate's IST field of 0 means no
      * IST stack switch at all, and such a delivery takes its SSP from
      * IA32_PL0_SSP. We fill it with the same token anyway so the table
-     * holds no slot that is neither a valid token nor zero. */
-    uint64_t *table = (uint64_t *)isst_va;
+     * holds no slot that is neither a valid token nor zero.
+     *
+     * The ISST page itself is NOT a shadow stack and is never sealed:
+     * the processor reads it with ordinary loads to find an SSP, it
+     * holds no return addresses, and sealing it would only make this
+     * store fault. */
+    uint64_t *table = (uint64_t *)set.isst_va;
     table[0] = (uint64_t)pl0_top;
     for (int i = 0; i < CET_SUPV_IST_LEVELS; i++) {
         table[1 + i] = (uint64_t)ist_top[i];
     }
     table[6] = 0;
     table[7] = 0;
+
+    /* ─── Seal: R/W = 0 + Dirty = 1 on every SSP leaf ───
+     *
+     * From here on these six pages are shadow stacks to the processor
+     * and nothing but the processor writes them. A refusal is loud and
+     * total: a core that cannot seal its stacks hands every frame back
+     * and reports ERR_NO_MEMORY, so cet_supv_shstk_activate_and_jump
+     * never turns SH_STK_EN on against pages that are not shadow
+     * stacks. kprintf, not debug_printf — this is a line that has to
+     * reach a real board's console. */
+    vmm_context_t *kctx = vmm_get_kernel_context();
+    if (!kctx || !vmm_shadow_stack_seal(kctx, set.pl0_va)) {
+        kprintf("[CET/core %u] PL0 shadow-stack seal refused at 0x%lx — "
+                "supervisor shadow stack NOT armed on this core\n",
+                core_idx, (unsigned long)set.pl0_va);
+        return CetSupvSspSetRelease(&set, ERR_NO_MEMORY);
+    }
+    set.pl0_sealed = true;
+
+    for (int i = 0; i < CET_SUPV_IST_LEVELS; i++) {
+        if (!vmm_shadow_stack_seal(kctx, set.ist_va[i])) {
+            kprintf("[CET/core %u] IST %d shadow-stack seal refused at 0x%lx — "
+                    "supervisor shadow stack NOT armed on this core\n",
+                    core_idx, i + 1, (unsigned long)set.ist_va[i]);
+            return CetSupvSspSetRelease(&set, ERR_NO_MEMORY);
+        }
+        set.ist_sealed = i + 1;
+    }
 
     /* ─── Program the MSRs ───
      *
@@ -697,23 +745,23 @@ error_t cet_lifecycle_init_supervisor_ssp(uint8_t core_idx)
      * Both MSRs must already hold valid token addresses by then, which is
      * why they are programmed here and not there. */
     cet_wrmsr(VMM_MSR_IA32_PL0_SSP, (uint64_t)pl0_top);
-    cet_wrmsr(VMM_MSR_IA32_INTERRUPT_SSP_TABLE_ADDR, (uint64_t)isst_va);
+    cet_wrmsr(VMM_MSR_IA32_INTERRUPT_SSP_TABLE_ADDR, (uint64_t)set.isst_va);
 
     /* ─── Persist bookkeeping ─── */
-    pc->pl0_ssp_phys     = (uintptr_t)pl0_phys;
+    pc->pl0_ssp_phys     = (uintptr_t)set.pl0_phys;
     pc->pl0_ssp_top_va   = pl0_top;
-    pc->isst_phys        = (uintptr_t)isst_phys;
-    pc->isst_va          = isst_va;
+    pc->isst_phys        = (uintptr_t)set.isst_phys;
+    pc->isst_va          = set.isst_va;
     for (int i = 0; i < CET_SUPV_IST_LEVELS; i++) {
-        pc->ist_ssp_phys[i]   = (uintptr_t)ist_phys[i];
+        pc->ist_ssp_phys[i]   = (uintptr_t)set.ist_phys[i];
         pc->ist_ssp_top_va[i] = ist_top[i];
     }
     pc->cet_supv_ready = true;
 
     debug_printf("[CET/core %u] supervisor SSP infra ready: PL0=0x%lx ISST=0x%lx "
-                 "(IST 1..5 SSPs allocated, tokens free; S_CET.SH_STK_EN still 0 "
-                 "until cet_supv_shstk_activate_and_jump)\n",
-                 core_idx, (unsigned long)pl0_top, (unsigned long)isst_va);
+                 "(IST 1..5 SSPs sealed R/W=0 D=1, tokens free; S_CET.SH_STK_EN "
+                 "still 0 until cet_supv_shstk_activate_and_jump)\n",
+                 core_idx, (unsigned long)pl0_top, (unsigned long)set.isst_va);
     return OK;
 }
 
@@ -728,6 +776,27 @@ void cet_lifecycle_release_supervisor_ssp(uint8_t core_idx)
      * for sequencing this against any prior SHSTK enable. */
     cet_wrmsr(VMM_MSR_IA32_PL0_SSP, 0);
     cet_wrmsr(VMM_MSR_IA32_INTERRUPT_SSP_TABLE_ADDR, 0);
+
+    /* Unseal every SSP leaf before the frames go back to the buddy. A
+     * sealed leaf is R/W = 0, and the next pmm_alloc_zero to hand one of
+     * these frames out memsets it through this same kernel window — on a
+     * sealed leaf that is a #PF in the allocator, on a page the new owner
+     * never suspected. The ISST page was never sealed, so it just goes.
+     *
+     * The unseal shoots the translation down across every core, because
+     * the core being torn down is not necessarily the core running this. */
+    vmm_context_t *kctx = vmm_get_kernel_context();
+    if (kctx) {
+        if (pc->pl0_ssp_phys) {
+            uintptr_t va = (uintptr_t)vmm_phys_to_virt(pc->pl0_ssp_phys);
+            if (va) (void)vmm_shadow_stack_unseal(kctx, va);
+        }
+        for (int i = 0; i < CET_SUPV_IST_LEVELS; i++) {
+            if (!pc->ist_ssp_phys[i]) continue;
+            uintptr_t va = (uintptr_t)vmm_phys_to_virt(pc->ist_ssp_phys[i]);
+            if (va) (void)vmm_shadow_stack_unseal(kctx, va);
+        }
+    }
 
     if (pc->pl0_ssp_phys) pmm_free((void *)pc->pl0_ssp_phys, 1);
     if (pc->isst_phys)    pmm_free((void *)pc->isst_phys, 1);
@@ -768,34 +837,48 @@ error_t cet_process_create_kernel_ssp(struct process_t *proc, uintptr_t entry_ri
     }
     uintptr_t top = va + (PMM_PAGE_SIZE - 8);
 
-    /* Pre-stamp window: write supervisor token via NORMAL store before
-     * the PTE is stamped. This avoids a WRSSQ dependency for the very
-     * first write. BUSY clear — the processor claims the token, not us. */
-    *(volatile uint64_t *)top = cet_supv_token_free(top);
+    /* Both writes happen here, while the page is still ordinary
+     * writable kernel memory, because after the seal below neither is
+     * possible: a normal store faults on R/W = 0, and WRSS is #UD until
+     * S_CET.SH_STK_EN is up. The file header carries the SDM quote.
+     *
+     *   [top]     the supervisor SSP token — its own linear address,
+     *             BUSY clear; the processor claims the token, not us.
+     *   [top - 8] the pre-pushed entry RIP. The very first
+     *             task_restore_context for this process does
+     *               push entry_rip; RET
+     *             and that RET pops entry_rip from the regular stack AND
+     *             from the shadow stack at PL0_SSP = top - 8. Match → no
+     *             #CP and the process runs at entry_rip. */
+    *(volatile uint64_t *)top         = cet_supv_token_free(top);
+    *(volatile uint64_t *)(top - 8)   = (uint64_t)entry_rip;
 
-    /* Set PTE bit 60 + INVLPG. Bit 60 is protection-key bit 1 here, not
-     * a shadow-stack attribute — see the note at the top of this file. */
+    /* Seal. A process whose kernel shadow stack could not be sealed must
+     * not start: on a core with SH_STK_EN up, its first
+     * task_restore_context would make a shadow-stack access to a page
+     * the processor does not consider a shadow stack. Hand the frame
+     * back and refuse — a refused seal writes nothing (vmm.c checks
+     * §4.6 condition (2) before it touches the leaf), so the frame goes
+     * back to the PMM exactly as it came out. */
     vmm_context_t *kctx = vmm_get_kernel_context();
-    if (kctx) {
-        pte_t *p = vmm_get_or_create_pte(kctx, va);
-        if (p) *p |= VMM_PTE_CET_SS_SUPV;
-        cet_invlpg(va);
+    if (!kctx || !vmm_shadow_stack_seal(kctx, va)) {
+        kprintf("[CET] proc=%u kernel shadow-stack seal refused at 0x%lx — "
+                "process not given a supervisor shadow stack\n",
+                proc->pid, (unsigned long)va);
+        pmm_free(phys, 1);
+        proc->kernel_ssp_phys   = 0;
+        proc->kernel_ssp_va_top = 0;
+        proc->context.pl0_ssp   = 0;
+        return ERR_NO_MEMORY;
     }
-
-    /* WRSSQ the pre-pushed entry RIP one slot below the token. The very
-     * first task_restore_context for this process does
-     *   push entry_rip; RET
-     * RET pops entry_rip from the regular stack AND from the shadow
-     * stack at [top - 8] — we just wrote entry_rip there. Match → no
-     * #CP, process runs at entry_rip. */
-    cet_wrssq8((uint64_t)entry_rip, top - 8);
 
     proc->kernel_ssp_phys   = (uintptr_t)phys;
     proc->kernel_ssp_va_top = top;
     proc->context.pl0_ssp   = top - 8;
 
     debug_printf("[CET] proc=%u kernel SSP allocated: phys=0x%lx top=0x%lx "
-                 "pl0_ssp=0x%lx (entry_rip=0x%lx pre-pushed)\n",
+                 "pl0_ssp=0x%lx (entry_rip=0x%lx pre-pushed, leaf sealed "
+                 "R/W=0 D=1)\n",
                  proc->pid, (unsigned long)(uintptr_t)phys,
                  (unsigned long)top, (unsigned long)(top - 8),
                  (unsigned long)entry_rip);
@@ -806,6 +889,16 @@ void cet_process_destroy_kernel_ssp(struct process_t *proc)
 {
     if (!proc) return;
     if (!proc->kernel_ssp_phys) return;
+
+    /* Unseal before the frame returns to the buddy — the next
+     * pmm_alloc_zero writes it through this same kernel window and a
+     * sealed leaf would fault inside the allocator. */
+    vmm_context_t *kctx = vmm_get_kernel_context();
+    if (kctx) {
+        uintptr_t va = (uintptr_t)vmm_phys_to_virt(proc->kernel_ssp_phys);
+        if (va) (void)vmm_shadow_stack_unseal(kctx, va);
+    }
+
     pmm_free((void *)proc->kernel_ssp_phys, 1);
     proc->kernel_ssp_phys = 0;
     proc->kernel_ssp_va_top = 0;

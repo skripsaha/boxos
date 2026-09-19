@@ -10,8 +10,20 @@
 // kernel stack via swapgs + PerCpuData, builds an interrupt_frame_t,
 // and calls syscall_handler().  INT 0x80 remains as fallback.
 //
-// Exit uses SYSRETQ (~30 cycles) instead of IRETQ (~80 cycles).
-// Canonical-address check guards against CVE-2012-0217.
+// Exit is IRETQ — the one at the end of notify_entry.asm, on every return,
+// with no SYSRETQ path anywhere in this kernel.  Not an oversight: SYSRETQ
+// returns to the RIP it finds in RCX, so taking it would mean overwriting
+// RCX with the frame's RIP, and RCX holds live user data whenever the frame
+// being returned to was built by a timer interrupt rather than by SYSCALL.
+// notify_entry.asm keeps the same reasoning at the instruction itself, with
+// the crash it once caused.
+//
+// So there is no canonical-address test on any return path here, and none is
+// owed: CVE-2012-0217 is a SYSRET hazard — SYSRET with a non-canonical return
+// RIP raises #GP in ring 0 on the user's stack — and an IRETQ return is not
+// exposed to it.  Anything that ever converts this exit to SYSRETQ has to add
+// that test (return RIP against the canonical boundary, IRETQ when it is
+// outside) together with RCX = return RIP and R11 = RFLAGS.
 
 // Per-CPU data accessed via GS segment.
 //

@@ -1044,6 +1044,16 @@ static int TagFsBootStamp(uint32_t *out_volume_block, uint32_t *out_block_count,
  * Kernel loading
  * ========================================================================= */
 
+/* Where the pages TagFsLoadKernel asked the firmware for END. Page-aligned by
+ * construction, and the first address past it is the first one the loader has
+ * NOT already reserved — which is where the BSS reservation has to begin, for
+ * two reasons at once: AllocateAddress refuses an unaligned address outright
+ * (EDK2 CoreInternalAllocatePages returns EFI_NOT_FOUND from its granularity
+ * check before it looks at the map at all), and asking again for a page this
+ * loader already holds is a range that is allocated, which is the other thing
+ * that answer means. */
+static uint64_t g_kernel_alloc_end = 0;
+
 /* Loads kernel file blocks to KERNEL_LOAD_ADDR.
  * Reads all block_count blocks from disk; returns file_size as the actual byte count,
  * or 0 on error. */
@@ -1100,6 +1110,8 @@ static uint64_t TagFsLoadKernel(uint32_t volume_block,
               "to take back\r\n");
         return 0;
     }
+
+    g_kernel_alloc_end = KERNEL_LOAD_ADDR + (uint64_t)pages * PAGE_4KB;
 
     uint8_t *dst = (uint8_t *)(uintptr_t)KERNEL_LOAD_ADDR;
 
@@ -1187,6 +1199,104 @@ static int GopDescribePixels(const EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info,
         *out_format = 0; *out_pixel_bytes = 4; return 1;   /* R,G,B,X in memory */
     }
     return 0;
+}
+
+/* EFI_CONSOLE_OUT_DEVICE_GUID — UEFI 2.10 §12.3, the tag the firmware puts on
+ * the handle its own console output goes to. Defined here rather than in
+ * uefi.h because this is the only question in this loader that needs it. */
+#define EFI_CONSOLE_OUT_DEVICE_GUID \
+    EFI_GUID_INIT(0xd3b36f2c,0xd551,0x11d4, 0x9a,0x46,0x00,0x90,0x27,0x3f,0xc1,0x4d)
+
+/* Has this adapter ANY mode whose pixels this loader can hand over? The
+ * current one first, because that is the one it will usually keep. */
+static int GopHasUsableMode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop)
+{
+    if (!gop || !gop->mode) return 0;
+
+    uint32_t fmt = 0, pixel_bytes = 0;
+    if (gop->mode->info && GopDescribePixels(gop->mode->info, &fmt, &pixel_bytes))
+        return 1;
+
+    for (uint32_t m = 0; m < gop->mode->max_mode; m++) {
+        UINTN size_of_info = 0;
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
+        if (EFI_ERROR(gop->query_mode(gop, m, &size_of_info, &info))) continue;
+        if (!info) continue;
+        /* QueryMode's buffer is the caller's to release (UEFI 2.10 §12.9.2.1).
+         * Before ExitBootServices every pool block left behind is one more
+         * descriptor in the map this loader is about to convert. */
+        int usable = GopDescribePixels(info, &fmt, &pixel_bytes);
+        g_bs->free_pool(info);
+        if (usable) return 1;
+    }
+    return 0;
+}
+
+/*
+ * ── which GOP, on a machine that has more than one
+ *
+ * locate_protocol returns ONE handle and the firmware picks which. On
+ * EDK2-derived firmware the ConSplitter installs a virtual GOP on the console
+ * handle by default (PcdConOutGopSupport), and every mode of that GOP is
+ * PixelBltOnly with FrameBufferBase == 0 in two states that exist on shipping
+ * hardware: no physical GOP connected, and two or more of them — a server with
+ * BMC video beside an add-in card, a desktop with iGPU and dGPU both attached.
+ * Taking that handle means refusing a framebuffer the machine really has and
+ * bringing the kernel up on VGA text, which on a UEFI class-3 board is a black
+ * screen with nothing said.
+ *
+ * So every handle is asked, one with no describable mode at all is passed
+ * over, and one that also carries EFI_CONSOLE_OUT_DEVICE — the device the
+ * firmware's own console writes to, and therefore the display in front of the
+ * operator — wins outright. This is the workaround Linux carries for the same
+ * firmware (drivers/firmware/efi/libstub/gop.c, find_handle_with_primary_gop).
+ */
+static EFI_GRAPHICS_OUTPUT_PROTOCOL *GopFindPrimary(void)
+{
+    EFI_GUID gop_guid    = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+    EFI_GUID conout_guid = EFI_CONSOLE_OUT_DEVICE_GUID;
+
+    UINTN       handle_count = 0;
+    EFI_HANDLE *handles      = NULL;
+    EFI_STATUS  status = g_bs->locate_handle_buffer(EFI_BY_PROTOCOL, &gop_guid,
+                                                    NULL, &handle_count, &handles);
+    if (EFI_ERROR(status) || !handles || handle_count == 0) {
+        /* The firmware will not enumerate its GOPs. One question is left. */
+        EFI_GRAPHICS_OUTPUT_PROTOCOL *only = NULL;
+        if (EFI_ERROR(g_bs->locate_protocol(&gop_guid, NULL, (void **)&only)))
+            return NULL;
+        return only;
+    }
+
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *first  = NULL;   /* first usable adapter */
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *conout = NULL;   /* ...that is the console */
+
+    for (UINTN i = 0; i < handle_count && !conout; i++) {
+        EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
+        if (EFI_ERROR(g_bs->handle_protocol(handles[i], &gop_guid, (void **)&gop)))
+            continue;
+        if (!GopHasUsableMode(gop)) continue;
+
+        void *console = NULL;
+        if (!EFI_ERROR(g_bs->handle_protocol(handles[i], &conout_guid, &console)))
+            conout = gop;
+        else if (!first)
+            first = gop;
+    }
+
+    g_bs->free_pool(handles);
+
+    if (conout) return conout;
+    if (first)  return first;
+
+    /* Not one adapter here has a mode this loader can hand over. Answer with
+     * whatever locate_protocol names anyway, so QueryGopFramebuffer prints
+     * WHICH format it is refusing — that line is the whole diagnosis on a
+     * board that comes up black, and it is worth more than a bare "none". */
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *any = NULL;
+    if (EFI_ERROR(g_bs->locate_protocol(&gop_guid, NULL, (void **)&any)))
+        return NULL;
+    return any;
 }
 
 /*
@@ -1345,11 +1455,12 @@ static FbInfo QueryGopFramebuffer(void)
     FbInfo fb;
     MemZero(&fb, sizeof(fb));
 
-    EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
-    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
-
-    EFI_STATUS status = g_bs->locate_protocol(&gop_guid, NULL, (void **)&gop);
-    if (EFI_ERROR(status) || !gop || !gop->mode) return fb;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = GopFindPrimary();
+    if (!gop || !gop->mode) {
+        Print("TagBoot: no display adapter here offers a linear framebuffer — "
+              "the kernel comes up on text\r\n");
+        return fb;
+    }
 
     SelectGopBestMode(gop);
 
@@ -2592,6 +2703,20 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
         /* The BSS extends past the loaded file data. Reserve those pages so
          * UEFI does not allocate them for its own use before ExitBootServices.
          *
+         * ‼ THE RESERVATION BEGINS WHERE THE IMAGE ALLOCATION ENDS, not at the
+         * kernel's last loaded byte. It used to begin at KERNEL_LOAD_ADDR +
+         * loaded_bytes, which is the kernel file's true size out of the Deed's
+         * boot stamp and is therefore almost never a multiple of 4096 — and an
+         * unaligned AllocateAddress is refused by EDK2 before the memory map is
+         * consulted at all (CoreInternalAllocatePages: `if (Type ==
+         * AllocateAddress) { if ((*Memory & (Alignment - 1)) != 0) { return
+         * EFI_NOT_FOUND; } }`). Rounding down would not have helped either: the
+         * page holding that byte is inside the range TagFsLoadKernel already
+         * allocated, and asking for pages one already holds is the OTHER thing
+         * EFI_NOT_FOUND means here. So the whole 2 MB window the kernel treats
+         * as its BSS went unreserved on every UEFI boot, and the only trace was
+         * a status in parentheses at the end of one line.
+         *
          * Nothing here relies on what the pages contain: §7.2.1 says nothing
          * about the contents of a page AllocatePages hands back (EDK2 clears
          * pages only under DEBUG_CLEAR_MEMORY, a debug-build macro), and the
@@ -2599,25 +2724,38 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
          * before it runs a line of C. A comment here used to claim the spec
          * promised zeroed pages. It does not.
          *
-         * A refusal is NOT followed by free_pages. This loader has not
-         * allocated this range — the kernel image allocation stops at the
-         * end of the file data — so a refusal is somebody else's range, and
+         * A refusal is NOT followed by free_pages. Past the image allocation
+         * this loader holds nothing, so a refusal is somebody else's range, and
          * EDK2 frees without one ownership check. The guard this replaces
          * tested AllocatePages' EFI_NOT_FOUND against FreePages' meaning of
          * the code (§7.2.2 vs §7.2.1) and so fired only when the pages WERE
          * held by someone. */
-        EFI_PHYSICAL_ADDRESS bss_pa  = (EFI_PHYSICAL_ADDRESS)kernel_end_phys;
-        UINTN bss_pages = ((uint64_t)header_phys_end - kernel_end_phys + PAGE_4KB - 1)
-                          / PAGE_4KB;
-        EFI_STATUS bss_status = g_bs->allocate_pages(AllocateAddress, EfiLoaderData,
-                                                      bss_pages, &bss_pa);
         kernel_end_phys = (uint64_t)header_phys_end;
         Print("TagBoot: kernel phys end (BSS) ");
         PrintHex64(kernel_end_phys);
-        if (EFI_ERROR(bss_status)) {
-            Print(" (BSS pages not set aside, status=");
-            PrintHex64((uint64_t)bss_status);
-            Print(")");
+
+        if (kernel_end_phys > g_kernel_alloc_end) {
+            EFI_PHYSICAL_ADDRESS bss_pa = (EFI_PHYSICAL_ADDRESS)g_kernel_alloc_end;
+            UINTN bss_pages = (UINTN)((kernel_end_phys - g_kernel_alloc_end +
+                                       PAGE_4KB - 1) / PAGE_4KB);
+            EFI_STATUS bss_status = g_bs->allocate_pages(AllocateAddress,
+                                                          EfiLoaderData,
+                                                          bss_pages, &bss_pa);
+            if (EFI_ERROR(bss_status)) {
+                Print(" (BSS pages not set aside, status=");
+                PrintHex64((uint64_t)bss_status);
+                Print(")");
+            } else {
+                Print(" (");
+                PrintDec((uint64_t)bss_pages);
+                Print(" BSS pages set aside from ");
+                PrintHex64(g_kernel_alloc_end);
+                Print(")");
+            }
+        } else {
+            /* The BSS ends inside the pages the image was loaded into, which
+             * this loader already holds. Nothing left to ask for. */
+            Print(" (BSS inside the kernel's own pages)");
         }
         Print("\r\n");
     }

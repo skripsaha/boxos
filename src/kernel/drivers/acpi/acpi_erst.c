@@ -22,6 +22,13 @@
  *   erst_clear_record(record_id, status_out)  — §18.5.2.3 sequence
  *   erst_get_record_count()
  *
+ * ‼ NOT IN SERVICE. Nothing outside this file calls any of them. The one
+ * entry point the boot path uses is acpi_erst_bind(), from acpi_parse_apei:
+ * it records where the table is and executes nothing. So no firmware
+ * instruction of this interpreter runs on any boot today, and the first
+ * caller — a RAS consumer that persists an error record — is what puts it
+ * in service.
+ *
  * The record itself never travels through those wrappers: ACPI 6.5 §18.5.2
  * transfers every record through the ERROR LOG ADDRESS RANGE the firmware
  * publishes (Table 18.18 action 0x0D), and the wrappers drive the action
@@ -453,15 +460,46 @@ int erst_run_action(uint8_t action_id, uint64_t value_in, uint64_t* value_out) {
                 }
                 break;
             case ERST_INS_STALL_WHILE_TRUE: {
-                /* Poll the register region while it still reads the value the
-                 * entry names (ACPI 6.5 Table 18.21). The exit is that FACT; the
-                 * glass only bounds it, and on a machine with no ruler the
-                 * fact is the only thing left to wait on. */
+                /* ACPI 6.5 §18.5.1.2, Table 18.21, instruction 0x0D: "OSPM
+                 * continually compares the contents of the specified register
+                 * region to Value until the values are not equal. OSPM stalls
+                 * between each successive comparison. The amount of time to
+                 * stall is specified by VAR1 and is expressed in
+                 * microseconds."
+                 *
+                 * The comparison was right and the STALL half was missing:
+                 * the loop re-read the register as fast as the core could
+                 * issue the access, so the gap the firmware named in VAR1
+                 * never happened. On a register that lives behind an eSPI or
+                 * an SMBus bridge that is a poll rate the platform never
+                 * agreed to, and a settling time the table asked for and did
+                 * not get.
+                 *
+                 * The gap is capped the way the STALL instruction is: past
+                 * ERST_MAX_STALL_US the table is describing something other
+                 * than a settling time. A VAR1 of zero is a firmware that
+                 * asked for no gap at all, and then cpu_pause is the whole
+                 * of it.
+                 *
+                 * The exit is still the FACT; the glass only bounds it, and
+                 * on a machine with no ruler the fact is the only thing left
+                 * to wait on. */
+                uint64_t gap = var1;
+                if (gap > ERST_MAX_STALL_US) {
+                    debug_printf("[ERST] STALL_WHILE_TRUE at pc=%u asks %lu us "
+                                 "between comparisons, past the %u us cap — "
+                                 "polling at the cap\n",
+                                 pc, (unsigned long)gap,
+                                 (unsigned)ERST_MAX_STALL_US);
+                    gap = ERST_MAX_STALL_US;
+                }
+
                 HourGlass glass;
                 if (!HourGlassTurn(&glass, ERST_POLL_PATIENCE_US)) {
                     kprintf("[ERST] no time source — waiting out a firmware "
-                            "poll at pc=%u on the fact itself, with no "
-                            "bound\n", pc);
+                            "poll at pc=%u on the fact itself, with no bound "
+                            "and without the %lu us gap the table asked "
+                            "for\n", pc, (unsigned long)gap);
                     while (erst_region_read(e) == e->value)
                         cpu_pause();
                     break;
@@ -475,7 +513,8 @@ int erst_run_action(uint8_t action_id, uint64_t value_in, uint64_t* value_out) {
                                 HourGlassRulerName(&glass));
                         return -4;
                     }
-                    cpu_pause();
+                    if (gap) erst_stall_us(gap);
+                    else     cpu_pause();
                 }
                 break;
             }

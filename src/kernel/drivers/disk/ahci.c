@@ -1383,6 +1383,67 @@ void ahci_get_port_stats(uint8_t port_num, ahci_port_stats_t* stats_out) {
     stats_out->last_tfd            = __atomic_load_n(&port->stats.last_tfd,            __ATOMIC_RELAXED);
 }
 
+/* GHC.AE — the first register write this driver makes, and the permission
+ * every other register access afterwards rests on.
+ *
+ * AHCI 1.3.1 §3.1.2, Offset 04h bit 31: "Software shall set this bit to '1'
+ * before accessing other AHCI registers... The implementation of this bit is
+ * dependent upon the value of the CAP.SAM bit. If CAP.SAM is '0', then GHC.AE
+ * shall be read-write and shall have a reset value of '0'." §5.3.2.3 says what
+ * happens if it is skipped: "In implementations where CAP.SAM is cleared to
+ * '0', software shall set GHC.AE to '1' before accessing AHCI registers other
+ * than the GHC register. If software accesses AHCI registers other than GHC
+ * when GHC.AE is cleared to '0' the results are indeterminate." And §10.1.2
+ * puts it first in an ordered list that reads CAP fourth: "1. Indicate that
+ * system software is AHCI aware by setting GHC.AE to '1'... 4. Determine how
+ * many command slots the HBA supports, by reading CAP.NCS."
+ *
+ * GHC itself is the one register that clause exempts, so reading it here to
+ * find out whether AE is already set — CAP.SAM='1' makes AE read-only '1', and
+ * firmware that already ran an AHCI driver leaves it set — is legal.
+ *
+ * The write is retried because the bit does not always take on the first
+ * attempt: Linux carries the same loop in ahci_enable_ahci() with "Some
+ * controllers need AHCI_EN to be written multiple times. Try a few times
+ * before giving up." — five writes, a read-back after each, 10 ms apart. Where
+ * this differs from Linux is the ending: Linux WARN_ONs and drives the
+ * controller anyway, and this returns false, because a CAP read taken with AE
+ * clear is not a small error. CAP.NCS decides the slot bitmap, CAP.S64A is the
+ * only guard keeping a PRDT address above 4 GiB out of a 32-bit-only HBA, and
+ * an indeterminate answer to either is a number nobody can act on. */
+#define AHCI_AE_WRITE_ATTEMPTS  5
+#define AHCI_AE_SETTLE_US       10000u
+
+static bool ahci_enable_ae(void) {
+    uint32_t ghc = ahci_ctrl.hba_mem->ghc;
+    if (ghc & AHCI_GHC_AE) return true;
+
+    bool said = false;
+    for (int attempt = 0; attempt < AHCI_AE_WRITE_ATTEMPTS; attempt++) {
+        ahci_ctrl.hba_mem->ghc = ghc | AHCI_GHC_AE;
+        mfence();
+        ghc = ahci_ctrl.hba_mem->ghc;
+        if (ghc & AHCI_GHC_AE) return true;
+
+        HourGlass settle;
+        if (!HourGlassTurn(&settle, AHCI_AE_SETTLE_US)) {
+            /* No ruler yet is no reason to stop asking, and no reason to
+             * pretend the interval was spent either: the attempts go back to
+             * back and the board is told that is what happened. */
+            if (!said) {
+                kprintf("[AHCI] no time source — the %u ms between AHCI-enable "
+                        "attempts cannot be spent, so the %d writes go back to "
+                        "back\n", AHCI_AE_SETTLE_US / 1000u,
+                        AHCI_AE_WRITE_ATTEMPTS);
+                said = true;
+            }
+            continue;
+        }
+        while (!HourGlassRunOut(&settle)) cpu_pause();
+    }
+    return false;
+}
+
 /* AHCI 1.3.1 §10.6.3 — BIOS/OS handoff, and the one question it exists to
  * answer: does this kernel own the HBA yet?
  *
@@ -1423,8 +1484,8 @@ static bool ahci_boh_owned(uint32_t bohc) {
     return (bohc & (AHCI_BOHC_BOS | AHCI_BOHC_OOS)) == AHCI_BOHC_OOS;
 }
 
-static bool ahci_bios_handoff(void) {
-    if (!(ahci_ctrl.hba_mem->cap2 & AHCI_CAP2_BOH)) {
+static bool ahci_bios_handoff(uint32_t cap2) {
+    if (!(cap2 & AHCI_CAP2_BOH)) {
         /* §10.6.1: BOS and OOS are '0' out of reset, and a controller with no
          * handoff mechanism has no BIOS semaphore to wait on. */
         return true;
@@ -1603,14 +1664,48 @@ int ahci_init(void) {
     debug_printf("[AHCI] BAR5: phys=0x%08lx mapped to virt=0x%p (span=0x%x)\n",
                  ahci_ctrl.hba_phys, ahci_ctrl.hba_mem, (unsigned)AHCI_ABAR_SPAN);
 
-    /* CAP is RO and valid before AHCI enable; cache it. CAP2 carries the
-     * BOH bit and must be read before the handoff below. */
+    /* AHCI 1.3.1 §10.1.2 step 1, before any register but GHC is touched —
+     * see ahci_enable_ae. What stood here instead was a CAP read with a
+     * comment claiming "CAP is RO and valid before AHCI enable", which is the
+     * opposite of what §5.3.2.3 says of that read, followed by a CAP2 read and
+     * a BOHC read-modify-write inside the handoff, all of them before the
+     * first AE write. QEMU sets CAP.SAM, so AE reads back '1' there whatever
+     * software does and the whole block returns correct values on the bench;
+     * on a CAP.SAM='0' HBA whose firmware left AHCI mode off, the cached CAP
+     * that every later decision is made from — num_slots, s64a_support,
+     * ncq_support, the CAP.SSS staggered-spin-up test — is indeterminate. */
+    if (!ahci_enable_ae()) {
+        kprintf("[AHCI] the controller will not enter AHCI mode: GHC.AE does "
+                "not read back as '1' after %d writes (GHC=0x%08x). Every "
+                "other register would answer indeterminately (AHCI 1.3.1 "
+                "§5.3.2.3), so nothing is read from it and no disk is taken "
+                "from this controller\n",
+                AHCI_AE_WRITE_ATTEMPTS, ahci_ctrl.hba_mem->ghc);
+        vmm_unmap_mmio(ahci_ctrl.hba_mem, AHCI_ABAR_SPAN);
+        return -1;
+    }
+
+    /* §10.1.2 step 4's read, now that it means something. CAP is HwInit, so
+     * this value survives the HBA reset below. */
     ahci_ctrl.cap = ahci_ctrl.hba_mem->cap;
 
+    /* CAP2 is only defined from AHCI 1.2 onwards, so on an older HBA offset
+     * 24h is reserved and the version register decides whether to read it at
+     * all — the same gate Linux applies in ahci_save_initial_config ("CAP2
+     * register is only defined for AHCI 1.2 and later"). VS is MJR in bits
+     * 31:16 and MNR in 15:0 (§3.1.5). Reserved locations read '0' by §3, so a
+     * pre-1.2 HBA would answer 0 anyway; asking the version is how the driver
+     * knows that rather than assumes it. */
+    uint32_t vs        = ahci_ctrl.hba_mem->vs;
+    uint16_t vs_major  = (uint16_t)(vs >> 16);
+    uint16_t vs_minor  = (uint16_t)(vs & 0xFFFFu);
+    uint32_t cap2      = (vs_major > 1 || (vs_major == 1 && vs_minor >= 0x0200u))
+                         ? ahci_ctrl.hba_mem->cap2 : 0;
+
     /* AHCI 1.3.1 §10.6.3: ask the firmware for the HBA before driving it — and
-     * SAY what the answer was. The next two writes are GHC.AE and GHC.HR, and
-     * §10.4.3 makes GHC.HR a reset of GHC.AE, GHC.IE, the IS register and
-     * every non-HwInit port register field: pulling that out from under an SMI
+     * SAY what the answer was. The next write is GHC.HR, and §10.4.3 makes it
+     * a reset of GHC.AE, GHC.IE, the IS register and every non-HwInit port
+     * register field: pulling that out from under an SMI
      * handler that still believes it owns the controller is the hazard this
      * handoff exists to avoid, and it is the lesser of the two here. The
      * greater is a machine with no disk at all — this kernel reaches its
@@ -1618,17 +1713,14 @@ int ahci_init(void) {
      * grant and never says to abandon the HBA, and mainline Linux resets this
      * same controller without asking anybody. So the driver proceeds, and the
      * board is told on which terms. */
-    if (!ahci_bios_handoff()) {
+    if (!ahci_bios_handoff(cap2)) {
         kprintf("[AHCI] proceeding without the firmware's handoff: the "
                 "controller is reset and driven from here\n");
     }
 
-    /* §5.3.2.3: GHC.AE must be set before accessing other AHCI registers.
-     * Set it, issue the HBA reset (which clears AE), then set it again —
-     * the spec-mandated ordering for a clean reset. */
-    ahci_ctrl.hba_mem->ghc |= AHCI_GHC_AE;
-    mfence();
-
+    /* §10.1.2: "Software may perform an HBA reset prior to initializing the
+     * controller by setting GHC.AE to '1' and then setting GHC.HR to '1'."
+     * AE was set above, before anything else was read. */
     debug_printf("[AHCI] Performing HBA reset...\n");
     ahci_ctrl.hba_mem->ghc |= AHCI_GHC_HR;
     mfence();
@@ -1650,12 +1742,14 @@ int ahci_init(void) {
 
     debug_printf("[AHCI] HBA reset complete\n");
 
-    // Re-enable AHCI mode — the reset cleared GHC.AE.
-    ahci_ctrl.hba_mem->ghc |= AHCI_GHC_AE;
-    mfence();
-
-    if ((ahci_ctrl.hba_mem->ghc & AHCI_GHC_AE) == 0) {
-        debug_printf("[AHCI] Failed to enable AHCI mode\n");
+    /* Re-enable AHCI mode — §10.4.3 has the reset clear GHC.AE. Same helper,
+     * because a controller that needed the bit written more than once before
+     * the reset needs it just as much after. */
+    if (!ahci_enable_ae()) {
+        kprintf("[AHCI] GHC.AE does not read back as '1' after the HBA reset "
+                "(%d writes, GHC=0x%08x) — the controller is not in AHCI mode "
+                "and nothing more is read from it\n",
+                AHCI_AE_WRITE_ATTEMPTS, ahci_ctrl.hba_mem->ghc);
         vmm_unmap_mmio(ahci_ctrl.hba_mem, AHCI_ABAR_SPAN);
         return -1;
     }
@@ -1667,11 +1761,13 @@ int ahci_init(void) {
     ahci_ctrl.ncq_support  = (ahci_ctrl.cap & AHCI_CAP_SNCQ) != 0;
     ahci_ctrl.num_slots    = ((ahci_ctrl.cap >> AHCI_CAP_NCS_SHIFT) & AHCI_CAP_NCS_MASK) + 1;
 
-    debug_printf("[AHCI] CAP: NCQ=%s, Slots=%u, S64A=%s, CAP2=0x%08x\n",
+    debug_printf("[AHCI] VS=%u.%u.%u CAP: NCQ=%s, Slots=%u, S64A=%s, CAP2=0x%08x\n",
+                 (unsigned)vs_major, (unsigned)(vs_minor >> 8),
+                 (unsigned)(vs_minor & 0xFFu),
                  ahci_ctrl.ncq_support ? "yes" : "no",
                  ahci_ctrl.num_slots,
                  ahci_ctrl.s64a_support ? "yes" : "no",
-                 ahci_ctrl.hba_mem->cap2);
+                 cap2);
 
     ahci_ctrl.initialized = true;
 

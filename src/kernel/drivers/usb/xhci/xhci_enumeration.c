@@ -761,15 +761,6 @@ int xhci_enumerate_behind_hub(xhci_controller_t* ctrl,
         return -1;
     }
 
-    /* Four bits name the port at each tier, so fifteen is the highest port the
-     * bus can be told about — which is why the specification stops hubs there
-     * too, and why a hub claiming more of them has some that cannot be used. */
-    if (hub_port > 15) {
-        kprintf("[xHCI] hub slot %u has no port %u the bus could name — four "
-                "bits per tier stop at 15\n", hub->slot_id, hub_port);
-        return -5;
-    }
-
     /* Five tiers is the whole of the route string, and the specification says
      * so: four bits each, twenty bits, and no sixth place to put a number. */
     if (hub->depth >= 5) {
@@ -793,15 +784,29 @@ int xhci_enumerate_behind_hub(xhci_controller_t* ctrl,
     /* The hub did the resetting, and it is the hub that knows what answered. */
     slot->reset_kind = XHCI_PORT_RESET_HUB;
 
-    /* Four bits per tier, and the tier is how deep the HUB is — a device on a
+    /*
+     * Four bits per tier, and the tier is how deep the HUB is — a device on a
      * hub that is itself on a root port occupies the first four bits.
      *
-     * A port number above fifteen does not fit in those four bits, and the old
-     * code clamped it to fifteen. That does not address port sixteen; it
-     * addresses port fifteen, and hands whatever is plugged into that one the
-     * transfers meant for its neighbour. A port the bus cannot name is a port
-     * this driver says it cannot reach. */
-    slot->route_string   = hub->route_string | ((uint32_t)hub_port << (4 * hub->depth));
+     * ‼ AND FIFTEEN IS WHAT THE SPECIFICATION ASKS FOR ABOVE FOURTEEN, NOT A
+     * CLAMP THIS DRIVER INVENTED.
+     *
+     * The comment that used to stand here said a port above fifteen "is a port
+     * this driver says it cannot reach", and the refusal above it said the bus
+     * could not name such a port. Both were false. xHCI 1.2 Table 6-4, the
+     * Route String field, footnote 106: "If HS or FS hub in the path supports
+     * more than 14 ports the associated Route String Port field shall be set
+     * to 15." A USB 2.0 hub does not route by the route string at all — it
+     * repeats downstream and the device address picks the device out — so the
+     * nibble is a placeholder for such a tier and fifteen is the value the
+     * specification names for it. Linux writes exactly this (usb_alloc_dev:
+     * "Route string assumes hubs have less than 16 ports", port1 below 15 or
+     * 15 otherwise), and a SuperSpeed hub, which does route, is limited to
+     * fifteen downstream ports of its own, so the ambiguity cannot arise on
+     * the tier where the nibble is read.
+     */
+    uint32_t route_nibble = (hub_port < 15) ? hub_port : 15u;
+    slot->route_string   = hub->route_string | (route_nibble << (4 * hub->depth));
     slot->depth          = (uint8_t)(hub->depth + 1);
     slot->parent_slot_id = hub->slot_id;
     slot->parent_port    = hub_port;
@@ -2100,6 +2105,73 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
                     "all — carrying on\n", ctrl->name, slot->port_num);
             enum_resume_after_recovery(ctrl, slot, slot_id);
             return;
+        }
+
+        /*
+         * ‼ AND THE SAME ANSWER TO THE OTHER COMMAND, WHICH THE SPECIFICATION
+         * NAMES AS A RACE RATHER THAN A FAILURE.
+         *
+         * xHCI 1.2 §4.6.9, the Note before Table 4-2: "A Busy endpoint may
+         * asynchronously transition from the Running to the Halted or Error
+         * state due to error conditions detected while processing TRBs. A
+         * possible race condition may occur if software, thinking an endpoint
+         * is in the Running state, issues a Stop Endpoint Command however at
+         * the same time the xHC asynchronously transitions the endpoint to the
+         * Halted or Error state. In this case, a Context State Error may be
+         * generated for the command completion. Software may verify that this
+         * case occurred by inspecting the EP State for Halted or Error when a
+         * Stop Endpoint Command results in a Context State Error."
+         *
+         * That race is not a corner: the watchdog issues this Stop precisely
+         * when a control step went unanswered, which is the case in which the
+         * pipe most plausibly halted and the event saying so was lost — this
+         * file's own report calls that state out by name. Falling through to
+         * the release below threw the slot away on the FIRST of three attempts
+         * and took the device with it: a root-port device pays a fresh port
+         * reset and two Address Devices for it, and a device behind a hub is
+         * simply gone, because born_port is zero for one and hub_scan_ports
+         * has already marked its port as answered.
+         *
+         * So the endpoint is asked, exactly as the Note directs, and each
+         * answer goes to the repair the specification defines for it:
+         *
+         *   Halted           — Reset Endpoint (§4.6.8), which is the road
+         *                      WAIT_EP0_RESET already travels, and the step's
+         *                      resume and reissue are carried across unchanged
+         *                      so the retry that was just entered survives.
+         *   Stopped or Error — already where Stop Endpoint would have left it,
+         *                      and §4.6.10 makes Set TR Dequeue Pointer legal
+         *                      in both, so the shared branch below is entered
+         *                      straight away.
+         *
+         * Anything else — Running, Disabled — is not the race the Note
+         * describes, and there is no repair here that can reason about it; it
+         * takes the release below, as before.
+         */
+        if (slot->state == ENUM_STATE_WAIT_EP0_STOP &&
+            completion_code == TRB_COMPLETION_CONTEXT_STATE) {
+            uint8_t ep0 = xhci_ep_context_state(ctrl, slot, 1);
+
+            if (ep0 == XHCI_EP_STATE_HALTED) {
+                kprintf("[xHCI %s] port %u: the control pipe halted while the "
+                        "transfer was being taken back — clearing it instead\n",
+                        ctrl->name, slot->port_num);
+                slot->state = ENUM_STATE_WAIT_EP0_RESET;
+                if (xhci_post_reset_endpoint_cmd(ctrl, slot,
+                                                 slot->slot_id, 1) < 0) {
+                    xhci_slot_retire(ctrl, slot);
+                }
+                return;
+            }
+
+            if (ep0 == XHCI_EP_STATE_STOPPED || ep0 == XHCI_EP_STATE_ERROR) {
+                kprintf("[xHCI %s] port %u: the control pipe was already %s — "
+                        "repositioning it\n", ctrl->name, slot->port_num,
+                        xhci_ep_state_name(ep0));
+                xhci_enum_advance_state(ctrl, slot, slot_id,
+                                        TRB_COMPLETION_SUCCESS);
+                return;
+            }
         }
 
         kprintf("[xHCI %s] port %u: enumeration step %s failed — %s (code %u); "

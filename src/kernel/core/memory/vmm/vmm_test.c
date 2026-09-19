@@ -118,23 +118,35 @@ void VmmHelperTest(void) {
                  "vmm_phys_with_keyid bound guard (15+52 > 64) → no-op");
     }
 
-    /* ── G: CET shadow-stack PTE bit 60 encoder (Phase 2K) ─────────── */
-    kprintf("[VMM TEST] G: CET shadow-stack bit-60 encoder\n");
+    /* ── G: shadow-stack leaf encoding (Intel SDM Vol 3A §4.6) ─────── */
+    kprintf("[VMM TEST] G: shadow-stack leaf encoding\n");
     {
-        uint64_t base = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE;
-        uint64_t with_ss = vmm_pte_with_cet_supv_ss(base);
-        VT_CHECK((with_ss & VMM_PTE_CET_SS_SUPV) != 0,
-                 "vmm_pte_with_cet_supv_ss sets bit 60");
-        VT_CHECK(vmm_pte_is_supv_ss(with_ss),
-                 "vmm_pte_is_supv_ss detects bit 60");
-        VT_CHECK(!vmm_pte_is_supv_ss(base),
-                 "vmm_pte_is_supv_ss false on unstamped PTE");
-        VT_CHECK((vmm_pte_addr_mask & VMM_PTE_CET_SS_SUPV) == 0,
-                 "CET SS bit 60 outside phys mask");
-        VT_CHECK((MEMTAG_PTE_REGION_MASK & VMM_PTE_CET_SS_SUPV) == 0,
-                 "CET SS bit 60 outside Phase 2D region bits");
-        /* Bit 60 IS protection-key bit 1 (Table 4-19); VMM_PTE_CET_SS_SUPV
-         * names it, it does not own it. */
+        /* "A linear address is a shadow-stack address if ... the R/W flag
+         * (bit 1) is 0 and the dirty flag (bit 6) is 1 in the paging-
+         * structure entry that maps the page" — U/S then picks the ring.
+         * There is no shadow-stack flag bit; bit 60 is protection-key
+         * bit 1 and never meant anything else in ordinary paging. */
+        uint64_t supv = VMM_FLAGS_SHADOW_STACK_SUPV;
+        uint64_t user = VMM_FLAGS_SHADOW_STACK_USER;
+        VT_CHECK((supv & VMM_FLAG_WRITABLE) == 0, "supervisor SS is R/W=0");
+        VT_CHECK((supv & VMM_FLAG_DIRTY) != 0,    "supervisor SS is D=1");
+        VT_CHECK((supv & VMM_FLAG_PRESENT) != 0,  "supervisor SS is present");
+        VT_CHECK((supv & VMM_FLAG_USER) == 0,     "supervisor SS is U/S=0");
+        VT_CHECK((user & VMM_FLAG_WRITABLE) == 0, "user SS is R/W=0");
+        VT_CHECK((user & VMM_FLAG_DIRTY) != 0,    "user SS is D=1");
+        VT_CHECK((user & VMM_FLAG_USER) != 0,     "user SS is U/S=1");
+        /* Both bits must survive the flag mask vmm_make_pte applies, or
+         * a fresh mapping would come out as ordinary read-only memory. */
+        VT_CHECK((supv & VMM_PTE_FLAGS_MASK) == supv,
+                 "supervisor SS flags survive vmm_make_pte's mask");
+        VT_CHECK((user & VMM_PTE_FLAGS_MASK) == user,
+                 "user SS flags survive vmm_make_pte's mask");
+        /* The encoding lives entirely below bit 12, so MemTag's region
+         * window (52-58) and the PKEY field (62:59) cannot disturb it. */
+        VT_CHECK((MEMTAG_PTE_REGION_MASK & (VMM_FLAG_WRITABLE | VMM_FLAG_DIRTY)) == 0,
+                 "shadow-stack bits outside Phase 2D region bits");
+        VT_CHECK((VMM_PTE_PKEY_MASK & (VMM_FLAG_WRITABLE | VMM_FLAG_DIRTY)) == 0,
+                 "shadow-stack bits outside the PKEY field");
     }
 
     if (fail == 0)

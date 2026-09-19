@@ -89,10 +89,13 @@ typedef struct {
     /* CET (Phase 2K) — Intel SDM Vol 3D §17. Two sub-features:
      *   CPUID.07H.0:ECX[7]  = SHSTK (Shadow Stack)
      *   CPUID.07H.0:EDX[20] = IBT   (Indirect Branch Tracking)
-     * Both gate on CR4.CET (bit 23). PTE bit 60 selects supervisor
-     * shadow stack when set on a leaf 4 KiB PTE; bit 61 selects user
-     * SS. The SSP register lives in XSAVE component 11 (XCR0.CET_S/U
-     * via bits 11/12). */
+     * Both gate on CR4.CET (bit 23). A page is a shadow stack by its
+     * ACCESS RIGHTS, not by a flag of its own: SDM Vol 3A 4.6 makes it
+     * R/W=0 with D=1 in the leaf, and U/S picks the ring. There is no
+     * shadow-stack bit in ordinary paging -- bit 60 is protection-key
+     * bit 1, and the bit-60 meaning belongs to EPT entries only. The
+     * SSP state lives in IA32_XSS components 11 (CET_U) and 12 (CET_S),
+     * which are supervisor state and invisible to XCR0. */
     bool has_shstk;             // CPUID.07H.0:ECX[7]
     bool has_ibt;               // CPUID.07H.0:EDX[20]
     /* PCONFIG instruction (Intel SDM Vol 2D PCONFIG, Vol 3D §16).

@@ -93,6 +93,34 @@ static void ioapic_write_redir(uint8_t entry, uint32_t low, uint32_t high) {
     spin_unlock(&ioapic_reg_lock);
 }
 
+/*
+ * Taking a pin out of service is the one case that goes the other way.
+ *
+ * High-dword-first is right while ARMING a line and wrong while disarming
+ * one. The mask bit is in the low dword, so raising it first means the rest
+ * of the entry only ever changes under a pin that can no longer deliver.
+ * Skip that and the same window opens in reverse: ioapic_init() meets an
+ * entry in whatever state firmware left it — on a warm handoff that can be
+ * unmasked, with a live vector and a destination of its own — and writing
+ * the high dword first drops destination 0 into an entry that is still
+ * armed with the OLD vector. An assertion inside that window is formatted
+ * from the old low dword and sent to APIC ID 0, which at this point in boot
+ * is either the wrong core or no core at all.
+ *
+ * Linux splits the two for this reason and says so above ioapic_mask_entry:
+ * "When we mask an IO APIC routing entry, we need to write the low word
+ * first, in order to set the mask bit before we change the high bits!"
+ * (arch/x86/kernel/apic/io_apic.c) — the mirror of the sentence quoted
+ * above ioapic_write_redir.
+ */
+static void ioapic_mask_redir(uint8_t entry) {
+    uint32_t reg = IOAPIC_REG_REDTBL + entry * 2;
+    spin_lock(&ioapic_reg_lock);
+    ioapic_write_held(reg, IOAPIC_REDIR_MASKED);
+    ioapic_write_held(reg + 1, 0);
+    spin_unlock(&ioapic_reg_lock);
+}
+
 void ioapic_init(uintptr_t base_addr, uint8_t gsi_base) {
     ioapic_base_phys = base_addr;
     ioapic_gsi_base = gsi_base;
@@ -125,7 +153,7 @@ void ioapic_init(uintptr_t base_addr, uint8_t gsi_base) {
 
     // Mask all entries by default
     for (uint8_t i = 0; i <= ioapic_max_entry && i < IOAPIC_MAX_PINS; i++) {
-        ioapic_write_redir(i, IOAPIC_REDIR_MASKED, 0);
+        ioapic_mask_redir(i);
     }
 
     debug_printf("[IOAPIC] All %u pins masked\n", ioapic_max_entry + 1);

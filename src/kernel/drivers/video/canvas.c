@@ -443,78 +443,130 @@ static void implicit_close_locked(CanvasState *c, bool opened)
  *  Lifecycle
  * ========================================================================= */
 
+/* ‼ A CANVAS THAT CANNOT BE BUILT MUST NOT TAKE THE ONE ON THE GLASS WITH IT.
+ *
+ * This used to overwrite s_canvas.be/cols/rows with the new geometry FIRST and
+ * allocate afterwards, so a failed vmalloc left `ready = false` over a
+ * half-swapped record and every public entry point returned at its
+ * `if (!s_canvas.ready) return;` from then on. The console was gone for the
+ * rest of the boot — not the boot log, not the shell, not the panic banner —
+ * and the only notice was a debug_printf, which klib.h compiles to
+ * `do { if (0) kprintf(...); } while (0)` in a shipping build. Meanwhile
+ * video.c had already installed the backend and main.c printed "[DISPLAY] GOP
+ * framebuffer active". On a real UEFI board that is total, permanent, silent
+ * loss of the only output device: HwVgaBackendInit's stores to 0xB8000 are not
+ * scanned out in a GOP mode, so the glass keeps firmware's last frame.
+ *
+ * The rule now is the obvious one: nothing of the new Canvas is published
+ * until every part of it exists, and no part of it is written where the live
+ * Canvas can see it. The build happens in a local record and outside the lock
+ * (vmalloc reaches into the VMM, which is not somewhere to go holding a leaf
+ * display lock), and the publish is one assignment under the lock. A failure
+ * leaves the previous Canvas — backend, geometry, cells and all — exactly as
+ * it was, still ready, still printing, and says so with kprintf, which
+ * survives the build that matters.
+ *
+ * ‼ WHICH IS WHY THE STATIC ARRAYS ARE FOR THE FIRST CANVAS ONLY. There is
+ * one set of them, so a second Canvas built on them would blank the cells the
+ * live one is printing into, before the publish and outside the lock — the
+ * exact tear the rule above forbids, arrived at from the other side. The
+ * static path is therefore taken only while no Canvas is live; a later
+ * geometry that would also fit them is allocated instead, which it can be,
+ * because a Canvas being live means VideoInit has run and any replacement
+ * comes after it.
+ *
+ * False = the Canvas could not be built and NOTHING was published. */
+static bool canvas_build(CanvasState *out, DisplayBackend *be)
+{
+    out->be   = be;
+    out->cols = be->cols;
+    out->rows = be->rows;
+
+    if (canvas_fits_static(be->cols, be->rows) && !s_canvas.ready) {
+        /* Early-boot path: VGA text mode (80×25) sits comfortably in
+         * the static arrays — no vmalloc needed, so VideoInit can run
+         * before mem_init and kprintf still works for boot-time logs. */
+        out->cells          = s_static_cells;
+        out->plan_row_dirty = s_static_dirty;
+        out->plan_col_lo    = s_static_col_lo;
+        out->plan_col_hi    = s_static_col_hi;
+    } else {
+        /* Any Canvas that is not the first one: a larger surface (the GOP
+         * framebuffer), or a surface that would fit the static arrays but
+         * cannot have them because the live Canvas is printing into them.
+         * Both cases run after vmm_init, so vmalloc is available and cells +
+         * plan arrays are allocated. */
+        size_t cell_bytes  = sizeof(TextCell) * out->rows * out->cols;
+        size_t dirty_bytes = (size_t)out->rows;
+        size_t cl_bytes    = sizeof(uint16_t) * (size_t)out->rows;
+
+        out->cells          = (TextCell *)vmalloc(cell_bytes);
+        out->plan_row_dirty = (uint8_t  *)vmalloc(dirty_bytes);
+        out->plan_col_lo    = (uint16_t *)vmalloc(cl_bytes);
+        out->plan_col_hi    = (uint16_t *)vmalloc(cl_bytes);
+
+        if (!out->cells || !out->plan_row_dirty ||
+            !out->plan_col_lo || !out->plan_col_hi) {
+            kprintf("[CANVAS] %ux%u console not built: no room for "
+                    "cell=%zu dirty=%zu range=%zu bytes; the console stays on "
+                    "the backend it already had\n",
+                    out->cols, out->rows, cell_bytes, dirty_bytes, cl_bytes);
+            return false;
+        }
+    }
+
+    TextCell empty = cell_blank();
+    for (size_t i = 0; i < out->rows * out->cols; i++)
+        out->cells[i] = empty;
+    plan_reset(out);
+
+    out->col           = 0;
+    out->row           = 0;
+    out->caret_col     = 0;
+    out->caret_row     = 0;
+    out->caret_visible = false;
+    out->batch_depth   = 0;
+    out->ready         = true;
+    return true;
+}
+
 void CanvasInit(DisplayBackend *be)
 {
     if (!be) return;
 
     /* Init the spinlock formally; before mem_init runs the BSS-zero
      * layout is already an unlocked spinlock, but spinlock_init keeps
-     * the contract explicit and idempotent. */
-    spinlock_init(&s_canvas_lock);
+     * the contract explicit and idempotent.  Only while no Canvas is live:
+     * re-initialising it under a ready Canvas would release it out from
+     * under a writer on another core. */
+    if (!s_canvas.ready) spinlock_init(&s_canvas_lock);
 
-    s_canvas.be   = be;
-    s_canvas.cols = be->cols;
-    s_canvas.rows = be->rows;
+    CanvasState next = {0};
+    if (!canvas_build(&next, be)) return;
 
-    if (canvas_fits_static(be->cols, be->rows)) {
-        /* Early-boot path: VGA text mode (80×25) sits comfortably in
-         * the static arrays — no vmalloc needed, so VideoInit can run
-         * before mem_init and kprintf still works for boot-time logs. */
-        s_canvas.cells          = s_static_cells;
-        s_canvas.plan_row_dirty = s_static_dirty;
-        s_canvas.plan_col_lo    = s_static_col_lo;
-        s_canvas.plan_col_hi    = s_static_col_hi;
-    } else {
-        /* Larger surface (GOP framebuffer): runs after vmm_init.  vmalloc
-         * is available; cells + plan arrays are allocated dynamically. */
-        size_t cell_bytes  = sizeof(TextCell) * s_canvas.rows * s_canvas.cols;
-        size_t dirty_bytes = (size_t)s_canvas.rows;
-        size_t cl_bytes    = sizeof(uint16_t) * (size_t)s_canvas.rows;
-
-        s_canvas.cells          = (TextCell *)vmalloc(cell_bytes);
-        s_canvas.plan_row_dirty = (uint8_t  *)vmalloc(dirty_bytes);
-        s_canvas.plan_col_lo    = (uint16_t *)vmalloc(cl_bytes);
-        s_canvas.plan_col_hi    = (uint16_t *)vmalloc(cl_bytes);
-
-        if (!s_canvas.cells || !s_canvas.plan_row_dirty ||
-            !s_canvas.plan_col_lo || !s_canvas.plan_col_hi) {
-            debug_printf("[CANVAS] init: alloc failed (cell=%zu dirty=%zu range=%zu)\n",
-                         cell_bytes, dirty_bytes, cl_bytes);
-            s_canvas.ready = false;
-            return;
-        }
-    }
+    spin_lock(&s_canvas_lock);
+    s_canvas = next;
+    spin_unlock(&s_canvas_lock);
 
     TextCell empty = cell_blank();
-    for (size_t i = 0; i < s_canvas.rows * s_canvas.cols; i++)
-        s_canvas.cells[i] = empty;
-    plan_reset(&s_canvas);
-
-    s_canvas.col           = 0;
-    s_canvas.row           = 0;
-    s_canvas.caret_col     = 0;
-    s_canvas.caret_row     = 0;
-    s_canvas.caret_visible = false;
-    s_canvas.batch_depth   = 0;
-    s_canvas.ready         = true;
-
-    for (uint32_t r = 0; r < s_canvas.rows; r++)
+    for (uint32_t r = 0; r < next.rows; r++)
         be->FillRow(be, r, empty.fg, empty.bg);
-    be->Present(be, 0, s_canvas.rows);
+    be->Present(be, 0, next.rows);
 }
 
 void CanvasReplaceBackend(DisplayBackend *be)
 {
     if (!be) return;
 
-    /* Resolution change (e.g. BIOS text → UEFI GOP at boot): drop the
-     * cached state and re-init from scratch.  Boot-time only — the
-     * orphaned cell/plan allocations are bounded by their sizes and we
-     * do not have a vfree() that splits arbitrary heap nodes yet. */
+    /* Resolution change (e.g. BIOS text → UEFI GOP at boot): re-init from
+     * scratch.  Boot-time only — the orphaned cell/plan allocations are
+     * bounded by their sizes and we do not have a vfree() that splits
+     * arbitrary heap nodes yet.  The old Canvas keeps serving right up to
+     * the publish inside CanvasInit, and keeps serving for good if the new
+     * one cannot be built. */
     spin_lock(&s_canvas_lock);
     bool replace = (be->cols != s_canvas.cols || be->rows != s_canvas.rows);
     if (replace) {
-        s_canvas.ready = false;
         spin_unlock(&s_canvas_lock);
         CanvasInit(be);
         return;

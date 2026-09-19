@@ -5,12 +5,25 @@
 #include "vmm.h"
 #include "touch.h"
 
-/* PCI config space access is two stages:
+/* Configuration space has two doors, and only one of them needs a lock.
+ *
+ * The legacy door is two stages against ONE shared address register:
  *   outl(0xCF8, addr); inl/outl(0xCFC, ...);
- * If two cores interleave, one's `inl` can read using the other's `outl` of
- * 0xCF8 and return data from a different (bus,dev,fn,off). Currently config
- * cycles only run during boot (BSP) and during driver init, but the lock
- * makes the API safe to call from any core / any time. */
+ * If two cores interleave, one's data cycle runs against the other's address
+ * cycle and reads — or writes — a different (bus,dev,fn,off) entirely. Every
+ * legacy accessor below therefore holds g_pci_cfg_lock across BOTH cycles,
+ * which is the whole of what this lock is for.
+ *
+ * The ECAM door is a single MMIO access at an address that already names the
+ * function, so there is no shared selector to protect and the ECAM paths take
+ * no lock at all. On a machine with an MCFG that is every access, so the lock
+ * is not what makes those safe — the addressing is.
+ *
+ * What neither door offers is atomicity across a read and a later write of
+ * the same register. None of the accessors below needs it any more: a word
+ * write is a word write and a byte write is a byte write (see
+ * pci_config_write_word / pci_config_write_byte). A caller that wants a
+ * read-modify-write of one register has to arrange that itself. */
 static spinlock_t g_pci_cfg_lock = {0};
 
 /* ============================================================
@@ -83,15 +96,40 @@ uint16_t pci_ecam_read_word(uint16_t segment, uint8_t bus, uint8_t device,
     return (uint16_t)(aligned >> ((offset & 0x2u) * 8));
 }
 
+/* A word is written as a word and a byte as a byte — never as a dword.
+ *
+ * PCI Local Bus Specification Rev. 3.0 §6.2.3 "Device Status": the Status
+ * register at offset 0x06 shares dword 0x04 with the Command register at
+ * 0x04, and its error bits — Detected Parity Error (15), Signaled System
+ * Error (14), Received Master Abort (13), Received Target Abort (12),
+ * Signaled Target Abort (11), Master Data Parity Error (8) — are all
+ * write-1-to-clear: "A one bit is reset (if it is not read-only) whenever
+ * the register is written, and the write data in the corresponding bit
+ * location is a 1." A read-modify-write of the containing dword reads those
+ * bits and hands them straight back, which resets every error the device had
+ * recorded. Nothing in BoxOS reads them today, so what that destroys is the
+ * evidence — for a later AER or GHES reader, for firmware, for a post-mortem
+ * — and it destroys it on every pci_enable_bus_master, every BAR-size probe
+ * and every MSI/MSI-X arming.
+ *
+ * The same construction turns a one-byte write into a four-byte write of
+ * three neighbours sampled at a different instant, which is the part that is
+ * visible today: an AML OperationRegion Field declared ByteAcc or WordAcc on
+ * PCI_Config (drivers/acpi/aml/aml.c) and an ACPI Generic Address Structure
+ * write into PCI config space (drivers/acpi/acpi_shutdown.c — PM1 control and
+ * the reset register) both land here, and a 4-byte write gives those methods
+ * a side effect on the neighbouring bytes that their author never wrote.
+ *
+ * Linux never does it either: pci_generic_config_write issues
+ * writeb/writew/writel (drivers/pci/access.c) and pci_mmcfg_write issues
+ * mmio_config_writeb/writew/writel (arch/x86/pci/mmconfig_64.c) — a
+ * native-width store, never a read-modify-write. */
 void pci_ecam_write_word(uint16_t segment, uint8_t bus, uint8_t device,
                          uint8_t function, uint16_t offset, uint16_t value) {
-    uint32_t aligned_off = offset & 0xFFCu;
-    uint32_t dword = pci_ecam_read_dword(segment, bus, device, function,
-                                          aligned_off);
-    uint8_t shift = (uint8_t)((offset & 0x2u) * 8);
-    dword = (dword & ~((uint32_t)0xFFFFu << shift)) |
-            ((uint32_t)value << shift);
-    pci_ecam_write_dword(segment, bus, device, function, aligned_off, dword);
+    volatile uint8_t* p = ecam_locate(segment, bus, device, function,
+                                      offset & 0xFFEu);
+    if (!p) return;
+    *(volatile uint16_t *)p = value;
 }
 
 uint8_t pci_ecam_read_byte(uint16_t segment, uint8_t bus, uint8_t device,
@@ -103,13 +141,9 @@ uint8_t pci_ecam_read_byte(uint16_t segment, uint8_t bus, uint8_t device,
 
 void pci_ecam_write_byte(uint16_t segment, uint8_t bus, uint8_t device,
                          uint8_t function, uint16_t offset, uint8_t value) {
-    uint32_t aligned_off = offset & 0xFFCu;
-    uint32_t dword = pci_ecam_read_dword(segment, bus, device, function,
-                                          aligned_off);
-    uint8_t shift = (uint8_t)((offset & 0x3u) * 8);
-    dword = (dword & ~((uint32_t)0xFFu << shift)) |
-            ((uint32_t)value << shift);
-    pci_ecam_write_dword(segment, bus, device, function, aligned_off, dword);
+    volatile uint8_t* p = ecam_locate(segment, bus, device, function, offset);
+    if (!p) return;
+    *p = value;
 }
 
 /* Map every MCFG segment that ACPI told us about. We map the full
@@ -194,14 +228,27 @@ uint16_t pci_config_read_word(uint8_t bus, uint8_t device, uint8_t function, uin
     return (uint16_t)(dword >> ((offset & 0x02) * 8));
 }
 
+/* Native-width word and byte writes on the legacy path too — see the note
+ * above pci_ecam_write_word for why a read-modify-write of the containing
+ * dword is not an option. 0xCF8 carries the dword-aligned address and the
+ * width is chosen by which byte of the 0xCFC data port is addressed: Linux
+ * writes `outw((u16)value, 0xCFC + (reg & 2))` and `outb((u8)value, 0xCFC +
+ * (reg & 3))` after the same address cycle (pci_conf1_write,
+ * arch/x86/pci/direct.c). Address cycle and data cycle are one critical
+ * section, as they are for the dword accessors above. */
 void pci_config_write_word(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, uint16_t value) {
-    uint32_t aligned_offset = offset & 0xFC;
-    uint32_t dword = pci_config_read_dword(bus, device, function, aligned_offset);
+    volatile uint8_t* p = ecam_locate(0, bus, device, function,
+                                      (uint16_t)(offset & 0xFEu));
+    if (p) {
+        *(volatile uint16_t *)p = value;
+        return;
+    }
 
-    uint8_t shift = (offset & 0x02) * 8;
-    dword = (dword & ~(0xFFFF << shift)) | ((uint32_t)value << shift);
-
-    pci_config_write_dword(bus, device, function, aligned_offset, dword);
+    uint32_t address = pci_build_address(bus, device, function, offset);
+    spin_lock(&g_pci_cfg_lock);
+    outl(PCI_CONFIG_ADDRESS, address);
+    outw((uint16_t)(PCI_CONFIG_DATA + (offset & 0x02u)), value);
+    spin_unlock(&g_pci_cfg_lock);
 }
 
 uint8_t pci_config_read_byte(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset) {
@@ -210,13 +257,17 @@ uint8_t pci_config_read_byte(uint8_t bus, uint8_t device, uint8_t function, uint
 }
 
 void pci_config_write_byte(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, uint8_t value) {
-    uint32_t aligned_offset = offset & 0xFC;
-    uint32_t dword = pci_config_read_dword(bus, device, function, aligned_offset);
+    volatile uint8_t* p = ecam_locate(0, bus, device, function, offset);
+    if (p) {
+        *p = value;
+        return;
+    }
 
-    uint8_t shift = (offset & 0x03) * 8;
-    dword = (dword & ~(0xFF << shift)) | ((uint32_t)value << shift);
-
-    pci_config_write_dword(bus, device, function, aligned_offset, dword);
+    uint32_t address = pci_build_address(bus, device, function, offset);
+    spin_lock(&g_pci_cfg_lock);
+    outl(PCI_CONFIG_ADDRESS, address);
+    outb((uint16_t)(PCI_CONFIG_DATA + (offset & 0x03u)), value);
+    spin_unlock(&g_pci_cfg_lock);
 }
 
 /* Recursive bus scan with cycle guard: a malformed or virtualised bridge
@@ -525,6 +576,40 @@ uint8_t pci_find_capability(uint8_t bus, uint8_t device, uint8_t function,
     return 0;
 }
 
+/* The same chain, read through the window the function actually lives behind.
+ *
+ * pci_find_capability() above is the segment-0 API and pci.h says so: it
+ * reads through pci_config_read_*, whose ECAM fast path is hardcoded to
+ * segment 0 and whose fallback is 0xCF8/0xCFC — a mechanism with no concept
+ * of a segment at all. The ECAM enumerator walks every segment group the
+ * MCFG published, and PCI Firmware Specification Rev. 3.0 §4.1.2 gives one
+ * base address per segment group: a (bus, dev, fn) means nothing without the
+ * group it belongs to. So the enumerator needs the walk with the segment
+ * carried through. Same anchor, same bounds (PCI 3.0 §6.7), different door —
+ * the two cannot be folded into one without taking the legacy fallback away
+ * from machines that have no MCFG. */
+static uint8_t pci_find_capability_seg(uint16_t segment, uint8_t bus,
+                                        uint8_t device, uint8_t function,
+                                        uint8_t cap_id) {
+    uint16_t status = pci_ecam_read_word(segment, bus, device, function,
+                                          PCI_STATUS);
+    if (!(status & PCI_STATUS_CAP_LIST)) return 0;
+
+    uint8_t off = pci_ecam_read_byte(segment, bus, device, function,
+                                      PCI_CAP_LIST_PTR);
+    off &= 0xFCu;
+    for (uint8_t hops = 0; off != 0 && hops < 64; hops++) {
+        if (off < 0x40 || off > 0xFCu) return 0;
+        uint8_t id   = pci_ecam_read_byte(segment, bus, device, function, off);
+        uint8_t next = pci_ecam_read_byte(segment, bus, device, function,
+                                           (uint16_t)(off + 1));
+        if (id == cap_id) return off;
+        if (next == 0) return 0;
+        off = next & 0xFCu;
+    }
+    return 0;
+}
+
 uint16_t pci_find_ext_capability(uint16_t segment, uint8_t bus, uint8_t device,
                                   uint8_t function, uint16_t cap_id) {
     if (!pci_has_ecam()) return 0;
@@ -663,8 +748,8 @@ int pci_msix_enable_vector(uint8_t bus, uint8_t device, uint8_t function,
  * at cap+0x12. */
 static void log_pcie_link(uint16_t segment, uint8_t bus, uint8_t dev,
                           uint8_t fn, uint8_t cap_off) {
-    uint16_t link_status = pci_config_read_word(bus, dev, fn,
-                                                  (uint8_t)(cap_off + 0x12));
+    uint16_t link_status = pci_ecam_read_word(segment, bus, dev, fn,
+                                                (uint16_t)(cap_off + 0x12));
     uint8_t speed_code = (uint8_t)(link_status & 0xF);
     uint8_t width      = (uint8_t)((link_status >> 4) & 0x3F);
     const char* speed = "?";
@@ -676,20 +761,33 @@ static void log_pcie_link(uint16_t segment, uint8_t bus, uint8_t dev,
         case 5: speed = "32 GT/s";  break;
         case 6: speed = "64 GT/s";  break;
     }
-    (void)segment;
     debug_printf("[PCI]     PCIe link: x%u @ %s\n", width, speed);
 }
 
-/* Walk one (bus, dev, fn) — only valid if vendor != 0xFFFF. */
+/* Walk one (segment, bus, dev, fn) — only valid if vendor != 0xFFFF.
+ *
+ * Every register here is read through the SEGMENT's own ECAM window, and
+ * that is the point of the function taking a segment at all. PCI Firmware
+ * Specification Rev. 3.0 §4.1.2 allocates one ECAM base address per PCI
+ * Segment Group: a (bus, dev, fn) is only an address together with its
+ * group, and two groups routinely both start at bus 0. Reading through the
+ * segment-0 API instead — which is what pci_config_read_* is, by its own
+ * contract in pci.h — would identify a segment-1 function from whatever
+ * segment 0 happens to hold at the same coordinates: either 0xFFFF, and the
+ * function silently vanishes from the count, or a different device, whose
+ * vendor, class and capabilities then get published under the right address
+ * as `pci:vendor:...` / `pci:class:...`. The caller has already proven the
+ * window exists (pci_enumerate_ecam runs only when pci_has_ecam()), so there
+ * is no legacy fallback to want here. */
 static void enumerate_function(uint16_t segment, uint8_t bus, uint8_t dev,
                                 uint8_t fn, uint32_t* counter) {
-    uint16_t vendor = pci_config_read_word(bus, dev, fn, PCI_VENDOR_ID);
+    uint16_t vendor = pci_ecam_read_word(segment, bus, dev, fn, PCI_VENDOR_ID);
     if (vendor == PCI_INVALID_VENDOR) return;
 
-    uint16_t devid = pci_config_read_word(bus, dev, fn, PCI_DEVICE_ID);
-    uint8_t  cls   = pci_config_read_byte(bus, dev, fn, PCI_CLASS_CODE);
-    uint8_t  sub   = pci_config_read_byte(bus, dev, fn, PCI_SUBCLASS);
-    uint8_t  prog  = pci_config_read_byte(bus, dev, fn, PCI_PROG_IF);
+    uint16_t devid = pci_ecam_read_word(segment, bus, dev, fn, PCI_DEVICE_ID);
+    uint8_t  cls   = pci_ecam_read_byte(segment, bus, dev, fn, PCI_CLASS_CODE);
+    uint8_t  sub   = pci_ecam_read_byte(segment, bus, dev, fn, PCI_SUBCLASS);
+    uint8_t  prog  = pci_ecam_read_byte(segment, bus, dev, fn, PCI_PROG_IF);
 
     debug_printf("[PCI]   %04x:%02x:%02x.%x  %04x:%04x  class=%02x.%02x.%02x\n",
                  segment, bus, dev, fn, vendor, devid, cls, sub, prog);
@@ -732,9 +830,12 @@ static void enumerate_function(uint16_t segment, uint8_t bus, uint8_t dev,
     TouchPublish(ct, &ev, sizeof(ev));
 
     /* Capability list. */
-    uint8_t msi_off  = pci_find_capability(bus, dev, fn, PCI_CAP_ID_MSI);
-    uint8_t msix_off = pci_find_capability(bus, dev, fn, PCI_CAP_ID_MSIX);
-    uint8_t pcie_off = pci_find_capability(bus, dev, fn, PCI_CAP_ID_PCIE);
+    uint8_t msi_off  = pci_find_capability_seg(segment, bus, dev, fn,
+                                               PCI_CAP_ID_MSI);
+    uint8_t msix_off = pci_find_capability_seg(segment, bus, dev, fn,
+                                               PCI_CAP_ID_MSIX);
+    uint8_t pcie_off = pci_find_capability_seg(segment, bus, dev, fn,
+                                               PCI_CAP_ID_PCIE);
     if (msi_off || msix_off || pcie_off) {
         debug_printf("[PCI]     caps:%s%s%s\n",
                      msi_off  ? " MSI"   : "",

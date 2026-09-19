@@ -25,12 +25,16 @@ void pit_init(uint32_t frequency_hz) {
     pit_frequency = frequency_hz;
     g_timer_frequency = frequency_hz;  // Update scheduler with actual frequency
 
-    /* When HPET LegacyReplacement is sourcing IRQ0 we MUST NOT program
-     * the 8254 — its counter output and HPET timer 0 would both clock
-     * the IOAPIC's IRQ0 pin and the existing pit_tick() handler would
-     * double-count. Leave the 8254 quiescent (no command byte, no
-     * counter load) and just enable IRQ0 routing so the HPET-delivered
-     * pulses reach the kernel. */
+    /* When HPET LegacyReplacement is sourcing IRQ0 there is nothing here
+     * for the 8254 to do. HPET 1.0a §2.4.2.1, Mapping Option #1: with
+     * LEG_RT_CNF set, timer 0 is forced onto IRQ0 (INTI2 through the I/O
+     * APIC) and "the 8254 timer will not cause any interrupts" — the part
+     * is disconnected from the pin, so programming it could not
+     * double-count the tick as this comment used to claim; it simply would
+     * not reach the interrupt the kernel receives. We leave the 8254 as
+     * firmware left it — which is also why pit_read_count() has no reload
+     * value of ours to divide by in this mode, see pit_delay_busy() — and
+     * only enable IRQ0 routing so the HPET-delivered pulses arrive. */
     if (hpet_tick_active()) {
         debug_printf("[PIT] HPET legacy tick active — leaving 8254 idle, "
                      "registering IRQ0 only (%u Hz logical)\n", pit_frequency);
@@ -159,14 +163,15 @@ static uint16_t pit_read_count(void) {
 // PIT crystal runs at exactly 1,193,182 Hz on all x86 hardware and is faithfully
 // emulated by QEMU/VirtualBox/Bochs. No dependency on CPU frequency.
 //
-// When HPET LegacyReplacement is active, the 8254 channel-0 counter is
-// idle (HPET timer 0 drives IRQ0 instead) and reading it returns stale
-// values — pit_delay_busy() would loop with `elapsed` stuck or jumping
-// randomly, producing delays of microseconds instead of the requested
-// milliseconds. In that mode we delegate to the HPET-counter busy-wait
-// which is always reliable. This single chokepoint keeps every existing
-// `pit_delay_busy()` caller correct on modern hardware that ships
-// without a functional 8254.
+// When HPET LegacyReplacement is active, pit_init() never programmed the
+// 8254: channel 0 holds whatever reload value firmware left it with, so
+// the `divisor` computed below is not the one the counter is actually
+// counting down from and `elapsed` accumulates nonsense — delays of
+// microseconds instead of the requested milliseconds, or none at all if
+// the firmware left the channel stopped. In that mode we delegate to the
+// HPET-counter busy-wait, which is always reliable. This single chokepoint
+// keeps every existing `pit_delay_busy()` caller correct on modern
+// hardware that ships without a functional 8254.
 void pit_delay_busy(uint32_t milliseconds) {
     if (hpet_tick_active() && hpet_is_present()) {
         hpet_busy_wait_us((uint64_t)milliseconds * 1000ULL);

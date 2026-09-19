@@ -434,6 +434,17 @@ error_t tme_init_bsp(void) {
                  (unsigned)g_tme.pool_programmed,
                  (unsigned)g_tme.pool_size);
 
+    /* A pool that came up short is a pool that will refuse encrypted Bays
+     * later, for a reason that happened here. Said once, out loud: the
+     * per-slot lines above are debug_printf and are not there on a board,
+     * and a pool of zero is the whole feature gone without a word. */
+    if (g_tme.pool_programmed < g_tme.pool_size)
+        kprintf("[TME] %u of %u KeyIDs would not take a key; the pool holds "
+                "%u\n",
+                (unsigned)(g_tme.pool_size - g_tme.pool_programmed),
+                (unsigned)g_tme.pool_size,
+                (unsigned)g_tme.pool_programmed);
+
     g_tme_initialized = true;
     return OK;
 }
@@ -480,16 +491,37 @@ error_t tme_keyid_free(uint16_t keyid) {
 
     uint64_t rc = pconfig_set_key_random(keyid);
     if (rc != TME_PCONFIG_SUCCESS) {
-        /* The wrapper already re-issued on DEVICE_BUSY and
-         * ENTROPY_ERROR — the two reasons the manual says to retry, and
-         * the two a contending key-table holder produces. Reaching here
-         * means the refusal outlived the budget or was never retryable,
-         * so the slot is in an undefined state: leave it marked in-use
-         * forever so no future allocation can reach it. Better to lose
-         * one slot than risk programming-failure plus key reuse. */
+        /* The wrapper already re-issued on DEVICE_BUSY and ENTROPY_ERROR
+         * — the two reasons the manual says to retry, and the two a
+         * contending key-table holder produces. Reaching here means the
+         * refusal outlived the budget.
+         *
+         * What is left in the slot is not undefined: on both codes the
+         * manual leaves the key table alone ("the key table is not
+         * updated" for DEVICE_BUSY; ENTROPY_ERROR releases the platform
+         * lock and exits before the table is written). The slot still
+         * holds the key of the Bay that has just gone. THAT is why it
+         * must not go back in the pool: handing it to the next caller
+         * would hand them a key that decrypts the dead Bay's ciphertext.
+         * Leave the bit set so no allocation can reach it.
+         *
+         * Both counters move, because both facts changed. The
+         * reservation is over — the holder gave the KeyID back and this
+         * call is what ends it — so in_use comes down; and the slot is
+         * no longer one the pool can hand out, so pool_programmed comes
+         * down with it. Leave either standing and tme_dump_state drifts
+         * by one per lost slot: in_use stops meaning "held right now",
+         * or programmed - in_use stops meaning "free". */
+        if (g_tme.in_use > 0) g_tme.in_use--;
+        if (g_tme.pool_programmed > 0) g_tme.pool_programmed--;
         spin_unlock(&g_tme_lock);
-        debug_printf("[TME] KeyID %u re-key failed (rc=%lu); slot lost\n",
-                     (unsigned)keyid, (unsigned long)rc);
+        /* A KeyID that will never be handed out again is a capability
+         * this machine has permanently lost. An operator on the board
+         * has to be able to read that; debug_printf compiles to nothing
+         * in a shipping build. */
+        kprintf("[TME] KeyID %u re-key failed (rc=%lu); slot lost for the "
+                "life of this boot\n",
+                (unsigned)keyid, (unsigned long)rc);
         if (g_tme_tag_rekey_failed != TOUCH_TAG_INVALID) {
             struct { uint16_t keyid; uint16_t pad; uint64_t pconfig_rc; }
                 payload = { keyid, 0, rc };

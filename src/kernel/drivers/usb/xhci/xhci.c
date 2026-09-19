@@ -47,6 +47,20 @@ xhci_controller_t* xhci_controller_at(uint8_t index) {
     return &g_controllers[index];
 }
 
+/* Which of the records above this controller is, or XHCI_MAX_CONTROLLERS when
+ * it is none of them. The vector a controller signals on and the account this
+ * file keeps of its repairs are both kept alongside the records, so both are
+ * found by the same arithmetic. */
+static uint8_t xhci_controller_index(const xhci_controller_t* ctrl)
+{
+    for (uint8_t i = 0; i < XHCI_MAX_CONTROLLERS; i++) {
+        if (&g_controllers[i] == ctrl) {
+            return i;
+        }
+    }
+    return XHCI_MAX_CONTROLLERS;
+}
+
 /* The first controller in service. Kept for the callers that genuinely want
  * any one of them — a query, a diagnostic — and not for the ones that mean
  * "all of them", which now say so. */
@@ -54,25 +68,64 @@ xhci_controller_t* xhci_controller_at(uint8_t index) {
  * themselves, so an interrupt says which one spoke. */
 static uint8_t xhci_vector_for(const xhci_controller_t* ctrl)
 {
-    for (uint8_t i = 0; i < XHCI_MAX_CONTROLLERS; i++) {
-        if (&g_controllers[i] == ctrl) {
-            return (uint8_t)(XHCI_MSI_VECTOR + i);
-        }
+    uint8_t index = xhci_controller_index(ctrl);
+    if (index >= XHCI_MAX_CONTROLLERS) {
+        return XHCI_MSI_VECTOR;
     }
-    return XHCI_MSI_VECTOR;
+    return (uint8_t)(XHCI_MSI_VECTOR + index);
 }
 
 xhci_controller_t* xhci_get_controller(void) {
     return xhci_controller_at(0);
 }
 
-/* The specification gives the controller 16 ms to halt; some take longer, so
- * this follows Linux in allowing 32. A reset is allowed a full second — the
- * one number here that is generous on purpose, because a controller that has
- * just been taken away from firmware may have work of its own to finish. */
+/*
+ * The specification gives the controller 16 ms to halt; some take longer, so
+ * this follows Linux in allowing 32 (XHCI_MAX_HALT_USEC, drivers/usb/host/
+ * xhci-ext-caps.h: "HC should halt within 16 ms, but use 32 ms as some hosts
+ * take longer").
+ *
+ * ‼ AND THE RESET BUDGET IS TEN SECONDS, WHICH IS A MEASURED NUMBER AND NOT A
+ * GENEROUS ONE. The line that used to stand here called a full second "the one
+ * number here that is generous on purpose"; the opposite is true. Linux raised
+ * its own reset budget from 250 ms to ten seconds in commit 22ceac191211
+ * ("xhci: Increase reset timeout for Renesas 720201 host"), which states the
+ * measurement: that part takes "about 9 seconds to reset the host controller,
+ * and 1 second for the host to be ready for doorbell rings". A second for the
+ * HCRST poll is therefore about a ninth of what that silicon needs, and a
+ * second for the Controller Not Ready poll sits exactly on the measured
+ * boundary with no margin at all. The uPD720201/720202 is the commonest
+ * discrete PCIe USB3 part there is — soldered onto mainboards and sold as an
+ * add-in card — and a controller that misses this budget is gone for the whole
+ * boot, keyboard, boot medium and all.
+ *
+ * Ten seconds is 9 s plus margin, and it is XHCI_RESET_LONG_USEC in
+ * drivers/usb/host/xhci.h. Linux drops to XHCI_RESET_SHORT_USEC (250 ms) only
+ * from xhci_stop() and xhci_shutdown(), "where a successful reset isn't that
+ * critical"; this driver has no such caller — both roads here, bring-up and
+ * the repair, need the reset to succeed — so there is nothing to pass a
+ * shorter budget in for, and inventing the parameter would be inventing the
+ * caller.
+ *
+ * ‼ AND WHAT IT COSTS WHEN THE CONTROLLER IS THE OTHER KIND OF BROKEN, SAID
+ * HERE RATHER THAN DISCOVERED ON A BOARD. xhci_reset spends this budget three
+ * times over: once on the Controller Not Ready poll before HCRST, once on
+ * HCRST itself, and once on the Controller Not Ready poll after it. A part
+ * that decodes its registers but will not reset therefore holds bring-up for
+ * up to thirty seconds where a second-long budget held it for three, and
+ * bring-up has no refusal latched against it — the latch below is on the
+ * repair path only, because a controller that fails at bring-up has not been
+ * brought up yet and there is nothing to keep out of service.
+ *
+ * That is the price of the Renesas part coming up at all, and it is paid only
+ * by a machine that is already broken in that particular way: a controller
+ * that has stopped decoding is not waited for at all — xhci_wait_bit leaves
+ * the moment a register reads all ones — and a healthy one leaves in
+ * milliseconds. A working controller pays nothing for this number.
+ */
 #define XHCI_HALT_TIMEOUT_MS     32
-#define XHCI_RESET_TIMEOUT_MS    1000
-#define XHCI_READY_TIMEOUT_MS    1000
+#define XHCI_RESET_TIMEOUT_MS    10000
+#define XHCI_READY_TIMEOUT_MS    10000
 #define XHCI_START_TIMEOUT_MS    100
 
 /*
@@ -437,6 +490,61 @@ static void xhci_publish_structures(xhci_controller_t* ctrl)
 }
 
 /*
+ * ‼ A REPAIR THAT WAS REFUSED IS REMEMBERED, AND THE LINE THAT SAYS SO IS NOW
+ * TRUE.
+ *
+ * xHCI 1.2 §4.24.1 "Internal Errors": "a hard error shall cause the xHC to
+ * reassert HCE immediately after it is reinitialized. In this case, software
+ * should employ some heuristics to prevent the case where the xHC is
+ * continually in an error-reset-reinitialize loop and report this condition to
+ * the user." This is that heuristic, and until now the driver had neither half
+ * of it.
+ *
+ * Both failing ends of xhci_controller_recover returned with error_state still
+ * standing, and xhci_recover_if_needed gates on nothing but that flag — so the
+ * K-Core guide loop and the idle loop re-ran the WHOLE repair, slot-retirement
+ * sweep and all, on every wakeup, for ever, while printing "out of service
+ * until the machine is restarted" each time round. The success path had the
+ * same hole in the other direction: a controller that resets cleanly and
+ * re-asserts HCE is re-detected, re-flagged and taken through another full
+ * reset, tearing down and re-enumerating every device on it — including a
+ * mounted medium — without end.
+ *
+ * So one fact is kept per controller, beside the records rather than inside
+ * them: whether this controller has been found to be past repairing. Nothing
+ * automatic clears it. The one route that clears it is
+ * xhci_put_back_in_service, which is somebody saying "try anyway" — and that
+ * is exactly the caller for whom "it would not come back" is not the end of
+ * the matter.
+ *
+ * ‼ AND IT IS RAISED BY A FACT ABOUT THE CONTROLLER, NEVER BY A TALLY OF HOW
+ * OFTEN IT HAS ASKED. A count of repairs over the life of the boot cannot
+ * tell §4.24.1's loop from three unrelated host system errors hours apart —
+ * it takes the third one as proof of a loop and puts a controller that has
+ * been working the whole time, boot medium and all, permanently out of
+ * service. The specification does not ask for a tally; it names the thing to
+ * look for, and names it in one word: the xHC "shall reassert HCE IMMEDIATELY
+ * after it is reinitialized". That is observable. The reinitialization ends
+ * with the root-port survey, which is a hundred milliseconds of debounce and
+ * a bus full of commands, so a controller still holding HCE or HSE when that
+ * survey returns has reasserted it immediately in exactly the sense meant. A
+ * controller that comes back clean and fails again an hour later has not, and
+ * gets the repair it is owed, every time.
+ */
+static bool g_repair_refused[XHCI_MAX_CONTROLLERS];
+
+static void xhci_repair_refused(xhci_controller_t* ctrl, const char* what)
+{
+    uint8_t index = xhci_controller_index(ctrl);
+    if (index < XHCI_MAX_CONTROLLERS) {
+        g_repair_refused[index] = true;
+    }
+    kprintf("[xHCI %s] %s — out of service, and nothing will try again on its "
+            "own; it comes back only if it is put back in service by hand or "
+            "the machine is restarted\n", ctrl->name, what);
+}
+
+/*
  * Bringing a controller back — the whole of it, in one place.
  *
  * Host Controller Error and Host System Error both mean the same thing in
@@ -465,8 +573,11 @@ static void xhci_publish_structures(xhci_controller_t* ctrl)
  * eleven are only correct in this order.
  *
  * Reached from ordinary kernel context, never from the handler that noticed:
- * this waits up to a second for a reset, and an interrupt handler is not
- * somewhere to spend a second.
+ * this can spend the whole of XHCI_RESET_TIMEOUT_MS plus two of
+ * XHCI_READY_TIMEOUT_MS waiting for a controller that will not come back, and
+ * an interrupt handler is not somewhere to spend tens of seconds. It is spent
+ * at most once per controller for as long as the controller stays broken —
+ * the refusal is latched, see g_repair_refused.
  */
 static void xhci_controller_recover(xhci_controller_t* ctrl)
 {
@@ -493,8 +604,7 @@ static void xhci_controller_recover(xhci_controller_t* ctrl)
     ctrl->initialized = false;
 
     if (xhci_reset(ctrl) != 0) {
-        kprintf("[xHCI %s] would not reset — out of service until the machine "
-                "is restarted\n", ctrl->name);
+        xhci_repair_refused(ctrl, "would not reset");
         return;
     }
 
@@ -533,8 +643,7 @@ static void xhci_controller_recover(xhci_controller_t* ctrl)
     ctrl->op_regs->usbcmd |= XHCI_CMD_INTE | XHCI_CMD_HSEE;
 
     if (xhci_start(ctrl) != 0) {
-        kprintf("[xHCI %s] would not start again — out of service\n",
-                ctrl->name);
+        xhci_repair_refused(ctrl, "would not start again");
         return;
     }
 
@@ -548,6 +657,27 @@ static void xhci_controller_recover(xhci_controller_t* ctrl)
     kprintf("[xHCI %s] back in service — looking again at what is plugged "
             "in\n", ctrl->name);
     xhci_survey_root_ports(ctrl);
+
+    /*
+     * And the question §4.24.1 actually asks, asked of the silicon: is it in
+     * error again already? HCE is read-only and a reset is the only thing
+     * that clears it, so a set bit here was set after the reset above. HSE is
+     * write-one-to-clear and the interrupt handler does clear it — which is
+     * why this looks at the driver's own flag as well, raised by that same
+     * handler. Either way the controller has come back and gone straight out
+     * again without the machine getting anything from it, and that is the
+     * hard error the specification says to stop repairing and report.
+     */
+    uint32_t usbsts = ctrl->op_regs->usbsts;
+    if (ctrl->error_state || (usbsts & (XHCI_STS_HCE | XHCI_STS_HSE))) {
+        ctrl->error_state = true;
+        xhci_repair_refused(ctrl,
+                            (usbsts & XHCI_STS_HCE)
+                                ? "reported an internal controller error "
+                                  "again before it had finished coming back"
+                                : "reported a host system error again before "
+                                  "it had finished coming back");
+    }
 }
 
 /*
@@ -624,6 +754,13 @@ bool xhci_put_back_in_service(xhci_controller_t* ctrl)
         cpu_pause();
     }
 
+    /* "Try anyway" is the whole of this door, so it is also the one place a
+     * refusal is forgotten — see g_repair_refused. */
+    uint8_t index = xhci_controller_index(ctrl);
+    if (index < XHCI_MAX_CONTROLLERS) {
+        g_repair_refused[index] = false;
+    }
+
     xhci_controller_recover(ctrl);
     bool running = ctrl->running;
 
@@ -635,7 +772,7 @@ void xhci_recover_if_needed(void)
 {
     bool any = false;
     for (uint8_t i = 0; i < g_controller_count; i++) {
-        if (g_controllers[i].error_state ||
+        if ((g_controllers[i].error_state && !g_repair_refused[i]) ||
             __atomic_load_n(&g_controllers[i].cmd_abort_wanted,
                             __ATOMIC_ACQUIRE)) {
             any = true;
@@ -655,9 +792,14 @@ void xhci_recover_if_needed(void)
     }
 
     for (uint8_t i = 0; i < g_controller_count; i++) {
-        if (g_controllers[i].error_state) {
-            xhci_controller_recover(&g_controllers[i]);
+        if (!g_controllers[i].error_state || g_repair_refused[i]) {
+            continue;
         }
+
+        /* The other half of §4.24.1's heuristic is inside the repair, at the
+         * end of it, where the controller can be asked whether it came back
+         * at all — see xhci_controller_recover. Nothing is counted here. */
+        xhci_controller_recover(&g_controllers[i]);
     }
 
     __atomic_store_n(&g_repair_busy, 0u, __ATOMIC_RELEASE);

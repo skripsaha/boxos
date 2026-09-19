@@ -52,6 +52,12 @@
 #define EFI_PAGE_SIZE      4096ULL
 #define EFI_PAGE_SHIFT     12
 
+/* Where the kernel's own image lives in the higher half — vmm_init maps
+ * 64 MiB of 2 MiB pages here in the live kernel context, and the loader put
+ * the image at the same base before that. The runtime VA window has to stop
+ * short of it. See efi_rt_virt_for. */
+#define EFI_RT_VA_KERNEL_IMAGE_BASE  0xFFFFFFFF80000000ULL
+
 /* =========================================================================
  * Driver state
  * ========================================================================= */
@@ -89,6 +95,50 @@ static uint32_t g_rt_fw_revision         = 0;
 static inline uint64_t efi_pages_to_bytes(uint64_t pages)
 {
     return pages << EFI_PAGE_SHIFT;
+}
+
+/* The runtime VA for one physical range — and a refusal when the range does
+ * not fit between EFI_RT_VA_BASE and the kernel's own image.
+ *
+ * UEFI 2.10 §8.4.1 makes the OS responsible for supplying "a new virtual
+ * address for every entry in the memory map at ExitBootServices() that is
+ * marked as being needed for runtime usage", and it has to be a USABLE,
+ * non-conflicting one. §7.2 puts EfiMemoryMappedIO, EfiPersistentMemory and
+ * EfiReservedMemoryType in the set that firmware may mark
+ * EFI_MEMORY_RUNTIME, so the physical addresses arriving here are not
+ * bounded by top-of-DRAM: a two-socket box reporting persistent memory above
+ * DRAM hands out runtime descriptors hundreds of gigabytes up.
+ *
+ * ‼ EFI_RT_VA_BASE (0xFFFFFF8000000000) is -512 GiB. Its lowest set bit is
+ * 2^39, so the sum EFI_RT_VA_BASE + physical_start:
+ *
+ *   - reaches this kernel's own image window at physical_start = 510 GiB
+ *     (0xFFFFFFFF80000000 - 0xFFFFFF8000000000 = 0x7F80000000), where
+ *     vmm_map_pages refuses the conflicting remap and the machine loses its
+ *     entire EFI runtime surface for the boot; and
+ *   - wraps uint64_t at physical_start = 2^39 = 512 GiB, landing in the USER
+ *     half — a mapping vmm_map_page installs without complaint, and an
+ *     address that then goes to SetVirtualAddressMap for the firmware to
+ *     relocate onto.
+ *
+ * Neither bound existed. The comment that excused their absence claimed
+ * "bits 40..63 set" and a wrap at 2^40; both numbers were wrong, and the
+ * kernel-image collision 2 GiB below the wrap was not considered at all.
+ * The overflow is tested here as arithmetic rather than inferred from where
+ * a bit sits. */
+static bool efi_rt_virt_for(uint64_t phys, uint64_t pages, uint64_t *out_virt)
+{
+    if (pages > (UINT64_MAX >> EFI_PAGE_SHIFT))     return false;
+    uint64_t span = efi_pages_to_bytes(pages);
+    if (phys > UINT64_MAX - span)                   return false;
+    if (phys > UINT64_MAX - EFI_RT_VA_BASE)         return false;
+
+    uint64_t virt = EFI_RT_VA_BASE + phys;
+    if (virt > UINT64_MAX - span)                   return false;
+    if (virt + span > EFI_RT_VA_KERNEL_IMAGE_BASE)  return false;
+
+    *out_virt = virt;
+    return true;
 }
 
 /* Cacheability the firmware ASKED FOR, not the cacheability its type
@@ -219,8 +269,22 @@ static bool efi_map_rt_descriptor(EfiMemoryDescriptor *d, vmm_context_t *kctx)
     uint64_t flags = efi_rt_map_flags(d);
 
     uintptr_t phys = (uintptr_t)d->physical_start;
-    uintptr_t virt = EFI_RT_VA_BASE + phys;
     size_t    pages = (size_t)d->number_of_pages;
+
+    /* Bounded BEFORE anything is mapped and before virtual_start is written,
+     * because a descriptor with no usable runtime VA must not receive one:
+     * the address written here is the address the firmware relocates onto. */
+    uint64_t virt64;
+    if (!efi_rt_virt_for(d->physical_start, d->number_of_pages, &virt64)) {
+        kprintf("[EFI] runtime descriptor type=%u phys=0x%lx pages=%lu has no "
+                "usable runtime VA: 0x%lx + phys would reach the kernel image "
+                "window at 0x%lx or wrap\n",
+                d->type, (unsigned long)phys, (unsigned long)pages,
+                (unsigned long)EFI_RT_VA_BASE,
+                (unsigned long)EFI_RT_VA_KERNEL_IMAGE_BASE);
+        return false;
+    }
+    uintptr_t virt = (uintptr_t)virt64;
 
     /* IO port range: assign a fake VA so firmware's bookkeeping has a
      * stable virtual_start, but do not actually create a paging mapping
@@ -503,9 +567,17 @@ static void efi_apply_memory_attributes(vmm_context_t *kctx, uint8_t *map,
         /* Both windows onto the same pages: the canonical runtime VA the
          * firmware uses from here on, and the identity alias kept as a safety
          * net. Leaving either one writable makes the other's read-only an
-         * ornament. */
-        bool a = vmm_protect(kctx, EFI_RT_VA_BASE + (uintptr_t)phys,
-                             (size_t)span, flags);
+         * ornament.
+         *
+         * The runtime VA is recomputed through the same bound the mapping
+         * was created under — this line carried the second copy of the
+         * unbounded EFI_RT_VA_BASE + phys sum. */
+        uint64_t rt_va;
+        if (!efi_rt_virt_for(phys, d->number_of_pages, &rt_va)) {
+            skipped++;
+            continue;
+        }
+        bool a = vmm_protect(kctx, (uintptr_t)rt_va, (size_t)span, flags);
         bool b = vmm_protect(kctx, (uintptr_t)phys, (size_t)span, flags);
         if (a && b) {
             tightened++;
@@ -653,20 +725,31 @@ bool efi_runtime_init(void)
     /* The MAPPED count, deliberately, not the runtime count: if nothing got a
      * page-table entry there is no virtual map to install, and calling SVAM
      * with an array the firmware cannot be given addresses for is worse than
-     * staying physical. A firmware publishing only IO-port-space runtime
-     * descriptors lands here and keeps physical-mode runtime services, which
-     * is correct. */
+     * staying physical.
+     *
+     * ‼ But there is no physical-mode fallback to stay in, which is exactly
+     * what this branch used to claim. It published the service as available
+     * on the premise that "the Pull Map keeps RAM identity-accessible" —
+     * false: vmm_phys_to_virt returns phys + PULL_MAP_BASE, an OFFSET map,
+     * and this file's own note twenty lines up says the loader's 4 GB
+     * identity map is dropped by vmm_init, which is why the normal path
+     * installs VA==PA windows by hand. UEFI 2.10 §2.3.4 wants physical-mode
+     * runtime calls made with "all selectors set to be flat with virtual =
+     * physical address"; reading the table through the Pull Map satisfies
+     * nothing, because the function pointers INSIDE it are still physical
+     * addresses that no page table names. The first efi_get_variable — or
+     * the ResetSystem at shutdown — took an instruction-fetch #PF.
+     *
+     * So: no mappings, no service. Linux does the same (__efi_enter_virtual_
+     * mode clears EFI_RUNTIME_SERVICES when it cannot establish the runtime
+     * mappings), the file header's contract holds — every failure path leaves
+     * efi_runtime_available() false — and acpi_reboot's 0xCF9 / 8042 /
+     * triple-fault chain is what carries the machine down. */
     if (g_rt_runtime_descriptors == 0) {
-        debug_printf("[EFI] no EFI_MEMORY_RUNTIME descriptors found; "
-                     "calling RT in physical mode\n");
-        /* No SVAM needed — RT services are usable at their physical
-         * addresses since the Pull Map keeps RAM identity-accessible. */
-        g_rt = (EfiRuntimeServices *)vmm_phys_to_virt(
-            (uintptr_t)bi->efi_rt_services_phys);
-        if (!g_rt) return false;
-        if (!g_rt_lock_init) { spinlock_init(&g_rt_lock); g_rt_lock_init = true; }
-        g_rt_available = true;
-        return true;
+        kprintf("[EFI] %u descriptor(s) carried EFI_MEMORY_RUNTIME and none of "
+                "them could be given a page — no EFI runtime services on this "
+                "boot\n", g_rt_svam_descriptors);
+        return false;
     }
 
     /* Stage 2: find the descriptor that contains rt_services_phys so we
@@ -811,41 +894,69 @@ bool efi_runtime_init(void)
     EfiRuntimeServices *rt_new = (EfiRuntimeServices *)(uintptr_t)rt_new_va;
 
     /* Defensive: refuse a rebased pointer that lies outside the runtime
-     * VA window (firmware bug). Better to fall back to physical-mode RT
-     * than dispatch to a wild address.
+     * VA window (firmware bug).
+     *
+     * ‼ And refusing it means NO runtime services, not a fall back to
+     * rt_phys — for a reason that has to be stated correctly, because the
+     * obvious one is wrong. rt_phys is NOT a stale pointer into code the
+     * firmware has left: efi_firmware_ptr returns (void *)phys for a mapped
+     * runtime descriptor, which is the identity alias efi_map_rt_descriptor
+     * installed beside the runtime VA and deliberately kept afterwards, and
+     * efi_apply_memory_attributes protects both windows alike. The two
+     * pointers are two windows onto THE SAME TABLE PAGE.
+     *
+     * That sameness is exactly why rt_phys is no escape here. What went
+     * wrong in this branch is not the address used to REACH the table — it
+     * is the address the firmware relocated its own entry points ONTO.
+     * Every function pointer inside the table now holds a VA derived from
+     * the virtual_start this kernel supplied, and reading those same words
+     * through the identity window hands back the same unusable VAs. UEFI
+     * 2.10 §8.4.1 — "On successful return from this function, the system
+     * must then make any future calls with the newly assigned virtual
+     * mappings" — leaves nothing else to go back to: SVAM has already
+     * returned EFI_SUCCESS, and there is no un-relocated copy of the table.
      *
      * Bounds:
      *   - lower: must be >= EFI_RT_VA_BASE (otherwise virtual_start
      *     was never set, or set wrong).
-     *   - upper: skipped — EFI_RT_VA_BASE has bits 40..63 set, so
-     *     `EFI_RT_VA_BASE + N` for any N >= 2^40 overflows uint64_t.
-     *     In practice RT services live in low-phys memory (typically
-     *     < 4 GiB) so the lower-bound check + canonical-form check
-     *     below is sufficient. The canonical-form check ensures bits
-     *     47..63 are still set (kernel canonical half), which catches
-     *     any wild carry-out that wrapped the VA into user space. */
+     *   - upper: must stay below the kernel's own image window. This used
+     *     to be skipped, on the claim that "EFI_RT_VA_BASE has bits 40..63
+     *     set, so EFI_RT_VA_BASE + N for any N >= 2^40 overflows uint64_t".
+     *     Both halves were false. 0xFFFFFF8000000000 has bits 39..63 set —
+     *     its lowest set bit is 2^39 — so the sum wraps at N = 2^39 =
+     *     512 GiB, not 2^40; and 510 GiB before that it has already walked
+     *     into the kernel image at EFI_RT_VA_KERNEL_IMAGE_BASE. Every
+     *     descriptor now passes efi_rt_virt_for before it is mapped, so
+     *     this is the same bound, applied once more to the one value stage
+     *     1 does not produce on its own: rt_desc->virtual_start plus the
+     *     offset of rt_services inside its descriptor.
+     *   - canonical form: bits 47..63 still set (kernel canonical half),
+     *     which catches any wild carry-out that wrapped into user space. */
     const uint64_t CANONICAL_KERNEL_MASK = 0xFFFF800000000000ULL;
     if (rt_new_va < EFI_RT_VA_BASE ||
+        rt_new_va >= EFI_RT_VA_KERNEL_IMAGE_BASE ||
         (rt_new_va & CANONICAL_KERNEL_MASK) != CANONICAL_KERNEL_MASK) {
-        debug_printf("[EFI] rebased rt_services VA 0x%lx outside RT window — "
-                     "keeping physical mode\n", (unsigned long)rt_new_va);
-        g_rt = rt_phys;
+        kprintf("[EFI] rebased rt_services VA 0x%lx is outside the runtime "
+                "window — SVAM already succeeded, so there is no physical "
+                "pointer left to use: no EFI runtime services on this boot\n",
+                (unsigned long)rt_new_va);
+        return false;
+    }
+
+    /* Validate the CRC32 of the RT services table per UEFI 2.10 §4.2.
+     * Firmware re-computes this when it patches function pointers
+     * during SVAM; a mismatch indicates a buggy firmware whose table
+     * we should not trust. Downgrade to physical mode on failure. */
+    if (efi_table_header_valid(rt_new)) {
+        g_rt = rt_new;
+        debug_printf("[EFI] runtime services online at VA 0x%lx "
+                     "(post-SVAM, CRC OK)\n",
+                     (unsigned long)rt_new_va);
     } else {
-        /* Validate the CRC32 of the RT services table per UEFI 2.10 §4.2.
-         * Firmware re-computes this when it patches function pointers
-         * during SVAM; a mismatch indicates a buggy firmware whose table
-         * we should not trust. Downgrade to physical mode on failure. */
-        if (efi_table_header_valid(rt_new)) {
-            g_rt = rt_new;
-            debug_printf("[EFI] runtime services online at VA 0x%lx "
-                         "(post-SVAM, CRC OK)\n",
-                         (unsigned long)rt_new_va);
-        } else {
-            debug_printf("[EFI] rt_services CRC32 mismatch at VA 0x%lx — "
-                         "downgrading to physical mode\n",
-                         (unsigned long)rt_new_va);
-            g_rt = rt_phys;
-        }
+        debug_printf("[EFI] rt_services CRC32 mismatch at VA 0x%lx — "
+                     "downgrading to physical mode\n",
+                     (unsigned long)rt_new_va);
+        g_rt = rt_phys;
     }
 
     if (!g_rt_lock_init) { spinlock_init(&g_rt_lock); g_rt_lock_init = true; }
@@ -919,11 +1030,79 @@ bool efi_guid_equal(const EfiGuid *a, const EfiGuid *b)
  * call would bury the boot log in a fact that does not change. */
 static bool g_rt_if_violation_said = false;
 
+/*
+ * The two control words UEFI 2.10 §2.3.4 requires before the firmware is
+ * entered — and nothing established either of them until now.
+ *
+ * §2.3.4, the list governing an OS CALLING runtime services (not the
+ * boot-services-time list above it in the same section, which differs on
+ * stack size and on interrupts): "Floating-point control word must be
+ * initialized to 0x037F (all exceptions masked, double-extended-precision,
+ * round-to-nearest)" and "Multimedia-extensions control word (if supported)
+ * must be initialized to 0x1F80 (all exceptions masked, round-to-nearest,
+ * flush to zero for masked underflow)".
+ *
+ * FCW and MXCSR belong to whichever process last ran: fpu_restore reloads
+ * both from its XSAVE/FXSAVE area on every context switch, and ring 3 owns
+ * them outright — boxcxx's <cfenv> hands out WriteMxcsr / WriteX87ControlWord
+ * behind std::fesetround, and a bare ldmxcsr needs no kernel cooperation at
+ * all. The kernel is built -mno-sse -mno-mmx -mno-avx, so nothing between the
+ * last switch and the firmware entry touches or repairs them: the ring-3
+ * value arrived at the firmware intact. With a non-default rounding mode the
+ * firmware's floating-point answers are wrong; with the SSE masks cleared and
+ * CR4.OSXMMEXCPT set (enable_fpu), the first SSE operation in firmware that
+ * raises a flag takes #XM inside firmware code, on this kernel's IDT, with
+ * interrupts off and this lock held.
+ *
+ * The other four §2.3.4 conditions need no code here: CR0.EM and CR0.TS are
+ * already zero (enable_fpu clears EM, the kernel never sets TS), and the
+ * direction flag is clear on entry to any compiled C function by the System V
+ * x86-64 ABI, which is the only way this function is reached.
+ *
+ * The saved pair lives in file scope rather than on the caller's stack
+ * because the callers are in other translation units and their signatures
+ * are fixed; the lock is what makes that safe — efi_rt_lock owns g_rt_lock
+ * until efi_rt_unlock gives it back, so exactly one call owns these two words
+ * at a time, and SVAM (which goes through this same door) is BSP-only anyway.
+ *
+ * FNSTCW and STMXCSR do not wait on a pending x87 exception, and FLDCW raises
+ * none of its own — SDM Vol 2A, FLDCW, "Floating-Point Exceptions: None;
+ * however, this operation might unmask a pending exception in the FPU status
+ * word. That exception is then generated upon execution of the next 'waiting'
+ * floating-point instruction." So the restore can only deliver an exception
+ * where it would have been delivered without this code at all.
+ */
+static uint16_t g_rt_saved_fcw;
+static uint32_t g_rt_saved_mxcsr;
+
+/* The two values §2.3.4 names, held as objects because FLDCW and LDMXCSR
+ * take a memory operand and no immediate. */
+static const uint16_t g_rt_fcw_uefi   = 0x037Fu;
+static const uint32_t g_rt_mxcsr_uefi = 0x1F80u;
+
+static void efi_rt_fpu_enter(void)
+{
+    __asm__ volatile("fnstcw %0\n\t"
+                     "stmxcsr %1\n\t"
+                     "fldcw %2\n\t"
+                     "ldmxcsr %3"
+                     : "=m"(g_rt_saved_fcw), "=m"(g_rt_saved_mxcsr)
+                     : "m"(g_rt_fcw_uefi), "m"(g_rt_mxcsr_uefi));
+}
+
+static void efi_rt_fpu_leave(void)
+{
+    __asm__ volatile("fldcw %0\n\t"
+                     "ldmxcsr %1"
+                     :: "m"(g_rt_saved_fcw), "m"(g_rt_saved_mxcsr));
+}
+
 void efi_rt_lock(uint64_t *saved_rflags)
 {
     uint64_t rflags;
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags));
     spin_lock(&g_rt_lock);
+    efi_rt_fpu_enter();
     *saved_rflags = rflags;
 }
 
@@ -953,6 +1132,10 @@ void efi_rt_unlock(uint64_t saved_rflags)
 {
     uint64_t on_return;
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(on_return));
+
+    /* Still inside the lock: the saved pair is this call's, and the caller's
+     * FCW/MXCSR have to be back before anything else can run. */
+    efi_rt_fpu_leave();
 
     spin_unlock(&g_rt_lock);
 
@@ -1004,6 +1187,9 @@ void efi_reset_system(EfiResetType type, EfiStatus status,
      * before the lock so the wakeup we'd miss is genuinely irrelevant. */
     __asm__ volatile("cli");
     spin_lock(&g_rt_lock);
+    /* Same §2.3.4 contract as every other runtime call — this prologue is
+     * hand-rolled, so it needs the control words established by hand too. */
+    efi_rt_fpu_enter();
 
     debug_printf("[EFI] ResetSystem(type=%u, status=0x%lx)\n",
                  type, (unsigned long)status);
@@ -1017,6 +1203,7 @@ void efi_reset_system(EfiResetType type, EfiStatus status,
      * refused reset must not leave the machine more interruptible than the
      * caller left it. */
     __asm__ volatile("cli");
+    efi_rt_fpu_leave();
     spin_unlock(&g_rt_lock);
     kprintf("[EFI] ResetSystem returned — the firmware refused the reset\n");
 }
