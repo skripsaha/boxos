@@ -8,16 +8,31 @@
  * the honest answer is the controller's own, not the order of calls in
  * main(). Nothing else in this file looks at the interrupt system. */
 #include "irqchip.h"
+/* ‼ THE EVALUATOR OWNS NO DOOR OF ITS OWN. These three headers are here so
+ * that an OperationRegion is reached through the subsystem that already
+ * governs that address space, and never through a port write or a page table
+ * entry this file made for itself:
+ *   pci.h  — pci.c is the only holder of 0xCF8/0xCFC and of the ECAM window
+ *   vmm.h  — vmm_map_mmio / vmm_unmap_mmio, read-only and for one field read
+ *   io.h   — the x86 I/O instructions
+ * See AmlRegionRead, which is the only function below that calls any of
+ * them, and the window that is the only way to reach it. */
+#include "pci.h"
+#include "vmm.h"
+#include "io.h"
 
 /* =====================================================================
  * AML table reader — the namespace half of ACPI 6.5 §20, plus the narrow
  * evaluator that asks it where a PCI interrupt goes.
  *
- * There is no general executor here and none is missing; see aml.h for why,
- * and for the boundary the evaluator refuses to cross.
+ * There is no general executor here and none is missing; see aml.h for the
+ * boundary and the reasons, and the long note above THE NARROW EVALUATOR
+ * below for how each half of it is enforced by construction.
  *
- * Coverage:
- *   * Namespace build from DSDT + every SSDT
+ * TWO PASSES, AND THE FIRST ONE TOUCHES NOTHING.
+ *
+ * Pass one — everything above the evaluator — builds the namespace:
+ *   * DSDT + every SSDT
  *   * Named objects: Name, Scope, Method, Device, Processor, PowerRes,
  *     ThermalZone, OpRegion, Field, IndexField, BankField, Mutex,
  *     Event, Alias. Every other DEFINED extended opcode is stepped
@@ -26,13 +41,15 @@
  *     String, Buffer, Package
  *   * Lookup with C-string paths (`\_SB.PCI0._INI`) including relative
  *     forms with parent-prefix walk
+ * A Method is RECORDED here and not run: its flags and the byte range of
+ * its TermList are kept so the object is a faithful picture of what the
+ * firmware declared. An OperationRegion is recorded with its address space,
+ * base and length, and each Field with its bit offset, width and access
+ * rule. Nothing in this pass performs an I/O, MMIO or PCI-config access.
  *
- * A Method is RECORDED — its flags and its TermList byte range are kept
- * so the object is a faithful picture of what the firmware declared —
- * and it is never run. Same for an OperationRegion and the Fields cut
- * out of it: this file writes down the address space, the base, the
- * length and every field's bit offset and width, and touches none of
- * them. Nothing in this file performs an I/O, MMIO or PCI-config access.
+ * Pass two — the evaluator — runs one of five objects, on demand, to answer
+ * where a PCI interrupt pin goes, and it is the only part of this file that
+ * reaches an address space. It READS three of them and WRITES none.
  * ===================================================================== */
 
 /* How many namespace objects come out of one allocation.
@@ -53,7 +70,6 @@
  * the heap is in; the rest come from kmalloc, and running out of heap is said
  * out loud instead of quietly truncating the machine's namespace. */
 #define AML_POOL_CHUNK_OBJS     512
-#define AML_MAX_SCOPE_DEPTH     32
 
 /* AML opcodes — ACPI 6.5 §20.2.5. */
 #define ZeroOp           0x00
@@ -160,6 +176,39 @@ struct aml_object {
             uint8_t  space;
             uint64_t base;
             uint64_t len;
+            /* ‼ WHETHER THE FIRMWARE'S OWN NUMBERS ARE IN HAND YET.
+             *
+             * §20.2.5.2 makes RegionOffset and RegionLen TermArgs, and half
+             * the boards in the world write a NAME there rather than a
+             * literal: `OperationRegion (RCRB, SystemMemory, \\RCBA, 0x4000)`
+             * is the Intel ICH/PCH form and AMD's AGESA writes its own. The
+             * parse pass has no frame to evaluate a term in, so it keeps the
+             * BYTES and leaves these two false — the number is still owed.
+             *
+             * It is a flag because the alternative is worse than a flag: a
+             * base that is recorded as 0 because nobody could read it is
+             * INDISTINGUISHABLE from a base the firmware really wrote as 0,
+             * and reading it means physical page zero, I/O port zero or a
+             * function's Vendor ID answering as an interrupt number, under
+             * the routing table's own signature. AmlRegionArm turns the
+             * bytes into the number, once, before the first access; a region
+             * it cannot resolve is refused aloud and never read. */
+            bool     base_known;
+            bool     len_known;
+            const uint8_t* base_term;
+            const uint8_t* base_term_end;
+            const uint8_t* len_term;
+            const uint8_t* len_term_end;
+            /* The scope those bytes resolve names against — where the
+             * OperationRegion was DECLARED, which is not always where its
+             * name landed: `OperationRegion (\\_SB.PCI0.P40C, ...)` declares
+             * under PCI0 and resolves its operands here. */
+            struct aml_object* declared_in;
+            /* ‼ Said once, the first time anything reads through it. On a
+             * board where the routing does not add up, the line this flag
+             * gates is the only account of WHERE the firmware reached — see
+             * AmlRegionRead. */
+            bool     said;
         } region;
         struct {
             const uint8_t* aml;
@@ -565,133 +614,210 @@ static bool skip_pkg_block(const uint8_t** p, const uint8_t* end) {
     return true;
 }
 
-#define AML_MAX_SKIP_DEPTH 16
+/* Defined with the evaluator below. Both halves of this file grow their
+ * stacks through the one function, so "it grows with what the firmware
+ * wrote, and the heap is what ends it" is one mechanism and not two. */
+static void *AmlStackRoom(void *base, uint32_t *room, uint32_t want,
+                           uint32_t item);
 
-static bool skip_term_arg(const uint8_t** p, const uint8_t* end,
-                           aml_object_t* scope, int depth);
+/*
+ * ‼ STEPPING OVER AN OPERAND DOES NOT DESCEND THE C STACK EITHER.
+ *
+ * What stood here was `if (depth > AML_MAX_SKIP_DEPTH)` — a 16 that no
+ * specification names. Past it this pass gave up MEASURING an operand, and
+ * the TermList then fell back to the byte-at-a-time resync that aml.h calls
+ * a hazard by name: declarations fabricated out of misaligned operand bytes,
+ * inside a block whose real declarations are then lost.
+ *
+ * Skipping is strictly left to right — every item is consumed where the
+ * previous one ended — so what a nested operand needs is not a stack of
+ * POSITIONS, only a list of what is still OWED: another TermArg, another
+ * SuperName, or the two bytes of an Acquire's timeout. That list is one byte
+ * per item, it grows on the heap with the nesting the firmware wrote, and it
+ * is reused across the whole parse rather than allocated per operand. There
+ * is no ceiling on it; what ends the growth is kmalloc saying no.
+ */
+typedef enum {
+    AML_SKIP_TERM  = 0,     /* one TermArg   §20.2.3 */
+    AML_SKIP_SUPER = 1,     /* one SuperName §20.2.2 */
+    AML_SKIP_WORD  = 2,     /* two raw bytes: Acquire's Timeout */
+} AmlSkipKind;
 
-/* Target := SuperName | NullName (§20.2.2). */
-static bool skip_super_name(const uint8_t** p, const uint8_t* end,
-                             aml_object_t* scope, int depth) {
-    if (*p >= end) return false;
-    uint8_t op = **p;
-    if (op == 0x00) { (*p)++; return true; }              /* NullName    */
-    if (op >= 0x60 && op <= 0x6E) { (*p)++; return true; }/* Local / Arg */
-    if (op == ExtOpPrefix) {
-        /* The only SuperName under the prefix is DebugObj. */
-        if ((size_t)(end - *p) < 2 || (*p)[1] != ExtDebugOp) return false;
-        *p += 2;
-        return true;
+static uint8_t*  g_skip_owed = NULL;
+static uint32_t  g_skip_room = 0;
+
+static bool AmlSkipOwe(uint32_t* n, uint8_t kind) {
+    uint8_t* grown = (uint8_t*)AmlStackRoom(g_skip_owed, &g_skip_room,
+                                            *n + 1, 1);
+    if (!grown) {
+        kprintf("[AML] the heap has no room to measure an operand nested "
+                "this deep — the term is refused rather than half-measured\n");
+        return false;
     }
-    if (op == RefOfOp || op == DerefOfOp || op == IndexOp)
-        return skip_term_arg(p, end, scope, depth);
-    if (!aml_is_name_string_lead(op)) return false;
-    return skip_name_string(p, end);
+    g_skip_owed = grown;
+    g_skip_owed[(*n)++] = kind;
+    return true;
+}
+
+/* The parse pass is over; the list it grew is not the namespace. */
+static void AmlSkipForget(void) {
+    if (g_skip_owed) kfree(g_skip_owed);
+    g_skip_owed = NULL;
+    g_skip_room = 0;
 }
 
 /*
- * Step over one TermArg (§20.2.3) whose value this pass does not need.
- * The namespace builder has no executor frame, so an operand it cannot
- * measure is a refusal — never a guess that leaves *p inside the
+ * Step over one TermArg or one SuperName (§20.2.2-3) whose value this pass
+ * does not need. The namespace builder has no executor frame, so an operand
+ * it cannot measure is a refusal — never a guess that leaves *p inside the
  * operand bytes for the next TermObj scan to chew on.
  */
-static bool skip_term_arg(const uint8_t** p, const uint8_t* end,
-                           aml_object_t* scope, int depth) {
-    if (depth > AML_MAX_SKIP_DEPTH || *p >= end) return false;
-    uint8_t op = **p;
+static bool AmlSkipRun(const uint8_t** p, const uint8_t* end,
+                        aml_object_t* scope, uint8_t first) {
+    uint32_t n = 0;
+    if (!AmlSkipOwe(&n, first)) return false;
 
-    switch (op) {
-        case ZeroOp: case OneOp: case OnesOp:
-        case BytePrefix: case WordPrefix:
-        case DWordPrefix: case QWordPrefix: {
-            const uint8_t* before = *p;
-            read_integer(p, end);
-            return *p != before;
+    while (n) {
+        uint8_t kind = g_skip_owed[--n];
+
+        if (kind == AML_SKIP_WORD) {           /* Timeout := WordData */
+            if ((size_t)(end - *p) < 2) return false;
+            *p += 2;
+            continue;
         }
-        case StringPrefix:
-            (*p)++;
-            while (*p < end && **p) (*p)++;
-            if (*p >= end) return false;
-            (*p)++;                        /* the NUL */
-            return true;
-        case BufferOp: case PackageOp: case VarPackageOp:
-            (*p)++;
-            return skip_pkg_block(p, end);
-        default:
-            break;
-    }
+        if (*p >= end) return false;
+        uint8_t op = **p;
 
-    if (op >= 0x60 && op <= 0x6E) { (*p)++; return true; }   /* Local/Arg */
-
-    if (aml_is_name_string_lead(op) && op != 0x00) {
-        /* A NameString in TermArg position is either a data reference or
-         * a method invocation; only the namespace can say which, and a
-         * method drags its arguments along behind it. */
-        const uint8_t* probe = *p;
-        aml_object_t* o = resolve_name(&probe, end, scope, false, NULL);
-        if (!skip_name_string(p, end)) return false;
-        if (o && o->type == AML_OBJ_METHOD) {
-            uint8_t argc = (uint8_t)(o->v.method.flags & 0x7);
-            for (uint8_t i = 0; i < argc; i++)
-                if (!skip_term_arg(p, end, scope, depth + 1)) return false;
+        if (kind == AML_SKIP_SUPER) {
+            /* Target := SuperName | NullName. */
+            if (op == 0x00) { (*p)++; continue; }              /* NullName  */
+            if (op >= 0x60 && op <= 0x6E) { (*p)++; continue; }/* Local/Arg */
+            if (op == ExtOpPrefix) {
+                /* The only SuperName under the prefix is DebugObj. */
+                if ((size_t)(end - *p) < 2 || (*p)[1] != ExtDebugOp)
+                    return false;
+                *p += 2;
+                continue;
+            }
+            if (op != RefOfOp && op != DerefOfOp && op != IndexOp) {
+                if (!aml_is_name_string_lead(op)) return false;
+                if (!skip_name_string(p, end)) return false;
+                continue;
+            }
+            /* RefOf, DerefOf and Index in SuperName position are TermArgs,
+             * and the same byte is read again as one. */
         }
-        return true;
-    }
 
-    if (op == ExtOpPrefix) {
-        /* CondRefOf / Acquire / Timer ... in TermArg position. */
-        if ((size_t)(end - *p) < 2) return false;
-        uint8_t sub = (*p)[1];
-        *p += 2;
-        switch (sub) {
-            case ExtCondRefOfOp:
-                return skip_super_name(p, end, scope, depth + 1) &&
-                       skip_super_name(p, end, scope, depth + 1);
-            case ExtAcquireOp:
-                if (!skip_super_name(p, end, scope, depth + 1)) return false;
-                if ((size_t)(end - *p) < 2) return false;
-                *p += 2;                   /* Timeout := WordData */
-                return true;
-            case ExtWaitOp:
-                return skip_super_name(p, end, scope, depth + 1) &&
-                       skip_term_arg(p, end, scope, depth + 1);
-            case ExtFromBCDOp: case ExtToBCDOp:
-                return skip_term_arg(p, end, scope, depth + 1) &&
-                       skip_super_name(p, end, scope, depth + 1);
-            case ExtRevisionOp: case ExtDebugOp: case ExtTimerOp:
-                return true;               /* no operands */
+        switch (op) {
+            case ZeroOp: case OneOp: case OnesOp:
+            case BytePrefix: case WordPrefix:
+            case DWordPrefix: case QWordPrefix: {
+                const uint8_t* before = *p;
+                read_integer(p, end);
+                if (*p == before) return false;
+                continue;
+            }
+            case StringPrefix:
+                (*p)++;
+                while (*p < end && **p) (*p)++;
+                if (*p >= end) return false;
+                (*p)++;                        /* the NUL */
+                continue;
+            case BufferOp: case PackageOp: case VarPackageOp:
+                (*p)++;
+                if (!skip_pkg_block(p, end)) return false;
+                continue;
+            default:
+                break;
+        }
+
+        if (op >= 0x60 && op <= 0x6E) { (*p)++; continue; }  /* Local/Arg */
+
+        if (aml_is_name_string_lead(op) && op != 0x00) {
+            /* A NameString in TermArg position is either a data reference or
+             * a method invocation; only the namespace can say which, and a
+             * method drags its arguments along behind it. */
+            const uint8_t* probe = *p;
+            aml_object_t*  o = resolve_name(&probe, end, scope, false, NULL);
+            if (!skip_name_string(p, end)) return false;
+            if (o && o->type == AML_OBJ_METHOD) {
+                uint8_t argc = (uint8_t)(o->v.method.flags & 0x7);
+                for (uint8_t i = 0; i < argc; i++)
+                    if (!AmlSkipOwe(&n, AML_SKIP_TERM)) return false;
+            }
+            continue;
+        }
+
+        if (op == ExtOpPrefix) {
+            /* CondRefOf / Acquire / Timer ... in TermArg position. The items
+             * an operand owes are pushed in REVERSE, so the first one owed
+             * is the first one taken off. */
+            if ((size_t)(end - *p) < 2) return false;
+            uint8_t sub = (*p)[1];
+            *p += 2;
+            switch (sub) {
+                case ExtCondRefOfOp:           /* SuperName Target */
+                    if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return false;
+                    if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return false;
+                    continue;
+                case ExtAcquireOp:             /* SuperName WordData */
+                    if (!AmlSkipOwe(&n, AML_SKIP_WORD))  return false;
+                    if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return false;
+                    continue;
+                case ExtWaitOp:                /* SuperName TermArg */
+                    if (!AmlSkipOwe(&n, AML_SKIP_TERM))  return false;
+                    if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return false;
+                    continue;
+                case ExtFromBCDOp: case ExtToBCDOp:    /* TermArg Target */
+                    if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return false;
+                    if (!AmlSkipOwe(&n, AML_SKIP_TERM))  return false;
+                    continue;
+                case ExtRevisionOp: case ExtDebugOp: case ExtTimerOp:
+                    continue;                  /* no operands */
+                default:
+                    return false;
+            }
+        }
+
+        /* Expression opcodes: n TermArgs then t Targets (§20.2.5.4). */
+        uint8_t nargs, ntargets;
+        switch (op) {
+            case AddOp: case SubtractOp: case MultiplyOp: case ModOp:
+            case AndOp: case NandOp: case OrOp: case NorOp: case XorOp:
+            case ShiftLeftOp: case ShiftRightOp: case ConcatOp: case IndexOp:
+                nargs = 2; ntargets = 1; break;
+            case DivideOp:
+                nargs = 2; ntargets = 2; break;
+            case NotOp: case StoreOp:
+                nargs = 1; ntargets = 1; break;
+            case LAndOp: case LOrOp: case LEqualOp:
+            case LGreaterOp: case LLessOp:
+                nargs = 2; ntargets = 0; break;
+            case LNotOp: case DerefOfOp:
+                nargs = 1; ntargets = 0; break;
+            case RefOfOp: case SizeOfOp: case IncrementOp: case DecrementOp:
+                nargs = 0; ntargets = 1; break;
             default:
                 return false;
         }
+        (*p)++;
+        for (uint8_t i = 0; i < ntargets; i++)
+            if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return false;
+        for (uint8_t i = 0; i < nargs; i++)
+            if (!AmlSkipOwe(&n, AML_SKIP_TERM)) return false;
     }
-
-    /* Expression opcodes: n TermArgs then t Targets (§20.2.5.4). */
-    uint8_t nargs, ntargets;
-    switch (op) {
-        case AddOp: case SubtractOp: case MultiplyOp: case ModOp:
-        case AndOp: case NandOp: case OrOp: case NorOp: case XorOp:
-        case ShiftLeftOp: case ShiftRightOp: case ConcatOp: case IndexOp:
-            nargs = 2; ntargets = 1; break;
-        case DivideOp:
-            nargs = 2; ntargets = 2; break;
-        case NotOp: case StoreOp:
-            nargs = 1; ntargets = 1; break;
-        case LAndOp: case LOrOp: case LEqualOp:
-        case LGreaterOp: case LLessOp:
-            nargs = 2; ntargets = 0; break;
-        case LNotOp: case DerefOfOp:
-            nargs = 1; ntargets = 0; break;
-        case RefOfOp: case SizeOfOp: case IncrementOp: case DecrementOp:
-            nargs = 0; ntargets = 1; break;
-        default:
-            return false;
-    }
-    (*p)++;
-    for (uint8_t i = 0; i < nargs; i++)
-        if (!skip_term_arg(p, end, scope, depth + 1)) return false;
-    for (uint8_t i = 0; i < ntargets; i++)
-        if (!skip_super_name(p, end, scope, depth + 1)) return false;
     return true;
+}
+
+static bool skip_term_arg(const uint8_t** p, const uint8_t* end,
+                           aml_object_t* scope) {
+    return AmlSkipRun(p, end, scope, AML_SKIP_TERM);
+}
+
+/* Target := SuperName | NullName (§20.2.2). */
+static bool skip_super_name(const uint8_t** p, const uint8_t* end,
+                             aml_object_t* scope) {
+    return AmlSkipRun(p, end, scope, AML_SKIP_SUPER);
 }
 
 /*
@@ -712,48 +838,48 @@ static bool skip_ext_op(uint8_t sub, const uint8_t** p, const uint8_t* end,
         case ExtEventOp:                  /* NameString */
             return skip_name_string(p, end);
         case ExtCondRefOfOp:              /* SuperName Target */
-            return skip_super_name(p, end, scope, 0) &&
-                   skip_super_name(p, end, scope, 0);
+            return skip_super_name(p, end, scope) &&
+                   skip_super_name(p, end, scope);
         case ExtCreateFieldOp:            /* TermArg x3 NameString */
-            return skip_term_arg(p, end, scope, 0) &&
-                   skip_term_arg(p, end, scope, 0) &&
-                   skip_term_arg(p, end, scope, 0) &&
+            return skip_term_arg(p, end, scope) &&
+                   skip_term_arg(p, end, scope) &&
+                   skip_term_arg(p, end, scope) &&
                    skip_name_string(p, end);
         case ExtLoadTableOp:              /* TermArg x6 */
             for (int i = 0; i < 6; i++)
-                if (!skip_term_arg(p, end, scope, 0)) return false;
+                if (!skip_term_arg(p, end, scope)) return false;
             return true;
         case ExtLoadOp:                   /* NameString SuperName */
             return skip_name_string(p, end) &&
-                   skip_super_name(p, end, scope, 0);
+                   skip_super_name(p, end, scope);
         case ExtStallOp: case ExtSleepOp: /* TermArg */
-            return skip_term_arg(p, end, scope, 0);
+            return skip_term_arg(p, end, scope);
         case ExtAcquireOp:                /* SuperName WordData */
-            if (!skip_super_name(p, end, scope, 0)) return false;
+            if (!skip_super_name(p, end, scope)) return false;
             if ((size_t)(end - *p) < 2) return false;
             *p += 2;
             return true;
         case ExtSignalOp: case ExtResetOp:
         case ExtReleaseOp: case ExtUnloadOp:      /* SuperName */
-            return skip_super_name(p, end, scope, 0);
+            return skip_super_name(p, end, scope);
         case ExtWaitOp:                   /* SuperName TermArg */
-            return skip_super_name(p, end, scope, 0) &&
-                   skip_term_arg(p, end, scope, 0);
+            return skip_super_name(p, end, scope) &&
+                   skip_term_arg(p, end, scope);
         case ExtFromBCDOp: case ExtToBCDOp:       /* TermArg Target */
-            return skip_term_arg(p, end, scope, 0) &&
-                   skip_super_name(p, end, scope, 0);
+            return skip_term_arg(p, end, scope) &&
+                   skip_super_name(p, end, scope);
         case ExtRevisionOp: case ExtDebugOp: case ExtTimerOp:
             return true;                  /* no operands */
         case ExtFatalOp:                  /* ByteData DWordData TermArg */
             if ((size_t)(end - *p) < 5) return false;
             *p += 5;
-            return skip_term_arg(p, end, scope, 0);
+            return skip_term_arg(p, end, scope);
         case ExtOpRegionOp:               /* NameString RegionSpace TermArg x2 */
             if (!skip_name_string(p, end)) return false;
             if (*p >= end) return false;
             (*p)++;
-            return skip_term_arg(p, end, scope, 0) &&
-                   skip_term_arg(p, end, scope, 0);
+            return skip_term_arg(p, end, scope) &&
+                   skip_term_arg(p, end, scope);
         case ExtFieldOp: case ExtDeviceOp: case ExtProcessorOp:
         case ExtPowerResOp: case ExtThermalZoneOp:
         case ExtIndexFieldOp: case ExtBankFieldOp:
@@ -761,7 +887,7 @@ static bool skip_ext_op(uint8_t sub, const uint8_t** p, const uint8_t* end,
         case ExtDataRegionOp:             /* NameString TermArg x3 */
             if (!skip_name_string(p, end)) return false;
             for (int i = 0; i < 3; i++)
-                if (!skip_term_arg(p, end, scope, 0)) return false;
+                if (!skip_term_arg(p, end, scope)) return false;
             return true;
         default:
             return false;
@@ -772,8 +898,30 @@ static bool skip_ext_op(uint8_t sub, const uint8_t** p, const uint8_t* end,
  * Parser — populate namespace from a TermList byte range
  * =========================================================== */
 
-static aml_status_t parse_term_list(const uint8_t* aml, uint32_t len,
-                                     aml_object_t* scope, int depth);
+/*
+ * ‼ THE NAMESPACE WALK DOES NOT DESCEND THE C STACK, AND THAT IS WHY THERE
+ *   IS NO DEPTH LIMIT IN IT ANY MORE.
+ *
+ * What stood here was `if (depth > AML_MAX_SCOPE_DEPTH) return
+ * AML_ERR_DEEP_NEST` — a 32 that no specification names, guarding a C
+ * recursion that no specification requires either. A firmware that nested
+ * one level deeper lost an ENTIRE SUBTREE of its namespace, silently, and
+ * everything the evaluator later failed to find in it was reported as the
+ * firmware's silence rather than as this pass's.
+ *
+ * So the walk carries its own stack instead. A Scope or a Device body is not
+ * entered by calling parse_term_list again: parse_one hands the body BACK as
+ * an AmlParseInto, and the loop pushes it onto a heap-grown stack that grows
+ * with the nesting the firmware wrote. Nothing here decides how deep a board
+ * may nest — what ends the growth is kmalloc saying no, and that is said out
+ * loud with the body named. The same rule the evaluator lives under, and for
+ * the same reason.
+ */
+typedef struct AmlParseInto {
+    const uint8_t* p;            /* NULL when there is nothing to descend */
+    const uint8_t* end;
+    aml_object_t*  scope;
+} AmlParseInto;
 
 static aml_status_t handle_buffer(const uint8_t** p, const uint8_t* end,
                                    aml_object_t* obj) {
@@ -873,8 +1021,8 @@ static aml_status_t handle_named_data(const uint8_t** p, const uint8_t* end,
 }
 
 static aml_status_t handle_scope_method(const uint8_t** p, const uint8_t* end,
-                                         aml_object_t* scope, int depth,
-                                         bool is_method) {
+                                         aml_object_t* scope, bool is_method,
+                                         AmlParseInto* into) {
     (*p)++;     /* op byte */
     uint32_t pklen_bytes;
     uint32_t pklen = decode_pkglen(p, end, &pklen_bytes);
@@ -940,8 +1088,10 @@ static aml_status_t handle_scope_method(const uint8_t** p, const uint8_t* end,
         target->v.method.flags  = *np++;
         target->v.method.aml    = np;
         target->v.method.aml_len = (uint32_t)(body_end - np);
-    } else {
-        parse_term_list(np, (uint32_t)(body_end - np), target, depth + 1);
+    } else if (np < body_end) {
+        into->p     = np;
+        into->end   = body_end;
+        into->scope = target;
     }
     *p = body_end;
     return AML_OK;
@@ -979,7 +1129,14 @@ typedef struct AmlFieldSite {
  */
 static void parse_field_list(const uint8_t* np, const uint8_t* body_end,
                               aml_object_t* scope, const AmlFieldSite* site) {
-    uint32_t bit_cursor = 0;
+    /* ‼ THE CURSOR IS WIDER THAN WHAT IT COUNTS, ON PURPOSE. Each element's
+     * width is a PkgLength, which §20.2.4 lets reach 0x0FFFFFFF, and a
+     * FieldList may hold any number of them. Added up in 32 bits they wrap,
+     * and a wrapped offset is a SMALL one — it passes every bound check and
+     * points the access at the wrong end of the register. Counted here in
+     * 64, and a field whose offset no longer fits the 32 bits this pass
+     * records is said aloud instead of recorded wrong. */
+    uint64_t bit_cursor = 0;
     uint8_t  access     = site->flags;
 
     while (np < body_end) {
@@ -1031,6 +1188,16 @@ static void parse_field_list(const uint8_t* np, const uint8_t* body_end,
         if (!cbytes) break;
         np += cbytes;
 
+        if (bit_cursor + bits > 0xFFFFFFFFull) {
+            kprintf("[AML] FieldList in %s: %c%c%c%c would start at bit %lu, "
+                    "past where this pass can record an offset — the rest of "
+                    "the block is dropped rather than recorded at a bit "
+                    "offset that wrapped\n", scope->name,
+                    seg[0], seg[1], seg[2], seg[3],
+                    (unsigned long)bit_cursor);
+            break;
+        }
+
         aml_object_t* f = obj_create_child(scope, seg, AML_OBJ_FIELD);
         if (!f) break;
         f->v.field.region     = site->region;
@@ -1038,7 +1205,7 @@ static void parse_field_list(const uint8_t* np, const uint8_t* body_end,
         f->v.field.data       = site->data;
         f->v.field.bank       = site->bank;
         f->v.field.bank_value = site->bank_value;
-        f->v.field.bit_offset = bit_cursor;
+        f->v.field.bit_offset = (uint32_t)bit_cursor;
         f->v.field.bit_width  = bits;
         f->v.field.access     = access;
         bit_cursor += bits;
@@ -1046,7 +1213,8 @@ static void parse_field_list(const uint8_t* np, const uint8_t* body_end,
 }
 
 static aml_status_t handle_extended(const uint8_t** p, const uint8_t* end,
-                                     aml_object_t* scope, int depth) {
+                                     aml_object_t* scope,
+                                     AmlParseInto* into) {
     (*p) += 2;     /* ExtOp + opcode */
     /* Sub-opcode is at (*p - 1). */
     uint8_t sub = (*p)[-1];
@@ -1059,24 +1227,40 @@ static aml_status_t handle_extended(const uint8_t** p, const uint8_t* end,
         uint8_t space = **p; (*p)++;
         /* DefOpRegion := OpRegionOp NameString RegionSpace RegionOffset
          * RegionLen, and §20.2.5.2 makes both RegionOffset and RegionLen
-         * TermArgs — a NameSeg naming a Field is as legal there as a
-         * literal, and AMD's shipping AGESA FCH ASL uses exactly that at
-         * namespace level. This pass has no frame to evaluate one in, so
+         * TermArgs — a NameSeg naming a Name or a Field is as legal there
+         * as a literal, and both Intel's and AMD's shipping reference ASL
+         * use exactly that. This pass has no frame to evaluate one in, so
          * the non-constant form is stepped over EXACTLY — the measurement
-         * is what keeps the rest of the TermList aligned — and the object
-         * records the base it could read, which is zero when the firmware
-         * named none. */
+         * is what keeps the rest of the TermList aligned — and THE BYTES
+         * ARE KEPT, to be turned into a number by AmlRegionArm the first
+         * time anything wants to read through the region. What is NOT done
+         * is recording a zero and calling it a base. */
         uint64_t base = 0, len = 0;
+        const uint8_t* base_from = *p;
         bool have_base = read_const_integer(p, end, &base);
-        bool measured  = have_base || skip_term_arg(p, end, scope, 0);
+        bool measured  = have_base || skip_term_arg(p, end, scope);
+        const uint8_t* base_to = *p;
+        const uint8_t* len_from = *p;
         bool have_len  = measured && read_const_integer(p, end, &len);
-        if (measured && !have_len) measured = skip_term_arg(p, end, scope, 0);
+        if (measured && !have_len) measured = skip_term_arg(p, end, scope);
+        const uint8_t* len_to = *p;
 
         aml_object_t* o = obj_create_child(parent, leaf, AML_OBJ_REGION);
         if (!o) return AML_ERR_NOMEM;
-        o->v.region.space = space;
-        o->v.region.base  = base;
-        o->v.region.len   = len;
+        o->v.region.space       = space;
+        o->v.region.base        = base;
+        o->v.region.len         = len;
+        o->v.region.base_known  = have_base;
+        o->v.region.len_known   = have_len;
+        o->v.region.declared_in = scope;
+        if (measured && !have_base && base_to > base_from) {
+            o->v.region.base_term     = base_from;
+            o->v.region.base_term_end = base_to;
+        }
+        if (measured && !have_len && len_to > len_from) {
+            o->v.region.len_term     = len_from;
+            o->v.region.len_term_end = len_to;
+        }
 
         if (!measured) {
             kprintf("[AML] OperationRegion %s: its operand bytes cannot be "
@@ -1113,7 +1297,11 @@ static aml_status_t handle_extended(const uint8_t** p, const uint8_t* end,
         sub_obj->type = t;
         if (sub == ExtProcessorOp) { if (np + 6 <= body_end) np += 6; }
         if (sub == ExtPowerResOp)  { if (np + 3 <= body_end) np += 3; }
-        parse_term_list(np, (uint32_t)(body_end - np), sub_obj, depth + 1);
+        if (np < body_end) {
+            into->p     = np;
+            into->end   = body_end;
+            into->scope = sub_obj;
+        }
         *p = body_end;
         return AML_OK;
     }
@@ -1209,7 +1397,7 @@ static aml_status_t handle_extended(const uint8_t** p, const uint8_t* end,
 }
 
 static aml_status_t parse_one(const uint8_t** p, const uint8_t* end,
-                               aml_object_t* scope, int depth) {
+                               aml_object_t* scope, AmlParseInto* into) {
     if (*p >= end) return AML_ERR_BOUNDS;
     uint8_t op = **p;
 
@@ -1223,8 +1411,8 @@ static aml_status_t parse_one(const uint8_t** p, const uint8_t* end,
         if (!o) return AML_ERR_NOMEM;
         return handle_named_data(p, end, o);
     }
-    if (op == ScopeOp)   return handle_scope_method(p, end, scope, depth, false);
-    if (op == MethodOp)  return handle_scope_method(p, end, scope, depth, true);
+    if (op == ScopeOp)   return handle_scope_method(p, end, scope, false, into);
+    if (op == MethodOp)  return handle_scope_method(p, end, scope, true, into);
     if (op == AliasOp) {
         (*p)++;
         aml_object_t* src = resolve_name(p, end, scope, false, NULL);
@@ -1236,73 +1424,180 @@ static aml_status_t parse_one(const uint8_t** p, const uint8_t* end,
         if (a) a->v.alias.target = src;
         return AML_OK;
     }
-    if (op == ExtOpPrefix) return handle_extended(p, end, scope, depth);
+    if (op == ExtOpPrefix) return handle_extended(p, end, scope, into);
 
     return AML_ERR_BAD_OPCODE;
 }
 
 static aml_status_t parse_term_list(const uint8_t* aml, uint32_t len,
-                                     aml_object_t* scope, int depth) {
-    if (depth > AML_MAX_SCOPE_DEPTH) return AML_ERR_DEEP_NEST;
-    const uint8_t* p   = aml;
-    const uint8_t* end = aml + len;
-    while (p < end) {
-        const uint8_t* before = p;
-        aml_status_t s = parse_one(&p, end, scope, depth);
-        if (s == AML_ERR_DEEP_NEST || s == AML_ERR_NOMEM) return s;
+                                     aml_object_t* scope) {
+    uint32_t       room = 0, n = 0;
+    AmlParseInto*  stk  =
+        (AmlParseInto*)AmlStackRoom(NULL, &room, 1, sizeof(AmlParseInto));
+    if (!stk) {
+        kprintf("[AML] the heap has no room to begin walking this table's "
+                "namespace — nothing of it is recorded\n");
+        return AML_ERR_NOMEM;
+    }
+    stk[0].p     = aml;
+    stk[0].end   = aml + len;
+    stk[0].scope = scope;
+    n = 1;
+
+    aml_status_t worst = AML_OK;
+    while (n) {
+        if (stk[n - 1].p >= stk[n - 1].end) { n--; continue; }
+
+        const uint8_t* before = stk[n - 1].p;
+        AmlParseInto   into   = { NULL, NULL, NULL };
+        aml_status_t   s      = parse_one(&stk[n - 1].p, stk[n - 1].end,
+                                          stk[n - 1].scope, &into);
+        /* The pool is gone: every later declaration would be lost anyway,
+         * and obj_alloc has already said so. */
+        if (s == AML_ERR_NOMEM) { worst = s; break; }
+
+        if (into.p) {
+            /* A body to walk, with the parent already standing past it —
+             * handle_scope_method and handle_extended move it to body_end
+             * before they hand the body over, so the parent resumes at the
+             * next TermObj whatever happens inside. */
+            AmlParseInto* grown =
+                (AmlParseInto*)AmlStackRoom(stk, &room, n + 1,
+                                            sizeof(AmlParseInto));
+            if (!grown) {
+                kprintf("[AML] %[E]the heap has no room to walk into %s — "
+                        "this firmware nests its namespace deeper than the "
+                        "heap can follow, and everything declared inside "
+                        "that body is missing rather than silently "
+                        "renamed%[D]\n", into.scope->name);
+                worst = AML_ERR_NOMEM;
+                break;
+            }
+            stk = grown;
+            stk[n++] = into;
+            continue;
+        }
+
         /* AML_REFUSED: the term was measured and rejected, and `p` already
          * stands at the next TermObj. Resyncing over it would walk the block
          * this pass just declined, one byte at a time, declaring objects out
          * of whatever operand bytes happen to look like an opcode. */
-        if (s == AML_REFUSED && p > before) continue;
-        if (p == before || s == AML_ERR_BAD_OPCODE) p = before + 1;
+        if (s == AML_REFUSED && stk[n - 1].p > before) continue;
+        if (stk[n - 1].p == before || s == AML_ERR_BAD_OPCODE)
+            stk[n - 1].p = before + 1;
     }
-    return AML_OK;
+
+    kfree(stk);
+    return worst;
 }
 
 /* =====================================================================
- * THE NARROW EVALUATOR — enough AML to ask the firmware where a PCI
- * interrupt goes, and NOTHING that touches hardware.
+ * THE NARROW EVALUATOR — enough AML to ask the firmware WHERE A PCI
+ * INTERRUPT GOES, and not one operator beyond what that question needs.
  *
- * ‼ WHAT THIS IS ALLOWED TO DO, and why the boundary is where it is.
+ * ‼ WHAT THIS IS ALLOWED TO DO, AND WHY THE BOUNDARY IS WHERE IT IS.
  *
  * An executor lived in this file once and was removed with the ACPI S1-S4
- * sleep path it served — all of it, including the OperationRegion and Field
- * access path, which is the only way AML ever reaches a register. That
- * removal stands. What comes back here is a READER: If/Else, Return, Store
- * into a local, an argument or a namespace Name, the logical operators, and
- * the reading of Packages and Buffers. Exactly the shape a board writes when
- * it answers "where does this interrupt go":
+ * sleep path it served. That removal stands: there is no sleep path here, no
+ * Notify, no mutex taken as a means of synchronising with the firmware, and
+ * — the one that matters most — NO WAY TO WRITE ANYTHING ANYWHERE OUTSIDE
+ * THIS KERNEL'S OWN MEMORY.
+ *
+ * What is here is a READER. It exists because the answer to "where does this
+ * interrupt go" is not data on most boards; it is four to twenty lines of
+ * AML. The shape is the same everywhere, and every part of it is needed:
  *
  *     Method (_PRT, 0) { If (PICM) { Return (AR00) } Return (PR00) }
  *
- * The moment a term needs a value out of an OperationRegion, the evaluator
- * REFUSES ALOUD and abandons the method half-run rather than inventing a
- * number for it. That is not a gap to be filled later by widening this file;
- * it is the boundary, and crossing it is a question for the owner.
+ *     Device (LNKA) {
+ *       Name (_HID, EISAID ("PNP0C0F"))
+ *       Method (_STA, 0) { Return (IQST (PRQ0)) }      <- calls a method
+ *       Method (_CRS, 0) { Return (IQCR (PRQ0)) }      <- calls a method
+ *     }
+ *     Method (IQCR, 1, Serialized) {
+ *       Name (PRR0, ResourceTemplate () { Interrupt (...) {0} })  <- local object
+ *       CreateDWordField (PRR0, 0x05, PRRI)                       <- buffer field
+ *       Store (Arg0, PRRI)                                        <- writes MEMORY
+ *       Return (PRR0)
+ *     }
+ *
+ * and PRQ0 is a Field over `OperationRegion (P40C, PCI_Config, 0x60, 4)` —
+ * the chipset's PIRQ routing register. That last step is the whole point: the
+ * number this kernel needs is IN A REGISTER, and the firmware's own ASL is
+ * the only description of where that register is.
+ *
+ * ‼ SO THE EVALUATOR READS ADDRESS SPACES, AND IT DOES IT BY ASKING THE
+ *   SUBSYSTEM THAT OWNS THEM. It owns no door of its own:
+ *     PCI_Config   -> pci.c's configuration accessors, the only holder of
+ *                     0xCF8/0xCFC and of the ECAM window in this kernel
+ *     SystemMemory -> vmm_map_mmio / vmm_unmap_mmio, mapped READ-ONLY, for
+ *                     the length of one field read and not one instruction
+ *                     longer
+ *     SystemIO     -> io.h
+ *   Three of the eleven spaces ACPI 6.5 §20.2.5.2 defines. The other eight
+ *   are refused BY NAME: each needs a transport protocol of its own
+ *   (EmbeddedControl, SMBus, IPMI, GenericSerialBus, PCC), or a target this
+ *   kernel does not resolve (PciBarTarget, GeneralPurposeIO), or belongs to
+ *   a driver that already owns it (SystemCMOS) — and none of them appears on
+ *   the interrupt-routing path on any board.
+ *
+ * ‼ AND IT NEVER WRITES ONE. There is no function in this file that writes
+ *   to an address space, so "read only" is not a rule that could be broken
+ *   by forgetting a check: there is nothing to call. A Store whose target is
+ *   a Field or an OperationRegion is refused ALOUD on every path, in every
+ *   window, and the method is abandoned rather than half-run — see
+ *   AmlStoreInto. An IndexField and a BankField are refused for the same
+ *   reason one step earlier: reading one means WRITING the index or the bank
+ *   selector first, and that write does not exist here.
+ *
+ * ‼ THE WINDOW, AND WHY IT CANNOT BE LEFT OPEN.
+ *   An address space is reachable only while a ROUTING OBJECT is being
+ *   evaluated — _PRT (§6.2.13), _CRS (§6.2.2), _PRS (§6.2.12), _STA (§6.3.7)
+ *   and _PIC (§5.8.1). Outside that, every access is refused exactly as it
+ *   was before any of this existed.
+ *
+ *   It is not a flag. `window` is a field of AmlRun, AmlRun is a LOCAL
+ *   VARIABLE of the function that wanted the routing object, and it is
+ *   assigned in exactly ONE place in this file — the first statement of
+ *   AmlEvalIn, from the NAME OF THE OBJECT BEING EVALUATED. So:
+ *     * it cannot be opened for something that is not a routing object,
+ *       because the caller does not get to say;
+ *     * it cannot be left open, because closing it is the C function
+ *       returning, and that happens on every path including every refusal
+ *       and every abandoned method;
+ *     * it cannot leak into a later evaluation, because the next AmlEvalIn
+ *       on the same run assigns it again from that object's own name.
+ *   There is one assignment to it in this file and it is inside AmlEvalIn,
+ *   which is the mechanism — not a convention somebody has to keep.
  *
  * ‼ AND IT NEVER ANSWERS ZERO INSTEAD OF REFUSING. Every function here that
  * cannot produce a value returns false with a sentence on the console naming
  * what it could not do. A fabricated 0 in this path is a GSI, and a
  * fabricated GSI is a device wired to an interrupt nobody delivers.
  *
- * ‼ HOW DEEP IT CAN GO — by construction, not by a counter.
- *   * Statements: no C recursion at all. A method body is walked with an
- *     explicit block stack that grows on the heap with the nesting the
- *     firmware actually wrote; what ends the growth is kmalloc saying no,
- *     and that is said out loud.
- *   * Expressions: the same. AML is prefix notation, so an explicit stack of
- *     pending operators folds it without the C stack ever descending.
- *   * Methods: ONE frame exists at a time, because a NameString that resolves
- *     to a Method is REFUSED in expression position. The evaluator runs the
- *     method it was asked for and no other, so there is no chain to bound and
- *     no cycle to detect.
- * There is therefore no AML_MAX_EVAL_DEPTH in this file, and there is no
- * place one could be needed.
+ * ‼ HOW DEEP AND HOW LONG IT CAN RUN — by construction, not by a counter.
+ *   * NO C RECURSION. Statements, expressions and METHOD CALLS are all
+ *     driven by one loop (AmlRunTo) over one explicit stack of activations
+ *     that grows on the heap with the nesting the firmware actually wrote.
+ *     What ends the growth is kmalloc saying no, and that is said out loud.
+ *     The C stack depth of this whole subsystem is constant.
+ *   * IT PROVABLY TERMINATES. There is no loop opcode: DefWhile is refused
+ *     aloud by name, so every block is a finite byte range walked forward
+ *     once, and the only way to make more work is to call another method,
+ *     which costs an activation the heap has to supply. A firmware that
+ *     recurses without end therefore stops at the heap, loudly, instead of
+ *     spinning a core.
+ *   * ONE FRAME AT A TIME IS GONE, AND ON PURPOSE. It used to hold because
+ *     a NameString resolving to a Method was refused in expression position.
+ *     That refusal made the evaluator unable to read a PCI interrupt link on
+ *     ANY shipping board — every one of them writes `Return (IQCR (PRQ0))`
+ *     or its equivalent — so it was the wrong invariant. What it was
+ *     protecting (no C recursion, no unbounded descent) is protected above,
+ *     by the explicit stack, which is stronger.
  *
  * Single-threaded by the only thing that calls it: the routing table is read
- * once, on the BSP, during device bring-up, before any other core arms an
- * interrupt.
+ * on the BSP during device bring-up, and every entry point below takes its
+ * own AmlRun, so there is no state between them to share.
  * ===================================================================== */
 
 /* Statement opcodes — ACPI 6.5 §20.2.5.3. */
@@ -1311,6 +1606,19 @@ static aml_status_t parse_term_list(const uint8_t* aml, uint32_t len,
 #define WhileOp          0xA2
 #define NoopOp           0xA3
 #define ReturnOp         0xA4
+#define BreakOp          0xA5
+#define ContinueOp       0x9F
+#define BreakPointOp     0xCC
+
+/* Buffer-field makers and the two bit scanners — §20.2.5.2, §20.2.5.4. */
+#define FindSetLeftBitOp   0x81
+#define FindSetRightBitOp  0x82
+#define CreateDWordFieldOp 0x8A
+#define CreateWordFieldOp  0x8B
+#define CreateByteFieldOp  0x8C
+#define CreateBitFieldOp   0x8D
+#define ObjectTypeOp       0x8E
+#define CreateQWordFieldOp 0x8F
 
 /* ACPI 6.5 §20.2.6.2 gives the locals as Local0..Local7 and §20.2.6.1 the
  * arguments as Arg0..Arg6. Both counts are the specification's; the opcode
@@ -1322,6 +1630,27 @@ static aml_status_t parse_term_list(const uint8_t* aml, uint32_t len,
 #define AML_LOCAL_COUNT  8
 #define AML_ARG_COUNT    7
 
+/*
+ * How wide an Integer is. ACPI 6.5 §19.6.: "For AML code of revision 1, all
+ * integers are 32 bits. For revision 2 and above, integers are 64 bits" —
+ * the revision being the DSDT header's, which aml_init reads. Not a constant
+ * chosen here: it is a property of the table the board shipped, and getting
+ * it wrong turns Ones into the wrong number and every Not and ShiftLeft with
+ * it.
+ *
+ * Zero until that table has been read, and the mask below answers 64 bits
+ * ONLY for a board that said 64. Nothing can be evaluated before the DSDT is
+ * parsed — there is no namespace to evaluate — so the zero state is
+ * unreachable; it is written this way so that the wide answer has a board
+ * behind it rather than a default, which is what a 64 standing here as an
+ * initialiser was.
+ */
+static uint32_t g_int_bits = 0;
+
+static uint64_t AmlIntMask(void) {
+    return (g_int_bits == 64) ? ~0ULL : 0xFFFFFFFFULL;
+}
+
 typedef struct AmlValue {
     aml_obj_type_t type;
     uint64_t       integer;
@@ -1329,23 +1658,8 @@ typedef struct AmlValue {
     const uint8_t *bytes_end;
     uint32_t       count;        /* PACKAGE: the element count it declares */
     aml_object_t  *scope;        /* where a NameString inside it resolves */
-    aml_object_t  *node;         /* set when the operand WAS a name, not its value */
+    aml_object_t  *node;         /* set when the operand WAS a name */
 } AmlValue;
-
-typedef struct AmlFrame {
-    AmlValue      local[AML_LOCAL_COUNT];
-    AmlValue      arg[AML_ARG_COUNT];
-    aml_object_t *scope;         /* the method object — names resolve from here */
-    const char   *what;          /* its name, printed in every refusal */
-} AmlFrame;
-
-/* One pending prefix operator and the operands collected for it so far. */
-typedef struct AmlPending {
-    uint8_t  op;
-    uint8_t  need;
-    uint8_t  have;
-    AmlValue got[2];
-} AmlPending;
 
 /* One TermList still being walked: a method body, or the body of an If or an
  * Else that was entered. */
@@ -1353,6 +1667,85 @@ typedef struct AmlBlock {
     const uint8_t *p;
     const uint8_t *end;
 } AmlBlock;
+
+/*
+ * An object a method body declared for itself — `Name (PRR0, ...)` or one of
+ * the CreateXField operators. ACPI 6.5 §20.2.5.2 puts these in the namespace
+ * under the running method and takes them away again when it returns, and
+ * that is exactly their lifetime here: they live in the activation, and the
+ * activation dies with the call. Nothing a method declares can outlive it
+ * into the namespace the next boot stage reads.
+ */
+typedef struct AmlLocalObj {
+    char      name[4];
+    bool      is_field;          /* a CreateXField view over another local */
+    uint32_t  over;              /* index of the object it cuts into */
+    uint32_t  bit_offset;
+    uint32_t  bit_width;
+    AmlValue  value;             /* for a plain Name */
+    uint8_t  *buf;               /* writable copy, when the value is a Buffer */
+    uint32_t  buf_len;
+} AmlLocalObj;
+
+/* One pending prefix operator — or one pending method call — and the
+ * operands collected for it so far. */
+typedef struct AmlPending {
+    uint8_t       op;
+    bool          call;
+    aml_object_t *callee;
+    uint8_t       need;
+    uint8_t       have;
+    AmlValue      got[AML_ARG_COUNT];
+} AmlPending;
+
+/* What the expression now being folded is FOR. */
+typedef enum {
+    AML_AFTER_RETURN = 0,
+    AML_AFTER_IF,
+    AML_AFTER_STORE,
+    AML_AFTER_DISCARD,
+} AmlAfter;
+
+/* One method body being walked. */
+typedef struct AmlAct {
+    aml_object_t *method;
+    const char   *what;          /* its name, printed in every refusal */
+    AmlValue      local[AML_LOCAL_COUNT];
+    AmlValue      arg[AML_ARG_COUNT];
+
+    AmlBlock     *blk;    uint32_t blkn,  blk_room;
+    AmlLocalObj  *obj;    uint32_t objn,  obj_room;
+    AmlPending   *pend;   uint32_t pendn, pend_room;
+
+    bool            in_expr;
+    const uint8_t  *cur;
+    const uint8_t  *cur_end;
+    AmlValue        val;
+    bool            have_val;
+    AmlAfter        after;
+    const uint8_t  *if_end;      /* AML_AFTER_IF: end of the If package */
+
+    AmlValue      ret;
+    bool          returned;
+} AmlAct;
+
+/*
+ * One evaluation. A LOCAL VARIABLE of whoever asked a question, never a
+ * global — which is what makes the window below impossible to leave open and
+ * the heap below impossible to leak.
+ */
+typedef struct AmlRun {
+    AmlAct   *act;  uint32_t actn,  act_room;
+    void    **own;  uint32_t ownn,  own_room;   /* heap this run handed out */
+
+    /* ‼ THE ROUTING WINDOW. Assigned in exactly one place: the first
+     * statement of AmlEvalIn, from the name of the object being evaluated. */
+    bool      window;
+    const char *window_for;
+
+    AmlValue  result;
+    bool      returned;
+} AmlRun;
 
 /*
  * Make room for `want` items, copying what is already there. There is no
@@ -1405,9 +1798,54 @@ static aml_object_t *AmlChild(aml_object_t *parent, const char *seg) {
     return obj_find_child(parent, s);
 }
 
+/* ===========================================================
+ * The run's own memory
+ * =========================================================== */
+
+static void AmlRunInit(AmlRun *run) {
+    memset(run, 0, sizeof(*run));
+}
+
+/* Memory the run hands out lives exactly as long as the run. A buffer a
+ * method BUILT and returned is read by the caller after the machine has
+ * stopped — AmlLinkRoute reads the resource template its _CRS constructed —
+ * so it cannot be freed with the activation that made it, and it must not
+ * outlive the question either. */
+static void *AmlRunAlloc(AmlRun *run, uint32_t bytes) {
+    void **grown = (void **)AmlStackRoom(run->own, &run->own_room,
+                                         run->ownn + 1, sizeof(void *));
+    if (!grown) return NULL;
+    run->own = grown;
+    void *p = kmalloc(bytes);
+    if (!p) return NULL;
+    run->own[run->ownn++] = p;
+    return p;
+}
+
+static void AmlActRelease(AmlAct *a) {
+    if (a->blk)  kfree(a->blk);
+    if (a->obj)  kfree(a->obj);
+    if (a->pend) kfree(a->pend);
+    a->blk = NULL; a->obj = NULL; a->pend = NULL;
+}
+
+static void AmlRunDone(AmlRun *run) {
+    for (uint32_t i = 0; i < run->actn; i++) AmlActRelease(&run->act[i]);
+    if (run->act) kfree(run->act);
+    for (uint32_t i = 0; i < run->ownn; i++) kfree(run->own[i]);
+    if (run->own) kfree(run->own);
+    memset(run, 0, sizeof(*run));
+}
+
+/* ===========================================================
+ * Values held by namespace objects
+ * =========================================================== */
+
 /* The value a namespace object HOLDS. A Method is not one of them: reading a
- * method means running it, and that decision belongs to the caller, never to
- * a dereference buried inside an expression. */
+ * method means running it, and that is the machine's business, not a
+ * dereference buried inside a lookup. A Field is not one either — reading it
+ * is an address-space access, which goes through AmlRegionRead and its
+ * window. */
 static bool AmlValueOfNode(aml_object_t *node, const char *what,
                             AmlValue *out) {
     memset(out, 0, sizeof(*out));
@@ -1415,7 +1853,7 @@ static bool AmlValueOfNode(aml_object_t *node, const char *what,
     switch (node->type) {
     case AML_OBJ_INTEGER:
         out->type    = AML_OBJ_INTEGER;
-        out->integer = node->v.integer;
+        out->integer = node->v.integer & AmlIntMask();
         return true;
     case AML_OBJ_STRING:
         out->type      = AML_OBJ_STRING;
@@ -1448,18 +1886,14 @@ static bool AmlValueOfNode(aml_object_t *node, const char *what,
 }
 
 /*
- * One operand, read from the stream.
- *
- * `fr` may be NULL — then Local and Arg are refused, which is what reading a
- * Package's elements outside any method should do.
- * `deref` says what a NameString means here: in an expression it means the
- * VALUE the name holds; in a _PRT entry's Source field it means the object
- * ITSELF, and dereferencing it would throw away the very thing being asked
- * for. The node is recorded in both cases.
+ * One element of a Package, or one literal, read with no method frame around
+ * it and no dereferencing: a NameString here yields the OBJECT, because that
+ * is what a _PRT entry's Source field means and dereferencing it would throw
+ * away the very thing being asked for. Nothing in here can reach hardware.
  */
 static bool AmlReadOperand(const uint8_t **p, const uint8_t *end,
-                            aml_object_t *scope, AmlFrame *fr, bool deref,
-                            const char *what, AmlValue *out) {
+                            aml_object_t *scope, const char *what,
+                            AmlValue *out) {
     if (*p >= end) {
         kprintf("[AML] %s: an operand was expected and the body ended\n", what);
         return false;
@@ -1477,7 +1911,7 @@ static bool AmlReadOperand(const uint8_t **p, const uint8_t *end,
             return false;
         }
         out->type = AML_OBJ_INTEGER;
-        out->integer = v;
+        out->integer = v & AmlIntMask();
         return true;
     }
     case StringPrefix: {
@@ -1518,8 +1952,7 @@ static bool AmlReadOperand(const uint8_t **p, const uint8_t *end,
         /* The same rule handle_buffer applies, and for the same reason:
          * §20.2.5.4 makes BufferSize the LOGICAL length and lets the
          * ByteList be shorter, the tail being zero. What may be read is what
-         * is there, so the end is the smaller of the two. Not a
-         * malformation and not clamped silently — this IS the encoding. */
+         * is there, so the end is the smaller of the two. */
         out->type      = AML_OBJ_BUFFER;
         out->bytes     = q;
         out->bytes_end = ((uint64_t)(body_end - q) < size) ? body_end
@@ -1571,27 +2004,6 @@ static bool AmlReadOperand(const uint8_t **p, const uint8_t *end,
         break;
     }
 
-    if (op >= Local0Op && op <= Local7Op) {
-        if (!fr) {
-            kprintf("[AML] %s: Local%u stands outside any method body\n",
-                    what, (unsigned)(op - Local0Op));
-            return false;
-        }
-        *out = fr->local[op - Local0Op];
-        (*p)++;
-        return true;
-    }
-    if (op >= Arg0Op && op <= Arg6Op) {
-        if (!fr) {
-            kprintf("[AML] %s: Arg%u stands outside any method body\n",
-                    what, (unsigned)(op - Arg0Op));
-            return false;
-        }
-        *out = fr->arg[op - Arg0Op];
-        (*p)++;
-        return true;
-    }
-
     if (aml_is_name_string_lead(op) && op != 0x00) {
         if (!scope) {
             kprintf("[AML] %s: a name stands here with no scope to resolve it "
@@ -1604,18 +2016,8 @@ static bool AmlReadOperand(const uint8_t **p, const uint8_t *end,
                     "no value is invented for it\n", what);
             return false;
         }
-        if (o->type == AML_OBJ_METHOD) {
-            if (!deref) { out->node = o; return true; }
-            kprintf("[AML] %s: taking the value of %s means RUNNING it, and "
-                    "this evaluator runs only the method it was asked for — "
-                    "refused\n", what, o->name);
-            return false;
-        }
-        if (!deref) {
-            out->node = o;
-            return true;
-        }
-        return AmlValueOfNode(o, what, out);
+        out->node = o;
+        return true;
     }
 
     kprintf("[AML] %s: opcode 0x%02x in operand position is not one this "
@@ -1623,176 +2025,737 @@ static bool AmlReadOperand(const uint8_t **p, const uint8_t *end,
     return false;
 }
 
-/* The logical operators, and only they. §20.2.5.4 gives each one's operand
- * count; anything else in operator position is refused by name. */
-static bool AmlLogicalArity(uint8_t op, uint8_t *need) {
-    switch (op) {
-    case LNotOp:     *need = 1; return true;
-    case LAndOp: case LOrOp: case LEqualOp:
-    case LGreaterOp: case LLessOp: *need = 2; return true;
-    default: return false;
+/* =====================================================================
+ * ADDRESS SPACES — the three this kernel can reach, and the eight it
+ * refuses by name.
+ * ===================================================================== */
+
+/* ACPI 6.5 §20.2.5.2, RegionSpace, and Table 5.x's names for it.
+ *
+ * ‼ THE RANGE ABOVE THE NAMED ONES IS NOT ALL THE VENDOR'S. §20.2.5.2
+ * gives 0x00..0x0A the names below, RESERVES 0x0B..0x7F to the
+ * specification — 0x0B has been PlatformRtMechanism since ACPI 6.4 — and
+ * hands only 0x80..0xFF to the OEM. Calling a reserved code "OEM-defined"
+ * sends whoever reads the refusal on a live board looking for a vendor
+ * document that does not exist, and this refusal line is the only thing
+ * that board will give them. */
+static const char *AmlSpaceName(uint8_t space) {
+    switch (space) {
+    case 0x00: return "SystemMemory";
+    case 0x01: return "SystemIO";
+    case 0x02: return "PCI_Config";
+    case 0x03: return "EmbeddedControl";
+    case 0x04: return "SMBus";
+    case 0x05: return "SystemCMOS";
+    case 0x06: return "PciBarTarget";
+    case 0x07: return "IPMI";
+    case 0x08: return "GeneralPurposeIO";
+    case 0x09: return "GenericSerialBus";
+    case 0x0A: return "PCC";
+    case 0x0B: return "PlatformRtMechanism";
+    default:   return NULL;
     }
 }
 
-static bool AmlFold(const AmlPending *n, const char *what, AmlValue *out) {
-    for (uint8_t i = 0; i < n->need; i++) {
-        if (n->got[i].type != AML_OBJ_INTEGER) {
-            kprintf("[AML] %s: logical opcode 0x%02x was handed %s, and this "
-                    "evaluator compares integers only\n",
-                    what, n->op, AmlTypeName(n->got[i].type));
+/* Where in PCI configuration space a PCI_Config region actually sits.
+ *
+ * ACPI 6.5 §5.5.2.4.2: a PCI_Config OperationRegion is addressed relative to
+ * the PCI device it is DECLARED UNDER — the nearest enclosing Device with an
+ * _ADR — on the bus and segment of the PCI root bridge above it. The region's
+ * own base is then a byte offset within that function's configuration space.
+ *
+ * ‼ _ADR IS READ AS A STATIC OBJECT HERE AND ONLY AS A STATIC OBJECT, and
+ * that is deliberate rather than lazy. Running a method to find out where to
+ * perform an address-space access could need another address-space access to
+ * find out where to run it, and there is no bottom to that. §6.1.1 leaves
+ * _ADR an object or a control method; every PCI device on every board writes
+ * the object, and a board that writes the method is told so by name instead
+ * of being followed into a circle.
+ */
+static bool AmlPciConfigSite(aml_object_t *region, const char *who,
+                              uint16_t *seg, uint8_t *bus,
+                              uint8_t *dev, uint8_t *fn);
+
+/*
+ * WHERE A REGION STARTS AND HOW LONG IT IS, when the firmware did not write
+ * either as a number. Declared here, defined below the machine it runs the
+ * firmware's own term on.
+ *
+ * ‼ AND IT RUNS THAT TERM WITH NO WINDOW, WHICH IS WHAT KEEPS THIS ONE
+ *   LEVEL DEEP INSTEAD OF UNBOUNDED. Resolving an address must not itself
+ *   become an address-space access: a base computed by reading another
+ *   region would need that region's base, and there is no bottom to that.
+ *   The evaluation gets its OWN AmlRun, whose window is false because
+ *   AmlRunInit zeroes it and only AmlEvalIn ever assigns it — so a Field
+ *   standing in a base term is refused by AmlRegionRead's first line,
+ *   BEFORE it can ask for another base. One nested evaluation, never two,
+ *   and the bound is the window rather than a depth counter.
+ */
+static bool AmlRegionArm(aml_object_t *rg, const char *who);
+
+/* One access of `width` bytes at `offset` inside a PCI function's
+ * configuration space. pci.c owns both doors — the 0xCF8/0xCFC pair and the
+ * ECAM window — and this asks it for them rather than opening either. */
+static bool AmlPciUnitRead(uint16_t seg, uint8_t bus, uint8_t dev, uint8_t fn,
+                            uint32_t offset, uint32_t width, const char *who,
+                            uint64_t *out) {
+    /* PCI Express Base Specification: a function's configuration space is
+     * 4096 bytes, of which PCI 3.0 defines the first 256. */
+    if (offset + width > 4096u) {
+        kprintf("[AML] %s: an operation region would read configuration byte "
+                "%lu of %02x:%02x.%u, and a PCI function's configuration "
+                "space ends at 4096\n",
+                who, (unsigned long)offset, bus, dev, fn);
+        return false;
+    }
+    /* ‼ WHICH DOOR, AND WHY THE SEGMENT DECIDES IT AS MUCH AS THE OFFSET.
+     * The 0xCF8/0xCFC pair addresses bus, device, function and eight bits of
+     * offset — and NOTHING ELSE. It has no segment field, so every access
+     * through it lands in segment 0 whatever segment was asked for. A board
+     * with more than one PCI segment group (the MCFG lists them; multi-root
+     * server and workstation boards ship them) declares its root bridge with
+     * _SEG != 0, and taking the legacy door there reads another segment's
+     * device and stamps the answer "the ACPI routing table". So the segment
+     * sends the access through ECAM exactly as an offset past 256 does, and
+     * a machine that published no MCFG cannot perform it at all. */
+    if (offset + width > 256u || seg != 0) {
+        if (!pci_has_ecam()) {
+            if (seg != 0)
+                kprintf("[AML] %s: an operation region reads configuration "
+                        "byte %lu of %04x:%02x:%02x.%u, and the 0xCF8/0xCFC "
+                        "door carries no segment number — this machine "
+                        "published no MCFG, so segment %u cannot be reached "
+                        "at all\n",
+                        who, (unsigned long)offset, seg, bus, dev, fn, seg);
+            else
+                kprintf("[AML] %s: an operation region reaches configuration "
+                        "byte %lu of %02x:%02x.%u, which is past the 256 "
+                        "bytes the 0xCF8/0xCFC door can address, and this "
+                        "machine published no MCFG for the ECAM window\n",
+                        who, (unsigned long)offset, bus, dev, fn);
+            return false;
+        }
+        switch (width) {
+        case 1: *out = pci_ecam_read_byte(seg, bus, dev, fn,
+                                          (uint16_t)offset); return true;
+        case 2: *out = pci_ecam_read_word(seg, bus, dev, fn,
+                                          (uint16_t)offset); return true;
+        case 4: *out = pci_ecam_read_dword(seg, bus, dev, fn,
+                                           (uint16_t)offset); return true;
+        case 8: *out = (uint64_t)pci_ecam_read_dword(seg, bus, dev, fn,
+                                                     (uint16_t)offset) |
+                       ((uint64_t)pci_ecam_read_dword(seg, bus, dev, fn,
+                                          (uint16_t)(offset + 4)) << 32);
+                return true;
+        default: break;
+        }
+    } else {
+        switch (width) {
+        case 1: *out = pci_config_read_byte(bus, dev, fn,
+                                            (uint8_t)offset); return true;
+        case 2: *out = pci_config_read_word(bus, dev, fn,
+                                            (uint8_t)offset); return true;
+        case 4: *out = pci_config_read_dword(bus, dev, fn,
+                                             (uint8_t)offset); return true;
+        case 8: *out = (uint64_t)pci_config_read_dword(bus, dev, fn,
+                                             (uint8_t)offset) |
+                       ((uint64_t)pci_config_read_dword(bus, dev, fn,
+                                             (uint8_t)(offset + 4)) << 32);
+                return true;
+        default: break;
+        }
+    }
+    kprintf("[AML] %s: a field asks for a %lu-byte configuration access, and "
+            "PCI defines byte, word and dword\n", who, (unsigned long)width);
+    return false;
+}
+
+/* One access of `width` bytes at `port`. */
+static bool AmlIoUnitRead(uint64_t port, uint32_t width, const char *who,
+                           uint64_t *out) {
+    if (port + width > 0x10000u) {
+        kprintf("[AML] %s: an operation region would read I/O port 0x%lx, and "
+                "the x86 I/O space ends at 0xFFFF\n",
+                who, (unsigned long)port);
+        return false;
+    }
+    switch (width) {
+    case 1: *out = inb((uint16_t)port); return true;
+    case 2: *out = inw((uint16_t)port); return true;
+    case 4: *out = inl((uint16_t)port); return true;
+    default: break;
+    }
+    /* Intel SDM Vol 1 §18.2: IN and OUT move a byte, a word or a doubleword.
+     * There is no eight-byte port access to perform. */
+    kprintf("[AML] %s: a field declares a %lu-byte I/O access, and the x86 "
+            "I/O instructions move one, two or four bytes\n",
+            who, (unsigned long)width);
+    return false;
+}
+
+/*
+ * The heart of it: the value of one Field, read out of the address space its
+ * OperationRegion names.
+ *
+ * ACPI 6.5 §20.2.5.2 makes a Field a bit offset and a bit width inside the
+ * region, with an access width the FieldFlags byte names, and §19.6. makes
+ * the access width the granularity the hardware must actually be touched at:
+ * a DWordAcc field is read with 32-bit accesses even when it is one bit wide,
+ * because the register behind it answers no other way.
+ */
+static bool AmlRegionRead(AmlRun *run, aml_object_t *field, const char *who,
+                           uint64_t *out) {
+    /* ‼ THE WINDOW. Nothing below this line runs outside one. */
+    if (!run->window) {
+        kprintf("[AML] %s: reading %s means touching the address space its "
+                "operation region names, and this kernel opens one only while "
+                "it is evaluating an interrupt-routing object (_PRT, _CRS, "
+                "_PRS, _STA, _PIC) — refused\n",
+                who, field->name);
+        return false;
+    }
+
+    /* ‼ AN INDEXED OR BANKED FIELD IS A WRITE BEFORE IT IS A READ, and this
+     * kernel has no way to write an address space at all. §20.2.5.2: an
+     * IndexField selects what the Data register answers by STORING into the
+     * Index register first, and a BankField by storing its BankValue into the
+     * bank selector. Both are refused here rather than half-attempted. */
+    if (field->v.field.index || field->v.field.data) {
+        kprintf("[AML] %s: %s is an IndexField — choosing what its data "
+                "register answers means WRITING its index register first, and "
+                "this evaluator writes no address space anywhere\n",
+                who, field->name);
+        return false;
+    }
+    if (field->v.field.bank) {
+        kprintf("[AML] %s: %s is a BankField — reading it means WRITING %lu "
+                "into its bank selector %s first, and this evaluator writes "
+                "no address space anywhere\n",
+                who, field->name, (unsigned long)field->v.field.bank_value,
+                field->v.field.bank->name);
+        return false;
+    }
+
+    aml_object_t *rg = field->v.field.region;
+    if (!rg || rg->type != AML_OBJ_REGION) {
+        kprintf("[AML] %s: %s is a field of something this pass never recorded "
+                "as an operation region\n", who, field->name);
+        return false;
+    }
+
+    const char *space = AmlSpaceName(rg->v.region.space);
+    if (!space) {
+        kprintf("[AML] %s: operation region %s lives in OEM-defined address "
+                "space 0x%02x, whose meaning belongs to the board vendor and "
+                "is written down nowhere this kernel can read\n",
+                who, rg->name, rg->v.region.space);
+        return false;
+    }
+    if (rg->v.region.space > 0x02) {
+        kprintf("[AML] %s: operation region %s lives in %s, which is reached "
+                "over a transport protocol of its own. This kernel reaches "
+                "SystemMemory, SystemIO and PCI_Config, which is where every "
+                "interrupt-routing register on every board so far has been — "
+                "refused by name rather than guessed at\n",
+                who, rg->name, space);
+        return false;
+    }
+
+    /* ‼ THE FIRMWARE'S OWN NUMBERS FIRST, and never a substitute for one.
+     * A region whose base or length is a term rather than a literal has it
+     * evaluated here, once, before anything is touched — and a region that
+     * cannot produce both is refused aloud below without a single access. */
+    if (!AmlRegionArm(rg, who)) return false;
+
+    /* ‼ THE REGION SAYS WHAT IT IS, ONCE. On a board where something does not
+     * add up, this is the only line that says where the firmware reached, and
+     * it is kprintf for that reason. */
+    if (!rg->v.region.said) {
+        rg->v.region.said = true;
+        kprintf("[AML] operation region %s, declared under %s: %s, base "
+                "0x%lx, length %lu byte(s) — read from for the first time now, "
+                "for %s\n",
+                rg->name, rg->parent ? rg->parent->name : "the root", space,
+                (unsigned long)rg->v.region.base,
+                (unsigned long)rg->v.region.len,
+                run->window_for ? run->window_for : who);
+    }
+
+    /* §20.2.5.2, FieldFlags bits[3:0] — AccessType. AnyAcc and BufferAcc name
+     * no width of their own; ACPICA resolves both to byte access and so does
+     * this, because a byte access is the only one that is legal at every
+     * offset in all three of these spaces. */
+    uint32_t aw;
+    switch (field->v.field.access & 0x0Fu) {
+    case 0x00: aw = 1; break;            /* AnyAcc    */
+    case 0x01: aw = 1; break;            /* ByteAcc   */
+    case 0x02: aw = 2; break;            /* WordAcc   */
+    case 0x03: aw = 4; break;            /* DWordAcc  */
+    case 0x04: aw = 8; break;            /* QWordAcc  */
+    case 0x05: aw = 1; break;            /* BufferAcc */
+    default:
+        kprintf("[AML] %s: field %s declares access type %u, which "
+                "§20.2.5.2 does not define\n",
+                who, field->name, field->v.field.access & 0x0Fu);
+        return false;
+    }
+
+    uint32_t bits = field->v.field.bit_width;
+    if (bits == 0 || bits > 64) {
+        /* §19.6.: a field wider than an integer is a Buffer, and nothing on
+         * the routing path asks for one. Said rather than truncated. */
+        kprintf("[AML] %s: field %s is %lu bits wide; this evaluator reads a "
+                "field as an integer, and an integer on this machine is %lu "
+                "bits\n", who, field->name,
+                (unsigned long)bits, (unsigned long)g_int_bits);
+        return false;
+    }
+
+    /* ‼ IN 64 BITS, BECAUSE BOTH OPERANDS ARE THE FIRMWARE'S. A field's bit
+     * offset is accumulated from PkgLengths the table wrote, each of which
+     * §20.2.4 lets reach 0x0FFFFFFF; a sum of them that wraps a 32-bit
+     * register would come out SMALL, pass the length check below, and send
+     * the access somewhere else entirely. `last` is the single bound between
+     * this evaluator and the bus, so it is computed where it cannot wrap. */
+    uint64_t awb   = (uint64_t)aw * 8u;
+    uint64_t first = ((uint64_t)field->v.field.bit_offset / awb) * aw;
+    uint64_t last  = (((uint64_t)field->v.field.bit_offset + bits + awb - 1u)
+                      / awb) * aw;
+
+    /* The region's own length is the bound, and it is the FIRMWARE's number,
+     * not one written here. A region whose length this pass could not read
+     * bounds nothing, and a field read against no bound is a read at an
+     * address nobody stated. */
+    if (rg->v.region.len == 0) {
+        kprintf("[AML] %s: operation region %s was declared with a length of "
+                "zero, so nothing bounds a read inside it — refused\n",
+                who, rg->name);
+        return false;
+    }
+    if (last > rg->v.region.len) {
+        kprintf("[AML] %s: field %s ends at byte %lu of operation region %s, "
+                "which the firmware declared %lu byte(s) long\n",
+                who, field->name, (unsigned long)last, rg->name,
+                (unsigned long)rg->v.region.len);
+        return false;
+    }
+
+    /* PCI_Config resolves to a function once, before any access. Its offsets
+     * are checked here as 64-bit quantities, because the per-access check
+     * below sees them already narrowed and a base past four kilobytes would
+     * wrap into a legal-looking one. */
+    uint16_t seg = 0; uint8_t bus = 0, dev = 0, fn = 0;
+    if (rg->v.region.space == 0x02) {
+        if (rg->v.region.base + last > 4096u) {
+            kprintf("[AML] %s: operation region %s puts configuration byte "
+                    "%lu inside a PCI function, whose configuration space "
+                    "PCI Express makes 4096 bytes long\n",
+                    who, rg->name,
+                    (unsigned long)(rg->v.region.base + last));
+            return false;
+        }
+        if (!AmlPciConfigSite(rg, who, &seg, &bus, &dev, &fn)) return false;
+    }
+
+    /* SystemMemory is MAPPED FOR THE LENGTH OF THIS READ AND UNMAPPED BEFORE
+     * THIS FUNCTION RETURNS — on every path, including every refusal below,
+     * because there is exactly one return point past this line. Read-only: a
+     * page this kernel cannot write is a page no later defect can write
+     * either, and the mapping is uncacheable because vmm_map_mmio makes every
+     * mapping it hands out uncacheable. */
+    volatile uint8_t *va = NULL;
+    size_t            va_len = 0;
+    if (rg->v.region.space == 0x00) {
+        va_len = (size_t)(last - first);
+        va = (volatile uint8_t *)vmm_map_mmio(
+                 (uintptr_t)(rg->v.region.base + first), va_len,
+                 VMM_FLAGS_KERNEL_RO);
+        if (!va) {
+            kprintf("[AML] %s: operation region %s asks for system memory at "
+                    "0x%lx, and the mapper would not hand out a read-only "
+                    "window onto it\n",
+                    who, rg->name,
+                    (unsigned long)(rg->v.region.base + first));
             return false;
         }
     }
-    uint64_t a = n->got[0].integer;
-    uint64_t b = (n->need == 2) ? n->got[1].integer : 0;
-    bool r;
-    switch (n->op) {
-    case LNotOp:     r = (a == 0);            break;
-    case LAndOp:     r = (a != 0 && b != 0);  break;
-    case LOrOp:      r = (a != 0 || b != 0);  break;
-    case LEqualOp:   r = (a == b);            break;
-    case LGreaterOp: r = (a >  b);            break;
-    case LLessOp:    r = (a <  b);            break;
-    default:         return false;
+
+    bool     ok    = true;
+    uint64_t value = 0;
+    uint32_t done  = 0;
+    uint32_t lo    = (uint32_t)(field->v.field.bit_offset % awb);
+
+    for (uint64_t off = first; done < bits && ok; off += aw) {
+        uint64_t unit = 0;
+        switch (rg->v.region.space) {
+        case 0x00:
+            switch (aw) {
+            case 1: unit = va[(size_t)(off - first)]; break;
+            case 2: unit = *(volatile uint16_t *)(va + (size_t)(off - first));
+                    break;
+            case 4: unit = *(volatile uint32_t *)(va + (size_t)(off - first));
+                    break;
+            default: unit = *(volatile uint64_t *)(va + (size_t)(off - first));
+                    break;
+            }
+            break;
+        case 0x01:
+            ok = AmlIoUnitRead(rg->v.region.base + off, aw, who, &unit);
+            break;
+        default:
+            ok = AmlPciUnitRead(seg, bus, dev, fn,
+                                (uint32_t)(rg->v.region.base + off), aw,
+                                who, &unit);
+            break;
+        }
+        if (!ok) break;
+
+        uint32_t take = (uint32_t)awb - lo;
+        if (take > bits - done) take = bits - done;
+        uint64_t mask = (take == 64) ? ~0ULL : ((1ULL << take) - 1ULL);
+        value |= ((unit >> lo) & mask) << done;
+        done  += take;
+        lo     = 0;
     }
-    memset(out, 0, sizeof(*out));
-    out->type = AML_OBJ_INTEGER;
-    /* §20.2.5.4: a logical operator yields Ones for true, Zero for false. */
-    out->integer = r ? ~0ULL : 0ULL;
+
+    if (va) vmm_unmap_mmio((volatile void *)va, va_len);
+    if (!ok) return false;
+    *out = value & AmlIntMask();
+    return true;
+}
+
+/* =====================================================================
+ * The machine
+ * ===================================================================== */
+
+static AmlLocalObj *AmlLocalFind(AmlAct *a, const char seg[4]) {
+    for (uint32_t i = 0; i < a->objn; i++) {
+        AmlLocalObj *o = &a->obj[i];
+        if (o->name[0] == seg[0] && o->name[1] == seg[1] &&
+            o->name[2] == seg[2] && o->name[3] == seg[3]) return o;
+    }
+    return NULL;
+}
+
+/* A NameString that is one bare NameSeg and nothing else — the only form a
+ * method's own object can be named by, since §5.3's search rules are what
+ * find it. */
+static bool AmlBareSeg(const uint8_t *p, const uint8_t *end, char seg[4]) {
+    if ((size_t)(end - p) < 4) return false;
+    if (!aml_is_lead_name_char(p[0])) return false;
+    seg[0] = (char)p[0]; seg[1] = (char)p[1];
+    seg[2] = (char)p[2]; seg[3] = (char)p[3];
+    return true;
+}
+
+/* Bits out of, and into, a buffer a method built for itself. Never the AML
+ * table: the source of a CreateXField must be a method-local object, and a
+ * method-local buffer is this run's own copy. */
+static bool AmlBufFieldRead(AmlAct *a, AmlLocalObj *f, uint64_t *out) {
+    AmlLocalObj *b = &a->obj[f->over];
+    if (!b->buf || f->bit_width == 0 || f->bit_width > 64) return false;
+    if ((uint64_t)f->bit_offset + f->bit_width > (uint64_t)b->buf_len * 8u)
+        return false;
+    uint64_t v = 0;
+    for (uint32_t i = 0; i < f->bit_width; i++) {
+        uint32_t bit = f->bit_offset + i;
+        if (b->buf[bit >> 3] & (uint8_t)(1u << (bit & 7u)))
+            v |= (1ULL << i);
+    }
+    *out = v;
+    return true;
+}
+
+static bool AmlBufFieldWrite(AmlAct *a, AmlLocalObj *f, uint64_t v) {
+    AmlLocalObj *b = &a->obj[f->over];
+    if (!b->buf || f->bit_width == 0 || f->bit_width > 64) return false;
+    if ((uint64_t)f->bit_offset + f->bit_width > (uint64_t)b->buf_len * 8u)
+        return false;
+    for (uint32_t i = 0; i < f->bit_width; i++) {
+        uint32_t bit = f->bit_offset + i;
+        uint8_t  m   = (uint8_t)(1u << (bit & 7u));
+        if (v & (1ULL << i)) b->buf[bit >> 3] |= m;
+        else                 b->buf[bit >> 3] = (uint8_t)(b->buf[bit >> 3] & ~m);
+    }
     return true;
 }
 
 /*
- * One TermArg, folded with an explicit stack. AML is prefix notation, so the
- * operators arrive before their operands: each one is pushed with the number
- * of operands it needs, each finished value is handed to the top of the
- * stack, and a node whose operands are all in folds into a value of its own.
- * The C stack never descends, whatever the firmware nests.
+ * How many operands an operator takes, and how many Targets follow them.
+ * ACPI 6.5 §20.2.5.4. An opcode that is not here is not evaluated, and the
+ * refusal names it — this list IS the grammar, and widening it is a decision
+ * somebody makes on purpose.
  */
-static bool AmlEvalTermArg(const uint8_t **p, const uint8_t *end,
-                            AmlFrame *fr, AmlValue *out) {
-    AmlPending *st = NULL;
-    uint32_t    room = 0, n = 0;
-    AmlValue    v;
-    bool        have = false, ok = false;
-
-    memset(&v, 0, sizeof(v));
-    for (;;) {
-        if (!have) {
-            if (*p >= end) {
-                kprintf("[AML] %s: a term ends where an operand was "
-                        "expected\n", fr->what);
-                break;
-            }
-            uint8_t op = **p;
-            uint8_t need = 0;
-            if (AmlLogicalArity(op, &need)) {
-                AmlPending *grown = AmlStackRoom(st, &room, n + 1, sizeof(*st));
-                if (!grown) {
-                    kprintf("[AML] %s: the heap has no room to hold this "
-                            "expression's operators — the term is refused, "
-                            "not guessed\n", fr->what);
-                    break;
-                }
-                st = grown;
-                st[n].op   = op;
-                st[n].need = need;
-                st[n].have = 0;
-                n++;
-                (*p)++;
-                continue;
-            }
-            if (!AmlReadOperand(p, end, fr->scope, fr, true, fr->what, &v))
-                break;
-            have = true;
-        }
-        if (n == 0) { ok = true; break; }
-
-        AmlPending *top = &st[n - 1];
-        top->got[top->have++] = v;
-        have = false;
-        if (top->have == top->need) {
-            if (!AmlFold(top, fr->what, &v)) break;
-            n--;
-            have = true;
-        }
+static bool AmlOperatorShape(uint8_t op, uint8_t *nargs, uint8_t *ntargets) {
+    switch (op) {
+    case StoreOp:        *nargs = 1; *ntargets = 1; return true;
+    case AddOp: case SubtractOp: case MultiplyOp: case ModOp:
+    case AndOp: case NandOp: case OrOp: case NorOp: case XorOp:
+    case ShiftLeftOp: case ShiftRightOp:
+                         *nargs = 2; *ntargets = 1; return true;
+    case DivideOp:       *nargs = 2; *ntargets = 2; return true;
+    case NotOp: case FindSetLeftBitOp: case FindSetRightBitOp:
+                         *nargs = 1; *ntargets = 1; return true;
+    case LAndOp: case LOrOp: case LEqualOp:
+    case LGreaterOp: case LLessOp:
+                         *nargs = 2; *ntargets = 0; return true;
+    case LNotOp:         *nargs = 1; *ntargets = 0; return true;
+    default:             return false;
     }
-
-    if (st) kfree(st);
-    if (ok) *out = v;
-    return ok;
 }
 
-static bool AmlTruth(const AmlValue *v, const char *what, bool *out) {
-    if (v->type != AML_OBJ_INTEGER) {
-        kprintf("[AML] %s: an If was handed %s to decide on, and only an "
-                "integer decides anything here\n", what, AmlTypeName(v->type));
+/* The sub-opcodes under 0x5B this evaluator declines, by the name the ASL
+ * writer used. On a live board this is the line an operator photographs, so
+ * "0x5B 0x23" is worth a good deal less than "Acquire". */
+static const char *AmlExtOpName(uint8_t sub) {
+    switch (sub) {
+    case ExtMutexOp:       return "Mutex";
+    case ExtEventOp:       return "Event";
+    case ExtCondRefOfOp:   return "CondRefOf";
+    case ExtCreateFieldOp: return "CreateField";
+    case ExtLoadTableOp:   return "LoadTable";
+    case ExtLoadOp:        return "Load";
+    case ExtStallOp:       return "Stall";
+    case ExtSleepOp:       return "Sleep";
+    case ExtAcquireOp:     return "Acquire";
+    case ExtSignalOp:      return "Signal";
+    case ExtWaitOp:        return "Wait";
+    case ExtResetOp:       return "Reset";
+    case ExtReleaseOp:     return "Release";
+    case ExtFromBCDOp:     return "FromBCD";
+    case ExtToBCDOp:       return "ToBCD";
+    case ExtUnloadOp:      return "Unload";
+    case ExtRevisionOp:    return "Revision";
+    case ExtDebugOp:       return "Debug";
+    case ExtFatalOp:       return "Fatal";
+    case ExtTimerOp:       return "Timer";
+    case ExtOpRegionOp:    return "OperationRegion";
+    case ExtFieldOp:       return "Field";
+    case ExtIndexFieldOp:  return "IndexField";
+    case ExtBankFieldOp:   return "BankField";
+    case ExtDeviceOp:      return "Device";
+    case ExtDataRegionOp:  return "DataTableRegion";
+    default:               return NULL;
+    }
+}
+
+static const char *AmlOpcodeName(uint8_t op) {
+    switch (op) {
+    case WhileOp:        return "a While loop";
+    case BreakOp:        return "Break";
+    case ContinueOp:     return "Continue";
+    case BreakPointOp:   return "BreakPoint";
+    case ConcatOp:       return "Concatenate";
+    case IndexOp:        return "Index";
+    case DerefOfOp:      return "DerefOf";
+    case RefOfOp:        return "RefOf";
+    case SizeOfOp:       return "SizeOf";
+    case ObjectTypeOp:   return "ObjectType";
+    case IncrementOp:    return "Increment";
+    case DecrementOp:    return "Decrement";
+    /* Single-byte opcodes, not the extended ones of the same value —
+     * NotifyOp is 0x86 and 0x5B 0x86 is IndexField, which are two different
+     * things and were one bug's worth of confusion apart. */
+    case 0x86:           return "Notify";
+    case 0x84:           return "ConcatenateResTemplate";
+    case 0x89:           return "Match";
+    case 0x96:           return "ToBuffer";
+    case 0x98:           return "ToHexString";
+    case 0x99:           return "ToInteger";
+    case 0x9C:           return "ToString";
+    case 0x9D:           return "CopyObject";
+    case 0x9E:           return "Mid";
+    default:             return NULL;
+    }
+}
+
+/* ===========================================================
+ * Operands, inside a running method
+ * =========================================================== */
+
+static bool AmlReadOperandIn(AmlRun *run, AmlAct *a, const uint8_t **p,
+                              const uint8_t *end, AmlValue *out) {
+    if (*p >= end) {
+        kprintf("[AML] %s: an operand was expected and the body ended\n",
+                a->what);
         return false;
     }
-    *out = (v->integer != 0);
-    return true;
+    uint8_t op = **p;
+
+    if (op >= Local0Op && op <= Local7Op) {
+        *out = a->local[op - Local0Op];
+        (*p)++;
+        return true;
+    }
+    if (op >= Arg0Op && op <= Arg6Op) {
+        *out = a->arg[op - Arg0Op];
+        (*p)++;
+        return true;
+    }
+
+    /* A name. The method's own objects first — §20.2.5.2 puts them under the
+     * running method, and §5.3's search rules find them before anything an
+     * enclosing scope declares. */
+    char seg[4];
+    if (AmlBareSeg(*p, end, seg)) {
+        AmlLocalObj *lo = AmlLocalFind(a, seg);
+        if (lo) {
+            (*p) += 4;
+            if (lo->is_field) {
+                uint64_t v = 0;
+                if (!AmlBufFieldRead(a, lo, &v)) {
+                    kprintf("[AML] %s: buffer field %c%c%c%c does not fit "
+                            "inside the buffer it was cut from\n", a->what,
+                            seg[0], seg[1], seg[2], seg[3]);
+                    return false;
+                }
+                memset(out, 0, sizeof(*out));
+                out->type    = AML_OBJ_INTEGER;
+                out->integer = v & AmlIntMask();
+                return true;
+            }
+            *out = lo->value;
+            return true;
+        }
+    }
+
+    if (aml_is_name_string_lead(op) && op != 0x00) {
+        aml_object_t *o = resolve_name(p, end, a->method, false, NULL);
+        if (!o) {
+            kprintf("[AML] %s: a name in this term is not in the namespace — "
+                    "no value is invented for it\n", a->what);
+            return false;
+        }
+        if (o->type == AML_OBJ_FIELD) {
+            uint64_t v = 0;
+            if (!AmlRegionRead(run, o, a->what, &v)) return false;
+            memset(out, 0, sizeof(*out));
+            out->type    = AML_OBJ_INTEGER;
+            out->integer = v;
+            out->node    = o;
+            return true;
+        }
+        if (o->type == AML_OBJ_METHOD) {
+            /* Reached only when the caller did not take the call path, which
+             * it always does; said rather than silently valued. */
+            kprintf("[AML] %s: %s is a method and stands where a value was "
+                    "expected\n", a->what, o->name);
+            return false;
+        }
+        return AmlValueOfNode(o, a->what, out);
+    }
+
+    if (op == ExtOpPrefix) {
+        uint8_t     sub = ((size_t)(end - *p) >= 2) ? (*p)[1] : 0;
+        const char *nm  = AmlExtOpName(sub);
+        kprintf("[AML] %s: %s stands where a value was expected, and this "
+                "evaluator does not evaluate it\n",
+                a->what, nm ? nm : "an extended opcode under 0x5B");
+        return false;
+    }
+
+    /* Everything else is a literal, and AmlReadOperand reads literals. */
+    return AmlReadOperand(p, end, a->method, a->what, out);
 }
 
-/* Store's Target — §20.2.5.4. A local, an argument, the Debug object (which
- * discards, and touches nothing), or a namespace Name holding an integer. A
- * store into a Field or an OperationRegion is where AML reaches hardware, and
- * that is the boundary this evaluator does not cross. */
-static bool AmlStoreTo(const uint8_t **p, const uint8_t *end, AmlFrame *fr,
-                        const AmlValue *v) {
+/* ===========================================================
+ * Store targets
+ * =========================================================== */
+
+/*
+ * ‼ THE PLACES A Store MAY LAND, AND THE ONE IT MAY NEVER.
+ * A local, an argument, the Debug object (which discards and touches
+ * nothing), an object the running method declared for itself, or a namespace
+ * Name holding an integer. A Field or an OperationRegion is where AML reaches
+ * hardware, and this refusal has NO window and no exception: it is the same
+ * refusal whether or not a routing object is being evaluated, because there
+ * is no code in this file that could carry out the write even if it were
+ * allowed.
+ */
+static bool AmlStoreInto(AmlAct *a, const uint8_t **p, const uint8_t *end,
+                          const AmlValue *v) {
     if (*p >= end) {
-        kprintf("[AML] %s: a Store names no target\n", fr->what);
+        kprintf("[AML] %s: a Store names no target\n", a->what);
         return false;
     }
     uint8_t t = **p;
 
+    if (t == 0x00) { (*p)++; return true; }              /* NullName */
     if (t >= Local0Op && t <= Local7Op) {
         (*p)++;
-        fr->local[t - Local0Op] = *v;
+        a->local[t - Local0Op] = *v;
         return true;
     }
     if (t >= Arg0Op && t <= Arg6Op) {
         (*p)++;
-        fr->arg[t - Arg0Op] = *v;
+        a->arg[t - Arg0Op] = *v;
         return true;
     }
-    if (t == 0x00) { (*p)++; return true; }              /* NullName */
     if (t == ExtOpPrefix) {
         if ((size_t)(end - *p) >= 2 && (*p)[1] == ExtDebugOp) {
             *p += 2;
             return true;                                 /* Debug: discarded */
         }
         kprintf("[AML] %s: a Store names an extended target this evaluator "
-                "does not write\n", fr->what);
-        return false;
-    }
-    if (!aml_is_name_string_lead(t)) {
-        kprintf("[AML] %s: opcode 0x%02x in target position is not a name\n",
-                fr->what, t);
+                "does not write\n", a->what);
         return false;
     }
 
-    aml_object_t *o = resolve_name(p, end, fr->scope, false, NULL);
+    char seg[4];
+    if (AmlBareSeg(*p, end, seg)) {
+        AmlLocalObj *lo = AmlLocalFind(a, seg);
+        if (lo) {
+            (*p) += 4;
+            if (lo->is_field) {
+                if (v->type != AML_OBJ_INTEGER) {
+                    kprintf("[AML] %s: stores %s into buffer field %c%c%c%c, "
+                            "and only an integer store is written here\n",
+                            a->what, AmlTypeName(v->type),
+                            seg[0], seg[1], seg[2], seg[3]);
+                    return false;
+                }
+                if (!AmlBufFieldWrite(a, lo, v->integer)) {
+                    kprintf("[AML] %s: buffer field %c%c%c%c does not fit "
+                            "inside the buffer it was cut from\n", a->what,
+                            seg[0], seg[1], seg[2], seg[3]);
+                    return false;
+                }
+                return true;
+            }
+            lo->value = *v;
+            return true;
+        }
+    }
+
+    if (!aml_is_name_string_lead(t)) {
+        kprintf("[AML] %s: opcode 0x%02x in target position is not a name\n",
+                a->what, t);
+        return false;
+    }
+
+    aml_object_t *o = resolve_name(p, end, a->method, false, NULL);
     if (!o) {
         kprintf("[AML] %s: a Store names something this namespace does not "
-                "hold\n", fr->what);
+                "hold\n", a->what);
         return false;
     }
     if (o->type == AML_OBJ_FIELD || o->type == AML_OBJ_REGION) {
-        kprintf("[AML] %s: stores into %s, which is %s — this evaluator does "
-                "not touch hardware, so the method is abandoned here rather "
-                "than half-run\n", fr->what, o->name, AmlTypeName(o->type));
+        kprintf("[AML] %s: stores into %s, which is %s — this kernel reads "
+                "address spaces and writes none, so the method is abandoned "
+                "here rather than half-run\n",
+                a->what, o->name, AmlTypeName(o->type));
         return false;
     }
     if (o->type != AML_OBJ_INTEGER && o->type != AML_OBJ_NAME &&
         o->type != AML_OBJ_UNINIT) {
         kprintf("[AML] %s: stores into %s, which is %s — overwriting it is a "
                 "conversion this evaluator does not perform\n",
-                fr->what, o->name, AmlTypeName(o->type));
+                a->what, o->name, AmlTypeName(o->type));
         return false;
     }
     if (v->type != AML_OBJ_INTEGER) {
         kprintf("[AML] %s: stores %s into %s, and only an integer store is "
-                "written here\n", fr->what, AmlTypeName(v->type), o->name);
+                "written here\n", a->what, AmlTypeName(v->type), o->name);
         return false;
     }
     o->type      = AML_OBJ_INTEGER;
@@ -1800,139 +2763,125 @@ static bool AmlStoreTo(const uint8_t **p, const uint8_t *end, AmlFrame *fr,
     return true;
 }
 
-/*
- * Walk one method body. No C recursion: the block stack below holds every
- * If or Else body that was entered, and it grows on the heap with the nesting
- * the firmware wrote.
- *
- * `*returned` distinguishes "ran to its end" from "returned a value" — a
- * method that falls off its end has produced nothing, and saying it produced
- * zero is exactly the class of lie this file refuses to tell.
- */
-static bool AmlRunBody(const uint8_t *body, uint32_t len, AmlFrame *fr,
-                        AmlValue *result, bool *returned) {
-    AmlBlock *blk  = NULL;
-    uint32_t  room = 0, depth = 0;
-    bool      ok   = true;
+/* ===========================================================
+ * Folding one operator
+ * =========================================================== */
 
-    *returned = false;
-    blk = AmlStackRoom(blk, &room, 1, sizeof(*blk));
-    if (!blk) {
-        kprintf("[AML] %s: the heap has no room to walk this method's body\n",
-                fr->what);
-        return false;
-    }
-    blk[0].p   = body;
-    blk[0].end = body + len;
-    depth      = 1;
-
-    while (depth > 0) {
-        AmlBlock *b = &blk[depth - 1];
-        if (b->p >= b->end) { depth--; continue; }
-        uint8_t op = *b->p;
-
-        if (op == NoopOp) { b->p++; continue; }
-
-        if (op == ReturnOp) {
-            b->p++;
-            AmlValue v;
-            if (!AmlEvalTermArg(&b->p, b->end, fr, &v)) { ok = false; break; }
-            *result   = v;
-            *returned = true;
-            break;
-        }
-
-        if (op == StoreOp) {
-            b->p++;
-            AmlValue v;
-            if (!AmlEvalTermArg(&b->p, b->end, fr, &v)) { ok = false; break; }
-            if (!AmlStoreTo(&b->p, b->end, fr, &v))     { ok = false; break; }
-            continue;
-        }
-
-        if (op == IfOp) {
-            /* DefIfElse := IfOp PkgLength Predicate TermList DefElse — the
-             * predicate is INSIDE the package, and the Else, when there is
-             * one, follows the package. §20.2.5.3. */
-            const uint8_t *q = b->p + 1;
-            uint32_t cb = 0;
-            uint32_t pklen = decode_pkglen(&q, b->end, &cb);
-            if (!cb || pklen < cb) {
-                kprintf("[AML] %s: an If has a malformed package length\n",
-                        fr->what);
-                ok = false; break;
-            }
-            const uint8_t *if_end = q + pklen;
-            const uint8_t *pred   = q + cb;
-            if (if_end > b->end) {
-                kprintf("[AML] %s: an If runs past the end of its block\n",
-                        fr->what);
-                ok = false; break;
-            }
-            const uint8_t *pp = pred;
-            AmlValue pv;
-            if (!AmlEvalTermArg(&pp, if_end, fr, &pv)) { ok = false; break; }
-            bool truth = false;
-            if (!AmlTruth(&pv, fr->what, &truth))      { ok = false; break; }
-
-            const uint8_t *take_start = truth ? pp : NULL;
-            const uint8_t *take_end   = truth ? if_end : NULL;
-            const uint8_t *after      = if_end;
-            if (if_end < b->end && *if_end == ElseOp) {
-                const uint8_t *e = if_end + 1;
-                uint32_t ecb = 0;
-                uint32_t epk = decode_pkglen(&e, b->end, &ecb);
-                if (!ecb || epk < ecb) {
-                    kprintf("[AML] %s: an Else has a malformed package "
-                            "length\n", fr->what);
-                    ok = false; break;
-                }
-                const uint8_t *e_end = e + epk;
-                if (e_end > b->end) {
-                    kprintf("[AML] %s: an Else runs past the end of its "
-                            "block\n", fr->what);
-                    ok = false; break;
-                }
-                if (!truth) { take_start = e + ecb; take_end = e_end; }
-                after = e_end;
-            }
-
-            /* Before the stack may move under us. */
-            b->p = after;
-            if (take_start) {
-                AmlBlock *grown = AmlStackRoom(blk, &room, depth + 1,
-                                               sizeof(*blk));
-                if (!grown) {
-                    kprintf("[AML] %s: the heap has no room for this method's "
-                            "nesting — the method is abandoned, not "
-                            "guessed\n", fr->what);
-                    ok = false; break;
-                }
-                blk = grown;
-                blk[depth].p   = take_start;
-                blk[depth].end = take_end;
-                depth++;
-            }
-            continue;
-        }
-
-        kprintf("[AML] %s: opcode 0x%02x at byte %u is not one this evaluator "
-                "runs%s — the method is abandoned rather than half-run\n",
-                fr->what, op, (unsigned)(b->p - body),
-                op == WhileOp ? " (a While loop)" : "");
-        ok = false;
-        break;
-    }
-
-    kfree(blk);
-    return ok;
+static uint64_t AmlShiftLeft(uint64_t a, uint64_t n) {
+    if (n >= g_int_bits) return 0;
+    return (a << n) & AmlIntMask();
 }
 
-/* Run one method. `out` may be NULL when the caller wants no value — \_PIC
- * returns nothing and must not be judged for it. */
-static bool AmlRunMethod(aml_object_t *m, const AmlValue *args, uint8_t argc,
-                          AmlValue *out) {
-    uint8_t want = (uint8_t)(m->v.method.flags & 0x7);
+static uint64_t AmlShiftRight(uint64_t a, uint64_t n) {
+    if (n >= g_int_bits) return 0;
+    return (a & AmlIntMask()) >> n;
+}
+
+/*
+ * `tv` receives the values the operator's Targets take, in the order the
+ * Targets appear in the stream — §20.2.5.4 puts Divide's Remainder before its
+ * Quotient, which is the one place the order is not "the result".
+ */
+static bool AmlFold(AmlAct *a, const AmlPending *n, AmlValue *out,
+                     AmlValue tv[2], uint8_t *ntv) {
+    *ntv = 0;
+    memset(out, 0, sizeof(*out));
+
+    if (n->op == StoreOp) {
+        *out   = n->got[0];
+        tv[0]  = n->got[0];
+        *ntv   = 1;
+        return true;
+    }
+
+    for (uint8_t i = 0; i < n->need; i++) {
+        if (n->got[i].type != AML_OBJ_INTEGER) {
+            kprintf("[AML] %s: opcode 0x%02x was handed %s, and this evaluator "
+                    "computes with integers only\n",
+                    a->what, n->op, AmlTypeName(n->got[i].type));
+            return false;
+        }
+    }
+    uint64_t x = n->got[0].integer & AmlIntMask();
+    uint64_t y = (n->need == 2) ? (n->got[1].integer & AmlIntMask()) : 0;
+    uint64_t r;
+    bool     logical = false;
+
+    switch (n->op) {
+    case AddOp:       r = x + y;                          break;
+    case SubtractOp:  r = x - y;                          break;
+    case MultiplyOp:  r = x * y;                          break;
+    case ShiftLeftOp: r = AmlShiftLeft(x, y);             break;
+    case ShiftRightOp:r = AmlShiftRight(x, y);            break;
+    case AndOp:       r = x & y;                          break;
+    case NandOp:      r = ~(x & y);                       break;
+    case OrOp:        r = x | y;                          break;
+    case NorOp:       r = ~(x | y);                       break;
+    case XorOp:       r = x ^ y;                          break;
+    case NotOp:       r = ~x;                             break;
+    case ModOp:
+    case DivideOp:
+        if (y == 0) {
+            /* §20.2.5.4 makes a zero divisor a fatal error for the method.
+             * Answering with anything at all here would be the fabricated
+             * number this file exists not to produce. */
+            kprintf("[AML] %s: a division by zero — the method is abandoned "
+                    "rather than answered\n", a->what);
+            return false;
+        }
+        r = (n->op == ModOp) ? (x % y) : (x / y);
+        break;
+    case FindSetLeftBitOp:
+        r = 0;
+        for (uint32_t i = 0; i < g_int_bits; i++)
+            if (x & (1ULL << i)) r = i + 1u;
+        break;
+    case FindSetRightBitOp:
+        r = 0;
+        for (uint32_t i = 0; i < g_int_bits; i++)
+            if (x & (1ULL << i)) { r = i + 1u; break; }
+        break;
+    case LNotOp:     r = (x == 0);            logical = true; break;
+    case LAndOp:     r = (x != 0 && y != 0);  logical = true; break;
+    case LOrOp:      r = (x != 0 || y != 0);  logical = true; break;
+    case LEqualOp:   r = (x == y);            logical = true; break;
+    case LGreaterOp: r = (x >  y);            logical = true; break;
+    case LLessOp:    r = (x <  y);            logical = true; break;
+    default:
+        kprintf("[AML] %s: opcode 0x%02x reached the folder and has no rule "
+                "there\n", a->what, n->op);
+        return false;
+    }
+
+    out->type = AML_OBJ_INTEGER;
+    if (logical) {
+        /* §20.2.5.4: a logical operator yields Ones for true, Zero for
+         * false — Ones being as wide as an Integer is on this machine. */
+        out->integer = r ? AmlIntMask() : 0ULL;
+        return true;
+    }
+    out->integer = r & AmlIntMask();
+
+    if (n->op == DivideOp) {
+        memset(&tv[0], 0, sizeof(tv[0]));
+        memset(&tv[1], 0, sizeof(tv[1]));
+        tv[0].type = AML_OBJ_INTEGER; tv[0].integer = (x % y) & AmlIntMask();
+        tv[1] = *out;
+        *ntv = 2;
+    } else {
+        tv[0] = *out;
+        *ntv  = 1;
+    }
+    return true;
+}
+
+/* ===========================================================
+ * Activations
+ * =========================================================== */
+
+static bool AmlActPush(AmlRun *run, aml_object_t *m, const AmlValue *args,
+                        uint8_t argc) {
+    uint8_t want = (uint8_t)(m->v.method.flags & 0x7u);
     if (want != argc) {
         kprintf("[AML] %s takes %u arguments and was offered %u — not run\n",
                 m->name, want, argc);
@@ -1943,35 +2892,696 @@ static bool AmlRunMethod(aml_object_t *m, const AmlValue *args, uint8_t argc,
         return false;
     }
 
-    AmlFrame fr;
-    memset(&fr, 0, sizeof(fr));
-    fr.scope = m;
-    fr.what  = m->name;
-    for (uint8_t i = 0; i < argc; i++) fr.arg[i] = args[i];
-
-    AmlValue r;
-    bool returned = false;
-    memset(&r, 0, sizeof(r));
-    if (!AmlRunBody(m->v.method.aml, m->v.method.aml_len, &fr, &r, &returned))
+    AmlAct *grown = (AmlAct *)AmlStackRoom(run->act, &run->act_room,
+                                           run->actn + 1, sizeof(AmlAct));
+    if (!grown) {
+        kprintf("[AML] the heap has no room to call %s — this firmware nests "
+                "its methods deeper than this machine can hold, and the "
+                "question is abandoned rather than answered\n", m->name);
         return false;
-    if (out) {
-        if (!returned) {
-            kprintf("[AML] %s ran to its end without returning a value, and "
-                    "no value is invented for it\n", m->name);
-            return false;
-        }
-        *out = r;
     }
+    run->act = grown;
+
+    AmlAct *a = &run->act[run->actn];
+    memset(a, 0, sizeof(*a));
+    a->method = m;
+    a->what   = m->name;
+    for (uint8_t i = 0; i < argc; i++) a->arg[i] = args[i];
+
+    a->blk = (AmlBlock *)AmlStackRoom(NULL, &a->blk_room, 1, sizeof(AmlBlock));
+    if (!a->blk) {
+        kprintf("[AML] the heap has no room to walk %s's body\n", m->name);
+        return false;
+    }
+    a->blk[0].p   = m->v.method.aml;
+    a->blk[0].end = m->v.method.aml + m->v.method.aml_len;
+    a->blkn       = 1;
+
+    run->actn++;
     return true;
 }
 
-/* The value of a named object, running it first if it is a no-argument
- * method. This is how _PRT, _CRS, _BBN and _SEG are asked: every one of them
- * is a Name on some boards and a Method on others. */
-static bool AmlEvalNamed(aml_object_t *node, AmlValue *out) {
-    if (node->type == AML_OBJ_METHOD)
-        return AmlRunMethod(node, NULL, 0, out);
-    return AmlValueOfNode(node, node->name, out);
+/* Pop the top activation and hand its result to whoever asked for it. */
+static bool AmlActFinish(AmlRun *run) {
+    AmlAct  *a        = &run->act[run->actn - 1];
+    AmlValue ret      = a->ret;
+    bool     returned = a->returned;
+
+    AmlActRelease(a);
+    run->actn--;
+
+    if (run->actn == 0) {
+        run->result   = ret;
+        run->returned = returned;
+        return true;
+    }
+
+    AmlAct *c = &run->act[run->actn - 1];
+    if (c->pendn == 0 || !c->pend[c->pendn - 1].call) {
+        kprintf("[AML] %s: a method returned to a term that was not calling "
+                "one\n", c->what);
+        return false;
+    }
+    c->pendn--;
+    /* A method that returns nothing yields an object of no type; a caller
+     * that then tries to compute with it is refused BY THE FOLDER, naming
+     * what it was handed. A caller that discards it is right to. */
+    c->val      = returned ? ret : (AmlValue){ 0, 0, NULL, NULL, 0, NULL, NULL };
+    c->have_val = true;
+    return true;
+}
+
+/* ===========================================================
+ * One step of the machine
+ * =========================================================== */
+
+static bool AmlExprStep(AmlRun *run) {
+    AmlAct *a = &run->act[run->actn - 1];
+
+    if (!a->have_val) {
+        if (a->cur >= a->cur_end) {
+            kprintf("[AML] %s: a term ends where an operand was expected\n",
+                    a->what);
+            return false;
+        }
+        uint8_t op = *a->cur;
+        uint8_t nargs = 0, ntargets = 0;
+
+        if (AmlOperatorShape(op, &nargs, &ntargets)) {
+            AmlPending *grown =
+                (AmlPending *)AmlStackRoom(a->pend, &a->pend_room,
+                                           a->pendn + 1, sizeof(AmlPending));
+            if (!grown) {
+                kprintf("[AML] %s: the heap has no room to hold this "
+                        "expression's operators — the term is refused, not "
+                        "guessed\n", a->what);
+                return false;
+            }
+            a->pend = grown;
+            memset(&a->pend[a->pendn], 0, sizeof(AmlPending));
+            a->pend[a->pendn].op   = op;
+            a->pend[a->pendn].need = nargs;
+            a->pendn++;
+            a->cur++;
+            return true;
+        }
+
+        /* A name that resolves to a Method is a CALL, and the arguments
+         * follow it in the stream. This is the shape every board writes for
+         * an interrupt link, and refusing it was what kept this evaluator
+         * from reading one. */
+        char seg[4];
+        if (aml_is_name_string_lead(op) && op != 0x00 &&
+            !(AmlBareSeg(a->cur, a->cur_end, seg) && AmlLocalFind(a, seg))) {
+            const uint8_t *probe = a->cur;
+            aml_object_t  *o     = resolve_name(&probe, a->cur_end, a->method,
+                                                false, NULL);
+            if (o && o->type == AML_OBJ_METHOD) {
+                AmlPending *grown =
+                    (AmlPending *)AmlStackRoom(a->pend, &a->pend_room,
+                                               a->pendn + 1,
+                                               sizeof(AmlPending));
+                if (!grown) {
+                    kprintf("[AML] %s: the heap has no room to hold this "
+                            "expression's operators\n", a->what);
+                    return false;
+                }
+                a->pend = grown;
+                memset(&a->pend[a->pendn], 0, sizeof(AmlPending));
+                a->pend[a->pendn].call   = true;
+                a->pend[a->pendn].callee = o;
+                a->pend[a->pendn].need   = (uint8_t)(o->v.method.flags & 0x7u);
+                a->pendn++;
+                a->cur = probe;
+                if (a->pend[a->pendn - 1].need == 0)
+                    return AmlActPush(run, o, NULL, 0);
+                return true;
+            }
+        }
+
+        if (!AmlReadOperandIn(run, a, &a->cur, a->cur_end, &a->val)) {
+            const char *nm = AmlOpcodeName(op);
+            if (nm)
+                kprintf("[AML] %s: %s stands in this term, and this evaluator "
+                        "does not evaluate it — the method is abandoned rather "
+                        "than half-run\n", a->what, nm);
+            return false;
+        }
+        a->have_val = true;
+    }
+
+    if (a->pendn == 0) {
+        /* The expression is finished. What it was FOR decides what happens
+         * next, and every one of the four leaves the block cursor where the
+         * next statement begins. */
+        a->in_expr  = false;
+        a->have_val = false;
+        AmlValue v  = a->val;
+
+        switch (a->after) {
+        case AML_AFTER_RETURN:
+            a->ret      = v;
+            a->returned = true;
+            a->blkn     = 0;
+            return AmlActFinish(run);
+
+        case AML_AFTER_STORE: {
+            AmlBlock *b = &a->blk[a->blkn - 1];
+            if (!AmlStoreInto(a, &a->cur, a->cur_end, &v)) return false;
+            b->p = a->cur;
+            return true;
+        }
+
+        case AML_AFTER_DISCARD: {
+            AmlBlock *b = &a->blk[a->blkn - 1];
+            b->p = a->cur;
+            return true;
+        }
+
+        case AML_AFTER_IF: {
+            if (v.type != AML_OBJ_INTEGER) {
+                kprintf("[AML] %s: an If was handed %s to decide on, and only "
+                        "an integer decides anything here\n",
+                        a->what, AmlTypeName(v.type));
+                return false;
+            }
+            bool truth = (v.integer != 0);
+
+            AmlBlock      *b          = &a->blk[a->blkn - 1];
+            const uint8_t *if_end     = a->if_end;
+            const uint8_t *take_start = truth ? a->cur : NULL;
+            const uint8_t *take_end   = truth ? if_end : NULL;
+            const uint8_t *after      = if_end;
+
+            /* DefIfElse := IfOp PkgLength Predicate TermList DefElse — the
+             * Else, when there is one, follows the package. §20.2.5.3. */
+            if (if_end < b->end && *if_end == ElseOp) {
+                const uint8_t *e   = if_end + 1;
+                uint32_t       ecb = 0;
+                uint32_t       epk = decode_pkglen(&e, b->end, &ecb);
+                if (!ecb || epk < ecb) {
+                    kprintf("[AML] %s: an Else has a malformed package "
+                            "length\n", a->what);
+                    return false;
+                }
+                const uint8_t *e_end = e + epk;
+                if (e_end > b->end) {
+                    kprintf("[AML] %s: an Else runs past the end of its "
+                            "block\n", a->what);
+                    return false;
+                }
+                if (!truth) { take_start = e + ecb; take_end = e_end; }
+                after = e_end;
+            }
+
+            b->p = after;                    /* before the stack may move */
+            if (take_start) {
+                AmlBlock *grown =
+                    (AmlBlock *)AmlStackRoom(a->blk, &a->blk_room,
+                                             a->blkn + 1, sizeof(AmlBlock));
+                if (!grown) {
+                    kprintf("[AML] %s: the heap has no room for this method's "
+                            "nesting — the method is abandoned, not "
+                            "guessed\n", a->what);
+                    return false;
+                }
+                a->blk = grown;
+                a->blk[a->blkn].p   = take_start;
+                a->blk[a->blkn].end = take_end;
+                a->blkn++;
+            }
+            return true;
+        }
+        }
+        return false;
+    }
+
+    AmlPending *top = &a->pend[a->pendn - 1];
+    top->got[top->have++] = a->val;
+    a->have_val = false;
+    if (top->have != top->need) return true;
+
+    if (top->call) {
+        /* Everything the push needs, read BEFORE it: growing the activation
+         * array moves `a` and `top` both. */
+        aml_object_t *callee = top->callee;
+        uint8_t       argc   = top->need;
+        AmlValue      args[AML_ARG_COUNT];
+        for (uint8_t i = 0; i < argc; i++) args[i] = top->got[i];
+        return AmlActPush(run, callee, args, argc);
+    }
+
+    AmlValue folded;
+    AmlValue tv[2];
+    uint8_t  ntv = 0, nargs = 0, ntargets = 0;
+    AmlOperatorShape(top->op, &nargs, &ntargets);
+    if (!AmlFold(a, top, &folded, tv, &ntv)) return false;
+    a->pendn--;
+    for (uint8_t i = 0; i < ntargets; i++) {
+        const AmlValue *give = (i < ntv) ? &tv[i] : &folded;
+        if (!AmlStoreInto(a, &a->cur, a->cur_end, give)) return false;
+    }
+    a->val      = folded;
+    a->have_val = true;
+    return true;
+}
+
+/* Begin an expression at `from`, ending at `to`, for the reason `why`. */
+static void AmlExprBegin(AmlAct *a, const uint8_t *from, const uint8_t *to,
+                          AmlAfter why) {
+    a->in_expr  = true;
+    a->have_val = false;
+    a->cur      = from;
+    a->cur_end  = to;
+    a->after    = why;
+}
+
+/*
+ * A method's own object — `Name (PRR0, ResourceTemplate () {...})`. Its bytes
+ * are COPIED: the originals are inside the DSDT this kernel mapped, they are
+ * shared by every later reader of that table, and the very next statement of
+ * every link's _CRS writes an interrupt number into them.
+ */
+static bool AmlDeclareLocal(AmlRun *run, AmlAct *a, const char seg[4],
+                             const AmlValue *v) {
+    AmlLocalObj *grown = (AmlLocalObj *)AmlStackRoom(a->obj, &a->obj_room,
+                                                     a->objn + 1,
+                                                     sizeof(AmlLocalObj));
+    if (!grown) {
+        kprintf("[AML] %s: the heap has no room for the objects this method "
+                "declares\n", a->what);
+        return false;
+    }
+    a->obj = grown;
+    AmlLocalObj *o = &a->obj[a->objn];
+    memset(o, 0, sizeof(*o));
+    o->name[0] = seg[0]; o->name[1] = seg[1];
+    o->name[2] = seg[2]; o->name[3] = seg[3];
+    o->value   = *v;
+
+    if (v->type == AML_OBJ_BUFFER && v->bytes && v->bytes_end > v->bytes) {
+        uint32_t len = (uint32_t)(v->bytes_end - v->bytes);
+        uint8_t *copy = (uint8_t *)AmlRunAlloc(run, len);
+        if (!copy) {
+            kprintf("[AML] %s: the heap has no room for the %lu-byte buffer "
+                    "this method declares\n", a->what, (unsigned long)len);
+            return false;
+        }
+        memcpy(copy, v->bytes, len);
+        o->buf       = copy;
+        o->buf_len   = len;
+        o->value.bytes     = copy;
+        o->value.bytes_end = copy + len;
+    }
+    a->objn++;
+    return true;
+}
+
+static bool AmlStmtStep(AmlRun *run) {
+    AmlAct *a = &run->act[run->actn - 1];
+
+    if (a->blkn == 0) return AmlActFinish(run);
+    AmlBlock *b = &a->blk[a->blkn - 1];
+    if (b->p >= b->end) { a->blkn--; return true; }
+
+    uint8_t op = *b->p;
+
+    if (op == NoopOp) { b->p++; return true; }
+
+    if (op == ReturnOp) {
+        AmlExprBegin(a, b->p + 1, b->end, AML_AFTER_RETURN);
+        return true;
+    }
+
+    if (op == StoreOp) {
+        AmlExprBegin(a, b->p + 1, b->end, AML_AFTER_STORE);
+        return true;
+    }
+
+    if (op == IfOp) {
+        const uint8_t *q  = b->p + 1;
+        uint32_t       cb = 0;
+        uint32_t       pk = decode_pkglen(&q, b->end, &cb);
+        if (!cb || pk < cb) {
+            kprintf("[AML] %s: an If has a malformed package length\n",
+                    a->what);
+            return false;
+        }
+        const uint8_t *if_end = q + pk;
+        if (if_end > b->end) {
+            kprintf("[AML] %s: an If runs past the end of its block\n",
+                    a->what);
+            return false;
+        }
+        a->if_end = if_end;
+        AmlExprBegin(a, q + cb, if_end, AML_AFTER_IF);
+        return true;
+    }
+
+    if (op == NameOp) {
+        /* §20.2.5.2: DefName := NameOp NameString DataRefObject. Inside a
+         * method body it declares an object of the method's own. */
+        const uint8_t *q = b->p + 1;
+        char seg[4];
+        if (!AmlBareSeg(q, b->end, seg)) {
+            kprintf("[AML] %s: a Name inside a method body declares a path "
+                    "rather than a single name — this evaluator gives a "
+                    "method objects of its own and adds none to the "
+                    "namespace\n", a->what);
+            return false;
+        }
+        q += 4;
+        AmlValue v;
+        if (!AmlReadOperand(&q, b->end, a->method, a->what, &v)) return false;
+        if (!AmlDeclareLocal(run, a, seg, &v)) return false;
+        b->p = q;
+        return true;
+    }
+
+    if (op == CreateBitFieldOp  || op == CreateByteFieldOp ||
+        op == CreateWordFieldOp || op == CreateDWordFieldOp ||
+        op == CreateQWordFieldOp) {
+        /* §20.2.5.2: DefCreateXField := op SourceBuff Index NameString.
+         * The index is a BIT index for CreateBitField and a BYTE index for
+         * the other four. */
+        uint32_t width = (op == CreateBitFieldOp)   ? 1u  :
+                         (op == CreateByteFieldOp)  ? 8u  :
+                         (op == CreateWordFieldOp)  ? 16u :
+                         (op == CreateDWordFieldOp) ? 32u : 64u;
+        uint32_t scale = (op == CreateBitFieldOp) ? 1u : 8u;
+
+        const uint8_t *q = b->p + 1;
+        char src[4];
+        if (!AmlBareSeg(q, b->end, src)) {
+            kprintf("[AML] %s: a CreateField cuts into something that is not "
+                    "an object this method declared, and that is the only "
+                    "buffer this evaluator can hold\n", a->what);
+            return false;
+        }
+        AmlLocalObj *base = AmlLocalFind(a, src);
+        if (!base || !base->buf) {
+            kprintf("[AML] %s: a CreateField names %c%c%c%c as its buffer, and "
+                    "this method declared no buffer by that name\n",
+                    a->what, src[0], src[1], src[2], src[3]);
+            return false;
+        }
+        uint32_t base_index = (uint32_t)(base - a->obj);
+        q += 4;
+
+        uint64_t index = 0;
+        if (!read_const_integer(&q, b->end, &index)) {
+            kprintf("[AML] %s: a CreateField's index is not a constant this "
+                    "evaluator can read\n", a->what);
+            return false;
+        }
+        char name[4];
+        if (!AmlBareSeg(q, b->end, name)) {
+            kprintf("[AML] %s: a CreateField names its field with a path "
+                    "rather than a single name\n", a->what);
+            return false;
+        }
+        q += 4;
+
+        AmlValue empty;
+        memset(&empty, 0, sizeof(empty));
+        if (!AmlDeclareLocal(run, a, name, &empty)) return false;
+        AmlLocalObj *f = &a->obj[a->objn - 1];
+        f->is_field   = true;
+        f->over       = base_index;
+        f->bit_offset = (uint32_t)(index * scale);
+        f->bit_width  = width;
+        b->p = q;
+        return true;
+    }
+
+    if (op == ElseOp) {
+        kprintf("[AML] %s: an Else stands where no If precedes it\n", a->what);
+        return false;
+    }
+
+    if (op == ExtOpPrefix) {
+        /* Mutexes, Events, Notify, Sleep, Stall, Fatal — every one of them is
+         * the firmware asking this kernel to DO something rather than to read
+         * something, and none of them appears in an interrupt-routing object.
+         * Named rather than stepped over, because stepping over a statement
+         * with a side effect is pretending it ran. */
+        uint8_t     sub = ((size_t)(b->end - b->p) >= 2) ? b->p[1] : 0;
+        const char *nm  = AmlExtOpName(sub);
+        if (nm)
+            kprintf("[AML] %s: %s acts on the platform rather than reading "
+                    "it, and this evaluator only reads — the method is "
+                    "abandoned rather than half-run\n", a->what, nm);
+        else
+            kprintf("[AML] %s: extended opcode 0x5B 0x%02x is not a statement "
+                    "this evaluator runs — the method is abandoned rather "
+                    "than half-run\n", a->what, sub);
+        return false;
+    }
+
+    {
+        uint8_t nargs = 0, ntargets = 0;
+        if (AmlOperatorShape(op, &nargs, &ntargets) ||
+            (aml_is_name_string_lead(op) && op != 0x00)) {
+            /* An expression standing alone: a method called for its effect,
+             * or an operator whose Target is the point of it. */
+            AmlExprBegin(a, b->p, b->end, AML_AFTER_DISCARD);
+            return true;
+        }
+    }
+
+    {
+        const char *nm = AmlOpcodeName(op);
+        if (nm)
+            kprintf("[AML] %s: %s stands at byte %lu of its body, and this "
+                    "evaluator does not run it — the method is abandoned "
+                    "rather than half-run\n", a->what, nm,
+                    (unsigned long)(b->p - a->method->v.method.aml));
+        else
+            kprintf("[AML] %s: opcode 0x%02x at byte %lu of its body is not "
+                    "one this evaluator runs — the method is abandoned rather "
+                    "than half-run\n", a->what, op,
+                    (unsigned long)(b->p - a->method->v.method.aml));
+    }
+    return false;
+}
+
+static bool AmlRunTo(AmlRun *run) {
+    while (run->actn > 0)
+        if (run->act[run->actn - 1].in_expr) {
+            if (!AmlExprStep(run)) return false;
+        } else {
+            if (!AmlStmtStep(run)) return false;
+        }
+    return true;
+}
+
+/* ===========================================================
+ * The one door into the machine
+ * =========================================================== */
+
+/*
+ * The five objects that may reach an address space, and the only place in
+ * this file where the window is opened.
+ *
+ *   _PRT  ACPI 6.5 §6.2.13   where a PCI interrupt pin goes
+ *   _CRS  §6.2.2             what a device currently holds
+ *   _PRS  §6.2.12            what it could hold
+ *   _STA  §6.3.7             whether it is there and enabled
+ *   _PIC  §5.8.1             which interrupt model OSPM runs
+ */
+static bool AmlNameOpensWindow(const char *name) {
+    static const char *const routing[] =
+        { "_PRT", "_CRS", "_PRS", "_STA", "_PIC" };
+    for (uint32_t i = 0; i < 5; i++) {
+        const char *r = routing[i];
+        if (name[0] == r[0] && name[1] == r[1] &&
+            name[2] == r[2] && name[3] == r[3]) return true;
+    }
+    return false;
+}
+
+/*
+ * The value of a named object, running it first if it is a method. This is
+ * how _PRT, _CRS, _STA, _HID, _BBN and _SEG are all asked: every one of them
+ * is a Name on some boards and a Method on others.
+ *
+ * ‼ The value handed back may point into memory this run owns — a resource
+ * template a method BUILT is the ordinary case — so it is valid until
+ * AmlRunDone, and every caller consumes it before then.
+ */
+static bool AmlEvalIn(AmlRun *run, aml_object_t *node, const AmlValue *args,
+                       uint8_t argc, AmlValue *out) {
+    /* ‼ THE ONLY ASSIGNMENT TO run->window IN THIS FILE. It is taken from the
+     * name of the object being evaluated, so no caller can open a window for
+     * something that is not a routing object, and the next evaluation on this
+     * run replaces it with its own answer. */
+    run->window = AmlNameOpensWindow(node->name);
+    run->window_for = node->name;
+
+    if (node->type != AML_OBJ_METHOD) {
+        if (argc) {
+            kprintf("[AML] %s was handed %u argument(s) and is not a method\n",
+                    node->name, argc);
+            return false;
+        }
+        return AmlValueOfNode(node, node->name, out);
+    }
+
+    run->returned = false;
+    memset(&run->result, 0, sizeof(run->result));
+    if (!AmlActPush(run, node, args, argc)) return false;
+    if (!AmlRunTo(run)) return false;
+    if (!out) return true;                  /* \_PIC returns nothing */
+    if (!run->returned) {
+        kprintf("[AML] %s ran to its end without returning a value, and no "
+                "value is invented for it\n", node->name);
+        return false;
+    }
+    *out = run->result;
+    return true;
+}
+
+/* =====================================================================
+ * WHERE A REGION IS — the second door into the machine, and the last one.
+ * ===================================================================== */
+
+/*
+ * One TermArg, evaluated to an integer with no method around it.
+ *
+ * The activation this pushes has NO BODY: `blkn` is zero, so the machine
+ * never takes a statement step in it, and the expression it begins ends by
+ * RETURNING — which pops the activation and hands the value to the run. A
+ * method the term CALLS gets an ordinary activation on top of it, so a base
+ * written `ShiftLeft (RCBA, 14)` or `GNVS (Zero)` runs exactly as it would
+ * inside a method body, driven by the same loop and with no C recursion.
+ */
+static bool AmlEvalTermArg(aml_object_t *scope, const char *what,
+                            const uint8_t *from, const uint8_t *to,
+                            uint64_t *out) {
+    /* ‼ THE RUN IS MADE HERE AND NOWHERE ELSE, WHICH IS WHAT KEEPS THE
+     * WINDOW SHUT. No caller hands one in, so no caller can hand in a run
+     * that has a window open: AmlRunInit zeroes the field and only AmlEvalIn
+     * ever assigns it. A Field standing in a region's base term is therefore
+     * refused by AmlRegionRead's first line — before it can ask for another
+     * region's base — and the nesting stops at one level by construction
+     * rather than by a depth counter. */
+    AmlRun run;
+    AmlRunInit(&run);
+
+    bool    ok = false;
+    AmlAct *grown = (AmlAct *)AmlStackRoom(run.act, &run.act_room,
+                                           run.actn + 1, sizeof(AmlAct));
+    if (!grown) {
+        kprintf("[AML] the heap has no room to evaluate %s\n", what);
+    } else {
+        run.act = grown;
+        AmlAct *a = &run.act[run.actn];
+        memset(a, 0, sizeof(*a));
+        a->method = scope ? scope : &g_root_obj;  /* where its names live */
+        a->what   = what;
+        a->blkn   = 0;                            /* one term, and no body */
+        AmlExprBegin(a, from, to, AML_AFTER_RETURN);
+        run.actn++;
+
+        if (AmlRunTo(&run)) {
+            if (run.returned && run.result.type == AML_OBJ_INTEGER) {
+                *out = run.result.integer;
+                ok   = true;
+            } else {
+                kprintf("[AML] %s: the firmware's own term for it does not "
+                        "come out as an integer\n", what);
+            }
+        }
+    }
+
+    AmlRunDone(&run);
+    return ok;
+}
+
+/*
+ * ‼ AN OPERATION REGION IS ARMED BEFORE IT IS READ, AND A REGION THAT
+ *   CANNOT BE ARMED IS NEVER READ.
+ *
+ * ACPI 6.5 §20.2.5.2 makes RegionOffset and RegionLen TermArgs. Shipping
+ * firmware uses that: `OperationRegion (RCRB, SystemMemory, \\RCBA, 0x4000)`
+ * on Intel chipsets, and an offset named rather than written on AMD's. The
+ * parse pass kept the bytes; this turns them into the board's own numbers,
+ * ONCE, the first time anything wants to read through the region — which is
+ * where ACPICA resolves them too, and for the same reason: at parse time
+ * there is nothing to evaluate them with.
+ *
+ * What it will not do is supply a number nobody stated. A base that will not
+ * resolve is a refusal with the region named, never a zero — zero is an
+ * address: physical page 0 holds the real-mode interrupt vector table, I/O
+ * port 0 is the 8237's channel-0 address register whose byte-pointer
+ * flip-flop ADVANCES when it is read, and configuration byte 0 is a Vendor
+ * ID. Any of the three would come back as an interrupt number carrying the
+ * routing table's signature.
+ */
+static bool AmlRegionArm(aml_object_t *rg, const char *who) {
+    if (rg->v.region.base_known && rg->v.region.len_known) return true;
+
+    /* §20.2.2 makes a NameSeg four characters, so these sentences have a
+     * length that is known before they are written. */
+    char what[32];
+
+    if (!rg->v.region.base_known) {
+        ksnprintf(what, sizeof(what), "the base of %s", rg->name);
+        if (!rg->v.region.base_term) {
+            kprintf("[AML] %s: operation region %s was declared with a base "
+                    "this pass could not even measure, so where it starts is "
+                    "not known and nothing is read through it — refused "
+                    "rather than read at address zero\n", who, rg->name);
+            return false;
+        }
+        uint64_t v  = 0;
+        bool     ok = AmlEvalTermArg(rg->v.region.declared_in, what,
+                                     rg->v.region.base_term,
+                                     rg->v.region.base_term_end, &v);
+        if (!ok) {
+            kprintf("[AML] %[E]%s: operation region %s does not say where it "
+                    "starts — its base is a term the firmware computes, and "
+                    "this kernel evaluates that term WITHOUT touching any "
+                    "address space, so that finding out where to read can "
+                    "never itself become a read. Nothing is read through %s "
+                    "and no address is invented for it%[D]\n",
+                    who, rg->name, rg->name);
+            return false;
+        }
+        rg->v.region.base       = v;
+        rg->v.region.base_known = true;
+        kprintf("[AML] operation region %s: the firmware computes its base "
+                "rather than writing one, and it comes out 0x%lx\n",
+                rg->name, (unsigned long)v);
+    }
+
+    if (!rg->v.region.len_known) {
+        ksnprintf(what, sizeof(what), "the length of %s", rg->name);
+        if (!rg->v.region.len_term) {
+            kprintf("[AML] %s: operation region %s was declared with a length "
+                    "this pass could not measure, so nothing bounds a read "
+                    "inside it — refused\n", who, rg->name);
+            return false;
+        }
+        uint64_t v  = 0;
+        bool     ok = AmlEvalTermArg(rg->v.region.declared_in, what,
+                                     rg->v.region.len_term,
+                                     rg->v.region.len_term_end, &v);
+        if (!ok) {
+            kprintf("[AML] %[E]%s: operation region %s does not say how long "
+                    "it is — its length is a term this kernel cannot evaluate "
+                    "without touching an address space, and a field read "
+                    "against no bound is a read at an address nobody "
+                    "stated%[D]\n", who, rg->name);
+            return false;
+        }
+        rg->v.region.len       = v;
+        rg->v.region.len_known = true;
+        kprintf("[AML] operation region %s: the firmware computes its length "
+                "rather than writing one, and it comes out %lu byte(s)\n",
+                rg->name, (unsigned long)v);
+    }
+    return true;
 }
 
 /* =====================================================================
@@ -2003,10 +3613,49 @@ typedef struct AmlRootBridge {
     uint8_t               bus;
 } AmlRootBridge;
 
+/*
+ * ‼ WHAT \_PIC'S ABSENCE MEANS, AND WHY IT IS NOT THE SAME AS ITS FAILURE.
+ *
+ * ACPI 6.5 §5.8.1: "This optional object is a control method that OSPM must
+ * call to indicate the interrupt model being used ... If the platform does
+ * not implement the \_PIC method, OSPM assumes the platform is in PIC mode."
+ *
+ * Three different facts hide behind one old boolean, and treating them alike
+ * threw away every board of the first kind:
+ *
+ *   NOT_DECLARED — the firmware has ONE routing table and no way to switch.
+ *     §5.8.1 says OSPM assumes PIC mode, and on such a platform that is not a
+ *     warning: the PIRQ router's output IS an interrupt-controller input, and
+ *     the first sixteen IO-APIC inputs ARE the 8259's sixteen lines. That is
+ *     precisely what the MADT's Interrupt Source Overrides exist to describe
+ *     the exceptions to. The number is the board's own and it is the only one
+ *     it has; refusing it leaves the line with config byte 0x3C, which is a
+ *     WEAKER statement of the very same thing.
+ *
+ *   TOLD — \_PIC ran with this kernel's interrupt model. The table describes
+ *     the mode actually running, which is the strongest case there is.
+ *
+ *   UNKNOWN — \_PIC is declared and did not run to the end. The firmware is
+ *     holding a table this kernel cannot identify: it may be the PIC one,
+ *     whose directly numbered entries are 8259 interrupts and mean nothing
+ *     as global system interrupts. THAT is what is lost, and only that:
+ *     AmlPrtLookup refuses every direct entry. An entry that names an
+ *     interrupt LINK is still followed, because the link's _CRS reads the
+ *     chipset's routing register rather than a table variant — see the note
+ *     in AmlLinkRoute. Refusing those too would trade a register read for
+ *     configuration byte 0x3C, which is a weaker statement of the very same
+ *     8259 interrupt.
+ */
+typedef enum {
+    AML_PIC_NOT_DECLARED = 0,
+    AML_PIC_TOLD,
+    AML_PIC_UNKNOWN,
+} AmlPicState;
+
 static AmlRootBridge *g_root_bridges  = NULL;
 static AmlPrtTable   *g_prt_tables    = NULL;
 static bool           g_routing_tried = false;
-static bool           g_pic_answered  = false;
+static AmlPicState    g_pic           = AML_PIC_NOT_DECLARED;
 
 /* Depth-first walk of the namespace with the pointers the objects already
  * carry — no stack of its own, and no recursion. */
@@ -2071,7 +3720,7 @@ static bool AmlIdValueIs(const AmlValue *v, const char *who, const char *id) {
     const uint8_t *q = v->bytes;
     for (uint32_t i = 0; i < v->count && q && q < v->bytes_end; i++) {
         AmlValue e;
-        if (!AmlReadOperand(&q, v->bytes_end, v->scope, NULL, false, who, &e))
+        if (!AmlReadOperand(&q, v->bytes_end, v->scope, who, &e))
             return false;
         if (AmlIdTextIs(&e, id)) return true;
     }
@@ -2082,27 +3731,17 @@ static bool AmlIdValueIs(const AmlValue *v, const char *who, const char *id) {
  * ‼ _HID IS A NAME ON SOME BOARDS AND A METHOD ON OTHERS, AND READING ONLY
  *   THE FIRST FORM LOSES THE BRIDGE.
  *
- * What stood here took _HID and _CID only as a static Integer, String or
- * Package node and returned false, in silence, for anything else. ACPI 6.5
- * §6.1.5 makes _HID an object "OR control method", and firmware that decides
- * its id from what the OS said it was — the shape Intel's reference ASL uses
- * around OSYS — writes Method (_HID). On such a board the root-bridge walk
- * finds nothing, every PCI function falls back to config byte 0x3C, and the
- * only sentence printed is "this firmware's namespace holds no PCI root
- * bridge" about a namespace that holds one: precisely the defect the Scope
- * fix above closed, wearing a different hat.
- *
- * So both are read the way every other object on this path is read — through
- * AmlEvalNamed, which runs the method form and refuses aloud when it cannot.
- * The cost argument that stood here ("a method per device") is answered by
- * reading both ids ONCE per device, here, instead of once per id asked
- * about; and a method that cannot be run is named on the console rather than
+ * ACPI 6.5 §6.1.5 makes _HID an object "OR control method", and firmware that
+ * decides its id from what the OS said it was — the shape Intel's reference
+ * ASL uses around OSYS — writes Method (_HID). On such a board the
+ * root-bridge walk finds nothing and every PCI function falls back to config
+ * byte 0x3C. Both ids are read the way every other object on this path is
+ * read, and a method that cannot be run is named on the console rather than
  * turned into "this device is not a bridge".
  *
  * ‼ AND _CID COUNTS. §6.1.2: a device whose _HID is vendor-specific declares
  * what it is COMPATIBLE with in _CID, and a root bridge carrying a vendor
- * _HID with _CID EISAID("PNP0A03") is an ordinary shape on shipping
- * firmware.
+ * _HID with _CID EISAID("PNP0A03") is an ordinary shape on shipping firmware.
  */
 typedef struct AmlDeviceIds {
     AmlValue value[2];      /* _HID, then _CID */
@@ -2111,12 +3750,13 @@ typedef struct AmlDeviceIds {
 
 static const char *const g_aml_id_seg[2] = { "_HID", "_CID" };
 
-static void AmlReadDeviceIds(aml_object_t *dev, AmlDeviceIds *out) {
+static void AmlReadDeviceIds(AmlRun *run, aml_object_t *dev,
+                              AmlDeviceIds *out) {
     memset(out, 0, sizeof(*out));
     for (uint32_t i = 0; i < 2; i++) {
         aml_object_t *n = AmlChild(dev, g_aml_id_seg[i]);
         if (!n) continue;
-        if (!AmlEvalNamed(n, &out->value[i])) {
+        if (!AmlEvalIn(run, n, NULL, 0, &out->value[i])) {
             kprintf("[AML] device %s declares %s in a form this evaluator "
                     "cannot read, so what it is cannot be known here — if it "
                     "is a bridge or an interrupt link, it will be missed\n",
@@ -2135,9 +3775,13 @@ static bool AmlIdsName(const AmlDeviceIds *ids, const char *id) {
 }
 
 static bool AmlHidIs(aml_object_t *dev, const char *id) {
+    AmlRun run;
+    AmlRunInit(&run);
     AmlDeviceIds ids;
-    AmlReadDeviceIds(dev, &ids);
-    return AmlIdsName(&ids, id);
+    AmlReadDeviceIds(&run, dev, &ids);
+    bool yes = AmlIdsName(&ids, id);
+    AmlRunDone(&run);
+    return yes;
 }
 
 /*
@@ -2151,57 +3795,227 @@ static bool AmlOptionalInteger(aml_object_t *dev, const char *seg,
     *present = false;
     aml_object_t *n = AmlChild(dev, seg);
     if (!n) return true;
+
+    AmlRun run;
+    AmlRunInit(&run);
     AmlValue v;
-    if (!AmlEvalNamed(n, &v)) return false;
-    if (v.type != AML_OBJ_INTEGER) {
+    bool ok = AmlEvalIn(&run, n, NULL, 0, &v);
+    if (ok && v.type != AML_OBJ_INTEGER) {
         kprintf("[AML] %s.%s answered %s where an integer was expected\n",
                 dev->name, n->name, AmlTypeName(v.type));
+        ok = false;
+    }
+    if (ok) { *out = v.integer; *present = true; }
+    AmlRunDone(&run);
+    return ok;
+}
+
+/*
+ * ‼ AND SOMETHING HAS TO ANSWER THERE.
+ *
+ * A configuration read of a function that is not present answers all ones on
+ * the wire — PCI 3.0 §6.1 makes 0xFFFF an invalid Vendor ID for exactly that
+ * purpose — and so does an ECAM access to a segment or a bus the MCFG never
+ * mapped. Both would otherwise come back as a perfectly ordinary register
+ * value and be believed as an interrupt number. The Vendor ID is the one
+ * register every function must implement, so it is what this asks: if nobody
+ * is at the address the namespace led to, the region does not describe a
+ * register on this machine and the walk that found it went wrong somewhere.
+ * Said, not read past.
+ */
+static bool AmlPciFunctionAnswers(uint16_t seg, uint8_t bus, uint8_t dev,
+                                   uint8_t fn, const char *who,
+                                   aml_object_t *region) {
+    uint64_t vendor = 0;
+    if (!AmlPciUnitRead(seg, bus, dev, fn, PCI_VENDOR_ID, 2, who, &vendor))
+        return false;
+    if (vendor == PCI_INVALID_VENDOR) {
+        kprintf("[AML] %[E]%s: operation region %s resolves to %04x:%02x:%02x"
+                ".%u, and no function answers there — its Vendor ID reads "
+                "0xFFFF. The register this region names is not on this "
+                "machine at that address, so nothing is read through it%[D]\n",
+                who, region->name, seg, bus, dev, fn);
         return false;
     }
-    *out     = v.integer;
-    *present = true;
     return true;
 }
+
+/*
+ * Where in PCI configuration space a PCI_Config OperationRegion actually
+ * sits. Declared above AmlRegionRead; defined here, where the root-bridge
+ * list it walks to is in scope.
+ *
+ * The chain from the region up to a root bridge is collected first and then
+ * walked DOWNWARD, because a bus number is only known once the bridge above
+ * it has been read: ACPI names the devices, and PCI 3.0 §3.2.5.5 puts the
+ * secondary bus number in the bridge's own configuration header at 0x19.
+ */
+static bool AmlPciConfigSite(aml_object_t *region, const char *who,
+                              uint16_t *seg, uint8_t *bus,
+                              uint8_t *dev, uint8_t *fn) {
+    /* Up to the root bridge, counting the steps. */
+    AmlRootBridge *rb  = NULL;
+    uint32_t       len = 0;
+    for (aml_object_t *n = region->parent; n; n = n->parent) {
+        for (AmlRootBridge *b = g_root_bridges; b; b = b->next)
+            if (b->node == n) { rb = b; break; }
+        if (rb) break;
+        len++;
+    }
+    if (!rb) {
+        kprintf("[AML] %s: operation region %s addresses PCI configuration "
+                "space, and no PCI root bridge stands above it in the "
+                "namespace — nothing says which bus its offsets belong to\n",
+                who, region->name);
+        return false;
+    }
+
+    *seg = rb->segment;
+    *bus = rb->bus;
+    *dev = 0;
+    *fn  = 0;
+    /* Declared in the host bridge itself — still an address something has
+     * to answer at. */
+    if (len == 0) return AmlPciFunctionAnswers(*seg, *bus, *dev, *fn, who,
+                                               region);
+
+    aml_object_t **chain =
+        (aml_object_t **)kmalloc((size_t)len * sizeof(aml_object_t *));
+    if (!chain) {
+        kprintf("[AML] %s: the heap has no room to walk %u namespace levels "
+                "down to operation region %s\n", who, len, region->name);
+        return false;
+    }
+    uint32_t i = len;
+    for (aml_object_t *n = region->parent; n && n != rb->node; n = n->parent)
+        chain[--i] = n;
+
+    bool ok = true;
+    bool any = false;
+    for (uint32_t k = 0; k < len && ok; k++) {
+        aml_object_t *n = chain[k];
+        if (n->type != AML_OBJ_DEVICE) continue;
+        aml_object_t *adr = AmlChild(n, "_ADR");
+        if (!adr) continue;
+        if (adr->type != AML_OBJ_INTEGER) {
+            /* Said, not followed: see the note on AmlPciConfigSite's
+             * declaration for why a method _ADR is not run here. */
+            kprintf("[AML] %s: device %s above operation region %s declares "
+                    "its _ADR as %s rather than as an object, and this kernel "
+                    "will not run a method to find out where to perform an "
+                    "address-space access\n",
+                    who, n->name, region->name, AmlTypeName(adr->type));
+            ok = false;
+            break;
+        }
+        /* §6.1.1: the device number is the high word and the function
+         * number the low word, and 0xFFFF in the low word means "all
+         * functions". A region has to be read from ONE of them, and
+         * function 0 is the one that is always there. */
+        uint64_t hi = (adr->v.integer >> 16) & 0xFFFFu;
+        uint64_t lo = adr->v.integer & 0xFFFFu;
+        if (lo == 0xFFFFu) lo = 0;
+        if (hi > 31u || lo > 7u) {
+            kprintf("[AML] %s: device %s above operation region %s declares "
+                    "_ADR 0x%lx, and PCI 3.0 §3.2.2.3.4 gives a bus 32 "
+                    "devices of 8 functions\n",
+                    who, n->name, region->name,
+                    (unsigned long)adr->v.integer);
+            ok = false;
+            break;
+        }
+        if (any) {
+            /* The previous level was a bridge; its secondary bus carries
+             * everything below it. PCI 3.0 §3.2.5.5 puts that number in the
+             * bridge's own configuration header at offset 0x19 — read
+             * through the same one door as every other configuration access
+             * here, so that it goes to the SEGMENT the root bridge named and
+             * not to segment 0 because 0xCF8 has no field for one. */
+            uint64_t secondary = 0;
+            if (!AmlPciUnitRead(*seg, *bus, *dev, *fn,
+                                PCI_BRIDGE_SECONDARY_BUS, 1, who,
+                                &secondary)) {
+                ok = false;
+                break;
+            }
+            *bus = (uint8_t)secondary;
+        }
+        *dev = (uint8_t)hi;
+        *fn  = (uint8_t)lo;
+        any  = true;
+    }
+    kfree(chain);
+    if (!ok) return false;
+    return AmlPciFunctionAnswers(*seg, *bus, *dev, *fn, who, region);
+}
+
 
 /*
  * The current interrupt setting of one PCI Interrupt Link device, read out of
  * the resource template its _CRS returns.
  *
- * ‼ WHAT `index` COUNTS, AND WHAT IT COUNTED BEFORE.
- * ACPI 6.5 §6.2.13 defines a _PRT entry's Source Index, when Source names a
- * link, as the index "which indicates which resource descriptor in the
- * resource template of the device pointed to in the Source field this
- * interrupt is allocated from" — a DESCRIPTOR in the template, not an
- * interrupt inside one descriptor. What stood here walked the sixteen mask
- * bits of one IRQ descriptor and took the index-th bit that was set, then
- * stamped the answer "the link's own _CRS" with `wiring_known` true. The two
- * readings agree only for a single-descriptor, single-bit template. On a
- * link whose mask carries several bits — which is what an UNCONFIGURED link
- * returns, and real firmware does return it — that handed back a confident
- * GSI which is not the link's setting, and a device armed on a GSI nobody
- * drives is the exact failure this whole path exists to prevent.
- *
- * So `index` selects the descriptor, and the descriptor it selects must name
- * ONE interrupt: §6.2.2 makes _CRS "the system resources currently allocated
- * to this device", and a link that currently carries one interrupt says one.
+ * ‼ WHAT `index` COUNTS. ACPI 6.5 §6.2.13 defines a _PRT entry's Source Index,
+ * when Source names a link, as the index "which indicates which resource
+ * descriptor in the resource template of the device pointed to in the Source
+ * field this interrupt is allocated from" — a DESCRIPTOR in the template, not
+ * an interrupt inside one descriptor. The descriptor it selects must name ONE
+ * interrupt: §6.2.2 makes _CRS "the system resources currently allocated to
+ * this device", and a link that currently carries one interrupt says one.
  * Anything else is refused by name, with the count printed.
  *
- * ACPI 6.5 §6.4.2.1, IRQ Descriptor: the two mask bytes carry one bit per
- * 8259 interrupt, and the optional third byte is the Information byte —
+ * ACPI 6.5 §6.4.2.1, IRQ Descriptor (small tag 0x22 or 0x23): two mask bytes
+ * carrying one bit per 8259 interrupt, then an OPTIONAL Information byte —
  * "Bit[0] Interrupt Mode: 1 = Edge Triggered, 0 = Level Triggered", "Bit[3]
  * Interrupt Polarity: 0 = Active-High, 1 = Active-Low", "Bit[4] Interrupt
  * Sharing". The same section: "If byte 3 is not included, High true,
  * edge-sensitive, non-shareable is assumed."
  *
- * ACPI 6.5 §6.4.3.6, Extended Interrupt Descriptor: "Bit[1] Interrupt Mode:
- * 1 = Edge-Triggered, 0 = Level-Triggered", "Bit[2] Interrupt Polarity:
+ * ACPI 6.5 §6.4.3.6, Extended Interrupt Descriptor (0x89): "Bit[1] Interrupt
+ * Mode: 1 = Edge-Triggered, 0 = Level-Triggered", "Bit[2] Interrupt Polarity:
  * 0 = Active-High, 1 = Active-Low", "Bit[3] Interrupt Sharing", followed by
  * the Interrupt Table Length and that many 32-bit interrupt numbers.
+ *
+ * ‼ AND THE DESCRIPTOR DESCRIBES THE WIRE, WHICH THE PCI BUS RULE ONLY
+ *   GUESSES AT. MEASURED ON BOTH KINDS OF MACHINE.
+ *
+ * It is tempting to take only the number from here and let PCI 3.0 §2.2.6 —
+ * INTx# is level sensitive, asserted low, open drain — decide the rest. That
+ * is wrong, and the mistake is in WHERE the §2.2.6 wire ends: at the PIRQ
+ * router. What the IO-APIC input sees is the router's OUTPUT, and only the
+ * platform can say what that looks like.
+ *
+ *   * On a legacy PIRQ-to-ISA-IRQ platform — the i440fx this desk emulates,
+ *     and every board of that generation — the router drives one of the
+ *     sixteen 8259 lines, and those are active HIGH. The emulator says so
+ *     twice over: the link's own descriptor carries flags 0x09 (level,
+ *     active high, shared), and the MADT declares an Interrupt Source
+ *     Override for each PCI-capable ISA IRQ with flags 0x0D, which is the
+ *     same statement in the other table. Programming §2.2.6's active low
+ *     there points the redirection entry at a line that idles low — a
+ *     permanently asserted input, which is the storm §2.2.6 was invoked to
+ *     avoid.
+ *   * On a modern PCH — the owner's B365 — PIRQA-H# reach IO-APIC inputs
+ *     16 to 23 directly, those ARE active low, there is no MADT override
+ *     above 15 to say so, and the link's descriptor says active low.
+ *
+ * One rule covers both: BELIEVE THE LINK. Its _CRS is the board's own
+ * statement about the very pin, in the very interrupt mode this kernel put
+ * it in, and it is the most specific thing anybody has to say. §2.2.6 stays
+ * as the default for a line nothing described — a directly numbered _PRT
+ * entry names a GSI and no wire, and pci.c applies the bus rule there.
+ *
+ * A descriptor that disagrees with §2.2.6 is still PRINTED, because on a
+ * live board that disagreement is the first thing an operator needs to see.
+ *
+ * `needs_srs` comes back true for the one failure that has a named cure: the
+ * link is not carrying an interrupt, and giving it one means writing the
+ * chipset's routing register through _SRS.
  */
 static bool AmlIrqFromResources(const uint8_t *p, const uint8_t *end,
                                  uint32_t index, const char *who,
-                                 AmlRoute *out) {
+                                 AmlRoute *out, bool *needs_srs) {
     uint32_t at = 0;                 /* which descriptor of the template */
+    *needs_srs = false;
 
     while (p < end) {
         uint8_t tag = *p;
@@ -2224,9 +4038,10 @@ static bool AmlIrqFromResources(const uint8_t *p, const uint8_t *end,
 
         if (at++ != index) { p = body + len; continue; }
 
+        bool     level = false, active_low = false, shareable = false;
+        uint32_t gsi   = 0;
+
         if (small && ((tag >> 3) & 0x0Fu) == 0x04 && len >= 2) {
-            /* §6.4.2.1 IRQ descriptor: two mask bytes, one bit per 8259
-             * interrupt, and the optional Information byte. */
             uint32_t mask = (uint32_t)body[0] | ((uint32_t)body[1] << 8);
             uint32_t seen = 0, only = 0;
             for (uint32_t bit = 0; bit < 16; bit++)
@@ -2234,47 +4049,60 @@ static bool AmlIrqFromResources(const uint8_t *p, const uint8_t *end,
 
             if (seen == 0) {
                 kprintf("[AML] interrupt link %s holds no interrupt in its "
-                        "_CRS: it is not configured, and configuring it "
-                        "means writing the chipset's routing register "
-                        "through _SRS, which this evaluator does not do\n",
-                        who);
+                        "_CRS: it is not configured\n", who);
+                *needs_srs = true;
                 return false;
             }
             if (seen > 1) {
                 kprintf("[AML] interrupt link %s: its _CRS offers %u "
                         "interrupts at once, so it names no current setting "
-                        "— §6.2.2 makes _CRS the resources allocated NOW, "
-                        "and picking one of them would be this kernel "
-                        "choosing the link's routing instead of reading "
-                        "it\n", who, seen);
+                        "— §6.2.2 makes _CRS the resources allocated NOW, and "
+                        "picking one of them would be this kernel choosing "
+                        "the link's routing instead of reading it\n",
+                        who, seen);
+                *needs_srs = true;
                 return false;
             }
-
-            out->gsi = only;
+            /* ‼ A BIT IN THIS MASK IS AN 8259 INTERRUPT, NOT A GLOBAL ONE.
+             * §6.4.2.1 gives the two bytes as "IRQ mask bits[15:0], _INT,
+             * bit 0 is IRQ0, bit 1 is IRQ1" — the sixteen inputs of the
+             * dual 8259, which is what a small IRQ descriptor was defined
+             * against. What the IO-APIC calls that same line is the MADT's
+             * business: §5.2.12.5's Interrupt Source Override exists
+             * precisely because the mapping is the identity "except where
+             * the firmware says otherwise", and the usual exception is the
+             * timer on IRQ 0 arriving as GSI 2. Handing the bit number
+             * straight through would be right on most boards and silently
+             * wrong on the ones that publish an override — so the number is
+             * put through the same translation every ISA line in this
+             * kernel goes through, and a translation that MOVED it is said
+             * out loud, because on a live board that is the first thing an
+             * operator needs to see. The extended descriptor below needs
+             * none of this: §6.4.3.6 numbers ARE global system interrupts. */
+            Summons isa = SummonsForIsaLine((uint8_t)only);
+            gsi = isa.gsi;
+            if (isa.gsi != only)
+                kprintf("[AML] interrupt link %s carries 8259 interrupt %u, "
+                        "which this machine's MADT maps onto global system "
+                        "interrupt %u — the routing table's number is the "
+                        "8259's and the pin is the override's\n",
+                        who, only, isa.gsi);
             if (len >= 3) {
                 uint8_t f = body[2];
-                out->level      = ((f & 0x01u) == 0);
-                out->active_low = ((f & 0x08u) != 0);
-                out->shareable  = ((f & 0x10u) != 0);
+                level      = ((f & 0x01u) == 0);
+                active_low = ((f & 0x08u) != 0);
+                shareable  = ((f & 0x10u) != 0);
             } else {
-                out->level      = false;
-                out->active_low = false;
-                out->shareable  = false;
+                /* §6.4.2.1's stated default for the two-byte form. */
+                level = false; active_low = false; shareable = false;
             }
-            out->wiring_known = true;
-            out->named_by     = "the link's own _CRS";
-            return true;
-        }
-
-        if (!small && tag == 0x89 && len >= 2) {      /* Extended Interrupt */
+        } else if (!small && tag == 0x89 && len >= 2) {
             uint8_t flags = body[0];
             uint8_t count = body[1];
             if (count == 0) {
                 kprintf("[AML] interrupt link %s holds no interrupt in its "
-                        "_CRS: it is not configured, and configuring it "
-                        "means writing the chipset's routing register "
-                        "through _SRS, which this evaluator does not do\n",
-                        who);
+                        "_CRS: it is not configured\n", who);
+                *needs_srs = true;
                 return false;
             }
             if (count > 1) {
@@ -2282,6 +4110,7 @@ static bool AmlIrqFromResources(const uint8_t *p, const uint8_t *end,
                         "entry points at lists %u interrupts at once, so it "
                         "names no current setting — §6.2.2 makes _CRS the "
                         "resources allocated NOW\n", who, count);
+                *needs_srs = true;
                 return false;
             }
             if (len < 2u + 4u) {
@@ -2290,26 +4119,108 @@ static bool AmlIrqFromResources(const uint8_t *p, const uint8_t *end,
                         "short to hold it\n", who);
                 return false;
             }
-            out->gsi = (uint32_t)body[2] | ((uint32_t)body[3] << 8) |
-                       ((uint32_t)body[4] << 16) | ((uint32_t)body[5] << 24);
-            out->level        = ((flags & 0x02u) == 0);
-            out->active_low   = ((flags & 0x04u) != 0);
-            out->shareable    = ((flags & 0x08u) != 0);
-            out->wiring_known = true;
-            out->named_by     = "the link's own _CRS";
-            return true;
+            gsi = (uint32_t)body[2] | ((uint32_t)body[3] << 8) |
+                  ((uint32_t)body[4] << 16) | ((uint32_t)body[5] << 24);
+            level      = ((flags & 0x02u) == 0);
+            active_low = ((flags & 0x04u) != 0);
+            shareable  = ((flags & 0x08u) != 0);
+        } else {
+            kprintf("[AML] interrupt link %s: the routing entry points at "
+                    "descriptor %u of its _CRS, and that descriptor (tag "
+                    "0x%02x) carries no interrupt\n", who, index, tag);
+            return false;
         }
 
-        kprintf("[AML] interrupt link %s: the routing entry points at "
-                "descriptor %u of its _CRS, and that descriptor (tag 0x%02x) "
-                "carries no interrupt\n", who, index, tag);
-        return false;
+        /* Said out loud when it differs from what §2.2.6 makes of the wire
+         * on the PCI side of the router, because that difference is a fact
+         * about the board an operator cannot get anywhere else — and because
+         * it is what makes the line arrive described as active high on a
+         * machine whose every other table says the same. */
+        if (!level || !active_low) {
+            kprintf("[AML] interrupt link %s carries interrupt %u and "
+                    "describes that wire as %s, %s — not the %s, %s that PCI "
+                    "3.0 §2.2.6 makes of an INTx# line on the device side of "
+                    "the PIRQ router. The link is describing the router's "
+                    "output, which is the pin the controller sees, so the "
+                    "link is believed\n",
+                    who, gsi, level ? "level" : "edge",
+                    active_low ? "active low" : "active high",
+                    "level", "active low");
+        }
+
+        memset(out, 0, sizeof(*out));
+        out->gsi          = gsi;
+        out->level        = level;
+        out->active_low   = active_low;
+        out->shareable    = shareable;
+        out->wiring_known = true;
+        out->named_by     = "the link's own _CRS";
+        return true;
     }
 
     kprintf("[AML] interrupt link %s: its _CRS holds no descriptor number "
             "%u, so nothing in it says which interrupt the routing entry "
             "means\n", who, index);
     return false;
+}
+
+/* What a link COULD carry — §6.2.12, _PRS. Printed, never chosen from:
+ * choosing is what _SRS is for, and _SRS is a write. */
+static void AmlSayPossible(const uint8_t *p, const uint8_t *end,
+                            const char *who) {
+    while (p < end) {
+        uint8_t tag = *p;
+        if (tag == 0x79) break;
+        const uint8_t *body;
+        uint32_t       len;
+        bool           small = ((tag & 0x80u) == 0);
+        if (small) {
+            len = (uint32_t)(tag & 0x07u);
+            if (p + 1 + len > end) break;
+            body = p + 1;
+        } else {
+            if (p + 3 > end) break;
+            len  = (uint32_t)p[1] | ((uint32_t)p[2] << 8);
+            if (p + 3 + len > end) break;
+            body = p + 3;
+        }
+        if (small && ((tag >> 3) & 0x0Fu) == 0x04 && len >= 2) {
+            uint32_t mask = (uint32_t)body[0] | ((uint32_t)body[1] << 8);
+            for (uint32_t bit = 0; bit < 16; bit++)
+                if (mask & (1u << bit))
+                    kprintf("[AML]   %s could be given 8259 interrupt %u "
+                            "(global system interrupt %u)\n", who, bit,
+                            SummonsForIsaLine((uint8_t)bit).gsi);
+        } else if (!small && tag == 0x89 && len >= 2) {
+            uint32_t n = body[1];
+            for (uint32_t i = 0; i < n && 2u + 4u * (i + 1u) <= len; i++)
+                kprintf("[AML]   %s could be given interrupt %lu\n", who,
+                        (unsigned long)((uint32_t)body[2 + 4 * i] |
+                            ((uint32_t)body[3 + 4 * i] << 8) |
+                            ((uint32_t)body[4 + 4 * i] << 16) |
+                            ((uint32_t)body[5 + 4 * i] << 24)));
+        }
+        p = body + len;
+    }
+}
+
+/* A link that carries nothing needs one chosen and PROGRAMMED, and
+ * programming it is _SRS, which is a write. Named as the missing capability
+ * rather than worked around in silence. */
+static void AmlSaySrsIsMissing(AmlRun *run, aml_object_t *link) {
+    aml_object_t *prs = AmlChild(link, "_PRS");
+    if (prs) {
+        AmlValue v;
+        if (AmlEvalIn(run, prs, NULL, 0, &v) && v.type == AML_OBJ_BUFFER)
+            AmlSayPossible(v.bytes, v.bytes_end, link->name);
+    }
+    kprintf("[AML] %[E]interrupt link %s carries no interrupt, and giving it "
+            "one means picking a number out of its _PRS and WRITING it to the "
+            "chipset's routing register through %s._SRS (ACPI 6.5 §6.2.16). "
+            "This kernel reads address spaces and writes none, so _SRS is a "
+            "capability it does not have — the lines behind this link keep "
+            "their weaker source%[D]\n",
+            link->name, link->name);
 }
 
 static bool AmlLinkRoute(aml_object_t *link, uint32_t index, AmlRoute *out) {
@@ -2320,33 +4231,110 @@ static bool AmlLinkRoute(aml_object_t *link, uint32_t index, AmlRoute *out) {
                 "source\n", link->name);
         return false;
     }
-    if (!g_pic_answered) {
-        kprintf("[AML] interrupt link %s is refused: this firmware never "
-                "took \\_PIC, so the table it handed over describes the 8259s "
-                "and the link's current setting is an ISA interrupt, not a "
-                "global system interrupt\n", link->name);
-        return false;
+    if (g_pic == AML_PIC_UNKNOWN) {
+        /* ‼ WHAT \_PIC'S FAILURE DOES AND DOES NOT PUT IN DOUBT, AND WHY
+         * THE LINK SURVIVES IT.
+         *
+         * A table variant decides what a DIRECTLY NUMBERED entry means: the
+         * PIC-mode table names 8259 interrupts and the APIC-mode one names
+         * global ones, and with \_PIC unrun this kernel cannot tell which it
+         * was handed — so AmlPrtLookup refuses those, and still does.
+         *
+         * A LINK is a different fact. §6.2.2 makes its _CRS the resources
+         * ALLOCATED NOW, and what it reads to find them is the chipset's own
+         * PIRQ routing register: one register, holding one number, whichever
+         * table the firmware would hand over. The link device is the same
+         * device in both variants and its _CRS does not branch on the mode.
+         * Refusing it would drop the line back to configuration byte 0x3C,
+         * which — PCI 3.0 §6.2.4 footnote 43 — is firmware's note of the
+         * same 8259 interrupt, written earlier and by nobody in particular.
+         * Discarding a register read in favour of a note about it is not
+         * caution; it is losing the better of two statements of one fact. */
+        /* Said once for the machine, not once per line: the fact is about
+         * the firmware, and a board with 128 routing entries would
+         * otherwise print it 128 times and bury everything else. */
+        static bool said_once = false;
+        if (!said_once) {
+            said_once = true;
+            kprintf("[AML] this firmware declares \\_PIC and it could not be "
+                    "run, so which of its routing tables it is holding out "
+                    "is not known. Its interrupt links are still read — a "
+                    "link's _CRS reads the chipset's own routing register, "
+                    "which holds one number in either interrupt model. What "
+                    "the unknown variant costs is every DIRECTLY numbered "
+                    "entry, and those are refused; %s is the first link read "
+                    "this way\n", link->name);
+        }
     }
+
+    AmlRun run;
+    AmlRunInit(&run);
+    bool ok = false;
+
+    /* ‼ IS THE LINK EVEN ON. ACPI 6.5 §6.3.7 gives _STA bit 0 "the device is
+     * present" and bit 1 "the device is enabled and decoding its resources".
+     * A link that is present but not enabled is not carrying anything, and
+     * its _CRS says so; asking anyway and believing the answer is how a
+     * device gets armed on a line nothing drives. _STA is optional — §6.3.7
+     * makes an absent one mean present and enabled. */
+    aml_object_t *sta = AmlChild(link, "_STA");
+    if (sta) {
+        AmlValue v;
+        if (!AmlEvalIn(&run, sta, NULL, 0, &v)) {
+            kprintf("[AML] interrupt link %s: its _STA could not be read, so "
+                    "whether it is enabled is not known — refused rather than "
+                    "assumed\n", link->name);
+            AmlRunDone(&run);
+            return false;
+        }
+        if (v.type != AML_OBJ_INTEGER) {
+            kprintf("[AML] interrupt link %s: its _STA answered %s where "
+                    "§6.3.7 gives an integer of status bits\n",
+                    link->name, AmlTypeName(v.type));
+            AmlRunDone(&run);
+            return false;
+        }
+        if (!(v.integer & 0x2u)) {
+            kprintf("[AML] interrupt link %s answers _STA 0x%lx: %s\n",
+                    link->name, (unsigned long)v.integer,
+                    (v.integer & 0x1u) ? "present, and NOT enabled"
+                                       : "not present at all");
+            AmlSaySrsIsMissing(&run, link);
+            AmlRunDone(&run);
+            return false;
+        }
+    }
+
     aml_object_t *crs = AmlChild(link, "_CRS");
     if (!crs) {
         kprintf("[AML] interrupt link %s declares no _CRS, so nothing says "
                 "which interrupt it currently carries\n", link->name);
+        AmlRunDone(&run);
         return false;
     }
+
     AmlValue v;
-    if (!AmlEvalNamed(crs, &v)) {
-        kprintf("[AML] interrupt link %s: its _CRS is not something this "
-                "evaluator can read without touching hardware — the lines "
-                "behind it fall back to the weaker source\n", link->name);
+    if (!AmlEvalIn(&run, crs, NULL, 0, &v)) {
+        kprintf("[AML] interrupt link %s: its _CRS could not be evaluated to "
+                "the end — the lines behind it fall back to the weaker "
+                "source\n", link->name);
+        AmlRunDone(&run);
         return false;
     }
     if (v.type != AML_OBJ_BUFFER) {
         kprintf("[AML] interrupt link %s: its _CRS answered %s where a "
                 "resource template was expected\n",
                 link->name, AmlTypeName(v.type));
+        AmlRunDone(&run);
         return false;
     }
-    return AmlIrqFromResources(v.bytes, v.bytes_end, index, link->name, out);
+
+    bool needs_srs = false;
+    ok = AmlIrqFromResources(v.bytes, v.bytes_end, index, link->name, out,
+                             &needs_srs);
+    if (!ok && needs_srs) AmlSaySrsIsMissing(&run, link);
+    AmlRunDone(&run);
+    return ok;
 }
 
 /*
@@ -2432,8 +4420,7 @@ static bool AmlPrtElement(const AmlValue *row, const char *who,
     const uint8_t *q = row->bytes;
     AmlValue f[4];
     for (uint32_t i = 0; i < 4; i++)
-        if (!AmlReadOperand(&q, row->bytes_end, row->scope, NULL, false, who,
-                            &f[i]))
+        if (!AmlReadOperand(&q, row->bytes_end, row->scope, who, &f[i]))
             return false;
 
     if (f[0].type != AML_OBJ_INTEGER || f[1].type != AML_OBJ_INTEGER) {
@@ -2513,20 +4500,28 @@ static AmlPrtTable *AmlPrtTableFor(aml_object_t *dev) {
     aml_object_t *prt = AmlChild(dev, "_PRT");
     if (!prt) return t;                      /* no _PRT here — a real answer */
 
+    /* The run lives until every entry has been copied out of it: a _PRT that
+     * is a method may have BUILT the package it returned, and those bytes are
+     * this run's. */
+    AmlRun run;
+    AmlRunInit(&run);
     AmlValue v;
-    if (!AmlEvalNamed(prt, &v)) {
+    if (!AmlEvalIn(&run, prt, NULL, 0, &v)) {
         kprintf("[AML] %s._PRT could not be read — every line it would have "
                 "described falls back to the weaker source\n", dev->name);
+        AmlRunDone(&run);
         return t;
     }
     if (v.type != AML_OBJ_PACKAGE) {
         kprintf("[AML] %s._PRT answered %s where a package of entries was "
                 "expected\n", dev->name, AmlTypeName(v.type));
+        AmlRunDone(&run);
         return t;
     }
     if (v.count == 0) {
         kprintf("[AML] %s._PRT is empty: this firmware describes no interrupt "
                 "routing under it\n", dev->name);
+        AmlRunDone(&run);
         return t;
     }
 
@@ -2536,6 +4531,7 @@ static AmlPrtTable *AmlPrtTableFor(aml_object_t *dev) {
     if (!t->entry) {
         kprintf("[AML] the heap has no room for %s's %u routing entries\n",
                 dev->name, v.count);
+        AmlRunDone(&run);
         return t;
     }
 
@@ -2560,8 +4556,7 @@ static AmlPrtTable *AmlPrtTableFor(aml_object_t *dev) {
     uint32_t got = 0, skipped = 0, seen = 0;
     while (seen < v.count && q < v.bytes_end) {
         AmlValue row;
-        if (!AmlReadOperand(&q, v.bytes_end, v.scope, NULL, false, dev->name,
-                            &row)) {
+        if (!AmlReadOperand(&q, v.bytes_end, v.scope, dev->name, &row)) {
             kprintf("[AML] %s._PRT: entry %u cannot be stepped over, so "
                     "where the next one begins is no longer known — the "
                     "table ends here\n", dev->name, seen);
@@ -2579,6 +4574,7 @@ static AmlPrtTable *AmlPrtTableFor(aml_object_t *dev) {
     } else {
         kprintf("[AML] %s._PRT: %u routing entries read\n", dev->name, got);
     }
+    AmlRunDone(&run);
     return t;
 }
 
@@ -2600,22 +4596,25 @@ static bool AmlPrtLookup(AmlPrtTable *t, uint8_t device, uint8_t pin0,
         *named = true;
 
         if (e->direct) {
-            /* ‼ THE \_PIC GATE APPLIES HERE TOO, and applying it only to
-             * link-sourced entries was half a rule. ACPI 6.5 §5.8.1: a board
-             * that was never told the interrupt model hands over the table
-             * it prepared for PIC mode, and in that table a Source of zero
-             * means "the interrupt is allocated from the global interrupt
-             * pool" of the 8259s — SourceIndex is an ISA interrupt behind
-             * the PIRQ router, not a global system interrupt. Believing it
-             * as a GSI is exactly the mistake the sentence printed at boot
-             * says this kernel avoids. Refused, and the line falls back to
-             * the byte at 0x3C, which carries the same PIC-mode information
-             * already marked as the weakest source there is. */
-            if (!g_pic_answered) {
-                kprintf("[AML] %s._PRT names GSI %u for pin %u of device "
-                        "0x%04x, but this firmware never took \\_PIC — that "
-                        "number is an 8259 interrupt in a PIC-mode table, "
-                        "not a global system interrupt\n",
+            /* ‼ A DIRECTLY NUMBERED ENTRY IS THE ORDINARY APIC-MODE FORM, AND
+             * THIS DESK NEVER SHOWS IT. §6.2.13: "If this field is the
+             * integer zero, then the interrupt is allocated from the global
+             * interrupt pool" and Source Index "is the global system
+             * interrupt number". That is the AR00 package of the Intel
+             * reference ASL and it is what the owner's B365 board answers
+             * with once \_PIC(1) has been taken — while the emulator here
+             * routes all 128 of its entries through a link, so nothing on
+             * this desk exercises the branch below. It is written from
+             * §6.2.13 alone, and the \_PIC state is the whole of its
+             * condition: the number is a global system interrupt exactly
+             * when the table it came out of is the one this kernel's
+             * interrupt model asked for, or when the board has only one
+             * table to give. */
+            if (g_pic == AML_PIC_UNKNOWN) {
+                kprintf("[AML] %s._PRT names interrupt %u for pin %u of "
+                        "device 0x%04x, and this firmware declares \\_PIC but "
+                        "would not run it — which of its two tables this "
+                        "number came out of is not known\n",
                         t->owner->name, e->source_index, pin0, device);
                 return false;
             }
@@ -2661,43 +4660,6 @@ void AmlRoutingAdopt(void) {
         return;
     }
 
-    /* ACPI 6.5 §5.8.1, \_PIC: "This optional object is a control method that
-     * OSPM must call to indicate the interrupt model being used ... Arg0: 0 -
-     * PIC mode, 1 - APIC mode, 2 - SAPIC mode ... If the platform does not
-     * implement the \_PIC method, OSPM assumes the platform is in PIC mode."
-     *
-     * It must be told BEFORE _PRT is read: a board that has not been told
-     * hands over the table describing the 8259s, whose numbers are ISA
-     * interrupts behind a PIRQ router and mean nothing as GSIs. */
-    uint64_t model = (irqchip_get_type() == IRQCHIP_APIC) ? 1u : 0u;
-    aml_object_t *pic = AmlChild(&g_root_obj, "_PIC");
-    if (!pic) {
-        kprintf("[AML] this firmware declares no \\_PIC. Per ACPI 6.5 §5.8.1 "
-                "its routing table therefore describes PIC mode, whose "
-                "numbers are 8259 interrupts behind the PIRQ router — no "
-                "entry in it is read as a global system interrupt\n");
-    } else if (pic->type != AML_OBJ_METHOD) {
-        kprintf("[AML] \\_PIC is %s, and §5.8.1 makes it a control method — "
-                "the interrupt model was not announced\n",
-                AmlTypeName(pic->type));
-    } else {
-        AmlValue arg;
-        memset(&arg, 0, sizeof(arg));
-        arg.type    = AML_OBJ_INTEGER;
-        arg.integer = model;
-        if (AmlRunMethod(pic, &arg, 1, NULL)) {
-            g_pic_answered = true;
-            kprintf("[AML] \\_PIC(%u) — this kernel runs its %s, and the "
-                    "firmware has been told so before its routing table is "
-                    "read\n", (unsigned)model,
-                    model ? "IO-APIC" : "8259 pair");
-        } else {
-            kprintf("[AML] \\_PIC could not be run to the end; the routing "
-                    "table is still built, but no entry in it is read as a "
-                    "global system interrupt, because the mode it describes "
-                    "is no longer known\n");
-        }
-    }
 
     for (aml_object_t *n = AmlWalkNext(&g_root_obj, &g_root_obj); n;
          n = AmlWalkNext(n, &g_root_obj)) {
@@ -2706,10 +4668,14 @@ void AmlRoutingAdopt(void) {
          * PNP0A08 a PCI Express one. Both carry a _PRT. Read once per
          * device, asked about twice — a Method form is run here and nowhere
          * else in this loop. */
+        AmlRun run;
+        AmlRunInit(&run);
         AmlDeviceIds ids;
-        AmlReadDeviceIds(n, &ids);
-        if (!AmlIdsName(&ids, "PNP0A03") && !AmlIdsName(&ids, "PNP0A08"))
-            continue;
+        AmlReadDeviceIds(&run, n, &ids);
+        bool is_bridge = AmlIdsName(&ids, "PNP0A03") ||
+                         AmlIdsName(&ids, "PNP0A08");
+        AmlRunDone(&run);
+        if (!is_bridge) continue;
 
         uint64_t seg = 0, bbn = 0;
         bool have_seg = false, have_bbn = false;
@@ -2773,6 +4739,68 @@ void AmlRoutingAdopt(void) {
         kprintf("[AML] this firmware's namespace holds no PCI root bridge "
                 "(PNP0A03 or PNP0A08), so there is no routing table to read\n");
     }
+
+    /* ‼ THE BRIDGES ARE FOUND BEFORE \_PIC IS TOLD, AND \_PIC BEFORE ANY
+     * _PRT IS READ. §5.8.1's ordering constraint is against the ROUTING
+     * TABLE, and nothing above reads one: a bridge's _HID, _CID, _SEG and
+     * _BBN say the same thing in either interrupt mode. Doing the walk first
+     * is what lets a board whose \_PIC reaches a PCI configuration register
+     * — which is how a chipset's interrupt-mode bit is usually set — find a
+     * root bridge to resolve that register against. A _PRT is read lazily,
+     * in AmlPrtTableFor, long after this returns.
+     *
+     * ACPI 6.5 §5.8.1, \_PIC: "This optional object is a control method that
+     * OSPM must call to indicate the interrupt model being used ... Arg0: 0 -
+     * PIC mode, 1 - APIC mode, 2 - SAPIC mode ... If the platform does not
+     * implement the \_PIC method, OSPM assumes the platform is in PIC mode."
+     */
+    uint64_t model = (irqchip_get_type() == IRQCHIP_APIC) ? 1u : 0u;
+    aml_object_t *pic = AmlChild(&g_root_obj, "_PIC");
+    if (!pic) {
+        /* ‼ AN ABSENT \_PIC IS A LEGAL BOARD, NOT A FAULT — see the note on
+         * AmlPicState. The firmware has one routing table, it is the one it
+         * is holding out, and refusing it leaves the line with config byte
+         * 0x3C, which is a weaker statement of the same thing. */
+        g_pic = AML_PIC_NOT_DECLARED;
+        kprintf("[AML] this firmware declares no \\_PIC. ACPI 6.5 §5.8.1 makes "
+                "that legal and makes its one routing table the PIC-mode one; "
+                "on such a platform the 8259's inputs and the first sixteen "
+                "IO-APIC inputs are the same lines, so its numbers are read "
+                "as global system interrupts and the MADT's source overrides "
+                "are what describe any exception\n");
+    } else if (pic->type != AML_OBJ_METHOD) {
+        g_pic = AML_PIC_UNKNOWN;
+        kprintf("[AML] %[E]\\_PIC is %s, and §5.8.1 makes it a control method "
+                "— the interrupt model was not announced, so a directly "
+                "numbered entry of the table it hands over is not read as a "
+                "global system interrupt%[D]\n", AmlTypeName(pic->type));
+    } else {
+        AmlRun run;
+        AmlRunInit(&run);
+        AmlValue arg;
+        memset(&arg, 0, sizeof(arg));
+        arg.type    = AML_OBJ_INTEGER;
+        arg.integer = model;
+        if (AmlEvalIn(&run, pic, &arg, 1, NULL)) {
+            g_pic = AML_PIC_TOLD;
+            kprintf("[AML] \\_PIC(%u) — this kernel runs its %s, and the "
+                    "firmware has been told so before its routing table is "
+                    "read\n", (unsigned)model,
+                    model ? "IO-APIC" : "8259 pair");
+        } else {
+            g_pic = AML_PIC_UNKNOWN;
+            kprintf("[AML] %[E]\\_PIC could not be run to the end, so this "
+                    "kernel does not know which of the firmware's routing "
+                    "tables it is being handed. §5.8.1 makes an untold "
+                    "platform a PIC-mode one, whose directly numbered "
+                    "entries are 8259 interrupts — those are refused. An "
+                    "entry that names an interrupt link is still followed: "
+                    "the link's _CRS reads the chipset's routing register, "
+                    "which says the same thing in either mode%[D]\n");
+        }
+        AmlRunDone(&run);
+    }
+
 }
 
 /*
@@ -2807,8 +4835,14 @@ static aml_object_t *AmlDeviceByAdr(aml_object_t *parent, uint8_t device,
         if (c->type != AML_OBJ_DEVICE) continue;
         aml_object_t *adr = AmlChild(c, "_ADR");
         if (!adr) continue;            /* §6.1.1 leaves _ADR optional */
+        AmlRun run;
+        AmlRunInit(&run);
         AmlValue v;
-        if (!AmlEvalNamed(adr, &v) || v.type != AML_OBJ_INTEGER) {
+        bool ok = AmlEvalIn(&run, adr, NULL, 0, &v) &&
+                  v.type == AML_OBJ_INTEGER;
+        uint64_t got = ok ? v.integer : 0;
+        AmlRunDone(&run);
+        if (!ok) {
             kprintf("[AML] device %s under %s declares an _ADR this "
                     "evaluator cannot read as an integer, so whether it is "
                     "the bridge being asked about is not known\n",
@@ -2816,7 +4850,7 @@ static aml_object_t *AmlDeviceByAdr(aml_object_t *parent, uint8_t device,
             unreadable = true;
             continue;
         }
-        if (v.integer == want_exact || v.integer == want_any) return c;
+        if (got == want_exact || got == want_any) return c;
     }
 
     *uncertain = unreadable;
@@ -2932,7 +4966,7 @@ static bool ssdt_cb(acpi_sdt_header_t* h, void* u) {
     (void)u;
     uint32_t hdr = (uint32_t)sizeof(acpi_sdt_header_t);
     if (h->length <= hdr) return true;
-    parse_term_list((uint8_t*)h + hdr, h->length - hdr, &g_root_obj, 0);
+    parse_term_list((uint8_t*)h + hdr, h->length - hdr, &g_root_obj);
     return true;
 }
 
@@ -2962,12 +4996,25 @@ aml_status_t aml_init(void) {
         (uintptr_t)dsdt_addr, hdr->length);
     if (!dsdt) return AML_ERR_NOT_LOADED;
 
+    /* ‼ HOW WIDE AN INTEGER IS ON THIS BOARD, TAKEN FROM THE BOARD.
+     * ACPI 6.5 §19.6.: AML of revision 1 computes with 32-bit integers, and
+     * revision 2 and above with 64-bit ones. The DSDT's own header carries
+     * that revision, and it governs the whole namespace including every
+     * SSDT. Getting it wrong makes Ones the wrong number and takes Not,
+     * ShiftLeft and every comparison against Ones with it — and the emulator
+     * on this desk ships revision 1 while the owner's board ships 2, so it
+     * is not a difference that can be left to a default. */
+    g_int_bits = (dsdt->revision >= 2) ? 64u : 32u;
+
     parse_term_list((uint8_t*)dsdt + sizeof(acpi_sdt_header_t),
                     dsdt->length - sizeof(acpi_sdt_header_t),
-                    &g_root_obj, 0);
+                    &g_root_obj);
 
     /* Every SSDT contributes additional namespace. */
     acpi_for_each_table("SSDT", ssdt_cb, NULL);
+
+    /* The parse pass is over. Its operand list is scratch, not namespace. */
+    AmlSkipForget();
 
     g_loaded = true;
     /* kprintf: the object count is the first thing to compare against the

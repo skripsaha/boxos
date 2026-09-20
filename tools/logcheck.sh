@@ -2259,20 +2259,38 @@ run_intx() {
     #
     # _PRT is the only source written about THIS machine in THIS interrupt
     # mode, and it outranks the byte at 0x3C for the pin and the bus rule for
-    # the wiring. QEMU's board publishes one. So on this desk the pin must
-    # come from the routing table, and the wiring must be active low — a PCI
-    # interrupt link's _CRS says IRQ(Level, ActiveLow, Shared) and nothing
-    # else does.
+    # the wiring. QEMU's board publishes one, so on this desk the pin must
+    # come from the routing table.
     #
-    # ‼ THESE ARE NOT TO BE RELAXED IF THEY GO RED. Red here means _PRT was
-    # not read or was not believed, and the fallback that answered instead is
-    # the 8259 byte — a number that means an ISA IRQ, which is then matched
-    # against the MADT's ISA overrides and comes back active HIGH. One root,
-    # two red checks; softening either one hides it.
+    # ‼ THE SECOND CHECK USED TO DEMAND "active low" AND THAT WAS WRONG — it
+    # is recorded here because the mistake is an easy one to make twice. It
+    # read: a PCI interrupt link's _CRS says IRQ(Level, ActiveLow, Shared)
+    # and nothing else does. It does not. PCI 3.0 §2.2.6 makes INTx# active
+    # low on the DEVICE side of the PIRQ router; the link describes the
+    # router's OUTPUT, which is the pin the interrupt controller actually
+    # sees, and QEMU's own link says level, active HIGH. Demanding the bus
+    # rule there demanded that the kernel ignore the firmware — the exact
+    # opposite of the order of trust this whole mechanism is built on.
+    #
+    # What has discriminating power is AGREEMENT: whatever the link says the
+    # wire is, the entry the kernel programmed must say the same. A kernel
+    # that read _CRS and then armed the line by the bus rule anyway would
+    # show the two disagreeing, and that is the defect worth catching. The
+    # floor the bus rule still owns on its own is "shareable", which no
+    # firmware statement here contradicts and which a shared INTx line must
+    # have.
     grep -qE "\[IRQCHIP\] PCI GSI [0-9]+ armed .*pin from the ACPI routing table" "$L"
     chk $? "the pin came from the ACPI routing table, not from the 8259 byte"
-    grep -qE "\[IRQCHIP\] PCI GSI [0-9]+ armed on vector [0-9]+: level, active low" "$L"
-    chk $? "and the wire is active low, as a PCI interrupt link describes it"
+
+    LINK_WIRE=$(grep -oE "describes that wire as (level|edge), active (low|high)" "$L" \
+                | head -1 | sed 's/describes that wire as //')
+    ARMED_WIRE=$(grep -oE "\[IRQCHIP\] PCI GSI [0-9]+ armed on vector [0-9]+: (level|edge), active (low|high)" "$L" \
+                 | head -1 | sed 's/.*: //')
+    [ -n "$LINK_WIRE" ] && [ "$LINK_WIRE" = "$ARMED_WIRE" ]
+    chk $? "and the entry was programmed as the link describes it (link: ${LINK_WIRE:-none}, armed: ${ARMED_WIRE:-none})"
+
+    grep -qE "\[IRQCHIP\] PCI GSI [0-9]+ armed on vector [0-9]+: .*shareable" "$L"
+    chk $? "and shareable, which is the bus rule's own and which no firmware here contradicts"
     if grep -q "pin from the byte the firmware wrote for the 8259" "$L"; then
         echo "       ‼ the pin came from config byte 0x3C. _PRT did not answer —"
         echo "         see the [AML] lines in $L for which step declined."
