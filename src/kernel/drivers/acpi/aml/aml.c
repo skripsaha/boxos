@@ -291,21 +291,70 @@ static aml_object_t* obj_find_child(aml_object_t* parent, const char seg[4]) {
  * NameString resolution
  * =========================================================== */
 
+/*
+ * One NameString, resolved against `scope`.
+ *
+ * ‼ A NameString IS ALLOWED TO NAME NO LEAF, AND THAT WAS READ AS A LEAF.
+ *
+ * ACPI 6.5 §20.2.2 encodes it as
+ *
+ *     NameString  := <RootChar NamePath> | <PrefixPath NamePath>
+ *     PrefixPath  := Nothing | <'^' PrefixPath>
+ *     NamePath    := NameSeg | DualNamePath | MultiNamePath | NullName
+ *     NullName    := 0x00
+ *
+ * so `Scope (\\)` is two bytes — RootChar then NullName — and names the root
+ * itself with nothing under it. What stood here returned the base object for
+ * that form and left `leaf_out` UNTOUCHED, so every caller that declares a
+ * child went on to declare one named from four uninitialised bytes of its own
+ * C stack, and parsed the whole block's TermList into it. Measured on the
+ * i440fx firmware this desk boots: the root grew a junk object holding the
+ * firmware's debug port (its OperationRegion, its field and DBUG) and a
+ * second holding \\_S3, \\_S4 and \\_S5 — objects that exist, under a name
+ * nothing can ever look up.
+ *
+ * So `leaf_out` is emptied FIRST and written only when a leaf was really
+ * parsed. `leaf_out[0] == 0` on return means "the object returned is what
+ * this NameString names"; a declaration that needs a leaf says so aloud.
+ *
+ * The upward walk is §5.3's, and it is narrower than walking to the root for
+ * anything relative: "The namespace search rules only apply to single NameSeg
+ * paths, which is a relative namespace path. For those relative name paths
+ * that contain multiple NameSegs or Parent Prefixes, '^', the search rules do
+ * not apply." A path opened with RootChar is absolute and gets no search
+ * either — it is the path the firmware wrote or it is nothing.
+ */
 static aml_object_t* resolve_name(const uint8_t** p, const uint8_t* end,
                                     aml_object_t* scope, bool create,
                                     char leaf_out[4]) {
+    if (leaf_out) { leaf_out[0] = 0; leaf_out[1] = 0;
+                    leaf_out[2] = 0; leaf_out[3] = 0; }
     if (*p >= end) return NULL;
     aml_object_t* base = scope;
-    if (**p == RootChar) { base = &g_root_obj; (*p)++; }
+    bool rooted   = false;
+    bool prefixed = false;
+    if (**p == RootChar) { base = &g_root_obj; rooted = true; (*p)++; }
     while (*p < end && **p == ParentPrefixChar) {
-        if (base->parent) base = base->parent;
+        /* ACPI 6.5 §5.3: "An attempt to access names in the parent of the
+         * root will result in the name not being found." Stopping at the
+         * root instead — which is what stood here — resolves the rest of the
+         * path against the root and can hand back a REAL object that is not
+         * the one named, which is worse than not finding it. */
+        if (!base->parent) {
+            kprintf("[AML] a name path resolved from %s asks for the parent "
+                    "of the root; §5.3 makes that a name not found\n",
+                    scope ? scope->name : "the root");
+            return NULL;
+        }
+        base = base->parent;
+        prefixed = true;
         (*p)++;
     }
     if (*p >= end) return base;
 
     int segs = 1;
     uint8_t op = **p;
-    if (op == 0) { (*p)++; return base; }
+    if (op == 0) { (*p)++; return base; }          /* NullName — names `base` */
     if (op == DualNamePrefix) { (*p)++; segs = 2; }
     else if (op == MultiNamePrefix) {
         (*p)++;
@@ -320,6 +369,9 @@ static aml_object_t* resolve_name(const uint8_t** p, const uint8_t* end,
     }
     if (*p + (uint32_t)segs * 4 > end) return NULL;
 
+    /* §5.3, decided once for the whole path rather than per segment. */
+    bool search_rules = (!rooted && !prefixed && segs == 1);
+
     aml_object_t* cur = base;
     for (int i = 0; i < segs; i++) {
         char seg[4] = { (char)(*p)[0], (char)(*p)[1], (char)(*p)[2], (char)(*p)[3] };
@@ -330,16 +382,39 @@ static aml_object_t* resolve_name(const uint8_t** p, const uint8_t* end,
             return cur;
         }
         aml_object_t* next = obj_find_child(cur, seg);
-        if (!next && !create) {
-            if (i == 0 && cur == scope) {
-                for (aml_object_t* up = scope->parent; up; up = up->parent) {
-                    next = obj_find_child(up, seg);
-                    if (next) break;
-                }
+        if (!next && !create && search_rules) {
+            for (aml_object_t* up = base->parent; up; up = up->parent) {
+                next = obj_find_child(up, seg);
+                if (next) break;
             }
         }
         if (!next) {
             if (create && i < segs - 1) {
+                /* An intermediate segment this pass never saw declared.
+                 *
+                 * ACPI 6.5 §5.3 states the compiler's end of this: "Object
+                 * XYZ must already exist for the ABCD object to be created.
+                 * If XYZ does not exist, that will cause a fatal error ...
+                 * If any other Nameseg along the Namepath does not exist, it
+                 * is a fatal error." A LOADER stands at the other end, and
+                 * this one has already admitted (aml.h) that a declaration
+                 * nested behind control flow can be missed by this pass —
+                 * so "XYZ does not exist" here means "this pass did not see
+                 * it", not "the firmware never wrote it". Dropping the whole
+                 * branch would lose objects the board really declared.
+                 *
+                 * What is created carries the name the FIRMWARE wrote, at
+                 * the path the firmware wrote it: the leaf resolves there
+                 * afterwards, and a Device or Method declaration for the
+                 * same name later upgrades this placeholder in place. It is
+                 * said aloud because a name that resolves through a
+                 * placeholder is the first thing to know when the object
+                 * under it turns out to hold nothing. */
+                kprintf("[AML] a name path under %s passes through %c%c%c%c, "
+                        "which this pass never saw declared — recorded as an "
+                        "open scope so what the firmware hung beneath it can "
+                        "still be found\n",
+                        cur->name, seg[0], seg[1], seg[2], seg[3]);
                 next = obj_create_child(cur, seg, AML_OBJ_SCOPE);
                 if (!next) return NULL;
             } else return NULL;
@@ -347,6 +422,23 @@ static aml_object_t* resolve_name(const uint8_t** p, const uint8_t* end,
         cur = next;
     }
     return cur;
+}
+
+/*
+ * A declaration must name something to declare. §20.2.2 lets a NameString
+ * end in NullName, which names the scope it is resolved against — legal for
+ * DefScope, which opens that scope, and for no other operator in §20.2.5.2.
+ * Refused aloud rather than declaring an object under a name the firmware
+ * never wrote. What the caller does with the stream afterwards depends on
+ * whether it could measure the term: an operator carrying a PkgLength steps
+ * past it and returns AML_REFUSED, and one without a length has nothing to
+ * step past and leaves the TermList to resynchronise.
+ */
+static bool AmlLeafNamed(const char leaf[4], const char *what) {
+    if (leaf[0]) return true;
+    kprintf("[AML] a %s declaration's name ends in NullName, which names its "
+            "own scope and nothing to declare — refused\n", what);
+    return false;
 }
 
 /* ===========================================================
@@ -796,11 +888,52 @@ static aml_status_t handle_scope_method(const uint8_t** p, const uint8_t* end,
     aml_object_t* parent = resolve_name(&np, body_end, scope, true, leaf);
     if (!parent) { *p = body_end; return AML_ERR_BOUNDS; }
 
-    aml_obj_type_t t = is_method ? AML_OBJ_METHOD : AML_OBJ_SCOPE;
-    aml_object_t* target = obj_find_child(parent, leaf);
-    if (!target) target = obj_create_child(parent, leaf, t);
-    if (!target) { *p = body_end; return AML_ERR_NOMEM; }
-    target->type = t;
+    /* ‼ SCOPE OPENS AN OBJECT; IT DOES NOT SAY WHAT THE OBJECT IS.
+     *
+     * ACPI 6.5 §20.2.5.1 gives
+     *     DefScope := ScopeOp PkgLength NameString TermList
+     * and there is no type in it — §19.6.120 names the operator "Scope (Open
+     * Named Scope)". WHAT a named object is comes from the operator that
+     * declared it: DefDevice, DefMethod, DefProcessor and the rest of
+     * §20.2.5.2.
+     *
+     * What stood here stamped the opened object AML_OBJ_SCOPE every time. A
+     * board that declares `Device (PCI0)` and later opens `Scope (\\_SB.PCI0)`
+     * to hang further objects off it — which the firmware on this desk does
+     * twice, and shipping boards do as a matter of course — had its PCI host
+     * bridge DEMOTED to a plain scope. AmlRoutingAdopt walks the namespace
+     * for Devices, found none, and printed "this firmware's namespace holds
+     * no PCI root bridge" about a namespace that held one, with _HID
+     * PNP0A03 and a 128-entry _PRT beneath it. Every PCI function on the
+     * machine then took its pin from config byte 0x3C.
+     *
+     * A Method is the other case and keeps its assignment: DefMethod IS a
+     * declaration, and a forward reference may have left a placeholder scope
+     * under that name first. */
+    aml_object_t* target;
+    if (!leaf[0]) {
+        /* The NameString ended in NullName: it names `parent` itself. There
+         * is nothing to declare and the TermList belongs to `parent` — this
+         * is `Scope (\\)`, which is how firmware puts objects at the root. A
+         * Method cannot be nameless, and that malformation is said aloud. */
+        if (is_method) {
+            kprintf("[AML] a Method opened under %s declares no name — its "
+                    "body is not recorded, and nothing can call it\n",
+                    parent->name);
+            *p = body_end;
+            return AML_REFUSED;
+        }
+        target = parent;
+    } else {
+        target = obj_find_child(parent, leaf);
+        if (!target) {
+            target = obj_create_child(parent, leaf,
+                        is_method ? AML_OBJ_METHOD : AML_OBJ_SCOPE);
+            if (!target) { *p = body_end; return AML_ERR_NOMEM; }
+        } else if (is_method) {
+            target->type = AML_OBJ_METHOD;
+        }
+    }
 
     if (is_method) {
         if (np >= body_end) { *p = body_end; return AML_OK; }
@@ -922,6 +1055,7 @@ static aml_status_t handle_extended(const uint8_t** p, const uint8_t* end,
         char leaf[4];
         aml_object_t* parent = resolve_name(p, end, scope, true, leaf);
         if (!parent || *p >= end) return AML_ERR_BOUNDS;
+        if (!AmlLeafNamed(leaf, "OperationRegion")) return AML_ERR_BAD_OPCODE;
         uint8_t space = **p; (*p)++;
         /* DefOpRegion := OpRegionOp NameString RegionSpace RegionOffset
          * RegionLen, and §20.2.5.2 makes both RegionOffset and RegionLen
@@ -965,6 +1099,10 @@ static aml_status_t handle_extended(const uint8_t** p, const uint8_t* end,
         const uint8_t* np = body_start;
         aml_object_t* parent = resolve_name(&np, body_end, scope, true, leaf);
         if (!parent) { *p = body_end; return AML_ERR_BOUNDS; }
+        if (!AmlLeafNamed(leaf, "Device or Processor")) {
+            *p = body_end;
+            return AML_REFUSED;
+        }
         aml_obj_type_t t = (sub == ExtDeviceOp)     ? AML_OBJ_DEVICE :
                             (sub == ExtProcessorOp) ? AML_OBJ_PROCESSOR :
                             (sub == ExtPowerResOp)  ? AML_OBJ_POWER_RES :
@@ -1051,6 +1189,8 @@ static aml_status_t handle_extended(const uint8_t** p, const uint8_t* end,
         char leaf[4];
         aml_object_t* parent = resolve_name(p, end, scope, true, leaf);
         if (!parent) return AML_ERR_BOUNDS;
+        if (!AmlLeafNamed(leaf, sub == ExtMutexOp ? "Mutex" : "Event"))
+            return AML_ERR_BAD_OPCODE;
         obj_create_child(parent, leaf,
             sub == ExtMutexOp ? AML_OBJ_MUTEX : AML_OBJ_EVENT);
         if (sub == ExtMutexOp && *p < end) (*p)++;
@@ -1078,6 +1218,7 @@ static aml_status_t parse_one(const uint8_t** p, const uint8_t* end,
         char leaf[4];
         aml_object_t* parent = resolve_name(p, end, scope, true, leaf);
         if (!parent) return AML_ERR_BOUNDS;
+        if (!AmlLeafNamed(leaf, "Name")) return AML_ERR_BAD_OPCODE;
         aml_object_t* o = obj_create_child(parent, leaf, AML_OBJ_NAME);
         if (!o) return AML_ERR_NOMEM;
         return handle_named_data(p, end, o);
@@ -1090,6 +1231,7 @@ static aml_status_t parse_one(const uint8_t** p, const uint8_t* end,
         char leaf[4];
         aml_object_t* parent = resolve_name(p, end, scope, true, leaf);
         if (!parent) return AML_ERR_BOUNDS;
+        if (!AmlLeafNamed(leaf, "Alias")) return AML_ERR_BAD_OPCODE;
         aml_object_t* a = obj_create_child(parent, leaf, AML_OBJ_ALIAS);
         if (a) a->v.alias.target = src;
         return AML_OK;
@@ -1108,6 +1250,11 @@ static aml_status_t parse_term_list(const uint8_t* aml, uint32_t len,
         const uint8_t* before = p;
         aml_status_t s = parse_one(&p, end, scope, depth);
         if (s == AML_ERR_DEEP_NEST || s == AML_ERR_NOMEM) return s;
+        /* AML_REFUSED: the term was measured and rejected, and `p` already
+         * stands at the next TermObj. Resyncing over it would walk the block
+         * this pass just declined, one byte at a time, declaring objects out
+         * of whatever operand bytes happen to look like an opcode. */
+        if (s == AML_REFUSED && p > before) continue;
         if (p == before || s == AML_ERR_BAD_OPCODE) p = before + 1;
     }
     return AML_OK;
@@ -1915,46 +2062,82 @@ static bool AmlIdTextIs(const AmlValue *v, const char *id) {
     return false;
 }
 
-/* Does `dev`'s `seg` child name `id`? Read as the STATIC value §6.1.5
- * requires _HID and _CID to be; a method form is not run, because this
- * question is asked of EVERY Device in the namespace to find the handful
- * that are bridges, and running a method per device for it is a cost, and a
- * risk, out of all proportion to a form no shipping firmware uses. */
-static bool AmlNamedIdIs(aml_object_t *dev, const char *seg, const char *id) {
-    aml_object_t *n = AmlChild(dev, seg);
-    if (!n) return false;
-    if (n->type != AML_OBJ_INTEGER && n->type != AML_OBJ_STRING &&
-        n->type != AML_OBJ_PACKAGE)
-        return false;
+/* One id value — or one package of them — against the seven characters of
+ * `id`. ACPI 6.5 §6.1.2 lets _CID hold a single id or a package of them,
+ * listed most specific first; any of them naming the id asked for matches. */
+static bool AmlIdValueIs(const AmlValue *v, const char *who, const char *id) {
+    if (v->type != AML_OBJ_PACKAGE) return AmlIdTextIs(v, id);
 
-    AmlValue v;
-    if (!AmlValueOfNode(n, n->name, &v)) return false;
-    if (v.type != AML_OBJ_PACKAGE) return AmlIdTextIs(&v, id);
-
-    /* ACPI 6.5 §6.1.2 lets _CID hold one id or a package of them, listed
-     * most specific first. Any of them naming the id asked for is a match. */
-    const uint8_t *q = v.bytes;
-    for (uint32_t i = 0; i < v.count && q && q < v.bytes_end; i++) {
+    const uint8_t *q = v->bytes;
+    for (uint32_t i = 0; i < v->count && q && q < v->bytes_end; i++) {
         AmlValue e;
-        if (!AmlReadOperand(&q, v.bytes_end, v.scope, NULL, false, n->name,
-                            &e))
+        if (!AmlReadOperand(&q, v->bytes_end, v->scope, NULL, false, who, &e))
             return false;
         if (AmlIdTextIs(&e, id)) return true;
     }
     return false;
 }
 
-/* ‼ _CID COUNTS, AND ASKING ONLY _HID MISSED BRIDGES.
+/*
+ * ‼ _HID IS A NAME ON SOME BOARDS AND A METHOD ON OTHERS, AND READING ONLY
+ *   THE FIRST FORM LOSES THE BRIDGE.
  *
- * ACPI 6.5 §6.1.2: a device whose _HID is vendor-specific declares what it
- * is COMPATIBLE with in _CID, and a root bridge carrying a vendor _HID with
- * _CID EISAID("PNP0A03") is an ordinary shape on shipping firmware. Read
- * through _HID alone, such a bridge is simply not found: every function
- * under it falls back to the byte at 0x3C, and the refusal printed says "no
- * ACPI root bridge describes segment 0 bus N" — which names the board as
- * silent when in fact this kernel did not recognise what it said. */
+ * What stood here took _HID and _CID only as a static Integer, String or
+ * Package node and returned false, in silence, for anything else. ACPI 6.5
+ * §6.1.5 makes _HID an object "OR control method", and firmware that decides
+ * its id from what the OS said it was — the shape Intel's reference ASL uses
+ * around OSYS — writes Method (_HID). On such a board the root-bridge walk
+ * finds nothing, every PCI function falls back to config byte 0x3C, and the
+ * only sentence printed is "this firmware's namespace holds no PCI root
+ * bridge" about a namespace that holds one: precisely the defect the Scope
+ * fix above closed, wearing a different hat.
+ *
+ * So both are read the way every other object on this path is read — through
+ * AmlEvalNamed, which runs the method form and refuses aloud when it cannot.
+ * The cost argument that stood here ("a method per device") is answered by
+ * reading both ids ONCE per device, here, instead of once per id asked
+ * about; and a method that cannot be run is named on the console rather than
+ * turned into "this device is not a bridge".
+ *
+ * ‼ AND _CID COUNTS. §6.1.2: a device whose _HID is vendor-specific declares
+ * what it is COMPATIBLE with in _CID, and a root bridge carrying a vendor
+ * _HID with _CID EISAID("PNP0A03") is an ordinary shape on shipping
+ * firmware.
+ */
+typedef struct AmlDeviceIds {
+    AmlValue value[2];      /* _HID, then _CID */
+    bool     have[2];
+} AmlDeviceIds;
+
+static const char *const g_aml_id_seg[2] = { "_HID", "_CID" };
+
+static void AmlReadDeviceIds(aml_object_t *dev, AmlDeviceIds *out) {
+    memset(out, 0, sizeof(*out));
+    for (uint32_t i = 0; i < 2; i++) {
+        aml_object_t *n = AmlChild(dev, g_aml_id_seg[i]);
+        if (!n) continue;
+        if (!AmlEvalNamed(n, &out->value[i])) {
+            kprintf("[AML] device %s declares %s in a form this evaluator "
+                    "cannot read, so what it is cannot be known here — if it "
+                    "is a bridge or an interrupt link, it will be missed\n",
+                    dev->name, g_aml_id_seg[i]);
+            continue;
+        }
+        out->have[i] = true;
+    }
+}
+
+static bool AmlIdsName(const AmlDeviceIds *ids, const char *id) {
+    for (uint32_t i = 0; i < 2; i++)
+        if (ids->have[i] && AmlIdValueIs(&ids->value[i], g_aml_id_seg[i], id))
+            return true;
+    return false;
+}
+
 static bool AmlHidIs(aml_object_t *dev, const char *id) {
-    return AmlNamedIdIs(dev, "_HID", id) || AmlNamedIdIs(dev, "_CID", id);
+    AmlDeviceIds ids;
+    AmlReadDeviceIds(dev, &ids);
+    return AmlIdsName(&ids, id);
 }
 
 /*
@@ -1984,6 +2167,25 @@ static bool AmlOptionalInteger(aml_object_t *dev, const char *seg,
  * The current interrupt setting of one PCI Interrupt Link device, read out of
  * the resource template its _CRS returns.
  *
+ * ‼ WHAT `index` COUNTS, AND WHAT IT COUNTED BEFORE.
+ * ACPI 6.5 §6.2.13 defines a _PRT entry's Source Index, when Source names a
+ * link, as the index "which indicates which resource descriptor in the
+ * resource template of the device pointed to in the Source field this
+ * interrupt is allocated from" — a DESCRIPTOR in the template, not an
+ * interrupt inside one descriptor. What stood here walked the sixteen mask
+ * bits of one IRQ descriptor and took the index-th bit that was set, then
+ * stamped the answer "the link's own _CRS" with `wiring_known` true. The two
+ * readings agree only for a single-descriptor, single-bit template. On a
+ * link whose mask carries several bits — which is what an UNCONFIGURED link
+ * returns, and real firmware does return it — that handed back a confident
+ * GSI which is not the link's setting, and a device armed on a GSI nobody
+ * drives is the exact failure this whole path exists to prevent.
+ *
+ * So `index` selects the descriptor, and the descriptor it selects must name
+ * ONE interrupt: §6.2.2 makes _CRS "the system resources currently allocated
+ * to this device", and a link that currently carries one interrupt says one.
+ * Anything else is refused by name, with the count printed.
+ *
  * ACPI 6.5 §6.4.2.1, IRQ Descriptor: the two mask bytes carry one bit per
  * 8259 interrupt, and the optional third byte is the Information byte —
  * "Bit[0] Interrupt Mode: 1 = Edge Triggered, 0 = Level Triggered", "Bit[3]
@@ -1999,77 +2201,97 @@ static bool AmlOptionalInteger(aml_object_t *dev, const char *seg,
 static bool AmlIrqFromResources(const uint8_t *p, const uint8_t *end,
                                  uint32_t index, const char *who,
                                  AmlRoute *out) {
+    uint32_t at = 0;                 /* which descriptor of the template */
+
     while (p < end) {
         uint8_t tag = *p;
-
         if (tag == 0x79) break;                       /* End Tag — §6.4.2.9 */
 
-        if ((tag & 0x80u) == 0) {                     /* small descriptor */
-            uint32_t len  = (uint32_t)(tag & 0x07u);
-            uint8_t  name = (uint8_t)((tag >> 3) & 0x0Fu);
+        const uint8_t *body;
+        uint32_t       len;
+        bool           small = ((tag & 0x80u) == 0);
+        if (small) {
+            len = (uint32_t)(tag & 0x07u);
             if (p + 1 + len > end) break;
-            if (name == 0x04 && len >= 2) {           /* IRQ descriptor */
-                /* SourceIndex counts the interrupts this descriptor offers.
-                 * A configured link offers exactly one and every _PRT entry
-                 * naming it asks for number 0, which is where the two
-                 * readings of §6.2.13 — "which descriptor" and "which
-                 * interrupt in it" — say the same thing. */
-                uint32_t mask = (uint32_t)p[1] | ((uint32_t)p[2] << 8);
-                uint32_t seen = 0;
-                for (uint32_t bit = 0; bit < 16; bit++) {
-                    if (!(mask & (1u << bit))) continue;
-                    if (seen++ != index) continue;
-                    out->gsi = bit;
-                    if (len >= 3) {
-                        uint8_t f = p[3];
-                        out->level      = ((f & 0x01u) == 0);
-                        out->active_low = ((f & 0x08u) != 0);
-                        out->shareable  = ((f & 0x10u) != 0);
-                    } else {
-                        out->level      = false;
-                        out->active_low = false;
-                        out->shareable  = false;
-                    }
-                    out->wiring_known = true;
-                    out->named_by     = "the link's own _CRS";
-                    return true;
-                }
-                if (seen == 0) {
-                    kprintf("[AML] interrupt link %s holds no interrupt in "
-                            "its _CRS: it is not configured, and configuring "
-                            "it means writing the chipset's routing register "
-                            "through _SRS, which this evaluator does not do\n",
-                            who);
-                    return false;
-                }
-                kprintf("[AML] interrupt link %s: its _CRS offers %u "
-                        "interrupts and the routing entry asks for number "
-                        "%u\n", who, seen, index);
-                return false;
-            }
-            p += 1 + len;
-            continue;
+            body = p + 1;
+        } else {
+            /* Large descriptor: the two bytes after the tag are its length. */
+            if (p + 3 > end) break;
+            len  = (uint32_t)p[1] | ((uint32_t)p[2] << 8);
+            if (p + 3 + len > end) break;
+            body = p + 3;
         }
 
-        /* Large descriptor: the two bytes after the tag are its length. */
-        if (p + 3 > end) break;
-        uint32_t len = (uint32_t)p[1] | ((uint32_t)p[2] << 8);
-        if (p + 3 + len > end) break;
-        if (tag == 0x89) {                            /* Extended Interrupt */
-            if (len < 2) break;
-            uint8_t flags = p[3];
-            uint8_t count = p[4];
-            if (index >= count) {
-                kprintf("[AML] interrupt link %s: its extended interrupt "
-                        "descriptor carries %u numbers and the routing entry "
-                        "asks for number %u\n", who, count, index);
+        if (at++ != index) { p = body + len; continue; }
+
+        if (small && ((tag >> 3) & 0x0Fu) == 0x04 && len >= 2) {
+            /* §6.4.2.1 IRQ descriptor: two mask bytes, one bit per 8259
+             * interrupt, and the optional Information byte. */
+            uint32_t mask = (uint32_t)body[0] | ((uint32_t)body[1] << 8);
+            uint32_t seen = 0, only = 0;
+            for (uint32_t bit = 0; bit < 16; bit++)
+                if (mask & (1u << bit)) { seen++; only = bit; }
+
+            if (seen == 0) {
+                kprintf("[AML] interrupt link %s holds no interrupt in its "
+                        "_CRS: it is not configured, and configuring it "
+                        "means writing the chipset's routing register "
+                        "through _SRS, which this evaluator does not do\n",
+                        who);
                 return false;
             }
-            uint32_t off = 5u + 4u * index;
-            if (off + 4u > 3u + len) break;
-            out->gsi = (uint32_t)p[off] | ((uint32_t)p[off + 1] << 8) |
-                       ((uint32_t)p[off + 2] << 16) |
-                       ((uint32_t)p[off + 3] << 24);
+            if (seen > 1) {
+                kprintf("[AML] interrupt link %s: its _CRS offers %u "
+                        "interrupts at once, so it names no current setting "
+                        "— §6.2.2 makes _CRS the resources allocated NOW, "
+                        "and picking one of them would be this kernel "
+                        "choosing the link's routing instead of reading "
+                        "it\n", who, seen);
+                return false;
+            }
+
+            out->gsi = only;
+            if (len >= 3) {
+                uint8_t f = body[2];
+                out->level      = ((f & 0x01u) == 0);
+                out->active_low = ((f & 0x08u) != 0);
+                out->shareable  = ((f & 0x10u) != 0);
+            } else {
+                out->level      = false;
+                out->active_low = false;
+                out->shareable  = false;
+            }
+            out->wiring_known = true;
+            out->named_by     = "the link's own _CRS";
+            return true;
+        }
+
+        if (!small && tag == 0x89 && len >= 2) {      /* Extended Interrupt */
+            uint8_t flags = body[0];
+            uint8_t count = body[1];
+            if (count == 0) {
+                kprintf("[AML] interrupt link %s holds no interrupt in its "
+                        "_CRS: it is not configured, and configuring it "
+                        "means writing the chipset's routing register "
+                        "through _SRS, which this evaluator does not do\n",
+                        who);
+                return false;
+            }
+            if (count > 1) {
+                kprintf("[AML] interrupt link %s: the descriptor its routing "
+                        "entry points at lists %u interrupts at once, so it "
+                        "names no current setting — §6.2.2 makes _CRS the "
+                        "resources allocated NOW\n", who, count);
+                return false;
+            }
+            if (len < 2u + 4u) {
+                kprintf("[AML] interrupt link %s: its extended interrupt "
+                        "descriptor says it carries one interrupt and is too "
+                        "short to hold it\n", who);
+                return false;
+            }
+            out->gsi = (uint32_t)body[2] | ((uint32_t)body[3] << 8) |
+                       ((uint32_t)body[4] << 16) | ((uint32_t)body[5] << 24);
             out->level        = ((flags & 0x02u) == 0);
             out->active_low   = ((flags & 0x04u) != 0);
             out->shareable    = ((flags & 0x08u) != 0);
@@ -2077,11 +2299,16 @@ static bool AmlIrqFromResources(const uint8_t *p, const uint8_t *end,
             out->named_by     = "the link's own _CRS";
             return true;
         }
-        p += 3 + len;
+
+        kprintf("[AML] interrupt link %s: the routing entry points at "
+                "descriptor %u of its _CRS, and that descriptor (tag 0x%02x) "
+                "carries no interrupt\n", who, index, tag);
+        return false;
     }
 
-    kprintf("[AML] interrupt link %s: its _CRS holds no interrupt descriptor "
-            "this kernel recognises\n", who);
+    kprintf("[AML] interrupt link %s: its _CRS holds no descriptor number "
+            "%u, so nothing in it says which interrupt the routing entry "
+            "means\n", who, index);
     return false;
 }
 
@@ -2122,28 +2349,90 @@ static bool AmlLinkRoute(aml_object_t *link, uint32_t index, AmlRoute *out) {
     return AmlIrqFromResources(v.bytes, v.bytes_end, index, link->name, out);
 }
 
+/*
+ * A name path written as ASCII TEXT, resolved against `scope`.
+ *
+ * ‼ A _PRT ENTRY'S SOURCE COMES IN TWO SPELLINGS AND ONLY ONE WAS READ.
+ * The ASL compiler normally emits Source as a NameString operand, which
+ * AmlReadOperand hands back as the object itself. Shipping firmware also
+ * emits it as a String, and ACPICA accepts one there —
+ * acpi_rs_create_pci_routing_table takes ACPI_TYPE_STRING in that field — so
+ * a board that writes the string form works under every other OS and had its
+ * entry refused here. Together with the all-or-nothing element loop that
+ * used to stand below, one such entry threw away the routing of every device
+ * listed after it.
+ *
+ * The grammar is §20.2.2's, spelled in characters instead of bytes: an
+ * optional '\' naming the root, any number of '^' each naming a parent, and
+ * name segments separated by '.'. A segment shorter than four characters is
+ * padded with '_', which is what makes a NameSeg four bytes to begin with.
+ * §5.3's search rules apply here exactly as they do to the encoded form —
+ * only a single bare segment is searched for upward.
+ */
+static aml_object_t *AmlNodeForTextPath(const uint8_t *text, uint32_t len,
+                                         aml_object_t *scope) {
+    aml_object_t *base = scope ? scope : &g_root_obj;
+    uint32_t     i        = 0;
+    bool         rooted   = false;
+    bool         prefixed = false;
+
+    if (i < len && text[i] == '\\') { base = &g_root_obj; rooted = true; i++; }
+    while (i < len && text[i] == '^') {
+        if (!base->parent) return NULL;     /* §5.3: no names above the root */
+        base = base->parent;
+        prefixed = true;
+        i++;
+    }
+    if (i >= len) return base;
+
+    uint32_t segs = 1;
+    for (uint32_t k = i; k < len; k++) if (text[k] == '.') segs++;
+    bool search_rules = (!rooted && !prefixed && segs == 1);
+
+    aml_object_t *cur = base;
+    while (i < len) {
+        char     seg[4] = { '_', '_', '_', '_' };
+        uint32_t n      = 0;
+        while (i < len && text[i] != '.') {
+            if (n < 4) seg[n] = (char)text[i];
+            n++;
+            i++;
+        }
+        if (i < len) i++;                            /* the '.' */
+        if (n == 0 || n > 4) return NULL;
+
+        aml_object_t *next = obj_find_child(cur, seg);
+        if (!next && search_rules) {
+            for (aml_object_t *up = base->parent; up; up = up->parent) {
+                next = obj_find_child(up, seg);
+                if (next) break;
+            }
+        }
+        if (!next) return NULL;
+        cur = next;
+    }
+    return cur;
+}
+
 /* One _PRT element: Package { Address, Pin, Source, SourceIndex } —
  * ACPI 6.5 §6.2.13. */
-static bool AmlPrtElement(const uint8_t **p, const uint8_t *end,
-                           aml_object_t *scope, const char *who,
+static bool AmlPrtElement(const AmlValue *row, const char *who,
                            AmlPrtEntry *e) {
-    AmlValue row;
-    if (!AmlReadOperand(p, end, scope, NULL, false, who, &row)) return false;
-    if (row.type != AML_OBJ_PACKAGE) {
+    if (row->type != AML_OBJ_PACKAGE) {
         kprintf("[AML] %s._PRT: an entry is %s where a package of four was "
-                "expected\n", who, AmlTypeName(row.type));
+                "expected\n", who, AmlTypeName(row->type));
         return false;
     }
-    if (row.count < 4) {
+    if (row->count < 4) {
         kprintf("[AML] %s._PRT: an entry declares %u fields; §6.2.13 gives it "
-                "four\n", who, row.count);
+                "four\n", who, row->count);
         return false;
     }
 
-    const uint8_t *q = row.bytes;
+    const uint8_t *q = row->bytes;
     AmlValue f[4];
     for (uint32_t i = 0; i < 4; i++)
-        if (!AmlReadOperand(&q, row.bytes_end, row.scope, NULL, false, who,
+        if (!AmlReadOperand(&q, row->bytes_end, row->scope, NULL, false, who,
                             &f[i]))
             return false;
 
@@ -2177,9 +2466,29 @@ static bool AmlPrtElement(const uint8_t **p, const uint8_t *end,
          * allocated from the global interrupt pool" and Source Index "is the
          * global system interrupt number". */
         e->direct = true;
+    } else if (f[2].type == AML_OBJ_STRING) {
+        uint32_t tlen = (uint32_t)(f[2].bytes_end - f[2].bytes);
+        if (tlen == 0) {
+            /* A Source that is an empty string names no device, so the only
+             * reading §6.2.13 leaves is its other one: the interrupt comes
+             * from the global pool and Source Index is its number. ACPICA
+             * and Linux read an empty Source the same way. */
+            e->direct = true;
+        } else {
+            e->link = AmlNodeForTextPath(f[2].bytes, tlen, row->scope);
+            if (!e->link) {
+                kprintf("[AML] %s._PRT: an entry names \"%.*s\" as its "
+                        "interrupt source and no object in the namespace "
+                        "answers to that path\n",
+                        who, (int)tlen, (const char *)f[2].bytes);
+                return false;
+            }
+            e->direct = false;
+        }
     } else {
-        kprintf("[AML] %s._PRT: an entry's Source is neither zero nor a name\n",
-                who);
+        kprintf("[AML] %s._PRT: an entry's Source is %s — §6.2.13 gives it "
+                "the integer zero or the name of an interrupt link\n",
+                who, AmlTypeName(f[2].type));
         return false;
     }
     return true;
@@ -2230,19 +2539,43 @@ static AmlPrtTable *AmlPrtTableFor(aml_object_t *dev) {
         return t;
     }
 
+    /*
+     * ‼ ONE ENTRY THIS KERNEL CANNOT READ IS ONE ENTRY, NOT THE TABLE.
+     *
+     * What stood here broke out of the loop on the first refused element, so
+     * a single entry naming a link that this pass missed — declared behind
+     * control flow, which aml.h admits happens — discarded the routing of
+     * every device listed AFTER it, and the whole bus fell back to config
+     * byte 0x3C. The stand could never show it: all 128 of the emulator's
+     * entries are the same shape.
+     *
+     * The two failures are not the same failure. A refused ELEMENT is
+     * skipped and named: the entries around it are still the board's own
+     * statement about other devices, and nothing about them is made less
+     * true by the one that could not be read. A stream that cannot be
+     * ADVANCED is the end of the table — the next element's first byte is no
+     * longer known, so anything read past it would be invented.
+     */
     const uint8_t *q = v.bytes;
-    uint32_t got = 0;
-    while (got < v.count && q < v.bytes_end) {
-        if (!AmlPrtElement(&q, v.bytes_end, v.scope, dev->name,
-                           &t->entry[got]))
+    uint32_t got = 0, skipped = 0, seen = 0;
+    while (seen < v.count && q < v.bytes_end) {
+        AmlValue row;
+        if (!AmlReadOperand(&q, v.bytes_end, v.scope, NULL, false, dev->name,
+                            &row)) {
+            kprintf("[AML] %s._PRT: entry %u cannot be stepped over, so "
+                    "where the next one begins is no longer known — the "
+                    "table ends here\n", dev->name, seen);
             break;
-        got++;
+        }
+        seen++;
+        if (AmlPrtElement(&row, dev->name, &t->entry[got])) got++;
+        else skipped++;
     }
     t->count = got;
     if (got != v.count) {
-        kprintf("[AML] %s._PRT declares %u entries and %u of them were read; "
-                "the rest are refused, not filled in\n",
-                dev->name, v.count, got);
+        kprintf("[AML] %s._PRT declares %u entries: %u read, %u refused one "
+                "by one, %u never reached\n",
+                dev->name, v.count, got, skipped, v.count - seen);
     } else {
         kprintf("[AML] %s._PRT: %u routing entries read\n", dev->name, got);
     }
@@ -2370,8 +2703,13 @@ void AmlRoutingAdopt(void) {
          n = AmlWalkNext(n, &g_root_obj)) {
         if (n->type != AML_OBJ_DEVICE) continue;
         /* ACPI 6.5 §6.1.5 / Table 6.6: PNP0A03 is a PCI host bridge and
-         * PNP0A08 a PCI Express one. Both carry a _PRT. */
-        if (!AmlHidIs(n, "PNP0A03") && !AmlHidIs(n, "PNP0A08")) continue;
+         * PNP0A08 a PCI Express one. Both carry a _PRT. Read once per
+         * device, asked about twice — a Method form is run here and nowhere
+         * else in this loop. */
+        AmlDeviceIds ids;
+        AmlReadDeviceIds(n, &ids);
+        if (!AmlIdsName(&ids, "PNP0A03") && !AmlIdsName(&ids, "PNP0A08"))
+            continue;
 
         uint64_t seg = 0, bbn = 0;
         bool have_seg = false, have_bbn = false;
@@ -2437,24 +2775,61 @@ void AmlRoutingAdopt(void) {
     }
 }
 
-/* One namespace Device under `parent` whose _ADR names this function.
+/*
+ * One namespace Device under `parent` whose _ADR names this function.
+ *
  * ACPI 6.5 §6.1.1: _ADR for a PCI device is the device number in the high
  * word and the function number in the low word; 0xFFFF in the low word means
- * every function. */
+ * every function.
+ *
+ * ‼ _ADR IS AN OBJECT OR A CONTROL METHOD, AND "NOT FOUND" IS NOT THE SAME
+ *   FACT AS "NOT DECLARED".
+ *
+ * What stood here read the node raw — `adr->type != AML_OBJ_INTEGER`, skip —
+ * and said nothing. A bridge whose _ADR is a method therefore had no Device
+ * as far as this walk was concerned: its own _PRT was never asked, the §9.1
+ * rotation answered in its place, and PciSummons stamped the result "the
+ * ACPI routing table". A wrong GSI carrying the board's own signature is
+ * worse than no answer at all, which is why the two outcomes are now
+ * separated. The method form is run; and if any sibling's _ADR cannot be
+ * read, "no Device here" becomes UNCERTAIN — said aloud, and the caller
+ * refuses instead of rotating past a bridge that may have answered.
+ */
 static aml_object_t *AmlDeviceByAdr(aml_object_t *parent, uint8_t device,
-                                     uint8_t function) {
+                                     uint8_t function, bool *uncertain) {
+    *uncertain = false;
     if (!parent) return NULL;
     uint64_t want_exact = ((uint64_t)device << 16) | function;
     uint64_t want_any   = ((uint64_t)device << 16) | 0xFFFFu;
+    bool unreadable = false;
+
     for (aml_object_t *c = parent->child; c; c = c->sibling) {
         if (c->type != AML_OBJ_DEVICE) continue;
         aml_object_t *adr = AmlChild(c, "_ADR");
-        if (!adr || adr->type != AML_OBJ_INTEGER) continue;
-        if (adr->v.integer == want_exact || adr->v.integer == want_any)
-            return c;
+        if (!adr) continue;            /* §6.1.1 leaves _ADR optional */
+        AmlValue v;
+        if (!AmlEvalNamed(adr, &v) || v.type != AML_OBJ_INTEGER) {
+            kprintf("[AML] device %s under %s declares an _ADR this "
+                    "evaluator cannot read as an integer, so whether it is "
+                    "the bridge being asked about is not known\n",
+                    c->name, parent->name);
+            unreadable = true;
+            continue;
+        }
+        if (v.integer == want_exact || v.integer == want_any) return c;
     }
+
+    *uncertain = unreadable;
     return NULL;
 }
+
+/* One level of the walk from the root bus down to the function asked about:
+ * the namespace Device that owns that bus, and whether "no Device here" is
+ * the firmware's silence or this kernel's failure to read one. */
+typedef struct AmlBusOwner {
+    aml_object_t *node;
+    bool          uncertain;
+} AmlBusOwner;
 
 bool AmlRouteForPciPin(uint16_t segment, uint8_t root_bus,
                        const AmlPciStep *path, uint32_t depth,
@@ -2478,17 +2853,21 @@ bool AmlRouteForPciPin(uint16_t segment, uint8_t root_bus,
     /* The namespace Device that owns the bus each step sits on. owner[0] is
      * the root bridge; owner[i] is the bridge declared for step i-1, when the
      * firmware declared one — a bridge it did not declare simply has no _PRT
-     * of its own, and the swizzle below is then the answer. */
-    aml_object_t **owner =
-        (aml_object_t **)kmalloc((size_t)depth * sizeof(*owner));
+     * of its own, and the swizzle below is then the answer. `uncertain`
+     * keeps those two apart from the third case: a bridge this kernel could
+     * not recognise because an _ADR beside it would not read. */
+    AmlBusOwner *owner =
+        (AmlBusOwner *)kmalloc((size_t)depth * sizeof(*owner));
     if (!owner) {
         kprintf("[AML] the heap has no room to walk %u bridge levels\n", depth);
         return false;
     }
-    owner[0] = rb->node;
+    owner[0].node      = rb->node;
+    owner[0].uncertain = false;
     for (uint32_t i = 1; i < depth; i++)
-        owner[i] = AmlDeviceByAdr(owner[i - 1], path[i - 1].device,
-                                  path[i - 1].function);
+        owner[i].node = AmlDeviceByAdr(owner[i - 1].node, path[i - 1].device,
+                                       path[i - 1].function,
+                                       &owner[i].uncertain);
 
     /*
      * Up the hierarchy, one bus at a time.
@@ -2505,7 +2884,25 @@ bool AmlRouteForPciPin(uint16_t segment, uint8_t root_bus,
     uint8_t pin0 = (uint8_t)(intx_pin - 1);
     bool answered = false, named = false;
     for (uint32_t i = depth; i-- > 0; ) {
-        AmlPrtTable *t = owner[i] ? AmlPrtTableFor(owner[i]) : NULL;
+        /* ‼ An UNCERTAIN level is not a silent one. The bridge at this step
+         * may be declared with a _PRT of its own that this kernel could not
+         * find, and rotating the pin past it would hand back a number
+         * belonging to a different device — under the routing table's name,
+         * which is the most trusted source there is. */
+        if (!owner[i].node && owner[i].uncertain) {
+            kprintf("[AML] segment %u bus %u: the namespace Device for the "
+                    "bridge at %u.%u could not be identified, because an "
+                    "_ADR beside it would not read — so it may be there with "
+                    "a routing table of its own, and rotating the pin past "
+                    "it would answer with another device's interrupt. "
+                    "Refused\n",
+                    (unsigned)segment, (unsigned)root_bus,
+                    (unsigned)path[i - 1].device,
+                    (unsigned)path[i - 1].function);
+            kfree(owner);
+            return false;
+        }
+        AmlPrtTable *t = owner[i].node ? AmlPrtTableFor(owner[i].node) : NULL;
         if (t && AmlPrtLookup(t, path[i].device, pin0, out, &named)) {
             answered = true;
             break;

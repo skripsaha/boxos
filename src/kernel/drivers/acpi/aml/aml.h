@@ -28,8 +28,8 @@
  * standalone scanner in acpi_dsdt.c, not from anything in this file.
  *
  * ‼ WHAT DOES RUN, AND WHY IT IS NOT THE EXECUTOR COMING BACK.
- * A PCI interrupt line's true destination is in _PRT, and every board on
- * earth writes _PRT as either a Package or four lines of AML:
+ * A PCI interrupt line's true destination is in _PRT, which a board writes
+ * as a Package, or as the four lines of AML that pick between two of them:
  *
  *     Method (_PRT, 0) { If (PICM) { Return (AR00) } Return (PR00) }
  *
@@ -80,6 +80,26 @@
  *     that resync is silent. It is a known limit of this pass — declarations
  *     nested behind control flow can be missed — not a property of it.
  *
+ * ‼ AND THERE IS A SHAPE OF _PRT IT CANNOT FOLLOW. MEASURED, NOT FEARED.
+ * When an entry's Source is a PCI Interrupt Link rather than the integer
+ * zero, the interrupt number is the link's CURRENT setting, and that setting
+ * lives in the chipset's PIRQ routing register — the link's _CRS is what
+ * reads it. The i440fx firmware this kernel is tested against writes
+ *
+ *     Method (_CRS, 0) { Return (IQCR (PRQ0)) }
+ *
+ * and PRQ0 is a Field over OperationRegion (P40C, PCI_Config, 0x60, 4). No
+ * arrangement of If, Store and Return reaches that number: it is a PCI
+ * configuration read, which is the hardware path deliberately removed from
+ * this file. So the evaluator refuses aloud and the line keeps its weaker
+ * source, and widening it is the owner's decision and not this file's.
+ *
+ * A board that has been told \_PIC(1) and answers with a directly-numbered
+ * entry — Source the integer zero, Source Index the global system interrupt
+ * — needs none of that, and that is the ordinary APIC-mode form: the AR00
+ * package of the Intel reference ASL, against the PR00 package of link names
+ * it keeps for PIC mode.
+ *
  * Bounded by construction: the object pool is a chain of chunks that grows
  * with the firmware (an ASRock B365M Pro4-F declares 4615 objects) and says
  * out loud when the heap cannot follow; scope nesting is capped, because
@@ -93,6 +113,16 @@
 
 typedef enum {
     AML_OK = 0,
+    /* The term was MEASURED IN FULL and then refused — its package length
+     * was read, the stream already stands at the next TermObj, and what was
+     * rejected is only the declaration inside it. The TermList must not then
+     * resynchronise a byte at a time over a block whose length it knows:
+     * scanning a Device body byte by byte declares objects out of misaligned
+     * operand bytes, which is the hazard handle_extended already refuses to
+     * take with the extended opcodes. That is the whole difference from
+     * AML_ERR_BAD_OPCODE, which says the opposite — these bytes could not be
+     * measured, and stepping one byte is all that is left to do. */
+    AML_REFUSED = 1,
     AML_ERR_NOT_LOADED = -1,
     AML_ERR_BAD_OPCODE = -2,
     AML_ERR_DEEP_NEST  = -3,
