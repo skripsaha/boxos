@@ -61,7 +61,12 @@ public:
     std::uint32_t            cpu_k_cores() const noexcept { return s_.cpu_k_cores; }
     std::uint32_t            cpu_app_cores() const noexcept { return s_.cpu_app_cores; }
     std::uint32_t            process_count() const noexcept { return s_.process_count; }
-    std::uint32_t            pit_freq_hz() const noexcept { return s_.pit_freq_hz; }
+    // The system tick, as a pair. The rate on its own used to be called
+    // pit_freq_hz, and on every board where the HPET takes IRQ0 through
+    // LegacyReplacement that named a chip the kernel never programmed, so the
+    // source travels with it. Compare against SYSINFO_TICK_SOURCE_*.
+    std::uint32_t            tick_freq_hz() const noexcept { return s_.tick_freq_hz; }
+    std::uint8_t             tick_source() const noexcept { return s_.tick_source; }
     bool                     multicore() const noexcept { return s_.multicore_active != 0; }
     bool                     invariant_tsc() const noexcept { return s_.has_invariant_tsc != 0; }
     bool                     waitpkg() const noexcept { return s_.has_waitpkg != 0; }

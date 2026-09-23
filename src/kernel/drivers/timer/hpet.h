@@ -80,6 +80,12 @@ bool hpet_start_legacy_tick(uint32_t hz);
 /* True when LegacyReplacement is active and HPET is sourcing IRQ0. */
 bool hpet_tick_active(void);
 
+/* The rate timer 0 actually delivers on IRQ0, in Hz, derived from the interval
+ * this kernel wrote into the comparator and the period the controller states —
+ * not the rate that was requested, which lands on a whole number of counter
+ * ticks only by luck. 0 when the HPET is not sourcing the tick. */
+uint32_t hpet_tick_hz(void);
+
 /* Read the main counter (returns nanoseconds-equivalent monotonic counter
  * in microseconds since hpet_init success). Returns 0 if HPET absent. */
 uint64_t hpet_now_us(void);

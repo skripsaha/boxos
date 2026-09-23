@@ -440,11 +440,11 @@ int sysinfo(system_info_t *info)
     memcpy(&info->cpu_k_cores,  blob + 76, sizeof(uint32_t));
     memcpy(&info->cpu_app_cores,blob + 80, sizeof(uint32_t));
     memcpy(&info->process_count,blob + 84, sizeof(uint32_t));
-    memcpy(&info->pit_freq_hz,  blob + 88, sizeof(uint32_t));
+    memcpy(&info->tick_freq_hz, blob + 88, sizeof(uint32_t));
     info->multicore_active  = blob[92];
     info->has_invariant_tsc = blob[93];
     info->has_waitpkg       = blob[94];
-    info->reserved          = 0;
+    info->tick_source       = blob[95];
     return 0;
 }
 

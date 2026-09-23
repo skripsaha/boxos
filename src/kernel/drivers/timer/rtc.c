@@ -49,7 +49,13 @@
 
 typedef struct {
     uint64_t base_seconds;
-    uint64_t base_pit_ticks;
+    /* The monotonic microsecond reading taken at the same instant as
+     * base_seconds, on the same clock the rest of the kernel reports uptime
+     * with. It used to be a count of IRQ0 ticks, and that made the wall clock
+     * lose the whole boot: the tick counter cannot move before the BSP enables
+     * interrupts, which on the 2026-09-20 board happened 12.3 s after this
+     * reading was taken, and nothing ever went back for those seconds. */
+    uint64_t base_uptime_us;
     uint16_t year;
     uint8_t  month;
     uint8_t  day;
@@ -239,7 +245,7 @@ static uint8_t acpi_century_index(void) {
  * created_time and self-heal records, where no later boot corrects it. */
 static void rtc_declare_no_wall_clock(const char *why) {
     memset(&rtc_state, 0, sizeof(rtc_state));
-    rtc_state.base_pit_ticks = pit_get_ticks();
+    rtc_state.base_uptime_us = pit_get_uptime_us();
     kprintf("[RTC] no wall clock on this machine: %s. Boot time is unknown "
             "and will be reported as unknown — nothing is invented.\n", why);
 }
@@ -415,7 +421,7 @@ void rtc_init(void) {
                              + (uint64_t)hour * 3600
                              + (uint64_t)min * 60
                              + sec;
-    rtc_state.base_pit_ticks = pit_get_ticks();
+    rtc_state.base_uptime_us = pit_get_uptime_us();
     rtc_state.wall_known     = true;
 
     /* Leave the index register at CMOS_REG_SEC (0x00) with the
@@ -424,9 +430,12 @@ void rtc_init(void) {
      * register selection rather than whatever was last addressed. */
     outb(CMOS_ADDR, g_cmos_nmi_select | CMOS_REG_SEC);
 
-    debug_printf("[RTC] Initialized: %04u-%02u-%02u %02u:%02u:%02u (unix=%llu)\n",
-                 full_year, mon, day, hour, min, sec,
-                 rtc_state.base_seconds);
+    kprintf("[RTC] the CMOS reads %04u-%02u-%02u %02u:%02u:%02u (unix %llu) — "
+            "this kernel takes that as the wall clock's zero and carries it "
+            "forward on the same monotonic counter it reports uptime with, so "
+            "the two can no longer disagree about how long the machine has "
+            "been up\n",
+            full_year, mon, day, hour, min, sec, rtc_state.base_seconds);
 }
 
 void rtc_get_boxtime(BoxTime* out) {
@@ -466,12 +475,13 @@ uint64_t rtc_get_unix64(void) {
      * boot_unix_secs is zero. */
     if (!rtc_state.wall_known) return 0;
 
-    uint32_t freq = pit_get_frequency();
-    if (freq == 0) {
-        return rtc_state.base_seconds;
-    }
-    uint64_t elapsed_ticks = pit_get_ticks() - rtc_state.base_pit_ticks;
-    return rtc_state.base_seconds + elapsed_ticks / freq;
+    /* Elapsed on the same clock the base was taken on — pit_get_uptime_us()
+     * is the HPET main counter wherever there is one, and the tick
+     * accumulator only on a board without. There is no frequency to divide by
+     * and no tick to wait for, so this advances while interrupts are off,
+     * which is where a boot spends most of its length. */
+    uint64_t elapsed_us = pit_get_uptime_us() - rtc_state.base_uptime_us;
+    return rtc_state.base_seconds + elapsed_us / 1000000ULL;
 }
 
 uint64_t rtc_get_uptime_ns(void) {

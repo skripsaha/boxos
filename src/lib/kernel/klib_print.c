@@ -50,10 +50,22 @@ int kputnl(void)
 
 void kputchar(char c)
 {
-    /* Every byte the kernel says passes here — kprintf's characters under the
-     * console lock, the keyboard's echo without it — so this is where the log
-     * ring is fed and there is nowhere else to look. The serial line reads
-     * the ring (the Wire, serial.c): nothing here waits on a UART. */
+    /* kprintf's own bytes, one at a time, and nobody else's: the only caller
+     * is screen_emit below, so everything arriving here is already under
+     * g_kprintf_lock and inside the Canvas batch kprintf opened around its
+     * whole format string. That is what lets the Canvas assemble a multi-byte
+     * character out of these separate calls — it holds the part-built
+     * character only until the batch closes (canvas.c, print_utf8_byte_locked
+     * and batch_end_locked), and kprintf's batch does not close in the middle
+     * of one.
+     *
+     * This used to say that the keyboard's echo also came through here, and
+     * without the console lock. It has not since the line editor moved to
+     * boxlib: the echo is userspace text now and reaches the console as a
+     * HW_VGA_PUTSTRING, which mirrors its own bytes into the log ring at the
+     * hardware deck. So this is where the KERNEL's half of the ring is fed,
+     * not the whole of it. The serial line reads the ring (the Wire,
+     * serial.c): nothing here waits on a UART. */
     LogRingPut(c);
 
     if (c == '\n')

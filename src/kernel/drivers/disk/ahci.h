@@ -554,6 +554,43 @@ typedef struct {
     bool      ncq;                     // HBA SNCQ && device IDENTIFY word 76 bit 8
     bool      lba48;                   // 48-bit LBA addressing supported
 
+    /* WHAT IS ON THE CABLE, IN THE DRIVE'S OWN WORDS.
+     *
+     * A port number is a socket, not an identity. Everything above describes
+     * how this kernel must talk to whatever is plugged in; none of it says
+     * WHICH disk that is, so a drive swapped between two boots reads out
+     * identically and the exchange passes unnoticed. These three strings are
+     * the drive's answer to that, and they are kept rather than read and
+     * dropped because the port is built again on every re-admission
+     * (ahci_port_readmit) — the thing on the cable after a reseat may not be
+     * the thing that was on it before.
+     *
+     * IDENTIFY DEVICE, ACS-3 §7.12.7: words 27-46 Model number, words 10-19
+     * Serial number, words 23-26 Firmware revision. Each word holds two
+     * characters, high byte first, and the field is blank-padded — both are
+     * undone by ahci_id_string. Empty when the drive answered with nothing
+     * but pad, which is itself worth seeing. */
+    char      model[41];
+    char      serial[21];
+    char      firmware[9];
+
+    /* THE SPEED THE LINK SETTLED ON, which is not the speed either end can
+     * do. PxSSTS.SPD, read once the link is up (AHCI 1.3.1 §3.3.10: "Indicates
+     * the negotiated interface communication speed"); 0h is "no negotiated
+     * speed", 1h/2h/3h are Gen1 1.5 Gb/s, Gen2 3 Gb/s, Gen3 6 Gb/s. A cable or
+     * a connector that has degraded shows up here and nowhere else: the drive
+     * still works, every command still completes, and the machine is simply
+     * four times slower than the one the owner built. */
+    uint8_t   link_speed;
+
+    /* WHETHER A WRITE ON THIS PORT CAN BE MADE DURABLE AT ALL. IDENTIFY
+     * DEVICE word 83 bit 13, ACS-3 §7.12.7: FLUSH CACHE EXT supported. The
+     * drive's write cache answers a write the instant it lands in DRAM, so
+     * the only thing that turns "written" into "survives a power cut" is this
+     * command — and a drive that does not have it cannot be asked. Read from
+     * the same word the LBA48 bit above comes from. */
+    bool      flush_ext;
+
     /* Bitmask of command slots issued and awaiting completion. The IRQ
      * handler computes completions as issued_mask & ~outstanding, where
      * `outstanding` is PxSACT for NCQ ports or PxCI for non-NCQ ports. */

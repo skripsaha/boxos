@@ -45,7 +45,7 @@ typedef struct {
     bool     present;
     bool     leg_rt_cap;       /* LegacyReplacement-route capable per GCAP */
     bool     tick_active;      /* periodic legacy tick currently running */
-    uint32_t tick_hz;
+    uint64_t tick_interval;    /* main-counter ticks between timer-0 interrupts */
 } hpet_state_t;
 
 static hpet_state_t g_hpet = { 0 };
@@ -176,11 +176,16 @@ bool hpet_init(void) {
 
     const acpi_hpet_info_t *info = acpi_get_hpet();
     if (!info) {
-        debug_printf("[HPET] ACPI did not expose an HPET table\n");
+        kprintf("[HPET] ACPI describes no HPET on this machine — there is no "
+                "high-resolution counter here, so IRQ0 stays with the 8254 and "
+                "every time this kernel reports is counted out of those "
+                "interrupts\n");
         return false;
     }
     if (info->base == 0) {
-        debug_printf("[HPET] HPET base address is zero\n");
+        kprintf("[HPET] the ACPI HPET table places the controller at address "
+                "zero, which is nowhere — firmware left the table unfilled, and "
+                "this kernel will not go looking for it\n");
         return false;
     }
 
@@ -190,8 +195,9 @@ bool hpet_init(void) {
                                        VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE |
                                        VMM_FLAG_CACHE_DISABLE);
     if (!map) {
-        debug_printf("[HPET] vmm_map_mmio(0x%lx) failed\n",
-                     (unsigned long)info->base);
+        kprintf("[HPET] the register block firmware placed at 0x%lx could not be "
+                "mapped — this boot has no high-resolution counter, and IRQ0 "
+                "stays with the 8254\n", (unsigned long)info->base);
         return false;
     }
     g_hpet.base_virt = (volatile uint8_t *)map;
@@ -205,8 +211,11 @@ bool hpet_init(void) {
     uint64_t gcap = hpet_read64(HPET_REG_GCAP_ID);
     uint64_t period = gcap >> HPET_GCAP_PERIOD_SHIFT;
     if (period == 0 || period > 0x05F5E100ULL) {
-        debug_printf("[HPET] GCAP period 0x%lx out of spec range\n",
-                     (unsigned long)period);
+        kprintf("[HPET] the controller states %lu fs per tick, outside the "
+                "1..100000000 fs the specification allows (HPET 1.0a 2.3.4) — "
+                "firmware never initialised it, and every time derived from a "
+                "period like that would be wrong, so it is left alone\n",
+                (unsigned long)period);
         return false;
     }
 
@@ -254,14 +263,39 @@ bool hpet_init(void) {
     g_hpet.origin_ticks = hpet_read_mcnt();
     g_hpet.present      = true;
 
-    /* Frequency for the log line is 1e15 fs/s divided by the period — in
-     * kHz, so the canonical part reads 14318 kHz and not the "0 MHz" the
-     * old line printed by deriving it from the same truncated 1e9 ratio. */
-    debug_printf("[HPET] online: period=%lu fs (%lu kHz), %u timers, %s counter\n",
-                 (unsigned long)g_hpet.period_fs,
-                 (unsigned long)(1000000000000000ULL / g_hpet.period_fs / 1000ULL),
-                 g_hpet.num_timers,
-                 g_hpet.counter64 ? "64-bit" : "32-bit");
+    /* The line that lets a board answer for its own clock, and a kprintf
+     * because the machine that most needs answering is the one whose only
+     * diagnostic is a photograph of the screen.
+     *
+     * Frequency is 1e15 fs/s divided by the period the controller states, so
+     * the canonical part reads 14318180 Hz and not the "0 MHz" an older line
+     * printed off a truncated ratio. The WIDTH is spelled out with its
+     * consequence rather than tagged, because the width is what decides how a
+     * sample is taken — three MMIO reads or one — and whether the counter
+     * wraps inside a session. */
+    uint64_t counter_hz = 1000000000000000ULL / g_hpet.period_fs;
+    if (g_hpet.counter64) {
+        kprintf("[HPET] the counter runs at %lu Hz (the controller states %lu fs "
+                "per tick) and carries %u comparators; it is 64 bits wide, so "
+                "every sample costs three MMIO reads to prove the two halves "
+                "belong together, and it cannot wrap inside this machine's "
+                "lifetime\n",
+                (unsigned long)counter_hz, (unsigned long)g_hpet.period_fs,
+                g_hpet.num_timers);
+    } else {
+        /* 2^32 ticks at the stated period. The product cannot overflow: the
+         * period is bounded above by 1e8 fs two checks up, so 2^32 * period
+         * is at most 4.3e17. */
+        uint64_t wrap_s = (0x100000000ULL * g_hpet.period_fs)
+                          / 1000000000000000ULL;
+        kprintf("[HPET] the counter runs at %lu Hz (the controller states %lu fs "
+                "per tick) and carries %u comparators; it is only 32 bits wide, "
+                "so a sample is a single MMIO read, but it wraps every %lu s and "
+                "this kernel counts the laps itself — something must read it "
+                "more often than that or time stands still\n",
+                (unsigned long)counter_hz, (unsigned long)g_hpet.period_fs,
+                g_hpet.num_timers, (unsigned long)wrap_s);
+    }
     return true;
 }
 
@@ -301,6 +335,19 @@ void hpet_busy_wait_us(uint64_t us) {
 
 bool hpet_tick_active(void) { return g_hpet.tick_active; }
 
+uint32_t hpet_tick_hz(void) {
+    if (!g_hpet.tick_active || g_hpet.tick_interval == 0) return 0;
+    /* One tick period in femtoseconds: the interval this kernel wrote into
+     * the comparator times the period the controller states. That product is
+     * the requested period in microseconds times 1e9 by construction, so it
+     * stays under 1e15 and cannot overflow. Rounded to nearest, because the
+     * rate reported must be the closest whole hertz to what the silicon will
+     * deliver rather than a truncation of it. */
+    uint64_t tick_fs = g_hpet.tick_interval * g_hpet.period_fs;
+    if (tick_fs == 0) return 0;
+    return (uint32_t)((1000000000000000ULL + tick_fs / 2) / tick_fs);
+}
+
 /* Program timer 0 in periodic mode at `hz` Hz and enable
  * LegacyReplacement routing. The reference for the sequence below is
  * Intel HPET Specification 1.0a §2.3.9.2 and §3.2.5.
@@ -320,7 +367,10 @@ bool hpet_tick_active(void) { return g_hpet.tick_active; }
 bool hpet_start_legacy_tick(uint32_t hz) {
     if (!g_hpet.present || hz == 0) return false;
     if (!g_hpet.leg_rt_cap) {
-        debug_printf("[HPET] LegacyReplacement not supported by controller\n");
+        kprintf("[HPET] this controller cannot route LegacyReplacement "
+                "(GCAP.LEG_RT_CAP is 0), so IRQ0 stays with the 8254 and the "
+                "system tick comes from the chip this kernel programs "
+                "itself\n");
         return false;
     }
     if (g_hpet.num_timers < 1) return false;
@@ -328,7 +378,9 @@ bool hpet_start_legacy_tick(uint32_t hz) {
     /* Check timer 0 periodic capability. */
     uint64_t t0cnf = hpet_read64(HPET_REG_TIMER_CNF(0));
     if (!(t0cnf & HPET_TIMER_PER_INT_CAP)) {
-        debug_printf("[HPET] timer 0 is not periodic-capable\n");
+        kprintf("[HPET] timer 0 on this controller is not periodic-capable "
+                "(Tn_CNF.PER_INT_CAP is 0), so it cannot carry a system tick "
+                "and IRQ0 stays with the 8254\n");
         return false;
     }
 
@@ -373,9 +425,17 @@ bool hpet_start_legacy_tick(uint32_t hz) {
     /* Step 5 — enable counter + legacy route. */
     hpet_write32(HPET_REG_GCONF, HPET_GCONF_ENABLE | HPET_GCONF_LEG_RT);
 
-    g_hpet.tick_active = true;
-    g_hpet.tick_hz     = hz;
-    debug_printf("[HPET] legacy tick active: %u Hz, interval=%lu ticks (period_us=%lu)\n",
-                 hz, (unsigned long)interval, (unsigned long)period_us);
+    g_hpet.tick_active   = true;
+    g_hpet.tick_interval = interval;
+
+    /* The rate that will actually arrive, derived back out of the interval
+     * just written, rather than the rate that was asked for: the two differ
+     * whenever the requested period is not a whole number of counter ticks,
+     * and a log that repeats the request back has reported nothing. */
+    kprintf("[HPET] timer 0 now drives IRQ0 at %u Hz through LegacyReplacement, "
+            "one interrupt every %lu counter ticks — the 8254 is off that line "
+            "entirely (HPET 1.0a 2.4.2.1), and from here this counter is both "
+            "the system tick and the only monotonic clock this kernel has\n",
+            hpet_tick_hz(), (unsigned long)interval);
     return true;
 }

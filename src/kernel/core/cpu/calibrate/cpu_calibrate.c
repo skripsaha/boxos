@@ -468,6 +468,28 @@ static int freq_is_sane(uint64_t freq_khz) {
     return freq_is_strict_sane(freq_khz);
 }
 
+/* How far a measured frequency sits from a stated one, signed, in parts per
+ * million.
+ *
+ * Parts per million because that is the unit the silicon is specified in.
+ * HPET 1.0a 2.2, the "Minimum Recommended Hardware Implementation" table,
+ * asks for a Clock Frequency Drift of no more than ±0.05 % (500 ppm) "over
+ * any interval >= 1 Millisecond"; 2.4.1 "Timer Accuracy Rules", rule 1,
+ * expects the timers "accurate over any 1 ms period to within 0.05 % (500
+ * ppm) of the time specified in the timer resolution fields"; and 2.3.4
+ * reports the period in femtoseconds expressly "in order to achieve a
+ * resolution of 50 ppm". Whole percent, which this comparison used to be
+ * computed in, cannot express any of those — a 1102 ppm divergence came out
+ * as 0 %.
+ *
+ * No overflow: a sane frequency is bounded by TSC_SANE_MAX_KHZ, so the
+ * difference times 1e6 stays far inside 64 bits. */
+static int64_t freq_divergence_ppm(uint64_t measured_khz, uint64_t stated_khz) {
+    if (stated_khz == 0) return 0;
+    int64_t diff = (int64_t)measured_khz - (int64_t)stated_khz;
+    return (diff * 1000000LL) / (int64_t)stated_khz;
+}
+
 void cpu_calibrate_tsc(void) {
     kprintf("\n");
     kprintf("[CPU] Calibrating TSC frequency... (hypervisor: %s)\n",
@@ -557,23 +579,42 @@ void cpu_calibrate_tsc(void) {
         }
     }
 
-    /* Method 5: PIT channel-0 measurement. Only runs when HPET isn't
-     * sourcing IRQ0 (legacy 8254 idle otherwise). */
+    /* Method 5: PIT channel-0 measurement. Only runs when the HPET is not
+     * sourcing IRQ0 — and the gate stays exactly where it is, because it is
+     * the only thing keeping this from becoming a second HPET measurement
+     * wearing the 8254's name: pit_delay_busy() delegates to
+     * hpet_busy_wait_us() the moment LegacyReplacement is up.
+     *
+     * What changes is what the log says about the skip. A frequency of 0
+     * printed in this column meant two different things that cannot be told
+     * apart by a reader — "measured, and the counter stood still" and "never
+     * asked" — and on every modern board it is always the second. So the
+     * column carries a sentence instead of a glyph. */
     uint64_t pit_khz = 0;
-    if (!hpet_tick_active()) {
+    char pit_field[208];
+    if (hpet_tick_active()) {
+        ksnprintf(pit_field, sizeof(pit_field),
+                  "and the 8254 was not asked at all — the HPET holds IRQ0 "
+                  "through LegacyReplacement, which takes channel 0 off the "
+                  "interrupt line (HPET 1.0a 2.4.2.1)");
+    } else {
         uint64_t start_tsc = rdtsc_serialized();
         pit_delay_busy(PIT_TSC_WINDOW_MS);
         pit_khz = (rdtsc_serialized() - start_tsc) / PIT_TSC_WINDOW_MS;
+        ksnprintf(pit_field, sizeof(pit_field),
+                  "and the 8254, which still owns IRQ0, measured pit=%lu kHz",
+                  (unsigned long)pit_khz);
     }
 
     /* Single user-visible summary line per source. Critical for
      * Bochs / niche-HW debugging where the user needs to see which
      * source(s) actually responded. */
-    kprintf("[CPU] Sources: pvclock=%lu cpuid40=%lu hv-msr=%lu cpuid15=%lu cpuid16=%lu hpet=%lu pmt=%lu pit=%lu kHz\n",
+    kprintf("[CPU] Sources: pvclock=%lu cpuid40=%lu hv-msr=%lu cpuid15=%lu "
+            "cpuid16=%lu hpet=%lu pmt=%lu kHz, %s\n",
             (unsigned long)pvclock_khz, (unsigned long)hv_khz,
             (unsigned long)hv_msr_khz, (unsigned long)cpuid15_khz,
             (unsigned long)cpuid16_khz, (unsigned long)hpet_khz,
-            (unsigned long)pmt_khz,    (unsigned long)pit_khz);
+            (unsigned long)pmt_khz,    pit_field);
 
     /* Two-tier selection.
      *
@@ -680,21 +721,49 @@ void cpu_calibrate_tsc(void) {
             tsc_freq_khz / 1000000ULL,
             (tsc_freq_khz / 1000ULL) % 1000ULL);
 
-    /* Cross-check: if two trusted sources disagree by >5 %, warn. The
-     * pair we trust is (pvclock OR hypervisor TSC_KHZ OR CPUID.15h)
-     * vs. (HPET measurement). Skip when comparing against the TCG-
-     * poisoned methods (their value is 0 anyway). */
+    /* What the counters this kernel can measure against say about the number
+     * it just chose — always, for both of them, in parts per million.
+     *
+     * This was one `if (pct > 5) debug_printf(...)`, and it could not fire for
+     * three independent reasons. The channel compiles to nothing unless the
+     * tree is built DEBUG=on. The arithmetic was in WHOLE PERCENT, so the
+     * +1102 ppm a live i5-9400F shows came out as pct == 0 — a scale fifty
+     * times coarser than the thing it was watching for. And the threshold was
+     * derived from nothing: HPET 1.0a 2.2 asks for 500 ppm of clock drift
+     * over any interval of a millisecond or more and 2.3.4 states the period
+     * in femtoseconds to resolve 50 ppm, both two orders finer than 5 %; a
+     * board that diverged by 4.137 % on 2026-08-27 passed under it.
+     *
+     * So there is no threshold here any more and no number to argue with: the
+     * divergence is printed and the reader judges it. The PM Timer is printed
+     * beside the HPET because on this board it was the better measurer of the
+     * two, and it used to be compared against nothing at all. */
     uint64_t trusted = pvclock_khz ? pvclock_khz
                        : hv_khz ? hv_khz
                        : cpuid15_khz;
-    if (freq_is_sane(trusted) && freq_is_sane(hpet_khz)) {
-        uint64_t diff = (trusted > hpet_khz) ? (trusted - hpet_khz)
-                                              : (hpet_khz - trusted);
-        uint64_t pct = (diff * 100) / hpet_khz;
-        if (pct > 5) {
-            debug_printf("[CPU] WARNING: trusted-vs-HPET divergence %lu%% "
-                         "(trusted=%lu, HPET=%lu) — HPET likely throttled\n",
-                         pct, trusted, hpet_khz);
+    const char *trusted_name = pvclock_khz ? "pvclock"
+                               : hv_khz ? "the hypervisor's CPUID.40000010h"
+                               : "CPUID.15h";
+    if (freq_is_sane(trusted)) {
+        const struct { const char *counter; uint64_t khz; const char *tail; }
+        measurers[] = {
+            { "HPET counter", hpet_khz,
+              " — HPET 1.0a 2.2 asks a conforming part for no more than 500 "
+              "ppm of clock drift over any interval of a millisecond or more, "
+              "and this measurement is taken over a window many times longer "
+              "than that, so a divergence much wider than 500 ppm is this "
+              "kernel's measuring window before it is the crystal" },
+            { "ACPI PM Timer", pmt_khz, "" },
+        };
+        for (unsigned i = 0; i < sizeof(measurers) / sizeof(measurers[0]); i++) {
+            if (!freq_is_sane(measurers[i].khz)) continue;
+            int64_t ppm = freq_divergence_ppm(measurers[i].khz, trusted);
+            kprintf("[CPU] the %s measures this TSC at %lu kHz, %s%lu ppm away "
+                    "from what %s states%s\n",
+                    measurers[i].counter, (unsigned long)measurers[i].khz,
+                    ppm < 0 ? "-" : "+",
+                    (unsigned long)(ppm < 0 ? -ppm : ppm),
+                    trusted_name, measurers[i].tail);
         }
     }
 

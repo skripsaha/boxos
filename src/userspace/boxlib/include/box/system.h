@@ -33,12 +33,21 @@ typedef struct {
     uint32_t cpu_k_cores;        /* K-Cores (kernel/IO)             */
     uint32_t cpu_app_cores;      /* App-Cores (userspace)           */
     uint32_t process_count;      /* live processes                  */
-    uint32_t pit_freq_hz;        /* configured PIT frequency        */
+    uint32_t tick_freq_hz;       /* rate of the system tick, in Hz  */
     uint8_t  multicore_active;   /* 1 if AMP currently active       */
     uint8_t  has_invariant_tsc;  /* 1 if TSC stable across cores    */
     uint8_t  has_waitpkg;        /* 1 if UMWAIT available           */
-    uint8_t  reserved;
+    uint8_t  tick_source;        /* which part produces that tick   */
 } system_info_t;
+
+/* Which part is actually producing the system tick. Read it before reporting
+ * tick_freq_hz: the frequency alone used to be labelled "PIT", and on every
+ * board where the HPET takes IRQ0 through LegacyReplacement that named a chip
+ * the kernel never programmed. Values match the kernel's own SYSINFO_TICK_*
+ * in system_ops.c, which fills byte 95 of the blob. */
+#define SYSINFO_TICK_SOURCE_NONE          0u  /* nothing is driving IRQ0 */
+#define SYSINFO_TICK_SOURCE_HPET_LEGACY   1u  /* HPET timer 0, LegacyReplacement */
+#define SYSINFO_TICK_SOURCE_8254          2u  /* 8254 channel 0 */
 
 int proc_info(uint16_t pid, proc_info_t* info);
 

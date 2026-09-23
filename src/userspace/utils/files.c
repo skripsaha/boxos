@@ -91,6 +91,30 @@ int main(void)
         s_file_ids[j + 1]   = key_id;
     }
 
+    /* One file, one line, one call.
+     *
+     * The old loop asked print() once per padding blank, once per ", " and
+     * once per tag name — about twenty-five calls a file, 1700 for this
+     * volume. On a lane they merge into the frame and cost almost nothing,
+     * which is why no board run ever showed it; with no display daemon — the
+     * state the first shell starts in, and the one boxlib falls back to when
+     * the daemon dies — every call is its own Manifest, its own console lock,
+     * its own Canvas commit and its own blit, and the listing visibly crawls.
+     * It is the same crawl boxlib's line editor was rewritten to remove.
+     *
+     * The buffer is the ABI's own arithmetic, and so is the tag column: a name
+     * as wide as the field file_info_t hands back, " [", every tag slot as
+     * key + ':' + value with ", " between them, and "]\n". Nothing here picks
+     * a width of its own — the two 32s that used to sit in this loop were the
+     * same 32 as box/file.h's name field, written out twice. */
+    const size_t name_col  = sizeof(s_file_infos[0].filename);
+    const size_t tag_slots = sizeof(s_file_infos[0].tags) /
+                             sizeof(s_file_infos[0].tags[0]);
+    char line[sizeof(s_file_infos[0].filename) + 2 +
+              (sizeof(s_file_infos[0].tags) / sizeof(s_file_infos[0].tags[0])) *
+              (sizeof(s_file_infos[0].tags[0].key) +
+               sizeof(s_file_infos[0].tags[0].value) + 2) + 2];
+
     for (int i = 0; i < count; i++)
     {
         if (s_file_ids[i] == 0 || s_file_infos[i].filename[0] == '\0')
@@ -98,28 +122,39 @@ int main(void)
 
         const file_info_t *info = &s_file_infos[i];
 
-        print(info->filename);
+        size_t pos = strlen(info->filename);
+        memcpy(line, info->filename, pos);
+        while (pos < name_col)
+            line[pos++] = ' ';
 
-        size_t name_len = strlen(info->filename);
-        for (size_t j = name_len; j < 32; j++)
-            print(" ");
+        line[pos++] = ' ';
+        line[pos++] = '[';
 
-        print(" [");
-
-        int printed_tags = 0;
-        for (uint8_t t = 0; t < info->tag_count && t < 5; t++)
+        for (uint8_t t = 0; t < info->tag_count && t < tag_slots; t++)
         {
-            if (printed_tags > 0)
-                print(", ");
+            if (t > 0)
+            {
+                line[pos++] = ',';
+                line[pos++] = ' ';
+            }
+
+            size_t key_len = strlen(info->tags[t].key);
+            memcpy(line + pos, info->tags[t].key, key_len);
+            pos += key_len;
 
             if (info->tags[t].value[0])
-                printf("%s:%s", info->tags[t].key, info->tags[t].value);
-            else
-                print(info->tags[t].key);
-            printed_tags++;
+            {
+                size_t value_len = strlen(info->tags[t].value);
+                line[pos++] = ':';
+                memcpy(line + pos, info->tags[t].value, value_len);
+                pos += value_len;
+            }
         }
 
-        println("]");
+        line[pos++] = ']';
+        line[pos++] = '\n';
+
+        print_bytes(line, pos);
     }
 
     exit(0);

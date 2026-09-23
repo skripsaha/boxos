@@ -33,8 +33,14 @@ typedef enum {
 
 /* Call the room to order: find every medium, and let the USB bus finish saying
  * what is on it first. Safe to call more than once; later calls pick up media
- * that arrived since. */
-void BoardroomInit(void);
+ * that arrived since.
+ *
+ * Answers with how many media THIS pass seated, counted from inside the door
+ * the pass holds. A caller cannot work that out for itself: another core may
+ * be seating the whole room between the caller's two reads, and it would then
+ * report that core's work as its own. Zero means the room was already holding
+ * everything the buses had to offer. */
+uint32_t BoardroomInit(void);
 
 /*
  * Something arrived on a bus that can gain media while the machine runs.

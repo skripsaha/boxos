@@ -997,7 +997,7 @@ run_latearrival() {
     grep -q "no volume yet" "$L";      chk $? "the boot found no volume of its own"
     grep -q "Fallback shell ready" "$L"; chk $? "and stood a shell in for one"
     grep -q "mass storage" "$L";       chk $? "the stick enumerated after the boot"
-    grep -q "arrived after the room was called to order\|seat 1:" "$L"
+    grep -q "took a seat while the machine was\|seat 1:" "$L"
     chk $? "the room seated it"
 
     # ‼ AND IT IS ASKED WHAT IT TAKES, and answers as itself rather than as the
@@ -1009,7 +1009,7 @@ run_latearrival() {
     # a number that comes from the DEVICE. Named exactly rather than loosely,
     # so that going back to one figure imposed on every medium reddens this
     # whichever figure is chosen.
-    grep -q "this medium takes 128 sector(s) at a time, so neighbouring blocks are read 4 at a time" "$L"
+    grep -q "this medium hands over 128 sector(s) in one go" "$L"
     chk $? "the flash drive is asked what IT takes, and answers as itself"
     grep -q "seat 1 carries the volume this kernel was read out of" "$L"
     chk $? "and recognised it by the boarding pass, not by a rule"
@@ -1123,7 +1123,7 @@ run_replug() {
 
     # The second arrival is announced. This is the whole repair: it used not to
     # be, because the room only ever spoke when it GREW.
-    grep -q "arrived after the room was called to order" "$S"
+    grep -q "took a seat while the machine was" "$S"
     chk $? "the return was announced, not swallowed"
     grep -q "the volume is back, in seat" "$S"
     chk $? "TagFS took the volume back up"
@@ -1353,7 +1353,7 @@ run_healthy() {
     # the bytes with the processor — so the one number was not merely a poor
     # fit, it took the fast path away from the disk this machine boots from.
     # Asked instead, the channel says eight and keeps it.
-    grep -q "this medium takes 8 sector(s) at a time, so neighbouring blocks are read 1 at a time" "$L"
+    grep -q "this medium hands over 8 sector(s) in one go" "$L"
     chk $? "the legacy channel keeps the width its DMA path works at"
 
     # (12) THE TWO ENDPOINT-CONTEXT FIELDS NO BOOT EVER COMPUTES.
@@ -3149,7 +3149,7 @@ run_returnfail() {
 
     # ‼ ONE arrival, and it was spent. Everything after is the machine itself.
     local arrivals
-    arrivals=$(grep -c "arrived after the room was called to order" "$S")
+    arrivals=$(grep -c "took a seat while the machine was" "$S")
     [ "$arrivals" = 1 ]
     chk $? "the stick was plugged in exactly once after the pull ($arrivals)"
 
@@ -3485,7 +3485,7 @@ EOF
 
     # And the machine that was handed a damaged table finished the pass it was
     # in rather than stopping inside it — the room says so on its way out.
-    grep -q "arrived after the room was called to order" "$BAD_LOG"
+    grep -q "took a seat while the machine was" "$BAD_LOG"
     chk $? "and the room finished seating it"
 
     ! grep -qiE "panic|fault at" "$BAD_LOG"

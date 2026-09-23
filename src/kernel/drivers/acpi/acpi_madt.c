@@ -108,11 +108,17 @@ static const char* lapic_flags_text(uint32_t flags) {
 }
 
 /*
- * ACPI 6.5 §5.2.12.2: the OSPM determines the BSP at runtime — it is the
- * processor that is currently executing OS init code. Asking "which
- * processor am I" instead of taking the first enabled MADT entry avoids
- * the trap of MADTs whose Local APIC list is sorted by ACPI processor ID
- * rather than by which core booted first.
+ * The BSP is determined at runtime — it is the processor that is currently
+ * executing OS init code — and the MADT is not asked. ACPI 6.5 §5.2.12.1 is
+ * why: "OSPM executes on the boot processor to initialize the platform",
+ * and the only thing said about where that processor appears in the table is
+ * a guideline, "platform firmware SHOULD list the boot processor as the
+ * first processor entry in the MADT". A should is not a fact to build on, so
+ * asking "which processor am I" instead of taking the first enabled entry
+ * avoids the trap of MADTs whose Local APIC list is sorted by ACPI processor
+ * ID rather than by which core booted first. (This cited §5.2.12.2, which is
+ * the Processor Local APIC Structure's layout and says nothing about the
+ * BSP.)
  *
  * The question must be asked at FULL WIDTH. CPUID.01H:EBX[31:24] is the
  * 8-bit *initial* APIC ID and cannot name a processor whose APIC ID has
@@ -191,10 +197,12 @@ static void name_online_capable_seat(uint32_t apic_id, uint32_t acpi_uid) {
 acpi_error_t acpi_parse_madt(madt_info_t* info) {
     if (!info) return ACPI_ERR_INVALID_TABLE;
 
-    /* Sampled before the walk and acted on during it, so the seats are
-     * named in table order by whichever caller parses first and by nobody
-     * after. g_seats_named is raised when this walk ends. */
-    const bool name_seats = !g_seats_named;
+    /* Sampled before the walk and acted on during it, so everything this
+     * parse says out loud is said in table order by whichever caller parses
+     * first and by nobody after. g_seats_named is raised when this walk ends.
+     * Two sentences hang on it: the Online-Capable seats, and the census of
+     * IOAPICs below. */
+    const bool first_parse = !g_seats_named;
 
     memset(info, 0, sizeof(madt_info_t));
 
@@ -243,6 +251,11 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
     uint8_t* ptr = (uint8_t*)madt + sizeof(acpi_madt_t);
     uint8_t* end = (uint8_t*)madt + madt->header.length;
 
+    /* How many I/O APIC Structures this table carries. Counted rather than
+     * assumed, because "the IOAPIC" is a definite article this kernel has no
+     * right to until the count is one. */
+    uint32_t ioapic_count = 0;
+
     while (ptr + sizeof(madt_entry_header_t) <= end) {
         madt_entry_header_t* entry = (madt_entry_header_t*)ptr;
 
@@ -278,7 +291,7 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
                     info->bsp_acpi_processor_uid = lapic->acpi_processor_id;
                     info->bsp_acpi_uid_resolved  = true;
                 }
-                if (name_seats && lapic_flags_online_capable(lapic->flags))
+                if (first_parse && lapic_flags_online_capable(lapic->flags))
                     name_online_capable_seat(lapic->apic_id,
                                              lapic->acpi_processor_id);
                 break;
@@ -286,17 +299,37 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
 
             case MADT_TYPE_IO_APIC: {
                 madt_io_apic_t* ioapic = (madt_io_apic_t*)entry;
-                debug_printf("[MADT]   IO-APIC: ID=%u, addr=0x%x, GSI base=%u\n",
-                             ioapic->io_apic_id,
-                             ioapic->io_apic_address,
-                             ioapic->gsi_base);
-                /* Use the first IO-APIC found. Multi-IOAPIC support is a
-                 * future IOAPIC-subsystem audit. */
-                if (info->ioapic_address == 0) {
+
+                /* ‼ EVERY IOAPIC THE FIRMWARE NAMES IS READ ALOUD.
+                 *
+                 * ACPI 6.5 §5.2.12.3 gives one I/O APIC Structure per chip,
+                 * each with its own Global System Interrupt Base, and a
+                 * desktop PCH publishes a second one the moment firmware
+                 * enables a root port's own I/OxAPIC. This kernel brings up
+                 * the first entry only, so a line belonging to any other chip
+                 * is refused downstream by ioapic.c — truthfully, but in words
+                 * about a pin count, when the cause is that one entry out of N
+                 * was read. kprintf and not debug_printf: this is the only
+                 * place in the kernel where the count exists, and in front of
+                 * a board there is no other way to tell one chip from four. */
+                if (first_parse) {
+                    kprintf("[MADT] the firmware names an IOAPIC with ID %u, "
+                            "its registers at physical 0x%08x, and the first "
+                            "Global System Interrupt it answers for is %u\n",
+                            ioapic->io_apic_id, ioapic->io_apic_address,
+                            ioapic->gsi_base);
+                }
+
+                /* First in table order is the one brought up, and the census
+                 * counter is what says so. It used to be `ioapic_address == 0`
+                 * — a legal register address spent as a sentinel for "nothing
+                 * taken yet". */
+                if (ioapic_count == 0) {
                     info->ioapic_address = ioapic->io_apic_address;
                     info->ioapic_id = ioapic->io_apic_id;
                     info->ioapic_gsi_base = ioapic->gsi_base;
                 }
+                ioapic_count++;
                 break;
             }
 
@@ -368,7 +401,7 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
                     info->bsp_acpi_processor_uid = x->acpi_processor_uid;
                     info->bsp_acpi_uid_resolved = true;
                 }
-                if (name_seats && lapic_flags_online_capable(x->flags))
+                if (first_parse && lapic_flags_online_capable(x->flags))
                     name_online_capable_seat(x->x2apic_id,
                                              x->acpi_processor_uid);
                 break;
@@ -402,6 +435,31 @@ acpi_error_t acpi_parse_madt(madt_info_t* info) {
         }
 
         ptr += entry->length;
+    }
+
+    /* ‼ THE CENSUS, ONCE, AFTER THE WALK.
+     *
+     * The per-entry lines above scroll past; this is the single sentence that
+     * tells an operator whether "the IOAPIC" is a definite article on this
+     * board, or the first of several this kernel silently dropped. */
+    if (first_parse) {
+        if (ioapic_count == 0) {
+            kprintf("[MADT] %[E]this table names no IOAPIC at all, so the APIC "
+                    "backend has no chip to program and this kernel falls back "
+                    "to the 8259 pair and its sixteen lines%[D]\n");
+        } else if (ioapic_count == 1) {
+            kprintf("[MADT] that is the only IOAPIC this table names, so every "
+                    "Global System Interrupt on this machine belongs to it\n");
+        } else {
+            kprintf("[MADT] %[E]this table names %u IOAPICs and this kernel "
+                    "brings up only the first of them — ID %u at 0x%lx from "
+                    "GSI %u; a line belonging to one of the other %u is "
+                    "refused as past this chip's last pin, which names the "
+                    "wrong cause%[D]\n",
+                    ioapic_count, info->ioapic_id,
+                    (unsigned long)info->ioapic_address, info->ioapic_gsi_base,
+                    ioapic_count - 1u);
+        }
     }
 
     g_seats_named = true;

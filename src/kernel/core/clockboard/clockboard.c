@@ -2,6 +2,7 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "klib.h"
+#include "pit.h"   /* pit_get_uptime_us/ms, pit_get_ticks — the kernel's one clock */
 
 /* The single shared page. Allocated once in clockboard_init, never freed. */
 static uint64_t    s_clockboard_phys = 0;
@@ -41,20 +42,35 @@ uint64_t clockboard_phys(void)
     return s_clockboard_phys;
 }
 
-void clockboard_tick_update(uint64_t uptime_us, uint64_t tick_count)
+void clockboard_publish_uptime(void)
 {
     if (!s_clockboard_kva) return;
-    /* Single-writer (PIT IRQ on BSP). Plain stores; cross-core readers
-     * see naturally-aligned 8-byte word atomicity guaranteed by x86-64. */
-    s_clockboard_kva->uptime_us  = uptime_us;
-    s_clockboard_kva->uptime_ms  = uptime_us / 1000ULL;
-    s_clockboard_kva->tick_count = tick_count;
+
+    /* The page carries what the rest of the kernel would answer, read here
+     * rather than passed in: a caller that supplies the number is a caller
+     * that can supply a different one, and that is precisely how the page and
+     * the system deck came to disagree by the length of a boot.
+     *
+     * Single-writer by construction: the BSP's IRQ0 handler once the machine
+     * is running, and kernel_main once before any Ring 3 code exists to read
+     * the page. IRQ0 is addressed physically to the BSP's LAPIC, so no App
+     * Core ever enters here. Plain stores; cross-core readers see the
+     * naturally-aligned 8-byte word atomicity x86-64 guarantees. */
+    uint64_t us = pit_get_uptime_us();
+    s_clockboard_kva->uptime_us  = us;
+    s_clockboard_kva->uptime_ms  = us / 1000ULL;
+    s_clockboard_kva->tick_count = pit_get_ticks();
 }
 
 uint64_t clockboard_uptime_ms(void)
 {
-    if (!s_clockboard_kva) return 0;
-    return __atomic_load_n(&s_clockboard_kva->uptime_ms, __ATOMIC_RELAXED);
+    /* Kernel callers get the clock, not the mirror of it. The page only moves
+     * when IRQ0 arrives, and the kernel asks this question during boot, where
+     * no interrupt has arrived yet — Touch's deadlines read it from exactly
+     * there. It is the same clock the page carries, so the two can no longer
+     * answer differently; it simply costs the counter read instead of a load,
+     * and takes no lock, which is what the idle path needs of it. */
+    return pit_get_uptime_ms();
 }
 
 void clockboard_set_tsc_freq_khz(uint64_t khz)

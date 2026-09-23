@@ -280,7 +280,7 @@ static void seat_usb_take_attendance(void)
     }
 }
 
-void BoardroomInit(void)
+uint32_t BoardroomInit(void)
 {
     /*
      * What counts as "new in this pass" is a TAKING, not a seat number.
@@ -350,7 +350,7 @@ void BoardroomInit(void)
      * saying the same thing again is how a log stops being read. */
     if (g_seatings == seatings_before) {
         __atomic_store_n(&g_in_session, 0u, __ATOMIC_RELEASE);
-        return;
+        return 0;
     }
 
     uint8_t changed = 0;
@@ -420,6 +420,10 @@ void BoardroomInit(void)
     __atomic_store_n(&g_in_session, 0u, __ATOMIC_RELEASE);
 
     TouchPublish("seat:taken", &ev, sizeof(ev));
+
+    /* What THIS pass seated, and only that. Counted under the door, off the
+     * seatings that carry a number above the one this pass started from. */
+    return changed;
 }
 
 /*
@@ -481,15 +485,26 @@ void BoardroomAttendIfPending(void)
     }
     __atomic_store_n(&g_arrival_pending, 0u, __ATOMIC_RELEASE);
 
-    uint32_t before = g_seatings;
+    /*
+     * Idempotent per medium: a medium already sitting somewhere is not seated
+     * twice, and seat numbers never move, so anything holding one keeps it.
+     *
+     * The count comes back from the pass, and is not worked out here from two
+     * reads of g_seatings. It used to be, and the door is taken INSIDE
+     * BoardroomInit, so on a cold boot the snapshot was read while the first
+     * core still had the room open: the USB enumeration that raises the
+     * arrival flag runs under that very door, from inside the first core's
+     * pass. The second core read zero, waited, found the room already full,
+     * seated nothing — and announced the first core's three media as having
+     * turned up after the room was called to order. Nothing had turned up.
+     * That WAS the room being called to order.
+     */
+    uint32_t seated_now = BoardroomInit();
 
-    /* Idempotent per medium: a medium already sitting somewhere is not seated
-     * twice, and seat numbers never move, so anything holding one keeps it. */
-    BoardroomInit();
-
-    if (g_seatings != before) {
-        kprintf("[Boardroom] %u medium/media arrived after the room was called "
-                "to order\n", (unsigned)(g_seatings - before));
+    if (seated_now > 0) {
+        kprintf("[Boardroom] %u medium/media took a seat while the machine was "
+                "already running, so this was a hot-plug and not part of "
+                "bring-up\n", (unsigned)seated_now);
     }
 
     /* Whether any of it carries the filesystem this machine lives on is not

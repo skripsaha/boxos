@@ -699,17 +699,49 @@ const EfiSbHashEntry *efi_secureboot_find_db_hash_sha256(const uint8_t hash[32])
  * Diagnostic
  * ========================================================================= */
 
+/* Said out loud, on every UEFI boot, because it is the first thing anyone
+ * asks about a UEFI machine and because silence here is ambiguous: a log
+ * with no [SB] line cannot be told apart from a kernel whose Secure Boot
+ * reader never ran. Every line below is kprintf for that reason — a
+ * debug_printf compiles to nothing in a production build, and a fact nobody
+ * can read is a fact the machine did not state. */
 void efi_secureboot_print(void)
 {
     if (!g_ready) {
-        debug_printf("[SB] not initialised\n");
+        kprintf("[SB] this kernel has no Secure Boot state to report: the "
+                "firmware's databases were not taken in, so nothing here can "
+                "say whether this machine authenticates what it boots — and "
+                "every image it is asked to verify will be refused rather "
+                "than guessed at\n");
         return;
     }
-    debug_printf("[SB] enforced=%d setup=%d audit=%d deployed=%d "
-                 "certs=%u hashes=%u\n",
-                 g_state.enforced, g_state.setup_mode,
-                 g_state.audit_mode, g_state.deployed_mode,
-                 g_cert_count, g_hash_count);
+
+    const char *extra = "";
+    if (g_state.audit_mode && g_state.deployed_mode) {
+        extra = ", with audit mode on (a failing image is recorded, not "
+                "refused) and deployed mode on (the firmware allows no "
+                "further mode change)";
+    } else if (g_state.audit_mode) {
+        extra = ", with audit mode on: a failing image is recorded rather "
+                "than refused";
+    } else if (g_state.deployed_mode) {
+        extra = ", with deployed mode on: the firmware allows no further "
+                "mode change";
+    }
+
+    kprintf("[SB] Secure Boot is %s; the firmware is in %s mode%s%s. This "
+            "kernel took in %u certificate(s) and %u signature hash(es) from "
+            "PK/KEK/db/dbx and judges every image it loads against them\n",
+            g_state.enforced
+                ? "ON — the firmware authenticates every image it boots"
+                : "OFF — the firmware boots images without checking a signature",
+            g_state.setup_mode ? "setup" : "user",
+            g_state.setup_mode
+                ? " (no platform key is enrolled, so PK can still be written "
+                  "unauthenticated)"
+                : " (a platform key is enrolled)",
+            extra, g_cert_count, g_hash_count);
+
     for (uint32_t k = 0; k < EFI_SB_DB_COUNT; k++) {
         if (g_state.cert_count_by_db[k] || g_state.hash_count_by_db[k]) {
             debug_printf("  %s: %u cert, %u hash\n",

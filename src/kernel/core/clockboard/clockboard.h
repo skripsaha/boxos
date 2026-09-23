@@ -8,10 +8,11 @@
  * ClockBoard — kernel-published, userspace-readable clock page.
  *
  * One physical page allocated at boot, mapped read-only into every Cabin
- * at CABIN_CLOCKBOARD_ADDR. The PIT IRQ (BSP only) updates the dynamic
- * counters per tick; static fields are written once during early boot.
- * A read from userspace is a plain pointer load — no syscall, no
- * manifest, no ring round-trip.
+ * at CABIN_CLOCKBOARD_ADDR. The IRQ0 handler on the BSP refreshes the dynamic
+ * counters per tick, and kernel_main refreshes them once before userspace
+ * starts so the first Ring 3 read is not a zero from before the first tick;
+ * static fields are written once during early boot. A read from userspace is
+ * a plain pointer load — no syscall, no manifest, no ring round-trip.
  *
  * Layout is versioned so future field additions cannot silently break
  * mismatched userspace boxlibs. Reader pattern: check `magic` then
@@ -62,17 +63,22 @@ void clockboard_init(void);
  * page R/O into each process's address space at CABIN_CLOCKBOARD_ADDR. */
 uint64_t clockboard_phys(void);
 
-/* Called from pit_tick(). Updates dynamic counters. Single-writer
- * (BSP IRQ), so plain stores are safe. */
-void clockboard_tick_update(uint64_t uptime_us, uint64_t tick_count);
+/* Copy the kernel's uptime onto the page. Takes no arguments on purpose: the
+ * page must carry the same clock the system deck answers with, and a function
+ * that accepted a number could be — and was — handed a different one. Called
+ * from pit_tick() every tick, and from kernel_main once before the first
+ * userspace process can read the page. Single-writer, so plain stores are
+ * safe. */
+void clockboard_publish_uptime(void);
 
 /* Late-boot setters for the static fields. Called from cpu_calibrate
  * and rtc_init once those values are known. Safe to call repeatedly. */
-/* Monotonic uptime in milliseconds, straight off the published page.
- * A plain aligned load — no lock, no syscall, no page walk — so kernel code
- * may read it from any context, including one where taking another lock would
- * itself be a hazard (Nightwatch reads it from the idle path). Returns 0
- * before clockboard_init. */
+/* Monotonic uptime in milliseconds for KERNEL callers: the clock itself, not
+ * the page. No lock, no syscall, no page walk — so it may be read from any
+ * context, including one where taking another lock would itself be a hazard
+ * (Touch reads it for its deadlines, Nightwatch from the idle path). It does
+ * NOT read the published page, because the page only advances once IRQ0 is
+ * arriving and these callers run before that. */
 uint64_t clockboard_uptime_ms(void);
 
 void clockboard_set_tsc_freq_khz(uint64_t khz);

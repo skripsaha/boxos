@@ -79,7 +79,11 @@ const EfiSystemResourceEntry *efi_esrt_get(uint32_t idx);
  * if not present. */
 const EfiSystemResourceEntry *efi_esrt_find(const EfiGuid *target);
 
-/* Diagnostic: dump each entry to debug_printf. */
+/* Say what the firmware published, on the console and not to a debug
+ * build: how many updatable resources there are, what each one is, the
+ * version it is at and how its last update attempt ended. Safe before
+ * init and after a failed one — it then says that the table was not
+ * there, which is an answer too. */
 void efi_esrt_print(void);
 
 /* Touch tag publisher — call once after init to broadcast esrt:ready +

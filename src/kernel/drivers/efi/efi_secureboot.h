@@ -175,7 +175,11 @@ const EfiSbCertEntry *efi_secureboot_find_dbx_cert_sha256(const uint8_t hash[32]
 const EfiSbHashEntry *efi_secureboot_find_dbx_hash_sha256(const uint8_t hash[32]);
 const EfiSbHashEntry *efi_secureboot_find_db_hash_sha256(const uint8_t hash[32]);
 
-/* Diagnostic dump. */
+/* Say the Secure Boot state on the console, not to a debug build: whether
+ * the firmware is enforcing, whether it is in setup or user mode, and how
+ * many trust anchors and revocations were taken in. Safe before init and
+ * after a failed one — it then says that no state was taken in, which a
+ * silent log could not be told apart from a reader that never ran. */
 void efi_secureboot_print(void);
 
 /* Re-publish all secureboot:* Touch tags. */

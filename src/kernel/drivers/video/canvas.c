@@ -52,6 +52,7 @@
  */
 
 #include "canvas.h"
+#include "font/glyph_fold.h"
 #include "klib.h"
 #include "vmm.h"
 #include "touch.h"
@@ -106,6 +107,19 @@ typedef struct {
 
     /* Re-entrant batch */
     uint32_t        batch_depth;
+
+    /* The part-built UTF-8 character. Bytes reach the console one at a time,
+     * so a multi-byte sequence is assembled across calls and waits here —
+     * under the same lock as every other piece of console state, and only
+     * for as long as the batch that began it stays open. Its colours are
+     * kept with it because the bytes were said in them, and the operation
+     * that spills them may be past the call that set them. See
+     * print_utf8_byte_locked for why the batch is the bound. */
+    uint8_t         utf8_need;      /* bytes the lead byte promised; 0 = idle */
+    uint8_t         utf8_have;
+    uint8_t         utf8_seq[4];
+    uint32_t        utf8_fg;
+    uint32_t        utf8_bg;
 
     /* RenderPlan accumulator (reset at each outermost begin / after commit) */
     uint32_t        plan_scroll;
@@ -352,6 +366,11 @@ static void canvas_commit_locked(CanvasState *c)
  *  Batch / scroll _locked primitives (caller holds s_canvas_lock)
  * ========================================================================= */
 
+/* Defined with the rest of the decoder, below print_char_locked which it
+ * calls; declared here because closing a batch is where a half-built
+ * character stops being one. */
+static void utf8_spill_locked(CanvasState *c);
+
 static void batch_begin_locked(CanvasState *c)
 {
     if (c->batch_depth == 0) plan_reset(c);
@@ -362,6 +381,12 @@ static void batch_end_locked(CanvasState *c)
 {
     if (c->batch_depth == 0) return;
     if (--c->batch_depth > 0) return;
+    /* The operation is over, and so is any character it left half-built: the
+     * lead byte said how many bytes it takes, and a producer that has not
+     * delivered them by the end of its run never will. Put what is held on
+     * the glass now, inside this same commit, so the next operation opens on
+     * an idle decoder and cannot find someone else's bytes to finish. */
+    if (c->utf8_have) utf8_spill_locked(c);
     canvas_commit_locked(c);
 }
 
@@ -424,6 +449,135 @@ static void print_char_locked(CanvasState *c, char ch, uint32_t fg, uint32_t bg)
             if (c->row >= c->rows) { perform_scroll_locked(c); c->row = c->rows - 1; }
         }
     }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ *  UTF-8 in, this font's cells out — the one contract on a character
+ *
+ * Characters arrive a byte at a time: kprintf emits its format string byte by
+ * byte through kputchar, and the hardware deck's HW_VGA_PUTSTRING loop does
+ * the same for userspace. So a multi-byte sequence is assembled here, across
+ * calls, and only then folded to what the font can draw (font/glyph_fold.h).
+ *
+ * The fold happens HERE and nowhere upstream. The log ring, the serial Wire
+ * and `logsave` are handed exactly the bytes the machine said — a log is a
+ * stream of bytes and it is the only thing that leaves the board. The glass
+ * is a picture, one CP437 glyph per cell, and the only code that knows that
+ * is the code holding the font.
+ *
+ * A byte that cannot continue a sequence ends it: what is held goes to the
+ * glass as its own raw cells and the new byte starts over. A truncated
+ * sequence then costs exactly its own bytes and never swallows the character
+ * behind it.
+ *
+ * ‼ AND "ACROSS CALLS" MEANS ACROSS THE CALLS OF ONE OPERATION, NOT ACROSS
+ * THE LIFE OF THE MACHINE. This state used to wait here for the next byte
+ * from anyone at all, and the comment above said only "across calls", which
+ * read as a promise the code could not keep. Every producer does hold the
+ * console lock for its whole run — kprintf around its format string, the
+ * hardware deck around one HW_VGA_PUTSTRING — so no second producer can put
+ * a byte INSIDE a sequence. What it could do is arrive after one: a producer
+ * that ended its run mid-character left the lead byte sitting here, the next
+ * producer's first byte was an ordinary one and spilled that stranded byte
+ * as a raw cell in front of its own text, and the continuation bytes turned
+ * up later, in the first producer's next operation, to be spilled as raw
+ * cells somewhere else entirely. One character, two to four pieces of
+ * rubbish, in two places on the screen, and which two depended on who
+ * happened to print in between.
+ *
+ * The bound is the operation, because that is the one thing UTF-8 and the
+ * Canvas already agree on. UTF-8 carries the length in the lead byte, so the
+ * decoder knows at the first byte how many the character takes; the Canvas
+ * knows when a producer's run ends, because every producer brackets it in a
+ * batch. batch_end_locked therefore spills whatever is still held before it
+ * commits, in the colours the bytes were said in, and the cells reach the
+ * glass in that same frame. Nothing of one operation's character is alive
+ * when the next operation opens, so nothing can be glued to it.
+ *
+ * WHAT THAT COSTS, PLAINLY: a producer that cuts one string into several
+ * console operations mid-character now draws that character as its own two
+ * to four cells instead of the glyph it meant. That is a split for the
+ * producer to stop making — it knows the length too — and the damage is
+ * bounded, local, and the same every time, which the old behaviour was not.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/* Bytes the lead byte promises, itself included; 0 = not a lead byte
+ * (0x80-0xBF stray continuation, 0xC0/0xC1 overlong, 0xF5+ past U+10FFFF). */
+static uint8_t utf8_promise(uint8_t b)
+{
+    if (b >= 0xC2u && b <= 0xDFu) return 2;
+    if (b >= 0xE0u && b <= 0xEFu) return 3;
+    if (b >= 0xF0u && b <= 0xF4u) return 4;
+    return 0;
+}
+
+/* Put what is held on the glass as its own raw cells and go idle. The pair
+ * comes from the sequence, not from the caller: these bytes were said in the
+ * colours that were current when the lead byte arrived, and by the time the
+ * spill happens the running pair may belong to a later escape or to the end
+ * of the whole operation. The decoder is emptied before the first cell is
+ * written so that a scroll forced from inside print_char_locked cannot find
+ * a sequence that is already on its way out. */
+static void utf8_spill_locked(CanvasState *c)
+{
+    uint8_t  have = c->utf8_have;
+    uint32_t fg   = c->utf8_fg;
+    uint32_t bg   = c->utf8_bg;
+    c->utf8_have = 0;
+    c->utf8_need = 0;
+    for (uint8_t i = 0; i < have; i++)
+        print_char_locked(c, (char)c->utf8_seq[i], fg, bg);
+}
+
+static void print_utf8_byte_locked(CanvasState *c, char ch, uint32_t fg, uint32_t bg)
+{
+    uint8_t b = (uint8_t)ch;
+
+    if (c->utf8_need) {
+        if ((b & 0xC0u) == 0x80u) {
+            c->utf8_seq[c->utf8_have++] = b;
+            if (c->utf8_have < c->utf8_need) return;
+
+            /* Every continuation byte was checked on the way in, so the
+             * decoder is handed a whole well-formed sequence — it masks its
+             * continuations rather than validating them (klib_conv.c). */
+            uint32_t cp = 0;
+            if (utf8_decode((const char *)c->utf8_seq, &cp) == (int)c->utf8_need) {
+                char cells[GLYPH_FOLD_MAX];
+                int  n = GlyphFoldCodepoint(cp, cells);
+                /* In the colours the character was begun in, the same ones a
+                 * spill would use: a character is one thing to look at, and
+                 * which of its bytes was passing when a colour changed is not
+                 * something the reader should be able to see. */
+                uint32_t seq_fg = c->utf8_fg, seq_bg = c->utf8_bg;
+                c->utf8_have = 0;
+                c->utf8_need = 0;
+                for (int i = 0; i < n; i++)
+                    print_char_locked(c, cells[i], seq_fg, seq_bg);
+                return;
+            }
+            utf8_spill_locked(c);
+            return;
+        }
+        utf8_spill_locked(c);   /* cut short; b is a fresh character */
+    }
+
+    if (b < 0x80u) { print_char_locked(c, ch, fg, bg); return; }
+
+    uint8_t need = utf8_promise(b);
+    if (!need) {
+        /* Not UTF-8 at all. One byte in, one cell out, drawn by the font's
+         * own reading of it: the cell count stays the byte count, so a line
+         * on the glass keeps the width of the same line in the log. */
+        print_char_locked(c, ch, fg, bg);
+        return;
+    }
+
+    c->utf8_seq[0] = b;
+    c->utf8_have   = 1;
+    c->utf8_need   = need;
+    c->utf8_fg     = fg;
+    c->utf8_bg     = bg;
 }
 
 /* Implicit batch helpers: open a transient batch when the caller wasn't
@@ -526,6 +680,8 @@ static bool canvas_build(CanvasState *out, DisplayBackend *be)
     out->caret_row     = 0;
     out->caret_visible = false;
     out->batch_depth   = 0;
+    out->utf8_need     = 0;
+    out->utf8_have     = 0;
     out->ready         = true;
     return true;
 }
@@ -626,6 +782,11 @@ void CanvasForceReset(void)
      * commits immediately on the next CanvasBatchEnd. */
     spin_force_release(&s_canvas_lock);
     s_canvas.batch_depth = 0;
+    /* A core that died halfway through a character must not have its tail
+     * land in front of the banner. Drop what was held; the log ring already
+     * has those bytes whole. */
+    s_canvas.utf8_have   = 0;
+    s_canvas.utf8_need   = 0;
     plan_reset(&s_canvas);
 }
 
@@ -638,7 +799,7 @@ void CanvasPrintChar(char ch, uint32_t fg, uint32_t bg)
     if (!s_canvas.ready) return;
     spin_lock(&s_canvas_lock);
     bool opened = implicit_open_locked(&s_canvas);
-    print_char_locked(&s_canvas, ch, fg, bg);
+    print_utf8_byte_locked(&s_canvas, ch, fg, bg);
     implicit_close_locked(&s_canvas, opened);
     spin_unlock(&s_canvas_lock);
 }

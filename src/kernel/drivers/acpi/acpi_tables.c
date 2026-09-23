@@ -286,6 +286,210 @@ static bool s5_in_table_cb(acpi_sdt_header_t* tbl, void* user) {
     return true;
 }
 
+/* ─── From "what the firmware published" to "what became of it" ──────
+ *
+ * The signature list above says what the machine held out. This table says
+ * what this kernel does with each one, and the gap between the two was
+ * exactly the size of the question the owner asks standing in front of an
+ * unfamiliar board: is this subsystem missing because the machine has no
+ * such thing, or because nothing here ever opened the table describing it?
+ *
+ * The list is the kernel's declared appetite and it is read in BOTH
+ * directions — a published signature missing from it is reported as never
+ * opened, and a signature standing here that the firmware did not publish is
+ * reported as wanted and absent. Add a signature the same day you add its
+ * reader; the log tells on you either way.
+ *
+ * DSDT is deliberately not here: it hangs off the FADT rather than the root
+ * table, so it is never one of the entries walked below, and claiming it was
+ * absent would be a lie about every machine. */
+typedef enum {
+    ACPI_TABLE_OPENED,     /* a parser in this tree reads its contents */
+    ACPI_TABLE_SKIPPED,    /* looked at and walked past, deliberately */
+} AcpiTableVerdict;
+
+typedef struct {
+    const char       *sig;
+    AcpiTableVerdict  verdict;
+    const char       *why;   /* SKIPPED only — the reason, said out loud */
+} AcpiTableReader;
+
+static const AcpiTableReader g_table_readers[] = {
+    { "FACP", ACPI_TABLE_OPENED, NULL },  /* here: fixed hardware, _S5, PM1  */
+    { "SSDT", ACPI_TABLE_OPENED, NULL },  /* _S5 search + the AML namespace  */
+    { "APIC", ACPI_TABLE_OPENED, NULL },  /* acpi_madt.c                     */
+    { "MCFG", ACPI_TABLE_OPENED, NULL },  /* acpi_mcfg.c — ECAM windows      */
+    { "HPET", ACPI_TABLE_OPENED, NULL },  /* acpi_hpet.c                     */
+    { "SRAT", ACPI_TABLE_OPENED, NULL },  /* acpi_srat.c — NUMA affinity     */
+    { "SLIT", ACPI_TABLE_OPENED, NULL },  /* acpi_slit.c — NUMA distance     */
+    { "DMAR", ACPI_TABLE_OPENED, NULL },  /* acpi_dmar.c — Intel VT-d        */
+    { "IVRS", ACPI_TABLE_OPENED, NULL },  /* acpi_ivrs.c — AMD-Vi            */
+    { "HEST", ACPI_TABLE_OPENED, NULL },  /* acpi_apei.c — error sources     */
+    { "BERT", ACPI_TABLE_OPENED, NULL },  /* acpi_apei.c — last boot's death */
+    { "ERST", ACPI_TABLE_OPENED, NULL },  /* acpi_erst.c — record storage    */
+    { "EINJ", ACPI_TABLE_OPENED, NULL },  /* presence only — nothing injected*/
+    { "WSMT", ACPI_TABLE_OPENED, NULL },  /* acpi_wsmt.c — SMM's own claims  */
+    { "UEFI", ACPI_TABLE_OPENED, NULL },  /* its identifier — see below      */
+
+    { "FIDT", ACPI_TABLE_SKIPPED,
+      "it carries the firmware's own build identity and not one address, "
+      "resource or capability a kernel could act on" },
+};
+
+#define ACPI_TABLE_READER_COUNT \
+    (sizeof(g_table_readers) / sizeof(g_table_readers[0]))
+
+static uint32_t root_entry_count(void) {
+    return g_xsdt ? g_xsdt_count : g_rsdt_count;
+}
+
+/* Whichever root table won, entry i, already mapped and cached by the
+ * inventory pass — so walking the root three more times costs three loops
+ * and not one new mapping. */
+static acpi_sdt_header_t* root_entry(uint32_t i) {
+    uintptr_t phys = g_xsdt ? (uintptr_t)g_xsdt->entries[i]
+                            : (uintptr_t)g_rsdt->entries[i];
+    if (!phys) return NULL;
+    return map_and_validate_table(phys);
+}
+
+static const AcpiTableReader* reader_for(const char* sig) {
+    for (size_t i = 0; i < ACPI_TABLE_READER_COUNT; i++)
+        if (memcmp(sig, g_table_readers[i].sig, 4) == 0)
+            return &g_table_readers[i];
+    return NULL;
+}
+
+static bool first_copy_of(uint32_t idx, const char* sig) {
+    for (uint32_t i = 0; i < idx; i++) {
+        acpi_sdt_header_t* h = root_entry(i);
+        if (h && memcmp(h->signature, sig, 4) == 0) return false;
+    }
+    return true;
+}
+
+static uint32_t copies_of(const char* sig) {
+    uint32_t c = 0, n = root_entry_count();
+    for (uint32_t i = 0; i < n; i++) {
+        acpi_sdt_header_t* h = root_entry(i);
+        if (h && memcmp(h->signature, sig, 4) == 0) c++;
+    }
+    return c;
+}
+
+/* UEFI 2.10, Appendix O "UEFI ACPI Data Table", Table O.1 — the one signature
+ * that is not a table but an envelope: sixteen bytes of Identifier at offset
+ * 36, "This value contains a GUID which identifies the remaining table
+ * contents", and a two-byte DataOffset at 52, "Specifies the byte offset to
+ * the remaining data in the UEFI table". Until that GUID is read nothing
+ * whatever can be said about what the firmware put inside, which is why
+ * reading only the GUID settles the matter: either it names something this
+ * kernel must care about and can now be looked up, or it is vendor data and
+ * the question is closed. The sixteen bytes are laid out the way EFI lays
+ * out a GUID — the first three fields little-endian, the last eight in
+ * order. */
+static void acpi_log_uefi_data_table(void) {
+    acpi_sdt_header_t* t = acpi_find_table("UEFI");
+    if (!t) return;
+
+    const uint8_t* b = (const uint8_t*)t;
+    if (t->length < 54) {
+        kprintf("[ACPI] the UEFI data table declares length %u, too short to "
+                "hold the identifier at offset 36 that says what is inside "
+                "it — read as nothing\n", t->length);
+        return;
+    }
+
+    uint32_t d1; uint16_t d2, d3, data_off;
+    memcpy(&d1, b + 36, 4);
+    memcpy(&d2, b + 40, 2);
+    memcpy(&d3, b + 42, 2);
+    memcpy(&data_off, b + 52, 2);
+    const uint8_t* r = b + 44;
+
+    kprintf("[ACPI] the UEFI data table is an envelope and its identifier is "
+            "%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+            (unsigned)d1, (unsigned)d2, (unsigned)d3,
+            r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+    if (data_off >= 54 && data_off < t->length)
+        kprintf(", carrying %u byte(s) of data from offset %u",
+                t->length - data_off, (unsigned)data_off);
+    else
+        kprintf(", whose DataOffset of %u points outside its own %u bytes so "
+                "how much data it carries cannot be said", (unsigned)data_off,
+                t->length);
+    kprintf(": that GUID is the only thing that says what the data means, "
+            "and this kernel reads no further into it\n");
+}
+
+/* The verdict lines. Three questions, one line each, and none of them can be
+ * answered from the signature list alone. */
+static void acpi_log_verdicts(void) {
+    uint32_t n = root_entry_count();
+
+    kprintf("[ACPI] of those, this kernel opens: ");
+    uint32_t opened = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        acpi_sdt_header_t* h = root_entry(i);
+        if (!h || !first_copy_of(i, h->signature)) continue;
+        const AcpiTableReader* rd = reader_for(h->signature);
+        if (!rd || rd->verdict != ACPI_TABLE_OPENED) continue;
+        uint32_t c = copies_of(h->signature);
+        if (c > 1) kprintf("%.4s (%u of them) ", h->signature, c);
+        else       kprintf("%.4s ", h->signature);
+        opened++;
+    }
+    if (opened == 0) kprintf("not one of them ");
+    kprintf("— and the DSDT, which the FADT points at rather than the root "
+            "table\n");
+
+    kprintf("[ACPI] published and never opened: ");
+    uint32_t unread = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        acpi_sdt_header_t* h = root_entry(i);
+        if (!h || !first_copy_of(i, h->signature)) continue;
+        if (reader_for(h->signature)) continue;
+        kprintf("%.4s ", h->signature);
+        unread++;
+    }
+    if (unread == 0)
+        kprintf("none, every table this firmware published has a reader here");
+    else
+        kprintf("— nothing in this kernel opens them, so whatever each one "
+                "describes is not being used on this machine");
+    for (uint32_t i = 0; i < n; i++) {
+        acpi_sdt_header_t* h = root_entry(i);
+        if (!h || !first_copy_of(i, h->signature)) continue;
+        const AcpiTableReader* rd = reader_for(h->signature);
+        if (!rd || rd->verdict != ACPI_TABLE_SKIPPED) continue;
+        kprintf("; %.4s is walked past knowingly, %s", h->signature, rd->why);
+    }
+    kprintf("\n");
+
+    kprintf("[ACPI] this kernel can read and this firmware did not publish: ");
+    uint32_t missing = 0;
+    for (size_t k = 0; k < ACPI_TABLE_READER_COUNT; k++) {
+        const AcpiTableReader* rd = &g_table_readers[k];
+        if (rd->verdict != ACPI_TABLE_OPENED) continue;
+        bool here = false;
+        for (uint32_t i = 0; i < n && !here; i++) {
+            acpi_sdt_header_t* h = root_entry(i);
+            if (h && memcmp(h->signature, rd->sig, 4) == 0) here = true;
+        }
+        if (here) continue;
+        kprintf("%s ", rd->sig);
+        missing++;
+    }
+    if (missing == 0)
+        kprintf("nothing — every table this kernel knows how to read is "
+                "here\n");
+    else
+        kprintf("— each one names a facility this kernel can run and this "
+                "board's firmware never described\n");
+
+    acpi_log_uefi_data_table();
+}
+
 /* What the firmware actually handed us, said out loud once.
  *
  * kprintf rather than debug_printf, deliberately. Which root table the
@@ -324,6 +528,8 @@ static void acpi_log_inventory(acpi_rsdp_t* rsdp) {
     }
     if (shown == 0) kprintf("(none)");
     kprintf("\n");
+
+    acpi_log_verdicts();
 }
 
 acpi_error_t acpi_parse_tables(acpi_rsdp_t* rsdp) {
@@ -445,7 +651,8 @@ acpi_error_t acpi_parse_tables(acpi_rsdp_t* rsdp) {
      *   HPET / MCFG          — used by Timer + PCI subsystems
      *   SRAT / SLIT          — NUMA topology + distance
      *   DMAR / IVRS          — IOMMU detection (Intel / AMD)
-     *   APEI (HEST/BERT/ERST) — RAS error reporting
+     *   APEI (HEST/BERT/ERST/EINJ) — RAS error reporting
+     *   WSMT                 — what the firmware claims its SMM validates
      */
     acpi_parse_hpet();
     acpi_parse_mcfg();
@@ -454,6 +661,7 @@ acpi_error_t acpi_parse_tables(acpi_rsdp_t* rsdp) {
     acpi_parse_dmar();
     acpi_parse_ivrs();
     acpi_parse_apei();
+    acpi_parse_wsmt();
 
     /* Phase J — once DMAR's DRHD entries are known, peek inside each
      * register block to log version + features. Read-only, never enables

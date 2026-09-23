@@ -231,8 +231,9 @@ static void render_run(const ConsoleRun *f)
      * in, and the serial account read `…via=printf[6] [ROLLCALL] …` —
      * MEASURED on BIOS 16c: 184 and 71 lines of 1600 carried somebody else's.
      * '\n' and '\b' are content (a line end, an erased cell); other control
-     * bytes are dropped (the writer's UTF-8 filter never emits them, so
-     * anything else here is line noise). */
+     * bytes below 0x20 are dropped as line noise. Everything from 0x20 up
+     * passes, UTF-8 continuation bytes included — a character is folded to a
+     * glyph at the font (kernel font/glyph_fold.h), never on the way there. */
     char     seg[CONSOLE_RUN_TEXT_MAX + 1];
     uint32_t pos = 0;
     for (uint32_t i = 0; i < len; i++) {

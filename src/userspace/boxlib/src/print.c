@@ -802,40 +802,36 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
  * upper bound on input length — the loop keeps consuming until the source
  * NUL. The chunk size is purely an internal staging optimisation.
  * =========================================================================== */
-/* Stream `len` bytes through the UTF-8 filter (ASCII pass-through; each
- * multi-byte sequence collapses to one '?') into fixed-size chunks, handing
- * each chunk to emit_run with the current colours. Shared by print(),
- * print_bytes() and println() so the filter lives in exactly one place.
+/* Stream `len` bytes into fixed-size chunks, handing each chunk to emit_run
+ * with the current colours. Shared by print(), print_bytes() and println() so
+ * the chunking lives in exactly one place.
  * `newline` rides in the LAST chunk rather than in an emit of its own: a
  * newline emitted separately is a separate operation on the direct path, and
- * the gap between the two is where another core's line lands. */
-static void emit_filtered(StrandPrintState *ps, const char* data, size_t len,
-                          bool newline)
+ * the gap between the two is where another core's line lands.
+ *
+ * ‼ NOTHING IS SUBSTITUTED HERE, AND THAT IS THE POINT. This used to collapse
+ * every multi-byte UTF-8 sequence into a single '?' — "until the kernel-side
+ * font extension lands" — so `me` printed "6 cores ? 2 K-Core", and the
+ * character was gone from the log too, because the replacement happened in
+ * this address space, before the first syscall. Meanwhile the kernel wrote
+ * the same em dash through untouched and it came out as three empty cells on
+ * the board. Two printers, two different contracts on one character, and
+ * neither of them could see the font. The fold now happens once, at the font
+ * — canvas.c print_utf8_byte_locked, font/glyph_fold.h — which is the only
+ * code that knows what a cell can hold. A chunk may end mid-sequence; the
+ * Canvas assembles across calls, so a split costs nothing. */
+static void emit_chunks(StrandPrintState *ps, const char* data, size_t len,
+                        bool newline)
 {
     char   chunk[256];
     size_t src = 0;
     do {
-        int chunk_pos = 0;
-        while (chunk_pos < (int)sizeof(chunk) - 1 && src < len) {
-            unsigned char b = (unsigned char)data[src];
-            if (b < 0x80) {
-                chunk[chunk_pos++] = (char)b;
-                src++;
-            } else {
-                chunk[chunk_pos++] = '?';
-                int seq;
-                if (b < 0xC2)      seq = 1;
-                else if (b < 0xE0) seq = 2;
-                else if (b < 0xF0) seq = 3;
-                else if (b < 0xF5) seq = 4;
-                else               seq = 1;
-                src++;
-                for (int k = 1; k < seq && src < len; k++) {
-                    if (((unsigned char)data[src] & 0xC0) != 0x80) break;
-                    src++;
-                }
-            }
-        }
+        size_t take = len - src;
+        if (take > sizeof(chunk) - 1) take = sizeof(chunk) - 1;
+        if (take) memcpy(chunk, data + src, take);
+        src += take;
+
+        int chunk_pos = (int)take;
         if (newline && src >= len) chunk[chunk_pos++] = '\n';
         if (chunk_pos == 0) break;
         emit_run(ps, chunk, chunk_pos, ps->color_fg, ps->color_bg);
@@ -855,7 +851,7 @@ void print(const char* str)
     bool we_began = false;
     if (io_direct(ps)) { vga_begin(); we_began = true; }
 
-    emit_filtered(ps, str, strlen(str), false);
+    emit_chunks(ps, str, strlen(str), false);
 
     if (we_began) vga_commit();
 }
@@ -868,7 +864,7 @@ void print_bytes(const char* data, size_t len)
     bool we_began = false;
     if (io_direct(ps)) { vga_begin(); we_began = true; }
 
-    emit_filtered(ps, data, len, false);
+    emit_chunks(ps, data, len, false);
 
     if (we_began) vga_commit();
 }
@@ -882,7 +878,7 @@ void println(const char* str)
     bool we_began = false;
     if (io_direct(ps)) { vga_begin(); we_began = true; }
 
-    if (str) emit_filtered(ps, str, strlen(str), true);
+    if (str) emit_chunks(ps, str, strlen(str), true);
     else     emit_run(ps, "\n", 1, ps->color_fg, ps->color_bg);
 
     if (we_began) vga_commit();
@@ -922,8 +918,10 @@ void clear(void)
  *   - the buffer is about to overflow;
  *   - format string ends.
  *
- * UTF-8: ASCII pass-through; multi-byte runs collapse to '?' (kernel font
- * extension is a future milestone).
+ * UTF-8: passes through whole, format string and %s alike. What a character
+ * looks like is settled once, at the font, by the only code that holds it
+ * (kernel canvas.c / font/glyph_fold.h) — not here, where the font cannot be
+ * seen and the substitution reached the log as well as the glass.
  *
  * One printf currently produces N×emit_run calls (N = colour changes). For
  * VGA direct mode each emit is 1 setcolor + 1 puts syscall; for IPC mode
@@ -998,27 +996,11 @@ __attribute__((weak)) int printf(const char *fmt, ...)
 
     while (*fmt) {
         if (*fmt != '%') {
+            /* Every byte of the format string, UTF-8 sequences included, goes
+             * out as it was written. See emit_chunks: the character is folded
+             * at the font, not here. */
             ENSURE(4);
-            unsigned char b = (unsigned char)*fmt;
-            if (b < 0x80) {
-                buf[pos++] = (char)b;
-                fmt++;
-            } else {
-                /* UTF-8 multi-byte → single '?'. */
-                buf[pos++] = '?';
-                int seq;
-                if (b < 0xC2)      seq = 1;
-                else if (b < 0xE0) seq = 2;
-                else if (b < 0xF0) seq = 3;
-                else if (b < 0xF5) seq = 4;
-                else               seq = 1;
-                fmt++;
-                for (int k = 1; k < seq; k++) {
-                    if (*fmt == '\0') break;
-                    if (((unsigned char)*fmt & 0xC0) != 0x80) break;
-                    fmt++;
-                }
-            }
+            buf[pos++] = *fmt++;
             continue;
         }
 
@@ -1075,28 +1057,12 @@ __attribute__((weak)) int printf(const char *fmt, ...)
             case 's': {
                 const char *s = va_arg(args, const char *);
                 if (!s) s = "(null)";
-                /* Stream UTF-8 byte-at-a-time, flushing on overflow. */
+                /* Stream byte-at-a-time, flushing on overflow. A flush may
+                 * land mid-sequence and that is harmless: the Canvas
+                 * assembles the character across whatever calls carry it. */
                 while (*s) {
                     ENSURE(4);
-                    unsigned char b = (unsigned char)*s;
-                    if (b < 0x80) {
-                        buf[pos++] = (char)b;
-                        s++;
-                    } else {
-                        buf[pos++] = '?';
-                        int seq;
-                        if (b < 0xC2)      seq = 1;
-                        else if (b < 0xE0) seq = 2;
-                        else if (b < 0xF0) seq = 3;
-                        else if (b < 0xF5) seq = 4;
-                        else               seq = 1;
-                        s++;
-                        for (int k = 1; k < seq; k++) {
-                            if (*s == '\0') break;
-                            if (((unsigned char)*s & 0xC0) != 0x80) break;
-                            s++;
-                        }
-                    }
+                    buf[pos++] = *s++;
                 }
                 break;
             }

@@ -157,32 +157,63 @@ const EfiSystemResourceEntry *efi_esrt_find(const EfiGuid *target)
 static const char *fw_type_name(uint32_t t)
 {
     switch (t) {
-        case ESRT_FW_TYPE_SYSTEM_FIRMWARE: return "system";
-        case ESRT_FW_TYPE_DEVICE_FIRMWARE: return "device";
-        case ESRT_FW_TYPE_UEFI_DRIVER:     return "uefi-driver";
-        default:                            return "unknown";
+        case ESRT_FW_TYPE_SYSTEM_FIRMWARE: return "the system firmware";
+        case ESRT_FW_TYPE_DEVICE_FIRMWARE: return "a device's firmware";
+        case ESRT_FW_TYPE_UEFI_DRIVER:     return "a UEFI driver";
+        default:                            return "a resource of a type this "
+                                                   "firmware did not name";
     }
 }
 
+/* The names are UEFI 2.10 §23.4.1, EFI_SYSTEM_RESOURCE_TABLE, whose Related
+ * Definitions carry the block headed "Last Attempt Status Values" — a run of
+ * #defines, not a table, and not §23.4.2, which is "Adding and Removing
+ * Devices from the ESRT" and lists no status codes at all. */
+static const char *last_attempt_name(uint32_t status)
+{
+    switch (status) {
+        case ESRT_LAST_ATTEMPT_SUCCESS:                 return "it succeeded";
+        case ESRT_LAST_ATTEMPT_ERROR_UNSUCCESSFUL:      return "it failed";
+        case ESRT_LAST_ATTEMPT_ERROR_INSUFFICIENT_RES:  return "it ran out of resources";
+        case ESRT_LAST_ATTEMPT_ERROR_INCORRECT_VERSION: return "the version was wrong";
+        case ESRT_LAST_ATTEMPT_ERROR_INVALID_FORMAT:    return "the capsule format was invalid";
+        case ESRT_LAST_ATTEMPT_ERROR_AUTH_ERROR:        return "it failed authentication";
+        case ESRT_LAST_ATTEMPT_ERROR_AC_NOT_CONNECTED:  return "mains power was not connected";
+        case ESRT_LAST_ATTEMPT_ERROR_INSUFFICIENT_BATT: return "the battery was too low";
+        default:                                         return "the firmware reported a status this spec revision does not name";
+    }
+}
+
+/* Said out loud, not to a debug build. On a UEFI machine this is the table
+ * that answers "what firmware is on this board and can it be updated", and a
+ * log with no [ESRT] line cannot be told apart from a kernel that never
+ * looked. */
 void efi_esrt_print(void)
 {
     if (!g_esrt_ready) {
-        debug_printf("[ESRT] not available\n");
+        kprintf("[ESRT] the firmware published no System Resource Table, so "
+                "this machine does not say which of its firmware images can "
+                "be updated or what version they are at\n");
         return;
     }
-    debug_printf("[ESRT] %u firmware resource(s):\n", g_esrt_count);
+
+    kprintf("[ESRT] the firmware publishes %u updatable firmware resource(s), "
+            "and this table is where it states the version each one is at\n",
+            g_esrt_count);
+
     for (uint32_t i = 0; i < g_esrt_count; i++) {
         const EfiSystemResourceEntry *e = &g_esrt_entries[i];
         EfiGuid fc;
         memcpy(&fc, &e->fw_class, sizeof(fc));
         char gstr[37];
         guid_to_string(&fc, gstr);
-        debug_printf("  [%u] %s class=%s fwver=0x%x lowest=0x%x "
-                     "caps=0x%x last_ver=0x%x last_status=%u\n",
-                     i, fw_type_name(e->fw_type), gstr,
-                     e->fw_version, e->lowest_supported_fw_version,
-                     e->capsule_flags, e->last_attempt_version,
-                     e->last_attempt_status);
+        kprintf("[ESRT]   resource %u is %s, class %s: it is at version %u and "
+                "will not take anything below %u; its last recorded update "
+                "attempt was version %u and %s\n",
+                i, fw_type_name(e->fw_type), gstr,
+                e->fw_version, e->lowest_supported_fw_version,
+                e->last_attempt_version,
+                last_attempt_name(e->last_attempt_status));
     }
 }
 

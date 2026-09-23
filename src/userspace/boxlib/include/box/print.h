@@ -41,9 +41,12 @@ void io_flush(void);
  *                        the VGA text backend alone projects it onto its
  *                        16 colours, by dominant hue, at draw time.
  *
- * UTF-8 input: ASCII passes through; multi-byte sequences are replaced with
- * '?' until the kernel-side font extension lands. This keeps printf safe for
- * arbitrary user strings without breaking the cell grid.
+ * UTF-8 input: passes through untouched, every byte of it. A printer does
+ * not decide what a character looks like — the code that owns the font does,
+ * at the moment it draws (kernel canvas.c, font/glyph_fold.h), where a
+ * codepoint with no glyph becomes a visible box and nothing is lost on the
+ * way to the log. Replacing sequences here used to cost the character in the
+ * log file as well, because it happened in this cabin, before the syscall.
  *
  * The whole printf produces ONE syscall — output runs are batched as ops
  * inside a single Manifest submit.

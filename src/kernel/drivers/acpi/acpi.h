@@ -447,7 +447,34 @@ typedef struct {
     bool     hest_present;
     bool     bert_present;
     bool     erst_present;
+    /* EINJ is looked for and never walked — this kernel injects no errors.
+     * Its presence is kept because three places in this tree name APEI EINJ
+     * as the integration test for the MCE and GHES paths, and whether that
+     * test can be run at all is a fact about the firmware in front of you. */
+    bool     einj_present;
 } acpi_apei_info_t;
+
+/* ============================================================
+ * WSMT — Windows SMM Security Mitigations Table
+ * (Microsoft, "Windows SMM Security Mitigations Table", version 1.0; ACPI
+ *  6.5 Table 5.6 reserves the signature for that specification, under the
+ *  name "Windows Security Mitigations Table". A header and one word.)
+ * ============================================================ */
+typedef struct {
+    acpi_sdt_header_t header;
+    uint32_t protection_flags;
+} __attribute__((packed)) acpi_wsmt_t;
+
+/* Bit values are the specification's own, quoted where acpi_wsmt.c reads
+ * them. Bit 1 may not be set without bit 0. */
+#define ACPI_WSMT_FIXED_COMM_BUFFERS              0x1u
+#define ACPI_WSMT_COMM_BUFFER_NESTED_PTR_PROTECTION 0x2u
+#define ACPI_WSMT_SYSTEM_RESOURCE_PROTECTION      0x4u
+
+typedef struct {
+    uint32_t protection_flags;
+    bool     present;
+} acpi_wsmt_info_t;
 
 /* ============================================================
  * AML opcodes — minimal set for _S5 parsing

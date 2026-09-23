@@ -671,12 +671,35 @@ static void TagFSProbeDrive(void)
      * turns "why is this machine slower off that disk" into a sentence
      * somebody can read off a screen.
      */
-    uint32_t run = BoardroomSeatRun(g_tagfs_seat);
-    uint32_t blocks = run / 8u;
-    if (blocks == 0) blocks = 1;
-    if (blocks > TAGFS_READ_AHEAD_BLOCKS) blocks = TAGFS_READ_AHEAD_BLOCKS;
-    kprintf("[TagFS] this medium takes %u sector(s) at a time, so neighbouring "
-            "blocks are read %u at a time\n", run, blocks);
+    uint32_t run     = BoardroomSeatRun(g_tagfs_seat);
+    uint32_t offered = run / (TAGFS_BLOCK_SIZE / BOARDROOM_SECTOR_BYTES);
+    if (offered == 0) offered = 1;
+
+    uint32_t asked = offered;
+    if (asked > TAGFS_READ_AHEAD_BLOCKS) asked = TAGFS_READ_AHEAD_BLOCKS;
+
+    /*
+     * Two numbers and the narrower of them, each said by whoever chose it.
+     *
+     * The line used to read "this medium takes N sectors at a time, SO
+     * neighbouring blocks are read M at a time", and nothing derived M from N:
+     * the flash drive on the board answered 128 sectors, which is sixteen of
+     * this volume's blocks, and the four that got printed came from the size
+     * of the read-ahead cache. Two media answering 32 and 128 produced the
+     * same four, so the line stopped telling them apart exactly where it
+     * promised to. Which side is binding is the thing worth reading: when it
+     * is the cache, the medium is being asked for less than it offered, and
+     * that is the answer to "why is this machine slower off that disk".
+     */
+    kprintf("[TagFS] this medium hands over %u sector(s) in one go, which is %u "
+            "of this volume's %u-byte block(s), and the read-ahead cache holds "
+            "%u — so neighbours are fetched %u at a time, %s\n",
+            run, offered, (unsigned)TAGFS_BLOCK_SIZE,
+            (unsigned)TAGFS_READ_AHEAD_BLOCKS, asked,
+            asked < offered
+                ? "which is the cache's limit and not the medium's: it offered "
+                  "more than is being taken"
+                : "which is all the medium offered");
 }
 
 int tagfs_volume_read(uint64_t vlba, uint32_t count, void *buffer)

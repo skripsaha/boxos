@@ -31,6 +31,7 @@ typedef struct {
     acpi_dmar_info_t dmar;
     acpi_ivrs_info_t ivrs;
     acpi_apei_info_t apei;
+    acpi_wsmt_info_t wsmt;
 
     bool initialized;
 } acpi_state_t;
@@ -53,6 +54,7 @@ void acpi_parse_slit(void);
 void acpi_parse_dmar(void);
 void acpi_parse_ivrs(void);
 void acpi_parse_apei(void);
+void acpi_parse_wsmt(void);
 void acpi_apei_consume(void);
 void acpi_dmar_probe_registers(void);
 

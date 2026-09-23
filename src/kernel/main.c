@@ -231,6 +231,15 @@ void kernel_main(void)
         }
     }
 
+    /* Said once, in both backends, because a box on the screen is the first
+     * thing the owner will ask about standing in front of the board — and
+     * because for three years the same em dash came out of this kernel as
+     * three empty cells and out of userspace as a '?'. */
+    kprintf("[DISPLAY] one cell of this glass holds one CP437 glyph, so UTF-8 is folded "
+            "at the font and nowhere earlier — the log ring still keeps every byte it "
+            "was handed, and a character this font cannot draw appears as one solid box "
+            "rather than two or three wrong glyphs\n");
+
     /* The loader's account of its own journey — which volume this kernel was
      * read out of, off what medium, by which loader. Read here because the
      * block sits in memory the loaders own, below the first megabyte, and
@@ -370,9 +379,12 @@ void kernel_main(void)
          * SVAM success: ESRT is a plain in-memory copy. Touch publish
          * matches the acpi_init pattern: emit at boot — late subscribers
          * can query via efi_esrt_get(). */
-        if (efi_esrt_init()) {
-            efi_esrt_print();
-        }
+        efi_esrt_init();
+        /* Printed whether or not it came up. A boot log with no [ESRT] line
+         * cannot be told apart from a kernel whose ESRT reader never ran,
+         * and on a UEFI machine "the firmware published no ESRT" is itself
+         * one of the answers worth having. */
+        efi_esrt_print();
 
         /* Secure Boot consumer — reads SecureBoot/SetupMode/PK/KEK/db/dbx
          * via Variable Services. Safe to call even when firmware reports
@@ -385,9 +397,12 @@ void kernel_main(void)
          * the boot-time state events. The kernel-internal state is
          * available immediately via efi_secureboot_get_state() /
          * efi_esrt_get() so the deferral is purely for Touch consumers. */
-        if (efi_secureboot_init()) {
-            efi_secureboot_print();
-        }
+        efi_secureboot_init();
+        /* Printed on both outcomes, for the same reason as ESRT above and
+         * with more at stake: whether this machine authenticates what it
+         * boots is the first fact anyone wants from a UEFI board, and a
+         * refusal to serve Secure Boot state has to be as loud as a state. */
+        efi_secureboot_print();
     } else {
         debug_printf("[INIT] EFI runtime services not available\n");
     }
@@ -408,6 +423,23 @@ void kernel_main(void)
     if (acpi_err == ACPI_OK)
     {
         debug_printf("[INIT] ACPI initialized successfully\n");
+
+        /* The console, asked of the machine instead of assumed.
+         *
+         * serial_init() ran at the top of this function, before a single
+         * ACPI table existed, so the only address it could try was the
+         * PC/AT one — and on a board with no Super-I/O nothing decodes it.
+         * The firmware states where its own debug port is in DBG2 (and in
+         * the older DBGP), and this is the first line of the boot at which
+         * those tables can be read. It must also stay ahead of
+         * serial_console_init() further down, which wires IRQ4 and needs to
+         * know by then whether the line it is wiring is the legacy port.
+         *
+         * When the port moves, everything said so far goes out on the new
+         * line at once — which is the point: a board whose console only
+         * exists from here on would otherwise lose its whole early boot. */
+        WireFollowTheFirmware();
+
         /* Surface any pre-boot hardware error captured by firmware. */
         acpi_apei_consume();
         /* Log NUMA topology now that both PMM and ACPI/SRAT are ready. */
@@ -1037,6 +1069,16 @@ void kernel_main(void)
     AutostartWatchVolume();
 
     kprintf("[AUTOSTART] %d process(es) launched\n", autostart_count);
+
+    /* Fill the clock page before anything in Ring 3 can read it.
+     *
+     * From here the BSP's IRQ0 handler keeps it current, but that handler does
+     * not run until this core enables interrupts, which happens inside the
+     * loop entered below — and by then the machine has been up for the whole
+     * boot. Without this one call the first thing every process reads off the
+     * page is zero while the system deck, asked the same question, answers
+     * with the true uptime. */
+    clockboard_publish_uptime();
 
     if (g_amp.multicore_active)
     {
