@@ -2875,6 +2875,25 @@ error_t tagfs_init(void) {
     g_state.block_bitmap.free_list = NULL;
     g_state.block_bitmap.extent_count = 0;
 
+    /* The debt is sized from the same number the bitmap is: one bit per sector
+     * of the medium's copy. On this volume that is 44 sectors and six bytes.
+     * A volume whose debt cannot be sized is mounted READ-DURABLE-ONLY rather
+     * than refused — MapOwedMark answers the NULL by doing nothing, and the
+     * medium's map then waits for the next sync exactly as it always did. */
+    g_state.block_bitmap.owed_sectors =
+        (bitmap_bytes + TAGFS_SECTOR_SIZE - 1) / TAGFS_SECTOR_SIZE;
+    g_state.block_bitmap.owed_count = 0;
+    g_state.block_bitmap.owed =
+        kmalloc((g_state.block_bitmap.owed_sectors + 7) / 8);
+    if (g_state.block_bitmap.owed) {
+        memset(g_state.block_bitmap.owed, 0,
+               (g_state.block_bitmap.owed_sectors + 7) / 8);
+    } else {
+        kprintf("[TagFS] no room to track which bitmap sectors this medium "
+                "has not been told about — every hand-out waits for the next "
+                "sync to reach the medium\n");
+    }
+
     /* ‼ ONLY THE PART OF THE BITMAP THAT COVERS THE DATA RUN IS READ.
      *
      * The region a volume declares for its bitmap is laid down for the ground
@@ -3107,6 +3126,14 @@ error_t tagfs_init(void) {
             // Integrity-map blocks are used on disk but referenced by no file —
             // mark them so they are not treated as orphans or reused.
             IntegrityMarkMapBlocks(computed_bm, g_state.layout.data_blocks);
+
+            /* And the same question put to copy-on-write, which owns the one
+             * block on this volume that no file extent and no chain magic can
+             * reach: the snapshot manifest. Named in the Ledger the instant it
+             * is allocated, marked used on the medium only at the next sync —
+             * so a volume that lost power in between came back with the
+             * manifest block in the free list. See CowRollCall. */
+            CowRollCall(computed_bm, g_state.layout.data_blocks);
 
             // Compare computed vs on-disk bitmap
             for (uint32_t b = 0; b < g_state.layout.data_blocks; b++)
@@ -3344,9 +3371,39 @@ static void tagfs_sync_inside(void)
         if (disk_write_sectors(((uint64_t)g_state.layout.block_bitmap_block * TAGFS_BLOCK_SECTORS),
                                (uint16_t)sector_count, bm_buf) != 0)
         {
-            debug_printf("[TagFS] sync: failed to write block bitmap\n");
+            /* ‼ THE ONE WRITE THAT MAKES THE ALLOCATOR DURABLE, AND IT USED TO
+             * FAIL TO THE DEBUG CHANNEL — which compiles to nothing in a
+             * shipped build. What is at stake is not this sync: it is the NEXT
+             * mount, which reads this bitmap and believes it. Every block
+             * handed out since the last successful write reads as free, and
+             * the first writer after that mount is handed a block somebody
+             * already owns. */
+            kprintf("[TagFS] sync: the block bitmap for %u block(s) would not "
+                    "write — the medium's map is now older than this volume, "
+                    "and the next mount will read it as such\n",
+                    g_state.layout.data_blocks);
+        }
+        else if (g_state.block_bitmap.owed)
+        {
+            /* The whole map has just gone down, so nothing is owed on it —
+             * including sectors a refused MapOwedSettle had put back. */
+            spin_lock(&g_state.lock);
+            memset(g_state.block_bitmap.owed, 0,
+                   (g_state.block_bitmap.owed_sectors + 7) / 8);
+            g_state.block_bitmap.owed_count = 0;
+            spin_unlock(&g_state.lock);
         }
         kfree(bm_buf);
+    }
+    else
+    {
+        /* The same loss, arrived at by a different road, and it was not even
+         * reported to the debug channel: no buffer means the bitmap is simply
+         * not written and the sync carries on to the Ledger as though it had
+         * been. */
+        kprintf("[TagFS] sync: no room for a %u-byte buffer to write the block "
+                "bitmap with — the medium's map stays as it was\n",
+                bm_buf_size);
     }
 
     tagfs_write_ledger();
@@ -3446,6 +3503,13 @@ static void tagfs_clear_the_ground(void)
         kfree(g_state.block_bitmap.bitmap);
         g_state.block_bitmap.bitmap = NULL;
     }
+    if (g_state.block_bitmap.owed)
+    {
+        kfree(g_state.block_bitmap.owed);
+        g_state.block_bitmap.owed = NULL;
+    }
+    g_state.block_bitmap.owed_sectors = 0;
+    g_state.block_bitmap.owed_count = 0;
     g_state.block_bitmap.total_blocks = 0;
 
     TagFS_CowShutdown();
@@ -5218,6 +5282,101 @@ static int tagfs_truncate_file_inside(uint32_t file_id, uint64_t new_size)
 // Block allocator
 // ----------------------------------------------------------------------------
 
+/* Take on the debt for a run of blocks. Caller holds g_state.lock, because
+ * this is recorded in the same breath as the bits it is about. */
+static void MapOwedMark(uint32_t start_block, uint32_t count)
+{
+    if (!g_state.block_bitmap.owed || count == 0)
+        return;
+
+    uint32_t first_sector = (start_block / 8) / TAGFS_SECTOR_SIZE;
+    uint32_t last_sector  = ((start_block + count - 1) / 8) / TAGFS_SECTOR_SIZE;
+
+    for (uint32_t sec = first_sector;
+         sec <= last_sector && sec < g_state.block_bitmap.owed_sectors; sec++)
+    {
+        uint8_t bit = (uint8_t)(1u << (sec % 8));
+        if (!(g_state.block_bitmap.owed[sec / 8] & bit)) {
+            g_state.block_bitmap.owed[sec / 8] |= bit;
+            g_state.block_bitmap.owed_count++;
+        }
+    }
+}
+
+/*
+ * ‼ PAY IT. Called with NO lock held, by the allocator's own door, before the
+ * block it handed out can be named anywhere.
+ *
+ * One sector at a time, and each one is copied out from under the lock before
+ * the write rather than written from the live bitmap: holding the volume's
+ * lock across disk I/O would stop every other core on a flash drive's write
+ * latency, and letting the medium read a bitmap another core is editing would
+ * write a sector that was never a state this volume was in.
+ *
+ * A refused write puts the debt straight back. It is a debt, not a report: if
+ * the medium would not take it this time, the next hand-out and the next sync
+ * both try again, and the volume stays honest about being owed.
+ */
+static void MapOwedSettle(void)
+{
+    if (!g_state.block_bitmap.owed)
+        return;
+
+    /* Asked under the lock, because that is where the count is kept. Reading
+     * it any other way would be a race on the one number that decides whether
+     * this function does anything at all. */
+    spin_lock(&g_state.lock);
+    uint32_t owed_now = g_state.block_bitmap.owed_count;
+    spin_unlock(&g_state.lock);
+    if (owed_now == 0)
+        return;
+
+    uint8_t *sector = kmalloc(TAGFS_SECTOR_SIZE);
+    if (!sector) {
+        kprintf("[TagFS] no room for one sector to tell the medium which "
+                "blocks are taken — the map stays behind until the next "
+                "sync\n");
+        return;
+    }
+
+    uint64_t base_lba = (uint64_t)g_state.layout.block_bitmap_block * TAGFS_BLOCK_SECTORS;
+    uint32_t bitmap_bytes = (g_state.layout.data_blocks + 7) / 8;
+
+    for (uint32_t sec = 0; sec < g_state.block_bitmap.owed_sectors; sec++) {
+        uint8_t bit = (uint8_t)(1u << (sec % 8));
+
+        spin_lock(&g_state.lock);
+        if (!g_state.block_bitmap.owed || !(g_state.block_bitmap.owed[sec / 8] & bit)) {
+            spin_unlock(&g_state.lock);
+            continue;
+        }
+        uint32_t from = sec * TAGFS_SECTOR_SIZE;
+        uint32_t len  = (from + TAGFS_SECTOR_SIZE <= bitmap_bytes)
+                            ? TAGFS_SECTOR_SIZE : (bitmap_bytes - from);
+        memset(sector, 0, TAGFS_SECTOR_SIZE);
+        memcpy(sector, g_state.block_bitmap.bitmap + from, len);
+        g_state.block_bitmap.owed[sec / 8] &= (uint8_t)~bit;
+        if (g_state.block_bitmap.owed_count)
+            g_state.block_bitmap.owed_count--;
+        spin_unlock(&g_state.lock);
+
+        if (disk_write_sectors(base_lba + sec, 1, sector) != 0) {
+            spin_lock(&g_state.lock);
+            if (g_state.block_bitmap.owed &&
+                !(g_state.block_bitmap.owed[sec / 8] & bit)) {
+                g_state.block_bitmap.owed[sec / 8] |= bit;
+                g_state.block_bitmap.owed_count++;
+            }
+            spin_unlock(&g_state.lock);
+            kprintf("[TagFS] the medium would not take sector %u of this "
+                    "volume's block map — the blocks it covers are taken here "
+                    "and still read as free there\n", sec);
+        }
+    }
+
+    kfree(sector);
+}
+
 // Internal version - caller MUST hold g_state.lock
 // Exported for use by meta_pool.c
 int tagfs_alloc_blocks_internal(uint32_t count, uint32_t *out_start_block)
@@ -5236,6 +5395,9 @@ int tagfs_alloc_blocks_internal(uint32_t count, uint32_t *out_start_block)
             {
                 bitmap_set_bit(g_state.block_bitmap.bitmap, cur->start + i);
             }
+            /* And the medium is now owed the sectors those bits live in. It is
+             * told by whoever releases the lock — see MapOwedSettle. */
+            MapOwedMark(*out_start_block, count);
 
             if (cur->count == count)
             {
@@ -5287,6 +5449,20 @@ static int tagfs_alloc_blocks_inside(uint32_t count, uint32_t *out_start_block)
     spin_lock(&g_state.lock);
     int result = tagfs_alloc_blocks_internal(count, out_start_block);
     spin_unlock(&g_state.lock);
+
+    /* ‼ BEFORE THE CALLER CAN NAME IT. Every caller of this function goes on
+     * to write the block's number somewhere that outlives this boot — a
+     * Ledger field, a file's extent, a chain's next pointer. The medium
+     * learns the block is taken first, so the worst a crash between the two
+     * can leave is a block nobody claims, never a block two owners claim.
+     *
+     * Said plainly about the one path this does NOT cover: meta_pool.c calls
+     * tagfs_alloc_blocks_internal with the lock already held, and settles
+     * nothing here. Its blocks are reachable another way — the mount's roll
+     * call walks the pool chain by its magic — so they are found even when
+     * the medium's map is behind. */
+    if (result == 0)
+        MapOwedSettle();
     return result;
 }
 

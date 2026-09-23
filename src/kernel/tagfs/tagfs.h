@@ -250,6 +250,33 @@ typedef struct {
     uint32_t    total_blocks;
     FreeExtent* free_list;
     uint32_t    extent_count;
+    /*
+     * ‼ MapOwed — WHAT THE MEDIUM HAS NOT BEEN TOLD YET.
+     *
+     * The bitmap above is the one in RAM, and until now the medium's copy of
+     * it was written by exactly one routine: tagfs_sync. Between two syncs
+     * every block this kernel handed out was, on the medium, still free — so
+     * a machine that lost power in that window came back, read the medium,
+     * and handed the same block to somebody else. Two owners, and whichever
+     * writes second destroys what the first put there. That is not a
+     * hypothetical failure mode; it is the one the snapshot manifest hit.
+     *
+     * So a hand-out now leaves a DEBT: one bit per SECTOR of the on-medium
+     * bitmap, saying that sector carries something the medium has not heard.
+     * The debt is recorded under the volume's lock, where the bits change,
+     * and paid outside it — the allocator's own door pays before it returns,
+     * so the medium knows a block is taken before the caller who asked for it
+     * can name it anywhere.
+     *
+     * The debt is only ever taken on for a block being TAKEN, never for one
+     * being released. A crash between the two therefore leaves a block marked
+     * used that nobody owns — which the mount's roll call keeps and reports,
+     * and which costs a block. The opposite order would leave a block marked
+     * free that somebody owns, which costs the file.
+     */
+    uint8_t*    owed;           /* one bit per bitmap sector; NULL before mount */
+    uint32_t    owed_sectors;   /* bitmap sectors covering the data run       */
+    uint32_t    owed_count;     /* how many of them are owed right now        */
 } BlockBitmap;
 
 // ----------------------------------------------------------------------------

@@ -119,4 +119,10 @@ void TagFS_CowRestoreSnapshot(const CowSnapshot *snap);
 // for an unknown/deleted snapshot is safely ignored.
 void TagFS_CowRestoreRedirect(uint32_t snapshot_id, uint32_t old_block, uint32_t new_block);
 
+/* Mark the blocks of the data run that belong to copy-on-write into the map
+ * the mount's roll call is building. Called from the fsck in tagfs_init,
+ * beside IntegrityMarkMapBlocks; marks only, never clears. See the note over
+ * the definition for what it can and cannot know on a cold mount. */
+void CowRollCall(uint8_t *computed_bm, uint32_t total_blocks);
+
 #endif // COW_H

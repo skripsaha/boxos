@@ -47,10 +47,26 @@ static void CowWriteManifest(void) {
 
     // Lazy allocation: on first snapshot, allocate a dedicated block for the manifest.
     if (primary_block == 0) {
-        if (tagfs_alloc_blocks(1, &primary_block) != 0)
-            return;  // No free blocks — manifest cannot be persisted
+        if (tagfs_alloc_blocks(1, &primary_block) != 0) {
+            kprintf("[CoW] no free block for the snapshot manifest — the "
+                    "snapshots taken since this volume was mounted exist in "
+                    "memory only and will not survive a reboot\n");
+            return;
+        }
         fs->ledger.cow_manifest_block = primary_block;
-        tagfs_write_ledger();
+        /* ‼ The Ledger is the only thing that names this block. If it refuses
+         * the write, a block is taken in RAM that nothing on the medium will
+         * ever claim — so it goes straight back, and the caller is told the
+         * manifest is not on this volume rather than being left to assume it
+         * is. */
+        if (tagfs_write_ledger() != OK) {
+            fs->ledger.cow_manifest_block = 0;
+            tagfs_free_blocks(primary_block, 1);
+            kprintf("[CoW] the ledger would not take the manifest block, so "
+                    "the block is given back — the snapshots taken since this "
+                    "volume was mounted exist in memory only\n");
+            return;
+        }
     }
 
     CowManifest *manifest = kmalloc(sizeof(CowManifest));
@@ -583,4 +599,75 @@ void TagFS_CowRestoreRedirect(uint32_t snapshot_id, uint32_t old_block, uint32_t
         cow_append_redirect_locked(&g_cow_state.snapshots[slot], old_block, new_block);
     /* snapshot not found (deleted before this redirect was replayed) → ignore */
     spin_unlock(&g_cow_state.lock);
+}
+
+/*
+ * ‼ WHAT COPY-ON-WRITE OWNS, ANSWERED BY COPY-ON-WRITE ITSELF.
+ *
+ * The mount's roll call walks every file's extents and every metadata chain,
+ * builds a map of what it found, and then keeps any block EITHER map calls
+ * used. That union is what makes the repair additive and safe — nothing is
+ * ever released over live metadata. But it has one hole, and the hole is a
+ * block that NEITHER map names: one the kernel handed out and named in the
+ * Ledger, whose bit had not yet reached the medium when the machine stopped.
+ *
+ * The manifest block is exactly that block. CowWriteManifest allocates it on
+ * the first snapshot, writes the Ledger naming it immediately, and the bit
+ * saying it is taken lives in RAM until the next tagfs_sync. Cut the power in
+ * between and the next mount reads a bitmap that calls the block FREE, a roll
+ * call that does not reach it (no file's extent, no chain's magic), and a
+ * union that therefore leaves it free. The free list hands it to the next
+ * writer, and one block now has two owners: whichever of them writes second
+ * destroys what the other put there.
+ *
+ * So CoW is asked, at the moment the roll call is taken, which blocks of the
+ * data run are its own. Said plainly, because it bounds what this answers:
+ * the two manifest blocks are named by the Ledger and are therefore known on
+ * every mount; the per-snapshot redirects are a RUNTIME list that comes back
+ * empty after a reboot (see the note over CowSnapshot), so on a cold mount
+ * this answers with the manifest and nothing more. That is not a shortfall
+ * here — a redirect's OLD block was already marked used on the medium by the
+ * write that preserved it, and its NEW block is reachable through the file
+ * that owns it. The manifest is the one block in this subsystem with no other
+ * way to be found.
+ *
+ * Marks only. It never clears a bit, so it can only keep a block, never
+ * release one.
+ */
+void CowRollCall(uint8_t *computed_bm, uint32_t total_blocks)
+{
+    if (!computed_bm)
+        return;
+
+    TagFSState *fs = tagfs_get_state();
+    if (!fs)
+        return;
+
+#define COW_ROLL_CALL_MARK(blk) do {                                          \
+        uint32_t _b = (blk);                                                  \
+        if (_b != 0 && _b < (total_blocks))                                   \
+            computed_bm[_b / 8] |= (uint8_t)(1u << (_b % 8));                 \
+    } while (0)
+
+    COW_ROLL_CALL_MARK(fs->ledger.cow_manifest_block);
+    COW_ROLL_CALL_MARK(fs->ledger.cow_manifest_backup_block);
+
+    /* The redirects are held under the CoW lock, and this is taken WITHOUT
+     * g_state.lock — the same order CowWriteManifest already establishes
+     * (CoW lock first, then the volume's), so a roll call cannot invert it. */
+    if (g_cow_state.initialized) {
+        spin_lock(&g_cow_state.lock);
+        for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
+            CowSnapshot *snap = &g_cow_state.snapshots[i];
+            if (!snap->redirects)
+                continue;
+            for (uint32_t r = 0; r < snap->redirect_count; r++) {
+                COW_ROLL_CALL_MARK(snap->redirects[r].old_block);
+                COW_ROLL_CALL_MARK(snap->redirects[r].new_block);
+            }
+        }
+        spin_unlock(&g_cow_state.lock);
+    }
+
+#undef COW_ROLL_CALL_MARK
 }

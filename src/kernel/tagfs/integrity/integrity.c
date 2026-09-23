@@ -110,7 +110,14 @@ error_t IntegrityInit(void) {
         // later mounts just reuse it). Bounded RAM regardless of how big it is.
         uint32_t start = 0;
         if (tagfs_alloc_blocks(g_map_count, &start) != 0 || start == 0) {
-            debug_printf("[Integrity] could not allocate %u map blocks — disabled\n", g_map_count);
+            /* Said aloud: a volume mounted without its integrity map is a
+             * volume whose bit rot nobody will ever be told about, and that
+             * is a property of this machine's disk rather than of this
+             * build. It was a debug_printf, which compiles to nothing in a
+             * shipped build — so the one boot where it mattered was silent. */
+            kprintf("[Integrity] this volume has no room for a %u-block map, "
+                    "so nothing on it is checked for bit rot this boot\n",
+                    g_map_count);
             return ERR_NO_MEMORY;
         }
         g_map_first_block = start;
@@ -122,7 +129,23 @@ error_t IntegrityInit(void) {
         for (uint32_t i = 0; i < g_map_count; i++)
             tagfs_write_block(start + i, zero);
 
-        tagfs_write_ledger();
+        /* ‼ AND THE LEDGER'S ANSWER IS HEARD, which is what the growth path
+         * twenty lines below already does and this one did not. The run is
+         * allocated, the Ledger is the only thing that will ever name it
+         * again, and if the write refuses then the volume comes up with a
+         * region that is marked taken in RAM, named nowhere on the medium,
+         * and therefore lost to the next mount. Put back exactly as the
+         * growth path puts its own back. */
+        if (tagfs_write_ledger() != OK) {
+            SB_MAP_BLOCK(fs) = 0;
+            SB_MAP_COUNT(fs) = 0;
+            g_map_first_block = 0;
+            tagfs_free_blocks(start, g_map_count);
+            kprintf("[Integrity] the ledger would not take a fresh %u-block "
+                    "map, so the room is given back and nothing on this "
+                    "volume is checked for bit rot this boot\n", g_map_count);
+            return ERR_IO;
+        }
         debug_printf("[Integrity] fresh map: %u blocks at %u (covers %u, %u-slot cache)\n",
                      g_map_count, start, g_map_entries, MAP_CACHE_SLOTS);
     } else {
