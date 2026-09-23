@@ -34,22 +34,12 @@
 #define EXCEPTION_MACHINE_CHECK     18
 #define EXCEPTION_SIMD_EXCEPTION    19
 
-#define IRQ_TIMER       32  // IRQ 0 -> INT 0x20
-#define IRQ_KEYBOARD    33  // IRQ 1 -> INT 0x21
-#define IRQ_CASCADE     34  // IRQ 2 (internal cascade)
-#define IRQ_COM2        35  // IRQ 3
-#define IRQ_COM1        36  // IRQ 4
-#define IRQ_LPT2        37  // IRQ 5
-#define IRQ_FLOPPY      38  // IRQ 6
-#define IRQ_LPT1        39  // IRQ 7
-#define IRQ_RTC         40  // IRQ 8
-#define IRQ_FREE1       41  // IRQ 9
-#define IRQ_FREE2       42  // IRQ 10
-#define IRQ_FREE3       43  // IRQ 11
-#define IRQ_MOUSE       44  // IRQ 12
-#define IRQ_FPU         45  // IRQ 13
-#define IRQ_ATA_PRIMARY 46  // IRQ 14
-#define IRQ_ATA_SECONDARY 47 // IRQ 15
+/* The sixteen ISA IRQ numbers used to be spelled out here as vectors —
+ * IRQ_TIMER 32 through IRQ_ATA_SECONDARY 47 — which was the formula
+ * "32 + number" written by hand a third time. A grep of the tree matched none
+ * of them anywhere but their own definitions. Deleted rather than updated: a
+ * line's vector is given to it by the pool now, and a name that claims to know
+ * it in advance would be wrong on the first boot. */
 
 typedef struct {
     uint16_t offset_low;    // Offset bits 0-15
@@ -78,6 +68,22 @@ typedef void (*irq_callback_t)(void);
 
 void idt_init(void);
 void idt_set_entry(int index, uint64_t handler, uint16_t selector, uint8_t type_attr, uint8_t ist);
+
+/* The kernel's own two lines, answered like any other.
+ *
+ * The tick and the 8042 used to be dispatched by a switch on the ISA number
+ * at the bottom of irq_handler, which is to say by arithmetic on the vector,
+ * which is to say by the one assumption the vector pool removes. They are
+ * ordinary answerers now; whoever brings each line up hands the matching one
+ * of these to irq_register_handler. */
+/* The frame the interrupt currently being served arrived on, or NULL outside
+ * a handler. The tick asks for it because preemption means writing a return
+ * frame; nothing else in this kernel needs it. ‼ Valid only for the duration
+ * of the answerer — it points into the interrupted core's stack. */
+interrupt_frame_t *IrqFrameInFlight(void);
+
+void IrqTheTickAnswers(void);
+void IrqTheKeyboardAnswers(void);
 void idt_load(void);
 void idt_test(void);
 
@@ -165,7 +171,34 @@ bool SummonsAnswer(const Summons *line, SummonsResponder *node,
 /* The ISA-era form: one exclusive edge-triggered line, one answerer, and a
  * node the registry keeps on the line's behalf because a legacy caller has
  * nowhere to put one. Equivalent to SummonsAnswer with SummonsForIsaLine. */
-void irq_register_handler(uint8_t irq, irq_callback_t callback);
+/* Register an answerer for a legacy ISA line.
+ *
+ * `row` is not optional and has no default on purpose: it is what this line
+ * costs when it is late, and the driver is the only one who knows. It decides
+ * the priority class the line is delivered in -- see right_of_way.h. */
+void irq_register_handler(uint8_t irq, irq_callback_t callback, RightOfWay row);
+
+/* Answer a message-signalled interrupt: a registry entry keyed by vector with
+ * no pin behind it. The vector comes from the pool like any other line's, and
+ * the device was told it by whoever programmed its MSI capability. */
+bool IrqAnswerMessage(uint8_t vector, SummonsResponder *node,
+                      irq_callback_t answer, const char *who);
+
+/* Stop answering a line, and give its vector back when the last answerer on it
+ * leaves. The caller must already have stopped its device from raising the
+ * line; this masks the pin, unlinks the node and returns the number, in that
+ * order and for that reason. */
+bool SummonsUnanswer(const Summons *line, SummonsResponder *node,
+                     const char *who);
+
+/* ‼ There is deliberately no message-signalled counterpart to this. One was
+ * written and then removed, because nothing in this kernel calls it: every
+ * path that takes an MSI vector either keeps it for the life of the boot or
+ * fails before registering an answerer, and a function with no caller is a
+ * function nobody has ever run. When a controller that has taken a message
+ * can actually leave, the counterpart is ten lines — unlink the node, and
+ * give the number back — and the source is stopped by clearing the device's
+ * own MSI enable, which is the caller's doing either way. */
 
 void exception_handler(interrupt_frame_t* frame);
 void irq_handler(interrupt_frame_t* frame);

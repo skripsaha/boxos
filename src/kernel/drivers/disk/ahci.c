@@ -17,12 +17,32 @@
 
 #define AHCI_TIMEOUT_MS CONFIG_AHCI_CMD_TIMEOUT_MS
 
+/* How many bits are set in a register this driver reads — how many ports the
+ * HBA implements, how many command slots a port has.
+ *
+ * Counted here rather than with __builtin_popcount, and the reason is a link
+ * error rather than a preference: without -mpopcnt the compiler does not
+ * inline that builtin, it emits a call to libgcc's __popcountdi2, and a
+ * freestanding kernel links no libgcc. The loop is the honest alternative —
+ * it runs a handful of times on a 32-bit register, on paths that happen once
+ * per controller and once per port at bring-up. */
+static unsigned AhciBitsSet(uint32_t mask)
+{
+    unsigned n = 0;
+    while (mask) { mask &= mask - 1u; n++; }
+    return n;
+}
+
 static ahci_controller_t ahci_ctrl;
 
 /* This controller's link on its INTx line, for the fallback path. One node,
  * because there is one controller record; a shared wire chains it to the
  * nodes of whatever else sits on the same pin. */
 static SummonsResponder ahci_intx_responder;
+
+/* The node this controller answers its message on. MSI has no pin and no
+ * sharing, so it needs no Summons — only a vector and a link. */
+static SummonsResponder ahci_msi_responder;
 
 static inline ahci_port_regs_t* ahci_get_port_regs(uint8_t port_num) {
     uintptr_t port_base = (uintptr_t)ahci_ctrl.hba_mem + 0x100 + (port_num * 0x80);
@@ -448,20 +468,43 @@ void ahci_init_irq(void) {
      * so it sidesteps legacy INTx routing. The PCI 0x3C "interrupt line" is
      * frequently stale/wrong on APIC systems, and PCI INTx needs level /
      * active-low IOAPIC programming the firmware may not have arranged. MSI
-     * is universal on AHCI controllers. Route it to the BSP's LAPIC; the
-     * vector is dispatched directly by irq_handler (AHCI_MSI_VECTOR). */
+     * is universal on AHCI controllers. Route it to the BSP's LAPIC.
+     *
+     * The vector is asked for rather than compiled in. It used to be the
+     * constant AHCI_MSI_VECTOR, which is to say this controller owned 0x70
+     * whether it existed or not, and a second AHCI controller had nowhere to
+     * go. A completion that does not arrive is the difference between a disk
+     * and a wedge, so the line is asked for on those terms. */
+    uint8_t msi_vector = VectorPoolTake(RIGHT_OF_WAY_WORK_IS_REDONE, "AHCI MSI");
+    if (msi_vector == 0) return;   /* refused, and the pool said why */
+
     int msi = pci_msi_enable(ahci_ctrl.pci_dev.bus,
                              ahci_ctrl.pci_dev.device,
                              ahci_ctrl.pci_dev.function,
-                             AHCI_MSI_VECTOR,
+                             msi_vector,
                              g_amp.bsp_lapic_id);
     if (msi == 0) {
-        ahci_ctrl.irq_vector  = AHCI_MSI_VECTOR;
+        IrqAnswerMessage(msi_vector, &ahci_msi_responder, ahci_irq_handler,
+                         "the AHCI controller");
+        ahci_ctrl.irq_vector  = msi_vector;
         ahci_ctrl.irq_enabled = true;
-        debug_printf("[AHCI] MSI enabled (vector 0x%02x -> LAPIC %u)\n",
-                     AHCI_MSI_VECTOR, g_amp.bsp_lapic_id);
+        /* Said out loud, like the INTx fallback below it and like xHCI says
+         * the same thing twice on the same boot. How this controller reaches
+         * a core is not a detail on a board where a completion that never
+         * arrives is the difference between a disk and a wedge — and it was
+         * the one branch of this decision that could not be read from the
+         * log, because the successful one was a debug_printf. */
+        kprintf("[AHCI] this controller signals with MSI, vector 0x%02x "
+                "delivered straight to LAPIC %u — no INTx wire is shared with "
+                "anyone and no routing table decides where a completion "
+                "lands\n",
+                msi_vector, g_amp.bsp_lapic_id);
         return;
     }
+
+    /* MSI was offered and the device refused it. The number goes back, or the
+     * next controller to ask finds the pool one short for no reason. */
+    VectorPoolGiveBack(msi_vector, "AHCI MSI");
 
     /* Fallback: INTx, and it arrives DESCRIBED.
      *
@@ -484,8 +527,20 @@ void ahci_init_irq(void) {
         return;
     }
 
-    if (!SummonsAnswer(&line, &ahci_intx_responder, ahci_irq_handler, "AHCI") ||
-        !SummonsArm(&line)) {
+    if (!SummonsAnswer(&line, &ahci_intx_responder, ahci_irq_handler, "AHCI")) {
+        kprintf("[AHCI] INTx line refused — this controller's completions are "
+                "found by the overdue sweep, not by an interrupt\n");
+        ahci_ctrl.irq_vector  = 0xFF;
+        ahci_ctrl.irq_enabled = false;
+        return;
+    }
+
+    if (!SummonsArm(&line)) {
+        /* Answered and then not armed. Answering settles the line, and
+         * settling is what gives it a vector, so leaving without taking the
+         * answerer back off would hold a number on a line that will never
+         * deliver — invisible to everyone except the next device to ask. */
+        SummonsUnanswer(&line, &ahci_intx_responder, "AHCI");
         kprintf("[AHCI] INTx line refused — this controller's completions are "
                 "found by the overdue sweep, not by an interrupt\n");
         ahci_ctrl.irq_vector  = 0xFF;
@@ -931,6 +986,56 @@ static error_t ahci_port_identify(ahci_port_t* port, uint16_t* id_out) {
     return result;
 }
 
+/* ONE NAME FOR A SERIAL ATA GENERATION, and the same one for both registers
+ * that report it. AHCI 1.3.1 §3.3.10 gives PxSSTS.SPD as 1h/2h/3h = Gen1
+ * 1.5 Gb/s, Gen2 3 Gb/s, Gen3 6 Gb/s, and §3.1.1 gives CAP.ISS the identical
+ * encoding for what the HBA can do — which is what lets a negotiated speed be
+ * compared against the controller's ceiling and a degraded link be named as
+ * one instead of merely printed. 0h is the register's own "not negotiated",
+ * and anything above 3h is a generation newer than the specification this
+ * driver was written against: it is said as a number rather than guessed at. */
+static const char* ahci_link_gen_name(uint8_t gen) {
+    switch (gen) {
+        case 0x1: return "Gen1 (1.5 Gb/s)";
+        case 0x2: return "Gen2 (3.0 Gb/s)";
+        case 0x3: return "Gen3 (6.0 Gb/s)";
+        default:  return NULL;
+    }
+}
+
+/* AN IDENTIFY DEVICE TEXT FIELD, TURNED INTO SOMETHING A CONSOLE CAN PRINT.
+ *
+ * ACS-3 §3.3.10 ("ATA string convention"): the field is a run of 16-bit words
+ * in which the FIRST character of each pair is the high byte, and the whole
+ * field is padded with spaces (20h) rather than terminated. So the bytes come
+ * out of memcpy in the wrong order within every word, the tail is blanks, and
+ * some drives pad the head as well.
+ *
+ * `out` must hold words*2 + 1 bytes. Anything outside printable ASCII is
+ * replaced rather than passed through: this string reaches a serial console
+ * and a framebuffer, and a drive that answers a control byte must not be able
+ * to move the cursor of the machine reading it. */
+static void ahci_id_string(const uint16_t* id, unsigned first_word,
+                           unsigned words, char* out) {
+    unsigned n = words * 2u;
+    for (unsigned i = 0; i < words; i++) {
+        uint16_t w = id[first_word + i];
+        char hi = (char)(w >> 8);
+        char lo = (char)(w & 0xFFu);
+        out[i * 2u]      = (hi >= 0x20 && hi < 0x7F) ? hi : ' ';
+        out[i * 2u + 1u] = (lo >= 0x20 && lo < 0x7F) ? lo : ' ';
+    }
+    out[n] = '\0';
+
+    while (n > 0 && out[n - 1u] == ' ') out[--n] = '\0';
+
+    unsigned head = 0;
+    while (head < n && out[head] == ' ') head++;
+    if (head != 0) {
+        for (unsigned i = 0; head + i <= n; i++) out[i] = out[head + i];
+    }
+}
+
 static int ahci_port_init(uint8_t port_num) {
     if (port_num >= AHCI_MAX_PORTS) {
         return -1;
@@ -1177,22 +1282,74 @@ static int ahci_port_init(uint8_t port_num) {
         }
         if (det != AHCI_SSTS_DET_PRESENT) {
             if (empty) {
-                /* Nothing is attached to this port. Not a refusal — no disk
-                 * was taken away from anyone — so it belongs with the rest of
-                 * the port enumeration rather than on the operator's console. */
-                debug_printf("[AHCI] port %u: nothing on the link — no COMINIT "
-                             "in the %u ms Serial ATA 2.6 §15.2.2.2 allows one "
-                             "(SSTS=0x%08x SERR=0x%08x)\n",
-                             port_num, AHCI_PRESENCE_WINDOW_MS,
-                             regs->ssts, regs->serr);
+                /* Nothing is attached to this port. It used to be said with
+                 * debug_printf, on the reasoning that an empty socket is not a
+                 * refusal and belongs with the enumeration rather than on the
+                 * console — but debug_printf compiles to nothing in a shipped
+                 * build, and the operator standing at the board then cannot
+                 * tell an empty cable from a port this kernel never looked at.
+                 * Those are different facts and only one of them means "plug
+                 * the disk in". Every implemented port now accounts for
+                 * itself, in one line, whichever way it went. */
+                kprintf("[AHCI] port %u: nothing on the link — no COMINIT "
+                        "in the %u ms Serial ATA 2.6 §15.2.2.2 allows one "
+                        "(SSTS=0x%08x SERR=0x%08x)\n",
+                        port_num, AHCI_PRESENCE_WINDOW_MS,
+                        regs->ssts, regs->serr);
             } else if (det == AHCI_SSTS_DET_OFFLINE) {
-                /* Said out loud, and said correctly: a port whose Phy firmware
-                 * switched off looks exactly like a dead port to whoever
-                 * plugged a disk into it. This is the one thing the operator
-                 * can act on — it is undone in the firmware setup, not here. */
-                kprintf("[AHCI] port %u: its Phy is offline (DET=4h) — the "
-                        "interface is disabled in firmware or held in BIST "
-                        "loopback; not using it\n", port_num);
+                /* ‼ THE REASON IS READ, NOT ASSERTED.
+                 *
+                 * This used to say "the interface is disabled in firmware or
+                 * held in BIST loopback" — the §3.3.10 gloss on the value,
+                 * printed as though it were a measurement. It is not one, and
+                 * on the board of 2026-09-20 four ports carried it while
+                 * nothing in this driver had ever read the register that
+                 * decides between the two halves of the sentence.
+                 *
+                 * PxSCTL.DET is that register (§3.3.11, Type RW, reset 0h,
+                 * "4h Disable the Serial ATA interface and put Phy in offline
+                 * mode"), and it is the ONLY software-visible way to put a Phy
+                 * offline. Reading it splits the case cleanly, because this
+                 * driver's own GHC.HR a moment earlier resets every non-HwInit
+                 * port register field (§10.4.3) and PxSCTL.DET is one of them:
+                 *
+                 *   PxSCTL.DET = 4h — somebody wrote this port off through the
+                 *   AHCI register space and it survived, or was rewritten,
+                 *   after our reset. That is a switch, and a switch has an
+                 *   owner.
+                 *
+                 *   PxSCTL.DET = 0h with PxSSTS.DET still 4h — nothing in the
+                 *   AHCI register space asked for this. The lane is not given
+                 *   to SATA by the platform at all (on an Intel PCH, the PCS
+                 *   enable in configuration space or a Flex-I/O lane handed to
+                 *   PCIe or USB3), and §10.4.3 puts configuration space
+                 *   explicitly outside what GHC.HR reaches. No AHCI setting
+                 *   moves it, and telling the operator to look for a disabled
+                 *   port in Setup would send him after a switch that is not
+                 *   there.
+                 *
+                 * Nothing is written either way: taking a Phy off offline is
+                 * the owner's decision, not this driver's, and it is not made
+                 * here. What changes is that the log now carries the evidence
+                 * to make it with. */
+                uint32_t sctl = regs->sctl;
+                if ((sctl & 0xFu) == AHCI_SSTS_DET_OFFLINE) {
+                    kprintf("[AHCI] port %u: its Phy is offline and PxSCTL.DET "
+                            "reads 4h — this port was switched off through the "
+                            "AHCI registers and stayed off through this "
+                            "kernel's own HBA reset (SCTL=0x%08x SSTS=0x%08x); "
+                            "nothing here writes that field back, so the port "
+                            "is not used\n",
+                            port_num, sctl, regs->ssts);
+                } else {
+                    kprintf("[AHCI] port %u: its Phy is offline while PxSCTL.DET "
+                            "reads %uh — nothing in the AHCI registers asked "
+                            "for that, so the lane behind this port is not "
+                            "given to SATA by the platform and no AHCI setting "
+                            "reaches it (SCTL=0x%08x SSTS=0x%08x); not using "
+                            "it\n",
+                            port_num, (unsigned)(sctl & 0xFu), sctl, regs->ssts);
+                }
             } else if (HourGlassSourceDied(&link)) {
                 kprintf("[AHCI] port %u: the %s stopped ticking mid-wait, so an "
                         "empty link cannot be told from one still coming up "
@@ -1212,6 +1369,17 @@ static int ahci_port_init(uint8_t port_num) {
             }
             goto fail_free;
         }
+
+        /* THE SPEED THE TWO ENDS AGREED ON, taken here because here is the
+         * only place it means anything: AHCI 1.3.1 §3.3.10 defines PxSSTS.SPD
+         * as "the negotiated interface communication speed", and a negotiation
+         * has only happened once DET reads 3h. It is not a decision this
+         * driver makes — every command works the same at any generation — it
+         * is the one register that tells a disk running at a quarter of its
+         * speed from a disk running at all of it, and nothing else in the
+         * machine can be asked about it afterwards. */
+        port->link_speed = (uint8_t)((regs->ssts >> AHCI_SSTS_SPD_SHIFT)
+                                     & AHCI_SSTS_SPD_MASK);
     }
 
     /* AHCI 1.3.1 §10.1.1 step 6, in its place: "Clear the PxSERR register, by
@@ -1258,19 +1426,52 @@ static int ahci_port_init(uint8_t port_num) {
 
     port->signature = regs->sig;
 
-    // Only ATA disks are driven by this stack. ATAPI/PM/SEMB are skipped.
+    /* Only ATA disks are driven by this stack. ATAPI/PM/SEMB are skipped —
+     * and skipped ALOUD, on the same rule as every other refusal here: a
+     * device answered on this cable, and a port that disappears without a word
+     * looks to the operator exactly like a port with nothing plugged into it.
+     * What names it is AHCI 1.3.1 §3.3.9, "Offset 24h: PxSIG": the register
+     * "contains the initial signature of an attached device when the first
+     * D2H Register FIS is received from that device". (§3.3.6, cited here
+     * before, is PxIE — the port's interrupt enables, which say nothing
+     * about what is attached.) */
     if (port->signature != AHCI_SIG_ATA) {
-        debug_printf("[AHCI] Port %u: non-ATA device (sig=0x%08x), skipping\n",
-                     port_num, port->signature);
+        const char* what = "something whose signature this driver does not know";
+        if (port->signature == AHCI_SIG_ATAPI) {
+            what = "an ATAPI device — an optical or tape drive, which this "
+                   "kernel does not drive";
+        } else if (port->signature == AHCI_SIG_SEMB) {
+            what = "an enclosure management bridge, which is not a disk";
+        } else if (port->signature == AHCI_SIG_PM) {
+            what = "a port multiplier, and this driver speaks to one device "
+                   "per port";
+        }
+        kprintf("[AHCI] port %u: what answered here is %s (PxSIG=0x%08x); "
+                "not using it\n", port_num, what, port->signature);
         goto fail_free;
     }
 
     // Learn geometry/capabilities via IDENTIFY DEVICE.
     uint16_t id[256];
     if (ahci_port_identify(port, id) != OK) {
-        debug_printf("[AHCI] Port %u: IDENTIFY DEVICE failed\n", port_num);
+        /* The link is up, the device left BSY/DRQ and it signed itself as an
+         * ATA disk — and then would not describe itself. That is a drive this
+         * kernel cannot use and an operator can act on, so it is said in the
+         * shipped build and not only in a debug one. */
+        kprintf("[AHCI] port %u: an ATA device is on the link and will not say "
+                "what it is — IDENTIFY DEVICE never completed (TFD=0x%08x "
+                "SERR=0x%08x); not using it\n",
+                port_num, regs->tfd, regs->serr);
         goto fail_free;
     }
+
+    /* Who it is, before what it can do: words 27-46, 10-19 and 23-26 of the
+     * same answer (ACS-3 §7.12.7). Read here, kept in the port, and printed
+     * below — until now they were the only part of IDENTIFY this driver threw
+     * away, which is why a swapped disk left no trace anywhere. */
+    ahci_id_string(id, 27, 20, port->model);
+    ahci_id_string(id, 10, 10, port->serial);
+    ahci_id_string(id, 23,  4, port->firmware);
 
     /* Logical sector size: IDENTIFY word 106 is valid when bit 14 is set and
      * bit 15 clear; bit 12 then says words 117-118 carry the logical sector
@@ -1307,6 +1508,15 @@ static int ahci_port_init(uint8_t port_num) {
         memcpy(&s, &id[60], sizeof(uint32_t));     // words 60-61
         port->total_sectors = s;
     }
+
+    /* And from the same word, the other thing it settles: bit 13, "FLUSH CACHE
+     * EXT command supported" (ACS-3 §7.12.7). The drive's write cache answers
+     * a write the moment it lands in the drive's own DRAM, so what turns
+     * "written" into "still there after the power went out" is that one
+     * command and nothing else — and a drive that does not have it cannot be
+     * asked for durability by any means this kernel possesses. Read here so
+     * that the port can say which of the two it is. */
+    port->flush_ext = (id[83] & (1u << 13)) != 0;
 
     /* NCQ usable only if both the HBA (CAP.SNCQ) and the device (IDENTIFY
      * word 76 bit 8) support it. Word 76 reads 0x0000/0xFFFF on non-SATA. */
@@ -1370,10 +1580,116 @@ static int ahci_port_init(uint8_t port_num) {
 
     port->active = 1;
 
-    debug_printf("[AHCI] Port %u: ATA disk, %llu sectors, sec=%uB, LBA%s, NCQ=%s (sig=0x%08x)\n",
-                 port_num, (unsigned long long)port->total_sectors,
-                 port->logical_sector_size, port->lba48 ? "48" : "28",
-                 port->ncq ? "yes" : "no", port->signature);
+    /*
+     * ‼ AND HERE THE PORT SAYS WHAT IS ON IT.
+     *
+     * This was one debug_printf, which klib.h compiles into nothing whenever
+     * CONFIG_DEBUG_ENABLED is not set — that is, in every build that has ever
+     * been carried to a board. So on the run of 2026-09-20 two SATA drives
+     * were brought up, identified, seated in the Boardroom and read from, and
+     * the entire 719-line log said of them: "AHCI port 4" and "AHCI port 5".
+     * Every refusal on the way here was already loud; SUCCESS was the one
+     * thing that was not, and there is no second channel — nothing outside
+     * this driver ever repeats what IDENTIFY said.
+     *
+     * Four lines, and each of them is one of the questions an operator asks
+     * standing in front of the machine: is that my disk and is it still the
+     * same one, is all of it there and on what grid, did the link come up at
+     * the speed I paid for, and will a write on it survive the power going
+     * out. Nothing below is inferred: every value was read off this drive or
+     * this HBA within the last few milliseconds.
+     */
+    if (port->model[0] != '\0') {
+        kprintf("[AHCI port %u] %s, firmware %s, serial %s\n",
+                port_num, port->model,
+                port->firmware[0] != '\0' ? port->firmware : "not given",
+                port->serial[0]   != '\0' ? port->serial   : "not given");
+    } else {
+        kprintf("[AHCI port %u] the drive answered IDENTIFY with a blank model "
+                "field, so this port has nothing to be told apart from the "
+                "next disk by\n", port_num);
+    }
+
+    {
+        uint64_t mib = (port->total_sectors
+                        * (uint64_t)port->logical_sector_size) / (1024ULL * 1024ULL);
+        if (port->physical_sector_size != port->logical_sector_size) {
+            kprintf("[AHCI port %u] %llu sectors, %llu MiB, addressed in "
+                    "%u-byte sectors and built from %u-byte ones — a write "
+                    "that does not cover a whole physical sector costs this "
+                    "drive a read and a rewrite\n",
+                    port_num, (unsigned long long)port->total_sectors,
+                    (unsigned long long)mib, port->logical_sector_size,
+                    port->physical_sector_size);
+        } else {
+            kprintf("[AHCI port %u] %llu sectors, %llu MiB, addressed in "
+                    "%u-byte sectors and built from them too\n",
+                    port_num, (unsigned long long)port->total_sectors,
+                    (unsigned long long)mib, port->logical_sector_size);
+        }
+    }
+
+    {
+        const char* gen     = ahci_link_gen_name(port->link_speed);
+        uint8_t     hba_gen = (uint8_t)((ahci_ctrl.cap >> AHCI_CAP_ISS_SHIFT)
+                                        & AHCI_CAP_ISS_MASK);
+        char queueing[192];
+
+        if (port->ncq) {
+            ksnprintf(queueing, sizeof(queueing),
+                      "NCQ on with %u tag(s)",
+                      AhciBitsSet(port->slot_mask));
+        } else if (!ahci_ctrl.ncq_support) {
+            ksnprintf(queueing, sizeof(queueing),
+                      "no NCQ, because this HBA has none to offer (CAP.SNCQ=0) "
+                      "— one command at a time on this port");
+        } else {
+            ksnprintf(queueing, sizeof(queueing),
+                      "no NCQ, because the drive refuses it while this HBA "
+                      "offers it (IDENTIFY word 76 = 0x%04x) — one command at "
+                      "a time on this port", (unsigned)id[76]);
+        }
+
+        if (gen != NULL) {
+            kprintf("[AHCI port %u] link %s, LBA%s addressing, %s\n",
+                    port_num, gen, port->lba48 ? "48" : "28", queueing);
+        } else {
+            kprintf("[AHCI port %u] the link is up and names no negotiated "
+                    "speed (PxSSTS.SPD=%uh), LBA%s addressing, %s\n",
+                    port_num, port->link_speed,
+                    port->lba48 ? "48" : "28", queueing);
+        }
+
+        /* THE ONE THAT COSTS MONEY QUIETLY. A link that came up a generation
+         * or two below what the controller can drive works perfectly and is
+         * two or four times slower than the machine the owner built, and
+         * nothing else anywhere ever mentions it. Both fields are the same
+         * encoding — AHCI 1.3.1 §3.1.1 for CAP.ISS, §3.3.10 for PxSSTS.SPD —
+         * so the comparison is the register's own, not this driver's idea of
+         * one. */
+        if (gen != NULL && hba_gen != 0 && port->link_speed < hba_gen) {
+            const char* ceiling = ahci_link_gen_name(hba_gen);
+            kprintf("[AHCI port %u] this HBA drives a port at %s and this link "
+                    "settled at %s — the cable, the connector or the drive is "
+                    "holding it down, and every transfer on this port pays the "
+                    "difference (SSTS=0x%08x)\n",
+                    port_num,
+                    ceiling != NULL ? ceiling : "a generation this driver "
+                                                "does not name",
+                    gen, regs->ssts);
+        }
+    }
+
+    if (port->flush_ext) {
+        kprintf("[AHCI port %u] the drive supports FLUSH CACHE EXT, so a write "
+                "on this port can be made to survive the power going out\n",
+                port_num);
+    } else {
+        kprintf("[AHCI port %u] the drive does not support FLUSH CACHE EXT "
+                "(IDENTIFY word 83 = 0x%04x) — nothing this kernel can issue "
+                "makes a write on this port survive the power going out\n",
+                port_num, (unsigned)id[83]);
+    }
 
     return 0;
 
@@ -1454,7 +1770,31 @@ static int ahci_init_ports(void) {
 
     uint32_t pi = ahci_ctrl.hba_mem->pi;
     ahci_ctrl.port_implemented = pi;
-    debug_printf("[AHCI] Ports Implemented: 0x%08x\n", pi);
+
+    /* WHICH SOCKETS EXIST, by name and not only as a bitmask. AHCI 1.3.1
+     * §10.1.2 step 2 makes PI the answer to "which ports are implemented by
+     * the HBA", and without it on the console a run of refusals cannot be
+     * checked against anything: four ports saying "not using it" is a
+     * different machine depending on whether this HBA has four ports or
+     * eight. The register value is kept beside the list, because a board's
+     * documentation is written in hexadecimal and its case is written in
+     * numbers. */
+    {
+        char     list[AHCI_MAX_PORTS * 3 + 1];
+        unsigned at = 0;
+        for (unsigned i = 0; i < AHCI_MAX_PORTS; i++) {
+            if (!(pi & (1U << i))) continue;
+            at += (unsigned)ksnprintf(list + at, sizeof(list) - at,
+                                      at == 0 ? "%u" : " %u", i);
+        }
+        if (at == 0) list[0] = '\0';
+
+        kprintf("[AHCI] ports implemented: 0x%08x — %u of %u register sets, "
+                "ports %s; every one of them is brought up in turn, because a "
+                "port's DET says nothing until its link has been waited for\n",
+                pi, AhciBitsSet(pi), (unsigned)AHCI_MAX_PORTS,
+                at == 0 ? "none" : list);
+    }
 
     for (uint8_t i = 0; i < AHCI_MAX_PORTS; i++) {
         if (!(pi & (1U << i))) continue;
@@ -2276,24 +2616,81 @@ int ahci_init(void) {
     ahci_ctrl.ncq_support  = (ahci_ctrl.cap & AHCI_CAP_SNCQ) != 0;
     ahci_ctrl.num_slots    = ((ahci_ctrl.cap >> AHCI_CAP_NCS_SHIFT) & AHCI_CAP_NCS_MASK) + 1;
 
-    debug_printf("[AHCI] VS=%u.%u.%u CAP: NCQ=%s, Slots=%u, S64A=%s, CAP2=0x%08x\n",
-                 (unsigned)vs_major, (unsigned)(vs_minor >> 8),
-                 (unsigned)(vs_minor & 0xFFu),
-                 ahci_ctrl.ncq_support ? "yes" : "no",
-                 ahci_ctrl.num_slots,
-                 ahci_ctrl.s64a_support ? "yes" : "no",
-                 cap2);
+    /*
+     * ‼ AND THE CONTROLLER SAYS WHO IT IS, OUT LOUD.
+     *
+     * Every line above that described this HBA — where it was found, what its
+     * BAR5 is, its version, its CAP — was a debug_printf, so on the board the
+     * whole of AHCI was four refusals and nothing else: no way to tell six
+     * implemented ports from eight, no way to know whether CAP.SSS was set and
+     * therefore whether PxCMD.SUD was ever written, no way to check any
+     * reading of the port refusals against the controller that produced them.
+     * These two lines and the ports-implemented line below are what an
+     * operator needs to read the four refusals that may follow them.
+     *
+     * xHCI already announces itself this way on the same boot; the disk
+     * controller this machine reaches its volume through did not.
+     */
+    kprintf("[AHCI] controller at %02x:%02x.%x  %04x:%04x — AHCI %u.%u.%u, its "
+            "registers at 0x%08lx mapped for 0x%x bytes\n",
+            ahci_ctrl.pci_dev.bus, ahci_ctrl.pci_dev.device,
+            ahci_ctrl.pci_dev.function,
+            ahci_ctrl.pci_dev.vendor_id, ahci_ctrl.pci_dev.device_id,
+            (unsigned)vs_major, (unsigned)(vs_minor >> 8),
+            (unsigned)(vs_minor & 0xFFu),
+            (unsigned long)ahci_ctrl.hba_phys, (unsigned)AHCI_ABAR_SPAN);
+
+    {
+        /* CAP.ISS is the same three-value encoding as PxSSTS.SPD (AHCI 1.3.1
+         * §3.1.1 against §3.3.10), which is what makes a port's negotiated
+         * speed comparable to its controller's ceiling further down. */
+        uint8_t     iss      = (uint8_t)((ahci_ctrl.cap >> AHCI_CAP_ISS_SHIFT)
+                                         & AHCI_CAP_ISS_MASK);
+        const char* iss_name = ahci_link_gen_name(iss);
+        char        links[64];
+
+        if (iss_name != NULL) {
+            ksnprintf(links, sizeof(links), "up to %s", iss_name);
+        } else {
+            ksnprintf(links, sizeof(links),
+                      "at a generation this driver does not name (CAP.ISS=%uh)",
+                      iss);
+        }
+
+        /* Staggered spin-up is not trivia here: it is the whole of whether
+         * ahci_port_init writes PxCMD.SUD at all, so a port that came up empty
+         * cannot be argued about without knowing which of the two paths it
+         * took (AHCI 1.3.1 §10.1.1, and §10.4.3 for what the HBA reset does
+         * instead when the bit is clear). */
+        const char* spin =
+            (ahci_ctrl.cap & AHCI_CAP_SSS)
+            ? "staggered spin-up yes, so every port is commanded to spin its "
+              "drive up before its link is waited for"
+            : "staggered spin-up no, so nothing here writes PxCMD.SUD and each "
+              "link is started by the HBA reset itself";
+
+        kprintf("[AHCI] it has %u command slot(s), NCQ %s, 64-bit addressing "
+                "%s, drives its links %s; %s (CAP=0x%08x CAP2=0x%08x)\n",
+                ahci_ctrl.num_slots,
+                ahci_ctrl.ncq_support ? "yes" : "no",
+                ahci_ctrl.s64a_support ? "yes" : "no",
+                links, spin, ahci_ctrl.cap, cap2);
+    }
 
     ahci_ctrl.initialized = true;
 
     if (ahci_init_ports() != 0) {
-        debug_printf("[AHCI] No active ports found\n");
+        kprintf("[AHCI] none of the %u implemented port(s) yielded a disk — "
+                "each one's reason is above, and this controller is let go\n",
+                AhciBitsSet(ahci_ctrl.port_implemented));
         vmm_unmap_mmio(ahci_ctrl.hba_mem, AHCI_ABAR_SPAN);
         ahci_ctrl.initialized = false;
         return -1;
     }
 
-    debug_printf("[AHCI] Initialization complete (%u active port(s))\n", ahci_ctrl.num_active_ports);
+    kprintf("[AHCI] %u of %u implemented port(s) in service\n",
+            ahci_ctrl.num_active_ports,
+            AhciBitsSet(ahci_ctrl.port_implemented));
 
     /* Self-test was unconditional and ran on every boot — fine in QEMU,
      * questionable on real hardware where a hung port would stall the

@@ -1,6 +1,12 @@
 #ifndef IOAPIC_H
 #define IOAPIC_H
 
+/* Mask every redirection entry this chip implements. The count comes from the
+ * chip's own VER register, so a part with more inputs than the classic
+ * twenty-four is fully quieted rather than quieted as far as a number in a
+ * header happened to reach. */
+void IoapicMaskEveryPin(void);
+
 #include "ktypes.h"
 
 // IO-APIC register access (indirect via IOREGSEL/IOWIN)
@@ -29,9 +35,6 @@
 #define IOAPIC_REDIR_TRIGGER_LEVEL  (1 << 15)
 #define IOAPIC_REDIR_MASKED         (1 << 16)
 
-// Maximum IO-APIC pins we support
-#define IOAPIC_MAX_PINS     24
-
 // ISA IRQ to GSI override
 typedef struct {
     uint8_t  isa_irq;       // Source (ISA IRQ number)
@@ -40,16 +43,29 @@ typedef struct {
     bool     active;        // Whether this override is in use
 } ioapic_iso_t;
 
-void ioapic_init(uintptr_t base_addr, uint8_t gsi_base);
+/* `gsi_base` is the I/O APIC Structure's Global System Interrupt Base, and
+ * ACPI 6.5 §5.2.12.3 makes that field 32 bits wide — §5.2.13 numbers GSIs
+ * through every IOAPIC in the machine, so a second chip's base is not a small
+ * number. Taking it as a byte put the narrowing here, at the boundary, where
+ * the IOAPIC could not see that its own base had moved. */
+void ioapic_init(uintptr_t base_addr, uint32_t gsi_base);
 
 /* `dest_lapic_id` is a FULL-WIDTH APIC ID. The redirection entry carries
  * eight bits of it (Intel 82093AA §3.2.4, high dword), so an ID above 0xFF
  * is REFUSED and named inside ioapic.c rather than truncated onto a
  * different, running core. The parameter is uint32_t for that reason: an
  * eight-bit parameter puts the narrowing at the call site, where nothing
- * inside the IOAPIC can see it. */
-void ioapic_enable_irq(uint8_t gsi, uint8_t vector, uint32_t dest_lapic_id);
-void ioapic_disable_irq(uint8_t gsi);
+ * inside the IOAPIC can see it.
+ *
+ * `gsi` is 32 bits for the same reason and in the same words: every ACPI
+ * field that carries a Global System Interrupt is four bytes wide — the I/O
+ * APIC Structure's base (§5.2.12.3, Table 5.24) and the Interrupt Source
+ * Override's target (§5.2.12.5, Table 5.25) — and a byte here would make
+ * every caller narrow it silently at the call site. (§5.2.13, cited here on
+ * its own before, is where GSIs are NUMBERED across the machine; it states
+ * no width.) */
+void ioapic_enable_irq(uint32_t gsi, uint8_t vector, uint32_t dest_lapic_id);
+void ioapic_disable_irq(uint32_t gsi);
 
 // Interrupt Source Override management
 void ioapic_register_iso(uint8_t isa_irq, uint32_t gsi, uint16_t flags);

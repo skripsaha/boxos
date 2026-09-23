@@ -19,20 +19,9 @@ static void pic_chip_eoi(uint8_t gsi) {
     if (gsi < 16) pic_send_eoi(gsi);
 }
 
-static uint32_t pic_chip_get_isr(void) {
-    return (uint32_t)pic_get_isr();
-}
-
-static uint32_t pic_chip_get_irr(void) {
-    return (uint32_t)pic_get_irr();
-}
-
 static irq_chip_t pic_chip = {
     .name       = "8259A PIC",
     .send_eoi   = pic_chip_eoi,
-    .get_isr    = pic_chip_get_isr,
-    .get_irr    = pic_chip_get_irr,
-    .max_irqs   = 16,
 };
 
 // --- APIC backend (LAPIC + IO-APIC) ---
@@ -59,22 +48,23 @@ static void apic_chip_eoi(uint8_t gsi) {
     lapic_send_eoi();
 }
 
-static uint32_t apic_chip_get_isr(void) {
-    // Read first 32 bits of LAPIC ISR (covers vectors 0-31... but we want 32-63)
-    // ISR register 1 covers vectors 32-63
-    return lapic_read(LAPIC_REG_ISR_BASE + 0x10);  // ISR[1] = vectors 32-63
-}
-
-static uint32_t apic_chip_get_irr(void) {
-    return lapic_read(LAPIC_REG_IRR_BASE + 0x10);  // IRR[1] = vectors 32-63
-}
-
+/* No get_isr / get_irr here any more, and no max_irqs.
+ *
+ * The two readers took LAPIC ISR[1] and IRR[1] — the words covering vectors 32
+ * to 63 — and nothing in the kernel ever called them. They were a window into
+ * exactly the range a line could occupy back when a vector was 32 plus a pin
+ * number, so once lines could be delivered anywhere in the pool they would
+ * have answered "nothing pending" about most of the machine. Deleting beats
+ * widening: if a caller ever needs to know whether a particular vector is
+ * pending, it should ask about THAT vector rather than be handed a word and
+ * left to work out what it covers.
+ *
+ * max_irqs went with them. It answered with the width of a vector window and
+ * was read where the caller meant a count of pins; the chip's own register is
+ * the only honest source for that, and IoapicMaskEveryPin asks it. */
 static irq_chip_t apic_chip = {
     .name       = "APIC (LAPIC + IO-APIC)",
     .send_eoi   = apic_chip_eoi,
-    .get_isr    = apic_chip_get_isr,
-    .get_irr    = apic_chip_get_irr,
-    .max_irqs   = IRQ_MAX_COUNT,
 };
 
 // --- Detection ---
@@ -233,8 +223,7 @@ void irqchip_init(void) {
     active_type = IRQCHIP_APIC;
     active_chip = &apic_chip;
 
-    debug_printf("[IRQCHIP] %[S]Using APIC mode (LAPIC + IO-APIC, %u IRQs)%[D]\n",
-                 active_chip->max_irqs);
+    debug_printf("[IRQCHIP] %[S]Using APIC mode (LAPIC + IO-APIC)%[D]\n");
     return;
 
 use_pic:
@@ -298,24 +287,12 @@ void irqchip_send_eoi(uint8_t gsi) {
     }
 }
 
-uint32_t irqchip_get_isr(void) {
-    return active_chip ? active_chip->get_isr() : 0;
-}
-
-uint32_t irqchip_get_irr(void) {
-    return active_chip ? active_chip->get_irr() : 0;
-}
-
 irqchip_type_t irqchip_get_type(void) {
     return active_type;
 }
 
 const char* irqchip_get_name(void) {
     return active_chip ? active_chip->name : "none";
-}
-
-uint8_t irqchip_max_irqs(void) {
-    return active_chip ? active_chip->max_irqs : 0;
 }
 
 /* ===========================================================================
@@ -347,10 +324,15 @@ Summons SummonsForIsaLine(uint8_t isa_irq) {
 
     Summons line = {
         .gsi         = gsi,
-        /* The vector follows the IRQ NUMBER and not the pin, because
-         * irq_handler turns a vector back into the key handlers registered
-         * under. Changing that would move every ISA driver's registration. */
-        .vector      = irq_gsi_to_vector(isa_irq),
+        /* No vector yet. A line is given one when it settles on a pin that
+         * nobody else holds, and not before: SummonsForIsaLine is called more
+         * than once per line in a boot -- irq_register_handler builds one and
+         * irqchip_enable_irq builds another -- and a vector taken here would
+         * be taken again on every call, leaking one each time. Settling is
+         * also the only place that knows whether this pin already delivers
+         * under somebody else's vector, which it must then join. */
+        .vector      = 0,
+        .row         = RIGHT_OF_WAY_WORK_IS_REDONE,
         .intx_pin    = 0,
         .polarity    = SUMMONS_ACTIVE_HIGH,
         .trigger     = SUMMONS_EDGE,
@@ -368,7 +350,7 @@ Summons SummonsForIsaLine(uint8_t isa_irq) {
     return line;
 }
 
-Summons SummonsForAcpiSci(uint8_t sci_int) {
+Summons SummonsForAcpiSci(uint16_t sci_int) {
     /* ACPI 6.5 §5.2.9, Table 5.9, SCI_INT: "System vector the SCI interrupt
      * is wired to in 8259 mode. On systems that do not contain the 8259,
      * this field contains the Global System interrupt number of the SCI
@@ -400,7 +382,10 @@ Summons SummonsForAcpiSci(uint8_t sci_int) {
 
     Summons line = {
         .gsi         = gsi,
-        .vector      = irq_gsi_to_vector(sci_int),
+        .vector      = 0,
+        /* The SCI reports: a power button, a thermal event, a GPE. Nothing is
+         * in flight on it and nothing is redone if it waits a moment. */
+        .row         = RIGHT_OF_WAY_A_PERSON_WAITS,
         .intx_pin    = 0,
         .polarity    = SUMMONS_ACTIVE_LOW,
         .trigger     = SUMMONS_LEVEL,
@@ -514,13 +499,21 @@ uint16_t SummonsMpsFlags(const Summons *line) {
 bool SummonsArm(Summons *line) {
     if (!line || !active_chip) return false;
 
-    uint8_t key = irq_vector_to_gsi(line->vector);
-    if (key >= IRQ_MAX_COUNT) {
-        kprintf("[IRQCHIP] %[E]%s GSI %u not armed: vector %u is outside the "
-                "%u hardware IRQ vectors this kernel dispatches%[D]\n",
-                line->bus, line->gsi, line->vector, IRQ_MAX_COUNT);
-        return false;
-    }
+    /* There is no vector test here, and its absence is the point.
+     *
+     * A barrier used to stand on this line, judging `line->vector` against the
+     * width of a twenty-four-vector window before anything had been resolved
+     * or settled. It was checking a number the caller had computed for
+     * itself, and once lines stopped arriving with a vector of their own it
+     * would have rejected every one of them: a line carries zero until it
+     * settles, and zero minus the vector base underflows into a number well
+     * past any window. What it was really guarding — "this line must end up
+     * somewhere this kernel can dispatch" — is the settling's job now, and
+     * the settling either gives the line right of way or refuses aloud. */
+    /* Remembered before the settling, because the settling is what hands a
+     * vector out and afterwards there is no way to tell a number this line
+     * was just given from one it walked in with. */
+    bool line_had_no_vector = (line->vector < IRQ_VECTOR_BASE);
 
     Summons resolved = *line;
     SummonsResolve(&resolved);
@@ -540,12 +533,25 @@ bool SummonsArm(Summons *line) {
      * on. */
     *line = resolved;
 
+    /* From here on there are two ways out that are not "armed", and both of
+     * them owe the pool a vector.
+     *
+     * The settling above is where a line that nobody held is GIVEN one, so a
+     * refusal after this point walks away holding a number. Before the pool
+     * existed that was harmless — the number was the pin plus thirty-two and
+     * came back by arithmetic whether anybody returned it or not. Now it is a
+     * leak, and an invisible one: nothing is wrong until some later device
+     * finds its row full. */
+    bool line_was_given_a_vector = (line_had_no_vector && resolved.vector >= IRQ_VECTOR_BASE);
+
     if (active_type == IRQCHIP_APIC) {
         /* Asked BEFORE anything is written or recorded, because the answer
          * decides what the caller does next: a driver that is told its line
          * is armed stops polling, and a driver told the truth keeps its
          * fallback. The refusal itself is printed inside. */
         if (!SummonsPinIsReachable(resolved.gsi, madt_info.bsp_lapic_id)) {
+            if (line_was_given_a_vector)
+                VectorPoolGiveBack(resolved.vector, resolved.bus);
             return false;
         }
 
@@ -554,7 +560,7 @@ bool SummonsArm(Summons *line) {
          * irq_handler can describe — including one nobody has answered yet. */
         SummonsPost(&resolved);
         ioapic_describe_gsi(resolved.gsi, SummonsMpsFlags(&resolved));
-        ioapic_enable_irq((uint8_t)resolved.gsi, resolved.vector,
+        ioapic_enable_irq(resolved.gsi, resolved.vector,
                           madt_info.bsp_lapic_id);
     } else {
         if (resolved.gsi >= 16) {
@@ -562,6 +568,8 @@ bool SummonsArm(Summons *line) {
                     "inputs and this machine offered no MADT, so there is no "
                     "controller input with that number%[D]\n",
                     resolved.bus, resolved.gsi);
+            if (line_was_given_a_vector)
+                VectorPoolGiveBack(resolved.vector, resolved.bus);
             return false;
         }
         /* The 8259 takes polarity and trigger from the chipset's Edge/Level
@@ -627,7 +635,7 @@ void SummonsDisarm(const Summons *line) {
     if (!line || !active_chip) return;
 
     if (active_type == IRQCHIP_APIC) {
-        ioapic_disable_irq((uint8_t)line->gsi);
+        ioapic_disable_irq(line->gsi);
     } else if (line->gsi < 16) {
         pic_disable_irq((uint8_t)line->gsi);
     }

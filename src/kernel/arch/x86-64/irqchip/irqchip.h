@@ -2,53 +2,46 @@
 #define IRQCHIP_H
 
 #include "ktypes.h"
+#include "right_of_way.h"
 
-// Vector layout:
-//   0-31:   CPU exceptions
-//   32-55:  Hardware IRQs (GSI 0-23, covers PIC + IO-APIC)
-//   128:    Syscall (INT 0x80)
-//   254:    LAPIC timer
-//   255:    LAPIC spurious
+/* WHERE VECTORS COME FROM, now that they are not arithmetic.
+ *
+ * 0-31    the architecture's (Intel SDM Vol 3A §6.2)
+ * 32-239  the pool. A line asks for right of way and is given a vector in the
+ *         matching priority class; see right_of_way.h. 0x80 is carved out of
+ *         the middle of it — it is the syscall door and the only gate in this
+ *         kernel a ring-3 INT may reach.
+ * 240-242 the kernel's own IPIs: wake, TLB shootdown, panic
+ * 254     the LAPIC timer
+ * 255     the LAPIC spurious vector
+ *
+ * There is no window of "hardware IRQ vectors" any more, and no constant
+ * saying how many lines this kernel can dispatch. Both were the same claim —
+ * that a line's vector is its pin number plus thirty-two — and 82093AA §3.2.4
+ * says plainly that it never had to be: "the notion of interrupt priority is
+ * completely unrelated to the position of the physical interrupt input signal
+ * on the APIC. Instead, software determines the vector (and therefore the
+ * priority) for each input."
+ *
+ * The MSI numbers that used to live here went the same way. AHCI owned 0x70
+ * and USB owned a run of eight starting at 0x71, which meant this kernel had
+ * decided in advance that a machine has at most one AHCI controller and eight
+ * USB ones. They ask the pool now, like everything else. */
 
+/* How many interrupt request lines an ISA bus has: two cascaded 8259s of
+ * eight inputs each, the second hanging off the first's input 2. A fact about
+ * that bus, used where a caller names a line by its ISA number. */
+#define ISA_INTERRUPT_REQUEST_LINES 16
+
+/* The first vector software may use, and the pool's floor. Intel SDM Vol 3A
+ * §6.2: "Vector numbers in the range 0 through 31 are reserved by the Intel 64
+ * and IA-32 architectures for architecture-defined exceptions and interrupts."
+ * Note this is a stricter rule than §11.8.3's, which only forbids priority
+ * class 0 — vectors 0 through 15. Both are satisfied by starting here. */
 #define IRQ_VECTOR_BASE         32
-/* ‼ THIS IS A STATEMENT ABOUT THIS KERNEL, NOT ABOUT THE CHIP.
- *
- * It is the width of the window of IDT gates idt_init installs for IOAPIC
- * lines, and therefore the number of distinct hardware lines this kernel can
- * dispatch. It was written "Standard IO-APIC: 24 pins", which asserted the
- * 82093AA's input count of every part in front of it — and that assertion is
- * false on a PCH or a server IOAPIC, while the number itself stays true of
- * the vector map either way.
- *
- * So the chip is never assumed. ioapic_init reads how many inputs this one
- * actually has out of its own IOAPICVER register and, when that is more than
- * this window, says on the board which GSIs can be described but never
- * armed. The number here decides nothing about hardware; the hardware's own
- * word decides what is reachable, and the difference is spoken. */
-#define IRQ_MAX_COUNT           24
-#define IRQ_VECTOR_MAX          (IRQ_VECTOR_BASE + IRQ_MAX_COUNT - 1)  // 55
 
 #define LAPIC_TIMER_VECTOR      0xFE    // 254
 #define LAPIC_SPURIOUS_VECTOR   0xFF    // 255
-
-// MSI (message-signalled interrupt) device vectors. MSI is delivered
-// straight to the LAPIC (acked with LAPIC EOI, not the IOAPIC) so these sit
-// outside the IOAPIC GSI range (32-55). Dispatched explicitly in irq_handler.
-#define AHCI_MSI_VECTOR         0x70    // 112 — AHCI controller
-/* One vector per USB controller, not one for all of them.
- *
- * MSI is a message carrying a vector, and two devices told to send the same
- * message are two devices the processor cannot tell apart. A machine has as
- * many USB controllers as it has — a chipset one and, very often, another on a
- * graphics card — and giving them all 0x71 meant every interrupt had to be
- * offered to every controller in turn, on the chance that it was the one that
- * spoke. That works and it is not right: an interrupt should name its source.
- *
- * Eight is the number of controllers this kernel will bring up, so it is the
- * number of vectors reserved for them. */
-#define XHCI_MSI_VECTOR         0x71    // 113 — first USB xHCI controller
-#define XHCI_MSI_VECTOR_COUNT   8
-#define XHCI_MSI_VECTOR_LAST    (XHCI_MSI_VECTOR + XHCI_MSI_VECTOR_COUNT - 1)
 
 // AMP inter-processor interrupt vectors
 #define IPI_WAKE_VECTOR         0xF0    // 240 — wake idle AP or reschedule
@@ -74,9 +67,6 @@ typedef enum {
 typedef struct irq_chip {
     const char* name;
     void (*send_eoi)(uint8_t gsi);
-    uint32_t (*get_isr)(void);
-    uint32_t (*get_irr)(void);
-    uint8_t max_irqs;
 } irq_chip_t;
 
 // Global API - all drivers use these instead of pic_* directly
@@ -84,12 +74,9 @@ void irqchip_init(void);
 void irqchip_enable_irq(uint8_t gsi);
 void irqchip_disable_irq(uint8_t gsi);
 void irqchip_send_eoi(uint8_t gsi);
-uint32_t irqchip_get_isr(void);
-uint32_t irqchip_get_irr(void);
 
 irqchip_type_t irqchip_get_type(void);
 const char* irqchip_get_name(void);
-uint8_t irqchip_max_irqs(void);
 
 /* Access to the MADT info captured by irqchip_init(). Returns NULL when
  * running on the PIC fallback path (no MADT). Used by AP bring-up to
@@ -204,6 +191,12 @@ typedef struct Summons {
     /* Which IOAPIC input the line lands on. */
     uint32_t        gsi;
 
+    /* What it costs if this line is late, which is how the pool decides what
+     * vector -- and therefore what priority class -- it is given. Set by
+     * whoever builds the line, because the driver is the only one who knows.
+     * See right_of_way.h for why this is asked for instead of a number. */
+    RightOfWay      row;
+
     /* Which IDT vector it is delivered under, and — because irq_handler
      * derives one from the other — the key the responder registry uses.
      *
@@ -291,7 +284,14 @@ bool SummonsFirmwareSaid(uint32_t gsi, uint16_t *out_flags);
  * was born exclusive, and a PCI function that _PRT puts on the same pin —
  * the ordinary PIRQ outcome on IRQ 9, 10 or 11 — was refused the line and
  * dropped to polling. */
-Summons SummonsForAcpiSci(uint8_t sci_int);
+/* ‼ Sixteen bits, because that is the width of the field it is handed. ACPI
+ * 6.5 §5.2.9 Table 5.9 gives SCI_INT two bytes at offset 46, and above 15 the
+ * value is already a global system interrupt rather than an 8259 input — so a
+ * machine whose SCI sits on a pin past 255 is describable, and narrowing here
+ * would quietly route the kernel's one ACPI line to the wrong pin. It used to
+ * be a uint8_t, which was harmless only for as long as a separate bound above
+ * refused anything past twenty-three. */
+Summons SummonsForAcpiSci(uint16_t sci_int);
 
 /* Program the interrupt controller FROM THE DESCRIPTION and unmask the line.
  * Resolves, settles onto its pin and posts it first, so the registry and the

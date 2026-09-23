@@ -1,4 +1,5 @@
 #include "pit.h"
+#include "idt.h"   /* irq_register_handler + the kernel's own answerers */
 #include "hpet.h"
 #include "io.h"
 #include "klib.h"
@@ -38,6 +39,7 @@ void pit_init(uint32_t frequency_hz) {
     if (hpet_tick_active()) {
         debug_printf("[PIT] HPET legacy tick active — leaving 8254 idle, "
                      "registering IRQ0 only (%u Hz logical)\n", pit_frequency);
+        irq_register_handler(0, IrqTheTickAnswers, RIGHT_OF_WAY_TIME_IS_LOST);
         irqchip_enable_irq(0);
         return;
     }
@@ -59,6 +61,11 @@ void pit_init(uint32_t frequency_hz) {
     outb(PIT_CHANNEL0, (uint8_t)(divisor & 0xFF));
     outb(PIT_CHANNEL0, (uint8_t)((divisor >> 8) & 0xFF));
 
+    /* The tick answers its own line now, through the same registry every
+     * other line uses. It used to be dispatched by `case 0` of a switch on
+     * `vector - 32` inside irq_handler, which stopped being a way to find it
+     * the moment a vector stopped being 32 + its ISA number. */
+    irq_register_handler(0, IrqTheTickAnswers, RIGHT_OF_WAY_TIME_IS_LOST);
     irqchip_enable_irq(0);
 
     debug_printf("[PIT] Timer initialized: %u Hz (%u ticks/sec)\n", pit_frequency, pit_frequency);
@@ -93,26 +100,32 @@ uint64_t pit_get_ticks(void) {
 }
 
 void pit_tick(void) {
-    uint64_t new_ticks = __atomic_add_fetch(&pit_ticks, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&pit_ticks, 1, __ATOMIC_RELAXED);
 
     /* Advance microsecond counter. freq may change between ticks (scheduler
      * reprograms PIT under load), but each tick contributes 1_000_000/freq
-     * microseconds at the freq IT was issued at — preserving monotonicity. */
+     * microseconds at the freq IT was issued at — preserving monotonicity.
+     * This accumulator is the machine's clock only on a board with no HPET;
+     * where an HPET exists, pit_get_uptime_us() reads the counter instead and
+     * this total is never consulted. */
     uint32_t freq = pit_frequency;
-    uint64_t new_us = 0;
     if (freq > 0) {
-        new_us = __atomic_add_fetch(&pit_uptime_us,
-                                     1000000ULL / (uint64_t)freq,
-                                     __ATOMIC_RELAXED);
-    } else {
-        new_us = __atomic_load_n(&pit_uptime_us, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&pit_uptime_us,
+                           1000000ULL / (uint64_t)freq,
+                           __ATOMIC_RELAXED);
     }
 
-    /* Mirror dynamic counters into the userspace-visible ClockBoard so a
-     * read in userspace costs zero syscalls. Single-writer (this is the
-     * BSP-only IRQ handler), so the plain stores inside the helper are
-     * race-free against any cross-core reader. */
-    clockboard_tick_update(new_us, new_ticks);
+    /* Refresh the page userspace reads.
+     *
+     * It is deliberately NOT handed the accumulator above. That counter only
+     * starts moving when IRQ0 starts arriving, and on a board where the HPET
+     * carries the clock the kernel has already been up for the whole boot by
+     * then — twelve seconds on the 2026-09-20 i5-9400F run. The page said one
+     * thing and the same question asked through the deck said another, because
+     * one fact had two carriers with two different zeros. The publisher now
+     * reads the kernel's one clock itself, so there is no number left to pass
+     * in and nowhere for a second answer to come from. */
+    clockboard_publish_uptime();
 }
 
 uint64_t pit_get_uptime_ms(void) {

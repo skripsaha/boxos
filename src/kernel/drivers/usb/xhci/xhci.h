@@ -299,6 +299,47 @@ typedef struct {
     uint32_t drain_longest_us;
 
     /*
+     * When this driver last looked at the event ring and found nothing on it.
+     *
+     * ‼ The half of every "how long did that take" that used to be invisible.
+     *
+     * An event is written by the controller and read by whoever next drains
+     * the ring, and the gap between those two is this driver's, not the
+     * hardware's. So a duration measured from "we asked" to "we read the
+     * answer" is two quantities added together, and every line that printed
+     * one of them was naming the hardware for time this driver spent
+     * elsewhere: the port reset that read 113 ms on the owner's board against
+     * 56 ms on three identical ports is exactly that sum, and nothing on the
+     * screen could separate them.
+     *
+     * This is the separator. An answer handled in the drain AFTER this moment
+     * became visible somewhere between this moment and that one — so the true
+     * duration is bracketed, and the bracket is measured rather than argued.
+     * Written at the end of a drain, once the ring has been proven empty, and
+     * read inside the NEXT drain, where it still holds the previous one's
+     * answer.
+     */
+    uint64_t ring_last_empty;
+
+    /*
+     * How many events this controller's ring has given up in total, and the
+     * sample of itself it last printed.
+     *
+     * MFINDEX, ERDP and the ring's own position mean nothing as single
+     * readings — MFINDEX is a 14-bit microframe counter that wraps every
+     * 2.048 s (xHCI 1.2 §5.5.1), so one sample of it cannot tell a bus being
+     * scheduled from a controller that has stopped scheduling (§4.14.2). They
+     * mean something as DIFFERENCES, and a difference needs the previous
+     * sample kept. These are that sample, per controller, so the second
+     * failure on a board says what moved since the first.
+     */
+    volatile uint32_t events_seen;
+    uint64_t state_said_tsc;
+    uint32_t state_said_mfindex;
+    uint32_t state_said_erdp;
+    uint32_t state_said_events;
+
+    /*
      * The one device this controller is bringing up right now, or NULL.
      *
      * Enumeration is serialised per controller because the bus requires it:

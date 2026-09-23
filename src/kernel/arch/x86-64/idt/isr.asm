@@ -127,59 +127,38 @@ ISR_NOERROR 29  ; Reserved
 ISR_ERROR   30  ; Security exception
 ISR_NOERROR 31  ; Reserved
 
-; Hardware interrupts (IRQ 0-15 -> vectors 32-47, PIC compatible)
-IRQ 0, 32       ; Timer
-IRQ 1, 33       ; Keyboard
-IRQ 2, 34       ; Cascade
-IRQ 3, 35       ; COM2
-IRQ 4, 36       ; COM1
-IRQ 5, 37       ; LPT2
-IRQ 6, 38       ; Floppy
-IRQ 7, 39       ; LPT1
-IRQ 8, 40       ; RTC
-IRQ 9, 41       ; Free
-IRQ 10, 42      ; Free
-IRQ 11, 43      ; Free
-IRQ 12, 44      ; Mouse
-IRQ 13, 45      ; FPU
-IRQ 14, 46      ; ATA Primary
-IRQ 15, 47      ; ATA Secondary
-
-; IO-APIC extra IRQs (GSI 16-23 -> vectors 48-55)
-IRQ 16, 48      ; PCI / IO-APIC pin 16
-IRQ 17, 49      ; PCI / IO-APIC pin 17
-IRQ 18, 50      ; PCI / IO-APIC pin 18
-IRQ 19, 51      ; PCI / IO-APIC pin 19
-IRQ 20, 52      ; PCI / IO-APIC pin 20
-IRQ 21, 53      ; PCI / IO-APIC pin 21
-IRQ 22, 54      ; PCI / IO-APIC pin 22
-IRQ 23, 55      ; PCI / IO-APIC pin 23
-
-; System call (INT 0x80)
-ISR_NOERROR 128  ; kernel_notify syscall
-
-; Completion IRQ (INT 0x81)
-ISR_NOERROR 129  ; workflow completion notification
-
-; MSI vectors — message-signalled interrupts, delivered straight to the LAPIC
-ISR_NOERROR 112  ; AHCI MSI  (0x70)
-ISR_NOERROR 113  ; xHCI MSI  (0x71) — first USB host controller
-ISR_NOERROR 114  ; xHCI MSI  (0x72)
-ISR_NOERROR 115  ; xHCI MSI  (0x73)
-ISR_NOERROR 116  ; xHCI MSI  (0x74)
-ISR_NOERROR 117  ; xHCI MSI  (0x75)
-ISR_NOERROR 118  ; xHCI MSI  (0x76)
-ISR_NOERROR 119  ; xHCI MSI  (0x77)
-ISR_NOERROR 120  ; xHCI MSI  (0x78) — eighth, and the last this kernel brings up
-
-; LAPIC special vectors
-ISR_NOERROR 254  ; LAPIC timer
-ISR_NOERROR 255  ; LAPIC spurious
-
-; IPI vectors (AMP inter-processor interrupts)
-ISR_NOERROR 240  ; IPI_WAKE     (0xF0)
-ISR_NOERROR 241  ; IPI_SHOOTDOWN (0xF1)
-ISR_NOERROR 242  ; IPI_PANIC    (0xF2)
+; ── Every vector above the exceptions, in one run ──────────────────────────
+;
+; There used to be a stub here only for the vectors this kernel happened to
+; use — twenty-four IRQ lines, nine MSI numbers, a syscall, three IPIs, two
+; LAPIC specials — and `isr_table` below filled the gaps between them with
+; `isr13`, the #GP handler. Those were never gaps. A hardware interrupt
+; pushes no error code and isr13 is the form that expects one, so it reads
+; the saved RIP as an error code and shifts the entire frame by eight bytes.
+; The note further down this file records what that cost once already: the
+; first interrupt the xHCI controller ever delivered arrived as a #GP panic,
+; and the panic named vector 13 instead of the vector that was raised.
+;
+; So the run is complete now. Vectors 32..255 each get their own stub, all of
+; the no-error-code form — SDM Vol 3A Table 6-1 gives an error code to ten
+; exceptions and every one of them is below 32 — and `isr_table` has no
+; filler left in it at all. A vector this kernel does not use yet costs nine
+; bytes of .text, and when something delivers it anyway it arrives at
+; irq_handler carrying its own number rather than a lie.
+;
+; This is also the thing that lets a vector allocator exist. Handing a vector
+; to a line no longer means writing the IDT of a running machine — every gate
+; is already installed, pointing at a stub that knows which vector it is — it
+; means writing one entry in the responder registry.
+%assign vec 32
+%rep 224
+isr %+ vec:
+    endbr64
+    push 0                  ; the error code the CPU did not push
+    push vec                ; and the vector, so the handler knows who arrived
+    jmp isr_common
+%assign vec vec+1
+%endrep
 
 ; Common ISR entry point
 ; Stack layout on entry (top to bottom):
@@ -539,49 +518,11 @@ isr_table:
     dq isr8, isr9, isr10, isr11, isr12, isr13, isr14, isr15
     dq isr16, isr17, isr18, isr19, isr20, isr21, isr22, isr23
     dq isr24, isr25, isr26, isr27, isr28, isr29, isr30, isr31
-    ; IRQs (32-47): PIC / IO-APIC ISA IRQs
-    dq irq0, irq1, irq2, irq3, irq4, irq5, irq6, irq7
-    dq irq8, irq9, irq10, irq11, irq12, irq13, irq14, irq15
-    ; IRQs (48-55): IO-APIC extra pins (GSI 16-23)
-    dq irq16, irq17, irq18, irq19, irq20, irq21, irq22, irq23
-    ; Unimplemented (56-111) - use GPF handler
-    times 56 dq isr13
-    ; AHCI MSI (112 = 0x70)
-    dq isr112
-    ; xHCI MSI (113 = 0x71)
-    ;
-    ; A vector with no stub of its own is not an unused vector — every entry in
-    ; the unimplemented runs below points at isr13, the General Protection
-    ; Fault handler. So the first interrupt the xHCI controller delivered
-    ; arrived as a #GP panic, and the panic named vector 13 rather than the
-    ; vector that was actually raised. Adding a vector to irqchip.h and an
-    ; IDT entry in idt.c is two thirds of the work; this is the third.
-    dq isr113
-    ; One per USB host controller (114-120). A vector with no stub of its own
-    ; is the fault handler, which is how the very first xHCI interrupt this
-    ; kernel ever received arrived as a #GP panic naming the wrong vector.
-    dq isr114
-    dq isr115
-    dq isr116
-    dq isr117
-    dq isr118
-    dq isr119
-    dq isr120
-    ; Unimplemented (121-127) - use GPF handler
-    times 7 dq isr13
-    ; Syscall (128)
-    dq isr128
-    ; Completion IRQ (129)
-    dq isr129
-    ; Unimplemented (130-239) - use GPF handler
-    times 110 dq isr13
-    ; IPI vectors (240-242)
-    dq isr240
-    dq isr241
-    dq isr242
-    ; Unimplemented (243-253) - use GPF handler
-    times 11 dq isr13
-    ; LAPIC timer (254)
-    dq isr254
-    ; LAPIC spurious (255)
-    dq isr255
+    ; Everything above the exceptions: one entry per vector, no filler.
+    ; Generated by the same run that generates the stubs, so this table cannot
+    ; drift away from what actually exists in .text.
+%assign vec 32
+%rep 224
+    dq isr %+ vec
+%assign vec vec+1
+%endrep

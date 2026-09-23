@@ -1,4 +1,5 @@
 #include "idt.h"
+#include "right_of_way.h"
 #include "serial.h"      /* WireForceRelease / WireDrain — the halt is heard */
 #include "gdt.h"
 #include "tss.h"
@@ -36,11 +37,15 @@
 static idt_entry_t idt[IDT_ENTRIES];
 static idt_descriptor_t idt_desc;
 
-/* One record per IOAPIC input: what the line IS, and who answers it.
+/* One record per VECTOR: what the line delivered under it IS, and who
+ * answers it.
  *
- * The array is IRQ_MAX_COUNT long because that is the number of inputs a
- * standard IOAPIC has and therefore the number of distinct lines this kernel
- * can dispatch — a count of pins, not a budget. `builtin` is the one answerer
+ * The array is as long as the IDT, and that is not a budget anybody chose —
+ * it is how many gates an IDT has (Intel SDM Vol 3A §6.10), so the registry
+ * cannot be the wrong length for the table it describes. It used to be
+ * IRQ_MAX_COUNT long and indexed by `vector - 32`, which was the same thing
+ * written as arithmetic, and which quietly asserted that no line could ever
+ * be delivered above vector 55. `builtin` is the one answerer
  * a line is born with, for callers of the ISA-era irq_register_handler that
  * have nowhere of their own to keep a link; every further answerer on a
  * shareable line brings its own node, so nothing here caps how many devices
@@ -58,12 +63,59 @@ typedef struct {
      * everything else. */
     bool              join_said;
     bool              wiring_said;
+    /* Said once per VECTOR: an interrupt arrived under a number no line in
+     * this kernel is recorded on. */
+    bool              said_unarranged;
 } IrqLine;
 
-static IrqLine irq_lines[IRQ_MAX_COUNT];
+#define IDT_VECTOR_COUNT 256
+static IrqLine irq_lines[IDT_VECTOR_COUNT];
+
+/* ‼ WHAT KEEPS THIS TABLE CONSISTENT, since it is not a lock.
+ *
+ * The vector pool takes a spinlock and this registry does not, which looks
+ * like an oversight and is worth being exact about instead.
+ *
+ * Every write here happens on the path that brings a line up — SummonsAnswer,
+ * SummonsPost, SummonsSettleOnPin, SummonsUnanswer — and that path runs on the
+ * boot processor during bring-up, single file, because this kernel arms every
+ * line from one place in one order. The reads that race with it are
+ * irq_handler's, on any core, and they are made safe by the one field that IS
+ * ordered: `answerers` is published with a release store and read with an
+ * acquire load, so a handler either does not see a line yet or sees it whole.
+ *
+ * That is a property of the current bring-up order rather than of this data
+ * structure, and it stops holding the day a driver arms a line from an AP or
+ * from a work item. If that day comes, the lock this table needs is the
+ * pool's — one lock over both, because "who holds this vector" and "what is
+ * this vector's line" are two halves of one fact. */
+
+/* The frame the interrupt being served arrived on, per core.
+ *
+ * `irq_callback_t` takes nothing, and that is right for almost every answerer:
+ * a disk driver has no business with the interrupted thread's registers. The
+ * tick is the exception, and not by accident — its whole job is to preempt,
+ * and preemption means writing a return frame. It used to read `frame`
+ * directly because it was written inline in irq_handler; as an ordinary
+ * answerer it needs the same thing by another route.
+ *
+ * Per core, because two cores can be inside two different handlers at once.
+ *
+ * ‼ VALID ONLY WHILE AN ANSWERER IS RUNNING. It points at the stack of the
+ * core that took the interrupt, and that stack is reused the moment the
+ * handler returns. An answerer that keeps this pointer is keeping a pointer
+ * into somebody else's future stack frame. */
+static interrupt_frame_t *volatile g_irq_frame[MAX_CORES];
+
+interrupt_frame_t *IrqFrameInFlight(void)
+{
+    uint8_t core = amp_get_core_index();
+    if (core >= MAX_CORES) return NULL;
+    return g_irq_frame[core];
+}
 
 static volatile uint64_t exception_count = 0;
-static volatile uint64_t irq_count[IRQ_MAX_COUNT] = {0};
+static volatile uint64_t irq_count[IDT_VECTOR_COUNT] = {0};
 
 static void idt_load_asm(uint64_t idt_desc_addr)
 {
@@ -124,44 +176,57 @@ void idt_init(void)
         idt_set_entry(i, (uint64_t)isr_table[i], GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, ist);
     }
 
-    debug_printf("[IDT] Setting up IRQ handlers (32-55)...\n");
-
-    // Vectors 32-55: Hardware IRQs (PIC IRQ 0-15 + IO-APIC GSI 16-23)
-    for (int i = 32; i < 56; i++)
+    /* Every vector above the exceptions, installed here and never again.
+     *
+     * This used to install gates only where this kernel had a use for one —
+     * 32..55 for the IOAPIC window, nine MSI numbers, the syscall, three IPIs,
+     * two LAPIC specials — and left 185 descriptors with P=0. That is not a
+     * harmless absence. Delivery into a not-present gate raises #NP with error
+     * code (vector << 3) | 2 | EXT (Intel SDM Vol 3A §6.14, "Interrupt 11 —
+     * Segment Not Present"), which on this kernel kills whatever ring-3
+     * process happened to be running and leaves the ISR bit set in the LAPIC,
+     * deafening that priority class and every class below it.
+     *
+     * Installing the whole run costs 185 more descriptors — three kilobytes of
+     * a table that is already allocated in full — and buys two things. A
+     * vector nothing asked for arrives at irq_handler carrying its own number,
+     * so the log can say what it was. And handing a vector to a line stops
+     * being a write into the IDT of a running machine: the gate is already
+     * there, and only the responder registry changes.
+     *
+     * That second property is load-bearing rather than tidy. idt_set_entry
+     * publishes the present bit before the top 48 bits of the offset, which is
+     * harmless while this runs once before any AP is up and is a torn gate the
+     * moment a driver arms a line at runtime — and drivers arm lines at
+     * runtime, with the APs already taking interrupts.
+     *
+     * DPL is 0 for every one of them, deliberately and with one exception. The
+     * syscall vector is the only gate in this kernel a ring-3 INT may reach;
+     * if a device vector were ever given the same DPL, a user process could
+     * raise its own device's interrupt by hand. */
+    for (uint32_t v = 32; v < 256; v++)
     {
-        idt_set_entry(i, (uint64_t)isr_table[i], GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
+        uint8_t type = (v == SYSCALL_VECTOR) ? IDT_TYPE_USER_INTERRUPT
+                                             : IDT_TYPE_INTERRUPT_GATE;
+        idt_set_entry((int)v, (uint64_t)isr_table[v],
+                      GDT_KERNEL_CODE, type, 0);
     }
 
-    debug_printf("[IDT] Setting up syscall handler (INT 0x80)...\n");
-
-    // Syscall handler at 0x80 (Ring 3 accessible)
-    idt_set_entry(SYSCALL_VECTOR, (uint64_t)isr_table[SYSCALL_VECTOR], GDT_KERNEL_CODE, IDT_TYPE_USER_INTERRUPT, 0);
-
-    // LAPIC timer vector (254) and spurious vector (255)
-    idt_set_entry(LAPIC_TIMER_VECTOR, (uint64_t)isr_table[LAPIC_TIMER_VECTOR],
-                  GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
-    idt_set_entry(LAPIC_SPURIOUS_VECTOR, (uint64_t)isr_table[LAPIC_SPURIOUS_VECTOR],
-                  GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
-
-    // AHCI MSI vector (0x70) — message-signalled interrupt from the HBA
-    idt_set_entry(AHCI_MSI_VECTOR, (uint64_t)isr_table[AHCI_MSI_VECTOR],
-                  GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
-
-    // xHCI MSI vectors — one per USB host controller, so an interrupt names
-    // which of them raised it instead of being offered to all in turn.
-    for (uint32_t v = XHCI_MSI_VECTOR; v <= XHCI_MSI_VECTOR_LAST; v++)
-    {
-        idt_set_entry((uint8_t)v, (uint64_t)isr_table[v],
-                      GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
-    }
-
-    // AMP IPI vectors (0xF0-0xF2)
-    idt_set_entry(IPI_WAKE_VECTOR, (uint64_t)isr_table[IPI_WAKE_VECTOR],
-                  GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
-    idt_set_entry(IPI_SHOOTDOWN_VECTOR, (uint64_t)isr_table[IPI_SHOOTDOWN_VECTOR],
-                  GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
-    idt_set_entry(IPI_PANIC_VECTOR, (uint64_t)isr_table[IPI_PANIC_VECTOR],
-                  GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
+    /* The pool is seeded here, at the end of idt_init, and both halves of
+     * that placement are load-bearing.
+     *
+     * Here rather than in irqchip_init, because every gate above now exists:
+     * from this line on "a vector is free" and "a vector has a gate nobody
+     * uses" are the same statement. Seeding before the gates were installed
+     * would have left the pool's idea of the machine and the IDT's as two
+     * separate truths.
+     *
+     * In idt_init rather than in idt_load, because idt_load is what every
+     * application processor calls on its way up. Seeding from there ran the
+     * seeding once per core, late, and each run wiped what the boot processor
+     * had already handed out — which is how the timer came to be armed on a
+     * line with no vector at all. */
+    VectorPoolInit();
 
     idt_load_asm((uint64_t)&idt_desc);
 
@@ -173,24 +238,24 @@ bool SummonsSettleOnPin(Summons *line)
     if (!line) return false;
 
     /* Who already holds this PIN? The registry is indexed by vector, so this
-     * is a walk — over IRQ_MAX_COUNT entries, at registration time only, and
+     * is a walk — over the whole vector space, at registration time only, and
      * it is the only place in the kernel that knows the answer. */
-    for (uint32_t k = 0; k < IRQ_MAX_COUNT; k++)
+    for (uint32_t v = 0; v < IDT_VECTOR_COUNT; v++)
     {
-        IrqLine *l = &irq_lines[k];
+        IrqLine *l = &irq_lines[v];
         if (!l->posted || l->line.gsi != line->gsi) continue;
 
-        uint8_t held = irq_gsi_to_vector((uint8_t)k);
+        uint8_t held = (uint8_t)v;   /* the index IS the vector */
         if (held != line->vector)
         {
             if (!l->join_said)
             {
                 l->join_said = true;
-                kprintf("[IRQ] %s GSI %u already delivers under vector %u, "
-                        "so this line joins it there instead of on vector "
-                        "%u — one pin has one redirection entry and "
-                        "therefore one vector\n",
-                        line->bus, line->gsi, held, line->vector);
+                kprintf("[IRQ] %s GSI %u already delivers under vector "
+                        "0x%02x, so this line takes that one rather than "
+                        "being given its own — one pin has one redirection "
+                        "entry and therefore one vector\n",
+                        line->bus, line->gsi, held);
             }
             line->vector = held;
         }
@@ -232,17 +297,36 @@ bool SummonsSettleOnPin(Summons *line)
         return true;
     }
 
-    /* Nobody holds the pin. Can this vector carry it? */
-    uint8_t key = irq_vector_to_gsi(line->vector);
-    if (key >= IRQ_MAX_COUNT)
+    /* Nobody holds the pin, so this line is the first on it and this is where
+     * it is given right of way. Not in the constructor: a line is built more
+     * than once in a boot and a vector taken there would leak on every
+     * rebuild; not at arming time either, because answering a line settles it
+     * too and the answerer must find the same vector the armer will use. */
+    if (line->vector == 0)
     {
-        kprintf("[IRQ] %[E]%s GSI %u cannot be settled: vector %u is outside "
-                "the %u hardware IRQ vectors this kernel dispatches%[D]\n",
-                line->bus, line->gsi, line->vector, IRQ_MAX_COUNT);
-        return false;
+        char who[40];
+        ksnprintf(who, sizeof(who), "%s GSI %u", line->bus, line->gsi);
+
+        if (irqchip_get_type() == IRQCHIP_PIC)
+        {
+            /* On an 8259 the number is not this kernel's to choose. ICW2 sets
+             * the base of a run of eight consecutive vectors and the chip
+             * ignores the low three bits of what is written there, so
+             * "vector = base + input" is how the silicon is wired. The pool
+             * is still told, because two owners of one vector is the one
+             * thing it exists to prevent. */
+            uint8_t fixed = irq_gsi_to_vector((uint8_t)line->gsi);
+            if (!VectorPoolClaim(fixed, "an 8259 input")) return false;
+            line->vector = fixed;
+        }
+        else
+        {
+            line->vector = VectorPoolTake(line->row, who);
+            if (line->vector == 0) return false;   /* refused, and said so */
+        }
     }
 
-    IrqLine *l = &irq_lines[key];
+    IrqLine *l = &irq_lines[line->vector];
     if (l->posted && l->line.gsi != line->gsi)
     {
         /* Two pins, one vector. irq_handler is handed the vector and nothing
@@ -260,10 +344,9 @@ void SummonsPost(const Summons *line)
 {
     if (!line) return;
 
-    uint8_t key = irq_vector_to_gsi(line->vector);
-    if (key >= IRQ_MAX_COUNT) return;   /* named by whoever tried to arm it */
+    if (line->vector < IRQ_VECTOR_BASE) return;  /* named by whoever tried to arm it */
 
-    IrqLine *l = &irq_lines[key];
+    IrqLine *l = &irq_lines[line->vector];
     if (l->posted && l->line.gsi != line->gsi)
     {
         /* Unreachable through SummonsArm, which settles first. Enforced
@@ -287,15 +370,9 @@ bool SummonsAnswer(const Summons *line, SummonsResponder *node,
 
     const char *name = who ? who : "an answerer that did not name itself";
 
-    uint8_t key = irq_vector_to_gsi(line->vector);
-    if (key >= IRQ_MAX_COUNT)
-    {
-        kprintf("[IRQ] %[E]%s cannot answer %s GSI %u: vector %u is outside "
-                "the %u hardware IRQ vectors this kernel dispatches%[D]\n",
-                name, line->bus, line->gsi, line->vector, IRQ_MAX_COUNT);
-        return false;
-    }
-
+    /* No check on the vector here, deliberately. A line arrives with no
+     * vector at all -- it is given one by the settling below -- so testing it
+     * beforehand would refuse every line in the machine. */
     Summons described = *line;
     SummonsResolve(&described);
     if (!SummonsSettleOnPin(&described)) return false;
@@ -305,8 +382,7 @@ bool SummonsAnswer(const Summons *line, SummonsResponder *node,
      * how the ACPI SCI (ISA IRQ 9, pin 11, vector 41) and a PCI function
      * _PRT puts on GSI 11 (vector 43) came to occupy two separate chains for
      * one wire. */
-    key = irq_vector_to_gsi(described.vector);
-    IrqLine *l = &irq_lines[key];
+    IrqLine *l = &irq_lines[described.vector];
 
     SummonsResponder *head = l->answerers;
     if (head != NULL)
@@ -369,17 +445,223 @@ bool SummonsAnswer(const Summons *line, SummonsResponder *node,
     return true;
 }
 
-void irq_register_handler(uint8_t irq, irq_callback_t callback)
+/* ── Leaving ──────────────────────────────────────────────────────────────
+ *
+ * A vector that is handed out and never handed back is a vector the next
+ * device to arrive cannot have. That did not matter while a line's vector was
+ * its pin number plus thirty-two — the number came back by arithmetic whether
+ * anybody returned it or not — and it matters now.
+ *
+ * ‼ THE ORDER IS THE WHOLE THING, so it is stated before the code:
+ *   1. if this is the LAST answerer, mask the source first. A line whose
+ *      driver has gone but whose pin is still armed delivers into a chain
+ *      with nobody on it, and for a level-triggered line that is a wedge.
+ *   2. unlink the node.
+ *   3. only then give the number back. Returning it first means the next
+ *      caller can be handed a vector the departing device can still raise.
+ *
+ * ‼ WHAT IS AND IS NOT GUARANTEED AGAINST THE LOCK-FREE WALK, said plainly.
+ * irq_handler walks this chain with interrupts disabled, following `next`
+ * with acquire loads. Unlinking is safe against that walk: the node stays
+ * valid memory — every node in this kernel is static storage owned by its
+ * driver — and its `next` is left pointing forward, so a walker standing on
+ * the removed node still reaches everyone behind it. What is NOT covered is a
+ * walker still standing on that node when the SAME node is registered again
+ * later: registration sets `next` to NULL before splicing, and a walker there
+ * at that instant would see the chain end early. Masking the source before
+ * the last removal is what makes that window small rather than closed, and a
+ * device that leaves and returns does so milliseconds apart at best.
+ *
+ * ‼ AND THE PART THAT IS EASY TO UNDERSTATE: a walker that had already loaded
+ * this node when the unlink happened WILL STILL CALL IT. Returning from here
+ * does not mean the answerer has stopped running — it means no walk started
+ * after this point will reach it. A driver that frees state its handler reads
+ * must therefore stop its device first and keep that state valid until it is
+ * certain no handler is in flight; this function cannot promise that and does
+ * not try to. It is a limit, not a proof, and it is written out so nobody
+ * mistakes it for one.
+ */
+bool SummonsUnanswer(const Summons *line, SummonsResponder *node,
+                     const char *who)
 {
-    if (irq >= IRQ_MAX_COUNT)
+    if (!line || !node) return false;
+
+    const char *name = who ? who : "an answerer that did not name itself";
+
+    /* The caller may not know the vector, and that is not its fault:
+     * SummonsAnswer settles a COPY of the description and does not write the
+     * settled vector back, so a driver that answered a line and then failed to
+     * arm it holds a Summons whose vector is still zero. The pin is the thing
+     * it does know, and the registry can be asked by pin — the same walk
+     * SummonsSettleOnPin does, for the same reason. */
+    uint8_t vector = line->vector;
+    if (vector < IRQ_VECTOR_BASE) {
+        for (uint32_t v = 0; v < IDT_VECTOR_COUNT; v++) {
+            if (irq_lines[v].posted && irq_lines[v].line.gsi == line->gsi) {
+                vector = (uint8_t)v;
+                break;
+            }
+        }
+    }
+    if (vector < IRQ_VECTOR_BASE) {
+        kprintf("[IRQ] %[E]%s asked to stop answering %s GSI %u, and no vector "
+                "in this kernel delivers that pin — there is nothing to take "
+                "it off%[D]\n", name, line->bus, line->gsi);
+        return false;
+    }
+
+    IrqLine *l = &irq_lines[vector];
+
+    /* ‼ ONE WALK, and everything is decided from it before anything is done.
+     *
+     * There were two: one to count and decide whether this was the last
+     * answerer, another inside the unlink. Between them the answer could
+     * change, and worse, the pin was masked on the strength of the first walk
+     * BEFORE the second had established that this node was on the line at all
+     * — so a driver passing a node that belonged somewhere else masked a
+     * working line for everybody on it and then returned false as though it
+     * had done nothing. */
+    SummonsResponder *head = __atomic_load_n(&l->answerers, __ATOMIC_ACQUIRE);
+    unsigned count = 0;
+    bool found = false;
+    for (SummonsResponder *r = head; r; r = r->next) {
+        count++;
+        if (r == node) found = true;
+    }
+
+    if (!found) {
+        kprintf("[IRQ] %[E]%s asked to stop answering %s GSI %u and is not on "
+                "that line — either it never answered it, or it answered a "
+                "different one and this is the wrong record. Nothing was "
+                "masked and nothing was taken off%[D]\n",
+                name, line->bus, line->gsi);
+        return false;
+    }
+
+    bool last = (count == 1);
+
+    /* Now, and only now, the source is stopped — and only if this really is
+     * the last answerer, because the others are still using the line. */
+    if (last && l->posted) SummonsDisarm(&l->line);
+
+    if (head == node) {
+        __atomic_store_n(&l->answerers, node->next, __ATOMIC_RELEASE);
+    } else {
+        for (SummonsResponder *r = head; r->next; r = r->next) {
+            if (r->next == node) {
+                __atomic_store_n(&r->next, node->next, __ATOMIC_RELEASE);
+                break;
+            }
+        }
+    }
+    /* `node->next` is deliberately left alone — see the note above. */
+
+    if (!last) {
+        kprintf("[IRQ] %s stops answering %s GSI %u; %u other(s) still do, so "
+                "the line stays armed and keeps its vector\n",
+                name, line->bus, line->gsi, count - 1u);
+        return true;
+    }
+
+    kprintf("[IRQ] %s was the last answerer on %s GSI %u — the pin is masked "
+            "and the vector goes back, because a line nobody answers is a "
+            "line that would deliver into an empty chain\n",
+            name, line->bus, line->gsi);
+
+    l->posted          = false;
+    l->unanswered_said = false;
+    l->join_said       = false;
+    l->wiring_said     = false;
+    l->said_unarranged = false;
+    memset(&l->line, 0, sizeof(l->line));
+
+    VectorPoolGiveBack(vector, name);
+    return true;
+}
+
+bool IrqAnswerMessage(uint8_t vector, SummonsResponder *node,
+                      irq_callback_t answer, const char *who)
+{
+    if (!node || !answer || vector < IRQ_VECTOR_BASE) return false;
+
+    const char *name = who ? who : "an answerer that did not name itself";
+    IrqLine *l = &irq_lines[vector];
+
+    /* A message-signalled interrupt has no pin, and that is the whole
+     * difference from SummonsAnswer. There is no redirection entry to cut, no
+     * polarity or trigger to agree on, and no wire to share: the vector IS the
+     * wire, point to point from the device to the LAPIC. So `posted` stays
+     * false — no Summons describes this entry — and the level-line rescue in
+     * irq_handler correctly leaves it alone, because there is no pin to mask.
+     *
+     * The chain is kept rather than a single callback, so that there stays one
+     * path through irq_handler instead of two. */
+    for (SummonsResponder *seen = __atomic_load_n(&l->answerers, __ATOMIC_ACQUIRE);
+         seen; seen = seen->next)
     {
-        kprintf("[IRQ] %[E]no handler registered for IRQ %u: this kernel "
-                "dispatches IRQ 0 to %u%[D]\n", irq, IRQ_MAX_COUNT - 1);
+        if (seen == node)
+        {
+            kprintf("[IRQ] %[E]%s already answers vector 0x%02x — registering "
+                    "the same link twice would close the chain on itself%[D]\n",
+                    name, vector);
+            return false;
+        }
+    }
+
+    node->answer = answer;
+    node->who    = name;
+    node->next   = NULL;
+
+    SummonsResponder *head = l->answerers;
+    if (head == NULL)
+        __atomic_store_n(&l->answerers, node, __ATOMIC_RELEASE);
+    else
+    {
+        SummonsResponder *tail = head;
+        while (tail->next) tail = tail->next;
+        __atomic_store_n(&tail->next, node, __ATOMIC_RELEASE);
+    }
+
+    kprintf("[IRQ] %s answers vector 0x%02x, which nothing routes and nothing "
+            "else shares — a message carries it straight to the LAPIC\n",
+            name, vector);
+    return true;
+}
+
+void irq_register_handler(uint8_t irq, irq_callback_t callback, RightOfWay row)
+{
+    /* Sixteen, because that is how many interrupt request lines an ISA bus
+     * has — two cascaded 8259s, eight inputs each, with the second occupying
+     * the first's input 2. It is a fact about the bus this function speaks
+     * for, and it has nothing to do with how many vectors this kernel can
+     * dispatch, which is what the bound here used to be. */
+    if (irq >= ISA_INTERRUPT_REQUEST_LINES)
+    {
+        kprintf("[IRQ] %[E]no handler registered for IRQ %u: an ISA bus has "
+                "%u interrupt request lines, numbered 0 to %u%[D]\n",
+                irq, (unsigned)ISA_INTERRUPT_REQUEST_LINES,
+                (unsigned)ISA_INTERRUPT_REQUEST_LINES - 1);
         return;
     }
 
     Summons line = SummonsForIsaLine(irq);
-    SummonsAnswer(&line, &irq_lines[irq].builtin, callback, NULL);
+    line.row = row;
+
+    /* Settle FIRST, and take the built-in node from the record the settling
+     * chose.
+     *
+     * This used to hand SummonsAnswer `irq_lines[irq].builtin` — the record
+     * indexed by the ISA NUMBER — while SummonsAnswer splices that node onto
+     * the chain of the record at the SETTLED VECTOR. Those were the same
+     * record only for as long as a vector was 32 + its ISA number. The moment
+     * a line's vector comes from anywhere else, the node lives in one record
+     * and hangs off another: a second registration for the same number does
+     * not find it in the duplicate check, links node->next to itself, and
+     * irq_handler walks that chain with interrupts disabled. */
+    SummonsResolve(&line);
+    if (!SummonsSettleOnPin(&line)) return;
+
+    SummonsAnswer(&line, &irq_lines[line.vector].builtin, callback, NULL);
 }
 
 static process_t *find_process_by_kernel_stack_overflow(uint64_t rsp)
@@ -1498,6 +1780,212 @@ volatile bool g_kernel_ready_for_interrupts = false;
 #define KBC_STR_OBF      0x01  /* 0x60 holds a byte for the system        */
 #define KBC_STR_AUXDATA  0x20  /* that byte came from the second port     */
 
+/* -- The two lines this kernel answers itself --------------------------
+ *
+ * These used to be a `switch (vector - 32)` at the bottom of irq_handler,
+ * reached only when a line had no answerer at all -- which is to say the
+ * tick and the keyboard were dispatched by their ISA numbers while every
+ * other line in the machine was dispatched through the registry. That
+ * worked for exactly as long as a vector was 32 + its ISA number. It would
+ * have stopped working, silently, the moment a vector came from anywhere
+ * else: `case 0` would never match again, the tick would be accepted,
+ * acknowledged and thrown away, and the machine would look alive while
+ * nothing in it moved.
+ *
+ * So they answer their lines the same way a disk does. There is one path
+ * through this handler now, and no line in this kernel is dispatched by a
+ * number.
+ *
+ * They are exported rather than static because the registration belongs to
+ * whoever brings the line up, while the bodies belong next to the state
+ * they touch -- which is here. */
+void IrqTheTickAnswers(void)
+{
+        // Timer IRQ (PIT via PIC or IO-APIC GSI 0)
+        //
+        // ‼ The NULL check is not defensive dressing — it is the whole
+        // difference between a machine that boots and one that does not, and
+        // it took a board to say so. On an i5-9400F booting UEFI the first
+        // HPET tick arrived inside cpu_calibrate_tsc, thirty-six lines of
+        // kernel_main before scheduler_init() allocated any state, and this
+        // line wrote through the NULL it got back: #PF at 0x18, dead. The
+        // BIOS path never showed it because stage2 hands the kernel a machine
+        // with interrupts already off, so nothing could be delivered this
+        // early; _start now clears IF for both paths, which closes the window
+        // rather than making it narrower. Everything below this point is
+        // safe to run without a scheduler, and must stay that way.
+        scheduler_state_t *sched = scheduler_get_state();
+        if (sched) sched->total_ticks++;
+        pit_tick();
+
+        /* Advance the global scheduler clock from the MONOTONIC wall-clock at a
+         * FIXED logical rate, decoupled from the adaptive PIT IRQ frequency.
+         * The PIT IRQ rate swings 10-500 Hz with load, so a per-IRQ "+1" made a
+         * tick's wall-clock duration drift — starvation/affinity thresholds
+         * (counted in ticks) wobbled with load. Deriving the tick from
+         * pit_get_uptime_us() pins it to SCHEDULER_DEFAULT_TICK_HZ (the rate
+         * consumers were tuned for), now stable. Monotonic (uptime only grows);
+         * single writer (BSP IRQ0); all consumers use deltas. */
+        __atomic_store_n(&g_global_tick,
+                         pit_get_uptime_us() / (1000000ULL / SCHEDULER_DEFAULT_TICK_HZ),
+                         __ATOMIC_RELAXED);
+
+        /* Periodic scheduler parameter recalculation */
+        scheduler_recalc_parameters();
+
+        /* APEI/GHES periodic poll — walks Polled-notify HEST sources
+         * whose TSC deadline has elapsed and processes their GESB.
+         * Cheap when nothing is due (per-source TSC compare in the
+         * runtime path; no work outside that). Routes firmware-side
+         * ECC events into the same poison + page-migration pipeline
+         * as #MC-delivered events. */
+        {
+            extern void apei_ghes_poll_tick(void);
+            apei_ghes_poll_tick();
+        }
+
+        /* Periodic TSC recalibration tick. Cheap — just stamps a
+         * timestamp + sets a pending flag every TSC_RECAL_INTERVAL_US.
+         * The actual ~20ms measurement runs in idle context
+         * (cpu_tsc_recal_if_pending) — never in IRQ. */
+        cpu_tsc_recal_tick(pit_get_uptime_us());
+
+        /* Software key repeat driven by PIT tick */
+        keyboard_timer_tick();
+
+        /* Deferred touch event delivery */
+        TouchQueueTick(__atomic_load_n(&g_global_tick, __ATOMIC_RELAXED));
+
+        /* xHCI: poll for events when the controller has no usable interrupt,
+         * and run the command and enumeration watchdogs either way. */
+        xhci_tick();
+
+        /* Ф26 M1 — AHCI async-completion watchdog (safety backstop). Reconciles
+         * a lost/coalesced completion MSI from the port's PxSACT/PxCI level, and
+         * fails + COMRESETs a genuinely wedged port so a lost completion cannot
+         * hang a waiter forever. BSP-only (this is IRQ0) — the same core the
+         * AHCI MSI targets; no-op unless multi-core async I/O is in flight. */
+        ahci_watchdog_scan();
+
+        /* Ф26 BMIDE — the legacy-PATA analogue: reconcile a lost IDE INTRQ from
+         * the channel's BMISR latch, and fail + SRST-recover a genuinely wedged
+         * channel so a dropped completion cannot hang a BMIDE sync waiter
+         * forever. Same BSP-only tick (both need the disk's irqsave locks); the
+         * SRST itself is deferred to a K-Core. No-op unless multi-core BMIDE
+         * async I/O is in flight (dormant whenever AHCI owns block I/O). */
+        {
+            extern void bmide_watchdog_scan(void);
+            bmide_watchdog_scan();
+        }
+
+        /* Single-core mode: pump the batons here, when the PIT IRQ
+         * interrupted USERSPACE code.
+         *
+         * Background: the baton is the one hand-off from an interrupt to a
+         * K-Core for work that touches kmalloc / tagfs / process tables. In
+         * multi-core configurations the drain core pumps inside
+         * `kcore_run_loop`. Single-core mode does NOT run kcore_run_loop
+         * (the BSP runs userspace directly via the scheduler), so without an
+         * explicit pump nothing would ever run the queued continuations
+         * (keyboard Touch, USB Touch, SCI/GPE notifications, write_job
+         * completions, a park deadline's ERR_TIMEOUT).
+         *
+         * Lock-safety: the continuations take heap_lock, tagfs locks,
+         * process_lock, etc. If the PIT IRQ interrupted a kernel-mode
+         * syscall holding one of those locks, pumping here would deadlock
+         * against the interrupted thread on the same core. We gate the pump
+         * on `(frame->cs & 3) == 3` — the interrupted code was in user mode
+         * (CS=USER_CS, RPL=3) — which guarantees no kernel lock is held.
+         * Multi-core takes the `amp_is_appcore()` branch above and does not
+         * pump here. On one core this and the idle loop are the only drains,
+         * and the ring-3 gate is what keeps the two from ever interleaving
+         * on the single-consumer queue. */
+        interrupt_frame_t *in_flight = IrqFrameInFlight();
+        if (g_amp.total_cores == 1 && in_flight && (in_flight->cs & 3) == 3)
+        {
+            BatonPump(0);
+        }
+
+        /* PIT IRQ 0: same scheduling rule as the LAPIC timer above —
+         * preempt on App Cores or in single-core mode where the BSP
+         * itself runs userspace. Use total_cores (set during amp_init
+         * before any AP boots) — `multicore_active` is set LATE and was
+         * causing AP K-Cores to be hijacked into idle on early ticks. */
+        if (amp_is_appcore() || g_amp.total_cores == 1)
+        {
+            interrupt_frame_t *in_flight = IrqFrameInFlight();
+            if (in_flight) schedule(in_flight);
+        }
+}
+
+void IrqTheKeyboardAnswers(void)
+{
+        /* Ask the controller WHICH byte is in the output register before
+         * taking it. One register at 0x60 serves both 8042 ports, and IRQ1
+         * says only that the controller raised a line — not what put the
+         * byte there, nor that there is one.
+         *
+         * Bit 0 (OBF) says a byte is there at all. IRQ1 can arrive with the
+         * register already emptied: a shared level line, a second edge for a
+         * byte keyboard_init's polling loop took during bring-up, a spurious
+         * delivery. Reading 0x60 then re-reads whatever the controller last
+         * left there and types that key a second time. Nothing about an
+         * unconditional read makes the register refill.
+         *
+         * Bit 5 (AUXDATA) says the byte came from the second port. Scan-code
+         * set 1 and a mouse packet share the same byte values, so a packet
+         * fed to the decoder types characters nobody pressed. keyboard_init
+         * drives that port down (AUX_DISABLE plus AUXDIS in the command
+         * byte), so this should never fire; it is here because the read is
+         * what clears OBF, and a byte that reached the register by some
+         * other route — firmware, a warm handover, a controller quirk —
+         * must be consumed and discarded rather than decoded, or it blocks
+         * the keyboard's next byte forever. Discarding it is not silent:
+         * see the line below.
+         *
+         * Bit values are the reference every PC controller is built
+         * against: Linux include/linux/i8042.h, I8042_STR_OBF 0x01 and
+         * I8042_STR_AUXDATA 0x20. i8042_interrupt makes these same two
+         * decisions in this same order.
+         *
+         * Returning early is safe: the EOI is owed either way, and it is
+         * owed by irq_handler, which sends it after every answerer on the
+         * line has had its turn. An IRQ the kernel declines to act on still
+         * has to be acknowledged, or the line stays asserted. */
+        uint8_t status = inb(KEYBOARD_STATUS_PORT);
+        if (!(status & KBC_STR_OBF))
+            return;
+        uint8_t byte = inb(KEYBOARD_DATA_PORT);
+        if (status & KBC_STR_AUXDATA)
+        {
+            /* A dropped byte is a keystroke nobody will ever see, so it is
+             * said out loud. What it distinguishes is not guessable from a
+             * dead keyboard: either something really is talking on a port
+             * this kernel powered down, or this controller does not mean
+             * "second port" by bit 5 — the pre-PS/2 AT parts and a few
+             * emulated KBCs use it for a transmit timeout instead, and on
+             * those the byte being thrown away is the operator's.
+             *
+             * Once, not per byte. This runs inside IRQ1 with interrupts
+             * off; a controller stuck with the bit asserted would turn the
+             * console itself into the fault. One line names the condition,
+             * and the status byte in it is what tells the two cases
+             * apart. */
+            static volatile bool aux_byte_said = false;
+            if (!aux_byte_said)
+            {
+                aux_byte_said = true;
+                kprintf("[IRQ] the 8042 handed IRQ1 the byte 0x%02x marked as "
+                        "the second port's (status 0x%02x) although "
+                        "keyboard_init powered that port down — dropped, not "
+                        "decoded; further ones go unremarked\n",
+                        byte, status);
+            }
+            return;
+        }
+        keyboard_handle_scancode(byte);
+}
+
 void irq_handler(interrupt_frame_t *frame)
 {
     uint8_t vector = frame->vector;
@@ -1608,39 +2096,50 @@ void irq_handler(interrupt_frame_t *frame)
         }
     }
 
-    /* AHCI message-signalled interrupt. MSI is delivered point-to-point to
-     * the LAPIC, so it is acknowledged with a LAPIC EOI — never the IOAPIC.
-     * The handler itself is allocation-free and defers heavy work. */
-    if (vector == AHCI_MSI_VECTOR)
-    {
-        ahci_irq_handler();
-        lapic_send_eoi();
-        return;
-    }
+    /* There are no message-signalled branches here any more.
+     *
+     * Two used to stand at this spot, one testing `vector == AHCI_MSI_VECTOR`
+     * and one testing a range of eight xHCI numbers, because those vectors
+     * were constants compiled into the drivers. They are handed out by the
+     * pool now, so there is no constant left to compare against — and there
+     * does not need to be. A message-signalled interrupt is an entry in the
+     * same registry as everything else, with an answerer and no pin, and it
+     * goes down the same path below. The LAPIC EOI it needs is the one
+     * irqchip_send_eoi already sends on the APIC backend, which is the only
+     * backend on which MSI exists at all. */
 
-    /* xHCI message-signalled interrupt. Same reasoning as AHCI above: MSI is
-     * point-to-point to the LAPIC and is acknowledged there. This is the path
-     * a real PCH takes — its INTx line is frequently absent or mis-described
-     * in PCI configuration space, and a USB keyboard whose interrupts never
-     * arrive is a keyboard that does not type. */
-    if (vector >= XHCI_MSI_VECTOR && vector <= XHCI_MSI_VECTOR_LAST)
-    {
-        xhci_irq_handler_vector((uint8_t)vector);
-        lapic_send_eoi();
-        return;
-    }
-
-    // Standard hardware IRQ (vectors 32-55 -> IRQ 0-23)
+    /* The 8259's input number for this vector, kept for ONE purpose: the EOI
+     * below.
+     *
+     * On the APIC backend apic_chip_eoi ignores the argument entirely — the
+     * LAPIC's EOI register takes no vector. On the PIC backend it is not a
+     * convention this kernel chose but a fact about the silicon: ICW2 sets
+     * the base of a run of eight consecutive vectors and the 8259 ignores the
+     * low three bits of what is written there, so "vector = 32 + input" is
+     * how the chip is wired, and subtracting 32 is the only way back to the
+     * input that has to be acknowledged.
+     *
+     * It is NOT the registry key any more. The registry is indexed by the
+     * vector itself, so a line delivered anywhere in the pool finds its own
+     * record instead of falling off the end of a twenty-four-entry array. */
     uint8_t irq = irq_vector_to_gsi(vector);
-    if (irq >= IRQ_MAX_COUNT)
-    {
-        // Unknown vector outside our IRQ range — send EOI to prevent stuck interrupts
-        irqchip_send_eoi(0);
-        return;
-    }
-    atomic_fetch_add_u64(&irq_count[irq], 1);
 
-    IrqLine *l = &irq_lines[irq];
+    atomic_fetch_add_u64(&irq_count[vector], 1);
+
+    /* Published before any answerer runs and dropped after the last one, so
+     * that "there is a frame in flight" and "an answerer is running" are the
+     * same statement rather than two that can drift apart. */
+    uint8_t this_core = amp_get_core_index();
+    if (this_core < MAX_CORES) g_irq_frame[this_core] = frame;
+
+    /* Dropped again on every path out of this function, so that "there is a
+     * frame in flight" and "an answerer is running" stay the same statement.
+     * It used to be published and never cleared, which made the promise in
+     * idt.h — NULL outside a handler — untrue from the first interrupt
+     * onwards, and left a pointer into a stack frame that had returned. */
+#define IRQ_FRAME_DONE() do { if (this_core < MAX_CORES) g_irq_frame[this_core] = NULL; } while (0)
+
+    IrqLine *l = &irq_lines[vector];
     SummonsResponder *r = __atomic_load_n(&l->answerers, __ATOMIC_ACQUIRE);
 
     if (r != NULL)
@@ -1662,6 +2161,7 @@ void irq_handler(interrupt_frame_t *frame)
         } while (r != NULL);
 
         irqchip_send_eoi(irq);
+        IRQ_FRAME_DONE();
         return;
     }
 
@@ -1692,209 +2192,44 @@ void irq_handler(interrupt_frame_t *frame)
                     l->line.bus, l->line.gsi);
         }
         irqchip_send_eoi(irq);
+        IRQ_FRAME_DONE();
         return;
     }
 
-    switch (irq)
-    {
-    case 0:
-    {
-        // Timer IRQ (PIT via PIC or IO-APIC GSI 0)
-        //
-        // ‼ The NULL check is not defensive dressing — it is the whole
-        // difference between a machine that boots and one that does not, and
-        // it took a board to say so. On an i5-9400F booting UEFI the first
-        // HPET tick arrived inside cpu_calibrate_tsc, thirty-six lines of
-        // kernel_main before scheduler_init() allocated any state, and this
-        // line wrote through the NULL it got back: #PF at 0x18, dead. The
-        // BIOS path never showed it because stage2 hands the kernel a machine
-        // with interrupts already off, so nothing could be delivered this
-        // early; _start now clears IF for both paths, which closes the window
-        // rather than making it narrower. Everything below this point is
-        // safe to run without a scheduler, and must stay that way.
-        scheduler_state_t *sched = scheduler_get_state();
-        if (sched) sched->total_ticks++;
-        pit_tick();
-
-        /* Advance the global scheduler clock from the MONOTONIC wall-clock at a
-         * FIXED logical rate, decoupled from the adaptive PIT IRQ frequency.
-         * The PIT IRQ rate swings 10-500 Hz with load, so a per-IRQ "+1" made a
-         * tick's wall-clock duration drift — starvation/affinity thresholds
-         * (counted in ticks) wobbled with load. Deriving the tick from
-         * pit_get_uptime_us() pins it to SCHEDULER_DEFAULT_TICK_HZ (the rate
-         * consumers were tuned for), now stable. Monotonic (uptime only grows);
-         * single writer (BSP IRQ0); all consumers use deltas. */
-        __atomic_store_n(&g_global_tick,
-                         pit_get_uptime_us() / (1000000ULL / SCHEDULER_DEFAULT_TICK_HZ),
-                         __ATOMIC_RELAXED);
-
-        /* Periodic scheduler parameter recalculation */
-        scheduler_recalc_parameters();
-
-        /* APEI/GHES periodic poll — walks Polled-notify HEST sources
-         * whose TSC deadline has elapsed and processes their GESB.
-         * Cheap when nothing is due (per-source TSC compare in the
-         * runtime path; no work outside that). Routes firmware-side
-         * ECC events into the same poison + page-migration pipeline
-         * as #MC-delivered events. */
-        {
-            extern void apei_ghes_poll_tick(void);
-            apei_ghes_poll_tick();
-        }
-
-        /* Periodic TSC recalibration tick. Cheap — just stamps a
-         * timestamp + sets a pending flag every TSC_RECAL_INTERVAL_US.
-         * The actual ~20ms measurement runs in idle context
-         * (cpu_tsc_recal_if_pending) — never in IRQ. */
-        cpu_tsc_recal_tick(pit_get_uptime_us());
-
-        /* Software key repeat driven by PIT tick */
-        keyboard_timer_tick();
-
-        /* Deferred touch event delivery */
-        TouchQueueTick(__atomic_load_n(&g_global_tick, __ATOMIC_RELAXED));
-
-        /* xHCI: poll for events when the controller has no usable interrupt,
-         * and run the command and enumeration watchdogs either way. */
-        xhci_tick();
-
-        /* Ф26 M1 — AHCI async-completion watchdog (safety backstop). Reconciles
-         * a lost/coalesced completion MSI from the port's PxSACT/PxCI level, and
-         * fails + COMRESETs a genuinely wedged port so a lost completion cannot
-         * hang a waiter forever. BSP-only (this is IRQ0) — the same core the
-         * AHCI MSI targets; no-op unless multi-core async I/O is in flight. */
-        ahci_watchdog_scan();
-
-        /* Ф26 BMIDE — the legacy-PATA analogue: reconcile a lost IDE INTRQ from
-         * the channel's BMISR latch, and fail + SRST-recover a genuinely wedged
-         * channel so a dropped completion cannot hang a BMIDE sync waiter
-         * forever. Same BSP-only tick (both need the disk's irqsave locks); the
-         * SRST itself is deferred to a K-Core. No-op unless multi-core BMIDE
-         * async I/O is in flight (dormant whenever AHCI owns block I/O). */
-        {
-            extern void bmide_watchdog_scan(void);
-            bmide_watchdog_scan();
-        }
-
-        /* Single-core mode: pump the batons here, when the PIT IRQ
-         * interrupted USERSPACE code.
-         *
-         * Background: the baton is the one hand-off from an interrupt to a
-         * K-Core for work that touches kmalloc / tagfs / process tables. In
-         * multi-core configurations the drain core pumps inside
-         * `kcore_run_loop`. Single-core mode does NOT run kcore_run_loop
-         * (the BSP runs userspace directly via the scheduler), so without an
-         * explicit pump nothing would ever run the queued continuations
-         * (keyboard Touch, USB Touch, SCI/GPE notifications, write_job
-         * completions, a park deadline's ERR_TIMEOUT).
-         *
-         * Lock-safety: the continuations take heap_lock, tagfs locks,
-         * process_lock, etc. If the PIT IRQ interrupted a kernel-mode
-         * syscall holding one of those locks, pumping here would deadlock
-         * against the interrupted thread on the same core. We gate the pump
-         * on `(frame->cs & 3) == 3` — the interrupted code was in user mode
-         * (CS=USER_CS, RPL=3) — which guarantees no kernel lock is held.
-         * Multi-core takes the `amp_is_appcore()` branch above and does not
-         * pump here. On one core this and the idle loop are the only drains,
-         * and the ring-3 gate is what keeps the two from ever interleaving
-         * on the single-consumer queue. */
-        if (g_amp.total_cores == 1 && (frame->cs & 3) == 3)
-        {
-            BatonPump(0);
-        }
-
-        /* PIT IRQ 0: same scheduling rule as the LAPIC timer above —
-         * preempt on App Cores or in single-core mode where the BSP
-         * itself runs userspace. Use total_cores (set during amp_init
-         * before any AP boots) — `multicore_active` is set LATE and was
-         * causing AP K-Cores to be hijacked into idle on early ticks. */
-        if (amp_is_appcore() || g_amp.total_cores == 1)
-        {
-            schedule(frame);
-        }
-        break;
+    /* An edge-triggered line that fired with nobody on it, or a vector nothing
+     * in this kernel arranged to receive. One EOI and it is over — the pin is
+     * not held, so there is nothing to mask and nothing to wedge, and saying
+     * so on every stray pulse would bury the log.
+     *
+     * Said ONCE per vector, and the pool is asked who holds it, because the
+     * useful question about an interrupt nobody expected is not "which
+     * number" but "whose number". A vector the pool has never handed out is a
+     * message from a device this kernel did not program; one it HAS handed out
+     * is a driver that armed a line and then did not answer it.
+     *
+     * The flag lives in the registry record rather than in a counter: the
+     * fact is "this vector has surprised us", not how many times. */
+    if (!l->posted && !l->said_unarranged) {
+        l->said_unarranged = true;
+        const char *holder = VectorPoolHolder(vector);
+        kprintf("[IRQ] vector 0x%02x arrived and nothing in this kernel "
+                "answers it — %s\n", vector,
+                holder ? holder : "the pool has never handed this number out, "
+                                  "so it came from a device nobody here "
+                                  "programmed");
     }
-
-    case 1:
-    {
-        /* Ask the controller WHICH byte is in the output register before
-         * taking it. One register at 0x60 serves both 8042 ports, and IRQ1
-         * says only that the controller raised a line — not what put the
-         * byte there, nor that there is one.
-         *
-         * Bit 0 (OBF) says a byte is there at all. IRQ1 can arrive with the
-         * register already emptied: a shared level line, a second edge for a
-         * byte keyboard_init's polling loop took during bring-up, a spurious
-         * delivery. Reading 0x60 then re-reads whatever the controller last
-         * left there and types that key a second time. Nothing about an
-         * unconditional read makes the register refill.
-         *
-         * Bit 5 (AUXDATA) says the byte came from the second port. Scan-code
-         * set 1 and a mouse packet share the same byte values, so a packet
-         * fed to the decoder types characters nobody pressed. keyboard_init
-         * drives that port down (AUX_DISABLE plus AUXDIS in the command
-         * byte), so this should never fire; it is here because the read is
-         * what clears OBF, and a byte that reached the register by some
-         * other route — firmware, a warm handover, a controller quirk —
-         * must be consumed and discarded rather than decoded, or it blocks
-         * the keyboard's next byte forever. Discarding it is not silent:
-         * see the line below.
-         *
-         * Bit values are the reference every PC controller is built
-         * against: Linux include/linux/i8042.h, I8042_STR_OBF 0x01 and
-         * I8042_STR_AUXDATA 0x20. i8042_interrupt makes these same two
-         * decisions in this same order.
-         *
-         * `break`, not `return`: the EOI at the bottom of this function is
-         * owed either way — an IRQ the kernel declines to act on still has
-         * to be acknowledged, or the line stays asserted. */
-        uint8_t status = inb(KEYBOARD_STATUS_PORT);
-        if (!(status & KBC_STR_OBF))
-            break;
-        uint8_t byte = inb(KEYBOARD_DATA_PORT);
-        if (status & KBC_STR_AUXDATA)
-        {
-            /* A dropped byte is a keystroke nobody will ever see, so it is
-             * said out loud. What it distinguishes is not guessable from a
-             * dead keyboard: either something really is talking on a port
-             * this kernel powered down, or this controller does not mean
-             * "second port" by bit 5 — the pre-PS/2 AT parts and a few
-             * emulated KBCs use it for a transmit timeout instead, and on
-             * those the byte being thrown away is the operator's.
-             *
-             * Once, not per byte. This runs inside IRQ1 with interrupts
-             * off; a controller stuck with the bit asserted would turn the
-             * console itself into the fault. One line names the condition,
-             * and the status byte in it is what tells the two cases
-             * apart. */
-            static volatile bool aux_byte_said = false;
-            if (!aux_byte_said)
-            {
-                aux_byte_said = true;
-                kprintf("[IRQ] the 8042 handed IRQ1 the byte 0x%02x marked as "
-                        "the second port's (status 0x%02x) although "
-                        "keyboard_init powered that port down — dropped, not "
-                        "decoded; further ones go unremarked\n",
-                        byte, status);
-            }
-            break;
-        }
-        keyboard_handle_scancode(byte);
-        break;
-    }
-
-    default:
-        /* Legacy IDE IRQ14/15 are intentionally not dispatched. The
-         * PIO driver sets nIEN=1 on every detected drive and leaves
-         * the IOAPIC pins masked, so the channel IRQ line never
-         * fires. If something in the future re-enables it, falling
-         * through here sends a clean EOI without acting on the
-         * vector. */
-        break;
-    }
-
+    /* An edge-triggered line that fired with nobody on it. One EOI and it is
+     * over — the pin is not held, so there is nothing to mask and nothing to
+     * wedge, and saying so on every stray pulse would bury the log.
+     *
+     * Legacy IDE IRQ 14 and 15 arrive here by design: the PIO driver sets
+     * nIEN=1 on every drive it finds and leaves those pins masked, so the
+     * channel line never fires. If something re-enables it, this is where it
+     * lands, and it lands harmlessly. */
     irqchip_send_eoi(irq);
+    IRQ_FRAME_DONE();
 }
+#undef IRQ_FRAME_DONE
 
 // ---------------------------------------------------------------------------
 // Syscall dispatch: sync (single-core) vs async (multi-core)

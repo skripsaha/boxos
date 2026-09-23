@@ -1,4 +1,7 @@
 #include "pci.h"
+#include "pci_class_words.h"  /* PciClassInWords — the class triple said in
+                               * words, so the inventory line can be read off
+                               * a photograph of a screen */
 #include "io.h"
 #include "klib.h"
 #include "acpi.h"
@@ -160,7 +163,23 @@ static void pci_ecam_init(void) {
     g_ecam_count = 0;
     const acpi_mcfg_info_t* mcfg = acpi_get_mcfg();
     if (!mcfg) {
-        debug_printf("[PCI] No MCFG — using legacy 0xCF8/0xCFC config access\n");
+        /* Said with kprintf, because which door configuration space was read
+         * through is a fact about the machine and not a debugging detail.
+         *
+         * The two doors do not reach the same thing. PCI Local Bus
+         * Specification Rev. 3.0 §3.2.2.3.2 lays out CONFIG_ADDRESS at
+         * 0xCF8: bits 7:2 are the Register Number and bits 1:0 must be zero,
+         * which is six bits of dword index — 64 dwords, 256 bytes of a
+         * function and not one byte more. Everything a PCIe function says
+         * about itself beyond that (AER, ATS, ACS, and the extended
+         * capability chain that anchors them at offset 0x100) is unreachable
+         * through this door in principle, not by omission. */
+        kprintf("[PCI] the firmware published no MCFG table, so every "
+                "configuration access on this machine goes through the "
+                "0xCF8/0xCFC window — six bits of dword index (PCI 3.0 "
+                "§3.2.2.3.2), which reaches the first 256 bytes of a function "
+                "and nothing above them, so no extended capability on this "
+                "board can be read on this boot\n");
         return;
     }
     for (uint8_t i = 0; i < mcfg->count && g_ecam_count < ACPI_MCFG_MAX_SEGMENTS; i++) {
@@ -170,10 +189,23 @@ static void pci_ecam_init(void) {
                                          VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE |
                                          VMM_FLAG_CACHE_DISABLE);
         if (!va) {
-            debug_printf("[PCI] ECAM map failed seg=%u base=0x%lx span=0x%lx\n",
-                         s->segment_group,
-                         (unsigned long)s->base_address,
-                         (unsigned long)span);
+            /* The silent version of this failure was the whole defect: with
+             * nothing said, a board whose ECAM never mapped behaves exactly
+             * like a board whose ECAM did, because every register anyone
+             * reads during boot — vendor, class, BARs, the MSI capability —
+             * lives below offset 0x100 and the legacy door delivers it. What
+             * is lost is invisible until something asks for an extended
+             * capability and is told 0xFFFFFFFF, which reads as "absent". */
+            kprintf("[PCI] %[E]segment %u published an ECAM window at 0x%lx "
+                    "for buses %u..%u and this kernel could not map its %lu "
+                    "MiB — that segment falls back to 0xCF8/0xCFC, which "
+                    "reaches only the first 256 bytes of each function, so "
+                    "every extended capability behind it now reads as "
+                    "absent%[D]\n",
+                    s->segment_group,
+                    (unsigned long)s->base_address,
+                    s->start_bus, s->end_bus,
+                    (unsigned long)(span >> 20));
             continue;
         }
         pci_ecam_segment_t* slot = &g_ecam[g_ecam_count++];
@@ -182,10 +214,25 @@ static void pci_ecam_init(void) {
         slot->end_bus   = s->end_bus;
         slot->phys_base = (uintptr_t)s->base_address;
         slot->virt_base = (volatile uint8_t *)va;
-        debug_printf("[PCI] ECAM seg=%u bus %u..%u mapped 0x%lx -> %p (%lu MiB)\n",
-                     s->segment_group, s->start_bus, s->end_bus,
-                     (unsigned long)s->base_address, (void*)va,
-                     (unsigned long)(span >> 20));
+        debug_printf("[PCI] ECAM seg=%u virt base %p\n",
+                     s->segment_group, (void*)va);
+        kprintf("[PCI] segment %u answers through ECAM: buses %u..%u at "
+                "0x%lx, %lu MiB mapped uncached — the whole 4 KiB of every "
+                "function's configuration space, extended capabilities "
+                "included\n",
+                s->segment_group, s->start_bus, s->end_bus,
+                (unsigned long)s->base_address,
+                (unsigned long)(span >> 20));
+    }
+
+    /* MCFG said ECAM exists and not one window could be mapped. Every read
+     * below silently becomes a legacy read, so the machine still boots and
+     * still looks right — which is exactly why it has to be said here. */
+    if (g_ecam_count == 0) {
+        kprintf("[PCI] %[E]MCFG named %u segment(s) and not one of their "
+                "windows could be mapped — this kernel reads configuration "
+                "space through 0xCF8/0xCFC on a machine whose firmware says "
+                "it has ECAM%[D]\n", mcfg->count);
     }
 }
 
@@ -1020,22 +1067,31 @@ bool PciSummons(uint8_t bus, uint8_t device, uint8_t function, Summons *out) {
         gsi_from = SUMMONS_FROM_INTERRUPT_LINE;
     }
 
-    /* One range test for both sources, and it is a test against THIS
-     * KERNEL, not against the machine. The routing table may legitimately
-     * name a pin on a second IOAPIC or on a part with more than twenty-four
-     * inputs; what stops the line here is that idt_init installs interrupt
-     * gates for IRQ_MAX_COUNT vectors, so there is no vector for it to be
-     * delivered on. Whether the CHIP has such a pin is the IOAPIC's own
-     * question, answered from its VER register in ioapic_init, which names
-     * the same boundary from the other side. Said, not truncated. */
-    if (gsi >= IRQ_MAX_COUNT) {
-        kprintf("[PCI] %[E]%02x:%02x.%u drives INT%c# and %s puts it on GSI "
-                "%u, past the %u interrupt vectors this kernel installs gates "
-                "for — there is nowhere to deliver it%[D]\n",
-                bus, device, function, 'A' + (pin - 1),
-                SummonsSourceName(gsi_from), gsi, IRQ_MAX_COUNT);
-        return false;
-    }
+    /* There is no range test here any more, and the reason it went is worth
+     * writing down. It used to refuse any GSI at or above twenty-four,
+     * because idt_init installed gates for exactly that many vectors and a
+     * line past them had nowhere to be delivered. Both halves of that have
+     * changed: every vector now has a gate, and a line is given one from the
+     * pool when it settles rather than by adding thirty-two to its pin
+     * number. So the only question left is the chip's own — does an IOAPIC on
+     * this machine have this input — and SummonsPinIsReachable asks it, out
+     * of the VER register, at arming time. A routing table that names a pin
+     * on a part with a hundred and twenty inputs is therefore taken, where
+     * it used to be refused for a reason that was about this kernel rather
+     * than about the part.
+     *
+     * ‼ A PIN ON A SECOND IOAPIC IS STILL REFUSED, AND THIS COMMENT USED TO
+     * CLAIM IT WAS NOT. Exactly one chip is brought up: acpi_madt.c keeps
+     * the FIRST I/O APIC Structure the firmware names and only counts the
+     * rest, irqchip.c hands that one register address and that one Global
+     * System Interrupt base to ioapic_init, and ioapic.c holds one of each.
+     * A GSI belonging to any other chip — and a desktop PCH publishes a
+     * second the moment firmware enables a root port's own I/OxAPIC — gets
+     * this far, and is then turned away by SummonsPinIsReachable as below
+     * that one chip's GSI base or past its last pin. That refusal is true
+     * about the pin and silent about the cause, which is that one entry out
+     * of N was read; the count acpi_madt.c prints is where the cause can be
+     * seen. */
 
     /* §6.2.2, Table 6-1, bit 10: "This bit disables the device/function from
      * asserting INTx#. A value of 0 enables the assertion of its INTx#
@@ -1057,7 +1113,13 @@ bool PciSummons(uint8_t bus, uint8_t device, uint8_t function, Summons *out) {
          * through it would land the pin wherever some unrelated legacy IRQ
          * was moved to. The honest translation from (device, pin) to GSI is
          * _PRT's, and it is the one asked for above. */
-        .vector      = irq_gsi_to_vector((uint8_t)gsi),
+        /* Given when the line settles, not here -- see SummonsForIsaLine. */
+        .vector      = 0,
+        /* A PCI INTx line belongs to a device with a transfer in flight far
+         * more often than not, and a device whose interrupt waits is a device
+         * whose own deadline expires. A driver that knows better sets this
+         * itself before arming. */
+        .row         = RIGHT_OF_WAY_WORK_IS_REDONE,
         .intx_pin    = pin,
         .polarity    = polarity,
         .trigger     = trigger,
@@ -1096,39 +1158,193 @@ static void log_pcie_link(uint16_t segment, uint8_t bus, uint8_t dev,
     debug_printf("[PCI]     PCIe link: x%u @ %s\n", width, speed);
 }
 
+/* ============================================================
+ * The inventory walk, and the door it went through.
+ *
+ * Which door a function was read through is a fact about the machine, so it
+ * travels with the function and is printed on its line. The two doors do not
+ * reach the same space: the ECAM window of PCI Firmware Specification Rev.
+ * 3.0 §4.1.2 addresses all 4 KiB of a function's configuration space, while
+ * CONFIG_ADDRESS/CONFIG_DATA (PCI 3.0 §3.2.2.3.2) carries six bits of dword
+ * index and addresses 256 bytes of it. A function read through the second
+ * door has no extended capability chain — not "none found", none reachable.
+ * ============================================================ */
+typedef enum {
+    PCI_DOOR_ECAM,   /* MMIO, one window per segment group, offsets 0x000..0xFFF */
+    PCI_DOOR_PORTS,  /* 0xCF8/0xCFC, segment 0 only, offsets 0x00..0xFF */
+} PciDoor;
+
+static const char *PciDoorName(PciDoor door) {
+    return door == PCI_DOOR_ECAM ? "ECAM" : "0xCF8/0xCFC";
+}
+
+/* PCI_DOOR_PORTS has no segment to carry: the legacy address register (PCI
+ * 3.0 §3.2.2.3.2) holds bus, device, function and register number and
+ * nothing else, so it can only ever describe segment 0. The walk passes
+ * segment 0 with it for that reason, and never any other. */
+static uint16_t PciDoorWord(PciDoor door, uint16_t segment, uint8_t bus,
+                            uint8_t dev, uint8_t fn, uint16_t off) {
+    if (door == PCI_DOOR_ECAM) {
+        return pci_ecam_read_word(segment, bus, dev, fn, off);
+    }
+    return pci_config_read_word(bus, dev, fn, (uint8_t)off);
+}
+
+static uint8_t PciDoorByte(PciDoor door, uint16_t segment, uint8_t bus,
+                           uint8_t dev, uint8_t fn, uint16_t off) {
+    if (door == PCI_DOOR_ECAM) {
+        return pci_ecam_read_byte(segment, bus, dev, fn, off);
+    }
+    return pci_config_read_byte(bus, dev, fn, (uint8_t)off);
+}
+
+static uint8_t PciDoorCapability(PciDoor door, uint16_t segment, uint8_t bus,
+                                 uint8_t dev, uint8_t fn, uint8_t cap_id) {
+    if (door == PCI_DOOR_ECAM) {
+        return pci_find_capability_seg(segment, bus, dev, fn, cap_id);
+    }
+    return pci_find_capability(bus, dev, fn, cap_id);
+}
+
+/* What the walk counts, so its closing line can say it. */
+typedef struct {
+    uint32_t functions;
+    uint32_t bridges;
+    uint32_t buses;
+} PciWalkTally;
+
+/* How this function can be summoned, in one clause.
+ *
+ * The Interrupt Pin register is the whole of what a function says about its
+ * INTx wire — PCI 3.0 §6.2.4: "A value of 1 corresponds to INTA# ... Devices
+ * (or device functions) that do not use an interrupt pin must put a 0 in
+ * this register. The values 05h through FFh are reserved."
+ *
+ * A zero on its own reads like a fault, and on most of a modern board it is
+ * the normal answer — so the message capabilities are named in the same
+ * breath, because they are what turns "no pin" into either "it interrupts by
+ * message" or "nothing on it can interrupt at all". Both come from the
+ * capability chain this walk has already walked, so neither costs a further
+ * configuration cycle. */
+static void PciInterruptClause(uint8_t pin, bool has_msi, bool has_msix,
+                               char *out, size_t out_len) {
+    const char *msg = has_msix ? (has_msi ? "MSI and MSI-X" : "MSI-X")
+                               : (has_msi ? "MSI" : NULL);
+    if (pin >= 1 && pin <= 4) {
+        if (msg) {
+            ksnprintf(out, out_len,
+                      "wired to INT%c#, and it can also interrupt by %s",
+                      'A' + (pin - 1), msg);
+        } else {
+            ksnprintf(out, out_len,
+                      "wired to INT%c#, which is the only way it can interrupt",
+                      'A' + (pin - 1));
+        }
+    } else if (pin == 0) {
+        if (msg) {
+            ksnprintf(out, out_len,
+                      "with no INTx pin, so %s is the only way it can "
+                      "interrupt", msg);
+        } else {
+            ksnprintf(out, out_len,
+                      "with neither an INTx pin nor a message capability, so "
+                      "nothing on it can raise an interrupt");
+        }
+    } else {
+        ksnprintf(out, out_len,
+                  "reporting Interrupt Pin %u, a value PCI 3.0 §6.2.4 "
+                  "reserves, so it names no INTx# wire", pin);
+    }
+}
+
 /* Walk one (segment, bus, dev, fn) — only valid if vendor != 0xFFFF.
  *
- * Every register here is read through the SEGMENT's own ECAM window, and
- * that is the point of the function taking a segment at all. PCI Firmware
- * Specification Rev. 3.0 §4.1.2 allocates one ECAM base address per PCI
- * Segment Group: a (bus, dev, fn) is only an address together with its
- * group, and two groups routinely both start at bus 0. Reading through the
- * segment-0 API instead — which is what pci_config_read_* is, by its own
- * contract in pci.h — would identify a segment-1 function from whatever
- * segment 0 happens to hold at the same coordinates: either 0xFFFF, and the
- * function silently vanishes from the count, or a different device, whose
- * vendor, class and capabilities then get published under the right address
- * as `pci:vendor:...` / `pci:class:...`. The caller has already proven the
- * window exists (pci_enumerate_ecam runs only when pci_has_ecam()), so there
- * is no legacy fallback to want here. */
-static void enumerate_function(uint16_t segment, uint8_t bus, uint8_t dev,
-                                uint8_t fn, uint32_t* counter) {
-    uint16_t vendor = pci_ecam_read_word(segment, bus, dev, fn, PCI_VENDOR_ID);
+ * Every register here is read through the door the caller came in by, and
+ * through the SEGMENT's own ECAM window when that door is ECAM. That is the
+ * point of the function taking a segment at all. PCI Firmware Specification
+ * Rev. 3.0 §4.1.2 allocates one ECAM base address per PCI Segment Group: a
+ * (bus, dev, fn) is only an address together with its group, and two groups
+ * routinely both start at bus 0. Reading through the segment-0 API instead —
+ * which is what pci_config_read_* is, by its own contract in pci.h — would
+ * identify a segment-1 function from whatever segment 0 happens to hold at
+ * the same coordinates: either 0xFFFF, and the function silently vanishes
+ * from the count, or a different device, whose vendor, class and
+ * capabilities then get published under the right address as
+ * `pci:vendor:...` / `pci:class:...`. The legacy door is taken only when
+ * there is no ECAM window at all, and it has no segment but 0 to describe.
+ *
+ * ‼ The one line per function is kprintf, not debug_printf, and that is the
+ * whole reason it exists. DEBUG is off in a shipped build, CONFIG_DEBUG_ENABLED
+ * is then 0, and debug_printf expands to `do { if (0) kprintf(...); } while (0)`
+ * — so this kernel used to walk every function on the board and say nothing
+ * about a single one of them. A board where a controller failed to appear
+ * then looked exactly like a board where it had never been on a bus. */
+static void enumerate_function(PciDoor door, uint16_t segment, uint8_t bus,
+                                uint8_t dev, uint8_t fn, PciWalkTally* tally) {
+    uint16_t vendor = PciDoorWord(door, segment, bus, dev, fn, PCI_VENDOR_ID);
     if (vendor == PCI_INVALID_VENDOR) return;
 
-    uint16_t devid = pci_ecam_read_word(segment, bus, dev, fn, PCI_DEVICE_ID);
-    uint8_t  cls   = pci_ecam_read_byte(segment, bus, dev, fn, PCI_CLASS_CODE);
-    uint8_t  sub   = pci_ecam_read_byte(segment, bus, dev, fn, PCI_SUBCLASS);
-    uint8_t  prog  = pci_ecam_read_byte(segment, bus, dev, fn, PCI_PROG_IF);
+    uint16_t devid = PciDoorWord(door, segment, bus, dev, fn, PCI_DEVICE_ID);
+    uint8_t  cls   = PciDoorByte(door, segment, bus, dev, fn, PCI_CLASS_CODE);
+    uint8_t  sub   = PciDoorByte(door, segment, bus, dev, fn, PCI_SUBCLASS);
+    uint8_t  prog  = PciDoorByte(door, segment, bus, dev, fn, PCI_PROG_IF);
+    uint8_t  htype = PciDoorByte(door, segment, bus, dev, fn, PCI_HEADER_TYPE);
+    uint8_t  pin   = PciDoorByte(door, segment, bus, dev, fn,
+                                 PCI_INTERRUPT_PIN);
 
-    debug_printf("[PCI]   %04x:%02x:%02x.%x  %04x:%04x  class=%02x.%02x.%02x\n",
-                 segment, bus, dev, fn, vendor, devid, cls, sub, prog);
+    /* The capability list is asked for BEFORE the line is printed, because
+     * what can summon this function belongs in the same sentence as its pin. */
+    uint8_t msi_off  = PciDoorCapability(door, segment, bus, dev, fn,
+                                         PCI_CAP_ID_MSI);
+    uint8_t msix_off = PciDoorCapability(door, segment, bus, dev, fn,
+                                         PCI_CAP_ID_MSIX);
+    uint8_t pcie_off = PciDoorCapability(door, segment, bus, dev, fn,
+                                         PCI_CAP_ID_PCIE);
 
-    /* Tag-driven driver discovery — every found function publishes
-     * a `pci:vendor:VVVV:DDDD` (specific match) tag AND a broader
-     * `pci:class:CC:SS:PP` tag. Drivers subscribe by either tag and
-     * wake up here, instead of registering match tables. Payload is
-     * the full coordinate tuple so the driver can talk back. */
+    char what[96];
+    PciClassInWords(cls, sub, prog, what, sizeof(what));
+
+    /* A bridge that does not say which buses are behind it is not described:
+     * it is the reason the next bus in this list exists at all. PCI-to-PCI
+     * Bridge Architecture Specification Rev. 1.2 §3.2.5.4 and §3.2.5.5 put
+     * the Secondary Bus Number at offset 0x19 and the Subordinate Bus Number
+     * at 0x1A of a header-type-1 function, and together they name every bus
+     * downstream of it. A CardBus bridge (header type 2) numbers its buses
+     * in different registers, so it is not read here and says only what it
+     * is rather than a range taken from the wrong offsets. */
+    char behind[48];
+    behind[0] = '\0';
+    if ((htype & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_BRIDGE) {
+        uint8_t first_behind = PciDoorByte(door, segment, bus, dev, fn,
+                                           PCI_BRIDGE_SECONDARY_BUS);
+        uint8_t last_behind  = PciDoorByte(door, segment, bus, dev, fn,
+                                           PCI_BRIDGE_SUBORDINATE_BUS);
+        ksnprintf(behind, sizeof(behind), " spanning buses %02x..%02x",
+                  first_behind, last_behind);
+        tally->bridges++;
+    }
+
+    char how[112];
+    PciInterruptClause(pin, msi_off != 0, msix_off != 0, how, sizeof(how));
+
+    kprintf("[PCI] %04x:%02x:%02x.%x  %04x:%04x  %s%s — read through %s, %s\n",
+            segment, bus, dev, fn, vendor, devid, what, behind,
+            PciDoorName(door), how);
+
+    /* Every function names itself on Touch as the walk goes past it: a
+     * specific `pci:vendor:VVVV:DDDD` tag and a broader `pci:class:CC:SS:PP`
+     * tag, both carrying the whole coordinate tuple, so that whoever hears
+     * one can talk back to that function without walking the buses again.
+     *
+     * ‼ NOTHING IN THIS TREE SUBSCRIBES TO EITHER TAG YET, AND THAT IS SAID
+     * HERE RATHER THAN LEFT TO BE DISCOVERED. What stood in this comment
+     * claimed that drivers subscribe by these tags "instead of registering
+     * match tables"; there is no such subscriber anywhere — the three
+     * drivers that look for a controller (ahci.c, xhci.c, ata.c) each call
+     * pci_find_device_by_class, which takes a walk of its own. The channel
+     * is real and the tags are well formed, and this is where a driver that
+     * would rather be told about its device than go looking will hook in.
+     * Until one does, these two calls publish a fact with no reader. */
     struct {
         uint16_t segment;
         uint8_t  bus, dev, fn;
@@ -1161,23 +1377,20 @@ static void enumerate_function(uint16_t segment, uint8_t bus, uint8_t dev,
     ct[18] = '\0';
     TouchPublish(ct, &ev, sizeof(ev));
 
-    /* Capability list. */
-    uint8_t msi_off  = pci_find_capability_seg(segment, bus, dev, fn,
-                                               PCI_CAP_ID_MSI);
-    uint8_t msix_off = pci_find_capability_seg(segment, bus, dev, fn,
-                                               PCI_CAP_ID_MSIX);
-    uint8_t pcie_off = pci_find_capability_seg(segment, bus, dev, fn,
-                                               PCI_CAP_ID_PCIE);
     if (msi_off || msix_off || pcie_off) {
         debug_printf("[PCI]     caps:%s%s%s\n",
                      msi_off  ? " MSI"   : "",
                      msix_off ? " MSI-X" : "",
                      pcie_off ? " PCIe"  : "");
     }
-    if (pcie_off) {
+    /* log_pcie_link and the extended chain both read through the ECAM
+     * window by construction; through the legacy door the first would print
+     * a width and a speed decoded from 0xFFFF, and the second cannot reach
+     * offset 0x100 at all. Neither is guessed at — the closing line of the
+     * walk says instead that nothing above offset 0xFF was asked. */
+    if (pcie_off && door == PCI_DOOR_ECAM) {
         log_pcie_link(segment, bus, dev, fn, pcie_off);
 
-        /* PCIe extended capability chain (ECAM-only). */
         uint16_t aer = pci_find_ext_capability(segment, bus, dev, fn,
                                                   PCI_EXT_CAP_ID_AER);
         uint16_t vc  = pci_find_ext_capability(segment, bus, dev, fn,
@@ -1192,7 +1405,74 @@ static void enumerate_function(uint16_t segment, uint8_t bus, uint8_t dev,
         }
     }
 
-    (*counter)++;
+    tally->functions++;
+}
+
+/* One bus range, one door, every function that answers on it.
+ *
+ * The range is walked whole rather than followed through bridges, and the
+ * two walks are the same shape for that reason: what this log has to answer
+ * is what is THERE, including a function behind a bridge whose Subordinate
+ * Bus Number firmware left wrong — the one case where the inventory has to
+ * be trusted over the topology. */
+static void PciWalkBusRange(PciDoor door, uint16_t segment, uint8_t first_bus,
+                            uint8_t last_bus, PciWalkTally* tally) {
+    for (uint16_t b = first_bus; b <= last_bus; b++) {
+        uint32_t before = tally->functions;
+
+        for (uint8_t d = 0; d < 32; d++) {
+            uint16_t vendor = PciDoorWord(door, segment, (uint8_t)b, d, 0,
+                                          PCI_VENDOR_ID);
+            if (vendor == PCI_INVALID_VENDOR) continue;
+
+            enumerate_function(door, segment, (uint8_t)b, d, 0, tally);
+
+            /* Multi-function device? Bit 7 of header type. enumerate_function
+             * returns on its own when a function is absent, so no vendor
+             * probe is repeated here. */
+            uint8_t htype = PciDoorByte(door, segment, (uint8_t)b, d, 0,
+                                        PCI_HEADER_TYPE);
+            if (htype & PCI_HEADER_TYPE_MF) {
+                for (uint8_t f = 1; f < 8; f++) {
+                    enumerate_function(door, segment, (uint8_t)b, d, f, tally);
+                }
+            }
+        }
+
+        if (tally->functions != before) tally->buses++;
+    }
+}
+
+/* The one line that closes the walk: how many, through which door, how many
+ * of them bridges.
+ *
+ * The door has to be in it. The IOMMU prints a count of its own from an
+ * independent sweep of configuration space (core/iommu), and when the two
+ * counts disagree the only thing that can tell them apart is which door each
+ * walk went through — a bare number would leave that unanswerable. */
+static void PciSayWhatTheWalkFound(PciDoor door, const PciWalkTally* tally,
+                                   uint8_t segments) {
+    if (tally->functions == 0) {
+        kprintf("[PCI] %[E]the walk is done and not one function answered "
+                "through %s — on a machine that is running, that says the "
+                "configuration door itself is not answering, not that the "
+                "buses are empty%[D]\n", PciDoorName(door));
+        return;
+    }
+    if (door == PCI_DOOR_ECAM) {
+        kprintf("[PCI] the walk is done: %u function(s) answered through ECAM "
+                "on %u bus(es) of %u segment group(s), %u of them PCI-to-PCI "
+                "bridges — every function this kernel can see is named "
+                "above\n",
+                tally->functions, tally->buses, segments, tally->bridges);
+    } else {
+        kprintf("[PCI] the walk is done: %u function(s) answered through "
+                "0xCF8/0xCFC on %u bus(es) of segment 0, %u of them "
+                "PCI-to-PCI bridges — not one of them was asked anything "
+                "above configuration offset 0xFF, because through this door "
+                "there is nothing there to ask\n",
+                tally->functions, tally->buses, tally->bridges);
+    }
 }
 
 uint32_t pci_enumerate_ecam(void) {
@@ -1201,41 +1481,30 @@ uint32_t pci_enumerate_ecam(void) {
         return 0;
     }
 
-    uint32_t total = 0;
+    PciWalkTally tally = { 0, 0, 0 };
     for (uint8_t s = 0; s < g_ecam_count; s++) {
         pci_ecam_segment_t* seg = &g_ecam[s];
-        debug_printf("[PCI] enumerating segment %u (buses %u..%u)\n",
-                     seg->segment, seg->start_bus, seg->end_bus);
-
-        for (uint16_t b = seg->start_bus; b <= seg->end_bus; b++) {
-            for (uint8_t d = 0; d < 32; d++) {
-                uint16_t vendor = pci_ecam_read_word(seg->segment,
-                                                       (uint8_t)b, d, 0,
-                                                       PCI_VENDOR_ID);
-                if (vendor == PCI_INVALID_VENDOR) continue;
-
-                enumerate_function(seg->segment, (uint8_t)b, d, 0, &total);
-
-                /* Multi-function device? Bit 7 of header type. */
-                uint8_t htype = pci_ecam_read_byte(seg->segment,
-                                                     (uint8_t)b, d, 0,
-                                                     PCI_HEADER_TYPE);
-                if (htype & PCI_HEADER_TYPE_MF) {
-                    for (uint8_t f = 1; f < 8; f++) {
-                        uint16_t v = pci_ecam_read_word(seg->segment,
-                                                          (uint8_t)b, d, f,
-                                                          PCI_VENDOR_ID);
-                        if (v != PCI_INVALID_VENDOR) {
-                            enumerate_function(seg->segment, (uint8_t)b, d, f,
-                                                &total);
-                        }
-                    }
-                }
-            }
-        }
+        PciWalkBusRange(PCI_DOOR_ECAM, seg->segment, seg->start_bus,
+                        seg->end_bus, &tally);
     }
-    debug_printf("[PCI] ECAM enumeration: %u function(s) seen\n", total);
-    return total;
+    PciSayWhatTheWalkFound(PCI_DOOR_ECAM, &tally, g_ecam_count);
+    return tally.functions;
+}
+
+/* The same inventory on a machine that has no ECAM window to walk.
+ *
+ * Not a lesser walk: it reads the same registers of the same functions
+ * through the door the machine actually has, and the only thing out of its
+ * reach is the extended configuration space — which the closing line says
+ * out loud. Without it, a board with no MCFG, and a board whose ECAM windows
+ * failed to map, printed no inventory at all — and on such a board a
+ * controller that fails to appear looks exactly like a controller that was
+ * never on a bus. */
+static uint32_t PciEnumerateThroughPorts(void) {
+    PciWalkTally tally = { 0, 0, 0 };
+    PciWalkBusRange(PCI_DOOR_PORTS, 0, 0, 255, &tally);
+    PciSayWhatTheWalkFound(PCI_DOOR_PORTS, &tally, 1);
+    return tally.functions;
 }
 
 void pci_init(void) {
@@ -1245,10 +1514,24 @@ void pci_init(void) {
      * pci_config_* call to segment 0 will go through MMIO instead of
      * 0xCF8/0xCFC when an MCFG entry covers the bus. */
     pci_ecam_init();
-    /* Walk every PCIe function reachable via ECAM for log visibility
-     * and to populate the capability cache hot in the dcache before
-     * driver init touches the same registers. */
-    pci_enumerate_ecam();
+
+    /* The inventory, through whichever door this machine turned out to have.
+     * Every function names itself on its own line, and that account is what
+     * this walk is for: it is the only description of these buses that
+     * survives a shipped build, where debug_printf compiles away to nothing.
+     *
+     * It is NOT how the drivers below find their devices. Each of them asks
+     * pci_find_device_by_class, which walks again on its own account. The
+     * `pci:vendor:` / `pci:class:` tags this walk publishes on the way past
+     * have no subscriber in this tree yet — enumerate_function publishes
+     * them and says so there. The walk also leaves the configuration
+     * registers of every function hot in the dcache before driver init
+     * touches the same ones. */
+    if (pci_has_ecam()) {
+        pci_enumerate_ecam();
+    } else {
+        PciEnumerateThroughPorts();
+    }
 
     pci_device_t ide_controller;
     if (pci_find_device_by_class(PCI_CLASS_STORAGE, PCI_SUBCLASS_IDE, 0xFF, &ide_controller) == 0) {

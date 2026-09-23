@@ -1,4 +1,5 @@
 #include "keyboard.h"
+#include "idt.h"   /* irq_register_handler + the kernel's own answerers */
 #include "keymaps.h"
 #include "klib.h"
 #include "io.h"
@@ -751,6 +752,10 @@ static bool kb_8042_init(void)
      * is nothing left to interrupt, and IRQ1 is unmasked in the same breath:
      * from here on the answers arrive as interrupts and nothing polls. */
     g_kb_8042_alive = true;
+    /* Answered through the registry, like every other line. The 8042 used to
+     * be `case 1` of a switch on the ISA number at the bottom of irq_handler,
+     * which is the same arithmetic the vector pool removes. */
+    irq_register_handler(1, IrqTheKeyboardAnswers, RIGHT_OF_WAY_A_PERSON_WAITS);
     irqchip_enable_irq(1);
     debug_printf("[KEYBOARD] IRQ1 enabled\n");
 

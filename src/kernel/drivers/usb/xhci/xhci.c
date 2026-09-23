@@ -135,15 +135,21 @@ static uint8_t xhci_controller_index(const xhci_controller_t* ctrl)
 /* The first controller in service. Kept for the callers that genuinely want
  * any one of them — a query, a diagnostic — and not for the ones that mean
  * "all of them", which now say so. */
-/* The vector this controller signals on. Numbered alongside the controllers
- * themselves, so an interrupt says which one spoke. */
-static uint8_t xhci_vector_for(const xhci_controller_t* ctrl)
+/* The node each controller answers its message on, and the vector it was
+ * given. There used to be a run of eight consecutive numbers here, starting
+ * at XHCI_MSI_VECTOR, which meant this kernel had decided in advance that a
+ * machine has at most eight USB host controllers — a ceiling written as a
+ * constant. A controller asks for its own now, and the only limit left is how
+ * many vectors the machine has. */
+static SummonsResponder g_msi_responder[XHCI_MAX_CONTROLLERS];
+
+/* Which controller raised the interrupt being served. A message-signalled
+ * answerer takes no argument — nor should it, since almost none need one —
+ * so the vector is read back off the frame the handler arrived on. */
+static void xhci_message_answered(void)
 {
-    uint8_t index = xhci_controller_index(ctrl);
-    if (index >= XHCI_MAX_CONTROLLERS) {
-        return XHCI_MSI_VECTOR;
-    }
-    return (uint8_t)(XHCI_MSI_VECTOR + index);
+    interrupt_frame_t *in_flight = IrqFrameInFlight();
+    if (in_flight) xhci_irq_handler_vector((uint8_t)in_flight->vector);
 }
 
 xhci_controller_t* xhci_get_controller(void) {
@@ -502,34 +508,89 @@ static void xhci_setup_interrupts(xhci_controller_t* ctrl)
      * numbers for one controller in neighbouring lines is a question an
      * operator on a board should never have to answer. The cast keeps the
      * helper referenced under the key, which is all the print was doing. */
-    (void)xhci_vector_for;
+    /* Nothing to keep referenced here any more: the vector is asked for at
+     * the moment it is used, not computed by a helper. */
 #else
+    /* One pass, so that "this controller could not take a message" can leave
+     * by the same door from three different places without a label. */
+    do {
+    /*
+     * ‼ WHAT THIS CONTROLLER OFFERS AND WHAT IS ACTUALLY TAKEN, SAID BEFORE
+     * EITHER IS TRIED.
+     *
+     * Two facts that the log left an operator to guess at. The first: whether
+     * this function has an MSI-X capability at all. pci_msix_enable_vector
+     * returns -1 for a missing capability without printing anything, so "MSI-X
+     * was not found" and "MSI-X was never attempted" looked identical — and on
+     * the owner's board, where neither controller has one, the boot simply
+     * showed MSI with no explanation.
+     *
+     * The second: how many of the interrupters the controller advertises this
+     * driver uses. One. The register space line says intrs=8 on the chipset
+     * controller, and eight interrupters is a capability, not an obligation:
+     * delivering on more than one needs an Event Ring Segment Table and a ring
+     * of its own per interrupter (xHCI 1.2 §5.5.2) and an Interrupter Target
+     * to steer each event at one of them — §4.17.4 puts that field in the
+     * Transfer TRB and in the SLOT Context (§6.2.2, bits 31:22 of its third
+     * dword), not in the Endpoint Context, and §6.2.3.1, named here before,
+     * is Address Device Command Usage and carries no such field. This
+     * driver keeps one event ring, so one interrupter is the correct shape and
+     * one message is all that could be delivered — but that is a decision, and
+     * a decision the screen never mentioned.
+     */
+    kprintf("[xHCI %s] %s, and one message is all this driver would use: of "
+            "the %u interrupter(s) this controller offers it arms interrupter "
+            "0 alone, with the single %u-entry event ring it keeps\n",
+            ctrl->name,
+            pci_find_capability(ctrl->pci_dev.bus, ctrl->pci_dev.device,
+                                ctrl->pci_dev.function, PCI_CAP_ID_MSIX)
+                ? "this function carries an MSI-X table"
+                : "this function carries no MSI-X capability",
+            ctrl->max_interrupters, ctrl->event_ring.num_trbs);
+
     /* MSI-X before MSI, because that is the order in which controllers
      * actually implement them. QEMU's xHCI offers MSI-X and no MSI at all; the
      * PCH offers both. Trying only MSI meant the emulated controller — the one
      * every test runs against — silently took the legacy path, so the path
      * real hardware uses was never the path being tested. */
+    /* One vector, asked for once and offered to both capabilities in turn.
+     * A transfer this controller has already started is what waits on it. */
+    uint8_t ctrl_index = xhci_controller_index(ctrl);
+    if (ctrl_index >= XHCI_MAX_CONTROLLERS) break;
+
+    uint8_t msg_vector = VectorPoolTake(RIGHT_OF_WAY_WORK_IS_REDONE, ctrl->name);
+    if (msg_vector == 0) break;   /* refused, and the pool said why */
+
     if (pci_msix_enable_vector(ctrl->pci_dev.bus, ctrl->pci_dev.device,
-                               ctrl->pci_dev.function, 0, xhci_vector_for(ctrl),
+                               ctrl->pci_dev.function, 0, msg_vector,
                                g_amp.bsp_lapic_id) == 0) {
-        ctrl->irq_vector  = xhci_vector_for(ctrl);
+        IrqAnswerMessage(msg_vector, &g_msi_responder[ctrl_index],
+                         xhci_message_answered, ctrl->name);
+        ctrl->irq_vector  = msg_vector;
         ctrl->use_msi     = true;
         ctrl->use_polling = false;
         kprintf("[xHCI] MSI-X enabled (vector 0x%02x -> LAPIC %u)\n",
-                xhci_vector_for(ctrl), g_amp.bsp_lapic_id);
+                msg_vector, g_amp.bsp_lapic_id);
         return;
     }
 
     if (pci_msi_enable(ctrl->pci_dev.bus, ctrl->pci_dev.device,
-                       ctrl->pci_dev.function, xhci_vector_for(ctrl),
+                       ctrl->pci_dev.function, msg_vector,
                        g_amp.bsp_lapic_id) == 0) {
-        ctrl->irq_vector  = xhci_vector_for(ctrl);
+        IrqAnswerMessage(msg_vector, &g_msi_responder[ctrl_index],
+                         xhci_message_answered, ctrl->name);
+        ctrl->irq_vector  = msg_vector;
         ctrl->use_msi     = true;
         ctrl->use_polling = false;
         kprintf("[xHCI %s] MSI enabled (vector 0x%02x -> LAPIC %u)\n", ctrl->name,
-                xhci_vector_for(ctrl), g_amp.bsp_lapic_id);
+                msg_vector, g_amp.bsp_lapic_id);
         return;
     }
+
+    /* Neither capability took it. The number goes back before the wire is
+     * tried, so the next controller does not find the pool one short. */
+    VectorPoolGiveBack(msg_vector, ctrl->name);
+    } while (0);
 #endif /* CONFIG_XHCI_INTX_PROOF */
 
     /* INTx, and it arrives DESCRIBED. The bare Interrupt Line byte used to go
@@ -555,9 +616,22 @@ static void xhci_setup_interrupts(xhci_controller_t* ctrl)
 #else
     irq_callback_t answer = xhci_irq_handler;
 #endif
-    if (!SummonsAnswer(&line, &g_intx_responder[index], answer,
-                       ctrl->name) ||
-        !SummonsArm(&line)) {
+    if (!SummonsAnswer(&line, &g_intx_responder[index], answer, ctrl->name)) {
+        kprintf("[xHCI %s] INTx line refused — events will be polled from the "
+                "timer tick\n", ctrl->name);
+        ctrl->use_polling = true;
+        return;
+    }
+
+    if (!SummonsArm(&line)) {
+        /* Answered and then not armed, which used to be one `||` with the
+         * line above and is two branches now because the two outcomes are not
+         * the same. Answering SETTLES the line, and settling is what gives a
+         * line its vector — so walking away here without taking the answerer
+         * back off would leave a number held by a line that will never carry
+         * anything, and the next controller to ask would find the pool one
+         * short with nothing in the log to say why. */
+        SummonsUnanswer(&line, &g_intx_responder[index], ctrl->name);
         kprintf("[xHCI %s] INTx line refused — events will be polled from the "
                 "timer tick\n", ctrl->name);
         ctrl->use_polling = true;
@@ -1224,17 +1298,38 @@ static int xhci_bring_up(xhci_controller_t* ctrl) {
         goto cleanup_resources;
     }
 
-    if (need > ctrl->mmio_size) {
-        /* kprintf: this is a fact about the machine, and the machine is the
-         * thing we do not know. It printed nothing on the board where the
-         * absence of it cost a kernel #PF. */
-        kprintf("[xHCI %s] register space: 0x%llx bytes "
-                "(BAR0=0x%llx CAPLENGTH=0x%x RTSOFF=0x%x DBOFF=0x%x "
-                "ports=%u intrs=%u slots=%u)\n", ctrl->name,
-                (unsigned long long)need, (unsigned long long)bar_size,
-                caplength, rtsoff, dboff,
-                ctrl->max_ports, ctrl->max_interrupters, ctrl->max_slots);
+    /*
+     * kprintf: this is a fact about the machine, and the machine is the thing
+     * we do not know. It printed nothing on the board where the absence of it
+     * cost a kernel #PF.
+     *
+     * ‼ AND IT SAYS WHERE THE CONTROLLER IS, WHICH IT PREVIOUSLY DID NOT.
+     *
+     * The field was labelled BAR0 and carried pci_bar_size() — the LENGTH the
+     * base address register decodes, not the base. On the owner's board the
+     * computed extent and the decoded length happened to be equal, so the line
+     * read "0x40000 bytes (BAR0=0x40000)" and invited exactly one reading: that
+     * the controller lives at 0x40000. The physical address of either xHCI
+     * appeared nowhere in 719 lines of that boot — it existed only in two
+     * debug_printf calls, which compile to nothing — so no [VT-d] fault
+     * address, no E820 entry and no memory type could be matched to a
+     * controller at all.
+     *
+     * Three quantities, each named for what it is, and the line is printed for
+     * every controller rather than only for one whose window has to be
+     * remapped: a machine that never has to remap is still a machine whose
+     * controllers have addresses.
+     */
+    kprintf("[xHCI %s] register space: BAR0 puts it at physical 0x%llx, the "
+            "BAR decodes 0x%llx byte(s), and this driver maps 0x%llx of them "
+            "(CAPLENGTH=0x%x RTSOFF=0x%x DBOFF=0x%x ports=%u intrs=%u "
+            "slots=%u)\n", ctrl->name,
+            (unsigned long long)ctrl->mmio_base_phys,
+            (unsigned long long)bar_size, (unsigned long long)need,
+            caplength, rtsoff, dboff,
+            ctrl->max_ports, ctrl->max_interrupters, ctrl->max_slots);
 
+    if (need > ctrl->mmio_size) {
         vmm_unmap_mmio(mmio_virt, ctrl->mmio_size);
 
         mmio_virt = vmm_map_mmio(ctrl->mmio_base_phys, need,

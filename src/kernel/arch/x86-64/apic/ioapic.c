@@ -6,7 +6,15 @@
 #include "vmm.h"
 
 static volatile uint32_t* ioapic_base_virt = NULL;
-static uint8_t ioapic_gsi_base = 0;
+/* ACPI 6.5 §5.2.12.3 makes the I/O APIC Structure's Global System Interrupt
+ * Base a 32-bit field, and §5.2.13 numbers GSIs straight through every IOAPIC
+ * in the machine, so the base of the second chip on a large board is not a
+ * small number. This was a byte, and ioapic_init's parameter was a byte, so
+ * the narrowing happened at the call — where nothing in this file could see
+ * it. A chip based at GSI 256 would have come up believing it owned GSI 0,
+ * and every bound and every refusal below would have been computed against a
+ * base the firmware never wrote. */
+static uint32_t ioapic_gsi_base = 0;
 static uint8_t ioapic_max_entry = 0;
 
 // Interrupt Source Override table (ISA IRQ -> GSI remapping)
@@ -120,11 +128,8 @@ static void ioapic_mask_redir(uint8_t entry) {
     spin_unlock(&ioapic_reg_lock);
 }
 
-void ioapic_init(uintptr_t base_addr, uint8_t gsi_base) {
+void ioapic_init(uintptr_t base_addr, uint32_t gsi_base) {
     ioapic_gsi_base = gsi_base;
-
-    debug_printf("[IOAPIC] Initializing IO-APIC at phys 0x%lx, GSI base=%u\n",
-                 base_addr, gsi_base);
 
     // Map IO-APIC MMIO (one page, uncacheable)
     ioapic_base_virt = (volatile uint32_t*)vmm_map_mmio(
@@ -147,37 +152,60 @@ void ioapic_init(uintptr_t base_addr, uint8_t gsi_base) {
 
     uint32_t id = (ioapic_read(IOAPIC_REG_ID) >> 24) & 0xFF;
 
-    debug_printf("[IOAPIC] ID=%u, Version=0x%x, MaxEntry=%u (%u pins)\n",
-                 id, ver & 0xFF, ioapic_max_entry, ioapic_max_entry + 1);
+    /* ‼ THE RAW VERSION REGISTER, NOT ONLY WHAT WAS DERIVED FROM IT.
+     *
+     * Intel 82093AA §3.2.2 lays IOAPICVER out: bits 7:0 are the APIC VERSION
+     * and bits 23:16 the Maximum Redirection Entry, "the entry number (0
+     * being the lowest entry) of the highest entry in the I/O Redirection
+     * Table. The value is equal to the number of interrupt input pins for
+     * the IOAPIC minus one." The pin count is therefore MRE + 1 and nothing
+     * else.
+     *
+     * The dword itself is printed because the pin count alone cannot be
+     * checked against anything. On the integrated part that field is not pure
+     * silicon: Intel 200/Z370 PCH datasheet Vol 2, doc 335193, §24.1.2
+     * "Version Register (VER)—Offset 1h" gives MRE as RW/O with default 77h —
+     * "BIOS must write to this field after PLTRST# to lockdown the value.
+     * This allows BIOS to utilize some of the entries for its own purpose and
+     * thus advertising fewer IOxAPIC Redirection Entries to OS." A board that
+     * reports fewer inputs than the part has is firmware's doing, and the only
+     * way to tell that from a smaller chip is to read the register back whole.
+     *
+     * kprintf, not debug_printf: with DEBUG off this was the one fact the
+     * machine knew about its own interrupt controller and never said. */
+    kprintf("[IOAPIC] ID %u at physical 0x%lx answers Global System Interrupts "
+            "%u through %u: its VER register reads 0x%08x — APIC version 0x%02x "
+            "and a Maximum Redirection Entry of 0x%02x, so this chip presents "
+            "%u inputs. Firmware writes that field once after reset, so a count "
+            "below the part's own is the BIOS keeping entries for itself, not a "
+            "smaller chip\n",
+            id, (unsigned long)base_addr, ioapic_gsi_base,
+            ioapic_gsi_base + (uint32_t)ioapic_max_entry, ver,
+            ver & 0xFFu, (ver >> 16) & 0xFFu, (uint32_t)ioapic_max_entry + 1u);
 
     /* Mask every input this chip HAS, counted from the chip's own VER
      * register rather than from a number written here. `uint32_t` and not
      * `uint8_t`: the Maximum Redirection Entry field is eight bits, so a part
      * reporting 255 would make `i <= ioapic_max_entry` a loop with no end. */
-    for (uint32_t i = 0; i <= ioapic_max_entry; i++) {
-        ioapic_mask_redir((uint8_t)i);
-    }
+    IoapicMaskEveryPin();
 
     debug_printf("[IOAPIC] All %u pins masked\n", ioapic_max_entry + 1);
 
-    /* ‼ A CHIP WITH MORE INPUTS THAN THIS KERNEL HAS VECTORS SAYS SO.
+    /* What the chip presents, said whatever the number is.
      *
-     * IRQ_MAX_COUNT is the width of the vector window idt_init installs gates
-     * for, and it is the 82093AA's twenty-four entries. A PCH or a server
-     * part may present more, and the lines past the window are not armed
-     * wrongly — they are not armed at all, and every refusal downstream says
-     * "past the interrupt inputs this kernel dispatches" without the reader
-     * being able to tell whether the chip even has them. This is the one
-     * place that knows both numbers, so this is where the difference is
-     * named. */
-    if ((uint32_t)ioapic_max_entry + 1u > (uint32_t)IRQ_MAX_COUNT) {
-        kprintf("[IOAPIC] %[E]this IOAPIC presents %u inputs (GSI %u to %u) "
-                "and this kernel installs interrupt gates for %u of them — "
-                "GSI %u upwards can be described but never armed%[D]\n",
-                (unsigned)ioapic_max_entry + 1u, ioapic_gsi_base,
-                ioapic_gsi_base + ioapic_max_entry, (unsigned)IRQ_MAX_COUNT,
-                ioapic_gsi_base + (unsigned)IRQ_MAX_COUNT);
-    }
+     * This used to be a complaint: the kernel installed interrupt gates for
+     * twenty-four vectors and dispatched a line by adding thirty-two to its
+     * pin, so an IOAPIC with more inputs than that had pins that could be
+     * described and never armed, and this was the one place that knew both
+     * numbers. Neither number exists any more — every vector has a gate, and
+     * a line is given one from the pool when it settles — so every input this
+     * chip has is one this kernel can arm, and the line says so instead. */
+    kprintf("[IOAPIC] this IOAPIC presents %u input(s), GSI %u to %u, and "
+            "every one of them can be armed — a line is given its vector when "
+            "it settles, so a pin's number no longer decides whether there is "
+            "somewhere to deliver it\n",
+            (unsigned)ioapic_max_entry + 1u, ioapic_gsi_base,
+            ioapic_gsi_base + ioapic_max_entry);
     debug_printf("[IOAPIC] %[S]IO-APIC initialized successfully%[D]\n");
 }
 
@@ -291,7 +319,7 @@ bool SummonsPinIsReachable(uint32_t gsi, uint32_t dest_lapic_id) {
     return true;
 }
 
-void ioapic_enable_irq(uint8_t gsi, uint8_t vector, uint32_t dest_lapic_id) {
+void ioapic_enable_irq(uint32_t gsi, uint8_t vector, uint32_t dest_lapic_id) {
     /* SummonsArm asks this same question before it gets here, and returns
      * false to its caller when the answer is no — so on that path this is a
      * second, cheap confirmation rather than the place the refusal is
@@ -300,7 +328,11 @@ void ioapic_enable_irq(uint8_t gsi, uint8_t vector, uint32_t dest_lapic_id) {
      * having been checked, whoever the caller turns out to be. */
     if (!SummonsPinIsReachable(gsi, dest_lapic_id)) return;
 
-    uint8_t pin = (uint8_t)(gsi - ioapic_gsi_base);
+    /* SummonsPinIsReachable has just proved gsi >= ioapic_gsi_base and that
+     * the difference is within ioapic_max_entry, which is eight bits wide —
+     * so this is the one place the pin may be narrowed, and it is narrowed
+     * after the proof rather than at a call site that has none. */
+    uint32_t pin = gsi - ioapic_gsi_base;
 
     /* ‼ THE ENTRY IS WRITTEN FROM A DESCRIPTION, OR IT IS NOT WRITTEN.
      *
@@ -338,13 +370,13 @@ void ioapic_enable_irq(uint8_t gsi, uint8_t vector, uint32_t dest_lapic_id) {
     uint32_t low = (vector & IOAPIC_REDIR_VECTOR_MASK) | redir_flags;
     uint32_t high = dest_lapic_id << 24;
 
-    ioapic_write_redir(pin, low, high);
+    ioapic_write_redir((uint8_t)pin, low, high);
 
     debug_printf("[IOAPIC] GSI %u -> vector %u, dest LAPIC %u (pin %u)\n",
                  gsi, vector, dest_lapic_id, pin);
 }
 
-void ioapic_disable_irq(uint8_t gsi) {
+void ioapic_disable_irq(uint32_t gsi) {
     /* Silent, unlike the arming path: an unmapped IOAPIC never armed the
      * line either, so there is no work being dropped — only a null base to
      * keep out of ioapic_read_held(). */
@@ -357,7 +389,7 @@ void ioapic_disable_irq(uint8_t gsi) {
      * a line this IOAPIC never armed has nothing to disarm. */
     if (gsi < ioapic_gsi_base) return;
 
-    uint8_t pin = gsi - ioapic_gsi_base;
+    uint32_t pin = gsi - ioapic_gsi_base;
 
     if (pin > ioapic_max_entry) {
         return;
@@ -574,4 +606,23 @@ void ioapic_program_nmi_source(uint32_t gsi, uint16_t mps_flags,
 
     debug_printf("[IOAPIC] NMI Source: GSI %u pin %u mps=0x%04x dest=%u low=0x%08x\n",
                  gsi, pin, mps_flags, dest_lapic_id, redir);
+}
+
+/* Mask every input this chip has, asked of the chip.
+ *
+ * Halting used to do this by counting to irqchip_max_irqs(), which answers
+ * with the width of a vector window — twenty-four on the APIC backend,
+ * sixteen on the PIC one — where the caller means "how many pins are there".
+ * On a part with a hundred and twenty inputs that left everything above the
+ * twenty-fourth armed through a poweroff, and after lines stopped being
+ * numbered by their pins it would have masked twenty-four unrelated ones.
+ *
+ * The number is read out of IOAPICVER at init and is the only place that
+ * knows it, so this is the only place that can answer honestly. */
+void IoapicMaskEveryPin(void)
+{
+    if (!ioapic_base_virt) return;
+    for (uint32_t i = 0; i <= ioapic_max_entry; i++) {
+        ioapic_mask_redir((uint8_t)i);
+    }
 }

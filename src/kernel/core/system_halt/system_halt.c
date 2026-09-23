@@ -3,6 +3,7 @@
 #include "amp.h"
 #include "lapic.h"
 #include "irqchip.h"
+#include "ioapic.h"   /* IoapicMaskEveryPin — the chip's own count of its pins */
 #include "process.h"
 #include "scheduler.h"
 #include "tagfs.h"
@@ -543,10 +544,28 @@ static void halt_stop_hardware(void)
         }
     }
 
-    kprintf("[HALT] Masking all IRQs...\n");
-    for (uint8_t irq = 0; irq < irqchip_max_irqs(); irq++)
+    /* Every pin the chip has, asked of the chip.
+     *
+     * This used to count to irqchip_max_irqs() and call irqchip_disable_irq
+     * on each number — which answers with the width of a vector window and
+     * routes each number through the ISA override table on the way in. On the
+     * board in front of the owner that meant twenty-four of a hundred and
+     * twenty inputs were quieted, and after a line's vector stopped being its
+     * pin number it would have quieted twenty-four pins nobody asked about
+     * while leaving the armed ones live through a poweroff. */
+    kprintf("[HALT] Masking every interrupt input the chip has...\n");
+    if (irqchip_get_type() == IRQCHIP_APIC)
     {
-        irqchip_disable_irq(irq);
+        IoapicMaskEveryPin();
+    }
+    else
+    {
+        /* An 8259 has sixteen inputs and always has: two chips of eight, the
+         * second cascaded into the first's input 2. */
+        for (uint8_t input = 0; input < ISA_INTERRUPT_REQUEST_LINES; input++)
+        {
+            irqchip_disable_irq(input);
+        }
     }
 }
 

@@ -1009,12 +1009,12 @@ void ata_async_init(void) {
     uint8_t gsi0 = g_ata_channels[0].present ? g_ata_channels[0].irq_gsi : 0xFF;
     uint8_t gsi1 = g_ata_channels[1].present ? g_ata_channels[1].irq_gsi : 0xFF;
 
-    if (gsi0 != 0xFF && gsi0 < IRQ_MAX_COUNT) {
-        irq_register_handler(gsi0, ata_irq_handler);
+    if (gsi0 != 0xFF) {
+        irq_register_handler(gsi0, ata_irq_handler, RIGHT_OF_WAY_WORK_IS_REDONE);
         irqchip_enable_irq(gsi0);
     }
-    if (gsi1 != 0xFF && gsi1 < IRQ_MAX_COUNT && gsi1 != gsi0) {
-        irq_register_handler(gsi1, ata_irq_handler);
+    if (gsi1 != 0xFF && gsi1 != gsi0) {
+        irq_register_handler(gsi1, ata_irq_handler, RIGHT_OF_WAY_WORK_IS_REDONE);
         irqchip_enable_irq(gsi1);
     }
 

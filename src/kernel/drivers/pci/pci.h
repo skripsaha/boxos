@@ -217,13 +217,20 @@ void pci_init(void);
 
 /* PCIe full-tree enumeration via ECAM (when MCFG is present).
  * Walks every (segment, bus, device, function) reachable, validates
- * each function header, prints class / vendor / capabilities to the
- * boot log, and counts entries. Returns the number of functions seen.
+ * each function header, names each one on a line of the boot log —
+ * address, vendor:device, class in words, the door it was read
+ * through, its INTx pin — and counts entries. Returns the number of
+ * functions seen.
  *
  * Safe to call multiple times — no side effects on the devices
- * themselves; only config space is read. Falls back to a no-op when
- * MCFG is absent (and the legacy enumeration in pci_scan_bus_impl
- * remains the source of truth for driver discovery). */
+ * themselves; only config space is read. A no-op when MCFG is absent.
+ *
+ * It is not the only inventory: pci_init() takes this walk when the
+ * machine has ECAM and an equivalent walk through 0xCF8/0xCFC when it
+ * has not, so the same account is printed and the same `pci:vendor:` /
+ * `pci:class:` tags are published either way. The difference between
+ * the two is the reach of the door, and the boot log says which one
+ * this machine gave. */
 uint32_t pci_enumerate_ecam(void);
 
 #endif
