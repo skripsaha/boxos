@@ -17,15 +17,21 @@ void ap_entry_c(uint64_t core_index, uint64_t stack_top) {
     //   - SYSCALL MSRs (EFER.SCE+NXE, STAR, LSTAR, SFMASK)
     //   - PerCpuData + MSR_KERNEL_GS_BASE (for swapgs)
     //   - LAPIC enable + LAPIC timer (100Hz periodic)
+    //   - the kernel IDT, the moment the GDT and TSS it depends on are live
     per_core_init_ap((uint8_t)core_index, stack_top);
 
     /* Apply MADT Local APIC NMI entries to this AP's LVT (mirrors the
      * BSP step in irqchip_init). Without it, NMI watchdogs only fire on
-     * the BSP. Safe no-op when running on PIC fallback. */
+     * the BSP. Safe no-op when running on PIC fallback.
+     *
+     * ‼ This arms a line that IF does not silence, so it must not run before
+     * there is somewhere for an NMI to land. It used to: idt_load() stood
+     * BELOW this call, which meant every AP unmasked LVT NMI while still on
+     * the IDTR it had after INIT — base 0, limit 0FFFFH over a page this
+     * kernel does not map. The load now happens inside per_core_init_ap, as
+     * early as the GDT and TSS allow, so by the time this line runs the core
+     * has the kernel's own table. */
     irqchip_apply_lapic_nmi_self();
-
-    // IDT is shared across all cores (single static table)
-    idt_load();
 
     // Per-core scheduler + idle process.
     // MUST be before sti — LAPIC timer is already counting and will fire

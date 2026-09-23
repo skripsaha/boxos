@@ -14,6 +14,7 @@
 #include "cpu_caps_page.h"// cpu_caps_page_refresh_features()
 #include "memtag.h"       // MemTagVerifyPteMetadataBits() — Phase 2D M5
 #include "mce.h"          // mce_ap_init() — Phase 2F
+#include "idt.h"          // idt_load() — the AP swaps the Handrail for it here
 
 PerCoreData g_per_core[MAX_CORES] __attribute__((aligned(64)));
 volatile bool g_per_core_active = false;
@@ -480,6 +481,43 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
 
     // Load per-core TSS
     per_core_load_tss();
+
+    /* Let go of the Handrail, here and not a line later.
+     *
+     * Until this point the core has been on the trampoline's own IDT (see the
+     * Handrail note in ap_trampoline.asm): it names nothing, it services
+     * nothing, and all it can do with a fault is write a LastWord and stop.
+     * The kernel's IDT is the real one — it has the IST stacks for #DF, #NMI,
+     * #MC and the debug vectors, and it dispatches into the kernel's handlers.
+     *
+     * ‼ THE REASON IT CANNOT BE EARLIER IS THE TSS, AND ONLY THE TSS.
+     *
+     * This note used to give two reasons and one of them was wrong. It said
+     * the gates name GDT_KERNEL_CODE, which "becomes a 64-bit code segment
+     * only once per_core_load_gdt has run" — but the trampoline's own GDT was
+     * rebuilt in the same change to make 0x08 a 64-bit code segment precisely
+     * so that a table naming it stays deliverable across the switch (see the
+     * Handrail note in ap_trampoline.asm). Selector 0x08 has meant the same
+     * thing since this core entered long mode.
+     *
+     * What is genuinely not true two lines up is the other half: idt_init
+     * hands vectors 1, 2, 8, 12 and 18 the IST slots 4, 2, 1, 5 and 3, and
+     * only IST 1 exists before this point — the Handrail's TSS fills that one
+     * and leaves the rest zero. A #DF taken with IST 1 lands on a ledge; a #DF
+     * taken with IST 4 against a zero entry does not land anywhere.
+     *
+     * The Handrail covers the stretch from the top of this function to this
+     * line — cpu_intersect_features_ap, the UMWAIT and TEST_CTL MSR writes,
+     * per_core_alloc_ist — and it is the only thing that does.
+     *
+     * It does NOT cover the trampoline's own 16- and 32-bit run, because a
+     * 64-bit gate is sixteen bytes and a protected-mode one is eight, so the
+     * table below would have to be a second table. That run stays uncovered on
+     * purpose: it is a straight line of about twenty instructions that reads
+     * nothing but the data area the BSP filled in, and every value in it that
+     * could fault — CR4.LA57, EFER.NXE — is one the BSP asked CPUID about
+     * before writing it there, for exactly this reason. */
+    idt_load();
 
     // ---- FPU/SSE/AVX ----
     enable_fpu();

@@ -268,6 +268,79 @@ static bool send_sipi(uint32_t dest_lapic_id, uint8_t vector_page)
                            LAPIC_IPI_SIPI | (uint32_t)vector_page);
 }
 
+/* Where the LastWord sits inside the trampoline's data area, and what a whole
+ * one is sealed with. Both halves of this contract live in ap_trampoline.asm,
+ * under the Handrail note there — these are the same offsets, named from the
+ * side that reads them. The seal is the text `LastWord` and not a number
+ * precisely so that a hex dump of this page explains itself. */
+#define AP_LASTWORD_SEAL_OFFSET     32
+#define AP_LASTWORD_VECTOR_OFFSET   40
+#define AP_LASTWORD_ERRCODE_OFFSET  48
+#define AP_LASTWORD_RIP_OFFSET      56
+#define AP_LASTWORD_CR2_OFFSET      64
+static const char AP_LASTWORD_SEAL[8] = { 'L','a','s','t','W','o','r','d' };
+
+/* The thirty-two architectural vectors, so a core that never reported in can
+ * be told what happened to it in words rather than in a number the reader has
+ * to go and look up. Intel SDM Vol 3A, Table 6-1 "Protected-Mode Exceptions
+ * and Interrupts". Vectors the table leaves reserved answer with their number,
+ * which is the honest thing to say about them. */
+static const char *amp_vector_name(uint64_t vector)
+{
+    switch (vector) {
+    case 0:  return "a divide error";
+    case 1:  return "a debug exception";
+    case 2:  return "a non-maskable interrupt";
+    case 3:  return "a breakpoint";
+    case 4:  return "an overflow";
+    case 5:  return "a bound-range exceeded";
+    case 6:  return "an invalid opcode";
+    case 7:  return "a device-not-available";
+    case 8:  return "a double fault";
+    case 10: return "an invalid TSS";
+    case 11: return "a segment-not-present";
+    case 12: return "a stack-segment fault";
+    case 13: return "a general-protection fault";
+    case 14: return "a page fault";
+    case 16: return "an x87 floating-point error";
+    case 17: return "an alignment check";
+    case 18: return "a machine check";
+    case 19: return "a SIMD floating-point exception";
+    case 20: return "a virtualization exception";
+    case 21: return "a control-protection exception";
+    default: return "an exception";
+    }
+}
+
+/* Read the LastWord of a core that did not report in, and say it for them.
+ * Returns false when the seal is unbroken — the core stopped somewhere the
+ * Handrail does not reach (before the trampoline reached long mode, on a stack
+ * too broken to push a frame onto, or it simply never woke at all), and the
+ * caller falls back to saying only that. */
+static bool amp_speak_lastword(const uint8_t *data_area, const CoreDescriptor *c)
+{
+    if (memcmp(data_area + AP_LASTWORD_SEAL_OFFSET, AP_LASTWORD_SEAL, 8) != 0)
+        return false;
+
+    uint64_t vector = 0, errcode = 0, rip = 0, cr2 = 0;
+    memcpy(&vector,  data_area + AP_LASTWORD_VECTOR_OFFSET,  8);
+    memcpy(&errcode, data_area + AP_LASTWORD_ERRCODE_OFFSET, 8);
+    memcpy(&rip,     data_area + AP_LASTWORD_RIP_OFFSET,     8);
+    memcpy(&cr2,     data_area + AP_LASTWORD_CR2_OFFSET,     8);
+
+    kprintf("[AMP] Core %u (LAPIC %u) took %s (vector %u, error code 0x%lx) at "
+            "0x%lx, before it had a table of its own to handle it with; it "
+            "left the Handrail's record and stopped there\n",
+            c->core_index, c->lapic_id, amp_vector_name(vector),
+            (uint32_t)vector, (unsigned long)errcode, (unsigned long)rip);
+
+    if (vector == 14)
+        kprintf("[AMP]   the address it could not reach was 0x%lx\n",
+                (unsigned long)cr2);
+
+    return true;
+}
+
 void amp_boot_aps(void)
 {
     if (g_amp.total_cores <= 1)
@@ -417,6 +490,15 @@ void amp_boot_aps(void)
         uint32_t extra_efer = g_cpu_caps.has_nx ? (1u << 11) : 0u;
         memcpy(data_area + 24, &extra_efer, 4);
 
+        /* +32: break the seal on the LastWord before waking this core.
+         *
+         * The record below it belongs to whichever core wrote it, and cores
+         * are woken one at a time, so an unbroken seal from the core before
+         * would be read as this one's dying words. Clearing the seal — and
+         * only the seal, the four numbers under it are harmless while it is
+         * clear — makes "sealed" mean "this core, this SIPI". */
+        memset(data_area + AP_LASTWORD_SEAL_OFFSET, 0, 8);
+
         // Memory fence before SIPI
         mfence();
 
@@ -489,9 +571,30 @@ void amp_boot_aps(void)
             booted++;
             c->counted_at_boot = 1;
         } else {
-            kprintf("[AMP] WARNING: Core %u (LAPIC %u) has not responded in "
-                    "%u ms; its stack is kept in case it still starts\n",
-                    c->core_index, c->lapic_id, LONG_WAIT_MS);
+            /* Ask the Handrail first. A core that fell in the window before
+             * its own IDT was up cannot take the console lock, cannot reach
+             * kprintf, and cannot be interrupted into doing either — but it
+             * could write five words into the page we are both looking at,
+             * and it did. Saying "has not responded" over the top of that
+             * record would be the second time this kernel threw away the only
+             * account of a failure it will ever get. */
+            if (!amp_speak_lastword(data_area, c))
+                kprintf("[AMP] WARNING: Core %u (LAPIC %u) has not responded in "
+                        "%u ms and left no Handrail record — it never woke, or "
+                        "it stopped in the trampoline's real- and protected-"
+                        "mode run, which is the one stretch the Handrail does "
+                        "not reach; its stack is kept in case it still "
+                        "starts\n",
+                        c->core_index, c->lapic_id, LONG_WAIT_MS);
+            else
+                /* Not "kept in case it still starts" — that sentence is true
+                 * of a late core and false of this one. A core that wrote a
+                 * LastWord is in the Handrail's halt loop with interrupts
+                 * disabled; nothing in this kernel can wake it again. The
+                 * stack is still not returned to the PMM, for the same reason
+                 * the IST stacks below are not: the core is standing on it. */
+                kprintf("[AMP]   this core is stopped for the rest of the "
+                        "boot; it is not late, and it will not arrive\n");
 
             /* ‼ The stack is NOT freed, and that is the point.
              *
@@ -629,11 +732,42 @@ void amp_boot_aps(void)
      * entry for the VA before some unrelated alloc reuses the physical
      * frame. */
     {
-        vmm_context_t *kctx = vmm_get_kernel_context();
-        pte_t *t = vmm_get_or_create_pte(kctx, AP_TRAMPOLINE_PHYS);
-        if (t) {
-            *t = 0;
-            vmm_shootdown_page(kctx, AP_TRAMPOLINE_PHYS);
+        /* ‼ UNLESS SOMEBODY IS STANDING ON IT.
+         *
+         * A core that fell in the Handrail's window is parked in the halt loop
+         * at the end of that stub, and its IDTR still points at the Handrail —
+         * both inside this page. Unmapping it would leave a live processor
+         * whose RIP and whose interrupt table are in memory that is not there.
+         * It would never notice while it stays halted, and that is most of the
+         * time; but an NMI on its LAPIC, an SMI resumed with Auto-HALT-Restart
+         * clear, or a machine check would fetch from an absent page, fault,
+         * fetch the gate from the same absent page, fault again, and reset the
+         * board without a word — which is precisely the failure the Handrail
+         * was built to replace.
+         *
+         * So the page stays while anyone is on it. One page held for the life
+         * of a boot on which a core already died is the cheaper side of that
+         * trade by a wide margin, and the reason is said out loud rather than
+         * left for somebody to rediscover from a black screen. */
+        bool somebody_is_parked = false;
+        for (uint8_t i = 0; i < g_amp.total_cores; i++) {
+            CoreDescriptor *c = &g_amp.cores[i];
+            if (!c->is_bsp && !amp_core_online(c)) { somebody_is_parked = true; break; }
+        }
+
+        if (somebody_is_parked) {
+            kprintf("[AMP] the trampoline page stays mapped: a core that never "
+                    "reported in may be halted inside it, and taking the page "
+                    "away would leave that processor's instruction pointer and "
+                    "interrupt table pointing at memory this kernel no longer "
+                    "describes\n");
+        } else {
+            vmm_context_t *kctx = vmm_get_kernel_context();
+            pte_t *t = vmm_get_or_create_pte(kctx, AP_TRAMPOLINE_PHYS);
+            if (t) {
+                *t = 0;
+                vmm_shootdown_page(kctx, AP_TRAMPOLINE_PHYS);
+            }
         }
     }
 }

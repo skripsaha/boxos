@@ -199,7 +199,7 @@ void enable_fpu(void) {
          * BSP's reading, calling it a descriptor of the current core rather
          * than a kernel-wide capability. Every per-core decision below that
          * has no intersected boolean of its own has to use this word
-         * instead — an XSETBV that faults here happens before idt_load:
+         * instead — an XSETBV that faults here used to happen before the AP had any IDT at all, and a #GP with no gate is a triple fault and a core that never reports in. That is no longer the shape of it: per_core_init_ap loads the kernel IDT before it calls this, and the trampoline carries a Handrail before that, so such a fault is now caught and named. The reason for asking THIS core rather than trusting g_cpu_caps is unchanged and is the real one — the bit may not be set on this core at all on a hybrid part, and a fault we can name is still a core that does not come up. Kept for that, not for the triple fault it no longer causes. Original note: an XSETBV that faults here happens before idt_load:
          * triple fault, and a core that never reports in. */
         uint32_t sup_eax, sup_ebx, sup_ecx, sup_edx;
         cpuid_count(0xD, 0, &sup_eax, &sup_ebx, &sup_ecx, &sup_edx);
