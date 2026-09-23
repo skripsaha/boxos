@@ -593,6 +593,20 @@ drain_again:
         }
     }
 
+    /*
+     * The two facts a drain leaves behind for whoever has to explain a delay.
+     *
+     * The running total is what makes the controller's state dump a difference
+     * instead of a snapshot: "four events have been taken since the last look"
+     * answers a question a single ERDP reading cannot. And the timestamp is
+     * the moment the ring was PROVEN empty — the re-examination above has just
+     * failed — so an event handled in the next drain arrived after it. Both
+     * are written after every event in this drain has been handled, which is
+     * what leaves the previous drain's answer standing while they run.
+     */
+    __atomic_fetch_add(&ctrl->events_seen, drained, __ATOMIC_RELAXED);
+    __atomic_store_n(&ctrl->ring_last_empty, rdtsc(), __ATOMIC_RELAXED);
+
     if (drained > ctrl->event_high_water) {
         ctrl->event_high_water = drained;
         if (!ctrl->event_pressure_said && drained * 2 > event_ring->num_trbs) {

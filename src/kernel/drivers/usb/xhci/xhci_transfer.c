@@ -782,6 +782,13 @@ void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
      * queued ahead of it — a transfer ring is executed strictly in order, so an
      * answer for one TRB is an answer for all of them. */
     if (endpoint_id == 1) {
+        /* Counted before anything decides what this event means, and counted
+         * nowhere else: it is the one measure of the control pipe that no
+         * repair in this driver can move. The ring's dequeue index is not —
+         * xhci_ring_abandon sets it to the enqueue index on every repair — so
+         * the report that wanted to say "the controller has answered N" has to
+         * ask this and the endpoint context, never the ring. */
+        slot->ep0_events++;
         xhci_ring_reclaim_to(slot->ep0_ring, trb_phys);
     } else if (slot->endpoints && endpoint_id <= XHCI_MAX_DCI) {
         xhci_ring_reclaim_to(slot->endpoints[endpoint_id].ring, trb_phys);
@@ -883,20 +890,36 @@ void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
                 xhci_enum_step_can_be_asked_again(slot->state) &&
                 slot->step_retry < XHCI_STEP_RETRIES) {
                 slot->step_retry++;
-                kprintf("[xHCI %s] port %u: %s — %s; clearing the control "
+                /* ‼ WITH THE RESIDUAL, WHICH IS WHAT TELLS THE THREE BABBLES
+                 * APART.
+                 *
+                 * xHCI 1.2 §6.4.2.1: the Transfer Event's length field is what
+                 * was NOT transferred. A Babble that leaves the whole request
+                 * undelivered is a device overrunning the TD it was given —
+                 * the ordinary shape of a device that ignores wLength (§4.10.2.4)
+                 * — and one that leaves part of it is the bus being disturbed
+                 * mid-answer. The number was extracted six lines above this and
+                 * thrown away, and without it the board's Babble could only be
+                 * reasoned about, which is what three separate readings of the
+                 * same log ended up doing. */
+                kprintf("[xHCI %s] port %u: %s — %s, with %u of the %u byte(s) "
+                        "asked for undelivered; clearing the control "
                         "pipe and asking again (attempt %u of %u)\n",
                         ctrl->name, slot->port_num,
                         xhci_enum_state_name(slot->state),
                         xhci_completion_name(code),
+                        residual, slot->ctl_requested,
                         slot->step_retry, XHCI_STEP_RETRIES);
                 xhci_enum_recover_ep0(ctrl, slot, slot->state, true);
                 return;
             }
 
-            kprintf("[xHCI %s] port %u: %s failed — %s (code %u); releasing "
+            kprintf("[xHCI %s] port %u: %s failed — %s (code %u), with %u of "
+                    "the %u byte(s) asked for undelivered; releasing "
                     "the slot\n", ctrl->name, slot->port_num,
                     xhci_enum_state_name(slot->state),
-                    xhci_completion_name(code), code);
+                    xhci_completion_name(code), code,
+                    residual, slot->ctl_requested);
             xhci_slot_retire(ctrl, slot);
             return;
         }

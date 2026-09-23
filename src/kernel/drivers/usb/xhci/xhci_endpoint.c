@@ -730,6 +730,40 @@ uint8_t xhci_ep_context_state(xhci_controller_t* ctrl,
     return (uint8_t)(ep_ctx->dwords[0] & 0x7u);
 }
 
+/*
+ * Where the CONTROLLER says it has got to on this endpoint's ring.
+ *
+ * ‼ The one authoritative answer to "has it worked through what was queued",
+ * and the driver had no reader for it.
+ *
+ * xHCI 1.2 §4.6.9: "Before generating a Command Completion Event for this
+ * command, the xHC shall write the final value of the endpoint's Dequeue
+ * Pointer to the TR Dequeue Pointer field and CCS flag to the DCS field of the
+ * Output Endpoint Context." The controller maintains that field; software
+ * writes it only when it is repositioning the ring. So it is the hardware
+ * speaking, in the same sense the Slot State is — unlike the ring's own
+ * dequeue index, which two different writers move and only one of them is an
+ * event.
+ *
+ * Returned as the raw field: the address in bits 63:4 and the Dequeue Cycle
+ * State in bit 0. The caller decides what a pointer that is not on the ring it
+ * expected means, because that is a fact worth printing rather than hiding.
+ */
+uint64_t xhci_ep_context_dequeue(xhci_controller_t* ctrl,
+                                 const xhci_device_slot_t* slot, uint8_t dci)
+{
+    if (!ctrl || !slot || !slot->dev_ctx || dci < 1 || dci > XHCI_MAX_DCI) {
+        return 0;
+    }
+
+    const uint8_t* ctx = (const uint8_t*)slot->dev_ctx;
+    const xhci_endpoint_context_t* ep_ctx =
+        (const xhci_endpoint_context_t*)(ctx + (size_t)ctrl->context_size * dci);
+
+    return (uint64_t)ep_ctx->dwords[2] |
+           ((uint64_t)ep_ctx->dwords[3] << 32);
+}
+
 const char* xhci_ep_state_name(uint8_t state)
 {
     switch (state) {

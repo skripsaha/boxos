@@ -217,6 +217,28 @@ struct xhci_device_slot {
      * rather than abandoned half-configured. */
     uint16_t config_total_len;
 
+    /* How many interfaces that configuration declares (bNumInterfaces, USB 2.0
+     * §9.6.3 Table 9-10). This kernel drives exactly one of them, and on a
+     * composite device — the ordinary shape of a keyboard with media keys —
+     * the rest are left with nobody reading them. The count is what makes that
+     * visible: without it, a 98-byte configuration reported as one live
+     * keyboard looks exactly like a keyboard that works. */
+    uint8_t  config_interfaces;
+
+    /*
+     * How many Transfer Events the controller has actually raised for this
+     * device's control pipe.
+     *
+     * ‼ The number that cannot be moved by this driver, which is the whole
+     * point of it. The ring's dequeue index can: xhci_ring_abandon sets it
+     * equal to the enqueue index on every repair, so a report that printed it
+     * as "what the controller has answered" printed the driver's own arm
+     * moving. This counts events and nothing else, so zero here with a full
+     * enqueue index is the controller having answered nothing — which is a
+     * completely different fault from the one that arithmetic suggested.
+     */
+    uint32_t ep0_events;
+
     /* Where to carry on from once a halted EP0 has been cleared. A device is
      * allowed to refuse an optional request, and refusing it halts the pipe;
      * so does babbling at one, and so does a transaction the controller could
@@ -257,9 +279,29 @@ struct xhci_device_slot {
      * long the reset took. A device answers the default address only in the
      * Default state, and it enters the Default state only through a reset —
      * so on a machine that can only be read by photographing its screen, this
-     * is the first thing a silent Address Device has to be checked against. */
+     * is the first thing a silent Address Device has to be checked against.
+     *
+     * ‼ TWO NUMBERS, BECAUSE THERE ARE TWO QUANTITIES AND ONLY ONE IS THE
+     * HARDWARE'S.
+     *
+     * A port reset ends when the controller says so, and the controller says
+     * so with an event — which is read whenever this driver next drains the
+     * ring. `reset_noticed_ms` is the whole interval, from the write that
+     * ordered the reset to the moment its answer was read, and it therefore
+     * contains however long this driver was busy elsewhere. On the owner's
+     * board that was 100 ms of another controller's debounce, and the port
+     * that paid it reported 113 ms against 56 on three identical ports — a
+     * difference that belonged entirely to the observer and was printed as
+     * the hardware's.
+     *
+     * `reset_at_least_ms` is how much of that interval this driver can prove
+     * the reset was still running for: the last moment it looked at the event
+     * ring and found nothing on it. The reset ended somewhere between the two,
+     * and that bracket is the honest answer.
+     */
     uint8_t  reset_kind;            /* XHCI_PORT_RESET_* */
-    uint32_t reset_took_ms;
+    uint32_t reset_noticed_ms;
+    uint32_t reset_at_least_ms;
 
     /* When the recovery the bus owes this device is up, and it may be
      * addressed. Only meaningful in ENUM_STATE_WAIT_RESET_RECOVERY. */

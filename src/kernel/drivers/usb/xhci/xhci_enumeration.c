@@ -892,9 +892,35 @@ void xhci_enum_port_reset_done(xhci_controller_t* ctrl, uint8_t port)
         return;
     }
 
-    /* How long the reset itself took, measured before the recovery is owed so
-     * that the number is the hardware's and not this driver's. */
-    slot->reset_took_ms = (uint32_t)cpu_tsc_to_ms(rdtsc() - slot->timestamp_started);
+    /*
+     * ‼ HOW LONG THE RESET TOOK, AND HOW MUCH OF THAT THIS DRIVER CANNOT
+     * ACCOUNT FOR.
+     *
+     * This runs when the port's answer is READ, not when the controller gives
+     * it: the answer is a Port Status Change event and it waits on the ring
+     * until somebody drains it. So the interval from the write that ordered
+     * the reset to here is two things added together, and the comment that
+     * used to stand on this line claimed it was one of them — "the number is
+     * the hardware's and not this driver's". On the owner's board it was not:
+     * port 3 printed 113 ms and three identical ports printed 56, and the
+     * difference was the 100 ms connection debounce this controller's own
+     * survey pays before it drains anything (xhci.c, xhci_survey_root_ports).
+     * A port that is perfectly healthy looked like the slow one.
+     *
+     * What IS knowable is a bracket. The controller kept a ring this driver
+     * last found empty at ctrl->ring_last_empty; the reset was therefore still
+     * unfinished at that moment, and finished somewhere between it and now.
+     * Both ends are measured, neither is argued, and the width of the bracket
+     * is itself the answer to "was anybody looking".
+     */
+    uint64_t seen_at = rdtsc();
+    slot->reset_noticed_ms =
+        (uint32_t)cpu_tsc_to_ms(seen_at - slot->timestamp_started);
+    slot->reset_at_least_ms = 0;
+    if ((int64_t)(ctrl->ring_last_empty - slot->timestamp_started) > 0) {
+        slot->reset_at_least_ms =
+            (uint32_t)cpu_tsc_to_ms(ctrl->ring_last_empty - slot->timestamp_started);
+    }
 
     /*
      * What the port looks like at the one moment that decides everything after
@@ -905,10 +931,14 @@ void xhci_enum_port_reset_done(xhci_controller_t* ctrl, uint8_t port)
      * ruled in or out without another boot.
      */
     uint32_t portsc = xhci_get_port_status(ctrl, port);
-    kprintf("[xHCI %s] port %u: %s finished in %u ms — PORTSC 0x%08x, link %u, "
-            "speed %u\n",
+    kprintf("[xHCI %s] port %u: %s finished — its answer was read %u ms after "
+            "the reset was ordered, and the event ring was last seen empty %u "
+            "ms into that, so the reset itself took between %u and %u ms — "
+            "PORTSC 0x%08x, link %u, speed %u\n",
             ctrl->name, port, xhci_port_reset_kind_name(slot->reset_kind),
-            slot->reset_took_ms, portsc, XHCI_PORTSC_PLS(portsc),
+            slot->reset_noticed_ms, slot->reset_at_least_ms,
+            slot->reset_at_least_ms, slot->reset_noticed_ms,
+            portsc, XHCI_PORTSC_PLS(portsc),
             (unsigned)XHCI_PORTSC_SPEED(portsc));
 
     /*
@@ -1518,6 +1548,35 @@ static bool enum_pick_visit(void* ctx, const usb_endpoint_info_t* ep)
 }
 
 /*
+ * What this kernel took, out of what the device offered.
+ *
+ * ‼ A composite device is driven one interface at a time and this driver takes
+ * exactly one. Both keyboards on the owner's board declare three — the boot
+ * keyboard, the consumer/media keys and a vendor interface — and each was
+ * announced as a live keyboard with one endpoint. The media keys and the
+ * volume wheel on them do not work and never will, which is a different fault
+ * from a keyboard the machine never saw, and nothing on the screen could tell
+ * the two apart.
+ *
+ * An account, not a promise: driving the others is a driver each, and that
+ * work does not start here. Silent only when there is nothing to account for,
+ * because a line that says "1 interface, 0 left" answers no question anybody
+ * standing at the board would ask.
+ */
+static void enum_say_one_interface_taken(xhci_controller_t* ctrl,
+                                         const struct xhci_device_slot* slot)
+{
+    if (slot->config_interfaces <= 1) {
+        return;
+    }
+    kprintf("[xHCI %s] port %u: driving interface %u of the %u this device "
+            "declares — the other %u are left with nobody reading them\n",
+            ctrl->name, slot->port_num, slot->interface_num,
+            slot->config_interfaces,
+            (unsigned)(slot->config_interfaces - 1));
+}
+
+/*
  * Who drives this device?
  *
  * The device has just accepted its configuration, and the descriptor that
@@ -1546,6 +1605,7 @@ static void enum_bind_driver(xhci_controller_t* ctrl, struct xhci_device_slot* s
         slot->driver          = XHCI_DRIVER_KEYBOARD;
         slot->interface_num   = iface;
         slot->ep_interrupt_in = pick.intr_in_dci;
+        enum_say_one_interface_taken(ctrl, slot);
 
         if (xhci_ep_prepare(slot, pick.intr_in_dci, XHCI_EP_TYPE_INTERRUPT_IN,
                             &pick.intr_in, pick.intr_in.max_packet) != 0) {
@@ -1584,6 +1644,7 @@ static void enum_bind_driver(xhci_controller_t* ctrl, struct xhci_device_slot* s
         slot->interface_num = iface;
         slot->ep_bulk_in    = pick.bulk_in_dci;
         slot->ep_bulk_out   = pick.bulk_out_dci;
+        enum_say_one_interface_taken(ctrl, slot);
 
         if (xhci_ep_prepare(slot, pick.bulk_in_dci, XHCI_EP_TYPE_BULK_IN,
                             &pick.bulk_in, 0) != 0 ||
@@ -1614,6 +1675,7 @@ static void enum_bind_driver(xhci_controller_t* ctrl, struct xhci_device_slot* s
         slot->driver          = XHCI_DRIVER_HUB;
         slot->interface_num   = iface;
         slot->ep_interrupt_in = pick.intr_in_dci;
+        enum_say_one_interface_taken(ctrl, slot);
 
         slot->state = ENUM_STATE_WAIT_CONFIGURE_ENDPOINT;
         if (xhci_ep_prepare(slot, pick.intr_in_dci, XHCI_EP_TYPE_INTERRUPT_IN,
@@ -1787,34 +1849,76 @@ void xhci_enum_for_each_configured(xhci_controller_t* ctrl,
  * faults, and nothing else in the machine distinguishes them.
  */
 static void xhci_report_stuck(xhci_controller_t* ctrl,
-                              struct xhci_device_slot* slot, uint8_t state)
+                              struct xhci_device_slot* slot, uint8_t state,
+                              uint32_t waited_ms)
 {
     uint8_t  cmd_type = 0;
     uint32_t cmd_age  = 0;
     bool     waiting  = xhci_command_oldest_for(ctrl, slot, &cmd_type, &cmd_age);
 
-    kprintf("[xHCI %s] port %u (slot %u): gave up after %u ms while %s\n",
-            ctrl->name, slot->port_num, slot->slot_id, XHCI_ENUM_TIMEOUT_MS,
-            xhci_enum_state_name(state));
+    /* ‼ The age of the silence, measured, and the budget named separately.
+     *
+     * This line used to print XHCI_ENUM_TIMEOUT_MS — the watchdog's intention
+     * rather than the interval it actually observed. The two agree only while
+     * the watchdog is running in a tight loop, which is true on the boot path
+     * and false everywhere else: off the tick it looks every few milliseconds
+     * at best and shares its core with everything the machine is doing. A
+     * watchdog that was itself late then printed the same sentence as one that
+     * fired on time, so "the device did not answer" and "nobody asked for two
+     * seconds" were the same line. */
+    kprintf("[xHCI %s] port %u (slot %u): gave up after %u ms of silence "
+            "(the budget is %u) while %s\n",
+            ctrl->name, slot->port_num, slot->slot_id, waited_ms,
+            XHCI_ENUM_TIMEOUT_MS, xhci_enum_state_name(state));
+
+    /*
+     * ‼ THE INTERRUPTER, NOT THE HANDLER'S TALLY.
+     *
+     * "0 interrupt(s) so far" was a tautology on the boot path and read as an
+     * accusation. This kernel opens interrupts only once every driver is up,
+     * and both controllers' messages are addressed to the BSP, which has them
+     * closed until then — so the count could not be anything but zero, and a
+     * controller whose MSI genuinely never arrives prints exactly the same
+     * thing. A number that cannot vary is not a diagnostic.
+     *
+     * IMAN can vary, and it is the controller's own word (xHCI 1.2 §5.5.2.1):
+     * IE that the interrupter is armed, IP that it is holding an interrupt
+     * nobody has taken. IP set with a handler that has never run IS the broken
+     * delivery this line was being read as, and it is the only reading that
+     * earns it.
+     */
+    uint32_t iman = ctrl->runtime_regs
+                  ? ctrl->runtime_regs->interrupters[0].iman : 0;
+    uint32_t irqs = __atomic_load_n(&ctrl->irq_count, __ATOMIC_RELAXED);
 
     kprintf("[xHCI %s]   the controller says: slot %s, address %u; "
-            "PORTSC 0x%08x; %u interrupt(s) so far\n",
+            "PORTSC 0x%08x; its interrupter is %s and %s (IMAN=0x%08x), and "
+            "its handler has run %u time(s), %s\n",
             ctrl->name,
             xhci_slot_state_name(xhci_slot_context_state(slot)),
             xhci_slot_context_address(slot),
             xhci_get_port_status(ctrl, slot->port_num),
-            __atomic_load_n(&ctrl->irq_count, __ATOMIC_RELAXED));
+            (iman & XHCI_IMAN_IE) ? "armed" : "NOT armed",
+            (iman & XHCI_IMAN_IP) ? "is holding an interrupt nobody has taken"
+                                  : "has nothing pending",
+            iman, irqs,
+            irqs ? "so its messages do reach this kernel"
+                 : "which proves nothing on its own — until this kernel opens "
+                   "interrupts the ring is drained by polling and no message "
+                   "can have fired");
 
     /* And what was done to the port before any of this was said to the device.
      * A device only answers the default address from the Default state, and it
      * only reaches the Default state through a reset — so an Address Device
      * that was never answered on a port that was never reset is a different
      * fault from the same silence on a port that was. */
-    kprintf("[xHCI %s]   the port was %s%s (USB %u), %u ms; EP0 packet %u\n",
+    kprintf("[xHCI %s]   the port was %s%s (USB %u), and that reset took "
+            "between %u and %u ms; EP0 packet %u\n",
             ctrl->name, xhci_port_reset_kind_name(slot->reset_kind),
             slot->depth ? ", behind a hub" : "",
             xhci_port_protocol(ctrl, slot->port_num),
-            slot->reset_took_ms, slot->ep0_max_packet);
+            slot->reset_at_least_ms, slot->reset_noticed_ms,
+            slot->ep0_max_packet);
 
     /*
      * ‼ AND WHAT THE CONTROL PIPE ITSELF IS DOING, WHICH IS THE ONE FACT THAT
@@ -1837,17 +1941,55 @@ static void xhci_report_stuck(xhci_controller_t* ctrl,
      *   Halted   — the transfer failed and the event that said so was lost.
      *   Error / Disabled — the context is wrong, and nothing was ever tried.
      *
-     * The two ring positions are what "still queued" is made of: enqueue is
-     * where software wrote the last stage, dequeue only moves when a transfer
-     * event names a TRB. Equal means every stage has been answered; apart means
-     * the controller has not finished with them.
+     * ‼ AND THE POSITIONS ARE ASKED OF THE CONTROLLER, NOT OF THE RING.
+     *
+     * This line used to print the ring's own dequeue index and call it "the
+     * controller has answered up to". It is not: xhci_ring_abandon sets that
+     * index equal to the enqueue index, and it is called on every repair this
+     * driver makes. On the owner's board the four reports for one port read
+     * 3/0, 6/3, 9/6 and 12/9 — arithmetic indistinguishable from a controller
+     * working steadily three TRBs behind, produced by a controller that had
+     * answered nothing at all. A false statement about the hardware, on the
+     * one screen the hardware is read from.
+     *
+     * Three separate things are printed instead, each named for who writes it:
+     * where SOFTWARE stands (the enqueue index), where the CONTROLLER stands
+     * (the TR Dequeue Pointer it maintains in the Output Endpoint Context,
+     * xHCI 1.2 §4.6.9), and how many Transfer Events have ever been raised for
+     * this pipe. Not one of the three can be moved by a repair.
      */
     if (slot->ep0_ring) {
-        kprintf("[xHCI %s]   its control pipe is %s; software has queued to %u "
-                "and the controller has answered up to %u\n",
-                ctrl->name,
-                xhci_ep_state_name(xhci_ep_context_state(ctrl, slot, 1)),
-                slot->ep0_ring->enqueue_idx, slot->ep0_ring->dequeue_idx);
+        uint64_t hw   = xhci_ep_context_dequeue(ctrl, slot, 1);
+        uint64_t at   = hw & ~0xFULL;
+        uint64_t base = slot->ep0_ring->trbs_phys;
+        uint64_t span = (uint64_t)slot->ep0_ring->num_trbs * sizeof(xhci_trb_t);
+
+        if (at >= base && at < base + span) {
+            kprintf("[xHCI %s]   its control pipe is %s; software has written "
+                    "up to TRB %u of %u, the controller's own dequeue pointer "
+                    "stands at TRB %u with cycle %u, and %u transfer event(s) "
+                    "have ever been raised for it\n",
+                    ctrl->name,
+                    xhci_ep_state_name(xhci_ep_context_state(ctrl, slot, 1)),
+                    slot->ep0_ring->enqueue_idx, slot->ep0_ring->num_trbs,
+                    (uint32_t)((at - base) / sizeof(xhci_trb_t)),
+                    (unsigned)(hw & 1u), slot->ep0_events);
+        } else {
+            /* A pointer that is not on this ring is a fact worth having:
+             * either the controller has never been given the ring (the
+             * context was refused) or it is walking memory this device does
+             * not own. Both are answered by seeing the address. */
+            kprintf("[xHCI %s]   its control pipe is %s; software has written "
+                    "up to TRB %u of %u, the controller's own dequeue pointer "
+                    "reads 0x%llx which is not an address on this ring "
+                    "(it begins at 0x%llx), and %u transfer event(s) have ever "
+                    "been raised for it\n",
+                    ctrl->name,
+                    xhci_ep_state_name(xhci_ep_context_state(ctrl, slot, 1)),
+                    slot->ep0_ring->enqueue_idx, slot->ep0_ring->num_trbs,
+                    (unsigned long long)at, (unsigned long long)base,
+                    slot->ep0_events);
+        }
     }
 
     if (waiting) {
@@ -1882,7 +2024,6 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
 
     uint64_t now = rdtsc();
     uint64_t budget = cpu_ms_to_tsc(XHCI_ENUM_TIMEOUT_MS);
-    static bool reported_controller = false;
 
     for (uint32_t i = 0; i < ctrl->slot_count; i++) {
         struct xhci_device_slot* slot = &ctrl->slots[i];
@@ -1952,31 +2093,76 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
             continue;
         }
 
-        xhci_report_stuck(ctrl, slot, state);
+        xhci_report_stuck(ctrl, slot, state,
+                          (uint32_t)cpu_tsc_to_ms(now - slot->watch_since));
 
-        /* And the controller as a whole, once per boot: whether it is still
-         * running, whether its command ring is, whether events are sitting on
-         * the ring unread, and whether the cycle bit this driver expects still
-         * matches what the controller is writing. */
-        if (!reported_controller) {
-            reported_controller = true;
-            xhci_ring_t* er = &ctrl->event_ring;
-            uint32_t at_dequeue = er->trbs ? er->trbs[er->dequeue_idx].control : 0;
-            kprintf("[xHCI %s] state: USBSTS=0x%08x USBCMD=0x%08x "
-                    "CRCR=0x%08x ERDP=0x%08x IMAN=0x%08x MFINDEX=0x%08x | "
-                    "event ring at %u expecting cycle %u, TRB there 0x%08x | "
-                    "command ring at %u cycle %u | %u command(s) outstanding\n",
+        /*
+         * ‼ AND THE CONTROLLER AS A WHOLE — EVERY TIME, AND AS A DIFFERENCE.
+         *
+         * This used to be governed by a `static bool` inside this function,
+         * which made it once per BOOT and shared between controllers: on the
+         * owner's board, where the chipset xHCI and the one inside the
+         * graphics card are both up, the second could never print its state at
+         * all, and the first printed it for one failure out of four.
+         *
+         * Once is also the wrong number even for one controller, because the
+         * interesting registers are not readings. MFINDEX is a 14-bit
+         * microframe counter (xHCI 1.2 §5.5.1) that wraps every 2.048 s, so a
+         * single sample of it cannot tell a bus being scheduled from one that
+         * has stopped — and §4.14.2 says the xHC may stop counting when every
+         * root port is disconnected, disabled, training or powered off, which
+         * is exactly the condition an unanswered transfer raises. The same
+         * goes for ERDP and the ring position: they answer "did anything move"
+         * and nothing else.
+         *
+         * So the sample is kept on the controller and the next failure prints
+         * what changed. Three register reads per give-up, on an event that has
+         * already cost two seconds.
+         */
+        xhci_ring_t* er = &ctrl->event_ring;
+        uint32_t at_dequeue = er->trbs ? er->trbs[er->dequeue_idx].control : 0;
+        uint32_t mfindex = ctrl->runtime_regs->mfindex;
+        uint32_t erdp    = (uint32_t)ctrl->runtime_regs->interrupters[0].erdp;
+        uint32_t events  = __atomic_load_n(&ctrl->events_seen, __ATOMIC_RELAXED);
+
+        kprintf("[xHCI %s] state: USBSTS=0x%08x USBCMD=0x%08x "
+                "CRCR=0x%08x ERDP=0x%08x IMAN=0x%08x MFINDEX=0x%08x | "
+                "event ring at %u expecting cycle %u, TRB there 0x%08x | "
+                "command ring at %u cycle %u | %u command(s) outstanding\n",
+                ctrl->name,
+                ctrl->op_regs->usbsts, ctrl->op_regs->usbcmd,
+                (uint32_t)ctrl->op_regs->crcr,
+                erdp,
+                ctrl->runtime_regs->interrupters[0].iman,
+                mfindex,
+                er->dequeue_idx, er->cycle_state, at_dequeue,
+                ctrl->command_ring.enqueue_idx,
+                ctrl->command_ring.cycle_state,
+                xhci_command_outstanding(ctrl));
+
+        if (ctrl->state_said_tsc != 0) {
+            uint32_t mf_moved = (mfindex - ctrl->state_said_mfindex) & 0x3FFFu;
+            kprintf("[xHCI %s] and since it was last asked, %u ms ago: MFINDEX "
+                    "has moved %u of the 16384 microframes it counts before it "
+                    "wraps%s; %u event(s) have come off its ring; its read "
+                    "pointer %s\n",
                     ctrl->name,
-                    ctrl->op_regs->usbsts, ctrl->op_regs->usbcmd,
-                    (uint32_t)ctrl->op_regs->crcr,
-                    (uint32_t)ctrl->runtime_regs->interrupters[0].erdp,
-                    ctrl->runtime_regs->interrupters[0].iman,
-                    ctrl->runtime_regs->mfindex,
-                    er->dequeue_idx, er->cycle_state, at_dequeue,
-                    ctrl->command_ring.enqueue_idx,
-                    ctrl->command_ring.cycle_state,
-                    xhci_command_outstanding(ctrl));
+                    (uint32_t)cpu_tsc_to_ms(now - ctrl->state_said_tsc),
+                    mf_moved,
+                    mf_moved
+                        ? ", so the bus is still being scheduled"
+                        : " — it has stopped scheduling them altogether, which "
+                          "the specification allows only while every root port "
+                          "is disconnected, disabled, training or powered off",
+                    events - ctrl->state_said_events,
+                    (erdp == ctrl->state_said_erdp) ? "has not moved"
+                                                    : "has moved on");
         }
+
+        ctrl->state_said_tsc     = now;
+        ctrl->state_said_mfindex = mfindex;
+        ctrl->state_said_erdp    = erdp;
+        ctrl->state_said_events  = events;
 
         /*
          * ‼ AND THEN THE SAME ROAD THE ERROR TAKES, BECAUSE IT IS THE SAME FACT.
@@ -2482,6 +2668,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
 
             usb_config_desc_t* cfg = (usb_config_desc_t*)slot->descriptor_buffer_virt;
             slot->config_value = cfg->bConfigurationValue;
+            slot->config_interfaces = cfg->bNumInterfaces;
 
             usb_config_first_interface(slot->descriptor_buffer_virt,
                                        slot->config_total_len,
@@ -2497,13 +2684,30 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
              * identical refusals on the board were three refusals of a number
              * nobody could see. It comes off the wire like everything else
              * here and there is no reason to believe it without looking.
+             *
+             * ‼ AND HOW MANY INTERFACES IT DECLARES, WHICH IS HOW A COMPOSITE
+             * DEVICE STOPS LOOKING LIKE A SIMPLE ONE. Two keyboards on the
+             * owner's board answered with 98 and 109 bytes of configuration —
+             * a single-interface boot keyboard is 34 — and both were reported
+             * as one live keyboard with one endpoint. bNumInterfaces (USB 2.0
+             * §9.6.3 Table 9-10) is the field that says so, and it was read off
+             * the wire and never printed.
+             *
+             * ‼ AND THE CONTROL PIPE'S PACKET SIZE, which until now appeared
+             * in exactly one line in this driver: the report printed when the
+             * device has already been given up on. It is the number every
+             * Babble on this pipe has to be checked against, so it belongs on
+             * the path where the device is still alive.
              */
             kprintf("[xHCI %s] port %u: configuration %u of %u, %u byte(s), "
-                    "first interface class %02x/%02x/%02x\n",
+                    "%u interface(s), first interface class %02x/%02x/%02x, "
+                    "EP0 packet %u\n",
                     ctrl->name, slot->port_num, slot->config_value,
                     slot->device_desc.bNumConfigurations,
-                    slot->config_total_len, slot->interface_class,
-                    slot->interface_subclass, slot->interface_protocol);
+                    slot->config_total_len, slot->config_interfaces,
+                    slot->interface_class,
+                    slot->interface_subclass, slot->interface_protocol,
+                    slot->ep0_max_packet);
 
             /* Every device gets configured, driver or no driver. Leaving one
              * in the Addressed state is leaving it half spoken to.

@@ -203,6 +203,12 @@ bool xhci_ep_take_result(xhci_device_slot_t* slot, uint8_t dci,
 
 uint8_t     xhci_ep_context_state(xhci_controller_t* ctrl,
                                   const xhci_device_slot_t* slot, uint8_t dci);
+
+/* The controller's own TR Dequeue Pointer for this endpoint — address in bits
+ * 63:4, Dequeue Cycle State in bit 0 — as the xHC wrote it (xHCI 1.2 §4.6.9).
+ * Zero when there is no context to read it from. */
+uint64_t    xhci_ep_context_dequeue(xhci_controller_t* ctrl,
+                                    const xhci_device_slot_t* slot, uint8_t dci);
 const char* xhci_ep_state_name(uint8_t state);
 
 /* Clear a halted endpoint and put its dequeue pointer where software is.
