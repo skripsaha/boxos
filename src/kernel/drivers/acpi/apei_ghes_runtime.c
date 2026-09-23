@@ -314,10 +314,21 @@ void apei_ghes_runtime_init(void) {
     g_tag_generic_err = TouchLogbookIntern("apei:generic:error");
     g_tag_ready       = TouchLogbookIntern("apei:ghes:ready");
     g_initialized = true;
-    debug_printf("[APEI] runtime init: %u source(s) tracked, tags resolved\n",
-                 (unsigned)g_source_count);
+    /* kprintf, not debug_printf. How many error sources this runtime ended up
+     * watching is a fact about the machine, and it stands immediately before
+     * the decoder self-test's own line — which is about this kernel and
+     * nothing else. Apart they were each misread as the other; together they
+     * say which of the two was proven. */
     if (g_source_count == 0) {
-        debug_printf("[APEI] no GHES sources discovered — runtime dormant\n");
+        kprintf("[APEI] the error reporting runtime has no source to watch: "
+                "the firmware described none, so nothing is polled, nothing "
+                "is wired to an interrupt, and no hardware error will ever "
+                "reach this kernel along this path\n");
+    } else {
+        kprintf("[APEI] the error reporting runtime is watching %u error "
+                "source(s) the firmware described; a record appearing in any "
+                "of them is read, decoded and published\n",
+                (unsigned)g_source_count);
     }
     apei_event_payload_t ev = {0};
     ev.source_id = g_source_count;

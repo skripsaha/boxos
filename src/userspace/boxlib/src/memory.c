@@ -12,6 +12,7 @@
 #include "box/core/manifest.h"
 #include "box/core/strand_self.h"  /* strand_info_or_null / strand_self — pool selector */
 #include "box/print.h"
+#include "box/debug.h"             /* kdbg_print — a registry that refuses says so */
 #include "cabin_layout.h"
 #include "strand_pool_abi.h"       /* StrandPool layout (shared with kernel death-stamp) */
 
@@ -58,9 +59,33 @@ typedef char _block_size_check[sizeof(block_t) == 32 ? 1 : -1];
 typedef char _hdr_size_check[BLOCK_HDR_SIZE == 32 ? 1 : -1];
 
 // ---- tag registry (all access under heap_lock) ----------------------------
+//
+// A name is kept on the heap at its own length and compared whole, so two tags
+// are two tags however much of a prefix they share. The registry used to be 64
+// names of 32 bytes compared over their first 31: past 64 tags every further
+// tag allocated UNTAGGED, and two names alike for 31 characters became one id
+// — both in silence, so heap_count_tag and the tag dump simply stopped seeing
+// half of what was live and said nothing about it.
+//
+// The table of names is the id space itself (HEAP_TAG_CAP entries, which is
+// every id block_t.tag can hold) and it is taken from the heap on the first
+// tagged allocation, so a program that never tags anything carries nothing.
+// Names are never released: an id that has been stamped into a live block must
+// still have a name when the block is dumped.
+static char   **heap_tag_names = NULL;
+static uint8_t  heap_tag_count = 0;
 
-static char    heap_tag_names[HEAP_TAG_CAP][HEAP_TAG_NAME_MAX];
-static uint8_t heap_tag_count = 0;
+/* What the registry could not do, for the CALLER to say once the lock is
+ * dropped. kdbg is a syscall; its answer comes back through this strand's
+ * ResultRing, and a foreign record standing ahead of that answer is kept in a
+ * stash that grows from this very heap — said under heap_lock, that is the
+ * lock taken twice and a spin that never ends (the same reason prefault_huge
+ * is called outside it). */
+typedef enum {
+    TAG_SAY_NOTHING = 0,
+    TAG_SAY_IDS_EXHAUSTED,
+    TAG_SAY_NO_ROOM_FOR_NAME,
+} TagSay;
 
 // ---- internal state (all access under heap_lock) --------------------------
 
@@ -78,6 +103,26 @@ static int       initialized  = 0;
 static error_t  heap_last_error = OK;
 
 static uint32_t stat_malloc_calls = 0;
+
+/* Depth of "this allocation is the heap's own bookkeeping, not the program's".
+ *
+ * `malloc_calls` answers the question a caller actually asks — how many times
+ * did MY program go to the global allocator — and the tag registry is not that.
+ * It is storage the allocator needed in order to answer, taken out of the same
+ * heap because that is the only heap there is, and counting it would make the
+ * statistic mean "calls plus whatever housekeeping happened to be due".
+ *
+ * That is not a philosophical point. cxxtest phase41 A5 measures the tagged
+ * path by differencing this counter across exactly M pairs and requires the
+ * answer to be M: it is checking that the tagged path takes the global lock
+ * twice per pair and not a third time. The first tagged allocation in a program
+ * builds the registry — a table and a copied name — and those two landed inside
+ * the measured window and made the answer M+2.
+ *
+ * A depth rather than a flag because the registry's own allocation can, in
+ * principle, be the one that grows the heap. Only ever touched under
+ * heap_lock, which is also the only place the counter moves. */
+static uint32_t stat_housekeeping_depth = 0;
 static uint32_t stat_free_calls   = 0;
 
 // ---- helpers (called with lock held) --------------------------------------
@@ -130,22 +175,83 @@ static void coalesce_locked(void) {
     }
 }
 
-// Look up or insert a tag name. Returns HEAP_TAG_NONE if registry full.
-// Must be called with heap_lock held.
-static uint8_t get_or_create_tag_locked(const char *name) {
-    if (!name) return HEAP_TAG_NONE;
+/* The heap's own allocator, defined below: the registry grows out of the heap
+ * it belongs to, under the lock that heap is already holding. */
+static void* alloc_locked(size_t size, uint8_t tag_id, error_t *errcell,
+                          uintptr_t *huge_va, size_t *huge_len);
+
+/* Look up or insert a tag name. Returns the id, or HEAP_TAG_NONE when there is
+ * no id left to give or no room to remember the name — and then `say` carries
+ * which of the two it was, for the caller to speak outside the lock.
+ * Must be called with heap_lock held. */
+static uint8_t get_or_create_tag_locked(const char *name, TagSay *say) {
+    *say = TAG_SAY_NOTHING;
+    if (!name || !name[0]) return HEAP_TAG_NONE;
 
     for (uint8_t i = 0; i < heap_tag_count; i++) {
-        if (strncmp(heap_tag_names[i], name, HEAP_TAG_NAME_MAX - 1) == 0)
+        if (strcmp(heap_tag_names[i], name) == 0)
             return i;
     }
 
-    if (heap_tag_count >= HEAP_TAG_CAP) return HEAP_TAG_NONE;
+    if (heap_tag_count >= HEAP_TAG_CAP) {
+        *say = TAG_SAY_IDS_EXHAUSTED;
+        return HEAP_TAG_NONE;
+    }
+
+    error_t sink = 0;
+
+    /* The registry is the allocator's own, so the two allocations below are
+     * not the program's and are not counted as such — see
+     * stat_housekeeping_depth. They still take memory from this heap, and
+     * heap_stats' BYTE figures still show them, because the bytes really are
+     * gone; it is the CALL COUNT that would be a lie. */
+    stat_housekeeping_depth++;
+
+    if (!heap_tag_names) {
+        size_t table = (size_t)HEAP_TAG_CAP * sizeof(char *);
+        heap_tag_names = (char **)alloc_locked(table, HEAP_TAG_NONE, &sink,
+                                               NULL, NULL);
+        if (!heap_tag_names) {
+            stat_housekeeping_depth--;
+            *say = TAG_SAY_NO_ROOM_FOR_NAME; return HEAP_TAG_NONE;
+        }
+        memset(heap_tag_names, 0, table);
+    }
+
+    size_t len  = strlen(name);
+    char  *kept = (char *)alloc_locked(len + 1, HEAP_TAG_NONE, &sink, NULL, NULL);
+    stat_housekeeping_depth--;
+    if (!kept) { *say = TAG_SAY_NO_ROOM_FOR_NAME; return HEAP_TAG_NONE; }
+    memcpy(kept, name, len + 1);
 
     uint8_t id = heap_tag_count++;
-    strncpy(heap_tag_names[id], name, HEAP_TAG_NAME_MAX - 1);
-    heap_tag_names[id][HEAP_TAG_NAME_MAX - 1] = '\0';
+    heap_tag_names[id] = kept;
     return id;
+}
+
+/* Say what the registry refused — once per program, and never under the lock.
+ *
+ * Once, because the refusal is permanent: an id space that is full stays full,
+ * and the program would otherwise repeat itself for every allocation it makes
+ * from here to its exit. Once is enough for the reader the line is written
+ * for, who is looking at a heap dump that is missing blocks and needs to know
+ * why. */
+static void heap_tag_say(TagSay say, const char *name) {
+    static uint8_t said_exhausted = 0;
+    static uint8_t said_no_room   = 0;
+
+    if (say == TAG_SAY_IDS_EXHAUSTED) {
+        if (__atomic_exchange_n(&said_exhausted, 1, __ATOMIC_RELAXED)) return;
+        kdbg_print("[heap] all %u tag ids are in use — a block header carries its tag "
+                   "in one byte — so every tag after this one allocates UNTAGGED and "
+                   "no dump can see it: %s",
+                   (unsigned)HEAP_TAG_CAP, name ? name : "(none)");
+    } else if (say == TAG_SAY_NO_ROOM_FOR_NAME) {
+        if (__atomic_exchange_n(&said_no_room, 1, __ATOMIC_RELAXED)) return;
+        kdbg_print("[heap] no room on this heap to remember a tag name, so the block "
+                   "is UNTAGGED and the dump will not show it: %s",
+                   name ? name : "(none)");
+    }
 }
 
 /* Pre-fault a 2 MB-aligned, 2 MB-sized region. The kernel maps every
@@ -177,7 +283,7 @@ static void* alloc_locked(size_t size, uint8_t tag_id, error_t *errcell,
                           uintptr_t *huge_va, size_t *huge_len) {
     if (!initialized) heap_init_locked();
 
-    stat_malloc_calls++;
+    if (stat_housekeeping_depth == 0) stat_malloc_calls++;
 
     size_t orig_size = size;
     size = align_up(size, HEAP_ALIGN);
@@ -802,10 +908,13 @@ void* malloc_tagged(size_t size, const char *tag) {
      * pool_claim takes the lock itself, so resolving it here avoids re-entry. */
     error_t *errcell = heap_err_cell_for(pool_self());
     uintptr_t huge_va = 0; size_t huge_len = 0;
+    TagSay say = TAG_SAY_NOTHING;
     uspin_lock(&heap_lock);
-    uint8_t tag_id = get_or_create_tag_locked(tag);
+    uint8_t tag_id = get_or_create_tag_locked(tag, &say);
     void* ptr = alloc_locked(size, tag_id, errcell, &huge_va, &huge_len);
     uspin_unlock(&heap_lock);
+    /* Outside the lock: saying it is a syscall. */
+    if (say != TAG_SAY_NOTHING) heap_tag_say(say, tag);
     return huge_backed(ptr, huge_va, huge_len, tag_id, errcell);
 }
 
@@ -990,9 +1099,11 @@ void* realloc(void* ptr, size_t size) {
 // ---------------------------------------------------------------------------
 
 uint8_t heap_register_tag(const char *name) {
+    TagSay say = TAG_SAY_NOTHING;
     uspin_lock(&heap_lock);
-    uint8_t id = get_or_create_tag_locked(name);
+    uint8_t id = get_or_create_tag_locked(name, &say);
     uspin_unlock(&heap_lock);
+    if (say != TAG_SAY_NOTHING) heap_tag_say(say, name);
     return id;
 }
 
@@ -1002,7 +1113,7 @@ uint8_t heap_lookup_tag(const char *name) {
     uspin_lock(&heap_lock);
     uint8_t result = HEAP_TAG_NONE;
     for (uint8_t i = 0; i < heap_tag_count; i++) {
-        if (strncmp(heap_tag_names[i], name, HEAP_TAG_NAME_MAX - 1) == 0) {
+        if (strcmp(heap_tag_names[i], name) == 0) {
             result = i;
             break;
         }
@@ -1012,7 +1123,7 @@ uint8_t heap_lookup_tag(const char *name) {
 }
 
 const char *heap_tag_name(uint8_t id) {
-    if (id == HEAP_TAG_NONE || id >= HEAP_TAG_CAP) return NULL;
+    if (id == HEAP_TAG_NONE) return NULL;
 
     uspin_lock(&heap_lock);
     const char *name = (id < heap_tag_count) ? heap_tag_names[id] : NULL;
@@ -1027,7 +1138,7 @@ size_t heap_count_tag(const char *tag) {
 
     uint8_t tag_id = HEAP_TAG_NONE;
     for (uint8_t i = 0; i < heap_tag_count; i++) {
-        if (strncmp(heap_tag_names[i], tag, HEAP_TAG_NAME_MAX - 1) == 0) {
+        if (strcmp(heap_tag_names[i], tag) == 0) {
             tag_id = i;
             break;
         }
@@ -1054,7 +1165,7 @@ void heap_iterate_tag(const char *tag, HeapTagCallback cb, void *userdata) {
 
     uint8_t tag_id = HEAP_TAG_NONE;
     for (uint8_t i = 0; i < heap_tag_count; i++) {
-        if (strncmp(heap_tag_names[i], tag, HEAP_TAG_NAME_MAX - 1) == 0) {
+        if (strcmp(heap_tag_names[i], tag) == 0) {
             tag_id = i;
             break;
         }

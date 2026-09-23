@@ -12,6 +12,12 @@
  *   T4. MemTagApplyPkey(rid, 0) clears existing pku tag, PTE → 0
  *   T5. MemTagApplyPkey replace (pku:3 → pku:11) — old tag dropped
  *   T6. MemTagApplyPkey rejects a pkey outside 0..15
+ *   S1. CR4.PKE is up on a CPU that reports protection keys — the only
+ *       question here the processor answers, and the one that decides
+ *       whether T1..T6 describe enforcement or only bookkeeping. On a CPU
+ *       without protection keys it is counted as unrun and the summary
+ *       says so, because six green scenarios about bits nothing reads are
+ *       not a working feature.
  *
  * Builds on Phase 2D test patterns (memtag_test.c Phase 14C).
  */
@@ -21,12 +27,45 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "klib.h"
+#include "cpuid.h"
 
 #define PKU_CHECK(cond, label) \
     do { if (cond) { pass++; } \
          else { fail++; \
                 kprintf("[PKU TEST]   %[R]FAIL%[D]: " label "\n"); } \
     } while (0)
+
+/* The one check here the PROCESSOR answers rather than the kernel's own
+ * bookkeeping — and the one a CPU without protection keys cannot be asked.
+ * On such a CPU it is counted as unrun; it does not quietly vanish into a
+ * total that then reads as green proof of a feature the silicon does not
+ * have. */
+#define PKU_CHECK_SILICON(cond, label) \
+    do { if (!silicon) { unrun++; } \
+         else if (cond) { pass++; } \
+         else { fail++; \
+                kprintf("[PKU TEST]   %[R]FAIL%[D]: " label "\n"); } \
+    } while (0)
+
+/* CR4.PKE — Intel SDM Vol 3A §2.5 "Control Registers", which lays CR4 out in
+ * Figure 2-7 and names this one "Enable protection keys for user-mode pages
+ * (bit 22 of CR4)". (Table 2-2 stood here and is a different table
+ * altogether: x87 FPU behaviour for combinations of EM, MP and TS.) It is
+ * the whole difference between a stamp that is enforced and a stamp that is
+ * decoration: with PKE clear, §4.6.2 says "the protection key of a user-mode
+ * address does not control data accesses to the address", and the four bits
+ * every check below writes into a page table are ignored by the paging
+ * hardware (Vol 3A §4.5, bits 62:59 of a leaf entry: "if CR4.PKE = 1 or
+ * CR4.PKS = 1, this may control the page's access rights ...; otherwise, it
+ * is ignored"). vmm_pku_init sets the bit on every CPU that reports PKU;
+ * reading it back is how this test knows rather than assumes. */
+#define PKU_CR4_PKE_BIT   (1ULL << 22)
+
+static uint64_t pku_read_cr4(void) {
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    return cr4;
+}
 
 static uint8_t pte_pkey_at(vmm_context_t *ctx, uintptr_t va) {
     uint8_t level = 0;
@@ -38,8 +77,12 @@ static uint8_t pte_pkey_at(vmm_context_t *ctx, uintptr_t va) {
 }
 
 void PkuStampTest(void) {
-    kprintf("[PKU TEST] Starting PKU stamp test (Phase 2H+)...\n");
-    size_t pass = 0, fail = 0;
+    kprintf("[PKU TEST] stamping protection keys into page tables this test "
+            "builds itself: what follows measures whether this kernel writes "
+            "the bits its tags call for, which is a different question from "
+            "whether the processor under it enforces them\n");
+    size_t pass = 0, fail = 0, unrun = 0;
+    const bool silicon = g_cpu_caps.has_pku;
 
     if (!MemTagIsInitialized()) {
         kprintf("[PKU TEST] %[Y]SKIPPED%[D]: MemTag not initialized\n");
@@ -205,8 +248,24 @@ void PkuStampTest(void) {
         }
     }
 
-    if (fail == 0)
-        kprintf("[PKU TEST] %[S]PASSED%[D]: all %zu checks OK\n", pass);
-    else
-        kprintf("[PKU TEST] %[R]FAILED%[D]: %zu pass, %zu fail\n", pass, fail);
+    /* ── S1: the silicon that decides whether any of the above matters ── */
+    PKU_CHECK_SILICON((pku_read_cr4() & PKU_CR4_PKE_BIT) != 0,
+                      "S1: CR4.PKE set on a CPU that reports protection keys");
+
+    if (fail > 0) {
+        kprintf("[PKU TEST] %[R]FAILED%[D]: %zu answered, %zu failed, %zu not "
+                "runnable on this processor\n", pass, fail, unrun);
+    } else if (silicon) {
+        kprintf("[PKU TEST] %[S]PASSED%[D]: all %zu checks OK, and CR4.PKE is "
+                "up on this processor — the four bits each of them stamped "
+                "are the ones the MMU reads on every access to those pages\n",
+                pass);
+    } else {
+        kprintf("[PKU TEST] %[Y]SKIPPED%[D]: this processor has no protection "
+                "keys, so the %zu check(s) that answered prove only that the "
+                "kernel writes bits 62:59 where its tags say; the paging "
+                "hardware here ignores those bits, %zu check(s) that only "
+                "silicon can answer were not run, and nothing on this machine "
+                "was denied access by a key\n", pass, unrun);
+    }
 }

@@ -643,6 +643,64 @@ void acpi_parse_apei(void) {
                          (unsigned long)value, (unsigned long)mask);
         }
     }
+
+    /* ACPI 6.5 §18.6.1 — the Error Injection Table. Asked for, never walked:
+     * injecting an error means writing to registers a GAS names, and this
+     * kernel writes to none of them. What is worth knowing is whether the
+     * firmware published the table at all, because three comments in this
+     * tree name EINJ as the integration test that would prove the MCE and
+     * GHES paths, and on a board that does not publish it that test cannot
+     * be run by anyone. */
+    g_acpi.apei.einj_present = (acpi_find_table("EINJ") != NULL);
+
+    /* ‼ THE SENTENCE THAT SAYS WHETHER THIS MACHINE CAN REPORT A HARDWARE
+     * ERROR AT ALL. kprintf, not debug_printf, because the answer is a
+     * property of the board and not of this build — and because until now
+     * every carrier of it was mute: the runtime's own line was a
+     * debug_printf, acpi_print_info's summary is a debug_printf standing
+     * behind CONFIG_ACPI_DEBUG, and the capability word published on
+     * "acpi:ready" has carried HEST, BERT and ERST in bits 6..8 since the
+     * day it was written with no subscriber that ever prints them. The fact
+     * was machine-readable and unsaid. */
+    if (!g_acpi.apei.hest_present && !g_acpi.apei.bert_present &&
+        !g_acpi.apei.erst_present && !g_acpi.apei.einj_present) {
+        kprintf("[APEI] %[E]this firmware describes no hardware error source "
+                "at all%[D] — no HEST, no BERT, no ERST, no EINJ. Nothing "
+                "here arms the platform's error reporting: a corrected "
+                "memory error on this machine is handed to nobody, whatever "
+                "the previous boot died of was not kept for this one to "
+                "read, and the first error that does arrive arrives as a "
+                "machine check, after the fact and with no warning ahead of "
+                "it\n");
+        return;
+    }
+
+    kprintf("[APEI] what this firmware says about reporting its own errors: ");
+    if (g_acpi.apei.hest_present)
+        kprintf("HEST names %u error source(s) this kernel can watch; ",
+                g_acpi.apei.hest_error_source_count);
+    else
+        kprintf("no HEST, so not one error source is described and nothing "
+                "will be reported while the machine runs; ");
+    if (g_acpi.apei.bert_present)
+        kprintf("BERT hands over %u byte(s) holding what the previous boot "
+                "died of; ", g_acpi.apei.bert_region_length);
+    else
+        kprintf("no BERT, so whatever killed the previous boot was not kept "
+                "for this one; ");
+    if (g_acpi.apei.erst_present)
+        kprintf("ERST offers %u instruction(s) for writing an error record "
+                "into firmware storage; ",
+                g_acpi.apei.erst_instruction_count);
+    else
+        kprintf("no ERST, so an error seen here cannot be persisted where "
+                "the next boot would find it; ");
+    if (g_acpi.apei.einj_present)
+        kprintf("EINJ is published, so the error injection this kernel names "
+                "as its integration test can actually be run on this board\n");
+    else
+        kprintf("no EINJ, so the error injection this kernel names as its "
+                "integration test cannot be run on this board\n");
 }
 
 const acpi_apei_info_t *acpi_get_apei(void) {

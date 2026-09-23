@@ -16,6 +16,13 @@
  * erases the cell it steps onto but does nothing at column zero, which is
  * exactly where a line that wrapped past the right edge needs it to work.
  *
+ * A step is right for the glass and invisible to the log: the kernel mirrors
+ * text into its log ring, never caret movement, so a saved log holds the keys
+ * and not the line they became. An edited line therefore writes itself over
+ * itself at Enter (RestateLine) — the same characters onto the same cells, so
+ * the glass gains nothing and the ring gains the line that was handed over. A
+ * line typed straight through says nothing: its echo already is the line.
+ *
  * History is the cabin's, shared by its strands: recalled with Up and Down,
  * kept in order, and it grows with what was typed rather than stopping at a
  * number somebody guessed.
@@ -105,6 +112,7 @@ typedef struct EditLine {
     uint32_t browse;   /* history index while browsing; == count when not */
     char    *draft;    /* what was typed before browsing began, or NULL */
     uint32_t draft_len;
+    bool     echo_diverged;  /* the echo stopped reading as the line; RestateLine */
 } EditLine;
 
 /* Lay down `n` blanks in as few calls as the road takes.
@@ -130,8 +138,16 @@ static void EchoBlanks(uint32_t n)
     }
 }
 
-static void EchoTail(const EditLine *l, uint32_t from, uint32_t trailing_blanks)
+static void EchoTail(EditLine *l, uint32_t from, uint32_t trailing_blanks)
 {
+    /* Two things here write over ground this line already covered: a blank
+     * that erases a character, and a tail said a second time because the
+     * caret sits inside the line. Both leave the log holding characters that
+     * are not the line any more — RestateLine explains what is then owed.
+     * Appending at the end covers nothing, which is why a line typed straight
+     * through never sets this and never restates itself. */
+    if (trailing_blanks > 0 || l->cursor < l->len) l->echo_diverged = true;
+
     /* Redraw buf[from..len), then `trailing_blanks` blanks that erase what a
      * shorter line leaves behind, then step back to the cursor. */
     if (l->len > from) print_bytes(l->buf + from, l->len - from);
@@ -192,6 +208,12 @@ static void Replace(EditLine *l, const char *text, uint32_t n)
 {
     uint32_t was = l->len;
     if (n > l->cap) n = l->cap;
+
+    /* A recall laid over a line that had characters says them both, in the
+     * one place the log cannot tell them apart — see EchoTail's note and
+     * RestateLine. Laid over nothing it says only the new line, and the log
+     * is right about it without being told again. */
+    if (was > 0) l->echo_diverged = true;
 
     console_step(-(int32_t)l->cursor);
     memcpy(l->buf, text, n);
@@ -267,6 +289,44 @@ static bool NextKey(TouchTag ear, kb_event_t *out)
     }
 }
 
+/* Say the accepted line into the kernel's log ring — by writing it over
+ * itself, so the glass gains nothing at all.
+ *
+ * ‼ THE LOG KEEPS WHAT THE CONSOLE WAS TOLD, AND A CARET STEP TELLS IT
+ * NOTHING. The hardware deck mirrors into the log ring every character that
+ * reaches the screen (hardware_ops.c, HwVgaPutString) and no cursor movement
+ * whatsoever (HwVgaStepCursor). So the ring holds every key that was echoed
+ * and no record that any of them was taken back: on the board run of
+ * 2026-09-20 watch.log carried "memtagt" directly above the output of a
+ * `memtag` whose last letter had been erased before Enter — a log naming a
+ * command this machine never ran.
+ *
+ * The line is therefore said once more at Enter, and said the only way a
+ * program can reach that ring without spending a line of the person's screen
+ * on it: the caret steps back over the line and the accepted buffer is
+ * printed onto the cells that already hold it. The same characters land on
+ * the same cells, so the glass does not change and nothing is duplicated in
+ * front of anybody; the ring gains the accepted line immediately before the
+ * newline, which makes it the last word on what was handed over. Speaking it
+ * instead — kdbg — costs a printed paragraph per edited line, because the one
+ * operation that writes the ring from userspace, HW_DEBUG_PRINT, goes through
+ * kprintf and kprintf writes the glass too.
+ *
+ * The backward step is the one Home and a history recall already take across
+ * the same line, so it is sound exactly where those are.
+ *
+ * A line edited down to NOTHING has nothing to write and stays silent: the
+ * ring keeps the withdrawn keys with no line after them. Correcting that
+ * needs a sentence, and a sentence is a line on the glass nobody typed. It
+ * wants a ring-only operation on the hardware deck, which this cabin has no
+ * way to ask for today. */
+static void RestateLine(const EditLine *l)
+{
+    if (l->len == 0) return;
+    console_step(-(int32_t)l->len);
+    print_bytes(l->buf, l->len);
+}
+
 int readline(char *buffer, size_t max_len)
 {
     if (!buffer || max_len < 2) return -1;
@@ -277,6 +337,7 @@ int readline(char *buffer, size_t max_len)
     EditLine l = {
         .buf = buffer, .cap = (uint32_t)(max_len - 1), .len = 0, .cursor = 0,
         .browse = HistoryCount(), .draft = NULL, .draft_len = 0,
+        .echo_diverged = false,
     };
 
     for (;;) {
@@ -300,6 +361,9 @@ int readline(char *buffer, size_t max_len)
         char c = k.ascii;
         if (c == '\r' || c == '\n') {
             MoveTo(&l, l.len);
+            /* Before the newline, so the line the log ends up holding is the
+             * one that was accepted and not the keys it was edited out of. */
+            if (l.echo_diverged) RestateLine(&l);
             print_bytes("\n", 1);
             buffer[l.len] = '\0';
             HistoryKeep(buffer, l.len);

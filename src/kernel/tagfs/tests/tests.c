@@ -42,6 +42,24 @@ static void fill_pattern(void* buffer, uint32_t size, uint8_t pattern) {
     memset(buffer, pattern, size);
 }
 
+/*
+ * Why a test that RAN decided not to run.
+ *
+ * A test hands back one verdict and nothing else, so the reason it stepped
+ * aside had nowhere to travel and was said into debug_printf, which is
+ * compiled away in the build that goes on the board. The count then closed
+ * without the names: "19 skipped" against seventeen explained, and the other
+ * two unnameable in front of the machine. This is the road the reason takes
+ * instead. The runner clears it before every test, so a reason can never
+ * outlive the test that gave it, and reads it back beside the verdict.
+ */
+static const char* g_step_aside_reason = NULL;
+
+static TestResult test_steps_aside(const char* why) {
+    g_step_aside_reason = why;
+    return TEST_SKIP;
+}
+
 // ============================================================================
 // Core TagFS Tests
 // ============================================================================
@@ -147,7 +165,9 @@ static void dedup_stamp(uint8_t *buf, uint8_t fill, const char *marker) {
 
 static TestResult test_dedup_delete_unregisters(void) {
     if (!TagFS_DedupIsInitialized())
-        return TEST_SKIP;
+        return test_steps_aside("the dedup index is not up on this volume, so "
+                                "there is no index for a block to be entered "
+                                "in or struck out of");
 
     DedupStats before;
     TEST_ASSERT_OK(TagFS_DedupGetStats(&before), "stats before");
@@ -187,7 +207,9 @@ static TestResult test_dedup_delete_unregisters(void) {
 
 static TestResult test_dedup_truncate_unregisters(void) {
     if (!TagFS_DedupIsInitialized())
-        return TEST_SKIP;
+        return test_steps_aside("the dedup index is not up on this volume, so "
+                                "there is no index for a block to be entered "
+                                "in or struck out of");
 
     dedup_stamp(g_test_buffer, 0xD2, "dedup-truncate-unregisters");
 
@@ -219,7 +241,9 @@ static TestResult test_dedup_truncate_unregisters(void) {
 
 static TestResult test_dedup_shared_block_survives_release(void) {
     if (!TagFS_DedupIsInitialized())
-        return TEST_SKIP;
+        return test_steps_aside("the dedup index is not up on this volume, so "
+                                "there is no index for a block to be entered "
+                                "in or struck out of");
 
     TagFSState* fs = tagfs_get_state();
     TEST_ASSERT(fs != NULL, "TagFS state should not be NULL");
@@ -255,7 +279,9 @@ static TestResult test_dedup_shared_block_survives_release(void) {
 
 static TestResult test_dedup_reregister_follows_content(void) {
     if (!TagFS_DedupIsInitialized())
-        return TEST_SKIP;
+        return test_steps_aside("the dedup index is not up on this volume, so "
+                                "there is no index for a block to be entered "
+                                "in or struck out of");
 
     uint32_t block = 0;
     TEST_ASSERT_EQ(tagfs_alloc_blocks(1, &block), 0, "alloc one block");
@@ -616,8 +642,14 @@ static TestResult test_braid_add_disk(void) {
 }
 
 static TestResult test_braid_write_read(void) {
-    // Skip - requires multiple physical disks not available in QEMU
-    return TEST_SKIP;
+    /* Nothing is examined here on ANY machine: this test was never given a way
+     * to attach the two media a braid is written across, so it steps aside on
+     * the board exactly as it does in QEMU. Said out loud because the count
+     * above would otherwise read as coverage. */
+    return test_steps_aside("it has no way to attach the second medium a braid "
+                            "is written across, so it stands down on every "
+                            "machine and Braid's write-then-read path is "
+                            "covered by nothing");
 }
 
 static TestResult test_cow_snapshot_create(void) {
@@ -669,8 +701,11 @@ static TestResult test_cow_before_after_write(void) {
 }
 
 static TestResult test_stress_braid_operations(void) {
-    // Skip - requires multiple physical disks not available in QEMU
-    return TEST_SKIP;
+    /* Same standing-down as braid_write_read, and for the same reason: two
+     * media to braid across were never arranged for. */
+    return test_steps_aside("it has no way to attach the second medium a braid "
+                            "is written across, so it stands down on every "
+                            "machine and Braid holds up under nothing here");
 }
 
 static TestResult test_stress_concurrent_operations(void) {
@@ -882,14 +917,18 @@ static TestResult test_boxhash_sizes(void) {
 // ============================================================================
 static TestResult test_cow_redirect_reboot_survival(void) {
     if (!DiskBookIsInitialized())
-        return TEST_SKIP;
+        return test_steps_aside("the DiskBook log is not open, and the redirect "
+                                "this test looks for is only ever restored from "
+                                "it");
 
     uint32_t oldb = 0, newb = 0;
     if (tagfs_alloc_blocks(1, &oldb) != 0)
-        return TEST_SKIP;
+        return test_steps_aside("the volume would not hand out the block a "
+                                "redirect has to point away from");
     if (tagfs_alloc_blocks(1, &newb) != 0) {
         tagfs_free_blocks(oldb, 1);
-        return TEST_SKIP;
+        return test_steps_aside("the volume would not hand out the block a "
+                                "redirect has to point at");
     }
 
     // Inject a snapshot exactly as the mount manifest-restore path does: present
@@ -928,10 +967,13 @@ static TestResult test_cow_redirect_reboot_survival(void) {
 // ============================================================================
 static TestResult test_integrity_detects_mismatch(void) {
     if (!IntegrityIsInitialized())
-        return TEST_SKIP;
+        return test_steps_aside("verify-on-read is not armed on this volume, so "
+                                "there is no digest map to write into or catch "
+                                "a flipped bit with");
     uint32_t blk;
     if (tagfs_alloc_blocks(1, &blk) != 0)
-        return TEST_SKIP;
+        return test_steps_aside("the volume would not hand out a block to record "
+                                "a digest over");
 
     for (int i = 0; i < 4096; i++) g_test_buffer[i] = (uint8_t)(i * 7 + 1);
     IntegrityUpdate(blk, g_test_buffer);
@@ -954,10 +996,13 @@ static TestResult test_integrity_detects_mismatch(void) {
 // exercised safely in-kernel (no FS-wide teardown, no reboot orchestration).
 static TestResult test_integrity_persist_reload(void) {
     if (!IntegrityIsInitialized())
-        return TEST_SKIP;
+        return test_steps_aside("verify-on-read is not armed on this volume, so "
+                                "there is no digest map to write into or catch "
+                                "a flipped bit with");
     uint32_t blk;
     if (tagfs_alloc_blocks(1, &blk) != 0)
-        return TEST_SKIP;
+        return test_steps_aside("the volume would not hand out a block to record "
+                                "a digest over");
 
     for (int i = 0; i < 4096; i++) g_test_buffer[i] = (uint8_t)(i * 11 + 3);
     IntegrityUpdate(blk, g_test_buffer);   // record digest
@@ -1132,7 +1177,9 @@ static TestResult test_use_context_narrows(void)
     TEST_ASSERT(tagfs_get_metadata(first[0], &meta) == 0, "the first file's metadata");
     if (meta.tag_count == 0) {
         tagfs_metadata_free(&meta);
-        return TEST_SKIP;   /* nothing to narrow by */
+        return test_steps_aside("the first file on this volume carries no tag, "
+                                "and a Use Context narrows by tags — there was "
+                                "nothing here to narrow by");
     }
     uint16_t tag_id = meta.tag_ids[0];
     tagfs_metadata_free(&meta);
@@ -1401,6 +1448,11 @@ error_t TagFS_RunAllTests(TestStats* stats) {
 
             debug_printf("[TEST] Running %s...\n", test->name);
 
+            /* Cleared here so a reason can never be inherited from the test
+             * before: a skip with somebody else's reason on it is worse than
+             * a skip with none. */
+            g_step_aside_reason = NULL;
+
             test->result = test->func();
             test->duration_ms = get_time_ms() - start;
             
@@ -1414,6 +1466,24 @@ error_t TagFS_RunAllTests(TestStats* stats) {
             } else {
                 stats->total_skipped++;
                 debug_printf("[SKIP] %s\n", test->name);
+
+                /*
+                 * The other half of the count, and said with kprintf.
+                 *
+                 * The writers held back by the build are announced below, all
+                 * seventeen of them in one line. These are the tests that RAN
+                 * and stood down on their own, and until now their names and
+                 * their reasons went only to debug_printf — compiled out of
+                 * the build that goes on the board. The totals then did not
+                 * meet: nineteen skipped against seventeen explained, and no
+                 * way in front of the machine to learn which two covered
+                 * nothing, or why.
+                 */
+                kprintf("[TESTS] %s ran and stood down: %s\n", test->name,
+                        g_step_aside_reason
+                            ? g_step_aside_reason
+                            : "it gave no reason, which leaves this run "
+                              "covering less than its own count admits");
             }
         }
     }

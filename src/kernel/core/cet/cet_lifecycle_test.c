@@ -8,6 +8,14 @@
  * indirect-call-vs-ENDBR64) belongs to the physical-HW QA pass
  * (must-implement #4).
  *
+ * Which is precisely why this file does NOT end in "PASSED" on a CPU
+ * without CET. Every scenario below is about the kernel's bookkeeping and
+ * about the dormant path; none of them makes the processor enforce
+ * anything. On a Coffee Lake, where CET does not exist, a green summary
+ * was read as proof that shadow stacks work here — so the verdict names
+ * the silicon it ran on, and the checks a machine cannot be asked are
+ * counted instead of dropped.
+ *
  * Scenarios:
  *   T1. cet_lifecycle_init_bsp can be called when CET is dormant +
  *       reports ERR_UNSUPPORTED (TCG case).
@@ -31,9 +39,26 @@
                 kprintf("[CET TEST]   %[R]FAIL%[D]: " label "\n"); } \
     } while (0)
 
+/* A check only a processor WITHOUT a shadow stack can answer. On one that
+ * has a shadow stack it is counted as unrun rather than dropped, so the
+ * summary's total is the same number on both kinds of machine and a
+ * shrinking total can never pass for an unbroken one. */
+#define CET_CHECK_DORMANT(cond, label) \
+    do { if (g_cpu_caps.has_shstk) { unrun++; } \
+         else if (cond) { pass++; } \
+         else { fail++; \
+                kprintf("[CET TEST]   %[R]FAIL%[D]: " label "\n"); } \
+    } while (0)
+
 void CetLifecycleTest(void) {
-    kprintf("[CET TEST] Starting CET lifecycle test...\n");
-    size_t pass = 0, fail = 0;
+    size_t pass = 0, fail = 0, unrun = 0;
+    const bool silicon = g_cpu_caps.has_shstk || g_cpu_caps.has_ibt;
+
+    kprintf("[CET TEST] control-flow enforcement on this processor: shadow "
+            "stacks %s, indirect-branch tracking %s — what follows measures "
+            "this kernel's lifecycle around whichever of the two is there\n",
+            g_cpu_caps.has_shstk ? "present" : "absent",
+            g_cpu_caps.has_ibt   ? "present" : "absent");
 
     /* ── T1: init idempotency ───────────────────────────────────── */
     {
@@ -56,20 +81,28 @@ void CetLifecycleTest(void) {
     }
 
     /* ── T3: process_create on CET-less leaves ssp=0 ────────────── */
-    if (!g_cpu_caps.has_shstk) {
+    /* Four questions only a processor WITHOUT a shadow stack can be asked:
+     * on one that has it, cet_process_create would allocate a real shadow
+     * stack and map it into a cabin this fabricated struct does not have.
+     * So the call is made only on dormant silicon — and on live silicon
+     * the four are counted, not silently absent. */
+    {
         /* Synthesize a transient process struct stub.
          * cet_process_create only reads has_shstk to decide; it doesn't
          * dereference cabin in the dormant branch. */
         process_t dummy;
         for (size_t i = 0; i < sizeof(dummy); i++) ((uint8_t *)&dummy)[i] = 0;
-        dummy.pid = 0xCE7u;
-        error_t e = cet_process_create(&dummy);
-        CET_CHECK(e == OK, "T3: cet_process_create returns OK on dormant CPU");
-        CET_CHECK(process_get_user_ssp_phys(&dummy) == 0,
+        error_t e = ERR_UNSUPPORTED;
+        if (!g_cpu_caps.has_shstk) {
+            dummy.pid = 0xCE7u;
+            e = cet_process_create(&dummy);
+        }
+        CET_CHECK_DORMANT(e == OK, "T3: cet_process_create returns OK on dormant CPU");
+        CET_CHECK_DORMANT(process_get_user_ssp_phys(&dummy) == 0,
                   "T3: SSP phys remains 0 on dormant CPU");
-        CET_CHECK(process_get_user_ssp_va(&dummy) == 0,
+        CET_CHECK_DORMANT(process_get_user_ssp_va(&dummy) == 0,
                   "T3: SSP va remains 0 on dormant CPU");
-        CET_CHECK(process_get_user_ssp_size(&dummy) == 0,
+        CET_CHECK_DORMANT(process_get_user_ssp_size(&dummy) == 0,
                   "T3: SSP size remains 0 on dormant CPU");
     }
 
@@ -113,10 +146,24 @@ void CetLifecycleTest(void) {
                   "T5: stats.enabled coherent with cet_is_enabled()");
     }
 
-    if (fail == 0)
-        kprintf("[CET TEST] %[S]PASSED%[D]: all %zu checks OK\n", pass);
-    else
-        kprintf("[CET TEST] %[R]FAILED%[D]: %zu pass, %zu fail\n", pass, fail);
+    if (fail > 0) {
+        kprintf("[CET TEST] %[R]FAILED%[D]: %zu answered, %zu failed, %zu not "
+                "runnable on this processor\n", pass, fail, unrun);
+    } else if (!silicon) {
+        kprintf("[CET TEST] %[Y]SKIPPED%[D]: this processor has neither shadow "
+                "stacks nor indirect-branch tracking, so the %zu check(s) that "
+                "answered prove only that the kernel stays dormant and lays "
+                "its shadow-stack window where it says it does — on this "
+                "machine no RET was ever checked against a shadow stack and no "
+                "indirect branch was ever made to land on an ENDBR64\n", pass);
+    } else {
+        kprintf("[CET TEST] %[S]PASSED%[D]: %zu check(s) answered on a "
+                "processor that carries control-flow enforcement, and %zu that "
+                "only a processor without it can answer were not run. What "
+                "none of them provokes is the enforcement itself: a RET that "
+                "disagrees with the shadow stack raises #CP, and only the "
+                "machine can show that\n", pass, unrun);
+    }
 
     cet_lifecycle_dump();
 }

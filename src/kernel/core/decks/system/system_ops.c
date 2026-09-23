@@ -48,6 +48,7 @@
 extern uint64_t cpu_get_tsc_freq_khz(void);
 #include "rtc.h"
 #include "pit.h"
+#include "hpet.h"   /* hpet_tick_active/hpet_tick_hz — who really drives IRQ0 */
 #include "cpu_calibrate.h"
 #include "cpuid.h"
 #include "fpu.h"   /* g_user_fsbase_used — TLS FS-base context-switch gate */
@@ -1786,14 +1787,30 @@ static int SysFragScore(const ManifestOp *op, Crate *crates, uint16_t crate_coun
  *    [76..79]  uint32_t cpu_k_cores
  *    [80..83]  uint32_t cpu_app_cores
  *    [84..87]  uint32_t process_count
- *    [88..91]  uint32_t pit_freq_hz
+ *    [88..91]  uint32_t tick_freq_hz
  *    [92]      uint8_t  multicore_active
  *    [93]      uint8_t  has_invariant_tsc
  *    [94]      uint8_t  has_waitpkg
- *    [95]      uint8_t  reserved
+ *    [95]      uint8_t  tick_source
+ *
+ *  Offsets 88 and 95 travel together and must be read together. A frequency
+ *  on its own named the wrong silicon for years: the field was called
+ *  pit_freq_hz and `me` printed "PIT: 250 Hz" about an 8254 that pit_init()
+ *  deliberately never wrote a byte into, because the HPET had taken IRQ0
+ *  through LegacyReplacement and, per HPET 1.0a 2.4.2.1, "the 8254 timer will
+ *  not cause any interrupts". The number was true; the name on it was not.
+ *  The report now carries the pair {who is ticking, how fast}, and the
+ *  frequency comes from whichever part is actually ticking.
+ *
+ *  These values are duplicated by hand in boxlib's box/system.h, exactly as
+ *  the offsets above are — keep the two in step.
  * ========================================================================= */
 
 #define SYSINFO_BLOB_SIZE  96
+
+#define SYSINFO_TICK_SOURCE_NONE          0u  /* nothing is driving IRQ0 */
+#define SYSINFO_TICK_SOURCE_HPET_LEGACY   1u  /* HPET timer 0, LegacyReplacement */
+#define SYSINFO_TICK_SOURCE_8254          2u  /* 8254 channel 0, divisor ours */
 
 static int SysInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                    const OpContext *ctx)
@@ -1830,7 +1847,21 @@ static int SysInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     uint32_t cpu_k       = (uint32_t)g_amp.k_count;
     uint32_t cpu_app     = (uint32_t)g_amp.app_count;
     uint32_t proc_count  = process_get_count();
-    uint32_t pit_hz      = pit_get_frequency();
+
+    /* Ask who is ticking before asking how fast. When the HPET holds IRQ0 the
+     * rate comes from the HPET, derived from the interval written into its
+     * comparator; pit_get_frequency() in that mode returns only the number the
+     * scheduler was configured with, and no 8254 anywhere agreed to it. */
+    uint32_t tick_hz;
+    uint8_t  tick_src;
+    if (hpet_tick_active()) {
+        tick_hz  = hpet_tick_hz();
+        tick_src = SYSINFO_TICK_SOURCE_HPET_LEGACY;
+    } else {
+        tick_hz  = pit_get_frequency();
+        tick_src = tick_hz ? SYSINFO_TICK_SOURCE_8254
+                           : SYSINFO_TICK_SOURCE_NONE;
+    }
 
     uint8_t mc_active    = g_amp.multicore_active   ? 1 : 0;
     uint8_t inv_tsc      = g_cpu_caps.has_invariant_tsc ? 1 : 0;
@@ -1845,11 +1876,11 @@ static int SysInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     memcpy(blob + 76, &cpu_k,     sizeof(uint32_t));
     memcpy(blob + 80, &cpu_app,   sizeof(uint32_t));
     memcpy(blob + 84, &proc_count,sizeof(uint32_t));
-    memcpy(blob + 88, &pit_hz,    sizeof(uint32_t));
+    memcpy(blob + 88, &tick_hz,   sizeof(uint32_t));
     blob[92] = mc_active;
     blob[93] = inv_tsc;
     blob[94] = waitpkg;
-    blob[95] = 0;
+    blob[95] = tick_src;
 
     if (crate_write(out, ctx, blob, SYSINFO_BLOB_SIZE) != OK) return ERR_INVALID_ADDRESS;
     return OK;

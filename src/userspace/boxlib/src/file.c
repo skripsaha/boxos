@@ -15,6 +15,7 @@
 #include "box/types.h"
 #include "box/error.h"
 #include "box/memory.h"     /* malloc / free — a crate sized to the ask */
+#include "box/debug.h"      /* kdbg_print — what this ABI cuts is said out loud */
 #include "box/timeouts.h"   /* BOX_ANSWER_GUARANTEED */
 #include "boxos_decks.h"    /* STORAGE_* opcodes + STORAGE_SCOPE_* — single source */
 
@@ -148,10 +149,32 @@ int query_all_everywhere(const char *tags, uint32_t **out_ids)
 
 /* =========================================================================
  *  FILE_INFO — parse the variable-length blob ObjGetInfo writes.
+ *
+ *  ‼ WHAT IS CUT HERE IS SAID OUT LOUD.
+ *
+ *  Nothing on the volume is cut. TagFS keeps a file name and every tag at its
+ *  own length, the image builder interns the whole name, and the deck answers
+ *  with a self-describing blob of up to a kilobyte. The cutting belongs to
+ *  this library alone: file_info_t is a fixed-size structure — 32 bytes of
+ *  name, five tags of key[11] and value[12] — and it used to cut in silence.
+ *  That is how `files` came to print the tag "anchor_tes" for a file tagged
+ *  "anchor_test": type `files anchor_tes` and the answer is "No files found",
+ *  because the name the machine showed is one the volume has never heard. On a
+ *  machine where a tag IS the way to reach a thing, that is the main interface
+ *  refusing, and neither the screen nor the log said why.
+ *
+ *  Widening the structure is the owner's decision. Saying what it costs is
+ *  not, and it is said once per kind per program: one listing of a 69-file
+ *  volume would otherwise bury the log it is meant to explain.
  * ========================================================================= */
 
 int file_info(uint32_t file_id, file_info_t *info)
 {
+    /* One line each, the first time this program meets that kind of cut. */
+    static uint8_t said_name  = 0;
+    static uint8_t said_count = 0;
+    static uint8_t said_text  = 0;
+
     if (!info) return -ERR_INVALID_ARGUMENT;
 
     uint8_t  out[1024];
@@ -181,7 +204,21 @@ int file_info(uint32_t file_id, file_info_t *info)
     info->filename[fn_copy] = '\0';
     pos += fn_len;
 
-    info->tag_count = (uint8_t)(tag_count_raw > 5 ? 5 : tag_count_raw);
+    if (fn_len > fn_copy && !__atomic_exchange_n(&said_name, 1, __ATOMIC_RELAXED))
+        kdbg_print("[file] file %u is named with %u bytes on the volume and "
+                   "file_info_t holds %u — what this program shows is a prefix, "
+                   "and a prefix is not a name anybody can type back. Said once.",
+                   file_id, (unsigned)fn_len,
+                   (unsigned)(sizeof(info->filename) - 1));
+
+    const size_t slots = sizeof(info->tags) / sizeof(info->tags[0]);
+    info->tag_count = (uint8_t)(tag_count_raw > slots ? slots : tag_count_raw);
+
+    if (tag_count_raw > slots && !__atomic_exchange_n(&said_count, 1, __ATOMIC_RELAXED))
+        kdbg_print("[file] file %u wears %u tags and file_info_t carries %u — the "
+                   "tags this program lists are not all of them, and nothing in the "
+                   "list says so. Said once.",
+                   file_id, (unsigned)tag_count_raw, (unsigned)slots);
 
     for (uint16_t i = 0; i < tag_count_raw; i++) {
         if (pos + 5 > out_actual) break;
@@ -191,7 +228,7 @@ int file_info(uint32_t file_id, file_info_t *info)
         uint8_t type = out[pos]; pos += 1;   /* 1 = system, 0 = user */
         if (pos + kl + vl > out_actual) break;
 
-        if (i < 5) {
+        if (i < slots) {
             size_t kc = kl < sizeof(info->tags[i].key) - 1 ? kl
                                                             : sizeof(info->tags[i].key) - 1;
             size_t vc = vl < sizeof(info->tags[i].value) - 1 ? vl
@@ -201,6 +238,16 @@ int file_info(uint32_t file_id, file_info_t *info)
             memcpy(info->tags[i].value, out + pos + kl,  vc);
             info->tags[i].value[vc] = '\0';
             info->tags[i].type = type;
+
+            if ((kl > kc || vl > vc) &&
+                !__atomic_exchange_n(&said_text, 1, __ATOMIC_RELAXED))
+                kdbg_print("[file] a tag of file %u does not fit file_info_t (key %u "
+                           "bytes into %u, value %u into %u) — the tag shown is a "
+                           "prefix, and querying that prefix finds nothing. Said once.",
+                           file_id, (unsigned)kl,
+                           (unsigned)(sizeof(info->tags[i].key) - 1),
+                           (unsigned)vl,
+                           (unsigned)(sizeof(info->tags[i].value) - 1));
         }
         pos += kl + vl;
     }

@@ -13,8 +13,16 @@ extern "C" {
 // ---------------------------------------------------------------------------
 
 #define HEAP_TAG_NONE      0xFF
-#define HEAP_TAG_NAME_MAX  32
-#define HEAP_TAG_CAP       64
+
+/* How many tags a heap can tell apart, and why it is that number: a block
+ * remembers its tag in one byte of its header (block_t.tag, in a header held
+ * at 32 bytes by a compile-time check in memory.c), and 0xFF is spoken for by
+ * HEAP_TAG_NONE. 255 is therefore not a budget anyone chose — it is every id a
+ * live block can be made to carry. The names themselves have no limit: each is
+ * kept on the heap at the length it was given, so two tags can never become
+ * one by sharing a prefix, and a heap that runs out of ids says so once
+ * instead of allocating untagged in silence. */
+#define HEAP_TAG_CAP       HEAP_TAG_NONE
 
 // ---------------------------------------------------------------------------
 // Allocation interface (thread-safe via the heap uspin_t — the allocator's

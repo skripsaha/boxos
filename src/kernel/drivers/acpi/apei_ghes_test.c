@@ -124,11 +124,16 @@ static void build_proc_entry(void *buf, uint8_t sev) {
 }
 
 void ApeiGhesTest(void) {
-    kprintf("[APEI TEST] Starting APEI/GHES runtime test...\n");
+    kprintf("[APEI TEST] decoding Generic Error Status Blocks this test "
+            "wrote itself: what follows measures this kernel's decoder, and "
+            "says nothing about whether the machine it is running on has an "
+            "error source to send it one\n");
     size_t pass = 0, fail = 0;
 
     if (!apei_ghes_runtime_is_initialized()) {
-        kprintf("[APEI TEST] %[Y]SKIPPED%[D]: not initialized\n");
+        kprintf("[APEI TEST] %[Y]SKIPPED%[D]: the error reporting runtime "
+                "never came up on this boot, so there was no decoder to put "
+                "records in front of and nothing below was measured\n");
         return;
     }
 
@@ -253,7 +258,8 @@ t4:
 
 done:
     if (fail == 0)
-        kprintf("[APEI TEST] %[S]PASSED%[D]: all %zu checks OK\n", pass);
+        kprintf("[APEI TEST] %[S]PASSED%[D]: the decoder answered all %zu "
+                "checks on the records this test wrote\n", pass);
     else
         kprintf("[APEI TEST] %[R]FAILED%[D]: %zu pass, %zu fail\n", pass, fail);
 

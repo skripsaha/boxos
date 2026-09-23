@@ -30,6 +30,17 @@ static MemTagResult s_res;  /* avoid 4 KB on kernel stack */
          else { fail++; kprintf("[MEMTAG TEST]   %[R]FAIL%[D]: " label "\n"); } \
     } while (0)
 
+/* A check whose precondition this boot may not be able to give it. When
+ * `runnable` is false the condition is NOT evaluated and the check is
+ * counted as unrun — it does not disappear, and above all it does not end
+ * up inside the number of checks that passed. Phase 13 is why this exists:
+ * it used to print "(OK)" beside a capability it had never handed out. */
+#define MT_CHECK_IF(runnable, cond, label) \
+    do { if (!(runnable)) { unrun++; } \
+         else if (cond) { pass++; } \
+         else { fail++; kprintf("[MEMTAG TEST]   %[R]FAIL%[D]: " label "\n"); } \
+    } while (0)
+
 /* Helpers via the out-pointer variant — return-by-value of
  * MemTagResult (2056 bytes) would spill to the caller's stack and
  * accumulate the >8 KiB warning that triggered the -Wstack-usage
@@ -60,7 +71,7 @@ static bool ResultContainsRegionForPhys(MemTagResult *r, uintptr_t phys) {
 
 void MemTagStressTest(void) {
     kprintf("[MEMTAG TEST] Starting MemTag stress test (TagFS-shaped)...\n");
-    size_t pass = 0, fail = 0;
+    size_t pass = 0, fail = 0, unrun = 0;
 
     if (!MemTagIsInitialized()) {
         kprintf("[MEMTAG TEST] %[R]FAIL%[D]: MemTag not initialized\n");
@@ -284,14 +295,18 @@ void MemTagStressTest(void) {
     if (pnuma) {
         uint32_t rnuma = MemRegionFromPhys((uintptr_t)pnuma);
         uint32_t domain = pmm_phys_domain((uintptr_t)pnuma);
-        if (domain != 0xFFFFFFFFu) {
-            char expected[32];
+        const bool numa_known = (domain != 0xFFFFFFFFu);
+        char expected[32];
+        expected[0] = '\0';
+        if (numa_known)
             ksnprintf(expected, sizeof(expected), "numa:domain:%u", domain);
-            MT_CHECK(MemRegionHasTagStr(rnuma, expected),
-                     "NUMA tag auto-derived on alloc");
-        } else {
-            kprintf("[MEMTAG TEST]   SRAT not available (UMA) — NUMA tag skipped (OK)\n");
-        }
+        else
+            kprintf("[MEMTAG TEST]   this firmware publishes no SRAT, so the "
+                    "kernel knows of no memory domain to name and the tag that "
+                    "would carry one was never derived: the check for it is "
+                    "counted below as not run, not as passed\n");
+        MT_CHECK_IF(numa_known, MemRegionHasTagStr(rnuma, expected),
+                    "NUMA tag auto-derived on alloc");
         pmm_free(pnuma, 1);
     }
 
@@ -359,25 +374,30 @@ void MemTagStressTest(void) {
     error_t grerr = MemCabinGrant(test_pid, cap_tid);
     MT_CHECK(grerr == OK || grerr == ERR_OBJECT_NOT_FOUND,
              "MemCabinGrant returns ok or no-proc");
-    /* pid 0 may not have a real process_t — that's OK for this test;
-     * we mostly verify the API doesn't crash. Run check anyway: if
-     * grant succeeded (real cabin), access should now be allowed. */
-    if (grerr == OK) {
-        MT_CHECK(MemCabinHolds(test_pid, cap_tid),
-                 "MemCabinHolds returns true after grant");
-        MT_CHECK(MemRegionAccessAllowed(test_pid, rcap),
-                 "grant ON → access ALLOWED");
-
-        /* Revoke → DENIED again. */
-        MemCabinRevoke(test_pid, cap_tid);
-        MT_CHECK(!MemCabinHolds(test_pid, cap_tid),
-                 "MemCabinHolds returns false after revoke");
-        MT_CHECK(!MemRegionAccessAllowed(test_pid, rcap),
-                 "revoke → access DENIED");
-    } else {
-        kprintf("[MEMTAG TEST]   note: pid %u has no cabin — grant/revoke skipped (OK)\n",
-                test_pid);
+    /* Whether this boot has a cabin to grant to decides whether the four
+     * checks below are answered or counted as unrun. They are the only
+     * ones in this file that exercise what the capability layer exists
+     * for — handing a tag to a cabin and taking it back again — so a boot
+     * that cannot ask them must not report them as having passed. */
+    const bool cabin_live = (grerr == OK);
+    if (!cabin_live) {
+        kprintf("[MEMTAG TEST]   pid %u has no cabin this early in the boot, "
+                "so the capability was never handed to anyone and never taken "
+                "back: granting and revoking go unexercised on this machine, "
+                "and the four checks that would have proven them are counted "
+                "below as not run, not as passed\n", test_pid);
     }
+    MT_CHECK_IF(cabin_live, MemCabinHolds(test_pid, cap_tid),
+                "MemCabinHolds returns true after grant");
+    MT_CHECK_IF(cabin_live, MemRegionAccessAllowed(test_pid, rcap),
+                "grant ON → access ALLOWED");
+
+    /* Revoke → DENIED again. */
+    if (cabin_live) MemCabinRevoke(test_pid, cap_tid);
+    MT_CHECK_IF(cabin_live, !MemCabinHolds(test_pid, cap_tid),
+                "MemCabinHolds returns false after revoke");
+    MT_CHECK_IF(cabin_live, !MemRegionAccessAllowed(test_pid, rcap),
+                "revoke → access DENIED");
 
     /* Cleanup: clear guard so subsequent system code isn't affected. */
     MemTagSetGuard("test:phase13:capability", false);
@@ -749,8 +769,13 @@ void MemTagStressTest(void) {
             (unsigned long)final_stats.cache_hits,
             (unsigned long)final_stats.cache_misses);
 
-    if (fail == 0)
-        kprintf("[MEMTAG TEST] %[S]PASSED%[D]: all %zu checks OK\n", pass);
+    if (fail > 0)
+        kprintf("[MEMTAG TEST] %[R]FAILED%[D]: %zu passed, %zu failed, %zu "
+                "not runnable on this boot\n", pass, fail, unrun);
+    else if (unrun > 0)
+        kprintf("[MEMTAG TEST] %[S]PASSED%[D]: %zu checks OK, and %zu that "
+                "this machine gave nothing to ask them of were not run — each "
+                "of them said above what it was waiting for\n", pass, unrun);
     else
-        kprintf("[MEMTAG TEST] %[R]FAILED%[D]: %zu pass, %zu fail\n", pass, fail);
+        kprintf("[MEMTAG TEST] %[S]PASSED%[D]: all %zu checks OK\n", pass);
 }
