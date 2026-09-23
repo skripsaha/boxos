@@ -39,3 +39,16 @@ tools/nameplate
 # Build stamps: one recipe per sub-make, not one per binary (see Makefile).
 src/userspace/apps/.apps.stamp
 src/userspace/utils/.utils.stamp
+
+# Saved reference pages read during a session (OSDev threads and wiki copies).
+# Kept on disk on purpose — they are the material a wave of work was read
+# against — but they are somebody else's HTML, not this repository's source.
+osdev_other/
+
+# Photographs of the board taken during a real-hardware run.
+*.jpeg
+*.jpg
+
+# Written by tooling that runs inside a session, not by this project.
+.claude/hook-log.txt
+.claude/design-context.json
