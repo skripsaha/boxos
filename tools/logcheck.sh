@@ -175,10 +175,32 @@ mut_forget() {
 # construction: a path with nothing held for it is already as it should be, so
 # a second call, or a call on a path an earlier run already put back, does
 # nothing and says nothing.
+#
+# ‼ AND IT TAKES THE IMAGE WITH IT. A put-back restores the SOURCE; it cannot
+# restore the image that was packed while the source was mutated, and that
+# image outlives the mutation by sitting in build/ looking exactly like a clean
+# one. `git status` is silent about it — build/ is ignored — so the tree reads
+# clean while build/boxos.img carries the harness's injection.
+#
+# That is not a hypothetical: the image flashed to the Zenbook on 2026-09-22
+# was one of these. 1228 of its 2274 log lines were printed by probe_on()'s
+# injection into TouchLogbookResolve, probe_off had already put the source
+# back, and nothing anywhere could say so. Every timing conclusion from that
+# run had to be thrown away.
+#
+# So the product dies with the mutation, which is this file's own doctrine for
+# a mutated product (see mutate_product above): an image is a thing that can
+# simply be MADE again, and the next `build` makes it from clean sources. The
+# deletion goes HERE rather than in probe_off or in restore_all, because this
+# is the one funnel every put-back in this file already passes through — every
+# *_off helper, restore_all, and the startup preflight. It costs nothing: a
+# restored source is stamped ahead of its object by mut_bump, so the next make
+# was going to recompile, relink and repack anyway.
 restore() {
     local f="$1"
     if [ -f "$MUT_DISCARD/$f" ]; then
         rm -f "$f" "$MUT_DISCARD/$f"
+        rm -f build/boxos.img
         mut_forget "$f"
         return 0
     fi
@@ -188,6 +210,7 @@ restore() {
     fi
     cp -p "$MUT_PRISTINE/$f" "$f" || exit 1
     rm -f "$MUT_PRISTINE/$f"
+    rm -f build/boxos.img
     mut_bump "$f"
     mut_forget "$f"
 }
@@ -1392,29 +1415,99 @@ badpool_on() {
     mutate_product build/boxos.img
     # ‼ AN IMAGE CARRIES NO COMMENT, so there is no marker for `mut_done` to
     # find and no preflight that could see this one left behind. The proof it
-    # can give is its own bytes: the four at that offset must NOT already be
-    # the corruption before the write (an image that already holds it is not a
-    # clean image), and they must BE it afterwards. A scenario whose offset has
-    # drifted then says so instead of booting a perfectly healthy volume and
-    # reporting that the kernel failed to notice a corruption nobody made.
+    # can give is its own bytes — and the proof it used to give was not enough.
+    #
+    # THIS OFFSET WAS HARDWIRED AND IT ROTTED. It read
+    # `(2048 + 136 * 8) * 512` with a comment saying "the data run begins at
+    # volume block 134, the pool is data block 2". Then the volume moved onto
+    # its own ground and its parts moved with it: the pool now begins at volume
+    # block 647. The write landed on empty ground, the four bytes it reported
+    # replacing were 00000000 rather than a pool magic, and the only check on
+    # them was "they must not ALREADY be the corruption" — which empty ground
+    # passes. So the scenario booted a perfectly healthy volume, watched it
+    # mount, and reported that the kernel had failed to notice a corruption
+    # nobody had made. Two red checks for a year, both of them the stand's.
+    #
+    # So the offset is DERIVED from the image: find the volume's Deed, walk its
+    # stamps to the LAYOUT stamp, and take the block the volume itself says its
+    # metadata pool begins at. And the guard is the real one: the four bytes
+    # must BE the pool magic before the write. A scenario that cannot find a
+    # pool says so and stops, instead of testing nothing in silence.
     if ! python3 - <<'EOF'
 import struct, sys
-# ground at 2048, data run begins at volume block 134, the pool is data block 2
-off = (2048 + 136 * 8) * 512
-f = open("build/boxos.img", "r+b")
-f.seek(off)
-was = f.read(4)
-if was == b"\xAA\xBB\xCC\xDD":
+
+TMPL = b"\x4c\x50\x4d\x54"          # TAGFS_MPOOL_MAGIC 0x544D504C, on disk
+BAD  = b"\xAA\xBB\xCC\xDD"
+BLOCK = 4096
+STAMP_LAYOUT = 2
+
+img = open("build/boxos.img", "r+b")
+blob = img.read()
+
+# The Deed head is the volume's first sector, and the volume starts wherever
+# the partition put it. Found by its magic rather than by a number — and the
+# FIRST match is not it: both loaders carry the same eight bytes as the thing
+# they compare against, and the kernel is a file inside this very image, so
+# `BOXDEED` appears in the image several times as code before it appears once
+# as a Deed. Every match is therefore parsed, and one has to pass: a head role,
+# a prologue that is the size a prologue is, and a stamp block that fits in a
+# sector.
+#
+# Prologue: magic[8] prologue_bytes:u16 stamp_bytes:u16 crc32:u32 uuid[16]
+#           sectors:u64 tail_sector:u64 role:u32
+deed_at = None
+probe = -1
+while True:
+    probe = blob.find(b"BOXDEED\x00", probe + 1)
+    if probe < 0:
+        break
+    if probe + 52 > len(blob):
+        break
+    pb, sb = struct.unpack_from("<HH", blob, probe + 8)
+    role,  = struct.unpack_from("<I", blob, probe + 48)
+    if role == 1 and 52 <= pb <= 512 and 0 < sb <= 512:
+        deed_at = probe
+        prologue_bytes, stamp_bytes = pb, sb
+        break
+if deed_at is None:
+    sys.exit("logcheck: no head Deed in this image — nothing here can say where the pool is")
+
+# Walk the stamps: kind:u16 bytes:u16, payload, next on a four-byte boundary.
+off  = deed_at + prologue_bytes
+end  = off + stamp_bytes
+pool_block = None
+while off + 4 <= end:
+    kind, nbytes = struct.unpack_from("<HH", blob, off)
+    payload = off + 4
+    if kind == STAMP_LAYOUT:
+        # VolumeLayout: total_blocks:u64 then fourteen u32; the pool's first
+        # block is the eighth of those.
+        pool_block, = struct.unpack_from("<I", blob, payload + 8 + 6 * 4)
+        break
+    off = payload + nbytes
+    off = (off + 3) & ~3
+if pool_block is None:
+    sys.exit("logcheck: this Deed carries no LAYOUT stamp")
+
+at = deed_at + pool_block * BLOCK
+img.seek(at)
+was = img.read(4)
+if was == BAD:
     sys.exit("logcheck: that offset ALREADY holds the corruption — this image is not clean")
-f.seek(off)
-f.write(b"\xAA\xBB\xCC\xDD")
-f.flush()
-f.seek(off)
-now = f.read(4)
-f.close()
-if now != b"\xAA\xBB\xCC\xDD":
+if was != TMPL:
+    sys.exit("logcheck: volume block %d holds %s, not a metadata pool — the "
+             "scenario refuses to corrupt something it cannot identify"
+             % (pool_block, was.hex()))
+img.seek(at)
+img.write(BAD)
+img.flush()
+img.seek(at)
+now = img.read(4)
+img.close()
+if now != BAD:
     sys.exit("logcheck: the image did not take the corruption")
-print("logcheck: metadata pool magic %s -> aabbccdd" % was.hex())
+print("logcheck: metadata pool at volume block %d (byte %d): %s -> aabbccdd"
+      % (pool_block, at, was.hex()))
 EOF
     then
         echo "badpool: the image could not be corrupted where the pool should be"

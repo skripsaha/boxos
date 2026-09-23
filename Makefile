@@ -201,6 +201,13 @@ CFLAGS         += $(addprefix -I,$(INCLUDE_DIRS))
 ifeq ($(DEBUG),on)
 CFLAGS += -DCONFIG_DEBUG_ENABLED=1 -DCONFIG_DEBUG_MODE=1
 endif
+# ‼ The key whose absence is hardest to see. With DEBUG off every debug_printf
+# compiles to nothing at all (klib.h: `do { if (0) kprintf(...); } while (0)`),
+# so on an already-built tree `make DEBUG=on` linked the objects it already had
+# and booted a kernel that stayed silent in exactly the place the person asking
+# for DEBUG was looking. The marker is what carries the key to the compiler;
+# see BUILD_KEY_MARKS further down for why a marker and not a variable.
+DEBUG_MARK = $(BUILDDIR)/.debug.$(if $(filter on,$(DEBUG)),on,off)
 
 # Bring-up hold: the first user-mode fault prints in full and the machine
 # stops, instead of the process being killed and the next one scheduled. On a
@@ -306,6 +313,7 @@ VOLUME_TESTS_MARK = $(BUILDDIR)/.volume_tests.$(if $(filter on,$(VOLUME_TESTS)),
 ifeq ($(BRINGUP),on)
 CFLAGS += -DCONFIG_BRINGUP_HOLD_ON_FIRST_FAULT=1
 endif
+BRINGUP_MARK = $(BUILDDIR)/.bringup.$(if $(filter on,$(BRINGUP)),on,off)
 
 # Keep what the kernel says, so a machine with no serial cable can be asked
 # afterwards. Every byte kputchar() emits also lands in a ring in kernel
@@ -538,6 +546,7 @@ WEDGETEST ?= off
 ifeq ($(WEDGETEST),on)
 CFLAGS += -DCONFIG_BMIDE_WEDGE_SELFTEST=1
 endif
+WEDGETEST_MARK = $(BUILDDIR)/.wedgetest.$(if $(filter on,$(WEDGETEST)),on,off)
 # LDFLAGS — kernel link
 #   -z max-page-size=0x1000    align segments to page (kernel mappings)
 #   -z noexecstack             explicit no-exec stack (default but
@@ -824,12 +833,42 @@ $(INTX_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.intx.*
 	@touch $@
 
-$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) $(IOMMU_MARK) $(INTX_MARK) | $(BUILDDIR)
+$(DEBUG_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.debug.*
+	@touch $@
+
+$(BRINGUP_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.bringup.*
+	@touch $@
+
+$(WEDGETEST_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.wedgetest.*
+	@touch $@
+
+# EVERY KEY THAT REACHES THE COMPILER, NAMED ONCE.
+#
+# ‼ This list used to be written out twice — in the USB object rule and in the
+# general one — and that is exactly how three keys came to have no marker at
+# all. DEBUG, BRINGUP and WEDGETEST each change CFLAGS and each was missing
+# from both copies, so for as long as they have existed `make DEBUG=on` on an
+# already-built tree changed nothing and said nothing about changing nothing.
+# A list a person has to remember to extend in two places is a list that will
+# be extended in one.
+#
+# Adding a key: a *_MARK beside its ifeq, a rule above, and a name HERE.
+# Nowhere else.
+BUILD_KEY_MARKS := $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) \
+                   $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) \
+                   $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) \
+                   $(IOMMU_MARK) $(INTX_MARK) $(DEBUG_MARK) $(BRINGUP_MARK) \
+                   $(WEDGETEST_MARK)
+
+$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(BUILD_KEY_MARKS) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -Os -c $< -o $@
 
-$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) $(IOMMU_MARK) $(INTX_MARK) | $(BUILDDIR)
+$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(BUILD_KEY_MARKS) | $(BUILDDIR)
 	@echo "Compiling $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
