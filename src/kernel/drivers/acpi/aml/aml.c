@@ -20,6 +20,11 @@
 #include "pci.h"
 #include "vmm.h"
 #include "io.h"
+/* e820.h, for one question and one only: does the firmware's OWN memory map
+ * call a physical range ACPI NVS. That is the whole of what lets \_PIC's one
+ * store land — see AmlNvsHolds — and nothing else in this file looks at the
+ * memory map. */
+#include "e820.h"
 
 /* =====================================================================
  * AML table reader — the namespace half of ACPI 6.5 §20, plus the narrow
@@ -49,7 +54,10 @@
  *
  * Pass two — the evaluator — runs one of five objects, on demand, to answer
  * where a PCI interrupt pin goes, and it is the only part of this file that
- * reaches an address space. It READS three of them and WRITES none.
+ * reaches an address space. It READS three of them. It WRITES in one, and
+ * only at an address this board's own memory map calls ACPI NVS, and only
+ * inside a \_PIC that a dry walk proved can be run from beginning to end —
+ * see THE NARROW GATE near the bottom of this file.
  * ===================================================================== */
 
 /* How many namespace objects come out of one allocation.
@@ -638,7 +646,7 @@ static void *AmlStackRoom(void *base, uint32_t *room, uint32_t want,
  * is no ceiling on it; what ends the growth is kmalloc saying no.
  */
 typedef enum {
-    AML_SKIP_TERM  = 0,     /* one TermArg   §20.2.3 */
+    AML_SKIP_TERM  = 0,     /* one TermArg   §20.2.5 */
     AML_SKIP_SUPER = 1,     /* one SuperName §20.2.2 */
     AML_SKIP_WORD  = 2,     /* two raw bytes: Acquire's Timeout */
 } AmlSkipKind;
@@ -667,10 +675,10 @@ static void AmlSkipForget(void) {
 }
 
 /*
- * Step over one TermArg or one SuperName (§20.2.2-3) whose value this pass
- * does not need. The namespace builder has no executor frame, so an operand
- * it cannot measure is a refusal — never a guess that leaves *p inside the
- * operand bytes for the next TermObj scan to chew on.
+ * Step over one TermArg (§20.2.5) or one SuperName (§20.2.2) whose value
+ * this pass does not need. The namespace builder has no executor frame, so
+ * an operand it cannot measure is a refusal — never a guess that leaves *p
+ * inside the operand bytes for the next TermObj scan to chew on.
  */
 static bool AmlSkipRun(const uint8_t** p, const uint8_t* end,
                         aml_object_t* scope, uint8_t first) {
@@ -1499,9 +1507,21 @@ static aml_status_t parse_term_list(const uint8_t* aml, uint32_t len,
  *
  * An executor lived in this file once and was removed with the ACPI S1-S4
  * sleep path it served. That removal stands: there is no sleep path here, no
- * Notify, no mutex taken as a means of synchronising with the firmware, and
- * — the one that matters most — NO WAY TO WRITE ANYTHING ANYWHERE OUTSIDE
- * THIS KERNEL'S OWN MEMORY.
+ * Notify, and no mutex taken as a means of synchronising with the firmware.
+ *
+ * ‼ AND IT WRITES OUTSIDE THIS KERNEL'S MEMORY IN EXACTLY ONE CASE, WHICH IS
+ * NAMED HERE BECAUSE IT USED NOT TO. There was once no function in this file
+ * that wrote an address space at all, so "reads only" needed no guard. There
+ * is one now — AmlRegionWrite — and what replaces the old guarantee is not a
+ * weaker one but a narrower one, spelled out above that function: a store
+ * happens only inside a \_PIC that a dry walk proved can be run from
+ * beginning to end, only into a field of a SystemMemory region, and only at
+ * an address this board's own memory map declares ACPI NVS. Every other
+ * store into every other address space is refused BY NAME, with the reason
+ * printed — see AmlSpaceWriteReason, which takes the ten refused spaces one
+ * at a time. \_PIC earned that and nothing else did: ACPI 6.5 §5.8.1 makes
+ * an untold firmware go on describing the machine to a kernel that does not
+ * exist, and there is no way to tell it without a store.
  *
  * What is here is a READER. It exists because the answer to "where does this
  * interrupt go" is not data on most boards; it is four to twenty lines of
@@ -1534,21 +1554,27 @@ static aml_status_t parse_term_list(const uint8_t* aml, uint32_t len,
  *                     the length of one field read and not one instruction
  *                     longer
  *     SystemIO     -> io.h
- *   Three of the eleven spaces ACPI 6.5 §20.2.5.2 defines. The other eight
- *   are refused BY NAME: each needs a transport protocol of its own
- *   (EmbeddedControl, SMBus, IPMI, GenericSerialBus, PCC), or a target this
+ *   Three of the spaces ACPI 6.5 Table 5.182 defines. Every other space in
+ *   that table is refused BY NAME: each needs a transport protocol of its
+ *   own (EmbeddedControl, SMBus, IPMI, GenericSerialBus, PCC,
+ *   PlatformRtMechanism), or an instruction sequence the processor
+ *   architecture rather than ACPI defines (FFixedHW), or a target this
  *   kernel does not resolve (PciBarTarget, GeneralPurposeIO), or belongs to
  *   a driver that already owns it (SystemCMOS) — and none of them appears on
  *   the interrupt-routing path on any board.
  *
- * ‼ AND IT NEVER WRITES ONE. There is no function in this file that writes
- *   to an address space, so "read only" is not a rule that could be broken
- *   by forgetting a check: there is nothing to call. A Store whose target is
- *   a Field or an OperationRegion is refused ALOUD on every path, in every
- *   window, and the method is abandoned rather than half-run — see
- *   AmlStoreInto. An IndexField and a BankField are refused for the same
- *   reason one step earlier: reading one means WRITING the index or the bank
- *   selector first, and that write does not exist here.
+ * ‼ AND IT WRITES IN ONE OF THEM, UNDER THREE CONDITIONS THAT MUST ALL HOLD.
+ *   AmlRegionWrite is the one function in this file that writes an address
+ *   space, and the long note above it sets out what has to be true at once:
+ *   the narrow gate proved the whole method first, the run is the real run
+ *   of \_PIC, and the target is a whole-access-unit field of a SystemMemory
+ *   region at an address the board's own memory map declares ACPI NVS. A
+ *   Store into any other field, in any other space, on any other run, is
+ *   refused ALOUD and the method is abandoned rather than half-run — see
+ *   AmlStoreInto and AmlSpaceWriteReason. An IndexField and a BankField are
+ *   refused a step earlier in both directions: reaching either one means
+ *   writing its index or bank selector FIRST, and two writes in a fixed
+ *   order is a protocol, not a store.
  *
  * ‼ THE WINDOW, AND WHY IT CANNOT BE LEFT OPEN.
  *   An address space is reachable only while a ROUTING OBJECT is being
@@ -1631,9 +1657,13 @@ static aml_status_t parse_term_list(const uint8_t* aml, uint32_t len,
 #define AML_ARG_COUNT    7
 
 /*
- * How wide an Integer is. ACPI 6.5 §19.6.: "For AML code of revision 1, all
- * integers are 32 bits. For revision 2 and above, integers are 64 bits" —
- * the revision being the DSDT header's, which aml_init reads. Not a constant
+ * How wide an Integer is. ACPI 6.5 §19.6.29, DefinitionBlock: "the bit width
+ * of Integer objects is dependent on the ComplianceRevision of the DSDT. If
+ * the ComplianceRevision is less than 2, all integers are restricted to 32
+ * bits. Otherwise, full 64-bit integers are used" — the revision being the
+ * DSDT header's, which aml_init reads. (The sentence quoted here used to be
+ * a paraphrase in quotation marks attributed to no subsection at all; this
+ * is the specification's own wording, and its own section.) Not a constant
  * chosen here: it is a property of the table the board shipped, and getting
  * it wrong turns Ones into the wrong number and every Not and ShiftLeft with
  * it.
@@ -1742,6 +1772,27 @@ typedef struct AmlRun {
      * statement of AmlEvalIn, from the name of the object being evaluated. */
     bool      window;
     const char *window_for;
+
+    /* ‼ THE PERMISSION TO WRITE, WHICH IS TWO FACTS AND NOT ONE.
+     *
+     * `proven` is set by AmlRoutingAdopt and nowhere else, only after the
+     * narrow gate has walked the whole of \_PIC and of every method it calls
+     * and found nothing it cannot perform. `may_write` is then assigned in
+     * exactly one place — beside the window, in AmlEvalIn — as `proven` AND
+     * "the object being evaluated is \_PIC". A run that AmlRunInit made and
+     * nobody proved has `proven` false, so a nested evaluation (a region's
+     * base term, a link's _CRS) cannot inherit the permission; and since
+     * AmlRun is a local variable of whoever asked, the permission ends when
+     * that C function returns, on every path including every refusal.
+     *
+     * `writes` counts what actually landed. It is not bookkeeping: if a
+     * method that was proven runnable then fails anyway — a register nobody
+     * answers at, a division by zero the gate cannot see — this is what lets
+     * the machine say out loud that the firmware has been told half of
+     * something, instead of reporting a clean failure. */
+    bool      proven;
+    bool      may_write;
+    uint32_t  writes;
 
     AmlValue  result;
     bool      returned;
@@ -2026,19 +2077,31 @@ static bool AmlReadOperand(const uint8_t **p, const uint8_t *end,
 }
 
 /* =====================================================================
- * ADDRESS SPACES — the three this kernel can reach, and the eight it
+ * ADDRESS SPACES — the three this kernel can reach, and the rest it
  * refuses by name.
  * ===================================================================== */
 
-/* ACPI 6.5 §20.2.5.2, RegionSpace, and Table 5.x's names for it.
+/* The names are ACPI 6.5 Table 5.182, "Operation Region Address Space
+ * Identifiers" (§5.5.2.4.1; §19.6.99 OperationRegion sends the reader to it:
+ * "The predefined Operation Region types specified in ACPI are shown in
+ * Table 5.182").
  *
- * ‼ THE RANGE ABOVE THE NAMED ONES IS NOT ALL THE VENDOR'S. §20.2.5.2
- * gives 0x00..0x0A the names below, RESERVES 0x0B..0x7F to the
- * specification — 0x0B has been PlatformRtMechanism since ACPI 6.4 — and
- * hands only 0x80..0xFF to the OEM. Calling a reserved code "OEM-defined"
- * sends whoever reads the refusal on a live board looking for a vendor
- * document that does not exist, and this refusal line is the only thing
- * that board will give them. */
+ * ‼ THE RANGE ABOVE THE NAMED ONES IS NOT ALL THE VENDOR'S, AND THE TABLE IS
+ * WHERE THAT IS WRITTEN DOWN. This comment used to cite §20.2.5.2 for a
+ * sentence reserving 0x0B..0x7F to the specification. That sentence is not
+ * there: §20.2.5.2 is AML grammar, and its RegionSpace production lists only
+ * 0x00 SystemMemory .. 0x0A PCC and "0x80-0xFF: OEM Defined" — no reserved
+ * range, no 0x0B, no 0x7F. Table 5.182 is the list that has them, and it
+ * divides the space differently from what stood here: 0x0B is
+ * PlatformRtMechanism, 0x0C-0x7E is Reserved, 0x7F is FFixedHW — functional
+ * fixed hardware, an ACPI-defined space with a section of its own
+ * (§5.5.2.4.2) — and only 0x80 to 0xFF is OEM defined.
+ *
+ * The difference is not academic: calling 0x7F "the board vendor's" sends an
+ * operator reading a refusal on a live board after a vendor document that
+ * does not exist, when the specification names that space itself. Firmware
+ * that publishes _CPC or another CPPC interface declares FFixedHW regions,
+ * so this is a code a real board hands us. */
 static const char *AmlSpaceName(uint8_t space) {
     switch (space) {
     case 0x00: return "SystemMemory";
@@ -2053,24 +2116,120 @@ static const char *AmlSpaceName(uint8_t space) {
     case 0x09: return "GenericSerialBus";
     case 0x0A: return "PCC";
     case 0x0B: return "PlatformRtMechanism";
+    case 0x7F: return "FFixedHW";
     default:   return NULL;
+    }
+}
+
+/*
+ * ‼ WHY EXACTLY ONE ADDRESS SPACE MAY BE WRITTEN, AND WHAT A WRITE COSTS IN
+ *   EACH OF THE OTHERS.
+ *
+ * The narrow gate below lets \_PIC store, and the question it has to answer
+ * first is not "is this space convenient" but "does a store here ACT on
+ * something". Reading is allowed in three spaces because reading a register
+ * is, on the routing path, an observation. Writing is not symmetrical: an
+ * address space is a bus, and in every space below except SystemMemory a
+ * write is a command that has already been obeyed by the time the
+ * instruction retires.
+ *
+ * SystemMemory is the one exception, and not because it is "memory" — a
+ * SystemMemory region is just as often an MMIO window (`OperationRegion
+ * (RCRB, SystemMemory, \RCBA, 0x4000)` is the Intel chipset form, and a PCH's
+ * power-management and GPIO registers live behind exactly that). What makes
+ * the difference is not the space, it is the ADDRESS, and the only thing on
+ * this machine that knows a device window from firmware scratch RAM is the
+ * firmware's own memory map. AmlNvsHolds asks it. So the rule this file
+ * enforces is narrower than "SystemMemory": a store lands only where the
+ * board itself declared AddressRangeNVS.
+ *
+ * Each sentence below is printed in place of the write, so that a board this
+ * kernel refuses says WHY on its own console rather than going quiet.
+ */
+static const char *AmlSpaceWriteReason(uint8_t space) {
+    switch (space) {
+    case 0x01: return
+        "an OUT instruction is an action on a device the moment it retires. "
+        "Port 0xB2 raises a System Management Interrupt and runs firmware "
+        "this kernel cannot see or interrupt; the 8237's byte-pointer "
+        "flip-flop moves; an index port moves the window that the next read "
+        "answers from. Nothing in a region's offset says which of those a "
+        "port is";
+    case 0x02: return
+        "a configuration write MOVES a device. A Base Address Register "
+        "relocates its window, the Command register turns its decode on or "
+        "off, a bridge's Secondary Bus number re-parents every function "
+        "below it — and a region offset is a byte number, which says nothing "
+        "about which of those it lands on";
+    case 0x03: return
+        "a write is a command handed to the embedded controller's own "
+        "processor over a handshake protocol (ACPI 6.5 §12) that this kernel "
+        "does not speak in either direction";
+    case 0x04: return
+        "a write is a bus transaction addressed at another device entirely — "
+        "the memory modules' SPD, the battery, the clock generator";
+    case 0x05: return
+        "the CMOS index port carries the NMI mask in its top bit, so writing "
+        "CMOS at all decides whether this machine can still take a "
+        "non-maskable interrupt; and the bytes behind it are the RTC "
+        "driver's, which owns that pair of ports";
+    case 0x06: return
+        "an offset inside a Base Address Register's window is a device "
+        "register by definition — the space exists to name one";
+    case 0x07: return
+        "a write is a request message to the baseboard management "
+        "controller, which acts on it independently of this processor";
+    case 0x08: return
+        "a write drives a physical pin, and nothing in the namespace says "
+        "whether that pin is a status LED or a device's reset line";
+    case 0x09: return
+        "a write is a transaction on a serial bus, addressed at a device "
+        "this kernel has not enumerated and cannot name";
+    case 0x0A: return
+        "a write rings a doorbell that sets firmware running on another "
+        "processor, and the reply comes back when that firmware is finished";
+    case 0x0B: return
+        "a write invokes a platform runtime service, which is firmware "
+        "execution under another name";
+    case 0x7F: return
+        "functional fixed hardware is reached by an instruction sequence the "
+        "processor architecture defines, not by an address — ACPI 6.5 "
+        "§5.5.2.4.2 leaves the syntax of an FFixedHW region architecture "
+        "specific and refers the reader out of the specification for it. A "
+        "region offset here names nothing this evaluator can carry out";
+    default:
+        if (space >= 0x0C && space <= 0x7E) return
+            "ACPI 6.5 Table 5.182 marks this code Reserved and has not yet "
+            "said what it means, so what a write would do is not written "
+            "down anywhere";
+        return
+            "this code belongs to the board vendor, and what a write would do "
+            "is written down nowhere this kernel can read";
     }
 }
 
 /* Where in PCI configuration space a PCI_Config region actually sits.
  *
- * ACPI 6.5 §5.5.2.4.2: a PCI_Config OperationRegion is addressed relative to
- * the PCI device it is DECLARED UNDER — the nearest enclosing Device with an
- * _ADR — on the bus and segment of the PCI root bridge above it. The region's
- * own base is then a byte offset within that function's configuration space.
+ * A PCI_Config OperationRegion is addressed relative to the PCI device it is
+ * DECLARED UNDER — the nearest enclosing Device with an _ADR — on the bus and
+ * segment of the PCI root bridge above it; the region's own base is then a
+ * byte offset within that function's configuration space. That rule is
+ * assembled out of two clauses rather than quoted from one. ACPI 6.5 §6.1.1:
+ * "OSPM infers the parent bus and segment from the location of the _ADR
+ * object's device package in the ACPI namespace", with Table 6.2 giving the
+ * PCI encoding as "High word-Device #, Low word-Function #"; and §19.6.99
+ * makes the OperationRegion's Offset "the offset within the selected
+ * RegionSpace at which the region starts (byte-granular)". (§5.5.2.4.2 was
+ * cited here for the whole rule and says none of it — it is "Declaring
+ * Functional Fixed Hardware (FFH) Operation Regions", about the 0x7F space.)
  *
  * ‼ _ADR IS READ AS A STATIC OBJECT HERE AND ONLY AS A STATIC OBJECT, and
  * that is deliberate rather than lazy. Running a method to find out where to
  * perform an address-space access could need another address-space access to
- * find out where to run it, and there is no bottom to that. §6.1.1 leaves
- * _ADR an object or a control method; every PCI device on every board writes
- * the object, and a board that writes the method is told so by name instead
- * of being followed into a circle.
+ * find out where to run it, and there is no bottom to that. §6.1.1 is on the
+ * same side: "_ADR object information must be static". Every PCI device on
+ * every board writes the object, and a board that writes a method instead is
+ * told so by name rather than followed into a circle.
  */
 static bool AmlPciConfigSite(aml_object_t *region, const char *who,
                               uint16_t *seg, uint8_t *bus,
@@ -2194,14 +2353,96 @@ static bool AmlIoUnitRead(uint64_t port, uint32_t width, const char *who,
 }
 
 /*
- * The heart of it: the value of one Field, read out of the address space its
- * OperationRegion names.
+ * HOW FAR INTO ITS REGION ONE FIELD REACHES, and at what granularity the
+ * hardware has to be touched to reach it. The same geometry answers a read
+ * and a write, and it is computed in one place so that the bound between
+ * this evaluator and the bus is one piece of arithmetic rather than two that
+ * have to be kept equal by hand.
  *
  * ACPI 6.5 §20.2.5.2 makes a Field a bit offset and a bit width inside the
- * region, with an access width the FieldFlags byte names, and §19.6. makes
- * the access width the granularity the hardware must actually be touched at:
+ * region, with an access width the FieldFlags byte names, and §19.6.47
+ * (Field) makes that width the granularity the hardware is touched at:
  * a DWordAcc field is read with 32-bit accesses even when it is one bit wide,
  * because the register behind it answers no other way.
+ */
+typedef struct AmlFieldReach {
+    uint32_t access;        /* bytes per access unit */
+    uint32_t bits;          /* how many bits the field is */
+    uint32_t lo;            /* where it starts inside the first access unit */
+    uint64_t first;         /* first byte of the region it touches */
+    uint64_t last;          /* one past the last byte it touches */
+} AmlFieldReach;
+
+static bool AmlFieldReachOf(aml_object_t *field, aml_object_t *rg,
+                             const char *who, AmlFieldReach *out) {
+    /* §20.2.5.2, FieldFlags bits[3:0] — AccessType. AnyAcc and BufferAcc name
+     * no width of their own; ACPICA resolves both to byte access and so does
+     * this, because a byte access is the only one that is legal at every
+     * offset in all three of these spaces. */
+    uint32_t aw;
+    switch (field->v.field.access & 0x0Fu) {
+    case 0x00: aw = 1; break;            /* AnyAcc    */
+    case 0x01: aw = 1; break;            /* ByteAcc   */
+    case 0x02: aw = 2; break;            /* WordAcc   */
+    case 0x03: aw = 4; break;            /* DWordAcc  */
+    case 0x04: aw = 8; break;            /* QWordAcc  */
+    case 0x05: aw = 1; break;            /* BufferAcc */
+    default:
+        kprintf("[AML] %s: field %s declares access type %u, which "
+                "§20.2.5.2 does not define\n",
+                who, field->name, field->v.field.access & 0x0Fu);
+        return false;
+    }
+
+    uint32_t bits = field->v.field.bit_width;
+    if (bits == 0 || bits > 64) {
+        /* §19.6.47: "If the FieldUnit is larger than the size of an Integer,
+         * it will be treated as a Buffer" — and nothing on the routing path
+         * asks for one. Said rather than truncated. */
+        kprintf("[AML] %s: field %s is %lu bits wide; this evaluator carries "
+                "a field as an integer, and an integer on this machine is "
+                "%lu bits\n", who, field->name,
+                (unsigned long)bits, (unsigned long)g_int_bits);
+        return false;
+    }
+
+    /* ‼ IN 64 BITS, BECAUSE BOTH OPERANDS ARE THE FIRMWARE'S. A field's bit
+     * offset is accumulated from PkgLengths the table wrote, each of which
+     * §20.2.4 lets reach 0x0FFFFFFF; a sum of them that wraps a 32-bit
+     * register would come out SMALL, pass the length check below, and send
+     * the access somewhere else entirely. `last` is the single bound between
+     * this evaluator and the bus, so it is computed where it cannot wrap. */
+    uint64_t awb = (uint64_t)aw * 8u;
+    out->access = aw;
+    out->bits   = bits;
+    out->lo     = (uint32_t)((uint64_t)field->v.field.bit_offset % awb);
+    out->first  = ((uint64_t)field->v.field.bit_offset / awb) * aw;
+    out->last   = (((uint64_t)field->v.field.bit_offset + bits + awb - 1u)
+                   / awb) * aw;
+
+    /* The region's own length is the bound, and it is the FIRMWARE's number,
+     * not one written here. A region whose length this pass could not read
+     * bounds nothing, and a field read against no bound is a read at an
+     * address nobody stated. */
+    if (rg->v.region.len == 0) {
+        kprintf("[AML] %s: operation region %s was declared with a length of "
+                "zero, so nothing bounds an access inside it — refused\n",
+                who, rg->name);
+        return false;
+    }
+    if (out->last > rg->v.region.len) {
+        kprintf("[AML] %s: field %s ends at byte %lu of operation region %s, "
+                "which the firmware declared %lu byte(s) long\n",
+                who, field->name, (unsigned long)out->last, rg->name,
+                (unsigned long)rg->v.region.len);
+        return false;
+    }
+    return true;
+}
+
+/*
+ * The heart of it: the value of one Field, read out of the address space its
+ * OperationRegion names.
  */
 static bool AmlRegionRead(AmlRun *run, aml_object_t *field, const char *who,
                            uint64_t *out) {
@@ -2215,22 +2456,25 @@ static bool AmlRegionRead(AmlRun *run, aml_object_t *field, const char *who,
         return false;
     }
 
-    /* ‼ AN INDEXED OR BANKED FIELD IS A WRITE BEFORE IT IS A READ, and this
-     * kernel has no way to write an address space at all. §20.2.5.2: an
-     * IndexField selects what the Data register answers by STORING into the
-     * Index register first, and a BankField by storing its BankValue into the
-     * bank selector. Both are refused here rather than half-attempted. */
+    /* ‼ AN INDEXED OR BANKED FIELD IS A WRITE BEFORE IT IS A READ, and the
+     * one write this kernel performs is a single store into firmware scratch
+     * RAM, not a protocol. §20.2.5.2: an IndexField selects what the Data
+     * register answers by STORING into the Index register first, and a
+     * BankField by storing its BankValue into the bank selector — two
+     * accesses in a fixed order, into a register chosen by the firmware and
+     * not by this kernel. Both are refused here rather than half-attempted. */
     if (field->v.field.index || field->v.field.data) {
         kprintf("[AML] %s: %s is an IndexField — choosing what its data "
-                "register answers means WRITING its index register first, and "
-                "this evaluator writes no address space anywhere\n",
+                "register answers means WRITING its index register first, "
+                "and two accesses in a fixed order is a protocol this kernel "
+                "does not run\n",
                 who, field->name);
         return false;
     }
     if (field->v.field.bank) {
         kprintf("[AML] %s: %s is a BankField — reading it means WRITING %lu "
-                "into its bank selector %s first, and this evaluator writes "
-                "no address space anywhere\n",
+                "into its bank selector %s first, and two accesses in a "
+                "fixed order is a protocol this kernel does not run\n",
                 who, field->name, (unsigned long)field->v.field.bank_value,
                 field->v.field.bank->name);
         return false;
@@ -2245,10 +2489,19 @@ static bool AmlRegionRead(AmlRun *run, aml_object_t *field, const char *who,
 
     const char *space = AmlSpaceName(rg->v.region.space);
     if (!space) {
-        kprintf("[AML] %s: operation region %s lives in OEM-defined address "
-                "space 0x%02x, whose meaning belongs to the board vendor and "
-                "is written down nowhere this kernel can read\n",
-                who, rg->name, rg->v.region.space);
+        /* Two different unknowns, and the operator is told which one he has:
+         * ACPI 6.5 Table 5.182 marks 0x0C-0x7E Reserved — nobody has said
+         * what it means yet — while 0x80 to 0xFF is the board vendor's, and
+         * only in that second case is there a vendor document to go and look
+         * for. */
+        kprintf("[AML] %s: operation region %s lives in address space 0x%02x, "
+                "which %s\n",
+                who, rg->name, rg->v.region.space,
+                rg->v.region.space >= 0x80
+                    ? "belongs to the board vendor and is written down "
+                      "nowhere this kernel can read"
+                    : "ACPI 6.5 Table 5.182 marks Reserved — the "
+                      "specification has not yet said what lives there");
         return false;
     }
     if (rg->v.region.space > 0x02) {
@@ -2281,64 +2534,13 @@ static bool AmlRegionRead(AmlRun *run, aml_object_t *field, const char *who,
                 run->window_for ? run->window_for : who);
     }
 
-    /* §20.2.5.2, FieldFlags bits[3:0] — AccessType. AnyAcc and BufferAcc name
-     * no width of their own; ACPICA resolves both to byte access and so does
-     * this, because a byte access is the only one that is legal at every
-     * offset in all three of these spaces. */
-    uint32_t aw;
-    switch (field->v.field.access & 0x0Fu) {
-    case 0x00: aw = 1; break;            /* AnyAcc    */
-    case 0x01: aw = 1; break;            /* ByteAcc   */
-    case 0x02: aw = 2; break;            /* WordAcc   */
-    case 0x03: aw = 4; break;            /* DWordAcc  */
-    case 0x04: aw = 8; break;            /* QWordAcc  */
-    case 0x05: aw = 1; break;            /* BufferAcc */
-    default:
-        kprintf("[AML] %s: field %s declares access type %u, which "
-                "§20.2.5.2 does not define\n",
-                who, field->name, field->v.field.access & 0x0Fu);
-        return false;
-    }
-
-    uint32_t bits = field->v.field.bit_width;
-    if (bits == 0 || bits > 64) {
-        /* §19.6.: a field wider than an integer is a Buffer, and nothing on
-         * the routing path asks for one. Said rather than truncated. */
-        kprintf("[AML] %s: field %s is %lu bits wide; this evaluator reads a "
-                "field as an integer, and an integer on this machine is %lu "
-                "bits\n", who, field->name,
-                (unsigned long)bits, (unsigned long)g_int_bits);
-        return false;
-    }
-
-    /* ‼ IN 64 BITS, BECAUSE BOTH OPERANDS ARE THE FIRMWARE'S. A field's bit
-     * offset is accumulated from PkgLengths the table wrote, each of which
-     * §20.2.4 lets reach 0x0FFFFFFF; a sum of them that wraps a 32-bit
-     * register would come out SMALL, pass the length check below, and send
-     * the access somewhere else entirely. `last` is the single bound between
-     * this evaluator and the bus, so it is computed where it cannot wrap. */
+    AmlFieldReach at;
+    if (!AmlFieldReachOf(field, rg, who, &at)) return false;
+    uint32_t aw    = at.access;
+    uint32_t bits  = at.bits;
+    uint64_t first = at.first;
+    uint64_t last  = at.last;
     uint64_t awb   = (uint64_t)aw * 8u;
-    uint64_t first = ((uint64_t)field->v.field.bit_offset / awb) * aw;
-    uint64_t last  = (((uint64_t)field->v.field.bit_offset + bits + awb - 1u)
-                      / awb) * aw;
-
-    /* The region's own length is the bound, and it is the FIRMWARE's number,
-     * not one written here. A region whose length this pass could not read
-     * bounds nothing, and a field read against no bound is a read at an
-     * address nobody stated. */
-    if (rg->v.region.len == 0) {
-        kprintf("[AML] %s: operation region %s was declared with a length of "
-                "zero, so nothing bounds a read inside it — refused\n",
-                who, rg->name);
-        return false;
-    }
-    if (last > rg->v.region.len) {
-        kprintf("[AML] %s: field %s ends at byte %lu of operation region %s, "
-                "which the firmware declared %lu byte(s) long\n",
-                who, field->name, (unsigned long)last, rg->name,
-                (unsigned long)rg->v.region.len);
-        return false;
-    }
 
     /* PCI_Config resolves to a function once, before any access. Its offsets
      * are checked here as 64-bit quantities, because the per-access check
@@ -2383,7 +2585,7 @@ static bool AmlRegionRead(AmlRun *run, aml_object_t *field, const char *who,
     bool     ok    = true;
     uint64_t value = 0;
     uint32_t done  = 0;
-    uint32_t lo    = (uint32_t)(field->v.field.bit_offset % awb);
+    uint32_t lo    = at.lo;
 
     for (uint64_t off = first; done < bits && ok; off += aw) {
         uint64_t unit = 0;
@@ -2421,6 +2623,253 @@ static bool AmlRegionRead(AmlRun *run, aml_object_t *field, const char *who,
     if (va) vmm_unmap_mmio((volatile void *)va, va_len);
     if (!ok) return false;
     *out = value & AmlIntMask();
+    return true;
+}
+
+/* =====================================================================
+ * THE ONE PLACE THIS KERNEL WRITES AN ADDRESS SPACE.
+ *
+ * ‼ AND IT IS ONE PLACE ON PURPOSE. What used to be true of this file is
+ * that there was NO function that wrote an address space, so "reads only"
+ * needed no guard: there was nothing to call. That is no longer true, and
+ * what replaces it is not a flag somebody remembers to check but three
+ * conditions that have to hold at once, each enforced somewhere it cannot be
+ * skipped:
+ *
+ *   1. THE METHOD WAS PROVEN WHOLE FIRST. The narrow gate (AmlGateProve,
+ *      below) walks every byte of \_PIC and of every method it calls, takes
+ *      BOTH sides of every If, and refuses on anything this evaluator cannot
+ *      perform — including every store whose target fails condition 3. Only
+ *      a method that came out the far end is run at all. What that excludes
+ *      before the first instruction, rather than discovering half-way, is a
+ *      method whose TEXT this evaluator cannot carry. What it cannot exclude
+ *      is one that runs onto a value of the wrong type, because the walk has
+ *      no values — the gate says so itself, at length, and the count of
+ *      stores already landed is what reports that residue out loud.
+ *   2. IT IS \_PIC, AND THE RUN IS THE ONE THE GATE OPENED FOR. `may_write`
+ *      is a field of AmlRun, assigned in exactly one place — AmlEvalIn — from
+ *      the name of the object being evaluated AND from a `proven` flag that
+ *      only AmlRoutingAdopt sets, after the gate returned. AmlRun is a local
+ *      variable of whoever asked the question, so the permission dies when
+ *      that C function returns, on every path including every refusal.
+ *   3. THE ADDRESS IS FIRMWARE SCRATCH RAM AND NOT A DEVICE. See
+ *      AmlSpaceWriteReason for the ten spaces refused by name, and
+ *      AmlNvsHolds for the eleventh, where the firmware's own memory map is
+ *      what decides.
+ * ===================================================================== */
+
+/*
+ * Does the board's own memory map call this whole range ACPI NVS?
+ *
+ * ‼ THIS IS THE WHOLE OF THE WRITE PERMISSION, AND IT IS THE MACHINE'S
+ *   STATEMENT, NOT A RANGE WRITTEN HERE.
+ *
+ * "SystemMemory" is not enough and never was: half the SystemMemory regions
+ * on a shipping board are MMIO windows — the PCH's root complex register
+ * block, its power-management registers, its GPIO community — and a store
+ * into one of those is a device action wearing memory's clothes. The one
+ * thing on this machine that can tell them apart is the map the firmware
+ * itself published, and it publishes exactly the distinction that is needed.
+ *
+ * ACPI 6.5 Table 15.1 "Address Range Types" — which stands in the opening of
+ * chapter 15, above §15.1, not inside it — value 4: "AddressRangeNVS ... ACPI
+ * NVS Memory. This range of addresses is in use or reserved by the system and
+ * must not be used by the operating system. This range is required to be
+ * saved and restored across an NVS sleep." §15.3, Table 15.6 maps
+ * UEFI's EfiACPIMemoryNVS onto that same type, and both of this kernel's
+ * loaders write it through as E820_ACPI_NVS.
+ *
+ * Read the second sentence: a range whose CONTENTS have to be saved and put
+ * back is a range whose contents are the point — it holds state, which is
+ * what memory is and what a device window is not. A device's registers are
+ * not saved and restored; they are re-programmed. So the firmware, by
+ * marking a range NVS, has said "this is RAM I set aside", and GNVS — the
+ * block every Intel reference ASL passes values through, and the block
+ * \_PIC's GPIC lives in — is precisely that block.
+ *
+ * A range the map does not call NVS is refused however plausible it looks.
+ * That includes AddressRangeMemory, which is the OS's own heap, and
+ * AddressRangeACPI, which is where the DSDT being interpreted right now is
+ * sitting.
+ *
+ * The whole range must lie inside ONE entry. A range that straddles two
+ * entries is one whose far end the map describes differently, and half a
+ * store is worse than none.
+ */
+static bool AmlNvsHolds(uint64_t base, uint64_t len) {
+    if (len == 0) return false;
+    uint64_t end = base + len;
+    if (end < base) return false;                 /* wrapped */
+
+    const e820_entry_t *m = memory_map_get_entries();
+    size_t n = memory_map_get_entry_count();
+    if (!m || n == 0) return false;
+
+    for (size_t i = 0; i < n; i++) {
+        if (m[i].type != E820_ACPI_NVS || m[i].length == 0) continue;
+        uint64_t stop = m[i].base + m[i].length;
+        if (stop <= m[i].base) continue;          /* wrapped entry */
+        if (base >= m[i].base && end <= stop) return true;
+    }
+    return false;
+}
+
+/*
+ * May a store into this Field be carried out at all — asked with no side
+ * effect, so that the gate can ask it about every store in a method BEFORE
+ * any of them happens, and the writer can ask it again about the store it is
+ * about to make.
+ *
+ * On success `*at` and `*phys` say exactly which bytes would move, which is
+ * what the writer needs and what the log line prints.
+ *
+ * ‼ AND IT REFUSES A FIELD THAT DOES NOT FILL WHOLE ACCESS UNITS, which is
+ * the one restriction here that is about this kernel rather than about the
+ * platform. §20.2.5.2's FieldFlags carry an UpdateRule in bits[6:5] —
+ * Preserve, WriteAsOnes, WriteAsZeros — that says what happens to the bits
+ * AROUND a partial field, and an AccessField element inside a FieldList
+ * replaces the byte this pass records, taking those two bits with it. So
+ * this kernel does not know the update rule for every field, and rather than
+ * pick one it writes only fields that have no surrounding bits to rule on.
+ * The gain is not only correctness: a whole-unit store is a pure store, so
+ * placing a value never has to READ the register first, and a register whose
+ * read has a side effect is never read on the way to writing it.
+ */
+static bool AmlFieldWritable(aml_object_t *field, const char *who,
+                              AmlFieldReach *at, uint64_t *phys) {
+    if (field->v.field.index || field->v.field.data) {
+        kprintf("[AML] %s: %s is an IndexField, so placing a value in it "
+                "means two writes in a fixed order — its index register "
+                "first, its data register after. That is a protocol, not a "
+                "store, and this kernel does not run it\n",
+                who, field->name);
+        return false;
+    }
+    if (field->v.field.bank) {
+        kprintf("[AML] %s: %s is a BankField, so placing a value in it means "
+                "writing %lu into its bank selector %s first — two writes in "
+                "a fixed order, which is a protocol this kernel does not "
+                "run\n", who, field->name,
+                (unsigned long)field->v.field.bank_value,
+                field->v.field.bank->name);
+        return false;
+    }
+
+    aml_object_t *rg = field->v.field.region;
+    if (!rg || rg->type != AML_OBJ_REGION) {
+        kprintf("[AML] %s: %s is a field of something this pass never "
+                "recorded as an operation region\n", who, field->name);
+        return false;
+    }
+
+    const char *space = AmlSpaceName(rg->v.region.space);
+    if (rg->v.region.space != 0x00) {
+        kprintf("[AML] %s: %s is a field of operation region %s, which lives "
+                "in %s, and %s — so no value is placed in it\n",
+                who, field->name, rg->name,
+                space ? space : "an address space this kernel has no name for",
+                AmlSpaceWriteReason(rg->v.region.space));
+        return false;
+    }
+
+    /* Where the region starts has to be known before anything can be said
+     * about what is at that address, and working it out reads no address
+     * space — AmlRegionArm runs the firmware's term on a run of its own,
+     * whose window is shut. */
+    if (!AmlRegionArm(rg, who)) return false;
+    if (!AmlFieldReachOf(field, rg, who, at)) return false;
+
+    uint64_t awb = (uint64_t)at->access * 8u;
+    if (at->lo != 0 || (uint64_t)at->bits % awb != 0u) {
+        kprintf("[AML] %s: field %s occupies bits %lu to %lu of a %lu-bit "
+                "access unit rather than whole units, and what happens to the "
+                "bits beside it is the UpdateRule of §20.2.5.2, which this "
+                "pass does not record once a FieldList has changed its access "
+                "rules. No value is placed in a field whose neighbours this "
+                "kernel would have to guess at\n",
+                who, field->name, (unsigned long)at->lo,
+                (unsigned long)(at->lo + at->bits - 1u), (unsigned long)awb);
+        return false;
+    }
+
+    *phys = rg->v.region.base + at->first;
+    if (!AmlNvsHolds(*phys, at->last - at->first)) {
+        kprintf("[AML] %[E]%s: field %s would place a value at physical "
+                "0x%lx, and this machine's own memory map does not call those "
+                "%lu byte(s) ACPI NVS. A SystemMemory region is as often a "
+                "device's register window as it is firmware scratch RAM — the "
+                "map is the only thing that tells them apart, and it has not "
+                "said memory here. Nothing is written%[D]\n",
+                who, field->name, (unsigned long)*phys,
+                (unsigned long)(at->last - at->first));
+        return false;
+    }
+    return true;
+}
+
+/*
+ * Place one integer in one Field. The only function in this file that writes
+ * anything outside this kernel's own memory.
+ *
+ * The mapping is uncacheable, which is not a choice made here: vmm_map_mmio
+ * hands out nothing else, and it happens to be the right thing — the Pull Map
+ * gives a write-back leaf only to a span that is E820 USABLE end to end, so
+ * an ACPI NVS page's standing alias is uncacheable too, and the two agree.
+ * Intel SDM Vol 3A §12.12.4, "Programming the PAT", names two aliases of
+ * different memory type onto one physical page as the thing a program must
+ * not do — "Intel does not support this practice because it may lead to
+ * undefined operations that can result in a system failure"; here there are
+ * not two types. (This said §11.12.4, which was the number before chapter 11
+ * became the APIC and memory cache control moved to chapter 12.)
+ */
+static bool AmlRegionWrite(AmlRun *run, aml_object_t *field, const char *who,
+                            uint64_t value) {
+    if (!run->may_write) {
+        kprintf("[AML] %s: stores into %s, which is a field of an operation "
+                "region — this kernel writes an address space only while it "
+                "is running a \\_PIC that a dry pass proved it can run whole, "
+                "so the method is abandoned here rather than half-run\n",
+                who, field->name);
+        return false;
+    }
+
+    AmlFieldReach at;
+    uint64_t      phys = 0;
+    if (!AmlFieldWritable(field, who, &at, &phys)) return false;
+
+    size_t len = (size_t)(at.last - at.first);
+    volatile uint8_t *va =
+        (volatile uint8_t *)vmm_map_mmio((uintptr_t)phys, len,
+                                         VMM_FLAGS_KERNEL_RW);
+    if (!va) {
+        kprintf("[AML] %s: field %s sits at physical 0x%lx and the mapper "
+                "would not hand out a writable window onto it — nothing is "
+                "written\n", who, field->name, (unsigned long)phys);
+        return false;
+    }
+
+    uint32_t done = 0;
+    for (size_t off = 0; done < at.bits; off += at.access) {
+        uint64_t unit = (value >> done);
+        switch (at.access) {
+        case 1: va[off] = (uint8_t)unit; break;
+        case 2: *(volatile uint16_t *)(va + off) = (uint16_t)unit; break;
+        case 4: *(volatile uint32_t *)(va + off) = (uint32_t)unit; break;
+        default: *(volatile uint64_t *)(va + off) = unit; break;
+        }
+        done += (uint32_t)(at.access * 8u);
+    }
+    vmm_unmap_mmio((volatile void *)va, len);
+
+    run->writes++;
+    kprintf("[AML] %s: 0x%lx placed in %s, a field of operation region %s — "
+            "%lu byte(s) at physical 0x%lx, inside a range this board's own "
+            "memory map declares ACPI NVS, which ACPI 6.5 Table 15.1 "
+            "makes memory the firmware set aside and asks to have saved "
+            "across sleep\n",
+            who, (unsigned long)value, field->name,
+            field->v.field.region->name,
+            (unsigned long)len, (unsigned long)phys);
     return true;
 }
 
@@ -2663,17 +3112,20 @@ static bool AmlReadOperandIn(AmlRun *run, AmlAct *a, const uint8_t **p,
  * =========================================================== */
 
 /*
- * ‼ THE PLACES A Store MAY LAND, AND THE ONE IT MAY NEVER.
+ * ‼ THE PLACES A Store MAY LAND, AND THE ONE NARROW GATE IT MAY GO THROUGH.
  * A local, an argument, the Debug object (which discards and touches
  * nothing), an object the running method declared for itself, or a namespace
- * Name holding an integer. A Field or an OperationRegion is where AML reaches
- * hardware, and this refusal has NO window and no exception: it is the same
- * refusal whether or not a routing object is being evaluated, because there
- * is no code in this file that could carry out the write even if it were
- * allowed.
+ * Name holding an integer — none of which leaves this kernel's own memory.
+ *
+ * A Field is where AML reaches hardware, and it now has exactly one way
+ * through: AmlRegionWrite, whose first line refuses unless this run is the
+ * real run of a \_PIC that the narrow gate proved. An OperationRegion named
+ * whole is refused with no gate at all — a store into a region rather than
+ * into a field of one names no width and no offset, so there is nothing to
+ * write even in principle.
  */
-static bool AmlStoreInto(AmlAct *a, const uint8_t **p, const uint8_t *end,
-                          const AmlValue *v) {
+static bool AmlStoreInto(AmlRun *run, AmlAct *a, const uint8_t **p,
+                          const uint8_t *end, const AmlValue *v) {
     if (*p >= end) {
         kprintf("[AML] %s: a Store names no target\n", a->what);
         return false;
@@ -2739,12 +3191,22 @@ static bool AmlStoreInto(AmlAct *a, const uint8_t **p, const uint8_t *end,
                 "hold\n", a->what);
         return false;
     }
-    if (o->type == AML_OBJ_FIELD || o->type == AML_OBJ_REGION) {
-        kprintf("[AML] %s: stores into %s, which is %s — this kernel reads "
-                "address spaces and writes none, so the method is abandoned "
-                "here rather than half-run\n",
-                a->what, o->name, AmlTypeName(o->type));
+    if (o->type == AML_OBJ_REGION) {
+        kprintf("[AML] %s: stores into %s, which is an operation region "
+                "named whole — a region has no width and no offset of its "
+                "own, so there is nothing here to place a value in. The "
+                "method is abandoned rather than half-run\n",
+                a->what, o->name);
         return false;
+    }
+    if (o->type == AML_OBJ_FIELD) {
+        if (v->type != AML_OBJ_INTEGER) {
+            kprintf("[AML] %s: stores %s into %s, and the only value this "
+                    "kernel places in a field of an operation region is an "
+                    "integer\n", a->what, AmlTypeName(v->type), o->name);
+            return false;
+        }
+        return AmlRegionWrite(run, o, a->what, v->integer);
     }
     if (o->type != AML_OBJ_INTEGER && o->type != AML_OBJ_NAME &&
         o->type != AML_OBJ_UNINIT) {
@@ -3047,7 +3509,7 @@ static bool AmlExprStep(AmlRun *run) {
 
         case AML_AFTER_STORE: {
             AmlBlock *b = &a->blk[a->blkn - 1];
-            if (!AmlStoreInto(a, &a->cur, a->cur_end, &v)) return false;
+            if (!AmlStoreInto(run, a, &a->cur, a->cur_end, &v)) return false;
             b->p = a->cur;
             return true;
         }
@@ -3139,7 +3601,7 @@ static bool AmlExprStep(AmlRun *run) {
     a->pendn--;
     for (uint8_t i = 0; i < ntargets; i++) {
         const AmlValue *give = (i < ntv) ? &tv[i] : &folded;
-        if (!AmlStoreInto(a, &a->cur, a->cur_end, give)) return false;
+        if (!AmlStoreInto(run, a, &a->cur, a->cur_end, give)) return false;
     }
     a->val      = folded;
     a->have_val = true;
@@ -3389,14 +3851,16 @@ static bool AmlRunTo(AmlRun *run) {
  *   _STA  §6.3.7             whether it is there and enabled
  *   _PIC  §5.8.1             which interrupt model OSPM runs
  */
+static bool AmlNameIs(const char *name, const char *four) {
+    return name[0] == four[0] && name[1] == four[1] &&
+           name[2] == four[2] && name[3] == four[3];
+}
+
 static bool AmlNameOpensWindow(const char *name) {
     static const char *const routing[] =
         { "_PRT", "_CRS", "_PRS", "_STA", "_PIC" };
-    for (uint32_t i = 0; i < 5; i++) {
-        const char *r = routing[i];
-        if (name[0] == r[0] && name[1] == r[1] &&
-            name[2] == r[2] && name[3] == r[3]) return true;
-    }
+    for (uint32_t i = 0; i < 5; i++)
+        if (AmlNameIs(name, routing[i])) return true;
     return false;
 }
 
@@ -3417,6 +3881,14 @@ static bool AmlEvalIn(AmlRun *run, aml_object_t *node, const AmlValue *args,
      * run replaces it with its own answer. */
     run->window = AmlNameOpensWindow(node->name);
     run->window_for = node->name;
+
+    /* ‼ THE ONLY ASSIGNMENT TO run->may_write IN THIS FILE, and it needs both
+     * halves. `proven` says the narrow gate walked this method whole; the
+     * name says the object being evaluated is the one it walked. Neither on
+     * its own opens anything, and a nested evaluation on a fresh run — a
+     * region's base term, an interrupt link's _CRS — has `proven` false
+     * because AmlRunInit zeroed it and nothing but AmlRoutingAdopt sets it. */
+    run->may_write = run->proven && AmlNameIs(node->name, "_PIC");
 
     if (node->type != AML_OBJ_METHOD) {
         if (argc) {
@@ -3616,16 +4088,31 @@ typedef struct AmlRootBridge {
 /*
  * ‼ WHAT \_PIC'S ABSENCE MEANS, AND WHY IT IS NOT THE SAME AS ITS FAILURE.
  *
- * ACPI 6.5 §5.8.1: "This optional object is a control method that OSPM must
- * call to indicate the interrupt model being used ... If the platform does
- * not implement the \_PIC method, OSPM assumes the platform is in PIC mode."
+ * ACPI 6.5 §5.8.1 entire, because every clause of it decides something
+ * below: "The \_PIC optional method is used to report to the platform
+ * runtime firmware the current interrupt model used by the OS. This control
+ * method returns nothing. The argument passed into the method signifies the
+ * interrupt model OSPM has chosen, PIC mode, APIC mode, or SAPIC mode.
+ * Notice that calling this method is optional for OSPM. If the platform CPU
+ * architecture supports PIC mode and the method is never called, the
+ * platform runtime firmware must assume PIC mode. It is important that the
+ * platform runtime firmware save the value passed in by OSPM for later use
+ * during wake operations."
+ *
+ * Read it in the direction it is written. The assumption belongs to the
+ * FIRMWARE, not to OSPM: an untold platform is not one this kernel chooses
+ * to read as PIC-mode, it is one the firmware is required to keep holding
+ * the PIC-mode description out on. That is what makes reading its directly
+ * numbered entries as 8259 lines a fact about the board rather than an
+ * optimistic guess. The condition attached to it — "if the platform CPU
+ * architecture supports PIC mode" — holds on every x86-64 machine.
  *
  * Three different facts hide behind one old boolean, and treating them alike
  * threw away every board of the first kind:
  *
  *   NOT_DECLARED — the firmware has ONE routing table and no way to switch.
- *     §5.8.1 says OSPM assumes PIC mode, and on such a platform that is not a
- *     warning: the PIRQ router's output IS an interrupt-controller input, and
+ *     §5.8.1 has the FIRMWARE assume PIC mode, and on such a platform that
+ *     is not a warning: the PIRQ router's output IS an interrupt-controller input, and
  *     the first sixteen IO-APIC inputs ARE the 8259's sixteen lines. That is
  *     precisely what the MADT's Interrupt Source Overrides exist to describe
  *     the exceptions to. The number is the board's own and it is the only one
@@ -3669,11 +4156,17 @@ static aml_object_t *AmlWalkNext(aml_object_t *node, aml_object_t *root) {
 }
 
 /*
- * The seven characters an EISA id integer spells. ACPI 6.5 §19.6.30 defines
- * EISAID as a compressed form: three five-bit letters biased by '@' followed
- * by four hexadecimal digits, laid out so the whole thing reads as a
- * little-endian DWord. Decoding it is how "PNP0A03" is recognised without a
- * magic constant standing in for the string.
+ * The seven characters an EISA id integer spells. ACPI 6.5 §19.6.37 is the
+ * EISAID macro — a seven-character "UUUNNNN" string turned into "its
+ * corresponding 4-byte numeric EISA ID encoding" — and §6.1.5 calls what a
+ * _HID then holds "a numeric 32-bit compressed EISA type ID". Neither
+ * section writes the bit layout out, so what follows is a restatement of the
+ * compression every PNP ID uses rather than a quotation: three five-bit
+ * letters biased by '@' followed by four hexadecimal digits, laid out so the
+ * whole thing reads as a little-endian DWord. (§19.6.30, cited here before,
+ * is DerefOf and has nothing to do with EISA ids.) Decoding it is how
+ * "PNP0A03" is recognised without a magic constant standing in for the
+ * string.
  */
 static void AmlEisaIdText(uint64_t id, char out[8]) {
     static const char hex[] = "0123456789ABCDEF";
@@ -4217,9 +4710,11 @@ static void AmlSaySrsIsMissing(AmlRun *run, aml_object_t *link) {
     kprintf("[AML] %[E]interrupt link %s carries no interrupt, and giving it "
             "one means picking a number out of its _PRS and WRITING it to the "
             "chipset's routing register through %s._SRS (ACPI 6.5 §6.2.16). "
-            "This kernel reads address spaces and writes none, so _SRS is a "
-            "capability it does not have — the lines behind this link keep "
-            "their weaker source%[D]\n",
+            "That register is in SystemIO or PCI configuration space on every "
+            "board, and this kernel writes in neither — the one store it "
+            "makes is into memory the firmware's own map calls ACPI NVS. So "
+            "_SRS is a capability it does not have, and the lines behind this "
+            "link keep their weaker source%[D]\n",
             link->name, link->name);
 }
 
@@ -4635,6 +5130,779 @@ static bool AmlPrtLookup(AmlPrtTable *t, uint8_t device, uint8_t pin0,
     return false;
 }
 
+/* =====================================================================
+ * THE NARROW GATE — the whole of \_PIC, or none of it.
+ *
+ * ‼ WHY A GATE AT ALL, AND WHY IT IS SHAPED LIKE THIS.
+ *
+ * On the owner's board this file printed, and was right to print:
+ *
+ *   [AML] _PIC: stores into GPIC, which is a field of an operation region —
+ *   this kernel reads address spaces and writes none, so the method is
+ *   abandoned here rather than half-run
+ *
+ * The refusal was correct and the consequence was not. §5.8.1 puts the cost
+ * of silence on the firmware — never told, it must assume PIC mode — so a
+ * \_PIC that is declared and cannot be run leaves this kernel unable to say
+ * which of two routing tables it is being handed, and every directly
+ * numbered entry of that table is then refused. On a modern PCH that is the
+ * ordinary form, so the loss is most of the board's own statement about its
+ * interrupts.
+ *
+ * What was actually wrong was not the refusal but the ORDER of it: the
+ * method was entered, run part-way, and abandoned at the first store. A
+ * firmware method stopped in the middle is the worst of the three outcomes —
+ * worse than running it and worse than leaving it alone — because the
+ * platform is now in a state neither side has a name for.
+ *
+ * So the decision moves to before the first instruction. This walk takes
+ * every byte of \_PIC and of every method it calls, takes BOTH sides of
+ * every If (which branch runs depends on values this pass does not have),
+ * and asks of each operation only: is this one this evaluator performs, and
+ * is this store one this kernel may carry out. If the walk reaches the end,
+ * the method is run for real with those stores allowed. If it stumbles
+ * anywhere, it says where, and NOTHING is run — the behaviour the board
+ * already had, arrived at without touching the platform first.
+ *
+ * ‼ WHAT IT PROVES. Every OPERATION in the method is one this evaluator
+ * performs, and every STORE lands somewhere this kernel may carry it out —
+ * that second question goes to AmlFieldWritable, which is the same function
+ * the writer asks again on its way to the register, so the two answers
+ * cannot drift apart.
+ *
+ * ‼ AND WHAT IT DOES NOT, WHICH WAS WRITTEN HERE TOO SMALL. What stood in
+ * this paragraph said the walk "can never admit one it could not" run, and
+ * named the whole residue as a register that might not answer and a divisor
+ * that might come out zero. That list was short by its largest item: THIS
+ * WALK HAS NO VALUES, SO IT HAS NO TYPES. The machine computes with integers
+ * and with nothing else, and it says so in five places — the folder, an If's
+ * predicate, and a store into a field of a region, into a namespace name, or
+ * into a buffer field. Which of those fires is decided by a value the text
+ * does not carry: what Arg0 was handed, what a name holds today, what a
+ * called method gave back (one that returns nothing yields an object of no
+ * type at all). So a method this gate passes can still be handed a buffer
+ * where an integer was owed, and stop there, in the middle, with earlier
+ * stores already landed. That is the very outcome the gate was built to
+ * exclude, and it is narrower than it was rather than gone.
+ *
+ * What covers the residue is not a claim but a count — AmlRun::writes — and
+ * a method that was proven and then failed anyway says out loud how many
+ * stores had already landed. Closing it instead would mean carrying a type
+ * for every Local, every Arg and every method's return value across both
+ * sides of every If: the evaluator written a second time, and still ending
+ * at "unknown" wherever the caller or the firmware supplies the value. A
+ * gate that cannot close a hole is worth more saying so than claiming it.
+ *
+ * ‼ WHERE THE TEXT ALONE DECIDES, THIS WALK DECIDES WITH THE MACHINE. Three
+ * of the machine's refusals need no values at all, and all three are made
+ * here rather than left to the middle of a run: a Name whose value is
+ * another name yields nothing that can be cut, because the evaluator hands
+ * back the node and does not dereference it; a Buffer declared with no bytes
+ * is not a buffer a CreateXField can cut; and a cut that reaches past the
+ * end of the buffer it names is refused where it is written.
+ *
+ * ‼ AND ABOUT TEXT IT IS STRICTER THAN THE MACHINE, ON PURPOSE. Statements
+ * standing after a Return in the same block are dead, and this walk proves
+ * them anyway, because it does not know which Return fires; both sides of
+ * every If are proven and only one of them will run; a cut nothing ever
+ * reads is refused all the same. Each of those can only refuse a method the
+ * machine could have carried, which is the direction an all-or-nothing gate
+ * has to err in — and each is a statement about TEXT, which is the only
+ * thing this walk sees.
+ *
+ * ‼ AND IT ADDS NO While. The obvious way to widen a gate like this is to
+ * start running loops, and it is not taken: neither \_PIC of the two real
+ * firmware bodies this was built against contains one, DefWhile stays
+ * refused by name in both the walk and the machine, and a board whose \_PIC
+ * loops is left exactly where it is today. If that ever has to change, the
+ * bound on it will be a DEADLINE taken from the clockboard on entry, not a
+ * count of iterations — an iteration count is a number nobody can justify,
+ * and the thing actually being protected is wall-clock time.
+ * ===================================================================== */
+
+/* What the walk still owes itself, one byte per item. The same technique the
+ * parse pass uses in AmlSkipRun, and for the same reason: an operand nests
+ * as deeply as the firmware wrote it, and the C stack is not where that
+ * depth belongs. */
+#define AML_GATE_TERM    0u      /* one TermArg   §20.2.5 */
+#define AML_GATE_TARGET  1u      /* one Target    §20.2.2 */
+
+/* One object a method declares for itself — Name, or a CreateXField view.
+ *
+ * ‼ A LENGTH AND NOT A FLAG, BECAUSE THE MACHINE KEEPS A LENGTH. A method's
+ * own buffer is a COPY the run makes (AmlDeclareLocal), and it is made only
+ * where the declaration handed it bytes: a Name whose value is another name
+ * is not dereferenced and yields none, and a Buffer declared empty has none
+ * to give. Carrying the same number the run will carry is what lets this
+ * walk answer a CreateXField exactly as the run answers it rather than
+ * approximately. Zero means there is nothing here that can be cut. */
+typedef struct AmlGateName {
+    char     name[4];
+    uint32_t buf_len;            /* bytes the run's own copy would hold */
+} AmlGateName;
+
+/* One TermList of the method being proven: its body, or an If or Else body. */
+typedef struct AmlGateBlock {
+    const uint8_t *p;
+    const uint8_t *end;
+} AmlGateBlock;
+
+typedef struct AmlGate {
+    aml_object_t **todo;  uint32_t todon,  todo_room;  /* methods still to prove */
+    aml_object_t **seen;  uint32_t seenn,  seen_room;  /* methods already proven */
+    AmlGateBlock  *blk;   uint32_t blkn,   blk_room;
+    AmlGateName   *obj;   uint32_t objn,   obj_room;
+    uint8_t       *owed;  uint32_t owed_room;
+
+    aml_object_t  *now;          /* the method being proven — names resolve here */
+    const char    *asked_for;    /* what the whole walk is for, named in refusals */
+    uint32_t       writes;
+    uint32_t       reads;
+    uint32_t       methods;
+} AmlGate;
+
+/* Where it stumbled, said once and in full, because on a live board this is
+ * the only account anybody gets of why the platform was left untold. */
+static bool AmlGateSay(AmlGate *g, const uint8_t *at, const char *what,
+                        const char *tail) {
+    const uint8_t *from = g->now->v.method.aml;
+    kprintf("[AML] %[E]%s cannot be run whole — at byte %lu of %s's body "
+            "stands %s%s. Not one byte of %s is run: a firmware method "
+            "carried half-way leaves the platform in a state neither side "
+            "has a name for, and this gate is all or nothing%[D]\n",
+            g->asked_for,
+            (unsigned long)((at >= from) ? (size_t)(at - from) : 0u),
+            g->now->name, what, tail ? tail : "", g->asked_for);
+    return false;
+}
+
+static bool AmlGateNoRoom(AmlGate *g, const char *forwhat) {
+    kprintf("[AML] %[E]%s cannot be run whole: the heap has no room to %s, so "
+            "this walk cannot finish and an unfinished proof proves nothing. "
+            "Nothing is run%[D]\n", g->asked_for, forwhat);
+    return false;
+}
+
+static bool AmlGateOwe(AmlGate *g, uint32_t *n, uint8_t kind) {
+    uint8_t *grown = (uint8_t *)AmlStackRoom(g->owed, &g->owed_room, *n + 1, 1);
+    if (!grown) return AmlGateNoRoom(g, "measure an operand nested this deep");
+    g->owed = grown;
+    g->owed[(*n)++] = kind;
+    return true;
+}
+
+static bool AmlGatePush(AmlGate *g, const uint8_t *p, const uint8_t *end) {
+    AmlGateBlock *grown = (AmlGateBlock *)AmlStackRoom(g->blk, &g->blk_room,
+                                                       g->blkn + 1,
+                                                       sizeof(AmlGateBlock));
+    if (!grown) return AmlGateNoRoom(g, "walk into a block nested this deep");
+    g->blk = grown;
+    g->blk[g->blkn].p   = p;
+    g->blk[g->blkn].end = end;
+    g->blkn++;
+    return true;
+}
+
+static bool AmlGateHasName(AmlGate *g, const char seg[4], uint32_t *buf_len) {
+    for (uint32_t i = 0; i < g->objn; i++) {
+        AmlGateName *o = &g->obj[i];
+        if (o->name[0] == seg[0] && o->name[1] == seg[1] &&
+            o->name[2] == seg[2] && o->name[3] == seg[3]) {
+            if (buf_len) *buf_len = o->buf_len;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool AmlGateDeclare(AmlGate *g, const char seg[4], uint32_t buf_len) {
+    AmlGateName *grown = (AmlGateName *)AmlStackRoom(g->obj, &g->obj_room,
+                                                     g->objn + 1,
+                                                     sizeof(AmlGateName));
+    if (!grown) return AmlGateNoRoom(g, "hold the objects this method declares");
+    g->obj = grown;
+    g->obj[g->objn].name[0] = seg[0]; g->obj[g->objn].name[1] = seg[1];
+    g->obj[g->objn].name[2] = seg[2]; g->obj[g->objn].name[3] = seg[3];
+    g->obj[g->objn].buf_len = buf_len;
+    g->objn++;
+    return true;
+}
+
+/* A method this walk must prove as well, because the one being walked calls
+ * it. Queued once: a method already proven, or already queued, is not queued
+ * again — which is also what keeps a method that calls itself from queueing
+ * work for ever. */
+static bool AmlGateOwesMethod(AmlGate *g, aml_object_t *m) {
+    for (uint32_t i = 0; i < g->seenn; i++) if (g->seen[i] == m) return true;
+    for (uint32_t i = 0; i < g->todon; i++) if (g->todo[i] == m) return true;
+    aml_object_t **grown = (aml_object_t **)AmlStackRoom(g->todo, &g->todo_room,
+                                                         g->todon + 1,
+                                                         sizeof(aml_object_t *));
+    if (!grown) return AmlGateNoRoom(g, "hold the methods this one calls");
+    g->todo = grown;
+    g->todo[g->todon++] = m;
+    return true;
+}
+
+/*
+ * One literal, measured exactly and checked against what the evaluator will
+ * make of it. `*was` comes back false when these bytes are not a literal at
+ * all, and `*p` is then untouched.
+ */
+static bool AmlGateLiteral(AmlGate *g, const uint8_t **p, const uint8_t *end,
+                            bool *was, uint32_t *buf_len) {
+    *was = false;
+    if (buf_len) *buf_len = 0;
+    if (*p >= end) return true;
+    const uint8_t *at = *p;
+    uint8_t op = **p;
+
+    switch (op) {
+    case ZeroOp: case OneOp: case OnesOp:
+    case BytePrefix: case WordPrefix: case DWordPrefix: case QWordPrefix: {
+        *was = true;
+        uint64_t v = 0;
+        if (!read_const_integer(p, end, &v))
+            return AmlGateSay(g, at, "an integer whose encoding runs past the "
+                                     "end of the body", NULL);
+        return true;
+    }
+    case StringPrefix: {
+        *was = true;
+        (*p)++;
+        while (*p < end && **p) (*p)++;
+        if (*p >= end)
+            return AmlGateSay(g, at, "a string that runs past the end of the "
+                                     "body", NULL);
+        (*p)++;                                       /* the NUL */
+        return true;
+    }
+    case BufferOp: case PackageOp: case VarPackageOp: {
+        *was = true;
+        (*p)++;
+        uint32_t cb = 0;
+        uint32_t pklen = decode_pkglen(p, end, &cb);
+        if (!cb || pklen < cb)
+            return AmlGateSay(g, at, "a buffer or package whose length is "
+                                     "malformed", NULL);
+        const uint8_t *body_start = *p + cb;
+        const uint8_t *body_end   = *p + pklen;
+        if (body_end > end)
+            return AmlGateSay(g, at, "a buffer or package that runs past the "
+                                     "end of the body", NULL);
+        /* §20.2.5.4: a Buffer's size and a VarPackage's element count are
+         * TermArgs, and the evaluator reads only a constant there — a count
+         * it cannot read leaves the elements with no known start. A plain
+         * Package's count is one ByteData and is always readable. */
+        const uint8_t *q = body_start;
+        uint64_t n = 0;
+        if (op == PackageOp) {
+            if (q >= body_end)
+                return AmlGateSay(g, at, "a package that declares no element "
+                                         "count", NULL);
+        } else if (!read_const_integer(&q, body_end, &n)) {
+            return AmlGateSay(g, at,
+                              (op == BufferOp)
+                                ? "a buffer whose size is not a constant this "
+                                  "evaluator can read"
+                                : "a variable package whose element count is "
+                                  "not a constant, so its elements have no "
+                                  "known start", NULL);
+        }
+        /* ‼ AND HOW MANY BYTES OF IT THE RUN WOULD ACTUALLY HOLD. §20.2.5.4
+         * makes BufferSize the LOGICAL length and lets the ByteList be
+         * shorter, the tail being zero; AmlReadOperand therefore keeps the
+         * smaller of the two, and AmlDeclareLocal copies exactly that many
+         * bytes — and copies nothing at all when there are none, leaving a
+         * name that no CreateXField can cut. The same arithmetic taken here
+         * is what keeps this walk from proving a cut the run will refuse. */
+        if (buf_len && op == BufferOp) {
+            uint64_t have = (uint64_t)(body_end - q);
+            *buf_len = (uint32_t)((have < n) ? have : n);
+        }
+        *p = body_end;
+        return true;
+    }
+    default:
+        return true;                                  /* not a literal */
+    }
+}
+
+/* One DataRefObject, as the evaluator reads the value of a Name: a literal,
+ * or a name that yields the object it names without dereferencing it. */
+static bool AmlGateData(AmlGate *g, const uint8_t **p, const uint8_t *end,
+                         uint32_t *buf_len) {
+    bool was = false;
+    if (!AmlGateLiteral(g, p, end, &was, buf_len)) return false;
+    if (was) return true;
+
+    if (*p >= end)
+        return AmlGateSay(g, end, "a declaration whose value is missing", NULL);
+    uint8_t op = **p;
+    if (aml_is_name_string_lead(op) && op != 0x00) {
+        const uint8_t *at = *p;
+        aml_object_t *o = resolve_name(p, end, g->now, false, NULL);
+        if (!o)
+            return AmlGateSay(g, at, "a declaration whose value names "
+                                     "something this namespace does not hold",
+                              NULL);
+        /* ‼ AND IT YIELDS NOTHING THAT CAN BE CUT, WHATEVER IT NAMES. What
+         * stood here read the named object's type and called the declaration
+         * a buffer whenever that object was one — which is not what the run
+         * does: AmlReadOperand hands back the NODE and no value, so the copy
+         * AmlDeclareLocal would make has no bytes, and a CreateXField over
+         * this name is refused in the middle of the method. The zero
+         * AmlGateLiteral already left in *buf_len is the truth for a name
+         * too, and it is left standing on purpose. */
+        return true;
+    }
+    return AmlGateSay(g, *p, "a declaration whose value this evaluator does "
+                             "not read", NULL);
+}
+
+/*
+ * A read of an address space, judged on what the namespace already says:
+ * that it is a Field of a real region, in one of the three spaces this
+ * kernel reaches, and not one whose access protocol needs a write first.
+ * Where the region turns out to BE, and whether anything answers there, are
+ * facts about the running machine and belong to AmlRegionRead.
+ */
+static bool AmlGateMayRead(AmlGate *g, aml_object_t *field,
+                            const uint8_t *at) {
+    if (field->v.field.index || field->v.field.data)
+        return AmlGateSay(g, at, "a read of an IndexField, which would mean "
+                                 "writing its index register first: ",
+                          field->name);
+    if (field->v.field.bank)
+        return AmlGateSay(g, at, "a read of a BankField, which would mean "
+                                 "writing its bank selector first: ",
+                          field->name);
+    aml_object_t *rg = field->v.field.region;
+    if (!rg || rg->type != AML_OBJ_REGION)
+        return AmlGateSay(g, at, "a field of something this pass never "
+                                 "recorded as an operation region: ",
+                          field->name);
+    if (rg->v.region.space > 0x02) {
+        const char *nm = AmlSpaceName(rg->v.region.space);
+        return AmlGateSay(g, at, "a read of an operation region in an address "
+                                 "space this kernel reaches over no transport "
+                                 "of its own: ",
+                          nm ? nm : "one the specification has not named");
+    }
+    g->reads++;
+    return true;
+}
+
+/*
+ * One TermArg, or one Target, walked without producing a value. Left to
+ * right, so what a nested operand needs is not a stack of positions but a
+ * list of what is still OWED — the same shape AmlSkipRun uses in the parse
+ * pass, and for the same reason: no C recursion, and no ceiling on nesting
+ * but the heap.
+ */
+static bool AmlGateRun(AmlGate *g, const uint8_t **p, const uint8_t *end,
+                        uint8_t first) {
+    uint32_t n = 0;
+    if (!AmlGateOwe(g, &n, first)) return false;
+
+    while (n) {
+        uint8_t kind = g->owed[--n];
+        if (*p >= end)
+            return AmlGateSay(g, end,
+                              (kind == AML_GATE_TARGET)
+                                ? "a Store that names no target"
+                                : "a term that ends where an operand was "
+                                  "expected", NULL);
+        const uint8_t *at = *p;
+        uint8_t        op = **p;
+
+        if (kind == AML_GATE_TARGET) {
+            if (op == 0x00)                { (*p)++; continue; }  /* NullName */
+            if (op >= Local0Op && op <= Arg6Op) { (*p)++; continue; }
+            if (op == ExtOpPrefix) {
+                if ((size_t)(end - *p) >= 2 && (*p)[1] == ExtDebugOp) {
+                    *p += 2;                          /* Debug: discarded */
+                    continue;
+                }
+                return AmlGateSay(g, at, "a Store into an extended target "
+                                         "this evaluator does not write",
+                                  NULL);
+            }
+            char seg[4];
+            if (AmlBareSeg(*p, end, seg) && AmlGateHasName(g, seg, NULL)) {
+                (*p) += 4;                            /* the method's own */
+                continue;
+            }
+            if (!aml_is_name_string_lead(op))
+                return AmlGateSay(g, at, "a Store whose target is not a name",
+                                  NULL);
+            aml_object_t *o = resolve_name(p, end, g->now, false, NULL);
+            if (!o)
+                return AmlGateSay(g, at, "a Store into a name this namespace "
+                                         "does not hold", NULL);
+            if (o->type == AML_OBJ_FIELD) {
+                /* ‼ THE GATE ITSELF. Asked here, with no side effect, about
+                 * every store in the method — so a method holding one store
+                 * this kernel may not carry out is refused before the stores
+                 * it may are carried out. */
+                AmlFieldReach reach;
+                uint64_t      phys = 0;
+                if (!AmlFieldWritable(o, g->asked_for, &reach, &phys))
+                    return AmlGateSay(g, at, "a store this kernel may not "
+                                             "carry out — the reason is on "
+                                             "the line above — into ",
+                                      o->name);
+                g->writes++;
+                continue;
+            }
+            if (o->type == AML_OBJ_REGION)
+                return AmlGateSay(g, at, "a Store into an operation region "
+                                         "named whole, which has no width and "
+                                         "no offset of its own: ", o->name);
+            if (o->type != AML_OBJ_INTEGER && o->type != AML_OBJ_NAME &&
+                o->type != AML_OBJ_UNINIT)
+                return AmlGateSay(g, at, "a Store that would overwrite "
+                                         "something this evaluator does not "
+                                         "convert: ", AmlTypeName(o->type));
+            continue;
+        }
+
+        /* A TermArg. Literals first — none of their opcodes can begin a
+         * name, so the order below settles nothing that is ambiguous. */
+        bool was = false;
+        if (!AmlGateLiteral(g, p, end, &was, NULL)) return false;
+        if (was) continue;
+
+        if (op >= Local0Op && op <= Arg6Op) { (*p)++; continue; }
+
+        char seg[4];
+        if (AmlBareSeg(*p, end, seg) && AmlGateHasName(g, seg, NULL)) {
+            (*p) += 4;                                /* the method's own */
+            continue;
+        }
+
+        uint8_t nargs = 0, ntargets = 0;
+        if (AmlOperatorShape(op, &nargs, &ntargets)) {
+            (*p)++;
+            /* Pushed in reverse: the stream gives the arguments first and
+             * the targets after, so the arguments come off the top first. */
+            for (uint8_t i = 0; i < ntargets; i++)
+                if (!AmlGateOwe(g, &n, AML_GATE_TARGET)) return false;
+            for (uint8_t i = 0; i < nargs; i++)
+                if (!AmlGateOwe(g, &n, AML_GATE_TERM)) return false;
+            continue;
+        }
+
+        if (aml_is_name_string_lead(op) && op != 0x00) {
+            aml_object_t *o = resolve_name(p, end, g->now, false, NULL);
+            if (!o)
+                return AmlGateSay(g, at, "a name this namespace does not "
+                                         "hold, and no value is invented for "
+                                         "one", NULL);
+            if (o->type == AML_OBJ_METHOD) {
+                /* A call. Its body has to be proven too, and its arguments
+                 * follow it in the stream. */
+                if (!AmlGateOwesMethod(g, o)) return false;
+                uint8_t argc = (uint8_t)(o->v.method.flags & 0x7u);
+                for (uint8_t i = 0; i < argc; i++)
+                    if (!AmlGateOwe(g, &n, AML_GATE_TERM)) return false;
+                continue;
+            }
+            if (o->type == AML_OBJ_FIELD) {
+                if (!AmlGateMayRead(g, o, at)) return false;
+                continue;
+            }
+            if (o->type == AML_OBJ_PACKAGE && !o->v.package.body)
+                return AmlGateSay(g, at, "a package whose element count this "
+                                         "pass could not read, so its "
+                                         "elements have no known start: ",
+                                  o->name);
+            if (o->type == AML_OBJ_INTEGER || o->type == AML_OBJ_STRING ||
+                o->type == AML_OBJ_BUFFER  || o->type == AML_OBJ_PACKAGE)
+                continue;
+            return AmlGateSay(g, at, "a name holding no value this evaluator "
+                                     "can read: it is ", AmlTypeName(o->type));
+        }
+
+        if (op == ExtOpPrefix) {
+            uint8_t     sub = ((size_t)(end - *p) >= 2) ? (*p)[1] : 0;
+            const char *nm  = AmlExtOpName(sub);
+            return AmlGateSay(g, at, "an extended opcode where a value was "
+                                     "expected: ",
+                              nm ? nm : "one under 0x5B this pass cannot name");
+        }
+
+        {
+            const char *nm = AmlOpcodeName(op);
+            return AmlGateSay(g, at, "an operand this evaluator does not "
+                                     "evaluate: ",
+                              nm ? nm : "an opcode this pass cannot name");
+        }
+    }
+    return true;
+}
+
+/* One statement of the method being proven. `*done` comes back true when its
+ * last block has been walked to the end. */
+static bool AmlGateStep(AmlGate *g, bool *done) {
+    if (g->blkn == 0) { *done = true; return true; }
+    AmlGateBlock *b = &g->blk[g->blkn - 1];
+    if (b->p >= b->end) { g->blkn--; return true; }
+
+    uint8_t op = *b->p;
+
+    if (op == NoopOp) { b->p++; return true; }
+
+    if (op == ReturnOp) {
+        const uint8_t *q = b->p + 1;
+        if (!AmlGateRun(g, &q, b->end, AML_GATE_TERM)) return false;
+        b->p = q;
+        return true;
+    }
+
+    if (op == StoreOp) {
+        const uint8_t *q = b->p + 1;
+        if (!AmlGateRun(g, &q, b->end, AML_GATE_TERM))   return false;
+        if (!AmlGateRun(g, &q, b->end, AML_GATE_TARGET)) return false;
+        b->p = q;
+        return true;
+    }
+
+    if (op == IfOp) {
+        /* DefIfElse := IfOp PkgLength Predicate TermList DefElse — §20.2.5.3. */
+        const uint8_t *q  = b->p + 1;
+        uint32_t       cb = 0;
+        uint32_t       pk = decode_pkglen(&q, b->end, &cb);
+        if (!cb || pk < cb)
+            return AmlGateSay(g, b->p, "an If with a malformed package length",
+                              NULL);
+        const uint8_t *if_end = q + pk;
+        if (if_end > b->end)
+            return AmlGateSay(g, b->p, "an If that runs past the end of its "
+                                       "block", NULL);
+        const uint8_t *body = q + cb;
+        if (!AmlGateRun(g, &body, if_end, AML_GATE_TERM)) return false;
+
+        const uint8_t *else_body = NULL, *else_end = NULL;
+        const uint8_t *after     = if_end;
+        if (if_end < b->end && *if_end == ElseOp) {
+            const uint8_t *e   = if_end + 1;
+            uint32_t       ecb = 0;
+            uint32_t       epk = decode_pkglen(&e, b->end, &ecb);
+            if (!ecb || epk < ecb)
+                return AmlGateSay(g, if_end, "an Else with a malformed "
+                                             "package length", NULL);
+            const uint8_t *ee = e + epk;
+            if (ee > b->end)
+                return AmlGateSay(g, if_end, "an Else that runs past the end "
+                                             "of its block", NULL);
+            else_body = e + ecb;
+            else_end  = ee;
+            after     = ee;
+        }
+
+        b->p = after;                 /* before the stack below may move it */
+        /* ‼ BOTH SIDES, BECAUSE THE PREDICATE IS A VALUE AND THIS WALK HAS
+         * NO VALUES. A gate that proved only the branch it guessed would be
+         * guessing about the one that runs. */
+        if (else_body && else_body < else_end &&
+            !AmlGatePush(g, else_body, else_end)) return false;
+        if (body < if_end && !AmlGatePush(g, body, if_end)) return false;
+        return true;
+    }
+
+    if (op == NameOp) {
+        /* ‼ A DECLARATION INSIDE A BRANCH IS REFUSED. §20.2.5.2 puts a
+         * method's Name under the running method, so whether it exists after
+         * the If depends on which side ran — and this walk takes both. Rather
+         * than let a later Store find a name that may not be there, a board
+         * that declares one this way is left where it is. */
+        if (g->blkn > 1)
+            return AmlGateSay(g, b->p, "a Name declared inside an If or an "
+                                       "Else, so whether it exists afterwards "
+                                       "depends on a branch this walk cannot "
+                                       "choose between", NULL);
+        const uint8_t *q = b->p + 1;
+        char seg[4];
+        if (!AmlBareSeg(q, b->end, seg))
+            return AmlGateSay(g, b->p, "a Name inside a method body that "
+                                       "declares a path rather than a single "
+                                       "name", NULL);
+        q += 4;
+        uint32_t buf_len = 0;
+        if (!AmlGateData(g, &q, b->end, &buf_len)) return false;
+        if (!AmlGateDeclare(g, seg, buf_len))      return false;
+        b->p = q;
+        return true;
+    }
+
+    if (op == CreateBitFieldOp  || op == CreateByteFieldOp ||
+        op == CreateWordFieldOp || op == CreateDWordFieldOp ||
+        op == CreateQWordFieldOp) {
+        /* §20.2.5.2: DefCreateXField := op SourceBuff Index NameString. */
+        if (g->blkn > 1)
+            return AmlGateSay(g, b->p, "a CreateField inside an If or an "
+                                       "Else, so whether the field exists "
+                                       "afterwards depends on a branch this "
+                                       "walk cannot choose between", NULL);
+        /* The index is a BIT index for CreateBitField and a BYTE index for
+         * the other four — AmlStmtStep's own arithmetic, repeated here
+         * because the two passes have to land on the same bits or this one
+         * is proving a cut the other will not make. */
+        uint32_t width = (op == CreateBitFieldOp)   ? 1u  :
+                         (op == CreateByteFieldOp)  ? 8u  :
+                         (op == CreateWordFieldOp)  ? 16u :
+                         (op == CreateDWordFieldOp) ? 32u : 64u;
+        uint32_t scale = (op == CreateBitFieldOp) ? 1u : 8u;
+
+        const uint8_t *q = b->p + 1;
+        char src[4];
+        uint32_t buf_len = 0;
+        if (!AmlBareSeg(q, b->end, src))
+            return AmlGateSay(g, b->p, "a CreateField cutting into something "
+                                       "other than a single named object",
+                              NULL);
+        if (!AmlGateHasName(g, src, &buf_len) || buf_len == 0)
+            return AmlGateSay(g, b->p, "a CreateField naming a buffer this "
+                                       "method never declared, or one it "
+                                       "declared with no bytes in it", NULL);
+        q += 4;
+        uint64_t index = 0;
+        if (!read_const_integer(&q, b->end, &index))
+            return AmlGateSay(g, b->p, "a CreateField whose index is not a "
+                                       "constant this evaluator can read",
+                              NULL);
+        /* ‼ AND THE CUT HAS TO FIT, ANSWERED WHERE IT IS WRITTEN RATHER THAN
+         * WHERE IT IS USED. AmlBufFieldRead and AmlBufFieldWrite refuse a
+         * field that reaches past the end of the buffer it was cut from, and
+         * they refuse it at the read or the write — which in a method this
+         * gate has passed is the middle of the run, with earlier stores
+         * already landed. Every number in the question is in the text, so
+         * the answer is taken here instead. A method that declares such a
+         * cut and then never touches it is refused although the run would
+         * have survived it: that is the same direction this walk already
+         * errs in everywhere else. */
+        uint64_t bits = (uint64_t)buf_len * 8u;
+        if (index > bits || index * scale + width > bits)
+            return AmlGateSay(g, b->p, "a CreateField whose cut reaches past "
+                                       "the end of the buffer it names", NULL);
+        char name[4];
+        if (!AmlBareSeg(q, b->end, name))
+            return AmlGateSay(g, b->p, "a CreateField naming its field with a "
+                                       "path rather than a single name", NULL);
+        q += 4;
+        /* The view itself holds no bytes of its own — the run gives it an
+         * empty value and a window onto the buffer — so nothing may be cut
+         * out of it in turn, which is what the zero says. */
+        if (!AmlGateDeclare(g, name, 0)) return false;
+        b->p = q;
+        return true;
+    }
+
+    if (op == ElseOp)
+        return AmlGateSay(g, b->p, "an Else with no If before it", NULL);
+
+    if (op == ExtOpPrefix) {
+        uint8_t     sub = ((size_t)(b->end - b->p) >= 2) ? b->p[1] : 0;
+        const char *nm  = AmlExtOpName(sub);
+        return AmlGateSay(g, b->p, "a statement that acts on the platform "
+                                   "rather than reading it: ",
+                          nm ? nm : "an extended opcode under 0x5B this pass "
+                                    "cannot name");
+    }
+
+    {
+        uint8_t nargs = 0, ntargets = 0;
+        if (AmlOperatorShape(op, &nargs, &ntargets) ||
+            (aml_is_name_string_lead(op) && op != 0x00)) {
+            /* An expression standing alone: a method called for its effect,
+             * or an operator whose Target is the point of it. */
+            const uint8_t *q = b->p;
+            if (!AmlGateRun(g, &q, b->end, AML_GATE_TERM)) return false;
+            b->p = q;
+            return true;
+        }
+    }
+
+    /* Everything left, DefWhile among it. */
+    {
+        const char *nm = AmlOpcodeName(op);
+        return AmlGateSay(g, b->p, "a statement this evaluator does not run: ",
+                          nm ? nm : "an opcode this pass cannot name");
+    }
+}
+
+static void AmlGateForget(AmlGate *g) {
+    if (g->todo) kfree(g->todo);
+    if (g->seen) kfree(g->seen);
+    if (g->blk)  kfree(g->blk);
+    if (g->obj)  kfree(g->obj);
+    if (g->owed) kfree(g->owed);
+    memset(g, 0, sizeof(*g));
+}
+
+/*
+ * Walk `method` and everything it calls. True only if every operation in all
+ * of them is one this evaluator performs and every store is one this kernel
+ * may carry out; the refusal has already been printed otherwise.
+ */
+static bool AmlGateProve(aml_object_t *method, const char *asked_for,
+                          uint32_t *writes, uint32_t *reads,
+                          uint32_t *methods) {
+    AmlGate g;
+    memset(&g, 0, sizeof(g));
+    g.asked_for = asked_for;
+    g.now       = method;          /* so a refusal before the first pop names it */
+
+    bool ok = AmlGateOwesMethod(&g, method);
+    while (ok && g.todon) {
+        aml_object_t *m = g.todo[--g.todon];
+
+        bool again = false;
+        for (uint32_t i = 0; i < g.seenn; i++) if (g.seen[i] == m) again = true;
+        if (again) continue;
+
+        aml_object_t **grown =
+            (aml_object_t **)AmlStackRoom(g.seen, &g.seen_room, g.seenn + 1,
+                                          sizeof(aml_object_t *));
+        if (!grown) {
+            ok = AmlGateNoRoom(&g, "remember which methods it has proven");
+            break;
+        }
+        g.seen = grown;
+        /* Remembered BEFORE its body is walked, so a method that calls
+         * itself is not queued again and the walk cannot circle. */
+        g.seen[g.seenn++] = m;
+
+        g.now  = m;
+        g.objn = 0;                /* a method's own objects are its own */
+        g.blkn = 0;
+        if (!m->v.method.aml || m->v.method.aml_len == 0) {
+            kprintf("[AML] %[E]%s cannot be run whole: %s has an empty body, "
+                    "so there is nothing to prove and nothing to run%[D]\n",
+                    asked_for, m->name);
+            ok = false;
+            break;
+        }
+        if (!AmlGatePush(&g, m->v.method.aml,
+                         m->v.method.aml + m->v.method.aml_len)) {
+            ok = false;
+            break;
+        }
+        g.methods++;
+
+        bool done = false;
+        while (!done)
+            if (!AmlGateStep(&g, &done)) { ok = false; break; }
+    }
+
+    *writes  = g.writes;
+    *reads   = g.reads;
+    *methods = g.methods;
+    AmlGateForget(&g);
+    return ok;
+}
+
 /*
  * Tell the platform which interrupt model this kernel runs, and read what it
  * then says about routing. Once; every call after the first is a no-op.
@@ -4749,10 +6017,16 @@ void AmlRoutingAdopt(void) {
      * root bridge to resolve that register against. A _PRT is read lazily,
      * in AmlPrtTableFor, long after this returns.
      *
-     * ACPI 6.5 §5.8.1, \_PIC: "This optional object is a control method that
-     * OSPM must call to indicate the interrupt model being used ... Arg0: 0 -
-     * PIC mode, 1 - APIC mode, 2 - SAPIC mode ... If the platform does not
-     * implement the \_PIC method, OSPM assumes the platform is in PIC mode."
+     * ACPI 6.5 §5.8.1, \_PIC: "The \_PIC optional method is used to report
+     * to the platform runtime firmware the current interrupt model used by
+     * the OS ... The argument passed into the method signifies the interrupt
+     * model OSPM has chosen, PIC mode, APIC mode, or SAPIC mode ... If the
+     * platform CPU architecture supports PIC mode and the method is never
+     * called, the platform runtime firmware must assume PIC mode."
+     *
+     * The models are numbered in the order that sentence names them, which
+     * is what `model` below carries: 0 PIC, 1 APIC, 2 SAPIC. Only the first
+     * two exist on this architecture.
      */
     uint64_t model = (irqchip_get_type() == IRQCHIP_APIC) ? 1u : 0u;
     aml_object_t *pic = AmlChild(&g_root_obj, "_PIC");
@@ -4763,7 +6037,9 @@ void AmlRoutingAdopt(void) {
          * 0x3C, which is a weaker statement of the same thing. */
         g_pic = AML_PIC_NOT_DECLARED;
         kprintf("[AML] this firmware declares no \\_PIC. ACPI 6.5 §5.8.1 makes "
-                "that legal and makes its one routing table the PIC-mode one; "
+                "the method optional and puts the consequence on the firmware "
+                "rather than on us — never told, it must assume PIC mode — so "
+                "the one routing table it is holding out is the PIC-mode one; "
                 "on such a platform the 8259's inputs and the first sixteen "
                 "IO-APIC inputs are the same lines, so its numbers are read "
                 "as global system interrupts and the MADT's source overrides "
@@ -4775,30 +6051,94 @@ void AmlRoutingAdopt(void) {
                 "numbered entry of the table it hands over is not read as a "
                 "global system interrupt%[D]\n", AmlTypeName(pic->type));
     } else {
-        AmlRun run;
-        AmlRunInit(&run);
-        AmlValue arg;
-        memset(&arg, 0, sizeof(arg));
-        arg.type    = AML_OBJ_INTEGER;
-        arg.integer = model;
-        if (AmlEvalIn(&run, pic, &arg, 1, NULL)) {
-            g_pic = AML_PIC_TOLD;
-            kprintf("[AML] \\_PIC(%u) — this kernel runs its %s, and the "
-                    "firmware has been told so before its routing table is "
-                    "read\n", (unsigned)model,
-                    model ? "IO-APIC" : "8259 pair");
-        } else {
+        /* ‼ THE GATE FIRST, AND THE PLATFORM AFTERWARDS. Nothing below this
+         * line touches the machine until the walk above has proved that the
+         * whole of \_PIC — and of every method it calls — is something this
+         * evaluator can carry out from beginning to end. A board it cannot
+         * prove is left exactly where it stood before any of this existed. */
+        uint32_t owed_writes = 0, owed_reads = 0, owed_methods = 0;
+        if (!AmlGateProve(pic, "\\_PIC", &owed_writes, &owed_reads,
+                          &owed_methods)) {
             g_pic = AML_PIC_UNKNOWN;
-            kprintf("[AML] %[E]\\_PIC could not be run to the end, so this "
-                    "kernel does not know which of the firmware's routing "
-                    "tables it is being handed. §5.8.1 makes an untold "
-                    "platform a PIC-mode one, whose directly numbered "
+            kprintf("[AML] %[E]\\_PIC was not run at all, so this kernel does "
+                    "not know which of the firmware's routing tables it is "
+                    "being handed. §5.8.1 makes that assumption the "
+                    "firmware's and not ours: a platform runtime firmware "
+                    "that was never told must assume PIC mode, and since this "
+                    "kernel cannot tell whether it was told, it reads what it "
+                    "is handed as the PIC-mode table, whose directly numbered "
                     "entries are 8259 interrupts — those are refused. An "
                     "entry that names an interrupt link is still followed: "
                     "the link's _CRS reads the chipset's routing register, "
                     "which says the same thing in either mode%[D]\n");
+        } else {
+            kprintf("[AML] \\_PIC: the dry walk took every byte of it and of "
+                    "%u method(s) it calls, went down both sides of every If, "
+                    "and found every operation one this evaluator performs — "
+                    "%u store(s) into memory this board's own map calls ACPI "
+                    "NVS, %u read(s) of an address space. It may be run for "
+                    "real, with those stores allowed and nothing else\n",
+                    owed_methods, owed_writes, owed_reads);
+
+            AmlRun run;
+            AmlRunInit(&run);
+            /* ‼ THE ONLY ASSIGNMENT TO proven IN THIS FILE, on a run that is
+             * a local variable of this function — so the permission it
+             * carries ends when this function returns. */
+            run.proven = true;
+            AmlValue arg;
+            memset(&arg, 0, sizeof(arg));
+            arg.type    = AML_OBJ_INTEGER;
+            arg.integer = model;
+            if (AmlEvalIn(&run, pic, &arg, 1, NULL)) {
+                g_pic = AML_PIC_TOLD;
+                /* ‼ AND THIS IS WHERE THE KERNEL LEARNS WHICH TABLE IT WILL
+                 * BE HANDED. Not by reading back the name the firmware
+                 * branches on — that name is the board's own and this file
+                 * knows none of them — but from §5.8.1's own terms: the
+                 * argument names the model, the firmware is required to save
+                 * it, and what it describes from here on is the model it was
+                 * given. AmlPrtLookup reads AML_PIC_TOLD as exactly that. */
+                kprintf("[AML] \\_PIC(%u) ran to its end%s — this kernel runs "
+                        "its %s and the firmware has now been told so, before "
+                        "a single routing table has been read. What it hands "
+                        "over from here is the %s-mode table, so a directly "
+                        "numbered _PRT entry in it is a global system "
+                        "interrupt and is believed\n",
+                        (unsigned)model,
+                        run.writes ? "" : " and placed no value anywhere",
+                        model ? "IO-APIC" : "8259 pair",
+                        model ? "APIC" : "PIC");
+            } else {
+                g_pic = AML_PIC_UNKNOWN;
+                if (run.writes) {
+                    /* What the gate never promised, said plainly rather than
+                     * reported as a clean failure: whether a register
+                     * answers, and what type a value turns out to have, are
+                     * facts about the running machine and not about the
+                     * method's text. */
+                    kprintf("[AML] %[E]\\_PIC was proved runnable and then did "
+                            "not finish, after %u value(s) had already been "
+                            "placed. The dry walk proves every OPERATION is "
+                            "one this evaluator performs; it cannot promise a "
+                            "register will answer, nor that every value "
+                            "reaching an operation is the integer that "
+                            "operation takes — the line above says which of "
+                            "those it was. The firmware has been told half of "
+                            "something, and which routing table it now holds "
+                            "out is not known%[D]\n", run.writes);
+                } else {
+                    kprintf("[AML] %[E]\\_PIC was proved runnable and then did "
+                            "not finish, before any value had been placed — "
+                            "so the firmware is exactly as untold as it was, "
+                            "and which of its routing tables it is holding out "
+                            "is not known. Its directly numbered entries are "
+                            "refused; an entry naming an interrupt link is "
+                            "still followed%[D]\n");
+                }
+            }
+            AmlRunDone(&run);
         }
-        AmlRunDone(&run);
     }
 
 }
@@ -4997,10 +6337,11 @@ aml_status_t aml_init(void) {
     if (!dsdt) return AML_ERR_NOT_LOADED;
 
     /* ‼ HOW WIDE AN INTEGER IS ON THIS BOARD, TAKEN FROM THE BOARD.
-     * ACPI 6.5 §19.6.: AML of revision 1 computes with 32-bit integers, and
-     * revision 2 and above with 64-bit ones. The DSDT's own header carries
-     * that revision, and it governs the whole namespace including every
-     * SSDT. Getting it wrong makes Ones the wrong number and takes Not,
+     * ACPI 6.5 §19.6.29: a DSDT whose ComplianceRevision is less than 2
+     * restricts every integer to 32 bits, and one of 2 or above gets full
+     * 64-bit integers. The DSDT's own header carries that revision, and the
+     * same clause says it "sets the global integer width for all integers,
+     * including integers in SSDTs". Getting it wrong makes Ones the wrong number and takes Not,
      * ShiftLeft and every comparison against Ones with it — and the emulator
      * on this desk ships revision 1 while the owner's board ships 2, so it
      * is not a difference that can be left to a default. */

@@ -55,15 +55,21 @@
  *                   And the function has to ANSWER: a Vendor ID of 0xFFFF
  *                   means nothing is at the address the namespace led to,
  *                   which is refused rather than read as a register value.
- *   SystemMemory -> vmm_map_mmio READ-ONLY, for the length of one field read
+ *   SystemMemory -> vmm_map_mmio, for the length of one field access and not
+ *                   one instruction longer. Read-only for a read; writable
+ *                   only for the one store described below.
  *   SystemIO     -> io.h
- * The other eight spaces of ACPI 6.5 §20.2.5.2 — EmbeddedControl, SMBus,
- * SystemCMOS, PciBarTarget, IPMI, GeneralPurposeIO, GenericSerialBus and
- * PCC — are refused by name: each needs a transport of its own, and none of
- * them carries an interrupt-routing register. So are the codes above them,
- * and the refusal keeps them apart: 0x0B..0x7F are RESERVED to the
- * specification (0x0B is PlatformRtMechanism) and only 0x80..0xFF belong to
- * the board vendor.
+ * The other spaces of ACPI 6.5 Table 5.182 — EmbeddedControl, SMBus,
+ * SystemCMOS, PciBarTarget, IPMI, GeneralPurposeIO, GenericSerialBus, PCC,
+ * PlatformRtMechanism and FFixedHW — are refused by name: each needs a
+ * transport of its own, and none of them carries an interrupt-routing
+ * register. So are the codes with no name, and the refusal keeps the two
+ * kinds apart as that table does: 0x0C-0x7E is Reserved to the specification,
+ * 0x7F is FFixedHW and ACPI-defined, and only 0x80 to 0xFF belongs to the
+ * board vendor. (This paragraph used to attribute a reservation of
+ * 0x0B..0x7F to §20.2.5.2. §20.2.5.2 is AML grammar and reserves nothing; it
+ * names 0x00..0x0A and hands 0x80-0xFF to the OEM, and Table 5.182 is where
+ * the rest is written down.)
  *
  * ‼ AND A REGION SAYS WHERE IT IS BEFORE ANYTHING IS READ THROUGH IT.
  * §20.2.5.2 makes RegionOffset and RegionLen TermArgs, and shipping firmware
@@ -76,15 +82,49 @@
  * touched: a base recorded as zero because nobody could read one is
  * indistinguishable from a base of zero, and zero is an address.
  *
- * ‼ AND IT WRITES NONE OF THEM, EVER. There is no function in aml.c that
- * writes an address space, so this is not a rule that a later change could
- * forget to check: there is nothing to call. A Store into a Field or an
- * OperationRegion is refused on every path, in every state. An IndexField
- * and a BankField are refused one step earlier, because reading either one
- * means writing its index or bank selector first. And _SRS — the operator
- * that would CONFIGURE an interrupt link that is carrying nothing — is named
- * out loud as a capability this kernel does not have, rather than worked
- * around in silence.
+ * ‼ AND IT WRITES IN EXACTLY ONE OF THEM, THROUGH A GATE THAT IS ALL OR
+ *   NOTHING.
+ *
+ * There used to be no function in aml.c that wrote an address space at all,
+ * and that was a real guarantee until a real board made it a defect. \_PIC
+ * on every modern PCH stores its argument into a field of the firmware's own
+ * GNVS block, so a kernel that cannot store cannot tell the platform which
+ * interrupt model it runs — and ACPI 6.5 §5.8.1 puts the whole cost of that
+ * silence on the OS: "If the platform CPU architecture supports PIC mode and
+ * the method is never called, the platform runtime firmware must assume PIC
+ * mode." An untold board goes on holding out the table it prepared for the
+ * 8259s, and every directly numbered entry in it is then unusable. The old
+ * evaluator did worse than refuse: it ENTERED \_PIC, ran as far as the
+ * store, and abandoned it there — a firmware method stopped in the middle,
+ * which is the one outcome worse than not running it.
+ *
+ * So the decision moved to before the first instruction. A DRY WALK
+ * (AmlGateProve) takes every byte of \_PIC and of every method it calls,
+ * goes down BOTH sides of every If, and asks of each operation only whether
+ * this evaluator performs it and whether this kernel may carry out each
+ * store. Only a method that comes out the far end is run at all, and then
+ * with writes allowed for the length of that run and no longer. A method it
+ * cannot prove is not entered, and the board is left exactly where it stood.
+ *
+ * A store that does happen is narrow three times over:
+ *   - into a FIELD of a SystemMemory region, never a region named whole,
+ *     never an IndexField or a BankField (reaching either means writing its
+ *     selector first, and two accesses in a fixed order is a protocol);
+ *   - only where the field fills whole access units, because §20.2.5.2's
+ *     UpdateRule governs the bits beside a partial field and this pass does
+ *     not record it — which also means placing a value never has to read the
+ *     register first;
+ *   - only at a physical address the board's OWN memory map declares
+ *     AddressRangeNVS (ACPI 6.5 Table 15.1). "SystemMemory" alone is not
+ *     enough and never was: a SystemMemory region is as often an MMIO
+ *     window as it is firmware scratch RAM, and the memory map is the only
+ *     thing on the machine that tells them apart.
+ * Every other address space this evaluator can name is refused for WRITING
+ * by name, each with its own reason printed — see AmlSpaceWriteReason in
+ * aml.c, which takes them one at a time. And _SRS — the operator that would CONFIGURE an
+ * interrupt link that is carrying nothing — stays a capability this kernel
+ * does not have: the register it would write is in SystemIO or PCI
+ * configuration space on every board.
  *
  * ‼ THE WINDOW. An address space is reachable only while one of five objects
  * is being evaluated: _PRT (§6.2.13), _CRS (§6.2.2), _PRS (§6.2.12), _STA
@@ -279,10 +319,14 @@ typedef struct AmlPciStep {
 } AmlPciStep;
 
 /* Tell the platform which interrupt model OSPM is using, and read what it
- * then says about interrupt routing. ACPI 6.5 §5.8.1 makes the first half a
- * duty of its own, owed whether or not any PCI line ever needs the second:
- * "OSPM must call the \_PIC method to inform the platform of the interrupt
- * model in use". The model is asked of the interrupt controller, so this
+ * then says about interrupt routing. ACPI 6.5 §5.8.1 makes the call itself
+ * optional — "Notice that calling this method is optional for OSPM" — and
+ * makes staying silent expensive all the same: "If the platform CPU
+ * architecture supports PIC mode and the method is never called, the
+ * platform runtime firmware must assume PIC mode." So the first half is
+ * owed whether or not any PCI line ever needs the second, because an untold
+ * firmware goes on holding out the description it prepared for the 8259s.
+ * The model is asked of the interrupt controller, so this
  * belongs after irqchip_init and before the kernel registers its first
  * platform interrupt — which is where acpi_sci_register calls it. Idempotent,
  * and a no-op on a machine whose firmware declares neither \_PIC nor a PCI

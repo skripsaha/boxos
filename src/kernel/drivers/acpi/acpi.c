@@ -1117,10 +1117,13 @@ void acpi_sci_register(void) {
     /* ‼ THE PLATFORM IS TOLD WHICH INTERRUPT CONTROLLER IT IS TALKING TO,
      * HERE, BEFORE THIS KERNEL ASKS IT FOR ANYTHING.
      *
-     * ACPI 6.5 §5.8.1, \_PIC: "This optional object is a control method that
-     * OSPM must call to indicate the interrupt model being used ... If the
-     * platform does not implement the \_PIC method, OSPM assumes the platform
-     * is in PIC mode." A board that is never told hands back the description
+     * ACPI 6.5 §5.8.1, \_PIC: "The \_PIC optional method is used to report
+     * to the platform runtime firmware the current interrupt model used by
+     * the OS ... Notice that calling this method is optional for OSPM. If the
+     * platform CPU architecture supports PIC mode and the method is never
+     * called, the platform runtime firmware must assume PIC mode." The
+     * assumption is the firmware's, which is why staying silent is not free:
+     * a board that is never told hands back the description
      * it prepared for the 8259s — routing entries whose numbers are ISA
      * interrupts behind a PIRQ router, meaning nothing as GSIs — and on some
      * boards more than the routing changes.
@@ -1137,10 +1140,11 @@ void acpi_sci_register(void) {
         debug_printf("[ACPI] FADT advertises no SCI GSI\n");
         return;
     }
-    if (sci >= IRQ_MAX_COUNT) {
-        debug_printf("[ACPI] SCI GSI %u beyond IOAPIC range\n", sci);
-        return;
-    }
+    /* No upper bound on the SCI's GSI is tested here. It used to be refused
+     * above twenty-three — the width of this kernel's old vector window —
+     * which was a statement about the kernel wearing the costume of a
+     * statement about the chip. Whether the pin exists is asked of the IOAPIC
+     * when the line is armed. */
     /*
      * ACPI 6.5 §5.2.9, Table 5.9, SCI_INT (offset 46): "System vector the SCI
      * interrupt is wired to in 8259 mode. On systems that do not contain the
@@ -1214,7 +1218,7 @@ void acpi_sci_register(void) {
      * level, active low" in one breath, so all three are stated in one
      * place — SummonsForAcpiSci — and a PCI function that _PRT routes onto
      * this same pin can now join the line instead of being refused it. */
-    Summons line = SummonsForAcpiSci((uint8_t)sci);
+    Summons line = SummonsForAcpiSci(sci);
     if (!SummonsAnswer(&line, &g_sci_responder, acpi_sci_handler,
                        "the ACPI SCI")) {
         return;
@@ -1237,7 +1241,7 @@ void acpi_sci_arm(void)
 {
     if (!g_acpi.initialized || !g_acpi.fadt) return;
     uint16_t sci = g_acpi.fadt->sci_interrupt;
-    if (sci == 0 || sci >= IRQ_MAX_COUNT) return;
+    if (sci == 0) return;   /* the FADT says there is no SCI */
 
     acpi_tag_resolve(&g_acpi_tag_power_button, "acpi:power-button");
     acpi_tag_resolve(&g_acpi_tag_sleep_button, "acpi:sleep-button");
@@ -1256,7 +1260,7 @@ void acpi_sci_arm(void)
     /* Armed from the same description the handler was registered against,
      * so the pin's redirection entry and the registry cannot say different
      * things about a line this kernel is about to start taking. */
-    Summons line = SummonsForAcpiSci((uint8_t)sci);
+    Summons line = SummonsForAcpiSci(sci);
     if (!SummonsArm(&line)) {
         kprintf("[ACPI] %[E]the SCI line could not be armed — no ACPI event, "
                 "no power button, and no GPE will be delivered%[D]\n");
