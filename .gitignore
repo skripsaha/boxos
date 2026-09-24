@@ -29,8 +29,13 @@ build/
 *.elf
 *.backup
 
-# Host build tool (compiled from tools/nameplate.c)
+# Host build tools, each compiled from the .c beside it by a Makefile rule.
+# They are build products that happen to live outside build/ — and one of them
+# was tracked for years, so a macOS binary rode in the repository and every
+# edit to its source produced a second, meaningless diff of 53 kilobytes.
 tools/nameplate
+tools/create_tagfs
+tools/buildplate
 
 # Compiler-generated header-dependency files (-MMD). One per object; they are
 # build output, not source, and every clean target removes them.
@@ -52,4 +57,3 @@ osdev_other/
 # Written by tooling that runs inside a session, not by this project.
 .claude/hook-log.txt
 .claude/design-context.json
-tools/buildplate
