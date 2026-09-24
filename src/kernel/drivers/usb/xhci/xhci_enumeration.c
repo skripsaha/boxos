@@ -1882,7 +1882,7 @@ void xhci_enum_for_each_configured(xhci_controller_t* ctrl,
  */
 static void xhci_report_stuck(xhci_controller_t* ctrl,
                               struct xhci_device_slot* slot, uint8_t state,
-                              uint32_t waited_ms)
+                              uint32_t waited_ms, const char* why)
 {
     uint8_t  cmd_type = 0;
     uint32_t cmd_age  = 0;
@@ -1898,10 +1898,15 @@ static void xhci_report_stuck(xhci_controller_t* ctrl,
      * watchdog that was itself late then printed the same sentence as one that
      * fired on time, so "the device did not answer" and "nobody asked for two
      * seconds" were the same line. */
+    /* ‼ AND WHICH SILENCE IT WAS. Two different facts end this wait now and
+     * they have different remedies: the controller never began (GateClock, a
+     * handful of microframes) or the device did not answer in the time it was
+     * given (the budget, two seconds). One sentence for both would be the same
+     * defect this line was already fixed for once. */
     kprintf("[xHCI %s] port %u (slot %u): gave up after %u ms of silence "
-            "(the budget is %u) while %s\n",
+            "— %s — while %s\n",
             ctrl->name, slot->port_num, slot->slot_id, waited_ms,
-            XHCI_ENUM_TIMEOUT_MS, xhci_enum_state_name(state));
+            why, xhci_enum_state_name(state));
 
     /*
      * ‼ THE INTERRUPTER, NOT THE HANDLER'S TALLY.
@@ -2162,12 +2167,65 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
             slot->watch_since = now;
             continue;
         }
-        if ((int64_t)(now - slot->watch_since) < (int64_t)budget) {
-            continue;
+        /*
+         * ── GateClock: has the CONTROLLER even begun? ─────────────────────
+         *
+         * Asked before the budget, because it is a different and much cheaper
+         * question, and because the answer to it was sitting in memory for two
+         * thousand milliseconds while this loop watched a clock. Three facts,
+         * all written by the controller itself:
+         *
+         *   the endpoint is Running        — nothing is wrong with the pipe;
+         *   its TR Dequeue Pointer stands  — it has not consumed the transfer
+         *   where it stood at the doorbell   we rang for;
+         *   the device has answered nothing — ep0_answers is zero, so no event
+         *                                    has ever come back from it.
+         *
+         * Together they say the transfer was never started, and no further
+         * waiting will start it. Measured at the moment the old budget expired
+         * on the owner's Zenbook, all three were true — and had been from the
+         * first millisecond.
+         *
+         * ‼ It cannot shorten a DEVICE's time. If any one of the three is
+         * false — a single event came back, the pipe halted, the pointer moved
+         * — this says nothing and the full budget below still applies. The
+         * device that is slowly answering keeps every millisecond it had.
+         *
+         * The microframe difference is masked (xHCI 1.2 §5.5.1: fourteen bits,
+         * 2.048 s), and a difference that wrapped reads SMALL — so a wrap can
+         * only make this fire later, never sooner. doorbell_dequeue is also the
+         * witness that the pair was taken at all: a slot whose control ring has
+         * no context yet reads zero there and is left to the budget.
+         */
+        const char* why = NULL;
+
+        if (xhci_enum_step_can_be_asked_again(state) &&
+            slot->ep0_answers == 0 &&
+            slot->doorbell_dequeue != 0 &&
+            slot->ep0_ring && slot->slot_id != 0 &&
+            ctrl->runtime_regs) {
+
+            uint32_t mf_now   = ctrl->runtime_regs->mfindex & XHCI_MFINDEX_MASK;
+            uint32_t mf_since = (mf_now - slot->doorbell_mfindex) & XHCI_MFINDEX_MASK;
+
+            if (mf_since >= XHCI_GATE_CLOCK_MICROFRAMES &&
+                xhci_ep_context_state(ctrl, slot, 1) == XHCI_EP_STATE_RUNNING &&
+                xhci_ep_context_dequeue(ctrl, slot, 1) == slot->doorbell_dequeue) {
+                why = "the controller never began it — the endpoint is Running, "
+                      "its own dequeue pointer has not moved since the doorbell, "
+                      "and the device has answered nothing";
+            }
+        }
+
+        if (!why) {
+            if ((int64_t)(now - slot->watch_since) < (int64_t)budget) {
+                continue;
+            }
+            why = "the device did not answer in the time it was given";
         }
 
         xhci_report_stuck(ctrl, slot, state,
-                          (uint32_t)cpu_tsc_to_ms(now - slot->watch_since));
+                          (uint32_t)cpu_tsc_to_ms(now - slot->watch_since), why);
 
         /*
          * ‼ AND THE CONTROLLER AS A WHOLE — EVERY TIME, AND AS A DIFFERENCE.

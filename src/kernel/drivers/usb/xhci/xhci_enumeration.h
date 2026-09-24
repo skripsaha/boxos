@@ -266,6 +266,21 @@ struct xhci_device_slot {
      */
     uint32_t ep0_answers;
 
+    /*
+     * What the controller had got to on this pipe, and when, AT THE MOMENT THE
+     * DOORBELL WAS RUNG. Its TR Dequeue Pointer and the bus's own microframe
+     * counter, both taken in xhci_control_transfer just before the ring.
+     *
+     * Taken THERE and not at the watchdog's first pass, because the two are not
+     * the same question. A pointer snapshotted at some later pass has already
+     * moved if the controller started and then stalled — and "it has not moved
+     * since I looked" would then read as "it never started", which is a
+     * different fault with a different remedy. Taken at the doorbell, unchanged
+     * means unchanged since we asked. See XHCI_GATE_CLOCK_MICROFRAMES.
+     */
+    uint64_t doorbell_dequeue;
+    uint32_t doorbell_mfindex;
+
     /* Where to carry on from once a halted EP0 has been cleared. A device is
      * allowed to refuse an optional request, and refusing it halts the pipe;
      * so does babbling at one, and so does a transaction the controller could
@@ -562,6 +577,36 @@ const char* xhci_enum_state_name(uint8_t state);
  * a slot is held for its visitors. One number for two kindred meanings beats
  * two numbers chosen separately.
  */
+/*
+ * GateClock — how many microframes of the BUS the controller is given to begin
+ * a transfer at all, counted on MFINDEX rather than on any clock of ours.
+ *
+ * ‼ THIS IS NOT THE DEVICE'S BUDGET. XHCI_ENUM_TIMEOUT_MS below is: two
+ * seconds, four times the slowest interval USB 2.0 §9.2.6.4 allows a device for
+ * answering a standard request. That number is sound and stays. GateClock asks
+ * a completely different and much cheaper question: has the CONTROLLER even
+ * begun? It is answered by three facts the controller writes itself — the
+ * endpoint is Running, its TR Dequeue Pointer has not moved from where it stood
+ * when the doorbell was rung, and not one Transfer Event has come from the
+ * device. All three together mean the transfer was never started, and no amount
+ * of further waiting is going to start it.
+ *
+ * Measured on the owner's Zenbook, at the moment the old two-second budget
+ * expired: `its control pipe is Running; software has written up to TRB 3 of 32,
+ * the controller's own dequeue pointer stands at TRB 0 with cycle 1, and of 0
+ * transfer event(s) ever raised on it 0 came from the device`. That triple was
+ * true from the first millisecond and the kernel waited two thousand of them.
+ *
+ * Sixty-four microframes is eight frames of eight. A control transfer's SETUP
+ * stage is scheduled in the frame after the doorbell (USB 2.0 §11.17.5 puts
+ * control traffic in the next frame's budget), so eight frames is eight chances
+ * to have done the first thing — and 250 times shorter than the budget it
+ * stands in front of. Nothing shortens the DEVICE's time: if any one of the
+ * three facts is false, this test says nothing at all and the full two seconds
+ * still apply.
+ */
+#define XHCI_GATE_CLOCK_MICROFRAMES 64u
+
 #define XHCI_PORT_PATIENCE_MS 15000
 
 /* The attempt count is also the latch that says this port has been given up

@@ -217,6 +217,11 @@ typedef struct {
 
 typedef struct {
     volatile uint32_t mfindex;
+/* MFINDEX is fourteen bits of microframe counter (xHCI 1.2 §5.5.1), so it wraps
+ * every 2.048 s. Every difference taken on it must be masked, and a difference
+ * that wrapped reads SMALL — which is the safe direction for anything that
+ * fires when enough microframes have passed. */
+#define XHCI_MFINDEX_MASK  0x3FFFu
     uint32_t reserved[7];
     xhci_interrupter_regs_t interrupters[1024];
 } xhci_runtime_regs_t;

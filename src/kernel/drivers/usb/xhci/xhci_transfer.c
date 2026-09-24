@@ -486,6 +486,17 @@ int xhci_control_transfer(xhci_controller_t* ctrl,
         return -1;
     }
 
+    /*
+     * ‼ WHAT THE CONTROLLER HAD DONE, AND WHEN WE ASKED — taken here, one
+     * instruction before the doorbell, because this is the only moment at which
+     * "it has not moved since we rang" can be said truthfully. See GateClock
+     * (XHCI_GATE_CLOCK_MICROFRAMES) for what reads the pair.
+     */
+    slot->doorbell_dequeue = xhci_ep_context_dequeue(ctrl, slot, 1);
+    slot->doorbell_mfindex = ctrl->runtime_regs
+                           ? (ctrl->runtime_regs->mfindex & XHCI_MFINDEX_MASK)
+                           : 0u;
+
 #if CONFIG_XHCI_ENUM_SILENCE_PROOF
     /*
      * ── the one proof that a pipe which never spoke is answered by the port ──

@@ -3913,6 +3913,21 @@ run_enumsilence() {
     grep -q "trying again on a freshly reset port (attempt 1," "$L"
     chk $? "and the port was reset instead, on the first attempt"
 
+    # ‼ AND THE WAIT ENDED ON THE CONTROLLER'S OWN FACTS, NOT ON A CLOCK.
+    # GateClock: the endpoint Running, the dequeue pointer where it stood at the
+    # doorbell, and nothing ever answered. Under the injection all three are
+    # true from the first microframe, which is exactly what the boards showed.
+    grep -q "the controller never began it" "$L"
+    chk $? "the give-up named the controller, not the clock"
+
+    # And it was fast. The old road spent XHCI_ENUM_TIMEOUT_MS = 2000 ms here;
+    # GateClock is 64 microframes = 8 ms, seen by a 250 Hz tick, so anything
+    # under half a second proves the clock is no longer what decides.
+    local gms
+    gms=$(sed -n 's/.*gave up after \([0-9]*\) ms of silence.*/\1/p' "$L" | head -1)
+    [ -n "$gms" ] && [ "$gms" -lt 500 ]
+    chk $? "and it was decided in ${gms:-?} ms, not in the two-second budget"
+
     # The report tells the two counts apart now: everything that happened on the
     # pipe, and how much of it came from the device. A silenced pipe must read 0.
     grep -q "transfer event(s) ever raised on it 0 came from the device" "$L"

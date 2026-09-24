@@ -3,6 +3,39 @@
 
 #include "ktypes.h"
 
+/*
+ * ControllerSaid — one aligned 32-bit word of a structure THE CONTROLLER WRITES,
+ * read as a read.
+ *
+ * ‼ These structures are not ours. The xHC writes the Slot and Endpoint
+ * Contexts by DMA — xHCI 1.2 §6.2.2 and §6.2.3 — and software reads them to
+ * find out where the hardware has got to. A plain `ctx->dwords[2]` is a
+ * compiler-visible load of ordinary memory: it may be hoisted out of a loop,
+ * merged with an earlier load, or reordered against the loads beside it, and
+ * two fields of one pointer may then come from two different moments. Every
+ * read of these fields in this driver was that plain load, which made it
+ * correct by accident rather than by construction.
+ *
+ * So every such read goes through here: one aligned word, through a volatile
+ * view so the compiler must actually fetch it, followed by an acquire fence so
+ * the reads that follow cannot be hoisted above it. That is what makes a pair
+ * of words one snapshot rather than two.
+ *
+ * It does NOT make the read atomic with respect to the controller — nothing
+ * can, because the controller is a bus master and not a core. What it buys is
+ * that a decision made on these words is made on the words that were in memory
+ * when the decision was taken, and that a 64-bit field read as two words is
+ * read in one order. Anything that needs more than that must ask the
+ * controller a question and wait for its event, not read its notes.
+ */
+static inline uint32_t ControllerSaid(const uint32_t* word)
+{
+    uint32_t v = *(const volatile uint32_t*)word;
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    return v;
+}
+
+
 /* xHCI 1.2 spec: all contexts are 32 bytes (8 dwords) in 32-byte mode.
  * In 64-byte mode (CSZ=1 in HCCPARAMS1), each context is 64 bytes
  * with the extra 32 bytes reserved. We handle 64-byte mode by using

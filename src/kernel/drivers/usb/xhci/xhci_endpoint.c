@@ -727,7 +727,7 @@ uint8_t xhci_ep_context_state(xhci_controller_t* ctrl,
     const xhci_endpoint_context_t* ep_ctx =
         (const xhci_endpoint_context_t*)(ctx + (size_t)ctrl->context_size * dci);
 
-    return (uint8_t)(ep_ctx->dwords[0] & 0x7u);
+    return (uint8_t)(ControllerSaid(&ep_ctx->dwords[0]) & 0x7u);
 }
 
 /*
@@ -760,8 +760,12 @@ uint64_t xhci_ep_context_dequeue(xhci_controller_t* ctrl,
     const xhci_endpoint_context_t* ep_ctx =
         (const xhci_endpoint_context_t*)(ctx + (size_t)ctrl->context_size * dci);
 
-    return (uint64_t)ep_ctx->dwords[2] |
-           ((uint64_t)ep_ctx->dwords[3] << 32);
+    /* Low word first, then high, both through ControllerSaid: the fence
+     * between them is what makes the two halves one pointer rather than two
+     * readings of a pointer that moved in between. */
+    uint64_t lo = ControllerSaid(&ep_ctx->dwords[2]);
+    uint64_t hi = ControllerSaid(&ep_ctx->dwords[3]);
+    return lo | (hi << 32);
 }
 
 const char* xhci_ep_state_name(uint8_t state)
