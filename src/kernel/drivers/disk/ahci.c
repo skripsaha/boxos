@@ -75,7 +75,18 @@ static int ahci_port_stop(ahci_port_t* port) {
 
     regs->cmd &= ~AHCI_PCMD_ST;
 
-    // AHCI spec: 500ms for CR to clear after ST cleared
+    /* The exit is the fact — PxCMD.CR clearing — and the 500 ms is not a
+     * number picked here: AHCI 1.3.1 §10.4.2 names it exactly, "if PxCMD.CR
+     * does not clear within a reasonable time (500 milliseconds), it may
+     * assume the interface is in a hung condition". The clock cannot be
+     * replaced by an interrupt, because CR clearing raises none — it is a
+     * status bit the engine drops on its own schedule, not a completion the
+     * HBA signals — and this function is called from contexts with nothing
+     * else to wait on anyway: port bring-up before this port's PxIE is armed,
+     * the K-Core COMRESET path, and (since AHCI 1.3.1 §3.3.14 makes a clean
+     * stop the only proof the HBA has let go of a DMA buffer) the two places
+     * in this file that must know before freeing a page the controller might
+     * still be writing to. */
     uint64_t deadline = rdtsc() + cpu_ms_to_tsc(500);
     while (rdtsc() < deadline) {
         if ((regs->cmd & AHCI_PCMD_CR) == 0) {
@@ -91,7 +102,13 @@ static int ahci_port_stop(ahci_port_t* port) {
 
     regs->cmd &= ~AHCI_PCMD_FRE;
 
-    // AHCI spec: 500ms for FR to clear after FRE cleared
+    /* Same shape as the CR wait above, on PxCMD.FR — AHCI 1.3.1 §10.3.2:
+     * "software must first wait for PxCMD.FR to clear to '0'" before PxFB may
+     * be touched. §10.3.2 names no separate number for FR the way §10.4.2
+     * does for CR, so the same 500 ms bound is reused rather than invented: a
+     * DMA engine that will not idle within the time the specification itself
+     * calls unreasonable for the command-list engine is unreasonable here
+     * too, and FR raises no interrupt of its own to wait on instead. */
     deadline = rdtsc() + cpu_ms_to_tsc(500);
     while (rdtsc() < deadline) {
         if ((regs->cmd & AHCI_PCMD_FR) == 0) {
@@ -115,7 +132,11 @@ static int ahci_port_start(ahci_port_t* port) {
 
     ahci_port_regs_t* regs = port->regs;
 
-    // Wait up to 500ms for CR to clear before starting
+    /* Same register, same 500 ms and the same reason as ahci_port_stop's CR
+     * wait above (AHCI 1.3.1 §10.4.2): PxCMD.ST must not be set while
+     * PxCMD.CR is still 1 (§10.1.2), CR clearing is a status bit rather than
+     * an interrupt, and starting only ever follows a stop or a COMRESET —
+     * contexts with no armed interrupt of this port's own to wait on instead. */
     uint64_t start_deadline = rdtsc() + cpu_ms_to_tsc(500);
     while (rdtsc() < start_deadline) {
         if ((regs->cmd & AHCI_PCMD_CR) == 0) {
@@ -959,6 +980,16 @@ static error_t ahci_port_identify(ahci_port_t* port, uint16_t* id_out) {
     regs->ci = (1U << 0);                   // non-queued: PxCI only
     mfence();
 
+    /* The exit is PxCI clearing (AHCI 1.3.1 §5.3.2.1, the non-queued
+     * completion signal this command uses) or PxIS naming a task-file /
+     * host-bus / interface fatal error — both are the HBA's own word, not
+     * this driver's guess. The deadline stays only because there is nothing
+     * else to fall back on here: this probe runs from ahci_port_init, before
+     * ahci_init_irq has given this controller a vector and before
+     * ahci_port_enable_irq has armed this port's PxIE — main.c does both only
+     * after ahci_init returns. No MSI can land for this command however long
+     * it is waited for, so the clock is not a backstop beside an interrupt,
+     * it is the only exit a wedged device leaves open. */
     error_t result = ERR_TIMEOUT;
     uint64_t deadline = rdtsc() + cpu_ms_to_tsc(AHCI_TIMEOUT_CMD_DEFAULT);
     while (rdtsc() < deadline) {
@@ -982,7 +1013,39 @@ static error_t ahci_port_identify(ahci_port_t* port, uint16_t* id_out) {
 
     uint32_t isr = regs->is;               // W1C: clear any status the probe raised
     regs->is = isr;
-    pmm_free(buf_page, 1);
+
+    /* ‼ A TIMED-OUT COMMAND DOES NOT HAND THE PAGE BACK — THE HBA DOES.
+     *
+     * result == ERR_TIMEOUT means the loop above ran out of clock with PxCI
+     * bit 0 STILL SET: the HBA never signalled that it was done with this
+     * command, so for all this driver knows the DMA engine is this instant
+     * writing IDENTIFY's 512 bytes into buf_page. Freeing it here handed a
+     * page the controller still owned straight back to pmm_alloc, and
+     * whatever the next caller put there — a TagFS buffer, a page table — was
+     * the controller's to overwrite whenever it got around to finishing.
+     *
+     * The only proof that the HBA has let go is the one AHCI 1.3.1 offers:
+     * §3.3.14, writing PxCMD.ST from '1' to '0' clears PxCI itself as part of
+     * that transition. ahci_port_stop() is exactly that write, walked out to
+     * PxCMD.CR and PxCMD.FR/PxCMD.FRE clearing too (§10.3.2), so a successful
+     * return from it is the controller saying, in its own register, that it
+     * is no longer touching this port's command list or this buffer. A port
+     * that will not stop is a port still mid-transfer by every fact available
+     * here, and the page is held rather than freed — one held page against a
+     * corrupted heap is not a choice this driver gets to make twice. */
+    if (result == ERR_TIMEOUT) {
+        if (ahci_port_stop(port) == 0) {
+            pmm_free(buf_page, 1);
+        } else {
+            kprintf("[AHCI] port %u: IDENTIFY timed out and the port will not "
+                    "stop (CMD=0x%08x) — its DMA page is held, not freed, "
+                    "because the controller may still be writing to it\n",
+                    port->port_num, regs->cmd);
+        }
+    } else {
+        pmm_free(buf_page, 1);
+    }
+
     return result;
 }
 
@@ -1181,10 +1244,36 @@ static int ahci_port_init(uint8_t port_num) {
     regs->cmd |= AHCI_PCMD_FRE;
 
     /* Staggered spin-up (AHCI 1.3.1 §10.1.1): when CAP.SSS is set the drive
-     * stays spun down until commanded. Set SUD + power-on + ICC=active.
-     * Harmless on non-SSS HBAs where SUD reads as 1 / is reserved. */
+     * stays spun down until commanded, so this port asks for it — SUD +
+     * power-on + ICC=active.
+     *
+     * ‼ THE WRITE BELOW IS NOT MADE "HARMLESSLY" ON A NON-SSS HBA — IT IS NOT
+     * MADE AT ALL, AND THAT IS THE CORRECT READING OF THE REGISTER. AHCI
+     * 1.3.1 §3.3.7 gives PxCMD.SUD's own definition: "If CAP.SSS is '0', this
+     * bit is read-only and should be set to '1' by hardware." A comment used
+     * to stand here claiming the write happens and does no harm; on a
+     * CAP.SSS='0' HBA there is no write to be harmless, because the `if`
+     * below is exactly what stops one from being attempted. Skipping the
+     * write and attempting a no-op write are the same fact under §3.3.7 — the
+     * bit is hardware's to set either way — but only one of those sentences
+     * is true of what this driver does. */
     if (ahci_ctrl.cap & AHCI_CAP_SSS) {
         uint32_t cmd = regs->cmd;
+
+        /* Whether the drive was already spinning before this write is a
+         * question this register can only answer once. SUD reading 1 here
+         * means something upstream of this driver — firmware, or a warm boot
+         * that never cleared it — already commanded the spin-up; SUD reading
+         * 0 means the write below is the one that starts it. Nothing else in
+         * the machine remembers which of the two happened, and the console is
+         * the only place left to ask. */
+        kprintf("[AHCI] port %u: PxCMD.SUD reads %u before this write — the "
+                "drive was %s\n",
+                port_num, (cmd & AHCI_PCMD_SUD) ? 1u : 0u,
+                (cmd & AHCI_PCMD_SUD)
+                    ? "already spun up, by firmware or an earlier boot"
+                    : "spun up by this kernel, not before it");
+
         cmd |= AHCI_PCMD_SUD | AHCI_PCMD_POD;
         cmd  = (cmd & ~((uint32_t)AHCI_PCMD_ICC_MASK << AHCI_PCMD_ICC_SHIFT))
                | ((uint32_t)AHCI_PCMD_ICC_ACTIVE << AHCI_PCMD_ICC_SHIFT);
@@ -2779,7 +2868,24 @@ void ahci_test_read(void) {
 
     if (port->regs->ci & (1 << slot)) {
         debug_printf("[AHCI] Test READ: Timeout waiting for command completion\n");
-        pmm_free(dma_page, 1);
+        /* PxCI bit `slot` is still set: the HBA has not said it is done with
+         * this command, so dma_page may still be a live DMA target. Freeing
+         * it here — as this used to do unconditionally — is the same
+         * corruption ahci_port_identify carried at its own timeout exit: a
+         * page the controller still owns handed back to pmm_alloc, to be
+         * overwritten by whatever the next caller puts there. AHCI 1.3.1
+         * §3.3.14 makes a successful ahci_port_stop() (PxCMD.ST 1->0, which
+         * clears PxCI itself, walked out through PxCMD.CR/FR/FRE per
+         * §10.3.2) the one proof that the HBA let the buffer go; a port that
+         * will not stop keeps it, and the page stays held rather than freed. */
+        if (ahci_port_stop(port) == 0) {
+            pmm_free(dma_page, 1);
+        } else {
+            kprintf("[AHCI] Test READ: port %u will not stop (CMD=0x%08x) — "
+                    "its DMA page is held, not freed, because the controller "
+                    "may still be writing to it\n",
+                    port->port_num, port->regs->cmd);
+        }
         return;
     }
 
