@@ -984,13 +984,37 @@ static void mce_note_deliver(MceNoteSlot *slot, bool say_here) {
 static uint8_t          g_cmci_vector = 0;
 static SummonsResponder g_cmci_responder;
 
-/* What the arming found, for the one line that says it. Written by the BSP
- * before any AP exists; an AP that diverges says so itself. */
-static uint32_t         g_cmci_banks_present = 0;
-static uint32_t         g_cmci_banks_armed   = 0;
-static uint32_t         g_cmci_banks_held    = 0;
-static bool             g_cmci_delivery      = false;
-static const char      *g_cmci_owed          = NULL;
+/* What the arming found, PER LOGICAL PROCESSOR.
+ *
+ * ‼ IA32_MCi_CTL2.CMCI_EN read back set says "enabled" and nothing more: SDM
+ * Vol 3B §16.5.1 gives the bit no owner field, and "the CMCI facility of a
+ * bank may be shared by more than one logical processor". A core arms its
+ * banks before its local APIC is software-enabled and comes back for delivery
+ * afterwards, so on the second pass it reads ITS OWN enables — indistinguish-
+ * able from a sibling's unless this core remembers which bits it wrote.
+ * `mine` is that memory, and every count below is derived from it rather than
+ * from CMCI_EN alone.
+ *
+ * Indexed by amp_get_core_index(), which answers 0 for the BSP both before
+ * per-core GS exists (its early-boot fallback) and after (the BSP is built at
+ * descriptor index 0), so the BSP's two passes land in one slot. */
+typedef struct {
+    uint64_t    mine;     /* bit i ⇒ THIS core wrote bank i's CMCI_EN */
+    uint32_t    present;  /* banks whose CTL2 carries CMCI_EN at all */
+    uint32_t    armed;    /* popcount(mine) */
+    uint32_t    held;     /* enabled, and not by this core */
+    uint32_t    fresh;    /* banks the most recent pass turned on */
+    const char *owed;     /* why delivery is not armed HERE, or NULL */
+} MceCmciCoreArm;
+
+static MceCmciCoreArm   g_cmci_arm[MAX_CORES];
+static bool             g_cmci_delivery = false;
+
+/* amp_get_core_index() returns uint8_t and MAX_CORES is 256, so the index is
+ * in range by type. */
+static MceCmciCoreArm *MceCmciMine(void) {
+    return &g_cmci_arm[amp_get_core_index()];
+}
 
 /* A corrected error reached its bank's threshold.
  *
@@ -1067,8 +1091,9 @@ static void MceCmciAnswers(void) {
     /* A CMCI that found nothing to say is not silence to shrug at: the bank
      * is shared between logical processors (§16.5.1) and a sibling may have
      * read it first, or an uncorrected record is sitting in the walk waiting
-     * for a #MC that has not been raised. Said once per core — a storm of
-     * these would otherwise become the fault. */
+     * for a #MC that has not been raised. Said once for the machine — a storm
+     * of these would otherwise become the fault, and the line names the core
+     * it came from because the first one is the one worth chasing. */
     if (taken == 0) {
         static volatile uint32_t empty_said = 0;
         uint32_t expected = 0;
@@ -1091,26 +1116,35 @@ static void MceCmciAnswers(void) {
  * a write. That read-back IS the discovery method — nothing here decides from
  * a bank's number whether it has the facility.
  *
- * ‼ A bank that ALREADY had CMCI_EN set is left exactly as it is. §16.5.1:
- * "the CMCI facility of a bank may be shared by more than one logical
- * processor", so an enabled bank belongs to a sibling thread or to firmware,
- * and two owners of one bank would each clear the other's record out from
- * under it. Linux's cmci_discover makes the same test for the same reason.
+ * ‼ A bank that ALREADY had CMCI_EN set and is NOT in this core's `mine` mask
+ * is left exactly as it is. §16.5.1: "the CMCI facility of a bank may be
+ * shared by more than one logical processor", so such a bank belongs to a
+ * sibling thread or to firmware, and two owners of one bank would each clear
+ * the other's record out from under it. Linux's cmci_discover makes the same
+ * test for the same reason. A bank already in `mine` is this core's own
+ * earlier pass and stays counted as armed — nothing is rewritten, and it is
+ * not attributed to a sibling.
  *
  * The threshold is 1 — one corrected error is one interrupt. Any larger
  * number would be this kernel deciding how many corrected errors on a failing
  * DIMM are not worth hearing about, which is not something it can know. */
 static void MceCmciBanksArm(void) {
-    uint32_t present = 0, armed = 0, held = 0;
+    MceCmciCoreArm *me = MceCmciMine();
+    uint32_t present = 0, held = 0, fresh = 0;
 
     for (uint32_t i = 0; i < g_mce_bank_count && i < MCE_MAX_BANKS; i++) {
+        uint64_t bit    = 1ULL << i;
         uint64_t before = mce_rdmsr(MCE_MSR_MC_CTL2_BASE + i);
 
         if (before & MCE_MC_CTL2_CMCI_EN) {
             present++;
-            held++;
+            if (!(me->mine & bit)) held++;
             continue;
         }
+
+        /* Not enabled, so it is not this core's whatever an earlier pass
+         * recorded — firmware or an SMI may have taken it back. */
+        me->mine &= ~bit;
 
         uint64_t want = (before & ~(MCE_MC_CTL2_THRESHOLD_MASK |
                                     MCE_MC_CTL2_CMCI_EN)) |
@@ -1129,12 +1163,16 @@ static void MceCmciBanksArm(void) {
             mce_wrmsr(MCE_MSR_MC_CTL2_BASE + i, before);
             continue;
         }
-        armed++;
+        me->mine |= bit;
+        fresh++;
     }
 
-    g_cmci_banks_present = present;
-    g_cmci_banks_armed   = armed;
-    g_cmci_banks_held    = held;
+    me->present = present;
+    me->held    = held;
+    me->fresh   = fresh;
+    /* Counted from the mask, not from present - held: a bank whose threshold
+     * read back zero is present, is nobody's, and must not inflate either. */
+    me->armed   = (uint32_t)CountSetBits(me->mine);
 }
 
 /* Point this logical processor's CMCI LVT entry at the vector and unmask it.
@@ -1174,15 +1212,16 @@ static void MceCmciVectorClaim(void) {
 
     uint8_t v = VectorPoolTake(RIGHT_OF_WAY_A_PERSON_WAITS, "CMCI");
     if (v == 0) {
-        g_cmci_owed = "the vector pool had no number left in the row a report "
-                      "belongs in";
+        MceCmciMine()->owed = "the vector pool had no number left in the row "
+                              "a report belongs in";
         return;
     }
 
     if (!IrqAnswerMessage(v, &g_cmci_responder, MceCmciAnswers, "CMCI")) {
         VectorPoolGiveBack(v, "CMCI");
-        g_cmci_owed = "a vector was taken but no answerer could be registered "
-                      "on it, so it was given straight back";
+        MceCmciMine()->owed = "a vector was taken but no answerer could be "
+                              "registered on it, so it was given straight "
+                              "back";
         return;
     }
 
@@ -1204,44 +1243,54 @@ void MceCmciArmLocal(void) {
      * a #GP on a core with no fixup for one. */
     if (!(g_mce_mcg_cap & MCE_CAP_MCG_CMCI_P)) return;
 
+    MceCmciCoreArm *me = MceCmciMine();
+
     MceCmciBanksArm();
 
     if (!lapic_is_mapped() ||
         !(lapic_read(LAPIC_REG_SVR) & LAPIC_SVR_ENABLE)) {
-        g_cmci_owed = "this core's local APIC is not software-enabled yet, and "
-                      "a masked LVT entry cannot be unmasked on one — the "
-                      "banks count corrected errors, but no interrupt carries "
-                      "them out";
+        me->owed = "this core's local APIC is not software-enabled yet, and "
+                   "a masked LVT entry cannot be unmasked on one — the "
+                   "banks count corrected errors, but no interrupt carries "
+                   "them out";
         return;
     }
 
     MceCmciVectorClaim();
 
     if (!MceCmciLvtArm()) {
-        if (g_cmci_owed == NULL) {
-            g_cmci_owed = "the CMCI LVT entry did not read back carrying the "
-                          "vector unmasked — this local APIC kept corrected-"
-                          "error delivery off";
+        if (me->owed == NULL) {
+            me->owed = "the CMCI LVT entry did not read back carrying the "
+                       "vector unmasked — this local APIC kept corrected-"
+                       "error delivery off";
         }
         /* One core out of step matters the way an unarmed LMCE does: the
          * fleet answer stops claiming otherwise and the exchange elects the
          * single speaker. */
         if (__atomic_exchange_n(&g_cmci_delivery, false, __ATOMIC_ACQ_REL)) {
             kprintf("[MCE] core %u: CMCI delivery not armed: %s\n",
-                    (unsigned)amp_get_core_index(), g_cmci_owed);
+                    (unsigned)amp_get_core_index(), me->owed);
         }
         return;
     }
 
-    g_cmci_owed = NULL;
+    me->owed = NULL;
+    /* The exchange elects one speaker for the machine, so a third call on an
+     * already-delivering fleet says nothing — which is what idempotent has to
+     * mean for a line an operator reads. */
     if (!__atomic_exchange_n(&g_cmci_delivery, true, __ATOMIC_ACQ_REL)) {
         kprintf("[MCE] CMCI armed on %u of %u bank(s) that implement it "
-                "(%u already held by a logical processor sharing them), "
-                "delivered on vector 0x%02x — a corrected error now raises an "
-                "interrupt instead of waiting in its bank for the next #MC to "
-                "walk past it\n",
-                (unsigned)g_cmci_banks_armed, (unsigned)g_cmci_banks_present,
-                (unsigned)g_cmci_banks_held, (unsigned)g_cmci_vector);
+                "(%u held by a logical processor sharing them), delivered on "
+                "vector 0x%02x — this pass armed %u of those bank(s)%s. A "
+                "corrected error now raises an interrupt instead of waiting "
+                "in its bank for the next #MC to walk past it\n",
+                (unsigned)me->armed, (unsigned)me->present,
+                (unsigned)me->held, (unsigned)g_cmci_vector,
+                (unsigned)me->fresh,
+                (me->fresh < me->armed)
+                    ? " and found the rest already counting from this core's "
+                      "earlier pass, so what it added was delivery"
+                    : "");
     }
 }
 
@@ -1258,13 +1307,13 @@ static void MceCmciSay(void) {
 
     if (__atomic_load_n(&g_cmci_delivery, __ATOMIC_ACQUIRE)) return;
 
+    const MceCmciCoreArm *me = MceCmciMine();
+
     kprintf("[MCE] CMCI: %u of %u bank(s) that implement it are counting "
-            "corrected errors (%u already held elsewhere), but delivery is "
-            "not armed: %s\n",
-            (unsigned)g_cmci_banks_armed, (unsigned)g_cmci_banks_present,
-            (unsigned)g_cmci_banks_held,
-            g_cmci_owed ? g_cmci_owed
-                        : "nothing asked this core to arm it");
+            "corrected errors for this core (%u held by a logical processor "
+            "sharing them), but delivery is not armed: %s\n",
+            (unsigned)me->armed, (unsigned)me->present, (unsigned)me->held,
+            me->owed ? me->owed : "nothing asked this core to arm it");
 }
 
 bool mce_handle(interrupt_frame_t *frame) {
