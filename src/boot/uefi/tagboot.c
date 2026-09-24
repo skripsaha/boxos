@@ -2001,7 +2001,7 @@ static EFI_STATUS DoExitBootServices(EFI_HANDLE image_handle)
          * survive EBS too, but PMM treats it as USABLE and frees it. */
         /* Below 4 GB — same reason as the ESRT copy above: the kernel walks
          * this map through the loader's identity window, which ends at 4 GB,
-         * and PmmHoldBootServicesMemory reads it before vmm_init has run. */
+         * and PmmReserveFirmwareMemory reads it before vmm_init has run. */
         buf_pa = 0xFFFFF000ULL;
         EFI_STATUS s = g_bs->allocate_pages(AllocateMaxAddress,
                                             EfiACPIMemoryNVS,

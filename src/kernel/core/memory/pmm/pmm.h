@@ -36,31 +36,27 @@ error_t pmm_init(void);
 void    pmm_free(void* addr, size_t pages);
 
 /*
- * The memory UEFI used to boot us, held back until firmware has finished
- * moving house.
+ * The firmware's own memory, kept out of the buddy for the life of the
+ * machine.
  *
- * UEFI 2.10 §7.4 says EfiBootServicesCode and EfiBootServicesData become the
- * OS's to use once ExitBootServices has returned, and TagBoot reports them to
- * the kernel as ordinary usable RAM on that authority. The trouble is that
- * SetVirtualAddressMap runs LATER — it is the one firmware call the OS makes
- * while firmware is still relocating itself — and a long line of shipping
- * firmwares reach into their boot-services memory while doing it. Linux
- * carries the same workaround under the same names (efi_reserve_boot_services
- * / efi_free_boot_services) and maps those regions for the duration.
+ * ON A UEFI BOOT, EFI BOOT-SERVICES MEMORY BELONGS TO THE FIRMWARE. ON A BIOS
+ * BOOT THERE IS NONE. The predicate and the evidence live in one place,
+ * EfiMemoryIsFirmwares (src/kernel/drivers/efi/efi.h); this call walks the
+ * staged EFI memory map and reserves every range it names.
  *
- * So: Hold before the buddy allocator can hand them out (from pmm_init, which
- * is the only moment early enough), Release once SetVirtualAddressMap has
- * returned. Between those two points the machine is short exactly the memory
- * the firmware might still be standing on, which on a typical board is a few
- * tens of megabytes for a few dozen milliseconds.
+ * There is no counterpart that gives the memory back. UEFI 2.10 §7.4 says
+ * boot-services memory becomes the OS's once ExitBootServices returns, and
+ * shipping firmware goes on using it anyway — measured here as a #PF inside
+ * the firmware's own ResetSystem, at shutdown, long after any window tied to
+ * SetVirtualAddressMap would have come down. Nothing tells a kernel when the
+ * firmware has finished, so the answer is never.
  *
- * Both are no-ops on a BIOS boot, where there is no EFI memory map to read,
- * and Release is idempotent — it is called once from the SetVirtualAddressMap
- * path and once as a backstop from kernel_main, because a boot that never
- * reaches SVAM must still get its memory back.
+ * ‼ Called from pmm_init, BEFORE vmm_init and before the buddy can hand out a
+ * single page — that is the only moment early enough. It reads the staged map
+ * through vmm_phys_to_virt, which answers with the boot identity mapping that
+ * early. A no-op on a BIOS boot.
  */
-void    PmmHoldBootServicesMemory(void);
-void    PmmReleaseBootServicesMemory(void);
+void    PmmReserveFirmwareMemory(void);
 
 size_t   pmm_total_pages(void);
 /* Largest page count a SINGLE pmm_alloc can serve (the buddy's max block).

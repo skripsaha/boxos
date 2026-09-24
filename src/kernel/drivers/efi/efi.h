@@ -137,6 +137,41 @@ typedef struct {
     uint64_t attribute;
 } EfiMemoryDescriptor;
 
+/* ─── WHOSE MEMORY IS THIS ────────────────────────────────────────────────
+ *
+ * True for every physical range that belongs to the firmware FOR THE LIFE OF
+ * THE MACHINE on a UEFI boot. On a BIOS boot there is no EFI memory map and
+ * nothing asks.
+ *
+ *   EFI_MEMORY_RUNTIME (UEFI 2.10 §7.2 Table 7.10) — the firmware asked for a
+ *   virtual address for this range and relocates its own pointers onto it at
+ *   SetVirtualAddressMap. It was never the OS's.
+ *
+ *   EfiBootServicesCode / EfiBootServicesData — UEFI 2.10 §7.4 says these
+ *   become the OS's once ExitBootServices returns. On shipping firmware that
+ *   is not true: MEASURED 2026-09-24 on an Asus UX303L, a #PF taken inside
+ *   the firmware's own ResetSystem with CR2 inside a BootServicesData
+ *   descriptor whose base and page count differ from boot to boot. Linux
+ *   works around the same firmware bug in should_map_region()
+ *   (arch/x86/platform/efi/efi.c). BoxOS does not take the memory back at
+ *   all — a window that has to exist during one call has to exist during
+ *   every later one, and nothing tells the kernel when the last one was.
+ *
+ * ‼ THIS IS NOT THE TEST FOR THE SetVirtualAddressMap ARRAY. UEFI 2.10 §8.4
+ * admits only EFI_MEMORY_RUNTIME descriptors there — see
+ * EfiMemoryJoinsVirtualMap in efi_runtime.c. Boot-services memory is the
+ * firmware's and still has no business in that array.
+ *
+ * Inline, and in the header, because the physical allocator has to ask it
+ * before the EFI driver exists and must not answer it from private copies of
+ * these constants. */
+static inline bool EfiMemoryIsFirmwares(uint32_t type, uint64_t attribute)
+{
+    return (attribute & EFI_MEMORY_RUNTIME) != 0 ||
+           type == EFI_BOOT_SERVICES_CODE ||
+           type == EFI_BOOT_SERVICES_DATA;
+}
+
 /* =========================================================================
  * Runtime Services table (UEFI 2.10 §8.5, canonical layout)
  *

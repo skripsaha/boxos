@@ -451,16 +451,6 @@ void kernel_main(void)
         debug_printf("[INIT] EFI runtime services not available\n");
     }
 
-    /* The backstop for the memory held across SetVirtualAddressMap.
-     *
-     * efi_runtime_init releases it the moment that call returns, which is
-     * the tight window we want. But every path that never reaches the call —
-     * a BIOS boot, a firmware with no runtime descriptors, a map that could
-     * not be walked — must give the memory back too, and none of them can be
-     * relied on to remember. Idempotent, and a no-op when nothing was
-     * held. */
-    PmmReleaseBootServicesMemory();
-
     // ACPI must init early so irqchip_init can parse MADT for APIC detection
     debug_printf("[INIT] ACPI Subsystem (early)...\n");
     acpi_error_t acpi_err = acpi_init();

@@ -11,6 +11,7 @@
 #include "boxos_memory.h"
 #include "cpuid.h"
 #include "boot_info.h"
+#include "efi.h"          /* EfiMemoryIsFirmwares — the one ownership predicate */
 #include "linker_symbols.h"
 #include "error.h"
 
@@ -150,54 +151,39 @@ static error_t pmm_defer_region(uintptr_t start, uintptr_t end) {
 }
 
 /* ===========================================================================
- * Boot services memory, held and released — see the note in pmm.h.
+ * The firmware's own memory, kept out of the buddy — see the note in pmm.h.
  *
  * The EFI memory map TagBoot staged in ACPI NVS is the only place the kernel
- * can learn WHICH ranges were boot services; the E820 table cannot say,
+ * can learn WHICH ranges are the firmware's; the E820 table cannot say,
  * because E820 has no such type and calling them RESERVED there would lose
  * the memory permanently on any board where the top of RAM happens to be one.
+ *
+ * The ownership question is answered by EfiMemoryIsFirmwares (efi.h) and
+ * nowhere else. This file used to keep private copies of the EFI type
+ * constants and a second, narrower criterion, and the two criteria disagreed
+ * about when the memory came back.
  * ======================================================================== */
 
-/* UEFI 2.10 §7.2 Table 7.10 memory types. Spelled here rather than pulled
- * from the EFI driver's header: this file is the physical allocator and has
- * no other business with EFI. */
-#define EFI_TYPE_BOOT_SERVICES_CODE  3u
-#define EFI_TYPE_BOOT_SERVICES_DATA  4u
-#define EFI_MEMORY_DESC_TYPE_OFFSET  0u
-#define EFI_MEMORY_DESC_PHYS_OFFSET  8u
-#define EFI_MEMORY_DESC_PAGES_OFFSET 24u
-/* type(4) pad(4) physical_start(8) virtual_start(8) number_of_pages(8)
- * attribute(8). The firmware may report a LARGER descriptor_size — that is
- * what the field is for — but never a smaller one, and a map that claims one
- * is not a map this walk can read. */
-#define EFI_MEMORY_DESC_MIN_SIZE     40u
+static size_t pmm_firmware_pages = 0;
 
-static bool   pmm_bs_held        = false;
-static size_t pmm_bs_pages_held  = 0;
-/* Set when a boot-services range was NOT taken in full — i.e. some of its
- * pages were already spoken for when Hold ran. Releasing such a range would
- * hand back memory this allocator never took, and whoever owned those pages
- * would keep using them while the buddy offered them to somebody else. It
- * cannot happen with the layouts either loader produces (the kernel image,
- * the loader's tables and its stack are all EfiLoaderData, never boot
- * services), which is exactly why it is worth checking rather than assuming:
- * if it ever does happen, the machine keeps the memory and says so. */
-static bool   pmm_bs_partial     = false;
-
-/* Walk the staged EFI memory map, calling back for every boot-services
- * range. Returns false when there is no map to walk (BIOS boot, or a UEFI
- * boot whose loader could not stage one). */
-static bool pmm_for_each_boot_services_range(
+/* Walk the staged EFI memory map, calling back for every range that is the
+ * firmware's. Returns false when there is no map to walk (BIOS boot, or a
+ * UEFI boot whose loader could not stage one).
+ *
+ * ‼ Runs from pmm_init, BEFORE vmm_init: vmm_phys_to_virt answers with the
+ * boot identity mapping at that point and with the Pull Map afterwards, and
+ * this walk needs nothing else. A firmware descriptor_size SMALLER than the
+ * spec structure is a map this walk cannot read; larger is what the field is
+ * for (UEFI 2.10 §7.2). */
+static bool pmm_for_each_firmware_range(
         void (*visit)(uintptr_t start, uintptr_t end))
 {
     boot_info_t *bi = boot_info_get();
     if (!boot_info_valid(bi)) return false;
     if (bi->boot_method != 1) return false;              /* BIOS */
     if (!bi->efi_mmap_phys || !bi->efi_mmap_size ||
-        bi->efi_mmap_desc_size < EFI_MEMORY_DESC_MIN_SIZE) return false;
+        bi->efi_mmap_desc_size < sizeof(EfiMemoryDescriptor)) return false;
 
-    /* Identity during early boot, Pull Map afterwards — either way this is
-     * the kernel-readable address of the staged map. */
     uint8_t *map = (uint8_t *)vmm_phys_to_virt((uintptr_t)bi->efi_mmap_phys);
     if (!map) return false;
 
@@ -205,83 +191,38 @@ static bool pmm_for_each_boot_services_range(
     uint8_t *end = map + bi->efi_mmap_size;
 
     for (uint8_t *p = map; p + desc_size <= end; p += desc_size) {
-        uint32_t type;
-        uint64_t phys, pages;
-        memcpy(&type,  p + EFI_MEMORY_DESC_TYPE_OFFSET,  4);
-        memcpy(&phys,  p + EFI_MEMORY_DESC_PHYS_OFFSET,  8);
-        memcpy(&pages, p + EFI_MEMORY_DESC_PAGES_OFFSET, 8);
+        const EfiMemoryDescriptor *d = (const EfiMemoryDescriptor *)p;
+        if (!EfiMemoryIsFirmwares(d->type, d->attribute)) continue;
+        if (d->number_of_pages == 0) continue;
 
-        if (type != EFI_TYPE_BOOT_SERVICES_CODE &&
-            type != EFI_TYPE_BOOT_SERVICES_DATA) continue;
-        if (pages == 0) continue;
-
-        visit((uintptr_t)phys, (uintptr_t)(phys + pages * PMM_PAGE_SIZE));
+        visit((uintptr_t)d->physical_start,
+              (uintptr_t)(d->physical_start +
+                          d->number_of_pages * PMM_PAGE_SIZE));
     }
     return true;
 }
 
-/* How many pages of [start,end) this buddy zone actually manages. */
-static size_t pmm_pages_in_zone(uintptr_t start, uintptr_t end)
+static void pmm_firmware_reserve_one(uintptr_t start, uintptr_t end)
 {
-    uintptr_t zone_end = pmm_buddy.base + pmm_buddy.total_pages * PMM_PAGE_SIZE;
-    if (start < pmm_buddy.base) start = pmm_buddy.base;
-    if (end   > zone_end)       end   = zone_end;
-    if (start >= end) return 0;
-    start = (start + PMM_PAGE_SIZE - 1) & ~(uintptr_t)(PMM_PAGE_SIZE - 1);
-    end  &= ~(uintptr_t)(PMM_PAGE_SIZE - 1);
-    return (start < end) ? (end - start) / PMM_PAGE_SIZE : 0;
-}
-
-static void pmm_bs_reserve_one(uintptr_t start, uintptr_t end)
-{
-    size_t expected = pmm_pages_in_zone(start, end);
-    size_t before   = pmm_buddy.free_count;
+    size_t before = pmm_buddy.free_count;
     buddy_reserve_range(&pmm_buddy, start, end);
-    size_t taken = before - pmm_buddy.free_count;
-
-    if (taken != expected) {
-        pmm_bs_partial = true;
-        kprintf("[PMM] boot-services range 0x%lx..0x%lx was only %zu of %zu "
-                "page(s) free — this memory will not be handed back\n",
-                (unsigned long)start, (unsigned long)end, taken, expected);
-    }
-    pmm_bs_pages_held += taken;
+    pmm_firmware_pages += before - pmm_buddy.free_count;
 }
 
-static void pmm_bs_release_one(uintptr_t start, uintptr_t end)
+void PmmReserveFirmwareMemory(void)
 {
-    buddy_free_range(&pmm_buddy, start, end);
-}
+    pmm_firmware_pages = 0;
+    if (!pmm_for_each_firmware_range(pmm_firmware_reserve_one)) return;
 
-void PmmHoldBootServicesMemory(void)
-{
-    if (pmm_bs_held) return;
-    pmm_bs_pages_held = 0;
-    pmm_bs_partial    = false;
-    if (!pmm_for_each_boot_services_range(pmm_bs_reserve_one)) return;
-
-    pmm_bs_held = true;
-    debug_printf("[PMM] holding %zu page(s) of EFI boot-services memory until "
-                 "SetVirtualAddressMap has returned\n", pmm_bs_pages_held);
-}
-
-void PmmReleaseBootServicesMemory(void)
-{
-    if (!pmm_bs_held) return;
-    pmm_bs_held = false;   /* first, so a re-entry cannot double-free */
-
-    if (pmm_bs_partial) {
-        kprintf("[PMM] keeping %zu page(s) of EFI boot-services memory: at "
-                "least one range was not this allocator's to give back\n",
-                pmm_bs_pages_held);
-        pmm_bs_pages_held = 0;
-        return;
-    }
-
-    (void)pmm_for_each_boot_services_range(pmm_bs_release_one);
-    kprintf("[PMM] EFI boot-services memory returned to the machine "
-            "(%zu page(s))\n", pmm_bs_pages_held);
-    pmm_bs_pages_held = 0;
+    /* kprintf, and this is the line an operator goes looking for: on the two
+     * boards measured 2026-09-24 it is 61 MB of 3934 and 136 MB of 16186, and
+     * memory that disappears without a sentence becomes a bug report. */
+    kprintf("[PMM] %zu page(s), %zu MB, belong to the firmware for the life of "
+            "this machine and are not coming back: it goes on using them after "
+            "ExitBootServices (of %zu MB usable)\n",
+            pmm_firmware_pages,
+            (pmm_firmware_pages * PMM_PAGE_SIZE) / (1024u * 1024u),
+            ((size_t)pmm_usable_pages * PMM_PAGE_SIZE) / (1024u * 1024u));
 }
 
 error_t pmm_init(void) {
@@ -449,10 +390,10 @@ error_t pmm_init(void) {
 
     pmm_initialized = true;
 
-    /* Before a single page can be handed out: take back the regions the
-     * firmware may still walk into during SetVirtualAddressMap. See the note
-     * on PmmHoldBootServicesMemory in pmm.h. */
-    PmmHoldBootServicesMemory();
+    /* Before a single page can be handed out: the firmware's own memory
+     * never enters the buddy. See the note on PmmReserveFirmwareMemory in
+     * pmm.h. */
+    PmmReserveFirmwareMemory();
 
     /* And the window the log is carried through. It is a FIXED physical range
      * this kernel wrote into before pmm_init ran and will keep writing into
