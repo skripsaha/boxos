@@ -126,19 +126,42 @@ void kernel_main(void)
             (unsigned long)g_entry_rflags,
             (g_entry_rflags & (1ULL << 9)) ? "ENABLED" : "disabled");
 
-    /* Whether anything came through the last reset, said early so it is on
-     * the screen even when the machine does not get much further. */
+    /* WHETHER THIS IMAGE KEEPS ANYTHING AT ALL, said out loud and once.
+     *
+     * The carry-over window is behind PRINTTOFILE, and a default image
+     * carried nothing while saying nothing — which is how a board run gets
+     * thrown away: the machine dies, and only afterwards does anybody find
+     * out that this image was never going to keep the record. So the three
+     * cases are told apart by name.
+     *
+     * Early, so it is on the screen even when the machine does not get much
+     * further, and so an operator who just watched a machine die knows
+     * whether `lastsaid` has something for them. The bank is NOT dumped
+     * here — it is named, and lastsaid reads it. */
+#ifdef CONFIG_PRINTTOFILE
     if (LogKeepWindow(NULL, NULL)) {
         uint64_t carried = LogKeepPreviousBytes();
         if (carried) {
-            kprintf("[BOOT] the previous run left %lu byte(s) behind (boot %u) "
-                    "— `lastsaid` reads them\n",
+            kprintf("[BOOT] LogKeep is armed (written back with %s); the "
+                    "previous run left %lu byte(s) behind (boot %u) — "
+                    "`lastsaid` reads them\n",
+                    LogKeepWriteBackName(),
                     (unsigned long)carried, LogKeepPreviousBoot());
         } else {
-            kprintf("[BOOT] nothing came through the last reset — a cold start, "
-                    "a first one, or firmware that scrubs memory\n");
+            kprintf("[BOOT] LogKeep is armed (written back with %s); nothing "
+                    "came through the last reset — a cold start, a first one, "
+                    "or firmware that scrubs memory\n",
+                    LogKeepWriteBackName());
         }
+    } else {
+        kprintf("[BOOT] %[W]LogKeep is compiled in but this machine's E820 map "
+                "does not offer the window — NOTHING will survive a reset%[D]\n");
     }
+#else
+    kprintf("[BOOT] %[W]LogKeep is COMPILED OUT of this image (build it with "
+            "`make PRINTTOFILE=on`) — nothing this kernel says will survive a "
+            "reset, and `lastsaid` will have nothing to read%[D]\n");
+#endif
 
     debug_printf("[INIT] CPU Feature Detection (early)...\n");
     cpu_detect_features();
@@ -486,6 +509,14 @@ void kernel_main(void)
     // Detect and initialize interrupt controller (APIC or PIC fallback)
     debug_printf("[INIT] Interrupt Controller...\n");
     irqchip_init();
+
+    /* The corrected-error interrupt, now that this core's local APIC is
+     * software-enabled. mce_init armed the banks back at line ~299 and could
+     * not arm the LVT: an unmask written to a software-disabled APIC is
+     * ignored (Intel SDM Vol 3A, "Local APIC State After It Has Been Software
+     * Disabled"). Without this line CMCI_P would be printed and nothing would
+     * ever deliver one — which is the defect this session closed. */
+    MceCmciArmLocal();
 
     /* Register the ACPI SCI handler now that IOAPIC routing is live. */
     if (acpi_err == ACPI_OK) acpi_sci_register();

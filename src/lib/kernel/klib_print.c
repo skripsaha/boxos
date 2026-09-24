@@ -25,6 +25,9 @@
 #include "serial.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
+#include "amp.h"        /* g_amp — is there a peer core to stop at all */
+#include "lapic.h"      /* lapic_is_mapped, lapic_send_ipi_all_excluding_self */
+#include "irqchip.h"    /* IPI_PANIC_VECTOR */
 
 /* Module-local state — neither escapes outside this TU. */
 static spinlock_t g_kprintf_lock;
@@ -475,19 +478,50 @@ int ksnprintf(char *buf, size_t size, const char *fmt, ...)
     return n;
 }
 
+/* Every other core stopped, by the vector right_of_way.c reserves for exactly
+ * this (irqchip.h: 240-242 are the kernel's own IPIs).
+ *
+ * Guarded on the LAPIC being mapped: a panic raised before lapic_init has no
+ * way to reach another core and no other core to reach — they are started
+ * through that same LAPIC — and writing through an unmapped MMIO window
+ * would fault inside the panic. Sent with the "all excluding self" shorthand
+ * (Intel SDM Vol 3A, ICR Destination Shorthand 11b), one write, no walk of
+ * the core table, and NOT waited for: a core that will never answer must not
+ * cost the machine the only account of why it died. */
+static void PanicHaltPeers(void)
+{
+    if (!g_amp.multicore_active) return;
+    if (!lapic_is_mapped())      return;
+    lapic_send_ipi_all_excluding_self(IPI_PANIC_VECTOR);
+}
+
 __attribute__((noreturn)) void panic(const char *message, ...)
 {
-    /* Defensive lock break BEFORE the first kprintf — see klib.h
-     * console-lock invariant. spin_force_release skips the saved-flags
-     * restore; that is fine here because we never return, and IPI_PANIC
-     * (sent from exception_handler) halts peer cores before they ever
-     * spin_unlock again. */
+    /* This core stops taking interrupts first. An interrupt landing after the
+     * locks below are broken would re-enter kprintf on a lock that no longer
+     * means anything. */
+    asm volatile("cli");
+
+    /* EVERY lock the banner needs, broken BEFORE the banner and not after it.
+     * The console lock was already broken here; the ring's and the line's
+     * were not, and they are on the same path — kprintf -> kputchar ->
+     * LogRingPut takes the ring lock and then WireKick takes the line's. A
+     * core that died holding either one used to take the panic with it, in
+     * silence, before a single character had been said. WireForceRelease
+     * breaks both (serial.c). spin_force_release skips the saved-flags
+     * restore, which is right here because this never returns. */
     spin_force_release(&g_kprintf_lock);
+    WireForceRelease();
+
     /* Discard any pending Canvas batch state left by an interrupted
      * Manifest op so the panic banner commits on its first kprintf. */
     CanvasForceReset();
 
-    asm volatile("cli");
+    /* Peers stopped before the banner is composed rather than after it: a
+     * core still running keeps writing into the same console and the same
+     * ring while the account of the crash is being written into them. The
+     * exception path (panic_dump, idt.c) broadcasts the same vector. */
+    PanicHaltPeers();
 
     va_list args;
     va_start(args, message);
@@ -504,9 +538,17 @@ __attribute__((noreturn)) void panic(const char *message, ...)
 
     va_end(args);
 
+    /* The account out of this core's cache and into the memory the NEXT boot
+     * reads. A warm reset invalidates the caches without writing them back
+     * (Intel SDM Vol 3A §11.5.1), so a banner that never left the cache is a
+     * banner nobody will ever see — and a panicked machine is reset by hand.
+     * Takes no lock and waits on nothing; safe with every peer frozen. */
+    LogKeepFlush();
+
     /* Everything said, onto the wire, before the last breath: the line
-     * drives itself by interrupt and interrupts are off. The locks may be
-     * this core's own from the moment it died. */
+     * drives itself by interrupt and interrupts are off. Forced open a
+     * second time because a peer that never answered the halt IPI may have
+     * taken the line's lock again while the banner was printing. */
     WireForceRelease();
     WireDrain();
 

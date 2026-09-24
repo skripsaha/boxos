@@ -94,6 +94,23 @@ void LogRingForceRelease(void);
 uint64_t LogRingRead(uint64_t from, void *dst, uint64_t max,
                      uint64_t *out_oldest, uint64_t *out_written);
 
+/* Write the carry-over window back out of cache, NOW.
+ *
+ * Callable in every build and from every path: without CONFIG_PRINTTOFILE
+ * both are defined and do nothing, so a reset path may ask without knowing
+ * whether this image has a window. Takes no lock, allocates nothing and waits
+ * on nothing, because its callers are a panic and a one-way reset ladder —
+ * a core may already be frozen holding any lock this kernel owns.
+ *
+ * A warm reset invalidates the caches without writing them back (Intel SDM
+ * Vol 3A §11.5.1, Table 11-7 "Invalidating Caches and TLBs"), so a window
+ * written only through the ordinary write-back path loses exactly the tail
+ * that matters. LogKeepWriteBackName() says which instruction this part got
+ * (CLWB, CLFLUSHOPT, CLFLUSH or WBINVD), so a board log states how its own
+ * evidence was preserved. */
+void        LogKeepFlush(void);
+const char *LogKeepWriteBackName(void);
+
 #ifdef CONFIG_PRINTTOFILE
 
 /* ==========================================================================

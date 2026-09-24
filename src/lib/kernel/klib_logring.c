@@ -16,6 +16,8 @@
 #include "klib_logring.h"
 #include "serial.h"     /* WireKick — the line is this ring's reader */
 #include "vmm.h"
+#include "cpu.h"            /* cpu_cpuid — which write-back this part has */
+#include "kernel_config.h"  /* CONFIG_CACHE_LINE_SIZE */
 
 _Static_assert((LOGRING_CAPACITY & (LOGRING_CAPACITY - 1)) == 0,
                "LOGRING_CAPACITY must be a power of two — the position maps "
@@ -113,6 +115,92 @@ static inline volatile uint8_t *keep_bank(uint32_t which)
     return keep_base() + LOGKEEP_HEADER + (uint64_t)which * LOGRING_CAPACITY;
 }
 
+/* ── getting the window out of the cache and into the memory ─────────────
+ *
+ * The window is ordinary write-back RAM, so a byte stored into it lives in
+ * this core's cache until something evicts it — and a reset does not evict
+ * it. Intel SDM Vol 3A, "Cache Control", Table 9-1 (IA-32 Processor States
+ * Following Power-up, Reset, or INIT) gives the cache state after RESET as
+ * invalid, and §11.5.1 says the caches are invalidated WITHOUT writeback on
+ * a hardware reset. So the tail that matters most — the seconds before the
+ * button was pressed — is exactly the part a cached window loses.
+ *
+ * Written back as the bank is FILLED, one line per line, rather than at a
+ * flush point: a machine that wedges never reaches a flush point, and that
+ * is the machine this file exists for. LogKeepFlush closes the last partial
+ * line for the paths that know they are about to reset or halt.
+ *
+ * Which instruction is a CPUID question, asked once:
+ *   CLWB       CPUID.(EAX=07H,ECX=0):EBX[24] — writes back, keeps the line
+ *   CLFLUSHOPT CPUID.(EAX=07H,ECX=0):EBX[23] — writes back and evicts
+ *   CLFLUSH    CPUID.01H:EDX[19] (CLFSH)     — the same, strongly ordered
+ * CLWB is preferred because the log is appended to continuously and there is
+ * no reason to give the line up every 64 bytes. All three are ordered with
+ * respect to older stores to the SAME line (SDM Vol 2A, CLFLUSHOPT and CLWB:
+ * "ordered with respect to ... older writes to the cache line being written
+ * back"), which is the only ordering the fill path needs — each line is
+ * complete before it is written back. The two weakly-ordered forms need an
+ * SFENCE to be COMPLETE before anything else, and that belongs on the flush
+ * path, not on every line. */
+typedef enum {
+    KeepWbNone = 0,
+    KeepWbClflush,
+    KeepWbClflushOpt,
+    KeepWbClwb
+} KeepWriteBack;
+
+static KeepWriteBack g_keep_wb;
+static uint64_t      g_keep_line = (uint64_t)CONFIG_CACHE_LINE_SIZE;
+
+static void keep_writeback_pick(void)
+{
+    uint32_t a = 0, b = 0, c = 0, d = 0;
+
+    /* CPUID.01H:EBX[15:8] is the CLFLUSH line size in eight-byte quantums
+     * (SDM Vol 2A, CPUID, Basic CPUID Information). A part that answers 0 —
+     * which no x86_64 part does — gets this kernel's declared line size
+     * rather than a number invented here. */
+    cpu_cpuid(1, 0, &a, &b, &c, &d);
+    uint64_t said = (uint64_t)((b >> 8) & 0xFFu) * 8u;
+    if (said && (said & (said - 1u)) == 0u) g_keep_line = said;
+
+    bool clflush = (d & (1u << 19)) != 0u;
+
+    uint32_t max_leaf = 0, ub = 0, uc = 0, ud = 0;
+    cpu_cpuid(0, 0, &max_leaf, &ub, &uc, &ud);
+
+    bool clflushopt = false, clwb = false;
+    if (max_leaf >= 7u) {
+        cpu_cpuid(7, 0, &a, &b, &c, &d);
+        clflushopt = (b & (1u << 23)) != 0u;
+        clwb       = (b & (1u << 24)) != 0u;
+    }
+
+    g_keep_wb = clwb       ? KeepWbClwb
+              : clflushopt ? KeepWbClflushOpt
+              : clflush    ? KeepWbClflush
+                           : KeepWbNone;
+}
+
+static inline void keep_writeback_line(volatile void *at)
+{
+    const void *p = (const void *)at;
+    switch (g_keep_wb) {
+    case KeepWbClwb:
+        __asm__ volatile("clwb (%0)"       :: "r"(p) : "memory");
+        break;
+    case KeepWbClflushOpt:
+        __asm__ volatile("clflushopt (%0)" :: "r"(p) : "memory");
+        break;
+    case KeepWbClflush:
+        __asm__ volatile("clflush (%0)"    :: "r"(p) : "memory");
+        break;
+    case KeepWbNone:
+    default:
+        break;
+    }
+}
+
 /* Is [phys, phys+bytes) inside one usable E820 entry?
  *
  * Asked of the map at its fixed low address rather than of the kernel's own
@@ -164,6 +252,7 @@ void LogKeepInit(void)
     }
 
     g_keep_ok = true;
+    keep_writeback_pick();
 
     volatile LogKeepHeader *h = keep_header();
     bool carried = (h->magic == LOGKEEP_MAGIC) &&
@@ -195,6 +284,58 @@ void LogKeepInit(void)
 
     h->current               = g_keep_current;
     h->bytes[g_keep_current] = 0;
+
+    /* The header the NEXT boot reads is the one thing that must be in memory
+     * before this boot says a word: a window whose magic never left the
+     * cache reads as "nothing was carried" after a reset. */
+    keep_writeback_line((volatile void *)h);
+    __asm__ volatile("sfence" ::: "memory");
+}
+
+const char *LogKeepWriteBackName(void)
+{
+    if (!g_keep_ok) return "none";
+    switch (g_keep_wb) {
+    case KeepWbClwb:       return "CLWB";
+    case KeepWbClflushOpt: return "CLFLUSHOPT";
+    case KeepWbClflush:    return "CLFLUSH";
+    case KeepWbNone:
+    default:               return "WBINVD";
+    }
+}
+
+/* Everything said so far, in memory rather than in a cache, for a caller that
+ * is about to reset or halt the machine — and for the panic path, which is
+ * the one caller that cannot come back and ask again.
+ *
+ * Takes no lock, allocates nothing and waits on nothing, so it is safe with
+ * every AP already frozen. Only the LAST line can still be outstanding: every
+ * line before it was written back as it was filled. */
+void LogKeepFlush(void)
+{
+    if (!g_keep_ok) return;
+
+    if (g_keep_wb == KeepWbNone) {
+        /* No CLFLUSH at all — which no x86_64 part reports, but the fallback
+         * that always exists in ring 0 (SDM Vol 2C, WBINVD: writes back all
+         * modified cache lines and invalidates the caches). */
+        __asm__ volatile("wbinvd" ::: "memory");
+        return;
+    }
+
+    volatile LogKeepHeader *h = keep_header();
+    uint64_t n = h->bytes[g_keep_current];
+    if (n) {
+        volatile uint8_t *bank = keep_bank(g_keep_current);
+        keep_writeback_line(&bank[(n - 1u) & LOGRING_MASK]);
+    }
+    keep_writeback_line((volatile void *)h);
+
+    /* CLFLUSHOPT and CLWB are weakly ordered; SDM Vol 2A says a store fence
+     * is what makes them complete with respect to what follows. CLFLUSH is
+     * fenced the same way rather than by MFENCE because SFENCE orders it
+     * too and this path must not be told apart by instruction. */
+    __asm__ volatile("sfence" ::: "memory");
 }
 
 bool LogKeepWindow(uintptr_t *out_phys, uint64_t *out_bytes)
@@ -243,22 +384,39 @@ uint64_t LogKeepPreviousRead(uint64_t from, void *dst, uint64_t max,
     return copied;
 }
 
-/* The same byte, into the window the next boot will find. Two stores
- * instead of one, both into RAM, and the counter goes down with every byte
- * rather than at some flush point — a machine that wedges never reaches a
- * flush point, and that is the machine this exists for. */
+/* The same byte, into the window the next boot will find. The counter goes
+ * down with every byte rather than at some flush point — a machine that
+ * wedges never reaches a flush point, and that is the machine this exists
+ * for. The count and the bytes it names leave the cache TOGETHER, so a
+ * window read after a reset never names a byte that is not in it. */
 static inline void keep_put(char c)
 {
     if (!g_keep_ok) return;
     volatile LogKeepHeader *h = keep_header();
     uint64_t n = h->bytes[g_keep_current];
-    keep_bank(g_keep_current)[n & LOGRING_MASK] = (uint8_t)c;
+    volatile uint8_t *slot = &keep_bank(g_keep_current)[n & LOGRING_MASK];
+    *slot = (uint8_t)c;
     h->bytes[g_keep_current] = n + 1;
+
+    /* The byte that completed a cache line takes that line back to memory,
+     * and the header with it, so the count never names bytes that are still
+     * in a cache. One pair of write-backs per LINE, not per byte. The bank
+     * starts at a 4 KiB boundary of the window, so the slot's low bits are
+     * its true offset within the line. */
+    if (((uintptr_t)slot & (g_keep_line - 1u)) == g_keep_line - 1u) {
+        keep_writeback_line(slot);
+        keep_writeback_line((volatile void *)h);
+    }
 }
 
 #else
 
 static inline void keep_put(char c) { (void)c; }
+
+/* Compiled out, but still callable: the reset and panic paths ask for the
+ * window to be written back without knowing whether this build has one. */
+void LogKeepFlush(void) { }
+const char *LogKeepWriteBackName(void) { return "none"; }
 
 #endif /* CONFIG_PRINTTOFILE */
 

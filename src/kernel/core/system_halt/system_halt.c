@@ -1,4 +1,5 @@
 #include "serial.h"      /* WireForceRelease / WireDrain — every rung is heard */
+#include "klib_logring.h" /* LogKeepFlush — the last words into memory that outlives the reset */
 #include "system_halt.h"
 #include "amp.h"
 #include "lapic.h"
@@ -703,6 +704,13 @@ void system_halt(bool reboot)
      * interrupts are off, so the line cannot drive itself from here. */
     WireForceRelease();
     WireDrain();
+
+    /* And the same last words into memory that outlives the reset. The wire
+     * reaches a cable; this reaches the next boot, which is the only reader a
+     * machine on a bench has. It must be the LAST thing said, because
+     * everything after this line happens inside firmware and is not ours to
+     * record. Does nothing in a build without CONFIG_PRINTTOFILE. */
+    LogKeepFlush();
 
     if (reboot) acpi_reboot();
     else        acpi_shutdown();
