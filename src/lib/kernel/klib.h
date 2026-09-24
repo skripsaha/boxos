@@ -14,6 +14,24 @@ extern uintptr_t _kernel_start;
 #define ALIGN_UP(addr, align) (((addr) + (align) - 1) & ~((align) - 1))
 #define ALIGN_DOWN(addr, align) ((addr) & ~((align) - 1))
 
+/* How many bits are set. ONE owner, because the reason not to use the builtin
+ * is a link error and every caller has had to rediscover it separately.
+ *
+ * Without -mpopcnt the compiler does not inline __builtin_popcount{,ll}: it
+ * emits a call to libgcc's __popcountsi2/__popcountdi2, and this kernel links
+ * no libgcc. Requiring POPCNT instead would mean refusing to run on a part
+ * without SSE4.2. Kernighan's fold costs one step per SET bit — a handful on
+ * a port mask, a bank mask or a command-slot register — and needs nothing
+ * from the CPU beyond AND and subtract.
+ *
+ * 64-bit so one function serves every caller; a uint32_t promotes for free. */
+static inline unsigned CountSetBits(uint64_t v)
+{
+    unsigned n = 0;
+    while (v) { v &= v - 1u; n++; }
+    return n;
+}
+
 /* Kernel-heap sizing.
  *   TARGET   = KLIB_HEAP_RAM_PERCENT% of total RAM
  *   FLOOR    = KLIB_HEAP_MIN_SIZE

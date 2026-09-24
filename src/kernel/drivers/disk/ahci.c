@@ -17,22 +17,6 @@
 
 #define AHCI_TIMEOUT_MS CONFIG_AHCI_CMD_TIMEOUT_MS
 
-/* How many bits are set in a register this driver reads — how many ports the
- * HBA implements, how many command slots a port has.
- *
- * Counted here rather than with __builtin_popcount, and the reason is a link
- * error rather than a preference: without -mpopcnt the compiler does not
- * inline that builtin, it emits a call to libgcc's __popcountdi2, and a
- * freestanding kernel links no libgcc. The loop is the honest alternative —
- * it runs a handful of times on a 32-bit register, on paths that happen once
- * per controller and once per port at bring-up. */
-static unsigned AhciBitsSet(uint32_t mask)
-{
-    unsigned n = 0;
-    while (mask) { mask &= mask - 1u; n++; }
-    return n;
-}
-
 static ahci_controller_t ahci_ctrl;
 
 /* This controller's link on its INTx line, for the fallback path. One node,
@@ -1727,7 +1711,7 @@ static int ahci_port_init(uint8_t port_num) {
         if (port->ncq) {
             ksnprintf(queueing, sizeof(queueing),
                       "NCQ on with %u tag(s)",
-                      AhciBitsSet(port->slot_mask));
+                      CountSetBits(port->slot_mask));
         } else if (!ahci_ctrl.ncq_support) {
             ksnprintf(queueing, sizeof(queueing),
                       "no NCQ, because this HBA has none to offer (CAP.SNCQ=0) "
@@ -1881,7 +1865,7 @@ static int ahci_init_ports(void) {
         kprintf("[AHCI] ports implemented: 0x%08x — %u of %u register sets, "
                 "ports %s; every one of them is brought up in turn, because a "
                 "port's DET says nothing until its link has been waited for\n",
-                pi, AhciBitsSet(pi), (unsigned)AHCI_MAX_PORTS,
+                pi, CountSetBits(pi), (unsigned)AHCI_MAX_PORTS,
                 at == 0 ? "none" : list);
     }
 
@@ -2771,7 +2755,7 @@ int ahci_init(void) {
     if (ahci_init_ports() != 0) {
         kprintf("[AHCI] none of the %u implemented port(s) yielded a disk — "
                 "each one's reason is above, and this controller is let go\n",
-                AhciBitsSet(ahci_ctrl.port_implemented));
+                CountSetBits(ahci_ctrl.port_implemented));
         vmm_unmap_mmio(ahci_ctrl.hba_mem, AHCI_ABAR_SPAN);
         ahci_ctrl.initialized = false;
         return -1;
@@ -2779,7 +2763,7 @@ int ahci_init(void) {
 
     kprintf("[AHCI] %u of %u implemented port(s) in service\n",
             ahci_ctrl.num_active_ports,
-            AhciBitsSet(ahci_ctrl.port_implemented));
+            CountSetBits(ahci_ctrl.port_implemented));
 
     /* Self-test was unconditional and ran on every boot — fine in QEMU,
      * questionable on real hardware where a hung port would stall the

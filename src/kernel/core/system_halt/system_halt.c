@@ -64,14 +64,6 @@ static const char *halt_name_of(void (*run)(void *ctx), NameplateName *scratch)
     return "an unnamed continuation";
 }
 
-static inline uint32_t halt_bits_set(uint32_t v)
-{
-    v = v - ((v >> 1) & 0x55555555u);
-    v = (v & 0x33333333u) + ((v >> 2) & 0x33333333u);
-    v = (v + (v >> 4)) & 0x0F0F0F0Fu;
-    return (v * 0x01010101u) >> 24;
-}
-
 /* How much async storage work the machine still owes, counted the only two
  * ways it can owe any:
  *   1. Never-drop baton passes posted but not yet consumed — the read/write
@@ -106,7 +98,7 @@ static uint64_t halt_async_work_owed(void)
             if (!regs) continue;
             uint32_t ci   = regs->ci;
             uint32_t sact = regs->sact;
-            work += halt_bits_set(ci | sact);
+            work += CountSetBits(ci | sact);
         }
     }
 
