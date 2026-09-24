@@ -699,12 +699,17 @@ static int HwDiskFlush(const ManifestOp *op, Crate *crates, uint16_t crate_count
  *  System power (reboot / shutdown — noreturn)
  * ========================================================================= */
 
+/* kprintf, not debug_printf: this is the last line either op says before
+ * system_halt()'s one-way reset/shutdown ladder runs, and debug_printf
+ * compiles to nothing outside a CONFIG_DEBUG_ENABLED build (klib.h) — on
+ * real hardware there is no such build, so "who asked for this" would
+ * never reach the log at all. */
 static int HwSystemReboot(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
 {
     (void)op; (void)crates; (void)crate_count;
-    debug_printf("[HardwareDeck] reboot requested by PID %u\n",
-                 (ctx && ctx->proc) ? ctx->proc->pid : 0);
+    kprintf("[HardwareDeck] reboot requested by PID %u\n",
+            (ctx && ctx->proc) ? ctx->proc->pid : 0);
     system_halt(true);
     return OK; /* unreachable */
 }
@@ -713,8 +718,8 @@ static int HwSystemShutdown(const ManifestOp *op, Crate *crates, uint16_t crate_
                             const OpContext *ctx)
 {
     (void)op; (void)crates; (void)crate_count;
-    debug_printf("[HardwareDeck] shutdown requested by PID %u\n",
-                 (ctx && ctx->proc) ? ctx->proc->pid : 0);
+    kprintf("[HardwareDeck] shutdown requested by PID %u\n",
+            (ctx && ctx->proc) ? ctx->proc->pid : 0);
     system_halt(false);
     return OK; /* unreachable */
 }

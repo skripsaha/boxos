@@ -141,6 +141,25 @@ typedef struct {
     acpi_gas_t x_pm_timer_block;
     acpi_gas_t x_gpe0_block;
     acpi_gas_t x_gpe1_block;
+
+    /* ACPI 5.0 added these two for Hardware-Reduced ACPI (FADT flags bit 20,
+     * HW_REDUCED_ACPI — ACPI 6.5 Table 5.10, "If set, indicates that the
+     * ACPI Hardware Interface is not implemented"): a platform that sets the
+     * bit has no PM1a/b control block, no PM timer and no fixed GPE blocks
+     * at all, and enters/leaves sleep states through these registers in
+     * their place. ACPI 6.5 §4.8.3.7 "Sleep Control and Status Registers"
+     * packs the \_Sx sleep type this kernel already reads out of \_S5 plus
+     * SLP_EN into ONE byte write to SLEEP_CONTROL_REG (Table 4.15), where
+     * acpi_pm1_request_sleep instead legislates SLP_TYPa then SLP_TYPb into
+     * TWO separate register writes (ACPI 6.5 §4.8) because a fixed-hardware
+     * platform has a PM1a/b pair to sequence and a reduced one has nothing
+     * to sequence. SLEEP_STATUS_REG (Table 4.16) carries WAK_STS in the
+     * pair's place. Both are absent on every FADT below 268 bytes (every
+     * ACPI 2.0-4.0 table) — guarded the same way reset_reg already is:
+     * fadt_field_present() before the first read, never assumed present
+     * because the pointer happens to be non-NULL. */
+    acpi_gas_t sleep_control_reg;   /* offset 244 */
+    acpi_gas_t sleep_status_reg;    /* offset 256 */
 } __attribute__((packed)) acpi_fadt_t;
 _Static_assert(sizeof(acpi_fadt_t) >= 244, "acpi_fadt_t too short for ACPI 2.0");
 _Static_assert(offsetof(acpi_fadt_t, reset_value) == 128,
@@ -151,6 +170,10 @@ _Static_assert(offsetof(acpi_fadt_t, minor_revision) == 131,
                "FADT Minor Version is at offset 131 (ACPI 6.5 Table 5.9)");
 _Static_assert(offsetof(acpi_fadt_t, x_firmware_control) == 132,
                "FADT X_FIRMWARE_CTRL is at offset 132 (ACPI 6.5 Table 5.9)");
+_Static_assert(offsetof(acpi_fadt_t, sleep_control_reg) == 244,
+               "FADT SLEEP_CONTROL_REG is at offset 244 (ACPI 6.5 Table 5.9)");
+_Static_assert(offsetof(acpi_fadt_t, sleep_status_reg) == 256,
+               "FADT SLEEP_STATUS_REG is at offset 256 (ACPI 6.5 Table 5.9)");
 
 /* ACPI 6.5 Table 5.9, "FADT Minor Version": "Bits 0-3 - The low order bits
  * correspond to the minor version of the specification version... Bits 4-7 -

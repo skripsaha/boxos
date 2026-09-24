@@ -1,4 +1,4 @@
-#include "serial.h"      /* WireDrain — the last words are heard */
+#include "serial.h"      /* WireForceRelease / WireDrain — every rung is heard */
 #include "system_halt.h"
 #include "amp.h"
 #include "lapic.h"
@@ -509,14 +509,47 @@ static void halt_terminate_all_processes(void)
 static void halt_sync_storage(void)
 {
     kprintf("[HALT] Syncing TagFS...\n");
-    tagfs_shutdown();
+    /*
+     * ‼ AND THE ANSWER IS HEARD. Two different things can go wrong here and
+     * only one of them used to be reported.
+     *
+     * tagfs_shutdown was void, so a shutdown that wrote NOT ONE BYTE of
+     * metadata — because the volume's door was already shut, or because the
+     * bitmap write was refused — returned exactly like one that wrote
+     * everything, and the flush below then reported a perfectly successful
+     * flush OF NOTHING. "Storage sync complete" was printed over it. It now
+     * carries an error_t and this is the caller that has to hear it, because
+     * this is the last place anybody can be told.
+     *
+     * The two answers are kept apart on purpose: the volume's own records are
+     * one question ("were they written at all?") and the medium's cache is
+     * another ("did what was written reach the platter?"). A machine that
+     * failed the first and passed the second is not a machine that synced.
+     */
+    error_t recorded = tagfs_shutdown();
+    if (recorded != OK) {
+        kprintf("[HALT] ‼ THE VOLUME ON SEAT %u (%s) DID NOT WRITE ITS RECORDS "
+                "(error %u) — what follows flushes a medium that was not given "
+                "them\n",
+                tagfs_get_seat(), BoardroomSeatName(tagfs_get_seat()),
+                (unsigned)recorded);
+    }
 
     kprintf("[HALT] Flushing disk cache...\n");
 
     error_t flushed = tagfs_flush_cache();
 
-    if (flushed == OK) {
+    if (flushed == OK && recorded == OK) {
         kprintf("[HALT] Storage sync complete\n");
+        return;
+    }
+    if (flushed == OK) {
+        /* The medium took what it was given, and it was not given everything.
+         * Said as its own sentence rather than folded into the line below,
+         * which is about a flush that failed. */
+        kprintf("[HALT] the medium on seat %u took what it was given, and the "
+                "volume's own records were not part of it\n",
+                tagfs_get_seat());
         return;
     }
 
@@ -632,16 +665,43 @@ void system_halt(bool reboot)
 
     kprintf("%s initiated\n", reboot ? "reboot" : "shutdown");
 
+    /* From here on, every rung of the ladder gets its own
+     * WireForceRelease()+WireDrain() pair instead of one at the very end.
+     * This is a one-way path: halt_stop_hardware() never returns to a
+     * caller that could drain for it, and acpi_reboot()/acpi_shutdown()
+     * below may reset or park the CPU before the next rung ever runs. A
+     * message queued behind a rung that never finishes is a message nobody
+     * reads. ForceRelease always comes before Drain: halt_all_ap_cores()
+     * can freeze another core with IPI_PANIC while it is mid-kprintf,
+     * still holding g_serial_lock, and that core is never coming back to
+     * release it — WireDrain() alone would spin forever on a lock its
+     * holder abandoned. idt.c's own panic exit uses the same pair in the
+     * same order for the same reason. */
+    WireForceRelease();
+    WireDrain();
+
     halt_all_ap_cores();
+    WireForceRelease();
+    WireDrain();
+
     halt_terminate_all_processes();
+    WireForceRelease();
+    WireDrain();
+
     halt_sync_storage();
+    WireForceRelease();
+    WireDrain();
+
     halt_stop_hardware();
+    WireForceRelease();
+    WireDrain();
 
     kprintf("[HALT] Cleanup complete.\n");
     kprintf(reboot ? "[HALT] Rebooting...\n" : "[HALT] Powering off...\n");
 
-    /* The last words onto the wire before the machine goes: interrupts are
-     * off, so the line cannot drive itself from here. */
+    /* The last words onto the wire before the machine goes into firmware —
+     * interrupts are off, so the line cannot drive itself from here. */
+    WireForceRelease();
     WireDrain();
 
     if (reboot) acpi_reboot();

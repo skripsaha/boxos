@@ -1227,32 +1227,36 @@ void efi_reset_system(EfiResetType type, EfiStatus status,
                       uint64_t data_size, void *data)
 {
     if (!efi_runtime_available() || !g_rt->reset_system) {
-        debug_printf("[EFI] reset_system unavailable\n");
+        kprintf("[EFI] reset_system unavailable\n");
         return;
     }
 
-    /* CLI then take the lock: this call may not return. We disable IRQs
-     * before the lock so the wakeup we'd miss is genuinely irrelevant. */
-    __asm__ volatile("cli");
-    spin_lock(&g_rt_lock);
-    /* Same §2.3.4 contract as every other runtime call — this prologue is
-     * hand-rolled, so it needs the control words established by hand too. */
-    efi_rt_fpu_enter();
+    /* The same door every other runtime call in this file goes through, not
+     * a hand-rolled cli + spin_lock + efi_rt_fpu_enter: that prologue did the
+     * identical three operations efi_rt_lock already performs, written out a
+     * second time by hand. This is a deduplication, not a fix for a defect
+     * in what it replaces — IF was already cleared unconditionally below
+     * before the "refused" print, and the refusal was already reported with
+     * kprintf. What efi_rt_lock/efi_rt_unlock add on top is the check
+     * efi_rt_unlock already runs for every OTHER runtime call and this one
+     * alone skipped: UEFI 2.10 §8.1 requires firmware to restore IF to its
+     * entry state, and efi_rt_unlock is where a firmware that does not gets
+     * named. ResetSystem is now covered by that same check, same as
+     * GetTime, SetTime and the rest. */
+    uint64_t rflags;
+    efi_rt_lock(&rflags);
 
-    debug_printf("[EFI] ResetSystem(type=%u, status=0x%lx)\n",
-                 type, (unsigned long)status);
+    kprintf("[EFI] ResetSystem(type=%u, status=0x%lx)\n",
+            type, (unsigned long)status);
 
     g_rt->reset_system(type, status, (EfiUintn)data_size, data);
 
-    /* If we return, the firmware refused the reset — take the interrupt flag
-     * back before anything else, release the lock, and let the caller fall
-     * through to alternate methods. Interrupts stay off because that is the
-     * state this function was entered in: it does its own cli above, and a
-     * refused reset must not leave the machine more interruptible than the
+    /* Reached only if the firmware refused the reset. efi_rt_unlock puts IF
+     * back to what it was on entry — cleared, since both callers of this
+     * function (acpi_shutdown, acpi_reboot) cli before reaching it — so a
+     * refused reset still leaves the machine no more interruptible than the
      * caller left it. */
-    __asm__ volatile("cli");
-    efi_rt_fpu_leave();
-    spin_unlock(&g_rt_lock);
+    efi_rt_unlock(rflags);
     kprintf("[EFI] ResetSystem returned — the firmware refused the reset\n");
 }
 
