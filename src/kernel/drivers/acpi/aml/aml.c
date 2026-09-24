@@ -1577,9 +1577,10 @@ static aml_status_t parse_term_list(const uint8_t* aml, uint32_t len,
  *   order is a protocol, not a store.
  *
  * ‼ THE WINDOW, AND WHY IT CANNOT BE LEFT OPEN.
- *   An address space is reachable only while a ROUTING OBJECT is being
- *   evaluated — _PRT (§6.2.13), _CRS (§6.2.2), _PRS (§6.2.12), _STA (§6.3.7)
- *   and _PIC (§5.8.1). Outside that, every access is refused exactly as it
+ *   An address space is reachable only while an object that DESCRIBES the
+ *   machine is being evaluated — _PRT (§6.2.13), _CRS (§6.2.2), _PRS
+ *   (§6.2.12), _STA (§6.3.7), _PIC (§5.8.1), _HID (§6.1.5) and _CID
+ *   (§6.1.2). Outside that, every access is refused exactly as it
  *   was before any of this existed.
  *
  *   It is not a flag. `window` is a field of AmlRun, AmlRun is a LOCAL
@@ -2450,8 +2451,8 @@ static bool AmlRegionRead(AmlRun *run, aml_object_t *field, const char *who,
     if (!run->window) {
         kprintf("[AML] %s: reading %s means touching the address space its "
                 "operation region names, and this kernel opens one only while "
-                "it is evaluating an interrupt-routing object (_PRT, _CRS, "
-                "_PRS, _STA, _PIC) — refused\n",
+                "it is evaluating an object that describes the machine "
+                "(_PRT, _CRS, _PRS, _STA, _PIC, _HID, _CID) — refused\n",
                 who, field->name);
         return false;
     }
@@ -3842,7 +3843,7 @@ static bool AmlRunTo(AmlRun *run) {
  * =========================================================== */
 
 /*
- * The five objects that may reach an address space, and the only place in
+ * The seven objects that may reach an address space, and the only place in
  * this file where the window is opened.
  *
  *   _PRT  ACPI 6.5 §6.2.13   where a PCI interrupt pin goes
@@ -3850,6 +3851,34 @@ static bool AmlRunTo(AmlRun *run) {
  *   _PRS  §6.2.12            what it could hold
  *   _STA  §6.3.7             whether it is there and enabled
  *   _PIC  §5.8.1             which interrupt model OSPM runs
+ *   _HID  §6.1.5             what the device IS
+ *   _CID  §6.1.2             what it is compatible with
+ *
+ * ‼ WHY _HID AND _CID EARN A WINDOW WHERE AN ARBITRARY METHOD DOES NOT.
+ *
+ * ACPI 6.5 §6.1.5 makes _HID "an object that ... can be a control method",
+ * and §6.1.2 says the same of _CID. Firmware that decides an identifier from
+ * what the OS announced — the shape Intel's reference ASL uses around OSYS —
+ * writes Method (_HID), and that method reads a chipset register through an
+ * OperationRegion like any other. Left outside the window, every such method
+ * was refused on its first field read.
+ *
+ * What both objects may hand back is fixed by the specification and is not a
+ * device operation: §6.1.5 allows "a 32-bit compressed EISA type ID" or a
+ * string, §6.1.2 allows either of those or a package of them. An identifier
+ * is an observation about the machine in exactly the sense _STA's presence
+ * bits are, which is the standing that put _STA in this list. And the window
+ * is a READING window only — run->may_write below is still granted to \_PIC
+ * and to nothing else, so a _HID that tried to store would be refused aloud
+ * by AmlStoreInto exactly as before.
+ *
+ * ‼ AND WHAT LEAVING THEM OUT COST is not a warning in a log. AmlRoutingAdopt
+ * asks every device in the namespace what it is; a PCI root bridge whose _HID
+ * is a method is then not recognised as a bridge at all, so its _PRT is never
+ * read and every PCI line under it falls back to configuration byte 0x3C —
+ * a byte PCI 3.0 §6.2.4 footnote 43 defines against the 8259 on a machine
+ * running its IO-APIC. Six devices on one shipping desktop board were refused
+ * here at once.
  */
 static bool AmlNameIs(const char *name, const char *four) {
     return name[0] == four[0] && name[1] == four[1] &&
@@ -3858,8 +3887,8 @@ static bool AmlNameIs(const char *name, const char *four) {
 
 static bool AmlNameOpensWindow(const char *name) {
     static const char *const routing[] =
-        { "_PRT", "_CRS", "_PRS", "_STA", "_PIC" };
-    for (uint32_t i = 0; i < 5; i++)
+        { "_PRT", "_CRS", "_PRS", "_STA", "_PIC", "_HID", "_CID" };
+    for (uint32_t i = 0; i < sizeof(routing) / sizeof(routing[0]); i++)
         if (AmlNameIs(name, routing[i])) return true;
     return false;
 }
@@ -4243,6 +4272,45 @@ typedef struct AmlDeviceIds {
 
 static const char *const g_aml_id_seg[2] = { "_HID", "_CID" };
 
+/*
+ * ‼ HOW MANY DEVICES COULD NOT SAY WHAT THEY ARE — one line, not one alarm
+ *   each.
+ *
+ * AmlRoutingAdopt asks every device in the namespace, so a board whose _HID
+ * methods this evaluator cannot run refuses in a run: six on one shipping
+ * desktop board, six copies of one sentence, and nowhere in the log the
+ * number that says whether a routing table was lost or a camera stub was.
+ * The evaluator has already printed WHAT stopped it — the opcode, the space,
+ * the region — at the point it stopped; what is added here is the count and
+ * one example to find in the lines above.
+ *
+ * Said only when it has grown since the last time, so a later walk that
+ * refuses nothing new stays quiet and one that does is not silent.
+ */
+static uint32_t    g_ids_refused       = 0;
+static uint32_t    g_ids_refused_said  = 0;
+static const char *g_ids_refused_first = NULL;
+static const char *g_ids_refused_seg   = NULL;
+
+static void AmlDeviceIdsRefusedSay(void) {
+    if (g_ids_refused == g_ids_refused_said) return;
+
+    kprintf("[AML] %[E]%u device(s) declare _HID or _CID in a form this "
+            "evaluator could not read, so what they are is not known here. A "
+            "PCI root bridge among them loses its whole _PRT and every line "
+            "under it falls back to configuration byte 0x3C; an interrupt "
+            "link among them is not recognised as one. The first was %s.%s, "
+            "and the line that says what stopped the evaluator was printed "
+            "where it stopped%[D]\n",
+            (unsigned)(g_ids_refused - g_ids_refused_said),
+            g_ids_refused_first ? g_ids_refused_first : "an unnamed device",
+            g_ids_refused_seg ? g_ids_refused_seg : "_HID");
+
+    g_ids_refused_said  = g_ids_refused;
+    g_ids_refused_first = NULL;
+    g_ids_refused_seg   = NULL;
+}
+
 static void AmlReadDeviceIds(AmlRun *run, aml_object_t *dev,
                               AmlDeviceIds *out) {
     memset(out, 0, sizeof(*out));
@@ -4250,10 +4318,11 @@ static void AmlReadDeviceIds(AmlRun *run, aml_object_t *dev,
         aml_object_t *n = AmlChild(dev, g_aml_id_seg[i]);
         if (!n) continue;
         if (!AmlEvalIn(run, n, NULL, 0, &out->value[i])) {
-            kprintf("[AML] device %s declares %s in a form this evaluator "
-                    "cannot read, so what it is cannot be known here — if it "
-                    "is a bridge or an interrupt link, it will be missed\n",
-                    dev->name, g_aml_id_seg[i]);
+            if (g_ids_refused_first == NULL) {
+                g_ids_refused_first = dev->name;
+                g_ids_refused_seg   = g_aml_id_seg[i];
+            }
+            g_ids_refused++;
             continue;
         }
         out->have[i] = true;
@@ -6003,6 +6072,12 @@ void AmlRoutingAdopt(void) {
                                 "bus 0)");
     }
 
+    /* The whole namespace has just been asked what each of its devices is.
+     * Whatever could not answer is said here, once, with a count — before the
+     * "no root bridge" line below, because on a board where that line is the
+     * consequence this is the cause. */
+    AmlDeviceIdsRefusedSay();
+
     if (!g_root_bridges) {
         kprintf("[AML] this firmware's namespace holds no PCI root bridge "
                 "(PNP0A03 or PNP0A08), so there is no routing table to read\n");
@@ -6290,6 +6365,12 @@ bool AmlRouteForPciPin(uint16_t segment, uint8_t root_bus,
     }
 
     kfree(owner);
+
+    /* Following a table's entry asks interrupt links what they are, so this
+     * walk can add to the tally the adoption already reported. Said only if
+     * it grew. */
+    AmlDeviceIdsRefusedSay();
+
     if (!answered && !named) {
         kprintf("[AML] the routing table under segment %u bus %u names no "
                 "entry for device %u pin INT%c#\n",

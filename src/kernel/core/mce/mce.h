@@ -195,6 +195,19 @@ void          mce_init(void);
  * a per-bank CTL write. Mirrors mce_init minus IDT registration. */
 void          mce_ap_init(void);
 
+/* Arm THIS core's corrected-machine-check interrupt: the per-bank
+ * IA32_MCi_CTL2 threshold and enable (Intel SDM Vol 3B §16.5.1) and this
+ * core's LVT CMCI entry (§16.5, LAPIC offset 0x2F0). Idempotent.
+ *
+ * ‼ CALL IT AFTER THE LOCAL APIC IS SOFTWARE-ENABLED, not before.
+ * mce_init and mce_ap_init both run earlier than that and arm the BANK half
+ * on their own, so corrected errors are already being counted; but SDM
+ * Vol 3A "Local APIC State After It Has Been Software Disabled" says an
+ * unmask written to a software-disabled APIC is ignored, so the INTERRUPT
+ * that carries them out is armed only from here. The two call sites are
+ * main.c (after irqchip_init) and per_core.c (after lapic_enable). */
+void          MceCmciArmLocal(void);
+
 /* #MC handler — called from idt.c exception_handler when vector == 18.
  * Runs in abort context on the IST stack: for as long as MCIP is set it
  * takes no lock, allocates nothing and says nothing (see mce.c's file

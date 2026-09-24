@@ -690,6 +690,12 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
     // ---- LAPIC ----
     lapic_enable();
 
+    /* This AP's corrected-error interrupt. mce_ap_init ran earlier and armed
+     * the banks; the LVT has to wait until the APIC above is software-enabled
+     * (Intel SDM Vol 3A, "Local APIC State After It Has Been Software
+     * Disabled"). Same reason, same ordering, as the BSP's call in main.c. */
+    MceCmciArmLocal();
+
     if (pc->is_kcore) {
         // K-Cores run kcore_run_loop() — HLT until an IPI_WAKE doorbell — and
         // never call schedule(). A periodic LAPIC timer would only wake them

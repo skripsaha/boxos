@@ -51,6 +51,8 @@
 #include "logbook.h"
 #include "baton.h"
 #include "amp.h"
+#include "lapic.h"        /* LVT CMCI — the delivery half of §16.5 */
+#include "right_of_way.h" /* the vector a corrected error is delivered under */
 
 /* ─── State ────────────────────────────────────────────────────────── */
 
@@ -90,6 +92,12 @@ static TouchTag  g_mce_tag_fatal      = TOUCH_TAG_INVALID;
 /* Armed by mce_init before the handler can ever run — see the record pool
  * below the severity helpers. */
 static void mce_note_pool_arm(void);
+
+/* CMCI — defined below the record pool, because the corrected-error handler
+ * delivers through the same slots and the same baton the #MC walk uses. */
+static void MceCmciVectorClaim(void);
+static void MceCmciSay(void);
+void        MceCmciArmLocal(void);
 
 /* ─── MSR primitives ──────────────────────────────────────────────── */
 
@@ -425,6 +433,15 @@ void mce_init(void) {
     mce_note_pool_arm();
 
     g_mce_initialized = true;
+
+    /* CMCI, both halves as far as this moment allows. The banks can be armed
+     * now — they are MSRs and MCG_CAP has been read — while delivery needs
+     * this core's local APIC software-enabled, which happens later in
+     * bring-up than MCA does. MceCmciArmLocal is idempotent, so the call that
+     * comes after the APIC is up finishes what this one starts, and
+     * MceCmciSay names what is still owed until then. */
+    MceCmciArmLocal();
+    MceCmciSay();
 }
 
 void mce_ap_init(void) {
@@ -480,6 +497,12 @@ void mce_ap_init(void) {
      * false. */
     const char *why = NULL;
     if (!mce_lmce_arm(cap, &why)) mce_lmce_fleet_disarm(why);
+
+    /* IA32_MCi_CTL2 is per logical processor exactly as IA32_MCG_EXT_CTL is,
+     * so this AP arms its own banks; whether it can also arm its LVT depends
+     * on whether its local APIC has been software-enabled by the time this
+     * runs, and MceCmciArmLocal asks rather than assumes. */
+    MceCmciArmLocal();
 }
 
 /* ─── #MC handler ─────────────────────────────────────────────────── */
@@ -546,9 +569,10 @@ typedef struct {
  * whole point. Table 15-6 attaches "If OVER=1, reset system" to the SRAR
  * row — to a record that is enabled, signalled and action-required — not
  * to every uncorrected record carrying the bit. A not-enabled or UCNA entry
- * sits in its bank until somebody polls it, and this kernel has no CMCI
- * handler yet, so that entry is precisely the one most likely to have
- * overflowed by the time an unrelated #MC walks past it: grading it fatal
+ * sits in its bank until CMCI reaches its threshold or an unrelated #MC
+ * walks past it, and on a bank whose CMCI could not be armed only the second
+ * ever comes — so that entry is the one most likely to have
+ * overflowed by the time it is read: grading it fatal
  * here would halt a healthy machine over an error that never signalled
  * anything. Linux reads the same bits in the same order — "Not enabled" is
  * the second rule of its severity table, its UCNA rule carries the comment
@@ -753,7 +777,7 @@ typedef struct {
     uint32_t  bank;          /* MCE_NOTE_NO_BANK = the empty walk */
     uint16_t  severity;      /* mce_severity_t */
     uint8_t   nested;        /* 1 = consumed by an in-flight migration */
-    uint8_t   rsv0;
+    uint8_t   via_cmci;      /* 1 = read by the CMCI handler, not by a #MC */
 } MceRecord;
 
 typedef struct {
@@ -805,6 +829,21 @@ static void mce_record_say(const MceRecord *r) {
                      : "Either the record sits in a bank this CPU does not "
                        "walk, or another logical processor took the same "
                        "broadcast signal and cleared the shared bank first.");
+        return;
+    }
+
+    /* A CMCI record interrupted nothing — SDM Vol 3B §16.5 delivers it as an
+     * ordinary LAPIC interrupt long after the error was logged — so its RIP
+     * and its MCG_STATUS belong to whatever the core happened to be doing,
+     * not to the error. Said, rather than printed as if it meant something. */
+    if (r->via_cmci) {
+        kprintf("[MCE] bank[%u] %s status=0x%016lx addr=0x%016lx "
+                "misc=0x%016lx [CMCI — the bank reached its corrected-error "
+                "threshold and raised an interrupt; nothing was interrupted "
+                "by the error itself, so no RIP names it]\n",
+                (unsigned)r->bank, mce_sev_str((mce_severity_t)r->severity),
+                (unsigned long)r->status, (unsigned long)r->addr,
+                (unsigned long)r->misc);
         return;
     }
 
@@ -896,6 +935,336 @@ static void mce_note_deliver(MceNoteSlot *slot, bool say_here) {
 
     mce_notes_lost_say();
     mce_record_say(&r);
+}
+
+/* ─── CMCI — the interrupt a corrected error raises ──────────────────── */
+/*
+ * Intel SDM Vol 3B §16.5, "Corrected Machine Check Error Interrupt": "CMCI
+ * ... provides capability to signal an interrupt when a hardware corrected
+ * machine check error reaches a threshold ... CMCI is disabled by default,
+ * system software must enable it explicitly." Until this existed, MCG_CAP
+ * bit 10 was read, printed, and then nothing armed a single bank: every
+ * corrected error sat in its bank uncounted until an unrelated #MC happened
+ * to walk past it, which is exactly the record mce_classify has to grade
+ * UCNA-with-OVER because nobody had polled it.
+ *
+ * Two halves, and they are armed in different places because the hardware
+ * puts them in different places:
+ *   - the SOURCE is per bank, in IA32_MCi_CTL2 (MSR 0x280 + i). Pure MSR
+ *     work, legal from the moment MCG_CAP has been read;
+ *   - the DELIVERY is per logical processor, in the local APIC's CMCI LVT
+ *     entry, and a local APIC that is not yet software-enabled silently
+ *     refuses to unmask it (see MceCmciLvtArm).
+ * MceCmciArmLocal does both, is idempotent, and is safe to call again from
+ * any point where the local APIC has since come up.
+ *
+ * The handler runs in ordinary interrupt context, not the #MC abort context,
+ * so the console lock is not forbidden to it the way the file header forbids
+ * it above — but it is still an interrupt that can land on a core holding
+ * that lock. So a corrected record rides the same slot and the same baton a
+ * #MC record rides, and a K-Core says it.
+ */
+
+/* IA32_MCi_CTL2 layout — SDM Vol 3B §16.5.1, Figure 16-8. Bits 14:0 are the
+ * corrected error count threshold, bit 30 is CMCI_EN, everything else is
+ * reserved and is carried through read-modify-write untouched. */
+#define MCE_MC_CTL2_THRESHOLD_MASK  0x7FFFULL
+#define MCE_MC_CTL2_CMCI_EN         (1ULL << 30)
+
+/* The local APIC's CMCI LVT entry. Intel SDM Vol 3A, chapter "ADVANCED
+ * PROGRAMMABLE INTERRUPT CONTROLLER (APIC)", section "Local Vector Table":
+ * the CMCI register is at offset 2F0H, and it is present only where the
+ * Local APIC Version register's Max LVT Entry field reads 6 or more. */
+#define MCE_LAPIC_LVT_CMCI          0x2F0u
+#define MCE_LAPIC_MAXLVT_WITH_CMCI  6u
+
+/* The vector corrected errors arrive under, taken from the pool once and
+ * held for the life of the boot. Zero is not a sentinel of convenience:
+ * vector 0 is #DE and VectorPoolTake answers 0 when it refuses. */
+static uint8_t          g_cmci_vector = 0;
+static SummonsResponder g_cmci_responder;
+
+/* What the arming found, for the one line that says it. Written by the BSP
+ * before any AP exists; an AP that diverges says so itself. */
+static uint32_t         g_cmci_banks_present = 0;
+static uint32_t         g_cmci_banks_armed   = 0;
+static uint32_t         g_cmci_banks_held    = 0;
+static bool             g_cmci_delivery      = false;
+static const char      *g_cmci_owed          = NULL;
+
+/* A corrected error reached its bank's threshold.
+ *
+ * Only CORRECTED and UCNA records are cleared here. §16.5 is about corrected
+ * errors, and §15.6.2 adds UCNA — "System software is not required to take
+ * any recovery action" — to the same interrupt; both are records whose whole
+ * value is being counted. An uncorrected record found in the same walk is
+ * LEFT WHERE IT IS: it is the #MC handler's to read, and clearing it here
+ * would throw away the one copy of an error that has not yet been signalled
+ * to anybody. */
+static void MceCmciAnswers(void) {
+    bool     deferral = mce_deferral_open();
+    uint32_t taken    = 0;
+    uint32_t left     = 0;
+
+    for (uint32_t i = 0; i < g_mce_bank_count && i < MCE_MAX_BANKS; i++) {
+        uint64_t status = mce_rdmsr(MCE_MSR_MC_STATUS_BASE + i * 4);
+        if (!(status & MCE_MC_STATUS_VAL)) continue;
+
+        mce_severity_t sev = mce_classify(status);
+        if (sev != MCE_SEV_CORRECTED && sev != MCE_SEV_UCNA) {
+            left++;
+            continue;
+        }
+
+        uint64_t addr = (status & MCE_MC_STATUS_ADDRV)
+                        ? mce_rdmsr(MCE_MSR_MC_ADDR_BASE + i * 4) : 0;
+        uint64_t misc = (status & MCE_MC_STATUS_MISCV)
+                        ? mce_rdmsr(MCE_MSR_MC_MISC_BASE + i * 4) : 0;
+
+        MceRecord r = {
+            .status     = status,
+            .addr       = addr,
+            .misc       = misc,
+            .mcg_status = 0,
+            .rip        = 0,
+            .phys       = 0,
+            .bank       = i,
+            .severity   = (uint16_t)sev,
+            .nested     = 0,
+            .via_cmci   = 1,
+        };
+        MceNoteSlot *slot = mce_note_claim(&r);
+        if (slot != NULL) {
+            mce_note_deliver(slot, !deferral);
+            taken++;
+        }
+
+        /* A subscriber counting corrected errors on one DIMM is how the next
+         * uncorrected one is seen coming, which is the whole reason this
+         * interrupt is worth arming. */
+        if (deferral && g_mce_tag_detected != TOUCH_TAG_INVALID) {
+            mce_event_payload_t ev = {
+                .status     = status,
+                .addr       = addr,
+                .misc       = misc,
+                .mcg_status = 0,
+                .rip        = 0,
+                .bank       = i,
+                .severity   = (uint8_t)sev,
+                .recovered  = 1,
+                .pad        = 0,
+            };
+            TouchPublishIrqPair(g_mce_tag_detected, TOUCH_TAG_INVALID,
+                                &ev, (uint16_t)sizeof(ev), 0u, 0u);
+        }
+
+        /* §15.3.2.2: writing 0 clears VAL and every sticky bit, and it is
+         * what re-arms the bank — the corrected error count restarts from
+         * zero, so the next threshold crossing raises the next CMCI. */
+        mce_wrmsr(MCE_MSR_MC_STATUS_BASE + i * 4, 0ULL);
+    }
+
+    /* A CMCI that found nothing to say is not silence to shrug at: the bank
+     * is shared between logical processors (§16.5.1) and a sibling may have
+     * read it first, or an uncorrected record is sitting in the walk waiting
+     * for a #MC that has not been raised. Said once per core — a storm of
+     * these would otherwise become the fault. */
+    if (taken == 0) {
+        static volatile uint32_t empty_said = 0;
+        uint32_t expected = 0;
+        if (__atomic_compare_exchange_n(&empty_said, &expected, 1, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            kprintf("[MCE] a corrected-error interrupt arrived on core %u and "
+                    "no bank held a corrected record — %u bank(s) held an "
+                    "uncorrected one, which is the #MC handler's to read, and "
+                    "the rest were already cleared by a logical processor "
+                    "sharing them. Further empty ones go unremarked\n",
+                    (unsigned)amp_get_core_index(), (unsigned)left);
+        }
+    }
+}
+
+/* Arm every bank of THIS logical processor that implements CMCI.
+ *
+ * SDM Vol 3B §16.5.1: IA32_MCi_CTL2 exists only where IA32_MCG_CAP.CMCI_P is
+ * set, and a bank that does not implement CMCI reads CMCI_EN back clear after
+ * a write. That read-back IS the discovery method — nothing here decides from
+ * a bank's number whether it has the facility.
+ *
+ * ‼ A bank that ALREADY had CMCI_EN set is left exactly as it is. §16.5.1:
+ * "the CMCI facility of a bank may be shared by more than one logical
+ * processor", so an enabled bank belongs to a sibling thread or to firmware,
+ * and two owners of one bank would each clear the other's record out from
+ * under it. Linux's cmci_discover makes the same test for the same reason.
+ *
+ * The threshold is 1 — one corrected error is one interrupt. Any larger
+ * number would be this kernel deciding how many corrected errors on a failing
+ * DIMM are not worth hearing about, which is not something it can know. */
+static void MceCmciBanksArm(void) {
+    uint32_t present = 0, armed = 0, held = 0;
+
+    for (uint32_t i = 0; i < g_mce_bank_count && i < MCE_MAX_BANKS; i++) {
+        uint64_t before = mce_rdmsr(MCE_MSR_MC_CTL2_BASE + i);
+
+        if (before & MCE_MC_CTL2_CMCI_EN) {
+            present++;
+            held++;
+            continue;
+        }
+
+        uint64_t want = (before & ~(MCE_MC_CTL2_THRESHOLD_MASK |
+                                    MCE_MC_CTL2_CMCI_EN)) |
+                        MCE_MC_CTL2_CMCI_EN | 1ULL;
+        mce_wrmsr(MCE_MSR_MC_CTL2_BASE + i, want);
+
+        uint64_t after = mce_rdmsr(MCE_MSR_MC_CTL2_BASE + i);
+        if (!(after & MCE_MC_CTL2_CMCI_EN)) continue;  /* no CMCI on this bank */
+
+        present++;
+        if ((after & MCE_MC_CTL2_THRESHOLD_MASK) == 0) {
+            /* Enabled, but the threshold field read back zero. §16.5.1 makes
+             * the field's width model-specific, and a zero threshold is a
+             * bank that will never reach one — so the enable is taken back
+             * rather than left looking armed. */
+            mce_wrmsr(MCE_MSR_MC_CTL2_BASE + i, before);
+            continue;
+        }
+        armed++;
+    }
+
+    g_cmci_banks_present = present;
+    g_cmci_banks_armed   = armed;
+    g_cmci_banks_held    = held;
+}
+
+/* Point this logical processor's CMCI LVT entry at the vector and unmask it.
+ *
+ * ‼ The unmask only STICKS on a software-enabled local APIC. SDM Vol 3A,
+ * section "Local APIC State After It Has Been Software Disabled": "The mask
+ * bits for all the LVT entries are set. Attempts to reset these bits will be
+ * ignored." A core whose SVR still carries its reset value would therefore
+ * end up with an entry that reads armed to nobody and delivers nothing, so
+ * its own SVR is read first and a disabled APIC is answered with false. */
+static bool MceCmciLvtArm(void) {
+    if (g_cmci_vector == 0)  return false;
+    if (!lapic_is_mapped())  return false;
+    if (!(lapic_read(LAPIC_REG_SVR) & LAPIC_SVR_ENABLE)) return false;
+
+    uint32_t maxlvt = (lapic_read(LAPIC_REG_VERSION) >> 16) & 0xFFu;
+    if (maxlvt < MCE_LAPIC_MAXLVT_WITH_CMCI) return false;
+
+    lapic_write(MCE_LAPIC_LVT_CMCI,
+                (uint32_t)g_cmci_vector | LAPIC_LVT_DELIVERY_FIXED);
+
+    uint32_t back = lapic_read(MCE_LAPIC_LVT_CMCI);
+    return (back & 0xFFu) == (uint32_t)g_cmci_vector &&
+           !(back & LAPIC_LVT_MASKED);
+}
+
+/* Take the vector corrected errors will arrive under, once for the machine.
+ *
+ * A corrected error is a REPORT — nothing is lost while it waits and nothing
+ * is redone — so it asks the pool for the row a report belongs in
+ * (right_of_way.h). The registry entry is the message-signalled kind:
+ * an LVT-delivered interrupt has no pin to cut, no polarity to agree on and
+ * nobody to share the wire with, which is the same shape IrqAnswerMessage
+ * already exists for. */
+static void MceCmciVectorClaim(void) {
+    if (g_cmci_vector != 0) return;
+
+    uint8_t v = VectorPoolTake(RIGHT_OF_WAY_A_PERSON_WAITS, "CMCI");
+    if (v == 0) {
+        g_cmci_owed = "the vector pool had no number left in the row a report "
+                      "belongs in";
+        return;
+    }
+
+    if (!IrqAnswerMessage(v, &g_cmci_responder, MceCmciAnswers, "CMCI")) {
+        VectorPoolGiveBack(v, "CMCI");
+        g_cmci_owed = "a vector was taken but no answerer could be registered "
+                      "on it, so it was given straight back";
+        return;
+    }
+
+    g_cmci_vector = v;
+}
+
+/* Arm CMCI on the logical processor this runs on: the banks, then delivery.
+ *
+ * Idempotent and re-callable, because the two halves become possible at
+ * different moments. The banks can be armed the instant MCG_CAP has been
+ * read; the LVT cannot be armed until this core's own local APIC is software
+ * enabled, which happens later in bring-up than MCA does. A call that cannot
+ * yet arm delivery arms the source and records what is still owed. */
+void MceCmciArmLocal(void) {
+    if (!g_mce_initialized && g_mce_bank_count == 0) return;
+
+    /* SDM Vol 3B §16.5.1: IA32_MCi_CTL2 is present only when
+     * IA32_MCG_CAP.MCG_CMCI_P (bit 10) is set. Writing 0x280+i without it is
+     * a #GP on a core with no fixup for one. */
+    if (!(g_mce_mcg_cap & MCE_CAP_MCG_CMCI_P)) return;
+
+    MceCmciBanksArm();
+
+    if (!lapic_is_mapped() ||
+        !(lapic_read(LAPIC_REG_SVR) & LAPIC_SVR_ENABLE)) {
+        g_cmci_owed = "this core's local APIC is not software-enabled yet, and "
+                      "a masked LVT entry cannot be unmasked on one — the "
+                      "banks count corrected errors, but no interrupt carries "
+                      "them out";
+        return;
+    }
+
+    MceCmciVectorClaim();
+
+    if (!MceCmciLvtArm()) {
+        if (g_cmci_owed == NULL) {
+            g_cmci_owed = "the CMCI LVT entry did not read back carrying the "
+                          "vector unmasked — this local APIC kept corrected-"
+                          "error delivery off";
+        }
+        /* One core out of step matters the way an unarmed LMCE does: the
+         * fleet answer stops claiming otherwise and the exchange elects the
+         * single speaker. */
+        if (__atomic_exchange_n(&g_cmci_delivery, false, __ATOMIC_ACQ_REL)) {
+            kprintf("[MCE] core %u: CMCI delivery not armed: %s\n",
+                    (unsigned)amp_get_core_index(), g_cmci_owed);
+        }
+        return;
+    }
+
+    g_cmci_owed = NULL;
+    if (!__atomic_exchange_n(&g_cmci_delivery, true, __ATOMIC_ACQ_REL)) {
+        kprintf("[MCE] CMCI armed on %u of %u bank(s) that implement it "
+                "(%u already held by a logical processor sharing them), "
+                "delivered on vector 0x%02x — a corrected error now raises an "
+                "interrupt instead of waiting in its bank for the next #MC to "
+                "walk past it\n",
+                (unsigned)g_cmci_banks_armed, (unsigned)g_cmci_banks_present,
+                (unsigned)g_cmci_banks_held, (unsigned)g_cmci_vector);
+    }
+}
+
+/* A capability that is printed is either armed or explained — the boot line
+ * above says CMCI_P, so this says what came of it. */
+static void MceCmciSay(void) {
+    if (!(g_mce_mcg_cap & MCE_CAP_MCG_CMCI_P)) {
+        kprintf("[MCE] IA32_MCG_CAP.CMCI_P (bit 10) is clear — this part has "
+                "no IA32_MCi_CTL2 and no corrected-error interrupt. Corrected "
+                "errors are only ever seen when a later #MC walks past "
+                "them\n");
+        return;
+    }
+
+    if (__atomic_load_n(&g_cmci_delivery, __ATOMIC_ACQUIRE)) return;
+
+    kprintf("[MCE] CMCI: %u of %u bank(s) that implement it are counting "
+            "corrected errors (%u already held elsewhere), but delivery is "
+            "not armed: %s\n",
+            (unsigned)g_cmci_banks_armed, (unsigned)g_cmci_banks_present,
+            (unsigned)g_cmci_banks_held,
+            g_cmci_owed ? g_cmci_owed
+                        : "nothing asked this core to arm it");
 }
 
 bool mce_handle(interrupt_frame_t *frame) {
@@ -1149,7 +1518,7 @@ bool mce_handle(interrupt_frame_t *frame) {
                 .bank       = i,
                 .severity   = (uint16_t)sev,
                 .nested     = nested ? 1u : 0u,
-                .rsv0       = 0,
+                .via_cmci   = 0,
             };
             MceNoteSlot *slot = mce_note_claim(&r);
             if (slot != NULL && claimed_n < MCE_MAX_BANKS) {
@@ -1340,7 +1709,7 @@ bool mce_handle(interrupt_frame_t *frame) {
             .bank       = MCE_NOTE_NO_BANK,
             .severity   = (uint16_t)MCE_SEV_NONE,
             .nested     = 0,
-            .rsv0       = 0,
+            .via_cmci   = 0,
         };
         MceNoteSlot *slot = mce_note_claim(&r);
         if (slot != NULL && claimed_n < MCE_MAX_BANKS) {
