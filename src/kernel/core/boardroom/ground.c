@@ -542,6 +542,10 @@ static GptVerdict gpt_read_one(uint8_t seat, uint64_t header_block,
         (*found)++;
     }
 
+    kprintf("[Ground] seat %u: its GPT names %u partition entr%s, %u "
+            "carrying BoxOS ground\n",
+            seat, entry_count, entry_count == 1 ? "y" : "ies", *found);
+
 done:
     kfree(array);
     kfree(header);
@@ -731,6 +735,16 @@ static uint8_t ground_survey_medium(uint8_t seat, MediumGround *out)
         out[found].origin       = GROUND_FROM_MBR;
         out[found].entry        = (uint8_t)i;
         found++;
+    }
+
+    if (found == 0) {
+        kprintf("[Ground] seat %u: MBR table read, no BoxOS ground on it — "
+                "its four entries are types", seat);
+        for (uint32_t i = 0; i < MBR_ENTRY_COUNT; i++) {
+            const uint8_t *e = sector0 + MBR_TABLE_OFFSET + i * MBR_ENTRY_BYTES;
+            kprintf(" %u:0x%02x", i, e[MBR_ENTRY_TYPE]);
+        }
+        kprintf("\n");
     }
 
     return found;

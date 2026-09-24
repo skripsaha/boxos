@@ -731,7 +731,10 @@ void efi_secureboot_print(void)
 
     kprintf("[SB] Secure Boot is %s; the firmware is in %s mode%s%s. This "
             "kernel took in %u certificate(s) and %u signature hash(es) from "
-            "PK/KEK/db/dbx and judges every image it loads against them\n",
+            "its six databases (PK/KEK/db/dbx/dbt/dbr) and holds them ready; "
+            "verifying an image against them is the deck operation "
+            "system.efi.verifype (requires utility authority), and nothing "
+            "in the image-loading path calls it\n",
             g_state.enforced
                 ? "ON — the firmware authenticates every image it boots"
                 : "OFF — the firmware boots images without checking a signature",

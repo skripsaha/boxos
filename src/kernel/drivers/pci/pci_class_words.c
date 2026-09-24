@@ -45,7 +45,7 @@ static const PciClassRow kPciClassRows[] = {
     { 0x01, 0x04,          PCI_CLASS_ANY, "a RAID controller" },
     { 0x01, 0x05,          PCI_CLASS_ANY, "an ATA controller" },
     { 0x01, 0x06,          0x00,          "a SATA controller with a vendor-specific interface" },
-    { 0x01, 0x06,          0x01,          "a SATA controller speaking AHCI 1.0" },
+    { 0x01, 0x06,          0x01,          "a SATA controller speaking the AHCI programming interface" },
     { 0x01, 0x06,          0x02,          "a SATA controller on the Serial Storage Bus" },
     { 0x01, 0x06,          PCI_CLASS_ANY, "a SATA controller" },
     { 0x01, 0x07,          PCI_CLASS_ANY, "a Serial Attached SCSI controller" },

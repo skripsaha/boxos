@@ -19,32 +19,41 @@
  *   DeployedMode (UINT8) — UEFI 2.10 §32.3.3. Locked-down mode, no
  *                          mode transitions allowed.
  *
- * Databases parsed:
+ * Databases parsed — all six that UEFI 2.10 §32 defines:
  *
- *   PK   (EFI_GLOBAL_VARIABLE)             Platform key (single X.509).
- *   KEK  (EFI_GLOBAL_VARIABLE)             Key-exchange keys (chain root).
+ *   PK   (EFI_GLOBAL_VARIABLE)              Platform key (single X.509).
+ *   KEK  (EFI_GLOBAL_VARIABLE)              Key-exchange keys (chain root).
  *   db   (EFI_IMAGE_SECURITY_DATABASE_GUID) Authorised image database.
  *   dbx  (...)                              Forbidden image / cert database
  *                                            (revocations).
+ *   dbt  (...)                              Timestamp signing database.
+ *   dbr  (...)                              Recovery key database.
  *
  * Each database is a concatenation of EFI_SIGNATURE_LIST blocks. Each
  * block carries one signature_type GUID + N signature payloads of
- * uniform size. Our parser flattens db / dbx into two collections:
+ * uniform size. Our parser flattens all six into two collections, each
+ * entry tagged with which database it came from (EfiSbCertEntry.db_kind /
+ * EfiSbHashEntry.db_kind):
  *   - certificate entries     (X.509 DER blobs)
- *   - raw hash entries        (SHA-256, 32 bytes; SHA-384/SHA-512 also
- *                              recorded but only SHA-256 is searched in
- *                              Authenticode verify per Microsoft's
- *                              currently-deployed dbx).
+ *   - raw hash entries        (SHA-256/384/512, up to 64 bytes). Every
+ *                              width efi_authenticode.c is handed — raw
+ *                              hash and X.509-then-hash alike — is
+ *                              consulted during verification; SHA-256 is
+ *                              not a verification limit, only the width
+ *                              this file's Touch tags carry.
  *
- * Touch surface:
+ * Touch surface (one pair of tags per database that holds anything, named
+ * by db_kind: pk/kek/db/dbx/dbt/dbr):
  *   secureboot:on / secureboot:off          state
  *   secureboot:setup-mode / user-mode       PK enrollment state
  *   secureboot:deployed-mode                locked
  *   secureboot:audit-mode                   log-only
- *   secureboot:db-cert:<sha256-of-cert>     per X.509 in db
- *   secureboot:db-hash:<sha256>             per raw SHA-256 in db
- *   secureboot:dbx-cert:<sha256-of-cert>    per X.509 in dbx
- *   secureboot:dbx-hash:<sha256>            per raw SHA-256 in dbx
+ *   secureboot:<db>-cert:<sha256-of-cert>   per X.509 in that database
+ *   secureboot:<db>-hash:<sha256>           per raw SHA-256 in that
+ *                                            database (SHA-384/512 and
+ *                                            X.509-hash records are kept
+ *                                            in the inventory but not
+ *                                            published under this tag)
  *
  * Storage: parsed certs/hashes are kmalloc'd at init; cleared by
  * efi_secureboot_reset() (only used in tests). On production boots
@@ -139,10 +148,21 @@ typedef struct {
     uint32_t hash_count_by_db[EFI_SB_DB_COUNT];
 } EfiSecureBootState;
 
-/* Initialise — reads SecureBoot/SetupMode/AuditMode/DeployedMode +
- * PK / KEK / db / dbx / dbt / dbr.  Idempotent.  Returns true on
- * any successful state read (even when none of the databases parse,
- * which happens on machines with Secure Boot disabled at firmware). */
+/* Initialise — reads SecureBoot/SetupMode/AuditMode/DeployedMode, then
+ * PK / KEK / db / dbx / dbt / dbr.  Idempotent.  In the order the code
+ * takes them, there are four outcomes:
+ *
+ *   1. EFI runtime not available          -> false, nothing read at all.
+ *   2. dbx present but unreadable (any status but NOT_FOUND or
+ *      UNSUPPORTED)                       -> false; an unreadable
+ *      revocation list must not be treated as an empty one, so the state
+ *      and whatever else was staged are discarded.
+ *   3. the cert or hash inventory fails to allocate once its exact size
+ *      is known                           -> false; everything staged is
+ *      released.
+ *   4. otherwise                          -> true, including when every
+ *      database is absent or empty (Secure Boot disabled at firmware) —
+ *      that is a successful read of zero entries, not a failure. */
 bool efi_secureboot_init(void);
 
 /* True iff the boot is UEFI + RT services available + init ran. */

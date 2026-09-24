@@ -330,6 +330,9 @@ static const AcpiTableReader g_table_readers[] = {
     { "EINJ", ACPI_TABLE_OPENED, NULL },  /* presence only — nothing injected*/
     { "WSMT", ACPI_TABLE_OPENED, NULL },  /* acpi_wsmt.c — SMM's own claims  */
     { "UEFI", ACPI_TABLE_OPENED, NULL },  /* its identifier — see below      */
+    { "DBG2", ACPI_TABLE_OPENED, NULL },  /* acpi_dbg2.c — debug port table  */
+    { "DBGP", ACPI_TABLE_OPENED, NULL },  /* acpi_dbg2.c — debug port spec   */
+    { "SPCR", ACPI_TABLE_OPENED, NULL },  /* acpi_dbg2.c — console redirect  */
 
     { "FIDT", ACPI_TABLE_SKIPPED,
       "it carries the firmware's own build identity and not one address, "
