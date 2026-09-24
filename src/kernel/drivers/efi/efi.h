@@ -39,6 +39,7 @@
  */
 
 #include "ktypes.h"
+#include "lifeline.h"   /* LifelineRange — the footing/catch contract */
 
 /* =========================================================================
  * EFI types and status codes (kernel-side mirror of src/boot/uefi/uefi.h)
@@ -105,6 +106,7 @@ typedef enum {
     EFI_MEMORY_MAPPED_IO_PORT_SPACE = 12,
     EFI_PAL_CODE              = 13,
     EFI_PERSISTENT_MEMORY     = 14,
+    EFI_UNACCEPTED_MEMORY_TYPE = 15,   /* UEFI 2.10 §7.2 Table 7.9 */
     EFI_MAX_MEMORY_TYPE
 } EfiMemoryType;
 
@@ -117,7 +119,13 @@ typedef enum {
 #define EFI_MEMORY_WP          0x0000000000001000ULL
 #define EFI_MEMORY_RP          0x0000000000002000ULL
 #define EFI_MEMORY_XP          0x0000000000004000ULL
+#define EFI_MEMORY_NV          0x0000000000008000ULL
+#define EFI_MEMORY_MORE_RELIABLE 0x0000000000010000ULL
 #define EFI_MEMORY_RO          0x0000000000020000ULL
+#define EFI_MEMORY_SP          0x0000000000040000ULL
+#define EFI_MEMORY_CPU_CRYPTO  0x0000000000080000ULL
+#define EFI_MEMORY_ISA_VALID   0x4000000000000000ULL
+#define EFI_MEMORY_ISA_MASK    0x0FFFF00000000000ULL
 #define EFI_MEMORY_RUNTIME     0x8000000000000000ULL
 
 typedef struct {
@@ -382,6 +390,57 @@ void *efi_find_configuration_table(const EfiGuid *target);
  * where the EfiGuid may not satisfy its natural 4-byte alignment.
  * memcmp is intrinsified by GCC for fixed sizeof(EfiGuid)=16. */
 bool efi_guid_equal(const EfiGuid *a, const EfiGuid *b);
+
+/* ------------------------------------------------------------------------
+ * The memory map, read back (UEFI 2.10 §7.2)
+ * ------------------------------------------------------------------------ */
+
+/* Spelling of an EfiMemoryType for a log line. Never NULL — a type number
+ * this kernel has no name for comes back as "Unnamed". */
+const char *EfiMemoryTypeName(uint32_t type);
+
+/* What the firmware said about the descriptor covering `phys`.
+ *
+ * Built for an exception handler: takes no lock, allocates nothing, and walks
+ * the boot copy of the map through the Pull Map, which lives in the shared
+ * upper half of every address space. `found` is false when no descriptor
+ * covers the address — which is itself the answer worth printing. */
+typedef struct {
+    bool     found;
+    uint32_t index;
+    uint32_t type;
+    uint64_t physical_start;
+    uint64_t number_of_pages;
+    uint64_t attribute;
+    uint64_t virtual_start;
+} EfiDescriptorFacts;
+
+bool EfiDescribePhysical(uint64_t phys, EfiDescriptorFacts *out);
+
+/* The windows firmware code may legitimately execute in: the runtime VA
+ * window this kernel assigned at SetVirtualAddressMap, and the VA==PA window
+ * kept beside it. Fills at most `max` entries, returns how many it wrote,
+ * and returns 0 before efi_runtime_init has mapped anything. */
+#define EFI_FIRMWARE_CODE_RANGES 2u
+unsigned EfiFirmwareCodeRanges(LifelineRange *out, unsigned max);
+
+/* ------------------------------------------------------------------------
+ * Footing (UEFI 2.10 §8.1, §2.3.4)
+ *
+ * The kernel's own map goes under the firmware's feet for the duration of
+ * every runtime call and comes back off after, because the firmware reaches
+ * its own structures through the VA==PA window this driver installed in
+ * PML4[0] — and vmm_create_context copies only PML4[256..512) into a cabin,
+ * so that window is absent from every process address space. Footing is
+ * taken inside efi_rt_lock and given back inside efi_rt_unlock, so every
+ * runtime wrapper in this driver gets it without asking.
+ * ------------------------------------------------------------------------ */
+
+/* Is `len` bytes at `p` reachable from the KERNEL map? A pointer that is not
+ * must never be handed to the firmware while Footing holds. NULL is
+ * reachable by definition — the services that take optional pointers are
+ * entitled to receive one. */
+bool EfiFootingReachable(const void *p, uint64_t len);
 
 /* ------------------------------------------------------------------------
  * Diagnostics

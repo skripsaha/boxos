@@ -49,6 +49,7 @@
 #include "atomics.h"
 #include "crypto.h"   /* KCrc32 — shared CRC32(IEEE 802.3) implementation */
 #include "fpu.h"      /* fpu_save / fpu_restore around every firmware entry */
+#include "lifeline.h" /* LifelineArm / LifelineDisarm around every firmware entry */
 
 #define EFI_PAGE_SIZE      4096ULL
 #define EFI_PAGE_SHIFT     12
@@ -94,6 +95,20 @@ static uint32_t g_rt_svam_descriptors    = 0;
 static uint32_t g_rt_runtime_descriptors = 0;
 static uint64_t g_rt_runtime_pages_total = 0;
 static uint32_t g_rt_fw_revision         = 0;
+
+/* The boot copy of the EFI memory map, kept so an address can be named long
+ * after init — including from an exception handler, which may not parse
+ * boot_info, take a lock or allocate. The pointer is a Pull Map VA and the
+ * Pull Map is in the shared upper half of every address space. */
+static uint8_t *g_efi_map       = NULL;
+static uint32_t g_efi_map_size  = 0;
+static uint32_t g_efi_desc_size = 0;
+
+/* Where firmware code may legitimately execute: [0] the runtime VA window
+ * this kernel assigned, [1] the VA==PA window kept beside it. Filled once,
+ * after stage 1, and handed to Lifeline at every call site. */
+static LifelineRange g_efi_code_ranges[EFI_FIRMWARE_CODE_RANGES];
+static unsigned      g_efi_code_range_count = 0;
 
 /* =========================================================================
  * Helpers
@@ -400,21 +415,292 @@ static void efi_boot_services_alias(uint8_t *map, uint32_t map_size,
  * firmware extends the struct in a future revision. Always step by
  * desc_size, never sizeof.
  *
- * Returns the descriptor, or NULL if `phys` is not in the map. */
+ * Returns the descriptor, or NULL if `phys` is not in the map. `out_index`,
+ * when given, receives the descriptor's position in the map — the number a
+ * log line needs to be matched against the dump below. */
 static EfiMemoryDescriptor *efi_find_descriptor(uint8_t *map, uint32_t map_size,
                                                 uint32_t desc_size,
-                                                uint64_t phys)
+                                                uint64_t phys,
+                                                uint32_t *out_index)
 {
     uint8_t *p   = map;
     uint8_t *end = map + map_size;
+    uint32_t i   = 0;
     while (p + desc_size <= end) {
         EfiMemoryDescriptor *d = (EfiMemoryDescriptor *)p;
         uint64_t span = efi_pages_to_bytes(d->number_of_pages);
-        if (phys >= d->physical_start && phys < d->physical_start + span)
+        if (phys >= d->physical_start && phys < d->physical_start + span) {
+            if (out_index) *out_index = i;
             return d;
+        }
         p += desc_size;
+        i++;
     }
     return NULL;
+}
+
+/* =========================================================================
+ * The memory map, said out loud (UEFI 2.10 §7.2)
+ *
+ * All of this is kprintf on purpose. It exists so ONE board run explains
+ * itself — which descriptor a faulting address belongs to, what the firmware
+ * said the region supports, and which virtual address this kernel handed it —
+ * and debug_printf compiles to nothing in every image that ships.
+ * ========================================================================= */
+
+const char *EfiMemoryTypeName(uint32_t type)
+{
+    switch (type) {
+    case EFI_RESERVED_MEMORY_TYPE:        return "Reserved";
+    case EFI_LOADER_CODE:                 return "LoaderCode";
+    case EFI_LOADER_DATA:                 return "LoaderData";
+    case EFI_BOOT_SERVICES_CODE:          return "BootServicesCode";
+    case EFI_BOOT_SERVICES_DATA:          return "BootServicesData";
+    case EFI_RUNTIME_SERVICES_CODE:       return "RuntimeServicesCode";
+    case EFI_RUNTIME_SERVICES_DATA:       return "RuntimeServicesData";
+    case EFI_CONVENTIONAL_MEMORY:         return "Conventional";
+    case EFI_UNUSABLE_MEMORY:             return "Unusable";
+    case EFI_ACPI_RECLAIM_MEMORY:         return "ACPIReclaim";
+    case EFI_ACPI_MEMORY_NVS:             return "ACPIMemoryNVS";
+    case EFI_MEMORY_MAPPED_IO:            return "MemoryMappedIO";
+    case EFI_MEMORY_MAPPED_IO_PORT_SPACE: return "MemoryMappedIOPortSpace";
+    case EFI_PAL_CODE:                    return "PalCode";
+    case EFI_PERSISTENT_MEMORY:           return "PersistentMemory";
+    case EFI_UNACCEPTED_MEMORY_TYPE:      return "UnacceptedMemory";
+    default:                              return "Unnamed";
+    }
+}
+
+/* Every attribute bit UEFI 2.10 §7.2 Table 7.10 names. Bits outside the table
+ * are printed as a residue rather than dropped, because a firmware that sets
+ * one is telling us something this kernel has not been taught. The ISA field
+ * (§7.2, EFI_MEMORY_ISA_MASK) is excluded from the residue: it is a value,
+ * not a set of flags, and only meaningful where EFI_MEMORY_ISA_VALID is set. */
+static void EfiAttributeNames(uint64_t attr, char *out, size_t cap)
+{
+    static const struct { uint64_t bit; const char *name; } kAttrBits[] = {
+        { EFI_MEMORY_UC,            "UC"            },
+        { EFI_MEMORY_WC,            "WC"            },
+        { EFI_MEMORY_WT,            "WT"            },
+        { EFI_MEMORY_WB,            "WB"            },
+        { EFI_MEMORY_UCE,           "UCE"           },
+        { EFI_MEMORY_WP,            "WP"            },
+        { EFI_MEMORY_RP,            "RP"            },
+        { EFI_MEMORY_XP,            "XP"            },
+        { EFI_MEMORY_NV,            "NV"            },
+        { EFI_MEMORY_MORE_RELIABLE, "MORE_RELIABLE" },
+        { EFI_MEMORY_RO,            "RO"            },
+        { EFI_MEMORY_SP,            "SP"            },
+        { EFI_MEMORY_CPU_CRYPTO,    "CPU_CRYPTO"    },
+        { EFI_MEMORY_ISA_VALID,     "ISA_VALID"     },
+        { EFI_MEMORY_RUNTIME,       "RUNTIME"       },
+    };
+
+    if (!out || cap == 0) return;
+    out[0] = 0;
+
+    size_t   used  = 0;
+    uint64_t named = 0;
+    for (size_t i = 0; i < sizeof(kAttrBits) / sizeof(kAttrBits[0]); i++) {
+        if (!(attr & kAttrBits[i].bit)) continue;
+        named |= kAttrBits[i].bit;
+        int n = ksnprintf(out + used, cap - used, "%s%s",
+                          used ? " " : "", kAttrBits[i].name);
+        if (n <= 0 || (size_t)n >= cap - used) { used = cap - 1; break; }
+        used += (size_t)n;
+    }
+
+    uint64_t rest = attr & ~named & ~EFI_MEMORY_ISA_MASK;
+    if (rest && used + 1 < cap) {
+        ksnprintf(out + used, cap - used, "%s+0x%lx",
+                  used ? " " : "", (unsigned long)rest);
+    } else if (used == 0) {
+        ksnprintf(out, cap, "none");
+    }
+}
+
+static void EfiDumpMemoryMap(uint8_t *map, uint32_t map_size, uint32_t desc_size)
+{
+    if (!map || !desc_size || map_size < desc_size) return;
+
+    kprintf("[EFI] memory map: %u descriptor(s) of %u byte(s) each\n",
+            map_size / desc_size, desc_size);
+
+    uint32_t i = 0;
+    for (uint8_t *p = map; p + desc_size <= map + map_size;
+         p += desc_size, i++) {
+        EfiMemoryDescriptor *d    = (EfiMemoryDescriptor *)p;
+        uint64_t             span = efi_pages_to_bytes(d->number_of_pages);
+        char                 attrs[192];
+
+        EfiAttributeNames(d->attribute, attrs, sizeof(attrs));
+        kprintf("[EFI]   [%3u] %-24s phys=0x%016lx..0x%016lx pages=%lu "
+                "virt=0x%016lx attr=0x%016lx %s\n",
+                i, EfiMemoryTypeName(d->type),
+                (unsigned long)d->physical_start,
+                (unsigned long)(d->physical_start + span),
+                (unsigned long)d->number_of_pages,
+                (unsigned long)d->virtual_start,
+                (unsigned long)d->attribute,
+                attrs);
+    }
+}
+
+bool EfiDescribePhysical(uint64_t phys, EfiDescriptorFacts *out)
+{
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+
+    uint8_t *map       = g_efi_map;
+    uint32_t map_size  = g_efi_map_size;
+    uint32_t desc_size = g_efi_desc_size;
+    if (!map || !desc_size || map_size < desc_size) return false;
+
+    uint32_t index = 0;
+    EfiMemoryDescriptor *d =
+        efi_find_descriptor(map, map_size, desc_size, phys, &index);
+    if (!d) return false;
+
+    out->found           = true;
+    out->index           = index;
+    out->type            = d->type;
+    out->physical_start  = d->physical_start;
+    out->number_of_pages = d->number_of_pages;
+    out->attribute       = d->attribute;
+    out->virtual_start   = d->virtual_start;
+    return true;
+}
+
+/* What Lifeline caught, on its way back out of the firmware — and the memory
+ * map's own answer for CR2, which is the difference between "a bare physical
+ * address nobody recognises" and "runtime data descriptor 41". */
+void EfiSayFall(const char *service, const char *consequence)
+{
+    const LifelineFall *fp = LifelineLastFall();
+    LifelineFall        f  = { 0, 0, 0, 0, 0, false };
+    if (fp) f = *fp;
+
+    kprintf("[EFI] the firmware fell inside %s: vector=%lu err=0x%lx "
+            "RIP=0x%lx CR2=0x%lx CR3=0x%lx — %s\n",
+            service, (unsigned long)f.vector, (unsigned long)f.error_code,
+            (unsigned long)f.rip, (unsigned long)f.cr2,
+            (unsigned long)f.cr3, consequence);
+
+    EfiDescriptorFacts d;
+    if (EfiDescribePhysical(f.cr2, &d)) {
+        char attrs[192];
+        EfiAttributeNames(d.attribute, attrs, sizeof(attrs));
+        kprintf("[EFI]   CR2 0x%lx is descriptor [%u] %s phys=0x%lx pages=%lu "
+                "virt=0x%lx attr=0x%016lx %s\n",
+                (unsigned long)f.cr2, d.index, EfiMemoryTypeName(d.type),
+                (unsigned long)d.physical_start,
+                (unsigned long)d.number_of_pages,
+                (unsigned long)d.virtual_start,
+                (unsigned long)d.attribute, attrs);
+    } else {
+        kprintf("[EFI]   CR2 0x%lx falls in no EFI memory descriptor\n",
+                (unsigned long)f.cr2);
+    }
+}
+
+/* The two windows firmware code may legitimately run in, derived from the
+ * descriptors this kernel actually gave pages to: EFI_RUNTIME_SERVICES_CODE
+ * at the virtual_start assigned in stage 1, and the same code at VA==PA.
+ * Everything outside them is this kernel's own text, so a fault reported
+ * there is ours and Lifeline must not swallow it. */
+static void EfiBuildCodeRanges(uint8_t *map, uint32_t map_size,
+                               uint32_t desc_size)
+{
+    g_efi_code_range_count = 0;
+    if (!map || !desc_size || map_size < desc_size) return;
+
+    uint64_t va_lo = UINT64_MAX, va_hi = 0;
+    uint64_t pa_lo = UINT64_MAX, pa_hi = 0;
+
+    for (uint8_t *p = map; p + desc_size <= map + map_size; p += desc_size) {
+        EfiMemoryDescriptor *d = (EfiMemoryDescriptor *)p;
+        if (d->type != EFI_RUNTIME_SERVICES_CODE)  continue;
+        if (!(d->attribute & EFI_MEMORY_RUNTIME))  continue;
+        if (d->number_of_pages == 0)               continue;
+        if (efi_rt_map_flags(d) == 0)              continue;  /* never paged */
+
+        uint64_t span = efi_pages_to_bytes(d->number_of_pages);
+        if (d->physical_start < pa_lo)        pa_lo = d->physical_start;
+        if (d->physical_start + span > pa_hi) pa_hi = d->physical_start + span;
+        if (d->virtual_start) {
+            if (d->virtual_start < va_lo)        va_lo = d->virtual_start;
+            if (d->virtual_start + span > va_hi) va_hi = d->virtual_start + span;
+        }
+    }
+
+    if (va_lo < va_hi) {
+        g_efi_code_ranges[g_efi_code_range_count].lo = va_lo;
+        g_efi_code_ranges[g_efi_code_range_count].hi = va_hi;
+        g_efi_code_range_count++;
+    }
+    if (pa_lo < pa_hi) {
+        g_efi_code_ranges[g_efi_code_range_count].lo = pa_lo;
+        g_efi_code_ranges[g_efi_code_range_count].hi = pa_hi;
+        g_efi_code_range_count++;
+    }
+
+    if (g_efi_code_range_count == 0) {
+        kprintf("[EFI] no runtime CODE region was mapped — a fault inside a "
+                "firmware call cannot be told from one of ours\n");
+        return;
+    }
+    for (unsigned i = 0; i < g_efi_code_range_count; i++) {
+        kprintf("[EFI] firmware code window %u: 0x%016lx..0x%016lx\n",
+                i, (unsigned long)g_efi_code_ranges[i].lo,
+                (unsigned long)g_efi_code_ranges[i].hi);
+    }
+}
+
+unsigned EfiFirmwareCodeRanges(LifelineRange *out, unsigned max)
+{
+    if (!out) return 0;
+    unsigned n = (g_efi_code_range_count < max) ? g_efi_code_range_count : max;
+    for (unsigned i = 0; i < n; i++) out[i] = g_efi_code_ranges[i];
+    return n;
+}
+
+/* The outcome of the one SetVirtualAddressMap call, parked in file scope
+ * rather than in efi_runtime_init's frame.
+ *
+ * ‼ A Lifeline throwback restores the SysV callee-saved registers from the pad
+ * and nothing else, while GCC is entitled to keep a local in RSI or RDI across
+ * an ms_abi call — the Microsoft x64 convention preserves both, the SysV
+ * AMD64 ABI §3.2.1 does not. efi_runtime_init has a dozen locals live across
+ * this call (map, kctx, svam_phys, rt_pages, rt_phys...), and unmapping or
+ * freeing a garbage one of those is worse than the fault being caught. So the
+ * call is made from a frame with nothing of ours live across it, and the
+ * answer is read back from here. BSP-only, under g_rt_lock, one writer. */
+static EfiStatus g_rt_svam_status = EFI_STATUS_DEVICE_ERROR;
+static bool      g_rt_svam_fell   = false;
+
+static void EfiCallSetVirtualAddressMap(EfiRuntimeServices *rt_phys,
+                                        uint64_t  map_bytes,
+                                        uint64_t  desc_size,
+                                        uint32_t  desc_ver,
+                                        uintptr_t svam_phys)
+{
+    g_rt_svam_status = EFI_STATUS_DEVICE_ERROR;
+    g_rt_svam_fell   = false;
+
+    /* The map argument is deliberately a PHYSICAL address and is therefore
+     * not run past EfiFootingReachable, which answers for the kernel half
+     * only: svam_phys was identity-mapped into the kernel context by the
+     * caller, which is the window the firmware reads it through. */
+    LifelinePad pad;
+    if (LifelineArm(&pad, g_efi_code_ranges, g_efi_code_range_count) == 0) {
+        g_rt_svam_status = rt_phys->set_virtual_address_map(
+            (EfiUintn)map_bytes, (EfiUintn)desc_size, desc_ver,
+            (EfiMemoryDescriptor *)svam_phys);
+        LifelineDisarm();
+    } else {
+        LifelineDisarm();
+        g_rt_svam_fell = true;
+    }
 }
 
 /* The address this kernel may read a firmware structure at, WITHOUT putting a
@@ -448,7 +734,7 @@ static void *efi_firmware_ptr(uint8_t *map, uint32_t map_size,
 {
     if (map && desc_size && map_size >= desc_size) {
         EfiMemoryDescriptor *d =
-            efi_find_descriptor(map, map_size, desc_size, phys);
+            efi_find_descriptor(map, map_size, desc_size, phys, NULL);
         if (d && (d->attribute & EFI_MEMORY_RUNTIME) && efi_rt_map_flags(d) != 0)
             return (void *)(uintptr_t)phys;
     }
@@ -557,7 +843,7 @@ static void efi_apply_memory_attributes(vmm_context_t *kctx, uint8_t *map,
          * a permission applied across a boundary would land on a region
          * nobody described. */
         EfiMemoryDescriptor *cover =
-            efi_find_descriptor(map, map_size, desc_size, phys);
+            efi_find_descriptor(map, map_size, desc_size, phys, NULL);
         if (!cover ||
             !(cover->attribute & EFI_MEMORY_RUNTIME) ||
             cover->type != d->type ||
@@ -640,6 +926,12 @@ bool efi_runtime_init(void)
         return false;
     }
 
+    /* Published before the first mapping, so that a fault taken anywhere
+     * below this line can still be named by EfiDescribePhysical. */
+    g_efi_map       = map;
+    g_efi_map_size  = bi->efi_mmap_size;
+    g_efi_desc_size = bi->efi_mmap_desc_size;
+
     /*
      * Is the map the kernel is about to walk memory the allocator believes is
      * free? It used to be, on every UEFI boot, and nothing said so.
@@ -682,14 +974,14 @@ bool efi_runtime_init(void)
         }
     }
 
-    debug_printf("[EFI] runtime init: mmap=0x%lx size=%u desc_size=%u "
-                 "desc_ver=%u rt_services=0x%lx fw_rev=0x%x\n",
-                 (unsigned long)bi->efi_mmap_phys,
-                 bi->efi_mmap_size,
-                 bi->efi_mmap_desc_size,
-                 bi->efi_mmap_desc_ver,
-                 (unsigned long)bi->efi_rt_services_phys,
-                 bi->efi_fw_revision);
+    kprintf("[EFI] runtime init: mmap=0x%lx size=%u desc_size=%u "
+            "desc_ver=%u rt_services=0x%lx fw_rev=0x%x\n",
+            (unsigned long)bi->efi_mmap_phys,
+            bi->efi_mmap_size,
+            bi->efi_mmap_desc_size,
+            bi->efi_mmap_desc_ver,
+            (unsigned long)bi->efi_rt_services_phys,
+            bi->efi_fw_revision);
 
     vmm_context_t *kctx = vmm_get_kernel_context();
     if (!kctx) {
@@ -786,10 +1078,17 @@ bool efi_runtime_init(void)
         return false;
     }
 
+    /* Stage 1 is over and every runtime descriptor now carries the
+     * virtual_start this kernel assigned, so the map can be dumped with that
+     * column filled and the firmware's execution windows can be derived from
+     * it. Both are the machine explaining itself to a board log. */
+    EfiDumpMemoryMap(map, bi->efi_mmap_size, desc_size);
+    EfiBuildCodeRanges(map, bi->efi_mmap_size, desc_size);
+
     /* Stage 2: find the descriptor that contains rt_services_phys so we
      * can compute the new VA for the RT services pointer. */
     EfiMemoryDescriptor *rt_desc = efi_find_descriptor(
-        map, bi->efi_mmap_size, desc_size, bi->efi_rt_services_phys);
+        map, bi->efi_mmap_size, desc_size, bi->efi_rt_services_phys, NULL);
     if (!rt_desc) {
         debug_printf("[EFI] cannot locate descriptor for rt_services 0x%lx\n",
                      (unsigned long)bi->efi_rt_services_phys);
@@ -886,12 +1185,15 @@ bool efi_runtime_init(void)
      * takes it back and says so. */
     uint64_t svam_rflags;
     efi_rt_lock(&svam_rflags);
-    EfiStatus s = rt_phys->set_virtual_address_map(
-        (EfiUintn)((EfiUintn)svam_count * desc_size),
-        (EfiUintn)desc_size,
-        bi->efi_mmap_desc_ver,
-        (EfiMemoryDescriptor *)svam_phys);
+    EfiCallSetVirtualAddressMap(rt_phys,
+                                (uint64_t)svam_count * desc_size,
+                                desc_size,
+                                bi->efi_mmap_desc_ver,
+                                svam_phys);
     efi_rt_unlock(svam_rflags);
+
+    EfiStatus s         = g_rt_svam_status;
+    bool      svam_fell = g_rt_svam_fell;
 
     /* The array was only ever an argument. Firmware keeps no pointer to it
      * (EDK2 clears mVirtualMap on the way out of the same call), so the
@@ -904,6 +1206,18 @@ bool efi_runtime_init(void)
     efi_boot_services_alias(map, bi->efi_mmap_size, desc_size, kctx, false);
     PmmReleaseBootServicesMemory();
 
+    /* A fault INSIDE SetVirtualAddressMap is not the error return §8.4
+     * describes, and physical mode is no refuge from it: the firmware was
+     * half-way through relocating itself when it fell, so neither the
+     * physical nor the virtual entry points can be trusted afterwards. The
+     * cleanup above has already run, so the pages and the boot-services alias
+     * are back; the service is simply not published. */
+    if (svam_fell) {
+        EfiSayFall("SetVirtualAddressMap",
+                   "no EFI runtime services on this boot");
+        return false;
+    }
+
     /* And now — only now — the runtime regions can be tightened to what the
      * firmware itself declared. Before this call it was patching its own code
      * and needed the write permission it is about to lose. */
@@ -911,8 +1225,13 @@ bool efi_runtime_init(void)
         efi_apply_memory_attributes(kctx, map, bi->efi_mmap_size, desc_size);
 
     if (EFI_IS_ERROR(s)) {
-        debug_printf("[EFI] SetVirtualAddressMap failed: 0x%lx\n",
-                     (unsigned long)s);
+        /* kprintf, and load-bearing: the branch below keeps the PHYSICAL
+         * pointer while the line printed before the call already announced a
+         * runtime VA this machine is not going to use. Without this line the
+         * log says the opposite of what the kernel did. */
+        kprintf("[EFI] SetVirtualAddressMap failed: 0x%lx — staying in "
+                "physical mode, rt_services=0x%lx\n",
+                (unsigned long)s, (unsigned long)(uintptr_t)rt_phys);
         /* SVAM failure leaves firmware in physical mode per UEFI 2.10
          * §8.4 "If SetVirtualAddressMap() returns an error, EFI runtime
          * services remain available in physical mode." So we keep using
@@ -983,13 +1302,14 @@ bool efi_runtime_init(void)
      * we should not trust. Downgrade to physical mode on failure. */
     if (efi_table_header_valid(rt_new)) {
         g_rt = rt_new;
-        debug_printf("[EFI] runtime services online at VA 0x%lx "
-                     "(post-SVAM, CRC OK)\n",
-                     (unsigned long)rt_new_va);
+        kprintf("[EFI] runtime services online at VA 0x%lx (post-SVAM, "
+                "CRC OK)\n", (unsigned long)rt_new_va);
     } else {
-        debug_printf("[EFI] rt_services CRC32 mismatch at VA 0x%lx — "
-                     "downgrading to physical mode\n",
-                     (unsigned long)rt_new_va);
+        /* Same reason as the SVAM-failure line: the address the kernel ends
+         * up calling through is not the one already announced. */
+        kprintf("[EFI] rt_services CRC32 mismatch at VA 0x%lx — downgrading "
+                "to physical mode, rt_services=0x%lx\n",
+                (unsigned long)rt_new_va, (unsigned long)(uintptr_t)rt_phys);
         g_rt = rt_phys;
     }
 
@@ -1145,11 +1465,139 @@ static void efi_rt_fpu_leave(void)
     fpu_restore(g_rt_fpu_area);
 }
 
+/* =========================================================================
+ * Footing — the kernel's map under the firmware's feet
+ *
+ * efi_map_rt_descriptor installs the VA==PA window for every runtime region
+ * into the KERNEL context, and vmm_create_context copies only PML4[256..512)
+ * into a cabin — so PML4[0], where every one of those windows lives, is
+ * absent from every process address space. Nothing on the reboot path
+ * (HwSystemReboot → system_halt → acpi_reboot → efi_reset_system) switches
+ * CR3, so the firmware was being entered in the shell's address space: its
+ * code was reachable (EFI_RT_VA_BASE is PML4[511], shared) and its own
+ * physical pointers were not. That is the #PF at RIP=EFI_RT_VA_BASE+... with
+ * a bare physical CR2 seen on the owner's laptop. Linux avoids it by
+ * switching to efi_mm for every runtime call; this is the same move.
+ *
+ * Taken inside efi_rt_lock and given back inside efi_rt_unlock, so EVERY
+ * runtime wrapper in this driver is covered — a fault in GetVariable is no
+ * more ours than a fault in ResetSystem — and costs nothing when the caller
+ * was already on the kernel map, which is every call made from boot.
+ *
+ * ‼ The trap that comes with it: with the kernel map loaded, a pointer
+ * argument that lives only in the CALLER's address space is unreachable.
+ * EfiFootingReachable is how a wrapper refuses such a call instead of letting
+ * the firmware read whatever happens to be at that address. The stack is not
+ * such a pointer: process_alloc_kernel_stack takes its pages from the Pull
+ * Map (0xFFFF_8800_…, PML4[272]), which is inside the copied kernel half and
+ * points at the same PDPT pages in both contexts.
+ * ========================================================================= */
+
+/* CR3 bits 51:12 are the PML4 physical address; 11:0 carry the PCID when
+ * CR4.PCIDE is set and 62:61 the LAM selectors (Intel SDM Vol 3A §4.5, §5.6),
+ * so the address has to be masked out rather than compared whole. */
+#define EFI_CR3_PML4_MASK  0x000FFFFFFFFFF000ULL
+
+/* Owned by g_rt_lock: written by EfiFootingEnter, read by EfiFootingLeave,
+ * and both run with the lock held and interrupts off. */
+static uint64_t g_rt_footing_cr3      = 0;
+static bool     g_rt_footing_switched = false;
+static bool     g_rt_footing_said     = false;
+
+static inline uint64_t EfiReadCr3(void)
+{
+    uint64_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    return cr3;
+}
+
+bool EfiFootingReachable(const void *p, uint64_t len)
+{
+    /* UEFI 2.10 §8.2/§8.3 make several of these arguments optional, and a
+     * service is entitled to be handed NULL for one. */
+    if (!p) return true;
+
+    vmm_context_t *kctx = vmm_get_kernel_context();
+    if (!kctx) return false;
+
+    uint64_t start = (uint64_t)(uintptr_t)p;
+    if (len == 0) len = 1;
+    if (start > UINT64_MAX - (len - 1)) return false;
+
+    /* Kernel half only, and that is exact rather than conservative:
+     * vmm_create_context copies PML4[256..512) from the kernel context, so a
+     * kernel-half address any cabin can reach is one the kernel map reaches
+     * too, and a user-half address is reachable from no kernel map at all. */
+    if (!vmm_is_kernel_addr((uintptr_t)start)) return false;
+
+    for (uint64_t a = start & ~(EFI_PAGE_SIZE - 1); a < start + len;
+         a += EFI_PAGE_SIZE) {
+        if (!vmm_virt_to_phys(kctx, (uintptr_t)a)) return false;
+    }
+    return true;
+}
+
+/* ‼ Call before efi_rt_lock, never under it: vmm_virt_to_phys takes the
+ * kernel context's own lock, and g_rt_lock → kctx->lock is an order this
+ * driver otherwise never establishes. On the one-way shutdown path the
+ * question costs nothing and takes nothing, because acpi_shutdown and
+ * acpi_reboot both pass a NULL reset_data and NULL answers before any lock is
+ * reached — a halt path must not wait on a lock a frozen AP may be holding. */
+bool EfiFootingRefuse(const char *service, const char *argument,
+                      const void *p, uint64_t len)
+{
+    if (EfiFootingReachable(p, len)) return false;
+    kprintf("[EFI] %s refused: %s at 0x%lx (%lu byte(s)) is not reachable "
+            "from the kernel map that Footing puts under the firmware — a "
+            "wrong answer would be worse than none\n",
+            service, argument, (unsigned long)(uintptr_t)p,
+            (unsigned long)len);
+    return true;
+}
+
+static void EfiFootingEnter(void)
+{
+    g_rt_footing_switched = false;
+
+    vmm_context_t *kctx = vmm_get_kernel_context();
+    if (!kctx || !kctx->pml4_phys) return;
+
+    uint64_t live = EfiReadCr3();
+    if ((live & EFI_CR3_PML4_MASK) == (uint64_t)kctx->pml4_phys) return;
+
+    g_rt_footing_cr3      = live;
+    g_rt_footing_switched = true;
+    __asm__ volatile("mov %0, %%cr3" :: "r"(vmm_build_cr3(kctx)) : "memory");
+
+    if (!g_rt_footing_said) {
+        g_rt_footing_said = true;
+        kprintf("[EFI] Footing: a runtime call was about to enter the "
+                "firmware in a process cabin (CR3=0x%016lx, kernel PML4="
+                "0x%016lx); the kernel map goes under its feet for the call "
+                "and comes off after\n",
+                (unsigned long)live, (unsigned long)kctx->pml4_phys);
+    }
+}
+
+static void EfiFootingLeave(void)
+{
+    if (!g_rt_footing_switched) return;
+    g_rt_footing_switched = false;
+    /* Bit 63 is the PCID no-flush selector and reads back as 0 from CR3;
+     * masking it is what vmm_flush_tlb does for the same reason — a set bit
+     * here would skip the very invalidation the reload is for. */
+    __asm__ volatile("mov %0, %%cr3"
+                     :: "r"(g_rt_footing_cr3 & ~(1ULL << 63)) : "memory");
+}
+
 void efi_rt_lock(uint64_t *saved_rflags)
 {
     uint64_t rflags;
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags));
     spin_lock(&g_rt_lock);
+    /* Before the FPU park, so everything from here to efi_rt_unlock runs on
+     * the map the firmware is about to be entered with. */
+    EfiFootingEnter();
     efi_rt_fpu_enter();
     *saved_rflags = rflags;
 }
@@ -1184,6 +1632,7 @@ void efi_rt_unlock(uint64_t saved_rflags)
     /* Still inside the lock: the saved pair is this call's, and the caller's
      * FCW/MXCSR have to be back before anything else can run. */
     efi_rt_fpu_leave();
+    EfiFootingLeave();
 
     spin_unlock(&g_rt_lock);
 
@@ -1210,8 +1659,8 @@ void efi_rt_watch_end(const char *name, uint64_t t0)
     if (!khz) return;
     uint64_t elapsed_ms = (rdtsc() - t0) / khz;
     if (elapsed_ms > EFI_RT_CALL_WARN_MS) {
-        debug_printf("[EFI] WARNING: %s took %lu ms (firmware slow)\n",
-                     name, (unsigned long)elapsed_ms);
+        kprintf("[EFI] WARNING: %s took %lu ms (firmware slow)\n",
+                name, (unsigned long)elapsed_ms);
     }
 }
 
@@ -1231,6 +1680,27 @@ void efi_reset_system(EfiResetType type, EfiStatus status,
         return;
     }
 
+    /* ResetData is the only pointer this service takes (UEFI 2.10 §8.5.1),
+     * and both callers in this tree — acpi_shutdown and acpi_reboot — pass
+     * NULL. Asked before the lock, because EfiFootingReachable walks the
+     * kernel context under that context's own lock. */
+    if (EfiFootingRefuse("ResetSystem", "reset_data", data, data_size)) return;
+
+    /* The measurement, taken before Footing changes the answer: the CR3 this
+     * machine would have entered the firmware with, the kernel map it should
+     * have, and g_rt itself — the pointer the faulting call dereferences. */
+    vmm_context_t *kctx      = vmm_get_kernel_context();
+    uint64_t       live_cr3  = EfiReadCr3();
+    uint64_t       kernel_p4 = kctx ? (uint64_t)kctx->pml4_phys : 0;
+    kprintf("[EFI] ResetSystem(type=%u, status=0x%lx): CR3=0x%016lx "
+            "kernel PML4=0x%016lx — %s; g_rt=0x%lx\n",
+            type, (unsigned long)status, (unsigned long)live_cr3,
+            (unsigned long)kernel_p4,
+            ((live_cr3 & EFI_CR3_PML4_MASK) == kernel_p4)
+                ? "already on the kernel map"
+                : "the firmware was about to be entered in a process cabin",
+            (unsigned long)(uintptr_t)g_rt);
+
     /* The same door every other runtime call in this file goes through, not
      * a hand-rolled cli + spin_lock + efi_rt_fpu_enter: that prologue did the
      * identical three operations efi_rt_lock already performs, written out a
@@ -1246,18 +1716,33 @@ void efi_reset_system(EfiResetType type, EfiStatus status,
     uint64_t rflags;
     efi_rt_lock(&rflags);
 
-    kprintf("[EFI] ResetSystem(type=%u, status=0x%lx)\n",
-            type, (unsigned long)status);
+    bool        fell = false;
+    LifelinePad pad;
+    if (LifelineArm(&pad, g_efi_code_ranges, g_efi_code_range_count) == 0) {
+        g_rt->reset_system(type, status, (EfiUintn)data_size, data);
+        LifelineDisarm();
+    } else {
+        LifelineDisarm();
+        fell = true;
+        EfiSayFall("ResetSystem",
+                   "returning to the ladder so acpi_reboot can try its "
+                   "remaining rungs");
+    }
 
-    g_rt->reset_system(type, status, (EfiUintn)data_size, data);
-
-    /* Reached only if the firmware refused the reset. efi_rt_unlock puts IF
-     * back to what it was on entry — cleared, since both callers of this
-     * function (acpi_shutdown, acpi_reboot) cli before reaching it — so a
-     * refused reset still leaves the machine no more interruptible than the
-     * caller left it. */
+    /* Reached when the firmware refused the reset, and when it fell inside it
+     * and Lifeline threw control back. efi_rt_unlock puts IF back to what it
+     * was on entry — cleared, since both callers of this function
+     * (acpi_shutdown, acpi_reboot) cli before reaching it — so a refused
+     * reset still leaves the machine no more interruptible than the caller
+     * left it. */
     efi_rt_unlock(rflags);
-    kprintf("[EFI] ResetSystem returned — the firmware refused the reset\n");
+    if (fell) {
+        kprintf("[EFI] ResetSystem did not reset and did not return on its "
+                "own — the next rung of the ladder gets the machine\n");
+    } else {
+        kprintf("[EFI] ResetSystem returned — the firmware refused the "
+                "reset\n");
+    }
 }
 
 EfiStatus efi_get_time(EfiTime *time, EfiTimeCapabilities *cap)
@@ -1265,10 +1750,28 @@ EfiStatus efi_get_time(EfiTime *time, EfiTimeCapabilities *cap)
     EfiRuntimeServices *rt = efi_rt_get();
     if (!rt || !rt->get_time) return EFI_STATUS_UNSUPPORTED;
 
-    uint64_t rflags, t0;
+    /* Both buffers belong to the caller; UEFI 2.10 §8.3.1 makes Capabilities
+     * optional and NULL passes by definition. */
+    if (EfiFootingRefuse("GetTime", "time", time, sizeof(EfiTime)) ||
+        EfiFootingRefuse("GetTime", "capabilities", cap,
+                         sizeof(EfiTimeCapabilities)))
+        return EFI_STATUS_INVALID_PARAMETER;
+
+    uint64_t  rflags, t0;
+    EfiStatus s;
     efi_rt_lock(&rflags);
     efi_rt_watch_start(&t0);
-    EfiStatus s = rt->get_time(time, cap);
+
+    LifelinePad pad;
+    if (LifelineArm(&pad, g_efi_code_ranges, g_efi_code_range_count) == 0) {
+        s = rt->get_time(time, cap);
+        LifelineDisarm();
+    } else {
+        LifelineDisarm();
+        EfiSayFall("GetTime", "the call is answered as a device error");
+        s = EFI_STATUS_DEVICE_ERROR;
+    }
+
     efi_rt_watch_end("GetTime", t0);
     efi_rt_unlock(rflags);
     return s;
@@ -1279,10 +1782,24 @@ EfiStatus efi_set_time(EfiTime *time)
     EfiRuntimeServices *rt = efi_rt_get();
     if (!rt || !rt->set_time) return EFI_STATUS_UNSUPPORTED;
 
-    uint64_t rflags, t0;
+    if (EfiFootingRefuse("SetTime", "time", time, sizeof(EfiTime)))
+        return EFI_STATUS_INVALID_PARAMETER;
+
+    uint64_t  rflags, t0;
+    EfiStatus s;
     efi_rt_lock(&rflags);
     efi_rt_watch_start(&t0);
-    EfiStatus s = rt->set_time(time);
+
+    LifelinePad pad;
+    if (LifelineArm(&pad, g_efi_code_ranges, g_efi_code_range_count) == 0) {
+        s = rt->set_time(time);
+        LifelineDisarm();
+    } else {
+        LifelineDisarm();
+        EfiSayFall("SetTime", "the call is answered as a device error");
+        s = EFI_STATUS_DEVICE_ERROR;
+    }
+
     efi_rt_watch_end("SetTime", t0);
     efi_rt_unlock(rflags);
 

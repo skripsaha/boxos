@@ -24,6 +24,7 @@
 #include "efi.h"
 #include "efi_runtime_internal.h"
 #include "klib.h"
+#include "lifeline.h"
 #include "touch.h"
 
 EfiStatus efi_get_wakeup_time(uint8_t *enabled, uint8_t *pending, EfiTime *time)
@@ -31,13 +32,29 @@ EfiStatus efi_get_wakeup_time(uint8_t *enabled, uint8_t *pending, EfiTime *time)
     EfiRuntimeServices *rt = efi_rt_get();
     if (!rt || !rt->get_wakeup_time) return EFI_STATUS_UNSUPPORTED;
 
+    /* No Footing check: UEFI 2.10 §8.3.2 writes all three out-parameters, and
+     * all three this wrapper hands the firmware are the locals below. Nothing
+     * of the caller's crosses into the firmware. */
+    LifelineRange ranges[EFI_FIRMWARE_CODE_RANGES];
+    unsigned      nranges = EfiFirmwareCodeRanges(ranges,
+                                                  EFI_FIRMWARE_CODE_RANGES);
+
     uint64_t rflags, t0;
     efi_rt_lock(&rflags);
     efi_rt_watch_start(&t0);
 
-    uint8_t en_local = 0, pend_local = 0;
-    EfiTime t_local = {0};
-    EfiStatus s = rt->get_wakeup_time(&en_local, &pend_local, &t_local);
+    uint8_t     en_local = 0, pend_local = 0;
+    EfiTime     t_local  = {0};
+    EfiStatus   s;
+    LifelinePad pad;
+    if (LifelineArm(&pad, ranges, nranges) == 0) {
+        s = rt->get_wakeup_time(&en_local, &pend_local, &t_local);
+        LifelineDisarm();
+    } else {
+        LifelineDisarm();
+        EfiSayFall("GetWakeupTime", "the call is answered as a device error");
+        s = EFI_STATUS_DEVICE_ERROR;
+    }
     efi_rt_watch_end("GetWakeupTime", t0);
 
     if (enabled) *enabled = en_local;
@@ -56,12 +73,32 @@ EfiStatus efi_set_wakeup_time(uint8_t enabled, EfiTime *time)
     /* When disabling, UEFI 2.10 §8.3.3: "If Enable is FALSE then Time
      * is ignored and the wakeup alarm is cleared." We still pass `time`
      * through as some firmware checks it for validity even when
-     * disabling — being explicit costs nothing. */
+     * disabling — being explicit costs nothing.
+     *
+     * Time is therefore the one caller pointer that crosses into the firmware
+     * on either branch, and NULL passes by definition. */
+    if (EfiFootingRefuse("SetWakeupTime", "time", time, sizeof(EfiTime))) {
+        return EFI_STATUS_INVALID_PARAMETER;
+    }
+
+    LifelineRange ranges[EFI_FIRMWARE_CODE_RANGES];
+    unsigned      nranges = EfiFirmwareCodeRanges(ranges,
+                                                  EFI_FIRMWARE_CODE_RANGES);
+
     uint64_t rflags, t0;
     efi_rt_lock(&rflags);
     efi_rt_watch_start(&t0);
 
-    EfiStatus s = rt->set_wakeup_time(enabled, time);
+    EfiStatus   s;
+    LifelinePad pad;
+    if (LifelineArm(&pad, ranges, nranges) == 0) {
+        s = rt->set_wakeup_time(enabled, time);
+        LifelineDisarm();
+    } else {
+        LifelineDisarm();
+        EfiSayFall("SetWakeupTime", "the call is answered as a device error");
+        s = EFI_STATUS_DEVICE_ERROR;
+    }
     efi_rt_watch_end("SetWakeupTime", t0);
     efi_rt_unlock(rflags);
 

@@ -32,6 +32,7 @@
 #include "efi.h"
 #include "efi_runtime_internal.h"
 #include "klib.h"
+#include "lifeline.h"
 #include "touch.h"
 
 /* =========================================================================
@@ -74,13 +75,39 @@ EfiStatus efi_get_variable(uint16_t *variable_name,
     EfiRuntimeServices *rt = efi_rt_get();
     if (!rt || !rt->get_variable) return EFI_STATUS_UNSUPPORTED;
 
+    EfiUintn sz = data_size ? (EfiUintn)*data_size : 0;
+
+    /* Every pointer the firmware is handed, at the byte count it may touch
+     * (UEFI 2.10 §8.2.1): the UCS-2 name including its terminator, the vendor
+     * GUID, the optional Attributes word, and Data for *DataSize bytes.
+     * DataSize itself is a local below, not the caller's. */
+    if (EfiFootingRefuse("GetVariable", "variable_name", variable_name,
+                     (efi_ucs2_strlen(variable_name) + 1) * sizeof(uint16_t)) ||
+        EfiFootingRefuse("GetVariable", "vendor", vendor, sizeof(EfiGuid)) ||
+        EfiFootingRefuse("GetVariable", "attributes", attributes,
+                     sizeof(uint32_t)) ||
+        EfiFootingRefuse("GetVariable", "data", data, sz)) {
+        return EFI_STATUS_INVALID_PARAMETER;
+    }
+
+    LifelineRange ranges[EFI_FIRMWARE_CODE_RANGES];
+    unsigned      nranges = EfiFirmwareCodeRanges(ranges,
+                                                  EFI_FIRMWARE_CODE_RANGES);
+
     uint64_t rflags, t0;
     efi_rt_lock(&rflags);
     efi_rt_watch_start(&t0);
 
-    EfiUintn sz = data_size ? (EfiUintn)*data_size : 0;
-    EfiStatus s = rt->get_variable(variable_name, vendor, attributes,
-                                    &sz, data);
+    EfiStatus   s;
+    LifelinePad pad;
+    if (LifelineArm(&pad, ranges, nranges) == 0) {
+        s = rt->get_variable(variable_name, vendor, attributes, &sz, data);
+        LifelineDisarm();
+    } else {
+        LifelineDisarm();
+        EfiSayFall("GetVariable", "the call is answered as a device error");
+        s = EFI_STATUS_DEVICE_ERROR;
+    }
     efi_rt_watch_end("GetVariable", t0);
     if (data_size) *data_size = sz;
 
@@ -97,12 +124,35 @@ EfiStatus efi_set_variable(uint16_t *variable_name,
     EfiRuntimeServices *rt = efi_rt_get();
     if (!rt || !rt->set_variable) return EFI_STATUS_UNSUPPORTED;
 
+    /* UEFI 2.10 §8.2.2: Data is read for DataSize bytes, and a DataSize of 0
+     * with no APPEND_WRITE deletes the variable, so a NULL Data is legal and
+     * passes by definition. */
+    if (EfiFootingRefuse("SetVariable", "variable_name", variable_name,
+                     (efi_ucs2_strlen(variable_name) + 1) * sizeof(uint16_t)) ||
+        EfiFootingRefuse("SetVariable", "vendor", vendor, sizeof(EfiGuid)) ||
+        EfiFootingRefuse("SetVariable", "data", data, data_size)) {
+        return EFI_STATUS_INVALID_PARAMETER;
+    }
+
+    LifelineRange ranges[EFI_FIRMWARE_CODE_RANGES];
+    unsigned      nranges = EfiFirmwareCodeRanges(ranges,
+                                                  EFI_FIRMWARE_CODE_RANGES);
+
     uint64_t rflags, t0;
     efi_rt_lock(&rflags);
     efi_rt_watch_start(&t0);
 
-    EfiStatus s = rt->set_variable(variable_name, vendor, attributes,
-                                    (EfiUintn)data_size, data);
+    EfiStatus   s;
+    LifelinePad pad;
+    if (LifelineArm(&pad, ranges, nranges) == 0) {
+        s = rt->set_variable(variable_name, vendor, attributes,
+                             (EfiUintn)data_size, data);
+        LifelineDisarm();
+    } else {
+        LifelineDisarm();
+        EfiSayFall("SetVariable", "the call is answered as a device error");
+        s = EFI_STATUS_DEVICE_ERROR;
+    }
     efi_rt_watch_end("SetVariable", t0);
     efi_rt_unlock(rflags);
 
@@ -143,12 +193,36 @@ EfiStatus efi_get_next_variable_name(uint64_t *variable_name_size,
     EfiRuntimeServices *rt = efi_rt_get();
     if (!rt || !rt->get_next_variable_name) return EFI_STATUS_UNSUPPORTED;
 
+    EfiUintn sz = variable_name_size ? (EfiUintn)*variable_name_size : 0;
+
+    /* UEFI 2.10 §8.2.3: VariableNameSize is the VariableName buffer's size in
+     * BYTES, not in CHAR16 units, and the firmware writes up to that many.
+     * VendorGuid is in-out and is written as well as read. */
+    if (EfiFootingRefuse("GetNextVariableName", "variable_name", variable_name,
+                     sz) ||
+        EfiFootingRefuse("GetNextVariableName", "vendor", vendor,
+                     sizeof(EfiGuid))) {
+        return EFI_STATUS_INVALID_PARAMETER;
+    }
+
+    LifelineRange ranges[EFI_FIRMWARE_CODE_RANGES];
+    unsigned      nranges = EfiFirmwareCodeRanges(ranges,
+                                                  EFI_FIRMWARE_CODE_RANGES);
+
     uint64_t rflags, t0;
     efi_rt_lock(&rflags);
     efi_rt_watch_start(&t0);
 
-    EfiUintn sz = variable_name_size ? (EfiUintn)*variable_name_size : 0;
-    EfiStatus s = rt->get_next_variable_name(&sz, variable_name, vendor);
+    EfiStatus   s;
+    LifelinePad pad;
+    if (LifelineArm(&pad, ranges, nranges) == 0) {
+        s = rt->get_next_variable_name(&sz, variable_name, vendor);
+        LifelineDisarm();
+    } else {
+        LifelineDisarm();
+        EfiSayFall("GetNextVariableName", "the call is answered as a device error");
+        s = EFI_STATUS_DEVICE_ERROR;
+    }
     efi_rt_watch_end("GetNextVariableName", t0);
     if (variable_name_size) *variable_name_size = sz;
 
@@ -172,12 +246,28 @@ EfiStatus efi_query_variable_info(uint32_t attributes,
         return EFI_STATUS_UNSUPPORTED;
     }
 
+    /* No Footing check: UEFI 2.10 §8.2.4 takes Attributes by value and three
+     * out-parameters, and all three the firmware writes are the locals below.
+     * Nothing of the caller's crosses into the firmware. */
+    LifelineRange ranges[EFI_FIRMWARE_CODE_RANGES];
+    unsigned      nranges = EfiFirmwareCodeRanges(ranges,
+                                                  EFI_FIRMWARE_CODE_RANGES);
+
     uint64_t rflags, t0;
     efi_rt_lock(&rflags);
     efi_rt_watch_start(&t0);
 
-    uint64_t mvs = 0, rvs = 0, mvz = 0;
-    EfiStatus s = rt->query_variable_info(attributes, &mvs, &rvs, &mvz);
+    uint64_t    mvs = 0, rvs = 0, mvz = 0;
+    EfiStatus   s;
+    LifelinePad pad;
+    if (LifelineArm(&pad, ranges, nranges) == 0) {
+        s = rt->query_variable_info(attributes, &mvs, &rvs, &mvz);
+        LifelineDisarm();
+    } else {
+        LifelineDisarm();
+        EfiSayFall("QueryVariableInfo", "the call is answered as a device error");
+        s = EFI_STATUS_DEVICE_ERROR;
+    }
     efi_rt_watch_end("QueryVariableInfo", t0);
 
     if (max_var_storage)       *max_var_storage       = mvs;

@@ -41,4 +41,31 @@ size_t efi_ascii_to_ucs2(const char *ascii, uint16_t *dest, size_t dest_chars);
 /* Length of a UCS-2 string in CHAR16 units (excluding NUL). */
 size_t efi_ucs2_strlen(const uint16_t *s);
 
+/* ─── The two things EVERY firmware entry in this driver says ─────────────
+ *
+ * Six runtime services live in efi_variable.c, efi_wakeup.c and
+ * efi_capsule.c, and the rest in efi_runtime.c. All of them enter the
+ * firmware the same way — on the kernel's map (Footing) and under a Lifeline
+ * — so all of them refuse an unreachable argument in the same words and
+ * report a fall in the same words. ONE definition, in efi_runtime.c, because
+ * four copies of a diagnostic are four chances for the machine to describe
+ * the same event four different ways.
+ *
+ * EfiFootingRefuse: true when `p` is NOT reachable from the kernel map, after
+ * saying so by name. With Footing loaded, a pointer that lives only in a
+ * caller's address space becomes unreachable mid-call, and a wrong answer
+ * from the firmware is worse than a refusal. A NULL `p` is reachable by
+ * definition (the firmware is being handed nothing).
+ * ‼ CALL IT BEFORE efi_rt_lock, NEVER UNDER IT: vmm_virt_to_phys takes the
+ * kernel context's lock, and g_rt_lock → kctx->lock is an order this driver
+ * establishes nowhere else.
+ *
+ * EfiSayFall: what Lifeline caught on the way back out, plus the memory
+ * map's own answer for CR2 — which is the whole difference between "a bare
+ * physical address nobody recognises" and "runtime data descriptor 41".
+ * Safe after a throwback: it takes no lock and allocates nothing. */
+bool EfiFootingRefuse(const char *service, const char *argument,
+                      const void *p, uint64_t len);
+void EfiSayFall(const char *service, const char *consequence);
+
 #endif /* EFI_RUNTIME_INTERNAL_H */

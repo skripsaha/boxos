@@ -37,7 +37,35 @@
 #include "efi.h"
 #include "efi_runtime_internal.h"
 #include "klib.h"
+#include "lifeline.h"
 #include "touch.h"
+
+/* Every pointer the firmware will follow out of this batch, at the byte count
+ * it may touch. Capsule buffers are the one argument in this driver a future
+ * caller could plausibly stage outside the kernel half, and with Footing
+ * loaded such a buffer is unreachable for the whole call.
+ *
+ * `in_place` is true when the firmware reads the capsule IMAGE through the
+ * header pointer: UEFI 2.10 §8.5.3 puts the image behind ScatterGatherList
+ * when one is supplied and leaves it contiguous at the header otherwise.
+ *
+ * Runs after capsule_headers_valid, so count is capped and every arr[i] is
+ * non-NULL with a sane image size. */
+static bool EfiCapsuleBatchRefuse(const char *service,
+                                  EfiCapsuleHeader **arr, uint64_t count,
+                                  bool in_place)
+{
+    if (EfiFootingRefuse(service, "capsule_header_array", arr,
+                         count * sizeof(EfiCapsuleHeader *))) {
+        return true;
+    }
+    for (uint64_t i = 0; i < count; i++) {
+        uint64_t len = in_place ? arr[i]->capsule_image_size
+                                : arr[i]->header_size;
+        if (EfiFootingRefuse(service, "capsule", arr[i], len)) return true;
+    }
+    return false;
+}
 
 static bool capsule_headers_valid(EfiCapsuleHeader **arr, uint64_t count)
 {
@@ -68,15 +96,36 @@ EfiStatus efi_query_capsule_capabilities(EfiCapsuleHeader **capsule_header_array
         return EFI_STATUS_INVALID_PARAMETER;
     }
 
+    /* UEFI 2.10 §8.5.4 examines the capsule HEADERS only — the image need not
+     * be staged yet — so header_size is the byte count the firmware touches.
+     * MaximumCapsuleSize and ResetType are the locals below. */
+    if (EfiCapsuleBatchRefuse("QueryCapsuleCapabilities", capsule_header_array,
+                              capsule_count, false)) {
+        return EFI_STATUS_INVALID_PARAMETER;
+    }
+
+    LifelineRange ranges[EFI_FIRMWARE_CODE_RANGES];
+    unsigned      nranges = EfiFirmwareCodeRanges(ranges,
+                                                  EFI_FIRMWARE_CODE_RANGES);
+
     uint64_t rflags, t0;
     efi_rt_lock(&rflags);
     efi_rt_watch_start(&t0);
 
-    uint64_t max_sz = 0;
-    uint32_t rtype  = 0;
-    EfiStatus s = rt->query_capsule_caps(capsule_header_array,
-                                          (EfiUintn)capsule_count,
-                                          &max_sz, &rtype);
+    uint64_t    max_sz = 0;
+    uint32_t    rtype  = 0;
+    EfiStatus   s;
+    LifelinePad pad;
+    if (LifelineArm(&pad, ranges, nranges) == 0) {
+        s = rt->query_capsule_caps(capsule_header_array,
+                                   (EfiUintn)capsule_count,
+                                   &max_sz, &rtype);
+        LifelineDisarm();
+    } else {
+        LifelineDisarm();
+        EfiSayFall("QueryCapsuleCapabilities", "the call is answered as a device error");
+        s = EFI_STATUS_DEVICE_ERROR;
+    }
     efi_rt_watch_end("QueryCapsuleCapabilities", t0);
     efi_rt_unlock(rflags);
 
@@ -94,6 +143,20 @@ EfiStatus efi_update_capsule(EfiCapsuleHeader **capsule_header_array,
     if (rt->hdr.revision < ((2U << 16) | 0)) return EFI_STATUS_UNSUPPORTED;
 
     if (!capsule_headers_valid(capsule_header_array, capsule_count)) {
+        return EFI_STATUS_INVALID_PARAMETER;
+    }
+
+    /* Refused before the batch is announced — a capsule the firmware can not
+     * reach was never armed.
+     *
+     * ScatterGatherList is an EFI_PHYSICAL_ADDRESS (UEFI 2.10 §8.5.3), not a
+     * pointer into this kernel's map, so it is deliberately not asked about:
+     * the firmware walks it through its own VA==PA window, the same reason
+     * SetVirtualAddressMap's map argument is exempt in efi_runtime.c. When
+     * one is supplied the image lives behind it, so only the headers are
+     * read through capsule_header_array. */
+    if (EfiCapsuleBatchRefuse("UpdateCapsule", capsule_header_array,
+                              capsule_count, scatter_gather_list == 0)) {
         return EFI_STATUS_INVALID_PARAMETER;
     }
 
@@ -115,19 +178,34 @@ EfiStatus efi_update_capsule(EfiCapsuleHeader **capsule_header_array,
         ev.total_bytes += capsule_header_array[i]->capsule_image_size;
     }
     TouchPublish("efi:capsule:armed", &ev, sizeof(ev));
-    debug_printf("[EFI] UpdateCapsule: %lu capsule(s), %lu bytes, flags=0x%x, sg=0x%lx\n",
-                 (unsigned long)capsule_count,
-                 (unsigned long)ev.total_bytes,
-                 ev.flags,
-                 (unsigned long)scatter_gather_list);
+    /* kprintf, not debug_printf: a shipped image reflashing its own firmware
+     * is the last line a board may ever print. */
+    kprintf("[EFI] UpdateCapsule: %lu capsule(s), %lu bytes, flags=0x%x, sg=0x%lx\n",
+            (unsigned long)capsule_count,
+            (unsigned long)ev.total_bytes,
+            ev.flags,
+            (unsigned long)scatter_gather_list);
+
+    LifelineRange ranges[EFI_FIRMWARE_CODE_RANGES];
+    unsigned      nranges = EfiFirmwareCodeRanges(ranges,
+                                                  EFI_FIRMWARE_CODE_RANGES);
 
     uint64_t rflags, t0;
     efi_rt_lock(&rflags);
     efi_rt_watch_start(&t0);
 
-    EfiStatus s = rt->update_capsule(capsule_header_array,
-                                      (EfiUintn)capsule_count,
-                                      scatter_gather_list);
+    EfiStatus   s;
+    LifelinePad pad;
+    if (LifelineArm(&pad, ranges, nranges) == 0) {
+        s = rt->update_capsule(capsule_header_array,
+                               (EfiUintn)capsule_count,
+                               scatter_gather_list);
+        LifelineDisarm();
+    } else {
+        LifelineDisarm();
+        EfiSayFall("UpdateCapsule", "the call is answered as a device error");
+        s = EFI_STATUS_DEVICE_ERROR;
+    }
     /* If we get here, firmware did not auto-reset. */
     efi_rt_watch_end("UpdateCapsule", t0);
     efi_rt_unlock(rflags);
