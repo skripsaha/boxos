@@ -38,12 +38,25 @@
  *         Return (PRR0)
  *     }
  *
- * So it runs: If/Else, Return, Store, Name and the CreateXField operators
- * inside a method body, the integer arithmetic and logical operators, method
- * CALLS with their arguments, and the reading of Buffers and Packages. It
- * READS OperationRegions in three address spaces. That is the whole grammar,
- * and everything outside it is refused BY NAME with the method abandoned —
- * never answered with a number nobody computed.
+ * So it runs: If/Else, While with Break and Continue, Return, Store, Name and
+ * the CreateXField operators inside a method body, the integer arithmetic and
+ * logical operators, method CALLS with their arguments, and the reading of
+ * Buffers and Packages. It READS OperationRegions in three address spaces.
+ * That is the whole grammar, and everything outside it is refused BY NAME
+ * with the method abandoned — never answered with a number nobody computed.
+ *
+ * ‼ AND A While DOES NOT COST THE EVALUATOR ITS TERMINATION ARGUMENT. It used
+ * to have one for free — no loop opcode, so every block was a byte range
+ * walked forward once — and eight devices on a shipping desktop board paid
+ * for it with their _HID. What stands in its place is not a turn count and
+ * not a timeout: a turn of a loop is reduced to one number covering every
+ * Local, every Arg, every object the method declared and everything the turn
+ * read from or placed outside the activation, and a loop that produces a
+ * number it has produced before is standing where it already stood and is
+ * refused aloud. A loop can show a state never seen before only finitely many
+ * times, so every loop ends — by leaving, by being refused, or at the heap
+ * that keeps the account, loudly. The argument is written out in full in
+ * aml.c, above THE NARROW EVALUATOR.
  *
  * ‼ AND IT READS ADDRESS SPACES WITHOUT OWNING ONE.
  *   PCI_Config   -> pci.c's configuration accessors (the only holder of
@@ -169,11 +182,21 @@
  *     operand shapes, and that is what keeps a declaration's operands from
  *     being mistaken for declarations. An extended opcode this pass cannot
  *     measure says so on the console and resynchronises.
- *   - AT TERMOBJ LEVEL the scan knows only the declarations listed above.
- *     An If, While or Return standing there is NOT measured: the TermList
- *     steps ONE BYTE and tries again until a declaration opcode lands, and
- *     that resync is silent. It is a known limit of this pass — declarations
- *     nested behind control flow can be missed — not a property of it.
+ *   - AT TERMOBJ LEVEL §20.2.5.1 allows three kinds of term and this pass
+ *     declares only the first: Object, StatementOpcode, ExpressionOpcode. The
+ *     other two — an `If (CondRefOf (...))` guarding a block of declarations,
+ *     a Return, a method called for its effect — are MEASURED exactly, and
+ *     the body of an If, an Else or a While among them is WALKED for what it
+ *     declares, both sides of the If, because which side a board takes is
+ *     decided by a value there is no frame here to compute. The count is said
+ *     once at the end of the load.
+ *
+ *     What stood here instead was a one-byte resync: the TermList stepped a
+ *     byte at a time until a declaration opcode landed, which read such a
+ *     body's DATA as opcodes. On one shipping desktop it refused twenty-six
+ *     `Name` declarations the firmware never wrote — a byte away, each time,
+ *     from DECLARING one out of operand bytes — and whatever it did recover
+ *     from inside those bodies, it recovered by luck.
  *
  * ‼ THE TWO SHAPES A _PRT ENTRY COMES IN, AND BOTH ARE IMPLEMENTED.
  * When Source is the integer zero, §6.2.13 makes Source Index the global

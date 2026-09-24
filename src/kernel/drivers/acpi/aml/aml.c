@@ -166,6 +166,18 @@
 #define LGreaterOp       0x94
 #define LLessOp          0x95
 
+/* Statement opcodes — ACPI 6.5 §20.2.5.3. Both passes need them: the
+ * evaluator RUNS these, and the namespace walk has to measure one standing at
+ * TermObj level rather than resynchronise through its body. */
+#define IfOp             0xA0
+#define ElseOp           0xA1
+#define WhileOp          0xA2
+#define NoopOp           0xA3
+#define ReturnOp         0xA4
+#define BreakOp          0xA5
+#define ContinueOp       0x9F
+#define BreakPointOp     0xCC
+
 /* ===========================================================
  * Namespace data structures
  * =========================================================== */
@@ -268,6 +280,13 @@ static AmlPoolChunk* g_pool_tail      = NULL;
 static uint32_t      g_pool_used      = 0;  /* objects across the whole chain */
 static bool          g_pool_exhausted = false;
 static bool          g_loaded         = false;
+
+/* Statement and expression terms that stood at TermList level, where §20.2.5.1
+ * allows them and this pass declares nothing. Counted because the number is
+ * how much of a firmware's tables is control flow rather than declaration, and
+ * because it used to be the number of places the walk resynchronised one byte
+ * at a time. Said once, with the number, at the end of the load. */
+static uint32_t      g_parse_stmts    = 0;
 
 /* Drop every heap chunk and start the chain over at the static one. Called
  * once per aml_init, so a build that failed part-way does not hand its
@@ -607,6 +626,24 @@ static bool skip_name_string(const uint8_t** p, const uint8_t* end) {
     if ((size_t)(end - *p) < (size_t)segs * 4u) return false;
     *p += (size_t)segs * 4u;
     return true;
+}
+
+/* The single-byte expression opcodes of §20.2.5.4. A TermObj may be one of
+ * them — a method called for its effect, or an operator whose Target is the
+ * point of it — and a DATA prefix may not. The distinction is what stops a
+ * resync from swallowing a literal as though it were a statement. */
+static bool aml_is_expression_op(uint8_t op) {
+    switch (op) {
+    case StoreOp: case RefOfOp: case AddOp: case ConcatOp: case SubtractOp:
+    case IncrementOp: case DecrementOp: case MultiplyOp: case DivideOp:
+    case ShiftLeftOp: case ShiftRightOp: case AndOp: case NandOp:
+    case OrOp: case NorOp: case XorOp: case NotOp: case DerefOfOp:
+    case ModOp: case SizeOfOp: case IndexOp: case LAndOp: case LOrOp:
+    case LNotOp: case LEqualOp: case LGreaterOp: case LLessOp:
+        return true;
+    default:
+        return false;
+    }
 }
 
 /* Step over an op that carries a PkgLength, *p on the PkgLength byte.
@@ -1434,6 +1471,80 @@ static aml_status_t parse_one(const uint8_t** p, const uint8_t* end,
     }
     if (op == ExtOpPrefix) return handle_extended(p, end, scope, into);
 
+    /* ‼ §20.2.5.1: TermObj := Object | StatementOpcode | ExpressionOpcode.
+     * Everything above declares an Object. The other two kinds are MEASURED
+     * here and stepped over exactly, and that is not tidiness.
+     *
+     * What stood here was a bare AML_ERR_BAD_OPCODE for all of them, which
+     * sent parse_term_list into its one-byte resync — through the whole body
+     * of the `If (CondRefOf (...))` that shipping SSDTs wrap their
+     * declarations in. The resync reads that body's DATA as opcodes: on the
+     * ASRock B365M Pro4-F it landed on an 0x08 followed by an 0x00
+     * twenty-six times and refused, each time, a `Name` the firmware never
+     * wrote. One byte further along, the same landing DECLARES an object into
+     * the namespace instead of refusing one.
+     *
+     * ‼ AND THE BODY OF AN If IS WALKED, BOTH SIDES OF IT. Skipping the
+     * package would be exact and would still lose what the firmware declared
+     * inside — and shipping SSDTs declare whole Devices there. Which side a
+     * board takes is decided by a value this pass has no frame to compute, so
+     * BOTH are recorded, which is the same choice the narrow gate makes when
+     * it proves a method it has no values for. A name declared on one side
+     * and not the other is then in the namespace either way; a name declared
+     * on both is the later one, and neither outcome can be a byte of data
+     * read as an opcode. */
+    if (op == IfOp || op == ElseOp || op == WhileOp) {
+        /* §20.2.5.3: DefIfElse := IfOp PkgLength Predicate TermList,
+         * DefWhile := WhileOp PkgLength Predicate TermList, and
+         * DefElse := ElseOp PkgLength TermList — no predicate on the Else. */
+        (*p)++;
+        uint32_t cbytes;
+        uint32_t pklen = decode_pkglen(p, end, &cbytes);
+        if (!cbytes || pklen < cbytes) return AML_ERR_BOUNDS;
+        const uint8_t* body_end = *p + pklen;
+        if (body_end > end) return AML_ERR_BOUNDS;
+        const uint8_t* np = *p + cbytes;
+        *p = body_end;                   /* the parent resumes past the whole */
+        g_parse_stmts++;
+        if (op != ElseOp && !skip_term_arg(&np, body_end, scope)) {
+            /* The predicate could not be measured, so where its TermList
+             * begins is not known — and a body entered at the wrong byte is
+             * the very thing this branch exists to stop. */
+            kprintf("[AML] a %s at TermList level under %s has a predicate "
+                    "this pass cannot measure, so where its body begins is "
+                    "not known and nothing inside it is recorded\n",
+                    op == IfOp ? "If" : "While", scope->name);
+            return AML_REFUSED;
+        }
+        if (np < body_end) {
+            into->p     = np;
+            into->end   = body_end;
+            into->scope = scope;         /* §20.2.5.3 opens no scope */
+        }
+        return AML_OK;
+    }
+    if (op == ReturnOp) {
+        (*p)++;
+        if (!skip_term_arg(p, end, scope)) return AML_ERR_BAD_OPCODE;
+        g_parse_stmts++;
+        return AML_REFUSED;
+    }
+    if (op == NoopOp || op == BreakOp || op == ContinueOp ||
+        op == BreakPointOp) {
+        (*p)++;
+        g_parse_stmts++;
+        return AML_REFUSED;
+    }
+    if (aml_is_expression_op(op) ||
+        (aml_is_name_string_lead(op) && op != 0x00)) {
+        const uint8_t* before = *p;
+        if (skip_term_arg(p, end, scope) && *p > before) {
+            g_parse_stmts++;
+            return AML_REFUSED;
+        }
+        *p = before;
+    }
+
     return AML_ERR_BAD_OPCODE;
 }
 
@@ -1608,12 +1719,57 @@ static aml_status_t parse_term_list(const uint8_t* aml, uint32_t len,
  *     that grows on the heap with the nesting the firmware actually wrote.
  *     What ends the growth is kmalloc saying no, and that is said out loud.
  *     The C stack depth of this whole subsystem is constant.
- *   * IT PROVABLY TERMINATES. There is no loop opcode: DefWhile is refused
- *     aloud by name, so every block is a finite byte range walked forward
- *     once, and the only way to make more work is to call another method,
- *     which costs an activation the heap has to supply. A firmware that
- *     recurses without end therefore stops at the heap, loudly, instead of
- *     spinning a core.
+ *   * IT PROVABLY TERMINATES, AND THERE IS NOW A LOOP OPCODE. DefWhile
+ *     (§20.2.5.3) is run. What used to carry the guarantee was that no block
+ *     could be re-entered — every one of them a finite byte range walked
+ *     forward once — and a loop deletes that. What carries it instead is not
+ *     a turn count and not a timeout; a wait that ends on a number somebody
+ *     guessed is a wait that ends at the wrong moment on somebody's board.
+ *     It is this:
+ *
+ *       A TURN OF A LOOP IS A FUNCTION OF THE STATE IT STARTS FROM. That
+ *       state is a finite, enumerable thing and every part of it is in this
+ *       file: the eight Locals and seven Args of §20.2.6, the objects the
+ *       method declared for itself and the bytes of their buffers, and what
+ *       the turn has to do with anything OUTSIDE the activation — what a
+ *       field read answered, what a store placed in a namespace object or in
+ *       an address space. Nothing else can reach a running method: the
+ *       namespace is otherwise read-only here, a called method's own
+ *       activation dies with the call, and there is no interrupt, no thread
+ *       and no clock in this evaluator's reach.
+ *
+ *       So the whole of it is reduced to one number at the end of every turn
+ *       (AmlTurnMark), and the numbers a loop has already produced are kept
+ *       (AmlSeen). A turn that produces a number this loop produced before
+ *       has put the machine back in a state it has already been in, with
+ *       nothing outside it having changed that it did not itself observe —
+ *       so every turn from there is a turn that already ran, and the loop
+ *       has no end. It is refused at that turn, ALOUD, and the method is
+ *       abandoned rather than left half-run, exactly as every other refusal
+ *       in this file abandons it.
+ *
+ *       Termination follows by construction and not by measurement: a loop
+ *       can produce a number it has never produced before only finitely many
+ *       times. Every turn either leaves the loop, or shows a state never seen
+ *       before — and the account of those states grows on the heap, so a
+ *       board that manages to keep showing new ones stops at kmalloc saying
+ *       no, loudly, exactly as an endlessly recursing firmware already did.
+ *       There is no third outcome. It is the same shape as the bound on
+ *       halt_drain_async_writes, which ends because a non-negative integer
+ *       can set a new low only finitely many times.
+ *
+ *       ‼ AND IT COVERS THE HARDWARE WAIT, WHICH IS THE CASE A COUNTER GETS
+ *       WRONG. `While (LEqual (STAT, One))` is getting somewhere only while
+ *       STAT's answer changes, and what the machine answered is IN the
+ *       number — so a register that keeps answering the same bits is a loop
+ *       standing still and is named as one, while a register that answers
+ *       something new is a loop making progress and is left alone for as
+ *       long as it keeps doing so. No duration is involved in either
+ *       direction.
+ *
+ *     A method that calls another method still costs an activation the heap
+ *     has to supply, and a firmware that recurses without end still stops at
+ *     the heap, loudly, instead of spinning a core.
  *   * ONE FRAME AT A TIME IS GONE, AND ON PURPOSE. It used to hold because
  *     a NameString resolving to a Method was refused in expression position.
  *     That refusal made the evaluator unable to read a PCI interrupt link on
@@ -1626,16 +1782,6 @@ static aml_status_t parse_term_list(const uint8_t* aml, uint32_t len,
  * on the BSP during device bring-up, and every entry point below takes its
  * own AmlRun, so there is no state between them to share.
  * ===================================================================== */
-
-/* Statement opcodes — ACPI 6.5 §20.2.5.3. */
-#define IfOp             0xA0
-#define ElseOp           0xA1
-#define WhileOp          0xA2
-#define NoopOp           0xA3
-#define ReturnOp         0xA4
-#define BreakOp          0xA5
-#define ContinueOp       0x9F
-#define BreakPointOp     0xCC
 
 /* Buffer-field makers and the two bit scanners — §20.2.5.2, §20.2.5.4. */
 #define FindSetLeftBitOp   0x81
@@ -1692,11 +1838,46 @@ typedef struct AmlValue {
     aml_object_t  *node;         /* set when the operand WAS a name */
 } AmlValue;
 
-/* One TermList still being walked: a method body, or the body of an If or an
- * Else that was entered. */
+/*
+ * ‼ THE STATES ONE While LOOP HAS ALREADY BEEN IN.
+ *
+ * Open addressing on a power-of-two table, so asking "has this turn happened
+ * before" costs the same on the thousandth turn as on the second. It grows on
+ * the heap with the number of DISTINCT states the loop reaches — never with
+ * the number of turns, because a turn that is not distinct is the turn the
+ * loop is refused on. Nothing here decides how many states a board may have;
+ * what ends the growth is kmalloc saying no, and that is said out loud.
+ *
+ * Zero is the empty slot, so AmlTurnMark never answers zero.
+ */
+typedef struct AmlSeen {
+    uint64_t *slot;
+    uint32_t  room;              /* a power of two, or zero before the first */
+    uint32_t  used;
+} AmlSeen;
+
+/* One TermList still being walked: a method body, the body of an If or an
+ * Else that was entered, or the body of a While that is turning. */
 typedef struct AmlBlock {
     const uint8_t *p;
     const uint8_t *end;
+
+    /* ‼ SET ONLY ON THE BODY OF A While, AND IT IS WHAT MAKES THE BLOCK A
+     * LOOP. `pred` is where the loop's predicate begins — inside the same
+     * package, ahead of the body — and `end` is the end of that package. A
+     * block whose `pred` is NULL is walked forward once and popped, exactly
+     * as every block in this file used to be. */
+    const uint8_t *pred;
+    AmlSeen        seen;
+
+    /* What this TURN has had to do with anything outside the activation: what
+     * the machine answered a read, and what the method placed into a
+     * namespace object or an address space. Folded in by AmlRunHeard, read
+     * and cleared by AmlLoopTurn at the end of every turn. Two turns whose
+     * dealings differ are two different turns, however alike the Locals
+     * look. */
+    uint64_t       world;
+    uint32_t       worldn;
 } AmlBlock;
 
 /*
@@ -1733,6 +1914,7 @@ typedef struct AmlPending {
 typedef enum {
     AML_AFTER_RETURN = 0,
     AML_AFTER_IF,
+    AML_AFTER_WHILE,
     AML_AFTER_STORE,
     AML_AFTER_DISCARD,
 } AmlAfter;
@@ -1874,8 +2056,31 @@ static void *AmlRunAlloc(AmlRun *run, uint32_t bytes) {
     return p;
 }
 
+static void AmlSeenForget(AmlSeen *s) {
+    if (s->slot) kfree(s->slot);
+    s->slot = NULL;
+    s->room = 0;
+    s->used = 0;
+}
+
+/*
+ * Leave every block above `to`. The ONLY way a block is left in this file, so
+ * that a loop's account of the states it has been in is given back on every
+ * path there is — the loop ending, a Break, a Return out of the middle of it,
+ * and the activation being torn down.
+ */
+static void AmlBlocksDrop(AmlAct *a, uint32_t to) {
+    while (a->blkn > to) {
+        a->blkn--;
+        AmlSeenForget(&a->blk[a->blkn].seen);
+    }
+}
+
 static void AmlActRelease(AmlAct *a) {
-    if (a->blk)  kfree(a->blk);
+    if (a->blk) {
+        AmlBlocksDrop(a, 0);
+        kfree(a->blk);
+    }
     if (a->obj)  kfree(a->obj);
     if (a->pend) kfree(a->pend);
     a->blk = NULL; a->obj = NULL; a->pend = NULL;
@@ -1887,6 +2092,131 @@ static void AmlRunDone(AmlRun *run) {
     for (uint32_t i = 0; i < run->ownn; i++) kfree(run->own[i]);
     if (run->own) kfree(run->own);
     memset(run, 0, sizeof(*run));
+}
+
+/* =====================================================================
+ * WHAT A TURN OF A LOOP WAS — see THE NARROW EVALUATOR's doctrine below,
+ * under HOW LONG IT CAN RUN.
+ * ===================================================================== */
+
+/* FNV-1a's 64-bit prime, with a final xor-shift so a change in one low bit
+ * reaches the high ones. Nothing here depends on the constant beyond its
+ * spreading bits; what the mixing is FOR is the argument in the doctrine. */
+static uint64_t AmlMix(uint64_t h, uint64_t v) {
+    h ^= v;
+    h *= 0x100000001B3ULL;
+    return h ^ (h >> 29);
+}
+
+/*
+ * ‼ EVERY LOOP NOW TURNING ON THIS RUN HEARS THIS.
+ *
+ * Called with what the machine answered a read, and with what a store placed
+ * into a namespace object or an address space — the only two ways a method
+ * body can differ from one turn to the next without the difference being
+ * visible in the activation itself. It reaches every loop frame of every
+ * activation, not just the innermost, because from an outer loop's point of
+ * view the whole of an inner loop, and the whole of a method it called, is
+ * part of ONE of its turns.
+ */
+static void AmlRunHeard(AmlRun *run, uint64_t what) {
+    for (uint32_t i = 0; i < run->actn; i++) {
+        AmlAct *a = &run->act[i];
+        for (uint32_t b = 0; b < a->blkn; b++) {
+            if (!a->blk[b].pred) continue;
+            a->blk[b].world = AmlMix(a->blk[b].world, what);
+            a->blk[b].worldn++;
+        }
+    }
+}
+
+/* One AmlValue, whole. Its pointers are identities — the bytes a String or a
+ * Buffer names are inside the table this kernel mapped and do not move — so
+ * the pointer is the value. The bytes that DO change under a pointer are a
+ * method-local buffer's, and AmlTurnMark reads those one by one. */
+static uint64_t AmlValueMark(uint64_t h, const AmlValue *v) {
+    h = AmlMix(h, (uint64_t)v->type);
+    h = AmlMix(h, v->integer);
+    h = AmlMix(h, (uint64_t)(uintptr_t)v->bytes);
+    h = AmlMix(h, (uint64_t)(uintptr_t)v->bytes_end);
+    h = AmlMix(h, (uint64_t)v->count);
+    h = AmlMix(h, (uint64_t)(uintptr_t)v->scope);
+    h = AmlMix(h, (uint64_t)(uintptr_t)v->node);
+    return h;
+}
+
+/*
+ * ‼ EVERYTHING A TURN OF A While CAN HAVE CHANGED, IN ONE NUMBER.
+ *
+ * The eight Locals and seven Args of §20.2.6, every object the method
+ * declared for itself and every byte of every buffer among them, and the fold
+ * of this turn's dealings with everything outside the activation. That list
+ * is not a selection: it is the whole of the state this evaluator's next step
+ * reads. The block cursor is not in it because the turn always begins at the
+ * same byte — that is what makes it a turn.
+ *
+ * Never zero, because zero is the empty slot of the table this goes into.
+ */
+static uint64_t AmlTurnMark(const AmlAct *a, const AmlBlock *loop) {
+    uint64_t h = 0xCBF29CE484222325ULL;          /* FNV-1a's offset basis */
+
+    for (uint32_t i = 0; i < AML_LOCAL_COUNT; i++)
+        h = AmlValueMark(h, &a->local[i]);
+    for (uint32_t i = 0; i < AML_ARG_COUNT; i++)
+        h = AmlValueMark(h, &a->arg[i]);
+
+    h = AmlMix(h, a->objn);
+    for (uint32_t i = 0; i < a->objn; i++) {
+        const AmlLocalObj *o = &a->obj[i];
+        h = AmlMix(h, (uint64_t)(uint8_t)o->name[0]        |
+                      ((uint64_t)(uint8_t)o->name[1] << 8)  |
+                      ((uint64_t)(uint8_t)o->name[2] << 16) |
+                      ((uint64_t)(uint8_t)o->name[3] << 24));
+        h = AmlMix(h, (uint64_t)(o->is_field ? 1u : 0u) |
+                      ((uint64_t)o->over << 1));
+        h = AmlMix(h, ((uint64_t)o->bit_offset << 32) | o->bit_width);
+        h = AmlValueMark(h, &o->value);
+        h = AmlMix(h, o->buf_len);
+        for (uint32_t b = 0; b < o->buf_len; b++) h = AmlMix(h, o->buf[b]);
+    }
+
+    h = AmlMix(h, loop->world);
+    h = AmlMix(h, loop->worldn);
+    return h ? h : 1ULL;
+}
+
+/* Remember one turn. `*again` comes back true when this loop has stood in
+ * exactly this state before; false means the state is new and is now kept.
+ * False FROM THE FUNCTION means the heap would not hold it. */
+static bool AmlSeenAdd(AmlSeen *s, uint64_t fp, bool *again) {
+    *again = false;
+
+    /* Kept at half full: a table that fills cannot be probed. */
+    if ((s->used + 1u) * 2u > s->room) {
+        uint32_t  bigger = s->room ? s->room * 2u : 16u;
+        uint64_t *fresh  = (uint64_t *)kmalloc((size_t)bigger * sizeof(uint64_t));
+        if (!fresh) return false;
+        memset(fresh, 0, (size_t)bigger * sizeof(uint64_t));
+        for (uint32_t i = 0; i < s->room; i++) {
+            uint64_t v = s->slot[i];
+            if (!v) continue;
+            uint32_t j = (uint32_t)(v & (uint64_t)(bigger - 1u));
+            while (fresh[j]) j = (j + 1u) & (bigger - 1u);
+            fresh[j] = v;
+        }
+        if (s->slot) kfree(s->slot);
+        s->slot = fresh;
+        s->room = bigger;
+    }
+
+    uint32_t i = (uint32_t)(fp & (uint64_t)(s->room - 1u));
+    while (s->slot[i]) {
+        if (s->slot[i] == fp) { *again = true; return true; }
+        i = (i + 1u) & (s->room - 1u);
+    }
+    s->slot[i] = fp;
+    s->used++;
+    return true;
 }
 
 /* ===========================================================
@@ -2624,6 +2954,11 @@ static bool AmlRegionRead(AmlRun *run, aml_object_t *field, const char *who,
     if (va) vmm_unmap_mmio((volatile void *)va, va_len);
     if (!ok) return false;
     *out = value & AmlIntMask();
+    /* ‼ A LOOP WAITING ON THIS REGISTER IS TOLD WHAT IT ANSWERED. A While
+     * that spins on a field is only getting somewhere while the field's
+     * answer changes, and this is the only place in the file that knows what
+     * it answered. */
+    AmlRunHeard(run, AmlMix((uint64_t)(uintptr_t)field, *out));
     return true;
 }
 
@@ -2863,6 +3198,7 @@ static bool AmlRegionWrite(AmlRun *run, aml_object_t *field, const char *who,
     vmm_unmap_mmio((volatile void *)va, len);
 
     run->writes++;
+    AmlRunHeard(run, AmlMix((uint64_t)(uintptr_t)field, value));
     kprintf("[AML] %s: 0x%lx placed in %s, a field of operation region %s — "
             "%lu byte(s) at physical 0x%lx, inside a range this board's own "
             "memory map declares ACPI NVS, which ACPI 6.5 Table 15.1 "
@@ -3223,6 +3559,9 @@ static bool AmlStoreInto(AmlRun *run, AmlAct *a, const uint8_t **p,
     }
     o->type      = AML_OBJ_INTEGER;
     o->v.integer = v->integer;
+    /* ‼ THIS LANDS OUTSIDE THE ACTIVATION, so a loop counting in a namespace
+     * object rather than in a Local is still visibly getting somewhere. */
+    AmlRunHeard(run, AmlMix((uint64_t)(uintptr_t)o, v->integer));
     return true;
 }
 
@@ -3376,6 +3715,7 @@ static bool AmlActPush(AmlRun *run, aml_object_t *m, const AmlValue *args,
         kprintf("[AML] the heap has no room to walk %s's body\n", m->name);
         return false;
     }
+    memset(&a->blk[0], 0, sizeof(AmlBlock));
     a->blk[0].p   = m->v.method.aml;
     a->blk[0].end = m->v.method.aml + m->v.method.aml_len;
     a->blkn       = 1;
@@ -3505,7 +3845,9 @@ static bool AmlExprStep(AmlRun *run) {
         case AML_AFTER_RETURN:
             a->ret      = v;
             a->returned = true;
-            a->blkn     = 0;
+            /* Dropped rather than zeroed: a Return out of the middle of a
+             * While has to give back that loop's account of itself. */
+            AmlBlocksDrop(a, 0);
             return AmlActFinish(run);
 
         case AML_AFTER_STORE: {
@@ -3569,10 +3911,31 @@ static bool AmlExprStep(AmlRun *run) {
                     return false;
                 }
                 a->blk = grown;
+                memset(&a->blk[a->blkn], 0, sizeof(AmlBlock));
                 a->blk[a->blkn].p   = take_start;
                 a->blk[a->blkn].end = take_end;
                 a->blkn++;
             }
+            return true;
+        }
+
+        case AML_AFTER_WHILE: {
+            /* ACPI 6.5 §20.2.5.3 writes it `Predicate := TermArg => Integer`,
+             * the same shape it gives DefIfElse's. */
+            if (v.type != AML_OBJ_INTEGER) {
+                kprintf("[AML] %s: a While was handed %s to decide on, and "
+                        "only an integer decides anything here\n",
+                        a->what, AmlTypeName(v.type));
+                return false;
+            }
+            AmlBlock *L = &a->blk[a->blkn - 1];
+            if (v.integer == 0) {
+                AmlBlocksDrop(a, a->blkn - 1);
+                return true;
+            }
+            /* The body is whatever stands between the predicate this just
+             * read and the end of the loop's package. */
+            L->p = a->cur;
             return true;
         }
         }
@@ -3660,12 +4023,61 @@ static bool AmlDeclareLocal(AmlRun *run, AmlAct *a, const char seg[4],
     return true;
 }
 
+/*
+ * ‼ ONE TURN OF A While HAS RUN OUT OF BODY, AND THIS IS WHERE THE LOOP HAS
+ *   TO SHOW IT IS GETTING SOMEWHERE.
+ *
+ * The argument is in the doctrine above (HOW LONG IT CAN RUN). What happens
+ * here is the whole of it: the turn is reduced to one number that covers
+ * every Local, every Arg, every object the method declared, every byte of
+ * every buffer among them, and everything the turn read from or placed
+ * outside the activation. If this loop has stood in that exact state before,
+ * then every step from here is a step it has already taken and the loop
+ * cannot end — so it is refused, aloud, and the method is abandoned rather
+ * than left half-run. Otherwise the state is kept and the predicate is asked
+ * again.
+ */
+static bool AmlLoopTurn(AmlAct *a) {
+    AmlBlock *L = &a->blk[a->blkn - 1];
+
+    uint64_t fp = AmlTurnMark(a, L);
+    L->world  = 0;
+    L->worldn = 0;
+
+    bool again = false;
+    if (!AmlSeenAdd(&L->seen, fp, &again)) {
+        kprintf("[AML] %[E]%s: a While loop has turned %u times without ever "
+                "standing where it stood before, and the heap has no room to "
+                "go on keeping account of that. A loop this machine cannot "
+                "account for is not one it will go on turning — the method is "
+                "abandoned rather than half-run%[D]\n",
+                a->what, L->seen.used);
+        return false;
+    }
+    if (again) {
+        kprintf("[AML] %[E]%s: a turn of a While loop left every Local, every "
+                "Arg, every object this method declared and every byte the "
+                "machine answered exactly as an earlier turn left them. The "
+                "next turn is a turn that already ran, so this loop has no "
+                "end — the method is abandoned rather than half-run%[D]\n",
+                a->what);
+        return false;
+    }
+
+    AmlExprBegin(a, L->pred, L->end, AML_AFTER_WHILE);
+    return true;
+}
+
 static bool AmlStmtStep(AmlRun *run) {
     AmlAct *a = &run->act[run->actn - 1];
 
     if (a->blkn == 0) return AmlActFinish(run);
     AmlBlock *b = &a->blk[a->blkn - 1];
-    if (b->p >= b->end) { a->blkn--; return true; }
+    if (b->p >= b->end) {
+        if (b->pred) return AmlLoopTurn(a);
+        a->blkn--;
+        return true;
+    }
 
     uint8_t op = *b->p;
 
@@ -3698,6 +4110,71 @@ static bool AmlStmtStep(AmlRun *run) {
         }
         a->if_end = if_end;
         AmlExprBegin(a, q + cb, if_end, AML_AFTER_IF);
+        return true;
+    }
+
+    if (op == WhileOp) {
+        /* DefWhile := WhileOp PkgLength Predicate TermList — ACPI 6.5
+         * §20.2.5.3. The predicate lives inside the same package, ahead of
+         * the body, so one block frame holds both: `pred` is where the
+         * predicate begins and `end` is where the package ends. */
+        const uint8_t *q  = b->p + 1;
+        uint32_t       cb = 0;
+        uint32_t       pk = decode_pkglen(&q, b->end, &cb);
+        if (!cb || pk < cb) {
+            kprintf("[AML] %s: a While has a malformed package length\n",
+                    a->what);
+            return false;
+        }
+        const uint8_t *loop_end = q + pk;
+        if (loop_end > b->end) {
+            kprintf("[AML] %s: a While runs past the end of its block\n",
+                    a->what);
+            return false;
+        }
+        const uint8_t *pred = q + cb;
+
+        b->p = loop_end;                 /* before the stack below may move it */
+        AmlBlock *grown =
+            (AmlBlock *)AmlStackRoom(a->blk, &a->blk_room, a->blkn + 1,
+                                     sizeof(AmlBlock));
+        if (!grown) {
+            kprintf("[AML] %s: the heap has no room for this method's "
+                    "nesting — the method is abandoned, not guessed\n",
+                    a->what);
+            return false;
+        }
+        a->blk = grown;
+        memset(&a->blk[a->blkn], 0, sizeof(AmlBlock));
+        a->blk[a->blkn].p    = pred;
+        a->blk[a->blkn].end  = loop_end;
+        a->blk[a->blkn].pred = pred;
+        a->blkn++;
+
+        AmlExprBegin(a, pred, loop_end, AML_AFTER_WHILE);
+        return true;
+    }
+
+    if (op == BreakOp || op == ContinueOp) {
+        /* §20.2.5.3: DefBreak := BreakOp, DefContinue := ContinueOp. Both
+         * name the INNERMOST enclosing loop. The blocks between here and it
+         * are the bodies of Ifs entered inside that loop, and each of them
+         * wrote its own "after" into the block beneath it when it was
+         * entered — so leaving them owes nothing to anybody. */
+        uint32_t at = a->blkn;
+        while (at > 0 && !a->blk[at - 1].pred) at--;
+        if (at == 0) {
+            kprintf("[AML] %s: %s stands where no While loop encloses it — "
+                    "the method is abandoned rather than half-run\n",
+                    a->what, op == BreakOp ? "a Break" : "a Continue");
+            return false;
+        }
+        if (op == BreakOp) {
+            AmlBlocksDrop(a, at - 1);    /* the loop's own frame goes too */
+            return true;
+        }
+        AmlBlocksDrop(a, at);            /* back to the loop's body ... */
+        a->blk[at - 1].p = a->blk[at - 1].end;   /* ... this turn being over */
         return true;
     }
 
@@ -5893,7 +6370,24 @@ static bool AmlGateStep(AmlGate *g, bool *done) {
         }
     }
 
-    /* Everything left, DefWhile among it. */
+    if (op == WhileOp || op == BreakOp || op == ContinueOp) {
+        /* ‼ THE EVALUATOR RUNS THESE AND THIS WALK REFUSES THEM, ON PURPOSE.
+         * A loop's turns are decided by values and this walk has none — it
+         * takes both sides of every If for exactly that reason. It could walk
+         * a body once, but what it promises is not "every opcode is one this
+         * evaluator knows", it is "this method will run from beginning to
+         * END" — and that is what earns \_PIC its store. A loop that the run
+         * would refuse half-way (see AmlLoopTurn) would leave the firmware
+         * told half of something, which is the one outcome the narrow gate
+         * exists to prevent. No board's \_PIC has a loop in it; one that does
+         * is refused whole, before its first store. */
+        return AmlGateSay(g, b->p, "a loop, whose number of turns is decided "
+                                   "by values this walk does not have: ",
+                          op == WhileOp ? "While"
+                                        : (op == BreakOp ? "Break"
+                                                         : "Continue"));
+    }
+
     {
         const char *nm = AmlOpcodeName(op);
         return AmlGateSay(g, b->p, "a statement this evaluator does not run: ",
@@ -6401,6 +6895,7 @@ aml_status_t aml_init(void) {
     g_root_obj.type = AML_OBJ_SCOPE;
     g_root_obj.name[0] = '\\';
     pool_reset();
+    g_parse_stmts = 0;
 
     if (!g_acpi.initialized || !g_acpi.fadt) return AML_ERR_NOT_LOADED;
     uint64_t dsdt_addr =
@@ -6447,6 +6942,15 @@ aml_status_t aml_init(void) {
             g_pool_used,
             g_pool_exhausted ? " (TRUNCATED — the heap ran out, see above)"
                              : "");
+    if (g_parse_stmts)
+        kprintf("[AML] %u term(s) at TermList level were statements rather "
+                "than declarations — an If or a While guarding a block of "
+                "them, a Return, a method called for its effect. Every one "
+                "was measured exactly rather than resynchronised through, and "
+                "the body of every If, Else and While among them was walked "
+                "for what it declares — both sides, because which side a board "
+                "takes is decided by a value this pass has no frame to "
+                "compute\n", g_parse_stmts);
     /* Announced on the tag bus with the object count as payload. The reader
      * that binds to this namespace is AmlRouteForPciPin below, and it asks
      * its question later — the first time a driver has a PCI interrupt line
