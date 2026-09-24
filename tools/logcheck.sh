@@ -15,6 +15,10 @@
 #                         one built PRINTTOFILE=on, which must produce a
 #                         readable account of its own boot on the volume, and
 #                         one without, which must SAY it keeps none
+#   logcheck.sh footing  a UEFI boot is told to reboot: the kernel's own map
+#                         goes under the firmware (Footing), the reset says
+#                         which map it stood on, the EFI descriptor list is
+#                         on the record, and the Lifeline stays silent
 #   logcheck.sh both
 #
 # Every check is a grep against build/serial.log. No timing assertions.
@@ -7687,11 +7691,80 @@ run_unattendedmut() {
     grep -q "BoxOS Shell" "$L"; chk $? "unattendedwrong: the machine still boots"
 }
 
+# ---------------------------------------------------------------------------
+# footing: the kernel's own map goes under the firmware, and a fall inside the
+# firmware does not take the reboot ladder with it.
+#
+# Every runtime-services call now enters the firmware through Footing (the
+# kernel CR3 loaded for the duration of the call) and under a Lifeline (a fault
+# in foreign code throws control back instead of panicking). A UEFI boot that
+# is told to reboot is the one path that exercises both, and nothing on this
+# desk exercised either before this scenario existed.
+#
+# ‼ WHAT THIS DESK CANNOT DECIDE, said here so nobody reads more into a green
+# run than it carries: on QEMU the reboot op already runs on the kernel map, so
+# Footing reports "already on the kernel map" and changes nothing. Whether a
+# real board enters the firmware in a process cabin is a question only that
+# board answers. What this gate proves is that the measurement SPEAKS, that the
+# two mechanisms cost the machine nothing when they are not needed, and that
+# the machine still reboots.
+# ---------------------------------------------------------------------------
+run_footing() {
+    echo "== footing: the map under the firmware, and the ladder that survives it =="
+    build
+    make run-stop >/dev/null 2>&1
+    make run-bg UEFI=on STRICT=on CORES=4 MEM=4G >/dev/null 2>&1
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    local reached=0
+    grep -q "BoxOS Shell" build/serial.log 2>/dev/null && reached=1
+    sleep 3
+    type_cmd "reboot"
+    sleep 1; key_press ret
+    wait_for_line build/serial.log "Rebooting" "$WAIT_QUIET_S"
+    sleep 5
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.footing.log"
+    L="$SCRATCH/serial.footing.log"
+
+    [ $reached -eq 1 ]; chk $? "footing: the uefi boot reached the shell"
+
+    # The measurement must SPEAK, and it must say which of the two it was.
+    grep -qE "\[EFI\] ResetSystem\(type=1.*(already on the kernel map|NOT the kernel map)" "$L"
+    chk $? "footing: the reset says which map the firmware was entered on"
+
+    grep -q "\[EFI\] ResetSystem(type=1" "$L"; chk $? "footing: and names g_rt, the pointer the call dereferences"
+
+    # The map itself, dumped once so any faulting address can be placed in it.
+    local descs
+    descs=$(grep -c "^\[EFI\]   \[" "$L")
+    [ "${descs:-0}" -gt 0 ]; chk $? "footing: every EFI descriptor is named on the boot ($descs)"
+    grep -q "RUNTIME" "$L"; chk $? "footing: and the runtime ones are marked as such"
+    grep -qE "^\[EFI\]   \[ *[0-9]+\] RuntimeServices(Code|Data) .*virt=0xffffff" "$L"
+    chk $? "footing: a runtime region carries the virtual address this kernel gave it"
+
+    # Lifeline must stay silent when the firmware behaves. A throwback here
+    # would mean OVMF faulted, which it does not — so a line is a regression,
+    # not a pass.
+    grep -q "\[LIFELINE\]" "$L" \
+        && bad "footing: a lifeline was thrown on a bench where the firmware does not fall" \
+        || ok "footing: the lifeline stayed out of the way"
+
+    # And the machine actually came back.
+    local boots
+    boots=$(grep -c "BoxOS Shell" "$L")
+    [ "${boots:-0}" -ge 2 ]; chk $? "footing: the machine rebooted and came back up ($boots boot(s))"
+
+    grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
+        && bad "footing: the kernel spoke of a stall or a fault" \
+        || ok "footing: no verdict, no panic"
+}
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
     badpool)  run_badpool ;;
     uefi)     run_uefi ;;
+    footing)  run_footing ;;
     stranger) run_stranger ;;
     latearrival) run_latearrival ;;
     replug)   run_replug ;;
