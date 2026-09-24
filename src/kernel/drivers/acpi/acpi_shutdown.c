@@ -3,10 +3,10 @@
 #include "klib.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
-#include "vmm.h"
 #include "pci.h"
 #include "efi.h"
 #include "serial.h"   /* WireForceRelease / WireDrain — acpi_reboot()'s ladder is heard */
+#include "klib_logring.h" /* LogKeepFlush — a rung's account survives the reset the next rung causes */
 
 /* ACPI Generic Address Structure address_space_id values (ACPI 6.x §5.2.3.2) */
 #define GAS_AS_SYSTEM_MEMORY  0  /* MMIO */
@@ -29,6 +29,10 @@ static inline bool fadt_field_present(uint32_t len, size_t field_end) {
  * unasked: three lanes touch ACPI in this tree at once, and acpi.h's FADT
  * flags are not this task's to redesign. */
 #define FADT_FLAG_HW_REDUCED_ACPI   (1u << 20)
+
+/* ACPI 6.5 §5.2.9, FADT Flags, RESET_REG_SUP: "If set, indicates the system
+ * supports system reset via the FADT RESET_REG." */
+#define FADT_FLAG_RESET_REG_SUP     (1u << 10)
 
 static void delay_ms(uint32_t ms) {
     uint64_t deadline = rdtsc() + cpu_ms_to_tsc(ms);
@@ -56,7 +60,10 @@ static void triple_fault(void) {
      * and resets) or, failing that, parks in the hlt loop at the bottom
      * forever. Either way nothing after this line runs again, so the line
      * above is drained here, in place, rather than by a caller that will
-     * never regain control to do it. */
+     * never regain control to do it. The carry-over window goes with it: a
+     * triple fault IS a warm reset, and a warm reset invalidates the caches
+     * without writing them back (Intel SDM Vol 3A §11.5.1). */
+    LogKeepFlush();
     WireForceRelease();
     WireDrain();
 
@@ -173,26 +180,27 @@ static bool gas_pci_decode(uint64_t address, GasPciAddress *out) {
     return true;
 }
 
-static int gas_write_byte(const acpi_gas_t *gas, uint8_t value) {
-    if (!gas || gas->address == 0) return -1;
+/* The one writer on the one-way path. It allocates nothing and maps nothing:
+ * a System Memory register was mapped in acpi_init (AcpiOneWayRegistersLocate)
+ * and is dereferenced here. It used to call vmm_map_mmio at this point, which
+ * takes kernel_mmio_lock and the address space's lock and creates page tables
+ * — after halt_all_ap_cores() has frozen the APs wherever they stood, any of
+ * which can be held by a core that is never coming back. */
+static int one_way_write_byte(const AcpiOneWayRegister *r, uint8_t value) {
+    if (!r || !r->usable) return -1;
 
-    switch (gas->address_space) {
+    switch (r->space) {
         case GAS_AS_SYSTEM_IO:
-            outb((uint16_t)gas->address, value);
+            outb((uint16_t)r->address, value);
             return 0;
 
-        case GAS_AS_SYSTEM_MEMORY: {
-            volatile void *vmap = vmm_map_mmio((uintptr_t)gas->address,
-                                               sizeof(uint8_t),
-                                               VMM_FLAGS_KERNEL_RW);
-            if (!vmap) return -1;
-            *(volatile uint8_t *)vmap = value;
+        case GAS_AS_SYSTEM_MEMORY:
+            *r->mapped = value;
             return 0;
-        }
 
         case GAS_AS_PCI_CONFIG: {
             GasPciAddress pci;
-            if (!gas_pci_decode(gas->address, &pci)) return -1;
+            if (!gas_pci_decode(r->address, &pci)) return -1;
 
             /* Said out loud, not with debug_printf: this is the reset
              * register, it is written once in the machine's life, and which
@@ -235,19 +243,29 @@ static void attempt_acpi_reset(void) {
         return;
     }
 
-    if (!(g_acpi.fadt->flags & (1 << 10))) {
+    if (!(g_acpi.fadt->flags & FADT_FLAG_RESET_REG_SUP)) {
         kprintf("[ACPI] FADT does not support reset register\n");
         return;
     }
 
-    const acpi_gas_t *reg = &g_acpi.fadt->reset_reg;
-    uint8_t val           = g_acpi.fadt->reset_value;
+    /* Resolved and, in System Memory, mapped during acpi_init. `usable` is
+     * the whole question here — the reasons it can be false were each said
+     * out loud at bind time, and the boot survey prints the answer. */
+    const AcpiOneWayRegister *reg = AcpiResetRegister();
+    uint8_t val = g_acpi.fadt->reset_value;
+
+    if (!reg->named) {
+        kprintf("[ACPI] FADT flags claim RESET_REG_SUP but the descriptor "
+                "names no address\n");
+        return;
+    }
 
     kprintf("[ACPI] reset: addr_space=%u addr=0x%lx value=0x%x\n",
-            reg->address_space, (unsigned long)reg->address, val);
+            reg->space, (unsigned long)reg->address, val);
 
-    if (gas_write_byte(reg, val) != 0) {
-        kprintf("[ACPI] reset write failed (unsupported address space)\n");
+    if (one_way_write_byte(reg, val) != 0) {
+        kprintf("[ACPI] reset write failed — this register was not usable "
+                "without allocating, and this path allocates nothing\n");
         return;
     }
     delay_ms(100);
@@ -267,22 +285,20 @@ static void attempt_acpi_reset(void) {
  * into bits this function does not own.
  *
  * The register itself is a Table-5.9 extension at offset 244 — acpi.h's
- * sleep_control_reg — absent on any FADT under 268 bytes, so
- * fadt_field_present() gates the read exactly as it already does for
- * reset_reg above. gas_write_byte() is the same GAS writer reset_reg uses:
- * SLEEP_CONTROL_REG is spec'd byte-wide in the same three address spaces. */
+ * sleep_control_reg — absent on any FADT under 268 bytes. That length gate,
+ * and the mapping a System Memory descriptor needs, both happened once in
+ * acpi_init; what arrives here is an AcpiOneWayRegister that already knows
+ * the answer, and one_way_write_byte() allocates nothing to use it. */
 static bool attempt_sleep_control_reg(uint8_t slp_typ) {
-    uint32_t flen = g_acpi.fadt->header.length;
-    if (!fadt_field_present(flen, offsetof(acpi_fadt_t, sleep_control_reg) +
-                                   sizeof(acpi_gas_t))) {
-        kprintf("[ACPI] FADT too short for SLEEP_CONTROL_REG (len=%u, need "
-                "256) — hardware-reduced poweroff has no register to write\n",
-                flen);
+    const AcpiOneWayRegister *reg = AcpiSleepControlRegister();
+
+    if (!reg->present) {
+        kprintf("[ACPI] FADT is %u bytes, too short to carry "
+                "SLEEP_CONTROL_REG (offset 244) — hardware-reduced poweroff "
+                "has no register to write\n", g_acpi.fadt->header.length);
         return false;
     }
-
-    const acpi_gas_t *reg = &g_acpi.fadt->sleep_control_reg;
-    if (reg->address == 0) {
+    if (!reg->named) {
         kprintf("[ACPI] FADT names no SLEEP_CONTROL_REG address — "
                 "hardware-reduced poweroff cannot proceed\n");
         return false;
@@ -291,11 +307,12 @@ static bool attempt_sleep_control_reg(uint8_t slp_typ) {
     uint8_t value = (uint8_t)(((slp_typ & 0x07u) << 2) | (1u << 5));
     kprintf("[ACPI] hardware-reduced poweroff: SLEEP_CONTROL_REG "
             "addr_space=%u addr=0x%lx value=0x%x\n",
-            reg->address_space, (unsigned long)reg->address, value);
+            reg->space, (unsigned long)reg->address, value);
 
-    if (gas_write_byte(reg, value) != 0) {
-        kprintf("[ACPI] SLEEP_CONTROL_REG write failed (unsupported address "
-                "space)\n");
+    if (one_way_write_byte(reg, value) != 0) {
+        kprintf("[ACPI] SLEEP_CONTROL_REG write failed — this register was "
+                "not usable without allocating, and this path allocates "
+                "nothing\n");
         return false;
     }
     return true;
@@ -304,39 +321,24 @@ static bool attempt_sleep_control_reg(uint8_t slp_typ) {
 void acpi_shutdown(void) {
     __asm__ volatile("cli");
 
-    if (g_acpi.initialized) {
-        kprintf("[ACPI] poweroff via PM1 (PM1a=0x%x PM1b=0x%x SLP_TYPa=0x%x SLP_TYPb=0x%x rev=%u len=%u)\n",
-                g_acpi.pm1a_cnt_blk, g_acpi.pm1b_cnt_blk,
-                g_acpi.slp_typa, g_acpi.slp_typb,
-                g_acpi.fadt ? g_acpi.fadt->header.revision : 0,
-                g_acpi.fadt ? g_acpi.fadt->header.length   : 0);
-    } else {
+    /* Which register the S5 write is about to go to — the two platforms have
+     * nothing in common here, and this line used to name PM1 on both. A
+     * hardware-reduced platform HAS no PM1 control block (ACPI 6.5 Table
+     * 5.10, HW_REDUCED_ACPI), so printing its ports and sleep types was
+     * describing a register that does not exist. The rest of the FADT is
+     * surveyed once at boot by AcpiFadtSurvey (acpi.c), not again here. */
+    if (!g_acpi.initialized) {
         kprintf("[ACPI] not initialised; no soft poweroff available\n");
-    }
-
-    /* One line that closes a question none of the owner's three machines has
-     * ever answered: is this a Hardware-Reduced platform, and does its FADT
-     * even carry SLEEP_CONTROL_REG? minor_revision is guarded by
-     * fadt_field_present() because it sits at offset 131 — inside the
-     * ACPI-2.0 extended region reset_reg already requires a length check
-     * for, one byte past what an ACPI 1.0b (116-byte) or a bare ACPI-2.0
-     * (129-byte) FADT carries. `flags` needs no guard: it ends at offset
-     * 116, so it is present on every FADT this kernel accepts as valid. */
-    if (g_acpi.initialized && g_acpi.fadt) {
-        uint32_t flen = g_acpi.fadt->header.length;
-        bool has_minor = fadt_field_present(flen,
-            offsetof(acpi_fadt_t, minor_revision) + 1);
-        bool has_sleep_control = fadt_field_present(flen,
-            offsetof(acpi_fadt_t, sleep_control_reg) + sizeof(acpi_gas_t));
-        bool hw_reduced = (g_acpi.fadt->flags & FADT_FLAG_HW_REDUCED_ACPI) != 0;
-
-        kprintf("[ACPI] FADT survey: len=%u rev=%u minor=%u%s "
-                "HW_REDUCED_ACPI=%u SLEEP_CONTROL_REG=%s\n",
-                flen, g_acpi.fadt->header.revision,
-                has_minor ? ACPI_FADT_MINOR_VERSION(g_acpi.fadt) : 0,
-                has_minor ? "" : " (n/a: FADT too short)",
-                hw_reduced ? 1u : 0u,
-                has_sleep_control ? "present" : "absent");
+    } else if (g_acpi.fadt &&
+               (g_acpi.fadt->flags & FADT_FLAG_HW_REDUCED_ACPI)) {
+        kprintf("[ACPI] poweroff on a hardware-reduced platform: no PM1 "
+                "control block exists, so S5 goes to SLEEP_CONTROL_REG "
+                "(SLP_TYPa=0x%x)\n", g_acpi.slp_typa);
+    } else {
+        kprintf("[ACPI] poweroff via PM1 (PM1a=0x%x PM1b=0x%x SLP_TYPa=0x%x "
+                "SLP_TYPb=0x%x)\n",
+                g_acpi.pm1a_cnt_blk, g_acpi.pm1b_cnt_blk,
+                g_acpi.slp_typa, g_acpi.slp_typb);
     }
 
     /* UEFI 2.10 §8.5.1: EFI ResetSystem(EfiResetShutdown) is the
@@ -359,6 +361,13 @@ void acpi_shutdown(void) {
         kprintf("[ACPI] this firmware published no \\_S5, so there is no sleep "
                 "vector to write and none will be guessed\n");
     }
+
+    /* Before the S5 write, not after: either branch below can be the write that
+     * takes the machine's power away, and neither returns to flush anything.
+     * The window survives a warm reset, not a power cut (klib_logring.h), so
+     * what this buys is the account of a poweroff that DIDN'T work and was
+     * ended with the reset button. */
+    LogKeepFlush();
 
     /* Through acpi_pm1_request_sleep(), which is the kernel's ONLY resolver
      * of the PM1 control pair and its only writer.
@@ -430,25 +439,38 @@ void acpi_reboot(void) {
      * rung that never returns is a message nobody reads. ForceRelease always
      * comes first — g_serial_lock may still be held by an AP this same
      * shutdown parked mid-kprintf in halt_all_ap_cores(), and that core is
-     * never coming back to release it. */
+     * never coming back to release it.
+     *
+     * LogKeepFlush() rides beside every one of them for the same reason and a
+     * different medium: the wire carries the line to a cable nobody on a bench
+     * has, while the carry-over window is what the NEXT boot reads. Rung 1
+     * returning is now an ordinary event — Lifeline gives control back after a
+     * fault inside the firmware — so rungs 2..5 run, and why rung 1 failed must
+     * survive the reset rung 3 causes. A warm reset invalidates the caches
+     * without writing them back (Intel SDM Vol 3A §11.5.1), so a window written
+     * only through the ordinary write-back path loses exactly that tail. */
     if (efi_runtime_available()) {
         kprintf("[ACPI] Attempting EFI ResetSystem(WARM)...\n");
         efi_reset_system(EFI_RESET_WARM, EFI_STATUS_SUCCESS, 0, NULL);
         /* If the firmware refused (returns), fall through. */
+        LogKeepFlush();
         WireForceRelease();
         WireDrain();
     }
 
     kprintf("[ACPI] Attempting ACPI reset register...\n");
     attempt_acpi_reset();
+    LogKeepFlush();
     WireForceRelease();
     WireDrain();
 
     attempt_cf9_reset();
+    LogKeepFlush();
     WireForceRelease();
     WireDrain();
 
     attempt_keyboard_reset();
+    LogKeepFlush();
     WireForceRelease();
     WireDrain();
 

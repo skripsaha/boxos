@@ -93,6 +93,7 @@ static acpi_gpe_handler_t g_gpe_handlers[ACPI_MAX_GPES];
  * ============================================================ */
 #define GAS_AS_SYSTEM_MEMORY 0
 #define GAS_AS_SYSTEM_IO     1
+#define GAS_AS_PCI_CONFIG    2   /* ACPI 6.5 §5.2.3.2, Table 5.2 */
 
 static bool fadt_has_field(uint32_t len, size_t field_end) {
     return len >= field_end;
@@ -455,6 +456,7 @@ void acpi_gpe_unregister(uint16_t gpe) {
 typedef struct {
     bool               described; /* the FADT names this block at all */
     bool               present;   /* and this kernel can reach it */
+    bool               from_x;    /* which of the two descriptions won, §5.2.9 */
     uint8_t            space;     /* GAS_AS_SYSTEM_IO or GAS_AS_SYSTEM_MEMORY */
     uint16_t           port;      /* System I/O */
     volatile uint16_t *reg;       /* System Memory, mapped once */
@@ -548,6 +550,7 @@ static void pm1_control_release(AcpiPm1Control *r)
     if (r->space == GAS_AS_SYSTEM_MEMORY && r->reg)
         vmm_unmap_mmio(r->reg, sizeof(uint16_t));
     r->present = false;
+    r->from_x  = false;
     r->space   = GAS_AS_SYSTEM_IO;
     r->port    = 0;
     r->reg     = NULL;
@@ -559,6 +562,7 @@ static void pm1_control_locate(AcpiPm1Control *out, const acpi_gas_t *x,
 {
     out->described = false;
     out->present   = false;
+    out->from_x    = false;
     out->space     = GAS_AS_SYSTEM_IO;
     out->port      = 0;
     out->reg       = NULL;
@@ -583,6 +587,7 @@ static void pm1_control_locate(AcpiPm1Control *out, const acpi_gas_t *x,
     if (have_x) {
         if (pm1_control_bind(out, x->address_space, x->address, which,
                              "the X_ descriptor")) {
+            out->from_x = true;
             uint16_t probe = 0;
             if (pm1_control_read(out, &probe)) return;
 
@@ -607,8 +612,10 @@ static void pm1_control_locate(AcpiPm1Control *out, const acpi_gas_t *x,
 
     if (!have_legacy) return;        /* described, and out of reach */
 
-    (void)pm1_control_bind(out, GAS_AS_SYSTEM_IO, legacy, which,
-                           "this FADT's 32-bit field");
+    if (pm1_control_bind(out, GAS_AS_SYSTEM_IO, legacy, which,
+                         "this FADT's 32-bit field")) {
+        out->from_x = false;
+    }
 }
 
 static void acpi_pm1_control_locate(void)
@@ -625,6 +632,96 @@ static void acpi_pm1_control_locate(void)
                        g_acpi.pm1b_cnt_blk, flen,
                        offsetof(acpi_fadt_t, x_pm1b_control_block) +
                            sizeof(acpi_gas_t), "PM1b");
+}
+
+/* ============================================================
+ * RESET_REG and SLEEP_CONTROL_REG — found and mapped here, written from a
+ * path that must allocate nothing. See AcpiOneWayRegister in
+ * acpi_internal.h for why the mapping cannot happen at write time.
+ * ============================================================ */
+static AcpiOneWayRegister g_reset_register;
+static AcpiOneWayRegister g_sleep_control_register;
+
+const AcpiOneWayRegister *AcpiResetRegister(void)        { return &g_reset_register; }
+const AcpiOneWayRegister *AcpiSleepControlRegister(void) { return &g_sleep_control_register; }
+
+static void one_way_register_bind(AcpiOneWayRegister *out, const acpi_gas_t *gas,
+                                  uint32_t fadt_len, size_t field_end,
+                                  const char *which)
+{
+    out->present = fadt_has_field(fadt_len, field_end);
+    out->named   = false;
+    out->usable  = false;
+    out->space   = 0;
+    out->address = 0;
+    out->mapped  = NULL;
+
+    if (!out->present) return;          /* absent from a short FADT, not zero */
+    if (gas->address == 0) return;      /* the field exists and names nothing */
+
+    out->named   = true;
+    out->space   = gas->address_space;
+    out->address = gas->address;
+
+    switch (gas->address_space) {
+        case GAS_AS_SYSTEM_IO:
+            /* A GAS address is 64 bits and x86 I/O space is 16. Truncating
+             * would name a different port and then WRITE it — on the reboot
+             * path, where a wrong write is unrecoverable. */
+            if (gas->address > 0xFFFFu) {
+                kprintf("[ACPI] %s names I/O address 0x%lx, past the 16-bit "
+                        "I/O space this machine has — it will not be "
+                        "written\n", which, (unsigned long)gas->address);
+                return;
+            }
+            out->usable = true;
+            return;
+
+        case GAS_AS_SYSTEM_MEMORY: {
+            volatile void *va = vmm_map_mmio((uintptr_t)gas->address,
+                                             sizeof(uint8_t),
+                                             VMM_FLAGS_KERNEL_RW);
+            if (!va) {
+                kprintf("[ACPI] %s at 0x%lx is in System Memory and could not "
+                        "be mapped; the one-way path maps nothing, so it will "
+                        "not be written\n", which,
+                        (unsigned long)gas->address);
+                return;
+            }
+            out->mapped = (volatile uint8_t *)va;
+            out->usable = true;
+            return;
+        }
+
+        case GAS_AS_PCI_CONFIG:
+            /* Reached with the PCI config accessors, which address a window
+             * this kernel already holds — no mapping, no allocation. The BDF
+             * is decoded at write time (gas_pci_decode, acpi_shutdown.c). */
+            out->usable = true;
+            return;
+
+        default:
+            kprintf("[ACPI] %s lives in address space %u; ACPI 6.5 §4.8.3.6 "
+                    "and §4.8.3.7 put these registers in System I/O, System "
+                    "Memory or PCI config space\n", which, gas->address_space);
+            return;
+    }
+}
+
+static void AcpiOneWayRegistersLocate(void)
+{
+    if (!g_acpi.fadt) return;
+
+    uint32_t flen = g_acpi.fadt->header.length;
+
+    one_way_register_bind(&g_reset_register, &g_acpi.fadt->reset_reg, flen,
+                          offsetof(acpi_fadt_t, reset_reg) + sizeof(acpi_gas_t),
+                          "RESET_REG");
+    one_way_register_bind(&g_sleep_control_register,
+                          &g_acpi.fadt->sleep_control_reg, flen,
+                          offsetof(acpi_fadt_t, sleep_control_reg) +
+                              sizeof(acpi_gas_t),
+                          "SLEEP_CONTROL_REG");
 }
 
 /* What the pair says about SCI_EN. */
@@ -1291,6 +1388,11 @@ void acpi_sci_arm(void)
  * which a FADT legitimately describes no PM1 control block at all. */
 #define FADT_FLAG_HW_REDUCED_ACPI   (1u << 20)
 
+/* ACPI 6.5 §5.2.9, FADT Flags, RESET_REG_SUP: "If set, indicates the system
+ * supports system reset via the FADT RESET_REG." A described RESET_REG with
+ * this bit clear is a register the firmware says not to use. */
+#define FADT_FLAG_RESET_REG_SUP     (1u << 10)
+
 /* ACPI 6.5 §16.3.1: many real firmwares boot in PIC/SMI mode (SCI_EN=0).
  * The OS writes FADT.ACPI_ENABLE to FADT.SMI_CMD and the platform raises
  * SCI_EN when it has handed the machine over; no PM1 write takes effect
@@ -1420,6 +1522,133 @@ static void acpi_enable_mode(void) {
                                         : "span ran out");
 }
 
+/* ============================================================
+ * What THIS machine's FADT says — answered once, on boot, out loud.
+ *
+ * Every fact below decides something later: HW_REDUCED_ACPI picks which
+ * register S5 is written to, RESET_REG_SUP decides whether acpi_reboot()'s
+ * second rung is attempted at all, and the PM1 provenance says which of two
+ * descriptions of the same register this boot ended up using. It used to be
+ * printed only by acpi_shutdown(), i.e. only if an operator typed 'bye', so
+ * on a board that never got that far none of it was ever knowable.
+ *
+ * Two lines rather than one: the whole survey on one line is ~180 columns,
+ * which a text log keeps but an 80-column screen breaks mid-token, and a
+ * photograph of a broken token cannot be reassembled. Split at the seam
+ * between what the table IS (line 1) and what it DESCRIBES (line 2), each
+ * short enough to wrap at most once with whole tokens on each row.
+ *
+ * Every field at or past offset 116 is read through fadt_has_field(): a
+ * field a 116-byte ACPI 1.0b FADT does not carry prints as absent, never as
+ * zero. `flags` ends at 116, so it is on every FADT and needs no guard.
+ * ============================================================ */
+
+/* ACPI 6.5 Table 5.9 revision history: each FADT revision is defined over a
+ * minimum table length. These are ACPICA's ACPI_FADT_V*_SIZE. */
+static uint32_t fadt_length_for_revision(uint8_t rev)
+{
+    switch (rev) {
+        case 0: case 1: return 116;   /* ACPI 1.0, ends at Flags            */
+        case 2:         return 132;   /* ACPI 1.0b errata, ends at MinorRev */
+        case 3: case 4: return 244;   /* ACPI 2.0 / 3.0 / 4.0               */
+        case 5:         return 268;   /* ACPI 5.0, + SLEEP_{CTRL,STS}_REG   */
+        default:        return 276;   /* ACPI 6.0+, + HYPERVISOR_VENDOR_ID  */
+    }
+}
+
+static uint8_t fadt_revision_for_length(uint32_t len)
+{
+    if (len >= 276) return 6;
+    if (len >= 268) return 5;
+    if (len >= 244) return 3;
+    if (len >= 132) return 2;
+    return 1;
+}
+
+static void one_way_register_say(const AcpiOneWayRegister *r, char *buf,
+                                 size_t n)
+{
+    if (!r->present) { ksnprintf(buf, n, "absent"); return; }
+    if (!r->named)   { ksnprintf(buf, n, "none");   return; }
+
+    switch (r->space) {
+        case GAS_AS_SYSTEM_IO:
+            ksnprintf(buf, n, "io:0x%lx%s", (unsigned long)r->address,
+                      r->usable ? "" : "!");
+            return;
+        case GAS_AS_SYSTEM_MEMORY:
+            ksnprintf(buf, n, "mem:0x%lx%s", (unsigned long)r->address,
+                      r->mapped ? "(bound)" : "(UNMAPPED)");
+            return;
+        case GAS_AS_PCI_CONFIG:
+            ksnprintf(buf, n, "pci:0x%lx", (unsigned long)r->address);
+            return;
+        default:
+            ksnprintf(buf, n, "space%u:0x%lx", r->space,
+                      (unsigned long)r->address);
+            return;
+    }
+}
+
+static void pm1_control_say(const AcpiPm1Control *r, char *buf, size_t n)
+{
+    if (!r->described) { ksnprintf(buf, n, "none");        return; }
+    if (!r->present)   { ksnprintf(buf, n, "unreachable"); return; }
+
+    const char *whence = r->from_x ? "X_" : "legacy";
+    if (r->space == GAS_AS_SYSTEM_MEMORY) ksnprintf(buf, n, "mem(%s)", whence);
+    else ksnprintf(buf, n, "io:0x%x(%s)", r->port, whence);
+}
+
+static void AcpiFadtSurvey(void)
+{
+    if (!g_acpi.fadt) {
+        kprintf("[ACPI] no FADT: nothing on this machine's power path is "
+                "described, and neither S5 nor the reset register exists\n");
+        return;
+    }
+
+    const acpi_fadt_t *f = g_acpi.fadt;
+    uint32_t flen = f->header.length;
+    uint8_t  rev  = f->header.revision;
+    uint32_t want = fadt_length_for_revision(rev);
+    uint8_t  implied = fadt_revision_for_length(flen);
+
+    char shape[144];
+    if (flen < want) {
+        ksnprintf(shape, sizeof(shape),
+                  " — rev %u is defined over %u bytes and this table declares "
+                  "%u; fields it claims are not there", rev, want, flen);
+    } else if (implied > rev) {
+        ksnprintf(shape, sizeof(shape),
+                  " — %u bytes is the rev %u shape, not the rev %u this table "
+                  "claims", flen, implied, rev);
+    } else {
+        shape[0] = '\0';
+    }
+
+    if (fadt_has_field(flen, offsetof(acpi_fadt_t, minor_revision) + 1)) {
+        kprintf("[ACPI] FADT len=%u rev=%u minor=%u errata=%u%s\n",
+                flen, rev, ACPI_FADT_MINOR_VERSION(f),
+                ACPI_FADT_ERRATA_REVISION(f), shape);
+    } else {
+        kprintf("[ACPI] FADT len=%u rev=%u minor=absent errata=absent%s\n",
+                flen, rev, shape);
+    }
+
+    char reset[48], sleepc[48], pm1a[32], pm1b[32];
+    one_way_register_say(AcpiResetRegister(), reset, sizeof(reset));
+    one_way_register_say(AcpiSleepControlRegister(), sleepc, sizeof(sleepc));
+    pm1_control_say(&g_pm1a_control, pm1a, sizeof(pm1a));
+    pm1_control_say(&g_pm1b_control, pm1b, sizeof(pm1b));
+
+    kprintf("[ACPI] FADT hw_reduced=%u PM1a=%s PM1b=%s RESET=%s sup=%u "
+            "SLEEP_CONTROL=%s _S5=%s\n",
+            (f->flags & FADT_FLAG_HW_REDUCED_ACPI) ? 1u : 0u, pm1a, pm1b,
+            reset, (f->flags & FADT_FLAG_RESET_REG_SUP) ? 1u : 0u,
+            sleepc, g_acpi.s5_found ? "found" : "absent");
+}
+
 acpi_error_t acpi_init(void) {
     debug_printf("[ACPI] Initializing ACPI subsystem...\n");
 
@@ -1447,6 +1676,17 @@ acpi_error_t acpi_init(void) {
      * below reads SCI_EN out of them and acpi_shutdown() writes its S5 sleep
      * vector to them, so this has to stand before either. */
     acpi_pm1_control_locate();
+
+    /* RESET_REG and SLEEP_CONTROL_REG, resolved and (when they are in System
+     * Memory) mapped here — so the reboot and hardware-reduced poweroff paths
+     * write through a pointer that already exists instead of allocating after
+     * the APs have been frozen. */
+    AcpiOneWayRegistersLocate();
+
+    /* The FADT is resolved, \_S5 has been searched (acpi_parse_tables) and
+     * both register pairs are bound, so the survey has every fact it needs
+     * and prints before the ACPI-mode handoff can change anything. */
+    AcpiFadtSurvey();
 
     /* Switch the platform into ACPI mode if firmware booted us in
      * legacy/SMI mode. Must happen after FADT is captured but BEFORE

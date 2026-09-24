@@ -38,6 +38,32 @@ typedef struct {
 
 extern acpi_state_t g_acpi;
 
+/* ============================================================
+ * The two GAS registers the ONE-WAY path writes: RESET_REG (ACPI 6.5
+ * §4.8.3.6, every reboot) and SLEEP_CONTROL_REG (§4.8.3.7, poweroff on a
+ * hardware-reduced platform).
+ *
+ * Both are reached from system_halt.c's sequence — after cli, after
+ * halt_all_ap_cores() froze the APs wherever they stood, and after
+ * halt_stop_hardware(). Mapping a System Memory descriptor there takes
+ * kernel_mmio_lock and the address space's own lock and allocates page
+ * tables, any of which a frozen AP may hold forever. So both are resolved
+ * and mapped ONCE in acpi_init (AcpiOneWayRegistersLocate) and the one-way
+ * path only dereferences — the shape pm1_control_bind already gives a System
+ * Memory PM1 control register.
+ * ============================================================ */
+typedef struct {
+    bool              present;  /* the FADT is long enough to carry the field */
+    bool              named;    /* and the descriptor names a non-zero address */
+    bool              usable;   /* and it can be written without allocating */
+    uint8_t           space;    /* GAS address_space_id, ACPI 6.5 Table 5.2 */
+    uint64_t          address;  /* as firmware wrote it; never a kernel VA */
+    volatile uint8_t *mapped;   /* System Memory only, mapped once at init */
+} AcpiOneWayRegister;
+
+const AcpiOneWayRegister *AcpiResetRegister(void);
+const AcpiOneWayRegister *AcpiSleepControlRegister(void);
+
 /* RSDP discovery + table mapping. */
 acpi_rsdp_t* acpi_find_rsdp(void);
 acpi_error_t acpi_parse_tables(acpi_rsdp_t* rsdp);
