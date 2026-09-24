@@ -35,6 +35,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
+#include "buildplate_format.h"   /* the verdict this volume copies out of the kernel it packs */
 
 #include "tagfs_reserved.h"  /* shared reserved-tag vocabulary (-I src/include) */
 #include "volume_deed.h"     /* the title; types come from <stdint.h> above    */
@@ -198,6 +199,83 @@ static void seed_reserved_tags(void) {
 #define X(k) (void)intern_tag(k, NULL);
     TAGFS_RESERVED_KEYS(X)
 #undef X
+}
+
+/* ==================================================================
+ * THE SHIPMENT'S PEDIGREE
+ *
+ * The kernel carries a plate saying which tree built it. It cannot say
+ * anything about the other sixty-nine files on the volume, and a machine boots
+ * all seventy. So the volume gets its own stamp: one number over every file
+ * packed, in pack order, contents and all — and the kernel's verdict COPIED
+ * out of the plate as the kernel goes by, so the two halves cannot hold two
+ * opinions. See VolumePacked in volume_deed.h.
+ * ================================================================== */
+
+#define SHIPMENT_FNV_OFFSET 1469598103934665603ULL
+#define SHIPMENT_FNV_PRIME  1099511628211ULL
+
+static void shipment_fold(uint64_t* h, const void* p, size_t n) {
+    const unsigned char* b = (const unsigned char*)p;
+    for (size_t i = 0; i < n; i++) { *h ^= (uint64_t)b[i]; *h *= SHIPMENT_FNV_PRIME; }
+}
+
+/* Every file this volume is being given, in the order it is given them: the
+ * name as written on the command line, then the bytes. The name is in the
+ * number as well as the contents, because two files whose contents were
+ * swapped are a different shipment. */
+static uint64_t shipment_fingerprint(int file_count, char* argv[], int first) {
+    uint64_t h = SHIPMENT_FNV_OFFSET;
+    for (int i = 0; i < file_count; i++) {
+        const char* path = argv[first + i * 2];
+        shipment_fold(&h, path, strlen(path) + 1);
+        FILE* f = fopen(path, "rb");
+        if (!f) continue;            /* the pack itself will refuse it below */
+        static unsigned char buf[1 << 16];
+        size_t got;
+        while ((got = fread(buf, 1, sizeof(buf), f)) > 0) shipment_fold(&h, buf, got);
+        fclose(f);
+        shipment_fold(&h, "", 1);
+    }
+    return h;
+}
+
+/* Read the plate out of the kernel being packed. Found by its tag, exactly as
+ * tools/buildplate finds it, and required to appear exactly once — the same
+ * rule, because a kernel with two plates is a kernel nothing can vouch for. */
+static void kernel_plate(const char* path, uint64_t* tree, uint32_t* verdict) {
+    *tree = 0;
+    *verdict = BUILDPLATE_VERDICT_UNSTAMPED;
+    if (!path) return;
+
+    FILE* f = fopen(path, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n <= (long)sizeof(BuildPlate)) { fclose(f); return; }
+    unsigned char* img = (unsigned char*)malloc((size_t)n);
+    if (!img) { fclose(f); return; }
+    if (fread(img, 1, (size_t)n, f) != (size_t)n) { free(img); fclose(f); return; }
+    fclose(f);
+
+    static const char tag[BUILDPLATE_TAG_BYTES] = BUILDPLATE_TAG_INIT;
+    long at = -1; int seen = 0;
+    for (size_t i = 0; i + sizeof(BuildPlate) <= (size_t)n; i++) {
+        if (memcmp(img + i, tag, BUILDPLATE_TAG_BYTES) == 0) { seen++; if (at < 0) at = (long)i; }
+    }
+    if (seen == 1) {
+        BuildPlate p;
+        memcpy(&p, img + at, sizeof(p));
+        if (p.Magic == BUILDPLATE_MAGIC && p.Version == BUILDPLATE_VERSION) {
+            *tree = p.TreeFingerprint;
+            *verdict = p.Verdict;
+        }
+    } else if (seen > 1) {
+        printf("  WARNING: the kernel being packed carries %d plates; the volume "
+               "will say it knows nothing about which tree made it\n", seen);
+    }
+    free(img);
 }
 
 /* Extract filename stem: "kernel.bin" → "kernel", "files.elf" → "files" */
@@ -615,7 +693,8 @@ static int compute_layout(uint64_t ground_sectors, VolumeShape* out) {
 static int write_deed(FILE* disk, uint32_t role, uint64_t vsector,
                       const uint8_t uuid[16], const VolumeShape* shape,
                       const VolumeBoot* boot, uint32_t mpool_blocks,
-                      uint32_t ftable_blocks, uint32_t registry_blocks) {
+                      uint32_t ftable_blocks, uint32_t registry_blocks,
+                      const VolumePacked* packed) {
     uint8_t block[TAGFS_BLOCK_SIZE];
     memset(block, 0, sizeof(block));
 
@@ -676,7 +755,8 @@ static int write_deed(FILE* disk, uint32_t role, uint64_t vsector,
     if (DeedPenSay(&pen, VOLUME_STAMP_GEOMETRY, &geo,    sizeof(geo))    != 0 ||
         DeedPenSay(&pen, VOLUME_STAMP_LAYOUT,   &layout, sizeof(layout)) != 0 ||
         DeedPenSay(&pen, VOLUME_STAMP_BORN,     &born,   sizeof(born))   != 0 ||
-        DeedPenSay(&pen, VOLUME_STAMP_BOOT,     boot,    sizeof(*boot))  != 0) {
+        DeedPenSay(&pen, VOLUME_STAMP_BOOT,     boot,    sizeof(*boot))  != 0 ||
+        DeedPenSay(&pen, VOLUME_STAMP_PACKED,   packed,  sizeof(*packed)) != 0) {
         fprintf(stderr, "The stamps of this Deed do not fit the block it lives in\n");
         return -1;
     }
@@ -1437,15 +1517,41 @@ int main(int argc, char* argv[]) {
                "no kernel and no loader will boot from it\n");
     }
 
+    /* The shipment's own half of the pedigree, computed once and written into
+     * both copies of the Deed. The kernel's verdict rides along, copied out of
+     * the plate in the kernel file itself — so a volume packed over a harness
+     * injection says UNDER TEST at mount even if the kernel it carries never
+     * gets far enough to say it. */
+    VolumePacked packed;
+    memset(&packed, 0, sizeof(packed));
+    packed.packed_unix = (uint64_t)time(NULL);
+    packed.shipment    = shipment_fingerprint(file_count, argv, 2);
+    packed.file_count  = (uint32_t)file_count;
+    /* Through locals, because VolumePacked is packed and the address of a
+     * packed member is not necessarily aligned — the compiler is right to say
+     * so, and this tree builds with no warnings. */
+    uint64_t plate_tree = 0;
+    uint32_t plate_verdict = BUILDPLATE_VERDICT_UNSTAMPED;
+    kernel_plate(kernel_file_index >= 0 ? files[kernel_file_index].filepath : NULL,
+                 &plate_tree, &plate_verdict);
+    packed.tree    = plate_tree;
+    packed.verdict = plate_verdict;
+    printf("  Pedigree:      shipment %016llx over %d file(s), tree %016llx, %s\n",
+           (unsigned long long)packed.shipment, file_count,
+           (unsigned long long)packed.tree,
+           packed.verdict == BUILDPLATE_VERDICT_CLEAN      ? "clean" :
+           packed.verdict == BUILDPLATE_VERDICT_UNDER_TEST ? "UNDER TEST" :
+                                                            "the kernel carries no plate");
+
     if (write_deed(disk, VOLUME_DEED_ROLE_HEAD, 0,
                    volume_uuid, &shape, &boot, mpool_block_count,
-                   ftable_blocks, reg_blocks) != 0) {
+                   ftable_blocks, reg_blocks, &packed) != 0) {
         fprintf(stderr, "Failed to write the Deed\n");
         fclose(disk); return 1;
     }
     if (write_deed(disk, VOLUME_DEED_ROLE_TAIL, shape.tail_sector,
                    volume_uuid, &shape, &boot, mpool_block_count,
-                   ftable_blocks, reg_blocks) != 0) {
+                   ftable_blocks, reg_blocks, &packed) != 0) {
         fprintf(stderr, "Failed to write the far copy of the Deed\n");
         fclose(disk); return 1;
     }

@@ -3,6 +3,7 @@
 #include "boardroom.h"
 #include "klib.h"
 #include "error.h"
+#include "buildplate_format.h"   /* BUILDPLATE_VERDICT_* — one vocabulary for both halves */
 
 /*
  * How much of the ground a Deed occupies, and the eight bytes that say it is
@@ -304,7 +305,40 @@ void DeedDescribe(uint8_t seat, const DeedCopy *copy)
         char maker[17];
         memcpy(maker, born->maker, 16);
         maker[16] = '\0';
-        kprintf("[Deed] seat %u: made by %s\n", seat, maker);
+        kprintf("[Deed] seat %u: made by %s, born %llu\n", seat, maker,
+                (unsigned long long)born->created_unix);
+    }
+
+    /*
+     * ‼ AND WHAT WAS PUT ON IT, OUT OF WHAT.
+     *
+     * The kernel's own plate says which tree built THE KERNEL (its first line
+     * says it). This says it about the SHIPMENT — all seventy files — and it
+     * carries the kernel's verdict copied out of that plate as the kernel was
+     * packed. Which is why it is worth printing here even though the kernel has
+     * already spoken: this line comes off the MEDIUM, so a stick that is not
+     * the stick that was built says so, and it says so even when the kernel on
+     * it never reached its own first line.
+     *
+     * A volume made before this stamp existed simply has none, and the absence
+     * is said out loud rather than passed over — an operator comparing two
+     * sticks needs to know which of them cannot answer.
+     */
+    const VolumePacked *packed =
+        (const VolumePacked *)DeedStamp(copy, VOLUME_STAMP_PACKED, &bytes);
+    if (packed && bytes >= sizeof(*packed)) {
+        const char *word =
+            packed->verdict == BUILDPLATE_VERDICT_CLEAN      ? "clean" :
+            packed->verdict == BUILDPLATE_VERDICT_UNDER_TEST ? "‼ UNDER TEST" :
+                                                               "from a kernel with no plate";
+        kprintf("[Deed] seat %u: packed %llu — shipment %016llx over %u file(s), "
+                "tree %016llx, %s\n",
+                seat, (unsigned long long)packed->packed_unix,
+                (unsigned long long)packed->shipment, packed->file_count,
+                (unsigned long long)packed->tree, word);
+    } else {
+        kprintf("[Deed] seat %u: no pedigree stamp — this volume was packed "
+                "before the medium could say what it carries\n", seat);
     }
 }
 

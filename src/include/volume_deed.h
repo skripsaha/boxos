@@ -150,6 +150,7 @@ typedef struct __attribute__((packed)) {
 #define VOLUME_STAMP_LAYOUT    2    /* VolumeLayout   */
 #define VOLUME_STAMP_BORN      3    /* VolumeBorn     */
 #define VOLUME_STAMP_BOOT      4    /* VolumeBoot     */
+#define VOLUME_STAMP_PACKED    5    /* VolumePacked   */
 
 /*
  * What the volume was laid out for — as opposed to what it is sitting on.
@@ -239,5 +240,36 @@ typedef struct __attribute__((packed)) {
     uint64_t created_unix;
     char     maker[16];         /* NUL-padded, not necessarily terminated */
 } VolumeBorn;
+
+/*
+ * WHAT WAS PUT ON THIS VOLUME, AND OUT OF WHAT.
+ *
+ * The kernel carries a plate saying which tree it was built from (see
+ * buildplate_format.h) — but the kernel is one file of seventy on the medium,
+ * and it cannot vouch for the other sixty-nine. A machine boots a SHIPMENT: a
+ * kernel, a shell, the utilities, the test binaries. This stamp is the
+ * shipment's own half of the pedigree, and it is written by whoever packs the
+ * volume rather than by whoever compiles.
+ *
+ * `shipment` is one number over every file packed, in pack order, contents and
+ * all — so a volume carrying yesterday's display.elf beside today's kernel is
+ * a volume that says so. `tree` and `verdict` are COPIED OUT OF THE KERNEL'S
+ * OWN PLATE as it is packed, which is what ties the two halves together
+ * without inventing a second opinion: if the kernel says UNDER TEST, the
+ * volume says UNDER TEST, and the machine can print it at mount even when the
+ * kernel that would have said so never got far enough to speak.
+ *
+ * Values for `verdict` are BUILDPLATE_VERDICT_* from buildplate_format.h. The
+ * numbers are repeated there rather than included here, because this header is
+ * shared with an assembler and a host tool and chooses nothing for its
+ * includer.
+ */
+typedef struct __attribute__((packed)) {
+    uint64_t packed_unix;       /* when the volume was packed */
+    uint64_t shipment;          /* over every file packed, in pack order */
+    uint64_t tree;              /* the kernel plate's tree fingerprint */
+    uint32_t file_count;        /* how many files `shipment` spans */
+    uint32_t verdict;           /* BUILDPLATE_VERDICT_* */
+} VolumePacked;
 
 #endif /* VOLUME_DEED_H */

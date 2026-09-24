@@ -69,6 +69,7 @@
 #include "operations_deck.h"
 #include "hardware_deck.h"
 #include "system_deck.h"
+#include "buildplate.h"   /* BuildPlateSay — the first line of the log */
 
 /*
  * RFLAGS as the loader left them, captured by _start before its very first
@@ -86,6 +87,26 @@ void kernel_main(void)
     LogKeepInit();
 
     VideoInit();
+
+    /*
+     * ‼ THE FIRST THING THIS KERNEL SAYS ABOUT ITSELF, AND IT SAYS WHAT IT WAS
+     * MADE FROM.
+     *
+     * The slot is exact and there is only one. After VideoInit, so the line is
+     * on the glass of a machine with no cable; before serial_init, so it is in
+     * the log ring before the UART complains about not being there — the ring
+     * keeps it either way and the Wire drains it the moment it exists.
+     *
+     * Why a kernel says this at all: an image built over a test-harness
+     * injection was flashed to a stick and booted on the owner's laptop on
+     * 2026-09-22. It printed 2274 lines, 1228 of them from code that was no
+     * longer in the tree by the time anybody read them, and nothing in the log
+     * could say so. Every timing conclusion from that run had to be thrown
+     * away. A run is evidence about a kernel only if the log can name the
+     * kernel; see src/include/buildplate_format.h.
+     */
+    BuildPlateSay();
+
     serial_init();
 
     kprintf(" Cabin (0x%lx Info, 0x%lx PocketRing, 0x%lx ResultRing, 0x%lx Code)\n",

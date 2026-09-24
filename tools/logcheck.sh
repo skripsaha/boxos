@@ -30,6 +30,32 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); }
 chk()  { if [ "$1" = 0 ]; then ok "$2"; else bad "$2"; fi }
 
+# ‼ EVERY `make` IN THIS FILE CARRIES HARNESS=on, AND IT IS A WRAPPER.
+#
+# The pack gate refuses to stamp an image built from a tree that carries an
+# injection — that refusal is the point of it, because an unmarked probed image
+# is what reached a board on 2026-09-22 and printed 1228 lines nobody could
+# account for. This script's job is to build exactly such images, so it says who
+# is asking and the plate stamps them UNDER TEST instead of clean.
+#
+# A WRAPPER rather than a key at each call site, and that was measured the hard
+# way: `build()` was given the key and `boot()` was not. boot() runs
+# `make run-bg`, run-bg depends on the image, and with the tree mutated the
+# image was out of date — so make rebuilt, the gate refused, QEMU never
+# started, and the scenario then judged a STALE serial.log. Eighteen gates
+# "passed" on evidence from the previous run. One wrapper cannot be
+# half-applied, and a command-line variable is passed down to every sub-make
+# by GNU make itself.
+#
+# NOT an exported HARNESS=on: this script already uses that name for its own
+# harness-failure counter three hundred lines below, and exporting it would
+# hand make the counter instead of the key.
+#
+# It changes no compiler flag and no byte of source: a clean tree built through
+# here is stamped exactly as `make` alone would stamp it. The verdict comes from
+# what the tree CONTAINS, never from this key.
+make() { command make HARNESS=on "$@"; }
+
 build() {
     make >"$SCRATCH/build.log" 2>&1
     if [ $? -ne 0 ]; then
@@ -145,6 +171,28 @@ mutate_product() {
 # more than one edit to one file needs.
 mut_done() {
     local f="$1" marker="$2" want="${3:-}" got
+    # ‼ AND THE MARKER MUST NAME THIS HARNESS.
+    #
+    # tools/buildplate reads the tree before it stamps an image, and the way it
+    # knows the tree is mutated is that a mutated file SAYS SO: every marker
+    # here carries the words "logcheck injection" or "logcheck mutation", and
+    # nothing in a clean src/ does. That is what lets the plate stamp an image
+    # UNDER TEST instead of letting it pass as a shipped build — the flaw that
+    # cost the 2026-09-22 board run.
+    #
+    # It was a convention across forty-eight call sites. A convention holds
+    # until somebody adds the forty-ninth, so it is a rule now: a marker that
+    # does not name logcheck is refused here, where the author is looking.
+    case "$marker" in
+        *"logcheck injection"*|*"logcheck mutation"*) ;;
+        *) echo "mutate: the marker '$marker' does not say 'logcheck injection'"
+           echo "        or 'logcheck mutation'. tools/buildplate reads the tree"
+           echo "        for exactly those words to decide whether an image is"
+           echo "        UNDER TEST, so a mutation that does not say what it is"
+           echo "        can be packed and flashed as though it were a shipped"
+           echo "        build. Name it and try again."
+           exit 1 ;;
+    esac
     if [ -n "$want" ]; then
         got=$(grep -c "$marker" "$f")
         [ "$got" = "$want" ] || {

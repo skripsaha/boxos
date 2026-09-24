@@ -22,6 +22,10 @@
 // Nameplate — the in-image "address -> name" table (nameplate_format.h)
 #define NAMEPLATE_MAGIC        0x4E504C54  // "NPLT"
 
+// BuildPlate — what the image was made from (buildplate_format.h). Riveted by
+// tools/buildplate after the kernel is linked, said in the kernel's first line.
+#define BUILDPLATE_MAGIC       0x42504C54  // "BPLT"
+
 // Kernel boot
 #define KERNEL_HEADER_MAGIC    0x4E52454B  // "KERN"
 #define KERNEL_HEADER_MAGIC_HI 0x4C45      // "EL"

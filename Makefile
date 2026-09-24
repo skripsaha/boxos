@@ -547,6 +547,38 @@ ifeq ($(WEDGETEST),on)
 CFLAGS += -DCONFIG_BMIDE_WEDGE_SELFTEST=1
 endif
 WEDGETEST_MARK = $(BUILDDIR)/.wedgetest.$(if $(filter on,$(WEDGETEST)),on,off)
+
+# ‼ THE ONE KEY THAT MUST NOT REACH THE COMPILER. `make HARNESS=on` says who is
+# asking — the test harness, which has the tree deliberately mutated — and it
+# lets the pack gate stamp the image UNDER TEST instead of refusing it. It adds
+# no -D and so has no marker: a key that changed CFLAGS would change the tree
+# fingerprint the plate carries, and the plate would then be answering a
+# question about itself.
+HARNESS ?= off
+
+# THE BUILD KEYS, AS GIVEN, FOR THE PLATE TO CARRY.
+#
+# Only what is NOT at its default is named, and the plate says "all defaults"
+# when nothing is. Spelling out all fourteen would take about two hundred
+# characters of the plate's two hundred and eight, and a key list that has to be
+# truncated is a key list that lies — the tool refuses a long one rather than
+# cutting it. Two keys default to ON, so it is their OFF that is worth saying.
+BUILD_KEYS_SET := $(strip \
+  $(if $(filter on,$(DEBUG)),DEBUG=on,) \
+  $(if $(filter on,$(BRINGUP)),BRINGUP=on,) \
+  $(if $(filter on,$(WEDGETEST)),WEDGETEST=on,) \
+  $(if $(filter on,$(VOLUME_TESTS)),VOLUME_TESTS=on,) \
+  $(if $(filter on,$(PRINTTOFILE)),PRINTTOFILE=on,) \
+  $(if $(filter on,$(USBRECOVER)),USBRECOVER=on,) \
+  $(if $(filter on,$(CTRLGIVEUP)),CTRLGIVEUP=on,) \
+  $(if $(filter on,$(INTX)),INTX=on,) \
+  $(if $(filter on,$(EARLYIRQ)),EARLYIRQ=on,) \
+  $(if $(filter on,$(MOUNTFAIL)),MOUNTFAIL=on,) \
+  $(if $(filter on,$(HOLDGROUND)),HOLDGROUND=on,) \
+  $(if $(filter on,$(RETURNFAIL)),RETURNFAIL=on,) \
+  $(if $(filter off,$(NOEXEC)),NOEXEC=off,) \
+  $(if $(filter off,$(IOMMU)),IOMMU=off,))
+BUILD_KEYS := $(if $(BUILD_KEYS_SET),$(BUILD_KEYS_SET),all defaults)
 # LDFLAGS — kernel link
 #   -z max-page-size=0x1000    align segments to page (kernel mappings)
 #   -z noexecstack             explicit no-exec stack (default but
@@ -1051,12 +1083,23 @@ $(NAMEPLATE_TOOL): tools/nameplate.c src/include/nameplate_format.h
 	@echo "Compiling Nameplate tool..."
 	@$(CC_HOST) -O2 -Wall -Wextra -Isrc/include -o $@.$$$$ $< && mv -f $@.$$$$ $@
 
+# ---- The BuildPlate tool ---------------------------------------------------
+# Computes the tree's fingerprint, rivets it into the flat kernel, and refuses
+# to stamp a tree that carries a harness injection unless HARNESS=on says so
+# deliberately. See src/include/buildplate_format.h for why the image has to
+# carry this at all.
+BUILDPLATE_TOOL = tools/buildplate
+
+$(BUILDPLATE_TOOL): tools/buildplate.c src/include/buildplate_format.h src/include/boxos_magic.h
+	@echo "Compiling BuildPlate tool..."
+	@$(CC_HOST) -O2 -Wall -Wextra -Isrc/include -o $@.$$$$ $< && mv -f $@.$$$$ $@
+
 $(KERNEL_NP_OBJ): $(KERNEL_LINK_IN) $(NAMEPLATE_TOOL) $(ENTRYDIR)/linker.ld
 	@echo "Nameplate pass 1 (kernel)..."
 	@$(LD) -g -nostdlib -T $(ENTRYDIR)/linker.ld -o $(KERNEL_PASS1) $(KERNEL_LINK_IN)
 	@$(NAMEPLATE_TOOL) build $(KERNEL_PASS1) $@
 
-$(KERNEL_BIN): $(KERNEL_LINK_IN) $(KERNEL_NP_OBJ)
+$(KERNEL_BIN): $(KERNEL_LINK_IN) $(KERNEL_NP_OBJ) $(BUILDPLATE_TOOL)
 	@echo "Linking kernel (raw binary)..."
 	@$(LD) $(LDFLAGS) -o $@ $(KERNEL_LINK_IN) $(KERNEL_NP_OBJ)
 	@echo "Validating kernel size..."
@@ -1072,6 +1115,9 @@ $(KERNEL_BIN): $(KERNEL_LINK_IN) $(KERNEL_NP_OBJ)
 		REMAINING=$$((MAX_SIZE - KERNEL_SIZE)); \
 		echo "  Remaining space: $$REMAINING bytes"; \
 	fi
+	@echo "Riveting the BuildPlate..."
+	@$(BUILDPLATE_TOOL) stamp $@ --root . --keys "$(BUILD_KEYS)" \
+		$(if $(filter on,$(HARNESS)),--allow-harness,)
 
 $(KERNEL_ELF): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
 	@echo "Linking kernel ELF (with embedded shell binary)..."
@@ -1574,12 +1620,33 @@ run-bg: $(IMAGE)
 # the one thing the person flashing it had built it for. A flash command that
 # rebuilds is a flash command that can hand you something other than what you
 # built.
-usb:
+usb: $(BUILDPLATE_TOOL)
 	@if [ ! -f "$(IMAGE)" ]; then \
 		echo "ERROR: $(IMAGE) does not exist — run 'make' first"; \
 		echo "  (and 'make PRINTTOFILE=on' if you want the machine to keep its log)"; \
 		exit 1; \
 	fi
+	@# ‼ AND IT IS THE IMAGE THIS TREE MADE, OR IT IS NOT FLASHED.
+	@#
+	@# The cure for "do not rebuild" is not "do not look". This target still
+	@# never builds — it reads the plate inside the image and recomputes the
+	@# tree's fingerprint here and now, and refuses on three answers: no plate,
+	@# a plate that does not match the tree, or a plate that says UNDER TEST.
+	@#
+	@# The second of those is the 2026-09-22 run exactly: the harness had put
+	@# its injected source back, so the TREE was correct and the IMAGE was not,
+	@# and nothing anywhere could say so. The third is the same run before the
+	@# put-back. An UNDER TEST image can still be flashed on purpose, with
+	@# FLASH_UNDER_TEST=on, because sometimes that is the measurement — but it
+	@# is never flashed by accident.
+	@$(BUILDPLATE_TOOL) verify $(IMAGE) --root . ; \
+		rc=$$?; \
+		if [ $$rc = 4 ] && [ "$(FLASH_UNDER_TEST)" = "on" ]; then \
+			echo "  flashing an UNDER TEST image because FLASH_UNDER_TEST=on says so"; \
+		elif [ $$rc != 0 ]; then \
+			echo "REFUSED: see above. Run 'make' and try again"; \
+			exit 1; \
+		fi
 	@if [ -z "$(DEV)" ]; then \
 		echo "ERROR: specify target device, e.g. make usb DEV=/dev/disk4"; \
 		echo "  macOS: diskutil list  (look for the USB stick — never disk0!)"; \
