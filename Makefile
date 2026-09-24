@@ -742,7 +742,7 @@ UEFI_CFLAGS_CLANG = -ffreestanding -nostdlib -nostdinc \
 # even when 'clang' is in PATH.  Only enable the clang path when lld-link exists.
 CLANG_AVAILABLE := $(shell command -v lld-link 2>/dev/null)
 
-.PHONY: all clean run run-bg run-stop bochs-bg bochs-stop debug info check-deps install-deps uefi usb check-endbr64
+.PHONY: all clean run run-bg run-stop bochs-bg bochs-stop debug info check-deps install-deps uefi usb check-endbr64 logs logs-list
 
 # A recipe that fails leaves its target on disk otherwise, and the next make
 # takes that half-written file for a finished one. Measured on a fresh clone:
@@ -1724,6 +1724,31 @@ usb: $(BUILDPLATE_TOOL)
 	@echo "       3) Disable Secure Boot (we don't sign yet)"
 	@echo "       4) Enable Legacy/CSM boot OR pick the stick in UEFI menu"
 	@echo "       5) Boot from USB"
+
+# ---------------------------------------------------------------------------
+# What the machine wrote down, off the stick and onto this desk.
+#
+# `make logs`            the stick finds itself; watch.log lands in build/board/
+# `make logs FILE=x.log` some other file off the same volume
+# `make logs-list`       what is on the stick at all
+#
+# No device to remember and no sudo, once you are in the 'operator' group —
+# the tool's own refusal says how to join it, once. Reading a raw device is
+# all this needs; `make usb` still asks for sudo, because WRITING one is a
+# different question and should stay a deliberate act.
+# ---------------------------------------------------------------------------
+BOARD_DIR ?= $(BUILDDIR)/board
+STICK     ?= auto
+FILE      ?= watch.log
+
+.PHONY: logs logs-list
+logs:
+	@mkdir -p $(BOARD_DIR)
+	@python3 tools/volume-read.py $(STICK) get $(FILE) -o $(BOARD_DIR)/$(FILE)
+	@echo "[logs] $(BOARD_DIR)/$(FILE) — $$(wc -c < $(BOARD_DIR)/$(FILE) | tr -d ' ') bytes, $$(wc -l < $(BOARD_DIR)/$(FILE) | tr -d ' ') lines"
+
+logs-list:
+	@python3 tools/volume-read.py $(STICK) list
 
 run-stop:
 	@if [ -f $(BUILDDIR)/qemu.pid ]; then \

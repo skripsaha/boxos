@@ -90,6 +90,97 @@ def has_deed(medium, lba):
         return False
 
 
+def candidate_devices():
+    """Raw devices that could carry a BoxOS volume, system disk excluded.
+
+    The system disk is excluded by name, not by hope: this is a read-only
+    tool, but a scan that opens the disk the host is running from is a scan
+    that will one day be copied into something that is not."""
+    import glob
+    import subprocess
+
+    out = []
+    if sys.platform == "darwin":
+        # diskutil knows which disks are external; asking it is cheaper and
+        # narrower than opening every raw device to find out.
+        try:
+            listing = subprocess.run(
+                ["diskutil", "list", "-plist", "external", "physical"],
+                capture_output=True, text=True, timeout=10).stdout
+            import plistlib
+            plist = plistlib.loads(listing.encode())
+            for disk in plist.get("AllDisks", []):
+                out.append("/dev/r" + disk)
+        except Exception:
+            out = []
+        if not out:
+            out = [d.replace("/dev/disk", "/dev/rdisk")
+                   for d in sorted(glob.glob("/dev/disk[1-9]*"))]
+    else:
+        for pat in ("/dev/sd[b-z]", "/dev/sd[b-z][0-9]*",
+                    "/dev/nvme[1-9]n[0-9]*", "/dev/mmcblk[1-9]*"):
+            out.extend(sorted(glob.glob(pat)))
+
+    return [d for d in out
+            if not d.startswith(("/dev/rdisk0", "/dev/disk0",
+                                 "/dev/sda", "/dev/nvme0n1"))]
+
+
+def find_the_stick():
+    """The one medium here that carries a BoxOS volume.
+
+    Returns (path, Medium). Refuses on two answers rather than guessing:
+    none found, or more than one — because picking one of two sticks by
+    enumeration order is how the wrong prog run gets analysed."""
+    found, denied = [], []
+    for dev in candidate_devices():
+        try:
+            m = Medium(dev)
+        except PermissionError:
+            denied.append(dev)
+            continue
+        except OSError:
+            continue
+        try:
+            find_ground(m, None)
+            found.append((dev, m))
+        except Exception:
+            m.f.close()
+
+    if len(found) == 1:
+        return found[0]
+    for _d, m in found:
+        m.f.close()
+    if len(found) > 1:
+        sys.exit("more than one BoxOS volume is plugged in: "
+                 + ", ".join(d for d, _m in found)
+                 + "\nname the one you mean instead of 'auto'.")
+    if denied:
+        sys.exit(permission_advice(denied[0]))
+    sys.exit("no BoxOS volume found on any external medium.\n"
+             "is the stick plugged in? `diskutil list` / `lsblk` will say.")
+
+
+def permission_advice(dev):
+    """The refusal that names its own cure, once, instead of 'use sudo'."""
+    if sys.platform != "darwin":
+        return (f"cannot open {dev}: permission denied.\n"
+                f"add yourself to the 'disk' group, then log in again:\n"
+                f"  sudo usermod -aG disk $USER")
+    return (f"cannot open {dev}: permission denied.\n"
+            f"\n"
+            f"macOS keeps raw devices as root:operator, mode 0640 — readable\n"
+            f"by the 'operator' group and nobody else. Join it ONCE and this\n"
+            f"tool never needs sudo again:\n"
+            f"\n"
+            f"  sudo dseditgroup -o edit -a $(whoami) -t user operator\n"
+            f"\n"
+            f"Group membership is bound at login, so log out and back in (or\n"
+            f"reboot) for it to take. 0640 has no write bit for the group, so\n"
+            f"this grants READING raw disks and nothing else — `make usb`\n"
+            f"still asks for sudo, because writing is a different question.")
+
+
 def find_ground(medium, forced_start):
     """Where the BoxOS volume begins, in 512-byte sectors from the medium's 0.
 
@@ -338,7 +429,9 @@ class Volume:
 def main():
     ap = argparse.ArgumentParser(
         description="Read a file out of a BoxOS volume. Read only.")
-    ap.add_argument("device", help="raw device or image file")
+    ap.add_argument("device",
+                    help="raw device, image file, or 'auto' to find the "
+                         "one BoxOS stick that is plugged in")
     ap.add_argument("command", choices=["list", "get", "deed"])
     ap.add_argument("name", nargs="?", help="file to get")
     ap.add_argument("-o", "--out", help="write to this path instead of stdout")
@@ -347,12 +440,17 @@ def main():
                          "partition table cannot be trusted")
     args = ap.parse_args()
 
-    try:
-        medium = Medium(args.device)
-    except OSError as e:
-        sys.exit(f"cannot open {args.device}: {e}\n"
-                 f"on macOS a raw device usually needs sudo, and /dev/rdiskN "
-                 f"rather than /dev/diskN")
+    if args.device == "auto":
+        args.device, medium = find_the_stick()
+        print(f"[volume-read] {args.device}", file=sys.stderr)
+    else:
+        try:
+            medium = Medium(args.device)
+        except PermissionError:
+            sys.exit(permission_advice(args.device))
+        except OSError as e:
+            sys.exit(f"cannot open {args.device}: {e}\n"
+                     f"on macOS a raw device is /dev/rdiskN, not /dev/diskN")
 
     try:
         ground, how = find_ground(medium, args.start)
