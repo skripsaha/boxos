@@ -132,7 +132,7 @@ def find_the_stick():
     Returns (path, Medium). Refuses on two answers rather than guessing:
     none found, or more than one — because picking one of two sticks by
     enumeration order is how the wrong prog run gets analysed."""
-    found, denied = [], []
+    seen, denied = {}, []
     for dev in candidate_devices():
         try:
             m = Medium(dev)
@@ -142,11 +142,28 @@ def find_the_stick():
         except OSError:
             continue
         try:
-            find_ground(m, None)
-            found.append((dev, m))
+            ground, _how = find_ground(m, None)
+            uuid = read_deed(m, ground)["uuid"]
         except Exception:
             m.f.close()
+            continue
 
+        # ‼ COUNT VOLUMES, NOT PATHS. A stick answers to its whole disk AND
+        # to the partition inside it (/dev/rdisk5 and /dev/rdisk5s1), and the
+        # Deed found through either is the same Deed — one volume seen twice,
+        # not two volumes. The volume's own uuid is what says so; the paths
+        # cannot. Whole-disk wins the tie because its sector 0 is the one
+        # every other tool here counts from.
+        prev = seen.get(uuid)
+        if prev is None:
+            seen[uuid] = (dev, m)
+        elif len(dev) < len(prev[0]):
+            prev[1].f.close()
+            seen[uuid] = (dev, m)
+        else:
+            m.f.close()
+
+    found = list(seen.values())
     if len(found) == 1:
         return found[0]
     for _d, m in found:
@@ -175,8 +192,9 @@ def permission_advice(dev):
             f"\n"
             f"  sudo dseditgroup -o edit -a $(whoami) -t user operator\n"
             f"\n"
-            f"Group membership is bound at login, so log out and back in (or\n"
-            f"reboot) for it to take. 0640 has no write bit for the group, so\n"
+            f"Measured on this desk: it takes for new processes at once, no\n"
+            f"logout needed — but if this still refuses, log in again. 0640\n"
+            f"has no write bit for the group, so\n"
             f"this grants READING raw disks and nothing else — `make usb`\n"
             f"still asks for sudo, because writing is a different question.")
 
