@@ -548,6 +548,20 @@ CFLAGS += -DCONFIG_BMIDE_WEDGE_SELFTEST=1
 endif
 WEDGETEST_MARK = $(BUILDDIR)/.wedgetest.$(if $(filter on,$(WEDGETEST)),on,off)
 
+# The silence road of USB enumeration, made reachable on the stand.
+#
+# Under emulation every control request is answered at once, so the road this
+# driver spent eight seconds of every real boot on cannot be produced at all —
+# which is why its defect survived eight green scenarios. `make ENUMSILENCE=on`
+# withholds the doorbell for ONE descriptor request, once, on the first device
+# that asks: the controller then never starts the transfer, exactly as both
+# boards reported. Never in a shipped build.
+ENUMSILENCE ?= off
+ifeq ($(ENUMSILENCE),on)
+CFLAGS += -DCONFIG_XHCI_ENUM_SILENCE_PROOF=1
+endif
+ENUMSILENCE_MARK = $(BUILDDIR)/.enumsilence.$(if $(filter on,$(ENUMSILENCE)),on,off)
+
 # ‼ THE ONE KEY THAT MUST NOT REACH THE COMPILER. `make HARNESS=on` says who is
 # asking — the test harness, which has the tree deliberately mutated — and it
 # lets the pack gate stamp the image UNDER TEST instead of refusing it. It adds
@@ -576,6 +590,7 @@ BUILD_KEYS_SET := $(strip \
   $(if $(filter on,$(MOUNTFAIL)),MOUNTFAIL=on,) \
   $(if $(filter on,$(HOLDGROUND)),HOLDGROUND=on,) \
   $(if $(filter on,$(RETURNFAIL)),RETURNFAIL=on,) \
+  $(if $(filter on,$(ENUMSILENCE)),ENUMSILENCE=on,) \
   $(if $(filter off,$(NOEXEC)),NOEXEC=off,) \
   $(if $(filter off,$(IOMMU)),IOMMU=off,))
 BUILD_KEYS := $(if $(BUILD_KEYS_SET),$(BUILD_KEYS_SET),all defaults)
@@ -877,6 +892,10 @@ $(WEDGETEST_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.wedgetest.*
 	@touch $@
 
+$(ENUMSILENCE_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.enumsilence.*
+	@touch $@
+
 # EVERY KEY THAT REACHES THE COMPILER, NAMED ONCE.
 #
 # ‼ This list used to be written out twice — in the USB object rule and in the
@@ -893,7 +912,7 @@ BUILD_KEY_MARKS := $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) \
                    $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) \
                    $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) \
                    $(IOMMU_MARK) $(INTX_MARK) $(DEBUG_MARK) $(BRINGUP_MARK) \
-                   $(WEDGETEST_MARK)
+                   $(WEDGETEST_MARK) $(ENUMSILENCE_MARK)
 
 $(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(BUILD_KEY_MARKS) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."

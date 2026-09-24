@@ -179,12 +179,17 @@ static void xhci_scan_ports(xhci_controller_t* ctrl)
              * — a port whose four attempts all failed holds no device record,
              * so a teardown-driven reset could never reach it.
              */
-            if (ctrl->enum_attempts[port] > XHCI_ENUM_ATTEMPTS) {
+            if (ctrl->enum_attempts[port] == XHCI_PORT_GIVEN_UP) {
                 kprintf("[xHCI %s] port %u: it had been given up on, and what "
                         "was in it has gone — it will be tried again\n",
                         ctrl->name, port);
             }
-            ctrl->enum_attempts[port] = 0;
+            /* The window goes with the count: whatever was being waited for has
+             * left the socket, so the next device starts with a whole one and
+             * with no memory of how far its predecessor got. */
+            ctrl->enum_attempts[port]     = 0;
+            ctrl->port_window_since[port] = 0;
+            ctrl->port_high_water[port]   = 0;
 
             xhci_device_slot_t* slot = xhci_get_device_slot_by_port(ctrl, port);
             if (slot) {

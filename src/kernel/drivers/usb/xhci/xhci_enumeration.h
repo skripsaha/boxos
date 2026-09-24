@@ -229,15 +229,42 @@ struct xhci_device_slot {
      * How many Transfer Events the controller has actually raised for this
      * device's control pipe.
      *
-     * ‼ The number that cannot be moved by this driver, which is the whole
-     * point of it. The ring's dequeue index can: xhci_ring_abandon sets it
-     * equal to the enqueue index on every repair, so a report that printed it
-     * as "what the controller has answered" printed the driver's own arm
-     * moving. This counts events and nothing else, so zero here with a full
-     * enqueue index is the controller having answered nothing — which is a
-     * completely different fault from the one that arithmetic suggested.
+     * ‼ EVERY Transfer Event this control pipe has raised — INCLUDING the ones
+     * this driver provoked.
+     *
+     * It is still worth counting, and it is better than the ring's dequeue
+     * index, which xhci_ring_abandon sets equal to the enqueue index on every
+     * repair: this at least counts events rather than the driver's own arm
+     * moving. But the sentence that used to stand here — "the number that
+     * cannot be moved by this driver" — was false, and the log proved it on
+     * two machines: the count climbed 0, 1, 3 across three rungs of a repair
+     * ladder while the device answered nothing at all. Each climb was our own
+     * Stop Endpoint being answered.
+     *
+     * So the two are kept apart. This one is "how much has happened on this
+     * pipe"; `ep0_answers` below is "how much of it came from the device".
      */
     uint32_t ep0_events;
+
+    /*
+     * ‼ AND OF THOSE, THE ONES THE DEVICE ITSELF CAUSED.
+     *
+     * `ep0_events` above counts every Transfer Event on the control pipe, and
+     * that includes the ones this driver provokes: a Stop Endpoint posted by
+     * the repair completes the transfer it took back, and the controller
+     * answers with a Stopped event. So a device that has said NOTHING still
+     * makes that number climb, one per repair — measured on both machines of
+     * the fleet, where it went 0, 1, 3 across the rungs of a ladder while the
+     * device never answered once.
+     *
+     * This counts only what came back for a reason other than our own Stop.
+     * Zero here means the pipe has never spoken, whatever else has happened to
+     * it — which is the one fact worth gating a remedy on, because the cheap
+     * remedy (take the transfer back and ask again) can only help a pipe that
+     * was answering and stopped. On a pipe that never answered it is six
+     * seconds of asking a wall.
+     */
+    uint32_t ep0_answers;
 
     /* Where to carry on from once a halted EP0 has been cleared. A device is
      * allowed to refuse an optional request, and refusing it halts the pipe;
@@ -524,10 +551,23 @@ const char* xhci_enum_state_name(uint8_t state);
 /* How many times a step may be retried before the device is let go. */
 #define XHCI_STEP_RETRIES 3
 
-/* How many times a root port is tried again after a device on it failed to
- * come up. The first attempt is not counted, so this is three retries after
- * the original try. */
-#define XHCI_ENUM_ATTEMPTS 3
+/*
+ * How long a port keeps being given fresh attempts while the device in it is
+ * present and silent. See port_window_since in xhci.h for why this is a time
+ * and not a count of tries, and why it is honestly a number.
+ *
+ * Fifteen seconds: the flash drive that provoked this answered at about eight
+ * on both machines of the fleet, and the same figure already stands in this
+ * driver as XHCI_RETIRE_PATIENCE_MS for the neighbouring question of how long
+ * a slot is held for its visitors. One number for two kindred meanings beats
+ * two numbers chosen separately.
+ */
+#define XHCI_PORT_PATIENCE_MS 15000
+
+/* The attempt count is also the latch that says this port has been given up
+ * on, which is what lets an unplug say "it will be tried again". A count can
+ * never legitimately reach this. */
+#define XHCI_PORT_GIVEN_UP    0xFFu
 
 /*
  * Clear a halted control pipe and carry on at `resume_at`.

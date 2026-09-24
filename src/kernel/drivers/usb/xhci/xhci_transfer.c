@@ -486,6 +486,40 @@ int xhci_control_transfer(xhci_controller_t* ctrl,
         return -1;
     }
 
+#if CONFIG_XHCI_ENUM_SILENCE_PROOF
+    /*
+     * ── the one proof that a pipe which never spoke is answered by the port ──
+     *
+     * The eight seconds this driver spent on every boot of the owner's machines
+     * happened on a road emulation never takes: under QEMU every control
+     * request is answered immediately, so a device that goes SILENT at its
+     * first descriptor request cannot be produced at all. The fix for it was
+     * therefore unprovable on the stand — which is how it stayed broken while
+     * eight green scenarios passed.
+     *
+     * So the silence is made, once, at a moment defined by a FACT rather than a
+     * clock: the first device to reach the descriptor-header step. The stages
+     * really are on the ring and the doorbell is simply not rung, which is a
+     * faithful "the controller never started the TD" — the exact state both
+     * boards reported, with the endpoint Running, the dequeue pointer on the
+     * first TRB, and no event ever raised.
+     *
+     * The injection is spent after one use, so the retry that follows is a real
+     * one: the port is reset, the device is asked again, and this time it
+     * answers. A scenario can then check the whole shape — one give-up, no
+     * ladder of four, and a device that comes up on the fresh port.
+     */
+    static bool g_enum_silence_spent = false;
+    if (!g_enum_silence_spent &&
+        slot->state == ENUM_STATE_WAIT_GET_DESC_HEADER) {
+        g_enum_silence_spent = true;
+        kprintf("[xHCI %s] port %u: ENUMSILENCE — the doorbell for the first "
+                "descriptor request is deliberately not rung; this pipe will "
+                "never speak\n", ctrl->name, slot->port_num);
+        return 0;
+    }
+#endif
+
     __sync_synchronize();
     ctrl->doorbells->doorbells[slot->slot_id].doorbell = 1;
     return 0;
@@ -783,12 +817,30 @@ void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
      * answer for one TRB is an answer for all of them. */
     if (endpoint_id == 1) {
         /* Counted before anything decides what this event means, and counted
-         * nowhere else: it is the one measure of the control pipe that no
-         * repair in this driver can move. The ring's dequeue index is not —
+         * nowhere else. The ring's dequeue index would be the wrong measure —
          * xhci_ring_abandon sets it to the enqueue index on every repair — so
-         * the report that wanted to say "the controller has answered N" has to
-         * ask this and the endpoint context, never the ring. */
+         * a report about what the controller has answered asks these counters
+         * and the endpoint context, never the ring. */
         slot->ep0_events++;
+
+        /*
+         * ‼ AND WHETHER THE DEVICE HAD ANYTHING TO DO WITH IT.
+         *
+         * A Stop Endpoint posted by this driver's own repair completes the
+         * transfer it took back, and the controller answers with Stopped (xHCI
+         * 1.2 §4.6.9: the Stop Endpoint Command "shall" complete any TD in
+         * progress, and §6.4.5 gives Stopped and Stopped - Length Invalid as
+         * its completion codes). That answer says nothing whatever about the
+         * device. Counting it as one made the failure report claim a pipe was
+         * answering when it had never said a word — measured on both machines,
+         * 0 then 1 then 3 across three rungs, with the device silent all the
+         * way through.
+         */
+        if (code != TRB_COMPLETION_STOPPED &&
+            code != TRB_COMPLETION_STOPPED_LENGTH) {
+            slot->ep0_answers++;
+        }
+
         xhci_ring_reclaim_to(slot->ep0_ring, trb_phys);
     } else if (slot->endpoints && endpoint_id <= XHCI_MAX_DCI) {
         xhci_ring_reclaim_to(slot->endpoints[endpoint_id].ring, trb_phys);

@@ -529,17 +529,35 @@ int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port) {
         return -4;
     }
 
-    if (ctrl->enum_attempts[port] >= XHCI_ENUM_ATTEMPTS) {
-        /* Said once, and then the port is left alone until something is
-         * unplugged from it — a port retried for ever is a port that spends
-         * the machine's boot on a device which is not going to answer. */
-        if (ctrl->enum_attempts[port] == XHCI_ENUM_ATTEMPTS) {
-            ctrl->enum_attempts[port]++;
-            kprintf("[xHCI %s] port %u: %u attempts and the device on it never "
-                    "came up — leaving the port alone\n",
-                    ctrl->name, port, XHCI_ENUM_ATTEMPTS);
-        }
+    /*
+     * ‼ THE PORT IS BOUNDED BY TIME, NOT BY A COUNT OF OUR OWN TRIES.
+     *
+     * Said once when it runs out, and then the port is left alone until
+     * something is unplugged from it — a port retried for ever is a port that
+     * spends the machine's boot on a device which is not going to answer.
+     *
+     * Why a window and not "three attempts": see port_window_since in xhci.h.
+     * In one line — a count of attempts is a disguised time, and it changes
+     * meaning behind your back the moment an attempt gets cheaper.
+     */
+    if (ctrl->enum_attempts[port] == XHCI_PORT_GIVEN_UP) {
         return -8;
+    }
+    {
+        uint64_t now = rdtsc();
+        if (ctrl->port_window_since[port] == 0) {
+            ctrl->port_window_since[port] = now;   /* the window opens here */
+            ctrl->port_high_water[port]   = 0;
+        } else if ((int64_t)(now - ctrl->port_window_since[port]) >=
+                   (int64_t)cpu_ms_to_tsc(XHCI_PORT_PATIENCE_MS)) {
+            kprintf("[xHCI %s] port %u: %u attempt(s) over %u ms and the device "
+                    "on it never got past %s — leaving the port alone\n",
+                    ctrl->name, port, ctrl->enum_attempts[port],
+                    XHCI_PORT_PATIENCE_MS,
+                    xhci_enum_state_name(ctrl->port_high_water[port]));
+            ctrl->enum_attempts[port] = XHCI_PORT_GIVEN_UP;
+            return -8;
+        }
     }
 
     struct xhci_device_slot* slot = find_free_slot(ctrl);
@@ -1053,12 +1071,24 @@ static void slot_take_down(xhci_controller_t* ctrl, xhci_device_slot_t* slot) {
     slot->driver = XHCI_DRIVER_NONE;
 
     if (retry_port && retry_port <= ctrl->max_ports &&
-        ctrl->enum_attempts[retry_port] < XHCI_ENUM_ATTEMPTS &&
+        ctrl->enum_attempts[retry_port] != XHCI_PORT_GIVEN_UP &&
         xhci_port_has_device(ctrl, retry_port)) {
-        ctrl->enum_attempts[retry_port]++;
+        if (ctrl->enum_attempts[retry_port] < XHCI_PORT_GIVEN_UP - 1) {
+            ctrl->enum_attempts[retry_port]++;
+        }
+        /* ‼ The line says the arithmetic the gate actually uses. It used to
+         * print "attempt N+1 of ATTEMPTS+1" — both machines reported "attempt
+         * 2 of 4" while the gate refused at 3 — and the bound is no longer a
+         * count at all, so what is worth printing beside the attempt is how
+         * much of the port's window has gone. */
+        uint32_t spent = ctrl->port_window_since[retry_port]
+                       ? (uint32_t)cpu_tsc_to_ms(rdtsc() -
+                                                 ctrl->port_window_since[retry_port])
+                       : 0;
         kprintf("[xHCI %s] port %u: trying again on a freshly reset port "
-                "(attempt %u of %u)\n", ctrl->name, retry_port,
-                ctrl->enum_attempts[retry_port] + 1, XHCI_ENUM_ATTEMPTS + 1);
+                "(attempt %u, %u ms into the %u ms it is given)\n",
+                ctrl->name, retry_port, ctrl->enum_attempts[retry_port],
+                spent, XHCI_PORT_PATIENCE_MS);
         xhci_enumerate_device(ctrl, retry_port);
     }
 }
@@ -1276,7 +1306,9 @@ static void enum_settle_unclaimed(struct xhci_device_slot* slot,
             slot->interface_protocol);
     slot->ever_configured = true;
     if (slot->ctrl && slot->born_port) {
-        slot->ctrl->enum_attempts[slot->born_port] = 0;
+        slot->ctrl->enum_attempts[slot->born_port]     = 0;
+        slot->ctrl->port_window_since[slot->born_port] = 0;
+        slot->ctrl->port_high_water[slot->born_port]   = 0;
     }
     slot->state = ENUM_STATE_CONFIGURED;
 
@@ -1952,11 +1984,24 @@ static void xhci_report_stuck(xhci_controller_t* ctrl,
      * answered nothing at all. A false statement about the hardware, on the
      * one screen the hardware is read from.
      *
-     * Three separate things are printed instead, each named for who writes it:
+     * Four separate things are printed instead, each named for who writes it:
      * where SOFTWARE stands (the enqueue index), where the CONTROLLER stands
      * (the TR Dequeue Pointer it maintains in the Output Endpoint Context,
-     * xHCI 1.2 §4.6.9), and how many Transfer Events have ever been raised for
-     * this pipe. Not one of the three can be moved by a repair.
+     * xHCI 1.2 §4.6.9), how many Transfer Events have ever been raised on this
+     * pipe, and how many of those the DEVICE caused.
+     *
+     * ‼ AND THE LINE THAT USED TO STAND HERE WAS ITSELF UNTRUE. It promised
+     * "not one of the three can be moved by a repair", and two of them can:
+     * the enqueue index is moved by xhci_ring_abandon on every repair, and the
+     * event count is moved by our own Stop Endpoint, which the controller
+     * answers with Stopped. On the owner's board that produced exactly the
+     * arithmetic this comment calls impossible — 3/0, 6/3, 9/6, 12/9 — from a
+     * controller that had answered nothing.
+     *
+     * So the honest statement is: ONE of these numbers cannot be moved by any
+     * repair in this driver, and it is the last one. A device that has said
+     * nothing keeps it at zero however many times the pipe is cleared, taken
+     * back or repositioned.
      */
     if (slot->ep0_ring) {
         uint64_t hw   = xhci_ep_context_dequeue(ctrl, slot, 1);
@@ -1967,13 +2012,13 @@ static void xhci_report_stuck(xhci_controller_t* ctrl,
         if (at >= base && at < base + span) {
             kprintf("[xHCI %s]   its control pipe is %s; software has written "
                     "up to TRB %u of %u, the controller's own dequeue pointer "
-                    "stands at TRB %u with cycle %u, and %u transfer event(s) "
-                    "have ever been raised for it\n",
+                    "stands at TRB %u with cycle %u, and of %u transfer "
+                    "event(s) ever raised on it %u came from the device\n",
                     ctrl->name,
                     xhci_ep_state_name(xhci_ep_context_state(ctrl, slot, 1)),
                     slot->ep0_ring->enqueue_idx, slot->ep0_ring->num_trbs,
                     (uint32_t)((at - base) / sizeof(xhci_trb_t)),
-                    (unsigned)(hw & 1u), slot->ep0_events);
+                    (unsigned)(hw & 1u), slot->ep0_events, slot->ep0_answers);
         } else {
             /* A pointer that is not on this ring is a fact worth having:
              * either the controller has never been given the ring (the
@@ -1982,13 +2027,13 @@ static void xhci_report_stuck(xhci_controller_t* ctrl,
             kprintf("[xHCI %s]   its control pipe is %s; software has written "
                     "up to TRB %u of %u, the controller's own dequeue pointer "
                     "reads 0x%llx which is not an address on this ring "
-                    "(it begins at 0x%llx), and %u transfer event(s) have ever "
-                    "been raised for it\n",
+                    "(it begins at 0x%llx), and of %u transfer event(s) ever "
+                    "raised on it %u came from the device\n",
                     ctrl->name,
                     xhci_ep_state_name(xhci_ep_context_state(ctrl, slot, 1)),
                     slot->ep0_ring->enqueue_idx, slot->ep0_ring->num_trbs,
                     (unsigned long long)at, (unsigned long long)base,
-                    slot->ep0_events);
+                    slot->ep0_events, slot->ep0_answers);
         }
     }
 
@@ -2038,6 +2083,34 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
         }
         if (slot->timestamp_started == 0) {
             continue;
+        }
+
+        /*
+         * ── how far this port has ever got, and what that buys it ─────────
+         *
+         * An attempt that reaches a step no attempt on this port has reached
+         * before is a device demonstrably coming to life — a flash drive whose
+         * controller is still booting answers nothing, then answers the first
+         * eight descriptor bytes, then answers everything. So the port's window
+         * (see port_window_since in xhci.h) starts again from here.
+         *
+         * Only forward steps count. The three repair states sit numerically
+         * between SET_IDLE and CONFIGURE_ENDPOINT but they are a detour, not
+         * progress, and a pipe being cleared over and over must not extend
+         * anything. CONFIGURED is not needed here either: reaching it closes
+         * the window outright, where the port's attempts are given back.
+         *
+         * Extension can only ever help. It never shortens a window, so no
+         * device can be lost by it — which is why it is safe to do from the
+         * tick, with no lock, on a field only this loop writes.
+         */
+        if (slot->born_port && slot->born_port <= ctrl->max_ports &&
+            state > ctrl->port_high_water[slot->born_port] &&
+            state != ENUM_STATE_WAIT_EP0_RESET &&
+            state != ENUM_STATE_WAIT_EP0_STOP &&
+            state != ENUM_STATE_WAIT_EP0_DEQUEUE) {
+            ctrl->port_high_water[slot->born_port]   = state;
+            ctrl->port_window_since[slot->born_port] = now;
         }
 
         /*
@@ -2200,7 +2273,34 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
          * genuinely not going to answer still loses its slot — after the same
          * number of tries, not before them.
          */
+        /*
+         * ‼ AND ONLY FOR A PIPE THAT HAS EVER SPOKEN.
+         *
+         * This is the ladder that cost the owner's machines eight seconds of
+         * every boot, and the measurement says plainly why: taking a transfer
+         * back and asking again can only help a pipe that WAS answering and
+         * stopped. On a pipe that has never said a word it is three more
+         * rounds of asking a wall — and the one remedy that did work, a fresh
+         * port reset, stands behind all of them.
+         *
+         * Counted on two machines of different generations: six rungs of this
+         * ladder, zero devices recovered. The flash drive came up on the port
+         * reset that follows, both times. Meanwhile the desktop's only input
+         * device — a USB keyboard, 19f5:3247 — was recovered by the OTHER road
+         * entirely, the one that answers an error code by clearing a halted
+         * pipe in microseconds, and its counter was NOT zero when it happened:
+         * it had babbled, which is a device speaking badly rather than a device
+         * not speaking.
+         *
+         * So the gate is the fact, not the state and not the depth: has
+         * anything ever come back from the device on this pipe. Zero means the
+         * cheap remedy has nothing to work with, and the slot goes straight to
+         * the remedy that does — see the retire below. Nothing here narrows
+         * the error road (xhci_transfer.c), which keeps its own ladder and its
+         * own reason.
+         */
         if (xhci_enum_step_can_be_asked_again(state) &&
+            slot->ep0_answers != 0 &&
             slot->step_retry < XHCI_STEP_RETRIES &&
             slot->ep0_ring && slot->slot_id != 0) {
 
@@ -2822,7 +2922,9 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
             slot->ep_pending_add = 0;
             slot->ever_configured = true;
             if (slot->born_port) {
-                ctrl->enum_attempts[slot->born_port] = 0;
+                ctrl->enum_attempts[slot->born_port]     = 0;
+                ctrl->port_window_since[slot->born_port] = 0;
+                ctrl->port_high_water[slot->born_port]   = 0;
             }
             slot->state = ENUM_STATE_CONFIGURED;
             enum_driver_start(ctrl, slot);

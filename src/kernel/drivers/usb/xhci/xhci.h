@@ -353,6 +353,39 @@ typedef struct {
      * device on it is finally configured, so a port that works after two goes
      * costs two goes and not a budget for the life of the machine. */
     uint8_t enum_attempts[XHCI_PORT_MAP_ENTRIES];
+
+    /*
+     * ‼ WHAT BOUNDS A PORT'S RETRIES, NOW THAT IT IS NOT THE COUNT.
+     *
+     * The count used to be the bound: three goes and the port was left alone.
+     * A count is a disguised time, and a bad one — when a round of this ladder
+     * was made faster, the same "three" silently became a stricter deadline.
+     * Measured: a round cost about eight seconds, and the owner's flash drive
+     * answered at about eight seconds. Speed up the round to two and three of
+     * them no longer reach the moment the device comes alive, so the machine
+     * boots with no volume. The constant would not have changed; its meaning
+     * would have.
+     *
+     * So the bound is stated as what it always was: how long a device that is
+     * PRESENT but silent is given to come up. `window_since` is when this
+     * port's first attempt started, in TSC; zero means no window is open.
+     *
+     * And `high_water` is the answer to "is it waking up at all" — the
+     * furthest step any attempt on this port has ever reached. An attempt that
+     * gets further than every attempt before it is a device demonstrably
+     * coming to life, and the window starts again for it. Extension can only
+     * help: it never shortens anything.
+     *
+     * Said plainly, because it is the honest part: this remains a time, and a
+     * time is a number. It is one here because the fact it would need does not
+     * exist — a device that is present and silent is indistinguishable, in
+     * every register on the bus, from one that will never answer. A NAK
+     * touches no counter and no bit anywhere says "my controller is still
+     * booting". Linux has the same number, larger (USB_CTRL_GET_TIMEOUT 5000
+     * per request, PORT_INIT_TRIES 4 rounds of it).
+     */
+    uint64_t port_window_since[XHCI_PORT_MAP_ENTRIES];
+    uint8_t  port_high_water[XHCI_PORT_MAP_ENTRIES];
 } xhci_controller_t;
 
 int xhci_init(void);

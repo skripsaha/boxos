@@ -3855,6 +3855,76 @@ run_seal() {
 # a control transfer posted with the doorbell withheld, which is a faithful
 # "no answer came" rather than a simulated one. The proof is the transfer
 # AFTER it — see xhci_ctrl_giveup_proof.
+run_enumsilence() {
+    echo "== enumsilence: a pipe that never spoke is answered by the port, once =="
+
+    # ‼ WHY THIS SCENARIO HAS TO EXIST.
+    #
+    # The eight seconds the owner's two machines spent on every boot happened on
+    # a road emulation never takes: under QEMU every control request is answered
+    # immediately, so a device going silent at its first descriptor request
+    # cannot occur. Eight scenarios were green while that road was broken, and
+    # the only evidence for it was a photograph of a screen. ENUMSILENCE=on
+    # withholds the doorbell for ONE descriptor request, once — the exact state
+    # both boards reported: endpoint Running, dequeue pointer on the first TRB,
+    # no event ever raised.
+    build_with_key ENUMSILENCE=on
+    if [ $? -ne 0 ]; then
+        echo "BUILD FAILED — tail:"; tail -25 "$SCRATCH/build.log"; exit 1
+    fi
+
+    # Four cores, for the reason latearrival and replug give: the deferred work
+    # of this kernel runs from the K-Core guide loop and from cpu_idle, and on
+    # one core neither runs. USB=on gives the machine a keyboard, which is the
+    # device the injection will land on — deliberately, because the owner's
+    # desktop has exactly one input device and the whole risk of this change is
+    # whether a silenced pipe costs it.
+    make run-stop >/dev/null 2>&1
+    make run-bg ENUMSILENCE=on USB=on CORES=4 MEM=4G >/dev/null 2>&1
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    sleep 3
+
+    type_cmd "help"
+    sleep 1
+    key_press ret
+    sleep 3
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.enumsilence.log"
+    buildkey_restore
+    build
+    L="$SCRATCH/serial.enumsilence.log"
+
+    grep -q "ENUMSILENCE — the doorbell for the first descriptor request" "$L"
+    chk $? "the silence was actually made (the scenario is not vacuous)"
+
+    # THE POINT. A pipe that never spoke gets ONE give-up and then the remedy
+    # that works. Before this change it got the give-up four times over — 2000 ms
+    # each — and only then the port reset.
+    local ladder
+    ladder=$(grep -c "taking the transfer back and asking again" "$L")
+    [ "$ladder" = 0 ]
+    chk $? "the silence ladder was not entered at all (entered $ladder time(s))"
+
+    local gaveup
+    gaveup=$(grep -c "of silence" "$L")
+    [ "$gaveup" = 1 ]
+    chk $? "one give-up, not a ladder of them (counted $gaveup)"
+
+    grep -q "trying again on a freshly reset port (attempt 1," "$L"
+    chk $? "and the port was reset instead, on the first attempt"
+
+    # The report tells the two counts apart now: everything that happened on the
+    # pipe, and how much of it came from the device. A silenced pipe must read 0.
+    grep -q "transfer event(s) ever raised on it 0 came from the device" "$L"
+    chk $? "the report says the device itself answered nothing"
+
+    grep -q "BoxOS Shell" "$L"
+    chk $? "the machine still reaches a shell"
+
+    typed_ok "$L"
+    chk $? "and the device that was silenced came back — the keystroke landed"
+}
+
 run_ctrlgiveup() {
     echo "== ctrlgiveup: a control transfer is given up on, and taken back =="
 
@@ -7661,6 +7731,7 @@ case "${1:-both}" in
     returnfail) run_returnfail ;;
     seal)     run_seal ;;
     ctrlgiveup) run_ctrlgiveup ;;
+    enumsilence) run_enumsilence ;;
     isoch)    run_isoch ;;
     noexec)   run_noexec ;;
     earlyirq) run_earlyirq ;;
@@ -7685,8 +7756,8 @@ case "${1:-both}" in
     growcut)  run_growcut ;;
     growmut)  run_growmut ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
 esac
 
 LOGCHECK_FINISHED=1
