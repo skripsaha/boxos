@@ -97,7 +97,30 @@ typedef uint64_t  uintmax_t;
 #define INTMAX_MAX  INT64_MAX
 #define UINTMAX_MAX UINT64_MAX
 
-#define offsetof(type, member) ((size_t)&(((type*)0)->member))
+/*
+ * ‼ THE COMPILER'S, NOT A TRICK THAT HAPPENS TO WORK.
+ *
+ * This was `((size_t)&(((type*)0)->member))`, which every C codebase has
+ * carried at some point and which is undefined behaviour by the letter of the
+ * standard: it forms a member designator on a null pointer and then takes its
+ * address. It works on every compiler anybody has shipped, and it is still the
+ * wrong tool when the compiler offers the right one — __builtin_offsetof is
+ * what GCC's own <stddef.h> expands offsetof to, and it is a constant
+ * expression by construction rather than by luck.
+ *
+ * It also removes a genuine split in this tree. `acpi_shutdown.c` included
+ * <stddef.h> on top of this header, so THAT file was using the builtin while
+ * every other file used the trick: two definitions of one word, and the one in
+ * force depended on include order. Now there is one, and the outlier include is
+ * gone with it.
+ *
+ * The guard matters: a freestanding compiler is required to provide <stddef.h>
+ * (C17 §4p6), and if anything ever includes it before this header, its
+ * definition is already in scope and identical.
+ */
+#ifndef offsetof
+#define offsetof(type, member) __builtin_offsetof(type, member)
+#endif
 
 #define container_of(ptr, type, member) ({                      \
     const typeof(((type *)0)->member) *__mptr = (ptr);          \
