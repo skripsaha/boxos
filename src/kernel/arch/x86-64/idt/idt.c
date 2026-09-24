@@ -4,6 +4,7 @@
 #include "gdt.h"
 #include "tss.h"
 #include "klib.h"
+#include "klib_logring.h" /* LogKeepFlush — the dump outlives a warm reset */
 #include "io.h"
 #include "pic.h"
 #include "irqchip.h"
@@ -33,6 +34,8 @@
 #include "clockboard.h"
 #include "pit.h"
 #include "baton.h"
+#include "lifeline.h" /* a fault inside foreign firmware is thrown back, not fatal */
+#include "efi.h"      /* EfiDescribePhysical — CR2 named against the firmware's map */
 
 static idt_entry_t idt[IDT_ENTRIES];
 static idt_descriptor_t idt_desc;
@@ -840,6 +843,23 @@ static bool panic_probe_present(uint64_t va)
  * trace at all, because half a line of someone else's dump on the end of the
  * one that matters is its own kind of confusion.
  */
+/* Every peer core stopped, by the vector right_of_way.c reserves for it.
+ *
+ * Guarded on the LAPIC being mapped: a panic raised before lapic_init has no
+ * way to reach another core and no other core to reach — they are started
+ * through that same LAPIC — and writing through an unmapped MMIO window would
+ * fault inside the panic, which is what turned this machine's first panic into
+ * a fault at address 0x20. One "all excluding self" ICR write (Intel SDM Vol
+ * 3A, ICR Destination Shorthand 11b), no walk of the core table, and NOT
+ * waited for: a core that will never answer must not cost the machine the only
+ * account of why it died. The same three facts as klib_print.c's panic(). */
+static void PanicHaltPeers(void)
+{
+    if (!g_amp.multicore_active) return;
+    if (!lapic_is_mapped())      return;
+    lapic_send_ipi_all_excluding_self(IPI_PANIC_VECTOR);
+}
+
 static void panic_claim_or_halt(bool *already_claimed_here)
 {
     if (*already_claimed_here)
@@ -852,6 +872,20 @@ static void panic_claim_or_halt(bool *already_claimed_here)
             __asm__ volatile("cli; hlt");
     }
     *already_claimed_here = true;
+
+    /* Peers stopped by the WINNER, here, before its first line — and by the
+     * winner only. The dump used to broadcast after the whole register dump
+     * and stack walk had printed, so every other core wrote the same console
+     * and the same log ring for the entire length of the account of the crash.
+     *
+     * ‼ The loser must not reach this. "All excluding self" includes the core
+     * that is writing the dump, so a broadcast from a core that lost the claim
+     * would halt the winner mid-sentence; the loser halts above instead. The
+     * claim itself still holds against a re-entrant fault: an exception arrives
+     * through an interrupt gate with IF=0 (Intel SDM Vol 3A §6.12.1), so a peer
+     * already inside its own exception handler cannot take this IPI and stops
+     * at the exchange above. */
+    PanicHaltPeers();
 }
 
 /* The kernel's own Nameplate, linked in by the second pass — see the linker
@@ -889,6 +923,43 @@ static bool panic_probe_range(uint64_t va, uint64_t len)
 {
     return panic_probe_present(va) &&
            panic_probe_present(va + len - 1);
+}
+
+/* The faulting address, named against the firmware's own memory map
+ * (UEFI 2.10 §7.2).
+ *
+ * A ring-0 #PF inside a firmware call reports a CR2 that appears in no table
+ * this kernel keeps, and the map is the one description left that can claim
+ * it. Three answers, and they must be told apart: a descriptor carrying
+ * EFI_MEMORY_RUNTIME (UEFI 2.10 §7.2 Table 7.10 — firmware is entitled to
+ * this memory after ExitBootServices, so the fault is in how WE mapped it),
+ * a descriptor without it (firmware reached memory it gave back), and no
+ * descriptor at all (outside everything the firmware described).
+ *
+ * Safe from a fault handler: EfiDescribePhysical walks the boot copy of the
+ * map through the Pull Map and takes no lock and no allocation to do it
+ * (efi_runtime.c). The "no descriptor" line is gated on
+ * efi_runtime_available(), which efi_runtime_init sets strictly after it
+ * records the map, so reaching that branch proves there was a map to walk —
+ * a BIOS boot, and a fault raised before the map exists, say nothing. */
+static void PanicNameFaultAddress(uint64_t addr)
+{
+    EfiDescriptorFacts d;
+
+    if (EfiDescribePhysical(addr, &d))
+    {
+        kprintf("  CR2 is EFI descriptor [%u] %s phys=%016lx pages=%lu "
+                "virt=%016lx attr=%016lx  %s\n",
+                d.index, EfiMemoryTypeName(d.type), d.physical_start,
+                d.number_of_pages, d.virtual_start, d.attribute,
+                (d.attribute & EFI_MEMORY_RUNTIME)
+                    ? "RUNTIME — firmware keeps this across ExitBootServices"
+                    : "no RUNTIME attribute — firmware reached memory it gave back");
+    }
+    else if (efi_runtime_available())
+    {
+        kprintf("  CR2 falls inside no EFI memory descriptor\n");
+    }
 }
 
 /* Port 0x61 — System Control Port B, the legacy chipset's NMI status and
@@ -1278,7 +1349,32 @@ void exception_handler(interrupt_frame_t *frame)
         {
             return;
         }
+    }
 
+    /* ‼ LIFELINE — a fault inside code this kernel did not compile.
+     *
+     * Asked HERE and nowhere else, and the position is the whole of its
+     * safety. Later than the uaccess fixup and later than
+     * vmm_handle_page_fault, because an EFI runtime region is demand-pageable
+     * like any other and a lifeline asked first would refuse a fault the VMM
+     * was about to answer correctly. Earlier than panic_claim_or_halt, because
+     * a claimed panic ends in `cli; hlt` and there is no returning from it.
+     * Outside the vector-14 block, because firmware answers a bad descriptor
+     * or a forbidden MSR with #GP far more often than with #PF.
+     *
+     * LifelineCatch refuses unless the faulting RIP is inside a range the
+     * caller named as foreign, so a kernel bug raised inside the armed window
+     * still walks on into the panic below. See lifeline.h.
+     *
+     * The CR2 handed over is the one read at the top of this function; the
+     * note exists so the catch path does not become a second reader of a
+     * register the next fault overwrites. */
+    LifelineNoteFaultAddress(fault_addr);
+    if (LifelineCatch(frame))
+        return;
+
+    if (frame->vector == 14)
+    {
         /* Unhandled ring-0 #PF — fall through to KERNEL PANIC.
          *
          * Previously this branch logged + returned, which meant iretq
@@ -1680,6 +1776,7 @@ void exception_handler(interrupt_frame_t *frame)
                 (int)((frame->error_code >> 2) & 0x1),
                 (int)((frame->error_code >> 3) & 0x1),
                 (int)((frame->error_code >> 4) & 0x1));
+        PanicNameFaultAddress(panic_cr2);
     }
 
     // RBP-chain stack walk
@@ -1730,27 +1827,19 @@ void exception_handler(interrupt_frame_t *frame)
     kprintf("====================================================================\n");
     kprintf("System halted.\n");
 
+    /* The account out of this core's cache and into the memory the NEXT boot
+     * reads. A warm reset invalidates the caches without writing them back
+     * (Intel SDM Vol 3A §11.5.1, Table 11-7), so a dump that never left the
+     * cache is a dump nobody will ever see — and a panicked machine is reset
+     * by hand. Takes no lock and waits on nothing, which is what makes it
+     * callable with every peer frozen. */
+    LogKeepFlush();
+
     /* Everything said, onto the wire: interrupts are off, so the line cannot
-     * drive itself, and the locks may be this core's own. */
+     * drive itself, and the locks may be this core's own. The peers were
+     * stopped at panic_claim_or_halt, before the first line of this dump. */
     WireForceRelease();
     WireDrain();
-
-    /* Halt all cores via IPI_PANIC. Guarded on the LAPIC actually being
-     * mapped: lapic_send_ipi writes through the same MMIO window whose absence
-     * turned this machine's first panic into a fault at address 0x20. A panic
-     * raised before lapic_init() has no way to reach the other cores — and no
-     * other cores to reach, since they are started through that same LAPIC. */
-    if (g_amp.multicore_active && lapic_is_mapped())
-    {
-        for (uint8_t c = 0; c < g_amp.total_cores; c++)
-        {
-            if (c == amp_get_core_index())
-                continue;
-            if (!amp_core_online(&g_amp.cores[c]))
-                continue;
-            lapic_send_ipi(g_amp.cores[c].lapic_id, IPI_PANIC_VECTOR);
-        }
-    }
 
     while (1)
     {
