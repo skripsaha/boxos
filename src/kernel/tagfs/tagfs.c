@@ -2876,8 +2876,9 @@ error_t tagfs_init(void) {
     g_state.block_bitmap.extent_count = 0;
 
     /* The debt is sized from the same number the bitmap is: one bit per sector
-     * of the medium's copy. On this volume that is 44 sectors and six bytes.
-     * A volume whose debt cannot be sized is mounted READ-DURABLE-ONLY rather
+     * of the medium's copy. On this volume the bitmap is 2800 bytes, which is
+     * (2800+511)/512 = 6 sectors of debt, tracked in (6+7)/8 = 1 byte. A
+     * volume whose debt cannot be sized is mounted READ-DURABLE-ONLY rather
      * than refused — MapOwedMark answers the NULL by doing nothing, and the
      * medium's map then waits for the next sync exactly as it always did. */
     g_state.block_bitmap.owed_sectors =
@@ -3322,12 +3323,25 @@ error_t tagfs_init(void) {
 
 static void tagfs_sync_inside(void);
 
-void tagfs_sync(void)
+error_t tagfs_sync(void)
 {
-    if (!tagfs_enter())
-        return;
+    if (!tagfs_enter()) {
+        /* The same fact volume_would_not_flush tells about a flush that
+         * could not reach the medium, told here about a sync that never
+         * started: named volume, named seat, and what the door says right
+         * now — because a caller who hears nothing assumes the records it
+         * asked for are on the medium, and here not one byte was written. */
+        uint8_t door = __atomic_load_n(&g_door, __ATOMIC_ACQUIRE);
+        kprintf("[TagFS] sync refused at the door — seat %u (%s), %s — not "
+                "one byte of metadata was written\n",
+                g_tagfs_seat, BoardroomSeatName(g_tagfs_seat),
+                door == VOLUME_LEAVING ? "the volume is already on its way out"
+                                       : "no volume is mounted there");
+        return ERR_TAGFS_NOT_INITIALIZED;
+    }
     tagfs_sync_inside();
     tagfs_leave();
+    return OK;
 }
 
 static void tagfs_sync_inside(void)
@@ -3422,15 +3436,19 @@ static void tagfs_sync_inside(void)
      * drive's write cache has reached the media.
      *
      * Cost: ~5-15 ms per call on a spinning drive, ~50 µs on NVMe
-     * via SATA. tagfs_sync is called on user-initiated shutdown
-     * and on metadata-pool checkpoint, both rare.
+     * via SATA. tagfs_sync is called from exactly two places — an
+     * application's anchor() request (STORAGE_OBJ_ANCHOR, storage_ops.c)
+     * and the shutdown path (tagfs_shutdown) — both rare next to ordinary
+     * writes.
      *
      * ‼ AND THE ANSWER IS HEARD. It was thrown away, so a sync that wrote
      * every one of the records above and then could not get one of them onto
-     * the media returned exactly as a sync that had — and tagfs_sync is void,
-     * which means the only place that fact can still be told is here.
-     * tagfs_flush_cache has already named the volume; what is added is what
-     * it means for the records this particular call just wrote.
+     * the media returned exactly as a sync that had. tagfs_sync's error_t
+     * speaks for the door — refused before a single byte was touched — but
+     * carries nothing about a flush that fails AFTER real writes, so that
+     * fact is still told only here. tagfs_flush_cache has already named the
+     * volume; what is added is what it means for the records this
+     * particular call just wrote.
      *
      * It INSISTS rather than reporting a busy port: a sync is asked for
      * exactly when somebody needs these records on the media, and "somebody
@@ -3598,16 +3616,17 @@ static bool tagfs_abandon(void)
  * Freeing at a halt was never for the machine's benefit; it was tidiness, and
  * it is the one road on which the take-down cannot wait for anybody.
  */
-void tagfs_shutdown(void)
+error_t tagfs_shutdown(void)
 {
     if (!g_state.initialized) {
-        return;
+        return OK;                      /* nothing mounted, nothing owed */
     }
 
-    tagfs_sync();
+    error_t synced = tagfs_sync();
 
     __atomic_store_n(&g_door, (uint8_t)VOLUME_LEAVING, __ATOMIC_RELEASE);
     debug_printf("[TagFS] Shutdown complete\n");
+    return synced;
 }
 
 /*

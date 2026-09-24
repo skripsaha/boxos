@@ -1391,8 +1391,17 @@ static int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 
     /* Sync flush of all in-memory state — same path bye uses, but
      * inline so caller's fwrite-then-anchor is durable without a
-     * shutdown. */
-    tagfs_sync();
+     * shutdown. Its answer is checked for the same reason the flush
+     * below is: a sync refused at the door writes nothing, and an
+     * anchor published over nothing written would be exactly the lie
+     * the rest of this function exists to stop. */
+    error_t synced = tagfs_sync();
+    if (synced != OK) {
+        kprintf("[Storage] anchor of file %u: the volume's metadata was not "
+                "synced (error %u) — no anchor event is published\n",
+                file_id, (unsigned)synced);
+        return (int)synced;
+    }
 
     /*
      * ‼ THIS IS THE OPERATION AN APPLICATION USES TO SAY "MAKE MY WRITE

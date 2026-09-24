@@ -520,8 +520,8 @@ void     TagFSNoteMediumGone(void);
 /* Said once, by whoever tried the boot mount, whether or not it succeeded.
  * Before it, an arriving medium belongs to the boot that is still happening. */
 void     TagFSBootMountSettled(void);
-void tagfs_shutdown(void);
-void tagfs_sync(void);
+error_t tagfs_shutdown(void);
+error_t tagfs_sync(void);
 
 /* Flush the volatile write cache of the disk that holds the TagFS volume
  * (routes to the probed AHCI port / ATA drive, not a hardcoded device). */
