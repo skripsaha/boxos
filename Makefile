@@ -1737,7 +1737,11 @@ usb: $(BUILDPLATE_TOOL)
 # all this needs; `make usb` still asks for sudo, because WRITING one is a
 # different question and should stay a deliberate act.
 # ---------------------------------------------------------------------------
-BOARD_DIR ?= $(BUILDDIR)/board
+# ‼ NOT under $(BUILDDIR): `make clean` removes that whole tree, and a board
+# log is the one artefact in this project that CANNOT BE REBUILT. Two were
+# lost that way on 2026-09-25 — pulled off the stick, then destroyed by a
+# clean before they were read a second time, with the stick already reflashed.
+BOARD_DIR ?= boardlogs
 STICK     ?= auto
 FILE      ?= watch.log
 

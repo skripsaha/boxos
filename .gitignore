@@ -57,3 +57,4 @@ osdev_other/
 # Written by tooling that runs inside a session, not by this project.
 .claude/hook-log.txt
 .claude/design-context.json
+boardlogs/
