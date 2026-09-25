@@ -103,6 +103,15 @@ struct Baton {
     Baton *volatile next;  /* MPSC chain; NULL at tail (atomic)   */
     void (*run)(void *ctx);            /* K-Core continuation                 */
     void  *ctx;                        /* argument — the container job        */
+
+    /* Owned by the PASS, never by the container: BatonPass clears it and
+     * BatonPassOneWay sets it, both before the node is linked, so a container
+     * that never zeroed its node cannot make an ordinary pass look one-way and
+     * a caller cannot make a pass one-way by writing here. It rides on the
+     * NODE because the property belongs to the WORK: when the pump has to
+     * decide whether the count may wait for a return, the popped node is all
+     * it holds. */
+    volatile uint32_t one_way;
 };
 
 /* Per-core single-consumer queue. Producer end (`tail`) is XCHG'd by any
@@ -160,6 +169,26 @@ void BatonInit(void);
  * through must reopen on it, or nobody will ever pass again. */
 bool BatonPass(Baton *n);
 
+/* A pass whose continuation will NOT return — it halts, resets or parks
+ * the machine. Counted when it is TAKEN, never on return, because it
+ * never comes back. Every other pass keeps the return-counted rule, which
+ * is what lets a halt drain wait for a write's commit rather than merely
+ * for its node to be dequeued.
+ *
+ * Takes no node, because work that does not return has no container that
+ * outlives it to embed one in: the baton layer reserves ONE node per core for
+ * this, and the claim on that node is the marker itself, never cleared. A core
+ * therefore takes at most one one-way pass for the life of the boot — the
+ * first does not come back to release it — and a second attempt is refused and
+ * said, which is the truth and not a drop: the machine is already going where
+ * the loser wanted to send it. `core` is the core that will take the pass, and
+ * it is named rather than assumed, because a one-way pass is about WHERE the
+ * machine stops, not about where completions happen to be drained.
+ *
+ * Refused (false, and said out loud) before BatonInit, on an unknown core, on
+ * a NULL continuation, or when that core is already one-way. */
+bool BatonPassOneWay(uint8_t core, void (*run)(void *ctx), void *ctx);
+
 /* Consumer. Drains every ready node on `core_idx`'s queue, running each
  * continuation. CONTRACT: single-consumer — call ONLY with the calling
  * core's own index, and never from two contexts that can interleave on
@@ -172,7 +201,12 @@ uint32_t BatonPump(uint8_t core_idx);
 /* How many passes this core's queue is still holding. BatonOutstanding only
  * ever said WHETHER a queue was busy, which made "one unit of work" mean "one
  * core has something" and hid how much — the shutdown drain reported a single
- * unit stalled when it had no idea whether that was one pass or a thousand. */
+ * unit stalled when it had no idea whether that was one pass or a thousand.
+ *
+ * A one-way pass stops counting the moment it is taken, so a depth read from
+ * inside one (system_halt's drain runs inside exactly that) does not include
+ * the pass it is standing in. Waiting for it would be waiting for a return
+ * that was declared never to come. */
 uint64_t BatonDepth(uint8_t core_idx);
 
 /* The continuation most recently PUSHED to, and most recently POPPED from,
@@ -187,8 +221,10 @@ void BatonLastSeen(uint8_t core_idx,
  * Structural — no counter — so it never drifts. */
 bool BatonPending(uint8_t core_idx);
 
-/* Halt-drain helper: true iff any completion posted to `core_idx`'s queue
- * has not yet been consumed (pushed != popped). Uses atomic counters, so —
+/* Halt-drain helper: true iff any completion posted to `core_idx`'s queue has
+ * not yet been consumed (pushed != popped) — a pass posted, or dequeued and
+ * still running, EXCEPT a one-way pass, which is counted when taken and is
+ * therefore never outstanding while it runs. Uses atomic counters, so —
  * unlike BatonPending, which reads the SC-owned head — it is
  * safe to call from a core that does NOT own the queue (system_halt runs on
  * an arbitrary core while the drain core is still pumping). */

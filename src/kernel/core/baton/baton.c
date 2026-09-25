@@ -6,6 +6,8 @@
 #include "vmm.h"
 #include "lapic.h"
 #include "irqchip.h"
+#include "nameplate.h"        /* nameplate_name_at_kernel — name a one-way continuation */
+#include "nameplate_format.h" /* NameplateHeader — the table's own minimum size */
 
 /*
  * Vyukov intrusive MPSC with a persistent stub (1024cores.net,
@@ -16,6 +18,12 @@
 
 BatonQueue *g_baton       = NULL;
 volatile uint8_t        g_baton_ready = 0;
+
+/* One reserved node per core, for the only pass that cannot bring its own:
+ * work that does not return outlives no container, so there is no job struct
+ * left to embed a node in. Lives in the same pages as the queue array — see
+ * BatonInit. Indexed by the core that TAKES the pass. */
+static Baton *g_baton_oneway = NULL;
 
 /* ==========================================================================
  *  Raw MP link — the one primitive both the public push and the consumer's
@@ -88,10 +96,16 @@ void BatonInit(void)
      * CORE COUNT, allocated once, never freed. The kernel heap is a fixed
      * small-object pool and must not carry per-machine-scale arrays. */
     size_t cq_bytes = sizeof(BatonQueue) * n;
-    size_t cq_pages = (cq_bytes + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+    /* The reserved one-way nodes follow the queue array in the same
+     * allocation: sizeof(BatonQueue) is a multiple of a pointer's alignment,
+     * so the node array that starts at cq_bytes is aligned for a Baton. */
+    size_t ow_bytes = sizeof(Baton) * n;
+    size_t cq_pages = (cq_bytes + ow_bytes + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
     void  *cq_phys  = pmm_alloc_zero(cq_pages);
-    g_baton = cq_phys ? (BatonQueue *)vmm_phys_to_virt((uintptr_t)cq_phys)
-                           : NULL;
+    char  *base     = cq_phys ? (char *)vmm_phys_to_virt((uintptr_t)cq_phys)
+                              : NULL;
+    g_baton        = (BatonQueue *)(void *)base;
+    g_baton_oneway = base ? (Baton *)(void *)(base + cq_bytes) : NULL;
     if (!g_baton) {
         kprintf("[BATON] FATAL: cannot allocate queue array (%u cores, %zu pages)\n",
                 n, cq_pages);
@@ -109,6 +123,34 @@ void BatonInit(void)
 
     __atomic_store_n(&g_baton_ready, 1, __ATOMIC_RELEASE);
     debug_printf("[BATON] %u per-core never-drop queue(s) ready\n", n);
+}
+
+/* The half both producers share: publish the node and wake the core that will
+ * take it. The caller has already decided WHICH queue and has already set the
+ * node's one_way for this pass. */
+static void baton_post(BatonQueue *q, Baton *n, uint8_t target)
+{
+    /* Both bookkeeping stores happen BEFORE the link, and for the same reason
+     * the pop path copies run/ctx before it calls: the instant this node is
+     * linked it is reachable by the consumer, which may pop it and let its
+     * continuation free the whole container — node included — before this core
+     * gets another instruction.
+     *
+     * Counting `pushed` before the link is also what makes BatonDepth's
+     * subtraction safe. The link is what makes a node poppable, so a pass now
+     * raises `pushed` strictly before its own `popped` can rise. Counting after
+     * the link left a window — a producer interrupted between the two while the
+     * drain core popped and counted the very same node — in which popped led
+     * pushed and an unsigned depth read eighteen quintillion. The remaining
+     * error is that a queue looks busy a few instructions early, which is the
+     * direction a drain wants to be wrong in. */
+    q->last_push_run = n->run;
+    atomic_fetch_add_u64(&q->pushed, 1);
+
+    baton_link(q, n);
+
+    if (amp_get_core_index() != target)
+        lapic_send_ipi(g_amp.cores[target].lapic_id, IPI_WAKE_VECTOR);
 }
 
 /* ==========================================================================
@@ -132,24 +174,80 @@ bool BatonPass(Baton *n)
     }
 
     uint8_t drain = g_amp.bsp_index;
-    BatonQueue *q = &g_baton[drain];
 
-    /* Snapshot the continuation BEFORE the link, for the same reason BatonPump
-     * copies run/ctx before the call: once linked, this node is reachable by
-     * the consumer, which may pop it and let its continuation free the whole
-     * container — including the node — before we get another instruction. The
-     * value is a plain function pointer, never dereferenced here, so holding
-     * it after the container dies is safe; reading n->run then would not. */
-    void (*pushed_run)(void *) = n->run;
+    /* Every ordinary pass is return-counted, said here rather than assumed of
+     * the container: a node reused across passes, or one whose container was
+     * never zeroed, cannot carry a stale one-way marker into this pass. */
+    __atomic_store_n(&n->one_way, 0u, __ATOMIC_RELAXED);
 
-    baton_link(q, n);
-    q->last_push_run = pushed_run;
-    atomic_fetch_add_u64(&q->pushed, 1);
-
-    uint8_t me = amp_get_core_index();
-    if (me != drain)
-        lapic_send_ipi(g_amp.cores[drain].lapic_id, IPI_WAKE_VECTOR);
+    baton_post(&g_baton[drain], n, drain);
     return true;
+}
+
+/* ==========================================================================
+ *  Producer — BatonPassOneWay()
+ *
+ *  For the continuation that does not come back. See baton.h for the contract;
+ *  the claim on the core's reserved node is the marker itself and is never
+ *  cleared, so a core goes one-way at most once per boot.
+ * ========================================================================== */
+bool BatonPassOneWay(uint8_t core, void (*run)(void *ctx), void *ctx)
+{
+    if (!__atomic_load_n(&g_baton_ready, __ATOMIC_ACQUIRE)) {
+        kprintf("[BATON] ERROR: a one-way pass was made before BatonInit — "
+                "the machine was told to stop and nobody took the message\n");
+        return false;
+    }
+    if (!run || core >= g_amp.total_cores) {
+        kprintf("[BATON] ERROR: one-way pass refused — core %u of %u, "
+                "continuation %p\n",
+                core, g_amp.total_cores, (void *)(uintptr_t)run);
+        return false;
+    }
+
+    Baton *n = &g_baton_oneway[core];
+
+    /* LOCK CMPXCHG — a full fence, and the claim and the marker in one word.
+     * A loser is not a drop: the pass already on its way takes the machine to
+     * the same place this one wanted to. It is still said, because this queue
+     * never swallows a pass in silence. */
+    if (!atomic_cas_u32(&n->one_way, 0u, 1u)) {
+        kprintf("[BATON] one-way pass to core %u refused — that core is "
+                "already taking one\n", core);
+        return false;
+    }
+
+    /* Safe to write plainly: the node is not linked yet, so no consumer can
+     * reach it, and the claim above locked out every other producer. The link
+     * inside baton_post is the release that publishes all three fields. */
+    n->run = run;
+    n->ctx = ctx;
+
+    baton_post(&g_baton[core], n, core);
+    return true;
+}
+
+/* The kernel's own name table. A machine about to stop must say what it is
+ * stopping FOR, and a continuation pointer is only a number until the
+ * Nameplate turns it back into the function that was going to run — the same
+ * lookup the panic dump and the halt drain make, for the same reason. Never
+ * fails loudly: an absent or too-small table yields the raw address. */
+extern const char __nameplate_start[];
+extern const char __nameplate_end[];
+
+static void baton_say_one_way(uint8_t core_idx, void (*run)(void *ctx))
+{
+    NameplateName name;
+    uint64_t bytes = (uint64_t)(__nameplate_end - __nameplate_start);
+
+    if (bytes >= sizeof(NameplateHeader) &&
+        nameplate_name_at_kernel((uintptr_t)__nameplate_start, bytes,
+                                 (uintptr_t)run, &name))
+        kprintf("[BATON] core %u takes a one-way pass: %s — control does not "
+                "come back\n", core_idx, name.Text);
+    else
+        kprintf("[BATON] core %u takes a one-way pass: %016lx — control does "
+                "not come back\n", core_idx, (uint64_t)(uintptr_t)run);
 }
 
 /* ==========================================================================
@@ -180,11 +278,36 @@ uint32_t BatonPump(uint8_t core_idx)
          * Once popped, n is unreachable from the queue, so both are safe. */
         void (*run)(void *) = n->run;
         void  *ctx          = n->ctx;
+        bool   one_way      = __atomic_load_n(&n->one_way, __ATOMIC_RELAXED) != 0;
 
         /* Recorded BEFORE the call, not after, because the case this exists to
          * report is the continuation that never returns: a queue that will not
          * go quiet must be able to name the work standing in it. */
         q->last_pop_run = run;
+
+        if (one_way) {
+            /* Counted when TAKEN, because nothing comes back to count it: a
+             * drain that waited for this pass would be waiting for the pass it
+             * is running inside, which is the thirty seconds the power button
+             * used to take before it gave up on itself.
+             *
+             * LOCK XADD is a full barrier and locked instructions have a
+             * total order (Intel SDM Vol 3A §9.2.2; §8.2.2 in older
+             * revisions), so every other core observes `popped` rise before
+             * the continuation's first store — and the drain that runs INSIDE
+             * the continuation sees it by plain program order. No extra fence
+             * is owed: the acquire in baton_pop already made the marker
+             * visible, and this add is itself the barrier that orders it
+             * against the run.
+             *
+             * Counted exactly once even if a caller lied and the continuation
+             * did return: there is no second count after the call. */
+            baton_say_one_way(core_idx, run);
+            atomic_fetch_add_u64(&q->popped, 1);
+            run(ctx);
+            ran++;
+            continue;
+        }
 
         run(ctx);
         /* Count AFTER the continuation returns: BatonOutstanding
@@ -310,8 +433,9 @@ static inline bool knock_claim(Knock *k)
 void KnockInit(Knock *k, void (*run)(void *ctx), void *ctx)
 {
     __atomic_store_n(&k->baton.next, NULL, __ATOMIC_RELAXED);
-    k->baton.run = run;
-    k->baton.ctx = ctx;
+    k->baton.run     = run;
+    k->baton.ctx     = ctx;
+    k->baton.one_way = 0u;      /* a knock always comes back; see BatonPass */
     __atomic_store_n(&k->raised, 0u, __ATOMIC_RELAXED);
 }
 
@@ -381,9 +505,10 @@ error_t BatonSelfTest(void)
     __atomic_store_n(&tq.tail, &tq.stub, __ATOMIC_RELAXED);
 
     for (uint32_t i = 0; i < N; i++) {
-        seen[i]        = 0;
-        nodes[i].run   = baton_selftest_probe;
-        nodes[i].ctx   = &seen[i];
+        seen[i]          = 0;
+        nodes[i].run     = baton_selftest_probe;
+        nodes[i].ctx     = &seen[i];
+        nodes[i].one_way = 0u;   /* kmalloc does not zero; a node is born two-way */
     }
 
     /* ---- Phase 1: never-drop burst ---- */
