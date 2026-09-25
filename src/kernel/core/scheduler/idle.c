@@ -98,6 +98,19 @@ void idle_process_init(void) {
     idle_setup(&g_idle_process, g_amp.bsp_index);
     g_core_idle[g_amp.bsp_index] = &g_idle_process;
 
+    /* The receipt for the idle instruction, read on a board rather than
+     * assumed: which one cpu_idle will use, and the leaf-05H words it was
+     * decided from. */
+    if (g_cpu_caps.has_monitor && g_cpu_caps.max_basic_leaf >= CPUID_LEAF_MONITOR) {
+        uint32_t eax, ebx, ecx, edx;
+        cpuid(CPUID_LEAF_MONITOR, &eax, &ebx, &ecx, &edx);
+        kprintf("[IDLE] idle cores wait in %s (CPUID.05H ecx=0x%x edx=0x%x)\n",
+                g_cpu_caps.has_mwait_c1 ? "MWAIT C1" : "HLT", ecx, edx);
+    } else {
+        kprintf("[IDLE] idle cores wait in HLT (%s)\n",
+                g_cpu_caps.has_monitor ? "no CPUID leaf 05H" : "no MONITOR/MWAIT");
+    }
+
     debug_printf("[IDLE] BSP idle process (core %u, PID 0)\n", g_amp.bsp_index);
     debug_printf("[IDLE]   Stack: 0x%lx-0x%lx\n",
                  (uintptr_t)g_idle_process.kernel_stack,
@@ -226,41 +239,17 @@ void cpu_idle(void) {
      * the one to finish. One atomic load when there is nothing to do. */
     TagFSServiceIfPending();
 
-    if (g_cpu_caps.has_monitor) {
-        /* MWAIT idle. Arm MONITOR on a per-core stack address (each idle
-         * process has its own stack), then MWAIT into the deepest
-         * SAFE C-state.
+    if (g_cpu_caps.has_mwait_c1) {
+        /* MWAIT C1 (hint 0x00). The monitored cell is this idle stack's own
+         * byte, which nobody writes, so only an interrupt ends the wait — on
+         * silicon the same C1 as HLT, with the LAPIC timer running (Intel SDM
+         * Vol 3A, C1 keeps it without ARAT). Deeper states are a policy of
+         * their own and are not chosen here.
          *
-         * C-state selection — Intel SDM Vol 3A §10.5.4.1 / §17.16.4:
-         *   - C1 always keeps the LAPIC timer ticking.
-         *   - C2+ stops the LAPIC timer counter UNLESS ARAT
-         *     (CPUID.06H:EAX[2]) is set.
-         *
-         * Encoding of MWAIT EAX hint:
-         *   bits 7:4  target C-state (0 = C0, 1 = C1, 2 = C2, ...)
-         *   bits 3:0  sub-C-state index (0 = first sub-state)
-         *
-         * Policy:
-         *   has_arat == 0  →  C1 (0x00) — never deeper, would stop timer
-         *   has_arat == 1  →  C2 (0x10) — modest power saving, IPI/timer
-         *                     still deliverable, exit latency typically
-         *                     under 10 µs.
-         *
-         * C3+ deliberately not picked: requires PAT/cache flush
-         * coordination per SDM §17.16.4.2 and exit latency jumps
-         * to ~100 µs — premature for a kernel that targets desktop /
-         * server workloads. Revisit for battery targets. */
-        /* Default to C1 (0x00) — always safe, LAPIC timer always ticks.
-         *
-         * C2 (0x10) hint when ARAT available was tried but caused
-         * intermittent timing regressions on QEMU TCG -cpu max: TCG's
-         * MWAIT emulation latency for C2 wakeup is markedly higher
-         * than for C1, enough to time out the stress-matrix command
-         * delivery window. Revert until either (a) TCG emulation is
-         * not in scope, or (b) we add per-environment idle policy
-         * (e.g. detect QEMU TCG vendor + force C1). */
+         * Taken only where leaf 05H enumerates a C1 sub-state (cpuid.c,
+         * mwait_c1_enumerated): QEMU TCG does not, and on more than one vCPU
+         * runs MWAIT as PAUSE — an idle core there would spin a host thread. */
         uint32_t mwait_eax = 0x00;
-        (void)g_cpu_caps.has_arat;  /* placeholder for future C2 path */
 
         volatile uint8_t monitor_cell;
         __asm__ volatile(".byte 0x0f,0x01,0xc8"        /* monitor rax,rcx,rdx */

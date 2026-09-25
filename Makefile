@@ -1353,7 +1353,9 @@ DEBUG      ?= off
 UEFI       ?= off
 # STRICT=on — make QEMU emulate real-HW behaviour without softening:
 #   • -cpu max               — exposes every feature TCG can emulate
-#                              (RDRAND/RDSEED/AVX2/AES-NI/SMEP/SMAP/UMIP/+invtsc).
+#                              (RDRAND/RDSEED/AVX2/AES-NI/SMEP/SMAP/UMIP). The
+#                              +invtsc asked for below is dropped by TCG — the
+#                              guest reports invtsc=0 — it takes effect on KVM.
 #                              Catches "kernel uses CPU feature without CPUID
 #                              guard" bugs that default qemu64 silently masks.
 #   • -machine q35           — modern PCH chipset (PCIe, AHCI, MSI-X, ACPI 6.x).
@@ -1367,8 +1369,11 @@ UEFI       ?= off
 #     - `bye` (ACPI S5) cleanly exits QEMU without -no-shutdown blocking.
 #     - For triple-fault diagnostics (halt + log) use LOG=on instead, which
 #       keeps both flags set and writes boxos_qemu.log.
-#   • -overcommit cpu-pm=on   — match real CPU power-management semantics
-#                              (HLT/MWAIT actually descheduled, not no-op).
+#   • -overcommit cpu-pm=on   — KVM only: lets the guest's HLT/MWAIT reach the
+#                              host CPU. Under TCG (every QEMU on this desk) it
+#                              does nothing: HLT already parks the vCPU thread,
+#                              and MWAIT on more than one vCPU runs as PAUSE —
+#                              which is why cpu_idle asks CPUID.05H first.
 STRICT     ?= off
 BOCHSDBG      ?= off
 BOCHS_DISPLAY ?= auto

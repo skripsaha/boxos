@@ -224,7 +224,13 @@ submitted:
     debug_printf("[%s%u] KCORE submit PID %u -> K%u (depth=%u)\n",
                  my_type, my_core, proc->pid, target, kcore_queue_depth(target));
 
-    lapic_send_ipi(g_amp.cores[target].lapic_id, IPI_WAKE_VECTOR);
+    /* No doorbell to ourselves. A K-Core submits only from the re-arm in
+     * kcore_process_entry, which runs inside its own pop loop: the next pop
+     * takes the pocket, and the sleep gate re-reads `count` under CLI before
+     * any HLT. An IPI to self would only interrupt the work already under
+     * way. */
+    if (target != my_core)
+        lapic_send_ipi(g_amp.cores[target].lapic_id, IPI_WAKE_VECTOR);
     return OK;
 }
 

@@ -192,6 +192,7 @@ typedef struct process_t
     void *kernel_stack;
     void *kernel_stack_top;
     void *kernel_stack_guard_base;
+    pte_t kernel_stack_guard_leaf;  // the Pull Map leaf the guard replaced — restored verbatim at free
 
     bool started;
     uint8_t home_core;              // App Core index for scheduling (RunQueue lives here)

@@ -40,6 +40,22 @@ void cpuid_count(uint32_t leaf, uint32_t subleaf, uint32_t* eax, uint32_t* ebx, 
     );
 }
 
+/* Leaf 05H, ECX/EDX: may MWAIT be asked for C1? Intel SDM Vol 2A, CPUID leaf 5:
+ * ECX[0] says the MWAIT extensions are enumerated, and then EDX[7:4] is the
+ * number of C1 sub-states MWAIT supports. A processor without the extensions
+ * predates the sub-state count and takes the zero hint; a processor WITH them
+ * that counts no C1 sub-state has said MWAIT is not how it wants to idle.
+ * The SDM would still let the hint through (it may be ignored), so this is a
+ * policy and not an architectural rule — the one Linux keeps in
+ * prefer_mwait_c1_over_halt (arch/x86/kernel/process.c). It matters where it
+ * is taken literally: QEMU TCG enumerates the extensions with EDX=0, and on
+ * more than one vCPU executes MWAIT as PAUSE, so an idle core there spins a
+ * host thread instead of sleeping. Coffee Lake and Haswell/Broadwell report
+ * EDX=0x11142120 (two C1 sub-states) and keep MWAIT. */
+static bool mwait_c1_enumerated(uint32_t ecx, uint32_t edx) {
+    return !(ecx & 1u) || ((edx >> 4) & 0xFu) != 0;
+}
+
 void cpu_detect_features(void) {
     uint32_t eax, ebx, ecx, edx;
 
@@ -229,6 +245,7 @@ void cpu_detect_features(void) {
         if (max_line == 0) max_line = 64;
         g_cpu_caps.monitor_line_min = min_line;
         g_cpu_caps.monitor_line_max = max_line;
+        g_cpu_caps.has_mwait_c1 = g_cpu_caps.has_monitor && mwait_c1_enumerated(ecx, edx);
     }
 
     /* IA32_CORE_CAPABILITIES — Intel SDM Vol 4 Table 2-2 (MSR 0xCF).
@@ -516,6 +533,7 @@ void cpu_intersect_features_ap(void) {
     bool bsp_x2apic       = g_cpu_caps.has_x2apic;
     bool bsp_tsc_deadline = g_cpu_caps.has_tsc_deadline;
     bool bsp_monitor      = g_cpu_caps.has_monitor;
+    bool bsp_mwait_c1     = g_cpu_caps.has_mwait_c1;
     bool bsp_xsave        = g_cpu_caps.has_xsave;
     bool bsp_avx          = g_cpu_caps.has_avx;
     bool bsp_pcid         = g_cpu_caps.has_pcid;
@@ -670,6 +688,9 @@ void cpu_intersect_features_ap(void) {
             g_cpu_caps.monitor_line_min = ap_min;
         if (ap_max != 0 && ap_max > g_cpu_caps.monitor_line_max)
             g_cpu_caps.monitor_line_max = ap_max;
+        g_cpu_caps.has_mwait_c1 &= g_cpu_caps.has_monitor && mwait_c1_enumerated(ecx, edx);
+    } else {
+        g_cpu_caps.has_mwait_c1 = false;
     }
 
     /* Heterogeneity log — only fires when this AP actually flipped a
@@ -686,6 +707,7 @@ void cpu_intersect_features_ap(void) {
     _LOG_DROP(x2apic,       bsp_x2apic);
     _LOG_DROP(tsc_deadline, bsp_tsc_deadline);
     _LOG_DROP(monitor,      bsp_monitor);
+    _LOG_DROP(mwait_c1,     bsp_mwait_c1);
     _LOG_DROP(xsave,        bsp_xsave);
     _LOG_DROP(avx,          bsp_avx);
     _LOG_DROP(pcid,         bsp_pcid);

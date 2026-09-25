@@ -20,6 +20,13 @@ typedef struct {
     bool has_x2apic;            // x2APIC support (CPUID.1:ECX[21])
     bool has_tsc_deadline;      // LAPIC TSC-deadline timer (CPUID.1:ECX[24])
     bool has_monitor;           // MONITOR/MWAIT (CPUID.1:ECX[3])
+    bool has_mwait_c1;          // MWAIT may be asked for C1: has_monitor, and leaf 05H
+                                // either has no MWAIT extensions (ECX[0]=0) or counts
+                                // at least one C1 sub-state (EDX[7:4]!=0). The rule
+                                // Linux uses (prefer_mwait_c1_over_halt). QEMU TCG
+                                // offers MONITOR with EDX=0 and runs MWAIT as PAUSE
+                                // on more than one vCPU — this is what keeps an idle
+                                // core there asleep instead of spinning.
     bool has_waitpkg;           // UMONITOR/UMWAIT support (CPUID.7.0:ECX[5])
     bool has_invariant_tsc;     // Invariant TSC
     bool has_xsave;             // XSAVE/XRSTOR support (CPUID.1:ECX[26])

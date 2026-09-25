@@ -326,7 +326,17 @@ static bool process_alloc_kernel_stack(process_t *proc)
     size_t kernel_stack_size = CONFIG_KERNEL_STACK_PAGES * VMM_PAGE_SIZE;
     size_t total_pages       = CONFIG_KERNEL_STACK_TOTAL_PAGES;
 
-    void *stack_phys = pmm_alloc(total_pages);
+    /* Zeroed, as every kernel stack must be: the block's previous owner may
+     * have been a cabin, the heap, or firmware that ran code out of it, and
+     * none of that belongs on a stack the kernel reads uninitialised slots
+     * from. The same choice as Linux (THREADINFO_GFP carries __GFP_ZERO).
+     * Under QEMU TCG it also clears a page that still holds translated
+     * firmware code: TCG routes every store to such a page through its
+     * self-modifying-code path, and a kernel stack on one ran every entry
+     * into the kernel ~80x slower (measured 2026-09-25: SeaBIOS relocates its
+     * init code to the top of low RAM, and the first process's stack landed
+     * on it). */
+    void *stack_phys = pmm_alloc_zero(total_pages);
     if (!stack_phys)
     {
         kprintf("[PROCESS] ERROR: kernel stack alloc failed (%zu pages, PID %u)\n",
@@ -345,6 +355,7 @@ static bool process_alloc_kernel_stack(process_t *proc)
         return false;
     }
 
+    proc->kernel_stack_guard_leaf = *guard_pte;
     *guard_pte = 0;
     vmm_shootdown_page(kernel_ctx, (uintptr_t)stack_virt_base);
 
@@ -394,8 +405,15 @@ static void process_free_kernel_stack(process_t *proc)
         return;
     }
 
-    *guard_pte = vmm_make_pte(stack_phys, VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE);
-    vmm_shootdown_page(kernel_ctx, guard_virt);
+    /* Put back exactly the leaf the guard replaced — global and no-execute
+     * included; PRESENT|WRITABLE alone would hand the allocator a writable,
+     * executable alias.
+     *
+     * No shootdown: a leaf going from not-present to present needs no
+     * invalidation (Intel SDM Vol 3A §4.10.4.3) — nothing is cached from an
+     * entry whose P flag is 0, and the 1->0 change that punched the guard out
+     * was shot down on every core when the stack was allocated. */
+    *guard_pte = proc->kernel_stack_guard_leaf;
 
     pmm_free((void *)stack_phys, CONFIG_KERNEL_STACK_TOTAL_PAGES);
 
