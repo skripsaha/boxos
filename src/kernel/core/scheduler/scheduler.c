@@ -407,18 +407,34 @@ error_t sched_enqueue(process_t *proc)
         return ERR_HOME_CORE_INVALID;
     }
 
-    // Affinity: if process is cache-warm on home_core, keep it there
-    // If cache-cold, consider migration ONLY if load imbalance is significant
-    uint8_t target_core = proc->home_core;
+    /* A strand still on a CPU belongs to that core's runqueue and to no other.
+     *
+     * The wake that reaches here is process_set_state's WAITING->WORKING flip,
+     * and a strand can be flipped while it is still current: a K-Core parks it
+     * and answers it while its App-Core has not yet switched it out. Only the
+     * core that owns it can take it out of a runqueue safely — schedule()'s
+     * dispatch claim (on_cpu) refuses a strand another core still holds, and
+     * the strand refused there used to be dropped. So while on_cpu names a
+     * core, that core is the target, and cold migration is not considered: the
+     * cache is not cold, it is in use.
+     *
+     * Read under the strand's state_lock (process_set_state holds it), so
+     * on_cpu can only move from a core to -1 from here on, never to a new
+     * core: a WAITING strand is in no runqueue and nobody can dispatch it. */
+    int16_t  owner       = __atomic_load_n(&proc->on_cpu, __ATOMIC_ACQUIRE);
+    uint8_t  target_core = proc->home_core;
     uint64_t ticks_since_run = 0;
     uint64_t now = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
     if (now >= proc->last_run_time) {
         ticks_since_run = now - proc->last_run_time;
     }
 
+    if (owner >= 0 && (uint32_t)owner < g_sched_core_count) {
+        target_core = (uint8_t)owner;
+    }
     // If cache-cold (not run recently), consider load balancing
     // Only migrate if another core has ≥2 fewer processes (avoid thrashing)
-    if (ticks_since_run >= SCHEDULER_AFFINITY_WARM_TICKS) {
+    else if (ticks_since_run >= SCHEDULER_AFFINITY_WARM_TICKS) {
         uint32_t home_load = RunqueueAtomicTotal(&g_core_sched[target_core].runqueue);
         uint32_t min_load = home_load;
         uint8_t best_core = target_core;
@@ -751,6 +767,17 @@ static process_t *sched_try_steal(uint8_t my_core)
         SchedQueue *q = &vs->runqueue.queues[prio];
         if (q->count == 0) continue;
 
+        /* Never the strand the victim is still running. schedule() puts its
+         * outgoing strand back into its own runqueue BEFORE it picks the next
+         * one, so for a moment that strand is both queued and on_cpu. Taken
+         * here, the thief's dispatch claim loses to the owner and the strand
+         * is in no runqueue and on no core — WORKING, and never run again.
+         * The victim releases it a few instructions later; it is not ours to
+         * take until then. Read under the victim's runqueue lock: a queued
+         * strand's claim can only be released, never taken, while we hold it. */
+        if (__atomic_load_n(&q->procs[q->head]->on_cpu, __ATOMIC_ACQUIRE) >= 0)
+            continue;
+
         stolen = q->procs[q->head];
         q->procs[q->head] = NULL;
         stolen->rq_prio = -1;
@@ -789,6 +816,45 @@ static process_t *sched_try_steal(uint8_t my_core)
     }
 
     return stolen;
+}
+
+/* A dispatch claim lost to the core that still runs the strand. By
+ * construction this cannot happen — a wake enqueues a running strand only onto
+ * its owner (sched_enqueue) and a steal skips one (sched_try_steal) — so
+ * reaching here is a defect, and it is said. The strand is not dropped for it:
+ * it is back in the owner's runqueue, where the owner, which is the only core
+ * entitled to take it, will find it. Under the owner's runqueue lock the state
+ * read is decisive (the same reasoning as the re-enqueue in schedule()): a
+ * strand parked meanwhile is left to its wake. */
+static void sched_hand_back(process_t *proc, int16_t owner)
+{
+    static uint32_t said;
+    if (__atomic_fetch_add(&said, 1u, __ATOMIC_RELAXED) == 0)
+        kprintf("[SCHED] DEFECT: core %u lost the dispatch claim on PID %u to "
+                "core %d, which still runs it — handed back to that core\n",
+                (unsigned)amp_get_core_index(), proc->pid, (int)owner);
+
+    if (owner < 0 || (uint32_t)owner >= g_sched_core_count)
+        owner = (int16_t)proc->home_core;
+    scheduler_state_t *os = &g_core_sched[owner];
+    int prio = sched_determine_priority(proc);
+
+    spin_lock(&os->runqueue.lock);
+    bool queued = false;
+    if (__atomic_load_n(&proc->state, __ATOMIC_ACQUIRE) == PROC_WORKING &&
+        !runqueue_contains(&os->runqueue, proc) &&
+        runqueue_enqueue(&os->runqueue, proc, prio))
+    {
+        proc->current_prio = (int8_t)prio;
+        __atomic_fetch_add(prio == SCHED_PRIO_CONTEXT ? &g_core_context_count[owner]
+                                                      : &g_core_normal_count[owner],
+                           1, __ATOMIC_RELAXED);
+        queued = true;
+    }
+    spin_unlock(&os->runqueue.lock);
+
+    if (queued && owner != (int16_t)amp_get_core_index())
+        lapic_send_ipi(g_amp.cores[owner].lapic_id, IPI_WAKE_VECTOR);
 }
 
 // ---------------------------------------------------------------------------
@@ -942,13 +1008,19 @@ void schedule(void *frame_ptr)
      * idle; the next tick re-selects. The owner releases on_cpu below when it
      * switches the strand out. on_cpu == me means a consecutive run (already
      * ours) — keep it without re-claiming. */
+    process_t *refused = NULL;
+    int16_t    refused_owner = -1;
     if (next && !process_is_idle(next)) {
         int16_t me8 = (int16_t)amp_get_core_index();
         if (__atomic_load_n(&next->on_cpu, __ATOMIC_ACQUIRE) != me8) {
             int16_t expect = -1;
             if (!__atomic_compare_exchange_n(&next->on_cpu, &expect, me8,
                                              false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-                /* Another core still owns `next` — averting double-dispatch. */
+                /* Another core still owns `next` — averting double-dispatch.
+                 * `next` is already out of every runqueue, so it is handed back
+                 * to its owner below, once this core's scheduler_lock is gone. */
+                refused       = next;
+                refused_owner = expect;
                 next = idle_process_get();
             }
         }
@@ -1003,6 +1075,9 @@ void schedule(void *frame_ptr)
         __atomic_store_n(&current->on_cpu, (int16_t)-1, __ATOMIC_RELEASE);
     }
     spin_unlock(&s->scheduler_lock);
+
+    if (refused)
+        sched_hand_back(refused, refused_owner);
 
     /* Nightwatch: real work dispatched here, so this core is no longer idle
      * and a later stall counts as a new episode. One byte store. */

@@ -4388,6 +4388,95 @@ run_kcoreclaimmut() {
     chk $? "kcoreclaimmut: and bench did not complete three runs (rows=$rows)"
 }
 
+# ── runnable ─────────────────────────────────────────────────────────────────
+#
+# RUNNABLE UNSCHEDULED is Nightwatch's proof for a strand that is WORKING and
+# yet on no CPU and never dispatched again: the runqueue lost it. For as long
+# as it existed it could not fire. It asked `!e->on_cpu`, and a strand off the
+# CPU carries -1 there, so the test was true only of a strand RUNNING on core
+# 0 — which on a multi-core machine is a K-Core and runs none. And the loss it
+# was written for was real: a steal could take a strand its core was still
+# running, the thief's dispatch claim then lost to the owner, and schedule()
+# answered a lost claim by going idle over a strand it had already taken out of
+# every runqueue (both closed 2026-09-26, scheduler.c).
+#
+# runnable    — bench three times at sixteen cores: the proof stays silent and
+#               every run completes.
+# runnablemut — schedule() drops one application strand right after taking it
+#               out of its runqueue, which is what the lost-claim branch used
+#               to do. The proof must name it, "in no runqueue", on a machine
+#               whose bench then never finishes.
+runnable_boot() {
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    sleep 4
+    local run=0
+    while [ $run -lt 3 ]; do
+        local MARK
+        MARK=$(wc -l < build/serial.log)
+        if ! type_cmd "bench"; then break; fi
+        sleep 1
+        key_press ret
+        wait_until "$WAIT_QUIET_S" "a bench row or a verdict" \
+            'tail -n +$((MARK + 1)) build/serial.log | grep -q "create+write64+delete" ||
+              grep -q "RUNNABLE UNSCHEDULED" build/serial.log'
+        grep -q "RUNNABLE UNSCHEDULED" build/serial.log && break
+        run=$((run+1))
+    done
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.$1.log"
+}
+
+runnable_drop_on() {
+    mutate src/kernel/core/scheduler/scheduler.c
+    python3 - <<'EOF'
+p = "src/kernel/core/scheduler/scheduler.c"
+s = open(p).read()
+anchor = """    // Select next
+    process_t *next = scheduler_select_next();
+"""
+assert anchor in s, "runnable drop anchor missing"
+dropped = """    // Select next
+    process_t *next = scheduler_select_next();
+    { static uint32_t lcm_seen; if (next && !process_is_idle(next) && next->pid >= 3 && ++lcm_seen == 2000) next = idle_process_get(); } /* logcheck mutation: one application strand is taken out of its runqueue and never dispatched */
+"""
+open(p, "w").write(s.replace(anchor, dropped, 1))
+EOF
+    mut_done src/kernel/core/scheduler/scheduler.c "logcheck mutation"
+}
+
+runnable_drop_off() {
+    restore src/kernel/core/scheduler/scheduler.c
+}
+
+run_runnable() {
+    echo "== runnable: bench three times at sixteen cores, and RUNNABLE UNSCHEDULED stays silent =="
+    build
+    runnable_boot runnable
+    L="$SCRATCH/serial.runnable.log"
+    local rows
+    rows=$(grep -c "create+write64+delete" "$L")
+    [ "$rows" -ge 3 ]
+    chk $? "runnable: bench completed three runs at sixteen cores (rows=$rows)"
+    ! grep -q "RUNNABLE UNSCHEDULED" "$L"
+    chk $? "runnable: and no strand was accused of being runnable and unscheduled"
+}
+
+run_runnablemut() {
+    echo "== runnablemut: schedule() drops one strand after dequeuing it, and Nightwatch must name it =="
+    runnable_drop_on; build
+    runnable_boot runnablemut
+    runnable_drop_off
+    L="$SCRATCH/serial.runnablemut.log"
+    grep -q "RUNNABLE UNSCHEDULED: on no CPU and in no runqueue" "$L"
+    chk $? "runnablemut: Nightwatch named the dropped strand — RUNNABLE UNSCHEDULED, in no runqueue"
+    local rows
+    rows=$(grep -c "create+write64+delete" "$L")
+    [ "$rows" -lt 3 ]
+    chk $? "runnablemut: and bench did not complete three runs (rows=$rows)"
+}
+
 # ── lostwake ─────────────────────────────────────────────────────────────────
 #
 # Nightwatch's LOST WAKE used to be judged at a glance: a strand parked on a
@@ -7824,6 +7913,8 @@ case "${1:-both}" in
     sleepsmut)  run_sleepsmut ;;
     kcoreclaim) run_kcoreclaim ;;
     kcoreclaimmut) run_kcoreclaimmut ;;
+    runnable)   run_runnable ;;
+    runnablemut) run_runnablemut ;;
     lostwake)   run_lostwake ;;
     lostwakemut) run_lostwakemut ;;
     chit)       run_chit ;;
@@ -7863,8 +7954,8 @@ case "${1:-both}" in
     growcut)  run_growcut ;;
     growmut)  run_growmut ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
 esac
 
 LOGCHECK_FINISHED=1
