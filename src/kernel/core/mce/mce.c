@@ -64,6 +64,13 @@ static bool      g_mce_initialized = false;
  * takes it back to false, because one unarmed core is enough to put a
  * broadcast back on the table. */
 static bool      g_mce_lmce_armed  = false;
+
+/* What the BSP's own IA32_MCG_CAP said. SDM Vol 3B §15.3.1.1 makes that
+ * register per LOGICAL PROCESSOR, and on a hybrid part a P-core and an E-core
+ * need not report the same bank count, the same MCG_SER_P or the same
+ * MCG_CMCI_P. So these two are the BSP's answer and nothing more — telemetry
+ * (mce_bank_count) and the boot line. Every core that walks banks, classifies
+ * a record or arms IA32_MCi_CTL2 reads ITS OWN cap where it stands. */
 static uint32_t  g_mce_bank_count  = 0;
 static uint64_t  g_mce_mcg_cap     = 0;
 static uint64_t  g_mce_ban_mask    = 0;  /* bit i set ⇒ bank i CTL skipped */
@@ -97,6 +104,7 @@ static void mce_note_pool_arm(void);
  * delivers through the same slots and the same baton the #MC walk uses. */
 static void MceCmciVectorClaim(void);
 static void MceCmciSay(void);
+static void MceCmciDeliveryNone(const char *why);
 void        MceCmciArmLocal(void);
 
 /* ─── MSR primitives ──────────────────────────────────────────────── */
@@ -445,11 +453,8 @@ void mce_init(void) {
 }
 
 void mce_ap_init(void) {
-    /* APs program their own CR4.MCE + per-bank state. The BSP detected
-     * bank count + capability flags via the shared g_mce_mcg_cap.
-     * On a hybrid CPU where an AP reports different MCG_CAP, we trust
-     * the AP's CPUID gate to keep us from #GPing on bank registers it
-     * doesn't have. */
+    /* APs program their own CR4.MCE + per-bank state, from their own
+     * IA32_MCG_CAP (SDM Vol 3B §15.3.1.1: per logical processor). */
 
     /* The BSP refused, so nothing was ever armed and the fleet answer is
      * already false — there is nothing here to take back. */
@@ -464,16 +469,29 @@ void mce_ap_init(void) {
         mce_lmce_fleet_disarm("CPUID on this logical processor reports no "
                               "MCE/MCA, so there is no IA32_MCG_EXT_CTL here "
                               "to arm");
+        /* The same is owed to the corrected-error answer: a core with no MCA
+         * has no IA32_MCi_CTL2, counts no corrected errors and raises no
+         * CMCI, so "CMCI delivery is armed" must stop being a claim about
+         * this machine. */
+        MceCmciDeliveryNone("CPUID on this logical processor reports no "
+                            "MCE/MCA, so it has no IA32_MCi_CTL2 and no "
+                            "corrected-error interrupt");
         return;
     }
 
     mce_cr4_enable();
 
-    /* Re-read MCG_CAP — possible per-thread divergence on hybrid CPUs.
-     * Cap by the BSP-observed count to keep telemetry coherent. */
+    /* This core's OWN MCG_CAP and its own bank count. SDM Vol 3B §15.3.1.1:
+     * the register is per logical processor, and on a hybrid part the two core
+     * types need not implement the same number of banks. Clamping this to the
+     * BSP's count — which is what stood here — left an E-core with more banks
+     * than the BSP silently unprogrammed: their IA32_MCi_CTL stayed at the
+     * firmware's value and their stale IA32_MCi_STATUS was never cleared, so
+     * the first #MC on that core decoded a POST entry as a live record. The
+     * only clamp left is the array bound. */
     uint64_t cap = mce_rdmsr(MCE_MSR_MCG_CAP);
     uint32_t bank_count = (uint32_t)(cap & MCE_CAP_COUNT_MASK);
-    if (bank_count > g_mce_bank_count) bank_count = g_mce_bank_count;
+    if (bank_count > MCE_MAX_BANKS) bank_count = MCE_MAX_BANKS;
 
     mce_program_banks(bank_count, g_mce_ban_mask);
 
@@ -525,6 +543,13 @@ typedef struct {
  *
  * Called only from the #MC handler, i.e. always in exception context — the
  * EN rule below is an exception-context rule and would be wrong for a poll.
+ *
+ * `cap` is the IA32_MCG_CAP of the LOGICAL PROCESSOR standing here, read
+ * where the caller stands rather than taken from the BSP's: §15.3.1.1 makes
+ * the register per logical processor, so a hybrid part can set MCG_SER_P on
+ * one core type and leave it clear on the other, and grading an E-core's
+ * record against a P-core's SER_P decides recoverability from a bit that core
+ * never reported.
  *
  * The gate that used to be missing is MCG_CAP.MCG_SER_P (bit 24). SDM
  * §15.6.1: software must use it to detect the presence of software error
@@ -579,12 +604,12 @@ typedef struct {
  * "ignore OVER for UCNA", and its generic "Overflowed uncorrected" PANIC
  * rule is the last rule of all. Here that last rule lives in the SER_P=0
  * arm below, where every uncorrected record is fatal already. */
-static mce_severity_t mce_classify(uint64_t status) {
+static mce_severity_t mce_classify(uint64_t status, uint64_t cap) {
     if (!(status & MCE_MC_STATUS_VAL)) return MCE_SEV_NONE;
     if (!(status & MCE_MC_STATUS_UC))  return MCE_SEV_CORRECTED;
     if (status & MCE_MC_STATUS_PCC)    return MCE_SEV_UC;
 
-    if (!(g_mce_mcg_cap & MCE_CAP_MCG_SER_P)) return MCE_SEV_UC;
+    if (!(cap & MCE_CAP_MCG_SER_P)) return MCE_SEV_UC;
     if (!(status & MCE_MC_STATUS_EN))         return MCE_SEV_UCNA;
     if (!(status & MCE_MC_STATUS_S)) {
         return (status & MCE_MC_STATUS_AR) ? MCE_SEV_UC : MCE_SEV_UCNA;
@@ -622,12 +647,13 @@ static const char *mce_sev_str(mce_severity_t s) {
  * taking them as a page number offlines and MIGRATES a healthy page that
  * belongs to a running cabin — losing every write made to it inside the
  * shootdown window — while the page that actually failed stays in service.
- * A record we cannot read is logged and left alone. */
+ * A record we cannot read is logged and left alone. `cap` is the caller's own
+ * IA32_MCG_CAP, for the reason mce_classify gives. */
 static uintptr_t mce_extract_phys_page(uint64_t status, uint64_t addr,
-                                       uint64_t misc) {
-    if (!(status & MCE_MC_STATUS_ADDRV))       return 0;
-    if (!(g_mce_mcg_cap & MCE_CAP_MCG_SER_P))  return 0;
-    if (!(status & MCE_MC_STATUS_MISCV))       return 0;
+                                       uint64_t misc, uint64_t cap) {
+    if (!(status & MCE_MC_STATUS_ADDRV))  return 0;
+    if (!(cap & MCE_CAP_MCG_SER_P))       return 0;
+    if (!(status & MCE_MC_STATUS_MISCV))  return 0;
 
     uint32_t mode = (uint32_t)((misc >> MCE_MC_MISC_ADDR_MODE_SHIFT) &
                                MCE_MC_MISC_ADDR_MODE_MASK);
@@ -788,7 +814,15 @@ typedef struct {
 
 static MceNoteSlot       g_mce_notes[MCE_NOTE_POOL_SIZE];
 static volatile uint32_t g_mce_note_cursor = 0;
-static volatile uint64_t g_mce_notes_lost  = 0;
+
+/* Two counters for one pool, because the two losses are not the same loss and
+ * one sentence cannot be true of both. A #MC record that never reached a
+ * K-Core may name a page this kernel has already taken out of service; a
+ * corrected record names nothing and costs a count. Adding them together and
+ * saying "those pages stay poisoned" would describe corrected errors as
+ * poisoned memory. */
+static volatile uint64_t g_mce_notes_lost  = 0;  /* from the #MC bank walk */
+static volatile uint64_t g_cmci_notes_lost = 0;  /* from the CMCI walk */
 
 /* The losses since anyone last said them, claimed with an exchange so the
  * count reads the same whether a K-Core or a dying core says it. */
@@ -796,9 +830,24 @@ static void mce_notes_lost_say(void) {
     uint64_t lost = __atomic_exchange_n(&g_mce_notes_lost, 0, __ATOMIC_RELAXED);
     if (lost == 0) return;
     kprintf("[MCE] ERROR: %lu machine-check record(s) never reached a K-Core "
-            "— the bank walk outran the pool of %u. Those pages stay poisoned "
-            "in the PMM bitmap, so no future allocation takes them, but they "
-            "carry no `mce:poisoned` tag and their banks were never said\n",
+            "— the bank walk outran the pool of %u. Any page one of them named "
+            "stays poisoned in the PMM bitmap, so no future allocation takes "
+            "it, but it carries no `mce:poisoned` tag and its bank was never "
+            "said\n",
+            (unsigned long)lost, (unsigned)MCE_NOTE_POOL_SIZE);
+}
+
+/* The same for the corrected side. Said separately and in its own words: a
+ * corrected record that found no slot was read out of its bank and cleared, so
+ * the count below is the only trace it ever existed. */
+static void mce_cmci_lost_say(void) {
+    uint64_t lost = __atomic_exchange_n(&g_cmci_notes_lost, 0, __ATOMIC_RELAXED);
+    if (lost == 0) return;
+    kprintf("[MCE] ERROR: %lu corrected record(s) were read out of their banks "
+            "and cleared with nowhere to keep them — the pool of %u is shared "
+            "with the #MC walk and was full. Each bank that lost one and that "
+            "this core arms has had its corrected-error threshold raised, so "
+            "the machine reports less often rather than losing more\n",
             (unsigned long)lost, (unsigned)MCE_NOTE_POOL_SIZE);
 }
 
@@ -870,6 +919,7 @@ static void mce_note_worker(void *slot_ptr) {
     __atomic_store_n(&slot->in_use, 0, __ATOMIC_RELEASE);
 
     mce_notes_lost_say();
+    mce_cmci_lost_say();
     mce_record_say(&r);
 
     if (r.phys != 0 &&
@@ -919,7 +969,8 @@ static MceNoteSlot *mce_note_claim(const MceRecord *r) {
         slot->rec = *r;
         return slot;
     }
-    __atomic_fetch_add(&g_mce_notes_lost, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(r->via_cmci ? &g_cmci_notes_lost : &g_mce_notes_lost,
+                       1, __ATOMIC_RELAXED);
     return NULL;
 }
 
@@ -934,6 +985,7 @@ static void mce_note_deliver(MceNoteSlot *slot, bool say_here) {
     __atomic_store_n(&slot->in_use, 0, __ATOMIC_RELEASE);
 
     mce_notes_lost_say();
+    mce_cmci_lost_say();
     mce_record_say(&r);
 }
 
@@ -964,6 +1016,14 @@ static void mce_note_deliver(MceNoteSlot *slot, bool say_here) {
  * that lock. So a corrected record rides the same slot and the same baton a
  * #MC record rides, and a K-Core says it.
  */
+
+/* Where a core stands on corrected-error DELIVERY. Three states and not two,
+ * because "has not been asked yet" is not "answered no": a core arms its banks
+ * before its local APIC is software-enabled and comes back for the LVT
+ * afterwards. */
+#define MCE_CMCI_DELIVERY_UNKNOWN  0u  /* this core has not reached the LVT */
+#define MCE_CMCI_DELIVERY_NO       1u  /* it did, and nothing carries CMCI */
+#define MCE_CMCI_DELIVERY_YES      2u  /* the LVT read back armed */
 
 /* IA32_MCi_CTL2 layout — SDM Vol 3B §16.5.1, Figure 16-8. Bits 14:0 are the
  * corrected error count threshold, bit 30 is CMCI_EN, everything else is
@@ -1000,20 +1060,188 @@ static SummonsResponder g_cmci_responder;
  * descriptor index 0), so the BSP's two passes land in one slot. */
 typedef struct {
     uint64_t    mine;     /* bit i ⇒ THIS core wrote bank i's CMCI_EN */
+    uint64_t    capped;   /* bit i ⇒ bank i is at its threshold ceiling, said */
     uint32_t    present;  /* banks whose CTL2 carries CMCI_EN at all */
     uint32_t    armed;    /* popcount(mine) */
     uint32_t    held;     /* enabled, and not by this core */
     uint32_t    fresh;    /* banks the most recent pass turned on */
     const char *owed;     /* why delivery is not armed HERE, or NULL */
+    volatile uint8_t delivery;  /* MCE_CMCI_DELIVERY_* — this core's verdict */
 } MceCmciCoreArm;
 
 static MceCmciCoreArm   g_cmci_arm[MAX_CORES];
-static bool             g_cmci_delivery = false;
+
+/* Said once for the machine, not once per core: on a sixteen-thread part the
+ * same sentence sixteen times is noise an operator has to read past. */
+static volatile uint32_t g_cmci_armed_said   = 0;
+static volatile uint32_t g_cmci_unarmed_said = 0;
 
 /* amp_get_core_index() returns uint8_t and MAX_CORES is 256, so the index is
  * in range by type. */
 static MceCmciCoreArm *MceCmciMine(void) {
     return &g_cmci_arm[amp_get_core_index()];
+}
+
+/* Is a corrected error carried out as an interrupt on EVERY core that has
+ * reached the question?
+ *
+ * DERIVED from the per-core verdicts, never accumulated into one boolean. A
+ * machine-wide flag that each core exchanges into says what the LAST core to
+ * speak said, and the cores do not speak in any fixed order — the BSP reaches
+ * its delivery pass at main.c's irqchip_init, each AP at its own lapic_enable
+ * — so one core's failure was re-covered by the next core's success and the
+ * machine-wide line was printed a second time. A scan of MAX_CORES entries on
+ * a path taken twice per core per boot costs nothing and cannot be made wrong
+ * by arrival order.
+ *
+ * UNKNOWN entries are cores that have not reached the LVT question at all
+ * (never booted, or still between their bank pass and their delivery pass).
+ * They are neither a yes nor a no, so they neither carry the answer nor sink
+ * it; what sinks it is one core that HAS answered and answered no. */
+static bool MceCmciFleetDelivering(void) {
+    bool any = false;
+    for (uint32_t i = 0; i < MAX_CORES; i++) {
+        uint8_t v = __atomic_load_n(&g_cmci_arm[i].delivery, __ATOMIC_ACQUIRE);
+        if (v == MCE_CMCI_DELIVERY_NO)  return false;
+        if (v == MCE_CMCI_DELIVERY_YES) any = true;
+    }
+    return any;
+}
+
+/* Record THIS core's delivery verdict, and say it once for the machine.
+ *
+ * A NO on a core's FIRST pass is not news and is deliberately silent: both
+ * call sites arm the banks before the local APIC is software-enabled and come
+ * back for delivery afterwards, and mce_init's MceCmciSay names what is owed
+ * meanwhile. A NO on a LATER pass is news — that pass was the one that was
+ * supposed to finish the job. */
+static void MceCmciDeliverySet(uint8_t verdict, const char *why) {
+    MceCmciCoreArm *me  = MceCmciMine();
+    uint8_t         was = __atomic_load_n(&me->delivery, __ATOMIC_ACQUIRE);
+
+    me->owed = (verdict == MCE_CMCI_DELIVERY_YES) ? NULL : why;
+    __atomic_store_n(&me->delivery, verdict, __ATOMIC_RELEASE);
+
+    uint32_t expected = 0;
+
+    if (verdict == MCE_CMCI_DELIVERY_YES) {
+        if (!__atomic_compare_exchange_n(&g_cmci_armed_said, &expected, 1,
+                                         false, __ATOMIC_ACQ_REL,
+                                         __ATOMIC_RELAXED)) {
+            return;
+        }
+        kprintf("[MCE] core %u: CMCI armed on %u of %u bank(s) that implement "
+                "it (%u held by a logical processor sharing them), delivered "
+                "on vector 0x%02x — this pass armed %u of those bank(s)%s. A "
+                "corrected error now raises an interrupt instead of waiting "
+                "in its bank for the next #MC to walk past it. Every other "
+                "core arms its own banks and its own LVT; this line is this "
+                "core's\n",
+                (unsigned)amp_get_core_index(),
+                (unsigned)me->armed, (unsigned)me->present,
+                (unsigned)me->held, (unsigned)g_cmci_vector,
+                (unsigned)me->fresh,
+                (me->fresh < me->armed)
+                    ? " and found the rest already counting from this core's "
+                      "earlier pass, so what it added was delivery"
+                    : "");
+        return;
+    }
+
+    if (was == MCE_CMCI_DELIVERY_UNKNOWN) return;
+
+    if (!__atomic_compare_exchange_n(&g_cmci_unarmed_said, &expected, 1, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+        return;
+    }
+    kprintf("[MCE] core %u: CMCI delivery not armed: %s. Corrected errors on "
+            "this core are counted in their banks and carried out by nothing "
+            "until the next #MC walks past them\n",
+            (unsigned)amp_get_core_index(),
+            me->owed ? me->owed : "no reason was recorded");
+}
+
+/* This core will never deliver a corrected-error interrupt, and the reason is
+ * structural rather than an arming that failed. Recorded in the same slot, so
+ * the fleet answer counts it like any other core. Called from mce_ap_init,
+ * which returns before MceCmciArmLocal is ever reached. */
+static void MceCmciDeliveryNone(const char *why) {
+    MceCmciDeliverySet(MCE_CMCI_DELIVERY_NO, why);
+}
+
+/* The record pool had no room for bank `bank`'s corrected record, so the bank
+ * is told to ASK LESS OFTEN.
+ *
+ * CMCI shares the 32-slot pool with the #MC walk. One failing DIMM raising an
+ * interrupt per corrected error can hold every slot and starve a later #MC of
+ * the one thing that says which piece of hardware died. A cap of N reports a
+ * second would be this kernel guessing a rate; SDM Vol 3B §16.5.1 hands the
+ * problem back to the hardware instead — IA32_MCi_CTL2[14:0] is the number of
+ * corrected errors the bank counts BEFORE it raises CMCI, and it is the only
+ * knob the architecture gives for a bank that reports faster than software
+ * reads. Doubling it halves the rate, and the bound ends on an EVENT: the next
+ * saturation, never an interval. It is bounded twice over — the field is at
+ * most 15 bits, so one bank can be raised at most 15 times in a boot, and each
+ * raise is said with the number it rose to.
+ *
+ * Only a bank THIS core armed is touched. §16.5.1: "the CMCI facility of a
+ * bank may be shared by more than one logical processor", so retuning a bank a
+ * sibling or firmware owns would be this core rewriting somebody else's
+ * reporting policy — the same rule MceCmciBanksArm obeys when it declines to
+ * take such a bank over.
+ *
+ * ‼ The field's WIDTH is model-specific (§16.5.1). A doubled value that does
+ * not fit reads back with its high bits gone, and a read-back of ZERO is a
+ * bank that would never raise CMCI again — silence dressed as a fix. So the
+ * read-back is compared against what was there, and any write that did not
+ * actually raise the threshold is undone. */
+static void MceCmciThresholdRaise(uint32_t bank) {
+    MceCmciCoreArm *me  = MceCmciMine();
+    uint64_t        bit = 1ULL << bank;
+
+    if (!(me->mine & bit)) return;
+
+    uint64_t ctl2 = mce_rdmsr(MCE_MSR_MC_CTL2_BASE + bank);
+    uint64_t was  = ctl2 & MCE_MC_CTL2_THRESHOLD_MASK;
+    if (was == 0) return;
+
+    uint64_t want = was << 1;
+    if (want > MCE_MC_CTL2_THRESHOLD_MASK) want = MCE_MC_CTL2_THRESHOLD_MASK;
+
+    uint64_t now = was;
+    if (want != was) {
+        mce_wrmsr(MCE_MSR_MC_CTL2_BASE + bank,
+                  (ctl2 & ~MCE_MC_CTL2_THRESHOLD_MASK) | want);
+        now = mce_rdmsr(MCE_MSR_MC_CTL2_BASE + bank) &
+              MCE_MC_CTL2_THRESHOLD_MASK;
+        if (now <= was) {
+            mce_wrmsr(MCE_MSR_MC_CTL2_BASE + bank, ctl2);
+            now = was;
+        }
+    }
+
+    if (now > was) {
+        kprintf("[MCE] core %u: bank[%u] dropped a corrected record for want "
+                "of a pool slot, so its corrected-error threshold rises %lu "
+                "→ %lu (IA32_MCi_CTL2[14:0], SDM Vol 3B §16.5.1). This bank now "
+                "interrupts once per %lu corrected errors instead of once "
+                "per %lu\n",
+                (unsigned)amp_get_core_index(), (unsigned)bank,
+                (unsigned long)was, (unsigned long)now,
+                (unsigned long)now, (unsigned long)was);
+        return;
+    }
+
+    if (!(me->capped & bit)) {
+        me->capped |= bit;
+        kprintf("[MCE] core %u: bank[%u] dropped a corrected record and is "
+                "already at the highest threshold its IA32_MCi_CTL2 "
+                "implements (%lu) — nothing left to slow it down, so further "
+                "corrected records from this bank are read, cleared and "
+                "counted lost\n",
+                (unsigned)amp_get_core_index(), (unsigned)bank,
+                (unsigned long)was);
+    }
 }
 
 /* A corrected error reached its bank's threshold.
@@ -1027,14 +1255,25 @@ static MceCmciCoreArm *MceCmciMine(void) {
  * to anybody. */
 static void MceCmciAnswers(void) {
     bool     deferral = mce_deferral_open();
-    uint32_t taken    = 0;
-    uint32_t left     = 0;
 
-    for (uint32_t i = 0; i < g_mce_bank_count && i < MCE_MAX_BANKS; i++) {
+    /* THIS core's bank count and THIS core's cap. §15.3.1.1 makes IA32_MCG_CAP
+     * per logical processor, and the interrupt is delivered to the core whose
+     * banks crossed the threshold — walking the BSP's count here would read
+     * MSRs an E-core does not implement and miss the ones it does. Reading it
+     * costs one rdmsr in a handler that already does three per bank. */
+    uint64_t cap   = mce_rdmsr(MCE_MSR_MCG_CAP);
+    uint32_t banks = (uint32_t)(cap & MCE_CAP_COUNT_MASK);
+    if (banks > MCE_MAX_BANKS) banks = MCE_MAX_BANKS;
+
+    uint32_t taken = 0;  /* corrected records that reached a pool slot */
+    uint32_t lost  = 0;  /* corrected records read, cleared, and not kept */
+    uint32_t left  = 0;  /* uncorrected records — the #MC handler's to read */
+
+    for (uint32_t i = 0; i < banks; i++) {
         uint64_t status = mce_rdmsr(MCE_MSR_MC_STATUS_BASE + i * 4);
         if (!(status & MCE_MC_STATUS_VAL)) continue;
 
-        mce_severity_t sev = mce_classify(status);
+        mce_severity_t sev = mce_classify(status, cap);
         if (sev != MCE_SEV_CORRECTED && sev != MCE_SEV_UCNA) {
             left++;
             continue;
@@ -1061,6 +1300,15 @@ static void MceCmciAnswers(void) {
         if (slot != NULL) {
             mce_note_deliver(slot, !deferral);
             taken++;
+        } else {
+            /* The clear below is unconditional — leaving VAL=1 here would
+             * re-raise this same interrupt with nothing changed, a storm that
+             * makes no progress — so this record is about to stop existing.
+             * mce_note_claim has already counted it in g_mce_notes_lost; what
+             * is added here is the bank's own rate, lowered so the next one
+             * has somewhere to go. */
+            lost++;
+            MceCmciThresholdRaise(i);
         }
 
         /* A subscriber counting corrected errors on one DIMM is how the next
@@ -1093,8 +1341,15 @@ static void MceCmciAnswers(void) {
      * read it first, or an uncorrected record is sitting in the walk waiting
      * for a #MC that has not been raised. Said once for the machine — a storm
      * of these would otherwise become the fault, and the line names the core
-     * it came from because the first one is the one worth chasing. */
-    if (taken == 0) {
+     * it came from because the first one is the one worth chasing.
+     *
+     * ‼ `lost` is what makes this sentence true. The clear above runs whether
+     * or not a slot was found, so a saturated pool used to READ AND DESTROY a
+     * bank's corrected record and then print "no bank held a corrected
+     * record" — the kernel denying, in the same breath, the thing it had just
+     * thrown away. Banks that held one and found no room are a different
+     * statement, and MceCmciThresholdRaise has already made it per bank. */
+    if (taken == 0 && lost == 0) {
         static volatile uint32_t empty_said = 0;
         uint32_t expected = 0;
         if (__atomic_compare_exchange_n(&empty_said, &expected, 1, false,
@@ -1106,7 +1361,14 @@ static void MceCmciAnswers(void) {
                     "sharing them. Further empty ones go unremarked\n",
                     (unsigned)amp_get_core_index(), (unsigned)left);
         }
+        return;
     }
+
+    /* Nothing was delivered, so no slot's visit will say the losses for us.
+     * The exchange inside makes this the same statement wherever it is made,
+     * and its frequency is bounded by the CMCI rate MceCmciThresholdRaise has
+     * just halved. */
+    if (taken == 0) mce_cmci_lost_say();
 }
 
 /* Arm every bank of THIS logical processor that implements CMCI.
@@ -1125,14 +1387,18 @@ static void MceCmciAnswers(void) {
  * earlier pass and stays counted as armed — nothing is rewritten, and it is
  * not attributed to a sibling.
  *
- * The threshold is 1 — one corrected error is one interrupt. Any larger
- * number would be this kernel deciding how many corrected errors on a failing
- * DIMM are not worth hearing about, which is not something it can know. */
-static void MceCmciBanksArm(void) {
+ * The threshold starts at 1 — one corrected error is one interrupt. Any larger
+ * STARTING number would be this kernel deciding how many corrected errors on a
+ * failing DIMM are not worth hearing about, which is not something it can
+ * know. What may raise it later is the machine itself running out of room to
+ * keep the records, and only then: MceCmciThresholdRaise.
+ *
+ * `banks` is the caller's OWN bank count, from its own IA32_MCG_CAP. */
+static void MceCmciBanksArm(uint32_t banks) {
     MceCmciCoreArm *me = MceCmciMine();
     uint32_t present = 0, held = 0, fresh = 0;
 
-    for (uint32_t i = 0; i < g_mce_bank_count && i < MCE_MAX_BANKS; i++) {
+    for (uint32_t i = 0; i < banks && i < MCE_MAX_BANKS; i++) {
         uint64_t bit    = 1ULL << i;
         uint64_t before = mce_rdmsr(MCE_MSR_MC_CTL2_BASE + i);
 
@@ -1143,8 +1409,10 @@ static void MceCmciBanksArm(void) {
         }
 
         /* Not enabled, so it is not this core's whatever an earlier pass
-         * recorded — firmware or an SMI may have taken it back. */
-        me->mine &= ~bit;
+         * recorded — firmware or an SMI may have taken it back. Whatever this
+         * core knew about its threshold goes with it. */
+        me->mine   &= ~bit;
+        me->capped &= ~bit;
 
         uint64_t want = (before & ~(MCE_MC_CTL2_THRESHOLD_MASK |
                                     MCE_MC_CTL2_CMCI_EN)) |
@@ -1163,7 +1431,10 @@ static void MceCmciBanksArm(void) {
             mce_wrmsr(MCE_MSR_MC_CTL2_BASE + i, before);
             continue;
         }
-        me->mine |= bit;
+        /* Armed afresh at threshold 1, so any ceiling an earlier storm drove
+         * this bank to is no longer where it stands. */
+        me->mine   |= bit;
+        me->capped &= ~bit;
         fresh++;
     }
 
@@ -1236,62 +1507,66 @@ static void MceCmciVectorClaim(void) {
  * enabled, which happens later in bring-up than MCA does. A call that cannot
  * yet arm delivery arms the source and records what is still owed. */
 void MceCmciArmLocal(void) {
-    if (!g_mce_initialized && g_mce_bank_count == 0) return;
+    /* MCA never came up — on this machine, or on this logical processor.
+     * IA32_MCG_CAP is not architecturally present without CPUID.1:EDX[14], so
+     * this gate stands in front of the rdmsr below as well as the arming. */
+    if (!g_mce_initialized || !mce_supported_local()) return;
 
-    /* SDM Vol 3B §16.5.1: IA32_MCi_CTL2 is present only when
-     * IA32_MCG_CAP.MCG_CMCI_P (bit 10) is set. Writing 0x280+i without it is
-     * a #GP on a core with no fixup for one. */
-    if (!(g_mce_mcg_cap & MCE_CAP_MCG_CMCI_P)) return;
+    /* This core's OWN capability and bank count. SDM Vol 3B §15.3.1.1 makes
+     * IA32_MCG_CAP per logical processor and §16.5.1 makes IA32_MCi_CTL2
+     * present only where IA32_MCG_CAP.MCG_CMCI_P (bit 10) is set. Arming from
+     * the BSP's numbers, which is what stood here, writes MSR 0x280+i for
+     * banks a hybrid part's other core type does not implement — a #GP on a
+     * core with no fixup for one — and stops short of the banks it does; and
+     * on a core whose CMCI_P is clear where the BSP's is set it would #GP on
+     * the very first bank. */
+    uint64_t cap   = mce_rdmsr(MCE_MSR_MCG_CAP);
+    uint32_t banks = (uint32_t)(cap & MCE_CAP_COUNT_MASK);
+    if (banks > MCE_MAX_BANKS) banks = MCE_MAX_BANKS;
+
+    if (!(cap & MCE_CAP_MCG_CMCI_P) || banks == 0) {
+        MceCmciDeliverySet(MCE_CMCI_DELIVERY_NO,
+                           "IA32_MCG_CAP.CMCI_P (bit 10) is clear on this "
+                           "logical processor, so it has no IA32_MCi_CTL2 and "
+                           "nothing to arm — its corrected errors are only "
+                           "ever seen when a later #MC walks past them");
+        return;
+    }
 
     MceCmciCoreArm *me = MceCmciMine();
 
-    MceCmciBanksArm();
+    MceCmciBanksArm(banks);
 
     if (!lapic_is_mapped() ||
         !(lapic_read(LAPIC_REG_SVR) & LAPIC_SVR_ENABLE)) {
-        me->owed = "this core's local APIC is not software-enabled yet, and "
-                   "a masked LVT entry cannot be unmasked on one — the "
-                   "banks count corrected errors, but no interrupt carries "
-                   "them out";
+        MceCmciDeliverySet(MCE_CMCI_DELIVERY_NO,
+                           "this core's local APIC is not software-enabled "
+                           "yet, and a masked LVT entry cannot be unmasked on "
+                           "one — the banks count corrected errors, but no "
+                           "interrupt carries them out");
         return;
     }
+
+    /* The gate above has just been passed, so whatever an earlier pass left in
+     * `owed` is a reason this core demonstrably no longer has. Cleared HERE
+     * rather than only on success: a later failure that found the stale string
+     * still standing reported "the local APIC is not software-enabled yet"
+     * from the far side of the test that proved it is. */
+    me->owed = NULL;
 
     MceCmciVectorClaim();
 
     if (!MceCmciLvtArm()) {
-        if (me->owed == NULL) {
-            me->owed = "the CMCI LVT entry did not read back carrying the "
-                       "vector unmasked — this local APIC kept corrected-"
-                       "error delivery off";
-        }
-        /* One core out of step matters the way an unarmed LMCE does: the
-         * fleet answer stops claiming otherwise and the exchange elects the
-         * single speaker. */
-        if (__atomic_exchange_n(&g_cmci_delivery, false, __ATOMIC_ACQ_REL)) {
-            kprintf("[MCE] core %u: CMCI delivery not armed: %s\n",
-                    (unsigned)amp_get_core_index(), me->owed);
-        }
+        MceCmciDeliverySet(MCE_CMCI_DELIVERY_NO,
+                           me->owed ? me->owed
+                                    : "the CMCI LVT entry did not read back "
+                                      "carrying the vector unmasked — this "
+                                      "local APIC kept corrected-error "
+                                      "delivery off");
         return;
     }
 
-    me->owed = NULL;
-    /* The exchange elects one speaker for the machine, so a third call on an
-     * already-delivering fleet says nothing — which is what idempotent has to
-     * mean for a line an operator reads. */
-    if (!__atomic_exchange_n(&g_cmci_delivery, true, __ATOMIC_ACQ_REL)) {
-        kprintf("[MCE] CMCI armed on %u of %u bank(s) that implement it "
-                "(%u held by a logical processor sharing them), delivered on "
-                "vector 0x%02x — this pass armed %u of those bank(s)%s. A "
-                "corrected error now raises an interrupt instead of waiting "
-                "in its bank for the next #MC to walk past it\n",
-                (unsigned)me->armed, (unsigned)me->present,
-                (unsigned)me->held, (unsigned)g_cmci_vector,
-                (unsigned)me->fresh,
-                (me->fresh < me->armed)
-                    ? " and found the rest already counting from this core's "
-                      "earlier pass, so what it added was delivery"
-                    : "");
-    }
+    MceCmciDeliverySet(MCE_CMCI_DELIVERY_YES, NULL);
 }
 
 /* A capability that is printed is either armed or explained — the boot line
@@ -1305,7 +1580,7 @@ static void MceCmciSay(void) {
         return;
     }
 
-    if (__atomic_load_n(&g_cmci_delivery, __ATOMIC_ACQUIRE)) return;
+    if (MceCmciFleetDelivering()) return;
 
     const MceCmciCoreArm *me = MceCmciMine();
 
@@ -1360,11 +1635,23 @@ bool mce_handle(interrupt_frame_t *frame) {
     bool     eipv       = (mcg_status & MCE_MCG_STATUS_EIPV) != 0;
     bool     mcip       = (mcg_status & MCE_MCG_STATUS_MCIP) != 0;
 
+    /* THIS logical processor's own IA32_MCG_CAP, not the BSP's. SDM Vol 3B
+     * §15.3.1.1 makes the register per logical processor: on a hybrid part the
+     * two core types need not implement the same number of banks, nor the same
+     * MCG_SER_P — and SER_P is the bit mce_classify and mce_extract_phys_page
+     * decide recoverability and address validity from. The #MC is delivered
+     * with CR4.MCE set, which this file sets only where CPUID reported MCE and
+     * MCA, so the rdmsr is legal wherever this handler runs. One more rdmsr on
+     * a path that already does three per bank. */
+    uint64_t cap   = mce_rdmsr(MCE_MSR_MCG_CAP);
+    uint32_t banks = (uint32_t)(cap & MCE_CAP_COUNT_MASK);
+    if (banks > MCE_MAX_BANKS) banks = MCE_MAX_BANKS;
+
     /* Asked once, for every deferral below — the Touch publish, the
      * migration request and the record itself all ride the same queues. */
     bool deferral_open = mce_deferral_open();
 
-    for (uint32_t i = 0; i < g_mce_bank_count && i < MCE_MAX_BANKS; i++) {
+    for (uint32_t i = 0; i < banks; i++) {
         uint64_t status = mce_rdmsr(MCE_MSR_MC_STATUS_BASE + i * 4);
         if (!(status & MCE_MC_STATUS_VAL)) continue;
 
@@ -1373,14 +1660,15 @@ bool mce_handle(interrupt_frame_t *frame) {
         uint64_t misc = (status & MCE_MC_STATUS_MISCV)
                         ? mce_rdmsr(MCE_MSR_MC_MISC_BASE + i * 4) : 0;
 
-        mce_severity_t sev = mce_classify(status);
+        mce_severity_t sev = mce_classify(status, cap);
 
         /* The page this record names, and whether it may be acted on. Both
          * questions, not one: a record may name a page it has no licence to
          * offline (an unknown MCACOD, an error that is not a memory error at
          * all), and a record may have a licence and no readable address —
          * which for an action-REQUIRED error is itself fatal. */
-        uintptr_t poisoned_phys = mce_extract_phys_page(status, addr, misc);
+        uintptr_t poisoned_phys = mce_extract_phys_page(status, addr, misc,
+                                                        cap);
         bool      offline       = false;
 
         if (sev == MCE_SEV_UCR) {

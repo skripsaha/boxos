@@ -192,7 +192,9 @@ void          mce_init(void);
 
 /* Per-AP init. Call from per_core_init_ap AFTER cpu_intersect_features_ap
  * so an E-core that the BSP detected as missing MCA isn't fed a #GP via
- * a per-bank CTL write. Mirrors mce_init minus IDT registration. */
+ * a per-bank CTL write. Mirrors mce_init minus IDT registration, and programs
+ * the banks THIS logical processor's own IA32_MCG_CAP reports — not the
+ * BSP's. */
 void          mce_ap_init(void);
 
 /* Arm THIS core's corrected-machine-check interrupt: the per-bank
@@ -269,7 +271,11 @@ bool          mce_handle(interrupt_frame_t *frame);
  * init is required, etc.). */
 bool          mce_is_initialized(void);
 
-/* Bank count reported by IA32_MCG_CAP. Useful for telemetry. */
+/* Bank count the BSP's IA32_MCG_CAP reported, for telemetry. Not a
+ * machine-wide fact: SDM Vol 3B §15.3.1.1 makes IA32_MCG_CAP a
+ * per-logical-processor register, and a hybrid part's P-cores and E-cores need
+ * not implement the same number of banks. Every core that walks banks, arms
+ * IA32_MCi_CTL2 or classifies a record reads its OWN cap where it stands. */
 uint32_t      mce_bank_count(void);
 
 /* True when LMCE is ARMED on every logical processor that has run mce_init
