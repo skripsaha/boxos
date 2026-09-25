@@ -155,10 +155,11 @@
  * Its depth and its running time are bounded BY CONSTRUCTION, not by a
  * counter: statements, expressions and method calls are all driven by one
  * loop over explicit heap-backed stacks, so the C stack never descends with
- * the firmware's nesting; and there is no loop opcode at all — DefWhile is
- * refused by name — so every block is a finite byte range walked forward
- * once and the only way to make more work is to call a method, which costs
- * an activation the heap has to supply.
+ * the firmware's nesting; a block that is not a loop is a finite byte range
+ * walked forward once; a DefWhile turns only while it can show a state it
+ * has never stood in, and is refused aloud on the turn it cannot (the
+ * paragraph above); and the only other way to make more work is to call a
+ * method, which costs an activation the heap has to supply.
  *
  * Supported declarations (real-HW core surface):
  *   Namespace:  NameOp, ScopeOp, MethodOp, DeviceOp, OpRegionOp, FieldOp,

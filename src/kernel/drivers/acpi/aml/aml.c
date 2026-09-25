@@ -189,6 +189,22 @@ struct aml_object {
     struct aml_object* child;
     struct aml_object* sibling;
 
+    /* ‼ HAS AN OPERATOR ALREADY SAID WHAT THIS OBJECT IS, AND HAS A SECOND
+     * ONE ALREADY BEEN TURNED AWAY.
+     *
+     * `declared` is set by the operators of §20.2.5.2 that give a name a
+     * VALUE or a BODY — DefName and DefMethod. DefScope does not set it: it
+     * opens a name rather than declaring one (§19.6.120), and so does the
+     * placeholder resolve_name leaves for a path it has not seen declared
+     * yet, so both stay open for the real declaration to fill.
+     *
+     * It exists because this pass walks BOTH sides of an If, and the two
+     * sides may declare the same name. See parse_one's NameOp and
+     * handle_scope_method for what that costs and which side wins.
+     * `collided` keeps the refusal to one line per object. */
+    bool        declared;
+    bool        collided;
+
     union {
         uint64_t integer;
         struct { const uint8_t* bytes; uint32_t len; } buffer;
@@ -287,6 +303,19 @@ static bool          g_loaded         = false;
  * because it used to be the number of places the walk resynchronised one byte
  * at a time. Said once, with the number, at the end of the load. */
 static uint32_t      g_parse_stmts    = 0;
+
+/* How many of those statements had a body and did NOT have it walked, because
+ * where the body begins was not known: a predicate this pass could not
+ * measure, or one whose length it could only guess at. The summary at the end
+ * of the load says both numbers, because "every body was walked" was a claim
+ * this counter is the exception to. */
+static uint32_t      g_parse_unwalked = 0;
+
+/* How many terms were stepped over on a length that was ASSUMED rather than
+ * measured — see AmlSkipRun's AML_SKIP_GUESS. Said in full once, counted
+ * always, because a number that is only ever printed once is a number nobody
+ * can compare between two boards. */
+static uint32_t      g_parse_guessed  = 0;
 
 /* Drop every heap chunk and start the chain over at the static one. Called
  * once per aml_init, so a build that failed part-way does not hand its
@@ -517,6 +546,50 @@ static bool AmlLeafNamed(const char leaf[4], const char *what) {
     return false;
 }
 
+/*
+ * ‼ BOTH SIDES OF AN If MAY DECLARE THE SAME NAME, AND ONLY ONE OF THEM CAN
+ *   BE THE ONE THE MACHINE FINDS.
+ *
+ * This pass has no frame to evaluate a predicate, so it walks both bodies —
+ * which is how `If (PICM) { Name (_PRT, <APIC GSIs>) } Else { Name (_PRT,
+ * <PIC link entries>) }`, the shape every Intel reference ASL writes, puts
+ * TWO _PRTs under one device. What stood here let both land, and the LAST one
+ * won twice over: obj_create_child PREPENDS and obj_find_child answers with
+ * the first match, so the Else side shadowed the If side; and a _PRT or _CRS
+ * declared as a METHOD on both sides did not even shadow — handle_scope_method
+ * found the existing object and rewrote its body with the Else one. Either
+ * way AmlChild(dev, "_PRT") handed back the PIC-mode table to a kernel that
+ * had just told the firmware \_PIC(APIC), and every function on that bridge
+ * would have been armed from 8259 line numbers standing where global system
+ * interrupts belong.
+ *
+ * A static walk cannot choose a branch, so it must not pretend to: THE FIRST
+ * DECLARATION WINS, and a second one for the same name in the same scope is
+ * refused ALOUD. First is the If side, and for the shape that matters that is
+ * a default with a reason behind it rather than a preference: the predicate
+ * of `If (PICM)` is the value \_PIC was given, AmlRoutingAdopt gives it the
+ * model the interrupt controller is ACTUALLY running, and on a machine
+ * running its IO-APIC — which is every machine this kernel has been on that
+ * has one — the If side is the branch the firmware itself would take. The
+ * refusal names the object, so a board where the other side was the right one
+ * says so on its own console instead of routing quietly from the wrong table.
+ */
+static bool AmlFirstDeclarationWins(aml_object_t* o, const char* what) {
+    if (!o->declared) return true;
+    if (!o->collided) {
+        o->collided = true;
+        kprintf("[AML] %[E]%s under %s is declared a second time, as a %s — "
+                "which is what the two sides of an If look like to a pass "
+                "that cannot evaluate the predicate. The FIRST declaration "
+                "stands and this one is refused, because the first is the If "
+                "side: where the firmware branches on \\_PIC's argument, this "
+                "kernel is the one that supplies it, and it supplies the "
+                "model its interrupt controller is running%[D]\n",
+                o->name, o->parent ? o->parent->name : "the root", what);
+    }
+    return false;
+}
+
 /* ===========================================================
  * Stream helpers
  * =========================================================== */
@@ -716,21 +789,41 @@ static void AmlSkipForget(void) {
  * this pass does not need. The namespace builder has no executor frame, so
  * an operand it cannot measure is a refusal — never a guess that leaves *p
  * inside the operand bytes for the next TermObj scan to chew on.
+ *
+ * ‼ AND A GUESS SAYS SO INSTEAD OF PASSING FOR A MEASUREMENT. A NameString
+ * in TermArg position is a method invocation when the namespace says it is,
+ * and MethodInvocation drags argc TermArgs along behind it (§20.2.5). A name
+ * this pass has not SEEN declared yet — a forward reference, which shipping
+ * tables write freely — cannot be asked how many, so the walk below assumes
+ * none and the cursor it leaves may stand in the middle of the term. That
+ * cursor used to be handed back as success: the caller entered a body from a
+ * byte inside a predicate, and the resync fabricated declarations out of
+ * operand bytes. AML_SKIP_GUESS is that case, told apart from both the
+ * measurement and the failure, so that a caller for whom the difference
+ * decides something can see it — the note on skip_term_arg below says which
+ * callers those are and which can still act on a guess.
  */
-static bool AmlSkipRun(const uint8_t** p, const uint8_t* end,
-                        aml_object_t* scope, uint8_t first) {
+typedef enum {
+    AML_SKIP_NO    = 0,      /* these bytes are not a term this pass reads  */
+    AML_SKIP_YES   = 1,      /* measured exactly; *p stands past the term   */
+    AML_SKIP_GUESS = 2,      /* a name in it is not in the namespace YET    */
+} AmlSkipHow;
+
+static AmlSkipHow AmlSkipRun(const uint8_t** p, const uint8_t* end,
+                              aml_object_t* scope, uint8_t first) {
     uint32_t n = 0;
-    if (!AmlSkipOwe(&n, first)) return false;
+    bool     guessed = false;
+    if (!AmlSkipOwe(&n, first)) return AML_SKIP_NO;
 
     while (n) {
         uint8_t kind = g_skip_owed[--n];
 
         if (kind == AML_SKIP_WORD) {           /* Timeout := WordData */
-            if ((size_t)(end - *p) < 2) return false;
+            if ((size_t)(end - *p) < 2) return AML_SKIP_NO;
             *p += 2;
             continue;
         }
-        if (*p >= end) return false;
+        if (*p >= end) return AML_SKIP_NO;
         uint8_t op = **p;
 
         if (kind == AML_SKIP_SUPER) {
@@ -740,13 +833,13 @@ static bool AmlSkipRun(const uint8_t** p, const uint8_t* end,
             if (op == ExtOpPrefix) {
                 /* The only SuperName under the prefix is DebugObj. */
                 if ((size_t)(end - *p) < 2 || (*p)[1] != ExtDebugOp)
-                    return false;
+                    return AML_SKIP_NO;
                 *p += 2;
                 continue;
             }
             if (op != RefOfOp && op != DerefOfOp && op != IndexOp) {
-                if (!aml_is_name_string_lead(op)) return false;
-                if (!skip_name_string(p, end)) return false;
+                if (!aml_is_name_string_lead(op)) return AML_SKIP_NO;
+                if (!skip_name_string(p, end)) return AML_SKIP_NO;
                 continue;
             }
             /* RefOf, DerefOf and Index in SuperName position are TermArgs,
@@ -759,18 +852,18 @@ static bool AmlSkipRun(const uint8_t** p, const uint8_t* end,
             case DWordPrefix: case QWordPrefix: {
                 const uint8_t* before = *p;
                 read_integer(p, end);
-                if (*p == before) return false;
+                if (*p == before) return AML_SKIP_NO;
                 continue;
             }
             case StringPrefix:
                 (*p)++;
                 while (*p < end && **p) (*p)++;
-                if (*p >= end) return false;
+                if (*p >= end) return AML_SKIP_NO;
                 (*p)++;                        /* the NUL */
                 continue;
             case BufferOp: case PackageOp: case VarPackageOp:
                 (*p)++;
-                if (!skip_pkg_block(p, end)) return false;
+                if (!skip_pkg_block(p, end)) return AML_SKIP_NO;
                 continue;
             default:
                 break;
@@ -784,11 +877,17 @@ static bool AmlSkipRun(const uint8_t** p, const uint8_t* end,
              * method drags its arguments along behind it. */
             const uint8_t* probe = *p;
             aml_object_t*  o = resolve_name(&probe, end, scope, false, NULL);
-            if (!skip_name_string(p, end)) return false;
+            if (!skip_name_string(p, end)) return AML_SKIP_NO;
             if (o && o->type == AML_OBJ_METHOD) {
                 uint8_t argc = (uint8_t)(o->v.method.flags & 0x7);
                 for (uint8_t i = 0; i < argc; i++)
-                    if (!AmlSkipOwe(&n, AML_SKIP_TERM)) return false;
+                    if (!AmlSkipOwe(&n, AML_SKIP_TERM)) return AML_SKIP_NO;
+            } else if (!o) {
+                /* Not in the namespace — yet. Nothing here can say whether
+                 * it is a method with arguments still to come or a name with
+                 * none, so what follows is an assumption and the whole
+                 * measurement carries it out to the caller. */
+                guessed = true;
             }
             continue;
         }
@@ -797,30 +896,30 @@ static bool AmlSkipRun(const uint8_t** p, const uint8_t* end,
             /* CondRefOf / Acquire / Timer ... in TermArg position. The items
              * an operand owes are pushed in REVERSE, so the first one owed
              * is the first one taken off. */
-            if ((size_t)(end - *p) < 2) return false;
+            if ((size_t)(end - *p) < 2) return AML_SKIP_NO;
             uint8_t sub = (*p)[1];
             *p += 2;
             switch (sub) {
                 case ExtCondRefOfOp:           /* SuperName Target */
-                    if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return false;
-                    if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return false;
+                    if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return AML_SKIP_NO;
+                    if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return AML_SKIP_NO;
                     continue;
                 case ExtAcquireOp:             /* SuperName WordData */
-                    if (!AmlSkipOwe(&n, AML_SKIP_WORD))  return false;
-                    if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return false;
+                    if (!AmlSkipOwe(&n, AML_SKIP_WORD))  return AML_SKIP_NO;
+                    if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return AML_SKIP_NO;
                     continue;
                 case ExtWaitOp:                /* SuperName TermArg */
-                    if (!AmlSkipOwe(&n, AML_SKIP_TERM))  return false;
-                    if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return false;
+                    if (!AmlSkipOwe(&n, AML_SKIP_TERM))  return AML_SKIP_NO;
+                    if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return AML_SKIP_NO;
                     continue;
                 case ExtFromBCDOp: case ExtToBCDOp:    /* TermArg Target */
-                    if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return false;
-                    if (!AmlSkipOwe(&n, AML_SKIP_TERM))  return false;
+                    if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return AML_SKIP_NO;
+                    if (!AmlSkipOwe(&n, AML_SKIP_TERM))  return AML_SKIP_NO;
                     continue;
                 case ExtRevisionOp: case ExtDebugOp: case ExtTimerOp:
                     continue;                  /* no operands */
                 default:
-                    return false;
+                    return AML_SKIP_NO;
             }
         }
 
@@ -843,26 +942,42 @@ static bool AmlSkipRun(const uint8_t** p, const uint8_t* end,
             case RefOfOp: case SizeOfOp: case IncrementOp: case DecrementOp:
                 nargs = 0; ntargets = 1; break;
             default:
-                return false;
+                return AML_SKIP_NO;
         }
         (*p)++;
         for (uint8_t i = 0; i < ntargets; i++)
-            if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return false;
+            if (!AmlSkipOwe(&n, AML_SKIP_SUPER)) return AML_SKIP_NO;
         for (uint8_t i = 0; i < nargs; i++)
-            if (!AmlSkipOwe(&n, AML_SKIP_TERM)) return false;
+            if (!AmlSkipOwe(&n, AML_SKIP_TERM)) return AML_SKIP_NO;
     }
-    return true;
+    return guessed ? AML_SKIP_GUESS : AML_SKIP_YES;
 }
 
+/* ‼ WHERE A GUESS IS STILL WORTH ACTING ON, AND WHERE IT IS NOT.
+ *
+ * In an OPERAND — an OperationRegion's offset, a BankValue, the arguments of
+ * a CreateField — the guess is that a name takes no arguments, and the bytes
+ * it measured are the NameString itself, exactly. If the name turns out to be
+ * a method with arguments, what was kept is short; and what is kept is only
+ * ever handed to AmlRegionArm, which runs the term in a real frame with the
+ * namespace complete and refuses ALOUD when the term ends where an operand
+ * was owed. Refusing here instead would throw away the Intel chipset form
+ * `OperationRegion (RCRB, SystemMemory, \RCBA, 0x4000)` on any board whose
+ * \RCBA is declared in a later table, and resynchronise through the block it
+ * stands in — a worse outcome from a more cautious rule.
+ *
+ * Where a guess must not be acted on is where the END of the term decides
+ * where a BODY begins, and both of those callers ask AmlSkipRun directly and
+ * take AML_SKIP_GUESS apart from AML_SKIP_YES. See parse_one. */
 static bool skip_term_arg(const uint8_t** p, const uint8_t* end,
                            aml_object_t* scope) {
-    return AmlSkipRun(p, end, scope, AML_SKIP_TERM);
+    return AmlSkipRun(p, end, scope, AML_SKIP_TERM) != AML_SKIP_NO;
 }
 
 /* Target := SuperName | NullName (§20.2.2). */
 static bool skip_super_name(const uint8_t** p, const uint8_t* end,
                              aml_object_t* scope) {
-    return AmlSkipRun(p, end, scope, AML_SKIP_SUPER);
+    return AmlSkipRun(p, end, scope, AML_SKIP_SUPER) != AML_SKIP_NO;
 }
 
 /*
@@ -1124,6 +1239,14 @@ static aml_status_t handle_scope_method(const uint8_t** p, const uint8_t* end,
                         is_method ? AML_OBJ_METHOD : AML_OBJ_SCOPE);
             if (!target) { *p = body_end; return AML_ERR_NOMEM; }
         } else if (is_method) {
+            /* ‼ A SECOND BODY FOR A NAME THAT ALREADY HAS ONE OVERWROTE THE
+             * FIRST, WHICH IS WORSE THAN SHADOWING IT. See
+             * AmlFirstDeclarationWins: the whole package is already measured,
+             * so the refusal steps past it and the block goes on. */
+            if (!AmlFirstDeclarationWins(target, "Method")) {
+                *p = body_end;
+                return AML_REFUSED;
+            }
             target->type = AML_OBJ_METHOD;
         }
     }
@@ -1133,6 +1256,7 @@ static aml_status_t handle_scope_method(const uint8_t** p, const uint8_t* end,
         target->v.method.flags  = *np++;
         target->v.method.aml    = np;
         target->v.method.aml_len = (uint32_t)(body_end - np);
+        target->declared        = true;
     } else if (np < body_end) {
         into->p     = np;
         into->end   = body_end;
@@ -1452,9 +1576,25 @@ static aml_status_t parse_one(const uint8_t** p, const uint8_t* end,
         aml_object_t* parent = resolve_name(p, end, scope, true, leaf);
         if (!parent) return AML_ERR_BOUNDS;
         if (!AmlLeafNamed(leaf, "Name")) return AML_ERR_BAD_OPCODE;
-        aml_object_t* o = obj_create_child(parent, leaf, AML_OBJ_NAME);
+        aml_object_t* o = obj_find_child(parent, leaf);
+        if (o && !AmlFirstDeclarationWins(o, "Name")) {
+            /* Refused, and still MEASURED: the DataRefObject is read into an
+             * object that goes nowhere, so the stream stands at the next
+             * TermObj and the rest of the block is not resynchronised
+             * through. */
+            aml_object_t scratch;
+            memset(&scratch, 0, sizeof(scratch));
+            aml_status_t s = handle_named_data(p, end, &scratch);
+            return (s == AML_OK) ? AML_REFUSED : s;
+        }
+        /* A name this pass met only as a path before now gets what it IS —
+         * the placeholder resolve_name left, or the scope a Device body
+         * opened, is filled rather than shadowed by a second object. */
+        if (!o) o = obj_create_child(parent, leaf, AML_OBJ_NAME);
         if (!o) return AML_ERR_NOMEM;
-        return handle_named_data(p, end, o);
+        aml_status_t s = handle_named_data(p, end, o);
+        if (s == AML_OK) o->declared = true;
+        return s;
     }
     if (op == ScopeOp)   return handle_scope_method(p, end, scope, false, into);
     if (op == MethodOp)  return handle_scope_method(p, end, scope, true, into);
@@ -1491,8 +1631,9 @@ static aml_status_t parse_one(const uint8_t** p, const uint8_t* end,
      * BOTH are recorded, which is the same choice the narrow gate makes when
      * it proves a method it has no values for. A name declared on one side
      * and not the other is then in the namespace either way; a name declared
-     * on both is the later one, and neither outcome can be a byte of data
-     * read as an opcode. */
+     * on BOTH is the FIRST one — the If side — and the second is refused
+     * aloud by AmlFirstDeclarationWins, which is where that choice is argued.
+     * Neither outcome can be a byte of data read as an opcode. */
     if (op == IfOp || op == ElseOp || op == WhileOp) {
         /* §20.2.5.3: DefIfElse := IfOp PkgLength Predicate TermList,
          * DefWhile := WhileOp PkgLength Predicate TermList, and
@@ -1506,14 +1647,35 @@ static aml_status_t parse_one(const uint8_t** p, const uint8_t* end,
         const uint8_t* np = *p + cbytes;
         *p = body_end;                   /* the parent resumes past the whole */
         g_parse_stmts++;
-        if (op != ElseOp && !skip_term_arg(&np, body_end, scope)) {
-            /* The predicate could not be measured, so where its TermList
-             * begins is not known — and a body entered at the wrong byte is
-             * the very thing this branch exists to stop. */
-            kprintf("[AML] a %s at TermList level under %s has a predicate "
-                    "this pass cannot measure, so where its body begins is "
-                    "not known and nothing inside it is recorded\n",
-                    op == IfOp ? "If" : "While", scope->name);
+        AmlSkipHow how = (op == ElseOp)
+                           ? AML_SKIP_YES
+                           : AmlSkipRun(&np, body_end, scope, AML_SKIP_TERM);
+        if (how != AML_SKIP_YES) {
+            /* Where the predicate ENDS is where the TermList begins, and a
+             * body entered at the wrong byte is the very thing this branch
+             * exists to stop. A length that was guessed is no better than one
+             * that could not be taken at all: AmlSkipRun assumes a name it
+             * has not seen declared takes no arguments, so the cursor it left
+             * can stand inside the predicate. Both step over the whole
+             * package and record nothing inside it. */
+            g_parse_unwalked++;
+            if (how == AML_SKIP_NO)
+                kprintf("[AML] a %s at TermList level under %s has a "
+                        "predicate this pass cannot measure, so where its "
+                        "body begins is not known and nothing inside it is "
+                        "recorded\n",
+                        op == IfOp ? "If" : "While", scope->name);
+            else if (g_parse_guessed++ == 0)
+                kprintf("[AML] a %s at TermList level under %s has a "
+                        "predicate naming something this pass has not seen "
+                        "declared, so how many arguments follow it — and "
+                        "therefore where the predicate ENDS — was assumed "
+                        "rather than measured. Nothing inside the body is "
+                        "recorded: a body walked from a byte in the middle "
+                        "of a predicate declares objects out of operand "
+                        "bytes. Said once; the count is in the summary at "
+                        "the end of the load\n",
+                        op == IfOp ? "If" : "While", scope->name);
             return AML_REFUSED;
         }
         if (np < body_end) {
@@ -1535,14 +1697,47 @@ static aml_status_t parse_one(const uint8_t** p, const uint8_t* end,
         g_parse_stmts++;
         return AML_REFUSED;
     }
+    /* ‼ A BARE NAME AT TERMOBJ LEVEL IS A METHOD INVOCATION OR IT IS NOT A
+     * STATEMENT AT ALL. §20.2.5.1 admits a NameString here only as
+     * MethodInvocation := NameString TermArgList, and how many TermArgs
+     * follow is the CALLEE's argument count, which only the namespace holds.
+     *
+     * So a name that resolves to no Method is not measured, and that is what
+     * bounds the resync. The resync steps one byte at a time and every byte
+     * from 'A' to 'Z', plus '_', '\', '^', 0x2E and 0x2F, leads a NameString
+     * — and §20.2.2 lets a MultiNamePath carry a SegCount of up to 255
+     * four-character segments. Measuring a stray one of those swallowed up to
+     * 1020 bytes of the block being resynchronised, taking every declaration
+     * inside that span with it, where a byte that leads nothing advances by
+     * one. A forward-referenced call is stepped over by one byte for the same
+     * reason an unmeasurable predicate is: a length nobody could take is not
+     * a length. */
     if (aml_is_expression_op(op) ||
         (aml_is_name_string_lead(op) && op != 0x00)) {
-        const uint8_t* before = *p;
-        if (skip_term_arg(p, end, scope) && *p > before) {
-            g_parse_stmts++;
-            return AML_REFUSED;
+        bool callable = aml_is_expression_op(op);
+        if (!callable) {
+            const uint8_t* probe  = *p;
+            aml_object_t*  callee = resolve_name(&probe, end, scope, false,
+                                                 NULL);
+            callable = (callee && callee->type == AML_OBJ_METHOD);
         }
-        *p = before;
+        if (callable) {
+            const uint8_t* before = *p;
+            AmlSkipHow     how    = AmlSkipRun(p, end, scope, AML_SKIP_TERM);
+            if (how == AML_SKIP_YES && *p > before) {
+                g_parse_stmts++;
+                return AML_REFUSED;
+            }
+            if (how == AML_SKIP_GUESS && g_parse_guessed++ == 0)
+                kprintf("[AML] a term standing alone under %s names something "
+                        "this pass has not seen declared, so where it ends "
+                        "was assumed rather than measured — the walk goes on "
+                        "from the next byte rather than from a byte that may "
+                        "stand in the middle of it. Said once; the count is "
+                        "in the summary at the end of the load\n",
+                        scope->name);
+            *p = before;
+        }
     }
 
     return AML_ERR_BAD_OPCODE;
@@ -1758,14 +1953,19 @@ static aml_status_t parse_term_list(const uint8_t* aml, uint32_t len,
  *       halt_drain_async_writes, which ends because a non-negative integer
  *       can set a new low only finitely many times.
  *
- *       ‼ AND IT COVERS THE HARDWARE WAIT, WHICH IS THE CASE A COUNTER GETS
- *       WRONG. `While (LEqual (STAT, One))` is getting somewhere only while
- *       STAT's answer changes, and what the machine answered is IN the
- *       number — so a register that keeps answering the same bits is a loop
- *       standing still and is named as one, while a register that answers
- *       something new is a loop making progress and is left alone for as
- *       long as it keeps doing so. No duration is involved in either
- *       direction.
+ *       ‼ AND HERE IS WHAT IT DOES NOT DO: IT DOES NOT WAIT ON HARDWARE.
+ *       `While (LEqual (STAT, One))` is a firmware wait, and what the machine
+ *       answered is IN the number — so a register that answers something new
+ *       leaves the loop turning for as long as it keeps doing so, and a
+ *       register that answers the same bits twice with nothing else in the
+ *       activation changed is REFUSED, loudly, with the method abandoned. To
+ *       a static evaluator those two turns are the same turn and there is no
+ *       honest third answer; but a real device can and does answer the same
+ *       bits for a while before it changes, so the refusal can land on a wait
+ *       that would have finished. That is the bargain: this evaluator reads
+ *       the machine and never waits for it, and a firmware method that waits
+ *       is a method it does not carry out. No duration is involved in either
+ *       direction, and none is claimed.
  *
  *     A method that calls another method still costs an activation the heap
  *     has to supply, and a firmware that recurses without end still stops at
@@ -3271,10 +3471,27 @@ static bool AmlBufFieldWrite(AmlAct *a, AmlLocalObj *f, uint64_t v) {
  * ACPI 6.5 §20.2.5.4. An opcode that is not here is not evaluated, and the
  * refusal names it — this list IS the grammar, and widening it is a decision
  * somebody makes on purpose.
+ *
+ * ‼ WIDENED ON PURPOSE, ONCE: Increment (0x75) and Decrement (0x76).
+ * §20.2.5.4 gives them DefIncrement := IncrementOp SuperName and
+ * DefDecrement := DecrementOp SuperName — add one, or take one away, store
+ * the result back into that same SuperName, and yield the new value. They are
+ * here because without them the CANONICAL counted loop,
+ * `While (LLess (Local0, N)) { ... Increment (Local0) }`, cannot run a single
+ * turn: it is refused by name on the statement that ends the turn, which
+ * makes the DefWhile above it worth nothing. Nothing else was added with
+ * them.
+ *
+ * Their single operand IS their Target, which no other shape here has, so
+ * AmlExprStep carries them out where the stream position is still in hand
+ * rather than through the pending-operator path — the counts below are what
+ * the dry walk needs to MEASURE one.
  */
 static bool AmlOperatorShape(uint8_t op, uint8_t *nargs, uint8_t *ntargets) {
     switch (op) {
     case StoreOp:        *nargs = 1; *ntargets = 1; return true;
+    case IncrementOp: case DecrementOp:
+                         *nargs = 0; *ntargets = 1; return true;
     case AddOp: case SubtractOp: case MultiplyOp: case ModOp:
     case AndOp: case NandOp: case OrOp: case NorOp: case XorOp:
     case ShiftLeftOp: case ShiftRightOp:
@@ -3325,6 +3542,10 @@ static const char *AmlExtOpName(uint8_t sub) {
     }
 }
 
+/* The name an ASL writer would recognise, for an opcode that stands where
+ * this evaluator cannot carry it out. Increment and Decrement were here and
+ * are gone with the refusal that named them: AmlOperatorShape now admits
+ * both, so neither can reach a line that says they were declined. */
 static const char *AmlOpcodeName(uint8_t op) {
     switch (op) {
     case WhileOp:        return "a While loop";
@@ -3337,8 +3558,6 @@ static const char *AmlOpcodeName(uint8_t op) {
     case RefOfOp:        return "RefOf";
     case SizeOfOp:       return "SizeOf";
     case ObjectTypeOp:   return "ObjectType";
-    case IncrementOp:    return "Increment";
-    case DecrementOp:    return "Decrement";
     /* Single-byte opcodes, not the extended ones of the same value —
      * NotifyOp is 0x86 and 0x5B 0x86 is IndexField, which are two different
      * things and were one bug's worth of confusion apart. */
@@ -3770,6 +3989,40 @@ static bool AmlExprStep(AmlRun *run) {
         uint8_t op = *a->cur;
         uint8_t nargs = 0, ntargets = 0;
 
+        if (op == IncrementOp || op == DecrementOp) {
+            /* ‼ THE ONE OPERATOR WHOSE OPERAND AND TARGET ARE THE SAME BYTES.
+             * §20.2.5.4: DefIncrement := IncrementOp SuperName. The name is
+             * READ, one is added or taken away, and the new value is placed
+             * back where it came from — so the cursor is kept and handed to
+             * the store, instead of the stream being read twice. Everything
+             * the read and the store may touch is what they always touch: a
+             * Local, an Arg, an object the method declared, a namespace Name,
+             * or a field, which the window and the write gate judge as they
+             * judge every other access. */
+            const uint8_t *at = a->cur + 1;
+            const uint8_t *q  = at;
+            AmlValue       v;
+            if (!AmlReadOperandIn(run, a, &q, a->cur_end, &v)) return false;
+            if (v.type != AML_OBJ_INTEGER) {
+                kprintf("[AML] %s: %s names %s, and §20.2.5.4 counts an "
+                        "integer up or down by one — nothing else\n", a->what,
+                        op == IncrementOp ? "Increment" : "Decrement",
+                        AmlTypeName(v.type));
+                return false;
+            }
+            AmlValue nv;
+            memset(&nv, 0, sizeof(nv));
+            nv.type    = AML_OBJ_INTEGER;
+            nv.integer = ((op == IncrementOp) ? v.integer + 1u
+                                              : v.integer - 1u) & AmlIntMask();
+            const uint8_t *t = at;
+            if (!AmlStoreInto(run, a, &t, a->cur_end, &nv)) return false;
+            a->cur      = q;
+            a->val      = nv;
+            a->have_val = true;
+            return true;
+        }
+
         if (AmlOperatorShape(op, &nargs, &ntargets)) {
             AmlPending *grown =
                 (AmlPending *)AmlStackRoom(a->pend, &a->pend_room,
@@ -3989,17 +4242,34 @@ static void AmlExprBegin(AmlAct *a, const uint8_t *from, const uint8_t *to,
  * every link's _CRS writes an interrupt number into them.
  */
 static bool AmlDeclareLocal(AmlRun *run, AmlAct *a, const char seg[4],
-                             const AmlValue *v) {
-    AmlLocalObj *grown = (AmlLocalObj *)AmlStackRoom(a->obj, &a->obj_room,
-                                                     a->objn + 1,
-                                                     sizeof(AmlLocalObj));
-    if (!grown) {
-        kprintf("[AML] %s: the heap has no room for the objects this method "
-                "declares\n", a->what);
-        return false;
+                             const AmlValue *v, AmlLocalObj **out) {
+    /* ‼ ONE OBJECT PER NAME, AND THE SECOND DECLARATION IS THE SAME OBJECT.
+     *
+     * ACPI 6.5 §20.2.5.2 gives a method's namespace one object per name, and
+     * a Name or a CreateXField inside a While body is declared again on every
+     * turn. What stood here APPENDED every time while AmlLocalFind answers
+     * with the first match, so turn two's declaration could never be found,
+     * `objn` grew by one per turn, and AmlTurnMark — which mixes objn in —
+     * could never produce a number it had produced before. The loop's own
+     * refusal was then unreachable: a firmware poll ended when kmalloc
+     * refused the growing list, which is termination by heap exhaustion
+     * wearing the name of a termination argument. Replaced in place, the
+     * fingerprint can repeat and the loop is refused where the doctrine says
+     * it is. */
+    AmlLocalObj *o = AmlLocalFind(a, seg);
+    bool         fresh = (o == NULL);
+    if (fresh) {
+        AmlLocalObj *grown = (AmlLocalObj *)AmlStackRoom(a->obj, &a->obj_room,
+                                                         a->objn + 1,
+                                                         sizeof(AmlLocalObj));
+        if (!grown) {
+            kprintf("[AML] %s: the heap has no room for the objects this "
+                    "method declares\n", a->what);
+            return false;
+        }
+        a->obj = grown;
+        o = &a->obj[a->objn];
     }
-    a->obj = grown;
-    AmlLocalObj *o = &a->obj[a->objn];
     memset(o, 0, sizeof(*o));
     o->name[0] = seg[0]; o->name[1] = seg[1];
     o->name[2] = seg[2]; o->name[3] = seg[3];
@@ -4019,7 +4289,8 @@ static bool AmlDeclareLocal(AmlRun *run, AmlAct *a, const char seg[4],
         o->value.bytes     = copy;
         o->value.bytes_end = copy + len;
     }
-    a->objn++;
+    if (fresh) a->objn++;
+    if (out) *out = o;
     return true;
 }
 
@@ -4046,12 +4317,16 @@ static bool AmlLoopTurn(AmlAct *a) {
 
     bool again = false;
     if (!AmlSeenAdd(&L->seen, fp, &again)) {
+        /* The turn being refused is the one whose state would not fit, and
+         * the table holds the ones before it — so the count said aloud is
+         * one more than the table's, and saying the table's was this file
+         * printing a number about itself that was not true. */
         kprintf("[AML] %[E]%s: a While loop has turned %u times without ever "
                 "standing where it stood before, and the heap has no room to "
                 "go on keeping account of that. A loop this machine cannot "
                 "account for is not one it will go on turning — the method is "
                 "abandoned rather than half-run%[D]\n",
-                a->what, L->seen.used);
+                a->what, L->seen.used + 1u);
         return false;
     }
     if (again) {
@@ -4081,7 +4356,13 @@ static bool AmlStmtStep(AmlRun *run) {
 
     uint8_t op = *b->p;
 
-    if (op == NoopOp) { b->p++; return true; }
+    /* ACPI 6.5 §20.2.5.3 gives DefNoop and DefBreakPoint the same behaviour
+     * on a machine with no debugger attached: BreakPoint "is used for
+     * debugging purposes ... if a debugger is not present, this operation
+     * performs no action". There is no debugger here, so abandoning the
+     * method on one was this evaluator inventing a refusal the specification
+     * does not have. */
+    if (op == NoopOp || op == BreakPointOp) { b->p++; return true; }
 
     if (op == ReturnOp) {
         AmlExprBegin(a, b->p + 1, b->end, AML_AFTER_RETURN);
@@ -4193,7 +4474,7 @@ static bool AmlStmtStep(AmlRun *run) {
         q += 4;
         AmlValue v;
         if (!AmlReadOperand(&q, b->end, a->method, a->what, &v)) return false;
-        if (!AmlDeclareLocal(run, a, seg, &v)) return false;
+        if (!AmlDeclareLocal(run, a, seg, &v, NULL)) return false;
         b->p = q;
         return true;
     }
@@ -4244,8 +4525,12 @@ static bool AmlStmtStep(AmlRun *run) {
 
         AmlValue empty;
         memset(&empty, 0, sizeof(empty));
-        if (!AmlDeclareLocal(run, a, name, &empty)) return false;
-        AmlLocalObj *f = &a->obj[a->objn - 1];
+        /* The object comes back from the declaration rather than being taken
+         * as the last entry: a CreateXField inside a loop body declares the
+         * same name every turn, and AmlDeclareLocal replaces that entry where
+         * it already stands instead of appending a second one. */
+        AmlLocalObj *f = NULL;
+        if (!AmlDeclareLocal(run, a, name, &empty, &f)) return false;
         f->is_field   = true;
         f->over       = base_index;
         f->bit_offset = (uint32_t)(index * scale);
@@ -4381,6 +4666,21 @@ static bool AmlNameOpensWindow(const char *name) {
  */
 static bool AmlEvalIn(AmlRun *run, aml_object_t *node, const AmlValue *args,
                        uint8_t argc, AmlValue *out) {
+    /* ‼ NOTHING OF A FAILED EVALUATION IS STILL STANDING WHEN THE NEXT ONE
+     * BEGINS.
+     *
+     * AmlRunTo stops at the first refusal and AmlEvalIn returns false with
+     * the activations that were running LEFT ON THE RUN — a method abandoned
+     * in the middle, its blocks and its half-collected operands intact. A run
+     * is shared: AmlReadDeviceIds evaluates _HID and then _CID on one,
+     * continuing past a failure of the first. What stood here cleared only
+     * `returned` and `result` and then pushed on top, so AmlRunTo drove the
+     * abandoned frames again and a value resumed out of _HID could come back
+     * under _CID's name — a device matched, or missed, as something it is
+     * not. Every evaluation on a shared run starts from an empty stack, and
+     * the heap those frames held goes back here rather than at AmlRunDone. */
+    while (run->actn) AmlActRelease(&run->act[--run->actn]);
+
     /* ‼ THE ONLY ASSIGNMENT TO run->window IN THIS FILE. It is taken from the
      * name of the object being evaluated, so no caller can open a window for
      * something that is not a routing object, and the next evaluation on this
@@ -5756,11 +6056,14 @@ static bool AmlPrtLookup(AmlPrtTable *t, uint8_t device, uint8_t pin0,
  * has to err in — and each is a statement about TEXT, which is the only
  * thing this walk sees.
  *
- * ‼ AND IT ADDS NO While. The obvious way to widen a gate like this is to
- * start running loops, and it is not taken: neither \_PIC of the two real
- * firmware bodies this was built against contains one, DefWhile stays
- * refused by name in both the walk and the machine, and a board whose \_PIC
- * loops is left exactly where it is today. If that ever has to change, the
+ * ‼ AND IT ADDS NO While, ALTHOUGH THE MACHINE NOW RUNS ONE. The obvious way
+ * to widen a gate like this is to start walking loops, and it is not taken:
+ * neither \_PIC of the two real firmware bodies this was built against
+ * contains one, this walk refuses DefWhile, Break and Continue by name (see
+ * AmlGateStep), and a board whose \_PIC loops is left exactly where it is
+ * today. The machine refuses a loop only when it stops getting somewhere,
+ * which is half-way through — and half-way through is the one outcome an
+ * all-or-nothing gate exists to prevent. If that ever has to change, the
  * bound on it will be a DEADLINE taken from the clockboard on entry, not a
  * count of iterations — an iteration count is a number nobody can justify,
  * and the thing actually being protected is wall-clock time.
@@ -6197,7 +6500,10 @@ static bool AmlGateStep(AmlGate *g, bool *done) {
 
     uint8_t op = *b->p;
 
-    if (op == NoopOp) { b->p++; return true; }
+    /* §20.2.5.3 makes both of these nothing at all on a machine with no
+     * debugger, and the machine below performs them as nothing — so the walk
+     * passes them, or it would refuse a method the run could carry whole. */
+    if (op == NoopOp || op == BreakPointOp) { b->p++; return true; }
 
     if (op == ReturnOp) {
         const uint8_t *q = b->p + 1;
@@ -6895,7 +7201,9 @@ aml_status_t aml_init(void) {
     g_root_obj.type = AML_OBJ_SCOPE;
     g_root_obj.name[0] = '\\';
     pool_reset();
-    g_parse_stmts = 0;
+    g_parse_stmts    = 0;
+    g_parse_unwalked = 0;
+    g_parse_guessed  = 0;
 
     if (!g_acpi.initialized || !g_acpi.fadt) return AML_ERR_NOT_LOADED;
     uint64_t dsdt_addr =
@@ -6945,12 +7253,25 @@ aml_status_t aml_init(void) {
     if (g_parse_stmts)
         kprintf("[AML] %u term(s) at TermList level were statements rather "
                 "than declarations — an If or a While guarding a block of "
-                "them, a Return, a method called for its effect. Every one "
-                "was measured exactly rather than resynchronised through, and "
-                "the body of every If, Else and While among them was walked "
-                "for what it declares — both sides, because which side a board "
+                "them, a Return, a method called for its effect. Each was "
+                "measured exactly rather than resynchronised through, and the "
+                "body of every If, Else and While among them was walked for "
+                "what it declares — both sides, because which side a board "
                 "takes is decided by a value this pass has no frame to "
-                "compute\n", g_parse_stmts);
+                "compute — except %u of them, whose body this pass did not "
+                "enter because where it begins was not known\n",
+                g_parse_stmts, g_parse_unwalked);
+    /* ‼ THE EXCEPTION, WITH WHAT IT COSTS. A body this pass did not enter
+     * holds declarations that are missing from this namespace, and a method
+     * naming one of them will not find it. */
+    if (g_parse_guessed)
+        kprintf("[AML] %[E]%u term(s) named something this pass had not seen "
+                "declared, so how far they reach was an assumption; wherever "
+                "that assumption decided where a BODY begins, the body was "
+                "stepped over unread rather than walked from a byte that may "
+                "stand in the middle of a predicate. Whatever those bodies "
+                "declare is missing from this namespace%[D]\n",
+                g_parse_guessed);
     /* Announced on the tag bus with the object count as payload. The reader
      * that binds to this namespace is AmlRouteForPciPin below, and it asks
      * its question later — the first time a driver has a PCI interrupt line
