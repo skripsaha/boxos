@@ -941,14 +941,35 @@ static bool panic_probe_range(uint64_t va, uint64_t len)
  * (efi_runtime.c). The "no descriptor" line is gated on
  * efi_runtime_available(), which efi_runtime_init sets strictly after it
  * records the map, so reaching that branch proves there was a map to walk —
- * a BIOS boot, and a fault raised before the map exists, say nothing. */
+ * a BIOS boot, and a fault raised before the map exists, say nothing.
+ *
+ * ‼ CR2 IS LINEAR AND THE MAP IS PHYSICAL. Intel SDM Vol 3A §4.7 gives CR2
+ * the linear address of the access; the descriptors carry physical_start. The
+ * two are the same number only where this kernel installed a VA==PA window,
+ * which exists below the top of the low canonical half — 2^47 under 4-level
+ * paging (SDM Vol 3A §4.5). Above it the number is a virtual address of ours
+ * and asking a physical map about it would answer about a page nobody
+ * touched, so the map is not asked and the line says why. The caller has
+ * already established that this is a page fault; on any other vector CR2
+ * holds an earlier fault's address and must not reach here. */
+#define PANIC_IDENTITY_VA_MAX  0x0000800000000000ULL
+
 static void PanicNameFaultAddress(uint64_t addr)
 {
+    if (addr >= PANIC_IDENTITY_VA_MAX)
+    {
+        if (efi_runtime_available())
+            kprintf("  CR2 is a kernel-half LINEAR address; the EFI memory map "
+                    "answers about PHYSICAL ones and is not asked here\n");
+        return;
+    }
+
     EfiDescriptorFacts d;
 
     if (EfiDescribePhysical(addr, &d))
     {
-        kprintf("  CR2 is EFI descriptor [%u] %s phys=%016lx pages=%lu "
+        kprintf("  CR2 (linear == physical in the identity window) is EFI "
+                "descriptor [%u] %s phys=%016lx pages=%lu "
                 "virt=%016lx attr=%016lx  %s\n",
                 d.index, EfiMemoryTypeName(d.type), d.physical_start,
                 d.number_of_pages, d.virtual_start, d.attribute,
@@ -1219,9 +1240,12 @@ void exception_handler(interrupt_frame_t *frame)
      * delivering this one and this line, could only come from the stub's own
      * pushes onto the kernel stack, and that is a #DF, not a recoverable #PF.
      *
-     * Meaningful only for vector 14; for every other vector it is whatever the
-     * last fault on this core left, which is exactly what the panic block used
-     * to print anyway.
+     * ‼ MEANINGFUL ONLY FOR VECTOR 14. For every other vector it is whatever
+     * the last page fault on this core left, and every reader of it below —
+     * the panic dump, PanicNameFaultAddress, the Lifeline fall record — says
+     * so or refuses to speak. A stale address printed as this fault's is not a
+     * near miss on a board: it gets resolved against the EFI memory map and
+     * names a region nothing touched.
      */
     uint64_t fault_addr;
     __asm__ volatile("mov %%cr2, %0" : "=r"(fault_addr));
@@ -1762,10 +1786,18 @@ void exception_handler(interrupt_frame_t *frame)
     panic_name_addr("  fault at ", frame->rip, false);
 
     /* The same value the handler read on the way in — see the note at the top.
-     * CR3 is read here because nothing about a fault disturbs it. */
+     * CR3 is read here because nothing about a fault disturbs it.
+     *
+     * The register is dumped for every vector because it IS a register this
+     * core holds, but only vector 14 wrote it (Intel SDM Vol 3A §4.7). On any
+     * other vector it is an earlier page fault's address, and the line says so
+     * rather than letting the reader take it for this exception's. */
     uint64_t panic_cr2 = fault_addr, panic_cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(panic_cr3));
-    kprintf("  CR2=%016lx  CR3=%016lx\n", panic_cr2, panic_cr3);
+    kprintf("  CR2=%016lx%s  CR3=%016lx\n", panic_cr2,
+            frame->vector == 14 ? ""
+                                : " (stale — not this exception's address)",
+            panic_cr3);
 
     if (frame->vector == 14)
     {

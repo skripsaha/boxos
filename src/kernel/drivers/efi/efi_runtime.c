@@ -64,6 +64,19 @@
  * short of it. See efi_rt_virt_for. */
 #define EFI_RT_VA_KERNEL_IMAGE_BASE  0xFFFFFFFF80000000ULL
 
+/* The top of the range in which VA==PA can be a fact rather than a wish.
+ * With 4-level paging the low canonical half ends at 2^47 (Intel SDM Vol 3A
+ * §4.5, "4-Level Paging"), so an identity mapping can only exist below it —
+ * every runtime region and every boot-services region the firmware goes on
+ * using is mapped at its own physical address inside this range.
+ *
+ * ‼ Under 5-level paging the low half reaches 2^56, so this bound UNDER-
+ * claims: a physical address above 128 TiB identity-mapped there is reported
+ * as "in neither window" rather than translated. That is the direction to be
+ * wrong in — a refusal costs a line of the log, a wrong translation costs an
+ * evening chasing the wrong descriptor. */
+#define EFI_IDENTITY_VA_MAX          0x0000800000000000ULL
+
 /* =========================================================================
  * Driver state
  * ========================================================================= */
@@ -591,35 +604,86 @@ bool EfiDescribePhysical(uint64_t phys, EfiDescriptorFacts *out)
     return true;
 }
 
-/* What Lifeline caught, on its way back out of the firmware — and the memory
- * map's own answer for CR2, which is the difference between "a bare physical
- * address nobody recognises" and "runtime data descriptor 41". */
+bool EfiPhysicalForFaultAddress(uint64_t linear, uint64_t *out_phys,
+                                const char **out_window)
+{
+    if (!out_phys || !out_window) return false;
+
+    if (linear >= EFI_RT_VA_BASE && linear < EFI_RT_VA_KERNEL_IMAGE_BASE) {
+        *out_phys  = linear - EFI_RT_VA_BASE;
+        *out_window = "the runtime VA window";
+        return true;
+    }
+
+    if (linear < EFI_IDENTITY_VA_MAX) {
+        *out_phys  = linear;
+        *out_window = "the VA==PA window";
+        return true;
+    }
+
+    return false;
+}
+
+/* What Lifeline caught, on its way back out of the firmware — and, when the
+ * fall was a page fault, the memory map's own answer for the address it
+ * names: the difference between "a bare physical address nobody recognises"
+ * and "runtime data descriptor 41".
+ *
+ * ‼ Both halves of that are conditional, and both used to be printed
+ * unconditionally.
+ *   - CR2 is written by page-fault delivery alone (Intel SDM Vol 3A §4.7), so
+ *     on a #GP inside ResetSystem it still holds an address from some earlier
+ *     fault. Lifeline now says whether the number belongs to this fall, and a
+ *     fall that names no address says so instead of naming someone else's.
+ *   - CR2 is LINEAR and this map answers about PHYSICAL memory, so the lookup
+ *     is only asked once the linear address has been turned into a physical
+ *     one through the window it came through. */
 void EfiSayFall(const char *service, const char *consequence)
 {
     const LifelineFall *fp = LifelineLastFall();
-    LifelineFall        f  = { 0, 0, 0, 0, 0, false };
+    LifelineFall        f  = { 0 };
     if (fp) f = *fp;
 
     kprintf("[EFI] the firmware fell inside %s: vector=%lu err=0x%lx "
-            "RIP=0x%lx CR2=0x%lx CR3=0x%lx — %s\n",
+            "RIP=0x%lx CR3=0x%lx — %s\n",
             service, (unsigned long)f.vector, (unsigned long)f.error_code,
-            (unsigned long)f.rip, (unsigned long)f.cr2,
-            (unsigned long)f.cr3, consequence);
+            (unsigned long)f.rip, (unsigned long)f.cr3, consequence);
+
+    if (!f.cr2_valid) {
+        kprintf("[EFI]   vector %lu names no memory address — CR2 is set by a "
+                "page fault and by nothing else, so there is nothing here to "
+                "look up in the memory map\n",
+                (unsigned long)f.vector);
+        return;
+    }
+
+    uint64_t    phys   = 0;
+    const char *window = NULL;
+    if (!EfiPhysicalForFaultAddress(f.cr2, &phys, &window)) {
+        kprintf("[EFI]   CR2 0x%lx (linear) is in neither window this kernel "
+                "built for the firmware, so it has no physical address to ask "
+                "the memory map about\n",
+                (unsigned long)f.cr2);
+        return;
+    }
 
     EfiDescriptorFacts d;
-    if (EfiDescribePhysical(f.cr2, &d)) {
+    if (EfiDescribePhysical(phys, &d)) {
         char attrs[192];
         EfiAttributeNames(d.attribute, attrs, sizeof(attrs));
-        kprintf("[EFI]   CR2 0x%lx is descriptor [%u] %s phys=0x%lx pages=%lu "
-                "virt=0x%lx attr=0x%016lx %s\n",
-                (unsigned long)f.cr2, d.index, EfiMemoryTypeName(d.type),
+        kprintf("[EFI]   CR2 0x%lx (linear, through %s) is phys 0x%lx = "
+                "descriptor [%u] %s phys=0x%lx pages=%lu virt=0x%lx "
+                "attr=0x%016lx %s\n",
+                (unsigned long)f.cr2, window, (unsigned long)phys,
+                d.index, EfiMemoryTypeName(d.type),
                 (unsigned long)d.physical_start,
                 (unsigned long)d.number_of_pages,
                 (unsigned long)d.virtual_start,
                 (unsigned long)d.attribute, attrs);
     } else {
-        kprintf("[EFI]   CR2 0x%lx falls in no EFI memory descriptor\n",
-                (unsigned long)f.cr2);
+        kprintf("[EFI]   CR2 0x%lx (linear, through %s) is phys 0x%lx, which "
+                "falls in no EFI memory descriptor\n",
+                (unsigned long)f.cr2, window, (unsigned long)phys);
     }
 }
 

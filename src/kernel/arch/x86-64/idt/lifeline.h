@@ -73,11 +73,27 @@ void LifelineDisarm(void);
 bool LifelineCatch(interrupt_frame_t *frame);
 
 /* What the last catch on THIS core recorded, so the caller can say what
- * happened. Per-core: an AP's fall never overwrites the BSP's. */
+ * happened. Per-core: an AP's fall never overwrites the BSP's.
+ *
+ * ‼ `cr2` IS ONLY A FAULT ADDRESS WHEN `cr2_valid` SAYS SO.
+ *
+ * CR2 is written by page-fault delivery and by nothing else (Intel SDM Vol 3A
+ * §4.7, "Page-Fault Exceptions"), so after a #GP, #UD or #NP the register
+ * still holds the address of some EARLIER page fault on this core. Copying it
+ * into every fall record made the log name an address that had nothing to do
+ * with the fall, and the reader then resolved that address against the EFI
+ * memory map and got a confident, fabricated attribution. So the catch fills
+ * `cr2` for vector 14 alone; `cr2_valid` is false otherwise and `cr2` is zero.
+ *
+ * ‼ AND IT IS A LINEAR ADDRESS. CR2 holds the linear address the access used
+ * (same section). Anything that answers about PHYSICAL memory — the EFI
+ * memory map among them — has to be told which window the linear address came
+ * through before it may be asked. */
 typedef struct
 {
     uint64_t vector, error_code, rip, cr2, cr3;
-    bool valid;
+    bool valid;     /* a fall was caught on this core at all */
+    bool cr2_valid; /* `cr2` is THIS fall's linear fault address */
 } LifelineFall;
 
 const LifelineFall *LifelineLastFall(void);
@@ -86,7 +102,10 @@ const LifelineFall *LifelineLastFall(void);
  * record can carry it. CR2 is read exactly once per exception and nowhere else
  * (see the block at the head of exception_handler); this exists so the catch
  * path does not become the second reader. Called immediately before
- * LifelineCatch and nowhere else. */
+ * LifelineCatch and nowhere else.
+ *
+ * It is handed over for EVERY vector because it is read for every vector; the
+ * catch decides whether this fall is one CR2 describes. */
 void LifelineNoteFaultAddress(uint64_t cr2);
 
 #endif /* LIFELINE_H */

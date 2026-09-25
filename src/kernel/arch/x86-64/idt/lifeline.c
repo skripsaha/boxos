@@ -94,7 +94,6 @@ static LifelineStation *LifelineStationHere(void)
  *   7  #NM  device not available — firmware touching x87/SSE with CR0.TS set
  *   10 #TS  invalid TSS
  *   11 #NP  segment not present — a descriptor the firmware expects, gone
- *   12 #SS  stack-segment fault
  *   13 #GP  general protection — the classic answer to firmware reaching for
  *           a descriptor, an MSR or an I/O port this kernel does not grant
  *   14 #PF  page fault — the observed failure on the owner's laptop
@@ -109,6 +108,28 @@ static LifelineStation *LifelineStationHere(void)
  *           this mechanism cannot be trusted, and neither can the pad's claim
  *           to describe a live context. idt.c already answers #DF: a guard-page
  *           hit is recovered, a miss panics. A lifeline must not take that away.
+ *   12 #SS  ‼ Fault class, and firmware can raise it — but it is one of the
+ *           five vectors idt_init hands an IST (IST_STACK_FAULT), so it takes
+ *           isr.asm's PARANOID entry rather than the ordinary one, and that
+ *           path is what rules it out. The paranoid entry saves the GS base as
+ *           it found it and installs this core's kernel base; the paranoid
+ *           exit, for a frame returning to ring 0, WRMSRs the found base back
+ *           (IA32_GS_BASE, Intel SDM Vol 2B "SWAPGS" — the shadow
+ *           IA32_KERNEL_GS_BASE is reachable only by WRMSR at CPL 0, so the
+ *           exit is replaying a fact about the INTERRUPTED code). That replay
+ *           is right exactly while the frame still returns to the code that
+ *           was interrupted. A throwback breaks that premise: it returns to
+ *           OUR code, which never owned the firmware's GS base, and the exit
+ *           would install that base underneath it — after which
+ *           amp_get_core_index and every other gs: read in this kernel is
+ *           reading firmware memory.
+ *           A WRMSR from the catch cannot mend it, because the paranoid exit
+ *           runs afterwards and overwrites whatever the catch wrote. Mending
+ *           it means teaching that exit the frame was redirected, which is a
+ *           change in isr.asm. Until that exists, a #SS inside firmware
+ *           panics — the same outcome every vector had before this file, and
+ *           a far smaller loss than a kernel running on a GS base it does not
+ *           own.
  *   18 #MC  Abort class as well, and mce_handle has already judged it and
  *           returned false — which means fatal — before this file is reached.
  *   2  NMI  answered and returned in full by handle_nmi long before the catch.
@@ -121,7 +142,7 @@ static LifelineStation *LifelineStationHere(void)
  */
 #define LIFELINE_CATCHABLE                                                  \
     ((1u << 0) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 10) |           \
-     (1u << 11) | (1u << 12) | (1u << 13) | (1u << 14) | (1u << 16) |       \
+     (1u << 11) | (1u << 13) | (1u << 14) | (1u << 16) |                    \
      (1u << 17) | (1u << 19))
 
 static bool LifelineVectorIsCatchable(uint64_t vector)
@@ -325,10 +346,18 @@ bool LifelineCatch(interrupt_frame_t *frame)
     if (cr3_now != pad->Cr3)
         __asm__ volatile("mov %0, %%cr3" ::"r"(pad->Cr3) : "memory");
 
+    /* CR2 belongs to vector 14 and to nothing else — Intel SDM Vol 3A §4.7
+     * gives page-fault delivery as the only writer, so on any other vector the
+     * register still names an earlier page fault on this core. Recording it
+     * anyway is how the fall record came to carry an address the fall never
+     * touched, and how the reader came to resolve that address against the EFI
+     * memory map and name a descriptor with conviction. Zero, and a flag that
+     * says there is nothing to say, is the true answer. */
     st->Fall.vector = frame->vector;
     st->Fall.error_code = frame->error_code;
     st->Fall.rip = frame->rip;
-    st->Fall.cr2 = st->PendingCr2;
+    st->Fall.cr2_valid = (frame->vector == 14);
+    st->Fall.cr2 = st->Fall.cr2_valid ? st->PendingCr2 : 0;
     st->Fall.cr3 = cr3_now;
     st->Fall.valid = true;
 
@@ -341,10 +370,18 @@ bool LifelineCatch(interrupt_frame_t *frame)
     __atomic_store_n(&st->Armed, (LifelinePad *)NULL, __ATOMIC_RELEASE);
 
     kprintf("[LIFELINE] core %u: vector %lu at RIP 0x%lx is inside foreign "
-            "code — throwing back (err=0x%lx CR2=0x%lx, CR3 was 0x%lx%s)\n",
+            "code — throwing back (err=0x%lx, CR3 was 0x%lx%s)\n",
             (unsigned)amp_get_core_index(), frame->vector, frame->rip,
-            frame->error_code, st->Fall.cr2, cr3_now,
+            frame->error_code, cr3_now,
             cr3_now != pad->Cr3 ? ", NOT ours — restored" : "");
+    if (st->Fall.cr2_valid)
+        kprintf("[LIFELINE]   fault address CR2=0x%lx (LINEAR — the window it "
+                "was reached through decides what physical page that is)\n",
+                st->Fall.cr2);
+    else
+        kprintf("[LIFELINE]   vector %lu sets no fault address; CR2 is left "
+                "holding an earlier page fault's and is not printed\n",
+                frame->vector);
 
     frame->rip = pad->Rip;
     frame->rsp = pad->Rsp;

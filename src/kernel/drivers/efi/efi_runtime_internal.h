@@ -60,12 +60,29 @@ size_t efi_ucs2_strlen(const uint16_t *s);
  * kernel context's lock, and g_rt_lock → kctx->lock is an order this driver
  * establishes nowhere else.
  *
- * EfiSayFall: what Lifeline caught on the way back out, plus the memory
- * map's own answer for CR2 — which is the whole difference between "a bare
- * physical address nobody recognises" and "runtime data descriptor 41".
+ * EfiSayFall: what Lifeline caught on the way back out, plus — when the fall
+ * was a page fault — the memory map's own answer for the address CR2 names,
+ * which is the whole difference between "a bare physical address nobody
+ * recognises" and "runtime data descriptor 41".
  * Safe after a throwback: it takes no lock and allocates nothing. */
 bool EfiFootingRefuse(const char *service, const char *argument,
                       const void *p, uint64_t len);
 void EfiSayFall(const char *service, const char *consequence);
+
+/* The PHYSICAL address behind a LINEAR fault address, for the two windows
+ * this driver built for the firmware: EFI_RT_VA_BASE + phys (the runtime VA
+ * window) and VA==PA. False when the address is in neither, which is the only
+ * honest answer — the map answers about physical memory and CR2 is linear
+ * (Intel SDM Vol 3A §4.7), and the two are the same number in one window only.
+ *
+ * ‼ A SUBTRACTION, NOT A PAGE WALK, and deliberately so: a walk means
+ * vmm_virt_to_phys, which takes the kernel context's lock, and this is called
+ * from a Lifeline throwback with interrupts off under g_rt_lock. g_rt_lock →
+ * kctx->lock is an order this driver establishes nowhere.
+ *
+ * `*out_window` receives a fixed string naming which window answered; it is
+ * .rodata and outlives every caller. */
+bool EfiPhysicalForFaultAddress(uint64_t linear, uint64_t *out_phys,
+                                const char **out_window);
 
 #endif /* EFI_RUNTIME_INTERNAL_H */
