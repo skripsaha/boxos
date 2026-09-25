@@ -164,7 +164,10 @@ static error_t pmm_defer_region(uintptr_t start, uintptr_t end) {
  * about when the memory came back.
  * ======================================================================== */
 
-static size_t pmm_firmware_pages = 0;
+static size_t pmm_firmware_pages = 0;      /* held, summed over every pass   */
+static size_t pmm_firmware_pass_pages = 0; /* taken by the pass running now   */
+static size_t pmm_firmware_still_free = 0; /* audit: held ranges still free   */
+static bool   pmm_firmware_map_seen = false;
 
 /* Walk the staged EFI memory map, calling back for every range that is the
  * firmware's. Returns false when there is no map to walk (BIOS boot, or a
@@ -206,13 +209,71 @@ static void pmm_firmware_reserve_one(uintptr_t start, uintptr_t end)
 {
     size_t before = pmm_buddy.free_count;
     buddy_reserve_range(&pmm_buddy, start, end);
-    pmm_firmware_pages += before - pmm_buddy.free_count;
+    pmm_firmware_pass_pages += before - pmm_buddy.free_count;
+}
+
+/* One reservation pass over the whole staged map, adding whatever it took to
+ * the running total. buddy_reserve_range removes only blocks that are FREE,
+ * so a pass takes nothing over a range that is not in the buddy yet — which
+ * is why there has to be more than one (see PmmSealFirmwareMemory). */
+static void pmm_firmware_reserve_pass(void)
+{
+    pmm_firmware_pass_pages = 0;
+    if (!pmm_for_each_firmware_range(pmm_firmware_reserve_one)) return;
+    pmm_firmware_map_seen = true;
+    pmm_firmware_pages += pmm_firmware_pass_pages;
+}
+
+/* The audit, and it asks a DIFFERENT store than the reservation wrote to:
+ * buddy.h's alloc_map, one bit per zone page, 1 = allocated. The reserve path
+ * walks the free lists; if it ever misses a block, the free lists are the one
+ * place that cannot say so. Pages outside the buddy zone are not the buddy's
+ * to hand out and are skipped. */
+static void pmm_firmware_audit_one(uintptr_t start, uintptr_t end)
+{
+    uintptr_t zone_end = pmm_buddy.base + pmm_buddy.total_pages * PMM_PAGE_SIZE;
+
+    start = ALIGN_DOWN(start, PMM_PAGE_SIZE);
+    end   = ALIGN_UP(end, PMM_PAGE_SIZE);
+    if (start < pmm_buddy.base) start = pmm_buddy.base;
+    if (end > zone_end) end = zone_end;
+
+    for (uintptr_t p = start; p < end; p += PMM_PAGE_SIZE) {
+        size_t idx = (p - pmm_buddy.base) / PMM_PAGE_SIZE;
+        if ((pmm_buddy.alloc_map[idx / 8] & (1u << (idx % 8))) == 0)
+            pmm_firmware_still_free++;
+    }
 }
 
 void PmmReserveFirmwareMemory(void)
 {
     pmm_firmware_pages = 0;
-    if (!pmm_for_each_firmware_range(pmm_firmware_reserve_one)) return;
+    pmm_firmware_map_seen = false;
+    pmm_firmware_reserve_pass();
+}
+
+/* Second and last pass, and the one that states the total.
+ *
+ * Every USABLE E820 span at or above IDENTITY_MAP_LIMIT is only on
+ * pmm_deferred while pmm_init runs, so the pass from there took nothing over
+ * it. The deferred spans reach the buddy in pmm_activate_pull_map, carved
+ * against NON-USABLE E820 entries only — and EfiBootServicesCode/Data carry
+ * no E820 type of their own (tagboot's UefiTypeToE820 maps both to
+ * E820_USABLE), so that carve does not hold them back either. EDK2 allocates
+ * top-down from the highest free address, which puts them above 4 GiB on any
+ * board with the RAM for it; EfiMapBootServicesWindow then maps the same
+ * pages RW for the firmware. Left here, the firmware would be writing its
+ * scratch into whatever kmalloc handed out.
+ *
+ * ‼ Nothing may be printed about the total before this runs: a count taken at
+ * pmm_init under-reports by exactly the high half. */
+static void PmmSealFirmwareMemory(void)
+{
+    pmm_firmware_reserve_pass();
+    if (!pmm_firmware_map_seen) return;          /* BIOS boot — no such map */
+
+    pmm_firmware_still_free = 0;
+    pmm_for_each_firmware_range(pmm_firmware_audit_one);
 
     /* kprintf, and this is the line an operator goes looking for: on the two
      * boards measured 2026-09-24 it is 61 MB of 3934 and 136 MB of 16186, and
@@ -223,6 +284,13 @@ void PmmReserveFirmwareMemory(void)
             pmm_firmware_pages,
             (pmm_firmware_pages * PMM_PAGE_SIZE) / (1024u * 1024u),
             ((size_t)pmm_usable_pages * PMM_PAGE_SIZE) / (1024u * 1024u));
+
+    if (pmm_firmware_still_free) {
+        kprintf("[PMM] %zu firmware page(s) are still free in this allocator "
+                "after both passes — the line above under-reports and the "
+                "firmware and kmalloc are about to share them\n",
+                pmm_firmware_still_free);
+    }
 }
 
 error_t pmm_init(void) {
@@ -843,6 +911,11 @@ void pmm_activate_pull_map(void) {
         pmm_buddy_free_carved(&pmm_buddy, start, end,
                               entries_for_carve, entries_for_carve_count);
     }
+
+    /* The high spans are in the buddy as of this line, and the firmware's
+     * share of them has to come straight back out — before the next kmalloc,
+     * and before anything is said about how much the firmware holds. */
+    PmmSealFirmwareMemory();
 
     debug_printf("[PMM] Total memory available: %zu MB (%zu pages)\n",
                  (pmm_buddy.free_count * PMM_PAGE_SIZE) / (1024 * 1024),

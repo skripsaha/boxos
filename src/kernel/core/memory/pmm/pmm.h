@@ -52,9 +52,16 @@ void    pmm_free(void* addr, size_t pages);
  * firmware has finished, so the answer is never.
  *
  * ‼ Called from pmm_init, BEFORE vmm_init and before the buddy can hand out a
- * single page — that is the only moment early enough. It reads the staged map
- * through vmm_phys_to_virt, which answers with the boot identity mapping that
- * early. A no-op on a BIOS boot.
+ * single page — that is the earliest moment, not the only one. It reads the
+ * staged map through vmm_phys_to_virt, which answers with the boot identity
+ * mapping that early. A no-op on a BIOS boot.
+ *
+ * ‼ THIS PASS CANNOT BE THE WHOLE ANSWER, and must not be read as one. Every
+ * USABLE E820 span at or above 4 GiB is still deferred when pmm_init runs, and
+ * buddy_reserve_range removes only blocks that are FREE — so over such a span
+ * this pass takes nothing. pmm_activate_pull_map frees those spans into the
+ * buddy and seals the firmware's share of them there, and that is where the
+ * total is stated. Nothing may print a firmware page count before it.
  */
 void    PmmReserveFirmwareMemory(void);
 

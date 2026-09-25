@@ -1776,12 +1776,25 @@ run_noexec() {
     ! grep -q "KERNEL PANIC" "$L"
     chk $? "the boot does not panic"
 
-    # The memory held across SetVirtualAddressMap comes back. Held pages that
-    # are never released are a leak the machine cannot report any other way.
-    grep -q "\[PMM\] EFI boot-services memory returned to the machine" "$L"
-    chk $? "boot-services memory is given back after the firmware relocates"
-    ! grep -q "was only .* page(s) free" "$L"
-    chk $? "every boot-services range was this allocator's to hold"
+    # The firmware's own memory never enters the allocator, and the machine
+    # says how much of itself it gave up. UEFI only — on a BIOS boot there is
+    # no EFI memory map and the line is correctly absent, which is why this
+    # sits in the UEFI half of this scenario.
+    #
+    # ‼ The count is asserted NON-ZERO, and that is the whole point of reading
+    # it out instead of grepping the sentence: the reservation is taken twice,
+    # once at pmm_init and once after the spans above 4 GiB reach the buddy,
+    # and a zero here would mean both passes found nothing to hold.
+    local fw_pages
+    fw_pages=$(sed -n 's/.*\[PMM\] \([0-9][0-9]*\) page(s), [0-9][0-9]* MB, belong to the firmware.*/\1/p' "$L" | head -1)
+    [ -n "$fw_pages" ] && [ "$fw_pages" -gt 0 ]
+    chk $? "the firmware's own memory is held out of the allocator (${fw_pages:-no line} page(s))"
+
+    # And the kernel's own audit of that claim — it re-reads the buddy's
+    # alloc_map after both passes and speaks only when a held range is still
+    # free. A line here means the count above under-reports.
+    ! grep -q "firmware page(s) are still free in this allocator" "$L"
+    chk $? "and the allocator's own bitmap agrees that none of them are free"
 
     # The E820 the kernel divides memory by is the one ExitBootServices
     # accepted, not the one built several allocations earlier.
@@ -7729,7 +7742,13 @@ run_footing() {
     [ $reached -eq 1 ]; chk $? "footing: the uefi boot reached the shell"
 
     # The measurement must SPEAK, and it must say which of the two it was.
-    grep -qE "\[EFI\] ResetSystem\(type=1.*(already on the kernel map|NOT the kernel map)" "$L"
+    #
+    # ‼ Both alternatives are the kernel's OWN words, copied from the ternary
+    # in EfiResetSystem. This read "NOT the kernel map" first — a string no
+    # build emits — so on this bench, where the first branch always prints,
+    # the alternation only ever tested one arm and the other could have been
+    # renamed away without a gate noticing.
+    grep -qE "\[EFI\] ResetSystem\(type=1.*(already on the kernel map|the firmware was about to be entered in a process cabin)" "$L"
     chk $? "footing: the reset says which map the firmware was entered on"
 
     grep -q "\[EFI\] ResetSystem(type=1" "$L"; chk $? "footing: and names g_rt, the pointer the call dereferences"
