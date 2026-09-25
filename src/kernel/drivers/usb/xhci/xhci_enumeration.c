@@ -1450,6 +1450,22 @@ bool xhci_enum_step_can_be_asked_again(uint8_t state)
     }
 }
 
+/*
+ * The three states a slot passes through while its control pipe is being
+ * repaired.
+ *
+ * They are not steps of the conversation with the device. Each of them ends by
+ * putting the slot back on step_resume — the step it was already on — so
+ * passing through them is not progress, and nothing that measures progress may
+ * read them as any.
+ */
+static bool enum_state_is_repair(uint8_t state)
+{
+    return state == ENUM_STATE_WAIT_EP0_RESET ||
+           state == ENUM_STATE_WAIT_EP0_STOP ||
+           state == ENUM_STATE_WAIT_EP0_DEQUEUE;
+}
+
 void xhci_enum_recover_ep0(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
                            uint8_t resume_at, bool ask_again)
 {
@@ -1476,6 +1492,25 @@ static void enum_resume_after_recovery(xhci_controller_t* ctrl,
                                        struct xhci_device_slot* slot,
                                        uint8_t slot_id)
 {
+    /*
+     * ‼ AND NOT `slot->step_retry = 0` HERE, WHICH IS WHERE IT LOOKS LIKE
+     * IT BELONGS.
+     *
+     * This is the moment the pipe is clear and the step is about to be asked
+     * again, so zeroing the count here reads as "a fresh attempt". It is the
+     * exact opposite: every attempt passes through this line, so a reset here
+     * hands the device an unlimited supply of them — fault, spend a try,
+     * repair, arrive here, count back to zero, fault again, for ever, on a
+     * step that never advances. That runaway is the one thing this counter
+     * exists to prevent, and neither of the other bounds would catch it: the
+     * port's window (XHCI_PORT_PATIENCE_MS, 15 s) is only examined when a new
+     * enumeration is STARTED on the port, which a slot looping here never
+     * reaches, and the watchdog measures silence, which a loop that keeps
+     * posting commands never has.
+     *
+     * The count is put back where the step genuinely changes — at the tail of
+     * xhci_enum_advance_state.
+     */
     slot->state = slot->step_resume;
 
     if (!slot->step_reissue) {
@@ -2111,9 +2146,7 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
          */
         if (slot->born_port && slot->born_port <= ctrl->max_ports &&
             state > ctrl->port_high_water[slot->born_port] &&
-            state != ENUM_STATE_WAIT_EP0_RESET &&
-            state != ENUM_STATE_WAIT_EP0_STOP &&
-            state != ENUM_STATE_WAIT_EP0_DEQUEUE) {
+            !enum_state_is_repair(state)) {
             ctrl->port_high_water[slot->born_port]   = state;
             ctrl->port_window_since[slot->born_port] = now;
         }
@@ -2598,6 +2631,11 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
         return;
     }
 
+    /* Which step this answer belongs to, read before any case can move it.
+     * The tail of this function compares the two to decide whether the
+     * enumeration actually got anywhere. */
+    const uint8_t step_answered = slot->state;
+
     switch (slot->state) {
 
         case ENUM_STATE_WAIT_ENABLE_SLOT: {
@@ -3003,5 +3041,45 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
             kprintf("[xHCI %s] slot %u answered a step it was not on (%s)\n",
                     ctrl->name, slot_id, xhci_enum_state_name(slot->state));
             break;
+    }
+
+    /*
+     * ‼ THE ATTEMPT COUNT BELONGS TO ONE STEP, SO IT ENDS WHEN THE STEP DOES.
+     *
+     * slot->step_retry bounds the tries spent on a SINGLE step — three, by
+     * XHCI_STEP_RETRIES — and nothing ever put it back, so one counter served
+     * the whole conversation and every later step began with whatever earlier
+     * steps had already spent. Measured on the owner's B365M board,
+     * boardlogs/b365m_2026_09_25_after.log, one keyboard on port 3:
+     *
+     *   reading the configuration header — Babble Detected ... (attempt 1 of 3)
+     *   reading the configuration        — Stall           ... (attempt 2 of 3)
+     *
+     * Two different steps, one fault each, and the second arrived with two
+     * thirds of its budget gone. What was left had to cover Set Configuration,
+     * Set Protocol and Set Idle as well — and on the last two a spent counter
+     * does not merely release the slot, it makes the transfer path read a
+     * USB Transaction Error as "it is optional, carrying on without it"
+     * (xhci_transfer.c), which leaves a keyboard in report protocol.
+     *
+     * ‼ ON THE TRANSITION, NOT ON ENTRY TO THE CASE. Entering a case means the
+     * step was answered; it does not mean the step is over. A descriptor read
+     * whose answer came up short is answered with Success and then spends a try
+     * from INSIDE the case (enum_got_it_all -> enum_ask_again). A reset written
+     * at the top of the switch would zero the count that line is about to
+     * raise, and the short read would have no bound left at all — the same
+     * runaway described in enum_resume_after_recovery, reached by the other
+     * road.
+     *
+     * The repair states are excluded because they end on step_resume, the step
+     * the slot was already on. IDLE and RETIRING are excluded because the slot
+     * is gone: the entry is claimable by the next device and its counter is no
+     * longer ours to write.
+     */
+    if (slot->state != step_answered &&
+        !enum_state_is_repair(step_answered) &&
+        slot->state != ENUM_STATE_IDLE &&
+        slot->state != ENUM_STATE_RETIRING) {
+        slot->step_retry = 0;
     }
 }
