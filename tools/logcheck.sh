@@ -4553,26 +4553,26 @@ p = "src/kernel/core/decks/system/sync_ops.c"
 s = open(p).read()
 anchor = """    spin_lock(&bucket->lock);
     AddrWaitEntry *e = bucket->head;
-    while (e && (count == 0 || wake_count < count) && wake_count < ADDR_WAKE_MAX_BATCH)"""
-assert anchor in s, "wakedrop anchor missing"
+"""
+assert s.count(anchor) == 1, "wakedrop anchor missing"
 dropped = """    {   /* logcheck mutation: the wake that was never rung */
         static uint32_t s_rung_short;
         if (ctx->proc->pid >= 3 && __atomic_load_n(&s_rung_short, __ATOMIC_ACQUIRE) == 0) {
             bool sleeper = false;
             spin_lock(&bucket->lock);
             for (AddrWaitEntry *w = bucket->head; w; w = w->next)
-                if (!w->done && w->phys_addr == phys) { sleeper = true; break; }
+                if (!w->done && w->space == space && w->user_va == user_va) { sleeper = true; break; }
             spin_unlock(&bucket->lock);
             if (sleeper && __atomic_exchange_n(&s_rung_short, 1u, __ATOMIC_ACQ_REL) == 0) {
                 kprintf("[MUTATION] wake dropped: pid %u asked for 0x%lx and the sleeper was not told\\n",
-                        ctx->proc->pid, (unsigned long)phys);
+                        ctx->proc->pid, (unsigned long)user_va);
                 return OK;
             }
         }
     }
     spin_lock(&bucket->lock);
     AddrWaitEntry *e = bucket->head;
-    while (e && (count == 0 || wake_count < count) && wake_count < ADDR_WAKE_MAX_BATCH)"""
+"""
 open(p, "w").write(s.replace(anchor, dropped, 1))
 EOF
     mut_done src/kernel/core/decks/system/sync_ops.c "logcheck mutation: the wake that was never rung"
@@ -4602,14 +4602,23 @@ lostwake_prompt_back() {
     sleep 2
     return 0
 }
+# rounds = how many brigades must pass; want_looks = how many of the watch's
+# looks must have landed while one ran. A look comes every ten seconds and a
+# round lasts about as long, so the two lock phase: on 2026-09-26 a kernel that
+# printed through the console faster moved every look into the gaps between
+# rounds, and eight clean rounds proved nothing (looks=2). So the rounds go on
+# until the watch has looked often enough — a pause that grows with the round
+# number walks the phase — and stop at three times the rounds asked for.
 lostwake_boot() {
-    local rounds=$2
+    local rounds=$2 want_looks=${3:-0}
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     sleep 4
     local run=0
-    while [ $run -lt "$rounds" ]; do
+    while [ $run -lt "$rounds" ] ||
+          { [ $run -lt $((rounds * 3)) ] &&
+            [ "$(grep -c "the watch walks slowly" build/serial.log)" -lt "$want_looks" ]; }; do
         local MARK
         MARK=$(wc -l < build/serial.log)
         if ! type_cmd "cxxtest 201-202"; then break; fi
@@ -4620,6 +4629,7 @@ lostwake_boot() {
               grep -q "LOST WAKE" build/serial.log'
         grep -q "LOST WAKE" build/serial.log && break
         lostwake_prompt_back "$MARK" || break
+        [ "$want_looks" -gt 0 ] && sleep $((run % 4))
         run=$((run+1))
     done
     make run-stop >/dev/null 2>&1
@@ -4629,7 +4639,7 @@ lostwake_boot() {
 run_lostwake() {
     echo "== lostwake: the watch walks slowly through a brigade, and must not cry wolf =="
     slowwalk_on; build
-    lostwake_boot lostwake 8
+    lostwake_boot lostwake 8 3
     slowwalk_off
     L="$SCRATCH/serial.lostwake.log"
 
@@ -4909,11 +4919,13 @@ turnin_window_on() {
     python3 - <<'EOF'
 p = "src/kernel/core/ipc/kring.c"
 s = open(p).read()
+# Anchored on the payload store alone: the stretch between it and the publish
+# has grown (the stray-token check, e1e39272, 2026-09-09) and an anchor that
+# spanned it stopped matching — this scenario could not run from that day
+# until it was noticed on 2026-09-26.
 anchor = """    slot->r = *r;
-
-    /* Publish — the RELEASE store makes the payload above visible to the
 """
-assert anchor in s, "turnin window anchor missing"
+assert s.count(anchor) == 1, "turnin window anchor missing"
 widened = """    slot->r = *r;
     /* logcheck mutation: an IPC push into pid 1 holds its released-later slot
      * until the daemon has gone to sleep (or 300 ms), so the claim lands
@@ -4922,8 +4934,6 @@ widened = """    slot->r = *r;
         for (uint32_t w = 0; w < 300 && process_get_state(target) != PROC_WAITING; w++)
             delay(1);
     }
-
-    /* Publish — the RELEASE store makes the payload above visible to the
 """
 open(p, "w").write(s.replace(anchor, widened, 1))
 EOF
@@ -4935,22 +4945,16 @@ turnin_window_off() {
 }
 
 # The sleep that stood here before: cursors only, on both sides — exactly the
-# old SysTurnIn re-check and the old box_turn_in exit — and the writer that
-# stood with it, which waited for its lane grant without ever asking again.
-# The re-ask (print.c) would otherwise end the mutation's wedge by itself: a
-# second request is a second push, and a push wakes the sleeper.
+# old SysTurnIn re-check and the old box_turn_in exit. The writer waiting for
+# its lane grant used to re-ask on a clock, and that re-ask had to be blinded
+# here too or it ended the wedge by itself; since 3141287b (2026-09-08) the
+# writer asks once and asks again only when the daemon dies, so there is
+# nothing left to blind in print.c — and the anchor that blinded it had
+# stopped matching, which kept this mutant from building until 2026-09-26.
 cursoronly_on() {
     mutate src/kernel/core/decks/system/turnin_ops.c
     mutate src/userspace/boxlib/src/turnin.c
-    mutate src/userspace/boxlib/src/print.c
     python3 - <<'EOF'
-p = "src/userspace/boxlib/src/print.c"
-s = open(p).read()
-anchor = """            asked = false;
-            continue;"""
-assert anchor in s, "cursoronly writer anchor missing"
-blind = """            continue;   /* logcheck mutation: the writer that never asked again */"""
-open(p, "w").write(s.replace(anchor, blind, 1))
 p = "src/kernel/core/decks/system/turnin_ops.c"
 s = open(p).read()
 anchor = """    return turnin_touch_tail(proc)  != touch_seen  ||
@@ -4972,14 +4976,12 @@ blind = """    return box_mark_moved(seen);   /* logcheck mutation: the mark alo
 open(p, "w").write(s.replace(anchor, blind, 1))
 EOF
     mut_done src/kernel/core/decks/system/turnin_ops.c "logcheck mutation"
-    mut_done src/userspace/boxlib/src/print.c "logcheck mutation"
     mut_done src/userspace/boxlib/src/turnin.c "logcheck mutation: the mark alone"
 }
 
 cursoronly_off() {
     restore src/kernel/core/decks/system/turnin_ops.c
     restore src/userspace/boxlib/src/turnin.c
-    restore src/userspace/boxlib/src/print.c
 }
 
 # Sixteen cores, `cxxtest 58` three times over. Each run is waited out to its
