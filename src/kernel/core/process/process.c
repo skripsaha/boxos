@@ -639,10 +639,10 @@ uint32_t process_ref_count(process_t *proc)
     return atomic_load_u32(&proc->ref_count);
 }
 
-void process_set_state(process_t *proc, process_state_t new_state)
+bool process_set_state(process_t *proc, process_state_t new_state)
 {
     if (!proc)
-        return;
+        return false;
 
     spin_lock(&proc->state_lock);
     process_state_t old_state = proc->state;
@@ -663,7 +663,7 @@ void process_set_state(process_t *proc, process_state_t new_state)
         (old_state == PROC_DONE || old_state == PROC_CRASHED))
     {
         spin_unlock(&proc->state_lock);
-        return;
+        return false;
     }
 
     /* Sleep is refused while an answer is already on the table. Every
@@ -685,6 +685,16 @@ void process_set_state(process_t *proc, process_state_t new_state)
 
     proc->state = new_state;
 
+    /* Parked while still on its CPU: on more than one core the K-Core that
+     * took the submit is the one parking it, and the strand itself is spinning
+     * on its App-Core in a reply wait that nothing else will end until the
+     * next tick. Asked to step aside, its spin yields at once and the
+     * scheduler takes the WAITING strand off the core. */
+    if (new_state == PROC_WAITING &&
+        __atomic_load_n(&proc->on_cpu, __ATOMIC_ACQUIRE) >= 0)
+        KResultStepAside(proc, true);
+
+    bool enqueued = false;
     if (new_state == PROC_WORKING && old_state != PROC_WORKING)
     {
         error_t err = sched_enqueue(proc);
@@ -693,6 +703,7 @@ void process_set_state(process_t *proc, process_state_t new_state)
             debug_printf("[PROCESS] sched_enqueue failed for PID %u: %s\n",
                          proc->pid, ErrorString(err));
         }
+        enqueued = (err == OK);
     }
     else if (new_state != PROC_WORKING && old_state == PROC_WORKING)
     {
@@ -700,6 +711,7 @@ void process_set_state(process_t *proc, process_state_t new_state)
     }
 
     spin_unlock(&proc->state_lock);
+    return enqueued;
 }
 
 process_state_t process_get_state(process_t *proc)

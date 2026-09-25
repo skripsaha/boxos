@@ -28,8 +28,7 @@
 #include "error.h"
 #include "boxos_magic.h"
 #include "amp.h"
-#include "lapic.h"
-#include "irqchip.h"
+#include "scheduler.h"   /* sched_ring_home — one transition, one bell */
 
 void KRingPocketInitAt(PocketRing *hdr, uint64_t slots_base, uint32_t slot_count_max)
 {
@@ -238,33 +237,6 @@ bool KResultRingHasUnreadAtHead(process_t *proc)
     return __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE) == 2u * (head / cap) + 1u;
 }
 
-/* Cross-core wake helper — mirrors touch_wake_remote in touch.c.
- *
- * Real-HW rationale: process_set_state(target, PROC_WORKING) below
- * enqueues the target on its home_core's runqueue, but the core itself
- * may be in HLT / MWAIT / UMWAIT idle. Without an explicit IPI the
- * target only resumes on the next LAPIC timer tick (~1 ms at 1 kHz
- * scheduling, longer if the BIOS configured a lower tick rate). On real
- * Intel silicon with deeper C-states (intel_idle C3+) the wakeup tail
- * can stretch to tens of ms — fatal for IPC reply latency.
- *
- * IPI_WAKE_VECTOR is the existing AMP-wide doorbell; its handler is a
- * no-op acknowledger that triggers a reschedule probe on the receiver.
- * Idempotent — extra IPIs to an already-running core are a few cycles
- * each; missed IPIs are the real risk and we err on the side of always
- * sending. Skip the IPI when target's home is this same core (we'll
- * pick up the reschedule on return to userspace) or when SMP is
- * single-core (no remote core to wake). */
-static inline void kring_wake_remote(process_t *target)
-{
-    if (!target) return;
-    if (g_amp.total_cores <= 1) return;
-    uint8_t core = target->home_core;
-    if (core >= g_amp.total_cores) return;
-    if (core == amp_get_core_index()) return;
-    lapic_send_ipi(g_amp.cores[core].lapic_id, IPI_WAKE_VECTOR);
-}
-
 /* The two refusals that are said out loud are rate-limited by their own
  * counts; every other outcome of a push is a fact about ONE answer, and the
  * chit that answer redeems (or fails to) is where it is recorded now. */
@@ -292,6 +264,15 @@ static void krp_refused(const process_t *target, const Result *r, const char *wh
         kprintf("[KRP] WARN: refused a message for pid %u: %s\n",
                 (unsigned int)target->pid, why);
     }
+}
+
+void KResultStepAside(process_t *proc, bool step_aside)
+{
+    ResultRing *rr = kring_result_hdr(proc);
+    if (!rr) return;
+    uint64_t want = step_aside ? 1u : 0u;
+    if (__atomic_load_n(&rr->hdr.step_aside, __ATOMIC_RELAXED) != want)
+        __atomic_store_n(&rr->hdr.step_aside, want, __ATOMIC_RELEASE);
 }
 
 bool KResultPush(process_t *target, const Result *r)
@@ -500,21 +481,25 @@ bool KResultPush(process_t *target, const Result *r)
      * still DUE, which its next chit would call an answer dropped. */
     ChitKeep(target, KCTX_COOKIE24(r->context));
 
-    /* Wake. The home core may be HLT/MWAIT-idle and would not learn of the
-     * reply until the next LAPIC tick; the IPI is the doorbell.
+    /* Wake.
      *
      * A token-carrying Result ANSWERS a submit — its owner is kernel-parked on
      * it, or mid-transition to that park. The flip is unconditional for that
      * case: a conditional one lost the race against a parker that had not yet
      * committed PROC_WAITING, and the strand then slept forever on a reply
      * already published. For a running target the transition is a benign
-     * no-op, and process_set_state's death-guard still refuses corpses. */
+     * no-op, and process_set_state's death-guard still refuses corpses.
+     *
+     * A flip that enqueued has rung the core (sched_enqueue); otherwise the
+     * scheduler's doorbell rings it only if the strand is not on a CPU. */
+    bool enqueued = false;
     if (KCTX_COOKIE24(r->context) != 0) {
-        process_set_state(target, PROC_WORKING);
+        enqueued = process_set_state(target, PROC_WORKING);
     } else if (process_get_state(target) == PROC_WAITING) {
-        process_set_state(target, PROC_WORKING);
+        enqueued = process_set_state(target, PROC_WORKING);
     }
-    kring_wake_remote(target);
+    if (!enqueued)
+        sched_ring_home(target);
     return true;
 }
 

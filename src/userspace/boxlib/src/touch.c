@@ -274,7 +274,9 @@ static bool touch_wait_pause(Touch *out, uint32_t timeout_ms)
         /* Same door as the UMWAIT path: events the ring refused are handed
          * over in the guide, so go there now rather than spend the whole spin
          * budget waiting for a tail that cannot move. */
-        if (touch_owed() != 0) {
+        if (touch_owed() != 0 || result_step_aside()) {
+            /* Owed events are handed over at the door; an ask to step aside
+             * means somebody — perhaps the producer — waits for this core. */
             spin = 0;
             yield();
         } else if (++spin < TOUCH_SPIN_BUDGET) {

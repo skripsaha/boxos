@@ -31,11 +31,9 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "process.h"
+#include "scheduler.h"   /* sched_ring_home — one transition, one bell */
 #include "atomics.h"
 #include "boxos_magic.h"
-#include "amp.h"
-#include "lapic.h"
-#include "irqchip.h"
 
 void KTouchRingInitAt(TouchRing *hdr, uint64_t slots_base, uint32_t slot_count_max)
 {
@@ -99,29 +97,6 @@ bool KTouchRingHasUnreadAtHead(process_t *proc)
     return __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE) == 2u * (head / cap) + 1u;
 }
 
-/* ------------------------------------------------------------------------
- * Cross-core wake helper — mirrors kring_wake_remote and touch_wake_remote.
- *
- * Real-HW rationale (identical to KResultPush M3 wake): the home_core
- * of `target` may sit in HLT / MWAIT / UMWAIT idle when we publish a
- * Touch slot. Without an explicit IPI, the consumer only resumes on the
- * next LAPIC timer tick (≤ 1 ms at 1 kHz; longer on deep C-states).
- * TouchRestDeliver in touch.c also calls touch_wake_remote at its outer
- * retry layer — that stays as the fallback. The inline wake here covers
- * the common single-attempt fast path where the outer wake would only
- * arrive AFTER the retry loop completes (~ms later on a contested ring).
- *
- * Defensive guards: skip on null/single-core/out-of-range/self — same
- * shape as kring_wake_remote in kring.c. ------------------------- */
-static inline void ktr_wake_remote(process_t *target)
-{
-    if (!target) return;
-    if (g_amp.total_cores <= 1) return;
-    uint8_t core = target->home_core;
-    if (core >= g_amp.total_cores) return;
-    if (core == amp_get_core_index()) return;
-    lapic_send_ipi(g_amp.cores[core].lapic_id, IPI_WAKE_VECTOR);
-}
 
 /* ------------------------------------------------------------------------
  * Per-return-path counters (snapshot via KTouchPushStats).
@@ -314,11 +289,13 @@ bool KTouchPush(process_t *target,
     __atomic_store_n(&slot->seq, expected + 1u, __ATOMIC_RELEASE);
     atomic_fetch_add_u64(&g_ktr_success, 1);
 
-    /* Wake. The home_core may be HLT/MWAIT-idle and would otherwise not learn
-     * of the new slot until the next LAPIC tick; the IPI is the doorbell. */
+    /* Wake: a flip that enqueued has rung the core; otherwise the scheduler's
+     * doorbell rings it only if the strand is not on a CPU. */
+    bool enqueued = false;
     if (process_get_state(target) == PROC_WAITING) {
-        process_set_state(target, PROC_WORKING);
+        enqueued = process_set_state(target, PROC_WORKING);
     }
-    ktr_wake_remote(target);
+    if (!enqueued)
+        sched_ring_home(target);
     return true;
 }

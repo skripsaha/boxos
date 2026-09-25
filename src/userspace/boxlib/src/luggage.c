@@ -13,6 +13,8 @@
 #include "box/core/cabin.h"
 #include "box/memory.h"
 #include "box/string.h"
+#include "box/core/result.h"   /* result_step_aside */
+#include "box/system.h"        /* yield */
 
 /* -------------------------------------------------------------------------
  * The cutter — one rule for the shell and for the luggage
@@ -89,9 +91,13 @@ static void luggage_prepare(void)
     if (__atomic_load_n(&g_luggage.ready, __ATOMIC_ACQUIRE)) return;
 
     if (!__sync_bool_compare_and_swap(&g_luggage.claimed, 0u, 1u)) {
-        /* Another strand is cutting; its work is a few microseconds away. */
-        while (!__atomic_load_n(&g_luggage.ready, __ATOMIC_ACQUIRE))
-            __asm__ volatile("pause");
+        /* Another strand is cutting; its work is a few microseconds away —
+         * unless it is queued behind us on this core, which the kernel's ask
+         * to step aside says. */
+        while (!__atomic_load_n(&g_luggage.ready, __ATOMIC_ACQUIRE)) {
+            if (result_step_aside()) yield();
+            else __asm__ volatile("pause");
+        }
         return;
     }
 

@@ -18,6 +18,7 @@
 #include "pit.h"
 #include "lapic.h"     /* lapic_send_ipi — directed reschedule IPI on cross-core enqueue */
 #include "irqchip.h"   /* IPI_WAKE_VECTOR */
+#include "kring.h"     /* KResultStepAside — the ask to yield a core */
 
 /* TSC frequency for per-process processor-time accounting (see schedule()). */
 extern uint64_t cpu_get_tsc_freq_khz(void);
@@ -486,6 +487,25 @@ error_t sched_enqueue(process_t *proc)
     }
     spin_unlock(&home->runqueue.lock);
 
+    /* Ask the strand holding that core to step aside. A strand that runs does
+     * not need this — the IPI below brings a schedule() — but one that SPINS
+     * waiting on another strand's work (a hot look, a reply wait) may be
+     * spinning on exactly the strand just queued behind it, and would hold the
+     * core for its whole budget. Read under the target core's scheduler_lock,
+     * so its current strand cannot be switched out and torn down while its
+     * ring header is written. Lock order: state_lock (held by the caller,
+     * process_set_state) -> scheduler_lock; nothing takes them the other way
+     * round. */
+    if (result == OK)
+    {
+        scheduler_state_t *ts = &g_core_sched[target_core];
+        spin_lock(&ts->scheduler_lock);
+        process_t *cur = ts->current_process;
+        if (cur && cur != proc && !process_is_idle(cur))
+            KResultStepAside(cur, true);
+        spin_unlock(&ts->scheduler_lock);
+    }
+
     /* Directed reschedule IPI: if the strand landed on a REMOTE core, kick
      * that core so it leaves MWAIT/idle and re-enters schedule() at once,
      * instead of waiting up to one LAPIC tick (≈10 ms) — or, if the core
@@ -502,6 +522,36 @@ error_t sched_enqueue(process_t *proc)
     }
 
     return result;
+}
+
+/* One transition, one bell. The wake paths (kring, touch_ring, touch,
+ * touch_queue, sync_ops) each carried their own copy of "IPI the home core",
+ * and each rang it AFTER process_set_state had already rung it from
+ * sched_enqueue — two IPIs, and on an App-Core each IPI_WAKE was a full
+ * schedule(). They ring here now, and only when the flip did not.
+ *
+ * A strand on a CPU is not rung at all. It is running: whatever it waits on it
+ * reads from memory — a spin on its ring, or UMWAIT on the very cacheline the
+ * producer just wrote — and an interrupt would only take the core from it for
+ * a schedule() that has nothing new to decide. A strand parked while still on
+ * its CPU is told to step aside through its ring header instead
+ * (KResultStepAside), which is the one it is already watching.
+ *
+ * Ordering: every caller has published (a RELEASE store) and then passed
+ * through the target's state_lock — a locked instruction, a full barrier on
+ * x86 — before on_cpu is read here. A strand leaving its CPU after that read is
+ * re-queued by its own core (WORKING) and dispatched on a later schedule(); a
+ * stale on_cpu >= 0 therefore costs latency up to that schedule, never a wake. */
+void sched_ring_home(process_t *proc)
+{
+    if (!proc || g_amp.total_cores <= 1)
+        return;
+    if (__atomic_load_n(&proc->on_cpu, __ATOMIC_ACQUIRE) >= 0)
+        return;
+    uint8_t core = proc->home_core;
+    if (core >= g_amp.total_cores || core == amp_get_core_index())
+        return;
+    lapic_send_ipi(g_amp.cores[core].lapic_id, IPI_WAKE_VECTOR);
 }
 
 error_t sched_enqueue_on(uint8_t core_idx, process_t *proc)
@@ -1068,6 +1118,10 @@ void schedule(void *frame_ptr)
         }
     }
     s->current_process = next;
+    /* The ask to step aside is recomputed at every dispatch: true exactly when
+     * somebody is left waiting in this core's runqueue. */
+    if (!process_is_idle(next))
+        KResultStepAside(next, RunqueueAtomicTotal(&s->runqueue) != 0);
     /* Release the outgoing strand's dispatch claim AFTER current_process moves to
      * `next`: once on_cpu is -1 the strand is no longer current_process on this
      * core, so a core that then claims it dispatches it singly (no double). */

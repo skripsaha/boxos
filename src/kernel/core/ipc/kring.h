@@ -71,6 +71,9 @@ void ResultOwedRelease(process_t *proc);
  * process_set_state consults this before committing PROC_WAITING — a
  * process must never sleep past its own pending reply. */
 bool KResultRingHasPendingReply(process_t *proc);
+/* Ask the strand holding a core to yield it (1), or withdraw the ask (0):
+ * ResultRingHeader.step_aside. A strand without a reply ring is ignored. */
+void KResultStepAside(process_t *proc, bool step_aside);
 
 /* True when the slot at the ring's head is published and unconsumed — any
  * record, token or not. Turn In refuses a sleep across it: the cursors alone

@@ -21,6 +21,7 @@
 #include "atomics.h"
 #include "touch.h" /* TouchTag types — Phase 2K #CP publish */
 #include "scheduler.h"
+#include "idle.h"   /* process_is_idle — the wake bell reschedules an idle core */
 #include "context_switch.h"
 #include "keyboard.h"
 #include "ahci.h"
@@ -2183,7 +2184,23 @@ void irq_handler(interrupt_frame_t *frame)
     {
         if (amp_is_appcore() || g_amp.total_cores == 1)
         {
-            schedule(frame);
+            /* Only when there is something to decide. The bell means "a
+             * strand became runnable here", and sched_enqueue raises the
+             * runqueue's total BEFORE it rings, so a bell that finds the queue
+             * empty, the core running a working strand and nobody else to pick
+             * has nothing new to say — and a schedule() there only rotates the
+             * running strand behind itself, XSAVE and XRSTOR included. A bell
+             * rung after this read is latched in the IRR and delivered again
+             * after the EOI below. An idle current, or one no longer WORKING
+             * (parked while still on this CPU), always reschedules. */
+            scheduler_state_t *s   = scheduler_get_state();
+            process_t         *cur = s ? __atomic_load_n(&s->current_process, __ATOMIC_ACQUIRE) : NULL;
+            if (!s || !cur || process_is_idle(cur) ||
+                RunqueueAtomicTotal(&s->runqueue) != 0 ||
+                __atomic_load_n(&cur->state, __ATOMIC_ACQUIRE) != PROC_WORKING)
+            {
+                schedule(frame);
+            }
         }
         lapic_send_eoi();
         return;

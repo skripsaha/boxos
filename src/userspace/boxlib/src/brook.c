@@ -28,6 +28,7 @@
 #include "box/cpu.h"
 #include "box/core/manifest.h"
 #include "box/core/pocket.h"
+#include "box/core/result.h"   /* result_step_aside — a spin gives up a wanted core */
 #include "box/turnin.h"   /* box_turn_in — a sleep on a stream must cost no core */
 #include "box/core/strand_self.h"  /* strand_self — whose bell to hang */
 #include "boxos_decks.h"  /* SYSTEM_OP_BROOK_* opcodes — single source */
@@ -508,6 +509,14 @@ static void brook_wait_cycle(volatile void *watch_addr,
                              uint32_t *spin_counter,
                              uint64_t deadline_ms)
 {
+    /* The peer may be queued behind us on this very core: when the kernel
+     * asks this strand to step aside, the wait gives the core up at once. */
+    if (result_step_aside()) {
+        *spin_counter = 0;
+        yield();
+        return;
+    }
+
     if (cpu_has_waitpkg()) {
         /* UMONITOR (Intel SDM Vol 2A — opcode F3 0F AE /6) arms the
          * hardware monitor on the cacheline of `watch_addr`. The

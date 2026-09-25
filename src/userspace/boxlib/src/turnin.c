@@ -108,8 +108,16 @@ static bool turn_in_arrival(TurnInMark seen)
 
 void box_turn_in(TurnInMark seen)
 {
+    /* The look ends early when the kernel asks this strand to step aside:
+     * somebody is waiting for this core — quite possibly the very strand
+     * whose arrival the look is waiting for — and spinning out the budget
+     * would only keep it from running. Measured on a shared App-Core
+     * (2026-09-25, QEMU): the display daemon's look held the core ~1 ms per
+     * exchange while the strand with its answer already published sat queued
+     * behind it. */
     for (uint32_t spin = 0; spin < TURN_IN_HOT_LOOK; spin++) {
         if (turn_in_arrival(seen)) return;
+        if (result_step_aside()) break;
         __asm__ volatile("pause" ::: "memory");
     }
 

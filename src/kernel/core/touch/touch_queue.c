@@ -14,9 +14,7 @@
 #include "klib.h"
 #include "atomics.h"
 #include "process.h"
-#include "amp.h"
-#include "lapic.h"
-#include "irqchip.h"
+#include "scheduler.h"   /* sched_ring_home — one transition, one bell */
 #include "baton.h"       /* the deadline rides the process's own baton to a K-Core */
 #include "sync_ops.h"    /* SyncTimeoutDeliver */
 
@@ -161,13 +159,8 @@ static void touch_queue_fire_wake(uint32_t target_pid, uint32_t owes_result,
          * no Result and carries no token. */
         if (owes_result)
             ChitDue(target, target->addr_wait_entry.submit_cookie);
-        process_set_state(target, PROC_WORKING);
-        if (g_amp.total_cores > 1) {
-            uint8_t core = target->home_core;
-            if (core < g_amp.total_cores && core != amp_get_core_index()) {
-                lapic_send_ipi(g_amp.cores[core].lapic_id, IPI_WAKE_VECTOR);
-            }
-        }
+        if (!process_set_state(target, PROC_WORKING))
+            sched_ring_home(target);
     }
 
     if (this_sleep && owes_result) {

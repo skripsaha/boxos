@@ -160,10 +160,16 @@ static struct process_t* kcore_queue_pop(KCorePocketQueue* q)
     return proc;
 }
 
+/* Least loaded, where the load a K-Core carries is what is queued on it PLUS
+ * the strand it is serving right now: `count` falls at pop, before the guide
+ * runs, so a K-Core deep in a long pocket used to read as empty and win every
+ * choice. On a tie the BSP loses — it already takes every interrupt, every
+ * baton and the tick — so with nothing else to tell them apart the pocket goes
+ * to a K-Core that has only pockets to serve. */
 static uint8_t kcore_find_least_loaded(void)
 {
-    uint8_t best_core = g_amp.bsp_index;
-    uint32_t best_depth = UINT32_MAX;
+    uint8_t  best_core = g_amp.bsp_index;
+    uint32_t best_rank = UINT32_MAX;
 
     for (uint8_t i = 0; i < g_amp.total_cores; i++) {
         CoreDescriptor *c = &g_amp.cores[i];
@@ -174,9 +180,11 @@ static uint8_t kcore_find_least_loaded(void)
          * pocket, fires IPI_WAKE at a CPU that never returned from
          * INIT — and the pocket sits in the ring forever. */
         if (!amp_core_online(c)) continue;
-        uint32_t depth = kcore_queue_depth(i);
-        if (depth < best_depth) {
-            best_depth = depth;
+        uint32_t load = kcore_queue_depth(i) +
+                        (__atomic_load_n(&g_kcore_queues[i].serving, __ATOMIC_ACQUIRE) ? 1u : 0u);
+        uint32_t rank = load * 2u + (i == g_amp.bsp_index ? 1u : 0u);
+        if (rank < best_rank) {
+            best_rank = rank;
             best_core = i;
         }
     }
@@ -224,12 +232,14 @@ submitted:
     debug_printf("[%s%u] KCORE submit PID %u -> K%u (depth=%u)\n",
                  my_type, my_core, proc->pid, target, kcore_queue_depth(target));
 
-    /* No doorbell to ourselves. A K-Core submits only from the re-arm in
-     * kcore_process_entry, which runs inside its own pop loop: the next pop
-     * takes the pocket, and the sleep gate re-reads `count` under CLI before
-     * any HLT. An IPI to self would only interrupt the work already under
-     * way. */
-    if (target != my_core)
+    /* The doorbell only for a K-Core in HLT (see `in_hlt`, kcore.h). An awake
+     * one — serving, pumping batons, or on its way round the loop — reaches
+     * the pocket on its next pop, and an interrupt would only break into the
+     * work it is doing. Never to ourselves: a K-Core submits only from the
+     * re-arm inside its own pop loop. The push above ended in a lock xadd on
+     * `count` and an mfence, so this read cannot pass the claim. */
+    if (target != my_core &&
+        __atomic_load_n(&g_kcore_queues[target].in_hlt, __ATOMIC_SEQ_CST))
         lapic_send_ipi(g_amp.cores[target].lapic_id, IPI_WAKE_VECTOR);
     return OK;
 }
@@ -414,10 +424,13 @@ void kcore_run_loop(void)
          * tail=1, yet this process still waits"). Everything an interrupt
          * hands over now rides a baton, and the baton queue is asked. */
         __asm__ volatile("cli");
+        __atomic_store_n(&q->in_hlt, 1u, __ATOMIC_SEQ_CST);  /* before the last look */
         if (kcore_queue_depth(my_idx) != 0 || BatonPending(my_idx)) {
+            __atomic_store_n(&q->in_hlt, 0u, __ATOMIC_RELEASE);
             __asm__ volatile("sti");        /* raced submit — loop, don't sleep */
         } else {
             __asm__ volatile("sti; hlt");   /* atomic arm-and-sleep */
+            __atomic_store_n(&q->in_hlt, 0u, __ATOMIC_RELEASE);
         }
     }
 }

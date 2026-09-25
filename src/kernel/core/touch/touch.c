@@ -15,10 +15,9 @@
 #include "tagfs.h"
 #include "atomics.h"
 #include "amp.h"
+#include "scheduler.h"   /* sched_ring_home — one transition, one bell */
 #include "per_core.h"
 #include "kcore.h"
-#include "lapic.h"
-#include "irqchip.h"
 #include "baton.h"      /* Knock — the one pass for the IRQ ring */
 #include "kernel_config.h"
 #include "manifest_exec.h"
@@ -289,15 +288,6 @@ static uint64_t touch_emit_payload(process_t *target, TouchTag tag_id,
     return vaddr;
 }
 
-static void touch_wake_remote(process_t *target)
-{
-    if (g_amp.total_cores <= 1) return;
-    uint8_t core = target->home_core;
-    if (core < g_amp.total_cores && core != amp_get_core_index()) {
-        lapic_send_ipi(g_amp.cores[core].lapic_id, IPI_WAKE_VECTOR);
-    }
-}
-
 /* ────────────────────────────────────────────────────────────────────────
  * Owed — what a full ring refused, and did not lose.
  *
@@ -419,9 +409,11 @@ static bool touch_owed_append(process_t *proc, TouchTag tag_id, uint16_t flags,
      *
      * A consumer in userspace UMWAIT needs no IPI at all: the slip store above
      * writes the very cacheline its UMONITOR is armed on. */
+    bool enqueued = false;
     if (process_get_state(proc) == PROC_WAITING)
-        process_set_state(proc, PROC_WORKING);
-    touch_wake_remote(proc);
+        enqueued = process_set_state(proc, PROC_WORKING);
+    if (!enqueued)
+        sched_ring_home(proc);
     return true;
 }
 
@@ -574,8 +566,8 @@ void TouchRestDeliver(process_t *target, TouchTag tag_id,
      * situation it was waiting on. What the ring refuses is owed instead, and
      * the slip goes out immediately. */
     if (KTouchPush(target, tag_id, flags, source_pid, kpayload, plen)) {
+        /* KTouchPush has woken the strand itself — one transition, one bell. */
         __atomic_add_fetch(&g_touch_delivered, 1, __ATOMIC_RELAXED);
-        touch_wake_remote(target);
         return;
     }
 
@@ -585,7 +577,7 @@ void TouchRestDeliver(process_t *target, TouchTag tag_id,
         return;
 
     touch_drop_announce(target, tag_id);
-    touch_wake_remote(target);
+    sched_ring_home(target);
 }
 
 static void touch_interrupt_deliver(process_t *proc, TouchSub *sub,
@@ -633,8 +625,8 @@ static void touch_interrupt_deliver(process_t *proc, TouchSub *sub,
 
     spin_unlock(&proc->irq_lock);
 
-    process_set_state(proc, PROC_WORKING);
-    touch_wake_remote(proc);
+    if (!process_set_state(proc, PROC_WORKING))
+        sched_ring_home(proc);
 }
 
 /* Bound synchronous re-entry on THIS core — a delivery that publishes, whose

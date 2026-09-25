@@ -38,6 +38,13 @@ typedef struct {
      * however long that takes (a proc_exec reads its image inside the call);
      * one standing there with nobody serving it is unserved. */
     struct process_t* volatile serving;
+    /* 1 while this K-Core is committed to HLT: set by the sleep gate BEFORE
+     * its last look at the queue, cleared when it wakes. kcore_submit rings
+     * the doorbell only when it reads 1 — an awake K-Core finds the pocket
+     * on its next pop. Dekker pairing: the gate's store and the producer's
+     * lock xadd on `count` are both full barriers, so either the gate sees
+     * the claim or the producer sees the flag. */
+    volatile uint32_t in_hlt;
 } __attribute__((aligned(64))) KCorePocketQueue;
 
 extern KCorePocketQueue *g_kcore_queues;

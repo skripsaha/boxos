@@ -376,6 +376,9 @@ void result_drain_orphan_replies(void) {
  * Blocking waits — was result_wait.c (merged Stage 2).
  * UMWAIT-based fast path on CPUs with WAITPKG; pause-spin fallback otherwise.
  * =========================================================================== */
+
+void yield(void);   /* boxlib (yield.c) — declared here to avoid pulling sync.h */
+
 static inline uint64_t rdtsc(void) {
     uint32_t lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
@@ -406,6 +409,11 @@ static bool result_wait_umwait(Result* out, uint32_t timeout_ms) {
         if (result_available()) {
             if (result_pop_non_ipc(out)) return true;
         }
+
+        /* Asked to step aside (step_aside shares the tail's cacheline, so the
+         * store that set it also ended the last UMWAIT): give the core to
+         * whoever waits for it, and come back to look. */
+        if (result_step_aside()) { yield(); continue; }
 
         umonitor((volatile void*)tail_addr);
         __sync_synchronize();
@@ -458,6 +466,12 @@ static bool result_wait_spin(Result* out, uint32_t timeout_ms) {
         }
 
         if (timeout_ms > 0 && rdtsc() >= deadline) return false;
+
+        /* The one exception to "never a yield": the kernel asking this strand
+         * to step aside. Either somebody is queued behind it on this core, or
+         * the K-Core has parked it while it spins here — and then only a
+         * pass through the scheduler takes it off the core. */
+        if (result_step_aside()) { yield(); continue; }
 
         __asm__ volatile("pause");
     }
@@ -598,6 +612,10 @@ bool result_wait_any(Result* out, uint32_t timeout_ms) {
 
         if (timeout_ms > 0 && rdtsc() >= deadline) return false;
 
+        /* Asked to step aside: an IPC server waiting on traffic may be holding
+         * the core its next client needs. */
+        if (result_step_aside()) { yield(); continue; }
+
         __asm__ volatile("pause");
     }
 }
@@ -608,7 +626,6 @@ bool result_wait_any(Result* out, uint32_t timeout_ms) {
  * the message producer may be a sibling strand on the same App-Core that must
  * be scheduled for the message to ever arrive (PAUSE-spinning would livelock a
  * single-App-Core cabin). Mirrors result_wait()'s WAITPKG/fallback split. */
-void yield(void);   /* boxlib (yield.c) — declared here to avoid pulling sync.h */
 
 static bool result_wait_ipc_umwait(Result* out, uint32_t timeout_ms) {
     ResultRing* rr = result_ring();
@@ -619,6 +636,11 @@ static bool result_wait_ipc_umwait(Result* out, uint32_t timeout_ms) {
         if (result_available() || result_ipc_stash_count() > 0) {
             if (result_pop_ipc(out)) return true;
         }
+        /* Asked to step aside (step_aside shares the tail's cacheline, so the
+         * store that set it also ended the last UMWAIT): give the core to
+         * whoever waits for it, and come back to look. */
+        if (result_step_aside()) { yield(); continue; }
+
         umonitor((volatile void*)tail_addr);
         __sync_synchronize();
         if (!result_available() && result_ipc_stash_count() == 0) {
@@ -725,6 +747,11 @@ static bool result_wait_ferry_umwait(Result* out, uint32_t timeout_ms) {
             /* seq not yet released by the producer — fall through to UMWAIT
              * rather than busy-return. */
         }
+        /* Asked to step aside (step_aside shares the tail's cacheline, so the
+         * store that set it also ended the last UMWAIT): give the core to
+         * whoever waits for it, and come back to look. */
+        if (result_step_aside()) { yield(); continue; }
+
         umonitor((volatile void*)tail_addr);
         __sync_synchronize();
         if (!result_available() && result_ferry_stash_count() == 0) {

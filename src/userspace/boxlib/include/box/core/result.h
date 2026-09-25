@@ -82,7 +82,13 @@ typedef struct PACKED {
      * settled by this cabin's own next entry into the kernel — the syscall
      * gate hands it over — so nothing here has to act on the number. */
     volatile uint64_t owed;
-    uint8_t           _pad_line1[40];   /* fill cacheline 1 */
+    /* The kernel asking the strand that holds this core to yield it: another
+     * strand waits in this core's runqueue, or this one was parked while still
+     * on its CPU. Written by the kernel (kring.c KResultStepAside), read-only
+     * here. Every spin that waits on work ANOTHER strand must do ends on it —
+     * that strand may be queued behind us on this very core. */
+    volatile uint64_t step_aside;
+    uint8_t           _pad_line1[32];   /* fill cacheline 1 */
 } ResultRingHeader;
 
 STATIC_ASSERT(sizeof(ResultRingHeader) == 128,
@@ -91,6 +97,8 @@ STATIC_ASSERT(OFFSETOF(ResultRingHeader, awaiting) == 72,
               "ResultRingHeader.awaiting must sit at offset 72 (kernel agrees)");
 STATIC_ASSERT(OFFSETOF(ResultRingHeader, owed) == 80,
               "ResultRingHeader.owed must sit at offset 80 (kernel agrees)");
+STATIC_ASSERT(OFFSETOF(ResultRingHeader, step_aside) == 88,
+              "ResultRingHeader.step_aside must sit at offset 88 (kernel agrees)");
 
 typedef struct PACKED {
     ResultRingHeader hdr;
@@ -105,6 +113,12 @@ INLINE ResultRing* result_ring(void) {
 
 INLINE bool result_ring_is_empty(const ResultRing* ring) {
     return ring->hdr.head == ring->hdr.tail;
+}
+
+/* The kernel is asking this strand to give its core up (see step_aside). */
+INLINE bool result_step_aside(void) {
+    ResultRing* rr = result_ring();
+    return rr && __atomic_load_n(&rr->hdr.step_aside, __ATOMIC_ACQUIRE) != 0;
 }
 
 bool result_available(void);

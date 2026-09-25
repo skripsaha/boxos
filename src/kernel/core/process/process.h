@@ -507,7 +507,9 @@ void process_ref_inc(process_t *proc);
 void process_ref_dec(process_t *proc);
 uint32_t process_ref_count(process_t *proc);
 
-void process_set_state(process_t *proc, process_state_t new_state);
+/* Returns true when this call made the strand runnable AND enqueued it —
+ * sched_enqueue rang its core, so the caller must not ring again. */
+bool process_set_state(process_t *proc, process_state_t new_state);
 process_state_t process_get_state(process_t *proc);
 
 int process_destroy_safe(process_t *proc);

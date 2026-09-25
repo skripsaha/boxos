@@ -93,7 +93,22 @@ typedef struct __packed {
      * to be invented for it. The debt itself is settled by the owner at the
      * syscall gate, not by anyone reading this number. */
     volatile uint64_t owed;
-    uint8_t           _pad_line1[40];   /* fill cacheline 1                */
+    /* Step aside: the kernel asking the strand that holds this core to give it
+     * up — written by the kernel, read-only for userspace.
+     *
+     * 1 when another strand is waiting in this core's runqueue (set when one
+     * is queued here, recomputed at every dispatch), or when this strand has
+     * been parked while still on its CPU (a K-Core took its submit and put it
+     * to sleep; only a pass through the scheduler takes it off). A spin that
+     * waits on something ANOTHER strand must produce — the display daemon's
+     * hot look, a Touch or Brook budget, a reply wait — cannot end on its own
+     * when that strand is queued behind it on the same core: the core it waits
+     * for is the one it holds. It ends on this word instead, and yields.
+     *
+     * On the tail's cacheline for the reason `owed` is: UMWAIT on &tail is
+     * stirred by the store that sets it. */
+    volatile uint64_t step_aside;
+    uint8_t           _pad_line1[32];   /* fill cacheline 1                */
 } ResultRingHeader;
 
 _Static_assert(sizeof(ResultRingHeader) == 128,
@@ -108,6 +123,9 @@ _Static_assert(__builtin_offsetof(ResultRingHeader, awaiting) == 72,
 _Static_assert(__builtin_offsetof(ResultRingHeader, owed) == 80,
                "ResultRingHeader.owed must share cacheline 1 with tail — the "
                "consumer's UMONITOR watches that line and nothing else");
+_Static_assert(__builtin_offsetof(ResultRingHeader, step_aside) == 88,
+               "ResultRingHeader.step_aside must share cacheline 1 with tail, "
+               "at offset 88 — boxlib's mirror agrees");
 
 /* Per-slot Vyukov-style envelope: payload + generation counter.
  * Lives at slots_base + (idx % slot_count_max) * RESULT_SLOT_SIZE. */

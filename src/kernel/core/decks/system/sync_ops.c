@@ -58,10 +58,7 @@
 #include "error.h"
 #include "klib.h"
 #include "atomics.h"
-#include "amp.h"
 #include "pid_allocator.h"   /* pid_life — the monotone per-slot generation decides "gone" exactly */
-#include "lapic.h"
-#include "irqchip.h"
 #include "scheduler.h"   /* g_global_tick, SCHEDULER_DEFAULT_TICK_HZ */
 #include "boxos_decks.h"
 
@@ -353,15 +350,9 @@ static int SysAddrWake(const ManifestOp *op, Crate *crates,
              * PROC_WORKING reschedule (no Result, no ERR_TIMEOUT). At worst a
              * benign spurious wakeup for a re-parked strand, which re-checks its
              * predicate. No IRQ-context cleanup. */
-            if (process_get_state(target) == PROC_WAITING) {
-                process_set_state(target, PROC_WORKING);
-                if (g_amp.total_cores > 1) {
-                    uint8_t core = target->home_core;
-                    if (core < g_amp.total_cores && core != amp_get_core_index()) {
-                        lapic_send_ipi(g_amp.cores[core].lapic_id, IPI_WAKE_VECTOR);
-                    }
-                }
-            }
+            if (process_get_state(target) == PROC_WAITING &&
+                !process_set_state(target, PROC_WORKING))
+                sched_ring_home(target);
         }
 
         /* Publish outside bucket lock (per spec). */
@@ -435,15 +426,9 @@ void SyncTimeoutDeliver(void *ctx)
         r.context    = KCTX_PACK24(KCTX_GUIDE, cookie);
         KResultPush(target, &r);
 
-        if (process_get_state(target) == PROC_WAITING) {
-            process_set_state(target, PROC_WORKING);
-            if (g_amp.total_cores > 1) {
-                uint8_t core = target->home_core;
-                if (core < g_amp.total_cores && core != amp_get_core_index()) {
-                    lapic_send_ipi(g_amp.cores[core].lapic_id, IPI_WAKE_VECTOR);
-                }
-            }
-        }
+        if (process_get_state(target) == PROC_WAITING &&
+            !process_set_state(target, PROC_WORKING))
+            sched_ring_home(target);
     }
 
     process_ref_dec(target);   /* the pass's ref */

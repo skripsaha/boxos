@@ -110,6 +110,11 @@ int sched_determine_priority(process_t *proc);
 error_t sched_enqueue(process_t *proc);
 error_t sched_enqueue_on(uint8_t core_idx, process_t *proc);
 error_t sched_dequeue(process_t *proc);
+/* The doorbell for a strand that is runnable but may be waiting its turn: IPI
+ * its home core, unless it is on a CPU right now (it reads its rings itself)
+ * or its home is this core. A wake whose state flip enqueued the strand has
+ * already rung — sched_enqueue's IPI — and must not ring again. */
+void sched_ring_home(process_t *proc);
 /* Remove proc from whichever core's runqueue holds it (referenced-nowhere
  * guarantee before process_destroy frees it). See scheduler.c. */
 void sched_dequeue_all_cores(process_t *proc);
