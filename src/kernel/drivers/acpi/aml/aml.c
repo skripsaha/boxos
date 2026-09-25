@@ -94,6 +94,10 @@
 #define PackageOp        0x12
 #define VarPackageOp     0x13
 #define MethodOp         0x14
+/* DefExternal := ExternalOp NameString ObjectType ArgumentCount — ACPI 6.5
+ * §20.2.5.2. iasl emits one for every name a table borrows from another, so a
+ * board with many SSDTs carries dozens of them in a row. */
+#define ExternalOp       0x15
 #define DualNamePrefix   0x2E
 #define MultiNamePrefix  0x2F
 #define ExtOpPrefix      0x5B
@@ -155,16 +159,36 @@
 #define NorOp            0x7E
 #define XorOp            0x7F
 #define NotOp            0x80
+#define FindSetLeftBitOp   0x81
+#define FindSetRightBitOp  0x82
 #define DerefOfOp        0x83
+#define ConcatResOp      0x84          /* ConcatenateResTemplate */
 #define ModOp            0x85
+/* ‼ 0x86 is Notify and 0x5B 0x86 is IndexField. One byte's worth of
+ * confusion between them is a whole FieldList read as a statement. */
+#define NotifyOp         0x86
 #define SizeOfOp         0x87
 #define IndexOp          0x88
+#define MatchOp          0x89
+#define CreateDWordFieldOp 0x8A
+#define CreateWordFieldOp  0x8B
+#define CreateByteFieldOp  0x8C
+#define CreateBitFieldOp   0x8D
+#define ObjectTypeOp       0x8E
+#define CreateQWordFieldOp 0x8F
 #define LAndOp           0x90
 #define LOrOp            0x91
 #define LNotOp           0x92
 #define LEqualOp         0x93
 #define LGreaterOp       0x94
 #define LLessOp          0x95
+#define ToBufferOp       0x96
+#define ToDecimalStringOp 0x97
+#define ToHexStringOp    0x98
+#define ToIntegerOp      0x99
+#define ToStringOp       0x9C
+#define CopyObjectOp     0x9D
+#define MidOp            0x9E
 
 /* Statement opcodes — ACPI 6.5 §20.2.5.3. Both passes need them: the
  * evaluator RUNS these, and the namespace walk has to measure one standing at
@@ -316,6 +340,23 @@ static uint32_t      g_parse_unwalked = 0;
  * always, because a number that is only ever printed once is a number nobody
  * can compare between two boards. */
 static uint32_t      g_parse_guessed  = 0;
+
+/* ‼ HOW MANY NAMES THIS TABLE SET BORROWS FROM ANOTHER — DefExternal, which
+ * was invisible here until it was measured, in both senses of the word.
+ *
+ * An unhandled ExternalOp made the TermList resync one byte into the
+ * NameString that follows it, and a run of Externals is where that resync did
+ * its worst: the ObjectType byte of `External (X, MethodObj, n)` is 0x08,
+ * which IS NameOp, so the walk read the ArgumentCount byte after it as the
+ * start of a NameString. An ArgumentCount of zero is NullName — twenty-four
+ * refusals on one shipping desktop, for `Name` declarations the firmware
+ * never wrote. An ArgumentCount of one to seven became a four-byte NameSeg
+ * spelling <count> 0x15 '\' <first character of the next External's path>,
+ * and objects were DECLARED under it. Counted and said at the end of the
+ * load, because a board that was fabricating objects out of these bytes
+ * should now report FEWER of them, and nothing else in the log states the
+ * size of what was being misread. */
+static uint32_t      g_parse_externals = 0;
 
 /* Drop every heap chunk and start the chain over at the static one. Called
  * once per aml_init, so a build that failed part-way does not hand its
@@ -713,6 +754,15 @@ static bool aml_is_expression_op(uint8_t op) {
     case OrOp: case NorOp: case XorOp: case NotOp: case DerefOfOp:
     case ModOp: case SizeOfOp: case IndexOp: case LAndOp: case LOrOp:
     case LNotOp: case LEqualOp: case LGreaterOp: case LLessOp:
+    /* ‼ THE TWELVE THAT WERE MISSING. §20.2.5.4's ExpressionOpcode production
+     * holds all of these, and a TermObj may be any of them. Left out, each
+     * one sent parse_term_list into the byte-at-a-time resync — the same
+     * resync that read a run of DefExternal declarations as `Name` and built
+     * objects out of their ObjectType and ArgumentCount bytes. */
+    case FindSetLeftBitOp: case FindSetRightBitOp: case ConcatResOp:
+    case MatchOp: case ObjectTypeOp: case ToBufferOp:
+    case ToDecimalStringOp: case ToHexStringOp: case ToIntegerOp:
+    case ToStringOp: case CopyObjectOp: case MidOp:
         return true;
     default:
         return false;
@@ -759,6 +809,7 @@ typedef enum {
     AML_SKIP_TERM  = 0,     /* one TermArg   §20.2.5 */
     AML_SKIP_SUPER = 1,     /* one SuperName §20.2.2 */
     AML_SKIP_WORD  = 2,     /* two raw bytes: Acquire's Timeout */
+    AML_SKIP_BYTE  = 3,     /* one raw byte: a MatchOpcode of DefMatch */
 } AmlSkipKind;
 
 static uint8_t*  g_skip_owed = NULL;
@@ -824,6 +875,10 @@ static AmlSkipHow AmlSkipRun(const uint8_t** p, const uint8_t* end,
             continue;
         }
         if (*p >= end) return AML_SKIP_NO;
+        if (kind == AML_SKIP_BYTE) {           /* MatchOpcode := ByteData */
+            (*p)++;
+            continue;
+        }
         uint8_t op = **p;
 
         if (kind == AML_SKIP_SUPER) {
@@ -923,23 +978,47 @@ static AmlSkipHow AmlSkipRun(const uint8_t** p, const uint8_t* end,
             }
         }
 
+        /* ‼ THE ONE OPERATOR WITH RAW BYTES BETWEEN ITS OPERANDS. §20.2.5.4:
+         * DefMatch := MatchOp SearchPkg MatchOpcode Operand MatchOpcode
+         * Operand StartIndex, and each MatchOpcode is ByteData — so no
+         * (arguments, targets) pair describes it and it is owed item by item.
+         * Pushed in reverse, as everything here is: the first item owed is
+         * the first one taken off. */
+        if (op == MatchOp) {
+            (*p)++;
+            if (!AmlSkipOwe(&n, AML_SKIP_TERM)) return AML_SKIP_NO;
+            if (!AmlSkipOwe(&n, AML_SKIP_TERM)) return AML_SKIP_NO;
+            if (!AmlSkipOwe(&n, AML_SKIP_BYTE)) return AML_SKIP_NO;
+            if (!AmlSkipOwe(&n, AML_SKIP_TERM)) return AML_SKIP_NO;
+            if (!AmlSkipOwe(&n, AML_SKIP_BYTE)) return AML_SKIP_NO;
+            if (!AmlSkipOwe(&n, AML_SKIP_TERM)) return AML_SKIP_NO;
+            continue;
+        }
+
         /* Expression opcodes: n TermArgs then t Targets (§20.2.5.4). */
         uint8_t nargs, ntargets;
         switch (op) {
             case AddOp: case SubtractOp: case MultiplyOp: case ModOp:
             case AndOp: case NandOp: case OrOp: case NorOp: case XorOp:
             case ShiftLeftOp: case ShiftRightOp: case ConcatOp: case IndexOp:
+            case ConcatResOp: case ToStringOp:
                 nargs = 2; ntargets = 1; break;
             case DivideOp:
                 nargs = 2; ntargets = 2; break;
+            case MidOp:
+                nargs = 3; ntargets = 1; break;
             case NotOp: case StoreOp:
+            case FindSetLeftBitOp: case FindSetRightBitOp:
+            case ToBufferOp: case ToDecimalStringOp: case ToHexStringOp:
+            case ToIntegerOp: case CopyObjectOp:
                 nargs = 1; ntargets = 1; break;
             case LAndOp: case LOrOp: case LEqualOp:
             case LGreaterOp: case LLessOp:
                 nargs = 2; ntargets = 0; break;
             case LNotOp: case DerefOfOp:
                 nargs = 1; ntargets = 0; break;
-            case RefOfOp: case SizeOfOp: case IncrementOp: case DecrementOp:
+            case RefOfOp: case SizeOfOp: case ObjectTypeOp:
+            case IncrementOp: case DecrementOp:
                 nargs = 0; ntargets = 1; break;
             default:
                 return AML_SKIP_NO;
@@ -1611,6 +1690,87 @@ static aml_status_t parse_one(const uint8_t** p, const uint8_t* end,
     }
     if (op == ExtOpPrefix) return handle_extended(p, end, scope, into);
 
+    /*
+     * ‼ AN External DECLARES NOTHING HERE, AND THAT IS THE WHOLE POINT OF IT.
+     *
+     * ACPI 6.5 §20.2.5.2: DefExternal := ExternalOp NameString ObjectType
+     * ArgumentCount — two single bytes after the name. It is a PROMISE that a
+     * name lives in another table, not a declaration: the object itself is
+     * declared in the DSDT or the SSDT that really owns it, and this walk
+     * parses every one of those. Recording something here would put a second
+     * object under a name that is about to get its real one, and
+     * AmlFirstDeclarationWins would then refuse the REAL declaration.
+     *
+     * So it is measured exactly and nothing is kept. Measured is the word
+     * that matters: until this branch existed, 0x15 fell through to
+     * AML_ERR_BAD_OPCODE and parse_term_list resynchronised ONE BYTE into the
+     * NameString — see g_parse_externals for what a run of them then built.
+     */
+    if (op == ExternalOp) {
+        (*p)++;
+        if (!skip_name_string(p, end)) return AML_ERR_BAD_OPCODE;
+        if ((size_t)(end - *p) < 2) return AML_ERR_BOUNDS;
+        *p += 2;                     /* ObjectType, ArgumentCount */
+        g_parse_externals++;
+        return AML_REFUSED;          /* measured in full; nothing declared */
+    }
+
+    /*
+     * ‼ A CreateXField AT TERMLIST LEVEL CUTS INTO A NAMESPACE BUFFER, AND
+     *   THIS PASS MEASURES IT RATHER THAN RECORDING THE NAME IT MAKES.
+     *
+     * §20.2.5.2 puts DefCreateBitField, DefCreateByteField, DefCreateWordField,
+     * DefCreateDWordField and DefCreateQWordField in NamedObj, so every one of
+     * them is a legal TermObj:
+     *     DefCreateDWordField := CreateDWordFieldOp SourceBuff ByteIndex NameString
+     * Two TermArgs and a NameString, and none of the five carries a PkgLength.
+     * Unmeasured they were five more doors into the byte-at-a-time resync.
+     *
+     * What is NOT done is recording the field. The object this evaluator can
+     * hold is a bit window over a buffer a METHOD declared and the run copied
+     * (AmlLocalObj); a window over a namespace Buffer would be a different
+     * object with a different lifetime, and inventing one whose reads and
+     * writes nothing implements is worse than a name that is honestly absent.
+     * A method that later names it is refused by name, aloud, where it stands.
+     */
+    if (op == CreateBitFieldOp  || op == CreateByteFieldOp ||
+        op == CreateWordFieldOp || op == CreateDWordFieldOp ||
+        op == CreateQWordFieldOp) {
+        (*p)++;
+        if (!skip_term_arg(p, end, scope))  return AML_ERR_BAD_OPCODE;
+        if (!skip_term_arg(p, end, scope))  return AML_ERR_BAD_OPCODE;
+        const uint8_t *nm = *p;
+        if (!skip_name_string(p, end))      return AML_ERR_BAD_OPCODE;
+        /* Said once with the first name, because every later refusal of that
+         * name says only that the namespace does not hold it. */
+        static bool said = false;
+        if (!said && (size_t)(end - nm) >= 4 && aml_is_lead_name_char(nm[0])) {
+            said = true;
+            kprintf("[AML] a CreateField at TermList level under %s cuts "
+                    "%c%c%c%c out of a namespace buffer. The cut is measured "
+                    "and stepped over exactly; the field itself is not "
+                    "recorded, because this evaluator holds a buffer field "
+                    "only over a buffer a running method declared. Anything "
+                    "naming %c%c%c%c later is refused by name where it "
+                    "stands. Said once\n",
+                    scope->name, nm[0], nm[1], nm[2], nm[3],
+                    nm[0], nm[1], nm[2], nm[3]);
+        }
+        return AML_REFUSED;
+    }
+
+    /* §20.2.5.3: DefNotify := NotifyOp NotifyObject NotifyValue, with
+     * NotifyObject a SuperName. A StatementOpcode, so nothing is declared —
+     * but it is a single byte that used to reach the resync, and the bytes it
+     * guards are a name and a value. */
+    if (op == NotifyOp) {
+        (*p)++;
+        if (!skip_super_name(p, end, scope)) return AML_ERR_BAD_OPCODE;
+        if (!skip_term_arg(p, end, scope))   return AML_ERR_BAD_OPCODE;
+        g_parse_stmts++;
+        return AML_REFUSED;
+    }
+
     /* ‼ §20.2.5.1: TermObj := Object | StatementOpcode | ExpressionOpcode.
      * Everything above declares an Object. The other two kinds are MEASURED
      * here and stepped over exactly, and that is not tidiness.
@@ -1983,16 +2143,6 @@ static aml_status_t parse_term_list(const uint8_t* aml, uint32_t len,
  * own AmlRun, so there is no state between them to share.
  * ===================================================================== */
 
-/* Buffer-field makers and the two bit scanners — §20.2.5.2, §20.2.5.4. */
-#define FindSetLeftBitOp   0x81
-#define FindSetRightBitOp  0x82
-#define CreateDWordFieldOp 0x8A
-#define CreateWordFieldOp  0x8B
-#define CreateByteFieldOp  0x8C
-#define CreateBitFieldOp   0x8D
-#define ObjectTypeOp       0x8E
-#define CreateQWordFieldOp 0x8F
-
 /* ACPI 6.5 §20.2.6.2 gives the locals as Local0..Local7 and §20.2.6.1 the
  * arguments as Arg0..Arg6. Both counts are the specification's; the opcode
  * ranges 0x60..0x67 and 0x68..0x6E are Table 20.2's. */
@@ -2036,6 +2186,19 @@ typedef struct AmlValue {
     uint32_t       count;        /* PACKAGE: the element count it declares */
     aml_object_t  *scope;        /* where a NameString inside it resolves */
     aml_object_t  *node;         /* set when the operand WAS a name */
+
+    /* ‼ THIS VALUE CAME OUT OF AN Index, AND IT IS NOT A REFERENCE.
+     *
+     * ACPI 6.5 §20.2.5.4 makes DefIndex yield a reference to the element it
+     * selects, and there is no reference object in this evaluator — see
+     * AmlFoldIndex for why one is not invented here. What Index yields
+     * instead is the ELEMENT ITSELF, with this flag set, and the flag is what
+     * DerefOf accepts: DerefOf of anything else is refused aloud rather than
+     * answered with the value it was handed. It is a field of AmlValue and
+     * not a separate type, so AmlValueMark covers it and a loop that turns on
+     * an Index cannot look to the turn fingerprint like a loop standing
+     * still. */
+    bool           indexed;
 } AmlValue;
 
 /*
@@ -2342,6 +2505,7 @@ static uint64_t AmlValueMark(uint64_t h, const AmlValue *v) {
     h = AmlMix(h, (uint64_t)v->count);
     h = AmlMix(h, (uint64_t)(uintptr_t)v->scope);
     h = AmlMix(h, (uint64_t)(uintptr_t)v->node);
+    h = AmlMix(h, v->indexed ? 1ULL : 0ULL);
     return h;
 }
 
@@ -3486,12 +3650,40 @@ static bool AmlBufFieldWrite(AmlAct *a, AmlLocalObj *f, uint64_t v) {
  * AmlExprStep carries them out where the stream position is still in hand
  * rather than through the pending-operator path — the counts below are what
  * the dry walk needs to MEASURE one.
+ *
+ * ‼ WIDENED ON PURPOSE, A SECOND TIME: ToInteger (0x99), SizeOf (0x87),
+ * Index (0x88) and DerefOf (0x83). Eight devices on a shipping desktop board
+ * could not say what they are because their _HID runs through HCID, and HCID
+ * stands on ToInteger; one of the eight is an interrupt link. §20.2.5.4 gives
+ * DefToInteger := ToIntegerOp Operand Target, DefSizeOf := SizeOfOp
+ * SuperName, DefIndex := IndexOp BuffPkgObj IndexValue Target and DefDerefOf
+ * := DerefOfOp ObjReference. SizeOf's SuperName is counted as an argument and
+ * not as a Target because it is READ and never written; DerefOf's operand is
+ * a TermArg already.
+ *
+ * ‼ AND Match (0x89) IS DELIBERATELY NOT HERE. §20.2.5.4 writes DefMatch :=
+ * MatchOp SearchPkg MatchOpcode Operand MatchOpcode Operand StartIndex, and
+ * each MatchOpcode is a raw ByteData standing BETWEEN two TermArgs — so no
+ * pair of counts describes it, and an entry claiming three arguments and no
+ * target would make the dry walk measure the wrong bytes and mis-prove a
+ * method. It is carried out in AmlExprStep, where the stream position is in
+ * hand, for the same reason Increment is; and the dry walk refuses it by
+ * name, through AmlOpcodeName, exactly as it refuses a loop.
+ *
+ * ‼ EVERY ENTRY HERE MUST ALSO HAVE A RULE IN AmlFold OR A BRANCH IN
+ * AmlExprStep. This table is what the narrow gate measures WITH: an operator
+ * admitted here and unimplemented there is a method the gate passes and the
+ * run abandons half-way, which is the one outcome the gate exists to prevent.
  */
 static bool AmlOperatorShape(uint8_t op, uint8_t *nargs, uint8_t *ntargets) {
     switch (op) {
     case StoreOp:        *nargs = 1; *ntargets = 1; return true;
     case IncrementOp: case DecrementOp:
                          *nargs = 0; *ntargets = 1; return true;
+    case ToIntegerOp:    *nargs = 1; *ntargets = 1; return true;
+    case IndexOp:        *nargs = 2; *ntargets = 1; return true;
+    case SizeOfOp: case DerefOfOp:
+                         *nargs = 1; *ntargets = 0; return true;
     case AddOp: case SubtractOp: case MultiplyOp: case ModOp:
     case AndOp: case NandOp: case OrOp: case NorOp: case XorOp:
     case ShiftLeftOp: case ShiftRightOp:
@@ -3544,8 +3736,14 @@ static const char *AmlExtOpName(uint8_t sub) {
 
 /* The name an ASL writer would recognise, for an opcode that stands where
  * this evaluator cannot carry it out. Increment and Decrement were here and
- * are gone with the refusal that named them: AmlOperatorShape now admits
- * both, so neither can reach a line that says they were declined. */
+ * are gone with the refusal that named them, and SizeOf, Index, DerefOf and
+ * ToInteger have just followed them out for the same reason: AmlOperatorShape
+ * admits all six, so none of them can reach a line that says it was declined.
+ *
+ * Match stays, and it is the one name here the dry walk depends on: the gate
+ * has no branch of its own for Match, so this is what makes its refusal read
+ * "a statement this evaluator does not run: Match" rather than a bare
+ * opcode. */
 static const char *AmlOpcodeName(uint8_t op) {
     switch (op) {
     case WhileOp:        return "a While loop";
@@ -3553,23 +3751,20 @@ static const char *AmlOpcodeName(uint8_t op) {
     case ContinueOp:     return "Continue";
     case BreakPointOp:   return "BreakPoint";
     case ConcatOp:       return "Concatenate";
-    case IndexOp:        return "Index";
-    case DerefOfOp:      return "DerefOf";
     case RefOfOp:        return "RefOf";
-    case SizeOfOp:       return "SizeOf";
     case ObjectTypeOp:   return "ObjectType";
     /* Single-byte opcodes, not the extended ones of the same value —
      * NotifyOp is 0x86 and 0x5B 0x86 is IndexField, which are two different
      * things and were one bug's worth of confusion apart. */
-    case 0x86:           return "Notify";
-    case 0x84:           return "ConcatenateResTemplate";
-    case 0x89:           return "Match";
-    case 0x96:           return "ToBuffer";
-    case 0x98:           return "ToHexString";
-    case 0x99:           return "ToInteger";
-    case 0x9C:           return "ToString";
-    case 0x9D:           return "CopyObject";
-    case 0x9E:           return "Mid";
+    case NotifyOp:          return "Notify";
+    case ConcatResOp:       return "ConcatenateResTemplate";
+    case MatchOp:           return "Match";
+    case ToBufferOp:        return "ToBuffer";
+    case ToDecimalStringOp: return "ToDecimalString";
+    case ToHexStringOp:     return "ToHexString";
+    case ToStringOp:        return "ToString";
+    case CopyObjectOp:      return "CopyObject";
+    case MidOp:             return "Mid";
     default:             return NULL;
     }
 }
@@ -3785,6 +3980,317 @@ static bool AmlStoreInto(AmlRun *run, AmlAct *a, const uint8_t **p,
 }
 
 /* ===========================================================
+ * The operators that compute with something other than an integer
+ * =========================================================== */
+
+/* How many bytes a String or a Buffer value holds. */
+static uint32_t AmlSpan(const AmlValue *v) {
+    return (v->bytes && v->bytes_end > v->bytes)
+             ? (uint32_t)(v->bytes_end - v->bytes) : 0u;
+}
+
+/*
+ * SizeOf — ACPI 6.5 §19.6.130: "If the ObjectName is a String, the size in
+ * bytes of the string is returned. If the ObjectName is a Buffer, the size in
+ * bytes of the buffer is returned. If the ObjectName is a Package, the number
+ * of elements is returned."
+ *
+ * That sentence names three types and no fourth. An Integer is refused by
+ * name rather than answered with 4 or 8: the width of an Integer is a
+ * property of the DSDT's ComplianceRevision (§19.6.29), and handing it back
+ * as a size would be this evaluator's number standing where the firmware's
+ * belongs.
+ */
+static bool AmlFoldSizeOf(AmlAct *a, const AmlValue *in, AmlValue *out) {
+    uint64_t n;
+    switch (in->type) {
+    case AML_OBJ_STRING:
+    case AML_OBJ_BUFFER:  n = AmlSpan(in); break;
+    case AML_OBJ_PACKAGE: n = in->count;   break;
+    default:
+        kprintf("[AML] %s: SizeOf was handed %s, and ACPI 6.5 §19.6.130 gives "
+                "a size to a String, a Buffer and a Package and to nothing "
+                "else — the method is abandoned rather than answered with a "
+                "width this evaluator chose\n", a->what, AmlTypeName(in->type));
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    out->type    = AML_OBJ_INTEGER;
+    out->integer = n & AmlIntMask();
+    return true;
+}
+
+/*
+ * The numeric string of ACPI 6.5 §19.6.141: "If the Data is a string, it must
+ * be either a decimal or hexadecimal numeric string (in other words, a
+ * hexadecimal string must be prefixed with 0x)." Conversion stops at the
+ * first character that is not a digit of the base in hand, which is how every
+ * implementation reads that clause.
+ *
+ * False when there is no digit at all. §19.6.141 has no value for a string
+ * that names no number, and zero is a number the firmware did not write.
+ */
+static bool AmlStringToInteger(const uint8_t *p, const uint8_t *e,
+                                uint64_t *out) {
+    bool     hex    = false;
+    uint32_t digits = 0;
+    uint64_t v      = 0;
+
+    if ((size_t)(e - p) >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+        hex = true;
+        p += 2;
+    }
+    for (; p < e; p++) {
+        uint8_t  c = *p;
+        uint64_t d;
+        if (c >= '0' && c <= '9')              d = (uint64_t)(c - '0');
+        else if (hex && c >= 'a' && c <= 'f')  d = (uint64_t)(c - 'a' + 10u);
+        else if (hex && c >= 'A' && c <= 'F')  d = (uint64_t)(c - 'A' + 10u);
+        else break;
+        v = v * (hex ? 16u : 10u) + d;
+        digits++;
+    }
+    if (!digits) return false;
+    *out = v;
+    return true;
+}
+
+/*
+ * ToInteger — ACPI 6.5 §20.2.5.4 gives DefToInteger := ToIntegerOp Operand
+ * Target, and §19.6.141 gives the three conversions: an Integer is returned
+ * unchanged, a String is a decimal or hexadecimal numeric string, and a
+ * Buffer is read as a little-endian integer of at most as many bytes as an
+ * Integer is wide on this board, zero-extended when it is shorter.
+ *
+ * This is the operator eight devices on one shipping desktop board were
+ * waiting on: their _HID runs through HCID, and HCID stands on ToInteger.
+ */
+static bool AmlFoldToInteger(AmlAct *a, const AmlValue *in, AmlValue *out) {
+    uint64_t v = 0;
+
+    switch (in->type) {
+    case AML_OBJ_INTEGER:
+        v = in->integer;
+        break;
+    case AML_OBJ_STRING:
+        if (!AmlStringToInteger(in->bytes, in->bytes_end, &v)) {
+            kprintf("[AML] %s: ToInteger was handed a string that names no "
+                    "number — §19.6.141 makes it a decimal constant, or a "
+                    "hexadecimal one when it opens 0x, and this one is "
+                    "neither. The method is abandoned rather than answered "
+                    "with zero\n", a->what);
+            return false;
+        }
+        break;
+    case AML_OBJ_BUFFER: {
+        uint32_t have = AmlSpan(in);
+        uint32_t take = g_int_bits / 8u;
+        if (have < take) take = have;
+        for (uint32_t i = 0; i < take; i++)
+            v |= (uint64_t)in->bytes[i] << (8u * i);
+        break;
+    }
+    default:
+        kprintf("[AML] %s: ToInteger was handed %s, and §19.6.141 converts an "
+                "Integer, a String or a Buffer — the method is abandoned "
+                "rather than half-run\n", a->what, AmlTypeName(in->type));
+        return false;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->type    = AML_OBJ_INTEGER;
+    out->integer = v & AmlIntMask();
+    return true;
+}
+
+/*
+ * ‼ Index — AND THE REFERENCE THIS EVALUATOR DOES NOT HAVE.
+ *
+ * ACPI 6.5 §20.2.5.4: DefIndex := IndexOp BuffPkgObj IndexValue Target, and
+ * §19.6.63 makes the result "a reference to" the object at that position —
+ * for a Buffer or a String, the byte there; for a Package, the element.
+ *
+ * There is no reference object here, and one is not invented. A reference
+ * that meant anything would have to be storable THROUGH: `Store (X, Index
+ * (BUF, 3))` must write byte 3 of BUF, and the only writable bytes this
+ * evaluator holds are a method's own buffer reached through a CreateXField
+ * view. So what Index yields is the ELEMENT ITSELF, marked `indexed`, and the
+ * mark is what DerefOf accepts. Everything else about it is refused where it
+ * stands rather than quietly treated as a value: an Index in TARGET position
+ * is refused by AmlStoreInto, by name, because 0x88 is not a name there.
+ */
+static bool AmlFoldIndex(AmlAct *a, const AmlValue *src, const AmlValue *at,
+                          AmlValue *out) {
+    if (at->type != AML_OBJ_INTEGER) {
+        kprintf("[AML] %s: Index was handed %s as its index, and §19.6.63 "
+                "counts with an integer\n", a->what, AmlTypeName(at->type));
+        return false;
+    }
+    uint64_t i = at->integer;
+
+    if (src->type == AML_OBJ_BUFFER || src->type == AML_OBJ_STRING) {
+        uint32_t span = AmlSpan(src);
+        if (i >= (uint64_t)span) {
+            kprintf("[AML] %s: Index asks for byte %lu of %s holding %lu "
+                    "byte(s) — refused rather than read past its end\n",
+                    a->what, (unsigned long)i, AmlTypeName(src->type),
+                    (unsigned long)span);
+            return false;
+        }
+        memset(out, 0, sizeof(*out));
+        out->type    = AML_OBJ_INTEGER;
+        out->integer = src->bytes[(size_t)i];
+        out->indexed = true;
+        return true;
+    }
+
+    if (src->type == AML_OBJ_PACKAGE) {
+        if (i >= (uint64_t)src->count) {
+            kprintf("[AML] %s: Index asks for element %lu of a package of "
+                    "%lu — refused rather than read past its end\n",
+                    a->what, (unsigned long)i, (unsigned long)src->count);
+            return false;
+        }
+        /* The elements have no table of offsets: §20.2.5.4 lays them end to
+         * end, so reaching the one asked for means reading the ones before
+         * it. Each is measured exactly by the same reader every other package
+         * element in this file goes through. */
+        const uint8_t *q = src->bytes;
+        for (uint64_t k = 0; k <= i; k++)
+            if (!AmlReadOperand(&q, src->bytes_end, src->scope, a->what, out))
+                return false;
+        out->indexed = true;
+        return true;
+    }
+
+    kprintf("[AML] %s: Index was handed %s, and §19.6.63 indexes a Buffer, a "
+            "String or a Package\n", a->what, AmlTypeName(src->type));
+    return false;
+}
+
+/*
+ * DerefOf — ACPI 6.5 §20.2.5.4: DefDerefOf := DerefOfOp ObjReference.
+ *
+ * The only reference this evaluator makes is the one Index leaves behind, so
+ * that is the only one it dereferences. A plain value is refused rather than
+ * handed straight back: answering with what it was given would be a
+ * dereference nobody performed, and on this path a value nobody computed is
+ * how a device ends up armed on an interrupt nothing delivers. §19.6.30's
+ * other form — DerefOf of a String, which names an object by its path — is a
+ * namespace lookup at run time, and it is refused with the rest.
+ */
+static bool AmlFoldDerefOf(AmlAct *a, const AmlValue *in, AmlValue *out) {
+    if (!in->indexed) {
+        kprintf("[AML] %s: DerefOf was handed %s, which is not a reference "
+                "this evaluator made — the only one it makes is what Index "
+                "leaves behind, and answering with the value it was handed "
+                "would be a dereference nobody performed\n",
+                a->what, AmlTypeName(in->type));
+        return false;
+    }
+    aml_object_t *named = in->node;
+    *out = *in;
+    out->indexed = false;
+    /* A package element that was written as a NameString yields the node and
+     * no value — which is right for a _PRT Source and wrong for a DerefOf,
+     * because dereferencing it is exactly the request. */
+    if (out->type == AML_OBJ_UNINIT && named)
+        return AmlValueOfNode(named, a->what, out);
+    return true;
+}
+
+/* ACPI 6.5 §19.6.82 numbers the six match operators: MTR always true, then
+ * equal, less-or-equal, less, greater-or-equal, greater. */
+#define AML_MTR 0u
+#define AML_MGT 5u
+
+static bool AmlMatchOne(uint8_t mop, uint64_t elem, uint64_t want) {
+    switch (mop) {
+    case 1u:  return elem == want;               /* MEQ */
+    case 2u:  return elem <= want;               /* MLE */
+    case 3u:  return elem <  want;               /* MLT */
+    case 4u:  return elem >= want;               /* MGE */
+    case 5u:  return elem >  want;               /* MGT */
+    default:  return true;                       /* MTR */
+    }
+}
+
+/*
+ * Match — ACPI 6.5 §19.6.82. Both criteria are applied to every element of
+ * the search package from StartIndex onward, and the INDEX of the first
+ * element that satisfies both is the answer; Ones means none did.
+ *
+ * ‼ AND AN ELEMENT IT CANNOT COMPARE STOPS IT, BY NAME. §19.6.82 orders
+ * Integers, Strings and Buffers, each by its own rule; this evaluator
+ * computes with integers and says so in every other operator. A package
+ * holding anything else is refused where that element is MET — stepping over
+ * it would answer with the index of some later element, which is a number
+ * nobody computed, and this is a function whose result is an index into the
+ * firmware's own table.
+ */
+static bool AmlMatchRun(AmlAct *a, const AmlValue *pkg,
+                         uint8_t mop1, const AmlValue *want1,
+                         uint8_t mop2, const AmlValue *want2,
+                         const AmlValue *start, AmlValue *out) {
+    if (pkg->type != AML_OBJ_PACKAGE) {
+        kprintf("[AML] %s: Match was handed %s to search, and §19.6.82 "
+                "searches a package\n", a->what, AmlTypeName(pkg->type));
+        return false;
+    }
+    if (mop1 > AML_MGT || mop2 > AML_MGT) {
+        kprintf("[AML] %s: Match names match operators %u and %u, and "
+                "§19.6.82 numbers them 0 to 5 — MTR, MEQ, MLE, MLT, MGE, "
+                "MGT\n", a->what, mop1, mop2);
+        return false;
+    }
+    if (start->type != AML_OBJ_INTEGER) {
+        kprintf("[AML] %s: Match was handed %s as the index to start from\n",
+                a->what, AmlTypeName(start->type));
+        return false;
+    }
+    if ((mop1 != AML_MTR && want1->type != AML_OBJ_INTEGER) ||
+        (mop2 != AML_MTR && want2->type != AML_OBJ_INTEGER)) {
+        kprintf("[AML] %s: Match compares its elements against %s and %s; "
+                "§19.6.82 also orders Strings and Buffers and this evaluator "
+                "compares integers, so the comparison is refused rather than "
+                "made on something it cannot order\n",
+                a->what, AmlTypeName(want1->type), AmlTypeName(want2->type));
+        return false;
+    }
+
+    uint64_t       w1 = want1->integer;
+    uint64_t       w2 = want2->integer;
+    const uint8_t *q  = pkg->bytes;
+
+    memset(out, 0, sizeof(*out));
+    out->type = AML_OBJ_INTEGER;
+
+    for (uint32_t i = 0; i < pkg->count; i++) {
+        AmlValue e;
+        if (!AmlReadOperand(&q, pkg->bytes_end, pkg->scope, a->what, &e))
+            return false;
+        if ((uint64_t)i < start->integer) continue;
+        if (e.type != AML_OBJ_INTEGER) {
+            kprintf("[AML] %s: Match reaches element %u of its search "
+                    "package, which is %s — the search stops here rather "
+                    "than stepping over an element this evaluator cannot "
+                    "order and answering with a later index\n",
+                    a->what, i, AmlTypeName(e.type));
+            return false;
+        }
+        if (AmlMatchOne(mop1, e.integer, w1) &&
+            AmlMatchOne(mop2, e.integer, w2)) {
+            out->integer = i;
+            return true;
+        }
+    }
+    /* §19.6.82: nothing matched, and the answer for that is Ones — as wide
+     * as an Integer is on this board (§19.6.29). */
+    out->integer = AmlIntMask();
+    return true;
+}
+
+/* ===========================================================
  * Folding one operator
  * =========================================================== */
 
@@ -3813,6 +4319,30 @@ static bool AmlFold(AmlAct *a, const AmlPending *n, AmlValue *out,
         tv[0]  = n->got[0];
         *ntv   = 1;
         return true;
+    }
+
+    /* ‼ THE FOUR THAT DO NOT COMPUTE WITH INTEGERS, taken before the check
+     * below that every operand is one. Each says for itself, by name, what it
+     * was handed and could not use — §19.6.130, §19.6.141, §19.6.63,
+     * §19.6.30. The two that carry a Target hand it the same value they
+     * yield; SizeOf and DerefOf have none, so `*ntv` stays zero. */
+    switch (n->op) {
+    case SizeOfOp:
+        return AmlFoldSizeOf(a, &n->got[0], out);
+    case DerefOfOp:
+        return AmlFoldDerefOf(a, &n->got[0], out);
+    case ToIntegerOp:
+        if (!AmlFoldToInteger(a, &n->got[0], out)) return false;
+        tv[0] = *out;
+        *ntv  = 1;
+        return true;
+    case IndexOp:
+        if (!AmlFoldIndex(a, &n->got[0], &n->got[1], out)) return false;
+        tv[0] = *out;
+        *ntv  = 1;
+        return true;
+    default:
+        break;
     }
 
     for (uint8_t i = 0; i < n->need; i++) {
@@ -3968,7 +4498,8 @@ static bool AmlActFinish(AmlRun *run) {
     /* A method that returns nothing yields an object of no type; a caller
      * that then tries to compute with it is refused BY THE FOLDER, naming
      * what it was handed. A caller that discards it is right to. */
-    c->val      = returned ? ret : (AmlValue){ 0, 0, NULL, NULL, 0, NULL, NULL };
+    if (returned) c->val = ret;
+    else          memset(&c->val, 0, sizeof(c->val));
     c->have_val = true;
     return true;
 }
@@ -4019,6 +4550,48 @@ static bool AmlExprStep(AmlRun *run) {
             if (!AmlStoreInto(run, a, &t, a->cur_end, &nv)) return false;
             a->cur      = q;
             a->val      = nv;
+            a->have_val = true;
+            return true;
+        }
+
+        if (op == MatchOp) {
+            /* ‼ THE ONE OPERATOR WITH RAW BYTES BETWEEN ITS OPERANDS.
+             * §20.2.5.4: DefMatch := MatchOp SearchPkg MatchOpcode Operand
+             * MatchOpcode Operand StartIndex. Two ByteData stand between
+             * three TermArgs, which no (arguments, targets) pair describes —
+             * so it is carried out here, where the stream position is still
+             * in hand, exactly as Increment is above and for the same reason.
+             *
+             * ‼ AND ITS OPERANDS ARE READ, NOT FOLDED. AmlReadOperandIn takes
+             * a literal, a Local, an Arg, an object this method declared or a
+             * namespace object; an operand that is itself a term to compute
+             * is refused ALOUD where it stands, with nothing of the Match
+             * carried out — the whole of it happens after every operand is in
+             * hand, so there is no half of it to leave behind. */
+            const uint8_t *q = a->cur + 1;
+            AmlValue pkg, want1, want2, start, r;
+
+            if (!AmlReadOperandIn(run, a, &q, a->cur_end, &pkg)) return false;
+            if (q >= a->cur_end) {
+                kprintf("[AML] %s: a Match ends where its first match "
+                        "operator byte was expected\n", a->what);
+                return false;
+            }
+            uint8_t mop1 = *q++;
+            if (!AmlReadOperandIn(run, a, &q, a->cur_end, &want1)) return false;
+            if (q >= a->cur_end) {
+                kprintf("[AML] %s: a Match ends where its second match "
+                        "operator byte was expected\n", a->what);
+                return false;
+            }
+            uint8_t mop2 = *q++;
+            if (!AmlReadOperandIn(run, a, &q, a->cur_end, &want2)) return false;
+            if (!AmlReadOperandIn(run, a, &q, a->cur_end, &start)) return false;
+            if (!AmlMatchRun(a, &pkg, mop1, &want1, mop2, &want2, &start, &r))
+                return false;
+
+            a->cur      = q;
+            a->val      = r;
             a->have_val = true;
             return true;
         }
@@ -4565,10 +5138,12 @@ static bool AmlStmtStep(AmlRun *run) {
 
     {
         uint8_t nargs = 0, ntargets = 0;
-        if (AmlOperatorShape(op, &nargs, &ntargets) ||
+        if (AmlOperatorShape(op, &nargs, &ntargets) || op == MatchOp ||
             (aml_is_name_string_lead(op) && op != 0x00)) {
             /* An expression standing alone: a method called for its effect,
-             * or an operator whose Target is the point of it. */
+             * or an operator whose Target is the point of it. Match is named
+             * here because AmlOperatorShape cannot hold its shape — see the
+             * note there — and AmlExprStep has a branch of its own for it. */
             AmlExprBegin(a, b->p, b->end, AML_AFTER_DISCARD);
             return true;
         }
@@ -7201,9 +7776,10 @@ aml_status_t aml_init(void) {
     g_root_obj.type = AML_OBJ_SCOPE;
     g_root_obj.name[0] = '\\';
     pool_reset();
-    g_parse_stmts    = 0;
-    g_parse_unwalked = 0;
-    g_parse_guessed  = 0;
+    g_parse_stmts     = 0;
+    g_parse_unwalked  = 0;
+    g_parse_guessed   = 0;
+    g_parse_externals = 0;
 
     if (!g_acpi.initialized || !g_acpi.fadt) return AML_ERR_NOT_LOADED;
     uint64_t dsdt_addr =
@@ -7250,6 +7826,19 @@ aml_status_t aml_init(void) {
             g_pool_used,
             g_pool_exhausted ? " (TRUNCATED — the heap ran out, see above)"
                              : "");
+    /* ‼ SAID WHATEVER THE NUMBER IS, INCLUDING ZERO. A board that borrows no
+     * name between its tables and a build that cannot read a borrowed one
+     * used to look identical from the log, and the difference was 24 refused
+     * `Name` declarations the firmware never wrote plus every object built
+     * out of an External's ObjectType and ArgumentCount bytes. The object
+     * count on the line above is the other half of the same measurement: a
+     * board that was fabricating should now report FEWER objects. */
+    kprintf("[AML] %u name(s) in those tables are External — declared in one "
+            "table and owned by another (ACPI 6.5 §20.2.5.2). Each was "
+            "measured exactly and NOTHING was recorded for it: the object "
+            "itself is declared in the table that owns it, and a second one "
+            "here would take the first declaration's place and refuse the "
+            "real one\n", g_parse_externals);
     if (g_parse_stmts)
         kprintf("[AML] %u term(s) at TermList level were statements rather "
                 "than declarations — an If or a While guarding a block of "
