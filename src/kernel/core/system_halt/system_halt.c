@@ -25,13 +25,30 @@
 #include "nameplate.h"        /* nameplate_name_at_kernel — name a stuck continuation */
 #include "nameplate_format.h" /* NameplateHeader — the table's own minimum size */
 
-/* The only bound in the drain below, and it judges a DEVICE, not a shutdown.
- * CONFIG_AHCI_IO_TIMEOUT_MS is this kernel's already-written answer to "how
- * long may one storage command legitimately take before it is declared
- * non-completing" — the industry disk deadline the AHCI async watchdog uses.
- * Reused rather than invented, so the kernel holds one answer to that question
- * instead of two that can drift apart. */
-#define HALT_STALLED_DEVICE_US ((uint64_t)CONFIG_AHCI_IO_TIMEOUT_MS * 1000ULL)
+/* WHOSE deadline may judge a drain that has stopped moving — decided on the
+ * machine in front of us, from what is actually holding the un-drained work.
+ *
+ * CONFIG_AHCI_IO_TIMEOUT_MS is this kernel's written answer to "how long may
+ * ONE storage command legitimately take before it is declared non-completing":
+ * the deadline the AHCI async watchdog enforces (ahci.c). It is the right ruler
+ * for a command sitting in PxCI (AHCI 1.3.1 §3.3.14) or PxSACT (§3.3.13) and for
+ * nothing else. Turned unconditionally it bounded the shutdown of a machine
+ * with NO AHCI CONTROLLER AT ALL — the owner's B365M boots from a USB stick and
+ * its board log names no AHCI — so a permanent off-by-one in a queue count was
+ * paid for with thirty seconds of screen, waiting out the patience owed to a
+ * device that is not present.
+ *
+ * A baton nobody consumes is a different fact with a different owner. Each
+ * baton queue is single-consumer and falls ONLY when its own core pumps it
+ * (baton.h), so a depth that stops falling says that CORE has stopped pumping
+ * — and the kernel has one written answer to "a core is not answering" too:
+ * CONFIG_TLB_SHOOTDOWN_PANIC_MS, the ceiling shootdown_wait_acks uses before it
+ * calls a missing ack a cross-core deadlock (vmm.c), and the same ceiling
+ * halt_all_ap_cores gives an AP to answer the halt IPI below. Both macros here
+ * are unit conversions of a constant this kernel already decided; neither
+ * invents a number, and neither is applied to a medium it does not describe. */
+#define HALT_STALLED_AHCI_US ((uint64_t)CONFIG_AHCI_IO_TIMEOUT_MS * 1000ULL)
+#define HALT_STALLED_CORE_US ((uint64_t)CONFIG_TLB_SHOOTDOWN_PANIC_MS * 1000ULL)
 
 /* Set bits in a 32-bit word, counted here rather than by __builtin_popcount.
  *
@@ -64,8 +81,10 @@ static const char *halt_name_of(void (*run)(void *ctx), NameplateName *scratch)
     return "an unnamed continuation";
 }
 
-/* How much async storage work the machine still owes, counted the only two
- * ways it can owe any:
+/* What the machine still owes, and WHOSE it is — because the amount alone
+ * cannot say which deadline is allowed to judge it.
+ *
+ * Counted the only two ways async storage work can be owed:
  *   1. Never-drop baton passes posted but not yet consumed — the read/write
  *      state-machine continuations the AHCI IRQ hands on, plus every other
  *      pass an interrupt made (SCI/GPE, AHCI recovery, the Touch IRQ ring's
@@ -81,15 +100,29 @@ static const char *halt_name_of(void (*run)(void *ctx), NameplateName *scratch)
  *      PxCI (AHCI 1.3.1 §3.3.14) and PxSACT (§3.3.13), each cleared by the
  *      controller when that command completes.
  * Both terms are non-negative and fall as the machine finishes work — which is
- * exactly what lets the drain below run without a deadline while they fall. */
-static uint64_t halt_async_work_owed(void)
+ * exactly what lets the drain below run without a deadline while they fall.
+ *
+ * AhciPresent is asked separately from Ahci because the two answer different
+ * questions and the console line says which one it is looking at: a controller
+ * that is initialised and idle owes nothing at this instant, while a machine
+ * with no controller can never owe anything through that term at all. */
+typedef struct HaltWorkOwed {
+    uint64_t Total;       /* Baton + Ahci — the progress measure            */
+    uint64_t Baton;       /* passes handed to a core and not yet run        */
+    uint64_t Ahci;        /* command slots the controller has not completed */
+    bool     AhciPresent; /* an AHCI controller was initialised at boot     */
+} HaltWorkOwed;
+
+static void halt_async_work_owed(HaltWorkOwed *owed)
 {
-    uint64_t work = 0;
+    owed->Baton       = 0;
+    owed->Ahci        = 0;
+    owed->AhciPresent = ahci_is_initialized();
 
     for (uint8_t i = 0; i < g_amp.total_cores; i++)
-        work += BatonDepth(i);
+        owed->Baton += BatonDepth(i);
 
-    if (ahci_is_initialized()) {
+    if (owed->AhciPresent) {
         uint32_t mask = ahci_get_active_port_mask();
         for (uint8_t p = 0; p < 32 && mask; p++) {
             if (!(mask & (1u << p))) continue;
@@ -98,11 +131,43 @@ static uint64_t halt_async_work_owed(void)
             if (!regs) continue;
             uint32_t ci   = regs->ci;
             uint32_t sact = regs->sact;
-            work += CountSetBits(ci | sact);
+            owed->Ahci += CountSetBits(ci | sact);
         }
     }
 
-    return work;
+    owed->Total = owed->Baton + owed->Ahci;
+}
+
+/* The core carrying the most un-run passes, and the continuation most recently
+ * handed to it. A stall that can name that continuation tells the next reader
+ * WHAT the machine is waiting on, not only how long it has waited. False when
+ * no core holds a pass — the depth is re-read here, so a queue that drained
+ * between the measure and this look reports nothing rather than a stale count.
+ */
+static bool halt_deepest_baton(uint8_t *core_out, uint64_t *depth_out,
+                               void (**run_out)(void *ctx))
+{
+    uint64_t deepest = 0;
+    uint8_t  where   = 0;
+
+    for (uint8_t i = 0; i < g_amp.total_cores; i++) {
+        uint64_t depth = BatonDepth(i);
+        if (depth <= deepest) continue;
+        deepest = depth;
+        where   = i;
+    }
+
+    if (deepest == 0)
+        return false;
+
+    void (*handed_in)(void *ctx) = NULL;
+    void (*last_run)(void *ctx)  = NULL;
+    BatonLastSeen(where, &handed_in, &last_run);
+
+    *core_out  = where;
+    *depth_out = deepest;
+    *run_out   = handed_in;
+    return true;
 }
 
 /*
@@ -120,10 +185,12 @@ static uint64_t halt_async_work_owed(void)
  * runs with no deadline at all — a non-negative integer can set a new low only
  * finitely many times, so the loop terminates by construction and there is
  * nothing a clock could usefully judge. A clock is needed only once the measure
- * stops falling, and then what it judges is not the shutdown but one device
- * that has stopped answering: HALT_STALLED_DEVICE_US. The glass is put away
- * again the moment progress resumes, so a slow-but-working disk is never cut
- * off no matter how long the queue is.
+ * stops falling, and then what it judges is not the shutdown but ONE THING THAT
+ * HAS STOPPED ANSWERING — so the glass is turned on the deadline of whatever is
+ * actually holding the work (HALT_STALLED_AHCI_US / HALT_STALLED_CORE_US), and
+ * the console is told which one and why. The glass is put away again the moment
+ * progress resumes, so a slow-but-working disk is never cut off no matter how
+ * long the queue is.
  *
  * "New low" rather than "lower than last pass" on purpose: a measure that
  * oscillates (a commit continuation issuing a fresh command as another
@@ -139,9 +206,17 @@ static void halt_drain_async_writes(void)
 
     uint8_t   me    = amp_get_core_index();
     uint64_t  best  = UINT64_MAX;   /* lowest work owed ever seen — the witness */
+    uint64_t  bound = 0;            /* the deadline the stall glass was turned on */
     bool      stuck = false;        /* the last pass failed to beat `best`      */
     bool      ruled = false;        /* the stall glass turned on a real ruler   */
     bool      said  = false;        /* the no-ruler line is said exactly once   */
+    /* Each bound announces itself once. A stall episode begins every time a new
+     * low is followed by a pass that does not beat it, and on a queue of a
+     * thousand passes that can happen a thousand times — one line per episode
+     * would bury the log it exists to clarify. There are two bounds, so there
+     * are at most two lines. */
+    bool      told_ahci = false;
+    bool      told_core = false;
     HourGlass stall;
 
     for (;;) {
@@ -158,16 +233,56 @@ static void halt_drain_async_writes(void)
          * pumping their own queues from their guide loops. */
         BatonPump(me);
 
-        uint64_t work = halt_async_work_owed();
-        if (work == 0)
+        HaltWorkOwed owed;
+        halt_async_work_owed(&owed);
+        if (owed.Total == 0)
             break;
 
-        if (work < best) {
-            best  = work;
+        if (owed.Total < best) {
+            best  = owed.Total;
             stuck = false;          /* progress — the clock goes back in the pocket */
         } else if (!stuck) {
             stuck = true;
-            ruled = HourGlassTurn(&stall, HALT_STALLED_DEVICE_US);
+
+            /* Whose deadline this stall is judged by. When both a port and a
+             * queue hold work, the LONGER of the two applies: the passes may be
+             * the completions that command is going to hand on, and cutting
+             * them off at the core's ceiling would abandon a disk that is still
+             * answering within its own. */
+            bool by_ahci = (owed.Ahci > 0) &&
+                           (owed.Baton == 0 ||
+                            HALT_STALLED_AHCI_US >= HALT_STALLED_CORE_US);
+            bound = by_ahci ? HALT_STALLED_AHCI_US : HALT_STALLED_CORE_US;
+
+            if (by_ahci && !told_ahci) {
+                told_ahci = true;
+                kprintf("[HALT] work owed stopped falling at %lu (%lu pass(es), "
+                        "%lu AHCI command(s) still issued) — judged by the AHCI "
+                        "command deadline, %lu us, because a controller that is "
+                        "here owes them\n",
+                        owed.Total, owed.Baton, owed.Ahci, bound);
+            } else if (!by_ahci && !told_core) {
+                told_core = true;
+                kprintf("[HALT] work owed stopped falling at %lu (%lu pass(es), "
+                        "%s) — judged by the core deadline, %lu us: a baton queue "
+                        "falls only when its own core pumps it\n",
+                        owed.Total, owed.Baton,
+                        owed.AhciPresent ? "no AHCI command issued"
+                                         : "no AHCI controller on this machine",
+                        bound);
+
+                uint8_t  core  = 0;
+                uint64_t depth = 0;
+                void (*handed_in)(void *ctx) = NULL;
+                if (halt_deepest_baton(&core, &depth, &handed_in)) {
+                    NameplateName in_name;
+                    kprintf("[HALT]   waiting on core %u: %lu pass(es), last "
+                            "handed in %s\n",
+                            core, depth, halt_name_of(handed_in, &in_name));
+                }
+            }
+
+            ruled = HourGlassTurn(&stall, bound);
             if (!ruled && !said) {
                 /* No ruler on this machine at this point in boot. A missing
                  * ruler never becomes an invented one: we wait on the fact
@@ -179,12 +294,12 @@ static void halt_drain_async_writes(void)
                 said = true;
             }
         } else if (ruled && HourGlassRunOut(&stall)) {
-            kprintf("[HALT] storage work has not moved for %lu us (%s) — "
+            kprintf("[HALT] storage work has not moved for %lu us of %lu (%s) — "
                     "%lu unit(s) still owed\n",
-                    HourGlassElapsedUs(&stall),
+                    HourGlassElapsedUs(&stall), bound,
                     HourGlassSourceDied(&stall) ? "ruler died"
                                                 : HourGlassRulerName(&stall),
-                    work);
+                    owed.Total);
 
             /* WHICH core, HOW MANY, and WHOSE work — the three things the old
              * line could not say. A stuck queue names the continuation it is
