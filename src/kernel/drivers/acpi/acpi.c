@@ -10,6 +10,9 @@
 #include "ioapic.h"
 #include "baton.h"
 #include "atomics.h"
+#include "amp.h"       /* g_amp.bsp_index — the drain core a one-way pass is
+                        * routed to, and amp_get_core_index for the Global
+                        * Lock's holder check */
 #include "kernel_config.h"
 #include "hourglass.h"
 #include "vmm.h"
@@ -1000,6 +1003,38 @@ static void acpi_pm1_arm_power_button(void)
     }
 }
 
+/* The shutdown a press ends in when nobody claimed it — POSTED, not called.
+ *
+ * ‼ WHY THE HALT IS A PASS OF ITS OWN, AND WHY IT IS THE ONE-WAY ONE.
+ *
+ * system_halt() does not return. Called from inside the knocked continuation
+ * below, it makes that continuation one that never returns — and BatonPump
+ * counts a pass when its continuation RETURNS (baton.c), so the press's own
+ * node would read as one unit of work still owed for as long as the machine
+ * had left. system_halt's drain sums BatonDepth over every core, so it would
+ * be waiting for the very pass that is running it: it waits out the core
+ * deadline and then says "giving up; a pending write's commit may be lost"
+ * about work that never existed. That sentence would be untrue, and a real
+ * write queued behind that stall is abandoned for nothing.
+ *
+ * A one-way pass is counted when it is TAKEN, because nothing will ever hand
+ * it back. That is the fix, and it has to sit HERE rather than on the press:
+ * baton.h reserves ONE one-way node per core for the life of the boot and
+ * never releases the claim, while a press a subscriber holds is answered with
+ * a line and RETURNS. Making the press itself one-way would spend that node
+ * on the first claimed press and have every press after it refused —
+ * including the press with nobody listening, which is the one that must turn
+ * the machine off. So the press stays an ordinary pass and only the step that
+ * never comes back is one-way.
+ *
+ * Posted to the drain core, which is the core already running this: the pump
+ * we are inside pops it as its next node, with no IPI and no second context. */
+static void acpi_power_button_halt(void *ctx)
+{
+    (void)ctx;
+    system_halt(false);
+}
+
 /*
  * A press nobody has claimed is a press the kernel answers.
  *
@@ -1028,7 +1063,12 @@ static void acpi_power_button_answer(void)
 
     kprintf("[ACPI] power button pressed and nobody is listening — shutting "
             "down\n");
-    system_halt(false);
+
+    /* A refusal is said by the baton layer and means this core already took a
+     * one-way pass: the machine is on its way down by somebody else's hand.
+     * There is nothing to fall back to — calling system_halt from here is the
+     * uncounted pass the one-way rule exists to avoid. */
+    (void)BatonPassOneWay(g_amp.bsp_index, acpi_power_button_halt, NULL);
 }
 
 /* Carried out of the interrupt handler on a knock (baton.h): the press is
@@ -1037,7 +1077,12 @@ static void acpi_power_button_answer(void)
  * shutdown sequence documents that it needs; on a machine that is one core it
  * is the timer's own pump, gated on having interrupted user mode so no kernel
  * lock is held. Presses that land before the answer runs are one knock and
- * one answer; a press after the door opened is answered again. */
+ * one answer; a press after the door opened is answered again.
+ *
+ * This pass is an ORDINARY one and stays ordinary: deciding what a press means
+ * returns — with a subscriber holding it, the whole answer is one line. The
+ * step that never returns is posted separately and one-way
+ * (acpi_power_button_halt, above), which is what keeps this node countable. */
 static void acpi_power_button_answer_knocked(void *ctx);
 static Knock g_acpi_power_button_knock = {
     .baton  = { .next = NULL, .run = acpi_power_button_answer_knocked, .ctx = NULL },
@@ -1393,6 +1438,345 @@ void acpi_sci_arm(void)
  * this bit clear is a register the firmware says not to use. */
 #define FADT_FLAG_RESET_REG_SUP     (1u << 10)
 
+/* ============================================================
+ * THE ACPI GLOBAL LOCK — ACPI 6.5 §5.2.10, §5.2.10.1, §5.2.10.2
+ *
+ * ‼ WHAT WAS MISSING. This kernel writes into a field the firmware declared
+ * as Field (GNVS, AnyAcc, Lock, Preserve) — the \_PIC store into ACPI NVS
+ * (AmlRegionWrite, aml/aml.c), the one store this kernel makes outside its
+ * own memory — and it held NO Global Lock while doing it. The `Lock`
+ * attribute of §20.2.5.2 FieldFlags bit 4 (and §19.6.45 FieldUnit) is the
+ * firmware asking, in the declaration, for exactly the exclusion this
+ * provides: its own SMM code touches those same bytes and has no other way
+ * to be kept off them. A write made without the lock is a race with SMM.
+ *
+ * WHERE IT LIVES. One DWORD at offset 16 of the FACS (§5.2.10, Table 5.17),
+ * which is named only by the FADT's FIRMWARE_CTRL or X_FIRMWARE_CTRL — never
+ * by the XSDT — and which nothing in this kernel had ever reached. It is
+ * found and mapped once, in acpi_init, under the same length-guard
+ * discipline (fadt_has_field) the rest of this file uses.
+ *
+ * THE PROTOCOL. §5.2.10.1 spells out a two-bit compare-exchange: Owned is
+ * bit 1, Pending is bit 0. An attempt clears Pending and sets Owned, and if
+ * Owned was ALREADY set it puts Pending back — which is how the firmware
+ * learns, on its own release, that somebody is waiting. The attempt
+ * succeeded iff the word it installed reads Owned without Pending.
+ *
+ * WHAT A FAILED ACQUIRE DOES HERE, said plainly. The spec's answer is to
+ * wait for the firmware's release, which it announces with GBL_STS in PM1
+ * status (§4.8.3.1.1). This kernel does NOT wait on that interrupt, and
+ * saying so is the point: the one access that needs this lock is the \_PIC
+ * store, which runs inside acpi_sci_register — BEFORE acpi_sci_arm has
+ * unmasked the line — so a GBL_STS raised then waits in the IOAPIC and would
+ * never arrive. What is waited on instead is the fact itself: the firmware's
+ * release is a locked write into the very word being polled, visible to this
+ * core the instant it happens, with or without an interrupt. The wait is
+ * bounded, because this runs under a spinlock with interrupts off and the
+ * alternative is a boot that never finishes; when the bound is reached the
+ * access is REFUSED, never made anyway.
+ * ============================================================ */
+
+/* ACPI 6.5 §5.2.10.1 — the two bits of the Global Lock DWORD. */
+#define ACPI_GBL_LOCK_PENDING   0x00000001u   /* bit 0 */
+#define ACPI_GBL_LOCK_OWNED     0x00000002u   /* bit 1 */
+
+/* ACPI 6.5 §4.8.3.2.1, Table 4.13 — PM1 control, GBL_RLS: "This write-only
+ * bit is used by the ACPI software to raise an event to the BIOS software."
+ * It is how a release tells the firmware that its own pending acquire can
+ * now succeed. */
+#define PM1_CNT_GBL_RLS         0x0004u
+
+/* How long the firmware gets to let go of the Global Lock.
+ *
+ * DECLARED POLICY, not a spec quantity — the same kind of number as
+ * ACPI_SCI_HANDOFF_PATIENCE_US above, written once so there is one place to
+ * argue with it. Two facts fix the order of magnitude. An SMM access to a
+ * Lock-declared field is a handful of memory touches, not work, so a
+ * firmware that has not let go in tens of milliseconds is not busy — it is
+ * broken. And this wait runs with interrupts off, where the hard ceiling is
+ * CONFIG_TLB_SHOOTDOWN_PANIC_MS (5000 ms): a core that cannot ACK a
+ * shootdown for longer than that panics the initiator. Fifty milliseconds
+ * sits two orders of magnitude under that ceiling. */
+#define ACPI_GLOBAL_LOCK_PATIENCE_US   50000u
+
+/* The mapped lock word, or NULL when this machine has none. The mapping is
+ * never torn down: acpi_map_physical is the ACPI mapper, which by its own
+ * contract maps firmware structures for the life of the kernel. */
+static volatile uint32_t *g_global_lock;
+static uint64_t           g_global_lock_address;
+
+/* Why there is none — a full sentence, so every refusal can name the reason
+ * instead of printing a code. NULL exactly when g_global_lock is not. */
+static const char *g_global_lock_why =
+    "the FACS has not been looked for yet (acpi_init has not run)";
+
+/* One core at a time on the OS side. The FACS word arbitrates between this
+ * kernel and the firmware; it cannot tell two BoxOS cores apart, so a second
+ * core acquiring while the first holds would see Owned set by its own kernel
+ * and mark Pending against itself. Held from a successful acquire until the
+ * matching release — spin_lock keeps interrupts off for that whole span
+ * (klib.h), which is what bounds the patience above. BSS-zero is unlocked. */
+static spinlock_t g_global_lock_gate;
+
+/* Which core holds it; 0xFF is free. Written only under the gate, and read
+ * by AcpiGlobalLockRelease before it unlocks anything: a core that is not
+ * the holder can only read another core's index or 0xFF, never its own, so
+ * a release that was never acquired can never drop somebody else's gate. */
+#define ACPI_GLOBAL_LOCK_NO_HOLDER  0xFFu
+static volatile uint8_t g_global_lock_holder = ACPI_GLOBAL_LOCK_NO_HOLDER;
+
+/* Where the FACS is. §5.2.9 gives X_FIRMWARE_CTRL precedence over the
+ * 32-bit FIRMWARE_CTRL, the same rule every other X_ field in this file is
+ * resolved by; FIRMWARE_CTRL is at offset 36 and so is carried by even a
+ * 116-byte ACPI 1.0b FADT, while X_FIRMWARE_CTRL at offset 132 is not and
+ * needs the length guard. */
+static uint64_t facs_address(const acpi_fadt_t *f, const char **whence)
+{
+    if (fadt_has_field(f->header.length,
+                       offsetof(acpi_fadt_t, x_firmware_control) +
+                           sizeof(uint64_t)) &&
+        f->x_firmware_control != 0) {
+        *whence = "X_FIRMWARE_CTRL";
+        return f->x_firmware_control;
+    }
+    if (f->firmware_ctrl != 0) {
+        *whence = "FIRMWARE_CTRL";
+        return (uint64_t)f->firmware_ctrl;
+    }
+    *whence = "nothing";
+    return 0;
+}
+
+static void AcpiGlobalLockLocate(void)
+{
+    g_global_lock         = NULL;
+    g_global_lock_address = 0;
+
+    if (!g_acpi.fadt) {
+        g_global_lock_why = "there is no FADT on this machine, so nothing "
+                            "names a FACS";
+        goto absent;
+    }
+
+    /* ACPI 6.5 §4.1: a hardware-reduced platform does not implement the ACPI
+     * Hardware Interface at all, and §5.2.10 has such a platform name no
+     * FACS. There is no Global Lock to take — not one that is busy, not one
+     * this kernel failed to find. */
+    if (g_acpi.fadt->flags & FADT_FLAG_HW_REDUCED_ACPI) {
+        g_global_lock_why = "this is a hardware-reduced platform (FADT "
+                            "HW_REDUCED_ACPI), and ACPI 6.5 §4.1 gives such a "
+                            "platform no ACPI Hardware Interface and no "
+                            "Global Lock";
+        goto absent;
+    }
+
+    const char *whence = NULL;
+    uint64_t addr = facs_address(g_acpi.fadt, &whence);
+    if (addr == 0) {
+        g_global_lock_why = "this FADT's FIRMWARE_CTRL and X_FIRMWARE_CTRL "
+                            "both name nothing, so it describes no FACS";
+        goto absent;
+    }
+
+    /* §5.2.10 puts the FACS on a 64-byte boundary. The lock word is at
+     * offset 16 of it, so a correctly aligned FACS makes the DWORD naturally
+     * aligned — and the protocol below is a `lock cmpxchgl`, which on a
+     * misaligned address is a split lock: on a machine with split-lock
+     * detection armed that is an #AC, and on every other one it is a bus
+     * lock taken during firmware's own access. Refused rather than executed. */
+    if ((addr & 63u) != 0) {
+        g_global_lock_why = "the FACS this FADT names is not on the 64-byte "
+                            "boundary ACPI 6.5 §5.2.10 requires, so its lock "
+                            "word is not naturally aligned and the locked "
+                            "compare-exchange on it would be a split lock";
+        goto absent;
+    }
+
+    volatile acpi_facs_t *facs = (volatile acpi_facs_t *)
+        acpi_map_physical((uintptr_t)addr, sizeof(acpi_facs_t));
+    if (!facs) {
+        g_global_lock_why = "the FACS could not be mapped";
+        goto absent;
+    }
+
+    if (facs->signature[0] != 'F' || facs->signature[1] != 'A' ||
+        facs->signature[2] != 'C' || facs->signature[3] != 'S') {
+        g_global_lock_why = "what this FADT names as its FACS does not begin "
+                            "with the signature FACS";
+        goto absent;
+    }
+
+    /* Table 5.17 gives the FACS a Length of "64 bytes or larger", and the
+     * lock ends at offset 20. A table that declares less than that does not
+     * carry the field, whatever happens to be mapped there. */
+    uint32_t flen = facs->length;
+    if (flen < offsetof(acpi_facs_t, global_lock) + sizeof(uint32_t)) {
+        g_global_lock_why = "the FACS declares a length too short to carry "
+                            "the Global Lock field at offset 16";
+        goto absent;
+    }
+
+    /* Computed by offset rather than taken as &facs->global_lock: the struct
+     * is packed, and the address of a packed member is a pointer the
+     * compiler is entitled to distrust the alignment of. The 64-byte
+     * boundary checked above is what makes this one aligned. */
+    g_global_lock = (volatile uint32_t *)
+        ((volatile uint8_t *)facs + offsetof(acpi_facs_t, global_lock));
+    g_global_lock_address = addr;
+    g_global_lock_why     = NULL;
+
+    kprintf("[ACPI] Global Lock at FACS 0x%lx+16 (named by %s, len %u, "
+            "version %u) — a field declared Lock can be written with the "
+            "firmware held off it\n",
+            (unsigned long)addr, whence, flen, facs->version);
+    return;
+
+absent:
+    kprintf("[ACPI] %[E]no ACPI Global Lock on this machine: %s. A field the "
+            "firmware declared with the Lock attribute (ACPI 6.5 §20.2.5.2, "
+            "FieldFlags bit 4) cannot be written with SMM held off it, so "
+            "every such write is refused%[D]\n", g_global_lock_why);
+}
+
+/* ACPI 6.5 §5.2.10.1's AcquireGlobalLock, transliterated. One attempt, no
+ * waiting: the loop retries only when the word CHANGED under the
+ * compare-exchange, which is somebody else making progress and not a wait. */
+static bool global_lock_try(void)
+{
+    for (;;) {
+        uint32_t old = atomic_load_u32(g_global_lock);
+        uint32_t want = (old & ~ACPI_GBL_LOCK_PENDING) | ACPI_GBL_LOCK_OWNED;
+        if (old & ACPI_GBL_LOCK_OWNED) want |= ACPI_GBL_LOCK_PENDING;
+        if (atomic_cas_u32(g_global_lock, old, want)) {
+            return (want & (ACPI_GBL_LOCK_OWNED | ACPI_GBL_LOCK_PENDING)) ==
+                   ACPI_GBL_LOCK_OWNED;
+        }
+    }
+}
+
+/* §5.2.10.1's ReleaseGlobalLock: clear both bits, and report whether Pending
+ * was standing — that is the firmware waiting, and it has to be told. */
+static bool global_lock_drop(void)
+{
+    for (;;) {
+        uint32_t old = atomic_load_u32(g_global_lock);
+        uint32_t want = old & ~(ACPI_GBL_LOCK_OWNED | ACPI_GBL_LOCK_PENDING);
+        if (atomic_cas_u32(g_global_lock, old, want))
+            return (old & ACPI_GBL_LOCK_PENDING) != 0;
+    }
+}
+
+/* Tell the firmware the lock is free — PM1 control's GBL_RLS, through the
+ * resolver this file already owns (pm1_control_locate) and nowhere else.
+ *
+ * §4.6.1 has OSPM preserve a control register's other bits, so this is a
+ * read-modify-write and not a synthesised word: the same rule
+ * pm1_control_sleep_word keeps for SLP_TYP, and the reason SCI_EN survives
+ * it. GBL_RLS and SLP_EN are both write-only and read back as zero, so
+ * neither is re-driven by the readback.
+ *
+ * PM1a is the half asked; PM1b only when this FADT describes no PM1a. One
+ * pulse is one SMI, and §4.8.3.2 lets the block be split but does not make
+ * the B half a second copy to be signalled as well. */
+static void pm1_signal_gbl_rls(void)
+{
+    const AcpiPm1Control *r = g_pm1a_control.present ? &g_pm1a_control
+                                                     : &g_pm1b_control;
+    uint16_t cur = 0;
+    if (!pm1_control_read(r, &cur)) {
+        kprintf("[ACPI] %[E]the Global Lock was released with the firmware "
+                "waiting for it, and the PM1 control register answers nothing "
+                "that decodes — GBL_RLS cannot be raised, so the firmware is "
+                "not told and will wait for its own next attempt%[D]\n");
+        return;
+    }
+    pm1_control_write(r, (uint16_t)(cur | PM1_CNT_GBL_RLS));
+}
+
+AcpiGlobalLockState AcpiGlobalLockAcquire(const char *who)
+{
+    if (!g_global_lock) {
+        kprintf("[ACPI] %[E]%s asks for the Global Lock and this machine has "
+                "none: %s. Nothing can hold the firmware off the same bytes, "
+                "so the access is refused rather than made in silence%[D]\n",
+                who, g_global_lock_why);
+        return ACPI_GLOBAL_LOCK_ABSENT;
+    }
+
+    spin_lock(&g_global_lock_gate);
+
+    if (global_lock_try()) {
+        g_global_lock_holder = amp_get_core_index();
+        return ACPI_GLOBAL_LOCK_HELD;          /* the gate stays held */
+    }
+
+    /* The firmware owns it, and the attempt above left Pending standing —
+     * which is what makes the firmware raise GBL_STS (§4.8.3.1.1) when it
+     * lets go. That interrupt is not what this waits on; see the block
+     * comment. The word itself is. */
+    HourGlass glass;
+    if (!HourGlassTurn(&glass, ACPI_GLOBAL_LOCK_PATIENCE_US)) {
+        spin_unlock(&g_global_lock_gate);
+        kprintf("[ACPI] %[E]%s asks for the Global Lock, the firmware holds "
+                "it, and there is no time source to bound the wait with. This "
+                "core will not spin with interrupts off for the life of the "
+                "machine, so the access is refused%[D]\n", who);
+        return ACPI_GLOBAL_LOCK_BUSY;
+    }
+
+    for (;;) {
+        if (global_lock_try()) {
+            g_global_lock_holder = amp_get_core_index();
+            (void)HourGlassRunOut(&glass);
+            kprintf("[ACPI] the firmware let go of the Global Lock after %lu "
+                    "us on the %s; %s has it\n",
+                    (unsigned long)HourGlassElapsedUs(&glass),
+                    HourGlassRulerName(&glass), who);
+            return ACPI_GLOBAL_LOCK_HELD;      /* the gate stays held */
+        }
+        if (HourGlassRunOut(&glass)) break;
+        cpu_pause();
+    }
+
+    spin_unlock(&g_global_lock_gate);
+
+    /* Pending is left standing on purpose. Clearing it would be a third
+     * compare-exchange racing the firmware's own release for no gain, and the
+     * bit costs nothing: the firmware's release raises GBL_STS, and the SCI
+     * handler writes every raw PM1 status word back, so the event is
+     * acknowledged and the level line drops whether or not anybody wanted it. */
+    kprintf("[ACPI] %[E]the firmware did not let go of the Global Lock in %lu "
+            "us on the %s (%s) — %s's access is refused rather than made "
+            "without it%[D]\n",
+            (unsigned long)HourGlassElapsedUs(&glass),
+            HourGlassRulerName(&glass),
+            HourGlassSourceDied(&glass) ? "ruler died mid-wait"
+                                        : "span ran out", who);
+    return ACPI_GLOBAL_LOCK_BUSY;
+}
+
+void AcpiGlobalLockRelease(const char *who)
+{
+    if (!g_global_lock) return;      /* nothing was ever taken */
+
+    if (g_global_lock_holder != amp_get_core_index()) {
+        kprintf("[ACPI] %[E]%s releases a Global Lock this core does not "
+                "hold — the FACS is not written and no gate is dropped%[D]\n",
+                who);
+        return;
+    }
+
+    g_global_lock_holder = ACPI_GLOBAL_LOCK_NO_HOLDER;
+    bool firmware_waiting = global_lock_drop();
+    spin_unlock(&g_global_lock_gate);
+
+    /* Signalled after the gate is dropped, so no port write and no console
+     * line happens with interrupts off. A core that takes the lock again in
+     * that window only makes the firmware's next attempt set Pending, which
+     * is the state it was already in. */
+    if (firmware_waiting) pm1_signal_gbl_rls();
+}
+
 /* ACPI 6.5 §16.3.1: many real firmwares boot in PIC/SMI mode (SCI_EN=0).
  * The OS writes FADT.ACPI_ENABLE to FADT.SMI_CMD and the platform raises
  * SCI_EN when it has handed the machine over; no PM1 write takes effect
@@ -1682,6 +2066,12 @@ acpi_error_t acpi_init(void) {
      * write through a pointer that already exists instead of allocating after
      * the APs have been frozen. */
     AcpiOneWayRegistersLocate();
+
+    /* The FACS, and the Global Lock inside it. After the PM1 control pair,
+     * because a release with the firmware waiting signals GBL_RLS through
+     * it; before anything that could write a field the firmware declared
+     * with the Lock attribute. */
+    AcpiGlobalLockLocate();
 
     /* The FADT is resolved, \_S5 has been searched (acpi_parse_tables) and
      * both register pairs are bound, so the survey has every fact it needs

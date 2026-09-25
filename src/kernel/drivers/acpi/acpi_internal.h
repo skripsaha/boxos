@@ -64,6 +64,66 @@ typedef struct {
 const AcpiOneWayRegister *AcpiResetRegister(void);
 const AcpiOneWayRegister *AcpiSleepControlRegister(void);
 
+/* ============================================================
+ * FACS — ACPI 6.5 §5.2.10, Table 5.17, Firmware ACPI Control Structure.
+ *
+ * Not an SDT: it carries no checksum, it is not listed in the RSDT or the
+ * XSDT, and the only thing that names it is the FADT's FIRMWARE_CTRL or
+ * X_FIRMWARE_CTRL (§5.2.9). §5.2.10 aligns it on a 64-byte boundary and
+ * gives it a length of "64 bytes or larger".
+ * ============================================================ */
+typedef struct {
+    uint8_t  signature[4];              /* "FACS", offset 0                 */
+    uint32_t length;
+    uint32_t hardware_signature;
+    uint32_t firmware_waking_vector;
+    uint32_t global_lock;               /* offset 16 — §5.2.10.1            */
+    uint32_t flags;
+    uint64_t x_firmware_waking_vector;
+    uint8_t  version;
+    uint8_t  reserved[3];
+    uint32_t ospm_flags;
+    uint8_t  reserved2[24];
+} __attribute__((packed)) acpi_facs_t;
+_Static_assert(offsetof(acpi_facs_t, global_lock) == 16,
+               "FACS Global Lock is at offset 16 (ACPI 6.5 Table 5.17)");
+_Static_assert(sizeof(acpi_facs_t) == 64,
+               "FACS is 64 bytes (ACPI 6.5 Table 5.17)");
+
+/* ============================================================
+ * The ACPI Global Lock — ACPI 6.5 §5.2.10.1 and §5.2.10.2.
+ *
+ * One DWORD inside the FACS, shared between this kernel and the platform's
+ * own SMM code, with two bits of protocol in it: Owned (bit 1) and Pending
+ * (bit 0).
+ *
+ * What makes it mandatory rather than advisory: §20.2.5.2 FieldFlags bit 4
+ * and §19.6.45 FieldUnit. A firmware that writes
+ *
+ *     Field (GNVS, AnyAcc, Lock, Preserve)
+ *
+ * is asking, in the declaration itself, that every access OSPM makes to
+ * those bits be made while holding this lock — because its own SMM code
+ * touches the same memory and has no other way to be excluded from it. A
+ * kernel that writes such a field holding nothing is racing the firmware.
+ *
+ * Taken and dropped BY NAME so that a refusal can say whose access it
+ * refused. Both calls say out loud what they did; neither is silent, and
+ * the acquire never returns HELD without the word in the FACS proving it.
+ * ============================================================ */
+typedef enum {
+    ACPI_GLOBAL_LOCK_HELD = 0,  /* taken — AcpiGlobalLockRelease owes a call */
+    ACPI_GLOBAL_LOCK_ABSENT,    /* this platform has no Global Lock to take  */
+    ACPI_GLOBAL_LOCK_BUSY,      /* the firmware holds it and did not let go  */
+} AcpiGlobalLockState;
+
+/* `who` names the access for the log — "\\_PIC", a field name. Never NULL.
+ * Anything but ACPI_GLOBAL_LOCK_HELD means the access must not be made:
+ * there is nothing holding the firmware off it. Release is owed only after
+ * HELD, and only from the same core. */
+AcpiGlobalLockState AcpiGlobalLockAcquire(const char *who);
+void AcpiGlobalLockRelease(const char *who);
+
 /* RSDP discovery + table mapping. */
 acpi_rsdp_t* acpi_find_rsdp(void);
 acpi_error_t acpi_parse_tables(acpi_rsdp_t* rsdp);
