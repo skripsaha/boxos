@@ -19,6 +19,13 @@
 #                         goes under the firmware (Footing), the reset says
 #                         which map it stood on, the EFI descriptor list is
 #                         on the record, and the Lifeline stays silent
+#   logcheck.sh census    the host's roll call (tools/volume-read.py check) and
+#                         the kernel's fsck name the same runs, counts and free
+#                         figure on a planted volume; and a qemu-io blklogwrites
+#                         log replays onto its base byte for byte
+#   logcheck.sh censusmut either half of that reconcile broken on purpose — the
+#                         kernel's pool walk, the census's retired-record rule —
+#                         must turn it red
 #   logcheck.sh both
 #
 # Every check is a grep against build/serial.log. No timing assertions.
@@ -7148,6 +7155,255 @@ run_footing() {
         || ok "footing: no verdict, no panic"
 }
 
+# ===========================================================================
+# census — the host's roll call and the kernel's name the same blocks
+# ===========================================================================
+#
+# `tools/volume-read.py check` holds two roll calls of one image: the CENSUS,
+# every owner of every block found the way the volume's writers laid it down,
+# and the KERNELVIEW, a simulation of what the mount in this tree decides —
+# which runs its fsck calls orphan and missing, which files it loses, what
+# free count it prints. The simulation is only worth anything if it IS the
+# mount, and the only way to know that is to boot the image and hold the
+# kernel's own lines against it.
+#
+# So an image is planted with damage the mount must see (self-test's
+# `reconcile`: two orphan blocks, a registry chained past data block 0, a
+# block of a live file cleared in the bitmap, a file whose only record was
+# retired), the tool predicts every line, and the machine boots it. The kernel
+# names its runs (FsckSayRuns, tagfs.c) and every run, every count and the
+# free figure must be the ones predicted — and every orphan the kernel names
+# must be one the census cannot find an owner for. A kernel that calls an owned
+# block an orphan is one whose roll call would free a live block the day the
+# repair starts giving orphans back.
+#
+# (A) is host only: a real blklogwrites log written by qemu-io, read back by
+# `cut`, and replayed onto its base, byte for byte.
+
+census_qemu_io() {
+    local d="$SCRATCH/census-io"
+    if ! command -v qemu-io >/dev/null 2>&1; then
+        harness "census: qemu-io is not on this desk, so no real blklogwrites log can be made"
+        return
+    fi
+    rm -rf "$d"; mkdir -p "$d"
+    dd if=/dev/zero of="$d/base.img" bs=1048576 count=2 2>/dev/null
+    cp "$d/base.img" "$d/run.img"
+    : > "$d/io.log"
+    qemu-io --image-opts "driver=blklogwrites,file.driver=file,file.filename=$d/run.img,log.driver=file,log.filename=$d/io.log,log-sector-size=512" \
+        -c 'write -P 0xa1 0 4k' -c 'flush' -c 'write -P 0xb2 8k 1k' \
+        -c 'write -f -P 0xc3 16k 512' -c 'write -z 32k 4k' >"$d/qemu-io.out" 2>&1 \
+        || { harness "census: qemu-io would not write through blklogwrites: $(tail -1 "$d/qemu-io.out")"; return; }
+
+    local said
+    said=$(python3 tools/volume-read.py "$d/base.img" cut "$d/io.log" --against "$d/run.img" 2>&1)
+    chk $? "census: $said"
+
+    local epochs
+    epochs=$(python3 tools/volume-read.py "$d/base.img" cut "$d/io.log" --count --json 2>&1 \
+             | python3 -c 'import json,sys; print(json.load(sys.stdin)["epochs"])' 2>&1)
+    case "$epochs" in
+        "[1, 2, 1"*) ok "census: qemu-io's log splits into epochs $epochs — write, flush, write + FUA write, zeroes" ;;
+        *)           bad "census: qemu-io's log splits into epochs $epochs, not [1, 2, 1, ...]" ;;
+    esac
+}
+
+# census_settle — let every mutated source's stamp fall into the past.
+#
+# mut_bump stamps a mutated file five seconds AHEAD so make cannot miss it, and
+# an object compiled inside those five seconds is still older than its source.
+# The next `make run-bg` then recompiles, relinks and REPACKS build/boxos.img —
+# over the planted volume. Measured: censusmut's first run booted a freshly
+# packed image, and the kernel's lines showed none of the planted damage. So
+# the build that precedes a planting runs after the stamp, which is a known
+# instant, not a guess.
+census_settle() {
+    [ -s "$MUT_MANIFEST" ] || return 0
+    local f m newest=0 now
+    while IFS= read -r f; do
+        [ -f "$f" ] || continue
+        m=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f")
+        [ "$m" -gt "$newest" ] && newest=$m
+    done < "$MUT_MANIFEST"
+    now=$(date +%s)
+    [ "$newest" -ge "$now" ] && sleep $((newest - now + 1))
+    return 0
+}
+
+# census_boot NAME — a fresh image, planted with `reconcile`, predicted, booted.
+census_boot() {
+    census_settle
+    rm -f build/boxos.img        # a volume that booted before is not the one predicted
+    build
+    make run-stop >/dev/null 2>&1
+    mutate_product build/boxos.img
+    python3 tools/volume-read.py build/boxos.img self-test --emit reconcile \
+        --out "$SCRATCH/census.$1.img" >"$SCRATCH/census.$1.emit" 2>&1 \
+        || { cat "$SCRATCH/census.$1.emit"; restore build/boxos.img; return 1; }
+    cp "$SCRATCH/census.$1.img" build/boxos.img
+    python3 tools/volume-read.py build/boxos.img check --json >"$SCRATCH/census.$1.json"
+    make run-bg >/dev/null 2>&1
+    # The guest reads its volume seconds from now; if make repacked the image
+    # on the way to QEMU, what boots is not what was predicted.
+    if ! cmp -s build/boxos.img "$SCRATCH/census.$1.img"; then
+        harness "census: build/boxos.img is not the planted volume when QEMU starts — make repacked it, so this boot judges nothing"
+        make run-stop >/dev/null 2>&1
+        restore build/boxos.img
+        return 1
+    fi
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    local rc=$?
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.$1.log"
+    restore build/boxos.img
+    return $rc
+}
+
+# census_judge NAME — the prediction against the kernel's own lines, one
+# "ok|bad <sentence>" line per assertion into $SCRATCH/census.NAME.verdict.
+census_judge() {
+    python3 - "$SCRATCH/census.$1.json" "$SCRATCH/serial.$1.log" \
+        >"$SCRATCH/census.$1.verdict" 2>&1 <<'CENSUS_EOF'
+import json, re, sys
+pred = json.load(open(sys.argv[1]))
+log = open(sys.argv[2], errors="replace").read()
+k = pred["kernel"]
+
+def say(held, text):
+    print(("ok " if held else "bad ") + text)
+
+def runs(kind):
+    return sorted((int(a), int(b)) for a, b in re.findall(
+        r"\[TagFS FSCK\] %s run at data block (\d+), (\d+) block\(s\)" % kind, log))
+
+def text(rs):
+    return ", ".join("%u+%u" % r for r in rs) or "none"
+
+if not k["mounts"]:
+    say(False, "the census predicts no mount at all: %s" % k["refusal"])
+    sys.exit(0)
+fsck = k["fsck"]
+m = re.search(r"is MOUNTED — (\d+) file", log)
+say(m is not None, "the kernel mounted the planted volume — %s file(s)" % (m.group(1) if m else "no MOUNTED line"))
+m = re.search(r"\[TagFS FSCK\] Bitmap mismatch: (\d+) orphan, (\d+) missing", log)
+have = (int(m.group(1)), int(m.group(2))) if m else None
+say(have == (fsck["orphan"], fsck["missing"]),
+    "the kernel's mismatch line says %s; the census predicted %u orphan, %u missing"
+    % ("%u orphan, %u missing" % have if have else "nothing", fsck["orphan"], fsck["missing"]))
+for kind in ("orphan", "missing"):
+    got, want = runs(kind), sorted(tuple(r) for r in fsck[kind + "_runs"])
+    say(got == want, "the kernel names %s runs %s; the census predicted %s" % (kind, text(got), text(want)))
+m = re.search(r"\[TagFS FSCK\] (\d+) file table entry\(s\) corrected from this volume's "
+              r"metadata pool, (\d+) file\(s\) lost", log)
+have = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+say(have == (fsck["corrected"], fsck["lost"]),
+    "the kernel corrected %u table entry(s) and lost %u file(s); the census predicted %u and %u"
+    % (have + (fsck["corrected"], fsck["lost"])))
+m = re.search(r"\[TagFS\] (\d+) data blocks, (\d+) free, (\d+) files", log)
+have = tuple(int(x) for x in m.groups()) if m else None
+want = (k["says"]["data_blocks"], k["says"]["free"], k["says"]["files"])
+say(have == want, "the kernel says %s; the census predicted \"%u data blocks, %u free, %u files\""
+    % ('"%u data blocks, %u free, %u files"' % have if have else "nothing", *want))
+owned = []
+for a, n in runs("orphan"):
+    for c in pred["census"]["claims"]:
+        for s, cn in c["runs"]:
+            lo, hi = max(a, s), min(a + n, s + cn)
+            if lo < hi:
+                owned.append("%s at data block %u+%u" % (c["label"], lo, hi - lo))
+census_orphans = sorted(tuple(r) for r in pred["census"]["orphan_runs"])
+say(not owned and runs("orphan") == census_orphans,
+    "every orphan the kernel names (%s) is one the census finds no owner for (%s)%s"
+    % (text(runs("orphan")), text(census_orphans),
+       " — the kernel calls OWNED blocks orphans: " + "; ".join(owned) if owned else ""))
+CENSUS_EOF
+    local rc=$?
+    [ $rc = 0 ] && [ -s "$SCRATCH/census.$1.verdict" ] && return 0
+    echo "bad the judge could not read $SCRATCH/census.$1.json against $SCRATCH/serial.$1.log: $(tail -1 "$SCRATCH/census.$1.verdict")" \
+        > "$SCRATCH/census.$1.verdict"
+}
+
+run_census() {
+    echo "== census: the host's roll call and the kernel's name the same blocks =="
+    census_qemu_io
+    if ! census_boot census; then
+        bad "census: the planted volume never reached a shell"
+        build; return
+    fi
+    census_judge census
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            "ok "*)  ok  "census: ${line#ok }" ;;
+            "bad "*) bad "census: ${line#bad }" ;;
+        esac
+    done < "$SCRATCH/census.census.verdict"
+    build   # the planted image was discarded; leave one built from clean sources
+}
+
+# The two halves of the reconcile must each be able to go red. The kernel's:
+# a roll call that stops walking the pool chain calls pool[1] an orphan. The
+# host's: a census that calls every retired record damage — they fail their
+# sum by construction — is a census that cries wolf on every volume that ever
+# deleted a file.
+census_poolblind_on() {
+    mutate src/kernel/tagfs/tagfs.c
+    python3 - <<'EOF2'
+p = "src/kernel/tagfs/tagfs.c"
+s = open(p).read()
+anchor = "            MARK_CHAIN_BLOCKS(data_block_of(g_state.layout.metadata_pool_block),   TAGFS_MPOOL_MAGIC);\n"
+assert s.count(anchor) == 1, "census pool-chain anchor missing"
+s = s.replace(anchor, "            /* logcheck mutation: the pool chain is not walked */\n", 1)
+open(p, "w").write(s)
+EOF2
+    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation"
+}
+
+census_exempt_on() {
+    mutate tools/volumeread/census.py
+    python3 - <<'EOF2'
+p = "tools/volumeread/census.py"
+s = open(p).read()
+anchor = "            if r.fid != 0 and not r.unpack_ok:\n"
+assert s.count(anchor) == 1, "census exemption anchor missing"
+s = s.replace(anchor, "            if not r.unpack_ok:  # logcheck mutation: retired records are called bad\n", 1)
+open(p, "w").write(s)
+EOF2
+    mut_done tools/volumeread/census.py "logcheck mutation"
+}
+
+run_censusmut() {
+    echo "== censusmut: with either half broken, the reconcile must go red =="
+    census_poolblind_on
+    if census_boot censusmut; then
+        census_judge censusmut
+        local reds
+        reds=$(grep -c '^bad ' "$SCRATCH/census.censusmut.verdict")
+        if [ "${reds:-0}" -gt 0 ]; then
+            ok "censusmut: the kernel left the pool chain out and $reds assertion(s) went red — $(grep -m1 '^bad ' "$SCRATCH/census.censusmut.verdict" | cut -c5-)"
+        else
+            bad "censusmut: the kernel left the pool chain out of its roll call and the reconcile stayed green"
+        fi
+    else
+        bad "censusmut: the planted volume never reached a shell on the mutated kernel"
+    fi
+    restore src/kernel/tagfs/tagfs.c
+    build
+
+    census_exempt_on
+    python3 tools/volume-read.py build/boxos.img self-test >"$SCRATCH/census.exempt.out" 2>&1
+    local rc=$?
+    restore tools/volumeread/census.py
+    local c14
+    c14=$(grep -m1 "C14 retired is not bad" "$SCRATCH/census.exempt.out")
+    if [ $rc -ne 0 ] && echo "$c14" | grep -q "unexpected RECORD_CRC"; then
+        ok "censusmut: a census that calls retired records bad fails its self-test (exit $rc) — ${c14#self-test: }"
+    else
+        bad "censusmut: a census that calls retired records bad passed its self-test (exit $rc): ${c14:-no C14 line}"
+    fi
+    build   # every put-back discards the image; leave one built from clean sources
+}
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -7234,9 +7490,11 @@ case "${1:-both}" in
     grow)     run_grow ;;
     growcut)  run_growcut ;;
     growmut)  run_growmut ;;
+    census)   run_census ;;
+    censusmut) run_censusmut ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_mountfail; echo; run_badpool; echo; run_census; echo; run_censusmut ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1
