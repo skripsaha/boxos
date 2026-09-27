@@ -33,9 +33,10 @@
 #               answers": `quilltest hogged anchor_test` on the booted state.
 #   halt        quilltest churn writes for ever; the power button. The machine
 #               must switch off, and what churn wrote is durable behind the
-#               halt's flush. A guard: no caveat.
+#               halt's flush: a guard, whose census codes are held (below).
 #   race        quilltest race: 200 anchors against a churn, then the power
-#               button; the halt's oracles. A guard unless measured red.
+#               button; the halt's oracles, and an anchored file lost by a
+#               later torn sync held under 1.4.
 #   settlecut   the second oracle: kernels built SETTLECUT=ledger and =done,
 #               each booted from a copy, anchor_test, the machine stopped
 #               inside its sync; volume-read's codes against PowerCut's cut at
@@ -45,6 +46,13 @@
 #               lifted early, the durability or the ack oracle must go red.
 #   selftest    the planner's arithmetic, and a record forged by one byte that
 #               the record's self-check must refuse.
+#
+# Every census code a scenario was measured showing is its own caveat row —
+# (scenario, code), stand_caveat.sh — held under 1.6, the ORPHAN of an
+# unanchored create (noanchor, hog) and race's lost anchored file under 1.4
+# (the owner, 2026-09-27). A caveated code no cut shows is lifted early only
+# where its absence is proof: every medium of the record built, and no writer
+# left writing through it. Anywhere else it is said, and counts for nothing.
 #
 # ORACLES, each one line: the record accounts for the disk QEMU left, byte for
 # byte (else nothing measured means anything: HARNESS); every durable step has
@@ -92,9 +100,10 @@ pc_preflight() {
         echo "powercut: this QEMU has no blklogwrites driver, and without it nothing is recorded"; exit 1; }
     python3 "$VR" --help 2>/dev/null | grep -q "check" && python3 "$VR" --help | grep -q "cut" || {
         echo "powercut: $VR does not offer check and cut"; exit 1; }
-    case "$PC_ROOT" in *,*)
-        echo "powercut: $PC_ROOT holds a comma, and QEMU reads a comma in a file name as the"
-        echo "          end of the option — run under a TMPDIR without one"; exit 1 ;;
+    case "$PC_ROOT" in *,*|*[[:space:]]*)
+        echo "powercut: $PC_ROOT holds a comma or a blank: QEMU reads a comma in a file name as"
+        echo "          the end of the option, and run-bg hands the disk's path to QEMU as"
+        echo "          words — run under a TMPDIR with neither"; exit 1 ;;
     esac
 }
 
@@ -112,9 +121,12 @@ stand_exit_hook() {
 
 # The record's superblock (blklogwrites.c 38-43): u64 magic, u64 version, u64
 # entries. Read live while QEMU writes it; everything else about the record
-# is volume-read's. 0 until the first entry lands.
+# is volume-read's. 0 until the first entry lands. Both u64s are read in
+# decimal: BSD od pads hex with blanks and GNU od with zeros, and a magic
+# compared as padded hex is recognised on one desk and never on the other.
+# 29963231459240050 is WRITE_LOG_MAGIC, 0x6a736677736872.
 pc_record_count() {
-    [ "$(od -An -t x8 -N 8 "$1" 2>/dev/null | tr -d ' ')" = "6a736677736872" ] || { echo 0; return; }
+    [ "$(od -An -t u8 -N 8 "$1" 2>/dev/null | tr -d ' ')" = 29963231459240050 ] || { echo 0; return; }
     od -An -t u8 -j 16 -N 8 "$1" | tr -d ' '
 }
 
@@ -146,19 +158,39 @@ pc_build() {
     return 1
 }
 
-pc_begin() {   # pc_begin NAME KEYS...
+# pc_begin NAME KEYS... — the machine keys are kept as the words they were
+# given, so a key whose value holds a blank (QEMUEXTRA='-machine pc', the
+# matrix's PIIX stand) reaches make as one key. Expanded as
+# ${PC_KEYS[@]+"${PC_KEYS[@]}"}: bash 3.2 under set -u calls an empty array
+# unbound, and a scenario with no keys is the plain stand.
+pc_begin() {
+    local key
     PC_NAME=$1; shift
-    PC_KEYS="$*"
-    PC_DIR="$PC_ROOT/$PC_NAME-$(printf '%s' "${PC_KEYS:-plain}" | tr ' =' '_-')"
-    PC_CORES=$(printf '%s\n' $PC_KEYS | sed -n 's/^CORES=\([0-9][0-9]*\)$/\1/p' | tail -1)
-    PC_CORES=${PC_CORES:-1}
+    PC_KEYS=("$@")
+    PC_DIR="$PC_ROOT/$PC_NAME-$(printf '%s' "${PC_KEYS[*]:-plain}" | tr ' =,/' '_-__')"
+    PC_CORES=1
+    for key in ${PC_KEYS[@]+"${PC_KEYS[@]}"}; do
+        case "${key#CORES=}" in "$key"|''|*[!0-9]*) ;; *) PC_CORES=${key#CORES=} ;; esac
+    done
     PC_PATH="unknown"
     rm -rf "$PC_DIR"
     mkdir -p "$PC_DIR/boots"
     : > "$PC_DIR/steps.jsonl"
     : > "$PC_DIR/facts.txt"
     PC_T0=$(date +%s)
-    echo "== powercut $PC_NAME${PC_KEYS:+ ($PC_KEYS)} =="
+    echo "== powercut $PC_NAME${PC_KEYS[*]:+ (${PC_KEYS[*]})} =="
+}
+
+# pc_extra WORDS — the QEMUEXTRA key this scenario's machine is booted with,
+# WORDS added: what the machine keys (or the environment) said, and WORDS
+# after it. make keeps only the last of a key given twice, so a scenario that
+# added its own would boot another machine than the one it was asked for.
+pc_extra() {
+    local key extra=${QEMUEXTRA:-}
+    for key in ${PC_KEYS[@]+"${PC_KEYS[@]}"}; do
+        case "$key" in QEMUEXTRA=*) extra=${key#QEMUEXTRA=} ;; esac
+    done
+    echo "QEMUEXTRA=${extra:+$extra }$1"
 }
 
 # pc_boot DISK [KEYS...] — DISK booted as it stands, on this scenario's
@@ -166,8 +198,7 @@ pc_begin() {   # pc_begin NAME KEYS...
 pc_boot() {
     local disk=$1; shift
     make run-stop >/dev/null 2>&1
-    # shellcheck disable=SC2086
-    if ! make run-bg BOOTDISK="$disk" $PC_KEYS "$@" >"$PC_DIR/run-bg.out" 2>&1; then
+    if ! make run-bg BOOTDISK="$disk" ${PC_KEYS[@]+"${PC_KEYS[@]}"} "$@" >"$PC_DIR/run-bg.out" 2>&1; then
         harness "$PC_NAME: run-bg would not start $disk: $(tail -1 "$PC_DIR/run-bg.out")"
         return 1
     fi
@@ -202,13 +233,22 @@ pc_base() {
 
 # pc_logged [KEYS...] — a clone of the base, booted with every write on the
 # record (and KEYS on the machine besides).
+#
+# The machine is asked which disk it has: run.img is a clone of the base, so
+# nothing read off either image can tell them apart, and a boot of any other
+# disk would leave run.img an untouched clone that still looks right.
 pc_logged() {
+    local pid
     pc_clone "$PC_DIR/base.img" "$PC_DIR/run.img" || return 1
     if ! pc_boot "$PC_DIR/run.img" POWERCUT=on POWERCUT_LOG="$PC_DIR/run.log" "$@"; then
         bad "$PC_NAME: the recorded boot never reached a shell"; return 1
     fi
-    [ "$(deed_uuid "$PC_DIR/run.img")" = "$PC_BASE_UUID" ] || {
-        harness "$PC_NAME: the recorded boot stands on another volume than the base"; return 1; }
+    pid=$(cat build/qemu.pid 2>/dev/null)
+    case "$(ps -o command= -p "$pid" 2>/dev/null)" in
+        *"filename=$PC_DIR/run.img,"*"filename=$PC_DIR/run.log,"*) ;;
+        *) harness "$PC_NAME: the recorded machine (pid $pid) was not started on $PC_DIR/run.img with its record at $PC_DIR/run.log"
+           return 1 ;;
+    esac
     PC_PATH=$(stand_path build/serial.log "$PC_CORES")
 }
 
@@ -216,9 +256,10 @@ pc_logged() {
 # note where the record stood before, at the answer and once it went quiet.
 # DURABLE is NAME:RECORD:FROM:TO for a step whose answer promises durability
 # (TO 0: as many records as the record holds writes).
-# noquiet: the step leaves a writer behind, and the record never goes quiet.
+# noquiet: the step leaves a writer behind, and the record never goes quiet —
+# which the judge is told, because such a record is one run's timing.
 pc_step() {
-    local name=$1 cmd=$2 ack=$3 durable=${4:-} n0 nack nq mark line
+    local name=$1 cmd=$2 ack=$3 durable=${4:-} quiet="" n0 nack nq mark line
     n0=$(pc_record_count "$PC_DIR/run.log")
     mark=$(wc -l < build/serial.log)
     type_line "$cmd" || { bad "$PC_NAME: the machine never took '$cmd'"; return 1; }
@@ -228,13 +269,13 @@ pc_step() {
     nack=$(pc_record_count "$PC_DIR/run.log")
     line=$(tail -n +$((mark + 1)) build/serial.log | tr -d '\r' | grep -aE "$ack" | head -1)
     if [ "${5:-}" = noquiet ]; then
-        nq=$nack
+        nq=$nack; quiet=--noquiet
     else
         wait_for_quiet "$PC_RECORD_QUIET_S" "$PC_DIR/run.log"
         nq=$(pc_record_count "$PC_DIR/run.log")
     fi
     python3 "$PC" step "$PC_DIR/steps.jsonl" --step "$name" --cmd "$cmd" --before "$n0" \
-        --ack "$nack" --quiet "$nq" --line "$line" ${durable:+--durable "$durable"}
+        --ack "$nack" --quiet "$nq" --line "$line" ${durable:+--durable "$durable"} $quiet
 }
 
 # pc_cut_power — kill -9 by pid, and the fact that it is gone. Never
@@ -301,7 +342,7 @@ pc_record() {
         return 1
     fi
     ok "$PC_NAME: the record accounts for the disk QEMU left — $said"
-    echo "machine: ${PC_KEYS:-plain BIOS}, $PC_CORES core(s), a userspace write goes by $PC_PATH" >>"$PC_DIR/facts.txt"
+    echo "machine: ${PC_KEYS[*]:-plain BIOS}, $PC_CORES core(s), a userspace write goes by $PC_PATH" >>"$PC_DIR/facts.txt"
     python3 "$VR" "$PC_DIR/base.img" cut "$PC_DIR/run.log" --list --json >"$PC_DIR/list.json" || {
         harness "$PC_NAME: volume-read could not list the record"; return 1; }
     PC_SEED=$(shasum -a 256 "$PC_DIR/run.log" | cut -c1-16)
@@ -352,37 +393,55 @@ pc_boots() {
     done 3<"$PC_DIR/boots.txt"
 }
 
-# The caveats a scenario's verdicts may be held under: KEY=NAME, NAME a row of
-# stand.sh's one table. A code no row names is a FAIL until the owner assigns
-# it a step; a row that sees nothing is lifted early.
+# pc_caveats NAME PATH — the caveats a scenario's verdicts may be held under:
+# KEY=ROW, ROW a row of stand_caveat.sh's one table. Every census code the
+# scenario was measured showing on this path is its own (scenario, code) row
+# (the owner, 2026-09-27); a code no row names is a FAIL until the owner
+# assigns it a step. nextfid's quiet, whole census shows MISSING and
+# TAG_ABSENT only on a synchronous path — on the WriteJob the bitmap and the
+# registry are flushed before the anchor's sync — and there their absence
+# would be read as a lifting.
 pc_caveats() {
+    local base code codes=""
     case "$1" in
-        noanchor|noanchormut) echo "verify=noanchor" ;;
-        nextfid|nextfidmut|tablemut|flushmut) echo "reissue=nextfid"; echo "code:FID_PAST_NEXT=nextfid" ;;
-        hog)       echo "verify=hog" ;;
-        settlecut) echo "code:FID_PAST_NEXT=settlecut" ;;
+        noanchor|noanchormut) base=noanchor; echo "verify=noanchor"; codes="ORPHAN" ;;
+        hog)                  base=hog; echo "verify=hog"; codes="ORPHAN" ;;
+        nextfid|nextfidmut|tablemut|flushmut)
+            base=nextfid; echo "reissue=nextfid"
+            codes="FID_PAST_NEXT FILE_LOST ORPHAN UNNAMED_RECORD"
+            case "$2" in *" sync") codes="$codes MISSING TAG_ABSENT" ;; esac ;;
+        halt)
+            base=halt
+            codes="CHAIN_REFUSED FID_PAST_NEXT FILE_LOST MISSING ORPHAN SPARE_UNNAMED TAG_ABSENT UNNAMED_RECORD" ;;
+        race)
+            base=race; echo "durable:_qt_churn@race=race:durable"
+            codes="CHAIN_REFUSED FID_PAST_NEXT FILE_LOST MISSING ORPHAN SPARE_UNNAMED TAG_ABSENT TAG_DUPLICATE UNNAMED_RECORD" ;;
+        settlecut) base=settlecut; codes="FID_PAST_NEXT" ;;
     esac
+    for code in $codes; do echo "code:$code=$base:$code"; done
 }
 
 # pc_judge ARGS... — every oracle (tools/powercut.py judge), into
 # $PC_DIR/verdicts.tsv; the report printed and kept.
 pc_judge() {
-    local c args=""
-    for c in $(pc_caveats "$PC_NAME"); do args="$args --caveat $c"; done
+    local c args=()
+    for c in $(pc_caveats "$PC_NAME" "$PC_PATH"); do args+=(--caveat "$c"); done
     echo "took $(( $(date +%s) - PC_T0 )) s to judge; the report is $PC_DIR/report.txt" >>"$PC_DIR/facts.txt"
-    # shellcheck disable=SC2086
-    python3 "$PC" judge "$PC_DIR" --path "$PC_PATH" $args "$@" >"$PC_DIR/verdicts.tsv" || {
+    python3 "$PC" judge "$PC_DIR" --path "$PC_PATH" ${args[@]+"${args[@]}"} "$@" >"$PC_DIR/verdicts.tsv" || {
         harness "$PC_NAME: the judge could not read this run"; return 1; }
     sed '$d' "$PC_DIR/report.txt" | sed 's/^/  | /'
 }
 
 # pc_say — the verdicts in stand.sh's words, and a copy of them in the report.
+# A note is no verdict: a caveated defect a census could not show gone, said
+# in the words the waits use for what is not a count.
 pc_say() {
     local key kind name seen what
     while IFS="$TAB" read -r key kind name seen what; do
         case "$kind" in
             caveat)  caveat_judge "$name" "$seen" "$PC_NAME $key: $what" ;;
             harness) harness "$PC_NAME $key: $what" ;;
+            note)    echo "  ($PC_NAME $key, caveat $name: $what)" ;;
             *) if [ "$seen" = behaves ]; then ok "$PC_NAME $key: $what"; else bad "$PC_NAME $key: $what"; fi ;;
         esac
     done <"$PC_DIR/verdicts.tsv"
@@ -437,7 +496,7 @@ pc_hog() {
 }
 
 pc_halt() {
-    pc_base && pc_logged QEMUEXTRA=-no-shutdown || return 1
+    pc_base && pc_logged "$(pc_extra -no-shutdown)" || return 1
     pc_step churn "quilltest churn _qt_churn" '\[QUILL\] churn: _qt_churn fid=[0-9]+ starts at seq=[0-9]+' \
         "" noquiet || return 1
     pc_halt_orderly _qt_churn:quill && pc_record || return 1
@@ -447,9 +506,11 @@ pc_halt() {
 }
 
 pc_race() {
-    pc_base && pc_logged QEMUEXTRA=-no-shutdown || return 1
+    pc_base && pc_logged "$(pc_extra -no-shutdown)" || return 1
+    # Every verdict race can give is its answer, the ones before the anchors
+    # started too: "never answered" is kept for a machine that said nothing.
     pc_step race "quilltest race _qt_churn 200" \
-        '\[QUILL\] race: (PASS|FAIL) — anchored [0-9]+ of [0-9]+' "_qt_churn:quill:1:0" noquiet \
+        '\[QUILL\] race: (PASS|FAIL) — ' "_qt_churn:quill:1:0" noquiet \
         || return 1
     grep -aq '\[QUILL\] race: PASS — anchored 200 of 200' build/serial.log
     chk $? "$PC_NAME: $(grep -aoE '\[QUILL\] race: (PASS|FAIL) — [^.]*' build/serial.log | head -1)"
@@ -520,7 +581,9 @@ pc_settlecut() {
     grep -aqE '\[ANCHOR\] PASS — anchored write survived hard crash \(seq=1\)' "$again"
     chk $? "settlecut: done — the file its sync finished survives a reboot: $(grep -aoE '\[ANCHOR\] [^.(]*' "$again" | head -1)"
     buildkey_restore || bad "settlecut: the plain kernel could not be built back"
-    python3 "$PC" settlecut "$PC_DIR" --path "$PC_PATH" >"$PC_DIR/verdicts.tsv" || {
+    local c args=()
+    for c in $(pc_caveats settlecut "$PC_PATH"); do args+=(--caveat "$c"); done
+    python3 "$PC" settlecut "$PC_DIR" --path "$PC_PATH" ${args[@]+"${args[@]}"} >"$PC_DIR/verdicts.tsv" || {
         harness "settlecut: the judge could not read this run"; return 1; }
 }
 
@@ -537,19 +600,25 @@ run_settlecut() {
 
 # The *mut scenarios. Each puts one fix or one fault into the tree through
 # stand.sh's mutation mechanism (restored by the exit trap on every way out),
-# runs its scenario on the plain stand and asks one verdict.
+# runs its scenario (on the plain stand unless it names a machine) and asks
+# one verdict — and says every harness line the judge gave, because a verdict
+# over cuts volume-read could not judge is not one.
 mut_on() {   # mut_on FILE MARKER — FILE's edit (python on stdin) under the manifest
     mutate "$1"
     python3 - "$1" || { echo "powercut: the mutation of $1 did not apply"; exit 1; }
     mut_done "$1" "$2"
 }
 
-mut_run() {  # mut_run NAME BASE KEY SEEN WHY — the mutated tree through BASE's scenario
-    pc_begin "$1"
+mut_run() {  # mut_run NAME BASE KEY SEEN WHY [KEYS...] — the mutated tree through BASE's scenario
+    local key kind name seen what
+    pc_begin "$1" "${@:6}"
     pc_build 4 || return
     if ! "pc_$2"; then
         bad "$1: the scenario stopped before its record could be judged (logs in $PC_DIR)"; return
     fi
+    while IFS="$TAB" read -r key kind name seen what; do
+        [ "$kind" = harness ] && harness "$1 $key: $what"
+    done <"$PC_DIR/verdicts.tsv"
     pc_expect "$3" "$4" "$5"
 }
 
@@ -599,15 +668,32 @@ EOF
     restore src/kernel/tagfs/tagfs.c
 }
 
+# Only the anchor's flushes are taken out — the sync's own, and the one
+# ObjAnchor asks for after the sync; the WriteJob still flushes the data it
+# writes. So the mutant is asked on the WriteJob's machine too, where a flush
+# of anchor_test's own data comes before the anchor's sync: the ack must not
+# be credited with it.
 run_flushmut() {
     mut_on src/kernel/tagfs/tagfs.c "logcheck mutation" <<'EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = "    int said = BoardroomFlush(g_tagfs_seat);"
+a = "    error_t flushed = tagfs_flush_cache_insisting();"
 assert s.count(a) == 1
-open(p, "w").write(s.replace(a, "    return OK; /* logcheck mutation: the medium is never asked to flush */\n" + a))
+open(p, "w").write(s.replace(a, "    error_t flushed = OK;   /* logcheck mutation: the sync never asks the medium to flush */"))
 EOF
-    mut_run flushmut nextfid ack:anchor_test fail "the medium never asked to flush, the anchor's ack has none behind it"
+    mut_on src/kernel/core/decks/storage/storage_ops.c "logcheck mutation" <<'EOF'
+import sys
+p = sys.argv[1]; s = open(p).read()
+a = "    error_t flushed = tagfs_flush_cache();\n    while (flushed == ERR_BUSY) {\n"
+assert s.count(a) == 1
+open(p, "w").write(s.replace(a, "    error_t flushed = OK;   /* logcheck mutation: the anchor never asks the medium to flush */\n"
+                                "    while (flushed == ERR_BUSY) {\n"))
+EOF
+    mut_run flushmut nextfid ack:anchor_test fail "the anchor never asking the medium to flush, its ack has none behind it"
+    mut_run flushmut nextfid ack:anchor_test fail \
+        "on the WriteJob the data's own flush comes first, and still the anchor's ack has none behind it" \
+        STRICT=on CORES=4 MEM=4G
+    restore src/kernel/core/decks/storage/storage_ops.c
     restore src/kernel/tagfs/tagfs.c
 }
 

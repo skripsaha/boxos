@@ -2,6 +2,7 @@
  * persist — two-phase TagFS persistence verification, one phase per word.
  *
  *   persist write
+ *     deletes every earlier `_persist_test` and anchors the deletes, then
  *     creates `_persist_test` tagged "persist", writes a known marker
  *     (16 bytes: magic + sequence + checksum) and exits WITHOUT anchoring
  *     it. User then runs `bye` (or `reboot`) and re-launches BoxOS; or
@@ -15,6 +16,10 @@
  * The phase is said, not guessed. It used to be chosen by whether the file
  * already existed, so a file lost to a power cut turned "verify" into a new
  * write that printed WROTE — never FAIL — and the loss looked like a pass.
+ * And every write carries the same seq-1 record, so an earlier file left
+ * beside a lost write would read back as that pass: the earlier ones are
+ * deleted durably before the write, and verify refuses to answer for a
+ * volume holding more than one.
  *
  * Why this matters: "OS that loses your file on shutdown" is not a
  * production OS.
@@ -47,6 +52,41 @@ static uint32_t fold_checksum(uint32_t magic, uint32_t seq)
 
 static int do_write(uint32_t sequence)
 {
+    /* The deletes are anchored before the write under test, so a cut that
+     * loses the write cannot bring an earlier file back in its place. On
+     * PowerCut's settled base there is none: nothing is deleted, nothing
+     * anchored, and the record holds the write under test alone. */
+    uint32_t earlier[8];
+    int      gone = 0;
+    for (;;) {
+        int found = find_file_by_name(PERSIST_NAME, earlier, NULL, 8);
+        if (found < 0) {
+            kdbg_print("[PERSIST] FAIL: could not ask the volume for an earlier '%s' (error %d)",
+                       PERSIST_NAME, found);
+            return 1;
+        }
+        if (found == 0)
+            break;
+        for (int i = 0; i < found && i < 8; i++, gone++) {
+            int drc = delete(earlier[i]);
+            if (drc != 0) {
+                kdbg_print("[PERSIST] FAIL: the earlier '%s' fid=%u would not be deleted (rc=%d)",
+                           PERSIST_NAME, earlier[i], drc);
+                return 1;
+            }
+        }
+    }
+    if (gone > 0) {
+        int arc = anchor(0);
+        if (arc != 0) {
+            kdbg_print("[PERSIST] FAIL: %d earlier '%s' deleted, and the anchor that makes it "
+                       "durable answered %d", gone, PERSIST_NAME, arc);
+            return 1;
+        }
+        kdbg_print("[PERSIST] %d earlier '%s' deleted and anchored before the write",
+                   gone, PERSIST_NAME);
+    }
+
     int fid = create(PERSIST_NAME, "persist");
     if (fid < 0) {
         kdbg_print("[PERSIST] create failed rc=%d", fid);
@@ -76,9 +116,18 @@ static int do_verify(void)
     uint32_t   fids[8];
     file_info_t infos[8];
     int found = find_file_by_name(PERSIST_NAME, fids, infos, 8);
-    if (found <= 0) {
-        kdbg_print("[PERSIST] FAIL: file '%s' not found after reboot (rc=%d)",
+    if (found < 0) {
+        kdbg_print("[PERSIST] FAIL: could not ask the volume for '%s' (error %d)",
                    PERSIST_NAME, found);
+        return 1;
+    }
+    if (found == 0) {
+        kdbg_print("[PERSIST] FAIL: file '%s' not found after reboot (rc=0)", PERSIST_NAME);
+        return 1;
+    }
+    if (found > 1) {
+        kdbg_print("[PERSIST] FAIL: the volume holds %d files called '%s', so a record read "
+                   "from one of them says nothing of which write it is", found, PERSIST_NAME);
         return 1;
     }
 

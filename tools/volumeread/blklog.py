@@ -54,7 +54,7 @@ class LogWrite:
     flushes counted; `index` its place within its epoch; `lba`/`sectors` in
     512-byte medium sectors; `data_at` the byte offset of its data in the log."""
 
-    __slots__ = ("seq", "epoch", "index", "log_sector", "lba", "sectors", "discard", "data_at")
+    __slots__ = ("seq", "epoch", "index", "lba", "sectors", "discard", "data_at")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -143,7 +143,7 @@ class BlkLog:
             self.entries += 1
             ep = self.epochs[-1]
             ep.append(LogWrite(seq=self.entries, epoch=len(self.epochs) - 1, index=len(ep),
-                               log_sector=pos, lba=lba, sectors=sectors, discard=discard,
+                               lba=lba, sectors=sectors, discard=discard,
                                data_at=None if discard else data_at))
             pos += 1 if discard else 1 + nr
         self.stop = stop
@@ -279,18 +279,21 @@ def ParseTears(items, epoch, keep):
 
 class Classifier:
     """Names what each write touched, by region of the medium, by what it
-    wrote, and by who owns the block in the image as of the end of its epoch."""
+    wrote, and by who owns the block in the image as of the end of its epoch.
+    `forced_start` is --start: the ground the volume stands on when the
+    partition table cannot be trusted, used exactly as `check` uses it."""
 
-    def __init__(self, log, base):
-        self.log, self.base = log, base
+    def __init__(self, log, base, forced_start=None):
+        self.log, self.base, self.forced_start = log, base, forced_start
         self.over = OverlayMedium(base)
         self.done_epoch = -1
         self.census = None
         try:
-            self.stand = StandOnDeed(base, None)
+            self.stand = StandOnDeed(base, forced_start)
         except Unreadable:
             self.stand = None
-        self.parts = [(s, n, how) for s, n, how, _k in GroundCandidates(base) if n and s]
+        candidates, _said = GroundCandidates(base)
+        self.parts = [(s, n, how) for s, n, how, _k in candidates if n and s]
         try:
             self.has_mbr = base.sectors(0, 1)[510:512] == b"\x55\xaa"
         except IOError:
@@ -306,7 +309,7 @@ class Classifier:
             self.census = None
         if self.census is None:
             try:
-                self.census = GroundCensus(self.over)
+                self.census = GroundCensus(self.over, self.forced_start)
             except (Unreadable, IOError):
                 self.census = False
             self.stand = self.census.f.stand if self.census else self.stand

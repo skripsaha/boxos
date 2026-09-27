@@ -8,6 +8,13 @@
  * must hear again once this program is gone.
  *
  *   handset         ask, read one line, say it, leave.
+ *   handset banked  the line typed while nobody listens: this program hears
+ *                   the keyboard itself first — a second pair of ears, which
+ *                   takes nothing from the daemon — until the Enter that ends
+ *                   the line, and only then asks for the ear and reads. So
+ *                   the line was typed before the ask as a fact, not as a
+ *                   race of the harness's keystrokes against this spawn, and
+ *                   what reaches the reader is what the daemon banked.
  *   handset deaf    a reader that vanished with the handset in its hand: a
  *                   strand takes the ear (asks the daemon to listen) and then
  *                   gives its CLAIM up without giving the ear back — the shape
@@ -23,6 +30,7 @@
 #include "box/luggage.h"
 #include "box/strand.h"
 #include "box/touch.h"
+#include "box/keyboard.h"
 #include "box/sync.h"
 #include "box/system.h"
 #include "box/string.h"
@@ -50,9 +58,43 @@ static int read_and_say(void)
     return 0;
 }
 
+/* The keyboard heard directly, key by key, up to the Enter that ends the
+ * line; 0 then, or the answer that stopped the listening. */
+static int HearToEnter(void)
+{
+    TouchTag kb = touch_pair_choose(touch_intern(TOUCH_TAG_KEYBOARD));
+    if (kb == TOUCH_TAG_INVALID || touch_claim(kb, TOUCH_REST, 0, 0) != 0)
+        return -1;
+    printf("[HANDSET] not listening\n");
+    int rc;
+    for (;;) {
+        Touch      t;
+        kb_event_t k;
+        rc = touch_await(kb, &t, 0);
+        if (rc != 0)
+            break;
+        if (t.payload_len < sizeof(k))
+            continue;
+        memcpy(&k, t.payload, sizeof(k));
+        if (k.ascii == '\n' || k.ascii == '\r')
+            break;
+    }
+    touch_release(kb);
+    return rc;
+}
+
 int main(void)
 {
     const char *mode = luggage_word(1);
+    if (mode && strcmp(mode, "banked") == 0) {
+        int rc = HearToEnter();
+        if (rc != 0) {
+            printf("[HANDSET] FAILED: the keyboard could not be heard directly (%d)\n", rc);
+            return 1;
+        }
+        printf("[HANDSET] ask\n");
+        return read_and_say();
+    }
     if (mode && strcmp(mode, "deaf") == 0) {
         if (strand_spawn(deaf_reader, NULL) == 0) {
             printf("[HANDSET] FAILED: no strand for the deaf reader\n");

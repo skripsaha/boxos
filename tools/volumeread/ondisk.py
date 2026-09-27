@@ -1,9 +1,11 @@
 """ondisk — the TagFS v1 format as the medium carries it, said once on the host.
 
 Every number here is copied out of a C header or a C routine, and every one
-names the file and line it came from, so a drift is findable by reading. The
-`self-test` X1 case goes further and holds the constants and the struct layouts
-against the headers themselves, so a drift is also FOUND, by a red line.
+names where it came from: a header by file and line, a routine by its name —
+the lines of tagfs.c move with every step of the plan, its routines do not.
+The `self-test` X1 case holds the constants and the struct layouts against the
+headers themselves, so a drift there is FOUND, by a red line; a routine a
+comment names is only found by reading it.
 
 The parsers take bytes and give back plain dicts (or a Record). None of them
 reads the medium: what to read, and in which order, is the caller's business —
@@ -152,7 +154,7 @@ FILE_ACTIVE, FILE_TRASHED, FILE_HIDDEN, FILE_COW = 1, 2, 4, 8   # tagfs.h:56-59
 MAX_TAG_ID = 0x7FFE                     # tagfs.h:53 TAGFS_MAX_TAG_ID
 TAG_FLAG_HAS_VALUE, TAG_FLAG_SYSTEM = 1, 2   # tagfs_constants.h:36-37
 REGISTRY_VALUE_ROOM = 4096              # tag_registry.c:667-672: value_len >= sizeof(value[4096]) is skipped
-MIRROR_SLACK = 64                       # tagfs.c:3022 next_file_id + 64; meta_pool.c:726 adds 1
+MIRROR_SLACK = 64                       # tagfs_init: meta_pool_mirror_init(next_file_id + 64); meta_pool.c:726 adds 1
 EXTENT_END_LIMIT = 0xFFFFFFFF           # meta_pool.c:631 start + count past 2^32-1 is an overflow
 
 # ---------------------------------------------------------------------------
@@ -168,7 +170,7 @@ DISKBOOK_CAPACITY = 512                 # disk_book.h:39
 DISKBOOK_TYPE_REDIRECT = 1              # disk_book.h:43
 DISKBOOK_HEAD_CRC_AT = 32               # disk_book.h:53 DiskBookSuperblock.crc32
 DISKBOOK_ENTRY_CRC_AT = 32              # disk_book.h:72 DiskBookEntry.record_crc32
-# Head, its copy, then the records (create_tagfs.c:634-635, tagfs.c:2709-2712).
+# Head, its copy, then the records (create_tagfs.c:634-635, tagfs_init's DiskBookInit).
 DISKBOOK_BLOCKS = 2 + DISKBOOK_CAPACITY * DISKBOOK_SECTORS_PER_ENTRY // SECTORS_PER_BLOCK
 DISKBOOK_SUPERBLOCK = Fields("<IIQIIIII16s",   # disk_book.h:45-56
                              "magic version start_sector capacity count "
@@ -203,6 +205,9 @@ TUSE_TEXT = BLOCK - 44                  # 4052 bytes of text after the 44-byte h
 
 MBR_TYPE_BOXOS = 0x7F                   # ground.c:17 GROUND_MBR_TYPE
 MBR_TYPE_PROTECTIVE = 0xEE              # ground.c:27 GROUND_MBR_TYPE_PROTECTIVE
+GPT_ARRAY_MAX_BYTES = 128 * 1024        # ground.c:83 GPT_ARRAY_MAX_BYTES
+GPT_BLOCK_MAX_BYTES = 4096              # ground.c:122 GPT_BLOCK_MAX_BYTES
+GROUND_MAX_PER_MEDIUM = 8               # ground.h:42 GROUND_MAX_PER_MEDIUM
 BOXOS_TYPE_GUID = bytes([               # ground.c:19-22, tagboot.c:451-454 — as on the medium
     0x9a, 0xe4, 0x8a, 0xcf, 0x6a, 0xd2, 0x59, 0x49,
     0x9a, 0x6f, 0x71, 0xc9, 0x32, 0xe0, 0xc9, 0xeb,
@@ -310,7 +315,7 @@ def ReadDeed(raw):
                               ("packed", STAMP_PACKED, VOLUME_PACKED)):
         payload = d["stamps"].get(kind)
         # Each is used only when the stamp is at least as long as the struct
-        # this build knows (tagfs.c:1149, 1159; deed.c:296-329).
+        # this build knows (tagfs.c volume_take_ground; deed.c:296-329).
         if payload is not None and len(payload) >= fields.size:
             d[key] = fields.Unpack(payload)
     d["ok"] = True
@@ -353,7 +358,7 @@ def DeedStampAt(raw, kind):
 
 
 def ReadLedgerCopy(sector, copy):
-    """One Ledger copy, read as ledger_read_copy reads it (tagfs.c:2119-2181):
+    """One Ledger copy, read as ledger_read_copy (tagfs.c) reads it:
     magic, a length inside [76, 512], the crc over exactly that length, zeros
     past a short record, and the remembered Use Context only if it lies inside
     the record. `why` carries the kernel's own words for a refusal."""
@@ -390,8 +395,8 @@ def ReadLedgerCopy(sector, copy):
 
 def LedgerChoice(copies):
     """Which copy the kernel stands on: the valid copy with the strictly
-    greater seq, a tie going to copy 0 (tagfs.c:2224-2232). None when neither
-    is valid — the kernel refuses (2217-2222)."""
+    greater seq, a tie going to copy 0 (tagfs.c ledger_load). None when
+    neither is valid — the kernel refuses."""
     newest = None
     for c in copies:
         if not c["ok"]:
@@ -440,7 +445,7 @@ def ReadDiskBookEntry(raw):
 
 def ReadManifest(raw):
     """A snapshot manifest (cow.h:69-74). `ok` is exactly the mount's test
-    (tagfs.c:2730-2731): the magic, and a count the block can hold."""
+    (tagfs_init's manifest check): the magic, and a count the block can hold."""
     magic, count = struct.unpack_from("<II", raw, 0)
     entries = []
     for i in range(min(count, COW_MANIFEST_MAX)):
@@ -623,9 +628,9 @@ _UNIFORM = re.compile(rb"\x00+|\xff+|[\x01-\xfe]")
 
 
 def RunsFromBits(bits, nbits):
-    """The used runs of a bitmap (bit b of byte b//8, LSB first — tagfs.c:505-508),
-    stepping over whole 0x00 and 0xFF bytes the way free_list_build does
-    (tagfs.c:2362-2420)."""
+    """The used runs of a bitmap (bit b of byte b//8, LSB first — tagfs.c
+    bitmap_test_bit), stepping over whole 0x00 and 0xFF bytes the way
+    free_list_build (tagfs.c) does."""
     runs, cur = [], None
     data = bytes(bits[:(nbits + 7) // 8])
     for m in _UNIFORM.finditer(data):
@@ -761,11 +766,10 @@ def MirrorWalk(pool_blocks, pool_raws, capacity):
 class FileVerdict:
     """What the mount's roll call decided about one file id."""
 
-    __slots__ = ("fid", "row", "place", "record", "outcome", "corrected")
+    __slots__ = ("fid", "record", "outcome", "corrected")
 
-    def __init__(self, fid, row, place, record, outcome, corrected):
-        self.fid, self.row, self.place = fid, row, place
-        self.record, self.outcome, self.corrected = record, outcome, corrected
+    def __init__(self, fid, record, outcome, corrected):
+        self.fid, self.record, self.outcome, self.corrected = fid, record, outcome, corrected
 
 
 def KernelRead(read_block, place):
@@ -784,7 +788,7 @@ def KernelRead(read_block, place):
 
 
 def KernelRollCall(read_block, next_file_id, rows, mirror):
-    """The per-file half of the mount's fsck (tagfs.c:3045-3123): fid 1 up to
+    """The per-file half of the mount's fsck (tagfs_init's roll call): fid 1 up to
     next_file_id, skipping one with no row; the pool's newest place wins over
     the row's; a place that will not unpack loses the file; a record that is
     not ACTIVE is quietly quitclaimed. Returns [FileVerdict] with outcome
@@ -805,7 +809,7 @@ def KernelRollCall(read_block, next_file_id, rows, mirror):
             outcome = "quitclaim"
         else:
             outcome = "visible"
-        out.append(FileVerdict(fid, row, place, rec, outcome, corrected))
+        out.append(FileVerdict(fid, rec, outcome, corrected))
     return out
 
 
@@ -836,7 +840,7 @@ class Volume:
 
     def data_block(self, rel):
         """One 4 KiB block of the DATA RUN, counted from the run's start —
-        block_to_vlba (tagfs.c:1982-1985)."""
+        block_to_vlba (tagfs.c)."""
         lba = self.ground + (self.layout["data_block"] + rel) * SECTORS_PER_BLOCK
         return self.medium.sectors(lba, SECTORS_PER_BLOCK)
 
@@ -872,7 +876,7 @@ class Volume:
         ‼ The pool is append-only: a file written in several goes leaves a
         record per go, every one of them ACTIVE. The row names one of them and
         the pool's newest names another whenever a table flush was lost, and
-        the kernel believes the pool (tagfs.c:3051-3073). A reader that believed
+        the kernel believes the pool (tagfs_init's roll call). A reader that believed
         the row would hand back a file the machine never shows.
 
         A volume with no readable Ledger does not mount at all; its files are

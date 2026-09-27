@@ -1051,7 +1051,12 @@ ifneq ($(words $(wildcard $(APP_ELFS))),$(words $(APP_ELFS)))
 $(shell rm -f $(APPS_STAMP))
 endif
 
-$(APPS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(APPS_INPUTS)
+# The VOLUME_TESTS mark too: quilltest's cases that harm a volume past their
+# own files are compiled only under that key (apps/Makefile), so switching it
+# has to reach the apps' sub-make, which then rebuilds quilltest by a mark of
+# its own.
+$(APPS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(APPS_INPUTS) \
+               $(VOLUME_TESTS_MARK)
 	@echo "Building apps..."
 	@cd $(APPS_DIR) && $(MAKE)
 	@echo "proca.elf: $$(stat -f%z $(PROCA_BIN) 2>/dev/null || stat -c%s $(PROCA_BIN) 2>/dev/null) bytes"
