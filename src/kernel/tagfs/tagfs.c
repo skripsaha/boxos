@@ -2578,6 +2578,38 @@ static error_t mount_refused(const char *what, error_t why)
     return why;
 }
 
+/*
+ * ‼ NAMED, NOT ONLY COUNTED.
+ *
+ * The mount's roll call below says how many blocks the medium's bitmap and the
+ * roll call disagree about; that count is the evidence a volume lost something.
+ * These lines are WHICH blocks, as runs of the data run: an orphan is used on
+ * the medium and reached by nothing, a missing block is reached and free.
+ *
+ * `tools/volume-read.py check` names the same runs off the same image, and
+ * logcheck's census scenario holds the two lists against each other — so the
+ * host's roll call and this one cannot drift apart without a red line saying
+ * where. Every run is said, none is summarised: a list cut short is a list the
+ * host cannot hold its own against.
+ */
+static void FsckSayRuns(const uint8_t *on_disk, const uint8_t *computed,
+                        uint32_t blocks, bool orphans)
+{
+    for (uint32_t b = 0; b < blocks; ) {
+        uint32_t start = b;
+        while (b < blocks &&
+               bitmap_test_bit(on_disk, b) == orphans &&
+               bitmap_test_bit(computed, b) != orphans)
+            b++;
+        if (b == start) {
+            b++;
+            continue;
+        }
+        kprintf("[TagFS FSCK] %s run at data block %u, %u block(s)\n",
+                orphans ? "orphan" : "missing", start, b - start);
+    }
+}
+
 error_t tagfs_init(void) {
     if (g_state.initialized) {
         debug_printf("[TagFS] Already initialized\n");
@@ -3102,11 +3134,33 @@ error_t tagfs_init(void) {
              * Each subsystem's first block is in the superblock and
              * its chain is on disk linked via next_block. Walk it
              * here at fsck time using the same magic-check pattern
-             * the per-subsystem init's do. */
+             * the per-subsystem init's do.
+             *
+             * ‼ THE HEAD IS WALKED WHATEVER BLOCK IT IS, AND ONLY A LINK
+             * OF ZERO ENDS A CHAIN.
+             *
+             * This loop used to test `_cb != 0` before it did anything,
+             * zero standing for "the end of the chain". Zero is also a
+             * block — and the tag registry's head IS data block 0, where
+             * mkfs puts it (volume_ledger.h: VOLUME_LEDGER_NO_BLOCK). So
+             * the registry's walk never began: block 0 was covered by the
+             * three reserved above, and every continuation the registry
+             * had chained on (tag_registry_flush takes one the day its
+             * records outgrow 4080 bytes) was an orphan on every mount.
+             * The repair below is additive, so that cost a line and a
+             * count; a roll call that gives orphans back would have freed
+             * a live registry block. Measured: logcheck `census` plants a
+             * registry chained to a second block and this kernel named it
+             * "orphan run at data block 6014" while the host's census
+             * found its owner.
+             *
+             * A chain ends where the block just walked says it ends,
+             * next_block == 0 — the rule its loader keeps (tag_registry.c,
+             * file_table.c, meta_pool.c). At most data_blocks hops: a chain
+             * of distinct blocks is no longer than the run it lives in. */
             #define MARK_CHAIN_BLOCKS(first_block, expected_magic) do {       \
                 uint32_t _cb = (first_block);                                  \
-                uint32_t _hops = 0;                                            \
-                while (_cb != 0 && _hops < g_state.layout.data_blocks) {                  \
+                for (uint32_t _hops = 0; _hops < g_state.layout.data_blocks; _hops++) { \
                     if (_cb < g_state.layout.data_blocks)                                 \
                         bitmap_set_bit(computed_bm, _cb);                      \
                     uint8_t _bbuf[TAGFS_BLOCK_SIZE];                           \
@@ -3114,9 +3168,8 @@ error_t tagfs_init(void) {
                     uint32_t _mg, _nx;                                         \
                     memcpy(&_mg, _bbuf + 0, 4);                                \
                     memcpy(&_nx, _bbuf + 4, 4);                                \
-                    if (_mg != (expected_magic)) break;                        \
+                    if (_mg != (expected_magic) || _nx == 0) break;            \
                     _cb = _nx;                                                 \
-                    _hops++;                                                   \
                 }                                                              \
             } while (0)
             MARK_CHAIN_BLOCKS(data_block_of(g_state.layout.tag_registry_block),    TAGFS_REGISTRY_MAGIC);
@@ -3163,6 +3216,12 @@ error_t tagfs_init(void) {
                  * say so on the boot that finds it. */
                 kprintf("[TagFS FSCK] Bitmap mismatch: %u orphan, %u missing - additive repair\n",
                         orphan_blocks, missing_blocks);
+                /* Before the union below, which is what makes the two maps
+                 * agree and would leave nothing to name. */
+                FsckSayRuns(g_state.block_bitmap.bitmap, computed_bm,
+                            g_state.layout.data_blocks, true);
+                FsckSayRuns(g_state.block_bitmap.bitmap, computed_bm,
+                            g_state.layout.data_blocks, false);
                 /* Additive repair: union (on_disk OR computed). Never
                  * release a block on-disk says is used — the chain
                  * walk above is best-effort and a subsystem we don't
