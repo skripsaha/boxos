@@ -542,6 +542,9 @@ CFLAGS += -DBOOT_INFO_ADDR_FROM_BUILD=$(BOOT_INFO_ADDR)
 CFLAGS += -DBOARDING_PASS_ADDR_FROM_BUILD=$(BOARDING_PASS_ADDR)
 # On-demand BMIDE watchdog TIER-2 (wedge->SRST) diagnostic. Off unless requested
 # (it SRSTs the boot drive) — `make WEDGETEST=on` for a verification build.
+# The BMIDE channel exists only on the i440fx machine, and the proof skips on
+# one core: boot such a build with CORES>=2 and without STRICT=on — STRICT is
+# q35, which has no legacy IDE — or with QEMUEXTRA='-machine pc' after it.
 WEDGETEST ?= off
 ifeq ($(WEDGETEST),on)
 CFLAGS += -DCONFIG_BMIDE_WEDGE_SELFTEST=1
@@ -1360,7 +1363,19 @@ UEFI       ?= off
 #                              guard" bugs that default qemu64 silently masks.
 #   • -machine q35           — modern PCH chipset (PCIe, AHCI, MSI-X, ACPI 6.x).
 #                              Default i440fx is a 1996 PIIX board no longer
-#                              shipping on real hardware.
+#                              shipping on real hardware. Asked for by run AND
+#                              run-bg. Until 2026-09-27 only `run` asked, so a
+#                              BIOS check by hand wrote through AHCI while the
+#                              matrix — every config STRICT, every one run-bg —
+#                              wrote through the legacy ATA channel, which is
+#                              always synchronous: two stands, two write paths,
+#                              and nothing said so. A -machine in QEMUEXTRA
+#                              comes later on the line and wins (QEMU keeps the
+#                              last machine type — measured). That is how the
+#                              intx scenario and the matrix's BIOS PIIX STRICT
+#                              4c config stay on i440fx, the one board with the
+#                              legacy channel and its BMIDE watchdog; a plain
+#                              BIOS run (STRICT=off) is on it as well.
 #   • -d guest_errors,unimp,cpu_reset — log every undefined / unimplemented
 #                              guest behaviour QEMU normally absorbs silently.
 #   STRICT deliberately does NOT set -no-reboot or -no-shutdown:
@@ -1569,6 +1584,7 @@ run-bg: $(IMAGE)
 			-drive if=pflash$(comma)format=raw$(comma)readonly=on$(comma)file=$(OVMF_FD) \
 			-drive if=pflash$(comma)format=raw$(comma)file=$(BUILDDIR)/edk2-vars.fd \
 			-drive format=raw$(comma)file=$<$(comma)if=ide$(comma)index=0, \
+			$(if $(filter on,$(STRICT)),-machine q35) \
 			$(if $(filter on,$(AHCI)), \
 				-drive id=disk0$(comma)file=$<$(comma)format=raw$(comma)if=none \
 				-device ahci$(comma)id=ahci \

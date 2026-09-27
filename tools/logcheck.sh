@@ -1966,14 +1966,15 @@ run_earlyirq() {
 # It goes in through QEMUEXTRA rather than a key of its own — see the
 # Makefile for why that hook exists.
 #
-# ‼ WHY UEFI AND NOT THE ORDINARY BIOS BOOT. The MBR path does not mount its
-#   volume on q35 at all, and that is nothing to do with translation:
-#   measured on a plain `-machine q35` boot with no remap hardware anywhere
-#   near it, TagFS says "no volume found on any of the 1 seated medium(s)"
-#   just the same. It is a separate defect of the BIOS path on q35 and not
-#   this scenario's business. What this scenario needs is a machine that has
-#   a DMAR and mounts, and UEFI+q35 is it — which is also how the owner's
-#   board boots.
+# ‼ WHY UEFI AND NOT THE ORDINARY BIOS BOOT. Not because the MBR path cannot
+#   stand on q35. This paragraph said it could not ("no volume found on any
+#   of the 1 seated medium(s)", written at bf2fb8aa, 2026-09-20), and at
+#   56f9871c that is false: measured 2026-09-27, SeaBIOS on q35 boots the
+#   image off ICH9 AHCI port 0, TagFS mounts its 69 files and the unattended
+#   read PASSES on 4 and 16 cores — every BIOS `STRICT=on` run-bg is that
+#   machine now. What this scenario needs is a machine that has a DMAR and
+#   mounts; it stays on UEFI+q35 because that is how the owner's board boots.
+#   BIOS on q35 with the remap unit has not been measured.
 #
 # ‼ intremap IS DELIBERATELY NOT ASKED FOR. QEMU's interrupt remapping wants
 #   kernel-irqchip=split, which is a KVM setting and means nothing under the
@@ -2325,6 +2326,12 @@ run_intx() {
     # checks here were green on a kernel that took no USB interrupt at all.
     #
     # With the chip gone the only keyboard on the machine is the USB one.
+    #
+    # STRICT puts `-machine q35` on the line first; this `-machine pc` comes
+    # after it and wins, because QEMU keeps the last machine type — measured:
+    # the volume stays on the ATA channel and the 8042 line checked below is
+    # printed. It has to: the slot arithmetic above is i440fx's PIRQ router,
+    # and it holds on that board and no other.
     local EXTRA="-machine pc,i8042=off"
 
     make run-stop >/dev/null 2>&1
@@ -7673,10 +7680,11 @@ run_handsetdeafmut() {
 # ── unattended: a read nobody stands over, proved at boot ─────────────────────
 #
 # The proof used to be called [USB ASYNC TEST], and on this stand it never
-# touched USB: the volume sits on AHCI under UEFI (q35) and on the legacy
-# channel under BIOS. On AHCI it was red on every boot — the completion is
-# delivered by an interrupt the BSP has not opened yet, and the proof turned
-# only the USB handle — and under BIOS it said nothing at all. Measured with a
+# touched USB: the volume sits on AHCI under q35 (UEFI, and BIOS with
+# STRICT=on) and on the legacy channel under a plain BIOS run. On AHCI it was
+# red on every boot — the completion is delivered by an interrupt the BSP has
+# not opened yet, and the proof turned only the USB handle — and on the legacy
+# channel it said nothing at all. Measured with a
 # probe: PxCI clear, PxIS.DHRS set, the MSI pending in the LAPIC's IRR, and the
 # callback landing 259 ms after the proof had given up and returned, at the
 # address of a stack frame that no longer existed.
@@ -7720,7 +7728,18 @@ run_unattended() {
     L="$SCRATCH/serial.unattended1c.log"
     grep -q "\[UNATTENDED READ\] not asked: with one core every read is attended" "$L"
     chk $? "unattended: one core — not asked, and said"
-    unattended_boot unattendedbios STRICT=on CORES=4 MEM=4G
+    # BIOS with STRICT=on is q35 too, so its volume is on AHCI and the proof is
+    # asked. Until 2026-09-27 run-bg left it on i440fx, and this leg read "not
+    # asked" off the legacy channel while `make run STRICT=on` wrote through
+    # AHCI — the two stands disagreed and this scenario confirmed the wrong one.
+    unattended_boot unattendedq35 STRICT=on CORES=4 MEM=4G
+    L="$SCRATCH/serial.unattendedq35.log"
+    grep -qE "\[UNATTENDED READ\] seat [0-9]+ \(AHCI port [0-9]+\): PASSED — 4096 bytes read" "$L"
+    chk $? "unattended: BIOS on q35 — the AHCI seat answered, and the bytes agree"
+    ! grep -q "\[UNATTENDED READ\].*FAILED" "$L"; chk $? "unattended: BIOS on q35 — nothing about it failed"
+    # A plain BIOS run is i440fx: the legacy channel, the one machine left that
+    # has it, whose seat answers only a read somebody stands over.
+    unattended_boot unattendedbios CORES=4 MEM=4G
     L="$SCRATCH/serial.unattendedbios.log"
     grep -qE "\[UNATTENDED READ\] not asked: seat [0-9]+ \(ATA [a-z ]+\) answers only a read somebody stands over" "$L"
     chk $? "unattended: the legacy channel — not asked, and said"
