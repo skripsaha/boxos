@@ -5,6 +5,13 @@
 # burst (baseline shell utilities + every safe production-stable test
 # app), then enforce zero-PANIC and a specific success marker per test.
 #
+# The seven configurations (MODE=fast runs only the 1c and 4c of each firmware),
+# each gated on the seat its volume stands on:
+#   BIOS STRICT 1c / 4c / 16c   q35 under SeaBIOS — the volume on an AHCI port
+#   UEFI STRICT 1c / 4c / 16c   q35 under OVMF    — the volume on an AHCI port
+#   BIOS PIIX STRICT 4c         the same keys on i440fx — the volume on the
+#                               legacy ATA channel
+#
 # Tests in the burst (all required to print their PASS marker):
 #   Baseline (run multiple times — historical regression guards):
 #     - memtest (×3)  "All 15 tests passed"
@@ -331,23 +338,35 @@ run_config() {
     selftest_bad=$(grep -c  "\[TESTS\] Some tests FAILED"  build/serial.log)
 
     # The boot-time proof of a read nobody stands over. It speaks on every
-    # boot: PASSED where the machine reads that way (several cores, a seat
-    # with a completion — the AHCI seat every UEFI config here stands on),
-    # "not asked" where it does not (one core; the legacy channel under BIOS).
-    # A FAILED is the medium, the completion spine or the bytes being wrong on
-    # the boot path, before userspace. It was red on every UEFI config for two
-    # weeks and gated nothing.
+    # boot: PASSED where the machine reads that way (several cores and a seat
+    # with a completion — the AHCI seat STRICT puts under the volume, BIOS as
+    # well as UEFI, since STRICT is q35 for both), "not asked" where it does
+    # not (one core; the legacy ATA channel of the PIIX config, which answers
+    # only a read somebody stands over). A FAILED is the medium, the
+    # completion spine or the bytes being wrong on the boot path, before
+    # userspace. It was red on every UEFI config for two weeks and gated
+    # nothing.
+    #
+    # THE STAND IS THE ONE IT CLAIMS TO BE. Until 2026-09-27 run-bg left BIOS
+    # on i440fx even with STRICT=on, so half of this matrix wrote through the
+    # legacy channel — always synchronously — while `make run STRICT=on` wrote
+    # through AHCI, and nothing here could tell. The mount names its seat by
+    # number and the medium under it by name (tagfs.c:661; the names are
+    # boardroom.c:220-223 and :331), so a config that fell back to the other
+    # machine cannot match its own line by accident.
     case "$cfg_name" in
-        UEFI*4c|UEFI*16c) ur_want="PASSED" ;;
-        *)                ur_want="not asked" ;;
+        *PIIX*)   ur_want="not asked"; seat_want="ATA (primary|secondary) (master|slave)" ;;
+        *4c|*16c) ur_want="PASSED";    seat_want="AHCI port [0-9]+" ;;
+        *)        ur_want="not asked"; seat_want="AHCI port [0-9]+" ;;
     esac
     ur_ok=$(grep -c   "\[UNATTENDED READ\].*${ur_want}" build/serial.log)
     ur_fail=$(grep -c "\[UNATTENDED READ\].*FAILED"     build/serial.log)
+    seat_ok=$(grep -cE "^\[TagFS\] volume on seat [0-9]+: ${seat_want}" build/serial.log)
 
     echo "  baseline: memtest=$mt/3 files=$fl/2 bench=$bn/2"
     echo "  apps:     mtest=$mtest_p chain=$chain_p cow=$cow_p lc=$lc_p wo=$wo_p wc=$wc_p ws=$ws_p tt=$tt_p decks=$decks_p ts=$ts1_p/$ts2_p/$ts3_p"
     echo "  suites:   cxx=$cxx_p current=$current_p strand=$strand_p htest=$htest_p use=$use_p luggage=$luggage_p"
-    echo "  selftest: kernel=$selftest_ok bad=$selftest_bad unattended(${ur_want})=$ur_ok fail=$ur_fail"
+    echo "  selftest: kernel=$selftest_ok bad=$selftest_bad unattended(${ur_want})=$ur_ok fail=$ur_fail seat=${seat_want%% *}:$seat_ok"
     echo "  negatives: PANIC=$pn ATRC=$at Unknown=$un AppFAIL=$app_fail Nightwatch=$nw TSC=~1GHz:$tsc_good/$bn"
 
     ok=1
@@ -395,6 +414,7 @@ run_config() {
     [ "$selftest_ok"  -lt 1 ] && ok=0
     [ "$ur_ok"   -lt 1 ] && ok=0
     [ "$ur_fail" -gt 0 ] && ok=0
+    [ "$seat_ok" -lt 1 ] && ok=0
 
     [ -n "$TIMED_OUT_CMD" ] && ok=0
     [ -n "$TYPING_FAILED_CMD" ] && ok=0
@@ -456,6 +476,16 @@ else
     run_config "UEFI STRICT 1c"    "UEFI=on STRICT=on CORES=1  MEM=2G"
     run_config "UEFI STRICT 4c"    "UEFI=on STRICT=on CORES=4  MEM=4G"
     run_config "UEFI STRICT 16c"   "UEFI=on STRICT=on CORES=16 MEM=8G"
+    # The one config that is not on q35. STRICT puts every other config's
+    # volume on AHCI, so without this one the legacy ATA channel — PIO, BMIDE
+    # DMA and its watchdog, the Boardroom's BOARD_ATA seat, synchronous writes
+    # from more than one core — would meet only the light non-STRICT logcheck
+    # boots. QEMUEXTRA lands after STRICT's `-machine q35` on QEMU's line and
+    # the last machine type wins, so this is the same CPU on the i440fx board.
+    # The single quotes are for run_config's eval: they make QEMUEXTRA one
+    # environment variable for make, which puts it on QEMU's line as the two
+    # words `-machine pc` (measured with a stand-in QEMU printing its argv).
+    run_config "BIOS PIIX STRICT 4c" "STRICT=on CORES=4  MEM=4G QEMUEXTRA='-machine pc'"
 fi
 
 echo "================================================================"
