@@ -2692,6 +2692,9 @@ error_t tagfs_init(void) {
         return ERR_FILE_NOT_FOUND;
     }
 
+    /* The heap as the mount finds it; what it keeps is said once it stands. */
+    size_t heap_before_mount = KHeapLiveBytes();
+
     /*
      * ‼ THREE LINES USED TO STAND HERE, AND THEY BELONGED TO THE MACHINE.
      *
@@ -3383,6 +3386,29 @@ error_t tagfs_init(void) {
      */
     kprintf("[TagFS] the volume on seat %u is MOUNTED — %llu file(s)\n",
             g_tagfs_seat, (unsigned long long)g_state.ledger.total_files);
+
+    /*
+     * ‼ WHAT THIS MOUNT KEEPS ON THE KERNEL HEAP, AND FOR HOW MANY NAMES.
+     *
+     * A mount builds its mirrors in kernel memory, and some of them are sized
+     * by every file id the volume ever issued rather than by the files it
+     * has: the pool mirror runs to next_file_id, so an id spent on a file
+     * deleted years ago still costs every mount its slot. The heap is a fixed
+     * fraction of the machine, so that is a volume that can one day refuse to
+     * mount because of its history and not its contents — and nothing said
+     * what a mount costs until now. Three numbers, so that two mounts of one
+     * volume a known number of dead ids apart measure the price of one
+     * (logcheck `quill`, fidhistory). The bytes are the difference of
+     * KHeapLiveBytes across the mount, both tiers of the heap; another core
+     * allocating meanwhile is in the figure too, which is why the harness
+     * judges a slope over tens of thousands of ids and never one mount.
+     */
+    size_t heap_after_mount = KHeapLiveBytes();
+    kprintf("[TagFS] this mount keeps %zu bytes of kernel heap for %u file id(s) "
+            "ever issued, %llu of them live\n",
+            heap_after_mount > heap_before_mount ? heap_after_mount - heap_before_mount : 0,
+            g_state.ledger.next_file_id - 1,
+            (unsigned long long)g_state.ledger.total_files);
 
     /*
      * ‼ AND WHAT THAT MOUNT PROMISES, SAID ONCE, IN PLAIN WORDS.

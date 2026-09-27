@@ -71,8 +71,9 @@ chk()  { if [ "$1" = 0 ]; then ok "$2"; else bad "$2"; fi }
 #
 # It changes no compiler flag and no byte of source: a clean tree built through
 # here is stamped exactly as `make` alone would stamp it. The verdict comes from
-# what the tree CONTAINS, never from this key.
-make() { command make HARNESS=on "$@"; }
+# what the tree CONTAINS, never from this key. And it waits for the last
+# mutation stamp to pass first (mut_bump, below says why).
+make() { mut_stamp_passed; command make HARNESS=on "$@"; }
 
 build() {
     make >"$SCRATCH/build.log" 2>&1
@@ -117,26 +118,30 @@ MUT_MANIFEST="$SCRATCH/mutated.list"
 MUT_PRISTINE="$SCRATCH/pristine"
 MUT_DISCARD="$SCRATCH/discard"
 
-# make(1) compares whole-second mtimes, so a file rewritten inside the same
-# second as the object built from it does not rebuild at all. What stood here
-# was `sleep 1` before every touch: a second of wall clock per mutation, and a
-# guess about a filesystem's timestamp granularity dressed as a fact. Instead
-# the file is given an mtime strictly AHEAD of anything that could have been
-# built from it. That is exact, it costs nothing, and it cannot be wrong.
-#
-# The stamp is five seconds into the FUTURE on purpose, and nothing waits for
-# it. The whole price is this: if the object built from the file happens to be
-# written inside those five seconds, the next make rebuilds that ONE file a
-# second time. One file, once. Nothing else in this tree reads the stamp —
-# git compares content whenever an index entry looks racily clean, so `git
-# status` tells the truth either way, and the mutation is off the tree again
-# long before anybody runs it.
+# make(1) compares mtimes, so a file rewritten inside the same second as the
+# object built from it may not rebuild at all: a mutated or restored file is
+# stamped one second AHEAD of the clock, newer than anything built from it.
+# ‼ AND make() WAITS FOR THE STAMP TO PASS. An object compiled while its
+# source is still in the future is OLDER than it, so the next make — a `make
+# run-bg` — recompiled, relinked and REPACKED build/boxos.img over whatever a
+# scenario had grown or planted in it: growmut passed that way, booting the
+# unstretched ground and judging nothing. Past the stamp, a known instant a
+# second or two away, every object is newer than every source ever bumped.
+MUT_STAMP="$SCRATCH/mut.stamp"
 mut_bump() {
-    local when
-    when=$(date -v+5S +%Y%m%d%H%M.%S 2>/dev/null) \
-        || when=$(date -d '+5 seconds' +%Y%m%d%H%M.%S 2>/dev/null) \
+    local at when
+    at=$(( $(date +%s) + 1 ))
+    when=$(date -r "$at" +%Y%m%d%H%M.%S 2>/dev/null) \
+        || when=$(date -d "@$at" +%Y%m%d%H%M.%S 2>/dev/null) \
         || { echo "mutate: no usable date(1)"; exit 1; }
-    touch -t "$when" "$1"
+    touch -t "$when" "$1" || exit 1
+    echo "$at" > "$MUT_STAMP"
+}
+mut_stamp_passed() {
+    local stamp
+    stamp=$(cat "$MUT_STAMP" 2>/dev/null)
+    case "$stamp" in ''|*[!0-9]*) return 0 ;; esac
+    while [ "$(date +%s)" -le "$stamp" ]; do sleep 1; done
 }
 
 # The refusal, in one place, because it is the whole point of the mechanism:
@@ -915,9 +920,9 @@ caveat_row() {
         bigwrite)   echo "1.3|a write is copied through one kernel-heap allocation of its whole size, so one bigger than the heap is refused and nothing reaches the file" ;;
         sequential) echo "1.3|a file's record takes one extent per 4 KiB written and never merges them, so the 4080-byte record refuses the write at about 2.6 MiB" ;;
         interleave) echo "1.3|a file's record takes one extent per 4 KiB written and never merges them, so the 4080-byte record refuses the write at about 2.6 MiB" ;;
-        usememory)  echo "1.6|a Use Context longer than 432 bytes is not remembered, the one remembered before is forgotten with it, and nothing says so" ;;
-        fidhistory) echo "1.3b|a mount spends kernel heap on every file id ever issued, the dead ones as much as the living" ;;
-        systemtag)  echo "1.4|any program may take the system tag off kernel.bin and then delete it, and the volume no longer boots" ;;
+        usememory)  echo "1.6|a Use Context longer than 432 bytes is forgotten, remembered=0" ;;
+        fidhistory) echo "1.3b|a mount spends kernel heap on every file id ever issued, the dead ones included" ;;
+        systemtag)  echo "1.4|any program may take the system tag off kernel.bin and then delete it — the kernel the volume boots is gone" ;;
         noanchor)   echo "1.7|a file written without anchor has no name after a power cut" ;;
         nextfid)    echo "1.6|a table written ahead of its ledger hands the same file id out twice" ;;
         hog)        echo "1.7|on one core under a CPU hog nothing settles a write before the power goes" ;;

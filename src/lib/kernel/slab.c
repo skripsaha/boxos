@@ -2,8 +2,44 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "klib.h"
+#include "amp.h"        /* MAX_CORES, amp_get_core_index — the live-byte lines */
 
 static SlabAllocator g_slab;
+
+/*
+ * ‼ LIVE BYTES, COUNTED WHERE THEY ARE HANDED OUT — ONE LINE PER CORE.
+ *
+ * The slab takes whole pages from the PMM and kept no count of what it gave
+ * away, so every object of 2048 bytes or less was invisible to anyone asking
+ * how much of the kernel heap is in use — and those small objects are exactly
+ * what a structure that grows one entry at a time is made of. This is that
+ * count: an object handed out adds its class size, an object given back takes
+ * it away. KHeapLiveBytes (klib_mem.c) adds it to the pool's own figure.
+ *
+ * One counter per core, each on a cache line of its own, because slab_alloc
+ * and slab_free are the busiest allocator path in the kernel: one shared
+ * counter would be one line bouncing between every core that allocates, paid
+ * on every small kmalloc for a number that is read a few times per boot. An
+ * add to this core's line stays in this core's cache. A core that frees what
+ * another allocated drives its own counter below zero while the other's
+ * stays up; only the SUM means anything, and the sum is exact, because the
+ * arithmetic is unsigned and wraps the same way in both directions. Atomic
+ * all the same: a strand can move to another core between reading its index
+ * and adding, and then two cores share one line for that one add.
+ */
+typedef struct {
+    size_t bytes;
+} __attribute__((aligned(64))) SlabCoreBytes;
+
+static SlabCoreBytes g_slab_live_bytes[MAX_CORES];
+
+size_t SlabLiveBytes(void)
+{
+    size_t sum = 0;
+    for (uint32_t i = 0; i < MAX_CORES; i++)
+        sum += __atomic_load_n(&g_slab_live_bytes[i].bytes, __ATOMIC_RELAXED);
+    return sum;
+}
 
 /*
  * Slab page registry — one bit per physical page, set while the page belongs
@@ -201,6 +237,7 @@ void* slab_alloc(size_t size) {
 
     void* ptr = base + slot_offset;
     memset(ptr, 0, cls->obj_size);
+    __atomic_fetch_add(&g_slab_live_bytes[amp_get_core_index()].bytes, cls->obj_size, __ATOMIC_RELAXED);
     return ptr;
 }
 
@@ -268,6 +305,7 @@ void slab_free(void* ptr) {
     *(uint16_t*)(base + slot_offset) = page->free_head;
     page->free_head = slot_offset;
     page->free_count++;
+    __atomic_fetch_sub(&g_slab_live_bytes[amp_get_core_index()].bytes, cls->obj_size, __ATOMIC_RELAXED);
 
     // If page was full, move it back to partial list
     if (was_full) {

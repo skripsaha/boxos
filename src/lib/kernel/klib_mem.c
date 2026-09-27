@@ -215,6 +215,75 @@ size_t mem_heap_size(void)
     return memory_pool_full ? memory_pool_full : memory_pool_size;
 }
 
+/* ‼ WHAT THE KERNEL HEAP HOLDS FOR SOMEBODY RIGHT NOW — BOTH TIERS.
+ *
+ * g_heap_live is the pool's figure and says nothing about the slab, which
+ * serves every request up to SLAB_LARGE_THRESHOLD straight from PMM pages —
+ * so the pool figure alone misses exactly the small, numerous allocations a
+ * structure that grows one entry at a time is made of. Each tier counts what
+ * it handed out and has not had back: the pool its blocks with their headers
+ * and guards, the slab its objects at their class size. The difference of
+ * two readings is what was kept in between — which is how a mount says what
+ * it costs (tagfs.c, the "this mount keeps" line). */
+size_t KHeapLiveBytes(void)
+{
+    spin_lock(&heap_lock);
+    size_t pool = g_heap_live;
+    spin_unlock(&heap_lock);
+    return pool + SlabLiveBytes();
+}
+
+/* The figure is evidence, so it is proven before anything reads it: a pool
+ * block and a page and a half of slab objects must each be counted, and
+ * giving them back must bring the figure to exactly where it started.
+ * Called from kernel_main before amp_init, on the BSP alone — nothing else
+ * allocates while it runs, so every difference is exact. A tier that stopped
+ * counting fails here, on every boot, before the first line that relies on
+ * the figure is printed. */
+void KHeapLiveSelfTest(void)
+{
+    static const size_t   pool_bytes = 65536;
+    static const size_t   obj_bytes  = 64;
+    static void          *objs[64];
+    const uint32_t        obj_count  = sizeof(objs) / sizeof(objs[0]);
+
+    size_t start = KHeapLiveBytes();
+    void  *block = kmalloc(pool_bytes);
+    size_t after_pool = KHeapLiveBytes();
+
+    uint32_t got = 0;
+    for (uint32_t i = 0; i < obj_count; i++) {
+        objs[i] = kmalloc(obj_bytes);
+        if (objs[i])
+            got++;
+    }
+    size_t after_slab = KHeapLiveBytes();
+
+    kfree(block);
+    for (uint32_t i = 0; i < obj_count; i++) {
+        kfree(objs[i]);
+        objs[i] = NULL;
+    }
+    size_t back = KHeapLiveBytes();
+
+    /* Signed on purpose: a tier that counts backwards is a failure to be
+     * read as a small negative number, not as a wrapped enormous one. */
+    long long pool_rise = (long long)(after_pool - start);
+    long long slab_rise = (long long)(after_slab - after_pool);
+    if (block && got == obj_count &&
+        pool_rise >= (long long)pool_bytes &&
+        slab_rise >= (long long)(obj_count * obj_bytes) && back == start) {
+        kprintf("[KLIB] heap accounting self-test passed — a %zu-byte pool block "
+                "and %u slab objects of %zu bytes were counted (+%lld, +%lld) and "
+                "given back (%zu bytes live before and after)\n",
+                pool_bytes, obj_count, obj_bytes, pool_rise, slab_rise, back);
+    } else {
+        kprintf("[KLIB] heap accounting self-test FAILED: the pool rose %lld, the "
+                "slab rose %lld (%u of %u objects), back to %zu from %zu\n",
+                pool_rise, slab_rise, got, obj_count, back, start);
+    }
+}
+
 static void *kmalloc_internal(size_t size)
 {
     if (size == 0)

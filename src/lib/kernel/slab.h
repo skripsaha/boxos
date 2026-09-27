@@ -42,6 +42,9 @@ void* slab_alloc(size_t size);
 void  slab_free(void* ptr);
 void  slab_activate_pull_map(void);
 bool  slab_owns(void* ptr);
+/* Bytes the slab holds for somebody right now: every object handed out and
+ * not given back, at its class size — summed over the per-core counters. */
+size_t SlabLiveBytes(void);
 /* Boot-time proof that membership comes from the page registry, not page
  * content — panics if a content heuristic ever creeps back. */
 void  slab_identity_selftest(void);
