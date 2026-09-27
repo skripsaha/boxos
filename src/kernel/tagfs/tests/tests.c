@@ -1,1303 +1,16 @@
 #include "tests.h"
 #include "../tagfs.h"
-#include "../bcdc/bcdc.h"
-#include "../disk_book/disk_book.h"
-#include "../braid/braid.h"
-#include "../cow/cow.h"
-#include "../integrity/integrity.h"
-#include "../../../kernel/drivers/timer/rtc.h"
-#include "use_context.h"   /* the user's tags, narrowing every query */
-#include "process.h"       /* a stand-in strand for the scheduler's question */
-#include "cabin.h"
+#include "boardroom.h"
 
 // ============================================================================
-// Global Test State
+// The runner, the judge, and what the suites share. The tests themselves live
+// one suite to a file beside this one (TEST_SUITES in tests.h).
 // ============================================================================
 
-static TestStats g_test_stats;
 static bool g_tests_initialized = false;
-static uint8_t g_test_buffer[16384];  // 4 blocks for testing
-static uint8_t g_test_output[16384];
 
-// ============================================================================
-// Utility Functions
-// ============================================================================
-
-static uint64_t get_time_ms(void) {
-    return rtc_get_unix64() * 1000;  // Approximate
-}
-
-static void fill_random(void* buffer, uint32_t size) {
-    uint8_t* buf = (uint8_t*)buffer;
-    for (uint32_t i = 0; i < size; i++) {
-        buf[i] = (uint8_t)(i ^ (i >> 3) ^ (i >> 7));
-    }
-}
-
-static void fill_zeros(void* buffer, uint32_t size) {
-    memset(buffer, 0, size);
-}
-
-static void fill_pattern(void* buffer, uint32_t size, uint8_t pattern) {
-    memset(buffer, pattern, size);
-}
-
-/*
- * Why a test that RAN decided not to run.
- *
- * A test hands back one verdict and nothing else, so the reason it stepped
- * aside had nowhere to travel and was said into debug_printf, which is
- * compiled away in the build that goes on the board. The count then closed
- * without the names: "19 skipped" against seventeen explained, and the other
- * two unnameable in front of the machine. This is the road the reason takes
- * instead. The runner clears it before every test, so a reason can never
- * outlive the test that gave it, and reads it back beside the verdict.
- */
-static const char* g_step_aside_reason = NULL;
-
-static TestResult test_steps_aside(const char* why) {
-    g_step_aside_reason = why;
-    return TEST_SKIP;
-}
-
-// ============================================================================
-// Core TagFS Tests
-// ============================================================================
-
-static TestResult test_tagfs_init(void) {
-    TagFSState* fs = tagfs_get_state();
-    TEST_ASSERT(fs != NULL, "TagFS state should not be NULL");
-    TEST_ASSERT(fs->initialized, "TagFS should be initialized");
-    return TEST_PASS;
-}
-
-/* What the mounted volume says about itself — out of its Deed and its Ledger,
- * which is where it now lives. There is no magic number to check here: a
- * volume whose deed did not check out never became a mount at all. */
-static TestResult test_tagfs_deed(void) {
-    TagFSState* fs = tagfs_get_state();
-    TEST_ASSERT(fs != NULL, "TagFS state should not be NULL");
-
-    TEST_ASSERT(fs->layout.data_block > 0,
-                "The data run cannot begin at block 0 — the Deed is there");
-    TEST_ASSERT(fs->layout.data_blocks > 0, "A volume with no data run");
-    TEST_ASSERT(fs->layout.state_blocks >= VOLUME_LEDGER_COPIES,
-                "The layout leaves no room for both copies of the Ledger");
-    TEST_ASSERT_EQ(fs->geometry.block_bytes, TAGFS_BLOCK_SIZE,
-                   "Volume block size is not the one this kernel speaks");
-    TEST_ASSERT(fs->ledger.free_blocks > 0, "Free blocks should be > 0");
-
-    uint8_t named = 0;
-    for (int i = 0; i < 16; i++) named |= fs->uuid[i];
-    TEST_ASSERT(named != 0, "The volume has no identity");
-
-    return TEST_PASS;
-}
-
-static TestResult test_tagfs_create_file(void) {
-    uint32_t file_id;
-    uint16_t tag_ids[2] = {1, 2};
-    
-    error_t err = tagfs_create_file("test_file", tag_ids, 2, &file_id);
-    TEST_ASSERT_OK(err, "tagfs_create_file should succeed");
-    TEST_ASSERT(file_id > 0, "File ID should be > 0");
-    
-    // Cleanup
-    tagfs_delete_file(file_id);
-    
-    return TEST_PASS;
-}
-
-static TestResult test_tagfs_write_read(void) {
-    uint32_t file_id;
-    uint16_t tag_ids[1] = {1};
-    
-    // Create file
-    error_t err = tagfs_create_file("test_rw", tag_ids, 1, &file_id);
-    TEST_ASSERT_OK(err, "tagfs_create_file should succeed");
-    
-    // Open for write
-    TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
-    TEST_ASSERT(handle != NULL, "tagfs_open should succeed");
-    
-    // Write data
-    fill_random(g_test_buffer, 4096);
-    int written = tagfs_write(handle, g_test_buffer, 4096);
-    TEST_ASSERT_EQ(written, 4096, "Should write 4096 bytes");
-    
-    // Close and reopen for read
-    tagfs_close(handle);
-    handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
-    TEST_ASSERT(handle != NULL, "tagfs_open for read should succeed");
-    
-    // Read data
-    memset(g_test_output, 0, sizeof(g_test_output));
-    int read = tagfs_read(handle, g_test_output, 4096);
-    TEST_ASSERT_EQ(read, 4096, "Should read 4096 bytes");
-    
-    // Verify data
-    TEST_ASSERT(memcmp(g_test_buffer, g_test_output, 4096) == 0, "Data should match");
-    
-    // Cleanup
-    tagfs_close(handle);
-    tagfs_delete_file(file_id);
-
-    return TEST_PASS;
-}
-
-// ============================================================================
-// Dedup index — does a block leave it when it leaves the allocator?
-//
-// It did not, until now: only truncate ever unregistered anything, so every
-// deleted file left its blocks in the index for the lifetime of the system,
-// each one mapping content that no longer exists to bytes handed to somebody
-// else. These pin both halves of the fix — the entry goes when the block goes,
-// and a block the index still counts as shared does NOT go.
-// ============================================================================
-
-// Give a block content nothing else in the volume holds, so a hash lookup for
-// it can only find this test's block.
-static void dedup_stamp(uint8_t *buf, uint8_t fill, const char *marker) {
-    fill_pattern(buf, TAGFS_BLOCK_SIZE, fill);
-    for (uint32_t i = 0; marker[i]; i++)
-        buf[i] = (uint8_t)marker[i];
-}
-
-static TestResult test_dedup_delete_unregisters(void) {
-    if (!TagFS_DedupIsInitialized())
-        return test_steps_aside("the dedup index is not up on this volume, so "
-                                "there is no index for a block to be entered "
-                                "in or struck out of");
-
-    DedupStats before;
-    TEST_ASSERT_OK(TagFS_DedupGetStats(&before), "stats before");
-
-    dedup_stamp(g_test_buffer, 0xD1, "dedup-delete-unregisters");
-
-    uint32_t file_id;
-    uint16_t tag_ids[1] = {1};
-    TEST_ASSERT_OK(tagfs_create_file("dedup_del", tag_ids, 1, &file_id),
-                   "create should succeed");
-
-    TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
-    TEST_ASSERT(handle != NULL, "open for write should succeed");
-    int written = tagfs_write(handle, g_test_buffer, TAGFS_BLOCK_SIZE);
-    tagfs_close(handle);
-    TEST_ASSERT_EQ(written, TAGFS_BLOCK_SIZE, "should write a whole block");
-
-    uint32_t block = 0;
-    bool is_dup = false;
-    TEST_ASSERT_OK(TagFS_DedupCheck(g_test_buffer, &block, &is_dup),
-                   "the written block should be indexed");
-    TEST_ASSERT(is_dup && block != 0, "and found by its content");
-
-    TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "delete should succeed");
-
-    is_dup = false;
-    TagFS_DedupCheck(g_test_buffer, &block, &is_dup);
-    TEST_ASSERT(!is_dup, "delete must take the block out of the index");
-
-    DedupStats after;
-    TEST_ASSERT_OK(TagFS_DedupGetStats(&after), "stats after");
-    TEST_ASSERT_EQ(after.unique_blocks, before.unique_blocks,
-                   "a create/write/delete cycle must not grow the index");
-
-    return TEST_PASS;
-}
-
-static TestResult test_dedup_truncate_unregisters(void) {
-    if (!TagFS_DedupIsInitialized())
-        return test_steps_aside("the dedup index is not up on this volume, so "
-                                "there is no index for a block to be entered "
-                                "in or struck out of");
-
-    dedup_stamp(g_test_buffer, 0xD2, "dedup-truncate-unregisters");
-
-    uint32_t file_id;
-    uint16_t tag_ids[1] = {1};
-    TEST_ASSERT_OK(tagfs_create_file("dedup_trunc", tag_ids, 1, &file_id),
-                   "create should succeed");
-
-    TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
-    TEST_ASSERT(handle != NULL, "open for write should succeed");
-    int written = tagfs_write(handle, g_test_buffer, TAGFS_BLOCK_SIZE);
-    tagfs_close(handle);
-    TEST_ASSERT_EQ(written, TAGFS_BLOCK_SIZE, "should write a whole block");
-
-    uint32_t block = 0;
-    bool is_dup = false;
-    TagFS_DedupCheck(g_test_buffer, &block, &is_dup);
-    TEST_ASSERT(is_dup, "the written block should be indexed");
-
-    TEST_ASSERT_EQ(tagfs_truncate_file(file_id, 0), 0, "truncate to empty");
-
-    is_dup = false;
-    TagFS_DedupCheck(g_test_buffer, &block, &is_dup);
-    TEST_ASSERT(!is_dup, "a truncated-away block must leave the index too");
-
-    tagfs_delete_file(file_id);
-    return TEST_PASS;
-}
-
-static TestResult test_dedup_shared_block_survives_release(void) {
-    if (!TagFS_DedupIsInitialized())
-        return test_steps_aside("the dedup index is not up on this volume, so "
-                                "there is no index for a block to be entered "
-                                "in or struck out of");
-
-    TagFSState* fs = tagfs_get_state();
-    TEST_ASSERT(fs != NULL, "TagFS state should not be NULL");
-
-    uint32_t block = 0;
-    TEST_ASSERT_EQ(tagfs_alloc_blocks(1, &block), 0, "alloc one block");
-    TEST_ASSERT(block != 0, "block 0 is not a block");
-
-    dedup_stamp(g_test_buffer, 0x5A, "dedup-shared-block");
-    TEST_ASSERT_OK(TagFS_DedupRegister(block, g_test_buffer, 0xBEEF), "register");
-    TEST_ASSERT_OK(TagFS_DedupAddRef(block), "a second owner takes a reference");
-
-    uint32_t free_before = fs->ledger.free_blocks;
-    TEST_ASSERT_EQ(tagfs_free_blocks(block, 1), 0, "first release");
-    TEST_ASSERT_EQ(fs->ledger.free_blocks, free_before,
-                   "a shared block must NOT go back to the allocator");
-
-    uint32_t found = 0;
-    bool is_dup = false;
-    TagFS_DedupCheck(g_test_buffer, &found, &is_dup);
-    TEST_ASSERT(is_dup && found == block, "its entry survives the first release");
-
-    TEST_ASSERT_EQ(tagfs_free_blocks(block, 1), 0, "last release");
-    TEST_ASSERT_EQ(fs->ledger.free_blocks, free_before + 1,
-                   "the last release hands the block back");
-
-    is_dup = false;
-    TagFS_DedupCheck(g_test_buffer, &found, &is_dup);
-    TEST_ASSERT(!is_dup, "and takes the entry with it");
-
-    return TEST_PASS;
-}
-
-static TestResult test_dedup_reregister_follows_content(void) {
-    if (!TagFS_DedupIsInitialized())
-        return test_steps_aside("the dedup index is not up on this volume, so "
-                                "there is no index for a block to be entered "
-                                "in or struck out of");
-
-    uint32_t block = 0;
-    TEST_ASSERT_EQ(tagfs_alloc_blocks(1, &block), 0, "alloc one block");
-
-    dedup_stamp(g_test_buffer, 0xA1, "dedup-content-one");
-    TEST_ASSERT_OK(TagFS_DedupRegister(block, g_test_buffer, 0xC0DE), "register first content");
-
-    dedup_stamp(g_test_output, 0xA2, "dedup-content-two");
-    TEST_ASSERT_OK(TagFS_DedupRegister(block, g_test_output, 0xC0DE), "register second content");
-
-    uint32_t found = 0;
-    bool is_dup = false;
-    TagFS_DedupCheck(g_test_output, &found, &is_dup);
-    TEST_ASSERT(is_dup && found == block, "the block is found by what it holds now");
-
-    is_dup = false;
-    TagFS_DedupCheck(g_test_buffer, &found, &is_dup);
-    TEST_ASSERT(!is_dup, "and not by what it used to hold");
-
-    // One block, one entry: a single release must empty it.
-    TEST_ASSERT_EQ(tagfs_free_blocks(block, 1), 0, "release");
-    is_dup = false;
-    TagFS_DedupCheck(g_test_output, &found, &is_dup);
-    TEST_ASSERT(!is_dup, "re-registering must not have forked a second entry");
-
-    return TEST_PASS;
-}
-
-// ============================================================================
-// Bcdc Compression Tests
-// ============================================================================
-
-static TestResult test_bcdc_init(void) {
-    // Bcdc should already be initialized by TagFS
-    // Just verify it's working
-    BcdcStats stats;
-    BcdcGetStats(&stats);
-    return TEST_PASS;
-}
-
-/* BSS pool shared by the test_bcdc_* functions below. TagFS_RunAllTests
- * is single-threaded at boot, so a single set of buffers is safe across
- * sequential test calls; keeps the per-function stack frame under the
- * -Wstack-usage=8192 threshold. */
-static uint8_t  s_bcdc_input[4096];
-static uint8_t  s_bcdc_output[4096 + 24];
-static uint8_t  s_bcdc_decompressed[4096];
-
-static TestResult test_bcdc_compress_decompress_random(void) {
-    uint8_t  *input         = s_bcdc_input;
-    uint8_t  *output        = s_bcdc_output;
-    uint8_t  *decompressed  = s_bcdc_decompressed;
-    uint16_t output_size, decompressed_size;
-
-    // Fill with random data (hard to compress)
-    fill_random(input, 4096);
-
-    // Compress with BCDC_TYPE_NONE (random data won't compress well)
-    error_t err = BcdcCompress(input, 4096, output, &output_size,
-                               BCDC_TYPE_NONE, BCDC_LEVEL_DEFAULT, 0);
-    TEST_ASSERT_OK(err, "BcdcCompress should succeed");
-    TEST_ASSERT(output_size <= 4096 + 24, "Output should fit in buffer");
-
-    // Decompress
-    err = BcdcDecompress(output, output_size, decompressed, &decompressed_size, 0);
-    TEST_ASSERT_OK(err, "BcdcDecompress should succeed");
-    TEST_ASSERT_EQ(decompressed_size, 4096, "Decompressed size should match");
-
-    // Verify data
-    TEST_ASSERT(memcmp(input, decompressed, 4096) == 0, "Data should match");
-
-    return TEST_PASS;
-}
-
-static TestResult test_bcdc_compress_decompress_zeros(void) {
-    uint8_t  *input         = s_bcdc_input;
-    uint8_t  *output        = s_bcdc_output;
-    uint8_t  *decompressed  = s_bcdc_decompressed;
-    uint16_t output_size, decompressed_size;
-
-    // Fill with zeros (easy to compress with RLE)
-    fill_zeros(input, 4096);
-
-    // Compress with RLE (best for zeros)
-    error_t err = BcdcCompress(input, 4096, output, &output_size,
-                               BCDC_TYPE_RLE, BCDC_LEVEL_DEFAULT, 0);
-    TEST_ASSERT_OK(err, "BcdcCompress should succeed");
-
-    // Decompress
-    err = BcdcDecompress(output, output_size, decompressed, &decompressed_size, 0);
-    TEST_ASSERT_OK(err, "BcdcDecompress should succeed");
-    TEST_ASSERT_EQ(decompressed_size, 4096, "Decompressed size should match");
-
-    // Verify data
-    TEST_ASSERT(memcmp(input, decompressed, 4096) == 0, "Data should match");
-
-    return TEST_PASS;
-}
-
-static TestResult test_bcdc_compress_decompress_pattern(void) {
-    uint8_t  *input         = s_bcdc_input;
-    uint8_t  *output        = s_bcdc_output;
-    uint8_t  *decompressed  = s_bcdc_decompressed;
-    uint16_t output_size, decompressed_size;
-    
-    // Fill with repeating pattern (RLE should work well)
-    fill_pattern(input, 4096, 0xAA);
-    
-    // Compress with RLE
-    error_t err = BcdcCompress(input, 4096, output, &output_size,
-                               BCDC_TYPE_RLE, BCDC_LEVEL_DEFAULT, 0);
-    TEST_ASSERT_OK(err, "BcdcCompress RLE should succeed");
-    
-    // Should compress well
-    TEST_ASSERT(output_size < 4096, "RLE should compress repeating data");
-    
-    // Decompress
-    err = BcdcDecompress(output, output_size, decompressed, &decompressed_size, 0);
-    TEST_ASSERT_OK(err, "BcdcDecompress should succeed");
-    
-    // Verify data
-    TEST_ASSERT(memcmp(input, decompressed, 4096) == 0, "Data should match");
-    
-    return TEST_PASS;
-}
-
-static TestResult test_bcdc_checksum_verification(void) {
-    uint8_t  *input         = s_bcdc_input;
-    uint8_t  *output        = s_bcdc_output;
-    uint8_t  *decompressed  = s_bcdc_decompressed;
-    uint16_t output_size, decompressed_size;
-    
-    fill_random(input, 4096);
-    
-    // Compress
-    error_t err = BcdcCompress(input, 4096, output, &output_size,
-                               BCDC_TYPE_LZ, BCDC_LEVEL_DEFAULT, 0);
-    TEST_ASSERT_OK(err, "BcdcCompress should succeed");
-    
-    // Corrupt compressed data
-    output[50] ^= 0xFF;
-    
-    // Decompress should fail
-    err = BcdcDecompress(output, output_size, decompressed, &decompressed_size, 0);
-    TEST_ASSERT(err != OK, "BcdcDecompress should detect corruption");
-    
-    return TEST_PASS;
-}
-
-static TestResult test_bcdc_stats(void) {
-    BcdcStats stats;
-    BcdcGetStats(&stats);
-
-    TEST_ASSERT(stats.blocks_compressed > 0 || stats.blocks_compressed == 0, "Should have compression stats");
-    TEST_ASSERT(stats.bytes_before >= stats.bytes_after, "Compression should save space (or equal)");
-
-    return TEST_PASS;
-}
-
-// ============================================================================
-// DiskBook Journal Tests
-// ============================================================================
-
-static TestResult test_diskbook_init(void) {
-    // DiskBook should already be initialized
-    TEST_ASSERT(DiskBookIsInitialized(), "DiskBook should be initialized");
-    return TEST_PASS;
-}
-
-static TestResult test_diskbook_checkpoint(void) {
-    error_t err = DiskBookCheckpoint();
-    TEST_ASSERT_OK(err, "DiskBookCheckpoint should succeed");
-    return TEST_PASS;
-}
-
-static TestResult test_diskbook_stats(void) {
-    DiskBookStats stats;
-    error_t err = DiskBookGetStats(&stats);
-    TEST_ASSERT_OK(err, "DiskBookGetStats should succeed");
-    return TEST_PASS;
-}
-
-// ============================================================================
-// Snapshot Tests
-// ============================================================================
-
-static TestResult test_snapshot_create(void) {
-    uint32_t snapshot_id;
-    
-    error_t err = TagFS_SnapshotCreate("test_snap", 0, &snapshot_id);
-    TEST_ASSERT_OK(err, "TagFS_SnapshotCreate should succeed");
-    TEST_ASSERT(snapshot_id > 0, "Snapshot ID should be > 0");
-    
-    // Cleanup
-    TagFS_SnapshotDelete(snapshot_id);
-    
-    return TEST_PASS;
-}
-
-static TestResult test_snapshot_list(void) {
-    uint32_t ids[16];
-    uint32_t count;
-    
-    error_t err = TagFS_SnapshotList(ids, 16, &count);
-    TEST_ASSERT_OK(err, "TagFS_SnapshotList should succeed");
-    
-    return TEST_PASS;
-}
-
-// ============================================================================
-// Stress Tests
-// ============================================================================
-
-static TestResult test_stress_many_files(void) {
-    const uint32_t FILE_COUNT = 10;  // Reduced for QEMU performance
-    uint32_t file_ids[10];
-    uint16_t tag_ids[2] = {1, 2};
-
-    // Create many files
-    for (uint32_t i = 0; i < FILE_COUNT; i++) {
-        char name[32];
-        ksnprintf(name, sizeof(name), "stress_file_%u", i);
-
-        error_t err = tagfs_create_file(name, tag_ids, 2, &file_ids[i]);
-        TEST_ASSERT_OK(err, "tagfs_create_file should succeed");
-    }
-
-    // Write to all files
-    for (uint32_t i = 0; i < FILE_COUNT; i++) {
-        TagFSFileHandle* handle = tagfs_open(file_ids[i], TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
-        if (handle) {
-            fill_random(g_test_buffer, 4096);
-            tagfs_write(handle, g_test_buffer, 4096);
-            tagfs_close(handle);
-        }
-    }
-
-    // Read from all files
-    for (uint32_t i = 0; i < FILE_COUNT; i++) {
-        TagFSFileHandle* handle = tagfs_open(file_ids[i], TAGFS_HANDLE_READ);
-        if (handle) {
-            memset(g_test_output, 0, sizeof(g_test_output));
-            tagfs_read(handle, g_test_output, 4096);
-            tagfs_close(handle);
-        }
-    }
-
-    // Cleanup
-    for (uint32_t i = 0; i < FILE_COUNT; i++) {
-        tagfs_delete_file(file_ids[i]);
-    }
-
-    return TEST_PASS;
-}
-
-static TestResult test_stress_large_file(void) {
-    const uint32_t FILE_SIZE = 16 * 1024;  // Reduced to 16KB for QEMU
-    uint32_t file_id;
-    uint16_t tag_ids[1] = {1};
-
-    // Create file
-    error_t err = tagfs_create_file("large_file", tag_ids, 1, &file_id);
-    TEST_ASSERT_OK(err, "tagfs_create_file should succeed");
-
-    // Open for write
-    TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
-    TEST_ASSERT(handle != NULL, "tagfs_open should succeed");
-
-    // Write file in 4KB chunks
-    fill_random(g_test_buffer, 4096);
-    for (uint32_t i = 0; i < FILE_SIZE / 4096; i++) {
-        int written = tagfs_write(handle, g_test_buffer, 4096);
-        TEST_ASSERT_EQ(written, 4096, "Should write 4096 bytes");
-    }
-
-    // Close and reopen for read
-    tagfs_close(handle);
-    handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
-    TEST_ASSERT(handle != NULL, "tagfs_open for read should succeed");
-
-    // Read and verify (just first and last block for speed)
-    memset(g_test_output, 0, sizeof(g_test_output));
-    int read = tagfs_read(handle, g_test_output, 4096);
-    TEST_ASSERT_EQ(read, 4096, "Should read 4096 bytes");
-
-    if (memcmp(g_test_buffer, g_test_output, 4096) != 0) {
-        /* Diagnostic: find first mismatch and dump context */
-        for (int i = 0; i < 4096; i++) {
-            if (g_test_buffer[i] != g_test_output[i]) {
-                debug_printf("[DIAG] large_file MISMATCH at byte %d: expected 0x%02x got 0x%02x\n",
-                             i, g_test_buffer[i], g_test_output[i]);
-                debug_printf("[DIAG] file_id=%u extent_count=%u extent[0].start=%u\n",
-                             handle->file_id, handle->extent_count,
-                             handle->extent_count > 0 ? handle->extents[0].start_block : 0);
-                break;
-            }
-        }
-    }
-    TEST_ASSERT(memcmp(g_test_buffer, g_test_output, 4096) == 0, "First block should match");
-
-    // Cleanup
-    tagfs_close(handle);
-    tagfs_delete_file(file_id);
-
-    return TEST_PASS;
-}
-
-static TestResult test_stress_compression(void) {
-    const uint32_t ITERATIONS = 20;  // Reduced from 100 for QEMU performance
-
-    for (uint32_t i = 0; i < ITERATIONS; i++) {
-        uint8_t  *input        = s_bcdc_input;
-        uint8_t  *output       = s_bcdc_output;
-        uint8_t  *decompressed = s_bcdc_decompressed;
-        uint16_t output_size, decompressed_size;
-
-        // Alternate between random and zeros
-        if (i % 2 == 0) {
-            fill_random(input, 4096);
-        } else {
-            fill_zeros(input, 4096);
-        }
-
-        error_t err = BcdcCompress(input, 4096, output, &output_size,
-                                   BCDC_TYPE_RLE, BCDC_LEVEL_DEFAULT, 0);
-        TEST_ASSERT_OK(err, "BcdcCompress should succeed");
-
-        err = BcdcDecompress(output, output_size, decompressed, &decompressed_size, 0);
-        TEST_ASSERT_OK(err, "BcdcDecompress should succeed");
-        TEST_ASSERT(memcmp(input, decompressed, 4096) == 0, "Data should match");
-    }
-
-    return TEST_PASS;
-}
-
-static TestResult test_braid_init(void) {
-    error_t err = BraidInit(BraidModeMirror);
-    TEST_ASSERT_OK(err, "BraidInit should succeed");
-    return TEST_PASS;
-}
-
-static TestResult test_braid_add_disk(void) {
-    error_t err = BraidAddDisk(0, 1000000);
-    TEST_ASSERT_OK(err, "BraidAddDisk should succeed");
-    
-    err = BraidAddDisk(1, 1000000);
-    TEST_ASSERT_OK(err, "BraidAddDisk second disk should succeed");
-    
-    TEST_ASSERT(BraidIsHealthy(), "Braid should be healthy with 2 disks");
-    TEST_ASSERT_EQ(BraidGetActiveDiskCount(), 2, "Should have 2 active disks");
-    
-    // Clean up: remove test disks so Braid does not stay "healthy" and intercept
-    // all subsequent TagFS block I/O (which would route through non-existent ATA slave).
-    BraidRemoveDisk(0);
-    BraidRemoveDisk(1);
-    
-    return TEST_PASS;
-}
-
-static TestResult test_braid_write_read(void) {
-    /* Nothing is examined here on ANY machine: this test was never given a way
-     * to attach the two media a braid is written across, so it steps aside on
-     * the board exactly as it does in QEMU. Said out loud because the count
-     * above would otherwise read as coverage. */
-    return test_steps_aside("it has no way to attach the second medium a braid "
-                            "is written across, so it stands down on every "
-                            "machine and Braid's write-then-read path is "
-                            "covered by nothing");
-}
-
-static TestResult test_cow_snapshot_create(void) {
-    uint32_t snapshot_id;
-    
-    error_t err = TagFS_SnapshotCreate("test-snapshot", 0, &snapshot_id);
-    TEST_ASSERT_OK(err, "TagFS_SnapshotCreate should succeed");
-    TEST_ASSERT(snapshot_id > 0, "Snapshot ID should be > 0");
-    
-    // Cleanup
-    TagFS_SnapshotDelete(snapshot_id);
-    
-    return TEST_PASS;
-}
-
-static TestResult test_cow_before_after_write(void) {
-    uint32_t file_id;
-    uint16_t tag_ids[1] = {1};
-    
-    // Create file
-    error_t err = tagfs_create_file("cow-test", tag_ids, 1, &file_id);
-    TEST_ASSERT_OK(err, "tagfs_create_file should succeed");
-    
-    // Open and write initial data
-    TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
-    TEST_ASSERT(handle != NULL, "tagfs_open should succeed");
-    
-    fill_random(g_test_buffer, 4096);
-    int written = tagfs_write(handle, g_test_buffer, 4096);
-    TEST_ASSERT_EQ(written, 4096, "Should write 4096 bytes");
-    
-    tagfs_close(handle);
-    
-    // Test CoW before write
-    uint32_t new_block;
-    err = TagFS_CowBeforeWrite(file_id, 1, &new_block);
-    // May fail if no snapshot active, which is OK
-    if (err == OK) {
-        TEST_ASSERT(new_block > 0, "New block should be allocated");
-        
-        err = TagFS_CowAfterWrite(file_id, 1, new_block);
-        TEST_ASSERT_OK(err, "TagFS_CowAfterWrite should succeed");
-    }
-    
-    // Cleanup
-    tagfs_delete_file(file_id);
-    
-    return TEST_PASS;
-}
-
-static TestResult test_stress_braid_operations(void) {
-    /* Same standing-down as braid_write_read, and for the same reason: two
-     * media to braid across were never arranged for. */
-    return test_steps_aside("it has no way to attach the second medium a braid "
-                            "is written across, so it stands down on every "
-                            "machine and Braid holds up under nothing here");
-}
-
-static TestResult test_stress_concurrent_operations(void) {
-    const uint32_t FILE_COUNT = 10;  // Reduced from 50 for QEMU performance
-    uint32_t file_ids[10];
-    uint16_t tag_ids[2] = {1, 2};
-    
-    // Create files
-    for (uint32_t i = 0; i < FILE_COUNT; i++) {
-        char name[32];
-        ksnprintf(name, sizeof(name), "concurrent_%u", i);
-        
-        error_t err = tagfs_create_file(name, tag_ids, 2, &file_ids[i]);
-        TEST_ASSERT_OK(err, "tagfs_create_file should succeed");
-    }
-    
-    // Write to all files concurrently (simulated)
-    for (uint32_t i = 0; i < FILE_COUNT; i++) {
-        TagFSFileHandle* handle = tagfs_open(file_ids[i], TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
-        if (handle) {
-            fill_random(g_test_buffer, 4096);
-            tagfs_write(handle, g_test_buffer, 4096);
-            tagfs_close(handle);
-        }
-    }
-    
-    // Read from all files
-    for (uint32_t i = 0; i < FILE_COUNT; i++) {
-        TagFSFileHandle* handle = tagfs_open(file_ids[i], TAGFS_HANDLE_READ);
-        if (handle) {
-            memset(g_test_output, 0, sizeof(g_test_output));
-            tagfs_read(handle, g_test_output, 4096);
-            tagfs_close(handle);
-        }
-    }
-    
-    // Cleanup
-    for (uint32_t i = 0; i < FILE_COUNT; i++) {
-        tagfs_delete_file(file_ids[i]);
-    }
-    
-    return TEST_PASS;
-}
-
-// ============================================================================
-// Test Runner Implementation
-// ============================================================================
-
-error_t TagFS_TestsInit(void) {
-    if (g_tests_initialized)
-        return ERR_ALREADY_INITIALIZED;
-    
-    memset(&g_test_stats, 0, sizeof(TestStats));
-    g_test_stats.start_time = get_time_ms();
-    g_tests_initialized = true;
-    
-    debug_printf("[Tests] Initialized\n");
-    return OK;
-}
-
-void TagFS_TestsShutdown(void) {
-    if (!g_tests_initialized)
-        return;
-    
-    g_test_stats.end_time = get_time_ms();
-    g_test_stats.total_duration_ms = g_test_stats.end_time - g_test_stats.start_time;
-    g_tests_initialized = false;
-    
-    debug_printf("[Tests] Shutdown complete\n");
-}
-
-void TagFS_PrintTestResults(const TestStats* stats) {
-    debug_printf("\n");
-    debug_printf("========================================\n");
-    debug_printf("         TagFS Test Results            \n");
-    debug_printf("========================================\n");
-    debug_printf("Total tests:    %u\n", stats->total_tests);
-    debug_printf("Passed:         %u\n", stats->total_passed);
-    debug_printf("Failed:         %u\n", stats->total_failed);
-    debug_printf("Skipped:        %u\n", stats->total_skipped);
-    debug_printf("Duration:       %lu ms\n", (unsigned long)stats->total_duration_ms);
-    
-    if (stats->total_failed == 0) {
-        debug_printf("\n[SUCCESS] All tests passed!\n");
-    } else {
-        debug_printf("\n[FAILURE] %u tests failed\n", stats->total_failed);
-    }
-    
-    debug_printf("========================================\n");
-}
-
-void TagFS_DumpState(void) {
-    debug_printf("\n=== TagFS State Dump ===\n");
-    
-    TagFSState* fs = tagfs_get_state();
-    if (fs && fs->initialized) {
-        debug_printf("Total blocks:   %u\n", fs->layout.data_blocks);
-        debug_printf("Free blocks:    %u\n", fs->ledger.free_blocks);
-        debug_printf("Total files:    %u\n", fs->ledger.total_files);
-        debug_printf("Total tags:     %u\n", fs->ledger.total_tags);
-    }
-    
-    BcdcStats bcdc_stats;
-    BcdcGetStats(&bcdc_stats);
-    debug_printf("\n=== Bcdc Stats ===\n");
-    debug_printf("Blocks compressed:   %lu\n", (unsigned long)bcdc_stats.blocks_compressed);
-    debug_printf("Bytes before:        %lu\n", (unsigned long)bcdc_stats.bytes_before);
-    debug_printf("Bytes after:         %lu\n", (unsigned long)bcdc_stats.bytes_after);
-    if (bcdc_stats.bytes_before > 0) {
-        debug_printf("Compression ratio:   %lu%%\n", 
-                     (unsigned long)(bcdc_stats.bytes_after * 100 / bcdc_stats.bytes_before));
-    }
-    
-    debug_printf("======================\n");
-}
-
-// Run all tests
-// ============================================================================
-// BoxHash v2 tests (deterministic integrity/content hashing)
-// ============================================================================
-
-static TestResult test_boxhash_determinism(void) {
-    uint8_t seed[16];
-    for (int i = 0; i < 16; i++) seed[i] = (uint8_t)(i * 7 + 1);
-    BoxHashContext c1, c2;
-    BoxHashInit(&c1, seed, 16);
-    BoxHashInit(&c2, seed, 16);
-    for (int i = 0; i < 256; i++) g_test_buffer[i] = (uint8_t)(i * 13 + 5);
-
-    BoxHash h1 = BoxHashContent(g_test_buffer, 256, &c1);
-    BoxHash h2 = BoxHashContent(g_test_buffer, 256, &c2);
-    TEST_ASSERT(BoxHashEqual(&h1, &h2), "same data+seed -> same 256-bit content hash");
-
-    uint64_t i1 = BoxHashIntegrity(g_test_buffer, 256, &c1);
-    uint64_t i2 = BoxHashIntegrity(g_test_buffer, 256, &c2);
-    TEST_ASSERT(i1 == i2, "same data+seed -> same 64-bit integrity hash");
-    TEST_ASSERT(i1 != 0, "integrity hash nonzero for nonempty data");
-    return TEST_PASS;
-}
-
-static TestResult test_boxhash_seed_separation(void) {
-    uint8_t s1[16], s2[16];
-    for (int i = 0; i < 16; i++) { s1[i] = (uint8_t)i; s2[i] = (uint8_t)(i + 1); }
-    BoxHashContext c1, c2;
-    BoxHashInit(&c1, s1, 16);
-    BoxHashInit(&c2, s2, 16);
-    for (int i = 0; i < 512; i++) g_test_buffer[i] = (uint8_t)(i & 0xFF);
-    BoxHash h1 = BoxHashContent(g_test_buffer, 512, &c1);
-    BoxHash h2 = BoxHashContent(g_test_buffer, 512, &c2);
-    TEST_ASSERT(!BoxHashEqual(&h1, &h2), "different volume seeds -> different hash");
-    return TEST_PASS;
-}
-
-static TestResult test_boxhash_avalanche(void) {
-    uint8_t seed[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-    BoxHashContext c;
-    BoxHashInit(&c, seed, 8);
-    for (int i = 0; i < 4096; i++) g_test_buffer[i] = (uint8_t)(i * 3 + 1);
-    BoxHash a = BoxHashContent(g_test_buffer, 4096, &c);
-    g_test_buffer[2000] ^= 0x01;                 // flip a single bit
-    BoxHash b = BoxHashContent(g_test_buffer, 4096, &c);
-    TEST_ASSERT(!BoxHashEqual(&a, &b), "1-bit change -> different hash");
-
-    int diff = 0;
-    for (int i = 0; i < BOX_HASH_BYTES; i++) {
-        uint8_t x = (uint8_t)(a.bytes[i] ^ b.bytes[i]);
-        while (x) { diff += x & 1; x >>= 1; }
-    }
-    TEST_ASSERT(diff > 64, "avalanche: >64 of 256 output bits flip on a 1-bit input change");
-    return TEST_PASS;
-}
-
-static TestResult test_boxhash_sha256_kat(void) {
-    // FIPS 180-4: SHA-256("abc")
-    static const uint8_t expected[32] = {
-        0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea,0x41,0x41,0x40,0xde,0x5d,0xae,0x22,0x23,
-        0xb0,0x03,0x61,0xa3,0x96,0x17,0x7a,0x9c,0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad
-    };
-    BoxHash h = BoxHashSecure("abc", 3);
-    TEST_ASSERT(memcmp(h.bytes, expected, 32) == 0, "SHA-256(\"abc\") known-answer vector");
-    return TEST_PASS;
-}
-
-static TestResult test_boxhash_sizes(void) {
-    uint8_t seed[4] = {9, 8, 7, 6};
-    BoxHashContext c;
-    BoxHashInit(&c, seed, 4);
-    // Exercise every tail length class (wyhash 1-3 / 4-7 / 8-16 / >16) — no OOB.
-    static const uint32_t sizes[] = {1,7,8,15,16,17,31,32,33,63,64,65,4096};
-    uint64_t prev = 0;
-    for (uint32_t k = 0; k < sizeof(sizes)/sizeof(sizes[0]); k++) {
-        uint32_t n = sizes[k];
-        for (uint32_t i = 0; i < n; i++) g_test_buffer[i] = (uint8_t)(i + n);
-        uint64_t a = BoxHashIntegrity(g_test_buffer, n, &c);
-        uint64_t b = BoxHashIntegrity(g_test_buffer, n, &c);
-        TEST_ASSERT(a == b, "deterministic across all tail lengths");
-        TEST_ASSERT(a != prev, "distinct content -> distinct integrity hash");
-        prev = a;
-    }
-    TEST_ASSERT(BoxHashIntegrity(NULL, 0, &c) == 0, "null/empty input -> 0");
-    return TEST_PASS;
-}
-
-// ============================================================================
-// CoW redirect durability — snapshot frozen view survives reboot
-// Reproduces the post-reboot state (snapshot restored from the manifest with no
-// in-memory redirects) and runs the real mount-time DiskBook replay path,
-// confirming the redirect is restored from the durable log.
-// ============================================================================
-static TestResult test_cow_redirect_reboot_survival(void) {
-    if (!DiskBookIsInitialized())
-        return test_steps_aside("the DiskBook log is not open, and the redirect "
-                                "this test looks for is only ever restored from "
-                                "it");
-
-    uint32_t oldb = 0, newb = 0;
-    if (tagfs_alloc_blocks(1, &oldb) != 0)
-        return test_steps_aside("the volume would not hand out the block a "
-                                "redirect has to point away from");
-    if (tagfs_alloc_blocks(1, &newb) != 0) {
-        tagfs_free_blocks(oldb, 1);
-        return test_steps_aside("the volume would not hand out the block a "
-                                "redirect has to point at");
-    }
-
-    // Inject a snapshot exactly as the mount manifest-restore path does: present
-    // in memory, but with its redirect list empty (redirects are not in the
-    // manifest — they live only in the DiskBook log). This IS the post-reboot
-    // state before replay.
-    CowSnapshot snap;
-    memset(&snap, 0, sizeof(snap));
-    snap.snapshot_id = 0x7eb007u;     // "reboot" test id — won't collide
-    strncpy(snap.name, "_reboot_surv", TAGFS_SNAPSHOT_NAME_LEN - 1);
-    snap.flags = COW_SNAP_READONLY;
-    TagFS_CowRestoreSnapshot(&snap);
-
-    CowSnapshot info;
-    TEST_ASSERT(TagFS_SnapshotInfo(snap.snapshot_id, &info) == OK, "test snapshot exists");
-    TEST_ASSERT(info.redirect_count == 0, "post-reboot snapshot starts with 0 redirects");
-
-    // Durably record a redirect, as a pre-reboot CoW write would have.
-    TEST_ASSERT(DiskBookLogRedirect(snap.snapshot_id, oldb, newb, 0) == OK,
-                "DiskBookLogRedirect persists the redirect");
-
-    // Run the real mount-time recovery path — it must restore the redirect.
-    TEST_ASSERT(DiskBookValidateAndReplay() == OK, "DiskBook replay succeeds");
-    TEST_ASSERT(TagFS_SnapshotInfo(snap.snapshot_id, &info) == OK, "snapshot still exists");
-    TEST_ASSERT(info.redirect_count >= 1, "replay restored the CoW redirect (survives reboot)");
-
-    // Cleanup: delete frees the redirect's old_block + compacts the journal;
-    // free the new block we allocated.
-    TagFS_SnapshotDelete(snap.snapshot_id);
-    tagfs_free_blocks(newb, 1);
-    return TEST_PASS;
-}
-
-// ============================================================================
-// Data integrity (verify-on-read) test
-// ============================================================================
-static TestResult test_integrity_detects_mismatch(void) {
-    if (!IntegrityIsInitialized())
-        return test_steps_aside("verify-on-read is not armed on this volume, so "
-                                "there is no digest map to write into or catch "
-                                "a flipped bit with");
-    uint32_t blk;
-    if (tagfs_alloc_blocks(1, &blk) != 0)
-        return test_steps_aside("the volume would not hand out a block to record "
-                                "a digest over");
-
-    for (int i = 0; i < 4096; i++) g_test_buffer[i] = (uint8_t)(i * 7 + 1);
-    IntegrityUpdate(blk, g_test_buffer);
-    TEST_ASSERT(IntegrityVerify(blk, g_test_buffer), "verify matches the recorded digest");
-
-    uint32_t before = IntegrityErrorCount();
-    g_test_buffer[100] ^= 0xFF;                       // simulate a flipped bit on disk
-    TEST_ASSERT(!IntegrityVerify(blk, g_test_buffer), "verify detects a 1-byte mismatch");
-    TEST_ASSERT(IntegrityErrorCount() == before + 1, "bit-rot counter incremented exactly once");
-
-    IntegrityDrainReports();   // exercise the deferred Touch-report path (no crash)
-
-    tagfs_free_blocks(blk, 1);
-    return TEST_PASS;
-}
-
-// Integrity-map reboot survival: persist -> release the in-RAM map -> reload it
-// from disk, then confirm a digest written before the cycle still verifies (and
-// still catches corruption). This is the map's actual reboot-recovery path,
-// exercised safely in-kernel (no FS-wide teardown, no reboot orchestration).
-static TestResult test_integrity_persist_reload(void) {
-    if (!IntegrityIsInitialized())
-        return test_steps_aside("verify-on-read is not armed on this volume, so "
-                                "there is no digest map to write into or catch "
-                                "a flipped bit with");
-    uint32_t blk;
-    if (tagfs_alloc_blocks(1, &blk) != 0)
-        return test_steps_aside("the volume would not hand out a block to record "
-                                "a digest over");
-
-    for (int i = 0; i < 4096; i++) g_test_buffer[i] = (uint8_t)(i * 11 + 3);
-    IntegrityUpdate(blk, g_test_buffer);   // record digest
-    IntegrityFlush();                       // persist the map to disk
-
-    IntegrityShutdown();                    // drop the in-RAM map (disk copy remains)
-    TEST_ASSERT(IntegrityInit() == OK, "integrity remount (re-init from disk) succeeds");
-
-    TEST_ASSERT(IntegrityVerify(blk, g_test_buffer), "digest survived persist + reload (reboot)");
-    g_test_buffer[50] ^= 0xFF;
-    TEST_ASSERT(!IntegrityVerify(blk, g_test_buffer), "reloaded map still detects corruption");
-
-    tagfs_free_blocks(blk, 1);
-    return TEST_PASS;
-}
-
-// ============================================================================
-// Use Context Tests — reads only.
-//
-// The context is the user's and the volume is the user's; neither is written
-// to prove that a query is narrowed. Every context set here is set WITHOUT
-// interning (a tag the volume does not know stays unknown), and whatever the
-// user had is put back afterwards.
-// ============================================================================
-
-/* The context as it was: a comma-joined list to hand back to UseContextSet,
- * or NULL for none. */
-static bool use_snapshot_take(char **out_list)
-{
-    uint32_t n    = 0;
-    size_t   need = UseContextTags(NULL, 0, &n);
-    if (need == 0) {
-        *out_list = NULL;
-        return true;
-    }
-    char *block = kmalloc(need);
-    if (!block) return false;
-    uint32_t got = 0;
-    UseContextTags(block, need, &got);
-    size_t pos = 0;
-    for (uint32_t i = 0; i + 1 < got; i++) {
-        pos += strlen(block + pos);
-        block[pos++] = ',';
-    }
-    *out_list = block;
-    return true;
-}
-
-static void use_snapshot_restore(char *list)
-{
-    if (list) {
-        UseContextSet(list, false);
-        kfree(list);
-    } else {
-        UseContextClear();
-    }
-}
-
-/* A strand that wears exactly one tag, for UseContextMatches. */
-static process_t *use_test_strand(uint16_t tag_id, cabin_t **out_cabin)
-{
-    cabin_t *cabin = kmalloc(sizeof(cabin_t));
-    process_t *proc = kmalloc(sizeof(process_t));
-    if (!cabin || !proc) {
-        kfree(cabin);
-        kfree(proc);
-        return NULL;
-    }
-    memset(cabin, 0, sizeof(*cabin));
-    memset(proc, 0, sizeof(*proc));
-    if (tag_id < 64) {
-        cabin->tag_bits = (uint64_t)1 << tag_id;
-    } else {
-        cabin->tag_overflow_ids = kmalloc(sizeof(uint16_t));
-        if (!cabin->tag_overflow_ids) {
-            kfree(cabin);
-            kfree(proc);
-            return NULL;
-        }
-        cabin->tag_overflow_ids[0]   = tag_id;
-        cabin->tag_overflow_count    = 1;
-        cabin->tag_overflow_capacity = 1;
-    }
-    proc->cabin = cabin;
-    *out_cabin  = cabin;
-    return proc;
-}
-
-static void use_test_strand_free(process_t *proc, cabin_t *cabin)
-{
-    if (cabin) kfree(cabin->tag_overflow_ids);
-    kfree(cabin);
-    kfree(proc);
-}
-
-/* Spelling: blanks dropped, "key:" is "key", a duplicate kept once, an unfit
- * tag refused with the context left as it was. */
-static TestResult test_use_context_spelling(void)
-{
-    char *saved;
-    TEST_ASSERT(use_snapshot_take(&saved), "the user's context could not be saved");
-
-    TEST_ASSERT_OK(UseContextSet(" code , cpp:, ,project:alpha ,code", false),
-                   "a list with blanks, an empty value and a repeat is a context");
-    char        *block = NULL;
-    const char **names = NULL;
-    uint32_t     count = 0;
-    TEST_ASSERT_OK(UseContextTagArray(&block, &names, &count), "names come back");
-    TEST_ASSERT_EQ(count, 3, "three distinct tags");
-    TEST_ASSERT(strcmp(names[0], "code") == 0, "first is code, trimmed");
-    TEST_ASSERT(strcmp(names[1], "cpp") == 0, "cpp: is spelled cpp");
-    TEST_ASSERT(strcmp(names[2], "project:alpha") == 0, "key:value kept whole");
-    kfree(block);
-    kfree(names);
-
-    char unfit[300];
-    memset(unfit, 'k', sizeof(unfit) - 1);
-    unfit[sizeof(unfit) - 1] = '\0';
-    TEST_ASSERT(UseContextSet(unfit, false) == ERR_INVALID_ARGUMENT,
-                "a key longer than the registry's field is refused");
-    TEST_ASSERT_OK(UseContextTagArray(&block, &names, &count), "names come back");
-    TEST_ASSERT_EQ(count, 3, "the refusal left the context as it was");
-    kfree(block);
-    kfree(names);
-
-    use_snapshot_restore(saved);
-    return TEST_PASS;
-}
-
-/* Walls: a context of a tag nobody wears shows nothing, and no strand can be
- * in its tier. */
-static TestResult test_use_context_walls(void)
-{
-    char *saved;
-    TEST_ASSERT(use_snapshot_take(&saved), "the user's context could not be saved");
-
-    TEST_ASSERT_OK(UseContextSet("use:test:nobody-wears-this", false),
-                   "a tag the volume does not know is still a context");
-    TEST_ASSERT(UseContextIsSet(), "the context is set");
-
-    char        *block = NULL;
-    const char **names = NULL;
-    uint32_t     count = 0;
-    TEST_ASSERT_OK(UseContextTagArray(&block, &names, &count), "names come back");
-    TEST_ASSERT_EQ(count, 1, "one tag");
-    uint32_t ids[8];
-    int found = tagfs_query_files(names, count, ids, 8);
-    kfree(block);
-    kfree(names);
-    TEST_ASSERT_EQ(found, 0, "inside walls nobody has built, nothing is visible");
-
-    cabin_t   *cabin = NULL;
-    process_t *proc  = use_test_strand(0, &cabin);
-    TEST_ASSERT(proc != NULL, "no memory for a stand-in strand");
-    cabin->tag_bits = ~(uint64_t)0;
-    bool in_tier = UseContextMatches(proc);
-    use_test_strand_free(proc, cabin);
-    TEST_ASSERT(!in_tier, "a tag without a number on this volume puts nobody in the tier");
-
-    use_snapshot_restore(saved);
-    return TEST_PASS;
-}
-
-/* Narrowing: a context of a tag some file wears shows only files wearing it,
- * and a strand wearing it is in the tier while one without is not. */
-static TestResult test_use_context_narrows(void)
-{
-    uint32_t first[1];
-    TEST_ASSERT_EQ(tagfs_list_all_files(first, 1), 1, "a volume with at least one file");
-
-    TagFSMetadata meta;
-    TEST_ASSERT(tagfs_get_metadata(first[0], &meta) == 0, "the first file's metadata");
-    if (meta.tag_count == 0) {
-        tagfs_metadata_free(&meta);
-        return test_steps_aside("the first file on this volume carries no tag, "
-                                "and a Use Context narrows by tags — there was "
-                                "nothing here to narrow by");
-    }
-    uint16_t tag_id = meta.tag_ids[0];
-    tagfs_metadata_free(&meta);
-
-    char text[512];
-    TEST_ASSERT(tagfs_tag_text(tag_id, text, sizeof(text)), "the tag has a name");
-
-    char *saved;
-    TEST_ASSERT(use_snapshot_take(&saved), "the user's context could not be saved");
-    TEST_ASSERT_OK(UseContextSet(text, false), "a context of a tag the volume knows");
-
-    char        *block = NULL;
-    const char **names = NULL;
-    uint32_t     count = 0;
-    TEST_ASSERT_OK(UseContextTagArray(&block, &names, &count), "names come back");
-
-    uint32_t inside[256];
-    int n_inside = tagfs_query_files(names, count, inside, 256);
-    kfree(block);
-    kfree(names);
-    TEST_ASSERT(n_inside >= 1, "the file that wears the tag is visible inside");
-    for (int i = 0; i < n_inside; i++)
-        TEST_ASSERT(tagfs_has_tag(inside[i], tag_id), "everything visible inside wears the tag");
-
-    uint32_t everywhere[256];
-    int n_everywhere = tagfs_list_all_files(everywhere, 256);
-    TEST_ASSERT(n_inside <= n_everywhere, "inside is never more than everywhere");
-
-    cabin_t   *cabin = NULL;
-    process_t *proc  = use_test_strand(tag_id, &cabin);
-    TEST_ASSERT(proc != NULL, "no memory for a stand-in strand");
-    bool wearing = UseContextMatches(proc);
-    cabin->tag_bits           = 0;
-    cabin->tag_overflow_count = 0;
-    bool bare = UseContextMatches(proc);
-    UseContextClear();
-    if (tag_id < 64) cabin->tag_bits = (uint64_t)1 << tag_id;
-    else             cabin->tag_overflow_count = 1;
-    bool after_clear = UseContextMatches(proc);
-    use_test_strand_free(proc, cabin);
-    TEST_ASSERT(wearing, "a strand wearing the context's tag is in the tier");
-    TEST_ASSERT(!bare, "a strand without it is not");
-    TEST_ASSERT(!after_clear, "with no context there is no tier");
-
-    use_snapshot_restore(saved);
-    return TEST_PASS;
-}
-
-/*
- * The volume remembers the context. What is said to it is read back off the
- * medium by the Ledger's own reader; a list longer than the record holds is
- * forgotten whole rather than kept in part; and what the volume held before
- * is put back, so the boot road recalls exactly what it would have.
- *
- * Only the volume's memory is touched here, never the machine's context:
- * the road that takes one up runs after these tests, on an empty context.
- */
-static TestResult test_use_context_remembered(void)
-{
-    typedef struct {
-        char         before[TAGFS_SECTOR_SIZE];
-        VolumeLedger led[VOLUME_LEDGER_COPIES];
-        char         tail[VOLUME_LEDGER_COPIES][TAGFS_SECTOR_SIZE];
-        uint16_t     tail_len[VOLUME_LEDGER_COPIES];
-        char         oversize[TAGFS_SECTOR_SIZE];
-    } Scratch;
-    Scratch *sc = kmalloc(sizeof(Scratch));
-    TEST_ASSERT(sc != NULL, "no memory for the scratch");
-
-    size_t before_len = tagfs_recall_use_context(sc->before, sizeof(sc->before));
-    if (before_len > sizeof(sc->before)) {
-        kfree(sc);
-        TEST_ASSERT(false, "the remembered context is longer than its own record");
-    }
-
-    static const char said[] = "use:test:night,use:test:orders";
-    bool    kept = false;
-    error_t rc   = tagfs_remember_use_context(said, sizeof(said) - 1, &kept);
-    if (rc != OK || !kept) {
-        kfree(sc);
-        TEST_ASSERT(rc == OK, "the volume takes the context");
-        TEST_ASSERT(kept, "and remembers it");
-    }
-
-    /* Off the medium, not out of memory: the newer of the two copies. */
-    int newest = -1;
-    for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
-        if (!tagfs_ledger_peek(c, &sc->led[c], sc->tail[c], &sc->tail_len[c])) continue;
-        if (newest < 0 || sc->led[c].seq > sc->led[newest].seq) newest = (int)c;
-    }
-    bool on_medium = newest >= 0 &&
-                     sc->tail_len[newest] == sizeof(said) - 1 &&
-                     memcmp(sc->tail[newest], said, sizeof(said) - 1) == 0 &&
-                     sc->led[newest].use_context_offset == sizeof(VolumeLedger);
-    if (!on_medium) {
-        kfree(sc);
-        TEST_ASSERT(newest >= 0, "a Ledger copy is readable");
-        TEST_ASSERT(false, "the medium carries the context as said, right after the fixed fields");
-    }
-
-    /* Longer than the record holds: forgotten whole, and said so. */
-    memset(sc->oversize, 'a', sizeof(sc->oversize));
-    rc = tagfs_remember_use_context(sc->oversize, sizeof(sc->oversize), &kept);
-    size_t left = tagfs_recall_use_context(NULL, 0);
-    if (rc != OK || kept || left != 0) {
-        kfree(sc);
-        TEST_ASSERT(rc == OK, "an oversize context is taken without error");
-        TEST_ASSERT(!kept, "and not remembered");
-        TEST_ASSERT(left == 0, "the volume now remembers none, not half");
-    }
-
-    /* What was there is put back. */
-    rc = tagfs_remember_use_context(sc->before, before_len, &kept);
-    bool restored = rc == OK && (before_len == 0 || kept);
-    kfree(sc);
-    TEST_ASSERT(restored, "the earlier context is put back and remembered again");
-    return TEST_PASS;
-}
+uint8_t g_test_buffer[16384];
+uint8_t g_test_output[16384];
 
 /*
  * Whether this build is allowed to write to the volume it is testing.
@@ -1312,396 +25,446 @@ static const bool g_volume_tests_allowed = true;
 static const bool g_volume_tests_allowed = false;
 #endif
 
-error_t TagFS_RunAllTests(TestStats* stats) {
+// ============================================================================
+// What the test running now has said
+//
+// A test hands back one verdict and nothing else, so everything it has to say
+// beside it travels here: why it stood down, whether an assertion already
+// failed out loud, and the evidence a caveat needs. The runner clears all of it
+// before every test, so nothing can outlive the test that said it.
+// ============================================================================
+
+static const char* g_current_test      = NULL;
+static const char* g_step_aside_reason = NULL;
+static bool        g_failure_said      = false;
+
+static struct {
+    bool     given;
+    char     words[96];
+    uint64_t n;
+} g_evidence;
+
+TestResult TestFailedAt(const char* file, int line, const char* what,
+                        int64_t seen, int64_t wanted)
+{
+    kprintf("[TESTS] %s failed at %s:%d: %s (%lld, %lld)\n",
+            g_current_test ? g_current_test : "(no test running)",
+            file, line, what, (long long)seen, (long long)wanted);
+    g_failure_said = true;
+    return TEST_FAIL;
+}
+
+void TestEvidence(const char* words, uint64_t n)
+{
+    size_t len = words ? strlen(words) : 0;
+    if (len >= sizeof(g_evidence.words))
+        len = sizeof(g_evidence.words) - 1;
+    memcpy(g_evidence.words, words, len);
+    g_evidence.words[len] = '\0';
+    g_evidence.n     = n;
+    g_evidence.given = true;
+}
+
+/*
+ * Why a test that RAN decided not to run.
+ *
+ * The reason used to be said into debug_printf, which is compiled away in the
+ * build that goes on the board. The count then closed without the names: "19
+ * skipped" against seventeen explained, and the other two unnameable in front
+ * of the machine. The runner reads it back beside the verdict instead.
+ */
+TestResult test_steps_aside(const char* why)
+{
+    g_step_aside_reason = why;
+    return TEST_SKIP;
+}
+
+// ============================================================================
+// Helpers the suites share
+// ============================================================================
+
+void fill_random(void* buffer, uint32_t size)
+{
+    uint8_t* buf = (uint8_t*)buffer;
+    for (uint32_t i = 0; i < size; i++)
+        buf[i] = (uint8_t)(i ^ (i >> 3) ^ (i >> 7));
+}
+
+void fill_zeros(void* buffer, uint32_t size)
+{
+    memset(buffer, 0, size);
+}
+
+void fill_pattern(void* buffer, uint32_t size, uint8_t pattern)
+{
+    memset(buffer, pattern, size);
+}
+
+/* fill_random repeats itself every block, so two blocks of one file written
+ * with it are indistinguishable and a block swap reads back as a pass. Here
+ * every group of four bytes is mixed from its absolute offset and the stream,
+ * so no two blocks — of one file or of two — hold the same bytes. */
+void TestFillAt(void* buffer, uint32_t size, uint32_t stream, uint64_t offset)
+{
+    uint8_t* buf = (uint8_t*)buffer;
+    for (uint32_t i = 0; i < size; i++) {
+        uint64_t at = offset + i;
+        uint64_t x  = ((at >> 2) + 1) * 0x9E3779B97F4A7C15ull;
+        x ^= ((uint64_t)stream + 1) * 0xC2B2AE3D27D4EB4Full;
+        x ^= x >> 29;
+        buf[i] = (uint8_t)(x >> ((at & 3) * 8));
+    }
+}
+
+uint32_t TestFirstDifference(const void* a, const void* b, uint32_t n)
+{
+    const uint8_t* x = (const uint8_t*)a;
+    const uint8_t* y = (const uint8_t*)b;
+    for (uint32_t i = 0; i < n; i++)
+        if (x[i] != y[i])
+            return i;
+    return n;
+}
+
+int TestFileWrite(uint32_t file_id, const void* data, uint32_t bytes)
+{
+    TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
+    if (!handle)
+        return -1;
+    int written = tagfs_write(handle, data, bytes);
+    tagfs_close(handle);
+    return written;
+}
+
+int TestFileRead(uint32_t file_id, void* buffer, uint32_t capacity)
+{
+    TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
+    if (!handle)
+        return -1;
+    int got = tagfs_read(handle, buffer, capacity);
+    tagfs_close(handle);
+    return got;
+}
+
+// ============================================================================
+// ‼ WHAT A TEST THAT WRITES LEAVES BEHIND
+//
+// A test that writes is a guest on the volume, and it leaves the volume as it
+// found it or it fails — by the runner's count, not by its own word. Taken
+// before and after every such test:
+//
+//   files      the Ledger's file count;
+//   snapshots  how many the CoW layer holds;
+//   held       blocks in use that are not the volume's own bookkeeping.
+//
+// Not the free count on its own, because the free count is not the test's
+// alone to move. The metadata pool chains a fresh block the moment a record
+// no longer fits (meta_pool.c, meta_pool_write), the file table and the
+// registry chain theirs at a sync, and the first snapshot a volume ever takes
+// lays down its manifest block (cow.c, CowWriteManifest) — all of it for good,
+// and none of it residue. So the chains are walked on the medium, the way the
+// mount's roll call walks them, and they, the manifest and the integrity map
+// are taken out of the count. What is left is what files and snapshots hold,
+// and a test that leaves a block behind, or hands back one that was never its
+// own, moves it.
+//
+// Not the tag count: a tag is interned for good (every created file interns
+// the stem of its name), so the tests keep to names they have always used and
+// the guard does not count tags.
+// ============================================================================
+
+typedef struct {
+    uint64_t files;
+    uint32_t snapshots;
+    uint64_t held;
+} VolumeTally;
+
+static uint32_t g_snapshot_ids[TAGFS_MAX_SNAPSHOTS];
+static uint8_t  g_chain_block[TAGFS_BLOCK_SIZE];
+
+/* Blocks on one metadata chain, walked on the medium from its head (a volume
+ * block, as the Deed names it) by the magic every link carries. */
+static uint32_t VolumeChainLength(uint32_t head_volume_block, uint32_t magic)
+{
+    TagFSState* fs = tagfs_get_state();
+    uint32_t block = head_volume_block - fs->layout.data_block;
+    uint32_t links = 0;
+
+    while (links < fs->layout.data_blocks) {
+        if (tagfs_read_block(block, g_chain_block) != OK)
+            break;
+        uint32_t says_magic, next;
+        memcpy(&says_magic, g_chain_block, sizeof(says_magic));
+        memcpy(&next, g_chain_block + sizeof(says_magic), sizeof(next));
+        if (says_magic != magic)
+            break;
+        links++;
+        if (next == 0)
+            break;
+        block = next;
+    }
+    return links;
+}
+
+static bool VolumeTallyTake(VolumeTally* tally)
+{
+    TagFSState* fs = tagfs_get_state();
+    if (!fs || !fs->initialized)
+        return false;
+
+    uint32_t snapshots = 0;
+    if (TagFS_SnapshotList(g_snapshot_ids, TAGFS_MAX_SNAPSHOTS, &snapshots) != OK)
+        return false;
+
+    uint64_t chains =
+        VolumeChainLength(fs->layout.tag_registry_block,  TAGFS_REGISTRY_MAGIC) +
+        VolumeChainLength(fs->layout.file_table_block,    TAGFS_FILETBL_MAGIC) +
+        VolumeChainLength(fs->layout.metadata_pool_block, TAGFS_MPOOL_MAGIC);
+
+    spin_lock(&fs->lock);
+    uint64_t used = fs->layout.data_blocks - fs->ledger.free_blocks;
+    uint64_t own  = chains + fs->ledger.integrity_map_blocks +
+                    (fs->ledger.cow_manifest_block != 0) +
+                    (fs->ledger.cow_manifest_backup_block != 0);
+    tally->files = fs->ledger.total_files;
+    spin_unlock(&fs->lock);
+
+    tally->snapshots = snapshots;
+    tally->held      = used - own;
+    return true;
+}
+
+/* True when the test left the volume other than it found it — every
+ * difference said, with both numbers. */
+static bool VolumeResidueSaid(const char* name, const VolumeTally* before)
+{
+    VolumeTally after;
+    if (!VolumeTallyTake(&after)) {
+        kprintf("[TESTS] %s failed: the volume could not be counted after it, "
+                "so what it left behind is unknown\n", name);
+        return true;
+    }
+
+    bool residue = false;
+    if (after.files != before->files) {
+        kprintf("[TESTS] %s failed: it left residue — the volume held %llu "
+                "file(s) before it and %llu after\n", name,
+                (unsigned long long)before->files,
+                (unsigned long long)after.files);
+        residue = true;
+    }
+    if (after.snapshots != before->snapshots) {
+        kprintf("[TESTS] %s failed: it left residue — %u snapshot(s) before it "
+                "and %u after\n", name, before->snapshots, after.snapshots);
+        residue = true;
+    }
+    if (after.held != before->held) {
+        kprintf("[TESTS] %s failed: it left residue — %llu block(s) in use "
+                "outside the volume's own chains before it and %llu after\n",
+                name, (unsigned long long)before->held,
+                (unsigned long long)after.held);
+        residue = true;
+    }
+    return residue;
+}
+
+// ============================================================================
+// The judge
+//
+//   caveated  seen     verdict
+//   yes       DEFECT   held — a known defect, reproduced on purpose
+//   yes       PASS     FAIL: the caveat was lifted early
+//   no        DEFECT   FAIL: the defect it stands for is back
+//   either    FAIL     FAIL
+//   no        PASS     PASS
+//
+// Plus two things no test gets to decide for itself: a caveated test that gave
+// no evidence has proven nothing either way, and a test whose assertion failed
+// out loud has failed whatever it returned afterwards.
+// ============================================================================
+
+static void TestJudge(const TestCase* test, TestResult seen, TestStats* stats)
+{
+    bool caveated = test->caveat_step != NULL;
+
+    /* Lifting a caveat deletes its words from the TestCase, so a defect that
+     * comes back after the lift has nothing left to name it by. */
+    const char* defect = test->caveat_defect ? test->caveat_defect
+                                             : "the one its lifted caveat named";
+
+    if (seen == TEST_FAIL || g_failure_said) {
+        stats->total_failed++;
+        if (!g_failure_said)
+            kprintf("[TESTS] %s failed and did not say where\n", test->name);
+        else if (seen != TEST_FAIL)
+            kprintf("[TESTS] %s failed: an assertion failed inside it and it "
+                    "still ended as if it had not\n", test->name);
+        return;
+    }
+
+    if (seen == TEST_SKIP) {
+        stats->total_skipped++;
+        kprintf("[TESTS] %s ran and stood down: %s\n", test->name,
+                g_step_aside_reason
+                    ? g_step_aside_reason
+                    : "it gave no reason, which leaves this run covering less "
+                      "than its own count admits");
+        return;
+    }
+
+    if (seen != TEST_PASS && seen != TEST_DEFECT) {
+        stats->total_failed++;
+        kprintf("[TESTS] %s failed: it ended with %u, which is no verdict\n",
+                test->name, (unsigned)seen);
+        return;
+    }
+
+    if ((caveated || seen == TEST_DEFECT) && !g_evidence.given) {
+        stats->total_failed++;
+        kprintf("[TESTS] %s failed: it gave no evidence — a test that %s must "
+                "say what it counted, and the count\n", test->name,
+                caveated ? "holds a caveat" : "sees its defect");
+        return;
+    }
+
+    if (caveated && seen == TEST_DEFECT) {
+        stats->total_held++;
+        kprintf("[TESTS] caveat held: %s — %s — discharged by step %s (%s %llu)\n",
+                test->name, defect, test->caveat_step, g_evidence.words,
+                (unsigned long long)g_evidence.n);
+        return;
+    }
+
+    if (caveated) {
+        stats->total_failed++;
+        kprintf("[TESTS] caveat lifted early: %s — the test does not test what "
+                "it claims, or step %s already landed — lift the caveat (%s %llu)\n",
+                test->name, test->caveat_step, g_evidence.words,
+                (unsigned long long)g_evidence.n);
+        return;
+    }
+
+    if (seen == TEST_DEFECT) {
+        stats->total_failed++;
+        kprintf("[TESTS] %s failed: the defect it stands for is back — %s (%s %llu)\n",
+                test->name, defect, g_evidence.words,
+                (unsigned long long)g_evidence.n);
+        return;
+    }
+
+    stats->total_passed++;
+    debug_printf("[TESTS] %s passed\n", test->name);
+}
+
+// ============================================================================
+// The runner
+// ============================================================================
+
+#define TEST_SUITE_WALKED(name) &g_##name##_suite,
+static const TestSuite* const g_suites[] = { TEST_SUITES(TEST_SUITE_WALKED) };
+
+/* Said once, before the first test that writes. A red test is only half a
+ * report until it says which road its writes took: these call tagfs_write
+ * from the boot core, so they never take the asynchronous WriteJob path a
+ * program's ObjWrite takes on an AHCI seat with more than one core. */
+static void TestSayWritePath(void)
+{
+    uint8_t seat = tagfs_get_seat();
+    kprintf("[TESTS] the tests that write go through seat %u (%s), on the "
+            "synchronous path — they call tagfs_write directly, never ObjWrite\n",
+            seat, BoardroomSeatName(seat));
+}
+
+static void TestRun(const TestCase* test, TestStats* stats)
+{
+    bool        guarded = test->reach == TEST_WRITES_TO_VOLUME;
+    VolumeTally before;
+
+    if (guarded && !VolumeTallyTake(&before)) {
+        stats->total_failed++;
+        kprintf("[TESTS] %s was not run: the volume could not be counted before "
+                "it, so nothing it left behind could have been seen\n", test->name);
+        return;
+    }
+
+    g_current_test      = test->name;
+    g_step_aside_reason = NULL;
+    g_failure_said      = false;
+    g_evidence.given    = false;
+
+    debug_printf("[TESTS] running %s\n", test->name);
+    TestResult seen = test->func();
+
+    /* Residue first: a test that left the volume changed has failed, and
+     * whatever it would otherwise have been judged — held included — is not
+     * said, so a count of held lines never includes one that failed. */
+    if (guarded && VolumeResidueSaid(test->name, &before))
+        stats->total_failed++;
+    else
+        TestJudge(test, seen, stats);
+
+    g_current_test = NULL;
+}
+
+error_t TagFS_TestsInit(void)
+{
+    if (g_tests_initialized)
+        return ERR_ALREADY_INITIALIZED;
+    g_tests_initialized = true;
+    return OK;
+}
+
+void TagFS_TestsShutdown(void)
+{
+    g_tests_initialized = false;
+}
+
+error_t TagFS_RunAllTests(TestStats* stats)
+{
     if (!g_tests_initialized)
         return ERR_NOT_INITIALIZED;
 
+    memset(stats, 0, sizeof(*stats));
     uint32_t skipped_writers = 0;
-    
-    memset(stats, 0, sizeof(TestStats));
-    stats->start_time = get_time_ms();
-    
-    // Define all tests
-    static TestCase core_tests[] = {
-        {"tagfs_init", test_tagfs_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"tagfs_deed", test_tagfs_deed, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"tagfs_create_file", test_tagfs_create_file, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-        {"tagfs_write_read", test_tagfs_write_read, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-    };
-    
-    static TestCase compression_tests[] = {
-        {"bcdc_init", test_bcdc_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"bcdc_compress_decompress_random", test_bcdc_compress_decompress_random, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"bcdc_compress_decompress_zeros", test_bcdc_compress_decompress_zeros, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"bcdc_compress_decompress_pattern", test_bcdc_compress_decompress_pattern, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"bcdc_checksum_verification", test_bcdc_checksum_verification, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"bcdc_stats", test_bcdc_stats, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    };
+    bool     path_said       = false;
 
-    static TestCase journal_tests[] = {
-        {"diskbook_init", test_diskbook_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"diskbook_checkpoint", test_diskbook_checkpoint, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-        {"diskbook_stats", test_diskbook_stats, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    };
-
-    static TestCase snapshot_tests[] = {
-        {"snapshot_create", test_snapshot_create, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-        {"snapshot_list", test_snapshot_list, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    };
-
-    static TestCase stress_tests[] = {
-        {"stress_many_files", test_stress_many_files, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-        {"stress_large_file", test_stress_large_file, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-        {"stress_compression", test_stress_compression, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"stress_braid_operations", test_stress_braid_operations, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"stress_concurrent_operations", test_stress_concurrent_operations, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-    };
-
-    static TestCase braid_tests[] = {
-        {"braid_init", test_braid_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"braid_add_disk", test_braid_add_disk, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"braid_write_read", test_braid_write_read, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    };
-
-    static TestCase cow_tests[] = {
-        {"cow_snapshot_create", test_cow_snapshot_create, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-        {"cow_before_after_write", test_cow_before_after_write, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-        {"cow_redirect_reboot_survival", test_cow_redirect_reboot_survival, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-    };
-
-    static TestCase boxhash_tests[] = {
-        {"boxhash_determinism", test_boxhash_determinism, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"boxhash_seed_separation", test_boxhash_seed_separation, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"boxhash_avalanche", test_boxhash_avalanche, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"boxhash_sha256_kat", test_boxhash_sha256_kat, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"boxhash_sizes", test_boxhash_sizes, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    };
-
-    static TestCase integrity_tests[] = {
-        {"integrity_detects_mismatch", test_integrity_detects_mismatch, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-        {"integrity_persist_reload", test_integrity_persist_reload, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-    };
-
-    static TestCase dedup_tests[] = {
-        {"dedup_delete_unregisters", test_dedup_delete_unregisters, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-        {"dedup_truncate_unregisters", test_dedup_truncate_unregisters, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-        {"dedup_shared_block_survives_release", test_dedup_shared_block_survives_release, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-        {"dedup_reregister_follows_content", test_dedup_reregister_follows_content, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-    };
-
-    static TestCase use_context_tests[] = {
-        {"use_context_spelling", test_use_context_spelling, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"use_context_walls",    test_use_context_walls,    TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"use_context_narrows",  test_use_context_narrows,  TEST_SKIP, 0, "", TEST_READS_ONLY},
-        {"use_context_remembered", test_use_context_remembered, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-    };
-
-    // Run all test suites
-    static TestCase* all_suites[] = {
-        core_tests, compression_tests, journal_tests, snapshot_tests, stress_tests, braid_tests, cow_tests, boxhash_tests, integrity_tests, dedup_tests, use_context_tests
-    };
-    uint32_t suite_sizes[] = {
-        sizeof(core_tests)/sizeof(TestCase),
-        sizeof(compression_tests)/sizeof(TestCase),
-        sizeof(journal_tests)/sizeof(TestCase),
-        sizeof(snapshot_tests)/sizeof(TestCase),
-        sizeof(stress_tests)/sizeof(TestCase),
-        sizeof(braid_tests)/sizeof(TestCase),
-        sizeof(cow_tests)/sizeof(TestCase),
-        sizeof(boxhash_tests)/sizeof(TestCase),
-        sizeof(integrity_tests)/sizeof(TestCase),
-        sizeof(dedup_tests)/sizeof(TestCase),
-        sizeof(use_context_tests)/sizeof(TestCase)
-    };
-
-    debug_printf("\n[Tests] Starting test run...\n");
-
-    /* Derived, not typed: the count used to be a literal 9, which is a silent
-     * way to add a suite that never runs. */
-    for (uint32_t s = 0; s < sizeof(all_suites)/sizeof(all_suites[0]); s++) {
-        for (uint32_t i = 0; i < suite_sizes[s]; i++) {
-            TestCase* test = &all_suites[s][i];
-            uint64_t start = get_time_ms();
+    for (uint32_t s = 0; s < ARRAY_SIZE(g_suites); s++) {
+        const TestSuite* suite = g_suites[s];
+        for (uint32_t i = 0; i < suite->count; i++) {
+            const TestCase* test = &suite->tests[i];
+            stats->total_tests++;
 
             /*
              * A test that writes goes nowhere near a volume somebody is using.
              *
-             * The mounted volume belongs to whoever switched the machine on.
-             * These tests create files, allocate blocks and checkpoint the
-             * journal — on their medium, in their filesystem, on every boot.
-             * That was found by reading the owner's flash drive back: his own
-             * files with test_file, test_rw and stress_file_0..2 among them.
-             *
-             * Built with VOLUME_TESTS=on they run, which is what the test
-             * images in QEMU are for. Otherwise they are skipped and said to
-             * have been skipped — a test silently not run is worse than one
-             * that never existed.
+             * The mounted volume belongs to whoever switched the machine on,
+             * and these tests create files, allocate blocks and checkpoint the
+             * journal on it. That was found by reading the owner's flash drive
+             * back: his own files with test_file, test_rw and stress_file_0..2
+             * among them. Built with VOLUME_TESTS=on they run, which is what
+             * the test images in QEMU are for; otherwise they are skipped and
+             * said to have been skipped.
              */
             if (test->reach == TEST_WRITES_TO_VOLUME && !g_volume_tests_allowed) {
-                test->result      = TEST_SKIP;
-                test->duration_ms = 0;
                 skipped_writers++;
-                stats->total_tests++;
                 stats->total_skipped++;
                 continue;
             }
-
-            debug_printf("[TEST] Running %s...\n", test->name);
-
-            /* Cleared here so a reason can never be inherited from the test
-             * before: a skip with somebody else's reason on it is worse than
-             * a skip with none. */
-            g_step_aside_reason = NULL;
-
-            test->result = test->func();
-            test->duration_ms = get_time_ms() - start;
-            
-            stats->total_tests++;
-            if (test->result == TEST_PASS) {
-                stats->total_passed++;
-                debug_printf("[PASS] %s (%lu ms)\n", test->name, (unsigned long)test->duration_ms);
-            } else if (test->result == TEST_FAIL) {
-                stats->total_failed++;
-                debug_printf("[FAIL] %s (%lu ms)\n", test->name, (unsigned long)test->duration_ms);
-            } else {
-                stats->total_skipped++;
-                debug_printf("[SKIP] %s\n", test->name);
-
-                /*
-                 * The other half of the count, and said with kprintf.
-                 *
-                 * The writers held back by the build are announced below, all
-                 * seventeen of them in one line. These are the tests that RAN
-                 * and stood down on their own, and until now their names and
-                 * their reasons went only to debug_printf — compiled out of
-                 * the build that goes on the board. The totals then did not
-                 * meet: nineteen skipped against seventeen explained, and no
-                 * way in front of the machine to learn which two covered
-                 * nothing, or why.
-                 */
-                kprintf("[TESTS] %s ran and stood down: %s\n", test->name,
-                        g_step_aside_reason
-                            ? g_step_aside_reason
-                            : "it gave no reason, which leaves this run "
-                              "covering less than its own count admits");
+            if (test->reach == TEST_WRITES_TO_VOLUME && !path_said) {
+                TestSayWritePath();
+                path_said = true;
             }
+            TestRun(test, stats);
         }
     }
-    
-    stats->end_time = get_time_ms();
-    stats->total_duration_ms = stats->end_time - stats->start_time;
 
-    /* Said with kprintf, and said even when the number is zero on a build that
-     * allows them: "37 run, 35 passed" tells nobody which 37, and a suite that
-     * quietly shrank is how a test stops covering anything. */
+    /* Said with kprintf: "37 run, 35 passed" tells nobody which 37, and a
+     * suite that quietly shrank is how a test stops covering anything. */
     if (skipped_writers > 0) {
         kprintf("[TESTS] %u test(s) that write to the volume were not run — "
                 "this volume belongs to whoever is using this machine (build "
                 "with VOLUME_TESTS=on to run them)\n", skipped_writers);
     }
-    
-    TagFS_PrintTestResults(stats);
-    TagFS_DumpState();
-    
+
     return stats->total_failed == 0 ? OK : ERR_INTERNAL;
-}
-
-error_t TagFS_RunSuite(const char* suite_name, TestStats* stats) {
-    if (!suite_name || !stats || !g_tests_initialized)
-        return ERR_INVALID_ARGUMENT;
-
-    memset(stats, 0, sizeof(TestStats));
-    stats->start_time = get_time_ms();
-
-    if (strcmp(suite_name, "core") == 0) {
-        static TestCase core_tests[] = {
-            {"tagfs_init", test_tagfs_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
-            {"tagfs_deed", test_tagfs_deed, TEST_SKIP, 0, "", TEST_READS_ONLY},
-            {"tagfs_create_file", test_tagfs_create_file, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-            {"tagfs_write_read", test_tagfs_write_read, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-        };
-        uint32_t count = sizeof(core_tests) / sizeof(TestCase);
-        for (uint32_t i = 0; i < count; i++) {
-            TestCase* test = &core_tests[i];
-            uint64_t start = get_time_ms();
-            test->result = test->func();
-            test->duration_ms = get_time_ms() - start;
-            stats->total_tests++;
-            if (test->result == TEST_PASS) stats->total_passed++;
-            else if (test->result == TEST_FAIL) stats->total_failed++;
-            else stats->total_skipped++;
-        }
-    } else if (strcmp(suite_name, "compression") == 0) {
-        TestCase compression_tests[] = {
-            {"bcdc_init", test_bcdc_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
-            {"bcdc_compress_decompress_random", test_bcdc_compress_decompress_random, TEST_SKIP, 0, "", TEST_READS_ONLY},
-            {"bcdc_compress_decompress_zeros", test_bcdc_compress_decompress_zeros, TEST_SKIP, 0, "", TEST_READS_ONLY},
-            {"bcdc_compress_decompress_pattern", test_bcdc_compress_decompress_pattern, TEST_SKIP, 0, "", TEST_READS_ONLY},
-            {"bcdc_checksum_verification", test_bcdc_checksum_verification, TEST_SKIP, 0, "", TEST_READS_ONLY},
-            {"bcdc_stats", test_bcdc_stats, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        };
-        uint32_t count = sizeof(compression_tests) / sizeof(TestCase);
-        for (uint32_t i = 0; i < count; i++) {
-            TestCase* test = &compression_tests[i];
-            uint64_t start = get_time_ms();
-            test->result = test->func();
-            test->duration_ms = get_time_ms() - start;
-            stats->total_tests++;
-            if (test->result == TEST_PASS) stats->total_passed++;
-            else if (test->result == TEST_FAIL) stats->total_failed++;
-            else stats->total_skipped++;
-        }
-    } else if (strcmp(suite_name, "journal") == 0) {
-        TestCase journal_tests[] = {
-            {"diskbook_init", test_diskbook_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
-            {"diskbook_checkpoint", test_diskbook_checkpoint, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-            {"diskbook_stats", test_diskbook_stats, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        };
-        uint32_t count = sizeof(journal_tests) / sizeof(TestCase);
-        for (uint32_t i = 0; i < count; i++) {
-            TestCase* test = &journal_tests[i];
-            uint64_t start = get_time_ms();
-            test->result = test->func();
-            test->duration_ms = get_time_ms() - start;
-            stats->total_tests++;
-            if (test->result == TEST_PASS) stats->total_passed++;
-            else if (test->result == TEST_FAIL) stats->total_failed++;
-            else stats->total_skipped++;
-        }
-    } else if (strcmp(suite_name, "snapshot") == 0) {
-        TestCase snapshot_tests[] = {
-            {"snapshot_create", test_snapshot_create, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-            {"snapshot_list", test_snapshot_list, TEST_SKIP, 0, "", TEST_READS_ONLY},
-            {"cow_snapshot_create", test_cow_snapshot_create, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-            {"cow_before_after_write", test_cow_before_after_write, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-        };
-        uint32_t count = sizeof(snapshot_tests) / sizeof(TestCase);
-        for (uint32_t i = 0; i < count; i++) {
-            TestCase* test = &snapshot_tests[i];
-            uint64_t start = get_time_ms();
-            test->result = test->func();
-            test->duration_ms = get_time_ms() - start;
-            stats->total_tests++;
-            if (test->result == TEST_PASS) stats->total_passed++;
-            else if (test->result == TEST_FAIL) stats->total_failed++;
-            else stats->total_skipped++;
-        }
-    } else if (strcmp(suite_name, "braid") == 0) {
-        TestCase braid_tests[] = {
-            {"braid_init", test_braid_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
-            {"braid_add_disk", test_braid_add_disk, TEST_SKIP, 0, "", TEST_READS_ONLY},
-            {"braid_write_read", test_braid_write_read, TEST_SKIP, 0, "", TEST_READS_ONLY},
-        };
-        uint32_t count = sizeof(braid_tests) / sizeof(TestCase);
-        for (uint32_t i = 0; i < count; i++) {
-            TestCase* test = &braid_tests[i];
-            uint64_t start = get_time_ms();
-            test->result = test->func();
-            test->duration_ms = get_time_ms() - start;
-            stats->total_tests++;
-            if (test->result == TEST_PASS) stats->total_passed++;
-            else if (test->result == TEST_FAIL) stats->total_failed++;
-            else stats->total_skipped++;
-        }
-    } else if (strcmp(suite_name, "stress") == 0) {
-        TestCase stress_tests[] = {
-            {"stress_many_files", test_stress_many_files, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-            {"stress_large_file", test_stress_large_file, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-            {"stress_compression", test_stress_compression, TEST_SKIP, 0, "", TEST_READS_ONLY},
-            {"stress_braid_operations", test_stress_braid_operations, TEST_SKIP, 0, "", TEST_READS_ONLY},
-            {"stress_concurrent_operations", test_stress_concurrent_operations, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-        };
-        uint32_t count = sizeof(stress_tests) / sizeof(TestCase);
-        for (uint32_t i = 0; i < count; i++) {
-            TestCase* test = &stress_tests[i];
-            uint64_t start = get_time_ms();
-            test->result = test->func();
-            test->duration_ms = get_time_ms() - start;
-            stats->total_tests++;
-            if (test->result == TEST_PASS) stats->total_passed++;
-            else if (test->result == TEST_FAIL) stats->total_failed++;
-            else stats->total_skipped++;
-        }
-    } else {
-        return ERR_INVALID_ARGUMENT;
-    }
-
-    stats->end_time = get_time_ms();
-    stats->total_duration_ms = stats->end_time - stats->start_time;
-    TagFS_PrintTestResults(stats);
-    return stats->total_failed == 0 ? OK : ERR_INTERNAL;
-}
-
-static TestCase g_core_tests_arr[] = {
-    {"tagfs_init", test_tagfs_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    {"tagfs_deed", test_tagfs_deed, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    {"tagfs_create_file", test_tagfs_create_file, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-    {"tagfs_write_read", test_tagfs_write_read, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-};
-
-static TestCase g_compression_tests_arr[] = {
-    {"bcdc_init", test_bcdc_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    {"bcdc_compress_decompress_random", test_bcdc_compress_decompress_random, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    {"bcdc_compress_decompress_zeros", test_bcdc_compress_decompress_zeros, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    {"bcdc_compress_decompress_pattern", test_bcdc_compress_decompress_pattern, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    {"bcdc_checksum_verification", test_bcdc_checksum_verification, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    {"bcdc_stats", test_bcdc_stats, TEST_SKIP, 0, "", TEST_READS_ONLY},
-};
-
-static TestCase g_journal_tests_arr[] = {
-    {"diskbook_init", test_diskbook_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    {"diskbook_checkpoint", test_diskbook_checkpoint, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-    {"diskbook_stats", test_diskbook_stats, TEST_SKIP, 0, "", TEST_READS_ONLY},
-};
-
-static TestCase g_snapshot_tests_arr[] = {
-    {"snapshot_create", test_snapshot_create, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-    {"snapshot_list", test_snapshot_list, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    {"cow_snapshot_create", test_cow_snapshot_create, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-    {"cow_before_after_write", test_cow_before_after_write, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-};
-
-static TestCase g_braid_tests_arr[] = {
-    {"braid_init", test_braid_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    {"braid_add_disk", test_braid_add_disk, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    {"braid_write_read", test_braid_write_read, TEST_SKIP, 0, "", TEST_READS_ONLY},
-};
-
-static TestCase g_stress_tests_arr[] = {
-    {"stress_many_files", test_stress_many_files, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-    {"stress_large_file", test_stress_large_file, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-    {"stress_compression", test_stress_compression, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    {"stress_braid_operations", test_stress_braid_operations, TEST_SKIP, 0, "", TEST_READS_ONLY},
-    {"stress_concurrent_operations", test_stress_concurrent_operations, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
-};
-
-static TestSuite g_core_suite = {"core", g_core_tests_arr, 4, 0, 0, 0};
-static TestSuite g_compression_suite = {"compression", g_compression_tests_arr, 6, 0, 0, 0};
-static TestSuite g_journal_suite = {"journal", g_journal_tests_arr, 3, 0, 0, 0};
-static TestSuite g_snapshot_suite = {"snapshot", g_snapshot_tests_arr, 4, 0, 0, 0};
-static TestSuite g_braid_suite = {"braid", g_braid_tests_arr, 3, 0, 0, 0};
-static TestSuite g_stress_suite = {"stress", g_stress_tests_arr, 5, 0, 0, 0};
-
-TestSuite* TagFS_GetCoreTests(void) {
-    return &g_core_suite;
-}
-
-TestSuite* TagFS_GetCompressionTests(void) {
-    return &g_compression_suite;
-}
-
-TestSuite* TagFS_GetJournalTests(void) {
-    return &g_journal_suite;
-}
-
-TestSuite* TagFS_GetSnapshotTests(void) {
-    return &g_snapshot_suite;
-}
-
-TestSuite* TagFS_GetBraidTests(void) {
-    return &g_braid_suite;
-}
-
-TestSuite* TagFS_GetStressTests(void) {
-    return &g_stress_suite;
 }

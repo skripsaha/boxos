@@ -7,16 +7,21 @@
 #include "../tagfs_constants.h"
 
 // ============================================================================
-// TagFS Test Framework
-// Comprehensive testing for all TagFS components
+// TagFS startup tests
+//
+// A test OBSERVES and the runner JUDGES. A test says what it saw — it behaved
+// (TEST_PASS), it did not (TEST_FAIL), it could not be asked here (TEST_SKIP),
+// or the defect it was written for was seen, positively, with a number
+// (TEST_DEFECT) — and the runner decides what that means from the TestCase:
+// a defect a caveat names is held, a defect nobody named any more is a
+// failure, and a caveated test that behaves has outlived its caveat.
 // ============================================================================
 
-// Test result codes
 typedef enum {
-    TEST_PASS = 0,
-    TEST_FAIL = 1,
-    TEST_SKIP = 2,
-    TEST_CRASH = 3
+    TEST_PASS   = 0,
+    TEST_FAIL   = 1,
+    TEST_SKIP   = 2,
+    TEST_DEFECT = 3
 } TestResult;
 
 /*
@@ -37,87 +42,161 @@ typedef enum {
     TEST_WRITES_TO_VOLUME = 1
 } TestReach;
 
-// Test case structure
+/*
+ * One test, always written with designated initializers.
+ *
+ * caveat_step / caveat_defect: a known defect this test reproduces on purpose,
+ * and the step of the plan that discharges it. Both NULL for a test with no
+ * caveat. Lifting a caveat is deleting these two lines in the commit of that
+ * step — the test itself does not change.
+ */
 typedef struct {
     const char* name;
     TestResult (*func)(void);
-    TestResult result;
-    uint64_t duration_ms;
-    char error_message[256];
-    TestReach reach;
+    TestReach   reach;
+    const char* caveat_step;
+    const char* caveat_defect;
 } TestCase;
 
-// Test suite structure
+/* A suite: one file under tests/ that defines `const TestSuite g_<name>_suite`
+ * and is listed in TEST_SUITES below. */
 typedef struct {
-    const char* name;
-    TestCase* tests;
-    uint32_t test_count;
-    uint32_t passed;
-    uint32_t failed;
-    uint32_t skipped;
+    const char*     name;
+    const TestCase* tests;
+    uint32_t        count;
 } TestSuite;
 
-// Test statistics
 typedef struct {
     uint32_t total_tests;
     uint32_t total_passed;
     uint32_t total_failed;
     uint32_t total_skipped;
-    uint64_t total_duration_ms;
-    uint64_t start_time;
-    uint64_t end_time;
+    uint32_t total_held;      /* a known defect reproduced under its caveat */
 } TestStats;
 
+/*
+ * Every suite the runner walks, in the order it walks them.
+ *
+ * One line per suite, and that one line is both the suite's declaration and
+ * its place in the walk, so a suite can never be written and then silently not
+ * run. A suite that exists only in a VOLUME_TESTS=on kernel — its tests reach
+ * for hooks no other build carries — goes in as VOLUME_TESTS_ONLY(SUITE(x)),
+ * still one line. The closing comment is part of the list, so a line added
+ * above it touches no other line.
+ */
+#ifdef CONFIG_VOLUME_TESTS
+#define VOLUME_TESTS_ONLY(line) line
+#else
+#define VOLUME_TESTS_ONLY(line)
+#endif
+
+#define TEST_SUITES(SUITE) \
+    SUITE(core)            \
+    SUITE(compression)     \
+    SUITE(journal)         \
+    SUITE(snapshot)        \
+    SUITE(stress)          \
+    SUITE(braid)           \
+    SUITE(cow)             \
+    SUITE(boxhash)         \
+    SUITE(integrity)       \
+    SUITE(dedup)           \
+    SUITE(use_context)     \
+    /* the walk ends here; a new suite's line goes above */
+
+#define TEST_SUITE_DECLARED(name) extern const TestSuite g_##name##_suite;
+TEST_SUITES(TEST_SUITE_DECLARED)
+
 // ============================================================================
-// Test Macros
+// Assertions
+//
+// Every test is written the same way:
+//
+//     TestResult verdict = TEST_PASS;
+//     ...every resource the test will take, declared and cleared here...
+//     TEST_ASSERT...;
+// out:
+//     ...every resource released, whatever path arrived here...
+//     return verdict;
+//
+// A failed assertion says so with kprintf — test, file:line, what should have
+// held, and the two values — and jumps to `out`. It used to be debug_printf and
+// a bare `return TEST_FAIL`: silent in every build that goes on a board, and
+// every file, block and snapshot the test held stayed on the volume.
+//
+// The two values are what was seen and what had to be seen; a truth that did
+// not hold prints (0, 1).
 // ============================================================================
 
-#define TEST_ASSERT(cond, msg) do { \
-    if (!(cond)) { \
-        debug_printf("[FAIL] %s:%d: %s\n", __FILE__, __LINE__, msg); \
-        return TEST_FAIL; \
-    } \
-} while(0)
+TestResult TestFailedAt(const char* file, int line, const char* what,
+                        int64_t seen, int64_t wanted);
 
-#define TEST_ASSERT_EQ(a, b, msg) do { \
-    if ((a) != (b)) { \
-        debug_printf("[FAIL] %s:%d: %s (expected %lu, got %lu)\n", \
-                     __FILE__, __LINE__, msg, (unsigned long)(b), (unsigned long)(a)); \
-        return TEST_FAIL; \
-    } \
-} while(0)
+#define TEST_ASSERT(cond, msg) do {                                          \
+    if (!(cond)) {                                                           \
+        verdict = TestFailedAt(__FILE__, __LINE__, (msg), 0, 1);             \
+        goto out;                                                            \
+    }                                                                        \
+} while (0)
 
-#define TEST_ASSERT_OK(err, msg) do { \
-    error_t _err = (err); \
-    if (_err != OK) { \
-        debug_printf("[FAIL] %s:%d: %s (error=%d)\n", __FILE__, __LINE__, msg, _err); \
-        return TEST_FAIL; \
-    } \
-} while(0)
+#define TEST_ASSERT_EQ(a, b, msg) do {                                       \
+    int64_t _seen = (int64_t)(a), _wanted = (int64_t)(b);                    \
+    if (_seen != _wanted) {                                                  \
+        verdict = TestFailedAt(__FILE__, __LINE__, (msg), _seen, _wanted);   \
+        goto out;                                                            \
+    }                                                                        \
+} while (0)
+
+#define TEST_ASSERT_OK(err, msg) do {                                        \
+    int64_t _err = (int64_t)(err);                                           \
+    if (_err != OK) {                                                        \
+        verdict = TestFailedAt(__FILE__, __LINE__, (msg), _err, OK);         \
+        goto out;                                                            \
+    }                                                                        \
+} while (0)
 
 // ============================================================================
-// Test Runner API
+// What the suites share
+// ============================================================================
+
+/* The evidence a caveated test owes on both of its outcomes: the words that
+ * say what was counted, and the count. Printed as "(<words> <n>)". */
+void TestEvidence(const char* words, uint64_t n);
+
+/* Why a test that ran decided not to run. Returns TEST_SKIP. */
+TestResult test_steps_aside(const char* why);
+
+/* Bytes that say where they are: each depends on the stream it belongs to and
+ * on its absolute offset, so two streams never hold the same block and a block
+ * read back from the wrong place never matches. */
+void TestFillAt(void* buffer, uint32_t size, uint32_t stream, uint64_t offset);
+
+/* The offset of the first byte where a and b differ, or n when they agree. */
+uint32_t TestFirstDifference(const void* a, const void* b, uint32_t n);
+
+/* A whole file written in one call through a fresh handle, and read back the
+ * same way. Each returns the byte count tagfs_write / tagfs_read gave, or -1
+ * when the file would not open. The handle is closed on every path. */
+int TestFileWrite(uint32_t file_id, const void* data, uint32_t bytes);
+int TestFileRead(uint32_t file_id, void* buffer, uint32_t capacity);
+
+void fill_random(void* buffer, uint32_t size);
+void fill_zeros(void* buffer, uint32_t size);
+void fill_pattern(void* buffer, uint32_t size, uint8_t pattern);
+
+/* Four blocks each, shared by the suites. The runner is single-threaded at
+ * boot, so one set is safe across tests, and a block buffer does not belong
+ * on a kernel stack (the stack guard refuses frames over 1024 bytes). */
+extern uint8_t g_test_buffer[16384];
+extern uint8_t g_test_output[16384];
+
+// ============================================================================
+// Runner
 // ============================================================================
 
 error_t TagFS_TestsInit(void);
 void TagFS_TestsShutdown(void);
 
-// Run all tests
+/* OK exactly when nothing failed. A held caveat is not a failure. */
 error_t TagFS_RunAllTests(TestStats* stats);
-
-// Run specific test suite
-error_t TagFS_RunSuite(const char* suite_name, TestStats* stats);
-
-// Individual test suites
-TestSuite* TagFS_GetCoreTests(void);
-TestSuite* TagFS_GetCompressionTests(void);
-TestSuite* TagFS_GetJournalTests(void);
-TestSuite* TagFS_GetSnapshotTests(void);
-TestSuite* TagFS_GetBraidTests(void);
-TestSuite* TagFS_GetStressTests(void);
-
-// Debug helpers
-void TagFS_PrintTestResults(const TestStats* stats);
-void TagFS_DumpState(void);
 
 #endif // TAGFS_TEST_H

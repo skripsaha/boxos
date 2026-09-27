@@ -3736,16 +3736,17 @@ error_t TagFS_RunTests(void)
 
 static error_t TagFS_RunTests_inside(void)
 {
-    
     TestStats stats;
     error_t result = TagFS_RunAllTests(&stats);
 
-    /* kprintf, not debug_printf: the per-test lines inside the runner are
-     * debug_printf and vanish in a normal build, so without these numbers a run
-     * where every single test SKIPPED still printed "All tests PASSED". */
-    kprintf("[TESTS] TagFS: %u run, %u passed, %u failed, %u skipped\n",
-            stats.total_tests, stats.total_passed,
-            stats.total_failed, stats.total_skipped);
+    /* kprintf, not debug_printf: without these numbers a run where every
+     * single test SKIPPED still printed "All tests PASSED". A test held under
+     * a caveat is a known defect reproduced on purpose — counted on its own,
+     * neither passed nor failed nor skipped, and it does not fail the run. */
+    kprintf("[TESTS] TagFS: %u run, %u passed, %u failed, %u skipped, "
+            "%u held under a caveat\n",
+            stats.total_tests, stats.total_passed, stats.total_failed,
+            stats.total_skipped, stats.total_held);
 
     return result;
 }
