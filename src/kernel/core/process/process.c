@@ -1046,7 +1046,6 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     }
 
     proc->cabin->vmm->heap_start = heap_start;
-    proc->cabin->vmm->heap_end   = heap_start + CONFIG_USER_HEAP_INITIAL_SIZE;
     proc->cabin->vmm->stack_top  = stack_top;
 
     CabinInfo *ci = (CabinInfo *)vmm_phys_to_virt(proc->cabin->cabin_info_phys);

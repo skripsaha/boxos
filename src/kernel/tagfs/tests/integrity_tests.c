@@ -208,5 +208,5 @@ static const TestCase g_integrity_tests[] = {
 };
 
 const TestSuite g_integrity_suite = {
-    .name = "integrity", .tests = g_integrity_tests, .count = ARRAY_SIZE(g_integrity_tests),
+    .tests = g_integrity_tests, .count = ARRAY_SIZE(g_integrity_tests),
 };

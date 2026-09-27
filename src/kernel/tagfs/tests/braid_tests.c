@@ -51,24 +51,11 @@ out:
     return verdict;
 }
 
-static TestResult test_braid_write_read(void)
-{
-    /* Nothing is examined here on ANY machine: this test was never given a way
-     * to attach the two media a braid is written across, so it steps aside on
-     * the board exactly as it does in QEMU. Said out loud because the count
-     * above would otherwise read as coverage. */
-    return test_steps_aside("it has no way to attach the second medium a braid "
-                            "is written across, so it stands down on every "
-                            "machine and Braid's write-then-read path is "
-                            "covered by nothing");
-}
-
 static const TestCase g_braid_tests[] = {
     { .name = "braid_init",       .func = test_braid_init,       .reach = TEST_READS_ONLY },
     { .name = "braid_add_disk",   .func = test_braid_add_disk,   .reach = TEST_READS_ONLY },
-    { .name = "braid_write_read", .func = test_braid_write_read, .reach = TEST_READS_ONLY },
 };
 
 const TestSuite g_braid_suite = {
-    .name = "braid", .tests = g_braid_tests, .count = ARRAY_SIZE(g_braid_tests),
+    .tests = g_braid_tests, .count = ARRAY_SIZE(g_braid_tests),
 };

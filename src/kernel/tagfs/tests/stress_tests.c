@@ -144,23 +144,12 @@ out:
     return verdict;
 }
 
-static TestResult test_stress_braid_operations(void)
-{
-    /* Nothing is examined here on ANY machine: two media to braid across were
-     * never arranged for. Said out loud because the count would otherwise
-     * read as coverage. */
-    return test_steps_aside("it has no way to attach the second medium a braid "
-                            "is written across, so it stands down on every "
-                            "machine and Braid holds up under nothing here");
-}
-
 static const TestCase g_stress_tests[] = {
     { .name = "stress_many_files",       .func = test_stress_many_files,       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stress_large_file",       .func = test_stress_large_file,       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stress_compression",      .func = test_stress_compression,      .reach = TEST_READS_ONLY },
-    { .name = "stress_braid_operations", .func = test_stress_braid_operations, .reach = TEST_READS_ONLY },
 };
 
 const TestSuite g_stress_suite = {
-    .name = "stress", .tests = g_stress_tests, .count = ARRAY_SIZE(g_stress_tests),
+    .tests = g_stress_tests, .count = ARRAY_SIZE(g_stress_tests),
 };

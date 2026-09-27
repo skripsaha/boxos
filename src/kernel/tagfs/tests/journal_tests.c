@@ -28,5 +28,5 @@ static const TestCase g_journal_tests[] = {
 };
 
 const TestSuite g_journal_suite = {
-    .name = "journal", .tests = g_journal_tests, .count = ARRAY_SIZE(g_journal_tests),
+    .tests = g_journal_tests, .count = ARRAY_SIZE(g_journal_tests),
 };

@@ -36,8 +36,8 @@ static int BraidRawWrite(uint8_t disk_id, uint64_t sector, const void *data) {
     return BoardroomWrite(disk_id, sector, 8, data);
 }
 
-// Locked wrappers — used by BraidAutoHeal and BraidVerifyBlock which hold the lock
-// across multiple reads for majority-vote consensus.  Must not be used on the normal
+// Locked wrappers — used by BraidAutoHeal, which holds the lock across
+// multiple reads for majority-vote consensus.  Must not be used on the normal
 // I/O path (BraidReadBlock / BraidWriteBlock) where holding the lock during disk I/O
 // would stall unrelated disk operations.
 static error_t BraidReadFromDisk(uint8_t disk_id, uint64_t block_num, void *data) {
@@ -325,78 +325,6 @@ error_t BraidWriteBlock(uint64_t block_num, const void *data, const uint8_t *tag
     return result;
 }
 
-// Static scratch buffer for VerifyBlock + AutoHeal — both functions hold
-// g_braid_state.lock for their full duration, so a single BSS-resident
-// pool is mutually exclusive and avoids the catastrophic per-call stack
-// frame (uint8_t[BRAID_MAX_DISKS][BRAID_BLOCK_SIZE] = 32 KB > per-core
-// kernel stack). Located in .bss — zero runtime cost.
-static uint8_t  g_braid_verify_ref[BRAID_BLOCK_SIZE];
-static uint8_t  g_braid_verify_candidate[BRAID_BLOCK_SIZE];
-
-error_t BraidVerifyBlock(uint64_t block_num, bool *is_valid) {
-    if (!g_braid_state.initialized || !is_valid)
-        return ERR_NOT_INITIALIZED;
-
-    *is_valid = false;
-
-    if (g_braid_state.active_disks < 2) {
-        // Cannot cross-verify with only one disk — read and accept if I/O
-        // succeeds. BraidReadBlock takes g_braid_state.lock internally, so
-        // we must NOT hold it here (recursive spinlock = deadlock).
-        // 4 KiB on the kernel stack is well below the 8 KiB per-frame budget;
-        // the BSS pool is reserved for the multi-disk path where two 4 KiB
-        // buffers would otherwise blow the limit.
-        uint8_t data[BRAID_BLOCK_SIZE];
-        error_t result = BraidReadBlock(block_num, data, NULL);
-        if (result == OK)
-            *is_valid = true;
-        return result;
-    }
-
-    // Read from each available disk and compare checksums to detect corruption.
-    // Agreement across at least two copies signals block integrity.
-    BoxHash ref_hash;
-    bool ref_set = false;
-    uint8_t agreements = 0;
-
-    spin_lock(&g_braid_state.lock);
-
-    for (uint8_t i = 0; i < g_braid_state.disk_count; i++) {
-        if (!g_braid_state.disks[i].online)
-            continue;
-
-        if (BraidReadFromDisk(i, block_num, g_braid_verify_candidate) != OK)
-            continue;
-
-        BoxHash candidate_hash = BoxHashContent(g_braid_verify_candidate, BRAID_BLOCK_SIZE, &g_braid_state.hash_ctx);
-
-        if (!ref_set) {
-            memcpy(g_braid_verify_ref, g_braid_verify_candidate, BRAID_BLOCK_SIZE);
-            ref_hash = candidate_hash;
-            ref_set = true;
-            agreements = 1;
-        } else if (BoxHashEqual(&candidate_hash, &ref_hash)) {
-            agreements++;
-        }
-    }
-
-    spin_unlock(&g_braid_state.lock);
-
-    if (agreements >= 2) {
-        *is_valid = true;
-        return OK;
-    }
-
-    if (agreements == 1) {
-        // Only one readable copy — treat as valid but degraded
-        *is_valid = true;
-        g_braid_stats.checksum_errors++;
-        return OK;
-    }
-
-    return ERR_IO;
-}
-
 // Tag-aware read (unique to Braid!)
 error_t BraidReadBlockTagged(uint64_t block_num, void *data, const uint8_t *tag_context) {
     if (!g_braid_state.initialized || !data)
@@ -513,9 +441,10 @@ error_t BraidWriteBlockTagged(uint64_t block_num, const void *data, const uint8_
 // Auto-healing from mirror (unique to Braid!)
 // Reads all available copies, selects the one agreed upon by majority (checksum consensus),
 // then re-writes the agreed copy to any disk that diverged.
-// BSS-resident scratch for AutoHeal — held under g_braid_state.lock,
-// mutually exclusive with VerifyBlock. Stack-frame replacement (see note
-// above g_braid_verify_ref).
+// BSS-resident scratch for AutoHeal — held under g_braid_state.lock for the
+// whole of it, so one pool is enough, and it replaces a per-call frame of
+// uint8_t[BRAID_MAX_DISKS][BRAID_BLOCK_SIZE] = 32 KB, past any per-core kernel
+// stack. Located in .bss — zero runtime cost.
 static uint8_t g_braid_heal_copies[BRAID_MAX_DISKS][BRAID_BLOCK_SIZE];
 
 error_t BraidAutoHeal(uint64_t block_num) {

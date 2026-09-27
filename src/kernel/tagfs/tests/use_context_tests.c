@@ -370,6 +370,5 @@ static const TestCase g_use_context_tests[] = {
 };
 
 const TestSuite g_use_context_suite = {
-    .name = "use_context", .tests = g_use_context_tests,
-    .count = ARRAY_SIZE(g_use_context_tests),
+    .tests = g_use_context_tests, .count = ARRAY_SIZE(g_use_context_tests),
 };

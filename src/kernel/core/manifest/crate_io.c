@@ -2,10 +2,12 @@
  * crate_io — page-walked Crate <-> kernel-buffer copy primitives.
  *
  * crate_read / crate_write copy a fixed-size payload between a user Crate and
- * a caller kernel buffer using the no-heap page-walk in vmm_user_buf_in_into /
- * vmm_user_buf_commit_out. A Crate payload that straddles a page boundary is
- * copied across every backing frame instead of being clipped to the first
- * page, which is what a raw vmm_translate_user_addr would do.
+ * a caller kernel buffer using the page-walk in vmm_user_buf_in_into /
+ * vmm_user_buf_commit_out, which takes no kernel heap (a heap page of the
+ * cabin's it has not touched yet is brought in, as its first touch would bring
+ * it). A Crate payload that straddles a page boundary is copied across every
+ * backing frame instead of being clipped to the first page, which is what a
+ * raw vmm_translate_user_addr would do.
  *
  * crate_in_buf / crate_out_alloc / crate_out_commit / crate_buf_free are the
  * variable-size bounce helpers used by handlers that serialize a record whose

@@ -119,7 +119,7 @@ static TestResult TestStandBlockFailReadsTheNth(void)
         return test_steps_aside(aside);
 
     TestFillAt(g_test_buffer, 3 * TAGFS_BLOCK_SIZE, 0x51, 0);
-    TEST_ASSERT(StandMakeFile("stand_blockfail.tst", g_test_buffer, 3 * TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, 3 * TAGFS_BLOCK_SIZE, &file_id),
                 "a three-block file is made");
     TEST_ASSERT(StandBlockOf(file_id, 1, &middle), "its middle block is found");
 
@@ -177,7 +177,7 @@ static TestResult TestStandBlockFailWriteNeverLands(void)
         return test_steps_aside(aside);
 
     TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x53, 0);
-    TEST_ASSERT(StandMakeFile("stand_blockfail.tst", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a one-block file is made");
     TEST_ASSERT(StandBlockOf(file_id, 0, &block), "its block is found");
 
@@ -261,7 +261,7 @@ static TestResult TestStandBlockFailAsyncRead(void)
         return test_steps_aside(aside);
 
     TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x55, 0);
-    TEST_ASSERT(StandMakeFile("stand_blockfail.tst", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a one-block file is made");
     TEST_ASSERT(StandBlockOf(file_id, 0, &block), "its block is found");
 
@@ -488,7 +488,7 @@ static const TestCase g_stand_tests[] = {
 };
 
 const TestSuite g_stand_suite = {
-    .name = "stand", .tests = g_stand_tests, .count = ARRAY_SIZE(g_stand_tests),
+    .tests = g_stand_tests, .count = ARRAY_SIZE(g_stand_tests),
 };
 
 #endif /* CONFIG_VOLUME_TESTS */

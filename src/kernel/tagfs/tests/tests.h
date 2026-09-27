@@ -45,10 +45,13 @@ typedef enum {
 /*
  * One test, always written with designated initializers.
  *
- * caveat_step / caveat_defect: a known defect this test reproduces on purpose,
- * and the step of the plan that discharges it. Both NULL for a test with no
- * caveat. Lifting a caveat is deleting these two lines in the commit of that
- * step — the test itself does not change.
+ * caveat_defect: the defect this test stands for — every test that can see
+ * one names it, and keeps the words for good. caveat_step: the step of the
+ * plan that discharges it, while the test still reproduces it on purpose.
+ * Both NULL for a test that stands for no defect. Lifting a caveat is deleting
+ * the caveat_step line in the commit of that step — caveat_defect stays, so a
+ * defect that comes back after the lift is named in the line that fails it,
+ * and the test itself does not change.
  */
 typedef struct {
     const char* name;
@@ -58,10 +61,10 @@ typedef struct {
     const char* caveat_defect;
 } TestCase;
 
-/* A suite: one file under tests/ that defines `const TestSuite g_<name>_suite`
- * and is listed in TEST_SUITES below. */
+/* A suite: `const TestSuite g_<name>_suite`, defined in a file under tests/ (a
+ * file may hold more than one, as snapshot_tests.c holds snapshot and cow)
+ * and listed in TEST_SUITES below. */
 typedef struct {
-    const char*     name;
     const TestCase* tests;
     uint32_t        count;
 } TestSuite;

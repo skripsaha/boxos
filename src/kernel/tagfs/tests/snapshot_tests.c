@@ -59,7 +59,7 @@ static const TestCase g_snapshot_tests[] = {
 };
 
 const TestSuite g_snapshot_suite = {
-    .name = "snapshot", .tests = g_snapshot_tests, .count = ARRAY_SIZE(g_snapshot_tests),
+    .tests = g_snapshot_tests, .count = ARRAY_SIZE(g_snapshot_tests),
 };
 
 // ----------------------------------------------------------------------------
@@ -211,6 +211,188 @@ out:
     return verdict;
 }
 
+/* The id of the standing snapshot called `name`, or 0. */
+static uint32_t CowSnapshotNamed(const char* name)
+{
+    uint32_t    count = 0;
+    CowSnapshot info;
+
+    if (TagFS_SnapshotList(s_listed, TAGFS_MAX_SNAPSHOTS, &count) != OK)
+        return 0;
+    for (uint32_t i = 0; i < count; i++)
+        if (TagFS_SnapshotInfo(s_listed[i], &info) == OK && strcmp(info.name, name) == 0)
+            return s_listed[i];
+    return 0;
+}
+
+/*
+ * W-COW. A file whose data is ONE extent three blocks long, a snapshot of it,
+ * and a write of its first block alone. The write path copies that block for
+ * the snapshot and moves the extent's start onto the copy (tagfs.c,
+ * tagfs_write_inside) — the whole extent, three blocks long, so the file's
+ * second and third blocks now read the two blocks after the copy, which it
+ * never held. The right answer leaves both of them as they were, and the
+ * snapshot's frozen block too; the evidence counts every one of those three
+ * that changed.
+ *
+ * The extent is laid down by gathering three one-block extents into one
+ * (tagfs_defrag_file): the write path gives every 4 KiB an extent of its own,
+ * so that is how a longer one arises on this volume. Its three blocks are then
+ * written over in place with bytes of this file's own (the stream names the
+ * file id, which no earlier boot had), so no other block on the volume holds
+ * what they hold: not the three the gathering let go of, which first-fit hands
+ * out first and still carry the first bytes, and not a block this test left
+ * free on an earlier boot. Only the file's own blocks can read back right.
+ *
+ * ‼ THE FILE THEN NAMES TWO BLOCKS IT DOES NOT OWN, and deleting it as it
+ * stands would hand them to the allocator whoever holds them. So once the
+ * snapshots are gone its record is cut back to the copy alone, the two blocks
+ * the extent was moved off are given back by hand, and only then is the file
+ * deleted. The frozen block is NOT given back here: deleting the snapshot
+ * already did (cow.c, TagFS_SnapshotDelete), and a second time is the double
+ * free this file's header warns of — which is also why a file whose redirect
+ * was recorded and whose record never moved onto the copy is not deleted at
+ * all, only said. The write also took an auto-snapshot of the file (tagfs.c,
+ * tagfs_auto_snapshot_before_write), and that goes too.
+ */
+#define COW_SPAN_BLOCKS 3u
+
+/* The record cut back to its first block, the copy, through a handle whose
+ * extent says so — the same road CowFileTakesCopy takes, with no snapshot
+ * standing, so nothing is copied for one. */
+static bool CowFileCutToTheCopy(uint32_t file_id, uint32_t copy, const uint8_t* content)
+{
+    TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
+    if (!handle)
+        return false;
+    bool cut = handle->extent_count == 1 && handle->extents &&
+               handle->extents[0].start_block == copy;
+    if (cut) {
+        handle->extents[0].block_count = 1;
+        handle->file_size = 0;
+        cut = tagfs_write(handle, content, TAGFS_BLOCK_SIZE) == TAGFS_BLOCK_SIZE;
+    }
+    tagfs_close(handle);
+    return cut;
+}
+
+static TestResult TestCowMovesOnlyTheBlockWritten(void)
+{
+    TestResult    verdict   = TEST_PASS;
+    uint32_t      file_id   = 0;
+    uint32_t      snap_id   = 0;
+    uint32_t      start     = 0;     /* the extent's first block: frozen by the snapshot */
+    uint32_t      copy      = 0;     /* where the write sent the first block */
+    bool          have_meta = false;
+    uint8_t*      was       = g_test_buffer;                                /* 3 blocks */
+    uint8_t*      now       = g_test_buffer + COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE;
+    char          auto_name[TAGFS_SNAPSHOT_NAME_LEN];
+    TagFSMetadata meta;
+    CowSnapshot   info;
+
+    if (TagFS_CowIsActive(0))
+        return test_steps_aside("a snapshot of the whole volume is standing, so "
+                                "every write would be copied for it and this "
+                                "test's redirect could not be told apart");
+
+    TEST_ASSERT_EQ(tagfs_create_file("cow-test", NULL, 0, &file_id), 0, "a file is created");
+    TestFillAt(g_test_output, COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE, 0xC1DE0000u | file_id, 0);
+    TestFillAt(was, COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE, 0xC2DE0000u | file_id, 0);
+    TestFillAt(now, TAGFS_BLOCK_SIZE, 0xC3DE0000u | file_id, 0);
+    TEST_ASSERT_EQ(TestFileWrite(file_id, g_test_output, COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE),
+                   COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE, "three blocks are written");
+    TEST_ASSERT_EQ(tagfs_defrag_file(file_id, 0), 0, "and gathered into one extent");
+    TEST_ASSERT_EQ(TestFileWrite(file_id, was, COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE),
+                   COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE, "and written over");
+
+    TEST_ASSERT_EQ(tagfs_get_metadata(file_id, &meta), 0, "the file's metadata reads");
+    have_meta = true;
+    TEST_ASSERT_EQ(meta.extent_count, 1, "the file is one extent, written over in place");
+    TEST_ASSERT_EQ(meta.extents[0].block_count, COW_SPAN_BLOCKS, "three blocks long");
+    start = meta.extents[0].start_block;
+    tagfs_metadata_free(&meta);
+    have_meta = false;
+
+    error_t made = TagFS_SnapshotCreate("cow-one-block", file_id, &snap_id);
+    if (made != OK)
+        snap_id = 0;        /* ERR_ALREADY_EXISTS names somebody else's snapshot */
+    TEST_ASSERT_OK(made, "a snapshot of the file is taken");
+
+    /* The copy is learnt before the write's answer is judged: a write that
+     * answers short may still have recorded its redirect, and the way out
+     * has to know. */
+    int     wrote    = TestFileWrite(file_id, now, TAGFS_BLOCK_SIZE);
+    error_t standing = TagFS_SnapshotInfo(snap_id, &info);
+    if (standing == OK && info.redirect_count == 1 && info.redirects[0].old_block == start)
+        copy = info.redirects[0].new_block;
+    TEST_ASSERT_EQ(wrote, TAGFS_BLOCK_SIZE, "the first block alone is written");
+    TEST_ASSERT_OK(standing, "the snapshot is standing");
+
+    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE),
+                   COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE, "the file reads back whole");
+    TEST_ASSERT_EQ(TestFirstDifference(g_test_output, now, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
+                   "its first block holds the write");
+    uint32_t changed = 0;
+    for (uint32_t k = 1; k < COW_SPAN_BLOCKS; k++)
+        changed += TestFirstDifference(g_test_output + k * TAGFS_BLOCK_SIZE,
+                                       was + k * TAGFS_BLOCK_SIZE,
+                                       TAGFS_BLOCK_SIZE) != TAGFS_BLOCK_SIZE;
+    TEST_ASSERT_OK(tagfs_read_block(start, s_cow_block), "the frozen block reads");
+    changed += TestFirstDifference(s_cow_block, was, TAGFS_BLOCK_SIZE) != TAGFS_BLOCK_SIZE;
+    TestEvidence("blocks the write should have left as they were that changed, in "
+                 "the file or its snapshot", changed);
+    if (changed)
+        verdict = TEST_DEFECT;
+out:
+    if (have_meta)
+        tagfs_metadata_free(&meta);
+    if (file_id) {
+        ksnprintf(auto_name, sizeof(auto_name), "auto-snap-%u", file_id);
+        uint32_t auto_id = CowSnapshotNamed(auto_name);
+        if (auto_id && auto_id != snap_id)
+            TagFS_SnapshotDelete(auto_id);
+    }
+    if (snap_id)
+        TagFS_SnapshotDelete(snap_id);      /* gives the frozen block back */
+
+    /* Where the record's one extent starts now says what is still owed. */
+    uint32_t first = 0;
+    uint32_t span  = 0;
+    if (copy && file_id && tagfs_get_metadata(file_id, &meta) == 0) {
+        if (meta.extent_count == 1 && meta.extents) {
+            first = meta.extents[0].start_block;
+            span  = meta.extents[0].block_count;
+        }
+        tagfs_metadata_free(&meta);
+    }
+    if (copy && first == copy && span == COW_SPAN_BLOCKS) {
+        tagfs_free_blocks(start + 1, COW_SPAN_BLOCKS - 1);
+        if (!CowFileCutToTheCopy(file_id, copy, now)) {
+            /* It still names two blocks it never held, and deleting it would
+             * give them to the allocator — so it stays, and the runner's count
+             * says so. */
+            verdict = TestFailedAt(__FILE__, __LINE__,
+                                   "the file names blocks it never held and could not "
+                                   "be cut back to its copy — it is left on the volume "
+                                   "(file, copy)", file_id, copy);
+            file_id = 0;
+        }
+    } else if (copy && first == start) {
+        /* The snapshot has just given back the block the record still names;
+         * deleting the file would give it back again. The copy is named by
+         * nothing now, and goes back once. */
+        verdict = TestFailedAt(__FILE__, __LINE__,
+                               "the write recorded its redirect and the file never moved "
+                               "onto the copy, so it names the block its snapshot gave "
+                               "back — it is left on the volume (file, copy)", file_id, copy);
+        tagfs_free_blocks(copy, 1);
+        file_id = 0;
+    }
+    if (file_id)
+        tagfs_delete_file(file_id);
+    return verdict;
+}
+
 /*
  * CoW redirect durability — the snapshot's frozen view survives a reboot.
  *
@@ -307,9 +489,15 @@ out:
 static const TestCase g_cow_tests[] = {
     { .name = "cow_snapshot_create",          .func = test_cow_snapshot_create,          .reach = TEST_WRITES_TO_VOLUME },
     { .name = "cow_before_after_write",       .func = test_cow_before_after_write,       .reach = TEST_WRITES_TO_VOLUME },
+    { .name  = "cow_moves_only_the_block_written", .func = TestCowMovesOnlyTheBlockWritten,
+      .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_step   = "1.3",
+      .caveat_defect = "a write into the first block of a longer extent, under a snapshot, "
+                       "moves the whole extent onto a one-block copy, so the file's later "
+                       "blocks read blocks it never held" },
     { .name = "cow_redirect_reboot_survival", .func = test_cow_redirect_reboot_survival, .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_cow_suite = {
-    .name = "cow", .tests = g_cow_tests, .count = ARRAY_SIZE(g_cow_tests),
+    .tests = g_cow_tests, .count = ARRAY_SIZE(g_cow_tests),
 };

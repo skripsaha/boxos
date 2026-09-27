@@ -2221,11 +2221,11 @@ void irq_handler(interrupt_frame_t *frame)
          * arrived; this release store is the core's own word that it did, and
          * it pairs with the initiator's acquire load. Written LAST, after the
          * EOI, so the flag means "nothing of mine is still in flight". Reaching
-         * this branch also proves this core held no spin_lock — spin_lock runs
-         * its whole critical section with IF=0, so the IPI could not have been
-         * delivered inside one; it waited in the LAPIC IRR until the lock was
-         * released. That is precisely what makes a complete roll call on the
-         * other side worth having. */
+         * this branch proves this core was not in a stretch that kept IF=0 —
+         * the IPI waited in the LAPIC IRR until such a spin_lock section was
+         * released. It does not prove the core held no lock: ata_dma_sync
+         * runs `sti` inside its caller's sections, and a core waiting there
+         * on its DMA takes this IPI with the caller's lock still held. */
         __atomic_store_n(&g_amp.cores[amp_get_core_index()].halted, (uint8_t)1,
                          __ATOMIC_RELEASE);
         while (1)

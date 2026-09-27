@@ -201,12 +201,13 @@ static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_o
 
     /* The bytes reach the program's pages BEFORE anything says they did, and
      * a count is said only of bytes that got there. A commit that cannot
-     * finish — a page the program does not own, or no frame left to bring in
-     * one it does — is the read's answer: its error and 0 bytes, the code
-     * crate_out_commit hands the synchronous path for the same refusal. This
-     * used to go on and report the whole count, and a read into a buffer the
-     * program had not been through yet said every byte had arrived while the
-     * pages past the first untouched one stayed zeros. */
+     * finish — a page the program does not own (ERR_INVALID_ADDRESS), or no
+     * frame left to bring in one it does (ERR_NO_MEMORY) — is the read's
+     * answer: its error and 0 bytes, the code crate_out_commit hands the
+     * synchronous path for the same refusal. This used to go on and report
+     * the whole count, and a read into a buffer the program had not been
+     * through yet said every byte had arrived while the pages past the first
+     * untouched one stayed zeros. */
     if (reported > 0) {
         error_t crc = (ctx->out_base && ctx->target && ctx->target->cabin)
                           ? vmm_user_buf_commit_out(ctx->target->cabin->vmm, ctx->out_user_addr,
@@ -420,7 +421,7 @@ static int ObjRead(const ManifestOp *op,
      * we copy back to user pages at the end. The kernel address is one
      * contiguous allocation regardless of how the user pages map. */
     void *kp = crate_out_alloc(out, out->capacity);
-    if (!kp) return storage_op_fail(ctx, crates, ERR_INVALID_ADDRESS, waybill);
+    if (!kp) return storage_op_fail(ctx, crates, ERR_NO_MEMORY, waybill);
 
     TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
     if (!handle) {
@@ -1062,7 +1063,8 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (op->in_crate != CRATE_INDEX_NONE) {
         Crate *src = &crates[op->in_crate];
         if (src->size > 0 && src->size < sizeof(qbuf)) {
-            if (crate_read(src, ctx, qbuf, src->size) != OK) return ERR_INVALID_ADDRESS;
+            error_t cr = crate_read(src, ctx, qbuf, src->size);
+            if (cr != OK) return cr;
             qlen = src->size;
             qbuf[qlen] = '\0';
         }
@@ -1139,7 +1141,8 @@ static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (src->size == 0 || src->size > 127) return ERR_INVALID_ARGUMENT;
 
     char tag[128];
-    if (crate_read(src, ctx, tag, src->size) != OK) return ERR_INVALID_ADDRESS;
+    error_t cr = crate_read(src, ctx, tag, src->size);
+    if (cr != OK) return cr;
     tag[src->size] = '\0';
 
     char key[64], value[64];
@@ -1165,7 +1168,8 @@ static int ObjTagUnset(const ManifestOp *op, Crate *crates, uint16_t crate_count
     if (src->size == 0 || src->size > 63) return ERR_INVALID_ARGUMENT;
 
     char key[64];
-    if (crate_read(src, ctx, key, src->size) != OK) return ERR_INVALID_ADDRESS;
+    error_t cr = crate_read(src, ctx, key, src->size);
+    if (cr != OK) return cr;
     key[src->size] = '\0';
 
     if (tagfs_remove_tag_string(file_id, key) != 0) {
@@ -1207,7 +1211,8 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (op->in_crate != CRATE_INDEX_NONE) {
         Crate *src = &crates[op->in_crate];
         if (src->size > 0 && src->size < sizeof(tag_buf)) {
-            if (crate_read(src, ctx, tag_buf, src->size) != OK) return ERR_INVALID_ADDRESS;
+            error_t cr = crate_read(src, ctx, tag_buf, src->size);
+            if (cr != OK) return cr;
             tlen = src->size;
             tag_buf[tlen] = '\0';
         }
@@ -1330,7 +1335,8 @@ static int ObjSnapList(const ManifestOp *op, Crate *crates, uint16_t crate_count
     uint8_t blob[4 + 64 * 4];   /* count + up to max_ids (<= 64) ids */
     memcpy(blob, &count, 4);
     if (count > 0) memcpy(blob + 4, ids, count * 4);
-    if (crate_write(out, ctx, blob, bytes) != OK) return ERR_INVALID_ADDRESS;
+    error_t cr = crate_write(out, ctx, blob, bytes);
+    if (cr != OK) return cr;
     return OK;
 }
 
@@ -1370,7 +1376,8 @@ static int ObjSnapInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count
     blob[pos++] = cs.flags;
     memcpy(blob + pos, cs.name, 32); pos += 32;
 
-    if (crate_write(out, ctx, blob, pos) != OK) return ERR_INVALID_ADDRESS;
+    error_t cr = crate_write(out, ctx, blob, pos);
+    if (cr != OK) return cr;
     return OK;
 }
 
