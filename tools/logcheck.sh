@@ -8641,9 +8641,9 @@ EOF2
     python3 - <<'EOF2'
 p = "src/kernel/core/memory/vmm/vmm.c"
 s = open(p).read()
-a = "    if (window || VmmFirstTouch(ctx, user_vaddr) <= 0)\n"
+a = "    int touched = VmmFirstTouch(ctx, user_vaddr);\n"
 assert s.count(a) == 1, "quillmut first-touch anchor missing"
-s = s.replace(a, "    if (window || 1)   /* logcheck mutation: a copy never brings a page in */\n", 1)
+s = s.replace(a, "    int touched = 0;   /* logcheck mutation: a copy never brings a page in */\n", 1)
 open(p, "w").write(s)
 EOF2
     mut_done src/kernel/core/memory/vmm/vmm.c "logcheck mutation"

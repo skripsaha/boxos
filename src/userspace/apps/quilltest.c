@@ -45,13 +45,13 @@
  * ‼ A CASE THAT HARMS MORE THAN ITS OWN FILES EXISTS ONLY FOR A THROWAWAY IMAGE.
  * quilltest is on every volume, and it wears `system`. sequential and
  * interleave leak blocks on the synchronous path of HEAD, fidhistory spends
- * fifty thousand file ids for good, and systemtag deletes the kernel the
- * volume boots. Those four are compiled only into a quilltest built with
+ * fifty thousand file ids for good, usememory interns its 91 tags in the
+ * volume's registry for good, and systemtag deletes the kernel the volume
+ * boots. Those five are compiled only into a quilltest built with
  * VOLUME_TESTS=on — the key that already means a throwaway image, and that
  * builds the kernel's own writing tests — and anywhere else each answers one
- * FAIL saying so. The others read, or change only files of their own
- * (usememory also interns its 91 tags, as its listing says), or are the
- * power-cut modes, and stay in every build.
+ * FAIL saying so. The others read, or change only files of their own, or
+ * are the power-cut modes, and stay in every build.
  */
 
 #include "box/print.h"
@@ -96,7 +96,6 @@ typedef struct {
 #endif
 
 static uint64_t *g_window;                        /* QUILL_READ_WINDOW, taken on first read */
-static char     g_probe[QUILL_USE_TAGS * 11];     /* "quiluNNNNN," per tag, the last one NUL */
 
 /* =========================================================================
  *  Bytes that say where they belong
@@ -369,9 +368,12 @@ static QuillVerdict QuillBigWrite(const char *const *args)
     return QUILL_FAIL;
 }
 
+#ifdef CONFIG_VOLUME_TESTS
 /* =========================================================================
- *  usememory — a long Use Context, across a reboot
+ *  usememory — a long Use Context, across a reboot (a throwaway image's case)
  * ========================================================================= */
+
+static char g_probe[QUILL_USE_TAGS * 11];     /* "quiluNNNNN," per tag, the last one NUL */
 
 /* "quilu00000,quilu00001,…" — QUILL_USE_TAGS tags; returns its length. */
 static size_t QuillUseProbe(void)
@@ -513,6 +515,7 @@ static QuillVerdict QuillUseMemory(const char *const *args)
            (unsigned)probe_len, QUILL_USE_TAGS);
     return QUILL_PENDING;
 }
+#endif /* CONFIG_VOLUME_TESTS */
 
 /* =========================================================================
  *  coldread / coldwrite — memory this program has never touched
@@ -677,9 +680,9 @@ static const QuillCase g_cases[] = {
     { "coldwrite", "", 0, QuillColdWrite,
       "does a write out of memory this program never touched write zeros, and say how many",
       "nothing: quillcold.bin is deleted and the volume anchored", false },
-    { "usememory", "", 0, QuillUseMemory,
+    { "usememory", "", 0, QUILL_THROWAWAY(QuillUseMemory),
       "is a 1000-byte Use Context remembered across a reboot (run it before and after)",
-      "between its halves a remembered context of 91 tags; for good, tags quilu* interned", false },
+      "between its halves a remembered context of 91 tags; for good, tags quilu* interned", true },
     { "fidhistory", "", 0, QUILL_THROWAWAY(QuillFidHistory),
       "what 50000 file ids spent on deleted files cost the next mount",
       "50000 file ids spent for good, and their dead records in the pool", true },
