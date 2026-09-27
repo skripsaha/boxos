@@ -577,6 +577,13 @@ int              tagfs_write(TagFSFileHandle* handle, const void* buffer, uint64
 int      tagfs_alloc_blocks(uint32_t count, uint32_t* out_start_block);
 int      tagfs_free_blocks(uint32_t start_block, uint32_t count);
 
+#ifdef CONFIG_VOLUME_TESTS
+/* The free list and count derived again from the bitmap, as a mount derives
+ * them; returns how far the count had drifted from it. For a startup test that
+ * has watched a block be given back twice — see the definition. */
+int64_t  TagFSAllocatorRederive(void);
+#endif
+
 int         tagfs_get_metadata(uint32_t file_id, TagFSMetadata* out);
 TagFSState* tagfs_get_state(void);
 

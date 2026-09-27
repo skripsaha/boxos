@@ -99,6 +99,31 @@ void kfree(void* ptr);
 void mem_stats(void);
 size_t mem_heap_size(void);
 
+#ifdef CONFIG_VOLUME_TESTS
+/*
+ * HEAPFAIL — one allocation answered NULL, as an exhausted heap answers it.
+ *
+ * Every allocation in the kernel has a road for NULL, and almost none of them
+ * had ever been walked: the heap does not run out on a desk. A startup test
+ * arms this for one core and a number N, and the Nth kmalloc made on that core
+ * since arming comes back NULL — before the slab and before the pool, so
+ * nothing is taken from either — and says so on the log. Once: the count goes
+ * on, nothing after the Nth is refused.
+ *
+ * One core, named by the caller, because the other cores are not the code
+ * under test: a test passes amp_get_core_index(), and a core number no
+ * processor has arms a plan that can never fire. An interrupt taken on the
+ * armed core is not the code under test either, and is passed over. Not seen:
+ * pmm_alloc (DMA pages), and slab_alloc called directly (dedup.c).
+ *
+ * Built only into a VOLUME_TESTS=on kernel.
+ */
+void     HeapFailArm(uint8_t core, uint32_t nth);   /* nth == 0 is taken as 1 */
+bool     HeapFailDisarm(void);                      /* true when a plan stood */
+uint32_t HeapFailSeen(void);                        /* allocations counted since arming */
+bool     HeapFailFired(void);
+#endif
+
 __attribute__((noreturn)) void panic(const char* message, ...);
 int kprintf(const char* format, ...);
 int ksnprintf(char* buf, size_t size, const char* fmt, ...);

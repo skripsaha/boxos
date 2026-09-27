@@ -23,6 +23,7 @@
 #include "dedup/dedup.h"
 #include "self_heal/self_heal.h"
 #include "integrity/integrity.h"
+#include "settle_cut/settle_cut.h"
 #include "../../kernel/drivers/timer/rtc.h"
 #include "../../lib/kernel/crypto.h"
 #include "logbook.h"
@@ -2419,6 +2420,32 @@ static void free_list_build(void)
     }
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+/*
+ * The free list and the free count, derived again from the bitmap — exactly as
+ * a mount derives them, and for the same reason: the bitmap is the truth about
+ * whether a block is taken, and both of the others are bookkeeping about it.
+ *
+ * For a startup test that has just watched a block be given back twice
+ * (free_run_locked does not look at the bit, so the second release puts the
+ * block on the list a second time and counts it free a second time, while the
+ * bitmap, cleared the first time, does not move). The test measures that and
+ * then leaves the allocator as the next mount would read it, instead of
+ * leaving one block for two owners to be handed. Returns how far the count
+ * had drifted from the bitmap: positive is blocks counted free that are not.
+ */
+int64_t TagFSAllocatorRederive(void)
+{
+    spin_lock(&g_state.lock);
+    uint64_t by_bitmap = count_free_blocks();
+    int64_t  drift     = (int64_t)g_state.ledger.free_blocks - (int64_t)by_bitmap;
+    free_list_build();
+    g_state.ledger.free_blocks = by_bitmap;
+    spin_unlock(&g_state.lock);
+    return drift;
+}
+#endif
+
 // ----------------------------------------------------------------------------
 // System behavior tag helpers
 // ----------------------------------------------------------------------------
@@ -3372,6 +3399,7 @@ error_t tagfs_init(void) {
             "medium as it is written; its name, the table, the bitmap and the "
             "ledger are made durable by `anchor` and by an orderly shutdown\n");
 
+    SettleCutSayArmed();            /* nothing at all unless SETTLECUT=<point> */
     TagFSHoldGroundOpenFile();      /* nothing at all unless HOLDGROUND=on */
     return 0;
 }
@@ -3405,6 +3433,10 @@ error_t tagfs_sync(void)
 
 static void tagfs_sync_inside(void)
 {
+    /* SETTLE_CUT_AT: a SETTLECUT=<point> kernel stops the machine at that
+     * point of the first sync to reach it (settle_cut.h); nothing in any other
+     * build. */
+    SETTLE_CUT_AT(SETTLE_CUT_POINT_REGISTRY);
     tag_registry_flush(g_state.registry);
 
     /*
@@ -3421,10 +3453,14 @@ static void tagfs_sync_inside(void)
      * named on the medium, the old copy is the only metadata that file has.
      * See the note over MetaPoolRetire.
      */
+    SETTLE_CUT_AT(SETTLE_CUT_POINT_POOL);
     meta_pool_flush();
+    SETTLE_CUT_AT(SETTLE_CUT_POINT_TABLE);
     file_table_flush();
+    SETTLE_CUT_AT(SETTLE_CUT_POINT_RETIRES);
     meta_pool_flush_retires();
 
+    SETTLE_CUT_AT(SETTLE_CUT_POINT_INTEGRITY);
     IntegrityFlush();
     IntegrityDrainReports();   // publish any pending bit-rot Touch events
 
@@ -3432,6 +3468,7 @@ static void tagfs_sync_inside(void)
      * data run, not the whole region the volume reserved for its growth. The
      * rest is zero on the medium and stays zero — writing it back every sync
      * would be two megabytes of traffic to say nothing. */
+    SETTLE_CUT_AT(SETTLE_CUT_POINT_BITMAP);
     uint32_t bitmap_bytes = (g_state.layout.data_blocks + 7) / 8;
     uint32_t sector_count = (bitmap_bytes + TAGFS_SECTOR_SIZE - 1) / TAGFS_SECTOR_SIZE;
     uint32_t bm_buf_size = sector_count * TAGFS_SECTOR_SIZE;
@@ -3479,6 +3516,7 @@ static void tagfs_sync_inside(void)
                 bm_buf_size);
     }
 
+    SETTLE_CUT_AT(SETTLE_CUT_POINT_LEDGER);
     tagfs_write_ledger();
 
     /* Drive write-cache flush.
@@ -3513,12 +3551,14 @@ static void tagfs_sync_inside(void)
      * exactly when somebody needs these records on the media, and "somebody
      * else is flushing this instant" is not an answer to that. See
      * tagfs_flush_cache_insisting for why the asking ends. */
+    SETTLE_CUT_AT(SETTLE_CUT_POINT_FLUSH);
     error_t flushed = tagfs_flush_cache_insisting();
     if (flushed != OK) {
         kprintf("[TagFS] sync: the registry, the pool, the file table, the "
                 "bitmap and the ledger are all written, and none of them is "
                 "proven durable\n");
     }
+    SETTLE_CUT_AT(SETTLE_CUT_POINT_DONE);
 }
 
 /*

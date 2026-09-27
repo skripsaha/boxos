@@ -226,7 +226,12 @@ int tag_bitmap_set(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id) {
     uint32_t needed_max = (file_id > idx->max_file_id) ? file_id : idx->max_file_id;
     ensure_bitmap_width(idx->bitmaps[tag_id], needed_max);
 
-    if (!idx->bitmaps[tag_id]->bits) {
+    /* A row that could not be widened is refused, never written past. This
+     * asked only whether the row had bits at all, so a row that failed to grow
+     * kept its old array and had the new file's bit set beyond the end of it —
+     * one byte into whatever the heap put next, every eighth new file id. */
+    TagBitmap* row = idx->bitmaps[tag_id];
+    if (!row->bits || row->bit_count <= needed_max) {
         spin_unlock(&idx->lock);
         return -1;
     }

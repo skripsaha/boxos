@@ -533,6 +533,33 @@ endif
 
 RETURNFAIL_MARK = $(BUILDDIR)/.returnfail.$(if $(filter on,$(RETURNFAIL)),on,off)
 
+# ── SETTLECUT=<point> ──────────────────────────────────────────────────────
+#
+# The power goes at a named point of the metadata sync. The first sync of the
+# boot to reach it — an `anchor`, or the shutdown; nothing syncs during boot —
+# stops the whole machine right there, and the medium is left exactly as a
+# power cut at that point leaves it, for the host to read back
+# (tools/volume-read.py check). The points are named by the record ABOUT to be
+# written, so a scenario keeps its meaning when the sync becomes Settle at
+# step 1.4:
+#
+#   registry pool table retires integrity bitmap ledger flush done
+#
+# tagfs/settle_cut/settle_cut.h is the one list of them; a value that is not on
+# it names an undeclared point and does not compile.
+#
+# Not with VOLUME_TESTS=on: the startup tests sync the volume themselves, so the
+# cut would land inside a test instead of in the scenario it names.
+SETTLECUT ?=
+ifneq ($(SETTLECUT),)
+ifeq ($(VOLUME_TESTS),on)
+$(error SETTLECUT=$(SETTLECUT) cannot be built with VOLUME_TESTS=on — the startup tests sync the volume themselves, so the cut would land inside a test instead of in the scenario it names)
+endif
+CFLAGS += -DCONFIG_TAGFS_SETTLE_CUT_POINT=SETTLE_CUT_POINT_$(shell printf '%s' '$(SETTLECUT)' | tr '[:lower:]' '[:upper:]')
+endif
+
+SETTLECUT_MARK = $(BUILDDIR)/.settlecut.$(if $(SETTLECUT),$(SETTLECUT),off)
+
 # The handoff address the image build chose, handed to the C side so the two
 # headers that name it can _Static_assert against it. Unconditional on
 # purpose: it first went in under `ifeq ($(DEBUG),on)`, where DEBUG defaults
@@ -593,6 +620,7 @@ BUILD_KEYS_SET := $(strip \
   $(if $(filter on,$(MOUNTFAIL)),MOUNTFAIL=on,) \
   $(if $(filter on,$(HOLDGROUND)),HOLDGROUND=on,) \
   $(if $(filter on,$(RETURNFAIL)),RETURNFAIL=on,) \
+  $(if $(SETTLECUT),SETTLECUT=$(SETTLECUT),) \
   $(if $(filter on,$(ENUMSILENCE)),ENUMSILENCE=on,) \
   $(if $(filter off,$(NOEXEC)),NOEXEC=off,) \
   $(if $(filter off,$(IOMMU)),IOMMU=off,))
@@ -879,6 +907,10 @@ $(RETURNFAIL_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.returnfail.*
 	@touch $@
 
+$(SETTLECUT_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.settlecut.*
+	@touch $@
+
 $(INTX_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.intx.*
 	@touch $@
@@ -914,8 +946,8 @@ $(ENUMSILENCE_MARK): | $(BUILDDIR)
 BUILD_KEY_MARKS := $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) \
                    $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) \
                    $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) \
-                   $(IOMMU_MARK) $(INTX_MARK) $(DEBUG_MARK) $(BRINGUP_MARK) \
-                   $(WEDGETEST_MARK) $(ENUMSILENCE_MARK)
+                   $(SETTLECUT_MARK) $(IOMMU_MARK) $(INTX_MARK) $(DEBUG_MARK) \
+                   $(BRINGUP_MARK) $(WEDGETEST_MARK) $(ENUMSILENCE_MARK)
 
 $(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(BUILD_KEY_MARKS) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
@@ -1914,6 +1946,11 @@ info:
 	@echo "Bochs-only flags:"
 	@echo "  BOCHSDBG=on        — launch with -debugger (internal text debugger)"
 	@echo "  BOCHS_DISPLAY=...  — sdl2 (default macOS), x, term, nogui, win32"
+	@echo ""
+	@echo "Test-stand build keys (never in a shipped build):"
+	@echo "  SETTLECUT=<point>  — the first sync to reach <point> stops the machine there, as a"
+	@echo "                       power cut would: registry|pool|table|retires|integrity|bitmap|"
+	@echo "                       ledger|flush|done (not with VOLUME_TESTS=on)"
 
 debug: $(IMAGE)
 	@$(MAKE) run GDB=on IMAGE=$(IMAGE) CORES=$(CORES) MEM=$(MEM) FULLSCREEN=$(FULLSCREEN) USB=$(USB) AHCI=$(AHCI) LOG=$(LOG) DEBUG=$(DEBUG)

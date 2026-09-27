@@ -102,6 +102,7 @@ typedef struct {
     SUITE(integrity)       \
     SUITE(dedup)           \
     SUITE(use_context)     \
+    VOLUME_TESTS_ONLY(SUITE(stand)) \
     /* the walk ends here; a new suite's line goes above */
 
 #define TEST_SUITE_DECLARED(name) extern const TestSuite g_##name##_suite;
@@ -161,6 +162,19 @@ TestResult TestFailedAt(const char* file, int line, const char* what,
 /* The evidence a caveated test owes on both of its outcomes: the words that
  * say what was counted, and the count. Printed as "(<words> <n>)". */
 void TestEvidence(const char* words, uint64_t n);
+
+/* What a test that writes leaves behind, as the runner counts it before and
+ * after every such test (tests.c, the residue guard): the files, the
+ * snapshots, and the blocks in use outside the volume's own chains. A test
+ * whose defect IS a leak takes the same count, to measure what it leaked and
+ * to give back exactly that — so the guard stays strict for everybody. */
+typedef struct {
+    uint64_t files;
+    uint32_t snapshots;
+    uint64_t held;
+} VolumeTally;
+
+bool VolumeTallyTake(VolumeTally* tally);
 
 /* Why a test that ran decided not to run. Returns TEST_SKIP. */
 TestResult test_steps_aside(const char* why);
