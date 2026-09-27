@@ -1,6 +1,9 @@
 #include "tests.h"
 #include "../tagfs.h"
 #include "boardroom.h"
+#ifdef CONFIG_VOLUME_TESTS
+#include "block_fail.h"
+#endif
 
 // ============================================================================
 // The runner, the judge, and what the suites share. The tests themselves live
@@ -173,12 +176,6 @@ int TestFileRead(uint32_t file_id, void* buffer, uint32_t capacity)
 // the guard does not count tags.
 // ============================================================================
 
-typedef struct {
-    uint64_t files;
-    uint32_t snapshots;
-    uint64_t held;
-} VolumeTally;
-
 static uint32_t g_snapshot_ids[TAGFS_MAX_SNAPSHOTS];
 static uint8_t  g_chain_block[TAGFS_BLOCK_SIZE];
 
@@ -206,7 +203,7 @@ static uint32_t VolumeChainLength(uint32_t head_volume_block, uint32_t magic)
     return links;
 }
 
-static bool VolumeTallyTake(VolumeTally* tally)
+bool VolumeTallyTake(VolumeTally* tally)
 {
     TagFSState* fs = tagfs_get_state();
     if (!fs || !fs->initialized)
@@ -375,6 +372,33 @@ static void TestSayWritePath(void)
             seat, BoardroomSeatName(seat));
 }
 
+/*
+ * A fault left armed.
+ *
+ * BLOCKFAIL and HEAPFAIL strike whatever meets them next. A test that came
+ * back with one still standing — out through an assertion, or by forgetting —
+ * would have it strike the runner's own count of the volume, the next test,
+ * or the rest of the boot. So both are taken down after every test, before
+ * anything is counted, and a test that left one standing has failed.
+ */
+static bool TestLeftAFaultArmed(const TestCase* test)
+{
+#ifdef CONFIG_VOLUME_TESTS
+    bool block = BlockFailDisarm();
+    bool heap  = HeapFailDisarm();
+    if (!block && !heap)
+        return false;
+    kprintf("[TESTS] %s failed: it left %s armed — taken down by the runner "
+            "before anything else could meet it\n", test->name,
+            block && heap ? "BLOCKFAIL and HEAPFAIL"
+                          : block ? "BLOCKFAIL" : "HEAPFAIL");
+    return true;
+#else
+    (void)test;
+    return false;
+#endif
+}
+
 static void TestRun(const TestCase* test, TestStats* stats)
 {
     bool        guarded = test->reach == TEST_WRITES_TO_VOLUME;
@@ -394,11 +418,14 @@ static void TestRun(const TestCase* test, TestStats* stats)
 
     debug_printf("[TESTS] running %s\n", test->name);
     TestResult seen = test->func();
+    bool left_armed = TestLeftAFaultArmed(test);
 
     /* Residue first: a test that left the volume changed has failed, and
      * whatever it would otherwise have been judged — held included — is not
      * said, so a count of held lines never includes one that failed. */
     if (guarded && VolumeResidueSaid(test->name, &before))
+        stats->total_failed++;
+    else if (left_armed)
         stats->total_failed++;
     else
         TestJudge(test, seen, stats);

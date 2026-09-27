@@ -340,7 +340,7 @@ static void halt_drain_async_writes(void)
  * so the kernel has one answer to "a core is not responding", not two. */
 #define HALT_AP_ARRIVAL_US ((uint64_t)CONFIG_TLB_SHOOTDOWN_PANIC_MS * 1000ULL)
 
-static void halt_all_ap_cores(void)
+void halt_all_ap_cores(void)
 {
     if (!g_amp.multicore_active)
         return;

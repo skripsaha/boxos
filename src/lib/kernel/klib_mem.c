@@ -23,6 +23,10 @@
 #include "slab.h"
 #include "pmm.h"
 #include "vmm.h"
+#ifdef CONFIG_VOLUME_TESTS
+#include "amp.h"    /* HEAPFAIL: which core is asking */
+#include "idt.h"    /* HEAPFAIL: whether it is asking from an interrupt handler */
+#endif
 
 #define HEAP_CANARY_MAGIC  0xDEADBEEFCAFEBABEULL
 #define HEAP_GUARD_ENABLED 1
@@ -328,10 +332,105 @@ static void *kmalloc_internal(size_t size)
     return result;
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+/*
+ * HEAPFAIL (klib.h), with the plan under a sequence word: rewritten only while
+ * the word is even (nothing armed), copied between two looks at it. Every
+ * kmalloc on every core asks, so the question costs one load of one word while
+ * nothing is armed and takes no lock.
+ *
+ * The count is written by the armed core alone — every other core, and every
+ * interrupt taken on that one, is turned away before it — so it is a plain
+ * increment stored atomically, never a read-modify-write two cores could race.
+ */
+typedef struct {
+    uint8_t  core;
+    uint32_t nth;
+} HeapFailPlan;
+
+static HeapFailPlan      g_heap_fail;
+static volatile uint32_t g_heap_fail_gen;       /* odd while a plan stands */
+static volatile uint32_t g_heap_fail_seen;
+static volatile uint32_t g_heap_fail_fired;
+
+bool HeapFailDisarm(void)
+{
+    uint32_t g = __atomic_load_n(&g_heap_fail_gen, __ATOMIC_ACQUIRE);
+    while (g & 1u)
+    {
+        if (__atomic_compare_exchange_n(&g_heap_fail_gen, &g, g + 1u, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return true;
+    }
+    return false;
+}
+
+void HeapFailArm(uint8_t core, uint32_t nth)
+{
+    HeapFailDisarm();
+
+    g_heap_fail.core = core;
+    g_heap_fail.nth  = nth ? nth : 1u;
+    __atomic_store_n(&g_heap_fail_seen, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_heap_fail_fired, 0u, __ATOMIC_RELAXED);
+
+    __atomic_add_fetch(&g_heap_fail_gen, 1u, __ATOMIC_RELEASE);    /* even -> odd */
+}
+
+uint32_t HeapFailSeen(void)
+{
+    return __atomic_load_n(&g_heap_fail_seen, __ATOMIC_ACQUIRE);
+}
+
+bool HeapFailFired(void)
+{
+    return __atomic_load_n(&g_heap_fail_fired, __ATOMIC_ACQUIRE) != 0;
+}
+
+static bool HeapFailStrikes(size_t size)
+{
+    uint32_t g = __atomic_load_n(&g_heap_fail_gen, __ATOMIC_ACQUIRE);
+    if (!(g & 1u))
+        return false;
+
+    HeapFailPlan plan = g_heap_fail;
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    if (__atomic_load_n(&g_heap_fail_gen, __ATOMIC_RELAXED) != g)
+        return false;
+
+    uint8_t me = amp_get_core_index();
+    if (me != plan.core)
+        return false;               /* another core is not the code under test */
+    if (IrqFrameInFlight() != NULL)
+        return false;               /* nor is an interrupt taken on this one */
+
+    uint32_t n = __atomic_load_n(&g_heap_fail_seen, __ATOMIC_RELAXED) + 1u;
+    __atomic_store_n(&g_heap_fail_seen, n, __ATOMIC_RELEASE);
+    if (n != plan.nth || __atomic_load_n(&g_heap_fail_fired, __ATOMIC_ACQUIRE))
+        return false;
+    __atomic_store_n(&g_heap_fail_fired, 1u, __ATOMIC_RELEASE);
+
+    /* Said here, before any caller can act on the NULL: kprintf takes no
+     * allocation of its own, and the caller may be about to print why it
+     * failed. */
+    kprintf("[HEAPFAIL] core %u: allocation %u since arming (%zu bytes) is "
+            "answered NULL, as an exhausted heap answers — nothing was taken "
+            "from the heap\n", me, n, size);
+    return true;
+}
+#endif
+
 void *kmalloc(size_t size)
 {
     if (size == 0)
         return NULL;
+
+#ifdef CONFIG_VOLUME_TESTS
+    /* Before the slab and before the pool: a refused allocation takes nothing
+     * from either, and is refused on whichever of the two it would have used. */
+    if (HeapFailStrikes(size))
+        return NULL;
+#endif
 
     /* Slab path: O(1) for small allocations. */
     if (size <= SLAB_LARGE_THRESHOLD)

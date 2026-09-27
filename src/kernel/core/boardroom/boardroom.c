@@ -18,6 +18,7 @@
 #include "vmm.h"
 #include "cpu_calibrate.h"
 #include "atomics.h"
+#include "block_fail.h"
 
 /*
  * A seat is a PLACE, and a medium is who is sitting in it.
@@ -660,6 +661,29 @@ uint32_t BoardroomSeatRun(uint8_t seat)
     return run;
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+/*
+ * What a seat's driver answers once its own retries have run out, for a
+ * command BLOCKFAIL refuses in its place (block_fail.h). The caller above
+ * cannot tell the two apart, which is the point: every road a real refusal
+ * takes out of here, this one takes too.
+ *
+ *   AHCI  -1 for a read or a write, after AHCI_MAX_RETRIES with the port
+ *         recovered between tries; ERR_IO, as an error_t, for a flush.
+ *   ATA   ATA_ERR_MAX_RETRIES for a read or a write; ATA_ERR_FLUSH_FAILED.
+ *   USB   -1 for all three.
+ */
+static int BoardMediumRefusal(BoardKind kind, BlockFailKind what)
+{
+    switch (kind) {
+    case BOARD_AHCI: return what == BLOCK_FAIL_FLUSH ? (int)ERR_IO : -1;
+    case BOARD_ATA:  return what == BLOCK_FAIL_FLUSH ? ATA_ERR_FLUSH_FAILED
+                                                     : ATA_ERR_MAX_RETRIES;
+    default:         return -1;
+    }
+}
+#endif
+
 int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
 {
     BoardSeat* s = seat_taken(seat);
@@ -672,6 +696,14 @@ int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
     while (count > 0) {
         uint32_t run = (count > most) ? most : count;
         int rc;
+
+#ifdef CONFIG_VOLUME_TESTS
+        /* Per run, because a run is what a driver is handed: the runs before a
+         * refused one reach the medium, exactly as they do when it is real. */
+        if (BlockFailStrikes(seat, BLOCK_FAIL_READ, lba, run)) {
+            return BoardMediumRefusal(s->kind, BLOCK_FAIL_READ);
+        }
+#endif
 
         switch (s->kind) {
         case BOARD_AHCI: rc = ahci_read_sectors_sync(s->index, lba,
@@ -704,6 +736,18 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
     while (count > 0) {
         uint32_t run = (count > most) ? most : count;
         int rc;
+
+#ifdef CONFIG_VOLUME_TESTS
+        /* Refused before the driver is called, so a refused write never
+         * reaches the medium — the runs before it do. The asynchronous
+         * WriteJob does not come through this door (write_job.c submits its
+         * reads and writes to AHCI itself), so no write it makes is ever
+         * refused here: that road is folded into this one at step 1.5, and
+         * armed there. */
+        if (BlockFailStrikes(seat, BLOCK_FAIL_WRITE, lba, run)) {
+            return BoardMediumRefusal(s->kind, BLOCK_FAIL_WRITE);
+        }
+#endif
 
         switch (s->kind) {
         case BOARD_AHCI: rc = ahci_write_sectors_sync(s->index, lba,
@@ -750,6 +794,20 @@ error_t BoardroomReadAsync(uint8_t seat, uint64_t lba, uint32_t count,
     if (!s || !dma_phys || count == 0) {
         return ERR_INVALID_ARGUMENT;
     }
+
+#ifdef CONFIG_VOLUME_TESTS
+    /* Refused the way these seats refuse an asynchronous read: taken, and then
+     * answered through the callback with ERR_IO — never by the submit's own
+     * return, which a real medium error does not reach. The callbacks in use
+     * only keep the status and pass it on, and a real completion can already
+     * arrive before the submit returns, so answering here is a road the
+     * callers already take. Nothing is issued, and the buffer is not touched. */
+    if (cb && (s->kind == BOARD_AHCI || s->kind == BOARD_USB) &&
+        BlockFailStrikes(seat, BLOCK_FAIL_READ, lba, count)) {
+        cb(s->index, 0, ERR_IO, ctx);
+        return OK;
+    }
+#endif
 
     switch (s->kind) {
     case BOARD_AHCI: {
@@ -941,6 +999,12 @@ int BoardroomFlush(uint8_t seat)
     if (!s) {
         return -1;
     }
+
+#ifdef CONFIG_VOLUME_TESTS
+    if (BlockFailStrikes(seat, BLOCK_FAIL_FLUSH, 0, 0)) {
+        return BoardMediumRefusal(s->kind, BLOCK_FAIL_FLUSH);
+    }
+#endif
 
     switch (s->kind) {
     case BOARD_AHCI: return ahci_flush_cache_sync(s->index);
