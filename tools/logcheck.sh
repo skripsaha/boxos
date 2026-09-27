@@ -40,6 +40,10 @@
 #                         fixes emulated, sizes shrunk, the slab count cut, a
 #                         copy's first touch taken away — must turn; and the
 #                         caveat judge's three answers, word for word
+#   logcheck.sh stackguard no boot: a block put on a TagFS stack, a held frame
+#                         grown or lifted, the reach grown or its caveat gone —
+#                         each must stop a plain make before the link, and the
+#                         harness must still link a grown frame, saying so
 #   logcheck.sh both
 #
 # Every check is a grep against build/serial.log. No timing assertions.
@@ -8386,6 +8390,184 @@ quill_fid_kept() {
     fi
 }
 
+# ===========================================================================
+# stackguard — a block buffer on the kernel stack stops the link
+# ===========================================================================
+#
+# tools/check_stack_usage.py stands in front of the kernel link and holds the
+# frames tools/stack_usage_held.txt names, each under the step that removes it.
+# Host only, no boot. Each leg puts into the tree one thing the gate exists to
+# refuse, builds as a person at the desk builds — a plain make, without
+# HARNESS=on, because that is the one build the held numbers are judged on —
+# and requires the build to stop before the first link pass, in the gate's
+# own words and with its numbers:
+#   M1 a 4 KiB block on the stack of a function that holds none: new offender
+#   M2 a held frame 512 bytes bigger: grew
+#   M3 a held frame's block moved off the stack: lifted early
+#   M4 512 bytes on the way to the medium, in a frame under the limit: the
+#      reach grew, and nothing else is said to be wrong
+#   M5 the reach line taken out of the held file: the reach is over its budget
+# Then M2 once more through the harness, where the same mutant must LINK, the
+# gate must say what it did not judge, and no stamp may be left: every *mut
+# scenario in this file builds a mutated tree with HARNESS=on, and one that
+# failed to link over a frame's few bytes would fail for the wrong reason.
+# ---------------------------------------------------------------------------
+
+STACKGUARD_HELD=tools/stack_usage_held.txt
+
+# stackguard_held FUNCTION — the bytes the held file holds FUNCTION at.
+stackguard_held() {
+    awk -v f=":$1" 'substr($1, length($1) - length(f) + 1) == f { print $2 }' "$STACKGUARD_HELD"
+}
+
+# stackguard_red NAME ERE — a plain make must stop at the gate, saying ERE,
+# before any link. Returns 0 when it did; the build log is kept either way.
+stackguard_red() {
+    local log="$SCRATCH/build.stackguard.$1.log" rc
+    mut_stamp_passed
+    command make >"$log" 2>&1
+    rc=$?
+    [ $rc -ne 0 ] && grep -qE "$2" "$log" && ! grep -q "Nameplate pass 1" "$log"
+}
+
+stackguard_said() {   # the gate's first refusal in NAME's build, for a verdict line
+    grep -E '^\[stack\] FAIL' "$SCRATCH/build.stackguard.$1.log" | head -1 | cut -c1-220
+}
+
+stackguard_block_on() {
+    mutate src/kernel/tagfs/tagfs.c
+    python3 - <<'EOF2'
+p = "src/kernel/tagfs/tagfs.c"
+s = open(p).read()
+anchor = "void tagfs_close(TagFSFileHandle *handle)\n{\n"
+assert s.count(anchor) == 1, "stackguard tagfs_close anchor missing"
+s = s.replace(anchor, anchor +
+    "    volatile uint8_t logcheck_scratch[TAGFS_BLOCK_SIZE];   /* logcheck mutation: a block on the stack */\n"
+    "    logcheck_scratch[handle ? handle->file_id % TAGFS_BLOCK_SIZE : 0] = 1;\n", 1)
+open(p, "w").write(s)
+EOF2
+    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 1
+}
+
+# stackguard_write_on grow|lift — tagfs_write_inside's block buffer, 512 bytes
+# more of it, or none of it on the stack.
+stackguard_write_on() {
+    mutate src/kernel/tagfs/tagfs.c
+    python3 - "$1" <<'EOF2'
+import sys
+p = "src/kernel/tagfs/tagfs.c"
+s = open(p).read()
+anchor = "    uint8_t block_buf[TAGFS_BLOCK_SIZE];\n    uint64_t bytes_written = 0;\n"
+assert s.count(anchor) == 1, "stackguard tagfs_write_inside anchor missing"
+if sys.argv[1] == "grow":
+    new = anchor + ("    volatile uint8_t logcheck_more[512];   /* logcheck mutation: a held frame grows */\n"
+                    "    logcheck_more[bytes_written % 512] = 1;\n")
+else:
+    new = ("    static uint8_t block_buf[TAGFS_BLOCK_SIZE];   /* logcheck mutation: the block leaves the stack */\n"
+           "    uint64_t bytes_written = 0;\n")
+open(p, "w").write(s.replace(anchor, new, 1))
+EOF2
+    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 1
+}
+
+stackguard_reach_on() {
+    mutate src/kernel/tagfs/tagfs.c
+    python3 - <<'EOF2'
+p = "src/kernel/tagfs/tagfs.c"
+s = open(p).read()
+anchor = "    int rc = tagfs_get_metadata_inside(file_id, out);\n"
+assert s.count(anchor) == 1, "stackguard tagfs_get_metadata anchor missing"
+s = s.replace(anchor,
+    "    volatile uint8_t logcheck_reach[512];   /* logcheck mutation: 512 bytes on the way to the medium */\n"
+    "    logcheck_reach[file_id % 512] = 1;\n" + anchor, 1)
+open(p, "w").write(s)
+EOF2
+    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 1
+}
+
+stackguard_noreach_on() {
+    mutate "$STACKGUARD_HELD"
+    python3 - "$STACKGUARD_HELD" <<'EOF2'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+lines = [l for l in s.splitlines(True) if l.startswith("reach ")]
+assert len(lines) == 1, "stackguard reach line missing"
+open(p, "w").write(s.replace(lines[0], "# logcheck mutation: the reach caveat is gone\n", 1))
+EOF2
+    mut_done "$STACKGUARD_HELD" "logcheck mutation" 1
+}
+
+run_stackguard() {
+    echo "== stackguard: a block buffer on the kernel stack stops the link =="
+    local held_frames held_reach n said reach_now over held L
+
+    rm -f build/.stack_usage.ok
+    build
+    held_frames=$(grep -c '^caveat held: stack src/' "$SCRATCH/build.log")
+    said=$(grep -E '^\[stack\] [0-9]+ frame\(s\) over 1024 B' "$SCRATCH/build.log")
+    over=$(echo "$said" | sed -nE 's/^\[stack\] ([0-9]+) frame\(s\).*/\1/p')
+    held=$(echo "$said" | sed -nE 's/.*, ([0-9]+) held;.*/\1/p')
+    [ -n "$over" ] && [ "$over" = "$held" ] && [ "$held_frames" = "$held" ] \
+        && [ "$held" = "$(grep -cE '^src/' "$STACKGUARD_HELD")" ]
+    chk $? "stackguard: the clean tree holds every frame over the limit, and says each ($held_frames said; ${said:-no summary})"
+    held_reach=$(awk '$1 == "reach" { print $2 }' "$STACKGUARD_HELD")
+    grep -qE "^caveat held: stack reach $held_reach B > 4096 — .* — discharged by step [0-9.]+[a-z]*$" "$SCRATCH/build.log"
+    chk $? "stackguard: the reach is held at its measured $held_reach bytes, under its step"
+    grep -qE '^\[stack\] recursion on the way to the medium, each frame counted once: ' "$SCRATCH/build.log"
+    chk $? "stackguard: the recursion on the way to the medium is named"
+    [ -f build/.stack_usage.ok ]
+    chk $? "stackguard: the clean tree is judged in full through the harness too, and stamped"
+
+    # M1 — a new offender.
+    stackguard_block_on
+    stackguard_red block "^\[stack\] FAIL new offender: src/kernel/tagfs/tagfs.c:tagfs_close stands on [0-9]+ bytes, over 1024"
+    chk $? "stackguard: a 4 KiB block in tagfs_close stops the link — $(stackguard_said block)"
+    restore src/kernel/tagfs/tagfs.c
+
+    # M2 — a held frame grows, by at least what was put on it.
+    held=$(stackguard_held tagfs_write_inside)
+    stackguard_write_on grow
+    stackguard_red grow "^\[stack\] FAIL src/kernel/tagfs/tagfs.c:tagfs_write_inside grew to [0-9]+ bytes while its caveat holds it at $held "
+    n=$(sed -nE 's/.*tagfs_write_inside grew to ([0-9]+) bytes.*/\1/p' "$SCRATCH/build.stackguard.grow.log" | head -1)
+    [ -n "$n" ] && [ "$n" -ge $((held + 512)) ]
+    chk $? "stackguard: tagfs_write_inside 512 bytes bigger stops the link, at ${n:-?} over its $held — $(stackguard_said grow)"
+
+    # The same mutant through the harness: said, not judged, linked, no stamp.
+    L="$SCRATCH/build.stackguard.harness.log"
+    make >"$L" 2>&1
+    n=$?
+    [ $n -eq 0 ] && grep -q "Nameplate pass 1" "$L" && [ ! -f build/.stack_usage.ok ] \
+        && grep -qE "^\[stack\] under the harness, said and not judged: src/kernel/tagfs/tagfs.c:tagfs_write_inside grew to [0-9]+ bytes while its caveat holds it at $held " "$L"
+    chk $? "stackguard: under HARNESS=on the same mutant links, the growth is said and not judged, and no stamp is left (make $n)"
+    restore src/kernel/tagfs/tagfs.c
+
+    # M3 — a held frame's block leaves the stack: the caveat must be lifted.
+    stackguard_write_on lift
+    stackguard_red lift "^\[stack\] FAIL caveat lifted early: stack src/kernel/tagfs/tagfs.c:tagfs_write_inside — .* — (is [0-9]+ bytes, no longer over 1024|is no longer a function of its own): the test does not test what it claims, or step [0-9.]+[a-z]* already landed — lift the caveat$"
+    chk $? "stackguard: tagfs_write_inside with its block off the stack is a caveat lifted early — $(stackguard_said lift)"
+    restore src/kernel/tagfs/tagfs.c
+
+    # M4 — the reach grows, and it is the only thing said to be wrong.
+    stackguard_reach_on
+    stackguard_red reach "^\[stack\] FAIL reach grew to [0-9]+ bytes while its caveat holds it at $held_reach: "
+    reach_now=$(sed -nE 's/.*reach grew to ([0-9]+) bytes.*/\1/p' "$SCRATCH/build.stackguard.reach.log" | head -1)
+    [ -n "$reach_now" ] && [ "$reach_now" -ge $((held_reach + 512)) ] \
+        && [ "$(grep -c '^\[stack\] FAIL' "$SCRATCH/build.stackguard.reach.log")" = 1 ]
+    chk $? "stackguard: 512 bytes in tagfs_get_metadata grow the reach to ${reach_now:-?} over its $held_reach, and nothing else fails — $(stackguard_said reach)"
+    restore src/kernel/tagfs/tagfs.c
+
+    # M5 — no reach line: the budget itself is the rule.
+    stackguard_noreach_on
+    stackguard_red noreach "^\[stack\] FAIL reach $held_reach bytes, over its budget of 4096: ObjWrite "
+    chk $? "stackguard: with the reach caveat gone, $held_reach bytes against 4096 stops the link — $(stackguard_said noreach)"
+    restore "$STACKGUARD_HELD"
+
+    build   # every put-back discards the image; leave one built from clean sources
+    [ -f build/.stack_usage.ok ]
+    chk $? "stackguard: the tree put back is judged in full again, and stamped"
+}
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -8478,9 +8660,10 @@ case "${1:-both}" in
     standmut) run_standmut ;;
     quill)    run_quill ;;
     quillmut) run_quillmut ;;
+    stackguard) run_stackguard ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standmut; echo; run_quillmut ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|stand|standmut|quill|quillmut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standmut; echo; run_quillmut; echo; run_stackguard ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|stand|standmut|quill|quillmut|stackguard|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1

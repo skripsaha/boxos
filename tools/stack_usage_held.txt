@@ -1,0 +1,42 @@
+# tools/stack_usage_held.txt — what the stack guard holds, and until when.
+#
+# Every line is a Caveat: a defect this tree still has, measured, named, and
+# given the step of the Quill plan that removes it. While the defect is there
+# tools/check_stack_usage.py says "caveat held" and the kernel is linked. When
+# it is gone the line is a FAILURE until it is deleted — in the same commit as
+# the step that removed it, which is how this file only ever gets shorter.
+#
+# A function line: <source>:<function>  <bytes>  <step>  <what the frame holds>
+#   bytes are GCC 15.2.0's, default build keys; the frame may not grow past
+#   them, and falling to 1024 or under lifts the caveat.
+# The reach line:  reach  <bytes>  <step>  <the chain>
+#   the heaviest chain from a storage request to the medium; it may not grow,
+#   and falling to the budget (4096) lifts the caveat.
+#
+# Measured 2026-09-27 at e7aa9345. tagfs_init is 448 bytes over its 56f9871c
+# figure with no new buffer in it: the mount grew, GCC moved its partial-inline
+# split, and volume_take_ground (704 B, called once) now inlines into the part.
+src/kernel/tagfs/tag_registry/tag_registry.c:tag_registry_load   4464  1.1  char value[4096] + char key[256]
+src/kernel/tagfs/file_table/file_table.c:file_table_flush        4160  1.1  FileTableBlock block
+src/kernel/tagfs/file_table/file_table.c:file_table_init         4144  1.1  FileTableBlock fb
+src/kernel/tagfs/integrity/integrity.c:cache_get                 4144  1.1  uint8_t buf[TAGFS_BLOCK_SIZE] twice, sharing one slot
+src/kernel/tagfs/integrity/integrity.c:IntegrityInit             4192  1.1  uint8_t zero[TAGFS_BLOCK_SIZE]
+src/kernel/tagfs/integrity/integrity.c:IntegrityFlush            4128  1.1  uint8_t buf[TAGFS_BLOCK_SIZE]
+src/kernel/core/decks/storage/storage_ops.c:ObjCreate            1200  1.1b create's fixed tag buffers: tag_buf[256], own_storage[16][32], own_tags[16], k[64] + v[64]
+src/kernel/tagfs/cow/cow.c:TagFS_CowBeforeWrite                  4144  1.3  uint8_t original_data[TAGFS_BLOCK_SIZE]
+src/kernel/tagfs/disk_book/disk_book.c:DiskBookLogRedirect       2128  1.3  DiskBookEntry e + write_entry's buf[DISK_BOOK_ENTRY_SIZE], inlined
+src/kernel/tagfs/tagfs.c:tagfs_write_inside                      4304  1.4  uint8_t block_buf[TAGFS_BLOCK_SIZE]
+src/kernel/tagfs/tagfs.c:tagfs_defrag_file_inside                4288  1.4  uint8_t block_buf[TAGFS_BLOCK_SIZE]
+src/kernel/tagfs/metadata_pool/meta_pool.c:meta_pool_mirror_init 4240  1.4  uint8_t buf[TAGFS_BLOCK_SIZE]
+src/kernel/tagfs/metadata_pool/meta_pool.c:meta_pool_flush_retires 4192 1.4 uint8_t buf[TAGFS_BLOCK_SIZE]
+src/kernel/tagfs/metadata_pool/meta_pool.c:meta_pool_init        4176  1.4  MetaPoolBlock here
+src/kernel/tagfs/metadata_pool/meta_pool.c:meta_pool_delete      4176  1.4  uint8_t buf[TAGFS_BLOCK_SIZE]
+src/kernel/tagfs/metadata_pool/meta_pool.c:unpack_record         4160  1.4  uint8_t check_buf[TAGFS_MPOOL_DATA_SIZE]
+src/kernel/tagfs/metadata_pool/meta_pool.c:meta_pool_read        4128  1.4  uint8_t buf[TAGFS_BLOCK_SIZE]
+src/kernel/tagfs/tagfs.c:tagfs_init                              4624  1.6  uint8_t _bbuf[TAGFS_BLOCK_SIZE] in MARK_CHAIN_BLOCKS + volume_take_ground's ground[] and DeedCopy head/candidate, inlined
+src/kernel/tagfs/tagfs.c:ledger_read_copy                        1184  1.6  uint8_t buf[TAGFS_SECTOR_SIZE] + probe[TAGFS_SECTOR_SIZE]
+src/kernel/tagfs/disk_book/disk_book.c:DiskBookValidateAndReplay 2096  1.9  DiskBookEntry e + read_entry's buf[DISK_BOOK_ENTRY_SIZE], inlined
+src/kernel/tagfs/disk_book/disk_book.c:DiskBookInit              1584  1.9  DiskBookSuperblock disk + read_superblock_into's buf[TAGFS_SECTOR_SIZE], inlined
+src/kernel/tagfs/tagfs.c:ReadAheadPrefetch                       4224  1.10 uint8_t tmp[TAGFS_BLOCK_SIZE]
+src/kernel/tagfs/braid/braid.c:BraidVerifyBlock                  4208  1.10 uint8_t data[BRAID_BLOCK_SIZE] (no caller in src/)
+reach                                                            13496 1.4  ObjWrite -> tagfs_write_inside -> meta_pool_read -> the integrity map (cache_get) -> the medium: three block buffers nested
