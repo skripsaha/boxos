@@ -1,24 +1,28 @@
 /*
- * persist — two-phase TagFS persistence verification.
+ * persist — two-phase TagFS persistence verification, one phase per word.
  *
- * Phase A (no args / "write"):
- *   creates `_persist_test.txt` tagged "persist", writes a known marker
- *   (16 bytes: magic + sequence + checksum), exits. User then runs
- *   `bye` (or `reboot`) and re-launches BoxOS. The disk image is NOT
- *   formatted on boot — TagFS replays from the existing image.
+ *   persist write
+ *     creates `_persist_test` tagged "persist", writes a known marker
+ *     (16 bytes: magic + sequence + checksum) and exits WITHOUT anchoring
+ *     it. User then runs `bye` (or `reboot`) and re-launches BoxOS; or
+ *     tools/powercut.sh pulls the power instead (its `noanchor` scenario).
  *
- * Phase B ("verify"):
- *   re-opens the file by name, reads back the 16 bytes, checks magic
- *   and checksum. PASS means TagFS journaling + dirty-page flush
- *   actually committed the writes to the underlying disk before halt.
+ *   persist verify
+ *     finds the file by name, reads back the 16 bytes, checks magic and
+ *     checksum, and never writes. PASS means the write reached the medium
+ *     with its name before the machine went down.
+ *
+ * The phase is said, not guessed. It used to be chosen by whether the file
+ * already existed, so a file lost to a power cut turned "verify" into a new
+ * write that printed WROTE — never FAIL — and the loss looked like a pass.
  *
  * Why this matters: "OS that loses your file on shutdown" is not a
- * production OS. This is the foundation test before async storage —
- * we need to know the existing sync path is correctness-clean.
+ * production OS.
  */
 
 #include "box/file.h"
 #include "box/debug.h"
+#include "box/luggage.h"
 #include "box/string.h"
 
 #define PERSIST_NAME    "_persist_test"
@@ -109,18 +113,12 @@ static int do_verify(void)
 
 int main(void)
 {
-    /* No real arg parsing — the shell launches us via `proc_exec` and
-     * doesn't pass argv yet. Mode is decided by whether the marker
-     * already exists: if not, write; if yes, verify. Idempotent enough
-     * for a manual reboot loop. */
-    uint32_t   fids[4];
-    file_info_t infos[4];
-    int found = find_file_by_name(PERSIST_NAME, fids, infos, 4);
+    const char *mode = luggage_word_count() > 1 ? luggage_word(1) : "";
 
-    if (found <= 0) {
-        /* First run after a fresh boot or after delete — write phase. */
+    if (strcmp(mode, "write") == 0)
         return do_write(/*sequence=*/1);
-    }
-    /* File exists — assume reboot has happened, verify phase. */
-    return do_verify();
+    if (strcmp(mode, "verify") == 0)
+        return do_verify();
+    kdbg_print("[PERSIST] say what to do: persist write | persist verify (got '%s')", mode);
+    return 2;
 }

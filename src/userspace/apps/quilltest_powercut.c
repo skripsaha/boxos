@@ -4,8 +4,9 @@
  * tools/powercut.sh records every write the machine makes, pulls the power
  * at every flush and at every subset of the writes between two, and boots
  * what is left. These modes give it something to cut: a write left
- * unanchored while one core is busy (hog, settle), a writer that never
- * stops (churn), anchors racing that writer (race), and the read that says
+ * unanchored while one core is busy (hog, settle), a program asked to run
+ * beside that hog (hogged), a writer that never stops (churn), anchors
+ * racing that writer (race), and the read that says
  * afterwards whether a record survived (verify). Each says what it did in
  * quilltest's four words, with the numbers the judge needs to compute the
  * bytes a surviving file must hold. See quilltest.c for the rest.
@@ -120,6 +121,42 @@ QuillVerdict QuillSettle(const char *const *args)
     printf("[QUILL] settle: the hog (pid %d) was ended from outside (gone %d, exit %d)\n",
            hog, grc, code);
     return QUILL_PENDING;
+}
+
+/* PROGRAM run to its end in a cabin of its own while a hog spins in another,
+ * and how long that took — the design's "anchor under the hog answers":
+ * `quilltest hogged anchor_test` asks whether what an anchor needs from the
+ * kernel is given on a machine whose only core a program will not let go
+ * of. The shell runs one program at a time, so the hog and PROGRAM are both
+ * started from here. A PROGRAM that is never answered leaves this parked,
+ * and the silence is the finding. */
+QuillVerdict QuillHogged(const char *const *args)
+{
+    const char *line    = args[0];
+    uint32_t    hog_gen = 0, gen = 0;
+    int hog = proc_exec_gen("quilltest hog", NULL, &hog_gen);
+    if (hog <= 0) {
+        printf("[QUILL] hogged: FAIL — the hog would not start (answer %d)\n", hog);
+        return QUILL_FAIL;
+    }
+
+    uint64_t from = 0, to = 0;
+    time_uptime_ms(&from);
+    int     pid  = proc_exec_gen(line, NULL, &gen);
+    int32_t code = -1;
+    int     grc  = pid > 0 ? process_gone((uint32_t)pid, gen, &code) : pid;
+    time_uptime_ms(&to);
+    int krc = proc_finish((uint32_t)hog, hog_gen);
+
+    if (pid <= 0 || grc != 0) {
+        printf("[QUILL] hogged: FAIL — '%s' could not be run beside hog pid %d (start %d, "
+               "gone %d; the hog ended: %d)\n", line, hog, pid, grc, krc);
+        return QUILL_FAIL;
+    }
+    printf("[QUILL] hogged: %s — '%s' (pid %d) ended with exit %d after %llu ms while hog "
+           "pid %d spun (the hog ended: %d)\n", code == 0 ? "PASS" : "FAIL", line, pid,
+           code, (unsigned long long)(to - from), hog, krc);
+    return code == 0 ? QUILL_PASS : QUILL_FAIL;
 }
 
 /* What `settle` or `churn` left in NAME, read back after the machine came up

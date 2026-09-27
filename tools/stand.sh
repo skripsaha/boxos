@@ -462,16 +462,17 @@ fi
 # tools/ is asked as well as src/: an oracle that proves a host tool edits
 # that tool exactly as one that proves the kernel edits the kernel, and an
 # edit left behind there is a tool that judges every later run with its
-# defect put back. Three files in tools/ carry the two phrases as TEXT and are
-# passed over by name: the harness that writes them into its mutations, this
-# library that insists on them, and the plate that reads them. A harness
+# defect put back. Four files in tools/ carry the two phrases as TEXT and are
+# passed over by name: the two harnesses that write them into their mutations,
+# this library that insists on them, and the plate that reads them. A harness
 # added to tools/ is added to this list, and until it is this refuses to run
 # and names it — the safe way to be wrong. -I because every mutation is an
 # edit to a text source, and the one binary that carries the words is the
 # plate's own compiled search for them.
 MUT_LEFTOVER=$( { grep -rl -e "logcheck mutation" -e "logcheck injection" src
                   grep -rlI -e "logcheck mutation" -e "logcheck injection" \
-                       --exclude=logcheck.sh --exclude=stand.sh --exclude=buildplate.c tools
+                       --exclude=logcheck.sh --exclude=powercut.sh --exclude=stand.sh \
+                       --exclude=buildplate.c tools
                 } 2>/dev/null || true)
 if [ -n "$MUT_LEFTOVER" ]; then
     echo "$STAND_NAME: REFUSING TO RUN — the source tree still carries a mutation:"

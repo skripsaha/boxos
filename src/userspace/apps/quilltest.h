@@ -29,6 +29,7 @@ uint64_t QuillSize(uint32_t fid);
 /* The power-cut modes, quilltest_powercut.c. */
 __attribute__((noreturn)) QuillVerdict QuillHog(const char *const *args);
 QuillVerdict QuillSettle(const char *const *args);
+QuillVerdict QuillHogged(const char *const *args);
 QuillVerdict QuillVerify(const char *const *args);
 QuillVerdict QuillChurn(const char *const *args);
 QuillVerdict QuillRace(const char *const *args);
