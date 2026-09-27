@@ -165,6 +165,11 @@ ASMFLAGS_ELF   = -g -f elf64 $(ASM_INCLUDE) $(ASM_LAYOUT)
 #   -Wstack-usage=8192
 #                       warn at >8 KB stack frame; per-cpu/IST stacks are
 #                       16 KB so this leaves headroom for nested IRQs
+#   -fcallgraph-info=su
+#                       one .ci beside every object: each function's frame and
+#                       every direct call GCC emitted. Changes no byte of code
+#                       (.text measured identical). Read by the stack guard
+#                       beside the kernel link rules.
 #
 # Real-HW security hardening (GCC ≥ 11 / ≥ 12):
 #   -fzero-call-used-regs=used
@@ -186,7 +191,7 @@ CFLAGS         = -Os -m64 -ffreestanding -nostdlib -mno-red-zone -mno-sse -mno-m
                  -Werror=incompatible-pointer-types \
                  -Werror=return-type \
                  -Werror=int-conversion \
-                 -Wstack-usage=8192
+                 -Wstack-usage=8192 -fcallgraph-info=su
 # -Wno-type-limits — defensive `if (core < MAX_CORES)` checks on uint8_t
 # values look "always true" to GCC because uint8_t maxes at 255 < 256.
 # We keep the checks as type-widening defence (amp_get_core_index could
@@ -1134,6 +1139,33 @@ KERNEL_PASS1    = $(BUILDDIR)/kernel.pass1.elf
 NAMEPLATE_TOOL  = tools/nameplate
 KERNEL_LINK_IN  = $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
 
+# ---- The stack guard -------------------------------------------------------
+# A block buffer belongs to the job that moves the block, or to its OpContext —
+# not to the kernel stack: a K-Core and every process stand on 16 KiB, and
+# every interrupt lands on the same 16 KiB (no IST for vectors 32..255). GCC's
+# -Wstack-usage has one threshold and no memory, so it cannot say "these
+# twenty-three, until their step, and nothing new". tools/check_stack_usage.py
+# can: it reads the .ci of every C object, holds what the held file names as
+# Caveats, and refuses anything else. It stands in front of the link, so a
+# kernel that puts a new block on the stack is never linked, and `make run-bg`
+# cannot boot one either.
+#
+# The held numbers are the default build's. Under a build key the guard judges
+# only what no key excuses — a new offender, the budget — and under HARNESS=on,
+# a tree mutated on purpose, it says what it would refuse and writes no stamp,
+# so the next build without the harness judges the same objects in full.
+#
+# Order-only below, and not only for tidiness: the ELF recipe links `$^`, and
+# a stamp in that list would be handed to the linker.
+STACK_CHECK       = tools/check_stack_usage.py
+STACK_HELD        = tools/stack_usage_held.txt
+STACK_USAGE_STAMP = $(BUILDDIR)/.stack_usage.ok
+
+$(STACK_USAGE_STAMP): $(C_OBJS) $(STACK_CHECK) $(STACK_HELD) | $(BUILDDIR)
+	@python3 $(STACK_CHECK) --build $(BUILDDIR) --held $(STACK_HELD) \
+		--keys "$(BUILD_KEYS)" $(if $(filter on,$(HARNESS)),--harness,) \
+		--stamp $@ $(C_OBJS)
+
 $(NAMEPLATE_TOOL): tools/nameplate.c src/include/nameplate_format.h
 	@echo "Compiling Nameplate tool..."
 	@$(CC_HOST) -O2 -Wall -Wextra -Isrc/include -o $@.$$$$ $< && mv -f $@.$$$$ $@
@@ -1149,7 +1181,7 @@ $(BUILDPLATE_TOOL): tools/buildplate.c src/include/buildplate_format.h src/inclu
 	@echo "Compiling BuildPlate tool..."
 	@$(CC_HOST) -O2 -Wall -Wextra -Isrc/include -o $@.$$$$ $< && mv -f $@.$$$$ $@
 
-$(KERNEL_NP_OBJ): $(KERNEL_LINK_IN) $(NAMEPLATE_TOOL) $(ENTRYDIR)/linker.ld
+$(KERNEL_NP_OBJ): $(KERNEL_LINK_IN) $(NAMEPLATE_TOOL) $(ENTRYDIR)/linker.ld | $(STACK_USAGE_STAMP)
 	@echo "Nameplate pass 1 (kernel)..."
 	@$(LD) -g -nostdlib -T $(ENTRYDIR)/linker.ld -o $(KERNEL_PASS1) $(KERNEL_LINK_IN)
 	@$(NAMEPLATE_TOOL) build $(KERNEL_PASS1) $@
@@ -1174,7 +1206,7 @@ $(KERNEL_BIN): $(KERNEL_LINK_IN) $(KERNEL_NP_OBJ) $(BUILDPLATE_TOOL)
 	@$(BUILDPLATE_TOOL) stamp $@ --root . --keys "$(BUILD_KEYS)" \
 		$(if $(filter on,$(HARNESS)),--allow-harness,)
 
-$(KERNEL_ELF): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
+$(KERNEL_ELF): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED) | $(STACK_USAGE_STAMP)
 	@echo "Linking kernel ELF (with embedded shell binary)..."
 	@$(LD) -g -nostdlib -T $(ENTRYDIR)/linker.ld -o $@ $^
 
