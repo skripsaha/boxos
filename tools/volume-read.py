@@ -165,7 +165,7 @@ def CmdCut(args, medium):
         facts = log.EpochFacts()
         if args.count:
             return CutCount(log, facts, args.json)
-        classifier = blklog.Classifier(log, medium)
+        classifier = blklog.Classifier(log, medium, args.start)
         if args.list:
             return CutList(log, facts, classifier, args.json)
         epoch = log.Epoch(args.epoch)

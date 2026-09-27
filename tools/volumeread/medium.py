@@ -22,7 +22,8 @@ import sys
 from . import ondisk
 from .ondisk import (SECTOR, BLOCK, SECTORS_PER_BLOCK, DEED_MAGIC, DEED_SECTORS,
                      DEED_ROLE_HEAD, DEED_ROLE_TAIL, BOXOS_TYPE_GUID,
-                     MBR_TYPE_BOXOS, MBR_TYPE_PROTECTIVE, LEDGER_COPIES,
+                     MBR_TYPE_BOXOS, MBR_TYPE_PROTECTIVE, GPT_ARRAY_MAX_BYTES,
+                     GPT_BLOCK_MAX_BYTES, GROUND_MAX_PER_MEDIUM, LEDGER_COPIES,
                      REGISTRY_MAGIC, FILETBL_MAGIC, MPOOL_MAGIC,
                      DISKBOOK_TYPE_REDIRECT, RunsFromBits, RunsIntersect)
 
@@ -252,56 +253,194 @@ def permission_advice(dev):
             f"still asks for sudo, because writing is a different question.")
 
 
-def GroundCandidates(medium):
-    """Every place a volume could begin: [(start, sectors|None, how, kernels)].
+def _GptReadOne(medium, header_block, block_bytes, medium_sectors, said):
+    """gpt_read_one: the GPT whose header sits at block `header_block` of a
+    medium addressed in `block_bytes` blocks, every check the kernel makes, in
+    its order. Returns ("read", [(start, sectors, entry)]) with both in 512-byte
+    sectors, "absent" or "damaged"; the kernel's own sentence for a refusal is
+    appended to `said`. `medium_sectors` 0 is a length nobody could say, and
+    every bound on it is then skipped, as the kernel skips it."""
+    ratio = block_bytes // SECTOR
+    medium_blocks = medium_sectors // ratio
+    at = header_block * ratio
+    try:
+        header = bytearray(medium.sectors(at, ratio))
+    except IOError:
+        said.append("sector %u would not be read" % at)
+        return "damaged", []
+    if header[0:8] != b"EFI PART":
+        return "absent", []
+    header_bytes = struct.unpack_from("<I", header, 0x0C)[0]
+    if not 92 <= header_bytes <= block_bytes:
+        said.append("the GPT header at sector %u states a length of %u, which cannot be one"
+                    % (at, header_bytes))
+        return "damaged", []
+    want = struct.unpack_from("<I", header, 0x10)[0]
+    header[0x10:0x14] = bytes(4)
+    have = ondisk.Crc32(bytes(header[:header_bytes]))
+    if have != want:
+        said.append("the GPT header at sector %u does not match its own checksum "
+                    "(0x%08x against 0x%08x)" % (at, have, want))
+        return "damaged", []
+    my_lba = struct.unpack_from("<Q", header, 0x18)[0]
+    if my_lba != header_block:
+        said.append("the GPT header at sector %u is block %u of %u bytes and says it lives at "
+                    "block %u" % (at, header_block, block_bytes, my_lba))
+        return "damaged", []
+    entry_lba, count, size, want = struct.unpack_from("<QIII", header, 0x48)
+    if (size < 128 or size & (size - 1) or count == 0 or size > GPT_ARRAY_MAX_BYTES or
+            count > GPT_ARRAY_MAX_BYTES // size):
+        said.append("its GPT states %u entries of %u bytes, which is not a table the kernel reads"
+                    % (count, size))
+        return "damaged", []
+    array_bytes = count * size
+    array_secs = (array_bytes + SECTOR - 1) // SECTOR
+    array_at = entry_lba * ratio
+    if medium_sectors and (array_at >= medium_sectors or array_at + array_secs > medium_sectors):
+        said.append("its GPT puts the entry array at sectors %u..%u and the medium has %u"
+                    % (array_at, array_at + array_secs - 1, medium_sectors))
+        return "damaged", []
+    try:
+        array = medium.sectors(array_at, array_secs)
+    except IOError:
+        said.append("it would not give up its GPT entries")
+        return "damaged", []
+    have = ondisk.Crc32(array[:array_bytes])
+    if have != want:
+        said.append("the GPT entries at sector %u do not match their own checksum "
+                    "(0x%08x against 0x%08x)" % (array_at, have, want))
+        return "damaged", []
+    found = []
+    for i in range(count):
+        e = array[i * size:(i + 1) * size]
+        if e[0:16] != BOXOS_TYPE_GUID:
+            continue
+        first, last = struct.unpack_from("<QQ", e, 32)
+        if last < first:
+            said.append("GPT entry %u ends before it begins" % i)
+            continue
+        if medium_blocks and last >= medium_blocks:
+            said.append("GPT entry %u claims blocks %u..%u and the medium has %u — not using it"
+                        % (i, first, last, medium_blocks))
+            continue
+        if len(found) == GROUND_MAX_PER_MEDIUM:
+            said.append("the medium carries more BoxOS ground than the kernel's survey holds (%u)"
+                        % GROUND_MAX_PER_MEDIUM)
+            break
+        found.append((first * ratio, (last - first + 1) * ratio, i))
+    if not found:
+        said.append("its GPT names %u partition entries, none carrying BoxOS ground" % count)
+    return "read", found
 
-    GPT entries (UEFI 2.10 §5.3) give `last - first + 1` sectors, MBR entries
-    give their count, and the bare medium gives its own length. `kernels` says
-    whether the kernel would stand there at all: it takes an MBR entry of type
-    0x7f, or a GPT entry of the BoxOS type behind a protective MBR
-    (ground.c:696-731, 500) — and never a medium with no table. This tool
-    looks further than the kernel does on purpose, because it exists to get
-    evidence off volumes the kernel will not take."""
-    candidates = []
+
+def KernelGround(medium):
+    """GroundSurvey (ground.c: ground_survey_medium, ground_survey_gpt,
+    gpt_read_one) as this tree has it: [(start, sectors, how)] — every run of
+    the medium the kernel would stand on, in 512-byte sectors, in its order —
+    and the kernel's own sentences for every table, copy and entry it will not
+    use. The GPT is tried in every unit the medium could be addressed in,
+    512 to 4096 bytes, the primary and then, when the medium says how far it
+    runs, the copy at the far end; the first table that checks out is the only
+    one the kernel reads."""
+    said, medium_sectors = [], medium.SizeSectors() or 0
+    try:
+        mbr = medium.sectors(0, 1)
+    except IOError:
+        return [], ["the medium could not be read at all"]
+    if mbr[510:512] != b"\x55\xaa":
+        return [], ["the medium carries no partition table"]
+    entries = [mbr[446 + i * 16:446 + (i + 1) * 16] for i in range(4)]
+    if any(e[4] == MBR_TYPE_PROTECTIVE for e in entries):
+        block = SECTOR
+        while block <= GPT_BLOCK_MAX_BYTES:
+            ratio = block // SECTOR
+            if medium_sectors and medium_sectors < 2 * ratio:
+                break
+            unit = "" if block == SECTOR else ", in %u-byte blocks" % block
+            verdict, found = _GptReadOne(medium, 1, block, medium_sectors, said)
+            if verdict == "read":
+                return [(s, n, "GPT entry %u (BoxOS type)%s" % (i, unit)) for s, n, i in found], said
+            if medium_sectors:
+                far = medium_sectors // ratio - 1
+                verdict, found = _GptReadOne(medium, far, block, medium_sectors, said)
+                if verdict == "read":
+                    return [(s, n, "GPT entry %u (BoxOS type), from the copy at the far end%s"
+                             % (i, unit)) for s, n, i in found], said
+            block *= 2
+        said.append("neither copy of its GPT could be read, in any unit this medium could be "
+                    "addressed in" if medium_sectors else
+                    "its GPT is damaged, and the medium will not say how far it runs")
+        return [], said
+    grounds = []
+    for i, e in enumerate(entries):
+        if e[4] != MBR_TYPE_BOXOS:
+            continue
+        start, count = struct.unpack_from("<II", e, 8)
+        if count == 0:
+            said.append("MBR entry %u claims no sectors" % i)
+            continue
+        if medium_sectors and (start >= medium_sectors or start + count > medium_sectors):
+            said.append("MBR entry %u claims sectors %u..%u and the medium has %u — not using it"
+                        % (i, start, start + count - 1, medium_sectors))
+            continue
+        if len(grounds) == GROUND_MAX_PER_MEDIUM:
+            break
+        grounds.append((start, count, "MBR entry %u (type 0x%02x)" % (i, e[4])))
+    if not grounds:
+        said.append("its MBR holds no BoxOS ground — its four entries are types %s"
+                    % " ".join("%u:0x%02x" % (i, e[4]) for i, e in enumerate(entries)))
+    return grounds, said
+
+
+def GroundCandidates(medium):
+    """Every place a volume could begin: ([(start, sectors|None, how, kernels)],
+    the kernel's sentences for the ground it will not use).
+
+    The kernel's own ground comes first, kernels=True (KernelGround). Then
+    everything else this tool looks at, kernels=False: the primary GPT's
+    entries of any type as they stand (UEFI 2.10 §5.3, `last - first + 1`
+    sectors), every MBR entry, and the bare medium at its own length. This
+    tool looks further than the kernel does on purpose, because it exists to
+    get evidence off volumes the kernel will not take."""
+    kernel, said = KernelGround(medium)
+    candidates = [(s, n, how, True) for s, n, how in kernel]
+    taken = {(s, n) for s, n, _how in kernel}
+
+    def Evidence(start, sectors, how):
+        if (start, sectors) not in taken:
+            taken.add((start, sectors))
+            candidates.append((start, sectors, how, False))
 
     try:
         mbr = medium.sectors(0, 1)
     except IOError:
         mbr = b""
-    have_mbr = mbr[510:512] == b"\x55\xaa"
-    protective = have_mbr and any(
-        mbr[446 + i * 16 + 4] == MBR_TYPE_PROTECTIVE for i in range(4))
-
     try:
         hdr = medium.sectors(1, 1)
     except IOError:
         hdr = b""
     if hdr[0:8] == b"EFI PART":
         entry_lba, entry_count, entry_size = struct.unpack_from("<QII", hdr, 72)
-        if 0 < entry_count <= 512 and 128 <= entry_size <= 1024:
-            want = (entry_count * entry_size + SECTOR - 1) // SECTOR
-            table = medium.sectors(entry_lba, want)
-            for i in range(entry_count):
+        if 0 < entry_count and 128 <= entry_size and entry_count * entry_size <= GPT_ARRAY_MAX_BYTES:
+            try:
+                table = medium.sectors(entry_lba, (entry_count * entry_size + SECTOR - 1) // SECTOR)
+            except IOError:
+                table = b""
+            for i in range(len(table) // entry_size):
                 e = table[i * entry_size:(i + 1) * entry_size]
                 if len(e) < 56 or e[0:16] == bytes(16):
                     continue
                 first, last = struct.unpack_from("<QQ", e, 32)
-                named = e[0:16] == BOXOS_TYPE_GUID
-                candidates.append((first, last - first + 1 if last >= first else None,
-                                   f"GPT entry {i}" + (" (BoxOS type)" if named else ""),
-                                   protective and named))
-
-    if have_mbr:
+                Evidence(first, last - first + 1 if last >= first else None,
+                         f"GPT entry {i}" + (" (BoxOS type)" if e[0:16] == BOXOS_TYPE_GUID else ""))
+    if mbr[510:512] == b"\x55\xaa":
         for i in range(4):
             e = mbr[446 + i * 16:446 + (i + 1) * 16]
             first, count = struct.unpack_from("<II", e, 8)
             if first:
-                candidates.append((first, count, f"MBR entry {i} (type 0x{e[4]:02x})",
-                                   not protective and e[4] == MBR_TYPE_BOXOS and count > 0))
-
-    candidates.append((0, medium.SizeSectors(),
-                       "the medium itself, with no partition table", False))
-    return candidates
+                Evidence(first, count, f"MBR entry {i} (type 0x{e[4]:02x})")
+    Evidence(0, medium.SizeSectors(), "the medium itself, with no partition table")
+    return candidates, said
 
 
 def find_ground(medium, forced_start):
@@ -318,7 +457,7 @@ def find_ground(medium, forced_start):
     if forced_start is not None:
         return forced_start, "you said so"
 
-    candidates = GroundCandidates(medium)
+    candidates, _said = GroundCandidates(medium)
     for lba, _sectors, how, _kernels in candidates:
         if has_deed(medium, lba):
             return lba, how
@@ -398,9 +537,10 @@ def _TailAlone(medium, start, ground_sectors):
 
 class Stand:
     """Where the volume stands: which ground, which copy of its Deed, and what
-    the far copy says."""
+    the far copy says. `kernel_why`, on a ground the kernel does not stand on,
+    is why not, in its words."""
 
-    __slots__ = ("start", "sectors", "how", "kernels", "head", "head_why",
+    __slots__ = ("start", "sectors", "how", "kernels", "kernel_why", "head_why",
                  "stood_on", "deed", "tail", "tail_why", "far_end")
 
     def __init__(self, **kw):
@@ -409,7 +549,8 @@ class Stand:
 
 
 def StandOnDeed(medium, forced_start):
-    """The ground and the Deed the kernel would stand on (tagfs.c:1082-1142).
+    """The ground and the Deed the kernel would stand on (tagfs.c
+    volume_take_ground).
 
     Each candidate's head is tried with all of DeedReadHead; failing that, the
     far copy alone at the ground's last block. The first candidate that yields
@@ -418,24 +559,29 @@ def StandOnDeed(medium, forced_start):
     DeedReadTail checks it (deed.c:158-201); with or without it, the ground's
     last block is read too, because a growth cut between its two writes leaves
     the new far copy THERE (deed.c:177-198)."""
+    said = []
     if forced_start is not None:
         candidates = [(forced_start, None, "you said so", True)]
     else:
-        candidates = GroundCandidates(medium)
-        # The kernel's own grounds first, then everything this tool looks at.
-        candidates.sort(key=lambda c: not c[3])
+        candidates, said = GroundCandidates(medium)
+    kernel = [c for c in candidates if c[3]]
 
     for start, sectors, how, kernels in candidates:
+        why = None
+        if not kernels:
+            why = ("the kernel's ground (%s) holds no deed it can read"
+                   % "; ".join("%s, sectors %u+%u" % (h, s, n) for s, n, h, _k in kernel)
+                   if kernel else "the kernel finds no BoxOS ground on this medium: " + "; ".join(said))
         head, head_why = _HeadAt(medium, start, sectors)
         if head is not None:
             stand = Stand(start=start, sectors=sectors, how=how, kernels=kernels,
-                          head=head, stood_on="head", deed=head)
+                          kernel_why=why, stood_on="head", deed=head)
         else:
             tail = _TailAlone(medium, start, sectors)
             if tail is None:
                 continue
             stand = Stand(start=start, sectors=sectors, how=how, kernels=kernels,
-                          head=None, head_why=head_why, stood_on="tail", deed=tail)
+                          kernel_why=why, head_why=head_why, stood_on="tail", deed=tail)
         if stand.deed["layout"] is None:
             raise Unreadable("the deed at sector %u carries no layout stamp this "
                              "tool understands — nothing can say where anything is"
@@ -513,7 +659,7 @@ class VolumeFacts:
 
     def read_block(self, b):
         """A block of the data run, or None where the medium ends. Unbounded
-        by the run on purpose: tagfs_read_block bounds nothing (tagfs.c:1982)."""
+        by the run on purpose: tagfs_read_block bounds nothing (tagfs.c)."""
         if b not in self._cache:
             self._cache[b] = self.vread(self.layout["data_block"] + b)
         return self._cache[b]
@@ -527,10 +673,11 @@ class VolumeFacts:
         return raw if raw is not None else b""
 
     def _PredictGrowth(self):
-        """volume_take_more_ground (tagfs.c:828-1071), up to its commit. None
-        and a sentence when nothing is taken."""
+        """volume_take_more_ground (tagfs.c), up to its commit. None and a
+        sentence when nothing is taken — and nothing is on ground the kernel
+        does not stand on."""
         st, deed, lay = self.stand, self.deed, self.layout
-        if st.stood_on != "head":
+        if st.stood_on != "head" or not st.kernels:
             return None, None
         if st.sectors is None:
             return None, "the ground's length is not known here, so growth is not predicted"

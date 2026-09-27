@@ -8,7 +8,8 @@
  * one — so what it sees is what anybody using this machine would see.
  *
  * ‼ IT SAYS WHAT IT SAW, IN FOUR WORDS, AND JUDGES NOTHING.
- * Every case ends in exactly one line, and every figure in it was measured:
+ * Every case says its verdict in exactly one line, and every figure in it was
+ * measured:
  *
  *     [QUILL] <case>: PASS|DEFECT|PENDING|FAIL — <what was measured>
  *
@@ -17,9 +18,14 @@
  *   PENDING  the answer can only be read after a reboot or a power cut
  *   FAIL     anything else, including a case that could not ask its question
  *
+ * Progress lines carry numbers and no verdict word. The power-cut modes are
+ * cut rather than ended: hog says only what it started and churn what it
+ * wrote, a verdict each only when it fails; settle says PENDING before it
+ * parks, and a FAIL after it only when the park ends before the power goes.
+ *
  * Which defects are known, and which step of the plan discharges each, is
- * the host's table (tools/stand.sh, caveat_row). A DEFECT here is only an
- * observation; logcheck `quill` decides what it means.
+ * the host's table (tools/stand_caveat.sh, caveat_row). A DEFECT here is only
+ * an observation; logcheck `quill` decides what it means.
  *
  * ‼ ONE CASE PER RUN, BY NAME, AND NO "ALL".
  * Most cases change the volume, several of them for good, and they need
@@ -35,6 +41,17 @@
  * after the anchor, never before, and a kill cannot leave half a case on
  * the medium. The power-cut modes (settle, churn) are the exception by
  * design: being cut before they settle is what they are for.
+ *
+ * ‼ A CASE THAT HARMS MORE THAN ITS OWN FILES EXISTS ONLY FOR A THROWAWAY IMAGE.
+ * quilltest is on every volume, and it wears `system`. sequential and
+ * interleave leak blocks on the synchronous path of HEAD, fidhistory spends
+ * fifty thousand file ids for good, and systemtag deletes the kernel the
+ * volume boots. Those four are compiled only into a quilltest built with
+ * VOLUME_TESTS=on — the key that already means a throwaway image, and that
+ * builds the kernel's own writing tests — and anywhere else each answers one
+ * FAIL saying so. The others read, or change only files of their own
+ * (usememory also interns its 91 tags, as its listing says), or are the
+ * power-cut modes, and stay in every build.
  */
 
 #include "box/print.h"
@@ -49,36 +66,35 @@
 #include "box/error.h"
 #include "quilltest.h"
 
-/* logcheck's quillmut edits these five lines by exact text — keep them verbatim */
+/* logcheck's quillmut edits these two lines by exact text — keep them verbatim
+ * (and three in quilltest_throwaway.c) */
 #define QUILL_BIG_BYTES      (256u << 20)
-#define QUILL_WEAVE_BYTES    (64u << 20)
-#define QUILL_SEQ_BYTES      (3u << 20)
 #define QUILL_USE_TAGS       91          /* 91 x "quiluNNNNN" + 90 commas = 1000 bytes */
-/* ...and the delete line in QuillFidHistory. */
 
-#define QUILL_CHUNK          4096u
-#define QUILL_WIDTH_CEILING  (4u << 20)  /* a refusal below this is the record width, not the space */
-#define QUILL_LONG_TAG_BYTES 256u        /* the first length ObjQuery drops */
-#define QUILL_FID_CYCLES     50000u
-#define QUILL_FID_PROGRESS   10000u
+#define QUILL_LONG_TAG_BYTES 256u        /* the first length ObjQuery drops, one past the tag width */
 #define QUILL_READ_WINDOW    (1u << 20)
 #define QUILL_COLD_BYTES     (1u << 20)  /* under 2 MiB: malloc leaves it to first touch */
 #define QUILL_SEED_BIG       0xB16u
-#define QUILL_SEED_A         0xAu
-#define QUILL_SEED_B         0xBu
-#define QUILL_SEED_S         0x5u
 #define QUILL_SEED_COLD      0xC01Du
 
 typedef struct {
     const char   *name;
     const char   *args;      /* the words after the name, as the listing shows them */
     uint32_t      argc;      /* how many words that is */
-    QuillVerdict (*run)(const char *const *args);
+    QuillVerdict (*run)(const char *const *args);   /* NULL: not in this build */
     const char   *asks;
     const char   *leaves;
+    bool          throwaway; /* a throwaway image's case: VOLUME_TESTS=on builds only */
 } QuillCase;
 
-static uint64_t g_chunk[QUILL_CHUNK / 8];
+/* A throwaway image's case is compiled only into a VOLUME_TESTS=on build
+ * (the header says why); anywhere else its row stands, with nothing to run. */
+#ifdef CONFIG_VOLUME_TESTS
+#define QUILL_THROWAWAY(run) (run)
+#else
+#define QUILL_THROWAWAY(run) NULL
+#endif
+
 static uint64_t *g_window;                        /* QUILL_READ_WINDOW, taken on first read */
 static char     g_probe[QUILL_USE_TAGS * 11];     /* "quiluNNNNN," per tag, the last one NUL */
 
@@ -98,7 +114,7 @@ static uint64_t QuillWord(uint32_t seed, uint64_t off)
 }
 
 /* `len` bytes (a multiple of 8) of the stream, from file offset `base`. */
-static void QuillFill(uint64_t *dst, uint32_t seed, uint64_t base, uint64_t len)
+void QuillFill(uint64_t *dst, uint32_t seed, uint64_t base, uint64_t len)
 {
     for (uint64_t i = 0; i < len / 8; i++)
         dst[i] = QuillWord(seed, base + i * 8);
@@ -117,7 +133,7 @@ static void QuillFill(uint64_t *dst, uint32_t seed, uint64_t base, uint64_t len)
  * may land in pages a program has not touched yet is coldread's question,
  * and quillmut takes the kernel's answer to it away to see coldread notice —
  * without the cases beside it noticing too. */
-static uint64_t QuillReadBack(uint32_t fid, uint32_t seed, uint64_t size, int64_t *err)
+uint64_t QuillReadBack(uint32_t fid, uint32_t seed, uint64_t size, int64_t *err)
 {
     *err = 0;
     if (!g_window) {
@@ -158,13 +174,6 @@ int64_t QuillWrite(uint32_t fid, uint64_t off, const void *buf, size_t len)
     while ((w = fwrite(fid, off, buf, len)) == -(int64_t)ERR_BUSY)
         yield();
     return w;
-}
-
-/* One QUILL_CHUNK of the stream at `off`, written; fwrite's answer. */
-static int64_t QuillWriteChunk(uint32_t fid, uint32_t seed, uint64_t off)
-{
-    QuillFill(g_chunk, seed, off, QUILL_CHUNK);
-    return QuillWrite(fid, off, g_chunk, QUILL_CHUNK);
 }
 
 /* =========================================================================
@@ -213,7 +222,8 @@ int QuillFindEverywhere(const char *name, uint32_t *ids, int max)
     return found;
 }
 
-/* Delete every file called `name`: what a previous run left behind. */
+/* Delete every file called `name` on the whole volume that does not wear
+ * system or boot: a previous run's leftovers, or whatever the operator named. */
 static int QuillForget(const char *name)
 {
     uint32_t ids[8];
@@ -244,21 +254,15 @@ uint64_t QuillSize(uint32_t fid)
     return file_info(fid, &info) == 0 ? info.size : 0;
 }
 
-static bool QuillWears(uint32_t fid, const char *key)
-{
-    file_info_t info;
-    if (file_info(fid, &info) != 0)
-        return false;
-    for (uint8_t t = 0; t < info.tag_count; t++)
-        if (strcmp(info.tags[t].key, key) == 0)
-            return true;
-    return false;
-}
-
 /* =========================================================================
  *  longquery — a tag of 256 bytes
  * ========================================================================= */
 
+/* A tag is at most 255 bytes, and one longer is refused out loud: that is the
+ * only answer that behaves. No file wears a tag of q's, so "no file" is also
+ * what a kernel answers that parses the query and cuts the tag short — the
+ * 31 bytes parse_tag_list keeps, or the 255 tagfs_parse_tag keeps — and the
+ * case cannot tell that from a query answered as asked. */
 static QuillVerdict QuillLongQuery(const char *const *args)
 {
     (void)args;
@@ -296,9 +300,10 @@ static QuillVerdict QuillLongQuery(const char *const *args)
         return QUILL_PASS;
     }
     if (got == 0) {
-        printf("[QUILL] longquery: PASS — a query for one tag %u bytes long returned no "
-               "file of the volume's %d\n", QUILL_LONG_TAG_BYTES, all);
-        return QUILL_PASS;
+        printf("[QUILL] longquery: FAIL — a query for one tag %u bytes long, over the 255-byte "
+               "tag width, answered no file of the volume's %d where a refusal was due; a query "
+               "silently cut to a shorter tag answers the same\n", QUILL_LONG_TAG_BYTES, all);
+        return QUILL_FAIL;
     }
     printf("[QUILL] longquery: FAIL — a query for one tag %u bytes long returned %d of the "
            "volume's %d files\n", QUILL_LONG_TAG_BYTES, got, all);
@@ -314,7 +319,9 @@ static QuillVerdict QuillBigWrite(const char *const *args)
     (void)args;
     int fid = QuillCreate("quillbig.bin");
     if (fid <= 0) {
-        printf("[QUILL] bigwrite: FAIL — quillbig.bin could not be created (answer %d)\n", fid);
+        int arc = anchor(0);
+        printf("[QUILL] bigwrite: FAIL — quillbig.bin could not be created (answer %d, anchor %d)\n",
+               fid, arc);
         return QUILL_FAIL;
     }
 
@@ -324,9 +331,9 @@ static QuillVerdict QuillBigWrite(const char *const *args)
     uint64_t *buf = bay_open("quilltest:bigwrite", QUILL_BIG_BYTES, BAY_CREATE);
     if (!buf) {
         delete((uint32_t)fid);
-        anchor(0);
+        int arc = anchor(0);
         printf("[QUILL] bigwrite: FAIL — a Bay of %u bytes could not be opened, so no write "
-               "of that size could be asked for\n", QUILL_BIG_BYTES);
+               "of that size could be asked for (anchor %d)\n", QUILL_BIG_BYTES, arc);
         return QUILL_FAIL;
     }
     QuillFill(buf, QUILL_SEED_BIG, 0, QUILL_BIG_BYTES);
@@ -363,138 +370,6 @@ static QuillVerdict QuillBigWrite(const char *const *args)
 }
 
 /* =========================================================================
- *  sequential — one writer, 4 KiB at a time, one write after another
- * ========================================================================= */
-
-/* The design's 1.3 test "3 MB in a row". A lone writer is the case where
- * every block could lie next to the one before it: a record that merges
- * neighbouring blocks into one extent holds the whole file in a handful of
- * extents, and a record that takes one extent per write runs out of room at
- * its 4080 bytes long before the volume runs out of space. The host counts
- * the extents (logcheck `quill`, volume-read.py list). */
-static QuillVerdict QuillSequential(const char *const *args)
-{
-    (void)args;
-    int fid = QuillCreate("quillS.bin");
-    if (fid <= 0) {
-        printf("[QUILL] sequential: FAIL — quillS.bin could not be created (answer %d)\n", fid);
-        return QUILL_FAIL;
-    }
-
-    const uint32_t writes = QUILL_SEQ_BYTES / QUILL_CHUNK;
-    uint32_t done    = 0;
-    int64_t  refusal = QUILL_CHUNK;
-    for (; done < writes; done++) {
-        refusal = QuillWriteChunk((uint32_t)fid, QUILL_SEED_S, (uint64_t)done * QUILL_CHUNK);
-        if (refusal != (int64_t)QUILL_CHUNK)
-            break;
-    }
-    uint64_t acked = (uint64_t)done * QUILL_CHUNK;
-    uint64_t size  = QuillSize((uint32_t)fid);
-    int64_t  rerr  = 0;
-    uint64_t good  = QuillReadBack((uint32_t)fid, QUILL_SEED_S, size, &rerr);
-    int      arc   = anchor(0);
-    bool     whole = arc == 0 && size == acked && good == size;
-
-    if (whole && done == writes) {
-        printf("[QUILL] sequential: PASS — quillS.bin took %u bytes in %u writes of %u, one "
-               "after another, and read back exactly; anchored for the extent count\n",
-               QUILL_SEQ_BYTES, writes, QUILL_CHUNK);
-        return QUILL_PASS;
-    }
-    if (whole && refusal < 0 && acked < QUILL_WIDTH_CEILING) {
-        printf("[QUILL] sequential: DEFECT — quillS.bin, with no other writer, refused its "
-               "write at byte %llu of %u (error %u) after %u writes of %u in a row; the %llu "
-               "bytes it acknowledged read back exactly — no extent merge, and the record "
-               "width runs out\n",
-               (unsigned long long)acked, QUILL_SEQ_BYTES, box_errno_of((int)refusal), done,
-               QUILL_CHUNK, (unsigned long long)size);
-        return QUILL_DEFECT;
-    }
-    printf("[QUILL] sequential: FAIL — quillS.bin took %u of %u writes of %u (the next "
-           "answered %lld), holds %llu bytes and reads back good to byte %llu (read answer "
-           "%lld, anchor %d)\n", done, writes, QUILL_CHUNK, (long long)refusal,
-           (unsigned long long)size, (unsigned long long)good, (long long)rerr, arc);
-    return QUILL_FAIL;
-}
-
-/* =========================================================================
- *  interleave — two files, 4 KiB each in turn
- * ========================================================================= */
-
-/* One program alternating rather than two strands: the allocator sees the
- * same interleaving, the order is the same on every run, and what makes two
- * files' blocks land apart — Allotment — is per file id either way. On HEAD
- * this case is refused at the same byte as `sequential`: the record width,
- * not the interleaving; once 1.3 lands it asks about Allotment alone. */
-static QuillVerdict QuillInterleave(const char *const *args)
-{
-    (void)args;
-    static const char    *names[2] = { "quillA.bin", "quillB.bin" };
-    static const uint32_t seeds[2] = { QUILL_SEED_A, QUILL_SEED_B };
-    int fids[2];
-    for (int f = 0; f < 2; f++) {
-        fids[f] = QuillCreate(names[f]);
-        if (fids[f] <= 0) {
-            printf("[QUILL] interleave: FAIL — %s could not be created (answer %d)\n",
-                   names[f], fids[f]);
-            return QUILL_FAIL;
-        }
-    }
-
-    const uint32_t rounds = QUILL_WEAVE_BYTES / QUILL_CHUNK;
-    uint32_t done = 0;
-    int      stopped = -1;             /* which file refused, -1 for neither */
-    int64_t  refusal = 0;
-    uint64_t refused_at = 0;
-    for (uint32_t r = 0; r < rounds && stopped < 0; r++) {
-        for (int f = 0; f < 2; f++) {
-            uint64_t off = (uint64_t)r * QUILL_CHUNK;
-            int64_t  w   = QuillWriteChunk((uint32_t)fids[f], seeds[f], off);
-            if (w != (int64_t)QUILL_CHUNK) {
-                stopped = f;
-                refusal = w;
-                refused_at = off;
-                break;
-            }
-            done++;
-        }
-    }
-
-    uint64_t size[2], good[2];
-    int64_t  rerr[2];
-    for (int f = 0; f < 2; f++) {
-        size[f] = QuillSize((uint32_t)fids[f]);
-        good[f] = QuillReadBack((uint32_t)fids[f], seeds[f], size[f], &rerr[f]);
-    }
-    int  arc   = anchor(0);
-    bool whole = arc == 0 && good[0] == size[0] && good[1] == size[1] &&
-                 size[0] + size[1] == (uint64_t)done * QUILL_CHUNK;
-
-    if (whole && stopped < 0 && size[0] == QUILL_WEAVE_BYTES && size[1] == QUILL_WEAVE_BYTES) {
-        printf("[QUILL] interleave: PASS — quillA.bin and quillB.bin took %u bytes each in %u "
-               "alternating writes of %u and read back exactly; anchored for the extent count\n",
-               QUILL_WEAVE_BYTES, done, QUILL_CHUNK);
-        return QUILL_PASS;
-    }
-    if (whole && stopped >= 0 && refusal < 0 && refused_at < QUILL_WIDTH_CEILING) {
-        printf("[QUILL] interleave: DEFECT — %s refused its write at byte %llu of %u (error %u) "
-               "after %u alternating writes of %u; the %llu and %llu bytes the two files "
-               "acknowledged read back exactly\n", names[stopped],
-               (unsigned long long)refused_at, QUILL_WEAVE_BYTES, box_errno_of((int)refusal),
-               done, QUILL_CHUNK, (unsigned long long)size[0], (unsigned long long)size[1]);
-        return QUILL_DEFECT;
-    }
-    printf("[QUILL] interleave: FAIL — %u alternating writes of %u taken (the next answered "
-           "%lld at byte %llu); quillA.bin holds %llu bytes good to %llu, quillB.bin %llu good "
-           "to %llu (read answers %lld, %lld; anchor %d)\n", done, QUILL_CHUNK,
-           (long long)refusal, (unsigned long long)refused_at, (unsigned long long)size[0],
-           (unsigned long long)good[0], (unsigned long long)size[1], (unsigned long long)good[1],
-           (long long)rerr[0], (long long)rerr[1], arc);
-    return QUILL_FAIL;
-}
-
-/* =========================================================================
  *  usememory — a long Use Context, across a reboot
  * ========================================================================= */
 
@@ -517,7 +392,10 @@ static size_t QuillUseProbe(void)
     return len;
 }
 
-/* The second half: the probe is what the machine came up with. */
+/* The second half: the probe is what the machine came up with. A context
+ * every tag of which is one the probe says — "quilu" and five digits below
+ * QUILL_USE_TAGS — is the probe come back damaged, and is cleared; any other
+ * is somebody's own, and is left as it is. */
 static QuillVerdict QuillUseReadBack(size_t probe_len, size_t need)
 {
     char *have = malloc(need);
@@ -528,7 +406,36 @@ static QuillVerdict QuillUseReadBack(size_t probe_len, size_t need)
     }
     int  tags = use_get(have, need, NULL);
     bool same = tags == QUILL_USE_TAGS && strcmp(have, g_probe) == 0;
+    bool ours = tags > 0;
+    for (size_t i = 0, from = 0; ours; i++) {
+        if (have[i] != ',' && have[i] != '\0')
+            continue;
+        uint32_t v = 0;
+        ours = i - from == 10 && memcmp(have + from, "quilu", 5) == 0;
+        for (size_t d = from + 5; ours && d < i; d++) {
+            ours = have[d] >= '0' && have[d] <= '9';
+            v = v * 10 + (uint32_t)(have[d] - '0');
+        }
+        ours = ours && v < QUILL_USE_TAGS;
+        if (have[i] == '\0')
+            break;
+        from = i + 1;
+    }
+    size_t   len  = strlen(have);
+    uint32_t diff = 0;
+    while (diff < len && diff < probe_len && have[diff] == g_probe[diff])
+        diff++;
     free(have);
+    if (!same && ours) {
+        bool drem = false;
+        int  drc  = use_clear(&drem);
+        int  darc = anchor(0);
+        printf("[QUILL] usememory: FAIL — after a reboot the probe of %u bytes in %d tags came "
+               "back as %d tags, %u bytes, differing from byte %u; cleared (answer %d, "
+               "remembered=%d, anchor %d)\n", (unsigned)probe_len, QUILL_USE_TAGS, tags,
+               (unsigned)len, diff, drc, drem ? 1 : 0, darc);
+        return QUILL_FAIL;
+    }
     if (!same) {
         printf("[QUILL] usememory: FAIL — the machine has a Use Context of its own (%u bytes, "
                "%d tags); this case replaces it across a reboot and could not give it back — "
@@ -574,12 +481,26 @@ static QuillVerdict QuillUseMemory(const char *const *args)
         return QUILL_FAIL;
     }
     if (!rem) {
-        use_clear(NULL);
-        int arc = anchor(0);
-        printf("[QUILL] usememory: DEFECT — a Use Context of %u bytes in %d tags was set and "
-               "the volume did not remember it (remembered=0; cleared, anchor %d)\n",
-               (unsigned)probe_len, QUILL_USE_TAGS, arc);
-        return QUILL_DEFECT;
+        /* The clear is the control. An empty context always fits, so a
+         * volume that remembers the clear took a Ledger write just after the
+         * probe's was dropped: the volume is up, the medium takes the write,
+         * and the length is what was refused. A refusal of the probe's own
+         * write alone still reads the same — `remembered` is one bit — until
+         * the kernel says why it did not remember. */
+        bool crem = false;
+        int  crc  = use_clear(&crem);
+        int  arc  = anchor(0);
+        if (crc == 0 && crem && arc == 0) {
+            printf("[QUILL] usememory: DEFECT — a Use Context of %u bytes in %d tags was set and "
+                   "the volume did not remember it (remembered=0; cleared with remembered=1, "
+                   "anchor 0)\n", (unsigned)probe_len, QUILL_USE_TAGS);
+            return QUILL_DEFECT;
+        }
+        printf("[QUILL] usememory: FAIL — a Use Context of %u bytes was not remembered, and "
+               "clearing it answered %d with remembered=%d (anchor %d) — the volume is not "
+               "taking the Ledger, so the length was never asked\n", (unsigned)probe_len, crc,
+               crem ? 1 : 0, arc);
+        return QUILL_FAIL;
     }
     int arc = anchor(0);
     if (arc < 0) {
@@ -591,117 +512,6 @@ static QuillVerdict QuillUseMemory(const char *const *args)
            "(remembered=1); after a reboot quilltest usememory reads it back\n",
            (unsigned)probe_len, QUILL_USE_TAGS);
     return QUILL_PENDING;
-}
-
-/* =========================================================================
- *  fidhistory — file ids spent on files that are gone
- * ========================================================================= */
-
-/* One name throughout, so the only tag this interns is its stem. What the
- * spent ids cost is not something this program can see: the next mount says
- * it, in its "this mount keeps" line, and the host reads the slope between
- * two mounts. */
-static QuillVerdict QuillFidHistory(const char *const *args)
-{
-    (void)args;
-    uint32_t *ids = NULL;
-    int before = query_all_everywhere(NULL, &ids);
-    free(ids);
-    if (before < 0) {
-        printf("[QUILL] fidhistory: FAIL — counting the live files answered %d\n", before);
-        return QUILL_FAIL;
-    }
-
-    uint32_t first = 0, last = 0, spent = 0;
-    int broke = 0;
-    for (uint32_t i = 0; i < QUILL_FID_CYCLES; i++) {
-        int fid = create_everywhere("quillfid.tmp", NULL);
-        if (fid <= 0 || (uint32_t)fid <= last) {
-            broke = fid <= 0 ? fid : -1;
-            break;
-        }
-        int drc = delete((uint32_t)fid);
-        if (!first)
-            first = (uint32_t)fid;
-        last = (uint32_t)fid;
-        spent++;
-        if (drc != 0) {
-            broke = drc;
-            break;
-        }
-        if (spent % QUILL_FID_PROGRESS == 0)
-            printf("[QUILL] fidhistory: %u of %u file ids spent (last %u)\n",
-                   spent, QUILL_FID_CYCLES, last);
-    }
-    int arc = anchor(0);
-    int after = query_all_everywhere(NULL, &ids);
-    free(ids);
-
-    if (broke != 0 || arc != 0 || after != before) {
-        printf("[QUILL] fidhistory: FAIL — %u file ids spent, %u to %u, the last cycle "
-               "answered %d; %d files were live before and %d after (anchor %d)\n",
-               spent, first, last, broke, before, after, arc);
-        return QUILL_FAIL;
-    }
-    printf("[QUILL] fidhistory: PENDING — spent %u file ids, %u to %u, with %d live files "
-           "before and after; anchored — the next mount says what they cost\n",
-           spent, first, last, before);
-    return QUILL_PENDING;
-}
-
-/* =========================================================================
- *  systemtag — the tag that guards the kernel, taken off by a program
- * ========================================================================= */
-
-static QuillVerdict QuillSystemTag(const char *const *args)
-{
-    (void)args;
-    uint32_t ids[4];
-    int n = QuillFindEverywhere("kernel.bin", ids, 4);
-    if (n != 1) {
-        printf("[QUILL] systemtag: FAIL — the volume has %d file(s) called kernel.bin; this "
-               "case asks about exactly one\n", n);
-        return QUILL_FAIL;
-    }
-    uint32_t kid = ids[0];
-    if (!QuillWears(kid, "system")) {
-        printf("[QUILL] systemtag: FAIL — kernel.bin (file %u) does not wear the system tag, "
-               "so there is nothing to take off\n", kid);
-        return QUILL_FAIL;
-    }
-
-    int urc = tag_remove(kid, "system");
-    int drc = delete(kid);
-    file_info_t info;
-    int  irc     = file_info(kid, &info);
-    bool present = irc == 0;
-    bool wears   = present && QuillWears(kid, "system");
-    int  arc     = anchor(0);
-
-    if (arc == 0 && urc < 0 && drc < 0 && present && wears) {
-        printf("[QUILL] systemtag: PASS — kernel.bin (file %u) refused to give up its system "
-               "tag (error %u) and refused deletion (error %u); it is still on the volume\n",
-               kid, box_errno_of(urc), box_errno_of(drc));
-        return QUILL_PASS;
-    }
-    if (arc == 0 && urc == 0 && drc == 0 && !present) {
-        printf("[QUILL] systemtag: DEFECT — kernel.bin (file %u) gave up its system tag and "
-               "was then deleted; asked about it now, the volume answers error %u — the "
-               "kernel this volume boots is gone\n", kid, box_errno_of(irc));
-        return QUILL_DEFECT;
-    }
-    /* Whatever else happened, a kernel left on the volume without its guard
-     * is given it back before this is reported. */
-    int trc = 0;
-    if (present && !wears) {
-        trc = tag_add(kid, "system");
-        arc = anchor(0);
-    }
-    printf("[QUILL] systemtag: FAIL — kernel.bin (file %u): taking the system tag off "
-           "answered %d, deleting it %d; it is %s the volume%s (tag put back: %d, anchor %d)\n",
-           kid, urc, drc, present ? "still on" : "gone from",
-           present ? (wears ? " and wears system" : " without system") : "", trc, arc);
-    return QUILL_FAIL;
 }
 
 /* =========================================================================
@@ -749,7 +559,9 @@ static QuillVerdict QuillColdRead(const char *const *args)
         return QUILL_FAIL;
     int fid = QuillCreate("quillcold.bin");
     if (fid <= 0) {
-        printf("[QUILL] coldread: FAIL — quillcold.bin could not be created (answer %d)\n", fid);
+        int arc = anchor(0);
+        printf("[QUILL] coldread: FAIL — quillcold.bin could not be created (answer %d, anchor %d)\n",
+               fid, arc);
         return QUILL_FAIL;
     }
 
@@ -800,7 +612,9 @@ static QuillVerdict QuillColdWrite(const char *const *args)
         return QUILL_FAIL;
     int fid = QuillCreate("quillcold.bin");
     if (fid <= 0) {
-        printf("[QUILL] coldwrite: FAIL — quillcold.bin could not be created (answer %d)\n", fid);
+        int arc = anchor(0);
+        printf("[QUILL] coldwrite: FAIL — quillcold.bin could not be created (answer %d, anchor %d)\n",
+               fid, arc);
         return QUILL_FAIL;
     }
 
@@ -845,45 +659,52 @@ static QuillVerdict QuillColdWrite(const char *const *args)
 
 static const QuillCase g_cases[] = {
     { "longquery", "", 0, QuillLongQuery,
-      "is a query for one tag of 256 bytes answered as asked", "nothing" },
+      "is a query for one tag of 256 bytes, over the tag width, refused rather than answered",
+      "nothing", false },
     { "bigwrite", "", 0, QuillBigWrite,
       "does one fwrite of 256 MiB, more than the kernel heap, land whole",
-      "nothing: quillbig.bin is deleted and the volume anchored" },
-    { "sequential", "", 0, QuillSequential,
+      "nothing: quillbig.bin is deleted and the volume anchored", false },
+    { "sequential", "", 0, QUILL_THROWAWAY(QuillSequential),
       "does one writer's 3 MiB, 4 KiB at a time in a row, fit one file's record",
-      "quillS.bin, anchored; on the synchronous path a refused write's block, orphaned" },
-    { "interleave", "", 0, QuillInterleave,
+      "quillS.bin, anchored; on the synchronous path a refused write's block, orphaned", true },
+    { "interleave", "", 0, QUILL_THROWAWAY(QuillInterleave),
       "do two files written 4 KiB each in turn, 64 MiB each, stay whole",
-      "quillA.bin and quillB.bin, anchored; on the synchronous path a refused block, orphaned" },
+      "quillA.bin and quillB.bin, anchored; on the synchronous path a refused block, orphaned",
+      true },
     { "coldread", "", 0, QuillColdRead,
       "does a read into memory this program never touched deliver every byte it reports",
-      "nothing: quillcold.bin is deleted and the volume anchored" },
+      "nothing: quillcold.bin is deleted and the volume anchored", false },
     { "coldwrite", "", 0, QuillColdWrite,
       "does a write out of memory this program never touched write zeros, and say how many",
-      "nothing: quillcold.bin is deleted and the volume anchored" },
+      "nothing: quillcold.bin is deleted and the volume anchored", false },
     { "usememory", "", 0, QuillUseMemory,
       "is a 1000-byte Use Context remembered across a reboot (run it before and after)",
-      "between its halves a remembered context of 91 tags; for good, tags quilu* interned" },
-    { "fidhistory", "", 0, QuillFidHistory,
+      "between its halves a remembered context of 91 tags; for good, tags quilu* interned", false },
+    { "fidhistory", "", 0, QUILL_THROWAWAY(QuillFidHistory),
       "what 50000 file ids spent on deleted files cost the next mount",
-      "50000 file ids spent for good, and their dead records in the pool" },
-    { "systemtag", "", 0, QuillSystemTag,
-      "may a program take the system tag off kernel.bin and delete it",
-      "DESTRUCTIVE: where the answer is yes, kernel.bin is gone and the volume will not boot" },
+      "50000 file ids spent for good, and their dead records in the pool", true },
+    { "systemtag", "", 0, QUILL_THROWAWAY(QuillSystemTag),
+      "may programs that do not wear system — untag, trash, erase — take the system tag off "
+      "kernel.bin and delete it",
+      "DESTRUCTIVE: where the answer is yes, kernel.bin is gone and the volume will not boot", true },
     { "hog", "", 0, QuillHog, "nothing: it computes without end",
-      "a cabin spinning until the machine stops; never returns" },
+      "a cabin spinning until the machine stops; never returns", false },
     { "settle", "NAME", 1, QuillSettle,
       "for the power-cut stand: a write left unanchored beside a hog",
-      "NAME holding one record, not anchored, and a hog; never returns" },
+      "DESTRUCTIVE: every file called NAME that does not wear system or boot is deleted first, "
+      "whatever it holds; then NAME holding one record, not anchored, and a hog; never returns "
+      "while the hog spins", false },
     { "hogged", "PROGRAM", 1, QuillHogged,
       "is PROGRAM answered while a hog spins (anchor_test: does an anchor answer)",
-      "whatever PROGRAM leaves; the hog is ended" },
+      "whatever PROGRAM leaves; the hog is ended", false },
     { "verify", "NAME", 1, QuillVerify,
-      "does NAME hold the whole record settle or churn wrote", "nothing" },
+      "does NAME hold the whole record settle or churn wrote", "nothing", false },
     { "churn", "NAME", 1, QuillChurn, "for the power-cut stand: a writer that never stops",
-      "NAME, rewritten until the machine stops; never returns" },
+      "NAME, rewritten until the machine stops; never returns", false },
     { "race", "NAME ROUNDS", 2, QuillRace, "do ROUNDS anchors hold while a churn writes NAME",
-      "NAME, and the churn it started, still writing" },
+      "DESTRUCTIVE: every file called NAME that does not wear system or boot is deleted first, "
+      "and the anchors make it durable; then NAME, and the churn it started, still writing",
+      false },
 };
 
 #define QUILL_CASE_COUNT ((uint32_t)(sizeof(g_cases) / sizeof(g_cases[0])))
@@ -894,9 +715,10 @@ int main(void)
     if (words < 2) {
         println("[QUILL] quilltest CASE [ARG...] — one case per run:");
         for (uint32_t i = 0; i < QUILL_CASE_COUNT; i++)
-            printf("[QUILL]   %s%s%s — asks: %s; leaves: %s\n", g_cases[i].name,
+            printf("[QUILL]   %s%s%s — asks: %s; leaves: %s%s\n", g_cases[i].name,
                    g_cases[i].argc ? " " : "", g_cases[i].args, g_cases[i].asks,
-                   g_cases[i].leaves);
+                   g_cases[i].leaves, g_cases[i].throwaway
+                       ? " — a throwaway image's case, in a VOLUME_TESTS=on build only" : "");
         printf("[QUILL] FAIL: no case named — %u cases are listed above, and quilltest asks "
                "only what it is told to, because most of them change the volume\n",
                QUILL_CASE_COUNT);
@@ -916,6 +738,13 @@ int main(void)
     if (words - 2 != c->argc) {
         printf("[QUILL] %s: FAIL — it takes %u word(s) after its name (%s) and was given %u\n",
                c->name, c->argc, c->argc ? c->args : "none", words - 2);
+        return 1;
+    }
+
+    if (!c->run) {
+        printf("[QUILL] %s: FAIL — this case exists only in a quilltest built with "
+               "VOLUME_TESTS=on, for a throwaway image — what it leaves: %s\n", c->name,
+               c->leaves);
         return 1;
     }
 

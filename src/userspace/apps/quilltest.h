@@ -1,10 +1,11 @@
 /*
- * quilltest.h — what the two halves of quilltest share.
+ * quilltest.h — what the three parts of quilltest share.
  *
  * quilltest.c holds the red tests of the Quill write core, the table of
- * cases and the one way in; quilltest_powercut.c holds the modes the
- * power-cut stand drives (tools/powercut.sh). Both say their verdict in the
- * same four words and both ask the volume for files by name.
+ * cases and the one way in; quilltest_throwaway.c the cases only a throwaway
+ * image may be asked (VOLUME_TESTS=on builds); quilltest_powercut.c the modes
+ * the power-cut stand drives (tools/powercut.sh). All say their verdict in
+ * the same four words and ask the volume for files by name.
  */
 #ifndef QUILLTEST_H
 #define QUILLTEST_H
@@ -13,6 +14,14 @@
 
 typedef enum { QUILL_PASS, QUILL_DEFECT, QUILL_PENDING, QUILL_FAIL } QuillVerdict;
 
+#define QUILL_CHUNK          4096u       /* one write of the cases that write a block at a time */
+
+/* `len` bytes (a multiple of 8) of the stream seeded `seed`, from file offset
+ * `base`: every 8 bytes a function of where they sit. */
+void     QuillFill(uint64_t *dst, uint32_t seed, uint64_t base, uint64_t len);
+/* [0, size) of `fid` read back against that stream: the offset of the first
+ * byte that is not it (`size` when all are), the read that stopped it in *err. */
+uint64_t QuillReadBack(uint32_t fid, uint32_t seed, uint64_t size, int64_t *err);
 /* The name up to its last dot: the tag TagFS stamps on every file. */
 void     QuillStem(const char *name, char *out, size_t cap);
 /* Every file called `name`, whatever Use Context is set: how many there are
@@ -25,6 +34,14 @@ int      QuillCreate(const char *name);
 int64_t  QuillWrite(uint32_t fid, uint64_t off, const void *buf, size_t len);
 /* The size file_info reports, 0 when it will not answer. */
 uint64_t QuillSize(uint32_t fid);
+
+#ifdef CONFIG_VOLUME_TESTS
+/* A throwaway image's cases, quilltest_throwaway.c. */
+QuillVerdict QuillSequential(const char *const *args);
+QuillVerdict QuillInterleave(const char *const *args);
+QuillVerdict QuillFidHistory(const char *const *args);
+QuillVerdict QuillSystemTag(const char *const *args);
+#endif
 
 /* The power-cut modes, quilltest_powercut.c. */
 __attribute__((noreturn)) QuillVerdict QuillHog(const char *const *args);

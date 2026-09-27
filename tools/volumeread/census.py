@@ -116,8 +116,7 @@ class KernelView:
         f, lay, D = self.f, self.f.layout, self.f.D
         st = f.stand
         if not st.kernels:
-            return self.Refuse("ground", "the kernel stands only on an MBR entry of type 0x7f or a "
-                               "BoxOS GPT entry, and this volume was found at %s" % st.how)
+            return self.Refuse("ground", "%s, and this volume was found at %s" % (st.kernel_why, st.how))
         blocks_in_volume = f.deed["sectors"] // SECTORS_PER_BLOCK
         dl = self.f.deed["layout"]
         if (dl["data_block"] == 0 or dl["data_blocks"] == 0 or
@@ -183,7 +182,7 @@ class KernelView:
         return marked
 
     def _Fsck(self):
-        """The mount's roll call (tagfs.c:3024-3266)."""
+        """The mount's roll call (tagfs_init's fsck, after the ledger and the chains)."""
         f, lay, D = self.f, self.f.layout, self.f.D
         led = f.ledger
         mirror = ondisk.MirrorWalk([b for b, _blk, _r in f.pool], [r for _b, _blk, r in f.pool],
@@ -219,20 +218,19 @@ class KernelView:
                      "corrected": corrected, "lost": lost, "quitclaims": quits,
                      "orphan_runs": orphans, "missing_runs": missing}
         self.says = (D, self.free, led["total_files"])
-        self.ledger_free = led["free_blocks"]
         if self.free != led["free_blocks"]:
             self._LedgerWrite("the ledger's free count, %u where the bitmap says %u"
                               % (led["free_blocks"], self.free))
 
     def _LedgerWrite(self, why):
-        """ledger_write_locked (tagfs.c:2252-2289): the older copy, seq + 1."""
+        """ledger_write_locked (tagfs.c): the older copy, seq + 1."""
         self.current = (self.current + 1) % LEDGER_COPIES
         self.seq += 1
         self.writes.append(("ledger copy %u at seq %u (%s)" % (self.current, self.seq, why), []))
 
     def _Alloc(self, count):
-        """tagfs_alloc_blocks_internal (tagfs.c:5460-5508): first fit in the free
-        extents, ascending, built from the bitmap the roll call left."""
+        """tagfs_alloc_blocks_internal (tagfs.c): first fit in the free extents,
+        ascending, built from the bitmap the roll call left."""
         for s, n in RunsSubtract([(0, self.f.D)], self.union):
             if n >= count:
                 self.union = RunsNormal(self.union + [(s, count)])
@@ -251,8 +249,8 @@ class KernelView:
         if start is None or start == 0:
             self.writes.append(("nothing for an integrity map — no free run of %u blocks" % need, []))
             return
-        # MapOwedMark/MapOwedSettle (tagfs.c:5365-5456): every bitmap sector the
-        # run's bits live in is written before the map is.
+        # MapOwedMark/MapOwedSettle (tagfs.c): every bitmap sector the run's
+        # bits live in is written before the map is.
         lo, hi = (start // 8) // SECTOR, ((start + need - 1) // 8) // SECTOR
         what = "bitmap sector %u" % lo if lo == hi else "bitmap sectors %u..%u" % (lo, hi)
         if first == 0:
@@ -311,7 +309,7 @@ class GroundCensus:
         self._Records()
         self._Files()
         self._Boot()
-        if f.ledger is not None:
+        if f.ledger is not None and self.kernel.step != "bitmap":
             self._Sweep()
         self._Drift()
 
@@ -332,12 +330,12 @@ class GroundCensus:
         if st.stood_on == "tail":
             self.Say("DEED_HEAD_BAD", "damage",
                      "the deed at the head of the ground at sector %u does not answer (%s) — "
-                     "the kernel stands on the far copy at sector %u (tagfs.c:1123-1126)"
+                     "the kernel stands on the far copy at sector %u (tagfs.c volume_take_ground)"
                      % (st.start, st.head_why, st.start + st.deed["at_sector"]))
         elif st.tail is None and st.far_end is None:
             self.Say("DEED_TAIL_BAD", "damage",
                      "the far copy the head names at sector %u: %s — the kernel mounts on one "
-                     "deed (tagfs.c:1273-1275)" % (st.deed["tail_sector"], st.tail_why))
+                     "deed (tagfs.c volume_take_ground)" % (st.deed["tail_sector"], st.tail_why))
         if st.far_end is not None:
             self.Say("GROWTH_INTERRUPTED", "note",
                      "a valid far copy of this volume at sector %u claims %u sectors against "
@@ -347,12 +345,23 @@ class GroundCensus:
         if g:
             self.Say("GROWTH_PENDING", "note",
                      "the kernel takes the ground behind this volume at its next mount: %u "
-                     "sectors to %u, %u more data blocks%s (tagfs.c:906-914)" % (
+                     "sectors to %u, %u more data blocks%s (tagfs.c volume_take_more_ground)" % (
                          g["from_sectors"], g["to_sectors"], g["more"],
                          ", clamped by what its bitmap can account for" if g["clamped"] else ""))
-        if self.kernel.step == "layout":
-            self.Say("LAYOUT_UNFIT", "damage", "%s — the kernel refuses the mount "
-                     "(tagfs.c:1171-1185, 1223-1229, 2952-2956)" % self.kernel.refusal)
+        # The kernel's refusals that no later section would name: its ground,
+        # its layout and its bitmap. The ledger's and the chains' are named
+        # where those are read (LEDGER_NONE, CHAIN_REFUSED).
+        step, refusal = self.kernel.step, self.kernel.refusal
+        if step == "ground":
+            self.Say("GROUND_REFUSED", "damage", "%s — the kernel never mounts it (ground.c "
+                     "GroundSurvey, tagfs.c volume_take_ground)" % refusal)
+        elif step == "layout":
+            self.Say("LAYOUT_UNFIT", "damage", "%s — the kernel refuses the mount (tagfs.c "
+                     "volume_take_ground, tagfs_init's bitmap region check)" % refusal)
+        elif step == "bitmap":
+            self.Say("BITMAP_UNREADABLE", "damage", "%s — the kernel refuses the mount (tagfs_init's "
+                     "bitmap read), and the ownership sweep is not run: an unread bitmap is not an "
+                     "empty one" % refusal)
 
     def Regions(self):
         """The Deed's regions as the kernel uses them, in volume blocks: the
@@ -390,18 +399,18 @@ class GroundCensus:
         bad = [c for c in f.ledgers if not c["ok"]]
         if len(bad) == LEDGER_COPIES:
             self.Say("LEDGER_NONE", "damage", "neither ledger copy is readable — copy 0 %s, copy 1 "
-                     "%s — and the kernel refuses the mount (tagfs.c:2217-2222); the ownership "
+                     "%s — and the kernel refuses the mount (tagfs.c ledger_load); the ownership "
                      "sweep is not run, because the ledger names blocks nothing else can"
                      % (bad[0]["why"], bad[1]["why"]))
         elif bad:
             self.Say("LEDGER_TORN", "note", "ledger copy %u %s — the kernel runs on copy %u "
-                     "(seq %u) alone (tagfs.c:2243-2247)" % (bad[0]["copy"], bad[0]["why"],
+                     "(seq %u) alone (tagfs.c ledger_load)" % (bad[0]["copy"], bad[0]["why"],
                                                             f.ledger["copy"], f.ledger["seq"]))
         for c in f.ledgers:
             if c["ok"] and c["use_misplaced"]:
                 self.Say("LEDGER_USE_MISPLACED", "note", "ledger copy %u places its Use Context at "
                          "%u for %u bytes, outside its own record — it remembers none "
-                         "(tagfs.c:2167-2172)" % (c["copy"], c["use_context_offset"],
+                         "(tagfs.c ledger_read_copy)" % (c["copy"], c["use_context_offset"],
                                                   c["use_context_bytes"]))
 
     def _DiskBook(self):
@@ -427,7 +436,7 @@ class GroundCensus:
             label = "snapshot manifest" + (" backup" if which == "cow_manifest_backup_block" else "")
             if b >= f.D or m is None or not m["ok"]:
                 self.Say("MANIFEST_BAD", "damage", "the %s the ledger names at data block %u %s "
-                         "(tagfs.c:2729-2731)" % (label, b, "lies past the data run" if b >= f.D
+                         "(tagfs_init's manifest check)" % (label, b, "lies past the data run" if b >= f.D
                                                   else "will not read" if m is None else
                                                   "reads magic 0x%08x, count %u"
                                                   % (m["magic"], m["count"])), [(b, 1)])
@@ -452,7 +461,8 @@ class GroundCensus:
         past = RunsIntersect(RunsFromBits(f.region, region_bits), [(f.D, max(0, region_bits - f.D))])
         if past:
             self.Say("BITMAP_PAST_RUN", "damage", "%u bit(s) are set past the data run's %u blocks: "
-                     "%s — ground the volume would take on growth is not blank (tagfs.c:919-924)"
+                     "%s — ground the volume would take on growth is not blank (tagfs.c "
+                     "volume_take_more_ground)"
                      % (RunsCount(past), f.D, RunsText(past)))
         for name in ("registry", "table", "pool"):
             for i, b in enumerate(f.chains[name][0]):
@@ -559,7 +569,7 @@ class GroundCensus:
             return self._File(fid, "names_other", None, row)
         self.Say("FILE_LOST", "damage", "fid %u is named at block %u+%u and there is no readable "
                  "record for it there or anywhere in the pool — the mount deletes its name "
-                 "(tagfs.c:3077-3092)" % (fid, row[0], row[1]))
+                 "(tagfs_init's roll call)" % (fid, row[0], row[1]))
         return self._File(fid, "lost", None, row)
 
     def _Files(self):
@@ -579,10 +589,10 @@ class GroundCensus:
             elif (rec.block, rec.at) != row and not past:
                 self.Say("TABLE_CORRECTED", "note", "%s is named at block %u+%u and its newest "
                          "record is at block %u+%u — the mount corrects the table to it "
-                         "(tagfs.c:3061-3073)" % (_Label(fid, rec), row[0], row[1], rec.block, rec.at))
+                         "(tagfs_init's roll call)" % (_Label(fid, rec), row[0], row[1], rec.block, rec.at))
             if past:
                 self.Say("FID_PAST_NEXT", "damage", "%s has a table row and the ledger's "
-                         "next_file_id is %u — the roll call never visits it (tagfs.c:3045) and "
+                         "next_file_id is %u — the roll call never visits it (tagfs_init) and "
                          "the next create is issued its id and overwrites the row "
                          "(file_table.c:203-227)" % (_Label(fid, rec), next_fid))
                 self._File(fid, "past_next", rec, row)
@@ -594,7 +604,7 @@ class GroundCensus:
             else:
                 self.Say("QUITCLAIM_PENDING", "note", "%s is named and its newest record is not "
                          "ACTIVE — the mount deletes the name and frees its blocks without a word "
-                         "(tagfs.c:3094-3103)" % _Label(fid, rec))
+                         "(tagfs_init's roll call)" % _Label(fid, rec))
                 self._File(fid, "quitclaim", rec, row)
         for tag, holders in sorted(self.absent.items()):
             self.Say("TAG_ABSENT", "damage", "tag id %u is carried by %u file(s) and the registry does "
@@ -651,12 +661,14 @@ class GroundCensus:
             if kept:
                 self.Say("MISSING", "note", "data block(s) %s of %s read free in the bitmap — the "
                          "kernel's union repair keeps them, in memory, at every mount "
-                         "(tagfs.c:3225-3240)" % (RunsText(kept), " and ".join(labels)), kept)
+                         "(tagfs_init's union repair)" % (RunsText(kept), " and ".join(labels)), kept)
             lost = RunsSubtract(runs, self.kernel.marked)
             if lost:
-                self.Say("MISSING", "damage", "data block(s) %s of %s read free in the bitmap and "
-                         "the kernel's roll call does not reach them — the allocator hands them out"
-                         % (RunsText(lost), " and ".join(labels)), lost)
+                self.Say("MISSING", "damage", "data block(s) %s of %s read free in the bitmap and %s"
+                         % (RunsText(lost), " and ".join(labels),
+                            "the kernel's roll call does not reach them — the allocator hands them out"
+                            if self.kernel.refusal is None else
+                            "the kernel, which refuses this mount, repairs nothing"), lost)
         self.claimed = RunsNormal([(s, n) for s, n, _c in segs])
         self.orphans = RunsSubtract(f.used, self.claimed)
         self._Orphans()
@@ -670,7 +682,8 @@ class GroundCensus:
                      "%s is an ACTIVE newest record no table row names — %s"
                      % (_Label(fid, e["record"]),
                         "its blocks %s are marked used and nothing owns them: an interrupted "
-                        "create, or a delete whose retire never landed (tagfs.c:4048-4069, 3424-3426)"
+                        "create, or a delete whose retire never landed (tagfs.c "
+                        "tagfs_delete_file_inside, tagfs_sync_inside)"
                         % RunsText(leak) if leak else
                         "stale: its blocks %s" % ("went to others" if taken else "are free")), leak)
         if self.kernel.fsck is not None:
@@ -775,7 +788,7 @@ class GroundCensus:
         derived = k.free if k.fsck is not None else f.D - RunsCount(f.used)
         if derived != led["free_blocks"]:
             self.Say("LEDGER_FREE_DRIFT", "note", "the ledger says %u free and the bitmap derives %u "
-                     "— the mount writes the ledger back (tagfs.c:3291-3305)"
+                     "— the mount writes the ledger back (tagfs_init's free-count rewrite)"
                      % (led["free_blocks"], derived))
         live = sum(1 for e in self.files.values() if e["state"] == "live")
         if led["total_files"] != live:

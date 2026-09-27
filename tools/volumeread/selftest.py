@@ -9,8 +9,8 @@ has to be consistent to begin with (C0), because every case is measured as a
 difference from it.
 
 `--emit CASE --out IMG` writes one case's overlay out as a new image, for a
-harness to boot: logcheck's `census` scenario boots `reconcile` and holds the
-kernel's own fsck lines against this package's prediction.
+harness to boot: logcheck's `census` scenario boots `reconcile` and `C17`
+and holds the kernel's own fsck lines against this package's prediction.
 """
 
 import os
@@ -201,6 +201,67 @@ def PlantNoDeed(t, over):
     over.Put(t.base + t.f.deed["tail_sector"], bytes(ondisk.DEED_SECTORS * SECTOR))
 
 
+def PlantMbrEntry(t, over, kind=None, extra=0):
+    """MBR entry 0, the volume's ground: its type byte, or its sector count
+    `extra` sectors longer."""
+    raw = bytearray(over.sectors(0, 1))
+    if kind is not None:
+        raw[446 + 4] = kind
+    count = struct.unpack_from("<I", raw, 446 + 12)[0]
+    struct.pack_into("<I", raw, 446 + 12, count + extra)
+    over.Put(0, bytes(raw))
+
+
+def PlantGpt(t, over, count=128, primary="good", backup="good", ends=None):
+    """The volume's ground said again as a GPT (UEFI 2.10 §5.3): a protective
+    MBR, the primary header at LBA 1 with its entries from LBA 2, and the far
+    copy's header in the medium's last sector — the unused tail of the far
+    deed's block — with its entries at sector 1024, before the ESP. One BoxOS
+    entry, from the volume's first sector to `ends` (the medium's last by
+    default). `primary` and `backup` are "good", "array" (the entry array
+    written with one byte off its sum) or "gone" (no header at all)."""
+    size = t.f.medium.SizeSectors()
+    entry = bytearray(128)
+    entry[0:16] = ondisk.BOXOS_TYPE_GUID
+    entry[16:32] = bytes(range(1, 17))
+    struct.pack_into("<QQ", entry, 32, t.base, size - 1 if ends is None else ends)
+    array = bytes(entry) + bytes(128 * (count - 1))
+    mbr = bytearray(over.sectors(0, 1))
+    mbr[446:510] = bytes(64)
+    mbr[446 + 4] = ondisk.MBR_TYPE_PROTECTIVE
+    struct.pack_into("<II", mbr, 446 + 8, 1, min(size - 1, 0xFFFFFFFF))
+    over.Put(0, bytes(mbr))
+    for state, lba, alt, at in ((primary, 1, size - 1, 2), (backup, size - 1, 1, 1024)):
+        if state == "gone":
+            over.Put(lba, bytes(SECTOR))
+            continue
+        hdr = bytearray(SECTOR)
+        struct.pack_into("<8sIII4xQQQQ16sQIII", hdr, 0, b"EFI PART", 0x00010000, 92, 0, lba, alt,
+                         34, size - 34, bytes(range(16, 32)), at, count, 128, ondisk.Crc32(array))
+        struct.pack_into("<I", hdr, 16, ondisk.Crc32(bytes(hdr[:92])))
+        over.Put(lba, bytes(hdr))
+        body = bytearray(array) if state == "good" else bytearray([array[0] ^ 1]) + array[1:]
+        over.Put(at, bytes(body.ljust((len(body) + SECTOR - 1) // SECTOR * SECTOR, b"\0")))
+
+
+def PlantBitmapAway(t, over):
+    """The head deed's layout moves the block bitmap past the medium's end,
+    and the deed is sealed again: every other region stays where it is."""
+    raw = bytearray(over.sectors(t.base, ondisk.DEED_SECTORS))
+    at = ondisk.DeedStampAt(raw, ondisk.STAMP_LAYOUT)
+    off = dict((f, o) for f, o, _s in ondisk.VOLUME_LAYOUT.Offsets())["block_bitmap_block"]
+    struct.pack_into("<I", raw, at + off, t.lay["total_blocks"] + 64)
+    over.Put(t.base, ondisk.DeedSeal(raw))
+
+
+def ManyOrphans(t):
+    """ORPHAN_RUNS single blocks with a free one between each: a roll call
+    that must name more orphan runs than the kernel says one by one."""
+    free = RunsSubtract([(3, t.f.D - 3)], t.f.used)
+    s = next(s for s, n in free if n >= 2 * ORPHAN_RUNS)
+    return [s + 2 * i for i in range(ORPHAN_RUNS)]
+
+
 # ---------------------------------------------------------------------------
 # The cases
 # ---------------------------------------------------------------------------
@@ -221,6 +282,12 @@ class Case:
     def __init__(self, name, plant, must=(), may=(), checks=()):
         self.name, self.plant = name, plant
         self.must, self.may, self.checks = set(must), set(may), list(checks)
+
+
+# More than the 32 runs of each kind the kernel's mount names one by one
+# (tagfs.c FsckSayRuns); the rest it counts in one line.
+ORPHAN_RUNS = 40
+FSCK_RUNS_NAMED = 32
 
 
 def Cases(t):
@@ -309,6 +376,42 @@ def Cases(t):
              [t.Bit(o, b, False) for s, n in t.Sruns for b in range(s, s + n)]),
         Case("C15 head torn", lambda o: PlantHeadTorn(t, o), must={"DEED_HEAD_BAD"}, checks=[
             ("it stands on the far copy", lambda c: c.f.stand.stood_on == "tail")]),
+        Case("C17 many orphan runs", lambda o: [PlantOrphan(t, o, b) for b in ManyOrphans(t)],
+             must={"ORPHAN"}, checks=[
+                 ("the kernel names %u orphan runs of one block, past the %u it says one by one"
+                  % (ORPHAN_RUNS, FSCK_RUNS_NAMED),
+                  lambda c: K(c)["orphan_runs"] == [(b, 1) for b in ManyOrphans(t)]),
+                 ("the census's orphans are the kernel's", lambda c: Runs(c, "ORPHAN") == K(c)["orphan_runs"])]),
+        Case("G1 MBR type", lambda o: PlantMbrEntry(t, o, kind=0x83), must={"GROUND_REFUSED"}, checks=[
+            ("the kernel refuses at the ground", lambda c: c.kernel.step == "ground"),
+            ("the refusal names the types it found", lambda c: "0:0x83" in c.kernel.refusal),
+            ("check exits 1", lambda c: c.ExitCode() == 1)]),
+        Case("G2 MBR past the end", lambda o: PlantMbrEntry(t, o, extra=1), must={"GROUND_REFUSED"}, checks=[
+            ("the kernel does not use an entry past the medium",
+             lambda c: c.kernel.step == "ground" and "not using it" in c.kernel.refusal)]),
+        Case("G3 GPT", lambda o: PlantGpt(t, o), checks=[
+            ("the kernel stands on GPT entry 0", lambda c: c.f.stand.kernels and
+             c.f.stand.how == "GPT entry 0 (BoxOS type)" and c.kernel.refusal is None)]),
+        Case("G4 GPT primary array", lambda o: PlantGpt(t, o, primary="array"), checks=[
+            ("the kernel stands on the far copy's entry",
+             lambda c: c.f.stand.kernels and "from the copy at the far end" in c.f.stand.how and
+             c.kernel.refusal is None)]),
+        Case("G5 GPT primary gone", lambda o: PlantGpt(t, o, primary="gone"), checks=[
+            ("the kernel stands on the far copy's entry",
+             lambda c: c.f.stand.kernels and "from the copy at the far end" in c.f.stand.how and
+             c.kernel.refusal is None)]),
+        Case("G6 GPT both arrays", lambda o: PlantGpt(t, o, primary="array", backup="array"),
+             must={"GROUND_REFUSED"}, checks=[
+                 ("the kernel reads neither copy", lambda c: c.kernel.step == "ground" and
+                  "neither copy of its GPT" in c.kernel.refusal)]),
+        Case("G7 GPT ends first", lambda o: PlantGpt(t, o, ends=t.base - 1), must={"GROUND_REFUSED"}, checks=[
+            ("the kernel skips an entry that ends before it begins",
+             lambda c: c.kernel.step == "ground" and "ends before it begins" in c.kernel.refusal)]),
+        Case("G8 GPT of 1024", lambda o: PlantGpt(t, o, count=1024), checks=[
+            ("the kernel reads a table of 1024 entries", lambda c: c.f.stand.kernels and
+             c.kernel.refusal is None)]),
+        Case("G9 bitmap away", lambda o: PlantBitmapAway(t, o), must={"BITMAP_UNREADABLE", "REGION_OVERLAP"},
+             checks=[("the kernel refuses at the bitmap", lambda c: c.kernel.step == "bitmap")]),
         Case("reconcile", lambda o: Reconcile(t, o), must={"ORPHAN", "FILE_LOST", "MISSING"}, checks=[
             ("the census's orphans are the kernel's", lambda c: Runs(c, "ORPHAN") == K(c)["orphan_runs"]),
             ("the kernel's orphans are %u+2 and %s's blocks" % (F, t.Label(S)),
@@ -440,6 +543,9 @@ def _Value(text, defines):
     m = re.fullmatch(r"\(\s*1U?\s*<<\s*(\d+)\s*\)", text)
     if m:
         return 1 << int(m.group(1))
+    m = re.fullmatch(r"\(\s*(\d+)[uU]?\s*\*\s*(\d+)[uU]?\s*\)", text)
+    if m:
+        return int(m.group(1)) * int(m.group(2))
     m = re.fullmatch(r"(0[xX][0-9a-fA-F]+|\d+)[uUlL]*", text)
     if m:
         return int(m.group(1), 0)
@@ -484,7 +590,8 @@ def ConstantsCheck(src):
              "cow": os.path.join(fs, "cow", "cow.h"), "book": os.path.join(fs, "disk_book", "disk_book.h"),
              "pool": os.path.join(fs, "metadata_pool", "meta_pool.c"),
              "boot": os.path.join(src, "boot", "uefi", "tagfs_boot.h"),
-             "ground": os.path.join(src, "kernel", "core", "boardroom", "ground.c")}
+             "ground": os.path.join(src, "kernel", "core", "boardroom", "ground.c"),
+             "groundh": os.path.join(src, "kernel", "core", "boardroom", "ground.h")}
     if not all(os.path.exists(p) for p in paths.values()):
         return None, "self-test needs the source tree beside the tool (src/ next to tools/)"
     text = {k: open(p, encoding="utf-8", errors="replace").read() for k, p in paths.items()}
@@ -521,7 +628,9 @@ def ConstantsCheck(src):
                   ("DISKBOOK_CAPACITY", "DISK_BOOK_CAPACITY"), ("DISKBOOK_TYPE_REDIRECT", "DISK_BOOK_TYPE_REDIRECT"),
                   ("RECORD_HEADER", "RECORD_HEADER_SIZE"), ("MPOOL_BLOCK_HEADER", "MPOOL_BLOCK_HEADER"),
                   ("RECORD_CRC_AT", "RECORD_CRC_OFFSET"), ("MBR_TYPE_BOXOS", "GROUND_MBR_TYPE"),
-                  ("MBR_TYPE_PROTECTIVE", "GROUND_MBR_TYPE_PROTECTIVE")):
+                  ("MBR_TYPE_PROTECTIVE", "GROUND_MBR_TYPE_PROTECTIVE"),
+                  ("GPT_ARRAY_MAX_BYTES", "GPT_ARRAY_MAX_BYTES"), ("GPT_BLOCK_MAX_BYTES", "GPT_BLOCK_MAX_BYTES"),
+                  ("GROUND_MAX_PER_MEDIUM", "GROUND_MAX_PER_MEDIUM")):
         Eq(c, getattr(ondisk, py), d.get(c))
     guid = re.search(r"g_boxos_type_guid\[16\]\s*=\s*\{(.*?)\}", text["ground"], re.S)
     Eq("g_boxos_type_guid", ondisk.BOXOS_TYPE_GUID,

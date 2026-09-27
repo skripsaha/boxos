@@ -4676,7 +4676,7 @@ p = "src/userspace/display/display.c"
 s = open(p).read()
 anchor = """    for (uint32_t i = 0; i < len; i++) {
         char c = f->text[i];
-        if (c == '\\n' || (unsigned char)c >= 0x20) seg[pos++] = c;
+        if (c == '\\n' || c == '\\b' || (unsigned char)c >= 0x20) seg[pos++] = c;
     }
     if (pos > 0) {
         seg[pos] = '\\0';
@@ -4687,7 +4687,7 @@ assert s.count(anchor) == 1, "rollcall display anchor missing"
 mutated = """    for (uint32_t i = 0; i <= len; i++) {   /* logcheck mutation: text and newline as two operations */
         int at_end = (i == len);
         char c     = at_end ? '\\0' : f->text[i];
-        if (!at_end && c != '\\n' && (unsigned char)c >= 0x20) { seg[pos++] = c; continue; }
+        if (!at_end && c != '\\n' && (c == '\\b' || (unsigned char)c >= 0x20)) { seg[pos++] = c; continue; }
         if (pos > 0) { seg[pos] = '\\0'; vga_puts(seg); pos = 0; }
         if (!at_end && c == '\\n') vga_newline();
     }
@@ -4737,7 +4737,8 @@ run_rollcallmut() {
 # Three facts, one boot:
 #   1. a child (handset) hears the line typed AFTER it asked;
 #   2. the shell hears again once the child is gone (it runs `hw`);
-#   3. a child hears the line typed BEFORE it asked (type-ahead banked).
+#   3. a child hears the line typed BEFORE it asked (type-ahead banked), the
+#      line typed while it hears the keyboard itself and holds no ear.
 handset_boot() {
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
@@ -4762,16 +4763,21 @@ handset_boot() {
     wait_for_line build/serial.log "TSC freq" "$WAIT_QUIET_S"
     sleep 2
 
-    # 3: the line typed before the ask — `handset`, Enter, then the words at
-    # once, before "[HANDSET] ask" can possibly have been printed. The words go
-    # as RAW keystrokes: `type` waits for each character's echo and retypes
-    # what was not echoed, and a key that nobody echoes because nobody listens
-    # is exactly the key this case is about — a witness would type it again
-    # once the child listens and hide the loss.
+    # 3: the line typed before the ask. `handset banked` hears the keyboard
+    # itself and says "[HANDSET] not listening"; the words are typed only then,
+    # and it asks for the ear only once it has heard their Enter — so they were
+    # typed while nobody listened, as a fact. Typed straight after the spawn
+    # they raced it, and they landed after the ask: the leg tested nothing, and
+    # its mutant could not turn it. The words go as RAW keystrokes: `type`
+    # waits for each character's echo and retypes what was not echoed, and a
+    # key that nobody echoes because nobody listens is exactly the key this
+    # case is about — a witness would type it again once the child listens and
+    # hide the loss.
     local MARK
     MARK=$(wc -l < build/serial.log)
-    type_cmd "handset"
+    type_cmd "handset banked"; sleep 1
     key_press ret
+    wait_for_line build/serial.log "\[HANDSET\] not listening" "$WAIT_QUIET_S" $((MARK + 1))
     local k
     for k in b e f o r e spc t h e spc a s k ret; do
         mon_raw "sendkey $k 30"
@@ -4813,12 +4819,11 @@ handset_deaf_on() {
     python3 - <<'EOF'
 p = "src/userspace/display/display.c"
 s = open(p).read()
-anchor = "    while (g_ear && touch_try_pop_tag(g_kb, &t)) {\n"
+anchor = "    while (g_ear) {\n        if (!g_key_in_hand) {\n"
 assert s.count(anchor) == 1, "handset mutation anchor missing"
-s = s.replace(anchor, "    while (touch_try_pop_tag(g_kb, &t)) {   /* logcheck mutation: consumed while nobody listens */\n", 1)
-anchor2 = "        touch_send(g_ear->lane->ear, t.payload, t.payload_len, 0);\n"
-assert s.count(anchor2) == 1, "handset mutation anchor 2 missing"
-s = s.replace(anchor2, "        if (g_ear) touch_send(g_ear->lane->ear, t.payload, t.payload_len, 0);\n", 1)
+s = s.replace(anchor, "    for (;;) {   /* logcheck mutation: consumed while nobody listens */\n"
+                      "        if (!g_ear) { if (!touch_try_pop_tag(g_kb, &g_key)) break; did = true; continue; }\n"
+                      "        if (!g_key_in_hand) {\n", 1)
 open(p, "w").write(s)
 EOF
     mut_done src/userspace/display/display.c "logcheck mutation"
@@ -7208,14 +7213,20 @@ run_footing() {
 # `reconcile`: two orphan blocks, a registry chained past data block 0, a
 # block of a live file cleared in the bitmap, a file whose only record was
 # retired), the tool predicts every line, and the machine boots it. The kernel
-# names its runs (FsckSayRuns, tagfs.c) and every run, every count and the
-# free figure must be the ones predicted — and every orphan the kernel names
-# must be one the census cannot find an owner for. A kernel that calls an owned
-# block an orphan is one whose roll call would free a live block the day the
-# repair starts giving orphans back.
+# names its runs (FsckSayRuns, tagfs.c) — the first 32 of each kind one by
+# one, ascending, and the rest in one line that counts them — and every named
+# run, every count and the free figure must be the ones predicted, and every
+# orphan the kernel names one the census cannot find an owner for. A kernel
+# that calls an owned block an orphan is one whose roll call would free a live
+# block the day the repair starts giving orphans back. A second image, C17,
+# carries 40 orphan runs, so the line that counts the rest is held to its
+# numbers too.
 #
-# (A) is host only: a real blklogwrites log written by qemu-io, read back by
-# `cut`, and replayed onto its base, byte for byte.
+# Host only, beside them: (A) a real blklogwrites log written by qemu-io, read
+# back by `cut` and replayed onto its base, byte for byte; and volume-read's
+# self-test in its plain form on a fresh image, the one gate that answers for
+# the rules no boot plants — TUSE, Spare, BOOT, the grounds, the constants
+# held against the headers.
 
 census_qemu_io() {
     local d="$SCRATCH/census-io"
@@ -7245,33 +7256,46 @@ census_qemu_io() {
     esac
 }
 
-# census_boot NAME — a fresh image, planted with `reconcile`, predicted, booted.
-# The build before the planting waits out every mutation stamp by itself
-# (stand.sh, make); the cmp below still refuses a boot that is not the plant.
+# census_selftest — volume-read's self-test, every case, on a fresh image.
+census_selftest() {
+    local rc said counts
+    rm -f build/boxos.img
+    build
+    python3 tools/volume-read.py build/boxos.img self-test >"$SCRATCH/census.selftest.out" 2>&1
+    rc=$?
+    said=$(tail -1 "$SCRATCH/census.selftest.out")
+    counts=$(printf '%s\n' "$said" | sed -nE 's/^self-test: ([0-9]+) of ([0-9]+) cases answered as expected$/\1 \2/p')
+    [ "$rc" = 0 ] && [ -n "$counts" ] && [ "${counts% *}" = "${counts#* }" ]
+    chk $? "census: volume-read's self-test on a fresh image — ${said:-no answer} (exit $rc)"
+    grep -v -e 'as expected$' -e '^self-test: aiming at' -e 'cases answered as expected$' \
+        "$SCRATCH/census.selftest.out" | sed 's/^/  /'
+}
+
+# census_boot NAME CASE — a fresh image, planted with self-test's CASE,
+# predicted, and booted as the disk it was written to: make builds no disk it
+# was handed, so what boots is what was predicted. It says why itself when it
+# answers 1 — a plant that would not take, the boot a harness fault, or a
+# machine that never reached its shell — and its caller counts nothing more.
 census_boot() {
+    local img="$SCRATCH/census.$1.img"
     rm -f build/boxos.img        # a volume that booted before is not the one predicted
     build
     make run-stop >/dev/null 2>&1
-    mutate_product build/boxos.img
-    python3 tools/volume-read.py build/boxos.img self-test --emit reconcile \
-        --out "$SCRATCH/census.$1.img" >"$SCRATCH/census.$1.emit" 2>&1 \
-        || { cat "$SCRATCH/census.$1.emit"; restore build/boxos.img; return 1; }
-    cp "$SCRATCH/census.$1.img" build/boxos.img
-    python3 tools/volume-read.py build/boxos.img check --json >"$SCRATCH/census.$1.json"
-    make run-bg >/dev/null 2>&1
-    # The guest reads its volume seconds from now; if make repacked the image
-    # on the way to QEMU, what boots is not what was predicted.
-    if ! cmp -s build/boxos.img "$SCRATCH/census.$1.img"; then
-        harness "census: build/boxos.img is not the planted volume when QEMU starts — make repacked it, so this boot judges nothing"
-        make run-stop >/dev/null 2>&1
-        restore build/boxos.img
+    if ! python3 tools/volume-read.py build/boxos.img self-test --emit "$2" --out "$img" \
+            >"$SCRATCH/census.$1.emit" 2>&1; then
+        bad "census: $2 could not be planted in a fresh image — $(tail -1 "$SCRATCH/census.$1.emit")"
+        return 1
+    fi
+    python3 tools/volume-read.py "$img" check --json >"$SCRATCH/census.$1.json"
+    if ! make run-bg BOOTDISK="$img" >"$SCRATCH/census.$1.run-bg" 2>&1; then
+        harness "census: run-bg would not start the volume planted with $2: $(tail -1 "$SCRATCH/census.$1.run-bg")"
         return 1
     fi
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     local rc=$?
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.$1.log"
-    restore build/boxos.img
+    [ $rc = 0 ] || bad "census: the volume planted with $2 never reached a shell"
     return $rc
 }
 
@@ -7285,15 +7309,34 @@ pred = json.load(open(sys.argv[1]))
 log = open(sys.argv[2], errors="replace").read()
 k = pred["kernel"]
 
+NAMED = 32    # FsckSayRuns names this many runs of each kind, and counts the rest in one line
+
 def say(held, text):
     print(("ok " if held else "bad ") + text)
 
-def runs(kind):
-    return sorted((int(a), int(b)) for a, b in re.findall(
-        r"\[TagFS FSCK\] %s run at data block (\d+), (\d+) block\(s\)" % kind, log))
+def said(kind):
+    """What the mount says of one kind: the runs it names, in the order it
+    names them, and its line for the rest as [(runs, blocks)] — empty when it
+    says none."""
+    named = [(int(a), int(b)) for a, b in re.findall(
+        r"\[TagFS FSCK\] %s run at data block (\d+), (\d+) block\(s\)" % kind, log)]
+    rest = [(int(a), int(b)) for a, b in re.findall(
+        r"\[TagFS FSCK\] and (\d+) more %s run\(s\), (\d+) block\(s\) — tools/volume-read\.py names "
+        r"every one" % kind, log)]
+    return named, rest
+
+def due(runs):
+    """What the mount must say of these runs: the first NAMED ascending, and
+    the count and blocks of the rest when there are any."""
+    runs = sorted(tuple(r) for r in runs)
+    rest = runs[NAMED:]
+    return runs[:NAMED], [(len(rest), sum(n for _s, n in rest))] if rest else []
 
 def text(rs):
     return ", ".join("%u+%u" % r for r in rs) or "none"
+
+def more(rest):
+    return "%u more run(s), %u block(s)" % rest[0] if rest else "no more"
 
 if not k["mounts"]:
     say(False, "the census predicts no mount at all: %s" % k["refusal"])
@@ -7307,8 +7350,11 @@ say(have == (fsck["orphan"], fsck["missing"]),
     "the kernel's mismatch line says %s; the census predicted %u orphan, %u missing"
     % ("%u orphan, %u missing" % have if have else "nothing", fsck["orphan"], fsck["missing"]))
 for kind in ("orphan", "missing"):
-    got, want = runs(kind), sorted(tuple(r) for r in fsck[kind + "_runs"])
+    (got, got_rest), (want, want_rest) = said(kind), due(fsck[kind + "_runs"])
     say(got == want, "the kernel names %s runs %s; the census predicted %s" % (kind, text(got), text(want)))
+    say(got_rest == want_rest, "past the %u %s runs it names the kernel counts %s; the census predicted %s"
+        % (NAMED, kind, more(got_rest) if len(got_rest) < 2 else "%u lines of them" % len(got_rest),
+           more(want_rest)))
 m = re.search(r"\[TagFS FSCK\] (\d+) file table entry\(s\) corrected from this volume's "
               r"metadata pool, (\d+) file\(s\) lost", log)
 have = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
@@ -7321,16 +7367,17 @@ want = (k["says"]["data_blocks"], k["says"]["free"], k["says"]["files"])
 say(have == want, "the kernel says %s; the census predicted \"%u data blocks, %u free, %u files\""
     % ('"%u data blocks, %u free, %u files"' % have if have else "nothing", *want))
 owned = []
-for a, n in runs("orphan"):
+named, rest = said("orphan")
+for a, n in named:
     for c in pred["census"]["claims"]:
         for s, cn in c["runs"]:
             lo, hi = max(a, s), min(a + n, s + cn)
             if lo < hi:
                 owned.append("%s at data block %u+%u" % (c["label"], lo, hi - lo))
-census_orphans = sorted(tuple(r) for r in pred["census"]["orphan_runs"])
-say(not owned and runs("orphan") == census_orphans,
-    "every orphan the kernel names (%s) is one the census finds no owner for (%s)%s"
-    % (text(runs("orphan")), text(census_orphans),
+census_named, census_rest = due(pred["census"]["orphan_runs"])
+say(not owned and (named, rest) == (census_named, census_rest),
+    "every orphan the kernel names (%s; %s) is one the census finds no owner for (%s; %s)%s"
+    % (text(named), more(rest), text(census_named), more(census_rest),
        " — the kernel calls OWNED blocks orphans: " + "; ".join(owned) if owned else ""))
 CENSUS_EOF
     local rc=$?
@@ -7341,20 +7388,19 @@ CENSUS_EOF
 
 run_census() {
     echo "== census: the host's roll call and the kernel's name the same blocks =="
+    local plant line
     census_qemu_io
-    if ! census_boot census; then
-        bad "census: the planted volume never reached a shell"
-        build; return
-    fi
-    census_judge census
-    local line
-    while IFS= read -r line; do
-        case "$line" in
-            "ok "*)  ok  "census: ${line#ok }" ;;
-            "bad "*) bad "census: ${line#bad }" ;;
-        esac
-    done < "$SCRATCH/census.census.verdict"
-    build   # the planted image was discarded; leave one built from clean sources
+    census_selftest
+    for plant in reconcile C17; do
+        census_boot "$plant" "$plant" || continue
+        census_judge "$plant"
+        while IFS= read -r line; do
+            case "$line" in
+                "ok "*)  ok  "census $plant: ${line#ok }" ;;
+                "bad "*) bad "census $plant: ${line#bad }" ;;
+            esac
+        done < "$SCRATCH/census.$plant.verdict"
+    done
 }
 
 # The two halves of the reconcile must each be able to go red. The kernel's:
@@ -7391,7 +7437,7 @@ EOF2
 run_censusmut() {
     echo "== censusmut: with either half broken, the reconcile must go red =="
     census_poolblind_on
-    if census_boot censusmut; then
+    if census_boot censusmut reconcile; then
         census_judge censusmut
         local reds
         reds=$(grep -c '^bad ' "$SCRATCH/census.censusmut.verdict")
@@ -7400,8 +7446,6 @@ run_censusmut() {
         else
             bad "censusmut: the kernel left the pool chain out of its roll call and the reconcile stayed green"
         fi
-    else
-        bad "censusmut: the planted volume never reached a shell on the mutated kernel"
     fi
     restore src/kernel/tagfs/tagfs.c
     build
@@ -8084,7 +8128,13 @@ STAND_HELD_EOF
 #   boot 3  systemtag; then the host lists the volume again: is kernel.bin on it
 #
 # on a throwaway image given a gigabyte more ground, so that once the steps
-# land no case is refused for want of space. Each case stands for a defect
+# land no case is refused for want of space — built VOLUME_TESTS=on, the one
+# build whose quilltest carries the cases that harm a volume past their own
+# files. So the kernel's own startup tests run too, after every mount and
+# before the shell, and what the judge reads of a boot is its first mount
+# line and what follows the case's own echo: the file ids those tests spend
+# on boot 2 lie between the two mounts fidhistory is weighed by, and are
+# counted as dead ids like the case's own. Each case stands for a defect
 # found red on HEAD, and caveat_judge (stand.sh) holds it under the step that
 # discharges it: the defect seen, with its number, is held; the correct
 # behaviour seen is a FAIL until that step lifts the caveat; anything else is
@@ -8097,16 +8147,30 @@ STAND_HELD_EOF
 # QUILL_STAND is the machine. The default is UEFI on q35 with four cores —
 # AHCI and the asynchronous WriteJob, the way a userspace write goes on the
 # owner's boards — and every verdict about a write names the path it took.
+# Its keys are read as a shell reads words, so a key whose value holds a
+# blank is quoted inside it: QUILL_STAND="STRICT=on CORES=4 MEM=2G
+# QEMUEXTRA='-machine pc'" is the PIIX stand, one key reaching make whole.
 QUILL_STAND=${QUILL_STAND:-"UEFI=on STRICT=on CORES=4 MEM=2G"}
 QUILL_GROW_SECTORS=2097152   # a gigabyte more ground than the image was made with
 QUILL_NEED_FREE=131072       # blocks the grown volume must have free: 512 MiB
 
+# quill_keys — QUILL_STAND into QUILL_KEYS, its words; says so and answers 1
+# when it does not read as words.
+quill_keys() {
+    if ! eval "QUILL_KEYS=($QUILL_STAND)" 2>/dev/null; then
+        bad "quill: QUILL_STAND does not read as shell words: $QUILL_STAND"
+        return 1
+    fi
+}
+
 # The core count QUILL_STAND boots with — the Makefile's own default when the
 # stand does not say — because a write's path depends on it (stand_path).
 quill_cores() {
-    local c
-    c=$(printf '%s\n' $QUILL_STAND | sed -n 's/^CORES=\([0-9][0-9]*\)$/\1/p' | tail -1)
-    echo "${c:-1}"
+    local key c=1
+    for key in ${QUILL_KEYS[@]+"${QUILL_KEYS[@]}"}; do
+        case "${key#CORES=}" in "$key"|''|*[!0-9]*) ;; *) c=${key#CORES=} ;; esac
+    done
+    echo "$c"
 }
 
 quill_keep() {    # quill_keep NAME — stop the machine and keep its log
@@ -8116,12 +8180,13 @@ quill_keep() {    # quill_keep NAME — stop the machine and keep its log
 
 # quill_boot NAME — boot the stretched image, and refuse to go on from a boot
 # that stands on any other ground: a repacked image is a fresh one, and every
-# verdict taken on it would be about a volume nobody stretched.
+# verdict taken on it would be about a volume nobody stretched. VOLUME_TESTS
+# goes on run-bg as well: it owns a rebuild marker, and a run-bg without it
+# would rebuild the tree plain and repack.
 quill_boot() {
     local stood
     make run-stop >/dev/null 2>&1
-    # shellcheck disable=SC2086
-    make run-bg $QUILL_STAND >/dev/null 2>&1
+    make run-bg VOLUME_TESTS=on ${QUILL_KEYS[@]+"${QUILL_KEYS[@]}"} >/dev/null 2>&1
     if ! wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"; then
         quill_keep "$1"
         bad "quill: boot $1 never reached a shell"
@@ -8151,12 +8216,18 @@ quill_run() {
     wait_for_quiet 3
 }
 
-# quill_session TAG — the three boots, their logs and the two listings.
+# quill_session TAG — the three boots, their logs and the two listings, on a
+# tree built VOLUME_TESTS=on (the caller puts the plain one back).
 quill_session() {
     local tag=$1 grown c
     rm -f "$SCRATCH/serial.quill.$tag"[123].log "$SCRATCH/quill.$tag.list"[13]
+    quill_keys || return 1
     rm -f build/boxos.img
-    build
+    if ! build_with_key VOLUME_TESTS=on; then
+        echo "BUILD FAILED (VOLUME_TESTS=on) — tail:"; tail -25 "$SCRATCH/build.log"
+        bad "quill: VOLUME_TESTS=on does not build"
+        return 1
+    fi
     make run-stop >/dev/null 2>&1
     mutate_product build/boxos.img
     if ! grown=$(grow_stretch build/boxos.img "$QUILL_GROW_SECTORS"); then
@@ -8198,8 +8269,12 @@ quill_judge() {
 import math, re, sys
 scratch, tag = sys.argv[1], sys.argv[2]
 BIG, SEQ, WEAVE, USE_BYTES, USE_TAGS, FIDS, NEED_FREE = (int(x) for x in sys.argv[3:10])
-CEILING = 4 << 20                       # quilltest's QUILL_WIDTH_CEILING
 COLD = 1 << 20                          # quilltest's QUILL_COLD_BYTES
+# The extents a record holds with one stem tag and a 10-byte name (quillS.bin,
+# quillA.bin): 42 bytes of header, 2 per tag, 6 per extent and the name in
+# 4080 (meta_pool.c RECORD_HEADER_SIZE, meta_pool_record_size). A file of one
+# extent per block is refused at exactly EMAX blocks.
+EMAX = (4080 - 42 - 2 - 10) // 6
 
 def text(path):
     try:
@@ -8229,14 +8304,22 @@ def host(listing, name):
 def ceiling(blocks):
     return int(math.log2(blocks)) + 1 if blocks > 0 else 0
 
+# The boot's own mount: the first such line, before the startup tests.
 def keeps(log):
     found = re.findall(r"this mount keeps (\d+) bytes of kernel heap for (\d+) file id\(s\) "
                        r"ever issued, (\d+) of them live", log)
-    return tuple(int(x) for x in found[-1]) if found else None
+    return tuple(int(x) for x in found[0]) if found else None
 
 def after_echo(log, case):
     at = log.rfind("~ quilltest " + case)
     return log[at:] if at >= 0 else log
+
+# The medium said it failed a command while the case ran: whatever the case
+# says of a refusal, the disk may have made it.
+def medium_fault(log, case):
+    m = re.search(r"\[AHCI\] port \d+ (?:went past its deadline|reported a fatal error)[^\n]*",
+                  after_echo(log, case))
+    return m.group(0) if m else None
 
 # --- the stand ---------------------------------------------------------------
 m = re.search(r"\[KLIB\] Total RAM: (\d+) MB, kernel heap: (\d+) KB", logs[0])
@@ -8248,7 +8331,7 @@ m = re.search(r"this volume runs (\d+) sectors and the ground under it runs (\d+
 out("check", "ok" if m else "bad", "boot 1's volume took the ground behind it: %s"
     % ("%s sectors to %s" % m.groups() if m else "no line says so"))
 said_free = re.findall(r"\[TagFS\] (\d+) data blocks, (\d+) free, (\d+) files", logs[0])
-free = int(said_free[-1][1]) if said_free else None
+free = int(said_free[0][1]) if said_free else None
 out("check", "ok" if free is not None and free >= NEED_FREE else "bad",
     "boot 1 has %s blocks free, %d needed for everything the cases write" % (free, NEED_FREE))
 for i, log in enumerate(logs, 1):
@@ -8274,8 +8357,7 @@ def longquery():
     m = re.match(r"a query for one tag 256 bytes long returned all (\d+) of the volume's (\d+) files$", rest)
     if word == "DEFECT" and m and m.group(1) == m.group(2) and int(m.group(1)) > 0:
         return "defect", "a query for one tag 256 bytes long answered all %s of the volume's %s files" % m.groups()
-    if word == "PASS" and re.match(r"a query for one tag 256 bytes long (was refused \(error \d+\)|"
-                                   r"returned no file of the volume's \d+)$", rest):
+    if word == "PASS" and re.match(r"a query for one tag 256 bytes long was refused \(error \d+\)$", rest):
         return "behaves", rest
     return "fail", said(logs[0], "longquery")
 
@@ -8293,13 +8375,17 @@ def bigwrite():
         return "behaves", rest
     return "fail", "%s; the kernel's heap refusals for it: %s" % (said(logs[0], "bigwrite"), seen or "none")
 
-def per_write(files, sizes):
-    """Every file whole on the host, one extent per 4 KiB block."""
-    return all(h and h[0] == size and h[1] == h[2] == size // 4096 for h, size in zip(files, sizes))
+def at_width(files):
+    """Every file whole on the host at the record's width: EMAX blocks in EMAX
+    extents, one per write."""
+    return all(h and h == (EMAX * 4096, EMAX, EMAX) for h in files)
 
 def sequential():
     word, rest = verdict(logs[0], "sequential")
     h = host(lists[0], "quillS.bin")
+    fault = medium_fault(logs[0], "sequential")
+    if fault:
+        return "fail", "%s; the medium said, while it ran: %s" % (said(logs[0], "sequential"), fault)
     if word == "PASS" and rest.startswith("quillS.bin took %d bytes in " % SEQ) and h:
         c = ceiling(h[2])
         if h[0] == SEQ and h[2] == SEQ // 4096 and h[1] <= c:
@@ -8308,17 +8394,21 @@ def sequential():
         return "fail", "the file is whole but quillS.bin has %d extents where %d is the ceiling (%d bytes, " \
                        "%d blocks)" % (h[1], c, h[0], h[2])
     m = re.match(r"quillS\.bin, with no other writer, refused its write at byte (\d+) of (\d+) \(error (\d+)\) "
-                 r"after (\d+) writes of 4096 in a row", rest)
-    if word == "DEFECT" and m and int(m.group(2)) == SEQ and int(m.group(1)) < CEILING and \
-            per_write([h], [int(m.group(1))]):
-        return "defect", "quillS.bin, its only writer, was refused at byte %s (error %s) after %s writes; the " \
-                         "host counts %d extents for %d blocks — one per write" % (m.group(1), m.group(3),
-                                                                                   m.group(4), h[1], h[2])
+                 r"after (\d+) writes of 4096 in a row, the byte its record's width puts the refusal at "
+                 r"\((\d+)\)", rest)
+    if word == "DEFECT" and m and int(m.group(2)) == SEQ and m.group(3) == "200" and \
+            int(m.group(1)) == int(m.group(5)) == EMAX * 4096 and at_width([h]):
+        return "defect", "quillS.bin, its only writer, was refused at byte %s (error 200) after %s writes, " \
+                         "the record's width; the host counts %d extents for %d blocks — one per write" \
+                         % (m.group(1), m.group(4), h[1], h[2])
     return "fail", "%s; the host lists quillS.bin as %s" % (said(logs[0], "sequential"), h)
 
 def interleave():
     word, rest = verdict(logs[0], "interleave")
     ha, hb = host(lists[0], "quillA.bin"), host(lists[0], "quillB.bin")
+    fault = medium_fault(logs[0], "interleave")
+    if fault:
+        return "fail", "%s; the medium said, while it ran: %s" % (said(logs[0], "interleave"), fault)
     if word == "PASS" and rest.startswith("quillA.bin and quillB.bin took %d bytes each" % WEAVE) and ha and hb:
         c = ceiling(WEAVE // 4096)
         if all(h[0] == WEAVE and h[2] == WEAVE // 4096 and h[1] <= c for h in (ha, hb)):
@@ -8327,12 +8417,15 @@ def interleave():
         return "fail", "the files are whole but quillA.bin has %d extents and quillB.bin %d where %d is the " \
                        "ceiling" % (ha[1], hb[1], c)
     m = re.match(r"(quill[AB]\.bin) refused its write at byte (\d+) of (\d+) \(error (\d+)\) after (\d+) "
-                 r"alternating writes of 4096; the (\d+) and (\d+) bytes", rest)
-    if word == "DEFECT" and m and int(m.group(3)) == WEAVE and int(m.group(2)) < CEILING and \
-            per_write([ha, hb], [int(m.group(6)), int(m.group(7))]):
-        return "defect", "%s was refused at byte %s (error %s) after %s alternating writes; the host counts %d " \
-                         "and %d extents for %d and %d blocks — one per write, as for the lone writer of " \
-                         "sequential" % (m.group(1), m.group(2), m.group(4), m.group(5), ha[1], hb[1], ha[2], hb[2])
+                 r"alternating writes of 4096, the byte its record's width puts the refusal at \((\d+)\); "
+                 r"the (\d+) and (\d+) bytes", rest)
+    if word == "DEFECT" and m and m.group(1) == "quillA.bin" and int(m.group(3)) == WEAVE and \
+            m.group(4) == "200" and int(m.group(2)) == int(m.group(6)) == EMAX * 4096 and \
+            int(m.group(7)) == int(m.group(8)) == EMAX * 4096 and at_width([ha, hb]):
+        return "defect", "%s was refused at byte %s (error 200) after %s alternating writes, the record's " \
+                         "width; the host counts %d and %d extents for %d and %d blocks — one per write, as for " \
+                         "the lone writer of sequential" % (m.group(1), m.group(2), m.group(5), ha[1], hb[1],
+                                                           ha[2], hb[2])
     return "fail", "%s; the host lists quillA.bin as %s and quillB.bin as %s" % (said(logs[0], "interleave"), ha, hb)
 
 def coldread():
@@ -8365,11 +8458,13 @@ def coldwrite():
 def usememory():
     w1, t1 = verdict(logs[0], "usememory")
     w2, t2 = verdict(logs[1], "usememory")
+    # The clear right after is the control: remembered, it says the volume took
+    # a Ledger write beside the probe's, so the length is what was refused.
     m = re.match(r"a Use Context of (\d+) bytes in (\d+) tags was set and the volume did not remember it "
-                 r"\(remembered=0", t1)
+                 r"\(remembered=0; cleared with remembered=1, anchor 0\)$", t1)
     if w1 == "DEFECT" and m and (int(m.group(1)), int(m.group(2))) == (USE_BYTES, USE_TAGS):
         return "defect", "a Use Context of %d bytes in %d tags was set and the volume did not remember it " \
-                         "(remembered=0)" % (USE_BYTES, USE_TAGS)
+                         "(remembered=0), and the clear beside it was remembered" % (USE_BYTES, USE_TAGS)
     p = re.match(r"a Use Context of (\d+) bytes in (\d+) tags is remembered \(remembered=1\)", t1)
     q = re.match(r"after a reboot the machine gave back all (\d+) tags, (\d+) bytes, in the order they were "
                  r"said; the probe is cleared \(remembered=1\)", t2)
@@ -8384,15 +8479,20 @@ def fidhistory():
     m = re.match(r"spent (\d+) file ids, (\d+) to (\d+), with (-?\d+) live files before and after", rest)
     if word != "PENDING" or not m or int(m.group(1)) != FIDS:
         return "fail", said(logs[1], "fidhistory")
+    first, last = int(m.group(2)), int(m.group(3))
     b, c = keeps(logs[1]), keeps(logs[2])
     if not b or not c:
         return "fail", "a mount did not say what it keeps: boot 2 %s, boot 3 %s" % (b, c)
-    if b[2] != c[2] or c[1] - b[1] != FIDS:
-        return "fail", "the two mounts are not %d dead ids apart: %d then %d ids issued, %d then %d live" \
-                       % (FIDS, b[1], c[1], b[2], c[2])
-    slope = (c[0] - b[0]) / FIDS
-    what = "%d dead file ids took the next mount from %d to %d bytes of kernel heap, %.1f bytes per id" \
-           % (FIDS, b[0], c[0], slope)
+    # Between the two mounts: boot 2's startup tests, then the case's ids,
+    # the last of them the last id issued before boot 3.
+    if b[2] != c[2] or last - first + 1 != FIDS or c[1] != last or first <= b[1]:
+        return "fail", "the two mounts do not stand around the case's %d ids, %d to %d: %d then %d ids " \
+                       "issued, %d then %d live" % (FIDS, first, last, b[1], c[1], b[2], c[2])
+    dead = c[1] - b[1]
+    slope = (c[0] - b[0]) / dead
+    what = "%d dead file ids — the case's %d, and %d the startup tests spent before it — took the next " \
+           "mount from %d to %d bytes of kernel heap, %.1f bytes per id" \
+           % (dead, FIDS, dead - FIDS, b[0], c[0], slope)
     if slope >= 64:
         return "defect", what
     if slope <= 8:
@@ -8403,16 +8503,19 @@ def systemtag():
     word, rest = verdict(logs[2], "systemtag")
     listed = len(re.findall(r"^ +\S+ +\d+ bytes +\d+ extent\(s\)", lists[1], re.M))
     present = host(lists[1], "kernel.bin") is not None
-    m = re.match(r"kernel\.bin \(file (\d+)\) gave up its system tag and was then deleted; asked about it now, "
-                 r"the volume answers error (\d+)", rest)
+    m = re.match(r"kernel\.bin \(file (\d+)\) gave up its system tag to untag and was then deleted by erase "
+                 r"trashed, programs that do not wear system \(exit 0 each\); asked about it now, the volume "
+                 r"answers error (\d+)", rest)
     if word == "DEFECT" and m and listed and not present:
-        return "defect", "kernel.bin (file %s) gave up its system tag and was deleted (error %s when asked " \
-                         "after); the host lists %d files and no kernel.bin" % (m.group(1), m.group(2), listed)
-    p = re.match(r"kernel\.bin \(file (\d+)\) refused to give up its system tag \(error (\d+)\) and refused "
-                 r"deletion \(error (\d+)\)", rest)
-    if word == "PASS" and p and present:
-        return "behaves", "kernel.bin (file %s) refused both (errors %s and %s), and the host still lists it" \
-                          % p.groups()
+        return "defect", "kernel.bin (file %s) gave up its system tag to untag and was deleted by erase trashed, " \
+                         "programs that do not wear system (error %s when asked after); the host lists %d files " \
+                         "and no kernel.bin" % (m.group(1), m.group(2), listed)
+    p = re.match(r"kernel\.bin \(file (\d+)\) kept its system tag against untag \(exit (\d+)\), and its place "
+                 r"against erase trashed with it in the trash \(trash and erase exit 0\), programs that do not "
+                 r"wear system", rest)
+    if word == "PASS" and p and present and p.group(2) != "0":
+        return "behaves", "kernel.bin (file %s) refused untag (exit %s) and stayed through erase trashed, programs " \
+                          "that do not wear system, and the host still lists it" % p.groups()
     return "fail", "%s; the host lists %d files, kernel.bin %s" % (said(logs[2], "systemtag"), listed,
                                                                  "among them" if present else "not among them")
 
@@ -8434,27 +8537,36 @@ quill_path() {
     stand_path "$SCRATCH/serial.quill.$1$boot.log" "$(quill_cores)"
 }
 
+# The path a case's verdict names. bigwrite's refusal comes before any: the
+# write is copied into one kernel-heap buffer (crate_in_buf) before ObjWrite
+# forks to the machine's path, and that copy is what refuses it.
+quill_said_path() {   # quill_said_path CASE SEEN
+    case "$1:$2" in
+        longquery:*)     echo "" ;;
+        bigwrite:defect) echo " [path: none — refused in ObjWrite's copy of the write (crate_in_buf), before its fork to $(quill_path quill bigwrite)]" ;;
+        *)               echo " [path: $(quill_path quill "$1")]" ;;
+    esac
+}
+
 run_quill() {
     echo "== quill: the Quill write core's red tests, each held under the step that discharges it =="
-    echo "   stand: $QUILL_STAND"
-    local kind a b c what
+    echo "   stand: $QUILL_STAND, built VOLUME_TESTS=on"
+    local kind a b c
     # A session cut short has said why; three boots or none are judged.
     if ! quill_session quill; then
-        make run-stop >/dev/null 2>&1; restore build/boxos.img; build; return
+        make run-stop >/dev/null 2>&1; restore build/boxos.img; buildkey_restore; return
     fi
     quill_judge quill 268435456 3145728 67108864 1000 91 50000
     while IFS=$'\t' read -r kind a b c; do
         case "$kind" in
             check)    if [ "$a" = ok ]; then ok "quill: $b"; else bad "quill: $b"; fi ;;
             selftest) if [ "$a" = passed ]; then ok "quill: $b"; else bad "quill: $b"; fi ;;
-            case)     what=$c
-                      [ "$a" != longquery ] && what="$what [path: $(quill_path quill "$a")]"
-                      caveat_judge "$a" "$b" "$what" ;;
+            case)     caveat_judge "$a" "$b" "$c$(quill_said_path "$a" "$b")" ;;
         esac
     done < "$SCRATCH/quill.quill.verdict"
     make run-stop >/dev/null 2>&1
     restore build/boxos.img
-    build
+    buildkey_restore
 }
 
 # ---------------------------------------------------------------------------
@@ -8492,26 +8604,27 @@ EOF2
     mut_done src/kernel/core/decks/storage/storage_ops.c "logcheck mutation" 2
 
     mutate src/userspace/apps/quilltest.c
+    mutate src/userspace/apps/quilltest_throwaway.c
     python3 - <<'EOF2'
-p = "src/userspace/apps/quilltest.c"
-s = open(p).read()
-for a, b in (
-    ("#define QUILL_BIG_BYTES      (256u << 20)\n",
+for p, a, b in (
+    ("src/userspace/apps/quilltest.c", "#define QUILL_BIG_BYTES      (256u << 20)\n",
      "#define QUILL_BIG_BYTES      (2u << 20)   /* logcheck mutation: a write HEAD can take */\n"),
-    ("#define QUILL_WEAVE_BYTES    (64u << 20)\n",
-     "#define QUILL_WEAVE_BYTES    (1u << 20)   /* logcheck mutation: below the record width */\n"),
-    ("#define QUILL_SEQ_BYTES      (3u << 20)\n",
-     "#define QUILL_SEQ_BYTES      (1u << 20)   /* logcheck mutation: below the record width */\n"),
-    ("#define QUILL_USE_TAGS       91          /* 91 x \"quiluNNNNN\" + 90 commas = 1000 bytes */\n",
+    ("src/userspace/apps/quilltest.c",
+     "#define QUILL_USE_TAGS       91          /* 91 x \"quiluNNNNN\" + 90 commas = 1000 bytes */\n",
      "#define QUILL_USE_TAGS       36   /* logcheck mutation: 395 bytes, which the Ledger holds */\n"),
-    ("        int drc = delete((uint32_t)fid);\n",
+    ("src/userspace/apps/quilltest_throwaway.c", "#define QUILL_WEAVE_BYTES    (64u << 20)\n",
+     "#define QUILL_WEAVE_BYTES    (1u << 20)   /* logcheck mutation: below the record width */\n"),
+    ("src/userspace/apps/quilltest_throwaway.c", "#define QUILL_SEQ_BYTES      (3u << 20)\n",
+     "#define QUILL_SEQ_BYTES      (1u << 20)   /* logcheck mutation: below the record width */\n"),
+    ("src/userspace/apps/quilltest_throwaway.c", "        int drc = delete((uint32_t)fid);\n",
      "        int drc = (i % 1000u == 999u) ? 0 : delete((uint32_t)fid);   /* logcheck mutation: one in a thousand stays */\n"),
 ):
-    assert s.count(a) == 1, "quillmut quilltest anchor missing: " + a.strip()
-    s = s.replace(a, b, 1)
-open(p, "w").write(s)
+    s = open(p).read()
+    assert s.count(a) == 1, "quillmut quilltest anchor missing in %s: %s" % (p, a.strip())
+    open(p, "w").write(s.replace(a, b, 1))
 EOF2
-    mut_done src/userspace/apps/quilltest.c "logcheck mutation" 5
+    mut_done src/userspace/apps/quilltest.c "logcheck mutation" 2
+    mut_done src/userspace/apps/quilltest_throwaway.c "logcheck mutation" 3
 
     mutate src/lib/kernel/slab.c
     python3 - <<'EOF2'
@@ -8539,6 +8652,7 @@ EOF2
 quill_mutants_off() {
     restore src/kernel/core/decks/storage/storage_ops.c
     restore src/userspace/apps/quilltest.c
+    restore src/userspace/apps/quilltest_throwaway.c
     restore src/lib/kernel/slab.c
     restore src/kernel/core/memory/vmm/vmm.c
 }
@@ -8571,7 +8685,7 @@ run_quillmut() {
     quill_judge_selfcheck
     quill_mutants_on
     if ! quill_session quillmut; then
-        make run-stop >/dev/null 2>&1; quill_mutants_off; restore build/boxos.img; build; return
+        make run-stop >/dev/null 2>&1; quill_mutants_off; restore build/boxos.img; buildkey_restore; return
     fi
     make run-stop >/dev/null 2>&1
     quill_mutants_off
@@ -8601,7 +8715,7 @@ run_quillmut() {
         esac
     done < "$SCRATCH/quill.quillmut.verdict"
     quill_fid_kept
-    build   # every put-back discards the image; leave one built from clean sources
+    buildkey_restore   # every put-back discards the image; leave one built plain from clean sources
 }
 
 # fidhistory's guest must have counted exactly the files the mutant kept.

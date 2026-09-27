@@ -28,8 +28,9 @@
 #                    stay as the run left it.
 #
 # Written here rather than inside one harness, because every harness needs
-# them the same way: the stand lock (one harness at a time on one SCRATCH),
-# the Caveat judge with its one table, and stand_path.
+# them the same way: the stand locks (one harness at a time on one SCRATCH and
+# on one tree), and the Caveat judge with its one table and stand_path
+# (stand_caveat.sh, sourced below).
 
 : "${STAND_NAME:?stand.sh is sourced by a harness that names itself first — set STAND_NAME}"
 
@@ -38,7 +39,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # logcheck on purpose: the mutation manifest and the build-key record live
 # here, and a run killed under one harness is put back by whichever harness
 # runs next — which works only while they all read the same books. A job
-# that must not share them runs under a TMPDIR of its own.
+# that must not share them runs under a TMPDIR of its own — and in a tree of
+# its own, because build/ belongs to the tree, not to the TMPDIR.
 SCRATCH="${TMPDIR:-/tmp}/boxos-logcheck"
 mkdir -p "$SCRATCH"
 cd "$ROOT" || exit 1
@@ -370,12 +372,17 @@ buildkey_restore() {
 # for every harness under the same TMPDIR. Two harnesses on it at once are not
 # two runs. The second one's first preflight finds the first one's manifest,
 # takes it for a run that was killed, and puts back the tree the first is in
-# the middle of measuring; and both drive the same build/ — which was
-# measured, see buildkey_restore: a second agent tore the image out from under
-# a rebuild and the run still printed a green summary.
+# the middle of measuring. And every harness drives the tree's own build/ —
+# its image, its QEMU pid, its serial log — whatever TMPDIR it runs under:
+# a second agent tore the image out from under a rebuild and the run still
+# printed a green summary (see buildkey_restore). So there are two stands,
+# taken the same way: the TMPDIR's books, and the tree. The tree's lies in
+# the checkout's own git directory — one per worktree, which git does not
+# show and `make clean` does not remove, where build/ is removed by one and
+# absent from a fresh clone.
 #
-# So the stand is taken before anything reads the books, and it names who
-# holds it: stand.lock/holder is "pid name". mkdir is the lock because it is
+# A stand is taken before anything reads the books, and it names who holds
+# it: stand.lock/holder is "pid name scratch". mkdir is the lock because it is
 # the one filesystem operation that either makes the directory or fails,
 # whoever else is asking in the same instant. A holder whose pid is gone —
 # killed by a signal no trap sees, or a desk that went down under it — is
@@ -385,28 +392,32 @@ buildkey_restore() {
 # refused too, never guessed at: a lock that names nobody is one being taken
 # at that very instant, or one whose taker died in the microseconds between
 # its mkdir and its name — the line says which directory to remove if no
-# harness is running.
+# harness is running. Both stands refuse and never wait, so the order they
+# are taken in cannot deadlock two harnesses.
+STAND_TREE_LOCK="$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null || { mkdir -p "$ROOT/build" && echo "$ROOT/build"; })/stand.lock"
+STAND_BOOKS_LOCK="$SCRATCH/stand.lock"
+
+# stand_lock LOCK WHAT — take LOCK; WHAT says what it guards.
 stand_lock() {
-    local lock="$SCRATCH/stand.lock" holder pid
+    local lock=$1 what=$2 holder pid
     while ! mkdir "$lock" 2>/dev/null; do
         holder=$(cat "$lock/holder" 2>/dev/null) || holder=""
         pid=${holder%% *}
         case "$pid" in
             ''|*[!0-9]*)
                 echo "$STAND_NAME: REFUSING TO RUN — $lock names no holder: a harness"
-                echo "          is taking the stand this very instant, or was killed doing"
-                echo "          so. If none is running under this TMPDIR, remove it."
+                echo "          is taking $what this very instant, or was killed doing so."
+                echo "          If none is running, remove it."
                 exit 1 ;;
         esac
         if kill -0 "$pid" 2>/dev/null; then
-            echo "$STAND_NAME: REFUSING TO RUN — the stand is taken by pid $pid (${holder#* })."
-            echo "          It keeps its mutation manifest in $SCRATCH, the books this"
-            echo "          run would read. Run again once it is done, or under a TMPDIR"
-            echo "          of your own."
+            echo "$STAND_NAME: REFUSING TO RUN — $what is taken by pid $pid (${holder#* })."
+            echo "          Run again once it is done; a run of your own beside it needs a"
+            echo "          worktree of its own and a TMPDIR of its own."
             exit 1
         fi
         if ! mkdir "$lock/takeover" 2>/dev/null; then
-            echo "$STAND_NAME: REFUSING TO RUN — pid $pid (${holder#* }) left the stand without"
+            echo "$STAND_NAME: REFUSING TO RUN — pid $pid (${holder#* }) left $what without"
             echo "          letting go of it, and another harness is taking it over right"
             echo "          now. If none is, remove $lock."
             exit 1
@@ -417,28 +428,30 @@ stand_lock() {
             rmdir "$lock/takeover" 2>/dev/null
             continue
         fi
-        echo "$STAND_NAME: the stand was held by pid $pid (${holder#* }), which is gone — taking it over"
+        echo "$STAND_NAME: $what was held by pid $pid (${holder#* }), which is gone — taking it over"
         rm -rf "$lock.gone.$$"
         mv "$lock" "$lock.gone.$$" || exit 1
         rm -rf "$lock.gone.$$"
     done
-    printf '%s %s\n' "$$" "$STAND_NAME" > "$lock/holder" || exit 1
+    printf '%s %s %s\n' "$$" "$STAND_NAME" "$SCRATCH" > "$lock/holder" || exit 1
 }
 
-# Let go of the stand, and only if it is this run's to let go of. Moved aside
-# before it is removed, so no harness ever finds it half deleted: a lock with
-# no holder in it reads as one being taken, and is refused.
+# stand_unlock LOCK — let go of LOCK, and only if it is this run's to let go
+# of. Moved aside before it is removed, so no harness ever finds it half
+# deleted: a lock with no holder in it reads as one being taken, and is
+# refused.
 stand_unlock() {
-    local lock="$SCRATCH/stand.lock"
-    [ "$(cat "$lock/holder" 2>/dev/null)" = "$$ $STAND_NAME" ] || return 0
+    local lock=$1
+    [ "$(cat "$lock/holder" 2>/dev/null)" = "$$ $STAND_NAME $SCRATCH" ] || return 0
     rm -rf "$lock.gone.$$"
     mv "$lock" "$lock.gone.$$" 2>/dev/null && rm -rf "$lock.gone.$$"
 }
 
-stand_lock
-# The way out until the exit trap below is set: a preflight that refuses must
-# not leave the stand held by a pid that is about to be gone.
-trap stand_unlock EXIT
+stand_lock "$STAND_TREE_LOCK" "the tree $ROOT, whose build/ this run would drive,"
+# The way out until the exit trap below is set: a stand that refuses must not
+# leave the other held by a pid that is about to be gone.
+trap 'stand_unlock "$STAND_BOOKS_LOCK"; stand_unlock "$STAND_TREE_LOCK"' EXIT
+stand_lock "$STAND_BOOKS_LOCK" "the mutation books in $SCRATCH"
 
 # Three preflights, because the three failures they catch are different. The
 # first is this mechanism's own bookkeeping: a manifest that outlived its run.
@@ -493,34 +506,115 @@ fi
 # `BrookCleanupProcess` was renamed to `BrookCleanupStrand` and `orderlifemut`
 # was the only oracle that noticed, half an hour into a suite.
 #
-# The literals are right here, in the harness that sources this — "$0" is its
-# path, and sourcing does not change it. Reading them all out and asking the
-# tree costs a second and answers for every oracle at once.
+# The anchors are right here, in the harness that sources this — "$0" is its
+# path, and sourcing does not change it: every string a mutation's python
+# asserts it finds exactly once (`assert s.count(X) == 1`), read by python's
+# own parser — bound to a name, built from others, or a row of an edit table
+# — and looked for byte for byte in the file the mutation opens, or, where
+# the harness hands the path in as a word, in every source under src/ and
+# tools/. This used to ask grep, and grep -F splits a pattern at every
+# newline: an anchor ending in one matched every file, twenty-three anchors
+# could never go stale, and two of handset's had. So the check is first shown
+# a stale anchor of each kind, and vouches for nothing if it does not see
+# them. The harnesses are never searched: every anchor is found in the line
+# that declares it.
 python3 - "$0" "$STAND_NAME" <<'ANCHOR_EOF' || exit 1
-import os, re, subprocess, sys
-script = open(sys.argv[1]).read()
-lits = re.findall(r'^\s*(?:a|anchor)\s*=\s*"((?:[^"\\]|\\.)*)"', script, re.M)
-stale = []
-for lit in sorted(set(lits)):
-    text = lit.encode().decode('unicode_escape')
-    if len(text.strip()) < 6:
-        continue
-    # --exclude the harness itself. Without it the search finds the anchor
-    # inside the very line that declares it, every anchor looks alive, and the
-    # check is a green light wired to nothing — which is worse than no check
-    # at all.
-    if subprocess.run(["grep", "-rlF",
-                       "--exclude=" + os.path.basename(sys.argv[1]), text,
-                       "src", "tools"], capture_output=True).returncode != 0:
-        stale.append(text)
+import ast, os, re, sys
+HARNESSES = {"logcheck.sh", "powercut.sh", "stand.sh"}
+SOURCES = (".c", ".h", ".cpp", ".hpp", ".S", ".asm", ".ld", ".py", ".sh", ".txt", ".mk")
+CACHE = {}
+
+def Read(path):
+    if path not in CACHE:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                CACHE[path] = fh.read()
+        except OSError:
+            CACHE[path] = ""
+    return CACHE[path]
+
+def Corpus():
+    for top in ("src", "tools"):
+        for d, _dirs, files in os.walk(top):
+            for f in sorted(files):
+                if f not in HARNESSES and (f.endswith(SOURCES) or f == "Makefile"):
+                    yield os.path.join(d, f)
+
+def One(n, env):
+    """A string the python would compute, or None."""
+    if isinstance(n, ast.Constant) and isinstance(n.value, str):
+        return n.value
+    if isinstance(n, ast.Name):
+        return env.get(n.id) if isinstance(env.get(n.id), str) else None
+    if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add):
+        a, b = One(n.left, env), One(n.right, env)
+        return a + b if a is not None and b is not None else None
+    return None
+
+def Rows(n, env):
+    """The rows of an edit table: a list or tuple of tuples, or every value
+    of a dict the table is picked out of."""
+    if isinstance(n, ast.Name):
+        return env.get(n.id) if isinstance(env.get(n.id), list) else []
+    if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Dict):
+        return [r for v in n.value.values for r in Rows(v, env)]
+    if isinstance(n, (ast.Tuple, ast.List)):
+        return [tuple(One(e, env) for e in x.elts) if isinstance(x, (ast.Tuple, ast.List))
+                else One(x, env) for x in n.elts]
+    return []
+
+def Walk(body, env, out):
+    for st in body:
+        if isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name):
+            v, name = st.value, st.targets[0].id
+            if (isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute) and v.func.attr == "read"
+                    and isinstance(v.func.value, ast.Call) and getattr(v.func.value.func, "id", "") == "open"):
+                env["<opened>" + name] = One(v.func.value.args[0], env)
+            else:
+                env[name] = Rows(v, env) or One(v, env)
+        elif isinstance(st, ast.For):
+            names = [t.id for t in (st.target.elts if isinstance(st.target, ast.Tuple) else [st.target])]
+            for row in Rows(st.iter, env):
+                Walk(st.body, dict(env, **dict(zip(names, row if isinstance(row, tuple) else (row,)))), out)
+        elif isinstance(st, ast.Assert):
+            for n in ast.walk(st.test):
+                if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "count" and len(n.args) == 1:
+                    text = One(n.args[0], env)
+                    if text is not None and len(text.strip()) >= 6:
+                        out.append((text, env.get("<opened>" + getattr(n.func.value, "id", ""))))
+        elif isinstance(st, (ast.If, ast.With, ast.While, ast.Try)):
+            Walk(getattr(st, "body", []) + getattr(st, "orelse", []), env, out)
+
+def Stale(script):
+    found = []
+    for _tag, body in re.findall(r"<<'(\w+)'[^\n]*\n(.*?)\n\1\n", script, re.S):
+        try:
+            Walk(ast.parse(body).body, {}, found)
+        except SyntaxError:
+            continue
+    stale = []
+    for text, path in sorted(set(found), key=lambda x: (x[0], x[1] or "")):
+        where = [path] if path and path.startswith(("src/", "tools/")) else list(Corpus())
+        if not any(text in Read(f) for f in where):
+            stale.append((text, path or "src/ and tools/"))
+    return stale
+
+probe = ("x <<'EOF'\np = \"src/kernel/tagfs/tagfs.c\"\ns = open(p).read()\n"
+         "a = \"zz no such line, ending in a newline\\n\"\nassert s.count(a) == 1\n"
+         "for a, b in ((\"zz no such line, in an edit table\", \"b\"),):\n    assert s.count(a) == 1\nEOF\n")
+if len(Stale(probe)) != 2:
+    print("%s: REFUSING TO RUN — preflight 3 did not see the two stale anchors it is shown "
+          "first, so its silence about the harness's would mean nothing" % sys.argv[2])
+    sys.exit(1)
+stale = Stale(open(sys.argv[1], encoding="utf-8").read())
 if stale:
     print("%s: REFUSING TO RUN — %d mutation anchor(s) name code that is"
           % (sys.argv[2], len(stale)))
     print("          no longer in the tree. The oracle that uses one cannot put")
     print("          its defect back, so its green half proves nothing. Fix the")
     print("          anchor; do not skip the oracle.")
-    for s in stale:
-        print("          stale: %r" % s[:100])
+    for text, where in stale:
+        print("          stale in %s: %r" % (where, text[:100]))
     sys.exit(1)
 ANCHOR_EOF
 
@@ -550,8 +644,9 @@ on_exit() {
     # that are already back to what they were. A rebuild that fails takes the
     # whole run down with it — the tree is not the one it was handed.
     buildkey_restore || rc=1
-    # And the stand last, once the books it guards are closed.
-    stand_unlock
+    # And the stands last, once the books they guard are closed.
+    stand_unlock "$STAND_BOOKS_LOCK"
+    stand_unlock "$STAND_TREE_LOCK"
     if [ "$STAND_FINISHED" = 0 ] && [ "$rc" = 0 ]; then
         echo "$STAND_NAME: the run ended before its summary. The tree has been put"
         echo "          back, and this counts as a failure — a run that was cut"
@@ -889,109 +984,7 @@ print(deed[16:32].hex())
 PY
 }
 
-# ===========================================================================
-# A KNOWN DEFECT, REPRODUCED ON PURPOSE, IS HELD — NOT PASSED, NOT SKIPPED
-# ===========================================================================
-#
-# A test written for a defect that a later step of the plan discharges has two
-# honest answers before that step: the defect was SEEN, with a number measured
-# at run time, or the test is broken. Counting the first as a FAIL keeps every
-# run red until the step lands and teaches everyone to stop reading the
-# colour; counting it as a PASS, or skipping it, lets the test rot unwatched,
-# and a test that has quietly stopped seeing its defect is then green on the
-# day the step claims to have fixed it.
-#
-# So a test OBSERVES and this JUDGES, in the same words as the kernel's own
-# startup tests. The observation is one of three: `defect` (the named defect,
-# seen positively), `behaves` (the correct behaviour, seen), or `fail` (anything
-# else — a broken test must never hide behind a caveat). A caveated test that
-# behaves is a FAIL as well: it does not test what it claims, or its step has
-# landed and the caveat has to go, which is deleting its row below in that
-# step's commit. Held caveats are counted in CAVEAT and never change a run's
-# exit status.
-CAVEAT=0
-
-# THE table, and the only one: NAME -> "STEP|DEFECT". A row names a defect
-# found red on HEAD, never one that might be — race gets its row only once it
-# is measured red — and it is lifted by deleting it, in the commit of the step
-# it names. A harness adds the rows of its own tests here.
-caveat_row() {
-    case "$1" in
-        longquery)  echo "1.1b|a query of 256 bytes or more is dropped unread, and the answer is every file in scope" ;;
-        bigwrite)   echo "1.3|a write is copied through one kernel-heap allocation of its whole size, so one bigger than the heap is refused and nothing reaches the file" ;;
-        sequential) echo "1.3|a file's record takes one extent per 4 KiB written and never merges them, so the 4080-byte record refuses the write at about 2.6 MiB" ;;
-        interleave) echo "1.3|a file's record takes one extent per 4 KiB written and never merges them, so the 4080-byte record refuses the write at about 2.6 MiB" ;;
-        usememory)  echo "1.6|a Use Context longer than 432 bytes is forgotten, remembered=0" ;;
-        fidhistory) echo "1.3b|a mount spends kernel heap on every file id ever issued, the dead ones included" ;;
-        systemtag)  echo "1.4|any program may take the system tag off kernel.bin and then delete it — the kernel the volume boots is gone" ;;
-        noanchor)   echo "1.7|a file written without anchor has no name after a power cut" ;;
-        nextfid)    echo "1.6|a table written ahead of its ledger hands the same file id out twice" ;;
-        hog)        echo "1.7|on one core under a CPU hog nothing settles a write before the power goes" ;;
-        settlecut)  echo "1.6|a table written ahead of its ledger hands the same file id out twice" ;;
-    esac
-}
-
-# caveat_step NAME / caveat_defect NAME — the two halves of NAME's row; both
-# empty for a test that carries no caveat.
-caveat_step()   { local row; row=$(caveat_row "$1"); echo "${row%%|*}"; }
-caveat_defect() { local row; row=$(caveat_row "$1"); echo "${row#*|}"; }
-
-# caveat_judge NAME OBSERVED WHAT — the one verdict. WHAT carries the numbers
-# the run measured, and for a test that writes it ends with " [path: …]" from
-# stand_path, because a verdict about a write is a verdict about one path.
-caveat_judge() {
-    local name=$1 seen=$2 what=$3 step defect
-    case "$seen" in
-        defect|behaves|fail) ;;
-        *) harness "caveat_judge $name: '$seen' is not an observation — defect, behaves or fail ($what)"
-           return ;;
-    esac
-    step=$(caveat_step "$name")
-    defect=$(caveat_defect "$name")
-    if [ -n "$step" ]; then
-        case "$seen" in
-            defect)
-                printf '  \033[36mCAVEAT\033[0m caveat held: %s — %s — discharged by step %s (%s)\n' \
-                       "$name" "$defect" "$step" "$what"
-                CAVEAT=$((CAVEAT+1)) ;;
-            behaves)
-                bad "caveat lifted early: $name — the test does not test what it claims, or step $step already landed — lift the caveat ($what)" ;;
-            fail)
-                bad "$name: $what" ;;
-        esac
-        return
-    fi
-    case "$seen" in
-        behaves) ok "$name: $what" ;;
-        defect)  bad "$name failed: the defect it stands for is back — $what" ;;
-        fail)    bad "$name: $what" ;;
-    esac
-}
-
-# stand_path LOG CORES — the way a userspace write went down to the medium on
-# the machine that wrote LOG, booted with CORES cores. A red test that writes
-# is evidence about ONE path: the same test takes the legacy channel
-# synchronously on one machine and the AHCI WriteJob on another, and a verdict
-# that does not say which cannot be compared with the next one. Read off the
-# kernel's own mount line ("[TagFS] volume on seat N: <seat>", tagfs.c) and
-# ObjWrite's own fork (storage_ops.c: AHCI, more than one core and a writer in
-# userspace go through the WriteJob; everything else writes synchronously).
-# Prints one of AHCI async (WriteJob) | AHCI sync | ATA sync | USB sync. A log
-# that mounted nothing, or a seat this does not know, prints what it found
-# instead and answers 1, so the path in a verdict is never a guess.
-stand_path() {
-    local log=$1 cores=$2 seat
-    case "$cores" in
-        ''|*[!0-9]*) echo "no path: '$cores' is not a number of cores"; return 1 ;;
-    esac
-    [ -f "$log" ] || { echo "no path: there is no log at $log"; return 1; }
-    seat=$(tr -d '\r' < "$log" | sed -nE 's/^\[TagFS\] volume on seat [0-9]+: (.*)$/\1/p' | tail -1)
-    case "$seat" in
-        "AHCI port "*)
-            if [ "$cores" -gt 1 ]; then echo "AHCI async (WriteJob)"; else echo "AHCI sync"; fi ;;
-        ATA*) echo "ATA sync" ;;
-        usb*) echo "USB sync" ;;
-        "")   echo "no path: $log mounted no volume"; return 1 ;;
-        *)    echo "no path: seat '$seat' is none this knows"; return 1 ;;
-    esac
-}
+# The Caveat table, its one judge and stand_path (caveat_row, caveat_step,
+# caveat_defect, caveat_judge, CAVEAT, stand_path): in their own file beside
+# this one.
+. "$ROOT/tools/stand_caveat.sh"

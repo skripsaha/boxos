@@ -10,12 +10,12 @@ volume-read about each, and holds the answers against what the machine said
 it had made durable:
 
     powercut.py step STEPS --step NAME --cmd CMD --before N --ack N --quiet N
-                           --line TEXT [--durable NAME:RECORD:FROM:TO]
+                           --line TEXT [--durable NAME:RECORD:FROM:TO] [--noquiet]
     powercut.py plan LIST --seed HEX [--all-max N --sample N --tear-all-max N] > PLAN
     powercut.py checks PLAN BASE LOG BASECHECK [--jobs N] > CUTS
     powercut.py boots DIR --picks final|prefixes:STEP --sample N --seed HEX > BOOTS
     powercut.py judge DIR --path PATH [--caveat KEY=NAME]... [--verify KIND] [--hogged] [--waited S]
-    powercut.py settlecut DIR --path PATH
+    powercut.py settlecut DIR --path PATH [--caveat KEY=NAME]...
     powercut.py forge LIST LOG OUT
     powercut.py selftest
 
@@ -26,7 +26,13 @@ flush. Writes outside the volume (firmware on the ESP) are always applied and
 never enumerated. An epoch of at most --all-max volume writes is enumerated
 whole; a larger one by every prefix, every single omission and a sample drawn
 from the seed, and the plan counts exactly how many subsets were NOT built.
-The last volume write of every epoch is also torn, 512-byte sector by sector.
+The last volume write of every epoch is also torn as a prefix: after every
+sector when it is at most --tear-all-max sectors, otherwise after sector 1,
+sector n-1 and every 4 KiB boundary — and the plan counts the prefixes it did
+not tear. An epoch with nothing left unbuilt is enumerated whole, and only
+there does a defect's absence say anything: a sample cannot show one is gone —
+and neither can a record a writer kept writing (a step --noquiet), whose cuts
+are one run's timing and not the machine's.
 Two cuts whose every sector came from the same write are one medium and are
 judged once: the listing carries no content hash (contract C3), so identity is
 by provenance, and two writes that happen to carry the same bytes are not
@@ -34,7 +40,15 @@ collapsed — the count errs towards judging more, never fewer.
 
 Every verdict is one tab-separated line on stdout, which the shell says in
 stand.sh's words:
-    KEY <TAB> caveat|plain|harness <TAB> NAME <TAB> defect|behaves|fail <TAB> WHAT
+    KEY <TAB> caveat|plain|harness|note <TAB> NAME <TAB> defect|behaves|fail|unseen <TAB> WHAT
+A note is no verdict: a caveated defect that a sampled census did not meet.
+
+A step's acknowledgement stands behind the first flush after the last write of
+its own that touches the ledger — HEAD's sync writes the ledger last and then
+flushes — and before the answer was read. Where another writer flushes too
+(race, and halt on the AHCI WriteJob) the record cannot say whose that flush
+is: `ack:` then proves only that some flush followed the step's last ledger
+write before its answer.
 """
 
 import sys
@@ -117,7 +131,7 @@ def Outside(w):
 
 def CmdStep(a):
     step = {"step": a.step, "cmd": a.cmd, "before": a.before, "ack": a.ack, "quiet": a.quiet,
-            "line": a.line, "durable": None}
+            "line": a.line, "durable": None, "noquiet": a.noquiet}
     if a.durable:
         name, record, lo, hi = a.durable.rsplit(":", 3)
         step["durable"] = {"name": name, "record": record, "size": RECORDS[record][1],
@@ -167,14 +181,13 @@ class Planner:
                     drawn += 1
             how = "every prefix %d, every single omission %d, %d drawn with seed %x" % (
                 m + 1, m, want, self.seed ^ k)
-        tears = 0
+        tears, n = [], 0
         if vol and vol[-1]["sectors"] >= 2:
             n = vol[-1]["sectors"]
-            js = range(1, n) if n <= self.tear_all_max else sorted({1, n - 1} | set(range(8, n, 8)))
-            for j in js:
+            tears = range(1, n) if n <= self.tear_all_max else sorted({1, n - 1} | set(range(8, n, 8)))
+            for j in tears:
                 out.append(("t%03d" % j, frozenset(idx[:-1]), (vol[-1]["index"], (1 << j) - 1)))
-                tears += 1
-        return out, how, tears
+        return out, how, len(tears), max(0, n - 1 - len(tears)), n
 
     def Run(self):
         prov, seen, cuts, epochs, through_before = {}, {}, [], [], 0
@@ -183,7 +196,7 @@ class Planner:
             ws = self.by_epoch.get(k, [])
             vol = [w for w in ws if not Outside(w)]
             always = frozenset(w["index"] for w in ws if Outside(w))
-            subsets, how, tears = self.Subsets(k, vol)
+            subsets, how, tears, untorn, tear_sectors = self.Subsets(k, vol)
             built, distinct = set(), 0
             for label, sub, tear in subsets:
                 if (sub, tear) in built:
@@ -217,7 +230,8 @@ class Planner:
             enumerated = sum(1 for (_s, t) in built if t is None)
             epochs.append({"epoch": k, "writes": m, "outside": len(always), "subsets": 1 << m,
                            "enumerated": enumerated, "not_enumerated": (1 << m) - enumerated,
-                           "tears": tears, "distinct": distinct, "collapsed": len(built) - distinct,
+                           "tears": tears, "tears_not_built": untorn, "tear_sectors": tear_sectors,
+                           "distinct": distinct, "collapsed": len(built) - distinct,
                            "how": how, "flush_seq": e["flush_seq"]})
         return {"seed": "%x" % self.seed, "all_max": self.all_max, "sample": self.sample_n,
                 "tear_all_max": self.tear_all_max, "epochs": epochs, "cuts": cuts}
@@ -343,10 +357,37 @@ class Run:
         return "epoch %d, entries %s kept (%s)%s" % (c["epoch"], kept, ", ".join(kinds) or "nothing",
                                                       tear)
 
+    def LedgerWrites(self, step):
+        """The step's own writes that touch the ledger: entries in (before, ack]."""
+        return [w["seq"] for w in self.listing["writes"] if step["before"] < w["seq"] <= step["ack"]
+                and any(t["kind"] == "ledger" for t in w["touches"])]
+
     def AckFlush(self, step):
-        """The last flush at or before the ack, if the step came before it."""
-        f = [s for s in self.flushes if s <= step["ack"]]
-        return f[-1] if f and f[-1] > step["before"] else None
+        """The flush behind the step's acknowledgement: the first after its last
+        ledger write, and no later than the ack was read. None when the step
+        wrote no ledger, or no flush followed its last one in time."""
+        led = self.LedgerWrites(step)
+        f = next((s for s in self.flushes if led and s > led[-1]), None)
+        return f if f is not None and f <= step["ack"] else None
+
+    def Exhaustive(self, from_epoch=0):
+        """Whether a defect no cut shows is gone from this machine: every medium
+        the model has of the epochs from `from_epoch` on was built — no subset
+        left out, no prefix of a last write left untorn — and no step left a
+        writer behind, whose record is one run's timing."""
+        return not any(s.get("noquiet") for s in self.steps) and all(
+            not e["not_enumerated"] and not e.get("tears_not_built", 0)
+            for e in self.plan["epochs"] if e["epoch"] >= from_epoch)
+
+    def Unbuilt(self, from_epoch=0):
+        """Why Exhaustive said no."""
+        if any(s.get("noquiet") for s in self.steps):
+            return "a writer kept writing through the record, so its cuts are one run's timing"
+        es = [e for e in self.plan["epochs"] if e["epoch"] >= from_epoch]
+        left = sum(e["not_enumerated"] for e in es)
+        return "%s subset(s) and %d torn prefix(es) of the record were not built" % (
+            left if left < 1 << 40 else "over 2^%d" % (left.bit_length() - 1),
+            sum(e.get("tears_not_built", 0) for e in es))
 
     def SeqCeiling(self, item):
         """The last seq a durable item may hold. TO 0 is "as many as the record
@@ -356,6 +397,11 @@ class Run:
 
     def LastWriteBefore(self, seq):
         return max((w["seq"] for w in self.listing["writes"] if w["seq"] < seq), default=0)
+
+    def Judged(self, cid):
+        """A cut volume-read answered for."""
+        r = self.results.get(cid)
+        return r is not None and "error" not in r
 
     def Signature(self, cid):
         return tuple(sorted({(f[0], f[1]) for f in self.results.get(cid, {}).get("findings", [])
@@ -439,7 +485,8 @@ class Judge:
 
     def Out(self, key, seen, what, caveat=None):
         name = self.caveats.get(caveat or key)
-        kind = "harness" if seen == "harness" else "caveat" if name else "plain"
+        kind = ("harness" if seen == "harness" else "note" if seen == "unseen" else
+                "caveat" if name else "plain")
         print("\t".join((key, kind, name or "-", "fail" if seen == "harness" else seen,
                          (what + " [path: %s]" % self.path).replace("\t", " ").replace("\n", " "))))
 
@@ -447,28 +494,42 @@ class Judge:
         for s in self.run.steps:
             if not s["durable"]:
                 continue
-            f = self.run.AckFlush(s)
-            if f is None:
-                self.Out("ack:" + s["step"], "fail", "%s was acknowledged at record entry %d with no "
-                         "flush behind it — none in entries %d..%d"
+            f, led = self.run.AckFlush(s), self.run.LedgerWrites(s)
+            if not led:
+                self.Out("ack:" + s["step"], "fail", "%s was acknowledged at record entry %d and wrote "
+                         "no ledger in entries %d..%d, so no sync of its own stands behind it"
                          % (s["step"], s["ack"], s["before"] + 1, s["ack"]))
+            elif f is None:
+                self.Out("ack:" + s["step"], "fail", "%s was acknowledged at record entry %d with no "
+                         "flush behind its last ledger write, entry %d — %s"
+                         % (s["step"], s["ack"], led[-1], "the answer was read with nothing after it"
+                            if led[-1] >= s["ack"] else "none in entries %d..%d" % (led[-1] + 1, s["ack"])))
             else:
                 self.Out("ack:" + s["step"], "behaves", "%s was acknowledged at record entry %d and "
-                         "the flush at entry %d, closing epoch %d, stands behind it"
-                         % (s["step"], s["ack"], f, self.run.closes[f]))
+                         "the flush at entry %d, the first after its last ledger write (entry %d), "
+                         "closing epoch %d, stands behind it"
+                         % (s["step"], s["ack"], f, led[-1], self.run.closes[f]))
 
     def BaseFiles(self):
+        """No cut the kernel mounts loses or changes a file the base held. A cut
+        it refuses to mount holds no file of anybody's, and every refusal is a
+        damage code of its own (GROUND_REFUSED … CHAIN_REFUSED), judged there."""
         run = self.run
-        lost = [(c["id"], run.results[c["id"]]["base_changed"]) for c in run.canon
-                if run.results.get(c["id"], {}).get("base_changed")]
+        judged = [c["id"] for c in run.canon if run.Judged(c["id"])]
+        mounted = [cid for cid in judged if run.results[cid]["mounts"]]
+        lost = [(cid, run.results[cid]["base_changed"]) for cid in mounted
+                if run.results[cid]["base_changed"]]
         count = sum(1 for f in self.base["files"] if f["visible"])
+        refused = len(judged) - len(mounted)
+        rest = "; the %d cut(s) the kernel refuses to mount are their codes'" % refused if refused else ""
         if lost:
             cid, ch = lost[0]
-            self.Out("d0", "fail", "%d of %d cuts lost or changed a file the base held, e.g. %s (%s): "
-                     "%s" % (len(lost), len(run.canon), cid, run.Kept(cid), "; ".join(ch[:3])))
+            self.Out("d0", "fail", "%d of %d mountable cuts lost or changed a file the base held, e.g. "
+                     "%s (%s): %s%s" % (len(lost), len(mounted), cid, run.Kept(cid), "; ".join(ch[:3]),
+                                        rest))
         else:
-            self.Out("d0", "behaves", "all %d files of the base are in every one of %d cuts, byte "
-                     "for byte" % (count, len(run.canon)))
+            self.Out("d0", "behaves", "all %d files of the base are in every one of %d mountable cuts, "
+                     "byte for byte%s" % (count, len(mounted), rest))
 
     def Durable(self):
         run = self.run
@@ -489,17 +550,21 @@ class Judge:
                                                for x in mine) or "no file of that name"))
             key = "durable:%s@%s" % (item["name"], s["step"])
             if bad:
-                self.Out(key, "fail", "%s, made durable by the flush at entry %d, is missing or wrong "
+                self.Out(key, "defect" if self.caveats.get(key) else "fail",
+                         "%s, made durable by the flush at entry %d, is missing or wrong "
                          "in %d of the %d cuts after it, e.g. %s (%s): %s"
                          % (item["name"], f, len(bad), len(after), bad[0][0], run.Kept(bad[0][0]),
                             bad[0][1]))
             elif after:
                 seqs = sorted({hashes[x[5]] for cid in after for x in run.results[cid]["new_files"]
                                if x[1] == item["name"] and x[5] in hashes})
-                self.Out(key, "behaves", "%s is visible with its %d bytes, a whole record (seq %s, "
-                         "%d..%d allowed), in every one of the %d cuts after the flush at entry %d"
+                whole = run.Exhaustive(run.closes[f])
+                self.Out(key, "behaves" if whole or not self.caveats.get(key) else "unseen",
+                         "%s is visible with its %d bytes, a whole record (seq %s, %d..%d allowed), in "
+                         "every one of the %d cuts after the flush at entry %d%s"
                          % (item["name"], item["size"], Ranges(seqs), item["from"],
-                            run.SeqCeiling(item), len(after), f))
+                            run.SeqCeiling(item), len(after), f,
+                            "" if whole else "; " + run.Unbuilt(run.closes[f])))
             else:
                 self.Out(key, "fail", "no cut stands after the flush at entry %d, so the durability "
                          "of %s was never judged" % (f, item["name"]))
@@ -528,9 +593,11 @@ class Judge:
             else:
                 self.Out("code:" + code, "fail", what + " — no caveat names it; its step is the "
                          "owner's to assign")
+        whole = run.Exhaustive()
         for key in sorted(self.caveats):
             if key.startswith("code:") and key[5:] not in {c for c, _s in harm}:
-                self.Out(key, "behaves", "no cut of %d shows %s" % (judged, key[5:]))
+                self.Out(key, "behaves" if whole else "unseen", "no cut of %d shows %s%s"
+                         % (judged, key[5:], "" if whole else "; " + run.Unbuilt()))
         if not harm:
             self.Out("codes", "behaves", "every one of %d cuts is consistent" % judged)
 
@@ -541,9 +608,13 @@ class Judge:
                   if any(t["kind"] == "ledger" for t in w["touches"])}
         ends = [(self.run.Canon("e%d-all" % e["epoch"]), e["flush_seq"])
                 for e in self.run.listing["epochs"] if e["flush_seq"] and e["epoch"] in synced]
+        blind = ["%s (flush at entry %d)" % (c, f) for c, f in ends if not self.run.Judged(c)]
         bad = ["%s (flush at entry %d): %s" % (c, f, " ".join("%s/%s" % s for s in self.run.Signature(c)))
-               for c, f in ends if self.run.Signature(c)]
-        if ends:
+               for c, f in ends if self.run.Judged(c) and self.run.Signature(c)]
+        if blind:
+            self.Out("boundaries", "harness", "volume-read could not judge %d of %d syncs' flushes: %s"
+                     % (len(blind), len(ends), "; ".join(blind[:3])))
+        elif ends:
             self.Out("boundaries", "fail" if bad else "behaves", "%d of %d syncs' flushes stand behind an "
                      "inconsistent volume: %s" % (len(bad), len(ends), "; ".join(bad[:3])) if bad else
                      "the volume is consistent at every one of %d syncs' flushes" % len(ends))
@@ -593,7 +664,7 @@ class Judge:
     def Persist(self, log):
         step = self.run.Step("persist")
         want = re.search(r"WROTE fid=(\d+)", step["line"]) if step else None
-        red = re.search(r"\[PERSIST\] FAIL: file '_persist_test' not found after reboot \(rc=-?\d+\)", log)
+        red = re.search(r"\[PERSIST\] FAIL: file '_persist_test' not found after reboot \(rc=0\)", log)
         green = re.search(r"\[PERSIST\] READ  fid=(\d+) rrc=16 seq=1 .*\n.*\[PERSIST\] PASS", log)
         if red:
             self.Out("verify", "defect", "persist wrote fid=%s, the power went %d s later, and on the "
@@ -657,7 +728,8 @@ class Judge:
         """The state an orderly halt left: consistent, and booted, nothing lost."""
         final, r = self.Final(), self.run.results.get(self.run.final or "", {})
         log = final["log"] if final else ""
-        gone = re.findall(r"\[TagFS FSCK\] file (\d+) is named at block", log)
+        gone = sorted(set(re.findall(r"\[TagFS FSCK\] file (\d+) is named at block \d+\+\d+ and there "
+                                     r"is no readable metadata", log)))
         lost = re.search(r"(\d+) file\(s\) lost", log)
         harm = sorted({"%s/%s" % (x[0], x[1]) for x in r.get("findings", []) if x[1] in HARM})
         held = final is not None and r.get("verdict") == "consistent" and not gone and \
@@ -743,18 +815,29 @@ def CmdSettleCut(a):
     one built SETTLECUT=done stopped it after the flush (DIR/done.check.json). The recorded plain run of
     the same anchor_test is cut at two points of its own sync — through the file table, and everything
     before the ledger — and each is judged by volume-read: the SETTLECUT medium and PowerCut's cut
-    before the ledger must name the same codes."""
+    before the ledger must name the same codes. The SETTLECUT=ledger medium is judged code by code, as
+    Codes judges a census: each harm code is held under its own caveat or is a FAIL, and a caveated code
+    it does not show is lifted early — one medium is its own whole census."""
     run = Run(a.dir)
-    judge = Judge(run, None, {"code:FID_PAST_NEXT": "settlecut"}, a.path, 0)
+    judge = Judge(run, None, dict(x.split("=", 1) for x in a.caveat), a.path, 0)
     checks = {}
     for point in ("ledger", "done"):
         with open(os.path.join(a.dir, point + ".check.json")) as fh:
             checks[point] = json.load(fh)
     ledger, done = checks["ledger"], checks["done"]
-    past = [x for x in ledger["findings"] if x["code"] == "FID_PAST_NEXT"]
-    judge.Out("code:FID_PAST_NEXT", "defect" if past else
-              "behaves" if ledger["verdict"] == "consistent" else "fail",
-              "SETTLECUT=ledger left %s%s" % (Codes(Harm(ledger)), " — " + past[0]["text"] if past else ""))
+    harm, first = Harm(ledger), {}
+    for x in ledger["findings"]:
+        first.setdefault(x["code"], x["text"])
+    for code, sev in harm:
+        what = "SETTLECUT=ledger left %s/%s — %s" % (code, sev, first[code])
+        if judge.caveats.get("code:" + code):
+            judge.Out("code:" + code, "defect", what)
+        else:
+            judge.Out("code:" + code, "fail", what + " — no caveat names it; its step is the owner's to "
+                      "assign")
+    for key in sorted(judge.caveats):
+        if key.startswith("code:") and key[5:] not in {c for c, _s in harm}:
+            judge.Out(key, "behaves", "SETTLECUT=ledger left %s, and no %s" % (Codes(harm), key[5:]))
     step = run.Step("anchor_test")
     flush = run.AckFlush(step) if step else None
     if flush is None:
@@ -793,31 +876,6 @@ def CmdSettleCut(a):
     return 0
 
 
-def CmdForge(a):
-    """The record with one byte flipped in the data of its last write — the one write no later write
-    covers, so the disk QEMU left must show the byte. The one piece of the record's layout this file
-    knows, for this alone: after the superblock's sector, an entry is a header sector and then its data
-    sectors, a flush a header only (blklogwrites.c 486-496)."""
-    with open(a.list) as fh:
-        listing = json.load(fh)
-    ss = listing["sector_bytes"]
-    writes = [w for w in listing["writes"] if not w["discard"]]
-    if not writes:
-        return 1
-    last = max(writes, key=lambda w: w["seq"])
-    flushes = sum(1 for e in listing["epochs"] if e["flush_seq"] and e["flush_seq"] < last["seq"])
-    before = sum(1 + (0 if w["discard"] else w["sectors"] * 512 // ss)
-                 for w in listing["writes"] if w["seq"] < last["seq"])
-    at = (1 + flushes + before + 1) * ss + ss // 2
-    with open(a.log, "rb") as fh:
-        data = bytearray(fh.read())
-    data[at] ^= 0xFF
-    with open(a.out, "wb") as fh:
-        fh.write(data)
-    print("byte %d of the record, inside entry %d's data (LBA %d)" % (at, last["seq"], last["lba"]))
-    return 0
-
-
 # ---------------------------------------------------------------------------
 # report — what was enumerated, found and booted
 # ---------------------------------------------------------------------------
@@ -836,20 +894,22 @@ def Report(run, judge):
              "(every sector up to %d)" % (p["seed"], p["all_max"], p["sample"], p["tear_all_max"]))
     groups = []
     for e in p["epochs"]:
-        shape = tuple(e[k] for k in ("writes", "outside", "subsets", "enumerated", "not_enumerated",
-                                     "tears", "distinct", "collapsed", "how"))
+        shape = tuple(e.get(k, 0) for k in ("writes", "outside", "subsets", "enumerated", "not_enumerated",
+                                            "tears", "tears_not_built", "tear_sectors", "distinct",
+                                            "collapsed", "how"))
         if groups and groups[-1][2] == shape and groups[-1][1] == e["epoch"] - 1:
             groups[-1][1] = e["epoch"]
         else:
             groups.append([e["epoch"], e["epoch"], shape])
-    for a, b, (m, o, sub, en, ne, t, d, c, how) in groups:
+    for a, b, (m, o, sub, en, ne, t, tn, ts, d, c, how) in groups:
         exact = sub < 1 << 40      # past that the count is written as the power it is
-        L.append("  %s: %d volume write(s)%s — %s subset(s), %d built (%s), %s NOT built; %d torn; "
+        L.append("  %s: %d volume write(s)%s — %s subset(s), %d built (%s), %s NOT built; %d torn%s; "
                  "%d distinct media, %d collapsed into an earlier one"
                  % ("epoch %d" % a if a == b else "epochs %d..%d (%d, each)" % (a, b, b - a + 1), m,
                     " + %d outside the volume, always applied" % o if o else "",
                     sub if exact else "2^%d" % m, en, how, ne if exact else "exactly 2^%d - %d" % (m, en),
-                    t, d, c))
+                    t, " of a %d-sector last write, %d prefix tear(s) NOT built" % (ts, tn) if tn else "",
+                    d, c))
     for s in run.steps:
         f = run.AckFlush(s)
         L.append("step %s: `%s` from entry %d, acknowledged at %d, the record quiet at %d%s — %s"
@@ -873,79 +933,6 @@ def Report(run, judge):
     return "\n".join(L) + "\n"
 
 
-# ---------------------------------------------------------------------------
-# selftest — the arithmetic, on listings made up here
-# ---------------------------------------------------------------------------
-
-
-def Synthetic(shape):
-    """A listing from [[write...] per epoch]; a write is its sector count, or
-    (sectors, lba) to put it somewhere on purpose — lba 0 is outside the volume."""
-    writes, epochs, seq, lba = [], [], 0, 1000
-    for k, ws in enumerate(shape):
-        for i, w in enumerate(ws):
-            n, at = w if isinstance(w, tuple) else (w, None)
-            seq += 1
-            writes.append({"epoch": k, "index": i, "seq": seq, "lba": lba if at is None else at,
-                           "sectors": n, "discard": False,
-                           "touches": [{"kind": "outside" if at == 0 else "file", "first_lba": lba,
-                                        "sectors": n, "what": "w"}]})
-            lba += n
-        seq += 1
-        epochs.append({"epoch": k, "writes": len(ws), "flush_seq": seq if k < len(shape) - 1 else None,
-                       "maybe_qemu_exit_flush": False})
-    return {"writes": writes, "epochs": epochs}
-
-
-def CmdSelfTest(_a):
-    fails = []
-
-    def Want(held, what):
-        print("  %s %s" % ("ok  " if held else "FAIL", what))
-        if not held:
-            fails.append(what)
-
-    def Plan(shape, seed=7):
-        return Planner(Synthetic(shape), seed, 10, 64, 16).Run()
-
-    Want(Mix(0x42504552, 1) == 0xC3BEFF2C, "persist's checksum of seq 1 is the runtime's 0xc3beff2c")
-    e = Plan([[1, 1, 1]])["epochs"][0]
-    Want((e["subsets"], e["enumerated"], e["not_enumerated"], e["distinct"]) == (8, 8, 0, 8),
-         "three one-sector writes: 8 subsets, all built, 8 distinct media")
-    e = Plan([[1, (1, 1000)]])["epochs"][0]
-    Want(e["distinct"] == 3 and e["collapsed"] == 1,
-         "a write the next one covers collapses: 3 distinct media of 4 (%d)" % e["distinct"])
-    cuts = {c["id"]: c for c in Plan([[1, 1], [1]])["cuts"]}
-    Want(cuts["e1-none"]["same"] == "e0-all", "a flush boundary is one medium: e1-none is e0-all")
-    Want(Plan([[1], []])["cuts"][-1]["id"] == "e1-all", "an epoch with no writes has its one cut, all")
-    Want(Plan([[8, 8]])["epochs"][0]["tears"] == 7, "an 8-sector last write is torn 7 ways")
-    Want(Plan([[40]])["epochs"][0]["tears"] == 6, "a 40-sector last write: 1, 39 and every 8th — 6 tears")
-    torn = next(c for c in Plan([[1, 8]])["cuts"] if c["id"] == "e0-t003")
-    Want((torn["keep"], torn["tear"]) == ("0", [1, 7]), "tear 3 keeps the first write and lands "
-         "sectors 0-2 of the last (%s %s)" % (torn["keep"], torn["tear"]))
-    a, b = Plan([[1] * 14], 0xABC), Plan([[1] * 14], 0xABC)
-    e = a["epochs"][0]
-    Want(a == b, "the same seed gives the same plan")
-    Want(e["enumerated"] == 15 + 13 + 64 and e["not_enumerated"] == (1 << 14) - 92,
-         "14 writes: 15 prefixes, 13 more omissions (leaving out the last is a prefix), 64 drawn "
-         "— exactly %d not built (%d)" % ((1 << 14) - 92, e["not_enumerated"]))
-    Want(Plan([[1] * 14], 0xABD) != a, "another seed draws another sample")
-    p = Plan([[(1, 0), 1, 1]])
-    Want(p["epochs"][0]["outside"] == 1 and all(0 in RangeSet(c["keep"]) for c in p["cuts"])
-         and p["epochs"][0]["subsets"] == 4, "a write outside the volume is in every cut and is not "
-         "enumerated")
-    th = {c["id"]: c["through"] for c in Plan([[1, 1, 1]])["cuts"]}
-    Want((th["e0-all"], th["e0-s3"], th["e0-s5"], th["e0-none"])
-         == (3, 2, 1, 0), "`through` is the longest run applied from the start: 3, 2, 1, 0")
-    Want(Ranges([1, 2, 3, 5, 7, 8]) == "1-3,5,7-8" and RangeSet("1-3,5,7-8") == {1, 2, 3, 5, 7, 8},
-         "entry sets are written and read back as ranges")
-    rec = RecordBytes("anchor", 1)
-    Want(len(rec) == 128 and rec[:12] == struct.pack("<III", 0x414E4348, 1, 0xC389EC80),
-         "anchor_test's record: 128 bytes, magic, seq 1, sum 0xc389ec80, zeros")
-    print("selftest: %d failed" % len(fails))
-    return 1 if fails else 0
-
-
 def Main():
     ap = argparse.ArgumentParser(description="PowerCut's planner and judge; see tools/powercut.sh")
     sub = ap.add_subparsers(dest="verb")
@@ -956,6 +943,7 @@ def Main():
     for x in ("before", "ack", "quiet"):
         s.add_argument("--" + x, type=int, required=True)
     s.add_argument("--durable")
+    s.add_argument("--noquiet", action="store_true")
     s = sub.add_parser("plan")
     s.add_argument("list")
     s.add_argument("--seed", required=True)
@@ -982,6 +970,7 @@ def Main():
     s = sub.add_parser("settlecut")
     s.add_argument("dir")
     s.add_argument("--path", required=True)
+    s.add_argument("--caveat", action="append", default=[])
     s = sub.add_parser("forge")
     for x in ("list", "log", "out"):
         s.add_argument(x)
@@ -989,9 +978,14 @@ def Main():
     a = ap.parse_args()
     if not a.verb:
         ap.error("say what to do: step, plan, checks, boots, judge, settlecut, forge or selftest")
+    if a.verb in ("selftest", "forge"):
+        # The gate judging itself lives beside it, and is handed this very
+        # module: the arithmetic tested is the arithmetic the judge runs.
+        import powercut_selftest
+        return (powercut_selftest.SelfTest(sys.modules[__name__]) if a.verb == "selftest"
+                else powercut_selftest.Forge(a))
     return {"step": CmdStep, "plan": CmdPlan, "checks": CmdChecks, "boots": CmdBoots,
-            "judge": CmdJudge, "settlecut": CmdSettleCut, "forge": CmdForge,
-            "selftest": CmdSelfTest}[a.verb](a)
+            "judge": CmdJudge, "settlecut": CmdSettleCut}[a.verb](a)
 
 
 if __name__ == "__main__":

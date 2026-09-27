@@ -81,11 +81,27 @@ include ../nameplate.mk
 %.elf: $(BOXLIB_START) %.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $*.o $(BOXLIB))
 
-# Two objects, one program: the red tests of the Quill write core and the
-# modes the power-cut stand drives (tools/powercut.sh), which together ran
-# past the thousand lines one file may hold.
-quilltest.elf: $(BOXLIB_START) quilltest.o quilltest_powercut.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) quilltest.o quilltest_powercut.o $(BOXLIB))
+# Three objects, one program: the red tests of the Quill write core, the ones
+# only a throwaway image may be asked, and the modes the power-cut stand
+# drives (tools/powercut.sh), which together ran past the thousand lines one
+# file may hold.
+QUILLTEST_OBJS = quilltest.o quilltest_throwaway.o quilltest_powercut.o
+quilltest.elf: $(BOXLIB_START) $(QUILLTEST_OBJS) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $(QUILLTEST_OBJS) $(BOXLIB))
+
+# The cases that harm a volume past their own files exist only in a quilltest
+# built for a throwaway image: the top Makefile's VOLUME_TESTS=on, which make
+# hands down to this one. The marker's name carries the key — the top
+# Makefile's build-key trick — so switching it names a file that does not
+# exist, and every quilltest object compiles again. It lives in ../build with
+# boxlib_start.o, which git does not see and `make clean` removes.
+QUILLTEST_KEY_MARK = ../build/.quilltest.volume_tests.$(if $(filter on,$(VOLUME_TESTS)),on,off)
+$(QUILLTEST_OBJS): CFLAGS += $(if $(filter on,$(VOLUME_TESTS)),-DCONFIG_VOLUME_TESTS=1,)
+$(QUILLTEST_OBJS): $(QUILLTEST_KEY_MARK)
+$(QUILLTEST_KEY_MARK):
+	@mkdir -p $(dir $@)
+	@rm -f ../build/.quilltest.volume_tests.*
+	@touch $@
 
 brookexec.elf: $(BOXLIB_START) brookexec.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) brookexec.o $(BOXCXX) $(BOXLIB) -lgcc)

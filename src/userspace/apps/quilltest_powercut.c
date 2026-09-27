@@ -17,6 +17,7 @@
 #include "box/string.h"
 #include "box/convert.h"
 #include "box/system.h"
+#include "box/strand.h"
 #include "box/time.h"
 #include "box/touch.h"
 #include "box/error.h"
@@ -87,9 +88,11 @@ __attribute__((noreturn)) QuillVerdict QuillHog(const char *const *args)
 }
 
 /* A hog in another cabin, one record written and NOT anchored, then parked
- * on the hog for good — the power goes while the machine has a write it has
- * not settled and a core that is busy. `verify NAME` after the cut says
- * whether the write survived. */
+ * on the hog while it spins — the power goes while the machine has a write it
+ * has not settled and a core that is busy. `verify NAME` after the cut says
+ * whether the write survived. A park that is refused, or a hog that ends
+ * before the power goes, leaves nothing to cut beside it: that is a FAIL,
+ * said after the PENDING it overturns. */
 QuillVerdict QuillSettle(const char *const *args)
 {
     const char *name = args[0];
@@ -118,9 +121,15 @@ QuillVerdict QuillSettle(const char *const *args)
 
     int32_t code = 0;
     int     grc  = process_gone((uint32_t)hog, gen, &code);
-    printf("[QUILL] settle: the hog (pid %d) was ended from outside (gone %d, exit %d)\n",
-           hog, grc, code);
-    return QUILL_PENDING;
+    if (grc != 0) {
+        int krc = proc_finish((uint32_t)hog, gen);
+        printf("[QUILL] settle: FAIL — the park on hog pid %d was refused (gone %d), so nothing "
+               "waits for the power beside it; the hog ended: %d\n", hog, grc, krc);
+        return QUILL_FAIL;
+    }
+    printf("[QUILL] settle: FAIL — the hog (pid %d) ended with exit %d before the power went, so "
+           "the write was not left beside a busy core\n", hog, code);
+    return QUILL_FAIL;
 }
 
 /* PROGRAM run to its end in a cabin of its own while a hog spins in another,
@@ -197,6 +206,11 @@ QuillVerdict QuillChurn(const char *const *args)
     uint32_t ids[1];
     uint32_t seq = 1;
     int n = QuillFindEverywhere(name, ids, 1);
+    if (n < 0) {
+        printf("[QUILL] churn: FAIL — could not look for %s (answer %d), so there is no telling "
+               "whether to carry a file on or lay one down\n", name, n);
+        return QUILL_FAIL;
+    }
     int fid;
     if (n > 0) {
         fid = (int)ids[0];
@@ -237,11 +251,44 @@ static uint32_t QuillRaceHeard(TouchTag tag, uint32_t churn)
     return heard;
 }
 
+/* What race's watch on its churn saw. `gone` is set before it is said on
+ * NAME's stem tag, so whoever wakes on that word finds it set. */
+typedef struct {
+    uint32_t     pid, gen;           /* the churn */
+    TouchTagPair pair;               /* NAME's stem tag, which race listens on */
+    int          grc;                /* process_gone's own answer */
+    int32_t      code;               /* how the churn ended */
+    uint32_t     gone;
+} QuillChurnWatch;
+
+/* The churn's end, asked of the kernel as a state — an incarnation already
+ * gone answers at once, so there is nothing to miss — and said on the tag
+ * race waits on for the churn's first write. A churn that ends before it
+ * writes ends that wait, instead of leaving race parked for good with no
+ * verdict. */
+static void QuillRaceWatch(void *arg)
+{
+    QuillChurnWatch *w = arg;
+    w->grc = process_gone(w->pid, w->gen, &w->code);
+    __atomic_store_n(&w->gone, 1u, __ATOMIC_RELEASE);
+    touch_send(w->pair, &w->code, sizeof(w->code), 0);
+}
+
+/* The watch let go of: taken down while it still waits (its pid is held for
+ * it, joinable, so the kill can land on nobody else), and released. */
+static void QuillRaceUnwatch(uint32_t watcher, const QuillChurnWatch *watch)
+{
+    if (!__atomic_load_n(&watch->gone, __ATOMIC_ACQUIRE))
+        proc_kill(watcher);
+    strand_release(watcher);
+}
+
 /* ROUNDS anchors of the whole volume while a churn writes NAME in another
  * cabin — an anchor racing a writer for the pool's dirty mark. The anchors
  * start on the churn's first write, heard as the WROTE event on NAME's stem
  * tag, never on a guess at how long a spawn takes, and the churn's writes
- * heard while they run say the race really ran. The churn is left writing. */
+ * heard while they run say the race really ran. A churn that ends first is
+ * heard too, from a strand parked on its end. The churn is left writing. */
 QuillVerdict QuillRace(const char *const *args)
 {
     const char *name   = args[0];
@@ -251,38 +298,66 @@ QuillVerdict QuillRace(const char *const *args)
                args[1]);
         return QUILL_FAIL;
     }
+    /* The churn is handed NAME as one quoted word of its command line, so a
+     * NAME with a blank reaches it whole; one with a quote in it cannot. */
+    char   line[64];
+    size_t nl = strlen(name);
+    if (strchr(name, '"') || 16 + 1 + nl + 1 >= sizeof(line)) {
+        printf("[QUILL] race: FAIL — %s cannot be handed to the churn as one quoted word "
+               "(%u bytes, room for %u, and no '\"' in it); 0 anchors run\n", name,
+               (unsigned)nl, (unsigned)(sizeof(line) - 19));
+        return QUILL_FAIL;
+    }
+    memcpy(line, "quilltest churn \"", 17);
+    memcpy(line + 17, name, nl);
+    memcpy(line + 17 + nl, "\"", 2);
+
     QuillRecord rec = QuillRecordOf(1);
     int     fid = QuillCreate(name);
     int64_t w   = fid > 0 ? QuillWrite((uint32_t)fid, 0, &rec, sizeof(rec)) : 0;
     char    stem[64];
     QuillStem(name, stem, sizeof(stem));
-    TouchTag tag = touch_pair_choose(touch_intern(stem));
+    TouchTagPair pair = touch_intern(stem);
+    TouchTag     tag  = touch_pair_choose(pair);
     if (fid <= 0 || w != (int64_t)sizeof(rec) || tag == TOUCH_TAG_INVALID ||
         touch_claim(tag, TOUCH_REST, 0, 0) != 0) {
         printf("[QUILL] race: FAIL — %s could not be laid down and listened to (create %d, "
-               "write %lld, tag %u)\n", name, fid, (long long)w, (uint32_t)tag);
+               "write %lld, tag %u); 0 anchors run\n", name, fid, (long long)w, (uint32_t)tag);
         return QUILL_FAIL;
     }
 
-    char line[96];
-    size_t nl = strlen(name);
-    memcpy(line, "quilltest churn ", 16);
-    memcpy(line + 16, name, nl + 1);
-    uint32_t gen = 0;
-    int churn = nl < sizeof(line) - 16 ? proc_exec_gen(line, NULL, &gen) : -(int)ERR_INVALID_ARGUMENT;
+    uint32_t gen   = 0;
+    int      churn = proc_exec_gen(line, NULL, &gen);
+    static QuillChurnWatch watch;
+    watch = (QuillChurnWatch){ .pid = (uint32_t)churn, .gen = gen, .pair = pair };
+    uint32_t watcher = churn > 0 ? strand_spawn_joinable(QuillRaceWatch, &watch) : 0;
     /* The churn's own write, not the echo of the one above: the WROTE event
      * carries the writer's pid. */
-    int hrc = churn;
-    if (churn > 0) {
-        Touch first;
+    int   hrc = 0;
+    Touch first;
+    first.source_pid = 0;
+    if (watcher) {
         do {
             hrc = touch_await(tag, &first, 0);
-        } while (hrc == 0 && first.source_pid != (uint32_t)churn);
+        } while (hrc == 0 && first.source_pid != (uint32_t)churn &&
+                 !__atomic_load_n(&watch.gone, __ATOMIC_ACQUIRE));
     }
-    if (churn <= 0 || hrc != 0) {
+    if (!watcher || hrc != 0 || first.source_pid != (uint32_t)churn) {
+        bool gone = watcher && __atomic_load_n(&watch.gone, __ATOMIC_ACQUIRE);
+        int  krc  = churn > 0 && !gone ? proc_finish((uint32_t)churn, gen) : 0;
+        if (watcher)
+            QuillRaceUnwatch(watcher, &watch);
         touch_release(tag);
-        printf("[QUILL] race: FAIL — the churn of %s did not start writing (spawn %d, heard %d)\n",
-               name, churn, hrc);
+        if (churn <= 0)
+            printf("[QUILL] race: FAIL — the churn of %s would not start (answer %d); 0 anchors "
+                   "run\n", name, churn);
+        else if (gone)
+            printf("[QUILL] race: FAIL — the churn of %s (pid %d) ended with exit %d before its "
+                   "first write (gone %d); 0 anchors run\n", name, churn, watch.code, watch.grc);
+        else
+            printf("[QUILL] race: FAIL — the churn of %s (pid %d) could not be %s (answer %d), "
+                   "so it was ended: %d; 0 anchors run\n", name, churn,
+                   watcher ? "listened to" : "watched", watcher ? hrc : 0, krc);
         return QUILL_FAIL;
     }
 
@@ -298,6 +373,7 @@ QuillVerdict QuillRace(const char *const *args)
         }
         landed += QuillRaceHeard(tag, (uint32_t)churn);
     }
+    QuillRaceUnwatch(watcher, &watch);
     touch_release(tag);
     if (anchored == rounds && landed > 0) {
         printf("[QUILL] race: PASS — anchored %u of %u while churn pid %d landed %u write(s) "
