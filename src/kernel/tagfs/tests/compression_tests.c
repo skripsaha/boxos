@@ -108,6 +108,5 @@ static const TestCase g_compression_tests[] = {
 };
 
 const TestSuite g_compression_suite = {
-    .name = "compression", .tests = g_compression_tests,
-    .count = ARRAY_SIZE(g_compression_tests),
+    .tests = g_compression_tests, .count = ARRAY_SIZE(g_compression_tests),
 };

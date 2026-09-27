@@ -462,14 +462,17 @@ error_t ProcAuthSelfTest(void)
  * once of the image's head before it commits any memory, once of the whole
  * range afterwards — and a caller that is told "not yours" should hear it said
  * the same way whichever ask caught it. kprintf, not debug_printf: on a board
- * this is the only trace that ring 3 reached for memory it does not hold. */
+ * this is the only trace that ring 3 reached for memory it does not hold. A
+ * heap page of its own that could not be had (ERR_NO_MEMORY) is a shortage,
+ * not a reach, and is answered without the line. */
 static error_t SpawnRefuseForeignMemory(const process_t *proc, uint64_t va,
                                         uint64_t size, error_t why)
 {
-    kprintf("[Spawn] pid %u may not spawn from 0x%llx..0x%llx: that is not "
-            "its cabin's memory\n",
-            proc->pid, (unsigned long long)va,
-            (unsigned long long)(va + size));
+    if (why == ERR_INVALID_ADDRESS)
+        kprintf("[Spawn] pid %u may not spawn from 0x%llx..0x%llx: that is not "
+                "its cabin's memory\n",
+                proc->pid, (unsigned long long)va,
+                (unsigned long long)(va + size));
     return why;
 }
 
@@ -485,9 +488,11 @@ static error_t SpawnRefuseForeignMemory(const process_t *proc, uint64_t va,
  *   IS THIS YOURS?  the calling cabin's own page tables. The image is named by a
  *   VIRTUAL address in that cabin and taken through vmm_user_buf_in_into, which
  *   walks those tables leaf by leaf and stops on the first leaf the cabin does
- *   not hold with the USER bit. What ring 3 cannot reach by running, it cannot
- *   name here either — the check needs no list and cannot go stale, because it
- *   consults the same structure the hardware consults.
+ *   not hold with the USER bit and cannot have on first touch (only its heap
+ *   grows that way). What ring 3 cannot reach by running, it cannot name here
+ *   either — it reaches untouched heap by touching it — and the check needs no
+ *   list and cannot go stale, because it consults the same structure the
+ *   hardware consults.
  *
  * ‼ WHY THE ADDRESS IS NO LONGER PHYSICAL. This op used to take a physical
  * address straight out of the op parameters, check only its page alignment and
@@ -510,8 +515,9 @@ static error_t SpawnRefuseForeignMemory(const process_t *proc, uint64_t va,
  * and always fails closed. */
 /* SYSTEM_OP_PROC_SPAWN
  *   params:  [u64 binary_va][u64 binary_size] — binary_va is an address in the
- *            CALLING cabin, at any alignment; the whole range must be mapped to
- *            it. Not page-aligned by requirement: the walk copies a partial
+ *            CALLING cabin, at any alignment; the whole range must be memory
+ *            the cabin holds, or heap it would get on first touch. Not
+ *            page-aligned by requirement: the walk copies a partial
  *            first and last leaf, so alignment buys nothing and would only
  *            force callers to move an image they already hold.
  *   in_crate: tags string (NUL-bounded)
@@ -556,12 +562,14 @@ static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     if (gate != OK) return gate;
 
     /* LOOK AT THE HEAD BEFORE MAKING ROOM FOR THE WHOLE. Both questions this
-     * answers cost one page-table walk and allocate nothing: does the caller
-     * hold the address it named, and is what it holds an ELF at all? Asked in
-     * this order, a caller cannot make the kernel commit up to 64 MiB of
-     * contiguous pages against a size it invented at an address it never
-     * mapped — the staging below is reached only by a call that has already
-     * shown an image. */
+     * answers cost one page-table walk and no kernel buffer: does the caller
+     * hold the address it named, and is what it holds an ELF at all? If the
+     * head lies on a heap page the caller has not touched yet, the walk brings
+     * that one page in, as the caller's own first touch would, and it stays
+     * mapped. Asked in this order, a caller cannot make the kernel commit up
+     * to 64 MiB of contiguous pages against a size it invented at an address
+     * it neither holds nor can have on first touch — the staging below is
+     * reached only by a call that has already shown an image. */
     uint8_t head[16];   /* an ELF opens with a 16-byte e_ident */
     if (binary_size < sizeof(head)) return ERR_INVALID_ELF;
 
@@ -583,8 +591,10 @@ static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     if (!stage_phys) return ERR_NO_MEMORY;
     uint8_t *elf = (uint8_t *)vmm_phys_to_virt((uintptr_t)stage_phys);
 
-    /* The head translated, but the tail is a separate claim: a cabin holding
-     * one mapped page does not thereby hold the megabytes behind it. */
+    /* The head translated, but the tail is a separate claim, walked page by
+     * page like the head: heap the cabin has not touched is brought in as its
+     * first touch would bring it, and anything else it does not hold refuses
+     * the call and frees the staging. */
     error_t take = vmm_user_buf_in_into(ctx->proc->cabin->vmm,
                                         (uintptr_t)binary_va,
                                         (size_t)binary_size, elf);

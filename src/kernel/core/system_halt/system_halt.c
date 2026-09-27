@@ -419,14 +419,19 @@ void halt_all_ap_cores(void)
 
     if (absent == 0)
     {
-        /* Nothing to force, and that is a proof rather than a hope. A core that
-         * published its arrival cannot have been inside a spin_lock critical
-         * section: spin_lock does `cli` before it acquires and restores RFLAGS
-         * only in spin_unlock, so IPI_PANIC is undeliverable for the whole of
-         * any critical section — it waits in that core's LAPIC IRR and is taken
-         * at the instant the lock is released. A complete roll call therefore
-         * proves process_lock and the cleanup queue's lock are unheld by any AP,
-         * and force-releasing them here would be theatre. */
+        /* Nothing to force. A core that published its arrival was not inside a
+         * stretch that kept interrupts off: spin_lock does `cli` before it
+         * acquires and restores RFLAGS only in spin_unlock, so IPI_PANIC waits
+         * in that core's LAPIC IRR until the lock is released — for every
+         * section that does not turn interrupts back on itself. process_lock
+         * and the cleanup queue's lock are such sections, so a complete roll
+         * call proves them unheld by any AP.
+         *
+         * It does not prove that of every lock. ata_dma_sync runs `sti` and
+         * waits for its DMA inside its caller's sections (g_ledger_lock
+         * through tagfs_write_ledger, on a legacy-IDE seat with more than one
+         * core), so a core can answer holding one, and the sync below then
+         * waits on it for good. */
         kprintf("[HALT] All AP cores stopped (roll call complete)\n");
         return;
     }

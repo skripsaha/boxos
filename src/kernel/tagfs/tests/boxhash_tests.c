@@ -116,5 +116,5 @@ static const TestCase g_boxhash_tests[] = {
 };
 
 const TestSuite g_boxhash_suite = {
-    .name = "boxhash", .tests = g_boxhash_tests, .count = ARRAY_SIZE(g_boxhash_tests),
+    .tests = g_boxhash_tests, .count = ARRAY_SIZE(g_boxhash_tests),
 };

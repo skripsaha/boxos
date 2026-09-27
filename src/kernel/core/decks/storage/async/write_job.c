@@ -614,7 +614,11 @@ static void wjob_finalize(WriteJob *j, int rc)
         tagfs_free_blocks(j->alloc_block, j->alloc_count);
     }
 
-    /* Stat reporter (matches sync ObjWrite contract). out_crate points into
+    /* Stat reporter, on the sync ObjWrite contract: the size says 16 only of
+     * stats that reached the program, as crate_write sets it only on success.
+     * A commit the program's pages refuse leaves the size as it staged it, and
+     * the write itself stands — its bytes are in the file, and failing it
+     * would invite the duplicate append described below. out_crate points into
      * the staged Crate[] kbuf; out_crate->addr is the user vaddr. Commit the
      * 16 stats bytes through the page-walked path so a stats crate that
      * straddles a page boundary is safe across the async boundary. j->target
@@ -639,9 +643,9 @@ static void wjob_finalize(WriteJob *j, int rc)
         uint8_t stats[16];
         memcpy(stats + 0, &bytes_written, sizeof(uint64_t));
         memcpy(stats + 8, &final_size,    sizeof(uint64_t));
-        vmm_user_buf_commit_out(j->target->cabin->vmm,
-                                (uintptr_t)j->out_crate->addr, stats, 16);
-        j->out_crate->size = 16;
+        if (vmm_user_buf_commit_out(j->target->cabin->vmm,
+                                    (uintptr_t)j->out_crate->addr, stats, 16) == OK)
+            j->out_crate->size = 16;
     }
 
     if (j->dma_phys)    pmm_free(j->dma_phys, 1);
@@ -649,8 +653,8 @@ static void wjob_finalize(WriteJob *j, int rc)
     if (j->src_bounce)  vmm_user_buf_free(j->src_bounce);
 
     /* CrateStage release. Dispatcher handed us ownership of crates_kbuf
-     * at ObjWriteAsync's PROC_WAITING return. We just wrote
-     * j->out_crate->size = 16 above (into kbuf); commit_and_release
+     * at ObjWriteAsync's PROC_WAITING return. The stats' size above went
+     * into kbuf only if the stats arrived; commit_and_release
      * flushes the whole descriptor array back to user memory and frees
      * the kbuf. Cabin is target->cabin (already pinned via ref). */
     if (j->crates_kbuf) {

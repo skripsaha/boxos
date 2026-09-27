@@ -2231,7 +2231,6 @@ vmm_context_t *vmm_create_context(void)
     ctx->pml4 = (page_table_t *)vmm_phys_to_virt(pml4_phys);
     ctx->pml4_phys = pml4_phys;
     ctx->heap_start = VMM_USER_HEAP_BASE;
-    ctx->heap_end = VMM_USER_HEAP_BASE;
     ctx->stack_top = VMM_USER_STACK_TOP;
 
     error_t pcid_err = pcid_alloc_safe(&ctx->pcid);
@@ -3718,15 +3717,6 @@ static int VmmFirstTouch(vmm_context_t *ctx, uintptr_t addr)
         return -1;
     }
 
-    /* A high-water mark raised from more than one core: a CAS, so a lower
-     * page mapped late cannot lower it. */
-    uintptr_t end  = page_addr + VMM_PAGE_SIZE;
-    uintptr_t seen = __atomic_load_n(&ctx->heap_end, __ATOMIC_RELAXED);
-    while (seen < end &&
-           !__atomic_compare_exchange_n(&ctx->heap_end, &seen, end, true,
-                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
-        ;
-
     debug_printf("[VMM] Demand paging: mapped user heap page at 0x%lx\n", page_addr);
     return 1;
 }
@@ -4657,7 +4647,6 @@ void vmm_dump_context_stats(vmm_context_t *ctx)
     debug_printf("[VMM]   Kernel pages:    %zu\n", ctx->kernel_pages);
     debug_printf("[VMM]   User pages:      %zu\n", ctx->user_pages);
     debug_printf("[VMM]   Heap start:      0x%p\n", (void *)ctx->heap_start);
-    debug_printf("[VMM]   Heap end:        0x%p\n", (void *)ctx->heap_end);
     debug_printf("[VMM]   Stack top:       0x%p\n", (void *)ctx->stack_top);
 
     spin_unlock(&ctx->lock);
@@ -5425,24 +5414,40 @@ uintptr_t vmm_virt_to_phys_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr)
  * order, and only for an address in the heap window. The cabin may be
  * running on another core and touch the same page first; vmm_map_page
  * settles that under ctx->lock.
+ *
+ * The answer keeps the reason VmmFirstTouch knows: ERR_NO_MEMORY for a heap
+ * page that is the cabin's but could not be had — no frame, or no page-table
+ * page to map it with — which is a shortage the caller may outlast, and
+ * ERR_INVALID_ADDRESS for memory the cabin does not have and cannot have,
+ * which it never will.
  */
-static void *VmmUserCopyWindow(vmm_context_t *ctx, uintptr_t user_vaddr,
-                               bool for_write, size_t *out_span)
+static error_t VmmUserCopyWindow(vmm_context_t *ctx, uintptr_t user_vaddr,
+                                 bool for_write, void **window, size_t *out_span)
 {
-    void *window = vmm_user_window(ctx, user_vaddr, for_write, out_span);
-    if (window || VmmFirstTouch(ctx, user_vaddr) <= 0)
-        return window;
-    return vmm_user_window(ctx, user_vaddr, for_write, out_span);
+    *window = vmm_user_window(ctx, user_vaddr, for_write, out_span);
+    if (*window)
+        return OK;
+    int touched = VmmFirstTouch(ctx, user_vaddr);
+    if (touched < 0)
+        return ERR_NO_MEMORY;
+    if (touched == 0)
+        return ERR_INVALID_ADDRESS;
+    *window = vmm_user_window(ctx, user_vaddr, for_write, out_span);
+    return *window ? OK : ERR_INVALID_ADDRESS;
 }
 
 /*
  * vmm_user_buf_in_into — copy a multi-page user-VA range into a caller-
  * supplied kernel buffer. Page-by-page walk handles non-contiguous physical
- * backing and non-page-aligned start/end. NO allocation: the caller owns
- * the destination buffer (stack, heap, or preallocated scratch).
+ * backing and non-page-aligned start/end. No kernel buffer is allocated: the
+ * caller owns the destination (stack, heap, or preallocated scratch). A heap
+ * page the cabin has not touched yet is brought in on the way, as its own
+ * first touch would bring it (VmmUserCopyWindow): one zeroed frame, and any
+ * page-table page its mapping needs, charged to the cabin and kept mapped.
  *
- * Returns OK, or ERR_INVALID_ADDRESS at the first page that is not user
- * memory the cabin has or can have on first touch; on failure the contents
+ * Returns OK; ERR_NO_MEMORY at the first heap page of the cabin's that could
+ * not be had; or ERR_INVALID_ADDRESS at the first page that is not user
+ * memory the cabin has or can have on first touch. On failure the contents
  * of `kbuf` beyond `[0, fail_offset)` are undefined. Caller is expected to
  * treat partial copies as full failure — i.e. discard kbuf or its
  * downstream interpretation.
@@ -5458,8 +5463,10 @@ error_t vmm_user_buf_in_into(vmm_context_t *ctx, uintptr_t user_vaddr,
          * 2 MiB-backed buffer is one window, and a 4 KiB one is still
          * exactly one page. vmm_user_window reports the span. */
         size_t span = 0;
-        void *src = VmmUserCopyWindow(ctx, user_vaddr + copied, false, &span);
-        if (!src || span == 0) return ERR_INVALID_ADDRESS;
+        void *src;
+        error_t why = VmmUserCopyWindow(ctx, user_vaddr + copied, false, &src, &span);
+        if (why != OK) return why;
+        if (span == 0) return ERR_INVALID_ADDRESS;
 
         size_t chunk = size - copied;
         if (chunk > span) chunk = span;
@@ -5504,8 +5511,10 @@ error_t vmm_user_buf_commit_out(vmm_context_t *ctx, uintptr_t user_vaddr,
          * the hardware will not refuse a store into a page the cabin gave
          * away read-only — see vmm_user_window. */
         size_t span = 0;
-        void *dst = VmmUserCopyWindow(ctx, user_vaddr + copied, true, &span);
-        if (!dst || span == 0) return ERR_INVALID_ADDRESS;
+        void *dst;
+        error_t why = VmmUserCopyWindow(ctx, user_vaddr + copied, true, &dst, &span);
+        if (why != OK) return why;
+        if (span == 0) return ERR_INVALID_ADDRESS;
 
         size_t chunk = size - copied;
         if (chunk > span) chunk = span;

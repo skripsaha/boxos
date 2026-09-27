@@ -187,5 +187,5 @@ static const TestCase g_dedup_tests[] = {
 };
 
 const TestSuite g_dedup_suite = {
-    .name = "dedup", .tests = g_dedup_tests, .count = ARRAY_SIZE(g_dedup_tests),
+    .tests = g_dedup_tests, .count = ARRAY_SIZE(g_dedup_tests),
 };

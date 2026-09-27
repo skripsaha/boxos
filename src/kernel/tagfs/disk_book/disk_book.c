@@ -347,7 +347,8 @@ error_t DiskBookCheckpoint(void) {
      * precisely when somebody needs an answer about the media, not about the
      * traffic. Returning it would also have made this function fail at
      * random on a busy volume, which the checkpoint test in
-     * tagfs/tests/tests.c would see as a red run with nothing wrong.
+     * tagfs/tests/journal_tests.c (diskbook_checkpoint) would see as a red
+     * run with nothing wrong.
      *
      * So it asks again, and the asking ends on a fact rather than a clock:
      * the holder's own command is bounded, and a holder that stops being a

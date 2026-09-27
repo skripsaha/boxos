@@ -2613,15 +2613,23 @@ static error_t mount_refused(const char *what, error_t why)
  * These lines are WHICH blocks, as runs of the data run: an orphan is used on
  * the medium and reached by nothing, a missing block is reached and free.
  *
- * `tools/volume-read.py check` names the same runs off the same image, and
- * logcheck's census scenario holds the two lists against each other — so the
+ * The first 32 runs of each kind are named, lowest block first, and the rest
+ * are said as one line of how many and how big (the owner's bound, 09-27). A
+ * garbage bitmap sector alone is about a thousand runs, and the repair only
+ * ever adds, so a damaged volume would say its whole list again on every mount
+ * — one console line and one framebuffer scroll each, on the boot path. The
+ * whole list is `tools/volume-read.py check`'s, off the same image; logcheck's
+ * census scenario holds the first 32 and the remainder against it, so the
  * host's roll call and this one cannot drift apart without a red line saying
- * where. Every run is said, none is summarised: a list cut short is a list the
- * host cannot hold its own against.
+ * where.
  */
 static void FsckSayRuns(const uint8_t *on_disk, const uint8_t *computed,
                         uint32_t blocks, bool orphans)
 {
+    const uint32_t named_at_most = 32;
+    const char *kind = orphans ? "orphan" : "missing";
+    uint32_t runs = 0, more_runs = 0, more_blocks = 0;
+
     for (uint32_t b = 0; b < blocks; ) {
         uint32_t start = b;
         while (b < blocks &&
@@ -2632,9 +2640,18 @@ static void FsckSayRuns(const uint8_t *on_disk, const uint8_t *computed,
             b++;
             continue;
         }
-        kprintf("[TagFS FSCK] %s run at data block %u, %u block(s)\n",
-                orphans ? "orphan" : "missing", start, b - start);
+        if (runs++ < named_at_most) {
+            kprintf("[TagFS FSCK] %s run at data block %u, %u block(s)\n",
+                    kind, start, b - start);
+        } else {
+            more_runs++;
+            more_blocks += b - start;
+        }
     }
+    if (more_runs)
+        kprintf("[TagFS FSCK] and %u more %s run(s), %u block(s) — "
+                "tools/volume-read.py names every one\n",
+                more_runs, kind, more_blocks);
 }
 
 error_t tagfs_init(void) {

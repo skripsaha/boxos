@@ -43,11 +43,14 @@ void SettleCutSayArmed(void)
  * Interrupts go off on this core first, so nothing of its own runs after the
  * point; then every other core is stopped by the roll call a shutdown takes
  * (system_halt.c). What that roll call proves is narrower than it sounds: a
- * core that answered was not inside a spin_lock section — IPI_PANIC cannot be
- * delivered there — so no lock is left held. It does NOT prove a core was
- * between writes: one frozen between two synchronous writes of a stage that
- * holds no lock (a writer with no open-file entry, say) stops right there. A
- * scenario therefore runs a single writer, and the sync is that writer.
+ * core that answered was not inside a stretch that kept interrupts off. It
+ * does NOT prove the core held no lock — ata_dma_sync runs `sti` and waits for
+ * its DMA inside its caller's spin_lock sections, so on a legacy-IDE seat with
+ * more than one core a core can stop holding g_ledger_lock, say. Nor does it
+ * prove a core was between writes: one frozen between two synchronous writes
+ * of a stage that holds no lock (a writer with no open-file entry, say) stops
+ * right there. A scenario therefore runs a single writer, and the sync is that
+ * writer.
  *
  * And what cannot be stopped is not claimed: a command another operation had
  * already issued to the device still completes after every processor has

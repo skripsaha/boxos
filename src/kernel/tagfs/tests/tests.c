@@ -7,7 +7,7 @@
 
 // ============================================================================
 // The runner, the judge, and what the suites share. The tests themselves live
-// one suite to a file beside this one (TEST_SUITES in tests.h).
+// in the suite files beside this one (TEST_SUITES in tests.h).
 // ============================================================================
 
 static bool g_tests_initialized = false;
@@ -275,19 +275,15 @@ static bool VolumeResidueSaid(const char* name, const VolumeTally* before)
 //   either    FAIL     FAIL
 //   no        PASS     PASS
 //
-// Plus two things no test gets to decide for itself: a caveated test that gave
-// no evidence has proven nothing either way, and a test whose assertion failed
-// out loud has failed whatever it returned afterwards.
+// Plus three things no test gets to decide for itself: a caveated test that
+// gave no evidence has proven nothing either way, a test that can see a defect
+// but does not name it cannot say what came back, and a test whose assertion
+// failed out loud has failed whatever it returned afterwards.
 // ============================================================================
 
 static void TestJudge(const TestCase* test, TestResult seen, TestStats* stats)
 {
     bool caveated = test->caveat_step != NULL;
-
-    /* Lifting a caveat deletes its words from the TestCase, so a defect that
-     * comes back after the lift has nothing left to name it by. */
-    const char* defect = test->caveat_defect ? test->caveat_defect
-                                             : "the one its lifted caveat named";
 
     if (seen == TEST_FAIL || g_failure_said) {
         stats->total_failed++;
@@ -324,11 +320,20 @@ static void TestJudge(const TestCase* test, TestResult seen, TestStats* stats)
         return;
     }
 
+    if ((caveated || seen == TEST_DEFECT) && !test->caveat_defect) {
+        stats->total_failed++;
+        kprintf("[TESTS] %s failed: its TestCase names no defect — a test that "
+                "can see one says what it stands for in caveat_defect, and keeps "
+                "it after its caveat is lifted (%s %llu)\n", test->name,
+                g_evidence.words, (unsigned long long)g_evidence.n);
+        return;
+    }
+
     if (caveated && seen == TEST_DEFECT) {
         stats->total_held++;
         kprintf("[TESTS] caveat held: %s — %s — discharged by step %s (%s %llu)\n",
-                test->name, defect, test->caveat_step, g_evidence.words,
-                (unsigned long long)g_evidence.n);
+                test->name, test->caveat_defect, test->caveat_step,
+                g_evidence.words, (unsigned long long)g_evidence.n);
         return;
     }
 
@@ -344,7 +349,7 @@ static void TestJudge(const TestCase* test, TestResult seen, TestStats* stats)
     if (seen == TEST_DEFECT) {
         stats->total_failed++;
         kprintf("[TESTS] %s failed: the defect it stands for is back — %s (%s %llu)\n",
-                test->name, defect, g_evidence.words,
+                test->name, test->caveat_defect, g_evidence.words,
                 (unsigned long long)g_evidence.n);
         return;
     }

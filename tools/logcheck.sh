@@ -31,7 +31,9 @@
 #                         0 failed, the caveats held with their numbers, the
 #                         faults fired where aimed, no Bitmap mismatch after
 #   logcheck.sh standmut  each caveat's real fix put in must lift it early, and
-#                         each fault mechanism broken must fail its self-test
+#                         each fault mechanism broken must fail its self-test;
+#                         a muted assertion, a judge that always holds and the
+#                         old CR-12 body must each be caught
 #   logcheck.sh quill     quilltest's red tests of the Quill write core on a grown
 #                         volume, three boots: each case held under the step that
 #                         discharges it, judged with the kernel's lines and the
@@ -7430,10 +7432,19 @@ run_censusmut() {
 # q35, AHCI — each on a volume made fresh by the build, and the boot is held
 # to what it must say: nothing failed, exactly the caveats this table names
 # are held, each with the number it measured, the faults fired where they
-# were aimed, and the road the writes took. Then the SAME image is booted a
-# second time: a test that leaked a block, or gave one back twice, leaves a
-# volume whose next roll call says "Bitmap mismatch", and the first boot was
-# halted through `bye` so that what the tests gave back reached the medium.
+# were aimed, the road the writes took, and a halt whose sync wrote the
+# volume — what the tests gave back reaches the medium only there.
+#
+# Then the volume that boot left is booted a second time: a test that leaked a
+# block, or gave one back twice, leaves a volume whose next roll call says
+# "Bitmap mismatch". That boot is judged only on the volume the first one
+# really left: the first must have said "Storage sync complete", the image
+# must still carry the Deed the build laid down (a repack lays down another),
+# and the second boot stands on a copy of it named by BOOTDISK, which run-bg
+# boots as it stands, so no source touched in between can repack a fresh
+# volume under it. Every boot starts on an empty serial log, and one that
+# started no machine is the harness's failure — never a verdict read off the
+# log the last boot left.
 #
 # The held evidence is the same on the second boot as on the first, and on
 # both roads — measured — so it is held to on every boot. A number that moves
@@ -7441,40 +7452,64 @@ run_censusmut() {
 # caveat deletes its row here in the same commit.
 # ---------------------------------------------------------------------------
 
-# NAME|STEP|EVIDENCE — every caveat a VOLUME_TESTS boot holds.
+# NAME|STEP|HELD|LIFTED — every caveat a VOLUME_TESTS boot holds: the evidence
+# it gives while its defect is there, and the evidence it gives once standmut
+# has put its step's fix in. A sweep's LIFTED count is how many allocations
+# the operation takes on a fresh volume of this tree; a create takes one more
+# when its name's tag row has to widen for the new file id (tag_bitmap.c,
+# ensure_bitmap_width), so a create added before the sweep can move it by one.
 STAND_HELD="
-integrity_reports_every_rot|1.10|of 65 rotten blocks, reported 64
-use_context_long_remembered|1.6|of 479 bytes said, the volume remembers 0
-stand_rmw_read_refused|1.3|bytes around the write that the medium now holds as zeros 4086
-stand_create_all_or_nothing|1.4|half-done create at refused allocation 5
-stand_sync_owns_a_refused_write|1.4|ledger copies written after the file table's write was refused 1
-stand_sync_owns_a_refused_flush|1.4|cache flushes the medium refused under a sync that answered OK 1
-stand_write_returns_its_ground|1.3|blocks refused writes kept named by no file, all given back 3
-stand_write_all_or_refusal|1.5|write answered short with no refusal at refused allocation 4
-stand_open_holds_what_it_names|1.4|handle counting extents it did not hold at refused allocation 6
-stand_open_refuses_unread_metadata|1.4|one-block file opened as empty at refused allocation 3
-stand_open_joins_the_writers|1.5|handle with no open-file entry at refused allocation 1
-stand_frozen_block_freed_twice|1.3|blocks the allocator was given back twice 1
+cow_moves_only_the_block_written|1.3|blocks the write should have left as they were that changed, in the file or its snapshot 2|blocks the write should have left as they were that changed, in the file or its snapshot 0
+integrity_reports_every_rot|1.10|of 65 rotten blocks, reported 64|of 65 rotten blocks, reported 65
+use_context_long_remembered|1.6|of 479 bytes said, the volume remembers 0|of 479 bytes said, the volume remembers 479
+stand_rmw_read_refused|1.3|bytes around the write that the medium now holds as zeros 4086|bytes around the write that the medium now holds as zeros 0
+stand_create_all_or_nothing|1.4|half-done create at refused allocation 5|creates whole or refused whole, allocations refused 6
+stand_sync_owns_a_refused_write|1.4|ledger copies written after the file table's write was refused 1|ledger copies written after the file table's write was refused 0
+stand_sync_owns_a_refused_flush|1.4|cache flushes the medium refused under a sync that answered OK 1|a refused cache flush, and the sync answered it with error 200
+stand_write_returns_its_ground|1.3|blocks refused writes kept named by no file, all given back 3|blocks refused writes kept named by no file, all given back 0
+stand_write_all_or_refusal|1.5|write answered short with no refusal at refused allocation 4|writes whole or refused, allocations refused 10
+stand_open_holds_what_it_names|1.4|handle counting extents it did not hold at refused allocation 6|opens whole or refused, allocations refused 6
+stand_open_refuses_unread_metadata|1.4|one-block file opened as empty at refused allocation 3|opens whole or refused, allocations refused 6
+stand_open_joins_the_writers|1.5|handle with no open-file entry at refused allocation 1|opens whole or refused, allocations refused 6
+stand_frozen_block_freed_twice|1.3|blocks the allocator was given back twice 1|blocks the allocator was given back twice 0
 "
-STAND_HELD_COUNT=12
+STAND_HELD_COUNT=13
 
-# stand_boot TAG KEYS... — boot the image that is on the disk under
-# VOLUME_TESTS=on and KEYS (the machine), wait for the startup tests' summary
-# — or a panic, which ends them too — and halt through `bye`, so the halt's
-# sync carries what the tests gave back to the medium. The key goes on run-bg
-# as well: it owns a rebuild marker, and a run-bg without it rebuilds the
-# kernel without the tests.
+# The last thing a halt says about the volume, whichever way its sync went
+# (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT
+# WRITE ITS RECORDS", which comes BEFORE the flush, and a machine stopped
+# there is stopped in the middle of it.
+STAND_HALT_ENDS='^\[HALT\] (Storage sync complete|the medium on seat [0-9]+ took|‼ THE VOLUME ON SEAT [0-9]+ .* WAS NOT MADE DURABLE)'
+
+# stand_boot TAG KEYS... — boot the image that is on the disk (or the one
+# BOOTDISK names) under VOLUME_TESTS=on and KEYS (the machine), wait for the
+# startup tests' summary — or a panic, which ends them too — and halt through
+# `bye`, so the halt's sync carries what the tests gave back to the medium.
+# The key goes on run-bg as well: it owns a rebuild marker, and a run-bg
+# without it rebuilds the kernel without the tests.
+#
+# Answers 0 when the machine halted and said its sync wrote the volume, 1 when
+# a machine ran — its log is kept — and did not, and 2 when no machine was
+# started at all, which is said as the harness's failure: there is no log of
+# this boot to judge, only the last one's.
 stand_boot() {
-    local tag=$1; shift
+    local tag=$1 halted=1; shift
     make run-stop >/dev/null 2>&1
-    make run-bg VOLUME_TESTS=on "$@" >/dev/null 2>&1
+    rm -f build/serial.log
+    if ! make run-bg VOLUME_TESTS=on "$@" >"$SCRATCH/runbg.$tag.log" 2>&1 || [ ! -S build/qemu.mon ]; then
+        harness "stand: no machine was started for $tag — $(tail -1 "$SCRATCH/runbg.$tag.log" | tr -d '\r')"
+        make run-stop >/dev/null 2>&1
+        return 2
+    fi
     if wait_for_line -E build/serial.log 'TagFS: [0-9]+ run, |KERNEL PANIC' "$WAIT_QUIET_S" &&
-       grep -qE 'TagFS: [0-9]+ run, ' build/serial.log && wait_for_prompt; then
-        type_line "bye" &&
-            wait_for_line -E build/serial.log '\[HALT\] (Storage sync complete|the medium on seat|‼)' "$WAIT_QUIET_S"
+       grep -qE 'TagFS: [0-9]+ run, ' build/serial.log && wait_for_prompt && type_line "bye" &&
+       wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S" &&
+       grep -aq '^\[HALT\] Storage sync complete' build/serial.log; then
+        halted=0
     fi
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.$tag.log"
+    return $halted
 }
 
 # stand_summary LOG — the startup tests' summary line, without its tag.
@@ -7482,12 +7517,24 @@ stand_summary() {
     grep -aE '^\[TESTS\] TagFS: [0-9]+ run, ' "$1" | tr -d '\r' | tail -1 | sed 's/^\[TESTS\] //'
 }
 
+# stand_held LOG WHAT — every row of the table held, each with its number.
+stand_held() {
+    local L=$1 what=$2 name step held lifted
+    while IFS='|' read -r name step held lifted; do
+        [ -n "$name" ] || continue
+        grep -aF "[TESTS] caveat held: $name — " "$L" | grep -qF " — discharged by step $step ($held)"
+        chk $? "stand: $what — $name held under step $step ($held)"
+    done <<STAND_HELD_EOF
+$STAND_HELD
+STAND_HELD_EOF
+}
+
 # stand_judge TAG WHAT SEAT BLOCKFAILS — one first boot, held to all of it.
 # SEAT is the volume seat's name as an ERE; BLOCKFAILS is how many commands
 # the faults refuse on that machine — one per test that arms BLOCKFAIL and
 # runs there (the asynchronous read has no road on the legacy channel).
 stand_judge() {
-    local L="$SCRATCH/serial.$1.log" what=$2 seat=$3 want=$4 said name step evidence got
+    local L="$SCRATCH/serial.$1.log" what=$2 seat=$3 want=$4 said got
     said=$(stand_summary "$L")
     echo "$said" | grep -qE "^TagFS: [0-9]+ run, [0-9]+ passed, 0 failed, [0-9]+ skipped, $STAND_HELD_COUNT held under a caveat"
     chk $? "stand: $what — nothing failed and exactly $STAND_HELD_COUNT caveats are held (${said:-no summary})"
@@ -7499,13 +7546,7 @@ stand_judge() {
     chk $? "stand: $what — no panic"
     grep -aqE "^\[TESTS\] the tests that write go through seat [0-9]+ \($seat\), on the synchronous path" "$L"
     chk $? "stand: $what — the writes' road is said: $(grep -aoE 'go through seat [0-9]+ \([^)]*\)' "$L" | head -1)"
-    while IFS='|' read -r name step evidence; do
-        [ -n "$name" ] || continue
-        grep -aF "[TESTS] caveat held: $name — " "$L" | grep -qF " — discharged by step $step ($evidence)"
-        chk $? "stand: $what — $name held under step $step ($evidence)"
-    done <<STAND_HELD_EOF
-$STAND_HELD
-STAND_HELD_EOF
+    stand_held "$L" "$what"
     got=$(grep -ac '^\[BLOCKFAIL\] seat [0-9]*: ' "$L")
     [ "$got" = "$want" ]
     chk $? "stand: $what — BLOCKFAIL refused $got command(s), one for each test that armed it ($want)"
@@ -7521,10 +7562,13 @@ STAND_HELD_EOF
     chk $? "stand: $what — and the fourth of the next, one the pool would have served"
     grep -aqE '^\[HEAPFAIL\] core [0-9]+: allocation 1 since arming \(2 bytes\) is answered NULL' "$L"
     chk $? "stand: $what — and the tag row's widening, which the row then refused to write past"
+    grep -aq '^\[HALT\] Storage sync complete' "$L"
+    chk $? "stand: $what — the halt through bye said its sync wrote the volume ($(grep -aE "$STAND_HALT_ENDS" "$L" | tr -d '\r' | head -1 | cut -c1-120))"
 }
 
-# stand_again TAG WHAT — the second boot of the same image: its roll call finds
-# nothing to repair, and the suite holds what it held.
+# stand_again TAG WHAT — the second boot of the volume the first one left: its
+# roll call finds nothing to repair, and the suite holds what it held, number
+# for number.
 stand_again() {
     local L="$SCRATCH/serial.$1.log" what=$2 said mounted
     said=$(stand_summary "$L")
@@ -7533,28 +7577,46 @@ stand_again() {
     chk $? "stand: $what, second boot — the roll call finds no Bitmap mismatch (${mounted:-no mount line})"
     echo "$said" | grep -qE "^TagFS: [0-9]+ run, [0-9]+ passed, 0 failed, [0-9]+ skipped, $STAND_HELD_COUNT held under a caveat"
     chk $? "stand: $what, second boot — nothing failed and the same caveats are held (${said:-no summary})"
+    ! grep -aq 'KERNEL PANIC' "$L"
+    chk $? "stand: $what, second boot — no panic"
+    stand_held "$L" "$what, second boot"
+}
+
+# stand_twice TAG WHAT SEAT BLOCKFAILS KEYS... — one road: a fresh volume
+# built and booted, judged, and the volume it left booted again and judged.
+stand_twice() {
+    local tag=$1 what=$2 seat=$3 want=$4 img built kept rc; shift 4
+    img="$SCRATCH/stand.$tag.img"
+    rm -f build/boxos.img "$img"
+    if ! build_with_key VOLUME_TESTS=on; then
+        echo "BUILD FAILED (VOLUME_TESTS=on) — tail:"; tail -25 "$SCRATCH/build.log"
+        bad "stand: $what — VOLUME_TESTS=on does not build"
+        return
+    fi
+    built=$(deed_uuid build/boxos.img) || built=""
+    stand_boot "$tag" "$@"; rc=$?
+    [ "$rc" = 2 ] && return
+    stand_judge "$tag" "$what" "$seat" "$want"
+    if [ "$rc" != 0 ]; then
+        bad "stand: $what, second boot — not judged: the first boot never said its halt's sync wrote the volume, so a Bitmap mismatch on the next would be the halt's, not the tests'"
+        return
+    fi
+    cp -c build/boxos.img "$img" 2>/dev/null || cp build/boxos.img "$img"
+    kept=$(deed_uuid "$img") || kept=""
+    if [ -z "$built" ] || [ "$kept" != "$built" ]; then
+        bad "stand: $what, second boot — not judged: the image the first boot left carries Deed ${kept:-none} and the build laid down ${built:-none}, so it was repacked under that boot"
+        rm -f "$img"
+        return
+    fi
+    stand_boot "${tag}_again" BOOTDISK="$img" "$@"; rc=$?
+    [ "$rc" = 2 ] || stand_again "${tag}_again" "$what"
+    rm -f "$img"
 }
 
 run_stand() {
     echo "== stand: the startup tests that write, on both roads to the medium, twice each =="
-    rm -f build/boxos.img
-    if ! build_with_key VOLUME_TESTS=on; then
-        echo "BUILD FAILED (VOLUME_TESTS=on) — tail:"; tail -25 "$SCRATCH/build.log"
-        bad "stand: VOLUME_TESTS=on does not build"
-        buildkey_restore; return
-    fi
-
-    stand_boot stand_bios CORES=4 MEM=4G
-    stand_judge stand_bios "BIOS 4c" "ATA [a-z ]+" 6
-    stand_boot stand_bios_again CORES=4 MEM=4G
-    stand_again stand_bios_again "BIOS 4c"
-
-    rm -f build/boxos.img
-    stand_boot stand_uefi UEFI=on STRICT=on CORES=4 MEM=4G
-    stand_judge stand_uefi "UEFI 4c" "AHCI port [0-9]+" 7
-    stand_boot stand_uefi_again UEFI=on STRICT=on CORES=4 MEM=4G
-    stand_again stand_uefi_again "UEFI 4c"
-
+    stand_twice stand_bios "BIOS 4c" "ATA [a-z ]+" 6 CORES=4 MEM=4G
+    stand_twice stand_uefi "UEFI 4c" "AHCI port [0-9]+" 7 UEFI=on STRICT=on CORES=4 MEM=4G
     buildkey_restore
 }
 
@@ -7564,19 +7626,31 @@ run_stand() {
 # A caveated test is only worth holding if it sees its defect because the
 # defect is there: so each defect's real fix is put in — the fix its step will
 # make, in the least code that makes it — and each test must then say
-# "caveat lifted early" and fail. And a test that proves a fault mechanism is
-# only worth passing if the mechanism, broken, fails it: no range check, no
-# kind check, not single-shot, a disarm that does not disarm, a refused write
-# that lands anyway, a flush never asked, an asynchronous refusal returned
-# instead of called back, HEAPFAIL asked after the slab, counting without
-# refusing, blind to the core, the tag row's PF-1 fix taken out, and a test
-# that forgets to take its fault down (the runner must take it down and fail
-# it). Mutations whose tests do not meet each other's share a boot; each is
-# judged by its own test's own line.
+# "caveat lifted early", with the number the fix makes it see, and fail. And a
+# test that proves a fault mechanism is only worth passing if the mechanism,
+# broken, fails it: no range check, no kind check, not single-shot, a disarm
+# that does not disarm, a refused write that lands anyway, a flush never
+# asked, an asynchronous refusal returned instead of called back, HEAPFAIL
+# asked after the slab, counting without refusing, blind to the core, the tag
+# row's PF-1 fix taken out, and a test that forgets to take its fault down
+# (the runner must take it down and fail it). Mutations whose tests do not
+# meet each other's share a boot; each is judged by its own test's own line,
+# number and all.
+#
+# And the runner is only worth believing if it cannot be made to pass what it
+# should fail. A failed assertion must say where, and what it saw — shown by
+# one forced to fail — and with that print put back on debug_printf, the
+# failure shrinks to a count nobody can place. A judge that holds whatever a
+# caveated test saw lets every fix in go by as held, with no "lifted early"
+# at all. And CR-12 as it stood before its rewrite — a copy taken of the
+# literal block 1, with no snapshot standing, and never given back — must be
+# caught twice: by the runner's count as it runs, and by the next boot's roll
+# call as an orphan.
 # ---------------------------------------------------------------------------
 
 # stand_mut_boot TAG KEYS... — build what the tree now is under VOLUME_TESTS,
 # on a fresh volume, and boot it (first boot only; the volume is discarded).
+# Answers 1 only when there is nothing to judge: no build, or no machine.
 stand_mut_boot() {
     local tag=$1; shift
     rm -f build/boxos.img
@@ -7586,9 +7660,10 @@ stand_mut_boot() {
         return 1
     fi
     stand_boot "$tag" "$@"
+    [ $? != 2 ]
 }
 
-# stand_fix_on — the real fix of every caveated stand test, emulated.
+# stand_fix_on — the real fix of every caveated test, emulated.
 stand_fix_on() {
     mutate src/kernel/tagfs/tagfs.c
     python3 - <<'EOF'
@@ -7638,13 +7713,49 @@ edits = [
     # 1.3: a block already free is not given back again
     ("    uint32_t end = start_block + count;\n\n    // Clear bits\n",
      "    uint32_t end = start_block + count;\n\n    for (uint32_t i = 0; i < count; i++)   /* logcheck mutation: a free block is not freed again */\n        if (!bitmap_test_bit(g_state.block_bitmap.bitmap, start_block + i))\n            return;\n\n    // Clear bits\n"),
+    # 1.3: a copy for a snapshot takes the one block written, and the rest of
+    # its extent stays where it is
+    ("            if (TagFS_CowBeforeWrite(handle->file_id, disk_block, &cow_block) == OK && cow_block != 0) {\n",
+     "            if (TagFS_CowBeforeWrite(handle->file_id, disk_block, &cow_block) == OK && cow_block != 0) {\n"
+     "                uint16_t span = handle->extents[found].block_count;   /* logcheck mutation: the copy takes the one block, the rest of the extent stays */\n"
+     "                FileExtent *split = span > 1 ? kmalloc(sizeof(FileExtent) * (handle->extent_count + 1)) : NULL;\n"
+     "                if (split) {\n"
+     "                    memcpy(split, handle->extents, sizeof(FileExtent) * (found + 1));\n"
+     "                    memcpy(split + found + 2, handle->extents + found + 1,\n"
+     "                           sizeof(FileExtent) * (handle->extent_count - found - 1));\n"
+     "                    split[found + 1].start_block = disk_block + 1;\n"
+     "                    split[found + 1].block_count = (uint16_t)(span - 1);\n"
+     "                    split[found].block_count = 1;\n"
+     "                    kfree(handle->extents);\n"
+     "                    handle->extents = split;\n"
+     "                    handle->extent_count++;\n"
+     "                }\n"),
+    # 1.6: a Use Context longer than the Ledger's record is still the volume's.
+    # The step keeps it whole on the medium (its own block); what the test asks
+    # is the volume's answer, and this gives that answer while the record
+    # carries only what fits of it.
+    ("    bool fits = len <= LEDGER_USE_MAX;\n",
+     "    bool fits = len <= sizeof(g_ledger_use);   /* logcheck mutation: a Use Context longer than the record is still remembered */\n"),
+    ("    led.use_context_offset = g_ledger_use_len ? (uint16_t)sizeof(VolumeLedger) : 0;\n"
+     "    led.use_context_bytes  = g_ledger_use_len;\n"
+     "    led.bytes        = (uint32_t)sizeof(VolumeLedger) + g_ledger_use_len;\n"
+     "    led.crc32        = 0;\n"
+     "    memcpy(buf, &led, sizeof(led));\n"
+     "    memcpy(buf + sizeof(led), g_ledger_use, g_ledger_use_len);\n",
+     "    uint16_t put = g_ledger_use_len <= LEDGER_USE_MAX ? g_ledger_use_len : 0;   /* logcheck mutation: the record carries what fits */\n"
+     "    led.use_context_offset = put ? (uint16_t)sizeof(VolumeLedger) : 0;\n"
+     "    led.use_context_bytes  = put;\n"
+     "    led.bytes        = (uint32_t)sizeof(VolumeLedger) + put;\n"
+     "    led.crc32        = 0;\n"
+     "    memcpy(buf, &led, sizeof(led));\n"
+     "    memcpy(buf + sizeof(led), g_ledger_use, put);\n"),
 ]
 for a, m in edits:
     assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
     s = s.replace(a, m, 1)
 open(p, "w").write(s)
 EOF
-    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 9
+    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 12
 
     mutate src/kernel/tagfs/tag_bitmap/tag_bitmap.c
     python3 - <<'EOF'
@@ -7668,30 +7779,50 @@ for a, m in edits:
 open(p, "w").write(s)
 EOF
     mut_done src/kernel/tagfs/tag_bitmap/tag_bitmap.c "logcheck mutation" 1
+
+    # 1.10: the report ring holds every rot the test plants.
+    mutate src/kernel/tagfs/integrity/integrity.c
+    python3 - <<'EOF'
+p = "src/kernel/tagfs/integrity/integrity.c"
+s = open(p).read()
+a = "#define ROT_RING_MAX      64\n"
+assert s.count(a) == 1, "stand fix anchor missing: " + a.strip()
+open(p, "w").write(s.replace(a, "#define ROT_RING_MAX      128   /* logcheck mutation: the ring holds every rot the test plants */\n", 1))
+EOF
+    mut_done src/kernel/tagfs/integrity/integrity.c "logcheck mutation" 1
 }
 stand_fix_off() {
     restore src/kernel/tagfs/tagfs.c
     restore src/kernel/tagfs/tag_bitmap/tag_bitmap.c
+    restore src/kernel/tagfs/integrity/integrity.c
 }
 
 # stand_mech_on GROUP — the fault mechanisms broken, a few at a time: each
 # group's mutations are caught by different tests, and none of them changes
-# what another group member's test sees.
+# what another group member's test sees. Two groups break the runner instead:
+# `range` also forces one assertion to fail with its print intact, and
+# `blind` forces the same one with its print muted and a judge that holds
+# whatever a caveated test saw.
 stand_mech_on() {
     local group=$1 marks mark
     # FILE:COUNT — every file the group edits, and how many edits land in it.
     case "$group" in
-        range)  marks="src/kernel/core/boardroom/block_fail.c:1 src/lib/kernel/klib_mem.c:1 src/kernel/tagfs/tests/stand_tests.c:1" ;;
+        range)  marks="src/kernel/core/boardroom/block_fail.c:1 src/lib/kernel/klib_mem.c:1 src/kernel/tagfs/tests/stand_tests.c:1 src/kernel/tagfs/tests/core_tests.c:1" ;;
         kind)   marks="src/kernel/core/boardroom/block_fail.c:1 src/lib/kernel/klib_mem.c:1" ;;
         shots)  marks="src/kernel/core/boardroom/block_fail.c:1 src/lib/kernel/klib_mem.c:1" ;;
         disarm) marks="src/kernel/core/boardroom/block_fail.c:1 src/kernel/core/boardroom/boardroom.c:1" ;;
         lands)  marks="src/kernel/core/boardroom/boardroom.c:2 src/kernel/tagfs/tag_bitmap/tag_bitmap.c:1" ;;
+        blind)  marks="src/kernel/tagfs/tests/tests.c:2 src/kernel/tagfs/tests/core_tests.c:1" ;;
     esac
     for mark in $marks; do mutate "${mark%%:*}"; done
     python3 - "$group" <<'EOF'
 import sys
 group = sys.argv[1]
 M = "logcheck mutation"
+forced = ("src/kernel/tagfs/tests/core_tests.c",
+          "    TEST_ASSERT(fs->ledger.free_blocks > 0, \"Free blocks should be > 0\");\n",
+          "    TEST_ASSERT(fs->ledger.free_blocks == 0,   /* " + M + ": an assertion forced to fail */\n"
+          "                \"Free blocks should be > 0\");\n")
 edits = {
  "range": [
   ("src/kernel/core/boardroom/block_fail.c",
@@ -7703,6 +7834,7 @@ edits = {
   ("src/kernel/tagfs/tests/stand_tests.c",
    "    TEST_ASSERT_EQ(BlockFailSeen(), 3, \"and all three met the plan\");\nout:\n    if (armed)\n        BlockFailDisarm();\n    return verdict;\n",
    "    TEST_ASSERT_EQ(BlockFailSeen(), 3, \"and all three met the plan\");\nout:\n    (void)armed;   /* " + M + ": the test forgets to take its plan down */\n    return verdict;\n"),
+  forced,
  ],
  "kind": [
   ("src/kernel/core/boardroom/block_fail.c",
@@ -7714,15 +7846,15 @@ edits = {
  ],
  "shots": [
   ("src/kernel/core/boardroom/block_fail.c",
-   "    if (n != plan.nth)\n        return false;\n    if (__atomic_exchange_n(&g_block_fail_fired, 1u, __ATOMIC_ACQ_REL) != 0)\n        return false;\n",
-   "    if (n < plan.nth)   /* " + M + ": not single-shot — every command from the nth on is refused */\n        return false;\n    __atomic_store_n(&g_block_fail_fired, 1u, __ATOMIC_RELEASE);\n"),
+   "        fire = n == plan.nth && !(s & 1u);\n",
+   "        fire = n >= plan.nth;   /* " + M + ": not single-shot — every command from the nth on is refused */\n"),
   ("src/lib/kernel/klib_mem.c",
    "    if (me != plan.core)\n        return false;               /* another core is not the code under test */\n",
    "    /* " + M + ": every core is the code under test */\n"),
  ],
  "disarm": [
   ("src/kernel/core/boardroom/block_fail.c",
-   "        if (__atomic_compare_exchange_n(&g_block_fail_gen, &g, g + 1u, false,\n                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))\n            return true;\n",
+   "        if (__atomic_compare_exchange_n(&g_block_fail_state, &s, s + BLOCK_FAIL_GEN_ONE, false,\n                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))\n            return true;\n",
    "        return true;   /* " + M + ": disarm says it took the plan down and leaves it standing */\n"),
   ("src/kernel/core/boardroom/boardroom.c",
    "    if (BlockFailStrikes(seat, BLOCK_FAIL_FLUSH, 0, 0)) {\n        return BoardMediumRefusal(s->kind, BLOCK_FAIL_FLUSH);\n    }\n",
@@ -7739,6 +7871,15 @@ edits = {
    "    if (!row->bits || row->bit_count <= needed_max) {\n",
    "    if (!row->bits) {   /* " + M + ": PF-1 taken out — a row that could not widen is written past */\n"),
  ],
+ "blind": [
+  ("src/kernel/tagfs/tests/tests.c",
+   "    kprintf(\"[TESTS] %s failed at %s:%d: %s (%lld, %lld)\\n\",\n",
+   "    /* " + M + ": the assertion's print back on debug_printf */\n    debug_printf(\"[TESTS] %s failed at %s:%d: %s (%lld, %lld)\\n\",\n"),
+  ("src/kernel/tagfs/tests/tests.c",
+   "    if (caveated && seen == TEST_DEFECT) {\n",
+   "    if (caveated) {   /* " + M + ": a judge that holds whatever a caveated test saw */\n"),
+  forced,
+ ],
 }[group]
 for path, a, m in edits:
     s = open(path).read()
@@ -7751,9 +7892,55 @@ stand_mech_off() {
     local f
     for f in src/kernel/core/boardroom/block_fail.c src/lib/kernel/klib_mem.c \
              src/kernel/tagfs/tests/stand_tests.c src/kernel/core/boardroom/boardroom.c \
-             src/kernel/tagfs/tag_bitmap/tag_bitmap.c; do
+             src/kernel/tagfs/tag_bitmap/tag_bitmap.c src/kernel/tagfs/tests/tests.c \
+             src/kernel/tagfs/tests/core_tests.c; do
         restore "$f"
     done
+}
+
+# stand_cr12_on — CR-12 as it stood before its rewrite, in the runner's form:
+# the copy is taken of the literal block 1, with no snapshot standing, and
+# never given back. Its helper goes with it, having no other caller.
+stand_cr12_on() {
+    mutate src/kernel/tagfs/tests/snapshot_tests.c
+    python3 - <<'EOF'
+p = "src/kernel/tagfs/tests/snapshot_tests.c"
+s = open(p).read()
+begin = "/*\n * The half of a copy-on-write that the write path does after\n"
+end = "/* The id of the standing snapshot called `name`, or 0. */\n"
+assert s.count(begin) == 1 and s.count(end) == 1, "stand CR-12 anchors missing"
+old_body = (
+    "/* logcheck mutation: CR-12 as it stood before its rewrite */\n"
+    "static TestResult test_cow_before_after_write(void)\n"
+    "{\n"
+    "    TestResult verdict    = TEST_PASS;\n"
+    "    uint32_t   file_id    = 0;\n"
+    "    uint32_t   new_block  = 0;\n"
+    "    uint16_t   tag_ids[1] = {1};\n"
+    "\n"
+    "    TEST_ASSERT_EQ(tagfs_create_file(\"cow-test\", tag_ids, 1, &file_id), 0,\n"
+    "                   \"tagfs_create_file should succeed\");\n"
+    "    fill_random(g_test_buffer, TAGFS_BLOCK_SIZE);\n"
+    "    TEST_ASSERT_EQ(TestFileWrite(file_id, g_test_buffer, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,\n"
+    "                   \"Should write 4096 bytes\");\n"
+    "    if (TagFS_CowBeforeWrite(file_id, 1, &new_block) == OK) {\n"
+    "        TEST_ASSERT(new_block > 0, \"New block should be allocated\");\n"
+    "        TEST_ASSERT_OK(TagFS_CowAfterWrite(file_id, 1, new_block),\n"
+    "                       \"TagFS_CowAfterWrite should succeed\");\n"
+    "    }\n"
+    "out:\n"
+    "    if (file_id)\n"
+    "        tagfs_delete_file(file_id);\n"
+    "    return verdict;\n"
+    "}\n"
+    "\n")
+a, b = s.index(begin), s.index(end)
+open(p, "w").write(s[:a] + old_body + s[b:])
+EOF
+    mut_done src/kernel/tagfs/tests/snapshot_tests.c "logcheck mutation" 1
+}
+stand_cr12_off() {
+    restore src/kernel/tagfs/tests/snapshot_tests.c
 }
 
 # stand_red TAG WHAT ERE — a line the mutated boot must carry.
@@ -7765,34 +7952,51 @@ stand_red() {
 
 run_standmut() {
     echo "== standmut: every stand test, and every fault it stands on, can go red =="
+    local L name step held lifted count said n before after img
 
     # ── the real fixes: every caveat must be lifted early, and fail ────────
     stand_fix_on
     if stand_mut_boot standmut_fix CORES=4 MEM=4G; then
-        local L="$SCRATCH/serial.standmut_fix.log" name step evidence lifted=0 said
-        while IFS='|' read -r name step evidence; do
-            case "$name" in stand_*) ;; *) continue ;; esac
-            grep -aqF "[TESTS] caveat lifted early: $name — " "$L"
-            chk $? "standmut: with its step's fix in, $name says its caveat was lifted early — $(grep -aF "caveat lifted early: $name — " "$L" | tr -d '\r' | grep -oE '\([^()]*\)$')"
-            lifted=$((lifted + 1))
+        L="$SCRATCH/serial.standmut_fix.log"; count=0
+        while IFS='|' read -r name step held lifted; do
+            [ -n "$name" ] || continue
+            grep -aF "[TESTS] caveat lifted early: $name — " "$L" | grep -qF " — lift the caveat ($lifted)"
+            chk $? "standmut: with its step's fix in, $name says its caveat was lifted early ($(grep -aF "caveat lifted early: $name — " "$L" | tr -d '\r' | grep -oE '\([^()]*\)$'))"
+            count=$((count + 1))
         done <<STAND_HELD_EOF
 $STAND_HELD
 STAND_HELD_EOF
         said=$(stand_summary "$L")
-        echo "$said" | grep -qE ", $lifted failed, [0-9]+ skipped, $((STAND_HELD_COUNT - lifted)) held under a caveat"
-        chk $? "standmut: and exactly those $lifted fail, the other caveats still held (${said:-no summary})"
+        echo "$said" | grep -qE ", $count failed, [0-9]+ skipped, 0 held under a caveat"
+        chk $? "standmut: and exactly those $count fail, none held (${said:-no summary})"
     fi
+
+    # ── the same fixes, judged by a runner that cannot see them ────────────
+    stand_mech_on blind
+    if stand_mut_boot standmut_blind CORES=4 MEM=4G; then
+        L="$SCRATCH/serial.standmut_blind.log"
+        said=$(stand_summary "$L")
+        n=$(grep -ac 'caveat lifted early' "$L")
+        [ "$n" = 0 ] && echo "$said" | grep -qE ", 1 failed, [0-9]+ skipped, $STAND_HELD_COUNT held under a caveat"
+        chk $? "standmut: a judge that holds whatever a caveated test saw lets every fix in go by as held — $n 'lifted early' line(s) (${said:-no summary})"
+        n=$(grep -acE '^\[TESTS\] [a-z_0-9]+ failed at ' "$L")
+        [ "$n" = 0 ] && echo "$said" | grep -qE ", 1 failed, "
+        chk $? "standmut: with the assertion's print back on debug_printf, the forced failure is a count nobody can place — $n 'failed at' line(s) (${said:-no summary})"
+    fi
+    stand_mech_off
     stand_fix_off
 
     # ── the mechanisms, broken ──────────────────────────────────────────────
     stand_mech_on range
     if stand_mut_boot standmut_range CORES=4 MEM=4G; then
         stand_red standmut_range "BLOCKFAIL with no range check refuses a block the plan never named" \
-            'stand_blockfail_reads_the_nth failed at [^:]+:[0-9]+: the first read of the file is whole'
+            'stand_blockfail_reads_the_nth failed at [^:]+:[0-9]+: the first read of the file is whole \(-1, 12288\)'
         stand_red standmut_range "HEAPFAIL asked only after the slab lets a small allocation through" \
-            'stand_heapfail_nth_on_this_core failed at [^:]+:[0-9]+: the third is answered NULL'
+            'stand_heapfail_nth_on_this_core failed at [^:]+:[0-9]+: the third is answered NULL \(0, 1\)'
         stand_red standmut_range "a test that leaves its fault armed is taken down by the runner, and failed" \
-            'stand_blockfail_flush_refused failed: it left BLOCKFAIL armed'
+            'stand_blockfail_flush_refused failed: it left BLOCKFAIL armed — taken down by the runner before anything else could meet it'
+        stand_red standmut_range "a failed assertion says where it failed and what it saw" \
+            'tagfs_deed failed at src/kernel/tagfs/tests/core_tests\.c:[0-9]+: Free blocks should be > 0 \(0, 1\)'
     fi
     stand_mech_off
 
@@ -7827,13 +8031,38 @@ STAND_HELD_EOF
     stand_mech_on lands
     if stand_mut_boot standmut_lands UEFI=on STRICT=on CORES=4 MEM=4G; then
         stand_red standmut_lands "a refused write that reaches the medium first is found on it" \
-            'stand_blockfail_write_never_lands failed at [^:]+:[0-9]+: holding what it held — nothing of the refused write landed'
+            'stand_blockfail_write_never_lands failed at [^:]+:[0-9]+: holding what it held — nothing of the refused write landed \(0, 4096\)'
         stand_red standmut_lands "an asynchronous read refused by the submit's answer is not the medium's refusal" \
-            'stand_blockfail_async_read failed at [^:]+:[0-9]+: the seat takes the read, as it takes one the medium then refuses'
+            'stand_blockfail_async_read failed at [^:]+:[0-9]+: the seat takes the read, as it takes one the medium then refuses \(200, 0\)'
         stand_red standmut_lands "with PF-1 taken out, the tag row is written past its end" \
             'stand_tag_row_refuses_what_it_cannot_widen failed at [^:]+:[0-9]+: a row that could not widen refuses the set instead of writing past its end \(0, -1\)'
     fi
     stand_mech_off
+
+    # ── CR-12 as it was: caught as it runs, and by the next roll call ───────
+    stand_cr12_on
+    if stand_mut_boot standmut_cr12 CORES=4 MEM=4G; then
+        L="$SCRATCH/serial.standmut_cr12.log"
+        before=$(grep -aoE 'cow_before_after_write failed: it left residue — [0-9]+ block\(s\) in use outside the volume.s own chains before it and [0-9]+ after' "$L" | grep -oE '[0-9]+' | head -1)
+        after=$(grep -aoE 'cow_before_after_write failed: it left residue — [0-9]+ block\(s\) in use outside the volume.s own chains before it and [0-9]+ after' "$L" | grep -oE '[0-9]+' | tail -1)
+        [ -n "$before" ] && [ "$after" = "$((before + 1))" ]
+        chk $? "standmut: the old CR-12 body leaves the copy it took, and the runner counts it — ${before:-no} block(s) before it, ${after:-no} after"
+        if grep -aq '^\[HALT\] Storage sync complete' "$L"; then
+            img="$SCRATCH/stand.cr12.img"
+            cp -c build/boxos.img "$img" 2>/dev/null || cp build/boxos.img "$img"
+            stand_boot standmut_cr12_again BOOTDISK="$img" CORES=4 MEM=4G
+            if [ $? != 2 ]; then
+                stand_red standmut_cr12_again "and the next boot's roll call finds the block it left as an orphan" \
+                    '\[TagFS FSCK\] Bitmap mismatch: 1 orphan, 0 missing'
+                stand_red standmut_cr12_again "named by where it is" \
+                    '\[TagFS FSCK\] orphan run at data block [0-9]+, 1 block\(s\)'
+            fi
+            rm -f "$img"
+        else
+            bad "standmut: the old CR-12 boot never said its halt's sync wrote the volume, so the next roll call would judge nothing"
+        fi
+    fi
+    stand_cr12_off
 
     buildkey_restore
 }

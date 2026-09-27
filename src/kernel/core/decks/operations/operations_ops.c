@@ -500,7 +500,8 @@ static int OpValAdd(const ManifestOp *op,
 
     uint8_t scalar[4];
     if (vmm) {
-        if (vmm_user_buf_in_into(vmm, at, type_size, scalar) != OK) return ERR_INVALID_ADDRESS;
+        error_t cr = vmm_user_buf_in_into(vmm, at, type_size, scalar);
+        if (cr != OK) return cr;
     } else {
         memcpy(scalar, (const void *)at, type_size);
     }

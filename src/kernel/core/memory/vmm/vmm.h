@@ -171,7 +171,6 @@ typedef struct {
     size_t kernel_pages;
     size_t user_pages;
     uintptr_t heap_start;
-    uintptr_t heap_end;
     uintptr_t stack_top;
 } vmm_context_t;
 
@@ -865,8 +864,11 @@ void* vmm_translate_user_addr(vmm_context_t* ctx, uintptr_t user_vaddr, size_t s
  * a 2 MiB PDE leaf and a 1 GiB PDPTE leaf are all one chunk. A heap page
  * the cabin has not touched yet is brought in on the way, exactly as the
  * cabin's own first touch would bring it in (a read of it reads zeros).
- * NULL means a fault mid-walk (a page the cabin does not have and cannot
- * have on first touch, non-user, or alloc failure).
+ * The two that answer a code tell a shortage from a bad address:
+ * ERR_NO_MEMORY for a heap page of the cabin's that could not be had,
+ * ERR_INVALID_ADDRESS for a page the cabin does not have and cannot have on
+ * first touch, or one that is not user memory. vmm_user_buf_in answers
+ * NULL for either, and for its own kmalloc failing.
  *
  * vmm_user_buf_commit_out is the WRITE direction and refuses, with
  * ERR_INVALID_ADDRESS, any leaf the cabin holds read-only: the copy goes
@@ -880,7 +882,8 @@ void *vmm_user_buf_in(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size);
  * writes into a caller-supplied kernel buffer (no kmalloc/kfree). Use
  * when the caller already owns a destination (stack scratch, preallocated
  * arena, etc.). Returns OK on success, ERR_INVALID_ARGUMENT on a NULL/0
- * argument, ERR_INVALID_ADDRESS if any page fails to translate.
+ * argument, ERR_NO_MEMORY if a heap page it had to bring in could not be
+ * had, ERR_INVALID_ADDRESS if any page fails to translate.
  */
 error_t vmm_user_buf_in_into(vmm_context_t *ctx, uintptr_t user_vaddr,
                               size_t size, void *kbuf);

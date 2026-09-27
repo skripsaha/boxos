@@ -99,7 +99,6 @@ error_t BraidSetDiskOnline(uint8_t disk_id, bool online);
 // Block operations
 error_t BraidReadBlock(uint64_t block_num, void *data, BoxHash *expected_checksum);
 error_t BraidWriteBlock(uint64_t block_num, const void *data, const uint8_t *tag_context);
-error_t BraidVerifyBlock(uint64_t block_num, bool *is_valid);
 
 // Tag-aware operations
 error_t BraidReadBlockTagged(uint64_t block_num, void *data, const uint8_t *tag_context);

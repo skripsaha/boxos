@@ -234,8 +234,9 @@ size_t KHeapLiveBytes(void)
 }
 
 /* The figure is evidence, so it is proven before anything reads it: a pool
- * block and a page and a half of slab objects must each be counted, and
- * giving them back must bring the figure to exactly where it started.
+ * block and 64 slab objects of 64 bytes (4096 bytes at class size, one more
+ * object than a 64-byte slab page holds) must each be counted, and giving
+ * them back must bring the figure to exactly where it started.
  * Called from kernel_main before amp_init, on the BSP alone — nothing else
  * allocates while it runs, so every difference is exact. A tier that stopped
  * counting fails here, on every boot, before the first line that relies on

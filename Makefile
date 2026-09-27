@@ -542,16 +542,21 @@ RETURNFAIL_MARK = $(BUILDDIR)/.returnfail.$(if $(filter on,$(RETURNFAIL)),on,off
 #
 # The power goes at a named point of the metadata sync. The first sync of the
 # boot to reach it — an `anchor`, or the shutdown; nothing syncs during boot —
-# stops the whole machine right there, and the medium is left exactly as a
-# power cut at that point leaves it, for the host to read back
-# (tools/volume-read.py check). The points are named by the record ABOUT to be
-# written, so a scenario keeps its meaning when the sync becomes Settle at
-# step 1.4:
+# stops the whole machine right there, for the host to read the medium back
+# (tools/volume-read.py check). The medium then holds every write issued before
+# the point and none after it: the best case of a power cut there, the one in
+# which the drive's cache survived. A real cut can also lose any of the writes
+# since the last cache flush; those states are PowerCut's (tools/powercut.sh,
+# `tools/volume-read.py cut`), never this key's. The points are named by the
+# record ABOUT to be written, so a scenario keeps its meaning when the sync
+# becomes Settle at step 1.4:
 #
 #   registry pool table retires integrity bitmap ledger flush done
 #
 # tagfs/settle_cut/settle_cut.h is the one list of them; a value that is not on
-# it names an undeclared point and does not compile.
+# it names an undeclared point and does not compile. Its mark lives apart from
+# the unset one (at-<value> against unset), so no value — `off` included — can
+# find the plain kernel's objects already built and skip that compile.
 #
 # Not with VOLUME_TESTS=on: the startup tests sync the volume themselves, so the
 # cut would land inside a test instead of in the scenario it names.
@@ -563,7 +568,7 @@ endif
 CFLAGS += -DCONFIG_TAGFS_SETTLE_CUT_POINT=SETTLE_CUT_POINT_$(shell printf '%s' '$(SETTLECUT)' | tr '[:lower:]' '[:upper:]')
 endif
 
-SETTLECUT_MARK = $(BUILDDIR)/.settlecut.$(if $(SETTLECUT),$(SETTLECUT),off)
+SETTLECUT_MARK = $(BUILDDIR)/.settlecut.$(if $(SETTLECUT),at-$(SETTLECUT),unset)
 
 # The handoff address the image build chose, handed to the C side so the two
 # headers that name it can _Static_assert against it. Unconditional on
@@ -2061,8 +2066,9 @@ info:
 	@echo ""
 	@echo "Test-stand build keys (never in a shipped build):"
 	@echo "  SETTLECUT=<point>  — the first sync to reach <point> stops the machine there, as a"
-	@echo "                       power cut would: registry|pool|table|retires|integrity|bitmap|"
-	@echo "                       ledger|flush|done (not with VOLUME_TESTS=on)"
+	@echo "                       power cut that kept the drive's cache would: registry|pool|"
+	@echo "                       table|retires|integrity|bitmap|ledger|flush|done"
+	@echo "                       (not with VOLUME_TESTS=on)"
 
 debug: $(IMAGE)
 	@$(MAKE) run GDB=on IMAGE=$(IMAGE) CORES=$(CORES) MEM=$(MEM) FULLSCREEN=$(FULLSCREEN) USB=$(USB) AHCI=$(AHCI) LOG=$(LOG) DEBUG=$(DEBUG)

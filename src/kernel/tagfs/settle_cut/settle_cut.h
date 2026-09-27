@@ -7,9 +7,14 @@
  * `make SETTLECUT=<point>` builds a kernel whose first sync to reach that
  * point stops the whole machine there: interrupts off on the syncing core,
  * every other core halted by the same roll call a shutdown takes, one line
- * said, and nothing after it. The medium is then exactly what a power cut at
- * that point leaves, and the host reads it back (tools/volume-read.py check)
- * to see what the next mount would find.
+ * said, and nothing after it. The medium then holds every write issued before
+ * the point and none after it — the best case of a power cut there, the one in
+ * which the drive's cache survived — and the host reads it back
+ * (tools/volume-read.py check) to see what the next mount would find. A real
+ * cut can also lose any write since the last cache flush (tagfs.c's sync says
+ * which); those media are PowerCut's (tools/powercut.sh, volume-read.py cut),
+ * so a SETTLECUT image that reads consistent proves the ORDER at the point,
+ * not that a power cut there is survived.
  *
  * The points are named by the record ABOUT to be written, not by a line of
  * tagfs.c, so a scenario keeps its meaning when the sync becomes Settle at

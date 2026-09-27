@@ -4,13 +4,21 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 /*
- * The plan, under a sequence word.
+ * The plan, and everything a strike counts against it, under one word.
  *
- * The plan is only ever rewritten while the word is even (nothing armed), and
- * a reader takes a copy between two looks at the word: an odd word that did
- * not move is a plan that was whole the whole time. So the question every
- * command asks costs one load of one word while nothing is armed, and no lock
- * is taken on a road that runs on every core.
+ *   bits 63..32  the generation — odd while a plan stands
+ *   bits 31..1   the matching commands the plan has met
+ *   bit  0       whether it has refused one
+ *
+ * The plan itself is only ever rewritten while the generation is even, and a
+ * reader copies it between two looks at the word: an odd generation that did
+ * not move is a plan that was whole the whole time. The count and the refusal
+ * are in the same word as the generation, and a strike moves them with one
+ * compare-and-swap that also asks the generation it read the plan under. So a
+ * strike that read one plan can never count toward the plan armed after it,
+ * nor fire as it: the moment the generation moves, its swap fails and its
+ * command goes through uncounted. The unarmed question still costs one load
+ * of one word, and no lock is taken on a road that runs on every core.
  */
 typedef struct {
     uint8_t  seat;
@@ -20,16 +28,17 @@ typedef struct {
     uint32_t nth;
 } BlockFailPlan;
 
+#define BLOCK_FAIL_GEN_ONE  ((uint64_t)1 << 32)
+#define BLOCK_FAIL_SEEN_MAX 0x7FFFFFFFu
+
 static BlockFailPlan     g_block_fail;
-static volatile uint32_t g_block_fail_gen;      /* odd while a plan stands */
-static volatile uint32_t g_block_fail_seen;
-static volatile uint32_t g_block_fail_fired;
+static volatile uint64_t g_block_fail_state;
 
 bool BlockFailDisarm(void)
 {
-    uint32_t g = __atomic_load_n(&g_block_fail_gen, __ATOMIC_ACQUIRE);
-    while (g & 1u) {
-        if (__atomic_compare_exchange_n(&g_block_fail_gen, &g, g + 1u, false,
+    uint64_t s = __atomic_load_n(&g_block_fail_state, __ATOMIC_ACQUIRE);
+    while ((s >> 32) & 1u) {
+        if (__atomic_compare_exchange_n(&g_block_fail_state, &s, s + BLOCK_FAIL_GEN_ONE, false,
                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
             return true;
     }
@@ -46,31 +55,36 @@ void BlockFailArm(uint8_t seat, BlockFailKind kind,
     g_block_fail.first = first_sector;
     g_block_fail.end   = sectors ? first_sector + sectors : 0;
     g_block_fail.nth   = nth ? nth : 1u;
-    __atomic_store_n(&g_block_fail_seen, 0u, __ATOMIC_RELAXED);
-    __atomic_store_n(&g_block_fail_fired, 0u, __ATOMIC_RELAXED);
 
-    __atomic_add_fetch(&g_block_fail_gen, 1u, __ATOMIC_RELEASE);   /* even -> odd */
+    /* Even -> odd, with the count and the refusal cleared in the same store.
+     * Nothing else writes the word while the generation is even: a strike
+     * swaps only under the odd generation it read. */
+    uint64_t s = __atomic_load_n(&g_block_fail_state, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_block_fail_state, (s & ~(BLOCK_FAIL_GEN_ONE - 1u)) + BLOCK_FAIL_GEN_ONE,
+                     __ATOMIC_RELEASE);
 }
 
 uint32_t BlockFailSeen(void)
 {
-    return __atomic_load_n(&g_block_fail_seen, __ATOMIC_ACQUIRE);
+    return (uint32_t)(__atomic_load_n(&g_block_fail_state, __ATOMIC_ACQUIRE) >> 1) &
+           BLOCK_FAIL_SEEN_MAX;
 }
 
 bool BlockFailFired(void)
 {
-    return __atomic_load_n(&g_block_fail_fired, __ATOMIC_ACQUIRE) != 0;
+    return (__atomic_load_n(&g_block_fail_state, __ATOMIC_ACQUIRE) & 1u) != 0;
 }
 
 bool BlockFailStrikes(uint8_t seat, BlockFailKind kind, uint64_t lba, uint32_t count)
 {
-    uint32_t g = __atomic_load_n(&g_block_fail_gen, __ATOMIC_ACQUIRE);
+    uint64_t s = __atomic_load_n(&g_block_fail_state, __ATOMIC_ACQUIRE);
+    uint64_t g = s >> 32;
     if (!(g & 1u))
         return false;
 
     BlockFailPlan plan = g_block_fail;
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    if (__atomic_load_n(&g_block_fail_gen, __ATOMIC_RELAXED) != g)
+    if ((__atomic_load_n(&g_block_fail_state, __ATOMIC_RELAXED) >> 32) != g)
         return false;           /* rewritten while it was read: not this plan's command */
 
     if (plan.seat != seat || plan.kind != (uint8_t)kind)
@@ -79,10 +93,20 @@ bool BlockFailStrikes(uint8_t seat, BlockFailKind kind, uint64_t lba, uint32_t c
         (lba + count <= plan.first || lba >= plan.end))
         return false;
 
-    uint32_t n = __atomic_add_fetch(&g_block_fail_seen, 1u, __ATOMIC_ACQ_REL);
-    if (n != plan.nth)
-        return false;
-    if (__atomic_exchange_n(&g_block_fail_fired, 1u, __ATOMIC_ACQ_REL) != 0)
+    /* Counted, and chosen or not, in one swap under the generation the plan
+     * was read under. */
+    uint32_t n;
+    bool     fire;
+    do {
+        if ((s >> 32) != g)
+            return false;       /* taken down, or armed again, since the plan was read */
+        n    = (((uint32_t)(s >> 1) & BLOCK_FAIL_SEEN_MAX) + 1u) & BLOCK_FAIL_SEEN_MAX;
+        fire = n == plan.nth && !(s & 1u);
+    } while (!__atomic_compare_exchange_n(&g_block_fail_state, &s,
+                                          (s & ~(BLOCK_FAIL_GEN_ONE - 1u)) |
+                                              ((uint64_t)n << 1) | (s & 1u) | fire,
+                                          true, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED));
+    if (!fire)
         return false;
 
     if (kind == BLOCK_FAIL_FLUSH) {

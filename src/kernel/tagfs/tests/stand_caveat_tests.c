@@ -22,7 +22,10 @@
 // call judges the volume too ("[TagFS FSCK] Bitmap mismatch"). So a leak is
 // measured — counted by the guard's own tally, and named block by block — and
 // then exactly those blocks are handed back. What the volume keeps from this
-// suite is burned file ids, and nothing else.
+// suite is burned file ids and the chain blocks any writer lays down for good
+// (tests.c, the residue guard) — and no tag: every file here is called
+// test_file, the name the core suite has always used, because a create
+// interns its name's stem for good.
 // ============================================================================
 
 #define STAND_SWEEP_MAX 64u     /* allocations a sweep may refuse, one per try */
@@ -62,7 +65,7 @@ TestResult TestStandRmwReadRefused(void)
         return test_steps_aside(aside);
 
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, STAND_RMW_WAS);
-    TEST_ASSERT(StandMakeFile("stand_rmw.tst", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a one-block file of 0x5A is made");
     TEST_ASSERT(StandBlockOf(file_id, 0, &block), "its block is found");
 
@@ -108,9 +111,6 @@ out:
 // A create with one of its allocations refused
 // ----------------------------------------------------------------------------
 
-#define STAND_RT17_NAME "stand_rt17.tst"
-#define STAND_RT17_STEM "stand_rt17"
-
 static uint32_t s_found[256];
 
 /* Does the name's row of the tag index hold this file id? Asked of the index
@@ -142,17 +142,25 @@ static bool StandVolumeNames(uint32_t file_id)
  * after its delete found by nothing — or made nothing at all. The name's row
  * is put back when a deleted file lingers in it: nothing else would ever
  * clear that bit, and the next test would inherit a name that finds a file
- * that is not there. */
+ * that is not there.
+ *
+ * The file a create made is deleted on every path out, and by the id the
+ * create answered — `id` is only the one it should have taken, and may be
+ * another creator's. A refused create that left a record behind is failed and
+ * the record stays: it has no table row (file_table_update is the step that
+ * failed), so tagfs_delete_file cannot find it and nothing a test can call
+ * retires it. */
 static TestResult StandCreateOnce(uint32_t n, uint16_t stem, bool* fired, bool* whole)
 {
     TestResult verdict = TEST_PASS;
     uint32_t   id      = tagfs_file_ceiling();      /* the id this create takes */
     uint32_t   made    = 0;
+    uint32_t   owned   = 0;                         /* made, until it is deleted */
     bool       armed   = false;
 
     HeapFailArm(amp_get_core_index(), n);
     armed = true;
-    int rc = tagfs_create_file(STAND_RT17_NAME, NULL, 0, &made);
+    int rc = tagfs_create_file("test_file", NULL, 0, &made);
     *fired = HeapFailFired();
     HeapFailDisarm();
     armed = false;
@@ -167,8 +175,10 @@ static TestResult StandCreateOnce(uint32_t n, uint16_t stem, bool* fired, bool* 
         goto out;
     }
 
+    owned = made;
     TEST_ASSERT_EQ(made, id, "a create takes the next id");
     TEST_ASSERT_EQ(tagfs_delete_file(made), 0, "the file a create made can be deleted");
+    owned = 0;
     bool lingers = StandNameFinds(stem, made);
     if (lingers)
         tag_bitmap_clear(tagfs_get_state()->bitmap_index, stem, made);
@@ -176,6 +186,8 @@ static TestResult StandCreateOnce(uint32_t n, uint16_t stem, bool* fired, bool* 
 out:
     if (armed)
         HeapFailDisarm();
+    if (owned)
+        tagfs_delete_file(owned);
     return verdict;
 }
 
@@ -187,13 +199,14 @@ TestResult TestStandCreateAllOrNothing(void)
     uint32_t   broken_at = 0;
     bool       swept     = false;
 
-    /* The name's tag is interned, and its row made, by one create before the
-     * sweep — the sweep measures a create, not the first create of a name. */
-    TEST_ASSERT_EQ(tagfs_create_file(STAND_RT17_NAME, NULL, 0, &file_id), 0,
+    /* The name's tag and its row are made, if no test before made them, by one
+     * create before the sweep — the sweep measures a create, not the first
+     * create of a name. */
+    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0,
                    "a create before the sweep interns the name");
     TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "and its file is deleted");
     file_id = 0;
-    uint16_t stem = tagfs_tag_lookup(STAND_RT17_STEM);
+    uint16_t stem = tagfs_tag_lookup("test_file");
     TEST_ASSERT(stem != TAGFS_INVALID_TAG_ID, "the name has a tag");
 
     for (uint32_t n = 1; n <= STAND_SWEEP_MAX; n++) {
@@ -250,9 +263,40 @@ static uint64_t StandLedgerSeq(void)
     return newest;
 }
 
+/* The file's row of the file table as the MEDIUM holds it: the table's chain
+ * walked from its head, on the medium, to the block that carries the row —
+ * tagfs_read_block reads it there, because the sync's write_block took the
+ * block out of the read-ahead cache. False when the chain does not reach it. */
+static bool StandTableRowOnMedium(uint32_t file_id, FileTableEntry* out)
+{
+    TagFSState*     fs    = tagfs_get_state();
+    FileTableBlock* fb    = (FileTableBlock*)g_test_output;
+    uint32_t        block = fs->layout.file_table_block - fs->layout.data_block;
+
+    for (uint32_t k = file_id / TAGFS_FTABLE_PER_BLOCK; ; k--) {
+        if (tagfs_read_block(block, fb) != OK || fb->magic != TAGFS_FILETBL_MAGIC)
+            return false;
+        if (k == 0)
+            break;
+        if (fb->next_block == 0)
+            return false;
+        block = fb->next_block;
+    }
+    uint32_t row = file_id % TAGFS_FTABLE_PER_BLOCK;
+    if (row >= fb->entry_count)
+        return false;
+    *out = fb->entries[row];
+    return true;
+}
+
 /* The file table's head block is refused while a sync writes it. The sync
  * goes on to write the ledger over a table the medium does not have, and
- * answers OK; the right answer names the refusal and writes no ledger. */
+ * answers OK; the right answer names the refusal and writes no ledger.
+ *
+ * On the way out the table the medium refused is still owed to it, and that
+ * is proven off the medium: an unarmed sync while the file stands, then the
+ * file's row read back — the refused table never carried it, so the medium
+ * holds it only if the second sync wrote the table. */
 TestResult TestStandSyncOwnsARefusedWrite(void)
 {
     TestResult  verdict = TEST_PASS;
@@ -265,7 +309,7 @@ TestResult TestStandSyncOwnsARefusedWrite(void)
         return test_steps_aside(aside);
 
     TagFSState* fs = tagfs_get_state();
-    TEST_ASSERT_EQ(tagfs_create_file("stand_sync.tst", NULL, 0, &file_id), 0,
+    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0,
                    "a file is created, so the table has a row to write");
     uint64_t seq_before = StandLedgerSeq();
     TEST_ASSERT(seq_before > 0, "a Ledger copy reads");
@@ -292,13 +336,23 @@ TestResult TestStandSyncOwnsARefusedWrite(void)
 out:
     if (armed)
         BlockFailDisarm();
+    error_t again = tagfs_sync();
+    if (again != OK) {
+        verdict = TestFailedAt(__FILE__, __LINE__, "an unarmed sync afterwards is taken "
+                               "(error, OK)", again, OK);
+    } else if (file_id) {
+        uint32_t       meta_block = 0, meta_offset = 0;
+        FileTableEntry on_medium  = { 0, 0 };
+        bool           read_back  = StandTableRowOnMedium(file_id, &on_medium);
+        if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0 || !read_back ||
+            on_medium.meta_block != meta_block || on_medium.meta_offset != meta_offset)
+            verdict = TestFailedAt(__FILE__, __LINE__, "an unarmed sync afterwards puts the "
+                                   "table on the medium — the file's row, read back off it "
+                                   "(on the medium, in memory)",
+                                   read_back ? (int64_t)on_medium.meta_block : -1, meta_block);
+    }
     if (file_id)
         tagfs_delete_file(file_id);
-    /* The table the medium refused is still owed to it. */
-    error_t again = tagfs_sync();
-    if (again != OK)
-        verdict = TestFailedAt(__FILE__, __LINE__, "an unarmed sync afterwards puts the "
-                               "table on the medium (error, OK)", again, OK);
     return verdict;
 }
 
@@ -341,7 +395,6 @@ out:
 typedef struct {
     uint32_t refused;       /* writes swept, each with one allocation refused */
     uint32_t leaked;        /* blocks refused writes kept, named by no file */
-    uint32_t leak_at;       /* the first refused allocation that leaked */
     uint32_t short_at;      /* the first answered neither whole nor refused */
 } StandWriteSweep;
 
@@ -376,7 +429,9 @@ static uint32_t StandKeptUnnamed(const TagFSFileHandle* handle, uint32_t file_id
 /* One block written into a fresh file with allocation n refused, the file
  * closed and deleted, and whatever the write kept that no file names counted
  * by the residue guard's own tally, matched block for block against what the
- * handle named and the record did not, and given back. */
+ * handle named and the record did not, and given back — whether or not the
+ * delete went through: what the record does not name is no file's either
+ * way, and tagfs_close commits nothing of the handle's to the record. */
 static TestResult StandWriteOnce(uint32_t n, StandWriteSweep* sweep, bool* fired)
 {
     TestResult       verdict = TEST_PASS;
@@ -388,7 +443,7 @@ static TestResult StandWriteOnce(uint32_t n, StandWriteSweep* sweep, bool* fired
 
     memset(&before, 0, sizeof(before));
     memset(&after, 0, sizeof(after));
-    TEST_ASSERT_EQ(tagfs_create_file("stand_sweep.tst", NULL, 0, &file_id), 0,
+    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0,
                    "a file to write into is created");
     handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     TEST_ASSERT(handle != NULL, "and opened");
@@ -405,8 +460,9 @@ static TestResult StandWriteOnce(uint32_t n, StandWriteSweep* sweep, bool* fired
     uint32_t kept = StandKeptUnnamed(handle, file_id);
     tagfs_close(handle);
     handle = NULL;
-    TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "the file is deleted");
-    file_id = 0;
+    int deleted = tagfs_delete_file(file_id);
+    if (deleted == 0)
+        file_id = 0;
 
     /* Counted before anything is given back, and given back before anything
      * is asserted: a count that does not match is a failure, and still not a
@@ -419,6 +475,7 @@ static TestResult StandWriteOnce(uint32_t n, StandWriteSweep* sweep, bool* fired
     for (uint32_t i = 0; i < kept; i++)
         if (StandBlockInUse(s_kept[i]))
             tagfs_free_blocks(s_kept[i], 1);
+    TEST_ASSERT_EQ(deleted, 0, "the file is deleted");
     TEST_ASSERT(counted, "the volume is counted after the write");
     TEST_ASSERT_EQ(left, still, "what the file left in use is exactly what its handle named "
                                 "and its record did not");
@@ -431,8 +488,6 @@ static TestResult StandWriteOnce(uint32_t n, StandWriteSweep* sweep, bool* fired
     }
     sweep->refused++;
     sweep->leaked += still;
-    if (still && !sweep->leak_at)
-        sweep->leak_at = n;
     if (wrote >= 0 && wrote != (int)TAGFS_BLOCK_SIZE && !sweep->short_at)
         sweep->short_at = n;
 out:
@@ -522,7 +577,7 @@ static TestResult StandOpenSweepRun(StandOpenSweep* sweep)
 
     memset(sweep, 0, sizeof(*sweep));
     TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x5E, 0);
-    TEST_ASSERT(StandMakeFile("stand_open.tst", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a one-block file is made");
 
     for (uint32_t n = 1; n <= STAND_SWEEP_MAX && !swept; n++) {
@@ -637,16 +692,11 @@ TestResult TestStandFrozenBlockFreedTwice(void)
         return test_steps_aside(aside);
 
     TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x5F, 0);
-    TEST_ASSERT(StandMakeFile("stand_frozen.tst", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a one-block file is made");
     TEST_ASSERT(StandBlockOf(file_id, 0, &frozen), "its block is found");
 
     error_t made = TagFS_SnapshotCreate("stand-frozen", file_id, &snap_id);
-    if (made == ERR_UNSUPPORTED) {
-        snap_id = 0;        /* no snapshot can keep a block, so none is given back twice */
-        TestEvidence("blocks the allocator was given back twice", 0);
-        goto out;
-    }
     if (made != OK)
         snap_id = 0;        /* ERR_ALREADY_EXISTS names somebody else's snapshot */
     TEST_ASSERT_OK(made, "a snapshot of the file is taken");

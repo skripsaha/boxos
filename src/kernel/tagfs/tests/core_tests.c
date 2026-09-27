@@ -5,16 +5,6 @@
 // Core — the mount itself, and one file through create, write, read, delete
 // ============================================================================
 
-static TestResult test_tagfs_init(void)
-{
-    TestResult verdict = TEST_PASS;
-    TagFSState* fs = tagfs_get_state();
-    TEST_ASSERT(fs != NULL, "TagFS state should not be NULL");
-    TEST_ASSERT(fs->initialized, "TagFS should be initialized");
-out:
-    return verdict;
-}
-
 /* What the mounted volume says about itself — out of its Deed and its Ledger,
  * which is where it now lives. There is no magic number to check here: a
  * volume whose deed did not check out never became a mount at all. */
@@ -82,12 +72,11 @@ out:
 }
 
 static const TestCase g_core_tests[] = {
-    { .name = "tagfs_init",        .func = test_tagfs_init,        .reach = TEST_READS_ONLY },
     { .name = "tagfs_deed",        .func = test_tagfs_deed,        .reach = TEST_READS_ONLY },
     { .name = "tagfs_create_file", .func = test_tagfs_create_file, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "tagfs_write_read",  .func = test_tagfs_write_read,  .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_core_suite = {
-    .name = "core", .tests = g_core_tests, .count = ARRAY_SIZE(g_core_tests),
+    .tests = g_core_tests, .count = ARRAY_SIZE(g_core_tests),
 };

@@ -46,7 +46,13 @@ typedef enum {
 void     BlockFailArm(uint8_t seat, BlockFailKind kind,
                       uint64_t first_sector, uint64_t sectors, uint32_t nth);
 
-/* Take the plan down. True when one was standing — fired or not. */
+/* Take the plan down. True when one was standing — fired or not. From its
+ * return on, no command is counted toward the plan it took down, and none is
+ * chosen to be refused by it: a strike still between reading the plan and
+ * counting its command lets the command through, uncounted, on any core. A
+ * command chosen before the disarm — its strike had fired, and BlockFailFired
+ * already said so — is still refused on its way back. What the plan counted
+ * stays readable (BlockFailSeen, BlockFailFired) until the next arm. */
 bool     BlockFailDisarm(void);
 
 /* Matching commands met since the plan was armed, the refused one included. */
