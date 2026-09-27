@@ -37,8 +37,9 @@
 #                         discharges it, judged with the kernel's lines and the
 #                         host's listing (QUILL_STAND picks the machine)
 #   logcheck.sh quillmut  every quill oracle shown the behaviour it waits for —
-#                         fixes emulated, sizes shrunk, the slab count cut — must
-#                         turn; and the caveat judge's three answers, word for word
+#                         fixes emulated, sizes shrunk, the slab count cut, a
+#                         copy's first touch taken away — must turn; and the
+#                         caveat judge's three answers, word for word
 #   logcheck.sh both
 #
 # Every check is a grep against build/serial.log. No timing assertions.
@@ -7843,8 +7844,9 @@ STAND_HELD_EOF
 # and judges what came back, beside what the kernel said and what the medium
 # holds afterwards:
 #
-#   boot 1  longquery bigwrite sequential interleave usememory; then the host
-#           lists the volume and counts the extents each file was given
+#   boot 1  longquery bigwrite sequential interleave coldread coldwrite
+#           usememory; then the host lists the volume and counts the extents
+#           each file was given
 #   boot 2  usememory's second half, when the first said PENDING; fidhistory
 #   boot 3  systemtag; then the host lists the volume again: is kernel.bin on it
 #
@@ -7854,7 +7856,10 @@ STAND_HELD_EOF
 # discharges it: the defect seen, with its number, is held; the correct
 # behaviour seen is a FAIL until that step lifts the caveat; anything else is
 # a plain FAIL. fidhistory is judged from the mount line of two boots a known
-# number of dead file ids apart.
+# number of dead file ids apart. coldread and coldwrite carry no caveat: the
+# defect they stand for — a read into pages its program had not touched yet
+# reported every byte and delivered only those before the first such page —
+# was fixed with them, so behaving is a PASS and the defect back is a FAIL.
 #
 # QUILL_STAND is the machine. The default is UEFI on q35 with four cores —
 # AHCI and the asynchronous WriteJob, the way a userspace write goes on the
@@ -7929,7 +7934,7 @@ quill_session() {
     QUILL_COUNT=${grown#* }
 
     quill_boot "${tag}1" || return 1
-    for c in longquery bigwrite sequential interleave usememory; do
+    for c in longquery bigwrite sequential interleave coldread coldwrite usememory; do
         quill_run "$c" "$WAIT_QUIET_SLOW_S" || break
     done
     quill_keep "${tag}1"
@@ -7961,6 +7966,7 @@ import math, re, sys
 scratch, tag = sys.argv[1], sys.argv[2]
 BIG, SEQ, WEAVE, USE_BYTES, USE_TAGS, FIDS, NEED_FREE = (int(x) for x in sys.argv[3:10])
 CEILING = 4 << 20                       # quilltest's QUILL_WIDTH_CEILING
+COLD = 1 << 20                          # quilltest's QUILL_COLD_BYTES
 
 def text(path):
     try:
@@ -8096,6 +8102,33 @@ def interleave():
                          "sequential" % (m.group(1), m.group(2), m.group(4), m.group(5), ha[1], hb[1], ha[2], hb[2])
     return "fail", "%s; the host lists quillA.bin as %s and quillB.bin as %s" % (said(logs[0], "interleave"), ha, hb)
 
+def coldread():
+    word, rest = verdict(logs[0], "coldread")
+    m = re.match(r"a read of (\d+) bytes into memory this program never touched delivered all (\d+), each one "
+                 r"the file's$", rest)
+    if word == "PASS" and m and int(m.group(1)) == int(m.group(2)) == COLD:
+        return "behaves", rest
+    m = re.match(r"a read of (\d+) bytes into memory this program never touched reported all (\d+), and (\d+) of "
+                 r"them are not the file's, from byte (\d+) on \((\d+) of those are zeros\)$", rest)
+    if word == "DEFECT" and m and int(m.group(1)) == int(m.group(2)) == COLD and int(m.group(3)) > 0:
+        return "defect", "a read of %d bytes into memory its program never touched reported all of them, and %s " \
+                         "are not the file's from byte %s on, %s of them zeros" % (COLD, m.group(3), m.group(4),
+                                                                                  m.group(5))
+    return "fail", said(logs[0], "coldread")
+
+def coldwrite():
+    word, rest = verdict(logs[0], "coldwrite")
+    m = re.match(r"a write of (\d+) bytes out of memory this program never touched wrote all (\d+), and the file "
+                 r"reads back as zeros, every byte$", rest)
+    if word == "PASS" and m and int(m.group(1)) == int(m.group(2)) == COLD:
+        return "behaves", rest
+    m = re.match(r"a write of (\d+) bytes out of memory this program never touched reported all (\d+), and (\d+) "
+                 r"bytes of the file are not zeros, from byte (\d+) on$", rest)
+    if word == "DEFECT" and m and int(m.group(1)) == int(m.group(2)) == COLD and int(m.group(3)) > 0:
+        return "defect", "a write of %d bytes out of memory its program never touched reported all of them, and " \
+                         "%s bytes of the file are not zeros from byte %s on" % (COLD, m.group(3), m.group(4))
+    return "fail", said(logs[0], "coldwrite")
+
 def usememory():
     w1, t1 = verdict(logs[0], "usememory")
     w2, t2 = verdict(logs[1], "usememory")
@@ -8151,8 +8184,8 @@ def systemtag():
                                                                  "among them" if present else "not among them")
 
 for name, judge in (("longquery", longquery), ("bigwrite", bigwrite), ("sequential", sequential),
-                    ("interleave", interleave), ("usememory", usememory), ("fidhistory", fidhistory),
-                    ("systemtag", systemtag)):
+                    ("interleave", interleave), ("coldread", coldread), ("coldwrite", coldwrite),
+                    ("usememory", usememory), ("fidhistory", fidhistory), ("systemtag", systemtag)):
     seen, what = judge()
     out("case", name, seen, what)
 QUILL_EOF
@@ -8203,8 +8236,11 @@ run_quill() {
 # count is what must go red, one extent per block being far over the
 # ceiling — and a Use Context of 395 bytes, which the Ledger holds. fidhistory
 # keeps one file in a thousand, so its guest must count them. The slab stops
-# counting, so the kernel's heap self-test must say FAILED. And first, with no
-# machine at all, caveat_judge's three answers in their approved words.
+# counting, so the kernel's heap self-test must say FAILED. The kernel's copies
+# stop bringing in a page the program has not touched (VmmUserCopyWindow), so
+# coldread and coldwrite must turn to a refusal that reports 0 bytes — never a
+# count, which is the half of the fix that stands without the other. And first,
+# with no machine at all, caveat_judge's three answers in their approved words.
 quill_mutants_on() {
     mutate src/kernel/core/decks/storage/storage_ops.c
     python3 - <<'EOF2'
@@ -8254,12 +8290,24 @@ s = s.replace(a, "    (void)0;   /* logcheck mutation: the slab stops counting w
 open(p, "w").write(s)
 EOF2
     mut_done src/lib/kernel/slab.c "logcheck mutation"
+
+    mutate src/kernel/core/memory/vmm/vmm.c
+    python3 - <<'EOF2'
+p = "src/kernel/core/memory/vmm/vmm.c"
+s = open(p).read()
+a = "    if (window || VmmFirstTouch(ctx, user_vaddr) <= 0)\n"
+assert s.count(a) == 1, "quillmut first-touch anchor missing"
+s = s.replace(a, "    if (window || 1)   /* logcheck mutation: a copy never brings a page in */\n", 1)
+open(p, "w").write(s)
+EOF2
+    mut_done src/kernel/core/memory/vmm/vmm.c "logcheck mutation"
 }
 
 quill_mutants_off() {
     restore src/kernel/core/decks/storage/storage_ops.c
     restore src/userspace/apps/quilltest.c
     restore src/lib/kernel/slab.c
+    restore src/kernel/core/memory/vmm/vmm.c
 }
 
 # The judge with no machine: a caveated test that shows its defect is held, one
@@ -8307,6 +8355,8 @@ run_quillmut() {
             case)     case "$a" in
                           sequential|interleave) want="fail:the files? (is|are) whole but .* where [0-9]+ is the ceiling" ;;
                           fidhistory)            want="fail:[0-9]+ files were live before and [0-9]+ after" ;;
+                          coldread)              want="fail:a read of [0-9]+ bytes into memory this program never touched answered -[0-9]+ \(error [0-9]+\); 0 of the bytes" ;;
+                          coldwrite)             want="fail:a write of [0-9]+ bytes out of memory this program never touched answered -[0-9]+ \(error [0-9]+\); the file holds 0 bytes" ;;
                           *)                     want="behaves:" ;;
                       esac
                       line="$b:$c"

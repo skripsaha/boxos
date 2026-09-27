@@ -62,10 +62,12 @@
 #define QUILL_FID_CYCLES     50000u
 #define QUILL_FID_PROGRESS   10000u
 #define QUILL_READ_WINDOW    (1u << 20)
+#define QUILL_COLD_BYTES     (1u << 20)  /* under 2 MiB: malloc leaves it to first touch */
 #define QUILL_SEED_BIG       0xB16u
 #define QUILL_SEED_A         0xAu
 #define QUILL_SEED_B         0xBu
 #define QUILL_SEED_S         0x5u
+#define QUILL_SEED_COLD      0xC01Du
 
 typedef struct {
     const char   *name;
@@ -110,14 +112,11 @@ static void QuillFill(uint64_t *dst, uint32_t seed, uint64_t base, uint64_t len)
  * allocation of the whole read, the sibling of the defect bigwrite stands
  * for, so a read as big as the heap would fail for another reason.
  *
- * ‼ THE WINDOW IS TOUCHED, EVERY PAGE, BEFORE THE FIRST READ. The kernel
- * copies a read's answer into the cabin's pages through its own alias, and
- * a page this program has not touched yet is not mapped: the synchronous
- * path refuses the read, and the asynchronous one (ObjRead on AHCI with
- * more than one core) delivers the answer only up to that page and reports
- * every byte — measured here, a 1 MiB read that read back zeros from byte
- * 65056 on. That is a defect of its own, not one this program stands for,
- * so it is kept out of the way of the ones it does. */
+ * ‼ THE WINDOW IS TOUCHED, EVERY PAGE, BEFORE THE FIRST READ, so the cases
+ * that read back ask about the write core and nothing else. Whether a read
+ * may land in pages a program has not touched yet is coldread's question,
+ * and quillmut takes the kernel's answer to it away to see coldread notice —
+ * without the cases beside it noticing too. */
 static uint64_t QuillReadBack(uint32_t fid, uint32_t seed, uint64_t size, int64_t *err)
 {
     *err = 0;
@@ -706,6 +705,141 @@ static QuillVerdict QuillSystemTag(const char *const *args)
 }
 
 /* =========================================================================
+ *  coldread / coldwrite — memory this program has never touched
+ * ========================================================================= */
+
+/* Two buffers of QUILL_COLD_BYTES, taken one after the other: `warm` for what
+ * this program writes and looks at, `cold` for nothing at all. A block under
+ * 2 MiB is backed by its first touch, not in advance (boxlib memory.c), and
+ * `cold` begins where `warm` ends, so the only store near it is malloc's own
+ * header: every page of it past the first is one this program owns and has
+ * never touched. */
+static bool QuillColdPair(const char *which, uint64_t **warm, uint64_t **cold)
+{
+    *warm = malloc(QUILL_COLD_BYTES);
+    *cold = *warm ? malloc(QUILL_COLD_BYTES) : NULL;
+    if (*cold)
+        return true;
+    printf("[QUILL] %s: FAIL — the heap would not give two buffers of %u bytes\n",
+           which, QUILL_COLD_BYTES);
+    return false;
+}
+
+/* How many of the `len` bytes at `buf` are not the stream seeded `seed` —
+ * or, with `seed` 0, not zero — and in *first the offset of the first. */
+static uint64_t QuillColdWrong(const uint64_t *buf, uint64_t len, uint32_t seed, uint64_t *first)
+{
+    uint64_t wrong = 0;
+    *first = len;
+    for (uint64_t w = 0; w < len / 8; w++) {
+        if (buf[w] == (seed ? QuillWord(seed, w * 8) : 0))
+            continue;
+        if (wrong == 0)
+            *first = w * 8;
+        wrong += 8;
+    }
+    return wrong;
+}
+
+static QuillVerdict QuillColdRead(const char *const *args)
+{
+    (void)args;
+    uint64_t *warm, *cold;
+    if (!QuillColdPair("coldread", &warm, &cold))
+        return QUILL_FAIL;
+    int fid = QuillCreate("quillcold.bin");
+    if (fid <= 0) {
+        printf("[QUILL] coldread: FAIL — quillcold.bin could not be created (answer %d)\n", fid);
+        return QUILL_FAIL;
+    }
+
+    QuillFill(warm, QUILL_SEED_COLD, 0, QUILL_COLD_BYTES);
+    int64_t wrote = QuillWrite((uint32_t)fid, 0, warm, QUILL_COLD_BYTES);
+    int64_t got   = wrote == (int64_t)QUILL_COLD_BYTES
+                        ? fread((uint32_t)fid, 0, cold, QUILL_COLD_BYTES) : 0;
+
+    /* Only now is `cold` looked at, and the look is a first touch of its
+     * own: a page the read did not fill comes in as zeros. */
+    uint64_t first = 0, zero = 0;
+    uint64_t wrong = got > 0 ? QuillColdWrong(cold, (uint64_t)got, QUILL_SEED_COLD, &first) : 0;
+    for (uint64_t w = first / 8; wrong && w < (uint64_t)got / 8; w++)
+        zero += cold[w] == 0 && QuillWord(QUILL_SEED_COLD, w * 8) != 0 ? 8 : 0;
+    delete((uint32_t)fid);
+    int arc = anchor(0);
+
+    if (wrote != (int64_t)QUILL_COLD_BYTES) {
+        printf("[QUILL] coldread: FAIL — quillcold.bin took %lld of %u bytes from a buffer this "
+               "program wrote, so there was nothing to read (anchor %d)\n",
+               (long long)wrote, QUILL_COLD_BYTES, arc);
+        return QUILL_FAIL;
+    }
+    if (arc == 0 && got == (int64_t)QUILL_COLD_BYTES && wrong == 0) {
+        printf("[QUILL] coldread: PASS — a read of %u bytes into memory this program never "
+               "touched delivered all %u, each one the file's\n", QUILL_COLD_BYTES, QUILL_COLD_BYTES);
+        return QUILL_PASS;
+    }
+    if (arc == 0 && got == (int64_t)QUILL_COLD_BYTES) {
+        printf("[QUILL] coldread: DEFECT — a read of %u bytes into memory this program never "
+               "touched reported all %u, and %llu of them are not the file's, from byte %llu "
+               "on (%llu of those are zeros)\n", QUILL_COLD_BYTES, QUILL_COLD_BYTES,
+               (unsigned long long)wrong, (unsigned long long)first, (unsigned long long)zero);
+        return QUILL_DEFECT;
+    }
+    printf("[QUILL] coldread: FAIL — a read of %u bytes into memory this program never touched "
+           "answered %lld (error %u); %llu of the bytes it answered for are not the file's "
+           "(anchor %d)\n", QUILL_COLD_BYTES, (long long)got,
+           got < 0 ? (unsigned)box_errno_of((int)got) : 0u, (unsigned long long)wrong, arc);
+    return QUILL_FAIL;
+}
+
+static QuillVerdict QuillColdWrite(const char *const *args)
+{
+    (void)args;
+    uint64_t *warm, *cold;
+    if (!QuillColdPair("coldwrite", &warm, &cold))
+        return QUILL_FAIL;
+    int fid = QuillCreate("quillcold.bin");
+    if (fid <= 0) {
+        printf("[QUILL] coldwrite: FAIL — quillcold.bin could not be created (answer %d)\n", fid);
+        return QUILL_FAIL;
+    }
+
+    int64_t  wrote = QuillWrite((uint32_t)fid, 0, cold, QUILL_COLD_BYTES);
+    uint64_t size  = QuillSize((uint32_t)fid);
+
+    /* Read back into `warm`, filled first with bytes that are not zero, so a
+     * read that left any of it alone cannot pass for one that read zeros. */
+    memset(warm, 0xA5, QUILL_COLD_BYTES);
+    int64_t  got   = size > 0 && size <= QUILL_COLD_BYTES ? fread((uint32_t)fid, 0, warm, size) : 0;
+    uint64_t first = 0;
+    uint64_t wrong = got > 0 ? QuillColdWrong(warm, (uint64_t)got, 0, &first) : 0;
+    delete((uint32_t)fid);
+    int arc = anchor(0);
+
+    bool whole = arc == 0 && wrote == (int64_t)QUILL_COLD_BYTES && size == QUILL_COLD_BYTES &&
+                 got == (int64_t)QUILL_COLD_BYTES;
+    if (whole && wrong == 0) {
+        printf("[QUILL] coldwrite: PASS — a write of %u bytes out of memory this program never "
+               "touched wrote all %u, and the file reads back as zeros, every byte\n",
+               QUILL_COLD_BYTES, QUILL_COLD_BYTES);
+        return QUILL_PASS;
+    }
+    if (whole) {
+        printf("[QUILL] coldwrite: DEFECT — a write of %u bytes out of memory this program never "
+               "touched reported all %u, and %llu bytes of the file are not zeros, from byte "
+               "%llu on\n", QUILL_COLD_BYTES, QUILL_COLD_BYTES, (unsigned long long)wrong,
+               (unsigned long long)first);
+        return QUILL_DEFECT;
+    }
+    printf("[QUILL] coldwrite: FAIL — a write of %u bytes out of memory this program never "
+           "touched answered %lld (error %u); the file holds %llu bytes, read back answered "
+           "%lld with %llu not zeros (anchor %d)\n", QUILL_COLD_BYTES, (long long)wrote,
+           wrote < 0 ? (unsigned)box_errno_of((int)wrote) : 0u, (unsigned long long)size,
+           (long long)got, (unsigned long long)wrong, arc);
+    return QUILL_FAIL;
+}
+
+/* =========================================================================
  *  The table, and the one way in
  * ========================================================================= */
 
@@ -721,6 +855,12 @@ static const QuillCase g_cases[] = {
     { "interleave", "", 0, QuillInterleave,
       "do two files written 4 KiB each in turn, 64 MiB each, stay whole",
       "quillA.bin and quillB.bin, anchored; on the synchronous path a refused block, orphaned" },
+    { "coldread", "", 0, QuillColdRead,
+      "does a read into memory this program never touched deliver every byte it reports",
+      "nothing: quillcold.bin is deleted and the volume anchored" },
+    { "coldwrite", "", 0, QuillColdWrite,
+      "does a write out of memory this program never touched write zeros, and say how many",
+      "nothing: quillcold.bin is deleted and the volume anchored" },
     { "usememory", "", 0, QuillUseMemory,
       "is a 1000-byte Use Context remembered across a reboot (run it before and after)",
       "between its halves a remembered context of 91 tags; for good, tags quilu* interned" },

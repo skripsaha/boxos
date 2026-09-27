@@ -197,8 +197,28 @@ static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_o
     Result r;
     memset(&r, 0, sizeof(r));
     uint64_t reported = partial_ok ? ctx->bytes_done : 0;
+    error_t  answer   = (status == OK) ? OK : ERR_IO;
+
+    /* The bytes reach the program's pages BEFORE anything says they did, and
+     * a count is said only of bytes that got there. A commit that cannot
+     * finish — a page the program does not own, or no frame left to bring in
+     * one it does — is the read's answer: its error and 0 bytes, the code
+     * crate_out_commit hands the synchronous path for the same refusal. This
+     * used to go on and report the whole count, and a read into a buffer the
+     * program had not been through yet said every byte had arrived while the
+     * pages past the first untouched one stayed zeros. */
+    if (reported > 0) {
+        error_t crc = (ctx->out_base && ctx->target && ctx->target->cabin)
+                          ? vmm_user_buf_commit_out(ctx->target->cabin->vmm, ctx->out_user_addr,
+                                                    ctx->out_base, (size_t)reported)
+                          : ERR_INVALID_ADDRESS;
+        if (crc != OK) {
+            answer   = crc;
+            reported = 0;
+        }
+    }
     ctx->out_crate->size = reported;
-    r.error_code  = (status == OK) ? OK : ERR_IO;
+    r.error_code  = answer;
     r.data_length = (uint32_t)reported;
     r.sender_pid  = 0;
     /* Ф26e: a waybilled (box::ferry) read echoes its correlation token in
@@ -207,14 +227,6 @@ static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_o
      * KCTX_GUIDE / data_addr==0 — byte-identical to the pre-ferry substrate. */
     if (ctx->waybill) { r.context = KCTX_STORAGE; r.data_addr = ctx->waybill; }
     else              { r.context = KCTX_PACK24(KCTX_GUIDE, ctx->submit_cookie); }
-
-    /* Commit bounce buffer back into user pages BEFORE waking caller.
-     * If commit fails (e.g. user unmapped the page mid-flight) we still
-     * report the byte count — the user's buffer is just left untouched. */
-    if (reported > 0 && ctx->out_base && ctx->target && ctx->target->cabin) {
-        vmm_user_buf_commit_out(ctx->target->cabin->vmm, ctx->out_user_addr,
-                                 ctx->out_base, (size_t)reported);
-    }
 
     if (ctx->out_base)  vmm_user_buf_free(ctx->out_base);
     if (ctx->dma_phys)  pmm_free(ctx->dma_phys, 1);
