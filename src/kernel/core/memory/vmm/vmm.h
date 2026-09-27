@@ -862,8 +862,11 @@ void* vmm_translate_user_addr(vmm_context_t* ctx, uintptr_t user_vaddr, size_t s
  *
  * Each helper handles arbitrary cross-page user ranges by walking the
  * page table leaf by leaf and memcpy'ing chunk by chunk — a 4 KiB page,
- * a 2 MiB PDE leaf and a 1 GiB PDPTE leaf are all one chunk. NULL means
- * a fault mid-walk (unmapped, non-user, or alloc failure).
+ * a 2 MiB PDE leaf and a 1 GiB PDPTE leaf are all one chunk. A heap page
+ * the cabin has not touched yet is brought in on the way, exactly as the
+ * cabin's own first touch would bring it in (a read of it reads zeros).
+ * NULL means a fault mid-walk (a page the cabin does not have and cannot
+ * have on first touch, non-user, or alloc failure).
  *
  * vmm_user_buf_commit_out is the WRITE direction and refuses, with
  * ERR_INVALID_ADDRESS, any leaf the cabin holds read-only: the copy goes

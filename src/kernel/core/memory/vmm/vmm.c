@@ -3658,6 +3658,79 @@ int vmm_ensure_user_page(vmm_context_t *ctx, uintptr_t user_vaddr, bool writable
     return 0;
 }
 
+/*
+ * VmmFirstTouch — the page a cabin's first touch of `addr` brings in, brought
+ * in: the one place that decides what that is. The #PF handler asks it about
+ * a fault the cabin took, and the kernel's copies into and out of cabin memory
+ * (VmmUserCopyWindow) about a page the cabin has not touched yet, so a buffer
+ * reads and writes the same whether its owner has been through it or not.
+ *
+ * Of what a program owns, only its heap grows on first touch — the window from
+ * ctx->heap_start that CabinInfo hands it as heap_max_size. Stacks, Bay, Brook
+ * and the hammock are mapped whole when they are made. The ring slot windows
+ * grow on first touch as well, but they are the kernel's rings, not a buffer:
+ * their producers bring them in (vmm_ensure_user_page), their own arm of the
+ * fault handler covers a cabin that looks first, and a copy aimed at a slot
+ * page nobody has brought in yet is refused.
+ *
+ *    1  the page is there: brought in now, or already there — a sibling
+ *       strand's fault or a copy on another core may get there first, and
+ *       vmm_map_page refuses the second map under ctx->lock
+ *    0  `addr` is not in the heap window
+ *   -1  it is, and the page could not be had
+ *
+ * A page that was not present has no TLB entry on any core, so bringing it in
+ * owes no shootdown: vmm_map_page skips one for a first-time map (SDM Vol 3A
+ * §4.10.2.1), and a copy on another core goes through the Pull Map alias, not
+ * through the cabin's translation.
+ */
+static int VmmFirstTouch(vmm_context_t *ctx, uintptr_t addr)
+{
+    if (addr < ctx->heap_start || addr >= ctx->heap_start + CONFIG_USER_HEAP_MAX_SIZE)
+        return 0;
+
+    uintptr_t page_addr = addr & ~(VMM_PAGE_SIZE - 1);
+    if (vmm_is_mapped(ctx, page_addr))
+        return 1;
+
+    void *phys = pmm_alloc_zero(1);
+    if (!phys)
+    {
+        debug_printf("[VMM] ERROR: Failed to allocate heap page for user process\n");
+        return -1;
+    }
+
+    uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER | VMM_FLAG_NO_EXECUTE;
+    vmm_map_result_t result = vmm_map_page(ctx, page_addr, (uintptr_t)phys, flags);
+    if (!result.success)
+    {
+        /* Race tolerance: two first touches of the SAME heap page — sibling
+         * strands on different cores, or the cabin and a kernel copy — both
+         * pass the unlocked vmm_is_mapped probe, both pmm_alloc, both
+         * vmm_map_page. The loser's map is rejected (the winner installed a
+         * different phys); free our spare and report the page there if it now
+         * genuinely is. Without this the loser returned -1, which kills a
+         * faulting strand and leaks its page. Mirrors vmm_ensure_user_page. */
+        pmm_free(phys, 1);
+        if (vmm_is_mapped(ctx, page_addr))
+            return 1;
+        debug_printf("[VMM] ERROR: Failed to map user heap page at 0x%lx\n", page_addr);
+        return -1;
+    }
+
+    /* A high-water mark raised from more than one core: a CAS, so a lower
+     * page mapped late cannot lower it. */
+    uintptr_t end  = page_addr + VMM_PAGE_SIZE;
+    uintptr_t seen = __atomic_load_n(&ctx->heap_end, __ATOMIC_RELAXED);
+    while (seen < end &&
+           !__atomic_compare_exchange_n(&ctx->heap_end, &seen, end, true,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        ;
+
+    debug_printf("[VMM] Demand paging: mapped user heap page at 0x%lx\n", page_addr);
+    return 1;
+}
+
 uint64_t vmm_get_page_flags(vmm_context_t *ctx, uintptr_t virt_addr)
 {
     if (!ctx)
@@ -5332,8 +5405,35 @@ uintptr_t vmm_virt_to_phys_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr)
  * The leaf-by-leaf walk handles non-contiguous physical frames, a
  * partial first leaf (offset != 0) and a partial last leaf (size not a
  * multiple of the leaf size). The OUT direction additionally requires
- * R/W on each leaf it writes: see vmm_user_window.
+ * R/W on each leaf it writes: see vmm_user_window. A heap page the cabin
+ * has not touched yet is brought in on the way, as its own first touch
+ * would bring it in: see VmmUserCopyWindow.
  */
+
+/*
+ * VmmUserCopyWindow — the window a kernel COPY takes onto cabin memory:
+ * vmm_user_window, and where that finds no page, the page the cabin's own
+ * first touch would bring in, brought in and looked at once more
+ * (VmmFirstTouch). A program's buffer is its buffer whether or not it has
+ * been through every page yet — malloc hands out heap that the first touch
+ * backs — so a read into one and a write out of one see what the program
+ * would. A write out of such a page reads the zeros it was given. Whatever
+ * else the walk refuses stays refused: a page the cabin does not have, one
+ * it holds read-only for a write, one that is not user memory at all.
+ *
+ * VmmFirstTouch takes the locks the cabin's own fault takes, in the same
+ * order, and only for an address in the heap window. The cabin may be
+ * running on another core and touch the same page first; vmm_map_page
+ * settles that under ctx->lock.
+ */
+static void *VmmUserCopyWindow(vmm_context_t *ctx, uintptr_t user_vaddr,
+                               bool for_write, size_t *out_span)
+{
+    void *window = vmm_user_window(ctx, user_vaddr, for_write, out_span);
+    if (window || VmmFirstTouch(ctx, user_vaddr) <= 0)
+        return window;
+    return vmm_user_window(ctx, user_vaddr, for_write, out_span);
+}
 
 /*
  * vmm_user_buf_in_into — copy a multi-page user-VA range into a caller-
@@ -5341,8 +5441,8 @@ uintptr_t vmm_virt_to_phys_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr)
  * backing and non-page-aligned start/end. NO allocation: the caller owns
  * the destination buffer (stack, heap, or preallocated scratch).
  *
- * Returns 0 on success. Returns -1 on the first page that fails to
- * translate (PT missing, not VMM_FLAG_USER, etc.); on failure the contents
+ * Returns OK, or ERR_INVALID_ADDRESS at the first page that is not user
+ * memory the cabin has or can have on first touch; on failure the contents
  * of `kbuf` beyond `[0, fail_offset)` are undefined. Caller is expected to
  * treat partial copies as full failure — i.e. discard kbuf or its
  * downstream interpretation.
@@ -5358,7 +5458,7 @@ error_t vmm_user_buf_in_into(vmm_context_t *ctx, uintptr_t user_vaddr,
          * 2 MiB-backed buffer is one window, and a 4 KiB one is still
          * exactly one page. vmm_user_window reports the span. */
         size_t span = 0;
-        void *src = vmm_user_window(ctx, user_vaddr + copied, false, &span);
+        void *src = VmmUserCopyWindow(ctx, user_vaddr + copied, false, &span);
         if (!src || span == 0) return ERR_INVALID_ADDRESS;
 
         size_t chunk = size - copied;
@@ -5404,7 +5504,7 @@ error_t vmm_user_buf_commit_out(vmm_context_t *ctx, uintptr_t user_vaddr,
          * the hardware will not refuse a store into a page the cabin gave
          * away read-only — see vmm_user_window. */
         size_t span = 0;
-        void *dst = vmm_user_window(ctx, user_vaddr + copied, true, &span);
+        void *dst = VmmUserCopyWindow(ctx, user_vaddr + copied, true, &span);
         if (!dst || span == 0) return ERR_INVALID_ADDRESS;
 
         size_t chunk = size - copied;
@@ -5869,56 +5969,13 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code)
         }
     }
 
-    // User heap demand paging
+    // User heap demand paging — the rule is VmmFirstTouch's, shared with the
+    // kernel's copies into and out of cabin memory.
     if (ctx && user && !present)
     {
-        uintptr_t heap_max = ctx->heap_start + CONFIG_USER_HEAP_MAX_SIZE;
-        if (fault_addr >= ctx->heap_start && fault_addr < heap_max)
-        {
-            uintptr_t page_addr = fault_addr & ~(VMM_PAGE_SIZE - 1);
-
-            if (vmm_is_mapped(ctx, page_addr))
-            {
-                return 0;
-            }
-
-            void *phys = pmm_alloc_zero(1);
-            if (!phys)
-            {
-                debug_printf("[VMM] ERROR: Failed to allocate heap page for user process\n");
-                return -1;
-            }
-
-            uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER | VMM_FLAG_NO_EXECUTE;
-            vmm_map_result_t result = vmm_map_page(ctx, page_addr, (uintptr_t)phys, flags);
-            if (!result.success)
-            {
-                /* Race tolerance (sibling strands share one cabin/CR3 and one
-                 * demand-paged heap): two strands first-touching the SAME heap
-                 * page on different cores both pass the unlocked vmm_is_mapped
-                 * probe, both pmm_alloc, both vmm_map_page. The loser's map is
-                 * rejected (the winner installed a different phys); free our
-                 * spare and report success if the page is now genuinely mapped —
-                 * the address is valid, just mapped by the sibling. Without this
-                 * the loser returned -1, which kills the faulting strand and
-                 * leaks its page. Mirrors vmm_ensure_user_page. */
-                pmm_free(phys, 1);
-                if (vmm_is_mapped(ctx, page_addr))
-                {
-                    return 0;
-                }
-                debug_printf("[VMM] ERROR: Failed to map user heap page at 0x%lx\n", page_addr);
-                return -1;
-            }
-
-            if (page_addr + VMM_PAGE_SIZE > ctx->heap_end)
-            {
-                ctx->heap_end = page_addr + VMM_PAGE_SIZE;
-            }
-
-            debug_printf("[VMM] Demand paging: mapped user heap page at 0x%lx\n", page_addr);
-            return 0;
-        }
+        int touched = VmmFirstTouch(ctx, fault_addr);
+        if (touched != 0)
+            return touched > 0 ? 0 : -1;
     }
 
     // Phase 11: PocketRing / ResultRing / TouchRing slot regions —
