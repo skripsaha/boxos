@@ -92,6 +92,12 @@ size_t list_size(list_t* list);
 void list_remove(list_t* list, void* data, bool (*cmp)(void*, void*));
 void list_for_each(list_t* list, void (*func)(void*));
 
+/* Bytes the kernel heap holds for somebody right now — the pool's blocks
+ * and the slab's objects together — and the boot-time proof that both tiers
+ * count what they hand out and what they get back. */
+size_t KHeapLiveBytes(void);
+void   KHeapLiveSelfTest(void);
+
 void mem_init(void);
 void mem_activate_pull_map(void);
 void* kmalloc(size_t size);
