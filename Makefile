@@ -1456,6 +1456,61 @@ UEFI       ?= off
 #                              and MWAIT on more than one vCPU runs as PAUSE —
 #                              which is why cpu_idle asks CPUID.05H first.
 STRICT     ?= off
+
+# THE POWER GOES — AND EVERY WRITE BEFORE IT IS ON THE RECORD.
+#
+# `make run-bg POWERCUT=on` hands the boot disk to QEMU through blklogwrites:
+# every write the guest makes and every flush it asks for is appended, in the
+# order the disk finished them, to POWERCUT_LOG (the dm-log-writes format).
+# tools/powercut.sh replays that record onto a copy of the disk as it stood
+# before the run and so builds the medium a power cut would have left — at
+# every flush, and at every subset of the writes between two of them. The
+# emulator cannot pull a plug; this is how one run pulls it a thousand times.
+#
+#   · The record is emptied before QEMU starts: without log-append blklogwrites
+#     starts again at sector 1 and truncates nothing (blklogwrites.c 255-260),
+#     so a longer earlier run would leave entries behind the new ones.
+#   · log-super-update-interval=1: the superblock is otherwise written only on
+#     a flush or every 4096 entries (402-404), and a whole boot with no flush
+#     left sector 0 all zeros — a record that counted nothing.
+#   · cache.no-flush=on on the two FILE nodes only. The guest's flush still
+#     reaches blklogwrites and is recorded (measured, 212 flushes under
+#     write_stress); what is skipped is the host's fsync of two files on a
+#     machine that is not the one losing power. Never on the blklogwrites node.
+#
+# A MACHINE key, like USB, AHCI and QEMUEXTRA: nothing about the kernel changes,
+# so it has no marker and the plate does not carry it.
+POWERCUT     ?= off
+POWERCUT_LOG ?= $(BUILDDIR)/powercut.log
+
+# THE DISK A RUN BOOTS, WHEN IT IS NOT THE ONE THIS TREE JUST MADE.
+#
+# The kernel is a file ON the volume, so a disk already carries the kernel
+# that will boot from it. A disk handed in by name — a power-cut image, a copy
+# of a volume that has lived — is booted as it stands, and run-bg then does
+# not depend on $(IMAGE): rebuilding build/boxos.img first changes nothing
+# about that boot and can lay a fresh volume under a harness that believed it
+# had the old one (tools/logcheck.sh: stick_from_boot_image, grow_stood_on).
+# ‼ Not IMAGE=: IMAGE is the target of the rule that lays the volume down, and
+# pointing it at a disk worth keeping hands that disk to a recipe that rewrites
+# it from nothing whenever make thinks it is out of date.
+BOOTDISK ?= $(IMAGE)
+RUN_BG_NEEDS = $(if $(filter $(IMAGE),$(BOOTDISK)),$(IMAGE))
+
+# The chain, bottom to top: the disk's file and the record's file; blklogwrites
+# over both — it writes the disk, THEN appends the write to the record
+# (blklogwrites.c 511-512), which is why powercut.sh checks that the record
+# accounts for every byte the disk holds; raw on top, as -drive format=raw was.
+POWERCUT_CHAIN = \
+	-blockdev driver=file$(comma)node-name=pc-disk-file$(comma)filename=$(BOOTDISK)$(comma)cache.no-flush=on \
+	-blockdev driver=file$(comma)node-name=pc-log-file$(comma)filename=$(POWERCUT_LOG)$(comma)cache.no-flush=on \
+	-blockdev driver=blklogwrites$(comma)node-name=pc-log$(comma)file=pc-disk-file$(comma)log=pc-log-file$(comma)log-sector-size=512$(comma)log-super-update-interval=1 \
+	-blockdev driver=raw$(comma)node-name=pc-disk$(comma)file=pc-log
+# ide.0 unit 0 is the PIIX primary master on pc and AHCI port 0 on q35 — where
+# `-drive index=0` (if=ide by default on both) has always put the disk.
+POWERCUT_IDE  = $(POWERCUT_CHAIN) -device ide-hd$(comma)drive=pc-disk$(comma)bus=ide.0$(comma)unit=0$(comma)bootindex=0
+POWERCUT_AHCI = $(POWERCUT_CHAIN) -device ahci$(comma)id=ahci -device ide-hd$(comma)drive=pc-disk$(comma)bus=ahci.0$(comma)bootindex=0
+
 BOCHSDBG      ?= off
 BOCHS_DISPLAY ?= auto
 
@@ -1543,6 +1598,17 @@ $(UEFI_ESP_IMG): $(TAGBOOT_EFI) | $(BUILDDIR)
 	@echo "Creating UEFI ESP image (FAT32) for sector $(ESP_START_SECTOR)..."
 	@python3 tools/make_esp.py $(TAGBOOT_EFI) $@ $(ESP_START_SECTOR)
 
+# The two run-bg keys, refused here before anything is built: an interactive
+# run would boot build/boxos.img unrecorded and let the key pass unheard.
+ifneq ($(filter run,$(MAKECMDGOALS)),)
+ifeq ($(POWERCUT),on)
+$(error POWERCUT=on is a run-bg key: tools/powercut.sh reads the record, and an interactive run has nobody to read it)
+endif
+ifneq ($(BOOTDISK),$(IMAGE))
+$(error BOOTDISK is a run-bg key: `make run` boots the image this tree makes)
+endif
+endif
+
 run: $(IMAGE)
 ifeq ($(EMU),bochs)
 	@echo "=== BoxOS Bochs ==="
@@ -1629,33 +1695,43 @@ endif
 # - Serial output to a file (kernel debug_printf, panic markers)
 # - VGA framebuffer dumpable via tools/qemu-input.sh shot
 # - Drive interactively from the shell with tools/qemu-input.sh.
-# Same vars as `run`: UEFI=on, CORES=N, MEM=size, USB=on, AHCI=on.
+# Same vars as `run`: UEFI=on, CORES=N, MEM=size, USB=on, AHCI=on; and the
+# two of its own, BOOTDISK=path and POWERCUT=on (see RUN CONFIGURATION).
+# The sub-make below names no goal without UEFI, and no goal is `all`: for the
+# image this tree makes that is how it always ran. A disk handed in by name is
+# booted as it stands, so it gets the UEFI vars file and nothing else — measured:
+# with `all` run for it, a touched tagfs.c was compiled and build/boxos.img
+# repacked under a BOOTDISK boot.
 # ===================================================================
-run-bg: $(IMAGE)
-	@$(MAKE) --no-print-directory $(if $(filter on,$(UEFI)),$(BUILDDIR)/edk2-vars.fd)
+run-bg: $(RUN_BG_NEEDS)
+	$(if $(RUN_BG_NEEDS)$(filter on,$(UEFI)),@$(MAKE) --no-print-directory $(if $(filter on,$(UEFI)),$(BUILDDIR)/edk2-vars.fd))
 	@if [ -f $(BUILDDIR)/qemu.pid ] && kill -0 $$(cat $(BUILDDIR)/qemu.pid) 2>/dev/null; then \
 		echo "[run-bg] QEMU already running (pid $$(cat $(BUILDDIR)/qemu.pid)). Use 'make run-stop' first."; \
 		exit 1; \
 	fi
+	@[ -f "$(BOOTDISK)" ] || { echo "[run-bg] there is no disk at $(BOOTDISK)"; exit 1; }
+	$(if $(filter on,$(POWERCUT)),@: > "$(POWERCUT_LOG)")
 	@rm -f $(BUILDDIR)/qemu.mon $(BUILDDIR)/qemu.qmp $(BUILDDIR)/serial.log $(BUILDDIR)/qemu.pid
 	@touch $(BUILDDIR)/serial.log
 	@echo "=== BoxOS QEMU (background) ==="
 	@echo "  Monitor : $(BUILDDIR)/qemu.mon"
 	@echo "  Serial  : $(BUILDDIR)/serial.log"
 	@echo "  Pidfile : $(BUILDDIR)/qemu.pid"
+	$(if $(filter on,$(POWERCUT)),@echo "  Record  : $(POWERCUT_LOG)")
 	@echo "==============================="
 	@$(QEMU) \
 		$(if $(filter on,$(UEFI)), \
 			-machine q35 \
 			-drive if=pflash$(comma)format=raw$(comma)readonly=on$(comma)file=$(OVMF_FD) \
 			-drive if=pflash$(comma)format=raw$(comma)file=$(BUILDDIR)/edk2-vars.fd \
-			-drive format=raw$(comma)file=$<$(comma)if=ide$(comma)index=0, \
+			$(if $(filter on,$(POWERCUT)),$(POWERCUT_IDE),-drive format=raw$(comma)file=$(BOOTDISK)$(comma)if=ide$(comma)index=0), \
 			$(if $(filter on,$(STRICT)),-machine q35) \
 			$(if $(filter on,$(AHCI)), \
-				-drive id=disk0$(comma)file=$<$(comma)format=raw$(comma)if=none \
-				-device ahci$(comma)id=ahci \
-				-device ide-hd$(comma)drive=disk0$(comma)bus=ahci.0$(comma)bootindex=0, \
-				-drive format=raw$(comma)file=$<$(comma)index=0$(comma)media=disk)) \
+				$(if $(filter on,$(POWERCUT)),$(POWERCUT_AHCI), \
+					-drive id=disk0$(comma)file=$(BOOTDISK)$(comma)format=raw$(comma)if=none \
+					-device ahci$(comma)id=ahci \
+					-device ide-hd$(comma)drive=disk0$(comma)bus=ahci.0$(comma)bootindex=0), \
+				$(if $(filter on,$(POWERCUT)),$(POWERCUT_IDE),-drive format=raw$(comma)file=$(BOOTDISK)$(comma)index=0$(comma)media=disk))) \
 		$(if $(filter on,$(STRICT)), \
 		    -cpu max$(comma)+invtsc$(comma)+rdrand$(comma)+rdseed \
 		    -overcommit cpu-pm=on \
@@ -1976,6 +2052,8 @@ info:
 	@echo "  USB=on|off    — enable/disable USB keyboard"
 	@echo "  AHCI=on       — use AHCI disk controller"
 	@echo "  UEFI=on       — boot via OVMF + TagBoot EFI (requires OVMF.fd)"
+	@echo "  POWERCUT=on   — run-bg: record every write and flush of the boot disk in POWERCUT_LOG (tools/powercut.sh)"
+	@echo "  BOOTDISK=path — run-bg: boot this disk as it stands, without rebuilding the image"
 	@echo ""
 	@echo "Bochs-only flags:"
 	@echo "  BOCHSDBG=on        — launch with -debugger (internal text debugger)"
