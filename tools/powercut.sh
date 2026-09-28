@@ -41,7 +41,14 @@
 #               each booted from a copy, anchor_test, the machine stopped
 #               inside its sync; volume-read's codes against PowerCut's cut at
 #               the same point of the same sync.
-#   noanchormut nextfidmut tablemut flushmut
+#   chaingrow   MP-D5: the base brought by quilltest crowd to both edges —
+#               the file table one create short of its next block, the tag
+#               registry's last block room for one more tag — then `quilltest
+#               crowd` grows both chains and anchors, and the power goes. Its
+#               census is kept by kind: a prefix that links into unstamped
+#               ground is held under 1.1 and one such cut is booted to be
+#               refused by the kernel itself; a subset doing the same, apart.
+#   noanchormut nextfidmut tablemut flushmut chaingrowmut
 #               the fix or the fault put in on purpose: the caveat must be
 #               lifted early, the durability or the ack oracle must go red.
 #   selftest    the planner's arithmetic, and a record forged by one byte that
@@ -50,9 +57,12 @@
 # Every census code a scenario was measured showing is its own caveat row —
 # (scenario, code), stand_caveat.sh — held under 1.6, the ORPHAN of an
 # unanchored create (noanchor, hog) and race's lost anchored file under 1.4
-# (the owner, 2026-09-27). A caveated code no cut shows is lifted early only
-# where its absence is proof: every medium of the record built, and no writer
-# left writing through it. Anywhere else it is said, and counts for nothing.
+# (the owner, 2026-09-27); chaingrow's are (scenario, prefix|subset, code),
+# a chain refused named by its chain, and its refusals are held under 1.1.
+# A caveated code no cut shows is lifted early only where its absence is
+# proof: every medium of its kind built — every subset, or for a prefix
+# code every prefix — and no writer left writing through the record.
+# Anywhere else it is said, and counts for nothing.
 #
 # ORACLES, each one line: the record accounts for the disk QEMU left, byte for
 # byte (else nothing measured means anything: HARNESS); every durable step has
@@ -364,12 +374,13 @@ pc_ask() {
     wait_for_quiet "$BOOT_BURST_QUIET_S"
 }
 
-# pc_boots PICKS — the media the policy names (tools/powercut.py boots), each
-# built, booted, asked the scenario's question (PC_ASK_CMD/PC_ASK_ACK, and on
-# the final state PC_FINAL_CMD/PC_FINAL_ACK too), and its log kept.
+# pc_boots PICKS [ARGS...] — the media the policy names (tools/powercut.py
+# boots, ARGS handed to it), each built, booted, asked the scenario's question
+# (PC_ASK_CMD/PC_ASK_ACK — none when PC_ASK_CMD is empty — and on the final
+# state PC_FINAL_CMD/PC_FINAL_ACK too), and its log kept.
 pc_boots() {
     local id epoch keep tear why img="$PC_DIR/boot.img"
-    python3 "$PC" boots "$PC_DIR" --picks "$1" --sample "$PC_SAMPLE_BOOTS" --seed "$PC_SEED" \
+    python3 "$PC" boots "$PC_DIR" --picks "$1" --sample "$PC_SAMPLE_BOOTS" --seed "$PC_SEED" "${@:2}" \
         >"$PC_DIR/boots.txt" || { harness "$PC_NAME: no boot could be chosen"; return 1; }
     while IFS="$TAB" read -r id epoch keep tear why <&3; do
         if [ "$tear" = - ]; then
@@ -382,7 +393,7 @@ pc_boots() {
         # A volume the kernel refused holds no program to ask with; the
         # refusal itself is what the judge weighs.
         if pc_boot "$img" && ! grep -aq '\[TagFS\] this volume is NOT mounted' build/serial.log; then
-            pc_ask "$PC_ASK_CMD" "$PC_ASK_ACK"
+            [ -n "$PC_ASK_CMD" ] && pc_ask "$PC_ASK_CMD" "$PC_ASK_ACK"
             case "$why" in *"final state"*)
                 [ -n "${PC_FINAL_CMD:-}" ] && pc_ask "$PC_FINAL_CMD" "$PC_FINAL_ACK" ;;
             esac
@@ -417,6 +428,11 @@ pc_caveats() {
             base=race; echo "durable:_qt_churn@race=race:durable"
             codes="CHAIN_REFUSED FID_PAST_NEXT FILE_LOST MISSING ORPHAN SPARE_UNNAMED TAG_ABSENT TAG_DUPLICATE UNNAMED_RECORD" ;;
         settlecut) base=settlecut; codes="FID_PAST_NEXT" ;;
+        chaingrow|chaingrowmut)
+            base=chaingrow
+            codes="prefix:CHAIN_REFUSED:registry prefix:CHAIN_REFUSED:table prefix:FID_PAST_NEXT prefix:ORPHAN
+                   subset:CHAIN_REFUSED:registry subset:CHAIN_REFUSED:table subset:FID_PAST_NEXT
+                   subset:FILE_LOST subset:MISSING subset:ORPHAN subset:TAG_ABSENT" ;;
     esac
     for code in $codes; do echo "code:$code=$base:$code"; done
 }
@@ -518,6 +534,98 @@ pc_race() {
     PC_ASK_CMD="quilltest verify _qt_churn"; PC_ASK_ACK='\[QUILL\] verify: (PASS|FAIL)'; PC_FINAL_CMD=""
     pc_boots final
     pc_judge --verify quill-floor:_qt_churn:halt --final-consistent
+}
+
+# chaingrow — MP-D5. The file table and the tag registry take a new block by
+# writing their last block's link to it before the block itself, the one in
+# its sync's flush and the other as the create of a new tag flushes it. The
+# base is brought to both edges with quilltest crowd — the table one create
+# short of the row its blocks run out at, the registry's last block room for
+# PC_CROWD_ROOM more of crowd's tags — so the recorded run's few creates and
+# its anchor grow both chains, and every prefix of it is built.
+PC_CROWD_NAME_BYTES=15    # "crowd" and ten digits: quilltest_powercut.c QuillCrowdName
+PC_CROWD_ROOM=1
+PC_CROWD_SETTLE_FROM=4294967295   # the settling crowd's one name, past every other
+
+# pc_crowd CMD — one quilltest crowd on a machine that is not recorded, its
+# PASS required and said in the facts.
+pc_crowd() {
+    local mark said
+    mark=$(wc -l < build/serial.log)
+    type_line "$1" || { bad "$PC_NAME: the machine never took '$1'"; return 1; }
+    if ! wait_for_line -E build/serial.log '\[QUILL\] crowd: (PASS|FAIL) — ' "$WAIT_QUIET_S" $((mark + 1)); then
+        bad "$PC_NAME: '$1' never answered"; return 1
+    fi
+    said=$(tail -n +$((mark + 1)) build/serial.log | tr -d '\r' | grep -aoE '\[QUILL\] crowd: (PASS|FAIL) — .*' | head -1)
+    case "$said" in
+        *"crowd: PASS"*) echo "edges: \`$1\` — $said" >>"$PC_DIR/facts.txt" ;;
+        *) bad "$PC_NAME: $said"; return 1 ;;
+    esac
+    wait_for_quiet "$BOOT_BURST_QUIET_S"
+}
+
+# pc_crowded NAME CMD... — the base booted, every CMD (a quilltest crowd) run
+# on it, switched off by its power button and judged again: consistent, or
+# nothing after it means anything.
+pc_crowded() {
+    local what=$1 cmd pid
+    shift
+    pc_boot "$PC_DIR/base.img" || { bad "$PC_NAME: the base never reached a shell to be $what"; return 1; }
+    for cmd in "$@"; do pc_crowd "$cmd" || return 1; done
+    pid=$(cat build/qemu.pid)
+    mon_raw system_powerdown && pc_gone "$pid" || {
+        bad "$PC_NAME: the $what base would not switch off by its power button"; return 1; }
+    cp build/serial.log "$PC_DIR/$what.serial.log"
+    python3 "$VR" "$PC_DIR/base.img" check --json >"$PC_DIR/base.check.json"
+    [ $? = 0 ] || { bad "$PC_NAME: the $what base is not consistent"; return 1; }
+}
+
+# pc_edges — the base brought to both edges (tools/powercut.py crowd says how
+# many files) and judged again. Sets CG_FROM and CG_RUN: the first number and
+# the count of the recorded run's files.
+#
+# ‼ SETTLED FIRST, BECAUSE THE MACHINE INTERNS TAGS OF ITS OWN. Measured: the
+# first anchor ever put the tag `anchor` in the registry, and the first line
+# crowd printed (at its 50th file) put `console:1` there — 26 bytes no count
+# of crowd's files had asked for, and the registry's last block came out 193
+# records from its edge instead of one. So one crowd of one file, numbered
+# where no other reaches, is run and anchored first, the base is measured
+# after it, and only then are the files counted.
+pc_edges() {
+    local plan fill again
+    pc_crowded settled "quilltest crowd 1 $PC_CROWD_SETTLE_FROM" || return 1
+    plan=$(python3 "$PC" crowd "$PC_DIR/base.check.json" --name-bytes "$PC_CROWD_NAME_BYTES" \
+               --room "$PC_CROWD_ROOM" 2>&1) || {
+        harness "$PC_NAME: $plan"; return 1; }
+    fill=${plan%%"$TAB"*}; plan=${plan#*"$TAB"}
+    again=${plan%%"$TAB"*}
+    echo "edges: the settled base had ${plan#*"$TAB"}" >>"$PC_DIR/facts.txt"
+    if [ "$again" -gt 0 ]; then
+        pc_crowded crowded "quilltest crowd $fill 0" "quilltest crowd $again 0" || return 1
+    else
+        pc_crowded crowded "quilltest crowd $fill 0" || return 1
+    fi
+    plan=$(python3 "$PC" crowd "$PC_DIR/base.check.json" --name-bytes "$PC_CROWD_NAME_BYTES" \
+               --room "$PC_CROWD_ROOM" --made 2>&1) || {
+        harness "$PC_NAME: $plan"; return 1; }
+    CG_FROM=$fill
+    CG_RUN=${plan%%"$TAB"*}
+    echo "edges: switched off by its power button, check says consistent; ${plan#*"$TAB"}" \
+        >>"$PC_DIR/facts.txt"
+}
+
+pc_chaingrow() {
+    local last
+    pc_base && pc_edges && pc_logged || return 1
+    last=$(printf 'crowd%010u' $((CG_FROM + CG_RUN - 1)))
+    pc_step crowd "quilltest crowd $CG_RUN $CG_FROM" '\[QUILL\] crowd: (PASS|FAIL) — ' "$last:empty:1:1" \
+        || return 1
+    grep -aq '\[QUILL\] crowd: PASS — made '"$CG_RUN"' files' build/serial.log
+    chk $? "$PC_NAME: $(tr -d '\r' <build/serial.log | grep -aoE '\[QUILL\] crowd: (PASS|FAIL) — [^;]*' | tail -1)"
+    pc_cut_power && pc_record || return 1
+    PC_ASK_CMD=""; PC_FINAL_CMD=""
+    pc_boots final --by-kind
+    pc_judge --by-kind --verify grown
 }
 
 run_scenario() {   # run_scenario NAME KEYS... — build, run, judge, say
@@ -697,6 +805,64 @@ EOF
     restore src/kernel/tagfs/tagfs.c
 }
 
+# The fix for MP-D5 put in, in the pool's own shape (meta_pool.c "THE NEW
+# BLOCK IS STAMPED BEFORE ANYTHING POINTS AT IT"): a block the file table or
+# the registry has just taken is stamped, empty, before the link to it is
+# written. Every prefix then mounts, and the prefix caveats are lifted early.
+# The stamp and the link are still two writes of one epoch, so a cut that
+# keeps the link and loses the stamp is still refused: the subset verdicts
+# are asked what they answer, as the evidence for what closes them.
+run_chaingrowmut() {
+    mut_on src/kernel/tagfs/file_table/file_table.c "logcheck mutation" <<'EOF'
+import sys
+p = sys.argv[1]; s = open(p).read()
+a = ("                if (chain_append(next_block) != 0) {\n"
+     "                    spin_unlock(&g_lock);\n"
+     "                    debug_printf(\"[FileTable] flush: no memory to record block %u\\n\",\n"
+     "                                 next_block);\n"
+     "                    return -1;\n"
+     "                }\n")
+assert s.count(a) == 1
+open(p, "w").write(s.replace(a, a +
+     "                /* logcheck mutation: the new block is stamped before the link to it */\n"
+     "                static FileTableBlock stamp;\n"
+     "                memset(&stamp, 0, sizeof(stamp));\n"
+     "                stamp.magic = TAGFS_FILETBL_MAGIC;\n"
+     "                if (tagfs_write_block(next_block, &stamp) != OK) {\n"
+     "                    spin_unlock(&g_lock);\n"
+     "                    return -1;\n"
+     "                }\n"))
+EOF
+    mut_on src/kernel/tagfs/tag_registry/tag_registry.c "logcheck mutation" <<'EOF'
+import sys
+p = sys.argv[1]; s = open(p).read()
+a = ("                if (chain_append(new_block) != 0) {\n"
+     "                    spin_unlock(&reg->lock);\n"
+     "                    return -1;\n"
+     "                }\n")
+assert s.count(a) == 1
+open(p, "w").write(s.replace(a, a +
+     "                /* logcheck mutation: the new block is stamped before the link to it */\n"
+     "                static TagRegistryBlock stamp;\n"
+     "                memset(&stamp, 0, sizeof(stamp));\n"
+     "                stamp.magic = TAGFS_REGISTRY_MAGIC;\n"
+     "                if (tagfs_write_block(new_block, &stamp) != 0) {\n"
+     "                    spin_unlock(&reg->lock);\n"
+     "                    return -1;\n"
+     "                }\n"))
+EOF
+    mut_run chaingrowmut chaingrow code:prefix:CHAIN_REFUSED:table behaves \
+        "the table's new block stamped before its link, no prefix refuses the mount over the table: the caveat is lifted early"
+    pc_expect code:prefix:CHAIN_REFUSED:registry behaves \
+        "the registry's new block stamped before its link, no prefix refuses the mount over the registry: the caveat is lifted early"
+    pc_expect code:subset:CHAIN_REFUSED:table defect \
+        "the stamp and the link in one epoch, a cut that keeps the link and loses the stamp still refuses the table"
+    pc_expect code:subset:CHAIN_REFUSED:registry defect \
+        "the stamp and the link in one epoch, a cut that keeps the link and loses the stamp still refuses the registry"
+    restore src/kernel/tagfs/tag_registry/tag_registry.c
+    restore src/kernel/tagfs/file_table/file_table.c
+}
+
 # selftest — the gate judging itself: the planner's arithmetic, then one real
 # record that the self-check must accept and, forged by one byte, refuse.
 run_selftest() {
@@ -722,13 +888,14 @@ run_selftest() {
 
 pc_preflight
 case "${1:-}" in
-    noanchor|nextfid|hog|halt|race)
+    noanchor|nextfid|hog|halt|race|chaingrow)
         run_scenario "$@" ;;
     settlecut)   shift; run_settlecut "$@" ;;
     noanchormut) run_noanchormut ;;
     nextfidmut)  run_nextfidmut ;;
     tablemut)    run_tablemut ;;
     flushmut)    run_flushmut ;;
+    chaingrowmut) run_chaingrowmut ;;
     selftest)    run_selftest ;;
     all)
         run_selftest
@@ -742,10 +909,11 @@ case "${1:-}" in
             run_scenario halt $keys; run_scenario race $keys
         done
         run_settlecut
-        run_noanchormut; run_nextfidmut; run_tablemut; run_flushmut ;;
+        run_scenario chaingrow
+        run_noanchormut; run_nextfidmut; run_tablemut; run_flushmut; run_chaingrowmut ;;
     *)
-        echo "usage: $0 noanchor|nextfid|hog|halt|race|settlecut [MACHINE KEYS...]"
-        echo "       $0 noanchormut|nextfidmut|tablemut|flushmut|selftest|all"
+        echo "usage: $0 noanchor|nextfid|hog|halt|race|settlecut|chaingrow [MACHINE KEYS...]"
+        echo "       $0 noanchormut|nextfidmut|tablemut|flushmut|chaingrowmut|selftest|all"
         exit 2 ;;
 esac
 

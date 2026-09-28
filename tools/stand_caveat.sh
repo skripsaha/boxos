@@ -37,7 +37,10 @@ CAVEAT=0
 # PowerCut's census (tools/powercut.sh): every (scenario, code) pair a
 # scenario was measured showing is its own row, held under 1.6 — except the
 # ORPHAN an unanchored create leaves (noanchor, hog) and race's anchored file
-# lost by a later torn sync, under 1.4 (the owner, 2026-09-27).
+# lost by a later torn sync, under 1.4 (the owner, 2026-09-27). chaingrow
+# keeps its census by kind, (scenario, prefix|subset, code), and a chain
+# refused by the chain's name: its refusals are MP-D5, under 1.1 — the subset
+# rows there until the step-1.1 contract says whether they stay or go to 1.6.
 caveat_row() {
     case "$1" in
         longquery)  echo "1.1b|a query of 256 bytes or more is dropped unread, and the answer is every file in scope" ;;
@@ -58,15 +61,15 @@ caveat_row() {
                     echo "1.4|a create never anchored, cut by the power, leaves a block marked used that nothing owns — the map is written only inside Settle" ;;
         race:durable)
                     echo "1.4|an anchored file is lost by a later torn sync — the shutdown sync retires its record in place" ;;
-        nextfid:FID_PAST_NEXT|halt:FID_PAST_NEXT|race:FID_PAST_NEXT)
+        nextfid:FID_PAST_NEXT|halt:FID_PAST_NEXT|race:FID_PAST_NEXT|chaingrow:prefix:FID_PAST_NEXT|chaingrow:subset:FID_PAST_NEXT)
                     echo "1.6|a sync cut between its table and its ledger leaves a table row past the ledger's next_file_id" ;;
-        nextfid:FILE_LOST|halt:FILE_LOST|race:FILE_LOST)
+        nextfid:FILE_LOST|halt:FILE_LOST|race:FILE_LOST|chaingrow:subset:FILE_LOST)
                     echo "1.6|a sync cut between its writes leaves a table row naming a record the pool never got, and the mount deletes the file" ;;
-        nextfid:MISSING|halt:MISSING|race:MISSING)
+        nextfid:MISSING|halt:MISSING|race:MISSING|chaingrow:subset:MISSING)
                     echo "1.6|a sync cut between its writes leaves a named block reading free, for the allocator to hand out again" ;;
         nextfid:ORPHAN|halt:ORPHAN|race:ORPHAN)
                     echo "1.6|a sync cut between its writes leaves blocks marked used that nothing owns" ;;
-        nextfid:TAG_ABSENT|halt:TAG_ABSENT|race:TAG_ABSENT)
+        nextfid:TAG_ABSENT|halt:TAG_ABSENT|race:TAG_ABSENT|chaingrow:subset:TAG_ABSENT)
                     echo "1.6|a sync cut between its writes leaves a file wearing a tag the registry does not define" ;;
         nextfid:UNNAMED_RECORD|halt:UNNAMED_RECORD|race:UNNAMED_RECORD)
                     echo "1.6|a sync cut between its writes leaves an ACTIVE record no table row names, its blocks leaked" ;;
@@ -76,6 +79,16 @@ caveat_row() {
                     echo "1.6|a cut keeps a stamped spare header whose link was lost, a block nothing names" ;;
         race:TAG_DUPLICATE)
                     echo "1.6|a registry write torn by the cut leaves a record repeating another's key, and it is dropped" ;;
+        chaingrow:prefix:CHAIN_REFUSED:table)
+                    echo "1.1|the file table writes its last block's link to a block it has just taken before that block, so a power cut between the two leaves a chain into unstamped ground and the kernel refuses the volume at every mount" ;;
+        chaingrow:prefix:CHAIN_REFUSED:registry)
+                    echo "1.1|the tag registry writes its last block's link to a block it has just taken before that block, so a power cut between the two leaves a chain into unstamped ground and the kernel refuses the volume at every mount" ;;
+        chaingrow:subset:CHAIN_REFUSED:table)
+                    echo "1.1|a cut that keeps the file table's link to its new block and loses that block's own write, both in one flush epoch, leaves a chain into unstamped ground the kernel refuses to mount" ;;
+        chaingrow:subset:CHAIN_REFUSED:registry)
+                    echo "1.1|a cut that keeps the tag registry's link to its new block and loses that block's own write, both in one flush epoch, leaves a chain into unstamped ground the kernel refuses to mount" ;;
+        chaingrow:prefix:ORPHAN|chaingrow:subset:ORPHAN)
+                    echo "1.6|a cut that keeps the bitmap of a block the registry or the file table has just taken and loses the link to it leaves that block marked used and owned by nothing" ;;
     esac
 }
 

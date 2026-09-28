@@ -13,9 +13,11 @@ it had made durable:
                            --line TEXT [--durable NAME:RECORD:FROM:TO] [--noquiet]
     powercut.py plan LIST --seed HEX [--all-max N --sample N --tear-all-max N] > PLAN
     powercut.py checks PLAN BASE LOG BASECHECK [--jobs N] > CUTS
-    powercut.py boots DIR --picks final|prefixes:STEP --sample N --seed HEX > BOOTS
+    powercut.py boots DIR --picks final|prefixes:STEP --sample N --seed HEX [--by-kind] > BOOTS
     powercut.py judge DIR --path PATH [--caveat KEY=NAME]... [--verify KIND] [--hogged] [--waited S]
+                      [--by-kind]
     powercut.py settlecut DIR --path PATH [--caveat KEY=NAME]...
+    powercut.py crowd CHECK --name-bytes N --room N [--made]
     powercut.py forge LIST LOG OUT
     powercut.py selftest
 
@@ -37,6 +39,13 @@ Two cuts whose every sector came from the same write are one medium and are
 judged once: the listing carries no content hash (contract C3), so identity is
 by provenance, and two writes that happen to carry the same bytes are not
 collapsed — the count errs towards judging more, never fewer.
+A medium is a PREFIX when some cut that builds it kept its epoch's writes
+from the first up to one of them, the next perhaps torn — what a power cut
+leaves a device that writes in the order it is asked — and a SUBSET
+otherwise, which only a device that lets its cache reach the medium out of
+order can leave. --by-kind keeps the two apart in the census, because a fix
+may close one and not the other: an order of writes closes every prefix,
+and only a flush between two writes closes the subsets that part them.
 
 Every verdict is one tab-separated line on stdout, which the shell says in
 stand.sh's words:
@@ -74,6 +83,7 @@ RECORDS = {
     "anchor":  (0x414E4348, 128),    # apps/anchor_test.c AnchorRecord: magic, seq, sum, 116 zeros
     "persist": (0x42504552, 16),     # apps/persist.c PersistRecord: magic, seq, sum, 0
     "quill":   (0x5155494C, 16),     # apps/quilltest_powercut.c QuillRecord: magic, seq, sum, 0
+    "empty":   (0, 0),               # apps/quilltest_powercut.c QuillCrowd: made, never written
 }
 
 
@@ -86,6 +96,8 @@ def Mix(a, b):
 
 def RecordBytes(kind, seq):
     magic, size = RECORDS[kind]
+    if size == 0:
+        return b""
     head = struct.pack("<III", magic, seq, Mix(magic, seq))
     return head + bytes(size - len(head))
 
@@ -256,8 +268,9 @@ def FileKey(f):
 
 def Compact(cid, rc, out, err, base_files, base_names):
     """What the judge needs from one `check --json`: the mount the kernel would
-    make, every finding, the base's files where they differ from the base, and
-    every file the base did not have."""
+    make, every finding, which chains would be refused and how long each is,
+    the base's files where they differ from the base, and every file the base
+    did not have."""
     try:
         d = json.loads(out)
     except ValueError:
@@ -274,6 +287,8 @@ def Compact(cid, rc, out, err, base_files, base_names):
                            "is %s bytes, sha256 %s" % (f["size"], (f["sha256"] or "none")[:12])))
     return {"id": cid, "rc": rc, "verdict": d["verdict"], "mounts": k["mounts"],
             "refusal": k["refusal"], "says": k["says"],
+            "refused": d["chains"]["refused"] or {},
+            "chains": {x: len(d["chains"][x]) for x in ("registry", "table", "pool")},
             "fsck": {x: fsck.get(x) for x in ("orphan", "missing", "corrected", "lost")},
             "findings": [[x["code"], x["severity"], x["text"]] for x in d["findings"]],
             "base_changed": changed,
@@ -334,6 +349,27 @@ class Run:
         self.flushes = sorted(e["flush_seq"] for e in self.listing["epochs"] if e["flush_seq"])
         self.closes = {e["flush_seq"]: e["epoch"] for e in self.listing["epochs"] if e["flush_seq"]}
         self.final = self.Canon("e%d-all" % self.listing["epochs"][-1]["epoch"])
+        self.kind = self.Kinds()
+
+    def Kinds(self):
+        """Every medium's kind, prefix or subset (see the top of this file):
+        a cut's kept volume writes are the first n of its epoch's, and a torn
+        write is the next one — and a medium two cuts build is a prefix when
+        either of them is."""
+        order = {}
+        for w in self.listing["writes"]:
+            if not Outside(w):
+                order.setdefault(w["epoch"], []).append(w["index"])
+        kind = {}
+        for c in self.plan["cuts"]:
+            vol = order.get(c["epoch"], [])
+            keep = RangeSet(c["keep"]) & set(vol)
+            n, cid = len(keep), c["same"] or c["id"]
+            if keep == set(vol[:n]) and (c["tear"] is None or (n < len(vol) and c["tear"][0] == vol[n])):
+                kind[cid] = "prefix"
+            else:
+                kind.setdefault(cid, "subset")
+        return kind
 
     def Canon(self, cid):
         c = self.cut.get(cid)
@@ -370,21 +406,22 @@ class Run:
         f = next((s for s in self.flushes if led and s > led[-1]), None)
         return f if f is not None and f <= step["ack"] else None
 
-    def Exhaustive(self, from_epoch=0):
+    def Exhaustive(self, from_epoch=0, prefixes=False):
         """Whether a defect no cut shows is gone from this machine: every medium
         the model has of the epochs from `from_epoch` on was built — no subset
-        left out, no prefix of a last write left untorn — and no step left a
-        writer behind, whose record is one run's timing."""
+        left out (of the prefixes alone, when only they are asked about: the
+        plan builds every one), no prefix of a last write left untorn — and no
+        step left a writer behind, whose record is one run's timing."""
         return not any(s.get("noquiet") for s in self.steps) and all(
-            not e["not_enumerated"] and not e.get("tears_not_built", 0)
+            (prefixes or not e["not_enumerated"]) and not e.get("tears_not_built", 0)
             for e in self.plan["epochs"] if e["epoch"] >= from_epoch)
 
-    def Unbuilt(self, from_epoch=0):
+    def Unbuilt(self, from_epoch=0, prefixes=False):
         """Why Exhaustive said no."""
         if any(s.get("noquiet") for s in self.steps):
             return "a writer kept writing through the record, so its cuts are one run's timing"
         es = [e for e in self.plan["epochs"] if e["epoch"] >= from_epoch]
-        left = sum(e["not_enumerated"] for e in es)
+        left = 0 if prefixes else sum(e["not_enumerated"] for e in es)
         return "%s subset(s) and %d torn prefix(es) of the record were not built" % (
             left if left < 1 << 40 else "over 2^%d" % (left.bit_length() - 1),
             sum(e.get("tears_not_built", 0) for e in es))
@@ -403,9 +440,15 @@ class Run:
         r = self.results.get(cid)
         return r is not None and "error" not in r
 
-    def Signature(self, cid):
-        return tuple(sorted({(f[0], f[1]) for f in self.results.get(cid, {}).get("findings", [])
-                             if f[1] in HARM}))
+    def Signature(self, cid, chains=False):
+        """The damage and leak codes a cut shows; with `chains`, CHAIN_REFUSED
+        once per chain it names, as CHAIN_REFUSED:<chain>."""
+        r = self.results.get(cid, {})
+        harm = {(f[0], f[1]) for f in r.get("findings", []) if f[1] in HARM}
+        if chains:
+            harm = ({x for x in harm if x[0] != "CHAIN_REFUSED"} |
+                    {("CHAIN_REFUSED:" + name, "damage") for name in r.get("refused", {})})
+        return tuple(sorted(harm))
 
     def Step(self, name):
         return next((s for s in self.steps if s["step"] == name), None)
@@ -457,12 +500,17 @@ def CmdBoots(a):
         f = run.AckFlush(s) if s["durable"] else None
         if f is not None:
             Add(run.Canon("e%d-all" % run.closes[f]), "the boundary after the flush of %s" % s["step"])
+    # The first medium of every signature is booted — of every kind and
+    # every chain refused, too, when the census is kept by kind: the kernel's
+    # own refusal of a prefix is the evidence a prefix's verdict stands on.
     seen = set()
     for c in run.canon:
-        sig = run.Signature(c["id"])
+        kind = run.kind[c["id"]] if a.by_kind else None
+        sig = (kind, run.Signature(c["id"], a.by_kind))
         if sig not in seen:
             seen.add(sig)
-            Add(c["id"], "the first of %s" % (" ".join("%s/%s" % x for x in sig) or "the consistent"))
+            Add(c["id"], "the first%s of %s" % (" %s" % kind if kind else "",
+                                                " ".join("%s/%s" % x for x in sig[1]) or "the consistent"))
     rest = [c["id"] for c in run.canon if c["id"] not in chosen]
     for cid in random.Random(int(a.seed, 16)).sample(rest, min(a.sample, len(rest))):
         Add(cid, "sampled")
@@ -478,10 +526,21 @@ def CmdBoots(a):
 # ---------------------------------------------------------------------------
 
 
+def BootLogs(run):
+    """Every booted cut, why it was chosen, and what its machine said."""
+    path, out = os.path.join(run.dir, "boots.txt"), []
+    for line in (open(path).read().splitlines() if os.path.exists(path) else []):
+        cid, _k, _keep, _tear, why = line.split("\t")
+        lp = os.path.join(run.dir, "boots", cid + ".serial.log")
+        log = open(lp, errors="replace").read().replace("\r", "") if os.path.exists(lp) else ""
+        out.append({"id": cid, "why": why, "log": log})
+    return out
+
+
 class Judge:
-    def __init__(self, run, base, caveats, path, waited):
+    def __init__(self, run, base, caveats, path, waited, by_kind=False):
         self.run, self.base, self.caveats, self.path, self.waited = run, base, caveats, path, waited
-        self.census, self.boots = {}, []
+        self.by_kind, self.census, self.boots = by_kind, {}, BootLogs(run)
 
     def Out(self, key, seen, what, caveat=None):
         name = self.caveats.get(caveat or key)
@@ -559,47 +618,101 @@ class Judge:
                 seqs = sorted({hashes[x[5]] for cid in after for x in run.results[cid]["new_files"]
                                if x[1] == item["name"] and x[5] in hashes})
                 whole = run.Exhaustive(run.closes[f])
+                held = ("empty, as it was made" if not item["size"] else
+                        "with its %d bytes, a whole record (seq %s, %d..%d allowed)"
+                        % (item["size"], Ranges(seqs), item["from"], run.SeqCeiling(item)))
                 self.Out(key, "behaves" if whole or not self.caveats.get(key) else "unseen",
-                         "%s is visible with its %d bytes, a whole record (seq %s, %d..%d allowed), in "
-                         "every one of the %d cuts after the flush at entry %d%s"
-                         % (item["name"], item["size"], Ranges(seqs), item["from"],
-                            run.SeqCeiling(item), len(after), f,
+                         "%s is visible %s, in every one of the %d cuts after the flush at entry %d%s"
+                         % (item["name"], held, len(after), f,
                             "" if whole else "; " + run.Unbuilt(run.closes[f])))
             else:
                 self.Out(key, "fail", "no cut stands after the flush at entry %d, so the durability "
                          "of %s was never judged" % (f, item["name"]))
 
+    def Findings(self, cid, r):
+        """A cut's findings as the census keeps them: each code as it stands,
+        or — kept by kind — the cut's kind before it, and CHAIN_REFUSED once
+        for every chain the kernel would refuse, by name, so a refusal of the
+        table and one of the registry are two verdicts and not one."""
+        if not self.by_kind:
+            return r["findings"]
+        kind = self.run.kind[cid]
+        return ([("%s:%s" % (kind, code), sev, text) for code, sev, text in r["findings"]
+                 if code != "CHAIN_REFUSED"] +
+                [("%s:CHAIN_REFUSED:%s" % (kind, name), "damage", "the %s: %s" % (name, why))
+                 for name, why in sorted(r["refused"].items())])
+
     def Codes(self):
-        run, broken = self.run, []
+        run, broken, judged = self.run, [], {}
         for c in run.canon:
             r = run.results.get(c["id"])
             if r is None or "error" in r:
                 broken.append((c["id"], (r or {}).get("error", "no answer")))
                 continue
-            for code, sev, text in r["findings"]:
+            kind = run.kind[c["id"]] if self.by_kind else ""
+            judged[kind] = judged.get(kind, 0) + 1
+            for code, sev, text in self.Findings(c["id"], r):
                 e = self.census.setdefault((code, sev), {"cuts": set(), "first": c["id"], "text": text})
                 e["cuts"].add(c["id"])
         if broken:
             self.Out("checker", "harness", "volume-read could not judge %d of %d cuts, e.g. %s: %s"
                      % (len(broken), len(run.canon), broken[0][0], broken[0][1]))
-        judged = len(run.canon) - len(broken)
+
+        def Of(code):
+            """How many cuts a code was looked for in, and the word for their kind."""
+            kind = code.split(":")[0] if self.by_kind else ""
+            return judged.get(kind, 0), kind + " " if kind else ""
+
         harm = sorted(k for k in self.census if k[1] in HARM)
         for code, sev in harm:
             e = self.census[(code, sev)]
-            what = "%s (%s) in %d of %d cuts, first %s (%s): %s" % (
-                code, sev, len(e["cuts"]), judged, e["first"], run.Kept(e["first"]), e["text"])
+            what = "%s (%s) in %d of %d %scuts, first %s (%s): %s" % (
+                (code, sev, len(e["cuts"])) + Of(code) + (e["first"], run.Kept(e["first"]), e["text"]))
+            held = True
+            if self.by_kind and code.startswith("prefix:CHAIN_REFUSED:"):
+                held, proof = self.Refusal(e["cuts"], code.split(":")[2])
+                what += "; " + proof
             if self.caveats.get("code:" + code):
-                self.Out("code:" + code, "defect", what)
+                self.Out("code:" + code, "defect" if held else "fail", what)
             else:
                 self.Out("code:" + code, "fail", what + " — no caveat names it; its step is the "
                          "owner's to assign")
-        whole = run.Exhaustive()
         for key in sorted(self.caveats):
             if key.startswith("code:") and key[5:] not in {c for c, _s in harm}:
-                self.Out(key, "behaves" if whole else "unseen", "no cut of %d shows %s%s"
-                         % (judged, key[5:], "" if whole else "; " + run.Unbuilt()))
+                prefixes = self.by_kind and key[5:].startswith("prefix:")
+                whole = run.Exhaustive(prefixes=prefixes)
+                n, kind = Of(key[5:])
+                self.Out(key, "behaves" if whole else "unseen", "no %scut of %d shows %s%s"
+                         % (kind, n, key[5:], "" if whole else "; " + run.Unbuilt(prefixes=prefixes)))
         if not harm:
-            self.Out("codes", "behaves", "every one of %d cuts is consistent" % judged)
+            self.Out("codes", "behaves", "every one of %d cuts is consistent" % sum(judged.values()))
+
+    def Refusal(self, cuts, chain):
+        """The kernel's own word on a refusal check predicts over `chain`: every
+        booted cut among `cuts` whose predicted refusal is that chain's, held
+        to the sentence its mount said — and, for the file table, to the block
+        its loader names. (held, what was seen)."""
+        agree, differ = [], []
+        for b in self.boots:
+            r = self.run.results.get(b["id"], {})
+            why = r.get("refused", {}).get(chain)
+            if b["id"] not in cuts or not why or not (r.get("refusal") or "").endswith(" — " + why):
+                continue
+            due = r["refusal"][:-len(" — " + why)]
+            said = re.search(r"\[TagFS\] this volume is NOT mounted: (.*) \(error \d+\)", b["log"])
+            named = re.search(r"\[FileTable\] (block \d+ holds 0x[0-9a-f]+) where", b["log"])
+            if said and said.group(1) == due and (not named or why.startswith(named.group(1) + " ")):
+                agree.append("%s, whose mount said '%s'%s" % (
+                    b["id"], said.group(1), " and '[FileTable] %s'" % named.group(1) if named else ""))
+            else:
+                differ.append("%s, where check predicted '%s' (%s) and the kernel said %s" % (
+                    b["id"], due, why, "'%s'" % said.group(1) if said else "no refusal"))
+        if differ:
+            return False, "booted " + "; ".join(differ[:2])
+        if not agree:
+            return False, "none of them was booted, so the kernel's own refusal was never seen"
+        return True, "booted %d, the kernel refused as check predicted: %s" % (len(agree),
+                                                                              "; ".join(agree[:2]))
 
     def Boundaries(self):
         """Every state a sync stood behind — an epoch its flush closed, holding the ledger HEAD's sync
@@ -620,12 +733,6 @@ class Judge:
                      "the volume is consistent at every one of %d syncs' flushes" % len(ends))
 
     def Boots(self):
-        path = os.path.join(self.run.dir, "boots.txt")
-        for line in (open(path).read().splitlines() if os.path.exists(path) else []):
-            cid, _k, _keep, _tear, why = line.split("\t")
-            lp = os.path.join(self.run.dir, "boots", cid + ".serial.log")
-            log = open(lp, errors="replace").read().replace("\r", "") if os.path.exists(lp) else ""
-            self.boots.append({"id": cid, "why": why, "log": log})
         if not self.boots:
             self.Out("boots", "fail", "no cut was booted")
             return
@@ -653,6 +760,8 @@ class Judge:
         what, _sep, arg = kind.partition(":")
         if what == "reissue":
             return self.Reissue(arg)
+        if what == "grown":
+            return self.Grown()
         final = self.Final()
         if final is None:
             return self.Out("verify", "fail", "the final state was not booted")
@@ -724,6 +833,20 @@ class Judge:
         else:
             self.Out("reissue", "behaves", "none of %d prefix cuts issued fid %s twice" % (judged, fid))
 
+    def Grown(self):
+        """chaingrow's own question: did the recorded run give the tag registry
+        and the file table a block each? A run that grew neither has no cut
+        that tests how a chain grows, however green its census."""
+        base = {name: len(self.base["chains"][name]) for name in ("registry", "table")}
+        have = self.run.results.get(self.run.final or "", {}).get("chains")
+        if not have:
+            return self.Out("grown", "fail", "the final state %s was not judged, so nothing says "
+                            "whether the chains grew" % self.run.final)
+        grew = all(have[name] > base[name] for name in base)
+        self.Out("grown", "behaves" if grew else "fail", "the recorded run took the tag registry from "
+                 "%d to %d block(s) and the file table from %d to %d (the final state %s)"
+                 % (base["registry"], have["registry"], base["table"], have["table"], self.run.final))
+
     def FinalState(self):
         """The state an orderly halt left: consistent, and booted, nothing lost."""
         final, r = self.Final(), self.run.results.get(self.run.final or "", {})
@@ -779,7 +902,7 @@ def CmdJudge(a):
     run = Run(a.dir)
     with open(os.path.join(a.dir, "base.check.json")) as fh:
         base = json.load(fh)
-    j = Judge(run, base, dict(x.split("=", 1) for x in a.caveat), a.path, a.waited)
+    j = Judge(run, base, dict(x.split("=", 1) for x in a.caveat), a.path, a.waited, a.by_kind)
     j.Acks()
     j.BaseFiles()
     j.Durable()
@@ -877,6 +1000,65 @@ def CmdSettleCut(a):
 
 
 # ---------------------------------------------------------------------------
+# crowd — the arithmetic that brings chaingrow's base to both edges
+# ---------------------------------------------------------------------------
+
+
+def CmdCrowd(a):
+    """How many of quilltest crowd's files bring a volume to both edges — the
+    file table one create short of the row its blocks run out at, and the tag
+    registry's last block with room for exactly --room more of crowd's tags —
+    read off volume-read's check of it. A crowd file adds a table row and,
+    when its name is new, a registry record; a name made again adds the row
+    alone. So the base takes FILL new names and then AGAIN of them over: FILL
+    + AGAIN rows and FILL records. The registry is filled a record at a time,
+    one that does not fit starting the next block (tag_registry.c flush), so
+    the FILLs that leave --room are one every PER_BLOCK records from the
+    first, and the least of them that AGAIN ≤ FILL allows is taken. Prints
+    FILL, AGAIN and the numbers, tab-separated.
+
+    --made asks whether the volume is at both edges: it prints how many files
+    the recorded run makes to grow both chains, and the numbers, and answers
+    1 when the volume is not there."""
+    with open(a.check) as fh:
+        d = json.load(fh)
+    ch = d["chains"]
+    nfid = next(c["next_file_id"] for c in d["ledger"]["copies"]
+                if c["copy"] == d["ledger"]["standing_on"])
+    rows = ch["table_rows_per_block"] * len(ch["table"])
+    record = ch["registry_record_header"] + a.name_bytes
+    per_block = ch["registry_block_data"] // record
+    room = (ch["registry_block_data"] - ch["registry_tail_used"]) // record
+    said = ("next_file_id %d; the file table %d block(s), %d rows, so fid %d takes its next block; "
+            "the registry %d block(s), its last (data block %d) %d of %d bytes used — room for %d "
+            "more of crowd's %d-byte records (%d of header, a %d-byte name), %d to a fresh block"
+            % (nfid, len(ch["table"]), rows, rows, len(ch["registry"]), ch["registry"][-1],
+               ch["registry_tail_used"], ch["registry_block_data"], room, record,
+               ch["registry_record_header"], a.name_bytes, per_block))
+    if a.made:
+        if room != a.room or rows - nfid != 1:
+            print("the volume is not at both edges: %s — where 1 row short and room for %d were due"
+                  % (said, a.room), file=sys.stderr)
+            return 1
+        run = max(room, rows - nfid) + 1
+        print("%d\t%s; so %d of crowd's files grow both chains: the last is fid %d, the first row "
+              "past the table's blocks, and its tag the record past the registry's room"
+              % (run, said, run, nfid + run - 1))
+        return 0
+    fids = rows - 1 - nfid
+    fill = next((t for t in range(room - a.room, fids + 1, per_block) if t >= 0 and 2 * t >= fids),
+                None)
+    if fids < 0 or fill is None:
+        print("no FILL and AGAIN of crowd's reach both edges: %s — %d file id(s) to spend" % (said, fids),
+              file=sys.stderr)
+        return 1
+    print("%d\t%d\t%s; so crowd makes %d new names and %d of them again: %d file ids, next_file_id "
+          "%d, and the registry's last block left room for %d" % (fill, fids - fill, said, fill,
+                                                                   fids - fill, fids, rows - 1, a.room))
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # report — what was enumerated, found and booted
 # ---------------------------------------------------------------------------
 
@@ -959,6 +1141,7 @@ def Main():
     s.add_argument("--picks", required=True)
     s.add_argument("--sample", type=int, default=8)
     s.add_argument("--seed", required=True)
+    s.add_argument("--by-kind", action="store_true")
     s = sub.add_parser("judge")
     s.add_argument("dir")
     s.add_argument("--path", required=True)
@@ -967,17 +1150,23 @@ def Main():
     s.add_argument("--hogged", action="store_true")
     s.add_argument("--final-consistent", action="store_true")
     s.add_argument("--waited", type=int, default=0)
+    s.add_argument("--by-kind", action="store_true")
     s = sub.add_parser("settlecut")
     s.add_argument("dir")
     s.add_argument("--path", required=True)
     s.add_argument("--caveat", action="append", default=[])
+    s = sub.add_parser("crowd")
+    s.add_argument("check")
+    s.add_argument("--name-bytes", type=int, required=True)
+    s.add_argument("--room", type=int, required=True)
+    s.add_argument("--made", action="store_true")
     s = sub.add_parser("forge")
     for x in ("list", "log", "out"):
         s.add_argument(x)
     sub.add_parser("selftest")
     a = ap.parse_args()
     if not a.verb:
-        ap.error("say what to do: step, plan, checks, boots, judge, settlecut, forge or selftest")
+        ap.error("say what to do: step, plan, checks, boots, judge, settlecut, crowd, forge or selftest")
     if a.verb in ("selftest", "forge"):
         # The gate judging itself lives beside it, and is handed this very
         # module: the arithmetic tested is the arithmetic the judge runs.
@@ -985,7 +1174,7 @@ def Main():
         return (powercut_selftest.SelfTest(sys.modules[__name__]) if a.verb == "selftest"
                 else powercut_selftest.Forge(a))
     return {"step": CmdStep, "plan": CmdPlan, "checks": CmdChecks, "boots": CmdBoots,
-            "judge": CmdJudge, "settlecut": CmdSettleCut}[a.verb](a)
+            "judge": CmdJudge, "settlecut": CmdSettleCut, "crowd": CmdCrowd}[a.verb](a)
 
 
 if __name__ == "__main__":

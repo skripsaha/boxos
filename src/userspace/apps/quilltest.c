@@ -81,6 +81,7 @@ typedef struct {
     const char   *name;
     const char   *args;      /* the words after the name, as the listing shows them */
     uint32_t      argc;      /* how many words that is */
+    uint32_t      optional;  /* how many of them, at the end, may be left out */
     QuillVerdict (*run)(const char *const *args);   /* NULL: not in this build */
     const char   *asks;
     const char   *leaves;
@@ -661,53 +662,58 @@ static QuillVerdict QuillColdWrite(const char *const *args)
  * ========================================================================= */
 
 static const QuillCase g_cases[] = {
-    { "longquery", "", 0, QuillLongQuery,
+    { "longquery", "", 0, 0, QuillLongQuery,
       "is a query for one tag of 256 bytes, over the tag width, refused rather than answered",
       "nothing", false },
-    { "bigwrite", "", 0, QuillBigWrite,
+    { "bigwrite", "", 0, 0, QuillBigWrite,
       "does one fwrite of 256 MiB, more than the kernel heap, land whole",
       "nothing: quillbig.bin is deleted and the volume anchored", false },
-    { "sequential", "", 0, QUILL_THROWAWAY(QuillSequential),
+    { "sequential", "", 0, 0, QUILL_THROWAWAY(QuillSequential),
       "does one writer's 3 MiB, 4 KiB at a time in a row, fit one file's record",
       "quillS.bin, anchored; on the synchronous path a refused write's block, orphaned", true },
-    { "interleave", "", 0, QUILL_THROWAWAY(QuillInterleave),
+    { "interleave", "", 0, 0, QUILL_THROWAWAY(QuillInterleave),
       "do two files written 4 KiB each in turn, 64 MiB each, stay whole",
       "quillA.bin and quillB.bin, anchored; on the synchronous path a refused block, orphaned",
       true },
-    { "coldread", "", 0, QuillColdRead,
+    { "coldread", "", 0, 0, QuillColdRead,
       "does a read into memory this program never touched deliver every byte it reports",
       "nothing: quillcold.bin is deleted and the volume anchored", false },
-    { "coldwrite", "", 0, QuillColdWrite,
+    { "coldwrite", "", 0, 0, QuillColdWrite,
       "does a write out of memory this program never touched write zeros, and say how many",
       "nothing: quillcold.bin is deleted and the volume anchored", false },
-    { "usememory", "", 0, QUILL_THROWAWAY(QuillUseMemory),
+    { "usememory", "", 0, 0, QUILL_THROWAWAY(QuillUseMemory),
       "is a 1000-byte Use Context remembered across a reboot (run it before and after)",
       "between its halves a remembered context of 91 tags; for good, tags quilu* interned", true },
-    { "fidhistory", "", 0, QUILL_THROWAWAY(QuillFidHistory),
+    { "fidhistory", "", 0, 0, QUILL_THROWAWAY(QuillFidHistory),
       "what 50000 file ids spent on deleted files cost the next mount",
       "50000 file ids spent for good, and their dead records in the pool", true },
-    { "systemtag", "", 0, QUILL_THROWAWAY(QuillSystemTag),
+    { "systemtag", "", 0, 0, QUILL_THROWAWAY(QuillSystemTag),
       "may programs that do not wear system — untag, trash, erase — take the system tag off "
       "kernel.bin and delete it",
       "DESTRUCTIVE: where the answer is yes, kernel.bin is gone and the volume will not boot", true },
-    { "hog", "", 0, QuillHog, "nothing: it computes without end",
+    { "hog", "", 0, 0, QuillHog, "nothing: it computes without end",
       "a cabin spinning until the machine stops; never returns", false },
-    { "settle", "NAME", 1, QuillSettle,
+    { "settle", "NAME", 1, 0, QuillSettle,
       "for the power-cut stand: a write left unanchored beside a hog",
       "DESTRUCTIVE: every file called NAME that does not wear system or boot is deleted first, "
       "whatever it holds; then NAME holding one record, not anchored, and a hog; never returns "
       "while the hog spins", false },
-    { "hogged", "PROGRAM", 1, QuillHogged,
+    { "hogged", "PROGRAM", 1, 0, QuillHogged,
       "is PROGRAM answered while a hog spins (anchor_test: does an anchor answer)",
       "whatever PROGRAM leaves; the hog is ended", false },
-    { "verify", "NAME", 1, QuillVerify,
+    { "verify", "NAME", 1, 0, QuillVerify,
       "does NAME hold the whole record settle or churn wrote", "nothing", false },
-    { "churn", "NAME", 1, QuillChurn, "for the power-cut stand: a writer that never stops",
+    { "churn", "NAME", 1, 0, QuillChurn, "for the power-cut stand: a writer that never stops",
       "NAME, rewritten until the machine stops; never returns", false },
-    { "race", "NAME ROUNDS", 2, QuillRace, "do ROUNDS anchors hold while a churn writes NAME",
+    { "race", "NAME ROUNDS", 2, 0, QuillRace, "do ROUNDS anchors hold while a churn writes NAME",
       "DESTRUCTIVE: every file called NAME that does not wear system or boot is deleted first, "
       "and the anchors make it durable; then NAME, and the churn it started, still writing",
       false },
+    { "crowd", "N [FROM]", 2, 1, QuillCrowd,
+      "for the power-cut stand: N files, each wearing a tag no other file wears, so each adds "
+      "one record to the tag registry and one row to the file table",
+      "N files crowdNNNNNNNNNN numbered from FROM (0 when it is not given), anchored; a file "
+      "already called one of those names is deleted first and made again", false },
 };
 
 #define QUILL_CASE_COUNT ((uint32_t)(sizeof(g_cases) / sizeof(g_cases[0])))
@@ -738,9 +744,13 @@ int main(void)
                asked, QUILL_CASE_COUNT);
         return 1;
     }
-    if (words - 2 != c->argc) {
-        printf("[QUILL] %s: FAIL — it takes %u word(s) after its name (%s) and was given %u\n",
-               c->name, c->argc, c->argc ? c->args : "none", words - 2);
+    if (words - 2 > c->argc || words - 2 + c->optional < c->argc) {
+        if (c->optional)
+            printf("[QUILL] %s: FAIL — it takes %u to %u words after its name (%s) and was "
+                   "given %u\n", c->name, c->argc - c->optional, c->argc, c->args, words - 2);
+        else
+            printf("[QUILL] %s: FAIL — it takes %u word(s) after its name (%s) and was given %u\n",
+                   c->name, c->argc, c->argc ? c->args : "none", words - 2);
         return 1;
     }
 
