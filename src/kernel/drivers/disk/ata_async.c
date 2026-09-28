@@ -16,6 +16,10 @@
  *      │     stamp the channel's `landing` slot with the completed cmd
  *      └── EOI handled by IDT dispatcher
  *
+ *    the waiting caller (ata_dma_sync) looks at BMISR.IRQ itself too
+ *      └── BmideAnswerHere: the same retire, under the same cmd_lock, so the
+ *          answer never waits for the core the interrupt is routed to
+ *
  *    the waiting caller (ata_dma_sync) claims `landing` → ata_run_completion
  *      ├── if read & OK: memcpy DMA staging → user_buf
  *      ├── lock channel, pop next wait_head → in_flight; unlock; kick_dma
@@ -112,10 +116,11 @@ typedef struct AtaCmd {
     uint64_t       submit_tsc;
 
     /* Set to 1 (under cmd_lock) by whoever classifies this cmd's completion —
-     * the IRQ handler OR the watchdog's TIER-1 reconcile. It is the arbiter
-     * that keeps the periodic watchdog scan from mis-judging a just-completed
-     * cmd (in_flight still points at it until its bottom-half runs) as a fresh
-     * wedge: the scan only ever acts on an UN-reconciled in_flight cmd. */
+     * the IRQ handler, a waiter's own look (BmideAnswerHere) OR the watchdog's
+     * TIER-1 reconcile. It is the arbiter that keeps the periodic watchdog
+     * scan from mis-judging a just-completed cmd (in_flight still points at it
+     * until its bottom-half runs) as a fresh wedge: the scan only ever acts on
+     * an UN-reconciled in_flight cmd. */
     volatile uint8_t  reconciled;
 
     struct AtaCmd *next;
@@ -138,6 +143,9 @@ typedef struct AtaAsyncCh {
     volatile uint64_t cmds_submitted;
     volatile uint64_t cmds_completed;
     volatile uint64_t cmds_failed;
+    /* Interrupts that found nothing to retire — including the edge of every
+     * command its waiter retired by hand first (BmideAnswerHere), which still
+     * reaches the BSP afterwards. Telemetry, never a verdict. */
     volatile uint64_t spurious_irqs;
 
     /* Ф26 landing — per-channel single-slot NEVER-DROP completion mailbox.
@@ -449,9 +457,10 @@ static void ata_run_completion(AtaAsyncCh *aa, AtaCmd *cmd) {
  *  Caller holds cmd_lock and has already established, under that lock, that
  *  aa->in_flight is non-NULL, un-reconciled, and its INTRQ is asserted
  *  (`bmsr` is that same snapshot, IRQ bit set). Invoked identically by the
- *  raw IRQ handler and by the watchdog's TIER-1 lost-INTRQ reconcile, so a
- *  completion is retired by exactly one of them (whoever W1Cs the engine
- *  first clears BMISR.IRQ; the other then reads it clear and no-ops).
+ *  raw IRQ handler, by the waiter's own look (BmideAnswerHere) and by the
+ *  watchdog's TIER-1 lost-INTRQ reconcile, so a completion is retired by
+ *  exactly one of them (whoever W1Cs the engine first clears BMISR.IRQ; the
+ *  others then read it clear and no-op).
  *
  *  It stamps the never-drop `landing` slot; the waiting caller claims it.
  * ------------------------------------------------------------------ */
@@ -521,9 +530,9 @@ static void ata_channel_irq_process(uint8_t ch_idx) {
     AtaCmd *cmd = aa->in_flight;
     if (!cmd || __atomic_load_n(&cmd->reconciled, __ATOMIC_RELAXED)) {
         /* IRQ but nothing outstanding to retire (idle channel, or the
-         * watchdog already reconciled this cmd and its bottom-half has yet
-         * to move in_flight along) — clear drive latch + BMISR + stop
-         * engine, then drop the line. */
+         * watchdog or the cmd's waiter already reconciled it and its
+         * bottom-half has yet to move in_flight along) — clear drive latch
+         * + BMISR + stop engine, then drop the line. */
         if (g_ata_channels[ch_idx].present) {
             (void)inb(g_ata_channels[ch_idx].cmd_base + ATA_REG_STATUS);
         }
@@ -725,8 +734,41 @@ static bool async_path_viable(void) {
 }
 
 /* ---------------------------------------------------------------------
- *  Sync wrapper — submit + IRQ-wait, polled fallback before the IRQ path
- *  is viable
+ *  The waiter's own look at its channel
+ *
+ *  The drive answers a bus-master DMA with its INTRQ, and the controller
+ *  latches that in BMISR.IRQ whether or not any core takes the interrupt it
+ *  raises — while the IO-APIC routes the interrupt to the BSP alone. A wait
+ *  that only the BSP's interrupt could finish had to turn interrupts on
+ *  (`sti`) under whatever lock its caller held, and still waited for good
+ *  whenever the BSP spun with its own off: on that very lock, or in a halt's
+ *  roll call. So the waiter reads the latch itself and retires what it finds
+ *  by the same body, under the same cmd_lock, as the IRQ handler and the
+ *  tick's TIER 1: whoever W1Cs the engine first retires the command, and the
+ *  others read the latch clear. The interrupt that still reaches the BSP
+ *  afterwards finds nothing and is counted in spurious_irqs.
+ *
+ *  A trylock, because whoever holds cmd_lock is retiring, moving the queue
+ *  along, recovering or kicking the engine, and the waiter comes round again
+ *  anyway. It leaves the caller's interrupts as they were: spin_trylock turns
+ *  them off only while it holds the lock, so the IRQ handler never meets it
+ *  on this core.
+ * ------------------------------------------------------------------ */
+static void BmideAnswerHere(AtaAsyncCh *aa) {
+    if (!spin_trylock(&aa->cmd_lock)) return;
+    if (!__atomic_load_n(&aa->recovering, __ATOMIC_RELAXED)) {
+        AtaCmd *cmd = aa->in_flight;
+        if (cmd && !__atomic_load_n(&cmd->reconciled, __ATOMIC_RELAXED)) {
+            uint8_t bmsr = inb(aa->bmide_base + BMIDE_REG_STATUS);
+            if (bmsr & BMISR_IRQ) bmide_complete_locked(aa, bmsr);
+        }
+    }
+    spin_unlock(&aa->cmd_lock);
+}
+
+/* ---------------------------------------------------------------------
+ *  Sync wrapper — submit and wait for the drive's answer, polled fallback
+ *  before the IRQ path is viable
  * ------------------------------------------------------------------ */
 int ata_dma_sync(uint8_t drive_idx, uint64_t lba, uint16_t count,
                  bool is_write, void *buf)
@@ -752,7 +794,7 @@ int ata_dma_sync(uint8_t drive_idx, uint64_t lba, uint16_t count,
         return bmide_transfer_polled(&cmd);
     }
 
-    /* IRQ-driven path. submit, then wait on done via sti;hlt. */
+    /* IRQ-driven path: submit, then wait for done. */
     error_t srq = submit_internal(&cmd);
     if (srq != OK) {
         /* The channel's queue is full. Nothing timed out and nothing about
@@ -764,30 +806,33 @@ int ata_dma_sync(uint8_t drive_idx, uint64_t lba, uint16_t count,
         return ATA_ERR_DRIVE_FAULT;
     }
 
-    /* Wait loop. sti once and spin-pause — HLT would only wake on an IRQ
-     * targeting THIS core, but the BMIDE IRQ is routed point-to-point to the
-     * BSP via the IO-APIC; a K-Core caller would HLT forever. sti keeps IF=1
-     * so the IRQ can reach the BSP and stamp `landing`.
+    /* The wait, with interrupts exactly as the caller left them (off, when
+     * it holds a spin_lock), and needing none on any core. Each turn claims
+     * whatever completion has landed on the channel (an ACQ_REL XCHG of
+     * `landing`) and runs its bottom half; the claimed `c` may be ANOTHER
+     * waiter's cmd on this channel, and that is correct and necessary:
+     * whoever is awake runs the completion that landed. Otherwise the turn
+     * looks at the channel's interrupt latch itself (BmideAnswerHere), so a
+     * BSP spinning with its interrupts off — on a lock this caller holds, or
+     * in a halt's roll call — cannot strand the command whose interrupt only
+     * it would take. A caller with interrupts off takes no shootdown IPI
+     * either, so the wait answers shootdowns by hand, as ata_poll_pause does.
      *
-     * Never-drop delivery: the completion IRQ stamps this channel's `landing`
-     * slot, and we CLAIM it here via
-     * an ACQ_REL XCHG and run the bottom-half ourselves. Because the lock-
-     * holder drains its own completion, a BSP stuck spinning on a lock this
-     * caller holds can never strand it — the textbook BMIDE × write_lock
-     * deadlock is structurally impossible, with one atomic word instead of an
-     * MPMC ring. The claimed `c` may be ANOTHER waiter's cmd on this channel
-     * (we drain whatever landed, not necessarily our own) — correct and
-     * necessary: whoever is awake runs the completion that landed.
-     *
-     * No deadline / no timeout: the stack `cmd` is valid until we observe
-     * done; a wedged drive spins forever (orthogonal — the SRST watchdog is a
-     * separate follow-up, and `landing` is the seam it will reuse). Healthy
-     * drives complete in <1 ms. */
+     * No deadline: the stack `cmd` is live until done is observed. A drive
+     * that never answers is the watchdog's (bmide_watchdog_scan, TIER 2),
+     * which fails the command ERR_IO after an SRST — but the watchdog runs on
+     * the BSP's tick and its reset on the BSP's batons, so a wedged drive is
+     * still waited for without end while the BSP keeps its interrupts off.
+     * Healthy drives complete in <1 ms. */
     AtaAsyncCh *aa = &g_ata_async[cmd.channel];
-    asm volatile("sti" ::: "memory");
     while (!__atomic_load_n(&cmd.done, __ATOMIC_ACQUIRE)) {
         AtaCmd *c = __atomic_exchange_n(&aa->landing, NULL, __ATOMIC_ACQ_REL);
-        if (c) ata_run_completion(aa, c);
+        if (c) {
+            ata_run_completion(aa, c);
+            continue;
+        }
+        BmideAnswerHere(aa);
+        vmm_tlb_shootdown_poll();
         cpu_pause();
     }
 

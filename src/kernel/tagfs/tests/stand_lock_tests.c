@@ -327,11 +327,12 @@ static inline void StandFlagsBack(uint64_t flags)
 
 /* Eight sectors of the volume read by a caller that turned its interrupts
  * off — which is what every caller holding a TagFS lock has done. On the
- * legacy IDE channels the read is a bus-master DMA that completes with an
- * interrupt routed to the boot core, and the wait for it turned interrupts on
- * so that interrupt could arrive: under the caller's lock, on the caller's
- * core. What the caller's interrupts are when the read comes back is the
- * answer. The buffer is taken before interrupts go off. */
+ * legacy IDE channels the read is a bus-master DMA whose interrupt is routed
+ * to the boot core; a wait that turned interrupts on so that interrupt could
+ * arrive would do it under the caller's lock, on the caller's core, and that
+ * is the defect this test stands for. What the caller's interrupts are when
+ * the read comes back is the answer. The buffer is taken before interrupts go
+ * off. */
 static TestResult TestStandDmaWaitKeepsTheCallersInterrupts(void)
 {
     TestResult verdict = TEST_PASS;
@@ -406,7 +407,6 @@ static const TestCase g_stand_lock_tests[] = {
     { .name  = "stand_dma_wait_keeps_the_callers_interrupts",
       .func  = TestStandDmaWaitKeepsTheCallersInterrupts,
       .reach = TEST_READS_ONLY,
-      .caveat_step   = "1.1",
       .caveat_defect = "a legacy-IDE DMA wait turns interrupts on under its caller's lock because "
                        "only the BSP's interrupt can finish it" },
 };
