@@ -129,7 +129,6 @@ caveat_row() {
         lockrank:integrity@IntegrityVerify/readahead@ReadAheadInvalidate|\
         lockrank:integrity@IntegrityUpdate/readahead@ReadAheadInvalidate|\
         lockrank:integrity@IntegrityUpdate/readahead@ReadAheadLookup|\
-        lockrank:integrity@IntegrityUpdate/readahead@ReadAheadInvalidate|\
         lockrank:integrity@IntegrityFlush/readahead@ReadAheadInvalidate|\
         lockrank:integrity@IntegrityVerify/braid@BraidIsHealthy|\
         lockrank:integrity@IntegrityUpdate/braid@BraidIsHealthy|\
