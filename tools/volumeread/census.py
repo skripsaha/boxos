@@ -224,7 +224,7 @@ class KernelView:
                               % (led["free_blocks"], self.free))
 
     def _LedgerWrite(self, why):
-        """ledger_write_locked (tagfs.c): the older copy, seq + 1."""
+        """LedgerStroke (ledger.c): the older copy, seq + 1."""
         self.current = (self.current + 1) % LEDGER_COPIES
         self.seq += 1
         self.writes.append(("ledger copy %u at seq %u (%s)" % (self.current, self.seq, why), []))
@@ -400,18 +400,18 @@ class GroundCensus:
         bad = [c for c in f.ledgers if not c["ok"]]
         if len(bad) == LEDGER_COPIES:
             self.Say("LEDGER_NONE", "damage", "neither ledger copy is readable — copy 0 %s, copy 1 "
-                     "%s — and the kernel refuses the mount (tagfs.c ledger_load); the ownership "
+                     "%s — and the kernel refuses the mount (ledger.c ledger_load); the ownership "
                      "sweep is not run, because the ledger names blocks nothing else can"
                      % (bad[0]["why"], bad[1]["why"]))
         elif bad:
             self.Say("LEDGER_TORN", "note", "ledger copy %u %s — the kernel runs on copy %u "
-                     "(seq %u) alone (tagfs.c ledger_load)" % (bad[0]["copy"], bad[0]["why"],
+                     "(seq %u) alone (ledger.c ledger_load)" % (bad[0]["copy"], bad[0]["why"],
                                                             f.ledger["copy"], f.ledger["seq"]))
         for c in f.ledgers:
             if c["ok"] and c["use_misplaced"]:
                 self.Say("LEDGER_USE_MISPLACED", "note", "ledger copy %u places its Use Context at "
                          "%u for %u bytes, outside its own record — it remembers none "
-                         "(tagfs.c ledger_read_copy)" % (c["copy"], c["use_context_offset"],
+                         "(ledger.c ledger_read_copy)" % (c["copy"], c["use_context_offset"],
                                                   c["use_context_bytes"]))
 
     def _DiskBook(self):

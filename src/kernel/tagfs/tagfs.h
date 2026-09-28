@@ -19,6 +19,7 @@
 #include "cow/cow.h"
 #include "dedup/dedup.h"
 #include "self_heal/self_heal.h"
+#include "ledger/ledger.h"
 
 // ============================================================================
 // TagFS Constants — Production Configuration
@@ -603,41 +604,6 @@ error_t  tagfs_write_block(uint32_t block, const void* buffer);
  * The sync write path calls this internally; the async path (write_job) must
  * call it after each block write since it bypasses tagfs_write_block. */
 void     tagfs_readahead_invalidate(uint32_t block);
-
-/*
- * Write the Ledger back — the counters, not the identity.
- *
- * It goes to whichever of the two copies is currently older, with a sequence
- * number one higher than the newer one, so the copy that is intact is never
- * the copy being overwritten. See volume_ledger.h.
- */
-error_t  tagfs_write_ledger(void);
-
-/*
- * The Use Context the volume remembers — what its person was doing when they
- * left (volume_ledger.h). Kept in the Ledger and written with it.
- *
- * remember: say `list` (comma-joined tag names, `len` bytes, no NUL; len 0
- * says none) to the volume and write the Ledger. *remembered reports whether
- * the volume now holds exactly this list — false when the medium would not
- * take the write, or when the list is longer than the record holds, in which
- * case the volume forgets rather than keeping half. Takes no door: the
- * caller is inside the volume already (use_context.c takes it).
- *
- * recall: copy what the volume remembers into `buf` when it fits `cap`;
- * returns the byte length either way (0 = none), so a caller can size one.
- *
- * peek: one copy of the Ledger read off the medium by the Ledger's own
- * reader, its remembered context included — a proof, not a way in.
- */
-error_t  tagfs_remember_use_context(const char *list, size_t len, bool *remembered);
-size_t   tagfs_recall_use_context(char *buf, size_t cap);
-bool     tagfs_ledger_peek(uint32_t copy, VolumeLedger *out, char *tail, uint16_t *tail_len);
-
-/* The Ledger's one-writer lock. Taken nowhere outside tagfs.c: the stand reads
- * its Witnessed count to see whether a Ledger write crossed the medium under
- * it (stand_lock_tests.c). */
-extern TagFSLock g_ledger_lock;
 
 /*
  * Read one sector run of the mounted volume, counted from the start of its

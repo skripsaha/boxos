@@ -7574,8 +7574,6 @@ stand_open_refuses_unread_metadata|1.4|one-block file opened as empty at refused
 stand_open_joins_the_writers|1.5|handle with no open-file entry at refused allocation 1|opens whole or refused, allocations refused 6
 stand_frozen_block_freed_twice|1.3|blocks the allocator was given back twice 1|blocks the allocator was given back twice 0
 stand_registry_flush_holds_no_lock|1.1|registry flushes of one new name that crossed the medium holding the registry's lock 1|registry flushes of one new name that crossed the medium holding the registry's lock 0
-stand_ledger_writes_outside_its_lock|1.1|Ledger writes of one that crossed the medium holding the Ledger's lock 1|Ledger writes of one that crossed the medium holding the Ledger's lock 0
-stand_integrity_pages_outside_its_lock|1.1|17-page runs of block writes whose map paging crossed the medium under a lock 1|17-page runs of block writes whose map paging crossed the medium under a lock 0
 stand_cow_question_asks_no_medium|1.1|reads of a file's metadata block the copy-on-write question asked, no snapshot standing 1|reads of a file's metadata block the copy-on-write question asked, no snapshot standing 0
 stand_redirect_log_leaves_the_flush|1.1|cache flushes asked inside 64 redirects, under the copy-on-write lock 1|cache flushes asked inside 64 redirects, under the copy-on-write lock 0
 stand_dma_wait_keeps_the_callers_interrupts|1.1|DMA reads that turned interrupts on under a caller that had them off 1|DMA reads that turned interrupts on under a caller that had them off 0|bios
@@ -7802,15 +7800,17 @@ run_stand() {
 # asked, an asynchronous refusal returned instead of called back, HEAPFAIL
 # asked after the slab, counting without refusing, blind to the core, the tag
 # row's PF-1 fix taken out, and a test that forgets to take its fault down
-# (the runner must take it down and fail it). LockRank, which the lock tests
-# count with, the same: its witness keyed on a bare IF instead of a TagFS lock
-# held, and its order never checked. The flush tickets and the Scribe the
-# same: a refused flush that moves the mark, a count of kept flushes, a need
-# that is the last flush begun, a pass that publishes every ask, a Scribe
-# this core holds waited for like any other, a drain core that runs no baton
-# while it waits, and a Give that never lets the scheduler go. Mutations
-# whose tests do not meet each other's share a boot; each is judged by its
-# own test's own line, number and all.
+# (the runner must take it down and fail it). A caveat a step lifted the same:
+# its defect put back, its test says the defect is back — the Ledger written,
+# and the integrity map paged in, under their own locks again. LockRank,
+# which the lock tests count with, the same: its witness keyed on a bare IF
+# instead of a TagFS lock held, and its order never checked. The flush
+# tickets and the Scribe the same: a refused flush that moves the mark, a
+# count of kept flushes, a need that is the last flush begun, a pass that
+# publishes every ask, a Scribe this core holds waited for like any other, a
+# drain core that runs no baton while it waits, and a Give that never lets
+# the scheduler go. Mutations whose tests do not meet each other's share a
+# boot; each is judged by its own test's own line, number and all.
 #
 # And the runner is only worth believing if it cannot be made to pass what it
 # should fail. A failed assertion must say where, and what it saw — shown by
@@ -7905,38 +7905,34 @@ edits = [
      "                    handle->extents = split;\n"
      "                    handle->extent_count++;\n"
      "                }\n"),
-    # 1.6: a Use Context longer than the Ledger's record is still the volume's.
-    # The step keeps it whole on the medium (its own block); what the test asks
-    # is the volume's answer, and this gives that answer while the record
-    # carries only what fits of it.
-    ("    bool fits = len <= LEDGER_USE_MAX;\n",
-     "    bool fits = len <= sizeof(g_ledger_use);   /* logcheck mutation: a Use Context longer than the record is still remembered */\n"),
-    ("    led.use_context_offset = g_ledger_use_len ? (uint16_t)sizeof(VolumeLedger) : 0;\n"
-     "    led.use_context_bytes  = g_ledger_use_len;\n"
-     "    led.bytes        = (uint32_t)sizeof(VolumeLedger) + g_ledger_use_len;\n"
-     "    led.crc32        = 0;\n"
-     "    memcpy(buf, &led, sizeof(led));\n"
-     "    memcpy(buf + sizeof(led), g_ledger_use, g_ledger_use_len);\n",
-     "    uint16_t put = g_ledger_use_len <= LEDGER_USE_MAX ? g_ledger_use_len : 0;   /* logcheck mutation: the record carries what fits */\n"
-     "    led.use_context_offset = put ? (uint16_t)sizeof(VolumeLedger) : 0;\n"
-     "    led.use_context_bytes  = put;\n"
-     "    led.bytes        = (uint32_t)sizeof(VolumeLedger) + put;\n"
-     "    led.crc32        = 0;\n"
-     "    memcpy(buf, &led, sizeof(led));\n"
-     "    memcpy(buf + sizeof(led), g_ledger_use, put);\n"),
-    # 1.1: the Ledger is written outside its lock
-    ("    if (disk_write_sectors(ledger_vlba(target), 1, buf) != OK) {\n",
-     "    TagFSLockDrop(&g_ledger_lock);   /* logcheck mutation: the Ledger's write leaves its lock */\n"
-     "    int landed = disk_write_sectors(ledger_vlba(target), 1, buf);\n"
-     "    TagFSLockTake(&g_ledger_lock);\n"
-     "    if (landed != OK) {\n"),
 ]
 for a, m in edits:
     assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
     s = s.replace(a, m, 1)
 open(p, "w").write(s)
 EOF
-    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 13
+    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 10
+
+    # 1.6: a Use Context longer than the Ledger's record is still the volume's.
+    # The step keeps it whole on the medium (its own block); what the test asks
+    # is the volume's answer, and this gives that answer while the record
+    # carries only what fits of it.
+    mutate src/kernel/tagfs/ledger/ledger.c
+    python3 - <<'EOF'
+p = "src/kernel/tagfs/ledger/ledger.c"
+s = open(p).read()
+edits = [
+    ("    bool fits = len <= LEDGER_USE_MAX;\n",
+     "    bool fits = len <= sizeof(g_ledger_use);   /* logcheck mutation: a Use Context longer than the record is still remembered */\n"),
+    ("    uint16_t use_len = g_ledger_use_len;\n",
+     "    uint16_t use_len = g_ledger_use_len <= LEDGER_USE_MAX ? g_ledger_use_len : 0;   /* logcheck mutation: the record carries what fits */\n"),
+]
+for a, m in edits:
+    assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
+    s = s.replace(a, m, 1)
+open(p, "w").write(s)
+EOF
+    mut_done src/kernel/tagfs/ledger/ledger.c "logcheck mutation" 2
 
     # 1.1: nothing under the registry's lock reaches the medium, and a new
     # block is taken and stamped before anything links it; a registry that is
@@ -8119,39 +8115,24 @@ open(p, "w").write(s)
 EOF
     mut_done src/kernel/tagfs/tag_bitmap/tag_bitmap.c "logcheck mutation" 1
 
-    # 1.10: the report ring holds every rot the test plants. 1.1: the map's
-    # paging leaves the map's lock.
+    # 1.10: the report ring holds every rot the test plants.
     mutate src/kernel/tagfs/integrity/integrity.c
     python3 - <<'EOF'
 p = "src/kernel/tagfs/integrity/integrity.c"
 s = open(p).read()
-edits = [
-    ("#define ROT_RING_MAX      64\n",
-     "#define ROT_RING_MAX      128   /* logcheck mutation: the ring holds every rot the test plants */\n"),
-    ("        if (tagfs_write_block(g_map_first_block + v->map_idx, buf) != OK) {\n",
-     "        TagFSLockDrop(&g_lock);   /* logcheck mutation: the map's paging leaves its lock */\n"
-     "        error_t put = tagfs_write_block(g_map_first_block + v->map_idx, buf);\n"
-     "        TagFSLockTake(&g_lock);\n"
-     "        if (put != OK) {\n"),
-    ("    if (tagfs_read_block(g_map_first_block + idx, buf) != OK)\n        return NULL;\n",
-     "    TagFSLockDrop(&g_lock);   /* logcheck mutation: the map's paging leaves its lock */\n"
-     "    error_t got = tagfs_read_block(g_map_first_block + idx, buf);\n"
-     "    TagFSLockTake(&g_lock);\n"
-     "    if (got != OK)\n        return NULL;\n"),
-]
-for a, m in edits:
-    assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
-    s = s.replace(a, m, 1)
-open(p, "w").write(s)
+a = "#define ROT_RING_MAX      64\n"
+assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
+open(p, "w").write(s.replace(a, "#define ROT_RING_MAX      128   /* logcheck mutation: the ring holds every rot the test plants */\n", 1))
 EOF
-    mut_done src/kernel/tagfs/integrity/integrity.c "logcheck mutation" 3
+    mut_done src/kernel/tagfs/integrity/integrity.c "logcheck mutation" 1
 }
 stand_fix_off() {
     local f
     for f in src/kernel/tagfs/tagfs.c src/kernel/tagfs/tag_bitmap/tag_bitmap.c \
              src/kernel/tagfs/integrity/integrity.c src/kernel/tagfs/tag_registry/tag_registry.c \
              src/kernel/tagfs/file_table/file_table.c src/kernel/tagfs/cow/cow.c \
-             src/kernel/tagfs/disk_book/disk_book.c src/kernel/drivers/disk/ata_async.c; do
+             src/kernel/tagfs/disk_book/disk_book.c src/kernel/drivers/disk/ata_async.c \
+             src/kernel/tagfs/ledger/ledger.c; do
         restore "$f"
     done
 }
@@ -8173,6 +8154,7 @@ stand_mech_on() {
         lands)  marks="src/kernel/core/boardroom/boardroom.c:2 src/kernel/tagfs/tag_bitmap/tag_bitmap.c:1" ;;
         blind)  marks="src/kernel/tagfs/tests/tests.c:2 src/kernel/tagfs/tests/core_tests.c:1" ;;
         lockrank) marks="src/kernel/tagfs/lock_rank/lock_rank.c:2" ;;
+        underlock) marks="src/kernel/tagfs/ledger/ledger.c:1 src/kernel/tagfs/integrity/integrity.c:1" ;;
         scribe)    marks="src/kernel/tagfs/scribe/scribe.c:4" ;;
         flushsum)  marks="src/kernel/tagfs/scribe/scribe.c:3" ;;
         flushneed) marks="src/kernel/tagfs/scribe/scribe.c:1" ;;
@@ -8242,6 +8224,17 @@ edits = {
    "        if (lock->Rank == LOCK_RANK_NONE || h->Rank < lock->Rank)\n            continue;\n",
    "        continue;   /* " + M + ": the order is never checked */\n"),
  ],
+ "underlock": [
+  ("src/kernel/tagfs/ledger/ledger.c",
+   "    int wrote = tagfs_volume_write(ledger_vlba(slot), 1, sector);\n",
+   "    TagFSLockTake(&g_ledger_lock);   /* " + M + ": the Ledger's write is back under its lock */\n"
+   "    int wrote = tagfs_volume_write(ledger_vlba(slot), 1, sector);\n"
+   "    TagFSLockDrop(&g_ledger_lock);\n"),
+  ("src/kernel/tagfs/integrity/integrity.c",
+   "    TagFSLockDropAt(&g_lock, site);\n\n    error_t got = tagfs_read_block(at, g_page[s]);\n\n    TagFSLockTakeAt(&g_lock, site);\n",
+   "    /* " + M + ": the map's page comes in under its lock again */\n"
+   "    error_t got = tagfs_read_block(at, g_page[s]);\n\n"),
+ ],
  "scribe": [
   ("src/kernel/tagfs/scribe/scribe.c",
    "    if (!kept)\n        return;\n    uint64_t cur = __atomic_load_n(&g_flush_kept, __ATOMIC_RELAXED);\n",
@@ -8299,7 +8292,8 @@ stand_mech_off() {
              src/kernel/tagfs/tests/stand_tests.c src/kernel/core/boardroom/boardroom.c \
              src/kernel/tagfs/tag_bitmap/tag_bitmap.c src/kernel/tagfs/tests/tests.c \
              src/kernel/tagfs/tests/core_tests.c src/kernel/tagfs/lock_rank/lock_rank.c \
-             src/kernel/tagfs/scribe/scribe.c; do
+             src/kernel/tagfs/scribe/scribe.c src/kernel/tagfs/ledger/ledger.c \
+             src/kernel/tagfs/integrity/integrity.c; do
         restore "$f"
     done
 }
@@ -8454,6 +8448,18 @@ STAND_HELD_EOF
             'stand_lockrank_names_the_medium failed at [^:]+:[0-9]+: a read that holds no TagFS lock is not witnessed, interrupts off or not \(1, 0\)'
         stand_red standmut_lockrank "an order never checked takes a state-rank lock under a leaf and says nothing" \
             'stand_lockrank_names_the_order failed at [^:]+:[0-9]+: a state-rank lock taken under a leaf, twice, is out of order twice \(0, 2\)'
+    fi
+    stand_mech_off
+
+    # Step 1.1 lifted the caveats of the Ledger's write and of the map's
+    # paging: each put back under its own lock, the test says the defect it
+    # stands for is back, with the number it saw.
+    stand_mech_on underlock
+    if stand_mut_boot standmut_underlock CORES=4 MEM=4G; then
+        stand_red standmut_underlock "the Ledger written under its lock again is the defect back" \
+            'stand_ledger_writes_outside_its_lock failed: the defect it stands for is back — .* \(Ledger writes of one that crossed the medium holding the Ledger.s lock 1\)'
+        stand_red standmut_underlock "the map paged in under its lock again is the defect back" \
+            'stand_integrity_pages_outside_its_lock failed: the defect it stands for is back — .* \(17-page runs of block writes whose map paging crossed the medium under a lock 1\)'
     fi
     stand_mech_off
 
