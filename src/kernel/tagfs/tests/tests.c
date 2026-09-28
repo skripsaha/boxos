@@ -93,11 +93,6 @@ void fill_random(void* buffer, uint32_t size)
         buf[i] = (uint8_t)(i ^ (i >> 3) ^ (i >> 7));
 }
 
-void fill_zeros(void* buffer, uint32_t size)
-{
-    memset(buffer, 0, size);
-}
-
 void fill_pattern(void* buffer, uint32_t size, uint8_t pattern)
 {
     memset(buffer, pattern, size);

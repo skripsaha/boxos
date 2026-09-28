@@ -95,7 +95,6 @@ typedef struct {
 
 #define TEST_SUITES(SUITE) \
     SUITE(core)            \
-    SUITE(compression)     \
     SUITE(journal)         \
     SUITE(snapshot)        \
     SUITE(stress)          \
@@ -197,7 +196,6 @@ int TestFileWrite(uint32_t file_id, const void* data, uint32_t bytes);
 int TestFileRead(uint32_t file_id, void* buffer, uint32_t capacity);
 
 void fill_random(void* buffer, uint32_t size);
-void fill_zeros(void* buffer, uint32_t size);
 void fill_pattern(void* buffer, uint32_t size, uint8_t pattern);
 
 /* Four blocks each, shared by the suites. The runner is single-threaded at

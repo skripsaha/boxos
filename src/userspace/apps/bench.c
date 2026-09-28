@@ -478,7 +478,7 @@ static int b_touch_await_fastpath(uint32_t i, void *ctx)
     return touch_await(s_rtt_tag, &t, 100);
 }
 
-/* (9) Storage: file create + write 64 B + delete. Hits TagFS, BCDC,
+/* (9) Storage: file create + write 64 B + delete. Hits TagFS and
  *     possibly disk I/O via AHCI/PIO. The slowest path BoxOS has end-to-
  *     end. Each iteration uses a unique filename so the tagfs allocator
  *     is exercised, not just an inode rewrite.
@@ -621,7 +621,7 @@ int main(void)
     bench_run("chain 1000-op Manifest (1 syscall)", b_chain_bulk, NULL, 50);
 
     /* Slow path: storage. Keep iters modest so we don't overrun the
-     * journal or thrash BCDC. */
+     * journal. */
     bench_run("create+write64+delete (TagFS+disk)", b_file_cycle, NULL, 50);
 
     println("");

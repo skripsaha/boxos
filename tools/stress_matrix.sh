@@ -330,7 +330,7 @@ run_config() {
     # inside legitimate identifiers don't trip it.
     app_fail=$(grep -cE  "\[(mtest|chain|COW|LIFECYCLE|WO|WC|WS|TT|decks|STRESS|CXX|CURRENT|STRAND|htest|USE|LUGGAGE)[^]]*\].*(\\bFAIL\\b|\\bfail\\b)" build/serial.log)
 
-    # The kernel's own boot self-test (TagFS core, BCDC, journal, snapshot,
+    # The kernel's own boot self-test (TagFS core, journal, snapshot,
     # CoW, BoxHash, integrity, dedup). It runs on EVERY boot in EVERY config
     # and its verdict used to gate nothing at all — a config where the
     # filesystem's own suite failed still came out green here.
