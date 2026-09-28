@@ -633,6 +633,11 @@ error_t  tagfs_remember_use_context(const char *list, size_t len, bool *remember
 size_t   tagfs_recall_use_context(char *buf, size_t cap);
 bool     tagfs_ledger_peek(uint32_t copy, VolumeLedger *out, char *tail, uint16_t *tail_len);
 
+/* The Ledger's one-writer lock. Taken nowhere outside tagfs.c: the stand reads
+ * its Witnessed count to see whether a Ledger write crossed the medium under
+ * it (stand_lock_tests.c). */
+extern TagFSLock g_ledger_lock;
+
 /*
  * Read one sector run of the mounted volume, counted from the start of its
  * ground rather than from the start of the medium.

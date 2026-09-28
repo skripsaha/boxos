@@ -2,13 +2,19 @@
 #define TAGFS_STAND_TESTS_H
 
 #include "tests.h"
+#include "../tagfs.h"
 
 // ============================================================================
-// The stand suite — the two files it is written in, and what they share
+// The stand — the files it is written in, and what they share
 //
 // stand_tests.c          the helpers below, the self-tests of BLOCKFAIL and
 //                        HEAPFAIL, the tag-row precondition, and the table
 // stand_caveat_tests.c   the tests that hold a known defect under a caveat
+// stand_lock_tests.c     the stand_lock suite: what crosses the medium, or
+//                        turns interrupts on, under a lock that must not allow it
+// stand_chain_tests.c    the stand_chain suite: the registry's and the file
+//                        table's chains as they grow, and registries that are
+//                        not the volume's; and the chain walk below
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.
@@ -38,6 +44,38 @@ int  StandWriteAt(uint32_t file_id, uint64_t offset, const void* data, uint32_t 
 
 /* Whether the allocator's bitmap calls a data-run block taken. */
 bool StandBlockInUse(uint32_t block);
+
+/* The newest intact Ledger's sequence number, read off the medium by the
+ * Ledger's own reader; 0 when neither copy reads. */
+uint64_t StandLedgerSeq(void);
+
+/* The file's row of the file table as the MEDIUM holds it, and the data-run
+ * block that carries it (out_block may be NULL). False when the chain on the
+ * medium does not reach the row. */
+bool StandTableRowOnMedium(uint32_t file_id, FileTableEntry* out, uint32_t* out_block);
+
+/*
+ * One metadata chain — the registry's, the file table's or the pool's — as
+ * the MEDIUM holds it, walked from the head the Deed names (a volume block) by
+ * the magic and next link every block of the three carries at offsets 0 and 4.
+ * The walk stops at a link of zero, at a block without the magic (broken, and
+ * where), or after as many hops as the data run has blocks.
+ */
+typedef struct {
+    uint32_t  links;        /* blocks walked that carry the magic */
+    uint32_t  last;         /* the last of them, a block of the data run */
+    bool      broken;       /* a link named a block without the magic */
+    uint32_t  broken_at;    /* that block */
+    uint32_t* blocks;       /* the caller's room for the links in chain order, or NULL */
+    uint32_t  capacity;     /* its length; links past it are counted, not listed */
+} StandChain;
+
+/* False only when a block of the chain would not read. */
+bool StandChainOnMedium(uint32_t head_volume_block, uint32_t magic, StandChain* out);
+
+/* Whether the volume's tag registry, read off the medium block by block, holds
+ * a record of `key` and `value` (NULL: a record with no value). */
+bool StandRegistryHoldsOnMedium(const char* key, const char* value);
 
 /* The caveated tests (stand_caveat_tests.c). */
 TestResult TestStandRmwReadRefused(void);

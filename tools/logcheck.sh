@@ -7541,28 +7541,41 @@ run_censusmut() {
 # caveat deletes its row here in the same commit.
 # ---------------------------------------------------------------------------
 
-# NAME|STEP|HELD|LIFTED — every caveat a VOLUME_TESTS boot holds: the evidence
-# it gives while its defect is there, and the evidence it gives once standmut
-# has put its step's fix in. A sweep's LIFTED count is how many allocations
-# the operation takes on a fresh volume of this tree; a create takes one more
-# when its name's tag row has to widen for the new file id (tag_bitmap.c,
-# ensure_bitmap_width), so a create added before the sweep can move it by one.
+# NAME|STEP|HELD|LIFTED|ROADS — every caveat a VOLUME_TESTS boot holds: the
+# evidence it gives while its defect is there, the evidence it gives once
+# standmut has put its step's fix in, and the roads it is held on — both (or
+# empty), bios or uefi. A row written for one road only is a test that cannot
+# be asked on the other and stands down there; held on a road it is not
+# written for is a failure. How many caveats a boot holds is counted off these
+# rows, per road. A sweep's LIFTED count is how many allocations the operation
+# takes on a fresh volume of this tree; a create takes one more when its
+# name's tag row has to widen for the new file id (tag_bitmap.c,
+# ensure_bitmap_width), which is why the create sweep aligns its ids first.
 STAND_HELD="
 cow_moves_only_the_block_written|1.3|blocks the write should have left as they were that changed, in the file or its snapshot 2|blocks the write should have left as they were that changed, in the file or its snapshot 0
 integrity_reports_every_rot|1.10|of 65 rotten blocks, reported 64|of 65 rotten blocks, reported 65
 use_context_long_remembered|1.6|of 479 bytes said, the volume remembers 0|of 479 bytes said, the volume remembers 479
 stand_rmw_read_refused|1.3|bytes around the write that the medium now holds as zeros 4086|bytes around the write that the medium now holds as zeros 0
-stand_create_all_or_nothing|1.4|half-done create at refused allocation 5|creates whole or refused whole, allocations refused 6
+stand_create_all_or_nothing|1.4|half-done create at refused allocation 5|creates whole or refused whole, allocations refused 5
 stand_sync_owns_a_refused_write|1.4|ledger copies written after the file table's write was refused 1|ledger copies written after the file table's write was refused 0
 stand_sync_owns_a_refused_flush|1.4|cache flushes the medium refused under a sync that answered OK 1|a refused cache flush, and the sync answered it with error 200
 stand_write_returns_its_ground|1.3|blocks refused writes kept named by no file, all given back 3|blocks refused writes kept named by no file, all given back 0
-stand_write_all_or_refusal|1.5|write answered short with no refusal at refused allocation 4|writes whole or refused, allocations refused 10
+stand_write_all_or_refusal|1.5|write answered short with no refusal at refused allocation 4|writes whole or refused, allocations refused 8
 stand_open_holds_what_it_names|1.4|handle counting extents it did not hold at refused allocation 6|opens whole or refused, allocations refused 6
 stand_open_refuses_unread_metadata|1.4|one-block file opened as empty at refused allocation 3|opens whole or refused, allocations refused 6
 stand_open_joins_the_writers|1.5|handle with no open-file entry at refused allocation 1|opens whole or refused, allocations refused 6
 stand_frozen_block_freed_twice|1.3|blocks the allocator was given back twice 1|blocks the allocator was given back twice 0
+stand_registry_flush_holds_no_lock|1.1|registry flushes of one new name that crossed the medium holding the registry's lock 1|registry flushes of one new name that crossed the medium holding the registry's lock 0
+stand_ledger_writes_outside_its_lock|1.1|Ledger writes of one that crossed the medium holding the Ledger's lock 1|Ledger writes of one that crossed the medium holding the Ledger's lock 0
+stand_integrity_pages_outside_its_lock|1.1|17-page runs of block writes whose map paging crossed the medium under a lock 1|17-page runs of block writes whose map paging crossed the medium under a lock 0
+stand_cow_question_asks_no_medium|1.1|reads of a file's metadata block the copy-on-write question asked, no snapshot standing 1|reads of a file's metadata block the copy-on-write question asked, no snapshot standing 0
+stand_redirect_log_leaves_the_flush|1.1|cache flushes asked inside 64 redirects, under the copy-on-write lock 1|cache flushes asked inside 64 redirects, under the copy-on-write lock 0
+stand_dma_wait_keeps_the_callers_interrupts|1.1|DMA reads that turned interrupts on under a caller that had them off 1|DMA reads that turned interrupts on under a caller that had them off 0|bios
+stand_registry_growth_links_what_landed|1.1|registry chains on the medium that run into a block without the registry's magic 1|registry chains on the medium that run into a block without the registry's magic 0
+stand_table_grows_onto_a_stamp|1.1|file table chains on the medium that run into a block without the table's magic 1|file table chains on the medium that run into a block without the table's magic 0
+stand_registry_scratch_leaves_the_volume_alone|1.1|registry chains on the medium a scratch registry moved by living and dying 1|registry chains on the medium a scratch registry moved by living and dying 0
+stand_registry_load_refuses_what_it_cannot_hold|1.1|registry loads with an allocation refused that answered OK, stopping at the first 1|registry loads with an allocation refused that answered OK, stopping at the first 0
 "
-STAND_HELD_COUNT=13
 
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT
@@ -7606,27 +7619,75 @@ stand_summary() {
     grep -aE '^\[TESTS\] TagFS: [0-9]+ run, ' "$1" | tr -d '\r' | tail -1 | sed 's/^\[TESTS\] //'
 }
 
-# stand_held LOG WHAT — every row of the table held, each with its number.
+# stand_row_on ROADS ROAD — whether a row written for ROADS (both, bios or
+# uefi; empty is both) is held on ROAD.
+stand_row_on() {
+    case "${1:-both}" in
+        both|"$2") return 0 ;;
+        *)         return 1 ;;
+    esac
+}
+
+# stand_held_count ROAD — how many caveats a boot on ROAD holds.
+stand_held_count() {
+    local road=$1 name step held lifted roads n=0
+    while IFS='|' read -r name step held lifted roads; do
+        [ -n "$name" ] && stand_row_on "$roads" "$road" && n=$((n + 1))
+    done <<STAND_HELD_EOF
+$STAND_HELD
+STAND_HELD_EOF
+    echo "$n"
+}
+
+# stand_held LOG WHAT ROAD — every row of ROAD held, each with its number, and
+# no row of the other road held at all.
 stand_held() {
-    local L=$1 what=$2 name step held lifted
-    while IFS='|' read -r name step held lifted; do
+    local L=$1 what=$2 road=$3 name step held lifted roads
+    while IFS='|' read -r name step held lifted roads; do
         [ -n "$name" ] || continue
-        grep -aF "[TESTS] caveat held: $name — " "$L" | grep -qF " — discharged by step $step ($held)"
-        chk $? "stand: $what — $name held under step $step ($held)"
+        if stand_row_on "$roads" "$road"; then
+            grep -aF "[TESTS] caveat held: $name — " "$L" | grep -qF " — discharged by step $step ($held)"
+            chk $? "stand: $what — $name held under step $step ($held)"
+        else
+            ! grep -aqF "[TESTS] caveat held: $name — " "$L"
+            chk $? "stand: $what — $name is not held here: its row is written for the $roads road only"
+        fi
     done <<STAND_HELD_EOF
 $STAND_HELD
 STAND_HELD_EOF
 }
 
-# stand_judge TAG WHAT SEAT BLOCKFAILS — one first boot, held to all of it.
-# SEAT is the volume seat's name as an ERE; BLOCKFAILS is how many commands
-# the faults refuse on that machine — one per test that arms BLOCKFAIL and
-# runs there (the asynchronous read has no road on the legacy channel).
+# The two orders LockRank names on every stand boot while their steps stand:
+# the chain growth tests (stand_chain_tests.c) grow the tag registry and the
+# file table on every boot, each under its own lock, and the growth takes the
+# volume's state lock under it — the two ABBA of MP-D4, seen without a race.
+STAND_ORDERS="registry@tag_registry_flush/state@tagfs_alloc_blocks_inside
+table@file_table_flush/state@tagfs_alloc_blocks_inside"
+
+# stand_orders LOG WHAT — each of those places named, while its row carries a
+# step. Once the step lifts it, the place is lockrank_judge's to fail if it is
+# ever named again.
+stand_orders() {
+    local L=$1 what=$2 key step
+    for key in $STAND_ORDERS; do
+        step=$(caveat_step "lockrank:$key")
+        [ -n "$step" ] || continue
+        lockrank_rows "$L" | grep -qF "|$key|"
+        chk $? "stand: $what — LockRank names the order $key, held under step $step: the chain growth tests take it on every boot"
+    done
+}
+
+# stand_judge TAG WHAT ROAD SEAT BLOCKFAILS — one first boot, held to all of
+# it. ROAD is bios or uefi; SEAT is the volume seat's name as an ERE;
+# BLOCKFAILS is how many commands the faults refuse on that machine — one per
+# test that arms BLOCKFAIL to refuse and runs there (the asynchronous read has
+# no road on the legacy channel; a plan that only counts refuses nothing).
 stand_judge() {
-    local L="$SCRATCH/serial.$1.log" what=$2 seat=$3 want=$4 said got
+    local L="$SCRATCH/serial.$1.log" what=$2 road=$3 seat=$4 want=$5 said got count
+    count=$(stand_held_count "$road")
     said=$(stand_summary "$L")
-    echo "$said" | grep -qE "^TagFS: [0-9]+ run, [0-9]+ passed, 0 failed, [0-9]+ skipped, $STAND_HELD_COUNT held under a caveat"
-    chk $? "stand: $what — nothing failed and exactly $STAND_HELD_COUNT caveats are held (${said:-no summary})"
+    echo "$said" | grep -qE "^TagFS: [0-9]+ run, [0-9]+ passed, 0 failed, [0-9]+ skipped, $count held under a caveat"
+    chk $? "stand: $what — nothing failed and exactly $count caveats are held (${said:-no summary})"
     grep -aq '^\[TESTS\] All tests PASSED' "$L"
     chk $? "stand: $what — and the runner answers PASSED"
     ! grep -aq 'caveat lifted early' "$L"
@@ -7635,7 +7696,8 @@ stand_judge() {
     chk $? "stand: $what — no panic"
     grep -aqE "^\[TESTS\] the tests that write go through seat [0-9]+ \($seat\), on the synchronous path" "$L"
     chk $? "stand: $what — the writes' road is said: $(grep -aoE 'go through seat [0-9]+ \([^)]*\)' "$L" | head -1)"
-    stand_held "$L" "$what"
+    stand_held "$L" "$what" "$road"
+    stand_orders "$L" "$what"
     got=$(grep -ac '^\[BLOCKFAIL\] seat [0-9]*: ' "$L")
     [ "$got" = "$want" ]
     chk $? "stand: $what — BLOCKFAIL refused $got command(s), one for each test that armed it ($want)"
@@ -7655,26 +7717,28 @@ stand_judge() {
     chk $? "stand: $what — the halt through bye said its sync wrote the volume ($(grep -aE "$STAND_HALT_ENDS" "$L" | tr -d '\r' | head -1 | cut -c1-120))"
 }
 
-# stand_again TAG WHAT — the second boot of the volume the first one left: its
-# roll call finds nothing to repair, and the suite holds what it held, number
-# for number.
+# stand_again TAG WHAT ROAD — the second boot of the volume the first one
+# left: its roll call finds nothing to repair, and the suite holds what it
+# held, number for number.
 stand_again() {
-    local L="$SCRATCH/serial.$1.log" what=$2 said mounted
+    local L="$SCRATCH/serial.$1.log" what=$2 road=$3 said mounted count
+    count=$(stand_held_count "$road")
     said=$(stand_summary "$L")
     mounted=$(grep -aoE '\[TagFS\] [0-9]+ data blocks, [0-9]+ free, [0-9]+ files' "$L" | head -1)
     [ -n "$mounted" ] && ! grep -aq 'Bitmap mismatch' "$L"
     chk $? "stand: $what, second boot — the roll call finds no Bitmap mismatch (${mounted:-no mount line})"
-    echo "$said" | grep -qE "^TagFS: [0-9]+ run, [0-9]+ passed, 0 failed, [0-9]+ skipped, $STAND_HELD_COUNT held under a caveat"
-    chk $? "stand: $what, second boot — nothing failed and the same caveats are held (${said:-no summary})"
+    echo "$said" | grep -qE "^TagFS: [0-9]+ run, [0-9]+ passed, 0 failed, [0-9]+ skipped, $count held under a caveat"
+    chk $? "stand: $what, second boot — nothing failed and the same $count caveats are held (${said:-no summary})"
     ! grep -aq 'KERNEL PANIC' "$L"
     chk $? "stand: $what, second boot — no panic"
-    stand_held "$L" "$what, second boot"
+    stand_held "$L" "$what, second boot" "$road"
+    stand_orders "$L" "$what, second boot"
 }
 
-# stand_twice TAG WHAT SEAT BLOCKFAILS KEYS... — one road: a fresh volume
+# stand_twice TAG WHAT ROAD SEAT BLOCKFAILS KEYS... — one road: a fresh volume
 # built and booted, judged, and the volume it left booted again and judged.
 stand_twice() {
-    local tag=$1 what=$2 seat=$3 want=$4 img built kept rc; shift 4
+    local tag=$1 what=$2 road=$3 seat=$4 want=$5 img built kept rc; shift 5
     img="$SCRATCH/stand.$tag.img"
     rm -f build/boxos.img "$img"
     if ! build_with_key VOLUME_TESTS=on; then
@@ -7685,7 +7749,7 @@ stand_twice() {
     built=$(deed_uuid build/boxos.img) || built=""
     stand_boot "$tag" "$@"; rc=$?
     [ "$rc" = 2 ] && return
-    stand_judge "$tag" "$what" "$seat" "$want"
+    stand_judge "$tag" "$what" "$road" "$seat" "$want"
     if [ "$rc" != 0 ]; then
         bad "stand: $what, second boot — not judged: the first boot never said its halt's sync wrote the volume, so a Bitmap mismatch on the next would be the halt's, not the tests'"
         return
@@ -7698,7 +7762,7 @@ stand_twice() {
         return
     fi
     stand_boot "${tag}_again" BOOTDISK="$img" "$@"; rc=$?
-    [ "$rc" = 2 ] || stand_again "${tag}_again" "$what"
+    [ "$rc" = 2 ] || stand_again "${tag}_again" "$what" "$road"
     rm -f "$img"
 }
 
@@ -7707,8 +7771,8 @@ run_stand() {
     local f logs=""
     rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
           "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log
-    stand_twice stand_bios "BIOS 4c" "ATA [a-z ]+" 6 CORES=4 MEM=4G
-    stand_twice stand_uefi "UEFI 4c" "AHCI port [0-9]+" 7 UEFI=on STRICT=on CORES=4 MEM=4G
+    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 8 CORES=4 MEM=4G
+    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 9 UEFI=on STRICT=on CORES=4 MEM=4G
     for f in "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
              "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log; do
         [ -f "$f" ] && logs="$logs $f"
@@ -7848,13 +7912,177 @@ edits = [
      "    led.crc32        = 0;\n"
      "    memcpy(buf, &led, sizeof(led));\n"
      "    memcpy(buf + sizeof(led), g_ledger_use, put);\n"),
+    # 1.1: the Ledger is written outside its lock
+    ("    if (disk_write_sectors(ledger_vlba(target), 1, buf) != OK) {\n",
+     "    TagFSLockDrop(&g_ledger_lock);   /* logcheck mutation: the Ledger's write leaves its lock */\n"
+     "    int landed = disk_write_sectors(ledger_vlba(target), 1, buf);\n"
+     "    TagFSLockTake(&g_ledger_lock);\n"
+     "    if (landed != OK) {\n"),
 ]
 for a, m in edits:
     assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
     s = s.replace(a, m, 1)
 open(p, "w").write(s)
 EOF
-    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 12
+    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 13
+
+    # 1.1: nothing under the registry's lock reaches the medium, and a new
+    # block is taken and stamped before anything links it; a registry that is
+    # not the volume's leaves the volume's chain alone; and a load that cannot
+    # hold a tag refuses the mount.
+    mutate src/kernel/tagfs/tag_registry/tag_registry.c
+    python3 - <<'EOF'
+p = "src/kernel/tagfs/tag_registry/tag_registry.c"
+s = open(p).read()
+M = "logcheck mutation"
+edits = [
+    ("                if (tagfs_alloc_blocks(1, &new_block) != 0) {\n"
+     "                    TagFSLockDrop(&reg->lock);\n"
+     "                    return -1;\n"
+     "                }\n",
+     "                static TagRegistryBlock stamp;   /* " + M + ": a new block is taken and stamped outside the lock, before anything links it */\n"
+     "                TagFSLockDrop(&reg->lock);\n"
+     "                if (tagfs_alloc_blocks(1, &new_block) != 0)\n"
+     "                    return -1;\n"
+     "                memset(&stamp, 0, sizeof(stamp));\n"
+     "                stamp.magic = TAGFS_REGISTRY_MAGIC;\n"
+     "                if (tagfs_write_block(new_block, &stamp) != 0) {\n"
+     "                    tagfs_free_blocks(new_block, 1);\n"
+     "                    return -1;\n"
+     "                }\n"
+     "                TagFSLockTake(&reg->lock);\n"),
+    ("            blkp->next_block = new_block;\n"
+     "            int write_result = tagfs_write_block(current_block, blkp);\n",
+     "            blkp->next_block = new_block;\n"
+     "            TagFSLockDrop(&reg->lock);   /* " + M + ": the registry's writes leave its lock */\n"
+     "            int write_result = tagfs_write_block(current_block, blkp);\n"
+     "            TagFSLockTake(&reg->lock);\n"),
+    ("    int write_result = tagfs_write_block(current_block, blkp);\n\n    if (write_result == 0) {\n",
+     "    TagFSLockDrop(&reg->lock);   /* " + M + ": the registry's writes leave its lock */\n"
+     "    int write_result = tagfs_write_block(current_block, blkp);\n"
+     "    TagFSLockTake(&reg->lock);\n\n    if (write_result == 0) {\n"),
+    ("    TagFSLockTake(&reg->lock);\n    chain_release();\n",
+     "    TagFSLockTake(&reg->lock);\n"
+     "    bool own = reg == fs->registry;   /* " + M + ": a registry that is not the volume's leaves the volume's chain alone */\n"
+     "    if (own)\n"
+     "        chain_release();\n"),
+    ("        if (chain_append(block_num) != 0) {\n",
+     "        if (own && chain_append(block_num) != 0) {   /* " + M + " */\n"),
+    ("    reg->key_buckets = NULL;\n\n    chain_release();\n",
+     "    reg->key_buckets = NULL;\n\n"
+     "    if (reg == tagfs_get_state()->registry)   /* " + M + ": a registry that is not the volume's leaves the volume's chain alone */\n"
+     "        chain_release();\n"),
+    ("static void add_to_key_group(TagKeyGroup* group, uint16_t tag_id) {\n",
+     "static bool add_to_key_group(TagKeyGroup* group, uint16_t tag_id) {   /* " + M + ": a key group that cannot grow says so */\n"),
+    ("            debug_printf(\"[TagRegistry] add_to_key_group: grow alloc failed\\n\");\n            return;\n",
+     "            debug_printf(\"[TagRegistry] add_to_key_group: grow alloc failed\\n\");\n            return false;\n"),
+    ("    group->tag_ids[group->count++] = tag_id;\n}\n",
+     "    group->tag_ids[group->count++] = tag_id;\n    return true;\n}\n"),
+    ("    TagKeyGroup* group = find_or_create_key_group(reg, key);\n    if (group) add_to_key_group(group, tag_id);\n",
+     "    TagKeyGroup* group = find_or_create_key_group(reg, key);\n"
+     "    if (!group || !add_to_key_group(group, tag_id))   /* " + M + ": a tag its key group cannot hold is not held */\n"
+     "        return TAGFS_INVALID_TAG_ID;\n"),
+    ("            uint16_t new_id = intern_with_id_unlocked(reg, tag_id, key, value_ptr);\n",
+     "            uint16_t new_id = intern_with_id_unlocked(reg, tag_id, key, value_ptr);\n"
+     "            if (new_id == TAGFS_INVALID_TAG_ID) {   /* " + M + ": a load that cannot hold a tag refuses the mount */\n"
+     "                kprintf(\"[TagRegistry] tag %u could not be held — this volume is not mounted\\n\", tag_id);\n"
+     "                TagFSLockDrop(&reg->lock);\n"
+     "                return -1;\n"
+     "            }\n"),
+]
+for a, m in edits:
+    assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
+    s = s.replace(a, m, 1)
+open(p, "w").write(s)
+EOF
+    mut_done src/kernel/tagfs/tag_registry/tag_registry.c "logcheck mutation" 9
+
+    # 1.1: a new link of the file table is stamped before anything links it
+    mutate src/kernel/tagfs/file_table/file_table.c
+    python3 - <<'EOF'
+p = "src/kernel/tagfs/file_table/file_table.c"
+s = open(p).read()
+a = ("                    debug_printf(\"[FileTable] flush: alloc failed at entry_offset=%u\\n\",\n"
+     "                                 entry_offset);\n"
+     "                    return -1;\n"
+     "                }\n")
+m = (a +
+     "                static FileTableBlock stamp;   /* logcheck mutation: a new link is stamped before anything links it */\n"
+     "                memset(&stamp, 0, sizeof(stamp));\n"
+     "                stamp.magic = TAGFS_FILETBL_MAGIC;\n"
+     "                if (tagfs_write_block(next_block, &stamp) != OK) {\n"
+     "                    tagfs_free_blocks(next_block, 1);\n"
+     "                    TagFSLockDrop(&g_lock);\n"
+     "                    return -1;\n"
+     "                }\n")
+assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
+open(p, "w").write(s.replace(a, m, 1))
+EOF
+    mut_done src/kernel/tagfs/file_table/file_table.c "logcheck mutation" 1
+
+    # 1.1 (CR-10 and CR-6): whether a file is copied on write is answered by
+    # the snapshots in memory alone, and the redirect log asks for no flush of
+    # its own.
+    mutate src/kernel/tagfs/cow/cow.c
+    python3 - <<'EOF'
+p = "src/kernel/tagfs/cow/cow.c"
+s = open(p).read()
+a = ("    // Also check if file has COW flag in metadata\n"
+     "    TagFSMetadata meta;\n"
+     "    if (tagfs_get_metadata(file_id, &meta) == OK) {\n"
+     "        bool is_cow = (meta.flags & TAGFS_FILE_COW) != 0;\n"
+     "        tagfs_metadata_free(&meta);\n"
+     "        TagFSLockDrop(&g_cow_state.lock);\n"
+     "        return is_cow;\n"
+     "    }\n")
+assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
+open(p, "w").write(s.replace(a, "    /* logcheck mutation: the question is answered by the snapshots in memory alone */\n", 1))
+EOF
+    mut_done src/kernel/tagfs/cow/cow.c "logcheck mutation" 1
+    mutate src/kernel/tagfs/disk_book/disk_book.c
+    python3 - <<'EOF'
+p = "src/kernel/tagfs/disk_book/disk_book.c"
+s = open(p).read()
+a = ("    if (do_flush) {\n"
+     "        error_t flushed = tagfs_flush_cache();\n"
+     "        if (flushed != OK) {\n"
+     "            disk_book_flush_did_not_happen(flushed, \"redirect log\");\n"
+     "        } else {\n"
+     "            __atomic_store_n(&g_not_proven_durable, false, __ATOMIC_RELEASE);\n"
+     "        }\n"
+     "    }\n")
+assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
+open(p, "w").write(s.replace(a, "    (void)do_flush;   /* logcheck mutation: the redirect log asks for no flush of its own */\n", 1))
+EOF
+    mut_done src/kernel/tagfs/disk_book/disk_book.c "logcheck mutation" 1
+
+    # 1.1 (CR-5): the legacy-IDE waiter answers its own completion, and leaves
+    # its caller's interrupts as it found them.
+    mutate src/kernel/drivers/disk/ata_async.c
+    python3 - <<'EOF'
+p = "src/kernel/drivers/disk/ata_async.c"
+s = open(p).read()
+a = ("    asm volatile(\"sti\" ::: \"memory\");\n"
+     "    while (!__atomic_load_n(&cmd.done, __ATOMIC_ACQUIRE)) {\n"
+     "        AtaCmd *c = __atomic_exchange_n(&aa->landing, NULL, __ATOMIC_ACQ_REL);\n"
+     "        if (c) ata_run_completion(aa, c);\n")
+m = ("    while (!__atomic_load_n(&cmd.done, __ATOMIC_ACQUIRE)) {   /* logcheck mutation: the waiter answers its own completion, interrupts as its caller left them */\n"
+     "        AtaCmd *c = __atomic_exchange_n(&aa->landing, NULL, __ATOMIC_ACQ_REL);\n"
+     "        if (c) ata_run_completion(aa, c);\n"
+     "        else if (spin_trylock(&aa->cmd_lock)) {\n"
+     "            AtaCmd *f = aa->in_flight;\n"
+     "            if (f && !__atomic_load_n(&f->reconciled, __ATOMIC_RELAXED) &&\n"
+     "                !__atomic_load_n(&aa->recovering, __ATOMIC_RELAXED)) {\n"
+     "                uint8_t bmsr = inb(aa->bmide_base + BMIDE_REG_STATUS);\n"
+     "                if (bmsr & BMISR_IRQ)\n"
+     "                    bmide_complete_locked(aa, bmsr);\n"
+     "            }\n"
+     "            spin_unlock(&aa->cmd_lock);\n"
+     "        }\n")
+assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
+open(p, "w").write(s.replace(a, m, 1))
+EOF
+    mut_done src/kernel/drivers/disk/ata_async.c "logcheck mutation" 1
 
     mutate src/kernel/tagfs/tag_bitmap/tag_bitmap.c
     python3 - <<'EOF'
@@ -7879,21 +8107,41 @@ open(p, "w").write(s)
 EOF
     mut_done src/kernel/tagfs/tag_bitmap/tag_bitmap.c "logcheck mutation" 1
 
-    # 1.10: the report ring holds every rot the test plants.
+    # 1.10: the report ring holds every rot the test plants. 1.1: the map's
+    # paging leaves the map's lock.
     mutate src/kernel/tagfs/integrity/integrity.c
     python3 - <<'EOF'
 p = "src/kernel/tagfs/integrity/integrity.c"
 s = open(p).read()
-a = "#define ROT_RING_MAX      64\n"
-assert s.count(a) == 1, "stand fix anchor missing: " + a.strip()
-open(p, "w").write(s.replace(a, "#define ROT_RING_MAX      128   /* logcheck mutation: the ring holds every rot the test plants */\n", 1))
+edits = [
+    ("#define ROT_RING_MAX      64\n",
+     "#define ROT_RING_MAX      128   /* logcheck mutation: the ring holds every rot the test plants */\n"),
+    ("        if (tagfs_write_block(g_map_first_block + v->map_idx, buf) != OK) {\n",
+     "        TagFSLockDrop(&g_lock);   /* logcheck mutation: the map's paging leaves its lock */\n"
+     "        error_t put = tagfs_write_block(g_map_first_block + v->map_idx, buf);\n"
+     "        TagFSLockTake(&g_lock);\n"
+     "        if (put != OK) {\n"),
+    ("    if (tagfs_read_block(g_map_first_block + idx, buf) != OK)\n        return NULL;\n",
+     "    TagFSLockDrop(&g_lock);   /* logcheck mutation: the map's paging leaves its lock */\n"
+     "    error_t got = tagfs_read_block(g_map_first_block + idx, buf);\n"
+     "    TagFSLockTake(&g_lock);\n"
+     "    if (got != OK)\n        return NULL;\n"),
+]
+for a, m in edits:
+    assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
+    s = s.replace(a, m, 1)
+open(p, "w").write(s)
 EOF
-    mut_done src/kernel/tagfs/integrity/integrity.c "logcheck mutation" 1
+    mut_done src/kernel/tagfs/integrity/integrity.c "logcheck mutation" 3
 }
 stand_fix_off() {
-    restore src/kernel/tagfs/tagfs.c
-    restore src/kernel/tagfs/tag_bitmap/tag_bitmap.c
-    restore src/kernel/tagfs/integrity/integrity.c
+    local f
+    for f in src/kernel/tagfs/tagfs.c src/kernel/tagfs/tag_bitmap/tag_bitmap.c \
+             src/kernel/tagfs/integrity/integrity.c src/kernel/tagfs/tag_registry/tag_registry.c \
+             src/kernel/tagfs/file_table/file_table.c src/kernel/tagfs/cow/cow.c \
+             src/kernel/tagfs/disk_book/disk_book.c src/kernel/drivers/disk/ata_async.c; do
+        restore "$f"
+    done
 }
 
 # stand_mech_on GROUP — the fault mechanisms broken, a few at a time: each
@@ -8060,14 +8308,15 @@ stand_red() {
 
 run_standmut() {
     echo "== standmut: every stand test, and every fault it stands on, can go red =="
-    local L name step held lifted count said n before after img
+    local L name step held lifted roads count said n before after img
 
     # ── the real fixes: every caveat must be lifted early, and fail ────────
+    # On the legacy channel, so the rows written for the bios road are asked.
     stand_fix_on
     if stand_mut_boot standmut_fix CORES=4 MEM=4G; then
         L="$SCRATCH/serial.standmut_fix.log"; count=0
-        while IFS='|' read -r name step held lifted; do
-            [ -n "$name" ] || continue
+        while IFS='|' read -r name step held lifted roads; do
+            [ -n "$name" ] && stand_row_on "$roads" bios || continue
             grep -aF "[TESTS] caveat lifted early: $name — " "$L" | grep -qF " — lift the caveat ($lifted)"
             chk $? "standmut: with its step's fix in, $name says its caveat was lifted early ($(grep -aF "caveat lifted early: $name — " "$L" | tr -d '\r' | grep -oE '\([^()]*\)$'))"
             count=$((count + 1))
@@ -8085,7 +8334,7 @@ STAND_HELD_EOF
         L="$SCRATCH/serial.standmut_blind.log"
         said=$(stand_summary "$L")
         n=$(grep -ac 'caveat lifted early' "$L")
-        [ "$n" = 0 ] && echo "$said" | grep -qE ", 1 failed, [0-9]+ skipped, $STAND_HELD_COUNT held under a caveat"
+        [ "$n" = 0 ] && echo "$said" | grep -qE ", 1 failed, [0-9]+ skipped, $(stand_held_count bios) held under a caveat"
         chk $? "standmut: a judge that holds whatever a caveated test saw lets every fix in go by as held — $n 'lifted early' line(s) (${said:-no summary})"
         n=$(grep -acE '^\[TESTS\] [a-z_0-9]+ failed at ' "$L")
         [ "$n" = 0 ] && echo "$said" | grep -qE ", 1 failed, "
