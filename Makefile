@@ -1467,6 +1467,14 @@ UEFI       ?= off
 #                              which is why cpu_idle asks CPUID.05H first.
 STRICT     ?= off
 
+# BENCHES=N — how many machines `make run-bg` may run on this host at once,
+# counted across every worktree (tools/benches.sh; BENCH_DIR is one path for
+# the host). A boot past the limit waits for a bench instead of starting: jobs
+# that work side by side each boot QEMU under TCG, and past a few machines the
+# host is shared so thinly that guests miss the harnesses' waits. 0 = no limit.
+BENCHES    ?= 3
+BENCH_DIR  ?= /tmp/boxos-benches
+
 # THE POWER GOES — AND EVERY WRITE BEFORE IT IS ON THE RECORD.
 #
 # `make run-bg POWERCUT=on` hands the boot disk to QEMU through blklogwrites:
@@ -1720,6 +1728,7 @@ run-bg: $(RUN_BG_NEEDS)
 		exit 1; \
 	fi
 	@[ -f "$(BOOTDISK)" ] || { echo "[run-bg] there is no disk at $(BOOTDISK)"; exit 1; }
+	@BENCHES=$(BENCHES) BENCH_DIR=$(BENCH_DIR) tools/benches.sh take $(BUILDDIR)
 	$(if $(filter on,$(POWERCUT)),@: > "$(POWERCUT_LOG)")
 	@rm -f $(BUILDDIR)/qemu.mon $(BUILDDIR)/qemu.qmp $(BUILDDIR)/serial.log $(BUILDDIR)/qemu.pid
 	@touch $(BUILDDIR)/serial.log
@@ -1769,6 +1778,7 @@ run-bg: $(RUN_BG_NEEDS)
 		echo "[run-bg] Tail log  : tools/qemu-input.sh tail"; \
 		echo "[run-bg] Stop      : make run-stop"; \
 	else \
+		BENCHES=$(BENCHES) BENCH_DIR=$(BENCH_DIR) tools/benches.sh give $(BUILDDIR); \
 		echo "[run-bg] ERROR: QEMU failed to start"; exit 1; \
 	fi
 
@@ -1940,6 +1950,7 @@ run-stop:
 	else \
 		echo "[run-stop] no pidfile at $(BUILDDIR)/qemu.pid"; \
 	fi
+	@BENCHES=$(BENCHES) BENCH_DIR=$(BENCH_DIR) tools/benches.sh give $(BUILDDIR)
 
 # Headless Bochs with COM1 on a TCP socket — drive the shell entirely over the
 # serial console (kernel serial_console_init), no GUI. Bochs blocks until a
