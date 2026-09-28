@@ -40,7 +40,8 @@ CAVEAT=0
 # lost by a later torn sync, under 1.4 (the owner, 2026-09-27). chaingrow
 # keeps its census by kind, (scenario, prefix|subset, code), and a chain
 # refused by the chain's name: its refusals are MP-D5, under 1.1 — the subset
-# rows there until the step-1.1 contract says whether they stay or go to 1.6.
+# rows too, because step 1.1 links a new block only once a flush has covered
+# its stamp (the owner, 2026-09-28), which closes the epoch they fall in.
 caveat_row() {
     case "$1" in
         longquery)  echo "1.1b|a query of 256 bytes or more is dropped unread, and the answer is every file in scope" ;;
