@@ -19,7 +19,6 @@
 // Snapshot flags
 #define COW_SNAP_READONLY   (1 << 0)
 #define COW_SNAP_AUTO       (1 << 1)
-#define COW_SNAP_TAG_QUERY  (1 << 2)
 
 /* In-memory snapshot record. The runtime fields after `tag_ids[8]`
  * track CoW redirects so SnapshotDelete can release OLD blocks that
@@ -97,7 +96,6 @@ error_t TagFS_CowInit(void);
 void TagFS_CowShutdown(void);
 
 error_t TagFS_SnapshotCreate(const char *name, uint32_t file_id, uint32_t *snapshot_id);
-error_t TagFS_SnapshotCreateByTag(const char *tag_pattern, uint32_t *snapshot_id);
 error_t TagFS_SnapshotDelete(uint32_t snapshot_id);
 error_t TagFS_SnapshotList(uint32_t *ids, uint32_t max_count, uint32_t *actual_count);
 error_t TagFS_SnapshotInfo(uint32_t snapshot_id, CowSnapshot *info);

@@ -57,7 +57,7 @@
 #define TAGFS_FILE_ACTIVE           (1 << 0)
 #define TAGFS_FILE_TRASHED          (1 << 1)
 #define TAGFS_FILE_HIDDEN           (1 << 2)
-#define TAGFS_FILE_COW              (1 << 3)  // Copy-on-Write enabled
+/* Bit 3 is spent on v1: kernels before Quill step 1.1 took it for copy-on-write, so it is never set and never trusted. */
 
 // Handle flags
 #define TAGFS_HANDLE_READ           (1 << 0)

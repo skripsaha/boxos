@@ -143,7 +143,7 @@ class KernelView:
         self.seq = f.ledger["seq"]
         if not f.book_ok:
             self.writes.append(("the DiskBook head and its copy, reformatted empty "
-                                "(disk_book.c:146-151)", []))
+                                "(disk_book.c:144-149)", []))
         for name, sentence in (("registry", "its tag registry would not read"),
                                ("table", "its file table would not read"),
                                ("pool", "its metadata pool would not read")):
@@ -422,13 +422,13 @@ class GroundCensus:
                    % (f.book["version"], f.book["capacity"], f.book["count"], f.book["start_sector"]))
             self.Say("DISKBOOK_INVALID", "damage" if f.snapshots else "note",
                      "the DiskBook is not one the mount accepts — %s — so it is reformatted empty "
-                     "at mount and no redirect is replayed (disk_book.c:139-153)%s"
+                     "at mount and no redirect is replayed (disk_book.c:137-151)%s"
                      % (why, "; the manifest names %u snapshot(s) whose frozen blocks are then "
                         "forgotten" % len(f.snapshots) if f.snapshots else ""))
         bad = [i for i, e in enumerate(f.book_records) if not e["valid"]]
         if bad:
             self.Say("DISKBOOK_RECORD_BAD", "note", "DiskBook record(s) %s fail their magic or "
-                     "checksum and are skipped at replay (disk_book.c:175-182)"
+                     "checksum and are skipped at replay (disk_book.c:173-180)"
                      % ", ".join(map(str, bad)))
 
     def _Cow(self):
@@ -448,7 +448,7 @@ class GroundCensus:
                        exclusive=False)
         if f.stray:
             self.Say("REDIRECT_STRAY", "note", "%u DiskBook redirect(s) name snapshots the manifest "
-                     "does not carry (%s) — the kernel ignores them (cow.c:593-602)"
+                     "does not carry (%s) — the kernel ignores them (cow.c:527-536)"
                      % (len(f.stray), ", ".join(str(s[0]) for s in f.stray)))
         if led and led["integrity_map_block"]:
             self.Claim("integrity", "integrity map",

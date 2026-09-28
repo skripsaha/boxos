@@ -7568,7 +7568,7 @@ stand_create_all_or_nothing|1.4|half-done create at refused allocation 5|creates
 stand_sync_owns_a_refused_write|1.4|ledger copies written after the file table's write was refused 1|ledger copies written after the file table's write was refused 0
 stand_sync_owns_a_refused_flush|1.4|cache flushes the medium refused under a sync that answered OK 1|a refused cache flush, and the sync answered it with error 200
 stand_write_returns_its_ground|1.3|blocks refused writes kept named by no file, all given back 3|blocks refused writes kept named by no file, all given back 0
-stand_write_all_or_refusal|1.5|write answered short with no refusal at refused allocation 4|writes whole or refused, allocations refused 8
+stand_write_all_or_refusal|1.5|write answered short with no refusal at refused allocation 2|writes whole or refused, allocations refused 8
 stand_open_holds_what_it_names|1.4|handle counting extents it did not hold at refused allocation 6|opens whole or refused, allocations refused 6
 stand_open_refuses_unread_metadata|1.4|one-block file opened as empty at refused allocation 3|opens whole or refused, allocations refused 6
 stand_open_joins_the_writers|1.5|handle with no open-file entry at refused allocation 1|opens whole or refused, allocations refused 6
@@ -7576,8 +7576,6 @@ stand_frozen_block_freed_twice|1.3|blocks the allocator was given back twice 1|b
 stand_registry_flush_holds_no_lock|1.1|registry flushes of one new name that crossed the medium holding the registry's lock 1|registry flushes of one new name that crossed the medium holding the registry's lock 0
 stand_ledger_writes_outside_its_lock|1.1|Ledger writes of one that crossed the medium holding the Ledger's lock 1|Ledger writes of one that crossed the medium holding the Ledger's lock 0
 stand_integrity_pages_outside_its_lock|1.1|17-page runs of block writes whose map paging crossed the medium under a lock 1|17-page runs of block writes whose map paging crossed the medium under a lock 0
-stand_cow_question_asks_no_medium|1.1|reads of a file's metadata block the copy-on-write question asked, no snapshot standing 1|reads of a file's metadata block the copy-on-write question asked, no snapshot standing 0
-stand_redirect_log_leaves_the_flush|1.1|cache flushes asked inside 64 redirects, under the copy-on-write lock 1|cache flushes asked inside 64 redirects, under the copy-on-write lock 0
 stand_dma_wait_keeps_the_callers_interrupts|1.1|DMA reads that turned interrupts on under a caller that had them off 1|DMA reads that turned interrupts on under a caller that had them off 0|bios
 stand_registry_growth_links_what_landed|1.1|registry chains on the medium that run into a block without the registry's magic 1|registry chains on the medium that run into a block without the registry's magic 0
 stand_table_grows_onto_a_stamp|1.1|file table chains on the medium that run into a block without the table's magic 1|file table chains on the medium that run into a block without the table's magic 0
@@ -7808,7 +7806,12 @@ run_stand() {
 # same: a refused flush that moves the mark, a count of kept flushes, a need
 # that is the last flush begun, a pass that publishes every ask, a Scribe
 # this core holds waited for like any other, a drain core that runs no baton
-# while it waits, and a Give that never lets the scheduler go. Mutations
+# while it waits, and a Give that never lets the scheduler go. And a caveat a
+# step has lifted stays worth its test only while the test would see the
+# defect come back: the copy-on-write question that reads a file's own
+# record under its lock again, the redirect log that pushes the cache on
+# its 64th redirect again, and the question's fast exit taken out, which
+# takes its lock where no snapshot stands. Mutations
 # whose tests do not meet each other's share a boot; each is judged by its
 # own test's own line, number and all.
 #
@@ -8032,42 +8035,6 @@ open(p, "w").write(s.replace(a, m, 1))
 EOF
     mut_done src/kernel/tagfs/file_table/file_table.c "logcheck mutation" 1
 
-    # 1.1 (CR-10 and CR-6): whether a file is copied on write is answered by
-    # the snapshots in memory alone, and the redirect log asks for no flush of
-    # its own.
-    mutate src/kernel/tagfs/cow/cow.c
-    python3 - <<'EOF'
-p = "src/kernel/tagfs/cow/cow.c"
-s = open(p).read()
-a = ("    // Also check if file has COW flag in metadata\n"
-     "    TagFSMetadata meta;\n"
-     "    if (tagfs_get_metadata(file_id, &meta) == OK) {\n"
-     "        bool is_cow = (meta.flags & TAGFS_FILE_COW) != 0;\n"
-     "        tagfs_metadata_free(&meta);\n"
-     "        TagFSLockDrop(&g_cow_state.lock);\n"
-     "        return is_cow;\n"
-     "    }\n")
-assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
-open(p, "w").write(s.replace(a, "    /* logcheck mutation: the question is answered by the snapshots in memory alone */\n", 1))
-EOF
-    mut_done src/kernel/tagfs/cow/cow.c "logcheck mutation" 1
-    mutate src/kernel/tagfs/disk_book/disk_book.c
-    python3 - <<'EOF'
-p = "src/kernel/tagfs/disk_book/disk_book.c"
-s = open(p).read()
-a = ("    if (do_flush) {\n"
-     "        error_t flushed = tagfs_flush_cache();\n"
-     "        if (flushed != OK) {\n"
-     "            disk_book_flush_did_not_happen(flushed, \"redirect log\");\n"
-     "        } else {\n"
-     "            __atomic_store_n(&g_not_proven_durable, false, __ATOMIC_RELEASE);\n"
-     "        }\n"
-     "    }\n")
-assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
-open(p, "w").write(s.replace(a, "    (void)do_flush;   /* logcheck mutation: the redirect log asks for no flush of its own */\n", 1))
-EOF
-    mut_done src/kernel/tagfs/disk_book/disk_book.c "logcheck mutation" 1
-
     # 1.1 (CR-5): the legacy-IDE waiter answers its own completion, and leaves
     # its caller's interrupts as it found them.
     mutate src/kernel/drivers/disk/ata_async.c
@@ -8150,8 +8117,7 @@ stand_fix_off() {
     local f
     for f in src/kernel/tagfs/tagfs.c src/kernel/tagfs/tag_bitmap/tag_bitmap.c \
              src/kernel/tagfs/integrity/integrity.c src/kernel/tagfs/tag_registry/tag_registry.c \
-             src/kernel/tagfs/file_table/file_table.c src/kernel/tagfs/cow/cow.c \
-             src/kernel/tagfs/disk_book/disk_book.c src/kernel/drivers/disk/ata_async.c; do
+             src/kernel/tagfs/file_table/file_table.c src/kernel/drivers/disk/ata_async.c; do
         restore "$f"
     done
 }
@@ -8176,6 +8142,8 @@ stand_mech_on() {
         scribe)    marks="src/kernel/tagfs/scribe/scribe.c:4" ;;
         flushsum)  marks="src/kernel/tagfs/scribe/scribe.c:3" ;;
         flushneed) marks="src/kernel/tagfs/scribe/scribe.c:1" ;;
+        cowback)   marks="src/kernel/tagfs/cow/cow.c:2 src/kernel/tagfs/disk_book/disk_book.c:1" ;;
+        cowfast)   marks="src/kernel/tagfs/cow/cow.c:1" ;;
     esac
     for mark in $marks; do mutate "${mark%%:*}"; done
     python3 - "$group" <<'EOF'
@@ -8276,6 +8244,36 @@ edits = {
    "    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST) + 1u;\n",
    "    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST);   /* " + M + ": the need is the last flush begun */\n"),
  ],
+ "cowback": [
+  ("src/kernel/tagfs/cow/cow.c",
+   "    if (!g_cow_state.initialized ||\n        __atomic_load_n(&g_cow_state.snapshot_count, __ATOMIC_ACQUIRE) == 0)\n        return false;\n",
+   "    if (!g_cow_state.initialized)   /* " + M + ": the question is asked with no snapshot standing too */\n"
+   "        return false;\n"),
+  ("src/kernel/tagfs/cow/cow.c",
+   "        active = parent == file_id || parent == 0;\n    }\n"
+   "    TagFSLockDrop(&g_cow_state.lock);\n    return active;\n",
+   "        active = parent == file_id || parent == 0;\n    }\n"
+   "    TagFSMetadata meta;   /* " + M + ": the file's own record read for bit 3, under the lock */\n"
+   "    if (!active && tagfs_get_metadata(file_id, &meta) == OK) {\n"
+   "        active = (meta.flags & (1u << 3)) != 0;\n"
+   "        tagfs_metadata_free(&meta);\n"
+   "    }\n"
+   "    TagFSLockDrop(&g_cow_state.lock);\n    return active;\n"),
+  ("src/kernel/tagfs/disk_book/disk_book.c",
+   "    g_redirects_logged++;\n",
+   "    g_redirects_logged++;\n"
+   "    if (g_redirects_logged % 64 == 0) {   /* " + M + ": the log pushes the cache on every 64th redirect again */\n"
+   "        TagFSLockDrop(&g_lock);\n"
+   "        tagfs_flush_cache();\n"
+   "        return OK;\n"
+   "    }\n"),
+ ],
+ "cowfast": [
+  ("src/kernel/tagfs/cow/cow.c",
+   "    if (!g_cow_state.initialized ||\n        __atomic_load_n(&g_cow_state.snapshot_count, __ATOMIC_ACQUIRE) == 0)\n        return false;\n",
+   "    if (!g_cow_state.initialized)   /* " + M + ": the question takes its lock with no snapshot standing */\n"
+   "        return false;\n"),
+ ],
  "blind": [
   ("src/kernel/tagfs/tests/tests.c",
    "    kprintf(\"[TESTS] %s failed at %s:%d: %s (%lld, %lld)\\n\",\n",
@@ -8299,7 +8297,8 @@ stand_mech_off() {
              src/kernel/tagfs/tests/stand_tests.c src/kernel/core/boardroom/boardroom.c \
              src/kernel/tagfs/tag_bitmap/tag_bitmap.c src/kernel/tagfs/tests/tests.c \
              src/kernel/tagfs/tests/core_tests.c src/kernel/tagfs/lock_rank/lock_rank.c \
-             src/kernel/tagfs/scribe/scribe.c; do
+             src/kernel/tagfs/scribe/scribe.c src/kernel/tagfs/cow/cow.c \
+             src/kernel/tagfs/disk_book/disk_book.c; do
         restore "$f"
     done
 }
@@ -8486,6 +8485,30 @@ STAND_HELD_EOF
     if stand_mut_boot standmut_flushneed CORES=4 MEM=4G; then
         stand_red standmut_flushneed "a need that is the last flush begun is covered by that flush" \
             'stand_flush_ticket failed at [^:]+:[0-9]+: and proves nothing about that need \(0, 1\)'
+    fi
+    stand_mech_off
+
+    # The defects step 1.1 took out of copy-on-write, put back: the question
+    # that reads a file's own record for bit 3 under the copy-on-write lock
+    # (CR-10), and the redirect log that pushes the cache on every 64th
+    # redirect (CR-6). Their tests hold no caveat any more, and each must say
+    # its defect is back, number and all.
+    stand_mech_on cowback
+    if stand_mut_boot standmut_cowback CORES=4 MEM=4G; then
+        stand_red standmut_cowback "the copy-on-write question that reads the file's record again is its defect back" \
+            'stand_cow_question_asks_no_medium failed: the defect it stands for is back — .* \(reads of a file.s metadata block the copy-on-write question asked, no snapshot standing 1\)'
+        stand_red standmut_cowback "the redirect log that pushes the cache on every 64th redirect again is its defect back" \
+            'stand_redirect_log_leaves_the_flush failed: the defect it stands for is back — .* \(cache flushes asked inside 64 redirects, under the copy-on-write lock 1\)'
+    fi
+    stand_mech_off
+
+    # And with no snapshot standing the question takes no lock at all (the
+    # owner's F3): its fast exit taken out, the test's ask under the state
+    # lock takes the copy-on-write lock out of order.
+    stand_mech_on cowfast
+    if stand_mut_boot standmut_cowfast CORES=4 MEM=4G; then
+        stand_red standmut_cowfast "a question that takes its lock with no snapshot standing breaks the order under the state lock" \
+            'stand_cow_question_asks_no_medium failed at [^:]+:[0-9]+: and takes no lock: under the state lock it breaks no order \(1, 0\)'
     fi
     stand_mech_off
 

@@ -270,74 +270,6 @@ error_t TagFS_SnapshotCreate(const char *name, uint32_t file_id, uint32_t *snaps
     return OK;
 }
 
-error_t TagFS_SnapshotCreateByTag(const char *tag_pattern, uint32_t *snapshot_id) {
-    if (!g_cow_state.initialized || !tag_pattern || !snapshot_id)
-        return ERR_INVALID_ARGUMENT;
-    
-    TagFSLockTake(&g_cow_state.lock);
-    
-    if (g_cow_state.snapshot_count >= g_cow_state.snapshot_capacity) {
-        TagFSLockDrop(&g_cow_state.lock);
-        return ERR_NO_MEMORY;
-    }
-    
-    char snap_name[TAGFS_SNAPSHOT_NAME_LEN];
-    ksnprintf(snap_name, sizeof(snap_name), "tag-%s", tag_pattern);
-    
-    for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
-        if (strcmp(g_cow_state.snapshots[i].name, snap_name) == 0) {
-            *snapshot_id = g_cow_state.snapshots[i].snapshot_id;
-            TagFSLockDrop(&g_cow_state.lock);
-            return ERR_ALREADY_EXISTS;
-        }
-    }
-
-    CowSnapshot *snap = &g_cow_state.snapshots[g_cow_state.snapshot_count];
-    memset(snap, 0, sizeof(CowSnapshot));
-    
-    snap->snapshot_id = CowAllocSnapshotId();
-    snap->parent_file_id = 0;
-    snap->created_time = rtc_get_unix64();
-    snap->disk_book_checkpoint = DiskBookGetCheckpointSeq();
-    strncpy(snap->name, snap_name, TAGFS_SNAPSHOT_NAME_LEN - 1);
-    snap->flags = COW_SNAP_READONLY | COW_SNAP_TAG_QUERY;
-    
-    uint32_t file_count = 0;
-    uint64_t total_size = 0;
-    uint32_t block_count = 0;
-    
-    uint32_t *file_ids = kmalloc(sizeof(uint32_t) * TAGFS_MAX_FILES);
-    if (file_ids) {
-        int count = tagfs_list_all_files(file_ids, TAGFS_MAX_FILES);
-        for (int i = 0; i < count; i++) {
-            file_count++;
-            TagFSMetadata meta;
-            if (tagfs_get_metadata(file_ids[i], &meta) == OK) {
-                total_size += meta.size;
-                for (uint16_t j = 0; j < meta.extent_count; j++)
-                    block_count += meta.extents[j].block_count;
-                tagfs_metadata_free(&meta);
-            }
-        }
-        kfree(file_ids);
-    }
-    
-    snap->file_count = file_count;
-    snap->total_size = total_size;
-    snap->block_count = block_count;
-    
-    g_cow_state.snapshot_count++;
-    g_cow_state.snapshots_created++;
-    *snapshot_id = snap->snapshot_id;
-
-    TagFSLockDrop(&g_cow_state.lock);
-
-    CowWriteManifest();
-
-    debug_printf("[CoW] Created tag snapshot '%s' (id=%u, files=%u)\n", snap_name, snap->snapshot_id, file_count);
-    return OK;
-}
-
 error_t TagFS_SnapshotDelete(uint32_t snapshot_id) {
     if (!g_cow_state.initialized)
         return ERR_NOT_INITIALIZED;
@@ -522,33 +454,35 @@ void TagFS_CowGetStats(uint64_t *cow_writes, uint64_t *cow_copies,
     TagFSLockDrop(&g_cow_state.lock);
 }
 
+/* ‼ ONLY THE SNAPSHOTS STANDING IN MEMORY ANSWER THIS.
+ *
+ * It is asked on every block of every write, and it used to read the file's
+ * own record as well — under this lock, interrupts off — for a flag nothing
+ * ever set (bit 3 of a record's flags, spent: see tagfs.h). Whenever the
+ * pool's mirror had forgotten the file and its record was not in the block
+ * being appended to, that answer came off the medium, and a lock held across
+ * a medium command is one another core's interrupt may be needed to release
+ * (CR-10).
+ *
+ * With no snapshot standing — every volume that never took one — the answer
+ * is no, and it is given without the lock: a core that writes then never
+ * spins on it behind a core that holds it across the medium to take or drop
+ * a snapshot. A snapshot taken at this instant is missed exactly as it was
+ * when the count was read under the lock, which was let go before the answer
+ * was used. */
 bool TagFS_CowIsActive(uint32_t file_id) {
-    if (!g_cow_state.initialized)
+    if (!g_cow_state.initialized ||
+        __atomic_load_n(&g_cow_state.snapshot_count, __ATOMIC_ACQUIRE) == 0)
         return false;
 
+    bool active = false;
     TagFSLockTake(&g_cow_state.lock);
-
-    // CoW is active if there are any snapshots for this file
-    // or if file has the COW flag set
-    for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
-        CowSnapshot *snap = &g_cow_state.snapshots[i];
-        if (snap->parent_file_id == file_id || snap->parent_file_id == 0) {
-            TagFSLockDrop(&g_cow_state.lock);
-            return true;
-        }
+    for (uint32_t i = 0; i < g_cow_state.snapshot_count && !active; i++) {
+        uint32_t parent = g_cow_state.snapshots[i].parent_file_id;
+        active = parent == file_id || parent == 0;
     }
-
-    // Also check if file has COW flag in metadata
-    TagFSMetadata meta;
-    if (tagfs_get_metadata(file_id, &meta) == OK) {
-        bool is_cow = (meta.flags & TAGFS_FILE_COW) != 0;
-        tagfs_metadata_free(&meta);
-        TagFSLockDrop(&g_cow_state.lock);
-        return is_cow;
-    }
-
     TagFSLockDrop(&g_cow_state.lock);
-    return false;
+    return active;
 }
 
 uint64_t TagFS_CowGetCheckpoint(void) {

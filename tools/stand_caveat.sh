@@ -138,11 +138,11 @@ caveat_row() {
         lockrank:ledger@tagfs_remember_use_context:write)
                     echo "1.1|the Ledger is written to the medium under its IRQ-off lock, so a core that reads the Ledger spins with interrupts off for as long as the medium takes" ;;
         lockrank:diskbook@DiskBookCheckpoint:write)
-                    echo "1.1|the DiskBook's checkpoint writes its header to the medium under its IRQ-off lock, and a volume being taken down asks for it though nothing else of the take-down writes" ;;
+                    echo "|the DiskBook's checkpoint writes its header to the medium under its IRQ-off lock, and a volume being taken down asks for it though nothing else of the take-down writes" ;;
         lockrank:cow@TagFS_CowIsActive:read)
-                    echo "1.1|with no snapshot of a file standing, asking whether it is copied on write reads its metadata off the medium under the copy-on-write lock, so every core that writes spins with interrupts off for as long as the medium takes (CR-10)" ;;
+                    echo "|with no snapshot of a file standing, asking whether it is copied on write reads its metadata off the medium under the copy-on-write lock, so every core that writes spins with interrupts off for as long as the medium takes (CR-10)" ;;
         lockrank:cow@TagFS_CowAfterWrite:flush)
-                    echo "1.1|every 64th redirect the log takes pushes the medium's cache from inside the copy-on-write lock, with interrupts off, on the drain core that waits for completions only its own interrupt returns (CR-6)" ;;
+                    echo "|every 64th redirect the log takes pushes the medium's cache from inside the copy-on-write lock, with interrupts off, on the drain core that waits for completions only its own interrupt returns (CR-6)" ;;
         lockrank:cow@TagFS_CowBeforeWrite:read|\
         lockrank:cow@TagFS_CowBeforeWrite:write)
                     echo "1.3|a write into a block a snapshot keeps copies the block under the copy-on-write lock, so every core that writes spins with interrupts off while the medium reads and writes the copy" ;;

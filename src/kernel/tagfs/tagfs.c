@@ -3654,7 +3654,6 @@ static void tagfs_clear_the_ground(void)
     BraidShutdown();
     IntegrityShutdown();
     TagFS_TestsShutdown();
-    /* Last, so everything above it has been journaled by the time it goes. */
     DiskBookShutdown();
 
     g_state.initialized = false;
