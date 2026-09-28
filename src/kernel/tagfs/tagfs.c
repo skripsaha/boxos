@@ -10,7 +10,6 @@
 #include "metadata_pool/meta_pool.h"
 #include "use_context.h"
 #include "disk_book/disk_book.h"
-#include "bcdc/bcdc.h"
 #include "error.h"
 #include "ahci_sync.h"
 #include "ahci.h"
@@ -2817,12 +2816,6 @@ error_t tagfs_init(void) {
     // --- Self-Healing init ---
     TagFS_SelfHealInit();
 
-    // --- Bcdc Compression init ---
-    if (BcdcInit() != OK) {
-        return mount_refused("its compression dictionaries would not start",
-                             ERR_NO_MEMORY);
-    }
-
     // --- Test Framework init ---
     if (TagFS_TestsInit() != OK) {
         return mount_refused("its test framework would not start",
@@ -2833,7 +2826,7 @@ error_t tagfs_init(void) {
      * ‼ THE FAILURE THAT COST A BOARD ITS FILESYSTEM, ON COMMAND.
      *
      * Every refusal from here down leaves five subsystems standing — DiskBook,
-     * CoW, Dedup, Self-Heal, Bcdc and the test framework — and until
+     * CoW, Dedup, Self-Heal and the test framework — and until
      * tagfs_clear_the_ground existed nothing took them down. The NEXT mount
      * then died at TagFS_CowInit with ERR_ALREADY_INITIALIZED, and went on
      * dying there for the rest of the boot, saying nothing. Nothing in QEMU
@@ -3609,8 +3602,8 @@ static void tagfs_sync_inside(void)
  *
  * This is the piece that did not exist, and its absence is what turned one
  * transient read error into a machine with no filesystem for the rest of its
- * boot. tagfs_init brings up eleven things in order and any of them may refuse;
- * when one did, the ten before it were left standing and nothing anywhere took
+ * boot. tagfs_init brings up ten things in order and any of them may refuse;
+ * when one did, the nine before it were left standing and nothing anywhere took
  * them down — tagfs_teardown begins with `if (!g_state.initialized) return`,
  * and a mount that failed never set that flag.
  *
@@ -3676,7 +3669,6 @@ static void tagfs_clear_the_ground(void)
     TagFS_DedupShutdown();
     TagFS_SelfHealShutdown();
     BraidShutdown();
-    BcdcShutdown();
     IntegrityShutdown();
     TagFS_TestsShutdown();
     /* Last, so everything above it has been journaled by the time it goes. */

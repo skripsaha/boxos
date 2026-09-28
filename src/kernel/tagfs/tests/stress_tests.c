@@ -1,9 +1,8 @@
 #include "tests.h"
 #include "../tagfs.h"
-#include "../bcdc/bcdc.h"
 
 // ============================================================================
-// Stress — many files, one large file, many compressions
+// Stress — many files, one large file
 //
 // A stress_concurrent_operations used to stand here. It was stress_many_files
 // again under another name — the same ten files, written and read one after
@@ -115,39 +114,9 @@ out:
     return verdict;
 }
 
-static TestResult test_stress_compression(void)
-{
-    TestResult verdict      = TEST_PASS;
-    uint8_t*   input        = g_test_buffer;
-    uint8_t*   squeezed     = g_test_buffer + 2 * TAGFS_BLOCK_SIZE;   /* up to 4096 + 24 */
-    uint8_t*   decompressed = g_test_output;
-
-    for (uint32_t i = 0; i < 20; i++) {
-        uint16_t squeezed_size = 0, decompressed_size = 0;
-
-        // Alternate between random and zeros
-        if (i % 2 == 0)
-            fill_random(input, TAGFS_BLOCK_SIZE);
-        else
-            fill_zeros(input, TAGFS_BLOCK_SIZE);
-
-        TEST_ASSERT_OK(BcdcCompress(input, TAGFS_BLOCK_SIZE, squeezed, &squeezed_size,
-                                    BCDC_TYPE_RLE, BCDC_LEVEL_DEFAULT, 0),
-                       "BcdcCompress should succeed");
-        TEST_ASSERT_OK(BcdcDecompress(squeezed, squeezed_size, decompressed,
-                                      &decompressed_size, 0),
-                       "BcdcDecompress should succeed");
-        TEST_ASSERT_EQ(TestFirstDifference(input, decompressed, TAGFS_BLOCK_SIZE),
-                       TAGFS_BLOCK_SIZE, "Data should match (first differing byte)");
-    }
-out:
-    return verdict;
-}
-
 static const TestCase g_stress_tests[] = {
     { .name = "stress_many_files",       .func = test_stress_many_files,       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stress_large_file",       .func = test_stress_large_file,       .reach = TEST_WRITES_TO_VOLUME },
-    { .name = "stress_compression",      .func = test_stress_compression,      .reach = TEST_READS_ONLY },
 };
 
 const TestSuite g_stress_suite = {

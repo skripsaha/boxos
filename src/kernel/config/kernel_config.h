@@ -236,17 +236,6 @@ _Static_assert(CONFIG_KB_REPEAT_RATE_MS > 0,
  * removed: emulator-targeted defaults are not part of the spec. */
 #define CONFIG_ACPI_DEBUG 0
 
-/* TagFS BCDC compressor — runtime-tuneable. The on-disk header still pins
- * `dictionary_id` to a single byte (ID 0..255), so MAX_DICTS keeps that
- * upper bound, but everything else is dynamic. Unused dicts cost zero
- * memory: each struct is kmalloc'd on first BcdcCreateDictionary() and
- * holds its own spinlock. Policies live in a growable list. */
-#define CONFIG_BCDC_MAX_DICTS         256   /* hard cap from on-disk uint8_t */
-#define CONFIG_BCDC_DEFAULT_DICT_SIZE 8192  /* bytes per dictionary buffer */
-#define CONFIG_BCDC_POLICY_INITIAL    16    /* policy table starts here */
-#define CONFIG_BCDC_POLICY_MAX        4096  /* policy table hard ceiling */
-#define CONFIG_BCDC_LZ_HASH_BITS      12    /* 4096-entry hash chain head[] */
-
 #ifndef CONFIG_DEBUG_ENABLED
 #define CONFIG_DEBUG_ENABLED 0
 #endif
