@@ -46,7 +46,7 @@ static void tagfs_auto_snapshot_before_write(uint32_t file_id) {
     }
 }
 
-static TagFSState g_state;
+static TagFSState g_state = { .lock = TAGFS_LOCK_INIT("state", LOCK_RANK_STATE) };
 static WellKnownTags g_well_known;
 
 // Accessor function for well-known tags (tagfs_get_state already defined below)
@@ -257,7 +257,7 @@ static bool handle_belongs_here(const TagFSFileHandle *handle, const char *what)
  * this machine, and it is left alone.
  */
 static OpenFileEntry *g_open_files[OPEN_FILE_BUCKETS];
-static spinlock_t g_open_table_lock;
+static TagFSLock g_open_table_lock = TAGFS_LOCK_INIT("openfiles", LOCK_RANK_LEAF);
 
 static uint32_t ofe_hash(uint32_t file_id)
 {
@@ -266,7 +266,7 @@ static uint32_t ofe_hash(uint32_t file_id)
 
 static OpenFileEntry *ofe_acquire(uint32_t file_id)
 {
-    spin_lock(&g_open_table_lock);
+    TagFSLockTake(&g_open_table_lock);
     uint32_t bucket = ofe_hash(file_id);
     OpenFileEntry *e = g_open_files[bucket];
     while (e)
@@ -274,7 +274,7 @@ static OpenFileEntry *ofe_acquire(uint32_t file_id)
         if (e->file_id == file_id)
         {
             e->ref_count++;
-            spin_unlock(&g_open_table_lock);
+            TagFSLockDrop(&g_open_table_lock);
             return e;
         }
         e = e->next;
@@ -282,18 +282,18 @@ static OpenFileEntry *ofe_acquire(uint32_t file_id)
     e = kmalloc(sizeof(OpenFileEntry));
     if (!e)
     {
-        spin_unlock(&g_open_table_lock);
+        TagFSLockDrop(&g_open_table_lock);
         return NULL;
     }
     e->file_id = file_id;
     e->ref_count = 1;
-    spinlock_init(&e->write_lock);
+    TagFSLockInit(&e->write_lock, "writer", LOCK_RANK_WRITER);
     e->async_write_owner  = NULL;
     e->async_pending_head = NULL;
-    spinlock_init(&e->async_token_lock);
+    TagFSLockInit(&e->async_token_lock, "token", LOCK_RANK_LEAF);
     e->next = g_open_files[bucket];
     g_open_files[bucket] = e;
-    spin_unlock(&g_open_table_lock);
+    TagFSLockDrop(&g_open_table_lock);
     return e;
 }
 
@@ -304,11 +304,11 @@ static void ofe_release(OpenFileEntry *ofe)
 
     bool do_free = false;
 
-    spin_lock(&g_open_table_lock);
+    TagFSLockTake(&g_open_table_lock);
     if (ofe->ref_count == 0)
     {
         uint32_t fid = ofe->file_id;
-        spin_unlock(&g_open_table_lock);
+        TagFSLockDrop(&g_open_table_lock);
         panic("[TagFS] ofe_release: ref_count already zero for file_id=%u — double-release or corruption", fid);
     }
     ofe->ref_count--;
@@ -331,14 +331,14 @@ static void ofe_release(OpenFileEntry *ofe)
         do_free = true;
         // Note: table_lock is still held here, will be released below
     }
-    spin_unlock(&g_open_table_lock);
+    TagFSLockDrop(&g_open_table_lock);
 
     // Now acquire write_lock OUTSIDE of table_lock to prevent deadlock.
     // This waits for any in-flight writer to finish before freeing memory.
     if (do_free)
     {
-        spin_lock(&ofe->write_lock);
-        spin_unlock(&ofe->write_lock);
+        TagFSLockTake(&ofe->write_lock);
+        TagFSLockDrop(&ofe->write_lock);
         kfree(ofe);
     }
 }
@@ -393,7 +393,7 @@ static bool hold_entry_still_listed(const TagFSFileHandle *handle, uint32_t *out
         return false;
     }
     bool found = false;
-    spin_lock(&g_open_table_lock);
+    TagFSLockTake(&g_open_table_lock);
     for (OpenFileEntry *e = g_open_files[ofe_hash(handle->ofe->file_id)]; e; e = e->next) {
         if (e == handle->ofe) {
             found = true;
@@ -401,7 +401,7 @@ static bool hold_entry_still_listed(const TagFSFileHandle *handle, uint32_t *out
             break;
         }
     }
-    spin_unlock(&g_open_table_lock);
+    TagFSLockDrop(&g_open_table_lock);
     return found;
 }
 
@@ -1786,25 +1786,25 @@ typedef struct {
 static ReadAheadEntry g_read_ahead_cache[TAGFS_READ_AHEAD_BLOCKS];
 static uint32_t g_read_ahead_head = 0;
 static uint32_t g_read_ahead_last_block = 0;
-static spinlock_t g_read_ahead_lock;
+static TagFSLock g_read_ahead_lock = TAGFS_LOCK_INIT("readahead", LOCK_RANK_LEAF);
 
 static void ReadAheadInit(void) {
     memset(g_read_ahead_cache, 0, sizeof(g_read_ahead_cache));
     g_read_ahead_head = 0;
     g_read_ahead_last_block = 0;
-    spinlock_init(&g_read_ahead_lock);
+    TagFSLockInit(&g_read_ahead_lock, "readahead", LOCK_RANK_LEAF);
 }
 
 static int ReadAheadLookup(uint32_t block, void *buffer) {
-    spin_lock(&g_read_ahead_lock);
+    TagFSLockTake(&g_read_ahead_lock);
     for (uint32_t i = 0; i < TAGFS_READ_AHEAD_BLOCKS; i++) {
         if (g_read_ahead_cache[i].valid && g_read_ahead_cache[i].block == block) {
             memcpy(buffer, g_read_ahead_cache[i].data, TAGFS_BLOCK_SIZE);
-            spin_unlock(&g_read_ahead_lock);
+            TagFSLockDrop(&g_read_ahead_lock);
             return 0;
         }
     }
-    spin_unlock(&g_read_ahead_lock);
+    TagFSLockDrop(&g_read_ahead_lock);
     return -1;
 }
 
@@ -1812,14 +1812,14 @@ static int ReadAheadLookup(uint32_t block, void *buffer) {
  * know whether to go to the medium at all, not what is in the block. */
 static bool ReadAheadHas(uint32_t block) {
     bool here = false;
-    spin_lock(&g_read_ahead_lock);
+    TagFSLockTake(&g_read_ahead_lock);
     for (uint32_t i = 0; i < TAGFS_READ_AHEAD_BLOCKS; i++) {
         if (g_read_ahead_cache[i].valid && g_read_ahead_cache[i].block == block) {
             here = true;
             break;
         }
     }
-    spin_unlock(&g_read_ahead_lock);
+    TagFSLockDrop(&g_read_ahead_lock);
     return here;
 }
 
@@ -1832,7 +1832,7 @@ static void ReadAheadPrefetch(uint32_t start_block, uint32_t count) {
     uint32_t slots[TAGFS_READ_AHEAD_BLOCKS];
     uint32_t n_fetch = 0;
 
-    spin_lock(&g_read_ahead_lock);
+    TagFSLockTake(&g_read_ahead_lock);
     for (uint32_t i = 0; i < count && i < TAGFS_READ_AHEAD_BLOCKS; i++) {
         uint32_t block = start_block + i;
         if (block == g_read_ahead_last_block)
@@ -1856,7 +1856,7 @@ static void ReadAheadPrefetch(uint32_t start_block, uint32_t count) {
         g_read_ahead_head++;
     }
     g_read_ahead_last_block = start_block + count - 1;
-    spin_unlock(&g_read_ahead_lock);
+    TagFSLockDrop(&g_read_ahead_lock);
 
     /*
      * Phase 2: the disk I/O, without holding the lock — and blocks that lie
@@ -1906,11 +1906,11 @@ static void ReadAheadPrefetch(uint32_t start_block, uint32_t count) {
         if (len == 1) {
             uint8_t tmp[TAGFS_BLOCK_SIZE];
             if (disk_read_sectors(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {
-                spin_lock(&g_read_ahead_lock);
+                TagFSLockTake(&g_read_ahead_lock);
                 memcpy(g_read_ahead_cache[slots[i]].data, tmp, TAGFS_BLOCK_SIZE);
                 g_read_ahead_cache[slots[i]].block = to_fetch[i];
                 g_read_ahead_cache[slots[i]].valid = true;
-                spin_unlock(&g_read_ahead_lock);
+                TagFSLockDrop(&g_read_ahead_lock);
             }
             i++;
             continue;
@@ -1918,14 +1918,14 @@ static void ReadAheadPrefetch(uint32_t start_block, uint32_t count) {
 
         if (disk_read_sectors(block_to_vlba(to_fetch[i]),
                               (uint16_t)(len * 8u), run) == 0) {
-            spin_lock(&g_read_ahead_lock);
+            TagFSLockTake(&g_read_ahead_lock);
             for (uint32_t k = 0; k < len; k++) {
                 memcpy(g_read_ahead_cache[slots[i + k]].data,
                        run + k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE);
                 g_read_ahead_cache[slots[i + k]].block = to_fetch[i + k];
                 g_read_ahead_cache[slots[i + k]].valid = true;
             }
-            spin_unlock(&g_read_ahead_lock);
+            TagFSLockDrop(&g_read_ahead_lock);
         }
         kfree(run);
         i += len;
@@ -1936,12 +1936,12 @@ static void ReadAheadPrefetch(uint32_t start_block, uint32_t count) {
 // pre-write data (read-after-write consistency). Called on every block write,
 // sync and async.
 static void ReadAheadInvalidate(uint32_t block) {
-    spin_lock(&g_read_ahead_lock);
+    TagFSLockTake(&g_read_ahead_lock);
     for (uint32_t i = 0; i < TAGFS_READ_AHEAD_BLOCKS; i++) {
         if (g_read_ahead_cache[i].valid && g_read_ahead_cache[i].block == block)
             g_read_ahead_cache[i].valid = false;
     }
-    spin_unlock(&g_read_ahead_lock);
+    TagFSLockDrop(&g_read_ahead_lock);
 }
 
 void tagfs_readahead_invalidate(uint32_t block) {
@@ -1950,11 +1950,11 @@ void tagfs_readahead_invalidate(uint32_t block) {
 
 /* Every entry, for when what they are copies of is no longer there. */
 static void ReadAheadForget(void) {
-    spin_lock(&g_read_ahead_lock);
+    TagFSLockTake(&g_read_ahead_lock);
     for (uint32_t i = 0; i < TAGFS_READ_AHEAD_BLOCKS; i++) {
         g_read_ahead_cache[i].valid = false;
     }
-    spin_unlock(&g_read_ahead_lock);
+    TagFSLockDrop(&g_read_ahead_lock);
 }
 
 /*
@@ -2100,7 +2100,7 @@ static uint32_t g_ledger_current = 0;
  * leave the medium with whichever landed last and memory with whichever
  * committed last — not necessarily the same one. A leaf: nothing under it
  * takes another lock. */
-static spinlock_t g_ledger_lock;
+static TagFSLock  g_ledger_lock = TAGFS_LOCK_INIT("ledger", LOCK_RANK_LEAF);
 static char       g_ledger_use[TAGFS_SECTOR_SIZE];
 static uint16_t   g_ledger_use_len;
 #define LEDGER_USE_MAX  ((size_t)TAGFS_SECTOR_SIZE - sizeof(VolumeLedger))
@@ -2234,10 +2234,10 @@ static error_t ledger_load(void)
     g_state.ledger   = led[newest];
     g_ledger_current = newest;
 
-    spin_lock(&g_ledger_lock);
+    TagFSLockTake(&g_ledger_lock);
     g_ledger_use_len = tail_len[newest];
     memcpy(g_ledger_use, tails + (size_t)newest * TAGFS_SECTOR_SIZE, g_ledger_use_len);
-    spin_unlock(&g_ledger_lock);
+    TagFSLockDrop(&g_ledger_lock);
     kfree(tails);
 
     if (live < VOLUME_LEDGER_COPIES) {
@@ -2290,9 +2290,9 @@ static error_t ledger_write_locked(void)
 
 error_t tagfs_write_ledger(void)
 {
-    spin_lock(&g_ledger_lock);
+    TagFSLockTake(&g_ledger_lock);
     error_t rc = ledger_write_locked();
-    spin_unlock(&g_ledger_lock);
+    TagFSLockDrop(&g_ledger_lock);
     return rc;
 }
 
@@ -2304,11 +2304,11 @@ error_t tagfs_remember_use_context(const char *list, size_t len, bool *remembere
      * forgets rather than remembering half of what was said, and says so. */
     bool fits = len <= LEDGER_USE_MAX;
 
-    spin_lock(&g_ledger_lock);
+    TagFSLockTake(&g_ledger_lock);
     g_ledger_use_len = fits ? (uint16_t)len : 0;
     if (g_ledger_use_len) memcpy(g_ledger_use, list, g_ledger_use_len);
     error_t rc = ledger_write_locked();
-    spin_unlock(&g_ledger_lock);
+    TagFSLockDrop(&g_ledger_lock);
 
     if (remembered) *remembered = fits && rc == OK;
     return rc;
@@ -2316,10 +2316,10 @@ error_t tagfs_remember_use_context(const char *list, size_t len, bool *remembere
 
 size_t tagfs_recall_use_context(char *buf, size_t cap)
 {
-    spin_lock(&g_ledger_lock);
+    TagFSLockTake(&g_ledger_lock);
     size_t len = g_ledger_use_len;
     if (buf && cap >= len && len) memcpy(buf, g_ledger_use, len);
-    spin_unlock(&g_ledger_lock);
+    TagFSLockDrop(&g_ledger_lock);
     return len;
 }
 
@@ -2435,12 +2435,12 @@ static void free_list_build(void)
  */
 int64_t TagFSAllocatorRederive(void)
 {
-    spin_lock(&g_state.lock);
+    TagFSLockTake(&g_state.lock);
     uint64_t by_bitmap = count_free_blocks();
     int64_t  drift     = (int64_t)g_state.ledger.free_blocks - (int64_t)by_bitmap;
     free_list_build();
     g_state.ledger.free_blocks = by_bitmap;
-    spin_unlock(&g_state.lock);
+    TagFSLockDrop(&g_state.lock);
     return drift;
 }
 #endif
@@ -3533,11 +3533,11 @@ static void tagfs_sync_inside(void)
         {
             /* The whole map has just gone down, so nothing is owed on it —
              * including sectors a refused MapOwedSettle had put back. */
-            spin_lock(&g_state.lock);
+            TagFSLockTake(&g_state.lock);
             memset(g_state.block_bitmap.owed, 0,
                    (g_state.block_bitmap.owed_sectors + 7) / 8);
             g_state.block_bitmap.owed_count = 0;
-            spin_unlock(&g_state.lock);
+            TagFSLockDrop(&g_state.lock);
         }
         kfree(bm_buf);
     }
@@ -3632,9 +3632,9 @@ static void tagfs_clear_the_ground(void)
 
     /* What this volume remembered goes with it; the next one is read, not
      * assumed. */
-    spin_lock(&g_ledger_lock);
+    TagFSLockTake(&g_ledger_lock);
     g_ledger_use_len = 0;
-    spin_unlock(&g_ledger_lock);
+    TagFSLockDrop(&g_ledger_lock);
 
     if (g_state.registry) {
         tag_registry_destroy(g_state.registry);
@@ -3965,7 +3965,7 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
     // The name's tag first, outside the state lock (it may flush the registry).
     uint16_t auto_tag = tagfs_name_tag_intern(filename);
 
-    spin_lock(&g_state.lock);
+    TagFSLockTake(&g_state.lock);
 
     uint32_t file_id = g_state.ledger.next_file_id++;
 
@@ -3978,7 +3978,7 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
         if (!final_tags)
         {
             debug_printf("[TagFS] create_file: kmalloc for final_tags failed\n");
-            spin_unlock(&g_state.lock);
+            TagFSLockDrop(&g_state.lock);
             return -1;
         }
 
@@ -4027,7 +4027,7 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
     {
         debug_printf("[TagFS] create_file: kmalloc for filename failed\n");
         kfree(final_tags);
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return -1;
     }
     memcpy(meta.filename, filename, name_len + 1);
@@ -4048,7 +4048,7 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
         debug_printf("[TagFS] create_file: meta_pool_write failed for file_id=%u\n", file_id);
         kfree(meta.tag_ids);
         kfree(meta.filename);
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return -1;
     }
 
@@ -4058,7 +4058,7 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
         debug_printf("[TagFS] create_file: file_table_update failed for file_id=%u\n", file_id);
         kfree(meta.tag_ids);
         kfree(meta.filename);
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return -1;
     }
 
@@ -4078,7 +4078,7 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
     kfree(meta.tag_ids);
     kfree(meta.filename);
 
-    spin_unlock(&g_state.lock);
+    TagFSLockDrop(&g_state.lock);
 
     debug_printf("[TagFS] Created file '%s' file_id=%u\n", filename, file_id);
     return 0;
@@ -4107,12 +4107,12 @@ int tagfs_delete_file(uint32_t file_id)
 
 static int tagfs_delete_file_inside(uint32_t file_id)
 {
-    spin_lock(&g_state.lock);
+    TagFSLockTake(&g_state.lock);
 
     uint32_t meta_block, meta_offset;
     if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0)
     {
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return -1;
     }
 
@@ -4149,7 +4149,7 @@ static int tagfs_delete_file_inside(uint32_t file_id)
         g_state.ledger.total_files--;
     }
 
-    spin_unlock(&g_state.lock);
+    TagFSLockDrop(&g_state.lock);
 
     debug_printf("[TagFS] Deleted file_id=%u\n", file_id);
     return 0;
@@ -4180,12 +4180,12 @@ static int tagfs_rename_file_inside(uint32_t file_id, const char *new_filename)
      * new one — by-name lookup and proc_exec ask the index, not the string. */
     uint16_t new_tag = tagfs_name_tag_intern(new_filename);
 
-    spin_lock(&g_state.lock);
+    TagFSLockTake(&g_state.lock);
 
     uint32_t meta_block, meta_offset;
     if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0)
     {
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return -1;
     }
 
@@ -4194,7 +4194,7 @@ static int tagfs_rename_file_inside(uint32_t file_id, const char *new_filename)
     if (meta_pool_read(meta_block, meta_offset, &meta) != 0)
     {
         debug_printf("[TagFS] rename_file: failed to read metadata for file_id=%u\n", file_id);
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return -1;
     }
 
@@ -4209,7 +4209,7 @@ static int tagfs_rename_file_inside(uint32_t file_id, const char *new_filename)
     if (!meta.filename)
     {
         tagfs_metadata_free(&meta);
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return -1;
     }
     memcpy(meta.filename, new_filename, len + 1);
@@ -4245,7 +4245,7 @@ static int tagfs_rename_file_inside(uint32_t file_id, const char *new_filename)
                 if (!ids)
                 {
                     tagfs_metadata_free(&meta);
-                    spin_unlock(&g_state.lock);
+                    TagFSLockDrop(&g_state.lock);
                     return -1;
                 }
                 ids[0] = new_tag;
@@ -4264,7 +4264,7 @@ static int tagfs_rename_file_inside(uint32_t file_id, const char *new_filename)
     {
         debug_printf("[TagFS] rename_file: meta_pool_write failed\n");
         tagfs_metadata_free(&meta);
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return -1;
     }
 
@@ -4277,7 +4277,7 @@ static int tagfs_rename_file_inside(uint32_t file_id, const char *new_filename)
 
     tagfs_metadata_free(&meta);
 
-    spin_unlock(&g_state.lock);
+    TagFSLockDrop(&g_state.lock);
     return 0;
 }
 
@@ -4298,12 +4298,12 @@ int tagfs_add_tag(uint32_t file_id, uint16_t tag_id)
 
 static int tagfs_add_tag_inside(uint32_t file_id, uint16_t tag_id)
 {
-    spin_lock(&g_state.lock);
+    TagFSLockTake(&g_state.lock);
 
     uint32_t meta_block, meta_offset;
     if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0)
     {
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return -1;
     }
 
@@ -4311,7 +4311,7 @@ static int tagfs_add_tag_inside(uint32_t file_id, uint16_t tag_id)
     memset(&meta, 0, sizeof(meta));
     if (meta_pool_read(meta_block, meta_offset, &meta) != 0)
     {
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return -1;
     }
 
@@ -4321,7 +4321,7 @@ static int tagfs_add_tag_inside(uint32_t file_id, uint16_t tag_id)
         if (meta.tag_ids[i] == tag_id)
         {
             tagfs_metadata_free(&meta);
-            spin_unlock(&g_state.lock);
+            TagFSLockDrop(&g_state.lock);
             return 0;
         }
     }
@@ -4332,7 +4332,7 @@ static int tagfs_add_tag_inside(uint32_t file_id, uint16_t tag_id)
     if (!new_ids)
     {
         tagfs_metadata_free(&meta);
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return -1;
     }
     if (meta.tag_ids)
@@ -4349,7 +4349,7 @@ static int tagfs_add_tag_inside(uint32_t file_id, uint16_t tag_id)
     if (r != 0)
     {
         tagfs_metadata_free(&meta);
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return r;
     }
     file_table_update(file_id, new_block, new_offset);
@@ -4357,7 +4357,7 @@ static int tagfs_add_tag_inside(uint32_t file_id, uint16_t tag_id)
     meta_pool_delete(meta_block, meta_offset);
 
     tagfs_metadata_free(&meta);
-    spin_unlock(&g_state.lock);
+    TagFSLockDrop(&g_state.lock);
     return 0;
 }
 
@@ -4374,12 +4374,12 @@ int tagfs_remove_tag(uint32_t file_id, uint16_t tag_id)
 
 static int tagfs_remove_tag_inside(uint32_t file_id, uint16_t tag_id)
 {
-    spin_lock(&g_state.lock);
+    TagFSLockTake(&g_state.lock);
 
     uint32_t meta_block, meta_offset;
     if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0)
     {
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return -1;
     }
 
@@ -4387,7 +4387,7 @@ static int tagfs_remove_tag_inside(uint32_t file_id, uint16_t tag_id)
     memset(&meta, 0, sizeof(meta));
     if (meta_pool_read(meta_block, meta_offset, &meta) != 0)
     {
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return -1;
     }
 
@@ -4407,7 +4407,7 @@ static int tagfs_remove_tag_inside(uint32_t file_id, uint16_t tag_id)
     if (!found)
     {
         tagfs_metadata_free(&meta);
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return -1;
     }
 
@@ -4416,7 +4416,7 @@ static int tagfs_remove_tag_inside(uint32_t file_id, uint16_t tag_id)
     if (r != 0)
     {
         tagfs_metadata_free(&meta);
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return r;
     }
     file_table_update(file_id, new_block, new_offset);
@@ -4424,7 +4424,7 @@ static int tagfs_remove_tag_inside(uint32_t file_id, uint16_t tag_id)
     meta_pool_delete(meta_block, meta_offset);
 
     tagfs_metadata_free(&meta);
-    spin_unlock(&g_state.lock);
+    TagFSLockDrop(&g_state.lock);
     return 0;
 }
 
@@ -4445,11 +4445,11 @@ static bool tagfs_has_tag_inside(uint32_t file_id, uint16_t tag_id)
     if (!idx)
         return false;
 
-    spin_lock(&idx->lock);
+    TagFSLockTake(&idx->lock);
 
     if ((uint32_t)tag_id >= idx->bitmap_capacity || !idx->bitmaps[tag_id])
     {
-        spin_unlock(&idx->lock);
+        TagFSLockDrop(&idx->lock);
         return false;
     }
 
@@ -4461,7 +4461,7 @@ static bool tagfs_has_tag_inside(uint32_t file_id, uint16_t tag_id)
     bool result = (byte_idx < bm_bytes) &&
                   (bm->bits[byte_idx] & (1 << bit_idx));
 
-    spin_unlock(&idx->lock);
+    TagFSLockDrop(&idx->lock);
     return result;
 }
 
@@ -4695,9 +4695,9 @@ uint32_t tagfs_file_ceiling(void)
     /* Under g_state.lock for the same reason the scan bound below is: create
      * bumps next_file_id under it, and a lock-free read can see the value
      * from before a create that has already returned to its caller. */
-    spin_lock(&g_state.lock);
+    TagFSLockTake(&g_state.lock);
     uint32_t ceiling = g_state.ledger.next_file_id;
-    spin_unlock(&g_state.lock);
+    TagFSLockDrop(&g_state.lock);
     tagfs_leave();
     return ceiling;
 }
@@ -4724,9 +4724,9 @@ static int tagfs_list_all_files_inside(uint32_t *out_file_ids, uint32_t max_resu
      * to the caller (the cross-core half of write_concurrent "file not found").
      * Snapshot then release so the per-fid file_table locking below stays
      * unnested. */
-    spin_lock(&g_state.lock);
+    TagFSLockTake(&g_state.lock);
     uint32_t max_id = g_state.ledger.next_file_id;
-    spin_unlock(&g_state.lock);
+    TagFSLockDrop(&g_state.lock);
 
     for (uint32_t fid = 1; fid < max_id && found < max_results; fid++)
     {
@@ -4983,11 +4983,11 @@ static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint6
     // Auto-snapshot before write if versioning enabled (production feature)
     tagfs_auto_snapshot_before_write(handle->file_id);
 
-    /* Serialize writes to the same file. The plain `spin_lock` would
+    /* Serialize writes to the same file. A plain TagFSLockTake would
      * deadlock with the BMIDE-IRQ-on-BSP topology: this lock is held
      * across `write_block → ata_dma_sync`, which waits for the BMIDE
      * completion IRQ. That IRQ lands only on the BSP (legacy IO-APIC
-     * GSI 14). If the BSP is the CONTENDER here, its spin_lock has
+     * GSI 14). If the BSP is the CONTENDER here, its take has
      * already CLI'd and the IRQ never delivers; the holder spins
      * forever waiting for cmd.done and the BSP spins forever waiting
      * for the lock.
@@ -5005,9 +5005,9 @@ static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint6
      * unchanged — trylock succeeds first try. */
     if (handle->ofe)
     {
-        if (!spin_trylock(&handle->ofe->write_lock)) {
+        if (!TagFSLockTry(&handle->ofe->write_lock)) {
             uint8_t self_core = amp_get_core_index();
-            while (!spin_trylock(&handle->ofe->write_lock)) {
+            while (!TagFSLockTry(&handle->ofe->write_lock)) {
                 BatonPump(self_core);
                 cpu_pause();
             }
@@ -5174,7 +5174,7 @@ static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint6
         if (file_table_lookup(handle->file_id, &meta_block, &meta_offset) != 0)
         {
             if (handle->ofe)
-                spin_unlock(&handle->ofe->write_lock);
+                TagFSLockDrop(&handle->ofe->write_lock);
             return -1;
         }
 
@@ -5183,7 +5183,7 @@ static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint6
         if (meta_pool_read(meta_block, meta_offset, &meta) != 0)
         {
             if (handle->ofe)
-                spin_unlock(&handle->ofe->write_lock);
+                TagFSLockDrop(&handle->ofe->write_lock);
             return -1;
         }
 
@@ -5196,7 +5196,7 @@ static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint6
         {
             tagfs_metadata_free(&meta);
             if (handle->ofe)
-                spin_unlock(&handle->ofe->write_lock);
+                TagFSLockDrop(&handle->ofe->write_lock);
             return -1;
         }
         memcpy(meta.extents, handle->extents, sizeof(FileExtent) * handle->extent_count);
@@ -5206,7 +5206,7 @@ static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint6
         {
             tagfs_metadata_free(&meta);
             if (handle->ofe)
-                spin_unlock(&handle->ofe->write_lock);
+                TagFSLockDrop(&handle->ofe->write_lock);
             return -1;
         }
         file_table_update(handle->file_id, new_mb, new_mo);
@@ -5215,7 +5215,7 @@ static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint6
     }
 
     if (handle->ofe)
-        spin_unlock(&handle->ofe->write_lock);
+        TagFSLockDrop(&handle->ofe->write_lock);
 
     /* WROTE Touch fan-out is the caller's responsibility — published by
      * storage_ops.c::ObjWrite (sync path) and write_job.c::w_publish
@@ -5411,13 +5411,13 @@ static int tagfs_truncate_file_inside(uint32_t file_id, uint64_t new_size)
     /* The trylock-with-the-IRQ-window-open dance, for the same reason
      * tagfs_write does it: this lock is held across meta_pool_write ->
      * write_block -> ata_dma_sync, which waits on a BMIDE completion IRQ that
-     * lands only on the BSP. A plain spin_lock here would deadlock the BSP
+     * lands only on the BSP. A plain TagFSLockTake here would deadlock the BSP
      * against the holder exactly as described above tagfs_write. */
     if (handle->ofe)
     {
-        if (!spin_trylock(&handle->ofe->write_lock)) {
+        if (!TagFSLockTry(&handle->ofe->write_lock)) {
             uint8_t self_core = amp_get_core_index();
-            while (!spin_trylock(&handle->ofe->write_lock)) {
+            while (!TagFSLockTry(&handle->ofe->write_lock)) {
                 BatonPump(self_core);
                 cpu_pause();
             }
@@ -5427,7 +5427,7 @@ static int tagfs_truncate_file_inside(uint32_t file_id, uint64_t new_size)
     int rc = tagfs_truncate_locked(file_id, new_size);
 
     if (handle->ofe)
-        spin_unlock(&handle->ofe->write_lock);
+        TagFSLockDrop(&handle->ofe->write_lock);
     tagfs_close(handle);
     return rc;
 }
@@ -5479,9 +5479,9 @@ static void MapOwedSettle(void)
     /* Asked under the lock, because that is where the count is kept. Reading
      * it any other way would be a race on the one number that decides whether
      * this function does anything at all. */
-    spin_lock(&g_state.lock);
+    TagFSLockTake(&g_state.lock);
     uint32_t owed_now = g_state.block_bitmap.owed_count;
-    spin_unlock(&g_state.lock);
+    TagFSLockDrop(&g_state.lock);
     if (owed_now == 0)
         return;
 
@@ -5499,9 +5499,9 @@ static void MapOwedSettle(void)
     for (uint32_t sec = 0; sec < g_state.block_bitmap.owed_sectors; sec++) {
         uint8_t bit = (uint8_t)(1u << (sec % 8));
 
-        spin_lock(&g_state.lock);
+        TagFSLockTake(&g_state.lock);
         if (!g_state.block_bitmap.owed || !(g_state.block_bitmap.owed[sec / 8] & bit)) {
-            spin_unlock(&g_state.lock);
+            TagFSLockDrop(&g_state.lock);
             continue;
         }
         uint32_t from = sec * TAGFS_SECTOR_SIZE;
@@ -5512,16 +5512,16 @@ static void MapOwedSettle(void)
         g_state.block_bitmap.owed[sec / 8] &= (uint8_t)~bit;
         if (g_state.block_bitmap.owed_count)
             g_state.block_bitmap.owed_count--;
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
 
         if (disk_write_sectors(base_lba + sec, 1, sector) != 0) {
-            spin_lock(&g_state.lock);
+            TagFSLockTake(&g_state.lock);
             if (g_state.block_bitmap.owed &&
                 !(g_state.block_bitmap.owed[sec / 8] & bit)) {
                 g_state.block_bitmap.owed[sec / 8] |= bit;
                 g_state.block_bitmap.owed_count++;
             }
-            spin_unlock(&g_state.lock);
+            TagFSLockDrop(&g_state.lock);
             kprintf("[TagFS] the medium would not take sector %u of this "
                     "volume's block map — the blocks it covers are taken here "
                     "and still read as free there\n", sec);
@@ -5600,9 +5600,9 @@ static int tagfs_alloc_blocks_inside(uint32_t count, uint32_t *out_start_block)
     if (count == 0 || !out_start_block)
         return -1;
 
-    spin_lock(&g_state.lock);
+    TagFSLockTake(&g_state.lock);
     int result = tagfs_alloc_blocks_internal(count, out_start_block);
-    spin_unlock(&g_state.lock);
+    TagFSLockDrop(&g_state.lock);
 
     /* ‼ BEFORE THE CALLER CAN NAME IT. Every caller of this function goes on
      * to write the block's number somewhere that outlives this boot — a
@@ -5751,9 +5751,9 @@ static int tagfs_free_blocks_inside(uint32_t start_block, uint32_t count)
     if (count == 0)
         return 0;
 
-    spin_lock(&g_state.lock);
+    TagFSLockTake(&g_state.lock);
     tagfs_free_blocks_internal(start_block, count);
-    spin_unlock(&g_state.lock);
+    TagFSLockDrop(&g_state.lock);
     return 0;
 }
 
@@ -5982,12 +5982,12 @@ int tagfs_defrag_file(uint32_t file_id, uint32_t target_block)
 
 static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
 {
-    spin_lock(&g_state.lock);
+    TagFSLockTake(&g_state.lock);
 
     uint32_t meta_block, meta_offset;
     if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0)
     {
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return -1;
     }
 
@@ -5995,7 +5995,7 @@ static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
     memset(&meta, 0, sizeof(meta));
     if (meta_pool_read(meta_block, meta_offset, &meta) != 0)
     {
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return -1;
     }
 
@@ -6003,7 +6003,7 @@ static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
     if (meta.extent_count <= 1)
     {
         tagfs_metadata_free(&meta);
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         return 0;
     }
 
@@ -6035,23 +6035,23 @@ static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
             g_state.ledger.free_blocks -= total_blocks;
         } else {
             // Target not available, allocate first available
-            spin_unlock(&g_state.lock);
+            TagFSLockDrop(&g_state.lock);
             if (tagfs_alloc_blocks(total_blocks, &new_start) != 0)
             {
                 tagfs_metadata_free(&meta);
                 return -1;
             }
-            spin_lock(&g_state.lock);
+            TagFSLockTake(&g_state.lock);
         }
     } else {
         // No target specified, allocate first available contiguous space
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         if (tagfs_alloc_blocks(total_blocks, &new_start) != 0)
         {
             tagfs_metadata_free(&meta);
             return -1;
         }
-        spin_lock(&g_state.lock);
+        TagFSLockTake(&g_state.lock);
     }
 
     // Copy all data to new contiguous location
@@ -6076,7 +6076,7 @@ static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
     if (copy_failed)
     {
         // Cleanup: free newly allocated blocks
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         tagfs_free_blocks(new_start, total_blocks);
         tagfs_metadata_free(&meta);
         return -1;
@@ -6106,7 +6106,7 @@ static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
         meta.extents      = old_extents;
         meta.extent_count = old_extent_ct;
         tagfs_metadata_free(&meta);
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         tagfs_free_blocks(new_start, total_blocks);
         return -1;
     }
@@ -6125,7 +6125,7 @@ static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
                 "ground goes back\n", file_id, new_start);
         kfree(old_extents);
         tagfs_metadata_free(&meta);
-        spin_unlock(&g_state.lock);
+        TagFSLockDrop(&g_state.lock);
         tagfs_free_blocks(new_start, total_blocks);
         return -1;
     }
@@ -6146,7 +6146,7 @@ static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
     kfree(old_extents);
 
     tagfs_metadata_free(&meta);
-    spin_unlock(&g_state.lock);
+    TagFSLockDrop(&g_state.lock);
     return 0;
 }
 

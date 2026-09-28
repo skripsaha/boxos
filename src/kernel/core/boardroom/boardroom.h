@@ -199,7 +199,9 @@ uint64_t BoardroomSeatSectors(uint8_t seat);
 uint8_t BoardroomSeatIndex(uint8_t seat);
 
 /* Sector I/O. Counts are in 512-byte sectors and are split as needed, so no
- * caller has to know what any particular controller's limit is. */
+ * caller has to know what any particular controller's limit is. These two and
+ * BoardroomFlush are the doors LockRank watches: a TagFS lock held on the
+ * calling core is named at the door (tagfs/lock_rank). */
 int BoardroomRead (uint8_t seat, uint64_t lba, uint32_t count, void* buffer);
 int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffer);
 

@@ -3,6 +3,7 @@
 
 #include "../../lib/kernel/ktypes.h"
 #include "../../lib/kernel/klib.h"
+#include "../lock_rank/lock_rank.h"
 #include "../tagfs_constants.h"
 #include "../../core/error/error.h"
 
@@ -87,7 +88,7 @@ typedef struct {
     uint64_t cow_copies;
     uint64_t blocks_shared;
     uint32_t snapshots_created;
-    spinlock_t lock;
+    TagFSLock lock;
     bool initialized;
 } CowState;
 

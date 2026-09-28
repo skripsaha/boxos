@@ -28,7 +28,7 @@ typedef struct {
 } MapSlot;
 
 static bool           g_initialized   = false;
-static spinlock_t     g_lock;
+static TagFSLock      g_lock          = TAGFS_LOCK_INIT("integrity", LOCK_RANK_LEAF);
 static uint32_t       g_map_entries   = 0;       // == total_blocks (bounds check)
 static uint32_t       g_map_first_block = 0;
 static uint32_t       g_map_count     = 0;       // map blocks on disk
@@ -92,7 +92,7 @@ error_t IntegrityInit(void) {
     if (!fs || fs->layout.data_blocks == 0)
         return ERR_NOT_INITIALIZED;
 
-    spinlock_init(&g_lock);
+    TagFSLockInit(&g_lock, "integrity", LOCK_RANK_LEAF);
     g_map_entries = fs->layout.data_blocks;
     g_map_count   = (g_map_entries + ENTRIES_PER_BLOCK - 1) / ENTRIES_PER_BLOCK;
     BoxHashInit(&g_ctx, fs->uuid, 16);
@@ -263,13 +263,13 @@ void IntegrityUpdate(uint32_t block, const void *data) {
     uint64_t h   = BoxHashIntegrity(data, TAGFS_BLOCK_SIZE, &g_ctx);
     uint32_t idx = block / ENTRIES_PER_BLOCK;
     uint32_t off = block % ENTRIES_PER_BLOCK;
-    spin_lock(&g_lock);
+    TagFSLockTake(&g_lock);
     MapSlot *s = cache_get(idx);
     if (s && s->entries[off] != h) {
         s->entries[off] = h;
         s->dirty = true;
     }
-    spin_unlock(&g_lock);
+    TagFSLockDrop(&g_lock);
 }
 
 bool IntegrityVerify(uint32_t block, const void *data) {
@@ -277,10 +277,10 @@ bool IntegrityVerify(uint32_t block, const void *data) {
         return true;
     uint32_t idx = block / ENTRIES_PER_BLOCK;
     uint32_t off = block % ENTRIES_PER_BLOCK;
-    spin_lock(&g_lock);
+    TagFSLockTake(&g_lock);
     MapSlot *s    = cache_get(idx);
     uint64_t stored = s ? s->entries[off] : 0;
-    spin_unlock(&g_lock);
+    TagFSLockDrop(&g_lock);
 
     if (!s || stored == 0)
         return true;                          // I/O failure or unknown — never false-positive
@@ -289,10 +289,10 @@ bool IntegrityVerify(uint32_t block, const void *data) {
         return true;
 
     __atomic_fetch_add(&g_errors, 1, __ATOMIC_RELAXED);
-    spin_lock(&g_lock);
+    TagFSLockTake(&g_lock);
     if (g_rot_count < ROT_RING_MAX)
         g_rot_ring[g_rot_count++] = block;    // queued for deferred Touch report
-    spin_unlock(&g_lock);
+    TagFSLockDrop(&g_lock);
     debug_printf("[Integrity] BIT-ROT on block %u: stored=%016lx read=%016lx\n",
                  block, (unsigned long)stored, (unsigned long)h);
     return false;
@@ -301,7 +301,7 @@ bool IntegrityVerify(uint32_t block, const void *data) {
 error_t IntegrityFlush(void) {
     if (!g_initialized)
         return OK;
-    spin_lock(&g_lock);
+    TagFSLockTake(&g_lock);
     for (uint32_t s = 0; s < MAP_CACHE_SLOTS; s++) {
         if (g_cache[s].map_idx == SLOT_EMPTY || !g_cache[s].dirty)
             continue;
@@ -313,7 +313,7 @@ error_t IntegrityFlush(void) {
         if (tagfs_write_block(g_map_first_block + g_cache[s].map_idx, buf) == OK)
             g_cache[s].dirty = false;
     }
-    spin_unlock(&g_lock);
+    TagFSLockDrop(&g_lock);
     return OK;
 }
 
@@ -322,12 +322,12 @@ void IntegrityDrainReports(void) {
         return;
     uint32_t local[ROT_RING_MAX];
     uint32_t n;
-    spin_lock(&g_lock);
+    TagFSLockTake(&g_lock);
     n = g_rot_count;
     if (n > ROT_RING_MAX) n = ROT_RING_MAX;
     memcpy(local, g_rot_ring, n * sizeof(uint32_t));
     g_rot_count = 0;
-    spin_unlock(&g_lock);
+    TagFSLockDrop(&g_lock);
 
     for (uint32_t i = 0; i < n; i++) {
         struct __attribute__((packed)) {
@@ -343,14 +343,14 @@ void IntegrityShutdown(void) {
     if (!g_initialized)
         return;
     IntegrityFlush();
-    spin_lock(&g_lock);
+    TagFSLockTake(&g_lock);
     g_initialized = false;
     for (uint32_t s = 0; s < MAP_CACHE_SLOTS; s++)
         g_cache[s].map_idx = SLOT_EMPTY;
     g_map_first_block = 0;
     g_map_count = 0;
     g_map_entries = 0;
-    spin_unlock(&g_lock);
+    TagFSLockDrop(&g_lock);
 }
 
 bool IntegrityIsInitialized(void) { return g_initialized; }

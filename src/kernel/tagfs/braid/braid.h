@@ -3,6 +3,7 @@
 
 #include "../../lib/kernel/ktypes.h"
 #include "../../lib/kernel/klib.h"
+#include "../lock_rank/lock_rank.h"
 #include "../../core/error/error.h"
 #include "../box_hash/box_hash.h"
 
@@ -71,7 +72,7 @@ typedef struct {
     uint16_t reserved;
     BraidDisk disks[BRAID_MAX_DISKS];
     BoxHashContext hash_ctx;
-    spinlock_t lock;
+    TagFSLock lock;
     bool initialized;
 } BraidState;
 

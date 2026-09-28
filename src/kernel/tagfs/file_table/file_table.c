@@ -3,7 +3,7 @@
 static FileTableEntry* g_entries     = NULL;
 static uint32_t        g_capacity    = 0;
 static bool            g_dirty       = false;
-static spinlock_t      g_lock;
+static TagFSLock       g_lock        = TAGFS_LOCK_INIT("table", LOCK_RANK_LEAF);
 
 /*
  * ‼ THE TABLE IS AS LONG AS THE CHAIN, AND THE CHAIN IS ON THE MEDIUM.
@@ -82,7 +82,7 @@ int file_table_init(uint32_t first_block) {
     table_release();
 
     g_dirty = false;
-    spinlock_init(&g_lock);
+    TagFSLockInit(&g_lock, "table", LOCK_RANK_LEAF);
 
     /*
      * ‼ THE ONLY BOUND ON THIS WALK IS A TERMINATION PROOF, NOT A LENGTH.
@@ -186,22 +186,22 @@ void file_table_shutdown(bool write_back) {
 }
 
 int file_table_lookup(uint32_t file_id, uint32_t* out_block, uint32_t* out_offset) {
-    spin_lock(&g_lock);
+    TagFSLockTake(&g_lock);
 
     if (file_id >= g_capacity || g_entries[file_id].meta_block == 0) {
-        spin_unlock(&g_lock);
+        TagFSLockDrop(&g_lock);
         return -1;
     }
 
     *out_block  = g_entries[file_id].meta_block;
     *out_offset = g_entries[file_id].meta_offset;
 
-    spin_unlock(&g_lock);
+    TagFSLockDrop(&g_lock);
     return 0;
 }
 
 int file_table_update(uint32_t file_id, uint32_t meta_block, uint32_t meta_offset) {
-    spin_lock(&g_lock);
+    TagFSLockTake(&g_lock);
 
     if (file_id >= g_capacity) {
         uint32_t want = g_capacity * 2;
@@ -210,7 +210,7 @@ int file_table_update(uint32_t file_id, uint32_t meta_block, uint32_t meta_offse
         }
 
         if (table_grow_to(want) != 0) {
-            spin_unlock(&g_lock);
+            TagFSLockDrop(&g_lock);
             debug_printf("[FileTable] update: grow alloc failed (file_id=%u want=%u)\n",
                          file_id, want);
             return -1;
@@ -223,15 +223,15 @@ int file_table_update(uint32_t file_id, uint32_t meta_block, uint32_t meta_offse
     g_entries[file_id].meta_offset = meta_offset;
     g_dirty = true;
 
-    spin_unlock(&g_lock);
+    TagFSLockDrop(&g_lock);
     return 0;
 }
 
 int file_table_delete(uint32_t file_id) {
-    spin_lock(&g_lock);
+    TagFSLockTake(&g_lock);
 
     if (file_id >= g_capacity) {
-        spin_unlock(&g_lock);
+        TagFSLockDrop(&g_lock);
         return -1;
     }
 
@@ -239,15 +239,15 @@ int file_table_delete(uint32_t file_id) {
     g_entries[file_id].meta_offset = 0;
     g_dirty = true;
 
-    spin_unlock(&g_lock);
+    TagFSLockDrop(&g_lock);
     return 0;
 }
 
 int file_table_flush(void) {
-    spin_lock(&g_lock);
+    TagFSLockTake(&g_lock);
 
     if (!g_dirty) {
-        spin_unlock(&g_lock);
+        TagFSLockDrop(&g_lock);
         return 0;
     }
 
@@ -278,13 +278,13 @@ int file_table_flush(void) {
                 next_block = g_chain[link + 1];
             } else {
                 if (tagfs_alloc_blocks(1, &next_block) != 0) {
-                    spin_unlock(&g_lock);
+                    TagFSLockDrop(&g_lock);
                     debug_printf("[FileTable] flush: alloc failed at entry_offset=%u\n",
                                  entry_offset);
                     return -1;
                 }
                 if (chain_append(next_block) != 0) {
-                    spin_unlock(&g_lock);
+                    TagFSLockDrop(&g_lock);
                     debug_printf("[FileTable] flush: no memory to record block %u\n",
                                  next_block);
                     return -1;
@@ -311,7 +311,7 @@ int file_table_flush(void) {
          * first block, which would write the head of the table twice and lose
          * the entries in between. */
         if (link >= g_chain_len) {
-            spin_unlock(&g_lock);
+            TagFSLockDrop(&g_lock);
             kprintf("[FileTable] the table wants a %u'th block and only %u are "
                     "on its chain — nothing is written\n", link + 1, g_chain_len);
             return -1;
@@ -319,7 +319,7 @@ int file_table_flush(void) {
 
         uint32_t here = g_chain[link];
         if (tagfs_write_block(here, &block) != OK) {
-            spin_unlock(&g_lock);
+            TagFSLockDrop(&g_lock);
             debug_printf("[FileTable] flush: write failed at block=%u\n", here);
             return -1;
         }
@@ -329,6 +329,6 @@ int file_table_flush(void) {
     }
 
     g_dirty = false;
-    spin_unlock(&g_lock);
+    TagFSLockDrop(&g_lock);
     return 0;
 }

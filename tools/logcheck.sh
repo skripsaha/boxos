@@ -46,6 +46,10 @@
 #                         grown or lifted, the reach grown or its caveat gone —
 #                         each must stop a plain make before the link, and the
 #                         harness must still link a grown frame, saying so
+#   logcheck.sh lockrankmut no boot: the LockRank judge shown a place no row
+#                         holds, a row whose step was lifted, a place named
+#                         twice, the table full and a self-deadlock — each a
+#                         FAIL — and a bare spinlock put into TagFS, found
 #   logcheck.sh both
 #
 # Every check is a grep against build/serial.log. No timing assertions.
@@ -661,6 +665,7 @@ run_healthy() {
 
     # (6) TagFS itself still healthy
     grep -qE "TagFS: [0-9]+ run, [0-9]+ passed, 0 failed" "$L"; chk $? "TagFS startup tests: 0 failed"
+    lockrank_judge "$L" "healthy 1c"
 
     # (7) the kernel's ear works — mutation-proven harness, see commit
     grep -q "TOUCH WATCH TEST. PASSED: all 20 checks OK" "$L"; chk $? "TouchWatch self-test 20/20"
@@ -7090,6 +7095,7 @@ run_unattended() {
     L="$SCRATCH/serial.unattendedbios.log"
     grep -qE "\[UNATTENDED READ\] not asked: seat [0-9]+ \(ATA [a-z ]+\) answers only a read somebody stands over" "$L"
     chk $? "unattended: the legacy channel — not asked, and said"
+    lockrank_judge "$SCRATCH/serial.unattended.log $SCRATCH/serial.unattended1c.log $SCRATCH/serial.unattendedq35.log $SCRATCH/serial.unattendedbios.log" "unattended"
 }
 
 # The disk's answer withheld: Tier 1 of the AHCI watch — the level the proof
@@ -7438,6 +7444,7 @@ run_census() {
                 "bad "*) bad "census $plant: ${line#bad }" ;;
             esac
         done < "$SCRATCH/census.$plant.verdict"
+        lockrank_judge "$SCRATCH/serial.$plant.log" "census $plant"
     done
 }
 
@@ -7697,8 +7704,16 @@ stand_twice() {
 
 run_stand() {
     echo "== stand: the startup tests that write, on both roads to the medium, twice each =="
+    local f logs=""
+    rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
+          "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log
     stand_twice stand_bios "BIOS 4c" "ATA [a-z ]+" 6 CORES=4 MEM=4G
     stand_twice stand_uefi "UEFI 4c" "AHCI port [0-9]+" 7 UEFI=on STRICT=on CORES=4 MEM=4G
+    for f in "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
+             "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log; do
+        [ -f "$f" ] && logs="$logs $f"
+    done
+    lockrank_judge "$logs" "stand, both roads"
     buildkey_restore
 }
 
@@ -7715,7 +7730,9 @@ run_stand() {
 # asked, an asynchronous refusal returned instead of called back, HEAPFAIL
 # asked after the slab, counting without refusing, blind to the core, the tag
 # row's PF-1 fix taken out, and a test that forgets to take its fault down
-# (the runner must take it down and fail it). Mutations whose tests do not
+# (the runner must take it down and fail it). LockRank, which the lock tests
+# count with, the same: its witness keyed on a bare IF instead of a TagFS lock
+# held, and its order never checked. Mutations whose tests do not
 # meet each other's share a boot; each is judged by its own test's own line,
 # number and all.
 #
@@ -7760,7 +7777,7 @@ edits = [
      "            if (read_block(disk_block, block_buf) != 0)\n            {\n                medium_refused = true;   /* logcheck mutation: a refused read refuses the write */\n                refused_block  = disk_block;\n                break;\n            }\n"),
     # 1.4: a tag the index will not take undoes the create
     ("        if (meta.tag_ids[i] != TAGFS_INVALID_TAG_ID)\n        {\n            tag_bitmap_set(g_state.bitmap_index, meta.tag_ids[i], file_id);\n        }\n",
-     "        if (meta.tag_ids[i] != TAGFS_INVALID_TAG_ID &&\n            tag_bitmap_set(g_state.bitmap_index, meta.tag_ids[i], file_id) != 0)\n        {\n            for (uint16_t j = 0; j < i; j++)   /* logcheck mutation: create is all or nothing */\n                tag_bitmap_clear(g_state.bitmap_index, meta.tag_ids[j], file_id);\n            file_table_delete(file_id);\n            meta_pool_delete(meta_block, meta_offset);\n            kfree(meta.tag_ids);\n            kfree(meta.filename);\n            spin_unlock(&g_state.lock);\n            return -1;\n        }\n"),
+     "        if (meta.tag_ids[i] != TAGFS_INVALID_TAG_ID &&\n            tag_bitmap_set(g_state.bitmap_index, meta.tag_ids[i], file_id) != 0)\n        {\n            for (uint16_t j = 0; j < i; j++)   /* logcheck mutation: create is all or nothing */\n                tag_bitmap_clear(g_state.bitmap_index, meta.tag_ids[j], file_id);\n            file_table_delete(file_id);\n            meta_pool_delete(meta_block, meta_offset);\n            kfree(meta.tag_ids);\n            kfree(meta.filename);\n            TagFSLockDrop(&g_state.lock);\n            return -1;\n        }\n"),
     # 1.4: the sync answers for its table and its flush
     ("static void tagfs_sync_inside(void);\n",
      "static error_t tagfs_sync_inside(void);   /* logcheck mutation: the sync answers for its stages */\n"),
@@ -7853,7 +7870,7 @@ edits = [
     ("    list->ids[list->count++] = tag_id;\n}\n",
      "    list->ids[list->count++] = tag_id;\n    return true;\n}\n"),
     ("    reverse_index_add(idx, file_id, tag_id);\n    idx->generation++;\n",
-     "    if (!reverse_index_add(idx, file_id, tag_id)) {\n        idx->bitmaps[tag_id]->bits[byte_idx] &= (uint8_t)~(1 << bit_idx);\n        if (idx->bitmaps[tag_id]->file_count > 0)\n            idx->bitmaps[tag_id]->file_count--;\n        spin_unlock(&idx->lock);\n        return -1;\n    }\n    idx->generation++;\n"),
+     "    if (!reverse_index_add(idx, file_id, tag_id)) {\n        idx->bitmaps[tag_id]->bits[byte_idx] &= (uint8_t)~(1 << bit_idx);\n        if (idx->bitmaps[tag_id]->file_count > 0)\n            idx->bitmaps[tag_id]->file_count--;\n        TagFSLockDrop(&idx->lock);\n        return -1;\n    }\n    idx->generation++;\n"),
 ]
 for a, m in edits:
     assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
@@ -7895,6 +7912,7 @@ stand_mech_on() {
         disarm) marks="src/kernel/core/boardroom/block_fail.c:1 src/kernel/core/boardroom/boardroom.c:1" ;;
         lands)  marks="src/kernel/core/boardroom/boardroom.c:2 src/kernel/tagfs/tag_bitmap/tag_bitmap.c:1" ;;
         blind)  marks="src/kernel/tagfs/tests/tests.c:2 src/kernel/tagfs/tests/core_tests.c:1" ;;
+        lockrank) marks="src/kernel/tagfs/lock_rank/lock_rank.c:2" ;;
     esac
     for mark in $marks; do mutate "${mark%%:*}"; done
     python3 - "$group" <<'EOF'
@@ -7953,6 +7971,14 @@ edits = {
    "    if (!row->bits || row->bit_count <= needed_max) {\n",
    "    if (!row->bits) {   /* " + M + ": PF-1 taken out — a row that could not widen is written past */\n"),
  ],
+ "lockrank": [
+  ("src/kernel/tagfs/lock_rank/lock_rank.c",
+   "    if (core->Depth == 0 && core->Unwatched == 0) {\n        LockRankIrqRestore(flags);\n        return;\n    }\n    core->Witnessed++;\n",
+   "    if (core->Depth == 0 && core->Unwatched == 0 && (flags & 0x200)) {   /* " + M + ": the witness keyed on a bare IF */\n        LockRankIrqRestore(flags);\n        return;\n    }\n    core->Witnessed++;\n"),
+  ("src/kernel/tagfs/lock_rank/lock_rank.c",
+   "        if (lock->Rank == LOCK_RANK_NONE || h->Rank < lock->Rank)\n            continue;\n",
+   "        continue;   /* " + M + ": the order is never checked */\n"),
+ ],
  "blind": [
   ("src/kernel/tagfs/tests/tests.c",
    "    kprintf(\"[TESTS] %s failed at %s:%d: %s (%lld, %lld)\\n\",\n",
@@ -7975,7 +8001,7 @@ stand_mech_off() {
     for f in src/kernel/core/boardroom/block_fail.c src/lib/kernel/klib_mem.c \
              src/kernel/tagfs/tests/stand_tests.c src/kernel/core/boardroom/boardroom.c \
              src/kernel/tagfs/tag_bitmap/tag_bitmap.c src/kernel/tagfs/tests/tests.c \
-             src/kernel/tagfs/tests/core_tests.c; do
+             src/kernel/tagfs/tests/core_tests.c src/kernel/tagfs/lock_rank/lock_rank.c; do
         restore "$f"
     done
 }
@@ -8118,6 +8144,17 @@ STAND_HELD_EOF
             'stand_blockfail_async_read failed at [^:]+:[0-9]+: the seat takes the read, as it takes one the medium then refuses \(200, 0\)'
         stand_red standmut_lands "with PF-1 taken out, the tag row is written past its end" \
             'stand_tag_row_refuses_what_it_cannot_widen failed at [^:]+:[0-9]+: a row that could not widen refuses the set instead of writing past its end \(0, -1\)'
+    fi
+    stand_mech_off
+
+    # On one core, where every system call runs with interrupts off: a read
+    # that holds no TagFS lock is exactly what a bare-IF witness would name.
+    stand_mech_on lockrank
+    if stand_mut_boot standmut_lockrank CORES=1 MEM=2G; then
+        stand_red standmut_lockrank "a witness keyed on a bare IF counts a read that holds no TagFS lock" \
+            'stand_lockrank_names_the_medium failed at [^:]+:[0-9]+: a read that holds no TagFS lock is not witnessed, interrupts off or not \(1, 0\)'
+        stand_red standmut_lockrank "an order never checked takes a state-rank lock under a leaf and says nothing" \
+            'stand_lockrank_names_the_order failed at [^:]+:[0-9]+: a state-rank lock taken under a leaf, twice, is out of order twice \(0, 2\)'
     fi
     stand_mech_off
 
@@ -8602,6 +8639,7 @@ run_quill() {
             case)     caveat_judge "$a" "$b" "$c$(quill_said_path "$a" "$b")" ;;
         esac
     done < "$SCRATCH/quill.quill.verdict"
+    lockrank_judge "$SCRATCH/serial.quill.quill1.log $SCRATCH/serial.quill.quill2.log $SCRATCH/serial.quill.quill3.log" "quill"
     make run-stop >/dev/null 2>&1
     restore build/boxos.img
     buildkey_restore
@@ -8949,6 +8987,147 @@ run_stackguard() {
     chk $? "stackguard: the tree put back is judged in full again, and stamped"
 }
 
+# ===========================================================================
+# lockrankmut — the LockRank judge, and the rule that no TagFS lock goes
+# unranked, each shown what it must refuse. No machine.
+# ===========================================================================
+#
+# lockrank_judge (tools/stand_caveat.sh) holds every place the kernel names
+# under its row's step, and is only worth believing if it refuses what it
+# must: a place no row holds, a place whose row lost its step, a place one boot
+# named twice, a line that is no place at all (the self-deadlock, the table
+# full). And it must hold what it must hold — once, however many boots named
+# the place — with the self-tests' own places held and not counted as caveats.
+# Each shown on a log written for it, every verdict counted where it must be,
+# and lockrank_unheld (what the matrix counts) agreeing with it.
+#
+# The kernel's types keep every TagFS lock a TagFSLock: spin_lock on one does
+# not compile, so no lock can be taken without a rank. The host holds the same
+# rule over the text — no bare spinlock_t, and no bare spin_lock, in TagFS or
+# the storage deck outside LockRank's own module — and a bare spinlock_t put
+# into tagfs.c must turn it.
+
+LOCKRANK_HELD_LINE='[LockRank] registry is held across a medium write: taken in tag_registry_flush, the write asked for by write_block+0x3f'
+LOCKRANK_HELD_KEY='registry@tag_registry_flush:write'
+
+# lockrankmut_log NAME LINE... — a boot's log holding exactly LINE..., the way
+# the serial line ends them; prints its path.
+lockrankmut_log() {
+    local f="$SCRATCH/lockrankmut.$1.log"; shift
+    printf '%s\r\n' "$@" > "$f"
+    echo "$f"
+}
+
+# lockrankmut_said LOGS — what lockrank_judge says of LOGS, then "counted
+# PASS FAIL CAVEAT", in a subshell whose counters start at nothing.
+lockrankmut_said() {
+    (PASS=0; FAIL=0; CAVEAT=0; HARNESS=0
+     lockrank_judge "$1" "lockrankmut"
+     echo "counted $PASS $FAIL $CAVEAT")
+}
+
+# lockrankmut_saw WHAT LOGS COUNTED TEXT — the judge counted COUNTED ("P F C")
+# and said TEXT (fixed string) of LOGS.
+lockrankmut_saw() {
+    local said
+    said=$(lockrankmut_said "$2")
+    printf '%s\n' "$said" | grep -qx "counted $3" && printf '%s\n' "$said" | grep -qF -- "$4"
+    chk $? "lockrankmut: $1 ($(printf '%s\n' "$said" | tail -1))"
+}
+
+# lockrank_bare — every line of TagFS or the storage deck that declares or
+# takes a bare spinlock, outside LockRank's own module. A line whose code is
+# only a comment is not code.
+lockrank_bare() {
+    grep -rnE '\b(spinlock_t|spin_lock|spin_unlock|spin_trylock|spinlock_init|spin_force_release)\b' \
+        src/kernel/tagfs src/kernel/core/decks/storage --include='*.c' --include='*.h' |
+        grep -v '^src/kernel/tagfs/lock_rank/' | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|/\*|\*)'
+}
+
+run_lockrankmut() {
+    echo "== lockrankmut: the LockRank judge, shown what it must refuse and what it must hold =="
+    local held held2 unknown twice full deadlock proof said n bare step defect
+    step=$(caveat_step "lockrank:$LOCKRANK_HELD_KEY")
+    defect=$(caveat_defect "lockrank:$LOCKRANK_HELD_KEY")
+    held=$(lockrankmut_log held "$LOCKRANK_HELD_LINE")
+    held2=$(lockrankmut_log held2 "$LOCKRANK_HELD_LINE")
+    unknown=$(lockrankmut_log unknown \
+        '[LockRank] registry is held across a medium write: taken in lockrankmut_nowhere, the write asked for by write_block+0x3f')
+    twice=$(lockrankmut_log twice "$LOCKRANK_HELD_LINE" \
+        '[LockRank] registry is held across a medium write: taken in tag_registry_flush, the write asked for by tagfs_alloc_blocks+0x1f5')
+    full=$(lockrankmut_log full '[LockRank] 256 places have been named; later ones are counted, not named')
+    deadlock=$(lockrankmut_log deadlock \
+        '[LockRank] registry taken in tag_registry_lookup while this core already holds it, taken in tag_registry_flush — this core now waits for itself')
+    proof=$(lockrankmut_log proof \
+        '[LockRank] proof is held across a medium read: taken in TestStandLockRankNamesTheMedium, the read asked for by TestStandLockRankNamesTheMedium+0x12a')
+
+    lockrankmut_saw "a place its row holds is a caveat held under step $step" "$held" "1 0 1" \
+        "caveat held: lockrank:$LOCKRANK_HELD_KEY — $defect — discharged by step $step (lockrankmut, named in 1 of 1 boot(s): $LOCKRANK_HELD_LINE)"
+    lockrankmut_saw "and one caveat, however many boots named it" "$held $held2" "1 0 1" \
+        "named in 2 of 2 boot(s)"
+    lockrankmut_saw "a place no row holds is a FAIL" "$unknown" "0 1 0" \
+        "LockRank names a place no row holds: registry@lockrankmut_nowhere:write"
+    lockrankmut_saw "a place named twice in one boot is a FAIL" "$twice" "0 1 1" \
+        "names one place twice in one boot"
+    lockrankmut_saw "the table full is a FAIL" "$full" "0 1 0" \
+        "says what no place of a row can be: [LockRank] 256 places have been named"
+    lockrankmut_saw "a core that waits for itself is a FAIL" "$deadlock" "0 1 0" \
+        "says what no place of a row can be: [LockRank] registry taken in tag_registry_lookup while this core already holds it"
+    lockrankmut_saw "the self-tests' own place is held, and is no caveat" "$proof" "1 0 0" \
+        "(0 under a step, 1 the self-tests' own)"
+
+    # The day the step that removes the place lands, its row loses the step;
+    # the place seen again is then the defect back.
+    mutate tools/stand_caveat.sh
+    python3 - "$LOCKRANK_HELD_KEY" <<'EOF'
+import re, sys
+p = "tools/stand_caveat.sh"
+s = open(p).read()
+key = re.escape("lockrank:" + sys.argv[1])
+s, n = re.subn(r'(' + key + r'[|)][^"]*?\n\s*echo ")[0-9.]+[a-z]*(\|[^\n]*;;)',
+               r'\1\2   # logcheck mutation: the step lifted', s, count=1, flags=re.S)
+assert n == 1, "lockrankmut: the row of " + sys.argv[1] + " was not found"
+open(p, "w").write(s)
+EOF
+    mut_done tools/stand_caveat.sh "logcheck mutation" 1
+    said=$(. tools/stand_caveat.sh
+           PASS=0; FAIL=0; CAVEAT=0; HARNESS=0
+           lockrank_judge "$held" "lockrankmut"
+           echo "counted $PASS $FAIL $CAVEAT"
+           echo "unheld $(lockrank_unheld "$held" | wc -l | tr -d ' ')")
+    restore tools/stand_caveat.sh
+    printf '%s\n' "$said" | grep -qx "counted 0 1 0" &&
+        printf '%s\n' "$said" | grep -qF "lockrank:$LOCKRANK_HELD_KEY failed: the defect it stands for is back — $defect"
+    chk $? "lockrankmut: a place whose row lost its step is the defect back, and a FAIL ($(printf '%s\n' "$said" | grep '^counted'))"
+    printf '%s\n' "$said" | grep -qx "unheld 1"
+    chk $? "lockrankmut: and the matrix counts it ($(printf '%s\n' "$said" | grep '^unheld'))"
+
+    # What the matrix counts is what the judge refuses.
+    n="$(lockrank_unheld "$held" | wc -l | tr -d ' ') $(lockrank_unheld "$unknown" | wc -l | tr -d ' ')"
+    n="$n $(lockrank_unheld "$twice" | wc -l | tr -d ' ') $(lockrank_unheld "$full" | wc -l | tr -d ' ')"
+    n="$n $(lockrank_unheld "$proof" | wc -l | tr -d ' ')"
+    [ "$n" = "0 1 1 1 0" ]
+    chk $? "lockrankmut: the matrix counts nothing held and every refusal (held, unknown, twice, full, proof: $n)"
+
+    # No lock in TagFS without a rank.
+    bare=$(lockrank_bare)
+    [ -z "$bare" ]
+    chk $? "lockrankmut: TagFS and the storage deck hold no bare spinlock outside LockRank (${bare:-none})"
+    mutate src/kernel/tagfs/tagfs.c
+    python3 - <<'EOF'
+p = "src/kernel/tagfs/tagfs.c"
+s = open(p).read()
+a = "static WellKnownTags g_well_known;\n"
+assert s.count(a) == 1, "lockrankmut: the bare-lock anchor is missing"
+open(p, "w").write(s.replace(a, a + "static spinlock_t g_lockrankmut_bare;   /* logcheck mutation: a TagFS lock with no rank */\n", 1))
+EOF
+    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 1
+    bare=$(lockrank_bare)
+    restore src/kernel/tagfs/tagfs.c
+    printf '%s\n' "$bare" | grep -qF "src/kernel/tagfs/tagfs.c:" && [ "$(printf '%s\n' "$bare" | grep -c .)" = 1 ]
+    chk $? "lockrankmut: a bare spinlock_t put into tagfs.c is found ($(printf '%s\n' "$bare" | cut -c1-120))"
+}
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -9042,8 +9221,9 @@ case "${1:-both}" in
     quill)    run_quill ;;
     quillmut) run_quillmut ;;
     stackguard) run_stackguard ;;
+    lockrankmut) run_lockrankmut ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standmut; echo; run_quillmut; echo; run_stackguard ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut ;;
     *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|stand|standmut|quill|quillmut|stackguard|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
 esac
 

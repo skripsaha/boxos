@@ -1275,7 +1275,7 @@ int meta_pool_flush_retires(void) {
     if (!fs) return -1;
 
     int rc = 0;
-    spin_lock(&fs->lock);
+    TagFSLockTake(&fs->lock);
 
     while (g_retire_len > 0) {
         uint32_t block = g_retire[0].block;
@@ -1326,6 +1326,6 @@ int meta_pool_flush_retires(void) {
         retire_paid(block);
     }
 
-    spin_unlock(&fs->lock);
+    TagFSLockDrop(&fs->lock);
     return rc;
 }

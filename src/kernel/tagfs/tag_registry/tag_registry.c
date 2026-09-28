@@ -319,7 +319,7 @@ int tag_registry_init(TagRegistry* reg) {
     reg->total_tags       = 0;
     reg->next_id          = 0;
 
-    spinlock_init(&reg->lock);
+    TagFSLockInit(&reg->lock, "registry", LOCK_RANK_LEAF);
 
     debug_printf("[TagRegistry] initialized: %u reg buckets, %u key buckets\n",
                  TAGFS_REG_BUCKETS, TAGFS_KEY_BUCKETS);
@@ -371,52 +371,52 @@ void tag_registry_destroy(TagRegistry* reg) {
 
 uint16_t tag_registry_intern(TagRegistry* reg, const char* key, const char* value) {
     if (!reg || !key) return TAGFS_INVALID_TAG_ID;
-    spin_lock(&reg->lock);
+    TagFSLockTake(&reg->lock);
     uint16_t id = intern_unlocked(reg, key, value);
-    spin_unlock(&reg->lock);
+    TagFSLockDrop(&reg->lock);
     return id;
 }
 
 uint16_t tag_registry_lookup(TagRegistry* reg, const char* key, const char* value) {
     if (!reg || !key) return TAGFS_INVALID_TAG_ID;
-    spin_lock(&reg->lock);
+    TagFSLockTake(&reg->lock);
     uint16_t id = lookup_unlocked(reg, key, value);
-    spin_unlock(&reg->lock);
+    TagFSLockDrop(&reg->lock);
     return id;
 }
 
 const char* tag_registry_key(TagRegistry* reg, uint16_t tag_id) {
     if (!reg) return NULL;
-    spin_lock(&reg->lock);
+    TagFSLockTake(&reg->lock);
     const char* result = NULL;
     if (tag_id < reg->next_id && reg->by_id[tag_id]) {
         result = reg->by_id[tag_id]->key;
     }
-    spin_unlock(&reg->lock);
+    TagFSLockDrop(&reg->lock);
     return result;
 }
 
 const char* tag_registry_value(TagRegistry* reg, uint16_t tag_id) {
     if (!reg) return NULL;
-    spin_lock(&reg->lock);
+    TagFSLockTake(&reg->lock);
     const char* result = NULL;
     if (tag_id < reg->next_id && reg->by_id[tag_id]) {
         result = reg->by_id[tag_id]->value;
     }
-    spin_unlock(&reg->lock);
+    TagFSLockDrop(&reg->lock);
     return result;
 }
 
 TagKeyGroup* tag_registry_key_group(TagRegistry* reg, const char* key) {
     if (!reg || !key) return NULL;
-    spin_lock(&reg->lock);
+    TagFSLockTake(&reg->lock);
     uint32_t bucket = key_hash(key, reg->key_bucket_count);
     TagKeyGroup* group = reg->key_buckets[bucket];
     while (group) {
         if (strcmp(group->key, key) == 0) break;
         group = group->next;
     }
-    spin_unlock(&reg->lock);
+    TagFSLockDrop(&reg->lock);
     return group;
 }
 
@@ -426,19 +426,19 @@ TagKeyGroup* tag_registry_key_group(TagRegistry* reg, const char* key) {
 // reason for a disk flush.
 void tag_registry_mark_system(TagRegistry* reg, uint16_t tag_id) {
     if (!reg || tag_id == TAGFS_INVALID_TAG_ID) return;
-    spin_lock(&reg->lock);
+    TagFSLockTake(&reg->lock);
     if (tag_id < reg->next_id && reg->by_id[tag_id])
         reg->by_id[tag_id]->flags |= TAGFS_TAG_FLAG_SYSTEM;
-    spin_unlock(&reg->lock);
+    TagFSLockDrop(&reg->lock);
 }
 
 bool tag_registry_is_system(TagRegistry* reg, uint16_t tag_id) {
     if (!reg || tag_id == TAGFS_INVALID_TAG_ID) return false;
-    spin_lock(&reg->lock);
+    TagFSLockTake(&reg->lock);
     bool is_sys = false;
     if (tag_id < reg->next_id && reg->by_id[tag_id])
         is_sys = (reg->by_id[tag_id]->flags & TAGFS_TAG_FLAG_SYSTEM) != 0;
-    spin_unlock(&reg->lock);
+    TagFSLockDrop(&reg->lock);
     return is_sys;
 }
 
@@ -460,7 +460,7 @@ int tag_registry_flush(TagRegistry* reg) {
     TagFSState* state = tagfs_get_state();
     if (!state) return -1;
 
-    spin_lock(&reg->lock);
+    TagFSLockTake(&reg->lock);
 
     /* The chain the load walked. It is empty only if nothing ever loaded this
      * registry, which a mount does not allow — but the head is the one block
@@ -471,7 +471,7 @@ int tag_registry_flush(TagRegistry* reg) {
     if (g_chain_len == 0 &&
         chain_append(state->layout.tag_registry_block -
                      state->layout.data_block) != 0) {
-        spin_unlock(&reg->lock);
+        TagFSLockDrop(&reg->lock);
         return -1;
     }
 
@@ -506,11 +506,11 @@ int tag_registry_flush(TagRegistry* reg) {
                 new_block = g_chain[link + 1];
             } else {
                 if (tagfs_alloc_blocks(1, &new_block) != 0) {
-                    spin_unlock(&reg->lock);
+                    TagFSLockDrop(&reg->lock);
                     return -1;
                 }
                 if (chain_append(new_block) != 0) {
-                    spin_unlock(&reg->lock);
+                    TagFSLockDrop(&reg->lock);
                     return -1;
                 }
             }
@@ -518,7 +518,7 @@ int tag_registry_flush(TagRegistry* reg) {
             blkp->next_block = new_block;
             int write_result = tagfs_write_block(current_block, blkp);
             if (write_result != 0) {
-                spin_unlock(&reg->lock);
+                TagFSLockDrop(&reg->lock);
                 return -1;
             }
 
@@ -561,7 +561,7 @@ int tag_registry_flush(TagRegistry* reg) {
         g_registry_dirty = false;
     }
 
-    spin_unlock(&reg->lock);
+    TagFSLockDrop(&reg->lock);
     return write_result;
 }
 
@@ -598,7 +598,7 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
         return -1;
     }
 
-    spin_lock(&reg->lock);
+    TagFSLockTake(&reg->lock);
     chain_release();
 
     uint32_t block_num = first_block;
@@ -610,19 +610,19 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
             kprintf("[TagRegistry] the chain points at block %u and this "
                     "volume's data run is %u blocks — that is outside the "
                     "volume, so it is not mounted\n", block_num, run);
-            spin_unlock(&reg->lock);
+            TagFSLockDrop(&reg->lock);
             return -1;
         }
 
         TagRegistryBlock *blkp = &g_tag_registry_load_blk;
         int read_result = tagfs_read_block(block_num, blkp);
         if (read_result != 0) {
-            spin_unlock(&reg->lock);
+            TagFSLockDrop(&reg->lock);
             return -1;
         }
 
         if (blkp->magic != TAGFS_REGISTRY_MAGIC) {
-            spin_unlock(&reg->lock);
+            TagFSLockDrop(&reg->lock);
             return -1;
         }
 
@@ -633,7 +633,7 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
                     "tag registry chain at %u blocks — it is not mounted\n",
                     g_chain_len + 1);
             chain_release();
-            spin_unlock(&reg->lock);
+            TagFSLockDrop(&reg->lock);
             return -1;
         }
 
@@ -690,12 +690,12 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
             kprintf("[TagRegistry] this volume's tag registry chain has taken "
                     "%u hops in a data run of %u blocks, so it is going round "
                     "in a circle — it is not mounted\n", hops, run);
-            spin_unlock(&reg->lock);
+            TagFSLockDrop(&reg->lock);
             return -1;
         }
         block_num = blkp->next_block;
     }
 
-    spin_unlock(&reg->lock);
+    TagFSLockDrop(&reg->lock);
     return 0;
 }

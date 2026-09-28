@@ -3,6 +3,7 @@
 
 #include "../../lib/kernel/ktypes.h"
 #include "../../lib/kernel/klib.h"
+#include "../lock_rank/lock_rank.h"
 #include "../tagfs_constants.h"
 #include "../../core/error/error.h"
 
@@ -67,7 +68,7 @@ typedef struct {
     uint64_t scrub_interval_ms;
     bool scrub_active;
     HealStats stats;
-    spinlock_t lock;
+    TagFSLock lock;
     bool enabled;
     bool initialized;
 } HealState;

@@ -8,7 +8,7 @@
 #include "../tagfs.h"
 
 // Global state
-static CowState g_cow_state;
+static CowState g_cow_state = { .lock = TAGFS_LOCK_INIT("cow", LOCK_RANK_COW) };
 
 // Monotonic snapshot-ID source. File-scope (not a function-local static) so the
 // on-disk restore path can seed it past every reloaded id — see below.
@@ -146,7 +146,7 @@ static bool cow_append_redirect_locked(CowSnapshot *snap,
 // harmless on replay (no matching snapshot) but waste journal slots — this
 // reclaims them so the bounded log doesn't fill prematurely.
 static void cow_resync_redirect_journal(void) {
-    spin_lock(&g_cow_state.lock);
+    TagFSLockTake(&g_cow_state.lock);
     DiskBookResetRedirects();
     for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
         CowSnapshot *s = &g_cow_state.snapshots[i];
@@ -156,7 +156,7 @@ static void cow_resync_redirect_journal(void) {
                                 s->redirects[r].new_block, 0);
         }
     }
-    spin_unlock(&g_cow_state.lock);
+    TagFSLockDrop(&g_cow_state.lock);
 }
 
 error_t TagFS_CowInit(void) {
@@ -164,7 +164,7 @@ error_t TagFS_CowInit(void) {
         return ERR_ALREADY_INITIALIZED;
     
     memset(&g_cow_state, 0, sizeof(CowState));
-    spinlock_init(&g_cow_state.lock);
+    TagFSLockInit(&g_cow_state.lock, "cow", LOCK_RANK_COW);
     
     g_cow_state.snapshot_capacity = TAGFS_MAX_SNAPSHOTS;
     g_cow_state.snapshots = kmalloc(sizeof(CowSnapshot) * g_cow_state.snapshot_capacity);
@@ -184,13 +184,13 @@ void TagFS_CowShutdown(void) {
     if (!g_cow_state.initialized)
         return;
     
-    spin_lock(&g_cow_state.lock);
+    TagFSLockTake(&g_cow_state.lock);
     if (g_cow_state.snapshots) {
         kfree(g_cow_state.snapshots);
         g_cow_state.snapshots = NULL;
     }
     g_cow_state.initialized = false;
-    spin_unlock(&g_cow_state.lock);
+    TagFSLockDrop(&g_cow_state.lock);
     
     debug_printf("[CoW] Shutdown complete\n");
 }
@@ -199,17 +199,17 @@ error_t TagFS_SnapshotCreate(const char *name, uint32_t file_id, uint32_t *snaps
     if (!g_cow_state.initialized || !name || !snapshot_id)
         return ERR_INVALID_ARGUMENT;
 
-    spin_lock(&g_cow_state.lock);
+    TagFSLockTake(&g_cow_state.lock);
 
     if (g_cow_state.snapshot_count >= g_cow_state.snapshot_capacity) {
-        spin_unlock(&g_cow_state.lock);
+        TagFSLockDrop(&g_cow_state.lock);
         return ERR_NO_MEMORY;
     }
 
     for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
         if (strcmp(g_cow_state.snapshots[i].name, name) == 0) {
             *snapshot_id = g_cow_state.snapshots[i].snapshot_id;
-            spin_unlock(&g_cow_state.lock);
+            TagFSLockDrop(&g_cow_state.lock);
             return ERR_ALREADY_EXISTS;
         }
     }
@@ -242,7 +242,7 @@ error_t TagFS_SnapshotCreate(const char *name, uint32_t file_id, uint32_t *snaps
                 snap->block_count += file_meta.extents[j].block_count;
             has_file_meta = true;
         } else {
-            spin_unlock(&g_cow_state.lock);
+            TagFSLockDrop(&g_cow_state.lock);
             return ERR_FILE_NOT_FOUND;
         }
     }
@@ -254,7 +254,7 @@ error_t TagFS_SnapshotCreate(const char *name, uint32_t file_id, uint32_t *snaps
     g_cow_state.snapshots_created++;
     *snapshot_id = snap->snapshot_id;
 
-    spin_unlock(&g_cow_state.lock);
+    TagFSLockDrop(&g_cow_state.lock);
 
     /* Snapshot descriptors persist via the CoW manifest (CowWriteManifest).
      * The old per-snapshot DiskBook log serialized an in-memory TagFSMetadata
@@ -274,10 +274,10 @@ error_t TagFS_SnapshotCreateByTag(const char *tag_pattern, uint32_t *snapshot_id
     if (!g_cow_state.initialized || !tag_pattern || !snapshot_id)
         return ERR_INVALID_ARGUMENT;
     
-    spin_lock(&g_cow_state.lock);
+    TagFSLockTake(&g_cow_state.lock);
     
     if (g_cow_state.snapshot_count >= g_cow_state.snapshot_capacity) {
-        spin_unlock(&g_cow_state.lock);
+        TagFSLockDrop(&g_cow_state.lock);
         return ERR_NO_MEMORY;
     }
     
@@ -287,7 +287,7 @@ error_t TagFS_SnapshotCreateByTag(const char *tag_pattern, uint32_t *snapshot_id
     for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
         if (strcmp(g_cow_state.snapshots[i].name, snap_name) == 0) {
             *snapshot_id = g_cow_state.snapshots[i].snapshot_id;
-            spin_unlock(&g_cow_state.lock);
+            TagFSLockDrop(&g_cow_state.lock);
             return ERR_ALREADY_EXISTS;
         }
     }
@@ -330,7 +330,7 @@ error_t TagFS_SnapshotCreateByTag(const char *tag_pattern, uint32_t *snapshot_id
     g_cow_state.snapshots_created++;
     *snapshot_id = snap->snapshot_id;
 
-    spin_unlock(&g_cow_state.lock);
+    TagFSLockDrop(&g_cow_state.lock);
 
     CowWriteManifest();
 
@@ -342,11 +342,11 @@ error_t TagFS_SnapshotDelete(uint32_t snapshot_id) {
     if (!g_cow_state.initialized)
         return ERR_NOT_INITIALIZED;
 
-    spin_lock(&g_cow_state.lock);
+    TagFSLockTake(&g_cow_state.lock);
 
     int slot = CowFindSnapshot(snapshot_id);
     if (slot < 0) {
-        spin_unlock(&g_cow_state.lock);
+        TagFSLockDrop(&g_cow_state.lock);
         return ERR_SNAPSHOT_NOT_FOUND;
     }
 
@@ -376,7 +376,7 @@ error_t TagFS_SnapshotDelete(uint32_t snapshot_id) {
         g_cow_state.snapshots[i] = g_cow_state.snapshots[i + 1];
 
     g_cow_state.snapshot_count--;
-    spin_unlock(&g_cow_state.lock);
+    TagFSLockDrop(&g_cow_state.lock);
 
     CowWriteManifest();
     cow_resync_redirect_journal();   /* reclaim the deleted snapshot's redirect slots */
@@ -390,14 +390,14 @@ error_t TagFS_SnapshotList(uint32_t *ids, uint32_t max_count, uint32_t *actual_c
     if (!g_cow_state.initialized || !ids || !actual_count)
         return ERR_INVALID_ARGUMENT;
     
-    spin_lock(&g_cow_state.lock);
+    TagFSLockTake(&g_cow_state.lock);
     
     uint32_t count = max_count < g_cow_state.snapshot_count ? max_count : g_cow_state.snapshot_count;
     for (uint32_t i = 0; i < count; i++)
         ids[i] = g_cow_state.snapshots[i].snapshot_id;
     
     *actual_count = count;
-    spin_unlock(&g_cow_state.lock);
+    TagFSLockDrop(&g_cow_state.lock);
     return OK;
 }
 
@@ -405,16 +405,16 @@ error_t TagFS_SnapshotInfo(uint32_t snapshot_id, CowSnapshot *info) {
     if (!g_cow_state.initialized || !info)
         return ERR_INVALID_ARGUMENT;
     
-    spin_lock(&g_cow_state.lock);
+    TagFSLockTake(&g_cow_state.lock);
     
     int slot = CowFindSnapshot(snapshot_id);
     if (slot < 0) {
-        spin_unlock(&g_cow_state.lock);
+        TagFSLockDrop(&g_cow_state.lock);
         return ERR_SNAPSHOT_NOT_FOUND;
     }
     
     memcpy(info, &g_cow_state.snapshots[slot], sizeof(CowSnapshot));
-    spin_unlock(&g_cow_state.lock);
+    TagFSLockDrop(&g_cow_state.lock);
     return OK;
 }
 
@@ -423,19 +423,19 @@ error_t TagFS_CowBeforeWrite(uint32_t file_id, uint32_t block_addr, uint32_t *ne
     if (!g_cow_state.initialized || !new_block || block_addr == 0)
         return ERR_INVALID_ARGUMENT;
 
-    spin_lock(&g_cow_state.lock);
+    TagFSLockTake(&g_cow_state.lock);
 
     // Allocate new block for COW
     TagFSState *fs = tagfs_get_state();
     if (!fs || !fs->initialized) {
-        spin_unlock(&g_cow_state.lock);
+        TagFSLockDrop(&g_cow_state.lock);
         return ERR_NOT_INITIALIZED;
     }
 
     // Read original block data
     uint8_t original_data[TAGFS_BLOCK_SIZE];
     if (tagfs_read_block(block_addr, original_data) != OK) {
-        spin_unlock(&g_cow_state.lock);
+        TagFSLockDrop(&g_cow_state.lock);
         return ERR_READ_FAILED;
     }
 
@@ -443,14 +443,14 @@ error_t TagFS_CowBeforeWrite(uint32_t file_id, uint32_t block_addr, uint32_t *ne
     uint32_t free_block = 0;
     int alloc_result = tagfs_alloc_blocks(1, &free_block);
     if (alloc_result != OK || free_block == 0) {
-        spin_unlock(&g_cow_state.lock);
+        TagFSLockDrop(&g_cow_state.lock);
         return ERR_NO_MEMORY;
     }
 
     // Copy original data to new block
     if (tagfs_write_block(free_block, original_data) != OK) {
         tagfs_free_blocks(free_block, 1);
-        spin_unlock(&g_cow_state.lock);
+        TagFSLockDrop(&g_cow_state.lock);
         return ERR_WRITE_FAILED;
     }
 
@@ -458,7 +458,7 @@ error_t TagFS_CowBeforeWrite(uint32_t file_id, uint32_t block_addr, uint32_t *ne
     *new_block = free_block;
     g_cow_state.cow_copies++;
 
-    spin_unlock(&g_cow_state.lock);
+    TagFSLockDrop(&g_cow_state.lock);
     return OK;
 }
 
@@ -468,7 +468,7 @@ error_t TagFS_CowAfterWrite(uint32_t file_id, uint32_t old_block, uint32_t new_b
     if (old_block == 0 || new_block == 0)
         return ERR_INVALID_ARGUMENT;
 
-    spin_lock(&g_cow_state.lock);
+    TagFSLockTake(&g_cow_state.lock);
 
     /* Find the snapshot whose frozen view should keep this OLD block. */
     CowSnapshot *snap = NULL;
@@ -486,12 +486,12 @@ error_t TagFS_CowAfterWrite(uint32_t file_id, uint32_t old_block, uint32_t new_b
          * Before and After (rare). Either way, leave old_block alone;
          * the block accounting is the caller's responsibility. */
         g_cow_state.cow_writes++;
-        spin_unlock(&g_cow_state.lock);
+        TagFSLockDrop(&g_cow_state.lock);
         return OK;
     }
 
     if (!cow_append_redirect_locked(snap, old_block, new_block)) {
-        spin_unlock(&g_cow_state.lock);
+        TagFSLockDrop(&g_cow_state.lock);
         return ERR_NO_MEMORY;
     }
 
@@ -505,7 +505,7 @@ error_t TagFS_CowAfterWrite(uint32_t file_id, uint32_t old_block, uint32_t new_b
      * corruption. */
     DiskBookLogRedirect(snap->snapshot_id, old_block, new_block, 0);
 
-    spin_unlock(&g_cow_state.lock);
+    TagFSLockDrop(&g_cow_state.lock);
     return OK;
 }
 
@@ -514,26 +514,26 @@ void TagFS_CowGetStats(uint64_t *cow_writes, uint64_t *cow_copies,
     if (!g_cow_state.initialized)
         return;
     
-    spin_lock(&g_cow_state.lock);
+    TagFSLockTake(&g_cow_state.lock);
     if (cow_writes) *cow_writes = g_cow_state.cow_writes;
     if (cow_copies) *cow_copies = g_cow_state.cow_copies;
     if (blocks_shared) *blocks_shared = g_cow_state.blocks_shared;
     if (snapshots) *snapshots = g_cow_state.snapshots_created;
-    spin_unlock(&g_cow_state.lock);
+    TagFSLockDrop(&g_cow_state.lock);
 }
 
 bool TagFS_CowIsActive(uint32_t file_id) {
     if (!g_cow_state.initialized)
         return false;
 
-    spin_lock(&g_cow_state.lock);
+    TagFSLockTake(&g_cow_state.lock);
 
     // CoW is active if there are any snapshots for this file
     // or if file has the COW flag set
     for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
         CowSnapshot *snap = &g_cow_state.snapshots[i];
         if (snap->parent_file_id == file_id || snap->parent_file_id == 0) {
-            spin_unlock(&g_cow_state.lock);
+            TagFSLockDrop(&g_cow_state.lock);
             return true;
         }
     }
@@ -543,11 +543,11 @@ bool TagFS_CowIsActive(uint32_t file_id) {
     if (tagfs_get_metadata(file_id, &meta) == OK) {
         bool is_cow = (meta.flags & TAGFS_FILE_COW) != 0;
         tagfs_metadata_free(&meta);
-        spin_unlock(&g_cow_state.lock);
+        TagFSLockDrop(&g_cow_state.lock);
         return is_cow;
     }
 
-    spin_unlock(&g_cow_state.lock);
+    TagFSLockDrop(&g_cow_state.lock);
     return false;
 }
 
@@ -562,10 +562,10 @@ void TagFS_CowRestoreSnapshot(const CowSnapshot *snap) {
     /* Keep the allocator ahead of every reloaded id (unique-id invariant). */
     CowSeedSnapshotId(snap->snapshot_id);
 
-    spin_lock(&g_cow_state.lock);
+    TagFSLockTake(&g_cow_state.lock);
 
     if (g_cow_state.snapshot_count >= g_cow_state.snapshot_capacity) {
-        spin_unlock(&g_cow_state.lock);
+        TagFSLockDrop(&g_cow_state.lock);
         debug_printf("[CoW] RestoreSnapshot: no capacity for snapshot_id=%u\n", snap->snapshot_id);
         return;
     }
@@ -573,7 +573,7 @@ void TagFS_CowRestoreSnapshot(const CowSnapshot *snap) {
     // Skip if already present (idempotent restore)
     for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
         if (g_cow_state.snapshots[i].snapshot_id == snap->snapshot_id) {
-            spin_unlock(&g_cow_state.lock);
+            TagFSLockDrop(&g_cow_state.lock);
             return;
         }
     }
@@ -587,18 +587,18 @@ void TagFS_CowRestoreSnapshot(const CowSnapshot *snap) {
     dst->redirect_cap   = 0;
     g_cow_state.snapshot_count++;
 
-    spin_unlock(&g_cow_state.lock);
+    TagFSLockDrop(&g_cow_state.lock);
 }
 
 void TagFS_CowRestoreRedirect(uint32_t snapshot_id, uint32_t old_block, uint32_t new_block) {
     if (!g_cow_state.initialized || old_block == 0 || new_block == 0)
         return;
-    spin_lock(&g_cow_state.lock);
+    TagFSLockTake(&g_cow_state.lock);
     int slot = CowFindSnapshot(snapshot_id);
     if (slot >= 0)
         cow_append_redirect_locked(&g_cow_state.snapshots[slot], old_block, new_block);
     /* snapshot not found (deleted before this redirect was replayed) → ignore */
-    spin_unlock(&g_cow_state.lock);
+    TagFSLockDrop(&g_cow_state.lock);
 }
 
 /*
@@ -656,7 +656,7 @@ void CowRollCall(uint8_t *computed_bm, uint32_t total_blocks)
      * g_state.lock — the same order CowWriteManifest already establishes
      * (CoW lock first, then the volume's), so a roll call cannot invert it. */
     if (g_cow_state.initialized) {
-        spin_lock(&g_cow_state.lock);
+        TagFSLockTake(&g_cow_state.lock);
         for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
             CowSnapshot *snap = &g_cow_state.snapshots[i];
             if (!snap->redirects)
@@ -666,7 +666,7 @@ void CowRollCall(uint8_t *computed_bm, uint32_t total_blocks)
                 COW_ROLL_CALL_MARK(snap->redirects[r].new_block);
             }
         }
-        spin_unlock(&g_cow_state.lock);
+        TagFSLockDrop(&g_cow_state.lock);
     }
 
 #undef COW_ROLL_CALL_MARK

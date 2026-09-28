@@ -26,7 +26,7 @@ static int disk_book_write_sectors(uint64_t vlba, uint16_t count, const void *bu
 // ----------------------------------------------------------------------------
 static DiskBookSuperblock g_sb;
 static bool      g_initialized       = false;
-static spinlock_t g_lock;
+static TagFSLock g_lock              = TAGFS_LOCK_INIT("diskbook", LOCK_RANK_LEAF);
 static uint64_t  g_sb_sector         = 0;   /* all three counted from the */
 static uint64_t  g_sb_backup_sector  = 0;   /* start of the volume         */
 static uint32_t  g_redirects_logged  = 0;
@@ -129,7 +129,7 @@ error_t DiskBookInit(uint64_t head_sector, uint64_t backup_sector,
     if (g_initialized)
         return ERR_DISKBOOK_NOT_INITIALIZED;
 
-    spinlock_init(&g_lock);
+    TagFSLockInit(&g_lock, "diskbook", LOCK_RANK_LEAF);
     g_sb_sector        = head_sector;
     g_sb_backup_sector = backup_sector;
 
@@ -250,10 +250,10 @@ error_t DiskBookLogRedirect(uint32_t snapshot_id, uint32_t old_block,
     if (old_block == 0 || new_block == 0)
         return ERR_INVALID_ARGUMENT;
 
-    spin_lock(&g_lock);
+    TagFSLockTake(&g_lock);
 
     if (g_sb.count >= g_sb.capacity) {
-        spin_unlock(&g_lock);
+        TagFSLockDrop(&g_lock);
         /* Graceful: in-memory redirect stays authoritative this uptime; only
          * crash recovery beyond the cap degrades to live-data reads. */
         debug_printf("[DiskBook] redirect log full (%u) — not journaled\n", g_sb.capacity);
@@ -275,7 +275,7 @@ error_t DiskBookLogRedirect(uint32_t snapshot_id, uint32_t old_block,
 
     if (write_entry(idx, &e) != OK) {
         g_sb.generation--;   /* roll back the bump; slot not written */
-        spin_unlock(&g_lock);
+        TagFSLockDrop(&g_lock);
         return ERR_IO;
     }
 
@@ -287,7 +287,7 @@ error_t DiskBookLogRedirect(uint32_t snapshot_id, uint32_t old_block,
     if (do_flush)
         g_appends_since_flush = 0;
 
-    spin_unlock(&g_lock);
+    TagFSLockDrop(&g_lock);
 
     /* The entry IS written and this function's word is "logged", not
      * "durable" — its own comment above says so ("durable on next flush").
@@ -312,11 +312,11 @@ error_t DiskBookLogRedirect(uint32_t snapshot_id, uint32_t old_block,
 void DiskBookResetRedirects(void) {
     if (!g_initialized)
         return;
-    spin_lock(&g_lock);
+    TagFSLockTake(&g_lock);
     g_sb.count = 0;
     g_sb.generation++;
     write_superblock_locked();
-    spin_unlock(&g_lock);
+    TagFSLockDrop(&g_lock);
 }
 
 // ----------------------------------------------------------------------------
@@ -327,10 +327,10 @@ void DiskBookResetRedirects(void) {
 error_t DiskBookCheckpoint(void) {
     if (!g_initialized)
         return ERR_NOT_INITIALIZED;
-    spin_lock(&g_lock);
+    TagFSLockTake(&g_lock);
     error_t err = write_superblock_locked();
     g_appends_since_flush = 0;
-    spin_unlock(&g_lock);
+    TagFSLockDrop(&g_lock);
     if (err != OK)
         return err;
 
@@ -382,10 +382,10 @@ void DiskBookShutdown(void) {
     error_t sealed = DiskBookCheckpoint();
     bool    owed   = __atomic_load_n(&g_not_proven_durable, __ATOMIC_ACQUIRE);
 
-    spin_lock(&g_lock);
+    TagFSLockTake(&g_lock);
     uint32_t held = g_sb.count;      /* read under the lock that guards it */
     g_initialized = false;
-    spin_unlock(&g_lock);
+    TagFSLockDrop(&g_lock);
 
     if (sealed != OK || owed) {
         kprintf("[DiskBook] shutting down with %u redirects that were not "
@@ -406,7 +406,7 @@ error_t DiskBookGetStats(DiskBookStats *stats) {
         memset(stats, 0, sizeof(*stats));
         return ERR_NOT_INITIALIZED;
     }
-    spin_lock(&g_lock);
+    TagFSLockTake(&g_lock);
     stats->total_entries    = g_sb.capacity;
     stats->used_entries     = g_sb.count;
     stats->free_entries     = g_sb.capacity - g_sb.count;
@@ -415,7 +415,7 @@ error_t DiskBookGetStats(DiskBookStats *stats) {
     stats->crc_errors       = g_crc_errors;
     stats->generation       = g_sb.generation;
     stats->uptime_seconds   = (uint32_t)(rtc_get_unix64() - g_init_time);
-    spin_unlock(&g_lock);
+    TagFSLockDrop(&g_lock);
     return OK;
 }
 
