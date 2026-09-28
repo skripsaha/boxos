@@ -4,8 +4,10 @@
  * quilltest.c holds the red tests of the Quill write core, the table of
  * cases and the one way in; quilltest_throwaway.c the cases only a throwaway
  * image may be asked (VOLUME_TESTS=on builds); quilltest_powercut.c the modes
- * the power-cut stand drives (tools/powercut.sh). All say their verdict in
- * the same four words and ask the volume for files by name.
+ * the power-cut stand drives (tools/powercut.sh); quilltest_locks.c abba, the
+ * guard on the two lock orders a growing chain crosses, a throwaway image's
+ * case too. All say their verdict in the same four words and ask the volume
+ * for files by name.
  */
 #ifndef QUILLTEST_H
 #define QUILLTEST_H
@@ -34,6 +36,9 @@ int      QuillCreate(const char *name);
 int64_t  QuillWrite(uint32_t fid, uint64_t off, const void *buf, size_t len);
 /* The size file_info reports, 0 when it will not answer. */
 uint64_t QuillSize(uint32_t fid);
+/* A count or a number as the shell gave it — digits only, at most ten, no
+ * more than a uint32_t holds — in *out; false for anything else. */
+bool     QuillNumber(const char *word, uint32_t *out);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* A throwaway image's cases, quilltest_throwaway.c. */
@@ -41,6 +46,9 @@ QuillVerdict QuillSequential(const char *const *args);
 QuillVerdict QuillInterleave(const char *const *args);
 QuillVerdict QuillFidHistory(const char *const *args);
 QuillVerdict QuillSystemTag(const char *const *args);
+/* abba and its workers, quilltest_locks.c — a throwaway image's too. */
+QuillVerdict QuillAbba(const char *const *args);
+QuillVerdict QuillAbbaWorker(const char *const *args);
 #endif
 
 /* The power-cut modes, quilltest_powercut.c. */

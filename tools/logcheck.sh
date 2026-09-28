@@ -50,6 +50,14 @@
 #                         holds, a row whose step was lifted, a place named
 #                         twice, the table full and a self-deadlock — each a
 #                         FAIL — and a bare spinlock put into TagFS, found
+#   logcheck.sh abba      quilltest abba on UEFI STRICT 16c: the tag registry and
+#                         the file table grown while three other cabins rename,
+#                         create and tag; the run must reach its verdict (a stall
+#                         judged against its own pace), the chains must grow, and
+#                         the two order places are demanded as their rows say
+#   logcheck.sh abbamut   a block taken under the registry's lock at every flush,
+#                         its row's step lifted: abba's demand must say the
+#                         defect is back
 #   logcheck.sh both
 #
 # Every check is a grep against build/serial.log. No timing assertions.
@@ -9128,6 +9136,365 @@ EOF
     chk $? "lockrankmut: a bare spinlock_t put into tagfs.c is found ($(printf '%s\n' "$bare" | cut -c1-120))"
 }
 
+# ===========================================================================
+# abba — the tag registry and the file table grown on sixteen cores while
+# three other cabins rename, create and tag: the machine must come back
+# ===========================================================================
+#
+# MP-D4, the two ABBAs. A chain that grows takes the volume's state lock under
+# its own — the registry's in tag_registry_flush, the file table's in
+# file_table_flush, both through tagfs_alloc_blocks — and a rename, a create, a
+# delete, a tag and an untag take those locks under state. Every TagFS lock
+# keeps its core's interrupts off, so two K-Cores that meet there the two ways
+# round never move again. The red that does not depend on timing is LockRank's
+# order line, named the first time a chain grows in a boot; this gate is the
+# guard beside it (the owner, 2026-09-28): `quilltest abba` on UEFI STRICT
+# with sixteen cores — four K-Cores — grows both chains while its three
+# workers call the other way round, each in a cabin of its own, and the run
+# must reach the case's verdict. On a tree where the crossing strikes, it does
+# not: that is this gate going red on evidence, not on a flake.
+#
+# ‼ A STALL IS MEASURED AGAINST THE RUN'S OWN PACE, AND THE BOUND IS THE
+# HARNESS'S, NEVER THE KERNEL'S. The driver prints a progress line every 25 new
+# tags, each saying when by the machine's own clock. Once two have come, a
+# stall is no new progress line for ABBA_STALL_TIMES × (the slowest interval
+# between two so far + 1 s, the resolution the log is looked at with) — the
+# interval the larger of the machine's clock and the gaps the host saw the
+# lines arrive in, since a console may hand over a burst at once — however
+# much else the log says meanwhile, since a kernel that is wedged on two cores
+# may still print on a third. Before two lines there is no pace to hold the
+# machine to, and the wait is the stand's own: the log quiet for
+# WAIT_QUIET_S, or the runaway guard. The verdict says the bound and the
+# numbers it came from.
+#
+# ‼ THE ORDER LINES ARE DEMANDED BY THEIR ROWS, NOT BY THIS BLOCK. Each of the
+# two places in ABBA_ORDER_KEYS is judged by its row in stand_caveat.sh: while
+# the row carries a step the place must be named in this boot — a chain grew
+# under its own lock — and a place not named is the workload failing to ask
+# its question, or the step already landed; once the step is lifted the place
+# must not be named at all. The commit that fixes a chain lifts this demand by
+# deleting the step in the row, as it lifts every caveat, and nothing here
+# changes.
+#
+# Aimed as powercut.sh chaingrow is, by volume-read's figures of the fresh
+# image: enough new tags to fill the registry's last block and reach
+# ABBA_EDGES blocks past it, and the table's edge — its rows, 510 to a block.
+# Built VOLUME_TESTS=on, because abba spends tags and file ids for good, so the
+# startup tests run first; they can only bring either edge nearer. After the
+# verdict the machine halts through `bye` and volume-read reads the volume
+# again: the registry must have grown by at least the blocks any packing of
+# the case's own records takes past the room its last block had, and the
+# table by a block.
+#
+# ABBA_STAND is the machine: the gate is sixteen cores, and a look at the same
+# workload on another machine names it here, as QUILL_STAND does for quill
+# (one K-Core never crosses, so on a single core the run must always end).
+# ---------------------------------------------------------------------------
+
+ABBA_STAND=${ABBA_STAND:-"UEFI=on STRICT=on CORES=16 MEM=8G"}
+ABBA_NAME=_qa
+ABBA_STEM=31          # quilltest_locks.c: every new tag's name is 31 bytes long
+ABBA_EDGES=3          # registry blocks the new tags reach, the first the last one's room
+ABBA_STALL_TIMES=5
+ABBA_ORDER_KEYS="registry@tag_registry_flush/state@tagfs_alloc_blocks_inside table@file_table_flush/state@tagfs_alloc_blocks_inside"
+ABBA_PROGRESS='^\[QUILL\] abba: (workers rename pid [0-9]+|[0-9]+ of [0-9]+ new tags made).* at [0-9]+ ms[;,]'
+ABBA_VERDICT='^\[QUILL\] abba: (PASS|FAIL) — '
+
+# abba_aim JSON — "TAGS EDGE REGISTRY TABLE NEED" off volume-read's check of
+# the volume before the boot: the new tags that fill the registry's last block
+# and reach ABBA_EDGES blocks past it, the table's edge, both chains' lengths,
+# and the least number of blocks any packing of those tags' records takes
+# past the room the last block has.
+abba_aim() {
+    python3 - "$1" "$ABBA_STEM" "$ABBA_EDGES" <<'ABBA_AIM_EOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+ch, stem, edges = d["chains"], int(sys.argv[2]), int(sys.argv[3])
+record = ch["registry_record_header"] + stem
+room_bytes = ch["registry_block_data"] - ch["registry_tail_used"]
+room, per_block = room_bytes // record, ch["registry_block_data"] // record
+tags = room + (edges - 1) * per_block + 1
+need = -(-(tags * record - room_bytes) // ch["registry_block_data"])
+print(tags, ch["table_rows_per_block"] * len(ch["table"]), len(ch["registry"]), len(ch["table"]), need)
+ABBA_AIM_EOF
+}
+
+# abba_chains JSON — "REGISTRY TABLE": both chains' lengths after the run.
+abba_chains() {
+    python3 -c 'import json, sys; c = json.load(open(sys.argv[1]))["chains"]; print(len(c["registry"]), len(c["table"]))' "$1"
+}
+
+# abba_lines MARK — the case's own lines since line MARK of the serial log.
+abba_lines() {
+    tail -n +$(($1 + 1)) build/serial.log | tr -d '\r' | grep -a '^\[QUILL\] abba: '
+}
+
+# abba_pace MARK — the slowest interval between two consecutive progress
+# lines since line MARK, in ms by the machine's own clock (each line says when
+# it was printed); 0 while fewer than two have come.
+abba_pace() {
+    abba_lines "$1" | grep -E "$ABBA_PROGRESS" | sed -nE 's/.* at ([0-9]+) ms[;,].*/\1/p' |
+        awk 'NR > 1 && $1 - p > m { m = $1 - p } { p = $1 } END { print m + 0 }'
+}
+
+# abba_watch MARK — follow quilltest abba from line MARK until its verdict
+# (answers 0) or a stall (answers 1). The pace is the slowest interval between
+# two progress lines, taken the larger of two ways: by the machine's clock,
+# which the lines carry, and by the gaps in which the host saw them arrive —
+# a console may hand over a burst of lines at once, and a host may fall
+# behind. Leaves ABBA_SEEN (progress lines), ABBA_PACE_MS (the machine's
+# slowest interval), ABBA_SLOWEST (the pace, whole s), ABBA_BOUND (the stall
+# bound it came to, s; 0 while fewer than two lines had come), ABBA_SPENT (s
+# since the echo) and ABBA_WHY.
+abba_watch() {
+    local mark=$1 t0 now n at size last="" still=0 ms
+    t0=$(date +%s); at=$t0
+    ABBA_SEEN=0; ABBA_PACE_MS=0; ABBA_SLOWEST=0; ABBA_BOUND=0; ABBA_SPENT=0
+    while :; do
+        now=$(date +%s)
+        ABBA_SPENT=$((now - t0))
+        n=$(abba_lines "$mark" | grep -cE "$ABBA_PROGRESS")
+        if [ "$n" -gt "$ABBA_SEEN" ]; then
+            [ "$ABBA_SEEN" -gt 0 ] && [ $((now - at)) -gt "$ABBA_SLOWEST" ] && ABBA_SLOWEST=$((now - at))
+            ABBA_PACE_MS=$(abba_pace "$mark")
+            ms=$(((ABBA_PACE_MS + 999) / 1000))
+            [ "$ms" -gt "$ABBA_SLOWEST" ] && ABBA_SLOWEST=$ms
+            [ "$n" -ge 2 ] && ABBA_BOUND=$((ABBA_STALL_TIMES * (ABBA_SLOWEST + 1)))
+            ABBA_SEEN=$n; at=$now
+        fi
+        if abba_lines "$mark" | grep -qE "$ABBA_VERDICT"; then
+            ABBA_WHY=verdict; return 0
+        fi
+        if [ "$ABBA_BOUND" -gt 0 ] && [ $((now - at)) -ge "$ABBA_BOUND" ]; then
+            ABBA_WHY="no progress line for $((now - at)) s, past the bound of $ABBA_BOUND s — $ABBA_STALL_TIMES × (the slowest interval between two, $ABBA_SLOWEST s, + 1), the machine's own clock saying $ABBA_PACE_MS ms"
+            return 1
+        elif [ "$ABBA_BOUND" = 0 ]; then
+            size=$(wc -c < build/serial.log | tr -d ' ')
+            if [ "$size" = "$last" ]; then still=$((still + 1)); else still=0; last=$size; fi
+            if [ "$still" -ge "$WAIT_QUIET_S" ]; then
+                ABBA_WHY="the log went quiet for $WAIT_QUIET_S s with $ABBA_SEEN progress line(s), fewer than the two a pace needs"
+                return 1
+            fi
+        fi
+        if [ "$ABBA_SPENT" -ge "$WAIT_RUNAWAY_S" ]; then
+            ABBA_WHY="no verdict in the runaway guard's $WAIT_RUNAWAY_S s, the progress lines still coming"
+            return 1
+        fi
+        sleep 1
+    done
+}
+
+# abba_session TAG — a fresh image built VOLUME_TESTS=on, aimed, booted on
+# ABBA_STAND, `quilltest abba` typed and watched, and the machine halted
+# through bye once the case answered. Leaves $SCRATCH/serial.abba.TAG.log, the
+# checks abba.TAG.before.json and (after an orderly halt) abba.TAG.after.json,
+# the aim (ABBA_TAGS ABBA_EDGE ABBA_R0 ABBA_T0 ABBA_NEED), ABBA_HALTED and
+# abba_watch's figures. Answers 1, having said why, when there is no run to
+# judge.
+abba_session() {
+    local tag=$1 mark aim
+    ABBA_HALTED=0; ABBA_WHY="not watched"; ABBA_SEEN=0; ABBA_SLOWEST=0; ABBA_BOUND=0; ABBA_SPENT=0
+    rm -f "$SCRATCH/serial.abba.$tag.log" "$SCRATCH/abba.$tag.before.json" "$SCRATCH/abba.$tag.after.json"
+    make run-stop >/dev/null 2>&1
+    rm -f build/boxos.img
+    if ! build_with_key VOLUME_TESTS=on; then
+        echo "BUILD FAILED (VOLUME_TESTS=on) — tail:"; tail -25 "$SCRATCH/build.log"
+        bad "abba: $tag — VOLUME_TESTS=on does not build"
+        return 1
+    fi
+    python3 tools/volume-read.py build/boxos.img check --json >"$SCRATCH/abba.$tag.before.json" 2>/dev/null
+    if ! aim=$(abba_aim "$SCRATCH/abba.$tag.before.json" 2>&1); then
+        harness "abba: $tag — volume-read's figures of the fresh image would not read: $(echo "$aim" | tail -1)"
+        return 1
+    fi
+    read -r ABBA_TAGS ABBA_EDGE ABBA_R0 ABBA_T0 ABBA_NEED <<ABBA_AIM
+$aim
+ABBA_AIM
+    echo "   aim: the fresh image's registry is $ABBA_R0 block(s) and its table $ABBA_T0; $ABBA_TAGS new tags reach $ABBA_EDGES registry blocks past its last one's room, and the table's edge is fid $ABBA_EDGE"
+    # shellcheck disable=SC2086
+    if ! make run-bg VOLUME_TESTS=on $ABBA_STAND >"$SCRATCH/runbg.abba.$tag.log" 2>&1 || [ ! -S build/qemu.mon ]; then
+        harness "abba: $tag — no machine was started: $(tail -1 "$SCRATCH/runbg.abba.$tag.log" | tr -d '\r')"
+        make run-stop >/dev/null 2>&1
+        return 1
+    fi
+    if ! wait_for_line -E build/serial.log 'TagFS: [0-9]+ run, |KERNEL PANIC' "$WAIT_QUIET_S" ||
+       ! grep -aqE 'TagFS: [0-9]+ run, ' build/serial.log || ! wait_for_prompt; then
+        make run-stop >/dev/null 2>&1
+        cp build/serial.log "$SCRATCH/serial.abba.$tag.log"
+        bad "abba: $tag — the machine never came to its shell after the startup tests ($(grep -aE 'KERNEL PANIC|TagFS: [0-9]+ run, ' "$SCRATCH/serial.abba.$tag.log" | tr -d '\r' | tail -1))"
+        return 1
+    fi
+    mark=$(wc -l < build/serial.log)
+    if type_line "quilltest abba $ABBA_NAME $ABBA_TAGS $ABBA_EDGE"; then
+        abba_watch "$mark"
+    else
+        ABBA_WHY="the machine never took the command"
+    fi
+    if [ "$ABBA_WHY" = verdict ] &&
+       wait_until "$WAIT_QUIET_S" "the shell's prompt after quilltest abba" \
+           '[ "$(tail -n +$((mark + 1)) build/serial.log | tr -d "\r" | grep -cE "^(\[[^]]*\] )?~ ")" -ge 2 ]' &&
+       type_line bye && wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S" $((mark + 1)) &&
+       grep -aq '^\[HALT\] Storage sync complete' build/serial.log; then
+        ABBA_HALTED=1
+    fi
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.abba.$tag.log"
+    if [ "$ABBA_HALTED" = 1 ]; then
+        python3 tools/volume-read.py build/boxos.img check --json >"$SCRATCH/abba.$tag.after.json" 2>/dev/null
+    fi
+    return 0
+}
+
+# abba_order LOG WHAT ENDED — each place of ABBA_ORDER_KEYS as its row
+# demands: named in this boot while the row holds it under a step, not named
+# once the step is lifted. The row is read where this is asked, so a caller
+# that sources a changed stand_caveat.sh gets the demand that row makes. A
+# held place a run that did not reach its end (ENDED 0) never named is said
+# and not counted: that run never came to the question, and its stall is
+# the finding.
+abba_order() {
+    local log=$1 what=$2 ended=$3 key step line
+    for key in $ABBA_ORDER_KEYS; do
+        step=$(caveat_step "lockrank:$key")
+        line=$(lockrank_rows "$log" | awk -F'|' -v k="$key" '$2 == k { print $3; exit }')
+        if [ -n "$step" ] && [ -n "$line" ]; then
+            ok "abba: $what — the order place $key is held under step $step, and this boot named it: $line"
+        elif [ -n "$step" ] && [ "$ended" = 0 ]; then
+            echo "  (abba: $what — the order place $key, held under step $step, was not named before the run stopped: not asked, and not counted)"
+        elif [ -n "$step" ]; then
+            bad "abba: $what — the order place $key is held under step $step and this boot did not name it: the workload did not grow that chain under its lock, or step $step already landed — lift the caveat"
+        elif [ -z "$line" ]; then
+            ok "abba: $what — the order place $key, its step lifted, is not named"
+        else
+            bad "abba: $what — the order place $key, its step lifted, is named again: the defect it stands for is back — $(caveat_defect "lockrank:$key") ($line)"
+        fi
+    done
+}
+
+# abba_judge TAG WHAT — the session's run, the case's verdict, the chains and
+# the order demand.
+abba_judge() {
+    local tag=$1 what=$2 L="$SCRATCH/serial.abba.$1.log" said fault verdict made r1 t1
+    said=$(stand_summary "$L")
+    echo "$said" | grep -qE '^TagFS: [0-9]+ run, [0-9]+ passed, 0 failed'
+    chk $? "abba: $what — the boot's startup tests ran before the case and none failed (${said:-no summary})"
+    fault=$(grep -aE 'KERNEL PANIC|\[EXCEPTION\]' "$L" | tr -d '\r' | head -1 | cut -c1-160)
+    [ -z "$fault" ]
+    chk $? "abba: $what — no panic, no exception${fault:+: $fault}"
+    if [ "$ABBA_WHY" = verdict ] && [ "$ABBA_BOUND" -gt 0 ]; then
+        ok "abba: $what — the run reached its verdict in $ABBA_SPENT s after $ABBA_SEEN progress lines; the slowest interval between two was $ABBA_PACE_MS ms by the machine's clock and $ABBA_SLOWEST s the larger way, so a stall was no line for $ABBA_BOUND s ($ABBA_STALL_TIMES × ($ABBA_SLOWEST + 1))"
+    elif [ "$ABBA_WHY" = verdict ]; then
+        ok "abba: $what — the run reached its verdict in $ABBA_SPENT s after $ABBA_SEEN progress line(s), too few for a pace, so the wait was the stand's quiet rule ($WAIT_QUIET_S s)"
+    else
+        bad "abba: $what — the run did not reach its verdict: $ABBA_WHY; $ABBA_SEEN progress lines in $ABBA_SPENT s, the last: $(tr -d '\r' < "$L" | grep -aE "$ABBA_PROGRESS" | tail -1)"
+    fi
+    verdict=$(tr -d '\r' < "$L" | grep -aE "$ABBA_VERDICT" | tail -1)
+    case "$verdict" in
+        *"abba: PASS"*) ok "abba: $what — ${verdict#\[QUILL\] abba: }" ;;
+        ?*)             bad "abba: $what — ${verdict#\[QUILL\] abba: }" ;;
+    esac
+    made=$(printf '%s\n' "$verdict" | sed -nE 's/.*PASS — made ([0-9]+) new tags.*/\1/p')
+    if [ -n "$made" ]; then
+        if [ "$ABBA_HALTED" = 1 ] && read -r r1 t1 <<ABBA_AFTER
+$(abba_chains "$SCRATCH/abba.$tag.after.json" 2>/dev/null)
+ABBA_AFTER
+        then
+            [ $((r1 - ABBA_R0)) -ge "$ABBA_NEED" ] && [ "$t1" -gt "$ABBA_T0" ]
+            chk $? "abba: $what — the registry went from $ABBA_R0 to $r1 blocks, $ABBA_NEED at least for the case's $made new tags past the room its last block had, and the file table from $ABBA_T0 to $t1"
+        else
+            bad "abba: $what — the chains were not read after the run: the machine $([ "$ABBA_HALTED" = 1 ] && echo "halted and volume-read could not read the volume" || echo "did not halt through bye ($(grep -aE "$STAND_HALT_ENDS" "$L" | tr -d '\r' | tail -1 | cut -c1-120))")"
+        fi
+    fi
+    abba_order "$L" "$what" "$([ "$ABBA_WHY" = verdict ] && echo 1 || echo 0)"
+}
+
+run_abba() {
+    echo "== abba: the tag registry and the file table grown on $ABBA_STAND while three cabins rename, create and tag =="
+    if abba_session abba; then
+        abba_judge abba "the guard"
+        lockrank_judge "$SCRATCH/serial.abba.abba.log" "abba"
+    fi
+    make run-stop >/dev/null 2>&1
+    rm -f build/boxos.img
+    buildkey_restore
+}
+
+# ---------------------------------------------------------------------------
+# abbamut — a block taken under the registry's lock, and the demand must turn
+# ---------------------------------------------------------------------------
+#
+# The order demand is only worth its PASS if it can see the place come back.
+# So the registry takes a block for nothing — taken and given straight back —
+# under its own lock at the start of every flush, the allocation the fix of
+# its chain takes out from under that lock, put back where it cannot miss:
+# the first registry flush of the boot names the place, grown chain or not.
+# The session is abba's own, typed and watched as the gate does it, and its
+# guard is not judged here — a tree that takes the state lock under the
+# registry at every flush is expected to stall. Then the row is read as it
+# will stand the day that fix lands, its step lifted, and abba's demand must
+# answer that the defect it stands for is back.
+abbamut_kernel_on() {
+    mutate src/kernel/tagfs/tag_registry/tag_registry.c
+    python3 - <<'EOF'
+p = "src/kernel/tagfs/tag_registry/tag_registry.c"
+s = open(p).read()
+a = "    TagFSLockTake(&reg->lock);\n\n    /* The chain the load walked."
+assert s.count(a) == 1, "abbamut registry-flush anchor missing"
+s = s.replace(a, "    TagFSLockTake(&reg->lock);\n"
+                 "    uint32_t logcheck_taken;   /* logcheck mutation: a block taken under the registry's lock at every flush */\n"
+                 "    if (tagfs_alloc_blocks(1, &logcheck_taken) == 0)\n"
+                 "        tagfs_free_blocks(logcheck_taken, 1);\n"
+                 "\n    /* The chain the load walked.", 1)
+open(p, "w").write(s)
+EOF
+    mut_done src/kernel/tagfs/tag_registry/tag_registry.c "logcheck mutation" 1
+}
+
+# abbamut_lift_on KEY — KEY's row with its step lifted, as the commit that
+# fixes its place will leave it; a row already lifted is left as it is.
+abbamut_lift_on() {
+    mutate tools/stand_caveat.sh
+    python3 - "$1" <<'EOF'
+import re, sys
+p = "tools/stand_caveat.sh"
+s = open(p).read()
+key = re.escape("lockrank:" + sys.argv[1])
+s, n = re.subn(r'(' + key + r'[|)][^"]*?\n\s*echo ")[0-9.]*[a-z]*(\|[^\n]*;;)',
+               r'\1\2   # logcheck mutation: the step lifted', s, count=1, flags=re.S)
+assert n == 1, "abbamut: the row of " + sys.argv[1] + " was not found"
+open(p, "w").write(s)
+EOF
+    mut_done tools/stand_caveat.sh "logcheck mutation" 1
+}
+
+run_abbamut() {
+    echo "== abbamut: a block taken under the registry's lock at every flush, the step lifted — abba's demand must turn =="
+    local key=registry@tag_registry_flush/state@tagfs_alloc_blocks_inside L="$SCRATCH/serial.abba.abbamut.log"
+    local rc line said defect at typed
+    abbamut_kernel_on
+    abba_session abbamut; rc=$?
+    make run-stop >/dev/null 2>&1
+    restore src/kernel/tagfs/tag_registry/tag_registry.c
+    if [ "$rc" = 0 ]; then
+        line=$(lockrank_rows "$L" | awk -F'|' -v k="$key" '$2 == k { print $3; exit }')
+        at=$(tr -d '\r' < "$L" | grep -anF -- "$line" | head -1 | cut -d: -f1)
+        typed=$(tr -d '\r' < "$L" | grep -an '^~ quilltest abba ' | head -1 | cut -d: -f1)
+        [ -n "$line" ] && [ -n "$at" ] && [ -n "$typed" ] && [ "$at" -lt "$typed" ]
+        chk $? "abbamut: the registry taking a block under its lock is named at the boot's first flush, before the case began to grow anything (log line ${at:-none}, the case's echo ${typed:-none}) — ${line:-not named}; the run: $ABBA_WHY"
+        defect=$(caveat_defect "lockrank:$key")
+        abbamut_lift_on "$key"
+        said=$(. tools/stand_caveat.sh
+               PASS=0; FAIL=0; CAVEAT=0; HARNESS=0
+               abba_order "$L" "abbamut" "$([ "$ABBA_WHY" = verdict ] && echo 1 || echo 0)"
+               echo "counted $PASS $FAIL")
+        restore tools/stand_caveat.sh
+        printf '%s\n' "$said" | grep -qF "abba: abbamut — the order place $key, its step lifted, is named again: the defect it stands for is back — $defect ($line)"
+        chk $? "abbamut: with its step lifted, abba's demand for $key answers that the defect is back ($(printf '%s\n' "$said" | tail -1))"
+    fi
+    rm -f build/boxos.img
+    buildkey_restore
+}
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -9222,9 +9589,11 @@ case "${1:-both}" in
     quillmut) run_quillmut ;;
     stackguard) run_stackguard ;;
     lockrankmut) run_lockrankmut ;;
+    abba)     run_abba ;;
+    abbamut)  run_abbamut ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|stand|standmut|quill|quillmut|stackguard|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|stand|standmut|quill|quillmut|stackguard|abba|abbamut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1

@@ -119,10 +119,12 @@ caveat_row() {
                     echo "1.1|the file table takes a block for its chain under its own lock, so the volume's state lock is taken under the table while a create takes the table under state: the two orders of one ABBA (MP-D4), which stops both cores" ;;
         lockrank:integrity@IntegrityVerify:read|\
         lockrank:integrity@IntegrityUpdate:read|\
+        lockrank:integrity@IntegrityUpdate:write|\
         lockrank:integrity@IntegrityFlush:write)
                     echo "1.1|a page of the integrity map is read or written under the map's IRQ-off lock, from inside every block read and write, so every core that reads or writes a block spins with interrupts off for as long as the medium takes" ;;
         lockrank:integrity@IntegrityVerify/readahead@ReadAheadLookup|\
         lockrank:integrity@IntegrityUpdate/readahead@ReadAheadLookup|\
+        lockrank:integrity@IntegrityUpdate/readahead@ReadAheadInvalidate|\
         lockrank:integrity@IntegrityFlush/readahead@ReadAheadInvalidate|\
         lockrank:integrity@IntegrityVerify/braid@BraidIsHealthy|\
         lockrank:integrity@IntegrityUpdate/braid@BraidIsHealthy|\
@@ -148,8 +150,13 @@ caveat_row() {
         lockrank:state@tagfs_create_file_inside:read|\
         lockrank:state@tagfs_create_file_inside:write|\
         lockrank:state@tagfs_delete_file_inside:read|\
-        lockrank:state@tagfs_remove_tag_inside:read)
-                    echo "1.4|a create, a delete or a tag's removal reads and writes metadata pool blocks under the volume's state lock, so every other create, delete, rename and tag waits with interrupts off for as long as the medium takes" ;;
+        lockrank:state@tagfs_remove_tag_inside:read|\
+        lockrank:state@tagfs_remove_tag_inside:write|\
+        lockrank:state@tagfs_rename_file_inside:read|\
+        lockrank:state@tagfs_rename_file_inside:write|\
+        lockrank:state@tagfs_add_tag_inside:read|\
+        lockrank:state@tagfs_add_tag_inside:write)
+                    echo "1.4|a create, a delete, a rename, a tag or its removal reads and writes metadata pool blocks under the volume's state lock, so every other create, delete, rename and tag waits with interrupts off for as long as the medium takes" ;;
         lockrank:writer@tagfs_write_inside:read|\
         lockrank:writer@tagfs_write_inside:write)
                     echo "1.5|a file's writer holds its IRQ-off lock across every medium command of its write, so a second writer of the file spins with interrupts off for the whole of the first one's write" ;;
