@@ -287,9 +287,10 @@ static int QuillRunProgram(const char *line, int32_t *code)
 /* Asked by the shell's own tools — untag, trash, erase — which wear utility
  * and storage and not system. The defect is that ANY program may do this;
  * asked by this program, which wears system, a fix that weighed the asker's
- * authority would hide it. The trash is emptied with `erase trashed`: erase
- * by name finds no file once it is in the trash — its look-up leaves trashed
- * files out, and it then asks the file to be trashed. A kernel still on the
+ * authority would hide it. The trash is emptied with `erase trashed` — on a
+ * throwaway image the whole trash, which asks erase the same question its
+ * name would (erase by name, since it looks the name up in the trash itself,
+ * takes the same road). A kernel still on the
  * volume afterwards is given back what the tools took, out of the trash and
  * wearing its guard, before anything is reported. */
 QuillVerdict QuillSystemTag(const char *const *args)
