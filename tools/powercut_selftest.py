@@ -7,6 +7,9 @@ Not a program of its own: powercut.py hands it the module it was loaded as,
 so the arithmetic tested is the arithmetic the judge runs, not a copy of it.
 """
 
+import argparse
+import contextlib
+import io
 import json
 import os
 import struct
@@ -135,5 +138,46 @@ def SelfTest(pc):
     Want(Recorded([[1, 1], [1]], 0, 3).Exhaustive() and not Recorded([[1] * 14], 0, 0).Exhaustive()
          and not Recorded([[40]], 0, 0).Exhaustive(),
          "a record is enumerated whole only with no subset and no torn prefix left out")
+    Want(Recorded([[1] * 14], 0, 0).Exhaustive(prefixes=True) and
+         not Recorded([[40]], 0, 0).Exhaustive(prefixes=True),
+         "its prefixes are built whole however many subsets are left out, and not with a torn one left")
+
+    kind = Recorded([[1, 1, 1]], 0, 3).kind
+    Want([kind[c] for c in ("e0-none", "e0-s1", "e0-s3", "e0-all")] == ["prefix"] * 4 and
+         [kind[c] for c in ("e0-s2", "e0-s4", "e0-s5", "e0-s6")] == ["subset"] * 4,
+         "of three writes the cuts that keep the first 0, 1, 2 or 3 are prefixes and the four "
+         "others subsets")
+    Want(Recorded([[1, 8]], 0, 3).kind["e0-t003"] == "prefix", "a torn last write is a prefix")
+    kind = Recorded([[(1, 0), 1, 1]], 0, 3).kind
+    Want((kind["e0-s1"], kind["e0-s2"]) == ("prefix", "subset"),
+         "a write outside the volume, kept by every cut, makes no prefix a subset (%s %s)"
+         % (kind["e0-s1"], kind["e0-s2"]))
+    run = Recorded([[1, (1, 1000)]], 0, 3)
+    Want(run.Canon("e0-all") == "e0-s2" and run.kind["e0-s2"] == "prefix",
+         "a medium a subset and a prefix both build is a prefix (%s, %s)"
+         % (run.Canon("e0-all"), run.kind.get("e0-s2")))
+
+    def Crowd(nfid, used, made):
+        check = {"ledger": {"standing_on": 0, "copies": [{"copy": 0, "next_file_id": nfid}]},
+                 "chains": {"registry": [0], "table": [1], "registry_tail_used": used,
+                            "registry_block_data": 4080, "registry_record_header": 6,
+                            "table_rows_per_block": 510}}
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "check.json")
+            with open(path, "w") as fh:
+                json.dump(check, fh)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                rc = pc.CmdCrowd(argparse.Namespace(check=path, name_bytes=15, room=1, made=made))
+        return rc, out.getvalue().split("\t")[:2 if made else 3]
+
+    rc, said = Crowd(71, 1202, False)
+    Want(rc == 0 and said[:2] == ["330", "108"],
+         "fid 71 and 1202 registry bytes: 330 new names and 108 made again — 438 ids, and 137 - 1 + "
+         "194 records leave room for one (%s %s)" % (rc, said[:2]))
+    rc, said = Crowd(509, 4053, True)
+    Want(rc == 0 and said[0] == "2", "at both edges the recorded run makes 2 files (%s %s)" % (rc, said[:1]))
+    Want(Crowd(508, 4053, True)[0] == 1 and Crowd(509, 4032, True)[0] == 1,
+         "one row or one record off either edge is not at both edges")
     print("selftest: %d failed" % len(fails))
     return 1 if fails else 0

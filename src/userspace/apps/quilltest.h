@@ -50,5 +50,6 @@ QuillVerdict QuillHogged(const char *const *args);
 QuillVerdict QuillVerify(const char *const *args);
 QuillVerdict QuillChurn(const char *const *args);
 QuillVerdict QuillRace(const char *const *args);
+QuillVerdict QuillCrowd(const char *const *args);
 
 #endif /* QUILLTEST_H */

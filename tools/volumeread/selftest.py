@@ -148,6 +148,16 @@ def PlantRegistrySplit(t, over, at):
     t.Bit(over, at, True)
 
 
+def PlantLink(t, over, name, at):
+    """What a chain grown link first leaves when the power goes before the new
+    block is written (MP-D5, tag_registry.c and file_table.c flush): the
+    chain's last block naming data block `at`, ground nothing ever stamped."""
+    last = t.f.chains[name][0][-1]
+    raw = t.Block(over, last)
+    struct.pack_into("<I", raw, 4, at)
+    t.PutBlock(over, last, raw)
+
+
 def PlantRetire(t, over):
     """What meta_pool_delete leaves (meta_pool.c:1138-1240): the file_id zeroed
     and the CRC left alone."""
@@ -382,6 +392,8 @@ def Cases(t):
                   % (ORPHAN_RUNS, FSCK_RUNS_NAMED),
                   lambda c: K(c)["orphan_runs"] == [(b, 1) for b in ManyOrphans(t)]),
                  ("the census's orphans are the kernel's", lambda c: Runs(c, "ORPHAN") == K(c)["orphan_runs"])]),
+        LinkCase(t, "C18", "table"),
+        LinkCase(t, "C19", "registry"),
         Case("G1 MBR type", lambda o: PlantMbrEntry(t, o, kind=0x83), must={"GROUND_REFUSED"}, checks=[
             ("the kernel refuses at the ground", lambda c: c.kernel.step == "ground"),
             ("the refusal names the types it found", lambda c: "0:0x83" in c.kernel.refusal),
@@ -419,6 +431,19 @@ def Cases(t):
             ("the kernel names %u+1 missing" % t.Lmid, lambda c: K(c)["missing_runs"] == [(t.Lmid, 1)]),
             ("the kernel loses 1 file", lambda c: K(c)["lost"] == 1)]),
     ]
+
+
+def LinkCase(t, label, name):
+    """A chain whose last block links to free ground (PlantLink): the mount
+    refuses at that chain, and says which block it found unstamped."""
+    before = t.c0.f.chains[name][0]
+    return Case("%s %s linked to ground" % (label, name), lambda o: PlantLink(t, o, name, t.F),
+                must={"CHAIN_REFUSED"}, checks=[
+                    ("the kernel refuses at the %s" % name, lambda c: c.kernel.step == name),
+                    ("the refusal names data block %u, never stamped" % t.F,
+                     lambda c: c.f.refused.get(name, "").startswith("block %u holds 0x" % t.F)),
+                    ("the chain stops at its last stamped block, %u" % before[-1],
+                     lambda c: c.f.chains[name][0] == before)])
 
 
 def Reconcile(t, over):

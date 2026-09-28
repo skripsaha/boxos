@@ -27,7 +27,8 @@ from . import ondisk
 from .ondisk import (SECTOR, BLOCK, SECTORS_PER_BLOCK, REGISTRY_MAGIC,
                      FILETBL_MAGIC, MPOOL_MAGIC, TUSE_MAGIC, COW_MANIFEST_MAGIC,
                      FILE_ACTIVE, MAX_TAG_ID, INTEGRITY_PER_BLOCK, MIRROR_SLACK,
-                     LEDGER_COPIES, DISKBOOK_BLOCKS, TUSE_TEXT,
+                     LEDGER_COPIES, DISKBOOK_BLOCKS, TUSE_TEXT, REGISTRY_DATA,
+                     REGISTRY_RECORD, FTABLE_PER_BLOCK,
                      RunsFromBits, RunsNormal, RunsIntersect, RunsSubtract,
                      RunsCount, RunsText)
 from .medium import VolumeFacts
@@ -917,7 +918,17 @@ class GroundCensus:
             "cow": {"snapshots": sorted(f.snapshots), "redirects": [list(r) for r in f.redirects],
                     "stray": [list(r) for r in f.stray]},
             "chains": {"registry": f.chains["registry"][0], "table": f.chains["table"][0],
-                       "pool": f.chains["pool"][0], "refused": dict(f.refused) or None},
+                       "pool": f.chains["pool"][0], "refused": dict(f.refused) or None,
+                       # How far each chain is from taking a new block: the
+                       # registry's last block is filled record by record and a
+                       # record that does not fit starts the next one; the
+                       # table takes its next block for the first row past what
+                       # its blocks hold (tag_registry.c, file_table.c flush).
+                       "registry_tail_used": (f.registry[-1][1]["used_bytes"]
+                                              if f.registry else None),
+                       "registry_block_data": REGISTRY_DATA,
+                       "registry_record_header": REGISTRY_RECORD.size,
+                       "table_rows_per_block": FTABLE_PER_BLOCK},
             "files": files,
             "census": {"used": RunsCount(f.used), "free": f.D - RunsCount(f.used),
                        "swept": self.swept,

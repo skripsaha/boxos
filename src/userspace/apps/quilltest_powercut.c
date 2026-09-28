@@ -6,7 +6,8 @@
  * what is left. These modes give it something to cut: a write left
  * unanchored while one core is busy (hog, settle), a program asked to run
  * beside that hog (hogged), a writer that never stops (churn), anchors
- * racing that writer (race), and the read that says
+ * racing that writer (race), files that each add a record to the tag
+ * registry and a row to the file table (crowd), and the read that says
  * afterwards whether a record survived (verify). Each says what it did in
  * quilltest's four words, with the numbers the judge needs to compute the
  * bytes a surviving file must hold. See quilltest.c for the rest.
@@ -14,6 +15,7 @@
 
 #include "box/print.h"
 #include "box/file.h"
+#include "box/memory.h"
 #include "box/string.h"
 #include "box/convert.h"
 #include "box/system.h"
@@ -25,6 +27,8 @@
 #include "quilltest.h"
 
 #define QUILL_CHURN_PROGRESS 100u
+#define QUILL_CROWD_PROGRESS 50u
+#define QUILL_CROWD_NAME     16u         /* "crowd", ten digits and the NUL */
 
 /* =========================================================================
  *  The record of the power-cut modes
@@ -384,4 +388,132 @@ QuillVerdict QuillRace(const char *const *args)
            "landed %u write(s) on %s fid=%u\n", anchored, rounds, first_bad, bad_rc, churn,
            landed, name, (uint32_t)fid);
     return QUILL_FAIL;
+}
+
+/* =========================================================================
+ *  crowd — files that each add a record to the registry and a row to the table
+ * ========================================================================= */
+
+/* A count or a number as the shell gave it: digits only, at most ten, and no
+ * more than a uint32_t holds. to_uint reads "-5" as 0 and 4294967296 as 0 as
+ * well, and a case that took either for what it was given would make files
+ * nobody asked for. */
+static bool QuillNumber(const char *word, uint32_t *out)
+{
+    size_t   len = word ? strlen(word) : 0;
+    uint64_t v   = 0;
+    if (len == 0 || len > 10)
+        return false;
+    for (size_t i = 0; i < len; i++) {
+        if (word[i] < '0' || word[i] > '9')
+            return false;
+        v = v * 10 + (uint64_t)(word[i] - '0');
+    }
+    if (v > UINT32_MAX)
+        return false;
+    *out = (uint32_t)v;
+    return true;
+}
+
+/* "crowd" and the number in ten digits: every name one length whatever the
+ * number, so the tag a name gives its file is a registry record of one size
+ * the host can count on — tools/powercut.sh chaingrow brings a volume to the
+ * edge of a registry block with them. */
+static void QuillCrowdName(uint32_t number, char out[QUILL_CROWD_NAME])
+{
+    memcpy(out, "crowd", 5);
+    for (int d = 14; d >= 5; d--) {
+        out[d] = (char)('0' + number % 10);
+        number /= 10;
+    }
+    out[15] = '\0';
+}
+
+/* The tag a crowd name gives its file is the name itself (it has no dot), so
+ * before the file is made no other may wear it: a file of this very name — an
+ * earlier crowd's — is deleted, and one of any other name is the case's FAIL,
+ * because the tag would then not be the new file's own. Returns 0 once none
+ * wears it, *deleted counting the files of the name that went; 1 with *other
+ * the id of a file of another name that wears it; or the answer of the query,
+ * file_info or delete that stopped it. */
+static int QuillCrowdClear(const char *name, uint32_t *deleted, uint32_t *other)
+{
+    uint32_t *ids = NULL;
+    int n  = query_all_everywhere(name, &ids);
+    int rc = n < 0 ? n : 0;
+    for (int i = 0; i < n && rc == 0; i++) {
+        file_info_t info;
+        rc = file_info(ids[i], &info);
+        if (rc == 0 && strcmp(info.filename, name) != 0) {
+            *other = ids[i];
+            rc = 1;
+        } else if (rc == 0) {
+            rc = delete(ids[i]);
+            *deleted += rc == 0;
+        }
+    }
+    free(ids);
+    return rc;
+}
+
+/* N files crowdNNNNNNNNNN numbered from FROM, each wearing one tag no other
+ * file on the volume wears — its name — so each adds one record to the tag
+ * registry, flushed as the file is made (tagfs.c, "The name is a tag"), and
+ * one row to the file table, which the anchor after the last one writes. A
+ * name an earlier crowd made is made again, its old file deleted first: that
+ * spends a file id and adds no record, and the verdict counts those apart. */
+QuillVerdict QuillCrowd(const char *const *args)
+{
+    uint32_t count = 0, from = 0;
+    if (!QuillNumber(args[0], &count) || count == 0 ||
+        (args[1] && !QuillNumber(args[1], &from)) || count - 1 > UINT32_MAX - from) {
+        printf("[QUILL] crowd: FAIL — N is a count above 0 and FROM a number, FROM + N - 1 at "
+               "most %u; '%s' and '%s' are not (0 files made)\n", UINT32_MAX, args[0],
+               args[1] ? args[1] : "0");
+        return QUILL_FAIL;
+    }
+
+    char     name[QUILL_CROWD_NAME], first[QUILL_CROWD_NAME];
+    uint32_t first_fid = 0, last_fid = 0, again = 0;
+    uint64_t t0 = 0, t1 = 0;
+    time_uptime_ms(&t0);
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t deleted = 0, other = 0;
+        QuillCrowdName(from + i, name);
+        int crc = QuillCrowdClear(name, &deleted, &other);
+        int fid = crc == 0 ? create_everywhere(name, NULL) : 0;
+        if (fid <= 0) {
+            int arc = anchor(0);
+            if (crc == 1)
+                printf("[QUILL] crowd: FAIL — at index %u of %u, %s: fid %u wears its tag under "
+                       "another name, so the tag would not be the new file's own; %u made before "
+                       "it (anchor %d)\n", i, count, name, other, i, arc);
+            else
+                printf("[QUILL] crowd: FAIL — at index %u of %u, %s could not be made (%s "
+                       "answered %d); %u made before it (anchor %d)\n", i, count, name,
+                       crc ? "clearing its name" : "create", crc ? crc : fid, i, arc);
+            return QUILL_FAIL;
+        }
+        again += deleted > 0;
+        if (i == 0) {
+            memcpy(first, name, sizeof(first));
+            first_fid = (uint32_t)fid;
+        }
+        last_fid = (uint32_t)fid;
+        if ((i + 1) % QUILL_CROWD_PROGRESS == 0 && i + 1 < count)
+            printf("[QUILL] crowd: %u of %u made, the last %s fid=%u\n", i + 1, count, name,
+                   last_fid);
+    }
+    int arc = anchor(0);
+    time_uptime_ms(&t1);
+    if (arc != 0) {
+        printf("[QUILL] crowd: FAIL — %u files %s..%s were made (fids %u..%u) and the anchor "
+               "after them answered %d\n", count, first, name, first_fid, last_fid, arc);
+        return QUILL_FAIL;
+    }
+    printf("[QUILL] crowd: PASS — made %u files %s..%s, fids %u..%u, each wearing a tag no other "
+           "file wears (its name); %u of the names made again over a file of their own; "
+           "anchored, %llu ms in all\n", count, first, name, first_fid, last_fid, again,
+           (unsigned long long)(t1 - t0));
+    return QUILL_PASS;
 }
