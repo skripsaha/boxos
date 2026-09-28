@@ -7707,8 +7707,8 @@ run_stand() {
     local f logs=""
     rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
           "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log
-    stand_twice stand_bios "BIOS 4c" "ATA [a-z ]+" 6 CORES=4 MEM=4G
-    stand_twice stand_uefi "UEFI 4c" "AHCI port [0-9]+" 7 UEFI=on STRICT=on CORES=4 MEM=4G
+    stand_twice stand_bios "BIOS 4c" "ATA [a-z ]+" 7 CORES=4 MEM=4G
+    stand_twice stand_uefi "UEFI 4c" "AHCI port [0-9]+" 8 UEFI=on STRICT=on CORES=4 MEM=4G
     for f in "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
              "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log; do
         [ -f "$f" ] && logs="$logs $f"
@@ -7732,9 +7732,13 @@ run_stand() {
 # row's PF-1 fix taken out, and a test that forgets to take its fault down
 # (the runner must take it down and fail it). LockRank, which the lock tests
 # count with, the same: its witness keyed on a bare IF instead of a TagFS lock
-# held, and its order never checked. Mutations whose tests do not
-# meet each other's share a boot; each is judged by its own test's own line,
-# number and all.
+# held, and its order never checked. The flush tickets and the Scribe the
+# same: a refused flush that moves the mark, a count of kept flushes, a need
+# that is the last flush begun, a pass that publishes every ask, a Scribe
+# this core holds waited for like any other, a drain core that runs no baton
+# while it waits, and a Give that never lets the scheduler go. Mutations
+# whose tests do not meet each other's share a boot; each is judged by its
+# own test's own line, number and all.
 #
 # And the runner is only worth believing if it cannot be made to pass what it
 # should fail. A failed assertion must say where, and what it saw — shown by
@@ -7781,8 +7785,8 @@ edits = [
     # 1.4: the sync answers for its table and its flush
     ("static void tagfs_sync_inside(void);\n",
      "static error_t tagfs_sync_inside(void);   /* logcheck mutation: the sync answers for its stages */\n"),
-    ("    tagfs_sync_inside();\n    tagfs_leave();\n    return OK;\n",
-     "    error_t owned = tagfs_sync_inside();\n    tagfs_leave();\n    return owned;\n"),
+    ("        tagfs_sync_inside();\n        ScribeGive(&g_sync_scribe, cover, OK);\n",
+     "        rc = tagfs_sync_inside();\n        ScribeGive(&g_sync_scribe, cover, rc);\n"),
     ("static void tagfs_sync_inside(void)\n{\n", "static error_t tagfs_sync_inside(void)\n{\n"),
     ("    file_table_flush();\n    SETTLE_CUT_AT(SETTLE_CUT_POINT_RETIRES);\n",
      "    if (file_table_flush() != 0)\n        return ERR_IO;\n    SETTLE_CUT_AT(SETTLE_CUT_POINT_RETIRES);\n"),
@@ -7913,6 +7917,9 @@ stand_mech_on() {
         lands)  marks="src/kernel/core/boardroom/boardroom.c:2 src/kernel/tagfs/tag_bitmap/tag_bitmap.c:1" ;;
         blind)  marks="src/kernel/tagfs/tests/tests.c:2 src/kernel/tagfs/tests/core_tests.c:1" ;;
         lockrank) marks="src/kernel/tagfs/lock_rank/lock_rank.c:2" ;;
+        scribe)    marks="src/kernel/tagfs/scribe/scribe.c:4" ;;
+        flushsum)  marks="src/kernel/tagfs/scribe/scribe.c:3" ;;
+        flushneed) marks="src/kernel/tagfs/scribe/scribe.c:1" ;;
     esac
     for mark in $marks; do mutate "${mark%%:*}"; done
     python3 - "$group" <<'EOF'
@@ -7979,6 +7986,40 @@ edits = {
    "        if (lock->Rank == LOCK_RANK_NONE || h->Rank < lock->Rank)\n            continue;\n",
    "        continue;   /* " + M + ": the order is never checked */\n"),
  ],
+ "scribe": [
+  ("src/kernel/tagfs/scribe/scribe.c",
+   "    if (!kept)\n        return;\n    uint64_t cur = __atomic_load_n(&g_flush_kept, __ATOMIC_RELAXED);\n",
+   "    (void)kept;   /* " + M + ": a refused flush moves the mark too */\n    uint64_t cur = __atomic_load_n(&g_flush_kept, __ATOMIC_RELAXED);\n"),
+  ("src/kernel/tagfs/scribe/scribe.c",
+   "        __atomic_store_n(&s->written, cover, __ATOMIC_RELEASE);\n",
+   "        __atomic_store_n(&s->written, __atomic_load_n(&s->asked, __ATOMIC_SEQ_CST),   /* " + M + ": a pass publishes every ask, not what it covered */\n"
+   "                         __ATOMIC_RELEASE);\n"),
+  ("src/kernel/tagfs/scribe/scribe.c",
+   "        return seen == me ? SCRIBE_SELF : SCRIBE_HELD;\n",
+   "        return SCRIBE_HELD;   /* " + M + ": a Scribe this core holds is waited for like any other */\n"),
+  ("src/kernel/tagfs/scribe/scribe.c",
+   "    if (core == g_amp.bsp_index)\n        BatonPump(core);\n    cpu_pause();\n",
+   "    (void)core;   /* " + M + ": the drain core runs no baton while it waits */\n    cpu_pause();\n"),
+ ],
+ "flushsum": [
+  ("src/kernel/tagfs/scribe/scribe.c",
+   "    if (!kept)\n        return;\n    uint64_t cur = __atomic_load_n(&g_flush_kept, __ATOMIC_RELAXED);\n"
+   "    while (cur < ticket &&\n           !__atomic_compare_exchange_n(&g_flush_kept, &cur, ticket, false,\n"
+   "                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED))\n        ;\n",
+   "    (void)ticket;   /* " + M + ": a count of the flushes kept, raised as each answers */\n"
+   "    if (kept)\n        __atomic_add_fetch(&g_flush_kept, 1u, __ATOMIC_RELEASE);\n"),
+  ("src/kernel/tagfs/scribe/scribe.c",
+   "    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST) + 1u;\n",
+   "    return __atomic_load_n(&g_flush_kept, __ATOMIC_SEQ_CST) + 1u;   /* " + M + ": the next flush kept is the one that covers */\n"),
+  ("src/kernel/tagfs/scribe/scribe.c",
+   "    g_scribe_held[core][s->rank]--;\n    SchedulerLetGoHere();\n",
+   "    g_scribe_held[core][s->rank]--;   /* " + M + ": the scheduler is never let go */\n"),
+ ],
+ "flushneed": [
+  ("src/kernel/tagfs/scribe/scribe.c",
+   "    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST) + 1u;\n",
+   "    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST);   /* " + M + ": the need is the last flush begun */\n"),
+ ],
  "blind": [
   ("src/kernel/tagfs/tests/tests.c",
    "    kprintf(\"[TESTS] %s failed at %s:%d: %s (%lld, %lld)\\n\",\n",
@@ -8001,7 +8042,8 @@ stand_mech_off() {
     for f in src/kernel/core/boardroom/block_fail.c src/lib/kernel/klib_mem.c \
              src/kernel/tagfs/tests/stand_tests.c src/kernel/core/boardroom/boardroom.c \
              src/kernel/tagfs/tag_bitmap/tag_bitmap.c src/kernel/tagfs/tests/tests.c \
-             src/kernel/tagfs/tests/core_tests.c src/kernel/tagfs/lock_rank/lock_rank.c; do
+             src/kernel/tagfs/tests/core_tests.c src/kernel/tagfs/lock_rank/lock_rank.c \
+             src/kernel/tagfs/scribe/scribe.c; do
         restore "$f"
     done
 }
@@ -8155,6 +8197,38 @@ STAND_HELD_EOF
             'stand_lockrank_names_the_medium failed at [^:]+:[0-9]+: a read that holds no TagFS lock is not witnessed, interrupts off or not \(1, 0\)'
         stand_red standmut_lockrank "an order never checked takes a state-rank lock under a leaf and says nothing" \
             'stand_lockrank_names_the_order failed at [^:]+:[0-9]+: a state-rank lock taken under a leaf, twice, is out of order twice \(0, 2\)'
+    fi
+    stand_mech_off
+
+    # The flush tickets and the Scribe, broken one way per test and boot: the
+    # three wrong accounts of a flush go red in the same test, so each has a
+    # boot of its own.
+    stand_mech_on scribe
+    if stand_mut_boot standmut_scribe CORES=4 MEM=4G; then
+        stand_red standmut_scribe "a refused flush that moves the mark claims a need it never covered" \
+            'stand_flush_ticket failed at [^:]+:[0-9]+: keeps nothing \(0, 1\)'
+        stand_red standmut_scribe "a pass that publishes every ask answers one made during it as written" \
+            'stand_scribe_covers_only_what_was_asked failed at [^:]+:[0-9]+: the second is not, and takes a pass of its own \(1, 0\)'
+        stand_red standmut_scribe "a Scribe this core holds, waited for like any other, is never answered SELF" \
+            'stand_scribe_never_waits_on_itself failed at [^:]+:[0-9]+: a Scribe this core holds beneath the caller is answered SELF \(3, 4\)'
+        stand_red standmut_scribe "a drain core that runs no baton while it waits never ends the pass it waits for" \
+            'stand_scribe_waiter_keeps_pumping failed at [^:]+:[0-9]+: by the probe, which the drain core ran while it waited \(0, 1\)'
+    fi
+    stand_mech_off
+
+    stand_mech_on flushsum
+    if stand_mut_boot standmut_flushsum CORES=4 MEM=4G; then
+        stand_red standmut_flushsum "a count of kept flushes credits a need with a flush begun before it" \
+            'stand_flush_ticket failed at [^:]+:[0-9]+: and proves nothing about that need \(0, 1\)'
+        stand_red standmut_flushsum "a Give that never lets the scheduler go leaves the core held" \
+            'stand_scribe_covers_only_what_was_asked failed at [^:]+:[0-9]+: given back, the core may be switched away from again \([0-9]+, [0-9]+\)'
+    fi
+    stand_mech_off
+
+    stand_mech_on flushneed
+    if stand_mut_boot standmut_flushneed CORES=4 MEM=4G; then
+        stand_red standmut_flushneed "a need that is the last flush begun is covered by that flush" \
+            'stand_flush_ticket failed at [^:]+:[0-9]+: and proves nothing about that need \(0, 1\)'
     fi
     stand_mech_off
 

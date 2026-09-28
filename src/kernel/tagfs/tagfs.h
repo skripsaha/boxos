@@ -525,7 +525,8 @@ error_t tagfs_shutdown(void);
 error_t tagfs_sync(void);
 
 /* Flush the volatile write cache of the disk that holds the TagFS volume
- * (routes to the probed AHCI port / ATA drive, not a hardcoded device). */
+ * (routes to the probed AHCI port / ATA drive, not a hardcoded device). The
+ * one place a flush ticket is taken and answered (scribe/scribe.h). */
 error_t  tagfs_flush_cache(void);
 
 /* Convert a TagFS logical block number to its absolute disk-sector LBA.

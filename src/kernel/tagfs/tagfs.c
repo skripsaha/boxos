@@ -23,6 +23,7 @@
 #include "self_heal/self_heal.h"
 #include "integrity/integrity.h"
 #include "settle_cut/settle_cut.h"
+#include "scribe/scribe.h"
 #include "../../kernel/drivers/timer/rtc.h"
 #include "../../lib/kernel/crypto.h"
 #include "logbook.h"
@@ -1323,7 +1324,12 @@ static void volume_would_not_flush(error_t why)
 
 error_t tagfs_flush_cache(void)
 {
+    /* The one place a flush ticket is taken and answered (scribe.h): taken
+     * before the medium is asked, so the flush it stands for was issued after
+     * every write whose completion was seen before it. */
+    uint64_t ticket = VolumeFlushBegin();
     int said = BoardroomFlush(g_tagfs_seat);
+    VolumeFlushEnd(ticket, said == 0);
     if (said == 0) {
         return OK;
     }
@@ -1368,48 +1374,6 @@ error_t tagfs_flush_cache(void)
         volume_would_not_flush(why);
     }
     return why;
-}
-
-/*
- * ‼ COME BACK UNTIL THERE IS A REAL ANSWER — AND WHY THAT TERMINATES.
- *
- * ERR_BUSY from the flush is not an answer about the medium at all. It says
- * one thing: another whole-port command holds this port AT THIS INSTANT. Two
- * flushes of the same volume meeting is ordinary traffic, and the wave that
- * taught the flush to refuse turned that meeting into a failed write for one
- * of the two — where before it simply waited and both succeeded. Propagating
- * it was half a mechanism.
- *
- * So a caller whose whole purpose is durability asks again, and this is not a
- * clock and not a count: it ends on a FACT, three of which are reachable and
- * all of which are terminal.
- *
- *   - The door opens. The holder's command is itself bounded — a device that
- *     never answers is declared non-completing by AHCI_CMD_PATIENCE_MS — so
- *     the hold ends whether the flush under it succeeded or failed.
- *   - The holder stops being a running core. ahci_port_take_whole asks
- *     amp_core_online() and takes an abandoned door over on the spot, which
- *     is what makes this safe at shutdown, where the holder can be a core
- *     that has already been stopped.
- *   - The medium refuses, or leaves. Either is a different error_t and comes
- *     straight back out.
- *
- * Nothing here abandons the work it was given after a deadline — which is the
- * defect this is the opposite of — and nothing here invents a number.
- *
- * It is NOT used by the async write path: that runs on the drain core, where
- * a spin would stop every other job from making progress, so w_commit_txn
- * hands the job back to the same core through its own baton instead. Same
- * mechanism, spelled the way that place can spell it.
- */
-static error_t tagfs_flush_cache_insisting(void)
-{
-    error_t flushed = tagfs_flush_cache();
-    while (flushed == ERR_BUSY) {
-        cpu_pause();
-        flushed = tagfs_flush_cache();
-    }
-    return flushed;
 }
 
 /*
@@ -3462,9 +3426,28 @@ error_t tagfs_sync(void)
                                        : "no volume is mounted there");
         return ERR_TAGFS_NOT_INITIALIZED;
     }
-    tagfs_sync_inside();
+    /* One sync at a time: two, each cut by the other's flush, could leave the
+     * medium a table naming a pool record of the other sync that no flush has
+     * covered yet. A sync asked for while another runs is answered by the
+     * pass that covers it — its own, or the one that began after it asked. */
+    uint64_t cover  = 0;
+    error_t  rc     = OK;
+    uint64_t ticket = ScribeAsk(&g_sync_scribe);
+    switch (ScribeWait(&g_sync_scribe, ticket, &cover, &rc)) {
+    case SCRIBE_MINE:
+        tagfs_sync_inside();
+        ScribeGive(&g_sync_scribe, cover, OK);
+        break;
+    case SCRIBE_SELF:
+        kprintf("[TagFS] sync refused: a sync on this core is suspended beneath "
+                "this one, and waiting for it here would never end\n");
+        rc = ERR_BUSY;
+        break;
+    default:
+        break;      /* WRITTEN leaves OK; REFUSED has put the pass's refusal in rc */
+    }
     tagfs_leave();
-    return OK;
+    return rc;
 }
 
 static void tagfs_sync_inside(void)
@@ -3586,9 +3569,9 @@ static void tagfs_sync_inside(void)
      * It INSISTS rather than reporting a busy port: a sync is asked for
      * exactly when somebody needs these records on the media, and "somebody
      * else is flushing this instant" is not an answer to that. See
-     * tagfs_flush_cache_insisting for why the asking ends. */
+     * VolumeFlushFor (scribe.h) for why the asking ends. */
     SETTLE_CUT_AT(SETTLE_CUT_POINT_FLUSH);
-    error_t flushed = tagfs_flush_cache_insisting();
+    error_t flushed = VolumeFlushFor(VolumeFlushNeed());
     if (flushed != OK) {
         kprintf("[TagFS] sync: the registry, the pool, the file table, the "
                 "bitmap and the ledger are all written, and none of them is "

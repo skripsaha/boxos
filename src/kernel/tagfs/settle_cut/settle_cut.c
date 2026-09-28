@@ -70,7 +70,7 @@ void SettleCutAt(SettleCutPoint here)
     __asm__ volatile("cli" ::: "memory");
     uint8_t me = amp_get_core_index();
 
-    halt_all_ap_cores();
+    halt_all_ap_cores(false);   /* a power cut: every core stops where it stands */
 
     uint32_t answered = 0;
     for (uint8_t c = 0; c < g_amp.total_cores; c++) {
