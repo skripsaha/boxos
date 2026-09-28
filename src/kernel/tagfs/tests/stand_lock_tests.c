@@ -374,7 +374,6 @@ out:
 static const TestCase g_stand_lock_tests[] = {
     { .name  = "stand_registry_flush_holds_no_lock", .func = TestStandRegistryFlushHoldsNoLock,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.1",
       .caveat_defect = "the tag registry's flush holds its interrupts-off lock across every write "
                        "it makes to the medium, so a core that needs a tag spins with interrupts "
                        "off for as long as the medium takes" },

@@ -83,20 +83,22 @@ caveat_row() {
         chaingrow:prefix:CHAIN_REFUSED:table)
                     echo "1.1|the file table writes its last block's link to a block it has just taken before that block, so a power cut between the two leaves a chain into unstamped ground and the kernel refuses the volume at every mount" ;;
         chaingrow:prefix:CHAIN_REFUSED:registry)
-                    echo "1.1|the tag registry writes its last block's link to a block it has just taken before that block, so a power cut between the two leaves a chain into unstamped ground and the kernel refuses the volume at every mount" ;;
+                    echo "|the tag registry writes its last block's link to a block it has just taken before that block, so a power cut between the two leaves a chain into unstamped ground and the kernel refuses the volume at every mount" ;;
         chaingrow:subset:CHAIN_REFUSED:table)
                     echo "1.1|a cut that keeps the file table's link to its new block and loses that block's own write, both in one flush epoch, leaves a chain into unstamped ground the kernel refuses to mount" ;;
         chaingrow:subset:CHAIN_REFUSED:registry)
-                    echo "1.1|a cut that keeps the tag registry's link to its new block and loses that block's own write, both in one flush epoch, leaves a chain into unstamped ground the kernel refuses to mount" ;;
+                    echo "|a cut that keeps the tag registry's link to its new block and loses that block's own write, both in one flush epoch, leaves a chain into unstamped ground the kernel refuses to mount" ;;
         chaingrow:prefix:ORPHAN|chaingrow:subset:ORPHAN)
                     echo "1.6|a cut that keeps the bitmap of a block the registry or the file table has just taken and loses the link to it leaves that block marked used and owned by nothing" ;;
+        chaingrow:prefix:SPARE_UNNAMED|chaingrow:subset:SPARE_UNNAMED)
+                    echo "1.6|a cut after the registry's new block is stamped and before the link to it is written keeps a stamped spare header nothing names, a block marked used and owned by nothing" ;;
         # LockRank's places (lockrank_judge, below): every key a gate measured,
         # under the step R1 section 1.7 names for it.
         lockrank:registry@tag_registry_load:read)
-                    echo "1.1|the tag registry is read from the medium under its IRQ-off lock, so a core that looks up a tag spins with interrupts off for as long as the medium takes" ;;
+                    echo "|the tag registry is read from the medium under its IRQ-off lock, so a core that looks up a tag spins with interrupts off for as long as the medium takes" ;;
         lockrank:registry@tag_registry_flush:read|\
         lockrank:registry@tag_registry_flush:write)
-                    echo "1.1|the tag registry's flush holds its IRQ-off lock across every medium read and write it makes, so a core that needs the registry spins with interrupts off for as long as the medium takes" ;;
+                    echo "|the tag registry's flush holds its IRQ-off lock across every medium read and write it makes, so a core that needs the registry spins with interrupts off for as long as the medium takes" ;;
         lockrank:registry@tag_registry_load/readahead@ReadAheadLookup|\
         lockrank:registry@tag_registry_load/integrity@IntegrityVerify|\
         lockrank:registry@tag_registry_load/braid@BraidIsHealthy|\
@@ -104,10 +106,10 @@ caveat_row() {
         lockrank:registry@tag_registry_flush/readahead@ReadAheadInvalidate|\
         lockrank:registry@tag_registry_flush/integrity@IntegrityUpdate|\
         lockrank:registry@tag_registry_flush/braid@BraidIsHealthy)
-                    echo "1.1|a block is read or written for the tag registry with the registry's lock held, so the read-ahead cache's, the integrity map's and Braid's locks are taken under that leaf" ;;
+                    echo "|a block is read or written for the tag registry with the registry's lock held, so the read-ahead cache's, the integrity map's and Braid's locks are taken under that leaf" ;;
         lockrank:registry@tag_registry_flush/state@tagfs_alloc_blocks_inside|\
         lockrank:registry@tag_registry_flush/state@MapOwedSettle)
-                    echo "1.1|the tag registry takes a block for its chain under its own lock, so the volume's state lock is taken under the registry while a rename takes the registry under state: the two orders of one ABBA (MP-D4), which stops both cores" ;;
+                    echo "|the tag registry takes a block for its chain under its own lock, so the volume's state lock is taken under the registry while a rename takes the registry under state: the two orders of one ABBA (MP-D4), which stops both cores" ;;
         lockrank:table@file_table_flush:read|\
         lockrank:table@file_table_flush:write)
                     echo "1.1|the file table's flush holds its IRQ-off lock across every medium read and write it makes, so a core that looks up a file spins with interrupts off for as long as the medium takes" ;;

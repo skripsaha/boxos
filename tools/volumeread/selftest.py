@@ -150,8 +150,9 @@ def PlantRegistrySplit(t, over, at):
 
 def PlantLink(t, over, name, at):
     """What a chain grown link first leaves when the power goes before the new
-    block is written (MP-D5, tag_registry.c and file_table.c flush): the
-    chain's last block naming data block `at`, ground nothing ever stamped."""
+    block is written (MP-D5, as the registry and the file table grew before
+    step 1.1): the chain's last block naming data block `at`, ground nothing
+    ever stamped."""
     last = t.f.chains[name][0][-1]
     raw = t.Block(over, last)
     struct.pack_into("<I", raw, 4, at)

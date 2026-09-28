@@ -7573,16 +7573,12 @@ stand_open_holds_what_it_names|1.4|handle counting extents it did not hold at re
 stand_open_refuses_unread_metadata|1.4|one-block file opened as empty at refused allocation 3|opens whole or refused, allocations refused 6
 stand_open_joins_the_writers|1.5|handle with no open-file entry at refused allocation 1|opens whole or refused, allocations refused 6
 stand_frozen_block_freed_twice|1.3|blocks the allocator was given back twice 1|blocks the allocator was given back twice 0
-stand_registry_flush_holds_no_lock|1.1|registry flushes of one new name that crossed the medium holding the registry's lock 1|registry flushes of one new name that crossed the medium holding the registry's lock 0
 stand_ledger_writes_outside_its_lock|1.1|Ledger writes of one that crossed the medium holding the Ledger's lock 1|Ledger writes of one that crossed the medium holding the Ledger's lock 0
 stand_integrity_pages_outside_its_lock|1.1|17-page runs of block writes whose map paging crossed the medium under a lock 1|17-page runs of block writes whose map paging crossed the medium under a lock 0
 stand_cow_question_asks_no_medium|1.1|reads of a file's metadata block the copy-on-write question asked, no snapshot standing 1|reads of a file's metadata block the copy-on-write question asked, no snapshot standing 0
 stand_redirect_log_leaves_the_flush|1.1|cache flushes asked inside 64 redirects, under the copy-on-write lock 1|cache flushes asked inside 64 redirects, under the copy-on-write lock 0
 stand_dma_wait_keeps_the_callers_interrupts|1.1|DMA reads that turned interrupts on under a caller that had them off 1|DMA reads that turned interrupts on under a caller that had them off 0|bios
-stand_registry_growth_links_what_landed|1.1|registry chains on the medium that run into a block without the registry's magic 1|registry chains on the medium that run into a block without the registry's magic 0
 stand_table_grows_onto_a_stamp|1.1|file table chains on the medium that run into a block without the table's magic 1|file table chains on the medium that run into a block without the table's magic 0
-stand_registry_scratch_leaves_the_volume_alone|1.1|registry chains on the medium a scratch registry moved by living and dying 1|registry chains on the medium a scratch registry moved by living and dying 0
-stand_registry_load_refuses_what_it_cannot_hold|1.1|registry loads with an allocation refused that answered OK, stopping at the first 1|registry loads with an allocation refused that answered OK, stopping at the first 0
 "
 
 # The last thing a halt says about the volume, whichever way its sync went
@@ -7779,8 +7775,8 @@ run_stand() {
     local f logs=""
     rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
           "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log
-    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 9 CORES=4 MEM=4G
-    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 10 UEFI=on STRICT=on CORES=4 MEM=4G
+    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 10 CORES=4 MEM=4G
+    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 11 UEFI=on STRICT=on CORES=4 MEM=4G
     for f in "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
              "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log; do
         [ -f "$f" ] && logs="$logs $f"
@@ -7808,9 +7804,13 @@ run_stand() {
 # same: a refused flush that moves the mark, a count of kept flushes, a need
 # that is the last flush begun, a pass that publishes every ask, a Scribe
 # this core holds waited for like any other, a drain core that runs no baton
-# while it waits, and a Give that never lets the scheduler go. Mutations
-# whose tests do not meet each other's share a boot; each is judged by its
-# own test's own line, number and all.
+# while it waits, and a Give that never lets the scheduler go. And a caveat a
+# step has lifted must see its defect again when the step is undone: the tag
+# registry linking before it stamps, writing under its lock, sharing its mark
+# with a registry beside it, loading what it cannot hold, handing out its own
+# array, and forgetting the block a refused pass took. Mutations whose tests
+# do not meet each other's share a boot; each is judged by its own test's own
+# line, number and all.
 #
 # And the runner is only worth believing if it cannot be made to pass what it
 # should fail. A failed assertion must say where, and what it saw — shown by
@@ -7937,77 +7937,6 @@ for a, m in edits:
 open(p, "w").write(s)
 EOF
     mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 13
-
-    # 1.1: nothing under the registry's lock reaches the medium, and a new
-    # block is taken and stamped before anything links it; a registry that is
-    # not the volume's leaves the volume's chain alone; and a load that cannot
-    # hold a tag refuses the mount.
-    mutate src/kernel/tagfs/tag_registry/tag_registry.c
-    python3 - <<'EOF'
-p = "src/kernel/tagfs/tag_registry/tag_registry.c"
-s = open(p).read()
-M = "logcheck mutation"
-edits = [
-    ("                if (tagfs_alloc_blocks(1, &new_block) != 0) {\n"
-     "                    TagFSLockDrop(&reg->lock);\n"
-     "                    return -1;\n"
-     "                }\n",
-     "                static TagRegistryBlock stamp;   /* " + M + ": a new block is taken and stamped outside the lock, before anything links it */\n"
-     "                TagFSLockDrop(&reg->lock);\n"
-     "                if (tagfs_alloc_blocks(1, &new_block) != 0)\n"
-     "                    return -1;\n"
-     "                memset(&stamp, 0, sizeof(stamp));\n"
-     "                stamp.magic = TAGFS_REGISTRY_MAGIC;\n"
-     "                if (tagfs_write_block(new_block, &stamp) != 0) {\n"
-     "                    tagfs_free_blocks(new_block, 1);\n"
-     "                    return -1;\n"
-     "                }\n"
-     "                TagFSLockTake(&reg->lock);\n"),
-    ("            blkp->next_block = new_block;\n"
-     "            int write_result = tagfs_write_block(current_block, blkp);\n",
-     "            blkp->next_block = new_block;\n"
-     "            TagFSLockDrop(&reg->lock);   /* " + M + ": the registry's writes leave its lock */\n"
-     "            int write_result = tagfs_write_block(current_block, blkp);\n"
-     "            TagFSLockTake(&reg->lock);\n"),
-    ("    int write_result = tagfs_write_block(current_block, blkp);\n\n    if (write_result == 0) {\n",
-     "    TagFSLockDrop(&reg->lock);   /* " + M + ": the registry's writes leave its lock */\n"
-     "    int write_result = tagfs_write_block(current_block, blkp);\n"
-     "    TagFSLockTake(&reg->lock);\n\n    if (write_result == 0) {\n"),
-    ("    TagFSLockTake(&reg->lock);\n    chain_release();\n",
-     "    TagFSLockTake(&reg->lock);\n"
-     "    bool own = reg == fs->registry;   /* " + M + ": a registry that is not the volume's leaves the volume's chain alone */\n"
-     "    if (own)\n"
-     "        chain_release();\n"),
-    ("        if (chain_append(block_num) != 0) {\n",
-     "        if (own && chain_append(block_num) != 0) {   /* " + M + " */\n"),
-    ("    reg->key_buckets = NULL;\n\n    chain_release();\n",
-     "    reg->key_buckets = NULL;\n\n"
-     "    if (reg == tagfs_get_state()->registry)   /* " + M + ": a registry that is not the volume's leaves the volume's chain alone */\n"
-     "        chain_release();\n"),
-    ("static void add_to_key_group(TagKeyGroup* group, uint16_t tag_id) {\n",
-     "static bool add_to_key_group(TagKeyGroup* group, uint16_t tag_id) {   /* " + M + ": a key group that cannot grow says so */\n"),
-    ("            debug_printf(\"[TagRegistry] add_to_key_group: grow alloc failed\\n\");\n            return;\n",
-     "            debug_printf(\"[TagRegistry] add_to_key_group: grow alloc failed\\n\");\n            return false;\n"),
-    ("    group->tag_ids[group->count++] = tag_id;\n}\n",
-     "    group->tag_ids[group->count++] = tag_id;\n    return true;\n}\n"),
-    ("    TagKeyGroup* group = find_or_create_key_group(reg, key);\n    if (group) add_to_key_group(group, tag_id);\n",
-     "    TagKeyGroup* group = find_or_create_key_group(reg, key);\n"
-     "    if (!group || !add_to_key_group(group, tag_id))   /* " + M + ": a tag its key group cannot hold is not held */\n"
-     "        return TAGFS_INVALID_TAG_ID;\n"),
-    ("            uint16_t new_id = intern_with_id_unlocked(reg, tag_id, key, value_ptr);\n",
-     "            uint16_t new_id = intern_with_id_unlocked(reg, tag_id, key, value_ptr);\n"
-     "            if (new_id == TAGFS_INVALID_TAG_ID) {   /* " + M + ": a load that cannot hold a tag refuses the mount */\n"
-     "                kprintf(\"[TagRegistry] tag %u could not be held — this volume is not mounted\\n\", tag_id);\n"
-     "                TagFSLockDrop(&reg->lock);\n"
-     "                return -1;\n"
-     "            }\n"),
-]
-for a, m in edits:
-    assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
-    s = s.replace(a, m, 1)
-open(p, "w").write(s)
-EOF
-    mut_done src/kernel/tagfs/tag_registry/tag_registry.c "logcheck mutation" 9
 
     # 1.1: a new link of the file table is stamped before anything links it
     mutate src/kernel/tagfs/file_table/file_table.c
@@ -8149,7 +8078,7 @@ EOF
 stand_fix_off() {
     local f
     for f in src/kernel/tagfs/tagfs.c src/kernel/tagfs/tag_bitmap/tag_bitmap.c \
-             src/kernel/tagfs/integrity/integrity.c src/kernel/tagfs/tag_registry/tag_registry.c \
+             src/kernel/tagfs/integrity/integrity.c \
              src/kernel/tagfs/file_table/file_table.c src/kernel/tagfs/cow/cow.c \
              src/kernel/tagfs/disk_book/disk_book.c src/kernel/drivers/disk/ata_async.c; do
         restore "$f"
@@ -8176,6 +8105,8 @@ stand_mech_on() {
         scribe)    marks="src/kernel/tagfs/scribe/scribe.c:4" ;;
         flushsum)  marks="src/kernel/tagfs/scribe/scribe.c:3" ;;
         flushneed) marks="src/kernel/tagfs/scribe/scribe.c:1" ;;
+        registry)     marks="src/kernel/tagfs/tag_registry/tag_registry.c:6" ;;
+        registrykeep) marks="src/kernel/tagfs/tag_registry/tag_registry.c:1" ;;
     esac
     for mark in $marks; do mutate "${mark%%:*}"; done
     python3 - "$group" <<'EOF'
@@ -8276,6 +8207,41 @@ edits = {
    "    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST) + 1u;\n",
    "    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST);   /* " + M + ": the need is the last flush begun */\n"),
  ],
+ "registry": [
+  ("src/kernel/tagfs/tag_registry/tag_registry.c",
+   "        rc = SpareStamp(TAGFS_REGISTRY_MAGIC, reg->spare_image, &reg->spare_block, &reg->spare_need);\n",
+   "        rc = tagfs_alloc_blocks(1, &reg->spare_block) == 0 ? OK : ERR_TAGFS_NO_SPACE;   /* " + M + ": the new block is taken and never stamped */\n"),
+  ("src/kernel/tagfs/tag_registry/tag_registry.c",
+   "    rc = tagfs_write_block(reg->spare_block, reg->spare_image);\n",
+   "    reg->tail_image->next_block = reg->spare_block;   /* " + M + ": the link goes down before the block it names */\n"
+   "    tagfs_write_block(reg->tail_block, reg->tail_image);\n"
+   "    rc = tagfs_write_block(reg->spare_block, reg->spare_image);\n"),
+  ("src/kernel/tagfs/tag_registry/tag_registry.c",
+   "        error_t wrote = tagfs_write_block(reg->tail_block, tail);\n",
+   "        TagFSLockTake(&reg->lock);   /* " + M + ": the tail is written holding the registry's lock */\n"
+   "        error_t wrote = tagfs_write_block(reg->tail_block, tail);\n"
+   "        TagFSLockDrop(&reg->lock);\n"),
+  ("src/kernel/tagfs/tag_registry/tag_registry.c",
+   "    /* The two blocks every flush of this registry is written through, and the\n",
+   "    if (fs->registry && fs->registry != reg)   /* " + M + ": a registry beside the volume's shares its mark of what is owed */\n"
+   "        fs->registry->written_next = 0;\n"
+   "    /* The two blocks every flush of this registry is written through, and the\n"),
+  ("src/kernel/tagfs/tag_registry/tag_registry.c",
+   "        if (held != OK) {\n",
+   "        if (held != OK && held != ERR_NO_MEMORY) {   /* " + M + ": a tag the load cannot hold is dropped, and the load goes on */\n"),
+  ("src/kernel/tagfs/tag_registry/tag_registry.c",
+   "        out->ids = kmalloc(sizeof(uint16_t) * group->count);\n"
+   "        if (out->ids) {\n"
+   "            memcpy(out->ids, group->tag_ids, sizeof(uint16_t) * group->count);\n",
+   "        out->ids = group->tag_ids;   /* " + M + ": the registry's own array is handed out */\n"
+   "        if (out->ids) {\n"),
+ ],
+ "registrykeep": [
+  ("src/kernel/tagfs/tag_registry/tag_registry.c",
+   "    tail->used_bytes  = was_used;\n",
+   "    reg->spare_block  = 0;   /* " + M + ": a refused pass forgets the block it took */\n"
+   "    tail->used_bytes  = was_used;\n"),
+ ],
  "blind": [
   ("src/kernel/tagfs/tests/tests.c",
    "    kprintf(\"[TESTS] %s failed at %s:%d: %s (%lld, %lld)\\n\",\n",
@@ -8299,7 +8265,7 @@ stand_mech_off() {
              src/kernel/tagfs/tests/stand_tests.c src/kernel/core/boardroom/boardroom.c \
              src/kernel/tagfs/tag_bitmap/tag_bitmap.c src/kernel/tagfs/tests/tests.c \
              src/kernel/tagfs/tests/core_tests.c src/kernel/tagfs/lock_rank/lock_rank.c \
-             src/kernel/tagfs/scribe/scribe.c; do
+             src/kernel/tagfs/scribe/scribe.c src/kernel/tagfs/tag_registry/tag_registry.c; do
         restore "$f"
     done
 }
@@ -8486,6 +8452,33 @@ STAND_HELD_EOF
     if stand_mut_boot standmut_flushneed CORES=4 MEM=4G; then
         stand_red standmut_flushneed "a need that is the last flush begun is covered by that flush" \
             'stand_flush_ticket failed at [^:]+:[0-9]+: and proves nothing about that need \(0, 1\)'
+    fi
+    stand_mech_off
+
+    # The tag registry's step 1.1 undone, each defect in the place the fix
+    # took it out of, and each test must say its defect is back. A refused
+    # pass that forgets its block has a boot of its own: the growth that links
+    # before it stamps takes no flush at all, and the test of the block kept
+    # refuses exactly that flush.
+    stand_mech_on registry
+    if stand_mut_boot standmut_registry CORES=4 MEM=4G; then
+        stand_red standmut_registry "a registry that links its new block before stamping it runs its chain into unstamped ground" \
+            'stand_registry_growth_links_what_landed failed: the defect it stands for is back — .* \(registry chains on the medium that run into a block without the registry.s magic 1\)'
+        stand_red standmut_registry "a tail written holding the registry's lock crosses the medium under it" \
+            'stand_registry_flush_holds_no_lock failed: the defect it stands for is back — .* \(registry flushes of one new name that crossed the medium holding the registry.s lock 1\)'
+        stand_red standmut_registry "a registry beside the volume's that shares its mark of what is owed moves the volume's chain" \
+            'stand_registry_scratch_leaves_the_volume_alone failed: the defect it stands for is back — .* \(registry chains on the medium a scratch registry moved by living and dying 1\)'
+        stand_red standmut_registry "a load that drops what it cannot hold answers OK" \
+            'stand_registry_load_refuses_what_it_cannot_hold failed: the defect it stands for is back — .* \(registry loads with an allocation refused that answered OK, stopping at the first 1\)'
+        stand_red standmut_registry "a key's ids handed out as the registry's own array are not a copy" \
+            'stand_registry_key_ids_are_copies failed: the defect it stands for is back — .* \(copies of a key.s tag ids that were the registry.s own array 1\)'
+    fi
+    stand_mech_off
+
+    stand_mech_on registrykeep
+    if stand_mut_boot standmut_registrykeep CORES=4 MEM=4G; then
+        stand_red standmut_registrykeep "a refused pass that forgets the block it took leaves it owned by nothing" \
+            'stand_registry_flush_keeps_its_block failed: the defect it stands for is back — .* \(blocks a refused registry growth took that its retry did not link 1\)'
     fi
     stand_mech_off
 
@@ -9761,13 +9754,13 @@ abbamut_kernel_on() {
     python3 - <<'EOF'
 p = "src/kernel/tagfs/tag_registry/tag_registry.c"
 s = open(p).read()
-a = "    TagFSLockTake(&reg->lock);\n\n    /* The chain the load walked."
+a = "    TagFSLockTake(&reg->lock);\n    bool owed = reg->written_next < reg->next_id;\n"
 assert s.count(a) == 1, "abbamut registry-flush anchor missing"
 s = s.replace(a, "    TagFSLockTake(&reg->lock);\n"
                  "    uint32_t logcheck_taken;   /* logcheck mutation: a block taken under the registry's lock at every flush */\n"
                  "    if (tagfs_alloc_blocks(1, &logcheck_taken) == 0)\n"
                  "        tagfs_free_blocks(logcheck_taken, 1);\n"
-                 "\n    /* The chain the load walked.", 1)
+                 "    bool owed = reg->written_next < reg->next_id;\n", 1)
 open(p, "w").write(s)
 EOF
     mut_done src/kernel/tagfs/tag_registry/tag_registry.c "logcheck mutation" 1

@@ -431,8 +431,9 @@ pc_caveats() {
         chaingrow|chaingrowmut)
             base=chaingrow
             codes="prefix:CHAIN_REFUSED:registry prefix:CHAIN_REFUSED:table prefix:FID_PAST_NEXT prefix:ORPHAN
+                   prefix:SPARE_UNNAMED
                    subset:CHAIN_REFUSED:registry subset:CHAIN_REFUSED:table subset:FID_PAST_NEXT
-                   subset:FILE_LOST subset:MISSING subset:ORPHAN subset:TAG_ABSENT" ;;
+                   subset:FILE_LOST subset:MISSING subset:ORPHAN subset:SPARE_UNNAMED subset:TAG_ABSENT" ;;
     esac
     for code in $codes; do echo "code:$code=$base:$code"; done
 }
@@ -815,13 +816,16 @@ EOF
     restore src/kernel/tagfs/tagfs.c
 }
 
-# The fix for MP-D5 put in, in the pool's own shape (meta_pool.c "THE NEW
-# BLOCK IS STAMPED BEFORE ANYTHING POINTS AT IT"): a block the file table or
-# the registry has just taken is stamped, empty, before the link to it is
-# written. Every prefix then mounts, and the prefix caveats are lifted early.
-# The stamp and the link are still two writes of one epoch, so a cut that
-# keeps the link and loses the stamp is still refused: the subset verdicts
-# are asked what they answer, as the evidence for what closes them.
+# The file table's fix for MP-D5 put in, in the pool's own shape (meta_pool.c
+# "THE NEW BLOCK IS STAMPED BEFORE ANYTHING POINTS AT IT"): a block the table
+# has just taken is stamped, empty, before the link to it is written. Every
+# prefix then mounts, and the table's prefix caveat is lifted early. The stamp
+# and the link are still two writes of one epoch, so a cut that keeps the link
+# and loses the stamp is still refused: the subset verdict is asked what it
+# answers, as the evidence for what closes it. The registry's fix is in (step
+# 1.1), and here it is taken out: its new block taken and never stamped, and
+# the link to it written before the block itself — MP-D5 as it was, which a
+# prefix and a subset must both see again now that their caveats are lifted.
 run_chaingrowmut() {
     mut_on src/kernel/tagfs/file_table/file_table.c "logcheck mutation" <<'EOF'
 import sys
@@ -846,29 +850,23 @@ EOF
     mut_on src/kernel/tagfs/tag_registry/tag_registry.c "logcheck mutation" <<'EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = ("                if (chain_append(new_block) != 0) {\n"
-     "                    TagFSLockDrop(&reg->lock);\n"
-     "                    return -1;\n"
-     "                }\n")
-assert s.count(a) == 1
-open(p, "w").write(s.replace(a, a +
-     "                /* logcheck mutation: the new block is stamped before the link to it */\n"
-     "                static TagRegistryBlock stamp;\n"
-     "                memset(&stamp, 0, sizeof(stamp));\n"
-     "                stamp.magic = TAGFS_REGISTRY_MAGIC;\n"
-     "                if (tagfs_write_block(new_block, &stamp) != 0) {\n"
-     "                    TagFSLockDrop(&reg->lock);\n"
-     "                    return -1;\n"
-     "                }\n"))
+a = "        rc = SpareStamp(TAGFS_REGISTRY_MAGIC, reg->spare_image, &reg->spare_block, &reg->spare_need);\n"
+b = "    rc = tagfs_write_block(reg->spare_block, reg->spare_image);\n"
+assert s.count(a) == 1 and s.count(b) == 1
+s = s.replace(a, "        rc = tagfs_alloc_blocks(1, &reg->spare_block) == 0 ? OK : ERR_TAGFS_NO_SPACE;   "
+                 "/* logcheck mutation: the new block is taken and never stamped */\n", 1)
+open(p, "w").write(s.replace(b,
+     "    reg->tail_image->next_block = reg->spare_block;   /* the link goes down before the block it names */\n"
+     "    tagfs_write_block(reg->tail_block, reg->tail_image);\n" + b, 1))
 EOF
     mut_run chaingrowmut chaingrow code:prefix:CHAIN_REFUSED:table behaves \
         "the table's new block stamped before its link, no prefix refuses the mount over the table: the caveat is lifted early"
-    pc_expect code:prefix:CHAIN_REFUSED:registry behaves \
-        "the registry's new block stamped before its link, no prefix refuses the mount over the registry: the caveat is lifted early"
+    pc_expect code:prefix:CHAIN_REFUSED:registry defect \
+        "the registry's link written before its new block, a prefix that keeps the link refuses the mount over the registry: the defect is back"
     pc_expect code:subset:CHAIN_REFUSED:table defect \
         "the stamp and the link in one epoch, a cut that keeps the link and loses the stamp still refuses the table"
     pc_expect code:subset:CHAIN_REFUSED:registry defect \
-        "the stamp and the link in one epoch, a cut that keeps the link and loses the stamp still refuses the registry"
+        "and a subset that keeps the registry's link and loses its new block refuses it too"
     restore src/kernel/tagfs/tag_registry/tag_registry.c
     restore src/kernel/tagfs/file_table/file_table.c
 }

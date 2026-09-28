@@ -10,6 +10,7 @@
 #include "../../include/volume_ledger.h"
 #include "../core/error/error.h"
 #include "lock_rank/lock_rank.h"
+#include "scribe/scribe.h"
 
 // ============================================================================
 // Include Submodule Headers (production implementations)
@@ -170,13 +171,10 @@ typedef struct TagRegistryNode {
     struct TagRegistryNode* next;
 } TagRegistryNode;
 
-typedef struct TagKeyGroup {
-    char*               key;
-    uint16_t*           tag_ids;
-    uint32_t            count;
-    uint32_t            capacity;
-    struct TagKeyGroup* next;
-} TagKeyGroup;
+/* Every tag of one key. Its inside is tag_registry.c's alone: a key group's
+ * array is freed by the next tag of its key, so nothing outside the registry's
+ * lock may hold a pointer into one (MP-D11) — TagRegistryKeyIds copies. */
+typedef struct TagKeyGroup TagKeyGroup;
 
 typedef struct {
     TagRegistryNode** buckets;
@@ -192,6 +190,27 @@ typedef struct {
     uint32_t      key_bucket_count;
 
     TagFSLock lock;
+
+    /*
+     * What the medium holds of this registry: the record of every id below
+     * written_next, in the chain that ends at tail_block, whose image
+     * tail_image is byte for byte. written_next is changed under `lock`; the
+     * rest belong to whoever holds `scribe` — one flush of this registry at a
+     * time — and to the load before anyone can see the registry.
+     *
+     * spare_block is the block the chain grows by next: stamped, proved on
+     * the medium by the flush carrying spare_need, and kept across a flush
+     * that failed until a link names it. 0 is none — block 0 is the chain's
+     * head and never a Spare. spare_image is the buffer it is written from.
+     */
+    uint16_t          written_next;
+    uint32_t          tail_block;
+    TagRegistryBlock* tail_image;
+    uint32_t          spare_block;
+    TagRegistryBlock* spare_image;
+    uint64_t          spare_need;
+    bool              said_failing;   /* a refusal is said once, until a flush succeeds */
+    Scribe            scribe;
 } TagRegistry;
 
 // ----------------------------------------------------------------------------
@@ -393,9 +412,19 @@ void         tag_registry_mark_system(TagRegistry* reg, uint16_t tag_id);
 bool         tag_registry_is_system(TagRegistry* reg, uint16_t tag_id);
 const char*  tag_registry_key(TagRegistry* reg, uint16_t tag_id);
 const char*  tag_registry_value(TagRegistry* reg, uint16_t tag_id);
-TagKeyGroup* tag_registry_key_group(TagRegistry* reg, const char* key);
-int          tag_registry_flush(TagRegistry* reg);
-bool         tag_registry_is_dirty(void);
+
+/* The id of every tag whose key is `key`, COPIED: out->ids is the caller's to
+ * kfree, never the registry's own array. No such key: NULL and 0. */
+error_t      TagRegistryKeyIds(TagRegistry* reg, const char* key, TagIdList* out);
+
+/* Every tag interned before the call written to the medium; made durable by
+ * the caller's sync, as before. OK at once, with no I/O, when nothing is owed.
+ * May wait for another core's flush of the same registry, so never under a
+ * TagFS lock. */
+error_t      tag_registry_flush(TagRegistry* reg);
+
+/* The registry read off the medium from its head; the mount's, once. Refuses
+ * — and says why — a chain it cannot walk or a registry it cannot hold whole. */
 int          tag_registry_load(TagRegistry* reg, uint32_t first_block);
 
 // ----------------------------------------------------------------------------
@@ -409,7 +438,7 @@ int             tag_bitmap_clear(TagBitmapIndex* idx, uint16_t tag_id, uint32_t 
 void            tag_bitmap_remove_file(TagBitmapIndex* idx, uint32_t file_id);
 int             tag_bitmap_query(TagBitmapIndex* idx,
                     const uint16_t* tag_ids, uint32_t tag_count,
-                    TagKeyGroup** groups, uint32_t group_count,
+                    const TagIdList* groups, uint32_t group_count,
                     uint32_t* out_file_ids, uint32_t max_results);
 int             tag_bitmap_tags_for_file(TagBitmapIndex* idx, uint32_t file_id,
                     uint16_t* out_ids, uint32_t max_ids);

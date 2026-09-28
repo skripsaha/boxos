@@ -486,15 +486,12 @@ class GroundCensus:
                          "it are never read (meta_pool.c:764-767)" % (b, at, ln, blk["used_bytes"]))
 
     def _Registry(self):
-        """intern_with_id's rules (tag_registry.c:171-218) over the chain."""
+        """RegistryAdopt's rules (tag_registry.c) over the chain."""
         by_kv, dup, rng = {}, [], []
         for b, blk in self.f.registry:
             for r in blk["records"]:
                 where, kv = "block %u +%u" % (b, r["at"]), (r["key"], r["value"])
-                if r["skipped"]:
-                    rng.append("id %u at %s carries a %u-byte value the loader steps over"
-                               % (r["tag_id"], where, r["value_len"]))
-                elif kv in by_kv:
+                if kv in by_kv:
                     if by_kv[kv] != r["tag_id"]:
                         dup.append("id %u at %s repeats id %u's key/value and is dropped"
                                    % (r["tag_id"], where, by_kv[kv]))

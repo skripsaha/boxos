@@ -10,7 +10,7 @@ int             tag_bitmap_clear(TagBitmapIndex* idx, uint16_t tag_id, uint32_t 
 void            tag_bitmap_remove_file(TagBitmapIndex* idx, uint32_t file_id);
 int             tag_bitmap_query(TagBitmapIndex* idx,
                     const uint16_t* tag_ids, uint32_t tag_count,
-                    TagKeyGroup** groups, uint32_t group_count,
+                    const TagIdList* groups, uint32_t group_count,
                     uint32_t* out_file_ids, uint32_t max_results);
 int             tag_bitmap_tags_for_file(TagBitmapIndex* idx, uint32_t file_id,
                     uint16_t* out_ids, uint32_t max_ids);
