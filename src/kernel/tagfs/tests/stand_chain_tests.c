@@ -3,6 +3,7 @@
 #include "../tagfs.h"
 #include "block_fail.h"
 #include "amp.h"
+#include "../scribe/scribe.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -33,6 +34,7 @@
 #define STAND_GROW_RECORD     (6u + (uint32_t)sizeof(STAND_GROW_KEY) - 1u + STAND_GROW_VALUE_LEN)
 #define STAND_CHAIN_LISTED    64u       /* links a chain walk lists; more are counted */
 #define STAND_LOAD_SWEEP      8u        /* allocations of a registry load refused, one per load */
+#define STAND_GROWTH_SWEEP    16u       /* allocations of a table growth refused, one per pass */
 
 static uint8_t  s_link[TAGFS_BLOCK_SIZE];
 static uint32_t s_links_before[STAND_CHAIN_LISTED];
@@ -349,6 +351,99 @@ out:
     return verdict;
 }
 
+/* CR-11's guard. The file table is made to need one more block — a row past
+ * its chain, set to nothing, is all a growth asks for — and its flush is run
+ * with the n-th allocation it makes refused, n = 1, 2, … until a pass makes
+ * fewer than n. The flush is asked directly, under the sync's own Scribe, so
+ * the sweep counts the table's allocations and nobody else's; a pass that grew
+ * the chain is followed by a row past its new end. None of it may leave a
+ * block taken that the chain does not name: the slot a link is kept in is
+ * reserved before its block is taken, so nothing refused after the take can
+ * strand it. Counted once an unarmed sync has written whatever the passes left
+ * owed — a link attached in memory whose write is still to come is not a
+ * stranded block. The table is the only taker of blocks in a pass, so a block
+ * a pass took is the head of the free list it began with, and one of those the
+ * chain does not name at the end is given back. */
+static TestResult TestStandTableGrowthGivesBackItsGround(void)
+{
+    TestResult  verdict  = TEST_PASS;
+    TagFSState* fs       = tagfs_get_state();
+    uint8_t     me       = amp_get_core_index();
+    StandChain  chain    = { 0 };
+    VolumeTally before   = { 0 };
+    VolumeTally after    = { 0 };
+    uint32_t    taken[STAND_GROWTH_SWEEP];   /* the block each pass's growth took, 0 for none */
+    uint32_t    passes   = 0;
+    uint64_t    stranded = 0;
+    bool        ran_out  = false;
+    const char* aside    = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TEST_ASSERT_OK(tagfs_sync(), "an unarmed sync settles the file table first");
+    TEST_ASSERT(VolumeTallyTake(&before), "the volume is counted before the sweep");
+
+    for (uint32_t n = 1; n <= STAND_GROWTH_SWEEP && !ran_out; n++) {
+        uint32_t block = 0;
+        uint64_t cover = 0;
+        error_t  said  = OK;
+
+        TEST_ASSERT(StandChainOnMedium(fs->layout.file_table_block, TAGFS_FILETBL_MAGIC, &chain) &&
+                    !chain.broken, "the file table's chain on the medium is whole");
+        TagFSLockTake(&fs->lock);
+        int named = file_table_update(chain.links * TAGFS_FTABLE_PER_BLOCK, 0, 0);
+        TagFSLockDrop(&fs->lock);
+        TEST_ASSERT_EQ(named, 0, "a row past the chain makes the table need one more block");
+        TEST_ASSERT(StandNextBlock(&block), "the allocator has a block for the growth to take");
+        TEST_ASSERT_EQ(ScribeWait(&g_sync_scribe, ScribeAsk(&g_sync_scribe), &cover, &said),
+                       SCRIBE_MINE, "the test holds the sync's Scribe, as the sync does");
+
+        HeapFailArm(me, n);
+        file_table_flush();
+        ran_out = !HeapFailFired();
+        HeapFailDisarm();
+        ScribeGive(&g_sync_scribe, cover, OK);
+        taken[passes++] = StandBlockInUse(block) ? block : 0;
+    }
+    TEST_ASSERT(ran_out, "the sweep reaches a pass that makes fewer allocations than it refuses at");
+
+out:
+    if (passes) {
+        error_t again = tagfs_sync();
+        chain.blocks   = s_links_after;
+        chain.capacity = STAND_CHAIN_LISTED;
+        if (again != OK)
+            verdict = TestFailedAt(__FILE__, __LINE__, "an unarmed sync afterwards writes what "
+                                   "the passes left owed (answered, OK)", again, OK);
+        else if (!StandChainOnMedium(fs->layout.file_table_block, TAGFS_FILETBL_MAGIC, &chain) ||
+                 chain.broken || chain.links > STAND_CHAIN_LISTED)
+            verdict = TestFailedAt(__FILE__, __LINE__, "and leaves the table's chain whole and "
+                                   "listed on the medium (links, listed)", chain.links,
+                                   STAND_CHAIN_LISTED);
+        else if (!VolumeTallyTake(&after))
+            verdict = TestFailedAt(__FILE__, __LINE__, "the volume is counted after the sweep",
+                                   0, 1);
+        else {
+            stranded = after.held > before.held ? after.held - before.held : 0;
+            for (uint32_t i = 0; i < passes; i++) {
+                bool linked = false;
+                for (uint32_t j = 0; j < chain.links && !linked; j++)
+                    linked = s_links_after[j] == taken[i];
+                if (taken[i] && !linked && StandBlockInUse(taken[i]))
+                    tagfs_free_blocks(taken[i], 1);
+            }
+            if (verdict == TEST_PASS) {
+                TestEvidence("blocks a growth of the file table took and left named by nothing",
+                             stranded);
+                if (stranded)
+                    verdict = TEST_DEFECT;
+            }
+        }
+    }
+    return verdict;
+}
+
 // ----------------------------------------------------------------------------
 // Registries that are not the volume's
 // ----------------------------------------------------------------------------
@@ -524,10 +619,14 @@ static const TestCase g_stand_chain_tests[] = {
                        "every boot" },
     { .name  = "stand_table_grows_onto_a_stamp", .func = TestStandTableGrowsOntoAStamp,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.1",
       .caveat_defect = "a sync that lengthens the file table writes the link to its new block "
                        "before the block, so a refused write of that block leaves a chain the "
                        "next mount refuses" },
+    { .name  = "stand_table_growth_gives_back_its_ground",
+      .func  = TestStandTableGrowthGivesBackItsGround,
+      .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "a growth of the file table refused memory after it has taken its block "
+                       "returns with the block taken and named by nothing, for good (CR-11)" },
     { .name  = "stand_registry_scratch_leaves_the_volume_alone",
       .func  = TestStandRegistryScratchLeavesTheVolumeAlone,
       .reach = TEST_WRITES_TO_VOLUME,

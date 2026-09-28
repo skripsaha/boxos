@@ -7580,7 +7580,6 @@ stand_cow_question_asks_no_medium|1.1|reads of a file's metadata block the copy-
 stand_redirect_log_leaves_the_flush|1.1|cache flushes asked inside 64 redirects, under the copy-on-write lock 1|cache flushes asked inside 64 redirects, under the copy-on-write lock 0
 stand_dma_wait_keeps_the_callers_interrupts|1.1|DMA reads that turned interrupts on under a caller that had them off 1|DMA reads that turned interrupts on under a caller that had them off 0|bios
 stand_registry_growth_links_what_landed|1.1|registry chains on the medium that run into a block without the registry's magic 1|registry chains on the medium that run into a block without the registry's magic 0
-stand_table_grows_onto_a_stamp|1.1|file table chains on the medium that run into a block without the table's magic 1|file table chains on the medium that run into a block without the table's magic 0
 stand_registry_scratch_leaves_the_volume_alone|1.1|registry chains on the medium a scratch registry moved by living and dying 1|registry chains on the medium a scratch registry moved by living and dying 0
 stand_registry_load_refuses_what_it_cannot_hold|1.1|registry loads with an allocation refused that answered OK, stopping at the first 1|registry loads with an allocation refused that answered OK, stopping at the first 0
 "
@@ -7808,9 +7807,13 @@ run_stand() {
 # same: a refused flush that moves the mark, a count of kept flushes, a need
 # that is the last flush begun, a pass that publishes every ask, a Scribe
 # this core holds waited for like any other, a drain core that runs no baton
-# while it waits, and a Give that never lets the scheduler go. Mutations
-# whose tests do not meet each other's share a boot; each is judged by its
-# own test's own line, number and all.
+# while it waits, and a Give that never lets the scheduler go. A lifted
+# caveat the same, once its step has landed: the file table's growth as step
+# 1.1 found it — a new block linked with no stamp and no flush behind the
+# link, the memory for the link asked only after the block was taken — must
+# have each test that stands for one of the two say its defect is back.
+# Mutations whose tests do not meet each other's share a boot; each is judged
+# by its own test's own line, number and all.
 #
 # And the runner is only worth believing if it cannot be made to pass what it
 # should fail. A failed assertion must say where, and what it saw — shown by
@@ -8009,29 +8012,6 @@ open(p, "w").write(s)
 EOF
     mut_done src/kernel/tagfs/tag_registry/tag_registry.c "logcheck mutation" 9
 
-    # 1.1: a new link of the file table is stamped before anything links it
-    mutate src/kernel/tagfs/file_table/file_table.c
-    python3 - <<'EOF'
-p = "src/kernel/tagfs/file_table/file_table.c"
-s = open(p).read()
-a = ("                    debug_printf(\"[FileTable] flush: alloc failed at entry_offset=%u\\n\",\n"
-     "                                 entry_offset);\n"
-     "                    return -1;\n"
-     "                }\n")
-m = (a +
-     "                static FileTableBlock stamp;   /* logcheck mutation: a new link is stamped before anything links it */\n"
-     "                memset(&stamp, 0, sizeof(stamp));\n"
-     "                stamp.magic = TAGFS_FILETBL_MAGIC;\n"
-     "                if (tagfs_write_block(next_block, &stamp) != OK) {\n"
-     "                    tagfs_free_blocks(next_block, 1);\n"
-     "                    TagFSLockDrop(&g_lock);\n"
-     "                    return -1;\n"
-     "                }\n")
-assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
-open(p, "w").write(s.replace(a, m, 1))
-EOF
-    mut_done src/kernel/tagfs/file_table/file_table.c "logcheck mutation" 1
-
     # 1.1 (CR-10 and CR-6): whether a file is copied on write is answered by
     # the snapshots in memory alone, and the redirect log asks for no flush of
     # its own.
@@ -8150,7 +8130,7 @@ stand_fix_off() {
     local f
     for f in src/kernel/tagfs/tagfs.c src/kernel/tagfs/tag_bitmap/tag_bitmap.c \
              src/kernel/tagfs/integrity/integrity.c src/kernel/tagfs/tag_registry/tag_registry.c \
-             src/kernel/tagfs/file_table/file_table.c src/kernel/tagfs/cow/cow.c \
+             src/kernel/tagfs/cow/cow.c \
              src/kernel/tagfs/disk_book/disk_book.c src/kernel/drivers/disk/ata_async.c; do
         restore "$f"
     done
@@ -8176,6 +8156,7 @@ stand_mech_on() {
         scribe)    marks="src/kernel/tagfs/scribe/scribe.c:4" ;;
         flushsum)  marks="src/kernel/tagfs/scribe/scribe.c:3" ;;
         flushneed) marks="src/kernel/tagfs/scribe/scribe.c:1" ;;
+        table)     marks="src/kernel/tagfs/file_table/file_table.c:4" ;;
     esac
     for mark in $marks; do mutate "${mark%%:*}"; done
     python3 - "$group" <<'EOF'
@@ -8276,6 +8257,28 @@ edits = {
    "    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST) + 1u;\n",
    "    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST);   /* " + M + ": the need is the last flush begun */\n"),
  ],
+ "table": [
+  ("src/kernel/tagfs/file_table/file_table.c",
+   "        error_t  got     = SpareStamp(TAGFS_FILETBL_MAGIC, &g_image, &block, &stamped);\n",
+   "        error_t  got     = tagfs_alloc_blocks(1, &block) == 0 ? OK : ERR_TAGFS_NO_SPACE;   /* " + M + ": the new block is linked with no stamp */\n"),
+  ("src/kernel/tagfs/file_table/file_table.c",
+   "    error_t ready = VolumeFlushFor(need);\n",
+   "    error_t ready = OK;   /* " + M + ": and no flush stands between it and its link */\n    (void)need;\n"),
+  ("src/kernel/tagfs/file_table/file_table.c",
+   "    if (LinksReserve(wanted) != OK) {\n"
+   "        kprintf(\"[FileTable] there is no memory to hold the %u links the file \"\n"
+   "                \"table's rows need \u2014 its chain stays %u block(s) long, and the \"\n"
+   "                \"rows from file id %u on stay in memory until a later sync\\n\",\n"
+   "                wanted, have, have * TAGFS_FTABLE_PER_BLOCK);\n"
+   "        return -1;\n"
+   "    }\n",
+   "    /* " + M + ": the memory for a link is asked only after its block is taken */\n"),
+  ("src/kernel/tagfs/file_table/file_table.c",
+   "        TagFSLockTake(&g_lock);\n        g_links[have + in_hand] = (FileTableLink){ .block = block };\n",
+   "        if (LinksReserve(wanted) != OK)   /* " + M + ": and a refusal forgets the block */\n"
+   "            return -1;\n"
+   "        TagFSLockTake(&g_lock);\n        g_links[have + in_hand] = (FileTableLink){ .block = block };\n"),
+ ],
  "blind": [
   ("src/kernel/tagfs/tests/tests.c",
    "    kprintf(\"[TESTS] %s failed at %s:%d: %s (%lld, %lld)\\n\",\n",
@@ -8299,7 +8302,7 @@ stand_mech_off() {
              src/kernel/tagfs/tests/stand_tests.c src/kernel/core/boardroom/boardroom.c \
              src/kernel/tagfs/tag_bitmap/tag_bitmap.c src/kernel/tagfs/tests/tests.c \
              src/kernel/tagfs/tests/core_tests.c src/kernel/tagfs/lock_rank/lock_rank.c \
-             src/kernel/tagfs/scribe/scribe.c; do
+             src/kernel/tagfs/scribe/scribe.c src/kernel/tagfs/file_table/file_table.c; do
         restore "$f"
     done
 }
@@ -8486,6 +8489,17 @@ STAND_HELD_EOF
     if stand_mut_boot standmut_flushneed CORES=4 MEM=4G; then
         stand_red standmut_flushneed "a need that is the last flush begun is covered by that flush" \
             'stand_flush_ticket failed at [^:]+:[0-9]+: and proves nothing about that need \(0, 1\)'
+    fi
+    stand_mech_off
+
+    # The file table's growth as step 1.1 found it: both of the defects it
+    # lifted are back, and each test that stands for one says so, number and all.
+    stand_mech_on table
+    if stand_mut_boot standmut_table CORES=4 MEM=4G; then
+        stand_red standmut_table "a new block of the file table linked with no stamp and no flush behind it runs the chain into unstamped ground" \
+            "stand_table_grows_onto_a_stamp failed: the defect it stands for is back — .* \\(file table chains on the medium that run into a block without the table's magic 1\\)"
+        stand_red standmut_table "the memory for a link asked only after its block is taken strands the block when it is refused" \
+            'stand_table_growth_gives_back_its_ground failed: the defect it stands for is back — .* \(blocks a growth of the file table took and left named by nothing 1\)'
     fi
     stand_mech_off
 

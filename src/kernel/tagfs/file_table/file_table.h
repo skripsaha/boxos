@@ -12,21 +12,21 @@
 int  file_table_init(uint32_t first_block);
 
 /*
- * Let the table go.
- *
- * `write_back` is the ordinary case: the machine is stopping and what is in
- * memory belongs on the medium. It is exactly wrong in the other one — a
- * medium that went away, or a mount that failed halfway and is being taken
- * apart — where what is held in memory describes a volume that may no longer
- * be the one under the head. This used to flush unconditionally, so
- * tagfs_abandon(), whose whole contract is "without writing a byte", wrote
- * two of them through here and through the metadata pool.
+ * Let the table go: its memory, and not one byte written. Only the volume's
+ * sync writes the table (file_table_flush, under the sync's Scribe), and a
+ * volume being taken down — a medium that went away, a mount that failed
+ * halfway — must not be written from what memory holds, which may describe a
+ * volume that is no longer the one under the head.
  */
-void file_table_shutdown(bool write_back);
+void file_table_shutdown(void);
 
 int  file_table_lookup(uint32_t file_id, uint32_t* out_block, uint32_t* out_offset);
 int  file_table_update(uint32_t file_id, uint32_t meta_block, uint32_t meta_offset);
 int  file_table_delete(uint32_t file_id);
+/* Write every block of the table that changed since it last landed, growing
+ * the chain onto stamped Spares first. The volume's sync alone calls it, under
+ * its Scribe and holding no TagFS lock; asked any other way it writes nothing
+ * and answers -1. 0 when every row changed before the call is on the medium. */
 int  file_table_flush(void);
 
 #endif // FILE_TABLE_H

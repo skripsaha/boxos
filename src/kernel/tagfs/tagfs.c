@@ -3630,7 +3630,7 @@ static void tagfs_clear_the_ground(void)
         g_state.bitmap_index = NULL;
     }
 
-    file_table_shutdown(false);
+    file_table_shutdown();
     meta_pool_shutdown(false);
 
     free_list_destroy();
