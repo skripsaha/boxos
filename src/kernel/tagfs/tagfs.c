@@ -2099,8 +2099,8 @@ static uint32_t g_ledger_current = 0;
  * same seq, building two records and racing for the same older copy would
  * leave the medium with whichever landed last and memory with whichever
  * committed last — not necessarily the same one. A leaf: nothing under it
- * takes another lock. */
-static TagFSLock  g_ledger_lock = TAGFS_LOCK_INIT("ledger", LOCK_RANK_LEAF);
+ * takes another lock, and only the stand reads it from outside (tagfs.h). */
+TagFSLock         g_ledger_lock = TAGFS_LOCK_INIT("ledger", LOCK_RANK_LEAF);
 static char       g_ledger_use[TAGFS_SECTOR_SIZE];
 static uint16_t   g_ledger_use_len;
 #define LEDGER_USE_MAX  ((size_t)TAGFS_SECTOR_SIZE - sizeof(VolumeLedger))

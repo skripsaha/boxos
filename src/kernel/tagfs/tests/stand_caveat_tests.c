@@ -201,11 +201,16 @@ TestResult TestStandCreateAllOrNothing(void)
 
     /* The name's tag and its row are made, if no test before made them, by one
      * create before the sweep — the sweep measures a create, not the first
-     * create of a name. */
-    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0,
-                   "a create before the sweep interns the name");
-    TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "and its file is deleted");
-    file_id = 0;
+     * create of a name. Then the ids are brought to a multiple of eight: the
+     * name's row widens by a byte for every eight ids (tag_bitmap.c), so a
+     * create takes one allocation more or fewer by where its id falls, and the
+     * ids the tests before this one spent differ from boot to boot. */
+    do {
+        TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0,
+                       "a create before the sweep interns the name and aligns the ids");
+        TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "and its file is deleted");
+        file_id = 0;
+    } while (tagfs_file_ceiling() % 8 != 0);
     uint16_t stem = tagfs_tag_lookup("test_file");
     TEST_ASSERT(stem != TAGFS_INVALID_TAG_ID, "the name has a tag");
 
@@ -252,7 +257,7 @@ static struct {
 
 /* The newest intact Ledger on the medium, by its sequence number — read off
  * the medium by the Ledger's own reader. */
-static uint64_t StandLedgerSeq(void)
+uint64_t StandLedgerSeq(void)
 {
     uint64_t newest = 0;
     for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
@@ -267,7 +272,7 @@ static uint64_t StandLedgerSeq(void)
  * walked from its head, on the medium, to the block that carries the row —
  * tagfs_read_block reads it there, because the sync's write_block took the
  * block out of the read-ahead cache. False when the chain does not reach it. */
-static bool StandTableRowOnMedium(uint32_t file_id, FileTableEntry* out)
+bool StandTableRowOnMedium(uint32_t file_id, FileTableEntry* out, uint32_t* out_block)
 {
     TagFSState*     fs    = tagfs_get_state();
     FileTableBlock* fb    = (FileTableBlock*)g_test_output;
@@ -286,12 +291,20 @@ static bool StandTableRowOnMedium(uint32_t file_id, FileTableEntry* out)
     if (row >= fb->entry_count)
         return false;
     *out = fb->entries[row];
+    if (out_block)
+        *out_block = block;
     return true;
 }
 
-/* The file table's head block is refused while a sync writes it. The sync
- * goes on to write the ledger over a table the medium does not have, and
- * answers OK; the right answer names the refusal and writes no ledger.
+/* The block of the file table that carries a file's row is refused while a
+ * sync writes it. The sync goes on to write the ledger over a table the medium
+ * does not have, and answers OK; the right answer names the refusal and
+ * writes no ledger.
+ *
+ * The row is put on the medium first and then made owed again by renaming the
+ * file to its own name — a new record, so a new row, and no new tag — and the
+ * plan is armed on the block the medium says carries it: a table that writes
+ * only the rows it owes still writes that block, wherever the file's id falls.
  *
  * On the way out the table the medium refused is still owed to it, and that
  * is proven off the medium: an unarmed sync while the file stands, then the
@@ -299,24 +312,28 @@ static bool StandTableRowOnMedium(uint32_t file_id, FileTableEntry* out)
  * holds it only if the second sync wrote the table. */
 TestResult TestStandSyncOwnsARefusedWrite(void)
 {
-    TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
-    uint32_t    file_id = 0;
-    bool        armed   = false;
-    const char* aside   = StandStepsAsideFor();
+    TestResult     verdict   = TEST_PASS;
+    uint8_t        seat      = tagfs_get_seat();
+    uint32_t       file_id   = 0;
+    uint32_t       row_block = 0;
+    FileTableEntry row       = { 0, 0 };
+    bool           armed     = false;
+    const char*    aside     = StandStepsAsideFor();
 
     if (aside)
         return test_steps_aside(aside);
 
-    TagFSState* fs = tagfs_get_state();
     TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0,
                    "a file is created, so the table has a row to write");
+    TEST_ASSERT_OK(tagfs_sync(), "an unarmed sync puts the file's row on the medium");
+    TEST_ASSERT_EQ(tagfs_rename_file(file_id, "test_file"), 0,
+                   "the file is renamed to its own name, so its row is owed again");
+    TEST_ASSERT(StandTableRowOnMedium(file_id, &row, &row_block),
+                "the block that carries the file's row is found on the medium");
     uint64_t seq_before = StandLedgerSeq();
     TEST_ASSERT(seq_before > 0, "a Ledger copy reads");
 
-    uint64_t head = tagfs_get_volume_base() +
-                    (uint64_t)fs->layout.file_table_block * TAGFS_BLOCK_SECTORS;
-    BlockFailArm(seat, BLOCK_FAIL_WRITE, head, TAGFS_BLOCK_SECTORS, 1);
+    BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(row_block), TAGFS_BLOCK_SECTORS, 1);
     armed = true;
     error_t synced = tagfs_sync();
     bool fired = BlockFailFired();
@@ -324,7 +341,7 @@ TestResult TestStandSyncOwnsARefusedWrite(void)
     armed = false;
     uint64_t seq_after = StandLedgerSeq();
 
-    TEST_ASSERT(fired, "the file table's head block was the write refused");
+    TEST_ASSERT(fired, "the block that carries the file's row was the write refused");
     TestEvidence("ledger copies written after the file table's write was refused",
                  seq_after - seq_before);
     if (synced == OK && seq_after > seq_before) {
@@ -343,7 +360,7 @@ out:
     } else if (file_id) {
         uint32_t       meta_block = 0, meta_offset = 0;
         FileTableEntry on_medium  = { 0, 0 };
-        bool           read_back  = StandTableRowOnMedium(file_id, &on_medium);
+        bool           read_back  = StandTableRowOnMedium(file_id, &on_medium, NULL);
         if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0 || !read_back ||
             on_medium.meta_block != meta_block || on_medium.meta_offset != meta_offset)
             verdict = TestFailedAt(__FILE__, __LINE__, "an unarmed sync afterwards puts the "

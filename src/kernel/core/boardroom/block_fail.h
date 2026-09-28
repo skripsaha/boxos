@@ -39,6 +39,12 @@ typedef enum {
     BLOCK_FAIL_FLUSH
 } BlockFailKind;
 
+/* The nth of a plan that only counts. The count runs in 31 bits and turns over
+ * before it could reach this, so no command is ever the one refused: a test
+ * that asks how many commands of a kind met a run of sectors arms with it and
+ * reads BlockFailSeen, and nothing is said on the log. */
+#define BLOCK_FAIL_NEVER 0xFFFFFFFFu
+
 /* Refuse the nth command of `kind` on `seat` that touches any of the sectors
  * [first_sector, first_sector + sectors); sectors == 0 means the whole seat,
  * and a flush has no sectors. nth == 0 is taken as 1. Replaces any plan that
