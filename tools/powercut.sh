@@ -628,6 +628,16 @@ pc_chaingrow() {
     pc_judge --by-kind --verify grown
 }
 
+# pc_lockrank — every [LockRank] line of this scenario's boots judged, each
+# place once however many of the boots named it (stand_caveat.sh).
+pc_lockrank() {
+    local f logs=""
+    for f in "$PC_DIR"/*.serial.log "$PC_DIR"/boots/*.serial.log; do
+        [ -f "$f" ] && logs="$logs $f"
+    done
+    [ -z "$logs" ] || lockrank_judge "$logs" "$PC_NAME"
+}
+
 run_scenario() {   # run_scenario NAME KEYS... — build, run, judge, say
     local name=$1
     pc_begin "$@"
@@ -638,6 +648,7 @@ run_scenario() {   # run_scenario NAME KEYS... — build, run, judge, say
         bad "$PC_NAME: the scenario stopped before its record could be judged (logs in $PC_DIR)"
     fi
     make run-stop >/dev/null 2>&1
+    pc_lockrank
 }
 
 # settlecut — the second oracle. A kernel built SETTLECUT=<point> stops the
@@ -817,7 +828,7 @@ run_chaingrowmut() {
 import sys
 p = sys.argv[1]; s = open(p).read()
 a = ("                if (chain_append(next_block) != 0) {\n"
-     "                    spin_unlock(&g_lock);\n"
+     "                    TagFSLockDrop(&g_lock);\n"
      "                    debug_printf(\"[FileTable] flush: no memory to record block %u\\n\",\n"
      "                                 next_block);\n"
      "                    return -1;\n"
@@ -829,7 +840,7 @@ open(p, "w").write(s.replace(a, a +
      "                memset(&stamp, 0, sizeof(stamp));\n"
      "                stamp.magic = TAGFS_FILETBL_MAGIC;\n"
      "                if (tagfs_write_block(next_block, &stamp) != OK) {\n"
-     "                    spin_unlock(&g_lock);\n"
+     "                    TagFSLockDrop(&g_lock);\n"
      "                    return -1;\n"
      "                }\n"))
 EOF
@@ -837,7 +848,7 @@ EOF
 import sys
 p = sys.argv[1]; s = open(p).read()
 a = ("                if (chain_append(new_block) != 0) {\n"
-     "                    spin_unlock(&reg->lock);\n"
+     "                    TagFSLockDrop(&reg->lock);\n"
      "                    return -1;\n"
      "                }\n")
 assert s.count(a) == 1
@@ -847,7 +858,7 @@ open(p, "w").write(s.replace(a, a +
      "                memset(&stamp, 0, sizeof(stamp));\n"
      "                stamp.magic = TAGFS_REGISTRY_MAGIC;\n"
      "                if (tagfs_write_block(new_block, &stamp) != 0) {\n"
-     "                    spin_unlock(&reg->lock);\n"
+     "                    TagFSLockDrop(&reg->lock);\n"
      "                    return -1;\n"
      "                }\n"))
 EOF
@@ -884,6 +895,7 @@ run_selftest() {
     [ $? = 1 ]
     chk $? "selftest: $forged flipped, the self-check refuses the record — $said"
     make run-stop >/dev/null 2>&1
+    pc_lockrank
 }
 
 pc_preflight

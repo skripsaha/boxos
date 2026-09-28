@@ -3,6 +3,7 @@
 
 #include "../../lib/kernel/ktypes.h"
 #include "../../lib/kernel/klib.h"
+#include "../lock_rank/lock_rank.h"
 #include "../tagfs_constants.h"
 #include "../../core/error/error.h"
 #include "../box_hash/box_hash.h"
@@ -64,7 +65,7 @@ typedef struct {
     uint64_t last_gc_time;
     uint32_t gc_interval_entries;
     DedupStats stats;
-    spinlock_t lock;
+    TagFSLock lock;
     bool initialized;
 } DedupState;
 

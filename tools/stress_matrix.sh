@@ -43,6 +43,8 @@ set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || exit 2
+# The Caveat table, and lockrank_unheld beside it (read below, per config).
+. "$ROOT/tools/stand_caveat.sh"
 
 FAILED=0
 
@@ -363,11 +365,21 @@ run_config() {
     ur_fail=$(grep -c "\[UNATTENDED READ\].*FAILED"     build/serial.log)
     seat_ok=$(grep -cE "^\[TagFS\] volume on seat [0-9]+: ${seat_want}" build/serial.log)
 
+    # Every place LockRank named (src/kernel/tagfs/lock_rank) — a TagFS lock
+    # held across the medium, or taken out of order — is held by its row in
+    # tools/stand_caveat.sh, under the step of the plan that removes it. A
+    # place no row holds, a row whose step was lifted, or a line that names no
+    # place at all fails the configuration, and is printed so the log says which.
+    lr_unheld=$(lockrank_unheld build/serial.log)
+    lr_n=0
+    [ -n "$lr_unheld" ] && lr_n=$(printf '%s\n' "$lr_unheld" | wc -l | tr -d ' ')
+
     echo "  baseline: memtest=$mt/3 files=$fl/2 bench=$bn/2"
     echo "  apps:     mtest=$mtest_p chain=$chain_p cow=$cow_p lc=$lc_p wo=$wo_p wc=$wc_p ws=$ws_p tt=$tt_p decks=$decks_p ts=$ts1_p/$ts2_p/$ts3_p"
     echo "  suites:   cxx=$cxx_p current=$current_p strand=$strand_p htest=$htest_p use=$use_p luggage=$luggage_p"
     echo "  selftest: kernel=$selftest_ok bad=$selftest_bad unattended(${ur_want})=$ur_ok fail=$ur_fail seat=${seat_want%% *}:$seat_ok"
-    echo "  negatives: PANIC=$pn ATRC=$at Unknown=$un AppFAIL=$app_fail Nightwatch=$nw TSC=~1GHz:$tsc_good/$bn"
+    echo "  negatives: PANIC=$pn ATRC=$at Unknown=$un AppFAIL=$app_fail Nightwatch=$nw LockRank=$lr_n TSC=~1GHz:$tsc_good/$bn"
+    [ "$lr_n" -gt 0 ] && printf '%s\n' "$lr_unheld" | sed 's/^/    unheld: /'
 
     ok=1
     if [ "$MODE" = "fast" ]; then
@@ -409,6 +421,7 @@ run_config() {
 
     [ "$app_fail" -gt 0 ] && ok=0
     [ "$nw" -gt 0 ] && ok=0
+    [ "$lr_n" -gt 0 ] && ok=0
 
     [ "$selftest_bad" -gt 0 ] && ok=0
     [ "$selftest_ok"  -lt 1 ] && ok=0

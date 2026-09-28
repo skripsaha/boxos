@@ -213,13 +213,13 @@ bool VolumeTallyTake(VolumeTally* tally)
         VolumeChainLength(fs->layout.file_table_block,    TAGFS_FILETBL_MAGIC) +
         VolumeChainLength(fs->layout.metadata_pool_block, TAGFS_MPOOL_MAGIC);
 
-    spin_lock(&fs->lock);
+    TagFSLockTake(&fs->lock);
     uint64_t used = fs->layout.data_blocks - fs->ledger.free_blocks;
     uint64_t own  = chains + fs->ledger.integrity_map_blocks +
                     (fs->ledger.cow_manifest_block != 0) +
                     (fs->ledger.cow_manifest_backup_block != 0);
     tally->files = fs->ledger.total_files;
-    spin_unlock(&fs->lock);
+    TagFSLockDrop(&fs->lock);
 
     tally->snapshots = snapshots;
     tally->held      = used - own;

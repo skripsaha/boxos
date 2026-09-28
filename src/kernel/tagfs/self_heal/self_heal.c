@@ -5,7 +5,7 @@
 #include "../../../kernel/drivers/timer/rtc.h"
 
 // Global state
-static HealState g_self_heal_state;
+static HealState g_self_heal_state = { .lock = TAGFS_LOCK_INIT("selfheal", LOCK_RANK_LEAF) };
 
 // CRC32 wrapper using shared crypto library
 uint32_t TagFS_SelfHealComputeCrc32(const uint8_t *data, uint32_t length) {
@@ -51,7 +51,7 @@ error_t TagFS_SelfHealInit(void) {
         return ERR_ALREADY_INITIALIZED;
     
     memset(&g_self_heal_state, 0, sizeof(HealState));
-    spinlock_init(&g_self_heal_state.lock);
+    TagFSLockInit(&g_self_heal_state.lock, "selfheal", LOCK_RANK_LEAF);
     
     g_self_heal_state.scrub_interval_ms = HEAL_SCRUB_INTERVAL_MS;
     g_self_heal_state.last_scrub_time = rtc_get_unix64();
@@ -72,10 +72,10 @@ void TagFS_SelfHealShutdown(void) {
     if (!g_self_heal_state.initialized)
         return;
     
-    spin_lock(&g_self_heal_state.lock);
+    TagFSLockTake(&g_self_heal_state.lock);
     g_self_heal_state.enabled = false;
     g_self_heal_state.initialized = false;
-    spin_unlock(&g_self_heal_state.lock);
+    TagFSLockDrop(&g_self_heal_state.lock);
     
     debug_printf("[Self-Heal] Shutdown complete\n");
 }
@@ -84,9 +84,9 @@ void TagFS_SelfHealEnable(bool enable) {
     if (!g_self_heal_state.initialized)
         return;
     
-    spin_lock(&g_self_heal_state.lock);
+    TagFSLockTake(&g_self_heal_state.lock);
     g_self_heal_state.enabled = enable;
-    spin_unlock(&g_self_heal_state.lock);
+    TagFSLockDrop(&g_self_heal_state.lock);
     
     debug_printf("[Self-Heal] %s\n", enable ? "enabled" : "disabled");
 }
@@ -99,7 +99,7 @@ error_t TagFS_SelfHealOnMetadataWrite(uint32_t block_number, const uint8_t *data
     if (!g_self_heal_state.initialized || !g_self_heal_state.enabled || !data)
         return ERR_NOT_INITIALIZED;
     
-    spin_lock(&g_self_heal_state.lock);
+    TagFSLockTake(&g_self_heal_state.lock);
 
     // Locate an existing slot for this block or evict the oldest via round-robin.
     // This ensures different blocks occupy different mirror slots so that
@@ -126,7 +126,7 @@ error_t TagFS_SelfHealOnMetadataWrite(uint32_t block_number, const uint8_t *data
     m->mirror_index = (uint8_t)slot;
 
     g_self_heal_state.stats.mirror_syncs++;
-    spin_unlock(&g_self_heal_state.lock);
+    TagFSLockDrop(&g_self_heal_state.lock);
     return OK;
 }
 
@@ -136,7 +136,7 @@ error_t TagFS_SelfHealOnMetadataRead(uint32_t block_number, uint8_t *data, bool 
     
     *recovered = false;
     
-    spin_lock(&g_self_heal_state.lock);
+    TagFSLockTake(&g_self_heal_state.lock);
     
     int valid_mirror = -1;
     for (int i = 0; i < HEAL_MIRROR_COUNT; i++) {
@@ -161,7 +161,7 @@ error_t TagFS_SelfHealOnMetadataRead(uint32_t block_number, uint8_t *data, bool 
         }
     }
     
-    spin_unlock(&g_self_heal_state.lock);
+    TagFSLockDrop(&g_self_heal_state.lock);
     return OK;
 }
 
@@ -169,7 +169,7 @@ error_t TagFS_SelfHealScrubBlock(uint32_t block_number) {
     if (!g_self_heal_state.initialized || !g_self_heal_state.enabled)
         return ERR_NOT_INITIALIZED;
     
-    spin_lock(&g_self_heal_state.lock);
+    TagFSLockTake(&g_self_heal_state.lock);
     
     for (int i = 0; i < HEAL_MIRROR_COUNT; i++) {
         HealMirrorEntry *m = &g_self_heal_state.mirrors[i];
@@ -186,7 +186,7 @@ error_t TagFS_SelfHealScrubBlock(uint32_t block_number) {
     }
     
     g_self_heal_state.stats.blocks_scrubbed++;
-    spin_unlock(&g_self_heal_state.lock);
+    TagFSLockDrop(&g_self_heal_state.lock);
     return OK;
 }
 
@@ -194,7 +194,7 @@ error_t TagFS_SelfHealScrubRun(void) {
     if (!g_self_heal_state.initialized || !g_self_heal_state.enabled)
         return ERR_NOT_INITIALIZED;
     
-    spin_lock(&g_self_heal_state.lock);
+    TagFSLockTake(&g_self_heal_state.lock);
     g_self_heal_state.scrub_active = true;
     g_self_heal_state.stats.scrub_runs++;
     debug_printf("[Self-Heal] Starting scrub...\n");
@@ -212,9 +212,9 @@ error_t TagFS_SelfHealScrubRun(void) {
         }
         
         if (has_mirror) {
-            spin_unlock(&g_self_heal_state.lock);
+            TagFSLockDrop(&g_self_heal_state.lock);
             TagFS_SelfHealScrubBlock(block);
-            spin_lock(&g_self_heal_state.lock);
+            TagFSLockTake(&g_self_heal_state.lock);
             scrubbed++;
         }
     }
@@ -225,7 +225,7 @@ error_t TagFS_SelfHealScrubRun(void) {
     g_self_heal_state.scrub_active = false;
     
     debug_printf("[Self-Heal] Scrub complete: %u blocks\n", scrubbed);
-    spin_unlock(&g_self_heal_state.lock);
+    TagFSLockDrop(&g_self_heal_state.lock);
     return OK;
 }
 
@@ -233,15 +233,15 @@ error_t TagFS_SelfHealScheduleScrub(void) {
     if (!g_self_heal_state.initialized)
         return ERR_NOT_INITIALIZED;
     
-    spin_lock(&g_self_heal_state.lock);
+    TagFSLockTake(&g_self_heal_state.lock);
     
     uint64_t now = rtc_get_unix64();
     if (now >= g_self_heal_state.stats.next_scrub_time) {
-        spin_unlock(&g_self_heal_state.lock);
+        TagFSLockDrop(&g_self_heal_state.lock);
         return TagFS_SelfHealScrubRun();
     }
     
-    spin_unlock(&g_self_heal_state.lock);
+    TagFSLockDrop(&g_self_heal_state.lock);
     return OK;
 }
 
@@ -251,7 +251,7 @@ error_t TagFS_SelfHealRecover(uint32_t block_number, uint8_t *recovered_data, bo
     
     *success = false;
     
-    spin_lock(&g_self_heal_state.lock);
+    TagFSLockTake(&g_self_heal_state.lock);
     
     for (int i = 0; i < HEAL_MIRROR_COUNT; i++) {
         HealMirrorEntry *m = &g_self_heal_state.mirrors[i];
@@ -267,13 +267,13 @@ error_t TagFS_SelfHealRecover(uint32_t block_number, uint8_t *recovered_data, bo
         }
     }
     
-    spin_unlock(&g_self_heal_state.lock);
+    TagFSLockDrop(&g_self_heal_state.lock);
 
     if (!*success) {
-        spin_lock(&g_self_heal_state.lock);
+        TagFSLockTake(&g_self_heal_state.lock);
         SelfHealAddRecord(block_number, 0, NULL, false, NULL);
         g_self_heal_state.stats.corruptions_unrecoverable++;
-        spin_unlock(&g_self_heal_state.lock);
+        TagFSLockDrop(&g_self_heal_state.lock);
     }
 
     return OK;
@@ -288,9 +288,9 @@ error_t TagFS_SelfHealGetStats(HealStats *stats) {
         return ERR_NOT_INITIALIZED;
     }
     
-    spin_lock(&g_self_heal_state.lock);
+    TagFSLockTake(&g_self_heal_state.lock);
     memcpy(stats, &g_self_heal_state.stats, sizeof(HealStats));
-    spin_unlock(&g_self_heal_state.lock);
+    TagFSLockDrop(&g_self_heal_state.lock);
     return OK;
 }
 
@@ -320,7 +320,7 @@ error_t TagFS_SelfHealGetCorruptionRecords(HealCorruptionRecord *records, uint32
     if (!g_self_heal_state.initialized)
         return ERR_NOT_INITIALIZED;
     
-    spin_lock(&g_self_heal_state.lock);
+    TagFSLockTake(&g_self_heal_state.lock);
     
     uint32_t copy_count = max_records < g_self_heal_state.record_count ? max_records : g_self_heal_state.record_count;
     for (uint32_t i = 0; i < copy_count; i++) {
@@ -330,7 +330,7 @@ error_t TagFS_SelfHealGetCorruptionRecords(HealCorruptionRecord *records, uint32
     }
     
     *count = copy_count;
-    spin_unlock(&g_self_heal_state.lock);
+    TagFSLockDrop(&g_self_heal_state.lock);
     return OK;
 }
 
@@ -338,11 +338,11 @@ error_t TagFS_SelfHealClearRecords(void) {
     if (!g_self_heal_state.initialized)
         return ERR_NOT_INITIALIZED;
     
-    spin_lock(&g_self_heal_state.lock);
+    TagFSLockTake(&g_self_heal_state.lock);
     memset(g_self_heal_state.records, 0, sizeof(HealCorruptionRecord) * HEAL_MAX_RECORDS);
     g_self_heal_state.record_count = 0;
     g_self_heal_state.record_head = 0;
-    spin_unlock(&g_self_heal_state.lock);
+    TagFSLockDrop(&g_self_heal_state.lock);
     return OK;
 }
 

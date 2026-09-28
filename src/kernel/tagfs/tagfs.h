@@ -9,6 +9,7 @@
 #include "../../include/volume_deed.h"
 #include "../../include/volume_ledger.h"
 #include "../core/error/error.h"
+#include "lock_rank/lock_rank.h"
 
 // ============================================================================
 // Include Submodule Headers (production implementations)
@@ -190,7 +191,7 @@ typedef struct {
     TagKeyGroup** key_buckets;
     uint32_t      key_bucket_count;
 
-    spinlock_t lock;
+    TagFSLock lock;
 } TagRegistry;
 
 // ----------------------------------------------------------------------------
@@ -232,7 +233,7 @@ typedef struct {
     uint64_t    generation;     // incremented on every mutation
     QueryCacheEntry cache[QUERY_CACHE_SLOTS];
 
-    spinlock_t  lock;
+    TagFSLock   lock;
 } TagBitmapIndex;
 
 // ----------------------------------------------------------------------------
@@ -294,10 +295,10 @@ struct WriteJob;
 typedef struct OpenFileEntry {
     uint32_t              file_id;
     uint32_t              ref_count;
-    spinlock_t            write_lock;        /* sync path only */
+    TagFSLock             write_lock;        /* sync path only */
     struct WriteJob *     async_write_owner; /* token (NULL = free) */
     struct WriteJob *     async_pending_head;/* FIFO of waiters */
-    spinlock_t            async_token_lock;  /* guards above two fields */
+    TagFSLock             async_token_lock;  /* guards above two fields */
     struct OpenFileEntry* next;
 } OpenFileEntry;
 
@@ -364,7 +365,7 @@ typedef struct {
     TagBitmapIndex*  bitmap_index;
     BlockBitmap      block_bitmap;
     bool             initialized;
-    spinlock_t       lock;
+    TagFSLock        lock;
 } TagFSState;
 
 // trashed/hidden membership masks (populated by tagfs_init_well_known_tags).

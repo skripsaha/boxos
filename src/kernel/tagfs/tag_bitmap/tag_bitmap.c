@@ -158,7 +158,7 @@ TagBitmapIndex* tag_bitmap_create(uint32_t initial_tag_cap, uint32_t initial_fil
     idx->max_file_id = 0;
     idx->generation  = 0;
     memset(idx->cache, 0, sizeof(idx->cache));
-    spinlock_init(&idx->lock);
+    TagFSLockInit(&idx->lock, "index", LOCK_RANK_LEAF);
 
     return idx;
 }
@@ -198,25 +198,25 @@ int tag_bitmap_set(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id) {
         return -1;
     }
 
-    spin_lock(&idx->lock);
+    TagFSLockTake(&idx->lock);
 
     ensure_bitmap_capacity(idx, tag_id);
     ensure_file_capacity(idx, file_id);
 
     if (!idx->bitmaps || (uint32_t)tag_id >= idx->bitmap_capacity) {
-        spin_unlock(&idx->lock);
+        TagFSLockDrop(&idx->lock);
         return -1;
     }
 
     if (!idx->file_to_tags || file_id >= idx->file_capacity) {
-        spin_unlock(&idx->lock);
+        TagFSLockDrop(&idx->lock);
         return -1;
     }
 
     if (!idx->bitmaps[tag_id]) {
         TagBitmap* bm = kmalloc(sizeof(TagBitmap));
         if (!bm) {
-            spin_unlock(&idx->lock);
+            TagFSLockDrop(&idx->lock);
             return -1;
         }
         memset(bm, 0, sizeof(TagBitmap));
@@ -232,7 +232,7 @@ int tag_bitmap_set(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id) {
      * one byte into whatever the heap put next, every eighth new file id. */
     TagBitmap* row = idx->bitmaps[tag_id];
     if (!row->bits || row->bit_count <= needed_max) {
-        spin_unlock(&idx->lock);
+        TagFSLockDrop(&idx->lock);
         return -1;
     }
 
@@ -251,7 +251,7 @@ int tag_bitmap_set(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id) {
     reverse_index_add(idx, file_id, tag_id);
     idx->generation++;
 
-    spin_unlock(&idx->lock);
+    TagFSLockDrop(&idx->lock);
     return 0;
 }
 
@@ -260,10 +260,10 @@ int tag_bitmap_clear(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id) {
         return -1;
     }
 
-    spin_lock(&idx->lock);
+    TagFSLockTake(&idx->lock);
 
     if ((uint32_t)tag_id >= idx->bitmap_capacity || !idx->bitmaps[tag_id]) {
-        spin_unlock(&idx->lock);
+        TagFSLockDrop(&idx->lock);
         return -1;
     }
 
@@ -281,7 +281,7 @@ int tag_bitmap_clear(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id) {
     reverse_index_remove(idx, file_id, tag_id);
     idx->generation++;
 
-    spin_unlock(&idx->lock);
+    TagFSLockDrop(&idx->lock);
     return 0;
 }
 
@@ -290,7 +290,7 @@ void tag_bitmap_remove_file(TagBitmapIndex* idx, uint32_t file_id) {
         return;
     }
 
-    spin_lock(&idx->lock);
+    TagFSLockTake(&idx->lock);
 
     TagIdList* list = &idx->file_to_tags[file_id];
 
@@ -318,7 +318,7 @@ void tag_bitmap_remove_file(TagBitmapIndex* idx, uint32_t file_id) {
     list->capacity = 0;
     idx->generation++;
 
-    spin_unlock(&idx->lock);
+    TagFSLockDrop(&idx->lock);
 }
 
 // ---------------------------------------------------------------------------
@@ -450,10 +450,10 @@ int tag_bitmap_query(TagBitmapIndex* idx,
         return -1;
     }
 
-    spin_lock(&idx->lock);
+    TagFSLockTake(&idx->lock);
 
     if (idx->max_file_id == 0) {
-        spin_unlock(&idx->lock);
+        TagFSLockDrop(&idx->lock);
         return 0;
     }
 
@@ -465,7 +465,7 @@ int tag_bitmap_query(TagBitmapIndex* idx,
         if (cached) {
             uint32_t copy = cached->count < max_results ? cached->count : max_results;
             if (copy > 0) memcpy(out_file_ids, cached->file_ids, sizeof(uint32_t) * copy);
-            spin_unlock(&idx->lock);
+            TagFSLockDrop(&idx->lock);
             return (int)copy;
         }
     }
@@ -477,7 +477,7 @@ int tag_bitmap_query(TagBitmapIndex* idx,
 
     uint8_t* result_bitmap = kmalloc(result_size);
     if (!result_bitmap) {
-        spin_unlock(&idx->lock);
+        TagFSLockDrop(&idx->lock);
         return -1;
     }
     memset(result_bitmap, 0, result_size);
@@ -489,7 +489,7 @@ int tag_bitmap_query(TagBitmapIndex* idx,
         uint16_t tid = tag_ids[i];
         if ((uint32_t)tid >= idx->bitmap_capacity || !idx->bitmaps[tid]) {
             kfree(result_bitmap);
-            spin_unlock(&idx->lock);
+            TagFSLockDrop(&idx->lock);
             return 0;
         }
 
@@ -520,7 +520,7 @@ int tag_bitmap_query(TagBitmapIndex* idx,
             // Early termination: if result is all-zero, no matches possible
             if (bitmap_is_empty(result_bitmap, result_size)) {
                 kfree(result_bitmap);
-                spin_unlock(&idx->lock);
+                TagFSLockDrop(&idx->lock);
                 return 0;
             }
         }
@@ -536,7 +536,7 @@ int tag_bitmap_query(TagBitmapIndex* idx,
         uint8_t* temp = kmalloc(result_size);
         if (!temp) {
             kfree(result_bitmap);
-            spin_unlock(&idx->lock);
+            TagFSLockDrop(&idx->lock);
             return -1;
         }
         memset(temp, 0, result_size);
@@ -579,14 +579,14 @@ int tag_bitmap_query(TagBitmapIndex* idx,
         // Early termination after group AND
         if (!first && bitmap_is_empty(result_bitmap, result_size)) {
             kfree(result_bitmap);
-            spin_unlock(&idx->lock);
+            TagFSLockDrop(&idx->lock);
             return 0;
         }
     }
 
     if (first) {
         kfree(result_bitmap);
-        spin_unlock(&idx->lock);
+        TagFSLockDrop(&idx->lock);
         return 0;
     }
 
@@ -601,7 +601,7 @@ int tag_bitmap_query(TagBitmapIndex* idx,
     }
 
     kfree(result_bitmap);
-    spin_unlock(&idx->lock);
+    TagFSLockDrop(&idx->lock);
     return (int)count;
 }
 
@@ -611,10 +611,10 @@ int tag_bitmap_tags_for_file(TagBitmapIndex* idx, uint32_t file_id,
         return -1;
     }
 
-    spin_lock(&idx->lock);
+    TagFSLockTake(&idx->lock);
 
     if (file_id >= idx->file_capacity) {
-        spin_unlock(&idx->lock);
+        TagFSLockDrop(&idx->lock);
         return 0;
     }
 
@@ -624,21 +624,21 @@ int tag_bitmap_tags_for_file(TagBitmapIndex* idx, uint32_t file_id,
         memcpy(out_ids, list->ids, sizeof(uint16_t) * copy_count);
     }
 
-    spin_unlock(&idx->lock);
+    TagFSLockDrop(&idx->lock);
     return (int)copy_count;
 }
 
 int tag_bitmap_tag_count_for_file(TagBitmapIndex* idx, uint32_t file_id) {
     if (!idx) return 0;
 
-    spin_lock(&idx->lock);
+    TagFSLockTake(&idx->lock);
 
     if (file_id >= idx->file_capacity) {
-        spin_unlock(&idx->lock);
+        TagFSLockDrop(&idx->lock);
         return 0;
     }
 
     int count = (int)idx->file_to_tags[file_id].count;
-    spin_unlock(&idx->lock);
+    TagFSLockDrop(&idx->lock);
     return count;
 }

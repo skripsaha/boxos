@@ -21,7 +21,8 @@
 // mechanism itself is asked here whether it refuses exactly the command it was
 // told to, once, on the seat and sectors and core it was told to, and nothing
 // else. A mechanism that refused the wrong thing would make every test built
-// on it say something false about TagFS.
+// on it say something false about TagFS. LockRank (tagfs/lock_rank), which the
+// lock tests count with, is proved here the same way.
 //
 // Every test that arms a fault takes it down on every path out; the runner
 // takes down whatever is left standing and fails the test that left it
@@ -89,10 +90,10 @@ bool StandBlockInUse(uint32_t block)
 {
     TagFSState* fs = tagfs_get_state();
 
-    spin_lock(&fs->lock);
+    TagFSLockTake(&fs->lock);
     bool used = block < fs->layout.data_blocks &&
                 (fs->block_bitmap.bitmap[block / 8] & (uint8_t)(1u << (block % 8))) != 0;
-    spin_unlock(&fs->lock);
+    TagFSLockDrop(&fs->lock);
     return used;
 }
 
@@ -414,6 +415,110 @@ out:
     return verdict;
 }
 
+// ----------------------------------------------------------------------------
+// LockRank — the witness at the medium's doors and the order check, proved on
+// two locks of the tests' own, so that no TagFS lock and no place of TagFS is
+// touched and every number below is fixed by the test alone
+// ----------------------------------------------------------------------------
+
+static TagFSLock s_proof       = TAGFS_LOCK_INIT("proof", LOCK_RANK_LEAF);
+static TagFSLock s_proof_state = TAGFS_LOCK_INIT("proofstate", LOCK_RANK_STATE);
+
+static inline uint64_t StandInterruptsOff(void)
+{
+    uint64_t flags;
+    asm volatile("pushfq; pop %0; cli" : "=r"(flags)::"memory");
+    return flags;
+}
+
+static inline void StandInterruptsBack(uint64_t flags)
+{
+    asm volatile("push %0; popfq" ::"r"(flags) : "memory", "cc");
+}
+
+/* Sector 0 of the volume read three times. Once holding nothing, with
+ * interrupts off the way every system call on one core has them: the witness
+ * keys on a TagFS lock held, never on IF, so it says nothing. Then twice under
+ * the test's own lock: both reads are counted on the lock and on this core,
+ * and the place is named once, not once per read. */
+static TestResult TestStandLockRankNamesTheMedium(void)
+{
+    TestResult    verdict   = TEST_PASS;
+    bool          held      = false;
+    uint32_t      witnessed = s_proof.Witnessed;
+    LockRankCount before, first, after;
+    uint64_t      flags;
+    int           rc;
+
+    before = LockRankCountHere();
+    flags = StandInterruptsOff();
+    rc = tagfs_volume_read(0, 1, g_test_output);
+    StandInterruptsBack(flags);
+    after = LockRankCountHere();
+    TEST_ASSERT_EQ(rc, 0, "sector 0 of the volume is read holding no TagFS lock");
+    TEST_ASSERT_EQ(after.Witnessed - before.Witnessed, 0,
+                   "a read that holds no TagFS lock is not witnessed, interrupts off or not");
+    TEST_ASSERT(!LockRankAnyHeldHere(), "and this core holds no TagFS lock");
+
+    before = LockRankCountHere();
+    TagFSLockTake(&s_proof);
+    held = true;
+    TEST_ASSERT(LockRankHeldHere(&s_proof), "the test's lock is held here once taken");
+    rc = tagfs_volume_read(0, 1, g_test_output);
+    first = LockRankCountHere();
+    if (rc == 0)
+        rc = tagfs_volume_read(0, 1, g_test_output);
+    TagFSLockDrop(&s_proof);
+    held = false;
+    after = LockRankCountHere();
+
+    TEST_ASSERT_EQ(rc, 0, "and read twice under it");
+    TEST_ASSERT_EQ(s_proof.Witnessed - witnessed, 2, "both reads are counted on the lock held across them");
+    TEST_ASSERT_EQ(after.Witnessed - before.Witnessed, 2, "and on this core");
+    TEST_ASSERT_EQ(first.Named - before.Named, 1, "the first read names the place");
+    TEST_ASSERT_EQ(after.Named - first.Named, 0, "the second names it no more");
+    TEST_ASSERT(!LockRankHeldHere(&s_proof), "and once let go the lock is held here no more");
+out:
+    if (held)
+        TagFSLockDrop(&s_proof);
+    return verdict;
+}
+
+/* The order is strictly downward. A state-rank lock with a leaf under it is
+ * the order and says nothing; a state-rank lock taken under a leaf is out of
+ * order — counted each time, on this core and on the lock taken, and named
+ * once. */
+static TestResult TestStandLockRankNamesTheOrder(void)
+{
+    TestResult    verdict = TEST_PASS;
+    uint32_t      broke   = s_proof_state.OutOfOrder;
+    LockRankCount before, mid, after;
+
+    before = LockRankCountHere();
+    TagFSLockTake(&s_proof_state);
+    TagFSLockTake(&s_proof);
+    TagFSLockDrop(&s_proof);
+    TagFSLockDrop(&s_proof_state);
+    mid = LockRankCountHere();
+    TEST_ASSERT_EQ(mid.OutOfOrder - before.OutOfOrder, 0, "a leaf under a state-rank lock is the order");
+    TEST_ASSERT_EQ(mid.Named - before.Named, 0, "and names nothing");
+
+    for (uint32_t round = 0; round < 2; round++) {
+        TagFSLockTake(&s_proof);
+        TagFSLockTake(&s_proof_state);
+        TagFSLockDrop(&s_proof_state);
+        TagFSLockDrop(&s_proof);
+    }
+    after = LockRankCountHere();
+    TEST_ASSERT_EQ(after.OutOfOrder - mid.OutOfOrder, 2,
+                   "a state-rank lock taken under a leaf, twice, is out of order twice");
+    TEST_ASSERT_EQ(s_proof_state.OutOfOrder - broke, 2, "counted on the lock taken out of order");
+    TEST_ASSERT_EQ(after.Named - mid.Named, 1, "and named once");
+    TEST_ASSERT(!LockRankAnyHeldHere(), "and nothing is left held here");
+out:
+    return verdict;
+}
+
 // ============================================================================
 // The suite
 // ============================================================================
@@ -433,6 +538,10 @@ static const TestCase g_stand_tests[] = {
       .reach = TEST_READS_ONLY },
     { .name = "stand_tag_row_refuses_what_it_cannot_widen",
       .func = TestStandTagRowRefusesWhatItCannotWiden, .reach = TEST_READS_ONLY },
+    { .name = "stand_lockrank_names_the_medium",  .func = TestStandLockRankNamesTheMedium,
+      .reach = TEST_READS_ONLY },
+    { .name = "stand_lockrank_names_the_order",   .func = TestStandLockRankNamesTheOrder,
+      .reach = TEST_READS_ONLY },
 
     { .name  = "stand_rmw_read_refused", .func = TestStandRmwReadRefused,
       .reach = TEST_WRITES_TO_VOLUME,

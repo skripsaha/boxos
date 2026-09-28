@@ -6,7 +6,7 @@
 #include "../box_hash/box_hash.h"
 
 // Global state
-static DedupState g_dedup_state;
+static DedupState g_dedup_state = { .lock = TAGFS_LOCK_INIT("dedup", LOCK_RANK_LEAF) };
 
 // Compute BoxHash for block (secure mode)
 static DedupHash DedupComputeHash(const uint8_t *data, uint32_t size) {
@@ -151,7 +151,7 @@ error_t TagFS_DedupInit(void) {
         return ERR_ALREADY_INITIALIZED;
 
     memset(&g_dedup_state, 0, sizeof(DedupState));
-    spinlock_init(&g_dedup_state.lock);
+    TagFSLockInit(&g_dedup_state.lock, "dedup", LOCK_RANK_LEAF);
 
     // Deterministic per-volume hash seed (fs_uuid) — content keys are stable
     // across reboots (the old per-boot RTC salt broke cross-mount dedup).
@@ -189,7 +189,7 @@ void TagFS_DedupShutdown(void) {
     if (!g_dedup_state.initialized)
         return;
     
-    spin_lock(&g_dedup_state.lock);
+    TagFSLockTake(&g_dedup_state.lock);
     
     for (uint32_t i = 0; i < g_dedup_state.hash_buckets; i++) {
         DedupEntry *e = g_dedup_state.hash_table[i];
@@ -216,7 +216,7 @@ void TagFS_DedupShutdown(void) {
     g_dedup_state.entry_count = 0;
 
     g_dedup_state.initialized = false;
-    spin_unlock(&g_dedup_state.lock);
+    TagFSLockDrop(&g_dedup_state.lock);
     debug_printf("[Dedup] Shutdown complete\n");
 }
 
@@ -235,7 +235,7 @@ error_t TagFS_DedupCheck(const uint8_t *block_data, uint32_t *existing_block, bo
     DedupHash hash = DedupComputeHash(block_data, TAGFS_BLOCK_SIZE);
     uint32_t bucket = DedupHashBucket(&hash);
 
-    spin_lock(&g_dedup_state.lock);
+    TagFSLockTake(&g_dedup_state.lock);
 
     DedupEntry *entry = g_dedup_state.hash_table[bucket];
     while (entry) {
@@ -245,14 +245,14 @@ error_t TagFS_DedupCheck(const uint8_t *block_data, uint32_t *existing_block, bo
             g_dedup_state.stats.duplicate_blocks++;
             g_dedup_state.stats.bytes_saved += TAGFS_BLOCK_SIZE;
             entry->last_access = rtc_get_unix64();
-            spin_unlock(&g_dedup_state.lock);
+            TagFSLockDrop(&g_dedup_state.lock);
             return OK;
         }
         entry = entry->next;
     }
     
     *is_duplicate = false;
-    spin_unlock(&g_dedup_state.lock);
+    TagFSLockDrop(&g_dedup_state.lock);
     return ERR_OBJECT_NOT_FOUND;
 }
 
@@ -267,7 +267,7 @@ error_t TagFS_DedupRegister(uint32_t physical_block, const uint8_t *block_data, 
     bool gc_tried = false;
 
     for (;;) {
-        spin_lock(&g_dedup_state.lock);
+        TagFSLockTake(&g_dedup_state.lock);
 
         /* Already indexed: this is the same block saying what it holds NOW.
          * Re-key it instead of adding a second entry — two entries for one
@@ -283,7 +283,7 @@ error_t TagFS_DedupRegister(uint32_t physical_block, const uint8_t *block_data, 
             }
             entry->tag_context = DedupComputeTagContext(tag_context);
             entry->last_access = rtc_get_unix64();
-            spin_unlock(&g_dedup_state.lock);
+            TagFSLockDrop(&g_dedup_state.lock);
             return OK;
         }
 
@@ -293,7 +293,7 @@ error_t TagFS_DedupRegister(uint32_t physical_block, const uint8_t *block_data, 
              * re-run the whole body afterwards rather than assuming the block
              * is still unindexed, because another core had the lock in
              * between. */
-            spin_unlock(&g_dedup_state.lock);
+            TagFSLockDrop(&g_dedup_state.lock);
             if (gc_tried)
                 return ERR_NO_MEMORY;
             gc_tried = true;
@@ -315,7 +315,7 @@ error_t TagFS_DedupRegister(uint32_t physical_block, const uint8_t *block_data, 
         g_dedup_state.stats.unique_blocks++;
         g_dedup_state.stats.total_blocks++;
 
-        spin_unlock(&g_dedup_state.lock);
+        TagFSLockDrop(&g_dedup_state.lock);
         return OK;
     }
 }
@@ -327,11 +327,11 @@ error_t TagFS_DedupAddRef(uint32_t physical_block) {
     if (!g_dedup_state.initialized)
         return ERR_NOT_INITIALIZED;
 
-    spin_lock(&g_dedup_state.lock);
+    TagFSLockTake(&g_dedup_state.lock);
 
     DedupEntry *entry = DedupFindByBlockLocked(physical_block);
     if (!entry) {
-        spin_unlock(&g_dedup_state.lock);
+        TagFSLockDrop(&g_dedup_state.lock);
         return ERR_OBJECT_NOT_FOUND;
     }
 
@@ -339,7 +339,7 @@ error_t TagFS_DedupAddRef(uint32_t physical_block) {
      * one more reference than the count can hold would be one the release
      * path could never balance, and the block would never come back. */
     if (entry->ref_count >= DEDUP_MAX_REFS) {
-        spin_unlock(&g_dedup_state.lock);
+        TagFSLockDrop(&g_dedup_state.lock);
         return ERR_QUOTA_EXCEEDED;
     }
 
@@ -349,7 +349,7 @@ error_t TagFS_DedupAddRef(uint32_t physical_block) {
     entry->ref_count++;
     entry->last_access = rtc_get_unix64();
 
-    spin_unlock(&g_dedup_state.lock);
+    TagFSLockDrop(&g_dedup_state.lock);
     return OK;
 }
 
@@ -366,11 +366,11 @@ error_t TagFS_DedupUnregister(uint32_t physical_block, bool *may_reclaim) {
     if (!g_dedup_state.initialized)
         return ERR_NOT_INITIALIZED;
 
-    spin_lock(&g_dedup_state.lock);
+    TagFSLockTake(&g_dedup_state.lock);
 
     DedupEntry *entry = DedupFindByBlockLocked(physical_block);
     if (!entry) {
-        spin_unlock(&g_dedup_state.lock);
+        TagFSLockDrop(&g_dedup_state.lock);
         return ERR_OBJECT_NOT_FOUND;
     }
 
@@ -383,7 +383,7 @@ error_t TagFS_DedupUnregister(uint32_t physical_block, bool *may_reclaim) {
         DedupEvictLocked(entry);
     }
 
-    spin_unlock(&g_dedup_state.lock);
+    TagFSLockDrop(&g_dedup_state.lock);
     return OK;
 }
 
@@ -426,7 +426,7 @@ error_t TagFS_DedupFindByTag(uint32_t tag_context, uint32_t *blocks, uint32_t ma
     if (!g_dedup_state.initialized)
         return ERR_NOT_INITIALIZED;
     
-    spin_lock(&g_dedup_state.lock);
+    TagFSLockTake(&g_dedup_state.lock);
     
     uint32_t found = 0;
     uint32_t tag_hash = DedupComputeTagContext(tag_context);
@@ -441,7 +441,7 @@ error_t TagFS_DedupFindByTag(uint32_t tag_context, uint32_t *blocks, uint32_t ma
     }
     
     *count = found;
-    spin_unlock(&g_dedup_state.lock);
+    TagFSLockDrop(&g_dedup_state.lock);
     return OK;
 }
 
@@ -452,7 +452,7 @@ error_t TagFS_DedupGetTagStats(uint32_t tag_context, uint64_t *blocks, uint64_t 
     if (!g_dedup_state.initialized)
         return ERR_NOT_INITIALIZED;
     
-    spin_lock(&g_dedup_state.lock);
+    TagFSLockTake(&g_dedup_state.lock);
     
     uint64_t block_count = 0;
     uint32_t tag_hash = DedupComputeTagContext(tag_context);
@@ -468,7 +468,7 @@ error_t TagFS_DedupGetTagStats(uint32_t tag_context, uint64_t *blocks, uint64_t 
     
     *blocks = block_count;
     *bytes = block_count * TAGFS_BLOCK_SIZE;
-    spin_unlock(&g_dedup_state.lock);
+    TagFSLockDrop(&g_dedup_state.lock);
     return OK;
 }
 
@@ -476,7 +476,7 @@ error_t TagFS_DedupGC(void) {
     if (!g_dedup_state.initialized)
         return ERR_NOT_INITIALIZED;
     
-    spin_lock(&g_dedup_state.lock);
+    TagFSLockTake(&g_dedup_state.lock);
     
     uint64_t now = rtc_get_unix64();
     uint32_t freed = 0;
@@ -510,7 +510,7 @@ error_t TagFS_DedupGC(void) {
     g_dedup_state.stats.entries_freed += freed;
     g_dedup_state.last_gc_time = now;
     
-    spin_unlock(&g_dedup_state.lock);
+    TagFSLockDrop(&g_dedup_state.lock);
     
     if (freed > 0)
         debug_printf("[Dedup] GC freed %u entries\n", freed);
@@ -527,13 +527,13 @@ error_t TagFS_DedupGetStats(DedupStats *stats) {
         return ERR_NOT_INITIALIZED;
     }
     
-    spin_lock(&g_dedup_state.lock);
+    TagFSLockTake(&g_dedup_state.lock);
     memcpy(stats, &g_dedup_state.stats, sizeof(DedupStats));
     
     if (stats->total_blocks > 0)
         stats->dedup_ratio = (stats->duplicate_blocks * 100) / stats->total_blocks;
     
-    spin_unlock(&g_dedup_state.lock);
+    TagFSLockDrop(&g_dedup_state.lock);
     return OK;
 }
 

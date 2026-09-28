@@ -62,10 +62,10 @@ static void wjob_ahci_complete(uint8_t port, uint8_t slot, error_t status, void 
 static bool token_try_claim(WriteJob *j)
 {
     OpenFileEntry *ofe = j->ofe;
-    spin_lock(&ofe->async_token_lock);
+    TagFSLockTake(&ofe->async_token_lock);
     if (ofe->async_write_owner == NULL) {
         ofe->async_write_owner = j;
-        spin_unlock(&ofe->async_token_lock);
+        TagFSLockDrop(&ofe->async_token_lock);
         return true;
     }
     j->next_pending = NULL;
@@ -76,7 +76,7 @@ static bool token_try_claim(WriteJob *j)
         while (t->next_pending) t = t->next_pending;
         t->next_pending = j;
     }
-    spin_unlock(&ofe->async_token_lock);
+    TagFSLockDrop(&ofe->async_token_lock);
     return false;
 }
 
@@ -84,7 +84,7 @@ static WriteJob *token_release_handoff(WriteJob *j)
 {
     OpenFileEntry *ofe = j->ofe;
     WriteJob *next = NULL;
-    spin_lock(&ofe->async_token_lock);
+    TagFSLockTake(&ofe->async_token_lock);
     if (ofe->async_write_owner == j) {
         next = ofe->async_pending_head;
         if (next) {
@@ -93,7 +93,7 @@ static WriteJob *token_release_handoff(WriteJob *j)
         }
         ofe->async_write_owner = next;
     }
-    spin_unlock(&ofe->async_token_lock);
+    TagFSLockDrop(&ofe->async_token_lock);
     return next;
 }
 

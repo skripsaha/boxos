@@ -19,6 +19,7 @@
 #include "cpu_calibrate.h"
 #include "atomics.h"
 #include "block_fail.h"
+#include "lock_rank.h"     /* LockRankWitness — a TagFS lock held across the medium is named */
 
 /*
  * A seat is a PLACE, and a medium is who is sitting in it.
@@ -686,6 +687,7 @@ static int BoardMediumRefusal(BoardKind kind, BlockFailKind what)
 
 int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
 {
+    LockRankWitness("read", (uintptr_t)__builtin_return_address(0));
     BoardSeat* s = seat_taken(seat);
     if (!s || !buffer || count == 0) {
         return -1;
@@ -726,6 +728,7 @@ int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
 
 int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffer)
 {
+    LockRankWitness("write", (uintptr_t)__builtin_return_address(0));
     BoardSeat* s = seat_taken(seat);
     if (!s || !buffer || count == 0) {
         return -1;
@@ -995,6 +998,7 @@ void BoardroomProveUnattendedRead(uint8_t seat)
 
 int BoardroomFlush(uint8_t seat)
 {
+    LockRankWitness("flush", (uintptr_t)__builtin_return_address(0));
     BoardSeat* s = seat_taken(seat);
     if (!s) {
         return -1;
