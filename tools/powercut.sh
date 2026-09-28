@@ -796,17 +796,16 @@ run_flushmut() {
     mut_on src/kernel/tagfs/tagfs.c "logcheck mutation" <<'EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = "    error_t flushed = tagfs_flush_cache_insisting();"
+a = "    error_t flushed = VolumeFlushFor(VolumeFlushNeed());"
 assert s.count(a) == 1
 open(p, "w").write(s.replace(a, "    error_t flushed = OK;   /* logcheck mutation: the sync never asks the medium to flush */"))
 EOF
     mut_on src/kernel/core/decks/storage/storage_ops.c "logcheck mutation" <<'EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = "    error_t flushed = tagfs_flush_cache();\n    while (flushed == ERR_BUSY) {\n"
+a = "    error_t flushed = VolumeFlushFor(VolumeFlushNeed());"
 assert s.count(a) == 1
-open(p, "w").write(s.replace(a, "    error_t flushed = OK;   /* logcheck mutation: the anchor never asks the medium to flush */\n"
-                                "    while (flushed == ERR_BUSY) {\n"))
+open(p, "w").write(s.replace(a, "    error_t flushed = OK;   /* logcheck mutation: the anchor never asks the medium to flush */"))
 EOF
     mut_run flushmut nextfid ack:anchor_test fail "the anchor never asking the medium to flush, its ack has none behind it"
     mut_run flushmut nextfid ack:anchor_test fail \

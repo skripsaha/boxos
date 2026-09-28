@@ -168,6 +168,22 @@ scheduler_state_t *scheduler_get_state(void)
     return &g_core_sched[idx];
 }
 
+void SchedulerHoldHere(void)
+{
+    scheduler_state_t *s = scheduler_get_state();
+    if (s)
+        s->held++;
+}
+
+/* A pass that began before the scheduler existed (none does: the boot mount
+ * runs after scheduler_init) held nothing, and lets go of nothing. */
+void SchedulerLetGoHere(void)
+{
+    scheduler_state_t *s = scheduler_get_state();
+    if (s && s->held)
+        s->held--;
+}
+
 scheduler_state_t *scheduler_get_core(uint8_t core_idx)
 {
     if (!g_core_sched || core_idx >= g_sched_core_count) return NULL;
@@ -942,6 +958,16 @@ void schedule(void *frame_ptr)
 
     // Skip scheduling on parked cores
     if (__atomic_load_n(&s->is_parked, __ATOMIC_ACQUIRE)) {
+        return;
+    }
+
+    /* A kernel context in the middle of a Scribe pass stays on this core
+     * until the pass ends: the idle context of an application core, or of
+     * the only core, writes the volume from TagFSServiceIfPending, and a
+     * switch away from it here would stop the pass mid-write for as long as
+     * the process switched to ran — with every other writer of that
+     * structure waiting on it. Ring 3 never holds one. */
+    if (frame && (frame->cs & 3) == 0 && s->held) {
         return;
     }
 

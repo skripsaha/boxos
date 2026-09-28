@@ -50,6 +50,7 @@
 #include "cow.h"
 #include "amp.h"   /* g_amp.total_cores — async write needs a K-Core to pump */
 #include "boardroom.h"
+#include "scribe.h"   /* VolumeFlushFor — an anchor's flush comes back until it has an answer */
 
 /*
  * Can the medium under the volume answer a read without somebody standing over
@@ -1445,22 +1446,16 @@ static int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
      * is ordinary traffic and says nothing about the disk. Handing it to the
      * application would make anchor() a call that fails for a reason the
      * application cannot see, understand or act on better than the kernel
-     * can. So it is asked again here, and the asking ends on a fact rather
-     * than a clock: the holder's own command is bounded, and a holder that
-     * stops being a running core has its door taken over on the spot
-     * (ahci_port_take_whole). The full argument is written once, above
-     * tagfs_flush_cache_insisting in tagfs.c; this loop is that argument
-     * spelled where a static in another file cannot be called.
+     * can. So it is asked again, and the asking ends on a fact rather than a
+     * clock: the argument is written once, over VolumeFlushFor (scribe.h).
+     * The need is read after the sync came back, so the sync's own flush does
+     * not count for it; a flush begun since does.
      *
      * anchor() therefore keeps exactly the two answers it always had —
      * durable, or a named refusal of the medium — and neither of them is a
      * lie any more.
      */
-    error_t flushed = tagfs_flush_cache();
-    while (flushed == ERR_BUSY) {
-        cpu_pause();
-        flushed = tagfs_flush_cache();
-    }
+    error_t flushed = VolumeFlushFor(VolumeFlushNeed());
     if (flushed != OK) {
         kprintf("[Storage] anchor of file %u: the medium did not make it "
                 "durable (error %u) — no anchor event is published and the "

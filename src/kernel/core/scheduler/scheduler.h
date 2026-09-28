@@ -66,6 +66,11 @@ typedef struct {
      * stack (post-iretq) — never the evicted one's. The reaper gates on it so a
      * strand's stack is never freed while this core is still in its epilogue. */
     volatile uint64_t quiesce_seq;
+    /* Scribe passes this core is in (SchedulerHoldHere). While it is not
+     * zero, a tick or a wake that interrupted this core's kernel context does
+     * not switch away from it. Written only by the core itself, with its
+     * interrupts off; read by its own interrupts. */
+    volatile uint32_t held;
 } scheduler_state_t;
 
 // ============================================================================
@@ -121,5 +126,12 @@ void sched_dequeue_all_cores(process_t *proc);
 
 scheduler_state_t *scheduler_get_state(void);
 scheduler_state_t *scheduler_get_core(uint8_t core_idx);
+
+/* A Scribe pass (tagfs/scribe) begins and ends on this core. The kernel
+ * context running it is not switched away from by the tick in between —
+ * what an interrupts-off lock used to give a writer of the volume, without
+ * the deafness: interrupts stay on. Called with interrupts off, in pairs. */
+void SchedulerHoldHere(void);
+void SchedulerLetGoHere(void);
 
 #endif // SCHEDULER_H
