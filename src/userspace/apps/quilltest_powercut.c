@@ -398,7 +398,7 @@ QuillVerdict QuillRace(const char *const *args)
  * more than a uint32_t holds. to_uint reads "-5" as 0 and 4294967296 as 0 as
  * well, and a case that took either for what it was given would make files
  * nobody asked for. */
-static bool QuillNumber(const char *word, uint32_t *out)
+bool QuillNumber(const char *word, uint32_t *out)
 {
     size_t   len = word ? strlen(word) : 0;
     uint64_t v   = 0;

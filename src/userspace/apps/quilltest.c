@@ -46,12 +46,14 @@
  * quilltest is on every volume, and it wears `system`. sequential and
  * interleave leak blocks on the synchronous path of HEAD, fidhistory spends
  * fifty thousand file ids for good, usememory interns its 91 tags in the
- * volume's registry for good, and systemtag deletes the kernel the volume
- * boots. Those five are compiled only into a quilltest built with
- * VOLUME_TESTS=on — the key that already means a throwaway image, and that
- * builds the kernel's own writing tests — and anywhere else each answers one
- * FAIL saying so. The others read, or change only files of their own, or
- * are the power-cut modes, and stay in every build.
+ * volume's registry for good, systemtag deletes the kernel the volume boots,
+ * and abba interns hundreds of tags and spends file ids past a block of the
+ * file table for good (with abbaworker, the workers it starts). Those seven
+ * are compiled only into a quilltest built with VOLUME_TESTS=on — the key
+ * that already means a throwaway image, and that builds the kernel's own
+ * writing tests — and anywhere else each answers one FAIL saying so. The
+ * others read, or change only files of their own, or are the power-cut
+ * modes, and stay in every build.
  */
 
 #include "box/print.h"
@@ -714,6 +716,17 @@ static const QuillCase g_cases[] = {
       "one record to the tag registry and one row to the file table",
       "N files crowdNNNNNNNNNN numbered from FROM (0 when it is not given), anchored; a file "
       "already called one of those names is deleted first and made again", false },
+    { "abba", "NAME TAGS EDGE", 3, 0, QUILL_THROWAWAY(QuillAbba),
+      "does a machine of many cores come back while TAGS new tags and file ids past EDGE, where "
+      "the file table takes its next block, grow the registry and the table, and three cabins of "
+      "its own rename, create and tag NAME's files, taking the same locks the other way round",
+      "for good, the TAGS new tags and the file ids spent; files NAMEg... wearing them, NAMEra "
+      "and NAMEt; every earlier file of those names or NAMErb or NAMEc.tmp deleted; anchored",
+      true },
+    { "abbaworker", "NAME ROLE", 2, 0, QUILL_THROWAWAY(QuillAbbaWorker),
+      "for abba: one of the three workers it starts — ROLE rename, create or tag — calling on "
+      "NAME's files until abba says stop",
+      "nothing of its own: every pair of calls it makes undoes itself", true },
 };
 
 #define QUILL_CASE_COUNT ((uint32_t)(sizeof(g_cases) / sizeof(g_cases[0])))
@@ -761,6 +774,6 @@ int main(void)
         return 1;
     }
 
-    const char *args[2] = { luggage_word(2), luggage_word(3) };
+    const char *args[3] = { luggage_word(2), luggage_word(3), luggage_word(4) };
     return c->run(args) == QUILL_FAIL ? 1 : 0;
 }
