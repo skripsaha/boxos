@@ -34,26 +34,47 @@ int main(void) {
         return 0;
     }
 
-    uint32_t matches[4];
-    file_info_t infos[4];
-    int count = find_file_by_name(luggage_word(1), matches, infos, 4);
+    /* The name is looked for in the trash itself. A look-up by name asks the
+     * index the way a listing does, and a listing leaves the trash out — so
+     * it never found a trashed file, and the file it did find was refused as
+     * not trashed yet: `erase NAME` could delete nothing at all. */
+    const char *name = luggage_word(1);
+    uint32_t *trashed = NULL;
+    int total = query_all("trashed", &trashed);
 
-    if (count <= 0) { println("Error: File not found"); exit(1); return 1; }
+    if (total < 0) { println("Error: Failed to query files"); exit(1); return 1; }
+
+    uint32_t file_id = 0;
+    int count = 0;
+    for (int i = 0; i < total; i++) {
+        file_info_t info;
+        if (file_info(trashed[i], &info) != 0) continue;
+        if (strcmp(info.filename, name) != 0) continue;
+        file_id = trashed[i];
+        count++;
+    }
+    free(trashed);
+
     if (count > 1) { println("Error: Ambiguous filename"); exit(1); return 1; }
 
-    if (!(infos[0].flags & FILE_FLAG_TRASHED)) {
-        println("Error: File must be trashed first (use 'trash' command)");
+    if (count == 0) {
+        /* Not in the trash: the look-up by name tells a name nobody has from
+         * a file still out of the trash. */
+        if (find_file_by_name(name, NULL, NULL, 0) <= 0)
+            println("Error: File not found");
+        else
+            println("Error: File must be trashed first (use 'trash' command)");
         exit(1);
         return 1;
     }
 
-    if (delete(matches[0]) != 0) {
+    if (delete(file_id) != 0) {
         println("Error: Failed to delete file");
         exit(1);
         return 1;
     }
 
-    println("File deleted");
+    printf("File deleted: %s (file %u)\n", name, file_id);
     exit(0);
     return 0;
 }

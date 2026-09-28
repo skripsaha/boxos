@@ -6304,6 +6304,13 @@ run_headcountmut() {
 # not its new one. The scenario creates a file, renames it, and asks the volume
 # by tag and by name; then trashes it and erases the trash, which asks for the
 # trashed files by their tag (a plain listing leaves them out on purpose).
+#
+# Then a second file is trashed and erased BY NAME. erase looked the name up
+# the way a listing does — and a listing leaves the trash out — then refused
+# any file that was not trashed, so `erase NAME` could delete nothing at all.
+# A third file, never trashed, must still be refused, and a name nobody has
+# must be not found. The machine is halted through `bye` and the host lists
+# the volume it left: the refused file on it, the erased one not.
 byname_session() {
     local name=$1 args=$2
     make run-stop >/dev/null 2>&1
@@ -6319,13 +6326,17 @@ byname_session() {
     MARK=$(wc -l < build/serial.log)
     local cmd
     for cmd in "create alpha.txt" "name alpha.txt beta.txt" "files beta" "files alpha" \
-               "info beta.txt" "info alpha.txt" "trash beta.txt" "erase trashed" "files beta"; do
+               "info beta.txt" "info alpha.txt" "trash beta.txt" "erase trashed" "files beta" \
+               "create gamma.txt" "trash gamma.txt" "erase gamma.txt" "files trashed" \
+               "create delta.txt" "erase delta.txt" "erase nosuch.txt"; do
         type_line "$cmd" || break
         wait_for_prompt || break
     done
+    type_line "bye" && wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S" $((MARK + 1))
     sleep 1
     tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$name.log"
     make run-stop >/dev/null 2>&1
+    python3 tools/volume-read.py build/boxos.img list >"$SCRATCH/$name.list" 2>&1
     return 0
 }
 
@@ -6353,6 +6364,32 @@ byname_judge() {
     grep -q "Deleted 1 trashed files" "$L" \
         && ok "$name: erase found the trashed file by its tag" \
         || bad "$name: 'erase trashed' did not delete the one trashed file ($(grep -m1 'Deleted' "$L" || echo 'no answer'))"
+    sed -n '/~ trash gamma.txt/,/~ erase gamma.txt/p' "$L" | grep -q "^File moved to trash"
+    chk $? "$name: gamma.txt went to the trash ($(sed -n '/~ trash gamma.txt/,/~ erase gamma.txt/p' "$L" | grep -m1 -E '^(File moved|Error)' || echo 'no answer'))"
+    local erased said
+    said=$(sed -n '/~ erase gamma.txt/,/~ files trashed/p' "$L" | grep -m1 -E "^(File deleted|Error)")
+    erased=$(echo "$said" | grep -oE "^File deleted: gamma\.txt \(file [0-9]+\)")
+    [ -n "$erased" ]
+    chk $? "$name: erase by name found the trashed file in the trash (${said:-no answer})"
+    sed -n '/~ files trashed/,/~ create delta.txt/p' "$L" | grep -q "No files found"
+    chk $? "$name: and the trash is empty after it ($(sed -n '/~ files trashed/,/~ create delta.txt/p' "$L" | grep -m1 -E '^(No files found|gamma\.txt)' || echo 'no answer'))"
+    sed -n '/~ erase delta.txt/,/~ erase nosuch.txt/p' "$L" | grep -q "^Error: File must be trashed first"
+    chk $? "$name: a file out of the trash is refused ($(sed -n '/~ erase delta.txt/,/~ erase nosuch.txt/p' "$L" | grep -m1 -E '^(File deleted|Error)' || echo 'no answer'))"
+    sed -n '/~ erase nosuch.txt/,/~ bye/p' "$L" | grep -q "^Error: File not found"
+    chk $? "$name: a name nobody has is not found ($(sed -n '/~ erase nosuch.txt/,/~ bye/p' "$L" | grep -m1 -E '^(File deleted|Error)' || echo 'no answer'))"
+    local halt rows kept refused seen
+    halt=$(grep -m1 -E "$STAND_HALT_ENDS" "$L" | cut -c1-120)
+    grep -q '^\[HALT\] Storage sync complete' "$L"
+    chk $? "$name: the halt through bye said its sync wrote the volume (${halt:-no halt line})"
+    rows=$(grep -cE ' bytes +[0-9]+ extent\(s\), [0-9]+ block\(s\)$' "$SCRATCH/$name.list")
+    kept=$(grep -m1 -E '^ +gamma\.txt +[0-9]+ bytes ' "$SCRATCH/$name.list" | sed 's/^ *//; s/  */ /g')
+    refused=$(grep -m1 -E '^ +delta\.txt +[0-9]+ bytes ' "$SCRATCH/$name.list" | sed 's/^ *//; s/  */ /g')
+    if [ -n "$refused" ]; then seen="delta.txt, which erase refused, is on it ($refused)"
+    else seen="delta.txt, which erase refused, is NOT on it"; fi
+    if [ -n "$kept" ]; then seen="$seen, and gamma.txt IS ($kept)"
+    else seen="$seen, and gamma.txt is not"; fi
+    grep -qE '^ground sector [0-9]+ ' "$SCRATCH/$name.list" && [ -n "$refused" ] && [ -z "$kept" ]
+    chk $? "$name: the host lists $rows file(s) on the volume bye left — $seen"
     grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
         && bad "$name: the kernel spoke of a stall or fault" \
         || ok "$name: no verdict, no panic"
@@ -6360,6 +6397,7 @@ byname_judge() {
 
 run_byname() {
     echo "== byname: a file is found by its name through the index, and the tag follows a rename =="
+    rm -f build/boxos.img   # a fresh volume: the host listing judges this session's files alone
     build
     if ! byname_session byname "STRICT=on CORES=4 MEM=4G"; then
         bad "byname: never reached a shell"; return
