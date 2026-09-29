@@ -479,12 +479,12 @@ static error_t MapLayFresh(TagFSState *fs, uint32_t count, uint32_t *out_first)
  *
  * The new run is written and flushed before the Ledger names it, so a Ledger
  * that names it never points at a run that is not there. The Ledger is
- * written and flushed before the old run is given back, because the free
- * clears the bits and splices the run into the free list — a file can be
- * handed those blocks at once, and a cut that kept the file and lost the
- * Ledger would leave a volume whose next mount reads a file as checksums, and
- * grows again, and frees that file's blocks. A refusal anywhere leaves the
- * map where the medium says it is.
+ * written and flushed before the old run is given back, because the give
+ * clears the run's bits in the block map — a file can be handed those
+ * blocks at once, and a cut that kept the file and lost the Ledger would
+ * leave a volume whose next mount reads a file as checksums, and grows
+ * again, and frees that file's blocks. A refusal anywhere leaves the map
+ * where the medium says it is.
  *
  * Answers whether the map moved; *first then says where to.
  */

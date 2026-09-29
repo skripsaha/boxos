@@ -2411,8 +2411,8 @@ run_yank() {
 # replug proves a volume that leaves and comes home is re-read. It proves it on
 # an IDLE machine, which is the one case where the re-read is free: nobody is
 # in the filesystem, so the memory it hands back — the tag registry, the tag
-# index, the block bitmap, the free list, the file table, the metadata pool —
-# is memory nobody is holding. That is not the machine this has to survive.
+# index, the block map, the file table, the metadata pool — is memory nobody
+# is holding. That is not the machine this has to survive.
 #
 # `make HOLDGROUND=on` puts somebody there. At the moment the medium is noticed
 # gone, one caller steps into the volume and does not step out until the volume
