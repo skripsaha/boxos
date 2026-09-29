@@ -1,46 +1,57 @@
 #include "tag_registry.h"
 
-static bool g_registry_dirty = false;
-
 /*
- * ‼ THE BLOCKS THIS REGISTRY IS WRITTEN INTO ARE THE ONES IT ALREADY OWNS.
+ * ‼ THE MEDIUM HOLDS THE RECORD OF EVERY ID BELOW written_next, AND ONLY EVER
+ * GAINS MORE.
  *
- * The flush used to call tagfs_alloc_blocks for every continuation of every
- * flush, so a registry longer than one block handed itself a fresh block each
- * time it was written and left the previous one marked used with nothing
- * pointing at it — a block gone per sync, for the life of the boot, and the
- * mount's additive repair keeps every one of them. The file table had exactly
- * this defect and was cured exactly this way: keep the chain the load walked,
- * and allocate only when the registry has genuinely outgrown it.
+ * A tag is never renamed or taken back, and its id is what every file on the
+ * volume carries, so the registry on the medium only ever grows at its end:
+ * the records of the ids below written_next, in id order, in the chain that
+ * ends at tail_block. A flush appends what was interned since — to the tail,
+ * and to one new block at a time when the tail is full — and never writes a
+ * block the medium already holds whole again. A registry that owes nothing
+ * writes nothing. Everything about the medium is the instance's own: a
+ * registry built beside the volume's — a test's, the manifest's self-test —
+ * shares nothing with it but the code.
  *
- * It mattered the moment mkfs started chaining the registry instead of dying
- * at 416 tags, because until then no volume was born with a second block.
+ * ‼ NOTHING UNDER THE REGISTRY'S LOCK TOUCHES THE MEDIUM, TAKES A BLOCK OR
+ * WAITS.
+ *
+ * The lock keeps interrupts off, and every core that names a tag takes it —
+ * Touch, a cabin, a process, a create. The flush used to hold it across every
+ * block it wrote, which kept all of them spinning with interrupts off for as
+ * long as the medium took, and across the block a growing chain takes, which
+ * put the volume's state lock under the registry's while a rename takes the
+ * registry's under state: two cores meeting there both ways round never moved
+ * again (MP-D4). So a flush copies what it owes into its images under the
+ * lock, lets the lock go, and writes; and one flush of a registry runs at a
+ * time under the registry's Scribe, which a second flush waits for instead of
+ * spinning.
+ *
+ * ‼ A NEW BLOCK IS NAMED ONLY AFTER THE MEDIUM HAS KEPT ITS STAMP (scribe.h,
+ * THE SPARE RULE).
+ *
+ * The chain used to grow link first: the tail went down naming a block the
+ * medium had not been given yet, and a refused or lost write of that block
+ * left a chain into unstamped ground, which every later mount refuses
+ * (MP-D5). Now the new block is stamped, a kept flush proves the stamp, the
+ * block takes its records, and only then does the tail go down with the link
+ * — so a cut anywhere leaves the chain as it was, or longer by a stamped
+ * block. The block a growth took stays the registry's until a link names it:
+ * a flush that failed keeps it for the next one (CR-11), because the tail it
+ * could not write may have landed after all.
  */
-static uint32_t* g_chain     = NULL;
-static uint32_t  g_chain_len = 0;
-static uint32_t  g_chain_cap = 0;
 
-static void chain_release(void) {
-    if (g_chain) kfree(g_chain);
-    g_chain     = NULL;
-    g_chain_len = 0;
-    g_chain_cap = 0;
-}
+/* A record's fixed head: tag_id, flags, key_len, value_len. */
+#define REGISTRY_RECORD_HEAD 6u
 
-static int chain_append(uint32_t block) {
-    if (g_chain_len == g_chain_cap) {
-        uint32_t cap = g_chain_cap ? g_chain_cap * 2 : 8;
-        uint32_t* grown = kmalloc(sizeof(uint32_t) * cap);
-        if (!grown) return -1;
-        if (g_chain && g_chain_len)
-            memcpy(grown, g_chain, sizeof(uint32_t) * g_chain_len);
-        if (g_chain) kfree(g_chain);
-        g_chain     = grown;
-        g_chain_cap = cap;
-    }
-    g_chain[g_chain_len++] = block;
-    return 0;
-}
+struct TagKeyGroup {
+    char*               key;
+    uint16_t*           tag_ids;
+    uint32_t            count;
+    uint32_t            capacity;
+    struct TagKeyGroup* next;
+};
 
 static uint32_t registry_hash(const char* key, const char* value, uint32_t bucket_count) {
     uint32_t hash = 5381;
@@ -79,13 +90,14 @@ static char* copy_string(const char* src) {
     return dst;
 }
 
-static void add_to_key_group(TagKeyGroup* group, uint16_t tag_id) {
+/* False when the group had to grow and there was no memory for it. */
+static bool add_to_key_group(TagKeyGroup* group, uint16_t tag_id) {
     if (group->count >= group->capacity) {
         uint32_t new_cap = group->capacity * 2;
         uint16_t* new_ids = kmalloc(sizeof(uint16_t) * new_cap);
         if (!new_ids) {
             debug_printf("[TagRegistry] add_to_key_group: grow alloc failed\n");
-            return;
+            return false;
         }
         memcpy(new_ids, group->tag_ids, sizeof(uint16_t) * group->count);
         kfree(group->tag_ids);
@@ -93,6 +105,7 @@ static void add_to_key_group(TagKeyGroup* group, uint16_t tag_id) {
         group->capacity = new_cap;
     }
     group->tag_ids[group->count++] = tag_id;
+    return true;
 }
 
 static TagKeyGroup* find_or_create_key_group(TagRegistry* reg, const char* key) {
@@ -167,54 +180,78 @@ static int ensure_by_id_capacity(TagRegistry* reg, uint16_t needed_id) {
     return 0;
 }
 
-// Insert a tag at a specific ID (used by load to preserve disk IDs)
-static uint16_t intern_with_id_unlocked(TagRegistry* reg, uint16_t tag_id,
-                                         const char* key, const char* value) {
-    // If this exact tag already exists, return existing
-    uint16_t existing = lookup_unlocked(reg, key, value);
-    if (existing != TAGFS_INVALID_TAG_ID) return existing;
+/*
+ * One record read off the medium, taken in under the id the medium gives it —
+ * the id every file wearing the tag carries, so it is never renumbered. The
+ * rules are the loader's, in its order: an exact (key, value) the registry
+ * already holds keeps its id and takes the medium's flags; an id past
+ * TAGFS_MAX_TAG_ID, or one another tag already holds, is dropped. Under
+ * reg->lock. ERR_NO_MEMORY only when memory ran out.
+ */
+static error_t RegistryAdopt(TagRegistry* reg, uint16_t tag_id, uint8_t flags,
+                             const uint8_t* key_at, uint8_t key_len,
+                             const uint8_t* value_at, uint16_t value_len) {
+    char*             key   = kmalloc((size_t)key_len + 1);
+    char*             value = value_len ? kmalloc((size_t)value_len + 1) : NULL;
+    TagRegistryEntry* entry = NULL;
+    TagRegistryNode*  node  = NULL;
+    TagKeyGroup*      group = NULL;
 
-    if (tag_id > TAGFS_MAX_TAG_ID) return TAGFS_INVALID_TAG_ID;
-
-    if (ensure_by_id_capacity(reg, tag_id) != 0) return TAGFS_INVALID_TAG_ID;
-
-    // Slot already occupied — collision (shouldn't happen on clean load)
-    if (reg->by_id[tag_id]) {
-        debug_printf("[TagRegistry] intern_with_id: slot %u already used\n", tag_id);
-        return TAGFS_INVALID_TAG_ID;
+    if (!key || (value_len && !value))
+        goto no_memory;
+    memcpy(key, key_at, key_len);
+    key[key_len] = '\0';
+    if (value) {
+        memcpy(value, value_at, value_len);
+        value[value_len] = '\0';
     }
 
-    TagRegistryEntry* entry = kmalloc(sizeof(TagRegistryEntry));
-    if (!entry) return TAGFS_INVALID_TAG_ID;
+    uint16_t held = lookup_unlocked(reg, key, value);
+    if (held != TAGFS_INVALID_TAG_ID) {
+        reg->by_id[held]->flags = flags;
+        goto dropped;
+    }
+    if (tag_id > TAGFS_MAX_TAG_ID)
+        goto dropped;
+    if (ensure_by_id_capacity(reg, tag_id) != 0)
+        goto no_memory;
+    if (reg->by_id[tag_id]) {
+        debug_printf("[TagRegistry] load: slot %u already used\n", tag_id);
+        goto dropped;
+    }
 
-    entry->key = copy_string(key);
-    if (!entry->key) { kfree(entry); return TAGFS_INVALID_TAG_ID; }
+    entry = kmalloc(sizeof(TagRegistryEntry));
+    node  = kmalloc(sizeof(TagRegistryNode));
+    group = find_or_create_key_group(reg, key);
+    if (!entry || !node || !group || !add_to_key_group(group, tag_id)) {
+        kfree(node);
+        kfree(entry);
+        goto no_memory;
+    }
 
-    entry->value = copy_string(value);
-    if (value && !entry->value) { kfree(entry->key); kfree(entry); return TAGFS_INVALID_TAG_ID; }
-
-    entry->flags  = (value != NULL) ? TAGFS_TAG_FLAG_HAS_VALUE : 0;
+    entry->key    = key;
+    entry->value  = value;
+    entry->flags  = flags;
     entry->tag_id = tag_id;
-
-    TagRegistryNode* node = kmalloc(sizeof(TagRegistryNode));
-    if (!node) { kfree(entry->value); kfree(entry->key); kfree(entry); return TAGFS_INVALID_TAG_ID; }
 
     uint32_t bucket = registry_hash(key, value, reg->bucket_count);
     node->tag_id = tag_id;
     node->next   = reg->buckets[bucket];
     reg->buckets[bucket] = node;
+    reg->by_id[tag_id]   = entry;
 
-    reg->by_id[tag_id] = entry;
-
-    TagKeyGroup* group = find_or_create_key_group(reg, key);
-    if (group) add_to_key_group(group, tag_id);
-
-    // Keep next_id above all known IDs
     if (tag_id >= reg->next_id) reg->next_id = tag_id + 1;
     reg->total_tags++;
-    g_registry_dirty = true;
+    return OK;
 
-    return tag_id;
+dropped:
+    kfree(value);
+    kfree(key);
+    return OK;
+no_memory:
+    kfree(value);
+    kfree(key);
+    return ERR_NO_MEMORY;
 }
 
 static uint16_t intern_unlocked(TagRegistry* reg, const char* key, const char* value) {
@@ -276,7 +313,6 @@ static uint16_t intern_unlocked(TagRegistry* reg, const char* key, const char* v
     uint16_t assigned_id = reg->next_id;
     reg->next_id++;
     reg->total_tags++;
-    g_registry_dirty = true;
 
     debug_printf("[TagRegistry] interned tag_id=%u key='%s' value='%s'\n",
                  assigned_id, key, value ? value : "(null)");
@@ -321,6 +357,17 @@ int tag_registry_init(TagRegistry* reg) {
 
     TagFSLockInit(&reg->lock, "registry", LOCK_RANK_LEAF);
 
+    /* No medium yet: tag_registry_load reads one in, and until it has there is
+     * nothing to write into and nothing owed to it. */
+    reg->written_next = 0;
+    reg->tail_block   = 0;
+    reg->tail_image   = NULL;
+    reg->spare_block  = 0;
+    reg->spare_image  = NULL;
+    reg->spare_need   = 0;
+    reg->said_failing = false;
+    reg->scribe       = (Scribe)SCRIBE_INIT(SCRIBE_RANK_REGISTRY, "the tag registry");
+
     debug_printf("[TagRegistry] initialized: %u reg buckets, %u key buckets\n",
                  TAGFS_REG_BUCKETS, TAGFS_KEY_BUCKETS);
     return 0;
@@ -364,13 +411,32 @@ void tag_registry_destroy(TagRegistry* reg) {
     kfree(reg->key_buckets);
     reg->key_buckets = NULL;
 
-    chain_release();
+    kfree(reg->tail_image);
+    reg->tail_image = NULL;
+    kfree(reg->spare_image);
+    reg->spare_image = NULL;
 
     debug_printf("[TagRegistry] destroyed\n");
 }
 
 uint16_t tag_registry_intern(TagRegistry* reg, const char* key, const char* value) {
     if (!reg || !key) return TAGFS_INVALID_TAG_ID;
+
+    /* A record never crosses the edge of a block, so a tag whose record would
+     * not fit an empty one could never be written — and a flush that owed it
+     * would never be done. Refused before it has a number. */
+    size_t key_len   = strlen(key);
+    size_t value_len = value ? strlen(value) : 0;
+    if (key_len > UINT8_MAX ||
+        REGISTRY_RECORD_HEAD + key_len + value_len > TAGFS_REGISTRY_DATA_SIZE) {
+        kprintf("[TagRegistry] a tag of a %u-byte key and a %u-byte value is given no number: "
+                "its record would take %u bytes, and a registry block holds %u with a key of at "
+                "most %u\n", (unsigned)key_len, (unsigned)value_len,
+                (unsigned)(REGISTRY_RECORD_HEAD + key_len + value_len),
+                TAGFS_REGISTRY_DATA_SIZE, UINT8_MAX);
+        return TAGFS_INVALID_TAG_ID;
+    }
+
     TagFSLockTake(&reg->lock);
     uint16_t id = intern_unlocked(reg, key, value);
     TagFSLockDrop(&reg->lock);
@@ -407,23 +473,40 @@ const char* tag_registry_value(TagRegistry* reg, uint16_t tag_id) {
     return result;
 }
 
-TagKeyGroup* tag_registry_key_group(TagRegistry* reg, const char* key) {
-    if (!reg || !key) return NULL;
+error_t TagRegistryKeyIds(TagRegistry* reg, const char* key, TagIdList* out) {
+    if (!out) return ERR_NULL_POINTER;
+    out->ids      = NULL;
+    out->count    = 0;
+    out->capacity = 0;
+    if (!reg || !key) return ERR_NULL_POINTER;
+
+    /* Sized and copied under the lock the next tag of the key takes to free
+     * the group's array: the copy is whole and the array is never seen after
+     * the lock goes. A group holds at most TAGFS_MAX_TAG_ID + 1 ids, which a
+     * TagIdList counts. */
+    error_t rc = OK;
     TagFSLockTake(&reg->lock);
-    uint32_t bucket = key_hash(key, reg->key_bucket_count);
-    TagKeyGroup* group = reg->key_buckets[bucket];
-    while (group) {
-        if (strcmp(group->key, key) == 0) break;
+    TagKeyGroup* group = reg->key_buckets[key_hash(key, reg->key_bucket_count)];
+    while (group && strcmp(group->key, key) != 0)
         group = group->next;
+    if (group && group->count > 0) {
+        out->ids = kmalloc(sizeof(uint16_t) * group->count);
+        if (out->ids) {
+            memcpy(out->ids, group->tag_ids, sizeof(uint16_t) * group->count);
+            out->count    = (uint16_t)group->count;
+            out->capacity = (uint16_t)group->count;
+        } else {
+            rc = ERR_NO_MEMORY;
+        }
     }
     TagFSLockDrop(&reg->lock);
-    return group;
+    return rc;
 }
 
 // Stamp an entry as a reserved-vocabulary (system) tag. Idempotent OR of the
-// SYSTEM bit; deliberately does NOT raise g_registry_dirty — the bit is
-// re-derived from TagFsReservedKeys at every mount, so it must never be the
-// reason for a disk flush.
+// SYSTEM bit; it never makes the registry owe the medium anything — the bit
+// is re-derived from TagFsReservedKeys at every mount, so it must never be
+// the reason for a write.
 void tag_registry_mark_system(TagRegistry* reg, uint16_t tag_id) {
     if (!reg || tag_id == TAGFS_INVALID_TAG_ID) return;
     TagFSLockTake(&reg->lock);
@@ -442,128 +525,209 @@ bool tag_registry_is_system(TagRegistry* reg, uint16_t tag_id) {
     return is_sys;
 }
 
-bool tag_registry_is_dirty(void) {
-    return g_registry_dirty;
-}
+// ----------------------------------------------------------------------------
+// The flush
+// ----------------------------------------------------------------------------
 
-/* BSS-resident scratch — TagRegistryBlock is exactly 4 KiB. Held
- * under reg->lock for the duration of any load/flush, so a single
- * shared buffer is mutually exclusive across both callers. Avoids
- * 4 KiB+local-frame stack usage that exceeded the
- * -Wstack-usage=8192 threshold and would compete with nested IRQ
- * frames on per-cpu stacks. */
-static TagRegistryBlock g_tag_registry_load_blk;
+/*
+ * The records of the ids from `from` on, appended to `image` while each one
+ * fits whole — the order and the packing mkfs and every kernel before this one
+ * wrote, so an append lands exactly where a rewrite would have. An id no tag
+ * holds (one the medium did not have) is passed over. Answers the first id it
+ * did not take: next_id when every one fitted. Under reg->lock.
+ */
+static uint16_t RegistryPack(TagRegistry* reg, TagRegistryBlock* image, uint16_t from) {
+    uint16_t id = from;
 
-int tag_registry_flush(TagRegistry* reg) {
-    if (!reg) return -1;
-
-    TagFSState* state = tagfs_get_state();
-    if (!state) return -1;
-
-    TagFSLockTake(&reg->lock);
-
-    /* The chain the load walked. It is empty only if nothing ever loaded this
-     * registry, which a mount does not allow — but the head is the one block
-     * whose place the Deed states, so it can always be recovered. The Deed
-     * states it in blocks of the whole volume; what the registry reads and
-     * writes is a block of the data run. tagfs.c owns that conversion — see
-     * data_block_of() there. */
-    if (g_chain_len == 0 &&
-        chain_append(state->layout.tag_registry_block -
-                     state->layout.data_block) != 0) {
-        TagFSLockDrop(&reg->lock);
-        return -1;
-    }
-
-    uint32_t link          = 0;
-    uint32_t current_block = g_chain[0];
-
-    /* Shares the BSS scratch slot with tag_registry_load (both hold
-     * reg->lock for their full duration → mutually exclusive). Keeps
-     * the 4 KiB block off the kernel stack. */
-    TagRegistryBlock *blkp = &g_tag_registry_load_blk;
-    memset(blkp, 0, sizeof(*blkp));
-    blkp->magic       = TAGFS_REGISTRY_MAGIC;
-    blkp->next_block  = 0;
-    blkp->entry_count = 0;
-    blkp->used_bytes  = 0;
-
-    uint32_t data_offset = 0;
-
-    for (uint32_t i = 0; i < reg->next_id; i++) {
-        TagRegistryEntry* entry = reg->by_id[i];
-        if (!entry) continue;
+    for (; id < reg->next_id; id++) {
+        const TagRegistryEntry* entry = reg->by_id[id];
+        if (!entry)
+            continue;
 
         uint8_t  key_len   = (uint8_t)strlen(entry->key);
         uint16_t value_len = entry->value ? (uint16_t)strlen(entry->value) : 0;
+        uint32_t size      = REGISTRY_RECORD_HEAD + key_len + value_len;
+        if (image->used_bytes + size > TAGFS_REGISTRY_DATA_SIZE)
+            break;
 
-        uint32_t record_size = sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint8_t)
-                             + sizeof(uint16_t) + key_len + value_len;
+        uint8_t* p = image->data + image->used_bytes;
+        memcpy(p, &id, sizeof(id));
+        p[2] = entry->flags;
+        p[3] = key_len;
+        memcpy(p + 4, &value_len, sizeof(value_len));
+        memcpy(p + REGISTRY_RECORD_HEAD, entry->key, key_len);
+        if (value_len)
+            memcpy(p + REGISTRY_RECORD_HEAD + key_len, entry->value, value_len);
 
-        if (data_offset + record_size > TAGFS_REGISTRY_DATA_SIZE) {
-            uint32_t new_block;
-            if (link + 1 < g_chain_len) {
-                new_block = g_chain[link + 1];
-            } else {
-                if (tagfs_alloc_blocks(1, &new_block) != 0) {
-                    TagFSLockDrop(&reg->lock);
-                    return -1;
-                }
-                if (chain_append(new_block) != 0) {
-                    TagFSLockDrop(&reg->lock);
-                    return -1;
-                }
-            }
-
-            blkp->next_block = new_block;
-            int write_result = tagfs_write_block(current_block, blkp);
-            if (write_result != 0) {
-                TagFSLockDrop(&reg->lock);
-                return -1;
-            }
-
-            link++;
-            current_block = new_block;
-            memset(blkp, 0, sizeof(*blkp));
-            blkp->magic      = TAGFS_REGISTRY_MAGIC;
-            blkp->next_block = 0;
-            blkp->entry_count = 0;
-            blkp->used_bytes  = 0;
-            data_offset     = 0;
-        }
-
-        uint8_t* p = blkp->data + data_offset;
-
-        *((uint16_t*)p) = entry->tag_id;
-        p += sizeof(uint16_t);
-
-        *p++ = entry->flags;
-        *p++ = key_len;
-
-        *((uint16_t*)p) = value_len;
-        p += sizeof(uint16_t);
-
-        memcpy(p, entry->key, key_len);
-        p += key_len;
-
-        if (value_len > 0) {
-            memcpy(p, entry->value, value_len);
-        }
-
-        data_offset += record_size;
-        blkp->entry_count++;
-        blkp->used_bytes = (uint16_t)data_offset;
+        image->used_bytes = (uint16_t)(image->used_bytes + size);
+        image->entry_count++;
     }
-
-    int write_result = tagfs_write_block(current_block, blkp);
-
-    if (write_result == 0) {
-        g_registry_dirty = false;
-    }
-
-    TagFSLockDrop(&reg->lock);
-    return write_result;
+    return id;
 }
+
+/*
+ * The chain lengthened by one block, for the ids from `from` on that the tail
+ * had no room for: the Spare stamped when none is in hand, a kept flush
+ * proving the stamp, then the records packed into the Spare and written. OK:
+ * the Spare is whole on the medium, *out_end is the first id it did not take,
+ * and the tail's image links it — a link that reaches the medium only with the
+ * tail, after all of this. Otherwise nothing names the Spare, and one the
+ * medium has stamped stays in hand for the next flush; *why says what refused.
+ */
+static error_t RegistryGrow(TagRegistry* reg, uint16_t from, uint16_t* out_end,
+                            char* why, size_t why_size) {
+    error_t rc = OK;
+
+    if (reg->spare_block == 0) {
+        rc = SpareStamp(TAGFS_REGISTRY_MAGIC, reg->spare_image, &reg->spare_block, &reg->spare_need);
+        if (rc == ERR_TAGFS_NO_SPACE) {
+            ksnprintf(why, why_size, "the volume has no free block to lengthen the chain with");
+            return rc;
+        }
+        if (rc != OK) {
+            ksnprintf(why, why_size, "the block taken to lengthen the chain would not take its "
+                                     "stamp, and was given back");
+            return rc;
+        }
+    }
+    rc = VolumeFlushFor(reg->spare_need);
+    if (rc != OK) {
+        ksnprintf(why, why_size, "the medium would not flush the stamp of block %u, the chain's next",
+                  reg->spare_block);
+        return rc;
+    }
+
+    memset(reg->spare_image, 0, TAGFS_BLOCK_SIZE);
+    reg->spare_image->magic = TAGFS_REGISTRY_MAGIC;
+    TagFSLockTake(&reg->lock);
+    uint16_t end = RegistryPack(reg, reg->spare_image, from);
+    TagFSLockDrop(&reg->lock);
+
+    rc = tagfs_write_block(reg->spare_block, reg->spare_image);
+    if (rc != OK) {
+        ksnprintf(why, why_size, "block %u, the chain's next, would not take them", reg->spare_block);
+        return rc;
+    }
+    reg->tail_image->next_block = reg->spare_block;
+    *out_end = end;
+    return OK;
+}
+
+/*
+ * One pass: what is owed appended to the tail, and — when the tail is full —
+ * to one new block the tail then links, the tail's write last, because it is
+ * the one that commits. The holder of reg->scribe, no lock held.
+ *
+ * OK: every id below the new written_next is on the medium. ERR_TAGFS_NO_SPACE:
+ * the volume has no block to grow by, and the tail took what fitted — a full
+ * volume keeps the tags it has room for. Any other refusal moves nothing: the
+ * tail's image is put back, written_next stays, and the next pass packs the
+ * same records at the same places and links the same Spare.
+ */
+static error_t RegistryWritePass(TagRegistry* reg, char* why, size_t why_size) {
+    TagRegistryBlock* tail      = reg->tail_image;
+    uint16_t          was_used  = tail->used_bytes;
+    uint16_t          was_count = tail->entry_count;
+
+    TagFSLockTake(&reg->lock);
+    uint16_t upto = RegistryPack(reg, tail, reg->written_next);
+    bool     full = upto < reg->next_id;
+    TagFSLockDrop(&reg->lock);
+
+    uint16_t end = upto;
+    error_t  rc  = full ? RegistryGrow(reg, upto, &end, why, why_size) : OK;
+    if (rc != OK && rc != ERR_TAGFS_NO_SPACE)
+        goto refused;
+
+    if (tail->entry_count != was_count || tail->next_block != 0) {
+        error_t wrote = tagfs_write_block(reg->tail_block, tail);
+        if (wrote != OK) {
+            ksnprintf(why, why_size, "block %u, the chain's last, would not take them", reg->tail_block);
+            rc = wrote;
+            goto refused;
+        }
+    }
+
+    TagFSLockTake(&reg->lock);
+    reg->written_next = tail->next_block ? end : upto;
+    TagFSLockDrop(&reg->lock);
+    if (tail->next_block) {
+        reg->tail_block  = reg->spare_block;
+        reg->tail_image  = reg->spare_image;
+        reg->spare_image = tail;
+        reg->spare_block = 0;
+    }
+    return rc;
+
+refused:
+    /* A refused write of the tail may have landed all the same, so the Spare
+     * is never given back while the volume is mounted: a link to it may be on
+     * the medium, and a block handed to a file there is a chain the next
+     * mount refuses. Keeping it is what makes a retry link the same block. */
+    tail->used_bytes  = was_used;
+    tail->entry_count = was_count;
+    tail->next_block  = 0;
+    memset(tail->data + was_used, 0, TAGFS_REGISTRY_DATA_SIZE - was_used);
+    return rc;
+}
+
+error_t tag_registry_flush(TagRegistry* reg) {
+    if (!reg) return ERR_NULL_POINTER;
+
+    TagFSLockTake(&reg->lock);
+    bool owed = reg->written_next < reg->next_id;
+    TagFSLockDrop(&reg->lock);
+    if (!owed)
+        return OK;
+    if (!reg->tail_image)
+        return ERR_NOT_INITIALIZED;     /* no medium was ever read into it */
+
+    /* One flush of a registry at a time, and a flush asked for while another
+     * runs is answered by the pass that covers it — its own, or one that
+     * began after it asked. What a pass writes is what is owed when it takes
+     * the Scribe, so every tag interned before the ask is in it. */
+    uint64_t cover  = 0;
+    error_t  rc     = OK;
+    uint64_t ticket = ScribeAsk(&reg->scribe);
+    switch (ScribeWait(&reg->scribe, ticket, &cover, &rc)) {
+    case SCRIBE_MINE: {
+        char why[112];
+
+        TagFSLockTake(&reg->lock);
+        uint16_t target = reg->next_id;
+        TagFSLockDrop(&reg->lock);
+        /* written_next moves only in the hands of this Scribe's holder. */
+        while (rc == OK && reg->written_next < target)
+            rc = RegistryWritePass(reg, why, sizeof(why));
+
+        if (rc == OK) {
+            reg->said_failing = false;
+        } else if (!reg->said_failing) {
+            reg->said_failing = true;
+            TagFSLockTake(&reg->lock);
+            uint32_t unwritten = (uint32_t)(reg->next_id - reg->written_next);
+            TagFSLockDrop(&reg->lock);
+            kprintf("[TagRegistry] %u tag id(s) this volume issued are not on its medium yet — %s "
+                    "(error %d) — they stay in memory, and the next flush writes them\n",
+                    unwritten, why, (int)rc);
+        }
+        ScribeGive(&reg->scribe, cover, rc);
+        break;
+    }
+    case SCRIBE_SELF:
+        kprintf("[TagRegistry] flush refused: a flush of this registry on this core is suspended "
+                "beneath this one, and waiting for it here would never end\n");
+        rc = ERR_BUSY;
+        break;
+    default:
+        break;      /* WRITTEN leaves OK; REFUSED has put the pass's refusal in rc */
+    }
+    return rc;
+}
+
+// ----------------------------------------------------------------------------
+// The load
+// ----------------------------------------------------------------------------
 
 int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
     if (!reg) return -1;
@@ -580,10 +744,10 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
      * It had neither bound. A next_block pointing outside the volume was
      * followed off the end of it — nothing under tagfs_read_block bounds a
      * block number — and a next_block pointing back into the chain span for
-     * ever with reg->lock held, which is a machine that never finishes
-     * mounting rather than one that says what is wrong. Both are reachable on
-     * a volume whose registry block took a bad sector, and both became
-     * reachable in practice the day mkfs started chaining the registry.
+     * ever, which is a machine that never finishes mounting rather than one
+     * that says what is wrong. Both are reachable on a volume whose registry
+     * block took a bad sector, and both became reachable in practice the day
+     * mkfs started chaining the registry.
      *
      * The registry is NOT read out of layout.tag_registry_blocks for the
      * reason stated over that field in create_tagfs: a number written once
@@ -598,104 +762,95 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
         return -1;
     }
 
-    TagFSLockTake(&reg->lock);
-    chain_release();
+    /* The two blocks every flush of this registry is written through, and the
+     * one every block of the chain is read into on the way: the heap's, not
+     * the stack's. The walk ends with the tail in tail_image, which is then
+     * the medium's own copy. */
+    reg->tail_image  = kmalloc(TAGFS_BLOCK_SIZE);
+    reg->spare_image = kmalloc(TAGFS_BLOCK_SIZE);
+    if (!reg->tail_image || !reg->spare_image) {
+        kprintf("[TagRegistry] there is no memory for the two blocks this registry is read and "
+                "written through — this volume is not mounted\n");
+        return -1;
+    }
 
-    uint32_t block_num = first_block;
-    uint32_t hops      = 0;
-
-    /* Read at least the first block (block 0 is valid in our layout) */
-    while (1) {
-        if (block_num >= run) {
+    /* Read with no lock held: nobody can see this registry yet — the mount
+     * reads it before its door opens, and a registry a test builds is the
+     * test's. The lock is taken only for what goes into memory. */
+    TagRegistryBlock* image  = reg->tail_image;
+    uint32_t          block  = first_block;
+    uint32_t          hops   = 0;
+    uint16_t          walked = 0;
+    uint32_t          end    = 0;
+    for (;;) {
+        if (block >= run) {
             kprintf("[TagRegistry] the chain points at block %u and this "
                     "volume's data run is %u blocks — that is outside the "
-                    "volume, so it is not mounted\n", block_num, run);
-            TagFSLockDrop(&reg->lock);
+                    "volume, so it is not mounted\n", block, run);
+            return -1;
+        }
+        error_t read = tagfs_read_block(block, image);
+        if (read != OK) {
+            kprintf("[TagRegistry] block %u of the tag registry would not read (error %d) — this "
+                    "volume is not mounted\n", block, (int)read);
+            return -1;
+        }
+        if (image->magic != TAGFS_REGISTRY_MAGIC) {
+            kprintf("[TagRegistry] block %u holds 0x%08x where the tag registry should be — this "
+                    "volume is not mounted\n", block, image->magic);
             return -1;
         }
 
-        TagRegistryBlock *blkp = &g_tag_registry_load_blk;
-        int read_result = tagfs_read_block(block_num, blkp);
-        if (read_result != 0) {
-            TagFSLockDrop(&reg->lock);
-            return -1;
-        }
-
-        if (blkp->magic != TAGFS_REGISTRY_MAGIC) {
-            TagFSLockDrop(&reg->lock);
-            return -1;
-        }
-
-        /* Kept so a flush writes back into the blocks this registry already
-         * owns instead of taking a fresh one for every continuation. */
-        if (chain_append(block_num) != 0) {
-            kprintf("[TagRegistry] there is no memory to hold this volume's "
-                    "tag registry chain at %u blocks — it is not mounted\n",
-                    g_chain_len + 1);
-            chain_release();
-            TagFSLockDrop(&reg->lock);
-            return -1;
-        }
-
-        uint32_t offset = 0;
-        for (uint16_t e = 0; e < blkp->entry_count; e++) {
-            if (offset + sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint8_t) + sizeof(uint16_t)
-                    > TAGFS_REGISTRY_DATA_SIZE) {
+        /* Walked the way every reader walks it: entry_count records packed from
+         * the start of the data, none past its end. */
+        error_t held = OK;
+        walked = 0;
+        end    = 0;
+        TagFSLockTake(&reg->lock);
+        while (held == OK && walked < image->entry_count &&
+               end + REGISTRY_RECORD_HEAD <= TAGFS_REGISTRY_DATA_SIZE) {
+            const uint8_t* rec = image->data + end;
+            uint16_t       tag_id, value_len;
+            memcpy(&tag_id, rec, sizeof(tag_id));
+            memcpy(&value_len, rec + 4, sizeof(value_len));
+            uint32_t size = REGISTRY_RECORD_HEAD + rec[3] + value_len;
+            if (end + size > TAGFS_REGISTRY_DATA_SIZE)
                 break;
-            }
-
-            uint8_t* p = blkp->data + offset;
-
-            uint16_t tag_id;
-            memcpy(&tag_id, p, sizeof(uint16_t)); p += sizeof(uint16_t);
-            uint8_t  flags    = *p++;
-            uint8_t  key_len  = *p++;
-            uint16_t value_len;
-            memcpy(&value_len, p, sizeof(uint16_t)); p += sizeof(uint16_t);
-
-            uint32_t record_size = sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint8_t)
-                                 + sizeof(uint16_t) + key_len + value_len;
-
-            if (offset + record_size > TAGFS_REGISTRY_DATA_SIZE) break;
-
-            char key[256];  // uint8_t key_len always fits with null terminator
-            memcpy(key, p, key_len);
-            key[key_len] = '\0';
-            p += key_len;
-
-            char* value_ptr = NULL;
-            char value[4096];
-            if (value_len > 0) {
-                if (value_len >= sizeof(value)) {
-                    offset += record_size;
-                    continue;
-                }
-                memcpy(value, p, value_len);
-                value[value_len] = '\0';
-                value_ptr = value;
-            }
-
-            // Use the stored disk tag_id to preserve ID mapping across reboots
-            uint16_t new_id = intern_with_id_unlocked(reg, tag_id, key, value_ptr);
-            if (new_id != TAGFS_INVALID_TAG_ID && reg->by_id[new_id]) {
-                reg->by_id[new_id]->flags = flags;
-            }
-
-            offset += record_size;
+            held = RegistryAdopt(reg, tag_id, rec[2], rec + REGISTRY_RECORD_HEAD, rec[3],
+                                 rec + REGISTRY_RECORD_HEAD + rec[3], value_len);
+            end += size;
+            walked++;
+        }
+        TagFSLockDrop(&reg->lock);
+        if (held != OK) {
+            kprintf("[TagRegistry] there is no memory to hold the tags of block %u — a registry "
+                    "held in part would give their numbers to new tags, so this volume is not "
+                    "mounted\n", block);
+            return -1;
         }
 
-        if (blkp->next_block == 0) break;  /* end of chain */
+        if (image->next_block == 0) break;  /* end of chain */
 
         if (++hops >= run) {
             kprintf("[TagRegistry] this volume's tag registry chain has taken "
                     "%u hops in a data run of %u blocks, so it is going round "
                     "in a circle — it is not mounted\n", hops, run);
-            TagFSLockDrop(&reg->lock);
             return -1;
         }
-        block_num = blkp->next_block;
+        block = image->next_block;
     }
 
+    /* The tail as the next flush appends to it: its records end where the walk
+     * ended and nothing follows them. Whatever lay past a record the walk
+     * stopped at was never read by any reader, and the first append writes
+     * over it. Nothing is owed: the medium holds every id this registry has. */
+    image->entry_count = walked;
+    image->used_bytes  = (uint16_t)end;
+    memset(image->data + end, 0, TAGFS_REGISTRY_DATA_SIZE - end);
+
+    TagFSLockTake(&reg->lock);
+    reg->tail_block   = block;
+    reg->written_next = reg->next_id;
     TagFSLockDrop(&reg->lock);
     return 0;
 }

@@ -8,6 +8,11 @@
 #include "amp.h"
 #include "pmm.h"
 #include "vmm.h"
+#include "scribe.h"
+#include "scheduler.h"
+#include "baton.h"
+#include "atomics.h"
+#include "cpu_calibrate.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -22,7 +27,9 @@
 // told to, once, on the seat and sectors and core it was told to, and nothing
 // else. A mechanism that refused the wrong thing would make every test built
 // on it say something false about TagFS. LockRank (tagfs/lock_rank), which the
-// lock tests count with, is proved here the same way.
+// lock tests count with, is proved here the same way, and so are the flush
+// tickets and the Scribe (tagfs/scribe), which the writers of the volume
+// stand on.
 //
 // Every test that arms a fault takes it down on every path out; the runner
 // takes down whatever is left standing and fails the test that left it
@@ -519,6 +526,234 @@ out:
     return verdict;
 }
 
+// ----------------------------------------------------------------------------
+// Scribe — the flush tickets proved on the medium's own flushes, and the
+// one-writer turn on Scribes of the tests' own, so that no structure of the
+// volume is touched and every number below is fixed by the test alone
+// ----------------------------------------------------------------------------
+
+/* How long a wait below may take before the test gives up on it. The test's
+ * own bound, not the kernel's: a wait that behaves is answered within a few
+ * turns, and the bound only turns the defect it stands for into a failure the
+ * runner can report instead of a machine that stops. */
+#define STAND_SCRIBE_BOUND_MS 1000u
+
+/* Three flushes, and what each proves. One asked for after a need was read is
+ * kept for it. One whose ticket was taken before the need was read proves
+ * nothing about that need even when the medium takes it — it is issued here
+ * by hand, between its ticket and its answer, the way tagfs_flush_cache
+ * issues one. One the medium refuses keeps nothing, and VolumeFlushFor asks
+ * again; and a need already kept is answered without a word to the medium. */
+static TestResult TestStandFlushTicket(void)
+{
+    TestResult verdict = TEST_PASS;
+    uint8_t    seat    = tagfs_get_seat();
+    bool       armed   = false;
+    uint64_t   need, ticket;
+    int        said;
+
+    need = VolumeFlushNeed();
+    TEST_ASSERT_OK(tagfs_flush_cache(), "a flush asked for after the need was read is taken");
+    TEST_ASSERT(VolumeFlushKept(need), "and is kept for that need");
+
+    ticket = VolumeFlushBegin();
+    need = VolumeFlushNeed();
+    said = BoardroomFlush(seat);
+    VolumeFlushEnd(ticket, said == 0);
+    TEST_ASSERT_EQ(said, 0, "the flush begun before the need was read is taken by the medium");
+    TEST_ASSERT(!VolumeFlushKept(need), "and proves nothing about that need");
+
+    BlockFailArm(seat, BLOCK_FAIL_FLUSH, 0, 0, 1);
+    armed = true;
+    TEST_ASSERT(tagfs_flush_cache() != OK, "a flush the medium refuses");
+    TEST_ASSERT(BlockFailFired(), "refused by the plan");
+    TEST_ASSERT(!VolumeFlushKept(need), "keeps nothing");
+    TEST_ASSERT(BlockFailDisarm(), "the plan stood until it was taken down");
+    armed = false;
+    TEST_ASSERT_OK(VolumeFlushFor(need), "asked for again, the need is flushed");
+    TEST_ASSERT(VolumeFlushKept(need), "and kept");
+
+    BlockFailArm(seat, BLOCK_FAIL_FLUSH, 0, 0, 1);
+    armed = true;
+    TEST_ASSERT_OK(VolumeFlushFor(need), "a need already kept is answered at once");
+    TEST_ASSERT_EQ(BlockFailSeen(), 0, "without a word to the medium");
+out:
+    if (armed)
+        BlockFailDisarm();
+    return verdict;
+}
+
+static Scribe s_scribe_asked = SCRIBE_INIT(SCRIBE_RANK_SYNC, "the stand's own Scribe");
+
+/* An ask made while a pass runs is not what that pass covers: the first pass
+ * answers the first ask WRITTEN, and the second ask takes a pass of its own,
+ * whose refusal answers it and leaves the first one written. The core that
+ * holds the Scribe is not switched away from until it gives it back. */
+static TestResult TestStandScribeCoversOnlyWhatWasAsked(void)
+{
+    TestResult         verdict = TEST_PASS;
+    Scribe            *s       = &s_scribe_asked;
+    scheduler_state_t *here    = scheduler_get_state();
+    uint32_t           held    = here ? here->held : 0;
+    uint64_t           cover   = 0, other = 0, first, second;
+    error_t            refusal = OK;
+    bool               mine    = false;
+
+    TEST_ASSERT(here != NULL, "this core has a scheduler to be held off");
+    first = ScribeAsk(s);
+    TEST_ASSERT_EQ(ScribeWait(s, first, &cover, &refusal), SCRIBE_MINE,
+                   "the first ask finds the Scribe free and takes it");
+    mine = true;
+    TEST_ASSERT(cover >= first, "its pass covers its own ask");
+    TEST_ASSERT(ScribeHeldHere(s) && ScribeAnyHeldHere(), "and this core holds it");
+    TEST_ASSERT_EQ(here->held, held + 1, "and is not switched away from while it does");
+    second = ScribeAsk(s);
+    TEST_ASSERT(second > cover, "an ask made during the pass lies past what the pass covers");
+    ScribeGive(s, cover, OK);
+    mine = false;
+    TEST_ASSERT_EQ(here->held, held, "given back, the core may be switched away from again");
+    TEST_ASSERT(!ScribeAnyHeldHere(), "and holds no Scribe");
+
+    TEST_ASSERT_EQ(ScribeTry(s, first, &other, &refusal), SCRIBE_WRITTEN,
+                   "the first ask is written by the pass that covered it");
+    TEST_ASSERT_EQ(ScribeTry(s, second, &cover, &refusal), SCRIBE_MINE,
+                   "the second is not, and takes a pass of its own");
+    mine = true;
+    TEST_ASSERT(cover >= second, "which covers it");
+    ScribeGive(s, cover, ERR_IO);
+    mine = false;
+    TEST_ASSERT_EQ(ScribeTry(s, second, &other, &refusal), SCRIBE_REFUSED,
+                   "a pass that fails refuses what it covered");
+    TEST_ASSERT_EQ(refusal, ERR_IO, "with the pass's own answer");
+    TEST_ASSERT_EQ(ScribeTry(s, first, &other, &refusal), SCRIBE_WRITTEN,
+                   "and takes nothing from what an earlier pass wrote");
+out:
+    if (mine)
+        ScribeGive(s, cover, OK);
+    return verdict;
+}
+
+/* True once the TSC passes the bound ctx points at: a wait nothing else
+ * settles. */
+static bool StandBoundPassed(const void *ctx)
+{
+    return rdtsc() >= *(const uint64_t *)ctx;
+}
+
+static Scribe s_scribe_self = SCRIBE_INIT(SCRIBE_RANK_SYNC, "the stand's own Scribe, held beneath");
+
+/* A Scribe this core holds beneath the caller is answered SELF — by a try, and
+ * at once by both waits, which would otherwise spin for a holder that cannot
+ * run until they return. And a Scribe held by a core that is not running is
+ * not taken over: an orderly halt stops no core in the middle of a pass, so a
+ * holder that is not running is one still finishing its pass, and it is
+ * waited for. */
+static TestResult TestStandScribeNeverWaitsOnItself(void)
+{
+    TestResult verdict = TEST_PASS;
+    Scribe    *s       = &s_scribe_self;
+    uint32_t   me      = (uint32_t)amp_get_core_index() + 1u;
+    uint32_t   stopped = (uint32_t)g_amp.total_cores + 1u;   /* no processor has it */
+    uint64_t   cover   = 0, ticket, bound;
+    error_t    refusal = OK;
+
+    ticket = ScribeAsk(s);
+    __atomic_store_n(&s->holder, me, __ATOMIC_RELEASE);
+    TEST_ASSERT_EQ(ScribeTry(s, ticket, &cover, &refusal), SCRIBE_SELF,
+                   "a Scribe this core holds beneath the caller is answered SELF");
+    TEST_ASSERT_EQ(ScribeWait(s, ticket, &cover, &refusal), SCRIBE_SELF,
+                   "and a wait for it returns at once");
+    bound = rdtsc() + cpu_ms_to_tsc(STAND_SCRIBE_BOUND_MS);
+    TEST_ASSERT_EQ(ScribeWaitFor(&s->holder, StandBoundPassed, &bound), SCRIBE_SELF,
+                   "and so does a wait for a turn this core keeps");
+    TEST_ASSERT_EQ(__atomic_load_n(&s->holder, __ATOMIC_ACQUIRE), me,
+                   "and the holder is left as it was");
+
+    __atomic_store_n(&s->holder, stopped, __ATOMIC_RELEASE);
+    TEST_ASSERT_EQ(ScribeTry(s, ticket, &cover, &refusal), SCRIBE_HELD,
+                   "a Scribe held by a core that is not running is not taken over");
+    TEST_ASSERT_EQ(__atomic_load_n(&s->holder, __ATOMIC_ACQUIRE), stopped,
+                   "and its holder stays its holder");
+out:
+    __atomic_store_n(&s->holder, 0u, __ATOMIC_RELEASE);
+    return verdict;
+}
+
+/* A pass held on another core, whose end only a baton brings: the test sets
+ * the Scribe's holder to a running application core and hands the drain core
+ * a probe that publishes what that core's ScribeGive would — written, then
+ * the holder cleared. The drain core then waits for the turn. Kept in
+ * statics, because a probe the wait did not run is still queued when the test
+ * returns, and runs when the drain core next pumps. */
+static Scribe            s_scribe_pumped = SCRIBE_INIT(SCRIBE_RANK_SYNC,
+                                                       "the stand's own Scribe, held on another core");
+static Baton             s_scribe_probe;
+static volatile uint64_t s_scribe_probe_cover;
+static volatile uint32_t s_scribe_probe_ran;
+
+static void StandProbeEndsThePass(void *ctx)
+{
+    (void)ctx;
+    __atomic_store_n(&s_scribe_pumped.written, s_scribe_probe_cover, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_scribe_pumped.holder, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_scribe_probe_ran, 1u, __ATOMIC_RELEASE);
+}
+
+typedef struct {
+    uint64_t ticket;
+    uint64_t bound;
+} StandPumpedWatch;
+
+static bool StandPumpedSettled(const void *ctx)
+{
+    const StandPumpedWatch *w = ctx;
+    return __atomic_load_n(&s_scribe_pumped.written, __ATOMIC_ACQUIRE) >= w->ticket ||
+           rdtsc() >= w->bound;
+}
+
+static TestResult TestStandScribeWaiterKeepsPumping(void)
+{
+    TestResult       verdict = TEST_PASS;
+    Scribe          *s       = &s_scribe_pumped;
+    uint8_t          other   = g_amp.total_cores;
+    uint64_t         cover   = 0;
+    error_t          refusal = OK;
+    bool             passed  = false;
+    StandPumpedWatch watch;
+
+    if (amp_get_core_index() != g_amp.bsp_index)
+        return test_steps_aside("the wait is asked of the drain core, and the tests run on another");
+    for (uint8_t c = 0; c < g_amp.total_cores; c++) {
+        if (c != g_amp.bsp_index && amp_core_online(&g_amp.cores[c])) {
+            other = c;
+            break;
+        }
+    }
+    if (other == g_amp.total_cores)
+        return test_steps_aside("no other core is running to hold the Scribe");
+
+    watch.ticket = ScribeAsk(s);
+    s_scribe_probe_cover = watch.ticket;
+    s_scribe_probe_ran   = 0;
+    __atomic_store_n(&s->holder, (uint32_t)other + 1u, __ATOMIC_RELEASE);
+    s_scribe_probe.run = StandProbeEndsThePass;
+    s_scribe_probe.ctx = NULL;
+    passed = BatonPass(&s_scribe_probe);
+    TEST_ASSERT(passed, "the probe is handed to the drain core");
+
+    watch.bound = rdtsc() + cpu_ms_to_tsc(STAND_SCRIBE_BOUND_MS);
+    TEST_ASSERT_EQ(ScribeWaitFor(&s->holder, StandPumpedSettled, &watch), SCRIBE_WRITTEN,
+                   "the drain core's wait for a turn another core keeps is settled");
+    TEST_ASSERT(__atomic_load_n(&s_scribe_probe_ran, __ATOMIC_ACQUIRE),
+                "by the probe, which the drain core ran while it waited");
+    TEST_ASSERT_EQ(ScribeTry(s, watch.ticket, &cover, &refusal), SCRIBE_WRITTEN,
+                   "and the ask is answered by the pass that ended");
+out:
+    if (!passed)
+        __atomic_store_n(&s->holder, 0u, __ATOMIC_RELEASE);
+    return verdict;
+}
+
 // ============================================================================
 // The suite
 // ============================================================================
@@ -541,6 +776,14 @@ static const TestCase g_stand_tests[] = {
     { .name = "stand_lockrank_names_the_medium",  .func = TestStandLockRankNamesTheMedium,
       .reach = TEST_READS_ONLY },
     { .name = "stand_lockrank_names_the_order",   .func = TestStandLockRankNamesTheOrder,
+      .reach = TEST_READS_ONLY },
+    { .name = "stand_flush_ticket",               .func = TestStandFlushTicket,
+      .reach = TEST_READS_ONLY },
+    { .name = "stand_scribe_covers_only_what_was_asked",
+      .func = TestStandScribeCoversOnlyWhatWasAsked, .reach = TEST_READS_ONLY },
+    { .name = "stand_scribe_never_waits_on_itself", .func = TestStandScribeNeverWaitsOnItself,
+      .reach = TEST_READS_ONLY },
+    { .name = "stand_scribe_waiter_keeps_pumping", .func = TestStandScribeWaiterKeepsPumping,
       .reach = TEST_READS_ONLY },
 
     { .name  = "stand_rmw_read_refused", .func = TestStandRmwReadRefused,

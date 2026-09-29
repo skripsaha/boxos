@@ -9,10 +9,12 @@
  *
  *  This is the "real-HW" path for legacy PATA: every disk transfer is issued
  *  as a Bus-Master IDE DMA command and completes via the channel's INTRQ
- *  (BMISR.IRQ + drive STATUS read), never by polling the device. Bottom-half
+ *  (BMISR.IRQ + drive STATUS read), never by polling the device. The latch is
+ *  read by the IRQ handler and by the waiter itself, whichever comes first,
+ *  so no completion waits for the core the interrupt is routed to. Bottom-half
  *  work (memcpy of read data into the caller buffer, the error report) runs
- *  on the waiting caller, which claims the channel's `landing` slot the IRQ
- *  stamped (no kmalloc / sleeping locks from IRQ).
+ *  on the waiting caller, which claims the channel's `landing` slot the
+ *  completion stamped (no kmalloc / sleeping locks from IRQ).
  *
  *  Channel model: PATA is master/slave on a single bus, so only one command
  *  can be in flight per channel at any time. Submits past that point are
@@ -59,8 +61,10 @@ void ata_async_negotiate_dma_mode(uint8_t drive_idx, const uint16_t *id);
  * DMA, AND the channel finished ata_async_init successfully. */
 bool ata_async_usable(uint8_t drive_idx);
 
-/* Sync wrapper — submit then wait on the cmd's done flag with IF=1 (the
- * IRQ stamps `landing`, the waiter claims it and runs the bottom half). `count`
+/* Sync wrapper — submit then wait on the cmd's done flag with interrupts as
+ * the caller left them: the waiter reads the channel's interrupt latch itself
+ * as well as claiming the `landing` the IRQ handler stamps, and runs the bottom
+ * half, so the wait needs no interrupt taken on any core. `count`
  * must be in 1..8 (one 4 KB staging page). Returns 0 on success
  * or negative ATA_ERR_*. Safe to call from kernel context when the
  * caller is NOT a K-Core that other code expects to keep pumping

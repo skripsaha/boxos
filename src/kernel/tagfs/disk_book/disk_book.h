@@ -37,7 +37,6 @@
 #define DISK_BOOK_ENTRY_SIZE        1024
 #define DISK_BOOK_SECTORS_PER_ENTRY 2
 #define DISK_BOOK_CAPACITY          512
-#define DISK_BOOK_FLUSH_THRESH      64     /* flush cache every N appends      */
 
 // Record types
 #define DISK_BOOK_TYPE_REDIRECT     0x01    /* CoW redirect: old_block→new_block */
@@ -95,18 +94,18 @@ typedef struct {
 error_t  DiskBookInit(uint64_t head_sector, uint64_t backup_sector,
                      uint64_t records_sector);
 error_t  DiskBookValidateAndReplay(void);   /* restore redirects into CoW    */
-void     DiskBookShutdown(void);
+void     DiskBookShutdown(void);            /* forgets the book, writes nothing */
 
-/* Append one CoW redirect durably. tag_bits = owning file's well-known tag
- * bitmask (0 if unknown). Graceful on overflow (returns ERR_DISK_FULL). */
+/* Append one CoW redirect to the log on the medium; it is durable at the
+ * volume's next flush, never one of its own. tag_bits = owning file's
+ * well-known tag bitmask (0 if unknown). Graceful on overflow (returns
+ * ERR_DISK_FULL). */
 error_t  DiskBookLogRedirect(uint32_t snapshot_id, uint32_t old_block,
                              uint32_t new_block, uint64_t tag_bits);
 
 /* Drop all on-disk redirects (count→0). Used to compact: caller then re-logs
  * the surviving redirects. */
 void     DiskBookResetRedirects(void);
-
-error_t  DiskBookCheckpoint(void);          /* flush cache + persist          */
 
 error_t  DiskBookGetStats(DiskBookStats* stats);
 error_t  DiskBookPrintStats(void);

@@ -150,8 +150,9 @@ def PlantRegistrySplit(t, over, at):
 
 def PlantLink(t, over, name, at):
     """What a chain grown link first leaves when the power goes before the new
-    block is written (MP-D5, tag_registry.c and file_table.c flush): the
-    chain's last block naming data block `at`, ground nothing ever stamped."""
+    block is written (MP-D5, as the registry and the file table grew before
+    step 1.1): the chain's last block naming data block `at`, ground nothing
+    ever stamped."""
     last = t.f.chains[name][0][-1]
     raw = t.Block(over, last)
     struct.pack_into("<I", raw, 4, at)
@@ -644,7 +645,7 @@ def ConstantsCheck(src):
                   ("REGISTRY_DATA", "TAGFS_REGISTRY_DATA_SIZE"), ("MPOOL_DATA", "TAGFS_MPOOL_DATA_SIZE"),
                   ("FTABLE_PER_BLOCK", "TAGFS_FTABLE_PER_BLOCK"), ("MAX_TAG_ID", "TAGFS_MAX_TAG_ID"),
                   ("FILE_ACTIVE", "TAGFS_FILE_ACTIVE"), ("FILE_TRASHED", "TAGFS_FILE_TRASHED"),
-                  ("FILE_HIDDEN", "TAGFS_FILE_HIDDEN"), ("FILE_COW", "TAGFS_FILE_COW"),
+                  ("FILE_HIDDEN", "TAGFS_FILE_HIDDEN"),
                   ("TAG_FLAG_HAS_VALUE", "TAGFS_TAG_FLAG_HAS_VALUE"), ("TAG_FLAG_SYSTEM", "TAGFS_TAG_FLAG_SYSTEM"),
                   ("COW_MANIFEST_MAGIC", "COW_MANIFEST_MAGIC"), ("COW_MANIFEST_MAX", "COW_MANIFEST_MAX"),
                   ("DISKBOOK_MAGIC", "DISK_BOOK_MAGIC"), ("DISKBOOK_SB_MAGIC", "DISK_BOOK_SB_MAGIC"),

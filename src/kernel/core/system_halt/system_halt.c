@@ -340,7 +340,21 @@ static void halt_drain_async_writes(void)
  * so the kernel has one answer to "a core is not responding", not two. */
 #define HALT_AP_ARRIVAL_US ((uint64_t)CONFIG_TLB_SHOOTDOWN_PANIC_MS * 1000ULL)
 
-void halt_all_ap_cores(void)
+volatile bool g_halt_orderly = false;
+
+void HaltFreezeHere(void)
+{
+    __asm__ volatile("cli" ::: "memory");
+    /* The core's own word that it arrived, and the last thing it does: the
+     * release store pairs with the roll call's acquire load, and nothing of
+     * this core's is in flight after it. */
+    __atomic_store_n(&g_amp.cores[amp_get_core_index()].halted, (uint8_t)1,
+                     __ATOMIC_RELEASE);
+    for (;;)
+        __asm__ volatile("cli; hlt");
+}
+
+void halt_all_ap_cores(bool orderly)
 {
     if (!g_amp.multicore_active)
         return;
@@ -362,6 +376,13 @@ void halt_all_ap_cores(void)
         if (asked[c])
             __atomic_store_n(&g_amp.cores[c].halted, (uint8_t)0, __ATOMIC_RELAXED);
     }
+
+    /* Raised before the IPI can land anywhere: a core that holds a Scribe
+     * must already know, when the IPI reaches it, that this stop may wait for
+     * the end of its pass. The roll call below waits for that end the same
+     * way it waits for any other arrival. */
+    if (orderly)
+        __atomic_store_n(&g_halt_orderly, true, __ATOMIC_RELEASE);
 
     lapic_send_ipi_all_excluding_self(IPI_PANIC_VECTOR);
 
@@ -425,13 +446,11 @@ void halt_all_ap_cores(void)
          * in that core's LAPIC IRR until the lock is released — for every
          * section that does not turn interrupts back on itself. process_lock
          * and the cleanup queue's lock are such sections, so a complete roll
-         * call proves them unheld by any AP.
-         *
-         * It does not prove that of every lock. ata_dma_sync runs `sti` and
-         * waits for its DMA inside its caller's sections (g_ledger_lock
-         * through tagfs_write_ledger, on a legacy-IDE seat with more than one
-         * core), so a core can answer holding one, and the sync below then
-         * waits on it for good. */
+         * call proves them unheld by any AP. So are the ones a legacy-IDE DMA
+         * wait runs under: the wait takes the drive's answer itself
+         * (BmideAnswerHere, drivers/disk/ata_async.c) and never turns
+         * interrupts on for the BSP's, so a core in it answers only after its
+         * caller's lock is let go. */
         kprintf("[HALT] All AP cores stopped (roll call complete)\n");
         return;
     }
@@ -793,7 +812,7 @@ void system_halt(bool reboot)
     WireForceRelease();
     WireDrain();
 
-    halt_all_ap_cores();
+    halt_all_ap_cores(true);
     WireForceRelease();
     WireDrain();
 

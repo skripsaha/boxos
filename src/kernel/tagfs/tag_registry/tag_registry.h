@@ -11,9 +11,8 @@ void         tag_registry_mark_system(TagRegistry* reg, uint16_t tag_id);
 bool         tag_registry_is_system(TagRegistry* reg, uint16_t tag_id);
 const char*  tag_registry_key(TagRegistry* reg, uint16_t tag_id);
 const char*  tag_registry_value(TagRegistry* reg, uint16_t tag_id);
-TagKeyGroup* tag_registry_key_group(TagRegistry* reg, const char* key);
-int          tag_registry_flush(TagRegistry* reg);
-bool         tag_registry_is_dirty(void);
+error_t      TagRegistryKeyIds(TagRegistry* reg, const char* key, TagIdList* out);
+error_t      tag_registry_flush(TagRegistry* reg);
 int          tag_registry_load(TagRegistry* reg, uint32_t first_block);
 
 #endif // TAG_REGISTRY_H

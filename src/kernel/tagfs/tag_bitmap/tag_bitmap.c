@@ -325,19 +325,12 @@ void tag_bitmap_remove_file(TagBitmapIndex* idx, uint32_t file_id) {
 // Query cache helpers (called under lock)
 // ---------------------------------------------------------------------------
 
-static uint32_t query_hash(const uint16_t* tag_ids, uint32_t tag_count,
-                           TagKeyGroup** groups, uint32_t group_count) {
+/* Only a query of plain tags is cached, so only its tags are hashed. */
+static uint32_t query_hash(const uint16_t* tag_ids, uint32_t tag_count) {
     uint32_t h = 0x811c9dc5;  // FNV-1a
     for (uint32_t i = 0; i < tag_count; i++) {
         h ^= tag_ids[i];
         h *= 0x01000193;
-    }
-    for (uint32_t g = 0; g < group_count; g++) {
-        if (!groups[g]) continue;
-        for (uint32_t k = 0; k < groups[g]->count; k++) {
-            h ^= groups[g]->tag_ids[k] | 0x80000000;
-            h *= 0x01000193;
-        }
     }
     return h;
 }
@@ -444,7 +437,7 @@ static bool bitmap_is_empty(const uint8_t* bitmap, uint32_t byte_count) {
 
 int tag_bitmap_query(TagBitmapIndex* idx,
                      const uint16_t* tag_ids, uint32_t tag_count,
-                     TagKeyGroup** groups, uint32_t group_count,
+                     const TagIdList* groups, uint32_t group_count,
                      uint32_t* out_file_ids, uint32_t max_results) {
     if (!idx || !out_file_ids) {
         return -1;
@@ -460,7 +453,7 @@ int tag_bitmap_query(TagBitmapIndex* idx,
     // --- Cache lookup (only for simple tag-only queries) ---
     uint32_t hash = 0;
     if (tag_count > 0 && group_count == 0) {
-        hash = query_hash(tag_ids, tag_count, groups, group_count);
+        hash = query_hash(tag_ids, tag_count);
         QueryCacheEntry* cached = cache_lookup(idx, hash, tag_ids, tag_count);
         if (cached) {
             uint32_t copy = cached->count < max_results ? cached->count : max_results;
@@ -528,8 +521,8 @@ int tag_bitmap_query(TagBitmapIndex* idx,
 
     // AND with each group (OR within group)
     for (uint32_t g = 0; g < group_count; g++) {
-        TagKeyGroup* grp = groups[g];
-        if (!grp || grp->count == 0) {
+        const TagIdList* grp = &groups[g];
+        if (grp->count == 0) {
             continue;
         }
 
@@ -542,7 +535,7 @@ int tag_bitmap_query(TagBitmapIndex* idx,
         memset(temp, 0, result_size);
 
         for (uint32_t k = 0; k < grp->count; k++) {
-            uint16_t tid = grp->tag_ids[k];
+            uint16_t tid = grp->ids[k];
             if ((uint32_t)tid >= idx->bitmap_capacity || !idx->bitmaps[tid]) {
                 continue;
             }

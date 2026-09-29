@@ -23,8 +23,8 @@
 #include "self_heal/self_heal.h"
 #include "integrity/integrity.h"
 #include "settle_cut/settle_cut.h"
+#include "scribe/scribe.h"
 #include "../../kernel/drivers/timer/rtc.h"
-#include "../../lib/kernel/crypto.h"
 #include "logbook.h"
 #include "cpu_calibrate.h"
 
@@ -1323,7 +1323,12 @@ static void volume_would_not_flush(error_t why)
 
 error_t tagfs_flush_cache(void)
 {
+    /* The one place a flush ticket is taken and answered (scribe.h): taken
+     * before the medium is asked, so the flush it stands for was issued after
+     * every write whose completion was seen before it. */
+    uint64_t ticket = VolumeFlushBegin();
     int said = BoardroomFlush(g_tagfs_seat);
+    VolumeFlushEnd(ticket, said == 0);
     if (said == 0) {
         return OK;
     }
@@ -1368,48 +1373,6 @@ error_t tagfs_flush_cache(void)
         volume_would_not_flush(why);
     }
     return why;
-}
-
-/*
- * ‼ COME BACK UNTIL THERE IS A REAL ANSWER — AND WHY THAT TERMINATES.
- *
- * ERR_BUSY from the flush is not an answer about the medium at all. It says
- * one thing: another whole-port command holds this port AT THIS INSTANT. Two
- * flushes of the same volume meeting is ordinary traffic, and the wave that
- * taught the flush to refuse turned that meeting into a failed write for one
- * of the two — where before it simply waited and both succeeded. Propagating
- * it was half a mechanism.
- *
- * So a caller whose whole purpose is durability asks again, and this is not a
- * clock and not a count: it ends on a FACT, three of which are reachable and
- * all of which are terminal.
- *
- *   - The door opens. The holder's command is itself bounded — a device that
- *     never answers is declared non-completing by AHCI_CMD_PATIENCE_MS — so
- *     the hold ends whether the flush under it succeeded or failed.
- *   - The holder stops being a running core. ahci_port_take_whole asks
- *     amp_core_online() and takes an abandoned door over on the spot, which
- *     is what makes this safe at shutdown, where the holder can be a core
- *     that has already been stopped.
- *   - The medium refuses, or leaves. Either is a different error_t and comes
- *     straight back out.
- *
- * Nothing here abandons the work it was given after a deadline — which is the
- * defect this is the opposite of — and nothing here invents a number.
- *
- * It is NOT used by the async write path: that runs on the drain core, where
- * a spin would stop every other job from making progress, so w_commit_txn
- * hands the job back to the same core through its own baton instead. Same
- * mechanism, spelled the way that place can spell it.
- */
-static error_t tagfs_flush_cache_insisting(void)
-{
-    error_t flushed = tagfs_flush_cache();
-    while (flushed == ERR_BUSY) {
-        cpu_pause();
-        flushed = tagfs_flush_cache();
-    }
-    return flushed;
 }
 
 /*
@@ -2068,259 +2031,6 @@ error_t tagfs_write_block(uint32_t block, const void *buffer) {
         return ERR_WRITE_FAILED;
 
     return OK;
-}
-
-static const uint8_t g_ledger_magic[8] = {
-    VOLUME_LEDGER_MAGIC_0, VOLUME_LEDGER_MAGIC_1, VOLUME_LEDGER_MAGIC_2,
-    VOLUME_LEDGER_MAGIC_3, VOLUME_LEDGER_MAGIC_4, VOLUME_LEDGER_MAGIC_5,
-    VOLUME_LEDGER_MAGIC_6, VOLUME_LEDGER_MAGIC_7
-};
-
-// ----------------------------------------------------------------------------
-// The Ledger — what is true of the volume today (volume_ledger.h)
-//
-// Two copies, one block apart. A read takes the newer of the two that is
-// intact; a write goes to the older one with a sequence number one higher. So
-// the copy that survives a torn write is never the copy being written, and
-// recovery is a comparison rather than a repair.
-// ----------------------------------------------------------------------------
-
-/* Which of the two copies was written last. The next write goes to the other
- * one — this is the whole of the alternation. */
-static uint32_t g_ledger_current = 0;
-
-/* What the volume remembers of the Use Context — the comma-joined list it was
- * last told, kept beside the counters and written out with them on every
- * Ledger write. One sector is the record's whole world (ledger_read_copy takes
- * one and refuses a longer claim), so this is bounded by what a sector holds
- * past the fixed fields: a list that will not fit is not kept in part.
- *
- * One Ledger writer at a time, the whole way through. Two of them reading the
- * same seq, building two records and racing for the same older copy would
- * leave the medium with whichever landed last and memory with whichever
- * committed last — not necessarily the same one. A leaf: nothing under it
- * takes another lock, and only the stand reads it from outside (tagfs.h). */
-TagFSLock         g_ledger_lock = TAGFS_LOCK_INIT("ledger", LOCK_RANK_LEAF);
-static char       g_ledger_use[TAGFS_SECTOR_SIZE];
-static uint16_t   g_ledger_use_len;
-#define LEDGER_USE_MAX  ((size_t)TAGFS_SECTOR_SIZE - sizeof(VolumeLedger))
-
-static uint64_t ledger_vlba(uint32_t copy)
-{
-    return ((uint64_t)g_state.layout.state_block + copy) * TAGFS_BLOCK_SECTORS;
-}
-
-/*
- * Read one copy. Returns true when it is present, intact, and long enough to
- * hold what this kernel knows how to read — a Ledger written by a newer kernel
- * is longer than this one expects and is read up to what is understood, which
- * is what `bytes` is for.
- */
-static bool ledger_read_copy(uint32_t copy, VolumeLedger *out,
-                             char *tail, uint16_t *tail_len)
-{
-    uint8_t buf[TAGFS_SECTOR_SIZE];
-    if (disk_read_sectors(ledger_vlba(copy), 1, buf) != 0) {
-        kprintf("[Ledger] copy %u could not be read off the medium\n", copy);
-        return false;
-    }
-
-    VolumeLedger led;
-    memcpy(&led, buf, sizeof(led));
-
-    if (memcmp(led.magic, g_ledger_magic, sizeof(g_ledger_magic)) != 0) {
-        kprintf("[Ledger] copy %u carries no ledger\n", copy);
-        return false;
-    }
-
-    /* Bounded before it is summed: `bytes` came off the medium and a stated
-     * length longer than the sector it lives in would sum over memory this
-     * does not own. Required is what every reader needs, not what this one
-     * knows: a record from before the Use Context was kept ends at the
-     * counters, and refusing it would refuse every volume made before then. */
-    if (led.bytes < VOLUME_LEDGER_REQUIRED_BYTES || led.bytes > TAGFS_SECTOR_SIZE) {
-        kprintf("[Ledger] copy %u states a length of %u, which cannot be one\n",
-                copy, led.bytes);
-        return false;
-    }
-
-    uint8_t probe[TAGFS_SECTOR_SIZE];
-    memcpy(probe, buf, led.bytes);
-    memset(probe + __builtin_offsetof(VolumeLedger, crc32), 0, sizeof(uint32_t));
-    uint32_t have = KCrc32(probe, led.bytes);
-    if (have != led.crc32) {
-        kprintf("[Ledger] copy %u does not match its own checksum "
-                "(0x%08x against 0x%08x) — it was torn mid-write\n",
-                copy, have, led.crc32);
-        return false;
-    }
-
-    /* What a shorter record does not carry reads as zero, not as whatever
-     * followed it on the medium. */
-    if (led.bytes < sizeof(led))
-        memset((uint8_t *)&led + led.bytes, 0, sizeof(led) - led.bytes);
-
-    /* The remembered Use Context rides after the fixed fields, inside the
-     * summed bytes — so it is already proven intact by the checksum above;
-     * only its place in the record is checked here. */
-    *tail_len = 0;
-    if (led.use_context_bytes) {
-        uint32_t off = led.use_context_offset;
-        uint32_t len = led.use_context_bytes;
-        if (off < VOLUME_LEDGER_REQUIRED_BYTES || off + len > led.bytes) {
-            kprintf("[Ledger] copy %u places its Use Context at %u for %u bytes, "
-                    "outside its own record — it remembers none\n", copy, off, len);
-        } else {
-            memcpy(tail, buf + off, len);
-            *tail_len = (uint16_t)len;
-        }
-    }
-
-    *out = led;
-    return true;
-}
-
-/* One copy, read off the medium by the reader above and handed over as it
- * is — for a proof that what was said to the volume is what it holds. */
-bool tagfs_ledger_peek(uint32_t copy, VolumeLedger *out, char *tail, uint16_t *tail_len)
-{
-    if (copy >= VOLUME_LEDGER_COPIES || !out || !tail || !tail_len) return false;
-    return ledger_read_copy(copy, out, tail, tail_len);
-}
-
-/*
- * Take up the newer of the two.
- *
- * One unreadable copy is survivable and is said out loud, because a volume
- * running on a single Ledger has no second opinion left. Both unreadable is
- * not survivable: the counters are gone, and inventing them would hand out
- * block numbers that belong to files.
- */
-static error_t ledger_load(void)
-{
-    VolumeLedger led[VOLUME_LEDGER_COPIES];
-    bool         ok[VOLUME_LEDGER_COPIES];
-    uint32_t     live = 0;
-
-    /* Each copy's remembered context, read with it; the newest copy's is the
-     * one the volume stands on. Off the stack: two sectors' worth. */
-    char *tails = kmalloc((size_t)VOLUME_LEDGER_COPIES * TAGFS_SECTOR_SIZE);
-    uint16_t tail_len[VOLUME_LEDGER_COPIES];
-    if (!tails) return ERR_NO_MEMORY;
-
-    for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
-        ok[c] = ledger_read_copy(c, &led[c], tails + (size_t)c * TAGFS_SECTOR_SIZE,
-                                 &tail_len[c]);
-        if (ok[c]) live++;
-    }
-
-    if (live == 0) {
-        kfree(tails);
-        kprintf("[Ledger] neither copy is readable — this volume cannot say "
-                "what is on it\n");
-        return ERR_TAGFS_CORRUPTED;
-    }
-
-    uint32_t newest = 0;
-    bool     have   = false;
-    for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
-        if (!ok[c]) continue;
-        if (!have || led[c].seq > led[newest].seq) {
-            newest = c;
-            have   = true;
-        }
-    }
-
-    g_state.ledger   = led[newest];
-    g_ledger_current = newest;
-
-    TagFSLockTake(&g_ledger_lock);
-    g_ledger_use_len = tail_len[newest];
-    memcpy(g_ledger_use, tails + (size_t)newest * TAGFS_SECTOR_SIZE, g_ledger_use_len);
-    TagFSLockDrop(&g_ledger_lock);
-    kfree(tails);
-
-    if (live < VOLUME_LEDGER_COPIES) {
-        kprintf("[Ledger] running on copy %u alone (seq %llu); the other one "
-                "did not survive\n",
-                newest, (unsigned long long)led[newest].seq);
-    }
-    return OK;
-}
-
-/* The write itself; g_ledger_lock is held by the caller. */
-static error_t ledger_write_locked(void)
-{
-    if (g_state.layout.state_blocks < VOLUME_LEDGER_COPIES) {
-        return ERR_TAGFS_METADATA_ERROR;
-    }
-
-    uint32_t target = (g_ledger_current + 1) % VOLUME_LEDGER_COPIES;
-
-    uint8_t buf[TAGFS_SECTOR_SIZE];
-    memset(buf, 0, sizeof(buf));
-
-    VolumeLedger led = g_state.ledger;
-    memcpy(led.magic, g_ledger_magic, sizeof(g_ledger_magic));
-    led.seq          = g_state.ledger.seq + 1;
-    led.written_unix = rtc_get_unix64();
-    /* The remembered Use Context follows the fixed fields and is summed with
-     * them: a torn write loses the context together with the counters, never
-     * one without the other. */
-    led.use_context_offset = g_ledger_use_len ? (uint16_t)sizeof(VolumeLedger) : 0;
-    led.use_context_bytes  = g_ledger_use_len;
-    led.bytes        = (uint32_t)sizeof(VolumeLedger) + g_ledger_use_len;
-    led.crc32        = 0;
-    memcpy(buf, &led, sizeof(led));
-    memcpy(buf + sizeof(led), g_ledger_use, g_ledger_use_len);
-    led.crc32 = KCrc32(buf, led.bytes);
-    memcpy(buf + __builtin_offsetof(VolumeLedger, crc32), &led.crc32, sizeof(led.crc32));
-
-    if (disk_write_sectors(ledger_vlba(target), 1, buf) != OK) {
-        debug_printf("[Ledger] copy %u would not take the write\n", target);
-        return ERR_TAGFS_METADATA_ERROR;
-    }
-
-    /* Only now is the new one the current one — if the write failed, the older
-     * copy is still what the volume stands on. */
-    g_state.ledger   = led;
-    g_ledger_current = target;
-    return OK;
-}
-
-error_t tagfs_write_ledger(void)
-{
-    TagFSLockTake(&g_ledger_lock);
-    error_t rc = ledger_write_locked();
-    TagFSLockDrop(&g_ledger_lock);
-    return rc;
-}
-
-error_t tagfs_remember_use_context(const char *list, size_t len, bool *remembered)
-{
-    if (!list && len) return ERR_INVALID_ARGUMENT;
-
-    /* A list the record cannot hold is not cut short and not kept: the volume
-     * forgets rather than remembering half of what was said, and says so. */
-    bool fits = len <= LEDGER_USE_MAX;
-
-    TagFSLockTake(&g_ledger_lock);
-    g_ledger_use_len = fits ? (uint16_t)len : 0;
-    if (g_ledger_use_len) memcpy(g_ledger_use, list, g_ledger_use_len);
-    error_t rc = ledger_write_locked();
-    TagFSLockDrop(&g_ledger_lock);
-
-    if (remembered) *remembered = fits && rc == OK;
-    return rc;
-}
-
-size_t tagfs_recall_use_context(char *buf, size_t cap)
-{
-    TagFSLockTake(&g_ledger_lock);
-    size_t len = g_ledger_use_len;
-    if (buf && cap >= len && len) memcpy(buf, g_ledger_use, len);
-    TagFSLockDrop(&g_ledger_lock);
-    return len;
 }
 
 // ----------------------------------------------------------------------------
@@ -3462,9 +3172,28 @@ error_t tagfs_sync(void)
                                        : "no volume is mounted there");
         return ERR_TAGFS_NOT_INITIALIZED;
     }
-    tagfs_sync_inside();
+    /* One sync at a time: two, each cut by the other's flush, could leave the
+     * medium a table naming a pool record of the other sync that no flush has
+     * covered yet. A sync asked for while another runs is answered by the
+     * pass that covers it — its own, or the one that began after it asked. */
+    uint64_t cover  = 0;
+    error_t  rc     = OK;
+    uint64_t ticket = ScribeAsk(&g_sync_scribe);
+    switch (ScribeWait(&g_sync_scribe, ticket, &cover, &rc)) {
+    case SCRIBE_MINE:
+        tagfs_sync_inside();
+        ScribeGive(&g_sync_scribe, cover, OK);
+        break;
+    case SCRIBE_SELF:
+        kprintf("[TagFS] sync refused: a sync on this core is suspended beneath "
+                "this one, and waiting for it here would never end\n");
+        rc = ERR_BUSY;
+        break;
+    default:
+        break;      /* WRITTEN leaves OK; REFUSED has put the pass's refusal in rc */
+    }
     tagfs_leave();
-    return OK;
+    return rc;
 }
 
 static void tagfs_sync_inside(void)
@@ -3586,9 +3315,9 @@ static void tagfs_sync_inside(void)
      * It INSISTS rather than reporting a busy port: a sync is asked for
      * exactly when somebody needs these records on the media, and "somebody
      * else is flushing this instant" is not an answer to that. See
-     * tagfs_flush_cache_insisting for why the asking ends. */
+     * VolumeFlushFor (scribe.h) for why the asking ends. */
     SETTLE_CUT_AT(SETTLE_CUT_POINT_FLUSH);
-    error_t flushed = tagfs_flush_cache_insisting();
+    error_t flushed = VolumeFlushFor(VolumeFlushNeed());
     if (flushed != OK) {
         kprintf("[TagFS] sync: the registry, the pool, the file table, the "
                 "bitmap and the ledger are all written, and none of them is "
@@ -3632,9 +3361,7 @@ static void tagfs_clear_the_ground(void)
 
     /* What this volume remembered goes with it; the next one is read, not
      * assumed. */
-    TagFSLockTake(&g_ledger_lock);
-    g_ledger_use_len = 0;
-    TagFSLockDrop(&g_ledger_lock);
+    LedgerLetGo();
 
     if (g_state.registry) {
         tag_registry_destroy(g_state.registry);
@@ -3647,7 +3374,7 @@ static void tagfs_clear_the_ground(void)
         g_state.bitmap_index = NULL;
     }
 
-    file_table_shutdown(false);
+    file_table_shutdown();
     meta_pool_shutdown(false);
 
     free_list_destroy();
@@ -3671,7 +3398,6 @@ static void tagfs_clear_the_ground(void)
     BraidShutdown();
     IntegrityShutdown();
     TagFS_TestsShutdown();
-    /* Last, so everything above it has been journaled by the time it goes. */
     DiskBookShutdown();
 
     g_state.initialized = false;
@@ -3913,7 +3639,9 @@ static void tagfs_name_stem(const char *filename, char *out, size_t out_size)
 }
 
 /* Intern the name's tag. Called WITHOUT g_state.lock: a new tag flushes the
- * registry to the medium, and that I/O must not run under the state lock. */
+ * registry to the medium, and that flush writes, and may wait for another
+ * core's flush of the registry — neither of which may happen under the state
+ * lock. A name the registry already has costs the flush nothing. */
 static uint16_t tagfs_name_tag_intern(const char *filename)
 {
     char stem[128];
@@ -3921,10 +3649,7 @@ static uint16_t tagfs_name_tag_intern(const char *filename)
     if (stem[0] == '\0' || !g_state.registry)
         return TAGFS_INVALID_TAG_ID;
     uint16_t tag = tag_registry_intern(g_state.registry, stem, NULL);
-    if (tag_registry_is_dirty())
-    {
-        tag_registry_flush(g_state.registry);
-    }
+    tag_registry_flush(g_state.registry);
     return tag;
 }
 
@@ -4483,11 +4208,9 @@ static int tagfs_add_tag_string_inside(uint32_t file_id, const char *key, const 
     uint16_t tag_id = tag_registry_intern(g_state.registry, key, value);
     if (tag_id == TAGFS_INVALID_TAG_ID)
         return -1;
-    // Flush registry to disk if a new tag was created (crash safety)
-    if (tag_registry_is_dirty())
-    {
-        tag_registry_flush(g_state.registry);
-    }
+    /* A new tag is written before any file wears it; one the registry
+     * already had costs the flush nothing. */
+    tag_registry_flush(g_state.registry);
     return tagfs_add_tag(file_id, tag_id);
 }
 
@@ -4580,7 +4303,10 @@ static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
     if (!tag_ids)
         return 0;
 
-    TagKeyGroup **groups = kmalloc(sizeof(TagKeyGroup *) * count);
+    /* A wildcard's ids are copies (TagRegistryKeyIds): the registry frees its
+     * own array of a key when the key's next tag outgrows it, and that can
+     * happen on another core while this query reads. */
+    TagIdList *groups = kmalloc(sizeof(TagIdList) * count);
     if (!groups)
     {
         kfree(tag_ids);
@@ -4589,6 +4315,7 @@ static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
 
     uint32_t tag_count = 0;
     uint32_t group_count = 0;
+    int      result = 0;
 
     for (uint32_t i = 0; i < count; i++)
     {
@@ -4603,11 +4330,11 @@ static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
         // Check for wildcard (value == "...")
         if (strcmp(value, "...") == 0)
         {
-            TagKeyGroup *grp = tag_registry_key_group(g_state.registry, key);
-            if (grp)
-            {
-                groups[group_count++] = grp;
-            }
+            TagIdList *grp = &groups[group_count];
+            if (TagRegistryKeyIds(g_state.registry, key, grp) != OK)
+                goto out;
+            if (grp->count > 0)
+                group_count++;
         }
         else
         {
@@ -4616,18 +4343,16 @@ static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
             if (tid == TAGFS_INVALID_TAG_ID)
             {
                 // Tag not in registry — no files can match
-                kfree(tag_ids);
-                kfree(groups);
-                return 0;
+                goto out;
             }
             tag_ids[tag_count++] = tid;
         }
     }
 
-    int result = tag_bitmap_query(g_state.bitmap_index,
-                                  tag_ids, tag_count,
-                                  groups, group_count,
-                                  out_file_ids, max_results);
+    result = tag_bitmap_query(g_state.bitmap_index,
+                              tag_ids, tag_count,
+                              groups, group_count,
+                              out_file_ids, max_results);
 
     // Post-filter: remove trashed/hidden files unless explicitly queried
     if (result > 0)
@@ -4653,13 +4378,11 @@ static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
         // Also check wildcard groups — if a group contains the tag, it's explicit
         for (uint32_t g = 0; g < group_count && (!query_has_trashed || !query_has_hidden); g++)
         {
-            if (!groups[g])
-                continue;
-            for (uint32_t k = 0; k < groups[g]->count; k++)
+            for (uint32_t k = 0; k < groups[g].count; k++)
             {
-                if (groups[g]->tag_ids[k] == trashed_id)
+                if (groups[g].ids[k] == trashed_id)
                     query_has_trashed = true;
-                if (groups[g]->tag_ids[k] == hidden_id)
+                if (groups[g].ids[k] == hidden_id)
                     query_has_hidden = true;
             }
         }
@@ -4681,6 +4404,9 @@ static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
         }
     }
 
+out:
+    for (uint32_t g = 0; g < group_count; g++)
+        kfree(groups[g].ids);
     kfree(tag_ids);
     kfree(groups);
     return result;
@@ -4983,26 +4709,24 @@ static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint6
     // Auto-snapshot before write if versioning enabled (production feature)
     tagfs_auto_snapshot_before_write(handle->file_id);
 
-    /* Serialize writes to the same file. A plain TagFSLockTake would
-     * deadlock with the BMIDE-IRQ-on-BSP topology: this lock is held
-     * across `write_block → ata_dma_sync`, which waits for the BMIDE
-     * completion IRQ. That IRQ lands only on the BSP (legacy IO-APIC
-     * GSI 14). If the BSP is the CONTENDER here, its take has
-     * already CLI'd and the IRQ never delivers; the holder spins
-     * forever waiting for cmd.done and the BSP spins forever waiting
-     * for the lock.
+    /* Serialize writes to the same file — by trying, never by spinning in
+     * TagFSLockTake. This lock is held across `write_block`, and on some
+     * roads the holder's command is finished only by what the BSP does:
+     * an AHCI command slot an asynchronous write holds is given back only
+     * by the BSP's MSI handler or its tick (ahci_retire_slots), and a
+     * continuation queued for the drain core runs only there. A BSP
+     * contending here inside TagFSLockTake would spin with its interrupts
+     * off and run nothing, and the holder would wait on it — for a slot
+     * until its patience runs out and the write is refused, for a
+     * continuation for good.
      *
-     * Break the cycle by trylocking with the IRQ window open between
-     * attempts. Each failed trylock restores RFLAGS (re-enabling IRQs), so
-     * the pending BMIDE IRQ can fire on the BSP and stamp the holder's
-     * `landing` slot; the holder (spinning in ata_dma_sync) claims it, runs
-     * its completion, flips cmd.done, and releases. Opening the IRQ window is
-     * the load-bearing part for BMIDE (the holder self-drains via landing).
-     * The pump beside it is for the drain core: a holder on another core may
-     * be waiting for a continuation that only the drain core can run, and
-     * the drain core standing here must not stop running them. On any other
-     * core the pump is a one-load early-out. Uncontended fast path is
-     * unchanged — trylock succeeds first try. */
+     * So each failed trylock restores RFLAGS, putting this core's
+     * interrupts back as they were between attempts, and the pump beside it
+     * runs the drain core's continuations while it stands here; on any other
+     * core the pump is a one-load early-out. A legacy-IDE DMA needs neither:
+     * its waiter takes the drive's answer itself (BmideAnswerHere,
+     * drivers/disk/ata_async.c). Uncontended fast path is unchanged —
+     * trylock succeeds first try. */
     if (handle->ofe)
     {
         if (!TagFSLockTry(&handle->ofe->write_lock)) {
@@ -5409,10 +5133,11 @@ static int tagfs_truncate_file_inside(uint32_t file_id, uint64_t new_size)
         return -ERR_FILE_NOT_FOUND;
 
     /* The trylock-with-the-IRQ-window-open dance, for the same reason
-     * tagfs_write does it: this lock is held across meta_pool_write ->
-     * write_block -> ata_dma_sync, which waits on a BMIDE completion IRQ that
-     * lands only on the BSP. A plain TagFSLockTake here would deadlock the BSP
-     * against the holder exactly as described above tagfs_write. */
+     * tagfs_write_inside does it: this lock is held across meta_pool_write ->
+     * write_block, whose command may be finished only by the BSP's interrupts
+     * or by a continuation only the drain core runs. A plain TagFSLockTake
+     * here would strand the holder on a contending BSP exactly as described
+     * above tagfs_write_inside. */
     if (handle->ofe)
     {
         if (!TagFSLockTry(&handle->ofe->write_lock)) {

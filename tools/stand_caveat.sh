@@ -64,13 +64,29 @@ caveat_row() {
                     echo "1.4|an anchored file is lost by a later torn sync — the shutdown sync retires its record in place" ;;
         nextfid:FID_PAST_NEXT|halt:FID_PAST_NEXT|race:FID_PAST_NEXT|chaingrow:prefix:FID_PAST_NEXT|chaingrow:subset:FID_PAST_NEXT)
                     echo "1.6|a sync cut between its table and its ledger leaves a table row past the ledger's next_file_id" ;;
-        nextfid:FILE_LOST|halt:FILE_LOST|race:FILE_LOST|chaingrow:subset:FILE_LOST)
+        nextfid:FILE_LOST|halt:FILE_LOST|race:FILE_LOST)
                     echo "1.6|a sync cut between its writes leaves a table row naming a record the pool never got, and the mount deletes the file" ;;
-        nextfid:MISSING|halt:MISSING|race:MISSING|chaingrow:subset:MISSING)
+        nextfid:MISSING|halt:MISSING|race:MISSING)
                     echo "1.6|a sync cut between its writes leaves a named block reading free, for the allocator to hand out again" ;;
+        # chaingrow's own rows lifted in step 1.1 as a side effect of the two D5
+        # fixes (the owner, 2026-09-29: MISSING by name; any other row of chaingrow
+        # that vanishes under full enumeration, the same way). MISSING's only cut
+        # (e0-r048 of the run on a85bb6d5) came with CHAIN_REFUSED:registry: a
+        # named block reading free in a volume the kernel refused to mount, and a
+        # refused mount repairs nothing. Both chains now take a block, stamp it and
+        # have a flush cover the stamp before any link names it, and that flush
+        # splits the sync: on the merged step 1.1 tree the run's 14 writes fall in
+        # epochs of 3, 5, 6 and 0, every subset of each built (116 media, none left
+        # out), and no subset cut of the 87 shows MISSING, FILE_LOST or TAG_ABSENT.
+        chaingrow:subset:MISSING)
+                    echo "|a sync cut between its writes leaves a named block reading free, for the allocator to hand out again" ;;
+        chaingrow:subset:FILE_LOST)
+                    echo "|a sync cut between its writes leaves a table row naming a record the pool never got, and the mount deletes the file" ;;
+        chaingrow:subset:TAG_ABSENT)
+                    echo "|a sync cut between its writes leaves a file wearing a tag the registry does not define" ;;
         nextfid:ORPHAN|halt:ORPHAN|race:ORPHAN)
                     echo "1.6|a sync cut between its writes leaves blocks marked used that nothing owns" ;;
-        nextfid:TAG_ABSENT|halt:TAG_ABSENT|race:TAG_ABSENT|chaingrow:subset:TAG_ABSENT)
+        nextfid:TAG_ABSENT|halt:TAG_ABSENT|race:TAG_ABSENT)
                     echo "1.6|a sync cut between its writes leaves a file wearing a tag the registry does not define" ;;
         nextfid:UNNAMED_RECORD|halt:UNNAMED_RECORD|race:UNNAMED_RECORD)
                     echo "1.6|a sync cut between its writes leaves an ACTIVE record no table row names, its blocks leaked" ;;
@@ -80,23 +96,31 @@ caveat_row() {
                     echo "1.6|a cut keeps a stamped spare header whose link was lost, a block nothing names" ;;
         race:TAG_DUPLICATE)
                     echo "1.6|a registry write torn by the cut leaves a record repeating another's key, and it is dropped" ;;
+        race:RECORD_SHAPE)
+                    echo "1.6|the pool's last block is rewritten in place, so a cut that tears it after its first sector leaves a header counting records the block no longer holds, and the walk stops short" ;;
         chaingrow:prefix:CHAIN_REFUSED:table)
-                    echo "1.1|the file table writes its last block's link to a block it has just taken before that block, so a power cut between the two leaves a chain into unstamped ground and the kernel refuses the volume at every mount" ;;
+                    echo "|the file table writes its last block's link to a block it has just taken before that block, so a power cut between the two leaves a chain into unstamped ground and the kernel refuses the volume at every mount" ;;
         chaingrow:prefix:CHAIN_REFUSED:registry)
-                    echo "1.1|the tag registry writes its last block's link to a block it has just taken before that block, so a power cut between the two leaves a chain into unstamped ground and the kernel refuses the volume at every mount" ;;
+                    echo "|the tag registry writes its last block's link to a block it has just taken before that block, so a power cut between the two leaves a chain into unstamped ground and the kernel refuses the volume at every mount" ;;
         chaingrow:subset:CHAIN_REFUSED:table)
-                    echo "1.1|a cut that keeps the file table's link to its new block and loses that block's own write, both in one flush epoch, leaves a chain into unstamped ground the kernel refuses to mount" ;;
+                    echo "|a cut that keeps the file table's link to its new block and loses that block's own write, both in one flush epoch, leaves a chain into unstamped ground the kernel refuses to mount" ;;
         chaingrow:subset:CHAIN_REFUSED:registry)
-                    echo "1.1|a cut that keeps the tag registry's link to its new block and loses that block's own write, both in one flush epoch, leaves a chain into unstamped ground the kernel refuses to mount" ;;
+                    echo "|a cut that keeps the tag registry's link to its new block and loses that block's own write, both in one flush epoch, leaves a chain into unstamped ground the kernel refuses to mount" ;;
         chaingrow:prefix:ORPHAN|chaingrow:subset:ORPHAN)
                     echo "1.6|a cut that keeps the bitmap of a block the registry or the file table has just taken and loses the link to it leaves that block marked used and owned by nothing" ;;
+        # Both chains grow onto stamped Spares since step 1.1, and each job measured
+        # this code on its own tree: the file table prefix 8 of 26, subset 33 of
+        # 116; the registry prefix 8 of 21, subset 192 of 761. One row holds both;
+        # the merged step 1.1 tree: prefix 16 of 29, subset 28 of 87.
+        chaingrow:prefix:SPARE_UNNAMED|chaingrow:subset:SPARE_UNNAMED)
+                    echo "1.6|a cut after the file table's or the tag registry's new block is stamped and its stamp made durable, and before the link to it is written, keeps that Spare: a stamped header nothing names, a block marked used and owned by nothing" ;;
         # LockRank's places (lockrank_judge, below): every key a gate measured,
         # under the step R1 section 1.7 names for it.
         lockrank:registry@tag_registry_load:read)
-                    echo "1.1|the tag registry is read from the medium under its IRQ-off lock, so a core that looks up a tag spins with interrupts off for as long as the medium takes" ;;
+                    echo "|the tag registry is read from the medium under its IRQ-off lock, so a core that looks up a tag spins with interrupts off for as long as the medium takes" ;;
         lockrank:registry@tag_registry_flush:read|\
         lockrank:registry@tag_registry_flush:write)
-                    echo "1.1|the tag registry's flush holds its IRQ-off lock across every medium read and write it makes, so a core that needs the registry spins with interrupts off for as long as the medium takes" ;;
+                    echo "|the tag registry's flush holds its IRQ-off lock across every medium read and write it makes, so a core that needs the registry spins with interrupts off for as long as the medium takes" ;;
         lockrank:registry@tag_registry_load/readahead@ReadAheadLookup|\
         lockrank:registry@tag_registry_load/integrity@IntegrityVerify|\
         lockrank:registry@tag_registry_load/braid@BraidIsHealthy|\
@@ -104,27 +128,27 @@ caveat_row() {
         lockrank:registry@tag_registry_flush/readahead@ReadAheadInvalidate|\
         lockrank:registry@tag_registry_flush/integrity@IntegrityUpdate|\
         lockrank:registry@tag_registry_flush/braid@BraidIsHealthy)
-                    echo "1.1|a block is read or written for the tag registry with the registry's lock held, so the read-ahead cache's, the integrity map's and Braid's locks are taken under that leaf" ;;
+                    echo "|a block is read or written for the tag registry with the registry's lock held, so the read-ahead cache's, the integrity map's and Braid's locks are taken under that leaf" ;;
         lockrank:registry@tag_registry_flush/state@tagfs_alloc_blocks_inside|\
         lockrank:registry@tag_registry_flush/state@MapOwedSettle)
-                    echo "1.1|the tag registry takes a block for its chain under its own lock, so the volume's state lock is taken under the registry while a rename takes the registry under state: the two orders of one ABBA (MP-D4), which stops both cores" ;;
+                    echo "|the tag registry takes a block for its chain under its own lock, so the volume's state lock is taken under the registry while a rename takes the registry under state: the two orders of one ABBA (MP-D4), which stops both cores" ;;
         lockrank:table@file_table_flush:read|\
         lockrank:table@file_table_flush:write)
-                    echo "1.1|the file table's flush holds its IRQ-off lock across every medium read and write it makes, so a core that looks up a file spins with interrupts off for as long as the medium takes" ;;
+                    echo "|the file table's flush holds its IRQ-off lock across every medium read and write it makes, so a core that looks up a file spins with interrupts off for as long as the medium takes" ;;
         lockrank:table@file_table_flush/readahead@ReadAheadLookup|\
         lockrank:table@file_table_flush/readahead@ReadAheadInvalidate|\
         lockrank:table@file_table_flush/integrity@IntegrityUpdate|\
         lockrank:table@file_table_flush/braid@BraidIsHealthy)
-                    echo "1.1|a block is read or written for the file table with the table's lock held, so the read-ahead cache's, the integrity map's and Braid's locks are taken under that leaf" ;;
+                    echo "|a block is read or written for the file table with the table's lock held, so the read-ahead cache's, the integrity map's and Braid's locks are taken under that leaf" ;;
         lockrank:table@file_table_flush/state@tagfs_alloc_blocks_inside|\
         lockrank:table@file_table_flush/state@MapOwedSettle)
-                    echo "1.1|the file table takes a block for its chain under its own lock, so the volume's state lock is taken under the table while a create takes the table under state: the two orders of one ABBA (MP-D4), which stops both cores" ;;
+                    echo "|the file table takes a block for its chain under its own lock, so the volume's state lock is taken under the table while a create takes the table under state: the two orders of one ABBA (MP-D4), which stops both cores" ;;
         lockrank:integrity@IntegrityVerify:read|\
         lockrank:integrity@IntegrityVerify:write|\
         lockrank:integrity@IntegrityUpdate:read|\
         lockrank:integrity@IntegrityUpdate:write|\
         lockrank:integrity@IntegrityFlush:write)
-                    echo "1.1|a page of the integrity map is read or written under the map's IRQ-off lock, from inside every block read and write, so every core that reads or writes a block spins with interrupts off for as long as the medium takes" ;;
+                    echo "|a page of the integrity map is read or written under the map's IRQ-off lock, from inside every block read and write, so every core that reads or writes a block spins with interrupts off for as long as the medium takes" ;;
         lockrank:integrity@IntegrityVerify/readahead@ReadAheadLookup|\
         lockrank:integrity@IntegrityVerify/readahead@ReadAheadInvalidate|\
         lockrank:integrity@IntegrityUpdate/readahead@ReadAheadInvalidate|\
@@ -133,16 +157,16 @@ caveat_row() {
         lockrank:integrity@IntegrityVerify/braid@BraidIsHealthy|\
         lockrank:integrity@IntegrityUpdate/braid@BraidIsHealthy|\
         lockrank:integrity@IntegrityFlush/braid@BraidIsHealthy)
-                    echo "1.1|a page of the integrity map is read or written with the map's lock held, so the read-ahead cache's and Braid's locks are taken under that leaf" ;;
+                    echo "|a page of the integrity map is read or written with the map's lock held, so the read-ahead cache's and Braid's locks are taken under that leaf" ;;
         lockrank:ledger@tagfs_write_ledger:write|\
         lockrank:ledger@tagfs_remember_use_context:write)
-                    echo "1.1|the Ledger is written to the medium under its IRQ-off lock, so a core that reads the Ledger spins with interrupts off for as long as the medium takes" ;;
+                    echo "|the Ledger is written to the medium under its IRQ-off lock, so a core that reads the Ledger spins with interrupts off for as long as the medium takes" ;;
         lockrank:diskbook@DiskBookCheckpoint:write)
-                    echo "1.1|the DiskBook's checkpoint writes its header to the medium under its IRQ-off lock, and a volume being taken down asks for it though nothing else of the take-down writes" ;;
+                    echo "|the DiskBook's checkpoint writes its header to the medium under its IRQ-off lock, and a volume being taken down asks for it though nothing else of the take-down writes" ;;
         lockrank:cow@TagFS_CowIsActive:read)
-                    echo "1.1|with no snapshot of a file standing, asking whether it is copied on write reads its metadata off the medium under the copy-on-write lock, so every core that writes spins with interrupts off for as long as the medium takes (CR-10)" ;;
+                    echo "|with no snapshot of a file standing, asking whether it is copied on write reads its metadata off the medium under the copy-on-write lock, so every core that writes spins with interrupts off for as long as the medium takes (CR-10)" ;;
         lockrank:cow@TagFS_CowAfterWrite:flush)
-                    echo "1.1|every 64th redirect the log takes pushes the medium's cache from inside the copy-on-write lock, with interrupts off, on the drain core that waits for completions only its own interrupt returns (CR-6)" ;;
+                    echo "|every 64th redirect the log takes pushes the medium's cache from inside the copy-on-write lock, with interrupts off, on the drain core that waits for completions only its own interrupt returns (CR-6)" ;;
         lockrank:cow@TagFS_CowBeforeWrite:read|\
         lockrank:cow@TagFS_CowBeforeWrite:write)
                     echo "1.3|a write into a block a snapshot keeps copies the block under the copy-on-write lock, so every core that writes spins with interrupts off while the medium reads and writes the copy" ;;

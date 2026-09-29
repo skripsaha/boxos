@@ -29,7 +29,7 @@ typedef enum {
  *
  * It matters because the volume a running machine has mounted belongs to
  * whoever is using the machine. A test that creates files, allocates blocks or
- * checkpoints the journal is doing that to their data, on their medium, every
+ * writes the journal is doing that to their data, on their medium, every
  * time they switch the computer on.
  *
  * Found on the owner's flash drive after two boots: test_file, test_rw,

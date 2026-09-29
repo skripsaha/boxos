@@ -10,9 +10,9 @@
  * push right after the spinlock is taken, a pop right before it is let go, and
  * every read of it made with interrupts off too, so a thread that could be
  * moved to another core between reading "which core am I" and reading the
- * record cannot mistake another core's locks for its own. Nothing here depends
- * on the state of IF being meaningful: the one window in which a TagFS lock is
- * held with interrupts ON (ata_dma_sync's sti) changes nothing in the record.
+ * record cannot mistake another core's locks for its own. Nothing here takes
+ * the state of IF for an answer: whether a TagFS lock is held is read off the
+ * record, never off the interrupt flag.
  *
  * No chain in the tree nests deeper than five (writer -> cow -> integrity ->
  * readahead or braid): a ninth lock is counted in Unwatched and said, so the

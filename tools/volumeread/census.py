@@ -143,7 +143,7 @@ class KernelView:
         self.seq = f.ledger["seq"]
         if not f.book_ok:
             self.writes.append(("the DiskBook head and its copy, reformatted empty "
-                                "(disk_book.c:146-151)", []))
+                                "(disk_book.c:144-149)", []))
         for name, sentence in (("registry", "its tag registry would not read"),
                                ("table", "its file table would not read"),
                                ("pool", "its metadata pool would not read")):
@@ -224,7 +224,7 @@ class KernelView:
                               % (led["free_blocks"], self.free))
 
     def _LedgerWrite(self, why):
-        """ledger_write_locked (tagfs.c): the older copy, seq + 1."""
+        """LedgerStroke (ledger.c): the older copy, seq + 1."""
         self.current = (self.current + 1) % LEDGER_COPIES
         self.seq += 1
         self.writes.append(("ledger copy %u at seq %u (%s)" % (self.current, self.seq, why), []))
@@ -400,18 +400,18 @@ class GroundCensus:
         bad = [c for c in f.ledgers if not c["ok"]]
         if len(bad) == LEDGER_COPIES:
             self.Say("LEDGER_NONE", "damage", "neither ledger copy is readable — copy 0 %s, copy 1 "
-                     "%s — and the kernel refuses the mount (tagfs.c ledger_load); the ownership "
+                     "%s — and the kernel refuses the mount (ledger.c ledger_load); the ownership "
                      "sweep is not run, because the ledger names blocks nothing else can"
                      % (bad[0]["why"], bad[1]["why"]))
         elif bad:
             self.Say("LEDGER_TORN", "note", "ledger copy %u %s — the kernel runs on copy %u "
-                     "(seq %u) alone (tagfs.c ledger_load)" % (bad[0]["copy"], bad[0]["why"],
+                     "(seq %u) alone (ledger.c ledger_load)" % (bad[0]["copy"], bad[0]["why"],
                                                             f.ledger["copy"], f.ledger["seq"]))
         for c in f.ledgers:
             if c["ok"] and c["use_misplaced"]:
                 self.Say("LEDGER_USE_MISPLACED", "note", "ledger copy %u places its Use Context at "
                          "%u for %u bytes, outside its own record — it remembers none "
-                         "(tagfs.c ledger_read_copy)" % (c["copy"], c["use_context_offset"],
+                         "(ledger.c ledger_read_copy)" % (c["copy"], c["use_context_offset"],
                                                   c["use_context_bytes"]))
 
     def _DiskBook(self):
@@ -422,13 +422,13 @@ class GroundCensus:
                    % (f.book["version"], f.book["capacity"], f.book["count"], f.book["start_sector"]))
             self.Say("DISKBOOK_INVALID", "damage" if f.snapshots else "note",
                      "the DiskBook is not one the mount accepts — %s — so it is reformatted empty "
-                     "at mount and no redirect is replayed (disk_book.c:139-153)%s"
+                     "at mount and no redirect is replayed (disk_book.c:137-151)%s"
                      % (why, "; the manifest names %u snapshot(s) whose frozen blocks are then "
                         "forgotten" % len(f.snapshots) if f.snapshots else ""))
         bad = [i for i, e in enumerate(f.book_records) if not e["valid"]]
         if bad:
             self.Say("DISKBOOK_RECORD_BAD", "note", "DiskBook record(s) %s fail their magic or "
-                     "checksum and are skipped at replay (disk_book.c:175-182)"
+                     "checksum and are skipped at replay (disk_book.c:173-180)"
                      % ", ".join(map(str, bad)))
 
     def _Cow(self):
@@ -448,7 +448,7 @@ class GroundCensus:
                        exclusive=False)
         if f.stray:
             self.Say("REDIRECT_STRAY", "note", "%u DiskBook redirect(s) name snapshots the manifest "
-                     "does not carry (%s) — the kernel ignores them (cow.c:593-602)"
+                     "does not carry (%s) — the kernel ignores them (cow.c:527-536)"
                      % (len(f.stray), ", ".join(str(s[0]) for s in f.stray)))
         if led and led["integrity_map_block"]:
             self.Claim("integrity", "integrity map",
@@ -486,15 +486,12 @@ class GroundCensus:
                          "it are never read (meta_pool.c:764-767)" % (b, at, ln, blk["used_bytes"]))
 
     def _Registry(self):
-        """intern_with_id's rules (tag_registry.c:171-218) over the chain."""
+        """RegistryAdopt's rules (tag_registry.c) over the chain."""
         by_kv, dup, rng = {}, [], []
         for b, blk in self.f.registry:
             for r in blk["records"]:
                 where, kv = "block %u +%u" % (b, r["at"]), (r["key"], r["value"])
-                if r["skipped"]:
-                    rng.append("id %u at %s carries a %u-byte value the loader steps over"
-                               % (r["tag_id"], where, r["value_len"]))
-                elif kv in by_kv:
+                if kv in by_kv:
                     if by_kv[kv] != r["tag_id"]:
                         dup.append("id %u at %s repeats id %u's key/value and is dropped"
                                    % (r["tag_id"], where, by_kv[kv]))

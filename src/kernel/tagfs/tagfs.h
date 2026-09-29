@@ -10,6 +10,7 @@
 #include "../../include/volume_ledger.h"
 #include "../core/error/error.h"
 #include "lock_rank/lock_rank.h"
+#include "scribe/scribe.h"
 
 // ============================================================================
 // Include Submodule Headers (production implementations)
@@ -19,6 +20,7 @@
 #include "cow/cow.h"
 #include "dedup/dedup.h"
 #include "self_heal/self_heal.h"
+#include "ledger/ledger.h"
 
 // ============================================================================
 // TagFS Constants — Production Configuration
@@ -57,7 +59,7 @@
 #define TAGFS_FILE_ACTIVE           (1 << 0)
 #define TAGFS_FILE_TRASHED          (1 << 1)
 #define TAGFS_FILE_HIDDEN           (1 << 2)
-#define TAGFS_FILE_COW              (1 << 3)  // Copy-on-Write enabled
+/* Bit 3 is spent on v1: kernels before Quill step 1.1 took it for copy-on-write, so it is never set and never trusted. */
 
 // Handle flags
 #define TAGFS_HANDLE_READ           (1 << 0)
@@ -170,13 +172,10 @@ typedef struct TagRegistryNode {
     struct TagRegistryNode* next;
 } TagRegistryNode;
 
-typedef struct TagKeyGroup {
-    char*               key;
-    uint16_t*           tag_ids;
-    uint32_t            count;
-    uint32_t            capacity;
-    struct TagKeyGroup* next;
-} TagKeyGroup;
+/* Every tag of one key. Its inside is tag_registry.c's alone: a key group's
+ * array is freed by the next tag of its key, so nothing outside the registry's
+ * lock may hold a pointer into one (MP-D11) — TagRegistryKeyIds copies. */
+typedef struct TagKeyGroup TagKeyGroup;
 
 typedef struct {
     TagRegistryNode** buckets;
@@ -192,6 +191,27 @@ typedef struct {
     uint32_t      key_bucket_count;
 
     TagFSLock lock;
+
+    /*
+     * What the medium holds of this registry: the record of every id below
+     * written_next, in the chain that ends at tail_block, whose image
+     * tail_image is byte for byte. written_next is changed under `lock`; the
+     * rest belong to whoever holds `scribe` — one flush of this registry at a
+     * time — and to the load before anyone can see the registry.
+     *
+     * spare_block is the block the chain grows by next: stamped, proved on
+     * the medium by the flush carrying spare_need, and kept across a flush
+     * that failed until a link names it. 0 is none — block 0 is the chain's
+     * head and never a Spare. spare_image is the buffer it is written from.
+     */
+    uint16_t          written_next;
+    uint32_t          tail_block;
+    TagRegistryBlock* tail_image;
+    uint32_t          spare_block;
+    TagRegistryBlock* spare_image;
+    uint64_t          spare_need;
+    bool              said_failing;   /* a refusal is said once, until a flush succeeds */
+    Scribe            scribe;
 } TagRegistry;
 
 // ----------------------------------------------------------------------------
@@ -393,9 +413,19 @@ void         tag_registry_mark_system(TagRegistry* reg, uint16_t tag_id);
 bool         tag_registry_is_system(TagRegistry* reg, uint16_t tag_id);
 const char*  tag_registry_key(TagRegistry* reg, uint16_t tag_id);
 const char*  tag_registry_value(TagRegistry* reg, uint16_t tag_id);
-TagKeyGroup* tag_registry_key_group(TagRegistry* reg, const char* key);
-int          tag_registry_flush(TagRegistry* reg);
-bool         tag_registry_is_dirty(void);
+
+/* The id of every tag whose key is `key`, COPIED: out->ids is the caller's to
+ * kfree, never the registry's own array. No such key: NULL and 0. */
+error_t      TagRegistryKeyIds(TagRegistry* reg, const char* key, TagIdList* out);
+
+/* Every tag interned before the call written to the medium; made durable by
+ * the caller's sync, as before. OK at once, with no I/O, when nothing is owed.
+ * May wait for another core's flush of the same registry, so never under a
+ * TagFS lock. */
+error_t      tag_registry_flush(TagRegistry* reg);
+
+/* The registry read off the medium from its head; the mount's, once. Refuses
+ * — and says why — a chain it cannot walk or a registry it cannot hold whole. */
 int          tag_registry_load(TagRegistry* reg, uint32_t first_block);
 
 // ----------------------------------------------------------------------------
@@ -409,7 +439,7 @@ int             tag_bitmap_clear(TagBitmapIndex* idx, uint16_t tag_id, uint32_t 
 void            tag_bitmap_remove_file(TagBitmapIndex* idx, uint32_t file_id);
 int             tag_bitmap_query(TagBitmapIndex* idx,
                     const uint16_t* tag_ids, uint32_t tag_count,
-                    TagKeyGroup** groups, uint32_t group_count,
+                    const TagIdList* groups, uint32_t group_count,
                     uint32_t* out_file_ids, uint32_t max_results);
 int             tag_bitmap_tags_for_file(TagBitmapIndex* idx, uint32_t file_id,
                     uint16_t* out_ids, uint32_t max_ids);
@@ -420,7 +450,7 @@ int             tag_bitmap_tag_count_for_file(TagBitmapIndex* idx, uint32_t file
 // ----------------------------------------------------------------------------
 
 int  file_table_init(uint32_t first_block);
-void file_table_shutdown(bool write_back);
+void file_table_shutdown(void);
 int  file_table_lookup(uint32_t file_id, uint32_t* out_block, uint32_t* out_offset);
 int  file_table_update(uint32_t file_id, uint32_t meta_block, uint32_t meta_offset);
 int  file_table_delete(uint32_t file_id);
@@ -525,7 +555,8 @@ error_t tagfs_shutdown(void);
 error_t tagfs_sync(void);
 
 /* Flush the volatile write cache of the disk that holds the TagFS volume
- * (routes to the probed AHCI port / ATA drive, not a hardcoded device). */
+ * (routes to the probed AHCI port / ATA drive, not a hardcoded device). The
+ * one place a flush ticket is taken and answered (scribe/scribe.h). */
 error_t  tagfs_flush_cache(void);
 
 /* Convert a TagFS logical block number to its absolute disk-sector LBA.
@@ -602,41 +633,6 @@ error_t  tagfs_write_block(uint32_t block, const void* buffer);
  * The sync write path calls this internally; the async path (write_job) must
  * call it after each block write since it bypasses tagfs_write_block. */
 void     tagfs_readahead_invalidate(uint32_t block);
-
-/*
- * Write the Ledger back — the counters, not the identity.
- *
- * It goes to whichever of the two copies is currently older, with a sequence
- * number one higher than the newer one, so the copy that is intact is never
- * the copy being overwritten. See volume_ledger.h.
- */
-error_t  tagfs_write_ledger(void);
-
-/*
- * The Use Context the volume remembers — what its person was doing when they
- * left (volume_ledger.h). Kept in the Ledger and written with it.
- *
- * remember: say `list` (comma-joined tag names, `len` bytes, no NUL; len 0
- * says none) to the volume and write the Ledger. *remembered reports whether
- * the volume now holds exactly this list — false when the medium would not
- * take the write, or when the list is longer than the record holds, in which
- * case the volume forgets rather than keeping half. Takes no door: the
- * caller is inside the volume already (use_context.c takes it).
- *
- * recall: copy what the volume remembers into `buf` when it fits `cap`;
- * returns the byte length either way (0 = none), so a caller can size one.
- *
- * peek: one copy of the Ledger read off the medium by the Ledger's own
- * reader, its remembered context included — a proof, not a way in.
- */
-error_t  tagfs_remember_use_context(const char *list, size_t len, bool *remembered);
-size_t   tagfs_recall_use_context(char *buf, size_t cap);
-bool     tagfs_ledger_peek(uint32_t copy, VolumeLedger *out, char *tail, uint16_t *tail_len);
-
-/* The Ledger's one-writer lock. Taken nowhere outside tagfs.c: the stand reads
- * its Witnessed count to see whether a Ledger write crossed the medium under
- * it (stand_lock_tests.c). */
-extern TagFSLock g_ledger_lock;
 
 /*
  * Read one sector run of the mounted volume, counted from the start of its

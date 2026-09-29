@@ -7568,21 +7568,11 @@ stand_create_all_or_nothing|1.4|half-done create at refused allocation 5|creates
 stand_sync_owns_a_refused_write|1.4|ledger copies written after the file table's write was refused 1|ledger copies written after the file table's write was refused 0
 stand_sync_owns_a_refused_flush|1.4|cache flushes the medium refused under a sync that answered OK 1|a refused cache flush, and the sync answered it with error 200
 stand_write_returns_its_ground|1.3|blocks refused writes kept named by no file, all given back 3|blocks refused writes kept named by no file, all given back 0
-stand_write_all_or_refusal|1.5|write answered short with no refusal at refused allocation 4|writes whole or refused, allocations refused 8
+stand_write_all_or_refusal|1.5|write answered short with no refusal at refused allocation 2|writes whole or refused, allocations refused 8
 stand_open_holds_what_it_names|1.4|handle counting extents it did not hold at refused allocation 6|opens whole or refused, allocations refused 6
 stand_open_refuses_unread_metadata|1.4|one-block file opened as empty at refused allocation 3|opens whole or refused, allocations refused 6
 stand_open_joins_the_writers|1.5|handle with no open-file entry at refused allocation 1|opens whole or refused, allocations refused 6
 stand_frozen_block_freed_twice|1.3|blocks the allocator was given back twice 1|blocks the allocator was given back twice 0
-stand_registry_flush_holds_no_lock|1.1|registry flushes of one new name that crossed the medium holding the registry's lock 1|registry flushes of one new name that crossed the medium holding the registry's lock 0
-stand_ledger_writes_outside_its_lock|1.1|Ledger writes of one that crossed the medium holding the Ledger's lock 1|Ledger writes of one that crossed the medium holding the Ledger's lock 0
-stand_integrity_pages_outside_its_lock|1.1|17-page runs of block writes whose map paging crossed the medium under a lock 1|17-page runs of block writes whose map paging crossed the medium under a lock 0
-stand_cow_question_asks_no_medium|1.1|reads of a file's metadata block the copy-on-write question asked, no snapshot standing 1|reads of a file's metadata block the copy-on-write question asked, no snapshot standing 0
-stand_redirect_log_leaves_the_flush|1.1|cache flushes asked inside 64 redirects, under the copy-on-write lock 1|cache flushes asked inside 64 redirects, under the copy-on-write lock 0
-stand_dma_wait_keeps_the_callers_interrupts|1.1|DMA reads that turned interrupts on under a caller that had them off 1|DMA reads that turned interrupts on under a caller that had them off 0|bios
-stand_registry_growth_links_what_landed|1.1|registry chains on the medium that run into a block without the registry's magic 1|registry chains on the medium that run into a block without the registry's magic 0
-stand_table_grows_onto_a_stamp|1.1|file table chains on the medium that run into a block without the table's magic 1|file table chains on the medium that run into a block without the table's magic 0
-stand_registry_scratch_leaves_the_volume_alone|1.1|registry chains on the medium a scratch registry moved by living and dying 1|registry chains on the medium a scratch registry moved by living and dying 0
-stand_registry_load_refuses_what_it_cannot_hold|1.1|registry loads with an allocation refused that answered OK, stopping at the first 1|registry loads with an allocation refused that answered OK, stopping at the first 0
 "
 
 # The last thing a halt says about the volume, whichever way its sync went
@@ -7779,8 +7769,8 @@ run_stand() {
     local f logs=""
     rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
           "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log
-    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 8 CORES=4 MEM=4G
-    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 9 UEFI=on STRICT=on CORES=4 MEM=4G
+    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 10 CORES=4 MEM=4G
+    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 11 UEFI=on STRICT=on CORES=4 MEM=4G
     for f in "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
              "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log; do
         [ -f "$f" ] && logs="$logs $f"
@@ -7804,9 +7794,24 @@ run_stand() {
 # row's PF-1 fix taken out, and a test that forgets to take its fault down
 # (the runner must take it down and fail it). LockRank, which the lock tests
 # count with, the same: its witness keyed on a bare IF instead of a TagFS lock
-# held, and its order never checked. Mutations whose tests do not
-# meet each other's share a boot; each is judged by its own test's own line,
-# number and all.
+# held, and its order never checked. The flush tickets and the Scribe the
+# same: a refused flush that moves the mark, a count of kept flushes, a need
+# that is the last flush begun, a pass that publishes every ask, a Scribe
+# this core holds waited for like any other, a drain core that runs no baton
+# while it waits, and a Give that never lets the scheduler go. And a caveat a
+# step has lifted stays worth its test only while the test would see the
+# defect come back: the legacy-IDE DMA wait's `sti`, the copy-on-write
+# question that reads a file's own record under its lock again, the redirect
+# log that pushes the cache on its 64th redirect again, the question's fast
+# exit taken out, which takes its lock where no snapshot stands, the Ledger
+# written, and the integrity map paged in, under their own locks again, the
+# file table's growth as step 1.1 found it — a new block linked with no
+# stamp and no flush behind the link, the memory for the link asked only
+# after the block was taken — and the tag registry linking before it stamps,
+# writing under its lock, sharing its mark with a registry beside it, loading
+# what it cannot hold, handing out its own array, and forgetting the block a
+# refused pass took. Mutations whose tests do not meet each other's share a
+# boot; each is judged by its own test's own line, number and all.
 #
 # And the runner is only worth believing if it cannot be made to pass what it
 # should fail. A failed assertion must say where, and what it saw — shown by
@@ -7853,8 +7858,8 @@ edits = [
     # 1.4: the sync answers for its table and its flush
     ("static void tagfs_sync_inside(void);\n",
      "static error_t tagfs_sync_inside(void);   /* logcheck mutation: the sync answers for its stages */\n"),
-    ("    tagfs_sync_inside();\n    tagfs_leave();\n    return OK;\n",
-     "    error_t owned = tagfs_sync_inside();\n    tagfs_leave();\n    return owned;\n"),
+    ("        tagfs_sync_inside();\n        ScribeGive(&g_sync_scribe, cover, OK);\n",
+     "        rc = tagfs_sync_inside();\n        ScribeGive(&g_sync_scribe, cover, rc);\n"),
     ("static void tagfs_sync_inside(void)\n{\n", "static error_t tagfs_sync_inside(void)\n{\n"),
     ("    file_table_flush();\n    SETTLE_CUT_AT(SETTLE_CUT_POINT_RETIRES);\n",
      "    if (file_table_flush() != 0)\n        return ERR_IO;\n    SETTLE_CUT_AT(SETTLE_CUT_POINT_RETIRES);\n"),
@@ -7901,196 +7906,34 @@ edits = [
      "                    handle->extents = split;\n"
      "                    handle->extent_count++;\n"
      "                }\n"),
+]
+for a, m in edits:
+    assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
+    s = s.replace(a, m, 1)
+open(p, "w").write(s)
+EOF
+    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 10
+
     # 1.6: a Use Context longer than the Ledger's record is still the volume's.
     # The step keeps it whole on the medium (its own block); what the test asks
     # is the volume's answer, and this gives that answer while the record
     # carries only what fits of it.
+    mutate src/kernel/tagfs/ledger/ledger.c
+    python3 - <<'EOF'
+p = "src/kernel/tagfs/ledger/ledger.c"
+s = open(p).read()
+edits = [
     ("    bool fits = len <= LEDGER_USE_MAX;\n",
      "    bool fits = len <= sizeof(g_ledger_use);   /* logcheck mutation: a Use Context longer than the record is still remembered */\n"),
-    ("    led.use_context_offset = g_ledger_use_len ? (uint16_t)sizeof(VolumeLedger) : 0;\n"
-     "    led.use_context_bytes  = g_ledger_use_len;\n"
-     "    led.bytes        = (uint32_t)sizeof(VolumeLedger) + g_ledger_use_len;\n"
-     "    led.crc32        = 0;\n"
-     "    memcpy(buf, &led, sizeof(led));\n"
-     "    memcpy(buf + sizeof(led), g_ledger_use, g_ledger_use_len);\n",
-     "    uint16_t put = g_ledger_use_len <= LEDGER_USE_MAX ? g_ledger_use_len : 0;   /* logcheck mutation: the record carries what fits */\n"
-     "    led.use_context_offset = put ? (uint16_t)sizeof(VolumeLedger) : 0;\n"
-     "    led.use_context_bytes  = put;\n"
-     "    led.bytes        = (uint32_t)sizeof(VolumeLedger) + put;\n"
-     "    led.crc32        = 0;\n"
-     "    memcpy(buf, &led, sizeof(led));\n"
-     "    memcpy(buf + sizeof(led), g_ledger_use, put);\n"),
-    # 1.1: the Ledger is written outside its lock
-    ("    if (disk_write_sectors(ledger_vlba(target), 1, buf) != OK) {\n",
-     "    TagFSLockDrop(&g_ledger_lock);   /* logcheck mutation: the Ledger's write leaves its lock */\n"
-     "    int landed = disk_write_sectors(ledger_vlba(target), 1, buf);\n"
-     "    TagFSLockTake(&g_ledger_lock);\n"
-     "    if (landed != OK) {\n"),
+    ("    uint16_t use_len = g_ledger_use_len;\n",
+     "    uint16_t use_len = g_ledger_use_len <= LEDGER_USE_MAX ? g_ledger_use_len : 0;   /* logcheck mutation: the record carries what fits */\n"),
 ]
 for a, m in edits:
     assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
     s = s.replace(a, m, 1)
 open(p, "w").write(s)
 EOF
-    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 13
-
-    # 1.1: nothing under the registry's lock reaches the medium, and a new
-    # block is taken and stamped before anything links it; a registry that is
-    # not the volume's leaves the volume's chain alone; and a load that cannot
-    # hold a tag refuses the mount.
-    mutate src/kernel/tagfs/tag_registry/tag_registry.c
-    python3 - <<'EOF'
-p = "src/kernel/tagfs/tag_registry/tag_registry.c"
-s = open(p).read()
-M = "logcheck mutation"
-edits = [
-    ("                if (tagfs_alloc_blocks(1, &new_block) != 0) {\n"
-     "                    TagFSLockDrop(&reg->lock);\n"
-     "                    return -1;\n"
-     "                }\n",
-     "                static TagRegistryBlock stamp;   /* " + M + ": a new block is taken and stamped outside the lock, before anything links it */\n"
-     "                TagFSLockDrop(&reg->lock);\n"
-     "                if (tagfs_alloc_blocks(1, &new_block) != 0)\n"
-     "                    return -1;\n"
-     "                memset(&stamp, 0, sizeof(stamp));\n"
-     "                stamp.magic = TAGFS_REGISTRY_MAGIC;\n"
-     "                if (tagfs_write_block(new_block, &stamp) != 0) {\n"
-     "                    tagfs_free_blocks(new_block, 1);\n"
-     "                    return -1;\n"
-     "                }\n"
-     "                TagFSLockTake(&reg->lock);\n"),
-    ("            blkp->next_block = new_block;\n"
-     "            int write_result = tagfs_write_block(current_block, blkp);\n",
-     "            blkp->next_block = new_block;\n"
-     "            TagFSLockDrop(&reg->lock);   /* " + M + ": the registry's writes leave its lock */\n"
-     "            int write_result = tagfs_write_block(current_block, blkp);\n"
-     "            TagFSLockTake(&reg->lock);\n"),
-    ("    int write_result = tagfs_write_block(current_block, blkp);\n\n    if (write_result == 0) {\n",
-     "    TagFSLockDrop(&reg->lock);   /* " + M + ": the registry's writes leave its lock */\n"
-     "    int write_result = tagfs_write_block(current_block, blkp);\n"
-     "    TagFSLockTake(&reg->lock);\n\n    if (write_result == 0) {\n"),
-    ("    TagFSLockTake(&reg->lock);\n    chain_release();\n",
-     "    TagFSLockTake(&reg->lock);\n"
-     "    bool own = reg == fs->registry;   /* " + M + ": a registry that is not the volume's leaves the volume's chain alone */\n"
-     "    if (own)\n"
-     "        chain_release();\n"),
-    ("        if (chain_append(block_num) != 0) {\n",
-     "        if (own && chain_append(block_num) != 0) {   /* " + M + " */\n"),
-    ("    reg->key_buckets = NULL;\n\n    chain_release();\n",
-     "    reg->key_buckets = NULL;\n\n"
-     "    if (reg == tagfs_get_state()->registry)   /* " + M + ": a registry that is not the volume's leaves the volume's chain alone */\n"
-     "        chain_release();\n"),
-    ("static void add_to_key_group(TagKeyGroup* group, uint16_t tag_id) {\n",
-     "static bool add_to_key_group(TagKeyGroup* group, uint16_t tag_id) {   /* " + M + ": a key group that cannot grow says so */\n"),
-    ("            debug_printf(\"[TagRegistry] add_to_key_group: grow alloc failed\\n\");\n            return;\n",
-     "            debug_printf(\"[TagRegistry] add_to_key_group: grow alloc failed\\n\");\n            return false;\n"),
-    ("    group->tag_ids[group->count++] = tag_id;\n}\n",
-     "    group->tag_ids[group->count++] = tag_id;\n    return true;\n}\n"),
-    ("    TagKeyGroup* group = find_or_create_key_group(reg, key);\n    if (group) add_to_key_group(group, tag_id);\n",
-     "    TagKeyGroup* group = find_or_create_key_group(reg, key);\n"
-     "    if (!group || !add_to_key_group(group, tag_id))   /* " + M + ": a tag its key group cannot hold is not held */\n"
-     "        return TAGFS_INVALID_TAG_ID;\n"),
-    ("            uint16_t new_id = intern_with_id_unlocked(reg, tag_id, key, value_ptr);\n",
-     "            uint16_t new_id = intern_with_id_unlocked(reg, tag_id, key, value_ptr);\n"
-     "            if (new_id == TAGFS_INVALID_TAG_ID) {   /* " + M + ": a load that cannot hold a tag refuses the mount */\n"
-     "                kprintf(\"[TagRegistry] tag %u could not be held — this volume is not mounted\\n\", tag_id);\n"
-     "                TagFSLockDrop(&reg->lock);\n"
-     "                return -1;\n"
-     "            }\n"),
-]
-for a, m in edits:
-    assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
-    s = s.replace(a, m, 1)
-open(p, "w").write(s)
-EOF
-    mut_done src/kernel/tagfs/tag_registry/tag_registry.c "logcheck mutation" 9
-
-    # 1.1: a new link of the file table is stamped before anything links it
-    mutate src/kernel/tagfs/file_table/file_table.c
-    python3 - <<'EOF'
-p = "src/kernel/tagfs/file_table/file_table.c"
-s = open(p).read()
-a = ("                    debug_printf(\"[FileTable] flush: alloc failed at entry_offset=%u\\n\",\n"
-     "                                 entry_offset);\n"
-     "                    return -1;\n"
-     "                }\n")
-m = (a +
-     "                static FileTableBlock stamp;   /* logcheck mutation: a new link is stamped before anything links it */\n"
-     "                memset(&stamp, 0, sizeof(stamp));\n"
-     "                stamp.magic = TAGFS_FILETBL_MAGIC;\n"
-     "                if (tagfs_write_block(next_block, &stamp) != OK) {\n"
-     "                    tagfs_free_blocks(next_block, 1);\n"
-     "                    TagFSLockDrop(&g_lock);\n"
-     "                    return -1;\n"
-     "                }\n")
-assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
-open(p, "w").write(s.replace(a, m, 1))
-EOF
-    mut_done src/kernel/tagfs/file_table/file_table.c "logcheck mutation" 1
-
-    # 1.1 (CR-10 and CR-6): whether a file is copied on write is answered by
-    # the snapshots in memory alone, and the redirect log asks for no flush of
-    # its own.
-    mutate src/kernel/tagfs/cow/cow.c
-    python3 - <<'EOF'
-p = "src/kernel/tagfs/cow/cow.c"
-s = open(p).read()
-a = ("    // Also check if file has COW flag in metadata\n"
-     "    TagFSMetadata meta;\n"
-     "    if (tagfs_get_metadata(file_id, &meta) == OK) {\n"
-     "        bool is_cow = (meta.flags & TAGFS_FILE_COW) != 0;\n"
-     "        tagfs_metadata_free(&meta);\n"
-     "        TagFSLockDrop(&g_cow_state.lock);\n"
-     "        return is_cow;\n"
-     "    }\n")
-assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
-open(p, "w").write(s.replace(a, "    /* logcheck mutation: the question is answered by the snapshots in memory alone */\n", 1))
-EOF
-    mut_done src/kernel/tagfs/cow/cow.c "logcheck mutation" 1
-    mutate src/kernel/tagfs/disk_book/disk_book.c
-    python3 - <<'EOF'
-p = "src/kernel/tagfs/disk_book/disk_book.c"
-s = open(p).read()
-a = ("    if (do_flush) {\n"
-     "        error_t flushed = tagfs_flush_cache();\n"
-     "        if (flushed != OK) {\n"
-     "            disk_book_flush_did_not_happen(flushed, \"redirect log\");\n"
-     "        } else {\n"
-     "            __atomic_store_n(&g_not_proven_durable, false, __ATOMIC_RELEASE);\n"
-     "        }\n"
-     "    }\n")
-assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
-open(p, "w").write(s.replace(a, "    (void)do_flush;   /* logcheck mutation: the redirect log asks for no flush of its own */\n", 1))
-EOF
-    mut_done src/kernel/tagfs/disk_book/disk_book.c "logcheck mutation" 1
-
-    # 1.1 (CR-5): the legacy-IDE waiter answers its own completion, and leaves
-    # its caller's interrupts as it found them.
-    mutate src/kernel/drivers/disk/ata_async.c
-    python3 - <<'EOF'
-p = "src/kernel/drivers/disk/ata_async.c"
-s = open(p).read()
-a = ("    asm volatile(\"sti\" ::: \"memory\");\n"
-     "    while (!__atomic_load_n(&cmd.done, __ATOMIC_ACQUIRE)) {\n"
-     "        AtaCmd *c = __atomic_exchange_n(&aa->landing, NULL, __ATOMIC_ACQ_REL);\n"
-     "        if (c) ata_run_completion(aa, c);\n")
-m = ("    while (!__atomic_load_n(&cmd.done, __ATOMIC_ACQUIRE)) {   /* logcheck mutation: the waiter answers its own completion, interrupts as its caller left them */\n"
-     "        AtaCmd *c = __atomic_exchange_n(&aa->landing, NULL, __ATOMIC_ACQ_REL);\n"
-     "        if (c) ata_run_completion(aa, c);\n"
-     "        else if (spin_trylock(&aa->cmd_lock)) {\n"
-     "            AtaCmd *f = aa->in_flight;\n"
-     "            if (f && !__atomic_load_n(&f->reconciled, __ATOMIC_RELAXED) &&\n"
-     "                !__atomic_load_n(&aa->recovering, __ATOMIC_RELAXED)) {\n"
-     "                uint8_t bmsr = inb(aa->bmide_base + BMIDE_REG_STATUS);\n"
-     "                if (bmsr & BMISR_IRQ)\n"
-     "                    bmide_complete_locked(aa, bmsr);\n"
-     "            }\n"
-     "            spin_unlock(&aa->cmd_lock);\n"
-     "        }\n")
-assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
-open(p, "w").write(s.replace(a, m, 1))
-EOF
-    mut_done src/kernel/drivers/disk/ata_async.c "logcheck mutation" 1
+    mut_done src/kernel/tagfs/ledger/ledger.c "logcheck mutation" 2
 
     mutate src/kernel/tagfs/tag_bitmap/tag_bitmap.c
     python3 - <<'EOF'
@@ -8115,39 +7958,21 @@ open(p, "w").write(s)
 EOF
     mut_done src/kernel/tagfs/tag_bitmap/tag_bitmap.c "logcheck mutation" 1
 
-    # 1.10: the report ring holds every rot the test plants. 1.1: the map's
-    # paging leaves the map's lock.
+    # 1.10: the report ring holds every rot the test plants.
     mutate src/kernel/tagfs/integrity/integrity.c
     python3 - <<'EOF'
 p = "src/kernel/tagfs/integrity/integrity.c"
 s = open(p).read()
-edits = [
-    ("#define ROT_RING_MAX      64\n",
-     "#define ROT_RING_MAX      128   /* logcheck mutation: the ring holds every rot the test plants */\n"),
-    ("        if (tagfs_write_block(g_map_first_block + v->map_idx, buf) != OK) {\n",
-     "        TagFSLockDrop(&g_lock);   /* logcheck mutation: the map's paging leaves its lock */\n"
-     "        error_t put = tagfs_write_block(g_map_first_block + v->map_idx, buf);\n"
-     "        TagFSLockTake(&g_lock);\n"
-     "        if (put != OK) {\n"),
-    ("    if (tagfs_read_block(g_map_first_block + idx, buf) != OK)\n        return NULL;\n",
-     "    TagFSLockDrop(&g_lock);   /* logcheck mutation: the map's paging leaves its lock */\n"
-     "    error_t got = tagfs_read_block(g_map_first_block + idx, buf);\n"
-     "    TagFSLockTake(&g_lock);\n"
-     "    if (got != OK)\n        return NULL;\n"),
-]
-for a, m in edits:
-    assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
-    s = s.replace(a, m, 1)
-open(p, "w").write(s)
+a = "#define ROT_RING_MAX      64\n"
+assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
+open(p, "w").write(s.replace(a, "#define ROT_RING_MAX      128   /* logcheck mutation: the ring holds every rot the test plants */\n", 1))
 EOF
-    mut_done src/kernel/tagfs/integrity/integrity.c "logcheck mutation" 3
+    mut_done src/kernel/tagfs/integrity/integrity.c "logcheck mutation" 1
 }
 stand_fix_off() {
     local f
     for f in src/kernel/tagfs/tagfs.c src/kernel/tagfs/tag_bitmap/tag_bitmap.c \
-             src/kernel/tagfs/integrity/integrity.c src/kernel/tagfs/tag_registry/tag_registry.c \
-             src/kernel/tagfs/file_table/file_table.c src/kernel/tagfs/cow/cow.c \
-             src/kernel/tagfs/disk_book/disk_book.c src/kernel/drivers/disk/ata_async.c; do
+             src/kernel/tagfs/integrity/integrity.c src/kernel/tagfs/ledger/ledger.c; do
         restore "$f"
     done
 }
@@ -8169,6 +7994,16 @@ stand_mech_on() {
         lands)  marks="src/kernel/core/boardroom/boardroom.c:2 src/kernel/tagfs/tag_bitmap/tag_bitmap.c:1" ;;
         blind)  marks="src/kernel/tagfs/tests/tests.c:2 src/kernel/tagfs/tests/core_tests.c:1" ;;
         lockrank) marks="src/kernel/tagfs/lock_rank/lock_rank.c:2" ;;
+        underlock) marks="src/kernel/tagfs/ledger/ledger.c:1 src/kernel/tagfs/integrity/integrity.c:1" ;;
+        scribe)    marks="src/kernel/tagfs/scribe/scribe.c:4" ;;
+        flushsum)  marks="src/kernel/tagfs/scribe/scribe.c:3" ;;
+        flushneed) marks="src/kernel/tagfs/scribe/scribe.c:1" ;;
+        dmawait)   marks="src/kernel/drivers/disk/ata_async.c:1" ;;
+        cowback)   marks="src/kernel/tagfs/cow/cow.c:2 src/kernel/tagfs/disk_book/disk_book.c:1" ;;
+        cowfast)   marks="src/kernel/tagfs/cow/cow.c:1" ;;
+        table)     marks="src/kernel/tagfs/file_table/file_table.c:4" ;;
+        registry)     marks="src/kernel/tagfs/tag_registry/tag_registry.c:6" ;;
+        registrykeep) marks="src/kernel/tagfs/tag_registry/tag_registry.c:1" ;;
     esac
     for mark in $marks; do mutate "${mark%%:*}"; done
     python3 - "$group" <<'EOF'
@@ -8235,6 +8070,145 @@ edits = {
    "        if (lock->Rank == LOCK_RANK_NONE || h->Rank < lock->Rank)\n            continue;\n",
    "        continue;   /* " + M + ": the order is never checked */\n"),
  ],
+ "underlock": [
+  ("src/kernel/tagfs/ledger/ledger.c",
+   "    int wrote = tagfs_volume_write(ledger_vlba(slot), 1, sector);\n",
+   "    TagFSLockTake(&g_ledger_lock);   /* " + M + ": the Ledger's write is back under its lock */\n"
+   "    int wrote = tagfs_volume_write(ledger_vlba(slot), 1, sector);\n"
+   "    TagFSLockDrop(&g_ledger_lock);\n"),
+  ("src/kernel/tagfs/integrity/integrity.c",
+   "    TagFSLockDropAt(&g_lock, site);\n\n    error_t got = tagfs_read_block(at, g_page[s]);\n\n    TagFSLockTakeAt(&g_lock, site);\n",
+   "    /* " + M + ": the map's page comes in under its lock again */\n"
+   "    error_t got = tagfs_read_block(at, g_page[s]);\n\n"),
+ ],
+ "scribe": [
+  ("src/kernel/tagfs/scribe/scribe.c",
+   "    if (!kept)\n        return;\n    uint64_t cur = __atomic_load_n(&g_flush_kept, __ATOMIC_RELAXED);\n",
+   "    (void)kept;   /* " + M + ": a refused flush moves the mark too */\n    uint64_t cur = __atomic_load_n(&g_flush_kept, __ATOMIC_RELAXED);\n"),
+  ("src/kernel/tagfs/scribe/scribe.c",
+   "        __atomic_store_n(&s->written, cover, __ATOMIC_RELEASE);\n",
+   "        __atomic_store_n(&s->written, __atomic_load_n(&s->asked, __ATOMIC_SEQ_CST),   /* " + M + ": a pass publishes every ask, not what it covered */\n"
+   "                         __ATOMIC_RELEASE);\n"),
+  ("src/kernel/tagfs/scribe/scribe.c",
+   "        return seen == me ? SCRIBE_SELF : SCRIBE_HELD;\n",
+   "        return SCRIBE_HELD;   /* " + M + ": a Scribe this core holds is waited for like any other */\n"),
+  ("src/kernel/tagfs/scribe/scribe.c",
+   "    if (core == g_amp.bsp_index)\n        BatonPump(core);\n    cpu_pause();\n",
+   "    (void)core;   /* " + M + ": the drain core runs no baton while it waits */\n    cpu_pause();\n"),
+ ],
+ "flushsum": [
+  ("src/kernel/tagfs/scribe/scribe.c",
+   "    if (!kept)\n        return;\n    uint64_t cur = __atomic_load_n(&g_flush_kept, __ATOMIC_RELAXED);\n"
+   "    while (cur < ticket &&\n           !__atomic_compare_exchange_n(&g_flush_kept, &cur, ticket, false,\n"
+   "                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED))\n        ;\n",
+   "    (void)ticket;   /* " + M + ": a count of the flushes kept, raised as each answers */\n"
+   "    if (kept)\n        __atomic_add_fetch(&g_flush_kept, 1u, __ATOMIC_RELEASE);\n"),
+  ("src/kernel/tagfs/scribe/scribe.c",
+   "    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST) + 1u;\n",
+   "    return __atomic_load_n(&g_flush_kept, __ATOMIC_SEQ_CST) + 1u;   /* " + M + ": the next flush kept is the one that covers */\n"),
+  ("src/kernel/tagfs/scribe/scribe.c",
+   "    g_scribe_held[core][s->rank]--;\n    SchedulerLetGoHere();\n",
+   "    g_scribe_held[core][s->rank]--;   /* " + M + ": the scheduler is never let go */\n"),
+ ],
+ "flushneed": [
+  ("src/kernel/tagfs/scribe/scribe.c",
+   "    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST) + 1u;\n",
+   "    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST);   /* " + M + ": the need is the last flush begun */\n"),
+ ],
+ "dmawait": [
+  ("src/kernel/drivers/disk/ata_async.c",
+   "    AtaAsyncCh *aa = &g_ata_async[cmd.channel];\n    while (!__atomic_load_n(&cmd.done, __ATOMIC_ACQUIRE)) {\n",
+   "    AtaAsyncCh *aa = &g_ata_async[cmd.channel];\n"
+   "    asm volatile(\"sti\" ::: \"memory\");   /* " + M + ": the DMA wait turns interrupts on under its caller again */\n"
+   "    while (!__atomic_load_n(&cmd.done, __ATOMIC_ACQUIRE)) {\n"),
+ ],
+ "cowback": [
+  ("src/kernel/tagfs/cow/cow.c",
+   "    if (!g_cow_state.initialized ||\n        __atomic_load_n(&g_cow_state.snapshot_count, __ATOMIC_ACQUIRE) == 0)\n        return false;\n",
+   "    if (!g_cow_state.initialized)   /* " + M + ": the question is asked with no snapshot standing too */\n"
+   "        return false;\n"),
+  ("src/kernel/tagfs/cow/cow.c",
+   "        active = parent == file_id || parent == 0;\n    }\n"
+   "    TagFSLockDrop(&g_cow_state.lock);\n    return active;\n",
+   "        active = parent == file_id || parent == 0;\n    }\n"
+   "    TagFSMetadata meta;   /* " + M + ": the file's own record read for bit 3, under the lock */\n"
+   "    if (!active && tagfs_get_metadata(file_id, &meta) == OK) {\n"
+   "        active = (meta.flags & (1u << 3)) != 0;\n"
+   "        tagfs_metadata_free(&meta);\n"
+   "    }\n"
+   "    TagFSLockDrop(&g_cow_state.lock);\n    return active;\n"),
+  ("src/kernel/tagfs/disk_book/disk_book.c",
+   "    g_redirects_logged++;\n",
+   "    g_redirects_logged++;\n"
+   "    if (g_redirects_logged % 64 == 0) {   /* " + M + ": the log pushes the cache on every 64th redirect again */\n"
+   "        TagFSLockDrop(&g_lock);\n"
+   "        tagfs_flush_cache();\n"
+   "        return OK;\n"
+   "    }\n"),
+ ],
+ "cowfast": [
+  ("src/kernel/tagfs/cow/cow.c",
+   "    if (!g_cow_state.initialized ||\n        __atomic_load_n(&g_cow_state.snapshot_count, __ATOMIC_ACQUIRE) == 0)\n        return false;\n",
+   "    if (!g_cow_state.initialized)   /* " + M + ": the question takes its lock with no snapshot standing */\n"
+   "        return false;\n"),
+ ],
+ "table": [
+  ("src/kernel/tagfs/file_table/file_table.c",
+   "        error_t  got     = SpareStamp(TAGFS_FILETBL_MAGIC, &g_image, &block, &stamped);\n",
+   "        error_t  got     = tagfs_alloc_blocks(1, &block) == 0 ? OK : ERR_TAGFS_NO_SPACE;   /* " + M + ": the new block is linked with no stamp */\n"),
+  ("src/kernel/tagfs/file_table/file_table.c",
+   "    error_t ready = VolumeFlushFor(need);\n",
+   "    error_t ready = OK;   /* " + M + ": and no flush stands between it and its link */\n    (void)need;\n"),
+  ("src/kernel/tagfs/file_table/file_table.c",
+   "    if (LinksReserve(wanted) != OK) {\n"
+   "        kprintf(\"[FileTable] there is no memory to hold the %u links the file \"\n"
+   "                \"table's rows need \u2014 its chain stays %u block(s) long, and the \"\n"
+   "                \"rows from file id %u on stay in memory until a later sync\\n\",\n"
+   "                wanted, have, have * TAGFS_FTABLE_PER_BLOCK);\n"
+   "        return -1;\n"
+   "    }\n",
+   "    /* " + M + ": the memory for a link is asked only after its block is taken */\n"),
+  ("src/kernel/tagfs/file_table/file_table.c",
+   "        TagFSLockTake(&g_lock);\n        g_links[have + in_hand] = (FileTableLink){ .block = block };\n",
+   "        if (LinksReserve(wanted) != OK)   /* " + M + ": and a refusal forgets the block */\n"
+   "            return -1;\n"
+   "        TagFSLockTake(&g_lock);\n        g_links[have + in_hand] = (FileTableLink){ .block = block };\n"),
+ ],
+ "registry": [
+  ("src/kernel/tagfs/tag_registry/tag_registry.c",
+   "        rc = SpareStamp(TAGFS_REGISTRY_MAGIC, reg->spare_image, &reg->spare_block, &reg->spare_need);\n",
+   "        rc = tagfs_alloc_blocks(1, &reg->spare_block) == 0 ? OK : ERR_TAGFS_NO_SPACE;   /* " + M + ": the new block is taken and never stamped */\n"),
+  ("src/kernel/tagfs/tag_registry/tag_registry.c",
+   "    rc = tagfs_write_block(reg->spare_block, reg->spare_image);\n",
+   "    reg->tail_image->next_block = reg->spare_block;   /* " + M + ": the link goes down before the block it names */\n"
+   "    tagfs_write_block(reg->tail_block, reg->tail_image);\n"
+   "    rc = tagfs_write_block(reg->spare_block, reg->spare_image);\n"),
+  ("src/kernel/tagfs/tag_registry/tag_registry.c",
+   "        error_t wrote = tagfs_write_block(reg->tail_block, tail);\n",
+   "        TagFSLockTake(&reg->lock);   /* " + M + ": the tail is written holding the registry's lock */\n"
+   "        error_t wrote = tagfs_write_block(reg->tail_block, tail);\n"
+   "        TagFSLockDrop(&reg->lock);\n"),
+  ("src/kernel/tagfs/tag_registry/tag_registry.c",
+   "    /* The two blocks every flush of this registry is written through, and the\n",
+   "    if (fs->registry && fs->registry != reg)   /* " + M + ": a registry beside the volume's shares its mark of what is owed */\n"
+   "        fs->registry->written_next = 0;\n"
+   "    /* The two blocks every flush of this registry is written through, and the\n"),
+  ("src/kernel/tagfs/tag_registry/tag_registry.c",
+   "        if (held != OK) {\n",
+   "        if (held != OK && held != ERR_NO_MEMORY) {   /* " + M + ": a tag the load cannot hold is dropped, and the load goes on */\n"),
+  ("src/kernel/tagfs/tag_registry/tag_registry.c",
+   "        out->ids = kmalloc(sizeof(uint16_t) * group->count);\n"
+   "        if (out->ids) {\n"
+   "            memcpy(out->ids, group->tag_ids, sizeof(uint16_t) * group->count);\n",
+   "        out->ids = group->tag_ids;   /* " + M + ": the registry's own array is handed out */\n"
+   "        if (out->ids) {\n"),
+ ],
+ "registrykeep": [
+  ("src/kernel/tagfs/tag_registry/tag_registry.c",
+   "    tail->used_bytes  = was_used;\n",
+   "    reg->spare_block  = 0;   /* " + M + ": a refused pass forgets the block it took */\n"
+   "    tail->used_bytes  = was_used;\n"),
+ ],
  "blind": [
   ("src/kernel/tagfs/tests/tests.c",
    "    kprintf(\"[TESTS] %s failed at %s:%d: %s (%lld, %lld)\\n\",\n",
@@ -8257,7 +8231,11 @@ stand_mech_off() {
     for f in src/kernel/core/boardroom/block_fail.c src/lib/kernel/klib_mem.c \
              src/kernel/tagfs/tests/stand_tests.c src/kernel/core/boardroom/boardroom.c \
              src/kernel/tagfs/tag_bitmap/tag_bitmap.c src/kernel/tagfs/tests/tests.c \
-             src/kernel/tagfs/tests/core_tests.c src/kernel/tagfs/lock_rank/lock_rank.c; do
+             src/kernel/tagfs/tests/core_tests.c src/kernel/tagfs/lock_rank/lock_rank.c \
+             src/kernel/tagfs/scribe/scribe.c src/kernel/drivers/disk/ata_async.c \
+             src/kernel/tagfs/cow/cow.c src/kernel/tagfs/disk_book/disk_book.c \
+             src/kernel/tagfs/ledger/ledger.c src/kernel/tagfs/integrity/integrity.c \
+             src/kernel/tagfs/file_table/file_table.c src/kernel/tagfs/tag_registry/tag_registry.c; do
         restore "$f"
     done
 }
@@ -8412,6 +8390,122 @@ STAND_HELD_EOF
             'stand_lockrank_names_the_medium failed at [^:]+:[0-9]+: a read that holds no TagFS lock is not witnessed, interrupts off or not \(1, 0\)'
         stand_red standmut_lockrank "an order never checked takes a state-rank lock under a leaf and says nothing" \
             'stand_lockrank_names_the_order failed at [^:]+:[0-9]+: a state-rank lock taken under a leaf, twice, is out of order twice \(0, 2\)'
+    fi
+    stand_mech_off
+
+    # Step 1.1 lifted the caveats of the Ledger's write and of the map's
+    # paging: each put back under its own lock, the test says the defect it
+    # stands for is back, with the number it saw.
+    stand_mech_on underlock
+    if stand_mut_boot standmut_underlock CORES=4 MEM=4G; then
+        stand_red standmut_underlock "the Ledger written under its lock again is the defect back" \
+            'stand_ledger_writes_outside_its_lock failed: the defect it stands for is back — .* \(Ledger writes of one that crossed the medium holding the Ledger.s lock 1\)'
+        stand_red standmut_underlock "the map paged in under its lock again is the defect back" \
+            'stand_integrity_pages_outside_its_lock failed: the defect it stands for is back — .* \(17-page runs of block writes whose map paging crossed the medium under a lock 1\)'
+    fi
+    stand_mech_off
+
+    # The flush tickets and the Scribe, broken one way per test and boot: the
+    # three wrong accounts of a flush go red in the same test, so each has a
+    # boot of its own.
+    stand_mech_on scribe
+    if stand_mut_boot standmut_scribe CORES=4 MEM=4G; then
+        stand_red standmut_scribe "a refused flush that moves the mark claims a need it never covered" \
+            'stand_flush_ticket failed at [^:]+:[0-9]+: keeps nothing \(0, 1\)'
+        stand_red standmut_scribe "a pass that publishes every ask answers one made during it as written" \
+            'stand_scribe_covers_only_what_was_asked failed at [^:]+:[0-9]+: the second is not, and takes a pass of its own \(1, 0\)'
+        stand_red standmut_scribe "a Scribe this core holds, waited for like any other, is never answered SELF" \
+            'stand_scribe_never_waits_on_itself failed at [^:]+:[0-9]+: a Scribe this core holds beneath the caller is answered SELF \(3, 4\)'
+        stand_red standmut_scribe "a drain core that runs no baton while it waits never ends the pass it waits for" \
+            'stand_scribe_waiter_keeps_pumping failed at [^:]+:[0-9]+: by the probe, which the drain core ran while it waited \(0, 1\)'
+    fi
+    stand_mech_off
+
+    stand_mech_on flushsum
+    if stand_mut_boot standmut_flushsum CORES=4 MEM=4G; then
+        stand_red standmut_flushsum "a count of kept flushes credits a need with a flush begun before it" \
+            'stand_flush_ticket failed at [^:]+:[0-9]+: and proves nothing about that need \(0, 1\)'
+        stand_red standmut_flushsum "a Give that never lets the scheduler go leaves the core held" \
+            'stand_scribe_covers_only_what_was_asked failed at [^:]+:[0-9]+: given back, the core may be switched away from again \([0-9]+, [0-9]+\)'
+    fi
+    stand_mech_off
+
+    stand_mech_on flushneed
+    if stand_mut_boot standmut_flushneed CORES=4 MEM=4G; then
+        stand_red standmut_flushneed "a need that is the last flush begun is covered by that flush" \
+            'stand_flush_ticket failed at [^:]+:[0-9]+: and proves nothing about that need \(0, 1\)'
+    fi
+    stand_mech_off
+
+    # A lifted caveat's defect put back: the legacy-IDE DMA wait's `sti`, on
+    # the legacy channel, where its test is asked. The test holds no caveat
+    # any more, so seeing the defect is a failure that names it.
+    stand_mech_on dmawait
+    if stand_mut_boot standmut_dmawait CORES=4 MEM=4G; then
+        stand_red standmut_dmawait "a DMA wait that turns interrupts on under its caller again is the defect back" \
+            'stand_dma_wait_keeps_the_callers_interrupts failed: the defect it stands for is back — a legacy-IDE DMA wait turns interrupts on under its caller.s lock because only the BSP.s interrupt can finish it \(DMA reads that turned interrupts on under a caller that had them off 1\)'
+    fi
+    stand_mech_off
+
+    # The defects step 1.1 took out of copy-on-write, put back: the question
+    # that reads a file's own record for bit 3 under the copy-on-write lock
+    # (CR-10), and the redirect log that pushes the cache on every 64th
+    # redirect (CR-6). Their tests hold no caveat any more, and each must say
+    # its defect is back, number and all.
+    stand_mech_on cowback
+    if stand_mut_boot standmut_cowback CORES=4 MEM=4G; then
+        stand_red standmut_cowback "the copy-on-write question that reads the file's record again is its defect back" \
+            'stand_cow_question_asks_no_medium failed: the defect it stands for is back — .* \(reads of a file.s metadata block the copy-on-write question asked, no snapshot standing 1\)'
+        stand_red standmut_cowback "the redirect log that pushes the cache on every 64th redirect again is its defect back" \
+            'stand_redirect_log_leaves_the_flush failed: the defect it stands for is back — .* \(cache flushes asked inside 64 redirects, under the copy-on-write lock 1\)'
+    fi
+    stand_mech_off
+
+    # And with no snapshot standing the question takes no lock at all (the
+    # owner's F3): its fast exit taken out, the test's ask under the state
+    # lock takes the copy-on-write lock out of order.
+    stand_mech_on cowfast
+    if stand_mut_boot standmut_cowfast CORES=4 MEM=4G; then
+        stand_red standmut_cowfast "a question that takes its lock with no snapshot standing breaks the order under the state lock" \
+            'stand_cow_question_asks_no_medium failed at [^:]+:[0-9]+: and takes no lock: under the state lock it breaks no order \(1, 0\)'
+    fi
+    stand_mech_off
+
+    # The file table's growth as step 1.1 found it: both of the defects it
+    # lifted are back, and each test that stands for one says so, number and all.
+    stand_mech_on table
+    if stand_mut_boot standmut_table CORES=4 MEM=4G; then
+        stand_red standmut_table "a new block of the file table linked with no stamp and no flush behind it runs the chain into unstamped ground" \
+            "stand_table_grows_onto_a_stamp failed: the defect it stands for is back — .* \\(file table chains on the medium that run into a block without the table's magic 1\\)"
+        stand_red standmut_table "the memory for a link asked only after its block is taken strands the block when it is refused" \
+            'stand_table_growth_gives_back_its_ground failed: the defect it stands for is back — .* \(blocks a growth of the file table took and left named by nothing 1\)'
+    fi
+    stand_mech_off
+
+    # The tag registry's step 1.1 undone, each defect in the place the fix
+    # took it out of, and each test must say its defect is back. A refused
+    # pass that forgets its block has a boot of its own: the growth that links
+    # before it stamps takes no flush at all, and the test of the block kept
+    # refuses exactly that flush.
+    stand_mech_on registry
+    if stand_mut_boot standmut_registry CORES=4 MEM=4G; then
+        stand_red standmut_registry "a registry that links its new block before stamping it runs its chain into unstamped ground" \
+            'stand_registry_growth_links_what_landed failed: the defect it stands for is back — .* \(registry chains on the medium that run into a block without the registry.s magic 1\)'
+        stand_red standmut_registry "a tail written holding the registry's lock crosses the medium under it" \
+            'stand_registry_flush_holds_no_lock failed: the defect it stands for is back — .* \(registry flushes of one new name that crossed the medium holding the registry.s lock 1\)'
+        stand_red standmut_registry "a registry beside the volume's that shares its mark of what is owed moves the volume's chain" \
+            'stand_registry_scratch_leaves_the_volume_alone failed: the defect it stands for is back — .* \(registry chains on the medium a scratch registry moved by living and dying 1\)'
+        stand_red standmut_registry "a load that drops what it cannot hold answers OK" \
+            'stand_registry_load_refuses_what_it_cannot_hold failed: the defect it stands for is back — .* \(registry loads with an allocation refused that answered OK, stopping at the first 1\)'
+        stand_red standmut_registry "a key's ids handed out as the registry's own array are not a copy" \
+            'stand_registry_key_ids_are_copies failed: the defect it stands for is back — .* \(copies of a key.s tag ids that were the registry.s own array 1\)'
+    fi
+    stand_mech_off
+
+    stand_mech_on registrykeep
+    if stand_mut_boot standmut_registrykeep CORES=4 MEM=4G; then
+        stand_red standmut_registrykeep "a refused pass that forgets the block it took leaves it owned by nothing" \
+            'stand_registry_flush_keeps_its_block failed: the defect it stands for is back — .* \(blocks a refused registry growth took that its retry did not link 1\)'
     fi
     stand_mech_off
 
@@ -9264,8 +9358,8 @@ run_stackguard() {
 # the storage deck outside LockRank's own module — and a bare spinlock_t put
 # into tagfs.c must turn it.
 
-LOCKRANK_HELD_LINE='[LockRank] registry is held across a medium write: taken in tag_registry_flush, the write asked for by write_block+0x3f'
-LOCKRANK_HELD_KEY='registry@tag_registry_flush:write'
+LOCKRANK_HELD_LINE='[LockRank] writer is held across a medium write: taken in tagfs_write_inside, the write asked for by tagfs_alloc_blocks+0x1f5'
+LOCKRANK_HELD_KEY='writer@tagfs_write_inside:write'
 
 # lockrankmut_log NAME LINE... — a boot's log holding exactly LINE..., the way
 # the serial line ends them; prints its path.
@@ -9311,7 +9405,7 @@ run_lockrankmut() {
     unknown=$(lockrankmut_log unknown \
         '[LockRank] registry is held across a medium write: taken in lockrankmut_nowhere, the write asked for by write_block+0x3f')
     twice=$(lockrankmut_log twice "$LOCKRANK_HELD_LINE" \
-        '[LockRank] registry is held across a medium write: taken in tag_registry_flush, the write asked for by tagfs_alloc_blocks+0x1f5')
+        '[LockRank] writer is held across a medium write: taken in tagfs_write_inside, the write asked for by write_block+0x3f')
     full=$(lockrankmut_log full '[LockRank] 256 places have been named; later ones are counted, not named')
     deadlock=$(lockrankmut_log deadlock \
         '[LockRank] registry taken in tag_registry_lookup while this core already holds it, taken in tag_registry_flush — this core now waits for itself')
@@ -9687,13 +9781,13 @@ abbamut_kernel_on() {
     python3 - <<'EOF'
 p = "src/kernel/tagfs/tag_registry/tag_registry.c"
 s = open(p).read()
-a = "    TagFSLockTake(&reg->lock);\n\n    /* The chain the load walked."
+a = "    TagFSLockTake(&reg->lock);\n    bool owed = reg->written_next < reg->next_id;\n"
 assert s.count(a) == 1, "abbamut registry-flush anchor missing"
 s = s.replace(a, "    TagFSLockTake(&reg->lock);\n"
                  "    uint32_t logcheck_taken;   /* logcheck mutation: a block taken under the registry's lock at every flush */\n"
                  "    if (tagfs_alloc_blocks(1, &logcheck_taken) == 0)\n"
                  "        tagfs_free_blocks(logcheck_taken, 1);\n"
-                 "\n    /* The chain the load walked.", 1)
+                 "    bool owed = reg->written_next < reg->next_id;\n", 1)
 open(p, "w").write(s)
 EOF
     mut_done src/kernel/tagfs/tag_registry/tag_registry.c "logcheck mutation" 1

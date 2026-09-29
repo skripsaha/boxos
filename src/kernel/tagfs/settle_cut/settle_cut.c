@@ -43,13 +43,13 @@ void SettleCutSayArmed(void)
  * Interrupts go off on this core first, so nothing of its own runs after the
  * point; then every other core is stopped by the roll call a shutdown takes
  * (system_halt.c). What that roll call proves is narrower than it sounds: a
- * core that answered was not inside a stretch that kept interrupts off. It
- * does NOT prove the core held no lock — ata_dma_sync runs `sti` and waits for
- * its DMA inside its caller's spin_lock sections, so on a legacy-IDE seat with
- * more than one core a core can stop holding g_ledger_lock, say. Nor does it
- * prove a core was between writes: one frozen between two synchronous writes
- * of a stage that holds no lock (a writer with no open-file entry, say) stops
- * right there. A scenario therefore runs a single writer, and the sync is that
+ * core that answered was not inside a stretch that kept interrupts off — so it
+ * held no spin_lock whose section keeps them off to its end, a legacy-IDE DMA
+ * wait's caller included, since that wait no longer turns them on (it takes
+ * the drive's answer itself, drivers/disk/ata_async.c). It does NOT prove a
+ * core was between writes: one frozen between two synchronous writes of a
+ * stage that holds no lock (a writer with no open-file entry, say) stops right
+ * there. A scenario therefore runs a single writer, and the sync is that
  * writer.
  *
  * And what cannot be stopped is not claimed: a command another operation had
@@ -70,7 +70,7 @@ void SettleCutAt(SettleCutPoint here)
     __asm__ volatile("cli" ::: "memory");
     uint8_t me = amp_get_core_index();
 
-    halt_all_ap_cores();
+    halt_all_ap_cores(false);   /* a power cut: every core stops where it stands */
 
     uint32_t answered = 0;
     for (uint8_t c = 0; c < g_amp.total_cores; c++) {

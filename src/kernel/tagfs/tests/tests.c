@@ -465,7 +465,7 @@ error_t TagFS_RunAllTests(TestStats* stats)
              * A test that writes goes nowhere near a volume somebody is using.
              *
              * The mounted volume belongs to whoever switched the machine on,
-             * and these tests create files, allocate blocks and checkpoint the
+             * and these tests create files, allocate blocks and write the
              * journal on it. That was found by reading the owner's flash drive
              * back: his own files with test_file, test_rw and stress_file_0..2
              * among them. Built with VOLUME_TESTS=on they run, which is what

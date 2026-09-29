@@ -46,7 +46,7 @@
 #               registry's last block room for one more tag — then `quilltest
 #               crowd` grows both chains and anchors, and the power goes. Its
 #               census is kept by kind: a prefix that links into unstamped
-#               ground is held under 1.1 and one such cut is booted to be
+#               ground, which step 1.1 lifted, has one such cut booted to be
 #               refused by the kernel itself; a subset doing the same, apart.
 #   noanchormut nextfidmut tablemut flushmut chaingrowmut
 #               the fix or the fault put in on purpose: the caveat must be
@@ -58,7 +58,8 @@
 # (scenario, code), stand_caveat.sh — held under 1.6, the ORPHAN of an
 # unanchored create (noanchor, hog) and race's lost anchored file under 1.4
 # (the owner, 2026-09-27); chaingrow's are (scenario, prefix|subset, code),
-# a chain refused named by its chain, and its refusals are held under 1.1.
+# a chain refused named by its chain; its refusals were held under 1.1, which
+# lifted them.
 # A caveated code no cut shows is lifted early only where its absence is
 # proof: every medium of its kind built — every subset, or for a prefix
 # code every prefix — and no writer left writing through the record.
@@ -426,13 +427,14 @@ pc_caveats() {
             codes="CHAIN_REFUSED FID_PAST_NEXT FILE_LOST MISSING ORPHAN SPARE_UNNAMED TAG_ABSENT UNNAMED_RECORD" ;;
         race)
             base=race; echo "durable:_qt_churn@race=race:durable"
-            codes="CHAIN_REFUSED FID_PAST_NEXT FILE_LOST MISSING ORPHAN SPARE_UNNAMED TAG_ABSENT TAG_DUPLICATE UNNAMED_RECORD" ;;
+            codes="CHAIN_REFUSED FID_PAST_NEXT FILE_LOST MISSING ORPHAN RECORD_SHAPE SPARE_UNNAMED TAG_ABSENT TAG_DUPLICATE UNNAMED_RECORD" ;;
         settlecut) base=settlecut; codes="FID_PAST_NEXT" ;;
         chaingrow|chaingrowmut)
             base=chaingrow
             codes="prefix:CHAIN_REFUSED:registry prefix:CHAIN_REFUSED:table prefix:FID_PAST_NEXT prefix:ORPHAN
-                   subset:CHAIN_REFUSED:registry subset:CHAIN_REFUSED:table subset:FID_PAST_NEXT
-                   subset:FILE_LOST subset:MISSING subset:ORPHAN subset:TAG_ABSENT" ;;
+                   prefix:SPARE_UNNAMED subset:CHAIN_REFUSED:registry subset:CHAIN_REFUSED:table
+                   subset:FID_PAST_NEXT subset:FILE_LOST subset:MISSING subset:ORPHAN subset:SPARE_UNNAMED
+                   subset:TAG_ABSENT" ;;
     esac
     for code in $codes; do echo "code:$code=$base:$code"; done
 }
@@ -536,9 +538,11 @@ pc_race() {
     pc_judge --verify quill-floor:_qt_churn:halt --final-consistent
 }
 
-# chaingrow — MP-D5. The file table and the tag registry take a new block by
+# chaingrow — MP-D5. The file table and the tag registry took a new block by
 # writing their last block's link to it before the block itself, the one in
-# its sync's flush and the other as the create of a new tag flushes it. The
+# its sync's flush and the other as the create of a new tag flushes it, until
+# step 1.1 grew both onto Spares — stamped, and the stamp behind a kept flush
+# of its own, before any link names them — which splits the sync's epochs. The
 # base is brought to both edges with quilltest crowd — the table one create
 # short of the row its blocks run out at, the registry's last block room for
 # PC_CROWD_ROOM more of crowd's tags — so the recorded run's few creates and
@@ -796,17 +800,16 @@ run_flushmut() {
     mut_on src/kernel/tagfs/tagfs.c "logcheck mutation" <<'EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = "    error_t flushed = tagfs_flush_cache_insisting();"
+a = "    error_t flushed = VolumeFlushFor(VolumeFlushNeed());"
 assert s.count(a) == 1
 open(p, "w").write(s.replace(a, "    error_t flushed = OK;   /* logcheck mutation: the sync never asks the medium to flush */"))
 EOF
     mut_on src/kernel/core/decks/storage/storage_ops.c "logcheck mutation" <<'EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = "    error_t flushed = tagfs_flush_cache();\n    while (flushed == ERR_BUSY) {\n"
+a = "    error_t flushed = VolumeFlushFor(VolumeFlushNeed());"
 assert s.count(a) == 1
-open(p, "w").write(s.replace(a, "    error_t flushed = OK;   /* logcheck mutation: the anchor never asks the medium to flush */\n"
-                                "    while (flushed == ERR_BUSY) {\n"))
+open(p, "w").write(s.replace(a, "    error_t flushed = OK;   /* logcheck mutation: the anchor never asks the medium to flush */"))
 EOF
     mut_run flushmut nextfid ack:anchor_test fail "the anchor never asking the medium to flush, its ack has none behind it"
     mut_run flushmut nextfid ack:anchor_test fail \
@@ -816,60 +819,46 @@ EOF
     restore src/kernel/tagfs/tagfs.c
 }
 
-# The fix for MP-D5 put in, in the pool's own shape (meta_pool.c "THE NEW
-# BLOCK IS STAMPED BEFORE ANYTHING POINTS AT IT"): a block the file table or
-# the registry has just taken is stamped, empty, before the link to it is
-# written. Every prefix then mounts, and the prefix caveats are lifted early.
-# The stamp and the link are still two writes of one epoch, so a cut that
-# keeps the link and loses the stamp is still refused: the subset verdicts
-# are asked what they answer, as the evidence for what closes them.
+# Both chains' fixes for MP-D5 are in (step 1.1), and here both are taken
+# out as step 1.1 found them: the file table's new block linked with no stamp
+# and no flush behind the link, the registry's taken and never stamped, and
+# the link to it written before the block itself. A prefix that keeps a link
+# and not its block runs that chain into unstamped ground again, and so does
+# a subset that keeps the link and loses the block: the lifted rows of both
+# chains, prefix and subset, must say their defect is back.
 run_chaingrowmut() {
     mut_on src/kernel/tagfs/file_table/file_table.c "logcheck mutation" <<'EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = ("                if (chain_append(next_block) != 0) {\n"
-     "                    TagFSLockDrop(&g_lock);\n"
-     "                    debug_printf(\"[FileTable] flush: no memory to record block %u\\n\",\n"
-     "                                 next_block);\n"
-     "                    return -1;\n"
-     "                }\n")
-assert s.count(a) == 1
-open(p, "w").write(s.replace(a, a +
-     "                /* logcheck mutation: the new block is stamped before the link to it */\n"
-     "                static FileTableBlock stamp;\n"
-     "                memset(&stamp, 0, sizeof(stamp));\n"
-     "                stamp.magic = TAGFS_FILETBL_MAGIC;\n"
-     "                if (tagfs_write_block(next_block, &stamp) != OK) {\n"
-     "                    TagFSLockDrop(&g_lock);\n"
-     "                    return -1;\n"
-     "                }\n"))
+for a, m in (
+    ("        error_t  got     = SpareStamp(TAGFS_FILETBL_MAGIC, &g_image, &block, &stamped);\n",
+     "        error_t  got     = tagfs_alloc_blocks(1, &block) == 0 ? OK : ERR_TAGFS_NO_SPACE;   /* logcheck mutation: the new block is linked with no stamp */\n"),
+    ("    error_t ready = VolumeFlushFor(need);\n",
+     "    error_t ready = OK;   /* logcheck mutation: and no flush stands between it and its link */\n    (void)need;\n")):
+    assert s.count(a) == 1
+    s = s.replace(a, m)
+open(p, "w").write(s)
 EOF
     mut_on src/kernel/tagfs/tag_registry/tag_registry.c "logcheck mutation" <<'EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = ("                if (chain_append(new_block) != 0) {\n"
-     "                    TagFSLockDrop(&reg->lock);\n"
-     "                    return -1;\n"
-     "                }\n")
-assert s.count(a) == 1
-open(p, "w").write(s.replace(a, a +
-     "                /* logcheck mutation: the new block is stamped before the link to it */\n"
-     "                static TagRegistryBlock stamp;\n"
-     "                memset(&stamp, 0, sizeof(stamp));\n"
-     "                stamp.magic = TAGFS_REGISTRY_MAGIC;\n"
-     "                if (tagfs_write_block(new_block, &stamp) != 0) {\n"
-     "                    TagFSLockDrop(&reg->lock);\n"
-     "                    return -1;\n"
-     "                }\n"))
+a = "        rc = SpareStamp(TAGFS_REGISTRY_MAGIC, reg->spare_image, &reg->spare_block, &reg->spare_need);\n"
+b = "    rc = tagfs_write_block(reg->spare_block, reg->spare_image);\n"
+assert s.count(a) == 1 and s.count(b) == 1
+s = s.replace(a, "        rc = tagfs_alloc_blocks(1, &reg->spare_block) == 0 ? OK : ERR_TAGFS_NO_SPACE;   "
+                 "/* logcheck mutation: the new block is taken and never stamped */\n", 1)
+open(p, "w").write(s.replace(b,
+     "    reg->tail_image->next_block = reg->spare_block;   /* the link goes down before the block it names */\n"
+     "    tagfs_write_block(reg->tail_block, reg->tail_image);\n" + b, 1))
 EOF
-    mut_run chaingrowmut chaingrow code:prefix:CHAIN_REFUSED:table behaves \
-        "the table's new block stamped before its link, no prefix refuses the mount over the table: the caveat is lifted early"
-    pc_expect code:prefix:CHAIN_REFUSED:registry behaves \
-        "the registry's new block stamped before its link, no prefix refuses the mount over the registry: the caveat is lifted early"
+    mut_run chaingrowmut chaingrow code:prefix:CHAIN_REFUSED:table defect \
+        "the table's new block linked with no stamp and no flush behind it, a prefix refuses the mount over the table again: the defect is back"
     pc_expect code:subset:CHAIN_REFUSED:table defect \
-        "the stamp and the link in one epoch, a cut that keeps the link and loses the stamp still refuses the table"
+        "and a cut that keeps the table's link and loses its new block refuses it too"
+    pc_expect code:prefix:CHAIN_REFUSED:registry defect \
+        "the registry's link written before its new block, a prefix that keeps the link refuses the mount over the registry: the defect is back"
     pc_expect code:subset:CHAIN_REFUSED:registry defect \
-        "the stamp and the link in one epoch, a cut that keeps the link and loses the stamp still refuses the registry"
+        "and a subset that keeps the registry's link and loses its new block refuses it too"
     restore src/kernel/tagfs/tag_registry/tag_registry.c
     restore src/kernel/tagfs/file_table/file_table.c
 }
