@@ -5,8 +5,8 @@
 
 // Forward declarations - internal functions in tagfs.c. Both assume the caller
 // already holds g_state.lock, which every path into this file does.
-extern int  tagfs_alloc_blocks_internal(uint32_t count, uint32_t *out_start_block);
-extern void tagfs_free_blocks_internal(uint32_t start_block, uint32_t count);
+extern int     tagfs_alloc_blocks_internal(uint32_t count, uint32_t *out_start_block);
+extern error_t tagfs_free_blocks_internal(uint32_t start_block, uint32_t count);
 
 #define RECORD_HEADER_SIZE  42   // 40 bytes of fields + 2 bytes CRC16
 #define MPOOL_BLOCK_HEADER  16

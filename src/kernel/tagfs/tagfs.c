@@ -69,7 +69,7 @@ WellKnownTags *tagfs_get_well_known_tags(void) { return &g_well_known; }
  * query walking the tag index, a process being asked whether it carries a tag
  * — every one of them holding a pointer into exactly what tagfs_clear_the_ground
  * is about to hand back to the allocator: the registry, the tag index, the
- * block bitmap, the free list, the file table, the metadata pool.
+ * block map, the file table, the metadata pool.
  *
  * ‼ THE ONE-WAY LATCH DOES NOT COVER IT. g_medium_left makes every read and
  * every write refuse, which is what stops work that has not started. It does
@@ -344,10 +344,6 @@ static void ofe_release(OpenFileEntry *ofe)
 }
 
 // ----------------------------------------------------------------------------
-// Bitmap bit helpers
-// ----------------------------------------------------------------------------
-
-// ----------------------------------------------------------------------------
 // HOLDGROUND=on — a caller who is inside the volume when its medium leaves
 // ----------------------------------------------------------------------------
 
@@ -492,19 +488,11 @@ static void TagFSHoldGroundAfterReturn(void)
 #define TagFSHoldGroundAfterReturn() ((void)0)
 #endif  /* CONFIG_TAGFS_HOLD_GROUND */
 
+/* A bit of the mount's roll call map (tagfs_init): set where something owns
+ * the block. */
 static inline void bitmap_set_bit(uint8_t *bitmap, uint32_t bit)
 {
     bitmap[bit / 8] |= (uint8_t)(1u << (bit % 8));
-}
-
-static inline void bitmap_clear_bit(uint8_t *bitmap, uint32_t bit)
-{
-    bitmap[bit / 8] &= (uint8_t)~(1u << (bit % 8));
-}
-
-static inline bool bitmap_test_bit(const uint8_t *bitmap, uint32_t bit)
-{
-    return (bitmap[bit / 8] & (uint8_t)(1u << (bit % 8))) != 0;
 }
 
 // ----------------------------------------------------------------------------
@@ -2022,127 +2010,12 @@ error_t tagfs_write_block(uint32_t block, const void *buffer) {
     return OK;
 }
 
-// ----------------------------------------------------------------------------
-// Free extent list
-// ----------------------------------------------------------------------------
-
-static void free_list_destroy(void)
-{
-    FreeExtent *cur = g_state.block_bitmap.free_list;
-    while (cur)
-    {
-        FreeExtent *next = cur->next;
-        kfree(cur);
-        cur = next;
-    }
-    g_state.block_bitmap.free_list = NULL;
-    g_state.block_bitmap.extent_count = 0;
-}
-
-/* What the Ledger SAID when it was read, kept so the derived count below can
- * tell "the medium carries a wrong number" from "something already put it
- * right in memory this mount". The mount-time fsck corrects the count in RAM
- * and does not write it, so without this the same wrong number came back off
- * the medium on every boot for ever. */
+/* What the Ledger SAID when it was read, kept so the derived count the mount
+ * takes from the block map can tell "the medium carries a wrong number" from
+ * "something already put it right in memory this mount". The mount's roll call
+ * corrects the count in RAM and does not write it, so without this the same
+ * wrong number came back off the medium on every boot for ever. */
 static uint64_t g_ledger_free_as_read;
-
-/* How many blocks of the data run are free, counted from the bitmap that was
- * read off the medium. The bitmap is the truth about whether a block is taken;
- * everything else is bookkeeping about it. */
-static uint64_t count_free_blocks(void)
-{
-    uint64_t free_blocks = 0;
-    for (uint32_t b = 0; b < g_state.layout.data_blocks; b++) {
-        if (!bitmap_test_bit(g_state.block_bitmap.bitmap, b)) free_blocks++;
-    }
-    return free_blocks;
-}
-
-static void free_list_build(void)
-{
-    free_list_destroy();
-
-    uint32_t total = g_state.block_bitmap.total_blocks;
-    uint8_t *bitmap = g_state.block_bitmap.bitmap;
-    FreeExtent **tail = &g_state.block_bitmap.free_list;
-
-    uint32_t i = 0;
-    while (i < total)
-    {
-        // skip used blocks
-        while (i < total)
-        {
-            if ((i & 7) == 0 && i + 8 <= total && bitmap[i / 8] == 0xFF)
-            {
-                i += 8;
-                continue;
-            }
-            if (bitmap_test_bit(bitmap, i))
-            {
-                i++;
-                continue;
-            }
-            break;
-        }
-        if (i >= total)
-            break;
-
-        uint32_t start = i;
-        while (i < total)
-        {
-            if ((i & 7) == 0 && i + 8 <= total && bitmap[i / 8] == 0x00)
-            {
-                i += 8;
-                continue;
-            }
-            if (!bitmap_test_bit(bitmap, i))
-            {
-                i++;
-                continue;
-            }
-            break;
-        }
-
-        FreeExtent *ext = kmalloc(sizeof(FreeExtent));
-        if (!ext)
-        {
-            debug_printf("[TagFS] free_list_build: kmalloc failed\n");
-            break;
-        }
-        ext->start = start;
-        ext->count = i - start;
-        ext->next = NULL;
-        *tail = ext;
-        tail = &ext->next;
-        g_state.block_bitmap.extent_count++;
-    }
-}
-
-#ifdef CONFIG_VOLUME_TESTS
-/*
- * The free list and the free count, derived again from the bitmap — exactly as
- * a mount derives them, and for the same reason: the bitmap is the truth about
- * whether a block is taken, and both of the others are bookkeeping about it.
- *
- * For a startup test that has just watched a block be given back twice
- * (free_run_locked does not look at the bit, so the second release puts the
- * block on the list a second time and counts it free a second time, while the
- * bitmap, cleared the first time, does not move). The test measures that and
- * then leaves the allocator as the next mount would read it, instead of
- * leaving one block for two owners to be handed. Returns how far the count
- * had drifted from the bitmap: positive is blocks counted free that are not.
- */
-int64_t TagFSAllocatorRederive(void)
-{
-    TagFSLockTake(&g_state.lock);
-    uint64_t by_bitmap = count_free_blocks();
-    int64_t  drift     = (int64_t)g_state.ledger.free_blocks - (int64_t)by_bitmap;
-    free_list_build();
-    g_state.ledger.free_blocks = by_bitmap;
-    TagFSLockDrop(&g_state.lock);
-    return drift;
-}
-#endif
 
 // ----------------------------------------------------------------------------
 // System behavior tag helpers
@@ -2301,55 +2174,6 @@ static error_t mount_refused(const char *what, error_t why)
             what, (int)why);
     tagfs_clear_the_ground();
     return why;
-}
-
-/*
- * ‼ NAMED, NOT ONLY COUNTED.
- *
- * The mount's roll call below says how many blocks the medium's bitmap and the
- * roll call disagree about; that count is the evidence a volume lost something.
- * These lines are WHICH blocks, as runs of the data run: an orphan is used on
- * the medium and reached by nothing, a missing block is reached and free.
- *
- * The first 32 runs of each kind are named, lowest block first, and the rest
- * are said as one line of how many and how big (the owner's bound, 09-27). A
- * garbage bitmap sector alone is about a thousand runs, and the repair only
- * ever adds, so a damaged volume would say its whole list again on every mount
- * — one console line and one framebuffer scroll each, on the boot path. The
- * whole list is `tools/volume-read.py check`'s, off the same image; logcheck's
- * census scenario holds the first 32 and the remainder against it, so the
- * host's roll call and this one cannot drift apart without a red line saying
- * where.
- */
-static void FsckSayRuns(const uint8_t *on_disk, const uint8_t *computed,
-                        uint32_t blocks, bool orphans)
-{
-    const uint32_t named_at_most = 32;
-    const char *kind = orphans ? "orphan" : "missing";
-    uint32_t runs = 0, more_runs = 0, more_blocks = 0;
-
-    for (uint32_t b = 0; b < blocks; ) {
-        uint32_t start = b;
-        while (b < blocks &&
-               bitmap_test_bit(on_disk, b) == orphans &&
-               bitmap_test_bit(computed, b) != orphans)
-            b++;
-        if (b == start) {
-            b++;
-            continue;
-        }
-        if (runs++ < named_at_most) {
-            kprintf("[TagFS FSCK] %s run at data block %u, %u block(s)\n",
-                    kind, start, b - start);
-        } else {
-            more_runs++;
-            more_blocks += b - start;
-        }
-    }
-    if (more_runs)
-        kprintf("[TagFS FSCK] and %u more %s run(s), %u block(s) — "
-                "tools/volume-read.py names every one\n",
-                more_runs, kind, more_blocks);
 }
 
 error_t tagfs_init(void) {
@@ -2633,56 +2457,20 @@ error_t tagfs_init(void) {
                              ERR_NO_MEMORY);
     }
 
-    // --- Block Bitmap ---
-    uint32_t bitmap_bytes = (g_state.layout.data_blocks + 7) / 8;
-    g_state.block_bitmap.bitmap = kmalloc(bitmap_bytes);
-    if (!g_state.block_bitmap.bitmap)
-    {
-        return mount_refused("there is no memory for its block bitmap",
-                             ERR_NO_MEMORY);
-    }
-    memset(g_state.block_bitmap.bitmap, 0, bitmap_bytes);
-    g_state.block_bitmap.total_blocks = g_state.layout.data_blocks;
-    g_state.block_bitmap.free_list = NULL;
-    g_state.block_bitmap.extent_count = 0;
-
-    /* The debt is sized from the same number the bitmap is: one bit per sector
-     * of the medium's copy. On this volume the bitmap is 2800 bytes, which is
-     * (2800+511)/512 = 6 sectors of debt, tracked in (6+7)/8 = 1 byte. A
-     * volume whose debt cannot be sized is mounted READ-DURABLE-ONLY rather
-     * than refused — MapOwedMark answers the NULL by doing nothing, and the
-     * medium's map then waits for the next sync exactly as it always did. */
-    g_state.block_bitmap.owed_sectors =
-        (bitmap_bytes + TAGFS_SECTOR_SIZE - 1) / TAGFS_SECTOR_SIZE;
-    g_state.block_bitmap.owed_count = 0;
-    g_state.block_bitmap.owed =
-        kmalloc((g_state.block_bitmap.owed_sectors + 7) / 8);
-    if (g_state.block_bitmap.owed) {
-        memset(g_state.block_bitmap.owed, 0,
-               (g_state.block_bitmap.owed_sectors + 7) / 8);
-    } else {
-        kprintf("[TagFS] no room to track which bitmap sectors this medium "
-                "has not been told about — every hand-out waits for the next "
-                "sync to reach the medium\n");
-    }
-
+    // --- Block Map ---
     /* ‼ ONLY THE PART OF THE BITMAP THAT COVERS THE DATA RUN IS READ.
      *
      * The region a volume declares for its bitmap is laid down for the ground
      * it may one day take, not for the ground it has (create_tagfs: the growth
      * ceiling). On a 90 MiB volume that is two megabytes of region carrying
-     * three kilobytes of bits. Reading the whole region would mean a
-     * two-megabyte kmalloc and four thousand sectors off the medium at every
-     * mount, to use a thousandth of it — on a kernel heap whose floor is two
-     * megabytes.
-     *
-     * The bits past the data run are zero by construction and mean nothing
-     * until the volume grows into them; when it does, this arithmetic covers
-     * them, because it is derived from data_blocks and not from the region. */
+     * three kilobytes of bits. The bits past the data run are zero by
+     * construction and mean nothing until the volume grows into them; when it
+     * does, the block map covers them, because it is sized from data_blocks
+     * and not from the region. */
     uint32_t bm_region_sectors =
         g_state.layout.block_bitmap_blocks * TAGFS_BLOCK_SECTORS;
     uint32_t bm_sector_count =
-        (bitmap_bytes + TAGFS_SECTOR_SIZE - 1) / TAGFS_SECTOR_SIZE;
+        (g_state.layout.data_blocks + TAGFS_SECTOR_SIZE * 8 - 1) / (TAGFS_SECTOR_SIZE * 8);
 
     /* A bitmap region too small to hold a bit for every data block is a volume
      * that cannot keep track of its own ground. It has never been possible to
@@ -2693,52 +2481,10 @@ error_t tagfs_init(void) {
                              "bit for every block of its data run",
                              ERR_TAGFS_CORRUPTED);
     }
-
-    uint32_t bm_buf_size = bm_sector_count * TAGFS_SECTOR_SIZE;
-    uint8_t *bm_buf = kmalloc(bm_buf_size);
-    if (!bm_buf)
-    {
-        return mount_refused("there is no memory to read its block bitmap",
-                             ERR_NO_MEMORY);
+    if (BlockMapMount(g_state.layout.data_blocks,
+                      (uint64_t)g_state.layout.block_bitmap_block * TAGFS_BLOCK_SECTORS) != OK) {
+        return mount_refused("there is no memory for its block map", ERR_NO_MEMORY);
     }
-
-    /*
-     * ‼ A bitmap that would not read is NOT an empty bitmap.
-     *
-     * This used to warn and carry on with the all-zero buffer it had just
-     * allocated — and an all-zero bitmap says every block of the volume is
-     * free. The next allocation then hands out block 0, which is the tag
-     * registry, then the file table, then the metadata pool, and writes over
-     * all three. On the following boot the pool reads back as somebody else's
-     * bytes, the mount decides the volume is empty, and every file on it is
-     * gone.
-     *
-     * Measured on the board: a flash drive whose controller dropped a command
-     * mid-boot came up once with everything working, and the boot after that
-     * had no files on it at all. Nothing was said either time, because the
-     * warning was a debug_printf and those compile to nothing in a shipped
-     * build.
-     *
-     * So: a volume whose bitmap cannot be read is a volume this kernel will
-     * not mount. Refusing costs the machine its filesystem for that boot;
-     * carrying on costs it the filesystem permanently.
-     */
-    if (disk_read_sectors((uint64_t)((uint64_t)g_state.layout.block_bitmap_block *
-                                     TAGFS_BLOCK_SECTORS),
-                          (uint16_t)bm_sector_count, bm_buf) != 0)
-    {
-        kfree(bm_buf);
-        return mount_refused("its block bitmap would not read, and a missing "
-                             "bitmap reads as a volume with nothing on it — "
-                             "the next write would take everything",
-                             ERR_TAGFS_CORRUPTED);
-    }
-
-    uint32_t copy_bytes = bitmap_bytes < bm_buf_size ? bitmap_bytes : bm_buf_size;
-    memcpy(g_state.block_bitmap.bitmap, bm_buf, copy_bytes);
-    kfree(bm_buf);
-
-    free_list_build();
 
     /*
      * ‼ THE POOL IS READ BEFORE THE FSCK, BECAUSE THE FSCK IS WHAT DECIDES.
@@ -2760,7 +2506,14 @@ error_t tagfs_init(void) {
      */
     meta_pool_mirror_init(g_state.ledger.next_file_id + 64);
 
-    // --- Mount-time fsck: cross-check file extents vs bitmap ---
+    /*
+     * --- Mount-time roll call: every owner of a block, against the map ---
+     *
+     * The roll call's own map of the run is dense; the census by windows is
+     * step 1.6. When the heap will not give it, that is said, and the walk of
+     * the files still runs — it corrects the table and builds the tag index,
+     * and a mount that skipped it had files no query could find.
+     */
     {
         uint32_t bitmap_bytes_sz = (g_state.layout.data_blocks + 7) / 8;
         uint8_t *computed_bm = kmalloc(bitmap_bytes_sz);
@@ -2773,94 +2526,101 @@ error_t tagfs_init(void) {
             {
                 bitmap_set_bit(computed_bm, r);
             }
+        }
+        else
+        {
+            kprintf("[TagFS FSCK] no memory for the roll call's map of %u blocks "
+                    "(%u bytes) — this mount does not hold its block map against "
+                    "its files\n", g_state.layout.data_blocks, bitmap_bytes_sz);
+        }
 
-            // Scan all files and mark their extents
-            uint32_t files_checked = 0;
-            uint32_t orphan_blocks = 0;
-            uint32_t missing_blocks = 0;
-            uint32_t entries_corrected = 0;
-            uint32_t files_lost = 0;
+        // Scan all files and mark their extents
+        uint32_t files_checked = 0;
+        uint32_t entries_corrected = 0;
+        uint32_t files_lost = 0;
 
-            for (uint32_t fid = 1; fid < g_state.ledger.next_file_id; fid++)
+        for (uint32_t fid = 1; fid < g_state.ledger.next_file_id; fid++)
+        {
+            uint32_t mb, mo;
+            if (file_table_lookup(fid, &mb, &mo) != 0)
+                continue;
+
+            /* ‼ WHERE THE POOL SAYS THE NEWEST RECORD IS, WINS.
+             *
+             * The pool is append-only and the mirror walked it in order,
+             * so its answer is the newest record for this file that ever
+             * reached the medium. A table naming somewhere else is a table
+             * that missed a flush the pool did not — the exact state a
+             * power cut between the two writes of one metadata update
+             * leaves. Correcting it here is what turns that from a lost
+             * file into a file one sync behind. */
+            uint32_t pb, po;
+            if (meta_pool_mirror_where(fid, &pb, &po) == 0 &&
+                (pb != mb || po != mo))
             {
-                uint32_t mb, mo;
-                if (file_table_lookup(fid, &mb, &mo) != 0)
-                    continue;
-
-                /* ‼ WHERE THE POOL SAYS THE NEWEST RECORD IS, WINS.
-                 *
-                 * The pool is append-only and the mirror walked it in order,
-                 * so its answer is the newest record for this file that ever
-                 * reached the medium. A table naming somewhere else is a table
-                 * that missed a flush the pool did not — the exact state a
-                 * power cut between the two writes of one metadata update
-                 * leaves. Correcting it here is what turns that from a lost
-                 * file into a file one sync behind. */
-                uint32_t pb, po;
-                if (meta_pool_mirror_where(fid, &pb, &po) == 0 &&
-                    (pb != mb || po != mo))
-                {
-                    kprintf("[TagFS FSCK] file %u is named at block %u+%u and "
-                            "this volume's newest metadata for it is at block "
-                            "%u+%u — the pool is the newer of the two, and the "
-                            "table is corrected to it\n",
-                            fid, mb, mo, pb, po);
-                    file_table_update(fid, pb, po);
-                    mb = pb;
-                    mo = po;
-                    entries_corrected++;
-                }
-
-                TagFSMetadata meta;
-                memset(&meta, 0, sizeof(meta));
-                if (meta_pool_read(mb, mo, &meta) != 0)
-                {
-                    /* Nothing readable is left for this file anywhere: the
-                     * table's place will not unpack and the pool has no newer
-                     * one to offer. The entry goes, and with it the file — so
-                     * it is said with kprintf and survives into a shipped
-                     * build. This line was the silence that turned a lost file
-                     * into a mystery. */
-                    kprintf("[TagFS FSCK] file %u is named at block %u+%u and "
-                            "there is no readable metadata there or anywhere "
-                            "else in this volume's pool — the file is gone and "
-                            "its name goes with it\n", fid, mb, mo);
-                    files_lost++;
-                    file_table_delete(fid);
-                    continue;
-                }
-
-                if (!(meta.flags & TAGFS_FILE_ACTIVE))
-                {
-                    // File was marked for deletion (journal replay or incomplete delete).
-                    // Complete the cleanup: remove file_table entry and free blocks.
-                    debug_printf("[TagFS FSCK] File %u has ACTIVE=0 — completing cleanup\n", fid);
-                    file_table_delete(fid);
-                    // Don't mark extents in computed_bm → blocks will be reclaimed
-                    tagfs_metadata_free(&meta);
-                    continue;
-                }
-
-                for (uint16_t e = 0; e < meta.extent_count; e++)
-                {
-                    uint32_t start = meta.extents[e].start_block;
-                    uint32_t count = meta.extents[e].block_count;
-                    for (uint32_t b = start; b < start + count && b < g_state.layout.data_blocks; b++)
-                    {
-                        bitmap_set_bit(computed_bm, b);
-                    }
-                }
-                files_checked++;
-
-                // Rebuild bitmap index from disk metadata
-                for (uint16_t t = 0; t < meta.tag_count; t++)
-                {
-                    tag_bitmap_set(g_state.bitmap_index, meta.tag_ids[t], fid);
-                }
-
-                tagfs_metadata_free(&meta);
+                kprintf("[TagFS FSCK] file %u is named at block %u+%u and "
+                        "this volume's newest metadata for it is at block "
+                        "%u+%u — the pool is the newer of the two, and the "
+                        "table is corrected to it\n",
+                        fid, mb, mo, pb, po);
+                file_table_update(fid, pb, po);
+                mb = pb;
+                mo = po;
+                entries_corrected++;
             }
 
+            TagFSMetadata meta;
+            memset(&meta, 0, sizeof(meta));
+            if (meta_pool_read(mb, mo, &meta) != 0)
+            {
+                /* Nothing readable is left for this file anywhere: the
+                 * table's place will not unpack and the pool has no newer
+                 * one to offer. The entry goes, and with it the file — so
+                 * it is said with kprintf and survives into a shipped
+                 * build. This line was the silence that turned a lost file
+                 * into a mystery. */
+                kprintf("[TagFS FSCK] file %u is named at block %u+%u and "
+                        "there is no readable metadata there or anywhere "
+                        "else in this volume's pool — the file is gone and "
+                        "its name goes with it\n", fid, mb, mo);
+                files_lost++;
+                file_table_delete(fid);
+                continue;
+            }
+
+            if (!(meta.flags & TAGFS_FILE_ACTIVE))
+            {
+                // File was marked for deletion (journal replay or incomplete delete).
+                // Complete the cleanup: remove file_table entry and free blocks.
+                debug_printf("[TagFS FSCK] File %u has ACTIVE=0 — completing cleanup\n", fid);
+                file_table_delete(fid);
+                // Don't mark extents in computed_bm → blocks will be reclaimed
+                tagfs_metadata_free(&meta);
+                continue;
+            }
+
+            for (uint16_t e = 0; computed_bm && e < meta.extent_count; e++)
+            {
+                uint32_t start = meta.extents[e].start_block;
+                uint32_t count = meta.extents[e].block_count;
+                for (uint32_t b = start; b < start + count && b < g_state.layout.data_blocks; b++)
+                {
+                    bitmap_set_bit(computed_bm, b);
+                }
+            }
+            files_checked++;
+
+            // Rebuild bitmap index from disk metadata
+            for (uint16_t t = 0; t < meta.tag_count; t++)
+            {
+                tag_bitmap_set(g_state.bitmap_index, meta.tag_ids[t], fid);
+            }
+
+            tagfs_metadata_free(&meta);
+        }
+
+        if (computed_bm)
+        {
             /* Walk meta_pool / file_table / registry chains and mark
              * every chain block in computed_bm. Without this, chain
              * blocks (e.g. meta_pool's chain to 566) appear as
@@ -2925,84 +2685,52 @@ error_t tagfs_init(void) {
              * reach: the snapshot manifest. Named in the Ledger the instant it
              * is allocated, marked used on the medium only at the next sync —
              * so a volume that lost power in between came back with the
-             * manifest block in the free list. See CowRollCall. */
+             * manifest block free on the map. See CowRollCall. */
             CowRollCall(computed_bm, g_state.layout.data_blocks);
-
-            // Compare computed vs on-disk bitmap
-            for (uint32_t b = 0; b < g_state.layout.data_blocks; b++)
-            {
-                bool on_disk = bitmap_test_bit(g_state.block_bitmap.bitmap, b);
-                bool computed = bitmap_test_bit(computed_bm, b);
-                if (on_disk && !computed)
-                    orphan_blocks++;
-                if (!on_disk && computed)
-                    missing_blocks++;
-            }
-
-            if (orphan_blocks > 0 || missing_blocks > 0)
-            {
-                /* ‼ SAID ALOUD, not to the debug channel. An ORPHAN is a
-                 * block the on-disk bitmap calls used which no chain and no
-                 * file extent reaches — and that is precisely the footprint a
-                 * severed metadata-pool tail leaves behind: correctly
-                 * terminated, shorter than it was, with the lost blocks still
-                 * marked used and nothing pointing at them. This line was a
-                 * debug_printf, which compiles to nothing in a shipped build,
-                 * so every past severing happened in silence on exactly the
-                 * machines that matter. The repair is additive — the blocks
-                 * are kept, never reissued over live metadata — but the COUNT
-                 * is the evidence, and a volume that has lost something should
-                 * say so on the boot that finds it. */
-                kprintf("[TagFS FSCK] Bitmap mismatch: %u orphan, %u missing - additive repair\n",
-                        orphan_blocks, missing_blocks);
-                /* Before the union below, which is what makes the two maps
-                 * agree and would leave nothing to name. */
-                FsckSayRuns(g_state.block_bitmap.bitmap, computed_bm,
-                            g_state.layout.data_blocks, true);
-                FsckSayRuns(g_state.block_bitmap.bitmap, computed_bm,
-                            g_state.layout.data_blocks, false);
-                /* Additive repair: union (on_disk OR computed). Never
-                 * release a block on-disk says is used — the chain
-                 * walk above is best-effort and a subsystem we don't
-                 * yet enumerate (CoW snapshots, disk_book journal,
-                 * future vDSO-style) might also legitimately own a
-                 * block that on-disk bitmap correctly captured but
-                 * we don't reproduce. Erring towards "keep used" is
-                 * safe; the worst case is a slow, leaky allocator
-                 * that fsck will eventually resolve as files come
-                 * and go. The opposite (release-into-allocator a
-                 * block that's still live metadata) corrupts the
-                 * filesystem. */
-                for (uint32_t b = 0; b < g_state.layout.data_blocks; b++) {
-                    if (bitmap_test_bit(computed_bm, b))
-                        bitmap_set_bit(g_state.block_bitmap.bitmap, b);
-                }
-                free_list_build();
-
-                // Count actual free blocks
-                uint32_t used = 0;
-                for (uint32_t b = 0; b < g_state.layout.data_blocks; b++)
-                {
-                    if (bitmap_test_bit(g_state.block_bitmap.bitmap, b))
-                        used++;
-                }
-                g_state.ledger.free_blocks = g_state.layout.data_blocks - used;
-            }
-
-            /* Said aloud for the same reason the bitmap mismatch is: a
-             * corrected entry and a lost file are both things that happened to
-             * the user's files, and a shipped build has to say so. */
-            if (entries_corrected || files_lost) {
-                kprintf("[TagFS FSCK] %u file table entry(s) corrected from "
-                        "this volume's metadata pool, %u file(s) lost\n",
-                        entries_corrected, files_lost);
-            }
-
-            debug_printf("[TagFS FSCK] Checked %u files, bitmap %s\n",
-                         files_checked,
-                         (orphan_blocks == 0 && missing_blocks == 0) ? "OK" : "repaired");
-            kfree(computed_bm);
         }
+
+        /* The medium's map, read once, a block at a time, against the roll
+         * call: every window summarised, every orphan and missing run named,
+         * and the repair only ever adds (block_map.h). */
+        BlockMapCensusCount census;
+        error_t censused = BlockMapCensus(computed_bm, &census);
+        kfree(computed_bm);
+        if (censused == ERR_TAGFS_CORRUPTED) {
+            /*
+             * ‼ A bitmap that would not read is NOT an empty bitmap.
+             *
+             * An all-zero bitmap says every block of the volume is free, and
+             * the next allocation hands out block 0, which is the tag
+             * registry, then the file table, then the metadata pool. Measured
+             * on the board: a flash drive whose controller dropped a command
+             * mid-boot came up once with everything working, and the boot
+             * after that had no files on it at all. Refusing costs the machine
+             * its filesystem for that boot; carrying on costs it the
+             * filesystem permanently.
+             */
+            return mount_refused("its block bitmap would not read, and a missing "
+                                 "bitmap reads as a volume with nothing on it — "
+                                 "the next write would take everything",
+                                 ERR_TAGFS_CORRUPTED);
+        }
+        if (censused != OK) {
+            return mount_refused("there is no memory to hold its block map's repair",
+                                 censused);
+        }
+        g_state.ledger.free_blocks = census.free;
+
+        /* Said aloud for the same reason the bitmap mismatch is: a
+         * corrected entry and a lost file are both things that happened to
+         * the user's files, and a shipped build has to say so. */
+        if (entries_corrected || files_lost) {
+            kprintf("[TagFS FSCK] %u file table entry(s) corrected from "
+                    "this volume's metadata pool, %u file(s) lost\n",
+                    entries_corrected, files_lost);
+        }
+
+        debug_printf("[TagFS FSCK] Checked %u files, bitmap %s\n",
+                     files_checked,
+                     (census.orphan == 0 && census.missing == 0) ? "OK" : "repaired");
     }
 
     /*
@@ -3018,29 +2746,25 @@ error_t tagfs_init(void) {
      * a growth leaves — and then grew again on the next mount, came up
      * claiming 118764 free blocks in a data run of 73594. More free space than
      * the volume has, from a number that had been added to twice for the same
-     * ground. The bitmap knew better the whole time, and it has already been
-     * read by this point: every mount reads it, and the free list is built
-     * from it, so counting it costs one walk of memory and no I/O at all.
+     * ground. The bitmap knew better the whole time, and the roll call above
+     * has just counted it, window by window, at no cost beyond the read it
+     * made anyway.
      *
-     * So it is counted here and the stored number is corrected when it
-     * disagrees. That makes every mount a repair of it, and takes the whole
-     * class of "the count drifted" out of the system rather than adding
-     * another place that tries to keep it right.
+     * So the stored number is corrected when it disagrees. That makes every
+     * mount a repair of it, and takes the whole class of "the count drifted"
+     * out of the system rather than adding another place that tries to keep
+     * it right.
      */
-    {
-        uint64_t counted = count_free_blocks();
-        g_state.ledger.free_blocks = counted;
-        if (counted != g_ledger_free_as_read) {
-            bool kept = (tagfs_write_ledger() == OK);
-            kprintf("[TagFS] the ledger came off the medium saying %llu blocks "
-                    "were free and the bitmap says %llu — a block is taken in "
-                    "the bitmap, so that is the number kept%s\n",
-                    (unsigned long long)g_ledger_free_as_read,
-                    (unsigned long long)counted,
-                    kept ? ", and it is written back"
-                         : "; the medium would not take it, so it is counted "
-                           "again on the next mount");
-        }
+    if (g_state.ledger.free_blocks != g_ledger_free_as_read) {
+        bool kept = (tagfs_write_ledger() == OK);
+        kprintf("[TagFS] the ledger came off the medium saying %llu blocks "
+                "were free and the bitmap says %llu — a block is taken in "
+                "the bitmap, so that is the number kept%s\n",
+                (unsigned long long)g_ledger_free_as_read,
+                (unsigned long long)g_state.ledger.free_blocks,
+                kept ? ", and it is written back"
+                     : "; the medium would not take it, so it is counted "
+                       "again on the next mount");
     }
 
     /* Said HERE and not beside the Ledger, because until the bitmap has been
@@ -3218,56 +2942,20 @@ static void tagfs_sync_inside(void)
     IntegrityFlush();
     IntegrityDrainReports();   // publish any pending bit-rot Touch events
 
-    /* Written the same way it is read: the sectors that carry bits for the
-     * data run, not the whole region the volume reserved for its growth. The
-     * rest is zero on the medium and stays zero — writing it back every sync
-     * would be two megabytes of traffic to say nothing. */
+    /* The block map's part: every edit laid on, every sector memory changed
+     * written — the sectors that carry bits for the data run, a window at a
+     * time, never the whole region the volume reserved for its growth.
+     *
+     * ‼ THE WRITE THAT MAKES THE ALLOCATOR DURABLE, SAID WHEN REFUSED. What is
+     * at stake is not this sync: it is the NEXT mount, which reads this map
+     * and believes it. A block handed out since the medium last took its
+     * sector reads as free there, and the roll call is what then keeps it
+     * from being handed to a second owner. */
     SETTLE_CUT_AT(SETTLE_CUT_POINT_BITMAP);
-    uint32_t bitmap_bytes = (g_state.layout.data_blocks + 7) / 8;
-    uint32_t sector_count = (bitmap_bytes + TAGFS_SECTOR_SIZE - 1) / TAGFS_SECTOR_SIZE;
-    uint32_t bm_buf_size = sector_count * TAGFS_SECTOR_SIZE;
-    uint8_t *bm_buf = kmalloc(bm_buf_size);
-    if (bm_buf)
-    {
-        memset(bm_buf, 0, bm_buf_size);
-        uint32_t copy_bytes = bitmap_bytes < bm_buf_size ? bitmap_bytes : bm_buf_size;
-        memcpy(bm_buf, g_state.block_bitmap.bitmap, copy_bytes);
-        if (disk_write_sectors(((uint64_t)g_state.layout.block_bitmap_block * TAGFS_BLOCK_SECTORS),
-                               (uint16_t)sector_count, bm_buf) != 0)
-        {
-            /* ‼ THE ONE WRITE THAT MAKES THE ALLOCATOR DURABLE, AND IT USED TO
-             * FAIL TO THE DEBUG CHANNEL — which compiles to nothing in a
-             * shipped build. What is at stake is not this sync: it is the NEXT
-             * mount, which reads this bitmap and believes it. Every block
-             * handed out since the last successful write reads as free, and
-             * the first writer after that mount is handed a block somebody
-             * already owns. */
-            kprintf("[TagFS] sync: the block bitmap for %u block(s) would not "
-                    "write — the medium's map is now older than this volume, "
-                    "and the next mount will read it as such\n",
-                    g_state.layout.data_blocks);
-        }
-        else if (g_state.block_bitmap.owed)
-        {
-            /* The whole map has just gone down, so nothing is owed on it —
-             * including sectors a refused MapOwedSettle had put back. */
-            TagFSLockTake(&g_state.lock);
-            memset(g_state.block_bitmap.owed, 0,
-                   (g_state.block_bitmap.owed_sectors + 7) / 8);
-            g_state.block_bitmap.owed_count = 0;
-            TagFSLockDrop(&g_state.lock);
-        }
-        kfree(bm_buf);
-    }
-    else
-    {
-        /* The same loss, arrived at by a different road, and it was not even
-         * reported to the debug channel: no buffer means the bitmap is simply
-         * not written and the sync carries on to the Ledger as though it had
-         * been. */
-        kprintf("[TagFS] sync: no room for a %u-byte buffer to write the block "
-                "bitmap with — the medium's map stays as it was\n",
-                bm_buf_size);
+    if (BlockMapFlush() != OK) {
+        kprintf("[TagFS] sync: the block map of %u block(s) is not all on the "
+                "medium — its map there is older than this volume, and the next "
+                "mount will read it as such\n", g_state.layout.data_blocks);
     }
 
     SETTLE_CUT_AT(SETTLE_CUT_POINT_LEDGER);
@@ -3366,20 +3054,7 @@ static void tagfs_clear_the_ground(void)
     file_table_shutdown();
     meta_pool_shutdown(false);
 
-    free_list_destroy();
-    if (g_state.block_bitmap.bitmap)
-    {
-        kfree(g_state.block_bitmap.bitmap);
-        g_state.block_bitmap.bitmap = NULL;
-    }
-    if (g_state.block_bitmap.owed)
-    {
-        kfree(g_state.block_bitmap.owed);
-        g_state.block_bitmap.owed = NULL;
-    }
-    g_state.block_bitmap.owed_sectors = 0;
-    g_state.block_bitmap.owed_count = 0;
-    g_state.block_bitmap.total_blocks = 0;
+    BlockMapUnmount();
 
     TagFS_CowShutdown();
     TagFS_DedupShutdown();
@@ -3818,7 +3493,7 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
 // the last record in it is retired, and it is already holding g_state.lock
 // when it does — the same reason tagfs_alloc_blocks_internal is reachable from
 // there.
-void tagfs_free_blocks_internal(uint32_t start_block, uint32_t count);
+error_t tagfs_free_blocks_internal(uint32_t start_block, uint32_t count);
 
 // ----------------------------------------------------------------------------
 // tagfs_delete_file
@@ -3831,6 +3506,9 @@ int tagfs_delete_file(uint32_t file_id)
     if (!tagfs_enter())
         return -1;
     int rc = tagfs_delete_file_inside(file_id);
+    /* The file's blocks whose sectors were away went back as edits written
+     * down; they are laid on now, so the ground is free when this returns. */
+    BlockMapSettle();
     tagfs_leave();
     return rc;
 }
@@ -3860,6 +3538,9 @@ static int tagfs_delete_file_inside(uint32_t file_id)
 
     // Delete from file table (commit point: file officially gone)
     file_table_delete(file_id);
+
+    // And the ground it kept in hand for its growth
+    AllotmentRelease(file_id);
 
     // Free data blocks if we could read metadata
     if (has_meta == 0 && meta.extents)
@@ -5139,157 +4820,17 @@ static int tagfs_truncate_file_inside(uint32_t file_id, uint64_t new_size)
 }
 
 // ----------------------------------------------------------------------------
-// Block allocator
+// Block allocator — the doors into the block map (block_map/)
 // ----------------------------------------------------------------------------
 
-/* Take on the debt for a run of blocks. Caller holds g_state.lock, because
- * this is recorded in the same breath as the bits it is about. */
-static void MapOwedMark(uint32_t start_block, uint32_t count)
-{
-    if (!g_state.block_bitmap.owed || count == 0)
-        return;
-
-    uint32_t first_sector = (start_block / 8) / TAGFS_SECTOR_SIZE;
-    uint32_t last_sector  = ((start_block + count - 1) / 8) / TAGFS_SECTOR_SIZE;
-
-    for (uint32_t sec = first_sector;
-         sec <= last_sector && sec < g_state.block_bitmap.owed_sectors; sec++)
-    {
-        uint8_t bit = (uint8_t)(1u << (sec % 8));
-        if (!(g_state.block_bitmap.owed[sec / 8] & bit)) {
-            g_state.block_bitmap.owed[sec / 8] |= bit;
-            g_state.block_bitmap.owed_count++;
-        }
-    }
-}
-
-/*
- * ‼ PAY IT. Called with NO lock held, by the allocator's own door, before the
- * block it handed out can be named anywhere.
- *
- * One sector at a time, and each one is copied out from under the lock before
- * the write rather than written from the live bitmap: holding the volume's
- * lock across disk I/O would stop every other core on a flash drive's write
- * latency, and letting the medium read a bitmap another core is editing would
- * write a sector that was never a state this volume was in.
- *
- * A refused write puts the debt straight back. It is a debt, not a report: if
- * the medium would not take it this time, the next hand-out and the next sync
- * both try again, and the volume stays honest about being owed.
- */
-static void MapOwedSettle(void)
-{
-    if (!g_state.block_bitmap.owed)
-        return;
-
-    /* Asked under the lock, because that is where the count is kept. Reading
-     * it any other way would be a race on the one number that decides whether
-     * this function does anything at all. */
-    TagFSLockTake(&g_state.lock);
-    uint32_t owed_now = g_state.block_bitmap.owed_count;
-    TagFSLockDrop(&g_state.lock);
-    if (owed_now == 0)
-        return;
-
-    uint8_t *sector = kmalloc(TAGFS_SECTOR_SIZE);
-    if (!sector) {
-        kprintf("[TagFS] no room for one sector to tell the medium which "
-                "blocks are taken — the map stays behind until the next "
-                "sync\n");
-        return;
-    }
-
-    uint64_t base_lba = (uint64_t)g_state.layout.block_bitmap_block * TAGFS_BLOCK_SECTORS;
-    uint32_t bitmap_bytes = (g_state.layout.data_blocks + 7) / 8;
-
-    for (uint32_t sec = 0; sec < g_state.block_bitmap.owed_sectors; sec++) {
-        uint8_t bit = (uint8_t)(1u << (sec % 8));
-
-        TagFSLockTake(&g_state.lock);
-        if (!g_state.block_bitmap.owed || !(g_state.block_bitmap.owed[sec / 8] & bit)) {
-            TagFSLockDrop(&g_state.lock);
-            continue;
-        }
-        uint32_t from = sec * TAGFS_SECTOR_SIZE;
-        uint32_t len  = (from + TAGFS_SECTOR_SIZE <= bitmap_bytes)
-                            ? TAGFS_SECTOR_SIZE : (bitmap_bytes - from);
-        memset(sector, 0, TAGFS_SECTOR_SIZE);
-        memcpy(sector, g_state.block_bitmap.bitmap + from, len);
-        g_state.block_bitmap.owed[sec / 8] &= (uint8_t)~bit;
-        if (g_state.block_bitmap.owed_count)
-            g_state.block_bitmap.owed_count--;
-        TagFSLockDrop(&g_state.lock);
-
-        if (disk_write_sectors(base_lba + sec, 1, sector) != 0) {
-            TagFSLockTake(&g_state.lock);
-            if (g_state.block_bitmap.owed &&
-                !(g_state.block_bitmap.owed[sec / 8] & bit)) {
-                g_state.block_bitmap.owed[sec / 8] |= bit;
-                g_state.block_bitmap.owed_count++;
-            }
-            TagFSLockDrop(&g_state.lock);
-            kprintf("[TagFS] the medium would not take sector %u of this "
-                    "volume's block map — the blocks it covers are taken here "
-                    "and still read as free there\n", sec);
-        }
-    }
-
-    kfree(sector);
-}
-
-// Internal version - caller MUST hold g_state.lock
-// Exported for use by meta_pool.c
+/* Caller holds g_state.lock. Not static: the metadata pool takes the block its
+ * chain grows by under that lock, and nothing here reads the medium to find
+ * it — the block map decides on what memory holds (block_map.h). */
 int tagfs_alloc_blocks_internal(uint32_t count, uint32_t *out_start_block)
 {
-    FreeExtent *prev = NULL;
-    FreeExtent *cur = g_state.block_bitmap.free_list;
-
-    while (cur)
-    {
-        if (cur->count >= count)
-        {
-            *out_start_block = cur->start;
-
-            // Mark bits used
-            for (uint32_t i = 0; i < count; i++)
-            {
-                bitmap_set_bit(g_state.block_bitmap.bitmap, cur->start + i);
-            }
-            /* And the medium is now owed the sectors those bits live in. It is
-             * told by whoever releases the lock — see MapOwedSettle. */
-            MapOwedMark(*out_start_block, count);
-
-            if (cur->count == count)
-            {
-                // Remove extent from list
-                if (prev)
-                    prev->next = cur->next;
-                else
-                    g_state.block_bitmap.free_list = cur->next;
-                kfree(cur);
-                g_state.block_bitmap.extent_count--;
-            }
-            else
-            {
-                cur->start += count;
-                cur->count -= count;
-            }
-
-            if (g_state.ledger.free_blocks >= count)
-            {
-                g_state.ledger.free_blocks -= count;
-            }
-
-            return 0;
-        }
-        prev = cur;
-        cur = cur->next;
-    }
-
-    return -1;
+    return BlockMapTakeLocked(count, 0, out_start_block);
 }
 
-// Public version - acquires g_state.lock
 static int tagfs_alloc_blocks_inside(uint32_t count, uint32_t *out_start_block);
 
 int tagfs_alloc_blocks(uint32_t count, uint32_t *out_start_block)
@@ -5301,97 +4842,22 @@ int tagfs_alloc_blocks(uint32_t count, uint32_t *out_start_block)
     return rc;
 }
 
+/* ‼ BEFORE THE CALLER CAN NAME IT. Every caller of this function goes on to
+ * write the block's number somewhere that outlives this boot — a Ledger field,
+ * a file's extent, a chain's next pointer. The block map's door pays MapOwed
+ * before it returns, so the worst a crash between the two can leave is a block
+ * nobody claims, never a block two owners claim. The metadata pool's chain,
+ * taken under the state lock through tagfs_alloc_blocks_internal, is paid by
+ * the next door or sync; its blocks are reachable another way — the mount's
+ * roll call walks the pool chain by its magic. */
 static int tagfs_alloc_blocks_inside(uint32_t count, uint32_t *out_start_block)
 {
     if (count == 0 || !out_start_block)
         return -1;
-
-    TagFSLockTake(&g_state.lock);
-    int result = tagfs_alloc_blocks_internal(count, out_start_block);
-    TagFSLockDrop(&g_state.lock);
-
-    /* ‼ BEFORE THE CALLER CAN NAME IT. Every caller of this function goes on
-     * to write the block's number somewhere that outlives this boot — a
-     * Ledger field, a file's extent, a chain's next pointer. The medium
-     * learns the block is taken first, so the worst a crash between the two
-     * can leave is a block nobody claims, never a block two owners claim.
-     *
-     * Said plainly about the one path this does NOT cover: meta_pool.c calls
-     * tagfs_alloc_blocks_internal with the lock already held, and settles
-     * nothing here. Its blocks are reachable another way — the mount's roll
-     * call walks the pool chain by its magic — so they are found even when
-     * the medium's map is behind. */
-    if (result == 0)
-        MapOwedSettle();
-    return result;
+    return BlockMapTake(count, 0, out_start_block, __func__) == OK ? 0 : -1;
 }
 
-// Reclaim one contiguous run into the bitmap and the free list.
-// Caller holds g_state.lock, and has already settled the run with the dedup
-// index (see tagfs_free_blocks_internal below).
-static void free_run_locked(uint32_t start_block, uint32_t count)
-{
-    if (count == 0)
-        return;
-
-    uint32_t end = start_block + count;
-
-    // Clear bits
-    for (uint32_t i = 0; i < count; i++)
-    {
-        bitmap_clear_bit(g_state.block_bitmap.bitmap, start_block + i);
-    }
-    g_state.ledger.free_blocks += count;
-
-    // Insert into free list in sorted order, merging adjacent extents
-    FreeExtent *prev = NULL;
-    FreeExtent *cur = g_state.block_bitmap.free_list;
-
-    while (cur && cur->start < start_block)
-    {
-        prev = cur;
-        cur = cur->next;
-    }
-
-    // Check merge right (new extent is adjacent to cur from left)
-    bool merge_right = cur && cur->start == end;
-    // Check merge left (prev is adjacent to new extent from right)
-    bool merge_left = prev && (prev->start + prev->count) == start_block;
-
-    if (merge_left && merge_right)
-    {
-        prev->count += count + cur->count;
-        prev->next = cur->next;
-        kfree(cur);
-        g_state.block_bitmap.extent_count--;
-    }
-    else if (merge_left)
-    {
-        prev->count += count;
-    }
-    else if (merge_right)
-    {
-        cur->start = start_block;
-        cur->count += count;
-    }
-    else
-    {
-        FreeExtent *new_extent = kmalloc(sizeof(FreeExtent));
-        if (new_extent)
-        {
-            new_extent->start = start_block;
-            new_extent->count = count;
-            new_extent->next = cur;
-            if (prev)
-                prev->next = new_extent;
-            else
-                g_state.block_bitmap.free_list = new_extent;
-            g_state.block_bitmap.extent_count++;
-        }
-    }
-}
-
-// Give blocks back to the allocator. Caller MUST hold g_state.lock.
+// Give blocks back. Caller MUST hold g_state.lock.
 //
 // This is the one door out of the allocator, so it is also where a block leaves
 // the dedup index. Nothing used to walk that index on the way out: every
@@ -5406,11 +4872,12 @@ static void free_run_locked(uint32_t start_block, uint32_t count)
 // Lock order is g_state.lock -> dedup lock, established here and observed
 // everywhere; TagFS_DedupAllocBlock keeps its allocation outside the dedup lock
 // so the cycle cannot close from the other side.
-void tagfs_free_blocks_internal(uint32_t start_block, uint32_t count)
+//
+// OK, or the block map's refusal of the first run it would not take back — a
+// run holding a block already free is refused whole and the map left as it is.
+error_t tagfs_free_blocks_internal(uint32_t start_block, uint32_t count)
 {
-    if (count == 0)
-        return;
-
+    error_t  first     = OK;
     uint32_t run_start = start_block;
     uint32_t run_len   = 0;
 
@@ -5431,13 +4898,20 @@ void tagfs_free_blocks_internal(uint32_t start_block, uint32_t count)
 
         if (run_len)
         {
-            free_run_locked(run_start, run_len);
+            error_t given = BlockMapGiveLocked(run_start, run_len);
+            if (first == OK)
+                first = given;
             run_len = 0;
         }
     }
 
     if (run_len)
-        free_run_locked(run_start, run_len);
+    {
+        error_t given = BlockMapGiveLocked(run_start, run_len);
+        if (first == OK)
+            first = given;
+    }
+    return first;
 }
 
 // Public version - acquires g_state.lock
@@ -5452,15 +4926,20 @@ int tagfs_free_blocks(uint32_t start_block, uint32_t count)
     return rc;
 }
 
+/* The sectors of the run are brought in first, with no lock held, so the give
+ * under the lock is judged at once and its caller hears the answer; the edits
+ * the lock made without a sector are laid on before this returns. */
 static int tagfs_free_blocks_inside(uint32_t start_block, uint32_t count)
 {
     if (count == 0)
         return 0;
 
+    BlockMapFetchRun(start_block, count, __func__);
     TagFSLockTake(&g_state.lock);
-    tagfs_free_blocks_internal(start_block, count);
+    error_t given = tagfs_free_blocks_internal(start_block, count);
     TagFSLockDrop(&g_state.lock);
-    return 0;
+    BlockMapSettle();
+    return given == OK ? 0 : -(int)given;
 }
 
 // ----------------------------------------------------------------------------
@@ -5691,45 +5170,18 @@ static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
         total_blocks += meta.extents[i].block_count;
     }
 
-    // Allocate contiguous space at target location or first available
+    /* One run for the whole file, taken through the block map as near the
+     * target as a run that long lies. The target used to be taken by setting
+     * its bits here directly — past the allocator, past MapOwed, and past the
+     * check that the run fits inside the data run at all. */
     uint32_t new_start;
-    if (target_block != 0 && target_block < g_state.layout.data_blocks) {
-        // Try to allocate at specific target block
-        // Check if target area is free
-        bool area_free = true;
-        for (uint32_t b = 0; b < total_blocks && area_free; b++) {
-            if (bitmap_test_bit(g_state.block_bitmap.bitmap, target_block + b)) {
-                area_free = false;
-            }
-        }
-        
-        if (area_free) {
-            new_start = target_block;
-            // Mark blocks as allocated
-            for (uint32_t b = 0; b < total_blocks; b++) {
-                bitmap_set_bit(g_state.block_bitmap.bitmap, new_start + b);
-            }
-            g_state.ledger.free_blocks -= total_blocks;
-        } else {
-            // Target not available, allocate first available
-            TagFSLockDrop(&g_state.lock);
-            if (tagfs_alloc_blocks(total_blocks, &new_start) != 0)
-            {
-                tagfs_metadata_free(&meta);
-                return -1;
-            }
-            TagFSLockTake(&g_state.lock);
-        }
-    } else {
-        // No target specified, allocate first available contiguous space
-        TagFSLockDrop(&g_state.lock);
-        if (tagfs_alloc_blocks(total_blocks, &new_start) != 0)
-        {
-            tagfs_metadata_free(&meta);
-            return -1;
-        }
-        TagFSLockTake(&g_state.lock);
+    TagFSLockDrop(&g_state.lock);
+    if (BlockMapTake(total_blocks, target_block, &new_start, __func__) != OK)
+    {
+        tagfs_metadata_free(&meta);
+        return -1;
     }
+    TagFSLockTake(&g_state.lock);
 
     // Copy all data to new contiguous location
     uint8_t block_buf[TAGFS_BLOCK_SIZE];
@@ -5777,7 +5229,12 @@ static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
     FileExtent* old_extents   = meta.extents;
     uint16_t    old_extent_ct = meta.extent_count;
 
-    meta.extents = kmalloc(sizeof(FileExtent));
+    /* The run as extents no longer than an extent can say: a file of more
+     * than 0xFFFF blocks used to be named by one extent cut to 16 bits. The
+     * old ones were each that wide at most, so there are never more new than
+     * old. */
+    uint16_t new_extent_ct = (uint16_t)((total_blocks + 0xFFFFu - 1) / 0xFFFFu);
+    meta.extents = kmalloc(sizeof(FileExtent) * new_extent_ct);
     if (!meta.extents)
     {
         meta.extents      = old_extents;
@@ -5788,9 +5245,13 @@ static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
         return -1;
     }
 
-    meta.extents[0].start_block = new_start;
-    meta.extents[0].block_count = (uint16_t)total_blocks;
-    meta.extent_count = 1;
+    for (uint16_t i = 0; i < new_extent_ct; i++)
+    {
+        uint32_t left = total_blocks - (uint32_t)i * 0xFFFFu;
+        meta.extents[i].start_block = new_start + (uint32_t)i * 0xFFFFu;
+        meta.extents[i].block_count = (uint16_t)(left < 0xFFFFu ? left : 0xFFFFu);
+    }
+    meta.extent_count = new_extent_ct;
     meta.modified_time = rtc_get_unix64();
 
     uint32_t new_mb, new_mo;
@@ -5810,15 +5271,12 @@ static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
     file_table_update(file_id, new_mb, new_mo);
     meta_pool_delete(meta_block, meta_offset);
 
-    // The file is named at its new ground now, so the old ground is nobody's.
+    // The file is named at its new ground now, so the old ground is nobody's —
+    // given back through the allocator, whose give is judged block by block.
     for (uint16_t i = 0; i < old_extent_ct; i++)
     {
-        for (uint16_t b = 0; b < old_extents[i].block_count; b++)
-        {
-            bitmap_clear_bit(g_state.block_bitmap.bitmap,
-                             old_extents[i].start_block + b);
-        }
-        g_state.ledger.free_blocks += old_extents[i].block_count;
+        tagfs_free_blocks_internal(old_extents[i].start_block,
+                                   old_extents[i].block_count);
     }
     kfree(old_extents);
 

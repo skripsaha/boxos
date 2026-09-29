@@ -23,6 +23,8 @@
 //                        place on the medium taken wait for their turn
 // stand_heap_tests.c     the kernel heap growing by regions, its large pieces,
 //                        and a class of cabins refused while the reserve serves
+// stand_map_tests.c      the stand_map suite: where a take goes, a give that
+//                        comes twice, and the ground a growing file keeps
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.
@@ -50,7 +52,7 @@ bool StandBlockOf(uint32_t file_id, uint32_t k, uint32_t* out_block);
  * -1 when the file would not open. */
 int  StandWriteAt(uint32_t file_id, uint64_t offset, const void* data, uint32_t bytes);
 
-/* Whether the allocator's bitmap calls a data-run block taken. */
+/* Whether the block map calls a data-run block taken. */
 bool StandBlockInUse(uint32_t block);
 
 /* The newest intact Ledger's sequence number, read off the medium by the

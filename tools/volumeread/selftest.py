@@ -296,7 +296,7 @@ class Case:
 
 
 # More than the 32 runs of each kind the kernel's mount names one by one
-# (tagfs.c FsckSayRuns); the rest it counts in one line.
+# (block_map_mount.c, MapTallySay); the rest it counts in one line.
 ORPHAN_RUNS = 40
 FSCK_RUNS_NAMED = 32
 

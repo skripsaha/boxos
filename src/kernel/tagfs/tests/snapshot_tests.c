@@ -9,10 +9,9 @@
 // ‼ Deleting a snapshot GIVES BACK every block it froze (cow.c,
 // TagFS_SnapshotDelete). A test that makes a redirect has to leave the volume
 // in the state the write path would have: the frozen block the snapshot's,
-// the copy the file's. Freeing "what was allocated" on top of that frees the
-// frozen block a second time, and free_run_locked (tagfs.c) does not look at
-// the bit before it puts a run back on the free list — so the same block would
-// be handed out twice.
+// the copy the file's. Freeing "what was allocated" on top of that gives the
+// frozen block back a second time — a give the block map refuses and says
+// (block_map.h), and one the test must not make.
 // ============================================================================
 
 static uint32_t s_listed[TAGFS_MAX_SNAPSHOTS];

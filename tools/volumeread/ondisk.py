@@ -625,9 +625,9 @@ _UNIFORM = re.compile(rb"\x00+|\xff+|[\x01-\xfe]")
 
 
 def RunsFromBits(bits, nbits):
-    """The used runs of a bitmap (bit b of byte b//8, LSB first — tagfs.c
-    bitmap_test_bit), stepping over whole 0x00 and 0xFF bytes the way
-    free_list_build (tagfs.c) does."""
+    """The used runs of a bitmap (bit b of byte b//8, LSB first — the block
+    map's MapBit), stepping over whole 0x00 and 0xFF bytes the way the block
+    map measures a window (block_map.c, MapMeasureView)."""
     runs, cur = [], None
     data = bytes(bits[:(nbits + 7) // 8])
     for m in _UNIFORM.finditer(data):
