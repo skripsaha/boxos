@@ -46,7 +46,7 @@
 #               registry's last block room for one more tag — then `quilltest
 #               crowd` grows both chains and anchors, and the power goes. Its
 #               census is kept by kind: a prefix that links into unstamped
-#               ground is held under 1.1 and one such cut is booted to be
+#               ground, which step 1.1 lifted, has one such cut booted to be
 #               refused by the kernel itself; a subset doing the same, apart.
 #   noanchormut nextfidmut tablemut flushmut chaingrowmut
 #               the fix or the fault put in on purpose: the caveat must be
@@ -58,7 +58,8 @@
 # (scenario, code), stand_caveat.sh — held under 1.6, the ORPHAN of an
 # unanchored create (noanchor, hog) and race's lost anchored file under 1.4
 # (the owner, 2026-09-27); chaingrow's are (scenario, prefix|subset, code),
-# a chain refused named by its chain, and its refusals are held under 1.1.
+# a chain refused named by its chain; its refusals were held under 1.1, which
+# lifted them.
 # A caveated code no cut shows is lifted early only where its absence is
 # proof: every medium of its kind built — every subset, or for a prefix
 # code every prefix — and no writer left writing through the record.
@@ -537,11 +538,11 @@ pc_race() {
     pc_judge --verify quill-floor:_qt_churn:halt --final-consistent
 }
 
-# chaingrow — MP-D5. The tag registry takes a new block by writing its last
-# block's link to it before the block itself, as the create of a new tag
-# flushes it; the file table did the same in its sync's flush until step 1.1
-# grew it onto Spares — stamped, and the stamp behind a kept flush of its own,
-# before any link names them — which splits that sync's epoch in two. The
+# chaingrow — MP-D5. The file table and the tag registry took a new block by
+# writing their last block's link to it before the block itself, the one in
+# its sync's flush and the other as the create of a new tag flushes it, until
+# step 1.1 grew both onto Spares — stamped, and the stamp behind a kept flush
+# of its own, before any link names them — which splits the sync's epochs. The
 # base is brought to both edges with quilltest crowd — the table one create
 # short of the row its blocks run out at, the registry's last block room for
 # PC_CROWD_ROOM more of crowd's tags — so the recorded run's few creates and
