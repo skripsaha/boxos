@@ -32,7 +32,7 @@
 
 #define STAND_MAP_PAGE_BLOCKS 512u    /* blocks one page of the integrity map covers */
 #define STAND_MAP_PAGES       17u     /* one page more than the map keeps in memory */
-#define STAND_REDIRECTS       64u     /* the redirect log pushes the cache every 64 */
+#define STAND_REDIRECTS       64u     /* the redirect log pushed the cache on every 64th */
 #define STAND_DMA_SECTORS     8u      /* one legacy-IDE DMA transfer (ATA_ASYNC_MAX_SECTORS) */
 #define STAND_RFLAGS_IF       (1u << 9)
 
@@ -169,15 +169,22 @@ out:
  * file made after the mount is never in it), not in the block the pool is
  * appending to (a second file is written until the pool moves on), and not in
  * the read-ahead cache (dropped). Then every read of the record's block is
- * counted, and none refused. */
+ * counted, and none refused.
+ *
+ * With no snapshot standing at all the question takes no lock either. Asked
+ * once more under the volume's state lock — a rank the copy-on-write lock
+ * must never be taken under — it breaks no order only because it takes
+ * nothing. */
 static TestResult TestStandCowQuestionAsksNoMedium(void)
 {
     TestResult    verdict = TEST_PASS;
     uint32_t      first   = 0, second = 0;
     uint32_t      block   = 0, offset = 0;
     uint32_t      now     = 0, now_offset = 0;
+    uint32_t      listed  = 0, standing = 0;
     bool          armed   = false;
     TagFSMetadata cached;
+    TagFSState*   fs      = tagfs_get_state();
     const char*   aside   = StandStepsAsideFor();
 
     if (aside)
@@ -216,8 +223,21 @@ static TestResult TestStandCowQuestionAsksNoMedium(void)
 
     TestEvidence("reads of a file's metadata block the copy-on-write question asked, no snapshot standing",
                  reads);
-    if (reads)
+    if (reads) {
         verdict = TEST_DEFECT;
+        goto out;
+    }
+
+    TEST_ASSERT_OK(TagFS_SnapshotList(&listed, 1, &standing), "the snapshots standing are listed");
+    TEST_ASSERT_EQ(standing, 0, "and not one stands, of any file");
+    LockRankCount before = LockRankCountHere();
+    TagFSLockTake(&fs->lock);
+    copied = TagFS_CowIsActive(first);
+    TagFSLockDrop(&fs->lock);
+    LockRankCount after = LockRankCountHere();
+    TEST_ASSERT(!copied, "asked again under the state lock, the question still says no");
+    TEST_ASSERT_EQ(after.OutOfOrder - before.OutOfOrder, 0,
+                   "and takes no lock: under the state lock it breaks no order");
 out:
     if (armed)
         BlockFailDisarm();
@@ -230,11 +250,12 @@ out:
 
 /* Sixty-four redirects logged for a snapshot of the whole volume, the way the
  * write path logs one after it has copied a block for it, with every cache
- * flush the medium is asked for counted. The log pushes the cache itself on
- * every 64th redirect, so the 64 cross that mark exactly once wherever the
- * count stood — and the push is made from inside the copy-on-write lock.
- * Deleting the snapshot gives back the 64 blocks it kept and empties the log
- * of them; the 64 that stood in for them are the test's to give back. */
+ * flush the medium is asked for counted. The log used to push the cache
+ * itself on every 64th redirect, from inside the copy-on-write lock; 64 in a
+ * row cross that mark exactly once wherever its count stood, so a push that
+ * comes back is seen. Deleting the snapshot gives back the 64 blocks it kept
+ * and empties the log of them; the 64 that stood in for them are the test's
+ * to give back. */
 static TestResult TestStandRedirectLogLeavesTheFlush(void)
 {
     TestResult    verdict  = TEST_PASS;
@@ -255,7 +276,7 @@ static TestResult TestStandRedirectLogLeavesTheFlush(void)
     TEST_ASSERT_OK(DiskBookGetStats(&stats), "the redirect log's counts are read");
     if (stats.free_entries < STAND_REDIRECTS)
         return test_steps_aside("the redirect log has fewer than 64 free slots, and 64 are needed "
-                                "to cross its push");
+                                "to cross the mark its push stood at");
     uint32_t logged = stats.redirects_logged;
 
     error_t made = TagFS_SnapshotCreate("stand-cr6", 0, &snap);
@@ -394,13 +415,11 @@ static const TestCase g_stand_lock_tests[] = {
                        "as the medium takes" },
     { .name  = "stand_cow_question_asks_no_medium", .func = TestStandCowQuestionAsksNoMedium,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.1",
       .caveat_defect = "with no snapshot of it standing, asking whether a file is copied on write "
                        "reads the file's metadata off the medium under the copy-on-write lock, "
                        "with interrupts off, on every block of every write" },
     { .name  = "stand_redirect_log_leaves_the_flush", .func = TestStandRedirectLogLeavesTheFlush,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.1",
       .caveat_defect = "every 64th redirect the log takes pushes the medium's cache from inside "
                        "the copy-on-write lock, with interrupts off — on the drain core that "
                        "waits for completions only its own interrupt returns" },

@@ -728,7 +728,7 @@ class VolumeFacts:
         heads = [self.vread(db + i, 1) for i in (0, 1)]
         self.diskbook = [ondisk.ReadDiskBookHead(h, records_sector) if h else None
                          for h in heads]
-        # read_superblock_into (disk_book.c:76-90): the head, else its copy.
+        # read_superblock_into (disk_book.c:74-88): the head, else its copy.
         self.book = None
         for h in self.diskbook:
             if h is not None and h["valid"]:
@@ -742,7 +742,7 @@ class VolumeFacts:
                 try:
                     raw = self.medium.sectors(self.base + sector, ondisk.DISKBOOK_SECTORS_PER_ENTRY)
                 except IOError:
-                    break                        # replay stops at a failed read (disk_book.c:173-174)
+                    break                        # replay stops at a failed read (disk_book.c:171-172)
                 self.book_records.append(ondisk.ReadDiskBookEntry(raw))
 
     def _ReadCow(self):
@@ -757,7 +757,7 @@ class VolumeFacts:
             self.manifests.append((which, b, m))
             if which == "cow_manifest_block" and m is not None and m["ok"]:
                 self.snapshots = {e["snapshot_id"] for e in m["entries"]}
-        # DiskBookValidateAndReplay (disk_book.c:166-193) into the snapshots the
+        # DiskBookValidateAndReplay (disk_book.c:164-191) into the snapshots the
         # manifest restored; a reformatted book has nothing to replay.
         self.redirects, self.stray = [], []
         for e in self.book_records:
