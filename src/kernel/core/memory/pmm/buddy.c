@@ -207,24 +207,16 @@ void buddy_reserve_range(BuddyZone* zone, uintptr_t start, uintptr_t end) {
     }
 }
 
-void* buddy_alloc(BuddyZone* zone, size_t pages) {
-    if (!pages || !zone->initialized) return NULL;
-
-    int order = pages_to_order(pages);
-    if (order > BUDDY_MAX_ORDER) return NULL;
-
-    spin_lock(&zone->lock);
-
+/* The smallest free block of at least `order`, split down to it and marked
+ * taken. 0 when there is none. The caller holds the lock. */
+static uintptr_t buddy_pop_locked(BuddyZone* zone, int order) {
     // Find smallest order with a free block
     int o;
     for (o = order; o <= BUDDY_MAX_ORDER; o++) {
         if (zone->free_lists[o].head != NULL) break;
     }
 
-    if (o > BUDDY_MAX_ORDER) {
-        spin_unlock(&zone->lock);
-        return NULL;
-    }
+    if (o > BUDDY_MAX_ORDER) return 0;
 
     // Pop block from free list
     BuddyFreeNode* block_node = zone->free_lists[o].head;
@@ -247,6 +239,17 @@ void* buddy_alloc(BuddyZone* zone, size_t pages) {
     alloc_map_mark_range(zone, idx, block_pages, true);
     zone->free_count -= block_pages;
 
+    return block_phys;
+}
+
+void* buddy_alloc(BuddyZone* zone, size_t pages) {
+    if (!pages || !zone->initialized) return NULL;
+
+    int order = pages_to_order(pages);
+    if (order > BUDDY_MAX_ORDER) return NULL;
+
+    spin_lock(&zone->lock);
+    uintptr_t block_phys = buddy_pop_locked(zone, order);
     spin_unlock(&zone->lock);
 
     return (void*)block_phys;
@@ -306,6 +309,47 @@ void* buddy_alloc_range(BuddyZone* zone, size_t pages, uintptr_t min_phys, uintp
     return NULL;
 }
 
+/* One block of `order` at `phys`, every page of it taken, given back: marked
+ * free, counted, and merged with its buddy for as long as the buddy is free
+ * at the same order. The caller holds the lock and has checked the pages. */
+static void buddy_give_locked(BuddyZone* zone, uintptr_t phys, int order) {
+    alloc_map_mark_range(zone, page_index(zone, phys), order_to_pages(order), false);
+    zone->free_count += order_to_pages(order);
+
+    // Coalesce with buddy
+    uintptr_t block = phys;
+    while (order < BUDDY_MAX_ORDER) {
+        uintptr_t buddy_phys = buddy_address(zone, block, order);
+
+        // Buddy must be within zone
+        if (buddy_phys < zone->base ||
+            buddy_phys + order_to_pages(order) * BUDDY_PAGE_SIZE >
+            zone->base + zone->total_pages * BUDDY_PAGE_SIZE) {
+            break;
+        }
+
+        size_t buddy_idx = page_index(zone, buddy_phys);
+
+        // Buddy's first page must be free
+        if (alloc_map_test(zone, buddy_idx)) break;
+
+        // Buddy must be free at the SAME order (check the order field)
+        BuddyFreeNode* buddy_node = phys_to_node(buddy_phys);
+        if (buddy_node->order != (uint8_t)order) break;
+
+        // Remove buddy from its free list
+        buddy_list_remove(&zone->free_lists[order], buddy_node);
+
+        // Merged block starts at min(block, buddy)
+        if (buddy_phys < block) block = buddy_phys;
+        order++;
+    }
+
+    // Insert coalesced block
+    BuddyFreeNode* node = phys_to_node(block);
+    buddy_list_insert(&zone->free_lists[order], node, order);
+}
+
 void buddy_free(BuddyZone* zone, void* addr, size_t pages) {
     if (!addr || !pages || !zone->initialized) return;
 
@@ -342,43 +386,127 @@ void buddy_free(BuddyZone* zone, void* addr, size_t pages) {
         }
     }
 
-    // Mark pages free
-    alloc_map_mark_range(zone, idx, block_pages, false);
-    zone->free_count += block_pages;
+    buddy_give_locked(zone, phys, order);
 
-    // Coalesce with buddy
-    uintptr_t block = phys;
-    while (order < BUDDY_MAX_ORDER) {
-        uintptr_t buddy_phys = buddy_address(zone, block, order);
+    spin_unlock(&zone->lock);
+}
 
-        // Buddy must be within zone
-        if (buddy_phys < zone->base ||
-            buddy_phys + order_to_pages(order) * BUDDY_PAGE_SIZE >
-            zone->base + zone->total_pages * BUDDY_PAGE_SIZE) {
-            break;
-        }
+// --- Exact runs ---
+//
+// A block of the buddy is a power of two, and a caller that needs 257 pages
+// would be handed 512 and hold the other 255 for nothing. These two take and
+// give back EXACTLY the pages asked for: the block that holds them is taken
+// whole and what lies past the last page asked for goes straight back.
+//
+// And a run longer than one block of the largest order is not refused for
+// being longer: the buddy's largest order is how far it merges, not how much
+// memory the machine has in one piece. Such a run is that many blocks of the
+// largest order lying side by side, taken together.
 
-        size_t buddy_idx = page_index(zone, buddy_phys);
-
-        // Buddy's first page must be free
-        if (alloc_map_test(zone, buddy_idx)) break;
-
-        // Buddy must be free at the SAME order (check the order field)
-        BuddyFreeNode* buddy_node = phys_to_node(buddy_phys);
-        if (buddy_node->order != (uint8_t)order) break;
-
-        // Remove buddy from its free list
-        buddy_list_remove(&zone->free_lists[order], buddy_node);
-
-        // Merged block starts at min(block, buddy)
-        if (buddy_phys < block) block = buddy_phys;
+/* The largest order a piece at page index `rel` of the zone may have: its
+ * alignment, capped at the largest order and at the pages left to cover. */
+static int buddy_piece_order(size_t rel, size_t left) {
+    int order = 0;
+    while (order < BUDDY_MAX_ORDER &&
+           (rel & order_to_pages(order)) == 0 &&
+           order_to_pages(order + 1) <= left)
         order++;
+    return order;
+}
+
+/* Give back the pages [first, first + count) of the zone, every one of them
+ * taken, as the aligned blocks they fall into. The caller holds the lock. */
+static void buddy_give_pages_locked(BuddyZone* zone, uintptr_t first, size_t count) {
+    uintptr_t at = first;
+    size_t    left = count;
+    while (left > 0) {
+        int order = buddy_piece_order(page_index(zone, at), left);
+        buddy_give_locked(zone, at, order);
+        at   += order_to_pages(order) * BUDDY_PAGE_SIZE;
+        left -= order_to_pages(order);
     }
+}
 
-    // Insert coalesced block
-    BuddyFreeNode* node = phys_to_node(block);
-    buddy_list_insert(&zone->free_lists[order], node, order);
+/* `blocks` free blocks of the largest order, side by side, taken; 0 when the
+ * zone has no such run. Walks the largest order's list for a first block and
+ * asks, of each one after it, what buddy_give_locked asks of a buddy: a free
+ * first page and a node that says the largest order. A block of the largest
+ * order is aligned to its own size, so a free page at its start can only be
+ * the start of a free block, and the node there says which order. */
+static uintptr_t buddy_pop_run_locked(BuddyZone* zone, size_t blocks) {
+    size_t    span     = order_to_pages(BUDDY_MAX_ORDER) * BUDDY_PAGE_SIZE;
+    uintptr_t zone_end = zone->base + zone->total_pages * BUDDY_PAGE_SIZE;
 
+    for (BuddyFreeNode* node = zone->free_lists[BUDDY_MAX_ORDER].head; node; node = node->next) {
+        uintptr_t first = node_to_phys(node);
+        size_t    got   = 1;
+        while (got < blocks) {
+            uintptr_t next = first + got * span;
+            if (next + span > zone_end || alloc_map_test(zone, page_index(zone, next)) ||
+                phys_to_node(next)->order != (uint8_t)BUDDY_MAX_ORDER)
+                break;
+            got++;
+        }
+        if (got < blocks)
+            continue;
+
+        for (size_t i = 0; i < blocks; i++) {
+            uintptr_t at = first + i * span;
+            buddy_list_remove(&zone->free_lists[BUDDY_MAX_ORDER], phys_to_node(at));
+            alloc_map_mark_range(zone, page_index(zone, at), order_to_pages(BUDDY_MAX_ORDER), true);
+            zone->free_count -= order_to_pages(BUDDY_MAX_ORDER);
+        }
+        return first;
+    }
+    return 0;
+}
+
+void* BuddyTakeExact(BuddyZone* zone, size_t pages) {
+    if (!pages || !zone->initialized) return NULL;
+
+    size_t largest = order_to_pages(BUDDY_MAX_ORDER);
+    size_t whole;
+
+    spin_lock(&zone->lock);
+    uintptr_t first;
+    if (pages <= largest) {
+        int order = pages_to_order(pages);
+        first = buddy_pop_locked(zone, order);
+        whole = order_to_pages(order);
+    } else {
+        size_t blocks = (pages + largest - 1) / largest;
+        first = buddy_pop_run_locked(zone, blocks);
+        whole = blocks * largest;
+    }
+    if (first && whole > pages)
+        buddy_give_pages_locked(zone, first + pages * BUDDY_PAGE_SIZE, whole - pages);
+    spin_unlock(&zone->lock);
+
+    return (void*)first;
+}
+
+void BuddyGiveExact(BuddyZone* zone, void* addr, size_t pages) {
+    uintptr_t phys     = (uintptr_t)addr;
+    uintptr_t zone_end = zone->base + zone->total_pages * BUDDY_PAGE_SIZE;
+
+    if (!addr || !pages || !zone->initialized)
+        return;
+    if (phys < zone->base || phys % BUDDY_PAGE_SIZE != 0 ||
+        pages > (zone_end - phys) / BUDDY_PAGE_SIZE)
+        panic("[BUDDY] exact give of %lu page(s) at phys=0x%lx lies outside the zone "
+              "[0x%lx, 0x%lx)", (unsigned long)pages, phys, zone->base, zone_end);
+
+    size_t idx = page_index(zone, phys);
+
+    spin_lock(&zone->lock);
+    /* Every page must be taken — the same proof buddy_free asks for, over
+     * the whole run, with the lock held so no core sees half of it. */
+    for (size_t i = 0; i < pages; i++) {
+        if (!alloc_map_test(zone, idx + i))
+            panic("[BUDDY] Double free at phys=0x%lx pages=%lu (page +%lu already free)",
+                  phys, (unsigned long)pages, (unsigned long)i);
+    }
+    buddy_give_pages_locked(zone, phys, pages);
     spin_unlock(&zone->lock);
 }
 

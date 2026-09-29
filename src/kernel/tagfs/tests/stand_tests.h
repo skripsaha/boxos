@@ -21,6 +21,8 @@
 //                        widths and its full wall
 // stand_roadstead_tests.c  the stand_roadstead suite: reads that find every
 //                        place on the medium taken wait for their turn
+// stand_heap_tests.c     the kernel heap growing by regions, its large pieces,
+//                        and a class of cabins refused while the reserve serves
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.
@@ -82,6 +84,11 @@ bool StandChainOnMedium(uint32_t head_volume_block, uint32_t magic, StandChain* 
 /* Whether the volume's tag registry, read off the medium block by block, holds
  * a record of `key` and `value` (NULL: a record with no value). */
 bool StandRegistryHoldsOnMedium(const char* key, const char* value);
+
+/* The kernel heap (stand_heap_tests.c). */
+TestResult TestStandHeapGrowsByRegionsAndGivesBack(void);
+TestResult TestStandHeapLargeTakesPagesAndGivesBack(void);
+TestResult TestStandHeapClassRefusedReserveServes(void);
 
 /* The caveated tests (stand_caveat_tests.c). */
 TestResult TestStandRmwReadRefused(void);

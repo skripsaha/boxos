@@ -3102,13 +3102,13 @@ error_t tagfs_init(void) {
      * A mount builds its mirrors in kernel memory, and some of them are sized
      * by every file id the volume ever issued rather than by the files it
      * has: the pool mirror runs to next_file_id, so an id spent on a file
-     * deleted years ago still costs every mount its slot. The heap is a fixed
-     * fraction of the machine, so that is a volume that can one day refuse to
-     * mount because of its history and not its contents — and nothing said
-     * what a mount costs until now. Three numbers, so that two mounts of one
-     * volume a known number of dead ids apart measure the price of one
-     * (logcheck `quill`, fidhistory). The bytes are the difference of
-     * KHeapLiveBytes across the mount, both tiers of the heap; another core
+     * deleted years ago still costs every mount its slot. The heap grows only
+     * as far as the machine has room, so that is a volume that can one day
+     * refuse to mount because of its history and not its contents — and
+     * nothing said what a mount costs until now. Three numbers, so that two
+     * mounts of one volume a known number of dead ids apart measure the price
+     * of one (logcheck `quill`, fidhistory). The bytes are the difference of
+     * KHeapLiveBytes across the mount, every road of the heap; another core
      * allocating meanwhile is in the figure too, which is why the harness
      * judges a slope over tens of thousands of ids and never one mount.
      */

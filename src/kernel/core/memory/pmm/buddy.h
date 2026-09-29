@@ -42,6 +42,11 @@ void*  buddy_alloc(BuddyZone* zone, size_t pages);
 // Returns NULL if no block in range is available. Acquires zone->lock internally.
 void*  buddy_alloc_range(BuddyZone* zone, size_t pages, uintptr_t min_phys, uintptr_t max_phys);
 void   buddy_free(BuddyZone* zone, void* addr, size_t pages);
+// Exactly `pages` pages, not the power of two above them, and as many as one
+// run of the largest order's blocks side by side can hold. NULL when the zone
+// has no such run. Given back by BuddyGiveExact with the same page count.
+void*  BuddyTakeExact(BuddyZone* zone, size_t pages);
+void   BuddyGiveExact(BuddyZone* zone, void* addr, size_t pages);
 void   buddy_activate_pull_map(BuddyZone* zone);
 void   buddy_reserve_range(BuddyZone* zone, uintptr_t start, uintptr_t end);
 void   buddy_free_range(BuddyZone* zone, uintptr_t start, uintptr_t end);

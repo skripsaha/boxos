@@ -26,8 +26,7 @@ void kcore_init(void)
 {
     uint32_t n = g_amp.total_cores;
     /* From the PMM: this array is sized by CORE COUNT — 65 KiB at 16 cores,
-     * ~1 MiB at MAX_CORES — and the kernel heap is a fixed small-object pool
-     * that does not grow with the machine. Allocated once at boot and never
+     * ~1 MiB at MAX_CORES — in whole pages. Allocated once at boot and never
      * freed, so the Pull-Map pointer is valid for the kernel's lifetime. */
     size_t queue_bytes = sizeof(KCorePocketQueue) * n;
     size_t queue_pages = (queue_bytes + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;

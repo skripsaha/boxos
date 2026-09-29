@@ -2,43 +2,41 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "klib.h"
-#include "amp.h"        /* MAX_CORES, amp_get_core_index — the live-byte lines */
+#include "kheap_internal.h"   /* KHeapScopeHere — whom a bare slab_alloc serves */
 
 static SlabAllocator g_slab;
 
 /*
- * ‼ LIVE BYTES, COUNTED WHERE THEY ARE HANDED OUT — ONE LINE PER CORE.
+ * ‼ LIVE BYTES, COUNTED WHERE THEY ARE HANDED OUT.
  *
- * The slab takes whole pages from the PMM and kept no count of what it gave
- * away, so every object of 2048 bytes or less was invisible to anyone asking
- * how much of the kernel heap is in use — and those small objects are exactly
- * what a structure that grows one entry at a time is made of. This is that
- * count: an object handed out adds its class size, an object given back takes
- * it away. KHeapLiveBytes (klib_mem.c) adds it to the pool's own figure.
+ * The slab takes whole pages from the PMM, and every object of 2048 bytes or
+ * less it hands out used to be invisible to anyone asking how much of the
+ * kernel heap is in use — and those small objects are exactly what a
+ * structure that grows one entry at a time is made of. Each size class counts
+ * them: an object handed out adds its class size, an object given back takes
+ * it away, under the class's own lock, which the hand-out already holds — so
+ * the count costs no line the allocation did not already own.
+ * KHeapLiveBytes (klib_mem.c) adds the sum to the rest of the heap's figure.
  *
- * One counter per core, each on a cache line of its own, because slab_alloc
- * and slab_free are the busiest allocator path in the kernel: one shared
- * counter would be one line bouncing between every core that allocates, paid
- * on every small kmalloc for a number that is read a few times per boot. An
- * add to this core's line stays in this core's cache. A core that frees what
- * another allocated drives its own counter below zero while the other's
- * stays up; only the SUM means anything, and the sum is exact, because the
- * arithmetic is unsigned and wraps the same way in both directions. Atomic
- * all the same: a strand can move to another core between reading its index
- * and adding, and then two cores share one line for that one add.
+ * And each charge counts its pages, which is what a class of cabins holds of
+ * the slab (kheap_charge.c, the share rule).
  */
-typedef struct {
-    size_t bytes;
-} __attribute__((aligned(64))) SlabCoreBytes;
-
-static SlabCoreBytes g_slab_live_bytes[MAX_CORES];
+static volatile uint64_t g_slab_charge_pages[KHEAP_CHARGE_COUNT];
 
 size_t SlabLiveBytes(void)
 {
     size_t sum = 0;
-    for (uint32_t i = 0; i < MAX_CORES; i++)
-        sum += __atomic_load_n(&g_slab_live_bytes[i].bytes, __ATOMIC_RELAXED);
+    for (uint32_t c = 0; c < KHEAP_CHARGE_COUNT; c++)
+        for (uint32_t i = 0; i < SLAB_NUM_CLASSES; i++)
+            sum += __atomic_load_n(&g_slab.classes[c][i].live_bytes, __ATOMIC_RELAXED);
     return sum;
+}
+
+size_t SlabChargeBytes(KHeapCharge charge)
+{
+    if ((unsigned)charge >= KHEAP_CHARGE_COUNT)
+        return 0;
+    return (size_t)__atomic_load_n(&g_slab_charge_pages[charge], __ATOMIC_RELAXED) * SLAB_PAGE_SIZE;
 }
 
 /*
@@ -122,8 +120,8 @@ static void slab_init_page(SlabPage* page, size_t obj_size) {
     }
 }
 
-// Allocate a new slab page from PMM
-static SlabPage* slab_alloc_page(SlabClass* cls) {
+// Allocate a new slab page from PMM, for the class `cls` of `charge`
+static SlabPage* slab_alloc_page(SlabClass* cls, KHeapCharge charge) {
     void* raw = pmm_alloc(1);
     if (!raw) return NULL;
     uintptr_t phys = (uintptr_t)raw;
@@ -134,6 +132,8 @@ static SlabPage* slab_alloc_page(SlabClass* cls) {
 
     page->page_phys = phys;
     slab_init_page(page, cls->obj_size);
+    page->charge = (uint8_t)charge;
+    __atomic_add_fetch(&g_slab_charge_pages[charge], 1, __ATOMIC_RELAXED);
     slab_bit_set(phys);   /* the page is a slab page from this moment on */
 
     return page;
@@ -156,37 +156,49 @@ void slab_init(void) {
     g_slab_page_bits_phys = (uintptr_t)bits_phys;
     g_slab_page_bits      = (uint8_t *)vmm_phys_to_virt(g_slab_page_bits_phys);
 
-    for (int i = 0; i < SLAB_NUM_CLASSES; i++) {
-        SlabClass* cls = &g_slab.classes[i];
-        cls->obj_size = SLAB_SIZES[i];
-        uint16_t header_size = (uint16_t)ALIGN_UP(sizeof(SlabPage), 16);
-        cls->slots_per_page = (SLAB_PAGE_SIZE - header_size) / (uint16_t)SLAB_SIZES[i];
-        cls->partial = NULL;
-        cls->full = NULL;
-        spinlock_init(&cls->lock);
+    for (int c = 0; c < KHEAP_CHARGE_COUNT; c++) {
+        for (int i = 0; i < SLAB_NUM_CLASSES; i++) {
+            SlabClass* cls = &g_slab.classes[c][i];
+            cls->obj_size = SLAB_SIZES[i];
+            uint16_t header_size = (uint16_t)ALIGN_UP(sizeof(SlabPage), 16);
+            cls->slots_per_page = (SLAB_PAGE_SIZE - header_size) / (uint16_t)SLAB_SIZES[i];
+            cls->partial = NULL;
+            cls->full = NULL;
+            spinlock_init(&cls->lock);
+        }
     }
 
     g_slab.initialized = true;
-    debug_printf("[SLAB] Initialized %d size classes:", SLAB_NUM_CLASSES);
+    debug_printf("[SLAB] Initialized %d size classes for each of %d charges:",
+                 SLAB_NUM_CLASSES, KHEAP_CHARGE_COUNT);
     for (int i = 0; i < SLAB_NUM_CLASSES; i++) {
-        debug_printf(" %zu(%u/pg)", SLAB_SIZES[i], g_slab.classes[i].slots_per_page);
+        debug_printf(" %zu(%u/pg)", SLAB_SIZES[i], g_slab.classes[0][i].slots_per_page);
     }
     debug_printf("\n");
 }
 
 void* slab_alloc(size_t size) {
+    KHeapScope  who    = KHeapScopeHere();
+    KHeapCharge charge = who.reserve ? KHEAP_CHARGE_KERNEL : (KHeapCharge)who.charge;
+    if (!KHeapChargeAdmits(charge, who.pid, size))
+        return NULL;
+    return SlabAllocFor(size, charge);
+}
+
+void* SlabAllocFor(size_t size, KHeapCharge charge) {
     if (!g_slab.initialized || size == 0) return NULL;
+    if ((unsigned)charge >= KHEAP_CHARGE_COUNT) charge = KHEAP_CHARGE_KERNEL;
 
     int idx = slab_size_class(size);
     if (idx < 0) return NULL;  // too large for slab
 
-    SlabClass* cls = &g_slab.classes[idx];
+    SlabClass* cls = &g_slab.classes[charge][idx];
     spin_lock(&cls->lock);
 
     // Get a partial page (or allocate new one)
     SlabPage* page = cls->partial;
     if (!page) {
-        page = slab_alloc_page(cls);
+        page = slab_alloc_page(cls, charge);
         if (!page) {
             spin_unlock(&cls->lock);
             return NULL;
@@ -232,12 +244,12 @@ void* slab_alloc(size_t size) {
         page->next = cls->full;
         cls->full = page;
     }
+    __atomic_store_n(&cls->live_bytes, cls->live_bytes + cls->obj_size, __ATOMIC_RELAXED);
 
     spin_unlock(&cls->lock);
 
     void* ptr = base + slot_offset;
     memset(ptr, 0, cls->obj_size);
-    __atomic_fetch_add(&g_slab_live_bytes[amp_get_core_index()].bytes, cls->obj_size, __ATOMIC_RELAXED);
     return ptr;
 }
 
@@ -254,6 +266,9 @@ void slab_free(void* ptr) {
 
     int idx = slab_size_class(page->obj_size);
     if (idx < 0) return;
+    if (page->charge >= KHEAP_CHARGE_COUNT)
+        panic("[SLAB] free of %p: its page %p names charge %u — the header was "
+              "overwritten\n", ptr, (void *)page, page->charge);
 
     /* A genuine slab block sits ON the object grid of its page: at or past
      * the header, and an exact multiple of obj_size from it. A pointer that
@@ -282,7 +297,7 @@ void slab_free(void* ptr) {
         }
     }
 
-    SlabClass* cls = &g_slab.classes[idx];
+    SlabClass* cls = &g_slab.classes[page->charge][idx];
     spin_lock(&cls->lock);
 
     bool was_full = (page->free_count == 0);
@@ -305,7 +320,7 @@ void slab_free(void* ptr) {
     *(uint16_t*)(base + slot_offset) = page->free_head;
     page->free_head = slot_offset;
     page->free_count++;
-    __atomic_fetch_sub(&g_slab_live_bytes[amp_get_core_index()].bytes, cls->obj_size, __ATOMIC_RELAXED);
+    __atomic_store_n(&cls->live_bytes, cls->live_bytes - cls->obj_size, __ATOMIC_RELAXED);
 
     // If page was full, move it back to partial list
     if (was_full) {
@@ -326,6 +341,7 @@ void slab_free(void* ptr) {
         while (*prev && *prev != page) prev = &(*prev)->next;
         if (*prev == page) {
             *prev = page->next;
+            __atomic_sub_fetch(&g_slab_charge_pages[page->charge], 1, __ATOMIC_RELAXED);
             slab_bit_clear(page->page_phys);   /* ...and stops being one here */
             pmm_free((void*)page->page_phys, 1);
         }
@@ -356,8 +372,8 @@ void slab_activate_pull_map(void) {
     /* The page registry itself moves with everything else. */
     g_slab_page_bits = (uint8_t *)vmm_phys_to_virt(g_slab_page_bits_phys);
 
-    for (int i = 0; i < SLAB_NUM_CLASSES; i++) {
-        SlabClass* cls = &g_slab.classes[i];
+    for (int i = 0; i < KHEAP_CHARGE_COUNT * SLAB_NUM_CLASSES; i++) {
+        SlabClass* cls = &g_slab.classes[i / SLAB_NUM_CLASSES][i % SLAB_NUM_CLASSES];
 
         // Rebase partial list
         uintptr_t page_phys = (uintptr_t)cls->partial;  // identity addr = phys addr

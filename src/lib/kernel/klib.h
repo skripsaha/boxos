@@ -32,34 +32,13 @@ static inline unsigned CountSetBits(uint64_t v)
     return n;
 }
 
-/* Kernel-heap sizing.
- *   TARGET   = KLIB_HEAP_RAM_PERCENT% of total RAM
- *   FLOOR    = KLIB_HEAP_MIN_SIZE
- *   CEILING  = max(KLIB_HEAP_MAX_SIZE, total_ram / KLIB_HEAP_RAM_CAP_DIVISOR)
- * The dynamic ceiling lifts the legacy fixed 16 MB cap on machines with
- * > ~1 GB RAM — at the divisor below this is ≈1.56 % of physical RAM. */
-#define KLIB_HEAP_MIN_SIZE          (2 * 1024 * 1024)
-#define KLIB_HEAP_MAX_SIZE          (16 * 1024 * 1024)
-#define KLIB_HEAP_RAM_PERCENT       3
-#define KLIB_HEAP_RAM_CAP_DIVISOR   64
-
-/* The MBR + Stage2 path only identity-maps the first 128 MB until the VMM's
- * Pull Map is activated. The pool is allocated whole at boot, but only this
- * much of it is PUBLISHED until mem_activate_pull_map hands over the tail —
- * see mem_init. Anything larger would be untouchable while the window is all
- * the addressing there is. */
+/* The kernel heap's boot region: all of the heap there is until the Pull Map
+ * reaches the rest of the machine. The MBR + Stage2 path identity-maps only
+ * the first 128 MB until the VMM activates the Pull Map, so anything larger
+ * would be untouchable while the window is all the addressing there is.
+ * After that the heap takes regions from the page allocator as it is asked
+ * (kheap_region.c) — there is no other number for its size. */
 #define KLIB_HEAP_BOOTLOADER_SAFE_SIZE  (2 * 1024 * 1024)
-
-// 32 bytes: mem_block_t is 20 bytes; 16-byte alignment causes misaligned new_block pointers in kmalloc split
-#define KLIB_BLOCK_ALIGNMENT  32
-#define KLIB_MAGIC_NUMBER     0xDEADBEEF
-#define KLIB_MAGIC_FREE       0xFEEDFACE   /* set by kfree, checked by kfree to detect double-free in O(1) */
-
-typedef struct mem_block {
-    size_t size;
-    struct mem_block *next;
-    uint32_t magic;
-} mem_block_t;
 
 typedef struct {
     uint32_t locked;
@@ -92,9 +71,10 @@ size_t list_size(list_t* list);
 void list_remove(list_t* list, void* data, bool (*cmp)(void*, void*));
 void list_for_each(list_t* list, void (*func)(void*));
 
-/* Bytes the kernel heap holds for somebody right now — the pool's blocks
- * and the slab's objects together — and the boot-time proof that both tiers
- * count what they hand out and what they get back. */
+/* Bytes the kernel heap holds for somebody right now — every road of it:
+ * pool and reserve blocks, large pieces, slab objects — and the boot-time
+ * proof that each road counts what it hands out and what it gets back. Whom
+ * the heap serves, and what it keeps back, is kheap.h. */
 size_t KHeapLiveBytes(void);
 void   KHeapLiveSelfTest(void);
 
@@ -102,8 +82,6 @@ void mem_init(void);
 void mem_activate_pull_map(void);
 void* kmalloc(size_t size);
 void kfree(void* ptr);
-void mem_stats(void);
-size_t mem_heap_size(void);
 
 #ifdef CONFIG_VOLUME_TESTS
 /*
@@ -112,9 +90,9 @@ size_t mem_heap_size(void);
  * Every allocation in the kernel has a road for NULL, and almost none of them
  * had ever been walked: the heap does not run out on a desk. A startup test
  * arms this for one core and a number N, and the Nth kmalloc made on that core
- * since arming comes back NULL — before the slab and before the pool, so
- * nothing is taken from either — and says so on the log. Once: the count goes
- * on, nothing after the Nth is refused.
+ * since arming comes back NULL — before every road of the heap, the reserve
+ * included, so nothing is taken from any — and says so on the log. Once: the
+ * count goes on, nothing after the Nth is refused.
  *
  * One core, named by the caller, because the other cores are not the code
  * under test: a test passes amp_get_core_index(), and a core number no

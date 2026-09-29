@@ -8,6 +8,7 @@
 #include "irqchip.h"
 #include "nameplate.h"        /* nameplate_name_at_kernel — name a one-way continuation */
 #include "nameplate_format.h" /* NameplateHeader — the table's own minimum size */
+#include "kheap.h"            /* continuations run on the kernel's own account */
 
 /*
  * Vyukov intrusive MPSC with a persistent stub (1024cores.net,
@@ -93,8 +94,7 @@ void BatonInit(void)
     if (n == 0) n = 1;
 
     /* From the PMM, for the same reason as the K-Core queue array: sized by
-     * CORE COUNT, allocated once, never freed. The kernel heap is a fixed
-     * small-object pool and must not carry per-machine-scale arrays. */
+     * CORE COUNT in whole pages, allocated once, never freed. */
     size_t cq_bytes = sizeof(BatonQueue) * n;
     /* The reserved one-way nodes follow the queue array in the same
      * allocation: sizeof(BatonQueue) is a multiple of a pointer's alignment,
@@ -268,6 +268,13 @@ uint32_t BatonPump(uint8_t core_idx)
     BatonQueue *q = &g_baton[core_idx];
     uint32_t ran = 0;
 
+    /* A continuation is the kernel's own work — the answer to somebody's I/O,
+     * run by whichever core drains the queue, sometimes from inside a pocket
+     * the guide is serving or a Scribe's pass. What it allocates is charged
+     * to the kernel and is off any reserve path (kheap.h), never to the
+     * cabin or the pass it happened to run beneath. */
+    KHeapScope outer = KHeapScopeEnter(KHEAP_CHARGE_KERNEL, 0);
+
     for (;;) {
         Baton *n = baton_pop(q);
         if (!n) break;
@@ -318,6 +325,7 @@ uint32_t BatonPump(uint8_t core_idx)
         ran++;
     }
 
+    KHeapScopeLeave(outer);
     return ran;
 }
 

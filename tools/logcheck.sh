@@ -8018,8 +8018,11 @@ edits = {
    "    if (kind != BLOCK_FAIL_FLUSH && plan.end != 0 &&\n        (lba + count <= plan.first || lba >= plan.end))\n        return false;\n",
    "    /* " + M + ": no range check — every sector of the seat is the plan's */\n"),
   ("src/lib/kernel/klib_mem.c",
-   "    if (HeapFailStrikes(size))\n        return NULL;\n#endif\n\n    /* Slab path: O(1) for small allocations. */\n    if (size <= SLAB_LARGE_THRESHOLD)\n    {\n        void *ptr = slab_alloc(size);\n        if (ptr)\n            return ptr;\n        /* Fall through if slab exhausted — legacy pool handles it. */\n    }\n",
-   "#endif\n\n    /* Slab path: O(1) for small allocations. */\n    if (size <= SLAB_LARGE_THRESHOLD)\n    {\n        void *ptr = slab_alloc(size);\n        if (ptr)\n            return ptr;\n        /* Fall through if slab exhausted — legacy pool handles it. */\n    }\n#ifdef CONFIG_VOLUME_TESTS\n    if (HeapFailStrikes(size))   /* " + M + ": asked only after the slab has served */\n        return NULL;\n#endif\n"),
+   "    if (HeapFailStrikes(size))\n        return NULL;\n#endif\n\n    KHeapScope who = KHeapScopeHere();\n",
+   "#endif\n\n    KHeapScope who = KHeapScopeHere();\n"),
+  ("src/lib/kernel/klib_mem.c",
+   "        /* Fall through if slab exhausted — the pool handles it. */\n    }\n",
+   "        /* Fall through if slab exhausted — the pool handles it. */\n    }\n#ifdef CONFIG_VOLUME_TESTS\n    if (HeapFailStrikes(size))   /* " + M + ": asked only after the slab has served */\n        return NULL;\n#endif\n"),
   ("src/kernel/tagfs/tests/stand_tests.c",
    "    TEST_ASSERT_EQ(BlockFailSeen(), 3, \"and all three met the plan\");\nout:\n    if (armed)\n        BlockFailDisarm();\n    return verdict;\n",
    "    TEST_ASSERT_EQ(BlockFailSeen(), 3, \"and all three met the plan\");\nout:\n    (void)armed;   /* " + M + ": the test forgets to take its plan down */\n    return verdict;\n"),
@@ -8746,10 +8749,11 @@ def medium_fault(log, case):
     return m.group(0) if m else None
 
 # --- the stand ---------------------------------------------------------------
-m = re.search(r"\[KLIB\] Total RAM: (\d+) MB, kernel heap: (\d+) KB", logs[0])
-heap = int(m.group(2)) if m else None
-out("check", "ok" if heap is not None and heap < 262144 else "bad",
-    "boot 1's kernel heap is %s KB, smaller than the 256 MiB bigwrite asks for in one piece" % heap)
+m = re.search(r"\[KLIB\] Total RAM: (\d+) MB; the kernel heap starts from a (\d+) KB boot region", logs[0])
+ram = int(m.group(1)) if m else None
+out("check", "ok" if ram is not None and ram * 1024 * 1024 < 2 * BIG else "bad",
+    "boot 1 has %s MB of RAM: a class of cabins is refused the %d bytes bigwrite asks for in one "
+    "piece only while less than twice that is free — below %d MB" % (ram, BIG, 2 * BIG >> 20))
 m = re.search(r"this volume runs (\d+) sectors and the ground under it runs (\d+) — it takes the rest",
               logs[0])
 out("check", "ok" if m else "bad", "boot 1's volume took the ground behind it: %s"
@@ -8770,9 +8774,10 @@ m = re.search(r"\[KLIB\] heap accounting self-test (passed|FAILED)(.*)", logs[0]
 if not m:
     out("selftest", "missing", "boot 1 printed no heap accounting self-test line")
 else:
-    rise = re.search(r"a 65536-byte pool block and 64 slab objects of 64 bytes were counted "
-                     r"\(\+(\d+), \+(\d+)\)", m.group(2))
-    good = m.group(1) == "passed" and rise and int(rise.group(1)) >= 65536 and int(rise.group(2)) >= 4096
+    rise = re.search(r"a 8192-byte pool block, a 65536-byte large piece and 64 slab objects of 64 "
+                     r"bytes were counted \(\+(\d+), \+(\d+), \+(\d+)\)", m.group(2))
+    good = m.group(1) == "passed" and rise and int(rise.group(1)) >= 8192 and \
+        int(rise.group(2)) >= 65536 and int(rise.group(3)) >= 4096
     out("selftest", "passed" if good else "failed", "[KLIB] heap accounting self-test %s%s" % m.groups())
 
 # --- the cases -----------------------------------------------------------------
@@ -8788,12 +8793,13 @@ def longquery():
 def bigwrite():
     word, rest = verdict(logs[0], "bigwrite")
     seen = [(int(s), int(p)) for s, p in re.findall(
-        r"\[KLIB\] ERROR: kmalloc failed for (\d+) bytes — pool (\d+) KB", after_echo(logs[0], "bigwrite"))]
-    witness = [(s, p) for s, p in seen if BIG <= s < BIG + 4096 and p * 1024 < s]
+        r"\[KLIB\] refused (\d+) bytes to [^:]+: they make the kernel hold \d+ KB already, and the "
+        r"machine has (\d+) KB left", after_echo(logs[0], "bigwrite"))]
+    witness = [(s, p) for s, p in seen if BIG <= s < BIG + 4096]
     m = re.match(r"one fwrite of (\d+) bytes was refused with error (\d+) and nothing reached the file$", rest)
     if word == "DEFECT" and m and int(m.group(1)) == BIG and m.group(2) == "101" and witness:
         return "defect", ("one fwrite of %d bytes was refused with error 101 and nothing reached the file; "
-                          "the kernel: kmalloc failed for %d bytes of a %d KB pool" % ((BIG,) + witness[-1]))
+                          "the kernel refused %d bytes to its class with %d KB left" % ((BIG,) + witness[-1]))
     m = re.match(r"one fwrite of (\d+) bytes landed whole in (\d+) ms and read back exactly$", rest)
     if word == "PASS" and m and int(m.group(1)) == BIG and not witness:
         return "behaves", rest
@@ -9051,7 +9057,7 @@ EOF2
     python3 - <<'EOF2'
 p = "src/lib/kernel/slab.c"
 s = open(p).read()
-a = "    __atomic_fetch_add(&g_slab_live_bytes[amp_get_core_index()].bytes, cls->obj_size, __ATOMIC_RELAXED);\n"
+a = "    __atomic_store_n(&cls->live_bytes, cls->live_bytes + cls->obj_size, __ATOMIC_RELAXED);\n"
 assert s.count(a) == 1, "quillmut slab-count anchor missing"
 s = s.replace(a, "    (void)0;   /* logcheck mutation: the slab stops counting what it hands out */\n", 1)
 open(p, "w").write(s)

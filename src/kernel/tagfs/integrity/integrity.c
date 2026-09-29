@@ -5,6 +5,7 @@
 #include "../../lib/kernel/klib.h"
 #include "touch.h"
 #include "amp.h"
+#include "kheap.h"   /* MapPage: the reserve serves the map's pages */
 
 /* Where the map is, and how much of it there is, are two fields of the volume's
  * Ledger (volume_ledger.h). They used to be two four-byte windows into the
@@ -298,6 +299,16 @@ static error_t MapNameInLedger(TagFSState *fs, uint32_t block, uint32_t count,
     return written;
 }
 
+/* One page the map is laid or carried through: one of the kernel's own paths,
+ * so the heap serves it from its reserve first (kheap.h). */
+static uint8_t *MapPage(void)
+{
+    KHeapReserveOpen();
+    uint8_t *page = (uint8_t *)kmalloc(TAGFS_BLOCK_SIZE);
+    KHeapReserveClose();
+    return page;
+}
+
 /*
  * A fresh map: a run of blocks, zeroed on the medium, made durable, and only
  * then named by the Ledger. Named first, a cut that kept the Ledger and lost
@@ -307,7 +318,7 @@ static error_t MapNameInLedger(TagFSState *fs, uint32_t block, uint32_t count,
 static error_t MapLayFresh(TagFSState *fs, uint32_t count, uint32_t *out_first)
 {
     uint32_t start = 0;
-    uint8_t *page  = (uint8_t *)kmalloc(TAGFS_BLOCK_SIZE);   /* the zeros, off the stack */
+    uint8_t *page  = MapPage();   /* the zeros, off the stack */
 
     if (!page) {
         kprintf("[Integrity] no memory for the one page a fresh map is zeroed "
@@ -411,7 +422,7 @@ static error_t MapLayFresh(TagFSState *fs, uint32_t count, uint32_t *out_first)
 static bool MapGrow(TagFSState *fs, uint32_t *first, uint32_t stored, uint32_t count)
 {
     uint32_t start = 0;
-    uint8_t *page  = (uint8_t *)kmalloc(TAGFS_BLOCK_SIZE);   /* one page of the copy, off the stack */
+    uint8_t *page  = MapPage();   /* one page of the copy, off the stack */
     bool     laid  = page && tagfs_alloc_blocks(count, &start) == 0 && start != 0;
 
     for (uint32_t i = 0; laid && i < count; i++) {

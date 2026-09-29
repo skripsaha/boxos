@@ -789,6 +789,12 @@ static const TestCase g_stand_tests[] = {
       .reach = TEST_READS_ONLY },
     { .name = "stand_scribe_waiter_keeps_pumping", .func = TestStandScribeWaiterKeepsPumping,
       .reach = TEST_READS_ONLY },
+    { .name = "stand_heap_grows_by_regions_and_gives_back",
+      .func = TestStandHeapGrowsByRegionsAndGivesBack, .reach = TEST_READS_ONLY },
+    { .name = "stand_heap_large_takes_pages_and_gives_back",
+      .func = TestStandHeapLargeTakesPagesAndGivesBack, .reach = TEST_READS_ONLY },
+    { .name = "stand_heap_class_refused_reserve_serves",
+      .func = TestStandHeapClassRefusedReserveServes, .reach = TEST_READS_ONLY },
 
     { .name  = "stand_rmw_read_refused", .func = TestStandRmwReadRefused,
       .reach = TEST_WRITES_TO_VOLUME,
