@@ -96,6 +96,8 @@ caveat_row() {
                     echo "1.6|a cut keeps a stamped spare header whose link was lost, a block nothing names" ;;
         race:TAG_DUPLICATE)
                     echo "1.6|a registry write torn by the cut leaves a record repeating another's key, and it is dropped" ;;
+        race:RECORD_SHAPE)
+                    echo "1.6|the pool's last block is rewritten in place, so a cut that tears it after its first sector leaves a header counting records the block no longer holds, and the walk stops short" ;;
         chaingrow:prefix:CHAIN_REFUSED:table)
                     echo "|the file table writes its last block's link to a block it has just taken before that block, so a power cut between the two leaves a chain into unstamped ground and the kernel refuses the volume at every mount" ;;
         chaingrow:prefix:CHAIN_REFUSED:registry)

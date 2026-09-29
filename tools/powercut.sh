@@ -427,7 +427,7 @@ pc_caveats() {
             codes="CHAIN_REFUSED FID_PAST_NEXT FILE_LOST MISSING ORPHAN SPARE_UNNAMED TAG_ABSENT UNNAMED_RECORD" ;;
         race)
             base=race; echo "durable:_qt_churn@race=race:durable"
-            codes="CHAIN_REFUSED FID_PAST_NEXT FILE_LOST MISSING ORPHAN SPARE_UNNAMED TAG_ABSENT TAG_DUPLICATE UNNAMED_RECORD" ;;
+            codes="CHAIN_REFUSED FID_PAST_NEXT FILE_LOST MISSING ORPHAN RECORD_SHAPE SPARE_UNNAMED TAG_ABSENT TAG_DUPLICATE UNNAMED_RECORD" ;;
         settlecut) base=settlecut; codes="FID_PAST_NEXT" ;;
         chaingrow|chaingrowmut)
             base=chaingrow
