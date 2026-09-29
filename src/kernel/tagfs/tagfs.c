@@ -4966,26 +4966,24 @@ static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint6
     // Auto-snapshot before write if versioning enabled (production feature)
     tagfs_auto_snapshot_before_write(handle->file_id);
 
-    /* Serialize writes to the same file. A plain TagFSLockTake would
-     * deadlock with the BMIDE-IRQ-on-BSP topology: this lock is held
-     * across `write_block → ata_dma_sync`, which waits for the BMIDE
-     * completion IRQ. That IRQ lands only on the BSP (legacy IO-APIC
-     * GSI 14). If the BSP is the CONTENDER here, its take has
-     * already CLI'd and the IRQ never delivers; the holder spins
-     * forever waiting for cmd.done and the BSP spins forever waiting
-     * for the lock.
+    /* Serialize writes to the same file — by trying, never by spinning in
+     * TagFSLockTake. This lock is held across `write_block`, and on some
+     * roads the holder's command is finished only by what the BSP does:
+     * an AHCI command slot an asynchronous write holds is given back only
+     * by the BSP's MSI handler or its tick (ahci_retire_slots), and a
+     * continuation queued for the drain core runs only there. A BSP
+     * contending here inside TagFSLockTake would spin with its interrupts
+     * off and run nothing, and the holder would wait on it — for a slot
+     * until its patience runs out and the write is refused, for a
+     * continuation for good.
      *
-     * Break the cycle by trylocking with the IRQ window open between
-     * attempts. Each failed trylock restores RFLAGS (re-enabling IRQs), so
-     * the pending BMIDE IRQ can fire on the BSP and stamp the holder's
-     * `landing` slot; the holder (spinning in ata_dma_sync) claims it, runs
-     * its completion, flips cmd.done, and releases. Opening the IRQ window is
-     * the load-bearing part for BMIDE (the holder self-drains via landing).
-     * The pump beside it is for the drain core: a holder on another core may
-     * be waiting for a continuation that only the drain core can run, and
-     * the drain core standing here must not stop running them. On any other
-     * core the pump is a one-load early-out. Uncontended fast path is
-     * unchanged — trylock succeeds first try. */
+     * So each failed trylock restores RFLAGS, putting this core's
+     * interrupts back as they were between attempts, and the pump beside it
+     * runs the drain core's continuations while it stands here; on any other
+     * core the pump is a one-load early-out. A legacy-IDE DMA needs neither:
+     * its waiter takes the drive's answer itself (BmideAnswerHere,
+     * drivers/disk/ata_async.c). Uncontended fast path is unchanged —
+     * trylock succeeds first try. */
     if (handle->ofe)
     {
         if (!TagFSLockTry(&handle->ofe->write_lock)) {
@@ -5392,10 +5390,11 @@ static int tagfs_truncate_file_inside(uint32_t file_id, uint64_t new_size)
         return -ERR_FILE_NOT_FOUND;
 
     /* The trylock-with-the-IRQ-window-open dance, for the same reason
-     * tagfs_write does it: this lock is held across meta_pool_write ->
-     * write_block -> ata_dma_sync, which waits on a BMIDE completion IRQ that
-     * lands only on the BSP. A plain TagFSLockTake here would deadlock the BSP
-     * against the holder exactly as described above tagfs_write. */
+     * tagfs_write_inside does it: this lock is held across meta_pool_write ->
+     * write_block, whose command may be finished only by the BSP's interrupts
+     * or by a continuation only the drain core runs. A plain TagFSLockTake
+     * here would strand the holder on a contending BSP exactly as described
+     * above tagfs_write_inside. */
     if (handle->ofe)
     {
         if (!TagFSLockTry(&handle->ofe->write_lock)) {

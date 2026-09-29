@@ -2229,9 +2229,10 @@ void irq_handler(interrupt_frame_t *frame)
          * Scribe go (HaltFreezeHere), and the roll call waits for that as it
          * waits for any arrival. A panic does not raise g_halt_orderly — every
          * core stops where it stands, holding what it holds, as it always did.
-         * It does not prove the core held no lock: ata_dma_sync runs `sti`
-         * inside its caller's sections, and a core waiting there on its DMA
-         * takes this IPI with the caller's lock still held. */
+         * A core waiting on a legacy-IDE DMA inside such a section keeps its
+         * caller's interrupts off — it takes the drive's answer itself
+         * (BmideAnswerHere, drivers/disk/ata_async.c) — so it too takes this
+         * IPI only once the caller's lock is let go. */
         if (__atomic_load_n(&g_halt_orderly, __ATOMIC_ACQUIRE) && ScribeAnyHeldHere())
         {
             CoreDescriptor *me = &g_amp.cores[amp_get_core_index()];

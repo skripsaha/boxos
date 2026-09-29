@@ -39,13 +39,15 @@
  *  and the IRQ comes from PCI config Interrupt Line (offset 0x3C);
  *  both channels typically share the same INTx# pin.
  *
- *  IRQ posture: nIEN=1 on every detected drive + IOAPIC pins for
- *  IRQ14/15 left masked. Both PIO and Bus-Master DMA paths busy-poll
- *  completion — fully spec-compliant without an interrupt path. PIO
- *  mode is negotiated to the fastest the drive advertises (4 → 3 →
- *  default); DMA mode similarly (UDMA 6..0 → MDMA 2..0 → none), except
- *  that Ultra DMA above mode 2 needs an 80-conductor cable established
- *  first — ATA/ATAPI-6 §8.46.11 — or the walk starts at mode 2.
+ *  IRQ posture: PIO busy-polls completion. Bus-Master DMA (ata_async.c)
+ *  clears nIEN and unmasks the channel's IOAPIC pin once BMIDE is up, and
+ *  its waiter reads the channel's interrupt latch itself as well as taking
+ *  what the interrupt handler retires, so neither path needs an interrupt
+ *  delivered to finish. PIO mode is negotiated to the fastest the drive
+ *  advertises (4 → 3 → default); DMA mode similarly (UDMA 6..0 → MDMA
+ *  2..0 → none), except that Ultra DMA above mode 2 needs an 80-conductor
+ *  cable established first — ATA/ATAPI-6 §8.46.11 — or the walk starts at
+ *  mode 2.
  *  Read/write fast path runs through BMIDE when both the controller
  *  (ProgIF bit 7) and the drive (IDENTIFY word 49 bit 8) support it
  *  and the request fits the staging page (count ≤ 8 sectors); larger
@@ -772,11 +774,10 @@ int ata_read_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* b
     if (!d->exists || !ch->present) return ATA_ERR_NO_DEVICE;
     if (lba + count > d->total_sectors) return ATA_ERR_LBA_OUT_OF_BOUNDS;
 
-    /* Fast path: IRQ-driven Bus-Master DMA via ata_async. Run BEFORE
-     * acquiring g_ata_lock — ata_dma_sync may sti;hlt while waiting for
-     * the BMIDE IRQ, and that would violate the spinlock's IRQ-saved
-     * state. The async engine has its own per-channel cmd_lock for
-     * register-file mutual exclusion. */
+    /* Fast path: IRQ-driven Bus-Master DMA via ata_async, taken without
+     * g_ata_lock — the async engine has its own per-channel cmd_lock for
+     * register-file mutual exclusion, and nothing of the PIO path's lock
+     * to add to it. */
     if (ata_async_usable(drive_idx) && count <= ATA_ASYNC_MAX_SECTORS) {
         int rc = ata_dma_sync(drive_idx, lba, count, false, buffer);
         if (rc == 0) return 0;
@@ -828,10 +829,9 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
     }
     if (lba + count > d->total_sectors) return ATA_ERR_LBA_OUT_OF_BOUNDS;
 
-    /* DMA fast path — same gate as ata_read_sectors. Run BEFORE acquiring
-     * g_ata_lock so the sti;hlt in ata_dma_sync's wait loop doesn't
-     * collide with the lock's saved-IRQ state. Per-channel cmd_lock in
-     * ata_async covers register serialisation for the DMA path. */
+    /* DMA fast path — same gate as ata_read_sectors, and like it taken
+     * without g_ata_lock: per-channel cmd_lock in ata_async covers register
+     * serialisation for the DMA path. */
     if (ata_async_usable(drive_idx) && count <= ATA_ASYNC_MAX_SECTORS) {
         int rc = ata_dma_sync(drive_idx, lba, count, true, (void*)buffer);
         if (rc == 0) return 0;

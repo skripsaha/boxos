@@ -446,13 +446,11 @@ void halt_all_ap_cores(bool orderly)
          * in that core's LAPIC IRR until the lock is released — for every
          * section that does not turn interrupts back on itself. process_lock
          * and the cleanup queue's lock are such sections, so a complete roll
-         * call proves them unheld by any AP.
-         *
-         * It does not prove that of every lock. ata_dma_sync runs `sti` and
-         * waits for its DMA inside its caller's sections (g_ledger_lock
-         * through tagfs_write_ledger, on a legacy-IDE seat with more than one
-         * core), so a core can answer holding one, and the sync below then
-         * waits on it for good. */
+         * call proves them unheld by any AP. So are the ones a legacy-IDE DMA
+         * wait runs under: the wait takes the drive's answer itself
+         * (BmideAnswerHere, drivers/disk/ata_async.c) and never turns
+         * interrupts on for the BSP's, so a core in it answers only after its
+         * caller's lock is let go. */
         kprintf("[HALT] All AP cores stopped (roll call complete)\n");
         return;
     }

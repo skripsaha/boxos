@@ -7578,7 +7578,6 @@ stand_ledger_writes_outside_its_lock|1.1|Ledger writes of one that crossed the m
 stand_integrity_pages_outside_its_lock|1.1|17-page runs of block writes whose map paging crossed the medium under a lock 1|17-page runs of block writes whose map paging crossed the medium under a lock 0
 stand_cow_question_asks_no_medium|1.1|reads of a file's metadata block the copy-on-write question asked, no snapshot standing 1|reads of a file's metadata block the copy-on-write question asked, no snapshot standing 0
 stand_redirect_log_leaves_the_flush|1.1|cache flushes asked inside 64 redirects, under the copy-on-write lock 1|cache flushes asked inside 64 redirects, under the copy-on-write lock 0
-stand_dma_wait_keeps_the_callers_interrupts|1.1|DMA reads that turned interrupts on under a caller that had them off 1|DMA reads that turned interrupts on under a caller that had them off 0|bios
 stand_registry_growth_links_what_landed|1.1|registry chains on the medium that run into a block without the registry's magic 1|registry chains on the medium that run into a block without the registry's magic 0
 stand_table_grows_onto_a_stamp|1.1|file table chains on the medium that run into a block without the table's magic 1|file table chains on the medium that run into a block without the table's magic 0
 stand_registry_scratch_leaves_the_volume_alone|1.1|registry chains on the medium a scratch registry moved by living and dying 1|registry chains on the medium a scratch registry moved by living and dying 0
@@ -7808,7 +7807,9 @@ run_stand() {
 # same: a refused flush that moves the mark, a count of kept flushes, a need
 # that is the last flush begun, a pass that publishes every ask, a Scribe
 # this core holds waited for like any other, a drain core that runs no baton
-# while it waits, and a Give that never lets the scheduler go. Mutations
+# while it waits, and a Give that never lets the scheduler go. And a
+# lifted caveat's defect put back — the legacy-IDE DMA wait's `sti` — must
+# fail its test, saying the defect it stands for is back. Mutations
 # whose tests do not meet each other's share a boot; each is judged by its
 # own test's own line, number and all.
 #
@@ -8068,34 +8069,6 @@ open(p, "w").write(s.replace(a, "    (void)do_flush;   /* logcheck mutation: the
 EOF
     mut_done src/kernel/tagfs/disk_book/disk_book.c "logcheck mutation" 1
 
-    # 1.1 (CR-5): the legacy-IDE waiter answers its own completion, and leaves
-    # its caller's interrupts as it found them.
-    mutate src/kernel/drivers/disk/ata_async.c
-    python3 - <<'EOF'
-p = "src/kernel/drivers/disk/ata_async.c"
-s = open(p).read()
-a = ("    asm volatile(\"sti\" ::: \"memory\");\n"
-     "    while (!__atomic_load_n(&cmd.done, __ATOMIC_ACQUIRE)) {\n"
-     "        AtaCmd *c = __atomic_exchange_n(&aa->landing, NULL, __ATOMIC_ACQ_REL);\n"
-     "        if (c) ata_run_completion(aa, c);\n")
-m = ("    while (!__atomic_load_n(&cmd.done, __ATOMIC_ACQUIRE)) {   /* logcheck mutation: the waiter answers its own completion, interrupts as its caller left them */\n"
-     "        AtaCmd *c = __atomic_exchange_n(&aa->landing, NULL, __ATOMIC_ACQ_REL);\n"
-     "        if (c) ata_run_completion(aa, c);\n"
-     "        else if (spin_trylock(&aa->cmd_lock)) {\n"
-     "            AtaCmd *f = aa->in_flight;\n"
-     "            if (f && !__atomic_load_n(&f->reconciled, __ATOMIC_RELAXED) &&\n"
-     "                !__atomic_load_n(&aa->recovering, __ATOMIC_RELAXED)) {\n"
-     "                uint8_t bmsr = inb(aa->bmide_base + BMIDE_REG_STATUS);\n"
-     "                if (bmsr & BMISR_IRQ)\n"
-     "                    bmide_complete_locked(aa, bmsr);\n"
-     "            }\n"
-     "            spin_unlock(&aa->cmd_lock);\n"
-     "        }\n")
-assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
-open(p, "w").write(s.replace(a, m, 1))
-EOF
-    mut_done src/kernel/drivers/disk/ata_async.c "logcheck mutation" 1
-
     mutate src/kernel/tagfs/tag_bitmap/tag_bitmap.c
     python3 - <<'EOF'
 p = "src/kernel/tagfs/tag_bitmap/tag_bitmap.c"
@@ -8151,7 +8124,7 @@ stand_fix_off() {
     for f in src/kernel/tagfs/tagfs.c src/kernel/tagfs/tag_bitmap/tag_bitmap.c \
              src/kernel/tagfs/integrity/integrity.c src/kernel/tagfs/tag_registry/tag_registry.c \
              src/kernel/tagfs/file_table/file_table.c src/kernel/tagfs/cow/cow.c \
-             src/kernel/tagfs/disk_book/disk_book.c src/kernel/drivers/disk/ata_async.c; do
+             src/kernel/tagfs/disk_book/disk_book.c; do
         restore "$f"
     done
 }
@@ -8176,6 +8149,7 @@ stand_mech_on() {
         scribe)    marks="src/kernel/tagfs/scribe/scribe.c:4" ;;
         flushsum)  marks="src/kernel/tagfs/scribe/scribe.c:3" ;;
         flushneed) marks="src/kernel/tagfs/scribe/scribe.c:1" ;;
+        dmawait)   marks="src/kernel/drivers/disk/ata_async.c:1" ;;
     esac
     for mark in $marks; do mutate "${mark%%:*}"; done
     python3 - "$group" <<'EOF'
@@ -8276,6 +8250,13 @@ edits = {
    "    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST) + 1u;\n",
    "    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST);   /* " + M + ": the need is the last flush begun */\n"),
  ],
+ "dmawait": [
+  ("src/kernel/drivers/disk/ata_async.c",
+   "    AtaAsyncCh *aa = &g_ata_async[cmd.channel];\n    while (!__atomic_load_n(&cmd.done, __ATOMIC_ACQUIRE)) {\n",
+   "    AtaAsyncCh *aa = &g_ata_async[cmd.channel];\n"
+   "    asm volatile(\"sti\" ::: \"memory\");   /* " + M + ": the DMA wait turns interrupts on under its caller again */\n"
+   "    while (!__atomic_load_n(&cmd.done, __ATOMIC_ACQUIRE)) {\n"),
+ ],
  "blind": [
   ("src/kernel/tagfs/tests/tests.c",
    "    kprintf(\"[TESTS] %s failed at %s:%d: %s (%lld, %lld)\\n\",\n",
@@ -8299,7 +8280,7 @@ stand_mech_off() {
              src/kernel/tagfs/tests/stand_tests.c src/kernel/core/boardroom/boardroom.c \
              src/kernel/tagfs/tag_bitmap/tag_bitmap.c src/kernel/tagfs/tests/tests.c \
              src/kernel/tagfs/tests/core_tests.c src/kernel/tagfs/lock_rank/lock_rank.c \
-             src/kernel/tagfs/scribe/scribe.c; do
+             src/kernel/tagfs/scribe/scribe.c src/kernel/drivers/disk/ata_async.c; do
         restore "$f"
     done
 }
@@ -8486,6 +8467,16 @@ STAND_HELD_EOF
     if stand_mut_boot standmut_flushneed CORES=4 MEM=4G; then
         stand_red standmut_flushneed "a need that is the last flush begun is covered by that flush" \
             'stand_flush_ticket failed at [^:]+:[0-9]+: and proves nothing about that need \(0, 1\)'
+    fi
+    stand_mech_off
+
+    # A lifted caveat's defect put back: the legacy-IDE DMA wait's `sti`, on
+    # the legacy channel, where its test is asked. The test holds no caveat
+    # any more, so seeing the defect is a failure that names it.
+    stand_mech_on dmawait
+    if stand_mut_boot standmut_dmawait CORES=4 MEM=4G; then
+        stand_red standmut_dmawait "a DMA wait that turns interrupts on under its caller again is the defect back" \
+            'stand_dma_wait_keeps_the_callers_interrupts failed: the defect it stands for is back — a legacy-IDE DMA wait turns interrupts on under its caller.s lock because only the BSP.s interrupt can finish it \(DMA reads that turned interrupts on under a caller that had them off 1\)'
     fi
     stand_mech_off
 
