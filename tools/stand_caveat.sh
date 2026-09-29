@@ -1,10 +1,13 @@
 # stand_caveat — the Caveat table, its judge, and the path every verdict about
 # a write names (stand_path), for every host harness.
 #
-# SOURCED BY stand.sh, NEVER RUN, and never sourced by a harness itself: a
-# harness has it the moment it has stand.sh. Its own file because the table
-# grows with every red test a step of the plan is written against, and the
-# machinery beside it should not have to move out of its way.
+# SOURCED, NEVER RUN — by stand.sh, so every stand harness has it the moment
+# it has stand.sh, and by tools/stress_matrix.sh directly, which has no
+# stand.sh and none of its helpers (ok, bad, harness). So lockrank_unheld and
+# all it calls — lockrank_places, lockrank_rows, caveat_row — use none of
+# them. Its own file because the table grows with every red test a step of the
+# plan is written against, and the machinery beside it should not have to move
+# out of its way.
 
 # ===========================================================================
 # A KNOWN DEFECT, REPRODUCED ON PURPOSE, IS HELD — NOT PASSED, NOT SKIPPED

@@ -312,8 +312,10 @@ void kcore_run_loop(void)
          * them in the same loop body keeps cache-locality with the pocket
          * pump. Single-consumer: each K-Core drains only its own queue. All
          * passes route to the drain core, so non-drain queues are a one-load
-         * early-out. */
-        BatonPump(my_idx);
+         * early-out. Between pockets the core stands on nothing, so this is
+         * where a one-way pass — the power button's halt — is taken, and a
+         * pump inside a pocket's wait leaves it here (baton.h). */
+        BatonPumpAtRest(my_idx);
 
         /* USB hubs, when one has reported a change on its ports.
          *

@@ -64,14 +64,27 @@ bool ata_async_usable(uint8_t drive_idx);
 /* Sync wrapper — submit then wait on the cmd's done flag with interrupts as
  * the caller left them: the waiter reads the channel's interrupt latch itself
  * as well as claiming the `landing` the IRQ handler stamps, and runs the bottom
- * half, so the wait needs no interrupt taken on any core. `count`
- * must be in 1..8 (one 4 KB staging page). Returns 0 on success
- * or negative ATA_ERR_*. Safe to call from kernel context when the
- * caller is NOT a K-Core that other code expects to keep pumping
- * (init/mount paths, sync legacy callers). Internally short-circuits to
- * the polled BMIDE engine while the IRQ path is not viable. */
+ * half, so the wait needs no interrupt taken on any core. A recovery the
+ * channel owes is run by the waiter that finds it owed, so the wait needs no
+ * other core's continuation either, and any caller may use it — a K-Core
+ * pocket, the idle context, a caller holding a TagFS lock. `count` must be in
+ * 1..8 (one 4 KB staging page). Returns 0 on success or negative ATA_ERR_*.
+ * Short-circuits to the polled BMIDE engine, on the channel taken whole,
+ * while the IRQ path is not viable. */
 int ata_dma_sync(uint8_t drive_idx, uint64_t lba, uint16_t count,
                  bool is_write, void *buf);
+
+/* The channel's command block for one command that is not the async engine's
+ * — a PIO transfer, a FLUSH CACHE, a polled DMA, the reset between two flush
+ * attempts. PATA gives a channel one command at a time, and a command written
+ * while the drive is BSY with another is ignored by the drive (ATA/ATAPI-6
+ * §7.15.3) — so the engine's DMA and these must never meet on a channel.
+ * Take waits until nothing of the engine's is on the channel and keeps the
+ * engine from starting anything more; it answers with interrupts off, and the
+ * flags it returns are what Give puts back. Give starts the engine's next
+ * command, if one queued meanwhile. One holder per channel; a second waits. */
+uint64_t AtaChannelTake(uint8_t channel);
+void     AtaChannelGive(uint8_t channel, uint64_t flags);
 
 /* BMIDE completion watchdog — a safety BACKSTOP, not the delivery path. Glanced
  * at once per PIT tick on the BSP (idt.c), mutually exclusive with the BMIDE
@@ -81,9 +94,12 @@ int ata_dma_sync(uint8_t drive_idx, uint64_t lba, uint16_t count,
  * the same `landing` seam the IRQ uses), an engine that quit or a device that
  * vanished with no interrupt at all, and — only for a DMA engine frozen with
  * ACTIVE stuck (the one software-unobservable case) — a liveness-of-last-resort
- * bound (TIER 2). A genuine wedge is failed ERR_IO + SRST-recovered on a K-Core
- * (never-drop), so a lost completion can never hang a BMIDE sync waiter forever.
- * No-op unless multi-core BMIDE async I/O is actually in flight. */
+ * bound (TIER 2). A genuine wedge is marked owed, and the waiter on the
+ * channel that finds it owed fails the command ERR_IO and SRST-recovers the
+ * channel itself. The waiter also holds its own command to the same liveness
+ * bound, so a lost completion is waited for at most CONFIG_ATA_LIVENESS_MS and
+ * a reset even while the BSP's tick does not run. No-op unless multi-core
+ * BMIDE async I/O is actually in flight. */
 void bmide_watchdog_scan(void);
 
 /* Boot self-test — proves the watchdog's TIER-1 lost-INTRQ reconcile on the
@@ -94,9 +110,9 @@ void bmide_watchdog_scan(void);
 error_t bmide_watchdog_selftest(void);
 
 /* On-demand diagnostic (WEDGETEST=on only) — drives a synthetic wedge through
- * the real scan -> K-Core SRST recovery worker and asserts the wedged cmd fails
- * ERR_IO + the channel comes back. SRSTs the boot drive, so it is NOT part of a
- * normal boot. Emits "[BMIDE-WD] TIER-2 ... PASS/FAIL". */
+ * the real scan -> owed SRST recovery run by the waiting caller and asserts the
+ * wedged cmd fails ERR_IO + the channel comes back. SRSTs the boot drive, so it
+ * is NOT part of a normal boot. Emits "[BMIDE-WD] TIER-2 ... PASS/FAIL". */
 error_t bmide_wedge_selftest(void);
 
 /* Stats accessors (boot/diag prints, debug commands). */

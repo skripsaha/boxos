@@ -21,8 +21,10 @@ void system_halt(bool reboot) __attribute__((noreturn));
 // call twice — cores already offline are not asked again.
 //
 // `orderly` is a shutdown's roll call, and not a stop that stands for a power
-// cut (SETTLECUT): it lets a core that holds a Scribe finish its pass and stop
-// at the end of it (g_halt_orderly, below).
+// cut (SETTLECUT): it lets a core inside a held span — a Scribe pass, a
+// command it stands over — finish it and stop at the end of it
+// (g_halt_orderly, below), and waits for that end however long it takes; the
+// arrival bound holds only a core that never answered.
 void halt_all_ap_cores(bool orderly);
 
 // Raised by an orderly halt before its IPI goes out, and never lowered: the
@@ -34,8 +36,9 @@ void halt_all_ap_cores(bool orderly);
 // core where it stands.
 extern volatile bool g_halt_orderly;
 
-// This core stops for good: interrupts off, its own word that it arrived
-// (CoreDescriptor.halted) published for the roll call, and hlt. The end of
+// This core stops for good: interrupts off, no longer online, its own word
+// that it arrived (CoreDescriptor.halted) published for the roll call, and
+// hlt. The end of
 // the IPI_PANIC branch, and of whatever ends the last held span of a core an
 // orderly halt found in one.
 void HaltFreezeHere(void) __attribute__((noreturn));

@@ -46,7 +46,8 @@ typedef struct {
      * where its last span ends (ScribeGive, HaltStopIfOwedHere).
      * freeze_asked_tsc is when the IPI came, for the line that says how
      * long the halt waited. Both written by this core alone, from its IPI_PANIC
-     * branch, and read by it alone. */
+     * branch; freeze_owed is read by the roll call too, which waits for a core
+     * that owes its stop past the bound it holds a silent one to. */
     uint8_t  freeze_owed;
     uint64_t freeze_asked_tsc;
 } CoreDescriptor;

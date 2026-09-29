@@ -82,6 +82,10 @@ typedef struct {
 /* False only when a block of the chain would not read. */
 bool StandChainOnMedium(uint32_t head_volume_block, uint32_t magic, StandChain* out);
 
+/* Both chains as the medium holds them, said in one [TESTS] line once the
+ * startup tests are done — for the host, which aims what grows them next. */
+void StandSayChainsLeft(void);
+
 /* Whether the volume's tag registry, read off the medium block by block, holds
  * a record of `key` and `value` (NULL: a record with no value). */
 bool StandRegistryHoldsOnMedium(const char* key, const char* value);

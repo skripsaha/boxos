@@ -32,8 +32,8 @@
  *
  * Who rides it
  * ------------
- *   - storage async completions (AHCI, BMIDE, xHCI MSD): a block landed, a
- *     WriteJob step came back from an IRQ, a port recovery;
+ *   - storage async completions (AHCI, xHCI MSD): a block landed, a
+ *     WriteJob step came back from an IRQ, an AHCI port recovery;
  *   - the deadline of a timed addr_park: the PIT tick passes the process's
  *     own baton (process_t.deadline_baton) and a K-Core delivers the
  *     ERR_TIMEOUT Result where KResultPush (cabin VMM) is safe;
@@ -55,11 +55,12 @@
  *   all — its continuation is a delivery, not an answer somebody stands on.
  *
  * The one payload that does have a spinning, lock-holding waiter — a BMIDE
- * sync completion, whose caller may hold a TagFS write lock — does not ride
- * here: the IRQ stamps the channel's own `landing` slot and the spinner
- * claims and runs the bottom half itself (ata_async.c). So the classic cycle
- * (the drain core spins on a lock held by a core that is itself waiting on
- * a continuation only the drain core can run) has no edge to form on.
+ * sync command, whose caller may hold a TagFS lock — does not ride here in
+ * any part: the IRQ stamps the channel's own `landing` slot and the spinner
+ * claims and runs the bottom half itself, and a reset the channel owes is run
+ * by the spinner that finds it owed (ata_async.c). So the classic cycle (the
+ * drain core spins on a lock held by a core that is itself waiting on a
+ * continuation only the drain core can run) has no edge to form on.
  *
  * Every pass routes to the drain core (the BSP — the AHCI MSI owner and the
  * PIT's core). Per-core queues keep the consumer trivially single (each core
@@ -195,8 +196,22 @@ bool BatonPassOneWay(uint8_t core, void (*run)(void *ctx), void *ctx);
  * that core (kcore_run_loop; on one core the idle loop and the tick from
  * ring 3). A continuation may itself pump (a sync wait on the drain core
  * does): the node it is running under was popped before it ran, so the
- * nested drain sees a consistent head. Returns the number run. */
+ * nested drain sees a consistent head. Returns the number run.
+ *
+ * BatonPump is the pump of a core that is in the middle of something — a
+ * wait for a Scribe, a stood-over command, a drain: it never takes a one-way
+ * pass. One it meets is set aside, and the core's own loop takes it
+ * (BatonPumpAtRest), because the halt a one-way pass begins syncs the volume,
+ * and a sync begun beneath a pass this core holds would wait on that pass for
+ * ever. BatonPumpAtRest is the pump of a core that stands on nothing — the
+ * K-Core loop between pockets, the idle loop, the one-core tick that
+ * interrupted user mode — and is the one place a one-way pass is taken. */
 uint32_t BatonPump(uint8_t core_idx);
+uint32_t BatonPumpAtRest(uint8_t core_idx);
+
+/* Whether this core is running a continuation that will return — the ones
+ * that may not take a Scribe (scribe.h, rule 6). */
+bool BatonRunningHere(void);
 
 /* How many passes this core's queue is still holding. BatonOutstanding only
  * ever said WHETHER a queue was busy, which made "one unit of work" mean "one
@@ -217,8 +232,9 @@ void BatonLastSeen(uint8_t core_idx,
                    void (**out_popped)(void *ctx));
 
 /* HLT-gate helper: true iff `core_idx`'s queue has a real (non-stub) node
- * awaiting drain. Must be called by the owning core (it reads `head`).
- * Structural — no counter — so it never drifts. */
+ * awaiting drain, or a one-way pass set aside for its loop. Must be called by
+ * the owning core (it reads `head`). Structural — no counter — so it never
+ * drifts. */
 bool BatonPending(uint8_t core_idx);
 
 /* Halt-drain helper: true iff any completion posted to `core_idx`'s queue has

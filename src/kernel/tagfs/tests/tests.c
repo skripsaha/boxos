@@ -3,6 +3,7 @@
 #include "boardroom.h"
 #ifdef CONFIG_VOLUME_TESTS
 #include "block_fail.h"
+#include "stand_tests.h"
 #endif
 
 // ============================================================================
@@ -480,6 +481,10 @@ error_t TagFS_RunAllTests(TestStats* stats)
                 "this volume belongs to whoever is using this machine (build "
                 "with VOLUME_TESTS=on to run them)\n", skipped_writers);
     }
+#ifdef CONFIG_VOLUME_TESTS
+    if (path_said)
+        StandSayChainsLeft();
+#endif
 
     return stats->total_failed == 0 ? OK : ERR_INTERNAL;
 }

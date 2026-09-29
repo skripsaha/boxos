@@ -31,7 +31,12 @@
  */
 
 /*
- * Write the Ledger: the medium then holds a copy no older than this call.
+ * Write the Ledger: the medium has then taken a copy no older than this call —
+ * taken, into a cache it can lose, not made durable. A copy is on the medium
+ * for good only once a flush issued after this call returned is kept
+ * (VolumeFlushFor(VolumeFlushNeed()), scribe.h); until then a power cut may
+ * keep an older copy instead. Whoever frees ground the older copy names waits
+ * for that flush.
  *
  * Change a counter or a field under the volume's state lock FIRST, let the
  * lock go, then call this: the pass that answers the call takes its snapshot

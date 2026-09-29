@@ -25,6 +25,7 @@
 #include "kernel_config.h"
 #include "nameplate.h"        /* nameplate_name_at_kernel — name a stuck continuation */
 #include "nameplate_format.h" /* NameplateHeader — the table's own minimum size */
+#include "vmm.h"              /* vmm_tlb_shootdown_poll — the roll call answers by hand */
 
 /* WHOSE deadline may judge a drain that has stopped moving — decided on the
  * machine in front of us, from what is actually holding the un-drained work.
@@ -337,8 +338,16 @@ static void halt_drain_async_writes(void)
  * CONFIG_TLB_SHOOTDOWN_PANIC_MS, the ceiling shootdown_wait_acks uses before it
  * declares a cross-core deadlock. An IPI is delivered in microseconds and waits
  * in the target's LAPIC IRR until that core re-enables interrupts, so nothing
- * legitimate keeps a core from answering for seconds. DECLARED POLICY, reused
- * so the kernel has one answer to "a core is not responding", not two. */
+ * legitimate keeps a core from ANSWERING for seconds. DECLARED POLICY, reused
+ * so the kernel has one answer to "a core is not responding", not two.
+ *
+ * It bounds the answer and nothing after it. A core that answered by owing its
+ * stop is running a held span to its end — a Scribe pass, a command it stands
+ * over — and that may legitimately take as long as its medium's own patience;
+ * the roll call waits for that end however long it is, because the core is
+ * neither silent nor stuck, and forcing its locks open or calling it offline
+ * while it still runs would tear the structures its span exists to keep
+ * whole. */
 #define HALT_AP_ARRIVAL_US ((uint64_t)CONFIG_TLB_SHOOTDOWN_PANIC_MS * 1000ULL)
 
 volatile bool g_halt_orderly = false;
@@ -346,11 +355,17 @@ volatile bool g_halt_orderly = false;
 void HaltFreezeHere(void)
 {
     __asm__ volatile("cli" ::: "memory");
+    /* No longer running, said at once rather than when the roll call ends: a
+     * door or a turn a running core would wait for an owner to give back
+     * (ahci_roadstead.c), and a shootdown that would wait for its ACK, both
+     * ask amp_core_online — and a core that owes its stop may still be
+     * running its span beside this one for as long as that takes. */
+    uint8_t me = amp_get_core_index();
+    __atomic_store_n(&g_amp.cores[me].online, (uint8_t)0, __ATOMIC_RELEASE);
     /* The core's own word that it arrived, and the last thing it does: the
      * release store pairs with the roll call's acquire load, and nothing of
      * this core's is in flight after it. */
-    __atomic_store_n(&g_amp.cores[amp_get_core_index()].halted, (uint8_t)1,
-                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_amp.cores[me].halted, (uint8_t)1, __ATOMIC_RELEASE);
     for (;;)
         __asm__ volatile("cli; hlt");
 }
@@ -401,8 +416,8 @@ void halt_all_ap_cores(bool orderly)
     /* Raised before the IPI can land anywhere: a core inside a held span — a
      * Scribe pass, a command it stands over on a medium — must already know,
      * when the IPI reaches it, that this stop may wait for the end of it. The
-     * roll call below waits for that end the same way it waits for any other
-     * arrival. */
+     * roll call below waits for that end without the arrival bound: that core
+     * answered. */
     if (orderly)
         __atomic_store_n(&g_halt_orderly, true, __ATOMIC_RELEASE);
 
@@ -420,20 +435,31 @@ void halt_all_ap_cores(bool orderly)
         kprintf("[HALT] no time ruler — waiting for every AP to publish its "
                 "halt, unbounded\n");
 
+    /* A core that answered by owing its stop (freeze_owed) is running its
+     * span to its end, and is waited for past the bound; only a core that
+     * never answered at all is held to it. While one is owed, this core — when
+     * it is the drain core, as it is for the power button's halt and for any
+     * halt on one K-Core — runs the continuations such a span may be waiting
+     * for (an async USB job's steps run nowhere else). Interrupts are off
+     * here, so a shootdown a running span starts is answered by hand. */
     for (;;)
     {
-        bool all_in = true;
+        bool silent = false;
+        bool owing  = false;
         for (uint8_t c = 0; c < g_amp.total_cores; c++)
         {
             if (!asked[c]) continue;
-            if (!__atomic_load_n(&g_amp.cores[c].halted, __ATOMIC_ACQUIRE))
-            {
-                all_in = false;
-                break;
-            }
+            if (__atomic_load_n(&g_amp.cores[c].halted, __ATOMIC_ACQUIRE)) continue;
+            if (__atomic_load_n(&g_amp.cores[c].freeze_owed, __ATOMIC_ACQUIRE))
+                owing = true;
+            else
+                silent = true;
         }
-        if (all_in) break;
-        if (ruled && HourGlassRunOut(&roll)) break;
+        if (!silent && !owing) break;
+        if (!owing && ruled && HourGlassRunOut(&roll)) break;
+        if (owing && my_index == g_amp.bsp_index)
+            BatonPump(my_index);
+        vmm_tlb_shootdown_poll();
         __asm__ volatile("pause");
     }
 
@@ -456,7 +482,9 @@ void halt_all_ap_cores(bool orderly)
             continue;
         /* Release store pairs with amp_core_online's acquire load on the
          * other side, so peers that still iterate g_amp.cores[] see this
-         * core leave the "online" set with proper cross-CPU visibility. */
+         * core leave the "online" set with proper cross-CPU visibility. A core
+         * that stopped already said so itself (HaltFreezeHere); this is for
+         * the ones that never answered. */
         __atomic_store_n(&g_amp.cores[c].online, (uint8_t)0, __ATOMIC_RELEASE);
     }
 

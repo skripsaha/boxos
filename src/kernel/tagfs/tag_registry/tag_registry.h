@@ -12,6 +12,7 @@ bool         TagRegistrySpelling(TagRegistry* reg, uint16_t tag_id, TagSpelling*
                                  bool* is_system);
 error_t      TagRegistryKeyIds(TagRegistry* reg, const char* key, size_t key_len, TagIdList* out);
 error_t      tag_registry_flush(TagRegistry* reg);
+error_t      TagRegistryFlushFor(TagRegistry* reg, uint16_t id);
 int          tag_registry_load(TagRegistry* reg, uint32_t first_block);
 
 #endif // TAG_REGISTRY_H
