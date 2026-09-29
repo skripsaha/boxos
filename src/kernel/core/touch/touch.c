@@ -122,11 +122,14 @@ static TouchBucket *touch_bucket_get_or_create(TouchTag tag_id)
  * Tag-string resolution (cold path; hot publishers cache the resulting id).
  * ──────────────────────────────────────────────────────────────────────── */
 
-void TouchTagResolve(const char *tag, TouchTag *out_full, TouchTag *out_bare)
+error_t TouchTagResolve(const char *tag, size_t len, TouchTag *out_full, TouchTag *out_bare)
 {
     *out_full = TOUCH_TAG_INVALID;
     *out_bare = TOUCH_TAG_INVALID;
-    if (!tag || tag[0] == '\0') return;
+
+    TagSpelling spelled;
+    error_t     rc = TagSpell(tag, len, &spelled);
+    if (rc != OK) return rc;
 
     /* The kernel's own book first. A name the kernel has already spoken is
      * an occurrence, and a process asking by that name has to land on the id
@@ -134,28 +137,25 @@ void TouchTagResolve(const char *tag, TouchTag *out_full, TouchTag *out_bare)
      * Lookup only: a process may hear what the kernel named, never add to it.
      * A bare hit with no full hit is the honest answer for a value the kernel
      * never used, so it ends the search either way. */
-    TouchLogbookLookup(tag, out_full, out_bare);
-    if (*out_bare != TOUCH_TAG_INVALID) return;
-
-    char key[256], value[256];
-    tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
-
-    bool has_value   = (value[0] != '\0');
-    bool is_wildcard = has_value && value[0] == '.' && value[1] == '.' &&
-                                    value[2] == '.' && value[3] == '\0';
+    TouchLogbookLookup(&spelled, out_full, out_bare);
+    if (*out_bare != TOUCH_TAG_INVALID) return OK;
 
     /* Asked of TagFS by name rather than through a pointer to its registry:
      * this runs on every publish, and the volume can be dropped and read again
-     * underneath it. */
-    *out_bare = tagfs_tag_intern(key);
-    if (*out_bare == TAGFS_INVALID_TAG_ID) *out_bare = TOUCH_TAG_INVALID;
+     * underneath it. A name the volume refuses is refused here, by its code:
+     * a subscriber must not be handed an id for a shorter or other name. */
+    TagSpelling bare = { spelled.key, NULL, spelled.key_len, 0 };
+    uint16_t    id;
+    rc = TagFSInternSpelling(&bare, &id);
+    if (rc != OK) return rc;
+    *out_bare = (TouchTag)id;
 
-    if (has_value && !is_wildcard) {
-        char full[512];
-        tagfs_format_tag(full, sizeof(full), key, value);
-        *out_full = tagfs_tag_intern(full);
-        if (*out_full == TAGFS_INVALID_TAG_ID) *out_full = TOUCH_TAG_INVALID;
+    if (spelled.value && !TagSpellingIsWildcard(&spelled)) {
+        rc = TagFSInternSpelling(&spelled, &id);
+        if (rc != OK) return rc;
+        *out_full = (TouchTag)id;
     }
+    return OK;
 }
 
 

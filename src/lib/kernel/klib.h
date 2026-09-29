@@ -234,8 +234,4 @@ char* strpbrk(const char* s, const char* accept);
  * boot spent deliberately doing nothing. Anything that needs to be stared at
  * again belongs behind a build key, not in the path every boot takes. */
 
-// Tag wildcard matching: "key:..." matches any "key:<value>"
-bool tag_is_wildcard(const char* tag);
-bool tag_match(const char* pattern, const char* tag);
-
 #endif // KLIB_H

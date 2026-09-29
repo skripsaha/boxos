@@ -58,8 +58,6 @@ extern uint64_t cpu_get_tsc_freq_khz(void);
 #include "cabin_layout.h"   /* CABIN_USER_VA_CANONICAL_END — bind VA range check */
 #include "strand_pool_abi.h" /* StrandPool — _Alignof for the bind alignment check */
 
-#define BROADCAST_TAG_MAX      64u
-
 
 /* -------------------------------------------------------------------------
  * Crate I/O
@@ -71,19 +69,25 @@ extern uint64_t cpu_get_tsc_freq_khz(void);
  * being clipped to its first page (the vmm_translate_user_addr straddle bug).
  * ------------------------------------------------------------------------- */
 
-/* Read a NUL-bounded copy of in_crate into a caller-supplied buffer via the
- * page-walked crate_io snapshot. Returns OK / ERR_INVALID_ARGUMENT /
- * ERR_INVALID_ADDRESS. */
-static error_t sys_crate_string(const Crate *c, const OpContext *ctx,
-                                char *dst, size_t dst_size)
+/* The whole of in_crate as a NUL-terminated string in the heap, *out the
+ * caller's to kfree — never cut to a buffer of this deck's size, so a tag is
+ * never read as a shorter one. A caller that holds the text to a width judges
+ * the crate's size before this allocates. Returns OK / ERR_INVALID_ARGUMENT /
+ * ERR_NO_MEMORY / ERR_INVALID_ADDRESS. */
+static error_t sys_crate_text(const Crate *c, const OpContext *ctx, char **out)
 {
-    if (!c || c->size == 0 || dst_size == 0) return ERR_INVALID_ARGUMENT;
+    *out = NULL;
+    if (!c || c->size == 0) return ERR_INVALID_ARGUMENT;
 
-    size_t copy = c->size < dst_size - 1 ? c->size : dst_size - 1;
-    error_t rc = crate_read(c, ctx, dst, copy);
-    if (rc != OK) return rc;
-    dst[copy] = '\0';
-    if (dst[0] == '\0') return ERR_INVALID_ARGUMENT;
+    char *text = kmalloc((size_t)c->size + 1);
+    if (!text) return ERR_NO_MEMORY;
+    error_t rc = crate_read(c, ctx, text, c->size);
+    if (rc != OK) {
+        kfree(text);
+        return rc;
+    }
+    text[c->size] = '\0';
+    *out = text;
     return OK;
 }
 
@@ -196,15 +200,11 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 {
     (void)crate_count;
     if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
-    if (op->param_size == 0 || op->param_size > BROADCAST_TAG_MAX) {
-        return ERR_INVALID_ARGUMENT;
-    }
 
-    char tag[BROADCAST_TAG_MAX];
-    size_t plen = op->param_size < sizeof(tag) ? op->param_size : sizeof(tag) - 1;
-    memcpy(tag, op->params, plen);
-    tag[plen] = '\0';
-    if (tag[0] == '\0') return ERR_INVALID_ARGUMENT;
+    /* The tag, spelled in place in the op's params — however long they run. */
+    TagSpelling tag;
+    error_t spelled = TagSpell((const char *)op->params, op->param_size, &tag);
+    if (spelled != OK) return spelled;
 
     Crate    *src    = NULL;
     uint32_t  length = 0;
@@ -225,7 +225,7 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     /* Resolve the tag to its registry id once, outside the process-list
      * lock — sys_proc_has_tag's string/wildcard path would re-acquire
      * process_lock through process_snapshot_tags and self-deadlock. */
-    uint16_t tid = tagfs_tag_lookup(tag);
+    uint16_t tid = TagFSLookupSpelling(&tag);
     if (tid == TAGFS_INVALID_TAG_ID) return ERR_ROUTE_NO_SUBSCRIBERS;
 
     /* Phase 1: snapshot matching pids under process_list_lock so the
@@ -317,27 +317,23 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
  *
  * Authority is the FIXED auth_bits (auth_tags.h) on both sides, so the subset
  * check no longer depends on the privilege tags interning below registry id 64.
- * The colon-split key keeps "god:foo" detected as a god request. */
+ * The key of the one spelling keeps "god:foo" detected as a god request, and a
+ * tag that does not spell refuses the grant with the spelling's code. */
 static error_t proc_authorize_tag_grant(const char *tags, const process_t *spawner)
 {
+    uint32_t requested = 0;
+    size_t   len       = strlen(tags);
+    size_t   at        = 0;
+    for (;;) {
+        TagSpelling tag;
+        error_t rc = TagListNext(tags, len, &at, &tag);
+        if (rc != OK) return rc;
+        if (!tag.key) break;
+        requested |= AuthBitForKey(tag.key, tag.key_len);
+    }
+
     uint32_t caller = spawner->cabin->auth_bits;
     if (caller & AUTH_TAG_GOD) return OK;       /* god may grant anything */
-
-    uint32_t requested = 0;
-    const char *p = tags;
-    while (*p) {
-        const char *comma = strchr(p, ',');
-        size_t tlen = comma ? (size_t)(comma - p) : strlen(p);
-        if (tlen == 0) { if (!comma) break; p = comma + 1; continue; }
-        char key[PROCESS_TAG_SIZE];
-        if (tlen >= sizeof(key)) return ERR_INVALID_ARGUMENT;
-        size_t klen = tlen;
-        for (size_t i = 0; i < tlen; i++) { if (p[i] == ':') { klen = i; break; } }
-        memcpy(key, p, klen); key[klen] = '\0';
-        requested |= auth_bit_for_key(key);
-        if (!comma) break;
-        p = comma + 1;
-    }
     if (requested == 0) return OK;              /* nothing privileged requested */
     if (requested & AUTH_TAG_GOD) return ERR_ACCESS_DENIED;  /* only god grants god */
 
@@ -520,10 +516,13 @@ static error_t SpawnRefuseForeignMemory(const process_t *proc, uint64_t va,
  *            page-aligned by requirement: the walk copies a partial
  *            first and last leaf, so alignment buys nothing and would only
  *            force callers to move an image they already hold.
- *   in_crate: tags string (NUL-bounded)
+ *   in_crate: tags string (NUL-bounded), read whole
  *   out_crate (optional): u32 new_pid
  *   A blob spawn carries no Luggage: nobody types a line at a binary in
  *   memory. The child's CabinInfo says so (luggage_length 0). */
+static int SysProcSpawnTagged(const OpContext *ctx, uint64_t binary_va, uint64_t binary_size,
+                              const char *tags, const ManifestOp *op, Crate *crates);
+
 static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                         const OpContext *ctx)
 {
@@ -552,15 +551,23 @@ static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     if (binary_size > CABIN_USER_VA_CANONICAL_END - binary_va) return ERR_INVALID_ADDRESS;
     if (process_get_count() >= PROCESS_MAX_COUNT)  return ERR_PROCESS_LIMIT_EXCEEDED;
 
-    char tags[PROCESS_TAG_SIZE];
-    error_t srcrc = sys_crate_string(&crates[op->in_crate], ctx, tags, sizeof(tags));
+    char *tags = NULL;
+    error_t srcrc = sys_crate_text(&crates[op->in_crate], ctx, &tags);
     if (srcrc != OK) return srcrc;
 
     /* Gate the child's tags BEFORE creating it or reading the binary: a denied
      * spawn must create no process and dereference no caller memory. */
     error_t gate = proc_authorize_tag_grant(tags, ctx->proc);
-    if (gate != OK) return gate;
+    if (gate == OK)
+        gate = SysProcSpawnTagged(ctx, binary_va, binary_size, tags, op, crates);
+    kfree(tags);
+    return gate;
+}
 
+/* The spawn itself, once the child's tags have passed the grant gate. */
+static int SysProcSpawnTagged(const OpContext *ctx, uint64_t binary_va, uint64_t binary_size,
+                              const char *tags, const ManifestOp *op, Crate *crates)
+{
     /* LOOK AT THE HEAD BEFORE MAKING ROOM FOR THE WHOLE. Both questions this
      * answers cost one page-table walk and no kernel buffer: does the caller
      * hold the address it named, and is what it holds an ELF at all? If the
@@ -907,7 +914,8 @@ static int SysProcInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count
 }
 
 /* SYSTEM_OP_PROC_CREW — who wears this tag.
- *   params:    the tag, as text; param_size is its length, no NUL
+ *   params:    the tag, as text; param_size is its length, no NUL; any
+ *              length a tag can be (tag_spelling.h)
  *   out_crate: [u32 delivered][u32 total] then `delivered` records, each
  *              [u32 pid][u32 generation][u32 state][u32 tags_len]
  *              [u64 cpu_us][char tags[tags_len]]   (no NUL, no padding)
@@ -944,16 +952,12 @@ static int SysProcCrew(const ManifestOp *op, Crate *crates, uint16_t crate_count
 {
     (void)crate_count;
     if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
-    if (op->param_size == 0 || op->param_size > BROADCAST_TAG_MAX) {
-        return ERR_INVALID_ARGUMENT;
-    }
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
 
-    char   tag[BROADCAST_TAG_MAX];
-    size_t plen = op->param_size < sizeof(tag) ? op->param_size : sizeof(tag) - 1;
-    memcpy(tag, op->params, plen);
-    tag[plen] = '\0';
-    if (tag[0] == '\0') return ERR_INVALID_ARGUMENT;
+    /* The tag, spelled in place in the op's params — however long they run. */
+    TagSpelling tag;
+    error_t spelled = TagSpell((const char *)op->params, op->param_size, &tag);
+    if (spelled != OK) return spelled;
 
     Crate *out = &crates[op->out_crate];
     if (out->capacity < PROC_CREW_HEADER) return ERR_BUFFER_TOO_SMALL;
@@ -971,7 +975,7 @@ static int SysProcCrew(const ManifestOp *op, Crate *crates, uint16_t crate_count
      * re-enters process_lock through process_snapshot_tags and would
      * self-deadlock (the same rule SysBroadcast keeps). An unknown tag is
      * nobody wearing it, not a failure — the answer is an honest zero. */
-    uint16_t tid = tagfs_tag_lookup(tag);
+    uint16_t tid = TagFSLookupSpelling(&tag);
     if (tid != TAGFS_INVALID_TAG_ID) {
         /* Phase 1: the pids, under the list lock, counted then made room for
          * then filled — never a fixed tray that silently drops the last one. */
@@ -1047,56 +1051,55 @@ static int SysProcCrew(const ManifestOp *op, Crate *crates, uint16_t crate_count
     return OK;
 }
 
-/* True iff comma-delimited `list` already contains exactly `token` (element-exact,
- * so "app" never matches inside "apple" or "touch_test"). */
-static bool tag_list_contains(const char *list, const char *token)
+/* Whether a comma list already holds `tag`, element by element and spelled
+ * (so "app" never matches inside "apple" or "touch_test"). */
+static bool tag_list_holds(const char *list, const TagSpelling *tag)
 {
-    size_t tlen = strlen(token);
-    const char *p = list;
-    while (*p) {
-        const char *comma = strchr(p, ',');
-        size_t elen = comma ? (size_t)(comma - p) : strlen(p);
-        if (elen == tlen && memcmp(p, token, tlen) == 0) return true;
-        if (!comma) break;
-        p = comma + 1;
+    size_t len = strlen(list);
+    size_t at  = 0;
+    for (;;) {
+        TagSpelling held;
+        if (TagListNext(list, len, &at, &held) != OK || !held.key) return false;
+        if (held.key_len == tag->key_len && memcmp(held.key, tag->key, tag->key_len) == 0 &&
+            (held.value ? (tag->value && held.value_len == tag->value_len &&
+                           memcmp(held.value, tag->value, tag->value_len) == 0)
+                        : !tag->value))
+            return true;
     }
-    return false;
 }
 
-/* Merge caller `augment` (comma-list) into `dst` (file-tags, already built).
- * Per token: reject if its KEY (before ':') is reserved -> ERR_ACCESS_DENIED;
- * skip if already present (dedup); else append ",token" or ERR_INVALID_ARGUMENT
- * on cap overflow. file-tags are never the casualty (trusted, built first). */
-static error_t proc_exec_merge_augment(char *dst, size_t dst_size, const char *augment)
+/* The child's tags: the file's keys (TagFSKeyList) with the caller's augment —
+ * the `aug_len` bytes at `augment`, a comma list — folded in. Per tag: one
+ * whose KEY is reserved is refused (ERR_ACCESS_DENIED: no escalation), one
+ * that does not spell is refused with the spelling's code, one already there
+ * is kept once; the file's tags are never the casualty (trusted, first).
+ * *out is the caller's to kfree. */
+static error_t proc_exec_merge_augment(const char *file_tags, const char *augment,
+                                       size_t aug_len, char **out)
 {
-    const char *p = augment;
-    while (*p) {
-        const char *comma = strchr(p, ',');
-        size_t tlen = comma ? (size_t)(comma - p) : strlen(p);
-        if (tlen == 0) { if (!comma) break; p = comma + 1; continue; } /* skip empty token */
+    *out = NULL;
+    size_t have = strlen(file_tags);
+    char  *dst  = kmalloc(have + 1 + aug_len + 1);   /* a spelled tag is never longer than its text */
+    if (!dst) return ERR_NO_MEMORY;
+    memcpy(dst, file_tags, have + 1);
 
-        char token[PROCESS_TAG_SIZE];
-        if (tlen >= sizeof(token)) return ERR_INVALID_ARGUMENT;
-        memcpy(token, p, tlen); token[tlen] = '\0';
-
-        /* key = token up to ':' (value-bearing tags like "k:v") */
-        char key[PROCESS_TAG_SIZE];
-        const char *colon = strchr(token, ':');
-        size_t klen = colon ? (size_t)(colon - token) : tlen;
-        memcpy(key, token, klen); key[klen] = '\0';
-
-        if (tagfs_key_is_reserved(key)) return ERR_ACCESS_DENIED;  /* fail-closed: no escalation */
-
-        if (!tag_list_contains(dst, token)) {
-            size_t cur = strlen(dst);
-            size_t need = cur + (cur ? 1 : 0) + tlen + 1; /* comma + token + NUL */
-            if (need > dst_size) return ERR_INVALID_ARGUMENT;
-            if (cur) dst[cur++] = ',';
-            memcpy(dst + cur, token, tlen); dst[cur + tlen] = '\0';
+    size_t at = 0;
+    for (;;) {
+        TagSpelling tag;
+        error_t rc = TagListNext(augment, aug_len, &at, &tag);
+        if (rc == OK && tag.key && tagfs_key_is_reserved(tag.key, tag.key_len))
+            rc = ERR_ACCESS_DENIED;
+        if (rc != OK) {
+            kfree(dst);
+            return rc;
         }
-        if (!comma) break;
-        p = comma + 1;
+        if (!tag.key) break;
+        if (tag_list_holds(dst, &tag)) continue;
+        if (have) dst[have++] = ',';
+        TagSpellingText(&tag, dst + have);
+        have += TagSpellingTextLength(&tag);
     }
+    *out = dst;
     return OK;
 }
 
@@ -1129,7 +1132,10 @@ static error_t cabin_luggage_give(process_t *child, const uint8_t *bytes, uint32
 }
 
 static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext *ctx,
-                            const char *filename,
+                            const TagSpelling *name,
+                            const uint8_t *luggage, uint32_t luggage_len);
+static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext *ctx,
+                            uint32_t found_id, const char *child_tags,
                             const uint8_t *luggage, uint32_t luggage_len);
 
 /* SYSTEM_OP_PROC_EXEC
@@ -1153,17 +1159,17 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
     uint8_t *raw = crate_in_buf(src, ctx);
     if (!raw) return ERR_INVALID_ADDRESS;
 
-    /* The name ends at the first NUL, or at the end of the crate. */
+    /* The name ends at the first NUL, or at the end of the crate, and is the
+     * name's tag: a key, spelled in place, as a created file's stem is. */
     uint64_t name_len = 0;
     while (name_len < src->size && raw[name_len] != '\0') name_len++;
 
-    char filename[64];
-    if (name_len == 0 || name_len >= sizeof(filename)) {
+    TagSpelling name;
+    error_t spelled = TagSpellKey((const char *)raw, (size_t)name_len, &name);
+    if (spelled != OK) {
         crate_buf_free(raw);
-        return ERR_INVALID_ARGUMENT;
+        return spelled == ERR_TAGFS_INVALID_TAG ? ERR_INVALID_ARGUMENT : spelled;
     }
-    memcpy(filename, raw, name_len);
-    filename[name_len] = '\0';
 
     const uint8_t *luggage     = NULL;
     uint32_t       luggage_len = 0;
@@ -1172,25 +1178,20 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
         luggage_len = (uint32_t)(src->size - name_len - 1);
     }
 
-    int rc = SysProcExecNamed(op, crates, ctx, filename, luggage, luggage_len);
+    int rc = SysProcExecNamed(op, crates, ctx, &name, luggage, luggage_len);
     crate_buf_free(raw);
     return rc;
 }
 
 static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext *ctx,
-                            const char *filename,
+                            const TagSpelling *name,
                             const uint8_t *luggage, uint32_t luggage_len)
 {
-    /* Optional caller-tag augment rides in op->params (NUL-free, length-bounded).
-     * Empty (param_size == 0) leaves augment "" so the merge below is a no-op and
-     * this path stays byte-identical to a plain proc_exec. */
-    char augment[PROCESS_TAG_SIZE];
-    augment[0] = '\0';
-    if (op->param_size > 0) {
-        if (op->param_size >= sizeof(augment)) return ERR_INVALID_ARGUMENT;
-        memcpy(augment, op->params, op->param_size);
-        augment[op->param_size] = '\0';
-    }
+    /* Optional caller-tag augment rides in op->params, a comma list of any
+     * length, read in place. Empty (param_size == 0) makes the merge below a
+     * no-op, so this path stays byte-identical to a plain proc_exec. */
+    const char *augment = (const char *)op->params;
+    size_t      aug_len = op->param_size;
 
     /* Locate the file by tag-name + executable tag: every file that carries
      * the name as a tag, asked of the index, with room for every one of them.
@@ -1202,12 +1203,10 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
     uint32_t *file_ids = kmalloc(room * sizeof(uint32_t));
     if (!file_ids) return ERR_NO_MEMORY;
 
-    const char *by_name[1] = { filename };
-    int file_count = tagfs_query_files(by_name, 1, file_ids, room);
+    int file_count = tagfs_query_files(name, 1, file_ids, room);
 
-    uint32_t found_id = 0;
-    char     found_tags[PROCESS_TAG_SIZE];
-    found_tags[0] = '\0';
+    uint32_t found_id   = 0;
+    char    *found_tags = NULL;
 
     for (int i = 0; i < file_count; i++) {
         TagFSMetadata meta;
@@ -1225,18 +1224,8 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
         }
 
         if (has_exec_tag) {
-            found_id = file_ids[i];
-            size_t pos = 0;
-            for (uint16_t t = 0; t < meta.tag_count; t++) {
-                char key[128];
-                if (!tagfs_tag_key(meta.tag_ids[t], key, sizeof(key))) continue;
-                size_t klen = strlen(key);
-                if (pos + klen + 2 > PROCESS_TAG_SIZE) break;
-                if (pos > 0) found_tags[pos++] = ',';
-                memcpy(found_tags + pos, key, klen);
-                pos += klen;
-            }
-            found_tags[pos] = '\0';
+            found_id   = file_ids[i];
+            found_tags = TagFSKeyList(meta.tag_ids, meta.tag_count);
             tagfs_metadata_free(&meta);
             break;
         }
@@ -1245,13 +1234,26 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
     kfree(file_ids);
 
     if (found_id == 0) return ERR_FILE_NOT_FOUND;
+    if (!found_tags) return ERR_NO_MEMORY;
 
-    /* Fold the caller augment into found_tags BEFORE any binary I/O, so a
-     * reserved/oversize augment costs zero disk reads and never spawns an
-     * orphan. found_tags is already NUL-terminated by the build loop above. */
-    error_t arc = proc_exec_merge_augment(found_tags, sizeof(found_tags), augment);
+    /* Fold the caller augment into the file's tags BEFORE any binary I/O, so
+     * a reserved or unspellable augment costs zero disk reads and never
+     * spawns an orphan. */
+    char   *child_tags = NULL;
+    error_t arc = proc_exec_merge_augment(found_tags, augment, aug_len, &child_tags);
+    kfree(found_tags);
     if (arc != OK) return arc;
+    int rc = SysProcExecFound(op, crates, ctx, found_id, child_tags, luggage, luggage_len);
+    kfree(child_tags);
+    return rc;
+}
 
+/* The found program read in, made a process wearing `child_tags`, given its
+ * Luggage and started. */
+static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext *ctx,
+                            uint32_t found_id, const char *child_tags,
+                            const uint8_t *luggage, uint32_t luggage_len)
+{
     TagFSMetadata exec_meta;
     if (tagfs_get_metadata(found_id, &exec_meta) != 0) return ERR_FILE_NOT_FOUND;
     uint64_t file_size = exec_meta.size;
@@ -1282,7 +1284,7 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
         return ERR_SPAWN_FAILED;
     }
 
-    process_t *new_proc = process_create(found_tags);
+    process_t *new_proc = process_create(child_tags);
     if (!new_proc) {
         pmm_free(phys, pages);
         return ERR_SPAWN_FAILED;
@@ -1596,72 +1598,87 @@ static int SysUseGet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
  *  Tags
  * ========================================================================= */
 
-/* On OK, *out_target carries a pinned reference; the caller MUST
- * release it via process_ref_dec when done. On error, no ref is held. */
+/* On OK, *out_target carries a pinned reference and *out_tag the tag's text
+ * whole, spelled into *out_spelled; the caller MUST release the reference via
+ * process_ref_dec and kfree the text. A text wider than any tag is refused on
+ * its size before it is copied, and one that does not spell is refused with
+ * the spelling's code — so a process is never handed a different, shorter tag
+ * than the one it was asked for. On error, nothing is held. */
 static error_t sys_tag_target(const ManifestOp *op, Crate *crates,
                               const OpContext *ctx,
                               process_t **out_target,
-                              char *tag_out, size_t tag_out_size)
+                              char **out_tag, TagSpelling *out_spelled)
 {
     if (!ctx || !ctx->proc)                return ERR_INVALID_ARGUMENT;
     if (op->param_size < sizeof(uint32_t)) return ERR_INVALID_ARGUMENT;
     if (op->in_crate == CRATE_INDEX_NONE)  return ERR_INVALID_ARGUMENT;
+    if (crates[op->in_crate].size > TAG_TEXT_WIDTH) return ERR_TAGFS_TAG_TOO_LONG;
 
     uint32_t target_pid;
     memcpy(&target_pid, op->params, sizeof(uint32_t));
     if (target_pid == PROCESS_INVALID_PID) return ERR_INVALID_ARGUMENT;
     if (target_pid == 0) target_pid = ctx->proc->pid;
 
-    process_t *t = process_find_ref(target_pid);
-    if (!t) return ERR_PROCESS_NOT_FOUND;
-
-    error_t srcrc = sys_crate_string(&crates[op->in_crate], ctx, tag_out, tag_out_size);
+    char   *tag   = NULL;
+    error_t srcrc = sys_crate_text(&crates[op->in_crate], ctx, &tag);
+    if (srcrc == OK)
+        srcrc = TagSpell(tag, strlen(tag), out_spelled);
     if (srcrc != OK) {
-        process_ref_dec(t);
+        kfree(tag);
         return srcrc;
     }
 
+    process_t *t = process_find_ref(target_pid);
+    if (!t) {
+        kfree(tag);
+        return ERR_PROCESS_NOT_FOUND;
+    }
+
     *out_target = t;
+    *out_tag    = tag;
     return OK;
+}
+
+/* Whether a spelled tag is the bare `stopped`, the one tag a process's state
+ * follows. */
+static bool tag_is_stopped(const TagSpelling *tag)
+{
+    return !tag->value && TagSpanIs("stopped", tag->key, tag->key_len);
 }
 
 static int SysTagAdd(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
     (void)crate_count;
-    process_t *target = NULL;
-    char tag[64];
-    error_t rc = sys_tag_target(op, crates, ctx, &target, tag, sizeof(tag));
+    process_t  *target = NULL;
+    char       *tag    = NULL;
+    TagSpelling spelled;
+    error_t rc = sys_tag_target(op, crates, ctx, &target, &tag, &spelled);
     if (rc != OK) return rc;
 
+    int result = OK;
     /* Mutating another process's tags needs authority over it (self / same-cabin
      * / god|system / own child); without this any app could freeze or
-     * de-privilege any process by pid. */
+     * de-privilege any process by pid. And the granted tag must not exceed the
+     * CALLER's own authority — reuse the spawn grant gate so an app cannot
+     * self-grant "god"/"system" (escalation). Non-privilege tags (auth bit 0)
+     * and "stopped" pass freely. */
     if (!proc_has_authority_over(ctx->proc, target)) {
-        process_ref_dec(target);
-        return ERR_ACCESS_DENIED;
-    }
-    /* And the granted tag must not exceed the CALLER's own authority — reuse the
-     * spawn grant gate so an app cannot self-grant "god"/"system" (escalation).
-     * Non-privilege tags (auth bit 0) and "stopped" pass freely. */
-    error_t grant = proc_authorize_tag_grant(tag, ctx->proc);
-    if (grant != OK) {
-        process_ref_dec(target);
-        return grant;
-    }
-
-    int result = OK;
-    if (process_has_tag(target, tag)) {
+        result = ERR_ACCESS_DENIED;
+    } else if ((result = proc_authorize_tag_grant(tag, ctx->proc)) != OK) {
+        /* the grant gate's refusal stands */
+    } else if (process_has_tag(target, tag)) {
         result = ERR_ALREADY_EXISTS;
-    } else if (process_add_tag(target, tag) != 0) {
-        result = ERR_TAG_LIMIT_EXCEEDED;
-    } else if (strcmp(tag, "stopped") == 0) {
+    } else if ((result = process_add_tag(target, tag)) != OK) {
+        /* the process does not wear it, and the answer says why */
+    } else if (tag_is_stopped(&spelled)) {
         process_state_t s = process_get_state(target);
         if (s == PROC_WORKING || s == PROC_CREATED) {
             process_set_state(target, PROC_STOPPED);
         }
     }
     process_ref_dec(target);
+    kfree(tag);
     return result;
 }
 
@@ -1669,30 +1686,29 @@ static int SysTagRemove(const ManifestOp *op, Crate *crates, uint16_t crate_coun
                         const OpContext *ctx)
 {
     (void)crate_count;
-    process_t *target = NULL;
-    char tag[64];
-    error_t rc = sys_tag_target(op, crates, ctx, &target, tag, sizeof(tag));
+    process_t  *target = NULL;
+    char       *tag    = NULL;
+    TagSpelling spelled;
+    error_t rc = sys_tag_target(op, crates, ctx, &target, &tag, &spelled);
     if (rc != OK) return rc;
 
     /* Same authority gate as tag.add: only self / same-cabin / god|system /
      * own-child may strip a target's tags (no grant gate — dropping a tag never
      * escalates). */
-    if (!proc_has_authority_over(ctx->proc, target)) {
-        process_ref_dec(target);
-        return ERR_ACCESS_DENIED;
-    }
-
     int result = OK;
-    if (!process_has_tag(target, tag)) {
+    if (!proc_has_authority_over(ctx->proc, target)) {
+        result = ERR_ACCESS_DENIED;
+    } else if (!process_has_tag(target, tag)) {
         result = ERR_TAG_NOT_FOUND;
     } else if (process_remove_tag(target, tag) != 0) {
         result = ERR_INVALID_ARGUMENT;
-    } else if (strcmp(tag, "stopped") == 0) {
+    } else if (tag_is_stopped(&spelled)) {
         if (process_get_state(target) == PROC_STOPPED) {
             process_set_state(target, PROC_WORKING);
         }
     }
     process_ref_dec(target);
+    kfree(tag);
     return result;
 }
 
@@ -1701,12 +1717,14 @@ static int SysTagCheck(const ManifestOp *op, Crate *crates, uint16_t crate_count
                        const OpContext *ctx)
 {
     (void)crate_count;
-    process_t *target = NULL;
-    char tag[64];
-    error_t rc = sys_tag_target(op, crates, ctx, &target, tag, sizeof(tag));
+    process_t  *target = NULL;
+    char       *tag    = NULL;
+    TagSpelling spelled;
+    error_t rc = sys_tag_target(op, crates, ctx, &target, &tag, &spelled);
     if (rc != OK) return rc;
 
     bool has = process_has_tag(target, tag);
+    kfree(tag);
 
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];

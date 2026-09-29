@@ -15,9 +15,19 @@
 
 /* Kept off the stack: two answers of 256 file ids and a tag's text would make
  * a 2.7 KiB frame, and the stack guard refuses anything over 1 KiB. */
-static uint32_t s_inside[256];
-static uint32_t s_everywhere[256];
-static char     s_tag_text[512];
+static uint32_t    s_inside[256];
+static uint32_t    s_everywhere[256];
+static char        s_tag_text[512];
+static TagSpelling s_spelled[8];
+
+/* The context's names spelled for a query, into s_spelled. */
+static bool use_spelled(const char** names, uint32_t count)
+{
+    if (count > ARRAY_SIZE(s_spelled)) return false;
+    for (uint32_t i = 0; i < count; i++)
+        if (TagSpell(names[i], strlen(names[i]), &s_spelled[i]) != OK) return false;
+    return true;
+}
 
 /* The context as it was: a comma-joined list to hand back to UseContextSet,
  * or NULL for none. */
@@ -118,8 +128,8 @@ static TestResult test_use_context_spelling(void)
 
     memset(unfit, 'k', sizeof(unfit) - 1);
     unfit[sizeof(unfit) - 1] = '\0';
-    TEST_ASSERT_EQ(UseContextSet(unfit, false), ERR_INVALID_ARGUMENT,
-                   "a key longer than the registry's field is refused");
+    TEST_ASSERT_EQ(UseContextSet(unfit, false), ERR_TAGFS_TAG_TOO_LONG,
+                   "a key longer than the registry's field is refused as too long");
     TEST_ASSERT_OK(UseContextTagArray(&block, &names, &count), "names come back");
     TEST_ASSERT_EQ(count, 3, "the refusal left the context as it was");
 out:
@@ -153,7 +163,8 @@ static TestResult test_use_context_walls(void)
 
     TEST_ASSERT_OK(UseContextTagArray(&block, &names, &count), "names come back");
     TEST_ASSERT_EQ(count, 1, "one tag");
-    TEST_ASSERT_EQ(tagfs_query_files(names, count, ids, 8), 0,
+    TEST_ASSERT(use_spelled(names, count), "the context's names spell");
+    TEST_ASSERT_EQ(tagfs_query_files(s_spelled, count, ids, 8), 0,
                    "inside walls nobody has built, nothing is visible");
 
     proc = use_test_strand(0, &cabin);
@@ -200,14 +211,16 @@ static TestResult test_use_context_narrows(void)
     tagfs_metadata_free(&meta);
     have_meta = false;
 
-    TEST_ASSERT(tagfs_tag_text(tag_id, s_tag_text, sizeof(s_tag_text)), "the tag has a name");
+    size_t tag_len = tagfs_tag_text(tag_id, s_tag_text, sizeof(s_tag_text));
+    TEST_ASSERT(tag_len > 0 && tag_len < sizeof(s_tag_text), "the tag has a name, whole");
 
     TEST_ASSERT(use_snapshot_take(&saved), "the user's context could not be saved");
     taken = true;
     TEST_ASSERT_OK(UseContextSet(s_tag_text, false), "a context of a tag the volume knows");
     TEST_ASSERT_OK(UseContextTagArray(&block, &names, &count), "names come back");
 
-    int n_inside = tagfs_query_files(names, count, s_inside, ARRAY_SIZE(s_inside));
+    TEST_ASSERT(use_spelled(names, count), "the context's names spell");
+    int n_inside = tagfs_query_files(s_spelled, count, s_inside, ARRAY_SIZE(s_inside));
     TEST_ASSERT(n_inside >= 1, "the file that wears the tag is visible inside");
     for (int i = 0; i < n_inside; i++)
         TEST_ASSERT(tagfs_has_tag(s_inside[i], tag_id), "everything visible inside wears the tag");

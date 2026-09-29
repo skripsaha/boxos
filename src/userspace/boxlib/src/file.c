@@ -366,7 +366,6 @@ int tag_add(uint32_t file_id, const char *tag)
 {
     if (!tag || tag[0] == '\0') return -ERR_INVALID_ARGUMENT;
     size_t tag_len = strlen(tag);
-    if (tag_len >= 128) return -ERR_INVALID_ARGUMENT;
     int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_SET,
                      &file_id, sizeof(file_id),
                      tag, (uint32_t)tag_len,
@@ -379,7 +378,6 @@ int tag_remove(uint32_t file_id, const char *key)
 {
     if (!key || key[0] == '\0') return -ERR_INVALID_ARGUMENT;
     size_t kl = strlen(key);
-    if (kl >= 64) return -ERR_INVALID_ARGUMENT;
     int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_UNSET,
                      &file_id, sizeof(file_id),
                      key, (uint32_t)kl,

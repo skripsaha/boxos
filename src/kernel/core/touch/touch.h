@@ -175,13 +175,14 @@ void TouchStatsSnapshot(uint64_t out[5]);
 
 void TouchInit(void);
 
-/* Resolve a tag string into one or two TouchTags. THE READER DOOR: it looks
- * the name up in the kernel's Logbook first (logbook.h — occurrences the
- * kernel named), and only if that misses does it reach the mounted volume's
- * registry, interning there if needed. Returns:
+/* Resolve the `len` bytes of a tag's text into one or two TouchTags. THE
+ * READER DOOR: it looks the name up in the kernel's Logbook first (logbook.h
+ * — occurrences the kernel named), and only if that misses does it reach the
+ * mounted volume's registry, interning there if needed. Gives:
  *   *out_full = (key, value) id when string has explicit non-wildcard value
  *   *out_bare = (key, NULL)  id — also serves wildcard "key:..." subscribers
- * Either may be TOUCH_TAG_INVALID if neither book will issue an id.
+ * and answers OK, or why no id could be had: a text that does not spell
+ * (tag_spelling.h), the volume's refusal, or no volume at all.
  * Hot path callers should cache the returned ids in a static.
  *
  * This is what SysTouchIntern gives a process, so a process subscribing by
@@ -189,7 +190,7 @@ void TouchInit(void);
  * name: kernel code that means to name an occurrence calls
  * TouchLogbookResolve / TouchLogbookIntern instead.
  */
-void    TouchTagResolve(const char *tag, TouchTag *out_full, TouchTag *out_bare);
+error_t TouchTagResolve(const char *tag, size_t len, TouchTag *out_full, TouchTag *out_bare);
 
 /* Policy / capability management. */
 error_t TouchPolicySet(TouchTag tag_id, TouchPolicy policy, TouchCapability capability);

@@ -32,13 +32,21 @@ enum AuthTagBit {
 _Static_assert(AUTH_TAG_COUNT <= 32, "auth_bits is uint32_t");
 _Static_assert(AUTH_TAG_COUNT == TAGFS_AUTH_COUNT, "auth vocab count drift");
 
-/* The single checkpoint: bare auth key -> its fixed bit, 0 for any other key. */
-static inline uint32_t auth_bit_for_key(const char *key)
+/* The single checkpoint: the key_len bytes of a bare auth key -> its fixed
+ * bit, 0 for any other key. A key as a tag's spelling holds it, in place. */
+static inline uint32_t AuthBitForKey(const char *key, size_t key_len)
 {
-#define X(id, keystr) if (__builtin_strcmp(key, keystr) == 0) return AUTH_TAG_##id;
+#define X(id, keystr) \
+    if (key_len == sizeof(keystr) - 1 && __builtin_memcmp(key, keystr, key_len) == 0) \
+        return AUTH_TAG_##id;
     TAGFS_AUTH_KEYS(X)
 #undef X
     return 0;
+}
+
+static inline uint32_t auth_bit_for_key(const char *key)
+{
+    return AuthBitForKey(key, __builtin_strlen(key));
 }
 
 #endif /* AUTH_TAGS_H */

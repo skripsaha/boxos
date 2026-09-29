@@ -35,55 +35,14 @@ static struct
     spinlock_t lock;
 } g_use;
 
-/* The volume registry's field widths (TagRegistryEntry on disk: a one-byte
- * key length; every TagFS parse buffer is 256). A tag that cannot be written
- * to the volume cannot be a context tag either. */
-#define USE_TAG_PART_MAX 255u
-
 /* -------------------------------------------------------------------------
  * Names
+ *
+ * A context tag is kept in its canonical text, "key" or "key:value", as the
+ * one spelling (tag_spelling.h) reads it — so a tag the volume registry could
+ * not hold cannot be a context tag either, and two ways of typing one tag are
+ * one tag here.
  * ------------------------------------------------------------------------- */
-
-/* What tag_normalise made of a raw tag. */
-typedef enum
-{
-    TAG_BLANK   = 0,    /* nothing but blanks — the caller skips it */
-    TAG_SPELLED = 1,    /* a tag, written canonically into `out` */
-    TAG_UNFIT   = 2,    /* a key or value the registry could not hold */
-} TagSpelling;
-
-/*
- * One raw tag out of a list — as typed, blanks and all — into its canonical
- * spelling: "key" or "key:value".
- */
-static TagSpelling tag_normalise(const char *raw, size_t len, char *out, size_t out_cap)
-{
-    while (len > 0 && (raw[0] == ' ' || raw[0] == '\t')) { raw++; len--; }
-    while (len > 0 && (raw[len - 1] == ' ' || raw[len - 1] == '\t')) len--;
-    if (len == 0) return TAG_BLANK;
-
-    const char *colon = NULL;
-    for (size_t i = 0; i < len; i++) {
-        if (raw[i] == ':') { colon = raw + i; break; }
-    }
-
-    size_t klen = colon ? (size_t)(colon - raw) : len;
-    size_t vlen = colon ? len - klen - 1 : 0;
-    if (klen == 0 || klen > USE_TAG_PART_MAX || vlen > USE_TAG_PART_MAX)
-        return TAG_UNFIT;
-
-    /* "key:" says the same thing as "key"; the registry has one entry for it. */
-    size_t need = klen + (vlen ? vlen + 1 : 0) + 1;
-    if (need > out_cap) return TAG_UNFIT;
-
-    memcpy(out, raw, klen);
-    if (vlen) {
-        out[klen] = ':';
-        memcpy(out + klen + 1, colon + 1, vlen);
-    }
-    out[need - 1] = '\0';
-    return TAG_SPELLED;
-}
 
 static void tags_free(UseTag *tags, uint32_t count)
 {
@@ -93,54 +52,42 @@ static void tags_free(UseTag *tags, uint32_t count)
 }
 
 /*
- * Parse a comma-separated list into an array of unbound tags. A duplicate is
- * kept once. On any failure nothing is kept and the error is the caller's to
- * report.
+ * Parse a comma-separated list into an array of unbound tags, each in its
+ * canonical text. The whole list is spelled before anything is allocated, and
+ * a tag that does not spell refuses it with the spelling's code. A duplicate
+ * is kept once. On any failure nothing is kept and the error is the caller's
+ * to report.
  */
 static error_t list_parse(const char *list, UseTag **out_tags, uint32_t *out_count)
 {
     *out_tags  = NULL;
     *out_count = 0;
-    if (!list) return OK;
 
-    uint32_t capacity = 0, count = 0;
-    UseTag  *tags = NULL;
-    char     spelled[USE_TAG_PART_MAX * 2 + 2];
+    size_t   len    = list ? strlen(list) : 0;
+    uint32_t spoken = 0;
+    error_t  rc     = TagListCount(list, len, &spoken);
+    if (rc != OK || spoken == 0) return rc;
 
-    const char *pos = list;
-    for (;;) {
-        const char *comma = strchr(pos, ',');
-        size_t len = comma ? (size_t)(comma - pos) : strlen(pos);
+    UseTag *tags = kmalloc(sizeof(UseTag) * spoken);
+    if (!tags) return ERR_NO_MEMORY;
 
-        TagSpelling spelling = tag_normalise(pos, len, spelled, sizeof(spelled));
-        if (spelling == TAG_UNFIT) { tags_free(tags, count); return ERR_INVALID_ARGUMENT; }
-        if (spelling == TAG_SPELLED) {
-            bool seen = false;
-            for (uint32_t i = 0; i < count && !seen; i++)
-                seen = strcmp(tags[i].text, spelled) == 0;
+    uint32_t count = 0;
+    size_t   at    = 0;
+    for (uint32_t k = 0; k < spoken; k++) {
+        TagSpelling tag;
+        (void)TagListNext(list, len, &at, &tag);   /* judged whole above */
 
-            if (!seen) {
-                if (count == capacity) {
-                    uint32_t grown_cap = capacity ? capacity * 2 : 4;
-                    UseTag  *grown = kmalloc(sizeof(UseTag) * grown_cap);
-                    if (!grown) { tags_free(tags, count); return ERR_NO_MEMORY; }
-                    if (count) memcpy(grown, tags, sizeof(UseTag) * count);
-                    kfree(tags);
-                    tags     = grown;
-                    capacity = grown_cap;
-                }
-                size_t bytes = strlen(spelled) + 1;
-                char  *text  = kmalloc(bytes);
-                if (!text) { tags_free(tags, count); return ERR_NO_MEMORY; }
-                memcpy(text, spelled, bytes);
-                tags[count].text = text;
-                tags[count].id   = TAGFS_INVALID_TAG_ID;
-                count++;
-            }
-        }
+        bool seen = false;
+        for (uint32_t i = 0; i < count && !seen; i++)
+            seen = TagSpellingMatchesText(&tag, tags[i].text);
+        if (seen) continue;
 
-        if (!comma) break;
-        pos = comma + 1;
+        char *text = kmalloc(TagSpellingTextLength(&tag) + 1);
+        if (!text) { tags_free(tags, count); return ERR_NO_MEMORY; }
+        TagSpellingText(&tag, text);
+        tags[count].text = text;
+        tags[count].id   = TAGFS_INVALID_TAG_ID;
+        count++;
     }
 
     *out_tags  = tags;
@@ -197,8 +144,10 @@ error_t UseContextSet(const char *list, bool intern)
     /* Numbers first, outside the lock: the registry takes the volume's door
      * and its own lock, and neither is taken while ours is held. */
     for (uint32_t i = 0; i < count; i++) {
-        tags[i].id = intern ? tagfs_tag_intern(tags[i].text)
-                            : tagfs_tag_lookup(tags[i].text);
+        if (!intern)
+            tags[i].id = tagfs_tag_lookup(tags[i].text);
+        else if (tagfs_tag_intern(tags[i].text, &tags[i].id) != OK)
+            tags[i].id = TAGFS_INVALID_TAG_ID;
     }
 
     uint16_t *overflow = kmalloc(sizeof(uint16_t) * count);
@@ -430,18 +379,15 @@ void UseContextUnbind(void)
     spin_unlock(&g_use.lock);
 }
 
-void UseContextBindTag(const char *tag, uint16_t tag_id)
+void UseContextBindTag(const TagSpelling *tag, uint16_t tag_id)
 {
     if (!tag || tag_id == TAGFS_INVALID_TAG_ID) return;
     if (__atomic_load_n(&g_use.unbound, __ATOMIC_RELAXED) == 0) return;
 
-    char spelled[USE_TAG_PART_MAX * 2 + 2];
-    if (tag_normalise(tag, strlen(tag), spelled, sizeof(spelled)) != TAG_SPELLED) return;
-
     spin_lock(&g_use.lock);
     for (uint32_t i = 0; i < g_use.count; i++) {
         if (g_use.tags[i].id == TAGFS_INVALID_TAG_ID &&
-            strcmp(g_use.tags[i].text, spelled) == 0) {
+            TagSpellingMatchesText(tag, g_use.tags[i].text)) {
             g_use.tags[i].id = tag_id;
             cache_rebuild_locked();
             break;

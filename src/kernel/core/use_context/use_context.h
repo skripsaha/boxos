@@ -39,10 +39,11 @@ struct process_t;
 
 /*
  * Replace the context with the tags of a comma-separated list — "code,cpp" or
- * "code, project:alpha". An empty list clears. Each tag is normalised: blanks
- * around it are dropped, "key:" with nothing after the colon is the bare "key".
- * A key or a value longer than the volume registry's on-disk field (255 bytes)
- * is refused with ERR_INVALID_ARGUMENT and the context is left as it was.
+ * "code, project:alpha". An empty list clears. Each tag is read by the one
+ * spelling (tag_spelling.h): blanks around it are dropped, "key:" with nothing
+ * after the colon is the bare "key". A tag the volume registry could not hold
+ * is refused with the spelling's code (ERR_TAGFS_TAG_TOO_LONG,
+ * ERR_TAGFS_INVALID_TAG) and the context is left as it was.
  *
  * `intern` says whether a tag the mounted volume does not know yet may be
  * entered into its registry. The user's own `use` says yes: a tag is created
@@ -110,7 +111,8 @@ void    UseContextUnbind(void);
  * holds this tag and had no number for it, this is the number. One relaxed
  * load when nothing is waiting, which is almost always.
  */
-void    UseContextBindTag(const char *tag, uint16_t tag_id);
+struct TagSpelling;
+void    UseContextBindTag(const struct TagSpelling *tag, uint16_t tag_id);
 
 void    UseContextInit(void);
 void    UseContextShutdown(void);

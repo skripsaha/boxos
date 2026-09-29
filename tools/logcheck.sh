@@ -131,17 +131,13 @@ probe_on() {
     python3 - <<'EOF'
 p = "src/kernel/core/touch/logbook.c"
 s = open(p).read()
-anchor = """void TouchLogbookResolve(const char *tag, TouchTag *out_full, TouchTag *out_bare)
-{
-    logbook_resolve(tag, out_full, out_bare, true);
+anchor = """    logbook_resolve(&spelled, out_full, out_bare, true);
 }"""
-probed = """void TouchLogbookResolve(const char *tag, TouchTag *out_full, TouchTag *out_bare)
-{
-    logbook_resolve(tag, out_full, out_bare, true);
+probed = """    logbook_resolve(&spelled, out_full, out_bare, true);
     /* logcheck injection: the probe says which book answered each resolve */
     kprintf("[PROBE] logbook '%s' full=0x%x bare=0x%x\\n", tag, *out_full, *out_bare);
 }"""
-assert anchor in s, "probe anchor missing"
+assert s.count(anchor) == 1, "probe anchor missing"
 open(p, "w").write(s.replace(anchor, probed))
 EOF
     mut_done src/kernel/core/touch/logbook.c "logcheck injection"
@@ -9000,9 +8996,10 @@ run_quill() {
 # quillmut — every quill oracle, shown the behaviour it waits for, must turn
 # ---------------------------------------------------------------------------
 #
-# Two of the defects can have their fix emulated in a line: a query that
-# long refused (longquery), the system and boot tags refused to untag
-# (systemtag). The others cannot before their step lands, so their numbers
+# One defect can have its fix emulated in a line: the system and boot tags
+# refused to untag (systemtag); longquery's fix is the tree's own since step
+# 1.1b, and it must behave with nothing put in. The others cannot before
+# their step lands, so their numbers
 # are made small enough that HEAD already copes: bigwrite of 2 MiB, 1 MiB for
 # sequential and interleave — which then land whole, and the host's extent
 # count is what must go red, one extent per block being far over the
@@ -9018,17 +9015,12 @@ quill_mutants_on() {
     python3 - <<'EOF2'
 p = "src/kernel/core/decks/storage/storage_ops.c"
 s = open(p).read()
-a = "        Crate *src = &crates[op->in_crate];\n        if (src->size > 0 && src->size < sizeof(qbuf)) {\n"
-assert s.count(a) == 1, "quillmut long-query anchor missing"
-s = s.replace(a, "        Crate *src = &crates[op->in_crate];\n"
-                 "        if (src->size >= sizeof(qbuf)) return ERR_TAGFS_INVALID_TAG;   /* logcheck mutation: a long query is refused */\n"
-                 "        if (src->size > 0 && src->size < sizeof(qbuf)) {\n", 1)
-anchor = "    if (tagfs_remove_tag_string(file_id, key) != 0) {\n"
+anchor = "    int removed = tagfs_remove_tag_string(param_u32(op, 0), &tag);\n"
 assert s.count(anchor) == 1, "quillmut untag anchor missing"
-s = s.replace(anchor, "    if (strcmp(key, \"system\") == 0 || strcmp(key, \"boot\") == 0) return ERR_PERMISSION_DENIED;   /* logcheck mutation: the guard tags stay on */\n" + anchor, 1)
+s = s.replace(anchor, "    if (TagSpanIs(\"system\", tag.key, tag.key_len) || TagSpanIs(\"boot\", tag.key, tag.key_len)) { crate_buf_free(text); return ERR_PERMISSION_DENIED; }   /* logcheck mutation: the guard tags stay on */\n" + anchor, 1)
 open(p, "w").write(s)
 EOF2
-    mut_done src/kernel/core/decks/storage/storage_ops.c "logcheck mutation" 2
+    mut_done src/kernel/core/decks/storage/storage_ops.c "logcheck mutation"
 
     mutate src/userspace/apps/quilltest.c
     mutate src/userspace/apps/quilltest_throwaway.c
@@ -9088,17 +9080,26 @@ quill_mutants_off() {
 # that behaves is lifted early, and a test with no caveat that behaves passes —
 # each in the approved words, and each counted where it must be.
 quill_judge_selfcheck() {
-    local said step defect
-    step=$(caveat_step longquery)
-    defect=$(caveat_defect longquery)
+    local said step defect held
+    # The first quill case still held under a step: which one moves as the
+    # steps land, and the judge's answers are the same words for any of them.
+    for held in bigwrite sequential interleave usememory fidhistory systemtag ""; do
+        [ -n "$held" ] && [ -n "$(caveat_step "$held")" ] && break
+    done
+    if [ -z "$held" ]; then
+        harness "quillmut: no quill case is held under a step any more, so the judge's held answer cannot be shown"
+        return
+    fi
+    step=$(caveat_step "$held")
+    defect=$(caveat_defect "$held")
     said=$(PASS=0; FAIL=0; CAVEAT=0; HARNESS=0
-           caveat_judge longquery defect "seen 1"
-           caveat_judge longquery behaves "seen 2"
+           caveat_judge "$held" defect "seen 1"
+           caveat_judge "$held" behaves "seen 2"
            caveat_judge quillnocaveat behaves "seen 3"
            echo "counted $PASS $FAIL $CAVEAT")
-    printf '%s\n' "$said" | grep -qF "caveat held: longquery — $defect — discharged by step $step (seen 1)"
+    printf '%s\n' "$said" | grep -qF "caveat held: $held — $defect — discharged by step $step (seen 1)"
     chk $? "quillmut: a caveated test that shows its defect is held, under step $step"
-    printf '%s\n' "$said" | grep -qF "caveat lifted early: longquery — the test does not test what it claims, or step $step already landed — lift the caveat (seen 2)"
+    printf '%s\n' "$said" | grep -qF "caveat lifted early: $held — the test does not test what it claims, or step $step already landed — lift the caveat (seen 2)"
     chk $? "quillmut: a caveated test that behaves is lifted early, and that is a FAIL"
     printf '%s\n' "$said" | grep -qF "quillnocaveat: seen 3"
     chk $? "quillmut: a test with no caveat that behaves passes"
@@ -9468,7 +9469,7 @@ EOF
     python3 - <<'EOF'
 p = "src/kernel/tagfs/tagfs.c"
 s = open(p).read()
-a = "static WellKnownTags g_well_known;\n"
+a = "static WellKnownTags g_well_known = { TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID };\n"
 assert s.count(a) == 1, "lockrankmut: the bare-lock anchor is missing"
 open(p, "w").write(s.replace(a, a + "static spinlock_t g_lockrankmut_bare;   /* logcheck mutation: a TagFS lock with no rank */\n", 1))
 EOF

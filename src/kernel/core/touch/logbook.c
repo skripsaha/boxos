@@ -1,5 +1,5 @@
 #include "logbook.h"
-#include "tagfs.h"      /* tagfs_parse_tag — pure string split, no volume */
+#include "tag_spelling.h"   /* the one spelling of a tag — pure text, no volume */
 #include "muster.h"
 
 /*
@@ -39,40 +39,24 @@ static struct {
 } g_logbook;
 
 static void logbook_muster_unlocked(void);
-static void logbook_split(const char *tag, char *key, size_t key_size,
-                          char *value, size_t value_size, bool *out_has_value);
 
 #define LOGBOOK_INITIAL_BUCKETS  64u
 #define LOGBOOK_INITIAL_INDEX    64u
 
-/* Same djb2 the volume registry uses, so the two books hash names alike and
- * a reader comparing them by eye is not surprised. */
-static uint32_t logbook_hash(const char *key, const char *value)
+/* An entry as a spelling, for hashing it again when the table grows. The
+ * hash is the one the volume registry keeps too (TagSpellingHash), so the two
+ * books hash names alike. */
+static TagSpelling logbook_entry_spelling(const LogbookEntry *e)
 {
-    uint32_t hash = 5381;
-    while (*key) hash = ((hash << 5) + hash) + (uint8_t)(*key++);
-    if (value) {
-        hash = ((hash << 5) + hash) + ':';
-        while (*value) hash = ((hash << 5) + hash) + (uint8_t)(*value++);
-    }
-    return hash;
+    TagSpelling tag = { e->key, e->value, strlen(e->key), e->value ? strlen(e->value) : 0 };
+    return tag;
 }
 
-static bool logbook_values_equal(const char *a, const char *b)
+/* The bare half of a spelling: its key alone. */
+static TagSpelling logbook_bare(const TagSpelling *tag)
 {
-    if (!a && !b) return true;
-    if (!a || !b) return false;
-    return strcmp(a, b) == 0;
-}
-
-static char *logbook_copy(const char *src)
-{
-    if (!src) return NULL;
-    size_t len = strlen(src) + 1;
-    char *dst = kmalloc(len);
-    if (!dst) return NULL;
-    memcpy(dst, src, len);
-    return dst;
+    TagSpelling bare = { tag->key, NULL, tag->key_len, 0 };
+    return bare;
 }
 
 /* Caller holds the lock. Builds the two tables on first use — there is no
@@ -102,12 +86,18 @@ static bool logbook_ready_unlocked(void)
     return true;
 }
 
-static LogbookEntry *logbook_find_unlocked(const char *key, const char *value)
+static LogbookEntry *logbook_find_unlocked(const TagSpelling *tag)
 {
     if (!g_logbook.ready) return NULL;
-    uint32_t slot = logbook_hash(key, value) % g_logbook.bucket_count;
+    uint32_t slot = TagSpellingHash(tag) % g_logbook.bucket_count;
     for (LogbookEntry *e = g_logbook.buckets[slot]; e; e = e->chain) {
-        if (strcmp(e->key, key) == 0 && logbook_values_equal(e->value, value))
+        if (!TagSpanIs(e->key, tag->key, tag->key_len))
+            continue;
+        if (!e->value || !tag->value) {
+            if (!e->value && !tag->value) return e;
+            continue;
+        }
+        if (TagSpanIs(e->value, tag->value, tag->value_len))
             return e;
     }
     return NULL;
@@ -126,7 +116,8 @@ static void logbook_grow_buckets_unlocked(void)
         LogbookEntry *e = g_logbook.buckets[i];
         while (e) {
             LogbookEntry *next = e->chain;
-            uint32_t slot = logbook_hash(e->key, e->value) % new_count;
+            TagSpelling   name = logbook_entry_spelling(e);
+            uint32_t slot = TagSpellingHash(&name) % new_count;
             e->chain = fresh[slot];
             fresh[slot] = e;
             e = next;
@@ -158,16 +149,15 @@ static bool logbook_reserve_index_unlocked(uint32_t index)
 
 /* Caller holds the lock. Returns the id of an existing or freshly created
  * entry, TOUCH_TAG_INVALID if it could not be made. */
-static TouchTag logbook_intern_unlocked(const char *key, const char *value,
-                                        bool *out_created)
+static TouchTag logbook_intern_unlocked(const TagSpelling *tag, bool *out_created)
 {
     if (out_created) *out_created = false;
-    LogbookEntry *found = logbook_find_unlocked(key, value);
+    LogbookEntry *found = logbook_find_unlocked(tag);
     if (found) return found->tag_id;
 
     if (g_logbook.count > TOUCH_LOGBOOK_MAX_INDEX) {
-        kprintf("[Logbook] full at %u names — '%s' refused\n",
-                g_logbook.count, key);
+        kprintf("[Logbook] full at %u names — '%.*s' refused\n",
+                g_logbook.count, (int)tag->key_len, tag->key);
         return TOUCH_TAG_INVALID;
     }
 
@@ -177,11 +167,11 @@ static TouchTag logbook_intern_unlocked(const char *key, const char *value,
     LogbookEntry *entry = kmalloc(sizeof(LogbookEntry));
     if (!entry) return TOUCH_TAG_INVALID;
 
-    entry->key = logbook_copy(key);
+    entry->key = TagSpanDup(tag->key, tag->key_len);
     if (!entry->key) { kfree(entry); return TOUCH_TAG_INVALID; }
 
-    entry->value = logbook_copy(value);
-    if (value && !entry->value) {
+    entry->value = tag->value ? TagSpanDup(tag->value, tag->value_len) : NULL;
+    if (tag->value && !entry->value) {
         kfree(entry->key);
         kfree(entry);
         return TOUCH_TAG_INVALID;
@@ -191,7 +181,7 @@ static TouchTag logbook_intern_unlocked(const char *key, const char *value,
     entry->mustered = false;
     entry->warned   = false;
 
-    uint32_t slot = logbook_hash(key, value) % g_logbook.bucket_count;
+    uint32_t slot = TagSpellingHash(tag) % g_logbook.bucket_count;
     entry->chain = g_logbook.buckets[slot];
     g_logbook.buckets[slot] = entry;
 
@@ -215,32 +205,37 @@ static TouchTag logbook_intern_unlocked(const char *key, const char *value,
  * A failure to seat a name is not fatal. It costs that ONE name the guarantee
  * the muster exists to give, and the line below says which.
  */
+static void logbook_muster_seat(const char *name, unsigned *seated, unsigned *refused)
+{
+    TagSpelling tag;
+    if (TagSpell(name, strlen(name), &tag) != OK) {
+        kprintf("[Logbook] the muster names '%s', which does not spell as a tag\n", name);
+        (*refused)++;
+        return;
+    }
+
+    TagSpelling bare = logbook_bare(&tag);
+    if (logbook_intern_unlocked(&bare, NULL) == TOUCH_TAG_INVALID) {
+        (*refused)++;
+    } else {
+        (*seated)++;
+        logbook_find_unlocked(&bare)->mustered = true;
+    }
+    if (tag.value && !TagSpellingIsWildcard(&tag)) {
+        if (logbook_intern_unlocked(&tag, NULL) == TOUCH_TAG_INVALID) {
+            (*refused)++;
+        } else {
+            (*seated)++;
+            logbook_find_unlocked(&tag)->mustered = true;
+        }
+    }
+}
+
 static void logbook_muster_unlocked(void)
 {
     unsigned seated = 0, refused = 0;
 
-    #define MUSTER_SEAT(NAME)                                                  \
-        do {                                                                   \
-            char k[256], v[256];                                               \
-            bool has_value;                                                    \
-            logbook_split((NAME), k, sizeof(k), v, sizeof(v), &has_value);     \
-            if (k[0] != '\0') {                                               \
-                LogbookEntry *e;                                               \
-                if (logbook_intern_unlocked(k, NULL, NULL) == TOUCH_TAG_INVALID)\
-                    refused++;                                                 \
-                else { seated++;                                               \
-                       e = logbook_find_unlocked(k, NULL);                     \
-                       if (e) e->mustered = true; }                            \
-                if (has_value) {                                               \
-                    if (logbook_intern_unlocked(k, v, NULL) == TOUCH_TAG_INVALID)\
-                        refused++;                                             \
-                    else { seated++;                                           \
-                           e = logbook_find_unlocked(k, v);                    \
-                           if (e) e->mustered = true; }                        \
-                }                                                              \
-            }                                                                  \
-        } while (0);
-
+    #define MUSTER_SEAT(NAME) logbook_muster_seat((NAME), &seated, &refused);
     TOUCH_KERNEL_MUSTER(MUSTER_SEAT)
     #undef MUSTER_SEAT
 
@@ -249,32 +244,19 @@ static void logbook_muster_unlocked(void)
 }
 
 /*
- * Split a tag string the same way the volume registry does, so a name means
- * the same thing in both books. "usb:arrived" -> key "usb", value "arrived";
- * "keyboard" -> key "keyboard", no value; "usb:..." -> the wildcard form,
- * which resolves to the bare id only.
+ * A name is spelled the way the volume registry spells it (tag_spelling.h), so
+ * it means the same thing in both books. "usb:arrived" -> key "usb", value
+ * "arrived"; "keyboard" -> key "keyboard", no value; "usb:..." -> the wildcard
+ * form, which resolves to the bare id only.
  */
-static void logbook_split(const char *tag, char *key, size_t key_size,
-                          char *value, size_t value_size, bool *out_has_value)
-{
-    tagfs_parse_tag(tag, key, key_size, value, value_size);
-    bool has_value = (value[0] != '\0');
-    bool wildcard  = has_value && value[0] == '.' && value[1] == '.' &&
-                                  value[2] == '.' && value[3] == '\0';
-    *out_has_value = has_value && !wildcard;
-}
-
-static void logbook_resolve(const char *tag, TouchTag *out_full,
+static void logbook_resolve(const TagSpelling *tag, TouchTag *out_full,
                             TouchTag *out_bare, bool create)
 {
     *out_full = TOUCH_TAG_INVALID;
     *out_bare = TOUCH_TAG_INVALID;
-    if (!tag || tag[0] == '\0') return;
 
-    char key[256], value[256];
-    bool has_value;
-    logbook_split(tag, key, sizeof(key), value, sizeof(value), &has_value);
-    if (key[0] == '\0') return;
+    TagSpelling bare      = logbook_bare(tag);
+    bool        has_value = tag->value && !TagSpellingIsWildcard(tag);
 
     spin_lock(&g_logbook.lock);
 
@@ -284,8 +266,8 @@ static void logbook_resolve(const char *tag, TouchTag *out_full,
     }
 
     if (create) {
-        *out_bare = logbook_intern_unlocked(key, NULL, NULL);
-        if (has_value) *out_full = logbook_intern_unlocked(key, value, NULL);
+        *out_bare = logbook_intern_unlocked(&bare, NULL);
+        if (has_value) *out_full = logbook_intern_unlocked(tag, NULL);
 
         /*
          * A name entered here and not at the muster is a name this kernel can
@@ -307,20 +289,20 @@ static void logbook_resolve(const char *tag, TouchTag *out_full,
          * missing from the muster is one line naming the family; a family in
          * it is silent, which is what having declared it is supposed to buy.
          */
-        LogbookEntry *bare = logbook_find_unlocked(key, NULL);
-        if (bare && !bare->mustered && !bare->warned &&
+        LogbookEntry *named = logbook_find_unlocked(&bare);
+        if (named && !named->mustered && !named->warned &&
             g_muster_misses < LOGBOOK_MISS_LINES) {
-            bare->warned = true;
+            named->warned = true;
             g_muster_misses++;
-            kprintf("[Logbook] the kernel named '%s', which is not in its "
+            kprintf("[Logbook] the kernel named '%.*s', which is not in its "
                     "muster — anybody who asked for it earlier is listening "
-                    "elsewhere\n", tag);
+                    "elsewhere\n", (int)TagSpellingTextLength(tag), tag->key);
         }
     } else {
-        LogbookEntry *bare = logbook_find_unlocked(key, NULL);
-        if (bare) *out_bare = bare->tag_id;
+        LogbookEntry *named = logbook_find_unlocked(&bare);
+        if (named) *out_bare = named->tag_id;
         if (has_value) {
-            LogbookEntry *full = logbook_find_unlocked(key, value);
+            LogbookEntry *full = logbook_find_unlocked(tag);
             if (full) *out_full = full->tag_id;
         }
     }
@@ -330,10 +312,19 @@ static void logbook_resolve(const char *tag, TouchTag *out_full,
 
 void TouchLogbookResolve(const char *tag, TouchTag *out_full, TouchTag *out_bare)
 {
-    logbook_resolve(tag, out_full, out_bare, true);
+    TagSpelling spelled;
+    error_t     rc = TagSpell(tag, tag ? strlen(tag) : 0, &spelled);
+    if (rc != OK) {
+        *out_full = TOUCH_TAG_INVALID;
+        *out_bare = TOUCH_TAG_INVALID;
+        kprintf("[Logbook] the kernel named '%s', which does not spell as a tag "
+                "(error %d) — nothing is published under it\n", tag ? tag : "", (int)rc);
+        return;
+    }
+    logbook_resolve(&spelled, out_full, out_bare, true);
 }
 
-void TouchLogbookLookup(const char *tag, TouchTag *out_full, TouchTag *out_bare)
+void TouchLogbookLookup(const TagSpelling *tag, TouchTag *out_full, TouchTag *out_bare)
 {
     logbook_resolve(tag, out_full, out_bare, false);
 }

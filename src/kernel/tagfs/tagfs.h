@@ -11,6 +11,7 @@
 #include "../core/error/error.h"
 #include "lock_rank/lock_rank.h"
 #include "scribe/scribe.h"
+#include "tag_spelling/tag_spelling.h"
 
 // ============================================================================
 // Include Submodule Headers (production implementations)
@@ -160,9 +161,13 @@ STATIC_ASSERT(sizeof(FileExtent) == 6, "FileExtent must be 6 bytes");
 // In-Memory Structures: Tag Registry
 // ----------------------------------------------------------------------------
 
+/* key and value are NUL-terminated copies, their lengths kept beside them so
+ * a record is packed from what was measured once, never cut by a cast. */
 typedef struct {
     char*    key;
     char*    value;
+    uint16_t value_len;
+    uint8_t  key_len;
     uint8_t  flags;
     uint16_t tag_id;
 } TagRegistryEntry;
@@ -211,6 +216,7 @@ typedef struct {
     TagRegistryBlock* spare_image;
     uint64_t          spare_need;
     bool              said_failing;   /* a refusal is said once, until a flush succeeds */
+    bool              said_full;      /* every id issued: said once, the first time a tag is refused */
     Scribe            scribe;
 } TagRegistry;
 
@@ -388,14 +394,14 @@ typedef struct {
     TagFSLock        lock;
 } TagFSState;
 
-// trashed/hidden membership masks (populated by tagfs_init_well_known_tags).
-// Each field stores (1ULL << tag_id) for the file-listing post-filter; zero
-// means the tag was not found in the registry. These are membership filters,
-// NOT security. The 7 auth-privilege tags moved to cabin_t.auth_bits (fixed
-// bits, auth_tags.h) and no longer depend on the registry id.
+/* The ids of trashed and hidden, which listings leave out unless asked for
+ * (tagfs_init_well_known_tags); TAGFS_INVALID_TAG_ID when the registry has no
+ * such tag. Membership filters, not security: authority is the fixed
+ * cabin_t.auth_bits (auth_tags.h). They were kept as 1ULL << id, which is 0
+ * for every id past 63 — a volume that interned trashed late had no trash. */
 typedef struct {
-    uint64_t trashed;
-    uint64_t hidden;
+    uint16_t trashed;
+    uint16_t hidden;
 } WellKnownTags;
 
 // Accessor functions (no extern needed)
@@ -407,16 +413,25 @@ WellKnownTags* tagfs_get_well_known_tags(void);
 
 int          tag_registry_init(TagRegistry* reg);
 void         tag_registry_destroy(TagRegistry* reg);
-uint16_t     tag_registry_intern(TagRegistry* reg, const char* key, const char* value);
-uint16_t     tag_registry_lookup(TagRegistry* reg, const char* key, const char* value);
-void         tag_registry_mark_system(TagRegistry* reg, uint16_t tag_id);
-bool         tag_registry_is_system(TagRegistry* reg, uint16_t tag_id);
-const char*  tag_registry_key(TagRegistry* reg, uint16_t tag_id);
-const char*  tag_registry_value(TagRegistry* reg, uint16_t tag_id);
 
-/* The id of every tag whose key is `key`, COPIED: out->ids is the caller's to
- * kfree, never the registry's own array. No such key: NULL and 0. */
-error_t      TagRegistryKeyIds(TagRegistry* reg, const char* key, TagIdList* out);
+/* The id of a tag, issued when the registry has none yet. The widths are
+ * judged before anything is allocated (ERR_TAGFS_TAG_TOO_LONG); a registry
+ * that has issued every id refuses with ERR_TAGFS_REGISTRY_FULL and says so
+ * once; ERR_NO_MEMORY when memory ran out. */
+error_t      TagRegistryIntern(TagRegistry* reg, const TagSpelling* tag, uint16_t* out_id);
+uint16_t     TagRegistryLookup(TagRegistry* reg, const TagSpelling* tag);
+void         tag_registry_mark_system(TagRegistry* reg, uint16_t tag_id);
+
+/* A tag's key and value as spans into the registry's own copies, and whether
+ * the volume calls it its own. A tag's text never changes and is freed only
+ * with the registry, so the spans hold for as long as the registry does. */
+bool         TagRegistrySpelling(TagRegistry* reg, uint16_t tag_id, TagSpelling* out,
+                                 bool* is_system);
+
+/* The id of every tag whose key is the key_len bytes at `key`, COPIED:
+ * out->ids is the caller's to kfree, never the registry's own array. No such
+ * key: NULL and 0. */
+error_t      TagRegistryKeyIds(TagRegistry* reg, const char* key, size_t key_len, TagIdList* out);
 
 /* Every tag interned before the call written to the medium; made durable by
  * the caller's sync, as before. OK at once, with no I/O, when nothing is owed.
@@ -570,6 +585,9 @@ uint64_t tagfs_block_to_sector(uint32_t block);
  * called — so nothing ever ran it, nothing ever checked it, and it went on
  * writing the layout the rest of the kernel had already left behind. */
 
+/* 0, or a negative -ERR_*: a name whose tag the registry refuses (too long,
+ * the registry full) is refused with the registry's code, and no file is made
+ * without the tag its name gives it. */
 int  tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint16_t tag_count,
                        uint32_t* out_file_id);
 int  tagfs_delete_file(uint32_t file_id);
@@ -586,13 +604,18 @@ int  tagfs_add_tag(uint32_t file_id, uint16_t tag_id);
 int  tagfs_remove_tag(uint32_t file_id, uint16_t tag_id);
 bool tagfs_has_tag(uint32_t file_id, uint16_t tag_id);
 
-int  tagfs_add_tag_string(uint32_t file_id, const char* key, const char* value);
-int  tagfs_remove_tag_string(uint32_t file_id, const char* key);
-bool tagfs_has_tag_string(uint32_t file_id, const char* key, const char* value);
+/* The tag a spelling names, interned and put on the file: OK, the registry's
+ * refusal, or ERR_INVALID_ARGUMENT when the file would not take it. */
+error_t tagfs_add_tag_string(uint32_t file_id, const TagSpelling* tag);
+/* What the spelling names comes off the file: that tag when it has a value,
+ * every tag of its key when it is bare. -1 when the file wore none of them. */
+int  tagfs_remove_tag_string(uint32_t file_id, const TagSpelling* tag);
 
-bool tagfs_key_is_reserved(const char *key);
+bool tagfs_key_is_reserved(const char *key, size_t key_len);
 
-int  tagfs_query_files(const char* query_strings[], uint32_t count,
+/* Every file wearing all of `tags` ("key:..." is any tag of the key): how many
+ * were found, or a negative -ERR_*. */
+int  tagfs_query_files(const TagSpelling* tags, uint32_t count,
                        uint32_t* out_file_ids, uint32_t max_results);
 int  tagfs_list_all_files(uint32_t* out_file_ids, uint32_t max_results);
 /* The number no file id of this volume reaches. Room for "every file that
@@ -646,14 +669,6 @@ void     tagfs_readahead_invalidate(uint32_t block);
 int      tagfs_volume_read (uint64_t vlba, uint32_t count, void* buffer);
 int      tagfs_volume_write(uint64_t vlba, uint32_t count, const void* buffer);
 
-// ----------------------------------------------------------------------------
-// Tag String Helpers
-// ----------------------------------------------------------------------------
-
-void tagfs_format_tag(char* dest, size_t dest_size, const char* key, const char* value);
-int  tagfs_parse_tag(const char* tag_string, char* key, size_t key_size,
-                     char* value, size_t value_size);
-
 /*
  * Tags by name, for everything outside TagFS.
  *
@@ -663,13 +678,43 @@ int  tagfs_parse_tag(const char* tag_string, char* key, size_t key_size,
  * of the name rather than a pointer into the volume. Each takes the door for
  * the length of its answer, so none of them can be holding the registry when
  * it goes. TAGFS_INVALID_TAG_ID / false is the answer when there is no volume.
+ * A tag's text is read by the one spelling (tag_spelling.h).
  */
 uint16_t tagfs_tag_lookup(const char* tag);
-uint16_t tagfs_tag_intern(const char* tag);
+uint16_t TagFSLookupSpelling(const TagSpelling* tag);
+
+/* The id, issued when the volume has none: OK, the spelling's or the
+ * registry's refusal, or ERR_TAGFS_NOT_INITIALIZED when there is no volume. */
+error_t  tagfs_tag_intern(const char* tag, uint16_t* out_id);
+error_t  TagFSInternSpelling(const TagSpelling* tag, uint16_t* out_id);
+
+/* The key of a tag id — "app" out of "app:editor" — copied whole into `out`,
+ * or not at all: false when the volume has no such tag or the key would not
+ * fit, never a shorter key. */
 bool     tagfs_tag_key (uint16_t tag_id, char* out, size_t out_size);
-bool     tagfs_tag_text(uint16_t tag_id, char* out, size_t out_size);
-bool     tagfs_tag_parts(uint16_t tag_id, char* key, size_t key_size,
-                         char* value, size_t value_size, bool* is_system);
+
+/* The whole text of a tag id — "app:editor" — and its length. It is written
+ * into `out` only when it fits whole, NUL and all, and `out` is left empty
+ * otherwise, so a caller is never handed a shorter tag than the one it asked
+ * for: a caller that must have it measures first (out NULL, size 0). 0 when
+ * the volume has no such tag, or there is no volume. */
+size_t   tagfs_tag_text(uint16_t tag_id, char* out, size_t out_size);
+
+/* Whether tag `tag_id` is one a pattern names (TagPatternMatches), read in
+ * place in the volume's registry. */
+bool     TagFSTagMatches(uint16_t tag_id, const TagSpelling* pattern);
+
+/* The keys of `count` tags, comma-joined in a heap string the caller kfree's,
+ * whole however long — what a process started from a file wears (it is given
+ * the keys, as it always was). An id the volume does not know is passed over.
+ * NULL when there is no memory, or no volume. */
+char*    TagFSKeyList(const uint16_t* tag_ids, uint16_t count);
+
+/* A tag's key and value as spans into the volume's registry, and whether the
+ * volume calls the tag its own — no copy, for a caller that is INSIDE THE
+ * DOOR (tagfs_enter) and reads them before it leaves: the registry is freed
+ * only once the last caller is out. */
+bool     TagFSTagSpelling(uint16_t tag_id, TagSpelling* out, bool* is_system);
 
 // Snapshots: see the CoW snapshot API (TagFS_Snapshot*) in tagfs/cow/cow.h.
 // The former in-memory-only tagfs_snapshot_* API (snapshot.c) was unused and

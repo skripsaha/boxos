@@ -2,6 +2,7 @@
 #define TOUCH_LOGBOOK_H
 
 #include "touch.h"
+#include "tag_spelling.h"
 
 /*
  * TouchLogbook — the kernel's own event vocabulary.
@@ -89,8 +90,8 @@ TouchTag TouchLogbookIntern(const char *tag);
 
 /* Reader door — find only, never create. TouchTagResolve consults this
  * before the volume registry so a process subscribing by name lands on the
- * same id the kernel publishes to. */
-void TouchLogbookLookup(const char *tag, TouchTag *out_full, TouchTag *out_bare);
+ * same id the kernel publishes to. The name is already spelled. */
+void TouchLogbookLookup(const TagSpelling *tag, TouchTag *out_full, TouchTag *out_bare);
 
 /* Reverse lookup for diagnostics: the key of `tag_id`, or NULL if the id is
  * not one of ours. `out_value` receives the value or NULL for a bare tag. */

@@ -28,22 +28,6 @@
  * userspace calls ONCE per tag at process init to obtain the handle.
  * ──────────────────────────────────────────────────────────────────────── */
 
-/* Read a NUL-bounded copy of the tag string into a caller stack buffer via
- * the page-walked crate_io snapshot. A tag whose bytes straddle a page
- * boundary is copied across every backing frame instead of being clipped to
- * its first page (the vmm_translate_user_addr straddle bug). */
-static error_t crate_string(const Crate *c, const OpContext *ctx,
-                            char *dst, size_t dst_size)
-{
-    if (!c || c->size == 0 || dst_size == 0) return ERR_INVALID_ARGUMENT;
-    size_t copy = c->size < dst_size - 1 ? c->size : dst_size - 1;
-    error_t rc = crate_read(c, ctx, dst, copy);
-    if (rc != OK) return rc;
-    dst[copy] = '\0';
-    if (dst[0] == '\0') return ERR_INVALID_ARGUMENT;
-    return OK;
-}
-
 /* SYSTEM_OP_TOUCH_INTERN
  *   in_crate:  tag string
  *   out_crate: 4 bytes — [u16 full_id][u16 bare_id]
@@ -59,17 +43,22 @@ static int SysTouchIntern(const ManifestOp *op, Crate *crates,
     if (op->in_crate  == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
 
-    char tag[256];
-    error_t rc = crate_string(&crates[op->in_crate], ctx, tag, sizeof(tag));
-    if (rc != OK) return rc;
-
-    TouchTag full = TOUCH_TAG_INVALID, bare = TOUCH_TAG_INVALID;
-    TouchTagResolve(tag, &full, &bare);
-    if (full == TOUCH_TAG_INVALID && bare == TOUCH_TAG_INVALID)
-        return ERR_INVALID_ARGUMENT;
-
     Crate *out = &crates[op->out_crate];
     if (out->capacity < 4) return ERR_INVALID_ARGUMENT;
+
+    /* The tag whole, spelled in place in the crate's copy: its width is
+     * judged on the crate's size before anything is copied, and a name is
+     * never cut to fit, so a subscriber never hears a shorter one. */
+    const Crate *src = &crates[op->in_crate];
+    if (src->size == 0)             return ERR_TAGFS_INVALID_TAG;
+    if (src->size > TAG_TEXT_WIDTH) return ERR_TAGFS_TAG_TOO_LONG;
+    char *tag = crate_in_buf(src, ctx);
+    if (!tag) return ERR_INVALID_ADDRESS;
+
+    TouchTag full = TOUCH_TAG_INVALID, bare = TOUCH_TAG_INVALID;
+    error_t  rc   = TouchTagResolve(tag, src->size, &full, &bare);
+    crate_buf_free(tag);
+    if (rc != OK) return rc;
 
     /* Page-walked write of the two handle ids; crate_write sets out->size = 4
      * on success and fails closed (ERR_INVALID_ADDRESS) on a bad address. */

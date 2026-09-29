@@ -260,11 +260,11 @@ uint64_t QuillSize(uint32_t fid)
  *  longquery — a tag of 256 bytes
  * ========================================================================= */
 
-/* A tag is at most 255 bytes, and one longer is refused out loud: that is the
+/* A key is at most 255 bytes, and one longer is refused out loud: that is the
  * only answer that behaves. No file wears a tag of q's, so "no file" is also
- * what a kernel answers that parses the query and cuts the tag short — the
- * 31 bytes parse_tag_list keeps, or the 255 tagfs_parse_tag keeps — and the
- * case cannot tell that from a query answered as asked. */
+ * what a kernel answers that parses the query and cuts the tag short to a
+ * buffer of its own, and the case cannot tell that from a query answered as
+ * asked. */
 static QuillVerdict QuillLongQuery(const char *const *args)
 {
     (void)args;

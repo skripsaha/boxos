@@ -47,7 +47,7 @@ static void tagfs_auto_snapshot_before_write(uint32_t file_id) {
 }
 
 static TagFSState g_state = { .lock = TAGFS_LOCK_INIT("state", LOCK_RANK_STATE) };
-static WellKnownTags g_well_known;
+static WellKnownTags g_well_known = { TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID };
 
 // Accessor function for well-known tags (tagfs_get_state already defined below)
 WellKnownTags *tagfs_get_well_known_tags(void) { return &g_well_known; }
@@ -2167,12 +2167,8 @@ static bool file_has_system_behavior_tag(uint32_t file_id,
     if (!skip_trashed && !skip_hidden)
         return false;
 
-    uint16_t trashed_id = g_wk.trashed
-                              ? (uint16_t)__builtin_ctzll(g_wk.trashed)
-                              : TAGFS_INVALID_TAG_ID;
-    uint16_t hidden_id = g_wk.hidden
-                             ? (uint16_t)__builtin_ctzll(g_wk.hidden)
-                             : TAGFS_INVALID_TAG_ID;
+    uint16_t trashed_id = g_wk.trashed;
+    uint16_t hidden_id  = g_wk.hidden;
 
     int count = tag_bitmap_tag_count_for_file(g_state.bitmap_index, file_id);
     if (count <= 0)
@@ -2207,10 +2203,11 @@ static bool file_has_system_behavior_tag(uint32_t file_id,
 // tagfs_init_well_known_tags
 // ----------------------------------------------------------------------------
 
-static void register_well_known(uint64_t *field, TagRegistry *reg, const char *key)
+static uint16_t register_well_known(TagRegistry *reg, const char *key)
 {
-    uint16_t tid = tag_registry_intern(reg, key, NULL);
-    *field = (tid != TAGFS_INVALID_TAG_ID && tid < 64) ? (1ULL << tid) : 0;
+    TagSpelling tag = TagSpellingOfKey(key);
+    uint16_t    tid;
+    return TagRegistryIntern(reg, &tag, &tid) == OK ? tid : TAGFS_INVALID_TAG_ID;
 }
 
 // The reserved-key vocabulary. A tag is "system" iff it is the bare (value=NULL)
@@ -2238,38 +2235,41 @@ static const char *const AuthReservedKeys[] = {
 _Static_assert(sizeof(AuthReservedKeys) / sizeof(AuthReservedKeys[0]) == TAGFS_AUTH_COUNT,
                "auth-key drift");
 
-/* True iff `key` is one of the reserved kernel-owned tag keys (TagFsReservedKeys[]).
- * String compare on the bare key, so it catches both "system" and "system:foo"
- * (callers split key at ':' before calling). Works regardless of registry/mount
- * state — the reserved vocabulary is a compile-time constant. */
-bool tagfs_key_is_reserved(const char *key)
+/* True iff the key_len bytes at `key` are one of the reserved kernel-owned tag
+ * keys (TagFsReservedKeys[]). A key, not a tag's text, so it catches both
+ * "system" and "system:foo" once the caller has spelled the tag. Works
+ * regardless of registry/mount state — the reserved vocabulary is a
+ * compile-time constant. */
+bool tagfs_key_is_reserved(const char *key, size_t key_len)
 {
     if (!key) return false;
     for (size_t i = 0; i < sizeof(TagFsReservedKeys) / sizeof(TagFsReservedKeys[0]); i++)
-        if (strcmp(key, TagFsReservedKeys[i]) == 0) return true;
+        if (TagSpanIs(TagFsReservedKeys[i], key, key_len)) return true;
     return false;
 }
 
 void tagfs_init_well_known_tags(void)
 {
-    memset(&g_well_known, 0, sizeof(g_well_known));
+    g_well_known.trashed = TAGFS_INVALID_TAG_ID;
+    g_well_known.hidden  = TAGFS_INVALID_TAG_ID;
     TagFSState *fs = tagfs_get_state();
     if (!fs || !fs->registry)
         return;
     TagRegistry *reg = fs->registry;
 
-    /* trashed/hidden are membership filters for file listing (not security), so
-     * they stay keyed by the registry id (1ULL<<tag_id). The 7 auth-privilege
-     * tags are no longer registered here — their op-authority is the FIXED
-     * cabin_t.auth_bits (auth_tags.h), independent of the registry id. */
-    register_well_known(&g_wk.trashed, reg, "trashed");
-    register_well_known(&g_wk.hidden, reg, "hidden");
+    /* trashed/hidden are membership filters for file listing (not security),
+     * kept as the registry's ids. The 7 auth-privilege tags are not registered
+     * here — their op-authority is the FIXED cabin_t.auth_bits (auth_tags.h),
+     * independent of the registry id. */
+    g_wk.trashed = register_well_known(reg, "trashed");
+    g_wk.hidden  = register_well_known(reg, "hidden");
 
     // Stamp the reserved vocabulary as system tags. Runs after tag_registry_load,
     // so it self-heals over whatever flags the disk carried; mark_system sets no
     // dirty flag, so this re-derivation never forces a write.
     for (size_t i = 0; i < sizeof(TagFsReservedKeys) / sizeof(TagFsReservedKeys[0]); i++) {
-        uint16_t tid = tag_registry_lookup(reg, TagFsReservedKeys[i], NULL);
+        TagSpelling reserved = TagSpellingOfKey(TagFsReservedKeys[i]);
+        uint16_t    tid      = TagRegistryLookup(reg, &reserved);
         if (tid != TAGFS_INVALID_TAG_ID)
             tag_registry_mark_system(reg, tid);
     }
@@ -3617,10 +3617,16 @@ static error_t TagFS_RunTests_inside(void)
 // Every file carries the stem of its name — up to the last dot — as its first
 // tag, so "who is called kernel" is a question for the index, not a walk of the
 // volume. create puts the tag there and rename moves it, both through this one
-// rule, so the two can never disagree about what a name's tag is.
+// rule, so the two can never disagree about what a name's tag is. The stem is a
+// key, spelled by the one spelling (tag_spelling.h) but never split at ':', and
+// it is read in place: a name is never cut to fit a buffer, so it never wears a
+// shorter tag than itself.
 // ----------------------------------------------------------------------------
 
-static void tagfs_name_stem(const char *filename, char *out, size_t out_size)
+/* The stem of a name as a key. OK with out->key NULL when the name has no
+ * stem — ".profile", or nothing but blanks before the dot — and so no tag;
+ * ERR_TAGFS_TAG_TOO_LONG for a stem longer than a key may be. */
+static error_t tagfs_name_stem(const char *filename, TagSpelling *out)
 {
     size_t flen = strlen(filename);
     size_t slen = flen;
@@ -3632,36 +3638,43 @@ static void tagfs_name_stem(const char *filename, char *out, size_t out_size)
             break;
         }
     }
-    if (slen >= out_size)
-        slen = out_size - 1;
-    memcpy(out, filename, slen);
-    out[slen] = '\0';
+    error_t rc = TagSpellKey(filename, slen, out);
+    if (rc == ERR_TAGFS_INVALID_TAG)
+    {
+        out->key = NULL;
+        return OK;
+    }
+    return rc;
 }
 
-/* Intern the name's tag. Called WITHOUT g_state.lock: a new tag flushes the
- * registry to the medium, and that flush writes, and may wait for another
- * core's flush of the registry — neither of which may happen under the state
- * lock. A name the registry already has costs the flush nothing. */
-static uint16_t tagfs_name_tag_intern(const char *filename)
+/* Intern the name's tag: its id in *out_tag, TAGFS_INVALID_TAG_ID for a name
+ * with no stem. A name whose tag the registry refuses is refused with it —
+ * a file is never made or renamed without the tag its name gives it. Called
+ * WITHOUT g_state.lock: a new tag flushes the registry to the medium, and that
+ * flush writes, and may wait for another core's flush of the registry —
+ * neither of which may happen under the state lock. A name the registry
+ * already has costs the flush nothing. */
+static error_t tagfs_name_tag_intern(const char *filename, uint16_t *out_tag)
 {
-    char stem[128];
-    tagfs_name_stem(filename, stem, sizeof(stem));
-    if (stem[0] == '\0' || !g_state.registry)
-        return TAGFS_INVALID_TAG_ID;
-    uint16_t tag = tag_registry_intern(g_state.registry, stem, NULL);
-    tag_registry_flush(g_state.registry);
-    return tag;
+    TagSpelling stem;
+    *out_tag = TAGFS_INVALID_TAG_ID;
+    error_t rc = tagfs_name_stem(filename, &stem);
+    if (rc != OK || !stem.key)
+        return rc;
+    rc = TagRegistryIntern(g_state.registry, &stem, out_tag);
+    if (rc == OK)
+        tag_registry_flush(g_state.registry);
+    return rc;
 }
 
 /* The name's tag if the registry already knows it, else invalid. A lookup only
  * takes the registry's own lock, so it is safe under g_state.lock. */
 static uint16_t tagfs_name_tag_lookup(const char *filename)
 {
-    char stem[128];
-    tagfs_name_stem(filename, stem, sizeof(stem));
-    if (stem[0] == '\0' || !g_state.registry)
+    TagSpelling stem;
+    if (tagfs_name_stem(filename, &stem) != OK || !stem.key)
         return TAGFS_INVALID_TAG_ID;
-    return tag_registry_lookup(g_state.registry, stem, NULL);
+    return TagRegistryLookup(g_state.registry, &stem);
 }
 
 // ----------------------------------------------------------------------------
@@ -3675,7 +3688,7 @@ int tagfs_create_file(const char *filename, const uint16_t *tag_ids, uint16_t ta
                       uint32_t *out_file_id)
 {
     if (!tagfs_enter())
-        return -1;
+        return -(int)ERR_TAGFS_NOT_INITIALIZED;
     int rc = tagfs_create_file_inside(filename, tag_ids, tag_count, out_file_id);
     tagfs_leave();
     return rc;
@@ -3685,10 +3698,13 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
                                     uint32_t *out_file_id)
 {
     if (!filename || !out_file_id)
-        return -1;
+        return -(int)ERR_INVALID_ARGUMENT;
 
     // The name's tag first, outside the state lock (it may flush the registry).
-    uint16_t auto_tag = tagfs_name_tag_intern(filename);
+    uint16_t auto_tag;
+    error_t  named = tagfs_name_tag_intern(filename, &auto_tag);
+    if (named != OK)
+        return -(int)named;
 
     TagFSLockTake(&g_state.lock);
 
@@ -3704,7 +3720,7 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
         {
             debug_printf("[TagFS] create_file: kmalloc for final_tags failed\n");
             TagFSLockDrop(&g_state.lock);
-            return -1;
+            return -(int)ERR_NO_MEMORY;
         }
 
         // Add auto-label tag first
@@ -3753,7 +3769,7 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
         debug_printf("[TagFS] create_file: kmalloc for filename failed\n");
         kfree(final_tags);
         TagFSLockDrop(&g_state.lock);
-        return -1;
+        return -(int)ERR_NO_MEMORY;
     }
     memcpy(meta.filename, filename, name_len + 1);
 
@@ -3774,7 +3790,7 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
         kfree(meta.tag_ids);
         kfree(meta.filename);
         TagFSLockDrop(&g_state.lock);
-        return -1;
+        return -(int)ERR_DISK_FULL;
     }
 
     // Update file table
@@ -3784,7 +3800,7 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
         kfree(meta.tag_ids);
         kfree(meta.filename);
         TagFSLockDrop(&g_state.lock);
-        return -1;
+        return -(int)ERR_DISK_FULL;
     }
 
     // Add to bitmap index (use final_count, the deduplicated count)
@@ -3903,7 +3919,9 @@ static int tagfs_rename_file_inside(uint32_t file_id, const char *new_filename)
     /* The tag follows the name. A rename that changed the string and left the
      * tag made the file visible under its old name and invisible under its
      * new one — by-name lookup and proc_exec ask the index, not the string. */
-    uint16_t new_tag = tagfs_name_tag_intern(new_filename);
+    uint16_t new_tag;
+    if (tagfs_name_tag_intern(new_filename, &new_tag) != OK)
+        return -1;
 
     TagFSLockTake(&g_state.lock);
 
@@ -4190,50 +4208,59 @@ static bool tagfs_has_tag_inside(uint32_t file_id, uint16_t tag_id)
     return result;
 }
 
-static int tagfs_add_tag_string_inside(uint32_t file_id, const char *key, const char *value);
+static error_t tagfs_add_tag_string_inside(uint32_t file_id, const TagSpelling *tag);
 
-int tagfs_add_tag_string(uint32_t file_id, const char *key, const char *value)
+error_t tagfs_add_tag_string(uint32_t file_id, const TagSpelling *tag)
 {
     if (!tagfs_enter())
-        return -1;
-    int rc = tagfs_add_tag_string_inside(file_id, key, value);
+        return ERR_TAGFS_NOT_INITIALIZED;
+    error_t rc = tagfs_add_tag_string_inside(file_id, tag);
     tagfs_leave();
     return rc;
 }
 
-static int tagfs_add_tag_string_inside(uint32_t file_id, const char *key, const char *value)
+static error_t tagfs_add_tag_string_inside(uint32_t file_id, const TagSpelling *tag)
 {
-    if (!key)
-        return -1;
-    uint16_t tag_id = tag_registry_intern(g_state.registry, key, value);
-    if (tag_id == TAGFS_INVALID_TAG_ID)
-        return -1;
+    uint16_t tag_id;
+    error_t  rc = TagRegistryIntern(g_state.registry, tag, &tag_id);
+    if (rc != OK)
+        return rc;
     /* A new tag is written before any file wears it; one the registry
      * already had costs the flush nothing. */
     tag_registry_flush(g_state.registry);
-    return tagfs_add_tag(file_id, tag_id);
+    return tagfs_add_tag(file_id, tag_id) == 0 ? OK : ERR_INVALID_ARGUMENT;
 }
 
-static int tagfs_remove_tag_string_inside(uint32_t file_id, const char *key);
+static int tagfs_remove_tag_string_inside(uint32_t file_id, const TagSpelling *tag);
 
-int tagfs_remove_tag_string(uint32_t file_id, const char *key)
+int tagfs_remove_tag_string(uint32_t file_id, const TagSpelling *tag)
 {
     if (!tagfs_enter())
         return -1;
-    int rc = tagfs_remove_tag_string_inside(file_id, key);
+    int rc = tagfs_remove_tag_string_inside(file_id, tag);
     tagfs_leave();
     return rc;
 }
 
-static int tagfs_remove_tag_string_inside(uint32_t file_id, const char *key)
+/* Whether the file's tag `tag_id` is what `tag` names: that exact tag when it
+ * has a value, and any tag of its key when it is bare. */
+static bool tag_named_by(uint16_t tag_id, const TagSpelling *tag)
 {
-    if (!key)
-        return -1;
-    /* Remove by key. The registry keys tags by (key,value), so a key-only
-     * registry lookup cannot identify a key:value tag — and a bare "key" tag
-     * created by another file would mis-resolve here. Instead drop the file's
-     * own tag(s) whose key matches, regardless of value (unset "color" drops
-     * "color:red" and a bare "color" alike). */
+    TagSpelling worn;
+    if (!TagRegistrySpelling(g_state.registry, tag_id, &worn, NULL))
+        return false;
+    if (worn.key_len != tag->key_len || memcmp(worn.key, tag->key, tag->key_len) != 0)
+        return false;
+    return !tag->value || (worn.value && worn.value_len == tag->value_len &&
+                           memcmp(worn.value, tag->value, tag->value_len) == 0);
+}
+
+static int tagfs_remove_tag_string_inside(uint32_t file_id, const TagSpelling *tag)
+{
+    /* Remove by what the text names. The registry keys tags by (key, value),
+     * so a bare key names no one tag of its own: unset "color" drops
+     * "color:red" and a bare "color" alike, and unset "color:red" drops that
+     * tag alone. */
     int count = tag_bitmap_tag_count_for_file(g_state.bitmap_index, file_id);
     if (count <= 0)
         return -1;
@@ -4246,8 +4273,7 @@ static int tagfs_remove_tag_string_inside(uint32_t file_id, const char *key)
                                            file_tags, (uint32_t)count);
     int removed = 0;
     for (int i = 0; i < actual; i++) {
-        const char *k = tag_registry_key(g_state.registry, file_tags[i]);
-        if (k && strcmp(k, key) == 0 && tagfs_remove_tag(file_id, file_tags[i]) == 0)
+        if (tag_named_by(file_tags[i], tag) && tagfs_remove_tag(file_id, file_tags[i]) == 0)
             removed++;
     }
 
@@ -4255,53 +4281,52 @@ static int tagfs_remove_tag_string_inside(uint32_t file_id, const char *key)
     return removed > 0 ? 0 : -1;
 }
 
-static bool tagfs_has_tag_string_inside(uint32_t file_id, const char *key, const char *value);
-
-bool tagfs_has_tag_string(uint32_t file_id, const char *key, const char *value)
-{
-    if (!tagfs_enter())
-        return false;
-    bool rc = tagfs_has_tag_string_inside(file_id, key, value);
-    tagfs_leave();
-    return rc;
-}
-
-static bool tagfs_has_tag_string_inside(uint32_t file_id, const char *key, const char *value)
-{
-    if (!key)
-        return false;
-    uint16_t tag_id = tag_registry_lookup(g_state.registry, key, value);
-    if (tag_id == TAGFS_INVALID_TAG_ID)
-        return false;
-    return tagfs_has_tag(file_id, tag_id);
-}
-
 // ----------------------------------------------------------------------------
 // Query
 // ----------------------------------------------------------------------------
 
-static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
+static int tagfs_query_files_inside(const TagSpelling *tags, uint32_t count,
                                     uint32_t *out_file_ids, uint32_t max_results);
 
-int tagfs_query_files(const char *query_strings[], uint32_t count,
+int tagfs_query_files(const TagSpelling *tags, uint32_t count,
                       uint32_t *out_file_ids, uint32_t max_results)
 {
     if (!tagfs_enter())
-        return 0;
-    int rc = tagfs_query_files_inside(query_strings, count, out_file_ids, max_results);
+        return -(int)ERR_TAGFS_NOT_INITIALIZED;
+    int rc = tagfs_query_files_inside(tags, count, out_file_ids, max_results);
     tagfs_leave();
     return rc;
 }
 
-static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
+/* A query leaves out the files wearing trashed or hidden, unless it names the
+ * tag itself — plainly or through a wildcard of its key. */
+static void query_names_well_known(const uint16_t *tag_ids, uint32_t tag_count,
+                                   const TagIdList *groups, uint32_t group_count,
+                                   bool *out_trashed, bool *out_hidden)
+{
+    *out_trashed = false;
+    *out_hidden  = false;
+    for (uint32_t i = 0; i < tag_count; i++) {
+        *out_trashed |= tag_ids[i] == g_wk.trashed;
+        *out_hidden  |= tag_ids[i] == g_wk.hidden;
+    }
+    for (uint32_t g = 0; g < group_count; g++) {
+        for (uint32_t k = 0; k < groups[g].count; k++) {
+            *out_trashed |= groups[g].ids[k] == g_wk.trashed;
+            *out_hidden  |= groups[g].ids[k] == g_wk.hidden;
+        }
+    }
+}
+
+static int tagfs_query_files_inside(const TagSpelling *tags, uint32_t count,
                                     uint32_t *out_file_ids, uint32_t max_results)
 {
-    if (!query_strings || count == 0 || !out_file_ids || max_results == 0)
+    if (!tags || count == 0 || !out_file_ids || max_results == 0)
         return 0;
 
     uint16_t *tag_ids = kmalloc(sizeof(uint16_t) * count);
     if (!tag_ids)
-        return 0;
+        return -(int)ERR_NO_MEMORY;
 
     /* A wildcard's ids are copies (TagRegistryKeyIds): the registry frees its
      * own array of a key when the key's next tag outgrows it, and that can
@@ -4310,7 +4335,7 @@ static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
     if (!groups)
     {
         kfree(tag_ids);
-        return 0;
+        return -(int)ERR_NO_MEMORY;
     }
 
     uint32_t tag_count = 0;
@@ -4319,27 +4344,20 @@ static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
 
     for (uint32_t i = 0; i < count; i++)
     {
-        const char *qs = query_strings[i];
-        if (!qs)
-            continue;
-
-        char key[256];
-        char value[256];
-        tagfs_parse_tag(qs, key, sizeof(key), value, sizeof(value));
-
-        // Check for wildcard (value == "...")
-        if (strcmp(value, "...") == 0)
+        if (TagSpellingIsWildcard(&tags[i]))
         {
             TagIdList *grp = &groups[group_count];
-            if (TagRegistryKeyIds(g_state.registry, key, grp) != OK)
+            if (TagRegistryKeyIds(g_state.registry, tags[i].key, tags[i].key_len, grp) != OK)
+            {
+                result = -(int)ERR_NO_MEMORY;
                 goto out;
+            }
             if (grp->count > 0)
                 group_count++;
         }
         else
         {
-            uint16_t tid = tag_registry_lookup(g_state.registry, key,
-                                               value[0] ? value : NULL);
+            uint16_t tid = TagRegistryLookup(g_state.registry, &tags[i]);
             if (tid == TAGFS_INVALID_TAG_ID)
             {
                 // Tag not in registry — no files can match
@@ -4357,38 +4375,12 @@ static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
     // Post-filter: remove trashed/hidden files unless explicitly queried
     if (result > 0)
     {
-        uint16_t trashed_id = g_wk.trashed
-                                  ? (uint16_t)__builtin_ctzll(g_wk.trashed)
-                                  : TAGFS_INVALID_TAG_ID;
-        uint16_t hidden_id = g_wk.hidden
-                                 ? (uint16_t)__builtin_ctzll(g_wk.hidden)
-                                 : TAGFS_INVALID_TAG_ID;
+        bool query_has_trashed, query_has_hidden;
+        query_names_well_known(tag_ids, tag_count, groups, group_count,
+                               &query_has_trashed, &query_has_hidden);
 
-        // Check if trashed/hidden were explicitly part of the query
-        bool query_has_trashed = false;
-        bool query_has_hidden = false;
-
-        for (uint32_t i = 0; i < tag_count; i++)
-        {
-            if (tag_ids[i] == trashed_id)
-                query_has_trashed = true;
-            if (tag_ids[i] == hidden_id)
-                query_has_hidden = true;
-        }
-        // Also check wildcard groups — if a group contains the tag, it's explicit
-        for (uint32_t g = 0; g < group_count && (!query_has_trashed || !query_has_hidden); g++)
-        {
-            for (uint32_t k = 0; k < groups[g].count; k++)
-            {
-                if (groups[g].ids[k] == trashed_id)
-                    query_has_trashed = true;
-                if (groups[g].ids[k] == hidden_id)
-                    query_has_hidden = true;
-            }
-        }
-
-        bool skip_trashed = !query_has_trashed && trashed_id != TAGFS_INVALID_TAG_ID;
-        bool skip_hidden = !query_has_hidden && hidden_id != TAGFS_INVALID_TAG_ID;
+        bool skip_trashed = !query_has_trashed && g_wk.trashed != TAGFS_INVALID_TAG_ID;
+        bool skip_hidden = !query_has_hidden && g_wk.hidden != TAGFS_INVALID_TAG_ID;
 
         if (skip_trashed || skip_hidden)
         {
@@ -5537,157 +5529,128 @@ TagFSState *tagfs_get_state(void)
  *
  * All of them wanted one of four things, and all four are here now, each
  * taking the door for the length of the answer. What leaves TagFS is an id, or
- * a copy of a name in the caller's own buffer. The pointer does not.
+ * a copy of a name in the caller's own buffer — or spans into the registry for
+ * a caller that holds the door itself (TagFSTagSpelling).
  */
-static uint16_t tag_id_for(const char *tag, bool make_it)
+uint16_t TagFSLookupSpelling(const TagSpelling *tag)
 {
-    if (!tag || tag[0] == '\0') {
+    if (!tagfs_enter())
         return TAGFS_INVALID_TAG_ID;
-    }
-    if (!tagfs_enter()) {
-        return TAGFS_INVALID_TAG_ID;
-    }
-
-    uint16_t id = TAGFS_INVALID_TAG_ID;
-    if (g_state.registry) {
-        char key[256], value[256];
-        tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
-        const char *v = (value[0] != '\0') ? value : NULL;
-        id = make_it ? tag_registry_intern(g_state.registry, key, v)
-                     : tag_registry_lookup(g_state.registry, key, v);
-    }
-
+    uint16_t id = TagRegistryLookup(g_state.registry, tag);
     tagfs_leave();
     return id;
 }
 
-/* The id this volume has for a tag, or TAGFS_INVALID_TAG_ID when it has none
- * — including when there is no volume at all. */
+error_t TagFSInternSpelling(const TagSpelling *tag, uint16_t *out_id)
+{
+    *out_id = TAGFS_INVALID_TAG_ID;
+    if (!tagfs_enter())
+        return ERR_TAGFS_NOT_INITIALIZED;
+    error_t rc = TagRegistryIntern(g_state.registry, tag, out_id);
+    tagfs_leave();
+    return rc;
+}
+
+/* The id this volume has for a tag's text, or TAGFS_INVALID_TAG_ID when it has
+ * none — including when the text is no tag, and when there is no volume. */
 uint16_t tagfs_tag_lookup(const char *tag)
 {
-    return tag_id_for(tag, false);
+    TagSpelling spelled;
+    if (!tag || TagSpell(tag, strlen(tag), &spelled) != OK)
+        return TAGFS_INVALID_TAG_ID;
+    return TagFSLookupSpelling(&spelled);
 }
 
 /* The same, and the volume issues an id if it does not have one yet. */
-uint16_t tagfs_tag_intern(const char *tag)
+error_t tagfs_tag_intern(const char *tag, uint16_t *out_id)
 {
-    return tag_id_for(tag, true);
+    TagSpelling spelled;
+    *out_id = TAGFS_INVALID_TAG_ID;
+    if (!tag)
+        return ERR_TAGFS_INVALID_TAG;
+    error_t rc = TagSpell(tag, strlen(tag), &spelled);
+    if (rc != OK)
+        return rc;
+    return TagFSInternSpelling(&spelled, out_id);
 }
 
-static bool tag_name_of(uint16_t tag_id, char *out, size_t out_size, bool with_value)
+bool TagFSTagSpelling(uint16_t tag_id, TagSpelling *out, bool *is_system)
 {
-    if (!out || out_size == 0) {
-        return false;
-    }
-    out[0] = '\0';
-    if (!tagfs_enter()) {
-        return false;
-    }
-
-    bool said = false;
-    if (g_state.registry) {
-        const char *key = tag_registry_key(g_state.registry, tag_id);
-        if (key) {
-            if (with_value) {
-                tagfs_format_tag(out, out_size, key,
-                                 tag_registry_value(g_state.registry, tag_id));
-            } else {
-                ksnprintf(out, out_size, "%s", key);
-            }
-            said = true;
-        }
-    }
-
-    tagfs_leave();
-    return said;
+    return g_state.registry && TagRegistrySpelling(g_state.registry, tag_id, out, is_system);
 }
 
-/* The key of a tag id — "app" out of "app:editor". */
 bool tagfs_tag_key(uint16_t tag_id, char *out, size_t out_size)
 {
-    return tag_name_of(tag_id, out, out_size, false);
-}
-
-/* And the whole of it — "app:editor". */
-bool tagfs_tag_text(uint16_t tag_id, char *out, size_t out_size)
-{
-    return tag_name_of(tag_id, out, out_size, true);
-}
-
-/*
- * Key, value and whether the volume calls the tag its own, in one answer.
- *
- * For the one caller that has to serialise a tag rather than read it: three
- * separate questions would be three separate doors, and the answer to the
- * second could come from a different volume than the answer to the first.
- */
-bool tagfs_tag_parts(uint16_t tag_id, char *key, size_t key_size,
-                     char *value, size_t value_size, bool *is_system)
-{
-    if (key && key_size)     key[0] = '\0';
-    if (value && value_size) value[0] = '\0';
-    if (is_system)           *is_system = false;
-
-    if (!tagfs_enter()) {
+    if (!out || out_size == 0)
         return false;
-    }
+    out[0] = '\0';
+    if (!tagfs_enter())
+        return false;
 
-    bool said = false;
-    if (g_state.registry) {
-        const char *k = tag_registry_key(g_state.registry, tag_id);
-        if (k) {
-            const char *v = tag_registry_value(g_state.registry, tag_id);
-            if (key && key_size)     ksnprintf(key, key_size, "%s", k);
-            if (value && value_size && v) ksnprintf(value, value_size, "%s", v);
-            if (is_system) *is_system = tag_registry_is_system(g_state.registry, tag_id);
-            said = true;
-        }
+    TagSpelling tag;
+    bool said = TagFSTagSpelling(tag_id, &tag, NULL) && tag.key_len < out_size;
+    if (said) {
+        memcpy(out, tag.key, tag.key_len);
+        out[tag.key_len] = '\0';
     }
-
     tagfs_leave();
     return said;
 }
 
-void tagfs_format_tag(char *dest, size_t dest_size, const char *key, const char *value)
+size_t tagfs_tag_text(uint16_t tag_id, char *out, size_t out_size)
 {
-    if (!dest || dest_size == 0 || !key)
-        return;
-    if (value && value[0])
-    {
-        ksnprintf(dest, dest_size, "%s:%s", key, value);
+    if (out && out_size)
+        out[0] = '\0';
+    if (!tagfs_enter())
+        return 0;
+
+    TagSpelling tag;
+    size_t      len = 0;
+    if (TagFSTagSpelling(tag_id, &tag, NULL)) {
+        len = TagSpellingTextLength(&tag);
+        if (out && len < out_size)
+            TagSpellingText(&tag, out);
     }
-    else
-    {
-        strncpy(dest, key, dest_size - 1);
-        dest[dest_size - 1] = '\0';
-    }
+    tagfs_leave();
+    return len;
 }
 
-int tagfs_parse_tag(const char *tag_string, char *key, size_t key_size,
-                    char *value, size_t value_size)
+bool TagFSTagMatches(uint16_t tag_id, const TagSpelling *pattern)
 {
-    if (!tag_string || !key || !value || key_size == 0 || value_size == 0)
-        return -1;
+    if (!tagfs_enter())
+        return false;
+    TagSpelling tag;
+    bool matches = TagFSTagSpelling(tag_id, &tag, NULL) && TagPatternMatches(pattern, &tag);
+    tagfs_leave();
+    return matches;
+}
 
-    const char *colon = strchr(tag_string, ':');
-    if (colon)
-    {
-        size_t klen = (size_t)(colon - tag_string);
-        if (klen >= key_size)
-            klen = key_size - 1;
-        memcpy(key, tag_string, klen);
-        key[klen] = '\0';
+char *TagFSKeyList(const uint16_t *tag_ids, uint16_t count)
+{
+    if (!tagfs_enter())
+        return NULL;
 
-        strncpy(value, colon + 1, value_size - 1);
-        value[value_size - 1] = '\0';
+    TagSpelling tag;
+    size_t      need = 1;
+    for (uint16_t i = 0; i < count; i++)
+        if (TagFSTagSpelling(tag_ids[i], &tag, NULL))
+            need += tag.key_len + 1;
+
+    char *list = kmalloc(need);
+    if (list) {
+        size_t at = 0;
+        for (uint16_t i = 0; i < count; i++) {
+            if (!TagFSTagSpelling(tag_ids[i], &tag, NULL))
+                continue;
+            if (at)
+                list[at++] = ',';
+            memcpy(list + at, tag.key, tag.key_len);
+            at += tag.key_len;
+        }
+        list[at] = '\0';
     }
-    else
-    {
-        strncpy(key, tag_string, key_size - 1);
-        key[key_size - 1] = '\0';
-        value[0] = '\0';
-    }
-    return 0;
+    tagfs_leave();
+    return list;
 }
 
 // ----------------------------------------------------------------------------
