@@ -343,6 +343,8 @@ const char* ErrorString(error_t err) {
             return "TagFS extent error";
         case ERR_TAGFS_RECOVERY_FAILED:
             return "TagFS recovery failed";
+        case ERR_TAGFS_TAG_TOO_LONG:
+            return "TagFS tag too long";
 
         // TagFS Module Errors
         case ERR_DISKBOOK_NOT_INITIALIZED:

@@ -35,7 +35,6 @@
 #include "storage_deck.h"
 #include "tagfs.h"
 #include "use_context.h"   /* the user's tags — folded into query and create */
-#include "tag_registry.h"
 #include "vmm.h"
 #include "pmm.h"
 #include "process.h"
@@ -824,6 +823,9 @@ static int ObjRename(const ManifestOp *op,
 /* -------------------------------------------------------------------------
  * OBJ_GET_INFO — serialize file metadata into out_crate.
  *
+ * Every tag goes out whole, however long: its key and value are copied
+ * straight out of the volume's registry into the answer.
+ *
  * Layout written into out_crate (little-endian):
  *   [u32 file_id]
  *   [u32 flags]
@@ -838,6 +840,27 @@ static int ObjRename(const ManifestOp *op,
  * out_crate.size is set to the total bytes written. No truncation: if the
  * crate is too small, we return ERR_BUFFER_TOO_SMALL with size unchanged.
  * ------------------------------------------------------------------------- */
+
+/* One tag's record: [u16 key_len][u16 val_len][u8 type][key][val]. */
+static uint64_t info_tag_record(uint8_t *kp, uint64_t pos, uint16_t tag_id)
+{
+    TagSpelling tag       = { 0 };
+    bool        is_system = false;
+    /* A tag the volume no longer knows still takes its place in the list:
+     * the count in the header says how many records follow, so skipping one
+     * would leave the reader parsing the next tag's bytes as this one's. */
+    (void)TagFSTagSpelling(tag_id, &tag, &is_system);
+    uint16_t kl = (uint16_t)tag.key_len;
+    uint16_t vl = (uint16_t)tag.value_len;
+    if (kp) {
+        memcpy(kp + pos, &kl, 2);
+        memcpy(kp + pos + 2, &vl, 2);
+        kp[pos + 4] = is_system ? 1 : 0;
+        if (kl) memcpy(kp + pos + 5, tag.key, kl);
+        if (vl) memcpy(kp + pos + 5 + kl, tag.value, vl);
+    }
+    return pos + 5u + kl + vl;
+}
 
 static int ObjGetInfo(const ManifestOp *op,
                       Crate            *crates,
@@ -863,115 +886,66 @@ static int ObjGetInfo(const ManifestOp *op,
         filename_len = (uint16_t)l;
     }
 
-    /* Compute required size up front so we can fail fast on too-small crate. */
-    uint64_t need = 4u + 4u + 8u + 2u + 2u + filename_len;
-    for (uint16_t i = 0; i < md.tag_count; i++) {
-        /* A tag the volume no longer knows still takes its place in the list:
-         * the count in the header says how many records follow, so skipping
-         * one would leave the reader parsing the next tag's bytes as this
-         * one's. tagfs_tag_parts empties both buffers when it answers no. */
-        char k[128], v[128];
-        (void)tagfs_tag_parts(md.tag_ids[i], k, sizeof(k), v, sizeof(v), NULL);
-        need += 2u + 2u + 1u + strlen(k) + strlen(v);   /* +1: per-tag type byte */
-    }
-
-    if (need > out->capacity) {
+    /* Both passes read the tags as spans into the volume's registry, so both
+     * are inside the door: nothing is copied into a buffer of this deck's
+     * size, and the registry the second pass writes from is the one the first
+     * measured — a tag's text never changes while it is mounted. */
+    if (!tagfs_enter()) {
         tagfs_metadata_free(&md);
-        return ERR_BUFFER_TOO_SMALL;
+        return ERR_FILE_NOT_FOUND;
     }
 
-    uint8_t *kp = crate_out_alloc(out, need);
-    if (!kp) { tagfs_metadata_free(&md); return ERR_INVALID_ADDRESS; }
+    uint64_t need = 4u + 4u + 8u + 2u + 2u + filename_len;
+    for (uint16_t i = 0; i < md.tag_count; i++)
+        need = info_tag_record(NULL, need, md.tag_ids[i]);
 
-    /* trashed and hidden are tags, not bits the kernel ever set in the
-     * record — so the flags a program read said "not trashed" of every file,
-     * and `erase <name>` refused every file as not trashed yet. The record
-     * carries the bits; the tags decide them. */
-    uint32_t flags = md.flags;
-    {
-        const WellKnownTags *wk = tagfs_get_well_known_tags();
-        uint16_t trashed_id = (wk && wk->trashed)
-                              ? (uint16_t)__builtin_ctzll(wk->trashed) : TAGFS_INVALID_TAG_ID;
-        uint16_t hidden_id  = (wk && wk->hidden)
-                              ? (uint16_t)__builtin_ctzll(wk->hidden)  : TAGFS_INVALID_TAG_ID;
-        for (uint16_t i = 0; i < md.tag_count; i++) {
-            if (md.tag_ids[i] == trashed_id) flags |= TAGFS_FILE_TRASHED;
-            if (md.tag_ids[i] == hidden_id)  flags |= TAGFS_FILE_HIDDEN;
-        }
-    }
+    uint8_t *kp = NULL;
+    int      rc = OK;
+    if (need > out->capacity)
+        rc = ERR_BUFFER_TOO_SMALL;
+    else if (!(kp = crate_out_alloc(out, need)))
+        rc = ERR_INVALID_ADDRESS;
 
     uint64_t pos = 0;
-    memcpy(kp + pos, &md.file_id, 4); pos += 4;
-    memcpy(kp + pos, &flags,      4); pos += 4;
-    memcpy(kp + pos, &md.size,    8); pos += 8;
-    memcpy(kp + pos, &md.tag_count, 2); pos += 2;
-    memcpy(kp + pos, &filename_len, 2); pos += 2;
-    if (filename_len) { memcpy(kp + pos, md.filename, filename_len); pos += filename_len; }
+    if (rc == OK) {
+        /* trashed and hidden are tags, not bits the kernel ever set in the
+         * record — so the flags a program read said "not trashed" of every
+         * file, and `erase <name>` refused every file as not trashed yet. The
+         * record carries the bits; the tags decide them. */
+        const WellKnownTags *wk    = tagfs_get_well_known_tags();
+        uint32_t             flags = md.flags;
+        for (uint16_t i = 0; i < md.tag_count; i++) {
+            if (md.tag_ids[i] == wk->trashed) flags |= TAGFS_FILE_TRASHED;
+            if (md.tag_ids[i] == wk->hidden)  flags |= TAGFS_FILE_HIDDEN;
+        }
 
-    uint16_t written = 0;
-    for (uint16_t i = 0; i < md.tag_count; i++) {
-        char k[128], v[128];
-        bool is_system = false;
-        (void)tagfs_tag_parts(md.tag_ids[i], k, sizeof(k), v, sizeof(v), &is_system);
-        uint16_t kl = (uint16_t)strlen(k);
-        uint16_t vl = (uint16_t)strlen(v);
-        /* The two passes read the registry twice, and a volume that changed
-         * in between could make the second one longer than the first measured.
-         * Stopping here is what keeps this inside the buffer; the count is
-         * corrected below so the reader is told how many records there are
-         * rather than how many were hoped for. */
-        if (pos + 5u + kl + vl > need) break;
-        memcpy(kp + pos, &kl, 2); pos += 2;
-        memcpy(kp + pos, &vl, 2); pos += 2;
-        kp[pos++] = is_system ? 1 : 0;
-        if (kl) { memcpy(kp + pos, k, kl); pos += kl; }
-        if (vl) { memcpy(kp + pos, v, vl); pos += vl; }
-        written++;
+        memcpy(kp + pos, &md.file_id, 4); pos += 4;
+        memcpy(kp + pos, &flags,      4); pos += 4;
+        memcpy(kp + pos, &md.size,    8); pos += 8;
+        memcpy(kp + pos, &md.tag_count, 2); pos += 2;
+        memcpy(kp + pos, &filename_len, 2); pos += 2;
+        if (filename_len) { memcpy(kp + pos, md.filename, filename_len); pos += filename_len; }
+        for (uint16_t i = 0; i < md.tag_count; i++)
+            pos = info_tag_record(kp, pos, md.tag_ids[i]);
     }
-    memcpy(kp + 16, &written, 2);       /* tag_count: what was actually written */
+    tagfs_leave();
+    tagfs_metadata_free(&md);
+    if (rc != OK) return rc;
 
     int crc = crate_out_commit(out, ctx, kp, pos);
     crate_buf_free(kp);
-    tagfs_metadata_free(&md);
     if (crc != OK) return crc;   /* fail closed: leave out->size unset */
     out->size = pos;
     return OK;
 }
 
 /* =========================================================================
- *  Tag / Query / Context / Create — Phase 12 additions
+ *  Tag / Query / Context / Create
  *
- *  All tag-string parsing is done with a small static helper that tolerates
- *  empty input. The auto-context tags are merged in for query and create
- *  exactly as the legacy handler did, keyed on ctx->proc->pid.
+ *  A tag's text is read by the one spelling (tag_spelling.h), in place in the
+ *  crate's copy, and a tag that does not spell refuses the call. The Use
+ *  Context's tags are folded in for query and create when the scope is USE.
  * ========================================================================= */
-
-static int parse_tag_list(const char *src, size_t src_len,
-                          const char *tags[], char buffer[][32],
-                          uint32_t max_tags)
-{
-    if (!src || src_len == 0) return 0;
-
-    uint32_t count = 0;
-    size_t pos = 0;
-    while (pos < src_len && count < max_tags) {
-        size_t len = 0;
-        while (pos + len < src_len && src[pos + len] != ',' && src[pos + len] != '\0' && len < 31) {
-            len++;
-        }
-        if (len > 0) {
-            memcpy(buffer[count], src + pos, len);
-            buffer[count][len] = '\0';
-            tags[count] = buffer[count];
-            count++;
-        }
-        pos += len;
-        while (pos < src_len && src[pos] != ',' && src[pos] != '\0') pos++;
-        if (pos < src_len && src[pos] == ',') pos++;
-        if (pos < src_len && src[pos] == '\0') break;
-    }
-    return (int)count;
-}
 
 /*
  * The scope byte of storage.query / storage.create (boxos_decks.h): inside the
@@ -988,44 +962,81 @@ static error_t storage_scope_of(const ManifestOp *op, size_t at, uint8_t *out_sc
 }
 
 /*
- * The caller's tags followed by the Use Context's, as one array of names —
- * what a query is asked for and what a created file is stamped with when the
- * scope is USE. `own` are the caller's parsed tags; the result is kmalloc'd
- * (*out_all) and so is the block the context's names live in (*out_block);
- * the caller frees both. Both NULL with *out_total == own_count when the
- * scope is EVERYWHERE or the context is empty, so the caller's own array is
- * used as is.
+ * The tags a query asks for or a create stamps: the caller's, spelled in place
+ * out of the `len` bytes at `text`, followed — when the scope is USE — by the
+ * Use Context's. The caller's list is judged whole before anything is
+ * allocated for it, and a tag that does not spell refuses the call: a query
+ * never drops a tag it cannot read and answers for the rest, and a create
+ * never makes a file without a tag it was asked for. So is a text that names
+ * no tag at all — asking for every file is asking with no text.
+ *
+ * *out_tags is the caller's to kfree, and so is *out_block, the Use Context's
+ * names the last spellings point into. Both NULL, and a count of 0, when there
+ * is nothing to ask.
  */
-static error_t storage_tags_with_use(uint8_t scope,
-                                     const char **own, uint32_t own_count,
-                                     const char ***out_all, char **out_block,
-                                     uint32_t *out_total)
+static error_t storage_tags_spelled(uint8_t scope, const char *text, size_t len,
+                                    TagSpelling **out_tags, char **out_block,
+                                    uint32_t *out_count)
 {
-    *out_all   = NULL;
+    *out_tags  = NULL;
     *out_block = NULL;
-    *out_total = own_count;
-    if (scope != STORAGE_SCOPE_USE) return OK;
+    *out_count = 0;
+
+    uint32_t own = 0;
+    error_t  rc  = TagListCount(text, len, &own);
+    if (rc != OK)
+        return rc;
+    if (len > 0 && own == 0)
+        return ERR_TAGFS_INVALID_TAG;
 
     char        *block = NULL;
     const char **names = NULL;
-    uint32_t     count = 0;
-    error_t rc = UseContextTagArray(&block, &names, &count);
-    if (rc != OK) return rc;
-    if (count == 0) return OK;
+    uint32_t     use   = 0;
+    if (scope == STORAGE_SCOPE_USE) {
+        rc = UseContextTagArray(&block, &names, &use);
+        if (rc != OK)
+            return rc;
+    }
+    if (own + use == 0)
+        return OK;
 
-    const char **all = kmalloc(sizeof(char *) * (own_count + count));
-    if (!all) {
+    TagSpelling *tags = kmalloc(sizeof(TagSpelling) * (own + use));
+    if (!tags) {
         kfree(block);
         kfree(names);
         return ERR_NO_MEMORY;
     }
-    for (uint32_t i = 0; i < own_count; i++) all[i] = own[i];
-    for (uint32_t i = 0; i < count; i++)     all[own_count + i] = names[i];
+    size_t at = 0;
+    for (uint32_t i = 0; i < own; i++)
+        (void)TagListNext(text, len, &at, &tags[i]);   /* judged whole above */
+    for (uint32_t i = 0; i < use && rc == OK; i++)
+        rc = TagSpell(names[i], strlen(names[i]), &tags[own + i]);
     kfree(names);
+    if (rc != OK) {
+        kfree(tags);
+        kfree(block);
+        return rc;
+    }
 
-    *out_all   = all;
+    *out_tags  = tags;
     *out_block = block;
-    *out_total = own_count + count;
+    *out_count = own + use;
+    return OK;
+}
+
+/* The in_crate's bytes copied in, or NULL with *out_len 0 when there is no
+ * in_crate or it is empty. ERR_INVALID_ADDRESS when the copy failed. */
+static error_t storage_crate_text(const ManifestOp *op, Crate *crates, const OpContext *ctx,
+                                  char **out_text, size_t *out_len)
+{
+    *out_text = NULL;
+    *out_len  = 0;
+    if (op->in_crate == CRATE_INDEX_NONE || crates[op->in_crate].size == 0)
+        return OK;
+    *out_text = crate_in_buf(&crates[op->in_crate], ctx);
+    if (!*out_text)
+        return ERR_INVALID_ADDRESS;
+    *out_len = crates[op->in_crate].size;
     return OK;
 }
 
@@ -1057,32 +1068,21 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     TagFSState *state = tagfs_get_state();
     if (!state || !state->initialized) return ERR_NOT_INITIALIZED;
 
-    /* Query string from in_crate, if any. Read it BEFORE allocating the
-     * output bounce buffer so an early return here cannot leak the kbuf. */
-    char    qbuf[256];
-    size_t  qlen = 0;
-    if (op->in_crate != CRATE_INDEX_NONE) {
-        Crate *src = &crates[op->in_crate];
-        if (src->size > 0 && src->size < sizeof(qbuf)) {
-            error_t cr = crate_read(src, ctx, qbuf, src->size);
-            if (cr != OK) return cr;
-            qlen = src->size;
-            qbuf[qlen] = '\0';
-        }
-    }
+    /* The query's tags, read BEFORE the output bounce buffer is allocated so
+     * an early return here cannot leak the kbuf. */
+    char  *text = NULL;
+    size_t tlen = 0;
+    error_t rc = storage_crate_text(op, crates, ctx, &text, &tlen);
+    if (rc != OK) return rc;
 
-    const char *own_tags[16];
-    char        own_storage[16][32];
-    int own = parse_tag_list(qbuf, qlen, own_tags, own_storage, 16);
-    if (own < 0) own = 0;
-
-    const char **all_tags  = NULL;
+    TagSpelling *tags      = NULL;
     char        *use_block = NULL;
     uint32_t     total     = 0;
-    error_t mrc = storage_tags_with_use(scope, own_tags, (uint32_t)own,
-                                        &all_tags, &use_block, &total);
-    if (mrc != OK) return mrc;
-    const char **asked = all_tags ? all_tags : own_tags;
+    rc = storage_tags_spelled(scope, text, tlen, &tags, &use_block, &total);
+    if (rc != OK) {
+        crate_buf_free(text);
+        return rc;
+    }
 
     /* Room for every file the volume can hold, so the count is the true one
      * and not the size of the caller's crate. The volume's ceiling — the
@@ -1090,22 +1090,23 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
      * the same one proc_exec asks for. */
     uint32_t  room    = tagfs_file_ceiling();
     uint32_t *all_ids = NULL;
+    int       count   = 0;
     if (room > 0) {
         all_ids = kmalloc(room * sizeof(uint32_t));
-        if (!all_ids) {
-            kfree(all_tags);
-            kfree(use_block);
-            return ERR_NO_MEMORY;
-        }
+        if (!all_ids)
+            count = -(int)ERR_NO_MEMORY;
+        else if (total > 0)
+            count = tagfs_query_files(tags, total, all_ids, room);
+        else
+            count = tagfs_list_all_files(all_ids, room);
     }
-    int count = 0;
-    if (all_ids) {
-        if (total > 0) count = tagfs_query_files(asked, total, all_ids, room);
-        else           count = tagfs_list_all_files(all_ids, room);
-        if (count < 0) count = 0;
-    }
-    kfree(all_tags);
+    kfree(tags);
     kfree(use_block);
+    crate_buf_free(text);
+    if (count < 0) {
+        kfree(all_ids);
+        return (int)(error_t)(-count);
+    }
 
     uint32_t max_results = (uint32_t)((out->capacity - 8) / sizeof(uint32_t));
     uint32_t hdr[2];
@@ -1129,53 +1130,83 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return OK;
 }
 
-/* STORAGE_TAG_SET  params:[u32 file_id]  in_crate: "key" or "key:value" */
+/* One tag's text out of the in_crate, spelled. The width is judged on the
+ * crate's size before anything is copied: a text longer than any tag can be
+ * is refused as the too-long tag it is. *out_text is the caller's to free. */
+static error_t storage_one_tag(const ManifestOp *op, Crate *crates, const OpContext *ctx,
+                               char **out_text, TagSpelling *out)
+{
+    *out_text = NULL;
+    if (op->in_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+    const Crate *src = &crates[op->in_crate];
+    if (src->size == 0)              return ERR_TAGFS_INVALID_TAG;
+    if (src->size > TAG_TEXT_WIDTH)  return ERR_TAGFS_TAG_TOO_LONG;
+
+    char  *text = NULL;
+    size_t len  = 0;
+    error_t rc = storage_crate_text(op, crates, ctx, &text, &len);
+    if (rc != OK) return rc;
+    rc = TagSpell(text, len, out);
+    if (rc != OK) {
+        crate_buf_free(text);
+        return rc;
+    }
+    *out_text = text;
+    return OK;
+}
+
+/* STORAGE_TAG_SET  params:[u32 file_id]  in_crate: "key" or "key:value" —
+ * the file wears exactly that tag, or the call is refused. */
 static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
     (void)crate_count;
-    if (op->param_size < 4)               return ERR_INVALID_ARGUMENT;
-    if (op->in_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
 
-    uint32_t file_id = param_u32(op, 0);
-    Crate   *src     = &crates[op->in_crate];
-    if (src->size == 0 || src->size > 127) return ERR_INVALID_ARGUMENT;
-
-    char tag[128];
-    error_t cr = crate_read(src, ctx, tag, src->size);
-    if (cr != OK) return cr;
-    tag[src->size] = '\0';
-
-    char key[64], value[64];
-    if (tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value)) != 0) {
-        return ERR_INVALID_ARGUMENT;
-    }
-    if (tagfs_add_tag_string(file_id, key, value[0] ? value : NULL) != 0) {
-        return ERR_INVALID_ARGUMENT;
-    }
-    return OK;
+    char       *text = NULL;
+    TagSpelling tag;
+    error_t     rc = storage_one_tag(op, crates, ctx, &text, &tag);
+    if (rc != OK) return rc;
+    rc = tagfs_add_tag_string(param_u32(op, 0), &tag);
+    crate_buf_free(text);
+    return rc;
 }
 
-/* STORAGE_TAG_UNSET  params:[u32 file_id]  in_crate: tag key */
+/* STORAGE_TAG_UNSET  params:[u32 file_id]  in_crate: "key" — every tag of the
+ * key — or "key:value" — that tag alone. */
 static int ObjTagUnset(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
     (void)crate_count;
-    if (op->param_size < 4)               return ERR_INVALID_ARGUMENT;
-    if (op->in_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
 
-    uint32_t file_id = param_u32(op, 0);
-    Crate   *src     = &crates[op->in_crate];
-    if (src->size == 0 || src->size > 63) return ERR_INVALID_ARGUMENT;
+    char       *text = NULL;
+    TagSpelling tag;
+    error_t     rc = storage_one_tag(op, crates, ctx, &text, &tag);
+    if (rc != OK) return rc;
+    int removed = tagfs_remove_tag_string(param_u32(op, 0), &tag);
+    crate_buf_free(text);
+    return removed == 0 ? OK : ERR_INVALID_ARGUMENT;
+}
 
-    char key[64];
-    error_t cr = crate_read(src, ctx, key, src->size);
-    if (cr != OK) return cr;
-    key[src->size] = '\0';
-
-    if (tagfs_remove_tag_string(file_id, key) != 0) {
-        return ERR_INVALID_ARGUMENT;
+/* The ids of the tags a file is created with, each interned; the first
+ * refusal ends it. *out_ids is the caller's to kfree. */
+static error_t storage_intern_all(const TagSpelling *tags, uint32_t count, uint16_t **out_ids)
+{
+    *out_ids = NULL;
+    if (count == 0)
+        return OK;
+    uint16_t *ids = kmalloc(sizeof(uint16_t) * count);
+    if (!ids)
+        return ERR_NO_MEMORY;
+    for (uint32_t i = 0; i < count; i++) {
+        error_t rc = TagFSInternSpelling(&tags[i], &ids[i]);
+        if (rc != OK) {
+            kfree(ids);
+            return rc;
+        }
     }
+    *out_ids = ids;
     return OK;
 }
 
@@ -1185,7 +1216,10 @@ static int ObjTagUnset(const ManifestOp *op, Crate *crates, uint16_t crate_count
  *                     in_crate (optional): tag string
  *                     out_crate (optional): u32 file_id
  *                     Inside the context the new file is stamped with the
- *                     user's tags as well as its own. */
+ *                     user's tags as well as its own. Every tag is spelled
+ *                     before any is interned, and a tag that does not spell
+ *                     or intern refuses the create: no file is made without a
+ *                     tag it was asked to wear. */
 static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
@@ -1193,71 +1227,46 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (op->param_size < 1) return ERR_INVALID_ARGUMENT;
 
     uint8_t scope;
-    error_t src_rc = storage_scope_of(op, 32, &scope);
-    if (src_rc != OK) return src_rc;
+    error_t rc = storage_scope_of(op, 32, &scope);
+    if (rc != OK) return rc;
 
-    char filename[33];
-    size_t fn_copy = op->param_size < 32 ? op->param_size : 32;
-    memcpy(filename, op->params, fn_copy);
-    filename[fn_copy] = '\0';
-    /* trim at first NUL within the 32-byte field */
-    for (size_t i = 0; i < fn_copy; i++) {
-        if (filename[i] == '\0') { filename[i] = '\0'; break; }
-    }
-    if (filename[0] == '\0') return ERR_INVALID_ARGUMENT;
+    /* The name runs to its NUL inside the 32-byte field, or fills it. */
+    size_t field    = op->param_size < 32 ? op->param_size : 32;
+    size_t name_len = strnlen((const char *)op->params, field);
+    if (name_len == 0) return ERR_INVALID_ARGUMENT;
 
-    /* Parse tag list (in_crate) + auto-context tags. */
-    char    tag_buf[256];
-    size_t  tlen = 0;
-    if (op->in_crate != CRATE_INDEX_NONE) {
-        Crate *src = &crates[op->in_crate];
-        if (src->size > 0 && src->size < sizeof(tag_buf)) {
-            error_t cr = crate_read(src, ctx, tag_buf, src->size);
-            if (cr != OK) return cr;
-            tlen = src->size;
-            tag_buf[tlen] = '\0';
-        }
-    }
+    char  *text = NULL;
+    size_t tlen = 0;
+    rc = storage_crate_text(op, crates, ctx, &text, &tlen);
+    if (rc != OK) return rc;
 
-    const char *own_tags[16];
-    char        own_storage[16][32];
-    int own = parse_tag_list(tag_buf, tlen, own_tags, own_storage, 16);
-    if (own < 0) own = 0;
-
-    const char **all_tags  = NULL;
+    TagSpelling *tags      = NULL;
     char        *use_block = NULL;
     uint32_t     total     = 0;
-    error_t mrc = storage_tags_with_use(scope, own_tags, (uint32_t)own,
-                                        &all_tags, &use_block, &total);
-    if (mrc != OK) return mrc;
-    const char **stamped = all_tags ? all_tags : own_tags;
-
-    /* Intern every tag into the registry — the file's own and the user's. */
-    uint16_t *tag_ids      = NULL;
-    uint16_t  intern_count = 0;
-    if (total > 0) {
-        tag_ids = kmalloc(sizeof(uint16_t) * total);
-        if (!tag_ids) {
-            kfree(all_tags);
-            kfree(use_block);
-            return ERR_NO_MEMORY;
-        }
-        for (uint32_t i = 0; i < total; i++) {
-            char k[64], v[64];
-            if (tagfs_parse_tag(stamped[i], k, sizeof(k), v, sizeof(v)) != 0) continue;
-            uint16_t tid = tagfs_tag_intern(stamped[i]);
-            if (tid != TAGFS_INVALID_TAG_ID) tag_ids[intern_count++] = tid;
-        }
-    }
-    kfree(all_tags);
+    uint16_t    *tag_ids   = NULL;
+    char        *filename  = NULL;
+    rc = storage_tags_spelled(scope, text, tlen, &tags, &use_block, &total);
+    if (rc == OK && total > UINT16_MAX)
+        rc = ERR_TAG_LIMIT_EXCEEDED;
+    if (rc == OK)
+        rc = storage_intern_all(tags, total, &tag_ids);
+    if (rc == OK && !(filename = kmalloc(name_len + 1)))
+        rc = ERR_NO_MEMORY;
+    kfree(tags);
     kfree(use_block);
+    crate_buf_free(text);
+    if (rc != OK) {
+        kfree(tag_ids);
+        return rc;
+    }
+    memcpy(filename, op->params, name_len);
+    filename[name_len] = '\0';
 
     uint32_t file_id = 0;
-    int rc = tagfs_create_file(filename,
-                               intern_count > 0 ? tag_ids : NULL,
-                               intern_count, &file_id);
+    int made = tagfs_create_file(filename, tag_ids, (uint16_t)total, &file_id);
+    kfree(filename);
     kfree(tag_ids);
-    if (rc != 0) return ERR_DISK_FULL;
+    if (made != 0) return (int)(error_t)(-made);
 
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
@@ -1499,7 +1508,7 @@ static int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
      * would put publisher and subscriber on two different ids depending on
      * who spoke first. The reader door gives both sides the same id. */
     TouchTag anchor_full, anchor_bare;
-    TouchTagResolve("anchor", &anchor_full, &anchor_bare);
+    (void)TouchTagResolve("anchor", sizeof("anchor") - 1, &anchor_full, &anchor_bare);
     TouchPublishPair(anchor_full, anchor_bare, &ev, sizeof(ev),
                      pid, TOUCH_FLAG_TAGFS);
     return OK;

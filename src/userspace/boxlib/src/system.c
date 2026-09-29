@@ -36,9 +36,9 @@
 #define HW_SYSTEM_REBOOT    0x80
 #define HW_SYSTEM_SHUTDOWN  0x81
 
-/* Upper bound on a caller-supplied tag augment for proc_exec_tagged. Mirrors
- * the kernel PROCESS_TAG_SIZE (256) — the child's tag string can hold at most
- * that many bytes — and fits inside the 256-byte MfCall1 param region. */
+/* Upper bound on a caller-supplied tag augment for proc_exec_tagged: the
+ * augment rides in the op's params, and MfCall1 carries at most 256 bytes of
+ * them. The kernel reads an augment of any length. */
 #define PROC_EXEC_TAGS_MAX 256
 
 /* =========================================================================
@@ -194,7 +194,7 @@ int proc_exec_gen(const char *line, const char *tags, uint32_t *out_gen)
     while (*line == ' ' || *line == '\t') line++;
     size_t name_len = 0;
     while (line[name_len] != '\0' && line[name_len] != ' ' && line[name_len] != '\t') name_len++;
-    if (name_len == 0 || name_len >= 64) return -ERR_INVALID_ARGUMENT;
+    if (name_len == 0) return -ERR_INVALID_ARGUMENT;
     size_t line_len = strlen(line);
 
     const void *pbuf = NULL; uint16_t psize = 0;
@@ -366,7 +366,7 @@ static int proc_tag_op(const char *tag, uint16_t opcode, uint8_t *out_byte)
 {
     if (!tag) return -ERR_INVALID_ARGUMENT;
     size_t tlen = strlen(tag);
-    if (tlen == 0 || tlen >= 64) return -ERR_INVALID_ARGUMENT;
+    if (tlen == 0) return -ERR_INVALID_ARGUMENT;
 
     uint32_t my_pid = cabin_info()->pid;
     uint8_t out_storage = 0;

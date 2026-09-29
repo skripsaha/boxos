@@ -1687,12 +1687,18 @@ void *process_get_cabin(process_t *proc)
 
 bool process_has_tag(process_t *proc, const char *tag)
 {
-    if (!proc || !proc->cabin || !tag || tag[0] == '\0')
+    if (!proc || !proc->cabin || !tag)
         return false;
 
-    if (!tag_is_wildcard(tag))
+    /* The text is spelled once. A plain tag is one id to look for; a pattern
+     * ("..." in its key or value) is matched against each tag the process
+     * wears, read in place in the volume's registry and never cut to fit. */
+    TagSpelling spelled;
+    if (TagSpell(tag, strlen(tag), &spelled) != OK)
+        return false;
+    if (!TagSpellingIsPattern(&spelled))
     {
-        uint16_t tid = tagfs_tag_lookup(tag);
+        uint16_t tid = TagFSLookupSpelling(&spelled);
         if (tid == TAGFS_INVALID_TAG_ID)
             return false;
         return process_has_tag_id(proc, tid);
@@ -1703,29 +1709,26 @@ bool process_has_tag(process_t *proc, const char *tag)
     {
         uint16_t i = (uint16_t)__builtin_ctzll(bits);
         bits &= bits - 1;
-        char full[512];
-        if (!tagfs_tag_text(i, full, sizeof(full))) continue;
-        if (tag_match(tag, full))
+        if (TagFSTagMatches(i, &spelled))
             return true;
     }
     for (uint16_t j = 0; j < proc->cabin->tag_overflow_count; j++)
     {
-        char full[512];
-        if (!tagfs_tag_text(proc->cabin->tag_overflow_ids[j], full, sizeof(full)))
-            continue;
-        if (tag_match(tag, full))
+        if (TagFSTagMatches(proc->cabin->tag_overflow_ids[j], &spelled))
             return true;
     }
     return false;
 }
 
-int process_add_tag(process_t *proc, const char *tag)
+error_t process_add_tag(process_t *proc, const char *tag)
 {
-    if (!proc || !proc->cabin || !tag || tag[0] == '\0')
-        return -1;
+    if (!proc || !proc->cabin || !tag)
+        return ERR_INVALID_ARGUMENT;
 
-    char key[256], value[256];
-    tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
+    TagSpelling spelled;
+    error_t     rc = TagSpell(tag, strlen(tag), &spelled);
+    if (rc != OK)
+        return rc;
 
     /* Is there a volume? A tag id is the volume's to issue, and this used to
      * be asked by looking at its registry pointer — the one thing a re-mount
@@ -1765,41 +1768,44 @@ int process_add_tag(process_t *proc, const char *tag)
          * carries the authority and not the tag id, so anything ADDRESSED to
          * the tag will not reach it until the process is retagged.
          */
-        uint32_t bit = value[0] ? 0u : auth_bit_for_key(key);
+        uint32_t bit = spelled.value ? 0u : AuthBitForKey(spelled.key, spelled.key_len);
         if (bit == 0)
-            return -1;          /* an ordinary tag genuinely has nowhere to go */
+            return ERR_TAGFS_NOT_INITIALIZED;   /* an ordinary tag genuinely has nowhere to go */
         __atomic_or_fetch(&proc->cabin->auth_bits, bit, __ATOMIC_RELAXED);
-        return 0;
+        return OK;
     }
 
     spin_lock(&process_lock);
 
-    uint16_t tid = tagfs_tag_intern(tag);
-    if (tid == TAGFS_INVALID_TAG_ID)
+    uint16_t tid;
+    rc = TagFSInternSpelling(&spelled, &tid);
+    if (rc != OK)
     {
         spin_unlock(&process_lock);
-        return -1;
+        return rc;
     }
 
     /* The user's context may name this tag without yet having a number for
      * it; this is the number, so a strand tagged after `use` still lands in
      * the context tier. */
-    UseContextBindTag(tag, tid);
+    UseContextBindTag(&spelled, tid);
 
-    int ret = process_set_tag_bit(proc, tid);
+    if (process_set_tag_bit(proc, tid) != 0)
+        rc = ERR_TAG_OVERFLOW_FAILED;
     /* Mirror the fixed auth bit for a bare auth key (no-op for any other key),
      * but only once membership actually took — keeps auth_bits ⟺ membership exact
      * even on the (prod-unreachable) id>=64 overflow-alloc failure path.
      * RELAXED, matching tag_bits; serialized by process_lock. */
-    if (ret == 0 && !value[0])
-        __atomic_or_fetch(&proc->cabin->auth_bits, auth_bit_for_key(key), __ATOMIC_RELAXED);
+    if (rc == OK && !spelled.value)
+        __atomic_or_fetch(&proc->cabin->auth_bits, AuthBitForKey(spelled.key, spelled.key_len),
+                          __ATOMIC_RELAXED);
     spin_unlock(&process_lock);
-    return ret;
+    return rc;
 }
 
 int process_remove_tag(process_t *proc, const char *tag)
 {
-    if (!proc || !proc->cabin || !tag || tag[0] == '\0')
+    if (!proc || !proc->cabin || !tag)
         return -1;
 
     /* No volume, no membership to take away — and the answer is the refusal it
@@ -1808,10 +1814,11 @@ int process_remove_tag(process_t *proc, const char *tag)
     if (!fs || !fs->initialized)
         return -1;
 
-    char key[256], value[256];
-    tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
+    TagSpelling spelled;
+    if (TagSpell(tag, strlen(tag), &spelled) != OK)
+        return -1;
 
-    uint16_t tid = tagfs_tag_lookup(tag);
+    uint16_t tid = TagFSLookupSpelling(&spelled);
     if (tid == TAGFS_INVALID_TAG_ID)
         return 0;
 
@@ -1819,8 +1826,9 @@ int process_remove_tag(process_t *proc, const char *tag)
     int ret = process_clear_tag_bit(proc, tid);
     /* Drop the fixed auth bit when the bare auth key is removed (no-op
      * otherwise). RELAXED, matching tag_bits; serialized by process_lock. */
-    if (!value[0])
-        __atomic_and_fetch(&proc->cabin->auth_bits, ~auth_bit_for_key(key), __ATOMIC_RELAXED);
+    if (!spelled.value)
+        __atomic_and_fetch(&proc->cabin->auth_bits, ~AuthBitForKey(spelled.key, spelled.key_len),
+                           __ATOMIC_RELAXED);
     spin_unlock(&process_lock);
     return ret;
 }
@@ -1888,8 +1896,9 @@ void process_start_initial(process_t *proc)
 }
 
 /*
- * One tag, appended to a comma-separated list. False when it would not fit,
- * which ends the list.
+ * One tag, appended whole to a comma-separated list, straight from the
+ * volume's registry. False when it would not fit, which ends the list: a tag
+ * is never cut to a shorter one to make room.
  *
  * The two loops below used to carry a copy of this each, forty lines apart and
  * identical, and both of them wrote the separator BEFORE finding out whether
@@ -1898,20 +1907,21 @@ void process_start_initial(process_t *proc)
 static bool snapshot_append_tag(char *buffer, size_t buffer_size, size_t *pos,
                                 bool *first, uint16_t tag_id)
 {
-    char text[512];
-    if (!tagfs_tag_text(tag_id, text, sizeof(text)))
-        return true;                /* this volume has no such tag — skip it */
-
-    size_t len  = strlen(text);
-    size_t need = len + (*first ? 0u : 1u);
-    if (*pos + need >= buffer_size)
+    size_t sep = *first ? 0u : 1u;
+    if (*pos + sep >= buffer_size)
         return false;
 
-    if (!*first)
-        buffer[(*pos)++] = ',';
+    size_t room = buffer_size - *pos - sep;
+    size_t len  = tagfs_tag_text(tag_id, buffer + *pos + sep, room);
+    if (len == 0)
+        return true;                /* this volume has no such tag — skip it */
+    if (len >= room)
+        return false;
+
+    if (sep)
+        buffer[*pos] = ',';
     *first = false;
-    memcpy(buffer + *pos, text, len);
-    *pos += len;
+    *pos += sep + len;
     return true;
 }
 

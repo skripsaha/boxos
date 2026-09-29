@@ -185,8 +185,9 @@ void BrookInit(void)
  * ───────────────────────────────────────────────────────────────────── */
 static uint16_t brook_resolve_tag(const char *tag, bool intern_if_missing)
 {
-    if (!tag || tag[0] == '\0') return TAGFS_INVALID_TAG_ID;
-    return intern_if_missing ? tagfs_tag_intern(tag) : tagfs_tag_lookup(tag);
+    if (!intern_if_missing) return tagfs_tag_lookup(tag);
+    uint16_t id;
+    return tagfs_tag_intern(tag, &id) == OK ? id : TAGFS_INVALID_TAG_ID;
 }
 
 /* ─────────────────────────────────────────────────────────────────────
@@ -872,20 +873,24 @@ error_t BrookOpenInternal(struct process_t *proc,
 
             /* MemTag integration: tag header + each slot chunk with the
              * Brook's key:value AND "purpose:brook" + "purpose:stream"
-             * so the streaming buffers are queryable via tag algebra. */
-            char tag_buf[128];
-            if (tagfs_tag_text(tag_id, tag_buf, sizeof(tag_buf))) {
-                MemTagApplyByPhys(fresh->header_phys, 1, tag_buf);
+             * so the streaming buffers are queryable via tag algebra. The
+             * key:value goes whole, however long: measured first, then
+             * copied at its length. */
+            size_t tag_len  = tagfs_tag_text(tag_id, NULL, 0);
+            char  *tag_text = tag_len ? kmalloc(tag_len + 1) : NULL;
+            if (tag_text && tagfs_tag_text(tag_id, tag_text, tag_len + 1) == tag_len) {
+                MemTagApplyByPhys(fresh->header_phys, 1, tag_text);
                 MemTagApplyByPhys(fresh->header_phys, 1, "purpose:brook");
                 MemTagApplyByPhys(fresh->header_phys, 1, "purpose:brook-header");
                 size_t pages_per_chunk =
                     (cs == BROOK_HUGE_SIZE) ? BROOK_HUGE_PAGES : 1;
                 for (uint32_t ci = 0; ci < cc; ci++) {
-                    MemTagApplyByPhys((uintptr_t)chunks[ci], pages_per_chunk, tag_buf);
+                    MemTagApplyByPhys((uintptr_t)chunks[ci], pages_per_chunk, tag_text);
                     MemTagApplyByPhys((uintptr_t)chunks[ci], pages_per_chunk, "purpose:brook");
                     MemTagApplyByPhys((uintptr_t)chunks[ci], pages_per_chunk, "purpose:stream");
                 }
             }
+            kfree(tag_text);
         }
     }
 

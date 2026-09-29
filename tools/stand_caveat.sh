@@ -44,7 +44,7 @@ CAVEAT=0
 # its stamp (the owner, 2026-09-28), which closes the epoch they fall in.
 caveat_row() {
     case "$1" in
-        longquery)  echo "1.1b|a query of 256 bytes or more is dropped unread, and the answer is every file in scope" ;;
+        longquery)  echo "|a query of 256 bytes or more is dropped unread, and the answer is every file in scope" ;;
         bigwrite)   echo "1.3|a write is copied through one kernel-heap allocation of its whole size, so one bigger than the heap is refused and nothing reaches the file" ;;
         sequential|interleave)
                     echo "1.3|a file's record takes one extent per 4 KiB written and never merges them, so the 4080-byte record of a 10-byte name refuses its write at byte 2748416, after 671 extents" ;;

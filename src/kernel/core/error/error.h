@@ -203,6 +203,8 @@ typedef enum {
     ERR_TAGFS_INVALID_TAG = 863,
     ERR_TAGFS_EXTENT_ERROR = 864,
     ERR_TAGFS_RECOVERY_FAILED = 865,
+    /* A key past its u8 width, or a tag whose registry record would not fit a block. */
+    ERR_TAGFS_TAG_TOO_LONG = 866,
 
     // TagFS Module Errors (1000-1099)
     // DiskBook

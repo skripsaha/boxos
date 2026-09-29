@@ -56,24 +56,23 @@ int send(uint32_t target_pid, const void* data, uint16_t size) {
 int broadcast(const char* tag, const void* data, uint16_t size) {
     if (!tag || tag[0] == '\0') return -ERR_INVALID_ARGUMENT;
 
-    /* Tag travels as inline params (NUL-terminated). System.broadcast caps it
-     * at 64 bytes — same effective ceiling as before, no compile-time limit
-     * on payload itself. */
+    /* The tag travels whole as inline params, NUL included: cut short it would
+     * be some other tag. The kernel reads a tag of any width a tag can have;
+     * what bounds it here is this call's manifest buffer, and a tag it cannot
+     * carry is refused rather than cut. No limit on the payload itself. */
     size_t tlen = strlen(tag);
-    if (tlen >= 63) tlen = 63;
-    char tag_param[64];
-    memcpy(tag_param, tag, tlen);
-    tag_param[tlen] = '\0';
+    if (tlen + 1 > MFBUF_BYTES - sizeof(Manifest) - sizeof(ManifestOp))
+        return -ERR_INVALID_ARGUMENT;
 
     Crate c;
     if (data && size > 0) {
         CrateSetInput(&c, (void *)data, size);
         return ipc_submit_one_op(0x41 /* BROADCAST */, 0,
-                                 tag_param, (uint16_t)(tlen + 1),
+                                 tag, (uint16_t)(tlen + 1),
                                  &c, 1, 0, 0 /* no deadline — reply guaranteed */);
     }
     return ipc_submit_one_op(0x41, CRATE_INDEX_NONE,
-                             tag_param, (uint16_t)(tlen + 1),
+                             tag, (uint16_t)(tlen + 1),
                              NULL, 0, 0, 0 /* no deadline — reply guaranteed */);
 }
 

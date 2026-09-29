@@ -517,8 +517,11 @@ error_t IntegrityInit(void) {
     g_map_entries     = entries;
     TagFSLockDrop(&g_lock);
 
-    if (fs->registry)
-        g_integrity_tag = tag_registry_intern(fs->registry, "integrity", NULL);
+    if (fs->registry) {
+        TagSpelling integrity = TagSpellingOfKey("integrity");
+        if (TagRegistryIntern(fs->registry, &integrity, &g_integrity_tag) != OK)
+            g_integrity_tag = TAGFS_INVALID_TAG_ID;
+    }
 
     /* The hooks were no-ops until now, so Init's own I/O recorded nothing. */
     __atomic_store_n(&g_initialized, true, __ATOMIC_RELEASE);

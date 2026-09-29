@@ -52,25 +52,6 @@ void AutostartNoteVolumeLaunched(void)
     __atomic_store_n(&g_volume_launched, 1u, __ATOMIC_RELEASE);
 }
 
-/* Collect a file's tags into the comma-separated string process_create wants.
- * The names are the volume's, so they are asked of it one at a time and copied
- * out: the registry they live in belongs to a mount, and a mount ends. */
-static void autostart_collect_tags(const TagFSMetadata *meta,
-                                   char *out, size_t out_size)
-{
-    size_t pos = 0;
-    for (uint16_t t = 0; t < meta->tag_count; t++) {
-        char key[128];
-        if (!tagfs_tag_key(meta->tag_ids[t], key, sizeof(key))) continue;
-        size_t klen = strlen(key);
-        if (pos + klen + 2 > out_size) break;
-        if (pos > 0) out[pos++] = ',';
-        memcpy(out + pos, key, klen);
-        pos += klen;
-    }
-    out[pos] = '\0';
-}
-
 static bool autostart_wanted(const TagFSMetadata *meta)
 {
     bool has_autostart = false;
@@ -185,11 +166,18 @@ int AutostartLaunchFromVolume(process_t **out_first, bool scheduler_live)
             continue;
         }
 
-        char tags[PROCESS_TAG_SIZE];
-        autostart_collect_tags(&meta, tags, sizeof(tags));
+        /* The file's keys, whole: a process started from it wears every one
+         * (TagFSKeyList), never the ones that fitted a buffer. */
+        char *tags = TagFSKeyList(meta.tag_ids, meta.tag_count);
+        if (!tags) {
+            kprintf("[AUTOSTART] Skip '%s': no memory for its tags\n", meta.filename);
+            tagfs_metadata_free(&meta);
+            continue;
+        }
 
         process_t *proc = autostart_launch_one(file_ids[i], &meta, tags);
         if (!proc) {
+            kfree(tags);
             tagfs_metadata_free(&meta);
             continue;
         }
@@ -210,6 +198,7 @@ int AutostartLaunchFromVolume(process_t **out_first, bool scheduler_live)
         launched++;
         kprintf("[AUTOSTART] Started '%s' (PID %u, tags: %s)\n",
                 meta.filename, proc->pid, tags);
+        kfree(tags);
         tagfs_metadata_free(&meta);
 
         if (out_first && !*out_first) *out_first = proc;

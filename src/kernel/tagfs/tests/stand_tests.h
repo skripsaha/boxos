@@ -16,6 +16,9 @@
 //                        table's chains as they grow, registries that are not
 //                        the volume's, and what a registry hands out; and the
 //                        chain walk below
+// stand_spelling_tests.c the stand_spelling suite: one spelling of a tag at
+//                        the stations a program reaches, and the registry's
+//                        widths and its full wall
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.

@@ -28,14 +28,11 @@
  */
 
 #define PROCESS_MAX_COUNT MAX_PROCESSES
-#define PROCESS_TAG_SIZE 256
 #define PROCESS_INVALID_PID 0
 
 /* quiesce_core sentinel: strand was never dispatched on any core, so no core
  * can be in its stack epilogue — it is immediately reapable. */
 #define QUIESCE_CORE_NONE 0xFFu
-
-// Fast O(1) role checks use proc->cabin->tag_bits AND g_well_known bitmasks from tagfs.h.
 
 struct process_t;
 
@@ -499,7 +496,10 @@ void process_start_initial(process_t *proc);
 
 bool process_has_tag(process_t *proc, const char *tag);
 bool process_has_tag_id(process_t *proc, uint16_t tag_id);
-int process_add_tag(process_t *proc, const char *tag);
+/* OK, or why the process does not wear the tag: a text that does not spell
+ * (tag_spelling.h), the volume's refusal of a number, no volume for an
+ * ordinary tag, or ERR_TAG_OVERFLOW_FAILED. */
+error_t process_add_tag(process_t *proc, const char *tag);
 int process_remove_tag(process_t *proc, const char *tag);
 size_t process_snapshot_tags(process_t *proc, char *buffer, size_t buffer_size);
 

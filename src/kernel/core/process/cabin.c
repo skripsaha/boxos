@@ -58,6 +58,43 @@ static int cabin_set_tag_bit(cabin_t *cabin, uint16_t tag_id)
     return 0;
 }
 
+/*
+ * The cabin's tags, read by the one spelling (tag_spelling.h) out of the
+ * comma list in place. A tag that does not spell, or that the volume refuses a
+ * number, refuses the cabin: a process is never started without a tag it was
+ * given. With no volume up there is no number to have, and the tag is only
+ * not a membership yet — the cabin is made.
+ */
+static error_t cabin_wear_tags(cabin_t *cabin, const char *tags)
+{
+    size_t len = tags ? strlen(tags) : 0;
+    size_t at  = 0;
+    for (;;)
+    {
+        TagSpelling tag;
+        error_t rc = TagListNext(tags, len, &at, &tag);
+        if (rc != OK || !tag.key)
+            return rc;
+
+        uint16_t tid;
+        rc = TagFSInternSpelling(&tag, &tid);
+        if (rc == ERR_TAGFS_NOT_INITIALIZED)
+            continue;
+        if (rc != OK)
+            return rc;
+
+        /* The user's context may name this tag without yet having a number
+         * for it; this is the number. */
+        UseContextBindTag(&tag, tid);
+        if (cabin_set_tag_bit(cabin, tid) != 0)
+            return ERR_NO_MEMORY;
+        /* Mirror the fixed auth bit for a bare auth key. Plain OR: the cabin
+         * is not published to any core yet. */
+        if (!tag.value)
+            cabin->auth_bits |= AuthBitForKey(tag.key, tag.key_len);
+    }
+}
+
 cabin_t *cabin_create(uint32_t pid, const char *tags)
 {
     cabin_t *cabin = kmalloc(sizeof(cabin_t));
@@ -127,39 +164,10 @@ cabin_t *cabin_create(uint32_t pid, const char *tags)
     cabin->aslr_buf_heap_base = CABIN_BUF_HEAP_START + aslr.buf_heap_offset;
     cabin->buf_heap_next      = cabin->aslr_buf_heap_base;
 
-    if (tags && tags[0] != '\0')
+    if (cabin_wear_tags(cabin, tags) != OK)
     {
-        const char *pos = tags;
-        while (*pos)
-        {
-            const char *comma = strchr(pos, ',');
-            size_t len = comma ? (size_t)(comma - pos) : strlen(pos);
-            if (len > 0 && len < 256)
-            {
-                char tag_buf[256];
-                memcpy(tag_buf, pos, len);
-                tag_buf[len] = '\0';
-
-                char key[256], value[256];
-                tagfs_parse_tag(tag_buf, key, sizeof(key), value, sizeof(value));
-
-                uint16_t tid = tagfs_tag_intern(tag_buf);
-                if (tid != TAGFS_INVALID_TAG_ID)
-                {
-                    /* The user's context may name this tag without yet having
-                     * a number for it; this is the number. */
-                    UseContextBindTag(tag_buf, tid);
-                    cabin_set_tag_bit(cabin, tid);
-                    /* Mirror the fixed auth bit for a bare auth key. Plain
-                     * OR: the cabin is not published to any core yet. */
-                    if (!value[0])
-                        cabin->auth_bits |= auth_bit_for_key(key);
-                }
-            }
-            if (!comma)
-                break;
-            pos = comma + 1;
-        }
+        cabin_destroy(cabin);
+        return NULL;
     }
 
     atomic_store_u32(&cabin->strand_count, 1);

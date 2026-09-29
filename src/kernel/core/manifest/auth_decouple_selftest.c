@@ -1,7 +1,7 @@
 #include "auth_decouple_selftest.h"
 #include "auth_tags.h"
 #include "manifest_auth.h"   /* auth_level_permits, OP_AUTH_* */
-#include "tagfs.h"           /* TagRegistry, tag_registry_* */
+#include "tagfs.h"           /* TagRegistry, TagRegistryIntern */
 #include "klib.h"
 
 /* Enough distinct filler keys that the next interned id lands above 63. */
@@ -20,17 +20,21 @@ static error_t intern_god_high(uint16_t *out_god_id)
     for (unsigned i = 0; i < AUTHDEC_FILLERS; i++) {
         char filler[24];
         ksnprintf(filler, sizeof(filler), "authdec.filler.%u", i);
-        if (tag_registry_intern(&reg, filler, NULL) == TAGFS_INVALID_TAG_ID) {
+        TagSpelling filler_tag = TagSpellingOfKey(filler);
+        uint16_t    filler_id;
+        if (TagRegistryIntern(&reg, &filler_tag, &filler_id) != OK) {
             kprintf("[AUTHDEC] FAIL: filler intern %u\n", i);
             tag_registry_destroy(&reg);
             return ERR_INTERNAL;
         }
     }
 
-    uint16_t god_id = tag_registry_intern(&reg, "god", NULL);
+    TagSpelling god    = TagSpellingOfKey("god");
+    uint16_t    god_id = TAGFS_INVALID_TAG_ID;
+    error_t     named  = TagRegistryIntern(&reg, &god, &god_id);
     tag_registry_destroy(&reg);
 
-    if (god_id == TAGFS_INVALID_TAG_ID) {
+    if (named != OK) {
         kprintf("[AUTHDEC] FAIL: god intern\n");
         return ERR_INTERNAL;
     }

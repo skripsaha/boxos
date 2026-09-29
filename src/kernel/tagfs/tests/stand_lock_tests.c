@@ -66,7 +66,8 @@ static TestResult TestStandRegistryFlushHoldsNoLock(void)
     TestResult  verdict = TEST_PASS;
     TagFSState* fs      = tagfs_get_state();
 
-    TEST_ASSERT(tagfs_tag_intern(StandFreshFlushTag()) != TAGFS_INVALID_TAG_ID,
+    uint16_t fresh_id;
+    TEST_ASSERT(tagfs_tag_intern(StandFreshFlushTag(), &fresh_id) == OK,
                 "a name the volume never had is interned, and not yet flushed");
     uint32_t witnessed = fs->registry->lock.Witnessed;
     int      flushed   = tag_registry_flush(fs->registry);

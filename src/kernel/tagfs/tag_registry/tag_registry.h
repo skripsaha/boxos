@@ -5,13 +5,12 @@
 
 int          tag_registry_init(TagRegistry* reg);
 void         tag_registry_destroy(TagRegistry* reg);
-uint16_t     tag_registry_intern(TagRegistry* reg, const char* key, const char* value);
-uint16_t     tag_registry_lookup(TagRegistry* reg, const char* key, const char* value);
+error_t      TagRegistryIntern(TagRegistry* reg, const TagSpelling* tag, uint16_t* out_id);
+uint16_t     TagRegistryLookup(TagRegistry* reg, const TagSpelling* tag);
 void         tag_registry_mark_system(TagRegistry* reg, uint16_t tag_id);
-bool         tag_registry_is_system(TagRegistry* reg, uint16_t tag_id);
-const char*  tag_registry_key(TagRegistry* reg, uint16_t tag_id);
-const char*  tag_registry_value(TagRegistry* reg, uint16_t tag_id);
-error_t      TagRegistryKeyIds(TagRegistry* reg, const char* key, TagIdList* out);
+bool         TagRegistrySpelling(TagRegistry* reg, uint16_t tag_id, TagSpelling* out,
+                                 bool* is_system);
+error_t      TagRegistryKeyIds(TagRegistry* reg, const char* key, size_t key_len, TagIdList* out);
 error_t      tag_registry_flush(TagRegistry* reg);
 int          tag_registry_load(TagRegistry* reg, uint32_t first_block);
 
