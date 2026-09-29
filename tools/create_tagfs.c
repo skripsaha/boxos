@@ -191,7 +191,7 @@ static uint16_t intern_tag(const char* key, const char* value) {
 
 /* Intern the reserved vocabulary first so it claims tag_ids 0..11 — the same
  * on-disk ID contract the kernel's format-seed produces. The kernel restores
- * each tag at its stored id (tag_registry.c intern_with_id_unlocked), so the
+ * each tag at its stored id (tag_registry.c RegistryAdopt), so the
  * auth-privilege keys (god/stopped/bypass/network) land at ids < 64 and their
  * (1ULL<<id) masks are non-zero. Reserved keys that a file also carries dedup
  * back onto these low ids; genuinely new file tags start at id 12. */
@@ -882,7 +882,7 @@ static int write_registry_chain(FILE* disk, uint32_t data_start_block,
         uint8_t* p = blk.data + offset;
 
         /* tag_id (uint16_t) — the kernel RESTORES the tag at this exact id on
-         * load (tag_registry.c intern_with_id_unlocked), so the intern order
+         * load (tag_registry.c RegistryAdopt), so the intern order
          * above IS the on-disk ID contract, not a throwaway field. */
         memcpy(p, &g_tags[i].tag_id, 2); p += 2;
         /* flags (uint8_t) */

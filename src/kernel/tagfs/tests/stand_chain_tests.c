@@ -8,8 +8,8 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 // ============================================================================
-// The chains the registry and the file table grow, and registries that are
-// not the volume's
+// The chains the registry and the file table grow, registries that are not the
+// volume's, and what a registry hands out
 //
 // A chain that grows takes a block, and the link naming that block is written
 // into the chain's last block. Written before the block itself, one refused
@@ -274,6 +274,70 @@ out:
         BlockFailDisarm();
     if (owed)
         verdict = StandRegistryGrowthLanded(verdict, &before, block, first, count);
+    return verdict;
+}
+
+/* The registry made to outgrow its last block again, and this time the flush
+ * that proves the new block's stamp is refused. Nothing may name the block
+ * then — its stamp is not proven — and nothing may lose it either: it is
+ * taken and stamped, so a flush that forgot it would leave it marked used and
+ * owned by nothing for the life of the volume (CR-11). The refused flush keeps
+ * it in hand, and the unarmed flush after it links that very block. */
+static TestResult TestStandRegistryFlushKeepsItsBlock(void)
+{
+    TestResult  verdict = TEST_PASS;
+    TagFSState* fs      = tagfs_get_state();
+    StandChain  before  = { 0 };
+    StandChain  after   = { 0 };
+    uint32_t    first   = 0, count = 0, block = 0, landed = 0;
+    bool        owed    = false;
+    bool        armed   = false;
+    const char* aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TEST_ASSERT_EQ(tag_registry_flush(fs->registry), 0, "an unarmed flush settles the registry first");
+    TEST_ASSERT(StandRegistryChain(&before, NULL) && !before.broken,
+                "the registry's chain on the medium is whole");
+    owed = StandRegistryOverfill(&before, &first, &count);
+    TEST_ASSERT(owed, "names that outgrow the registry's last block by one record are interned");
+    TEST_ASSERT(StandNextBlock(&block), "the allocator has a block for the growth to take");
+
+    BlockFailArm(tagfs_get_seat(), BLOCK_FAIL_FLUSH, 0, 0, 1);
+    armed = true;
+    int  flushed = tag_registry_flush(fs->registry);
+    bool fired   = BlockFailFired();
+    BlockFailDisarm();
+    armed = false;
+    TEST_ASSERT(fired, "the flush that proves the new block's stamp was the one refused");
+    TEST_ASSERT(flushed != 0, "and the registry's flush that met it says so");
+    TEST_ASSERT(StandRegistryChain(&after, NULL) && !after.broken && after.links == before.links,
+                "nothing on the medium names the new block: the chain is as long as it was");
+    TEST_ASSERT(StandBlockInUse(block), "and the block the growth took is still taken");
+
+    owed = false;
+    TEST_ASSERT_EQ(tag_registry_flush(fs->registry), 0, "an unarmed flush afterwards is taken");
+    TEST_ASSERT(StandRegistryChain(&after, NULL) && !after.broken && after.links == before.links + 1,
+                "and grows the registry's chain on the medium by one block");
+    for (uint32_t i = 0; i < count; i++) {
+        StandGrowTag(first + i);
+        landed += StandRegistryHoldsOnMedium(STAND_GROW_KEY, s_grow_value);
+    }
+    TEST_ASSERT_EQ(landed, count, "carrying every name the test interned");
+
+    bool lost = after.last != block;
+    TestEvidence("blocks a refused registry growth took that its retry did not link", lost);
+    if (lost) {
+        verdict = TEST_DEFECT;
+        if (StandBlockInUse(block))
+            tagfs_free_blocks(block, 1);    /* nothing names it: the test gives it back */
+    }
+out:
+    if (armed)
+        BlockFailDisarm();
+    if (owed)
+        tag_registry_flush(fs->registry);
     return verdict;
 }
 
@@ -604,19 +668,108 @@ out:
     return verdict;
 }
 
+// ----------------------------------------------------------------------------
+// What a registry hands out
+// ----------------------------------------------------------------------------
+
+#define STAND_GROUP_FIRST 9u    /* one more than a new key group's first array holds */
+
+static char     s_group_key[24];
+static char     s_group_tag[40];
+static uint16_t s_group_ids[2 * STAND_GROUP_FIRST];
+
+/* "stand_group<k>:<v>"; its key, "stand_group<k>", is left in s_group_key. */
+static const char* StandGroupTag(uint32_t k, uint32_t v)
+{
+    ksnprintf(s_group_key, sizeof(s_group_key), "stand_group%u", k);
+    ksnprintf(s_group_tag, sizeof(s_group_tag), "%s:%u", s_group_key, v);
+    return s_group_tag;
+}
+
+/* The ids of every tag of one key, asked for by a query of `key:...`, are the
+ * caller's copy. The registry's own array of a key is freed by the key's next
+ * tag once it outgrows it — on any core, while a query reads — so an array
+ * the registry handed out would be read after it was freed. The copy is
+ * written over by the test, which the registry must not notice; then the key
+ * grows by nine, moving the registry's array, and the copy the test holds
+ * still says what it said. A key of the series no tag has yet is taken, since
+ * a tag is interned for good. */
+static TestResult TestStandRegistryKeyIdsAreCopies(void)
+{
+    TestResult  verdict = TEST_PASS;
+    TagFSState* fs      = tagfs_get_state();
+    TagIdList   copy    = { 0 };
+    TagIdList   again   = { 0 };
+    bool        ours    = true;
+    uint32_t    k       = 0;
+
+    while (tagfs_tag_lookup(StandGroupTag(k, 0)) != TAGFS_INVALID_TAG_ID)
+        k++;
+    for (uint32_t v = 0; v < STAND_GROUP_FIRST; v++) {
+        s_group_ids[v] = tagfs_tag_intern(StandGroupTag(k, v));
+        TEST_ASSERT(s_group_ids[v] != TAGFS_INVALID_TAG_ID, "a tag of a key no tag had is interned");
+    }
+    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, s_group_key, &copy), "the key's ids are asked for");
+    TEST_ASSERT_EQ(copy.count, STAND_GROUP_FIRST, "and all of them come back");
+    TEST_ASSERT(memcmp(copy.ids, s_group_ids, sizeof(uint16_t) * STAND_GROUP_FIRST) == 0,
+                "in the order they were interned");
+
+    for (uint32_t v = 0; v < STAND_GROUP_FIRST; v++)
+        copy.ids[v] = TAGFS_INVALID_TAG_ID;
+    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, s_group_key, &again),
+                   "the key's ids are asked for again");
+    bool shared = again.count != STAND_GROUP_FIRST ||
+                  memcmp(again.ids, s_group_ids, sizeof(uint16_t) * STAND_GROUP_FIRST) != 0;
+    TestEvidence("copies of a key's tag ids that were the registry's own array", shared);
+    if (shared) {
+        /* What the test wrote over was the registry's: put back, and freed by
+         * nobody but the registry. */
+        memcpy(copy.ids, s_group_ids, sizeof(uint16_t) * STAND_GROUP_FIRST);
+        ours    = false;
+        verdict = TEST_DEFECT;
+        goto out;
+    }
+
+    memcpy(copy.ids, s_group_ids, sizeof(uint16_t) * STAND_GROUP_FIRST);
+    kfree(again.ids);
+    again.ids = NULL;
+    for (uint32_t v = STAND_GROUP_FIRST; v < 2 * STAND_GROUP_FIRST; v++) {
+        s_group_ids[v] = tagfs_tag_intern(StandGroupTag(k, v));
+        TEST_ASSERT(s_group_ids[v] != TAGFS_INVALID_TAG_ID, "the key grows by nine more");
+    }
+    TEST_ASSERT(copy.count == STAND_GROUP_FIRST &&
+                memcmp(copy.ids, s_group_ids, sizeof(uint16_t) * STAND_GROUP_FIRST) == 0,
+                "and the copy taken before says what it said");
+    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, s_group_key, &again), "a copy taken now");
+    TEST_ASSERT(again.count == 2 * STAND_GROUP_FIRST &&
+                memcmp(again.ids, s_group_ids, sizeof(uint16_t) * 2 * STAND_GROUP_FIRST) == 0,
+                "holds all eighteen, in order");
+out:
+    if (ours) {
+        kfree(copy.ids);
+        kfree(again.ids);
+    }
+    return verdict;
+}
+
 // ============================================================================
 // The suite — the tests that grow a chain first, then the ones that lean on a
-// chain of more than one block
+// chain of more than one block, then what a registry hands out
 // ============================================================================
 
 static const TestCase g_stand_chain_tests[] = {
     { .name  = "stand_registry_growth_links_what_landed",
       .func  = TestStandRegistryGrowthLinksWhatLanded,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.1",
       .caveat_defect = "a registry that grows writes the link to its new block before the block "
                        "itself, so one refused or lost write leaves a chain the mount refuses on "
                        "every boot" },
+    { .name  = "stand_registry_flush_keeps_its_block",
+      .func  = TestStandRegistryFlushKeepsItsBlock,
+      .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "a registry flush that fails after taking a block for its chain forgets "
+                       "the block, which stays marked used and owned by nothing for the life of "
+                       "the volume" },
     { .name  = "stand_table_grows_onto_a_stamp", .func = TestStandTableGrowsOntoAStamp,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a sync that lengthens the file table writes the link to its new block "
@@ -630,16 +783,20 @@ static const TestCase g_stand_chain_tests[] = {
     { .name  = "stand_registry_scratch_leaves_the_volume_alone",
       .func  = TestStandRegistryScratchLeavesTheVolumeAlone,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.1",
       .caveat_defect = "a registry built and thrown away beside the volume's shares the volume's "
                        "chain and its mark of what is owed, so its end makes the volume's next "
                        "flush take new blocks and leave the old ones owned by nothing" },
     { .name  = "stand_registry_load_refuses_what_it_cannot_hold",
       .func  = TestStandRegistryLoadRefusesWhatItCannotHold,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.1",
       .caveat_defect = "a registry load whose allocation is refused drops what it could not hold "
                        "and answers OK, so the volume mounts missing tags its medium carries" },
+    { .name  = "stand_registry_key_ids_are_copies",
+      .func  = TestStandRegistryKeyIdsAreCopies,
+      .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "a key's tag ids were handed out as the registry's own array after its "
+                       "lock was let go, so the key's next tag could free it under a query still "
+                       "reading it" },
 };
 
 const TestSuite g_stand_chain_suite = {

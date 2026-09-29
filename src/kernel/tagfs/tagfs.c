@@ -3639,7 +3639,9 @@ static void tagfs_name_stem(const char *filename, char *out, size_t out_size)
 }
 
 /* Intern the name's tag. Called WITHOUT g_state.lock: a new tag flushes the
- * registry to the medium, and that I/O must not run under the state lock. */
+ * registry to the medium, and that flush writes, and may wait for another
+ * core's flush of the registry — neither of which may happen under the state
+ * lock. A name the registry already has costs the flush nothing. */
 static uint16_t tagfs_name_tag_intern(const char *filename)
 {
     char stem[128];
@@ -3647,10 +3649,7 @@ static uint16_t tagfs_name_tag_intern(const char *filename)
     if (stem[0] == '\0' || !g_state.registry)
         return TAGFS_INVALID_TAG_ID;
     uint16_t tag = tag_registry_intern(g_state.registry, stem, NULL);
-    if (tag_registry_is_dirty())
-    {
-        tag_registry_flush(g_state.registry);
-    }
+    tag_registry_flush(g_state.registry);
     return tag;
 }
 
@@ -4209,11 +4208,9 @@ static int tagfs_add_tag_string_inside(uint32_t file_id, const char *key, const 
     uint16_t tag_id = tag_registry_intern(g_state.registry, key, value);
     if (tag_id == TAGFS_INVALID_TAG_ID)
         return -1;
-    // Flush registry to disk if a new tag was created (crash safety)
-    if (tag_registry_is_dirty())
-    {
-        tag_registry_flush(g_state.registry);
-    }
+    /* A new tag is written before any file wears it; one the registry
+     * already had costs the flush nothing. */
+    tag_registry_flush(g_state.registry);
     return tagfs_add_tag(file_id, tag_id);
 }
 
@@ -4306,7 +4303,10 @@ static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
     if (!tag_ids)
         return 0;
 
-    TagKeyGroup **groups = kmalloc(sizeof(TagKeyGroup *) * count);
+    /* A wildcard's ids are copies (TagRegistryKeyIds): the registry frees its
+     * own array of a key when the key's next tag outgrows it, and that can
+     * happen on another core while this query reads. */
+    TagIdList *groups = kmalloc(sizeof(TagIdList) * count);
     if (!groups)
     {
         kfree(tag_ids);
@@ -4315,6 +4315,7 @@ static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
 
     uint32_t tag_count = 0;
     uint32_t group_count = 0;
+    int      result = 0;
 
     for (uint32_t i = 0; i < count; i++)
     {
@@ -4329,11 +4330,11 @@ static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
         // Check for wildcard (value == "...")
         if (strcmp(value, "...") == 0)
         {
-            TagKeyGroup *grp = tag_registry_key_group(g_state.registry, key);
-            if (grp)
-            {
-                groups[group_count++] = grp;
-            }
+            TagIdList *grp = &groups[group_count];
+            if (TagRegistryKeyIds(g_state.registry, key, grp) != OK)
+                goto out;
+            if (grp->count > 0)
+                group_count++;
         }
         else
         {
@@ -4342,18 +4343,16 @@ static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
             if (tid == TAGFS_INVALID_TAG_ID)
             {
                 // Tag not in registry — no files can match
-                kfree(tag_ids);
-                kfree(groups);
-                return 0;
+                goto out;
             }
             tag_ids[tag_count++] = tid;
         }
     }
 
-    int result = tag_bitmap_query(g_state.bitmap_index,
-                                  tag_ids, tag_count,
-                                  groups, group_count,
-                                  out_file_ids, max_results);
+    result = tag_bitmap_query(g_state.bitmap_index,
+                              tag_ids, tag_count,
+                              groups, group_count,
+                              out_file_ids, max_results);
 
     // Post-filter: remove trashed/hidden files unless explicitly queried
     if (result > 0)
@@ -4379,13 +4378,11 @@ static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
         // Also check wildcard groups — if a group contains the tag, it's explicit
         for (uint32_t g = 0; g < group_count && (!query_has_trashed || !query_has_hidden); g++)
         {
-            if (!groups[g])
-                continue;
-            for (uint32_t k = 0; k < groups[g]->count; k++)
+            for (uint32_t k = 0; k < groups[g].count; k++)
             {
-                if (groups[g]->tag_ids[k] == trashed_id)
+                if (groups[g].ids[k] == trashed_id)
                     query_has_trashed = true;
-                if (groups[g]->tag_ids[k] == hidden_id)
+                if (groups[g].ids[k] == hidden_id)
                     query_has_hidden = true;
             }
         }
@@ -4407,6 +4404,9 @@ static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
         }
     }
 
+out:
+    for (uint32_t g = 0; g < group_count; g++)
+        kfree(groups[g].ids);
     kfree(tag_ids);
     kfree(groups);
     return result;

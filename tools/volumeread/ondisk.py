@@ -132,7 +132,7 @@ CHAIN_HEADER = 16                       # tagfs.h:81, 103, 114 — every chain h
 
 REGISTRY_BLOCK = Fields("<IIHH4x",      # tagfs.h:85-92 TagRegistryBlock header
                         "magic next_block entry_count used_bytes")
-REGISTRY_RECORD = Fields("<HBBH",       # tagfs.h:82-84; tag_registry.c:649-654
+REGISTRY_RECORD = Fields("<HBBH",       # tagfs.h:84-86; tag_registry.c RegistryPack
                          "tag_id flags key_len value_len")
 FILE_TABLE_BLOCK = Fields("<IIII",      # tagfs.h:104-110 FileTableBlock header
                           "magic next_block entry_count reserved")
@@ -153,7 +153,6 @@ META_RECORD = Fields("<HIIQQQHHHH",     # tagfs_boot.h:53-67; meta_pool.c:492-50
 FILE_ACTIVE, FILE_TRASHED, FILE_HIDDEN = 1, 2, 4   # tagfs.h:57-59; bit 3 is spent (tagfs.h:60)
 MAX_TAG_ID = 0x7FFE                     # tagfs.h:54 TAGFS_MAX_TAG_ID
 TAG_FLAG_HAS_VALUE, TAG_FLAG_SYSTEM = 1, 2   # tagfs_constants.h:36-37
-REGISTRY_VALUE_ROOM = 4096              # tag_registry.c:667-672: value_len >= sizeof(value[4096]) is skipped
 MIRROR_SLACK = 64                       # tagfs_init: meta_pool_mirror_init(next_file_id + 64); meta_pool.c:726 adds 1
 EXTENT_END_LIMIT = 0xFFFFFFFF           # meta_pool.c:631 start + count past 2^32-1 is an overflow
 
@@ -463,15 +462,14 @@ def ReadManifest(raw):
 
 def _CString(raw):
     """What the kernel holds after copying `raw` into a NUL-terminated buffer:
-    everything up to the first NUL (tag_registry.c:661-675)."""
+    everything up to the first NUL (tag_registry.c RegistryAdopt)."""
     return bytes(raw).split(b"\0", 1)[0]
 
 
 def ReadRegistryBlock(raw):
-    """A tag registry block (tagfs.h:85-92) and its records, walked exactly as
-    tag_registry_load walks them (tag_registry.c:640-685). A record whose value
-    will not fit the loader's 4096-byte buffer is stepped over, not interned,
-    and is listed with `skipped` so the census can say so."""
+    """A tag registry block (tagfs.h:87-94) and its records, walked exactly as
+    tag_registry_load walks them: entry_count records packed from the start of
+    the data, and none past its end."""
     d = REGISTRY_BLOCK.Unpack(raw)
     data = raw[CHAIN_HEADER:CHAIN_HEADER + REGISTRY_DATA]
     records, offset = [], 0
@@ -488,7 +486,6 @@ def ReadRegistryBlock(raw):
         r["key"] = _CString(data[key_at:value_at])
         r["value"] = (_CString(data[value_at:value_at + r["value_len"]])
                       if r["value_len"] else None)
-        r["skipped"] = r["value_len"] >= REGISTRY_VALUE_ROOM
         records.append(r)
         offset += size
     d["records"] = records
@@ -715,7 +712,7 @@ CHAIN_NAMES = {REGISTRY_MAGIC: "tag registry", FILETBL_MAGIC: "file table",
 
 def WalkChain(read_block, first, magic, run):
     """A chain walked exactly as its loader walks it — the three are one rule
-    (file_table.c:105-170, meta_pool.c:324-380, tag_registry.c:604-697): a link
+    (file_table.c:105-170, meta_pool.c:324-380, tag_registry_load): a link
     outside the run is refused before it is read, a block that will not read or
     does not carry the magic is refused, next_block == 0 ends the chain, and
     the run's own length in hops is a cycle.

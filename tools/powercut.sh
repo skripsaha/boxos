@@ -818,18 +818,13 @@ EOF
     restore src/kernel/tagfs/tagfs.c
 }
 
-# The two chains, each asked the question its step leaves. The file table's
-# growth as step 1.1 found it is put back — a new block linked with no stamp
-# and no flush behind the link — so a prefix that keeps the link and not the
-# block runs the chain into unstamped ground again, and the lifted table rows
-# must say their defect is back. The registry, whose step is still to come,
-# has the fix put in in the pool's own shape (meta_pool.c "THE NEW BLOCK IS
-# STAMPED BEFORE ANYTHING POINTS AT IT"): a block it has just taken is
-# stamped, empty, before the link to it is written. Every prefix then mounts,
-# and the registry's prefix caveat is lifted early. The stamp and the link
-# are still two writes of one epoch, so a cut that keeps the link and loses
-# the stamp is still refused: the subset verdict is asked what it answers, as
-# the evidence for what closes it.
+# Both chains' fixes for MP-D5 are in (step 1.1), and here both are taken
+# out as step 1.1 found them: the file table's new block linked with no stamp
+# and no flush behind the link, the registry's taken and never stamped, and
+# the link to it written before the block itself. A prefix that keeps a link
+# and not its block runs that chain into unstamped ground again, and so does
+# a subset that keeps the link and loses the block: the lifted rows of both
+# chains, prefix and subset, must say their defect is back.
 run_chaingrowmut() {
     mut_on src/kernel/tagfs/file_table/file_table.c "logcheck mutation" <<'EOF'
 import sys
@@ -846,29 +841,23 @@ EOF
     mut_on src/kernel/tagfs/tag_registry/tag_registry.c "logcheck mutation" <<'EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = ("                if (chain_append(new_block) != 0) {\n"
-     "                    TagFSLockDrop(&reg->lock);\n"
-     "                    return -1;\n"
-     "                }\n")
-assert s.count(a) == 1
-open(p, "w").write(s.replace(a, a +
-     "                /* logcheck mutation: the new block is stamped before the link to it */\n"
-     "                static TagRegistryBlock stamp;\n"
-     "                memset(&stamp, 0, sizeof(stamp));\n"
-     "                stamp.magic = TAGFS_REGISTRY_MAGIC;\n"
-     "                if (tagfs_write_block(new_block, &stamp) != 0) {\n"
-     "                    TagFSLockDrop(&reg->lock);\n"
-     "                    return -1;\n"
-     "                }\n"))
+a = "        rc = SpareStamp(TAGFS_REGISTRY_MAGIC, reg->spare_image, &reg->spare_block, &reg->spare_need);\n"
+b = "    rc = tagfs_write_block(reg->spare_block, reg->spare_image);\n"
+assert s.count(a) == 1 and s.count(b) == 1
+s = s.replace(a, "        rc = tagfs_alloc_blocks(1, &reg->spare_block) == 0 ? OK : ERR_TAGFS_NO_SPACE;   "
+                 "/* logcheck mutation: the new block is taken and never stamped */\n", 1)
+open(p, "w").write(s.replace(b,
+     "    reg->tail_image->next_block = reg->spare_block;   /* the link goes down before the block it names */\n"
+     "    tagfs_write_block(reg->tail_block, reg->tail_image);\n" + b, 1))
 EOF
     mut_run chaingrowmut chaingrow code:prefix:CHAIN_REFUSED:table defect \
         "the table's new block linked with no stamp and no flush behind it, a prefix refuses the mount over the table again: the defect is back"
     pc_expect code:subset:CHAIN_REFUSED:table defect \
         "and a cut that keeps the table's link and loses its new block refuses it too"
-    pc_expect code:prefix:CHAIN_REFUSED:registry behaves \
-        "the registry's new block stamped before its link, no prefix refuses the mount over the registry: the caveat is lifted early"
+    pc_expect code:prefix:CHAIN_REFUSED:registry defect \
+        "the registry's link written before its new block, a prefix that keeps the link refuses the mount over the registry: the defect is back"
     pc_expect code:subset:CHAIN_REFUSED:registry defect \
-        "the stamp and the link in one epoch, a cut that keeps the link and loses the stamp still refuses the registry"
+        "and a subset that keeps the registry's link and loses its new block refuses it too"
     restore src/kernel/tagfs/tag_registry/tag_registry.c
     restore src/kernel/tagfs/file_table/file_table.c
 }

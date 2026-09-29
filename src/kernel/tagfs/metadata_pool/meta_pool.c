@@ -22,11 +22,10 @@ static uint32_t     g_current_block_num = 0;
 static bool         g_current_dirty    = false;
 
 /* The empty header a block is stamped with when the chain lengthens. BSS and
- * not a local, for the reason tag_registry.c states over its own scratch: a
- * MetaPoolBlock is exactly 4 KiB, meta_pool_write is reached from the K-Core
- * continuation that finishes an async write, and a 4 KiB frame there competes
- * with nested IRQ frames on a per-cpu stack. Every path into this file holds
- * g_state.lock, so one shared buffer has one user at a time. */
+ * not a local: a MetaPoolBlock is exactly 4 KiB, meta_pool_write is reached
+ * from the K-Core continuation that finishes an async write, and a 4 KiB frame
+ * there competes with nested IRQ frames on a per-cpu stack. Every path into
+ * this file holds g_state.lock, so one shared buffer has one user at a time. */
 static MetaPoolBlock g_fresh_block;
 // Note: No local lock - use g_state.lock from tagfs.c for all operations
 // static spinlock_t   g_lock;

@@ -13,8 +13,9 @@
 // stand_lock_tests.c     the stand_lock suite: what crosses the medium, or
 //                        turns interrupts on, under a lock that must not allow it
 // stand_chain_tests.c    the stand_chain suite: the registry's and the file
-//                        table's chains as they grow, and registries that are
-//                        not the volume's; and the chain walk below
+//                        table's chains as they grow, registries that are not
+//                        the volume's, and what a registry hands out; and the
+//                        chain walk below
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.
