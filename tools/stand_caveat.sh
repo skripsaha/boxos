@@ -81,13 +81,15 @@ caveat_row() {
         race:TAG_DUPLICATE)
                     echo "1.6|a registry write torn by the cut leaves a record repeating another's key, and it is dropped" ;;
         chaingrow:prefix:CHAIN_REFUSED:table)
-                    echo "1.1|the file table writes its last block's link to a block it has just taken before that block, so a power cut between the two leaves a chain into unstamped ground and the kernel refuses the volume at every mount" ;;
+                    echo "|the file table writes its last block's link to a block it has just taken before that block, so a power cut between the two leaves a chain into unstamped ground and the kernel refuses the volume at every mount" ;;
         chaingrow:prefix:CHAIN_REFUSED:registry)
                     echo "1.1|the tag registry writes its last block's link to a block it has just taken before that block, so a power cut between the two leaves a chain into unstamped ground and the kernel refuses the volume at every mount" ;;
         chaingrow:subset:CHAIN_REFUSED:table)
-                    echo "1.1|a cut that keeps the file table's link to its new block and loses that block's own write, both in one flush epoch, leaves a chain into unstamped ground the kernel refuses to mount" ;;
+                    echo "|a cut that keeps the file table's link to its new block and loses that block's own write, both in one flush epoch, leaves a chain into unstamped ground the kernel refuses to mount" ;;
         chaingrow:subset:CHAIN_REFUSED:registry)
                     echo "1.1|a cut that keeps the tag registry's link to its new block and loses that block's own write, both in one flush epoch, leaves a chain into unstamped ground the kernel refuses to mount" ;;
+        chaingrow:prefix:SPARE_UNNAMED|chaingrow:subset:SPARE_UNNAMED)
+                    echo "1.6|a cut after the file table's new block is stamped and its stamp made durable, and before the link to it is written, keeps that Spare taken and named by nothing" ;;
         chaingrow:prefix:ORPHAN|chaingrow:subset:ORPHAN)
                     echo "1.6|a cut that keeps the bitmap of a block the registry or the file table has just taken and loses the link to it leaves that block marked used and owned by nothing" ;;
         # LockRank's places (lockrank_judge, below): every key a gate measured,
@@ -110,15 +112,15 @@ caveat_row() {
                     echo "1.1|the tag registry takes a block for its chain under its own lock, so the volume's state lock is taken under the registry while a rename takes the registry under state: the two orders of one ABBA (MP-D4), which stops both cores" ;;
         lockrank:table@file_table_flush:read|\
         lockrank:table@file_table_flush:write)
-                    echo "1.1|the file table's flush holds its IRQ-off lock across every medium read and write it makes, so a core that looks up a file spins with interrupts off for as long as the medium takes" ;;
+                    echo "|the file table's flush holds its IRQ-off lock across every medium read and write it makes, so a core that looks up a file spins with interrupts off for as long as the medium takes" ;;
         lockrank:table@file_table_flush/readahead@ReadAheadLookup|\
         lockrank:table@file_table_flush/readahead@ReadAheadInvalidate|\
         lockrank:table@file_table_flush/integrity@IntegrityUpdate|\
         lockrank:table@file_table_flush/braid@BraidIsHealthy)
-                    echo "1.1|a block is read or written for the file table with the table's lock held, so the read-ahead cache's, the integrity map's and Braid's locks are taken under that leaf" ;;
+                    echo "|a block is read or written for the file table with the table's lock held, so the read-ahead cache's, the integrity map's and Braid's locks are taken under that leaf" ;;
         lockrank:table@file_table_flush/state@tagfs_alloc_blocks_inside|\
         lockrank:table@file_table_flush/state@MapOwedSettle)
-                    echo "1.1|the file table takes a block for its chain under its own lock, so the volume's state lock is taken under the table while a create takes the table under state: the two orders of one ABBA (MP-D4), which stops both cores" ;;
+                    echo "|the file table takes a block for its chain under its own lock, so the volume's state lock is taken under the table while a create takes the table under state: the two orders of one ABBA (MP-D4), which stops both cores" ;;
         lockrank:integrity@IntegrityVerify:read|\
         lockrank:integrity@IntegrityVerify:write|\
         lockrank:integrity@IntegrityUpdate:read|\

@@ -13,7 +13,11 @@
 int      meta_pool_init(uint32_t first_block);
 
 /* Let the pool go. `write_back` false means exactly that and nothing else is
- * written — see the note on file_table_shutdown, which had the same fault. */
+ * written: a medium that went away, or a mount that failed halfway and is
+ * being taken apart, must not be written from what memory holds, which may
+ * describe a volume that is no longer the one under the head. This used to
+ * flush unconditionally, so tagfs_abandon(), whose whole contract is "without
+ * writing a byte", wrote through here. */
 void     meta_pool_shutdown(bool write_back);
 
 int      meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out);
