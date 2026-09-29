@@ -240,6 +240,9 @@ static struct {
     volatile error_t  status;
 } s_async_answer;
 
+/* Where the read waits if the seat is busy; the seat's until it answers. */
+static RoadsteadBerth s_async_berth;
+
 static void StandAsyncAnswered(uint8_t index, uint8_t slot, error_t status, void* ctx)
 {
     (void)index;
@@ -285,7 +288,7 @@ static TestResult TestStandBlockFailAsyncRead(void)
     BlockFailArm(seat, BLOCK_FAIL_READ, sector, TAGFS_BLOCK_SECTORS, 1);
     armed = true;
     error_t sub = BoardroomReadAsync(seat, sector, TAGFS_BLOCK_SECTORS, dma,
-                                     StandAsyncAnswered, NULL);
+                                     StandAsyncAnswered, NULL, &s_async_berth);
     bool fired = BlockFailFired();
     BlockFailDisarm();
     armed = false;
@@ -542,8 +545,9 @@ out:
  * kept for it. One whose ticket was taken before the need was read proves
  * nothing about that need even when the medium takes it — it is issued here
  * by hand, between its ticket and its answer, the way tagfs_flush_cache
- * issues one. One the medium refuses keeps nothing, and VolumeFlushFor asks
- * again; and a need already kept is answered without a word to the medium. */
+ * issues one. One the medium refuses keeps nothing, and the need asked for
+ * again through VolumeFlushFor is flushed; and a need already kept is answered
+ * without a word to the medium. */
 static TestResult TestStandFlushTicket(void)
 {
     TestResult verdict = TEST_PASS;

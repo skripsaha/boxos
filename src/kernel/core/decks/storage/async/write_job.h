@@ -6,7 +6,8 @@
 #include "tagfs.h"
 #include "boxos_crate.h"
 #include "process.h"
-#include "baton.h"   /* embedded never-drop MPSC node (cq_node) */
+#include "baton.h"      /* embedded never-drop MPSC node (cq_node) */
+#include "roadstead.h"  /* the job's own berth at the port */
 
 /*
  * WriteJob — async ObjWrite state machine.
@@ -96,6 +97,11 @@ typedef struct WriteJob {
      * ctx = this job; set once in ObjWriteAsync. Distinct from next_pending
      * (the token-wait list). */
     Baton cq_node;
+
+    /* Where each block's read or write waits when the port has no slot for
+     * it, or its door is shut for a cache flush (core/boardroom/roadstead.h).
+     * The port's from the submit until the answer, then the job's again. */
+    RoadsteadBerth berth;
 
     /* ---- CrateStage handoff (async-safe Crate descriptor staging) ----
      * Dispatcher allocated the Crate[] kbuf via crate_stage_in and points

@@ -32,8 +32,6 @@ int      QuillFindEverywhere(const char *name, uint32_t *ids, int max);
 /* A fresh, empty `name` on the whole volume — every earlier one deleted —
  * and its file id, or <= 0. */
 int      QuillCreate(const char *name);
-/* fwrite, asked again while the port answers ERR_BUSY; the final answer. */
-int64_t  QuillWrite(uint32_t fid, uint64_t off, const void *buf, size_t len);
 /* The size file_info reports, 0 when it will not answer. */
 uint64_t QuillSize(uint32_t fid);
 /* A count or a number as the shell gave it — digits only, at most ten, no

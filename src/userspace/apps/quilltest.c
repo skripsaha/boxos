@@ -164,20 +164,6 @@ uint64_t QuillReadBack(uint32_t fid, uint32_t seed, uint64_t size, int64_t *err)
     return size;
 }
 
-/* fwrite, asked again for as long as the answer is ERR_BUSY. That word is
- * the AHCI port's "every slot is taken, or a cache flush holds it whole —
- * come back", and the kernel leaves the coming back to whoever holds the
- * bytes (write_job.c); a writer that took it for a verdict would report the
- * flush of somebody else's write as its own failure. Every other answer is
- * the answer. */
-int64_t QuillWrite(uint32_t fid, uint64_t off, const void *buf, size_t len)
-{
-    int64_t w;
-    while ((w = fwrite(fid, off, buf, len)) == -(int64_t)ERR_BUSY)
-        yield();
-    return w;
-}
-
 /* =========================================================================
  *  Files by name, on the whole volume
  * ========================================================================= */
@@ -342,7 +328,7 @@ static QuillVerdict QuillBigWrite(const char *const *args)
 
     uint64_t t0 = 0, t1 = 0;
     time_uptime_ms(&t0);
-    int64_t wrote = QuillWrite((uint32_t)fid, 0, buf, QUILL_BIG_BYTES);
+    int64_t wrote = fwrite((uint32_t)fid, 0, buf, QUILL_BIG_BYTES);
     time_uptime_ms(&t1);
     bay_release(buf);
 
@@ -572,7 +558,7 @@ static QuillVerdict QuillColdRead(const char *const *args)
     }
 
     QuillFill(warm, QUILL_SEED_COLD, 0, QUILL_COLD_BYTES);
-    int64_t wrote = QuillWrite((uint32_t)fid, 0, warm, QUILL_COLD_BYTES);
+    int64_t wrote = fwrite((uint32_t)fid, 0, warm, QUILL_COLD_BYTES);
     int64_t got   = wrote == (int64_t)QUILL_COLD_BYTES
                         ? fread((uint32_t)fid, 0, cold, QUILL_COLD_BYTES) : 0;
 
@@ -624,7 +610,7 @@ static QuillVerdict QuillColdWrite(const char *const *args)
         return QUILL_FAIL;
     }
 
-    int64_t  wrote = QuillWrite((uint32_t)fid, 0, cold, QUILL_COLD_BYTES);
+    int64_t  wrote = fwrite((uint32_t)fid, 0, cold, QUILL_COLD_BYTES);
     uint64_t size  = QuillSize((uint32_t)fid);
 
     /* Read back into `warm`, filled first with bytes that are not zero, so a

@@ -50,13 +50,17 @@ volatile ahci_port_regs_t* ahci_get_port_regs_pub(uint8_t port_num) {
     return ahci_get_port_regs(port_num);
 }
 
-static int ahci_port_stop(ahci_port_t* port) {
+int ahci_port_stop(ahci_port_t* port) {
     if (!port || !port->regs) {
         return -1;
     }
 
     ahci_port_regs_t* regs = port->regs;
 
+    /* Counted before the engine goes down: clearing PxCMD.ST clears PxCI
+     * (AHCI 1.3.1 §3.3.14), and a caller polling its own slot must be able to
+     * tell that from its command finishing. */
+    __atomic_add_fetch(&port->trouble, 1u, __ATOMIC_SEQ_CST);
     regs->cmd &= ~AHCI_PCMD_ST;
 
     /* The exit is the fact — PxCMD.CR clearing — and the 500 ms is not a
@@ -109,7 +113,7 @@ static int ahci_port_stop(ahci_port_t* port) {
     return 0;
 }
 
-static int ahci_port_start(ahci_port_t* port) {
+int ahci_port_start(ahci_port_t* port) {
     if (!port || !port->regs) {
         return -1;
     }
@@ -142,11 +146,13 @@ static int ahci_port_start(ahci_port_t* port) {
 
 static void ahci_port_readmit(ahci_port_t* port);
 
-/* K-Core bottom-half: full port recovery (COMRESET) after a fatal error.
+/* K-Core bottom-half: the port's recovery after a fault (ahci_trouble.c).
  * Posted to a K-Core via the port's embedded never-drop recovery node
- * (BatonPass) because COMRESET busy-waits for hundreds of ms,
- * far too long for interrupt context. The IRQ path already failed the
- * port's outstanding async slots with ERR_IO before scheduling this.
+ * (BatonPass) because an engine restart or a COMRESET busy-waits for up to
+ * hundreds of ms, far too long for interrupt context. The fault only HELD the
+ * port's outstanding async commands; the recovery decides which of them failed.
+ * A caller standing over the port may have run the recovery already — whoever
+ * finds it owed first runs it — and then this pass finds nothing to do.
  *
  * ‼ AND THE SAME NODE CARRIES THE OTHER LONG JOB THIS PORT CAN NEED: being
  * BUILT AGAIN after it left the machine. One node and one `recovering` claim
@@ -160,42 +166,35 @@ static void ahci_deferred_recover(void* ctx) {
     if (__atomic_load_n(&port->standing, __ATOMIC_ACQUIRE) == AHCI_STANDING_LEFT) {
         ahci_port_readmit(port);
     } else {
-        ahci_port_recover(port);
+        AhciRecoverIfOwed(port);
     }
     __atomic_store_n(&port->recovering, 0, __ATOMIC_RELEASE);
+
+    /* A fault that came while this ran found the post already claimed, and
+     * posted nothing; what it asked for is still owed, so the node goes again. */
+    if (AhciRecoveryOwed(port) && port->active &&
+        __sync_bool_compare_and_swap(&port->recovering, 0, 1)) {
+        BatonPass(&port->recover_node);   /* never-drop */
+    }
 }
 
-/* Fire the completion callback and return the slot to the pool for each bit
- * in `mask`. Async slots always carry a callback (installed before arming);
- * sync slots are never tracked in issued_mask, so they never reach here and
- * free themselves from their own poll loop. The slot is freed BEFORE the
- * callback runs so a callback that chains another async op can reuse it. */
+/* Answer the berth and return the slot to the pool for each bit in `mask`.
+ * Async slots always carry a berth (put aboard at admission, before arming);
+ * a slot stood over is never tracked in issued_mask, so it never reaches here
+ * and is given back by its own caller. The slot goes back BEFORE the berth is
+ * answered, and the berth is not touched after it: its owner may issue the
+ * next command on the same berth from inside the answer. */
 static inline void ahci_retire_slots(ahci_port_t* state, uint8_t port_idx,
                                      uint32_t mask, error_t status) {
     while (mask) {
         uint8_t slot = (uint8_t)__builtin_ctz(mask);
         mask &= mask - 1;
-        void (*cb)(uint8_t, uint8_t, error_t, void*) = state->cb[slot];
-        void *ctx = state->cb_ctx[slot];
-        state->cb[slot]     = NULL;
-        state->cb_ctx[slot] = NULL;
-        ahci_free_slot(port_idx, slot);
-        if (cb) {
-            cb(port_idx, slot, status, ctx);
+        RoadsteadBerth* berth = state->aboard[slot];
+        AhciSlotReturn(state, slot);
+        if (berth) {
+            berth->answered(port_idx, slot, status, berth->ctx);
         }
     }
-}
-
-/* Claim-checked retire arbitration (Ф26 M1). issued_mask is the single arbiter
- * of which async slots are still ours to retire. A retiring actor offers a
- * `candidate` set and gets back only the bits its own atomic transition actually
- * cleared (1->0); it must retire ONLY those. With one retire actor (the BSP MSI
- * handler) this is a plain wrapper — won always equals candidate. It becomes
- * load-bearing once ahci_watchdog_scan can also retire from the PIT tick: two
- * actors that decide the same slot completed in the same instant then retire it
- * exactly once, and only the winner reads/clears cb[slot]. */
-static inline uint32_t ahci_claim(ahci_port_t* state, uint32_t candidate) {
-    return __sync_fetch_and_and(&state->issued_mask, ~candidate) & candidate;
 }
 
 void ahci_irq_handler(void) {
@@ -219,95 +218,81 @@ void ahci_irq_handler(void) {
 
         ahci_port_t* state = &ahci_ctrl.ports[i];
         if (!state->active) continue;
-
-        volatile ahci_port_regs_t* port = ahci_get_port_regs(i);
-        uint32_t port_is = port->is;
-
-        /* Clear PxIS FIRST (write-1-to-clear), BEFORE scanning for completed
-         * slots. AHCI completion-interrupt bits are per-FIS-type — DHRS for a
-         * plain Reg-D2H, SDBS for an NCQ Set-Device-Bits — NOT per-command, so
-         * several commands retiring close together collapse onto ONE bit. If
-         * PxIS were cleared only AFTER processing, a command that completes
-         * DURING this handler (the async-read state machine arms its next block
-         * inline from a retire callback, and under fast media that block
-         * finishes before we return) would have its shared status bit cleared
-         * with no fresh edge AND be absent from the one `completed` snapshot —
-         * so it would never be retired: its slot stays in issued_mask forever
-         * with a live callback, hanging the waiter. Clearing first means any
-         * late completion re-asserts a fresh PxIS edge -> a new MSI we service.
-         * The fatal-error check below uses the pre-clear `port_is` snapshot. */
-        port->is = port_is;
-
-        /* Drain EVERY completed slot, re-reading the completion register on each
-         * pass. A retired slot's callback may arm the next command of a chained
-         * async op (multi-block read); that command can finish before we exit,
-         * so a single pass loses it. Loop until no issued slot is complete.
-         *
-         * Per pass read issued_mask BEFORE the completion register: the
-         * submitter writes the register then issued_mask (IRQs off), so on x86
-         * TSO a slot present in the snapshot is still set in the register read,
-         * and `snapshot & ~outstanding` never falsely retires a just-armed slot.
-         * NCQ commands clear PxSACT on completion (PxCI clears early when the
-         * FIS is sent); non-queued commands clear PxCI.
-         *
-         * AHCI_DRAIN_MAX bounds a pathological self-arming callback; legitimate
-         * chains drain in a handful of passes. If ever hit, slots left
-         * outstanding re-raise a fresh PxIS edge (cleared above) and the next
-         * MSI continues the drain — correctness holds either way. */
-        enum { AHCI_DRAIN_MAX = 4096 };
-        for (uint32_t pass = 0; pass < AHCI_DRAIN_MAX; pass++) {
-            uint32_t snapshot    = __atomic_load_n(&state->issued_mask, __ATOMIC_ACQUIRE);
-            uint32_t outstanding = state->ncq
-                ? __atomic_load_n(&port->sact, __ATOMIC_ACQUIRE)
-                : __atomic_load_n(&port->ci,   __ATOMIC_ACQUIRE);
-            uint32_t completed   = snapshot & ~outstanding;
-            if (!completed) break;
-            /* Claim-checked retire: clear our candidates from issued_mask and
-             * retire ONLY the bits we actually won, so a concurrent watchdog
-             * retire (Ф26 M1) can never double-fire a slot. Single actor today
-             * => won == completed (behaviour-identical). */
-            uint32_t won = ahci_claim(state, completed);
-            if (!won) continue;
-            __sync_fetch_and_or(&state->completed_slots, won);
-            ahci_retire_slots(state, i, won, OK);
-        }
-
-        /* Fatal port errors (TFES/HBFS/IFS). On a task-file error the failing
-         * NCQ tag's PxSACT bit is NOT cleared (so it never appears in
-         * `completed`) and the HBA halts PxCMD.ST. Snapshot diagnostics, then
-         * fail every still-outstanding async slot with ERR_IO so waiters do
-         * not hang. Port re-start is handled by the deferred recovery path. */
-        if (port_is & (AHCI_PIS_TFES | AHCI_PIS_HBFS | AHCI_PIS_IFS)) {
-            __sync_fetch_and_add(&state->ncq_errors, 1);
-            __atomic_fetch_add(&state->stats.tfes_count, 1, __ATOMIC_RELAXED);
-            __atomic_store_n(&state->stats.last_tfd,       port->tfd,  __ATOMIC_RELAXED);
-            __atomic_store_n(&state->stats.last_serr,      port->serr, __ATOMIC_RELAXED);
-            __atomic_store_n(&state->stats.last_error_tsc, rdtsc(),    __ATOMIC_RELAXED);
-
-            uint32_t stuck = __atomic_load_n(&state->issued_mask, __ATOMIC_ACQUIRE);
-            if (stuck) {
-                uint32_t won = ahci_claim(state, stuck);
-                if (won) ahci_retire_slots(state, i, won, ERR_IO);
-            }
-
-            /* The HBA halts PxCMD.ST on a fatal error, so without a restart
-             * every later command on this port would stall. COMRESET busy-
-             * waits, so post it to a K-Core via the port's never-drop
-             * recovery node (allocation-free, IRQ-safe, undroppable). The CAS
-             * coalesces a storm of error IRQs into one post. */
-            /* Only multi-core schedules deferred recovery: the COMRESET runs
-             * on a K-Core pump loop, which exists only when total_cores > 1.
-             * On a single core async I/O is disabled and the sync path
-             * recovers the port inline, so deferring here would just enqueue
-             * to a ring nothing drains. */
-            if (g_amp.total_cores > 1 &&
-                __sync_bool_compare_and_swap(&state->recovering, 0, 1)) {
-                BatonPass(&state->recover_node);   /* never-drop */
-            }
-        }
+        AhciPortReap(state);
     }
 
     ahci_ctrl.hba_mem->is = is;
+}
+
+void AhciPortReap(ahci_port_t* state) {
+    if (!state || !state->active) {
+        return;
+    }
+    uint8_t i = state->port_num;
+    volatile ahci_port_regs_t* port = ahci_get_port_regs(i);
+
+    /* The trouble count before PxIS: two reapers that read the same fatal bit
+     * before either cleared it hand the port to its recovery once, because
+     * the first fault moves the count the second one read. */
+    uint32_t seen = __atomic_load_n(&state->trouble, __ATOMIC_ACQUIRE);
+    uint32_t port_is = port->is;
+
+    /* Clear PxIS FIRST (write-1-to-clear), BEFORE scanning for completed
+     * slots. AHCI completion-interrupt bits are per-FIS-type — DHRS for a
+     * plain Reg-D2H, SDBS for an NCQ Set-Device-Bits — NOT per-command, so
+     * several commands retiring close together collapse onto ONE bit. If PxIS
+     * were cleared only AFTER processing, a command that completes DURING this
+     * reap would have its shared status bit cleared with no fresh edge AND be
+     * absent from the one `completed` snapshot — so it would never be retired:
+     * its slot stays in issued_mask forever with its berth aboard, hanging its
+     * owner. Clearing first means any late completion re-asserts a fresh PxIS
+     * edge -> a new MSI we service. The fatal-error check below uses the
+     * pre-clear `port_is` snapshot. Nothing to clear is no store: a caller
+     * standing over the port reaps on every turn of its wait. */
+    if (port_is) {
+        port->is = port_is;
+    }
+
+    /* Drain EVERY completed slot, re-reading the completion register on each
+     * pass: a command can finish before this returns, and a single pass would
+     * lose it. Loop until no issued slot is complete.
+     *
+     * Per pass read issued_mask BEFORE the completion register: the submitter
+     * writes the register then issued_mask (IRQs off), so on x86 TSO a slot
+     * present in the snapshot is still set in the register read, and
+     * `snapshot & ~outstanding` never falsely retires a just-armed slot. NCQ
+     * commands clear PxSACT on completion (PxCI clears early when the FIS is
+     * sent); non-queued commands clear PxCI.
+     *
+     * AHCI_DRAIN_MAX bounds a pathological run of completions; legitimate
+     * ones drain in a handful of passes. If ever hit, slots left outstanding
+     * re-raise a fresh PxIS edge (cleared above) and the next MSI continues
+     * the drain — correctness holds either way. */
+    enum { AHCI_DRAIN_MAX = 4096 };
+    for (uint32_t pass = 0; pass < AHCI_DRAIN_MAX; pass++) {
+        uint32_t snapshot    = __atomic_load_n(&state->issued_mask, __ATOMIC_ACQUIRE);
+        uint32_t outstanding = state->ncq
+            ? __atomic_load_n(&port->sact, __ATOMIC_ACQUIRE)
+            : __atomic_load_n(&port->ci,   __ATOMIC_ACQUIRE);
+        uint32_t completed   = snapshot & ~outstanding;
+        if (!completed) break;
+        /* Claim-checked retire: clear our candidates from issued_mask and
+         * retire ONLY the bits we actually won, so the watchdog, a fault or a
+         * caller reaping by hand can never double-answer a slot. */
+        uint32_t won = ahci_claim(state, completed);
+        if (!won) continue;
+        __sync_fetch_and_or(&state->completed_slots, won);
+        ahci_retire_slots(state, i, won, OK);
+    }
+
+    /* Fatal port errors (TFES/HBFS/IFS). On a task-file error the failing NCQ
+     * tag's PxSACT bit is NOT cleared (so it never appears in `completed`) and
+     * the HBA halts PxCMD.ST. Everything still in flight goes to the port's
+     * recovery, which tells the failed command from the ones beside it. */
+    if (port_is & (AHCI_PIS_TFES | AHCI_PIS_HBFS | AHCI_PIS_IFS)) {
+        (void)AhciPortFault(state, port_is & (AHCI_PIS_TFES | AHCI_PIS_HBFS | AHCI_PIS_IFS),
+                            seen, 0);
+    }
 }
 
 /* Ф26 M1 — AHCI async-completion watchdog: a safety BACKSTOP, not the delivery
@@ -315,8 +300,9 @@ void ahci_irq_handler(void) {
  * harbour-master's overdue-ship register, glanced at once per PIT tick on the
  * BSP — the same core the AHCI MSI targets, so this scan and ahci_irq_handler
  * are mutually exclusive, and ahci_claim keeps retire correct even if MSI
- * routing is ever spread across cores. It NEVER writes PxIS (the MSI handler
- * owns that W1C); it only READS the PxSACT/PxCI completion level.
+ * routing is ever spread across cores, or a caller reaps by hand. It writes
+ * PxIS only by serving a lost error interrupt the way the handler would have
+ * (AhciPortReap); otherwise it only READS the PxSACT/PxCI completion level.
  *
  * It has a second caller. The boot-time proof of a read nobody stands over
  * (BoardroomProveUnattendedRead) turns it by hand, on the BSP, before that
@@ -339,19 +325,18 @@ void ahci_irq_handler(void) {
  *     success — that case falls to Tier 2 / the MSI TFES path.)
  *
  *   TIER 2 — genuine wedge. A slot still outstanding past CONFIG_AHCI_IO_TIMEOUT_MS
- *     is a device that stopped both signalling and completing. Fail every
- *     in-flight slot ERR_IO (as the TFES path does — a port that stopped
- *     completing one 4 KiB command has stopped completing all) and post a
- *     COMRESET to a K-Core via the port's never-drop recovery node, so slots
- *     return to the pool instead of leaking until ahci_alloc_slot wedges the port.
+ *     is a command the device stopped both signalling and completing. The port
+ *     goes to its recovery (AhciPortFault, ahci_trouble.c) with the slots past
+ *     their deadline named as the culprits: they are failed ERR_IO, the link is
+ *     reset, and the commands in flight beside them are issued again, so slots
+ *     return to the pool instead of leaking until the port admits nothing.
  *
  * Gated on multi-core: async I/O only exists when total_cores > 1 (single core
- * takes the synchronous path with its own bounded poll), and COMRESET recovery
- * needs a K-Core pump that only exists there. */
+ * takes the synchronous path with its own bounded poll), and the recovery's
+ * baton needs a K-Core pump that only exists there. */
 void ahci_watchdog_scan(void) {
     if (!ahci_ctrl.initialized || g_amp.total_cores <= 1) return;
 
-    uint64_t now         = rdtsc();
     uint64_t overdue_tsc = cpu_ms_to_tsc(CONFIG_AHCI_IO_TIMEOUT_MS);
 
     for (uint8_t i = 0; i < AHCI_MAX_PORTS; i++) {
@@ -390,10 +375,10 @@ void ahci_watchdog_scan(void) {
          * means a command may have completed WITH an error — and on a non-NCQ
          * port PxCI can clear on error, so a bare completion-level check could
          * mis-read a failure as success. When an error is pending, skip Tier-1
-         * and treat the port as wedged (Tier-2): fail its slots ERR_IO +
-         * COMRESET. This doubles as the backstop for a LOST *error* MSI — PxIS
-         * stays set until a handler clears it, and COMRESET's PxIS W1C clears it
-         * (ahci_port_comreset). Mirrors ahci_irq_handler's fatal-bit test. */
+         * and hand the port to its recovery as the interrupt would have. This
+         * is the backstop for a LOST *error* MSI — PxIS stays set until a
+         * handler clears it, and the recovery's restart of the engine clears
+         * it. Mirrors AhciPortReap's fatal-bit test. */
         uint32_t pxis = __atomic_load_n(&regs->is, __ATOMIC_ACQUIRE);
         bool port_error = (pxis & (AHCI_PIS_TFES | AHCI_PIS_HBFS | AHCI_PIS_IFS)) != 0;
 
@@ -415,33 +400,28 @@ void ahci_watchdog_scan(void) {
             }
         }
 
-        /* TIER 2 — genuine wedge: any in-flight slot past the deadline. Read
-         * submit_tsc + claim under the lock, consistent with ahci_arm_slot's
-         * timestamp+issued_mask write, so a slot re-armed since the snapshot
-         * (fresh submit_tsc) is never mis-failed (ABA-safe). issued_mask is
-         * stable under the lock: the only other writers are the BSP MSI handler
-         * (serialized with this BSP tick) and a cross-core arm (blocked on the
-         * lock). */
-        spin_lock(&state->lock);
-        uint32_t still   = __atomic_load_n(&state->issued_mask, __ATOMIC_ACQUIRE);
-        uint32_t overdue = 0;
-        for (uint32_t m = still; m; m &= m - 1) {
-            uint8_t s = (uint8_t)__builtin_ctz(m);
-            if (now - state->submit_tsc[s] > overdue_tsc) overdue |= (1U << s);
+        /* The error interrupt that never came is served the way it would have
+         * been: the reap takes PxIS, so the bit is not seen again. */
+        if (port_error) {
+            kprintf("[AHCI] port %u reported a fatal error (lost MSI) — its "
+                    "commands in flight (0x%08x) go to the port's recovery\n",
+                    i, __atomic_load_n(&state->issued_mask, __ATOMIC_ACQUIRE));
+            AhciPortReap(state);
+            continue;
         }
-        uint32_t won = (overdue || port_error) ? ahci_claim(state, still) : 0;
-        spin_unlock(&state->lock);
 
-        if (won) {
-            __atomic_store_n(&state->stats.last_error_tsc, now, __ATOMIC_RELAXED);
-            kprintf("[AHCI] port %u %s — failing slots 0x%08x and resetting "
-                    "the link\n", i,
-                    port_error ? "reported a fatal error (lost MSI)"
-                               : "went past its deadline", won);
-            ahci_retire_slots(state, i, won, ERR_IO);
-            if (__sync_bool_compare_and_swap(&state->recovering, 0, 1)) {
-                BatonPass(&state->recover_node);   /* never-drop */
-            }
+        /* TIER 2 — genuine wedge: any in-flight slot past the deadline.
+         * AhciPortFault reads each submit_tsc under the port's lock, where the
+         * arm writes it with the issued_mask bit, so a slot re-armed since this
+         * look (fresh submit_tsc) is never blamed (ABA-safe); nothing past the
+         * deadline there is no fault at all. */
+        uint32_t overdue = AhciPortFault(state, 0,
+                                         __atomic_load_n(&state->trouble, __ATOMIC_ACQUIRE),
+                                         overdue_tsc);
+        if (overdue) {
+            kprintf("[AHCI] port %u went past its deadline — the command(s) on "
+                    "slots 0x%08x are failed and the link is reset; the rest in "
+                    "flight wait in its roadstead\n", i, overdue);
         }
     }
 }
@@ -572,262 +552,6 @@ void ahci_init_irq(void) {
                         : "and this kernel holds it alone");
 }
 
-int ahci_alloc_slot(uint8_t port_num) {
-    ahci_port_t* port = ahci_get_port(port_num);
-    if (!port) return -1;
-
-    spin_lock(&port->lock);
-
-    if (!port->active) {
-        spin_unlock(&port->lock);
-        return -1;
-    }
-
-    int slot = -1;
-    for (uint8_t s = 0; s < AHCI_MAX_SLOTS; s++) {
-        if (port->slot_bitmap & (1U << s)) {
-            port->slot_bitmap &= ~(1U << s);
-            /* Defensive reset — we never want to inherit a stale
-             * async callback from a freed slot. ahci_free_slot is
-             * supposed to leave these NULL too, but reset on alloc
-             * keeps the invariant locally enforced. */
-            port->cb[s]     = NULL;
-            port->cb_ctx[s] = NULL;
-            slot = s;
-            break;
-        }
-    }
-
-    spin_unlock(&port->lock);
-    return slot;
-}
-
-void ahci_free_slot(uint8_t port_num, uint8_t slot) {
-    if (slot >= AHCI_MAX_SLOTS) return;
-    ahci_port_t* port = ahci_get_port(port_num);
-    if (!port) return;
-
-    spin_lock(&port->lock);
-    if (!port->active) {
-        spin_unlock(&port->lock);
-        return;
-    }
-    port->slot_bitmap |= (1U << slot);
-    spin_unlock(&port->lock);
-}
-
-bool ahci_can_submit_port(uint8_t port_num) {
-    ahci_port_t* port = ahci_get_port(port_num);
-    if (!port) return false;
-    /* Advisory hint — actual allocation re-checks under port->lock. */
-    return __atomic_load_n(&port->slot_bitmap, __ATOMIC_RELAXED) != 0;
-}
-
-/* Take the port WHOLE, for the one command class that cannot share it.
- *
- * AHCI 1.3.1 §1.7: "System software is responsible to ensure that queued and
- * non-queued commands are not mixed in the command list for the same device
- * with the exception of the NCQ Unload command." FLUSH CACHE EXT is not that
- * exception, so on a port running FPDMA QUEUED it may only be issued with the
- * queue empty — and with nothing able to refill it while it runs.
- *
- * There is no new queue or flag invented for that. The port's slot pool
- * already is the door every submission goes through, so closing it IS the
- * hold: the door is shut only at the instant the port is found completely
- * idle, and it is shut for exactly as long as that one command needs — its
- * retries, and the port recovery between them, being the same command still
- * and needing the same empty list. Waiting
- * for that instant costs nobody anything — while this spins, every other flow
- * allocates and completes as usual, and only the flush waits.
- *
- * The condition is a fact and the whole fact: every legal slot free — which is
- * also the proof that no submitter is sitting between ahci_alloc_slot and its
- * PxCI store — with PxSACT and PxCI agreeing that the HBA has nothing
- * outstanding either.
- *
- * ‼ AND THE TWO WAYS OF NOT GETTING IT ARE DIFFERENT FACTS.
- *
- * They were one answer — -1 — and everything above turned that into ERR_IO,
- * so a machine whose disk was perfectly healthy reported a durability failure
- * because two flushes of the same medium overlapped by a microsecond.
- *
- *   THE DOOR IS HELD. Another whole-port command has it right now. That is
- *   knowable in one look under the port's own lock, it is true or false at
- *   this instant, and no amount of clock makes it truer — so no clock is
- *   turned: AHCI_TAKE_HELD goes back immediately and the caller, who still
- *   holds its bytes, decides whether to come again.
- *
- *   THE DEVICE OWES WORK. Slots are out with commands that have not been
- *   retired. That is the one thing here a clock may judge, because what is
- *   being waited on is a device answering, and a device that never answers is
- *   a device that has failed: AHCI_TAKE_SILENT, said out loud.
- *
- *   AND A THIRD, WHICH LOOKS LIKE THE FIRST AND IS NOT: THE DOOR IS HELD BY
- *   A CORE THAT IS NO LONGER RUNNING. "Come back later" is only an answer
- *   when somebody is left to open the door, and at shutdown nobody is —
- *   halt_sync_storage() flushes after `cli` and after every AP has been
- *   stopped, so a door held there would never be given back and a caller
- *   told to come again would spin out a whole patience window for nothing.
- *   Who holds it is recorded when it is taken (port->door_holder) and
- *   amp_core_online() is this kernel's own answer to whether that core still
- *   runs, so the abandoned door is a FACT too and no clock decides it. Once
- *   the device also owes nothing — the same condition a first take is
- *   granted on, PxSACT and PxCI both clear — the door is simply taken over.
- *   If the device DOES still owe work, that is the second case above and the
- *   clock judges it as it judges any unanswered command.
- *
- * Waiting for the second costs nobody anything — while this spins, every
- * other flow allocates and completes as usual, and only the flush waits. */
-AhciTake ahci_port_take_whole(uint8_t port_num, uint32_t patience_ms,
-                              uint8_t* slot_out) {
-    ahci_port_t* port = ahci_get_port(port_num);
-    if (!port || !slot_out) return AHCI_TAKE_NO_PORT;
-
-    volatile ahci_port_regs_t* regs = port->regs;
-
-    HourGlass glass;
-    bool      timing = false;
-
-    uint8_t me = amp_get_core_index();
-
-    /* Carried between passes: the previous pass found the door held by a core
-     * that is gone AND the device owing nothing, so this pass may take it
-     * over. Established outside the lock, one MMIO read, and only ever while
-     * a door is actually orphaned — the ordinary spin below reads no register
-     * it did not read before. It cannot go stale in the wrong direction: with
-     * the door shut nobody can allocate a slot, so a port that is quiet under
-     * a held door stays quiet. */
-    bool orphan_and_quiet = false;
-
-    for (;;) {
-        bool    held      = false;
-        bool    orphan    = false;
-        bool    abandoned = false;
-        bool    shut      = false;
-        uint8_t was_held_by = 0;
-
-        spin_lock(&port->lock);
-        if (port->slot_held) {
-            /* ‼ TWO DOORS THAT LOOK IDENTICAL AND ARE NOT.
-             *
-             * One is held by a core that is running and will give it back.
-             * The other is held by a core this machine has already stopped —
-             * every AP once halt_all_ap_cores() has swept, and any core that
-             * died holding it. Waiting on the second is waiting for an event
-             * that cannot happen, and the shutdown path is exactly where it
-             * is reached: halt_sync_storage() flushes after `cli` and after
-             * the APs are down, so "come back later" there means "never".
-             *
-             * The question is not how long to wait. It is WHO, and
-             * amp_core_online() already answers it. */
-            if (port->door_holder == me ||
-                amp_core_online(&g_amp.cores[port->door_holder])) {
-                held = true;
-            } else if (orphan_and_quiet) {
-                /* The holder is gone and the device owes nothing, so there is
-                 * nothing outstanding for a new command to be issued beside —
-                 * the same fact a first-time take is granted on. The door is
-                 * taken over rather than waited on. */
-                was_held_by       = port->door_holder;
-                port->door_holder = me;
-                port->slot_bitmap = 0;
-                abandoned = true;
-                shut      = true;
-            } else {
-                orphan = true;
-            }
-        } else if (port->slot_bitmap == port->slot_mask) {
-            port->slot_held   = true;
-            port->door_holder = me;
-            port->slot_bitmap = 0;
-            shut = true;
-        }
-        spin_unlock(&port->lock);
-
-        /* Not a wait and not a failure: somebody else's whole-port command is
-         * running on this port at this moment, and it will end. Said back as
-         * itself, without a syllable on the console — two flushes of the same
-         * medium meeting is ordinary, and a line per meeting is how a log
-         * stops being read. */
-        if (held) return AHCI_TAKE_HELD;
-
-        /* An orphaned door: its holder is not running. Whether it may be
-         * taken over is the same question a first take asks — does the device
-         * owe anything — and that is one register read, taken here rather
-         * than under the port's lock, and acted on by the next pass. If the
-         * device DOES still owe work, nothing is taken and the clock below
-         * judges it as it judges any device that was given a command and has
-         * not answered. */
-        orphan_and_quiet = orphan &&
-                           (regs->sact & port->slot_mask) == 0 &&
-                           (regs->ci   & port->slot_mask) == 0;
-
-        if (abandoned) {
-            kprintf("[AHCI] port %u: its whole-port door was held by core %u, "
-                    "which is no longer running, and the device owes nothing "
-                    "— the door is taken over rather than waited for\n",
-                    port_num, was_held_by);
-        }
-
-        if (shut) {
-            if ((regs->sact & port->slot_mask) == 0 &&
-                (regs->ci   & port->slot_mask) == 0) {
-                *slot_out = (uint8_t)__builtin_ctz(port->slot_mask);
-                return AHCI_TAKE_GOT;
-            }
-            /* Every slot was free and the HBA still shows work outstanding:
-             * open the door again rather than issue beside it. */
-            ahci_port_give_back(port_num);
-        }
-
-        /* A port can also LEAVE while this waits — its own recovery, or the
-         * watchdog's on another core, retires it and empties its slot pool.
-         * That looks from here exactly like a port that never goes quiet, and
-         * spinning out the whole of `patience_ms` on a port that is not in
-         * the machine any more is a wait with no possible end. One look, no
-         * clock. */
-        if (!ahci_get_port(port_num)) return AHCI_TAKE_NO_PORT;
-
-        /* From here the port is busy with the DEVICE, and only now is there
-         * anything a clock is entitled to judge. */
-        if (!timing) {
-            if (!HourGlassTurn(&glass, (uint64_t)patience_ms * 1000ULL)) {
-                kprintf("[AHCI] no time source — there is no clock to wait out "
-                        "port %u's outstanding commands on, and issuing a "
-                        "non-queued command beside queued ones is what AHCI "
-                        "1.3.1 §1.7 forbids; not issuing it\n", port_num);
-                return AHCI_TAKE_SILENT;
-            }
-            timing = true;
-        }
-
-        if (HourGlassRunOut(&glass)) {
-            kprintf("[AHCI] port %u: %lu us on the %s and the commands it was "
-                    "given never came back (SACT=0x%08x CI=0x%08x) — the "
-                    "device has stopped answering, so nothing more is issued "
-                    "to it\n",
-                    port_num, (unsigned long)HourGlassElapsedUs(&glass),
-                    HourGlassRulerName(&glass), regs->sact, regs->ci);
-            return AHCI_TAKE_SILENT;
-        }
-        cpu_pause();
-    }
-}
-
-/* Open the door again. A hold is only ever taken on a port with every slot
- * free, so this restores exactly what it took. */
-void ahci_port_give_back(uint8_t port_num) {
-    ahci_port_t* port = ahci_get_port(port_num);
-    if (!port) return;
-
-    spin_lock(&port->lock);
-    if (port->slot_held) {
-        port->slot_bitmap |= port->slot_mask;
-        port->slot_held    = false;
-    }
-    spin_unlock(&port->lock);
-}
-
 error_t ahci_build_io(uint8_t port_num, uint8_t slot, uint64_t lba,
                       uint16_t sector_count, void* buffer_phys, bool write) {
     if (slot >= AHCI_MAX_SLOTS) return ERR_INVALID_ARGUMENT;
@@ -889,32 +613,6 @@ error_t ahci_build_io(uint8_t port_num, uint8_t slot, uint64_t lba,
     }
 
     return OK;
-}
-
-void ahci_arm_slot(uint8_t port_num, uint8_t slot) {
-    ahci_port_t* port = ahci_get_port(port_num);
-    if (!port || slot >= AHCI_MAX_SLOTS) return;
-    volatile ahci_port_regs_t* regs = port->regs;
-
-    /* PxCI / PxSACT are write-1-to-set (writing 0 to a bit has no effect, and
-     * hardware clears bits independently as commands retire). A direct
-     * single-bit store is therefore correct; an RMW `|=` could re-arm a slot
-     * the HBA just cleared between the read and the write. For NCQ, PxSACT
-     * must be set before PxCI (AHCI 1.3.1 §5.5.3). The spin_lock disables
-     * IRQs so the completion handler cannot observe issued_mask mid-update. */
-    spin_lock(&port->lock);
-    if (port->ncq) {
-        regs->sact = (1U << slot);
-    }
-    regs->ci = (1U << slot);
-    /* Ф26 M1: stamp the submit timestamp under the lock, right where the slot
-     * enters issued_mask, so ahci_watchdog_scan's overdue check reads a
-     * submit_tsc consistent with the arming (no torn arm-vs-scan). Only the
-     * async path calls ahci_arm_slot, so only async slots get a submit_tsc —
-     * exactly the set the watchdog scans. */
-    port->submit_tsc[slot] = rdtsc();
-    __sync_fetch_and_or(&port->issued_mask, (1U << slot));
-    spin_unlock(&port->lock);
 }
 
 bool ahci_port_is_ncq(uint8_t port_num) {
@@ -1127,9 +825,26 @@ static int ahci_port_init(uint8_t port_num) {
      * job be posted onto a port that is half built. */
     uint32_t held_claim = port->recovering;
 
+    /* And the roadstead's knock, which is not re-made either. Its baton is
+     * never in the drain core's queue by now — the port stopped knocking the
+     * moment it left, and a knock from before that was queued ahead of the
+     * very pass running this — but its bytes are the node's identity, and a
+     * port built again keeps the one it had. */
+    Knock held_knock = port->roadstead_knock;
+
+    /* And the trouble count, which only ever goes up: a caller that armed a
+     * command before the port left must never read the same count after it
+     * came back, and take its dropped command for a finished one. */
+    uint32_t held_trouble = port->trouble;
+
     memset(port, 0, sizeof(ahci_port_t));
 
-    port->recovering = held_claim;
+    port->recovering      = held_claim;
+    port->roadstead_knock = held_knock;
+    port->trouble         = held_trouble;
+    if (!port->roadstead_knock.baton.run) {
+        KnockInit(&port->roadstead_knock, AhciRoadsteadKnocked, port);
+    }
 
     port->clb_virt = held_clb_virt;
     port->clb_phys = held_clb_phys;
@@ -2048,9 +1763,11 @@ error_t ahci_port_comreset(ahci_port_t* port) {
  *      claim-checked retire the IRQ path uses, so a waiter parked on a
  *      callback is woken with ERR_IO rather than left waiting on a port that
  *      no longer exists. ahci_claim makes that exactly-once even against the
- *      MSI handler retiring the same slots on the BSP. The ahci_free_slot
- *      inside it is a no-op by now, which costs nothing: the pool was emptied
- *      in step 1 and nothing may draw from it again.
+ *      MSI handler retiring the same slots on the BSP. The slot return inside
+ *      it is a no-op by now, which costs nothing: the pool was emptied in step
+ *      1 and nothing may draw from it again. The commands a fault was holding
+ *      for recovery fail the same way, and every berth in the roadstead —
+ *      taken whole under the same lock as `active` — is answered or sent away.
  *   3. ‼ THE PORT'S INTERRUPT IS DISARMED, AND NOTHING ELSE IN THIS KERNEL
  *      WOULD EVER HAVE DONE IT AGAIN. Both readers of PxIS — ahci_irq_handler
  *      and ahci_watchdog_scan — skip a port that is not `active`, and the
@@ -2093,13 +1810,25 @@ error_t ahci_port_comreset(ahci_port_t* port) {
  * memory, and every function that takes one re-asks ahci_get_port.
  */
 static void ahci_port_retire(ahci_port_t* port) {
-    uint8_t idx = port->port_num;
+    uint8_t         idx = port->port_num;
+    RoadsteadBerth* held_berth[AHCI_MAX_SLOTS];
 
     spin_lock(&port->lock);
     bool mine = port->active != 0;
     port->active      = 0;
     port->slot_bitmap = 0;
     port->slot_held   = false;
+    port->halted      = false;
+    RoadsteadBerth* waiting = RoadsteadClear(&port->roadstead);
+    uint32_t held = port->held;
+    port->held          = 0;
+    port->fault_bits    = 0;
+    port->fault_overdue = 0;
+    for (uint32_t m = held; m; m &= m - 1) {
+        uint8_t s = (uint8_t)__builtin_ctz(m);
+        held_berth[s]   = port->aboard[s];
+        port->aboard[s] = NULL;
+    }
     spin_unlock(&port->lock);
 
     if (!mine) return;
@@ -2108,6 +1837,26 @@ static void ahci_port_retire(ahci_port_t* port) {
     if (stuck) {
         uint32_t won = ahci_claim(port, stuck);
         if (won) ahci_retire_slots(port, idx, won, ERR_IO);
+    }
+
+    /* The commands a fault was holding for recovery were in flight on this
+     * port: they failed with it. The berths still waiting in its roadstead
+     * never reached it: a caller standing over one is sent away, and one
+     * nobody stands over is answered — it was told its read or write was on
+     * its way, and its answer is owed. */
+    for (uint32_t m = held; m; m &= m - 1) {
+        uint8_t s = (uint8_t)__builtin_ctz(m);
+        held_berth[s]->answered(idx, s, ERR_IO, held_berth[s]->ctx);
+    }
+    while (waiting) {
+        RoadsteadBerth* berth = waiting;
+        waiting = berth->next;
+        berth->next = NULL;
+        if (berth->answered) {
+            berth->answered(idx, 0, ERR_DEVICE_NOT_READY, berth->ctx);
+        } else {
+            RoadsteadSendAway(berth);
+        }
     }
 
     /* Step 3 — the virtual wire is taken down before the latch it comes from,
@@ -2256,48 +2005,6 @@ error_t ahci_port_recover(ahci_port_t* port) {
             port->port_num, AHCI_MAX_COMRESET_ATTEMPTS);
     ahci_port_retire(port);
     return ERR_IO;
-}
-
-const char* ahci_decode_serr(uint32_t serr) {
-    if (serr & (1 << 26)) return "Exchanged";
-    if (serr & (1 << 25)) return "UnrecognizedFIS";
-    if (serr & (1 << 24)) return "TransportStateTrans";
-    if (serr & (1 << 23)) return "LinkSeqError";
-    if (serr & (1 << 22)) return "HandshakeError";
-    if (serr & (1 << 21)) return "CRCError";
-    if (serr & (1 << 20)) return "Disparity";
-    if (serr & (1 << 19)) return "10bTo8bDecodeError";
-    if (serr & (1 << 18)) return "CommWake";
-    if (serr & (1 << 17)) return "PhyInternalError";
-    if (serr & (1 << 16)) return "PhyRdyChange";
-    if (serr & (1 << 11)) return "InternalError";
-    if (serr & (1 << 10)) return "ProtocolError";
-    if (serr & (1 << 9))  return "PersistentCommError";
-    if (serr & (1 << 8))  return "TransientDataError";
-    if (serr & (1 << 1))  return "RecoveredCommError";
-    if (serr & (1 << 0))  return "RecoveredDataError";
-    return "NoError";
-}
-
-void ahci_log_error(ahci_port_t* port, uint32_t pxis) {
-    if (!port || !port->regs) {
-        return;
-    }
-
-    volatile ahci_port_regs_t* regs = port->regs;
-    uint32_t serr = regs->serr;
-    uint32_t tfd = regs->tfd;
-
-    __atomic_store_n(&port->stats.last_error_tsc, rdtsc(), __ATOMIC_RELAXED);
-    __atomic_store_n(&port->stats.last_serr,      serr,    __ATOMIC_RELAXED);
-    __atomic_store_n(&port->stats.last_tfd,       tfd,     __ATOMIC_RELAXED);
-
-    if (pxis & AHCI_PIS_TFES) {
-        __atomic_fetch_add(&port->stats.tfes_count, 1, __ATOMIC_RELAXED);
-    }
-
-    debug_printf("[AHCI] Port %u ERROR: IS=0x%08x SERR=0x%08x TFD=0x%08x (%s)\n",
-                 port->port_num, pxis, serr, tfd, ahci_decode_serr(serr));
 }
 
 void ahci_get_port_stats(uint8_t port_num, ahci_port_stats_t* stats_out) {
@@ -2799,10 +2506,12 @@ void ahci_test_read(void) {
     void* dma_virt = vmm_phys_to_virt(dma_phys);
     memset(dma_virt, 0, 4096);
 
-    uint8_t slot = 0;
-    spin_lock(&port->lock);
-    port->slot_bitmap &= ~(1 << slot);
-    spin_unlock(&port->lock);
+    int drawn = AhciStandForSlot(0);
+    if (drawn < 0) {
+        pmm_free(dma_page, 1);
+        return;
+    }
+    uint8_t slot = (uint8_t)drawn;
 
     ahci_cmd_header_t* cmdheader = (ahci_cmd_header_t*)port->clb_virt;
     cmdheader[slot].cfl = sizeof(fis_reg_h2d_t) / sizeof(uint32_t);
@@ -2839,7 +2548,12 @@ void ahci_test_read(void) {
 
     mfence();
 
-    port->regs->ci = 1 << slot;
+    uint32_t trouble_at_arm = 0;
+    if (!AhciArmStanding(0, slot, false, &trouble_at_arm)) {
+        AhciLeaveSlot(0, slot);
+        pmm_free(dma_page, 1);
+        return;
+    }
 
     // Wait up to 5 seconds for IDENTIFY command to complete
     uint64_t id_deadline = rdtsc() + cpu_ms_to_tsc(5000);
@@ -2857,25 +2571,28 @@ void ahci_test_read(void) {
          * it here — as this used to do unconditionally — is the same
          * corruption ahci_port_identify carried at its own timeout exit: a
          * page the controller still owns handed back to pmm_alloc, to be
-         * overwritten by whatever the next caller puts there. AHCI 1.3.1
-         * §3.3.14 makes a successful ahci_port_stop() (PxCMD.ST 1->0, which
-         * clears PxCI itself, walked out through PxCMD.CR/FR/FRE per
-         * §10.3.2) the one proof that the HBA let the buffer go; a port that
-         * will not stop keeps it, and the page stays held rather than freed. */
-        if (ahci_port_stop(port) == 0) {
+         * overwritten by whatever the next caller puts there. The port goes
+         * to its recovery, whose link reset stops the engine first (AHCI 1.3.1
+         * §3.3.14: PxCMD.ST 1->0 is the one proof the HBA let the buffer go);
+         * a port that did not come back through it may still hold the page,
+         * and the page stays held rather than freed. */
+        AhciPortTroubled(0, trouble_at_arm);
+        if (AhciAwaitEngine(0)) {
             pmm_free(dma_page, 1);
         } else {
-            kprintf("[AHCI] Test READ: port %u will not stop (CMD=0x%08x) — "
-                    "its DMA page is held, not freed, because the controller "
-                    "may still be writing to it\n",
-                    port->port_num, port->regs->cmd);
+            kprintf("[AHCI] Test READ: port %u left the machine under an "
+                    "unanswered read — its DMA page is held, not freed, because "
+                    "the controller may still be writing to it\n",
+                    port->port_num);
         }
+        AhciLeaveSlot(0, slot);
         return;
     }
 
     uint32_t tfd = port->regs->tfd;
     if (tfd & AHCI_PTFD_STS_ERR) {
         debug_printf("[AHCI] Test READ: Error bit set in TFD (0x%08x)\n", tfd);
+        AhciLeaveSlot(0, slot);
         pmm_free(dma_page, 1);
         return;
     }
@@ -2893,9 +2610,7 @@ void ahci_test_read(void) {
         debug_printf("[AHCI] Test READ: FAILED (expected 0x55AA, got 0x%02x%02x)\n", sig1, sig2);
     }
 
-    spin_lock(&port->lock);
-    port->slot_bitmap |= (1 << slot);
-    spin_unlock(&port->lock);
+    AhciLeaveSlot(0, slot);
     pmm_free(dma_page, 1);
 }
 

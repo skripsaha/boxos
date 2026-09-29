@@ -66,10 +66,12 @@ typedef struct {
      * stack (post-iretq) — never the evicted one's. The reaper gates on it so a
      * strand's stack is never freed while this core is still in its epilogue. */
     volatile uint64_t quiesce_seq;
-    /* Scribe passes this core is in (SchedulerHoldHere). While it is not
-     * zero, a tick or a wake that interrupted this core's kernel context does
-     * not switch away from it. Written only by the core itself, with its
-     * interrupts off; read by its own interrupts. */
+    /* Spans this core is in that its kernel context must finish before being
+     * switched away from (SchedulerHoldHere): Scribe passes, and commands
+     * stood over on a medium. While it is not zero, a tick or a wake that
+     * interrupted this core's kernel context does not switch away from it.
+     * Written only by the core itself, with its interrupts off; read by its
+     * own interrupts. */
     volatile uint32_t held;
 } scheduler_state_t;
 
@@ -127,11 +129,17 @@ void sched_dequeue_all_cores(process_t *proc);
 scheduler_state_t *scheduler_get_state(void);
 scheduler_state_t *scheduler_get_core(uint8_t core_idx);
 
-/* A Scribe pass (tagfs/scribe) begins and ends on this core. The kernel
- * context running it is not switched away from by the tick in between —
- * what an interrupts-off lock used to give a writer of the volume, without
- * the deafness: interrupts stay on. Called with interrupts off, in pairs. */
+/* A span this core's kernel context must not be switched away from begins
+ * and ends here: a Scribe pass (tagfs/scribe), or a command stood over on a
+ * medium from the moment it asks for a place until it gives the place back
+ * (core/boardroom/roadstead.h). The tick does not switch away in between —
+ * what an interrupts-off lock used to give, without the deafness: interrupts
+ * stay on. Safe with interrupts in either state; in pairs, on one core. */
 void SchedulerHoldHere(void);
 void SchedulerLetGoHere(void);
+
+/* Whether this core is inside such a span. An orderly halt that finds it so
+ * lets it reach the end first (HaltStopIfOwedHere, system_halt.h). */
+bool SchedulerHeldHere(void);
 
 #endif // SCHEDULER_H

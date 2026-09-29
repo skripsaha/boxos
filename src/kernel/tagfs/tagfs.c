@@ -1334,15 +1334,10 @@ error_t tagfs_flush_cache(void)
     }
 
     /*
-     * ‼ "BUSY" AND "BROKEN" ARRIVE HERE AS DIFFERENT NUMBERS, AND USED TO
-     * LEAVE AS THE SAME ONE.
+     * ‼ A MEDIUM THAT CAN NAME ITS REFUSAL IS HEARD BY NAME.
      *
-     * Every refusal became ERR_IO, so a flush that was not issued because
-     * another flush of the SAME medium held the port for a microsecond
-     * reached the write path wearing the word for a failing disk — and the
-     * write path, which already knows how to come back from ERR_BUSY, had no
-     * way to tell that this was one.
-     *
+     * Every refusal used to become ERR_IO, so a port that had left the
+     * machine reached the write path wearing the word for a failing disk.
      * The two vocabularies that meet here cannot be confused. A seat whose
      * medium can name its refusal answers with an `error_t`, and every
      * error_t is positive; the media that can only say "no" answer with zero
@@ -1365,13 +1360,7 @@ error_t tagfs_flush_cache(void)
         why = ERR_DEVICE_NOT_READY;
     }
 
-    /* A door held for a flush that is already running is not a medium
-     * refusing anything, and it is ordinary traffic on a busy volume — so it
-     * is not announced. Whoever asked is the one who knows whether coming
-     * back is possible where it stands, and it is told. */
-    if (why != ERR_BUSY) {
-        volume_would_not_flush(why);
-    }
+    volume_would_not_flush(why);
     return why;
 }
 

@@ -168,20 +168,48 @@ scheduler_state_t *scheduler_get_state(void)
     return &g_core_sched[idx];
 }
 
+/* The count is read by this core's own interrupts, so it is changed with them
+ * shut, whatever state the caller left them in. */
+static inline uint64_t SchedulerIrqShut(void)
+{
+    uint64_t flags;
+    asm volatile("pushfq; pop %0; cli" : "=r"(flags)::"memory");
+    return flags;
+}
+
+static inline void SchedulerIrqBack(uint64_t flags)
+{
+    if (flags & (1u << 9))
+        asm volatile("sti" ::: "memory");
+}
+
 void SchedulerHoldHere(void)
 {
+    uint64_t flags = SchedulerIrqShut();
     scheduler_state_t *s = scheduler_get_state();
     if (s)
         s->held++;
+    SchedulerIrqBack(flags);
 }
 
-/* A pass that began before the scheduler existed (none does: the boot mount
- * runs after scheduler_init) held nothing, and lets go of nothing. */
+/* A span that began before the scheduler existed held nothing, and lets go of
+ * nothing. */
 void SchedulerLetGoHere(void)
 {
+    uint64_t flags = SchedulerIrqShut();
     scheduler_state_t *s = scheduler_get_state();
     if (s && s->held)
         s->held--;
+    SchedulerIrqBack(flags);
+}
+
+bool SchedulerHeldHere(void)
+{
+    uint64_t flags = SchedulerIrqShut();
+    scheduler_state_t *s = scheduler_get_state();
+    bool held = s && s->held;
+    SchedulerIrqBack(flags);
+    return held;
 }
 
 scheduler_state_t *scheduler_get_core(uint8_t core_idx)
@@ -961,12 +989,13 @@ void schedule(void *frame_ptr)
         return;
     }
 
-    /* A kernel context in the middle of a Scribe pass stays on this core
-     * until the pass ends: the idle context of an application core, or of
-     * the only core, writes the volume from TagFSServiceIfPending, and a
-     * switch away from it here would stop the pass mid-write for as long as
-     * the process switched to ran — with every other writer of that
-     * structure waiting on it. Ring 3 never holds one. */
+    /* A kernel context in the middle of a Scribe pass, or standing over a
+     * command on a medium, stays on this core until it is done: the idle
+     * context of an application core, or of the only core, writes the volume
+     * from TagFSServiceIfPending, and a switch away from it here would stop
+     * the pass mid-write — or keep a command slot from a caller on this same
+     * core whose interrupts are shut — for as long as the process switched to
+     * ran. Ring 3 never holds one. */
     if (frame && (frame->cs & 3) == 0 && s->held) {
         return;
     }

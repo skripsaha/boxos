@@ -472,6 +472,25 @@ void BoardroomNoteDeparture(BoardKind kind, uint8_t index)
     TouchPublish("seat:emptied", &ev, sizeof(ev));
 }
 
+void BoardroomNoteSeatReady(BoardKind kind, uint8_t index)
+{
+    seats_lock_init();
+
+    spin_lock(&g_seats_lock);
+    BoardSeat* s = seat_holding_locked(kind, index);
+    uint8_t    number = s ? s->number : BOARDROOM_NO_SEAT;
+    uint8_t    seated = seat_occupied_count();
+    spin_unlock(&g_seats_lock);
+
+    /* A medium nobody seated — one recovered before the room was first called
+     * to order — has no chair to name, and nobody could be waiting on it. */
+    if (!s) {
+        return;
+    }
+    BoardroomSeatEvent ev = { seated, 0, number, 0 };
+    TouchPublish("seat:ready", &ev, sizeof(ev));
+}
+
 void BoardroomAttendIfPending(void)
 {
     if (__atomic_load_n(&g_arrival_pending, __ATOMIC_ACQUIRE) == 0) {
@@ -791,10 +810,11 @@ bool BoardroomSeatCanReadAsync(uint8_t seat)
 }
 
 error_t BoardroomReadAsync(uint8_t seat, uint64_t lba, uint32_t count,
-                           void* dma_phys, BoardroomAsyncCb cb, void* ctx)
+                           void* dma_phys, BoardroomAsyncCb cb, void* ctx,
+                           RoadsteadBerth* berth)
 {
     BoardSeat* s = seat_taken(seat);
-    if (!s || !dma_phys || count == 0) {
+    if (!s || !dma_phys || count == 0 || !cb || !berth) {
         return ERR_INVALID_ARGUMENT;
     }
 
@@ -805,23 +825,24 @@ error_t BoardroomReadAsync(uint8_t seat, uint64_t lba, uint32_t count,
      * only keep the status and pass it on, and a real completion can already
      * arrive before the submit returns, so answering here is a road the
      * callers already take. Nothing is issued, and the buffer is not touched. */
-    if (cb && (s->kind == BOARD_AHCI || s->kind == BOARD_USB) &&
+    if ((s->kind == BOARD_AHCI || s->kind == BOARD_USB) &&
         BlockFailStrikes(seat, BLOCK_FAIL_READ, lba, count)) {
         cb(s->index, 0, ERR_IO, ctx);
         return OK;
     }
 #endif
 
+    memset(berth, 0, sizeof(*berth));
+    berth->lba      = lba;
+    berth->sectors  = count;
+    berth->dma_phys = dma_phys;
+    berth->answered = cb;
+    berth->ctx      = ctx;
+
     switch (s->kind) {
-    case BOARD_AHCI: {
-        uint8_t slot;
-        return ahci_submit_read_async(s->index, lba, (uint16_t)count, dma_phys,
-                                      cb, ctx, &slot);
-    }
-    case BOARD_USB:
-        return xhci_msd_read_async(s->index, lba, count, dma_phys, cb, ctx);
-    default:
-        return ERR_UNSUPPORTED;
+    case BOARD_AHCI: return ahci_submit_read_async(s->index, berth);
+    case BOARD_USB:  return xhci_msd_read_async(s->index, berth);
+    default:         return ERR_UNSUPPORTED;
     }
 }
 
@@ -839,6 +860,7 @@ error_t BoardroomReadAsync(uint8_t seat, uint64_t lba, uint32_t count,
 typedef struct {
     Baton    node;              /* the answer's continuation: passed by the
                                  * seat's callback, run by the pump */
+    RoadsteadBerth berth;       /* where the read waits if the seat is busy */
     error_t  status;            /* what the medium said */
     uint8_t  seat;
     void*    dma;               /* the physical page the medium wrote */
@@ -979,7 +1001,7 @@ void BoardroomProveUnattendedRead(uint8_t seat)
     __atomic_store_n(&r->judged, 0u, __ATOMIC_RELAXED);
 
     error_t sub = BoardroomReadAsync(seat, 0, sectors, dma,
-                                     unattended_read_answered, r);
+                                     unattended_read_answered, r, &r->berth);
     if (sub != OK) {
         kprintf("[UNATTENDED READ] seat %u (%s): FAILED — the seat would not "
                 "take the read (error %d)\n", seat, name, (int)sub);

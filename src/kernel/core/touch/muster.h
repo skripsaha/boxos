@@ -93,6 +93,7 @@
     X("process:died")                   \
     X("process:spawned")                \
     X("seat:emptied")                   \
+    X("seat:ready")                     \
     X("seat:taken")                     \
     X("secureboot:audit-mode")          \
     X("secureboot:deployed-mode")       \

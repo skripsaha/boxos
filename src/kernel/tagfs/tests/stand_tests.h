@@ -19,6 +19,8 @@
 // stand_spelling_tests.c the stand_spelling suite: one spelling of a tag at
 //                        the stations a program reaches, and the registry's
 //                        widths and its full wall
+// stand_roadstead_tests.c  the stand_roadstead suite: reads that find every
+//                        place on the medium taken wait for their turn
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.
