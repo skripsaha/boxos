@@ -8,6 +8,7 @@
 #include "scheduler.h"
 #include "system_halt.h"
 #include "kheap.h"
+#include "vmm.h"
 
 // ----------------------------------------------------------------------------
 // Flush tickets
@@ -66,6 +67,9 @@ static uint8_t g_scribe_held[MAX_CORES][SCRIBE_RANK_LEDGER + 1];
 /* Each out-of-order pair of ranks — held, then asked for — named once. */
 static volatile uint8_t g_scribe_order_said[SCRIBE_RANK_LEDGER + 1][SCRIBE_RANK_LEDGER + 1];
 
+/* Each rank asked for inside a baton continuation, named once. */
+static volatile uint8_t g_scribe_continuation_said[SCRIBE_RANK_LEDGER + 1];
+
 static inline uint64_t ScribeIrqOff(void)
 {
     uint64_t flags;
@@ -111,6 +115,20 @@ static void ScribeOrderCheck(const Scribe *s, uint8_t core)
                     "out of order: Scribes nest sync, then registry, then ledger\n",
                     s->what, (unsigned)core, (unsigned)rank);
     }
+}
+
+/* A Scribe asked for inside a continuation that will return (rule 6): the
+ * drain core runs those while it waits for a Scribe, so such an ask can be
+ * answered SELF by a pass this very core holds beneath it. Named once per
+ * rank; the work goes on. */
+static void ScribeContinuationCheck(const Scribe *s, uint8_t core)
+{
+    if (!BatonRunningHere())
+        return;
+    if (__atomic_exchange_n(&g_scribe_continuation_said[s->rank], (uint8_t)1,
+                            __ATOMIC_ACQ_REL) == 0)
+        kprintf("[Scribe] %s asked for inside a baton continuation on core %u — a "
+                "continuation never takes a Scribe\n", s->what, (unsigned)core);
 }
 
 /* Answered by a pass that already ended? SCRIBE_HELD says not yet. The kept
@@ -168,9 +186,12 @@ static ScribeTurn ScribeTryHere(Scribe *s, uint8_t core, uint64_t ticket,
 
 /* One turn of every wait: the drain core runs the continuations it owes — a
  * holder on another core may be waiting for one of them — and every core
- * pauses. */
+ * answers a shootdown aimed at it by hand, as spin_lock's contended loop
+ * does: a waiter whose caller left its interrupts off takes no shootdown IPI,
+ * and a holder's pass may take as long as its medium's patience. */
 static inline void ScribeWaitTurn(uint8_t core)
 {
+    vmm_tlb_shootdown_poll();
     if (core == g_amp.bsp_index)
         BatonPump(core);
     cpu_pause();
@@ -187,6 +208,7 @@ ScribeTurn ScribeTry(Scribe *s, uint64_t ticket, uint64_t *cover, error_t *refus
 
     ScribeWitness((uintptr_t)__builtin_return_address(0));
     ScribeOrderCheck(s, core);
+    ScribeContinuationCheck(s, core);
     return ScribeTryHere(s, core, ticket, cover, refusal);
 }
 
@@ -196,6 +218,7 @@ ScribeTurn ScribeWait(Scribe *s, uint64_t ticket, uint64_t *cover, error_t *refu
 
     ScribeWitness((uintptr_t)__builtin_return_address(0));
     ScribeOrderCheck(s, core);
+    ScribeContinuationCheck(s, core);
     for (;;) {
         ScribeTurn turn = ScribeTryHere(s, core, ticket, cover, refusal);
         if (turn != SCRIBE_HELD)

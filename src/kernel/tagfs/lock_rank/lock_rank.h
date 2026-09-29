@@ -26,10 +26,12 @@
  *   ask LockRankWitness first, and a door passed with a TagFS lock held on this
  *   core names that lock and where it was taken;
  *
- *   a take is checked BEFORE it spins: only strictly downward is allowed,
- *   WRITER -> COW -> STATE -> LEAF, and a leaf under a leaf is out of order.
- *   The ABBA and the self-deadlock are named before the core could wedge in
- *   them.
+ *   a take is checked BEFORE it spins — TagFSLockTake, and TagFSLockTakePumping
+ *   before its first wait: only strictly downward is allowed, WRITER -> COW ->
+ *   STATE -> LEAF, and a leaf under a leaf is out of order. The ABBA and the
+ *   self-deadlock are named before the core could wedge in them. A
+ *   TagFSLockTry that fails waits for nobody and is not checked; one that
+ *   succeeds is, as a take.
  *
  * The key is "this core holds a TagFS lock", never "interrupts are off": on
  * one core every system call runs with interrupts off, and a plain file read
@@ -66,6 +68,13 @@ void TagFSLockDropAt(TagFSLock *lock, const char *site);
 #define TagFSLockTake(l) TagFSLockTakeAt((l), __func__)
 #define TagFSLockTry(l)  TagFSLockTryAt((l), __func__)
 #define TagFSLockDrop(l) TagFSLockDropAt((l), __func__)
+
+/* A take that never spins with interrupts off: between tries the caller's
+ * interrupts are as it left them, and the drain core runs its continuations —
+ * for a lock whose holder may be waiting on the drain core (a file's writer
+ * lock, held across the medium until step 1.5). */
+void TagFSLockTakePumpingAt(TagFSLock *lock, const char *site);
+#define TagFSLockTakePumping(l) TagFSLockTakePumpingAt((l), __func__)
 
 /* At a door to the medium, or before a wait for a Scribe: op is "read",
  * "write", "flush" or "wait"; asked_by is the door's return address. */

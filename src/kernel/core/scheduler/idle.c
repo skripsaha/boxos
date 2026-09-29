@@ -176,7 +176,7 @@ void cpu_idle(void) {
      * Work posted between this drain and the MWAIT below waits for the next
      * tick — a few milliseconds at 250 Hz, and never longer, because the tick
      * arrives regardless of what this core is doing. */
-    BatonPump(amp_get_core_index());
+    BatonPumpAtRest(amp_get_core_index());
 
     /* Periodic TSC recalibration. Runs out of IRQ context so the
      * 20ms HPET measurement window inside is harmless to interrupt

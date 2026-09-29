@@ -16,7 +16,6 @@
 #include "touch.h"
 #include "ata.h"
 #include "amp.h"
-#include "baton.h"      /* BatonPump — the drain core keeps pumping while it waits for a lock */
 #include "cow/cow.h"
 #include "braid/braid.h"
 #include "dedup/dedup.h"
@@ -3170,6 +3169,11 @@ error_t tagfs_sync(void)
     uint64_t ticket = ScribeAsk(&g_sync_scribe);
     switch (ScribeWait(&g_sync_scribe, ticket, &cover, &rc)) {
     case SCRIBE_MINE:
+        /* Given back OK whatever the pass met on the medium: a sync answers
+         * for its writes only from step 1.4, which holds that very defect
+         * (stand_sync_owns_a_refused_write, _flush). Until then a caller whose
+         * ask this pass covers hears WRITTEN over a refused table write, as
+         * this caller hears OK — and does not run a pass of its own. */
         tagfs_sync_inside();
         ScribeGive(&g_sync_scribe, cover, OK);
         break;
@@ -3338,8 +3342,10 @@ static void tagfs_sync_inside(void)
  *
  * ‼ NOT ONE BYTE IS WRITTEN. What is held in memory describes the volume as it
  * was BEFORE whatever went wrong, and the medium under the head may not even be
- * the same one any more. That is why the two flushing shutdowns are told so
- * explicitly rather than being relied upon to find the medium gone.
+ * the same one any more. That is why the one shutdown that could still write,
+ * the metadata pool's, is told so explicitly (meta_pool_shutdown(false))
+ * rather than being relied upon to find the medium gone; the file table's
+ * shutdown only lets go of memory.
  */
 static void tagfs_clear_the_ground(void)
 {
@@ -3638,11 +3644,13 @@ static error_t tagfs_name_stem(const char *filename, TagSpelling *out)
 
 /* Intern the name's tag: its id in *out_tag, TAGFS_INVALID_TAG_ID for a name
  * with no stem. A name whose tag the registry refuses is refused with it —
- * a file is never made or renamed without the tag its name gives it. Called
- * WITHOUT g_state.lock: a new tag flushes the registry to the medium, and that
- * flush writes, and may wait for another core's flush of the registry —
- * neither of which may happen under the state lock. A name the registry
- * already has costs the flush nothing. */
+ * a file is never made or renamed without the tag its name gives it — and so
+ * is one whose tag the medium was not given: a file that wore an id the
+ * registry on the medium does not define would find that id handed to
+ * another tag after the next mount. Called WITHOUT g_state.lock: a new tag
+ * flushes the registry to the medium, and that flush writes, and may wait for
+ * another core's flush of the registry — neither of which may happen under
+ * the state lock. A name the medium already has costs the flush nothing. */
 static error_t tagfs_name_tag_intern(const char *filename, uint16_t *out_tag)
 {
     TagSpelling stem;
@@ -3652,7 +3660,7 @@ static error_t tagfs_name_tag_intern(const char *filename, uint16_t *out_tag)
         return rc;
     rc = TagRegistryIntern(g_state.registry, &stem, out_tag);
     if (rc == OK)
-        tag_registry_flush(g_state.registry);
+        rc = TagRegistryFlushFor(g_state.registry, *out_tag);
     return rc;
 }
 
@@ -4214,9 +4222,12 @@ static error_t tagfs_add_tag_string_inside(uint32_t file_id, const TagSpelling *
     error_t  rc = TagRegistryIntern(g_state.registry, tag, &tag_id);
     if (rc != OK)
         return rc;
-    /* A new tag is written before any file wears it; one the registry
-     * already had costs the flush nothing. */
-    tag_registry_flush(g_state.registry);
+    /* A new tag is on the medium before any file wears it, or no file does:
+     * the tag is not put on when the registry could not be written. One the
+     * medium already has costs the flush nothing. */
+    rc = TagRegistryFlushFor(g_state.registry, tag_id);
+    if (rc != OK)
+        return rc;
     return tagfs_add_tag(file_id, tag_id) == 0 ? OK : ERR_INVALID_ARGUMENT;
 }
 
@@ -4701,23 +4712,15 @@ static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint6
      * until its patience runs out and the write is refused, for a
      * continuation for good.
      *
-     * So each failed trylock restores RFLAGS, putting this core's
-     * interrupts back as they were between attempts, and the pump beside it
-     * runs the drain core's continuations while it stands here; on any other
-     * core the pump is a one-load early-out. A legacy-IDE DMA needs neither:
+     * So each failed try restores RFLAGS, putting this core's interrupts
+     * back as they were between attempts, and the drain core's continuations
+     * run while it stands here (TagFSLockTakePumping); on any other core the
+     * pump is a one-load early-out. A legacy-IDE DMA needs neither:
      * its waiter takes the drive's answer itself (BmideAnswerHere,
      * drivers/disk/ata_async.c). Uncontended fast path is unchanged —
      * trylock succeeds first try. */
     if (handle->ofe)
-    {
-        if (!TagFSLockTry(&handle->ofe->write_lock)) {
-            uint8_t self_core = amp_get_core_index();
-            while (!TagFSLockTry(&handle->ofe->write_lock)) {
-                BatonPump(self_core);
-                cpu_pause();
-            }
-        }
-    }
+        TagFSLockTakePumping(&handle->ofe->write_lock);
 
     const uint8_t *in = (const uint8_t *)buffer;
     uint8_t block_buf[TAGFS_BLOCK_SIZE];
@@ -5120,15 +5123,7 @@ static int tagfs_truncate_file_inside(uint32_t file_id, uint64_t new_size)
      * here would strand the holder on a contending BSP exactly as described
      * above tagfs_write_inside. */
     if (handle->ofe)
-    {
-        if (!TagFSLockTry(&handle->ofe->write_lock)) {
-            uint8_t self_core = amp_get_core_index();
-            while (!TagFSLockTry(&handle->ofe->write_lock)) {
-                BatonPump(self_core);
-                cpu_pause();
-            }
-        }
-    }
+        TagFSLockTakePumping(&handle->ofe->write_lock);
 
     int rc = tagfs_truncate_locked(file_id, new_size);
 

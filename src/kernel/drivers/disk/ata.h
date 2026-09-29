@@ -203,13 +203,14 @@ static inline void ata_settle_400ns(uint16_t ctrl_reg) {
  * legitimately recovering to be absent.
  *
  * The other two callers get less, and the reason is the CALLER, not the drive.
- * ata_flush_cache resets the channel from inside g_ata_lock, and spin_lock in
- * this kernel is `pushfq; pop; cli` — so the spec's patience there would be
- * thirty-one seconds with interrupts disabled on that core, which is a far
- * worse failure than mis-declaring a wedged drive. ata_recover_worker runs on
- * a K-Core pump shared with every other deferred kernel job and would starve
- * it for exactly as long. Both take the DECLARED POLICY below — two seconds,
- * the value this function used to apply to everybody.
+ * ata_flush_cache resets the channel while it holds the channel whole
+ * (AtaChannelTake), which keeps interrupts off — so the spec's patience there
+ * would be thirty-one seconds with interrupts disabled on that core, which is
+ * a far worse failure than mis-declaring a wedged drive. ata_recover_worker
+ * runs inside a waiter on the channel, which may hold a TagFS lock, while
+ * every other command on the channel waits behind the reset. Both take the
+ * DECLARED POLICY below — two seconds, the value this function used to apply
+ * to everybody.
  *
  * ‼ That is a statement about the RESET, which is recovery, and not about the
  * command being recovered. The flush itself is owed what §8.13.8 warns of
@@ -227,7 +228,7 @@ static inline void ata_settle_400ns(uint16_t ctrl_reg) {
 
 /* ATA-7 §9.2 software reset of one channel (SRST pulse with nIEN held =1
  * throughout, so the drive's INTRQ is silenced before/during/after). Exposed
- * for the BMIDE watchdog's K-Core recovery path (ata_recover_worker).
+ * for the BMIDE recovery (ata_recover_worker), run by a waiter on the channel.
  *
  * `bsy_patience_ms` is how long the caller can afford to wait for BSY to fall
  * — ATA_SRST_BSY_SPEC_MS when nothing is held, ATA_SRST_BSY_HELD_MS when a

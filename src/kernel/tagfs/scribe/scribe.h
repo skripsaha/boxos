@@ -104,7 +104,11 @@ error_t  VolumeFlushFor(uint64_t need);
 //   5. A module's I/O buffer belongs to whoever holds its Scribe.
 //   6. No baton continuation takes a Scribe. The drain core runs them while it
 //      waits for one, and a continuation asking for a Scribe that core holds
-//      beneath it would be answered SELF.
+//      beneath it would be answered SELF; one that does is named ("[Scribe]
+//      ... inside a baton continuation"). The one pass that must take them —
+//      the halt a one-way pass begins, whose sync takes every Scribe — is
+//      never run by the pump inside a wait: it waits for the core's own loop
+//      (BatonPumpAtRest, baton.h).
 //   7. Give on the core that took it, holding no spinlock of any kind: an
 //      orderly halt that found this core in a pass stops the core right there
 //      (below).
@@ -118,10 +122,12 @@ error_t  VolumeFlushFor(uint64_t need);
 // AND IT IS NEVER STOPPED IN THE MIDDLE OF A PASS. A core an orderly halt asks
 // to stop while it holds a Scribe does not stop there: it owes the halt its
 // stop, runs its pass to the end, and stops in the ScribeGive that ends the
-// last span it holds (HaltFreezeHere). A pass is never taken over from a stopped
-// core, because none is ever stopped holding one — and a command a stopped
-// core had in flight can never land over the next pass's. A panic stops every
-// core at once, as it always did.
+// last span it holds (HaltFreezeHere), and the roll call waits for it. Nor
+// does a halt begin beneath a pass on the holder's own core: the one-way pass
+// that begins one is left by every pump inside a wait (rule 6). A pass is
+// never taken over from a stopped core, because none is ever stopped holding
+// one — and a command a stopped core had in flight can never land over the
+// next pass's. A panic stops every core at once, as it always did.
 // ============================================================================
 
 typedef enum {

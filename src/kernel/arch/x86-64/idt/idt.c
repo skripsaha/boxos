@@ -1991,11 +1991,14 @@ void IrqTheTickAnswers(void)
         ahci_watchdog_scan();
 
         /* Ф26 BMIDE — the legacy-PATA analogue: reconcile a lost IDE INTRQ from
-         * the channel's BMISR latch, and fail + SRST-recover a genuinely wedged
-         * channel so a dropped completion cannot hang a BMIDE sync waiter
-         * forever. Same BSP-only tick (both need the disk's irqsave locks); the
-         * SRST itself is deferred to a K-Core. No-op unless multi-core BMIDE
-         * async I/O is in flight (dormant whenever AHCI owns block I/O). */
+         * the channel's BMISR latch, and mark a genuinely wedged channel's
+         * SRST recovery owed, which the waiter on the channel then runs itself
+         * and fails the command ERR_IO. The waiter holds its own command to
+         * the same liveness bound, so a dropped completion ends even while
+         * this tick does not run; the tick is the quicker of the two. Same
+         * BSP-only tick (both need the disk's irqsave locks). No-op unless
+         * multi-core BMIDE async I/O is in flight (dormant whenever AHCI owns
+         * block I/O). */
         {
             extern void bmide_watchdog_scan(void);
             bmide_watchdog_scan();
@@ -2026,7 +2029,7 @@ void IrqTheTickAnswers(void)
         interrupt_frame_t *in_flight = IrqFrameInFlight();
         if (g_amp.total_cores == 1 && in_flight && (in_flight->cs & 3) == 3)
         {
-            BatonPump(0);
+            BatonPumpAtRest(0);
         }
 
         /* PIT IRQ 0: same scheduling rule as the LAPIC timer above —
@@ -2242,10 +2245,14 @@ void irq_handler(interrupt_frame_t *frame)
             return;
         }
         /* The EOI first, and the core's own word that it arrived last (inside
-         * HaltFreezeHere), so the word means "nothing of mine is still in
-         * flight". It pairs with the initiator's acquire load: the initiator
-         * (system_halt, panic) used to wait a guessed few milliseconds and
-         * then assume every core had arrived. */
+         * HaltFreezeHere), so the word means "this core touches nothing
+         * again". A core stopped here holds no span and no other core's
+         * completion — a legacy-IDE waiter claims and publishes one with its
+         * interrupts off (ata_async.c) — and a command of its own still in
+         * flight is retired by whoever waits on its channel next. It pairs
+         * with the initiator's acquire load: the initiator (system_halt,
+         * panic) used to wait a guessed few milliseconds and then assume every
+         * core had arrived. */
         lapic_send_eoi();
         HaltFreezeHere();
     }

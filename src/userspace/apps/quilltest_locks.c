@@ -3,21 +3,22 @@
  * three cabins of the case's own rename, create and tag beside them, on every
  * core the machine has. A throwaway image's case (VOLUME_TESTS=on builds).
  *
- * ‼ TWO CHAINS TAKE THE STATE LOCK UNDER THEIR OWN, AND EVERY OTHER CALL TAKES
+ * ‼ TWO CHAINS TOOK THE STATE LOCK UNDER THEIR OWN, AND EVERY OTHER CALL TAKES
  * THEM UNDER IT.
- * A chain that grows takes its new block under its own lock: the registry's
- * flush (tag_registry.c) and the file table's (file_table.c) each call
- * tagfs_alloc_blocks, which takes the volume's state lock, while they hold
+ * A chain that grew took its new block under its own lock: the registry's
+ * flush (tag_registry.c) and the file table's (file_table.c) each called
+ * tagfs_alloc_blocks, which takes the volume's state lock, while they held
  * theirs. A rename, a create, a delete, a tag and an untag take the state lock
  * first and the table's — a rename the registry's as well — inside it. Every
- * TagFS lock keeps its core's interrupts off, so two K-Cores that meet there
- * the two ways round each spin for good on the lock the other holds: the two
- * ABBAs of MP-D4, which step 1.1 removes. LockRank names the crossing the
- * first time a chain grows (the order line), and that is the evidence that
- * does not depend on timing; this case is the other half — the machine asked
- * to do exactly that on all of its cores, and whether it comes back. It is a
- * guard: it says PASS or FAIL, and a machine that wedges says nothing at all,
- * which the host judges (logcheck abba).
+ * TagFS lock keeps its core's interrupts off, so two K-Cores that met there
+ * the two ways round each spun for good on the lock the other held: the two
+ * ABBAs of MP-D4. Step 1.1 took the block out from under both locks — a Spare
+ * is stamped with no lock held (scribe.h) — and LockRank's order line, the
+ * evidence that does not depend on timing, must now never come. This case is
+ * the other half: the machine asked to grow both chains on all of its cores
+ * while the other calls run, and whether it comes back. It is a guard: it says
+ * PASS or FAIL, and a machine that wedges says nothing at all, which the host
+ * judges (logcheck abba).
  *
  * ‼ A DRIVER AND THREE WORKERS, EACH IN A CABIN OF ITS OWN.
  * A cabin's system calls are pockets, each served by one K-Core, the least
@@ -40,16 +41,13 @@
  *
  * ‼ AIMED BY THE HOST, AT BOTH EDGES.
  * TAGS is how many new tags to make and EDGE the first file id the file
- * table had no row for, both read off the volume by the host before the boot
- * (tools/volume-read.py check, as powercut.sh chaingrow reads them): TAGS
- * past the room the registry's last block has, and a file id past EDGE, grow
- * both chains while the workers run. The boot's own startup tests may make
- * files and tags first. More tags only bring the registry's edge nearer; file
- * ids spent past EDGE have already grown the table, so the edge aimed at is
- * EDGE doubled until it lies past the file ids this case was given before it
- * grows anything — HEAD's table doubles what it holds when an id falls past
- * it (file_table_update), and a table that takes a block at a time takes one
- * at each of those edges too.
+ * table's chain on the medium had no row for, both where the boot's own
+ * startup tests left the chains — the kernel says so after its last test, and
+ * the host aims from that line (logcheck abba): TAGS past the room the
+ * registry's last block has, and a file id at or past EDGE, grow both chains
+ * while the workers run, the table by the block the next anchor's sync links
+ * for that id. A file id spent at or past EDGE before the case grows anything
+ * — by its own lay-down, or by a worker — only makes that sync come sooner.
  *
  * ‼ WHY ONLY A THROWAWAY IMAGE.
  * The case deletes nothing but files of its own names, but every tag it makes
@@ -527,9 +525,9 @@ static QuillVerdict QuillAbbaSay(const QuillAbbaBoard *board, const QuillAbbaGro
     const QuillAbbaCount *c = board->counts;
     int bad = QuillAbbaFailed(board, QUILL_ABBA_ROLES, true);
     if (!g->refused && bad < 0 && final == 0) {
-        printf("[QUILL] abba: PASS — made %u new tags, fids %u..%u past the table's edge at fid %u, "
-               "and %u anchors while rename answered %u calls, create %u and tag %u, each in a "
-               "cabin of its own and each as due; anchored, %llu ms in all\n", g->made,
+        printf("[QUILL] abba: PASS — made %u new tags, fids %u..%u, the last at or past the table's "
+               "edge at fid %u, and %u anchors while rename answered %u calls, create %u and tag "
+               "%u, each in a cabin of its own and each as due; anchored, %llu ms in all\n", g->made,
                g->first_fid, g->last_fid, g->edge, g->anchors, c[QUILL_ABBA_RENAME].calls,
                c[QUILL_ABBA_CREATE].calls, c[QUILL_ABBA_TAG].calls, (unsigned long long)ms);
         return QUILL_PASS;
@@ -588,8 +586,7 @@ QuillVerdict QuillAbba(const char *const *args)
                "worker started (anchor %d)\n", g.name, rc, arc);
         return QUILL_FAIL;
     }
-    for (g.edge = edge; g.edge <= highest && g.edge <= UINT32_MAX / 2; g.edge *= 2) {
-    }
+    g.edge = edge;
 
     bool     unwatched = false;
     uint32_t started = QuillAbbaStart(pair, name, &rc, &unwatched);

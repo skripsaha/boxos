@@ -199,10 +199,13 @@ typedef struct {
 
     /*
      * What the medium holds of this registry: the record of every id below
-     * written_next, in the chain that ends at tail_block, whose image
-     * tail_image is byte for byte. written_next is changed under `lock`; the
-     * rest belong to whoever holds `scribe` — one flush of this registry at a
-     * time — and to the load before anyone can see the registry.
+     * written_next, in the chain that ends at tail_block. tail_image is what
+     * the next write of the tail puts there: after a load, the medium's tail
+     * cut to the records the walk read; after a refused write, the tail as it
+     * was before that write — which the refused write may have overwritten
+     * all the same. written_next is changed under `lock`; the rest belong to
+     * whoever holds `scribe` — one flush of this registry at a time — and to
+     * the load before anyone can see the registry.
      *
      * spare_block is the block the chain grows by next: stamped, proved on
      * the medium by the flush carrying spare_need, and kept across a flush

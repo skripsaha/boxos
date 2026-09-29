@@ -80,6 +80,30 @@ bool StandChainOnMedium(uint32_t head_volume_block, uint32_t magic, StandChain* 
     return true;
 }
 
+/* The two chains as the startup tests leave them on the medium, said once
+ * after the last test. The tests grow both — the table by a block for every
+ * id they spend past its end, and more — so a case that has to grow them
+ * afterwards (quilltest abba, logcheck abba) aims at the ends said here, not
+ * at the ones the image was built with. */
+void StandSayChainsLeft(void)
+{
+    TagFSState* fs       = tagfs_get_state();
+    StandChain  table    = { 0 };
+    StandChain  registry = { 0 };
+
+    if (!StandChainOnMedium(fs->layout.file_table_block, TAGFS_FILETBL_MAGIC, &table) ||
+        table.broken ||
+        !StandChainOnMedium(fs->layout.tag_registry_block, TAGFS_REGISTRY_MAGIC, &registry) ||
+        registry.broken || tagfs_read_block(registry.last, s_link) != OK) {
+        kprintf("[TESTS] the chains the tests leave could not be walked on the medium\n");
+        return;
+    }
+    const TagRegistryBlock* tail = (const TagRegistryBlock*)s_link;
+    kprintf("[TESTS] the tests leave the file table %u block(s) long on the medium and the "
+            "registry %u, its last block holding %u byte(s)\n",
+            table.links, registry.links, (unsigned)tail->used_bytes);
+}
+
 static bool StandRegistryChain(StandChain* out, uint32_t* list)
 {
     out->blocks   = list;

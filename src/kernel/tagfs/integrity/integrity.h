@@ -14,8 +14,10 @@
 // Semantics: a digest of 0 means "unknown" (block not hashed in this volume's
 // lifetime yet) and is never flagged — so pre-existing data is not false-
 // positived; coverage grows as blocks are written. Every block write records
-// its digest; every block read re-checks it. The map's own blocks and any
-// block whose digest is unknown are skipped.
+// its digest, and one that cannot be recorded — no page of the map to be had
+// for it — makes the whole page it belongs to unknown until the next flush
+// lays it again as zeros; every block read re-checks it. The map's own blocks
+// and any block whose digest is unknown are skipped.
 // ============================================================================
 
 error_t  IntegrityInit(void);        // load the on-disk map, or lazily create it
@@ -31,10 +33,11 @@ void     IntegrityUpdate(uint32_t block, const void *data);
 // mismatch it logs + counts the rot and returns false. Never waits, as above.
 bool     IntegrityVerify(uint32_t block, const void *data);
 
-// Persist the dirty map pages, waiting for a page another core has out.
+// Persist the dirty map pages, waiting for a page another core has out, after
+// laying again as zeros every page whose digests went unrecorded.
 // OK; ERR_WRITE_FAILED when the medium refused a page, which stays owed;
 // ERR_WOULD_BLOCK when a page is out with a transfer this call cannot wait
-// for — one beneath it on this very core, or one a halted core left.
+// for — one beneath it on this very core, or one a stopped core left.
 error_t  IntegrityFlush(void);
 
 // Publish a Touch event on the well-known "integrity" tag for each bit-rot

@@ -448,7 +448,7 @@ class GroundCensus:
                        exclusive=False)
         if f.stray:
             self.Say("REDIRECT_STRAY", "note", "%u DiskBook redirect(s) name snapshots the manifest "
-                     "does not carry (%s) — the kernel ignores them (cow.c:527-536)"
+                     "does not carry (%s) — the kernel's replay of the DiskBook passes them by"
                      % (len(f.stray), ", ".join(str(s[0]) for s in f.stray)))
         if led and led["integrity_map_block"]:
             self.Claim("integrity", "integrity map",

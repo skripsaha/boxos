@@ -9493,15 +9493,16 @@ EOF
 # three other cabins rename, create and tag: the machine must come back
 # ===========================================================================
 #
-# MP-D4, the two ABBAs. A chain that grows takes the volume's state lock under
+# MP-D4, the two ABBAs. A chain that grew took the volume's state lock under
 # its own — the registry's in tag_registry_flush, the file table's in
-# file_table_flush, both through tagfs_alloc_blocks — and a rename, a create, a
-# delete, a tag and an untag take those locks under state. Every TagFS lock
-# keeps its core's interrupts off, so two K-Cores that meet there the two ways
-# round never move again. The red that does not depend on timing is LockRank's
-# order line, named the first time a chain grows in a boot; this gate is the
-# guard beside it (the owner, 2026-09-28): `quilltest abba` on UEFI STRICT
-# with sixteen cores — four K-Cores — grows both chains while its three
+# file_table_flush, both through tagfs_alloc_blocks — while a rename, a create,
+# a delete, a tag and an untag take those locks under state. Every TagFS lock
+# keeps its core's interrupts off, so two K-Cores that met there the two ways
+# round never moved again. Step 1.1 took the block out from under both locks
+# (a Spare stamped with none held, scribe.h), and LockRank's order line — the
+# red that does not depend on timing — is now demanded NOT to come. This gate
+# is the guard beside it (the owner, 2026-09-28): `quilltest abba` on UEFI
+# STRICT with sixteen cores — four K-Cores — grows both chains while its three
 # workers call the other way round, each in a cabin of its own, and the run
 # must reach the case's verdict. On a tree where the crossing strikes, it does
 # not: that is this gate going red on evidence, not on a flake.
@@ -9528,15 +9529,18 @@ EOF
 # deleting the step in the row, as it lifts every caveat, and nothing here
 # changes.
 #
-# Aimed as powercut.sh chaingrow is, by volume-read's figures of the fresh
-# image: enough new tags to fill the registry's last block and reach
-# ABBA_EDGES blocks past it, and the table's edge — its rows, 510 to a block.
-# Built VOLUME_TESTS=on, because abba spends tags and file ids for good, so the
-# startup tests run first; they can only bring either edge nearer. After the
+# Aimed where the case starts: enough new tags to fill the registry's last
+# block and reach ABBA_EDGES blocks past it, and the table's edge — its rows,
+# 510 to a block. Built VOLUME_TESTS=on, because abba spends tags and file ids
+# for good, so the startup tests run first — and they grow both chains, the
+# table by whole blocks, past any edge read off the fresh image. So the kernel
+# says, after its last test, how long each chain is on the medium and how full
+# the registry's last block is ("[TESTS] the tests leave ..."), and the aim is
+# taken from that line with volume-read's figures of the format. After the
 # verdict the machine halts through `bye` and volume-read reads the volume
-# again: the registry must have grown by at least the blocks any packing of
-# the case's own records takes past the room its last block had, and the
-# table by a block.
+# again: against that same line, the registry must have grown by at least the
+# blocks any packing of the case's own records takes past the room its last
+# block had, and the table by a block — growth nothing but the case made.
 #
 # ABBA_STAND is the machine: the gate is sixteen cores, and a look at the same
 # workload on another machine names it here, as QUILL_STAND does for quill
@@ -9552,23 +9556,34 @@ ABBA_ORDER_KEYS="registry@tag_registry_flush/state@tagfs_alloc_blocks_inside tab
 ABBA_PROGRESS='^\[QUILL\] abba: (workers rename pid [0-9]+|[0-9]+ of [0-9]+ new tags made).* at [0-9]+ ms[;,]'
 ABBA_VERDICT='^\[QUILL\] abba: (PASS|FAIL) — '
 
-# abba_aim JSON — "TAGS EDGE REGISTRY TABLE NEED" off volume-read's check of
-# the volume before the boot: the new tags that fill the registry's last block
-# and reach ABBA_EDGES blocks past it, the table's edge, both chains' lengths,
-# and the least number of blocks any packing of those tags' records takes
-# past the room the last block has.
+# abba_aim JSON TABLE REGISTRY TAIL — "TAGS EDGE REGISTRY TABLE NEED": the
+# format's figures off volume-read's check of the image (a registry record's
+# head, a block's data, a table block's rows), the chains as the startup tests
+# left them (TABLE and REGISTRY blocks, TAIL bytes in the registry's last),
+# and from them the new tags that fill that last block and reach ABBA_EDGES
+# blocks past it, the table's edge, both chains' lengths, and the least number
+# of blocks any packing of those tags' records takes past the room the last
+# block has.
 abba_aim() {
-    python3 - "$1" "$ABBA_STEM" "$ABBA_EDGES" <<'ABBA_AIM_EOF'
+    python3 - "$1" "$ABBA_STEM" "$ABBA_EDGES" "$2" "$3" "$4" <<'ABBA_AIM_EOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
 ch, stem, edges = d["chains"], int(sys.argv[2]), int(sys.argv[3])
+table, registry, tail = int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6])
 record = ch["registry_record_header"] + stem
-room_bytes = ch["registry_block_data"] - ch["registry_tail_used"]
+room_bytes = ch["registry_block_data"] - tail
 room, per_block = room_bytes // record, ch["registry_block_data"] // record
 tags = room + (edges - 1) * per_block + 1
 need = -(-(tags * record - room_bytes) // ch["registry_block_data"])
-print(tags, ch["table_rows_per_block"] * len(ch["table"]), len(ch["registry"]), len(ch["table"]), need)
+print(tags, ch["table_rows_per_block"] * table, registry, table, need)
 ABBA_AIM_EOF
+}
+
+# The kernel's own word on the chains once its startup tests are done
+# (stand_chain_tests.c, StandSayChainsLeft): "TABLE REGISTRY TAIL".
+ABBA_LEFT='^\[TESTS\] the tests leave the file table ([0-9]+) block\(s\) long on the medium and the registry ([0-9]+), its last block holding ([0-9]+) byte\(s\)'
+abba_left() {
+    tr -d '\r' < "$1" | grep -aE "$ABBA_LEFT" | tail -1 | sed -E "s/$ABBA_LEFT.*/\1 \2 \3/"
 }
 
 # abba_chains JSON — "REGISTRY TABLE": both chains' lengths after the run.
@@ -9655,14 +9670,11 @@ abba_session() {
         return 1
     fi
     python3 tools/volume-read.py build/boxos.img check --json >"$SCRATCH/abba.$tag.before.json" 2>/dev/null
-    if ! aim=$(abba_aim "$SCRATCH/abba.$tag.before.json" 2>&1); then
-        harness "abba: $tag — volume-read's figures of the fresh image would not read: $(echo "$aim" | tail -1)"
+    if ! python3 -c 'import json, sys; json.load(open(sys.argv[1]))["chains"]' \
+            "$SCRATCH/abba.$tag.before.json" >/dev/null 2>&1; then
+        harness "abba: $tag — volume-read's figures of the fresh image would not read"
         return 1
     fi
-    read -r ABBA_TAGS ABBA_EDGE ABBA_R0 ABBA_T0 ABBA_NEED <<ABBA_AIM
-$aim
-ABBA_AIM
-    echo "   aim: the fresh image's registry is $ABBA_R0 block(s) and its table $ABBA_T0; $ABBA_TAGS new tags reach $ABBA_EDGES registry blocks past its last one's room, and the table's edge is fid $ABBA_EDGE"
     # shellcheck disable=SC2086
     if ! make run-bg VOLUME_TESTS=on $ABBA_STAND >"$SCRATCH/runbg.abba.$tag.log" 2>&1 || [ ! -S build/qemu.mon ]; then
         harness "abba: $tag — no machine was started: $(tail -1 "$SCRATCH/runbg.abba.$tag.log" | tr -d '\r')"
@@ -9676,6 +9688,18 @@ ABBA_AIM
         bad "abba: $tag — the machine never came to its shell after the startup tests ($(grep -aE 'KERNEL PANIC|TagFS: [0-9]+ run, ' "$SCRATCH/serial.abba.$tag.log" | tr -d '\r' | tail -1))"
         return 1
     fi
+    local left
+    left=$(abba_left build/serial.log)
+    if [ -z "$left" ] || ! aim=$(abba_aim "$SCRATCH/abba.$tag.before.json" $left 2>&1); then
+        make run-stop >/dev/null 2>&1
+        cp build/serial.log "$SCRATCH/serial.abba.$tag.log"
+        harness "abba: $tag — the kernel did not say where its startup tests left the chains, so there is nothing to aim from${aim:+: $(echo "$aim" | tail -1)}"
+        return 1
+    fi
+    read -r ABBA_TAGS ABBA_EDGE ABBA_R0 ABBA_T0 ABBA_NEED <<ABBA_AIM
+$aim
+ABBA_AIM
+    echo "   aim: the startup tests left the registry $ABBA_R0 block(s) and the table $ABBA_T0; $ABBA_TAGS new tags reach $ABBA_EDGES registry blocks past its last one's room, and the table's edge is fid $ABBA_EDGE"
     mark=$(wc -l < build/serial.log)
     if type_line "quilltest abba $ABBA_NAME $ABBA_TAGS $ABBA_EDGE"; then
         abba_watch "$mark"
@@ -9752,7 +9776,7 @@ $(abba_chains "$SCRATCH/abba.$tag.after.json" 2>/dev/null)
 ABBA_AFTER
         then
             [ $((r1 - ABBA_R0)) -ge "$ABBA_NEED" ] && [ "$t1" -gt "$ABBA_T0" ]
-            chk $? "abba: $what — the registry went from $ABBA_R0 to $r1 blocks, $ABBA_NEED at least for the case's $made new tags past the room its last block had, and the file table from $ABBA_T0 to $t1"
+            chk $? "abba: $what — from where the startup tests left them, the registry went from $ABBA_R0 to $r1 blocks, $ABBA_NEED at least for the case's $made new tags past the room its last block had, and the file table from $ABBA_T0 to $t1"
         else
             bad "abba: $what — the chains were not read after the run: the machine $([ "$ABBA_HALTED" = 1 ] && echo "halted and volume-read could not read the volume" || echo "did not halt through bye ($(grep -aE "$STAND_HALT_ENDS" "$L" | tr -d '\r' | tail -1 | cut -c1-120))")"
         fi

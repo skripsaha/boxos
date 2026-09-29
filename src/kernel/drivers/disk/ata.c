@@ -57,12 +57,6 @@
 AtaChannel g_ata_channels[ATA_CHANNEL_COUNT];
 ATADevice  g_ata_devices[ATA_DRIVE_COUNT];
 
-/* Global IDE-controller lock. Serialises command issue across all four
- * drives behind a single ATA controller — the legacy register file is
- * shared so two cores cannot drive different channels concurrently
- * without a re-entrancy story we don't need. */
-static spinlock_t g_ata_lock;
-
 /* ATA register offsets within an 8-byte command block (PCI IDE native
  * layout, identical to legacy 0x1F0+N). */
 #define ATA_REG_DATA            0
@@ -112,9 +106,10 @@ static inline void ata_select_drive(uint8_t drive_idx) {
 
 /* One turn of any busy-poll loop in this driver.
  *
- * Every wait below turns while this core holds g_ata_lock, and spin_lock in
- * this kernel is `pushfq; pop; cli` — so these loops run with INTERRUPTS OFF,
- * for as long as the drive takes. That is not a number this driver gets to
+ * Every wait below turns while this core holds the drive's channel whole
+ * (AtaChannelTake, ata_async.h), which keeps interrupts off the way spin_lock
+ * does — so these loops run with INTERRUPTS OFF, for as long as the drive
+ * takes. That is not a number this driver gets to
  * choose: ATA/ATAPI-6 (T13/1410D r3a) §8.13.8 says a cache flush alone "may
  * take longer than 30 s to complete", and a command abandoned early is a
  * command whose outcome nobody knows.
@@ -774,10 +769,11 @@ int ata_read_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* b
     if (!d->exists || !ch->present) return ATA_ERR_NO_DEVICE;
     if (lba + count > d->total_sectors) return ATA_ERR_LBA_OUT_OF_BOUNDS;
 
-    /* Fast path: IRQ-driven Bus-Master DMA via ata_async, taken without
-     * g_ata_lock — the async engine has its own per-channel cmd_lock for
-     * register-file mutual exclusion, and nothing of the PIO path's lock
-     * to add to it. */
+    /* Fast path: IRQ-driven Bus-Master DMA via ata_async, which owns the
+     * channel for each of its commands from the kick to the retire. The PIO
+     * path below takes the channel whole instead (AtaChannelTake), so the two
+     * never write one channel's command block at once — a command written
+     * while the drive is busy with the other is one the drive ignores. */
     if (ata_async_usable(drive_idx) && count <= ATA_ASYNC_MAX_SECTORS) {
         int rc = ata_dma_sync(drive_idx, lba, count, false, buffer);
         if (rc == 0) return 0;
@@ -786,10 +782,10 @@ int ata_read_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* b
         if (rc != ATA_ERR_BUSY) ata_note_dma_fallback(drive_idx, rc, lba, false);
     }
 
-    spin_lock(&g_ata_lock);
+    uint64_t held = AtaChannelTake(drive_channel(drive_idx));
     ata_select_drive(drive_idx);
     if (ata_wait_ready(drive_idx) != 0) {
-        spin_unlock(&g_ata_lock);
+        AtaChannelGive(drive_channel(drive_idx), held);
         return ATA_ERR_TIMEOUT;
     }
     ata_program_lba(drive_idx, lba, count, ATA_CMD_READ_SECTORS, ATA_CMD_READ_SECTORS_EXT);
@@ -797,7 +793,7 @@ int ata_read_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* b
     for (uint16_t sec = 0; sec < count; sec++) {
         int rc = ata_wait_drq(drive_idx);
         if (rc != 0) {
-            spin_unlock(&g_ata_lock);
+            AtaChannelGive(drive_channel(drive_idx), held);
             return rc;
         }
         uint16_t* buf16 = (uint16_t*)(buffer + (uint32_t)sec * ATA_SECTOR_SIZE);
@@ -805,7 +801,7 @@ int ata_read_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* b
             buf16[i] = inw(ch->cmd_base + ATA_REG_DATA);
     }
 
-    spin_unlock(&g_ata_lock);
+    AtaChannelGive(drive_channel(drive_idx), held);
     return 0;
 }
 
@@ -829,9 +825,9 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
     }
     if (lba + count > d->total_sectors) return ATA_ERR_LBA_OUT_OF_BOUNDS;
 
-    /* DMA fast path — same gate as ata_read_sectors, and like it taken
-     * without g_ata_lock: per-channel cmd_lock in ata_async covers register
-     * serialisation for the DMA path. */
+    /* DMA fast path — same gate as ata_read_sectors, and the same division
+     * of the channel: the engine's for each DMA, taken whole for the PIO
+     * path below. */
     if (ata_async_usable(drive_idx) && count <= ATA_ASYNC_MAX_SECTORS) {
         int rc = ata_dma_sync(drive_idx, lba, count, true, (void*)buffer);
         if (rc == 0) return 0;
@@ -840,10 +836,10 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
         if (rc != ATA_ERR_BUSY) ata_note_dma_fallback(drive_idx, rc, lba, true);
     }
 
-    spin_lock(&g_ata_lock);
+    uint64_t held = AtaChannelTake(drive_channel(drive_idx));
     ata_select_drive(drive_idx);
     if (ata_wait_ready(drive_idx) != 0) {
-        spin_unlock(&g_ata_lock);
+        AtaChannelGive(drive_channel(drive_idx), held);
         return ATA_ERR_TIMEOUT;
     }
     ata_program_lba(drive_idx, lba, count, ATA_CMD_WRITE_SECTORS, ATA_CMD_WRITE_SECTORS_EXT);
@@ -851,7 +847,7 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
     for (uint16_t sec = 0; sec < count; sec++) {
         int rc = ata_wait_drq(drive_idx);
         if (rc != 0) {
-            spin_unlock(&g_ata_lock);
+            AtaChannelGive(drive_channel(drive_idx), held);
             return rc;
         }
         const uint16_t* buf16 = (const uint16_t*)(buffer + (uint32_t)sec * ATA_SECTOR_SIZE);
@@ -867,7 +863,7 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
     if (ata_wait_clear_bsy(drive_idx, CONFIG_ATA_IO_TIMEOUT_MS) != 0) {
         debug_printf("[ATA] drv%u: BSY-clear timeout after WRITE @LBA %lu\n",
                      drive_idx, (unsigned long)lba);
-        spin_unlock(&g_ata_lock);
+        AtaChannelGive(drive_channel(drive_idx), held);
         return ATA_ERR_TIMEOUT;
     }
     /* ERR and DF are two DIFFERENT ways the write ended badly, and ATA/ATAPI-6
@@ -885,11 +881,11 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
                      drive_idx, status,
                      (status & ATA_SR_DF) ? " DEVICE-FAULT" : "",
                      e, ata_decode_error(e), (unsigned long)lba);
-        spin_unlock(&g_ata_lock);
+        AtaChannelGive(drive_channel(drive_idx), held);
         return ATA_ERR_DRIVE_FAULT;
     }
 
-    spin_unlock(&g_ata_lock);
+    AtaChannelGive(drive_channel(drive_idx), held);
     return 0;
 }
 
@@ -943,7 +939,8 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
  * Returns 0 only when the device ended the command with nothing to say. On
  * ATA_ERR_DRIVE_FAULT the ending status and Error register are handed back for
  * the caller to report; nothing is printed from in here, because this runs
- * under g_ata_lock with interrupts off and the caller can say it once, after.
+ * with the channel held and interrupts off, and the caller can say it once,
+ * after.
  */
 static int ata_flush_once(uint8_t drive_idx, uint8_t cmd, uint32_t patience_ms,
                           uint8_t* out_status, uint8_t* out_error) {
@@ -988,7 +985,7 @@ int ata_flush_cache(uint8_t drive_idx) {
      * longer than 30 s": it is how long the DRIVE may take to put its write
      * cache on the medium. Handing that to each attempt in turn would not be
      * more patient with the drive — it would be a minute and a half of this
-     * core with interrupts disabled, holding g_ata_lock, because a retry only
+     * core with interrupts disabled, holding the channel, because a retry only
      * happens after the drive has already refused or gone silent once. So each
      * attempt gets what the previous ones left, and what a channel reset costs
      * comes out of the same purse. */
@@ -996,13 +993,18 @@ int ata_flush_cache(uint8_t drive_idx) {
     uint8_t  status = 0, error = 0;
     int      rc = ATA_ERR_FLUSH_FAILED;
 
-    spin_lock(&g_ata_lock);
+    /* The channel whole, before the command register is written at all: a
+     * FLUSH written while a DMA of the async engine holds the drive BSY is
+     * ignored by the drive, and a DMA kicked into this FLUSH's BSY is — and
+     * the FLUSH's INTRQ, latched in BMISR, would then retire that DMA as if
+     * it had run. */
+    uint64_t held = AtaChannelTake(drive_channel(drive_idx));
     for (int retry = 0; retry < CONFIG_ATA_MAX_RETRIES; retry++) {
         uint64_t attempt_start = rdtsc();
 
         rc = ata_flush_once(drive_idx, cmd, budget_ms, &status, &error);
         if (rc == 0) {
-            spin_unlock(&g_ata_lock);
+            AtaChannelGive(drive_channel(drive_idx), held);
             return 0;
         }
         /* The bus reads back 0xFF — there is nothing on this channel to flush
@@ -1011,17 +1013,17 @@ int ata_flush_cache(uint8_t drive_idx) {
 
         /* ATA_ERR_TIMEOUT — the command never ended at all. Reset the channel
          * between attempts: a wedged drive blocks every subsequent write. The
-         * reset runs *inside* the lock so no other core can find the channel
-         * mid-reset; ata_channel_soft_reset only touches I/O ports, not heap
-         * or other locks, so holding g_ata_lock across it is safe (no
-         * lock-order risk).
+         * reset runs with the channel still held, so no command of another
+         * caller's or of the engine's can find the channel mid-reset;
+         * ata_channel_soft_reset only touches I/O ports, not heap or locks, so
+         * holding the channel across it risks no lock order.
          *
-         * And that lock is why this caller asks for the SHORT patience: the
-         * budget above is what the FLUSH ITSELF is owed by the spec, and the
-         * reset is recovery on top of it — every millisecond spent here is
-         * another millisecond with interrupts off on this core, buying nothing
-         * the volume asked for. The spec's 31 s belongs to the boot-time
-         * reset, which holds nothing.
+         * And that hold, interrupts off, is why this caller asks for the SHORT
+         * patience: the budget above is what the FLUSH ITSELF is owed by the
+         * spec, and the reset is recovery on top of it — every millisecond
+         * spent here is another millisecond with interrupts off on this core,
+         * buying nothing the volume asked for. The spec's 31 s belongs to the
+         * boot-time reset, which holds nothing.
          *
          * ATA_ERR_DRIVE_FAULT takes neither branch: a flush the device ENDED
          * with an error wants another flush, not a reset. §8.13.6 — "Subsequent
@@ -1038,7 +1040,7 @@ int ata_flush_cache(uint8_t drive_idx) {
         if (spent >= budget_ms) break;
         budget_ms -= spent;
     }
-    spin_unlock(&g_ata_lock);
+    AtaChannelGive(drive_channel(drive_idx), held);
 
     /* Said once, out here, with the lock released and interrupts back on — and
      * said with kprintf rather than debug_printf, which compiles to nothing in
@@ -1258,7 +1260,6 @@ static void ata_discover_channels(void) {
  * ------------------------------------------------------------------ */
 void ata_init(void) {
     debug_printf("[ATA] Initialising legacy ATA/IDE driver...\n");
-    spinlock_init(&g_ata_lock);
 
     memset(g_ata_channels, 0, sizeof(g_ata_channels));
     memset(g_ata_devices, 0, sizeof(g_ata_devices));

@@ -641,6 +641,32 @@ error_t tag_registry_flush(TagRegistry* reg) {
     return rc;
 }
 
+/*
+ * One id's record on the medium: OK at once when the medium already holds it
+ * (below written_next), otherwise a flush, and OK only if that flush put it
+ * there. The flush's own refusal otherwise — so a caller about to make a file
+ * wear the id can refuse instead, and no record on the medium ever wears an id
+ * the registry on the medium does not define. Called with no TagFS lock held.
+ */
+error_t TagRegistryFlushFor(TagRegistry* reg, uint16_t id) {
+    if (!reg) return ERR_NULL_POINTER;
+
+    TagFSLockTake(&reg->lock);
+    bool held = id < reg->written_next;
+    TagFSLockDrop(&reg->lock);
+    if (held)
+        return OK;
+
+    error_t rc = tag_registry_flush(reg);
+
+    TagFSLockTake(&reg->lock);
+    held = id < reg->written_next;
+    TagFSLockDrop(&reg->lock);
+    if (held)
+        return OK;
+    return rc != OK ? rc : ERR_TAGFS_METADATA_ERROR;
+}
+
 // ----------------------------------------------------------------------------
 // The load
 // ----------------------------------------------------------------------------

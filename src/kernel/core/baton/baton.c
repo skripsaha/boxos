@@ -26,6 +26,15 @@ volatile uint8_t        g_baton_ready = 0;
  * BatonInit. Indexed by the core that TAKES the pass. */
 static Baton *g_baton_oneway = NULL;
 
+/* A one-way pass a pump inside a wait popped and did not run: the machine
+ * stops from the core's own loop, never from beneath what the core is in the
+ * middle of (BatonPumpAtRest). Written and read by the owning core only. */
+static uint8_t g_baton_oneway_owed[MAX_CORES];
+
+/* Two-way continuations this core is running, nested pumps included. Written
+ * by the owning core only; read by it (BatonRunningHere). */
+static uint32_t g_baton_running[MAX_CORES];
+
 /* ==========================================================================
  *  Raw MP link — the one primitive both the public push and the consumer's
  *  stub re-anchor share. Allocation-free, IRQ-safe. Does NOT touch
@@ -250,14 +259,36 @@ static void baton_say_one_way(uint8_t core_idx, void (*run)(void *ctx))
                 "not come back\n", core_idx, (uint64_t)(uintptr_t)run);
 }
 
+/* A one-way pass taken: counted when TAKEN, because nothing comes back to
+ * count it — a drain that waited for this pass would be waiting for the pass
+ * it is running inside, which is the thirty seconds the power button used to
+ * take before it gave up on itself.
+ *
+ * LOCK XADD is a full barrier and locked instructions have a total order
+ * (Intel SDM Vol 3A §9.2.2; §8.2.2 in older revisions), so every other core
+ * observes `popped` rise before the continuation's first store — and the
+ * drain that runs INSIDE the continuation sees it by plain program order. No
+ * extra fence is owed: the acquire in baton_pop already made the marker
+ * visible, and this add is itself the barrier that orders it against the run.
+ *
+ * Counted exactly once even if a caller lied and the continuation did
+ * return: there is no second count after the call. */
+static void baton_take_one_way(BatonQueue *q, uint8_t core_idx, void (*run)(void *), void *ctx)
+{
+    baton_say_one_way(core_idx, run);
+    atomic_fetch_add_u64(&q->popped, 1);
+    run(ctx);
+}
+
 /* ==========================================================================
- *  Consumer — BatonPump()
+ *  Consumer — BatonPump() / BatonPumpAtRest()
  *
  *  Single-consumer: only the owning core drains its queue. Every K-Core
- *  calls this with its own index from kcore_run_loop; non-drain queues stay
- *  empty and cost a single load.
+ *  calls this with its own index; non-drain queues stay empty and cost a
+ *  single load. Only a pump at rest takes a one-way pass: one inside a wait
+ *  sets it aside for the core's own loop.
  * ========================================================================== */
-uint32_t BatonPump(uint8_t core_idx)
+static uint32_t baton_pump(uint8_t core_idx, bool at_rest)
 {
     if (!__atomic_load_n(&g_baton_ready, __ATOMIC_ACQUIRE)) return 0;
     if (core_idx >= g_amp.total_cores) return 0;
@@ -274,6 +305,14 @@ uint32_t BatonPump(uint8_t core_idx)
      * to the kernel and is off any reserve path (kheap.h), never to the
      * cabin or the pass it happened to run beneath. */
     KHeapScope outer = KHeapScopeEnter(KHEAP_CHARGE_KERNEL, 0);
+
+    if (at_rest && g_baton_oneway_owed[core_idx]) {
+        Baton *n = &g_baton_oneway[core_idx];
+        g_baton_oneway_owed[core_idx] = 0;
+        q->last_pop_run = n->run;
+        baton_take_one_way(q, core_idx, n->run, n->ctx);
+        ran++;
+    }
 
     for (;;) {
         Baton *n = baton_pop(q);
@@ -293,30 +332,24 @@ uint32_t BatonPump(uint8_t core_idx)
         q->last_pop_run = run;
 
         if (one_way) {
-            /* Counted when TAKEN, because nothing comes back to count it: a
-             * drain that waited for this pass would be waiting for the pass it
-             * is running inside, which is the thirty seconds the power button
-             * used to take before it gave up on itself.
-             *
-             * LOCK XADD is a full barrier and locked instructions have a
-             * total order (Intel SDM Vol 3A §9.2.2; §8.2.2 in older
-             * revisions), so every other core observes `popped` rise before
-             * the continuation's first store — and the drain that runs INSIDE
-             * the continuation sees it by plain program order. No extra fence
-             * is owed: the acquire in baton_pop already made the marker
-             * visible, and this add is itself the barrier that orders it
-             * against the run.
-             *
-             * Counted exactly once even if a caller lied and the continuation
-             * did return: there is no second count after the call. */
-            baton_say_one_way(core_idx, run);
-            atomic_fetch_add_u64(&q->popped, 1);
-            run(ctx);
+            /* The machine stops from here only when this core stands on
+             * nothing. A pump inside a wait — a Scribe's, a stood-over USB
+             * command's — runs beneath whatever the core is in the middle of,
+             * and a halt begun there would sync the volume under a pass of its
+             * own that it can never let finish (SELF). It is taken from the
+             * core's own loop instead, the next time that loop pumps. */
+            if (!at_rest) {
+                g_baton_oneway_owed[core_idx] = 1;
+                continue;
+            }
+            baton_take_one_way(q, core_idx, run, ctx);
             ran++;
             continue;
         }
 
+        g_baton_running[core_idx]++;
         run(ctx);
+        g_baton_running[core_idx]--;
         /* Count AFTER the continuation returns: BatonOutstanding
          * (pushed != popped) then means "a completion is posted OR still
          * running", so halt-drain waits for a write's tagfs commit to finish
@@ -327,6 +360,26 @@ uint32_t BatonPump(uint8_t core_idx)
 
     KHeapScopeLeave(outer);
     return ran;
+}
+
+uint32_t BatonPump(uint8_t core_idx)
+{
+    return baton_pump(core_idx, false);
+}
+
+uint32_t BatonPumpAtRest(uint8_t core_idx)
+{
+    return baton_pump(core_idx, true);
+}
+
+bool BatonRunningHere(void)
+{
+    uint64_t flags;
+    asm volatile("pushfq; pop %0; cli" : "=r"(flags)::"memory");
+    bool running = g_baton_running[amp_get_core_index()] != 0;
+    if (flags & (1u << 9))
+        asm volatile("sti" ::: "memory");
+    return running;
 }
 
 /* ==========================================================================
@@ -342,6 +395,7 @@ bool BatonPending(uint8_t core_idx)
     if (core_idx >= g_amp.total_cores) return false;
 
     BatonQueue *q = &g_baton[core_idx];
+    if (g_baton_oneway_owed[core_idx]) return true;          /* a halt set aside */
     Baton *head = q->head;                       /* SC-owned */
     if (head != &q->stub) return true;                       /* real node at front */
     return __atomic_load_n(&q->stub.next, __ATOMIC_ACQUIRE) != NULL;
