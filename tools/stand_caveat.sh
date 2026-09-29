@@ -124,7 +124,7 @@ caveat_row() {
         lockrank:integrity@IntegrityUpdate:read|\
         lockrank:integrity@IntegrityUpdate:write|\
         lockrank:integrity@IntegrityFlush:write)
-                    echo "1.1|a page of the integrity map is read or written under the map's IRQ-off lock, from inside every block read and write, so every core that reads or writes a block spins with interrupts off for as long as the medium takes" ;;
+                    echo "|a page of the integrity map is read or written under the map's IRQ-off lock, from inside every block read and write, so every core that reads or writes a block spins with interrupts off for as long as the medium takes" ;;
         lockrank:integrity@IntegrityVerify/readahead@ReadAheadLookup|\
         lockrank:integrity@IntegrityVerify/readahead@ReadAheadInvalidate|\
         lockrank:integrity@IntegrityUpdate/readahead@ReadAheadInvalidate|\
@@ -133,10 +133,10 @@ caveat_row() {
         lockrank:integrity@IntegrityVerify/braid@BraidIsHealthy|\
         lockrank:integrity@IntegrityUpdate/braid@BraidIsHealthy|\
         lockrank:integrity@IntegrityFlush/braid@BraidIsHealthy)
-                    echo "1.1|a page of the integrity map is read or written with the map's lock held, so the read-ahead cache's and Braid's locks are taken under that leaf" ;;
+                    echo "|a page of the integrity map is read or written with the map's lock held, so the read-ahead cache's and Braid's locks are taken under that leaf" ;;
         lockrank:ledger@tagfs_write_ledger:write|\
         lockrank:ledger@tagfs_remember_use_context:write)
-                    echo "1.1|the Ledger is written to the medium under its IRQ-off lock, so a core that reads the Ledger spins with interrupts off for as long as the medium takes" ;;
+                    echo "|the Ledger is written to the medium under its IRQ-off lock, so a core that reads the Ledger spins with interrupts off for as long as the medium takes" ;;
         lockrank:diskbook@DiskBookCheckpoint:write)
                     echo "|the DiskBook's checkpoint writes its header to the medium under its IRQ-off lock, and a volume being taken down asks for it though nothing else of the take-down writes" ;;
         lockrank:cow@TagFS_CowIsActive:read)

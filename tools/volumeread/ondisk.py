@@ -358,7 +358,7 @@ def DeedStampAt(raw, kind):
 
 
 def ReadLedgerCopy(sector, copy):
-    """One Ledger copy, read as ledger_read_copy (tagfs.c) reads it:
+    """One Ledger copy, read as ledger_read_copy (ledger.c) reads it:
     magic, a length inside [76, 512], the crc over exactly that length, zeros
     past a short record, and the remembered Use Context only if it lies inside
     the record. `why` carries the kernel's own words for a refusal."""
@@ -395,7 +395,7 @@ def ReadLedgerCopy(sector, copy):
 
 def LedgerChoice(copies):
     """Which copy the kernel stands on: the valid copy with the strictly
-    greater seq, a tie going to copy 0 (tagfs.c ledger_load). None when
+    greater seq, a tie going to copy 0 (ledger.c ledger_load). None when
     neither is valid — the kernel refuses."""
     newest = None
     for c in copies:

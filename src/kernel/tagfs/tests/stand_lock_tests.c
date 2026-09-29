@@ -402,13 +402,11 @@ static const TestCase g_stand_lock_tests[] = {
                        "off for as long as the medium takes" },
     { .name  = "stand_ledger_writes_outside_its_lock", .func = TestStandLedgerWritesOutsideItsLock,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.1",
       .caveat_defect = "the Ledger is written to the medium under its interrupts-off lock, so a "
                        "core that needs the Ledger spins with interrupts off for as long as the "
                        "medium takes" },
     { .name  = "stand_integrity_pages_outside_its_lock", .func = TestStandIntegrityPagesOutsideItsLock,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.1",
       .caveat_defect = "the integrity map pages itself in and out of the medium under its "
                        "interrupts-off lock, from inside every block read and write, so every "
                        "core that reads or writes a block spins with interrupts off for as long "

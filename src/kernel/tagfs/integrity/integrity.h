@@ -9,8 +9,7 @@
 //
 // A per-block 64-bit BoxHashIntegrity digest (seeded by the volume fs_uuid, so
 // it is stable across reboots). The map lives in data blocks allocated lazily
-// on first mount and recorded in the superblock reserved area — no on-disk
-// layout change, no host-tool or bootloader change.
+// on first mount and named by the volume's Ledger.
 //
 // Semantics: a digest of 0 means "unknown" (block not hashed in this volume's
 // lifetime yet) and is never flagged — so pre-existing data is not false-
@@ -23,13 +22,20 @@ error_t  IntegrityInit(void);        // load the on-disk map, or lazily create i
 void     IntegrityShutdown(void);
 
 // Record a block's digest after writing it (sync + async write paths).
+// Never waits: it is called under the locks of whoever wrote the block. A
+// page of the map it needs moves to or from the medium with the map's own
+// lock let go.
 void     IntegrityUpdate(uint32_t block, const void *data);
 
 // Re-check a block just read from disk. Returns true if OK or unknown; on a
-// mismatch it logs + counts the rot and returns false.
+// mismatch it logs + counts the rot and returns false. Never waits, as above.
 bool     IntegrityVerify(uint32_t block, const void *data);
 
-error_t  IntegrityFlush(void);       // persist dirty map blocks
+// Persist the dirty map pages, waiting for a page another core has out.
+// OK; ERR_WRITE_FAILED when the medium refused a page, which stays owed;
+// ERR_WOULD_BLOCK when a page is out with a transfer this call cannot wait
+// for — one beneath it on this very core, or one a halted core left.
+error_t  IntegrityFlush(void);
 
 // Publish a Touch event on the well-known "integrity" tag for each bit-rot
 // detection recorded since the last drain. Called from a lock-free context

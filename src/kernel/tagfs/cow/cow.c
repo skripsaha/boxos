@@ -35,9 +35,12 @@ static void CowSeedSnapshotId(uint32_t id) {
 }
 
 // Write the in-memory snapshot list to the on-disk manifest block(s).
-// Caller must hold g_cow_state.lock OR be in a context where the snapshot
-// list is stable (e.g. after the lock is released but before returning).
-// This function acquires no locks itself to avoid re-entrancy.
+// Called after g_cow_state.lock is released, and with no other TagFS lock
+// held: the first manifest takes the volume's state lock to name its block in
+// the Ledger, and the Ledger write that follows may wait for a pass another
+// core is making. The snapshot list itself is copied without the CoW lock, as
+// it always was: a snapshot taken or deleted on another core meanwhile can
+// tear the copy.
 static void CowWriteManifest(void) {
     TagFSState *fs = tagfs_get_state();
     if (!fs || !fs->initialized)
@@ -53,18 +56,34 @@ static void CowWriteManifest(void) {
                     "memory only and will not survive a reboot\n");
             return;
         }
+        /* The Ledger's fields are the volume's state: changed under its lock,
+         * so the Ledger's snapshot sees the whole change or none of it. */
+        TagFSLockTake(&fs->lock);
         fs->ledger.cow_manifest_block = primary_block;
+        TagFSLockDrop(&fs->lock);
         /* ‼ The Ledger is the only thing that names this block. If it refuses
-         * the write, a block is taken in RAM that nothing on the medium will
-         * ever claim — so it goes straight back, and the caller is told the
-         * manifest is not on this volume rather than being left to assume it
-         * is. */
+         * the write, a block is taken in RAM that nothing on the medium may
+         * ever claim — or that the medium claims after all: another core's
+         * Ledger write may have carried the field while this one waited, and
+         * landed. So the field is taken back and the Ledger written again,
+         * and the block goes back only once a Ledger that does not name it
+         * has landed. Either way the caller is told the manifest is not on
+         * this volume rather than being left to assume it is. */
         if (tagfs_write_ledger() != OK) {
+            TagFSLockTake(&fs->lock);
             fs->ledger.cow_manifest_block = 0;
-            tagfs_free_blocks(primary_block, 1);
-            kprintf("[CoW] the ledger would not take the manifest block, so "
-                    "the block is given back — the snapshots taken since this "
-                    "volume was mounted exist in memory only\n");
+            TagFSLockDrop(&fs->lock);
+            if (tagfs_write_ledger() == OK) {
+                tagfs_free_blocks(primary_block, 1);
+                kprintf("[CoW] the ledger would not take the manifest block, so "
+                        "the block is given back — the snapshots taken since this "
+                        "volume was mounted exist in memory only\n");
+            } else {
+                kprintf("[CoW] the ledger would not take the manifest block, nor "
+                        "take it back — block %u stays taken, since the medium "
+                        "may still name it, and the snapshots taken since this "
+                        "volume was mounted exist in memory only\n", primary_block);
+            }
             return;
         }
     }
@@ -587,8 +606,9 @@ void CowRollCall(uint8_t *computed_bm, uint32_t total_blocks)
     COW_ROLL_CALL_MARK(fs->ledger.cow_manifest_backup_block);
 
     /* The redirects are held under the CoW lock, and this is taken WITHOUT
-     * g_state.lock — the same order CowWriteManifest already establishes
-     * (CoW lock first, then the volume's), so a roll call cannot invert it. */
+     * g_state.lock — the order TagFS_CowBeforeWrite establishes is the CoW
+     * lock first, then the volume's (it allocates the copy under the CoW
+     * lock), so a roll call cannot invert it. */
     if (g_cow_state.initialized) {
         TagFSLockTake(&g_cow_state.lock);
         for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
