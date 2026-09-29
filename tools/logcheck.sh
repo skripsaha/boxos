@@ -9358,8 +9358,8 @@ run_stackguard() {
 # the storage deck outside LockRank's own module — and a bare spinlock_t put
 # into tagfs.c must turn it.
 
-LOCKRANK_HELD_LINE='[LockRank] registry is held across a medium write: taken in tag_registry_flush, the write asked for by write_block+0x3f'
-LOCKRANK_HELD_KEY='registry@tag_registry_flush:write'
+LOCKRANK_HELD_LINE='[LockRank] writer is held across a medium write: taken in tagfs_write_inside, the write asked for by tagfs_alloc_blocks+0x1f5'
+LOCKRANK_HELD_KEY='writer@tagfs_write_inside:write'
 
 # lockrankmut_log NAME LINE... — a boot's log holding exactly LINE..., the way
 # the serial line ends them; prints its path.
@@ -9405,7 +9405,7 @@ run_lockrankmut() {
     unknown=$(lockrankmut_log unknown \
         '[LockRank] registry is held across a medium write: taken in lockrankmut_nowhere, the write asked for by write_block+0x3f')
     twice=$(lockrankmut_log twice "$LOCKRANK_HELD_LINE" \
-        '[LockRank] registry is held across a medium write: taken in tag_registry_flush, the write asked for by tagfs_alloc_blocks+0x1f5')
+        '[LockRank] writer is held across a medium write: taken in tagfs_write_inside, the write asked for by write_block+0x3f')
     full=$(lockrankmut_log full '[LockRank] 256 places have been named; later ones are counted, not named')
     deadlock=$(lockrankmut_log deadlock \
         '[LockRank] registry taken in tag_registry_lookup while this core already holds it, taken in tag_registry_flush — this core now waits for itself')
