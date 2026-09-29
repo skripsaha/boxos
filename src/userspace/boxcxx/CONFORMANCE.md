@@ -130,7 +130,6 @@ the library itself; there is no "no-exceptions" configuration.
 | `while (std::getline(std::cin, s))` | never ends | The keyboard Current is a live console with no terminator — there is no Ctrl-D here to make one, so `std::cin` never sets `eofbit`. Read a known number of lines, or read from a file. (§2 `<iostream>`) |
 | `std::cerr << "..."` | goes to the **screen**, like `cout` | BoxOS's separate diagnostic road is the serial `box::current::log`, under its own name. A `cerr` that only reached a serial cable would be invisible on a machine without one. (§2 `<iostream>`) |
 | `std::ofstream f(path)` with a path | opens a file literally named `"a/b.txt"` | TagFS is tag-addressed: the argument is a NAME, not a path. There are no directories to walk and no separator to parse. |
-| `std::ofstream f(name)` on a snapshotted file | fails to open | `out` means truncate, and truncating a file a snapshot still reads would corrupt the snapshot. (§2 `<fstream>`) |
 | `#include <filesystem>`, `std::filesystem::path` | no such header, no such name | There is no hierarchical path namespace to model, so the `path` overloads of `fstream`'s constructors and `open()` are absent with it. |
 | `os << u8"text"`, `os << L"text"` | does not compile | The inserters are deleted, as [ostream.inserters.character] requires. A narrow stream does not transcode; convert explicitly. (Until Ф31e-a this compiled and printed the pointer address.) |
 | `for (auto& [k, v] : m)` over `flat_map` or `box::flat_hash_map` | does not compile | The iterator hands out a proxy, not a reference to a pair. Use `auto` or `auto&&`. |
@@ -2480,13 +2479,6 @@ combinations the table leaves out.
 - `–` **No `filesystem::path` overloads** of the constructors or of `open()`,
   because there is no `<filesystem>` (§1.1). The `const char*` and
   `const string&` forms are complete.
-- `~` **`truncate` is refused on a snapshotted file**, so `ios_base::out` on
-  one fails to open rather than silently doing something else. A block that
-  has not been copied since the snapshot was taken is still the snapshot's
-  only copy, and a `CowSnapshot` records redirects rather than an extent list
-  of its own — nothing in the kernel can tell "mine alone" from "shared with a
-  frozen view". Freeing such a block would corrupt the snapshot. Refusing
-  costs a rare failed open; guessing costs the snapshot.
 - `~` **The truncate primitive shrinks only.** Growing a file by truncation is
   refused rather than served, because TagFS does not zero freshly allocated
   blocks and a grow would hand back whatever the allocator's previous tenant
@@ -5187,19 +5179,15 @@ What is left:
   `ios_base::out` as `"w"`, and `"w"` truncates. **Closed in Ф36** with a real
   primitive through all four layers: `tagfs_truncate_file` (frees the tail
   extents, trims the extent list, commits the new record before releasing a
-  single block, unregisters the freed blocks from the dedup index and drops them
-  from the read-ahead cache) → `STORAGE_OBJ_TRUNCATE` (guarded like
+  single block, and drops the freed blocks from the read-ahead cache) →
+  `STORAGE_OBJ_TRUNCATE` (guarded like
   `OBJ_DELETE`, and publishing a `TRUNCATED` Touch event with `op = 3` in the
   same 32-byte payload shape a write uses) → `file_truncate` → `current_resize`
   and the `CURRENT_TRUNCATE` open flag.
-- **`tagfs_delete_file` does not unregister the blocks it frees from the dedup
-  index.** Found while writing the truncate path above, which does unregister
-  them. It is latent rather than live: inline dedup is disabled on the write
-  path (`tagfs.c` says so, in a comment naming the block-reuse race that
-  disabled it), so nothing currently consults a stale entry. Left alone rather
-  than fixed in passing — it is one line in the most destructive path in the
-  filesystem, and it deserves its own change with its own test, not a ride
-  along a C++ header.
+- `✓` **`tagfs_delete_file` did not unregister the blocks it freed from the
+  dedup index.** Found while writing the truncate path above. Gone with the
+  index: Dedup was deleted in Quill step 1.3 (nothing on the write path ever
+  consulted it), and deduplication comes back as a working part of format v2.
 - **The file backing now accepts `CURRENT_READ | CURRENT_WRITE`.** Every other
   Current still takes exactly one role, and a Brook end explicitly rejects the
   combination — a producer and a consumer open different objects. A file is one

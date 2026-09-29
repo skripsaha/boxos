@@ -40,10 +40,11 @@
 //     code and cpp. query_everywhere / all_everywhere / create_everywhere ask
 //     the same of the whole volume, the context left out.
 //
-//   * box::tagfs::snapshot — an owning RAII handle on a CoW snapshot
-//     (auto-delete unless kept), with box::tagfs::snapshots() listing all ids;
-//     box::tagfs::on_anchor() — a box::touch subscription that delivers
-//     durability (anchor) events, read through box::tagfs::anchor_event.
+//   * box::tagfs::on_anchor() — a box::touch subscription that delivers
+//     durability (anchor) events, read through box::tagfs::anchor_event. There
+//     is no snapshot handle: a format-v1 volume answers every snapshot request
+//     unsupported (::snap_create and its kin say so), and snapshots arrive
+//     with format v2.
 //
 // This is a box:: extension, not part of std. The byte-stream bridge resolves by
 // the file's NAME through the "file:" Current scheme; for I/O bound precisely to
@@ -268,9 +269,7 @@ public:
     // Drop everything past `n` bytes. SHRINK ONLY: growing lands in the error
     // arm as invalid_argument, because TagFS does not zero freshly allocated
     // blocks and growing here would hand back the previous tenant's content —
-    // a file grows by being written. Refused on a snapshotted file
-    // (invalid_operation): a block not yet copied since the snapshot was taken
-    // is still the snapshot's only copy. Refused on a "system"/"boot" file
+    // a file grows by being written. Refused on a "system"/"boot" file
     // (permission_denied), like remove(). Publishes a TRUNCATED Touch event on
     // every tag of the file.
     box::status truncate(std::uint64_t n)
@@ -555,178 +554,9 @@ inline std::vector<record> find_all(const char *name)
     return out;
 }
 
-// ── snapshot — an owning RAII handle on a CoW snapshot ─────────────────────
-// snap_create freezes a copy-on-write view of one file (or the whole
-// filesystem) under a unique name; the snapshot's redirected blocks are
-// reclaimed at snap_delete. This handle deletes the snapshot when it goes out
-// of scope unless you keep() it. Move-only (like box::bay / box::brook).
-class snapshot {
-    std::uint32_t id_    = 0;
-    bool          owned_ = false;
-    std::string   name_;
-
-    snapshot(std::uint32_t id, const char *name) : id_(id), owned_(true), name_(name) {}
-
-public:
-    snapshot() noexcept = default;
-    snapshot(const snapshot &)            = delete;
-    snapshot &operator=(const snapshot &) = delete;
-    snapshot(snapshot &&o) noexcept
-        : id_(o.id_), owned_(o.owned_), name_(std::move(o.name_))
-    {
-        o.id_ = 0;
-        o.owned_ = false;
-    }
-    snapshot &operator=(snapshot &&o) noexcept
-    {
-        if (this != &o) {
-            if (owned_) ::snap_delete(id_);
-            id_      = o.id_;
-            owned_   = o.owned_;
-            name_    = std::move(o.name_);
-            o.id_    = 0;
-            o.owned_ = false;
-        }
-        return *this;
-    }
-    ~snapshot() { if (owned_) ::snap_delete(id_); }
-
-    // Factories — a snapshot needs a unique name (1..31 chars). Capture one
-    // file, or the whole filesystem (of_all). On success an owning snapshot; the
-    // error arm carries the recovered cause — invalid_argument for a null name,
-    // else the kernel error_t (e.g. already_exists when the name is taken).
-    static box::result<snapshot> of(std::uint32_t file_id, const char *name)
-    {
-        if (!name) return std::unexpected(box::error{box::errc::invalid_argument});
-        std::uint32_t sid = 0;
-        int rc = ::snap_create(name, file_id, &sid);
-        if (rc != 0) return std::unexpected(box::error{box_errno_of(rc)});
-        return snapshot(sid, name);
-    }
-    static box::result<snapshot> of(const file &f, const char *name)
-    {
-        return of(f.id(), name);
-    }
-    static box::result<snapshot> of_all(const char *name) { return of(0u, name); }
-
-    // Re-own an existing snapshot id (the inverse of keep()) — one from
-    // snapshots() / snapshots_named() or a prior keep() — so its lifetime returns
-    // to RAII. Ownership is handed across (keep → adopt), not duplicated: adopting
-    // an id another handle still owns lets both dtors snap_delete it (the second
-    // is a harmless no-op, but the contract is single-owner). This overload takes
-    // a caller-supplied cosmetic name; the adopt(id) overload fills the real name
-    // from snap_info. id == 0 → invalid_argument.
-    static box::result<snapshot> adopt(std::uint32_t id, const char *name)
-    {
-        if (id == 0) return std::unexpected(box::error{box::errc::invalid_argument});
-        return snapshot(id, name ? name : "");
-    }
-    // Self-naming adopt — re-own an id and fill name_ from the kernel via
-    // snap_info (the deterministic counterpart to the cosmetic-name overload).
-    // id == 0 → invalid_argument; an unknown id → snap_info's recovered cause
-    // (snapshot_not_found).
-    static box::result<snapshot> adopt(std::uint32_t id)
-    {
-        if (id == 0) return std::unexpected(box::error{box::errc::invalid_argument});
-        snap_info_t si{};
-        int rc = ::snap_info(id, &si);
-        if (rc != 0) return std::unexpected(box::error{box_errno_of(rc)});
-        return snapshot(id, si.name);
-    }
-    // Re-own the snapshot named `name` — the deterministic-cleanup primitive.
-    // Scans snapshots_named() for a name match and hands back an OWNING handle
-    // whose dtor snap_deletes it. snapshot_not_found when no snapshot carries the
-    // name; invalid_argument for a null name. (Defined out-of-line below, once
-    // snapshots_named() is in scope.)
-    static box::result<snapshot> reclaim(const char *name);
-
-    std::uint32_t    id() const noexcept { return id_; }
-    std::string_view name() const noexcept { return name_; }
-    explicit operator bool() const noexcept { return owned_; }
-
-    // Detach — the snapshot outlives this handle (no auto-delete). Returns the
-    // id so a caller can record it for a later box::tagfs::snapshots() scan.
-    std::uint32_t keep() noexcept
-    {
-        owned_ = false;
-        return id_;
-    }
-
-    // Delete now; after this the handle is empty. Empty status on success; the
-    // error arm carries the cause — invalid_operation when the handle owns no
-    // snapshot to drop, else the recovered snap_delete error_t. The snapshot is
-    // always disowned (no double snap_delete from a later dtor).
-    box::status drop() noexcept
-    {
-        if (!owned_) return std::unexpected(box::error{box::errc::invalid_operation});
-        int rc = ::snap_delete(id_);
-        owned_ = false;
-        return box::_detail::from_status(rc);
-    }
-};
-
-// A snapshot's metadata by id — the structured record snap_info() returns, with
-// the name the ids-only snapshots() can't give. created_unix is the kernel's
-// creation time in unix seconds (kernel rtc_get_unix64, NOT microseconds);
-// parent_file_id is 0 for a whole-filesystem snapshot.
-struct snapshot_info {
-    std::uint32_t id;
-    std::string   name;
-    std::uint64_t created_unix;
-    std::uint32_t parent_file_id;
-    std::uint32_t file_count;
-    std::uint64_t total_size;
-};
-
-// Every CoW snapshot id currently known to the filesystem.
-inline std::vector<std::uint32_t> snapshots()
-{
-    std::uint32_t              ids[64];
-    std::uint32_t              n = 0;
-    std::vector<std::uint32_t> out;
-    if (::snap_list(ids, 64, &n) == 0) {
-        out.reserve(n);
-        for (std::uint32_t i = 0; i < n; ++i) out.push_back(ids[i]);
-    }
-    return out;
-}
-
-// Every CoW snapshot with its full metadata (name included) — snap_list for the
-// ids, then snap_info per id. An id that fails snap_info (e.g. deleted between
-// the two calls) is skipped, so the result honestly reflects what is still
-// resolvable rather than carrying a half-filled entry.
-inline std::vector<snapshot_info> snapshots_named()
-{
-    std::vector<snapshot_info> out;
-    std::uint32_t              ids[64];
-    std::uint32_t              n = 0;
-    if (::snap_list(ids, 64, &n) != 0) return out;
-    out.reserve(n);
-    for (std::uint32_t i = 0; i < n; ++i) {
-        snap_info_t si{};
-        if (::snap_info(ids[i], &si) != 0) continue;  // skip a vanished id
-        out.push_back(snapshot_info{si.id,
-                                    std::string(field_view(si.name, sizeof(si.name))),
-                                    si.created_time,
-                                    si.parent_file_id,
-                                    si.file_count,
-                                    si.total_size});
-    }
-    return out;
-}
-
-inline box::result<snapshot> snapshot::reclaim(const char *name)
-{
-    if (!name) return std::unexpected(box::error{box::errc::invalid_argument});
-    for (const snapshot_info &si : snapshots_named())
-        if (si.name == name)
-            return snapshot(si.id, si.name.c_str());
-    return std::unexpected(box::error{box::errc::snapshot_not_found});
-}
-
 // Flush the whole filesystem to durable storage — the whole-FS counterpart of
-// file::anchor(), over the C anchor(0); parallels snapshot::of_all. Empty status
-// on success; the error arm carries the recovered anchor error_t.
+// file::anchor(), over the C anchor(0). Empty status on success; the error arm
+// carries the recovered anchor error_t.
 inline box::status anchor_all() { return box::_detail::from_status(::anchor(0)); }
 
 // ── anchor observer — bridge durability events into box::touch ─────────────

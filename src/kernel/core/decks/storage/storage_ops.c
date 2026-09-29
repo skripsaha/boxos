@@ -75,9 +75,9 @@ static inline bool tagfs_volume_can_read_async(void)
 /*
  * Writing is still AHCI's, and only AHCI's — honestly rather than by omission.
  *
- * A write here is not one command: it is a WriteJob that allocates blocks,
- * threads the DiskBook journal and may copy on write, and its state machine is
- * built on AHCI slots and the AHCI completion. Pointing it at another kind of
+ * A write here is not one command: it is a WriteJob that allocates blocks and
+ * commits the file's record, and its state machine is built on AHCI slots and
+ * the AHCI completion. Pointing it at another kind of
  * seat would need that machine rebuilt, not a different submit call. Until it
  * is, a volume on a flash drive takes the synchronous write path, which is
  * correct and says so.
@@ -591,8 +591,8 @@ static int ObjWrite(const ManifestOp *op,
     }
 
     /* Async write requires a K-Core to pump its IRQ-deferred completion
-     * continuations (write completion does heavy work — alloc / DiskBook /
-     * CoW — that cannot run in IRQ context, so it is posted to the never-drop
+     * continuations (write completion does heavy work — alloc / the record's
+     * commit — that cannot run in IRQ context, so it is posted to the never-drop
      * storage completion queue and drained by kcore_run_loop). That loop only exists in multi-core
      * mode; on a single core the BSP runs userspace and never pumps, so the
      * job would strand. Use the sync path there — it is correct and has no
@@ -1285,116 +1285,24 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 
 
 /* -------------------------------------------------------------------------
- * Snapshot ops — userspace surface for CoW snapshots.
+ * Snapshot ops — STORAGE_SNAP_CREATE, _DELETE, _LIST and _INFO.
  *
- *   STORAGE_SNAP_CREATE  params: [u32 file_id][u8 name_len][char name[]]
- *                        out_crate: [u32 snapshot_id]
- *   STORAGE_SNAP_DELETE  params: [u32 snapshot_id]
- *   STORAGE_SNAP_LIST    out_crate: [u32 count][u32 ids[count]]
+ * All four are answered ERR_UNSUPPORTED on a format-v1 volume, whatever their
+ * params: a snapshot there could be taken and never read, and snapshots arrive
+ * with format v2 (TagFS_SnapshotRefused, cow.h). The four stay on the wire so a
+ * program that asks is told why, not met with an operation nobody knows.
  * ------------------------------------------------------------------------- */
 
-static int ObjSnapCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                          const OpContext *ctx)
-{
-    (void)crate_count; (void)ctx;
-    if (op->param_size < 5) return ERR_INVALID_ARGUMENT;
-
-    uint32_t file_id = param_u32(op, 0);
-    uint8_t name_len;
-    memcpy(&name_len, op->params + 4, 1);
-    if (name_len == 0 || name_len > 31) return ERR_INVALID_ARGUMENT;
-    if (op->param_size < (uint16_t)(5 + name_len)) return ERR_INVALID_ARGUMENT;
-
-    char name[32];
-    memcpy(name, op->params + 5, name_len);
-    name[name_len] = '\0';
-
-    uint32_t snapshot_id = 0;
-    error_t err = TagFS_SnapshotCreate(name, file_id, &snapshot_id);
-    if (err != OK) return err;
-
-    if (op->out_crate != CRATE_INDEX_NONE) {
-        Crate *out = &crates[op->out_crate];
-        if (out->capacity >= 4) {
-            (void)crate_write(out, ctx, &snapshot_id, sizeof(uint32_t));
-        }
-    }
-    return OK;
-}
-
-static int ObjSnapDelete(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+static int ObjSnapRefused(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
 {
     (void)crates; (void)crate_count; (void)ctx;
-    if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
-    uint32_t snapshot_id = param_u32(op, 0);
-    return (int)TagFS_SnapshotDelete(snapshot_id);
-}
-
-static int ObjSnapList(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                        const OpContext *ctx)
-{
-    (void)crate_count;
-    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-    Crate *out = &crates[op->out_crate];
-    if (out->capacity < 4) return ERR_BUFFER_TOO_SMALL;
-
-    uint32_t max_ids = (uint32_t)((out->capacity - 4) / 4);
-    if (max_ids > 64) max_ids = 64;
-
-    uint32_t ids[64];
-    uint32_t count = 0;
-    error_t err = TagFS_SnapshotList(ids, max_ids, &count);
-    if (err != OK) return err;
-
-    uint32_t bytes = 4 + count * 4;
-    uint8_t blob[4 + 64 * 4];   /* count + up to max_ids (<= 64) ids */
-    memcpy(blob, &count, 4);
-    if (count > 0) memcpy(blob + 4, ids, count * 4);
-    error_t cr = crate_write(out, ctx, blob, bytes);
-    if (cr != OK) return cr;
-    return OK;
-}
-
-/* STORAGE_SNAP_INFO  params: [u32 snapshot_id]
- *                    out_crate: [u32 id][u32 parent_file_id][u64 created_time]
- *                               [u32 file_count][u64 total_size][u8 flags]
- *                               [char name[32]]  (61 bytes)
- *
- * The structured counterpart to SNAP_LIST (ids only) — carries the snapshot's
- * name so userspace can resolve a snapshot by name for deterministic cleanup.
- * The record is a fixed 61 bytes, so it ships through crate_write of a stack
- * blob rather than a capacity-sized bounce buffer. */
-static int ObjSnapInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                        const OpContext *ctx)
-{
-    (void)crate_count;
-    if (op->param_size < 4)                return ERR_INVALID_ARGUMENT;
-    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-
-    uint32_t snapshot_id = param_u32(op, 0);
-
-    CowSnapshot cs;
-    error_t err = TagFS_SnapshotInfo(snapshot_id, &cs);
-    if (err != OK) return (int)err;   /* ERR_SNAPSHOT_NOT_FOUND for an unknown id */
-
-    uint32_t need = 4u + 4u + 8u + 4u + 8u + 1u + 32u;   /* 61 bytes */
-    Crate   *out  = &crates[op->out_crate];
-    if (out->capacity < need) return ERR_BUFFER_TOO_SMALL;
-
-    uint8_t  blob[61];
-    uint32_t pos = 0;
-    memcpy(blob + pos, &cs.snapshot_id,    4); pos += 4;
-    memcpy(blob + pos, &cs.parent_file_id, 4); pos += 4;
-    memcpy(blob + pos, &cs.created_time,   8); pos += 8;
-    memcpy(blob + pos, &cs.file_count,     4); pos += 4;
-    memcpy(blob + pos, &cs.total_size,     8); pos += 8;
-    blob[pos++] = cs.flags;
-    memcpy(blob + pos, cs.name, 32); pos += 32;
-
-    error_t cr = crate_write(out, ctx, blob, pos);
-    if (cr != OK) return cr;
-    return OK;
+    switch (OP_KIND_OPCODE(op->op_kind)) {
+    case STORAGE_SNAP_CREATE: return TagFS_SnapshotRefused("storage.snap.create");
+    case STORAGE_SNAP_DELETE: return TagFS_SnapshotRefused("storage.snap.delete");
+    case STORAGE_SNAP_LIST:   return TagFS_SnapshotRefused("storage.snap.list");
+    default:                  return TagFS_SnapshotRefused("storage.snap.info");
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -1538,11 +1446,11 @@ error_t StorageDeckRegister(void)
         { STORAGE_OBJ_DELETE,   ObjDelete,       OP_AUTH_APP, "storage.delete"   },
         { STORAGE_OBJ_TRUNCATE, ObjTruncate,     OP_AUTH_APP, "storage.truncate" },
         { STORAGE_OBJ_RENAME,   ObjRename,       OP_AUTH_APP, "storage.rename"   },
-        /* Snapshot management: app+. */
-        { STORAGE_SNAP_CREATE,  ObjSnapCreate,   OP_AUTH_APP, "storage.snap.create"},
-        { STORAGE_SNAP_DELETE,  ObjSnapDelete,   OP_AUTH_APP, "storage.snap.delete"},
-        { STORAGE_SNAP_LIST,    ObjSnapList,     OP_AUTH_APP, "storage.snap.list"  },
-        { STORAGE_SNAP_INFO,    ObjSnapInfo,     OP_AUTH_APP, "storage.snap.info"  },
+        /* Snapshots: app+, refused on format v1. */
+        { STORAGE_SNAP_CREATE,  ObjSnapRefused,  OP_AUTH_APP, "storage.snap.create"},
+        { STORAGE_SNAP_DELETE,  ObjSnapRefused,  OP_AUTH_APP, "storage.snap.delete"},
+        { STORAGE_SNAP_LIST,    ObjSnapRefused,  OP_AUTH_APP, "storage.snap.list"  },
+        { STORAGE_SNAP_INFO,    ObjSnapRefused,  OP_AUTH_APP, "storage.snap.info"  },
         { STORAGE_OBJ_ANCHOR,   ObjAnchor,       OP_AUTH_APP, "storage.anchor"     },
     };
 

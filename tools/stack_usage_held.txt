@@ -18,11 +18,11 @@
 # split, and volume_take_ground (704 B, called once) now inlines into the part.
 # The DiskBook's mount frames are held under 2.5: under decision 1A the
 # DiskBook is removed with the v1 format at 2.5, not reworked at 1.9. Its
-# redirect log leaves the write path with CoW at 1.3, and is held there.
+# redirect log left the write path with CoW at 1.3 and is only read at mount
+# now, a record read in place: the replay holds one DiskBookEntry, not two.
 # The reach measured again 2026-09-28, at 9616: the integrity map pages
-# through its slots' own buffers now, so no block of it is on the stack.
-src/kernel/tagfs/cow/cow.c:TagFS_CowBeforeWrite                  4144  1.3  uint8_t original_data[TAGFS_BLOCK_SIZE]
-src/kernel/tagfs/disk_book/disk_book.c:DiskBookLogRedirect       2128  1.3  DiskBookEntry e + write_entry's buf[DISK_BOOK_ENTRY_SIZE], inlined
+# through its slots' own buffers now, so no block of it is on the stack; and
+# again at 1.3, at 9456, once no write asked copy-on-write for a snapshot.
 src/kernel/tagfs/tagfs.c:tagfs_write_inside                      4304  1.4  uint8_t block_buf[TAGFS_BLOCK_SIZE]
 src/kernel/tagfs/tagfs.c:tagfs_defrag_file_inside                4288  1.4  uint8_t block_buf[TAGFS_BLOCK_SIZE]
 src/kernel/tagfs/metadata_pool/meta_pool.c:meta_pool_mirror_init 4240  1.4  uint8_t buf[TAGFS_BLOCK_SIZE]
@@ -34,6 +34,6 @@ src/kernel/tagfs/metadata_pool/meta_pool.c:meta_pool_read        4128  1.4  uint
 src/kernel/tagfs/tagfs.c:tagfs_init                              4624  1.6  uint8_t _bbuf[TAGFS_BLOCK_SIZE] in MARK_CHAIN_BLOCKS + volume_take_ground's ground[] and DeedCopy head/candidate, inlined
 src/kernel/tagfs/ledger/ledger.c:ledger_read_copy                1184  1.6  uint8_t buf[TAGFS_SECTOR_SIZE] + probe[TAGFS_SECTOR_SIZE]
 src/kernel/tagfs/tagfs.c:ReadAheadPrefetch                       4224  1.10 uint8_t tmp[TAGFS_BLOCK_SIZE]
-src/kernel/tagfs/disk_book/disk_book.c:DiskBookValidateAndReplay 2096  2.5  DiskBookEntry e + read_entry's buf[DISK_BOOK_ENTRY_SIZE], inlined
-src/kernel/tagfs/disk_book/disk_book.c:DiskBookInit              1584  2.5  DiskBookSuperblock disk + read_superblock_into's buf[TAGFS_SECTOR_SIZE], inlined
-reach                                                            9616  1.4  ObjWrite -> tagfs_write_inside -> TagFS_SnapshotCreate -> tagfs_get_metadata -> meta_pool_read -> the integrity map's paging -> the medium: two block buffers nested
+src/kernel/tagfs/disk_book/disk_book.c:DiskBookValidateAndReplay 1088  2.5  DiskBookEntry e, read into in place
+src/kernel/tagfs/disk_book/disk_book.c:DiskBookInit              1568  2.5  DiskBookSuperblock disk + read_superblock_into's buf[TAGFS_SECTOR_SIZE], inlined
+reach                                                            9456  1.4  ObjWrite -> tagfs_write_inside -> meta_pool_delete -> the integrity map's paging -> the medium: two block buffers nested

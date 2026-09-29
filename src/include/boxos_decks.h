@@ -249,6 +249,9 @@
  * the allocator's previous tenant. The operation TagFS lacked until <fstream>
  * needed it — ios_base::out alone means "w", and "w" truncates. */
 #define STORAGE_OBJ_TRUNCATE        0x0B
+/* The four snapshot operations (0x20-0x22, 0x24) are answered ERR_UNSUPPORTED
+ * on a format-v1 volume, whatever their params; snapshots arrive with format
+ * v2. Their shapes are kept below as the wire they were. */
 #define STORAGE_SNAP_CREATE         0x20
 #define STORAGE_SNAP_DELETE         0x21
 #define STORAGE_SNAP_LIST           0x22

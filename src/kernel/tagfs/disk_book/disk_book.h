@@ -7,28 +7,19 @@
 #include "../../core/error/error.h"
 
 // ============================================================================
-// DiskBook — durable, content-addressed redirect log for TagFS CoW snapshots
+// DiskBook — the redirect log an earlier kernel kept for its CoW snapshots
 //
-// DiskBook's one load-bearing job is making the CoW redirect map (old_block →
-// new_block, per snapshot) survive a power cut. TagFS metadata consistency is
-// already guaranteed by append-ordering + mount fsck, so a general write-ahead
-// log over that would be redundant. What fsck CANNOT reconstruct is which OLD
-// physical block a snapshot froze when a live write was redirected — that
-// mapping lived only in RAM and was lost on reboot, so after a crash a
-// snapshot read returned live data instead of its frozen view.
+// A kernel that took snapshots on format v1 logged here, for each block a
+// write copied away from a snapshot, which block the snapshot kept (old) and
+// which the file moved onto (new): a dense array of CRC-protected records,
+// `count` of them live, behind a head and its copy.
 //
-// Model: a dense on-disk array of CRC-protected, tag-scoped redirect records.
-// `count` (in the superblock) is authoritative — records [0..count) are live.
-// Appended on each CoW redirect; compacted (rewritten from the live in-memory
-// set) when a snapshot is deleted. Replayed at mount into the restored
-// snapshots. Each record is content-addressed (CRC32); a torn record is
-// skipped. The array persists across clean reboots — redirects live until
-// their snapshot is deleted, NOT until shutdown.
-//
-// Bound: DISK_BOOK_CAPACITY live redirects. Overflow is graceful — the redirect
-// is not journaled and that snapshot block falls back to live data on the next
-// crash recovery (never corruption). The in-memory redirect list (cow.c) stays
-// authoritative at runtime and is unbounded; DiskBook is its durable mirror.
+// Nothing appends to it any more. A format-v1 volume refuses every snapshot
+// request (TagFS_SnapshotRefused), and no write copies a block for one, so the
+// book is only ever READ: at mount, its redirects are replayed into the
+// snapshots an earlier kernel left (CowNameStanding), so the blocks those keep
+// stay taken until the volume's census returns them. It goes with format v2,
+// whose snapshots are bookmarks that need no log.
 // ============================================================================
 
 #define DISK_BOOK_MAGIC             0x44424F4F  /* "DBOO" — redirect record    */
@@ -74,43 +65,26 @@ typedef struct __packed {
 
 STATIC_ASSERT(sizeof(DiskBookEntry) == 1024, "DiskBookEntry_must_be_1024_bytes");
 
-typedef struct {
-    uint32_t total_entries;
-    uint32_t used_entries;
-    uint32_t free_entries;
-    uint32_t redirects_logged;
-    uint32_t replay_count;
-    uint32_t crc_errors;
-    uint32_t generation;
-    uint32_t uptime_seconds;
-} DiskBookStats;
-
-// Public API
 /* Where the DiskBook's three parts are, each counted from the start of the
  * volume: its head, the copy of its head, and the run its records live in.
  * Three numbers rather than one, because "the backup is the next sector along"
  * is what put a record and its only copy inside one physical block of the
- * medium — see the Deed's layout stamp, which now names all three. */
+ * medium — see the Deed's layout stamp, which names all three. Reads the head
+ * and writes nothing: a head this kernel cannot take is a book with no record
+ * to replay. */
 error_t  DiskBookInit(uint64_t head_sector, uint64_t backup_sector,
                      uint64_t records_sector);
-error_t  DiskBookValidateAndReplay(void);   /* restore redirects into CoW    */
+
+/* One redirect the replay read and found whole. */
+typedef void (*DiskBookRedirectSeen)(uint32_t snapshot_id, uint32_t old_block,
+                                     uint32_t new_block, void *ctx);
+
+/* Every live redirect record, read off the medium and checked, handed to
+ * `seen` in the order the book holds them; a record that fails its magic or
+ * its checksum is counted, said, and skipped. */
+error_t  DiskBookValidateAndReplay(DiskBookRedirectSeen seen, void *ctx);
+
 void     DiskBookShutdown(void);            /* forgets the book, writes nothing */
-
-/* Append one CoW redirect to the log on the medium; it is durable at the
- * volume's next flush, never one of its own. tag_bits = owning file's
- * well-known tag bitmask (0 if unknown). Graceful on overflow (returns
- * ERR_DISK_FULL). */
-error_t  DiskBookLogRedirect(uint32_t snapshot_id, uint32_t old_block,
-                             uint32_t new_block, uint64_t tag_bits);
-
-/* Drop all on-disk redirects (count→0). Used to compact: caller then re-logs
- * the surviving redirects. */
-void     DiskBookResetRedirects(void);
-
-error_t  DiskBookGetStats(DiskBookStats* stats);
-error_t  DiskBookPrintStats(void);
-
 bool     DiskBookIsInitialized(void);
-uint32_t DiskBookGetCheckpointSeq(void);    /* current generation             */
 
 #endif // DISK_BOOK_H

@@ -106,8 +106,9 @@ out:
 // a word. The ear is the kernel's own TouchWatch, which is called on the
 // publisher's stack inside TouchPublishId (touch.c, touch_watch_deliver), so
 // every report the drain makes has arrived by the time the drain returns.
-// Kernel-side on purpose: only read_block's disk branch verifies, so a
-// program's read would be caught or not depending on the road it took.
+// Kernel-side on purpose: only read_block verifies (off the medium and out of
+// the read-ahead cache alike), and a program's read may take the asynchronous
+// road instead, so it would be caught or not depending on the road it took.
 // ----------------------------------------------------------------------------
 
 #define ROT_WITNESS_BLOCKS 65u

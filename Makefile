@@ -478,7 +478,7 @@ IOMMU_MARK = $(BUILDDIR)/.iommu.$(if $(filter off,$(IOMMU)),off,on)
 
 # Fail the FIRST mount of the volume, once, halfway through.
 #
-# tagfs_init brings up ten things in order, and until this key existed no
+# tagfs_init brings up nine things in order, and until this key existed no
 # emulator could reach the case where one of them refuses: QEMU's disk answers
 # every read. So the whole failure path — and everything that follows from it —
 # was unreachable from the desk, and it was on that path that the owner's board

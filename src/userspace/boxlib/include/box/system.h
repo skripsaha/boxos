@@ -154,6 +154,9 @@ int shutdown(void);
 int sysinfo(system_info_t* info);
 
 int defrag(uint32_t file_id, uint32_t target_block);
+/* The volume's fragmentation in percent: of every step from one of a file's
+ * blocks to its next, the share that is a gap — the next run not beginning
+ * where the one before it ends. defrag answers the same figure after it. */
 int fragmentation(void);
 int perf_dump(void);
 

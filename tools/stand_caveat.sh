@@ -167,13 +167,13 @@ caveat_row() {
                     echo "|every 64th redirect the log takes pushes the medium's cache from inside the copy-on-write lock, with interrupts off, on the drain core that waits for completions only its own interrupt returns (CR-6)" ;;
         lockrank:cow@TagFS_CowBeforeWrite:read|\
         lockrank:cow@TagFS_CowBeforeWrite:write)
-                    echo "1.3|a write into a block a snapshot keeps copies the block under the copy-on-write lock, so every core that writes spins with interrupts off while the medium reads and writes the copy" ;;
+                    echo "|a write into a block a snapshot keeps copies the block under the copy-on-write lock, so every core that writes spins with interrupts off while the medium reads and writes the copy" ;;
         lockrank:cow@TagFS_CowAfterWrite:write|\
         lockrank:diskbook@DiskBookLogRedirect:write)
-                    echo "1.3|the copy a snapshot keeps is logged in the DiskBook's redirect log under the copy-on-write and DiskBook locks, a medium write with both held" ;;
+                    echo "|the copy a snapshot keeps is logged in the DiskBook's redirect log under the copy-on-write and DiskBook locks, a medium write with both held" ;;
         lockrank:cow@cow_resync_redirect_journal:write|\
         lockrank:diskbook@DiskBookResetRedirects:write)
-                    echo "1.3|deleting a snapshot rewrites the DiskBook's header under the copy-on-write and DiskBook locks, a medium write with both held" ;;
+                    echo "|deleting a snapshot rewrites the DiskBook's header under the copy-on-write and DiskBook locks, a medium write with both held" ;;
         lockrank:state@meta_pool_flush_retires:read|\
         lockrank:state@meta_pool_flush_retires:write)
                     echo "1.4|the sync gives retired metadata records back under the volume's state lock, reading and writing pool blocks while every create, delete, rename and tag waits with interrupts off" ;;

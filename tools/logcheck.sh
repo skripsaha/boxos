@@ -1973,7 +1973,7 @@ run_lastsaid() {
 # `Unknown command` to every one of those files. Two photographs of it, and
 # the decisive fact was a line that WAS NOT THERE.
 #
-# tagfs_init brings up ten things in order. A mount that failed partway used
+# tagfs_init brings up nine things in order. A mount that failed partway used
 # to leave the first five standing and nothing ever took them down, so every
 # LATER mount died at TagFS_CowInit with ERR_ALREADY_INITIALIZED — reported by
 # a debug_printf, which compiles to nothing in a shipped build. One transient
@@ -1981,8 +1981,8 @@ run_lastsaid() {
 #
 # Nothing in QEMU ever fails a mount, so this whole path was unreachable from
 # the desk and the repair would have been green by construction. MOUNTFAIL=on
-# fails the FIRST mount at the worst point there is, with all five of those
-# subsystems up, and this scenario checks the whole story: the failure is SAID,
+# fails the FIRST mount at the worst point there is, with every subsystem
+# before it up, and this scenario checks the whole story: the failure is SAID,
 # the catch-up mount SUCCEEDS, and the shell can then find and run a program
 # that lives on the volume.
 #
@@ -7558,7 +7558,6 @@ run_censusmut() {
 # name's tag row has to widen for the new file id (tag_bitmap.c,
 # ensure_bitmap_width), which is why the create sweep aligns its ids first.
 STAND_HELD="
-cow_moves_only_the_block_written|1.3|blocks the write should have left as they were that changed, in the file or its snapshot 2|blocks the write should have left as they were that changed, in the file or its snapshot 0
 integrity_reports_every_rot|1.10|of 65 rotten blocks, reported 64|of 65 rotten blocks, reported 65
 use_context_long_remembered|1.6|of 479 bytes said, the volume remembers 0|of 479 bytes said, the volume remembers 479
 stand_rmw_read_refused|1.3|bytes around the write that the medium now holds as zeros 4086|bytes around the write that the medium now holds as zeros 0
@@ -7797,10 +7796,7 @@ run_stand() {
 # this core holds waited for like any other, a drain core that runs no baton
 # while it waits, and a Give that never lets the scheduler go. And a caveat a
 # step has lifted stays worth its test only while the test would see the
-# defect come back: the legacy-IDE DMA wait's `sti`, the copy-on-write
-# question that reads a file's own record under its lock again, the redirect
-# log that pushes the cache on its 64th redirect again, the question's fast
-# exit taken out, which takes its lock where no snapshot stands, the Ledger
+# defect come back: the legacy-IDE DMA wait's `sti`, the Ledger
 # written, and the integrity map paged in, under their own locks again, the
 # file table's growth as step 1.1 found it — a new block linked with no
 # stamp and no flush behind the link, the memory for the link asked only
@@ -7815,8 +7811,8 @@ run_stand() {
 # one forced to fail — and with that print put back on debug_printf, the
 # failure shrinks to a count nobody can place. A judge that holds whatever a
 # caveated test saw lets every fix in go by as held, with no "lifted early"
-# at all. And CR-12 as it stood before its rewrite — a copy taken of the
-# literal block 1, with no snapshot standing, and never given back — must be
+# at all. And a test that takes a block and never gives it back — what CR-12
+# was, a copy of the literal block 1 its test took for a snapshot — must be
 # caught twice: by the runner's count as it runs, and by the next boot's roll
 # call as an orphan.
 # ---------------------------------------------------------------------------
@@ -7883,30 +7879,13 @@ edits = [
     # 1.4: an open that cannot copy its extents is refused
     ("                memcpy(handle->extents, meta.extents,\n                       sizeof(FileExtent) * meta.extent_count);\n            }\n",
      "                memcpy(handle->extents, meta.extents,\n                       sizeof(FileExtent) * meta.extent_count);\n            }\n            else\n            {\n                tagfs_metadata_free(&meta);   /* logcheck mutation: an open that cannot copy its extents is refused */\n                ofe_release(ofe);\n                kfree(handle);\n                return NULL;\n            }\n"),
-    # 1.3: a copy for a snapshot takes the one block written, and the rest of
-    # its extent stays where it is
-    ("            if (TagFS_CowBeforeWrite(handle->file_id, disk_block, &cow_block) == OK && cow_block != 0) {\n",
-     "            if (TagFS_CowBeforeWrite(handle->file_id, disk_block, &cow_block) == OK && cow_block != 0) {\n"
-     "                uint16_t span = handle->extents[found].block_count;   /* logcheck mutation: the copy takes the one block, the rest of the extent stays */\n"
-     "                FileExtent *split = span > 1 ? kmalloc(sizeof(FileExtent) * (handle->extent_count + 1)) : NULL;\n"
-     "                if (split) {\n"
-     "                    memcpy(split, handle->extents, sizeof(FileExtent) * (found + 1));\n"
-     "                    memcpy(split + found + 2, handle->extents + found + 1,\n"
-     "                           sizeof(FileExtent) * (handle->extent_count - found - 1));\n"
-     "                    split[found + 1].start_block = disk_block + 1;\n"
-     "                    split[found + 1].block_count = (uint16_t)(span - 1);\n"
-     "                    split[found].block_count = 1;\n"
-     "                    kfree(handle->extents);\n"
-     "                    handle->extents = split;\n"
-     "                    handle->extent_count++;\n"
-     "                }\n"),
 ]
 for a, m in edits:
     assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
     s = s.replace(a, m, 1)
 open(p, "w").write(s)
 EOF
-    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 9
+    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 8
 
     # 1.6: a Use Context longer than the Ledger's record is still the volume's.
     # The step keeps it whole on the medium (its own block); what the test asks
@@ -7993,8 +7972,6 @@ stand_mech_on() {
         flushsum)  marks="src/kernel/tagfs/scribe/scribe.c:3" ;;
         flushneed) marks="src/kernel/tagfs/scribe/scribe.c:1" ;;
         dmawait)   marks="src/kernel/drivers/disk/ata_async.c:1" ;;
-        cowback)   marks="src/kernel/tagfs/cow/cow.c:2 src/kernel/tagfs/disk_book/disk_book.c:1" ;;
-        cowfast)   marks="src/kernel/tagfs/cow/cow.c:1" ;;
         table)     marks="src/kernel/tagfs/file_table/file_table.c:4" ;;
         registry)     marks="src/kernel/tagfs/tag_registry/tag_registry.c:6" ;;
         registrykeep) marks="src/kernel/tagfs/tag_registry/tag_registry.c:1" ;;
@@ -8119,36 +8096,6 @@ edits = {
    "    asm volatile(\"sti\" ::: \"memory\");   /* " + M + ": the DMA wait turns interrupts on under its caller again */\n"
    "    while (!__atomic_load_n(&cmd.done, __ATOMIC_ACQUIRE)) {\n"),
  ],
- "cowback": [
-  ("src/kernel/tagfs/cow/cow.c",
-   "    if (!g_cow_state.initialized ||\n        __atomic_load_n(&g_cow_state.snapshot_count, __ATOMIC_ACQUIRE) == 0)\n        return false;\n",
-   "    if (!g_cow_state.initialized)   /* " + M + ": the question is asked with no snapshot standing too */\n"
-   "        return false;\n"),
-  ("src/kernel/tagfs/cow/cow.c",
-   "        active = parent == file_id || parent == 0;\n    }\n"
-   "    TagFSLockDrop(&g_cow_state.lock);\n    return active;\n",
-   "        active = parent == file_id || parent == 0;\n    }\n"
-   "    TagFSMetadata meta;   /* " + M + ": the file's own record read for bit 3, under the lock */\n"
-   "    if (!active && tagfs_get_metadata(file_id, &meta) == OK) {\n"
-   "        active = (meta.flags & (1u << 3)) != 0;\n"
-   "        tagfs_metadata_free(&meta);\n"
-   "    }\n"
-   "    TagFSLockDrop(&g_cow_state.lock);\n    return active;\n"),
-  ("src/kernel/tagfs/disk_book/disk_book.c",
-   "    g_redirects_logged++;\n",
-   "    g_redirects_logged++;\n"
-   "    if (g_redirects_logged % 64 == 0) {   /* " + M + ": the log pushes the cache on every 64th redirect again */\n"
-   "        TagFSLockDrop(&g_lock);\n"
-   "        tagfs_flush_cache();\n"
-   "        return OK;\n"
-   "    }\n"),
- ],
- "cowfast": [
-  ("src/kernel/tagfs/cow/cow.c",
-   "    if (!g_cow_state.initialized ||\n        __atomic_load_n(&g_cow_state.snapshot_count, __ATOMIC_ACQUIRE) == 0)\n        return false;\n",
-   "    if (!g_cow_state.initialized)   /* " + M + ": the question takes its lock with no snapshot standing */\n"
-   "        return false;\n"),
- ],
  "table": [
   ("src/kernel/tagfs/file_table/file_table.c",
    "        error_t  got     = SpareStamp(TAGFS_FILETBL_MAGIC, &g_image, &block, &stamped);\n",
@@ -8230,55 +8177,32 @@ stand_mech_off() {
              src/kernel/tagfs/tag_bitmap/tag_bitmap.c src/kernel/tagfs/tests/tests.c \
              src/kernel/tagfs/tests/core_tests.c src/kernel/tagfs/lock_rank/lock_rank.c \
              src/kernel/tagfs/scribe/scribe.c src/kernel/drivers/disk/ata_async.c \
-             src/kernel/tagfs/cow/cow.c src/kernel/tagfs/disk_book/disk_book.c \
              src/kernel/tagfs/ledger/ledger.c src/kernel/tagfs/integrity/integrity.c \
              src/kernel/tagfs/file_table/file_table.c src/kernel/tagfs/tag_registry/tag_registry.c; do
         restore "$f"
     done
 }
 
-# stand_cr12_on — CR-12 as it stood before its rewrite, in the runner's form:
-# the copy is taken of the literal block 1, with no snapshot standing, and
-# never given back. Its helper goes with it, having no other caller.
-stand_cr12_on() {
+# stand_leak_on — a test that takes a block and never gives it back, the way
+# CR-12's test left the copy it took for a snapshot: the cow suite's test,
+# with one block taken at its start and nothing done with it.
+stand_leak_on() {
     mutate src/kernel/tagfs/tests/snapshot_tests.c
     python3 - <<'EOF'
 p = "src/kernel/tagfs/tests/snapshot_tests.c"
 s = open(p).read()
-begin = "/*\n * The half of a copy-on-write that the write path does after\n"
-end = "/* The id of the standing snapshot called `name`, or 0. */\n"
-assert s.count(begin) == 1 and s.count(end) == 1, "stand CR-12 anchors missing"
-old_body = (
-    "/* logcheck mutation: CR-12 as it stood before its rewrite */\n"
-    "static TestResult test_cow_before_after_write(void)\n"
-    "{\n"
-    "    TestResult verdict    = TEST_PASS;\n"
-    "    uint32_t   file_id    = 0;\n"
-    "    uint32_t   new_block  = 0;\n"
-    "    uint16_t   tag_ids[1] = {1};\n"
+a = "    TagFSMetadata meta;\n\n    TEST_ASSERT_EQ(tagfs_create_file(\"cow-test\", NULL, 0, &file_id), 0, \"a file is created\");\n"
+assert s.count(a) == 1, "stand leak anchor missing"
+open(p, "w").write(s.replace(a,
+    "    TagFSMetadata meta;\n"
+    "    uint32_t      leaked;   /* logcheck mutation: a block taken and never given back */\n"
     "\n"
-    "    TEST_ASSERT_EQ(tagfs_create_file(\"cow-test\", tag_ids, 1, &file_id), 0,\n"
-    "                   \"tagfs_create_file should succeed\");\n"
-    "    fill_random(g_test_buffer, TAGFS_BLOCK_SIZE);\n"
-    "    TEST_ASSERT_EQ(TestFileWrite(file_id, g_test_buffer, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,\n"
-    "                   \"Should write 4096 bytes\");\n"
-    "    if (TagFS_CowBeforeWrite(file_id, 1, &new_block) == OK) {\n"
-    "        TEST_ASSERT(new_block > 0, \"New block should be allocated\");\n"
-    "        TEST_ASSERT_OK(TagFS_CowAfterWrite(file_id, 1, new_block),\n"
-    "                       \"TagFS_CowAfterWrite should succeed\");\n"
-    "    }\n"
-    "out:\n"
-    "    if (file_id)\n"
-    "        tagfs_delete_file(file_id);\n"
-    "    return verdict;\n"
-    "}\n"
-    "\n")
-a, b = s.index(begin), s.index(end)
-open(p, "w").write(s[:a] + old_body + s[b:])
+    "    TEST_ASSERT_EQ(tagfs_alloc_blocks(1, &leaked), 0, \"a block is taken\");\n"
+    "    TEST_ASSERT_EQ(tagfs_create_file(\"cow-test\", NULL, 0, &file_id), 0, \"a file is created\");\n", 1))
 EOF
     mut_done src/kernel/tagfs/tests/snapshot_tests.c "logcheck mutation" 1
 }
-stand_cr12_off() {
+stand_leak_off() {
     restore src/kernel/tagfs/tests/snapshot_tests.c
 }
 
@@ -8444,30 +8368,6 @@ STAND_HELD_EOF
     fi
     stand_mech_off
 
-    # The defects step 1.1 took out of copy-on-write, put back: the question
-    # that reads a file's own record for bit 3 under the copy-on-write lock
-    # (CR-10), and the redirect log that pushes the cache on every 64th
-    # redirect (CR-6). Their tests hold no caveat any more, and each must say
-    # its defect is back, number and all.
-    stand_mech_on cowback
-    if stand_mut_boot standmut_cowback CORES=4 MEM=4G; then
-        stand_red standmut_cowback "the copy-on-write question that reads the file's record again is its defect back" \
-            'stand_cow_question_asks_no_medium failed: the defect it stands for is back — .* \(reads of a file.s metadata block the copy-on-write question asked, no snapshot standing 1\)'
-        stand_red standmut_cowback "the redirect log that pushes the cache on every 64th redirect again is its defect back" \
-            'stand_redirect_log_leaves_the_flush failed: the defect it stands for is back — .* \(cache flushes asked inside 64 redirects, under the copy-on-write lock 1\)'
-    fi
-    stand_mech_off
-
-    # And with no snapshot standing the question takes no lock at all (the
-    # owner's F3): its fast exit taken out, the test's ask under the state
-    # lock takes the copy-on-write lock out of order.
-    stand_mech_on cowfast
-    if stand_mut_boot standmut_cowfast CORES=4 MEM=4G; then
-        stand_red standmut_cowfast "a question that takes its lock with no snapshot standing breaks the order under the state lock" \
-            'stand_cow_question_asks_no_medium failed at [^:]+:[0-9]+: and takes no lock: under the state lock it breaks no order \(1, 0\)'
-    fi
-    stand_mech_off
-
     # The file table's growth as step 1.1 found it: both of the defects it
     # lifted are back, and each test that stands for one says so, number and all.
     stand_mech_on table
@@ -8506,30 +8406,30 @@ STAND_HELD_EOF
     fi
     stand_mech_off
 
-    # ── CR-12 as it was: caught as it runs, and by the next roll call ───────
-    stand_cr12_on
-    if stand_mut_boot standmut_cr12 CORES=4 MEM=4G; then
-        L="$SCRATCH/serial.standmut_cr12.log"
-        before=$(grep -aoE 'cow_before_after_write failed: it left residue — [0-9]+ block\(s\) in use outside the volume.s own chains before it and [0-9]+ after' "$L" | grep -oE '[0-9]+' | head -1)
-        after=$(grep -aoE 'cow_before_after_write failed: it left residue — [0-9]+ block\(s\) in use outside the volume.s own chains before it and [0-9]+ after' "$L" | grep -oE '[0-9]+' | tail -1)
+    # ── a test that leaks a block: caught as it runs, and by the next roll call
+    stand_leak_on
+    if stand_mut_boot standmut_leak CORES=4 MEM=4G; then
+        L="$SCRATCH/serial.standmut_leak.log"
+        before=$(grep -aoE 'cow_moves_only_the_block_written failed: it left residue — [0-9]+ block\(s\) in use outside the volume.s own chains before it and [0-9]+ after' "$L" | grep -oE '[0-9]+' | head -1)
+        after=$(grep -aoE 'cow_moves_only_the_block_written failed: it left residue — [0-9]+ block\(s\) in use outside the volume.s own chains before it and [0-9]+ after' "$L" | grep -oE '[0-9]+' | tail -1)
         [ -n "$before" ] && [ "$after" = "$((before + 1))" ]
-        chk $? "standmut: the old CR-12 body leaves the copy it took, and the runner counts it — ${before:-no} block(s) before it, ${after:-no} after"
+        chk $? "standmut: a test that takes a block and never gives it back is counted by the runner — ${before:-no} block(s) before it, ${after:-no} after"
         if grep -aq '^\[HALT\] Storage sync complete' "$L"; then
-            img="$SCRATCH/stand.cr12.img"
+            img="$SCRATCH/stand.leak.img"
             cp -c build/boxos.img "$img" 2>/dev/null || cp build/boxos.img "$img"
-            stand_boot standmut_cr12_again BOOTDISK="$img" CORES=4 MEM=4G
+            stand_boot standmut_leak_again BOOTDISK="$img" CORES=4 MEM=4G
             if [ $? != 2 ]; then
-                stand_red standmut_cr12_again "and the next boot's roll call finds the block it left as an orphan" \
+                stand_red standmut_leak_again "and the next boot's roll call finds the block it left as an orphan" \
                     '\[TagFS FSCK\] Bitmap mismatch: 1 orphan, 0 missing'
-                stand_red standmut_cr12_again "named by where it is" \
+                stand_red standmut_leak_again "named by where it is" \
                     '\[TagFS FSCK\] orphan run at data block [0-9]+, 1 block\(s\)'
             fi
             rm -f "$img"
         else
-            bad "standmut: the old CR-12 boot never said its halt's sync wrote the volume, so the next roll call would judge nothing"
+            bad "standmut: the leaking boot never said its halt's sync wrote the volume, so the next roll call would judge nothing"
         fi
     fi
-    stand_cr12_off
+    stand_leak_off
 
     buildkey_restore
 }
@@ -9245,19 +9145,22 @@ EOF2
     mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 1
 }
 
+# The 512 bytes go into ObjWrite, the root of the heaviest chain: a function
+# reached through the op table is never inlined, so the bytes land in its own
+# frame, which stays under the limit, and nothing but the reach moves.
 stackguard_reach_on() {
-    mutate src/kernel/tagfs/tagfs.c
+    mutate src/kernel/core/decks/storage/storage_ops.c
     python3 - <<'EOF2'
-p = "src/kernel/tagfs/tagfs.c"
+p = "src/kernel/core/decks/storage/storage_ops.c"
 s = open(p).read()
-anchor = "    int rc = tagfs_get_metadata_inside(file_id, out);\n"
-assert s.count(anchor) == 1, "stackguard tagfs_get_metadata anchor missing"
-s = s.replace(anchor,
+anchor = "    uint32_t flags   = param_u32(op, 12);\n"
+assert s.count(anchor) == 1, "stackguard ObjWrite anchor missing"
+s = s.replace(anchor, anchor +
     "    volatile uint8_t logcheck_reach[512];   /* logcheck mutation: 512 bytes on the way to the medium */\n"
-    "    logcheck_reach[file_id % 512] = 1;\n" + anchor, 1)
+    "    logcheck_reach[file_id % 512] = 1;\n", 1)
 open(p, "w").write(s)
 EOF2
-    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 1
+    mut_done src/kernel/core/decks/storage/storage_ops.c "logcheck mutation" 1
 }
 
 stackguard_noreach_on() {
@@ -9329,8 +9232,8 @@ run_stackguard() {
     reach_now=$(sed -nE 's/.*reach grew to ([0-9]+) bytes.*/\1/p' "$SCRATCH/build.stackguard.reach.log" | head -1)
     [ -n "$reach_now" ] && [ "$reach_now" -ge $((held_reach + 512)) ] \
         && [ "$(grep -c '^\[stack\] FAIL' "$SCRATCH/build.stackguard.reach.log")" = 1 ]
-    chk $? "stackguard: 512 bytes in tagfs_get_metadata grow the reach to ${reach_now:-?} over its $held_reach, and nothing else fails — $(stackguard_said reach)"
-    restore src/kernel/tagfs/tagfs.c
+    chk $? "stackguard: 512 bytes in ObjWrite grow the reach to ${reach_now:-?} over its $held_reach, and nothing else fails — $(stackguard_said reach)"
+    restore src/kernel/core/decks/storage/storage_ops.c
 
     # M5 — no reach line: the budget itself is the rule.
     stackguard_noreach_on

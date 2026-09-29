@@ -2,6 +2,7 @@
 #include "stand_tests.h"
 #include "../tagfs.h"
 #include "../cow/cow.h"
+#include "../integrity/integrity.h"
 #include "block_fail.h"
 #include "amp.h"
 
@@ -682,27 +683,28 @@ TestResult TestStandOpenJoinsTheWriters(void)
 // ----------------------------------------------------------------------------
 // A block a snapshot keeps, given back twice
 //
-// The state is the one a write leaves when it has copied a block for a
-// snapshot and recorded the redirect, and then could not commit the file onto
-// the copy — the medium refused the copy's write, or the record could not be
-// made (tagfs_write_inside): the snapshot keeps the old block, and the file
-// still names it. It is staged here with the copy-on-write calls themselves,
-// as the cow suite stages it. Then the file is deleted, which gives the block
-// back, and the snapshot is deleted, which gives it back again — a give the
-// block map refuses whole and says, since the block is already free (CW-D3).
-// Were it taken, the block would be counted free a second time: that is
-// measured as the free count's drift from the map (TagFSAllocatorRederive),
-// which also puts the count right, so no block is left for two owners.
+// The state this stood for was the one a write left when it had copied a
+// block for a snapshot and recorded the redirect, and then could not commit
+// the file onto the copy: the snapshot kept the old block, and the file still
+// named it. Deleting the file gave the block back, and deleting the snapshot
+// gave it back again — free_run_locked did not look at the bit, so the block
+// went on the free list a second time and was counted free a second time.
+//
+// A format-v1 volume never reaches that state now: the snapshot is refused,
+// and the write lands on the block the file has; and a second give of a free
+// block is refused whole by the block map and said (CW-D3). So the road is
+// walked as it now is — a one-block file, a snapshot of it asked for and
+// refused, its block written over whole, the file deleted — and the allocator
+// is then asked how far its count drifted from its map (TagFSAllocatorRederive,
+// which also derives it again, so no drift outlives the test).
 // ----------------------------------------------------------------------------
 
 TestResult TestStandFrozenBlockFreedTwice(void)
 {
     TestResult  verdict = TEST_PASS;
     uint32_t    file_id = 0;
-    uint32_t    snap_id = 0;
-    uint32_t    frozen  = 0;
-    uint32_t    copy    = 0;
-    bool        staged  = false;
+    uint32_t    kept    = 0;
+    uint32_t    now     = 0;
     const char* aside   = StandStepsAsideFor();
 
     if (aside)
@@ -711,44 +713,118 @@ TestResult TestStandFrozenBlockFreedTwice(void)
     TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x5F, 0);
     TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a one-block file is made");
-    TEST_ASSERT(StandBlockOf(file_id, 0, &frozen), "its block is found");
+    TEST_ASSERT(StandBlockOf(file_id, 0, &kept), "its block is found");
+    TEST_ASSERT_EQ(TagFS_SnapshotRefused("a snapshot of the stand's one-block file"),
+                   ERR_UNSUPPORTED, "a snapshot of the file is refused");
 
-    error_t made = TagFS_SnapshotCreate("stand-frozen", file_id, &snap_id);
-    if (made != OK)
-        snap_id = 0;        /* ERR_ALREADY_EXISTS names somebody else's snapshot */
-    TEST_ASSERT_OK(made, "a snapshot of the file is taken");
-    staged = true;
+    TestFillAt(g_test_output, TAGFS_BLOCK_SIZE, 0x60, 0);
+    TEST_ASSERT_EQ(TestFileWrite(file_id, g_test_output, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
+                   "the file's block is written over whole");
+    TEST_ASSERT(StandBlockOf(file_id, 0, &now), "and found again");
+    TEST_ASSERT_EQ(now, kept, "where it was: nothing was copied for a snapshot");
 
-    TEST_ASSERT_OK(TagFS_CowBeforeWrite(file_id, frozen, &copy), "the file's block is copied");
-    TEST_ASSERT_OK(TagFS_CowAfterWrite(file_id, frozen, copy),
-                   "and the snapshot keeps the block, while the file still names it");
-
-    TEST_ASSERT_EQ(TagFSAllocatorRederive(), 0, "the allocator agrees with its bitmap before the deletes");
+    TEST_ASSERT_EQ(TagFSAllocatorRederive(), 0, "the allocator agrees with its bitmap before the delete");
     TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "the file is deleted");
     file_id = 0;
-    TEST_ASSERT(!StandBlockInUse(frozen), "and the block the snapshot keeps is given back with it");
+    TEST_ASSERT(!StandBlockInUse(kept), "and its block is given back with it");
 
-    TEST_ASSERT_OK(TagFS_SnapshotDelete(snap_id), "the snapshot is deleted");
-    snap_id = 0;
     int64_t drift = TagFSAllocatorRederive();
-    TestEvidence("blocks the allocator was given back twice", (uint64_t)(drift > 0 ? drift : 0));
-    if (drift == 0)
-        goto out;
-    TEST_ASSERT_EQ(drift, 1, "the one block the snapshot kept, and no other");
-    verdict = TEST_DEFECT;
+    TEST_ASSERT(drift >= 0, "the allocator counts no block taken that its bitmap calls free");
+    TestEvidence("blocks the allocator was given back twice", (uint64_t)drift);
+    if (drift)
+        verdict = TEST_DEFECT;
 out:
     if (file_id)
         tagfs_delete_file(file_id);
-    if (snap_id)
-        TagFS_SnapshotDelete(snap_id);
-    if (staged) {
-        /* Whatever was given back twice on the way out is derived away, and
-         * the copy — which the deleted snapshot named and nothing else — goes
-         * back once. */
-        TagFSAllocatorRederive();
-        if (copy && StandBlockInUse(copy))
-            tagfs_free_blocks(copy, 1);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// A block out of the read-ahead cache, verified as one off the medium is
+// (CW-D8)
+//
+// A read of a file's block prefetches the rest of its extent into the
+// read-ahead cache (ReadAheadPrefetch), and read_block handed those blocks
+// out of the cache without verify-on-read: a block that rotted on the medium
+// was caught only when it was the first of the run a read prefetched, and once
+// extents merge a file is read in runs.
+//
+// A three-block extent is read once — its first block off the medium, the
+// others prefetched — then its middle block rots on the medium behind the
+// map's back and all three are dropped from the cache, and the file is read
+// again: its first block off the medium, and its middle block out of the
+// prefetch that read makes. The first read is what makes that so: a prefetch
+// passes over the block the last one ended on, and the first read's ended on
+// the third. The evidence is how many rotten blocks the second read caught, of
+// the one there is.
+// ----------------------------------------------------------------------------
+
+#define STAND_RA_BLOCKS 3u
+
+TestResult TestStandReadAheadHitIsVerified(void)
+{
+    TestResult  verdict  = TEST_PASS;
+    TagFSState* fs       = tagfs_get_state();
+    uint32_t    file_id  = 0;
+    uint32_t    blocks[STAND_RA_BLOCKS] = { 0, 0, 0 };
+    bool        rotten   = false;
+    uint8_t*    was      = g_test_buffer;                                   /* 3 blocks */
+    uint8_t*    rot      = g_test_buffer + STAND_RA_BLOCKS * TAGFS_BLOCK_SIZE;
+    uint32_t    middle   = TAGFS_BLOCK_SIZE;
+    const char* aside    = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+    if (!IntegrityIsInitialized())
+        return test_steps_aside("verify-on-read is not armed on this volume, so no rot "
+                                "can be caught on either road");
+
+    TestFillAt(was, STAND_RA_BLOCKS * TAGFS_BLOCK_SIZE, 0x6A, 0);
+    TEST_ASSERT(StandMakeFile("test_file", was, STAND_RA_BLOCKS * TAGFS_BLOCK_SIZE, &file_id),
+                "a three-block file is made");
+    TEST_ASSERT_EQ(tagfs_defrag_file(file_id, 0), 0, "and gathered into one extent");
+    for (uint32_t k = 0; k < STAND_RA_BLOCKS; k++)
+        TEST_ASSERT(StandBlockOf(file_id, k, &blocks[k]), "each of its blocks is found");
+    TEST_ASSERT(blocks[1] == blocks[0] + 1 && blocks[2] == blocks[0] + 2,
+                "one run on the medium, so a read of its first block prefetches the others");
+
+    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, STAND_RA_BLOCKS * TAGFS_BLOCK_SIZE),
+                   STAND_RA_BLOCKS * TAGFS_BLOCK_SIZE, "the file is read once, whole");
+
+    memcpy(rot, was + middle, TAGFS_BLOCK_SIZE);
+    rot[100] ^= 0xFF;
+    uint64_t vlba = ((uint64_t)fs->layout.data_block + blocks[1]) * TAGFS_BLOCK_SECTORS;
+    TEST_ASSERT_EQ(tagfs_volume_write(vlba, TAGFS_BLOCK_SECTORS, rot), 0,
+                   "its middle block rots on the medium, behind the map's back");
+    rotten = true;
+    for (uint32_t k = 0; k < STAND_RA_BLOCKS; k++)
+        tagfs_readahead_invalidate(blocks[k]);
+
+    IntegrityDrainReports();
+    uint32_t errors_before = IntegrityErrorCount();
+    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, STAND_RA_BLOCKS * TAGFS_BLOCK_SIZE),
+                   STAND_RA_BLOCKS * TAGFS_BLOCK_SIZE, "the file is read again, whole");
+    uint32_t caught = IntegrityErrorCount() - errors_before;
+    TEST_ASSERT_EQ(TestFirstDifference(g_test_output + middle, rot, TAGFS_BLOCK_SIZE),
+                   TAGFS_BLOCK_SIZE, "its middle block reads as the medium now holds it");
+    TEST_ASSERT(caught <= 1, "and the one rotten block is caught at most once");
+
+    TestEvidence("rotten blocks a read caught out of the read-ahead cache, of 1", caught);
+    if (caught == 0)
+        verdict = TEST_DEFECT;
+out:
+    if (rotten) {
+        /* The block and the map agree again before the file lets it go, so
+         * nobody who takes the block next is told of rot it never had. */
+        if (tagfs_write_block(blocks[1], was + middle) != OK)
+            verdict = TestFailedAt(__FILE__, __LINE__,
+                                   "the rotten block would not take its bytes back — "
+                                   "the map and the medium disagree over it (block, 0)",
+                                   blocks[1], 0);
+        IntegrityDrainReports();
     }
+    if (file_id)
+        tagfs_delete_file(file_id);
     return verdict;
 }
 

@@ -30,7 +30,7 @@ import zlib
 # ---------------------------------------------------------------------------
 
 SECTOR = 512                            # volume_deed.h:112 VOLUME_DEED_SECTOR_BYTES
-BLOCK = 4096                            # tagfs.h:30 TAGFS_BLOCK_SIZE
+BLOCK = 4096                            # tagfs.h:29 TAGFS_BLOCK_SIZE
 SECTORS_PER_BLOCK = BLOCK // SECTOR     # tagfs_constants.h:12 TAGFS_BLOCK_SECTORS
 
 # ---------------------------------------------------------------------------
@@ -125,22 +125,22 @@ VOLUME_LEDGER = Fields("<8sIIQQQQIIIIIIIHH",   # volume_ledger.h:85-126
 REGISTRY_MAGIC = 0x54524547             # boxos_magic.h:13 TAGFS_REGISTRY_MAGIC "TREG"
 FILETBL_MAGIC = 0x54465442              # boxos_magic.h:14 TAGFS_FILETBL_MAGIC  "TFTB"
 MPOOL_MAGIC = 0x544D504C                # boxos_magic.h:15 TAGFS_MPOOL_MAGIC    "TMPL"
-REGISTRY_DATA = 4080                    # tagfs.h:71 TAGFS_REGISTRY_DATA_SIZE
-MPOOL_DATA = 4080                       # tagfs.h:72 TAGFS_MPOOL_DATA_SIZE
-FTABLE_PER_BLOCK = 510                  # tagfs.h:73 TAGFS_FTABLE_PER_BLOCK
-CHAIN_HEADER = 16                       # tagfs.h:83, 105, 116 — every chain header is 16 bytes
+REGISTRY_DATA = 4080                    # tagfs.h:70 TAGFS_REGISTRY_DATA_SIZE
+MPOOL_DATA = 4080                       # tagfs.h:71 TAGFS_MPOOL_DATA_SIZE
+FTABLE_PER_BLOCK = 510                  # tagfs.h:72 TAGFS_FTABLE_PER_BLOCK
+CHAIN_HEADER = 16                       # tagfs.h:78, 100, 111 — every chain header is 16 bytes
 
-REGISTRY_BLOCK = Fields("<IIHH4x",      # tagfs.h:87-94 TagRegistryBlock header
+REGISTRY_BLOCK = Fields("<IIHH4x",      # tagfs.h:82-89 TagRegistryBlock header
                         "magic next_block entry_count used_bytes")
-REGISTRY_RECORD = Fields("<HBBH",       # tagfs.h:84-86; tag_registry.c RegistryPack
+REGISTRY_RECORD = Fields("<HBBH",       # tagfs.h:79-81; tag_registry.c RegistryPack
                          "tag_id flags key_len value_len")
-FILE_TABLE_BLOCK = Fields("<IIII",      # tagfs.h:106-112 FileTableBlock header
+FILE_TABLE_BLOCK = Fields("<IIII",      # tagfs.h:101-107 FileTableBlock header
                           "magic next_block entry_count reserved")
-FILE_TABLE_ENTRY = Fields("<II",        # tagfs.h:98-101 FileTableEntry
+FILE_TABLE_ENTRY = Fields("<II",        # tagfs.h:93-96 FileTableEntry
                           "meta_block meta_offset")
-META_POOL_BLOCK = Fields("<IIHHH2x",    # tagfs.h:140-148 MetaPoolBlock header
+META_POOL_BLOCK = Fields("<IIHHH2x",    # tagfs.h:135-143 MetaPoolBlock header
                          "magic next_block used_bytes record_count kept")
-FILE_EXTENT = Fields("<IH",             # tagfs.h:152-155 FileExtent
+FILE_EXTENT = Fields("<IH",             # tagfs.h:147-150 FileExtent
                      "start_block block_count")
 
 RECORD_HEADER = 42                      # meta_pool.c:11 RECORD_HEADER_SIZE
@@ -150,8 +150,8 @@ META_RECORD = Fields("<HIIQQQHHHH",     # tagfs_boot.h:53-67; meta_pool.c:492-50
                      "record_len file_id flags size created_time modified_time "
                      "tag_count extent_count name_len crc16")
 
-FILE_ACTIVE, FILE_TRASHED, FILE_HIDDEN = 1, 2, 4   # tagfs.h:59-61; bit 3 is spent (tagfs.h:62)
-MAX_TAG_ID = 0x7FFE                     # tagfs.h:56 TAGFS_MAX_TAG_ID
+FILE_ACTIVE, FILE_TRASHED, FILE_HIDDEN = 1, 2, 4   # tagfs.h:58-60; bit 3 is spent (tagfs.h:61)
+MAX_TAG_ID = 0x7FFE                     # tagfs.h:55 TAGFS_MAX_TAG_ID
 TAG_FLAG_HAS_VALUE, TAG_FLAG_SYSTEM = 1, 2   # tagfs_constants.h:36-37
 MIRROR_SLACK = 64                       # tagfs_init: meta_pool_mirror_init(next_file_id + 64); meta_pool.c:726 adds 1
 EXTENT_END_LIMIT = 0xFFFFFFFF           # meta_pool.c:631 start + count past 2^32-1 is an overflow
@@ -160,21 +160,21 @@ EXTENT_END_LIMIT = 0xFFFFFFFF           # meta_pool.c:631 start + count past 2^3
 # DiskBook
 # ---------------------------------------------------------------------------
 
-DISKBOOK_MAGIC = 0x44424F4F             # disk_book.h:34 DISK_BOOK_MAGIC    "DBOO"
-DISKBOOK_SB_MAGIC = 0x44425342          # disk_book.h:35 DISK_BOOK_SB_MAGIC "DBSB"
-DISKBOOK_VERSION = 2                    # disk_book.h:36
-DISKBOOK_ENTRY_BYTES = 1024             # disk_book.h:37
-DISKBOOK_SECTORS_PER_ENTRY = 2          # disk_book.h:38
-DISKBOOK_CAPACITY = 512                 # disk_book.h:39
-DISKBOOK_TYPE_REDIRECT = 1              # disk_book.h:42
-DISKBOOK_HEAD_CRC_AT = 32               # disk_book.h:52 DiskBookSuperblock.crc32
-DISKBOOK_ENTRY_CRC_AT = 32              # disk_book.h:71 DiskBookEntry.record_crc32
+DISKBOOK_MAGIC = 0x44424F4F             # disk_book.h:25 DISK_BOOK_MAGIC    "DBOO"
+DISKBOOK_SB_MAGIC = 0x44425342          # disk_book.h:26 DISK_BOOK_SB_MAGIC "DBSB"
+DISKBOOK_VERSION = 2                    # disk_book.h:27
+DISKBOOK_ENTRY_BYTES = 1024             # disk_book.h:28
+DISKBOOK_SECTORS_PER_ENTRY = 2          # disk_book.h:29
+DISKBOOK_CAPACITY = 512                 # disk_book.h:30
+DISKBOOK_TYPE_REDIRECT = 1              # disk_book.h:33
+DISKBOOK_HEAD_CRC_AT = 32               # disk_book.h:43 DiskBookSuperblock.crc32
+DISKBOOK_ENTRY_CRC_AT = 32              # disk_book.h:62 DiskBookEntry.record_crc32
 # Head, its copy, then the records (create_tagfs.c:634-635, tagfs_init's DiskBookInit).
 DISKBOOK_BLOCKS = 2 + DISKBOOK_CAPACITY * DISKBOOK_SECTORS_PER_ENTRY // SECTORS_PER_BLOCK
-DISKBOOK_SUPERBLOCK = Fields("<IIQIIIII16s",   # disk_book.h:44-55
+DISKBOOK_SUPERBLOCK = Fields("<IIQIIIII16s",   # disk_book.h:35-46
                              "magic version start_sector capacity count "
                              "generation flags crc32 uuid")
-DISKBOOK_ENTRY = Fields("<IIHHIIIQI",   # disk_book.h:62-73
+DISKBOOK_ENTRY = Fields("<IIHHIIIQI",   # disk_book.h:53-64
                         "magic sequence type flags snapshot_id old_block "
                         "new_block tag_bits record_crc32")
 
@@ -182,10 +182,10 @@ DISKBOOK_ENTRY = Fields("<IIHHIIIQI",   # disk_book.h:62-73
 # Copy-on-write manifest, integrity map, and the Quill TUSE link
 # ---------------------------------------------------------------------------
 
-COW_MANIFEST_MAGIC = 0x434F564D         # cow.h:16 "COVM"
-COW_MANIFEST_MAX = 60                   # cow.h:17
-COW_MANIFEST_HEADER = 8                 # cow.h:69-72 magic + count
-COW_SNAPSHOT_DISK = Fields("<IIQI32sB3xIQ",    # cow.h:55-65 CowSnapshotDisk
+COW_MANIFEST_MAGIC = 0x434F564D         # cow.h:13 "COVM"
+COW_MANIFEST_MAX = 60                   # cow.h:14
+COW_MANIFEST_HEADER = 8                 # cow.h:48-51 magic + count
+COW_SNAPSHOT_DISK = Fields("<IIQI32sB3xIQ",    # cow.h:34-44 CowSnapshotDisk
                            "snapshot_id parent_file_id created_time "
                            "disk_book_checkpoint name flags file_count total_size")
 
@@ -411,9 +411,10 @@ def LedgerChoice(copies):
 
 
 def ReadDiskBookHead(sector, records_sector):
-    """The DiskBook head (disk_book.h:44-55). `valid` is magic + crc over the
-    whole 512 bytes with its crc field zeroed (disk_book.c:65-72); `acceptable`
-    is what DiskBookInit takes instead of reformatting (disk_book.c:137-140)."""
+    """The DiskBook head (disk_book.h:35-46). `valid` is magic + crc over the
+    whole 512 bytes with its crc field zeroed (disk_book.c:47-54); `acceptable`
+    is what DiskBookInit takes, any other head a book with nothing to replay
+    (disk_book.c:101-108)."""
     sb = bytes(sector[:SECTOR])
     d = DISKBOOK_SUPERBLOCK.Unpack(sb)
     probe = bytearray(sb)
@@ -427,8 +428,8 @@ def ReadDiskBookHead(sector, records_sector):
 
 
 def ReadDiskBookEntry(raw):
-    """One redirect record (disk_book.h:62-73); `valid` is magic + crc over the
-    1024 bytes with its crc field zeroed (disk_book.c:37-41, 173-180)."""
+    """One redirect record (disk_book.h:53-64); `valid` is magic + crc over the
+    1024 bytes with its crc field zeroed (disk_book.c:31-38, 132-135)."""
     raw = bytes(raw[:DISKBOOK_ENTRY_BYTES])
     d = DISKBOOK_ENTRY.Unpack(raw)
     probe = bytearray(raw)
@@ -443,7 +444,7 @@ def ReadDiskBookEntry(raw):
 
 
 def ReadManifest(raw):
-    """A snapshot manifest (cow.h:69-74). `ok` is exactly the mount's test
+    """A snapshot manifest (cow.h:48-53). `ok` is exactly the mount's test
     (tagfs_init's manifest check): the magic, and a count the block can hold."""
     magic, count = struct.unpack_from("<II", raw, 0)
     entries = []
@@ -467,7 +468,7 @@ def _CString(raw):
 
 
 def ReadRegistryBlock(raw):
-    """A tag registry block (tagfs.h:87-94) and its records, walked exactly as
+    """A tag registry block (tagfs.h:82-89) and its records, walked exactly as
     tag_registry_load walks them: entry_count records packed from the start of
     the data, and none past its end."""
     d = REGISTRY_BLOCK.Unpack(raw)
@@ -493,7 +494,7 @@ def ReadRegistryBlock(raw):
 
 
 def ReadTableBlock(raw):
-    """A file table block (tagfs.h:106-112). Only the first entry_count rows are
+    """A file table block (tagfs.h:101-107). Only the first entry_count rows are
     loaded, clamped to 510 (file_table.c:152-158); the rest read as empty. A
     row is a file when meta_block != 0 (file_table.c:191)."""
     d = FILE_TABLE_BLOCK.Unpack(raw)
@@ -504,7 +505,7 @@ def ReadTableBlock(raw):
 
 
 def ReadPoolBlock(raw):
-    """A metadata pool block (tagfs.h:140-148) with its two walks.
+    """A metadata pool block (tagfs.h:135-143) with its two walks.
 
     `mirror_walk` is the mount's mirror walk (meta_pool.c:763-791): by
     record_len while pos < used_bytes, stopping at a length of zero or one past

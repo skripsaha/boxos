@@ -1,20 +1,20 @@
 /*
- * cow_test — CoW + snapshot semantic test.
+ * cow_test — snapshots on a format-v1 volume, as a program meets them.
  *
- *   1. create file, write pattern A
- *   2. snap_create — capture frozen view
- *   3. write pattern B (triggers CoW redirect to NEW block)
- *   4. read live file → must be pattern B
- *   5. snap_list  — confirm snapshot present
- *   6. snap_delete → frees redirected OLD blocks
- *   7. snap_list  — confirm gone
- *   8. live read still pattern B
+ *   1. create a file, write pattern A
+ *   2. snap_create of the file, and of the whole volume — each answered
+ *      -ERR_UNSUPPORTED, with no id handed back
+ *   3. snap_list, snap_info, snap_delete — each answered -ERR_UNSUPPORTED
+ *      too, never an empty list or a "not found"
+ *   4. write pattern B over A, read it back — the write lands in place
  *
- * Pass means: write paths see fresh content, snapshot list reflects
- * lifecycle, delete completes without corrupting the live file.
+ * Pass means: every snapshot request is refused out loud, and a write to the
+ * file it would have been taken of reads back as written. Snapshots arrive
+ * with format v2.
  */
 
 #include "box/file.h"
+#include "box/error.h"
 #include "box/debug.h"
 #include "box/string.h"
 
@@ -25,6 +25,41 @@
 static char buf_a[COW_BYTES];
 static char buf_b[COW_BYTES];
 static char rbuf[COW_BYTES];
+
+/* Whether a snapshot request came back as the refusal format v1 gives. */
+static bool refused(const char *what, int rc)
+{
+    if (rc == -ERR_UNSUPPORTED)
+        return true;
+    kdbg_print("[COW] FAIL: %s answered %d, not -ERR_UNSUPPORTED (%d)", what, rc,
+               -ERR_UNSUPPORTED);
+    return false;
+}
+
+static bool snapshots_refused(uint32_t fid)
+{
+    uint32_t    snap_id = 0;
+    uint32_t    ids[4];
+    uint32_t    count   = 0;
+    snap_info_t info;
+
+    if (!refused("snap_create of the file", snap_create("cow_pre_b", fid, &snap_id)))
+        return false;
+    if (!refused("snap_create of the volume", snap_create("cow_all", 0, &snap_id)))
+        return false;
+    if (snap_id != 0) {
+        kdbg_print("[COW] FAIL: a refused snap_create handed back id %u", snap_id);
+        return false;
+    }
+    if (!refused("snap_list", snap_list(ids, 4, &count)))
+        return false;
+    if (count != 0) {
+        kdbg_print("[COW] FAIL: a refused snap_list counted %u", count);
+        return false;
+    }
+    return refused("snap_info", snap_info(1, &info)) &&
+           refused("snap_delete", snap_delete(1));
+}
 
 int main(void)
 {
@@ -45,87 +80,29 @@ int main(void)
         return 1;
     }
 
-    /* Snap before second write — second write must CoW. */
-    uint32_t snap_id = 0;
-    if (snap_create("cow_pre_b", (uint32_t)fid, &snap_id) != 0 || snap_id == 0) {
-        kdbg_print("[COW] snap_create FAIL");
+    if (!snapshots_refused((uint32_t)fid)) {
         delete((uint32_t)fid);
         return 1;
     }
-    kdbg_print("[COW] created snapshot id=%u", snap_id);
+    kdbg_print("[COW] every snapshot request is refused (ERR_UNSUPPORTED) on format v1");
 
     if (fwrite((uint32_t)fid, 0, buf_b, COW_BYTES) != COW_BYTES) {
-        kdbg_print("[COW] CoW write FAIL");
-        snap_delete(snap_id);
+        kdbg_print("[COW] overwrite FAIL");
         delete((uint32_t)fid);
         return 1;
     }
-
     if (fread((uint32_t)fid, 0, rbuf, COW_BYTES) != COW_BYTES) {
-        kdbg_print("[COW] read after CoW FAIL");
-        snap_delete(snap_id);
+        kdbg_print("[COW] read after overwrite FAIL");
         delete((uint32_t)fid);
         return 1;
     }
     if (memcmp(rbuf, buf_b, COW_BYTES) != 0) {
         kdbg_print("[COW] FAIL: live read != pattern B");
-        snap_delete(snap_id);
-        delete((uint32_t)fid);
-        return 1;
-    }
-    kdbg_print("[COW] live read returns post-CoW pattern B (OK)");
-
-    /* Buffer sized well above the number of snapshots earlier boot phases
-     * (e.g. the box::tagfs::snapshot CXX tests) may leave in the global
-     * list — an 8-entry window could exclude our own snapshot and spuriously
-     * fail "snap not in list" depending on boot/test ordering (UEFI). */
-    uint32_t ids[64];
-    uint32_t count = 0;
-    if (snap_list(ids, 64, &count) != 0) {
-        kdbg_print("[COW] snap_list FAIL");
-        snap_delete(snap_id);
-        delete((uint32_t)fid);
-        return 1;
-    }
-    bool found = false;
-    for (uint32_t i = 0; i < count; i++) if (ids[i] == snap_id) { found = true; break; }
-    if (!found) {
-        kdbg_print("[COW] FAIL: snap not in list (count=%u)", count);
-        snap_delete(snap_id);
-        delete((uint32_t)fid);
-        return 1;
-    }
-
-    if (snap_delete(snap_id) != 0) {
-        kdbg_print("[COW] snap_delete FAIL");
-        delete((uint32_t)fid);
-        return 1;
-    }
-
-    /* Live file should still be intact after snapshot deletion. */
-    if (fread((uint32_t)fid, 0, rbuf, COW_BYTES) != COW_BYTES) {
-        kdbg_print("[COW] read after snap_delete FAIL");
-        delete((uint32_t)fid);
-        return 1;
-    }
-    if (memcmp(rbuf, buf_b, COW_BYTES) != 0) {
-        kdbg_print("[COW] FAIL: live read != pattern B after snap_delete");
-        delete((uint32_t)fid);
-        return 1;
-    }
-
-    /* List again — snapshot should be gone. */
-    count = 0;
-    snap_list(ids, 64, &count);
-    bool still_there = false;
-    for (uint32_t i = 0; i < count; i++) if (ids[i] == snap_id) { still_there = true; break; }
-    if (still_there) {
-        kdbg_print("[COW] FAIL: snap still in list after delete");
         delete((uint32_t)fid);
         return 1;
     }
 
     delete((uint32_t)fid);
-    kdbg_print("[COW] PASS — create/snap/CoW-write/list/delete all consistent");
+    kdbg_print("[COW] PASS — snapshots refused on format v1, the write lands in place");
     return 0;
 }

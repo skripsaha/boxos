@@ -2,7 +2,6 @@
 #include "stand_tests.h"
 #include "../tagfs.h"
 #include "../braid/braid.h"
-#include "../cow/cow.h"
 #include "block_fail.h"
 #include "boardroom.h"
 #include "amp.h"
@@ -41,9 +40,6 @@ const char* StandStepsAsideFor(void)
     if (BraidIsHealthy())
         return "Braid is healthy and takes every block of the volume, so a fault "
                "armed on the volume's own sectors would never meet its command";
-    if (TagFS_CowIsActive(0))
-        return "a snapshot of the whole volume is standing, so every write is "
-               "copied for it and the block a fault names is not the block written";
     return NULL;
 }
 
@@ -840,6 +836,11 @@ static const TestCase g_stand_tests[] = {
       .caveat_defect = "deleting a file whose block a snapshot still keeps gives the "
                        "block back, and deleting the snapshot gives it back again, so "
                        "the allocator counts it free twice" },
+    { .name  = "stand_readahead_hit_is_verified", .func = TestStandReadAheadHitIsVerified,
+      .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "a block read out of the read-ahead cache is handed out without "
+                       "verify-on-read, so a rotten block is caught only when it is the "
+                       "first of the run a read prefetched" },
 };
 
 const TestSuite g_stand_suite = {

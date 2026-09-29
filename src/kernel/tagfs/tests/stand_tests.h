@@ -34,8 +34,7 @@
 
 /* Why a stand test cannot be asked on this volume right now, or NULL. A
  * healthy Braid takes every block (tagfs.c, read_block and write_block), so a
- * fault armed on a sector of the volume would never meet the command; and a
- * snapshot of the whole volume turns every write into a copy. */
+ * fault armed on a sector of the volume would never meet the command. */
 const char* StandStepsAsideFor(void);
 
 /* A file of `bytes` bytes of `data`, created and written through the handle
@@ -103,6 +102,7 @@ TestResult TestStandOpenHoldsWhatItNames(void);
 TestResult TestStandOpenRefusesUnreadMetadata(void);
 TestResult TestStandOpenJoinsTheWriters(void);
 TestResult TestStandFrozenBlockFreedTwice(void);
+TestResult TestStandReadAheadHitIsVerified(void);
 
 #endif /* CONFIG_VOLUME_TESTS */
 

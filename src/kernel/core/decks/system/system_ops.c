@@ -1759,14 +1759,15 @@ static int SysDefragFile(const ManifestOp *op, Crate *crates, uint16_t crate_cou
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
         if (out->capacity >= sizeof(uint32_t)) {
-            uint32_t score = tagfs_get_fragmentation_score();
+            uint32_t score = tagfs_get_fragmentation_score(NULL, NULL);
             (void)crate_write(out, ctx, &score, sizeof(uint32_t));
         }
     }
     return OK;
 }
 
-/* SYSTEM_OP_FRAG_SCORE  out_crate:[u32 score][u32 total_files][u32 total_gaps] */
+/* SYSTEM_OP_FRAG_SCORE  out_crate:[u32 score][u32 total_files][u32 total_gaps]
+ * — all three from one walk of the volume's files (tagfs_get_fragmentation_score). */
 static int SysFragScore(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                         const OpContext *ctx)
 {
@@ -1775,21 +1776,9 @@ static int SysFragScore(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     Crate *out = &crates[op->out_crate];
     if (out->capacity < 12) return ERR_BUFFER_TOO_SMALL;
 
-    uint32_t score = tagfs_get_fragmentation_score();
     uint32_t total_files = 0;
     uint32_t total_gaps  = 0;
-
-    TagFSState *fs = tagfs_get_state();
-    if (fs && fs->initialized) {
-        uint32_t max_id = fs->ledger.next_file_id;
-        for (uint32_t i = 1; i < max_id; i++) {
-            TagFSMetadata meta;
-            if (tagfs_get_metadata(i, &meta) == 0) {
-                if (meta.flags & TAGFS_FILE_ACTIVE) total_files++;
-                tagfs_metadata_free(&meta);
-            }
-        }
-    }
+    uint32_t score = tagfs_get_fragmentation_score(&total_files, &total_gaps);
 
     uint8_t blob[12];
     memcpy(blob +  0, &score,        sizeof(uint32_t));

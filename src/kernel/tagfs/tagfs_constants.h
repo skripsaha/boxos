@@ -55,10 +55,6 @@
 #define TAGFS_MPOOL_DATA_SIZE       4080
 #define TAGFS_FTABLE_PER_BLOCK      510
 
-// Snapshot limits
-#define TAGFS_MAX_SNAPSHOTS         64
-#define TAGFS_SNAPSHOT_NAME_LEN     32
-
 // Bitmap index initial capacities
 #define TAGFS_BITMAP_INITIAL_TAG_CAP    64
 #define TAGFS_BITMAP_INITIAL_FILE_CAP   256

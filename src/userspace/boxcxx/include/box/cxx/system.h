@@ -89,7 +89,8 @@ inline result<box::system_info> info() noexcept
 // the cause.
 inline status perf_dump() noexcept { return _detail::from_status(::perf_dump()); }
 
-// The kernel-defined fragmentation metric (>= 0 on success); the error arm
+// The volume's fragmentation in percent (>= 0 on success) — the share of steps
+// between a file's blocks that are a gap; the error arm
 // carries the cause on a failed call.
 inline result<int> fragmentation() noexcept { return _detail::from_ret<int>(::fragmentation()); }
 

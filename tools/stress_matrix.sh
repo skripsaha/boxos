@@ -20,7 +20,7 @@
 #   Additional production-stability suite (each ×1):
 #     - mtest             "[mtest] PASS"             — Manifest fill+move
 #     - chain             "[chain] PASS"             — multi-op Manifest
-#     - cow_test          "[COW] PASS"               — CoW snapshot lifecycle
+#     - cow_test          "[COW] PASS"               — snapshots refused on format v1
 #     - lifecycle         "[LIFECYCLE] PASS"         — process:spawned/died Touches
 #     - write_observer    "[WO] PASS"                — Touch WROTE delivery
 #     - write_concurrent  "[WC] PASS"                — 4 children × cross-write
@@ -332,8 +332,8 @@ run_config() {
     # inside legitimate identifiers don't trip it.
     app_fail=$(grep -cE  "\[(mtest|chain|COW|LIFECYCLE|WO|WC|WS|TT|decks|STRESS|CXX|CURRENT|STRAND|htest|USE|LUGGAGE)[^]]*\].*(\\bFAIL\\b|\\bfail\\b)" build/serial.log)
 
-    # The kernel's own boot self-test (TagFS core, journal, snapshot,
-    # CoW, BoxHash, integrity, dedup). It runs on EVERY boot in EVERY config
+    # The kernel's own boot self-test (TagFS core, journal, CoW, BoxHash,
+    # integrity, Use Context). It runs on EVERY boot in EVERY config
     # and its verdict used to gate nothing at all — a config where the
     # filesystem's own suite failed still came out green here.
     selftest_ok=$(grep -c   "\[TESTS\] All tests PASSED"   build/serial.log)
