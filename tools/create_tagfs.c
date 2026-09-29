@@ -928,15 +928,33 @@ static uint16_t meta_crc16(const uint8_t* data, uint32_t len) {
  * Build metadata pool record (matches kernel's pack_record exactly)
  * ==================================================================== */
 
+/*
+ * ‼ A FILE IS LAID IN ONE RUN AND NAMED BY AS MANY EXTENTS AS THAT RUN NEEDS.
+ *
+ * An extent counts its blocks in 16 bits, and this used to write the whole
+ * file as one extent with its block count cast to them: a file of more than
+ * 0xFFFF blocks (256 MiB) went onto the volume named by an extent that held
+ * the count modulo 65536 — the kernel read a file cut short and the rest of
+ * its blocks stood taken and owned by nothing. The run is now cut into extents
+ * of at most 0xFFFF blocks, the most one can count. A record longer than the
+ * pool holds is answered with its length and not packed; the caller refuses
+ * it.
+ */
+#define EXTENT_MAX_BLOCKS 0xFFFFu
+
 static uint32_t pack_metadata_record(uint8_t* buf, const FileInfo* fi) {
     const char* fname = fi->filename;
     uint16_t name_len = (uint16_t)strlen(fname);
-    uint16_t extent_count = 1;  /* single contiguous extent */
+    uint32_t extents  = (fi->block_count + EXTENT_MAX_BLOCKS - 1) / EXTENT_MAX_BLOCKS;
 
-    uint16_t record_len = (uint16_t)(RECORD_HEADER_SIZE
-                          + fi->tag_count * sizeof(uint16_t)
-                          + extent_count * sizeof(FileExtent)
-                          + name_len);
+    uint32_t record_size = RECORD_HEADER_SIZE
+                         + fi->tag_count * (uint32_t)sizeof(uint16_t)
+                         + extents * (uint32_t)sizeof(FileExtent)
+                         + name_len;
+    if (record_size > TAGFS_MPOOL_DATA_SIZE)
+        return record_size;
+    uint16_t record_len   = (uint16_t)record_size;
+    uint16_t extent_count = (uint16_t)extents;
 
     uint32_t pos = 0;
 
@@ -970,12 +988,15 @@ static uint32_t pack_metadata_record(uint8_t* buf, const FileInfo* fi) {
         pos += fi->tag_count * 2;
     }
 
-    /* extents[] — single extent: {start_block, block_count} */
-    FileExtent ext;
-    ext.start_block = fi->start_block;
-    ext.block_count = (uint16_t)fi->block_count;
-    memcpy(buf + pos, &ext, sizeof(FileExtent));
-    pos += sizeof(FileExtent);
+    /* extents[] — the file's one run, cut at the width of an extent */
+    for (uint32_t e = 0; e < extents; e++) {
+        uint32_t   left = fi->block_count - e * EXTENT_MAX_BLOCKS;
+        FileExtent ext;
+        ext.start_block = fi->start_block + e * EXTENT_MAX_BLOCKS;
+        ext.block_count = (uint16_t)(left < EXTENT_MAX_BLOCKS ? left : EXTENT_MAX_BLOCKS);
+        memcpy(buf + pos, &ext, sizeof(FileExtent));
+        pos += sizeof(FileExtent);
+    }
 
     /* filename */
     memcpy(buf + pos, fname, name_len);

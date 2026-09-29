@@ -230,8 +230,9 @@ class KernelView:
         self.writes.append(("ledger copy %u at seq %u (%s)" % (self.current, self.seq, why), []))
 
     def _Alloc(self, count):
-        """tagfs_alloc_blocks_internal (tagfs.c): first fit in the free extents,
-        ascending, built from the bitmap the roll call left."""
+        """tagfs_alloc_blocks (tagfs.c) through BlockMapTake (block_map_take.c):
+        a take of `count` with no hint is the lowest run that holds it — first
+        fit, ascending, in the map the roll call left."""
         for s, n in RunsSubtract([(0, self.f.D)], self.union):
             if n >= count:
                 self.union = RunsNormal(self.union + [(s, count)])
@@ -250,8 +251,8 @@ class KernelView:
         if start is None or start == 0:
             self.writes.append(("nothing for an integrity map — no free run of %u blocks" % need, []))
             return
-        # MapOwedMark/MapOwedSettle (tagfs.c): every bitmap sector the run's
-        # bits live in is written before the map is.
+        # MapOwed (block_map.c, block_map_cache.c): every bitmap sector the
+        # run's bits live in is written before the map is.
         lo, hi = (start // 8) // SECTOR, ((start + need - 1) // 8) // SECTOR
         what = "bitmap sector %u" % lo if lo == hi else "bitmap sectors %u..%u" % (lo, hi)
         if first == 0:

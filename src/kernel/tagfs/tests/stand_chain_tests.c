@@ -16,8 +16,8 @@
 // or lost write leaves a chain on the medium that runs into a block without
 // the chain's magic, and every later mount refuses the volume there. The
 // growth tests refuse exactly the first write of the block the growth takes —
-// the head of the allocator's free list, which a first-fit allocation of one
-// block takes — and walk the chain on the medium afterwards.
+// the lowest free block, which a take of one block with no hint is given —
+// and walk the chain on the medium afterwards.
 //
 // ‼ EVERY TEST HERE LEAVES THE CHAINS WHOLE, AND WHAT IT GREW IS THE VOLUME'S.
 // Whatever a refused write left owed, an unarmed retry pays before the test
@@ -135,18 +135,11 @@ bool StandRegistryHoldsOnMedium(const char* key, const char* value)
     return false;
 }
 
-/* The block the allocator hands out next: the head of its free list, which a
- * first-fit allocation of one block takes (tagfs_alloc_blocks_internal). */
+/* The block the allocator hands out next: the lowest free one, which a take
+ * of one block with no hint is given (block_map.h). */
 static bool StandNextBlock(uint32_t* out_block)
 {
-    TagFSState* fs = tagfs_get_state();
-
-    TagFSLockTake(&fs->lock);
-    const FreeExtent* head = fs->block_bitmap.free_list;
-    if (head)
-        *out_block = head->start;
-    TagFSLockDrop(&fs->lock);
-    return head != NULL;
+    return BlockMapNextFree(out_block);
 }
 
 // ----------------------------------------------------------------------------
@@ -428,7 +421,7 @@ out:
  * strand it. Counted once an unarmed sync has written whatever the passes left
  * owed — a link attached in memory whose write is still to come is not a
  * stranded block. The table is the only taker of blocks in a pass, so a block
- * a pass took is the head of the free list it began with, and one of those the
+ * a pass took is the lowest free block when it began, and one of those the
  * chain does not name at the end is given back. */
 static TestResult TestStandTableGrowthGivesBackItsGround(void)
 {

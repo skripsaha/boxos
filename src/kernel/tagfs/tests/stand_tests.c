@@ -95,13 +95,7 @@ int StandWriteAt(uint32_t file_id, uint64_t offset, const void* data, uint32_t b
 
 bool StandBlockInUse(uint32_t block)
 {
-    TagFSState* fs = tagfs_get_state();
-
-    TagFSLockTake(&fs->lock);
-    bool used = block < fs->layout.data_blocks &&
-                (fs->block_bitmap.bitmap[block / 8] & (uint8_t)(1u << (block % 8))) != 0;
-    TagFSLockDrop(&fs->lock);
-    return used;
+    return BlockMapIsTaken(block);
 }
 
 // ----------------------------------------------------------------------------
@@ -843,7 +837,6 @@ static const TestCase g_stand_tests[] = {
                        "one, so its writes are serialised with nobody's" },
     { .name  = "stand_frozen_block_freed_twice", .func = TestStandFrozenBlockFreedTwice,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.3",
       .caveat_defect = "deleting a file whose block a snapshot still keeps gives the "
                        "block back, and deleting the snapshot gives it back again, so "
                        "the allocator counts it free twice" },

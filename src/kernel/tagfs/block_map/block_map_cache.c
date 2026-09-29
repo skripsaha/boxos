@@ -1,0 +1,334 @@
+#include "block_map_internal.h"
+#include "../scribe/scribe.h"
+#include "amp.h"
+#include "atomics.h"
+#include "baton.h"
+
+/*
+ * The sectors of the map in memory — MAP_PAGE_SLOTS of them, whatever the
+ * volume's size — and the debts they carry to the medium.
+ *
+ * ‼ A SECTOR MOVES WITH THE STATE LOCK LET GO. Every decision about a slot is
+ * made under the lock, and the bytes travel without it: a slot on its way in
+ * or out is READING or WRITING, its bits are the transfer's, and an edit meant
+ * for it is written down as a delta and laid on when the transfer ends. A core
+ * that wants a sector another core has on its way waits for that transfer
+ * with the lock let go, and a core that must evict a sector memory changed
+ * writes it out first. Nothing here reads or writes the medium for a caller
+ * that holds a TagFS lock: those never reach this file.
+ */
+
+static inline uint32_t MapCoreHere(void)
+{
+    return (uint32_t)amp_get_core_index() + 1u;
+}
+
+/* The transfer's core was stopped by a halt: it never comes back. */
+static bool MapHolderStopped(const BlockMapPage *p)
+{
+    uint32_t owner = __atomic_load_n(&p->holder, __ATOMIC_ACQUIRE);
+    return owner != 0 &&
+           __atomic_load_n(&g_amp.cores[owner - 1].halted, __ATOMIC_ACQUIRE) != 0;
+}
+
+static bool MapPageStill(const void *ctx)
+{
+    const BlockMapPage *p = (const BlockMapPage *)ctx;
+    uint8_t state = __atomic_load_n(&p->state, __ATOMIC_ACQUIRE);
+    return (state != MAP_PAGE_READING && state != MAP_PAGE_WRITING) || MapHolderStopped(p);
+}
+
+/* With the lock let go: until the sector's transfer ends. False when the
+ * transfer is this very core's, beneath the caller — waiting would never end. */
+static bool MapWaitForPage(BlockMapPage *p)
+{
+    return ScribeWaitFor(&p->holder, MapPageStill, p) != SCRIBE_SELF;
+}
+
+static error_t MapMediumSaid(int said, error_t otherwise)
+{
+    return said > 0 ? (error_t)said : otherwise;
+}
+
+/*
+ * The slot a fetch takes: an empty one, else the clean one least lately used.
+ * None clean: the least lately used one that owes the medium comes back in
+ * *writeback, to be written before anything else may use it, and NULL. NULL
+ * with no *writeback: every slot is on its way somewhere.
+ */
+static BlockMapPage *MapVictim(BlockMapPage **writeback)
+{
+    BlockMapPage *clean = NULL, *owing = NULL;
+
+    *writeback = NULL;
+    for (uint32_t s = 0; s < MAP_PAGE_SLOTS; s++) {
+        BlockMapPage *p = &g_map.page[s];
+        if (p->state == MAP_PAGE_EMPTY)
+            return p;
+        if (p->state != MAP_PAGE_READY)
+            continue;
+        if (p->dirty || (g_map.win[p->window].flags & MAP_W_OWED)) {
+            if (!owing || p->lru < owing->lru)
+                owing = p;
+        } else if (!clean || p->lru < clean->lru) {
+            clean = p;
+        }
+    }
+    if (!clean)
+        *writeback = owing;
+    return clean;
+}
+
+/*
+ * The sector as memory has it, to the medium. Entered and left with the state
+ * lock held, taken again in the name of `site`. MapOwed is cleared as the
+ * write begins, because the write carries every take laid on the sector before
+ * it; a take made while it travels is a delta, and owes again. A refused write
+ * owes again too, and is said.
+ */
+static error_t MapWriteOut(BlockMapPage *p, const char *site)
+{
+    uint32_t        w    = p->window;
+    BlockMapWindow *x    = &g_map.win[w];
+    bool            owed = (x->flags & MAP_W_OWED) != 0;
+
+    if (owed) {
+        x->flags &= (uint8_t)~MAP_W_OWED;
+        g_map.owed--;
+    }
+    p->dirty = 0;
+    __atomic_store_n(&p->holder, MapCoreHere(), __ATOMIC_RELAXED);
+    __atomic_store_n(&p->state, (uint8_t)MAP_PAGE_WRITING, __ATOMIC_RELEASE);
+    TagFSLockDropAt(MapLock(), site);
+
+    int said = tagfs_volume_write(g_map.map_vlba + w, 1, p->bits);
+    if (said != 0)
+        kprintf("[TagFS] the medium would not take sector %u of this volume's block "
+                "map — the blocks it covers are taken here and may still read as free "
+                "there\n", w);
+
+    TagFSLockTakeAt(MapLock(), site);
+    __atomic_store_n(&p->state, (uint8_t)MAP_PAGE_READY, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->holder, 0u, __ATOMIC_RELEASE);
+    if (said != 0) {
+        p->dirty = 1;
+        if (owed)
+            MapOwedMark(w);
+    }
+    if (x->flags & MAP_W_DELTAS) {
+        MapDeltaApply(w, p);
+        MapMeasure(w);
+    }
+    return said == 0 ? OK : MapMediumSaid(said, ERR_WRITE_FAILED);
+}
+
+/* The sector read into slot `p`, which was taken for window w. Entered and
+ * left with the state lock held. */
+static error_t MapReadIn(BlockMapPage *p, uint32_t w, const char *site)
+{
+    BlockMapWindow *x = &g_map.win[w];
+
+    if (p->state == MAP_PAGE_READY)
+        g_map.win[p->window].slot = 0;
+    p->window = w;
+    p->dirty  = 0;
+    p->lru    = ++g_map.lru_tick;
+    __atomic_store_n(&p->holder, MapCoreHere(), __ATOMIC_RELAXED);
+    __atomic_store_n(&p->state, (uint8_t)MAP_PAGE_READING, __ATOMIC_RELEASE);
+    x->slot = (uint8_t)(p - g_map.page + 1);
+    TagFSLockDropAt(MapLock(), site);
+
+    int said = tagfs_volume_read(g_map.map_vlba + w, 1, p->bits);
+    if (said != 0)
+        kprintf("[TagFS] sector %u of this volume's block map would not read — the "
+                "blocks it covers are decided on what memory knows of them\n", w);
+
+    TagFSLockTakeAt(MapLock(), site);
+    __atomic_store_n(&p->holder, 0u, __ATOMIC_RELEASE);
+    if (said != 0) {
+        x->slot   = 0;
+        p->window = MAP_NO_WINDOW;
+        __atomic_store_n(&p->state, (uint8_t)MAP_PAGE_EMPTY, __ATOMIC_RELEASE);
+        return MapMediumSaid(said, ERR_READ_FAILED);
+    }
+    __atomic_store_n(&p->state, (uint8_t)MAP_PAGE_READY, __ATOMIC_RELEASE);
+    MapDeltaApply(w, p);
+    MapMeasure(w);
+    return OK;
+}
+
+error_t MapFetch(uint32_t w, const char *site)
+{
+    TagFSLock *lock = MapLock();
+    uint8_t    core = amp_get_core_index();
+
+    for (;;) {
+        TagFSLockTakeAt(lock, site);
+        if (!g_map.up || w >= g_map.windows) {
+            TagFSLockDropAt(lock, site);
+            return ERR_TAGFS_NOT_INITIALIZED;
+        }
+
+        BlockMapWindow *x = &g_map.win[w];
+        if (x->slot) {
+            BlockMapPage *p = &g_map.page[x->slot - 1];
+            if (p->state == MAP_PAGE_READY) {
+                p->lru = ++g_map.lru_tick;
+                TagFSLockDropAt(lock, site);
+                return OK;
+            }
+            bool stopped = MapHolderStopped(p);
+            TagFSLockDropAt(lock, site);
+            if (stopped)
+                return ERR_DEVICE_NOT_READY;
+            if (!MapWaitForPage(p))
+                return ERR_WOULD_BLOCK;
+            continue;
+        }
+
+        BlockMapPage *writeback = NULL;
+        BlockMapPage *p         = MapVictim(&writeback);
+        if (p) {
+            error_t got = MapReadIn(p, w, site);
+            TagFSLockDropAt(lock, site);
+            return got;
+        }
+        if (writeback) {
+            error_t wrote = MapWriteOut(writeback, site);
+            TagFSLockDropAt(lock, site);
+            if (wrote != OK)
+                return wrote;
+            continue;
+        }
+        TagFSLockDropAt(lock, site);
+        BatonPump(core);
+        cpu_pause();
+    }
+}
+
+void BlockMapFetchRun(uint32_t start, uint32_t count, const char *site)
+{
+    if (!g_map.up || count == 0 || start >= g_map.blocks || LockRankAnyHeldHere())
+        return;
+    uint32_t last = start + count - 1 < g_map.blocks ? start + count - 1 : g_map.blocks - 1;
+    (void)MapFetch(start / MAP_WINDOW_BLOCKS, site);
+    if (last / MAP_WINDOW_BLOCKS != start / MAP_WINDOW_BLOCKS)
+        (void)MapFetch(last / MAP_WINDOW_BLOCKS, site);
+}
+
+// ----------------------------------------------------------------------------
+// Paying the medium
+// ----------------------------------------------------------------------------
+
+/* What window w still needs, under the lock: a transfer to wait for, a fetch
+ * that lays its deltas on, a write of the takes it owes — or nothing. */
+typedef enum { MAP_DUE_NOTHING, MAP_DUE_WAIT, MAP_DUE_FETCH, MAP_DUE_WRITE } MapDue;
+
+static MapDue MapDueAt(uint32_t w, BlockMapPage **out)
+{
+    BlockMapWindow *x = &g_map.win[w];
+    BlockMapPage   *p = x->slot ? &g_map.page[x->slot - 1] : NULL;
+
+    *out = p;
+    if (p && (p->state == MAP_PAGE_READING || p->state == MAP_PAGE_WRITING))
+        return MAP_DUE_WAIT;
+    if (x->flags & MAP_W_DELTAS)
+        return MAP_DUE_FETCH;
+    if (x->flags & MAP_W_OWED)
+        return p ? MAP_DUE_WRITE : MAP_DUE_FETCH;
+    return MAP_DUE_NOTHING;
+}
+
+/*
+ * Every window from `first` to `last` brought to what the medium must hold:
+ * deltas laid on, owed takes written, a write already on its way waited for —
+ * since a take laid on a sector before another core began writing it is
+ * carried by that write, and is on the medium only when the write ends. A few
+ * turns a window at most: a window other cores keep taking from is theirs to
+ * settle as well.
+ */
+static error_t MapSettleWindows(uint32_t first, uint32_t last, const char *site)
+{
+    TagFSLock *lock   = MapLock();
+    uint32_t   w      = first;
+    uint32_t   turns  = 0;
+    error_t    failed = OK;
+
+    for (;;) {
+        TagFSLockTakeAt(lock, site);
+        if (!g_map.up) {
+            TagFSLockDropAt(lock, site);
+            return ERR_TAGFS_NOT_INITIALIZED;
+        }
+        BlockMapPage *p   = NULL;
+        MapDue        due = MAP_DUE_NOTHING;
+        while (w <= last && w < g_map.windows &&
+               ((due = MapDueAt(w, &p)) == MAP_DUE_NOTHING || turns >= 4)) {
+            w++;
+            turns = 0;
+        }
+        if (w > last || w >= g_map.windows) {
+            TagFSLockDropAt(lock, site);
+            return failed;
+        }
+        turns++;
+
+        error_t said = OK;
+        if (due == MAP_DUE_WRITE) {
+            said = MapWriteOut(p, site);
+            TagFSLockDropAt(lock, site);
+        } else {
+            TagFSLockDropAt(lock, site);
+            if (due == MAP_DUE_WAIT)
+                said = MapWaitForPage(p) ? OK : ERR_WOULD_BLOCK;
+            else
+                said = MapFetch(w, site);
+        }
+        if (said != OK) {
+            turns = 4;                  /* said where it failed; the debt stays for the next pass */
+            if (failed == OK)
+                failed = said;
+        }
+    }
+}
+
+static error_t MapSettleAll(const char *site)
+{
+    TagFSLockTakeAt(MapLock(), site);
+    bool     work = g_map.owed || g_map.deltas;
+    uint32_t lo   = g_map.work_lo, hi = g_map.work_hi;
+    if (!work) {
+        g_map.work_lo = 1;
+        g_map.work_hi = 0;
+    }
+    TagFSLockDropAt(MapLock(), site);
+
+    return work && lo <= hi ? MapSettleWindows(lo, hi, site) : OK;
+}
+
+void BlockMapSettle(void)
+{
+    if (g_map.up && !LockRankAnyHeldHere())
+        (void)MapSettleAll(__func__);
+}
+
+error_t BlockMapFlush(void)
+{
+    if (!g_map.up)
+        return OK;
+    if (LockRankAnyHeldHere())
+        return ERR_WOULD_BLOCK;
+
+    error_t first = MapSettleAll(__func__);
+    TagFSLockTake(MapLock());
+    for (uint32_t s = 0; s < MAP_PAGE_SLOTS; s++) {
+        BlockMapPage *p = &g_map.page[s];
+        if (p->state != MAP_PAGE_READY || !p->dirty)
+            continue;
+        error_t wrote = MapWriteOut(p, __func__);
+        if (wrote != OK && first == OK)
+            first = wrote;
+    }
+    TagFSLockDrop(MapLock());
+    return first;
+}

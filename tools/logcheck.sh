@@ -7263,7 +7263,7 @@ run_footing() {
 # `reconcile`: two orphan blocks, a registry chained past data block 0, a
 # block of a live file cleared in the bitmap, a file whose only record was
 # retired), the tool predicts every line, and the machine boots it. The kernel
-# names its runs (FsckSayRuns, tagfs.c) — the first 32 of each kind one by
+# names its runs (MapTallySay, block_map_mount.c) — the first 32 of each kind one by
 # one, ascending, and the rest in one line that counts them — and every named
 # run, every count and the free figure must be the ones predicted, and every
 # orphan the kernel names one the census cannot find an owner for. A kernel
@@ -7359,7 +7359,7 @@ pred = json.load(open(sys.argv[1]))
 log = open(sys.argv[2], errors="replace").read()
 k = pred["kernel"]
 
-NAMED = 32    # FsckSayRuns names this many runs of each kind, and counts the rest in one line
+NAMED = 32    # MapTallySay names this many runs of each kind, and counts the rest in one line
 
 def say(held, text):
     print(("ok " if held else "bad ") + text)
@@ -7570,7 +7570,6 @@ stand_write_all_or_refusal|1.5|write answered short with no refusal at refused a
 stand_open_holds_what_it_names|1.4|handle counting extents it did not hold at refused allocation 6|opens whole or refused, allocations refused 6
 stand_open_refuses_unread_metadata|1.4|one-block file opened as empty at refused allocation 3|opens whole or refused, allocations refused 6
 stand_open_joins_the_writers|1.5|handle with no open-file entry at refused allocation 1|opens whole or refused, allocations refused 6
-stand_frozen_block_freed_twice|1.3|blocks the allocator was given back twice 1|blocks the allocator was given back twice 0
 "
 
 # The last thing a halt says about the volume, whichever way its sync went
@@ -7884,9 +7883,6 @@ edits = [
     # 1.4: an open that cannot copy its extents is refused
     ("                memcpy(handle->extents, meta.extents,\n                       sizeof(FileExtent) * meta.extent_count);\n            }\n",
      "                memcpy(handle->extents, meta.extents,\n                       sizeof(FileExtent) * meta.extent_count);\n            }\n            else\n            {\n                tagfs_metadata_free(&meta);   /* logcheck mutation: an open that cannot copy its extents is refused */\n                ofe_release(ofe);\n                kfree(handle);\n                return NULL;\n            }\n"),
-    # 1.3: a block already free is not given back again
-    ("    uint32_t end = start_block + count;\n\n    // Clear bits\n",
-     "    uint32_t end = start_block + count;\n\n    for (uint32_t i = 0; i < count; i++)   /* logcheck mutation: a free block is not freed again */\n        if (!bitmap_test_bit(g_state.block_bitmap.bitmap, start_block + i))\n            return;\n\n    // Clear bits\n"),
     # 1.3: a copy for a snapshot takes the one block written, and the rest of
     # its extent stays where it is
     ("            if (TagFS_CowBeforeWrite(handle->file_id, disk_block, &cow_block) == OK && cow_block != 0) {\n",
@@ -7910,7 +7906,7 @@ for a, m in edits:
     s = s.replace(a, m, 1)
 open(p, "w").write(s)
 EOF
-    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 10
+    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 9
 
     # 1.6: a Use Context longer than the Ledger's record is still the volume's.
     # The step keeps it whole on the medium (its own block); what the test asks

@@ -688,11 +688,11 @@ TestResult TestStandOpenJoinsTheWriters(void)
 // made (tagfs_write_inside): the snapshot keeps the old block, and the file
 // still names it. It is staged here with the copy-on-write calls themselves,
 // as the cow suite stages it. Then the file is deleted, which gives the block
-// back, and the snapshot is deleted, which gives it back again —
-// free_run_locked does not look at the bit, so the block is put on the free
-// list a second time and counted free a second time. That is measured as the
-// count's drift from the bitmap, and the allocator is then derived again from
-// the bitmap (TagFSAllocatorRederive) so no block is left for two owners.
+// back, and the snapshot is deleted, which gives it back again — a give the
+// block map refuses whole and says, since the block is already free (CW-D3).
+// Were it taken, the block would be counted free a second time: that is
+// measured as the free count's drift from the map (TagFSAllocatorRederive),
+// which also puts the count right, so no block is left for two owners.
 // ----------------------------------------------------------------------------
 
 TestResult TestStandFrozenBlockFreedTwice(void)

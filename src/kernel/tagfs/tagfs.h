@@ -22,6 +22,7 @@
 #include "dedup/dedup.h"
 #include "self_heal/self_heal.h"
 #include "ledger/ledger.h"
+#include "block_map/block_map.h"
 
 // ============================================================================
 // TagFS Constants — Production Configuration
@@ -263,50 +264,6 @@ typedef struct {
 } TagBitmapIndex;
 
 // ----------------------------------------------------------------------------
-// In-Memory Structures: Block Allocator
-// ----------------------------------------------------------------------------
-
-typedef struct FreeExtent {
-    uint32_t           start;
-    uint32_t           count;
-    struct FreeExtent* next;
-} FreeExtent;
-
-typedef struct {
-    uint8_t*    bitmap;
-    uint32_t    total_blocks;
-    FreeExtent* free_list;
-    uint32_t    extent_count;
-    /*
-     * ‼ MapOwed — WHAT THE MEDIUM HAS NOT BEEN TOLD YET.
-     *
-     * The bitmap above is the one in RAM, and until now the medium's copy of
-     * it was written by exactly one routine: tagfs_sync. Between two syncs
-     * every block this kernel handed out was, on the medium, still free — so
-     * a machine that lost power in that window came back, read the medium,
-     * and handed the same block to somebody else. Two owners, and whichever
-     * writes second destroys what the first put there. That is not a
-     * hypothetical failure mode; it is the one the snapshot manifest hit.
-     *
-     * So a hand-out now leaves a DEBT: one bit per SECTOR of the on-medium
-     * bitmap, saying that sector carries something the medium has not heard.
-     * The debt is recorded under the volume's lock, where the bits change,
-     * and paid outside it — the allocator's own door pays before it returns,
-     * so the medium knows a block is taken before the caller who asked for it
-     * can name it anywhere.
-     *
-     * The debt is only ever taken on for a block being TAKEN, never for one
-     * being released. A crash between the two therefore leaves a block marked
-     * used that nobody owns — which the mount's roll call keeps and reports,
-     * and which costs a block. The opposite order would leave a block marked
-     * free that somebody owns, which costs the file.
-     */
-    uint8_t*    owed;           /* one bit per bitmap sector; NULL before mount */
-    uint32_t    owed_sectors;   /* bitmap sectors covering the data run       */
-    uint32_t    owed_count;     /* how many of them are owed right now        */
-} BlockBitmap;
-
-// ----------------------------------------------------------------------------
 // In-Memory Structures: File Handles and Metadata
 // ----------------------------------------------------------------------------
 
@@ -389,7 +346,6 @@ typedef struct {
 
     TagRegistry*     registry;
     TagBitmapIndex*  bitmap_index;
-    BlockBitmap      block_bitmap;
     bool             initialized;
     TagFSLock        lock;
 } TagFSState;
@@ -500,10 +456,10 @@ uint8_t  tagfs_get_seat(void);       /* Boardroom seat the volume lives on */
  * A volume can be taken down under a running machine — its medium leaves, and
  * what is held about it is dropped and read again — and everything the mount
  * allocated goes back to the allocator at that moment: the tag registry, the
- * tag index, the block bitmap, the free list, the file table, the metadata
- * pool. Nothing is freed while a caller is inside, and no caller gets in once
- * the volume is on its way out. False means there is no volume to be inside;
- * every caller that gets true MUST leave.
+ * tag index, the block map, the file table, the metadata pool. Nothing is
+ * freed while a caller is inside, and no caller gets in once the volume is on
+ * its way out. False means there is no volume to be inside; every caller that
+ * gets true MUST leave.
  *
  * Every tagfs_* operation below takes this door itself. It is public because
  * one thing more is reachable from outside — a caller that wants to hold
@@ -629,13 +585,18 @@ void             tagfs_close(TagFSFileHandle* handle);
 int              tagfs_read(TagFSFileHandle* handle, void* buffer, uint64_t size);
 int              tagfs_write(TagFSFileHandle* handle, const void* buffer, uint64_t size);
 
+/* One run of exactly `count` blocks, the lowest that is free: 0, or -1 when
+ * there is none (block_map.h, BlockMapTake). */
 int      tagfs_alloc_blocks(uint32_t count, uint32_t* out_start_block);
+/* The run back: 0, or a negative -ERR_*. A run holding a block that is already
+ * free is refused whole (-ERR_TAGFS_EXTENT_ERROR), said, and the map is left
+ * as it is. */
 int      tagfs_free_blocks(uint32_t start_block, uint32_t count);
 
 #ifdef CONFIG_VOLUME_TESTS
-/* The free list and count derived again from the bitmap, as a mount derives
- * them; returns how far the count had drifted from it. For a startup test that
- * has watched a block be given back twice — see the definition. */
+/* The free count derived again from the block map, as a mount derives it;
+ * returns how far the Ledger's count had drifted from it. For a startup test
+ * that watches a block be given back twice — see the definition. */
 int64_t  TagFSAllocatorRederive(void);
 #endif
 

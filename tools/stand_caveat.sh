@@ -129,8 +129,7 @@ caveat_row() {
         lockrank:registry@tag_registry_flush/integrity@IntegrityUpdate|\
         lockrank:registry@tag_registry_flush/braid@BraidIsHealthy)
                     echo "|a block is read or written for the tag registry with the registry's lock held, so the read-ahead cache's, the integrity map's and Braid's locks are taken under that leaf" ;;
-        lockrank:registry@tag_registry_flush/state@tagfs_alloc_blocks_inside|\
-        lockrank:registry@tag_registry_flush/state@MapOwedSettle)
+        lockrank:registry@tag_registry_flush/state@tagfs_alloc_blocks_inside)
                     echo "|the tag registry takes a block for its chain under its own lock, so the volume's state lock is taken under the registry while a rename takes the registry under state: the two orders of one ABBA (MP-D4), which stops both cores" ;;
         lockrank:table@file_table_flush:read|\
         lockrank:table@file_table_flush:write)
@@ -140,8 +139,7 @@ caveat_row() {
         lockrank:table@file_table_flush/integrity@IntegrityUpdate|\
         lockrank:table@file_table_flush/braid@BraidIsHealthy)
                     echo "|a block is read or written for the file table with the table's lock held, so the read-ahead cache's, the integrity map's and Braid's locks are taken under that leaf" ;;
-        lockrank:table@file_table_flush/state@tagfs_alloc_blocks_inside|\
-        lockrank:table@file_table_flush/state@MapOwedSettle)
+        lockrank:table@file_table_flush/state@tagfs_alloc_blocks_inside)
                     echo "|the file table takes a block for its chain under its own lock, so the volume's state lock is taken under the table while a create takes the table under state: the two orders of one ABBA (MP-D4), which stops both cores" ;;
         lockrank:integrity@IntegrityVerify:read|\
         lockrank:integrity@IntegrityVerify:write|\
