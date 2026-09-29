@@ -3,6 +3,7 @@
 
 #include "ktypes.h"
 #include "error.h"
+#include "roadstead.h"   /* where a read waits for its turn on a busy medium */
 
 /*
  * The Boardroom — where every medium this machine can keep a filesystem on has
@@ -71,6 +72,19 @@ void BoardroomNoteArrival(void);
  */
 void BoardroomNoteDeparture(BoardKind kind, uint8_t index);
 
+/*
+ * The medium in a seat answers again, after a spell in which it would not —
+ * named the way a departure is, by the controller and the index it has.
+ *
+ * A transient refusal is not a count of tries to be spent: whoever was told
+ * "not now" by a medium waits for this instead, and asks again when it comes.
+ * Said where the driver knows the seat is back — an AHCI port its recovery
+ * brought back to work, a USB disk that reported a unit attention and then did
+ * what it was asked. Nothing is decided here; like the other two, it is an
+ * announcement, and cheap: no lock is held and no medium is touched.
+ */
+void BoardroomNoteSeatReady(BoardKind kind, uint8_t index);
+
 /* Cheap enough for the idle loop: one atomic load when nothing has arrived,
  * which is almost always. */
 void BoardroomAttendIfPending(void);
@@ -86,6 +100,7 @@ void BoardroomAttendIfPending(void);
  *
  *   seat:taken     one or more seats have somebody in them who was not there
  *   seat:emptied   a seat has nobody in it any more, and it is named
+ *   seat:ready     a seat's medium answers again after refusing, and it is named
  *
  * Announced AFTER the room has settled, never part-way through seating: a
  * listener that mounts on this event would otherwise be looking at a room
@@ -216,15 +231,23 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
  * reads is read by a core standing over the transfer, while the same machine
  * booting from SATA parks the caller and gets on with something else.
  *
- * `cb` runs on a K-Core once the medium has answered, and is shaped the way the
- * SATA path already shaped it — `index` names the port or the unit, `slot` is
- * the AHCI command slot and is zero for a seat that has no such thing — so the
- * same function can be handed to either kind of seat with nothing standing in
+ * `cb` runs once the medium has answered — on SATA from the completion
+ * interrupt or from whoever brings the completion in, on USB from a K-Core — so
+ * it is short and allocates nothing. It is shaped the way the SATA path
+ * already shaped it — `index` names the port or the unit, `slot` is the AHCI
+ * command slot and is zero for a seat that has no such thing — so the same
+ * function can be handed to either kind of seat with nothing standing in
  * between to translate.
  *
+ * `berth` is the caller's memory the read waits in (core/boardroom/
+ * roadstead.h): a medium with every place taken — all its command slots, its
+ * one turn, its door shut for a cache flush — moors the read there and issues
+ * it when its turn comes, rather than refusing it. The room fills it in; it is
+ * the seat's from an OK return until `cb` has run, and must live that long.
+ *
  * Sectors land straight in `dma_phys`. Returns OK when the read is on its way
- * and the callback WILL run; on any other return it will not, and the caller
- * still owns everything it passed in.
+ * or waiting its turn, and the callback WILL run; on any other return it will
+ * not, and the caller still owns everything it passed in.
  */
 typedef void (*BoardroomAsyncCb)(uint8_t index, uint8_t slot,
                                  error_t status, void* ctx);
@@ -246,7 +269,8 @@ typedef void (*BoardroomAsyncCb)(uint8_t index, uint8_t slot,
 uint32_t BoardroomSeatRun(uint8_t seat);
 
 error_t BoardroomReadAsync(uint8_t seat, uint64_t lba, uint32_t count,
-                           void* dma_phys, BoardroomAsyncCb cb, void* ctx);
+                           void* dma_phys, BoardroomAsyncCb cb, void* ctx,
+                           RoadsteadBerth* berth);
 
 /* Whether this seat can take the call above at all. A seat that cannot is not
  * a broken seat — it is one whose caller has to stay and wait. */

@@ -7,7 +7,8 @@
 #include "klib.h"  // For spinlock_t
 #include "boxos_limits.h"
 #include "kernel_config.h"
-#include "baton.h"  // embedded never-drop recovery node
+#include "baton.h"      // embedded never-drop recovery node, and the roadstead's knock
+#include "roadstead.h"  // where a command waits for a slot, or for the whole port
 
 // HBA Register Offsets
 #define AHCI_HBA_CAP        0x00
@@ -157,8 +158,8 @@
 #define AHCI_PIS_DHRS       (1U << 0)
 
 /* PxSERR bits (offset 30h) — AHCI 1.3.1 §3.3.12. Only the one bit that
- * ANSWERS A QUESTION is named; the rest are decoded positionally by
- * ahci_decode_serr, which is a printer and not a decision.
+ * ANSWERS A QUESTION is named; nothing here decides on the rest, and a fault
+ * records the register whole (ahci_port_stats_t.last_serr).
  *
  * §3.3.12, DIAG bit 26, verbatim: "Exchanged (X): When set to one this bit
  * indicates that a change in device presence has been detected since the last
@@ -209,6 +210,8 @@
 #define ATA_CMD_READ_DMA_EXT    0x25    // READ DMA EXT (48-bit LBA)
 #define ATA_CMD_WRITE_DMA_EXT   0x35    // WRITE DMA EXT (48-bit LBA)
 #define ATA_CMD_FLUSH_CACHE_EXT 0xEA    // FLUSH CACHE EXT (48-bit LBA)
+#define ATA_CMD_READ_LOG_EXT    0x2F    // READ LOG EXT, PIO data-in
+#define ATA_LOG_NCQ_ERROR       0x10    // log address of the NCQ Command Error log
 #define ATA_CMD_IDENTIFY_DEVICE 0xEC    // IDENTIFY DEVICE
 
 // PxCMD.ICC (Interface Communication Control, bits 31:28) values
@@ -524,9 +527,9 @@ typedef struct {
     uint32_t  slot_mask;
 
     /* A whole-port hold, for the one command class that cannot share the port
-     * (AHCI 1.3.1 §1.7). ahci_port_take_whole raises it at the instant every
-     * slot is free and empties slot_bitmap, so ahci_alloc_slot has nothing to
-     * hand out for as long as that one command runs; ahci_port_give_back
+     * (AHCI 1.3.1 §1.7). Raised for the berth that wants the whole port at the
+     * instant every slot is free, emptying slot_bitmap, so nothing else is
+     * admitted for as long as that one command runs; ahci_port_give_back
      * lowers it and puts the slots back. */
     bool      slot_held;
     uint8_t   active;
@@ -597,24 +600,61 @@ typedef struct {
     uint32_t issued_mask;
     volatile uint32_t completed_slots;
 
-    /* Set (CAS 0->1) by the IRQ handler when a fatal error schedules a
-     * deferred COMRESET; cleared by the recovery bottom-half. Prevents a
-     * storm of error IRQs from queuing redundant recoveries. */
+    /* Set (CAS 0->1) by whoever posts recover_node; cleared by the node's run
+     * when it returns. Prevents a storm of error IRQs from queuing redundant
+     * passes — `recovery`, not this, says whether there is work. */
     volatile uint32_t recovering;
 
-    uint32_t event_id[AHCI_MAX_SLOTS];
-    uint32_t pid[AHCI_MAX_SLOTS];
     uint64_t submit_tsc[AHCI_MAX_SLOTS];
 
-    /* Per-slot async completion. Set non-NULL by ahci_submit_*_async(); the
-     * IRQ handler invokes the callback once the slot retires (or on TFES).
-     * Sync callers leave these NULL — the existing port->ci poll path
-     * picks up their completion. Each slot is owned by exactly one flow
-     * (sync OR async, never both) since ahci_alloc_slot returns a unique
-     * slot index. */
-    void   (*cb[AHCI_MAX_SLOTS])(uint8_t port, uint8_t slot,
-                                  error_t status, void *ctx);
-    void   *cb_ctx[AHCI_MAX_SLOTS];
+    /* The berth issued on each slot by a caller that did not stay, answered
+     * once the slot retires. NULL for a slot a caller stands over — its own
+     * poll brings its completion in. Each slot is owned by exactly one flow,
+     * because admission hands a slot out once. */
+    RoadsteadBerth* aboard[AHCI_MAX_SLOTS];
+
+    /* Where a command waits when no slot is free, the door is closed or the
+     * engine is halted (core/boardroom/roadstead.h). Guarded by `lock`. Freeing
+     * a slot, opening the door and the engine coming back all knock, and the
+     * knock's run calls the head in on the drain core; a caller standing over
+     * its own berth calls it in itself as it waits, so its progress never
+     * depends on that core running. */
+    Roadstead roadstead;
+    Knock     roadstead_knock;
+
+    /* How many times this port's command engine has been interrupted — a fault
+     * seen (AhciPortFault), or the engine stopped (ahci_port_stop, which every
+     * recovery, reset and retirement goes through). Raised BEFORE the engine
+     * can stop, so a command stood over reads a slot bit that cleared under an
+     * unchanged count as a completion, and under a changed one as a command
+     * the engine may have dropped. AHCI 1.3.1 §3.3.14: clearing PxCMD.ST clears
+     * PxCI, and a poll that took that for "done" answered with whatever the
+     * page held. Kept across a rebuild of the port, so a count read before it
+     * left can never match one read after it came back. */
+    volatile uint32_t trouble;
+
+    /* The engine stopped on a fault and nothing may be armed until recovery
+     * restarts it. Guarded by `lock`: an arm under the lock either precedes the
+     * fault — and its command is the fault's to account for — or sees this. */
+    volatile bool halted;
+
+    /* What the fault left for recovery to sort, under `lock`. held: the slots
+     * of berths that were in flight, claimed out of issued_mask and kept, each
+     * with its berth still aboard — the culprit is answered with the error and
+     * the innocent are moored again first. fault_bits: the PxIS fatal bits
+     * seen. fault_overdue: the slots the watchdog found past their deadline,
+     * which are that fault's culprits. */
+    uint32_t  held;
+    uint32_t  fault_bits;
+    uint32_t  fault_overdue;
+
+    /* Whether a fault's recovery is owed, and whether somebody is running it
+     * (AhciRecovery, ahci_trouble.c). Whoever finds it owed first runs it — the
+     * port's baton on the drain core, or a caller standing over this port that
+     * found it halted — so a recovery never waits for a core that is busy
+     * waiting for it, and two never run on one port at once: a fault that
+     * comes while one runs is owed to that runner, which goes round again. */
+    volatile uint32_t recovery;
 
     uint64_t ncq_reads;
     uint64_t ncq_writes;
@@ -643,12 +683,12 @@ typedef struct {
      * and no reader anywhere in the tree. */
     volatile uint8_t standing;   /* AhciPortStanding */
 
-    /* Never-drop recovery node (Ф26 M4): a fatal-error or watchdog-wedge
-     * IRQ posts COMRESET to a K-Core via BatonPass with no
-     * allocation. The `recovering` 0->1 CAS coalesces a storm of error IRQs
-     * into one post, and ahci_deferred_recover resets it to 0 on completion,
-     * so this node is enqueued at most once at a time. run =
-     * ahci_deferred_recover, ctx = this port; set once in ahci_port_init. */
+    /* Never-drop recovery node (Ф26 M4): a fault posts the port's recovery to
+     * the drain core via BatonPass with no allocation. The `recovering` 0->1
+     * CAS coalesces a storm of error IRQs into one post, and
+     * ahci_deferred_recover resets it to 0 on completion, so this node is
+     * enqueued at most once at a time. run = ahci_deferred_recover, ctx = this
+     * port; set once in ahci_port_init. */
     Baton recover_node;
 } ahci_port_t;
 
@@ -667,7 +707,11 @@ typedef struct {
     bool     ncq_support;
     bool     s64a_support;
 
-    uint8_t  irq_vector;    // from PCI config offset 0x3C
+    /* The vector this controller's completions arrive on, as ahci_init_irq
+     * was given it: the MSI vector from the pool, or the one Summons armed on
+     * the INTx line; 0xFF when neither was granted. Never the Interrupt Line
+     * byte at PCI config 0x3C, which nothing here reads. */
+    uint8_t  irq_vector;
     bool     irq_enabled;
     uint64_t total_interrupts;
 
@@ -684,25 +728,33 @@ void ahci_irq_handler(void);
 /* Ф26 M1 — periodic async-completion watchdog (backstop for a lost/coalesced
  * completion MSI or a wedged device). Call once per PIT tick on the BSP.
  * Tier 1 reconciles a lost edge from the PxSACT/PxCI level (retires as success);
- * Tier 2 fails a genuinely wedged port's slots + defers a COMRESET. No-op on a
- * single core (async I/O disabled there). */
+ * Tier 2 hands a genuinely wedged port to its recovery, naming the slots past
+ * their deadline as the culprits. No-op on a single core (async I/O disabled
+ * there). */
 void ahci_watchdog_scan(void);
 
-int ahci_alloc_slot(uint8_t port_num);
-void ahci_free_slot(uint8_t port_num, uint8_t slot);
-bool ahci_can_submit_port(uint8_t port_num);
+/* Claim-checked retire arbitration (Ф26 M1). issued_mask is the single arbiter
+ * of which async slots are still ours to retire. A retiring actor offers a
+ * `candidate` set and gets back only the bits its own atomic transition actually
+ * cleared (1->0); it must retire ONLY those. Two actors that decide the same
+ * slot completed in the same instant — the MSI handler, the watchdog, a fault,
+ * a caller reaping by hand — then retire it exactly once, and only the winner
+ * reads its berth. */
+static inline uint32_t ahci_claim(ahci_port_t* state, uint32_t candidate) {
+    return __sync_fetch_and_and(&state->issued_mask, ~candidate) & candidate;
+}
 
-/* WHY A WHOLE-PORT COMMAND COULD NOT BE ISSUED — three answers, and only one
- * of them is a clock.
+/* WHY A WHOLE-PORT COMMAND COULD NOT BE ISSUED — two answers, and only one of
+ * them is a clock.
  *
- * These used to be one answer: -1. So a port whose door was being held by
- * another flush AT THAT INSTANT, and a device that had been given commands
- * and never answered them, reached the filesystem wearing the same word, and
- * the filesystem turned both into ERR_IO. One of those is a transient the
- * caller should come back from; the other is a medium that is failing. */
+ * A door held by another flush is not among them any more: it used to come
+ * back as its own answer, the caller span on it, and a stream of reads could
+ * keep the door from ever being found open. The flush now waits in the port's
+ * roadstead, and a berth at the head that wants the whole port stops anything
+ * behind it being admitted (door_wanted), so the slots drain and it is called
+ * in. */
 typedef enum {
     AHCI_TAKE_GOT = 0,   /* the port is the caller's; *slot_out is its slot */
-    AHCI_TAKE_HELD,      /* another whole-port command holds the door NOW */
     AHCI_TAKE_SILENT,    /* work outstanding to the device never came back */
     AHCI_TAKE_NO_PORT    /* there is no such port in service */
 } AhciTake;
@@ -712,33 +764,66 @@ typedef enum {
  * to ensure that queued and non-queued commands are not mixed in the command
  * list for the same device with the exception of the NCQ Unload command."
  *
- * The wait costs no other flow anything: the port is only closed at the
- * instant it is found completely idle, and only for as long as that one
- * command needs — a caller that retries it, and recovers the port between
- * tries, holds across both, because those are the same command still.
- *
- * `patience_ms` bounds ONE of the two ways this can fail to get the port, and
- * the enum above says which. A door already held is answered AHCI_TAKE_HELD
- * on the spot, with no clock turned at all: that is a fact about this instant
- * and waiting cannot make it truer. The clock is spent only on work the
- * DEVICE owes — commands issued and not yet retired — and running it out is
- * AHCI_TAKE_SILENT, which is a device that stopped answering.
+ * The caller stands in the roadstead until the door is its own — no clock,
+ * because every command it waits behind is bounded by its own facts — and
+ * holds this core's scheduler from the first ask until the give-back, so the
+ * door is never held by a context that has been switched away from. The clock
+ * is spent only once the door is held, on work the DEVICE still owes, and
+ * running it out is AHCI_TAKE_SILENT, which is a device that stopped
+ * answering. A door whose holder is a core no longer running, over a device
+ * that owes nothing, is opened by whoever next calls the roadstead in.
  *
  * Every outcome but AHCI_TAKE_GOT holds nothing and issues nothing. A
- * successful take must be paired with exactly one give-back. */
+ * successful take must be paired with exactly one give-back, on the same
+ * core. */
 AhciTake ahci_port_take_whole(uint8_t port_num, uint32_t patience_ms,
                               uint8_t* slot_out);
 void ahci_port_give_back(uint8_t port_num);
 
+/* A command slot for a caller that stands over its own command: the slot, or
+ * -1 when the port is not in the machine. Waits in the roadstead when none is
+ * free, and holds this core's scheduler until AhciLeaveSlot — which must be
+ * called on the same core, whatever became of the command. */
+int  AhciStandForSlot(uint8_t port_num);
+void AhciLeaveSlot(uint8_t port_num, uint8_t slot);
+
+/* Arm a slot its caller stands over. False, with nothing armed, when the
+ * engine is halted on a fault: the caller leaves the slot and asks again,
+ * which waits for the recovery. *trouble_at_arm is the port's trouble count
+ * at the arm, read under the same lock: the poll compares port->trouble
+ * against it. `queued` is false for a non-queued command on an NCQ port — the
+ * flush — which PxSACT must not name. */
+bool AhciArmStanding(uint8_t port_num, uint8_t slot, bool queued,
+                     uint32_t* trouble_at_arm);
+
+/* A command stood over went unanswered past its patience: the port is handed
+ * to its recovery, as a fault is. `seen_trouble` is the trouble count the
+ * caller armed under — if it has moved, the port is already in somebody's
+ * hands and is not handed over twice. */
+void AhciPortTroubled(uint8_t port_num, uint32_t seen_trouble);
+
+/* Where a caller standing over this port's engine waits for it to run again
+ * after a fault: true once it runs, false when the port left the machine. */
+bool AhciAwaitEngine(uint8_t port_num);
+
+/* What the completion interrupt does for one port — take PxIS, retire every
+ * async slot the device has finished, hand a fatal error to the port's
+ * recovery. Also done by hand, by whoever cannot count on the interrupt: a
+ * caller standing over the port (the interrupt goes to one core, and that core
+ * may have it shut — the halt's own roll call does), the watchdog serving an
+ * error interrupt that was lost, a poll that sees the port report an error. */
+void AhciPortReap(ahci_port_t* port);
+
+/* One turn of a caller standing over this port: recover it when it is halted
+ * and nobody has, bring its completions in by hand, and call in whoever may
+ * go — so the caller's progress never depends on another core running. */
+void AhciPortTurn(uint8_t port_num);
+
 /* Build a read/write command for `slot`. Picks FPDMA QUEUED (NCQ) or
  * READ/WRITE DMA EXT (non-queued) based on the port's command class, so the
- * caller does not need to know which. Arm with ahci_arm_slot(). */
+ * caller does not need to know which. */
 error_t ahci_build_io(uint8_t port_num, uint8_t slot, uint64_t lba,
                       uint16_t sector_count, void* buffer_phys, bool write);
-
-/* Arm a built slot: NCQ ports set PxSACT then PxCI; non-NCQ set PxCI only,
- * and track the slot in issued_mask for the IRQ completion path. */
-void ahci_arm_slot(uint8_t port_num, uint8_t slot);
 
 /* True if the port issues NCQ (FPDMA) commands. Callers that poll for
  * completion must watch PxSACT when true, PxCI when false. */
@@ -751,16 +836,22 @@ bool ahci_is_initialized(void);
 uint8_t ahci_get_active_port_count(void);
 uint32_t ahci_get_active_port_mask(void);
 
+/* Stop and start a port's command engine the way AHCI 1.3.1 §10.3.2 and
+ * §10.1.2 walk it; -1 when PxCMD.CR (or FR) will not clear. */
+int ahci_port_stop(ahci_port_t* port);
+int ahci_port_start(ahci_port_t* port);
+
 error_t ahci_port_comreset(ahci_port_t* port);
 
 /* Get the port's link back, or take the port out of the machine.
  *
  * Returns OK when a COMRESET brought the link up again. On ERR_IO the port has
  * LEFT: it is no longer handed out by ahci_get_port, its outstanding commands
- * have been failed, its interrupt is disarmed and its engine stopped, and the
- * Boardroom has been told its seat is empty the same way a USB stick's
- * departure is told. Nothing may be issued on it afterwards, and every ahci_*
- * call that names it answers as it does for a port that was never there.
+ * have been failed, every berth in its roadstead answered, its interrupt is
+ * disarmed and its engine stopped, and the Boardroom has been told its seat is
+ * empty the same way a USB stick's departure is told. Nothing may be issued on
+ * it afterwards, and every ahci_* call that names it answers as it does for a
+ * port that was never there.
  *
  * Leaving is not final. The watchdog watches a departed port's PxSERR.DIAG.X
  * latch, and a COMINIT on it brings the port through bring-up again — full
@@ -769,7 +860,40 @@ error_t ahci_port_comreset(ahci_port_t* port);
 error_t ahci_port_recover(ahci_port_t* port);
 
 void ahci_get_port_stats(uint8_t port_num, ahci_port_stats_t* stats_out);
-void ahci_log_error(ahci_port_t* port, uint32_t pxis);
-const char* ahci_decode_serr(uint32_t serr);
+
+/* ── shared by the driver's own files ──────────────────────────────────── */
+
+/* ahci_roadstead.c: the roadstead's knock run, set once per port bring-up; a
+ * slot handed back from the completion path; admission; and a berth issued on
+ * the slot it was admitted to (OK, or the refusal that means its answer will
+ * not come through `answered`). */
+void            AhciRoadsteadKnocked(void* ctx);
+void            AhciSlotReturn(ahci_port_t* port, uint8_t slot);
+RoadsteadAnswer AhciAdmit(ahci_port_t* port, RoadsteadBerth* berth, uint8_t* slot_out);
+error_t         AhciBoard(ahci_port_t* port, RoadsteadBerth* berth, uint8_t slot);
+
+/* ahci_trouble.c: a fault on the port handed to its recovery, and the recovery
+ * itself, run by whoever finds it owed first.
+ *
+ * AhciPortFault: `fatal_bits` are the PxIS fatal bits seen (0 when none were),
+ * `seen_trouble` the trouble count read BEFORE they were — if it has moved,
+ * somebody else has reported this fault and nothing is done. `deadline_tsc`,
+ * when not 0, names as the culprits the slots armed longer ago than that —
+ * decided under the port's lock, so a slot re-armed since the caller looked is
+ * never blamed — and a deadline nothing is past, with no fatal bit either, is
+ * no fault at all. Answers the slots it named overdue.
+ *
+ * AhciRecoveryOwed: a recovery is owed and nobody is running it. */
+uint32_t AhciPortFault(ahci_port_t* port, uint32_t fatal_bits, uint32_t seen_trouble,
+                       uint64_t deadline_tsc);
+void     AhciRecoverIfOwed(ahci_port_t* port);
+bool     AhciRecoveryOwed(const ahci_port_t* port);
+
+#ifdef CONFIG_VOLUME_TESTS
+/* The stand's one-slot port (tagfs/tests): narrow the port to the slots in
+ * `mask` while it is idle, answering the mask it had (0: refused — busy, or no
+ * such port); asked again with the mask it answered, it has them back. */
+uint32_t AhciPortStandNarrow(uint8_t port_num, uint32_t mask);
+#endif
 
 #endif // AHCI_H

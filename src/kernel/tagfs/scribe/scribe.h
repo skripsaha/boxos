@@ -40,8 +40,7 @@
 // locked add that hands out a ticket is a full barrier, and the command that
 // issues the flush is a store to the device that cannot pass it, so a flush
 // carrying a ticket >= need was issued after need was read. Of the flushes
-// the medium kept, the highest ticket is remembered; a refusal — ERR_BUSY
-// included — moves nothing.
+// the medium kept, the highest ticket is remembered; a refusal moves nothing.
 //
 // The only place a ticket is taken and answered is tagfs_flush_cache. The
 // flushes a growing volume makes of its Deed before its door opens go past it:
@@ -65,42 +64,16 @@ bool     VolumeFlushKept(uint64_t need);
 
 /*
  * Make `need` durable: OK at once, with no word to the medium, when a kept
- * flush already covers it; otherwise a flush, and the medium's own refusal as
- * it is.
+ * flush already covers it; otherwise a flush, and the medium's answer as it
+ * is.
  *
- * ‼ COME BACK UNTIL THERE IS A REAL ANSWER — AND WHY THAT TERMINATES.
- *
- * ERR_BUSY from the flush is not an answer about the medium at all. It says
- * one thing: another whole-port command holds this port AT THIS INSTANT. Two
- * flushes of the same volume meeting is ordinary traffic, and the wave that
- * taught the flush to refuse turned that meeting into a failed write for one
- * of the two — where before it simply waited and both succeeded. Propagating
- * it was half a mechanism.
- *
- * So a caller whose whole purpose is durability asks again, and this is not a
- * clock and not a count: it ends on a FACT, four of which are reachable and
- * all of which are terminal.
- *
- *   - The door opens. The holder's command is itself bounded — a device that
- *     never answers is declared non-completing by AHCI_CMD_PATIENCE_MS — so
- *     the hold ends whether the flush under it succeeded or failed.
- *   - The flush holding the door covers `need`. It is looked for before every
- *     asking, because the flush that made this one wait may be the very one
- *     that answers it.
- *   - The holder stops being a running core. ahci_port_take_whole asks
- *     amp_core_online() and takes an abandoned door over on the spot, which
- *     is what makes this safe at shutdown, where the holder can be a core
- *     that has already been stopped.
- *   - The medium refuses, or leaves. Either is a different error_t and comes
- *     straight back out.
- *
- * Nothing here abandons the work it was given after a deadline — which is the
- * defect this is the opposite of — and nothing here invents a number.
- *
- * It is NOT used by the async write path: that runs on the drain core, where
- * a spin would stop every other job from making progress, so w_commit_txn
- * hands the job back to the same core through its own baton instead. Same
- * mechanism, spelled the way that place can spell it.
+ * There is no asking again. Two flushes of the same volume meeting is
+ * ordinary traffic, and it used to reach here as ERR_BUSY — another
+ * whole-port command holding the port at that instant — which this asked
+ * about again in a loop. The meeting is now settled where it happens: the
+ * second flush waits in the port's roadstead (core/boardroom/roadstead.h) for
+ * the first to give the port back, so the answer that comes out of the medium
+ * is always about the medium.
  */
 error_t  VolumeFlushFor(uint64_t need);
 
@@ -144,8 +117,8 @@ error_t  VolumeFlushFor(uint64_t need);
 //
 // AND IT IS NEVER STOPPED IN THE MIDDLE OF A PASS. A core an orderly halt asks
 // to stop while it holds a Scribe does not stop there: it owes the halt its
-// stop, runs its pass to the end, and stops in the ScribeGive that lets its
-// last Scribe go (HaltFreezeHere). A pass is never taken over from a stopped
+// stop, runs its pass to the end, and stops in the ScribeGive that ends the
+// last span it holds (HaltFreezeHere). A pass is never taken over from a stopped
 // core, because none is ever stopped holding one — and a command a stopped
 // core had in flight can never land over the next pass's. A panic stops every
 // core at once, as it always did.

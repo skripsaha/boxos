@@ -44,14 +44,9 @@ bool VolumeFlushKept(uint64_t need)
 
 error_t VolumeFlushFor(uint64_t need)
 {
-    for (;;) {
-        if (VolumeFlushKept(need))
-            return OK;
-        error_t flushed = tagfs_flush_cache();
-        if (flushed != ERR_BUSY)
-            return flushed;
-        cpu_pause();
-    }
+    if (VolumeFlushKept(need))
+        return OK;
+    return tagfs_flush_cache();
 }
 
 // ----------------------------------------------------------------------------
@@ -256,7 +251,7 @@ void ScribeGive(Scribe *s, uint64_t cover, error_t result)
     __atomic_store_n(&s->holder, 0u, __ATOMIC_RELEASE);
 
     if (__atomic_load_n(&g_amp.cores[core].freeze_owed, __ATOMIC_RELAXED) &&
-        !ScribeAnyHeldOn(core))
+        !SchedulerHeldHere())
         ScribeStopAfterPass(s, core);
     ScribeIrqRestore(flags);
 }

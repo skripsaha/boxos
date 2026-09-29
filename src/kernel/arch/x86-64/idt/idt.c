@@ -38,7 +38,6 @@
 #include "lifeline.h" /* a fault inside foreign firmware is thrown back, not fatal */
 #include "efi.h"      /* EfiDescribePhysical — CR2 named against the firmware's map */
 #include "system_halt.h" /* g_halt_orderly, HaltFreezeHere — the halt IPI's two ends */
-#include "scribe.h"      /* ScribeAnyHeldHere — a core in a pass owes its stop */
 
 static idt_entry_t idt[IDT_ENTRIES];
 static idt_descriptor_t idt_desc;
@@ -2217,23 +2216,24 @@ void irq_handler(interrupt_frame_t *frame)
 
     if (vector == IPI_PANIC_VECTOR)
     {
-        /* Stop — unless an orderly halt found this core in the middle of a
-         * Scribe pass. Reaching this branch proves this core was not in a
-         * stretch that kept IF=0: the IPI waited in the LAPIC IRR until such a
-         * spin_lock section was released. A Scribe pass writes the volume
-         * with interrupts ON, so this IPI can land in the middle of one, and a
-         * core stopped there would leave the medium half of a structure and
-         * every later sync waiting on a holder that never gives it back. So
-         * under an orderly halt such a core owes its stop and returns: it runs
-         * its pass to the end and stops in the ScribeGive that lets its last
-         * Scribe go (HaltFreezeHere), and the roll call waits for that as it
-         * waits for any arrival. A panic does not raise g_halt_orderly — every
-         * core stops where it stands, holding what it holds, as it always did.
-         * A core waiting on a legacy-IDE DMA inside such a section keeps its
-         * caller's interrupts off — it takes the drive's answer itself
-         * (BmideAnswerHere, drivers/disk/ata_async.c) — so it too takes this
-         * IPI only once the caller's lock is let go. */
-        if (__atomic_load_n(&g_halt_orderly, __ATOMIC_ACQUIRE) && ScribeAnyHeldHere())
+        /* Stop — unless an orderly halt found this core inside a held span:
+         * a Scribe pass, or a command it stands over on a medium. Reaching
+         * this branch proves this core was not in a stretch that kept IF=0:
+         * the IPI waited in the LAPIC IRR until such a spin_lock section was
+         * released. Both spans run with interrupts ON, so this IPI can land in
+         * the middle of one, and a core stopped there would leave the medium
+         * half of a structure, or a command slot or a whole-port door held
+         * for ever — and the halt's own sync and flush waiting on a holder
+         * that never gives it back. So under an orderly halt such a core owes
+         * its stop and returns: it runs the span to its end and stops where it
+         * lets its last one go (ScribeGive, HaltStopIfOwedHere), and the roll
+         * call waits for that as it waits for any arrival. A panic does not
+         * raise g_halt_orderly — every core stops where it stands, holding
+         * what it holds, as it always did. A core waiting on a legacy-IDE DMA
+         * inside such a section keeps its caller's interrupts off — it takes
+         * the drive's answer itself (BmideAnswerHere, drivers/disk/ata_async.c)
+         * — so it too takes this IPI only once the caller's lock is let go. */
+        if (__atomic_load_n(&g_halt_orderly, __ATOMIC_ACQUIRE) && SchedulerHeldHere())
         {
             CoreDescriptor *me = &g_amp.cores[amp_get_core_index()];
             me->freeze_asked_tsc = rdtsc();

@@ -7157,8 +7157,10 @@ run_unattendedmut() {
     unattended_boot unattendedmut UEFI=on STRICT=on CORES=4 MEM=4G
     unattended_silence_off
     L="$SCRATCH/serial.unattendedmut.log"
-    grep -qE "\[AHCI\] port [0-9]+ went past its deadline — failing slots 0x[0-9a-f]+ and resetting the link" "$L"
-    chk $? "unattendedmut: the disk's own watch called the port overdue and gave the slot back"
+    grep -qE "\[AHCI\] port [0-9]+ went past its deadline — the command\(s\) on slots 0x[0-9a-f]+ are failed and the link is reset" "$L"
+    chk $? "unattendedmut: the disk's own watch called the port overdue"
+    grep -qE "\[AHCI\] port [0-9]+: back after commands past their deadline, by a link reset — 1 command\(s\) failed, 0 sent again" "$L"
+    chk $? "unattendedmut: and its recovery failed that one read and gave the slot back"
     grep -qE "\[UNATTENDED READ\] seat [0-9]+ \(AHCI port [0-9]+\): FAILED — the medium refused the read \(error -?[0-9]+\)" "$L"
     chk $? "unattendedmut: and the proof said the medium refused"
     ! grep -q "\[UNATTENDED READ\].*PASSED" "$L"; chk $? "unattendedmut: no PASSED was said"

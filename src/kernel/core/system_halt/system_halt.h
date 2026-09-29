@@ -26,16 +26,23 @@ void system_halt(bool reboot) __attribute__((noreturn));
 void halt_all_ap_cores(bool orderly);
 
 // Raised by an orderly halt before its IPI goes out, and never lowered: the
-// machine is going off. A core the IPI finds holding a Scribe (tagfs/scribe)
-// notes that it owes the halt its stop and runs its pass to the end, so no
-// pass is ever cut in the middle and none is ever taken over. A panic does
-// not raise it and stops every core where it stands.
+// machine is going off. A core the IPI finds inside a held span — a Scribe
+// pass (tagfs/scribe), or a command it stands over on a medium — notes that it
+// owes the halt its stop and runs the span to its end, so no pass is cut in
+// the middle and no command slot or whole-port door is left held by a core
+// that will never give it back. A panic does not raise it and stops every
+// core where it stands.
 extern volatile bool g_halt_orderly;
 
 // This core stops for good: interrupts off, its own word that it arrived
 // (CoreDescriptor.halted) published for the roll call, and hlt. The end of
-// the IPI_PANIC branch, and of the ScribeGive that lets go of the last
-// Scribe of a core an orderly halt found in a pass.
+// the IPI_PANIC branch, and of whatever ends the last held span of a core an
+// orderly halt found in one.
 void HaltFreezeHere(void) __attribute__((noreturn));
+
+// The end of a held span that is not a Scribe pass: if an orderly halt asked
+// this core to stop while it was inside one, and it holds none any more, it
+// stops here, saying after what. Returns otherwise. Called holding no lock.
+void HaltStopIfOwedHere(const char* after);
 
 #endif // SYSTEM_HALT_H

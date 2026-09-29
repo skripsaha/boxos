@@ -39,7 +39,7 @@ static uint64_t g_chunk[QUILL_CHUNK / 8];
 static int64_t QuillWriteChunk(uint32_t fid, uint32_t seed, uint64_t off)
 {
     QuillFill(g_chunk, seed, off, QUILL_CHUNK);
-    return QuillWrite(fid, off, g_chunk, QUILL_CHUNK);
+    return fwrite(fid, off, g_chunk, QUILL_CHUNK);
 }
 
 static bool QuillWears(uint32_t fid, const char *key)

@@ -112,7 +112,7 @@ QuillVerdict QuillSettle(const char *const *args)
     uint32_t    seq = (uint32_t)ms ? (uint32_t)ms : 1u;
     QuillRecord rec = QuillRecordOf(seq);
     int     fid = QuillCreate(name);
-    int64_t w   = fid > 0 ? QuillWrite((uint32_t)fid, 0, &rec, sizeof(rec)) : 0;
+    int64_t w   = fid > 0 ? fwrite((uint32_t)fid, 0, &rec, sizeof(rec)) : 0;
     if (fid <= 0 || w != (int64_t)sizeof(rec)) {
         int krc = proc_finish((uint32_t)hog, gen);
         printf("[QUILL] settle: FAIL — %s could not be written beside hog pid %d (create %d, "
@@ -231,7 +231,7 @@ QuillVerdict QuillChurn(const char *const *args)
            name, (uint32_t)fid, seq);
     for (;; seq++) {
         QuillRecord rec = QuillRecordOf(seq);
-        int64_t     w   = QuillWrite((uint32_t)fid, 0, &rec, sizeof(rec));
+        int64_t     w   = fwrite((uint32_t)fid, 0, &rec, sizeof(rec));
         if (w != (int64_t)sizeof(rec)) {
             printf("[QUILL] churn: FAIL — writing seq=%u of %s fid=%u answered %lld\n",
                    seq, name, (uint32_t)fid, (long long)w);
@@ -318,7 +318,7 @@ QuillVerdict QuillRace(const char *const *args)
 
     QuillRecord rec = QuillRecordOf(1);
     int     fid = QuillCreate(name);
-    int64_t w   = fid > 0 ? QuillWrite((uint32_t)fid, 0, &rec, sizeof(rec)) : 0;
+    int64_t w   = fid > 0 ? fwrite((uint32_t)fid, 0, &rec, sizeof(rec)) : 0;
     char    stem[64];
     QuillStem(name, stem, sizeof(stem));
     TouchTagPair pair = touch_intern(stem);

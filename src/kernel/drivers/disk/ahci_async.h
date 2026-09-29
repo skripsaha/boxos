@@ -3,59 +3,30 @@
 
 #include "ktypes.h"
 #include "error.h"
-#include "ahci.h"
+#include "roadstead.h"
 
 /*
- * AHCI async submission — non-blocking read/write.
+ * AHCI async submission — a read or a write for a caller that does not stay.
  *
- * Stage 1 of the storage-async migration: ground-floor IRQ-driven
- * completion path. The submitter posts a request and returns
- * immediately; when the disk command retires the AHCI IRQ handler
- * invokes the registered per-slot callback (see ahci_port_t::cb).
+ * The caller fills the berth's request — lba, sectors (at most 65535), the
+ * DMA page (below 4 GiB unless the controller advertises S64A), answered and
+ * ctx — and hands it over. The berth is the port's from an OK answer until
+ * `answered` has run, and is not touched by the driver after that: the owner
+ * may hand the same berth over again from inside the answer.
  *
- * Sync callers (ahci_read_sectors_sync) keep working unchanged —
- * each slot is owned by exactly one flow, and sync flow leaves
- * cb[slot] NULL so the IRQ-side fan-out skips it.
+ * OK: the command is issued, or moored in the port's roadstead behind the
+ * commands ahead of it, and `answered` WILL run — from the completion
+ * interrupt (keep it short, allocation-free), from the port's recovery, or
+ * from the port leaving the machine (ERR_DEVICE_NOT_READY for a berth that
+ * never reached it). A port with every slot taken, or its door shut for a
+ * cache flush, is not a refusal.
  *
- * Stage 2 wires this into storage_ops's ObjRead so a userspace
- * fread parks (PROC_WAITING), the K-Core moves on, and the IRQ
- * does KResultPush on completion.
+ * Anything else: `answered` will not run, and the caller still owns the page.
+ *   ERR_DEVICE_NOT_READY  — no such port in service
+ *   ERR_INVALID_ARGUMENT  — no berth, no callback, no page, or a bad count
+ *   ERR_INVALID_ADDRESS   — a page above 4 GiB on a controller without S64A
  */
-
-/* Completion callback signature. Fires from IRQ context — keep it
- * short and non-blocking. `status` is OK or an ERR_* code. */
-typedef void (*ahci_async_cb_t)(uint8_t port, uint8_t slot,
-                                error_t status, void *ctx);
-
-/*
- * Submit a non-blocking read. Reads `sector_count` 512-byte sectors
- * starting at `lba` into the DMA buffer at `dma_buf_phys` (must be
- * < 4 GiB unless the controller advertises s64a). On success
- * returns OK and writes the slot index into *out_slot; the supplied
- * callback runs from the AHCI IRQ when the command retires.
- *
- * Failure modes (no callback fires, slot freed):
- *   ERR_DEVICE_NOT_READY  — port inactive
- *   ERR_BUSY              — no free slot
- *   ERR_INVALID_ARGUMENT  — bad pointer / count == 0
- *   ERR_IO                — controller rejected the FIS build
- */
-error_t ahci_submit_read_async(uint8_t port, uint64_t lba,
-                                uint16_t sector_count,
-                                void *dma_buf_phys,
-                                ahci_async_cb_t cb, void *ctx,
-                                uint8_t *out_slot);
-
-/*
- * Submit a non-blocking write. Symmetric to read_async — the buffer at
- * `dma_buf_phys` is the source; caller has already staged bytes there.
- * Same failure modes and slot semantics. The callback fires from the
- * AHCI IRQ when the controller retires the slot.
- */
-error_t ahci_submit_write_async(uint8_t port, uint64_t lba,
-                                 uint16_t sector_count,
-                                 void *dma_buf_phys,
-                                 ahci_async_cb_t cb, void *ctx,
-                                 uint8_t *out_slot);
+error_t ahci_submit_read_async(uint8_t port, RoadsteadBerth* berth);
+error_t ahci_submit_write_async(uint8_t port, RoadsteadBerth* berth);
 
 #endif /* AHCI_ASYNC_H */

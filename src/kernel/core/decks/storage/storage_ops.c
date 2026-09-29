@@ -50,7 +50,7 @@
 #include "cow.h"
 #include "amp.h"   /* g_amp.total_cores — async write needs a K-Core to pump */
 #include "boardroom.h"
-#include "scribe.h"   /* VolumeFlushFor — an anchor's flush comes back until it has an answer */
+#include "scribe.h"   /* VolumeFlushFor — an anchor's flush, unless one already covers it */
 
 /*
  * Can the medium under the volume answer a read without somebody standing over
@@ -127,16 +127,17 @@ static uint16_t param_u16(const ManifestOp *op, uint16_t off)
 /* -------------------------------------------------------------------------
  * OBJ_READ — fill out_crate with up to capacity bytes from file at offset.
  *
- * Stage 2 async fast-path: when the request lands entirely inside one
- * disk block, we submit an ahci_submit_read_async, park the caller
- * (PROC_WAITING) and return ERR_WOULD_BLOCK. The AHCI IRQ fires the
- * obj_read_async_complete callback which memcpy's DMA → user buffer,
- * writes the actual byte count back into the Crate, KResultPush'es a
- * Result and ref_dec's the pinned process — KResultPush also flips
- * PROC_WAITING → PROC_WORKING so the caller wakes.
+ * Async fast-path: the seat under the volume takes a read nobody stands over
+ * (BoardroomReadAsync), so the caller is parked (PROC_WAITING) and
+ * ERR_WOULD_BLOCK returned. The seat's answer (obj_read_async_complete)
+ * hands the heavy half to the drain core, which copies DMA → user buffer,
+ * writes the actual byte count back into the Crate, KResultPush'es a Result
+ * and ref_dec's the pinned process — KResultPush also flips PROC_WAITING →
+ * PROC_WORKING so the caller wakes. A seat with every place taken does not
+ * refuse the read: it waits in the context's berth for its turn.
  *
- * Fallback (multi-block, off-block, no AHCI, allocation failure, no
- * proc context) takes the existing tagfs_read sync path.
+ * Fallback (a seat that only answers a caller who stays, allocation
+ * failure, no proc context) takes the existing tagfs_read sync path.
  * ------------------------------------------------------------------------- */
 
 /* ------------------------------------------------------------------------
@@ -185,6 +186,11 @@ typedef struct {
      * the drain core with zero allocation, so a completion can never be
      * dropped. run = obj_read_pump, ctx = this ctx; set once at alloc. */
     Baton cq_node;
+
+    /* Where each block's read waits when the seat has no place for it — the
+     * seat's until its answer comes, then this read's again for the next
+     * block. */
+    RoadsteadBerth berth;
 } ObjReadAsyncCtx;
 
 static void obj_read_step(ObjReadAsyncCtx *ctx);
@@ -341,7 +347,7 @@ static void obj_read_step(ObjReadAsyncCtx *ctx)
 
     uint64_t lba = tagfs_block_to_sector(disk_block);
     error_t  err = BoardroomReadAsync(tagfs_get_seat(), lba, 8, ctx->dma_phys,
-                                      obj_read_async_complete, ctx);
+                                      obj_read_async_complete, ctx, &ctx->berth);
     if (err != OK) {
         obj_read_finish(ctx, ERR_IO, /*partial_ok=*/false);
     }
@@ -1439,17 +1445,11 @@ static int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
      * is an observer that has not been misled — and the refusal goes back to
      * the caller as the medium's own word.
      *
-     * ‼ WITH ONE EXCEPTION, AND IT IS NOT A REFUSAL AT ALL: ERR_BUSY.
-     *
-     * That says another whole-port command holds this medium's port at this
-     * instant — two flushes of the same disk meeting, which on a busy volume
-     * is ordinary traffic and says nothing about the disk. Handing it to the
-     * application would make anchor() a call that fails for a reason the
-     * application cannot see, understand or act on better than the kernel
-     * can. So it is asked again, and the asking ends on a fact rather than a
-     * clock: the argument is written once, over VolumeFlushFor (scribe.h).
-     * The need is read after the sync came back, so the sync's own flush does
-     * not count for it; a flush begun since does.
+     * Two flushes of the same disk meeting is not a refusal: the second waits
+     * for the port in its roadstead (core/boardroom/roadstead.h) and is issued
+     * when the first has given the port back, so no answer the application
+     * cannot act on reaches it. The need is read after the sync came back, so
+     * the sync's own flush does not count for it; a flush begun since does.
      *
      * anchor() therefore keeps exactly the two answers it always had —
      * durable, or a named refusal of the medium — and neither of them is a

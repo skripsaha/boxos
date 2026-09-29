@@ -273,37 +273,26 @@ static bool w_cow_before(WriteJob *j)
     return true;
 }
 
-/* "Every command slot on the port is taken" is NOT "the disk failed", and
- * this is where the two used to become the same sentence.
- *
- * ahci_submit_read_async / ahci_submit_write_async answer ERR_BUSY when the
- * port's slot pool has nothing to give: every tag outstanding at once, or the
- * pool shut whole for a FLUSH CACHE EXT (ahci_port_take_whole — AHCI 1.3.1
- * §1.7 forbids issuing a non-queued command beside queued ones, and this very
- * state machine's W_COMMIT_TXN is one of the flushers, so one write's
- * durability point is exactly what makes another write's submit find the door
- * shut). Both submit sites below folded that into ERR_IO, so a write refused
- * by a momentarily full port came back from the kernel wearing the same word
- * as a write the medium had actually failed, and the caller had no way to
- * tell "come back" from "this disk is broken". It now comes back as ERR_BUSY,
- * which is the whole of what the caller was missing: the decision to try the
- * same write again belongs to whoever issued it and still holds the bytes.
- *
- * The job is not re-presented here. Waiting for a slot inside the state
- * machine needs two things this file cannot give it — the submit call must
- * hand the port a waiter to link under the same lock that failed the
- * allocation, or a slot freed in the gap is a wake nobody receives
- * (ahci_async.h), and the job must carry the deadline that bounds the wait
- * (write_job.h). A retry built without them is either a spin on the drain
- * core or a coin-flip; refusing with the port's own word is neither.
- *
- * The DURABILITY point (w_commit_txn, below) does re-present on ERR_BUSY,
- * and the difference is not inconsistency — it is what the two are waiting
- * for. There, one thing holds the port and it is a single command with a
- * device deadline on it, so the wait has a named end and the job can simply
- * go to the back of the drain queue until it comes. Here, what is waited on
- * is any one of up to thirty-two commands freeing a tag, with no single
- * owner to ask about and nobody to hand a waiter to. */
+/* One block of this job to the port. "Every command slot on the port is
+ * taken" is not "the disk failed", and it is not "come back later" either: the
+ * job's berth carries the request, and the port issues it now or moors it in
+ * its roadstead — under the same lock that found no slot, so a slot freed a
+ * moment later calls it in — until a slot comes free or the door a cache flush
+ * shut opens again. Either way `answered` runs, exactly once; an error here
+ * means the port is not there, or the request is malformed. */
+static error_t wjob_submit(WriteJob *j, bool write, RoadsteadAnswered answered)
+{
+    RoadsteadBerth *b = &j->berth;
+    memset(b, 0, sizeof(*b));
+    b->lba      = tagfs_block_to_sector(j->if_disk_block);
+    b->sectors  = TAGFS_BLOCK_SECTORS;
+    b->dma_phys = j->dma_phys;
+    b->answered = answered;
+    b->ctx      = j;
+
+    uint8_t port = BoardroomSeatIndex(tagfs_get_seat());
+    return write ? ahci_submit_write_async(port, b) : ahci_submit_read_async(port, b);
+}
 
 /* W_COW_READ_OLD — async read of (now-redirected) NEW block content
  * into DMA. CowBeforeWrite already populated NEW on disk with the OLD
@@ -315,10 +304,7 @@ static void wjob_cow_read_complete(uint8_t port, uint8_t slot,
 
 static bool w_cow_read_old(WriteJob *j)
 {
-    uint64_t lba = tagfs_block_to_sector(j->if_disk_block);
-    uint8_t  slot;
-    error_t  err = ahci_submit_read_async(BoardroomSeatIndex(tagfs_get_seat()), lba, 8, j->dma_phys,
-                                           wjob_cow_read_complete, j, &slot);
+    error_t err = wjob_submit(j, false, wjob_cow_read_complete);
     if (err != OK) {
         wjob_finalize(j, err);
         return false;
@@ -340,10 +326,7 @@ static bool w_dma_fill(WriteJob *j)
 /* W_AHCI_SUBMIT — fire write, yield to IRQ. */
 static bool w_ahci_submit(WriteJob *j)
 {
-    uint64_t lba = tagfs_block_to_sector(j->if_disk_block);
-    uint8_t  slot;
-    error_t  err = ahci_submit_write_async(BoardroomSeatIndex(tagfs_get_seat()), lba, 8, j->dma_phys,
-                                            wjob_ahci_complete, j, &slot);
+    error_t err = wjob_submit(j, true, wjob_ahci_complete);
     if (err != OK) {
         wjob_finalize(j, err);
         return false;
@@ -472,9 +455,9 @@ static bool w_cow_after(WriteJob *j)
  * Forcing the data blocks written above out of the drive's volatile write
  * cache to media is what makes them survive the power going away. The call
  * was made and its result thrown away, so a medium that REFUSED the flush —
- * a device that has no FLUSH CACHE EXT to give, a port that could not be
- * taken whole for it, a link that went down between the last write and here —
- * moved the job straight to W_PUBLISH: the write was announced on every tag
+ * a device that has no FLUSH CACHE EXT to give, a device that stopped
+ * answering, a link that went down between the last write and here — moved
+ * the job straight to W_PUBLISH: the write was announced on every tag
  * of the file and reported back as done, while the bytes were still in a
  * cache the drive can lose. The kernel would have told the truth about the
  * write and a lie about its durability in the same breath.
@@ -487,45 +470,18 @@ static bool w_cow_after(WriteJob *j)
  * zero it would answer by writing the same payload a second time. The one
  * thing it must not be told is "durable".
  *
- * ‼ AND ONE OF THOSE REFUSALS IS NOT A REFUSAL AT ALL: A PORT HELD FOR
- * SOMEBODY ELSE'S FLUSH AT THIS INSTANT.
- *
- * It arrives now as ERR_BUSY instead of ERR_IO, which is the whole of the
- * wave before this one — but a distinct word is only half a mechanism, and
- * the half that was missing is the one that matters here. The commonest
- * meeting on a busy volume is two writes reaching their durability point at
- * the same moment: one takes the port whole for its FLUSH CACHE EXT, the
- * other finds the door shut. The port used to make the second one WAIT, and
- * both writes succeeded. Simply handing ERR_BUSY to the process would turn
- * that meeting into a failed write — a regression wearing the right word.
- *
- * SO THE JOB COMES BACK, AND IT COMES BACK THE WAY EVERY OTHER STEP OF THIS
- * STATE MACHINE COMES BACK: its own baton, to the drain core. Not a spin —
- * this runs inside BatonPump on the drain core, and spinning here would stop
- * every other job on that core, which is exactly why this file refused to
- * invent one. Re-linking the node puts it at the TAIL of that core's queue,
- * so everything already waiting runs first and this job is retried in its
- * turn: a yield, spelled with the mechanism the file already uses.
- *
- * And it ends on a fact, never on a clock. The holder's own command is
- * bounded by the device (AHCI_CMD_PATIENCE_MS), a holder that stops being a
- * running core has its door taken over on the spot (ahci_port_take_whole),
- * and a medium that genuinely refuses, or leaves, answers with a different
- * error_t — which falls through below and fails the write out loud. Nothing
- * here abandons the job after a deadline.
- *
- * Nothing is said on the console for this: a meeting is ordinary traffic,
- * and it repeats, so a line per attempt is how a log stops being read. */
+ * Two writes reaching their durability point at the same moment is not a
+ * refusal: the second flush waits for the port in its roadstead, behind the
+ * first, and is issued when the port is given back — its want of the whole
+ * port stops new reads and writes from being admitted meanwhile, so the wait
+ * ends on the commands already out, each bounded by the device. It used to
+ * come back from the port as ERR_BUSY, and this step re-posted the job to the
+ * back of the drain queue until the door was found open: a spin through the
+ * drain core, and a stream of reads could keep the door from ever being found
+ * open at all. */
 static bool w_commit_txn(WriteJob *j)
 {
     error_t flushed = tagfs_flush_cache();
-
-    if (flushed == ERR_BUSY) {
-        cpu_pause();
-        atomic_store_u32((volatile uint32_t *)&j->state, W_COMMIT_TXN);
-        BatonPass(&j->cq_node);   /* never-drop; back of the drain queue */
-        return false;
-    }
 
     if (flushed != OK) {
         kprintf("[Storage] write to file %u: the medium would not flush "
@@ -666,11 +622,11 @@ static void wjob_finalize(WriteJob *j, int rc)
     Result r;
     memset(&r, 0, sizeof(r));
     /* The error the job actually ended on, not a blanket ERR_IO. Every exit
-     * above already carries a distinct one — ERR_BUSY (the port's slots, and
-     * the caller may simply come back), ERR_NO_MEMORY (this machine, not this
-     * disk), the status the AHCI completion reported, the refusal of the
-     * cache flush — and flattening them here is what left the caller unable
-     * to tell "try again" from "the medium is broken". */
+     * above already carries a distinct one — ERR_DEVICE_NOT_READY (the port
+     * is not in the machine), ERR_NO_MEMORY (this machine, not this disk),
+     * the status the AHCI completion reported, the refusal of the cache
+     * flush — and flattening them here is what left the caller unable to
+     * tell one from another. */
     r.error_code  = (uint32_t)rc;
     r.data_length = (uint32_t)bytes_written;
     r.sender_pid  = 0;

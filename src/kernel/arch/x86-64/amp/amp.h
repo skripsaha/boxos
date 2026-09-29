@@ -40,10 +40,11 @@ typedef struct {
      * `online` is — every access goes through the C11 atomic builtins, and
      * `volatile` would order the compiler without ordering the CPUs. */
     uint8_t  halted;
-    /* freeze_owed: an orderly halt's IPI found this core in the middle of a
-     * Scribe pass (tagfs/scribe), so the core did not stop there: it owes the
-     * halt its stop, and pays it in the ScribeGive that lets its last Scribe
-     * go. freeze_asked_tsc is when the IPI came, for the line that says how
+    /* freeze_owed: an orderly halt's IPI found this core inside a held span —
+     * a Scribe pass (tagfs/scribe), a command it stands over on a medium — so
+     * the core did not stop there: it owes the halt its stop, and pays it
+     * where its last span ends (ScribeGive, HaltStopIfOwedHere).
+     * freeze_asked_tsc is when the IPI came, for the line that says how
      * long the halt waited. Both written by this core alone, from its IPI_PANIC
      * branch, and read by it alone. */
     uint8_t  freeze_owed;

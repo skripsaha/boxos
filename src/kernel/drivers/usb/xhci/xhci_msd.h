@@ -4,6 +4,7 @@
 #include "ktypes.h"
 #include "error.h"
 #include "xhci.h"
+#include "roadstead.h"
 
 /*
  * USB Mass Storage, over Bulk-Only Transport, speaking SCSI.
@@ -15,8 +16,10 @@
  * device's answer to "how big are you" and "give me these sectors" comes back
  * through the other two.
  *
- * Every call here is synchronous, because the thing above it is a filesystem
- * mounting at boot with nothing else to do until the sector arrives.
+ * Every call here but one is synchronous, because the thing above it is a
+ * filesystem mounting at boot with nothing else to do until the sector
+ * arrives. The one that is not is a read for a caller that went away
+ * (xhci_msd_read_async).
  */
 
 /* The sector size BoxOS keeps filesystems in. A device reporting anything else
@@ -63,28 +66,28 @@ int xhci_msd_write(uint8_t unit, uint64_t lba, uint32_t count, const void* buffe
 /*
  * A read for a caller that is not going to stand and watch.
  *
- * The sectors land straight in `dma_phys` — no bounce, because the whole point
- * is that nobody is here to copy them out afterwards — and `cb` is told when
- * the device has answered. It runs on a K-Core, out of the guide loop, so it
- * may take locks, free memory and wake whoever was waiting.
- *
- * The callback is shaped exactly like the SATA one, so that the Boardroom can
- * hand the same function to either kind of seat without an adapter standing in
- * between: `index` is the USB unit, `slot` is meaningless here and is zero.
+ * The request is the berth (core/boardroom/roadstead.h): lba, sectors, the DMA
+ * page and `answered` with its ctx. The sectors land straight in the page — no
+ * bounce, because the whole point is that nobody is here to copy them out
+ * afterwards — and `answered` is told when the device has answered. It runs on
+ * a K-Core, out of the guide loop, so it may take locks, free memory and wake
+ * whoever was waiting. It is shaped exactly like the SATA one, so that the
+ * Boardroom can hand the same function to either kind of seat without an
+ * adapter standing in between: `index` is the USB unit, `slot` is meaningless
+ * here and is zero.
  *
  * The request must cover whole device blocks and start on one. Everything
  * BoxOS reads asynchronously is a filesystem block, which does; a request that
  * does not is REFUSED rather than quietly widened, because widening it would
  * mean a bounce buffer and a copy, and that is the sync path's job.
  *
- * Returns OK when the command is on its way (or queued behind one on the same
- * device), and the callback WILL run. On any other return it will not.
+ * Returns OK when the command is on its way, or moored behind the commands
+ * ahead of it on the same device, and `answered` WILL run; the berth is the
+ * device's until it has. On any other return it will not. Nothing is
+ * allocated: the berth is the caller's, and the device runs one command at a
+ * time on a job of its own.
  */
-typedef void (*XhciMsdAsyncCb)(uint8_t index, uint8_t slot,
-                               error_t status, void* ctx);
-
-error_t xhci_msd_read_async(uint8_t unit, uint64_t lba, uint32_t count,
-                            void* dma_phys, XhciMsdAsyncCb cb, void* ctx);
+error_t xhci_msd_read_async(uint8_t unit, RoadsteadBerth* berth);
 
 /* True when this unit can take the call above — it exists, it is ready, and
  * the geometry of a filesystem block suits it. */

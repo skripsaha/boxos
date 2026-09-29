@@ -16,6 +16,8 @@
 //                        table's chains as they grow, registries that are not
 //                        the volume's, and what a registry hands out; and the
 //                        chain walk below
+// stand_roadstead_tests.c  the stand_roadstead suite: reads that find every
+//                        place on the medium taken wait for their turn
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.

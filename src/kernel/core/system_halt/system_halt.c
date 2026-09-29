@@ -21,6 +21,7 @@
 #include "ahci.h"
 #include "amp.h"
 #include "hourglass.h"
+#include "cpu_calibrate.h"    /* cpu_tsc_to_us — how long an owed stop took */
 #include "kernel_config.h"
 #include "nameplate.h"        /* nameplate_name_at_kernel — name a stuck continuation */
 #include "nameplate_format.h" /* NameplateHeader — the table's own minimum size */
@@ -354,6 +355,26 @@ void HaltFreezeHere(void)
         __asm__ volatile("cli; hlt");
 }
 
+void HaltStopIfOwedHere(const char *after)
+{
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags)::"memory");
+
+    uint8_t core = amp_get_core_index();
+    if (__atomic_load_n(&g_amp.cores[core].freeze_owed, __ATOMIC_RELAXED) &&
+        !SchedulerHeldHere())
+    {
+        uint64_t waited = rdtsc() - g_amp.cores[core].freeze_asked_tsc;
+        kprintf("[HALT] core %u stops after %s, %lu us after the halt asked it "
+                "to stop\n", (unsigned)core, after,
+                (unsigned long)cpu_tsc_to_us(waited));
+        HaltFreezeHere();
+    }
+
+    if (flags & (1u << 9))
+        __asm__ volatile("sti" ::: "memory");
+}
+
 void halt_all_ap_cores(bool orderly)
 {
     if (!g_amp.multicore_active)
@@ -377,10 +398,11 @@ void halt_all_ap_cores(bool orderly)
             __atomic_store_n(&g_amp.cores[c].halted, (uint8_t)0, __ATOMIC_RELAXED);
     }
 
-    /* Raised before the IPI can land anywhere: a core that holds a Scribe
-     * must already know, when the IPI reaches it, that this stop may wait for
-     * the end of its pass. The roll call below waits for that end the same
-     * way it waits for any other arrival. */
+    /* Raised before the IPI can land anywhere: a core inside a held span — a
+     * Scribe pass, a command it stands over on a medium — must already know,
+     * when the IPI reaches it, that this stop may wait for the end of it. The
+     * roll call below waits for that end the same way it waits for any other
+     * arrival. */
     if (orderly)
         __atomic_store_n(&g_halt_orderly, true, __ATOMIC_RELEASE);
 
@@ -613,25 +635,26 @@ static void halt_terminate_all_processes(void)
  * screen said the opposite. On a machine that is read by photographing its
  * screen, that line was the only evidence there was, and it was false.
  *
- * ‼ AND THE ANSWER THAT LOOKS LIKE "TRY AGAIN IN A MOMENT" MUST NOT BE
- * TREATED AS ONE HERE, BECAUSE OF WHERE THIS STANDS.
+ * ‼ AND WHAT IT WAITS FOR HERE HAS TO BE ABLE TO HAPPEN, BECAUSE OF WHERE
+ * THIS STANDS.
  *
  * This runs after `cli` and after halt_all_ap_cores(), so there is exactly
  * one core executing on this machine and it is the one inside this function.
- * ERR_BUSY means another core holds the port's whole-port door — and every
- * other core has already been stopped, so that door would never be given
- * back. A retry loop here, however it were bounded, would be a wait for an
- * event that cannot happen, ending by abandoning the work. That is the
- * defect, not the repair.
+ * The flush below waits in the port's roadstead for the door, and nothing
+ * else on this machine will ever run to open one — so every door and every
+ * slot it waits behind must be one that gets given back from here:
  *
- * What it gets instead is a fact, and the fact is taken care of one level
- * down: ahci_port_take_whole records WHICH CORE holds the door and asks
- * amp_core_online() about it, so a door held by a core that is no longer
- * running is not "busy" at all — it is abandoned, and once the device owes
- * nothing it is taken over on the spot. So the single call below is the
- * whole of the asking, and an ERR_BUSY that survives it is a genuine
- * surprise: a door held by a core this shutdown believes is still running.
- * It is said out loud like any other refusal rather than waited on.
+ *   - a core the halt's IPI found standing over a command owed the halt its
+ *     stop, finished the command and gave its slot or its door back before it
+ *     stopped (idt.c, HaltStopIfOwedHere);
+ *   - a door still held by a core that is no longer running, over a device
+ *     that owes nothing, is opened by the roadstead's own call-in;
+ *   - completions whose interrupt cannot land now — this core has them shut —
+ *     and a recovery a fault left owed are brought in and run by the waiting
+ *     caller itself (ahci_roadstead.c, AhciTurn).
+ *
+ * So the single call below is the whole of the asking, and its answer is the
+ * medium's own.
  *
  * Either way the line that follows says what actually happened. A shutdown
  * that could not make the volume durable is not a failed shutdown — the
