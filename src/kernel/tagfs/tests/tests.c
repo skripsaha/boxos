@@ -152,26 +152,24 @@ int TestFileRead(uint32_t file_id, void* buffer, uint32_t capacity)
 // before and after every such test:
 //
 //   files      the Ledger's file count;
-//   snapshots  how many the CoW layer holds;
 //   held       blocks in use that are not the volume's own bookkeeping.
 //
 // Not the free count on its own, because the free count is not the test's
 // alone to move. The metadata pool chains a fresh block the moment a record
-// no longer fits (meta_pool.c, meta_pool_write), the file table and the
-// registry chain theirs at a sync, and the first snapshot a volume ever takes
-// lays down its manifest block (cow.c, CowWriteManifest) — all of it for good,
-// and none of it residue. So the chains are walked on the medium, the way the
-// mount's roll call walks them, and they, the manifest and the integrity map
-// are taken out of the count. What is left is what files and snapshots hold,
-// and a test that leaves a block behind, or hands back one that was never its
-// own, moves it.
+// no longer fits (meta_pool.c, meta_pool_write), and the file table and the
+// registry chain theirs at a sync — all of it for good, and none of it
+// residue. So the chains are walked on the medium, the way the mount's roll
+// call walks them, and they, the integrity map and the snapshot manifest an
+// earlier kernel may have laid down are taken out of the count. No test can
+// take a snapshot (a format-v1 volume refuses one), so what is left is what
+// files hold, and a test that leaves a block behind, or hands back one that
+// was never its own, moves it.
 //
 // Not the tag count: a tag is interned for good (every created file interns
 // the stem of its name), so the tests keep to names they have always used and
 // the guard does not count tags.
 // ============================================================================
 
-static uint32_t g_snapshot_ids[TAGFS_MAX_SNAPSHOTS];
 static uint8_t  g_chain_block[TAGFS_BLOCK_SIZE];
 
 /* Blocks on one metadata chain, walked on the medium from its head (a volume
@@ -204,10 +202,6 @@ bool VolumeTallyTake(VolumeTally* tally)
     if (!fs || !fs->initialized)
         return false;
 
-    uint32_t snapshots = 0;
-    if (TagFS_SnapshotList(g_snapshot_ids, TAGFS_MAX_SNAPSHOTS, &snapshots) != OK)
-        return false;
-
     uint64_t chains =
         VolumeChainLength(fs->layout.tag_registry_block,  TAGFS_REGISTRY_MAGIC) +
         VolumeChainLength(fs->layout.file_table_block,    TAGFS_FILETBL_MAGIC) +
@@ -221,8 +215,7 @@ bool VolumeTallyTake(VolumeTally* tally)
     tally->files = fs->ledger.total_files;
     TagFSLockDrop(&fs->lock);
 
-    tally->snapshots = snapshots;
-    tally->held      = used - own;
+    tally->held = used - own;
     return true;
 }
 
@@ -243,11 +236,6 @@ static bool VolumeResidueSaid(const char* name, const VolumeTally* before)
                 "file(s) before it and %llu after\n", name,
                 (unsigned long long)before->files,
                 (unsigned long long)after.files);
-        residue = true;
-    }
-    if (after.snapshots != before->snapshots) {
-        kprintf("[TESTS] %s failed: it left residue — %u snapshot(s) before it "
-                "and %u after\n", name, before->snapshots, after.snapshots);
         residue = true;
     }
     if (after.held != before->held) {

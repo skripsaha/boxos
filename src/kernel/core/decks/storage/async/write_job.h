@@ -25,14 +25,11 @@ typedef enum {
     W_TOKEN_WAIT,
     W_LOCATE,
     W_ALLOC,
-    W_COW_BEFORE,
-    W_COW_READ_OLD,    /* async read of OLD block into DMA (partial CoW only) */
+    W_READ_OLD,        /* async read of the block a partial write overlays */
     W_DMA_FILL,
     W_AHCI_SUBMIT,
     W_AHCI_DONE,
-    W_BEGIN_TXN,
     W_LOG_META,
-    W_COW_AFTER,
     W_COMMIT_TXN,
     W_PUBLISH,
     W_RELEASE_TOKEN,
@@ -66,10 +63,6 @@ typedef struct WriteJob {
     uint32_t          if_chunk;
     bool              if_partial_rmw;
     bool              if_alloc_fresh;        /* this chunk's block was just W_ALLOC'd */
-    bool              if_cow_redirected;    /* CoW remap happened for this chunk */
-    uint32_t          if_cow_old_block;     /* pre-CoW disk block */
-    uint16_t          if_extent_idx;        /* index into handle->extents */
-    uint32_t          if_blk_in_ext;
     error_t           if_status;            /* IRQ writes here */
 
     /* ---- alloc tracking ---- */

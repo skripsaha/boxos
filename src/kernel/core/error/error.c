@@ -156,8 +156,6 @@ const char* ErrorString(error_t err) {
             return "Snapshot limit reached";
         case ERR_SNAPSHOT_NOT_FOUND:
             return "Snapshot not found";
-        case ERR_DEDUP_FAILED:
-            return "Deduplication failed";
         case ERR_SELF_HEAL_FAILED:
             return "Self-healing failed";
 
@@ -378,17 +376,6 @@ const char* ErrorString(error_t err) {
             return "CoW allocation failed";
         case ERR_COW_RESTORE_FAILED:
             return "Snapshot restore failed";
-        
-        case ERR_DEDUP_NOT_INITIALIZED:
-            return "Dedup not initialized";
-        case ERR_DEDUP_HASH_COLLISION:
-            return "Dedup hash collision";
-        case ERR_DEDUP_POOL_EXHAUSTED:
-            return "Dedup entry pool exhausted";
-        case ERR_DEDUP_GC_FAILED:
-            return "Dedup GC failed";
-        case ERR_DEDUP_REGISTER_FAILED:
-            return "Dedup register failed";
         
         case ERR_SELF_HEAL_NOT_INITIALIZED:
             return "Self-heal not initialized";

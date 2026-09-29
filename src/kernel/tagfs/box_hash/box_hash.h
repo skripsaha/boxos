@@ -8,7 +8,7 @@
 //
 //   BoxHashIntegrity — fast 64-bit checksum: silent bit-rot / torn-write
 //                      detection on data blocks. wyhash-class.
-//   BoxHashContent   — 256-bit content digest: dedup keys, block checksums.
+//   BoxHashContent   — 256-bit content digest: Braid's block checksums.
 //   BoxHashSecure    — standard SHA-256. The ONLY cryptographic option here;
 //                      use it where tamper-resistance is actually required.
 //
@@ -38,7 +38,7 @@ void     BoxHashInit(BoxHashContext *ctx, const void *seed, uint32_t seed_len);
 // 64-bit integrity checksum (bit-rot / torn-write detection).
 uint64_t BoxHashIntegrity(const void *data, uint32_t size, const BoxHashContext *ctx);
 
-// 256-bit content digest (dedup keys, block checksums).
+// 256-bit content digest (Braid's block checksums).
 BoxHash  BoxHashContent(const void *data, uint32_t size, const BoxHashContext *ctx);
 
 // SHA-256 (cryptographic; unseeded; standard FIPS 180-4).

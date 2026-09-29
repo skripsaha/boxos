@@ -7,49 +7,28 @@
 #include "../tagfs_constants.h"
 #include "../../core/error/error.h"
 
-// CoW Snapshots with Tag-Based Queries
-
-#define COW_MAGIC           0x434F5753
-#define COW_VERSION         1
+// CoW snapshots on format v1: refused, and those an earlier kernel left, named
 
 // On-disk snapshot manifest
 #define COW_MANIFEST_MAGIC  0x434F564D   // "COVM"
 #define COW_MANIFEST_MAX    60           // fits in one 4096-byte TagFS block
 
-// Snapshot flags
-#define COW_SNAP_READONLY   (1 << 0)
-#define COW_SNAP_AUTO       (1 << 1)
-
-/* In-memory snapshot record. The runtime fields after `tag_ids[8]`
- * track CoW redirects so SnapshotDelete can release OLD blocks that
- * were preserved for this snapshot's frozen view. They're per-session
- * only — on reboot they re-init empty (a cold-start snapshot can't free
- * OLD blocks the previous session redirected; fsck eventually catches
- * orphans). The on-disk record (CowSnapshotDisk) is the persistent
- * subset and unchanged. */
-typedef struct CowRedirect {
-    uint32_t old_block;
-    uint32_t new_block;
-} CowRedirect;
-
-typedef struct __packed {
-    uint32_t snapshot_id;
-    uint32_t parent_file_id;
-    uint64_t created_time;
-    uint64_t disk_book_checkpoint;
-    uint32_t file_count;
-    uint64_t total_size;
-    uint32_t block_count;
-    char     name[32];
-    uint8_t  flags;
-    uint8_t  tag_count;
-    uint16_t tag_ids[8];
-    /* runtime fields — not persisted */
-    struct CowRedirect *redirects;
-    uint32_t            redirect_count;
-    uint32_t            redirect_cap;
-    uint8_t             reserved[10];
-} CowSnapshot;
+/*
+ * ‼ A SNAPSHOT ON FORMAT V1 COULD BE TAKEN AND NEVER READ.
+ *
+ * Nothing anywhere read a file as a snapshot kept it, and a snapshot of the
+ * volume did not even record which files it held. What taking one did do was
+ * send every write of the file through a copy under an interrupts-off lock and
+ * a redirect log on the medium. So on this format every request for a
+ * snapshot is answered ERR_UNSUPPORTED (TagFS_SnapshotRefused), and nothing on
+ * the write path asks copy-on-write anything: a write goes where the file's
+ * blocks are. Snapshots arrive with format v2, as bookmarks that can be read.
+ *
+ * A volume an earlier kernel wrote may still carry snapshots — the manifest
+ * the Ledger names and the redirects in the DiskBook. They are read at mount,
+ * named, and held in memory as they were found, so the blocks they kept stay
+ * taken (CowRollCall) until the volume's census returns them.
+ */
 
 // On-disk per-snapshot entry (68 bytes each)
 typedef struct __packed {
@@ -75,53 +54,22 @@ typedef struct __packed {
 
 STATIC_ASSERT(sizeof(CowManifest) == 4096, "CowManifest must be 4096 bytes");
 
-// STATIC_ASSERT(sizeof(CowSnapshot) == 128, "CowSnapshot_must_be_128_bytes");
-
-typedef struct {
-    uint32_t magic;
-    uint32_t version;
-    CowSnapshot *snapshots;
-    uint32_t snapshot_capacity;
-    uint32_t snapshot_count;
-    uint64_t cow_writes;
-    uint64_t cow_copies;
-    uint64_t blocks_shared;
-    uint32_t snapshots_created;
-    TagFSLock lock;
-    bool initialized;
-} CowState;
-
-// Public API
 error_t TagFS_CowInit(void);
-void TagFS_CowShutdown(void);
+void    TagFS_CowShutdown(void);
 
-error_t TagFS_SnapshotCreate(const char *name, uint32_t file_id, uint32_t *snapshot_id);
-error_t TagFS_SnapshotDelete(uint32_t snapshot_id);
-error_t TagFS_SnapshotList(uint32_t *ids, uint32_t max_count, uint32_t *actual_count);
-error_t TagFS_SnapshotInfo(uint32_t snapshot_id, CowSnapshot *info);
+/* The answer every snapshot request gets on this format — create, delete,
+ * list or info, named in `asked`: ERR_UNSUPPORTED, said once a boot. */
+error_t TagFS_SnapshotRefused(const char *asked);
 
-error_t TagFS_CowBeforeWrite(uint32_t file_id, uint32_t block_addr, uint32_t *new_block);
-error_t TagFS_CowAfterWrite(uint32_t file_id, uint32_t old_block, uint32_t new_block);
-
-void TagFS_CowGetStats(uint64_t *cow_writes, uint64_t *cow_copies,
-                       uint64_t *blocks_shared, uint32_t *snapshots);
-
-bool TagFS_CowIsActive(uint32_t file_id);
-uint64_t TagFS_CowGetCheckpoint(void);
-
-// Restore a single snapshot from persistent storage into the in-memory list.
-// Only called during mount from tagfs_init to replay the on-disk manifest.
-void TagFS_CowRestoreSnapshot(const CowSnapshot *snap);
-
-// Restore a single CoW redirect (old_block→new_block for a snapshot) at mount,
-// replayed from the DiskBook redirect log. Idempotent (de-duped); a redirect
-// for an unknown/deleted snapshot is safely ignored.
-void TagFS_CowRestoreRedirect(uint32_t snapshot_id, uint32_t old_block, uint32_t new_block);
+/* The snapshots an earlier kernel left on this volume: the manifest the
+ * Ledger names at `manifest_block` (0 when it names none), and the DiskBook's
+ * redirects into them. Read, held as found, and named out loud. Called once,
+ * by the mount, after the DiskBook is opened and before the roll call. */
+void    CowNameStanding(uint32_t manifest_block);
 
 /* Mark the blocks of the data run that belong to copy-on-write into the map
  * the mount's roll call is building. Called from the fsck in tagfs_init,
- * beside IntegrityMarkMapBlocks; marks only, never clears. See the note over
- * the definition for what it can and cannot know on a cold mount. */
-void CowRollCall(uint8_t *computed_bm, uint32_t total_blocks);
+ * beside IntegrityMarkMapBlocks; marks only, never clears. */
+void    CowRollCall(uint8_t *computed_bm, uint32_t total_blocks);
 
 #endif // COW_H

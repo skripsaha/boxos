@@ -62,8 +62,7 @@ typedef struct {
 } TestCase;
 
 /* A suite: `const TestSuite g_<name>_suite`, defined in a file under tests/ (a
- * file may hold more than one, as snapshot_tests.c holds snapshot and cow)
- * and listed in TEST_SUITES below. */
+ * file may hold more than one) and listed in TEST_SUITES below. */
 typedef struct {
     const TestCase* tests;
     uint32_t        count;
@@ -96,13 +95,11 @@ typedef struct {
 #define TEST_SUITES(SUITE) \
     SUITE(core)            \
     SUITE(journal)         \
-    SUITE(snapshot)        \
     SUITE(stress)          \
     SUITE(braid)           \
     SUITE(cow)             \
     SUITE(boxhash)         \
     SUITE(integrity)       \
-    SUITE(dedup)           \
     SUITE(use_context)     \
     VOLUME_TESTS_ONLY(SUITE(stand)) \
     VOLUME_TESTS_ONLY(SUITE(stand_lock)) \
@@ -170,13 +167,12 @@ TestResult TestFailedAt(const char* file, int line, const char* what,
 void TestEvidence(const char* words, uint64_t n);
 
 /* What a test that writes leaves behind, as the runner counts it before and
- * after every such test (tests.c, the residue guard): the files, the
- * snapshots, and the blocks in use outside the volume's own chains. A test
- * whose defect IS a leak takes the same count, to measure what it leaked and
- * to give back exactly that — so the guard stays strict for everybody. */
+ * after every such test (tests.c, the residue guard): the files, and the
+ * blocks in use outside the volume's own chains. A test whose defect IS a
+ * leak takes the same count, to measure what it leaked and to give back
+ * exactly that — so the guard stays strict for everybody. */
 typedef struct {
     uint64_t files;
-    uint32_t snapshots;
     uint64_t held;
 } VolumeTally;
 

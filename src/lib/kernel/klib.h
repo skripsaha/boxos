@@ -98,7 +98,7 @@ void kfree(void* ptr);
  * under test: a test passes amp_get_core_index(), and a core number no
  * processor has arms a plan that can never fire. An interrupt taken on the
  * armed core is not the code under test either, and is passed over. Not seen:
- * pmm_alloc (DMA pages), and slab_alloc called directly (dedup.c).
+ * pmm_alloc (DMA pages), and slab_alloc called directly.
  *
  * Built only into a VOLUME_TESTS=on kernel.
  */

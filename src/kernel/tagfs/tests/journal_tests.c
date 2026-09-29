@@ -3,7 +3,8 @@
 #include "../disk_book/disk_book.h"
 
 // ============================================================================
-// Journal (DiskBook) — the CoW redirect log is open
+// Journal (DiskBook) — the redirect log an earlier kernel kept is open, for
+// the replay of the snapshots it left
 // ============================================================================
 
 static TestResult test_diskbook_init(void)

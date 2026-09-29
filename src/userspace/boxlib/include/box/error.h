@@ -104,7 +104,6 @@ typedef uint32_t error_t;
     X(BOOT_HINTS_MISSING,            boot_hints_missing,            320,  "boot hints missing",            "storage") \
     X(SNAPSHOT_LIMIT,                snapshot_limit,                321,  "snapshot limit reached",        "storage") \
     X(SNAPSHOT_NOT_FOUND,            snapshot_not_found,            322,  "snapshot not found",            "storage") \
-    X(DEDUP_FAILED,                  dedup_failed,                  323,  "deduplication failed",          "storage") \
     X(SELF_HEAL_FAILED,              self_heal_failed,              324,  "self-healing failed",           "storage") \
     /* Process (400-414) */ \
     X(PROCESS_NOT_FOUND,             process_not_found,             400,  "process not found",             "process") \
@@ -222,12 +221,6 @@ typedef uint32_t error_t;
     X(COW_SNAPSHOT_LIMIT,            cow_snapshot_limit,            1013, "snapshot limit reached",        "cow") \
     X(COW_ALLOCATION_FAILED,         cow_allocation_failed,         1014, "cow allocation failed",         "cow") \
     X(COW_RESTORE_FAILED,            cow_restore_failed,            1015, "snapshot restore failed",       "cow") \
-    /* TagFS module — Dedup (1020-1024) */ \
-    X(DEDUP_NOT_INITIALIZED,         dedup_not_initialized,         1020, "dedup not initialized",         "dedup") \
-    X(DEDUP_HASH_COLLISION,          dedup_hash_collision,          1021, "dedup hash collision",          "dedup") \
-    X(DEDUP_POOL_EXHAUSTED,          dedup_pool_exhausted,          1022, "dedup entry pool exhausted",    "dedup") \
-    X(DEDUP_GC_FAILED,               dedup_gc_failed,               1023, "dedup gc failed",               "dedup") \
-    X(DEDUP_REGISTER_FAILED,         dedup_register_failed,         1024, "dedup register failed",         "dedup") \
     /* TagFS module — Self-Heal (1030-1034) */ \
     X(SELF_HEAL_NOT_INITIALIZED,     self_heal_not_initialized,     1030, "self-heal not initialized",     "selfheal") \
     X(SELF_HEAL_CORRUPTION_DETECTED, self_heal_corruption_detected, 1031, "self-heal corruption detected", "selfheal") \

@@ -19,7 +19,6 @@
 
 #include "disk_book/disk_book.h"
 #include "cow/cow.h"
-#include "dedup/dedup.h"
 #include "self_heal/self_heal.h"
 #include "ledger/ledger.h"
 
@@ -72,10 +71,6 @@
 #define TAGFS_REGISTRY_DATA_SIZE    4080
 #define TAGFS_MPOOL_DATA_SIZE       4080
 #define TAGFS_FTABLE_PER_BLOCK      510
-
-// Snapshot limits (production)
-#define TAGFS_MAX_SNAPSHOTS         64
-#define TAGFS_SNAPSHOT_NAME_LEN     32
 
 // ============================================================================
 // On-Disk Structures
@@ -595,9 +590,8 @@ int  tagfs_rename_file(uint32_t file_id, const char* new_filename);
 
 /* Drop everything past `new_size`. SHRINK ONLY — a request to grow is
  * refused (-ERR_INVALID_ARGUMENT) because freshly allocated blocks are not
- * zeroed, and refused outright on a snapshotted file (-ERR_INVALID_OPERATION)
- * because a not-yet-copied block is still the snapshot's only copy. Returns 0
- * or a negative -ERR_*. See the comment above the definition. */
+ * zeroed. Returns 0 or a negative -ERR_*. See the comment above the
+ * definition. */
 int  tagfs_truncate_file(uint32_t file_id, uint64_t new_size);
 
 int  tagfs_add_tag(uint32_t file_id, uint16_t tag_id);
@@ -643,7 +637,12 @@ int         tagfs_get_metadata(uint32_t file_id, TagFSMetadata* out);
 TagFSState* tagfs_get_state(void);
 
 int      tagfs_defrag_file(uint32_t file_id, uint32_t target_block);
-uint32_t tagfs_get_fragmentation_score(void);
+/* How fragmented the volume's files are: the share, in percent, of the steps
+ * from one of a file's blocks to its next that are a gap — the next run not
+ * beginning where the one before it ends — rounded up, so one gap never reads
+ * as none. The live files counted and the gaps found are said through
+ * out_files and out_gaps when they are not NULL. */
+uint32_t tagfs_get_fragmentation_score(uint32_t* out_files, uint32_t* out_gaps);
 
 // ----------------------------------------------------------------------------
 // Block I/O (for subsystem use)
@@ -716,9 +715,8 @@ char*    TagFSKeyList(const uint16_t* tag_ids, uint16_t count);
  * only once the last caller is out. */
 bool     TagFSTagSpelling(uint16_t tag_id, TagSpelling* out, bool* is_system);
 
-// Snapshots: see the CoW snapshot API (TagFS_Snapshot*) in tagfs/cow/cow.h.
-// The former in-memory-only tagfs_snapshot_* API (snapshot.c) was unused and
-// has been removed.
+// Snapshots: a format-v1 volume answers every request for one ERR_UNSUPPORTED
+// (TagFS_SnapshotRefused, tagfs/cow/cow.h); they arrive with format v2.
 
 // Accessor Functions
 // ============================================================================

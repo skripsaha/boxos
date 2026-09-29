@@ -58,10 +58,8 @@ int file_rename(uint32_t file_id, const char* new_filename);
 /* Drop everything past `new_size`. SHRINK ONLY: growing is refused
  * (-ERR_INVALID_ARGUMENT), because TagFS does not zero freshly allocated
  * blocks and a grow would hand back the previous tenant's bytes — files grow
- * by being written. Refused on a snapshotted file (-ERR_INVALID_OPERATION):
- * a block not yet copied since the snapshot is still the snapshot's only
- * copy. Refused on "system"/"boot" files (-ERR_PERMISSION_DENIED), like
- * delete. Returns 0 or a negative -error_t.
+ * by being written. Refused on "system"/"boot" files
+ * (-ERR_PERMISSION_DENIED), like delete. Returns 0 or a negative -error_t.
  *
  * Publishes a TRUNCATED Touch event on every tag of the file — the same
  * 32-byte payload shape as a write, with op = 3, offset = the new length,
@@ -76,15 +74,15 @@ int tag_remove(uint32_t file_id, const char* key);
  * when given). Asked with max == 0 it only counts. */
 int find_file_by_name(const char* filename, uint32_t* file_ids, file_info_t* out_infos, size_t max);
 
-/* CoW snapshots — capture a frozen view of a file (or all files when
- * file_id == 0). The snapshot's redirected blocks are released back to
- * the allocator at snap_delete. */
+/* Snapshots. On a format-v1 volume every one of these four answers
+ * -ERR_UNSUPPORTED and fills in nothing: a snapshot there could be taken and
+ * never read, and snapshots arrive with format v2. The kernel says so once a
+ * boot, naming the request. */
 int snap_create(const char *name, uint32_t file_id, uint32_t *out_snap_id);
 int snap_delete(uint32_t snap_id);
 int snap_list(uint32_t *out_ids, uint32_t max_ids, uint32_t *out_count);
 
-/* Structured per-snapshot record by id — the name-by-id lookup snap_list (ids
- * only) lacks, the basis for resolving a snapshot by name. */
+/* A snapshot's record, as snap_info would fill it. */
 typedef struct {
     uint32_t id;
     uint32_t parent_file_id;

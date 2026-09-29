@@ -19,7 +19,6 @@
 #include "baton.h"      /* BatonPump — the drain core keeps pumping while it waits for a lock */
 #include "cow/cow.h"
 #include "braid/braid.h"
-#include "dedup/dedup.h"
 #include "self_heal/self_heal.h"
 #include "integrity/integrity.h"
 #include "settle_cut/settle_cut.h"
@@ -27,24 +26,6 @@
 #include "../../kernel/drivers/timer/rtc.h"
 #include "logbook.h"
 #include "cpu_calibrate.h"
-
-static void tagfs_auto_snapshot_before_write(uint32_t file_id) {
-    if (file_id == 0)
-        return;
-
-    // Check if CoW is active for this file
-    if (TagFS_CowIsActive(file_id)) {
-        // Create auto-snapshot before write
-        char snap_name[64];
-        ksnprintf(snap_name, sizeof(snap_name), "auto-snap-%u", file_id);
-
-        uint32_t snapshot_id;
-        error_t err = TagFS_SnapshotCreate(snap_name, file_id, &snapshot_id);
-        if (err != OK && err != ERR_ALREADY_EXISTS) {
-            debug_printf("[TagFS] Auto-snapshot failed for file %u: %d\n", file_id, err);
-        }
-    }
-}
 
 static TagFSState g_state = { .lock = TAGFS_LOCK_INIT("state", LOCK_RANK_STATE) };
 static WellKnownTags g_well_known = { TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID };
@@ -1954,8 +1935,13 @@ static int read_block(uint32_t block, void *buffer)
         return -1;
     }
 
-    // Check read-ahead cache first
+    /* A block the read-ahead cache holds came off the medium in a prefetch's
+     * run, which checks nothing, so it is verified here, where it is handed
+     * out, exactly as a block read on its own is. Checked only on a miss,
+     * verify-on-read would cover one block of every run a file is read in —
+     * and a file's blocks are read in runs once its extents merge (CW-D8). */
     if (ReadAheadLookup(block, buffer) == 0) {
+        (void)IntegrityVerify(block, buffer);
         return 0;
     }
 
@@ -2124,8 +2110,8 @@ static void free_list_build(void)
  * a mount derives them, and for the same reason: the bitmap is the truth about
  * whether a block is taken, and both of the others are bookkeeping about it.
  *
- * For a startup test that has just watched a block be given back twice
- * (free_run_locked does not look at the bit, so the second release puts the
+ * For a startup test that asks whether a block was given back twice
+ * (free_run_locked does not look at the bit, so a second release puts the
  * block on the list a second time and counts it free a second time, while the
  * bitmap, cleared the first time, does not move). The test measures that and
  * then leaves the allocator as the next mount would read it, instead of
@@ -2442,9 +2428,9 @@ error_t tagfs_init(void) {
     }
     g_ledger_free_as_read = g_state.ledger.free_blocks;
 
-    /* --- DiskBook init (CoW redirect log). Replay is deferred until AFTER
-     *     CoW init + manifest restore below, so restored redirects attach to
-     *     the live snapshots they belong to.
+    /* --- The DiskBook: the redirect log an earlier kernel kept for its
+     *     snapshots, only ever read now. Its redirects are replayed into the
+     *     snapshots the manifest names, once copy-on-write has read that.
      *
      *     Its head, the copy of its head and its records are three separate
      *     runs of the volume, in the volume's own sectors — the DiskBook is
@@ -2465,52 +2451,9 @@ error_t tagfs_init(void) {
                              ERR_COW_NOT_INITIALIZED);
     }
 
-    // --- Restore CoW snapshots from on-disk manifest ---
-    {
-        uint32_t cow_sector = g_state.ledger.cow_manifest_block;
-        if (cow_sector != 0) {
-            CowManifest *manifest = kmalloc(sizeof(CowManifest));
-            if (manifest) {
-                if (tagfs_read_block(cow_sector, manifest) == OK &&
-                    manifest->magic == COW_MANIFEST_MAGIC &&
-                    manifest->count <= COW_MANIFEST_MAX) {
-                    for (uint32_t i = 0; i < manifest->count; i++) {
-                        CowSnapshotDisk *src = &manifest->entries[i];
-                        CowSnapshot snap;
-                        memset(&snap, 0, sizeof(snap));
-                        snap.snapshot_id          = src->snapshot_id;
-                        snap.parent_file_id       = src->parent_file_id;
-                        snap.created_time         = src->created_time;
-                        snap.disk_book_checkpoint = (uint64_t)src->disk_book_checkpoint;
-                        snap.file_count           = src->file_count;
-                        snap.total_size           = src->total_size;
-                        snap.flags                = src->flags;
-                        memcpy(snap.name, src->name, TAGFS_SNAPSHOT_NAME_LEN);
-                        TagFS_CowRestoreSnapshot(&snap);
-                    }
-                    debug_printf("[TagFS] Restored %u CoW snapshots from disk\n",
-                                 manifest->count);
-                } else {
-                    debug_printf("[TagFS] CoW manifest missing or invalid — starting fresh\n");
-                }
-                kfree(manifest);
-            }
-        }
-    }
-
-    // --- DiskBook replay: restore durable CoW redirects into the snapshots
-    //     just loaded from the manifest. Idempotent + CRC-verified. Runs after
-    //     TagFS_CowInit + manifest restore so the target snapshots exist.
-    if (DiskBookIsInitialized())
-    {
-        DiskBookValidateAndReplay();
-    }
-
-    // --- Data Deduplication init ---
-    if (TagFS_DedupInit() != OK) {
-        return mount_refused("its deduplication index would not start",
-                             ERR_DEDUP_NOT_INITIALIZED);
-    }
+    /* --- The snapshots an earlier kernel left: read, held, named. A
+     *     format-v1 volume takes no new one (TagFS_SnapshotRefused). */
+    CowNameStanding(g_state.ledger.cow_manifest_block);
 
     // --- Self-Healing init ---
     TagFS_SelfHealInit();
@@ -2524,8 +2467,8 @@ error_t tagfs_init(void) {
     /*
      * ‼ THE FAILURE THAT COST A BOARD ITS FILESYSTEM, ON COMMAND.
      *
-     * Every refusal from here down leaves five subsystems standing — DiskBook,
-     * CoW, Dedup, Self-Heal and the test framework — and until
+     * Every refusal from here down leaves four subsystems standing — DiskBook,
+     * CoW, Self-Heal and the test framework — and until
      * tagfs_clear_the_ground existed nothing took them down. The NEXT mount
      * then died at TagFS_CowInit with ERR_ALREADY_INITIALIZED, and went on
      * dying there for the rest of the boot, saying nothing. Nothing in QEMU
@@ -2920,12 +2863,10 @@ error_t tagfs_init(void) {
             // mark them so they are not treated as orphans or reused.
             IntegrityMarkMapBlocks(computed_bm, g_state.layout.data_blocks);
 
-            /* And the same question put to copy-on-write, which owns the one
-             * block on this volume that no file extent and no chain magic can
-             * reach: the snapshot manifest. Named in the Ledger the instant it
-             * is allocated, marked used on the medium only at the next sync —
-             * so a volume that lost power in between came back with the
-             * manifest block in the free list. See CowRollCall. */
+            /* And the same question put to copy-on-write, which owns what no
+             * file extent and no chain magic can reach: the snapshot manifest
+             * an earlier kernel named in the Ledger, and the blocks its
+             * snapshots keep. See CowRollCall. */
             CowRollCall(computed_bm, g_state.layout.data_blocks);
 
             // Compare computed vs on-disk bitmap
@@ -3320,8 +3261,8 @@ static void tagfs_sync_inside(void)
  *
  * This is the piece that did not exist, and its absence is what turned one
  * transient read error into a machine with no filesystem for the rest of its
- * boot. tagfs_init brings up ten things in order and any of them may refuse;
- * when one did, the nine before it were left standing and nothing anywhere took
+ * boot. tagfs_init brings up nine things in order and any of them may refuse;
+ * when one did, the eight before it were left standing and nothing anywhere took
  * them down — tagfs_teardown begins with `if (!g_state.initialized) return`,
  * and a mount that failed never set that flag.
  *
@@ -3382,7 +3323,6 @@ static void tagfs_clear_the_ground(void)
     g_state.block_bitmap.total_blocks = 0;
 
     TagFS_CowShutdown();
-    TagFS_DedupShutdown();
     TagFS_SelfHealShutdown();
     BraidShutdown();
     IntegrityShutdown();
@@ -4687,9 +4627,6 @@ static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint6
     if (!(handle->flags & TAGFS_HANDLE_WRITE))
         return -1;
 
-    // Auto-snapshot before write if versioning enabled (production feature)
-    tagfs_auto_snapshot_before_write(handle->file_id);
-
     /* Serialize writes to the same file — by trying, never by spinning in
      * TagFSLockTake. This lock is held across `write_block`, and on some
      * roads the holder's command is finished only by what the BSP does:
@@ -4743,7 +4680,6 @@ static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint6
             extent_start += extent_size;
         }
 
-        bool newly_allocated = false;
         if (found < 0)
         {
             // extent_start = cumulative size of all existing extents (from loop)
@@ -4776,7 +4712,6 @@ static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint6
             handle->extent_count = new_count;
 
             found = handle->extent_count - 1;
-            newly_allocated = true;
             // extent_start stays as cumulative end — math works correctly now
         }
 
@@ -4785,8 +4720,6 @@ static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint6
         uint32_t offset_in_block = (uint32_t)(offset_in_extent % TAGFS_BLOCK_SIZE);
         uint32_t disk_block = handle->extents[found].start_block + block_index;
 
-        // CoW only applies to pre-existing blocks, not newly allocated ones.
-        bool is_existing_block = !newly_allocated;
         bool needs_partial_read = (offset_in_block != 0 || (size - bytes_written) < TAGFS_BLOCK_SIZE);
 
         if (needs_partial_read)
@@ -4807,58 +4740,22 @@ static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint6
 
         memcpy(block_buf + offset_in_block, in + bytes_written, chunk);
 
-        // CoW: before overwriting an existing block in a CoW-enabled file,
-        // redirect the write to a freshly allocated single-block copy.
-        // Only applied when writing a full block at block_index==0 in an extent,
-        // which covers the common case without requiring extent splits.
-        uint32_t write_target = disk_block;
-        if (is_existing_block && block_index == 0 && TagFS_CowIsActive(handle->file_id)) {
-            uint32_t cow_block = 0;
-            if (TagFS_CowBeforeWrite(handle->file_id, disk_block, &cow_block) == OK && cow_block != 0) {
-                // Redirect this extent's start to the new block
-                handle->extents[found].start_block = cow_block;
-                write_target = cow_block;
-                TagFS_CowAfterWrite(handle->file_id, disk_block, cow_block);
-            }
-        }
-
-        // Dedup: for complete single-block writes on newly allocated blocks only,
-        // check if identical data already resides on disk.
-        // We skip dedup for partial writes (read-modify-write) since we need
-        // the real data to already exist on disk for dedup to be safe.
-        /* Inline dedup DISABLED during write.
-         *
-         * Dedup inside tagfs_write caused a block reuse race: freed dedup
-         * blocks were reallocated by MetaPool CHAINING (in the meta_pool_write
-         * call at the end of this function), corrupting file data.
-         *
-         * Dedup is still effective via TagFS_DedupRegister on close/flush
-         * or as a background compaction pass.  The inline path was an
-         * optimization that traded safety for space — not acceptable for
-         * production. */
-        bool wrote_block = false;
-        if (newly_allocated && block_index == 0 &&
-            offset_in_block == 0 && chunk == TAGFS_BLOCK_SIZE &&
-            TagFS_DedupIsInitialized()) {
-            TagFS_DedupRegister(write_target, block_buf, handle->file_id);
-        }
-
-        if (!wrote_block) {
-            if (write_block(write_target, block_buf) != 0)
-            {
-                /* The same lie the read path told, in the direction that
-                 * matters more: a block the medium refused ended the loop and
-                 * the byte count so far was returned as the answer. A caller
-                 * checking for failure the usual way was told the write
-                 * succeeded and simply moved fewer bytes than asked.
-                 *
-                 * The metadata below still commits what actually landed, so
-                 * the file on the medium stays consistent with itself — what
-                 * changes is that the caller is told. */
-                medium_refused = true;
-                refused_block  = write_target;
-                break;
-            }
+        /* The block is written where the file has it. Nothing is copied for a
+         * snapshot: a format-v1 volume takes none (TagFS_SnapshotRefused). */
+        if (write_block(disk_block, block_buf) != 0)
+        {
+            /* The same lie the read path told, in the direction that
+             * matters more: a block the medium refused ended the loop and
+             * the byte count so far was returned as the answer. A caller
+             * checking for failure the usual way was told the write
+             * succeeded and simply moved fewer bytes than asked.
+             *
+             * The metadata below still commits what actually landed, so
+             * the file on the medium stays consistent with itself — what
+             * changes is that the caller is told. */
+            medium_refused = true;
+            refused_block  = disk_block;
+            break;
         }
 
         bytes_written += chunk;
@@ -4956,13 +4853,6 @@ static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint6
 // file's bytes is worse than one that says no. Files grow the honest way, by
 // being written.
 //
-// REFUSED ON A SNAPSHOTTED FILE. A block that has not been copied since the
-// snapshot was taken is still the snapshot's only copy, and a CowSnapshot
-// records redirects rather than an extent list of its own — so nothing here
-// can tell "mine alone" from "shared with a frozen view". Freeing such a
-// block would corrupt the snapshot. Refusing costs a rare failed truncate;
-// guessing costs the snapshot.
-//
 // Returns 0, or a negative -ERR_* naming the cause.
 // ----------------------------------------------------------------------------
 
@@ -5057,11 +4947,8 @@ static int tagfs_truncate_locked(uint32_t file_id, uint64_t new_size)
     meta_pool_delete(meta_block, meta_offset);
 
     /* Committed: the dropped blocks are unreachable, so release them.
-     * tagfs_free_blocks settles them with the dedup index on the way out —
-     * a recycled block behind a live content hash is exactly how a later
-     * lookup would hand one file another's bytes. Dropping them from the
-     * read-ahead cache is this loop's own job, so a reallocation cannot serve
-     * the old tenant's content out of memory. */
+     * Dropping them from the read-ahead cache is this loop's own job, so a
+     * reallocation cannot serve the old tenant's content out of memory. */
     for (uint16_t i = 0; i < old_n; i++)
     {
         uint32_t drop_from = 0;
@@ -5104,10 +4991,6 @@ static int tagfs_truncate_file_inside(uint32_t file_id, uint64_t new_size)
 {
     if (file_id == 0)
         return -ERR_INVALID_ARGUMENT;
-
-    /* A snapshot may still be reading the blocks this would drop. */
-    if (TagFS_CowIsActive(file_id))
-        return -ERR_INVALID_OPERATION;
 
     TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
     if (!handle)
@@ -5327,8 +5210,7 @@ static int tagfs_alloc_blocks_inside(uint32_t count, uint32_t *out_start_block)
 }
 
 // Reclaim one contiguous run into the bitmap and the free list.
-// Caller holds g_state.lock, and has already settled the run with the dedup
-// index (see tagfs_free_blocks_internal below).
+// Caller holds g_state.lock.
 static void free_run_locked(uint32_t start_block, uint32_t count)
 {
     if (count == 0)
@@ -5391,53 +5273,11 @@ static void free_run_locked(uint32_t start_block, uint32_t count)
     }
 }
 
-// Give blocks back to the allocator. Caller MUST hold g_state.lock.
-//
-// This is the one door out of the allocator, so it is also where a block leaves
-// the dedup index. Nothing used to walk that index on the way out: every
-// deleted file left its blocks behind in it, mapping live content hashes to
-// bytes that now belong to somebody else, and the index grew for the lifetime
-// of the system with no pass able to shrink it.
-//
-// The index also gets a veto. It is the only record that a block has more than
-// one owner, so a block it still counts as shared is not ours to hand back —
-// the run is split around it and the rest is reclaimed.
-//
-// Lock order is g_state.lock -> dedup lock, established here and observed
-// everywhere; TagFS_DedupAllocBlock keeps its allocation outside the dedup lock
-// so the cycle cannot close from the other side.
+// Give blocks back to the allocator — the one door out of it. Caller MUST
+// hold g_state.lock.
 void tagfs_free_blocks_internal(uint32_t start_block, uint32_t count)
 {
-    if (count == 0)
-        return;
-
-    uint32_t run_start = start_block;
-    uint32_t run_len   = 0;
-
-    for (uint32_t i = 0; i < count; i++)
-    {
-        uint32_t block = start_block + i;
-
-        bool may_reclaim = true;
-        TagFS_DedupUnregister(block, &may_reclaim);
-
-        if (may_reclaim)
-        {
-            if (run_len == 0)
-                run_start = block;
-            run_len++;
-            continue;
-        }
-
-        if (run_len)
-        {
-            free_run_locked(run_start, run_len);
-            run_len = 0;
-        }
-    }
-
-    if (run_len)
-        free_run_locked(run_start, run_len);
+    free_run_locked(start_block, count);
 }
 
 // Public version - acquires g_state.lock
@@ -5827,20 +5667,37 @@ static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
     return 0;
 }
 
-static uint32_t tagfs_get_fragmentation_score_inside(void);
+static uint32_t tagfs_get_fragmentation_score_inside(uint32_t *out_files, uint32_t *out_gaps);
 
-uint32_t tagfs_get_fragmentation_score(void)
+uint32_t tagfs_get_fragmentation_score(uint32_t *out_files, uint32_t *out_gaps)
 {
+    if (out_files)
+        *out_files = 0;
+    if (out_gaps)
+        *out_gaps = 0;
     if (!tagfs_enter())
         return 0;
-    uint32_t rc = tagfs_get_fragmentation_score_inside();
+    uint32_t rc = tagfs_get_fragmentation_score_inside(out_files, out_gaps);
     tagfs_leave();
     return rc;
 }
 
-static uint32_t tagfs_get_fragmentation_score_inside(void)
+/*
+ * ‼ COUNTED WHERE A READ HAS TO SEEK, NOT BY HOW THE RECORD SPLITS A FILE.
+ *
+ * The score used to be one less than each file's extent count, summed, and no
+ * share of anything, while the tools print it as a percentage: a file written
+ * 4 KiB at a time carries an extent per block, laid end to end, and read as
+ * shredded though it reads in one run. And the gaps it stands for were sent
+ * out as zero, never counted (CW-N9). A gap is a run that does not begin on
+ * the block after the one before it ends; the score is the gaps as a share of
+ * every step from one of a file's blocks to its next.
+ */
+static uint32_t tagfs_get_fragmentation_score_inside(uint32_t *out_files, uint32_t *out_gaps)
 {
-    uint32_t score = 0;
+    uint32_t files  = 0;
+    uint32_t gaps   = 0;
+    uint32_t steps  = 0;
     uint32_t max_id = g_state.ledger.next_file_id;
 
     for (uint32_t fid = 1; fid < max_id; fid++)
@@ -5851,15 +5708,29 @@ static uint32_t tagfs_get_fragmentation_score_inside(void)
 
         TagFSMetadata meta;
         memset(&meta, 0, sizeof(meta));
-        if (meta_pool_read(mb, mo, &meta) == 0)
+        if (meta_pool_read(mb, mo, &meta) != 0)
+            continue;
+        if (meta.flags & TAGFS_FILE_ACTIVE)
         {
-            if (meta.extent_count > 1)
+            uint32_t blocks = 0;
+            for (uint16_t e = 0; e < meta.extent_count && meta.extents; e++)
             {
-                score += (meta.extent_count - 1);
+                const FileExtent *run = &meta.extents[e];
+                if (e > 0 && run->start_block !=
+                             run[-1].start_block + run[-1].block_count)
+                    gaps++;
+                blocks += run->block_count;
             }
-            tagfs_metadata_free(&meta);
+            if (blocks > 1)
+                steps += blocks - 1;
+            files++;
         }
+        tagfs_metadata_free(&meta);
     }
 
-    return score;
+    if (out_files)
+        *out_files = files;
+    if (out_gaps)
+        *out_gaps = gaps;
+    return steps ? (uint32_t)(((uint64_t)gaps * 100u + steps - 1) / steps) : 0;
 }

@@ -432,7 +432,7 @@ int find_file_by_name(const char *filename, uint32_t *file_ids,
 }
 
 /* =========================================================================
- *  CoW snapshot wrappers
+ *  Snapshot requests — each answered -ERR_UNSUPPORTED on format v1 (file.h)
  * ========================================================================= */
 
 int snap_create(const char *name, uint32_t file_id, uint32_t *out_snap_id)

@@ -4732,16 +4732,17 @@ void Phase18()
            "create/query/find\n");
 }
 
-// ── Ф15b: the Use Context / snapshot RAII + anchor↔touch observer ─────────
-static_assert(!std::is_copy_constructible_v<box::tagfs::snapshot>,
-              "box::tagfs::snapshot is move-only");
-static_assert(std::is_move_constructible_v<box::tagfs::snapshot>,
-              "box::tagfs::snapshot is movable");
+// ── Ф15b: the Use Context / snapshots refused on format v1 + anchor↔touch observer
+// A snapshot's error arm: unsupported, which is what every snapshot request on
+// a format-v1 volume is answered — snapshots arrive with format v2.
+static bool SnapshotRefused(int rc)
+{
+    return rc < 0 && box::error{box_errno_of(rc)}.code() == box::errc::unsupported;
+}
 
 void Phase19()
 {
     using box::tagfs::file;
-    using box::tagfs::snapshot;
 
     auto results_have = [](const std::vector<file> &v, std::uint32_t id) {
         for (const file &f : v)
@@ -4755,7 +4756,7 @@ void Phase19()
 
     box::result<file> created_a = box::tagfs::create("cxx:p19:alpha", {"p19ctx:alpha", "p19:probe"});
     if (!created_a) {
-        printf("[CXX] PASS phase19: box::use / snapshot / anchor "
+        printf("[CXX] PASS phase19: box::use / snapshots refused / anchor "
                "(compiled; storage unavailable)\n");
         return;
     }
@@ -4797,48 +4798,16 @@ void Phase19()
               "phase19 all_everywhere is never less than all");
     }
 
-    // ── snapshot: owning RAII over a CoW snapshot ───────────────────────
-    // The C++ contract is "the dtor (or drop()) issues exactly one snap_delete";
-    // verify it by the change in the live snapshot count, which is robust to
-    // whatever else already exists on disk and to the kernel's id assignment.
+    // ── snapshots: refused on a format-v1 volume ────────────────────────
+    // A snapshot on format v1 could be taken and never read, so a program that
+    // asks for one — of a file or of the whole volume — is answered
+    // unsupported, and handed no id to hold.
     {
-        auto snap_count = [] { return box::tagfs::snapshots().size(); };
-
-        std::size_t n0 = snap_count();
-        {
-            box::result<snapshot> snap = snapshot::of(fa, "cxx:p19:snap1");
-            if (snap) {
-                Check(snap->id() != 0, "phase19 snapshot has a live id");
-                Check(snap->name() == "cxx:p19:snap1", "phase19 snapshot name echoes create");
-                Check(snap_count() == n0 + 1, "phase19 snapshots() reflects the new snapshot");
-            } else {
-                printf("[CXX] note phase19: snap_create unavailable/name taken; "
-                       "snapshot lifecycle skipped\n");
-            }
-        }  // snap dtor → snap_delete
-        Check(snap_count() == n0, "phase19 snapshot auto-deleted on scope exit (RAII)");
-
-        // keep() detaches the snapshot so it outlives the handle's scope.
-        {
-            std::uint32_t kept = 0;
-            {
-                box::result<snapshot> snap = snapshot::of(fa, "cxx:p19:snap2");
-                if (snap) kept = snap->keep();
-            }
-            if (kept) {
-                Check(snap_count() == n0 + 1,
-                      "phase19 keep() detaches: snapshot survives scope");
-                Check(::snap_delete(kept) == 0, "phase19 manual snap_delete of kept snapshot");
-                Check(snap_count() == n0, "phase19 kept snapshot gone after manual delete");
-            }
-        }
-
-        // Whole-filesystem snapshot (file_id 0), auto-deleted on scope exit.
-        {
-            box::result<snapshot> whole = snapshot::of_all("cxx:p19:snapall");
-            if (whole) Check(whole->id() != 0, "phase19 snapshot::of_all (whole filesystem)");
-        }
-        Check(snap_count() == n0, "phase19 all snapshots cleaned up (count restored)");
+        std::uint32_t sid = 0;
+        Check(SnapshotRefused(::snap_create("cxx:p19:snap1", fa.id(), &sid)) && sid == 0,
+              "phase19 a snapshot of a file is refused (unsupported) and hands back no id");
+        Check(SnapshotRefused(::snap_create("cxx:p19:snapall", 0, &sid)) && sid == 0,
+              "phase19 a snapshot of the whole volume is refused (unsupported)");
     }
 
     // ── anchor observer: durability events bridged into box::touch ──────
@@ -4869,7 +4838,7 @@ void Phase19()
     (void)fb.remove();
 
     printf("[CXX] PASS phase19: box::use (asked by anyone, set only with authority) + "
-           "query_everywhere + snapshot (RAII/keep/of_all + snapshots()) + "
+           "query_everywhere + snapshots refused on format v1 + "
            "on_anchor/anchor_event\n");
 }
 
@@ -8891,7 +8860,6 @@ void Phase47()
             {box::errc::boot_info_invalid,      "boot"},     {box::errc::kernel_load_failed,    "boot"},
             {box::errc::diskbook_not_initialized,"diskbook"},{box::errc::diskbook_read_failed,  "diskbook"},
             {box::errc::cow_not_initialized,    "cow"},      {box::errc::cow_restore_failed,    "cow"},
-            {box::errc::dedup_not_initialized,  "dedup"},    {box::errc::dedup_register_failed, "dedup"},
             {box::errc::self_heal_not_initialized,"selfheal"},{box::errc::self_heal_scrub_failed,"selfheal"},
             {box::errc::boxhash_invalid_context,"boxhash"},  {box::errc::boxhash_key_not_set,   "boxhash"},
             {box::errc::braid_not_initialized,  "braid"},    {box::errc::braid_rebuild_failed,  "braid"},
@@ -10494,7 +10462,7 @@ void Phase54()
 }
 
 // ── Ф25e: explicit snapshot model (record snapshot vs live handle) + typed
-//    tags + anchor_all + snapshot::adopt + vga::clear_line ──
+//    tags + anchor_all + vga::clear_line ──
 void Phase55()
 {
     using box::tagfs::file;
@@ -10508,7 +10476,7 @@ void Phase55()
     if (!made) {
         std::string_view why = made.error().message();
         printf("[CXX] SKIP phase55: tagfs storage unavailable (create p55:recA: %.*s) "
-               "— record / typed-tag / anchor_all / snapshot::adopt checks skipped\n",
+               "— record / typed-tag / anchor_all checks skipped\n",
                static_cast<int>(why.size()), why.data());
     } else {
         std::uint32_t A = made->id();
@@ -10556,25 +10524,6 @@ void Phase55()
         Check(box::tagfs::anchor_all().has_value(),
               "phase55 anchor_all() whole-fs durability ok");
 
-        // (4) snapshot adopt + RAII drop ────────────────────────────────────
-        box::result<box::tagfs::snapshot> s = box::tagfs::snapshot::of(A, "p55snap");
-        if (!s) {
-            std::string why(s.error().message());
-            printf("[CXX] SKIP phase55: snapshot::of denied (%s) — adopt re-own "
-                   "round-trip skipped (adopt(0) arm still checked)\n", why.c_str());
-        } else {
-            std::uint32_t kept = s->keep();  // detach: the id outlives this handle
-            {
-                box::result<box::tagfs::snapshot> re =
-                    box::tagfs::snapshot::adopt(kept, "p55snap");
-                Check(re && re->id() == kept, "phase55 adopt re-owns the kept id");
-            }  // re's dtor → snap_delete(kept)
-            bool present = false;
-            for (std::uint32_t sid : box::tagfs::snapshots())
-                if (sid == kept) present = true;
-            Check(!present, "phase55 adopt's dtor snap_deleted the re-owned id");
-        }
-
         // (1b) find_all enumerates past the former 8 stack-buffer cap ────────
         // TagFS names are not unique; create N (> the old cap of 8) same-named
         // files and confirm find_all returns every one (heap buffer, ceiling 255).
@@ -10597,44 +10546,38 @@ void Phase55()
         for (auto f2 : box::tagfs::query("p55")) (void)f2.remove();
     }
 
-    // adopt(0) is a pure-logic guard (no syscall) — always checked.
-    box::result<box::tagfs::snapshot> z = box::tagfs::snapshot::adopt(0);
-    Check(!z && z.error().code() == box::errc::invalid_argument,
-          "phase55 adopt(0) → invalid_argument");
-
     // (5) vga::clear_line — the physical clear is dormant on the serial log
     //     (like every box::vga op); the syscall round-trip is what's checked.
     Check(box::vga::clear_line(0, box::colors::black), "phase55 vga::clear_line syscall ok");
 
     printf("[CXX] PASS phase55: box::tagfs::record (captured snapshot vs live/reread) "
            "+ typed tags (tag::as<T> / file::add_tag<T>) + anchor_all + "
-           "snapshot::adopt + vga::clear_line\n");
+           "vga::clear_line\n");
 }
 
 void Phase56()
 {
     using box::tagfs::file;
 
-    // SL-1 (system-tag classification) + SL-2 (snapshot name-by-id) honesty.
-    // The matrix shares one disk across its 4 configs, so this is cleanup-first
-    // and re-runnable: a leaked p56snap is reclaimed, and leftover p56 files are
-    // swept. p56sys carries an explicit "p56" tag purely so query() finds it for
-    // the sweep; its reserved "system" tag blocks ObjDelete, so it is stripped
-    // first (also covers a crash between the add and the final sweep).
+    // SL-1 (system-tag classification) + SL-2 (snapshot bookkeeping refused)
+    // honesty. The matrix shares one disk across its 4 configs, so this is
+    // cleanup-first and re-runnable: leftover p56 files are swept. p56sys
+    // carries an explicit "p56" tag purely so query() finds it for the sweep;
+    // its reserved "system" tag blocks ObjDelete, so it is stripped first (also
+    // covers a crash between the add and the final sweep).
     auto sweep = [] {
         for (auto victim : box::tagfs::query("p56")) {
             (void)victim.remove_tag("system");  // 'system' tag blocks delete
             (void)victim.remove();
         }
     };
-    (void)box::tagfs::snapshot::reclaim("p56snap");  // drop a leaked snapshot
     sweep();
 
     box::result<file> made = box::tagfs::create("p56sys", {"p56"});
     if (!made) {
         std::string_view why = made.error().message();
         printf("[CXX] SKIP phase56: tagfs storage unavailable (create p56sys: %.*s) "
-               "— system-tag classification + snapshot name-by-id checks skipped\n",
+               "— system-tag classification + snapshot refusal checks skipped\n",
                static_cast<int>(why.size()), why.data());
         return;
     }
@@ -10663,41 +10606,26 @@ void Phase56()
               "phase56 auto-label 'p56sys' is not system (reserved-vocabulary model, not provenance)");
     }
 
-    // ── SL-2: snapshot name-by-id + deterministic reclaim ────────────────────
-    box::result<box::tagfs::snapshot> s = box::tagfs::snapshot::of(f, "p56snap");
-    if (!s) {
-        std::string why(s.error().message());
-        printf("[CXX] SKIP phase56: snapshot::of denied (%s) — SL-2 name-by-id / reclaim skipped\n",
-               why.c_str());
-    } else {
-        std::uint32_t sid = s->keep();  // detach: simulate a leaked snapshot
-
-        bool named_match = false;
-        for (const box::tagfs::snapshot_info &si : box::tagfs::snapshots_named())
-            if (si.id == sid && si.name == "p56snap") named_match = true;
-        Check(named_match,
-              "phase56 snapshots_named() reports id + name for the leaked snapshot");
-
-        {
-            box::result<box::tagfs::snapshot> re = box::tagfs::snapshot::reclaim("p56snap");
-            Check(re && re->id() == sid,
-                  "phase56 reclaim(\"p56snap\") re-owns the leaked snapshot by name");
-        }  // re's owning dtor → snap_delete(sid)
-
-        bool still_present = false;
-        for (std::uint32_t id : box::tagfs::snapshots())
-            if (id == sid) still_present = true;
-        Check(!still_present, "phase56 reclaim's RAII drop removed the snapshot");
-
-        box::result<box::tagfs::snapshot> none = box::tagfs::snapshot::reclaim("p56nope");
-        Check(!none && none.error().code() == box::errc::snapshot_not_found,
-              "phase56 reclaim(\"p56nope\") -> snapshot_not_found");
+    // ── SL-2: a snapshot's bookkeeping is refused as its taking is ─────────
+    // There is none to list, name, or delete on format v1: each request is
+    // answered unsupported, never an empty list or a "not found" that would
+    // read as if snapshots existed and this one did not.
+    {
+        std::uint32_t ids[4] = {0, 0, 0, 0};
+        std::uint32_t count  = 0;
+        snap_info_t   info{};
+        Check(SnapshotRefused(::snap_list(ids, 4, &count)) && count == 0,
+              "phase56 snap_list is refused (unsupported), not answered empty");
+        Check(SnapshotRefused(::snap_info(1, &info)),
+              "phase56 snap_info is refused (unsupported), not snapshot_not_found");
+        Check(SnapshotRefused(::snap_delete(1)),
+              "phase56 snap_delete is refused (unsupported)");
     }
 
     sweep();  // clean the p56 files (strip 'system' first so delete is allowed)
 
     printf("[CXX] PASS phase56: TagFS substrate honesty — system-tag classification "
-           "(reserved vocabulary) + snapshot name-by-id (snap_info) + deterministic reclaim\n");
+           "(reserved vocabulary) + snapshot list / info / delete refused on format v1\n");
 }
 
 // phase57 — box::reflex (TOUCH_REACT manifest RAII). The kernel runs a stored
