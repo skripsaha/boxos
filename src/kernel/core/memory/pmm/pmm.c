@@ -804,6 +804,44 @@ void pmm_free(void* addr, size_t pages) {
     MemTagPmmFreed(base, pages);
 }
 
+/* The poison rule of _pmm_alloc_impl, kept for runs: a run that holds a page
+ * a machine check named is kept out of circulation whole and another is
+ * taken, a bounded number of times. */
+void* PmmTakeExact(size_t pages) {
+    if (!pages || !pmm_initialized) return NULL;
+
+    for (uint32_t tries = 0; tries <= PMM_MCE_RETRY_MAX; tries++) {
+        void* addr = BuddyTakeExact(&pmm_buddy, pages);
+        if (!addr) return NULL;
+
+        if (pmm_is_range_poisoned((uintptr_t)addr, pages)) {
+            for (size_t pi = 0; pi < pages; pi++)
+                pmm_set_poisoned((uintptr_t)addr + pi * PMM_PAGE_SIZE);
+            continue;
+        }
+        if ((uintptr_t)addr + pages * PMM_PAGE_SIZE - 1 >= pmm_max_phys_addr) {
+            BuddyGiveExact(&pmm_buddy, addr, pages);
+            return NULL;
+        }
+        return addr;
+    }
+    return NULL;
+}
+
+void PmmGiveExact(void* addr, size_t pages) {
+    if (!addr || !pages || !pmm_initialized) return;
+
+    uintptr_t base = (uintptr_t)addr;
+    /* Same rule as pmm_free: a run holding a poisoned page is leaked whole. */
+    if (!pmm_is_range_poisoned(base, pages))
+        BuddyGiveExact(&pmm_buddy, addr, pages);
+    MemTagPmmFreed(base, pages);
+}
+
+size_t PmmFreePagesNow(void) {
+    return __atomic_load_n(&pmm_buddy.free_count, __ATOMIC_RELAXED);
+}
+
 size_t pmm_total_pages(void) {
     /* Installed RAM in pages — count of E820 USABLE entries inserted into
      * the buddy at init.  NOT (mem_end - zone_base)/PAGE_SIZE: that span

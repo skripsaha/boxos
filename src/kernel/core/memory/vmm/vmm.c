@@ -2494,9 +2494,8 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
      *
      * Capacity is a power of two at twice the context's mapped-page count, so
      * linear probing runs at a load factor of 0.5 or better and insertion
-     * cannot fail through fullness. From the PMM: the kernel heap is a fixed
-     * small-object pool, and this is page-scale scratch for a walk that is
-     * about to hand pages back to the PMM anyway. */
+     * cannot fail through fullness. From the PMM: this is page-scale scratch
+     * for a walk that is about to hand pages back to the PMM anyway. */
     VmmFreedSet freed = {0};
     {
         size_t want_slots = vmm_pow2_ceil(((size_t)ctx->mapped_pages + 1) * 2);
@@ -4468,11 +4467,13 @@ void vmm_init(void)
     // VGA MUST be rebased FIRST — all subsequent prints go through VGA
     VideoActivatePullMap();
 
-    // Rebase kmalloc heap pool and free list from identity to Pull Map addresses
-    mem_activate_pull_map();
-
     // Rebase PMM bitmap to Pull Map address
     pmm_activate_pull_map();
+
+    // Rebase the kernel heap to the Pull Map. After the page allocator, not
+    // before it: from here on the heap grows by taking pages from it, and
+    // neither rebase allocates, so nothing asks the heap in between.
+    mem_activate_pull_map();
 
     // Rebase e820 entries to Pull Map address
     e820_activate_pull_map();

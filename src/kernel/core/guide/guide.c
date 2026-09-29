@@ -29,6 +29,8 @@
 #include "manifest_stage.h"
 #include "crate_stage.h"
 #include "op_registry.h"
+#include "kheap.h"       /* the pocket's charge: whom the kernel heap serves */
+#include "auth_tags.h"
 
 ReadyQueue g_ready_queue;
 
@@ -330,6 +332,19 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
     execution_deck_handler(pocket, proc);
 }
 
+/* The class a cabin's pockets charge the kernel heap to (kheap.h): the
+ * highest authority key it carries. Bypass authorises as system does, so it
+ * is charged as system is. */
+static KHeapCharge guide_charge_of(const cabin_t *cabin)
+{
+    uint32_t auth = __atomic_load_n(&cabin->auth_bits, __ATOMIC_RELAXED);
+    if (auth & AUTH_TAG_GOD)                        return KHEAP_CHARGE_GOD;
+    if (auth & (AUTH_TAG_SYSTEM | AUTH_TAG_BYPASS)) return KHEAP_CHARGE_SYSTEM;
+    if (auth & AUTH_TAG_UTILITY)                    return KHEAP_CHARGE_UTILITY;
+    if (auth & AUTH_TAG_APP)                        return KHEAP_CHARGE_APP;
+    return KHEAP_CHARGE_OTHER;
+}
+
 /*
  * Process one Pocket from a process's PocketRing.
  *
@@ -370,19 +385,23 @@ static void guide_process_pocket(process_t *proc)
     pocket.pid = proc->pid;
     pocket.error_code = OK;
 
+    /* Whatever serving this pocket makes the kernel hold is the cabin's to
+     * answer for, from the staging of its crates to its Result. */
+    KHeapScope outer = KHeapScopeEnter(guide_charge_of(proc->cabin), proc->pid);
+
     /* Every pocket carries the Manifest flag since Phase 12. */
     if (pocket.flags & POCKET_FLAG_MANIFEST) {
         guide_process_manifest_pocket(&pocket, proc);
-        (void)KPocketPopAt(proc, pos);
-        return;
+    } else {
+        /* Malformed pocket — neither yield nor manifest. Deliver an error
+         * Result to the sender and drop. */
+        pocket.error_code = ERR_INVALID_POCKET;
+        debug_printf("[GUIDE] PID %u sent non-manifest pocket (flags=0x%x)\n",
+                     proc->pid, pocket.flags);
+        execution_deck_handler(&pocket, proc);
     }
 
-    /* Malformed pocket — neither yield nor manifest. Deliver an error
-     * Result to the sender and drop. */
-    pocket.error_code = ERR_INVALID_POCKET;
-    debug_printf("[GUIDE] PID %u sent non-manifest pocket (flags=0x%x)\n",
-                 proc->pid, pocket.flags);
-    execution_deck_handler(&pocket, proc);
+    KHeapScopeLeave(outer);
     (void)KPocketPopAt(proc, pos);
 }
 

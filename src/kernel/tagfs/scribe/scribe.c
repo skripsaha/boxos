@@ -7,6 +7,7 @@
 #include "cpu_calibrate.h"
 #include "scheduler.h"
 #include "system_halt.h"
+#include "kheap.h"
 
 // ----------------------------------------------------------------------------
 // Flush tickets
@@ -163,6 +164,9 @@ static ScribeTurn ScribeTryHere(Scribe *s, uint8_t core, uint64_t ticket,
     g_scribe_held[core][s->rank]++;
     *cover = __atomic_load_n(&s->asked, __ATOMIC_SEQ_CST);
     SchedulerHoldHere();
+    /* The pass is one of the kernel's own paths: what it allocates is served
+     * from the heap's reserve first (kheap.h), until the Give. */
+    KHeapReserveOpen();
     ScribeIrqRestore(flags);
     return SCRIBE_MINE;
 }
@@ -253,6 +257,7 @@ void ScribeGive(Scribe *s, uint64_t cover, error_t result)
     }
     g_scribe_held[core][s->rank]--;
     SchedulerLetGoHere();
+    KHeapReserveClose();
     __atomic_store_n(&s->holder, 0u, __ATOMIC_RELEASE);
 
     if (__atomic_load_n(&g_amp.cores[core].freeze_owed, __ATOMIC_RELAXED) &&

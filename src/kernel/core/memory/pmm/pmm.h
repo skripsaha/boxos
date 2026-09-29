@@ -72,6 +72,19 @@ size_t   pmm_total_pages(void);
  * PMM_FAIL, which then reads as a shortage in every boot log. */
 size_t   pmm_max_alloc_pages(void);
 size_t   pmm_free_pages(void);
+/* The same count read without the zone's lock — one load, possibly a page
+ * behind a concurrent take or give. For a question asked on every allocation
+ * of a cabin (the kernel heap's share rule), where the lock would be a line
+ * every core bounces for an answer that is stale the moment it is read. */
+size_t   PmmFreePagesNow(void);
+
+/* Exactly `pages` pages, one physical run, however long the machine has one:
+ * the page allocator's power-of-two rounding and its largest block are not
+ * the caller's problem. NULL, silently, when there is no such run — the
+ * caller says why, with its own numbers. Given back by PmmGiveExact with the
+ * same count. The kernel heap takes its regions and its large pieces here. */
+void*    PmmTakeExact(size_t pages);
+void     PmmGiveExact(void* addr, size_t pages);
 size_t   pmm_used_pages(void);
 uint64_t pmm_get_total_memory(void);     /* phys-top of buddy zone (one-past-last byte) */
 uint64_t pmm_get_total_ram_bytes(void);  /* total_pages * PMM_PAGE_SIZE                 */
