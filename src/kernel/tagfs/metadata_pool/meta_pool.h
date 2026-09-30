@@ -20,6 +20,9 @@ int      meta_pool_init(uint32_t first_block);
  * writing a byte", wrote through here. */
 void     meta_pool_shutdown(bool write_back);
 
+/* The record at (block, offset): 0, or a negative -ERR_* — the medium refused
+ * the block (ERR_READ_FAILED), the record does not check out
+ * (ERR_METADATA_CORRUPTED), or memory ran out for it (ERR_NO_MEMORY). */
 int      meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out);
 int      meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* out_offset);
 
@@ -38,7 +41,6 @@ int      meta_pool_read_cached(uint32_t file_id, TagFSMetadata* out);
 int      meta_pool_mirror_where(uint32_t file_id, uint32_t* out_block, uint32_t* out_offset);
 
 void     tagfs_metadata_free(TagFSMetadata* meta);
-uint32_t meta_pool_record_size(const TagFSMetadata* meta);
 
 /* The two halves of putting this pool on the medium, and they are two because
  * the file table's flush goes BETWEEN them: a record must exist before anything

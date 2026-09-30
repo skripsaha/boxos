@@ -3,6 +3,7 @@
 
 #include "block_map.h"
 #include "../tagfs.h"
+#include "../plot/plot_width.h"
 
 /*
  * The block map's own parts, shared by block_map.c (the windows, the cache,

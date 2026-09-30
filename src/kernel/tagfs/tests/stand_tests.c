@@ -66,7 +66,7 @@ bool StandBlockOf(uint32_t file_id, uint32_t k, uint32_t* out_block)
     memset(&meta, 0, sizeof(meta));
     if (tagfs_get_metadata(file_id, &meta) != 0)
         return false;
-    for (uint16_t e = 0; e < meta.extent_count && meta.extents; e++) {
+    for (uint32_t e = 0; e < meta.extent_count && meta.extents; e++) {
         if (k < meta.extents[e].block_count) {
             *out_block = meta.extents[e].start_block + k;
             found = true;
@@ -84,7 +84,7 @@ int StandWriteAt(uint32_t file_id, uint64_t offset, const void* data, uint32_t b
     if (!handle)
         return -1;
     handle->offset = offset;
-    int written = tagfs_write(handle, data, bytes);
+    int written = TestHandleWrite(handle, data, bytes);
     tagfs_close(handle);
     return written;
 }
@@ -98,17 +98,20 @@ bool StandBlockInUse(uint32_t block)
 // BLOCKFAIL
 // ----------------------------------------------------------------------------
 
-/* Three one-block extents — the write path gives every 4 KiB its own, and an
- * extent of one block is never read ahead — and a plan on the middle block,
- * second read. The first read of the file meets the plan once and is served;
- * the second is refused at that block; an overwrite of the block is a write
- * and is not counted; the third read is served again, because the plan fires
- * once; and once the plan is down, nothing is counted at all. */
+/* A plan on the middle block of a three-block file, second read. Each block
+ * is read on its own, never through a read of the file, which would take the
+ * middle one in the prefetch of the block before it and hand it out of the
+ * read-ahead cache the second time. The block before it meets no plan; the
+ * first read of the middle one meets the plan once and is served; the second
+ * is refused at that block; an overwrite of the block is a write and is not
+ * counted; the third read is served again, because the plan fires once; and
+ * once the plan is down, nothing is counted at all. */
 static TestResult TestStandBlockFailReadsTheNth(void)
 {
     TestResult  verdict = TEST_PASS;
     uint8_t     seat    = tagfs_get_seat();
     uint32_t    file_id = 0;
+    uint32_t    first   = 0;
     uint32_t    middle  = 0;
     bool        armed   = false;
     const char* aside   = StandStepsAsideFor();
@@ -119,18 +122,19 @@ static TestResult TestStandBlockFailReadsTheNth(void)
     TestFillAt(g_test_buffer, 3 * TAGFS_BLOCK_SIZE, 0x51, 0);
     TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, 3 * TAGFS_BLOCK_SIZE, &file_id),
                 "a three-block file is made");
-    TEST_ASSERT(StandBlockOf(file_id, 1, &middle), "its middle block is found");
+    TEST_ASSERT(StandBlockOf(file_id, 0, &first), "its first block is found");
+    TEST_ASSERT(StandBlockOf(file_id, 1, &middle), "and its middle block");
 
     BlockFailArm(seat, BLOCK_FAIL_READ, tagfs_block_to_sector(middle), TAGFS_BLOCK_SECTORS, 2);
     armed = true;
 
-    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, 3 * TAGFS_BLOCK_SIZE), 3 * TAGFS_BLOCK_SIZE,
-                   "the first read of the file is whole");
+    TEST_ASSERT_OK(tagfs_read_block(first, g_test_output), "the block before it is read");
+    TEST_ASSERT_EQ(BlockFailSeen(), 0, "and meets no plan — the plan names another block");
+    TEST_ASSERT_OK(tagfs_read_block(middle, g_test_output), "the first read of the block is served");
     TEST_ASSERT_EQ(BlockFailSeen(), 1, "and met the plan once, at the block it names");
     TEST_ASSERT(!BlockFailFired(), "without being refused — it was the first, not the second");
 
-    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, 3 * TAGFS_BLOCK_SIZE), -1,
-                   "the second read is refused");
+    TEST_ASSERT(tagfs_read_block(middle, g_test_output) != OK, "the second read is refused");
     TEST_ASSERT_EQ(BlockFailSeen(), 2, "at the second meeting");
     TEST_ASSERT(BlockFailFired(), "and the plan says it fired");
 
@@ -140,14 +144,14 @@ static TestResult TestStandBlockFailReadsTheNth(void)
                    TAGFS_BLOCK_SIZE, "the middle block is overwritten whole");
     TEST_ASSERT_EQ(BlockFailSeen(), 2, "a write is not a read, and is not counted");
 
-    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, 3 * TAGFS_BLOCK_SIZE), 3 * TAGFS_BLOCK_SIZE,
-                   "the third read is whole — the plan refuses once");
+    TEST_ASSERT_OK(tagfs_read_block(middle, g_test_output),
+                   "the third read is served — the plan refuses once");
     TEST_ASSERT_EQ(BlockFailSeen(), 3, "and it was still counted");
 
     TEST_ASSERT(BlockFailDisarm(), "the plan stood until it was taken down");
     armed = false;
     TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, 3 * TAGFS_BLOCK_SIZE), 3 * TAGFS_BLOCK_SIZE,
-                   "a read with the plan down is whole");
+                   "a read of the file with the plan down is whole");
     TEST_ASSERT_EQ(BlockFailSeen(), 3, "and meets no plan");
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, 3 * TAGFS_BLOCK_SIZE),
                    3 * TAGFS_BLOCK_SIZE, "and the file holds what was written");
@@ -788,7 +792,6 @@ static const TestCase g_stand_tests[] = {
 
     { .name  = "stand_rmw_read_refused", .func = TestStandRmwReadRefused,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.3",
       .caveat_defect = "a write whose read-modify-write read is refused zeroes the rest "
                        "of the block, writes it back and answers success" },
     { .name  = "stand_create_all_or_nothing", .func = TestStandCreateAllOrNothing,
@@ -808,12 +811,10 @@ static const TestCase g_stand_tests[] = {
       .caveat_defect = "a sync whose cache flush the medium refuses still answers OK" },
     { .name  = "stand_write_returns_its_ground", .func = TestStandWriteReturnsItsGround,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.3",
       .caveat_defect = "a write whose metadata commit cannot get memory answers -1 and "
                        "keeps the block it wrote, named by no file" },
     { .name  = "stand_write_all_or_refusal", .func = TestStandWriteAllOrRefusal,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.5",
       .caveat_defect = "a write whose extent list cannot grow answers 0 bytes as a "
                        "success instead of refusing" },
     { .name  = "stand_open_holds_what_it_names", .func = TestStandOpenHoldsWhatItNames,

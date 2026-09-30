@@ -4,6 +4,7 @@
 #include "../../lib/kernel/ktypes.h"
 #include "../../lib/kernel/klib.h"
 #include "tagfs_constants.h"
+#include "plot/plot_width.h"
 #include "../../include/boxos_magic.h"
 #include "../../include/boxos_limits.h"
 #include "../../include/volume_deed.h"
@@ -65,12 +66,12 @@
 // Handle flags
 #define TAGFS_HANDLE_READ           (1 << 0)
 #define TAGFS_HANDLE_WRITE          (1 << 1)
+#define TAGFS_HANDLE_APPEND         (1 << 2)   /* every write lands at the file's size */
 
 // Registry constants
 #define TAGFS_REG_BUCKETS           512
 #define TAGFS_KEY_BUCKETS           128
 #define TAGFS_REGISTRY_DATA_SIZE    4080
-#define TAGFS_MPOOL_DATA_SIZE       4080
 #define TAGFS_FTABLE_PER_BLOCK      510
 
 // ============================================================================
@@ -111,12 +112,8 @@ typedef struct __packed {
 STATIC_ASSERT(sizeof(FileTableBlock) == 4096, "FileTableBlock must be 4096 bytes");
 
 // Header: 4+4+2+2+2+2 = 16 bytes. payload[4080] = 4096 total.
-// Records are packed variable-length in payload[]:
-//   uint16_t record_len | uint32_t file_id | uint32_t flags
-//   uint64_t size | uint64_t created_time | uint64_t modified_time
-//   uint16_t tag_count | uint16_t extent_count | uint16_t name_len
-//   uint16_t tag_ids[tag_count] | FileExtent extents[extent_count]
-//   char filename[name_len]
+// Records are packed variable-length in payload[] — their widths and their
+// packing are Plot's (plot/plot_width.h, PackV1).
 //
 // `record_count` counts every record ever appended here; `kept` counts the ones
 // still held by a file. The two words are a pair on purpose — one is what was
@@ -145,13 +142,6 @@ typedef struct __packed {
 } MetaPoolBlock;
 
 STATIC_ASSERT(sizeof(MetaPoolBlock) == 4096, "MetaPoolBlock must be 4096 bytes");
-
-typedef struct __packed {
-    uint32_t start_block;
-    uint16_t block_count;
-} FileExtent;
-
-STATIC_ASSERT(sizeof(FileExtent) == 6, "FileExtent must be 6 bytes");
 
 // ----------------------------------------------------------------------------
 // In-Memory Structures: Tag Registry
@@ -231,8 +221,8 @@ typedef struct {
 
 typedef struct {
     uint16_t* ids;
-    uint16_t  count;
-    uint16_t  capacity;
+    uint32_t  count;
+    uint32_t  capacity;
 } TagIdList;
 
 // Query cache: stores recent query results, invalidated by generation counter
@@ -244,7 +234,7 @@ typedef struct {
     uint32_t* file_ids;     // cached result array
     uint32_t  count;        // number of results
     uint16_t* tag_key;      // copy of sorted tag_ids (for validation)
-    uint16_t  tag_count;    // number of tags in key
+    uint32_t  tag_count;    // number of tags in key
 } QueryCacheEntry;
 
 typedef struct {
@@ -283,13 +273,17 @@ typedef struct OpenFileEntry {
     struct OpenFileEntry* next;
 } OpenFileEntry;
 
+/* A file opened for one operation. `extents` and `file_size` are the record as
+ * the open found it, and only a read walks them: a write loads the file's
+ * record again under its writer (plot.h, PlotLoad) and leaves here only where
+ * it ended — `offset`, and the size it left. */
 typedef struct {
     uint32_t    file_id;
     uint32_t    flags;
     uint64_t    offset;
     uint64_t    file_size;
     FileExtent* extents;
-    uint16_t    extent_count;
+    uint32_t    extent_count;
     OpenFileEntry* ofe;   // back-pointer to open file entry (for locking)
 
     /* Which mounting of the volume the extents above were copied out of.
@@ -310,9 +304,9 @@ typedef struct {
     uint64_t    modified_time;
     char*       filename;
     uint16_t*   tag_ids;
-    uint16_t    tag_count;
+    uint32_t    tag_count;
     FileExtent* extents;
-    uint16_t    extent_count;
+    uint32_t    extent_count;
 } TagFSMetadata;
 
 // ----------------------------------------------------------------------------
@@ -340,6 +334,7 @@ typedef struct {
     uint8_t          uuid[16];      /* which volume this is */
     VolumeLayout     layout;        /* where its parts are, in volume blocks */
     VolumeGeometry   geometry;      /* what it was laid out for */
+    VolumeBoot       boot;          /* where the loader finds the kernel; zero when the Deed says nothing */
     VolumeLedger     ledger;        /* what is true of it today */
 
     TagRegistry*     registry;
@@ -437,7 +432,6 @@ int      meta_pool_delete(uint32_t block, uint32_t offset);
 int      meta_pool_mirror_init(uint32_t max_file_id);
 int      meta_pool_read_cached(uint32_t file_id, TagFSMetadata* out);
 void     tagfs_metadata_free(TagFSMetadata* meta);
-uint32_t meta_pool_record_size(const TagFSMetadata* meta);
 int      meta_pool_flush(void);
 
 // ----------------------------------------------------------------------------
@@ -540,18 +534,20 @@ uint64_t tagfs_block_to_sector(uint32_t block);
  * writing the layout the rest of the kernel had already left behind. */
 
 /* 0, or a negative -ERR_*: a name whose tag the registry refuses (too long,
- * the registry full) is refused with the registry's code, and no file is made
- * without the tag its name gives it. */
-int  tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint16_t tag_count,
+ * the registry full) is refused with the registry's code, no file is made
+ * without the tag its name gives it, and a record wider than format v1 carries
+ * is refused ERR_TAGFS_RECORD_FULL. */
+int  tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint32_t tag_count,
                        uint32_t* out_file_id);
 int  tagfs_delete_file(uint32_t file_id);
 int  tagfs_rename_file(uint32_t file_id, const char* new_filename);
 
-/* Drop everything past `new_size`. SHRINK ONLY — a request to grow is
- * refused (-ERR_INVALID_ARGUMENT) because freshly allocated blocks are not
- * zeroed. Returns 0 or a negative -ERR_*. See the comment above the
- * definition. */
-int  tagfs_truncate_file(uint32_t file_id, uint64_t new_size);
+/* span — the file made exactly `size` bytes long. Shorter: the tail is cut and
+ * its blocks given back. Longer: the bytes from the old size to the new one
+ * read as zeros, written to blocks taken for them — never a previous owner's
+ * bytes. The one way a file grows past its size other than by being written at
+ * its end. OK, or the refusal: nothing of the file is changed by one. */
+error_t tagfs_span_file(uint32_t file_id, uint64_t size);
 
 int  tagfs_add_tag(uint32_t file_id, uint16_t tag_id);
 int  tagfs_remove_tag(uint32_t file_id, uint16_t tag_id);
@@ -579,8 +575,23 @@ uint32_t tagfs_file_ceiling(void);
 
 TagFSFileHandle* tagfs_open(uint32_t file_id, uint32_t flags);
 void             tagfs_close(TagFSFileHandle* handle);
-int              tagfs_read(TagFSFileHandle* handle, void* buffer, uint64_t size);
-int              tagfs_write(TagFSFileHandle* handle, const void* buffer, uint64_t size);
+
+/* Up to `size` bytes from the handle's offset: OK and *out_read — 0 at or
+ * past the file's size — or the refusal, with nothing counted. The offset
+ * moves by what was read. */
+error_t          tagfs_read(TagFSFileHandle* handle, void* buffer, uint64_t size,
+                            uint64_t* out_read);
+
+/* The source's bytes written at the handle's offset — at the file's size when
+ * the handle was opened TAGFS_HANDLE_APPEND. An offset past the size is
+ * refused ERR_TAGFS_BEYOND_SIZE: a file grows by being written at its end, or
+ * by span, never across a gap. OK with *out_written the whole source, or the
+ * refusal with *out_written the bytes the file now holds of it — a prefix is
+ * kept when the medium stopped taking the rest. The offset moves by what was
+ * written, and the handle's file_size is the size the write left. */
+struct PlotSource;
+error_t          tagfs_write(TagFSFileHandle* handle, const struct PlotSource* src,
+                             uint64_t* out_written);
 
 /* One run of exactly `count` blocks, the lowest that is free: 0, or -1 when
  * there is none (block_map.h, BlockMapTake). */
@@ -600,7 +611,11 @@ int64_t  TagFSAllocatorRederive(void);
 int         tagfs_get_metadata(uint32_t file_id, TagFSMetadata* out);
 TagFSState* tagfs_get_state(void);
 
-int      tagfs_defrag_file(uint32_t file_id, uint32_t target_block);
+/* The file laid in one run near `target_block`, its record naming the run in
+ * as few extents as a record can say it. OK, or the refusal: the file is left
+ * where it was. A file the loader reads by its blocks — wearing system or boot,
+ * or holding the kernel the Deed points at — is not moved. */
+error_t  tagfs_defrag_file(uint32_t file_id, uint32_t target_block);
 /* How fragmented the volume's files are: the share, in percent, of the steps
  * from one of a file's blocks to its next that are a gap — the next run not
  * beginning where the one before it ends — rounded up, so one gap never reads
@@ -671,7 +686,7 @@ bool     TagFSTagMatches(uint16_t tag_id, const TagSpelling* pattern);
  * whole however long — what a process started from a file wears (it is given
  * the keys, as it always was). An id the volume does not know is passed over.
  * NULL when there is no memory, or no volume. */
-char*    TagFSKeyList(const uint16_t* tag_ids, uint16_t count);
+char*    TagFSKeyList(const uint16_t* tag_ids, uint32_t count);
 
 /* A tag's key and value as spans into the volume's registry, and whether the
  * volume calls the tag its own — no copy, for a caller that is INSIDE THE

@@ -25,6 +25,8 @@
 //                        and a class of cabins refused while the reserve serves
 // stand_map_tests.c      the stand_map suite: where a take goes, a give that
 //                        comes twice, and the ground a growing file keeps
+// stand_plot_tests.c     the stand_plot suite: where a write may begin, what a
+//                        gap reads as, how a file's extents grow, and span
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.

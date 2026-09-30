@@ -204,6 +204,10 @@ typedef enum {
     ERR_TAGFS_RECOVERY_FAILED = 865,
     /* A key past its u8 width, or a tag whose registry record would not fit a block. */
     ERR_TAGFS_TAG_TOO_LONG = 866,
+    /* A write asked to begin past the file's size: a file grows at its end, or by span. */
+    ERR_TAGFS_BEYOND_SIZE = 867,
+    /* A file's record would be wider than format v1 carries (plot/plot_width.h). */
+    ERR_TAGFS_RECORD_FULL = 868,
 
     // TagFS Module Errors (1000-1099)
     // DiskBook

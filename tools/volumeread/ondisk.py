@@ -126,7 +126,7 @@ REGISTRY_MAGIC = 0x54524547             # boxos_magic.h:13 TAGFS_REGISTRY_MAGIC 
 FILETBL_MAGIC = 0x54465442              # boxos_magic.h:14 TAGFS_FILETBL_MAGIC  "TFTB"
 MPOOL_MAGIC = 0x544D504C                # boxos_magic.h:15 TAGFS_MPOOL_MAGIC    "TMPL"
 REGISTRY_DATA = 4080                    # tagfs.h:72 TAGFS_REGISTRY_DATA_SIZE
-MPOOL_DATA = 4080                       # tagfs.h:73 TAGFS_MPOOL_DATA_SIZE
+MPOOL_DATA = 4080                       # plot/plot_width.h TAGFS_MPOOL_DATA_SIZE
 FTABLE_PER_BLOCK = 510                  # tagfs.h:74 TAGFS_FTABLE_PER_BLOCK
 CHAIN_HEADER = 16                       # tagfs.h:80, 102, 113 — every chain header is 16 bytes
 
@@ -140,13 +140,13 @@ FILE_TABLE_ENTRY = Fields("<II",        # tagfs.h:95-98 FileTableEntry
                           "meta_block meta_offset")
 META_POOL_BLOCK = Fields("<IIHHH2x",    # tagfs.h:137-145 MetaPoolBlock header
                          "magic next_block used_bytes record_count kept")
-FILE_EXTENT = Fields("<IH",             # tagfs.h:149-152 FileExtent
+FILE_EXTENT = Fields("<IH",             # plot/plot_width.h FileExtent
                      "start_block block_count")
 
-RECORD_HEADER = 42                      # meta_pool.c:11 RECORD_HEADER_SIZE
+RECORD_HEADER = 42                      # plot/plot_width.h RECORD_HEADER_SIZE
 MPOOL_BLOCK_HEADER = 16                 # meta_pool.c:12
-RECORD_CRC_AT = 40                      # meta_pool.c:13 RECORD_CRC_OFFSET
-META_RECORD = Fields("<HIIQQQHHHH",     # tagfs_boot.h:53-67; meta_pool.c:492-504 pack_record
+RECORD_CRC_AT = 40                      # plot/plot_width.h RECORD_CRC_OFFSET
+META_RECORD = Fields("<HIIQQQHHHH",     # tagfs_boot.h:53-67; plot/plot_pack.c PackV1
                      "record_len file_id flags size created_time modified_time "
                      "tag_count extent_count name_len crc16")
 
@@ -154,7 +154,7 @@ FILE_ACTIVE, FILE_TRASHED, FILE_HIDDEN = 1, 2, 4   # tagfs.h:60-62; bit 3 is spe
 MAX_TAG_ID = 0x7FFE                     # tagfs.h:57 TAGFS_MAX_TAG_ID
 TAG_FLAG_HAS_VALUE, TAG_FLAG_SYSTEM = 1, 2   # tagfs_constants.h:36-37
 MIRROR_SLACK = 64                       # tagfs_init: meta_pool_mirror_init(next_file_id + 64); meta_pool.c:726 adds 1
-EXTENT_END_LIMIT = 0xFFFFFFFF           # meta_pool.c:631 start + count past 2^32-1 is an overflow
+EXTENT_END_LIMIT = 0xFFFFFFFF           # plot/plot_pack.c PlotExtentsInRun: start + count past 2^32-1 is an overflow
 
 # ---------------------------------------------------------------------------
 # DiskBook

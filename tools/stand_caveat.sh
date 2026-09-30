@@ -48,9 +48,9 @@ CAVEAT=0
 caveat_row() {
     case "$1" in
         longquery)  echo "|a query of 256 bytes or more is dropped unread, and the answer is every file in scope" ;;
-        bigwrite)   echo "1.3|a write is copied through one kernel-heap allocation of its whole size, so one bigger than the heap is refused and nothing reaches the file" ;;
+        bigwrite)   echo "|a write is copied through one kernel-heap allocation of its whole size, so one bigger than the heap is refused and nothing reaches the file" ;;
         sequential|interleave)
-                    echo "1.3|a file's record takes one extent per 4 KiB written and never merges them, so the 4080-byte record of a 10-byte name refuses its write at byte 2748416, after 671 extents" ;;
+                    echo "|a file's record takes one extent per 4 KiB written and never merges them, so the 4080-byte record of a 10-byte name refuses its write at byte 2748416, after 671 extents" ;;
         usememory)  echo "1.6|a Use Context longer than 432 bytes is forgotten, remembered=0" ;;
         fidhistory) echo "1.3b|a mount spends kernel heap on every file id ever issued, the dead ones included" ;;
         systemtag)  echo "1.4|any program may take the system tag off kernel.bin and then delete it — the kernel the volume boots is gone" ;;
@@ -193,9 +193,20 @@ caveat_row() {
         lockrank:writer@tagfs_write_inside:read|\
         lockrank:writer@tagfs_write_inside:write)
                     echo "1.5|a file's writer holds its IRQ-off lock across every medium command of its write, so a second writer of the file spins with interrupts off for the whole of the first one's write" ;;
+        # Written at step 1.3 from reading, not measured: span, defrag and a
+        # write's PlotGather run under the file's writer as a write does, and a
+        # gather flushes the blocks it moved before any record names them.
+        lockrank:writer@tagfs_write_inside:flush|\
+        lockrank:writer@tagfs_span_file_inside:read|\
+        lockrank:writer@tagfs_span_file_inside:write|\
+        lockrank:writer@tagfs_span_file_inside:flush|\
+        lockrank:writer@tagfs_defrag_file_inside:read|\
+        lockrank:writer@tagfs_defrag_file_inside:write|\
+        lockrank:writer@tagfs_defrag_file_inside:flush)
+                    echo "1.5|a file's writer holds its IRQ-off lock across the medium commands of a span, a defrag and a gather of its extents — the gather's flush among them — so a second writer of the file spins with interrupts off for all of them" ;;
         lockrank:state@tagfs_defrag_file_inside:read|\
         lockrank:state@tagfs_defrag_file_inside:write)
-                    echo "1.5|defragmenting a file copies its blocks under the volume's state lock, so every create, delete, rename and tag waits with interrupts off while the medium reads and writes the whole file" ;;
+                    echo "|defragmenting a file copies its blocks under the volume's state lock, so every create, delete, rename and tag waits with interrupts off while the medium reads and writes the whole file" ;;
         lockrank:proof@TestStandLockRankNamesTheMedium:read|\
         lockrank:proof@TestStandLockRankNamesTheOrder/proofstate@TestStandLockRankNamesTheOrder)
                     echo "proof|LockRank's self-tests hold a lock of their own across a read, and take one out of order, on purpose" ;;

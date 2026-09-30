@@ -162,12 +162,10 @@ void save_book(void)
     }
     free(bytes);
 
-    /* Shrink-only by construction: a draft that GREW has no tail to cut, and
-     * the volume says so with ERR_INVALID_ARGUMENT. That is this call
-     * succeeding, and treating it as a failure would call every growing save
-     * broken. */
-    int rc = file_truncate(g_fid, len);
-    if (rc != 0 && box_errno_of(rc) != ERR_INVALID_ARGUMENT) {
+    /* The file made exactly as long as the draft: a shorter draft's old tail
+     * is cut, and a draft that grew is that long already. */
+    int rc = file_span(g_fid, len);
+    if (rc != 0) {
         msg_begin();
         msg_add(s_name);
         msg_add(" was written, but its old tail could not be cut");

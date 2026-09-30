@@ -4648,18 +4648,30 @@ void Phase18()
               && std::string_view(rbuf) == "hello tagfs stream",
           "phase18 read_at(raw) round-trip + byte count");
 
+    // A write begins at the file's size at most; the gap before 64 is made by
+    // span, and reads as zeros.
     std::byte payload[4] = {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    box::result<std::size_t> beyond = f.write_at(64, std::span<const std::byte>(payload, 4));
+    Check(!beyond.has_value() && beyond.error().code() == box::errc::tagfs_beyond_size,
+          "phase18 write_at past the size is refused (tagfs_beyond_size)");
+    Check(f.span(64).has_value(), "phase18 span(64) makes the gap");
     box::result<std::size_t> ws = f.write_at(64, std::span<const std::byte>(payload, 4));
     Check(ws.has_value() && *ws == 4, "phase18 write_at(span) byte count");
     std::byte rb[4] = {};
     box::result<std::size_t> rs = f.read_at(64, std::span<std::byte>(rb, 4));
     Check(rs.has_value() && *rs == 4 && rb[0] == std::byte{1},
           "phase18 read_at(span) round-trip + byte count");
+    std::byte gap[64 - sizeof(msg)] = {};
+    box::result<std::size_t> rg = f.read_at(sizeof(msg), std::span<std::byte>(gap, sizeof(gap)));
+    Check(rg.has_value() && *rg == sizeof(gap) &&
+              std::all_of(gap, gap + sizeof(gap), [](std::byte b) { return b == std::byte{0}; }),
+          "phase18 the gap span made reads as zeros");
 
     struct Rec {
         std::uint32_t a;
         std::uint32_t b;
     };
+    Check(f.span(128).has_value(), "phase18 span(128) makes the gap before the object");
     Check(f.write_object<Rec>(128, Rec{0xAAu, 0xBBu}).has_value(), "phase18 write_object<T>");
     box::result<Rec> rec = f.read_object<Rec>(128);
     Check(rec.has_value() && rec->a == 0xAAu && rec->b == 0xBBu,
@@ -54569,7 +54581,7 @@ bool Lay(const unsigned char *bytes, std::size_t n)
     auto f = DoorFile();
     if (!f) f = box::tagfs::create("tzdb", kTag);
     if (!f) return false;
-    if (!f->truncate(0)) return false;
+    if (!f->span(0)) return false;
     auto wrote = f->write_at(0, bytes, n);
     return wrote && *wrote == n;
 }

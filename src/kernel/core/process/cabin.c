@@ -28,7 +28,7 @@ static int cabin_set_tag_bit(cabin_t *cabin, uint16_t tag_id)
         return 0;
     }
 
-    for (uint16_t i = 0; i < cabin->tag_overflow_count; i++)
+    for (uint32_t i = 0; i < cabin->tag_overflow_count; i++)
     {
         if (cabin->tag_overflow_ids[i] == tag_id)
             return 0;
@@ -36,7 +36,7 @@ static int cabin_set_tag_bit(cabin_t *cabin, uint16_t tag_id)
 
     if (cabin->tag_overflow_count >= cabin->tag_overflow_capacity)
     {
-        uint16_t new_cap = cabin->tag_overflow_capacity == 0 ? 8 : cabin->tag_overflow_capacity * 2;
+        uint32_t new_cap = cabin->tag_overflow_capacity == 0 ? 8 : cabin->tag_overflow_capacity * 2;
         uint16_t *new_ids = kmalloc(sizeof(uint16_t) * new_cap);
         if (!new_ids)
             return -1;

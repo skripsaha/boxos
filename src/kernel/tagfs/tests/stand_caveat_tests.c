@@ -18,13 +18,11 @@
 // a defect seen under its caveat is held, and a test that behaves before its
 // step has landed has outlived its caveat and fails.
 //
-// ‼ A TEST WHOSE DEFECT IS A LEAK GIVES BACK WHAT LEAKED. The runner's residue
-// guard is strict for every test, these included, and the next boot's roll
-// call judges the volume too ("[TagFS FSCK] Bitmap mismatch"). So a leak is
-// measured — counted by the guard's own tally, and named block by block — and
-// then exactly those blocks are handed back. What the volume keeps from this
-// suite is burned file ids and the chain blocks any writer lays down for good
-// (tests.c, the residue guard) — and no tag: every file here is called
+// ‼ A LEAK IS MEASURED BY THE RESIDUE GUARD'S OWN TALLY. The runner's guard is
+// strict for every test, these included, and the next boot's roll call judges
+// the volume too ("[TagFS FSCK] Bitmap mismatch"). What the volume keeps from
+// this suite is burned file ids and the chain blocks any writer lays down for
+// good (tests.c, the residue guard) — and no tag: every file here is called
 // test_file, the name the core suite has always used, because a create
 // interns its name's stem for good.
 // ============================================================================
@@ -41,10 +39,10 @@
 #define STAND_RMW_NEW   0xC3
 
 /* Ten bytes written at offset 100 of a block of 0x5A, with the block's read
- * refused. The right answer is a refusal and the block as it was. What
- * tagfs_write_inside does instead is zero its buffer when the read fails,
- * copy the ten bytes in, write the whole block back and answer 10 — the other
- * 4086 bytes of the file are gone and the caller was told it worked.
+ * refused. The right answer is a refusal and the block as it was (S1): a
+ * write that zeroed its buffer when the read failed, copied the ten bytes in,
+ * wrote the whole block back and answered 10 took the other 4086 bytes of the
+ * file and told the caller it worked.
  *
  * ‼ Nothing reads the block between its write and the armed one. read_block
  * answers from the read-ahead cache before it asks the medium, and a cached
@@ -412,44 +410,17 @@ out:
 
 typedef struct {
     uint32_t refused;       /* writes swept, each with one allocation refused */
-    uint32_t leaked;        /* blocks refused writes kept, named by no file */
+    uint32_t leaked;        /* blocks refused writes left in use, named by no file */
     uint32_t short_at;      /* the first answered neither whole nor refused */
 } StandWriteSweep;
 
-static uint32_t s_kept[64];
-
-/* The blocks the handle's extents name that the file's record does not — what
- * a write that allocated and then could not commit is left holding. */
-static uint32_t StandKeptUnnamed(const TagFSFileHandle* handle, uint32_t file_id)
-{
-    TagFSMetadata meta;
-    uint32_t      kept = 0;
-
-    memset(&meta, 0, sizeof(meta));
-    bool have = tagfs_get_metadata(file_id, &meta) == 0;
-    for (uint16_t e = 0; handle->extents && e < handle->extent_count; e++) {
-        for (uint32_t k = 0; k < handle->extents[e].block_count; k++) {
-            uint32_t block = handle->extents[e].start_block + k;
-            bool     named = false;
-            for (uint16_t r = 0; have && meta.extents && r < meta.extent_count && !named; r++) {
-                uint32_t from = meta.extents[r].start_block;
-                named = block >= from && block - from < meta.extents[r].block_count;
-            }
-            if (!named && kept < ARRAY_SIZE(s_kept))
-                s_kept[kept++] = block;
-        }
-    }
-    if (have)
-        tagfs_metadata_free(&meta);
-    return kept;
-}
-
 /* One block written into a fresh file with allocation n refused, the file
- * closed and deleted, and whatever the write kept that no file names counted
- * by the residue guard's own tally, matched block for block against what the
- * handle named and the record did not, and given back — whether or not the
- * delete went through: what the record does not name is no file's either
- * way, and tagfs_close commits nothing of the handle's to the record. */
+ * closed and deleted, and the volume counted by the residue guard's own tally
+ * before the write and after the delete. What a write takes and does not
+ * commit it gives back on its way out (CR-1), so a file that is deleted
+ * leaves nothing of any write in use. A block it did leave is named by no
+ * record and cannot be found to be given back: the sweep counts it, and the
+ * runner's guard fails the test for it as well. */
 static TestResult StandWriteOnce(uint32_t n, StandWriteSweep* sweep, bool* fired)
 {
     TestResult       verdict = TEST_PASS;
@@ -470,42 +441,27 @@ static TestResult StandWriteOnce(uint32_t n, StandWriteSweep* sweep, bool* fired
     TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x5C, 0);
     HeapFailArm(amp_get_core_index(), n);
     armed = true;
-    int wrote = tagfs_write(handle, g_test_buffer, TAGFS_BLOCK_SIZE);
+    int wrote = TestHandleWrite(handle, g_test_buffer, TAGFS_BLOCK_SIZE);
     *fired = HeapFailFired();
     HeapFailDisarm();
     armed = false;
 
-    uint32_t kept = StandKeptUnnamed(handle, file_id);
     tagfs_close(handle);
     handle = NULL;
-    int deleted = tagfs_delete_file(file_id);
-    if (deleted == 0)
-        file_id = 0;
-
-    /* Counted before anything is given back, and given back before anything
-     * is asserted: a count that does not match is a failure, and still not a
-     * reason to leave the blocks behind. */
-    uint32_t still = 0;
-    for (uint32_t i = 0; i < kept; i++)
-        still += StandBlockInUse(s_kept[i]);
-    bool    counted = VolumeTallyTake(&after);
-    int64_t left    = (int64_t)(after.held - before.held);
-    for (uint32_t i = 0; i < kept; i++)
-        if (StandBlockInUse(s_kept[i]))
-            tagfs_free_blocks(s_kept[i], 1);
-    TEST_ASSERT_EQ(deleted, 0, "the file is deleted");
-    TEST_ASSERT(counted, "the volume is counted after the write");
-    TEST_ASSERT_EQ(left, still, "what the file left in use is exactly what its handle named "
-                                "and its record did not");
-    TEST_ASSERT(VolumeTallyTake(&after), "the volume is counted once those are given back");
-    TEST_ASSERT_EQ(after.held, before.held, "and it holds what it held before the write");
+    TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "the file is deleted");
+    file_id = 0;
+    TEST_ASSERT(VolumeTallyTake(&after), "the volume is counted after the delete");
+    TEST_ASSERT(after.held >= before.held,
+                "the delete gave back no block that was not in use before the write");
+    uint64_t left = after.held - before.held;
 
     if (!*fired) {
         TEST_ASSERT_EQ(wrote, TAGFS_BLOCK_SIZE, "a write with nothing refused is whole");
+        TEST_ASSERT_EQ(left, 0, "and its file, deleted, leaves nothing in use");
         goto out;
     }
     sweep->refused++;
-    sweep->leaked += still;
+    sweep->leaked += (uint32_t)left;
     if (wrote >= 0 && wrote != (int)TAGFS_BLOCK_SIZE && !sweep->short_at)
         sweep->short_at = n;
 out:
@@ -547,7 +503,7 @@ TestResult TestStandWriteReturnsItsGround(void)
 
     if (swept != TEST_PASS)
         return swept;
-    TestEvidence("blocks refused writes kept named by no file, all given back", sweep.leaked);
+    TestEvidence("blocks refused writes left in use, named by no file", sweep.leaked);
     return sweep.leaked ? TEST_DEFECT : TEST_PASS;
 }
 

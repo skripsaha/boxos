@@ -16,6 +16,12 @@ uint32_t KCrc32(const uint8_t *data, uint32_t len);
 // Used for: metadata pool record integrity
 uint16_t KCrc16(const uint8_t *data, uint32_t len);
 
+// The same CRC16 carried on over more bytes: KCrc16(a ++ b) is
+// KCrc16Continue(KCrc16(a), b). The sum takes no final step, so a record can
+// be summed in pieces — a field it stores zeroed, its sum's own, fed as zeros —
+// without copying it into one buffer first.
+uint16_t KCrc16Continue(uint16_t crc, const uint8_t *data, uint32_t len);
+
 // SHA-256
 // Used for: secure hashing, future cryptographic needs
 void KSha256(const uint8_t *data, uint32_t len, uint8_t *out_hash);

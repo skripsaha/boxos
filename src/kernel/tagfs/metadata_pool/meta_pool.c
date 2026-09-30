@@ -1,21 +1,19 @@
 #include "meta_pool.h"
 #include "../tagfs.h"
-#include "tagfs.h"
-#include "../../lib/kernel/crypto.h"
+#include "../plot/plot.h"
 
-// Forward declarations - internal functions in tagfs.c. Both assume the caller
-// already holds g_state.lock, which every path into this file does.
+// Forward declarations - internal functions in tagfs.c. Both are meant for a
+// caller holding g_state.lock. A write's, a span's and a defrag's commit
+// (PlotCommit) still reaches meta_pool_write without it — W-LOCK, which Ink
+// closes at step 1.4.
 extern int     tagfs_alloc_blocks_internal(uint32_t count, uint32_t *out_start_block);
 extern error_t tagfs_free_blocks_internal(uint32_t start_block, uint32_t count);
 
-#define RECORD_HEADER_SIZE  42   // 40 bytes of fields + 2 bytes CRC16
+/* A record's own layout — its fields, its widths, its sum — is Plot's
+ * (plot/plot_width.h, PackV1). The pool frames records: a 16-byte block
+ * header, then records packed end to end, each opening with its u16 length
+ * and u32 file id. */
 #define MPOOL_BLOCK_HEADER  16
-#define RECORD_CRC_OFFSET   40   // CRC16 stored at bytes [40..41] of packed record
-
-// CRC16 wrapper using shared crypto library
-static uint16_t meta_crc16(const uint8_t* data, uint32_t len) {
-    return KCrc16(data, len);
-}
 
 static MetaPoolBlock g_current_block;
 static uint32_t     g_current_block_num = 0;
@@ -467,198 +465,6 @@ void meta_pool_shutdown(bool write_back) {
 }
 
 // ---------------------------------------------------------------------------
-// Public: record size
-// ---------------------------------------------------------------------------
-
-uint32_t meta_pool_record_size(const TagFSMetadata* meta) {
-    uint32_t name_len = meta->filename ? (uint32_t)strlen(meta->filename) : 0;
-    return (uint32_t)RECORD_HEADER_SIZE
-           + (uint32_t)meta->tag_count    * sizeof(uint16_t)
-           + (uint32_t)meta->extent_count * sizeof(FileExtent)
-           + name_len;
-}
-
-// ---------------------------------------------------------------------------
-// Internal: pack / unpack
-// ---------------------------------------------------------------------------
-
-static uint32_t pack_record(const TagFSMetadata* meta, uint8_t* buf) {
-    uint32_t name_len   = meta->filename ? (uint32_t)strlen(meta->filename) : 0;
-    uint16_t record_len = (uint16_t)meta_pool_record_size(meta);
-
-    uint32_t pos = 0;
-
-    memcpy(buf + pos, &record_len,          sizeof(uint16_t));  pos += 2;
-    memcpy(buf + pos, &meta->file_id,       sizeof(uint32_t));  pos += 4;
-    memcpy(buf + pos, &meta->flags,         sizeof(uint32_t));  pos += 4;
-    memcpy(buf + pos, &meta->size,          sizeof(uint64_t));  pos += 8;
-    memcpy(buf + pos, &meta->created_time,  sizeof(uint64_t));  pos += 8;
-    memcpy(buf + pos, &meta->modified_time, sizeof(uint64_t));  pos += 8;
-    memcpy(buf + pos, &meta->tag_count,     sizeof(uint16_t));  pos += 2;
-    memcpy(buf + pos, &meta->extent_count,  sizeof(uint16_t));  pos += 2;
-    memcpy(buf + pos, &name_len,            sizeof(uint16_t));  pos += 2;
-
-    // CRC16 — zeroed during computation, stamped below
-    uint16_t zero_crc = 0;
-    memcpy(buf + pos, &zero_crc, sizeof(uint16_t));             pos += 2;
-
-    if (meta->tag_count > 0 && meta->tag_ids) {
-        uint32_t tag_bytes = (uint32_t)meta->tag_count * sizeof(uint16_t);
-        memcpy(buf + pos, meta->tag_ids, tag_bytes);
-        pos += tag_bytes;
-    }
-
-    if (meta->extent_count > 0 && meta->extents) {
-        TagFSState* fs = tagfs_get_state();
-        uint32_t total_blocks = (fs && fs->initialized) ? fs->layout.data_blocks : 0;
-
-        for (uint16_t e = 0; e < meta->extent_count; e++) {
-            uint32_t start = meta->extents[e].start_block;
-            uint32_t count = meta->extents[e].block_count;
-            bool overflow  = (count > 0) && ((uint64_t)start + count > (uint64_t)0xFFFFFFFFU);
-            bool oob       = (total_blocks > 0) &&
-                             (start >= total_blocks || (uint64_t)start + count > total_blocks);
-            if (count == 0 || overflow || oob) {
-                debug_printf("[MetaPool] pack: extent %u invalid (start=%u count=%u total=%u) — skipping write\n",
-                             e, start, count, total_blocks);
-                return 0;
-            }
-        }
-
-        uint32_t extent_bytes = (uint32_t)meta->extent_count * sizeof(FileExtent);
-        memcpy(buf + pos, meta->extents, extent_bytes);
-        pos += extent_bytes;
-    }
-
-    if (name_len > 0 && meta->filename) {
-        memcpy(buf + pos, meta->filename, name_len);
-        pos += name_len;
-    }
-
-    // Stamp CRC16 over the entire record (with CRC field zeroed)
-    uint16_t crc = meta_crc16(buf, (uint32_t)record_len);
-    memcpy(buf + RECORD_CRC_OFFSET, &crc, sizeof(uint16_t));
-
-    return (uint32_t)record_len;
-}
-
-static int unpack_record(const uint8_t* buf, TagFSMetadata* out) {
-    uint32_t pos = 0;
-
-    uint16_t record_len;
-    memcpy(&record_len,         buf + pos, sizeof(uint16_t));  pos += 2;
-
-    // Validate record_len sanity before CRC check
-    if (record_len < RECORD_HEADER_SIZE || record_len > TAGFS_MPOOL_DATA_SIZE) {
-        debug_printf("[MetaPool] unpack: invalid record_len=%u\n", record_len);
-        return -1;
-    }
-
-    /* Verify CRC16 integrity (zero the CRC field for computation).
-     *
-     * ‼ A STORED ZERO IS CHECKED LIKE ANY OTHER SUM.
-     *
-     * It used to be waved through, for compatibility with records written
-     * before the CRC existed. That compatibility is empty: the CRC landed
-     * 2026-03-17 and the Deed format landed 2026-08-26, and a mount reads a
-     * Deed or it does not happen at all — so no volume this kernel can mount
-     * predates the sum. What the exception actually did was make about one
-     * record in 65536 written by the CURRENT code uncheckable for ever, because
-     * CRC-16/CCITT-FALSE legitimately produces 0x0000. */
-    uint16_t stored_crc;
-    memcpy(&stored_crc, buf + RECORD_CRC_OFFSET, sizeof(uint16_t));
-    {
-        uint8_t check_buf[TAGFS_MPOOL_DATA_SIZE];
-        memcpy(check_buf, buf, record_len);
-        memset(check_buf + RECORD_CRC_OFFSET, 0, 2);
-        uint16_t computed_crc = meta_crc16(check_buf, record_len);
-        if (computed_crc != stored_crc) {
-            debug_printf("[MetaPool] unpack: CRC16 mismatch (stored=0x%04x computed=0x%04x)\n",
-                         stored_crc, computed_crc);
-            return -1;
-        }
-    }
-
-    memcpy(&out->file_id,       buf + pos, sizeof(uint32_t));  pos += 4;
-    memcpy(&out->flags,         buf + pos, sizeof(uint32_t));  pos += 4;
-    memcpy(&out->size,          buf + pos, sizeof(uint64_t));  pos += 8;
-    memcpy(&out->created_time,  buf + pos, sizeof(uint64_t));  pos += 8;
-    memcpy(&out->modified_time, buf + pos, sizeof(uint64_t));  pos += 8;
-    memcpy(&out->tag_count,     buf + pos, sizeof(uint16_t));  pos += 2;
-    memcpy(&out->extent_count,  buf + pos, sizeof(uint16_t));  pos += 2;
-
-    uint16_t name_len;
-    memcpy(&name_len, buf + pos, sizeof(uint16_t));            pos += 2;
-
-    pos += 2;  // Skip CRC16 field (already validated above)
-
-    out->tag_ids  = NULL;
-    out->extents  = NULL;
-    out->filename = NULL;
-
-    if (out->tag_count > 0) {
-        out->tag_ids = kmalloc(sizeof(uint16_t) * out->tag_count);
-        if (!out->tag_ids) {
-            debug_printf("[MetaPool] unpack: kmalloc failed for tag_ids (count=%u)\n",
-                         out->tag_count);
-            return -1;
-        }
-        uint32_t tag_bytes = (uint32_t)out->tag_count * sizeof(uint16_t);
-        memcpy(out->tag_ids, buf + pos, tag_bytes);
-        pos += tag_bytes;
-    }
-
-    if (out->extent_count > 0) {
-        out->extents = kmalloc(sizeof(FileExtent) * out->extent_count);
-        if (!out->extents) {
-            debug_printf("[MetaPool] unpack: kmalloc failed for extents (count=%u)\n",
-                         out->extent_count);
-            kfree(out->tag_ids);
-            out->tag_ids = NULL;
-            return -1;
-        }
-        uint32_t extent_bytes = (uint32_t)out->extent_count * sizeof(FileExtent);
-        memcpy(out->extents, buf + pos, extent_bytes);
-        pos += extent_bytes;
-
-        TagFSState* fs = tagfs_get_state();
-        uint32_t total_blocks = (fs && fs->initialized) ? fs->layout.data_blocks : 0;
-
-        for (uint16_t e = 0; e < out->extent_count; e++) {
-            uint32_t start = out->extents[e].start_block;
-            uint32_t count = out->extents[e].block_count;
-            bool overflow  = (count > 0) && ((uint64_t)start + count > (uint64_t)0xFFFFFFFFU);
-            bool oob       = (total_blocks > 0) &&
-                             (start >= total_blocks || (uint64_t)start + count > total_blocks);
-            if (count == 0 || overflow || oob) {
-                debug_printf("[MetaPool] WARNING: extent %u invalid (start=%u count=%u total=%u) — discarding extents\n",
-                             e, start, count, total_blocks);
-                kfree(out->extents);
-                out->extents      = NULL;
-                out->extent_count = 0;
-                break;
-            }
-        }
-    }
-
-    out->filename = kmalloc(name_len + 1);
-    if (!out->filename) {
-        debug_printf("[MetaPool] unpack: kmalloc failed for filename (len=%u)\n", name_len);
-        kfree(out->tag_ids);
-        kfree(out->extents);
-        out->tag_ids = NULL;
-        out->extents = NULL;
-        return -1;
-    }
-    if (name_len > 0) {
-        memcpy(out->filename, buf + pos, name_len);
-    }
-    out->filename[name_len] = '\0';
-
-    return 0;
-}
-
-// ---------------------------------------------------------------------------
 // Public: free
 // ---------------------------------------------------------------------------
 
@@ -771,7 +577,8 @@ int meta_pool_mirror_init(uint32_t max_file_id) {
             if (file_id > 0 && file_id < g_mirror_capacity) {
                 TagFSMetadata meta;
                 memset(&meta, 0, sizeof(meta));
-                if (unpack_record(hdr->payload + pos, &meta) == 0) {
+                /* record_len is bounded by what the block holds past pos, above. */
+                if (UnpackV1(hdr->payload + pos, record_len, &meta) == OK) {
                     if (g_mirror_valid[file_id]) {
                         tagfs_metadata_free(&g_mirror[file_id]);
                     }
@@ -837,11 +644,10 @@ int meta_pool_read_cached(uint32_t file_id, TagFSMetadata* out) {
 // ---------------------------------------------------------------------------
 
 int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* out_offset) {
-    uint32_t record_size = meta_pool_record_size(meta);
-
-    if (record_size > TAGFS_MPOOL_DATA_SIZE) {
-        debug_printf("[MetaPool] write: record too large (%u > %u) for file_id=%u\n",
-                     record_size, TAGFS_MPOOL_DATA_SIZE, meta->file_id);
+    uint32_t record_size = 0;
+    if (!PlotFits(meta, &record_size)) {
+        kprintf("[MetaPool] file %u: its record would be wider than a record of this volume "
+                "holds (%u bytes) — it is not written\n", meta->file_id, TAGFS_MPOOL_DATA_SIZE);
         return -1;
     }
 
@@ -969,12 +775,8 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
     }
 
     uint8_t* dest = g_current_block.payload + g_current_block.used_bytes;
-    uint32_t packed = pack_record(meta, dest);
-    if (packed == 0) {
-        debug_printf("[MetaPool] write: pack_record failed for file_id=%u — invalid extent\n",
-                     meta->file_id);
+    if (PackV1(meta, dest) == 0)
         return -1;
-    }
 
     *out_block  = g_current_block_num;
     *out_offset = MPOOL_BLOCK_HEADER + g_current_block.used_bytes;
@@ -1033,22 +835,21 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
 // ---------------------------------------------------------------------------
 
 int meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out) {
+    /* A record starts past the block's header and leaves room for its own. */
+    if (offset < MPOOL_BLOCK_HEADER || offset + RECORD_HEADER_SIZE > TAGFS_BLOCK_SIZE)
+        return -(int)ERR_METADATA_CORRUPTED;
+
     // Current block may have unflushed data — read from in-memory copy
-    // spin_lock removed - using g_state.lock
-    if (block == g_current_block_num) {
-        int r = unpack_record((uint8_t *)&g_current_block + offset, out);
-        // spin_unlock removed - using g_state.lock
-        return r;
-    }
-    // spin_unlock removed - using g_state.lock
+    if (block == g_current_block_num)
+        return -(int)UnpackV1((uint8_t *)&g_current_block + offset, TAGFS_BLOCK_SIZE - offset, out);
 
     // Non-current blocks are always flushed — read from disk
     uint8_t buf[TAGFS_BLOCK_SIZE];
     if (tagfs_read_block(block, buf) != OK) {
         debug_printf("[MetaPool] read: tagfs_read_block failed for block %u\n", block);
-        return -1;
+        return -(int)ERR_READ_FAILED;
     }
-    return unpack_record(buf + offset, out);
+    return -(int)UnpackV1(buf + offset, TAGFS_BLOCK_SIZE - offset, out);
 }
 
 // ---------------------------------------------------------------------------

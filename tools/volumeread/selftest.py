@@ -615,6 +615,7 @@ def ConstantsCheck(src):
              "tagfs": os.path.join(fs, "tagfs.h"), "consts": os.path.join(fs, "tagfs_constants.h"),
              "cow": os.path.join(fs, "cow", "cow.h"), "book": os.path.join(fs, "disk_book", "disk_book.h"),
              "pool": os.path.join(fs, "metadata_pool", "meta_pool.c"),
+             "plot": os.path.join(fs, "plot", "plot_width.h"),
              "boot": os.path.join(src, "boot", "uefi", "tagfs_boot.h"),
              "ground": os.path.join(src, "kernel", "core", "boardroom", "ground.c"),
              "groundh": os.path.join(src, "kernel", "core", "boardroom", "ground.h")}
@@ -670,7 +671,7 @@ def ConstantsCheck(src):
     Eq("META_RECORD_VARDATA_OFF", ondisk.META_RECORD.size, d.get("META_RECORD_VARDATA_OFF"))
 
     structs = {}
-    for k in ("deed", "ledger", "tagfs", "cow", "book"):
+    for k in ("deed", "ledger", "tagfs", "plot", "cow", "book"):
         structs.update(Structs(text[k], d))
     for cname, fields in (("VolumeDeed", ondisk.VOLUME_DEED), ("VolumeGeometry", ondisk.VOLUME_GEOMETRY),
                           ("VolumeLayout", ondisk.VOLUME_LAYOUT), ("VolumeBoot", ondisk.VOLUME_BOOT),

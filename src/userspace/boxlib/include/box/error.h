@@ -152,7 +152,7 @@ typedef uint32_t error_t;
     X(ACPI_PARSE_ERROR,              acpi_parse_error,              803,  "acpi parse error",              "acpi") \
     X(ACPI_MADT_NOT_FOUND,           acpi_madt_not_found,           804,  "acpi madt not found",           "acpi") \
     X(ACPI_FADT_NOT_FOUND,           acpi_fadt_not_found,           805,  "acpi fadt not found",           "acpi") \
-    /* TagFS core (850-866) */ \
+    /* TagFS core (850-868) */ \
     X(TAGFS_NOT_INITIALIZED,         tagfs_not_initialized,         850,  "tagfs not initialized",         "tagfs") \
     X(TAGFS_CORRUPTED,               tagfs_corrupted,               851,  "tagfs corrupted",               "tagfs") \
     X(TAGFS_NO_SPACE,                tagfs_no_space,                852,  "tagfs no space",                "tagfs") \
@@ -170,6 +170,8 @@ typedef uint32_t error_t;
     X(TAGFS_EXTENT_ERROR,            tagfs_extent_error,            864,  "tagfs extent error",            "tagfs") \
     X(TAGFS_RECOVERY_FAILED,         tagfs_recovery_failed,         865,  "tagfs recovery failed",         "tagfs") \
     X(TAGFS_TAG_TOO_LONG,            tagfs_tag_too_long,            866,  "tagfs tag too long",            "tagfs") \
+    X(TAGFS_BEYOND_SIZE,             tagfs_beyond_size,             867,  "tagfs write past the size",     "tagfs") \
+    X(TAGFS_RECORD_FULL,             tagfs_record_full,             868,  "tagfs file record full",        "tagfs") \
     /* Pocket / IPC (900-911) */ \
     X(POCKET_RING_FULL,              pocket_ring_full,              900,  "pocket ring full",              "ipc") \
     X(RESULT_RING_FULL,              result_ring_full,              901,  "result ring full",              "ipc") \

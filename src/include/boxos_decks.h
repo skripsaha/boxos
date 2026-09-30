@@ -243,12 +243,13 @@
 #define STORAGE_OBJ_DELETE          0x08
 #define STORAGE_OBJ_RENAME          0x09
 #define STORAGE_OBJ_GET_INFO        0x0A
-/* obj.truncate — drop everything past a byte length. params =
- * [u32 file_id][u64 new_size]. Shrink only: growing is refused, because
- * TagFS does not zero freshly allocated blocks and a grow would hand back
- * the allocator's previous tenant. The operation TagFS lacked until <fstream>
- * needed it — ios_base::out alone means "w", and "w" truncates. */
-#define STORAGE_OBJ_TRUNCATE        0x0B
+/* obj.span — a file made exactly `size` bytes long. params =
+ * [u32 file_id][u64 size]. Shorter: the tail is cut and its blocks given
+ * back. Longer: the bytes from the old size to the new one read as zeros,
+ * written to blocks taken for them — never a previous owner's bytes. A write
+ * grows a file only at its end, and is refused ERR_TAGFS_BEYOND_SIZE past it;
+ * span is the one other way a file grows. */
+#define STORAGE_OBJ_SPAN            0x0B
 /* The four snapshot operations (0x20-0x22, 0x24) are answered ERR_UNSUPPORTED
  * on a format-v1 volume, whatever their params; snapshots arrive with format
  * v2. Their shapes are kept below as the wire they were. */

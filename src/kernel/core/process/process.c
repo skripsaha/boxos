@@ -71,7 +71,7 @@ static int process_set_tag_bit(process_t *proc, uint16_t tag_id)
         return 0;
     }
 
-    for (uint16_t i = 0; i < cabin->tag_overflow_count; i++)
+    for (uint32_t i = 0; i < cabin->tag_overflow_count; i++)
     {
         if (cabin->tag_overflow_ids[i] == tag_id)
             return 0;
@@ -79,7 +79,7 @@ static int process_set_tag_bit(process_t *proc, uint16_t tag_id)
 
     if (cabin->tag_overflow_count >= cabin->tag_overflow_capacity)
     {
-        uint16_t new_cap = cabin->tag_overflow_capacity == 0 ? 8 : cabin->tag_overflow_capacity * 2;
+        uint32_t new_cap = cabin->tag_overflow_capacity == 0 ? 8 : cabin->tag_overflow_capacity * 2;
         uint16_t *new_ids = kmalloc(sizeof(uint16_t) * new_cap);
         if (!new_ids)
             return -1;
@@ -123,7 +123,7 @@ static int process_clear_tag_bit(process_t *proc, uint16_t tag_id)
         cabin->tag_bits &= ~((uint64_t)1 << tag_id);
         return 0;
     }
-    for (uint16_t i = 0; i < cabin->tag_overflow_count; i++)
+    for (uint32_t i = 0; i < cabin->tag_overflow_count; i++)
     {
         if (cabin->tag_overflow_ids[i] == tag_id)
         {
@@ -1584,9 +1584,9 @@ bool process_has_tag_id(process_t *proc, uint16_t tag_id)
      * (old or new) — we never combine an old buffer with a new count and
      * read out of bounds.  Old buffers are retired (not freed), so the
      * pointer always references live memory. */
-    uint16_t  n   = __atomic_load_n(&proc->cabin->tag_overflow_count, __ATOMIC_ACQUIRE);
+    uint32_t  n   = __atomic_load_n(&proc->cabin->tag_overflow_count, __ATOMIC_ACQUIRE);
     uint16_t *ids = __atomic_load_n(&proc->cabin->tag_overflow_ids,   __ATOMIC_ACQUIRE);
-    for (uint16_t i = 0; ids && i < n; i++)
+    for (uint32_t i = 0; ids && i < n; i++)
     {
         if (ids[i] == tag_id)
             return true;
@@ -1712,7 +1712,7 @@ bool process_has_tag(process_t *proc, const char *tag)
         if (TagFSTagMatches(i, &spelled))
             return true;
     }
-    for (uint16_t j = 0; j < proc->cabin->tag_overflow_count; j++)
+    for (uint32_t j = 0; j < proc->cabin->tag_overflow_count; j++)
     {
         if (TagFSTagMatches(proc->cabin->tag_overflow_ids[j], &spelled))
             return true;
@@ -1944,7 +1944,7 @@ size_t process_snapshot_tags(process_t *proc, char *buffer, size_t buffer_size)
             break;
     }
 
-    for (uint16_t j = 0; j < proc->cabin->tag_overflow_count; j++)
+    for (uint32_t j = 0; j < proc->cabin->tag_overflow_count; j++)
     {
         if (!snapshot_append_tag(buffer, buffer_size, &pos, &first,
                                  proc->cabin->tag_overflow_ids[j]))

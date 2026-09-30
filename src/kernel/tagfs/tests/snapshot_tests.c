@@ -18,7 +18,7 @@ static uint8_t s_cow_block[TAGFS_BLOCK_SIZE];
  * the record does not reach that far. */
 static uint32_t CowBlockOf(const TagFSMetadata* meta, uint32_t k)
 {
-    for (uint16_t e = 0; e < meta->extent_count && meta->extents; e++) {
+    for (uint32_t e = 0; e < meta->extent_count && meta->extents; e++) {
         if (k < meta->extents[e].block_count)
             return meta->extents[e].start_block + k;
         k -= meta->extents[e].block_count;

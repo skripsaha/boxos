@@ -4,8 +4,9 @@
  * ‼ A PROGRAM, NOT A KERNEL TEST, BECAUSE THESE DEFECTS LIVE ON THE WAY IN.
  * The kernel's startup tests call tagfs_write directly. Every case here goes
  * the way a person's program goes — boxlib, a Manifest, the Storage and
- * System Decks, ObjWrite's crate bounce, the WriteJob on a machine that has
- * one — so what it sees is what anybody using this machine would see.
+ * System Decks, ObjWrite taking the bytes out of its pages, the WriteJob on a
+ * machine that has one — so what it sees is what anybody using this machine
+ * would see.
  *
  * ‼ IT SAYS WHAT IT SAW, IN FOUR WORDS, AND JUDGES NOTHING.
  * Every case says its verdict in exactly one line, and every figure in it was

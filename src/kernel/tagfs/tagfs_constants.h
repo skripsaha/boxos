@@ -52,7 +52,6 @@
 /* A registry record's head: u16 tag_id, u8 flags, u8 key_len, u16 value_len.
  * A record never crosses a block, so a tag is at most what one block holds. */
 #define TAGFS_REGISTRY_RECORD_HEAD  6
-#define TAGFS_MPOOL_DATA_SIZE       4080
 #define TAGFS_FTABLE_PER_BLOCK      510
 
 // Bitmap index initial capacities

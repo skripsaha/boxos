@@ -245,13 +245,13 @@ Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
             free(c); CUR_FAIL(ERR_FILE_NOT_FOUND);
         }
         /* CURRENT_TRUNCATE: start the writer from an empty file rather than
-         * over the top of the old one. Without this a shorter rewrite leaves
-         * the previous tail readable past the new content — the hole that
-         * made <fstream>'s ios_base::out impossible to implement honestly.
+         * over the top of the old one — the file spanned to nothing. Without
+         * this a shorter rewrite leaves the previous tail readable past the
+         * new content, and <fstream>'s ios_base::out could not be honest.
          * A refusal is fatal to the open: silently keeping the old bytes is
          * the one outcome the caller definitely did not ask for. */
         if ((role & CURRENT_WRITE) && (flags & CURRENT_TRUNCATE)) {
-            int trc = file_truncate(c->file_id, 0);
+            int trc = file_span(c->file_id, 0);
             if (trc != 0) { free(c); CUR_FAIL(box_errno_of(trc)); }
         }
         c->file_pos = 0;
@@ -412,7 +412,7 @@ int current_write(Current *c, const void *data, size_t len)
          * loop) instead of truncating a 2-4 GiB count into a negative int. */
         size_t  req = len > (size_t)INT32_MAX ? (size_t)INT32_MAX : len;
         int64_t n   = fwrite(c->file_id, c->file_pos, data, req);
-        if (n < 0) return -ERR_WRITE_FAILED;
+        if (n < 0) return (int)n;   /* the cause — a cursor past the end among them */
         c->file_pos += (uint64_t)n;
         return (int)n;
     }
@@ -559,18 +559,18 @@ int64_t current_size(const Current *c)
     return (int64_t)info.size;
 }
 
-int current_resize(Current *c, uint64_t new_size)
+int current_span(Current *c, uint64_t size)
 {
     if (!c) return -ERR_NULL_POINTER;
     if (!(c->caps & CURRENT_CAP_RESIZABLE)) return -ERR_INVALID_OPERATION;
     if (!(c->caps & CURRENT_CAP_WRITE))     return -ERR_INVALID_OPERATION;
 
-    int rc = file_truncate(c->file_id, new_size);
+    int rc = file_span(c->file_id, size);
     if (rc != 0) return rc;
 
-    /* Keep the cursor inside the file. Leaving it past the end would make the
-     * next write re-grow the file through a gap of blocks nobody wrote. */
-    if (c->file_pos > new_size) c->file_pos = new_size;
+    /* Keep the cursor inside the file: past a shorter end, the next write
+     * would begin past the size, and the kernel refuses that. */
+    if (c->file_pos > size) c->file_pos = size;
     return OK;
 }
 

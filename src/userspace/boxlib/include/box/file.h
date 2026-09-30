@@ -43,7 +43,9 @@ int query_all(const char* tags, uint32_t** out_ids);
 int query_all_everywhere(const char* tags, uint32_t** out_ids);
 int file_info(uint32_t file_id, file_info_t* info);
 /* Return the byte count transferred (0..4 GiB, short-transfer: a request > 4 GiB
- * is capped to one syscall — loop for more), or a negative -error_t on failure. */
+ * is capped to one syscall — loop for more), or a negative -error_t on failure.
+ * fwrite writes at `offset` no further than the file's size: past it the
+ * write is refused -ERR_TAGFS_BEYOND_SIZE (file_span makes a gap). */
 int64_t fread(uint32_t file_id, uint64_t offset, void* buffer, size_t size);
 int64_t fwrite(uint32_t file_id, uint64_t offset, const void* buffer, size_t size);
 /* `delete` is a C++ keyword — C++ callers use file_delete(), bound to the
@@ -55,16 +57,17 @@ int delete(uint32_t file_id);
 #endif
 int file_rename(uint32_t file_id, const char* new_filename);
 
-/* Drop everything past `new_size`. SHRINK ONLY: growing is refused
- * (-ERR_INVALID_ARGUMENT), because TagFS does not zero freshly allocated
- * blocks and a grow would hand back the previous tenant's bytes — files grow
- * by being written. Refused on "system"/"boot" files
- * (-ERR_PERMISSION_DENIED), like delete. Returns 0 or a negative -error_t.
+/* The file made exactly `size` bytes long. Shorter: the tail is cut and its
+ * blocks given back. Longer: the bytes from the old size on read as zeros —
+ * never another file's. A write grows a file only at its end, and one that
+ * begins past it is refused -ERR_TAGFS_BEYOND_SIZE: a gap is made by span.
+ * Refused on "system"/"boot" files (-ERR_PERMISSION_DENIED), like delete.
+ * Returns 0 or a negative -error_t.
  *
- * Publishes a TRUNCATED Touch event on every tag of the file — the same
- * 32-byte payload shape as a write, with op = 3, offset = the new length,
- * bytes = how many were discarded. */
-int file_truncate(uint32_t file_id, uint64_t new_size);
+ * Publishes the change on every tag of the file — the same 32-byte payload
+ * shape as a write, with op = 3, offset = where the file changed (the smaller
+ * of the old and the new size), bytes = how many were cut or added. */
+int file_span(uint32_t file_id, uint64_t size);
 
 int tag_add(uint32_t file_id, const char* tag);
 int tag_remove(uint32_t file_id, const char* key);

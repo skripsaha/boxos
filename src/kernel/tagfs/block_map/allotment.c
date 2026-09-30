@@ -202,7 +202,7 @@ static error_t AllotmentTakeInside(uint32_t fid, uint32_t want, uint64_t file_bl
     bool       may_read  = !LockRankAnyHeldHere();
     bool       caught_up = false;
     uint32_t   rounds    = 0;
-    uint64_t   fits      = file_blocks < 0xFFFFu ? file_blocks : 0xFFFFu;
+    uint64_t   fits      = file_blocks < PLOT_RUN_MOST ? file_blocks : PLOT_RUN_MOST;
     uint32_t   size      = fits > want ? (uint32_t)fits : want;
 
     for (;;) {
