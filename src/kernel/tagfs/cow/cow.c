@@ -1,4 +1,5 @@
 #include "cow.h"
+#include "../mount/ground_census.h"
 #include "../disk_book/disk_book.h"
 #include "../tagfs.h"
 
@@ -227,48 +228,25 @@ void CowNameStanding(uint32_t manifest_block)
 /*
  * ‼ WHAT COPY-ON-WRITE OWNS, ANSWERED BY COPY-ON-WRITE ITSELF.
  *
- * The mount's roll call walks every file's extents and every metadata chain,
- * builds a map of what it found, and then keeps any block EITHER map calls
- * used. That union is what makes the repair additive and safe — nothing is
- * ever released over live metadata. But it has one hole, and the hole is a
- * block that NEITHER map names: one a kernel handed out and named in the
- * Ledger, whose bit had not yet reached the medium when the machine stopped.
- *
- * The manifest block is exactly that block. The kernel that took the first
- * snapshot allocated it and wrote the Ledger naming it at once, and the bit
- * saying it is taken lived in RAM until that kernel's next sync. Cut the power
- * in between and a mount reads a bitmap that calls the block FREE, a roll call
- * that does not reach it (no file's extent, no chain's magic), and a union
- * that therefore leaves it free — for the next writer to take, while the
- * Ledger still calls it the manifest.
- *
- * So CoW is asked, at the moment the roll call is taken, which blocks of the
- * data run are its own: the two manifest blocks the Ledger names, and both
- * blocks of every redirect the DiskBook replayed into a snapshot named at this
- * mount — the kept block no file names any more, and the one its file moved
- * onto. They stay taken until the volume's census, which knows every owner,
- * returns what nothing owns.
- *
- * Marks only. It never clears a bit, so it can only keep a block, never
- * release one.
+ * The mount's census asks every owner of the data run for its ground
+ * (ground_owner.h), and copy-on-write owns what no file's record and no chain
+ * reaches: the two manifest blocks the Ledger names — allocated by a kernel
+ * that took a snapshot and named in the Ledger at once, while the bit saying
+ * they were taken could still be in its memory when the power went — and both
+ * blocks of every redirect the DiskBook replayed into a snapshot named at
+ * this mount: the frozen block no file names any more, and the block its file
+ * moved onto, which that file names too.
  */
-void CowRollCall(uint8_t *computed_bm, uint32_t total_blocks)
+void CowClaimGround(void)
 {
-    if (!computed_bm)
-        return;
-
     TagFSState *fs = tagfs_get_state();
     if (!fs)
         return;
 
-#define COW_ROLL_CALL_MARK(blk) do {                                          \
-        uint32_t _b = (blk);                                                  \
-        if (_b != 0 && _b < (total_blocks))                                   \
-            computed_bm[_b / 8] |= (uint8_t)(1u << (_b % 8));                 \
-    } while (0)
-
-    COW_ROLL_CALL_MARK(fs->ledger.cow_manifest_block);
-    COW_ROLL_CALL_MARK(fs->ledger.cow_manifest_backup_block);
+    if (fs->ledger.cow_manifest_block)
+        GroundClaim(GROUND_MANIFEST, fs->ledger.cow_manifest_block, 1, 0);
+    if (fs->ledger.cow_manifest_backup_block)
+        GroundClaim(GROUND_MANIFEST_BACKUP, fs->ledger.cow_manifest_backup_block, 1, 0);
 
     /* Taken WITHOUT g_state.lock: the copy-on-write lock ranks above the
      * volume's, so it is never taken under it. */
@@ -277,12 +255,12 @@ void CowRollCall(uint8_t *computed_bm, uint32_t total_blocks)
         for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
             const CowSnapshot *snap = &g_cow_state.snapshots[i];
             for (uint32_t r = 0; r < snap->redirect_count; r++) {
-                COW_ROLL_CALL_MARK(snap->redirects[r].old_block);
-                COW_ROLL_CALL_MARK(snap->redirects[r].new_block);
+                if (snap->redirects[r].old_block)
+                    GroundClaim(GROUND_FROZEN, snap->redirects[r].old_block, 1, i);
+                if (snap->redirects[r].new_block)
+                    GroundClaim(GROUND_REDIRECT_NEW, snap->redirects[r].new_block, 1, i);
             }
         }
         TagFSLockDrop(&g_cow_state.lock);
     }
-
-#undef COW_ROLL_CALL_MARK
 }

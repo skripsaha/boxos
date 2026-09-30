@@ -31,17 +31,76 @@
 // The mount
 // ----------------------------------------------------------------------------
 
-/* The chain walked from `first_block` to the block whose link is zero, which
- * becomes the tail. 0, or -1 — said — for a chain that leaves the volume, goes
- * round, will not read, or is not a pool. */
-int      meta_pool_init(uint32_t first_block);
+/*
+ * ‼ THE POOL IS WALKED ONCE, AND THE SEAL SAYS HOW FAR.
+ *
+ * The mount's walk reads each block of the chain once and puts every record
+ * into the map of live files as it goes — the newest of a file's records wins,
+ * because the walk is in append order (principle 26: through PoolMirrorPut,
+ * the door every Ink uses) — while it holds each block against the seals the
+ * Ledger's copies carry (volume_ledger.h, SettleMark):
+ *
+ *   the newest copy's seal borne out — its closed blocks fold to closed_crc32
+ *     and its open block's records to tail_crc32 — the pool is read up to its
+ *     `to` and not a byte further: what lies past it is a cycle that did not
+ *     settle. One walk, the common mount;
+ *   not borne out, and the other copy's seal is — the newest cycle was cut
+ *     before its flush, or the medium said a flush was kept that was not: the
+ *     volume stands on the cycle before, the walk is made again up to its
+ *     `to`, and the medium is marked as one that once held less than a seal
+ *     (SETTLE_MEDIUM_LIED);
+ *   neither, and a seal's closed part is borne out while its open block is not
+ *     — the open block was torn as it was rewritten (decision 5): the pool
+ *     rolls back to its last closed block, loudly, and mounts writable;
+ *   no seal's closed part borne out — a kernel before the seal retired records
+ *     in closed blocks in place, or the blocks rotted: the chain is read whole
+ *     as that kernel left it (no seal: the same), loudly, with nothing rolled
+ *     back.
+ *
+ * Only a walk that is made again, after a cut or damage, reads a block twice.
+ */
+typedef enum {
+    POOL_STOOD_SEAL = 1,       /* on the seal it names, borne out */
+    POOL_STOOD_TORN_TAIL,      /* on the seal it names, its open block rolled back */
+    POOL_STOOD_NO_SEAL,        /* the whole chain, as a kernel before the seal reads it */
+} PoolStood;
 
-/* The newest record of every file the file table names, into the map of live
- * files through PoolMirrorPut — the same door every Ink puts through. 0, or -1
- * — said, with the numbers — when memory cannot hold a record: the map is the
- * authority every read and every Ink stands on, and a file it cannot hold is
- * a file this mount does not have. */
-int      meta_pool_mirror_init(void);
+typedef struct {
+    const SettleMark* seal[VOLUME_LEDGER_COPIES];  /* [0] the newest copy's, [1] the other's; NULL: none */
+    uint32_t          head;                        /* the Deed's head: where a walk with no seal begins */
+} PoolMountAsk;
+
+typedef struct {
+    PoolStood stood;
+    int       seal;            /* the seal stood on: an index into ask->seal, or -1 */
+    bool      fell_back;       /* the newest copy's seal was not borne out, the other's was */
+    uint32_t  torn_bytes;      /* POOL_STOOD_TORN_TAIL: the records the torn open block held */
+    uint32_t  top_fid;         /* the highest file id any record walked names — past the seal too */
+    uint32_t  top_tag;         /* the highest tag id a record of the span wears */
+    uint32_t  from_block;      /* where the records of the next seal's cycle begin */
+    uint32_t  from_bytes;
+    uint32_t  unreadable;      /* records of the span that do not check out */
+    uint32_t* last_span;       /* the files the stood seal's own cycle wrote records of */
+    uint32_t  last_span_count;
+} PoolMountOutcome;
+
+/* The walk above, into the map of live files. OK; or ERR_TAGFS_CORRUPTED —
+ * said — for a chain that cannot be read as far as any seal or the Deed's head
+ * needs, and ERR_NO_MEMORY for records memory cannot hold: a map held in part
+ * is a mount that lost files. `out->last_span` is the caller's to kfree. */
+error_t  PoolMount(const PoolMountAsk* ask, PoolMountOutcome* out);
+
+#ifdef CONFIG_VOLUME_TESTS
+/* The seals held against the medium the way PoolMount holds them, reading
+ * only: nothing the mounted volume holds in memory is touched. Which the mount
+ * would stand on (POOL_STOOD_*), the seal's index in *out_seal (-1: none), and
+ * whether it would say it fell back. For the stand. */
+PoolStood PoolSealsJudge(const PoolMountAsk* ask, int* out_seal, bool* out_fell_back);
+#endif
+
+/* The mount's census: the chain's blocks — and the Deed's head, which the pool
+ * owns whether or not the chain still begins there — claimed. */
+void     PoolClaimGround(uint32_t deed_head);
 
 /* Everything the pool holds let go, not one byte written: what memory knows is
  * from before whatever took the volume down. With the door shut. */
@@ -182,6 +241,12 @@ uint64_t PoolSnapSettled(const PoolSnap* snap, MetaPoolPage** spent);
 
 /* Pages PoolSnapSettled spent, freed with no TagFS lock held. */
 void     PoolPagesFree(MetaPoolPage* list);
+
+/* S0, under the state lock, after PoolSnapTake: the pool's part of the
+ * cycle's seal (volume_ledger.h) — where the chain begins, the open block and
+ * the bytes of its records, the fold of the closed blocks and the CRC32 of the
+ * open one's records: what the medium holds once the cycle's S3 is done. */
+void     PoolSealTake(SettleMark* mark);
 
 /* Under the state lock: the blocks the pool holds that are not files' — its
  * chain in memory, and its Spares. */

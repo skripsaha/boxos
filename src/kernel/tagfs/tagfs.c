@@ -26,6 +26,7 @@
 #include "ink/fallow.h"
 #include "settle/settle.h"
 #include "helm/helm.h"
+#include "mount/mount.h"
 #include "../../kernel/drivers/timer/rtc.h"
 #include "logbook.h"
 #include "cpu_calibrate.h"
@@ -92,34 +93,44 @@ static volatile uint32_t g_abandon_pending = 0;
 static bool              g_leaving_said    = false;
 
 /*
- * ‼ A MOUNT THAT DID NOT FINISH, AND NOTHING THAT WOULD EVER ASK AGAIN.
+ * ‼ A MOUNT THAT DID NOT FINISH, AND WHAT MAKES IT ASK AGAIN.
  *
  * Mounting is driven by ARRIVALS: a medium is seated, `seat:taken` is
- * published, and this file takes the volume up. That is the only thing that
- * ever asks. So a mount that begins and fails leaves the machine with no
- * filesystem until the NEXT arrival — and if the medium is sitting in its
- * socket, answering, there will not be one. The stick is right there and the
- * machine will not look at it again for the rest of the boot.
- *
+ * published, and this file takes the volume up. So a mount that begins and
+ * fails leaves the machine with no filesystem until the NEXT arrival — and if
+ * the medium is sitting in its socket, answering, there will not be one.
  * Measured on the owner's board, 2026-08-30: three returns out of fifty-five
  * failed their mount, and all three recovered ONLY because the hand at the
- * machine kept replugging. Each of those failures was the medium leaving again
- * mid-read, which does produce another arrival — but a read that fails for any
- * other reason, on a medium that stays put, does not.
+ * machine kept replugging.
  *
- * So the mount is asked again. Not on a clock deciding anything: the medium is
- * in the room (the room says so), the volume is ours (its deed says so), and
- * the read failed (the medium says so). Asking again is the only answer to a
- * question whose answer changed under us, and it is spaced because nothing
- * about the hardware can change faster than that. It is bounded, and when the
- * budget is out it SAYS SO and stops — an arrival still gets the ordinary road.
+ * Two different failures, and only one of them is worth asking about again:
+ *
+ *   the medium REFUSED a read while the volume was being read — the room's
+ *   driver is recovering it, and says so when it answers again: `seat:ready`
+ *   (boardroom.h). The mount is owed until that event names this volume's seat,
+ *   and is asked again then — not on a clock, not a count of tries: a clock
+ *   guessed how long the hardware needs, and a count gave up on a medium that
+ *   only needed longer, or went on asking one that would never do;
+ *
+ *   the medium ANSWERED every read and what it holds was refused — a chain
+ *   that leaves the volume, a bitmap too small for the run, no memory to hold
+ *   it. Asking again reads the same bytes and refuses them again, so the cause
+ *   is said once and nothing asks until a medium arrives.
+ *
+ * The retry this replaced was 750 ms × 8, and the count was reset by the very
+ * attempt that exhausted it: a volume refused for good was mounted again
+ * forever.
  */
-#define TAGFS_MOUNT_RETRY_MS    750u
-#define TAGFS_MOUNT_RETRY_TRIES 8u
-
 static volatile uint32_t g_mount_owed  = 0;
-static uint64_t          g_mount_due   = 0;
-static uint32_t          g_mount_tries = 0;
+static volatile uint32_t g_mount_ready = 0;     /* seat:ready named the owed volume's seat */
+
+/* Refused reads of the volume, counted where the mount's readers meet them
+ * (TagFSNoteReadRefused): a mount that saw one failed on a medium that did not
+ * answer. The ground's own reads — the partition table and the Deed — are the
+ * survey's: a mount refused there is counted as one the medium did not
+ * answer. */
+static volatile uint32_t g_reads_refused     = 0;
+static bool              g_ground_refused    = false;
 
 /*
  * ‼ ONE CORE AT A TIME MOUNTS OR UNMOUNTS, AND THE REST GO AWAY.
@@ -176,19 +187,10 @@ uint32_t tagfs_mount_epoch(void)
     return __atomic_load_n(&g_mount_epoch, __ATOMIC_ACQUIRE);
 }
 
-/* This machine believes there is a volume in the room and has not got it up.
- * Ask again in a moment; see the note over TAGFS_MOUNT_RETRY_MS. */
-static void mount_owed(void)
-{
-    g_mount_due = rdtsc() + cpu_ms_to_tsc(TAGFS_MOUNT_RETRY_MS);
-    __atomic_store_n(&g_mount_owed, 1u, __ATOMIC_RELEASE);
-}
-
-
 /* It is up — by this road or any other — so nothing is owed. */
 static void mount_settled(void)
 {
-    g_mount_tries = 0;
+    __atomic_store_n(&g_mount_ready, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_mount_owed, 0u, __ATOMIC_RELEASE);
 }
 
@@ -345,13 +347,6 @@ static void TagFSHoldGroundAfterReturn(void)
 #define TagFSHoldGroundRelease()     ((void)0)
 #define TagFSHoldGroundAfterReturn() ((void)0)
 #endif  /* CONFIG_TAGFS_HOLD_GROUND */
-
-/* A bit of the mount's roll call map (tagfs_init): set where something owns
- * the block. */
-static inline void bitmap_set_bit(uint8_t *bitmap, uint32_t bit)
-{
-    bitmap[bit / 8] |= (uint8_t)(1u << (bit % 8));
-}
 
 // ----------------------------------------------------------------------------
 // Disk I/O helpers
@@ -555,6 +550,11 @@ static void TagFSProbeDrive(void)
 int tagfs_volume_read(uint64_t vlba, uint32_t count, void *buffer)
 {
     return BoardroomRead(g_tagfs_seat, g_volume_base + vlba, count, buffer);
+}
+
+void TagFSNoteReadRefused(void)
+{
+    __atomic_add_fetch(&g_reads_refused, 1u, __ATOMIC_RELAXED);
 }
 
 int tagfs_volume_write(uint64_t vlba, uint32_t count, const void *buffer)
@@ -1272,24 +1272,38 @@ static bool volume_medium_gone(void)
 }
 
 /*
- * ‼ AND ONLY WHEN THERE IS SOMETHING TO ASK FOR.
- *
- * "A medium is seated" is the wrong question: a machine whose disk carries no
- * BoxOS volume at all has one seated too, and asking it eight times says
- * nothing except eight surveys and nine lines of log on every boot without a
- * filesystem.
- *
- * The right one is the seat itself. TagFSProbeDrive leaves g_tagfs_seat set
- * only when a medium in the room answered with THIS machine's volume; a mount
- * that fails past that point failed on a volume that is there, and that is the
- * only failure worth asking about again. A mount that fails because the medium
- * has gone leaves no seat, and its return will arrive on its own.
+ * One attempt at the mount, and what it leaves owed (the note over
+ * g_mount_owed). Only a failure on a volume that is there is worth asking
+ * about again: TagFSProbeDrive leaves g_tagfs_seat set only when a medium in
+ * the room answered with THIS machine's volume, and a mount that fails
+ * because the medium has gone leaves no seat — its return arrives on its own.
  */
-static void mount_owed_if_the_volume_is_there(void)
+static error_t mount_attempt(void)
 {
-    if (g_tagfs_seat != BOARDROOM_NO_SEAT) {
-        mount_owed();
+    uint32_t refused = __atomic_load_n(&g_reads_refused, __ATOMIC_ACQUIRE);
+    g_ground_refused = false;
+    error_t rc = tagfs_init();
+    if (rc == OK || rc == ERR_ALREADY_INITIALIZED) {
+        mount_settled();
+        return rc;
     }
+    if (g_tagfs_seat == BOARDROOM_NO_SEAT)
+        return rc;
+
+    bool answered = !g_ground_refused &&
+                    __atomic_load_n(&g_reads_refused, __ATOMIC_ACQUIRE) == refused;
+    if (answered) {
+        kprintf("[TagFS] the medium in seat %u answered every read and its volume was "
+                "refused for what it holds (said above) — reading it again would refuse it "
+                "again, so the machine asks only when a medium arrives\n", g_tagfs_seat);
+        mount_settled();
+        return rc;
+    }
+    if (__atomic_exchange_n(&g_mount_owed, 1u, __ATOMIC_ACQ_REL) == 0)
+        kprintf("[TagFS] the medium in seat %u refused a read while its volume was being "
+                "read — the mount is asked again when the seat says it answers again "
+                "(seat:ready)\n", g_tagfs_seat);
+    return rc;
 }
 
 /*
@@ -1406,14 +1420,13 @@ static bool TagFSVolumeReturned(void)
             return false;
         }
 
-        if (tagfs_init() == OK) {
+        if (mount_attempt() == OK) {
             /* Said on every road to a mounted volume: a context this machine
              * holds is bound to the numbers of the volume that is up now and
              * told to it; a machine holding none takes up what the volume
              * remembers. This road did not say it once, while both of the
              * others did; the asymmetry was the whole of the risk. */
             UseContextRecall();
-            mount_settled();
             return true;
         }
 
@@ -1434,7 +1447,6 @@ static bool TagFSVolumeReturned(void)
         }
 
         kprintf("[TagFS] the volume came back and would not mount\n");
-        mount_owed_if_the_volume_is_there();
         return false;
     }
 
@@ -1501,6 +1513,7 @@ void TagFSNoteMediumGone(void)
  */
 static TouchWatch *g_seat_taken_watch   = NULL;
 static TouchWatch *g_seat_emptied_watch = NULL;
+static TouchWatch *g_seat_ready_watch   = NULL;
 
 static void tagfs_on_seat_taken(TouchTag tag, const void *payload,
                                 uint32_t plen, uint32_t source_pid, void *ctx)
@@ -1514,6 +1527,20 @@ static void tagfs_on_seat_emptied(TouchTag tag, const void *payload,
 {
     (void)tag; (void)payload; (void)plen; (void)source_pid; (void)ctx;
     TagFSNoteMediumGone();
+}
+
+/* A seat answers again. Only noted here — the publisher is a driver's
+ * recovery, not a place to read a volume from — and the mount it owes is asked
+ * by the service pass, where waiting is allowed. */
+static void tagfs_on_seat_ready(TouchTag tag, const void *payload,
+                                uint32_t plen, uint32_t source_pid, void *ctx)
+{
+    (void)tag; (void)source_pid; (void)ctx;
+    const BoardroomSeatEvent *ev = payload;
+    if (plen < sizeof(*ev) || !__atomic_load_n(&g_mount_owed, __ATOMIC_ACQUIRE))
+        return;
+    if (ev->first == g_tagfs_seat)
+        __atomic_store_n(&g_mount_ready, 1u, __ATOMIC_RELEASE);
 }
 
 void TagFSWatchSeats(void)
@@ -1530,7 +1557,10 @@ void TagFSWatchSeats(void)
     TouchLogbookResolve("seat:emptied", &full, &bare);
     g_seat_emptied_watch = TouchWatchSet(full, tagfs_on_seat_emptied, NULL);
 
-    if (!g_seat_taken_watch || !g_seat_emptied_watch) {
+    TouchLogbookResolve("seat:ready", &full, &bare);
+    g_seat_ready_watch = TouchWatchSet(full, tagfs_on_seat_ready, NULL);
+
+    if (!g_seat_taken_watch || !g_seat_emptied_watch || !g_seat_ready_watch) {
         kprintf("[TagFS] could not listen for media arriving — a volume that "
                 "turns up later will not be noticed\n");
     }
@@ -1546,20 +1576,15 @@ static void attend_arrival(void)
 
     /* Never mounted. tagfs_init only marks itself done at the very end, so a
      * first attempt that found nothing left everything exactly as it was. */
-    if (tagfs_init() != OK) {
-        mount_owed_if_the_volume_is_there();
+    if (mount_attempt() != OK)
         return;
-    }
 
-    {
-        /* Said on every road to a mounted volume: the Use Context binds its
-         * numbers here, and the person's word stands over the volume's memory. */
-        UseContextRecall();
-        kprintf("[TagFS] a medium arrived carrying a volume, and this machine "
-                "had none — mounted from seat %u\n", g_tagfs_seat);
-        TouchPublish("volume:mounted", &g_tagfs_seat, sizeof(g_tagfs_seat));
-        mount_settled();
-    }
+    /* Said on every road to a mounted volume: the Use Context binds its
+     * numbers here, and the person's word stands over the volume's memory. */
+    UseContextRecall();
+    kprintf("[TagFS] a medium arrived carrying a volume, and this machine "
+            "had none — mounted from seat %u\n", g_tagfs_seat);
+    TouchPublish("volume:mounted", &g_tagfs_seat, sizeof(g_tagfs_seat));
 }
 
 void TagFSAttendArrival(void)
@@ -1762,20 +1787,6 @@ static void ReadAheadForget(void) {
 }
 
 /*
- * A block the Deed names → the block TagFS allocates in.
- *
- * The Deed states where the registry, the file table and the metadata pool are
- * in blocks of the whole volume, because that is what makes a volume readable
- * by something that has not mounted it — a loader, a repair tool, another
- * kernel. TagFS itself counts from the start of the data run, because that is
- * what every file's extents on disk are counted in. This is the seam.
- */
-static uint32_t data_block_of(uint32_t volume_block)
-{
-    return volume_block - g_state.layout.data_block;
-}
-
-/*
  * A block of the DATA RUN → a sector inside the volume.
  *
  * The two coordinate systems meet here and nowhere else. What a file's
@@ -1828,6 +1839,8 @@ static int read_block(uint32_t block, void *buffer)
     int rc = tagfs_volume_read(block_to_vlba(block), 8, buffer);
     if (rc == 0)
         (void)IntegrityVerify(block, buffer);   // detect silent bit-rot on read
+    else
+        TagFSNoteReadRefused();
     return rc;
 }
 
@@ -1878,13 +1891,6 @@ error_t tagfs_write_block(uint32_t block, const void *buffer) {
 
     return OK;
 }
-
-/* What the Ledger SAID when it was read, kept so the derived count the mount
- * takes from the block map can tell "the medium carries a wrong number" from
- * "something already put it right in memory this mount". The mount's roll call
- * corrects the count in RAM and does not write it, so without this the same
- * wrong number came back off the medium on every boot for ever. */
-static uint64_t g_ledger_free_as_read;
 
 // ----------------------------------------------------------------------------
 // tagfs_init_well_known_tags
@@ -2001,92 +2007,6 @@ static error_t mount_refused(const char *what, error_t why)
     return why;
 }
 
-/*
- * One live file the table names, held against the pool.
- *
- * ‼ WHERE THE POOL SAYS THE NEWEST RECORD IS, WINS. The pool is only appended
- * to, and the mount's walk read it in order, so the record the map holds for a
- * file is the newest of its records that ever reached the medium. A table row
- * naming somewhere else is a row whose block no cycle wrote again since —
- * rows are written when files come and go, not every time a record moves —
- * and it is corrected to the pool, in memory now and on the medium by the
- * next cycle.
- *
- * A file the pool holds no record of has nothing readable anywhere: it leaves
- * the table and the map of live files, said. The rest have their extents
- * marked in the roll call's map, when there is one, and every tag they wear
- * put into the tag index.
- */
-static void mount_check_file(uint32_t fid, uint8_t *computed_bm, uint32_t *checked,
-                             uint32_t *corrected, uint32_t *lost)
-{
-    uint32_t mb, mo;
-    if (file_table_lookup(fid, &mb, &mo) != 0)
-        return;
-
-    RecordWhere where;
-    FileRecord *rec = FileMapRecordHold(g_state.files, fid, &where);
-    if (!rec)
-    {
-        /* Said with kprintf, so it survives into a shipped build: this line
-         * was the silence that turned a lost file into a mystery. */
-        kprintf("[TagFS FSCK] file %u is named at block %u+%u and this volume's pool "
-                "holds no record of it that reads — the file is gone and its name "
-                "goes with it\n", fid, mb, mo);
-        (*lost)++;
-        file_table_delete(fid);
-        FileMapDrop(g_state.files, fid);
-        return;
-    }
-
-    uint32_t pb = 0;
-    if (PoolLinkBlock(where.link, &pb) && (pb != mb || where.offset != mo))
-    {
-        file_table_update(fid, pb, where.offset);
-        (*corrected)++;
-    }
-
-    for (uint32_t e = 0; computed_bm && e < rec->extent_count; e++)
-    {
-        uint32_t start = rec->extents[e].start_block;
-        uint32_t count = rec->extents[e].block_count;
-        for (uint32_t b = start; b < start + count && b < g_state.layout.data_blocks; b++)
-            bitmap_set_bit(computed_bm, b);
-    }
-    (*checked)++;
-
-    for (uint32_t t = 0; t < rec->tag_count; t++)
-        tag_bitmap_set(g_state.bitmap_index, rec->tags[t], fid);
-
-    FileRecordRelease(rec);
-}
-
-/* Every live file, a batch of ids at a time out of the map of them: the walk
- * costs the files the volume holds, not every id it ever issued, and no lock
- * is held while a file is checked — which may take it out of the map. A row
- * at or past the Ledger's next_file_id names an id the volume never issued —
- * a table written ahead of its Ledger — and is left as it lies, unchecked and
- * in no index, as it always was (nextfid, step 1.6). */
-static void mount_walk_files(uint8_t *computed_bm, uint32_t *checked,
-                             uint32_t *corrected, uint32_t *lost)
-{
-    uint32_t batch[64];
-    uint32_t from = 1;
-    uint32_t n;
-    while ((n = FileMapRows(g_state.files, from, batch, ARRAY_SIZE(batch))) > 0)
-    {
-        for (uint32_t i = 0; i < n; i++)
-        {
-            if (batch[i] >= g_state.ledger.next_file_id)
-                return;
-            mount_check_file(batch[i], computed_bm, checked, corrected, lost);
-        }
-        if (batch[n - 1] == 0xFFFFFFFFu)
-            break;
-        from = batch[n - 1] + 1;
-    }
-}
-
 error_t tagfs_init(void) {
     if (g_state.initialized) {
         debug_printf("[TagFS] Already initialized\n");
@@ -2168,6 +2088,7 @@ error_t tagfs_init(void) {
     /* --- Stand on the ground, and read the deed that describes it --- */
     error_t ground_rc = volume_take_ground(g_tagfs_seat);
     if (ground_rc != OK) {
+        g_ground_refused = true;
         return ground_rc;
     }
 
@@ -2176,7 +2097,6 @@ error_t tagfs_init(void) {
     if (ledger_rc != OK) {
         return ledger_rc;
     }
-    g_ledger_free_as_read = g_state.ledger.free_blocks;
 
     /* --- The DiskBook: the redirect log an earlier kernel kept for its
      *     snapshots, only ever read now. Its redirects are replayed into the
@@ -2252,8 +2172,10 @@ error_t tagfs_init(void) {
      * that fails on a RETURN has no such thing: mounting is driven by
      * arrivals, and a medium that is already seated does not arrive again. So
      * `make RETURNFAIL=on` fails the first re-mount once, ONCE, with the
-     * medium left exactly where it is — and the only way back from there is
-     * the machine asking again by itself.
+     * medium left exactly where it is — as a read the medium refused, so the
+     * only way back from there is the machine asking again by itself, when
+     * the seat says it answers again (seat:ready, the note over
+     * g_mount_owed).
      *
      * Not the first mount: the stamp counts the ones that finished, so this
      * trips on the first mount after a volume has already been up.
@@ -2263,295 +2185,20 @@ error_t tagfs_init(void) {
         static bool tripped = false;
         if (!tripped && tagfs_mount_epoch() >= 1) {
             tripped = true;
+            TagFSNoteReadRefused();
             return mount_refused("RETURNFAIL=on asked this re-mount to fail",
                                  ERR_TAGFS_CORRUPTED);
         }
     }
 #endif
 
-    // --- Tag Registry ---
-    g_state.registry = kmalloc(sizeof(TagRegistry));
-    if (!g_state.registry) {
-        return mount_refused("there is no memory for its tag registry",
-                             ERR_NO_MEMORY);
-    }
-    if (tag_registry_init(g_state.registry) != OK) {
-        kfree(g_state.registry);
-        g_state.registry = NULL;
-        return mount_refused("its tag registry would not be built",
-                             ERR_TAGFS_REGISTRY_FULL);
-    }
-    /* Same rule as the bitmap below: a registry that would not read is not an
-     * empty registry. Every tag id on this volume is defined there, so a mount
-     * that continues without it renames nothing and mislabels everything. */
-    if (tag_registry_load(g_state.registry, data_block_of(g_state.layout.tag_registry_block)) != OK) {
-        return mount_refused("its tag registry would not read", ERR_TAGFS_CORRUPTED);
-    }
-
-    /*
-     * ‼ ONLY WHERE THEY START IS TAKEN FROM THE DEED. HOW LONG THEY ARE IS NOT.
-     *
-     * Both of these were handed layout.<thing>_blocks as well, and both of
-     * those numbers are written once by mkfs and raised by nothing — while the
-     * chains they describe are lengthened by ordinary use. The pool walked as
-     * far as the old number allowed and stopped inside itself, and the first
-     * write after that overwrote the link to the rest; the file table read its
-     * later blocks off the medium and threw them away above entry 510.
-     *
-     * Both now walk their own chain to its end, the same ruling the free-block
-     * count is already under ("THE FREE COUNT IS DERIVED, NOT REMEMBERED",
-     * below). The fields stay in the Deed's layout stamp so an older reader
-     * still finds everything after them, and nothing in this kernel reads
-     * either one to decide anything.
-     */
-    // --- The map of live files: the table's rows and the pool's records ---
-    g_state.files = FileMapCreate();
-    if (!g_state.files) {
-        return mount_refused("there is no memory for its map of live files",
-                             ERR_NO_MEMORY);
-    }
-
-    // --- File Table ---
-    if (file_table_init(data_block_of(g_state.layout.file_table_block)) != OK) {
-        return mount_refused("its file table would not read",
-                             ERR_FILE_TABLE_CORRUPT);
-    }
-
-    // --- Metadata Pool ---
-    if (meta_pool_init(data_block_of(g_state.layout.metadata_pool_block)) != OK) {
-        return mount_refused("its metadata pool would not read",
-                             ERR_METADATA_POOL_FULL);
-    }
-
-    // --- Bitmap Index ---
-    g_state.bitmap_index = tag_bitmap_create(TAGFS_BITMAP_INITIAL_TAG_CAP);
-    if (!g_state.bitmap_index) {
-        return mount_refused("there is no memory for its tag index",
-                             ERR_NO_MEMORY);
-    }
-
-    // --- Block Map ---
-    /* ‼ ONLY THE PART OF THE BITMAP THAT COVERS THE DATA RUN IS READ.
-     *
-     * The region a volume declares for its bitmap is laid down for the ground
-     * it may one day take, not for the ground it has (create_tagfs: the growth
-     * ceiling). On a 90 MiB volume that is two megabytes of region carrying
-     * three kilobytes of bits. The bits past the data run are zero by
-     * construction and mean nothing until the volume grows into them; when it
-     * does, the block map covers them, because it is sized from data_blocks
-     * and not from the region. */
-    uint32_t bm_region_sectors =
-        g_state.layout.block_bitmap_blocks * TAGFS_BLOCK_SECTORS;
-    uint32_t bm_sector_count =
-        (g_state.layout.data_blocks + TAGFS_SECTOR_SIZE * 8 - 1) / (TAGFS_SECTOR_SIZE * 8);
-
-    /* A bitmap region too small to hold a bit for every data block is a volume
-     * that cannot keep track of its own ground. It has never been possible to
-     * make one — mkfs sizes the two together — so this is a deed that has been
-     * damaged or written by something else, and it is not mounted. */
-    if (bm_sector_count > bm_region_sectors) {
-        return mount_refused("its block bitmap region is too small to hold a "
-                             "bit for every block of its data run",
-                             ERR_TAGFS_CORRUPTED);
-    }
-    if (BlockMapMount(g_state.layout.data_blocks,
-                      (uint64_t)g_state.layout.block_bitmap_block * TAGFS_BLOCK_SECTORS) != OK) {
-        return mount_refused("there is no memory for its block map", ERR_NO_MEMORY);
-    }
-
-    /*
-     * ‼ THE POOL IS READ BEFORE THE FSCK, BECAUSE THE FSCK IS WHAT DECIDES.
-     *
-     * This used to run twenty lines below the fsck, and the order was the
-     * whole defect: the fsck answers a file whose metadata will not read by
-     * deleting its file table entry — the file is gone, permanently, and until
-     * now it was gone SILENTLY, because the only line about it was a
-     * debug_printf that compiles to nothing in a shipped build. Meanwhile the
-     * mirror walks the pool in APPEND ORDER, so the last record it sees for a
-     * file id is the newest one on the medium by construction. It knew where
-     * every file's newest metadata actually was — and it learned it after the
-     * decision to throw the file away had already been made.
-     *
-     * So the pool speaks first, and the fsck below corrects the file table
-     * from it rather than merely reporting the disagreement. That is the same
-     * road the free-block count already takes further down: the number that
-     * can be derived wins over the number that was remembered.
-     */
-    if (meta_pool_mirror_init() != 0) {
-        return mount_refused("its files' records could not all be held in memory",
-                             ERR_NO_MEMORY);
-    }
-
-    /*
-     * --- Mount-time roll call: every owner of a block, against the map ---
-     *
-     * The roll call's own map of the run is dense; the census by windows is
-     * step 1.6. When the heap will not give it, that is said, and the walk of
-     * the files still runs — it corrects the table and builds the tag index,
-     * and a mount that skipped it had files no query could find.
-     */
-    {
-        uint32_t bitmap_bytes_sz = (g_state.layout.data_blocks + 7) / 8;
-        uint8_t *computed_bm = kmalloc(bitmap_bytes_sz);
-        if (computed_bm)
-        {
-            memset(computed_bm, 0, bitmap_bytes_sz);
-
-            // Mark reserved blocks: 0 = tag registry, 1 = file table, 2 = metadata pool
-            for (uint32_t r = 0; r < 3 && r < g_state.layout.data_blocks; r++)
-            {
-                bitmap_set_bit(computed_bm, r);
-            }
-        }
-        else
-        {
-            kprintf("[TagFS FSCK] no memory for the roll call's map of %u blocks "
-                    "(%u bytes) — this mount does not hold its block map against "
-                    "its files\n", g_state.layout.data_blocks, bitmap_bytes_sz);
-        }
-
-        // Scan all files and mark their extents
-        uint32_t files_checked = 0;
-        uint32_t entries_corrected = 0;
-        uint32_t files_lost = 0;
-
-        mount_walk_files(computed_bm, &files_checked, &entries_corrected, &files_lost);
-
-        if (computed_bm)
-        {
-            /* Walk meta_pool / file_table / registry chains and mark
-             * every chain block in computed_bm. Without this, chain
-             * blocks (e.g. meta_pool's chain to 566) appear as
-             * "orphan" — used in on-disk bitmap, missing in computed
-             * — and the old fsck would silently zero them, releasing
-             * still-live metadata pages to the allocator. CoW or any
-             * subsequent tagfs_alloc_blocks would then claim those
-             * pages and overwrite live metadata.
-             *
-             * Each subsystem's first block is in the superblock and
-             * its chain is on disk linked via next_block. Walk it
-             * here at fsck time using the same magic-check pattern
-             * the per-subsystem init's do.
-             *
-             * ‼ THE HEAD IS WALKED WHATEVER BLOCK IT IS, AND ONLY A LINK
-             * OF ZERO ENDS A CHAIN.
-             *
-             * This loop used to test `_cb != 0` before it did anything,
-             * zero standing for "the end of the chain". Zero is also a
-             * block — and the tag registry's head IS data block 0, where
-             * mkfs puts it (volume_ledger.h: VOLUME_LEDGER_NO_BLOCK). So
-             * the registry's walk never began: block 0 was covered by the
-             * three reserved above, and every continuation the registry
-             * had chained on (tag_registry_flush takes one the day its
-             * records outgrow 4080 bytes) was an orphan on every mount.
-             * The repair below is additive, so that cost a line and a
-             * count; a roll call that gives orphans back would have freed
-             * a live registry block. Measured: logcheck `census` plants a
-             * registry chained to a second block and this kernel named it
-             * "orphan run at data block 6014" while the host's census
-             * found its owner.
-             *
-             * A chain ends where the block just walked says it ends,
-             * next_block == 0 — the rule its loader keeps (tag_registry.c,
-             * file_table.c, meta_pool.c). At most data_blocks hops: a chain
-             * of distinct blocks is no longer than the run it lives in. */
-            #define MARK_CHAIN_BLOCKS(first_block, expected_magic) do {       \
-                uint32_t _cb = (first_block);                                  \
-                for (uint32_t _hops = 0; _hops < g_state.layout.data_blocks; _hops++) { \
-                    if (_cb < g_state.layout.data_blocks)                                 \
-                        bitmap_set_bit(computed_bm, _cb);                      \
-                    uint8_t _bbuf[TAGFS_BLOCK_SIZE];                           \
-                    if (tagfs_read_block(_cb, _bbuf) != OK) break;             \
-                    uint32_t _mg, _nx;                                         \
-                    memcpy(&_mg, _bbuf + 0, 4);                                \
-                    memcpy(&_nx, _bbuf + 4, 4);                                \
-                    if (_mg != (expected_magic) || _nx == 0) break;            \
-                    _cb = _nx;                                                 \
-                }                                                              \
-            } while (0)
-            MARK_CHAIN_BLOCKS(data_block_of(g_state.layout.tag_registry_block),    TAGFS_REGISTRY_MAGIC);
-            MARK_CHAIN_BLOCKS(data_block_of(g_state.layout.file_table_block),      TAGFS_FILETBL_MAGIC);
-            MARK_CHAIN_BLOCKS(data_block_of(g_state.layout.metadata_pool_block),   TAGFS_MPOOL_MAGIC);
-            #undef MARK_CHAIN_BLOCKS
-
-            // Integrity-map blocks are used on disk but referenced by no file —
-            // mark them so they are not treated as orphans or reused.
-            IntegrityMarkMapBlocks(computed_bm, g_state.layout.data_blocks);
-
-            /* And the same question put to copy-on-write, which owns what no
-             * file extent and no chain magic can reach: the snapshot manifest
-             * an earlier kernel named in the Ledger, and the blocks its
-             * snapshots keep. See CowRollCall. */
-            CowRollCall(computed_bm, g_state.layout.data_blocks);
-        }
-
-        /* The medium's map, read once, a block at a time, against the roll
-         * call: every window summarised, every orphan and missing run named,
-         * and the repair only ever adds (block_map.h). */
-        BlockMapCensusCount census;
-        error_t censused = BlockMapCensus(computed_bm, &census);
-        kfree(computed_bm);
-        if (censused == ERR_TAGFS_CORRUPTED) {
-            /*
-             * ‼ A bitmap that would not read is NOT an empty bitmap.
-             *
-             * An all-zero bitmap says every block of the volume is free, and
-             * the next allocation hands out block 0, which is the tag
-             * registry, then the file table, then the metadata pool. Measured
-             * on the board: a flash drive whose controller dropped a command
-             * mid-boot came up once with everything working, and the boot
-             * after that had no files on it at all. Refusing costs the machine
-             * its filesystem for that boot; carrying on costs it the
-             * filesystem permanently.
-             */
-            return mount_refused("its block bitmap would not read, and a missing "
-                                 "bitmap reads as a volume with nothing on it — "
-                                 "the next write would take everything",
-                                 ERR_TAGFS_CORRUPTED);
-        }
-        if (censused != OK) {
-            return mount_refused("there is no memory to hold its block map's repair",
-                                 censused);
-        }
-        g_state.ledger.free_blocks = census.free;
-
-        /* Said aloud for the same reason the bitmap mismatch is: a
-         * corrected entry and a lost file are both things that happened to
-         * the user's files, and a shipped build has to say so. */
-        if (entries_corrected || files_lost) {
-            kprintf("[TagFS FSCK] %u file table entry(s) corrected from "
-                    "this volume's metadata pool, %u file(s) lost\n",
-                    entries_corrected, files_lost);
-        }
-
-        debug_printf("[TagFS FSCK] Checked %u files, bitmap %s\n",
-                     files_checked,
-                     (census.orphan == 0 && census.missing == 0) ? "OK" : "repaired");
-    }
-
-    /*
-     * ‼ THE FREE COUNT IS DERIVED, NOT REMEMBERED.
-     *
-     * The Ledger carries a count of free blocks, and it used to be believed.
-     * It is the one number on a volume that no single write makes true: it is
-     * added to and taken from on every allocation, so anything that interrupts
-     * a sequence of writes leaves it saying something the bitmap does not.
-     *
-     * MEASURED 2026-09-10: a volume that grew, had its head deed rolled back
-     * to the pre-growth one — the state a power cut between the two writes of
-     * a growth leaves — and then grew again on the next mount, came up
-     * claiming 118764 free blocks in a data run of 73594. The bitmap knew
-     * better the whole time, and the roll call above has just counted it.
-     *
-     * So the number is corrected in memory, and the Ledger's one writer — the
-     * next Settle cycle — carries it to the medium: a mount writes no Ledger.
-     */
-    if (g_state.ledger.free_blocks != g_ledger_free_as_read) {
-        kprintf("[TagFS] the ledger came off the medium saying %llu blocks were free and "
-                "the bitmap says %llu — a block is taken in the bitmap, so that is the "
-                "number kept, and the next Settle cycle writes it\n",
-                (unsigned long long)g_ledger_free_as_read,
-                (unsigned long long)g_state.ledger.free_blocks);
+    /* --- What the volume's records say: the registry, the pool, the table,
+     *     the tag index and the block map, standing on the copy of the Ledger
+     *     whose seal the medium bears out (mount/mount.h). */
+    const char *what = NULL;
+    error_t     read = MountReadVolume(&what);
+    if (read != OK) {
+        return mount_refused(what, read);
     }
 
     /* Said HERE and not beside the Ledger, because until the bitmap has been
@@ -2593,6 +2240,7 @@ error_t tagfs_init(void) {
         kprintf("[TagFS] integrity map unavailable - continuing without verify-on-read\n");
     else
         kprintf("[TagFS] data-integrity verify-on-read active\n");
+    MountAfterDoor();
 
     /*
      * ‼ THE SENTENCE THAT WAS MISSING, AND ITS ABSENCE IS THE WHOLE STORY.
@@ -2823,48 +2471,27 @@ error_t tagfs_shutdown(void)
 }
 
 /*
- * A mount this machine owes itself.
- *
- * Reached only when a mount was attempted and did not finish while a medium
- * sat in the room; see the note over TAGFS_MOUNT_RETRY_MS for why nothing else
- * would ever ask. One atomic load when there is nothing owed.
+ * A mount this machine owes itself, asked again because the seat said it
+ * answers again (the note over g_mount_owed). Two atomic loads when nothing is
+ * owed.
  */
 static void tagfs_ask_for_the_mount_again(void)
 {
-    if (__atomic_load_n(&g_mount_owed, __ATOMIC_ACQUIRE) == 0) {
+    if (__atomic_load_n(&g_mount_owed, __ATOMIC_ACQUIRE) == 0 ||
+        __atomic_load_n(&g_mount_ready, __ATOMIC_ACQUIRE) == 0) {
         return;
     }
-
-    if (g_state.initialized) {
-        mount_settled();                /* somebody got there first */
-        return;
-    }
-
-    if ((int64_t)(rdtsc() - g_mount_due) < 0) {
-        return;                         /* not yet; the hardware needs a moment */
-    }
-
-    if (g_mount_tries >= TAGFS_MOUNT_RETRY_TRIES) {
-        kprintf("[TagFS] the volume in this room would not mount in %u "
-                "attempts — the machine stops asking and waits for a medium to "
-                "arrive\n", TAGFS_MOUNT_RETRY_TRIES);
-        mount_settled();
-        return;
-    }
-
     if (!attending_take()) {
-        return;                 /* somebody is already at it; no try is spent */
+        return;                 /* somebody is already at it; the event stays */
     }
-
-    g_mount_tries++;
-    kprintf("[TagFS] asking again for the volume nobody has mounted (attempt "
-            "%u of %u)\n", g_mount_tries, TAGFS_MOUNT_RETRY_TRIES);
-    attend_arrival();
-
-    if (!g_state.initialized) {
-        g_mount_due = rdtsc() + cpu_ms_to_tsc(TAGFS_MOUNT_RETRY_MS);
+    __atomic_store_n(&g_mount_ready, 0u, __ATOMIC_RELEASE);
+    if (g_state.initialized) {
+        mount_settled();        /* somebody got there first */
+    } else {
+        kprintf("[TagFS] seat %u answers again — asking for the volume nobody has "
+                "mounted\n", g_tagfs_seat);
+        attend_arrival();
     }
-
     attending_done();
 }
 

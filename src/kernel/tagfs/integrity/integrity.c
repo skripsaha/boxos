@@ -4,6 +4,7 @@
 #include "../scribe/scribe.h"
 #include "../settle/settle.h"
 #include "../ink/fallow.h"
+#include "../mount/ground_census.h"
 #include "../../lib/kernel/klib.h"
 #include "touch.h"
 #include "amp.h"
@@ -966,19 +967,8 @@ void IntegrityShutdown(void) {
 bool IntegrityIsInitialized(void) { return __atomic_load_n(&g_initialized, __ATOMIC_ACQUIRE); }
 uint32_t IntegrityErrorCount(void) { return g_errors; }
 
-void IntegrityMarkMapBlocks(uint8_t *computed_bm, uint32_t total_blocks) {
-    if (!computed_bm)
-        return;
+void IntegrityClaimGround(void) {
     TagFSState *fs = tagfs_get_state();
-    if (!fs)
-        return;
-    uint32_t first = SB_MAP_BLOCK(fs);
-    uint32_t cnt   = SB_MAP_COUNT(fs);
-    if (first == 0)
-        return;
-    for (uint32_t i = 0; i < cnt; i++) {
-        uint32_t b = first + i;
-        if (b < total_blocks)
-            computed_bm[b / 8] |= (uint8_t)(1u << (b % 8));
-    }
+    if (fs && SB_MAP_BLOCK(fs) != 0)
+        GroundClaim(GROUND_INTEGRITY, SB_MAP_BLOCK(fs), SB_MAP_COUNT(fs), 0);
 }

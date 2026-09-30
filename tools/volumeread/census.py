@@ -32,6 +32,7 @@ from .ondisk import (SECTOR, BLOCK, SECTORS_PER_BLOCK, REGISTRY_MAGIC,
                      RunsFromBits, RunsNormal, RunsIntersect, RunsSubtract,
                      RunsCount, RunsText)
 from .medium import VolumeFacts
+from .ground_owners import GROUND_OWNER_ALONE
 
 SEVERITY = ("damage", "leak", "note")        # exit 1 on any damage or leak
 
@@ -159,32 +160,12 @@ class KernelView:
         if disagreed:
             self.kept_line = (disagreed, len(f.pool))
 
-    def MarkChain(self, head, magic):
-        """MARK_CHAIN_BLOCKS as it stands in tagfs.c's mount fsck: the head is
-        marked and read, the chain is followed until a block will not read, does
-        not carry the magic, or says next_block 0 — at most data_blocks hops.
-        The head is walked even when it is data block 0, which the tag registry's
-        always is; the kernel before this tree's fix never entered that loop
-        (K1), and its registry continuations were orphans on every mount."""
-        D, cb, marked = self.f.D, head, []
-        for _ in range(D):
-            if cb < D:
-                marked.append((cb, 1))
-            raw = self.f.read_block(cb)
-            if raw is None:
-                break
-            magic_found, nxt = struct.unpack_from("<II", raw, 0)
-            if magic_found != magic or nxt == 0:
-                break
-            cb = nxt
-        return marked
-
     def _Fsck(self):
         """The mount's roll call (tagfs_init's fsck, after the ledger and the chains)."""
         f, lay, D = self.f, self.f.layout, self.f.D
         led = f.ledger
         mirror = ondisk.MirrorWalk([b for b, _blk, _r in f.pool], [r for _b, _blk, r in f.pool])
-        marks = [(0, min(3, D))]
+        marks = []
         corrected = lost = quits = 0
         for v in ondisk.KernelRollCall(f.read_block, led["next_file_id"], f.rows, mirror):
             self.verdicts[v.fid] = v
@@ -195,9 +176,19 @@ class KernelView:
                 quits += 1
             else:
                 marks += RunsIntersect(RunsNormal(v.record.extents_at_mount), [(0, D)])
-        marks += self.MarkChain(f.Head(lay["tag_registry_block"]), REGISTRY_MAGIC)
-        marks += self.MarkChain(f.Head(lay["file_table_block"]), FILETBL_MAGIC)
-        marks += self.MarkChain(f.Head(lay["metadata_pool_block"]), MPOOL_MAGIC)
+        # The census asks each owner for its ground from what the mount holds
+        # (mount/ground_census.h): the chains as it walked them — under a seal,
+        # the pool to the seal's open block and the registry to the block the
+        # seal names — the Deed's head of the pool, and the BOOT run.
+        for name in ("registry", "table", "pool"):
+            marks += [(b, 1) for b in f.chains[name][0] if b < D]
+        head = f.Head(lay["metadata_pool_block"])
+        if head < D:
+            marks.append((head, 1))
+        boot = f.deed["boot"]
+        if boot and boot["kernel_blocks"] and boot["kernel_block"] >= lay["data_block"]:
+            marks += RunsIntersect([(boot["kernel_block"] - lay["data_block"],
+                                     boot["kernel_blocks"])], [(0, D)])
         first, count = led["integrity_map_block"], led["integrity_map_blocks"]
         if first:
             marks += RunsIntersect([(first, count)], [(0, D)])
@@ -314,9 +305,13 @@ class GroundCensus:
     def Say(self, code, severity, text, runs=()):
         self.findings.append(Finding(code, severity, text, runs))
 
-    def Claim(self, kind, label, runs, exclusive=True, partner=None):
+    def Claim(self, kind, label, runs, partner=None):
+        """One owner's ground. The kinds, and which of them own alone, are the
+        kernel's (src/include/ground_owner.h, generated into ground_owners)."""
+        if kind not in GROUND_OWNER_ALONE:
+            raise ValueError("%s is no owner src/include/ground_owner.h names" % kind)
         c = GroundClaim(kind, label, RunsIntersect(RunsNormal(runs), [(0, self.f.D)]),
-                        exclusive, partner)
+                        GROUND_OWNER_ALONE[kind], partner)
         c.kernel_sees = not RunsSubtract(c.runs, self.kernel.marked)
         self.claims.append(c)
         return c
@@ -442,8 +437,7 @@ class GroundCensus:
             self.Claim("manifest" if "backup" not in label else "manifest_backup", label, [(b, 1)])
         for snap, old, new in f.redirects:
             self.Claim("frozen", "frozen block of snapshot %u" % snap, [(old, 1)])
-            self.Claim("redirect_new", "live block of snapshot %u's redirect" % snap, [(new, 1)],
-                       exclusive=False)
+            self.Claim("redirect_new", "live block of snapshot %u's redirect" % snap, [(new, 1)])
         if f.stray:
             self.Say("REDIRECT_STRAY", "note", "%u DiskBook redirect(s) name snapshots the manifest "
                      "does not carry (%s) — the kernel passes them over and counts them "
@@ -632,7 +626,7 @@ class GroundCensus:
                      % (boot["kernel_block"], boot["kernel_blocks"], boot["kernel_bytes"], why))
             return
         self.boot_file = _Label(holders[0]["fid"], holders[0]["record"])
-        self.Claim("boot", "BOOT", run, exclusive=False, partner=self.boot_file)
+        self.Claim("boot", "BOOT", run, partner=self.boot_file)
 
     # --- the sweep -----------------------------------------------------------
 

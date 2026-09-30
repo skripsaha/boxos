@@ -18,7 +18,10 @@
  *       yet cover: the data and the tags lie on the medium before any record
  *       names them;
  *   S3  the pool's closed blocks, then its tail;
- *   S4  the Ledger, into its older copy — the only writer it has;
+ *   S4  the Ledger, into its older copy — the only writer it has — sealed
+ *       with the cycle's SettleMark (volume_ledger.h): the pool from
+ *       chain_first to where this cycle's records end, the registry up to
+ *       its last record, each with the CRC32 a mount holds the medium to;
  *   S5  FLUSH#2;
  *   S6  under the state lock: settled_gen is the target, the closed blocks
  *       written leave memory, and Fallow gives back what has rested enough.
@@ -42,7 +45,7 @@ extern Scribe g_settle_scribe;
 error_t  TagFSSettle(void);
 
 /* The volume is short and Fallow rests blocks: cycles run until some come
- * back — at most 1 + FALLOW_LAG of them. OK when blocks came back,
+ * back — at most 1 + FallowLag() of them. OK when blocks came back,
  * ERR_TAGFS_NO_SPACE when none rest, or a cycle's refusal; ERR_WOULD_BLOCK at
  * once for a caller that may not wait for a cycle — under a TagFS lock or a
  * Scribe, or a baton continuation. Inside the door. */
@@ -75,5 +78,18 @@ uint64_t SettledCycles(void);
 
 /* A mount's first word: nothing settled yet. With the door shut. */
 void     SettleMountReset(void);
+
+/*
+ * What the mount stood on, for the seals the cycles of this mount write: the
+ * pool block and the bytes of its records the first cycle's own records begin
+ * after — the stood seal's pool_to, or the tail as a mount with no seal found
+ * it — and whether the medium was ever found holding less than a settled
+ * cycle's seal said (SETTLE_MEDIUM_LIED): every seal from now on carries it,
+ * and ground Fallow rests waits one cycle more for good. With the door shut.
+ */
+void     SettleMountStand(uint32_t from_block, uint32_t from_bytes, bool medium_lied);
+
+/* Whether this volume's seals carry SETTLE_MEDIUM_LIED. */
+bool     SettleMediumLied(void);
 
 #endif /* TAGFS_SETTLE_H */

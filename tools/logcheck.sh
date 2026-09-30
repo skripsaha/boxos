@@ -7456,21 +7456,21 @@ run_census() {
 }
 
 # The two halves of the reconcile must each be able to go red. The kernel's:
-# a roll call that stops walking the pool chain calls pool[1] an orphan. The
+# a census the pool does not claim its chain in calls pool[1] an orphan. The
 # host's: a census that calls every retired record damage — they fail their
 # sum by construction — is a census that cries wolf on every volume that ever
 # deleted a file.
 census_poolblind_on() {
-    mutate src/kernel/tagfs/tagfs.c
+    mutate src/kernel/tagfs/mount/mount.c
     python3 - <<'EOF2'
-p = "src/kernel/tagfs/tagfs.c"
+p = "src/kernel/tagfs/mount/mount.c"
 s = open(p).read()
-anchor = "            MARK_CHAIN_BLOCKS(data_block_of(g_state.layout.metadata_pool_block),   TAGFS_MPOOL_MAGIC);\n"
+anchor = "    PoolClaimGround(MountDataBlock(fs->layout.metadata_pool_block));\n"
 assert s.count(anchor) == 1, "census pool-chain anchor missing"
-s = s.replace(anchor, "            /* logcheck mutation: the pool chain is not walked */\n", 1)
+s = s.replace(anchor, "    /* logcheck mutation: the pool chain is not claimed */\n", 1)
 open(p, "w").write(s)
 EOF2
-    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation"
+    mut_done src/kernel/tagfs/mount/mount.c "logcheck mutation"
 }
 
 census_exempt_on() {
@@ -8047,14 +8047,16 @@ edits = {
    "        TagFSLockTake(&reg->lock);   /* " + M + ": the tail is written holding the registry's lock */\n"
    "        error_t wrote = tagfs_write_block(reg->tail_block, tail);\n"
    "        TagFSLockDrop(&reg->lock);\n"),
-  ("src/kernel/tagfs/tag_registry/tag_registry.c",
+  ("src/kernel/tagfs/tag_registry/tag_registry_load.c",
    "    /* The two blocks every flush of this registry is written through, and the\n",
    "    if (fs->registry && fs->registry != reg)   /* " + M + ": a registry beside the volume's shares its mark of what is owed */\n"
    "        fs->registry->written_next = 0;\n"
    "    /* The two blocks every flush of this registry is written through, and the\n"),
-  ("src/kernel/tagfs/tag_registry/tag_registry.c",
-   "        if (held != OK) {\n",
-   "        if (held != OK && held != ERR_NO_MEMORY) {   /* " + M + ": a tag the load cannot hold is dropped, and the load goes on */\n"),
+  ("src/kernel/tagfs/tag_registry/tag_registry_load.c",
+   "        end += size;\n        walked++;\n",
+   "        if (held == ERR_NO_MEMORY)   /* " + M + ": a tag the load cannot hold is dropped, and the load goes on */\n"
+   "            held = OK;\n"
+   "        end += size;\n        walked++;\n"),
   ("src/kernel/tagfs/tag_registry/tag_registry.c",
    "        out->ids = kmalloc(sizeof(uint16_t) * group->count);\n"
    "        if (out->ids) {\n"
@@ -9640,13 +9642,13 @@ abbamut_kernel_on() {
     python3 - <<'EOF'
 p = "src/kernel/tagfs/tag_registry/tag_registry.c"
 s = open(p).read()
-a = "    TagFSLockTake(&reg->lock);\n    bool owed = reg->written_next < reg->next_id;\n"
+a = "    TagFSLockTake(&reg->lock);\n    bool owed = reg->written_next < reg->next_id || reg->tail_owed;\n"
 assert s.count(a) == 1, "abbamut registry-flush anchor missing"
 s = s.replace(a, "    TagFSLockTake(&reg->lock);\n"
                  "    uint32_t logcheck_taken;   /* logcheck mutation: a block taken under the registry's lock at every flush */\n"
                  "    if (tagfs_alloc_blocks(1, &logcheck_taken) == 0)\n"
                  "        tagfs_free_blocks(logcheck_taken, 1);\n"
-                 "    bool owed = reg->written_next < reg->next_id;\n", 1)
+                 "    bool owed = reg->written_next < reg->next_id || reg->tail_owed;\n", 1)
 open(p, "w").write(s)
 EOF
     mut_done src/kernel/tagfs/tag_registry/tag_registry.c "logcheck mutation" 1

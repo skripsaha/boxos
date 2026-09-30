@@ -1379,7 +1379,7 @@ $(TAGBOOT_JUMP_OBJ): $(TAGBOOT_JUMP) | $(BUILDDIR)
 	@echo "Assembling TagBoot jump trampoline..."
 	@$(ASM) -f elf64 $< -o $@
 
-$(TAGBOOT_EFI): $(TAGBOOT_SRC) $(TAGBOOT_JUMP_OBJ) $(TAGBOOT_LD) src/boot/uefi/uefi.h src/boot/uefi/tagfs_boot.h | $(BUILDDIR)
+$(TAGBOOT_EFI): $(TAGBOOT_SRC) $(TAGBOOT_JUMP_OBJ) $(TAGBOOT_LD) src/boot/uefi/uefi.h src/boot/uefi/tagfs_boot.h src/include/volume_ledger.h | $(BUILDDIR)
 	@echo "Building TagBoot UEFI (clang/lld → PE32+)..."
 	@clang $(UEFI_CFLAGS_CLANG) \
 		-Wl,-entry:TagBootMain \
@@ -1395,7 +1395,7 @@ $(TAGBOOT_JUMP_OBJ): $(TAGBOOT_JUMP) | $(BUILDDIR)
 	@echo "Assembling TagBoot jump trampoline..."
 	@$(ASM) -f elf64 $< -o $@
 
-$(TAGBOOT_OBJ): $(TAGBOOT_SRC) src/boot/uefi/uefi.h src/boot/uefi/tagfs_boot.h | $(BUILDDIR)
+$(TAGBOOT_OBJ): $(TAGBOOT_SRC) src/boot/uefi/uefi.h src/boot/uefi/tagfs_boot.h src/include/volume_ledger.h | $(BUILDDIR)
 	@echo "Building TagBoot UEFI object (gcc ELF)..."
 	@$(UEFI_CC) $(UEFI_CFLAGS_GCC) -c $< -o $@
 

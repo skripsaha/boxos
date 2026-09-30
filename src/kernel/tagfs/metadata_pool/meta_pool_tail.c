@@ -1,5 +1,6 @@
 #include "meta_pool_internal.h"
 #include "../scribe/scribe.h"
+#include "../../../lib/kernel/crypto.h"
 
 /*
  * The tail, the closed blocks and the Spares.
@@ -124,6 +125,11 @@ bool PoolTailTurn(bool dig_reserve)
     MetaPoolBlock* spare_image = page->image;
     g_pool_tail->next_block = spare_block;
     g_pool_tail->kept       = PoolCountKept(g_pool_tail);
+
+    /* Closed now, and never written over again: its mix joins the fold. */
+    MetaPoolLink* closing = &g_pool_chain[g_pool_chain_len - 1];
+    closing->mix        = PoolBlockMix(g_pool_tail_block, g_pool_tail);
+    g_pool_closed_fold ^= closing->mix;
 
     page->next    = NULL;
     page->block   = g_pool_tail_block;
@@ -366,6 +372,18 @@ uint64_t PoolSnapSettled(const PoolSnap* snap, MetaPoolPage** spent)
         g_pool_tail_block == snap->tail_block)
         g_pool_tail_changed = false;
     return s_closed_settled_gen;
+}
+
+void PoolSealTake(SettleMark* mark)
+{
+    if (!g_pool_tail || !g_pool_chain_len)
+        return;
+    uint32_t used = g_pool_tail->used_bytes;
+    mark->chain_first   = g_pool_chain[0].block;
+    mark->pool_to_block = g_pool_tail_block;
+    mark->pool_to_bytes = used;
+    mark->closed_crc32  = g_pool_closed_fold;
+    mark->tail_crc32    = KCrc32(g_pool_tail->payload, used);
 }
 
 uint64_t PoolBlocksHeld(void)

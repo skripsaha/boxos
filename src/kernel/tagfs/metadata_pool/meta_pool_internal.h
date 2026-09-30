@@ -16,16 +16,29 @@
  * its u16 length and u32 file id. */
 #define MPOOL_BLOCK_HEADER  16
 
-/* One link of the chain: the block, and the number it keeps whatever is
- * unlinked around it. The numbers only rise along the chain. */
+/* One link of the chain: the block, the number it keeps whatever is unlinked
+ * around it — the numbers only rise along the chain — and, once the block is
+ * closed, its mix in the seal's fold (PoolBlockMix); 0 for the open tail. */
 typedef struct {
     uint32_t block;
     uint32_t link;
+    uint32_t mix;
 } MetaPoolLink;
 
 extern MetaPoolLink* g_pool_chain;
 extern uint32_t      g_pool_chain_len;
 extern uint32_t      g_pool_chain_cap;
+
+/* The seal's closed_crc32 as memory has it: every closed link's mix, XORed
+ * (volume_ledger.h). A link closed XORs its mix in; one dropped off the front
+ * XORs it out, and nothing is read. */
+extern uint32_t      g_pool_closed_fold;
+
+/* A block's mix in the fold: the CRC32 of its records, summed again with the
+ * block's number and their length. The block number names the link, and it is
+ * the one name a link keeps across mounts and across blocks unlinked before it
+ * (a link's number is memory's, counted afresh by every mount). */
+uint32_t PoolBlockMix(uint32_t block, const MetaPoolBlock* blk);
 
 /*
  * A block of the pool that is in memory and not yet the medium's: a closed

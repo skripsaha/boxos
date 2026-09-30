@@ -2,6 +2,7 @@
 #include "../scribe/scribe.h"
 #include "../file_map/file_map.h"
 #include "../settle/settle.h"
+#include "../mount/ground_census.h"
 
 /*
  * ‼ THE TABLE IS THE VOLUME'S STATE, AND ITS LOCK IS THE STATE LOCK.
@@ -62,7 +63,7 @@ static FileMap* table_files(void)
  * ‼ A BLOCK IS OWED BY WHICH FILES IT NAMES, NOT BY WHERE THEIR RECORDS ARE.
  * A file's record moves on every change of it, and the pool is the authority
  * on where it is: the mount corrects a row naming an older record to the
- * newest one the pool holds (tagfs.c, mount_check_file). So a row follows its
+ * newest one the pool holds (mount/mount.c, MountFile). So a row follows its
  * record in memory for nothing, and a block goes to the medium when a file
  * comes or goes in it — which is what the table decides on its own while the
  * volume carries no SettleMark (step 1.6).
@@ -139,22 +140,75 @@ static void table_release(void) {
     g_gen          = 0;
 }
 
-int file_table_init(uint32_t first_block) {
-    table_release();
+/*
+ * A block of the chain that does not read as the table — it would not read,
+ * holds another magic, or the link naming it points out of the run or round
+ * in a circle. With no seal the table decides which files there are, so a
+ * table that will not read is a volume that does not mount: carrying on would
+ * read as "no files", and the writes that follow take their blocks. Under a
+ * seal the pool decides (the mount derives every row from the sealed span), so
+ * the chain ends there: a block that was reached is kept as the chain's last,
+ * owed whole to the medium, and anything its link named after it is ground the
+ * census names. True: the walk stops and the mount goes on; false: refused.
+ */
+static bool TableBlockRefused(bool sealed, bool reached, uint32_t block, const char* what)
+{
+    if (!sealed) {
+        kprintf("[FileTable] block %u %s — this volume's file table cannot be walked, so it "
+                "is not mounted\n", block, what);
+        return false;
+    }
+    kprintf("[FileTable] block %u %s — under the volume's seal the table is derived from the "
+            "pool, so the volume mounts, and the next Settle cycle writes the table's chain "
+            "whole from %s\n", block, what, reached ? "that block on" : "its last good block");
+    return true;
+}
 
-    /*
-     * ‼ THE ONLY BOUND ON THIS WALK IS A TERMINATION PROOF, NOT A LENGTH.
-     *
-     * A chain of distinct blocks cannot be longer than the data run it lives
-     * in, so a walk that takes that many hops has come back to a block it has
-     * already been to. The hop count proves termination and catches the cycle
-     * together, and a next_block outside the run is refused before it is read
-     * — nothing under tagfs_read_block bounds a block number.
-     */
+/* One link taken into the chain, and its block's rows into the map of live
+ * files. A table the map has no room for is not a table held in part: the rows
+ * past the refusal would read as no files. False, said, when memory ran out. */
+static bool TableTakeLink(uint32_t block, const FileTableBlock* image, bool rows)
+{
+    if (g_link_count == g_link_cap && LinksReserve(g_link_cap ? g_link_cap * 2 : 1) != OK) {
+        kprintf("[FileTable] there is no memory to hold this volume's file table's chain at "
+                "%u blocks — it is not mounted\n", g_link_count + 1);
+        return false;
+    }
+    uint32_t entry_offset = g_link_count * TAGFS_FTABLE_PER_BLOCK;
+    g_links[g_link_count++] = (FileTableLink){ .block = block };
+
+    uint32_t count = rows ? image->entry_count : 0;
+    if (count > TAGFS_FTABLE_PER_BLOCK)
+        count = TAGFS_FTABLE_PER_BLOCK;
+    for (uint32_t r = 0; r < count; r++) {
+        const FileTableEntry* row = &image->entries[r];
+        if (row->meta_block == 0 || entry_offset + r == 0)
+            continue;
+        if (FileMapRowSet(table_files(), entry_offset + r, row->meta_block, row->meta_offset) != OK) {
+            kprintf("[FileTable] there is no memory to hold the row of file %u — this volume "
+                    "is not mounted\n", entry_offset + r);
+            return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * The chain walked from `first_block` through `image`: taken into the table
+ * when `take` (the mount), or only walked (the stand's question of whether a
+ * mount would stand on it). 0, or -1 — said — when the volume is not mounted.
+ *
+ * ‼ THE ONLY BOUND ON THIS WALK IS A TERMINATION PROOF, NOT A LENGTH. A chain
+ * of distinct blocks cannot be longer than the data run it lives in, so a walk
+ * that takes that many hops has come back to a block it has been to; and a
+ * next_block outside the run is refused before it is read — nothing under
+ * tagfs_read_block bounds a block number.
+ */
+static int TableWalk(uint32_t first_block, bool sealed, bool take, FileTableBlock* image)
+{
     TagFSState* fs    = tagfs_get_state();
     uint32_t    run   = fs ? fs->layout.data_blocks : 0;
-    FileMap*    files = table_files();
-    if (run == 0 || !files) {
+    if (run == 0 || (take && !table_files())) {
         kprintf("[FileTable] this volume states a data run of no blocks at "
                 "all, so there is nowhere for a file table to be — it is not "
                 "mounted\n");
@@ -162,87 +216,73 @@ int file_table_init(uint32_t first_block) {
     }
 
     uint32_t block = first_block;
-    uint32_t hops  = 0;
-
-    for (;;) {
+    bool     cut   = false;     /* the chain ends short of its last link: owed whole */
+    for (uint32_t hops = 0; ; hops++) {
         if (block >= run) {
-            kprintf("[FileTable] the chain points at block %u and this "
-                    "volume's data run is %u blocks — that is outside the "
-                    "volume, so it is not mounted\n", block, run);
-            table_release();
-            return -1;
-        }
-
-        /* Same rule as the metadata pool: a table that will not read, or a
-         * block holding something that is not a table, means this volume does
-         * not mount. Breaking out of the loop left the entries zeroed, which
-         * reads as "this volume has no files" — and the writes that follow
-         * take the blocks those files are still using.
-         *
-         * ‼ Tested as `!= OK`, because tagfs_read_block returns an error_t
-         * whose failures are POSITIVE and the `< 0` this used to ask was never
-         * once true. The refusal below only ever fired on the magic. */
-        if (tagfs_read_block(block, &g_image) != OK) {
-            kprintf("[FileTable] block %u would not read — this volume's file "
-                    "table cannot be reached, so it is not mounted\n", block);
-            table_release();
-            return -1;
-        }
-
-        if (g_image.magic != TAGFS_FILETBL_MAGIC) {
-            kprintf("[FileTable] block %u holds 0x%08x where a file table "
-                    "should be — this volume is not mounted\n", block, g_image.magic);
-            table_release();
-            return -1;
-        }
-
-        uint32_t entry_offset = g_link_count * TAGFS_FTABLE_PER_BLOCK;
-
-        if (g_link_count == g_link_cap &&
-            LinksReserve(g_link_cap ? g_link_cap * 2 : 1) != OK) {
-            kprintf("[FileTable] there is no memory to hold this volume's file "
-                    "table's chain at %u blocks — it is not mounted\n",
-                    g_link_count + 1);
-            table_release();
-            return -1;
-        }
-        g_links[g_link_count++] = (FileTableLink){ .block = block };
-
-        /* Only the rows that name a file are kept, each in the map beside its
-         * file. A table the map has no room for is not a table held in part:
-         * the rows past the refusal would read as no files. */
-        uint32_t count = g_image.entry_count;
-        if (count > TAGFS_FTABLE_PER_BLOCK) {
-            count = TAGFS_FTABLE_PER_BLOCK;
-        }
-        for (uint32_t r = 0; r < count; r++) {
-            const FileTableEntry* row = &g_image.entries[r];
-            if (row->meta_block == 0 || entry_offset + r == 0)
-                continue;
-            if (FileMapRowSet(files, entry_offset + r, row->meta_block, row->meta_offset) != OK) {
-                kprintf("[FileTable] there is no memory to hold the row of file %u — this "
-                        "volume is not mounted\n", entry_offset + r);
-                table_release();
+            if (!TableBlockRefused(sealed, false, block, "lies outside the volume's data run"))
                 return -1;
-            }
+            cut = true;
+            break;
         }
 
-        if (g_image.next_block == 0) break;
-
-        if (++hops >= run) {
-            kprintf("[FileTable] this volume's file table chain has taken %u "
-                    "hops in a data run of %u blocks, so it is going round in "
-                    "a circle — it is not mounted\n", hops, run);
-            table_release();
+        /* ‼ Tested as `!= OK`, because tagfs_read_block returns an error_t
+         * whose failures are POSITIVE and the `< 0` this used to ask was never
+         * once true. */
+        bool read  = tagfs_read_block(block, image) == OK;
+        bool table = read && image->magic == TAGFS_FILETBL_MAGIC;
+        if (!table) {
+            if (!TableBlockRefused(sealed, true, block,
+                                   read ? "holds no file table" : "would not read"))
+                return -1;
+            if (take && !TableTakeLink(block, image, false))
+                return -1;
+            cut = true;
+            break;
+        }
+        if (take && !TableTakeLink(block, image, true))
             return -1;
+        if (image->next_block == 0)
+            break;
+        if (hops + 1 >= run) {
+            if (!TableBlockRefused(sealed, false, block, "links a chain that goes round in a circle"))
+                return -1;
+            cut = true;
+            break;
         }
-        block = g_image.next_block;
+        block = image->next_block;
     }
 
-    g_links_wanted = g_link_count;
-    debug_printf("[FileTable] initialized: first_block=%u blocks=%u\n",
-                 first_block, g_link_count);
+    /* A chain cut short is written again from its last link: that link's
+     * image names no next block, and its rows are the map's. */
+    if (take && cut && g_link_count)
+        g_links[g_link_count - 1].edited = ++g_gen;
     return 0;
+}
+
+int file_table_init(uint32_t first_block, bool sealed) {
+    table_release();
+    if (TableWalk(first_block, sealed, true, &g_image) != 0) {
+        table_release();
+        return -1;
+    }
+    g_links_wanted = g_link_count;
+    return 0;
+}
+
+#ifdef CONFIG_VOLUME_TESTS
+bool FileTableWouldStand(uint32_t first_block, bool sealed)
+{
+    FileTableBlock* image = kmalloc(sizeof(FileTableBlock));
+    bool            stand = image && TableWalk(first_block, sealed, false, image) == 0;
+    kfree(image);
+    return stand;
+}
+#endif
+
+void FileTableClaimGround(void)
+{
+    for (uint32_t i = 0; i < g_link_count; i++)
+        GroundClaim(GROUND_TABLE, g_links[i].block, 1, 0);
 }
 
 void file_table_shutdown(void) {

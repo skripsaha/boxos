@@ -1,6 +1,7 @@
 #include "fallow.h"
 #include "../integrity/integrity.h"
 #include "../helm/helm.h"
+#include "../settle/settle.h"
 
 struct FallowNode {
     FallowNode* next;
@@ -46,6 +47,11 @@ FallowNode* FallowNodeMake(const FileExtent* runs, uint32_t count, FallowKind ki
 void FallowNodeLetGo(FallowNode* node)
 {
     kfree(node);
+}
+
+uint64_t FallowLag(void)
+{
+    return (uint64_t)VOLUME_LEDGER_COPIES - 1u + (SettleMediumLied() ? 1u : 0u);
 }
 
 void FallowAdd(FallowNode* node, uint64_t gen)
@@ -109,14 +115,16 @@ uint64_t FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent)
     uint64_t    given = 0;
     FallowNode* prev  = NULL;
 
+    uint64_t    lag   = FallowLag();
+
     *spent = NULL;
     for (FallowNode* n = s_head; n; ) {
         FallowNode* next = n->next;
         if (n->ripe_at == 0) {
             if (n->kind == FALLOW_BY_LEDGER && n->gen != 0)
-                n->ripe_at = n->gen + FALLOW_LAG;
+                n->ripe_at = n->gen + lag;
             else if (n->gen <= closed_gen)
-                n->ripe_at = cycle + FALLOW_LAG;
+                n->ripe_at = cycle + lag;
         }
         if (n->ripe_at == 0 || cycle < n->ripe_at || n->zeroed_in == 0 || n->zeroed_in > cycle ||
             (n->kind == FALLOW_BY_RECORD && n->gen > HelmViewFloor(n->fid))) {

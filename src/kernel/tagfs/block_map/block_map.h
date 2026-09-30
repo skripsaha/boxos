@@ -38,13 +38,14 @@ error_t BlockMapMount(uint32_t data_blocks, uint64_t map_vlba);
 
 /*
  * The mount's one pass over the medium's map. Every window is read once, the
- * summary is built from it, and — when `computed` is the roll call's own map
- * of the run (one bit per block, set where something owns the block) — the two
- * are compared: an ORPHAN is taken on the medium and owned by nothing, a
- * MISSING block is owned and reads free. The first 32 runs of each are named.
- * The repair only ever adds: a missing block is taken, in memory at once and
- * on the medium by the first door that settles, and an orphan stays taken.
- * NULL `computed` builds the summary alone. Nothing is written.
+ * summary is built from it, and — when `owns` is given — the window is held
+ * against the owners' bits for it, which `owns` lays into `bits` (one bit per
+ * block of window `window`, set where something owns the block): an ORPHAN is
+ * taken on the medium and owned by nothing, a MISSING block is owned and reads
+ * free. The first 32 runs of each are named. The repair only ever adds: a
+ * missing block is taken, in memory at once and on the medium by the next
+ * Settle cycle, and an orphan stays taken. NULL `owns` builds the summary
+ * alone. Nothing is written.
  */
 typedef struct {
     uint32_t orphan;         /* blocks */
@@ -52,7 +53,11 @@ typedef struct {
     uint64_t free;           /* free on the map once the repair is in */
 } BlockMapCensusCount;
 
-error_t BlockMapCensus(const uint8_t *computed, BlockMapCensusCount *out);
+/* The blocks one window of the map covers, and its owners' bits. */
+#define BLOCK_MAP_WINDOW_BLOCKS  (TAGFS_SECTOR_SIZE * 8u)
+typedef void (*BlockMapOwnsFn)(uint32_t window, uint8_t *bits, void *ctx);
+
+error_t BlockMapCensus(BlockMapOwnsFn owns, void *ctx, BlockMapCensusCount *out);
 
 /* Everything the mount holds let go, with not one byte written: what memory
  * knows of the map is from before whatever took the volume down. */
