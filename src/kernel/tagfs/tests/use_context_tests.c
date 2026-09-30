@@ -242,14 +242,12 @@ out:
 // ----------------------------------------------------------------------------
 
 /* 30 x "use:test:longNN" and 29 commas: 479 bytes, past the 432 a Ledger
- * sector holds after its fixed fields and inside one sector. */
+ * sector once held after its fixed fields. */
 #define USE_LONG_TAGS 30u
 
 static struct {
     char         said[TAGFS_SECTOR_SIZE];
     VolumeLedger led[VOLUME_LEDGER_COPIES];
-    char         tail[VOLUME_LEDGER_COPIES][TAGFS_SECTOR_SIZE];
-    uint16_t     tail_len[VOLUME_LEDGER_COPIES];
     char         words[64];
 } s_ledger;
 
@@ -268,8 +266,9 @@ static TestResult UseLedgerPutBack(TestResult verdict, UseText* before, uint64_t
     return verdict;
 }
 
-/* A context the record holds goes onto the medium as said — read back off it
- * by the Ledger's own reader, the newer of the two copies. */
+/* A context goes onto the medium as said — in the chain the newer copy of the
+ * Ledger names, read back off the medium and proven — and not one byte of it
+ * in the Ledger's own sector. */
 static TestResult test_use_context_remembered(void)
 {
     static const char said[] = "use:test:night,use:test:orders";
@@ -282,6 +281,7 @@ static TestResult test_use_context_remembered(void)
     UseText*   before  = tagfs_recall_use_context(&saying);
     UseText*   text    = UseTextMake(said, sizeof(said) - 1);
     UseText*   back    = NULL;
+    UseText*   medium  = NULL;
 
     TEST_ASSERT(text != NULL, "memory for the text said");
     changed = true;
@@ -290,23 +290,28 @@ static TestResult test_use_context_remembered(void)
     TEST_ASSERT(kept, "and remembers it");
 
     for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
-        if (!tagfs_ledger_peek(c, &s_ledger.led[c], s_ledger.tail[c], &s_ledger.tail_len[c]))
+        if (!tagfs_ledger_peek(c, &s_ledger.led[c], NULL))
             continue;
         if (newest < 0 || s_ledger.led[c].seq > s_ledger.led[newest].seq)
             newest = (int)c;
     }
     TEST_ASSERT(newest >= 0, "a Ledger copy is readable");
-    TEST_ASSERT_EQ(s_ledger.tail_len[newest], sizeof(said) - 1,
-                   "the medium carries the context at the length it was said");
-    TEST_ASSERT(memcmp(s_ledger.tail[newest], said, sizeof(said) - 1) == 0,
+    TEST_ASSERT(tagfs_ledger_peek((uint32_t)newest, &s_ledger.led[newest], &medium),
+                "the newest copy reads again");
+    TEST_ASSERT(medium != NULL && medium->bytes == sizeof(said) - 1,
+                "the chain it names reads back whole, at the length it was said");
+    TEST_ASSERT(memcmp(medium->text, said, sizeof(said) - 1) == 0,
                 "the medium carries the context as said");
-    TEST_ASSERT_EQ(s_ledger.led[newest].use_context_offset, sizeof(VolumeLedger),
-                   "right after the fixed fields");
+    TEST_ASSERT_EQ(s_ledger.led[newest].use_chain_bytes, sizeof(said) - 1,
+                   "the Ledger names a chain of its length");
+    TEST_ASSERT_EQ(s_ledger.led[newest].use_context_bytes, 0,
+                   "and carries no text of it in its own sector");
     back = tagfs_recall_use_context(NULL);
     TEST_ASSERT(back != NULL && back->bytes == sizeof(said) - 1, "and the volume recalls it");
 out:
     UseTextDrop(text);
     UseTextDrop(back);
+    UseTextDrop(medium);
     if (changed)
         verdict = UseLedgerPutBack(verdict, before, saying);
     else
@@ -314,10 +319,9 @@ out:
     return verdict;
 }
 
-/* A context longer than the Ledger's sector holds after its fixed fields. The
- * volume forgets it whole rather than keeping half — told, but not remembered
- * — and a person's context is lost at the next boot. Held under its caveat
- * until step 1.6 gives it room. */
+/* A context longer than the Ledger's sector ever held after its fixed fields
+ * is remembered whole, in its own chain. It used to be forgotten — told, but
+ * not remembered — and a person's context was lost at the next boot. */
 static TestResult TestUseContextLongRemembered(void)
 {
     TestResult verdict  = TEST_PASS;
@@ -369,7 +373,6 @@ static const TestCase g_use_context_tests[] = {
     { .name = "use_context_remembered", .func = test_use_context_remembered, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "use_context_long_remembered", .func = TestUseContextLongRemembered,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.6",
       .caveat_defect = "a Use Context longer than 432 bytes is forgotten, remembered=0" },
 };
 

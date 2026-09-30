@@ -113,6 +113,7 @@ typedef struct {
     VOLUME_TESTS_ONLY(SUITE(stand_helm)) \
     VOLUME_TESTS_ONLY(SUITE(stand_port)) \
     VOLUME_TESTS_ONLY(SUITE(stand_use)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_use_chain)) \
     VOLUME_TESTS_ONLY(SUITE(stand_seal)) \
     /* the walk ends here; a new suite's line goes above */
 

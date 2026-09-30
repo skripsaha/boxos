@@ -8,6 +8,7 @@
 #include "../integrity/integrity.h"
 #include "../settle_cut/settle_cut.h"
 #include "../ledger/ledger.h"
+#include "../use_memory/use_memory.h"
 #include "amp.h"
 #include "baton.h"
 
@@ -145,16 +146,18 @@ static void SettleTake(SettleSnap* snap, SettleWhy why)
     snap->mark.flags           = (why == SETTLE_FOR_HALT ? SETTLE_CLEAN : 0u) |
                                  (s_medium_lied ? SETTLE_MEDIUM_LIED : 0u);
     LedgerImageTake();
+    UseMemoryTake();
     FallowLedgerTaken(snap->cycle);
     TagFSLockDrop(&fs->lock);
 }
 
 /*
- * S1: what the pool's records stand on. The registry's refusal is said by it
- * and ends nothing: no record wears a tag the medium does not define — an Ink
- * takes none that is not on it (InkNameTagIntern, TagRegistryFlushFor) — so
- * what it could not write is only the tags nobody wears yet. The map's, the
- * table's and the integrity map's refusals end the cycle.
+ * S1: what the pool's records stand on, and what the Ledger names. The
+ * registry's refusal is said by it and ends nothing: no record wears a tag
+ * the medium does not define — an Ink takes none that is not on it
+ * (InkNameTagIntern, TagRegistryFlushFor) — so what it could not write is
+ * only the tags nobody wears yet. The map's, the table's, the integrity
+ * map's and the Use Context chain's refusals end the cycle.
  */
 static error_t SettleStandings(SettleSnap* snap)
 {
@@ -180,20 +183,31 @@ static error_t SettleStandings(SettleSnap* snap)
     FallowZeroDigests(snap->cycle);
     rc = IntegrityFlush();
     IntegrityDrainReports();
-    if (rc != OK)
+    if (rc != OK) {
         snap->stage = "the integrity map";
+        return rc;
+    }
+
+    SETTLE_CUT_AT(SETTLE_CUT_POINT_USECHAIN);
+    rc = UseMemoryWriteLinks();
+    if (rc != OK)
+        snap->stage = "the Use Context's chain";
     return rc;
 }
 
-/* S2: the first flush, when the cycle names data or tags a kept flush does
- * not yet cover — and a closed block's link names a Spare whose stamp it must
- * cover. A need already kept costs nothing (VolumeFlushFor). */
+/* S2: the first flush, when the cycle names data, tags or a Use Context chain
+ * a kept flush does not yet cover — and a closed block's link names a Spare
+ * whose stamp it must cover. A need already kept costs nothing
+ * (VolumeFlushFor); a chain the cycle wrote is new blocks, and always asks. */
 static error_t SettleFirstFlush(SettleSnap* snap)
 {
     uint64_t need = snap->data_need;
     uint64_t reg  = tag_registry_written_need(tagfs_get_state()->registry);
+    uint64_t use  = UseMemoryLinkNeed();
     if (reg > need)
         need = reg;
+    if (use > need)
+        need = use;
     if (snap->pool.link_need > need)
         need = snap->pool.link_need;
     if (need == 0)
@@ -205,7 +219,8 @@ static error_t SettleFirstFlush(SettleSnap* snap)
 }
 
 /* S6, under the state lock: the target settled, the written closed blocks out
- * of memory, and Fallow's ripe ground back to the allocator. */
+ * of memory, the copy of the Ledger written naming the Use Context's chain it
+ * was given, and Fallow's ripe ground back to the allocator. */
 static void SettleDone(SettleSnap* snap)
 {
     TagFSState*   fs    = tagfs_get_state();
@@ -218,6 +233,7 @@ static void SettleDone(SettleSnap* snap)
     __atomic_store_n(&s_cycles, snap->cycle, __ATOMIC_RELEASE);
     s_sealed_block = snap->mark.pool_to_block;
     s_sealed_bytes = snap->mark.pool_to_bytes;
+    UseMemorySettled();
     s_given = FallowRipen(closed, snap->cycle, &nodes);
     TagFSLockDrop(&fs->lock);
 
@@ -235,6 +251,7 @@ static error_t SettleCycle(SettleWhy why)
      * cycle writes it as it stands. */
     if (why != SETTLE_FOR_HALT)
         (void)PoolSpareRefill(1);
+    UseMemoryStake();
 
     SettleTake(&snap, why);
 
@@ -250,6 +267,7 @@ static error_t SettleCycle(SettleWhy why)
     if (rc == OK) {
         SETTLE_CUT_AT(SETTLE_CUT_POINT_LEDGER);
         rc = LedgerImageWrite(&snap.mark);
+        UseMemoryLedgerWritten();
         if (rc != OK)
             snap.stage = "the ledger";
     }
@@ -269,10 +287,12 @@ static error_t SettleCycle(SettleWhy why)
                     (unsigned long long)(snap.target - SettledGen()), snap.stage,
                     (unsigned)rc);
         s_failing = true;
+        UseMemoryCycleOver(rc);
         return rc;
     }
     SETTLE_CUT_AT(SETTLE_CUT_POINT_DONE);
     SettleDone(&snap);
+    UseMemoryCycleOver(OK);
     s_failing = false;
 
     /* The reserve a delete stands on, made again first from what came back. */
@@ -367,10 +387,13 @@ error_t TagFSSettleForHalt(void)
      * such a block taken for good. So the last cycle is followed by the ones
      * Fallow's rule asks for — each settles, so both copies of the Ledger move
      * past the records that freed the ground — and by one more that writes the
-     * map giving it back: at most 1 + FallowLag() + 1, fewer when nothing rests.
+     * map giving it back. A Ledger freer the last cycle itself made — the Use
+     * Context chain it replaced — is named by the next cycle's image and rests
+     * FallowLag() cycles from there: at most 1 + 1 + FallowLag() + 1, fewer
+     * when nothing rests.
      */
     error_t rc = SettleAsked(SETTLE_FOR_HALT);
-    for (uint64_t more = 0; rc == OK && more <= FallowLag() && SettleHaltOwesGround(); more++)
+    for (uint64_t more = 0; rc == OK && more <= FallowLag() + 1u && SettleHaltOwesGround(); more++)
         rc = SettleAsked(SETTLE_FOR_HALT);
     s_halt_answer = rc;
     s_halt_ran    = true;

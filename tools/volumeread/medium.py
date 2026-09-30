@@ -719,6 +719,11 @@ class VolumeFacts:
                 d["why"] = "could not be read off the medium"
             else:
                 d = ondisk.ReadLedgerCopy(raw, c)
+            # The Use Context's chain the copy names, read as the mount reads it
+            # (use_memory_mount.c UseMemoryJudge).
+            chain = d.get("use_chain")
+            d["use_chain_read"] = (ondisk.ReadUseChain(self.read_block, chain, self.D)
+                                   if d["ok"] and chain and chain["first"] else None)
             self.ledgers.append(d)
         self.ledger = ondisk.LedgerChoice(self.ledgers)
 

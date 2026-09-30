@@ -30,6 +30,7 @@
     X(GROUND_MANIFEST,        "manifest",        1)               \
     X(GROUND_MANIFEST_BACKUP, "manifest_backup", 1)               \
     X(GROUND_FROZEN,          "frozen",          1)               \
+    X(GROUND_USE_CHAIN,       "use_chain",       1)               \
     X(GROUND_REDIRECT_NEW,    "redirect_new",    0)               \
     X(GROUND_BOOT,            "boot",            0)
 

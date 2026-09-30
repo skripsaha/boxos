@@ -9,6 +9,7 @@
 #include "../settle/settle.h"
 #include "../integrity/integrity.h"
 #include "../cow/cow.h"
+#include "../use_memory/use_memory.h"
 
 /*
  * The mount's read of the volume (mount.h). Everything here runs with the
@@ -244,10 +245,14 @@ static error_t MountCensus(const char** what)
     PoolClaimGround(MountDataBlock(fs->layout.metadata_pool_block));
     IntegrityClaimGround();
     CowClaimGround();
+    UseRollCall();
     MountClaimBoot();
 
+    /* The orphans are asked for only when the newest copy of the Ledger was
+     * written by a kernel that does not know the Use Context's chain: one it
+     * stopped naming is among them (use_memory.h). */
     BlockMapCensusCount census;
-    error_t rc = GroundCensusRun(&census);
+    error_t rc = GroundCensusRun(UseMemoryWantsOrphans() ? UseMemoryOrphanRun : NULL, &census);
     GroundCensusEnd();
     if (rc == ERR_TAGFS_CORRUPTED) {
         /*
@@ -272,6 +277,7 @@ static error_t MountCensus(const char** what)
                 "bitmap says %llu — a block is taken in the bitmap, so that is the number "
                 "kept, and the next Settle cycle writes it\n",
                 (unsigned long long)as_read, (unsigned long long)census.free);
+    UseMemoryAfterCensus();
     return OK;
 }
 
@@ -324,7 +330,7 @@ static error_t MountPool(const MountSeals* seals, PoolMountOutcome* pool, const 
     uint32_t stood = pool->seal >= 0 ? seals->copy[pool->seal] : seals->copy[0];
     LedgerStandOn(stood);
 
-    bool lied = pool->fell_back ||
+    bool lied = pool->fell_back || UseMemoryMediumLied() ||
                 (pool->seal >= 0 && (seals->mark[pool->seal].flags & SETTLE_MEDIUM_LIED));
     SettleMountStand(pool->from_block, pool->from_bytes, lied);
 

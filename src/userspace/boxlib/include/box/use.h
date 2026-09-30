@@ -29,9 +29,9 @@ extern "C" {
  * takes it up again — what one was doing is still what one is doing after
  * the night, and it travels with the medium. `remembered` (optional) receives
  * whether the volume now holds exactly this context: false with no volume
- * up, a medium that will not take the write, or a context longer than the
- * volume's record holds. The context is set either way; the person is told,
- * never refused.
+ * up, no ground on it for the context, a medium that will not take the
+ * write, or a later word already said. The context is set either way; the
+ * person is told, never refused.
  */
 
 /* Replace the context with the tags of `tags`. NULL or "" clears. Returns 0

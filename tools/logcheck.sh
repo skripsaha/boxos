@@ -7558,7 +7558,6 @@ run_censusmut() {
 # takes on a fresh volume of this tree.
 STAND_HELD="
 integrity_reports_every_rot|1.10|of 65 rotten blocks, reported 64|of 65 rotten blocks, reported 65
-use_context_long_remembered|1.6|of 479 bytes said, the volume remembers 0|of 479 bytes said, the volume remembers 479
 "
 
 # The last thing a halt says about the volume, whichever way its sync went
@@ -7824,27 +7823,6 @@ stand_mut_boot() {
 
 # stand_fix_on — the real fix of every caveated test, emulated.
 stand_fix_on() {
-    # 1.6: a Use Context longer than the Ledger's record is still the volume's.
-    # The step keeps it whole on the medium (its own block); what the test asks
-    # is the volume's answer, and this gives that answer while the record
-    # carries only what fits of it.
-    mutate src/kernel/tagfs/ledger/ledger.c
-    python3 - <<'EOF'
-p = "src/kernel/tagfs/ledger/ledger.c"
-s = open(p).read()
-edits = [
-    ("    bool     fits = !said || said->bytes <= LEDGER_USE_MAX;\n",
-     "    bool     fits = true;   /* logcheck mutation: a Use Context longer than the record is still remembered */\n"),
-    ("    uint16_t use_len = g_ledger_use ? (uint16_t)g_ledger_use->bytes : 0;\n",
-     "    uint16_t use_len = g_ledger_use && g_ledger_use->bytes <= LEDGER_USE_MAX ? (uint16_t)g_ledger_use->bytes : 0;   /* logcheck mutation: the record carries what fits */\n"),
-]
-for a, m in edits:
-    assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
-    s = s.replace(a, m, 1)
-open(p, "w").write(s)
-EOF
-    mut_done src/kernel/tagfs/ledger/ledger.c "logcheck mutation" 2
-
     # 1.10: the report ring holds every rot the test plants.
     mutate src/kernel/tagfs/integrity/integrity.c
     python3 - <<'EOF'
@@ -7857,10 +7835,7 @@ EOF
     mut_done src/kernel/tagfs/integrity/integrity.c "logcheck mutation" 1
 }
 stand_fix_off() {
-    local f
-    for f in src/kernel/tagfs/integrity/integrity.c src/kernel/tagfs/ledger/ledger.c; do
-        restore "$f"
-    done
+    restore src/kernel/tagfs/integrity/integrity.c
 }
 
 # stand_mech_on GROUP — the fault mechanisms broken, a few at a time: each

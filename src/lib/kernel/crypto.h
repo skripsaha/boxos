@@ -12,6 +12,12 @@
 // Used for: the Ledger, the boarding pass, GPT, DiskBook records, EFI tables
 uint32_t KCrc32(const uint8_t *data, uint32_t len);
 
+// The same CRC32 carried on over more bytes: KCrc32(a ++ b) is
+// KCrc32Continue(KCrc32(a), b), and KCrc32Continue(0, x) is KCrc32(x). A text
+// longer than one piece of memory, or than a u32 length, is summed a piece at
+// a time.
+uint32_t KCrc32Continue(uint32_t crc, const uint8_t *data, uint32_t len);
+
 // CRC16 (CCITT-FALSE)
 // Used for: metadata pool record integrity
 uint16_t KCrc16(const uint8_t *data, uint32_t len);

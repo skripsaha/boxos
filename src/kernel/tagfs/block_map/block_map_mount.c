@@ -27,15 +27,19 @@ typedef struct {
     uint32_t open_len;
 } MapRunTally;
 
-/* The mount runs on one core with the door shut, so the two tallies are
- * nobody else's. */
-static MapRunTally s_orphans;
-static MapRunTally s_missing;
+/* The mount runs on one core with the door shut, so the two tallies — and
+ * where the census hands its orphans — are nobody else's. */
+static MapRunTally      s_orphans;
+static MapRunTally      s_missing;
+static BlockMapOrphanFn s_orphan_to;
+static void            *s_orphan_ctx;
 
 static void MapTallyClose(MapRunTally *t)
 {
     if (!t->open_len)
         return;
+    if (t == &s_orphans && s_orphan_to)
+        s_orphan_to(t->open_at, t->open_len, s_orphan_ctx);
     t->blocks += t->open_len;
     if (t->named < MAP_NAMED_RUNS) {
         t->start[t->named] = t->open_at;
@@ -165,7 +169,8 @@ static bool MapCensusWindow(uint32_t w, uint8_t *sector, const uint8_t *owns)
     return true;
 }
 
-error_t BlockMapCensus(BlockMapOwnsFn owns, void *ctx, BlockMapCensusCount *out)
+error_t BlockMapCensus(BlockMapOwnsFn owns, BlockMapOrphanFn orphan, void *ctx,
+                       BlockMapCensusCount *out)
 {
     uint8_t *chunk = kmalloc(TAGFS_BLOCK_SIZE);
     uint8_t *bits  = owns ? kmalloc(MAP_WINDOW_BLOCKS / 8u) : NULL;
@@ -179,6 +184,8 @@ error_t BlockMapCensus(BlockMapOwnsFn owns, void *ctx, BlockMapCensusCount *out)
 
     memset(&s_orphans, 0, sizeof(s_orphans));
     memset(&s_missing, 0, sizeof(s_missing));
+    s_orphan_to  = owns ? orphan : NULL;
+    s_orphan_ctx = ctx;
     uint64_t free = 0;
     error_t  rc   = OK;
 
@@ -207,11 +214,14 @@ error_t BlockMapCensus(BlockMapOwnsFn owns, void *ctx, BlockMapCensusCount *out)
     }
     kfree(chunk);
     kfree(bits);
-    if (rc != OK)
+    if (rc != OK) {
+        s_orphan_to = NULL;
         return rc;
+    }
 
     MapTallyClose(&s_orphans);
     MapTallyClose(&s_missing);
+    s_orphan_to = NULL;
     if (s_orphans.blocks || s_missing.blocks) {
         /* ‼ SAID ALOUD. An orphan is the footprint of a cycle the medium did
          * not settle, or of a chain severed — ground taken and nothing

@@ -168,21 +168,42 @@ typedef struct __attribute__((packed)) {
     uint32_t integrity_map_block;
     uint32_t integrity_map_blocks;
 
-    /* The Use Context the volume remembers — what its person was doing when
-     * they left, said in tags, taken up again when the volume comes up under
-     * a machine that holds none. The names ride inside this same record, one
-     * comma-joined list after the fields (after the seal, from a kernel that
-     * seals; right after these two, from one before): `use_context_offset`
-     * from the start of the record, `use_context_bytes` long, no NUL. Both
-     * zero when the volume remembers none. The record is one sector, and
-     * that is the whole room a context has here — a list that will not fit
-     * is not kept in part; the volume forgets, and the person is told. */
+    /* The Use Context as a kernel before its chain kept it — what its person
+     * was doing when they left, one comma-joined list inside this record:
+     * `use_context_offset` from the start of the record, `use_context_bytes`
+     * long, no NUL, inside the record's own `bytes` — at byte 80 from a kernel
+     * before the seal, at 132 from one that sealed, so at most the 432 a
+     * sector holds (u16 is that format's width). A kernel that keeps the
+     * chain below reads it once, to carry it into a chain, and writes both as
+     * zero: no text is ever laid in this sector again. */
     uint16_t use_context_offset;
     uint16_t use_context_bytes;
 
     /* The growth field (HOW THIS GROWS): read only where LedgerHas says the
      * writer put it there. */
     SettleMark mark;
+
+    /*
+     * ‼ THE USE CONTEXT THE VOLUME REMEMBERS — in its own chain of blocks,
+     * named here. What its person was doing when they left, said in tags and
+     * taken up again when the volume comes up under a machine that holds none.
+     * It has no ceiling but the volume's ground: the chain is as many
+     * UseChainLinks as the text needs, and this record carries only where it
+     * begins and what it must read back as.
+     *
+     *   use_chain_first    the first link's data block; VOLUME_LEDGER_NO_BLOCK
+     *                      says the volume remembers none;
+     *   use_chain_seq      the seq of the record the chain was written for,
+     *   use_chain_attempt  and which attempt of it — every link carries both,
+     *                      and a link carrying another pair is not this chain's;
+     *   use_chain_bytes    the whole text, u64: no width past the ground;
+     *   use_chain_crc32    the CRC32 of the whole text.
+     */
+    uint32_t use_chain_first;
+    uint32_t use_chain_attempt;
+    uint64_t use_chain_seq;
+    uint64_t use_chain_bytes;
+    uint32_t use_chain_crc32;
 } VolumeLedger;
 
 /* What every reader requires of `bytes`: the counters. A record written
@@ -203,9 +224,52 @@ static inline int LedgerHas(const VolumeLedger *led, uint32_t end)
            (led->use_context_bytes == 0 || led->use_context_offset >= end);
 }
 
+/* Where the chain's name ends — the same rule: a record carries one when it
+ * reaches past this and no inherited text lies over it. */
+#define VOLUME_LEDGER_USE_CHAIN_END  (__builtin_offsetof(VolumeLedger, use_chain_crc32) + sizeof(uint32_t))
+
 /* The record is one sector for every reader: the fixed fields and the whole
  * growth field stay inside it. */
 _Static_assert(sizeof(VolumeLedger) <= 512, "the Ledger's record is one sector");
+
+/*
+ * ‼ ONE LINK OF THE USE CONTEXT'S CHAIN — UseChainLink, a whole block.
+ *
+ * Its magic is on +0 and its next link on +4, as in the pool's and the
+ * registry's chains, and every link says everything the chain is: which
+ * record and attempt it was written for, where it stands in the chain, how
+ * many links there are and how long the whole text is, and the text's CRC32.
+ * So a chain proves itself whole without the Ledger — a mount that finds one
+ * among the orphans an older kernel left can take it up — and a link whose
+ * block still holds what it held before the write is told from rot: another
+ * magic or another (seq, attempt) is a write that never landed.
+ *
+ *   magic        USE_CHAIN_MAGIC ("TUSE");
+ *   next         the next link's data block; 0 after the last;
+ *   seq, attempt the pair the Ledger names;
+ *   index        0 for the first link;
+ *   used         bytes of text here: USE_CHAIN_TEXT in every link but the last;
+ *   n_links      the chain's length — a reader follows exactly this many;
+ *   total_bytes  the whole text;
+ *   text_crc32   the whole text's CRC32.
+ */
+#define USE_CHAIN_MAGIC  0x54555345u     /* "TUSE" */
+#define USE_CHAIN_TEXT   4052u
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint32_t next;
+    uint64_t seq;
+    uint32_t attempt;
+    uint32_t index;
+    uint32_t used;
+    uint32_t n_links;
+    uint64_t total_bytes;
+    uint32_t text_crc32;
+    uint8_t  text[USE_CHAIN_TEXT];
+} UseChainLink;
+
+_Static_assert(sizeof(UseChainLink) == 4096, "a link of the Use Context's chain is one block");
 
 /* Blocks in the data run are counted from zero, so zero cannot also mean "a
  * block". Nothing is allocated at data block 0 by anybody: mkfs puts the tag

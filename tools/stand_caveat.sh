@@ -53,7 +53,7 @@ caveat_row() {
         bigwrite)   echo "|a write is copied through one kernel-heap allocation of its whole size, so one bigger than the heap is refused and nothing reaches the file" ;;
         sequential|interleave)
                     echo "|a file's record takes one extent per 4 KiB written and never merges them, so the 4080-byte record of a 10-byte name refuses its write at byte 2748416, after 671 extents" ;;
-        usememory)  echo "1.6|a Use Context longer than 432 bytes is forgotten, remembered=0" ;;
+        usememory)  echo "|a Use Context longer than 432 bytes is forgotten, remembered=0" ;;
         fidhistory) echo "|a mount spends kernel heap on every file id ever issued, the dead ones included" ;;
         systemtag)  echo "|any program may take the system tag off kernel.bin and then delete it — the kernel the volume boots is gone" ;;
         coldread)   echo "|a read into pages its program had not touched yet reported every byte and delivered only those before the first such page" ;;
