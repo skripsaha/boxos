@@ -88,7 +88,7 @@ uint64_t UseContextCompares(void)
  * Text
  * ------------------------------------------------------------------------- */
 
-static UseText *UseTextRoom(size_t bytes)
+UseText *UseTextRoom(size_t bytes)
 {
     UseText *t = kmalloc(sizeof(UseText) + bytes + 1);
     if (!t) return NULL;

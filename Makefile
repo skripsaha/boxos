@@ -550,7 +550,7 @@ RETURNFAIL_MARK = $(BUILDDIR)/.returnfail.$(if $(filter on,$(RETURNFAIL)),on,off
 # `tools/volume-read.py cut`), never this key's. The points are named by the
 # record ABOUT to be written:
 #
-#   registry pool table integrity bitmap ledger flush done
+#   registry pool table integrity bitmap ledger flush done usechain
 #
 # tagfs/settle_cut/settle_cut.h is the one list of them; a value that is not on
 # it names an undeclared point and does not compile. Its mark lives apart from

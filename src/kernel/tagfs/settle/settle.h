@@ -11,12 +11,15 @@
  *
  *   S0  under the state lock, memory only: the target (every Ink so far), the
  *       tail closed onto a Spare when it holds anything unsettled, the pool's
- *       closed blocks and tail taken, the Ledger's image taken;
+ *       closed blocks and tail taken, the Ledger's image taken, naming the
+ *       Use Context's chain — a new one, its blocks staked just before S0
+ *       with no lock held, when the person's word changed (use_memory.h);
  *   S1  the tag registry, the block map, the file table, the integrity map —
- *       the digests of the ground at rest zeroed first;
+ *       the digests of the ground at rest zeroed first — and the new chain's
+ *       links;
  *   S2  FLUSH#1, when the cycle names blocks or tags a kept flush does not
- *       yet cover: the data and the tags lie on the medium before any record
- *       names them;
+ *       yet cover: the data, the tags and the chain lie on the medium before
+ *       any record names them;
  *   S3  the pool's closed blocks, then its tail;
  *   S4  the Ledger, into its older copy — the only writer it has — sealed
  *       with the cycle's SettleMark (volume_ledger.h): the pool from
@@ -24,7 +27,8 @@
  *       its last record, each with the CRC32 a mount holds the medium to;
  *   S5  FLUSH#2;
  *   S6  under the state lock: settled_gen is the target, the closed blocks
- *       written leave memory, and Fallow gives back what has rested enough.
+ *       written leave memory, the demand for the Use Context is answered, and
+ *       Fallow gives back what has rested enough.
  *
  * A refusal anywhere from S1 on declares nothing settled: said once for the
  * episode, answered to every waiter the cycle covered, and every step is one

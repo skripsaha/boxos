@@ -8,9 +8,9 @@
  *
  * The volume remembers it: what is said here is written to the mounted volume
  * and taken up again at the next boot with that volume. When the volume
- * cannot remember (no volume, a medium that will not take the write, a
- * context longer than its record holds) the context is set all the same and
- * the person is told.
+ * cannot remember (no volume, no ground on it for the context, a medium that
+ * will not take the write) the context is set all the same and the person is
+ * told.
  *
  * The context is the kernel's, one per machine; the shell only speaks for the
  * user. The prompt is rebuilt from what the kernel holds, never from a copy

@@ -27,6 +27,7 @@
  *   6 ledger     before the ledger is written                    (S4)
  *   7 flush      before the medium's cache is flushed            (S5)
  *   8 done       after the flush, with the whole cycle on the medium (S6)
+ *   9 usechain   before the Use Context's chain is written         (S1)
  *
  * This list is the only list of the names: the Makefile turns the value it is
  * given into SETTLE_CUT_POINT_<VALUE>, and a value that is none of these does
@@ -45,7 +46,8 @@ typedef enum {
     SETTLE_CUT_POINT_BITMAP,
     SETTLE_CUT_POINT_LEDGER,
     SETTLE_CUT_POINT_FLUSH,
-    SETTLE_CUT_POINT_DONE
+    SETTLE_CUT_POINT_DONE,
+    SETTLE_CUT_POINT_USECHAIN
 } SettleCutPoint;
 
 #ifdef CONFIG_TAGFS_SETTLE_CUT_POINT

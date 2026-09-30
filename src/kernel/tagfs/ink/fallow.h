@@ -31,11 +31,16 @@
  *       the integrity map, and the node goes back only once a cycle at least
  *       that late has settled.
  *
- * A freer is one of two kinds. A record of the pool (FALLOW_BY_RECORD) is
+ * A freer is one of three kinds. A record of the pool (FALLOW_BY_RECORD) is
  * known by the gen of the Ink that wrote it; a field of the Ledger
  * (FALLOW_BY_LEDGER) — the integrity map's old run — by the number of the
  * first cycle whose Ledger image was taken after the field changed, for which
- * (1) is moot.
+ * (1) is moot. A chain of the Use Context the Ledger stopped naming
+ * (FALLOW_BY_USE_CHAIN) is freed as a Ledger field is, and is held besides
+ * while either copy of the Ledger may still name it — asked at the moment it
+ * would go back, never when it came to rest (use_memory.h): a copy whose
+ * write was not proven may name the chain it held or the one it was given,
+ * and a mount that rolls back to the older copy stands on its chain.
  *
  * Everything here is changed under the volume's state lock and nothing is
  * allocated under it: a node is made before the lock and freed after it.
@@ -50,8 +55,9 @@
 uint64_t    FallowLag(void);
 
 typedef enum {
-    FALLOW_BY_RECORD = 1,
-    FALLOW_BY_LEDGER = 2,
+    FALLOW_BY_RECORD    = 1,
+    FALLOW_BY_LEDGER    = 2,
+    FALLOW_BY_USE_CHAIN = 3,   /* runs[0] begins with the chain's first link */
 } FallowKind;
 
 typedef struct FallowNode FallowNode;
@@ -69,7 +75,8 @@ void        FallowNodeLetGo(FallowNode* node);
 void        FallowAdd(FallowNode* node, uint64_t gen);
 
 /* Under the state lock, at S0 of cycle number `cycle`, as the Ledger's image
- * is taken: every Ledger freer not yet named is freed by this cycle. */
+ * is taken: every Ledger freer not yet named — a field, or a Use Context
+ * chain — is freed by this cycle. */
 void        FallowLedgerTaken(uint64_t cycle);
 
 /* By the Settle's holder, with no TagFS lock held, before the cycle numbered
@@ -85,9 +92,10 @@ void        FallowRetag(uint64_t from, uint64_t to);
 /* Under the state lock, at the end of cycle number `cycle`: every node whose
  * freer now lies in a settled closed block (gen <= closed_gen) is given the
  * cycle it may go back at, and every node whose cycle has come, whose digests
- * a settled cycle zeroed, and whose file no open handle views as it was before
- * goes back to the allocator. Answers the blocks given back; the nodes spent
- * come back in *spent, for FallowNodesFree after the lock. */
+ * a settled cycle zeroed, whose file no open handle views as it was before,
+ * and — a Use Context chain — which no copy of the Ledger may name, goes back
+ * to the allocator. Answers the blocks given back; the nodes spent come back
+ * in *spent, for FallowNodesFree after the lock. */
 uint64_t    FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent);
 
 /* Nodes FallowRipen spent, freed with no TagFS lock held. */

@@ -34,12 +34,13 @@ void    GroundCensusBegin(void);
 void    GroundClaim(GroundOwner owner, uint32_t start, uint32_t count, uint32_t who);
 
 /* The claims against the medium's map, a window at a time: the orphans and the
- * missing named, the missing taken again in memory for the next cycle to
- * write, the free count derived; two owners of a block said. ERR_TAGFS_CORRUPTED
- * when the map would not read; ERR_NO_MEMORY when the repair could not be
- * written down. When a claim was refused memory, the map is only measured —
- * said — and nothing is taken again. */
-error_t GroundCensusRun(BlockMapCensusCount* out);
+ * missing named — every orphan run handed to `orphan` when it is given — the
+ * missing taken again in memory for the next cycle to write, the free count
+ * derived; two owners of a block said. ERR_TAGFS_CORRUPTED when the map would
+ * not read; ERR_NO_MEMORY when the repair could not be written down. When a
+ * claim was refused memory, the map is only measured — said — and nothing is
+ * taken again, and no orphan is named. */
+error_t GroundCensusRun(BlockMapOrphanFn orphan, BlockMapCensusCount* out);
 
 /* The claims let go. */
 void    GroundCensusEnd(void);

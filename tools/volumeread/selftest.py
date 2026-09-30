@@ -678,7 +678,7 @@ def ConstantsCheck(src):
              "ledger": os.path.join(inc, "volume_ledger.h"), "pen": os.path.join(inc, "deed_pen.h"),
              "tagfs": os.path.join(fs, "tagfs.h"), "consts": os.path.join(fs, "tagfs_constants.h"),
              "cow": os.path.join(fs, "cow", "cow.h"), "book": os.path.join(fs, "disk_book", "disk_book.h"),
-             "pool": os.path.join(fs, "metadata_pool", "meta_pool.c"),
+             "pool": os.path.join(fs, "metadata_pool", "meta_pool_internal.h"),
              "plot": os.path.join(fs, "plot", "plot_width.h"),
              "boot": os.path.join(src, "boot", "uefi", "tagfs_boot.h"),
              "ground": os.path.join(src, "kernel", "core", "boardroom", "ground.c"),
@@ -721,7 +721,8 @@ def ConstantsCheck(src):
                   ("RECORD_CRC_AT", "RECORD_CRC_OFFSET"), ("MBR_TYPE_BOXOS", "GROUND_MBR_TYPE"),
                   ("MBR_TYPE_PROTECTIVE", "GROUND_MBR_TYPE_PROTECTIVE"),
                   ("GPT_ARRAY_MAX_BYTES", "GPT_ARRAY_MAX_BYTES"), ("GPT_BLOCK_MAX_BYTES", "GPT_BLOCK_MAX_BYTES"),
-                  ("GROUND_MAX_PER_MEDIUM", "GROUND_MAX_PER_MEDIUM")):
+                  ("GROUND_MAX_PER_MEDIUM", "GROUND_MAX_PER_MEDIUM"),
+                  ("TUSE_MAGIC", "USE_CHAIN_MAGIC"), ("TUSE_TEXT", "USE_CHAIN_TEXT")):
         Eq(c, getattr(ondisk, py), d.get(c))
     guid = re.search(r"g_boxos_type_guid\[16\]\s*=\s*\{(.*?)\}", text["ground"], re.S)
     Eq("g_boxos_type_guid", ondisk.BOXOS_TYPE_GUID,
@@ -745,12 +746,16 @@ def ConstantsCheck(src):
                           ("MetaPoolBlock", ondisk.META_POOL_BLOCK), ("FileExtent", ondisk.FILE_EXTENT),
                           ("CowSnapshotDisk", ondisk.COW_SNAPSHOT_DISK),
                           ("DiskBookSuperblock", ondisk.DISKBOOK_SUPERBLOCK),
-                          ("DiskBookEntry", ondisk.DISKBOOK_ENTRY)):
+                          ("DiskBookEntry", ondisk.DISKBOOK_ENTRY),
+                          ("UseChainLink", ondisk.TUSE_LINK)):
         c_fields = {f: (o, s) for f, o, s in structs.get(cname, [])}
         for field, off, size in fields.Offsets():
             Eq("%s.%s" % (cname, field), (off, size), c_fields.get(field))
     ledger = {f: o for f, o, _s in structs.get("VolumeLedger", [])}
     Eq("VOLUME_LEDGER_REQUIRED_BYTES", ondisk.LEDGER_REQUIRED_BYTES, ledger.get("use_context_offset"))
+    for field, off, _size in ondisk.USE_CHAIN.Offsets():
+        Eq("VolumeLedger.use_chain_%s" % field, ondisk.LEDGER_USE_CHAIN_AT + off,
+           ledger.get("use_chain_%s" % field))
     return wrong, n
 
 

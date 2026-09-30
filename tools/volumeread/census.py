@@ -197,6 +197,10 @@ class KernelView:
                 marks.append((b, 1))
         for _snap, old, new in f.redirects:
             marks += [(b, 1) for b in (old, new) if b < D]
+        # UseRollCall: every link either copy's chain reads back as its own.
+        for c in f.ledgers:
+            if c.get("use_chain_read"):
+                marks += [(b, 1) for b in c["use_chain_read"]["blocks"] if b < D]
         self.marked = RunsNormal(marks)
         orphans = RunsSubtract(f.used, self.marked)
         missing = RunsSubtract(self.marked, f.used)
@@ -291,6 +295,7 @@ class GroundCensus:
         if self.kernel.step == "layout" or not self._Regions():
             return
         self._Ledger()
+        self._UseChain()
         self._DiskBook()
         self._Cow()
         self._Chains()
@@ -405,6 +410,31 @@ class GroundCensus:
                          "%u for %u bytes, outside its own record — it remembers none "
                          "(ledger.c ledger_read_copy)" % (c["copy"], c["use_context_offset"],
                                                   c["use_context_bytes"]))
+
+    def _UseChain(self):
+        """The Use Context's chains the copies name (use_memory_mount.c):
+        GroundOwner use_chain, every link read back as the chain's own. A
+        newest copy's chain that does not read whole is the mount rolling the
+        memory back to the copy before — the medium's lie only when a link of
+        the chain the record's own cycle wrote holds another's content."""
+        f, seen = self.f, set()
+        newest = f.ledger
+        for c in f.ledgers:
+            got = c.get("use_chain_read")
+            if not got:
+                continue
+            first = c["use_chain"]["first"]
+            if first not in seen:
+                seen.add(first)
+                self.Claim("use_chain", "Use Context chain at data block %u" % first,
+                           RunsNormal([(b, 1) for b in got["blocks"]]))
+            if newest is not None and c["copy"] == newest["copy"] and got["state"] != "whole":
+                lied = got["state"] == "foreign" and c["use_chain"]["seq"] == c["seq"]
+                self.Say("TUSE_TORN", "note", "the newest ledger copy names a Use Context chain "
+                         "at data block %u that reads %s — the mount remembers what the copy "
+                         "before it names%s (use_memory_mount.c UseMemoryJudge)"
+                         % (first, got["state"], ", and says the medium lied about its FLUSH"
+                            if lied else ""))
 
     def _DiskBook(self):
         f = self.f
@@ -743,30 +773,26 @@ class GroundCensus:
         self._UseChains(links)
 
     def _UseChains(self, links):
-        """TUSE chains among the orphans (Quill design §1.2): from each link of
-        index 0, exactly n_links hops, every link agreeing with the first."""
+        """TUSE chains among the orphans, read as the kernel reads them
+        (ondisk.ReadUseChain, use_chain.c UseChainFindOrphans): from each link
+        of index 0, by the name it states, every link an orphan. A mount whose
+        newest copy an older kernel wrote takes the newest of them up again,
+        or lets them rest (use_memory_mount.c)."""
         f, by_block, whole = self.f, dict(links), set()
+        read = lambda b: f.read_block(b) if b in by_block else None
         for b, head in links:
             if head["index"] != 0:
                 continue
-            chain, cur, crc, total = [], b, 0, 0
-            for i in range(head["n_links"]):
-                link = by_block.get(cur)
-                if (link is None or not 1 <= cur < f.D or link["index"] != i or
-                        any(link[k] != head[k] for k in ("seq", "attempt", "n_links",
-                                                          "total_bytes", "text_crc32")) or
-                        link["used"] > TUSE_TEXT or
-                        (i < head["n_links"] - 1 and link["used"] != TUSE_TEXT)):
-                    chain = None
-                    break
-                chain.append(cur)
-                crc, total = ondisk.Crc32(link["text"], crc), total + link["used"]
-                cur = link["next"]
-            if chain and cur == 0 and total == head["total_bytes"] and crc == head["text_crc32"]:
+            ref = {"first": b, "attempt": head["attempt"], "seq": head["seq"],
+                   "bytes": head["total_bytes"], "crc32": head["text_crc32"]}
+            got = ondisk.ReadUseChain(read, ref, f.D)
+            if got["state"] == "whole":
+                chain = got["blocks"]
                 whole.update(chain)
                 runs = RunsNormal([(x, 1) for x in chain])
                 self.Say("TUSE_UNNAMED", "leak", "data block(s) %s hold a whole TUSE chain nothing "
-                         "names: %u links, %u bytes, crc ok" % (RunsText(runs), len(chain), total), runs)
+                         "names: %u links, %u bytes, crc ok" % (RunsText(runs), len(chain),
+                                                               len(got["text"])), runs)
         broken = RunsNormal([(b, 1) for b, _l in links if b not in whole])
         if broken:
             self.Say("TUSE_BROKEN", "leak", "data block(s) %s hold TUSE links that make no whole "

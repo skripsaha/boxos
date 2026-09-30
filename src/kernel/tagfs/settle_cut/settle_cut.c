@@ -10,7 +10,7 @@
 /* The Makefile hands the point over as SETTLE_CUT_POINT_<VALUE>; a value that
  * names no point is an undeclared identifier and never gets this far. */
 _Static_assert(CONFIG_TAGFS_SETTLE_CUT_POINT >= SETTLE_CUT_POINT_REGISTRY &&
-               CONFIG_TAGFS_SETTLE_CUT_POINT <= SETTLE_CUT_POINT_DONE,
+               CONFIG_TAGFS_SETTLE_CUT_POINT <= SETTLE_CUT_POINT_USECHAIN,
                "SETTLECUT names no point of the Settle cycle");
 
 static const char *const SettleCutWhere[] = {
@@ -22,6 +22,7 @@ static const char *const SettleCutWhere[] = {
     [SETTLE_CUT_POINT_LEDGER]    = "before the ledger is written",
     [SETTLE_CUT_POINT_FLUSH]     = "before the medium's cache is flushed",
     [SETTLE_CUT_POINT_DONE]      = "after the cache flush, with the whole cycle on the medium",
+    [SETTLE_CUT_POINT_USECHAIN]  = "before the Use Context's chain is written",
 };
 
 static volatile uint32_t g_settle_syncs;        /* cycles that reached point 1 */
@@ -32,7 +33,7 @@ void SettleCutSayArmed(void)
     kprintf("[SETTLECUT] armed: the first cycle to reach point %u of %u, %s, "
             "stops this machine there\n",
             (unsigned)CONFIG_TAGFS_SETTLE_CUT_POINT,
-            (unsigned)SETTLE_CUT_POINT_DONE,
+            (unsigned)SETTLE_CUT_POINT_USECHAIN,
             SettleCutWhere[CONFIG_TAGFS_SETTLE_CUT_POINT]);
 }
 
@@ -86,7 +87,7 @@ void SettleCutAt(SettleCutPoint here)
             "this boot, on core %u — %u of the %u other core(s) answered the "
             "roll call and run no more, and nothing after this point was "
             "issued to the medium\n",
-            (unsigned)here, (unsigned)SETTLE_CUT_POINT_DONE,
+            (unsigned)here, (unsigned)SETTLE_CUT_POINT_USECHAIN,
             SettleCutWhere[here], sync_no, (unsigned)me, answered,
             (unsigned)(g_amp.total_cores ? g_amp.total_cores - 1u : 0u));
     WireForceRelease();

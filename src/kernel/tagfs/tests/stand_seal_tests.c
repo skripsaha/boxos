@@ -29,15 +29,10 @@
  * the other when it is intact too. False when neither reads. */
 static bool StandSealCopies(VolumeLedger* newest, VolumeLedger* other, bool* has_other)
 {
-    char*        tail = kmalloc(TAGFS_SECTOR_SIZE);
     VolumeLedger led[VOLUME_LEDGER_COPIES];
     bool         ok[VOLUME_LEDGER_COPIES];
-    uint16_t     tail_len;
-    if (!tail)
-        return false;
     for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++)
-        ok[c] = tagfs_ledger_peek(c, &led[c], tail, &tail_len);
-    kfree(tail);
+        ok[c] = tagfs_ledger_peek(c, &led[c], NULL);
 
     uint32_t n = ok[1] && (!ok[0] || led[1].seq > led[0].seq) ? 1u : 0u;
     if (!ok[n])
@@ -87,9 +82,8 @@ static TestResult TestStandSealBorne(void)
     TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle settles");
     TEST_ASSERT(StandSealCopies(&newest, &other, &has_other), "a copy of the Ledger reads");
     TEST_ASSERT(StandSealOf(&newest), "the newest copy carries a seal of its own");
-    TEST_ASSERT(newest.use_context_bytes == 0 ||
-                newest.use_context_offset >= VOLUME_LEDGER_SEAL_END,
-                "and no Use Context lies over it");
+    TEST_ASSERT(newest.use_context_bytes == 0 && newest.use_context_offset == 0,
+                "and no text of a Use Context is laid in the Ledger's sector");
 
     PoolStood stood = StandSealJudge(&newest, &other, has_other, &seal, &fell_back);
     TEST_ASSERT_EQ(stood, POOL_STOOD_SEAL, "the mount would stand on a seal");

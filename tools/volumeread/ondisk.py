@@ -125,6 +125,11 @@ SETTLE_MARK = Fields("<QIIIIIIIIIII",
                      "closed_crc32 tail_crc32 flags")
 LEDGER_SEAL_AT = VOLUME_LEDGER.size                  # offsetof(VolumeLedger, mark)
 LEDGER_SEAL_END = LEDGER_SEAL_AT + SETTLE_MARK.size  # volume_ledger.h VOLUME_LEDGER_SEAL_END
+# The name of the Use Context's chain, in the growth field right after the seal
+# (volume_ledger.h use_chain_*, VOLUME_LEDGER_USE_CHAIN_END). first 0 names none.
+USE_CHAIN = Fields("<IIQQI", "first attempt seq bytes crc32")
+LEDGER_USE_CHAIN_AT = LEDGER_SEAL_END
+LEDGER_USE_CHAIN_END = LEDGER_USE_CHAIN_AT + USE_CHAIN.size
 SETTLE_CLEAN = 1 << 0                                # volume_ledger.h
 SETTLE_MEDIUM_LIED = 1 << 1
 
@@ -200,12 +205,12 @@ COW_SNAPSHOT_DISK = Fields("<IIQI32sB3xIQ",    # cow.h:34-44 CowSnapshotDisk
 
 INTEGRITY_PER_BLOCK = 512               # integrity.c:14 ENTRIES_PER_BLOCK
 
-# Quill design §1.2 UseChainLink. Not written by anything on HEAD; recognised
-# so that the census can name one the day a writer lays it down.
-TUSE_MAGIC = 0x54555345                 # "TUSE"
+# The Use Context's chain (volume_ledger.h UseChainLink; the kernel's reader is
+# tagfs/use_memory/use_chain.c UseChainRead, its writer UseChainWrite).
+TUSE_MAGIC = 0x54555345                 # volume_ledger.h USE_CHAIN_MAGIC, "TUSE"
 TUSE_LINK = Fields("<IIQIIIIQI",
                    "magic next seq attempt index used n_links total_bytes text_crc32")
-TUSE_TEXT = BLOCK - 44                  # 4052 bytes of text after the 44-byte header
+TUSE_TEXT = BLOCK - 44                  # volume_ledger.h USE_CHAIN_TEXT: 4052 bytes after the header
 
 # ---------------------------------------------------------------------------
 # Partition tables — the ground the kernel will stand on
@@ -368,11 +373,14 @@ def DeedStampAt(raw, kind):
 def ReadLedgerCopy(sector, copy):
     """One Ledger copy, read as ledger_read_copy (ledger.c) reads it:
     magic, a length inside [76, 512], the crc over exactly that length, zeros
-    past a short record, and the remembered Use Context only if it lies inside
-    the record. `why` carries the kernel's own words for a refusal."""
+    past a short record, the name of the Use Context's chain where the record
+    reaches it (LedgerHas), and otherwise the text a kernel before the chain
+    kept, only if it lies inside the record. `why` carries the kernel's own
+    words for a refusal."""
     rec = bytearray(sector[:SECTOR].ljust(SECTOR, b"\0"))
     d = VOLUME_LEDGER.Unpack(rec)
-    d.update(copy=copy, ok=False, why=None, use_context=None, use_misplaced=False)
+    d.update(copy=copy, ok=False, why=None, use_context=None, use_misplaced=False,
+             use_chain=None)
     if d["magic"] != LEDGER_MAGIC:
         d["why"] = "carries no ledger"
         return d
@@ -390,11 +398,13 @@ def ReadLedgerCopy(sector, copy):
     if n < SECTOR:
         rec[n:SECTOR] = bytes(SECTOR - n)
         d.update(VOLUME_LEDGER.Unpack(rec))
-        d.update(copy=copy, why=None, use_context=None, use_misplaced=False)
+        d.update(copy=copy, why=None, use_context=None, use_misplaced=False, use_chain=None)
     d["mark"] = SETTLE_MARK.Unpack(rec, LEDGER_SEAL_AT)
     d["sealed"] = (LedgerHas(d, LEDGER_SEAL_END) and d["mark"]["settle"] != 0 and
                    d["mark"]["settle"] == d["seq"])
-    if d["use_context_bytes"]:
+    if LedgerHas(d, LEDGER_USE_CHAIN_END):
+        d["use_chain"] = USE_CHAIN.Unpack(rec, LEDGER_USE_CHAIN_AT)
+    elif d["use_context_bytes"]:
         off, ln = d["use_context_offset"], d["use_context_bytes"]
         if off < LEDGER_REQUIRED_BYTES or off + ln > n:
             d["use_misplaced"] = True
@@ -618,11 +628,54 @@ def ParseRecord(raw, at, block=None):
 
 
 def ReadUseChainLink(raw):
-    """A TUSE link (Quill design §1.2): the 44-byte header and the text it
-    carries, at most 4052 bytes."""
+    """A TUSE link (volume_ledger.h UseChainLink): the 44-byte header and the
+    text it carries, at most 4052 bytes."""
     d = TUSE_LINK.Unpack(raw)
     d["text"] = bytes(raw[TUSE_LINK.size:TUSE_LINK.size + min(d["used"], TUSE_TEXT)])
     return d
+
+
+def ReadUseChain(read_block, ref, run):
+    """The chain `ref` names (first, attempt, seq, bytes, crc32), read as the
+    kernel's UseChainRead reads it: exactly ceil(bytes / 4052) hops, never more
+    than the data run has blocks; a link carrying another magic or another
+    (seq, attempt) is its block's previous content ("foreign") and is not the
+    chain's; one of this pair that disagrees in index, n_links, total_bytes,
+    text_crc32 or used, or a text that does not sum, is "rotten". `blocks` are
+    the links read as this chain's own, in link order."""
+    out = {"state": "whole", "blocks": [], "text": None}
+    links = (ref["bytes"] + TUSE_TEXT - 1) // TUSE_TEXT
+    if not ref["first"] or not ref["bytes"] or links > run:
+        out["state"] = "rotten"
+        return out
+    b, crc, text = ref["first"], 0, []
+    for i in range(links):
+        if not 1 <= b < run:
+            out["state"] = "rotten"
+            return out
+        raw = read_block(b)
+        if raw is None:
+            out["state"] = "unread"
+            return out
+        link = ReadUseChainLink(raw)
+        if (link["magic"] != TUSE_MAGIC or link["seq"] != ref["seq"] or
+                link["attempt"] != ref["attempt"]):
+            out["state"] = "foreign"
+            return out
+        out["blocks"].append(b)
+        want = TUSE_TEXT if i + 1 < links else ref["bytes"] - i * TUSE_TEXT
+        if (link["index"] != i or link["n_links"] != links or link["total_bytes"] != ref["bytes"] or
+                link["text_crc32"] != ref["crc32"] or link["used"] != want):
+            out["state"] = "rotten"
+            return out
+        crc = Crc32(link["text"], crc)
+        text.append(link["text"])
+        b = link["next"]
+    if crc != ref["crc32"]:
+        out["state"] = "rotten"
+        return out
+    out["text"] = b"".join(text)
+    return out
 
 
 def SpareShape(raw):

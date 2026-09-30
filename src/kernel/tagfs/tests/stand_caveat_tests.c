@@ -241,8 +241,6 @@ out:
 
 static struct {
     VolumeLedger led;
-    char         tail[TAGFS_SECTOR_SIZE];
-    uint16_t     tail_len;
 } s_peek;
 
 /* The newest intact Ledger on the medium, by its sequence number — read off
@@ -251,7 +249,7 @@ uint64_t StandLedgerSeq(void)
 {
     uint64_t newest = 0;
     for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
-        if (tagfs_ledger_peek(c, &s_peek.led, s_peek.tail, &s_peek.tail_len) &&
+        if (tagfs_ledger_peek(c, &s_peek.led, NULL) &&
             s_peek.led.seq > newest)
             newest = s_peek.led.seq;
     }

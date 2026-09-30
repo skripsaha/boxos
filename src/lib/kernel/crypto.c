@@ -11,7 +11,12 @@
 
 uint32_t KCrc32(const uint8_t *data, uint32_t len)
 {
-    uint32_t crc = CRC32_INIT_VALUE;
+    return KCrc32Continue(~(uint32_t)CRC32_INIT_VALUE, data, len);
+}
+
+uint32_t KCrc32Continue(uint32_t crc, const uint8_t *data, uint32_t len)
+{
+    crc = ~crc;
 
     for (uint32_t i = 0; i < len; i++)
     {

@@ -2,6 +2,7 @@
 #include "../integrity/integrity.h"
 #include "../helm/helm.h"
 #include "../settle/settle.h"
+#include "../use_memory/use_memory.h"
 
 struct FallowNode {
     FallowNode* next;
@@ -9,7 +10,7 @@ struct FallowNode {
     uint64_t    ripe_at;    /* the cycle it goes back at; 0 while its freer is unsettled */
     uint64_t    zeroed_in;  /* the cycle that zeroed its digests; 0 while none has */
     FallowKind  kind;
-    uint32_t    fid;        /* the file a record freer freed it from; 0 for a Ledger's */
+    uint32_t    fid;        /* the file a record freer freed it from; 0 for the others */
     uint32_t    count;
     FileExtent  runs[];
 };
@@ -99,7 +100,7 @@ void FallowZeroDigests(uint64_t cycle)
 void FallowLedgerTaken(uint64_t cycle)
 {
     for (FallowNode* n = s_head; n; n = n->next)
-        if (n->kind == FALLOW_BY_LEDGER && n->gen == 0)
+        if (n->kind != FALLOW_BY_RECORD && n->gen == 0)
             n->gen = cycle;
 }
 
@@ -121,13 +122,14 @@ uint64_t FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent)
     for (FallowNode* n = s_head; n; ) {
         FallowNode* next = n->next;
         if (n->ripe_at == 0) {
-            if (n->kind == FALLOW_BY_LEDGER && n->gen != 0)
+            if (n->kind != FALLOW_BY_RECORD && n->gen != 0)
                 n->ripe_at = n->gen + lag;
-            else if (n->gen <= closed_gen)
+            else if (n->kind == FALLOW_BY_RECORD && n->gen <= closed_gen)
                 n->ripe_at = cycle + lag;
         }
         if (n->ripe_at == 0 || cycle < n->ripe_at || n->zeroed_in == 0 || n->zeroed_in > cycle ||
-            (n->kind == FALLOW_BY_RECORD && n->gen > HelmViewFloor(n->fid))) {
+            (n->kind == FALLOW_BY_RECORD && n->gen > HelmViewFloor(n->fid)) ||
+            (n->kind == FALLOW_BY_USE_CHAIN && UseMemoryNames(n->runs[0].start_block))) {
             prev = n;
             n    = next;
             continue;

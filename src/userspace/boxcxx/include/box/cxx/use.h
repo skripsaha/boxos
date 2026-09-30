@@ -15,9 +15,9 @@
 //
 // The volume remembers the context: set and clear write it to the mounted
 // volume, and a machine booting with that volume takes it up again. Their
-// value says whether the volume now holds it — false with no volume up, a
-// medium that will not take the write, or a context longer than the volume's
-// record holds. The context is set either way.
+// value says whether the volume now holds it — false with no volume up, no
+// ground on it for the context, a medium that will not take the write, or a
+// later word already said. The context is set either way.
 //
 // This is a box:: extension, not part of std. A program without system
 // authority gets box::errc::access_denied from set / clear — the context is

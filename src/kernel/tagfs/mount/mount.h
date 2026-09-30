@@ -27,7 +27,10 @@
  *                  too — so no id it ever saw is given out again;
  *   the tags       J1: no tag id a record wears is given out again;
  *   the census     every owner of the data run against the medium's map
- *                  (ground_census.h).
+ *                  (ground_census.h) — the Use Context's chains among them,
+ *                  read with the Ledger (use_memory.h), and the orphans an
+ *                  older kernel's Ledger stopped naming looked through for
+ *                  one.
  *
  * With the door shut, on one core.
  */

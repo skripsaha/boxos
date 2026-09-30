@@ -20,13 +20,8 @@
 #define STAND_USE_WIDE   100000u   /* tags of the context the scheduler is asked under */
 #define STAND_USE_ASKS   1000u     /* scheduler questions counted */
 
-/* The newest Ledger copy's remembered text, read off the medium. Off the
- * stack: two sectors. */
-static struct {
-    VolumeLedger led[VOLUME_LEDGER_COPIES];
-    char         tail[VOLUME_LEDGER_COPIES][TAGFS_SECTOR_SIZE];
-    uint16_t     tail_len[VOLUME_LEDGER_COPIES];
-} s_use_ledger;
+/* The Ledger's copies as the medium holds them. */
+static VolumeLedger s_use_ledger[VOLUME_LEDGER_COPIES];
 
 /* `lead` (may be NULL), then `count` tags "key:0000000", "key:0000001", ...
  * comma-joined, in the heap; NULL with no memory. */
@@ -74,21 +69,19 @@ static void StandUseRestore(UseList* saved)
     UseListDrop(saved);
 }
 
-/* The text the newest intact Ledger copy on the medium remembers. */
-static bool StandUseOnMedium(const char** out_text, uint16_t* out_len)
+/* The text the newest intact Ledger copy on the medium remembers — its chain
+ * read back off the medium — held (UseTextDrop); NULL when it remembers none. */
+static bool StandUseOnMedium(UseText** out_text)
 {
     int newest = -1;
+    *out_text  = NULL;
     for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
-        if (!tagfs_ledger_peek(c, &s_use_ledger.led[c], s_use_ledger.tail[c],
-                               &s_use_ledger.tail_len[c]))
+        if (!tagfs_ledger_peek(c, &s_use_ledger[c], NULL))
             continue;
-        if (newest < 0 || s_use_ledger.led[c].seq > s_use_ledger.led[newest].seq)
+        if (newest < 0 || s_use_ledger[c].seq > s_use_ledger[newest].seq)
             newest = (int)c;
     }
-    if (newest < 0) return false;
-    *out_text = s_use_ledger.tail[newest];
-    *out_len  = s_use_ledger.tail_len[newest];
-    return true;
+    return newest >= 0 && tagfs_ledger_peek((uint32_t)newest, &s_use_ledger[newest], out_text);
 }
 
 // ----------------------------------------------------------------------------
@@ -153,8 +146,7 @@ static TestResult TestStandUseLaterWordStands(void)
     bool        kept_late   = false;
     bool        kept_early  = true;
     uint64_t    late_saying = 0;
-    const char* medium      = NULL;
-    uint16_t    medium_len  = 0;
+    UseText*    medium      = NULL;
 
     TEST_ASSERT_OK(UseContextSet(quiet, sizeof(quiet) - 1), "the short word is said");
     early = UseContextHold();
@@ -171,16 +163,18 @@ static TestResult TestStandUseLaterWordStands(void)
                    "the short word's remembering lands last");
 
     held = tagfs_recall_use_context(NULL);
-    TEST_ASSERT(StandUseOnMedium(&medium, &medium_len), "a Ledger copy is readable");
+    TEST_ASSERT(StandUseOnMedium(&medium), "a Ledger copy is readable");
     TestEvidence("bytes the volume remembers after the earlier, shorter word landed last",
                  held ? held->bytes : 0);
     if (kept_early || !UseTextSame(held, UseListText(late))) {
         verdict = TEST_DEFECT;
         goto out;
     }
-    TEST_ASSERT_EQ(medium_len, sizeof(night) - 1, "the medium carries the long word's length");
-    TEST_ASSERT(memcmp(medium, night, sizeof(night) - 1) == 0, "and the long word, whole");
+    TEST_ASSERT(medium != NULL && medium->bytes == sizeof(night) - 1,
+                "the medium carries the long word's length");
+    TEST_ASSERT(memcmp(medium->text, night, sizeof(night) - 1) == 0, "and the long word, whole");
 out:
+    UseTextDrop(medium);
     UseTextDrop(held);
     UseListDrop(early);
     UseListDrop(late);

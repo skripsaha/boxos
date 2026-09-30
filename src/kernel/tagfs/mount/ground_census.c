@@ -196,10 +196,10 @@ static void GroundOwns(uint32_t window, uint8_t* bits, void* ctx)
             s_carried[s_carried_count++] = s_next;
 }
 
-error_t GroundCensusRun(BlockMapCensusCount* out)
+error_t GroundCensusRun(BlockMapOrphanFn orphan, BlockMapCensusCount* out)
 {
     if (s_refused)
-        return BlockMapCensus(NULL, NULL, out);
+        return BlockMapCensus(NULL, NULL, NULL, out);
 
     /* A run is carried at most once at a time, so the carried list never
      * holds more than there are runs. */
@@ -207,13 +207,13 @@ error_t GroundCensusRun(BlockMapCensusCount* out)
     if (s_count && !s_carried) {
         kprintf("[TagFS FSCK] no memory to sweep %u owner run(s) past the block map — this "
                 "mount does not hold its block map against its owners\n", s_count);
-        return BlockMapCensus(NULL, NULL, out);
+        return BlockMapCensus(NULL, NULL, NULL, out);
     }
     RunsSort();
     RunsSayDoubles();
     s_next          = 0;
     s_carried_count = 0;
-    error_t rc = BlockMapCensus(GroundOwns, NULL, out);
+    error_t rc = BlockMapCensus(GroundOwns, orphan, NULL, out);
     kfree(s_carried);
     s_carried = NULL;
     return rc;

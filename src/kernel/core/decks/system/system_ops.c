@@ -1480,10 +1480,10 @@ static int SysStrandPoolBind(const ManifestOp *op, Crate *crates, uint16_t crate
 
 /* After a set or a clear: the volume is told, and the caller learns whether
  * it listened. out_crate (optional): u8 — 1 when the volume now remembers
- * exactly this context, 0 when it does not (no volume up, a medium that will
- * not take the write, a context longer than the Ledger's record holds, a
- * later word already said to it). The context itself is set either way; the
- * person is told, never refused. */
+ * exactly this context, 0 when it does not (no volume up, no ground on it for
+ * the context, a medium that will not take the write, a later word already
+ * said to it). The context itself is set either way; the person is told,
+ * never refused. */
 static int UseSayRemembered(const ManifestOp *op, Crate *crates, const OpContext *ctx)
 {
     bool kept = false;

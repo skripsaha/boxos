@@ -42,8 +42,9 @@ error_t BlockMapMount(uint32_t data_blocks, uint64_t map_vlba);
  * against the owners' bits for it, which `owns` lays into `bits` (one bit per
  * block of window `window`, set where something owns the block): an ORPHAN is
  * taken on the medium and owned by nothing, a MISSING block is owned and reads
- * free. The first 32 runs of each are named. The repair only ever adds: a
- * missing block is taken, in memory at once and on the medium by the next
+ * free. The first 32 runs of each are named, and every orphan run is handed
+ * to `orphan` when it is given, lowest block first. The repair only ever adds:
+ * a missing block is taken, in memory at once and on the medium by the next
  * Settle cycle, and an orphan stays taken. NULL `owns` builds the summary
  * alone. Nothing is written.
  */
@@ -56,8 +57,10 @@ typedef struct {
 /* The blocks one window of the map covers, and its owners' bits. */
 #define BLOCK_MAP_WINDOW_BLOCKS  (TAGFS_SECTOR_SIZE * 8u)
 typedef void (*BlockMapOwnsFn)(uint32_t window, uint8_t *bits, void *ctx);
+typedef void (*BlockMapOrphanFn)(uint32_t start, uint32_t count, void *ctx);
 
-error_t BlockMapCensus(BlockMapOwnsFn owns, void *ctx, BlockMapCensusCount *out);
+error_t BlockMapCensus(BlockMapOwnsFn owns, BlockMapOrphanFn orphan, void *ctx,
+                       BlockMapCensusCount *out);
 
 /* Everything the mount holds let go, with not one byte written: what memory
  * knows of the map is from before whatever took the volume down. */
