@@ -3,7 +3,7 @@
 
 // ============================================================================
 // CRC32 (ISO 3309 polynomial)
-// Used for: superblock integrity, disk entries, self-heal mirrors
+// Used for: the Ledger, the boarding pass, GPT, DiskBook records, EFI tables
 // ============================================================================
 
 #define CRC32_POLYNOMIAL 0xEDB88320  // ISO 3309 reversed polynomial

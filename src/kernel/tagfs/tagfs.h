@@ -20,7 +20,6 @@
 
 #include "disk_book/disk_book.h"
 #include "cow/cow.h"
-#include "self_heal/self_heal.h"
 #include "ledger/ledger.h"
 #include "block_map/block_map.h"
 
@@ -535,8 +534,9 @@ uint64_t tagfs_block_to_sector(uint32_t block);
 
 /* 0, or a negative -ERR_*: a name whose tag the registry refuses (too long,
  * the registry full) is refused with the registry's code, no file is made
- * without the tag its name gives it, and a record wider than format v1 carries
- * is refused ERR_TAGFS_RECORD_FULL. */
+ * without the tag its name gives it, a record wider than format v1 carries
+ * is refused ERR_TAGFS_RECORD_FULL, and a volume that has issued every file id
+ * it can is refused ERR_TAGFS_FID_EXHAUSTED (LedgerIssueFileId). */
 int  tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint32_t tag_count,
                        uint32_t* out_file_id);
 int  tagfs_delete_file(uint32_t file_id);

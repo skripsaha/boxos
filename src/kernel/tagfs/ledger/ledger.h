@@ -85,6 +85,13 @@ error_t  ledger_load(void);
  * is read, not assumed. */
 void     LedgerLetGo(void);
 
+/* The next file id out of `led`'s counter, which moves past it — the only
+ * place an id is issued. A create calls it on the volume's state
+ * (TagFSState.ledger) under the state lock. Every id is issued once and none
+ * is zero: a counter with no id left, or one an earlier kernel let wrap to 0,
+ * is refused ERR_TAGFS_FID_EXHAUSTED, said with kprintf, and left as it is. */
+error_t  LedgerIssueFileId(VolumeLedger *led, uint32_t *out_fid);
+
 /* The Ledger's lock. Taken nowhere outside ledger.c: the stand reads its
  * Witnessed count to see whether a Ledger write crossed the medium under it
  * (stand_lock_tests.c). */

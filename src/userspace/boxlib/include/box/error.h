@@ -80,7 +80,7 @@ typedef uint32_t error_t;
     X(DMA_TIMEOUT,                   dma_timeout,                   212,  "dma timeout",                   "io") \
     X(SECTOR_READ_FAILED,            sector_read_failed,            213,  "sector read failed",            "io") \
     X(SECTOR_WRITE_FAILED,           sector_write_failed,           214,  "sector write failed",           "io") \
-    /* Filesystem (300-324) */ \
+    /* Filesystem (300-322) */ \
     X(FILE_NOT_FOUND,                file_not_found,                300,  "file not found",                "storage") \
     X(OBJECT_NOT_FOUND,              object_not_found,              301,  "object not found",              "storage") \
     X(TAG_NOT_FOUND,                 tag_not_found,                 302,  "tag not found",                 "storage") \
@@ -104,7 +104,6 @@ typedef uint32_t error_t;
     X(BOOT_HINTS_MISSING,            boot_hints_missing,            320,  "boot hints missing",            "storage") \
     X(SNAPSHOT_LIMIT,                snapshot_limit,                321,  "snapshot limit reached",        "storage") \
     X(SNAPSHOT_NOT_FOUND,            snapshot_not_found,            322,  "snapshot not found",            "storage") \
-    X(SELF_HEAL_FAILED,              self_heal_failed,              324,  "self-healing failed",           "storage") \
     /* Process (400-414) */ \
     X(PROCESS_NOT_FOUND,             process_not_found,             400,  "process not found",             "process") \
     X(INVALID_PID,                   invalid_pid,                   401,  "invalid pid",                   "process") \
@@ -152,7 +151,7 @@ typedef uint32_t error_t;
     X(ACPI_PARSE_ERROR,              acpi_parse_error,              803,  "acpi parse error",              "acpi") \
     X(ACPI_MADT_NOT_FOUND,           acpi_madt_not_found,           804,  "acpi madt not found",           "acpi") \
     X(ACPI_FADT_NOT_FOUND,           acpi_fadt_not_found,           805,  "acpi fadt not found",           "acpi") \
-    /* TagFS core (850-868) */ \
+    /* TagFS core (850-869) */ \
     X(TAGFS_NOT_INITIALIZED,         tagfs_not_initialized,         850,  "tagfs not initialized",         "tagfs") \
     X(TAGFS_CORRUPTED,               tagfs_corrupted,               851,  "tagfs corrupted",               "tagfs") \
     X(TAGFS_NO_SPACE,                tagfs_no_space,                852,  "tagfs no space",                "tagfs") \
@@ -172,6 +171,7 @@ typedef uint32_t error_t;
     X(TAGFS_TAG_TOO_LONG,            tagfs_tag_too_long,            866,  "tagfs tag too long",            "tagfs") \
     X(TAGFS_BEYOND_SIZE,             tagfs_beyond_size,             867,  "tagfs write past the size",     "tagfs") \
     X(TAGFS_RECORD_FULL,             tagfs_record_full,             868,  "tagfs file record full",        "tagfs") \
+    X(TAGFS_FID_EXHAUSTED,           tagfs_fid_exhausted,           869,  "tagfs file ids exhausted",      "tagfs") \
     /* Pocket / IPC (900-911) */ \
     X(POCKET_RING_FULL,              pocket_ring_full,              900,  "pocket ring full",              "ipc") \
     X(RESULT_RING_FULL,              result_ring_full,              901,  "result ring full",              "ipc") \
@@ -223,12 +223,6 @@ typedef uint32_t error_t;
     X(COW_SNAPSHOT_LIMIT,            cow_snapshot_limit,            1013, "snapshot limit reached",        "cow") \
     X(COW_ALLOCATION_FAILED,         cow_allocation_failed,         1014, "cow allocation failed",         "cow") \
     X(COW_RESTORE_FAILED,            cow_restore_failed,            1015, "snapshot restore failed",       "cow") \
-    /* TagFS module — Self-Heal (1030-1034) */ \
-    X(SELF_HEAL_NOT_INITIALIZED,     self_heal_not_initialized,     1030, "self-heal not initialized",     "selfheal") \
-    X(SELF_HEAL_CORRUPTION_DETECTED, self_heal_corruption_detected, 1031, "self-heal corruption detected", "selfheal") \
-    X(SELF_HEAL_RECOVERY_FAILED,     self_heal_recovery_failed,     1032, "self-heal recovery failed",     "selfheal") \
-    X(SELF_HEAL_MIRROR_FAILED,       self_heal_mirror_failed,       1033, "self-heal mirror failed",       "selfheal") \
-    X(SELF_HEAL_SCRUB_FAILED,        self_heal_scrub_failed,        1034, "self-heal scrub failed",        "selfheal") \
     /* TagFS module — BoxHash (1040-1042) */ \
     X(BOXHASH_INVALID_CONTEXT,       boxhash_invalid_context,       1040, "boxhash invalid context",       "boxhash") \
     X(BOXHASH_VERIFICATION_FAILED,   boxhash_verification_failed,   1041, "boxhash verification failed",   "boxhash") \

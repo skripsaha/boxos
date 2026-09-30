@@ -18,7 +18,6 @@
 #include "amp.h"
 #include "cow/cow.h"
 #include "braid/braid.h"
-#include "self_heal/self_heal.h"
 #include "integrity/integrity.h"
 #include "settle_cut/settle_cut.h"
 #include "plot/plot.h"
@@ -2410,9 +2409,6 @@ error_t tagfs_init(void) {
      *     format-v1 volume takes no new one (TagFS_SnapshotRefused). */
     CowNameStanding(g_state.ledger.cow_manifest_block);
 
-    // --- Self-Healing init ---
-    TagFS_SelfHealInit();
-
     // --- Test Framework init ---
     if (TagFS_TestsInit() != OK) {
         return mount_refused("its test framework would not start",
@@ -2422,8 +2418,8 @@ error_t tagfs_init(void) {
     /*
      * ‼ THE FAILURE THAT COST A BOARD ITS FILESYSTEM, ON COMMAND.
      *
-     * Every refusal from here down leaves four subsystems standing — DiskBook,
-     * CoW, Self-Heal and the test framework — and until
+     * Every refusal from here down leaves three subsystems standing — DiskBook,
+     * CoW and the test framework — and until
      * tagfs_clear_the_ground existed nothing took them down. The NEXT mount
      * then died at TagFS_CowInit with ERR_ALREADY_INITIALIZED, and went on
      * dying there for the rest of the boot, saying nothing. Nothing in QEMU
@@ -3017,8 +3013,8 @@ static void tagfs_sync_inside(void)
  *
  * This is the piece that did not exist, and its absence is what turned one
  * transient read error into a machine with no filesystem for the rest of its
- * boot. tagfs_init brings up nine things in order and any of them may refuse;
- * when one did, the eight before it were left standing and nothing anywhere took
+ * boot. tagfs_init brings up eight things in order and any of them may refuse;
+ * when one did, the seven before it were left standing and nothing anywhere took
  * them down — tagfs_teardown begins with `if (!g_state.initialized) return`,
  * and a mount that failed never set that flag.
  *
@@ -3070,7 +3066,6 @@ static void tagfs_clear_the_ground(void)
     BlockMapUnmount();
 
     TagFS_CowShutdown();
-    TagFS_SelfHealShutdown();
     BraidShutdown();
     IntegrityShutdown();
     TagFS_TestsShutdown();
@@ -3386,7 +3381,12 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
 
     TagFSLockTake(&g_state.lock);
 
-    uint32_t file_id = g_state.ledger.next_file_id++;
+    uint32_t file_id = 0;
+    error_t  issued  = LedgerIssueFileId(&g_state.ledger, &file_id);
+    if (issued != OK) {
+        TagFSLockDrop(&g_state.lock);
+        return -(int)issued;
+    }
 
     // Build deduplicated tag array: auto-label first, then caller's tags
     uint32_t final_count = 0;

@@ -29,8 +29,9 @@
 //                        gap reads as, how a file's extents grow, and span
 // stand_index_tests.c    the stand_index suite: what the indexes of the live
 //                        files cost, a tag's members across a window's edge,
-//                        the registry's hashes growing, and more files than
-//                        the old ceiling asked a page at a time
+//                        the registry's hashes growing, more files than the
+//                        old ceiling asked a page at a time, and the last
+//                        file id a volume issues
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.

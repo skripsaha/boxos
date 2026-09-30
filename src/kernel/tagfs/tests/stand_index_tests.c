@@ -16,7 +16,8 @@
 // files there are was answered into an array cut at a ceiling. These tests
 // ask a map and an index of their own what a spread of a million ids costs
 // and how a tag's members cross the edge of a window, and ask the volume for
-// more files than the old ceiling of 1024 held, a page at a time.
+// more files than the old ceiling of 1024 held, a page at a time. And the
+// other end of the ids (step 1.4): the last one a volume can issue.
 // ============================================================================
 
 #define STAND_INDEX_FILES     64u
@@ -327,6 +328,104 @@ out:
     return verdict;
 }
 
+// ----------------------------------------------------------------------------
+// The last file id (step 1.4)
+// ----------------------------------------------------------------------------
+
+#define STAND_INDEX_FID_MUTANT 0xFFFFFFF0u   /* the design's mutant: sixteen ids before the end */
+#define STAND_INDEX_FID_ASKS   17u           /* every id left, and two asks past the last */
+
+/*
+ * The issuer is asked on a copy of the Ledger whose counter stands at
+ * 0xFFFFFFF0: fifteen ids come out, each the one after the last, the last
+ * 0xFFFFFFFE, and every ask after that is refused without the counter moving
+ * — a counter at 0, the one an earlier kernel let wrap, is refused too. Then
+ * the volume's own create is asked with its counter at the end, and must
+ * refuse the same way and make nothing. The fifteen are not made as files: a
+ * file table row is placed by its id (file_table.c), and one at 0xFFFFFFF0
+ * would ask the table's chain for eight million blocks at the next sync. The
+ * name has no stem, so the create interns no tag and writes nothing before it
+ * reaches the counter, and the live counter is at the end for no longer than
+ * that.
+ */
+static TestResult TestStandIndexFidExhausted(void)
+{
+    TestResult   verdict = TEST_PASS;
+    TagFSState*  fs      = tagfs_get_state();
+    VolumeLedger copy;
+    uint32_t     issued  = 0, refused = 0, never = 0, last = 0, fid = 0;
+    uint32_t     saved   = 0, left_at = 0, made = 0;
+    bool         moved   = false;
+    int          rc      = -1;
+    VolumeTally  before;
+    VolumeTally  after;
+
+    memset(&copy, 0, sizeof(copy));
+    memset(&before, 0, sizeof(before));
+    memset(&after, 0, sizeof(after));
+    copy.next_file_id = STAND_INDEX_FID_MUTANT;
+    for (uint32_t ask = 0; ask < STAND_INDEX_FID_ASKS; ask++) {
+        error_t got = LedgerIssueFileId(&copy, &fid);
+        if (got != OK) {
+            TEST_ASSERT_EQ(got, ERR_TAGFS_FID_EXHAUSTED, "an issuer out of ids says so");
+            refused++;
+            continue;
+        }
+        if (fid == 0 || fid == UINT32_MAX || (issued && fid != last + 1u))
+            never++;
+        last = fid;
+        issued++;
+    }
+    TestEvidence("ids issued that must never be — zero, the one that wraps the counter, "
+                 "or one out of turn", never);
+    if (never) {
+        verdict = TEST_DEFECT;
+        goto out;
+    }
+    TEST_ASSERT_EQ(issued, 15, "fifteen ids are issued from 0xFFFFFFF0");
+    TEST_ASSERT_EQ(last, UINT32_MAX - 1u, "the last of them 0xFFFFFFFE");
+    TEST_ASSERT_EQ(refused, 2, "and every ask after it is refused");
+    TEST_ASSERT_EQ(copy.next_file_id, UINT32_MAX, "with the counter left at the end");
+    copy.next_file_id = 0;
+    TEST_ASSERT_EQ(LedgerIssueFileId(&copy, &fid), ERR_TAGFS_FID_EXHAUSTED,
+                   "a counter an earlier kernel let wrap to 0 is refused too");
+    TEST_ASSERT_EQ(copy.next_file_id, 0, "and left where it was");
+
+    TEST_ASSERT(VolumeTallyTake(&before), "the volume is counted");
+    TagFSLockTake(&fs->lock);
+    saved                   = fs->ledger.next_file_id;
+    fs->ledger.next_file_id = UINT32_MAX;
+    moved                   = true;
+    TagFSLockDrop(&fs->lock);
+    rc = tagfs_create_file(".stand_fid", NULL, 0, &made);
+    TagFSLockTake(&fs->lock);
+    left_at                 = fs->ledger.next_file_id;
+    fs->ledger.next_file_id = saved;
+    moved                   = false;
+    TagFSLockDrop(&fs->lock);
+
+    TestEvidence("files made on a volume that had issued every id", rc == 0);
+    if (rc == 0) {
+        verdict = TEST_DEFECT;
+        goto out;
+    }
+    TEST_ASSERT_EQ(rc, -(int)ERR_TAGFS_FID_EXHAUSTED,
+                   "a create on a volume that has issued every id is refused as such");
+    TEST_ASSERT_EQ(left_at, UINT32_MAX, "and the volume's counter did not move");
+    TEST_ASSERT(VolumeTallyTake(&after), "the volume is counted again");
+    TEST_ASSERT_EQ(after.files, before.files, "no file was made");
+    TEST_ASSERT_EQ(after.held, before.held, "and no block was taken");
+out:
+    if (moved) {
+        TagFSLockTake(&fs->lock);
+        fs->ledger.next_file_id = saved;
+        TagFSLockDrop(&fs->lock);
+    }
+    if (rc == 0)
+        tagfs_delete_file(made);
+    return verdict;
+}
+
 static const TestCase g_stand_index_tests[] = {
     { .name  = "stand_index_map_costs_the_live", .func = TestStandIndexMapCostsTheLive,
       .reach = TEST_READS_ONLY,
@@ -344,6 +443,10 @@ static const TestCase g_stand_index_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a question of which files there are is answered into an array cut at a "
                        "ceiling, and the files past it are not there" },
+    { .name  = "stand_index_fid_exhausted", .func = TestStandIndexFidExhausted,
+      .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "the 2^32-th create is given file id 0 and the one after it id 1, a "
+                       "file the volume already holds" },
 };
 
 const TestSuite g_stand_index_suite = {

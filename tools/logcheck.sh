@@ -1973,7 +1973,7 @@ run_lastsaid() {
 # `Unknown command` to every one of those files. Two photographs of it, and
 # the decisive fact was a line that WAS NOT THERE.
 #
-# tagfs_init brings up nine things in order. A mount that failed partway used
+# tagfs_init brings up eight things in order. A mount that failed partway used
 # to leave the first five standing and nothing ever took them down, so every
 # LATER mount died at TagFS_CowInit with ERR_ALREADY_INITIALIZED — reported by
 # a debug_printf, which compiles to nothing in a shipped build. One transient

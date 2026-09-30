@@ -92,7 +92,6 @@ typedef enum {
     ERR_BOOT_HINTS_MISSING = 320,
     ERR_SNAPSHOT_LIMIT = 321,
     ERR_SNAPSHOT_NOT_FOUND = 322,
-    ERR_SELF_HEAL_FAILED = 324,
 
     // Process Errors (400-499)
     ERR_PROCESS_NOT_FOUND = 400,
@@ -208,6 +207,9 @@ typedef enum {
     ERR_TAGFS_BEYOND_SIZE = 867,
     /* A file's record would be wider than format v1 carries (plot/plot_width.h). */
     ERR_TAGFS_RECORD_FULL = 868,
+    /* Every file id a 32-bit id can carry has been issued: a volume never issues
+     * one twice, nor id 0 (ledger.h, LedgerIssueFileId). */
+    ERR_TAGFS_FID_EXHAUSTED = 869,
 
     // TagFS Module Errors (1000-1099)
     // DiskBook
@@ -228,13 +230,6 @@ typedef enum {
     ERR_COW_SNAPSHOT_LIMIT = 1013,
     ERR_COW_ALLOCATION_FAILED = 1014,
     ERR_COW_RESTORE_FAILED = 1015,
-    
-    // Self-Heal
-    ERR_SELF_HEAL_NOT_INITIALIZED = 1030,
-    ERR_SELF_HEAL_CORRUPTION_DETECTED = 1031,
-    ERR_SELF_HEAL_RECOVERY_FAILED = 1032,
-    ERR_SELF_HEAL_MIRROR_FAILED = 1033,
-    ERR_SELF_HEAL_SCRUB_FAILED = 1034,
     
     // BoxHash
     ERR_BOXHASH_INVALID_CONTEXT = 1040,

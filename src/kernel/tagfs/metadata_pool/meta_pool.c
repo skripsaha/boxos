@@ -847,14 +847,6 @@ static int pool_append(const TagFSMetadata* meta, uint32_t record_size,
     debug_printf("[MetaPool] write: file_id=%u block=%u offset=%u size=%u\n",
                  meta->file_id, *out_block, *out_offset, record_size);
 
-    /* Self-Healing keeps a whole 4096-byte BLOCK per mirror slot and sums it
-     * over TAGFS_BLOCK_SIZE, so what it must be handed is the block — which is
-     * this one, in memory, newer than the medium's copy and therefore the right
-     * thing to restore from. It used to be handed the TagFSMetadata, a ~48-byte
-     * object with pointers in it, and read 4 KiB past the end of it on every
-     * metadata write. */
-    TagFS_SelfHealOnMetadataWrite(*out_block, (const uint8_t*)&g_current_block);
-
     // spin_unlock removed - using g_state.lock
     return 0;
 }

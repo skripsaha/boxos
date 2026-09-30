@@ -9,7 +9,7 @@
 // ============================================================================
 
 // CRC32 (ISO 3309 polynomial)
-// Used for: superblock integrity, disk entries, self-heal mirrors
+// Used for: the Ledger, the boarding pass, GPT, DiskBook records, EFI tables
 uint32_t KCrc32(const uint8_t *data, uint32_t len);
 
 // CRC16 (CCITT-FALSE)

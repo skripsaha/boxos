@@ -59,6 +59,8 @@ class Targets:
         self.Sruns = RunsNormal(self.Srec.extents_at_mount)
         blocks = [b for s, n in RunsNormal(self.Lrec.extents_at_mount) for b in range(s, s + n)]
         self.Lmid = blocks[len(blocks) // 2]
+        tail_block, tail, _raw = f.pool[-1]
+        self.PoolTail = (tail_block, ondisk.CHAIN_HEADER + tail["used_bytes"])
 
     def Label(self, e):
         return "fid %u '%s'" % (e["fid"], e["record"].name)
@@ -163,6 +165,47 @@ def PlantRetire(t, over):
     """What meta_pool_delete leaves (meta_pool.c:1138-1240): the file_id zeroed
     and the CRC left alone."""
     t.RecordPatch(over, t.Srec, 2, b"\0\0\0\0", False)
+
+
+def PlantAppend(t, over, record):
+    """`record` appended to the pool as a kernel from step 1.4 on writes every
+    record, older ones left where they are: after the last record of the
+    chain's last block (T.PoolTail), that block's used bytes, record count and
+    kept count moved with it."""
+    block, at = t.PoolTail
+    raw = t.Block(over, block)
+    head = ondisk.META_POOL_BLOCK.Unpack(raw)
+    if at + len(record) > ondisk.CHAIN_HEADER + ondisk.MPOOL_DATA:
+        raise Unreadable("the pool's last block has no room for a %u-byte record" % len(record))
+    raw[at:at + len(record)] = record
+    kept = head["kept"] + (1 if struct.unpack_from("<I", record, 2)[0] else 0)
+    struct.pack_into("<HHH", raw, 8, head["used_bytes"] + len(record), head["record_count"] + 1, kept)
+    t.PutBlock(over, block, raw)
+
+
+def Quitclaim(fid):
+    """A Quitclaim of `fid` (Quill design §2): a record of the file without
+    ACTIVE, nothing else in it, summed."""
+    rec = bytearray(ondisk.META_RECORD.struct.pack(ondisk.RECORD_HEADER, fid, 0, 0, 0, 0, 0, 0, 0, 0))
+    struct.pack_into("<H", rec, ondisk.RECORD_CRC_AT, ondisk.Crc16(bytes(rec)))
+    return bytes(rec)
+
+
+def PlantSuperseded(t, over):
+    """S written again: its record, byte for byte, appended — the record at
+    its row is now an older one."""
+    raw = t.Block(over, t.Srec.block)
+    PlantAppend(t, over, bytes(raw[t.Srec.at:t.Srec.at + t.Srec.len]))
+
+
+def PlantQuitclaimLanded(t, over):
+    """S deleted by a kernel from step 1.4 on, all of it on the medium: its
+    Quitclaim appended, its row gone, its blocks free."""
+    PlantAppend(t, over, Quitclaim(t.S["fid"]))
+    t.Row(over, t.S["fid"], (0, 0))
+    for s, n in t.Sruns:
+        for b in range(s, s + n):
+            t.Bit(over, b, False)
 
 
 def PlantMissing(t, over):
@@ -395,6 +438,27 @@ def Cases(t):
                  ("the census's orphans are the kernel's", lambda c: Runs(c, "ORPHAN") == K(c)["orphan_runs"])]),
         LinkCase(t, "C18", "table"),
         LinkCase(t, "C19", "registry"),
+        Case("C20 superseded", lambda o: PlantSuperseded(t, o), checks=[
+            ("%s is taken at the record appended, not the one its row names" % t.Label(S),
+             lambda c: (c.f.newest[S["fid"]].block, c.f.newest[S["fid"]].at) == t.PoolTail),
+            ("the kernel corrects its row to that record and loses nothing",
+             lambda c: K(c)["corrected"] == 1 and K(c)["lost"] == 0 and
+             c.kernel.verdicts[S["fid"]].outcome == "visible"),
+            ("its blocks are owned once", lambda c: not K(c)["orphan_runs"])]),
+        Case("C21 quitclaim pending", lambda o: PlantAppend(t, o, Quitclaim(S["fid"])),
+             must={"ORPHAN"}, checks=[
+                 ("%s is gone: its newest record is the Quitclaim" % t.Label(S),
+                  lambda c: c.files[S["fid"]]["state"] == "quitclaim" and
+                  bool(Findings(c, "QUITCLAIM_PENDING"))),
+                 ("the kernel quitclaims 1 and keeps its row from nothing",
+                  lambda c: K(c)["quitclaims"] == 1 and K(c)["lost"] == 0),
+                 ("the orphans are %s's blocks, named as a superseded record's" % t.Label(S),
+                  lambda c: Runs(c, "ORPHAN") == t.Sruns and
+                  any("superseded record" in x.text for x in Findings(c, "ORPHAN")))]),
+        Case("C22 quitclaim landed", lambda o: PlantQuitclaimLanded(t, o), checks=[
+            ("%s is no file at all" % t.Label(S), lambda c: S["fid"] not in c.files),
+            ("and the kernel finds nothing to repair",
+             lambda c: not K(c)["orphan_runs"] and not K(c)["missing_runs"])]),
         Case("G1 MBR type", lambda o: PlantMbrEntry(t, o, kind=0x83), must={"GROUND_REFUSED"}, checks=[
             ("the kernel refuses at the ground", lambda c: c.kernel.step == "ground"),
             ("the refusal names the types it found", lambda c: "0:0x83" in c.kernel.refusal),
@@ -666,7 +730,7 @@ def ConstantsCheck(src):
     for c, field in (("META_RECORD_LEN_OFF", "record_len"), ("META_RECORD_FILE_ID_OFF", "file_id"),
                      ("META_RECORD_FLAGS_OFF", "flags"), ("META_RECORD_SIZE_OFF", "size"),
                      ("META_RECORD_TAGCOUNT_OFF", "tag_count"), ("META_RECORD_EXTCOUNT_OFF", "extent_count"),
-                     ("META_RECORD_NAMELEN_OFF", "name_len")):
+                     ("META_RECORD_NAMELEN_OFF", "name_len"), ("META_RECORD_CRC_OFF", "crc16")):
         Eq(c, rec[field], d.get(c))
     Eq("META_RECORD_VARDATA_OFF", ondisk.META_RECORD.size, d.get("META_RECORD_VARDATA_OFF"))
 
