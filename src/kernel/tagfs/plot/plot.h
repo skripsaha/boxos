@@ -52,17 +52,23 @@ typedef struct {
     FileExtent   *freed;          /* ground the record stops naming, to Fallow once it is inked */
     uint32_t      freed_count;
     uint32_t      freed_room;
+    FileHelm     *helm;           /* the Helm its holder loaded it under; NULL for none */
+    uint32_t      claimed;        /* the extents it claimed room for in the record (RT-19) */
 } Plot;
 
 /* The file's record, out of the map of live files afresh — never a handle's
  * copy of it. OK, or ERR_FILE_NOT_FOUND, ERR_METADATA_CORRUPTED (the record
- * names fewer blocks than its size needs), ERR_PERMISSION_DENIED (the file
- * holds the kernel the loader reads by its blocks: nothing of it is written),
- * ERR_NO_MEMORY. */
+ * names fewer blocks than its size needs), the refusal of the one guard of a
+ * change (InkMayChange: ERR_PERMISSION_DENIED for a file the loader reads by
+ * its blocks, ERR_DEVICE_NOT_READY once the medium left) — asked here, before
+ * a byte of the call moves — or ERR_NO_MEMORY. A holder of the file's Helm
+ * sets `helm` after the load, so the record's room is claimed for it
+ * (PlotReserve). */
 error_t  PlotLoad(Plot *p, uint32_t fid);
 
 /* Everything the Plot holds let go; every Stake still standing is given back
- * first (PlotPullStakes). Safe on a Plot PlotLoad refused. */
+ * first (PlotPullStakes), and the room it claimed (InkRoomLetGo). Safe on a
+ * Plot PlotLoad refused. */
 void     PlotRelease(Plot *p);
 
 /* Every Stake given back to the allocator: the way out of a call that commits
@@ -102,8 +108,9 @@ bool     PlotFits(const TagFSMetadata *record, uint32_t *out_bytes);
 /* Ground under every block of [0, end) bytes: what the file lacks is taken
  * through its Allotment near its last block, each run a Stake. Then the
  * record must fit: an extent list too long is shortened by PlotGather, and
- * ERR_TAGFS_RECORD_FULL — said, with its numbers — when it cannot be. Nothing
- * is written but what a gather moves. */
+ * ERR_TAGFS_RECORD_FULL — said, with its numbers — when it cannot be; and the
+ * room its extents need is claimed (InkRoomClaim). Nothing is written but what
+ * a gather moves. */
 error_t  PlotReserve(Plot *p, uint64_t end);
 
 /* The growth rule, and the ground: where a write of `bytes` at `offset` begins
@@ -137,11 +144,10 @@ error_t  PlotExtendZero(Plot *p, uint64_t size);
  * rest once a record that no longer names it is inked. `shed` 0 asks for
  * every extent of the file in one run (defrag).
  *
- * Only ground the loaded record named is moved, never a Stake. Refused
- * ERR_PERMISSION_DENIED for a file wearing system or boot, or holding a block
- * of the kernel the Deed points the loader at: a loader reads those by their
- * blocks. Refused — said, with the numbers — when no window sheds enough or no
- * run that long is free.
+ * Only ground the loaded record named is moved, never a Stake — and never a
+ * file the loader reads by its blocks: PlotLoad refused that one. Refused —
+ * said, with the numbers — when no window sheds enough or no run that long is
+ * free.
  */
 error_t  PlotGather(Plot *p, uint32_t shed, uint32_t hint);
 

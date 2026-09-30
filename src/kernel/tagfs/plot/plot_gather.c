@@ -1,5 +1,4 @@
 #include "plot_internal.h"
-#include "../ink/ink.h"
 #include "scribe.h"
 
 /*
@@ -18,20 +17,6 @@
  * no further gives it back; the ground it leaves is the record's until a
  * record that no longer names it is inked, and then rests in Fallow.
  */
-
-/* Whether the file is one the loader reads by its blocks: wearing system or
- * boot, or holding a block of the kernel the Deed points at. */
-static bool PlotLoaderReads(const Plot *p)
-{
-    for (uint32_t i = 0; i < p->meta.tag_count; i++) {
-        TagSpelling tag       = { 0 };
-        bool        is_system = false;
-        if (TagFSTagSpelling(p->meta.tag_ids[i], &tag, &is_system) &&
-            (TagSpanIs("system", tag.key, tag.key_len) || TagSpanIs("boot", tag.key, tag.key_len)))
-            return true;
-    }
-    return InkTouchesBoot(p->runs, p->run_count);
-}
 
 /* How many extents `blocks` in one run take. */
 static uint32_t PlotPieces(uint64_t blocks)
@@ -133,12 +118,6 @@ static error_t PlotSplice(Plot *p, uint32_t first, uint32_t last, uint32_t start
 
 error_t PlotGather(Plot *p, uint32_t shed, uint32_t hint)
 {
-    if (PlotLoaderReads(p)) {
-        kprintf("[TagFS] file %u: the loader reads it by its blocks, so its extents are not "
-                "moved\n", p->fid);
-        return ERR_PERMISSION_DENIED;
-    }
-
     uint32_t first = 0, last = 0;
     uint64_t blocks = 0;
     if (!PlotChooseWindow(p, shed, &first, &last, &blocks)) {

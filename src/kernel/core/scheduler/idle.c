@@ -18,6 +18,7 @@
 #include "cpuid.h"          // g_cpu_caps.has_monitor (MWAIT idle)
 #include "cpu_calibrate.h"  // cpu_tsc_recal_if_pending — periodic TSC recal
 #include "tagfs.h"
+#include "helm.h"          /* HelmReadyListed — a write between two windows */
 #include "use_context.h"
 
 // BSP idle process (static, PID 0)
@@ -244,6 +245,17 @@ void cpu_idle(void) {
      * cabins that never enter the kernel, which on one core has nowhere else
      * to run with interrupts on. One load when none is owed. */
     UseContextServiceIfPending();
+
+    /* And work of a file's Helm listed for that service point meanwhile — a
+     * write come back for its next window, having given the core back between
+     * two — is run on the next turn of this loop, not after the next
+     * interrupt: on one core this loop is the only service point there is,
+     * and a write would move one window a tick. Interrupts are on from here,
+     * as after a sleep, so a tick still takes the core for a program. */
+    if (HelmReadyListed()) {
+        __asm__ volatile("sti" ::: "memory");
+        return;
+    }
 
     if (g_cpu_caps.has_mwait_c1) {
         /* MWAIT C1 (hint 0x00). The monitored cell is this idle stack's own

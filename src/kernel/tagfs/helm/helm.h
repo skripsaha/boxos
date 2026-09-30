@@ -28,6 +28,13 @@
  * rests in Fallow until the handle is closed (fallow.h, condition 3), so a
  * delete under a reader never hands the reader's blocks to another file.
  *
+ * ‼ NOBODY WAITS FOR A MEDIUM THAT LEFT (RT-13). From the moment the volume
+ * sees its medium gone no waiter is queued behind a holder and none is handed
+ * a Helm: each one waiting is answered instead (HelmWaiter.gone), with the
+ * count of changes inked since the last settled cycle — what left with the
+ * medium. A waiter holds the volume's door, so the volume is let go of only
+ * once every one of them has its answer.
+ *
  * The open-file table the Helm lives in belongs to the machine, not to the
  * volume: a mount leaves it alone. Its lock and every FileHelm's are leaves.
  */
@@ -45,15 +52,34 @@ bool           ofe_listed(const OpenFileEntry* ofe, uint32_t* out_refs);
 
 /* The Helm for `w`: true when it was free and is w's now; false when w waits
  * in the FIFO, and w->hand runs once it is w's — on the core that let go, with
- * no TagFS lock held. */
+ * no TagFS lock held — or when the medium left and the Helm is held: w->gone
+ * has answered it before this returns. Either way a false w is not the
+ * caller's to touch again. */
 bool     HelmAsk(OpenFileEntry* ofe, HelmWaiter* w);
 
 /* The Helm for `w` only when it is free: false, and w not queued, when it is
  * held. */
 bool     HelmTry(OpenFileEntry* ofe, HelmWaiter* w);
 
-/* `w` lets go; the first waiter, if any, is handed the Helm (HelmHand). */
+/* The Helm for a caller in the kernel, only when it is free: such a caller
+ * cannot be parked behind the holder the way a program is (write_job.c), and
+ * it does not spin for it. `here` is made its place; held — said, and false. */
+bool     HelmTakeNow(TagFSFileHandle* handle, HelmWaiter* here);
+
+/* `w` lets go; the first waiter, if any, is handed the Helm (HelmHand) — or,
+ * once the medium left, every waiter is answered (w->gone) and none is. */
 void     HelmLetGo(OpenFileEntry* ofe, HelmWaiter* w);
+
+/* The medium under the volume left: every waiter in every Helm's FIFO is
+ * answered at the next service point (HelmRunReady), the drain core knocked
+ * awake for it. Called where the departure is noticed — inside a medium
+ * command, perhaps — so nothing is answered here. */
+void     HelmMediumLeft(void);
+
+/* The extents the holder of the file's Helm claimed room for in its record
+ * (RT-19, InkRoomClaim): 0 when the file is not open or nothing is claimed.
+ * Under the volume's state lock, which the claim is made under. */
+uint32_t HelmClaimedRuns(uint32_t file_id);
 
 /* Whether a Quitclaim gave the file up since it was opened. */
 bool     HelmVacated(const OpenFileEntry* ofe);
@@ -67,9 +93,17 @@ void     HelmVacate(uint32_t file_id);
  * The drain core is knocked awake for it. */
 void     HelmReady(HelmWaiter* w);
 
-/* The service point: every waiter HelmReady listed, run here, the scheduler
- * held off this core for each (SchedulerHoldHere). One load when none is. */
+/* The service point: the waiters of a medium that left answered, then every
+ * waiter HelmReady had listed when it began run here, the scheduler held off
+ * this core for each (SchedulerHoldHere). One listed meanwhile — a write come
+ * back for its next window — waits for the next service point, so the core
+ * goes round its loop between two windows. One load when none is. */
 void     HelmRunReady(void);
+
+/* Whether a service point has work: a waiter listed, or the waiters of a
+ * medium that left still owed their answer. An idle core does it before it
+ * sleeps. */
+bool     HelmReadyListed(void);
 
 /* Holders and waiters of every Helm: work the machine still owes a caller. */
 uint64_t HelmOwed(void);
@@ -89,12 +123,25 @@ uint64_t HelmViewFloor(uint32_t file_id);
  * Settle cycles run and tries again — the holder holds no lock, so it may wait
  * for one.
  *
- * HelmWrite: the source's bytes at the handle's offset — at the file's size
- * for a TAGFS_HANDLE_APPEND handle — as tagfs_write describes. HelmSpan: the
- * file made exactly `size` bytes long, as tagfs_span_file, and in *out_was the
- * size it found. HelmDefrag: the file gathered into one run near
- * `target_block`, as tagfs_defrag_file.
+ * A write is inked a window at a time (RT-16): the run the medium takes in one
+ * command, in whole blocks — HelmWindowBytes, the bytes of the window that
+ * begins at file offset `at`, which ends at a block's end — each its own load,
+ * reservation, blocks and Ink, so a write of any length never holds more than
+ * a window's ground unnamed, and the holder may give its core back between
+ * two windows while it keeps the Helm. HelmWriteWindow: the next window of the
+ * source — from its byte *inked, at the handle's offset (at the file's size
+ * for a TAGFS_HANDLE_APPEND handle) — written and inked; *inked and the offset
+ * move by what the file now holds of it. OK when the window is the file's
+ * whole, else the refusal, with the prefix that landed before it inked
+ * (W-ERR). HelmWrite: every window, one after another, as tagfs_write
+ * describes — for a caller that has no core to give back.
+ *
+ * HelmSpan: the file made exactly `size` bytes long, as tagfs_span_file, and
+ * in *out_was the size it found. HelmDefrag: the file gathered into one run
+ * near `target_block`, as tagfs_defrag_file.
  */
+uint64_t HelmWindowBytes(uint64_t at);
+error_t  HelmWriteWindow(TagFSFileHandle* handle, const PlotSource* src, uint64_t* inked);
 error_t  HelmWrite(TagFSFileHandle* handle, const PlotSource* src, uint64_t* out_written);
 error_t  HelmSpan(TagFSFileHandle* handle, uint64_t size, uint64_t* out_was);
 error_t  HelmDefrag(TagFSFileHandle* handle, uint32_t target_block);

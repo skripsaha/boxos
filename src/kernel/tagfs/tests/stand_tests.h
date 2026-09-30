@@ -37,7 +37,10 @@
 //                        with no free block that still deletes
 // stand_helm_tests.c     the stand_helm suite: two writers of a file taking
 //                        turns at its Helm, a reader's blocks outliving a
-//                        delete, and a defrag beside a delete
+//                        delete, a defrag beside a delete, a write inked a
+//                        window at a time, a write refused part way, the
+//                        record's room claimed, a medium that left answering
+//                        the waiters, and a guarded file refused
 // stand_use_tests.c      the stand_use suite: a context said without a number
 //                        issued, two sayings that race to the volume, and the
 //                        scheduler's question under a context of any size

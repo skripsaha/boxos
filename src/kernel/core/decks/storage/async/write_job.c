@@ -2,13 +2,14 @@
  * WriteJob — the one automaton of a file's changes a program asks for
  * (write_job.h).
  *
- * A synchronous job runs its work in one piece under the file's Helm — the
- * caller's call when the Helm was free, a service point when it was handed on
- * (HelmWrite, HelmSpan, HelmDefrag). An asynchronous write is a state machine
- * pumped from K-Core continuations posted by the AHCI IRQ. The IRQ side is
- * intentionally minimal: stash status, set the next state, post the
- * continuation. The K-Core side does everything that needs locks (the Plot,
- * the record's Ink, the Helm, Touch publish).
+ * A synchronous job runs under the file's Helm — the caller's call when the
+ * Helm was free, a service point when it was handed on: a span and a defrag in
+ * one piece (HelmSpan, HelmDefrag), a write a window at a time
+ * (HelmWriteWindow). An asynchronous write is a state machine pumped from
+ * K-Core continuations posted by the AHCI IRQ. The IRQ side is intentionally
+ * minimal: stash status, set the next state, post the continuation. The K-Core
+ * side does everything that needs locks (the Plot, the record's Ink, the Helm,
+ * Touch publish).
  *
  * The asynchronous write's states:
  *
@@ -19,23 +20,38 @@
  *              → (a block that held nothing of the file → W_DMA_FILL)  [zeros]
  *              → (covered whole                         → W_DMA_FILL)
  *     W_DMA_FILL → W_AHCI_SUBMIT → (yield to IRQ) → W_AHCI_DONE
- *     W_AHCI_DONE → if more bytes: W_LOCATE
- *                 → else:           W_LOG_META
+ *     W_AHCI_DONE → if more bytes of the window: W_LOCATE
+ *                 → else:                        W_LOG_META
  *
- *   the record (once):
- *     W_LOG_META → W_INK → W_DONE
+ *   the record, once a window:
+ *     W_LOG_META → W_INK → (more windows: yield to the K-Core → W_ALLOC)
+ *                        → (the last one:                     W_DONE)
  *     W_INK with no Spare to close the pool's tail onto:
  *              → W_SPARE → (yield to IRQ) → W_SPARE_DONE → W_INK
  *
- * The file's record is loaded under the Helm, every block the write needs
- * reserved and the record's room checked before a byte moves, and what landed
- * inked as one record (TagFSInkPlot). A refusal on the way — a read of an
- * overlaid block, a block's write, the program's pages — stops the job there:
- * what landed before it is inked and said, and the ground reserved past it
- * goes back. A job that inks nothing gives back everything it took (CR-1), and
- * never a block twice (W-DFREE): what it took is the Plot's Stakes, given back
- * once. A file given up meanwhile is not written further: its Helm is vacated,
- * and the job answers ERR_FILE_NOT_FOUND with its Stakes given back.
+ * ‼ A WRITE IS INKED A WINDOW AT A TIME (RT-16), ON EITHER ROAD. The window is
+ * the run the medium takes in one command (HelmWindowBytes): its ground is
+ * reserved and the record's room claimed before a byte of it moves (RT-19),
+ * what landed of it is inked as one record (TagFSInkPlot), and between two
+ * windows the job gives its core back while it keeps the Helm — a synchronous
+ * job is listed for the next service point (HelmReady), its caller parked, an
+ * asynchronous one posts itself behind what the drain core has waiting. A
+ * write of any length holds no more than a window's ground unnamed, and a
+ * K-Core for no longer than one window.
+ *
+ * ‼ ONE ANSWER TO EVERY WRITE (W-ERR): the reason, the bytes the file's inked
+ * record holds of the write (u64), and the size it left — in the out crate
+ * [u64 written][u64 size] on every answer, a refusal included, and said on the
+ * log for a refusal. A refusal on the way — a read of an overlaid block, a
+ * block's write, the program's pages, the record — stops the job there: the
+ * windows inked before it are the file's, what landed of the window it stopped
+ * in is inked and counted, and the ground reserved past it goes back. Whenever
+ * the file changed the listeners hear of it. A job that inks nothing gives
+ * back everything it took (CR-1), and never a block twice (W-DFREE): what it
+ * took is the Plot's Stakes, given back once. A file given up meanwhile is not
+ * written further: its Helm is vacated, and the job answers ERR_FILE_NOT_FOUND
+ * with its Stakes given back. A job waiting for the Helm when the medium left
+ * is answered ERR_DEVICE_NOT_READY, nothing of it done (RT-13).
  *
  * ‼ NO FLUSH OF ITS OWN. What a job inked reaches the medium with a Settle
  * cycle — the cycle's first flush covers the data before any record names it
@@ -48,7 +64,7 @@
  * like any block of its own (W_SPARE), hands it to the pool and inks again.
  * And a volume short of ground Fallow still rests turns the job synchronous:
  * a continuation cannot wait for the Settle cycle that gives it back, and a
- * service point can (HelmWrite).
+ * service point can (HelmWriteWindow), from the last window inked.
  *
  * The bytes come out of the program's pages a block at a time, into the DMA
  * page they go out of — never copied whole into the kernel heap first.
@@ -101,31 +117,61 @@ static inline void wjob_to(WriteJob *j, WriteJobState s)
  *  The Helm
  * ========================================================================= */
 
-/* The job's work, synchronously, under the Helm it holds. */
-static error_t wjob_work(WriteJob *j)
+static void wjob_defer(WriteJob *j, const OpContext *ctx);
+
+/* The write's next window, synchronously, under the Helm the job holds: from
+ * the first byte no window inked yet, where the last one ended. */
+static error_t wjob_window(WriteJob *j)
 {
-    error_t rc;
-    switch (j->kind) {
-    case WRITE_JOB_WRITE:
-        j->handle->offset = j->asked_offset;
-        rc = HelmWrite(j->handle, &j->source, &j->bytes_done);
-        j->committed    = true;
-        j->start_offset = j->handle->offset - j->bytes_done;
-        j->final_size   = j->handle->file_size;
-        return rc;
-    case WRITE_JOB_SPAN:
-        return HelmSpan(j->handle, j->span_size, &j->span_was);
-    case WRITE_JOB_DEFRAG:
-        return HelmDefrag(j->handle, j->defrag_target);
-    }
-    return ERR_INVALID_ARGUMENT;
+    j->handle->offset = j->bytes_inked ? j->start_offset + j->bytes_inked : j->asked_offset;
+    error_t rc = HelmWriteWindow(j->handle, &j->source, &j->bytes_inked);
+    if (j->bytes_inked)
+        j->start_offset = j->handle->offset - j->bytes_inked;
+    j->final_size = j->handle->file_size;
+    return rc;
 }
 
-/* A synchronous job handed the Helm is run at the next service point. */
+/* A synchronous job's turn under the Helm it holds: a span or a defrag whole,
+ * a write one window. A write with windows left gives its core back — its
+ * caller parked if it was not yet, the job listed for the next service point,
+ * and the turn ends there; a caller in the kernel has no core to give back,
+ * and its windows run on. The handler's answer when the job ended inside its
+ * caller's call, else ERR_WOULD_BLOCK: the answer is the job's to push. */
+static int wjob_turn(WriteJob *j)
+{
+    if (j->kind == WRITE_JOB_SPAN)
+        return wjob_finalize(j, HelmSpan(j->handle, j->span_size, &j->span_was));
+    if (j->kind == WRITE_JOB_DEFRAG)
+        return wjob_finalize(j, HelmDefrag(j->handle, j->defrag_target));
+
+    for (;;) {
+        error_t rc = wjob_window(j);
+        if (rc != OK || j->bytes_inked >= j->source.bytes)
+            return wjob_finalize(j, rc);
+        if (!j->target)
+            continue;
+        if (!j->deferred)
+            wjob_defer(j, j->ctx);
+        HelmReady(&j->helm);   /* the job is the service point's now: not touched again here */
+        return ERR_WOULD_BLOCK;
+    }
+}
+
+/* A synchronous job handed the Helm, or come back for its next window, is run
+ * at a service point. */
 static void wjob_run_ready(HelmWaiter *w)
 {
+    (void)wjob_turn(container_of(w, WriteJob, helm));
+}
+
+/* The medium left while the job waited for the Helm: nothing of it was done,
+ * and it is answered so, with what left with the medium. */
+static void wjob_gone(HelmWaiter *w, uint64_t lost)
+{
     WriteJob *j = container_of(w, WriteJob, helm);
-    (void)wjob_finalize(j, wjob_work(j));
+    j->medium_left = true;
+    j->lost        = lost;
+    (void)wjob_finalize(j, ERR_DEVICE_NOT_READY);
 }
 
 /* HelmHand's call, on the core that let go, with no TagFS lock held. */
@@ -145,13 +191,13 @@ static void wjob_handed(HelmWaiter *w)
  *  State handlers — the asynchronous write
  * ========================================================================= */
 
-/* The write stops at a refusal. What landed before it is made the file's —
- * one record, inked the way a whole write's is, the ground reserved past it
- * given back — and the refusal is the answer, with the bytes the file now
- * holds of the write. Answers whether the pump goes on. */
+/* The write stops at a refusal. What landed of the window before it is made
+ * the file's — one record, inked the way a whole window's is, the ground
+ * reserved past it given back — and the refusal is the answer, with the bytes
+ * the file now holds of the write. Answers whether the pump goes on. */
 static bool wjob_stop(WriteJob *j, error_t cause)
 {
-    if (j->bytes_done > 0 && j->loaded) {
+    if (j->bytes_done > j->bytes_inked && j->loaded) {
         j->stopped = cause;
         wjob_to(j, W_LOG_META);
         return true;
@@ -160,21 +206,40 @@ static bool wjob_stop(WriteJob *j, error_t cause)
     return false;
 }
 
-/* W_ALLOC — the file's record loaded under the Helm, the growth rule asked,
- * and every block the write covers reserved, before any byte moves. A volume
- * short of ground Fallow rests turns the job synchronous: the service point
- * that runs it may wait for the cycle that gives the ground back. */
+/* The file's record loaded under the Helm, for the job's first window: the
+ * Plot is the Helm holder's, and the room its extents need is claimed for it
+ * (RT-19); where the write begins is asked of the growth rule once. */
+static error_t wjob_load(WriteJob *j)
+{
+    if (HelmVacated(j->handle->ofe))
+        return ERR_FILE_NOT_FOUND;
+    HelmViewTake(j->handle);   /* it views the file from this load on (HelmWriteWindow's rule) */
+    error_t rc = PlotLoad(&j->plot, j->file_id);
+    j->loaded = rc == OK;
+    if (rc == OK) {
+        j->plot.helm    = &j->handle->ofe->helm;
+        j->start_offset = j->append ? j->plot.size : j->asked_offset;
+    }
+    return rc;
+}
+
+/* W_ALLOC — the window's blocks reserved and the record's room claimed before
+ * any byte of it moves; every window after the first goes on from where the
+ * last one's Ink left the Plot. A volume short of ground Fallow rests turns
+ * the job synchronous: the service point that runs it may wait for the cycle
+ * that gives the ground back, and goes on from the last window inked. */
 static bool w_alloc(WriteJob *j)
 {
-    error_t rc = ERR_FILE_NOT_FOUND;
-    if (!HelmVacated(j->handle->ofe)) {
-        HelmViewTake(j->handle);   /* it views the file from this load on (HelmWrite's rule) */
-        rc = PlotLoad(&j->plot, j->file_id);
+    error_t  rc     = j->loaded ? OK : wjob_load(j);
+    uint64_t at     = j->start_offset + j->bytes_inked;
+    uint64_t window = 0;
+    if (rc == OK) {
+        uint64_t left = j->source.bytes - j->bytes_inked;
+        window = HelmWindowBytes(at);
+        if (window > left)
+            window = left;
+        rc = PlotBeginWrite(&j->plot, at, false, window, &at);
     }
-    j->loaded = rc == OK;
-    if (rc == OK)
-        rc = PlotBeginWrite(&j->plot, j->asked_offset, j->append, j->source.bytes,
-                            &j->start_offset);
     if (rc == ERR_WOULD_BLOCK) {
         PlotRelease(&j->plot);
         j->loaded = false;
@@ -186,6 +251,7 @@ static bool w_alloc(WriteJob *j)
         wjob_finalize(j, rc);
         return false;
     }
+    j->window_end = j->bytes_inked + window;
     wjob_to(j, W_LOCATE);
     return true;
 }
@@ -203,14 +269,15 @@ static bool w_locate(WriteJob *j)
     uint64_t pos   = j->start_offset + j->bytes_done;
     uint64_t k     = pos / TAGFS_BLOCK_SIZE;
     uint32_t off   = (uint32_t)(pos % TAGFS_BLOCK_SIZE);
-    uint64_t rest  = j->source.bytes - j->bytes_done;
+    uint64_t rest  = j->window_end - j->bytes_done;
     uint32_t chunk = TAGFS_BLOCK_SIZE - off;
     if ((uint64_t)chunk > rest)
         chunk = (uint32_t)rest;
 
-    /* The run the last block came from while it lasts, a search when it ends:
-     * every chunk after the first begins a block. */
-    if (j->bytes_done > 0 && j->if_left > 0) {
+    /* The run the last block came from while it lasts, a search when it ends
+     * or a window begins — the Ink before it may have cut the run: every chunk
+     * after a window's first begins a block. */
+    if (j->bytes_done > j->bytes_inked && j->if_left > 0) {
         j->if_disk_block++;
         j->if_left--;
     } else if (!PlotFind(j->plot.runs, j->plot.run_count, k, &j->if_disk_block, &j->if_left)) {
@@ -336,17 +403,18 @@ static bool w_ahci_done(WriteJob *j)
     IntegrityUpdate(j->if_disk_block, j->dma_virt);
 
     j->bytes_done += j->if_chunk;
-    wjob_to(j, j->bytes_done >= j->source.bytes ? W_LOG_META : W_LOCATE);
+    wjob_to(j, j->bytes_done >= j->window_end ? W_LOG_META : W_LOCATE);
     return true;
 }
 
-/* W_LOG_META — what landed made ready to be the file's: the flush need its
- * blocks hold, read after their completions were seen, and the ground
- * reserved past them cut off. */
+/* W_LOG_META — what landed of the window made ready to be the file's: the
+ * flush need its blocks hold, read after their completions were seen, and the
+ * ground reserved past them cut off. */
 static bool w_log_meta(WriteJob *j)
 {
     j->plot.data_need = VolumeFlushNeed();
-    error_t rc = PlotEndWrite(&j->plot, j->start_offset, j->bytes_done);
+    error_t rc = PlotEndWrite(&j->plot, j->start_offset + j->bytes_inked,
+                              j->bytes_done - j->bytes_inked);
     if (rc != OK) {
         wjob_finalize(j, rc);
         return false;
@@ -355,9 +423,11 @@ static bool w_log_meta(WriteJob *j)
     return true;
 }
 
-/* W_INK — the one record the Plot builds, inked; with no Spare for the pool's
- * tail, one is stamped first (W_SPARE). A file given up meanwhile has no
- * record to ink over, and the answer is ERR_FILE_NOT_FOUND. */
+/* W_INK — the window's record the Plot builds, inked; with no Spare for the
+ * pool's tail, one is stamped first (W_SPARE). A file given up meanwhile has
+ * no record to ink over, and the answer is ERR_FILE_NOT_FOUND. With windows
+ * left, the job posts itself behind what the drain core has waiting before it
+ * reserves the next one. */
 static bool w_ink(WriteJob *j)
 {
     InkReceipt inked;
@@ -370,10 +440,15 @@ static bool w_ink(WriteJob *j)
         wjob_finalize(j, rc);
         return false;
     }
-    j->committed  = true;
-    j->final_size = j->plot.size;
-    wjob_to(j, W_DONE);
-    return true;
+    j->bytes_inked = j->bytes_done;
+    j->final_size  = j->plot.size;
+    if (j->stopped != OK || j->bytes_inked >= j->source.bytes) {
+        wjob_to(j, W_DONE);
+        return true;
+    }
+    wjob_to(j, W_ALLOC);
+    BatonPass(&j->cq_node);   /* the next window, after what the drain core has waiting */
+    return false;
 }
 
 static void wjob_spare_complete(uint8_t port, uint8_t slot, error_t status, void *ctx);
@@ -441,9 +516,9 @@ static void wjob_publish(const WriteJob *j, error_t rc)
     uint64_t offset, bytes, final_size;
     switch (j->kind) {
     case WRITE_JOB_WRITE:
-        if (!j->committed || j->bytes_done == 0)
+        if (j->bytes_inked == 0)
             return;
-        op = 1, offset = j->start_offset, bytes = j->bytes_done, final_size = j->final_size;
+        op = 1, offset = j->start_offset, bytes = j->bytes_inked, final_size = j->final_size;
         break;
     case WRITE_JOB_SPAN:
         if (rc != OK || j->span_size == j->span_was)
@@ -560,19 +635,42 @@ static int wjob_answer_now(WriteJob *j, error_t rc, uint64_t written)
     return (int)rc;
 }
 
+/* A refusal said once, on the job's way out: a write's with the one answer
+ * every write gives (W-ERR), and a job the medium left before it was handed
+ * the Helm with what left with the medium. */
+static void wjob_say_refused(const WriteJob *j, error_t rc)
+{
+    static const char *const what[] = {
+        [WRITE_JOB_WRITE]  = "write",
+        [WRITE_JOB_SPAN]   = "span",
+        [WRITE_JOB_DEFRAG] = "defrag",
+    };
+    if (rc == OK)
+        return;
+    if (j->medium_left)
+        kprintf("[Storage] file %u: the medium left while this %s waited for the file's Helm — "
+                "nothing of it was done, and %llu change(s) inked since the last settled cycle "
+                "left with the medium\n", j->file_id, what[j->kind],
+                (unsigned long long)j->lost);
+    else if (j->kind == WRITE_JOB_WRITE)
+        kprintf("[Storage] write to file %u refused (error %u): %llu of its %llu byte(s) are the "
+                "file's, and the file is %llu bytes\n", j->file_id, (unsigned)rc,
+                (unsigned long long)j->bytes_inked, (unsigned long long)j->source.bytes,
+                (unsigned long long)j->final_size);
+}
+
 /* What the job took goes back first — the Stakes nobody inked, on every way
  * out, once — then the listeners hear of what changed, the Helm goes to the
  * next waiter, and the answer is given; the door is let go of last of what
  * the volume lent. The handler's return when the job ran inside its call. */
 static int wjob_finalize(WriteJob *j, error_t rc)
 {
-    uint64_t written = j->committed ? j->bytes_done : 0;
-    if (!j->committed && j->loaded)
-        j->final_size = j->plot.size_before;
-    else if (!j->committed)
-        j->final_size = j->handle->file_size;
+    uint64_t written = j->bytes_inked;
+    if (written == 0)
+        j->final_size = j->loaded ? j->plot.size_before : j->handle->file_size;
 
     PlotRelease(&j->plot);
+    wjob_say_refused(j, rc);
     wjob_publish(j, rc);
     if (j->holds_helm)
         HelmLetGo(j->handle->ofe, &j->helm);
@@ -734,6 +832,7 @@ static error_t wjob_make(const WriteJobAsk *ask, Crate *crates, const OpContext 
     j->final_size    = j->handle->file_size;
     j->helm.hand     = wjob_handed;
     j->helm.run      = wjob_run_ready;
+    j->helm.gone     = wjob_gone;
     j->cq_node.run   = wjob_pump;
     j->cq_node.ctx   = j;
     j->crates_kbuf   = crates;
@@ -783,7 +882,7 @@ int WriteJobSubmit(const WriteJobAsk *ask, Crate *crates, const OpContext *ctx)
 
     if (!j->async && HelmTry(ofe, &j->helm)) {
         j->holds_helm = true;
-        return wjob_finalize(j, wjob_work(j));
+        return wjob_turn(j);
     }
     if (!j->target) {
         kprintf("[Storage] file %u is being changed by the holder of its Helm, and a caller "
@@ -794,7 +893,7 @@ int WriteJobSubmit(const WriteJobAsk *ask, Crate *crates, const OpContext *ctx)
     wjob_defer(j, ctx);
     wjob_to(j, W_HELM_WAIT);
     if (!HelmAsk(ofe, &j->helm))
-        return ERR_WOULD_BLOCK;   /* the job is the Helm's now: not touched again here */
+        return ERR_WOULD_BLOCK;   /* the job is the Helm's now, or answered: not touched again here */
 
     j->holds_helm = true;
     if (j->async) {
@@ -804,7 +903,7 @@ int WriteJobSubmit(const WriteJobAsk *ask, Crate *crates, const OpContext *ctx)
         wjob_to(j, W_ALLOC);
         wjob_pump(j);
     } else {
-        (void)wjob_finalize(j, wjob_work(j));
+        (void)wjob_turn(j);
     }
     return ERR_WOULD_BLOCK;
 }

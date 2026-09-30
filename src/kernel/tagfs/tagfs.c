@@ -1230,9 +1230,11 @@ error_t tagfs_flush_cache(void)
 static bool g_medium_left = false;
 static void ReadAheadForget(void);
 
+bool TagFSMediumLeft(void) { return __atomic_load_n(&g_medium_left, __ATOMIC_ACQUIRE); }
+
 static bool volume_medium_gone(void)
 {
-    if (g_medium_left) {
+    if (TagFSMediumLeft()) {
         return true;
     }
     if (g_tagfs_seat == BOARDROOM_NO_SEAT) {
@@ -1256,12 +1258,16 @@ static bool volume_medium_gone(void)
 
     bool swapped = BoardroomSeatOccupied(g_tagfs_seat);
 
-    g_medium_left = true;
+    /* Latched once: two cores that noticed together say it once. */
+    if (__atomic_exchange_n(&g_medium_left, true, __ATOMIC_ACQ_REL)) {
+        return true;
+    }
     ReadAheadForget();
     kprintf("[TagFS] the medium the volume lives on has %s — every read and "
             "write from here on will say so\n",
             swapped ? "been replaced by another one in the same seat"
                     : "left");
+    HelmMediumLeft();
     return true;
 }
 
@@ -2779,7 +2785,7 @@ static bool tagfs_abandon(void)
                 "go of\n");
     }
 
-    g_medium_left   = false;
+    __atomic_store_n(&g_medium_left, false, __ATOMIC_RELEASE);
     g_tagfs_seat    = BOARDROOM_NO_SEAT;
     g_tagfs_seating = 0;
     return true;
@@ -3155,19 +3161,6 @@ static error_t tagfs_read_inside(TagFSFileHandle *handle, void *buffer, uint64_t
     return OK;
 }
 
-/* A caller in the kernel takes a file's Helm only when it is free: it cannot
- * be parked behind the holder the way a program is (write_job.c), and it does
- * not spin for it. Held: said, and false. */
-static bool tagfs_helm_now(TagFSFileHandle *handle, HelmWaiter *here)
-{
-    memset(here, 0, sizeof(*here));
-    if (HelmTry(handle->ofe, here))
-        return true;
-    kprintf("[TagFS] file %u is being changed by the holder of its Helm — a caller in the "
-            "kernel cannot be parked behind it, and is refused\n", handle->file_id);
-    return false;
-}
-
 error_t tagfs_write(TagFSFileHandle *handle, const PlotSource *src, uint64_t *out_written)
 {
     if (!out_written)
@@ -3181,7 +3174,7 @@ error_t tagfs_write(TagFSFileHandle *handle, const PlotSource *src, uint64_t *ou
     HelmWaiter here;
     if (handle_belongs_here(handle, "write")) {
         rc = ERR_BUSY;
-        if (tagfs_helm_now(handle, &here)) {
+        if (HelmTakeNow(handle, &here)) {
             rc = HelmWrite(handle, src, out_written);
             HelmLetGo(handle->ofe, &here);
         }
@@ -3201,7 +3194,7 @@ error_t tagfs_span_file(uint32_t file_id, uint64_t size)
     HelmWaiter       here;
     if (handle) {
         rc = ERR_BUSY;
-        if (tagfs_helm_now(handle, &here)) {
+        if (HelmTakeNow(handle, &here)) {
             uint64_t was = 0;
             rc = HelmSpan(handle, size, &was);
             HelmLetGo(handle->ofe, &here);
@@ -3459,7 +3452,7 @@ error_t tagfs_defrag_file(uint32_t file_id, uint32_t target_block)
     HelmWaiter       here;
     if (handle) {
         rc = ERR_BUSY;
-        if (tagfs_helm_now(handle, &here)) {
+        if (HelmTakeNow(handle, &here)) {
             rc = HelmDefrag(handle, target_block);
             HelmLetGo(handle->ofe, &here);
         }

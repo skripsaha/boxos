@@ -1,6 +1,7 @@
 #include "helm.h"
 #include "../ink/ink.h"
 #include "../settle/settle.h"
+#include "boardroom.h"   /* BoardroomSeatRun — how much the medium takes in one command */
 
 /*
  * The work a Helm's holder does, synchronously (helm.h). The holder is the only
@@ -27,7 +28,9 @@ static bool HelmRoomCameBack(error_t *rc)
 /* The file's record for this call's Plot: ERR_FILE_NOT_FOUND at once for a
  * file a Quitclaim gave up, with nothing loaded. A handle that carries no copy
  * of the record views the file from this load on, not from its open: what a
- * holder before it freed is not this one's to keep resting. */
+ * holder before it freed is not this one's to keep resting. The Plot is the
+ * Helm's holder's, and the room its extents need in the record is claimed for
+ * that Helm (RT-19, PlotReserve). */
 static error_t HelmPlotLoad(TagFSFileHandle *handle, Plot *plot)
 {
     if (HelmVacated(handle->ofe)) {
@@ -36,36 +39,69 @@ static error_t HelmPlotLoad(TagFSFileHandle *handle, Plot *plot)
     }
     if (!handle->extents)
         HelmViewTake(handle);
-    return PlotLoad(plot, handle->file_id);
+    error_t rc = PlotLoad(plot, handle->file_id);
+    if (rc == OK)
+        plot->helm = &handle->ofe->helm;
+    return rc;
+}
+
+/* A window is the run the medium takes in one command, in whole blocks and at
+ * least one — the unit the stream moves (plot_write.c) is the unit a record is
+ * inked for — and it ends at a block's end of the file, so the next window
+ * begins a block and reads nothing back of this one. */
+uint64_t HelmWindowBytes(uint64_t at)
+{
+    uint64_t blocks = (uint64_t)BoardroomSeatRun(tagfs_get_seat()) * 512u / TAGFS_BLOCK_SIZE;
+    return (blocks ? blocks : 1u) * TAGFS_BLOCK_SIZE - at % TAGFS_BLOCK_SIZE;
+}
+
+/* The part of the source the window beginning at file offset `at` writes: from
+ * its byte `from`, up to the window's end. */
+static PlotSource HelmWindowOf(const PlotSource *src, uint64_t from, uint64_t at)
+{
+    PlotSource window = *src;
+    uint64_t   most   = HelmWindowBytes(at);
+    uint64_t   left   = src->bytes - from;
+
+    window.bytes = left < most ? left : most;
+    if (src->kernel)
+        window.kernel = src->kernel + from;
+    else
+        window.user = src->user + (uintptr_t)from;
+    return window;
 }
 
 /*
- * One write: the ground it needs reserved and the record's room checked before
- * a byte moves, the blocks written by the one read-modify-write rule, and what
- * landed inked as one record (TagFSInkPlot). A write the medium stops part way
- * keeps what landed before the stop and says why; ground it took past that goes
- * back (CR-13), and a write that inks nothing gives back everything it took
- * (CR-1) — a file given up meanwhile among them: its Ink finds no record.
+ * One window: the ground it needs reserved and the record's room claimed
+ * before a byte moves, the blocks written by the one read-modify-write rule,
+ * and what landed inked as one record (TagFSInkPlot). A window the medium stops
+ * part way keeps what landed before the stop and says why; ground it took past
+ * that goes back (CR-13), and a window that inks nothing gives back everything
+ * it took (CR-1) — a file given up meanwhile among them: its Ink finds no
+ * record.
  */
-static error_t HelmWriteOnce(TagFSFileHandle *handle, const PlotSource *src,
-                             uint64_t *out_written)
+static error_t HelmWriteWindowOnce(TagFSFileHandle *handle, const PlotSource *src,
+                                   uint64_t *inked)
 {
-    Plot     plot;
-    uint64_t at     = 0;
-    uint64_t done   = 0;
-    bool     append = (handle->flags & TAGFS_HANDLE_APPEND) != 0;
-    error_t  rc     = HelmPlotLoad(handle, &plot);
-    bool     loaded = rc == OK;
+    Plot       plot;
+    PlotSource window = { 0 };
+    uint64_t   at     = 0;
+    uint64_t   done   = 0;
+    error_t    rc     = HelmPlotLoad(handle, &plot);
+    bool       loaded = rc == OK;
 
+    if (rc == OK) {
+        at     = (handle->flags & TAGFS_HANDLE_APPEND) ? plot.size : handle->offset;
+        window = HelmWindowOf(src, *inked, at);
+        rc     = PlotBeginWrite(&plot, at, false, window.bytes, &at);
+    }
     if (rc == OK)
-        rc = PlotBeginWrite(&plot, handle->offset, append, src->bytes, &at);
-    if (rc == OK)
-        rc = PlotWriteBlocks(&plot, at, src, &done);
+        rc = PlotWriteBlocks(&plot, at, &window, &done);
     if (done > 0) {
-        InkReceipt inked;
+        InkReceipt receipt;
         error_t    kept = PlotEndWrite(&plot, at, done);
         if (kept == OK)
-            kept = TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked);
+            kept = TagFSInkPlot(&plot, INK_MAKES_SPARES, &receipt);
         if (kept != OK) {
             if (rc == OK)
                 rc = kept;
@@ -78,20 +114,32 @@ static error_t HelmWriteOnce(TagFSFileHandle *handle, const PlotSource *src,
         if (done > 0)
             handle->offset = at + done;
     }
-    *out_written = done;
+    *inked += done;
     PlotRelease(&plot);
+    return rc;
+}
+
+error_t HelmWriteWindow(TagFSFileHandle *handle, const PlotSource *src, uint64_t *inked)
+{
+    if (!(handle->flags & TAGFS_HANDLE_WRITE))
+        return ERR_PERMISSION_DENIED;
+    if (*inked >= src->bytes)
+        return OK;
+    uint64_t before = *inked;
+    error_t  rc;
+    do {
+        rc = HelmWriteWindowOnce(handle, src, inked);
+    } while (*inked == before && HelmRoomCameBack(&rc));
     return rc;
 }
 
 error_t HelmWrite(TagFSFileHandle *handle, const PlotSource *src, uint64_t *out_written)
 {
-    *out_written = 0;
-    if (!(handle->flags & TAGFS_HANDLE_WRITE))
-        return ERR_PERMISSION_DENIED;
     error_t rc;
+    *out_written = 0;
     do {
-        rc = HelmWriteOnce(handle, src, out_written);
-    } while (*out_written == 0 && HelmRoomCameBack(&rc));
+        rc = HelmWriteWindow(handle, src, out_written);
+    } while (rc == OK && *out_written < src->bytes);
     return rc;
 }
 

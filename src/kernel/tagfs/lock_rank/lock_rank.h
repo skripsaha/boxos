@@ -42,6 +42,14 @@
  * A place is named once per boot, in one line with the "[LockRank]" prefix;
  * the counters count every time. The host holds each named place under the
  * step of the plan that removes it (tools/stand_caveat.sh, lockrank_judge).
+ *
+ * ‼ A STRICT KERNEL STOPS THERE (CONFIG_STRICT, `make STRICT=on`). Since step
+ * 1.5 took the last TagFS lock held across the medium away, no place is held
+ * under a step any more, and a place is a defect: a TagFS lock held across a
+ * medium command or a wait for a Scribe, taken out of order, or taken again
+ * by the core that holds it panics, naming the place in the same words. The
+ * stand's own proofs of the witness take locks made TAGFS_PROOF_LOCK_INIT:
+ * their places are named and counted, and never stop the machine.
  */
 
 typedef enum {
@@ -56,11 +64,14 @@ typedef struct TagFSLock {
     const char       *Name;        /* word used in [LockRank] lines */
     const char       *HeldBy;      /* __func__ of the holder; written by the holder only */
     uint8_t           Rank;        /* LockRankLevel */
+    bool              Proof;       /* a proof's own lock: its places never stop a STRICT kernel */
     volatile uint32_t Witnessed;   /* medium commands and Scribe waits made while held, every core */
     volatile uint32_t OutOfOrder;  /* takes of THIS lock that broke the order */
 } TagFSLock;
 
 #define TAGFS_LOCK_INIT(name, rank) { .Spin = { 0, 0 }, .Name = (name), .HeldBy = NULL, .Rank = (rank) }
+#define TAGFS_PROOF_LOCK_INIT(name, rank) \
+    { .Spin = { 0, 0 }, .Name = (name), .HeldBy = NULL, .Rank = (rank), .Proof = true }
 
 void TagFSLockInit(TagFSLock *lock, const char *name, LockRankLevel rank);
 void TagFSLockTakeAt(TagFSLock *lock, const char *site);

@@ -45,7 +45,9 @@ int file_info(uint32_t file_id, file_info_t* info);
 /* Return the byte count transferred (0..4 GiB, short-transfer: a request > 4 GiB
  * is capped to one syscall — loop for more), or a negative -error_t on failure.
  * fwrite writes at `offset` no further than the file's size: past it the
- * write is refused -ERR_TAGFS_BEYOND_SIZE (file_span makes a gap). */
+ * write is refused -ERR_TAGFS_BEYOND_SIZE (file_span makes a gap). A write
+ * the volume refused part way answers the bytes the file holds of it — a
+ * short count; the refusal is the answer of the next call, from there. */
 int64_t fread(uint32_t file_id, uint64_t offset, void* buffer, size_t size);
 int64_t fwrite(uint32_t file_id, uint64_t offset, const void* buffer, size_t size);
 /* `delete` is a C++ keyword — C++ callers use file_delete(), bound to the
