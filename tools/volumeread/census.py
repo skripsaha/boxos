@@ -185,6 +185,7 @@ class KernelView:
         head = f.Head(lay["metadata_pool_block"])
         if head < D:
             marks.append((head, 1))
+        marks += [(b, 1) for b in f.pool_held if b < D]
         boot = f.deed["boot"]
         if boot and boot["kernel_blocks"] and boot["kernel_block"] >= lay["data_block"]:
             marks += RunsIntersect([(boot["kernel_block"] - lay["data_block"],
@@ -491,6 +492,9 @@ class GroundCensus:
         for name in ("registry", "table", "pool"):
             for i, b in enumerate(f.chains[name][0]):
                 self.Claim(name, "%s[%u]" % (name, i), [(b, 1)])
+        for i, b in enumerate(f.pool_held):
+            self.Claim("pool", "pool head" if i == 0 else "pool before its first[%u]" % (i - 1),
+                       [(b, 1)])
             if name in f.refused:
                 self.Say("CHAIN_REFUSED", "damage", "the %s: %s — the kernel refuses the mount: %s"
                          % (name, f.refused[name], self.kernel.refusal or "(an earlier refusal)"))

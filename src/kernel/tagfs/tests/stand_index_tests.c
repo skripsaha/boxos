@@ -52,8 +52,9 @@ static bool StandIndexFill(FileMap* map, uint32_t step)
             FileRecordRelease(rec);
             return false;
         }
-        RecordWhere   where = { .link = 0, .offset = 16 + k, .gen = 0, .shape = 0 };
-        error_t put = FileMapRecordPut(map, fid, rec, &where, &stake);
+        RecordWhere   where = { .link = 0, .offset = (uint16_t)(16 + k), .gen = 0, .shape = 0 };
+        RecordWhere   was;
+        error_t       put = FileMapRecordPut(map, fid, rec, &where, &stake, &was);
         FileMapStakeLetGo(&stake);
         if (put != OK || FileMapRowSet(map, fid, 3, 16 + k) != OK)
             return false;
@@ -88,7 +89,7 @@ static TestResult TestStandIndexMapCostsTheLive(void)
         TEST_ASSERT_EQ(s_rows[k], 1 + k * step, "in id order");
 
     for (uint32_t k = 0; k < STAND_INDEX_FILES; k += 2)
-        FileMapDrop(far, 1 + k * step);
+        FileMapDrop(far, 1 + k * step, NULL);
     TEST_ASSERT_EQ(FileMapCount(far), STAND_INDEX_FILES / 2, "half of them dropped");
     TEST_ASSERT(FileMapBytes(far) < far_bytes, "and the memory falls with them");
 

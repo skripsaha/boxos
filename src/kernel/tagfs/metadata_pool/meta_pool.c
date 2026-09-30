@@ -2,6 +2,7 @@
 #include "../plot/plot.h"
 #include "../file_table/file_table.h"
 #include "../mount/ground_census.h"
+#include "../glean/glean.h"
 #include "../../../lib/kernel/crypto.h"
 
 /*
@@ -17,7 +18,7 @@
  * So the length is not remembered anywhere. It is walked, from the head to the
  * block whose next_block is zero, and what the walk finds is held here: the
  * block numbers in chain order, each with the number of its link. A link keeps
- * its number whatever is later unlinked around it — Glean (step 1.8) takes
+ * its number whatever is later unlinked around it — Glean (glean/) takes
  * blocks off the front — and that number is what the map of live files keeps
  * as where a record sits, so a record's place stays true. A number finds its
  * link by halving: the numbers only rise along the chain.
@@ -26,6 +27,7 @@ MetaPoolLink* g_pool_chain       = NULL;
 uint32_t      g_pool_chain_len   = 0;
 uint32_t      g_pool_chain_cap   = 0;
 uint32_t      g_pool_closed_fold = 0;
+uint64_t      g_pool_live_bytes  = 0;
 
 uint32_t PoolBlockMix(uint32_t block, const MetaPoolBlock* blk)
 {
@@ -53,6 +55,7 @@ static void PoolChainRelease(void)
     g_pool_chain_len   = 0;
     g_pool_chain_cap   = 0;
     g_pool_closed_fold = 0;
+    g_pool_live_bytes  = 0;
 }
 
 int PoolChainRoom(uint32_t want)
@@ -93,7 +96,27 @@ void PoolChainAppend(uint32_t block)
     g_pool_chain[g_pool_chain_len].block = block;
     g_pool_chain[g_pool_chain_len].link  = link;
     g_pool_chain[g_pool_chain_len].mix   = 0;
+    g_pool_chain[g_pool_chain_len].live  = 0;
     g_pool_chain_len++;
+}
+
+void PoolLiveMove(const RecordWhere* from, const RecordWhere* to)
+{
+    if (from && from->len) {
+        uint32_t at = PoolChainAt(from->link);
+        if (at < g_pool_chain_len) {
+            uint32_t took = from->len <= g_pool_chain[at].live ? from->len : g_pool_chain[at].live;
+            g_pool_chain[at].live -= took;
+            g_pool_live_bytes     -= took;
+        }
+    }
+    if (to && to->len) {
+        uint32_t at = PoolChainAt(to->link);
+        if (at < g_pool_chain_len) {
+            g_pool_chain[at].live += to->len;
+            g_pool_live_bytes     += to->len;
+        }
+    }
 }
 
 uint32_t PoolChainAt(uint32_t link)
@@ -154,6 +177,7 @@ void meta_pool_shutdown(void)
 {
     PoolTailShutdown();
     PoolChainRelease();
+    GleanUnmount();
 }
 
 void PoolClaimGround(uint32_t deed_head)
@@ -183,14 +207,94 @@ void tagfs_metadata_free(TagFSMetadata* meta)
 error_t PoolMirrorPut(uint32_t fid, FileRecord* rec, const RecordWhere* where,
                       FileMapStake* stake)
 {
-    FileMap* files = PoolFiles();
     if (!rec || !(rec->flags & TAGFS_FILE_ACTIVE)) {
         FileRecordRelease(rec);
-        FileMapDrop(files, fid);
+        PoolMirrorDrop(fid);
         file_table_delete(fid);
         return OK;
     }
-    return FileMapRecordPut(files, fid, rec, where, stake);
+    RecordWhere was;
+    error_t     rc = FileMapRecordPut(PoolFiles(), fid, rec, where, stake, &was);
+    if (rc == OK)
+        PoolLiveMove(&was, where);
+    return rc;
+}
+
+void PoolMirrorDrop(uint32_t fid)
+{
+    RecordWhere was;
+    FileMapDrop(PoolFiles(), fid, &was);
+    PoolLiveMove(&was, NULL);
+}
+
+bool PoolMirrorMove(uint32_t fid, const RecordWhere* from, const RecordWhere* to)
+{
+    uint32_t block = 0;
+    if (!PoolLinkBlock(to->link, &block) ||
+        !FileMapRecordRelink(PoolFiles(), fid, from, to, block))
+        return false;
+    PoolLiveMove(from, to);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Glean's view of the chain
+// ---------------------------------------------------------------------------
+
+uint32_t PoolChainBlocks(void)
+{
+    return g_pool_chain_len;
+}
+
+uint32_t PoolLiveBlocks(void)
+{
+    return (uint32_t)((g_pool_live_bytes + TAGFS_MPOOL_DATA_SIZE - 1u) / TAGFS_MPOOL_DATA_SIZE);
+}
+
+uint32_t PoolChainFirst(void)
+{
+    return g_pool_chain_len ? g_pool_chain[0].block : 0;
+}
+
+bool PoolChainHolds(uint32_t block)
+{
+    for (uint32_t i = 0; i < g_pool_chain_len; i++)
+        if (g_pool_chain[i].block == block)
+            return true;
+    return false;
+}
+
+bool PoolFrontLink(uint32_t i, PoolFront* out)
+{
+    if (i + 1u >= g_pool_chain_len)
+        return false;       /* past the closed links: the tail is never gleaned */
+    const MetaPoolLink* l = &g_pool_chain[i];
+    if (PoolImageOf(l->link))
+        return false;       /* closed, but no cycle has written it yet */
+    out->block = l->block;
+    out->link  = l->link;
+    out->live  = l->live;
+    out->next  = g_pool_chain[i + 1u].block;
+    out->mix   = l->mix;
+    return true;
+}
+
+bool PoolFrontReadsTrue(const PoolFront* front, const MetaPoolBlock* img)
+{
+    return img->magic == TAGFS_MPOOL_MAGIC && PoolBlockMix(front->block, img) == front->mix;
+}
+
+void PoolUnlinkFront(uint32_t count)
+{
+    if (count >= g_pool_chain_len)
+        return;
+    for (uint32_t i = 0; i < count; i++) {
+        g_pool_closed_fold ^= g_pool_chain[i].mix;
+        g_pool_live_bytes  -= g_pool_chain[i].live;
+    }
+    memmove(g_pool_chain, g_pool_chain + count,
+            sizeof(MetaPoolLink) * (g_pool_chain_len - count));
+    g_pool_chain_len -= count;
 }
 
 // ---------------------------------------------------------------------------

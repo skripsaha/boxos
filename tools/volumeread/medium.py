@@ -775,7 +775,7 @@ class VolumeFacts:
 
     def _ReadChains(self):
         lay, D = self.layout, self.D
-        self.chains, self.refused = {}, {}
+        self.chains, self.refused, self.pool_held = {}, {}, []
         for name, head, magic in (("registry", lay["tag_registry_block"], REGISTRY_MAGIC),
                                   ("table", lay["file_table_block"], FILETBL_MAGIC),
                                   ("pool", lay["metadata_pool_block"], MPOOL_MAGIC)):
@@ -783,14 +783,31 @@ class VolumeFacts:
             self.chains[name] = (blocks, raws)
             if why:
                 self.refused[name] = why
+        self.seal = ondisk.SealStand(self.read_block, self.ledgers, D) if self.ledger else None
+        sealed = self.seal is not None and self.seal["stood"] != "none"
+        # Under a seal the mount walks the pool from the seal's chain_first
+        # (meta_pool_mount.c): the Deed's head may lie before it, off the
+        # chain, once Glean took blocks off the front (glean/glean.h).
+        if sealed:
+            first = self.seal["mark"]["chain_first"]
+            blocks, raws, why = ondisk.WalkChain(self.read_block, first, MPOOL_MAGIC, D)
+            self.chains["pool"] = (blocks, raws)
+            self.refused.pop("pool", None)
+            if why:
+                self.refused["pool"] = why
         # Every id the pool's chain shows — past a seal too: the medium has
         # seen it, and the mount's next file id is past it (mount/mount.c).
         top_record = max((fid for r in self.chains["pool"][1]
                           for _a, _l, fid in ondisk.ReadPoolBlock(r)["mirror_walk"]), default=0)
-        self.seal = ondisk.SealStand(self.read_block, self.ledgers, D) if self.ledger else None
-        sealed = self.seal is not None and self.seal["stood"] != "none"
+        # The blocks the pool holds off its chain: the Deed's head once the
+        # chain begins past it, and what the head still names before the
+        # chain's first block (glean.c GleanMount).
         if sealed:
             self._CutToSeal()
+            head, chain = self.Head(lay["metadata_pool_block"]), self.chains["pool"][0]
+            if head not in chain:
+                self.pool_held = [head] + ondisk.HeadPrefix(self.read_block, head, first,
+                                                            chain, D)
         self.registry = [(b, ondisk.ReadRegistryBlock(r)) for b, r in zip(*self.chains["registry"])]
         self.rows_medium = ondisk.TableRows(self.chains["table"][1])
         self.pool = [(b, ondisk.ReadPoolBlock(r), r) for b, r in zip(*self.chains["pool"])]

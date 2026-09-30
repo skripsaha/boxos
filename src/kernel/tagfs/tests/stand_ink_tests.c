@@ -259,8 +259,9 @@ out:
 // ----------------------------------------------------------------------------
 
 /* The newest record of `fid` in the pool as the medium holds it, walked from
- * the head the Deed names the way a mount walks it: false when the medium
- * holds none; *active whether it is an ACTIVE record rather than a Quitclaim. */
+ * the head the Deed names the way a reader that knows no seal walks it: false
+ * when the medium holds none; *active whether it is an ACTIVE record rather
+ * than a Quitclaim. */
 static bool StandInkNewestOnMedium(uint32_t fid, bool* active, bool* whole)
 {
     TagFSState*    fs    = tagfs_get_state();

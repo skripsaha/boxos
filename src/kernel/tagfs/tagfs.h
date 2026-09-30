@@ -115,14 +115,13 @@ STATIC_ASSERT(sizeof(FileTableBlock) == 4096, "FileTableBlock must be 4096 bytes
 // packing are Plot's (plot/plot_width.h, PackV1).
 //
 // `record_count` counts every record ever appended here; `kept` counts the ones
-// still held by a file. The two words are a pair on purpose — one is what was
-// ever written here, the other is what is still held — and Keep is already this
-// project's word for it (Chit: Give / Due / Keep). A record is retired by
-// zeroing its file_id in place — the pool never moves bytes, because a file
-// table entry is a byte offset into this block and moving a record would strand
-// it — so the two numbers drift apart as files are deleted, and a block whose
-// kept count falls to zero is 4080 bytes of nothing that can be handed back to
-// the bitmap.
+// that carry a file id. The two words are a pair on purpose — Keep is already
+// this project's word for what is still held (Chit: Give / Due / Keep) — and a
+// kernel before the pool took only appends retired a record by zeroing its
+// file_id in place, so the two drifted apart as files were deleted. What a
+// block still holds of the live files is the map of live files' to say, not
+// the header's: Glean (glean/) lays those records again at the tail and takes
+// the block off the chain, and a file's row follows its record.
 //
 // It sits in two of the four bytes this header set aside and kept for nothing,
 // so the block is the same 4096 bytes it always was and mkfs, the kernel and

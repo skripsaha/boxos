@@ -9,13 +9,16 @@
  * One cycle at a time, held by the Settle's Scribe (g_settle_scribe, whose
  * holder is the committer), and no TagFS lock across the medium:
  *
+ *   Glean's pass (glean.h), but in a machine's last cycles: blocks at the pool
+ *       chain's front taken off, their live records laid again in the tail;
  *   S0  under the state lock, memory only: the target (every Ink so far), the
  *       tail closed onto a Spare when a waiter is owed a closed block, the
  *       pool's closed blocks and tail taken, the Ledger's image taken, naming
  *       the Use Context's chain — a new one, its blocks staked just before S0
  *       with no lock held, when the person's word changed (use_memory.h);
- *   S1  the tag registry, the block map, the file table, the integrity map —
- *       the digests of the ground at rest zeroed first — and the new chain's
+ *   S1  the tag registry, the block map, the file table, the pool's head
+ *       named again once the chain begins past it, the integrity map — the
+ *       digests of the ground at rest zeroed first — and the new chain's
  *       links;
  *   S2  FLUSH#1, when the cycle names blocks or tags a kept flush does not
  *       yet cover: the data, the tags and the chain lie on the medium before
@@ -52,9 +55,10 @@ extern Scribe g_settle_scribe;
  * here: an anchor waits through its Chit (SettleWaitLink). */
 error_t  TagFSSettle(void);
 
-/* The volume is short and Fallow rests blocks: cycles run until some come
- * back — at most 1 + FallowLag() of them. OK when blocks came back,
- * ERR_TAGFS_NO_SPACE when none rest, or a cycle's refusal; ERR_WOULD_BLOCK at
+/* The volume is short and Fallow rests blocks, or Glean may take the pool's
+ * slack off its chain: cycles run until some come back — at most
+ * 2 + FallowLag() of them. OK when blocks came back, ERR_TAGFS_NO_SPACE when
+ * none rest and the chain has no slack, or a cycle's refusal; ERR_WOULD_BLOCK at
  * once for a caller that may not wait for a cycle — under a TagFS lock or a
  * Scribe, or a baton continuation. Inside the door. */
 error_t  SettleForRoom(void);
@@ -130,7 +134,8 @@ bool     SettleMediumLied(void);
 #define SETTLE_WINDOW_US  5000000ull          /* the promise: ext4's commit interval */
 
 typedef enum {
-    SETTLE_DEMAND_ROOM  = 1u << 0,  /* the allocator is short while Fallow rests blocks */
+    SETTLE_DEMAND_ROOM  = 1u << 0,  /* the allocator is short while Fallow rests blocks,
+                                       or while Glean may take the pool's slack off */
     SETTLE_DEMAND_LEAVE = 1u << 1,  /* a program left with changes no cycle settled */
 } SettleDemandKind;
 

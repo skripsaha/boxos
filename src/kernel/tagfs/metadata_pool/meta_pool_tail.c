@@ -1,5 +1,6 @@
 #include "meta_pool_internal.h"
 #include "../scribe/scribe.h"
+#include "../glean/glean.h"
 #include "../../../lib/kernel/crypto.h"
 
 /*
@@ -111,9 +112,10 @@ bool PoolSpareAvailable(bool dig_reserve)
     return s_spare_count > (dig_reserve ? 0u : (uint32_t)SPARE_RESERVE);
 }
 
-bool PoolTailTurn(bool dig_reserve)
+/* The turn, leaving the pool at least `keep` Spares. */
+static bool TailTurnKeeping(uint32_t keep)
 {
-    if (!g_pool_tail || !PoolSpareAvailable(dig_reserve) || g_pool_chain_len >= g_pool_chain_cap)
+    if (!g_pool_tail || s_spare_count <= keep || g_pool_chain_len >= g_pool_chain_cap)
         return false;
 
     MetaPoolPage* page = s_spares;
@@ -157,6 +159,16 @@ bool PoolTailTurn(bool dig_reserve)
     return true;
 }
 
+bool PoolTailTurn(bool dig_reserve)
+{
+    return TailTurnKeeping(dig_reserve ? 0u : (uint32_t)SPARE_RESERVE);
+}
+
+bool PoolTailTurnGlean(void)
+{
+    return TailTurnKeeping((uint32_t)SPARE_FOR_QUITCLAIMS);
+}
+
 RecordWhere PoolAppend(const uint8_t* packed, uint32_t bytes, uint64_t gen)
 {
     uint32_t pos = g_pool_tail->used_bytes;
@@ -172,8 +184,8 @@ RecordWhere PoolAppend(const uint8_t* packed, uint32_t bytes, uint64_t gen)
     g_pool_tail_changed = true;
     s_tail_edits++;
 
-    RecordWhere where = { .link = g_pool_tail_link, .offset = MPOOL_BLOCK_HEADER + pos,
-                          .gen = gen, .shape = 0 };
+    RecordWhere where = { .link = g_pool_tail_link, .offset = (uint16_t)(MPOOL_BLOCK_HEADER + pos),
+                          .len = (uint16_t)bytes, .gen = gen, .shape = 0 };
     return where;
 }
 
@@ -409,7 +421,7 @@ void PoolSealTake(SettleMark* mark)
 
 uint64_t PoolBlocksHeld(void)
 {
-    return (uint64_t)g_pool_chain_len + s_spare_count;
+    return (uint64_t)g_pool_chain_len + s_spare_count + (GleanHeadOffChain() ? 1u : 0u);
 }
 
 uint64_t PoolTailGen(void)

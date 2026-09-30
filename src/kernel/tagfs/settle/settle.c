@@ -9,6 +9,7 @@
 #include "../settle_cut/settle_cut.h"
 #include "../ledger/ledger.h"
 #include "../use_memory/use_memory.h"
+#include "../glean/glean.h"
 #include "amp.h"
 #include "baton.h"
 #include "kheap.h"
@@ -32,9 +33,12 @@ typedef enum {
 } SettleWhy;
 
 typedef enum {
-    SETTLE_STEP_REGISTRY = 0,    /* S1 */
+    SETTLE_STEP_GLEAN = 0,       /* before S0: Glean's pass (glean.h) */
+    SETTLE_STEP_TAKE,            /* S0 */
+    SETTLE_STEP_REGISTRY,        /* S1 */
     SETTLE_STEP_MAP,
     SETTLE_STEP_TABLE,
+    SETTLE_STEP_HEAD,            /* the pool's head, named again past the chain's front */
     SETTLE_STEP_INTEGRITY,
     SETTLE_STEP_USE_CHAIN,       /* the Use Context's new chain, the last of S1 */
     SETTLE_STEP_MAP_LAY,         /* pages of an integrity map being laid (RT-15) */
@@ -69,6 +73,7 @@ static bool     s_medium_lied;
 
 typedef struct {
     PoolSnap      pool;
+    GleanHead     head;
     SettleMark    mark;         /* what the cycle leaves on the medium, for S4 */
     uint64_t      target;
     uint64_t      cycle;
@@ -198,6 +203,7 @@ static void SettleTake(SettleSnap* snap, SettleWhy why, uint32_t demands)
         (void)IntegrityLayName();
     }
     PoolSealTake(&snap->mark);
+    GleanHeadTake(&snap->head);
     TagRegistryLanded(fs->registry, &snap->mark);
     snap->mark.pool_from_block = s_sealed_block;
     snap->mark.pool_from_bytes = s_sealed_bytes;
@@ -232,6 +238,20 @@ static error_t SettleFirstFlush(SettleSnap* snap)
     return VolumeFlushFor(need);
 }
 
+/* S0's step: a Spare for the early close, made before S0 — which takes nothing
+ * from the heap or the medium; a volume with none keeps its tail open, and the
+ * cycle writes it as it stands — the Use Context's new chain staked, and S0
+ * itself, whose time the window is measured from. */
+static void SettleTakeStep(SettleSnap* snap)
+{
+    if (s_run.why != SETTLE_FOR_HALT)
+        (void)PoolSpareRefill(1);
+    UseMemoryStake();
+    SettleWaitersRunBegins();
+    SettleTake(snap, s_run.why, CadenceRunBegins());
+    s_run.s0_us = SettleNowUs();
+}
+
 /*
  * One step, and the step after it. S1's registry refusal is said by it and
  * ends nothing: no record wears a tag the medium does not define — an Ink
@@ -246,6 +266,16 @@ static error_t SettleStepRun(SettleSnap* snap, SettleStep* step)
     bool        done;
 
     switch (*step) {
+    case SETTLE_STEP_GLEAN:
+        /* What it moves and takes off, this very cycle's S0 seals. */
+        GleanStep(&done);
+        if (done)
+            *step = SETTLE_STEP_TAKE;
+        return OK;
+    case SETTLE_STEP_TAKE:
+        SettleTakeStep(snap);
+        *step = SETTLE_STEP_REGISTRY;
+        return OK;
     case SETTLE_STEP_REGISTRY:
         SETTLE_CUT_AT(SETTLE_CUT_POINT_REGISTRY);
         (void)tag_registry_flush(fs->registry);
@@ -263,8 +293,13 @@ static error_t SettleStepRun(SettleSnap* snap, SettleStep* step)
             rc          = ERR_TAGFS_METADATA_ERROR;
             snap->stage = "the file table";
         }
-        *step = SETTLE_STEP_INTEGRITY;
+        *step = SETTLE_STEP_HEAD;
         break;
+    case SETTLE_STEP_HEAD:
+        GleanHeadStep(&snap->head, &done);
+        if (done)
+            *step = SETTLE_STEP_INTEGRITY;
+        return OK;
     case SETTLE_STEP_INTEGRITY:
         SETTLE_CUT_AT(SETTLE_CUT_POINT_INTEGRITY);
         FallowZeroDigests(snap->cycle);
@@ -335,6 +370,7 @@ static void SettleDone(SettleSnap* snap)
     s_sealed_block = snap->mark.pool_to_block;
     s_sealed_bytes = snap->mark.pool_to_bytes;
     UseMemorySettled();
+    GleanHeadSettled(&snap->head, snap->cycle, snap->mark.chain_first);
     s_given = FallowRipen(closed, snap->cycle, &nodes);
     bool map_stood = IntegrityLayStands();
     TagFSLockDrop(&fs->lock);
@@ -349,34 +385,24 @@ static void SettleDone(SettleSnap* snap)
 // The cycle in flight
 // ----------------------------------------------------------------------------
 
-/* The first step of a cycle the caller just took the Scribe for: a Spare for
- * the early close, made before S0 — which takes nothing from the heap or the
- * medium; a volume with none keeps its tail open, and the cycle writes it as
- * it stands — and S0 itself. */
+/* A cycle the caller just took the Scribe for, begun: Glean's pass first — a
+ * machine stopping gleans nothing, since ground it took off now would rest
+ * past the last cycle — and then S0, each a step of its own. */
 static void SettleRunBegin(SettleWhy why, uint64_t cover, bool door)
 {
-    uint64_t t0 = SettleNowUs();
-
     memset(&s_run.snap, 0, sizeof(s_run.snap));
     s_run.why     = why;
     s_run.door    = door;
     s_run.cover   = cover;
-    s_run.step    = SETTLE_STEP_REGISTRY;
+    s_run.step    = why == SETTLE_FOR_HALT ? SETTLE_STEP_TAKE : SETTLE_STEP_GLEAN;
     s_run.answer  = OK;
     s_run.busy_us = 0;
-    s_run.in_step = true;
+    s_run.s0_us   = SettleNowUs();
+    s_run.in_step = false;
     __atomic_store_n(&s_run.core, amp_get_core_index(), __ATOMIC_RELEASE);
     __atomic_store_n(&s_run.active, 1u, __ATOMIC_RELEASE);
-
     if (why != SETTLE_FOR_HALT)
-        (void)PoolSpareRefill(1);
-    UseMemoryStake();
-    SettleWaitersRunBegins();
-    SettleTake(&s_run.snap, why, CadenceRunBegins());
-
-    s_run.s0_us   = SettleNowUs();
-    s_run.busy_us = s_run.s0_us - t0;
-    s_run.in_step = false;
+        GleanPassBegin();
 
     /* The Scribe's MINE opened the heap's reserve for the pass; between the
      * steps it is closed, each step opens it again, and the last step's is
@@ -554,12 +580,17 @@ error_t SettleForRoom(void)
         return ERR_WOULD_BLOCK;
     }
 
-    for (uint64_t round = 0; round <= FallowLag(); round++) {
+    /* With nothing resting, one cycle more lets Glean take the pool's slack off
+     * its chain, at the lowered slack; what it takes rests like the rest. */
+    for (uint64_t round = 0; round <= FallowLag() + 1u; round++) {
         TagFSLockTake(&fs->lock);
         uint64_t resting = FallowBlocks();
+        bool     glean   = resting == 0 && GleanMayFree();
         TagFSLockDrop(&fs->lock);
-        if (resting == 0)
+        if (resting == 0 && !glean)
             return round ? OK : ERR_TAGFS_NO_SPACE;
+        if (glean)
+            GleanShort();
 
         error_t rc = SettleAsked(SETTLE_FOR_ROOM);
         if (rc != OK)

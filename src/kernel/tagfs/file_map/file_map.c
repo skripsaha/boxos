@@ -615,16 +615,19 @@ void FileMapDestroy(FileMap* map)
 }
 
 error_t FileMapRecordPut(FileMap* map, uint32_t fid, FileRecord* rec,
-                         const RecordWhere* where, FileMapStake* stake)
+                         const RecordWhere* where, FileMapStake* stake, RecordWhere* was)
 {
     FileMapEntry* e;
+    memset(was, 0, sizeof(*was));
     if (MapEntryHeld(map, fid, stake, &e) != OK) {
         FileRecordRelease(rec);
         return ERR_NO_MEMORY;
     }
     FileMapLeftover left = { NULL, e->record };
-    if (e->record)
+    if (e->record) {
         map->record_bytes -= e->record->bytes;
+        *was = e->where;
+    }
     map->record_bytes += rec->bytes;
     e->record = rec;
     e->where  = *where;
@@ -661,11 +664,40 @@ void FileMapRecordMoved(FileMap* map, uint32_t fid, uint32_t link, uint32_t bloc
     TagFSLockTake(&map->lock);
     FileMapEntry* e = MapFind(map, fid);
     if (e && e->record && e->where.link == link && e->where.offset == from) {
-        e->where.offset = to;
+        e->where.offset = (uint16_t)to;
         if (e->row_block == block && e->row_offset == from)
             e->row_offset = to;
     }
     TagFSLockDrop(&map->lock);
+}
+
+bool FileMapRecordAt(FileMap* map, uint32_t fid, uint32_t link, uint32_t offset)
+{
+    TagFSLockTake(&map->lock);
+    FileMapEntry* e  = MapFind(map, fid);
+    bool          at = e && e->record && e->where.link == link && e->where.offset == offset;
+    TagFSLockDrop(&map->lock);
+    return at;
+}
+
+bool FileMapRecordRelink(FileMap* map, uint32_t fid, const RecordWhere* from,
+                         const RecordWhere* to, uint32_t to_block)
+{
+    TagFSLockTake(&map->lock);
+    FileMapEntry* e     = MapFind(map, fid);
+    bool          moved = e && e->record && e->where.link == from->link &&
+                          e->where.offset == from->offset;
+    if (moved) {
+        uint64_t shape = e->where.shape;
+        e->where       = *to;
+        e->where.shape = shape;
+        if (e->row_block) {
+            e->row_block  = to_block;
+            e->row_offset = to->offset;
+        }
+    }
+    TagFSLockDrop(&map->lock);
+    return moved;
 }
 
 error_t FileMapRowSet(FileMap* map, uint32_t fid, uint32_t block, uint32_t offset)
@@ -714,11 +746,15 @@ void FileMapRowClear(FileMap* map, uint32_t fid)
     LeftoverFree(&left);
 }
 
-void FileMapDrop(FileMap* map, uint32_t fid)
+void FileMapDrop(FileMap* map, uint32_t fid, RecordWhere* was)
 {
     FileMapLeftover left = { NULL, NULL };
+    if (was)
+        memset(was, 0, sizeof(*was));
     TagFSLockTake(&map->lock);
     FileMapEntry* e = MapFind(map, fid);
+    if (e && e->record && was)
+        *was = e->where;
     if (e)
         MapLetGoEntry(map, fid, e, &left);
     TagFSLockDrop(&map->lock);

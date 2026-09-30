@@ -3,6 +3,7 @@
 
 #include "../tagfs.h"
 #include "../plot/plot.h"
+#include "../file_map/file_map.h"
 
 /*
  * Ink — the one way a file of the volume changes.
@@ -107,6 +108,15 @@ error_t InkNew(const char* name, const uint16_t* tags, uint32_t count, uint32_t*
 /* The file given up: a Quitclaim laid for it, its extents to Fallow, and it
  * leaves the map, the table and the tag index. OK, or the refusal. */
 error_t InkQuitclaim(uint32_t fid, InkReceipt* out);
+
+/*
+ * Glean's move (glean.h), under the state lock: the record at `from` — its
+ * file's newest, as the caller saw under this same hold of the lock — laid
+ * again at the tail's end, its bytes `packed` as they are, by an Ink of its
+ * own: the map names it there, the file's row and the links' counts follow,
+ * and its shape is the file's still. The tail has the room. Nothing refuses.
+ */
+void    InkGleanLocked(uint32_t fid, const RecordWhere* from, const uint8_t* packed);
 
 /* Under the state lock: the newest Ink's gen, and the flush need its data
  * holds — the one a cycle's first flush must be issued past. */
