@@ -219,6 +219,16 @@ error_t GroundCensusRun(BlockMapOrphanFn orphan, BlockMapCensusCount* out)
     return rc;
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+GroundOwner GroundClaimOf(uint32_t block)
+{
+    for (uint32_t i = 0; i < s_count; i++)
+        if (block >= s_runs[i].start && block - s_runs[i].start < s_runs[i].count)
+            return (GroundOwner)s_runs[i].owner;
+    return GROUND_OWNER_KINDS;
+}
+#endif
+
 void GroundCensusEnd(void)
 {
     kfree(s_runs);

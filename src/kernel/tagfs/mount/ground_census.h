@@ -45,4 +45,11 @@ error_t GroundCensusRun(BlockMapOrphanFn orphan, BlockMapCensusCount* out);
 /* The claims let go. */
 void    GroundCensusEnd(void);
 
+#ifdef CONFIG_VOLUME_TESTS
+/* The owner of the first claim made on `block` since Begin, or
+ * GROUND_OWNER_KINDS when none names it: the stand asks what one owner
+ * claims, between a Begin and an End of its own, with no mount running. */
+GroundOwner GroundClaimOf(uint32_t block);
+#endif
+
 #endif /* TAGFS_GROUND_CENSUS_H */

@@ -48,9 +48,9 @@ class Finding:
 
 
 class GroundClaim:
-    """One owner's claim on the data run. An alias (the BOOT run, a redirect's
-    live block) is not exclusive: it may coincide with its partner — the one
-    file it is — and with nothing else."""
+    """One owner's claim on the data run. An alias (the BOOT run) is not
+    exclusive: it may coincide with its partner — the one file it is — and
+    with nothing else."""
 
     __slots__ = ("kind", "label", "runs", "exclusive", "kernel_sees", "partner")
 
@@ -193,11 +193,11 @@ class KernelView:
         first, count = led["integrity_map_block"], led["integrity_map_blocks"]
         if first:
             marks += RunsIntersect([(first, count)], [(0, D)])
-        for b in (led["cow_manifest_block"], led["cow_manifest_backup_block"]):
-            if b and b < D:
-                marks.append((b, 1))
-        for _snap, old, new in f.redirects:
-            marks += [(b, 1) for b in (old, new) if b < D]
+        # CowClaimGround: the manifest the Ledger names, and nothing a snapshot
+        # kept — those blocks are orphans.
+        b = led["cow_manifest_block"]
+        if b and b < D:
+            marks.append((b, 1))
         # UseRollCall: every link either copy's chain reads back as its own.
         for c in f.ledgers:
             if c.get("use_chain_read"):
@@ -443,36 +443,34 @@ class GroundCensus:
             why = ("its head and the copy both fail their checksum" if f.book is None else
                    "its head reads version %u, capacity %u, count %u, records at sector %u"
                    % (f.book["version"], f.book["capacity"], f.book["count"], f.book["start_sector"]))
-            self.Say("DISKBOOK_INVALID", "damage" if f.snapshots else "note",
+            self.Say("DISKBOOK_INVALID", "note",
                      "the DiskBook is not one the mount accepts — %s — so the mount takes it as "
                      "holding nothing, writes nothing over it, and replays no redirect "
-                     "(disk_book.c:101-108)%s"
+                     "(disk_book.c DiskBookHeadTaken)%s"
                      % (why, "; the manifest names %u snapshot(s) whose frozen blocks are then "
-                        "forgotten" % len(f.snapshots) if f.snapshots else ""))
+                        "orphans nothing explains" % len(f.snapshots) if f.snapshots else ""))
         bad = [i for i, e in enumerate(f.book_records) if not e["valid"]]
         if bad:
             self.Say("DISKBOOK_RECORD_BAD", "note", "DiskBook record(s) %s fail their magic or "
-                     "checksum and are skipped at replay (disk_book.c:132-135)"
+                     "checksum and are skipped at replay (disk_book.c DiskBookRecordWhole)"
                      % ", ".join(map(str, bad)))
 
     def _Cow(self):
         f, led = self.f, self.f.ledger
-        for which, b, m in f.manifests:
-            label = "snapshot manifest" + (" backup" if which == "cow_manifest_backup_block" else "")
+        for _which, b, m in f.manifests:
             if b >= f.D or m is None or not m["ok"]:
-                self.Say("MANIFEST_BAD", "damage", "the %s the ledger names at data block %u %s "
-                         "(tagfs_init's manifest check)" % (label, b, "lies past the data run" if b >= f.D
+                self.Say("MANIFEST_BAD", "damage", "the snapshot manifest the ledger names at data "
+                         "block %u %s (cow.c CowManifestRead)" % (b, "lies past the data run" if b >= f.D
                                                   else "will not read" if m is None else
                                                   "reads magic 0x%08x, count %u"
                                                   % (m["magic"], m["count"])), [(b, 1)])
-            self.Claim("manifest" if "backup" not in label else "manifest_backup", label, [(b, 1)])
-        for snap, old, new in f.redirects:
-            self.Claim("frozen", "frozen block of snapshot %u" % snap, [(old, 1)])
-            self.Claim("redirect_new", "live block of snapshot %u's redirect" % snap, [(new, 1)])
+            self.Claim("manifest", "snapshot manifest", [(b, 1)])
+        # What a snapshot kept is no owner's (ground_owner.h): its frozen blocks
+        # are orphans, named in _Orphans for what they are.
         if f.stray:
             self.Say("REDIRECT_STRAY", "note", "%u DiskBook redirect(s) name snapshots the manifest "
                      "does not carry (%s) — the kernel passes them over and counts them "
-                     "(cow.c:106-109)"
+                     "(cow.c CowRedirectSeen)"
                      % (len(f.stray), ", ".join(str(s[0]) for s in f.stray)))
         if led and led["integrity_map_block"]:
             self.Claim("integrity", "integrity map",
@@ -745,8 +743,15 @@ class GroundCensus:
 
     def _Orphans(self):
         f, explained, groups, links = self.f, self._Explanations(), {}, []
+        kept = {old for _snap, old, _new in f.redirects}
         for s, n in self.orphans:
             for b in range(s, s + n):
+                if b in kept:
+                    groups.setdefault(("SNAPSHOT_KEPT", "blocks snapshots an earlier kernel took "
+                                       "keep — nothing reads a format-v1 snapshot, so nothing owns "
+                                       "them, and the census keeps them taken until it gives "
+                                       "orphans back (cow.h)"), []).append((b, 1))
+                    continue
                 raw = f.vread(f.layout["data_block"] + b)
                 magic = struct.unpack_from("<I", raw, 0)[0] if raw else None
                 spare = ondisk.SpareShape(raw) if raw else None
@@ -772,7 +777,8 @@ class GroundCensus:
                 groups.setdefault((code, text), []).append((b, 1))
         for (code, text), runs in groups.items():
             runs = RunsNormal(runs)
-            self.Say(code, "leak", "data block(s) %s are used in the bitmap and nothing owns them: %s"
+            self.Say(code, "note" if code == "SNAPSHOT_KEPT" else "leak",
+                     "data block(s) %s are used in the bitmap and nothing owns them: %s"
                      % (RunsText(runs), text), runs)
         self._UseChains(links)
 

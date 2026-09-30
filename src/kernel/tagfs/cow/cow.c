@@ -3,73 +3,8 @@
 #include "../disk_book/disk_book.h"
 #include "../tagfs.h"
 
-/* A block a snapshot kept (old) and the one its file moved onto (new). */
-typedef struct {
-    uint32_t old_block;
-    uint32_t new_block;
-} CowRedirect;
-
-/* One snapshot an earlier kernel left: what its manifest entry says of it,
- * and the redirects the DiskBook replays into it. */
-typedef struct {
-    uint32_t     snapshot_id;
-    uint32_t     parent_file_id;               /* 0: the whole volume */
-    char         name[sizeof(((CowSnapshotDisk *)0)->name) + 1];
-    CowRedirect *redirects;
-    uint32_t     redirect_count;
-    uint32_t     redirect_cap;
-} CowSnapshot;
-
-/* The snapshots standing on the mounted volume. Built by the mount off to the
- * side and published whole under the lock, never changed after that, and
- * taken down whole: so under the lock there is only ever a pointer to take or
- * to read. */
-typedef struct {
-    CowSnapshot *snapshots;
-    uint32_t     snapshot_count;
-    TagFSLock    lock;
-    bool         initialized;
-} CowState;
-
-static CowState g_cow_state = { .lock = TAGFS_LOCK_INIT("cow", LOCK_RANK_COW) };
-
 /* Said once a boot: the refusal itself is every caller's, on every request. */
 static bool g_refusal_said;
-
-static void CowSnapshotsFree(CowSnapshot *snapshots, uint32_t count)
-{
-    for (uint32_t i = 0; i < count; i++)
-        kfree(snapshots[i].redirects);
-    kfree(snapshots);
-}
-
-error_t TagFS_CowInit(void)
-{
-    if (g_cow_state.initialized)
-        return ERR_ALREADY_INITIALIZED;
-
-    TagFSLockInit(&g_cow_state.lock, "cow", LOCK_RANK_COW);
-    g_cow_state.snapshots      = NULL;
-    g_cow_state.snapshot_count = 0;
-    g_cow_state.initialized    = true;
-    return OK;
-}
-
-void TagFS_CowShutdown(void)
-{
-    if (!g_cow_state.initialized)
-        return;
-
-    TagFSLockTake(&g_cow_state.lock);
-    CowSnapshot *snapshots = g_cow_state.snapshots;
-    uint32_t     count     = g_cow_state.snapshot_count;
-    g_cow_state.snapshots      = NULL;
-    g_cow_state.snapshot_count = 0;
-    g_cow_state.initialized    = false;
-    TagFSLockDrop(&g_cow_state.lock);
-
-    CowSnapshotsFree(snapshots, count);
-}
 
 error_t TagFS_SnapshotRefused(const char *asked)
 {
@@ -84,15 +19,9 @@ error_t TagFS_SnapshotRefused(const char *asked)
 // The snapshots an earlier kernel left, read at mount
 // ----------------------------------------------------------------------------
 
-/* The list being read, and whether its reading has failed: the replay hands
- * each redirect here, to the snapshot it names. */
-typedef struct {
-    CowSnapshot *snapshots;
-    uint32_t     count;
-    uint32_t     stray;          /* redirects naming no snapshot of the manifest */
-    bool         short_of_memory;
-} CowReading;
-
+/* DiskBookRedirectSeen: one redirect, to the snapshot it names. Only the block
+ * the snapshot kept is taken down; the block its file moved onto is that
+ * file's, named by its own record. */
 static void CowRedirectSeen(uint32_t snapshot_id, uint32_t old_block,
                             uint32_t new_block, void *ctx)
 {
@@ -109,25 +38,24 @@ static void CowRedirectSeen(uint32_t snapshot_id, uint32_t old_block,
         return;
     }
 
-    for (uint32_t r = 0; r < snap->redirect_count; r++)
-        if (snap->redirects[r].old_block == old_block &&
-            snap->redirects[r].new_block == new_block)
+    for (uint32_t k = 0; k < snap->kept_count; k++)
+        if (snap->kept[k] == old_block)
             return;
 
-    if (snap->redirect_count == snap->redirect_cap) {
-        uint32_t     cap   = snap->redirect_cap ? snap->redirect_cap * 2 : 16;
-        CowRedirect *grown = kmalloc(sizeof(CowRedirect) * cap);
+    if (snap->kept_count == snap->kept_cap) {
+        uint32_t  cap   = snap->kept_cap ? snap->kept_cap * 2u : 16u;
+        uint32_t *grown = kmalloc(sizeof(uint32_t) * cap);
         if (!grown) {
             reading->short_of_memory = true;
             return;
         }
-        if (snap->redirect_count)
-            memcpy(grown, snap->redirects, sizeof(CowRedirect) * snap->redirect_count);
-        kfree(snap->redirects);
-        snap->redirects    = grown;
-        snap->redirect_cap = cap;
+        if (snap->kept_count)
+            memcpy(grown, snap->kept, sizeof(uint32_t) * snap->kept_count);
+        kfree(snap->kept);
+        snap->kept     = grown;
+        snap->kept_cap = cap;
     }
-    snap->redirects[snap->redirect_count++] = (CowRedirect){ old_block, new_block };
+    snap->kept[snap->kept_count++] = old_block;
 }
 
 /* The manifest at `block`, read into a list of its own: NULL with *count 0
@@ -138,15 +66,13 @@ static CowSnapshot *CowManifestRead(uint32_t block, uint32_t *count)
     CowManifest *manifest = kmalloc(sizeof(CowManifest));
     if (!manifest) {
         kprintf("[CoW] no memory to read the snapshot manifest at data block %u — the "
-                "snapshots an earlier kernel left are not named, and the blocks they keep "
-                "stay taken\n", block);
+                "snapshots an earlier kernel left are not named\n", block);
         return NULL;
     }
     if (tagfs_read_block(block, manifest) != OK ||
         manifest->magic != COW_MANIFEST_MAGIC || manifest->count > COW_MANIFEST_MAX) {
         kprintf("[CoW] the snapshot manifest the Ledger names at data block %u does not "
-                "read as one — its snapshots are not named, and the blocks they keep stay "
-                "taken\n", block);
+                "read as one — the snapshots an earlier kernel left are not named\n", block);
         kfree(manifest);
         return NULL;
     }
@@ -155,8 +81,7 @@ static CowSnapshot *CowManifestRead(uint32_t block, uint32_t *count)
     CowSnapshot *snapshots = n ? kmalloc(sizeof(CowSnapshot) * n) : NULL;
     if (n && !snapshots) {
         kprintf("[CoW] no memory to hold the %u snapshot(s) the manifest at data block %u "
-                "names — they are not named, and the blocks they keep stay taken\n",
-                n, block);
+                "names — they are not named\n", n, block);
         kfree(manifest);
         return NULL;
     }
@@ -173,94 +98,84 @@ static CowSnapshot *CowManifestRead(uint32_t block, uint32_t *count)
     return snapshots;
 }
 
-/* One line for the lot and one for each, so a volume that carries them says
- * which, and that they are held and not lost. */
-static void CowSayStanding(const CowReading *reading)
+void CowReadStanding(uint32_t manifest_block, uint32_t book_block, CowReading *out)
 {
-    uint32_t kept = 0;
-    for (uint32_t i = 0; i < reading->count; i++)
-        kept += reading->snapshots[i].redirect_count;
+    memset(out, 0, sizeof(*out));
+    if (manifest_block == 0)
+        return;
+    out->snapshots = CowManifestRead(manifest_block, &out->count);
+    if (out->count)
+        out->book = DiskBookReplay(book_block, CowRedirectSeen, out);
+}
 
-    kprintf("[CoW] this volume carries %u snapshot(s) an earlier kernel took — held "
-            "read-only, since snapshots arrive with format v2, and the %u block(s) they "
-            "keep stay taken until the volume's census returns them\n",
-            reading->count, kept);
+/* Said so a volume that carries them names which, and that what they kept is
+ * the census's to name — not lost, and not a fault of this kernel's. */
+void CowSayStanding(const CowReading *reading)
+{
+    kprintf("[CoW] this volume carries %u snapshot(s) an earlier kernel took — snapshots "
+            "arrive with format v2, and nothing reads these, so the blocks they keep are "
+            "owned by nothing: the census names them among its orphans and keeps them "
+            "taken until it gives orphans back\n", reading->count);
     for (uint32_t i = 0; i < reading->count; i++) {
         const CowSnapshot *snap = &reading->snapshots[i];
         if (snap->parent_file_id)
             kprintf("[CoW]   '%s' (id %u) of file %u keeps %u block(s)\n", snap->name,
-                    snap->snapshot_id, snap->parent_file_id, snap->redirect_count);
+                    snap->snapshot_id, snap->parent_file_id, snap->kept_count);
         else
             kprintf("[CoW]   '%s' (id %u) of the whole volume keeps %u block(s)\n",
-                    snap->name, snap->snapshot_id, snap->redirect_count);
+                    snap->name, snap->snapshot_id, snap->kept_count);
     }
     if (reading->stray)
         kprintf("[CoW] %u redirect(s) in the DiskBook name no snapshot of the manifest, "
                 "and are passed over\n", reading->stray);
+    if (reading->book == ERR_NO_MEMORY)
+        kprintf("[CoW] no memory to replay the DiskBook — the blocks the snapshots keep "
+                "are not counted here\n");
+    else if (reading->book != OK)
+        kprintf("[CoW] the DiskBook's head is not one this kernel takes — no redirect is "
+                "replayed, and the blocks the snapshots keep are not counted here\n");
     if (reading->short_of_memory)
         kprintf("[CoW] memory ran out while the DiskBook was replayed — some blocks the "
-                "snapshots keep are not named here, and stay taken only by the block "
-                "bitmap\n");
+                "snapshots keep are not counted here\n");
 }
 
-void CowNameStanding(uint32_t manifest_block)
+void CowReadingDrop(CowReading *reading)
 {
-    if (!g_cow_state.initialized || manifest_block == 0)
-        return;
+    for (uint32_t i = 0; i < reading->count; i++)
+        kfree(reading->snapshots[i].kept);
+    kfree(reading->snapshots);
+    memset(reading, 0, sizeof(*reading));
+}
 
-    CowReading reading;
-    memset(&reading, 0, sizeof(reading));
-    reading.snapshots = CowManifestRead(manifest_block, &reading.count);
-    if (reading.count == 0)
-        return;
+void CowNameStanding(void)
+{
+    TagFSState *fs = tagfs_get_state();
+    CowReading  reading;
 
-    if (DiskBookIsInitialized())
-        DiskBookValidateAndReplay(CowRedirectSeen, &reading);
-
-    TagFSLockTake(&g_cow_state.lock);
-    g_cow_state.snapshots      = reading.snapshots;
-    g_cow_state.snapshot_count = reading.count;
-    TagFSLockDrop(&g_cow_state.lock);
-
-    CowSayStanding(&reading);
+    CowReadStanding(fs->ledger.cow_manifest_block, fs->layout.disk_book_block, &reading);
+    if (reading.count)
+        CowSayStanding(&reading);
+    CowReadingDrop(&reading);
 }
 
 /*
- * ‼ WHAT COPY-ON-WRITE OWNS, ANSWERED BY COPY-ON-WRITE ITSELF.
+ * ‼ THE MANIFEST IS THE ONE BLOCK COPY-ON-WRITE OWNS.
  *
  * The mount's census asks every owner of the data run for its ground
- * (ground_owner.h), and copy-on-write owns what no file's record and no chain
- * reaches: the two manifest blocks the Ledger names — allocated by a kernel
- * that took a snapshot and named in the Ledger at once, while the bit saying
- * they were taken could still be in its memory when the power went — and both
- * blocks of every redirect the DiskBook replayed into a snapshot named at
- * this mount: the frozen block no file names any more, and the block its file
- * moved onto, which that file names too.
+ * (ground_owner.h). The manifest is named by the Ledger and read by every
+ * mount, so it is owned while the Ledger names it. What the snapshots kept is
+ * not claimed: nothing reads a v1 snapshot, so those blocks are orphans the
+ * census names and keeps taken. Nor is the block a redirect's file moved onto:
+ * that file's record claims it, and once the file was deleted a claim here
+ * took the freed block again as missing on every mount after.
+ *
+ * The step that lets the census give orphans back retires the manifest with
+ * it: a kernel from before format v1's refusal would otherwise replay these
+ * redirects over blocks other files hold by then, and free them with its
+ * snapshot.
  */
-void CowClaimGround(void)
+void CowClaimGround(uint32_t manifest_block)
 {
-    TagFSState *fs = tagfs_get_state();
-    if (!fs)
-        return;
-
-    if (fs->ledger.cow_manifest_block)
-        GroundClaim(GROUND_MANIFEST, fs->ledger.cow_manifest_block, 1, 0);
-    if (fs->ledger.cow_manifest_backup_block)
-        GroundClaim(GROUND_MANIFEST_BACKUP, fs->ledger.cow_manifest_backup_block, 1, 0);
-
-    /* Taken WITHOUT g_state.lock: the copy-on-write lock ranks above the
-     * volume's, so it is never taken under it. */
-    if (g_cow_state.initialized) {
-        TagFSLockTake(&g_cow_state.lock);
-        for (uint32_t i = 0; i < g_cow_state.snapshot_count; i++) {
-            const CowSnapshot *snap = &g_cow_state.snapshots[i];
-            for (uint32_t r = 0; r < snap->redirect_count; r++) {
-                if (snap->redirects[r].old_block)
-                    GroundClaim(GROUND_FROZEN, snap->redirects[r].old_block, 1, i);
-                if (snap->redirects[r].new_block)
-                    GroundClaim(GROUND_REDIRECT_NEW, snap->redirects[r].new_block, 1, i);
-            }
-        }
-        TagFSLockDrop(&g_cow_state.lock);
-    }
+    if (manifest_block)
+        GroundClaim(GROUND_MANIFEST, manifest_block, 1, 0);
 }

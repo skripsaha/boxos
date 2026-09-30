@@ -152,10 +152,6 @@ const char* ErrorString(error_t err) {
             return "Invalid superblock";
         case ERR_BOOT_HINTS_MISSING:
             return "Boot hints missing";
-        case ERR_SNAPSHOT_LIMIT:
-            return "Snapshot limit reached";
-        case ERR_SNAPSHOT_NOT_FOUND:
-            return "Snapshot not found";
 
         case ERR_PROCESS_NOT_FOUND:
             return "Process not found";
@@ -349,38 +345,6 @@ const char* ErrorString(error_t err) {
             return "TagFS file ids exhausted";
 
         // TagFS Module Errors
-        case ERR_DISKBOOK_NOT_INITIALIZED:
-            return "DiskBook not initialized";
-        case ERR_DISKBOOK_FULL:
-            return "DiskBook journal full";
-        case ERR_DISKBOOK_CORRUPTED:
-            return "DiskBook journal corrupted";
-        case ERR_DISKBOOK_COMMIT_FAILED:
-            return "DiskBook commit failed";
-        case ERR_DISKBOOK_CHECKPOINT_FAILED:
-            return "DiskBook checkpoint failed";
-        case ERR_DISKBOOK_REPLAY_FAILED:
-            return "DiskBook replay failed";
-        case ERR_DISKBOOK_INVALID_TXN:
-            return "DiskBook invalid transaction";
-        case ERR_DISKBOOK_WRITE_FAILED:
-            return "DiskBook write failed";
-        case ERR_DISKBOOK_READ_FAILED:
-            return "DiskBook read failed";
-        
-        case ERR_COW_NOT_INITIALIZED:
-            return "CoW snapshots not initialized";
-        case ERR_COW_SNAPSHOT_EXISTS:
-            return "Snapshot already exists";
-        case ERR_COW_SNAPSHOT_NOT_FOUND:
-            return "Snapshot not found";
-        case ERR_COW_SNAPSHOT_LIMIT:
-            return "Snapshot limit reached";
-        case ERR_COW_ALLOCATION_FAILED:
-            return "CoW allocation failed";
-        case ERR_COW_RESTORE_FAILED:
-            return "Snapshot restore failed";
-        
         case ERR_BOXHASH_INVALID_CONTEXT:
             return "BoxHash invalid context";
         case ERR_BOXHASH_VERIFICATION_FAILED:

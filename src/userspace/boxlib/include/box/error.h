@@ -102,8 +102,6 @@ typedef uint32_t error_t;
     X(BITMAP_FULL,                   bitmap_full,                   318,  "bitmap full",                   "storage") \
     X(SUPERBLOCK_INVALID,            superblock_invalid,            319,  "invalid superblock",            "storage") \
     X(BOOT_HINTS_MISSING,            boot_hints_missing,            320,  "boot hints missing",            "storage") \
-    X(SNAPSHOT_LIMIT,                snapshot_limit,                321,  "snapshot limit reached",        "storage") \
-    X(SNAPSHOT_NOT_FOUND,            snapshot_not_found,            322,  "snapshot not found",            "storage") \
     /* Process (400-414) */ \
     X(PROCESS_NOT_FOUND,             process_not_found,             400,  "process not found",             "process") \
     X(INVALID_PID,                   invalid_pid,                   401,  "invalid pid",                   "process") \
@@ -206,23 +204,6 @@ typedef uint32_t error_t;
     X(A20_FAILED,                    a20_failed,                    972,  "a20 gate failed",               "boot") \
     X(LONG_MODE_FAILED,              long_mode_failed,              973,  "long mode failed",              "boot") \
     X(KERNEL_LOAD_FAILED,            kernel_load_failed,            974,  "kernel load failed",            "boot") \
-    /* TagFS module — DiskBook (1000-1008) */ \
-    X(DISKBOOK_NOT_INITIALIZED,      diskbook_not_initialized,      1000, "diskbook not initialized",      "diskbook") \
-    X(DISKBOOK_FULL,                 diskbook_full,                 1001, "diskbook journal full",         "diskbook") \
-    X(DISKBOOK_CORRUPTED,            diskbook_corrupted,            1002, "diskbook journal corrupted",    "diskbook") \
-    X(DISKBOOK_COMMIT_FAILED,        diskbook_commit_failed,        1003, "diskbook commit failed",        "diskbook") \
-    X(DISKBOOK_CHECKPOINT_FAILED,    diskbook_checkpoint_failed,    1004, "diskbook checkpoint failed",    "diskbook") \
-    X(DISKBOOK_REPLAY_FAILED,        diskbook_replay_failed,        1005, "diskbook replay failed",        "diskbook") \
-    X(DISKBOOK_INVALID_TXN,          diskbook_invalid_txn,          1006, "diskbook invalid transaction",  "diskbook") \
-    X(DISKBOOK_WRITE_FAILED,         diskbook_write_failed,         1007, "diskbook write failed",         "diskbook") \
-    X(DISKBOOK_READ_FAILED,          diskbook_read_failed,          1008, "diskbook read failed",          "diskbook") \
-    /* TagFS module — CoW snapshots (1010-1015) */ \
-    X(COW_NOT_INITIALIZED,           cow_not_initialized,           1010, "cow snapshots not initialized", "cow") \
-    X(COW_SNAPSHOT_EXISTS,           cow_snapshot_exists,           1011, "snapshot already exists",       "cow") \
-    X(COW_SNAPSHOT_NOT_FOUND,        cow_snapshot_not_found,        1012, "snapshot not found",            "cow") \
-    X(COW_SNAPSHOT_LIMIT,            cow_snapshot_limit,            1013, "snapshot limit reached",        "cow") \
-    X(COW_ALLOCATION_FAILED,         cow_allocation_failed,         1014, "cow allocation failed",         "cow") \
-    X(COW_RESTORE_FAILED,            cow_restore_failed,            1015, "snapshot restore failed",       "cow") \
     /* TagFS module — BoxHash (1040-1042) */ \
     X(BOXHASH_INVALID_CONTEXT,       boxhash_invalid_context,       1040, "boxhash invalid context",       "boxhash") \
     X(BOXHASH_VERIFICATION_FAILED,   boxhash_verification_failed,   1041, "boxhash verification failed",   "boxhash") \

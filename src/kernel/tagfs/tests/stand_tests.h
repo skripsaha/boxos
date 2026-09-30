@@ -61,6 +61,9 @@
 //                        walked whole from; a block taken off resting past its
 //                        cycle; and a lie after a glean falling back to the
 //                        other copy's own chain
+// stand_snapshot_tests.c the stand_snapshot suite: the snapshots an earlier
+//                        kernel left, named and refused, and what they kept
+//                        claimed by no owner
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.

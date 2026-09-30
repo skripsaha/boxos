@@ -183,7 +183,7 @@ DISKBOOK_CAPACITY = 512                 # disk_book.h:30
 DISKBOOK_TYPE_REDIRECT = 1              # disk_book.h:33
 DISKBOOK_HEAD_CRC_AT = 32               # disk_book.h:43 DiskBookSuperblock.crc32
 DISKBOOK_ENTRY_CRC_AT = 32              # disk_book.h:62 DiskBookEntry.record_crc32
-# Head, its copy, then the records (create_tagfs.c:634-635, tagfs_init's DiskBookInit).
+# Head, its copy, then the records (create_tagfs.c:634-635, disk_book.c DiskBookPartAt).
 DISKBOOK_BLOCKS = 2 + DISKBOOK_CAPACITY * DISKBOOK_SECTORS_PER_ENTRY // SECTORS_PER_BLOCK
 DISKBOOK_SUPERBLOCK = Fields("<IIQIIIII16s",   # disk_book.h:35-46
                              "magic version start_sector capacity count "
@@ -439,10 +439,10 @@ def LedgerChoice(copies):
 
 
 def ReadDiskBookHead(sector, records_sector):
-    """The DiskBook head (disk_book.h:35-46). `valid` is magic + crc over the
-    whole 512 bytes with its crc field zeroed (disk_book.c:47-54); `acceptable`
-    is what DiskBookInit takes, any other head a book with nothing to replay
-    (disk_book.c:101-108)."""
+    """The DiskBook head (disk_book.h DiskBookSuperblock). `valid` is magic + crc
+    over the whole 512 bytes with its crc field zeroed (disk_book.c
+    DiskBookHeadWhole); `acceptable` is a copy DiskBookReplay takes, and a book
+    with no such copy has nothing to replay (disk_book.c DiskBookHeadTaken)."""
     sb = bytes(sector[:SECTOR])
     d = DISKBOOK_SUPERBLOCK.Unpack(sb)
     probe = bytearray(sb)
@@ -456,8 +456,8 @@ def ReadDiskBookHead(sector, records_sector):
 
 
 def ReadDiskBookEntry(raw):
-    """One redirect record (disk_book.h:53-64); `valid` is magic + crc over the
-    1024 bytes with its crc field zeroed (disk_book.c:31-38, 132-135)."""
+    """One redirect record (disk_book.h DiskBookEntry); `valid` is magic + crc
+    over the 1024 bytes with its crc field zeroed (disk_book.c DiskBookRecordWhole)."""
     raw = bytes(raw[:DISKBOOK_ENTRY_BYTES])
     d = DISKBOOK_ENTRY.Unpack(raw)
     probe = bytearray(raw)

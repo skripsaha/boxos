@@ -18,8 +18,6 @@
 // Include Submodule Headers (production implementations)
 // ============================================================================
 
-#include "disk_book/disk_book.h"
-#include "cow/cow.h"
 #include "ledger/ledger.h"
 #include "block_map/block_map.h"
 

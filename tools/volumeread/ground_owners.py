@@ -11,10 +11,7 @@ GROUND_OWNERS = (
     ("file", True),   # GROUND_FILE
     ("integrity", True),   # GROUND_INTEGRITY
     ("manifest", True),   # GROUND_MANIFEST
-    ("manifest_backup", True),   # GROUND_MANIFEST_BACKUP
-    ("frozen", True),   # GROUND_FROZEN
     ("use_chain", True),   # GROUND_USE_CHAIN
-    ("redirect_new", False),   # GROUND_REDIRECT_NEW
     ("boot", False),   # GROUND_BOOT
 )
 

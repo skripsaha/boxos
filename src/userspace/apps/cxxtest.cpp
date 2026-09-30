@@ -8859,7 +8859,7 @@ void Phase47()
             {box::errc::unknown,                "core"},     {box::errc::quota_exceeded,        "core"},
             {box::errc::no_memory,              "memory"},   {box::errc::pcid_exhausted,        "memory"},
             {box::errc::io,                     "io"},       {box::errc::sector_write_failed,   "io"},
-            {box::errc::file_not_found,         "storage"},  {box::errc::snapshot_not_found,    "storage"},
+            {box::errc::file_not_found,         "storage"},  {box::errc::boot_hints_missing,    "storage"},
             {box::errc::process_not_found,      "process"},  {box::errc::stack_alloc_failed,    "process"},
             {box::errc::access_denied,          "security"}, {box::errc::sandbox_violation,     "security"},
             {box::errc::hardware,               "hardware"}, {box::errc::cpu_error,             "hardware"},
@@ -8870,8 +8870,6 @@ void Phase47()
             {box::errc::pocket_failed,          "ipc"},
             {box::errc::scheduler_locked,       "scheduler"},{box::errc::work_steal_failed,     "scheduler"},
             {box::errc::boot_info_invalid,      "boot"},     {box::errc::kernel_load_failed,    "boot"},
-            {box::errc::diskbook_not_initialized,"diskbook"},{box::errc::diskbook_read_failed,  "diskbook"},
-            {box::errc::cow_not_initialized,    "cow"},      {box::errc::cow_restore_failed,    "cow"},
             {box::errc::boxhash_invalid_context,"boxhash"},  {box::errc::boxhash_key_not_set,   "boxhash"},
             {box::errc::braid_not_initialized,  "braid"},    {box::errc::braid_rebuild_failed,  "braid"},
             {box::errc::addr_value_mismatch,    "strand"},
@@ -10628,7 +10626,7 @@ void Phase56()
         Check(SnapshotRefused(::snap_list(ids, 4, &count)) && count == 0,
               "phase56 snap_list is refused (unsupported), not answered empty");
         Check(SnapshotRefused(::snap_info(1, &info)),
-              "phase56 snap_info is refused (unsupported), not snapshot_not_found");
+              "phase56 snap_info is refused (unsupported), not answered 'not found'");
         Check(SnapshotRefused(::snap_delete(1)),
               "phase56 snap_delete is refused (unsupported)");
     }

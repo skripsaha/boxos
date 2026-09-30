@@ -94,7 +94,6 @@ typedef struct {
 
 #define TEST_SUITES(SUITE) \
     SUITE(core)            \
-    SUITE(journal)         \
     SUITE(stress)          \
     SUITE(braid)           \
     SUITE(cow)             \
@@ -117,6 +116,7 @@ typedef struct {
     VOLUME_TESTS_ONLY(SUITE(stand_seal)) \
     VOLUME_TESTS_ONLY(SUITE(stand_settle)) \
     VOLUME_TESTS_ONLY(SUITE(stand_glean)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_snapshot)) \
     /* the walk ends here; a new suite's line goes above */
 
 #define TEST_SUITE_DECLARED(name) extern const TestSuite g_##name##_suite;

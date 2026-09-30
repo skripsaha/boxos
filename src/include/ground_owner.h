@@ -16,10 +16,12 @@
  *
  * One line per owner: its id, the name both sides print, and whether it owns
  * alone. An exclusive owner that meets another exclusive owner on one block is
- * two owners of one block — said aloud; the two that are not exclusive lie
+ * two owners of one block — said aloud; the one that is not exclusive lies
  * over another owner by design: the BOOT run is the kernel file's own blocks,
- * named again in the Deed for the loader, and a snapshot redirect's new block
- * is the block its file moved onto.
+ * named again in the Deed for the loader.
+ *
+ * What a snapshot an earlier kernel took kept is no owner's: nothing reads a
+ * format-v1 snapshot, so those blocks are orphans (cow.h).
  */
 #define GROUND_OWNERS(X)                                          \
     X(GROUND_REGISTRY,        "registry",        1)               \
@@ -28,10 +30,7 @@
     X(GROUND_FILE,            "file",            1)               \
     X(GROUND_INTEGRITY,       "integrity",       1)               \
     X(GROUND_MANIFEST,        "manifest",        1)               \
-    X(GROUND_MANIFEST_BACKUP, "manifest_backup", 1)               \
-    X(GROUND_FROZEN,          "frozen",          1)               \
     X(GROUND_USE_CHAIN,       "use_chain",       1)               \
-    X(GROUND_REDIRECT_NEW,    "redirect_new",    0)               \
     X(GROUND_BOOT,            "boot",            0)
 
 typedef enum {

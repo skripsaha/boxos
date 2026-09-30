@@ -150,10 +150,11 @@ typedef struct __attribute__((packed)) {
     uint32_t next_tag_id;
     uint32_t total_tags;
 
-    /* Where the CoW snapshot manifest and its backup live: zero unless a
-     * kernel from before format v1 refused snapshots took one — they were
-     * allocated out of the data run when first needed, which makes them
-     * state and not layout, and state is what this record is for. */
+    /* Where the CoW snapshot manifest lives: zero unless a kernel from before
+     * format v1 refused snapshots took one — it was allocated out of the data
+     * run when first needed, which makes it state and not layout, and state is
+     * what this record is for. Its backup was never allocated by any kernel:
+     * the field has only ever been written zero, and nothing reads it. */
     uint32_t cow_manifest_block;
     uint32_t cow_manifest_backup_block;
 
