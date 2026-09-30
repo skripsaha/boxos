@@ -2,7 +2,6 @@
 #include "stand_tests.h"
 #include "../tagfs.h"
 #include "../cow/cow.h"
-#include "../integrity/integrity.h"
 #include "block_fail.h"
 #include "amp.h"
 #include "../settle/settle.h"
@@ -46,13 +45,11 @@
  * wrote the whole block back and answered 10 took the other 4086 bytes of the
  * file and told the caller it worked.
  *
- * ‼ Nothing reads the block between its write and the armed one. read_block
- * answers from the read-ahead cache before it asks the medium, and a cached
- * copy would be served with the plan never met; the write that made the file
- * went through write_block, which drops the block from that cache, and the
- * block's number is read off the file's record, not off the block. The test
- * then asserts that the plan fired, so a read served from anywhere else fails
- * it rather than passing it. */
+ * ‼ Nothing reads the block between its write and the armed one. The write's
+ * read of it goes to the medium — no read-ahead window of a handle serves a
+ * read_block — and the block's number is read off the file's record, not off
+ * the block. The test then asserts that the plan fired, so a read served from
+ * anywhere else fails it rather than passing it. */
 TestResult TestStandRmwReadRefused(void)
 {
     TestResult  verdict = TEST_PASS;
@@ -258,8 +255,8 @@ uint64_t StandLedgerSeq(void)
 
 /* The file's row of the file table as the MEDIUM holds it: the table's chain
  * walked from its head, on the medium, to the block that carries the row —
- * tagfs_read_block reads it there, because the cycle's write_block took the
- * block out of the read-ahead cache. False when the chain does not reach it. */
+ * tagfs_read_block reads it there: no read-ahead window serves it. False when
+ * the chain does not reach it. */
 bool StandTableRowOnMedium(uint32_t file_id, FileTableEntry* out, uint32_t* out_block)
 {
     TagFSState*     fs    = tagfs_get_state();
@@ -687,95 +684,6 @@ TestResult TestStandFrozenBlockFreedTwice(void)
     if (drift)
         verdict = TEST_DEFECT;
 out:
-    if (file_id)
-        tagfs_delete_file(file_id);
-    return verdict;
-}
-
-// ----------------------------------------------------------------------------
-// A block out of the read-ahead cache, verified as one off the medium is
-// (CW-D8)
-//
-// A read of a file's block prefetches the rest of its extent into the
-// read-ahead cache (ReadAheadPrefetch), and read_block handed those blocks
-// out of the cache without verify-on-read: a block that rotted on the medium
-// was caught only when it was the first of the run a read prefetched, and once
-// extents merge a file is read in runs.
-//
-// A three-block extent is read once — its first block off the medium, the
-// others prefetched — then its middle block rots on the medium behind the
-// map's back and all three are dropped from the cache, and the file is read
-// again: its first block off the medium, and its middle block out of the
-// prefetch that read makes. The first read is what makes that so: a prefetch
-// passes over the block the last one ended on, and the first read's ended on
-// the third. The evidence is how many rotten blocks the second read caught, of
-// the one there is.
-// ----------------------------------------------------------------------------
-
-#define STAND_RA_BLOCKS 3u
-
-TestResult TestStandReadAheadHitIsVerified(void)
-{
-    TestResult  verdict  = TEST_PASS;
-    TagFSState* fs       = tagfs_get_state();
-    uint32_t    file_id  = 0;
-    uint32_t    blocks[STAND_RA_BLOCKS] = { 0, 0, 0 };
-    bool        rotten   = false;
-    uint8_t*    was      = g_test_buffer;                                   /* 3 blocks */
-    uint8_t*    rot      = g_test_buffer + STAND_RA_BLOCKS * TAGFS_BLOCK_SIZE;
-    uint32_t    middle   = TAGFS_BLOCK_SIZE;
-    const char* aside    = StandStepsAsideFor();
-
-    if (aside)
-        return test_steps_aside(aside);
-    if (!IntegrityIsInitialized())
-        return test_steps_aside("verify-on-read is not armed on this volume, so no rot "
-                                "can be caught on either road");
-
-    TestFillAt(was, STAND_RA_BLOCKS * TAGFS_BLOCK_SIZE, 0x6A, 0);
-    TEST_ASSERT(StandMakeFile("test_file", was, STAND_RA_BLOCKS * TAGFS_BLOCK_SIZE, &file_id),
-                "a three-block file is made");
-    TEST_ASSERT_EQ(tagfs_defrag_file(file_id, 0), 0, "and gathered into one extent");
-    for (uint32_t k = 0; k < STAND_RA_BLOCKS; k++)
-        TEST_ASSERT(StandBlockOf(file_id, k, &blocks[k]), "each of its blocks is found");
-    TEST_ASSERT(blocks[1] == blocks[0] + 1 && blocks[2] == blocks[0] + 2,
-                "one run on the medium, so a read of its first block prefetches the others");
-
-    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, STAND_RA_BLOCKS * TAGFS_BLOCK_SIZE),
-                   STAND_RA_BLOCKS * TAGFS_BLOCK_SIZE, "the file is read once, whole");
-
-    memcpy(rot, was + middle, TAGFS_BLOCK_SIZE);
-    rot[100] ^= 0xFF;
-    uint64_t vlba = ((uint64_t)fs->layout.data_block + blocks[1]) * TAGFS_BLOCK_SECTORS;
-    TEST_ASSERT_EQ(tagfs_volume_write(vlba, TAGFS_BLOCK_SECTORS, rot), 0,
-                   "its middle block rots on the medium, behind the map's back");
-    rotten = true;
-    for (uint32_t k = 0; k < STAND_RA_BLOCKS; k++)
-        tagfs_readahead_invalidate(blocks[k]);
-
-    IntegrityDrainReports();
-    uint32_t errors_before = IntegrityErrorCount();
-    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, STAND_RA_BLOCKS * TAGFS_BLOCK_SIZE),
-                   STAND_RA_BLOCKS * TAGFS_BLOCK_SIZE, "the file is read again, whole");
-    uint32_t caught = IntegrityErrorCount() - errors_before;
-    TEST_ASSERT_EQ(TestFirstDifference(g_test_output + middle, rot, TAGFS_BLOCK_SIZE),
-                   TAGFS_BLOCK_SIZE, "its middle block reads as the medium now holds it");
-    TEST_ASSERT(caught <= 1, "and the one rotten block is caught at most once");
-
-    TestEvidence("rotten blocks a read caught out of the read-ahead cache, of 1", caught);
-    if (caught == 0)
-        verdict = TEST_DEFECT;
-out:
-    if (rotten) {
-        /* The block and the map agree again before the file lets it go, so
-         * nobody who takes the block next is told of rot it never had. */
-        if (tagfs_write_block(blocks[1], was + middle) != OK)
-            verdict = TestFailedAt(__FILE__, __LINE__,
-                                   "the rotten block would not take its bytes back — "
-                                   "the map and the medium disagree over it (block, 0)",
-                                   blocks[1], 0);
-        IntegrityDrainReports();
-    }
     if (file_id)
         tagfs_delete_file(file_id);
     return verdict;

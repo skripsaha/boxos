@@ -9,10 +9,9 @@
 // ‼ The block is WRITTEN, not merely hashed. IntegrityUpdate over bytes that
 // never reach the medium leaves the map holding a digest the block does not
 // have; once the block is freed, whoever is handed it next and reads it before
-// writing it is told of bit rot that never happened — counted, queued, and
-// published on the "integrity" tag at the next sync. tagfs_write_block records
-// the digest of exactly what landed, so the map and the medium agree after
-// every test here, and the rot a test stages is drained before it returns.
+// writing it is told of bit rot that never happened — counted, named and
+// published on the "integrity" tag. tagfs_write_block records the digest of
+// exactly what landed, so the map and the medium agree after every test here.
 // ============================================================================
 
 static TestResult test_integrity_detects_mismatch(void)
@@ -38,7 +37,6 @@ static TestResult test_integrity_detects_mismatch(void)
     TEST_ASSERT(!IntegrityVerify(blk, g_test_buffer), "verify detects a 1-byte mismatch");
     TEST_ASSERT_EQ(IntegrityErrorCount(), before + 1, "bit-rot counter incremented exactly once");
 out:
-    IntegrityDrainReports();   // the deferred Touch report runs, and nothing of ours is left queued
     if (blk)
         tagfs_free_blocks(blk, 1);
     return verdict;
@@ -71,9 +69,6 @@ static TestResult test_integrity_persist_reload(void)
                    "the block takes its content, and the map its digest");
     TEST_ASSERT_OK(IntegrityFlush(), "the map is persisted to disk");
 
-    /* IntegrityInit empties the report ring, so rot already caught and not yet
-     * reported is reported now instead of being dropped by the reload. */
-    IntegrityDrainReports();
     IntegrityShutdown();                    // drop the in-RAM map (the disk copy remains)
     down = true;
     TEST_ASSERT_OK(IntegrityInit(), "integrity remount (re-init from disk) succeeds");
@@ -91,7 +86,6 @@ out:
                                    "stays down for the rest of this boot (error, OK)",
                                    again, OK);
     }
-    IntegrityDrainReports();
     if (blk)
         tagfs_free_blocks(blk, 1);
     return verdict;
@@ -100,15 +94,14 @@ out:
 // ----------------------------------------------------------------------------
 // rot65 — is every rotten block reported, or only the first 64?
 //
-// A caught rot is counted at once (g_errors) but REPORTED later: it waits in a
-// ring until IntegrityDrainReports publishes it on the "integrity" tag, and
-// the ring holds ROT_RING_MAX = 64 (integrity.c) — the 65th is dropped without
-// a word. The ear is the kernel's own TouchWatch, which is called on the
-// publisher's stack inside TouchPublishId (touch.c, touch_watch_deliver), so
-// every report the drain makes has arrived by the time the drain returns.
-// Kernel-side on purpose: only read_block verifies (off the medium and out of
-// the read-ahead cache alike), and a program's read may take the asynchronous
-// road instead, so it would be caught or not depending on the road it took.
+// A caught rot is counted at once (g_errors) and named at once: one Touch on
+// the "integrity" tag per block, from inside the verify, the set of blocks
+// named this mount growing as rot is found (integrity_rot.c). It used to wait
+// in a ring of 64 for a drain in the Settle cycle, and the 65th was dropped
+// without a word. The ear is the kernel's own TouchWatch, which is called on
+// the publisher's stack inside TouchPublishId (touch.c, touch_watch_deliver),
+// so every report has arrived by the time the verify returns. Each block is
+// named once: verifying one of them again tells nobody anything new.
 // ----------------------------------------------------------------------------
 
 #define ROT_WITNESS_BLOCKS 65u
@@ -116,6 +109,7 @@ out:
 typedef struct {
     uint32_t first;
     uint64_t heard[2];      /* bit i: a report for block first + i arrived */
+    uint32_t reports;       /* reports for the test's blocks, however many per block */
 } RotWitness;
 
 static RotWitness s_rot_witness;
@@ -136,6 +130,7 @@ static void RotWitnessHeard(TouchTag tag_id, const void* payload, uint32_t plen,
         return;
     uint32_t i = block - witness->first;
     __atomic_or_fetch(&witness->heard[i / 64], 1ull << (i % 64), __ATOMIC_RELAXED);
+    __atomic_add_fetch(&witness->reports, 1u, __ATOMIC_RELAXED);
 }
 
 static TestResult TestIntegrityReportsEveryRot(void)
@@ -157,7 +152,6 @@ static TestResult TestIntegrityReportsEveryRot(void)
                                 "to rot");
     have_blocks = true;
 
-    IntegrityDrainReports();    // whatever was already waiting is not this test's
     memset(&s_rot_witness, 0, sizeof(s_rot_witness));
     s_rot_witness.first = first;
     ear = TouchWatchSet(tag, RotWitnessHeard, &s_rot_witness);
@@ -177,20 +171,18 @@ static TestResult TestIntegrityReportsEveryRot(void)
     TEST_ASSERT_EQ(IntegrityErrorCount() - errors_before, ROT_WITNESS_BLOCKS,
                    "and counted once");
 
-    IntegrityDrainReports();    // the one road a rot report takes out of the kernel
     uint32_t reported = CountSetBits(s_rot_witness.heard[0]) +
                         CountSetBits(s_rot_witness.heard[1]);
     TestEvidence("of 65 rotten blocks, reported", reported);
-    if (reported == ROT_WITNESS_BLOCKS)
-        goto out;
+    TEST_ASSERT_EQ(reported, ROT_WITNESS_BLOCKS, "every rotten block is reported");
+    TEST_ASSERT_EQ(s_rot_witness.reports, ROT_WITNESS_BLOCKS, "each once");
 
-    /* The defect is the ring's overflow and nothing else: the first 64 told,
-     * the 65th never. Any other loss is a different failure. */
-    TEST_ASSERT_EQ(reported, ROT_WITNESS_BLOCKS - 1, "every report but the ring's overflow arrives");
-    TEST_ASSERT((s_rot_witness.heard[1] & 1) == 0, "and the one never told is the 65th");
-    verdict = TEST_DEFECT;
+    TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x65, 0);
+    g_test_buffer[0] ^= 0xFF;
+    TEST_ASSERT(!IntegrityVerify(first, g_test_buffer), "the first rotten block is caught again");
+    TEST_ASSERT_EQ(s_rot_witness.reports, ROT_WITNESS_BLOCKS,
+                   "and not reported again: it was named this mount already");
 out:
-    IntegrityDrainReports();    // none of this test's rot is left for a sync to report
     if (ear)
         TouchWatchClear(ear);
     if (have_blocks)
@@ -203,7 +195,6 @@ static const TestCase g_integrity_tests[] = {
     { .name = "integrity_persist_reload",   .func = test_integrity_persist_reload,   .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "integrity_reports_every_rot", .func = TestIntegrityReportsEveryRot,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.10",
       .caveat_defect = "the integrity report ring holds 64 — a 65th rotten block "
                        "is caught and never reported" },
 };

@@ -57,7 +57,4 @@
 // The tag index's table of tags before it first grows
 #define TAGFS_BITMAP_INITIAL_TAG_CAP    64
 
-// Read-ahead cache
-#define TAGFS_READ_AHEAD_BLOCKS         4
-
 #endif // TAGFS_CONSTANTS_H

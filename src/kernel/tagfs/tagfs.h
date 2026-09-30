@@ -326,6 +326,11 @@ typedef struct TagFSFileHandle {
     uint64_t                view_gen;
     struct TagFSFileHandle* view_prev;   /* the file's views (OpenFileEntry.views) */
     struct TagFSFileHandle* view_next;
+
+    /* The blocks a read in order has fetched ahead of itself, as many as the
+     * medium hands over in one command (read/read.h); NULL until the first
+     * fetch, and let go of when the handle is closed. */
+    struct ReadAheadWindow* ahead;
 } TagFSFileHandle;
 
 typedef struct {
@@ -372,6 +377,12 @@ typedef struct {
     TagRegistry*     registry;
     TagBitmapIndex*  bitmap_index;
     FileMap*         files;
+
+    /* The Braid the volume is assembled in, which the mount names — the only
+     * thing that sends a block of the volume through Braid. Format v1 names
+     * no assembly, so a v1 volume has none (braid/braid.h). */
+    struct BraidState* braid;
+
     bool             initialized;
     TagFSLock        lock;
 } TagFSState;
@@ -714,11 +725,21 @@ uint32_t tagfs_file_ceiling(void);
 TagFSFileHandle* tagfs_open(uint32_t file_id, uint32_t flags);
 void             tagfs_close(TagFSFileHandle* handle);
 
-/* Up to `size` bytes from the handle's offset: OK and *out_read — 0 at or
- * past the file's size — or the refusal, with nothing counted. The offset
- * moves by what was read. */
+/* Up to `size` bytes from the handle's offset into the kernel's `buffer`: OK
+ * and *out_read — 0 at or past the file's size — or the refusal with
+ * *out_read the bytes that landed before it. The refusal is the real one: a
+ * block the medium would not give (ERR_READ_FAILED), a medium that left
+ * (ERR_DEVICE_NOT_READY), a block that does not hold what was written to it
+ * (ERR_CHECKSUM), a part of the file inside its size that no extent covers
+ * (ERR_METADATA_CORRUPTED). The offset moves by what landed. */
 error_t          tagfs_read(TagFSFileHandle* handle, void* buffer, uint64_t size,
                             uint64_t* out_read);
+
+/* The same read into wherever `sink` says — a program's pages, a block at a
+ * time as the read reaches them (read/read.h) — up to the sink's room. */
+struct ReadSink;
+error_t          TagFSReadInto(TagFSFileHandle* handle, const struct ReadSink* sink,
+                               uint64_t* out_read);
 
 /* The source's bytes written at the handle's offset — at the file's size when
  * the handle was opened TAGFS_HANDLE_APPEND. An offset past the size is
@@ -765,12 +786,22 @@ uint32_t tagfs_get_fragmentation_score(uint32_t* out_files, uint32_t* out_gaps);
 // Block I/O (for subsystem use)
 // ----------------------------------------------------------------------------
 
+/* One block: OK, or the real refusal — ERR_DEVICE_NOT_READY once the medium
+ * left, ERR_READ_FAILED when it would not give the block, ERR_CHECKSUM when
+ * what it gave does not match the digest recorded when the block was written
+ * (integrity/integrity.h, which names the block and publishes it). */
 error_t  tagfs_read_block(uint32_t block, void* buffer);
 error_t  tagfs_write_block(uint32_t block, const void* buffer);
 
-/* Drop a block from the read-ahead cache (read-after-write consistency).
- * The sync write path calls this internally; the async path (write_job) must
- * call it after each block write since it bypasses tagfs_write_block. */
+/* `count` blocks from `first` on, off the volume's own medium in one run and
+ * checked against nothing: the read-ahead's fetch, which checks each block
+ * where it hands it out. OK, ERR_DEVICE_NOT_READY or ERR_READ_FAILED. */
+error_t  TagFSReadRun(uint32_t first, uint32_t count, void* buffer);
+
+/* A write landed on `block`: no read-ahead window hands out what it held
+ * before (read-after-write). tagfs_write_block says so itself; a writer that
+ * goes to the medium another way — the asynchronous WriteJob, the Use
+ * Context's chain — says so after each block. */
 void     tagfs_readahead_invalidate(uint32_t block);
 
 /*

@@ -23,6 +23,18 @@ static uint32_t* s_last_span;
 static uint32_t  s_last_span_count;
 static uint64_t  s_unclean_cycle;
 
+/* Whether the seal this mount stood on was written by a machine stopping
+ * cleanly, and its cycle (MountStopWasClean). */
+static bool      s_stop_clean;
+static uint64_t  s_stop_cycle;
+
+bool MountStopWasClean(uint64_t* out_cycle)
+{
+    if (out_cycle)
+        *out_cycle = s_stop_cycle;
+    return s_stop_clean;
+}
+
 /* A block the Deed names → the block TagFS allocates in. The Deed states where
  * the registry, the file table, the pool and the BOOT run are in blocks of the
  * whole volume — what makes a volume readable by something that has not
@@ -341,6 +353,8 @@ static error_t MountPool(const MountSeals* seals, PoolMountOutcome* pool, const 
     s_last_span       = NULL;
     s_last_span_count = 0;
     s_unclean_cycle   = 0;
+    s_stop_clean      = pool->seal >= 0 && (seals->mark[pool->seal].flags & SETTLE_CLEAN);
+    s_stop_cycle      = pool->seal >= 0 ? seals->mark[pool->seal].settle : 0;
     if (pool->seal >= 0 && !(seals->mark[pool->seal].flags & SETTLE_CLEAN)) {
         s_last_span       = pool->last_span;
         s_last_span_count = pool->last_span_count;
@@ -378,6 +392,10 @@ error_t MountReadVolume(const char** what)
     TagFSState* fs = tagfs_get_state();
     MountSeals  seals;
     MountSealsRead(&seals);
+
+    /* A v1 Deed names no Braid assembly: the volume's every block is its own
+     * medium's, and no read or write asks Braid (braid/braid.h). */
+    fs->braid = NULL;
 
     error_t rc = MountRegistry(&seals, what);
     if (rc != OK)

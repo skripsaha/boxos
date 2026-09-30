@@ -4,13 +4,10 @@
 #include "../scribe/scribe.h"
 #include "../mount/ground_census.h"
 #include "../../lib/kernel/klib.h"
-#include "touch.h"
 #include "amp.h"
 #include "scheduler.h"    /* a page's transfer is a held span */
 #include "system_halt.h"  /* and the halt stops the core only after it */
 #include "integrity_internal.h"
-
-#define ROT_RING_MAX      64
 
 volatile bool         g_map_initialized  = false;
 TagFSLock             g_map_lock         = TAGFS_LOCK_INIT("integrity", LOCK_RANK_LEAF);
@@ -27,9 +24,6 @@ static uint32_t       g_lru_tick      = 0;
 static bool           g_no_room_said  = false;
 static BoxHashContext g_ctx;
 static uint32_t       g_errors        = 0;
-static uint32_t       g_rot_ring[ROT_RING_MAX];
-static uint32_t       g_rot_count     = 0;
-static uint16_t       g_integrity_tag = 0xFFFF;
 
 static inline bool in_map_region(uint32_t block) {
     return g_map_first_block != 0 &&
@@ -270,19 +264,22 @@ error_t IntegrityInit(void) {
         g_map_cache[s].turn++;
         memset(g_map_cache[s].heard, 0, sizeof(g_map_cache[s].heard));
     }
-    g_lru_tick  = 0;
-    g_rot_count = 0;
+    g_lru_tick = 0;
     TagFSLockDrop(&g_map_lock);
 
     uint32_t entries = fs->layout.data_blocks;
     uint32_t count   = (entries + ENTRIES_PER_BLOCK - 1) / ENTRIES_PER_BLOCK;
     BoxHashInit(&g_ctx, fs->uuid, 16);
 
+    /* Rot is named from here on, each block once for this mount, on the tag
+     * its watchers listen to (integrity_rot.c). */
+    uint16_t tag = TAGFS_INVALID_TAG_ID;
     if (fs->registry) {
         TagSpelling integrity = TagSpellingOfKey("integrity");
-        if (TagRegistryIntern(fs->registry, &integrity, &g_integrity_tag) != OK)
-            g_integrity_tag = TAGFS_INVALID_TAG_ID;
+        if (TagRegistryIntern(fs->registry, &integrity, &tag) != OK)
+            tag = TAGFS_INVALID_TAG_ID;
     }
+    IntegrityRotBegin(tag);
 
     /* A volume with no map has one laid by the cycles, and is checked once it
      * stands; one that grew past its map is checked by the map it has, over
@@ -362,6 +359,7 @@ void IntegrityUpdate(uint32_t block, const void *data) {
     TagFSLockDrop(&g_map_lock);
     if (no_room)
         MapSayNoRoom(said);
+    IntegrityRotForget(block, 1);
     HaltStopIfOwedHere("a page of the integrity map it carried");
 }
 
@@ -373,6 +371,8 @@ void IntegrityUpdate(uint32_t block, const void *data) {
  * Settle's holder calls it, with no TagFS lock held. */
 void IntegrityForget(uint32_t start, uint32_t count) {
     uint64_t end = (uint64_t)start + count;
+
+    IntegrityRotForget(start, count);
 
     for (uint64_t b = start; b < end && IntegrityIsInitialized(); ) {
         uint32_t idx     = (uint32_t)(b / ENTRIES_PER_BLOCK);
@@ -449,12 +449,7 @@ bool IntegrityVerify(uint32_t block, const void *data) {
         return true;
 
     __atomic_fetch_add(&g_errors, 1, __ATOMIC_RELAXED);
-    TagFSLockTake(&g_map_lock);
-    if (g_rot_count < ROT_RING_MAX)
-        g_rot_ring[g_rot_count++] = block;    // queued for deferred Touch report
-    TagFSLockDrop(&g_map_lock);
-    debug_printf("[Integrity] BIT-ROT on block %u: stored=%016lx read=%016lx\n",
-                 block, (unsigned long)stored, (unsigned long)h);
+    IntegrityRotName(block, stored, h);
     return false;
 }
 
@@ -574,28 +569,6 @@ error_t IntegrityFlush(void) {
     return answer;
 }
 
-void IntegrityDrainReports(void) {
-    if (!IntegrityIsInitialized() || g_integrity_tag == 0xFFFF)
-        return;
-    uint32_t local[ROT_RING_MAX];
-    uint32_t n;
-    TagFSLockTake(&g_map_lock);
-    n = g_rot_count;
-    if (n > ROT_RING_MAX) n = ROT_RING_MAX;
-    memcpy(local, g_rot_ring, n * sizeof(uint32_t));
-    g_rot_count = 0;
-    TagFSLockDrop(&g_map_lock);
-
-    for (uint32_t i = 0; i < n; i++) {
-        struct __attribute__((packed)) {
-            uint32_t block;
-            uint8_t  op;        // 3 = integrity / bit-rot
-            uint8_t  _pad[3];
-        } ev = { local[i], 3, {0, 0, 0} };
-        TouchPublishId(g_integrity_tag, &ev, sizeof(ev), 0, TOUCH_FLAG_TAGFS);
-    }
-}
-
 /*
  * The map let go of in memory, its medium copy left as the last flush made
  * it. Returns only when no page of it is out with a transfer anyone will come
@@ -606,6 +579,7 @@ void IntegrityDrainReports(void) {
  * until then.
  */
 void IntegrityShutdown(void) {
+    IntegrityRotEnd();
     MapLayLetGo();
     if (!IntegrityIsInitialized())
         return;

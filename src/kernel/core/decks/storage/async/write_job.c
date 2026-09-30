@@ -320,6 +320,7 @@ static bool w_locate(WriteJob *j)
 
     j->if_off_in_blk = off;
     j->if_chunk      = chunk;
+    j->if_reading    = false;   /* until W_READ_OLD reads the block it overlays */
     switch (PlotFillFor(&j->plot, k, off, chunk)) {
     case PLOT_FILL_READ:
         wjob_to(j, W_READ_OLD);
@@ -370,9 +371,20 @@ static bool w_read_old(WriteJob *j)
 }
 
 /* W_DMA_FILL — the write's bytes for this block, out of the program's pages,
- * laid over what is staged in the DMA page. */
+ * laid over what is staged in the DMA page. A block read to be overlaid is
+ * checked against the digest recorded when it was written first: bytes laid
+ * over a rotten block would be written back under a fresh digest, and the rot
+ * would be the file's for good. A write that covers a block whole reads
+ * nothing and is never refused this way (RT-22). */
 static bool w_dma_fill(WriteJob *j)
 {
+    if (j->if_reading && !IntegrityVerify(j->if_disk_block, j->dma_virt)) {
+        kprintf("[Storage] write to file %u: block %u does not hold what was written to it, "
+                "so the %u byte(s) meant for it are not laid over the rest of it — %llu of %llu "
+                "written\n", j->file_id, j->if_disk_block, j->if_chunk,
+                (unsigned long long)j->bytes_done, (unsigned long long)j->source.bytes);
+        return wjob_stop(j, ERR_CHECKSUM);
+    }
     error_t rc = PlotSourcePull(&j->source, j->bytes_done,
                                 (uint8_t *)j->dma_virt + j->if_off_in_blk, j->if_chunk);
     if (rc != OK) {

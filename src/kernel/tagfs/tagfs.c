@@ -27,6 +27,7 @@
 #include "settle/settle.h"
 #include "helm/helm.h"
 #include "mount/mount.h"
+#include "read/read.h"
 #include "../../kernel/drivers/timer/rtc.h"
 #include "logbook.h"
 #include "cpu_calibrate.h"
@@ -511,36 +512,17 @@ static void TagFSProbeDrive(void)
      * and their neighbours are then fetched together. Printing it is what
      * turns "why is this machine slower off that disk" into a sentence
      * somebody can read off a screen.
-     */
-    uint32_t run     = BoardroomSeatRun(g_tagfs_seat);
-    uint32_t offered = run / (TAGFS_BLOCK_SIZE / BOARDROOM_SECTOR_BYTES);
-    if (offered == 0) offered = 1;
-
-    uint32_t asked = offered;
-    if (asked > TAGFS_READ_AHEAD_BLOCKS) asked = TAGFS_READ_AHEAD_BLOCKS;
-
-    /*
-     * Two numbers and the narrower of them, each said by whoever chose it.
      *
-     * The line used to read "this medium takes N sectors at a time, SO
-     * neighbouring blocks are read M at a time", and nothing derived M from N:
-     * the flash drive on the board answered 128 sectors, which is sixteen of
-     * this volume's blocks, and the four that got printed came from the size
-     * of the read-ahead cache. Two media answering 32 and 128 produced the
-     * same four, so the line stopped telling them apart exactly where it
-     * promised to. Which side is binding is the thing worth reading: when it
-     * is the cache, the medium is being asked for less than it offered, and
-     * that is the answer to "why is this machine slower off that disk".
+     * It used to stand beside the size of a read-ahead cache that held four
+     * blocks for the whole machine, and the narrower of the two was what a
+     * read got: the flash drive on the board offered sixteen of this volume's
+     * blocks at a time and was asked for four. The window a read fetches into
+     * is its handle's now, as deep as the run.
      */
     kprintf("[TagFS] this medium hands over %u sector(s) in one go, which is %u "
-            "of this volume's %u-byte block(s), and the read-ahead cache holds "
-            "%u — so neighbours are fetched %u at a time, %s\n",
-            run, offered, (unsigned)TAGFS_BLOCK_SIZE,
-            (unsigned)TAGFS_READ_AHEAD_BLOCKS, asked,
-            asked < offered
-                ? "which is the cache's limit and not the medium's: it offered "
-                  "more than is being taken"
-                : "which is all the medium offered");
+            "of this volume's %u-byte block(s) — a read in order fetches that "
+            "many neighbours in one command, into a window of its own handle\n",
+            BoardroomSeatRun(g_tagfs_seat), ReadAheadDepth(), (unsigned)TAGFS_BLOCK_SIZE);
 }
 
 /* A run of any length, in the volume's own sectors: the room cuts it into the
@@ -1228,7 +1210,6 @@ error_t tagfs_flush_cache(void)
  * about a disk that is in somebody's pocket.
  */
 static bool g_medium_left = false;
-static void ReadAheadForget(void);
 
 bool TagFSMediumLeft(void) { return __atomic_load_n(&g_medium_left, __ATOMIC_ACQUIRE); }
 
@@ -1262,7 +1243,7 @@ static bool volume_medium_gone(void)
     if (__atomic_exchange_n(&g_medium_left, true, __ATOMIC_ACQ_REL)) {
         return true;
     }
-    ReadAheadForget();
+    ReadAheadForgetAll();
     kprintf("[TagFS] the medium the volume lives on has %s — every read and "
             "write from here on will say so\n",
             swapped ? "been replaced by another one in the same seat"
@@ -1602,191 +1583,9 @@ void TagFSAttendArrival(void)
     attending_done();
 }
 
-static uint64_t block_to_vlba(uint32_t block);
-static int read_block(uint32_t block, void *buffer);
-static int write_block(uint32_t block, const void *buffer);
-
-// ----------------------------------------------------------------------------
-// Read-Ahead Cache for Sequential Reads
-// ----------------------------------------------------------------------------
-
-typedef struct {
-    uint32_t block;
-    uint8_t  data[TAGFS_BLOCK_SIZE];
-    bool     valid;
-} ReadAheadEntry;
-
-static ReadAheadEntry g_read_ahead_cache[TAGFS_READ_AHEAD_BLOCKS];
-static uint32_t g_read_ahead_head = 0;
-static uint32_t g_read_ahead_last_block = 0;
-static TagFSLock g_read_ahead_lock = TAGFS_LOCK_INIT("readahead", LOCK_RANK_LEAF);
-
-static void ReadAheadInit(void) {
-    memset(g_read_ahead_cache, 0, sizeof(g_read_ahead_cache));
-    g_read_ahead_head = 0;
-    g_read_ahead_last_block = 0;
-    TagFSLockInit(&g_read_ahead_lock, "readahead", LOCK_RANK_LEAF);
-}
-
-static int ReadAheadLookup(uint32_t block, void *buffer) {
-    TagFSLockTake(&g_read_ahead_lock);
-    for (uint32_t i = 0; i < TAGFS_READ_AHEAD_BLOCKS; i++) {
-        if (g_read_ahead_cache[i].valid && g_read_ahead_cache[i].block == block) {
-            memcpy(buffer, g_read_ahead_cache[i].data, TAGFS_BLOCK_SIZE);
-            TagFSLockDrop(&g_read_ahead_lock);
-            return 0;
-        }
-    }
-    TagFSLockDrop(&g_read_ahead_lock);
-    return -1;
-}
-
-/* Is this block already in hand? Asked without copying it: the reader wants to
- * know whether to go to the medium at all, not what is in the block. */
-static bool ReadAheadHas(uint32_t block) {
-    bool here = false;
-    TagFSLockTake(&g_read_ahead_lock);
-    for (uint32_t i = 0; i < TAGFS_READ_AHEAD_BLOCKS; i++) {
-        if (g_read_ahead_cache[i].valid && g_read_ahead_cache[i].block == block) {
-            here = true;
-            break;
-        }
-    }
-    TagFSLockDrop(&g_read_ahead_lock);
-    return here;
-}
-
-static void ReadAheadPrefetch(uint32_t start_block, uint32_t count) {
-    if (count == 0)
-        return;
-
-    // Phase 1: determine which blocks to fetch (under lock, no I/O)
-    uint32_t to_fetch[TAGFS_READ_AHEAD_BLOCKS];
-    uint32_t slots[TAGFS_READ_AHEAD_BLOCKS];
-    uint32_t n_fetch = 0;
-
-    TagFSLockTake(&g_read_ahead_lock);
-    for (uint32_t i = 0; i < count && i < TAGFS_READ_AHEAD_BLOCKS; i++) {
-        uint32_t block = start_block + i;
-        if (block == g_read_ahead_last_block)
-            continue;
-        // Check cache — skip if already present
-        bool already = false;
-        for (uint32_t j = 0; j < TAGFS_READ_AHEAD_BLOCKS; j++) {
-            if (g_read_ahead_cache[j].valid && g_read_ahead_cache[j].block == block) {
-                already = true;
-                break;
-            }
-        }
-        if (already)
-            continue;
-        uint32_t slot = g_read_ahead_head % TAGFS_READ_AHEAD_BLOCKS;
-        // Invalidate the slot now so it won't be served stale during I/O
-        g_read_ahead_cache[slot].valid = false;
-        to_fetch[n_fetch] = block;
-        slots[n_fetch]    = slot;
-        n_fetch++;
-        g_read_ahead_head++;
-    }
-    g_read_ahead_last_block = start_block + count - 1;
-    TagFSLockDrop(&g_read_ahead_lock);
-
-    /*
-     * Phase 2: the disk I/O, without holding the lock — and blocks that lie
-     * NEXT TO EACH OTHER on the medium are fetched together.
-     *
-     * ‼ THIS LOOP ALREADY KNEW THEY WERE NEIGHBOURS AND ASKED FOR THEM ONE AT
-     * A TIME ANYWAY. Four consecutive blocks were four commands: on a SATA
-     * disk four round trips where one would do, and on the flash drive this
-     * kernel boots from on a real board, four Bulk-Only commands — twelve USB
-     * transfers, three per command — to move sixteen kilobytes that the device
-     * would have handed over in one.
-     *
-     * How long a run may be is the MEDIUM'S answer, not a number chosen here.
-     * The legacy channel says eight sectors because past that it gives up its
-     * DMA path and moves the bytes with the processor, so on it this coalesces
-     * nothing and that is the right answer for it; a flash drive says its
-     * whole bounce buffer, and a SATA port says more still.
-     */
-    uint32_t run_blocks = BoardroomSeatRun(tagfs_get_seat()) / 8u;
-    if (run_blocks == 0) {
-        run_blocks = 1;
-    }
-    if (run_blocks > TAGFS_READ_AHEAD_BLOCKS) {
-        run_blocks = TAGFS_READ_AHEAD_BLOCKS;
-    }
-
-    uint32_t i = 0;
-    while (i < n_fetch) {
-        /* How many of the blocks still to fetch are consecutive from here.
-         * to_fetch[] is filled in increasing block order, so this is a walk
-         * rather than a search. */
-        uint32_t len = 1;
-        while (i + len < n_fetch &&
-               to_fetch[i + len] == to_fetch[i] + len &&
-               len < run_blocks) {
-            len++;
-        }
-
-        uint8_t *run = NULL;
-        if (len > 1) {
-            run = (uint8_t *)kmalloc(len * TAGFS_BLOCK_SIZE);
-            if (!run) {
-                len = 1;            /* no room to batch: one at a time still works */
-            }
-        }
-
-        if (len == 1) {
-            uint8_t tmp[TAGFS_BLOCK_SIZE];
-            if (tagfs_volume_read(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {
-                TagFSLockTake(&g_read_ahead_lock);
-                memcpy(g_read_ahead_cache[slots[i]].data, tmp, TAGFS_BLOCK_SIZE);
-                g_read_ahead_cache[slots[i]].block = to_fetch[i];
-                g_read_ahead_cache[slots[i]].valid = true;
-                TagFSLockDrop(&g_read_ahead_lock);
-            }
-            i++;
-            continue;
-        }
-
-        if (tagfs_volume_read(block_to_vlba(to_fetch[i]), len * TAGFS_BLOCK_SECTORS, run) == 0) {
-            TagFSLockTake(&g_read_ahead_lock);
-            for (uint32_t k = 0; k < len; k++) {
-                memcpy(g_read_ahead_cache[slots[i + k]].data,
-                       run + k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE);
-                g_read_ahead_cache[slots[i + k]].block = to_fetch[i + k];
-                g_read_ahead_cache[slots[i + k]].valid = true;
-            }
-            TagFSLockDrop(&g_read_ahead_lock);
-        }
-        kfree(run);
-        i += len;
-    }
-}
-
-// Drop any cached copy of `block` so a read after a write to it never serves
-// pre-write data (read-after-write consistency). Called on every block write,
-// sync and async.
-static void ReadAheadInvalidate(uint32_t block) {
-    TagFSLockTake(&g_read_ahead_lock);
-    for (uint32_t i = 0; i < TAGFS_READ_AHEAD_BLOCKS; i++) {
-        if (g_read_ahead_cache[i].valid && g_read_ahead_cache[i].block == block)
-            g_read_ahead_cache[i].valid = false;
-    }
-    TagFSLockDrop(&g_read_ahead_lock);
-}
-
-void tagfs_readahead_invalidate(uint32_t block) {
-    ReadAheadInvalidate(block);
-}
-
-/* Every entry, for when what they are copies of is no longer there. */
-static void ReadAheadForget(void) {
-    TagFSLockTake(&g_read_ahead_lock);
-    for (uint32_t i = 0; i < TAGFS_READ_AHEAD_BLOCKS; i++) {
-        g_read_ahead_cache[i].valid = false;
-    }
-    TagFSLockDrop(&g_read_ahead_lock);
+void tagfs_readahead_invalidate(uint32_t block)
+{
+    ReadAheadForgetBlock(block);
 }
 
 /*
@@ -1814,37 +1613,23 @@ uint64_t tagfs_block_to_sector(uint32_t block)
     return g_volume_base + block_to_vlba(block);
 }
 
-static int read_block(uint32_t block, void *buffer)
+/* The block off the medium, and its bytes checked against the digest recorded
+ * when it was written — through the Braid the volume is assembled in, when it
+ * is (TagFSState.braid, which a v1 mount never names), else off the volume's
+ * own medium. A mismatch is the read's answer (ERR_CHECKSUM), never thrown
+ * away: the integrity map names the block and publishes it. */
+static error_t read_block(uint32_t block, void *buffer)
 {
-    if (volume_medium_gone()) {
-        return -1;
-    }
+    if (volume_medium_gone())
+        return ERR_DEVICE_NOT_READY;
 
-    /* A block the read-ahead cache holds came off the medium in a prefetch's
-     * run, which checks nothing, so it is verified here, where it is handed
-     * out, exactly as a block read on its own is. Checked only on a miss,
-     * verify-on-read would cover one block of every run a file is read in —
-     * and a file's blocks are read in runs once its extents merge (CW-D8). */
-    if (ReadAheadLookup(block, buffer) == 0) {
-        (void)IntegrityVerify(block, buffer);
-        return 0;
-    }
-
-    // Route through Braid when it has active disks (provides redundancy/checksumming).
-    // Pass the physical LBA so Braid operates in sector-space, not TagFS block-space.
-    if (BraidIsHealthy()) {
-        error_t braid_result = BraidReadBlock(tagfs_block_to_sector(block), buffer, NULL);
-        if (braid_result == OK)
-            return 0;
-        // Braid failed — fall through to direct disk read as recovery path
-    }
-
-    int rc = tagfs_volume_read(block_to_vlba(block), 8, buffer);
-    if (rc == 0)
-        (void)IntegrityVerify(block, buffer);   // detect silent bit-rot on read
-    else
+    bool got = g_state.braid &&
+               BraidReadBlock(g_state.braid, tagfs_block_to_sector(block), buffer, NULL) == OK;
+    if (!got && tagfs_volume_read(block_to_vlba(block), TAGFS_BLOCK_SECTORS, buffer) != 0) {
         TagFSNoteReadRefused();
-    return rc;
+        return ERR_READ_FAILED;
+    }
+    return IntegrityVerify(block, buffer) ? OK : ERR_CHECKSUM;
 }
 
 static int write_block(uint32_t block, const void *buffer)
@@ -1853,45 +1638,44 @@ static int write_block(uint32_t block, const void *buffer)
         return -1;
     }
 
+    /* Through the Braid the volume is assembled in, when it is; the volume's
+     * own medium takes the block when Braid would not. */
     int rc = -1;
-
-    // Route through Braid when it has active disks (provides redundancy).
-    // Pass the physical LBA so Braid operates in sector-space, not TagFS block-space.
-    if (BraidIsHealthy()) {
-        if (BraidWriteBlock(tagfs_block_to_sector(block), buffer, NULL) == OK)
-            rc = 0;
-        // Braid failed — fall through to direct disk write as recovery path
-    }
+    if (g_state.braid &&
+        BraidWriteBlock(g_state.braid, tagfs_block_to_sector(block), buffer, NULL) == OK)
+        rc = 0;
     if (rc != 0)
-        rc = tagfs_volume_write(block_to_vlba(block), 8, (void *)buffer);
+        rc = tagfs_volume_write(block_to_vlba(block), TAGFS_BLOCK_SECTORS, buffer);
 
-    // Drop any stale read-ahead copy + record the new integrity digest.
     if (rc == 0) {
-        ReadAheadInvalidate(block);
+        ReadAheadForgetBlock(block);
         IntegrityUpdate(block, buffer);
     }
     return rc;
 }
 
-error_t tagfs_read_block(uint32_t block, void *buffer) {
+error_t tagfs_read_block(uint32_t block, void *buffer)
+{
     if (!buffer)
         return ERR_NULL_POINTER;
-    
-    error_t err = read_block(block, buffer);
-    if (err != OK)
-        return ERR_READ_FAILED;
-    
-    return OK;
+    return read_block(block, buffer);
 }
 
-error_t tagfs_write_block(uint32_t block, const void *buffer) {
+error_t tagfs_write_block(uint32_t block, const void *buffer)
+{
     if (!buffer)
         return ERR_NULL_POINTER;
+    return write_block(block, buffer) == 0 ? OK : ERR_WRITE_FAILED;
+}
 
-    error_t err = write_block(block, buffer);
-    if (err != OK)
-        return ERR_WRITE_FAILED;
-
+error_t TagFSReadRun(uint32_t first, uint32_t count, void *buffer)
+{
+    if (volume_medium_gone())
+        return ERR_DEVICE_NOT_READY;
+    if (tagfs_volume_read(block_to_vlba(first), count * TAGFS_BLOCK_SECTORS, buffer) != 0) {
+        TagFSNoteReadRefused();
+        return ERR_READ_FAILED;
+    }
     return OK;
 }
 
@@ -2084,9 +1868,6 @@ error_t tagfs_init(void) {
      * table itself (helm/helm.c); the one Helm per file it exists to provide
      * is what goes.
      */
-
-    // Initialize read-ahead cache FIRST — read_block uses it before the rest of init
-    ReadAheadInit();
 
     /* --- Stand on the ground, and read the deed that describes it --- */
     error_t ground_rc = volume_take_ground(g_tagfs_seat);
@@ -2374,7 +2155,11 @@ static void tagfs_clear_the_ground(void)
     BlockMapUnmount();
 
     TagFS_CowShutdown();
-    BraidShutdown();
+    if (g_state.braid) {
+        BraidShutdown(g_state.braid);
+        kfree(g_state.braid);
+        g_state.braid = NULL;
+    }
     IntegrityShutdown();
     TagFS_TestsShutdown();
     DiskBookShutdown();
@@ -2652,113 +2437,36 @@ void tagfs_close(TagFSFileHandle *handle)
         return;
     HelmViewLetGo(handle);
     ofe_release(handle->ofe);
+    ReadAheadLetGo(handle);
     kfree(handle->extents);
     kfree(handle);
 }
 
-static error_t tagfs_read_inside(TagFSFileHandle *handle, void *buffer, uint64_t size,
-                                 uint64_t *out_read);
-
-error_t tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size, uint64_t *out_read)
+error_t TagFSReadInto(TagFSFileHandle *handle, const ReadSink *sink, uint64_t *out_read)
 {
     if (!out_read)
         return ERR_INVALID_ARGUMENT;
     *out_read = 0;
-    if (!buffer)
+    if (!sink || (!sink->kernel && !sink->vmm))
         return ERR_INVALID_ARGUMENT;
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
     error_t rc = handle_belongs_here(handle, "read")
-                     ? tagfs_read_inside(handle, buffer, size, out_read)
+                     ? TagFSReadStream(handle, sink, out_read)
                      : ERR_TAGFS_INVALID_HANDLE;
     tagfs_leave();
     return rc;
 }
 
-static error_t tagfs_read_inside(TagFSFileHandle *handle, void *buffer, uint64_t size,
-                                 uint64_t *out_read)
+error_t tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size, uint64_t *out_read)
 {
-    if (size == 0 || handle->offset >= handle->file_size)
-        return OK;
-
-    uint64_t remaining = handle->file_size - handle->offset;
-    if (size > remaining)
-        size = remaining;
-
-    /* The block goes through the heap: a kernel stack has no room for 4 KiB. */
-    uint8_t *block_buf = (uint8_t *)kmalloc(TAGFS_BLOCK_SIZE);
-    if (!block_buf)
-        return ERR_NO_MEMORY;
-    uint8_t *out        = (uint8_t *)buffer;
-    uint64_t bytes_read = 0;
-    uint32_t disk_block = 0, left = 0;
-    error_t  rc         = OK;
-
-    while (bytes_read < size)
-    {
-        uint64_t file_pos        = handle->offset + bytes_read;
-        uint64_t k               = file_pos / TAGFS_BLOCK_SIZE;
-        uint32_t offset_in_block = (uint32_t)(file_pos % TAGFS_BLOCK_SIZE);
-
-        if (bytes_read > 0 && left > 0) {
-            disk_block++;
-            left--;
-        } else if (!PlotFind(handle->extents, handle->extent_count, k, &disk_block, &left)) {
-            /* The file claims more bytes than its extents describe. Whatever
-             * lies past the last extent is not a hole to be filled with zeros;
-             * it is metadata that does not match the medium. */
-            kprintf("[TagFS] file %u: no extent covers byte %llu of %llu — the "
-                    "metadata describes more file than there are blocks\n",
-                    handle->file_id, (unsigned long long)file_pos,
-                    (unsigned long long)handle->file_size);
-            rc = ERR_METADATA_CORRUPTED;
-            break;
-        }
-
-        if (read_block(disk_block, block_buf) != 0)
-        {
-            /*
-             * A block the medium would not give up is the read's answer, never
-             * a shorter count: a caller that took a short read of zeros for
-             * data once started a process image of nothing (the program loader,
-             * a flash drive pulled while running). Bytes already copied stay in
-             * the caller's buffer and the handle does not move.
-             */
-            kprintf("[TagFS] file %u: block %u would not read — %llu of %llu "
-                    "bytes had come back before the medium stopped answering\n",
-                    handle->file_id, disk_block,
-                    (unsigned long long)bytes_read, (unsigned long long)size);
-            rc = ERR_READ_FAILED;
-            break;
-        }
-
-        uint32_t chunk = TAGFS_BLOCK_SIZE - offset_in_block;
-        if (chunk > size - bytes_read)
-            chunk = (uint32_t)(size - bytes_read);
-
-        memcpy(out + bytes_read, block_buf + offset_in_block, chunk);
-        bytes_read += chunk;
-
-        /*
-         * Read-ahead, and only when the next block is NOT already in hand.
-         * Run after every block, it asked for four when three were cached, and
-         * the window crawled a block at a time — one command per 4 KiB on a
-         * flash drive. Waiting for the miss moves a whole run, and a whole run
-         * of neighbours is one command (ReadAheadPrefetch).
-         */
-        if (offset_in_block == 0 && chunk == TAGFS_BLOCK_SIZE && left > 0 &&
-            !ReadAheadHas(disk_block + 1)) {
-            ReadAheadPrefetch(disk_block + 1, left < TAGFS_READ_AHEAD_BLOCKS
-                                                  ? left : TAGFS_READ_AHEAD_BLOCKS);
-        }
+    ReadSink sink = { .kernel = buffer, .bytes = size };
+    if (!buffer) {
+        if (out_read)
+            *out_read = 0;
+        return ERR_INVALID_ARGUMENT;
     }
-
-    kfree(block_buf);
-    if (rc != OK)
-        return rc;
-    handle->offset += bytes_read;
-    *out_read = bytes_read;
-    return OK;
+    return TagFSReadInto(handle, &sink, out_read);
 }
 
 error_t tagfs_write(TagFSFileHandle *handle, const PlotSource *src, uint64_t *out_written)

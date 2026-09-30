@@ -2513,8 +2513,9 @@ run_holdground() {
     grep -q "was opened on an earlier mounting of this volume" "$S"
     chk $? "a read through the handle from the previous mounting is refused"
 
-    grep -q "HOLDGROUND. a read through the handle from before returned -1" "$S"
-    chk $? "and the refusal reaches the caller as a failure"
+    # 855 is ERR_TAGFS_INVALID_HANDLE: the read's own code, never folded (S3b).
+    grep -q "HOLDGROUND. a read through the handle from before answered 855" "$S"
+    chk $? "and the refusal reaches the caller as its own code, ERR_TAGFS_INVALID_HANDLE"
 
     # ── ‼ THE OPEN-FILE TABLE BELONGS TO THE MACHINE ───────────────────────
     grep -q "HOLDGROUND. the open-file entry that handle owns is still in the table" "$S"
@@ -7557,7 +7558,6 @@ run_censusmut() {
 # rows, per road. A sweep's LIFTED count is how many allocations the operation
 # takes on a fresh volume of this tree.
 STAND_HELD="
-integrity_reports_every_rot|1.10|of 65 rotten blocks, reported 64|of 65 rotten blocks, reported 65
 "
 
 # The last thing a halt says about the volume, whichever way its sync went
@@ -7821,21 +7821,14 @@ stand_mut_boot() {
     [ $? != 2 ]
 }
 
-# stand_fix_on — the real fix of every caveated test, emulated.
+# stand_fix_on — the real fix of every caveated test, emulated: one edit per
+# row of STAND_HELD, each taken out by the step that lifts its row. Since 1.10
+# no row is held, so there is no fix to emulate.
 stand_fix_on() {
-    # 1.10: the report ring holds every rot the test plants.
-    mutate src/kernel/tagfs/integrity/integrity.c
-    python3 - <<'EOF'
-p = "src/kernel/tagfs/integrity/integrity.c"
-s = open(p).read()
-a = "#define ROT_RING_MAX      64\n"
-assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
-open(p, "w").write(s.replace(a, "#define ROT_RING_MAX      128   /* logcheck mutation: the ring holds every rot the test plants */\n", 1))
-EOF
-    mut_done src/kernel/tagfs/integrity/integrity.c "logcheck mutation" 1
+    :
 }
 stand_fix_off() {
-    restore src/kernel/tagfs/integrity/integrity.c
+    :
 }
 
 # stand_mech_on GROUP — the fault mechanisms broken, a few at a time: each
@@ -9007,63 +9000,56 @@ EOF2
     mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 1
 }
 
-# stackguard_frame_on grow|lift — ReadAheadPrefetch's block buffer, 512 bytes
-# more of it, or none of it on the stack.
+# stackguard_frame_on grow|lift — DiskBookValidateAndReplay's record, held
+# until 2.5: 512 bytes more beside it, or none of it on the stack.
 stackguard_frame_on() {
-    mutate src/kernel/tagfs/tagfs.c
+    mutate src/kernel/tagfs/disk_book/disk_book.c
     python3 - "$1" <<'EOF2'
 import sys
-p = "src/kernel/tagfs/tagfs.c"
+p = "src/kernel/tagfs/disk_book/disk_book.c"
 s = open(p).read()
-anchor = "            uint8_t tmp[TAGFS_BLOCK_SIZE];\n            if (tagfs_volume_read(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {\n"
-assert s.count(anchor) == 1, "stackguard ReadAheadPrefetch anchor missing"
+anchor = "        DiskBookEntry e;\n        if (read_entry(i, &e) != OK)\n"
+assert s.count(anchor) == 1, "stackguard DiskBookValidateAndReplay anchor missing"
 if sys.argv[1] == "grow":
-    new = ("            uint8_t tmp[TAGFS_BLOCK_SIZE];\n"
-           "            volatile uint8_t logcheck_more[512];   /* logcheck mutation: a held frame grows */\n"
-           "            logcheck_more[i % 512] = 1;\n"
-           "            if (tagfs_volume_read(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {\n")
+    new = ("        DiskBookEntry e;\n"
+           "        volatile uint8_t logcheck_more[512];   /* logcheck mutation: a held frame grows */\n"
+           "        logcheck_more[i % 512] = 1;\n"
+           "        if (read_entry(i, &e) != OK)\n")
 else:
-    new = ("            static uint8_t tmp[TAGFS_BLOCK_SIZE];   /* logcheck mutation: the block leaves the stack */\n"
-           "            if (tagfs_volume_read(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {\n")
+    new = ("        static DiskBookEntry e;   /* logcheck mutation: the record leaves the stack */\n"
+           "        if (read_entry(i, &e) != OK)\n")
 open(p, "w").write(s.replace(anchor, new, 1))
 EOF2
-    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 1
+    mut_done src/kernel/tagfs/disk_book/disk_book.c "logcheck mutation" 1
 }
 
-# The 512 bytes go into ObjRead, the root of the heaviest chain: a function
-# reached through the op table is never inlined, so the bytes land in its own
-# frame, which stays under the limit, and nothing but the reach moves.
+# stackguard_reach_on BYTES — a reach line held at BYTES, when the reach is
+# within its budget and no line is due.
 stackguard_reach_on() {
-    mutate src/kernel/core/decks/storage/storage_ops.c
-    python3 - <<'EOF2'
-p = "src/kernel/core/decks/storage/storage_ops.c"
-s = open(p).read()
-anchor = "    uint64_t waybill = (op->param_size >= 20) ? param_u64(op, 12) : 0;\n    Crate   *out     = &crates[op->out_crate];\n"
-assert s.count(anchor) == 1, "stackguard ObjRead anchor missing"
-s = s.replace(anchor, anchor +
-    "    volatile uint8_t logcheck_reach[512];   /* logcheck mutation: 512 bytes on the way to the medium */\n"
-    "    logcheck_reach[file_id % 512] = 1;\n", 1)
-open(p, "w").write(s)
-EOF2
-    mut_done src/kernel/core/decks/storage/storage_ops.c "logcheck mutation" 1
+    mutate "$STACKGUARD_HELD"
+    printf 'reach  %s  9.99 logcheck mutation: a reach held that is within its budget\n' "$1" \
+        >>"$STACKGUARD_HELD"
+    mut_done "$STACKGUARD_HELD" "logcheck mutation" 1
 }
 
-stackguard_noreach_on() {
-    mutate "$STACKGUARD_HELD"
-    python3 - "$STACKGUARD_HELD" <<'EOF2'
+# stackguard_budget_on BYTES — the budget the reach is judged against, lowered
+# to BYTES: no reach line, so the budget itself is the rule.
+stackguard_budget_on() {
+    mutate tools/check_stack_usage.py
+    python3 - "$1" <<'EOF2'
 import sys
-p = sys.argv[1]
+p = "tools/check_stack_usage.py"
 s = open(p).read()
-lines = [l for l in s.splitlines(True) if l.startswith("reach ")]
-assert len(lines) == 1, "stackguard reach line missing"
-open(p, "w").write(s.replace(lines[0], "# logcheck mutation: the reach caveat is gone\n", 1))
+anchor = "BUDGET = 4096\n"
+assert s.count(anchor) == 1, "stackguard BUDGET anchor missing"
+open(p, "w").write(s.replace(anchor, "BUDGET = %s   # logcheck mutation: the budget below the reach\n" % sys.argv[1], 1))
 EOF2
-    mut_done "$STACKGUARD_HELD" "logcheck mutation" 1
+    mut_done tools/check_stack_usage.py "logcheck mutation" 1
 }
 
 run_stackguard() {
     echo "== stackguard: a block buffer on the kernel stack stops the link =="
-    local held_frames held_reach n said reach_now over held L
+    local held_frames n said reach_now over held L
 
     rm -f build/.stack_usage.ok
     build
@@ -9074,9 +9060,12 @@ run_stackguard() {
     [ -n "$over" ] && [ "$over" = "$held" ] && [ "$held_frames" = "$held" ] \
         && [ "$held" = "$(grep -cE '^src/' "$STACKGUARD_HELD")" ]
     chk $? "stackguard: the clean tree holds every frame over the limit, and says each ($held_frames said; ${said:-no summary})"
-    held_reach=$(awk '$1 == "reach" { print $2 }' "$STACKGUARD_HELD")
-    grep -qE "^caveat held: stack reach $held_reach B > 4096 — .* — discharged by step [0-9.]+[a-z]*$" "$SCRATCH/build.log"
-    chk $? "stackguard: the reach is held at its measured $held_reach bytes, under its step"
+    # Since 1.10 the reach is within its budget and no line holds it.
+    reach_now=$(echo "$said" | sed -nE 's/.*; reach ([0-9]+) B against a budget of 4096 B.*/\1/p')
+    [ -n "$reach_now" ] && [ "$reach_now" -le 4096 ] \
+        && ! awk '$1 == "reach"' "$STACKGUARD_HELD" | grep -q . \
+        && ! grep -q '^caveat held: stack reach' "$SCRATCH/build.log"
+    chk $? "stackguard: the reach is ${reach_now:-?} bytes, within its budget of 4096, and no caveat holds it"
     # A recursion is named when the heaviest way to the medium runs through
     # one — the chain then carries it as {its frames} — and never otherwise.
     if grep -E '^\[stack\]   ' "$SCRATCH/build.log" | grep -q '{'; then
@@ -9096,42 +9085,42 @@ run_stackguard() {
     restore src/kernel/tagfs/tagfs.c
 
     # M2 — a held frame grows, by at least what was put on it.
-    held=$(stackguard_held ReadAheadPrefetch)
+    held=$(stackguard_held DiskBookValidateAndReplay)
     stackguard_frame_on grow
-    stackguard_red grow "^\[stack\] FAIL src/kernel/tagfs/tagfs.c:ReadAheadPrefetch grew to [0-9]+ bytes while its caveat holds it at $held "
-    n=$(sed -nE 's/.*ReadAheadPrefetch grew to ([0-9]+) bytes.*/\1/p' "$SCRATCH/build.stackguard.grow.log" | head -1)
+    stackguard_red grow "^\[stack\] FAIL src/kernel/tagfs/disk_book/disk_book.c:DiskBookValidateAndReplay grew to [0-9]+ bytes while its caveat holds it at $held "
+    n=$(sed -nE 's/.*DiskBookValidateAndReplay grew to ([0-9]+) bytes.*/\1/p' "$SCRATCH/build.stackguard.grow.log" | head -1)
     [ -n "$n" ] && [ "$n" -ge $((held + 512)) ]
-    chk $? "stackguard: ReadAheadPrefetch 512 bytes bigger stops the link, at ${n:-?} over its $held — $(stackguard_said grow)"
+    chk $? "stackguard: DiskBookValidateAndReplay 512 bytes bigger stops the link, at ${n:-?} over its $held — $(stackguard_said grow)"
 
     # The same mutant through the harness: said, not judged, linked, no stamp.
     L="$SCRATCH/build.stackguard.harness.log"
     make >"$L" 2>&1
     n=$?
     [ $n -eq 0 ] && grep -q "Nameplate pass 1" "$L" && [ ! -f build/.stack_usage.ok ] \
-        && grep -qE "^\[stack\] under the harness, said and not judged: src/kernel/tagfs/tagfs.c:ReadAheadPrefetch grew to [0-9]+ bytes while its caveat holds it at $held " "$L"
+        && grep -qE "^\[stack\] under the harness, said and not judged: src/kernel/tagfs/disk_book/disk_book.c:DiskBookValidateAndReplay grew to [0-9]+ bytes while its caveat holds it at $held " "$L"
     chk $? "stackguard: under HARNESS=on the same mutant links, the growth is said and not judged, and no stamp is left (make $n)"
-    restore src/kernel/tagfs/tagfs.c
+    restore src/kernel/tagfs/disk_book/disk_book.c
 
-    # M3 — a held frame's block leaves the stack: the caveat must be lifted.
+    # M3 — a held frame's buffer leaves the stack: the caveat must be lifted.
     stackguard_frame_on lift
-    stackguard_red lift "^\[stack\] FAIL caveat lifted early: stack src/kernel/tagfs/tagfs.c:ReadAheadPrefetch — .* — (is [0-9]+ bytes, no longer over 1024|is no longer a function of its own): the test does not test what it claims, or step [0-9.]+[a-z]* already landed — lift the caveat$"
-    chk $? "stackguard: ReadAheadPrefetch with its block off the stack is a caveat lifted early — $(stackguard_said lift)"
-    restore src/kernel/tagfs/tagfs.c
+    stackguard_red lift "^\[stack\] FAIL caveat lifted early: stack src/kernel/tagfs/disk_book/disk_book.c:DiskBookValidateAndReplay — .* — (is [0-9]+ bytes, no longer over 1024|is no longer a function of its own): the test does not test what it claims, or step [0-9.]+[a-z]* already landed — lift the caveat$"
+    chk $? "stackguard: DiskBookValidateAndReplay with its record off the stack is a caveat lifted early — $(stackguard_said lift)"
+    restore src/kernel/tagfs/disk_book/disk_book.c
 
-    # M4 — the reach grows, and it is the only thing said to be wrong.
-    stackguard_reach_on
-    stackguard_red reach "^\[stack\] FAIL reach grew to [0-9]+ bytes while its caveat holds it at $held_reach: "
-    reach_now=$(sed -nE 's/.*reach grew to ([0-9]+) bytes.*/\1/p' "$SCRATCH/build.stackguard.reach.log" | head -1)
-    [ -n "$reach_now" ] && [ "$reach_now" -ge $((held_reach + 512)) ] \
-        && [ "$(grep -c '^\[stack\] FAIL' "$SCRATCH/build.stackguard.reach.log")" = 1 ]
-    chk $? "stackguard: 512 bytes in ObjRead grow the reach to ${reach_now:-?} over its $held_reach, and nothing else fails — $(stackguard_said reach)"
-    restore src/kernel/core/decks/storage/storage_ops.c
-
-    # M5 — no reach line: the budget itself is the rule.
-    stackguard_noreach_on
-    stackguard_red noreach "^\[stack\] FAIL reach $held_reach bytes, over its budget of 4096: ObjRead "
-    chk $? "stackguard: with the reach caveat gone, $held_reach bytes against 4096 stops the link — $(stackguard_said noreach)"
+    # M4 — a reach line where the reach is within its budget is a caveat
+    # lifted early, and it is the only thing said to be wrong.
+    stackguard_reach_on "${reach_now:-4096}"
+    stackguard_red reach "^\[stack\] FAIL caveat lifted early: stack reach — logcheck mutation: a reach held that is within its budget — is [0-9]+ bytes, within 4096: "
+    [ "$(grep -c '^\[stack\] FAIL' "$SCRATCH/build.stackguard.reach.log")" = 1 ]
+    chk $? "stackguard: a reach line held within the budget stops the link as lifted early, and nothing else fails — $(stackguard_said reach)"
     restore "$STACKGUARD_HELD"
+
+    # M5 — no reach line: the budget itself is the rule. Lowered below the
+    # reach, it stops the link.
+    stackguard_budget_on $(( ${reach_now:-4096} - 1 ))
+    stackguard_red noreach "^\[stack\] FAIL reach [0-9]+ bytes, over its budget of $(( ${reach_now:-4096} - 1 )): "
+    chk $? "stackguard: with no reach line, a reach of ${reach_now:-?} bytes against a budget one byte short stops the link — $(stackguard_said noreach)"
+    restore tools/check_stack_usage.py
 
     build   # every put-back discards the image; leave one built from clean sources
     [ -f build/.stack_usage.ok ]
