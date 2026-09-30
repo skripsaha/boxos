@@ -28,12 +28,16 @@
  * rests in Fallow until the handle is closed (fallow.h, condition 3), so a
  * delete under a reader never hands the reader's blocks to another file.
  *
- * ‼ NOBODY WAITS FOR A MEDIUM THAT LEFT (RT-13). From the moment the volume
- * sees its medium gone no waiter is queued behind a holder and none is handed
- * a Helm: each one waiting is answered instead (HelmWaiter.gone), with the
- * count of changes inked since the last settled cycle — what left with the
- * medium. A waiter holds the volume's door, so the volume is let go of only
- * once every one of them has its answer.
+ * ‼ THE FIFO WAITS WITH THE OPEN BOOK (RT-13). From the moment the volume sees
+ * its medium gone nobody new is queued behind a holder — one who asks is
+ * answered at once (HelmWaiter.gone) — and a holder who lets go hands the
+ * Helm to nobody: its Helm is parked, its FIFO held as the volume's open book
+ * is (mount/away.h). When the same volume comes back as it was left, every
+ * parked Helm is handed to its first waiter and the writes go on; when the
+ * book is given up, every waiter is answered with the count of changes no
+ * cycle settled — what left with the medium. A waiter holds the volume's
+ * door, so the volume is let go of only once every one of them has its
+ * answer.
  *
  * The open-file table the Helm lives in belongs to the machine, not to the
  * volume: a mount leaves it alone. Its lock and every FileHelm's are leaves.
@@ -52,13 +56,13 @@ bool           ofe_listed(const OpenFileEntry* ofe, uint32_t* out_refs);
 
 /* The Helm for `w`: true when it was free and is w's now; false when w waits
  * in the FIFO, and w->hand runs once it is w's — on the core that let go, with
- * no TagFS lock held — or when the medium left and the Helm is held: w->gone
- * has answered it before this returns. Either way a false w is not the
- * caller's to touch again. */
+ * no TagFS lock held — or when the medium left and the Helm is held or
+ * parked: w->gone has answered it before this returns. Either way a false w is
+ * not the caller's to touch again. */
 bool     HelmAsk(OpenFileEntry* ofe, HelmWaiter* w);
 
 /* The Helm for `w` only when it is free: false, and w not queued, when it is
- * held. */
+ * held or parked. */
 bool     HelmTry(OpenFileEntry* ofe, HelmWaiter* w);
 
 /* The Helm for a caller in the kernel, only when it is free: such a caller
@@ -67,14 +71,15 @@ bool     HelmTry(OpenFileEntry* ofe, HelmWaiter* w);
 bool     HelmTakeNow(TagFSFileHandle* handle, HelmWaiter* here);
 
 /* `w` lets go; the first waiter, if any, is handed the Helm (HelmHand) — or,
- * once the medium left, every waiter is answered (w->gone) and none is. */
+ * once the medium left, none is: the Helm is parked with its FIFO. */
 void     HelmLetGo(OpenFileEntry* ofe, HelmWaiter* w);
 
-/* The medium under the volume left: every waiter in every Helm's FIFO is
- * answered at the next service point (HelmRunReady), the drain core knocked
- * awake for it. Called where the departure is noticed — inside a medium
- * command, perhaps — so nothing is answered here. */
-void     HelmMediumLeft(void);
+/* The fate of the open book, for every Helm's FIFO at the next service point
+ * (HelmRunReady), the drain core knocked awake for it — nothing is done where
+ * the fate is decided. Given up: every waiter answered (w->gone) with `lost`.
+ * Taken up: every parked Helm handed to its first waiter. */
+void     HelmBookGivenUp(uint64_t lost);
+void     HelmBookTakenUp(void);
 
 /* The extents the holder of the file's Helm claimed room for in its record
  * (RT-19, InkRoomClaim): 0 when the file is not open or nothing is claimed.
@@ -93,16 +98,15 @@ void     HelmVacate(uint32_t file_id);
  * The drain core is knocked awake for it. */
 void     HelmReady(HelmWaiter* w);
 
-/* The service point: the waiters of a medium that left answered, then every
- * waiter HelmReady had listed when it began run here, the scheduler held off
- * this core for each (SchedulerHoldHere). One listed meanwhile — a write come
- * back for its next window — waits for the next service point, so the core
- * goes round its loop between two windows. One load when none is. */
+/* The service point: what the open book's fate owes the FIFOs done, then
+ * every waiter HelmReady had listed when it began run here, the scheduler held
+ * off this core for each (SchedulerHoldHere). One listed meanwhile — a write
+ * come back for its next window — waits for the next service point, so the
+ * core goes round its loop between two windows. One load when none is. */
 void     HelmRunReady(void);
 
-/* Whether a service point has work: a waiter listed, or the waiters of a
- * medium that left still owed their answer. An idle core does it before it
- * sleeps. */
+/* Whether a service point has work: a waiter listed, or the FIFOs still owed
+ * the open book's fate. An idle core does it before it sleeps. */
 bool     HelmReadyListed(void);
 
 /* Holders and waiters of every Helm: work the machine still owes a caller. */

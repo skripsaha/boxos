@@ -77,6 +77,19 @@ bool     VolumeFlushKept(uint64_t need);
  */
 error_t  VolumeFlushFor(uint64_t need);
 
+/*
+ * Every write of the volume whose completion was seen names, read after it,
+ * the smallest flush that proves it — and whether a kept flush covers every
+ * one of them is whether a medium that lost its power just now lost anything
+ * the volume wrote: a cache the medium had not flushed goes with the power.
+ * A medium that leaves and comes back is taken up as it was held only when
+ * the answer is yes (mount/away.h). VolumeWriteSeen: after the completion of
+ * a write of the volume, on either road; VolumeWritesKept: whether every write
+ * seen so far is covered.
+ */
+void     VolumeWriteSeen(void);
+bool     VolumeWritesKept(void);
+
 // ============================================================================
 // Scribe — one writer of a structure at a time, and a caller who waited sees
 // whether his change was written

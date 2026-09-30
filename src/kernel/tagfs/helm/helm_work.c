@@ -78,7 +78,9 @@ static PlotSource HelmWindowOf(const PlotSource *src, uint64_t from, uint64_t at
  * part way keeps what landed before the stop and says why; ground it took past
  * that goes back (CR-13), and a window that inks nothing gives back everything
  * it took (CR-1) — a file given up meanwhile among them: its Ink finds no
- * record.
+ * record. A stop the medium's leaving explains declares nothing of the window
+ * written (RT-13): what landed of it may be in a cache that went with the
+ * medium.
  */
 static error_t HelmWriteWindowOnce(TagFSFileHandle *handle, const PlotSource *src,
                                    uint64_t *inked)
@@ -97,6 +99,8 @@ static error_t HelmWriteWindowOnce(TagFSFileHandle *handle, const PlotSource *sr
     }
     if (rc == OK)
         rc = PlotWriteBlocks(&plot, at, &window, &done);
+    if (rc == ERR_DEVICE_NOT_READY)
+        done = 0;
     if (done > 0) {
         InkReceipt receipt;
         error_t    kept = PlotEndWrite(&plot, at, done);

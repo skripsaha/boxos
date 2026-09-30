@@ -503,17 +503,18 @@ MOUNTFAIL_MARK = $(BUILDDIR)/.mountfail.$(if $(filter on,$(MOUNTFAIL)),on,off)
 
 # ── HOLDGROUND=on ──────────────────────────────────────────────────────────
 #
-# A volume whose medium leaves is dropped and read again, and everything the
-# mount allocated goes back to the allocator at that moment. On a desk that is
-# always safe, because the medium comes back while the machine is idle and
-# there is nobody inside the volume to be protected from it — so every check
-# about the barrier that stops it would be green by construction.
+# A volume whose medium leaves and does not come back as it was left is
+# dropped and read again (its open book given up, tagfs/mount/away.h), and
+# everything the mount allocated goes back to the allocator at that moment. On
+# a desk that is always safe, because the medium comes back while the machine
+# is idle and there is nobody inside the volume to be protected from it — so
+# every check about the barrier that stops it would be green by construction.
 #
 # This key puts somebody there: at the moment the medium is noticed gone one
 # caller steps into the volume and stays for two seconds, and a file is held
 # open across the whole departure. It is a REPRODUCTION of the situation, not
-# a bug; see the block over TAGFS_HOLD_GROUND_MS in tagfs.c for the three
-# separate lines it makes falsifiable.
+# a bug; see the note in tagfs/mount/hold_ground.c for the separate lines it
+# makes falsifiable.
 ifeq ($(HOLDGROUND),on)
 CFLAGS += -DCONFIG_TAGFS_HOLD_GROUND=1
 endif

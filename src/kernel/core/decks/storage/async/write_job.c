@@ -33,8 +33,15 @@
  * back everything it took (CR-1), and never a block twice (W-DFREE): what it
  * took is the Plot's Stakes, given back once. A file given up meanwhile is not
  * written further: its Helm is vacated, and the job answers ERR_FILE_NOT_FOUND
- * with its Stakes given back. A job waiting for the Helm when the medium left
- * is answered ERR_DEVICE_NOT_READY, nothing of it done (RT-13).
+ * with its Stakes given back.
+ *
+ * ‼ A MEDIUM THAT LEFT (RT-13). A job asking for the Helm while the medium is
+ * away is answered ERR_DEVICE_NOT_READY, nothing of it done; one that waited
+ * in the FIFO from before the departure waits with the volume's open book
+ * (mount/away.h) — handed the Helm when the book is taken up, answered with
+ * what left with the medium when it is given up. And a window the medium's
+ * leaving stopped declares nothing of itself written: what landed of it is
+ * not inked, and its ground goes back.
  *
  * ‼ NO FLUSH OF ITS OWN. What a job inked reaches the medium with a Settle
  * cycle — the cycle's first flush covers the data before any record names it
@@ -146,8 +153,9 @@ static void wjob_run_ready(HelmWaiter *w)
         (void)wjob_turn(j);
 }
 
-/* The medium left while the job waited for the Helm: nothing of it was done,
- * and it is answered so, with what left with the medium. */
+/* The medium left while the job waited for the Helm, or it asked while the
+ * medium was away: nothing of it was done, and it is answered so, with what
+ * left with the medium. */
 static void wjob_gone(HelmWaiter *w, uint64_t lost)
 {
     WriteJob *j = container_of(w, WriteJob, helm);
@@ -315,11 +323,14 @@ static void wjob_say_refused(const WriteJob *j, error_t rc)
     };
     if (rc == OK)
         return;
-    if (j->medium_left)
+    if (j->medium_left && j->lost)
         kprintf("[Storage] file %u: the medium left while this %s waited for the file's Helm — "
-                "nothing of it was done, and %llu change(s) inked since the last settled cycle "
-                "left with the medium\n", j->file_id, what[j->kind],
-                (unsigned long long)j->lost);
+                "nothing of it was done, and %llu change(s) no cycle settled left with the "
+                "medium\n", j->file_id, what[j->kind], (unsigned long long)j->lost);
+    else if (j->medium_left)
+        kprintf("[Storage] file %u: the medium the volume lives on is away, and this %s was "
+                "never handed the file's Helm — nothing of it was done\n", j->file_id,
+                what[j->kind]);
     else if (j->kind == WRITE_JOB_WRITE)
         kprintf("[Storage] write to file %u refused (error %u): %llu of its %llu byte(s) are the "
                 "file's, and the file is %llu bytes\n", j->file_id, (unsigned)rc,

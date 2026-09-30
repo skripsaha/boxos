@@ -1,7 +1,6 @@
 #include "helm.h"
 #include "../ink/ink.h"
-#include "../settle/settle.h"
-#include "baton.h"       /* the Knock that wakes a service point for a ready waiter */
+#include "baton.h"      /* the Knock that wakes a service point for a ready waiter */
 #include "scheduler.h"   /* SchedulerHoldHere — a ready waiter's work is never switched away from */
 
 // ----------------------------------------------------------------------------
@@ -194,20 +193,11 @@ static void HelmHand(HelmWaiter *next)
     next->hand(next);
 }
 
-/* Changes inked since the last settled cycle: what a medium that left took
- * with it. */
-static uint64_t HelmLost(void)
+/* Every waiter of the chain answered that the medium left, with `lost` — the
+ * changes an open book given up took with it — and no TagFS lock held; each
+ * one's answer may free it, so the next is read first. */
+static void HelmAnswerGone(HelmWaiter *w, uint64_t lost)
 {
-    uint64_t inked   = InkedGen();
-    uint64_t settled = SettledGen();
-    return inked > settled ? inked - settled : 0;
-}
-
-/* Every waiter of the chain answered that the medium left, with no TagFS lock
- * held; each one's answer may free it, so the next is read first. */
-static void HelmAnswerGone(HelmWaiter *w)
-{
-    uint64_t lost = HelmLost();
     while (w) {
         HelmWaiter *next = w->next;
         w->next = NULL;
@@ -217,10 +207,12 @@ static void HelmAnswerGone(HelmWaiter *w)
     }
 }
 
-/* The medium's departure is read under the Helm's lock, and the walk that
- * answers the FIFOs takes every Helm's lock after the departure was latched:
- * a waiter is either queued before that take and answered by it, or asks
- * after it and is never queued. */
+/* The medium's departure is read under the Helm's lock: a waiter queued
+ * before it was latched is held with the open book — handed on when the book
+ * is taken up, answered by the walk that gives it up, which takes every
+ * Helm's lock once the book's fate is set — and one that asks after it is
+ * never queued: it is answered at once that the medium is away, nothing of
+ * its own lost. A parked Helm is held: its FIFO goes first. */
 bool HelmAsk(OpenFileEntry *ofe, HelmWaiter *w)
 {
     FileHelm *h = &ofe->helm;
@@ -228,7 +220,7 @@ bool HelmAsk(OpenFileEntry *ofe, HelmWaiter *w)
     __atomic_add_fetch(&s_helm_owed, 1u, __ATOMIC_ACQ_REL);
 
     TagFSLockTake(&h->lock);
-    bool mine = h->holder == NULL;
+    bool mine = h->holder == NULL && !h->parked;
     bool gone = !mine && TagFSMediumLeft();
     if (mine) {
         h->holder = w;
@@ -241,7 +233,7 @@ bool HelmAsk(OpenFileEntry *ofe, HelmWaiter *w)
     }
     TagFSLockDrop(&h->lock);
     if (gone)
-        HelmAnswerGone(w);
+        HelmAnswerGone(w, 0);
     return mine;
 }
 
@@ -251,7 +243,7 @@ bool HelmTry(OpenFileEntry *ofe, HelmWaiter *w)
     w->next = NULL;
 
     TagFSLockTake(&h->lock);
-    bool mine = h->holder == NULL;
+    bool mine = h->holder == NULL && !h->parked;
     if (mine)
         h->holder = w;
     TagFSLockDrop(&h->lock);
@@ -272,12 +264,9 @@ void HelmLetGo(OpenFileEntry *ofe, HelmWaiter *w)
         return;
     }
     HelmWaiter *next = h->first;
-    HelmWaiter *gone = NULL;
     if (next && TagFSMediumLeft()) {
-        gone     = next;
-        next     = NULL;
-        h->first = NULL;
-        h->last  = NULL;
+        h->parked = true;       /* the FIFO waits with the open book */
+        next      = NULL;
     } else if (next) {
         h->first = next->next;
         if (!h->first)
@@ -290,7 +279,6 @@ void HelmLetGo(OpenFileEntry *ofe, HelmWaiter *w)
     __atomic_sub_fetch(&s_helm_owed, 1u, __ATOMIC_ACQ_REL);
     if (next)
         HelmHand(next);
-    HelmAnswerGone(gone);
 }
 
 bool HelmTakeNow(TagFSFileHandle *handle, HelmWaiter *here)
@@ -367,26 +355,44 @@ void HelmReady(HelmWaiter *w)
     KnockOn(&s_ready_knock);
 }
 
-static void HelmAnswerLeft(void);
-static volatile uint32_t s_left_owed;   /* the medium left: the FIFOs are owed their answer */
+/* What the open book's fate owes the FIFOs, walked at a service point. */
+typedef enum {
+    HELM_BOOK_NOTHING = 0,
+    HELM_BOOK_ANSWER,       /* given up: every waiter answered */
+    HELM_BOOK_HAND,         /* taken up: every parked Helm handed on */
+} HelmBookOwed;
+
+static void HelmWalkBook(HelmBookOwed owed, uint64_t lost);
+static volatile uint32_t s_book_owed;   /* HelmBookOwed */
+static volatile uint64_t s_book_lost;
 
 bool HelmReadyListed(void)
 {
     return __atomic_load_n(&s_ready_count, __ATOMIC_ACQUIRE) != 0 ||
-           __atomic_load_n(&s_left_owed, __ATOMIC_ACQUIRE) != 0;
+           __atomic_load_n(&s_book_owed, __ATOMIC_ACQUIRE) != HELM_BOOK_NOTHING;
 }
 
-void HelmMediumLeft(void)
+void HelmBookGivenUp(uint64_t lost)
 {
-    __atomic_store_n(&s_left_owed, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_book_lost, lost, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_book_owed, (uint32_t)HELM_BOOK_ANSWER, __ATOMIC_RELEASE);
+    KnockOn(&s_ready_knock);
+}
+
+void HelmBookTakenUp(void)
+{
+    __atomic_store_n(&s_book_owed, (uint32_t)HELM_BOOK_HAND, __ATOMIC_RELEASE);
     KnockOn(&s_ready_knock);
 }
 
 void HelmRunReady(void)
 {
-    if (__atomic_load_n(&s_left_owed, __ATOMIC_ACQUIRE) &&
-        __atomic_exchange_n(&s_left_owed, 0u, __ATOMIC_ACQ_REL))
-        HelmAnswerLeft();
+    if (__atomic_load_n(&s_book_owed, __ATOMIC_ACQUIRE) != HELM_BOOK_NOTHING) {
+        HelmBookOwed owed = (HelmBookOwed)__atomic_exchange_n(
+            &s_book_owed, (uint32_t)HELM_BOOK_NOTHING, __ATOMIC_ACQ_REL);
+        if (owed != HELM_BOOK_NOTHING)
+            HelmWalkBook(owed, __atomic_load_n(&s_book_lost, __ATOMIC_ACQUIRE));
+    }
 
     for (uint32_t listed = __atomic_load_n(&s_ready_count, __ATOMIC_ACQUIRE); listed > 0;
          listed--) {
@@ -410,7 +416,7 @@ void HelmRunReady(void)
 }
 
 // ----------------------------------------------------------------------------
-// The FIFOs of a medium that left (RT-13)
+// The FIFOs of a medium that left: held with the open book (RT-13)
 // ----------------------------------------------------------------------------
 
 /* The entry the walk visits after `e` — the next of its bucket, or the first
@@ -427,27 +433,45 @@ static OpenFileEntry *HelmWalkNext(OpenFileEntry *e, uint32_t *bucket)
     return n;
 }
 
-/* One Helm's FIFO taken whole under its lock, and each waiter answered. */
-static void HelmAnswerFifo(OpenFileEntry *e)
+/* One Helm, as the book's fate says: its FIFO taken whole under its lock and
+ * each waiter answered, or — parked — its first waiter handed the Helm. */
+static void HelmBookFifo(OpenFileEntry *e, HelmBookOwed owed, uint64_t lost)
 {
-    FileHelm *h = &e->helm;
+    FileHelm   *h     = &e->helm;
+    HelmWaiter *chain = NULL;
+    HelmWaiter *next  = NULL;
+
     TagFSLockTake(&h->lock);
-    HelmWaiter *chain = h->first;
-    h->first = NULL;
-    h->last  = NULL;
+    if (owed == HELM_BOOK_ANSWER) {
+        chain    = h->first;
+        h->first = NULL;
+        h->last  = NULL;
+    } else if (h->parked && h->holder == NULL && h->first) {
+        next     = h->first;
+        h->first = next->next;
+        if (!h->first)
+            h->last = NULL;
+        next->next = NULL;
+        h->holder  = next;
+    }
+    h->parked = false;
     TagFSLockDrop(&h->lock);
-    HelmAnswerGone(chain);
+
+    if (next)
+        HelmHand(next);
+    HelmAnswerGone(chain, lost);
 }
 
 /*
- * Every open file's FIFO, with nothing allocated: the walk holds a reference
+ * Every open file's Helm, with nothing allocated: the walk holds a reference
  * on the entry it stands on, so the entry's place in its bucket stays, and
  * takes the next one under the table's lock. A table regrown meanwhile has
  * moved every entry to another bucket, and the walk begins again — an entry
- * visited twice finds its FIFO empty the second time. It ends: no waiter is
- * queued once the departure is latched, and a table only regrows by doubling.
+ * visited twice finds its FIFO empty, or no longer parked, the second time.
+ * It ends: no waiter is queued and no Helm parked but while the departure is
+ * latched, and a table only regrows by doubling.
  */
-static void HelmAnswerLeft(void)
+static void HelmWalkBook(HelmBookOwed owed, uint64_t lost)
 {
     OpenFileEntry *at     = NULL;
     uint32_t       bucket = 0;
@@ -470,7 +494,7 @@ static void HelmAnswerLeft(void)
         ofe_release(at);
         if (!next)
             return;
-        HelmAnswerFifo(next);
+        HelmBookFifo(next, owed, lost);
         at = next;
     }
 }

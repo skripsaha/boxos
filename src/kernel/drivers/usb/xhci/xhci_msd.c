@@ -265,6 +265,16 @@ typedef struct XhciMsdUnit {
      * devices answer as often wrongly as not; told by the refusal itself. */
     bool     write_protected;
 
+    /* The device answered SYNCHRONIZE CACHE with ILLEGAL REQUEST or INVALID
+     * COMMAND OPERATION CODE: it does not carry the command out, and says so
+     * about itself, so for as long as it is seated it is not asked again —
+     * its word that it keeps what it acknowledges is all there is. Asked of
+     * the command itself, never with MODE SENSE page 08h, which flash drives
+     * answer wrongly as often as not (Linux sets skip_ms_page_8 for every
+     * usb-storage device, scsiglue.c). Each seating is a unit of its own, so
+     * the answer is remembered for the seating it was given in. */
+    bool     sync_cache_unsupported;
+
     /*
      * Two counts, because the device and the filesystem measure in different
      * units and pretending otherwise is how a 4096-byte-sector drive gets read
@@ -2260,13 +2270,53 @@ int xhci_msd_write(uint8_t unit, uint64_t lba, uint32_t count, const void* buffe
  * run the command at all, both reported the transaction durable.
  *
  * So the device is asked why, the way msd_run_blocks in this same file already
- * asks, and only the answers that mean "there was nothing to synchronise" are
- * success. The list is closed, and is the one Linux's sd_sync_cache() keeps
- * under its own comment "this is no error here": ILLEGAL REQUEST, ASC 0x20
- * INVALID COMMAND OPERATION CODE, and ASC 0x3A MEDIUM NOT PRESENT. Everything
- * else — MEDIUM ERROR, HARDWARE ERROR, ABORTED COMMAND — is a flush that did
- * not happen, said out loud and returned as one.
+ * asks, and only the answer that means "there is nothing to synchronise" is
+ * success: ILLEGAL REQUEST, or ASC 0x20 INVALID COMMAND OPERATION CODE — a
+ * device that does not carry the command out. It is remembered for the
+ * seating and the device is not asked again (sync_cache_unsupported).
+ * Everything else — MEDIUM ERROR, HARDWARE ERROR, ABORTED COMMAND — is a flush
+ * that did not happen, said out loud and returned as one.
+ *
+ * ‼ AND NO MEDIUM IS NOT ON THAT LIST, THOUGH LINUX'S IS. sd_sync_cache()
+ * keeps ASC 0x3A MEDIUM NOT PRESENT beside the other two under "this is no
+ * error here", and so did this driver — so a card pulled out of its reader,
+ * or a stick whose medium went away while its cache was being committed,
+ * answered the durability barrier with success. A medium that is not there
+ * has kept nothing: it is a refusal, and the caller above hears it as one.
  */
+typedef enum {
+    MSD_FLUSH_KEPT = 0,     /* committed, or a device that has no such command */
+    MSD_FLUSH_REFUSED,      /* nothing it holds is known to be on the medium */
+    MSD_FLUSH_AGAIN,        /* a state change: the command was not run, ask again */
+} MsdFlushVerdict;
+
+/* What the device's refusal of the cache commit means, by the sense it gave —
+ * and, for a device that has no such command, the memory of it, said once. */
+static MsdFlushVerdict msd_flush_judge(XhciMsdUnit* u, uint8_t key, uint8_t asc,
+                                       uint8_t ascq)
+{
+    if (asc == ASC_NO_MEDIUM) {
+        kprintf("[USB disk %u] has no medium to commit its cache to (code "
+                "0x%02x/0x%02x) — nothing it held is known to be on the "
+                "medium\n", u->number, asc, ascq);
+        return MSD_FLUSH_REFUSED;
+    }
+    if (key == SENSE_ILLEGAL_REQUEST || asc == ASC_INVALID_OPCODE) {
+        if (!__atomic_exchange_n(&u->sync_cache_unsupported, true, __ATOMIC_ACQ_REL))
+            kprintf("[USB disk %u] does not carry out SYNCHRONIZE CACHE (sense key "
+                    "0x%x, code 0x%02x/0x%02x) — it is taken at its word that it "
+                    "keeps what it acknowledges, and is not asked again while it "
+                    "is seated\n", u->number, key, asc, ascq);
+        return MSD_FLUSH_KEPT;
+    }
+    if (key == SENSE_UNIT_ATTENTION) {
+        return MSD_FLUSH_AGAIN;
+    }
+    kprintf("[USB disk %u] could not commit its cache to the medium "
+            "(sense key 0x%x, code 0x%02x/0x%02x)\n", u->number, key, asc, ascq);
+    return MSD_FLUSH_REFUSED;
+}
+
 static int msd_flush_held(XhciMsdUnit* u, const uint8_t* cdb, uint8_t cdb_len)
 {
     uint64_t give_up_at = rdtsc() + cpu_ms_to_tsc(MSD_READY_PATIENCE_MS);
@@ -2296,18 +2346,9 @@ static int msd_flush_held(XhciMsdUnit* u, const uint8_t* cdb, uint8_t cdb_len)
             return -1;
         }
 
-        /* The refusals that ARE an answer: a device with nothing to
-         * synchronise, or no medium to synchronise to. */
-        if (key == SENSE_ILLEGAL_REQUEST || asc == ASC_INVALID_OPCODE ||
-            asc == ASC_NO_MEDIUM) {
-            return 0;
-        }
-
-        if (key != SENSE_UNIT_ATTENTION) {
-            kprintf("[USB disk %u] could not commit its cache to the medium "
-                    "(sense key 0x%x, code 0x%02x/0x%02x)\n",
-                    u->number, key, asc, ascq);
-            return -1;
+        MsdFlushVerdict verdict = msd_flush_judge(u, key, asc, ascq);
+        if (verdict != MSD_FLUSH_AGAIN) {
+            return verdict == MSD_FLUSH_KEPT ? 0 : -1;
         }
 
         /*
@@ -2335,13 +2376,18 @@ static int msd_flush_held(XhciMsdUnit* u, const uint8_t* cdb, uint8_t cdb_len)
     }
 }
 
-int xhci_msd_flush(uint8_t unit)
+/* A device that said it has no such command is not asked again while it is
+ * seated: its answer stands for every flush after it. */
+static bool msd_flush_answered_already(XhciMsdUnit* u)
 {
-    XhciMsdUnit* u = msd_take(unit);
-    if (!u) {
-        return -1;
-    }
+    return __atomic_load_n(&u->sync_cache_unsupported, __ATOMIC_ACQUIRE);
+}
 
+/* The cache commit put to the device, the caller holding the unit: its turn
+ * taken for the whole device, and given back — the caller then gives the unit
+ * back and ends the stand (msd_stand_done). */
+static int msd_flush_asked(XhciMsdUnit* u)
+{
     /* SYNCHRONIZE CACHE with a zero block count means "all of it". */
     uint8_t cdb[16] = {0};
     uint8_t cdb_len;
@@ -2356,8 +2402,56 @@ int xhci_msd_flush(uint8_t unit)
     msd_gate_enter(u, BERTH_WHOLE);
     int result = msd_flush_held(u, cdb, cdb_len);
     msd_gate_leave(u);
-    msd_give_back(u);
-    msd_stand_done("a cache commit it stood over on a USB disk");
-
     return result;
 }
+
+int xhci_msd_flush(uint8_t unit)
+{
+    XhciMsdUnit* u = msd_take(unit);
+    if (!u) {
+        return -1;
+    }
+    if (msd_flush_answered_already(u)) {
+        msd_give_back(u);
+        return 0;
+    }
+
+    int result = msd_flush_asked(u);
+    msd_give_back(u);
+    msd_stand_done("a cache commit it stood over on a USB disk");
+    return result;
+}
+
+#ifdef CONFIG_VOLUME_TESTS
+int xhci_msd_flush_answered(uint8_t unit, uint8_t key, uint8_t asc, uint8_t ascq)
+{
+    XhciMsdUnit* u = msd_take(unit);
+    if (!u) {
+        return -1;
+    }
+    if (msd_flush_answered_already(u)) {
+        msd_give_back(u);
+        return 0;
+    }
+
+    MsdFlushVerdict verdict = msd_flush_judge(u, key, asc, ascq);
+    int result = verdict == MSD_FLUSH_KEPT ? 0 : -1;
+    if (verdict == MSD_FLUSH_AGAIN) {
+        result = msd_flush_asked(u);
+        msd_give_back(u);
+        msd_stand_done("a cache commit it stood over on a USB disk");
+        return result;
+    }
+    msd_give_back(u);
+    return result;
+}
+
+void xhci_msd_forget_flush_answer(uint8_t unit)
+{
+    XhciMsdUnit* u = msd_take(unit);
+    if (u) {
+        __atomic_store_n(&u->sync_cache_unsupported, false, __ATOMIC_RELEASE);
+        msd_give_back(u);
+    }
+}
+#endif

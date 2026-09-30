@@ -142,6 +142,13 @@ extern ATADevice  g_ata_devices[ATA_DRIVE_COUNT];
 void ata_init(void);
 int  ata_identify(uint8_t drive_idx, ATADevice* device);
 
+/* The drive's volatile write cache, in the words an operator reads at the
+ * drive's seating, out of its IDENTIFY answer — the same words for a disk on
+ * the legacy channels and one behind AHCI: word 82 bit 5, a write cache the
+ * drive has; word 85 bit 5, the cache on (ACS-3, IDENTIFY DEVICE data), each
+ * read only when its word says it carries valid information. */
+const char* AtaWriteCacheSaid(const uint16_t* id);
+
 int  ata_read_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* buffer);
 int  ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uint8_t* buffer);
 int  ata_flush_cache(uint8_t drive_idx);

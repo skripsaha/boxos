@@ -112,11 +112,6 @@ void SettleCadenceHold(bool hold)
         KnockOn(&g_quill_knock);
 }
 
-void SettleMediumLeft(void)
-{
-    KnockOn(&g_quill_knock);
-}
-
 uint32_t CadenceRunBegins(void)
 {
     return __atomic_exchange_n(&s_demand, 0u, __ATOMIC_SEQ_CST);
@@ -216,10 +211,11 @@ static bool CadenceMounted(void)
 
 void SettleServiceIfPending(bool boundary)
 {
-    /* A medium that left, or takes no write, answers every waiter for good —
-     * on whichever core comes by first. */
-    if (SettleWaitersOwed() && (TagFSMediumLeft() || TagFSReadOnly()))
-        SettleWaitersAnswerAll(TagFSMediumLeft() ? ERR_DEVICE_NOT_READY : ERR_TAGFS_READ_ONLY);
+    /* A medium that takes no write answers every waiter for good — on
+     * whichever core comes by first. One that left holds them with its open
+     * book (mount/away.h), which answers them itself when it is given up. */
+    if (SettleWaitersOwed() && TagFSReadOnly() && !TagFSMediumLeft())
+        SettleWaitersAnswerAll(ERR_TAGFS_READ_ONLY);
 
     /* The cycle in flight is stepped by the core that began it, even one that
      * stopped being the committer's meanwhile (the other cores came up). */

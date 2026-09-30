@@ -191,19 +191,23 @@ void SettleWaitersMountReset(void)
 }
 
 /*
- * ‼ ONE RULE FOR A REFUSED CYCLE. A medium that left, or takes no write, never
- * will: every waiter hears the code now. So does every waiter of a seat that
- * never says it answers again — its refusal is as final as the medium makes
- * it. Any other refusal may pass: the waiters stay, and the cadence waits for
- * seat:ready — unless the seat said it already while this cycle ran, when the
- * next cycle may go at once. No attempt is counted.
+ * ‼ ONE RULE FOR A REFUSED CYCLE. A medium that takes no write never will:
+ * every waiter hears the code now. So does every waiter of a seat that never
+ * says it answers again — its refusal is as final as the medium makes it. A
+ * medium that left is its open book's to decide (mount/away.h): the waiters
+ * stay, parked until the book is taken up or given up. Any other refusal may
+ * pass: the waiters stay, and the cadence waits for seat:ready — unless the
+ * seat said it already while this cycle ran, when the next cycle may go at
+ * once. No attempt is counted.
  */
 static void SettleWaitersRefused(error_t rc)
 {
     error_t code = rc;
-    if (TagFSMediumLeft())
-        code = ERR_DEVICE_NOT_READY;
-    else if (TagFSReadOnly())
+    if (TagFSMediumLeft()) {
+        __atomic_store_n(&s_parked, 1u, __ATOMIC_RELEASE);
+        return;
+    }
+    if (TagFSReadOnly())
         code = ERR_TAGFS_READ_ONLY;
     else if (BoardroomSeatAnnouncesReady(tagfs_get_seat())) {
         if (__atomic_load_n(&s_ready_gen, __ATOMIC_ACQUIRE) == s_ready_at_begin)

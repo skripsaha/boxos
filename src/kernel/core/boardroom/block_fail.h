@@ -80,6 +80,21 @@ bool     BlockFailFired(void);
 bool     BlockFailStrikes(uint8_t seat, BlockFailKind kind,
                           uint64_t lba, uint32_t count, uint32_t* keep);
 
+/* A flush answered, the nth time, the way a USB disk answers SYNCHRONIZE
+ * CACHE it did not carry out: with the SCSI sense key, additional code and
+ * qualifier given here, which the disk's own driver then judges and remembers
+ * as it would the device's (xhci_msd_flush_answered) — NOT READY / 0x3A, no
+ * medium; ILLEGAL REQUEST, no such command. On a seat that is not a USB disk
+ * the sense has no one to be said to, and the flush is refused as a medium
+ * error. Replaces any plan that was standing. */
+void     BlockFailArmFlushSense(uint8_t seat, uint8_t key, uint8_t asc, uint8_t ascq,
+                                uint32_t nth);
+
+/* The flush's question: BlockFailStrikes for a flush, and the sense its plan
+ * answers with in out_sense[key, asc, ascq] — all zero for a plan that
+ * refuses it as a medium error. */
+bool     BlockFailFlushStrikes(uint8_t seat, uint8_t out_sense[3]);
+
 /* A medium that takes no write, on `seat`: while it stands, every write is
  * refused the way the seat's driver refuses one, never issued, and the seat
  * says it refuses writes as protected (BoardroomSeatRefusesWrites) — what

@@ -150,7 +150,7 @@ static void rjob_step(ReadJob *j)
         rjob_answer(j, OK);
         return;
     }
-    if (TagFSMediumLeft()) {
+    if (TagFSMediumGone()) {
         rjob_answer(j, ERR_DEVICE_NOT_READY);
         return;
     }

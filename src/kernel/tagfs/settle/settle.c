@@ -10,6 +10,7 @@
 #include "../ledger/ledger.h"
 #include "../use_memory/use_memory.h"
 #include "../glean/glean.h"
+#include "../mount/away.h"
 #include "amp.h"
 #include "baton.h"
 #include "kheap.h"
@@ -355,7 +356,8 @@ static error_t SettleStepRun(SettleSnap* snap, SettleStep* step)
 
 /* S6, under the state lock: the target settled, the written closed blocks out
  * of memory, the copy of the Ledger written naming the Use Context's chain it
- * was given, and Fallow's ripe ground back to the allocator. */
+ * was given — and the one a medium that leaves is held to (LedgerSettled) —
+ * and Fallow's ripe ground back to the allocator. */
 static void SettleDone(SettleSnap* snap)
 {
     TagFSState*   fs    = tagfs_get_state();
@@ -369,6 +371,7 @@ static void SettleDone(SettleSnap* snap)
     s_sealed_block = snap->mark.pool_to_block;
     s_sealed_bytes = snap->mark.pool_to_bytes;
     UseMemorySettled();
+    LedgerSettled();
     GleanHeadSettled(&snap->head, snap->cycle, snap->mark.chain_first);
     s_given = FallowRipen(closed, snap->cycle, &nodes);
     bool map_stood = IntegrityLayStands();
@@ -619,6 +622,16 @@ error_t TagFSSettleForHalt(void)
 {
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
+
+    /* A medium that is away takes no cycle, and the stopping machine is the
+     * event its open book waited for. */
+    if (TagFSMediumLeft()) {
+        AwayGiveUp(AWAY_HALT, tagfs_get_seat());
+        s_halt_answer = ERR_DEVICE_NOT_READY;
+        s_halt_ran    = true;
+        tagfs_leave();
+        return ERR_DEVICE_NOT_READY;
+    }
 
     /*
      * ‼ NO CLEAN SHUTDOWN LEAVES GROUND AT REST. A block in Fallow is taken on

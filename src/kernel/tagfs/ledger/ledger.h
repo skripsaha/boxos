@@ -82,6 +82,33 @@ void     LedgerStandOn(uint32_t copy);
  * and the next one is read, not assumed. */
 void     LedgerLetGo(void);
 
+/*
+ * A medium that left and came back, asked whether its Ledger is as this kernel
+ * left it (mount/away.h).
+ *
+ * LedgerNewestOn: the newest intact copy on `seat`, the volume's ground
+ * beginning at sector `base` — read by the Ledger's own reader and nothing
+ * else of the volume's; false when neither copy reads intact.
+ *
+ * LedgerLeftAs: that copy against what this kernel left — the record the
+ * volume stands on once its cycle settled (or the mount stood on), or the
+ * image the last S4 aimed at the other copy, landed or not (before any S4, a
+ * newer copy the mount would not stand on) — each by its seq and its seal's
+ * {settle, closed_crc32, tail_crc32}. AS_LEFT: one of the two,
+ * so no BoxOS kernel settled a cycle on the medium meanwhile (a host that
+ * changed bytes and left the Ledger alone is not seen). OLDER: a seq below
+ * the one a settled cycle wrote — the medium lost a cycle it said it kept, or
+ * an older image of it was written back. OTHER: anything else. In
+ * *out_settled_seq, the seq of the record that settled.
+ *
+ * LedgerSettled: at a cycle's S6, the image its S4 wrote is what the volume
+ * stands on.
+ */
+typedef enum { LEDGER_AS_LEFT, LEDGER_OLDER, LEDGER_OTHER } LedgerLeft;
+bool       LedgerNewestOn(uint8_t seat, uint64_t base, VolumeLedger *out);
+LedgerLeft LedgerLeftAs(const VolumeLedger *newest, uint64_t *out_settled_seq);
+void       LedgerSettled(void);
+
 /* The next file id out of `led`'s counter, which moves past it — the only
  * place an id is issued. A create calls it on the volume's state
  * (TagFSState.ledger) under the state lock. Every id is issued once and none

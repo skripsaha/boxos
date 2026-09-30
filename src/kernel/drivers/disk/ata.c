@@ -452,6 +452,35 @@ static void ata_negotiate_pio(uint8_t drive_idx, const uint16_t* id) {
     g_ata_devices[drive_idx].pio_mode = 0;
 }
 
+/*
+ * A write the drive acknowledges is on the medium only when the drive keeps no
+ * volatile cache in front of it, or once a cache flush put it there — and a
+ * flush the drive acknowledges proves as much as the drive's word. Which of
+ * the two this drive is was never said, so a board with a write-back cache and
+ * one without printed the same lines. Words 82-84 carry valid information when
+ * bits 15:14 of word 83 read 01b, words 85-87 when those of word 87 do.
+ */
+const char* AtaWriteCacheSaid(const uint16_t* id)
+{
+    bool supported_valid = (id[83] & 0xC000u) == 0x4000u;
+    bool enabled_valid   = (id[87] & 0xC000u) == 0x4000u;
+
+    if (!supported_valid || !enabled_valid)
+        return "the drive does not say whether it keeps a volatile write cache "
+               "(IDENTIFY words 82-87 carry no valid information) — a write it "
+               "acknowledges is known to be on the medium only once a flush it "
+               "acknowledges covers it";
+    if (!(id[82] & (1u << 5)))
+        return "the drive keeps no volatile write cache (IDENTIFY word 82 bit 5) — "
+               "a write it acknowledges is on the medium";
+    if (id[85] & (1u << 5))
+        return "the drive's volatile write cache is ON (IDENTIFY word 85 bit 5) — a "
+               "write it acknowledges waits in the drive's own memory until a cache "
+               "flush puts it on the medium";
+    return "the drive's volatile write cache is OFF (IDENTIFY word 85 bit 5) — a "
+           "write it acknowledges is on the medium, and a cache flush costs it nothing";
+}
+
 /* ---------------------------------------------------------------------
  *  IDENTIFY — spec-ordered ATA/ATAPI discrimination.
  *
@@ -634,6 +663,7 @@ int ata_identify(uint8_t drive_idx, ATADevice* device) {
     ata_string_fixup(device->serial, 20);
 
     device->exists = 1;
+    kprintf("[ATA] drive %u: %s\n", drive_idx, AtaWriteCacheSaid(id));
 
     /* Negotiate PIO mode (used for fallback) and DMA mode (used when
      * BMIDE is enabled on this channel). exists=1 is published first

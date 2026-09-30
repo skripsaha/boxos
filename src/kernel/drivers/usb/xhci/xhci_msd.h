@@ -124,7 +124,21 @@ bool xhci_msd_unit_can_async(uint8_t unit);
 void xhci_msd_watchdog(void);
 
 /* Push the device's own write cache to the medium. A write that has completed
- * is a write the device has accepted, not necessarily one it has kept. */
+ * is a write the device has accepted, not necessarily one it has kept. 0 when
+ * it committed — or when it said, this seating, that it has no such command
+ * (ILLEGAL REQUEST): it is then not asked again. A device with no medium in it
+ * has committed nothing, and is a refusal. */
 int xhci_msd_flush(uint8_t unit);
+
+#ifdef CONFIG_VOLUME_TESTS
+/* The cache commit answered as if the device had refused SYNCHRONIZE CACHE
+ * with this sense — BLOCKFAIL's flush with a sense (block_fail.h): nothing is
+ * sent, and the answer is judged and remembered exactly as the device's own
+ * would be; a state change is asked again, of the device itself. A device
+ * that already said it has no such command is not asked, and neither is this.
+ * And that memory forgotten, so the unit is asked again. */
+int  xhci_msd_flush_answered(uint8_t unit, uint8_t key, uint8_t asc, uint8_t ascq);
+void xhci_msd_forget_flush_answer(uint8_t unit);
+#endif
 
 #endif

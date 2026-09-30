@@ -40,7 +40,7 @@
 #include "helm.h"        /* the file's Helm, and HelmReady for a USB disk's steps */
 #include "ink.h"         /* TagFSInkPlot — the one way the file changes */
 #include "meta_pool.h"   /* PoolSpareBegin / Adopt / Drop — a Spare stamped through the port */
-#include "scribe.h"      /* VolumeFlushNeed — what the landed blocks wait for */
+#include "scribe.h"      /* VolumeFlushNeed, VolumeWriteSeen — what the landed blocks wait for */
 #include "integrity.h"
 #include "run.h"         /* TagFSDataCostLaid — what a file's bytes cost the medium */
 #include "cpu_calibrate.h"  /* a stretch's time on the medium, for the cadence */
@@ -67,9 +67,17 @@ static uint8_t *wjob_page(const WriteJob *j, uint32_t i)
 /* The write stops at a refusal. What landed of the window before it is made
  * the file's — one record, inked the way a whole window's is, the ground
  * reserved past it given back — and the refusal is the answer, with the bytes
- * the file now holds of the write. Answers whether the pump goes on. */
+ * the file now holds of the write. A stop the medium's leaving explains inks
+ * nothing (RT-13): what landed may be in a cache that went with it. A port
+ * that refused before the room emptied the seat is not seen as one — its
+ * prefix is inked, and a flush that never covered it gives the volume's open
+ * book up (mount/away.h). Answers whether the pump goes on. */
 static bool wjob_stop(WriteJob *j, error_t cause)
 {
+    if (cause == ERR_DEVICE_NOT_READY || TagFSMediumGone()) {
+        wjob_finalize(j, ERR_DEVICE_NOT_READY);
+        return false;
+    }
     if (j->bytes_done > j->bytes_inked && j->loaded) {
         j->stopped = cause;
         wjob_to(j, W_LOG_META);
@@ -173,10 +181,14 @@ static bool w_locate(WriteJob *j)
  * calls it in — until a place comes free or the door a cache flush shut opens
  * again. Either way `answered` runs, exactly once, perhaps before this
  * returns; an error here means the seat is not there, or the request is
- * malformed. */
+ * malformed — or the volume's medium is away, and its seat is not the
+ * volume's to be written through. */
 static error_t wjob_submit(WriteJob *j, bool write, uint32_t block, uint32_t blocks,
                            uint32_t page, RoadsteadAnswered answered)
 {
+    if (TagFSMediumGone())
+        return ERR_DEVICE_NOT_READY;
+
     uint8_t  seat    = tagfs_get_seat();
     uint64_t lba     = tagfs_block_to_sector(block);
     void    *dma     = (uint8_t *)j->dma_phys + (size_t)page * TAGFS_BLOCK_SIZE;
@@ -281,6 +293,8 @@ static bool w_block_done(WriteJob *j)
         tagfs_readahead_invalidate(j->st.block + i);
         IntegrityUpdate(j->st.block + i, wjob_page(j, i));
     }
+    if (landed)
+        VolumeWriteSeen();
     j->plot.data_us += cpu_tsc_to_us(rdtsc() - j->if_submit_tsc);
     j->bytes_done   += PlotStretchBytes(&j->st, landed);
 
@@ -380,6 +394,7 @@ static bool w_spare_done(WriteJob *j)
         wjob_finalize(j, j->if_status);
         return false;
     }
+    VolumeWriteSeen();
     error_t rc = PoolSpareAdopt(j->spare_block, image, VolumeFlushNeed());
     if (rc != OK) {
         wjob_finalize(j, rc);
