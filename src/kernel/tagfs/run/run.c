@@ -3,6 +3,7 @@
 #include "../braid/braid.h"
 #include "../integrity/integrity.h"
 #include "../read/read.h"
+#include "../scribe/scribe.h"   /* VolumeWriteSeen — what a flush must cover now */
 
 /*
  * The data run's door for runs (run.h). Every block goes to its seat by its
@@ -18,7 +19,8 @@ uint32_t TagFSRunBlocks(void)
 
 /* A Braid (TagFSState.braid, which a v1 mount never names) addresses a block
  * at a time: a run through it is its blocks one by one, each off the volume's
- * own medium when the Braid would not give it. */
+ * own medium when the Braid would not give it. A refusal the medium's
+ * departure explains is ERR_DEVICE_NOT_READY, as at a block's doors. */
 error_t TagFSReadRun(uint32_t first, uint32_t count, void *buffer)
 {
     if (TagFSMediumGone())
@@ -40,7 +42,7 @@ error_t TagFSReadRun(uint32_t first, uint32_t count, void *buffer)
     }
     if (!got) {
         TagFSNoteReadRefused();
-        return ERR_READ_FAILED;
+        return TagFSMediumGone() ? ERR_DEVICE_NOT_READY : ERR_READ_FAILED;
     }
     return OK;
 }
@@ -65,6 +67,8 @@ error_t TagFSWriteRun(uint32_t first, uint32_t count, const void *buffer, uint32
         uint32_t sectors = 0;
         (void)BoardroomWrite(tagfs_get_seat(), tagfs_block_to_sector(first),
                              count * TAGFS_BLOCK_SECTORS, in, &sectors);
+        if (sectors)
+            VolumeWriteSeen();
         landed = sectors / TAGFS_BLOCK_SECTORS;   /* a block cut part way is not one that landed */
         for (uint32_t i = 0; i < landed; i++) {
             ReadAheadForgetBlock(first + i);
@@ -72,7 +76,9 @@ error_t TagFSWriteRun(uint32_t first, uint32_t count, const void *buffer, uint32
         }
     }
     *out_landed = landed;
-    return landed == count ? OK : ERR_WRITE_FAILED;
+    if (landed == count)
+        return OK;
+    return TagFSMediumGone() ? ERR_DEVICE_NOT_READY : ERR_WRITE_FAILED;
 }
 
 // ----------------------------------------------------------------------------

@@ -25,7 +25,8 @@
 uint32_t TagFSRunBlocks(void);
 
 /* `count` blocks from `first` on, out of `buffer`, in as few commands as the
- * seat takes: OK, ERR_DEVICE_NOT_READY once the medium left, ERR_WRITE_FAILED
+ * seat takes: OK, ERR_DEVICE_NOT_READY once the medium left — asked before a
+ * command goes out, and of a refusal its departure explains — ERR_WRITE_FAILED
  * when it refused. *out_landed is the blocks from `first` that landed — all of
  * them on OK, on a refusal those of the commands before the refused one and
  * what the medium says the refused one kept (BoardroomWrite) — and every block

@@ -77,10 +77,14 @@ static error_t PlotLayStretch(Plot *p, const PlotStretch *s, const PlotSource *s
     uint32_t landed = 0;
     error_t  rc     = OK;
     if (staged > 0) {
+        /* The door's first question, asked before it: a medium already gone
+         * is sent no command, and none is counted. One that leaves under the
+         * command refuses it with the same answer, and that one went out. */
+        bool     sent  = !TagFSMediumGone();
         uint64_t began = rdtsc();
         rc = TagFSWriteRun(s->block, staged, buf, &landed);
         p->data_us += cpu_tsc_to_us(rdtsc() - began);
-        if (rc != ERR_DEVICE_NOT_READY)   /* else no command went out */
+        if (sent)
             TagFSDataCostLaid(staged);
         if (rc != OK)
             kprintf("[TagFS] file %u: blocks %u..%u would not be written (error %u) — %u of "
