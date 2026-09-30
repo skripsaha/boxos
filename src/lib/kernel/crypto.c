@@ -32,8 +32,11 @@ uint32_t KCrc32(const uint8_t *data, uint32_t len)
 
 uint16_t KCrc16(const uint8_t *data, uint32_t len)
 {
-    uint16_t crc = 0xFFFF;
+    return KCrc16Continue(0xFFFF, data, len);
+}
 
+uint16_t KCrc16Continue(uint16_t crc, const uint8_t *data, uint32_t len)
+{
     for (uint32_t i = 0; i < len; i++)
     {
         crc ^= (uint16_t)data[i] << 8;

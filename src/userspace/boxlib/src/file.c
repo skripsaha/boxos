@@ -344,14 +344,14 @@ int delete(uint32_t file_id)
     return box_fail(rc);
 }
 
-int file_truncate(uint32_t file_id, uint64_t new_size)
+int file_span(uint32_t file_id, uint64_t size)
 {
-    /* params: [u32 file_id][u64 new_size]. */
+    /* params: [u32 file_id][u64 size]. */
     uint8_t params[12];
-    memcpy(params,     &file_id,  4);
-    memcpy(params + 4, &new_size, 8);
+    memcpy(params,     &file_id, 4);
+    memcpy(params + 4, &size,    8);
 
-    int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_TRUNCATE,
+    int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_SPAN,
                      params, sizeof(params),
                      NULL, 0, NULL, 0, NULL,
                      BOX_ANSWER_GUARANTEED, NULL);

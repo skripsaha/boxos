@@ -4,7 +4,7 @@
 #include "../../lib/kernel/ktypes.h"
 #include "../../lib/kernel/klib.h"
 #include "../../core/error/error.h"
-#include "../tagfs_constants.h"
+#include "../tagfs.h"
 
 // ============================================================================
 // TagFS startup tests
@@ -107,6 +107,7 @@ typedef struct {
     VOLUME_TESTS_ONLY(SUITE(stand_spelling)) \
     VOLUME_TESTS_ONLY(SUITE(stand_roadstead)) \
     VOLUME_TESTS_ONLY(SUITE(stand_map)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_plot)) \
     /* the walk ends here; a new suite's line goes above */
 
 #define TEST_SUITE_DECLARED(name) extern const TestSuite g_##name##_suite;
@@ -190,9 +191,15 @@ void TestFillAt(void* buffer, uint32_t size, uint32_t stream, uint64_t offset);
 /* The offset of the first byte where a and b differ, or n when they agree. */
 uint32_t TestFirstDifference(const void* a, const void* b, uint32_t n);
 
+/* One write or read through an open handle, from or into the kernel's own
+ * memory: the byte count tagfs_write / tagfs_read answered, or -1 when it
+ * answered a refusal. The handle's offset moves by what moved. */
+int TestHandleWrite(TagFSFileHandle* handle, const void* data, uint32_t bytes);
+int TestHandleRead(TagFSFileHandle* handle, void* buffer, uint32_t capacity);
+
 /* A whole file written in one call through a fresh handle, and read back the
- * same way. Each returns the byte count tagfs_write / tagfs_read gave, or -1
- * when the file would not open. The handle is closed on every path. */
+ * same way: as TestHandleWrite / TestHandleRead answer, or -1 when the file
+ * would not open. The handle is closed on every path. */
 int TestFileWrite(uint32_t file_id, const void* data, uint32_t bytes);
 int TestFileRead(uint32_t file_id, void* buffer, uint32_t capacity);
 

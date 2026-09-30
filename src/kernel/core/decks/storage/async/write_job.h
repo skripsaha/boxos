@@ -4,6 +4,7 @@
 #include "ktypes.h"
 #include "error.h"
 #include "tagfs.h"
+#include "plot.h"       /* the file's Plot, and where the job's bytes come from */
 #include "boxos_crate.h"
 #include "process.h"
 #include "baton.h"      /* embedded never-drop MPSC node (cq_node) */
@@ -12,9 +13,11 @@
 /*
  * WriteJob — async ObjWrite state machine.
  *
- * Stage 4 of storage-async migration. Process parks on PROC_WAITING,
- * IRQ pumps state-machine via K-Core continuation queue, KResultPush
- * wakes when DONE.
+ * The caller parks on PROC_WAITING, each AHCI completion posts the job to the
+ * drain core's pump, and KResultPush wakes the caller when the job is done.
+ * The job works on the file's Plot exactly as a synchronous write does: the
+ * same growth rule, the same reservation before any byte moves, the same
+ * read-modify-write rule, and one committed record.
  */
 
 struct OpContext;
@@ -23,8 +26,8 @@ struct ManifestOp;
 typedef enum {
     W_INIT = 0,
     W_TOKEN_WAIT,
+    W_ALLOC,           /* the file's Plot loaded and the write's ground reserved */
     W_LOCATE,
-    W_ALLOC,
     W_READ_OLD,        /* async read of the block a partial write overlays */
     W_DMA_FILL,
     W_AHCI_SUBMIT,
@@ -46,29 +49,28 @@ typedef struct WriteJob {
     Crate            *out_crate;
 
     /* ---- payload ---- */
-    const uint8_t    *src_kp;            /* kernel pointer to user bytes */
-    void             *src_bounce;        /* if != NULL, kfree at W_DONE */
-    uint64_t          start_offset;
-    uint64_t          total_bytes;
+    PlotSource        source;            /* the program's pages, pulled a block at a time */
+    uint64_t          asked_offset;      /* where the caller asked the write to begin */
+    bool              append;            /* ... or at the file's size */
+    uint64_t          start_offset;      /* where it begins: set once the Plot is loaded */
     uint64_t          bytes_done;
-    uint32_t          flags;
     uint64_t          waybill;           /* Ф26e: ferry correlation token (0 = sync/no-token) */
     uint32_t          submit_cookie;     /* the write submit's cloakroom token — echoed
                                           * into the plain (waybill==0) completion so the
                                           * caller's paired wait adopts only its own. */
 
+    /* ---- the file ---- */
+    Plot              plot;              /* loaded under the token (W_ALLOC) */
+    bool              loaded;            /* PlotLoad answered OK */
+    bool              committed;         /* a record naming bytes_done is the file's */
+
     /* ---- in-flight chunk ---- */
     uint32_t          if_disk_block;
+    uint32_t          if_left;           /* blocks of its run after if_disk_block */
     uint32_t          if_off_in_blk;
     uint32_t          if_chunk;
-    bool              if_partial_rmw;
-    bool              if_alloc_fresh;        /* this chunk's block was just W_ALLOC'd */
-    error_t           if_status;            /* IRQ writes here */
-
-    /* ---- alloc tracking ---- */
-    uint32_t          alloc_block;
-    uint16_t          alloc_count;
-    bool              alloc_pending_meta;
+    bool              if_reading;        /* the command out is the overlaid block's read */
+    error_t           if_status;         /* IRQ writes here */
 
     /* ---- DMA staging ---- */
     void             *dma_phys;
@@ -76,9 +78,6 @@ typedef struct WriteJob {
 
     /* ---- token handoff ---- */
     struct WriteJob  *next_pending;
-
-    /* ---- result ---- */
-    int               result_rc;
 
     /* ---- state machine ---- */
     _Atomic int       state;
@@ -108,16 +107,19 @@ typedef struct WriteJob {
     uint16_t          crate_count;
 } WriteJob;
 
-int ObjWriteAsync(uint32_t           file_id,
-                  uint64_t           offset,
-                  uint32_t           flags,
-                  const void        *src_kp,
-                  uint32_t           size,
-                  Crate             *out_crate,
+/* The source's bytes written into the file at `offset` — at its size when
+ * `append` — by a job the caller parks on: ERR_WOULD_BLOCK once the job owns
+ * the write and the staged crates, anything else a refusal before it did, the
+ * source untouched and the caller free to write it synchronously. */
+int ObjWriteAsync(uint32_t                file_id,
+                  uint64_t                offset,
+                  bool                    append,
+                  const PlotSource       *source,
+                  Crate                  *out_crate,
                   const struct OpContext *ctx,
-                  Crate             *crates_kbuf,   /* staged Crate[] ownership */
-                  uint16_t           crate_count,
-                  uint64_t           crates_uaddr,
-                  uint64_t           waybill);       /* Ф26e: ferry token (0 = none) */
+                  Crate                  *crates_kbuf,   /* staged Crate[] ownership */
+                  uint16_t                crate_count,
+                  uint64_t                crates_uaddr,
+                  uint64_t                waybill);      /* Ф26e: ferry token (0 = none) */
 
 #endif /* WRITE_JOB_H */

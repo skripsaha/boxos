@@ -291,10 +291,11 @@ Reversing the exclusion cost one thing that was not a C++ problem at all.
 [filebuf.members] Table 122 says plain `ios_base::out` means `"w"`, and `"w"`
 truncates — and TagFS could not truncate. `tagfs_write` only ever grew a file,
 so **every shorter rewrite in the system left the old tail readable behind the
-new content**, and had done since TagFS was written. Ф36 built the primitive
-(`tagfs_truncate_file` → `STORAGE_OBJ_TRUNCATE` → `file_truncate` →
-`current_resize`); the C++ header is what finally asked for it. Its two
-refusals are recorded in §2 `<fstream>`.
+new content**, and had done since TagFS was written. Ф36 built the primitive,
+and Quill step 1.3 replaced it with span, which makes a file exactly as long
+as asked (`tagfs_span_file` → `STORAGE_OBJ_SPAN` → `file_span` →
+`current_span`); the C++ header is what finally asked for it. What it records
+is in §2 `<fstream>`.
 
 ### C++23 features not implemented — 0
 
@@ -2479,10 +2480,12 @@ combinations the table leaves out.
 - `–` **No `filesystem::path` overloads** of the constructors or of `open()`,
   because there is no `<filesystem>` (§1.1). The `const char*` and
   `const string&` forms are complete.
-- `~` **The truncate primitive shrinks only.** Growing a file by truncation is
-  refused rather than served, because TagFS does not zero freshly allocated
-  blocks and a grow would hand back whatever the allocator's previous tenant
-  left there. No `<fstream>` operation needs it: files grow by being written.
+- `✓` **A position past the end is written to through span.** TagFS grows a
+  file only at its end and refuses a write that begins past it
+  (`ERR_TAGFS_BEYOND_SIZE`), so a `seekp` past the end followed by a write
+  spans the file to the position first; the gap reads as zeros, never as the
+  bytes a block's previous owner left (Quill step 1.3). `fseek` past the end
+  and `fwrite` in `<cstdio>` take the same road.
 - `?` **`binary` is accepted and changes nothing.** A Current is a byte channel
   and boxcxx performs no text translation, so binary and text are one road.
   The standard leaves the difference implementation-defined; this records
@@ -5177,13 +5180,14 @@ What is left:
   content. This is not a C++ defect and predates the epic by years; what made it
   impossible to keep ignoring is that [filebuf.members] Table 122 defines plain
   `ios_base::out` as `"w"`, and `"w"` truncates. **Closed in Ф36** with a real
-  primitive through all four layers: `tagfs_truncate_file` (frees the tail
-  extents, trims the extent list, commits the new record before releasing a
-  single block, and drops the freed blocks from the read-ahead cache) →
-  `STORAGE_OBJ_TRUNCATE` (guarded like
-  `OBJ_DELETE`, and publishing a `TRUNCATED` Touch event with `op = 3` in the
-  same 32-byte payload shape a write uses) → `file_truncate` → `current_resize`
-  and the `CURRENT_TRUNCATE` open flag.
+  primitive through all four layers, which Quill step 1.3 replaced with span —
+  the file made exactly as long as asked, a longer one reading as zeros:
+  `tagfs_span_file` (the tail cut and its ground given back once the record
+  that no longer names it is committed, or the gap written as zeros to ground
+  taken for it) → `STORAGE_OBJ_SPAN` (guarded like `OBJ_DELETE`, and
+  publishing the change with `op = 3` in the same 32-byte payload shape a
+  write uses) → `file_span` → `current_span` and the `CURRENT_TRUNCATE` open
+  flag, which spans the file to nothing.
 - `✓` **`tagfs_delete_file` did not unregister the blocks it freed from the
   dedup index.** Found while writing the truncate path above. Gone with the
   index: Dedup was deleted in Quill step 1.3 (nothing on the write path ever

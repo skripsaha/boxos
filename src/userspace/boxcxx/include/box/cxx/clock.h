@@ -106,11 +106,11 @@ inline box::status set_zone(std::string_view name)
                       : box::result<box::tagfs::file>(files.front());
     if (!f) return std::unexpected(f.error());
 
-    // Truncate first. A shorter name written over a longer one would otherwise
+    // Emptied first. A shorter name written over a longer one would otherwise
     // leave the tail of the old one behind — "Etc/UTC" over "Europe/Moscow"
     // reads back as "Etc/UTCe/Moscow". TagFS learned to shorten a file in Ф36;
     // before that this could not have been written correctly at all.
-    if (auto shortened = f->truncate(0); !shortened) return shortened;
+    if (auto shortened = f->span(0); !shortened) return shortened;
 
     auto wrote = f->write_at(0, canonical.data(), canonical.size());
     if (!wrote) return std::unexpected(wrote.error());

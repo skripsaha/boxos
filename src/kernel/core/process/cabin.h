@@ -56,8 +56,8 @@ typedef struct cabin_t
     uint32_t auth_bits;
 
     uint16_t *tag_overflow_ids;
-    uint16_t  tag_overflow_count;
-    uint16_t  tag_overflow_capacity;
+    uint32_t  tag_overflow_count;      /* u32: a u16 capacity doubled past 32768 is 0 */
+    uint32_t  tag_overflow_capacity;
     TagOverflowRetired *tag_overflow_retired;  /* old buffers, freed at cabin_destroy */
 
     /* MemTag held-tag set, level 1 — see the block above MemCabinGrant in

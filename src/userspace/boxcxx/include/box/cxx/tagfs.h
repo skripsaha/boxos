@@ -266,15 +266,15 @@ public:
         return id_ ? box::_detail::from_status(::anchor(id_))
                    : std::unexpected(box::error{box::errc::invalid_argument});
     }
-    // Drop everything past `n` bytes. SHRINK ONLY: growing lands in the error
-    // arm as invalid_argument, because TagFS does not zero freshly allocated
-    // blocks and growing here would hand back the previous tenant's content —
-    // a file grows by being written. Refused on a "system"/"boot" file
-    // (permission_denied), like remove(). Publishes a TRUNCATED Touch event on
-    // every tag of the file.
-    box::status truncate(std::uint64_t n)
+    // The file made exactly `n` bytes long (file_span): shorter cuts the tail
+    // and gives its blocks back; longer reads as zeros from the old size on,
+    // never another file's bytes. A write grows a file only at its end — one
+    // past it lands in the error arm — so this is how a gap is made. Refused
+    // on a "system"/"boot" file (permission_denied), like remove(). The
+    // change is published on every tag of the file.
+    box::status span(std::uint64_t n)
     {
-        return id_ ? box::_detail::from_status(::file_truncate(id_, n))
+        return id_ ? box::_detail::from_status(::file_span(id_, n))
                    : std::unexpected(box::error{box::errc::invalid_argument});
     }
 

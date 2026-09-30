@@ -88,14 +88,14 @@ static void ensure_bitmap_width(TagBitmap* bm, uint32_t new_max) {
 static void reverse_index_add(TagBitmapIndex* idx, uint32_t file_id, uint16_t tag_id) {
     TagIdList* list = &idx->file_to_tags[file_id];
 
-    for (uint16_t i = 0; i < list->count; i++) {
+    for (uint32_t i = 0; i < list->count; i++) {
         if (list->ids[i] == tag_id) {
             return;
         }
     }
 
     if (list->count >= list->capacity) {
-        uint16_t new_cap = list->capacity ? (uint16_t)(list->capacity * 2) : 4;
+        uint32_t new_cap = list->capacity ? list->capacity * 2 : 4;   /* a u16 doubled past 32768 is 0 */
         uint16_t* new_ids = kmalloc(sizeof(uint16_t) * new_cap);
         if (!new_ids) {
             debug_printf("[TagBitmap] reverse_index_add: kmalloc failed\n");
@@ -118,7 +118,7 @@ static void reverse_index_remove(TagBitmapIndex* idx, uint32_t file_id, uint16_t
     }
 
     TagIdList* list = &idx->file_to_tags[file_id];
-    for (uint16_t i = 0; i < list->count; i++) {
+    for (uint32_t i = 0; i < list->count; i++) {
         if (list->ids[i] == tag_id) {
             list->ids[i] = list->ids[list->count - 1];
             list->count--;
@@ -294,7 +294,7 @@ void tag_bitmap_remove_file(TagBitmapIndex* idx, uint32_t file_id) {
 
     TagIdList* list = &idx->file_to_tags[file_id];
 
-    for (uint16_t i = 0; i < list->count; i++) {
+    for (uint32_t i = 0; i < list->count; i++) {
         uint16_t tid = list->ids[i];
         if ((uint32_t)tid < idx->bitmap_capacity && idx->bitmaps[tid]) {
             TagBitmap* bm = idx->bitmaps[tid];
@@ -342,7 +342,7 @@ static QueryCacheEntry* cache_lookup(TagBitmapIndex* idx, uint32_t hash,
         if (e->hash == hash && e->generation == idx->generation &&
             e->tag_count == tag_count && e->tag_key && e->file_ids) {
             bool match = true;
-            for (uint16_t j = 0; j < tag_count; j++) {
+            for (uint32_t j = 0; j < tag_count; j++) {
                 if (e->tag_key[j] != tag_ids[j]) { match = false; break; }
             }
             if (match) return e;
@@ -364,7 +364,7 @@ static void cache_store(TagBitmapIndex* idx, uint32_t hash,
     e->hash       = hash;
     e->generation = idx->generation;
     e->count      = count;
-    e->tag_count  = (uint16_t)tag_count;
+    e->tag_count  = tag_count;
 
     e->file_ids = kmalloc(sizeof(uint32_t) * (count > 0 ? count : 1));
     e->tag_key  = kmalloc(sizeof(uint16_t) * (tag_count > 0 ? tag_count : 1));

@@ -55,7 +55,7 @@ enum class opening : unsigned {
     none     = 0,
     create   = CURRENT_CREATE,    // create the backing if absent (stream / file writer)
     nonblock = CURRENT_NONBLOCK,  // put/take never block: would_block when full / empty
-    truncate = CURRENT_TRUNCATE,  // file writer: discard existing content at open
+    truncate = CURRENT_TRUNCATE,  // file writer: the file spanned to nothing at open
 };
 constexpr opening operator|(opening a, opening b) noexcept
 {
@@ -293,15 +293,13 @@ public:
         return static_cast<std::uint64_t>(n);
     }
 
-    // Discard everything past `n`. SHRINK ONLY — a request to grow lands in
-    // the error arm as invalid_argument, because TagFS does not zero fresh
-    // blocks and growing here would hand back the previous tenant's bytes.
-    // Also refused on a snapshotted file (invalid_operation): a block not yet
-    // copied since the snapshot is still the snapshot's only copy. The byte
-    // cursor is clamped into the new range.
-    status resize(std::uint64_t n) noexcept
+    // The channel made exactly `n` bytes long (current_span): shorter cuts
+    // the tail, longer reads as zeros from the old end on. The error arm
+    // carries the cause — invalid_operation on a backing with no extent or one
+    // opened for reading. A cursor left past a shorter end is brought back.
+    status span(std::uint64_t n) noexcept
     {
-        return _detail::from_status(c_ ? current_resize(c_, n) : -ERR_INVALID_ARGUMENT);
+        return _detail::from_status(c_ ? current_span(c_, n) : -ERR_INVALID_ARGUMENT);
     }
 };
 

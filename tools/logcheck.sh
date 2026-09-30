@@ -4880,12 +4880,13 @@ run_handsetmut() {
 #
 # TagFS writes only ever GREW a file: rewriting one shorter left the old tail
 # readable behind the new content, and every shorter rewrite in the system was
-# silently wrong until file_truncate existed. An editor is where that shows
-# first and worst — a line deleted and saved would come back on the next read.
+# silently wrong until a file could be cut (file_span). An editor is where that
+# shows first and worst — a line deleted and saved would come back on the next
+# read.
 #
 # draft is the instrument, and the whole path is under test: a key becomes a
-# Touch, the Touch becomes a byte in the book, ^S writes the book, truncates
-# to its length and anchors it, and `show` reads the volume back. Ten bytes
+# Touch, the Touch becomes a byte in the book, ^S writes the book, spans the
+# file to its length and anchors it, and `show` reads the volume back. Ten bytes
 # are typed and saved; five are taken back and saved again; the volume must
 # hold five.
 draft_keys() {
@@ -4967,7 +4968,7 @@ draft_notail_on() {
     python3 - <<'EOF2'
 p = "src/userspace/utils/draft_file.c"
 s = open(p).read()
-anchor = "    int rc = file_truncate(g_fid, len);"
+anchor = "    int rc = file_span(g_fid, len);"
 assert s.count(anchor) == 1, "draft mutation anchor missing"
 s = s.replace(anchor, "    int rc = 0;   /* logcheck mutation: the tail is left where it was */\n    (void)len;", 1)
 open(p, "w").write(s)
@@ -4980,7 +4981,7 @@ draft_notail_off() {
 }
 
 run_draftmut() {
-    echo "== draftmut: the truncate taken out, and the old tail must come back =="
+    echo "== draftmut: the span taken out, and the old tail must come back =="
     draft_notail_on; build
     draft_session draftmut "STRICT=on CORES=4 MEM=4G"; local booted=$?
     draft_notail_off
@@ -4989,7 +4990,7 @@ run_draftmut() {
     if grep -q "abcdefghij" "$L"; then
         ok "draftmut: without the cut the old tail is read back - and the oracle sees it"
     else
-        bad "draftmut: the truncate was taken out and the file was STILL five bytes - the oracle cannot see that defect ($(grep -m1 'abcde' "$L" || echo 'no content at all'))"
+        bad "draftmut: the span was taken out and the file was STILL five bytes - the oracle cannot see that defect ($(grep -m1 'abcde' "$L" || echo 'no content at all'))"
     fi
     build   # leave the tree built from clean sources
 }
@@ -7560,12 +7561,9 @@ run_censusmut() {
 STAND_HELD="
 integrity_reports_every_rot|1.10|of 65 rotten blocks, reported 64|of 65 rotten blocks, reported 65
 use_context_long_remembered|1.6|of 479 bytes said, the volume remembers 0|of 479 bytes said, the volume remembers 479
-stand_rmw_read_refused|1.3|bytes around the write that the medium now holds as zeros 4086|bytes around the write that the medium now holds as zeros 0
 stand_create_all_or_nothing|1.4|half-done create at refused allocation 5|creates whole or refused whole, allocations refused 5
 stand_sync_owns_a_refused_write|1.4|ledger copies written after the file table's write was refused 1|ledger copies written after the file table's write was refused 0
 stand_sync_owns_a_refused_flush|1.4|cache flushes the medium refused under a sync that answered OK 1|a refused cache flush, and the sync answered it with error 200
-stand_write_returns_its_ground|1.3|blocks refused writes kept named by no file, all given back 3|blocks refused writes kept named by no file, all given back 0
-stand_write_all_or_refusal|1.5|write answered short with no refusal at refused allocation 2|writes whole or refused, allocations refused 8
 stand_open_holds_what_it_names|1.4|handle counting extents it did not hold at refused allocation 6|opens whole or refused, allocations refused 6
 stand_open_refuses_unread_metadata|1.4|one-block file opened as empty at refused allocation 3|opens whole or refused, allocations refused 6
 stand_open_joins_the_writers|1.5|handle with no open-file entry at refused allocation 1|opens whole or refused, allocations refused 6
@@ -7838,13 +7836,7 @@ stand_fix_on() {
     python3 - <<'EOF'
 p = "src/kernel/tagfs/tagfs.c"
 s = open(p).read()
-give = ("            for (uint16_t k = first_new; k < handle->extent_count; k++)\n"
-        "                tagfs_free_blocks(handle->extents[k].start_block, handle->extents[k].block_count);\n"
-        "            handle->extent_count = first_new;\n")
 edits = [
-    # 1.3: a read-modify-write whose read is refused refuses the write
-    ("            if (read_block(disk_block, block_buf) != 0)\n            {\n                memset(block_buf, 0, TAGFS_BLOCK_SIZE);\n            }\n",
-     "            if (read_block(disk_block, block_buf) != 0)\n            {\n                medium_refused = true;   /* logcheck mutation: a refused read refuses the write */\n                refused_block  = disk_block;\n                break;\n            }\n"),
     # 1.4: a tag the index will not take undoes the create
     ("        if (meta.tag_ids[i] != TAGFS_INVALID_TAG_ID)\n        {\n            tag_bitmap_set(g_state.bitmap_index, meta.tag_ids[i], file_id);\n        }\n",
      "        if (meta.tag_ids[i] != TAGFS_INVALID_TAG_ID &&\n            tag_bitmap_set(g_state.bitmap_index, meta.tag_ids[i], file_id) != 0)\n        {\n            for (uint16_t j = 0; j < i; j++)   /* logcheck mutation: create is all or nothing */\n                tag_bitmap_clear(g_state.bitmap_index, meta.tag_ids[j], file_id);\n            file_table_delete(file_id);\n            meta_pool_delete(meta_block, meta_offset);\n            kfree(meta.tag_ids);\n            kfree(meta.filename);\n            TagFSLockDrop(&g_state.lock);\n            return -1;\n        }\n"),
@@ -7858,18 +7850,6 @@ edits = [
      "    if (file_table_flush() != 0)\n        return ERR_IO;\n    SETTLE_CUT_AT(SETTLE_CUT_POINT_RETIRES);\n"),
     ("    SETTLE_CUT_AT(SETTLE_CUT_POINT_DONE);\n}\n",
      "    SETTLE_CUT_AT(SETTLE_CUT_POINT_DONE);\n    return flushed;\n}\n"),
-    # 1.3: what a write takes it gives back when it cannot commit
-    ("    const uint8_t *in = (const uint8_t *)buffer;\n    uint8_t block_buf[TAGFS_BLOCK_SIZE];\n",
-     "    const uint8_t *in = (const uint8_t *)buffer;\n    uint8_t block_buf[TAGFS_BLOCK_SIZE];\n    uint16_t first_new = handle->extent_count;   /* logcheck mutation: a write that cannot commit gives its blocks back */\n"),
-    ("        if (meta_pool_read(meta_block, meta_offset, &meta) != 0)\n        {\n            if (handle->ofe)\n",
-     "        if (meta_pool_read(meta_block, meta_offset, &meta) != 0)\n        {\n" + give + "            if (handle->ofe)\n"),
-    ("        if (!meta.extents)\n        {\n            tagfs_metadata_free(&meta);\n            if (handle->ofe)\n",
-     "        if (!meta.extents)\n        {\n            tagfs_metadata_free(&meta);\n" + give + "            if (handle->ofe)\n"),
-    ("        if (meta_pool_write(&meta, &new_mb, &new_mo) != 0)\n        {\n            tagfs_metadata_free(&meta);\n            if (handle->ofe)\n",
-     "        if (meta_pool_write(&meta, &new_mb, &new_mo) != 0)\n        {\n            tagfs_metadata_free(&meta);\n" + give + "            if (handle->ofe)\n"),
-    # 1.5: an extent list that cannot grow refuses the write
-    ("                tagfs_free_blocks(new_start, blocks_needed);\n                break;\n",
-     "                tagfs_free_blocks(new_start, blocks_needed);\n                medium_refused = true;   /* logcheck mutation: an extent list that cannot grow refuses the write */\n                refused_block  = new_start;\n                break;\n"),
     # 1.5: an open that cannot join the writers is refused
     ("    OpenFileEntry *ofe = ofe_acquire(file_id);\n\n    TagFSFileHandle *handle = kmalloc(sizeof(TagFSFileHandle));\n",
      "    OpenFileEntry *ofe = ofe_acquire(file_id);\n    if (!ofe)\n        return NULL;   /* logcheck mutation: an open with no open-file entry is refused */\n\n    TagFSFileHandle *handle = kmalloc(sizeof(TagFSFileHandle));\n"),
@@ -7885,7 +7865,7 @@ for a, m in edits:
     s = s.replace(a, m, 1)
 open(p, "w").write(s)
 EOF
-    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 8
+    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 5
 
     # 1.6: a Use Context longer than the Ledger's record is still the volume's.
     # The step keeps it whole on the medium (its own block); what the test asks
@@ -8254,7 +8234,7 @@ STAND_HELD_EOF
     stand_mech_on range
     if stand_mut_boot standmut_range CORES=4 MEM=4G; then
         stand_red standmut_range "BLOCKFAIL with no range check refuses a block the plan never named" \
-            'stand_blockfail_reads_the_nth failed at [^:]+:[0-9]+: the first read of the file is whole \(-1, 12288\)'
+            'stand_blockfail_reads_the_nth failed at [^:]+:[0-9]+: and meets no plan — the plan names another block \(1, 0\)'
         stand_red standmut_range "HEAPFAIL asked only after the slab lets a small allocation through" \
             'stand_heapfail_nth_on_this_core failed at [^:]+:[0-9]+: the third is answered NULL \(0, 1\)'
         stand_red standmut_range "a test that leaves its fault armed is taken down by the runner, and failed" \
@@ -8276,7 +8256,7 @@ STAND_HELD_EOF
     stand_mech_on shots
     if stand_mut_boot standmut_shots CORES=4 MEM=4G; then
         stand_red standmut_shots "BLOCKFAIL that is not single-shot refuses the read after its own" \
-            'stand_blockfail_reads_the_nth failed at [^:]+:[0-9]+: the third read is whole — the plan refuses once \(-1, 12288\)'
+            'stand_blockfail_reads_the_nth failed at [^:]+:[0-9]+: the third read is served — the plan refuses once \([0-9]+, 0\)'
         stand_red standmut_shots "HEAPFAIL blind to the core refuses a core no plan named" \
             'stand_heapfail_other_core_untouched failed at [^:]+:[0-9]+: an allocation on this core is served \(0, 1\)'
     fi
@@ -8595,7 +8575,7 @@ BIG, SEQ, WEAVE, USE_BYTES, USE_TAGS, FIDS, NEED_FREE = (int(x) for x in sys.arg
 COLD = 1 << 20                          # quilltest's QUILL_COLD_BYTES
 # The extents a record holds with one stem tag and a 10-byte name (quillS.bin,
 # quillA.bin): 42 bytes of header, 2 per tag, 6 per extent and the name in
-# 4080 (meta_pool.c RECORD_HEADER_SIZE, meta_pool_record_size). A file of one
+# 4080 (plot/plot_width.h RECORD_HEADER_SIZE, PlotFits). A file of one
 # extent per block is refused at exactly EMAX blocks.
 EMAX = (4080 - 42 - 2 - 10) // 6
 
@@ -8624,8 +8604,11 @@ def host(listing, name):
                   listing, re.M)
     return tuple(int(x) for x in m.groups()) if m else None
 
+# The most extents a file grown a block at a time can have: its Allotment
+# windows, each sized to the file when it has none left — 1, 1, 2, 4, … — so
+# 1 + ceil(log2 blocks), fewer wherever a window begins where the last ended.
 def ceiling(blocks):
-    return int(math.log2(blocks)) + 1 if blocks > 0 else 0
+    return (blocks - 1).bit_length() + 1 if blocks > 0 else 0
 
 # The boot's own mount: the first such line, before the startup tests.
 def keeps(log):
@@ -8863,13 +8846,10 @@ quill_path() {
     stand_path "$SCRATCH/serial.quill.$1$boot.log" "$(quill_cores)"
 }
 
-# The path a case's verdict names. bigwrite's refusal comes before any: the
-# write is copied into one kernel-heap buffer (crate_in_buf) before ObjWrite
-# forks to the machine's path, and that copy is what refuses it.
+# The path a case's verdict names; a query writes nothing and takes none.
 quill_said_path() {   # quill_said_path CASE SEEN
     case "$1:$2" in
         longquery:*)     echo "" ;;
-        bigwrite:defect) echo " [path: none — refused in ObjWrite's copy of the write (crate_in_buf), before its fork to $(quill_path quill bigwrite)]" ;;
         *)               echo " [path: $(quill_path quill "$1")]" ;;
     esac
 }
@@ -8902,12 +8882,10 @@ run_quill() {
 #
 # One defect can have its fix emulated in a line: the system and boot tags
 # refused to untag (systemtag); longquery's fix is the tree's own since step
-# 1.1b, and it must behave with nothing put in. The others cannot before
-# their step lands, so their numbers
-# are made small enough that HEAD already copes: bigwrite of 2 MiB, 1 MiB for
-# sequential and interleave — which then land whole, and the host's extent
-# count is what must go red, one extent per block being far over the
-# ceiling — and a Use Context of 395 bytes, which the Ledger holds. fidhistory
+# 1.1b, and bigwrite, sequential and interleave are the tree's own since step
+# 1.3 — each must behave with nothing put in. The others cannot before their
+# step lands, so their numbers are made small enough that HEAD already copes:
+# a Use Context of 395 bytes, which the Ledger holds. fidhistory
 # keeps one file in a thousand, so its guest must count them. The slab stops
 # counting, so the kernel's heap self-test must say FAILED. The kernel's copies
 # stop bringing in a page the program has not touched (VmmUserCopyWindow), so
@@ -8930,15 +8908,9 @@ EOF2
     mutate src/userspace/apps/quilltest_throwaway.c
     python3 - <<'EOF2'
 for p, a, b in (
-    ("src/userspace/apps/quilltest.c", "#define QUILL_BIG_BYTES      (256u << 20)\n",
-     "#define QUILL_BIG_BYTES      (2u << 20)   /* logcheck mutation: a write HEAD can take */\n"),
     ("src/userspace/apps/quilltest.c",
      "#define QUILL_USE_TAGS       91          /* 91 x \"quiluNNNNN\" + 90 commas = 1000 bytes */\n",
      "#define QUILL_USE_TAGS       36   /* logcheck mutation: 395 bytes, which the Ledger holds */\n"),
-    ("src/userspace/apps/quilltest_throwaway.c", "#define QUILL_WEAVE_BYTES    (64u << 20)\n",
-     "#define QUILL_WEAVE_BYTES    (1u << 20)   /* logcheck mutation: below the record width */\n"),
-    ("src/userspace/apps/quilltest_throwaway.c", "#define QUILL_SEQ_BYTES      (3u << 20)\n",
-     "#define QUILL_SEQ_BYTES      (1u << 20)   /* logcheck mutation: below the record width */\n"),
     ("src/userspace/apps/quilltest_throwaway.c", "        int drc = delete((uint32_t)fid);\n",
      "        int drc = (i % 1000u == 999u) ? 0 : delete((uint32_t)fid);   /* logcheck mutation: one in a thousand stays */\n"),
 ):
@@ -8946,8 +8918,8 @@ for p, a, b in (
     assert s.count(a) == 1, "quillmut quilltest anchor missing in %s: %s" % (p, a.strip())
     open(p, "w").write(s.replace(a, b, 1))
 EOF2
-    mut_done src/userspace/apps/quilltest.c "logcheck mutation" 2
-    mut_done src/userspace/apps/quilltest_throwaway.c "logcheck mutation" 3
+    mut_done src/userspace/apps/quilltest.c "logcheck mutation" 1
+    mut_done src/userspace/apps/quilltest_throwaway.c "logcheck mutation" 1
 
     mutate src/lib/kernel/slab.c
     python3 - <<'EOF2'
@@ -9022,7 +8994,7 @@ run_quillmut() {
     make run-stop >/dev/null 2>&1
     quill_mutants_off
     restore build/boxos.img
-    quill_judge quillmut 2097152 1048576 1048576 395 36 50000
+    quill_judge quillmut 268435456 3145728 67108864 395 36 50000
     while IFS=$'\t' read -r kind a b c; do
         case "$kind" in
             check)    if [ "$a" = ok ]; then ok "quillmut: $b"; else bad "quillmut: $b"; fi ;;
@@ -9032,7 +9004,6 @@ run_quillmut() {
                           bad "quillmut: the slab stopped counting and the kernel's self-test said $a — $b"
                       fi ;;
             case)     case "$a" in
-                          sequential|interleave) want="fail:the files? (is|are) whole but .* where [0-9]+ is the ceiling" ;;
                           fidhistory)            want="fail:[0-9]+ files were live before and [0-9]+ after" ;;
                           coldread)              want="fail:a read of [0-9]+ bytes into memory this program never touched answered -[0-9]+ \(error [0-9]+\); 0 of the bytes" ;;
                           coldwrite)             want="fail:a write of [0-9]+ bytes out of memory this program never touched answered -[0-9]+ \(error [0-9]+\); the file holds 0 bytes" ;;
@@ -9124,22 +9095,24 @@ EOF2
     mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 1
 }
 
-# stackguard_write_on grow|lift — tagfs_write_inside's block buffer, 512 bytes
+# stackguard_frame_on grow|lift — ReadAheadPrefetch's block buffer, 512 bytes
 # more of it, or none of it on the stack.
-stackguard_write_on() {
+stackguard_frame_on() {
     mutate src/kernel/tagfs/tagfs.c
     python3 - "$1" <<'EOF2'
 import sys
 p = "src/kernel/tagfs/tagfs.c"
 s = open(p).read()
-anchor = "    uint8_t block_buf[TAGFS_BLOCK_SIZE];\n    uint64_t bytes_written = 0;\n"
-assert s.count(anchor) == 1, "stackguard tagfs_write_inside anchor missing"
+anchor = "            uint8_t tmp[TAGFS_BLOCK_SIZE];\n            if (disk_read_sectors(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {\n"
+assert s.count(anchor) == 1, "stackguard ReadAheadPrefetch anchor missing"
 if sys.argv[1] == "grow":
-    new = anchor + ("    volatile uint8_t logcheck_more[512];   /* logcheck mutation: a held frame grows */\n"
-                    "    logcheck_more[bytes_written % 512] = 1;\n")
+    new = ("            uint8_t tmp[TAGFS_BLOCK_SIZE];\n"
+           "            volatile uint8_t logcheck_more[512];   /* logcheck mutation: a held frame grows */\n"
+           "            logcheck_more[i % 512] = 1;\n"
+           "            if (disk_read_sectors(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {\n")
 else:
-    new = ("    static uint8_t block_buf[TAGFS_BLOCK_SIZE];   /* logcheck mutation: the block leaves the stack */\n"
-           "    uint64_t bytes_written = 0;\n")
+    new = ("            static uint8_t tmp[TAGFS_BLOCK_SIZE];   /* logcheck mutation: the block leaves the stack */\n"
+           "            if (disk_read_sectors(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {\n")
 open(p, "w").write(s.replace(anchor, new, 1))
 EOF2
     mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 1
@@ -9204,26 +9177,26 @@ run_stackguard() {
     restore src/kernel/tagfs/tagfs.c
 
     # M2 — a held frame grows, by at least what was put on it.
-    held=$(stackguard_held tagfs_write_inside)
-    stackguard_write_on grow
-    stackguard_red grow "^\[stack\] FAIL src/kernel/tagfs/tagfs.c:tagfs_write_inside grew to [0-9]+ bytes while its caveat holds it at $held "
-    n=$(sed -nE 's/.*tagfs_write_inside grew to ([0-9]+) bytes.*/\1/p' "$SCRATCH/build.stackguard.grow.log" | head -1)
+    held=$(stackguard_held ReadAheadPrefetch)
+    stackguard_frame_on grow
+    stackguard_red grow "^\[stack\] FAIL src/kernel/tagfs/tagfs.c:ReadAheadPrefetch grew to [0-9]+ bytes while its caveat holds it at $held "
+    n=$(sed -nE 's/.*ReadAheadPrefetch grew to ([0-9]+) bytes.*/\1/p' "$SCRATCH/build.stackguard.grow.log" | head -1)
     [ -n "$n" ] && [ "$n" -ge $((held + 512)) ]
-    chk $? "stackguard: tagfs_write_inside 512 bytes bigger stops the link, at ${n:-?} over its $held — $(stackguard_said grow)"
+    chk $? "stackguard: ReadAheadPrefetch 512 bytes bigger stops the link, at ${n:-?} over its $held — $(stackguard_said grow)"
 
     # The same mutant through the harness: said, not judged, linked, no stamp.
     L="$SCRATCH/build.stackguard.harness.log"
     make >"$L" 2>&1
     n=$?
     [ $n -eq 0 ] && grep -q "Nameplate pass 1" "$L" && [ ! -f build/.stack_usage.ok ] \
-        && grep -qE "^\[stack\] under the harness, said and not judged: src/kernel/tagfs/tagfs.c:tagfs_write_inside grew to [0-9]+ bytes while its caveat holds it at $held " "$L"
+        && grep -qE "^\[stack\] under the harness, said and not judged: src/kernel/tagfs/tagfs.c:ReadAheadPrefetch grew to [0-9]+ bytes while its caveat holds it at $held " "$L"
     chk $? "stackguard: under HARNESS=on the same mutant links, the growth is said and not judged, and no stamp is left (make $n)"
     restore src/kernel/tagfs/tagfs.c
 
     # M3 — a held frame's block leaves the stack: the caveat must be lifted.
-    stackguard_write_on lift
-    stackguard_red lift "^\[stack\] FAIL caveat lifted early: stack src/kernel/tagfs/tagfs.c:tagfs_write_inside — .* — (is [0-9]+ bytes, no longer over 1024|is no longer a function of its own): the test does not test what it claims, or step [0-9.]+[a-z]* already landed — lift the caveat$"
-    chk $? "stackguard: tagfs_write_inside with its block off the stack is a caveat lifted early — $(stackguard_said lift)"
+    stackguard_frame_on lift
+    stackguard_red lift "^\[stack\] FAIL caveat lifted early: stack src/kernel/tagfs/tagfs.c:ReadAheadPrefetch — .* — (is [0-9]+ bytes, no longer over 1024|is no longer a function of its own): the test does not test what it claims, or step [0-9.]+[a-z]* already landed — lift the caveat$"
+    chk $? "stackguard: ReadAheadPrefetch with its block off the stack is a caveat lifted early — $(stackguard_said lift)"
     restore src/kernel/tagfs/tagfs.c
 
     # M4 — the reach grows, and it is the only thing said to be wrong.

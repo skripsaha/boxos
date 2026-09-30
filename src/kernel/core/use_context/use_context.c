@@ -277,11 +277,11 @@ bool UseContextMatches(const struct process_t *proc)
     bool match = __atomic_load_n(&g_use.ready, __ATOMIC_RELAXED) != 0 &&
                  (worn & g_use.bits) == g_use.bits;
     if (match) {
-        uint16_t  worn_count = __atomic_load_n(&proc->cabin->tag_overflow_count, __ATOMIC_ACQUIRE);
+        uint32_t  worn_count = __atomic_load_n(&proc->cabin->tag_overflow_count, __ATOMIC_ACQUIRE);
         uint16_t *worn_ids   = __atomic_load_n(&proc->cabin->tag_overflow_ids, __ATOMIC_ACQUIRE);
         for (uint16_t j = 0; j < g_use.overflow_count && match; j++) {
             bool found = false;
-            for (uint16_t i = 0; i < worn_count && !found; i++)
+            for (uint32_t i = 0; i < worn_count && !found; i++)
                 found = worn_ids[i] == g_use.overflow[j];
             match = found;
         }

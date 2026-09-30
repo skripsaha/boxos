@@ -55,8 +55,8 @@ static bool QuillWears(uint32_t fid, const char *key)
 
 /* The byte at which a file holding one extent per block is refused: its
  * record — 42 bytes, 2 per tag, 6 per extent and the name — fills the 4080
- * bytes of a pool block's data (meta_pool.c RECORD_HEADER_SIZE and
- * meta_pool_record_size, TAGFS_MPOOL_DATA_SIZE). 2748416, 671 extents, for
+ * bytes of a pool block's data (plot/plot_width.h RECORD_HEADER_SIZE and
+ * TAGFS_MPOOL_DATA_SIZE, PlotFits). 2748416, 671 extents, for
  * a 10-byte name wearing its stem alone. 0 when the file will not say. */
 static uint64_t QuillWidthLimit(uint32_t fid)
 {

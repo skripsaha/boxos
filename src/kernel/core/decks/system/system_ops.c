@@ -1217,7 +1217,7 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
         }
 
         bool has_exec_tag = false;
-        for (uint16_t t = 0; t < meta.tag_count; t++) {
+        for (uint32_t t = 0; t < meta.tag_count; t++) {
             char key[128];
             if (!tagfs_tag_key(meta.tag_ids[t], key, sizeof(key))) continue;
             if (strcmp(key, "app") == 0 || strcmp(key, "utility") == 0) has_exec_tag = true;
@@ -1275,11 +1275,13 @@ static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext
      * short read leaves the rest of the buffer as the zeros it was allocated
      * with, and a process started on those runs `add [rax], al` off the first
      * page and dies writing to address zero. */
-    int rd = tagfs_read(fh, virt, file_size);
+    uint64_t got = 0;
+    error_t  rd  = tagfs_read(fh, virt, file_size, &got);
     tagfs_close(fh);
-    if (rd < 0 || (uint64_t)rd != file_size) {
-        kprintf("[Spawn] not starting file %u: %d of %llu bytes came back\n",
-                found_id, rd, (unsigned long long)file_size);
+    if (rd != OK || got != file_size) {
+        kprintf("[Spawn] not starting file %u: %llu of %llu bytes came back (error %u)\n",
+                found_id, (unsigned long long)got, (unsigned long long)file_size,
+                (unsigned)rd);
         pmm_free(phys, pages);
         return ERR_SPAWN_FAILED;
     }
@@ -1753,8 +1755,8 @@ static int SysDefragFile(const ManifestOp *op, Crate *crates, uint16_t crate_cou
     memcpy(&file_id,      op->params,     sizeof(uint32_t));
     memcpy(&target_block, op->params + 4, sizeof(uint32_t));
 
-    int rc = tagfs_defrag_file(file_id, target_block);
-    if (rc != 0) return ERR_INVALID_ARGUMENT;
+    error_t rc = tagfs_defrag_file(file_id, target_block);
+    if (rc != OK) return (int)rc;
 
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];

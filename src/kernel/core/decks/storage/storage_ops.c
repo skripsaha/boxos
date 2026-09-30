@@ -7,20 +7,19 @@
  * primitives, so a payload that straddles a page boundary is copied across
  * every backing frame. A 1-MiB read fits in one syscall.
  *
- * Phase 7 scope: OBJ_READ, OBJ_WRITE, OBJ_DELETE, OBJ_RENAME, OBJ_GET_INFO.
- * OBJ_CREATE, TAG_*, CONTEXT_* deferred — they need a separate pass because
- * of variable-length tag-string parsing.
- *
  * Param layouts (little-endian, packed):
  *   OBJ_READ      params: [u32 file_id][u64 offset]
  *   OBJ_WRITE     params: [u32 file_id][u64 offset][u32 flags]
+ *   OBJ_SPAN      params: [u32 file_id][u64 size]
  *   OBJ_DELETE    params: [u32 file_id]
  *   OBJ_RENAME    params: [u32 file_id][u16 new_name_len][char new_name[]]
  *   OBJ_GET_INFO  params: [u32 file_id]
  *
  *   OBJ_READ.out_crate     : payload destination; size <- bytes_read
- *   OBJ_WRITE.in_crate     : payload source
- *   OBJ_WRITE.out_crate    : optional [u64 bytes_written][u64 new_file_size]
+ *   OBJ_WRITE.in_crate     : payload source, taken out of the program's pages
+ *                            a block at a time as the write reaches it
+ *   OBJ_WRITE.out_crate    : optional [u64 bytes_written][u64 new_file_size],
+ *                            written on a refusal too: the bytes the file holds
  *   OBJ_GET_INFO.out_crate : serialized record, see ObjGetInfo() below
  */
 
@@ -50,6 +49,7 @@
 #include "amp.h"   /* g_amp.total_cores — async write needs a K-Core to pump */
 #include "boardroom.h"
 #include "scribe.h"   /* VolumeFlushFor — an anchor's flush, unless one already covers it */
+#include "plot.h"     /* PlotFind, PlotSource — the write's bytes where they are */
 
 /*
  * Can the medium under the volume answer a read without somebody standing over
@@ -316,26 +316,16 @@ static void obj_read_step(ObjReadAsyncCtx *ctx)
         return;
     }
 
-    uint64_t file_pos = ctx->start_offset + ctx->bytes_done;
+    uint64_t file_pos   = ctx->start_offset + ctx->bytes_done;
+    uint32_t off_in_blk = (uint32_t)(file_pos % TAGFS_BLOCK_SIZE);
+    uint32_t disk_block = 0;
 
-    /* Locate extent containing file_pos. */
-    uint64_t extent_start = 0;
-    uint16_t ext_idx = 0xFFFF;
-    for (uint16_t i = 0; i < ctx->handle->extent_count; i++) {
-        uint64_t ext_size = (uint64_t)ctx->handle->extents[i].block_count * TAGFS_BLOCK_SIZE;
-        if (file_pos < extent_start + ext_size) { ext_idx = i; break; }
-        extent_start += ext_size;
-    }
-    if (ext_idx == 0xFFFF) {
+    if (!PlotFind(ctx->handle->extents, ctx->handle->extent_count,
+                  file_pos / TAGFS_BLOCK_SIZE, &disk_block, NULL)) {
         /* Walked past last extent — finish with what we have. */
         obj_read_finish(ctx, OK, /*partial_ok=*/true);
         return;
     }
-
-    uint64_t off_in_ext = file_pos - extent_start;
-    uint32_t blk_in_ext = (uint32_t)(off_in_ext / TAGFS_BLOCK_SIZE);
-    uint32_t off_in_blk = (uint32_t)(off_in_ext % TAGFS_BLOCK_SIZE);
-    uint32_t disk_block = ctx->handle->extents[ext_idx].start_block + blk_in_ext;
 
     uint64_t remaining = ctx->total_bytes - ctx->bytes_done;
     uint32_t chunk     = TAGFS_BLOCK_SIZE - off_in_blk;
@@ -519,25 +509,26 @@ static int ObjRead(const ManifestOp *op,
 
     /* Sync fallback (no AHCI, no proc context, alloc failure, or empty
      * read). Same bounce path — we already allocated kp above. */
-    int got = tagfs_read(handle, kp, out->capacity);
+    uint64_t got  = 0;
+    error_t  read = tagfs_read(handle, kp, out->capacity, &got);
     tagfs_close(handle);
 
     error_t  sync_err   = OK;
     uint64_t sync_bytes = 0;
-    if (got < 0) {
+    if (read != OK) {
         sync_err  = ERR_IO;
         out->size = 0;
     } else if (got > 0) {
-        int crc = crate_out_commit(out, ctx, kp, (uint64_t)got);
+        int crc = crate_out_commit(out, ctx, kp, got);
         if (crc != OK) {
             sync_err  = (error_t)crc;
             out->size = 0;
         } else {
-            sync_bytes = (uint64_t)got;
-            out->size  = (uint64_t)got;
+            sync_bytes = got;
+            out->size  = got;
         }
     } else {
-        out->size = 0;   /* EOF read: 0 bytes, success */
+        out->size = 0;   /* at or past the size: 0 bytes, success */
     }
     crate_buf_free(kp);
 
@@ -548,9 +539,47 @@ static int ObjRead(const ManifestOp *op,
     return (sync_err == OK) ? OK : (int)sync_err;
 }
 
+/* A change to a file's bytes, said on every tag it wears — one 32-byte shape
+ * for every road that changes them, so one listener reads them all: op 1 a
+ * write (the bytes written at offset), op 3 a span (the bytes cut or added
+ * from offset, the old or the new size, whichever is less). */
+static void storage_publish_change(uint32_t file_id, uint8_t op, uint64_t offset,
+                                   uint64_t bytes, uint64_t final_size, const OpContext *ctx)
+{
+    if (!TouchHasAnyListeners())
+        return;
+    TagFSMetadata meta;
+    memset(&meta, 0, sizeof(meta));
+    if (tagfs_get_metadata(file_id, &meta) != OK)
+        return;
+    struct {
+        uint32_t file_id;
+        uint8_t  op;
+        uint8_t  _pad[3];
+        uint64_t offset;
+        uint64_t bytes;
+        uint64_t final_size;
+    } __attribute__((packed)) ev = {
+        .file_id    = file_id,
+        .op         = op,
+        .offset     = offset,
+        .bytes      = bytes,
+        .final_size = final_size,
+    };
+    uint32_t pid = (ctx && ctx->proc) ? ctx->proc->pid : 0;
+    for (uint32_t ti = 0; ti < meta.tag_count; ti++)
+        TouchPublishId(meta.tag_ids[ti], &ev, sizeof(ev), pid, TOUCH_FLAG_TAGFS);
+    tagfs_metadata_free(&meta);
+}
+
 /* -------------------------------------------------------------------------
- * OBJ_WRITE — write in_crate.size bytes to file at offset.
- * If out_crate is provided and capacity >= 16, write back stats.
+ * OBJ_WRITE — in_crate.size bytes into the file at offset, or at its size
+ * with OBJ_WRITE_APPEND_FLAG. An offset past the size is refused
+ * ERR_TAGFS_BEYOND_SIZE. The bytes are taken out of the program's pages a
+ * block at a time as the write reaches them — a write is never copied whole
+ * into the kernel heap, so its size is bounded by the volume, not the heap.
+ * If out_crate is provided and capacity >= 16, the stats are written back on
+ * every answer: the bytes the file now holds of the write, and its size.
  * ------------------------------------------------------------------------- */
 
 static int ObjWrite(const ManifestOp *op,
@@ -568,18 +597,29 @@ static int ObjWrite(const ManifestOp *op,
     /* Ф26e: optional trailing correlation waybill (box::ferry). Absent for a
      * synchronous write (param_size 16) → 0 → plain KCTX_GUIDE completion. */
     uint64_t waybill = (op->param_size >= 24) ? param_u64(op, 16) : 0;
+    bool     append  = (flags & OBJ_WRITE_APPEND_FLAG) != 0;
 
     Crate *src = &crates[op->in_crate];
-    if (src->size == 0)
+    if (src->size == 0 || src->size > src->capacity)
         return storage_op_fail(ctx, crates, ERR_INVALID_ARGUMENT, waybill);
 
-    /* Bounce-buffer the input crate. Multi-page user buffers are common
-     * (any write over 4 KiB) and vmm_translate_user_addr cannot span
-     * pages, so we copy through a kmalloc'd kernel buffer. The async
-     * path takes ownership of src_bounce on a successful submit and
-     * frees it from W_DONE; otherwise we free here. */
-    void *src_bounce = crate_in_buf(src, ctx);
-    if (!src_bounce) return storage_op_fail(ctx, crates, ERR_INVALID_ADDRESS, waybill);
+    /* Where the bytes are: the program's pages, walked as the write reaches
+     * them, or — for a kernel caller with no cabin — the crate's own address.
+     * A page the program has not touched yet is brought in here, before any
+     * lock of the volume is taken; a write that cannot have its pages is
+     * refused with nothing of it written. */
+    PlotSource source;
+    memset(&source, 0, sizeof(source));
+    source.bytes = src->size;
+    if (ctx && ctx->proc && ctx->proc->cabin) {
+        source.vmm  = ctx->proc->cabin->vmm;
+        source.user = (uintptr_t)src->addr;
+    } else {
+        source.kernel = (const uint8_t *)(uintptr_t)src->addr;
+    }
+    error_t pages = PlotSourceBringIn(&source);
+    if (pages != OK)
+        return storage_op_fail(ctx, crates, pages, waybill);
 
     /* Optional output stats crate [u64 bytes_written][u64 new_file_size].
      * Written via crate_write (sync) / vmm_user_buf_commit_out (async) —
@@ -591,102 +631,69 @@ static int ObjWrite(const ManifestOp *op,
     }
 
     /* Async write requires a K-Core to pump its IRQ-deferred completion
-     * continuations (write completion does heavy work — alloc / the record's
+     * continuations (write completion does heavy work — the record's
      * commit — that cannot run in IRQ context, so it is posted to the never-drop
      * storage completion queue and drained by kcore_run_loop). That loop only exists in multi-core
      * mode; on a single core the BSP runs userspace and never pumps, so the
      * job would strand. Use the sync path there — it is correct and has no
      * benefit to lose (one core does everything regardless). */
     if (tagfs_volume_is_ahci() && ctx && ctx->proc && g_amp.total_cores > 1) {
-        int rc = ObjWriteAsync(file_id, offset, flags,
-                               src_bounce, (uint32_t)src->size,
-                               out_crate, ctx,
-                               crates, ctx->crate_count, ctx->crates_uaddr,
-                               waybill);
+        int rc = ObjWriteAsync(file_id, offset, append, &source, out_crate, ctx,
+                               crates, ctx->crate_count, ctx->crates_uaddr, waybill);
         if (rc == ERR_WOULD_BLOCK) {
-            /* Async owns src_bounce AND the staged Crate[] kbuf now —
-             * wjob_finalize frees both at W_DONE. */
+            /* The job owns the write AND the staged Crate[] kbuf now —
+             * wjob_finalize answers and frees. */
             return ERR_WOULD_BLOCK;
         }
-        /* Hard failure before submission — free + fall through. */
+        /* Refused before the job took it — nothing of it moved; fall through. */
     }
 
     /* Sync fallback. */
-    TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
-    if (!handle) {
-        crate_buf_free(src_bounce);
+    TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE |
+                                                  (append ? TAGFS_HANDLE_APPEND : 0));
+    if (!handle)
         return storage_op_fail(ctx, crates, ERR_FILE_NOT_FOUND, waybill);
-    }
+    handle->offset = offset;
 
-    if (flags & OBJ_WRITE_APPEND_FLAG) {
-        handle->offset = handle->file_size;
-    } else {
-        handle->offset = offset;
-    }
-
-    int wrote = tagfs_write(handle, src_bounce, src->size);
+    uint64_t wrote      = 0;
+    error_t  rc         = tagfs_write(handle, &source, &wrote);
     uint64_t final_size = handle->file_size;
-    uint64_t start_offset = (flags & OBJ_WRITE_APPEND_FLAG)
-                                ? (final_size - (uint64_t)(wrote > 0 ? wrote : 0))
-                                : offset;
+    uint64_t began_at   = handle->offset - wrote;
     tagfs_close(handle);
-    crate_buf_free(src_bounce);
 
-    if (wrote < 0) {
-        if (waybill != 0)
-            return storage_sync_ferry_finalize(ctx, crates, ERR_IO, 0, waybill);
-        return ERR_IO;
-    }
-
-    /* WROTE fan-out — same 32-byte payload as write_job.c::w_publish so
-     * a tag listener (write_observer, etc.) gets identical layout on
-     * sync (BIOS / single-core) and async (UEFI + AHCI + multi-core)
-     * paths. Drift between the two surfaced as
-     *   "[WO] FAIL: payload too small (8)"
-     * on every sync-path config. */
-    if (wrote > 0 && TouchHasAnyListeners()) {
-        TagFSMetadata wmeta;
-        memset(&wmeta, 0, sizeof(wmeta));
-        if (tagfs_get_metadata(file_id, &wmeta) == OK) {
-            struct {
-                uint32_t file_id;
-                uint8_t  op;          /* 1 = WRITE */
-                uint8_t  _pad[3];
-                uint64_t offset;
-                uint64_t bytes;
-                uint64_t final_size;
-            } __attribute__((packed)) ev = {
-                .file_id    = file_id,
-                .op         = 1,
-                .offset     = start_offset,
-                .bytes      = (uint64_t)wrote,
-                .final_size = final_size,
-            };
-            uint32_t pid = (ctx && ctx->proc) ? ctx->proc->pid : 0;
-            for (uint16_t ti = 0; ti < wmeta.tag_count; ti++) {
-                TouchPublishId(wmeta.tag_ids[ti], &ev, sizeof(ev),
-                               pid, TOUCH_FLAG_TAGFS);
-            }
-            tagfs_metadata_free(&wmeta);
-        }
-    }
+    /* A refusal part way leaves the bytes before it in the file: the listeners
+     * hear of them and the stats count them, the same as on the async road. */
+    if (wrote > 0)
+        storage_publish_change(file_id, 1, began_at, wrote, final_size, ctx);
 
     if (out_crate) {
         uint8_t stats[16];
-        uint64_t bytes_written = (uint64_t)wrote;
-        memcpy(stats + 0, &bytes_written, sizeof(uint64_t));
-        memcpy(stats + 8, &final_size,    sizeof(uint64_t));
+        memcpy(stats + 0, &wrote,      sizeof(uint64_t));
+        memcpy(stats + 8, &final_size, sizeof(uint64_t));
         /* Best-effort: a commit failure (user unmapped the page mid-op)
-         * leaves the stats crate empty but does not fail the completed
-         * write — crate_write sets out_crate->size only on success. */
+         * leaves the stats crate empty but does not fail the write —
+         * crate_write sets out_crate->size only on success. */
         (void)crate_write(out_crate, ctx, stats, 16);
     }
 
     /* Ф26e: answer a ferry write on the KCTX_STORAGE channel — the async
      * path was declined (single core / alloc-fail) and fell through here. */
     if (waybill != 0)
-        return storage_sync_ferry_finalize(ctx, crates, OK, (uint64_t)wrote, waybill);
-    return OK;
+        return storage_sync_ferry_finalize(ctx, crates, rc, wrote, waybill);
+    return (int)rc;
+}
+
+/* Whether the file wears a tag whose key is system or boot: a file the
+ * machine starts from, which no program cuts, grows or deletes. */
+static bool storage_file_is_guarded(const TagFSMetadata *md)
+{
+    for (uint32_t i = 0; i < md->tag_count; i++) {
+        char key[128];
+        if (!tagfs_tag_key(md->tag_ids[i], key, sizeof(key))) continue;
+        if (strcmp(key, "system") == 0 || strcmp(key, "boot") == 0)
+            return true;
+    }
+    return false;
 }
 
 /* -------------------------------------------------------------------------
@@ -707,15 +714,10 @@ static int ObjDelete(const ManifestOp *op,
 
     TagFSMetadata md;
     if (tagfs_get_metadata(file_id, &md) == 0 && (md.flags & TAGFS_FILE_ACTIVE)) {
-        for (uint16_t i = 0; i < md.tag_count; i++) {
-            char key[128];
-            if (!tagfs_tag_key(md.tag_ids[i], key, sizeof(key))) continue;
-            if (strcmp(key, "system") == 0 || strcmp(key, "boot") == 0) {
-                tagfs_metadata_free(&md);
-                return ERR_PERMISSION_DENIED;
-            }
-        }
+        bool guarded = storage_file_is_guarded(&md);
         tagfs_metadata_free(&md);
+        if (guarded)
+            return ERR_PERMISSION_DENIED;
     }
 
     int rc = tagfs_delete_file(file_id);
@@ -723,78 +725,50 @@ static int ObjDelete(const ManifestOp *op,
 }
 
 /* -------------------------------------------------------------------------
- * OBJ_TRUNCATE — params = [u32 file_id][u64 new_size]. Shrink only.
+ * OBJ_SPAN — params = [u32 file_id][u64 size]: the file made exactly `size`
+ * bytes long (tagfs_span_file). Shorter cuts the tail; longer reads as zeros
+ * from the old size on.
  *
  * Guarded like OBJ_DELETE: cutting a "system" or "boot" file down to nothing
  * destroys it just as thoroughly as deleting it, so the same tags refuse the
  * same way.
  *
- * Publishes the TRUNCATED fan-out on every tag of the file, in the same
- * 32-byte payload shape ObjWrite uses so one observer can read both:
- *   op = 3, offset = the cut point (= the new length),
- *   bytes = how many bytes were discarded, final_size = the new length.
- * A content change that published nothing would be a hole in the Touch spine
- * — an observer would have to poll to notice, which is the thing Touch exists
- * to remove.
+ * Publishes the change on every tag of the file (storage_publish_change,
+ * op 3): a content change that published nothing would be a hole in the Touch
+ * spine — an observer would have to poll to notice, which is the thing Touch
+ * exists to remove.
  * ------------------------------------------------------------------------- */
 
-static int ObjTruncate(const ManifestOp *op,
-                       Crate            *crates,
-                       uint16_t          crate_count,
-                       const OpContext  *ctx)
+static int ObjSpan(const ManifestOp *op,
+                   Crate            *crates,
+                   uint16_t          crate_count,
+                   const OpContext  *ctx)
 {
     (void)crates;
     (void)crate_count;
     if (op->param_size < 12) return ERR_INVALID_ARGUMENT;
 
-    uint32_t file_id  = param_u32(op, 0);
-    uint64_t new_size = param_u64(op, 4);
+    uint32_t file_id = param_u32(op, 0);
+    uint64_t size    = param_u64(op, 4);
 
     TagFSMetadata md;
-    uint64_t      old_size = 0;
-    bool          have_md  = false;
-    if (tagfs_get_metadata(file_id, &md) == 0) {
-        for (uint16_t i = 0; i < md.tag_count; i++) {
-            char key[128];
-            if (!tagfs_tag_key(md.tag_ids[i], key, sizeof(key))) continue;
-            if (strcmp(key, "system") == 0 || strcmp(key, "boot") == 0) {
-                tagfs_metadata_free(&md);
-                return ERR_PERMISSION_DENIED;
-            }
-        }
-        old_size = md.size;
-        have_md  = true;
-    }
-
-    int rc = tagfs_truncate_file(file_id, new_size);
-    if (rc != 0) {
-        if (have_md) tagfs_metadata_free(&md);
-        return (error_t)(-rc);
-    }
-
-    if (have_md) {
-        if (old_size > new_size && TouchHasAnyListeners()) {
-            struct {
-                uint32_t file_id;
-                uint8_t  op;          /* 3 = TRUNCATE */
-                uint8_t  _pad[3];
-                uint64_t offset;
-                uint64_t bytes;
-                uint64_t final_size;
-            } __attribute__((packed)) ev = {
-                .file_id    = file_id,
-                .op         = 3,
-                .offset     = new_size,
-                .bytes      = old_size - new_size,
-                .final_size = new_size,
-            };
-            uint32_t pid = (ctx && ctx->proc) ? ctx->proc->pid : 0;
-            for (uint16_t ti = 0; ti < md.tag_count; ti++) {
-                TouchPublishId(md.tag_ids[ti], &ev, sizeof(ev), pid, TOUCH_FLAG_TAGFS);
-            }
-        }
+    memset(&md, 0, sizeof(md));
+    if (tagfs_get_metadata(file_id, &md) != 0 || !(md.flags & TAGFS_FILE_ACTIVE)) {
         tagfs_metadata_free(&md);
+        return ERR_FILE_NOT_FOUND;
     }
+    bool     guarded = storage_file_is_guarded(&md);
+    uint64_t was     = md.size;
+    tagfs_metadata_free(&md);
+    if (guarded)
+        return ERR_PERMISSION_DENIED;
+
+    error_t rc = tagfs_span_file(file_id, size);
+    if (rc != OK)
+        return (int)rc;
+    if (size != was)
+        storage_publish_change(file_id, 3, size < was ? size : was,
+                               size < was ? was - size : size - was, size, ctx);
     return OK;
 }
 
@@ -901,8 +875,10 @@ static int ObjGetInfo(const ManifestOp *op,
         return ERR_FILE_NOT_FOUND;
     }
 
+    /* The answer's tag count is u16 on the wire; a record holds no more. */
+    uint16_t tag_count = (uint16_t)md.tag_count;
     uint64_t need = 4u + 4u + 8u + 2u + 2u + filename_len;
-    for (uint16_t i = 0; i < md.tag_count; i++)
+    for (uint32_t i = 0; i < tag_count; i++)
         need = info_tag_record(NULL, need, md.tag_ids[i]);
 
     uint8_t *kp = NULL;
@@ -920,7 +896,7 @@ static int ObjGetInfo(const ManifestOp *op,
          * record carries the bits; the tags decide them. */
         const WellKnownTags *wk    = tagfs_get_well_known_tags();
         uint32_t             flags = md.flags;
-        for (uint16_t i = 0; i < md.tag_count; i++) {
+        for (uint32_t i = 0; i < tag_count; i++) {
             if (md.tag_ids[i] == wk->trashed) flags |= TAGFS_FILE_TRASHED;
             if (md.tag_ids[i] == wk->hidden)  flags |= TAGFS_FILE_HIDDEN;
         }
@@ -928,10 +904,10 @@ static int ObjGetInfo(const ManifestOp *op,
         memcpy(kp + pos, &md.file_id, 4); pos += 4;
         memcpy(kp + pos, &flags,      4); pos += 4;
         memcpy(kp + pos, &md.size,    8); pos += 8;
-        memcpy(kp + pos, &md.tag_count, 2); pos += 2;
+        memcpy(kp + pos, &tag_count,  2); pos += 2;
         memcpy(kp + pos, &filename_len, 2); pos += 2;
         if (filename_len) { memcpy(kp + pos, md.filename, filename_len); pos += filename_len; }
-        for (uint16_t i = 0; i < md.tag_count; i++)
+        for (uint32_t i = 0; i < tag_count; i++)
             pos = info_tag_record(kp, pos, md.tag_ids[i]);
     }
     tagfs_leave();
@@ -1252,8 +1228,6 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     uint16_t    *tag_ids   = NULL;
     char        *filename  = NULL;
     rc = storage_tags_spelled(scope, text, tlen, &tags, &use_block, &total);
-    if (rc == OK && total > UINT16_MAX)
-        rc = ERR_TAG_LIMIT_EXCEEDED;
     if (rc == OK)
         rc = storage_intern_all(tags, total, &tag_ids);
     if (rc == OK && !(filename = kmalloc(name_len + 1)))
@@ -1269,7 +1243,7 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     filename[name_len] = '\0';
 
     uint32_t file_id = 0;
-    int made = tagfs_create_file(filename, tag_ids, (uint16_t)total, &file_id);
+    int made = tagfs_create_file(filename, tag_ids, total, &file_id);
     kfree(filename);
     kfree(tag_ids);
     if (made != 0) return (int)(error_t)(-made);
@@ -1399,7 +1373,7 @@ static int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
         TagFSMetadata wmeta;
         memset(&wmeta, 0, sizeof(wmeta));
         if (tagfs_get_metadata(file_id, &wmeta) == OK) {
-            for (uint16_t ti = 0; ti < wmeta.tag_count; ti++) {
+            for (uint32_t ti = 0; ti < wmeta.tag_count; ti++) {
                 TouchPublishId(wmeta.tag_ids[ti], &ev, sizeof(ev),
                                pid, TOUCH_FLAG_TAGFS);
             }
@@ -1444,7 +1418,7 @@ error_t StorageDeckRegister(void)
         { STORAGE_OBJ_WRITE,    ObjWrite,        OP_AUTH_APP, "storage.write"    },
         { STORAGE_OBJ_CREATE,   ObjCreate,       OP_AUTH_APP, "storage.create"   },
         { STORAGE_OBJ_DELETE,   ObjDelete,       OP_AUTH_APP, "storage.delete"   },
-        { STORAGE_OBJ_TRUNCATE, ObjTruncate,     OP_AUTH_APP, "storage.truncate" },
+        { STORAGE_OBJ_SPAN,     ObjSpan,         OP_AUTH_APP, "storage.span"     },
         { STORAGE_OBJ_RENAME,   ObjRename,       OP_AUTH_APP, "storage.rename"   },
         /* Snapshots: app+, refused on format v1. */
         { STORAGE_SNAP_CREATE,  ObjSnapRefused,  OP_AUTH_APP, "storage.snap.create"},

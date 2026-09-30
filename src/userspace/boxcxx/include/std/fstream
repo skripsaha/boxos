@@ -9,12 +9,15 @@
 //
 // ── what made this header possible ──────────────────────────────────────
 // [filebuf.members] Table 122 says plain ios_base::out means "w", and "w"
-// truncates. TagFS could not truncate: tagfs_write only ever grew a file, so
+// truncates. TagFS could not shorten a file: a write only ever grew one, so
 // rewriting one shorter left the old tail readable behind the new content.
-// Writing this header honestly required building that primitive first, from
-// tagfs_truncate_file up through STORAGE_OBJ_TRUNCATE, file_truncate and
-// current_resize. Every row of Table 122 below is therefore real; none of
-// them is approximated.
+// Writing this header honestly required building that primitive first — span,
+// from tagfs_span_file up through STORAGE_OBJ_SPAN, file_span and current_span,
+// which makes a file exactly as long as asked. Every row of Table 122 below is
+// therefore real; none of them is approximated. span is also how a position
+// past the end is written to: TagFS grows a file only at its end, so a write
+// the kernel refuses as beyond the size spans the file to it first, and the
+// gap reads as zeros (WriteAt).
 //
 // ── the buffer strategy ─────────────────────────────────────────────────
 // ONE buffer, serving the get area or the put area but never both at once. A
@@ -750,7 +753,7 @@ protected:
 
         const uint64_t at = __append ? EndOffset() : (uint64_t)__base;
         if (::current_seek(__c, at) != 0) return 0;
-        const int w = ::current_write(__c, s, (size_t)(n * S));
+        const int w = WriteAt(at, s, (size_t)(n * S));
         if (w <= 0) return 0;
         const streamsize chars = (streamsize)w / S;
         __base = (off_type)(at + (uint64_t)(chars * S));
@@ -800,6 +803,19 @@ private:
         return __base;
     }
 
+    // Bytes out at `at`, the backing's cursor already there. The kernel grows
+    // a file only at its end and refuses a write that begins past it; a
+    // position a seek put past the end is therefore spanned to first, and the
+    // gap between reads as zeros, which is what writing there means.
+    int WriteAt(uint64_t at, const void *p, size_t n)
+    {
+        int w = ::current_write(__c, p, n);
+        if (w == -ERR_TAGFS_BEYOND_SIZE && ::current_span(__c, at) == OK &&
+            ::current_seek(__c, at) == 0)
+            w = ::current_write(__c, p, n);
+        return w;
+    }
+
     uint64_t EndOffset() const noexcept
     {
         const int64_t n = ::current_size(__c);
@@ -827,7 +843,7 @@ private:
             if (::current_seek(__c, at) != 0) return false;
 
             if (!Conv()) {
-                const int w = ::current_write(__c, this->pbase(), (size_t)(n * S));
+                const int w = WriteAt(at, this->pbase(), (size_t)(n * S));
                 if (w != (int)(n * S)) return false;
                 __base = (off_type)(at + (uint64_t)(n * S));
             } else {
@@ -851,7 +867,7 @@ private:
                     if (r == codecvt_base::error) return false;
                     const streamsize bytes = (streamsize)(tn - __ext);
                     if (bytes <= 0 || fn == from) return false;  // no progress
-                    if (::current_write(__c, __ext, (size_t)bytes) != (int)bytes)
+                    if (WriteAt(at + wrote, __ext, (size_t)bytes) != (int)bytes)
                         return false;
                     wrote += (uint64_t)bytes;
                     from = fn;

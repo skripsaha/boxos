@@ -61,7 +61,7 @@ typedef struct Current Current;
 /* Open flags. */
 #define CURRENT_CREATE      0x10u  /* create the backing if absent (stream / file writer) */
 #define CURRENT_NONBLOCK    0x20u  /* put/take never block: -ERR_WOULD_BLOCK when full/empty */
-#define CURRENT_TRUNCATE    0x40u  /* file writer: discard existing content at open */
+#define CURRENT_TRUNCATE    0x40u  /* file writer: the file spanned to nothing at open */
 
 /* Capability bits — query with current_caps(). Honest per-backing. */
 #define CURRENT_CAP_READ          0x01u  /* current_read / current_take usable */
@@ -70,7 +70,7 @@ typedef struct Current Current;
 #define CURRENT_CAP_BACKPRESSURE  0x08u  /* writer can block until the consumer catches up */
 #define CURRENT_CAP_CLOSEABLE     0x10u  /* a reader can observe end-of-stream (CURRENT_CLOSED) */
 #define CURRENT_CAP_SEEKABLE      0x20u  /* random access by byte offset (current_seek) */
-#define CURRENT_CAP_RESIZABLE     0x40u  /* extent is knowable and shrinkable (current_size/resize) */
+#define CURRENT_CAP_RESIZABLE     0x40u  /* extent is knowable and spannable (current_size/span) */
 
 /* Reader sentinel: current_read / current_take return CURRENT_CLOSED (0) when
  * no more data will arrive — the writer closed a stream, or a file's content
@@ -179,18 +179,21 @@ uint64_t current_tell(const Current *c);
  * Extent (CURRENT_CAP_RESIZABLE backings — file). A seekable channel that
  * could not say how long it is, or shorten itself, was only half a channel:
  * every shorter rewrite left the old tail readable behind the new content.
+ * A file writer writes at its cursor no further than the file's end — a
+ * cursor past it is refused -ERR_TAGFS_BEYOND_SIZE — and current_span is the
+ * one way to make a gap.
  * ------------------------------------------------------------------------ */
 
 /* Current length in bytes, or a negative -ERR_* (-ERR_INVALID_OPERATION when
  * the backing has no knowable extent — a stream, the screen, the keyboard). */
 int64_t current_size(const Current *c);
 
-/* Discard everything past `new_size`. SHRINK ONLY — see file_truncate for why
- * growth is refused rather than served. Returns OK, -ERR_INVALID_OPERATION on
- * a backing without an extent or one opened for reading, or the underlying
- * -ERR_*. The byte cursor is clamped into the new range so a writer cannot be
- * left pointing past the end. */
-int current_resize(Current *c, uint64_t new_size);
+/* The backing made exactly `size` bytes long (file_span): shorter cuts the
+ * tail, longer reads as zeros from the old end on. Returns OK,
+ * -ERR_INVALID_OPERATION on a backing without an extent or one opened for
+ * reading, or the underlying -ERR_*. A cursor left past a shorter end is
+ * brought back to it. */
+int current_span(Current *c, uint64_t size);
 
 /* --------------------------------------------------------------------------
  * Introspection

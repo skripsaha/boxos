@@ -77,7 +77,7 @@ static TestResult test_stress_large_file(void)
     TEST_ASSERT(handle != NULL, "tagfs_open should succeed");
     for (uint32_t at = 0; at < STRESS_LARGE_BYTES; at += TAGFS_BLOCK_SIZE) {
         TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x1A, at);
-        TEST_ASSERT_EQ(tagfs_write(handle, g_test_buffer, TAGFS_BLOCK_SIZE),
+        TEST_ASSERT_EQ(TestHandleWrite(handle, g_test_buffer, TAGFS_BLOCK_SIZE),
                        TAGFS_BLOCK_SIZE, "every block of the file is written");
     }
     tagfs_close(handle);
@@ -86,7 +86,7 @@ static TestResult test_stress_large_file(void)
     TEST_ASSERT_EQ(tagfs_get_metadata(file_id, &meta), 0, "the file's metadata reads");
     have_meta = true;
     uint32_t blocks = 0;
-    for (uint16_t e = 0; e < meta.extent_count && meta.extents; e++)
+    for (uint32_t e = 0; e < meta.extent_count && meta.extents; e++)
         blocks += meta.extents[e].block_count;
     TEST_ASSERT_EQ(meta.size, STRESS_LARGE_BYTES, "the file is as long as what was written");
     TEST_ASSERT_EQ(blocks, STRESS_LARGE_BYTES / TAGFS_BLOCK_SIZE,
@@ -96,13 +96,13 @@ static TestResult test_stress_large_file(void)
     TEST_ASSERT(handle != NULL, "tagfs_open for read should succeed");
     for (uint32_t at = 0; at < STRESS_LARGE_BYTES; at += TAGFS_BLOCK_SIZE) {
         TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x1A, at);
-        TEST_ASSERT_EQ(tagfs_read(handle, g_test_output, TAGFS_BLOCK_SIZE),
+        TEST_ASSERT_EQ(TestHandleRead(handle, g_test_output, TAGFS_BLOCK_SIZE),
                        TAGFS_BLOCK_SIZE, "every block reads");
         uint32_t diff = TestFirstDifference(g_test_output, g_test_buffer, TAGFS_BLOCK_SIZE);
         TEST_ASSERT_EQ(at + diff, at + TAGFS_BLOCK_SIZE,
                        "every block holds its own bytes (first differing byte of the file)");
     }
-    TEST_ASSERT_EQ(tagfs_read(handle, g_test_output, TAGFS_BLOCK_SIZE), 0,
+    TEST_ASSERT_EQ(TestHandleRead(handle, g_test_output, TAGFS_BLOCK_SIZE), 0,
                    "and the file ends where the writing ended");
 out:
     if (have_meta)

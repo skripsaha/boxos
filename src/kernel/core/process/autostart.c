@@ -56,7 +56,7 @@ static bool autostart_wanted(const TagFSMetadata *meta)
 {
     bool has_autostart = false;
     bool has_exec_tag  = false;
-    for (uint16_t t = 0; t < meta->tag_count; t++) {
+    for (uint32_t t = 0; t < meta->tag_count; t++) {
         char key[128];
         if (!tagfs_tag_key(meta->tag_ids[t], key, sizeof(key))) continue;
         if (strcmp(key, "autostart") == 0) has_autostart = true;
@@ -97,10 +97,8 @@ static process_t *autostart_launch_one(uint32_t file_id, TagFSMetadata *meta,
     /*
      * ‼ THE WHOLE IMAGE, OR NONE OF IT
      *
-     * tagfs_read returns the number of bytes it managed. This tested it for
-     * being negative, which catches a read that failed outright and misses the
-     * one that stopped early — and the buffer underneath was allocated zeroed,
-     * so a short read hands over an image that is partly, or entirely, zeros.
+     * The count is checked beside the answer: a read that stopped early hands
+     * over a buffer allocated zeroed, an image partly, or entirely, zeros.
      *
      * A page of zeros is not an empty program. 0x00 0x00 decodes as
      * `add [rax], al`, so the process starts, writes to address zero with
@@ -108,13 +106,15 @@ static process_t *autostart_launch_one(uint32_t file_id, TagFSMetadata *meta,
      * exactly what a machine whose flash drive stopped answering showed on the
      * screen, having first announced that it had started the program.
      */
-    int read_result = tagfs_read(fh, virt_buf, file_size);
+    uint64_t got = 0;
+    error_t  rd  = tagfs_read(fh, virt_buf, file_size, &got);
     tagfs_close(fh);
-    if (read_result < 0 || (uint64_t)read_result != file_size) {
+    if (rd != OK || got != file_size) {
         pmm_free(phys_buf, pages_needed);
-        kprintf("[AUTOSTART] not starting '%s': %d of %llu bytes came back — "
+        kprintf("[AUTOSTART] not starting '%s': %llu of %llu bytes came back (error %u) — "
                 "an image that is not all here is not started\n",
-                meta->filename, read_result, (unsigned long long)file_size);
+                meta->filename, (unsigned long long)got, (unsigned long long)file_size,
+                (unsigned)rd);
         return NULL;
     }
 

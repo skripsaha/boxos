@@ -21,6 +21,7 @@
 #include "self_heal/self_heal.h"
 #include "integrity/integrity.h"
 #include "settle_cut/settle_cut.h"
+#include "plot/plot.h"
 #include "scribe/scribe.h"
 #include "../../kernel/drivers/timer/rtc.h"
 #include "logbook.h"
@@ -1126,6 +1127,15 @@ static error_t volume_take_ground(uint8_t seat)
         (const VolumeGeometry *)DeedStamp(&head, VOLUME_STAMP_GEOMETRY, &bytes);
     if (geo && bytes >= sizeof(VolumeGeometry)) {
         memcpy(&g_state.geometry, geo, sizeof(g_state.geometry));
+    }
+
+    /* Where the loader finds the kernel, so nothing moves those blocks under
+     * it (PlotGather). A Deed without the stamp names no such blocks. */
+    const VolumeBoot *boot =
+        (const VolumeBoot *)DeedStamp(&head, VOLUME_STAMP_BOOT, &bytes);
+    memset(&g_state.boot, 0, sizeof(g_state.boot));
+    if (boot && bytes >= sizeof(VolumeBoot)) {
+        memcpy(&g_state.boot, boot, sizeof(g_state.boot));
     }
 
     memcpy(g_state.uuid, head.head.uuid, 16);
@@ -2541,7 +2551,7 @@ error_t tagfs_init(void) {
                 continue;
             }
 
-            for (uint16_t e = 0; computed_bm && e < meta.extent_count; e++)
+            for (uint32_t e = 0; computed_bm && e < meta.extent_count; e++)
             {
                 uint32_t start = meta.extents[e].start_block;
                 uint32_t count = meta.extents[e].block_count;
@@ -2553,7 +2563,7 @@ error_t tagfs_init(void) {
             files_checked++;
 
             // Rebuild bitmap index from disk metadata
-            for (uint16_t t = 0; t < meta.tag_count; t++)
+            for (uint32_t t = 0; t < meta.tag_count; t++)
             {
                 tag_bitmap_set(g_state.bitmap_index, meta.tag_ids[t], fid);
             }
@@ -3293,10 +3303,10 @@ static uint16_t tagfs_name_tag_lookup(const char *filename)
 // tagfs_create_file
 // ----------------------------------------------------------------------------
 
-static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_ids, uint16_t tag_count,
+static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_ids, uint32_t tag_count,
                                     uint32_t *out_file_id);
 
-int tagfs_create_file(const char *filename, const uint16_t *tag_ids, uint16_t tag_count,
+int tagfs_create_file(const char *filename, const uint16_t *tag_ids, uint32_t tag_count,
                       uint32_t *out_file_id)
 {
     if (!tagfs_enter())
@@ -3306,7 +3316,7 @@ int tagfs_create_file(const char *filename, const uint16_t *tag_ids, uint16_t ta
     return rc;
 }
 
-static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_ids, uint16_t tag_count,
+static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_ids, uint32_t tag_count,
                                     uint32_t *out_file_id)
 {
     if (!filename || !out_file_id)
@@ -3323,10 +3333,10 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
     uint32_t file_id = g_state.ledger.next_file_id++;
 
     // Build deduplicated tag array: auto-label first, then caller's tags
-    uint16_t final_count = 0;
+    uint32_t final_count = 0;
     uint16_t *final_tags = NULL;
     {
-        uint16_t max_tags = tag_count + 1;
+        uint64_t max_tags = (uint64_t)tag_count + 1;
         final_tags = kmalloc(sizeof(uint16_t) * max_tags);
         if (!final_tags)
         {
@@ -3342,13 +3352,13 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
         }
 
         // Add caller's tags, skipping duplicates
-        for (uint16_t i = 0; i < tag_count; i++)
+        for (uint32_t i = 0; i < tag_count; i++)
         {
             if (!tag_ids)
                 break;
             uint16_t tid = tag_ids[i];
             bool dup = false;
-            for (uint16_t j = 0; j < final_count; j++)
+            for (uint32_t j = 0; j < final_count; j++)
             {
                 if (final_tags[j] == tid)
                 {
@@ -3388,6 +3398,17 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
     meta.tag_count = final_count;
     meta.tag_ids = final_tags;
 
+    if (!PlotFits(&meta, NULL))
+    {
+        kprintf("[TagFS] create of '%s': %u tag(s) and its name make a record wider than this "
+                "volume holds (%u bytes) — no file is made\n", filename, final_count,
+                TAGFS_MPOOL_DATA_SIZE);
+        kfree(meta.tag_ids);
+        kfree(meta.filename);
+        TagFSLockDrop(&g_state.lock);
+        return -(int)ERR_TAGFS_RECORD_FULL;
+    }
+
     // No journal for create: metadata is NEW (no previous on-disk state to protect).
     // Write ordering ensures consistency:
     //   1. meta_pool_write (append-only, crash → orphaned record, fsck cleans up)
@@ -3416,7 +3437,7 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
     }
 
     // Add to bitmap index (use final_count, the deduplicated count)
-    for (uint16_t i = 0; i < final_count; i++)
+    for (uint32_t i = 0; i < final_count; i++)
     {
         if (meta.tag_ids[i] != TAGFS_INVALID_TAG_ID)
         {
@@ -3493,7 +3514,7 @@ static int tagfs_delete_file_inside(uint32_t file_id)
     // Free data blocks if we could read metadata
     if (has_meta == 0 && meta.extents)
     {
-        for (uint16_t i = 0; i < meta.extent_count; i++)
+        for (uint32_t i = 0; i < meta.extent_count; i++)
         {
             tagfs_free_blocks_internal(meta.extents[i].start_block, meta.extents[i].block_count);
         }
@@ -3583,11 +3604,11 @@ static int tagfs_rename_file_inside(uint32_t file_id, const char *new_filename)
     {
         if (old_tag != TAGFS_INVALID_TAG_ID)
         {
-            for (uint16_t i = 0; i < meta.tag_count; i++)
+            for (uint32_t i = 0; i < meta.tag_count; i++)
             {
                 if (meta.tag_ids[i] == old_tag)
                 {
-                    for (uint16_t j = i; j + 1 < meta.tag_count; j++)
+                    for (uint32_t j = i; j + 1 < meta.tag_count; j++)
                         meta.tag_ids[j] = meta.tag_ids[j + 1];
                     meta.tag_count--;
                     old_tag_removed = true;
@@ -3598,7 +3619,7 @@ static int tagfs_rename_file_inside(uint32_t file_id, const char *new_filename)
         if (new_tag != TAGFS_INVALID_TAG_ID)
         {
             bool present = false;
-            for (uint16_t i = 0; i < meta.tag_count; i++)
+            for (uint32_t i = 0; i < meta.tag_count; i++)
                 if (meta.tag_ids[i] == new_tag) present = true;
             if (!present)
             {
@@ -3677,7 +3698,7 @@ static int tagfs_add_tag_inside(uint32_t file_id, uint16_t tag_id)
     }
 
     // Check if tag already present
-    for (uint16_t i = 0; i < meta.tag_count; i++)
+    for (uint32_t i = 0; i < meta.tag_count; i++)
     {
         if (meta.tag_ids[i] == tag_id)
         {
@@ -3688,7 +3709,7 @@ static int tagfs_add_tag_inside(uint32_t file_id, uint16_t tag_id)
     }
 
     // Grow tag list
-    uint16_t new_count = meta.tag_count + 1;
+    uint32_t new_count = meta.tag_count + 1;
     uint16_t *new_ids = kmalloc(sizeof(uint16_t) * new_count);
     if (!new_ids)
     {
@@ -3754,7 +3775,7 @@ static int tagfs_remove_tag_inside(uint32_t file_id, uint16_t tag_id)
 
     // Find and remove
     bool found = false;
-    for (uint16_t i = 0; i < meta.tag_count; i++)
+    for (uint32_t i = 0; i < meta.tag_count; i++)
     {
         if (meta.tag_ids[i] == tag_id)
         {
@@ -4162,61 +4183,54 @@ void tagfs_close(TagFSFileHandle *handle)
     debug_printf("[TagFS] close: handle freed\n");
 }
 
-static int tagfs_read_inside(TagFSFileHandle *handle, void *buffer, uint64_t size);
+static error_t tagfs_read_inside(TagFSFileHandle *handle, void *buffer, uint64_t size,
+                                 uint64_t *out_read);
 
-int tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size)
+error_t tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size, uint64_t *out_read)
 {
+    if (!out_read)
+        return ERR_INVALID_ARGUMENT;
+    *out_read = 0;
+    if (!buffer)
+        return ERR_INVALID_ARGUMENT;
     if (!tagfs_enter())
-        return -1;
-    if (!handle_belongs_here(handle, "read")) {
-        tagfs_leave();
-        return -1;
-    }
-    int rc = tagfs_read_inside(handle, buffer, size);
+        return ERR_TAGFS_NOT_INITIALIZED;
+    error_t rc = handle_belongs_here(handle, "read")
+                     ? tagfs_read_inside(handle, buffer, size, out_read)
+                     : ERR_TAGFS_INVALID_HANDLE;
     tagfs_leave();
     return rc;
 }
 
-static int tagfs_read_inside(TagFSFileHandle *handle, void *buffer, uint64_t size)
+static error_t tagfs_read_inside(TagFSFileHandle *handle, void *buffer, uint64_t size,
+                                 uint64_t *out_read)
 {
-    if (!handle || !buffer || size == 0)
-        return -1;
-
-    if (handle->offset >= handle->file_size)
-        return 0;
+    if (size == 0 || handle->offset >= handle->file_size)
+        return OK;
 
     uint64_t remaining = handle->file_size - handle->offset;
     if (size > remaining)
         size = remaining;
 
-    /* Heap-alloc the per-call 4 KiB block scratch so the function
-     * frame stays under -Wstack-usage=8192. tagfs_read can run on
-     * per-cpu kernel stacks (16 KiB total); a 4 KiB stack frame +
-     * nested IRQ frame would eat half the budget. */
+    /* The block goes through the heap: a kernel stack has no room for 4 KiB. */
     uint8_t *block_buf = (uint8_t *)kmalloc(TAGFS_BLOCK_SIZE);
-    if (!block_buf) return -1;
-    uint8_t *out = (uint8_t *)buffer;
+    if (!block_buf)
+        return ERR_NO_MEMORY;
+    uint8_t *out        = (uint8_t *)buffer;
     uint64_t bytes_read = 0;
+    uint32_t disk_block = 0, left = 0;
+    error_t  rc         = OK;
 
     while (bytes_read < size)
     {
-        uint64_t file_pos = handle->offset + bytes_read;
-        uint64_t extent_start = 0;
-        int found = -1;
+        uint64_t file_pos        = handle->offset + bytes_read;
+        uint64_t k               = file_pos / TAGFS_BLOCK_SIZE;
+        uint32_t offset_in_block = (uint32_t)(file_pos % TAGFS_BLOCK_SIZE);
 
-        for (uint16_t i = 0; i < handle->extent_count; i++)
-        {
-            uint64_t extent_size = (uint64_t)handle->extents[i].block_count * TAGFS_BLOCK_SIZE;
-            if (file_pos < extent_start + extent_size)
-            {
-                found = i;
-                break;
-            }
-            extent_start += extent_size;
-        }
-
-        if (found < 0)
-        {
+        if (bytes_read > 0 && left > 0) {
+            disk_block++;
+            left--;
+        } else if (!PlotFind(handle->extents, handle->extent_count, k, &disk_block, &left)) {
             /* The file claims more bytes than its extents describe. Whatever
              * lies past the last extent is not a hole to be filled with zeros;
              * it is metadata that does not match the medium. */
@@ -4224,43 +4238,25 @@ static int tagfs_read_inside(TagFSFileHandle *handle, void *buffer, uint64_t siz
                     "metadata describes more file than there are blocks\n",
                     handle->file_id, (unsigned long long)file_pos,
                     (unsigned long long)handle->file_size);
-            kfree(block_buf);
-            return -1;
+            rc = ERR_METADATA_CORRUPTED;
+            break;
         }
-
-        uint64_t offset_in_extent = file_pos - extent_start;
-        uint32_t block_index = (uint32_t)(offset_in_extent / TAGFS_BLOCK_SIZE);
-        uint32_t offset_in_block = (uint32_t)(offset_in_extent % TAGFS_BLOCK_SIZE);
-        uint32_t disk_block = handle->extents[found].start_block + block_index;
 
         if (read_block(disk_block, block_buf) != 0)
         {
             /*
-             * A block the medium would not give up.
-             *
-             * This used to break out of the loop and return the byte count so
-             * far, which for the first block is zero — and zero is not
-             * negative, so every caller that checks for failure the usual way
-             * saw a successful short read into a buffer that was still full of
-             * the zeros it was allocated with.
-             *
-             * Measured: pull the flash drive out while the system is running,
-             * and the program loader reads a process image of nothing, reports
-             * that it started it, and jumps to address 0xC000 where the zeros
-             * are. Both userspace processes died on their first instruction
-             * with every register clear. The medium leaving is not something
-             * this kernel can prevent; a read that failed reading as a read
-             * that succeeded is.
-             *
-             * Bytes already copied stay in the caller's buffer and the handle
-             * does not move: a caller told the read failed cannot use either.
+             * A block the medium would not give up is the read's answer, never
+             * a shorter count: a caller that took a short read of zeros for
+             * data once started a process image of nothing (the program loader,
+             * a flash drive pulled while running). Bytes already copied stay in
+             * the caller's buffer and the handle does not move.
              */
             kprintf("[TagFS] file %u: block %u would not read — %llu of %llu "
                     "bytes had come back before the medium stopped answering\n",
                     handle->file_id, disk_block,
                     (unsigned long long)bytes_read, (unsigned long long)size);
-            kfree(block_buf);
-            return -1;
+            rc = ERR_READ_FAILED;
+            break;
         }
 
         uint32_t chunk = TAGFS_BLOCK_SIZE - offset_in_block;
@@ -4271,425 +4267,150 @@ static int tagfs_read_inside(TagFSFileHandle *handle, void *buffer, uint64_t siz
         bytes_read += chunk;
 
         /*
-         * Read-ahead, and it runs when the next block is NOT already in hand.
-         *
-         * ‼ IT USED TO RUN AFTER EVERY BLOCK, and that is why it never read
-         * more than one. Asking for the next four when three of them are
-         * already cached leaves exactly one to fetch, so the window crawled
-         * forward a block at a time and the medium got one command per four
-         * kilobytes for the whole file — measured on a flash drive: 216
-         * commands to mount and start a volume, every one of them eight
-         * sectors. Waiting for the miss lets the window move a whole run, and
-         * a whole run of neighbours is one command (see ReadAheadPrefetch).
+         * Read-ahead, and only when the next block is NOT already in hand.
+         * Run after every block, it asked for four when three were cached, and
+         * the window crawled a block at a time — one command per 4 KiB on a
+         * flash drive. Waiting for the miss moves a whole run, and a whole run
+         * of neighbours is one command (ReadAheadPrefetch).
          */
-        if (offset_in_block == 0 && chunk == TAGFS_BLOCK_SIZE) {
-            uint32_t next_block = disk_block + 1;
-            uint32_t blocks_remaining_in_extent = handle->extents[found].block_count - block_index - 1;
-            if (blocks_remaining_in_extent > 0 && !ReadAheadHas(next_block)) {
-                ReadAheadPrefetch(next_block, blocks_remaining_in_extent < TAGFS_READ_AHEAD_BLOCKS ?
-                                    blocks_remaining_in_extent : TAGFS_READ_AHEAD_BLOCKS);
-            }
+        if (offset_in_block == 0 && chunk == TAGFS_BLOCK_SIZE && left > 0 &&
+            !ReadAheadHas(disk_block + 1)) {
+            ReadAheadPrefetch(disk_block + 1, left < TAGFS_READ_AHEAD_BLOCKS
+                                                  ? left : TAGFS_READ_AHEAD_BLOCKS);
         }
     }
 
-    handle->offset += bytes_read;
     kfree(block_buf);
-    return (int)bytes_read;
+    if (rc != OK)
+        return rc;
+    handle->offset += bytes_read;
+    *out_read = bytes_read;
+    return OK;
 }
 
-static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint64_t size);
+static error_t tagfs_write_inside(TagFSFileHandle *handle, const PlotSource *src,
+                                  uint64_t *out_written);
 
-int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
+error_t tagfs_write(TagFSFileHandle *handle, const PlotSource *src, uint64_t *out_written)
 {
+    if (!out_written)
+        return ERR_INVALID_ARGUMENT;
+    *out_written = 0;
+    if (!src || src->bytes == 0)
+        return ERR_INVALID_ARGUMENT;
     if (!tagfs_enter())
-        return -1;
-    if (!handle_belongs_here(handle, "write")) {
-        tagfs_leave();
-        return -1;
-    }
-    int rc = tagfs_write_inside(handle, buffer, size);
+        return ERR_TAGFS_NOT_INITIALIZED;
+    error_t rc = handle_belongs_here(handle, "write")
+                     ? tagfs_write_inside(handle, src, out_written)
+                     : ERR_TAGFS_INVALID_HANDLE;
     tagfs_leave();
     return rc;
 }
 
-static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint64_t size)
+/*
+ * One write, the synchronous way: the file's record loaded afresh under its
+ * writer, the ground the write needs reserved and the record's room checked
+ * before a byte moves, the blocks written by the one read-modify-write rule,
+ * and what landed committed as one record. A write the medium stops part way
+ * keeps what landed before the stop and says why; ground it took past that
+ * goes back (CR-13), and a write that commits nothing gives back everything
+ * it took (CR-1).
+ *
+ * The writer lock is taken by trying, never by spinning in TagFSLockTake. It
+ * is held across the medium, and on some roads the holder's command is
+ * finished only by what the drain core does — an AHCI slot an asynchronous
+ * write holds comes back only through the BSP's interrupt or its tick, and a
+ * continuation queued for the drain core runs only there. A BSP spinning here
+ * with its interrupts off would strand the holder; between tries the caller's
+ * interrupts are as it left them and the drain core pumps its continuations
+ * (TagFSLockTakePumping). A legacy-IDE DMA waiter takes the drive's answer
+ * itself (BmideAnswerHere). Helm, at step 1.5, takes the file without a
+ * spinlock at all.
+ */
+static error_t tagfs_write_inside(TagFSFileHandle *handle, const PlotSource *src,
+                                  uint64_t *out_written)
 {
-    if (!handle || !buffer || size == 0)
-        return -1;
     if (!(handle->flags & TAGFS_HANDLE_WRITE))
-        return -1;
-
-    /* Serialize writes to the same file — by trying, never by spinning in
-     * TagFSLockTake. This lock is held across `write_block`, and on some
-     * roads the holder's command is finished only by what the BSP does:
-     * an AHCI command slot an asynchronous write holds is given back only
-     * by the BSP's MSI handler or its tick (ahci_retire_slots), and a
-     * continuation queued for the drain core runs only there. A BSP
-     * contending here inside TagFSLockTake would spin with its interrupts
-     * off and run nothing, and the holder would wait on it — for a slot
-     * until its patience runs out and the write is refused, for a
-     * continuation for good.
-     *
-     * So each failed try restores RFLAGS, putting this core's interrupts
-     * back as they were between attempts, and the drain core's continuations
-     * run while it stands here (TagFSLockTakePumping); on any other core the
-     * pump is a one-load early-out. A legacy-IDE DMA needs neither:
-     * its waiter takes the drive's answer itself (BmideAnswerHere,
-     * drivers/disk/ata_async.c). Uncontended fast path is unchanged —
-     * trylock succeeds first try. */
+        return ERR_PERMISSION_DENIED;
     if (handle->ofe)
         TagFSLockTakePumping(&handle->ofe->write_lock);
 
-    const uint8_t *in = (const uint8_t *)buffer;
-    uint8_t block_buf[TAGFS_BLOCK_SIZE];
-    uint64_t bytes_written = 0;
-    bool     medium_refused = false;
-    uint32_t refused_block = 0;
+    Plot     plot;
+    uint64_t at   = 0;
+    uint64_t done = 0;
+    bool     append = (handle->flags & TAGFS_HANDLE_APPEND) != 0;
+    error_t  rc   = PlotLoad(&plot, handle->file_id);
+    bool     loaded = rc == OK;
 
-
-    while (bytes_written < size)
-    {
-        uint64_t file_pos = handle->offset + bytes_written;
-        uint64_t extent_start = 0;
-        int found = -1;
-
-        for (uint16_t i = 0; i < handle->extent_count; i++)
-        {
-            uint64_t extent_size = (uint64_t)handle->extents[i].block_count * TAGFS_BLOCK_SIZE;
-            if (file_pos < extent_start + extent_size)
-            {
-                found = i;
-                break;
-            }
-            extent_start += extent_size;
+    if (rc == OK)
+        rc = PlotBeginWrite(&plot, handle->offset, append, src->bytes, &at);
+    if (rc == OK)
+        rc = PlotWriteBlocks(&plot, at, src, &done);
+    if (done > 0) {
+        error_t kept = PlotEndWrite(&plot, at, done);
+        if (kept != OK) {
+            if (rc == OK)
+                rc = kept;
+            done = 0;
         }
-
-        if (found < 0)
-        {
-            // extent_start = cumulative size of all existing extents (from loop)
-            // Allocate enough blocks to cover from extent_start to file_pos+1
-            uint32_t blocks_needed = (uint32_t)((file_pos - extent_start) / TAGFS_BLOCK_SIZE) + 1;
-            if (blocks_needed > 0xFFFF)
-                blocks_needed = 0xFFFF;
-
-            uint32_t new_start;
-            if (tagfs_alloc_blocks(blocks_needed, &new_start) != 0)
-            {
-                break;
-            }
-
-            uint16_t new_count = handle->extent_count + 1;
-            FileExtent *new_extents = kmalloc(sizeof(FileExtent) * new_count);
-            if (!new_extents)
-            {
-                tagfs_free_blocks(new_start, blocks_needed);
-                break;
-            }
-            if (handle->extents && handle->extent_count > 0)
-            {
-                memcpy(new_extents, handle->extents, sizeof(FileExtent) * handle->extent_count);
-                kfree(handle->extents);
-            }
-            new_extents[handle->extent_count].start_block = new_start;
-            new_extents[handle->extent_count].block_count = (uint16_t)blocks_needed;
-            handle->extents = new_extents;
-            handle->extent_count = new_count;
-
-            found = handle->extent_count - 1;
-            // extent_start stays as cumulative end — math works correctly now
-        }
-
-        uint64_t offset_in_extent = file_pos - extent_start;
-        uint32_t block_index = (uint32_t)(offset_in_extent / TAGFS_BLOCK_SIZE);
-        uint32_t offset_in_block = (uint32_t)(offset_in_extent % TAGFS_BLOCK_SIZE);
-        uint32_t disk_block = handle->extents[found].start_block + block_index;
-
-        bool needs_partial_read = (offset_in_block != 0 || (size - bytes_written) < TAGFS_BLOCK_SIZE);
-
-        if (needs_partial_read)
-        {
-            if (read_block(disk_block, block_buf) != 0)
-            {
-                memset(block_buf, 0, TAGFS_BLOCK_SIZE);
-            }
-        }
-        else
-        {
-            memset(block_buf, 0, TAGFS_BLOCK_SIZE);
-        }
-
-        uint32_t chunk = TAGFS_BLOCK_SIZE - offset_in_block;
-        if (chunk > size - bytes_written)
-            chunk = (uint32_t)(size - bytes_written);
-
-        memcpy(block_buf + offset_in_block, in + bytes_written, chunk);
-
-        /* The block is written where the file has it. Nothing is copied for a
-         * snapshot: a format-v1 volume takes none (TagFS_SnapshotRefused). */
-        if (write_block(disk_block, block_buf) != 0)
-        {
-            /* The same lie the read path told, in the direction that
-             * matters more: a block the medium refused ended the loop and
-             * the byte count so far was returned as the answer. A caller
-             * checking for failure the usual way was told the write
-             * succeeded and simply moved fewer bytes than asked.
-             *
-             * The metadata below still commits what actually landed, so
-             * the file on the medium stays consistent with itself — what
-             * changes is that the caller is told. */
-            medium_refused = true;
-            refused_block  = disk_block;
-            break;
-        }
-
-        bytes_written += chunk;
     }
 
-    handle->offset += bytes_written;
-    if (handle->offset > handle->file_size)
-    {
-        handle->file_size = handle->offset;
+    if (loaded) {
+        handle->file_size = plot.size_before;
+        if (done > 0)
+            handle->offset = at + done;
     }
-
-    // Update metadata. Two paths:
-    // - Extents changed (new blocks allocated): journal for crash safety
-    // - Size-only (wrote within existing extents): direct metadata write
-    if (bytes_written > 0)
-    {
-        uint32_t meta_block, meta_offset;
-        if (file_table_lookup(handle->file_id, &meta_block, &meta_offset) != 0)
-        {
-            if (handle->ofe)
-                TagFSLockDrop(&handle->ofe->write_lock);
-            return -1;
-        }
-
-        TagFSMetadata meta;
-        memset(&meta, 0, sizeof(meta));
-        if (meta_pool_read(meta_block, meta_offset, &meta) != 0)
-        {
-            if (handle->ofe)
-                TagFSLockDrop(&handle->ofe->write_lock);
-            return -1;
-        }
-
-        meta.size = handle->file_size;
-        if (meta.extents)
-            kfree(meta.extents);
-        meta.extent_count = handle->extent_count;
-        meta.extents = kmalloc(sizeof(FileExtent) * handle->extent_count);
-        if (!meta.extents)
-        {
-            tagfs_metadata_free(&meta);
-            if (handle->ofe)
-                TagFSLockDrop(&handle->ofe->write_lock);
-            return -1;
-        }
-        memcpy(meta.extents, handle->extents, sizeof(FileExtent) * handle->extent_count);
-
-        uint32_t new_mb, new_mo;
-        if (meta_pool_write(&meta, &new_mb, &new_mo) != 0)
-        {
-            tagfs_metadata_free(&meta);
-            if (handle->ofe)
-                TagFSLockDrop(&handle->ofe->write_lock);
-            return -1;
-        }
-        file_table_update(handle->file_id, new_mb, new_mo);
-        meta_pool_delete(meta_block, meta_offset);
-        tagfs_metadata_free(&meta);
-    }
-
+    *out_written = done;
+    PlotRelease(&plot);
     if (handle->ofe)
         TagFSLockDrop(&handle->ofe->write_lock);
-
-    /* WROTE Touch fan-out is the caller's responsibility — published by
-     * storage_ops.c::ObjWrite (sync path) and write_job.c::w_publish
-     * (async path) using a unified 32-byte payload. Publishing here
-     * with a truncated 8-byte event drifted from the async contract
-     * (write_observer's payload-size check failed on every BIOS / 1-core
-     * config that takes the sync path). Keep tagfs_write itself free
-     * of IPC side-effects so its self-tests do not need Touch wiring. */
-    if (medium_refused)
-    {
-        kprintf("[TagFS] file %u: block %u would not be written — %llu of %llu "
-                "bytes had landed before the medium stopped answering\n",
-                handle->file_id, refused_block,
-                (unsigned long long)bytes_written, (unsigned long long)size);
-        return -1;
-    }
-    return (int)bytes_written;
+    return rc;
 }
 
 // ----------------------------------------------------------------------------
-// tagfs_truncate_file — drop everything past `new_size`.
+// span — a file made exactly as long as asked
 //
-// The operation TagFS never had. Writes only ever GREW a file (see the
-// `if (handle->offset > handle->file_size)` above), so rewriting a file
-// shorter left the old tail readable behind the new content — every shorter
-// rewrite in the system was silently wrong. Nothing forced the issue until
-// <fstream>, where plain ios_base::out means "w" ([filebuf.members] Table
-// 122) and truncation is not optional.
-//
-// SHRINK ONLY, and a grow request is refused rather than served: TagFS does
-// not zero freshly allocated blocks, so growing here would hand back whatever
-// the allocator's previous tenant left. A primitive that returns another
-// file's bytes is worse than one that says no. Files grow the honest way, by
-// being written.
-//
-// Returns 0, or a negative -ERR_* naming the cause.
+// It replaces the truncate this kernel had, which only ever shrank: a file
+// could be cut, and it grew only by being written at its end. span also grows
+// one across a gap, and the gap reads as zeros, written to ground taken for
+// it — a write can never make a gap on its own (ERR_TAGFS_BEYOND_SIZE).
+// Taken under the file's writer, like a write.
 // ----------------------------------------------------------------------------
 
-// Caller holds the file's ofe->write_lock.
-static int tagfs_truncate_locked(uint32_t file_id, uint64_t new_size)
+static error_t tagfs_span_file_inside(uint32_t file_id, uint64_t size);
+
+error_t tagfs_span_file(uint32_t file_id, uint64_t size)
 {
-    uint32_t meta_block, meta_offset;
-    if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0)
-        return -ERR_FILE_NOT_FOUND;
-
-    /* Read the metadata under the lock rather than trusting the handle.
-     * tagfs_open snapshots extents BEFORE the lock is taken, and a writer
-     * that grew the file in between would leave that snapshot short — and
-     * freeing from a short list frees blocks that are still live. */
-    TagFSMetadata meta;
-    memset(&meta, 0, sizeof(meta));
-    if (meta_pool_read(meta_block, meta_offset, &meta) != 0)
-        return -ERR_IO;
-
-    if (new_size > meta.size)
-    {
-        tagfs_metadata_free(&meta);
-        return -ERR_INVALID_ARGUMENT;   /* growth is not this operation's job */
-    }
-    if (new_size == meta.size)
-    {
-        tagfs_metadata_free(&meta);
-        return 0;
-    }
-
-    FileExtent *old_ex = meta.extents;
-    uint16_t    old_n  = meta.extent_count;
-
-    /* The extent prefix that still holds bytes. Ceil, because a partly filled
-     * last block is still a block the file owns. */
-    uint32_t keep_blocks = (uint32_t)((new_size + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE);
-
-    /* Walk the list to find the cut: `kept` extents survive, and at most one
-     * of them — trim_at — straddles the boundary and keeps only trim_to of
-     * its blocks. */
-    uint32_t acc     = 0;
-    uint16_t kept    = 0;
-    uint16_t trim_at = 0xFFFFu;
-    uint32_t trim_to = 0;
-    for (uint16_t i = 0; i < old_n; i++)
-    {
-        uint32_t cnt = old_ex[i].block_count;
-        if (acc >= keep_blocks)
-            break;
-        if (acc + cnt > keep_blocks)
-        {
-            trim_at = i;
-            trim_to = keep_blocks - acc;
-            kept    = (uint16_t)(i + 1);
-            break;
-        }
-        acc += cnt;
-        kept = (uint16_t)(i + 1);
-    }
-
-    /* Build the new list first. A failure here has touched nothing. */
-    FileExtent *new_ex = NULL;
-    if (kept > 0)
-    {
-        new_ex = kmalloc(sizeof(FileExtent) * kept);
-        if (!new_ex)
-        {
-            tagfs_metadata_free(&meta);
-            return -ERR_NO_MEMORY;
-        }
-        memcpy(new_ex, old_ex, sizeof(FileExtent) * kept);
-        if (trim_at != 0xFFFFu)
-            new_ex[trim_at].block_count = (uint16_t)trim_to;
-    }
-
-    meta.extents      = new_ex;
-    meta.extent_count = kept;
-    meta.size         = new_size;
-
-    /* Commit in the same order tagfs_write does: write the new record, point
-     * the file table at it, then drop the old one. A crash between the write
-     * and the update leaves the file at its old length — never at a length
-     * whose blocks have already been handed away. */
-    uint32_t new_mb, new_mo;
-    if (meta_pool_write(&meta, &new_mb, &new_mo) != 0)
-    {
-        tagfs_metadata_free(&meta);   /* frees new_ex */
-        if (old_ex) kfree(old_ex);
-        return -ERR_IO;
-    }
-    file_table_update(file_id, new_mb, new_mo);
-    meta_pool_delete(meta_block, meta_offset);
-
-    /* Committed: the dropped blocks are unreachable, so release them.
-     * Dropping them from the read-ahead cache is this loop's own job, so a
-     * reallocation cannot serve the old tenant's content out of memory. */
-    for (uint16_t i = 0; i < old_n; i++)
-    {
-        uint32_t drop_from = 0;
-        if (i < kept)
-        {
-            if (i != trim_at)
-                continue;               /* wholly kept */
-            drop_from = trim_to;        /* head kept, tail released */
-        }
-        uint32_t cnt = old_ex[i].block_count;
-        if (drop_from >= cnt)
-            continue;
-
-        uint32_t first = old_ex[i].start_block + drop_from;
-        uint32_t n     = cnt - drop_from;
-        for (uint32_t b = 0; b < n; b++)
-        {
-            tagfs_readahead_invalidate(first + b);
-        }
-        tagfs_free_blocks(first, n);
-    }
-
-    if (old_ex) kfree(old_ex);
-    tagfs_metadata_free(&meta);
-    return 0;
-}
-
-static int tagfs_truncate_file_inside(uint32_t file_id, uint64_t new_size);
-
-int tagfs_truncate_file(uint32_t file_id, uint64_t new_size)
-{
+    if (file_id == 0)
+        return ERR_INVALID_ARGUMENT;
     if (!tagfs_enter())
-        return -ERR_INVALID_OPERATION;
-    int rc = tagfs_truncate_file_inside(file_id, new_size);
+        return ERR_TAGFS_NOT_INITIALIZED;
+    error_t rc = tagfs_span_file_inside(file_id, size);
     tagfs_leave();
     return rc;
 }
 
-static int tagfs_truncate_file_inside(uint32_t file_id, uint64_t new_size)
+static error_t tagfs_span_file_inside(uint32_t file_id, uint64_t size)
 {
-    if (file_id == 0)
-        return -ERR_INVALID_ARGUMENT;
-
     TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
     if (!handle)
-        return -ERR_FILE_NOT_FOUND;
-
-    /* The trylock-with-the-IRQ-window-open dance, for the same reason
-     * tagfs_write_inside does it: this lock is held across meta_pool_write ->
-     * write_block, whose command may be finished only by the BSP's interrupts
-     * or by a continuation only the drain core runs. A plain TagFSLockTake
-     * here would strand the holder on a contending BSP exactly as described
-     * above tagfs_write_inside. */
+        return ERR_FILE_NOT_FOUND;
     if (handle->ofe)
         TagFSLockTakePumping(&handle->ofe->write_lock);
 
-    int rc = tagfs_truncate_locked(file_id, new_size);
+    Plot    plot;
+    error_t rc = PlotLoad(&plot, file_id);
+    if (rc == OK && size != plot.size) {
+        if (size < plot.size) {
+            rc = PlotTrimTo(&plot, (size + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE);
+            plot.size = size;
+        } else {
+            rc = PlotExtendZero(&plot, size);
+        }
+        if (rc == OK)
+            rc = PlotCommit(&plot);
+    }
+    PlotRelease(&plot);
 
     if (handle->ofe)
         TagFSLockDrop(&handle->ofe->write_lock);
@@ -4924,21 +4645,21 @@ bool TagFSTagMatches(uint16_t tag_id, const TagSpelling *pattern)
     return matches;
 }
 
-char *TagFSKeyList(const uint16_t *tag_ids, uint16_t count)
+char *TagFSKeyList(const uint16_t *tag_ids, uint32_t count)
 {
     if (!tagfs_enter())
         return NULL;
 
     TagSpelling tag;
     size_t      need = 1;
-    for (uint16_t i = 0; i < count; i++)
+    for (uint32_t i = 0; i < count; i++)
         if (TagFSTagSpelling(tag_ids[i], &tag, NULL))
             need += tag.key_len + 1;
 
     char *list = kmalloc(need);
     if (list) {
         size_t at = 0;
-        for (uint16_t i = 0; i < count; i++) {
+        for (uint32_t i = 0; i < count; i++) {
             if (!TagFSTagSpelling(tag_ids[i], &tag, NULL))
                 continue;
             if (at)
@@ -4956,164 +4677,60 @@ char *TagFSKeyList(const uint16_t *tag_ids, uint16_t count)
 // Defrag
 // ----------------------------------------------------------------------------
 
-static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block);
+static error_t tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block);
 
-int tagfs_defrag_file(uint32_t file_id, uint32_t target_block)
+error_t tagfs_defrag_file(uint32_t file_id, uint32_t target_block)
 {
     if (!tagfs_enter())
-        return -1;
-    int rc = tagfs_defrag_file_inside(file_id, target_block);
+        return ERR_TAGFS_NOT_INITIALIZED;
+    error_t rc = tagfs_defrag_file_inside(file_id, target_block);
     tagfs_leave();
     return rc;
 }
 
-static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
+/* Whether the runs are one run on the medium, each beginning where the one
+ * before it ends. */
+static bool tagfs_runs_are_one(const FileExtent *runs, uint32_t count)
 {
-    TagFSLockTake(&g_state.lock);
+    for (uint32_t i = 1; i < count; i++)
+        if (runs[i].start_block != runs[i - 1].start_block + runs[i - 1].block_count)
+            return false;
+    return true;
+}
 
-    uint32_t meta_block, meta_offset;
-    if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0)
-    {
-        TagFSLockDrop(&g_state.lock);
-        return -1;
+/*
+ * Defrag is a gather of every extent (PlotGather, shed 0) under the file's
+ * writer, so no write and no span of the file runs beside it (D7-defrag): the
+ * blocks are copied into one run taken through the block map near the target,
+ * made durable, and named by one committed record, and only then is the old
+ * ground given back. Ground the record named past the file's size goes with
+ * it. A file the loader reads by its blocks is not moved.
+ */
+static error_t tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
+{
+    TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
+    if (!handle)
+        return ERR_FILE_NOT_FOUND;
+    if (handle->ofe)
+        TagFSLockTakePumping(&handle->ofe->write_lock);
+
+    Plot    plot;
+    bool    moved = false;
+    error_t rc    = PlotLoad(&plot, file_id);
+    if (rc == OK)
+        rc = PlotTrimTo(&plot, (plot.size + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE);
+    if (rc == OK && !tagfs_runs_are_one(plot.runs, plot.run_count)) {
+        rc    = PlotGather(&plot, 0, target_block);
+        moved = rc == OK;
     }
+    if (rc == OK && (moved || plot.freed_count > 0))
+        rc = PlotCommit(&plot);
+    PlotRelease(&plot);
 
-    TagFSMetadata meta;
-    memset(&meta, 0, sizeof(meta));
-    if (meta_pool_read(meta_block, meta_offset, &meta) != 0)
-    {
-        TagFSLockDrop(&g_state.lock);
-        return -1;
-    }
-
-    // Nothing to defrag if file has 0 or 1 extent
-    if (meta.extent_count <= 1)
-    {
-        tagfs_metadata_free(&meta);
-        TagFSLockDrop(&g_state.lock);
-        return 0;
-    }
-
-    // Calculate total blocks needed
-    uint32_t total_blocks = 0;
-    for (uint16_t i = 0; i < meta.extent_count; i++)
-    {
-        total_blocks += meta.extents[i].block_count;
-    }
-
-    /* One run for the whole file, taken through the block map as near the
-     * target as a run that long lies. The target used to be taken by setting
-     * its bits here directly — past the allocator, past MapOwed, and past the
-     * check that the run fits inside the data run at all. */
-    uint32_t new_start;
-    TagFSLockDrop(&g_state.lock);
-    if (BlockMapTake(total_blocks, target_block, &new_start, __func__) != OK)
-    {
-        tagfs_metadata_free(&meta);
-        return -1;
-    }
-    TagFSLockTake(&g_state.lock);
-
-    // Copy all data to new contiguous location
-    uint8_t block_buf[TAGFS_BLOCK_SIZE];
-    uint32_t dest_block = new_start;
-    bool copy_failed = false;
-
-    for (uint16_t i = 0; i < meta.extent_count && !copy_failed; i++)
-    {
-        for (uint16_t b = 0; b < meta.extents[i].block_count && !copy_failed; b++)
-        {
-            if (read_block(meta.extents[i].start_block + b, block_buf) != 0 ||
-                write_block(dest_block, block_buf) != 0)
-            {
-                copy_failed = true;
-                break;
-            }
-            dest_block++;
-        }
-    }
-
-    if (copy_failed)
-    {
-        // Cleanup: free newly allocated blocks
-        TagFSLockDrop(&g_state.lock);
-        tagfs_free_blocks(new_start, total_blocks);
-        tagfs_metadata_free(&meta);
-        return -1;
-    }
-
-    /*
-     * ‼ WRITE, NAME, RETIRE, AND ONLY THEN RELEASE THE OLD GROUND.
-     *
-     * All four of these were in the wrong order, and each one made the next
-     * worse. The old blocks went back to the bitmap first; then the old record
-     * was retired; then the new record was written and its failure THROWN AWAY
-     * — so a refused sector left the file table naming a retired record whose
-     * extents had already been handed to the allocator, with no crash needed
-     * at all. Every other path in this file writes the record, names it, and
-     * retires the one it replaced; this one is now the same, and the ground
-     * the file is moving off is the last thing let go.
-     *
-     * The old extents are held here rather than overwritten in place, because
-     * a failure has to be able to leave the file exactly where it was.
-     */
-    FileExtent* old_extents   = meta.extents;
-    uint16_t    old_extent_ct = meta.extent_count;
-
-    /* The run as extents no longer than an extent can say: a file of more
-     * than 0xFFFF blocks used to be named by one extent cut to 16 bits. The
-     * old ones were each that wide at most, so there are never more new than
-     * old. */
-    uint16_t new_extent_ct = (uint16_t)((total_blocks + 0xFFFFu - 1) / 0xFFFFu);
-    meta.extents = kmalloc(sizeof(FileExtent) * new_extent_ct);
-    if (!meta.extents)
-    {
-        meta.extents      = old_extents;
-        meta.extent_count = old_extent_ct;
-        tagfs_metadata_free(&meta);
-        TagFSLockDrop(&g_state.lock);
-        tagfs_free_blocks(new_start, total_blocks);
-        return -1;
-    }
-
-    for (uint16_t i = 0; i < new_extent_ct; i++)
-    {
-        uint32_t left = total_blocks - (uint32_t)i * 0xFFFFu;
-        meta.extents[i].start_block = new_start + (uint32_t)i * 0xFFFFu;
-        meta.extents[i].block_count = (uint16_t)(left < 0xFFFFu ? left : 0xFFFFu);
-    }
-    meta.extent_count = new_extent_ct;
-    meta.modified_time = rtc_get_unix64();
-
-    uint32_t new_mb, new_mo;
-    if (meta_pool_write(&meta, &new_mb, &new_mo) != 0)
-    {
-        kprintf("[TagFS] file %u was copied to block %u to be defragmented "
-                "and this volume would not take the metadata naming it there "
-                "— the file is left exactly where it was, and the copy's "
-                "ground goes back\n", file_id, new_start);
-        kfree(old_extents);
-        tagfs_metadata_free(&meta);
-        TagFSLockDrop(&g_state.lock);
-        tagfs_free_blocks(new_start, total_blocks);
-        return -1;
-    }
-
-    file_table_update(file_id, new_mb, new_mo);
-    meta_pool_delete(meta_block, meta_offset);
-
-    // The file is named at its new ground now, so the old ground is nobody's —
-    // given back through the allocator, whose give is judged block by block.
-    for (uint16_t i = 0; i < old_extent_ct; i++)
-    {
-        tagfs_free_blocks_internal(old_extents[i].start_block,
-                                   old_extents[i].block_count);
-    }
-    kfree(old_extents);
-
-    tagfs_metadata_free(&meta);
-    TagFSLockDrop(&g_state.lock);
-    return 0;
+    if (handle->ofe)
+        TagFSLockDrop(&handle->ofe->write_lock);
+    tagfs_close(handle);
+    return rc;
 }
 
 static uint32_t tagfs_get_fragmentation_score_inside(uint32_t *out_files, uint32_t *out_gaps);
@@ -5162,7 +4779,7 @@ static uint32_t tagfs_get_fragmentation_score_inside(uint32_t *out_files, uint32
         if (meta.flags & TAGFS_FILE_ACTIVE)
         {
             uint32_t blocks = 0;
-            for (uint16_t e = 0; e < meta.extent_count && meta.extents; e++)
+            for (uint32_t e = 0; e < meta.extent_count && meta.extents; e++)
             {
                 const FileExtent *run = &meta.extents[e];
                 if (e > 0 && run->start_block !=

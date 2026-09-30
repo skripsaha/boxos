@@ -1,5 +1,6 @@
 #include "tests.h"
 #include "../tagfs.h"
+#include "../plot/plot.h"
 #include "boardroom.h"
 #ifdef CONFIG_VOLUME_TESTS
 #include "block_fail.h"
@@ -125,12 +126,29 @@ uint32_t TestFirstDifference(const void* a, const void* b, uint32_t n)
     return n;
 }
 
+int TestHandleWrite(TagFSFileHandle* handle, const void* data, uint32_t bytes)
+{
+    PlotSource source;
+    uint64_t   written = 0;
+
+    memset(&source, 0, sizeof(source));
+    source.kernel = (const uint8_t*)data;
+    source.bytes  = bytes;
+    return tagfs_write(handle, &source, &written) == OK ? (int)written : -1;
+}
+
+int TestHandleRead(TagFSFileHandle* handle, void* buffer, uint32_t capacity)
+{
+    uint64_t got = 0;
+    return tagfs_read(handle, buffer, capacity, &got) == OK ? (int)got : -1;
+}
+
 int TestFileWrite(uint32_t file_id, const void* data, uint32_t bytes)
 {
     TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     if (!handle)
         return -1;
-    int written = tagfs_write(handle, data, bytes);
+    int written = TestHandleWrite(handle, data, bytes);
     tagfs_close(handle);
     return written;
 }
@@ -140,7 +158,7 @@ int TestFileRead(uint32_t file_id, void* buffer, uint32_t capacity)
     TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
     if (!handle)
         return -1;
-    int got = tagfs_read(handle, buffer, capacity);
+    int got = TestHandleRead(handle, buffer, capacity);
     tagfs_close(handle);
     return got;
 }
