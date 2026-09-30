@@ -1,5 +1,7 @@
 #include "plot_internal.h"
 #include "scribe.h"
+#include "../run/run.h"
+#include "../integrity/integrity.h"
 
 /*
  * PlotGather — a record out of room for extents gets it back by moving the
@@ -65,27 +67,37 @@ static bool PlotChooseWindow(const Plot *p, uint32_t shed, uint32_t *first, uint
     return best != UINT64_MAX;
 }
 
-/* The window's blocks copied into [to, to + blocks), and made durable before
- * any record can name them there — so the copy owes a cycle no flush. */
+/* The window's blocks copied into [to, to + blocks), as many at a time as the
+ * seat takes, each checked against its digest on the way through, and made
+ * durable before any record can name them there — so the copy owes a cycle no
+ * flush. */
 static error_t PlotCopyWindow(const Plot *p, uint32_t first, uint32_t last, uint32_t to)
 {
-    uint8_t *buf = kmalloc(TAGFS_BLOCK_SIZE);
+    uint32_t most = TagFSRunBlocks();
+    uint8_t *buf  = PlotRunBuffer(&most);
     if (!buf)
         return ERR_NO_MEMORY;
 
     error_t rc = OK;
     for (uint32_t i = first; i <= last && rc == OK; i++) {
-        for (uint32_t b = 0; b < p->runs[i].block_count; b++) {
+        for (uint32_t b = 0; b < p->runs[i].block_count && rc == OK;) {
             uint32_t from = p->runs[i].start_block + b;
-            rc = tagfs_read_block(from, buf);
+            uint32_t n    = p->runs[i].block_count - b;
+            if (n > most)
+                n = most;
+            uint32_t landed = 0;
+            rc = TagFSReadRun(from, n, buf);
+            for (uint32_t j = 0; j < n && rc == OK; j++)
+                if (!IntegrityVerify(from + j, buf + (size_t)j * TAGFS_BLOCK_SIZE))
+                    rc = ERR_CHECKSUM;
             if (rc == OK)
-                rc = tagfs_write_block(to, buf);
-            if (rc != OK) {
-                kprintf("[TagFS] file %u: block %u would not move to %u (error %u) — its "
-                        "extents are left where they are\n", p->fid, from, to, (unsigned)rc);
-                break;
-            }
-            to++;
+                rc = TagFSWriteRun(to, n, buf, &landed);
+            if (rc != OK)
+                kprintf("[TagFS] file %u: blocks %u..%u would not move to %u (error %u) — its "
+                        "extents are left where they are\n", p->fid, from, from + n - 1, to,
+                        (unsigned)rc);
+            b  += n;
+            to += n;
         }
     }
     kfree(buf);

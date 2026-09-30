@@ -2,6 +2,7 @@
 #include "stand_tests.h"
 #include "../tagfs.h"
 #include "../read/read.h"
+#include "../run/run.h"
 #include "../integrity/integrity.h"
 #include "read_job.h"      /* ReadJobSubmit, and the stand's own answer record */
 #include "touch.h"
@@ -185,7 +186,7 @@ static TestResult TestStandReadAheadForgetsAWrite(void)
 
     if (aside)
         return test_steps_aside(aside);
-    if (ReadAheadDepth() < STAND_READ_BLOCKS)
+    if (TagFSRunBlocks() < STAND_READ_BLOCKS)
         return test_steps_aside("the medium hands over fewer than three blocks at a time, so "
                                 "no window holds the run this test fetches");
     TEST_ASSERT(StandReadMakeRun(STAND_READ_BLOCKS, 0x73, &file_id, &first),

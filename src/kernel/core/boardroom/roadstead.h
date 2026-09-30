@@ -74,6 +74,17 @@ typedef struct RoadsteadBerth {
     bool               write;
     RoadsteadAnswered  answered;   /* NULL: a caller stands over this berth */
     void*              ctx;
+
+    /* Of a write refused, the sectors from `lba` the medium took before the
+     * sector it failed at — read by `answered`; 0 when the medium names no
+     * such sector, which ours do not yet (BoardroomWrite's `landed`). */
+    uint32_t           landed;
+#ifdef CONFIG_VOLUME_TESTS
+    /* The caller's answer while BLOCKFAIL lets the sectors before the plan's
+     * first one go out as their own command (boardroom.c, seat_async). */
+    RoadsteadAnswered  struck_answered;
+    void*              struck_ctx;
+#endif
 } RoadsteadBerth;
 
 typedef struct Roadstead {

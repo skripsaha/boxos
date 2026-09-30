@@ -20,7 +20,7 @@
 // A program's write through the port (steps 1.5 and 1.5c)
 //
 // A program's write on a seat that takes commands nobody stands over goes
-// through the port, the WriteJob parked on each block's answer — an AHCI
+// through the port, the WriteJob parked on each command's answer — an AHCI
 // port's slots, and since step 1.5c a USB disk's queue too, where it had only
 // ever stood over every block on the drain core. These tests put a job on that
 // road the way ObjWrite does, with the stand's own record in place of the

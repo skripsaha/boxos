@@ -14,6 +14,11 @@
  * that reaches the Boardroom is answered with exactly what that seat's driver
  * answers after its own retries have run out — and is never issued, so a
  * refused write leaves the medium as it was, which is what a refused write is.
+ * A write that reaches the plan's first sector part way is refused FROM that
+ * sector, the way a medium that names the sector it failed at refuses it: the
+ * sectors of the command before it reach the medium, and the refusal says how
+ * many (BoardroomWrite's `landed`), so the Nth block of a run is refusable as
+ * it was when every block went out alone.
  *
  * Once, and only the Nth: every matching command before and after it reaches
  * the medium, and the count goes on while the plan stands, so a test can prove
@@ -69,9 +74,11 @@ bool     BlockFailFired(void);
 
 /* The Boardroom's question, asked once per command before it reaches a
  * driver: is this the one to refuse? Says so on the log when it is. Never
- * called from an interrupt handler. */
+ * called from an interrupt handler. `keep`: NULL refuses the whole command;
+ * else the caller issues the sectors before the plan's first one itself, and
+ * learns here how many that is — 0 when the command begins inside the plan. */
 bool     BlockFailStrikes(uint8_t seat, BlockFailKind kind,
-                          uint64_t lba, uint32_t count);
+                          uint64_t lba, uint32_t count, uint32_t* keep);
 
 /* A medium that takes no write, on `seat`: while it stands, every write is
  * refused the way the seat's driver refuses one, never issued, and the seat

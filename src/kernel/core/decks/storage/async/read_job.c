@@ -3,16 +3,20 @@
  *
  * The job's life:
  *
- *   ReadJobSubmit (the program's call): the door, a DMA page, the caller
- *     parked, the first block submitted — or the answer at once, when the read
- *     is refused before a block moves;
+ *   ReadJobSubmit (the program's call): the door, DMA pages for the run the
+ *     seat takes in one command, the caller parked, the first run submitted —
+ *     or the answer at once, when the read is refused before a block moves;
  *   the seat's answer (rjob_answered): the status stashed, the job continued
  *     where its seat's answers continue — no allocation, no lock, nothing
  *     dropped: the node it posts lives inside the job;
- *   the pump (rjob_pump): the block checked and landed, the next one
- *     submitted, or the answer given;
- *   the answer (rjob_answer): the handle closed, the DMA page and the door
+ *   the pump (rjob_pump): the run's blocks checked and landed in order, the
+ *     next run submitted, or the answer given;
+ *   the answer (rjob_answer): the handle closed, the DMA pages and the door
  *     given back, the caller told.
+ *
+ * A run is as many of the file's next blocks as lie in one run on the medium,
+ * the read still needs and the seat takes in one command (step 1.11): one
+ * command for all of them, where it was one a block.
  */
 
 #include "read_job.h"
@@ -24,6 +28,7 @@
 #include "helm.h"         /* HelmReady — a USB disk's job goes on at a service point */
 #include "roadstead.h"
 #include "integrity.h"
+#include "run.h"          /* TagFSRunBlocks — how much the seat takes in one command */
 #include "process.h"
 #include "kring.h"        /* KResultPush, and the Result it pushes */
 #include "kresult.h"
@@ -38,13 +43,13 @@ typedef struct ReadJob {
     uint64_t         start;           /* the file offset it reads from */
     uint64_t         total;           /* the bytes it reads: the sink's room, or up to the size */
     uint64_t         landed;          /* bytes that reached the sink */
-    uint32_t         block;           /* the block on its way in ... */
-    uint32_t         left;            /* ... and how many of the file's next blocks follow it */
-    uint32_t         in_offset;       /* the bytes of it the read takes */
-    uint32_t         in_chunk;
+    uint32_t         block;           /* the run on its way in: its first block ... */
+    uint32_t         count;           /* ... its blocks ... */
+    uint32_t         head;            /* ... and where the read begins in the first */
     volatile error_t status;          /* the seat's answer, stashed where it came */
     void            *dma_phys;
     uint8_t         *dma_virt;
+    uint32_t         dma_blocks;      /* the run the seat takes in one command */
     bool             at_service;      /* goes on at a service point, not the drain core */
 
     Baton            cq_node;         /* the drain core's continuation */
@@ -83,7 +88,7 @@ static void rjob_answer(ReadJob *j, error_t rc)
                 (unsigned long long)j->landed, (unsigned long long)j->total);
 
     tagfs_close(j->handle);
-    pmm_free(j->dma_phys, 1);
+    pmm_free(j->dma_phys, j->dma_blocks);
     tagfs_leave();
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -123,7 +128,7 @@ static void rjob_answer(ReadJob *j, error_t rc)
     kfree(j);
 }
 
-/* The seat's answer to a block: stashed, and the job continued where its
+/* The seat's answer to a run: stashed, and the job continued where its
  * seat's answers go on — never run here, which may be an interrupt. */
 static void rjob_answered(uint8_t port, uint8_t slot, error_t status, void *ctx)
 {
@@ -137,8 +142,8 @@ static void rjob_answered(uint8_t port, uint8_t slot, error_t status, void *ctx)
         BatonPass(&j->cq_node);
 }
 
-/* The next block submitted, or the answer when the read is done or refused
- * before the block moves. */
+/* The next run submitted, or the answer when the read is done or refused
+ * before a block of it moves. */
 static void rjob_step(ReadJob *j)
 {
     if (j->landed >= j->total) {
@@ -150,53 +155,55 @@ static void rjob_step(ReadJob *j)
         return;
     }
 
-    uint64_t pos    = j->start + j->landed;
-    uint32_t offset = (uint32_t)(pos % TAGFS_BLOCK_SIZE);
-    uint32_t chunk  = TAGFS_BLOCK_SIZE - offset;
-    if ((uint64_t)chunk > j->total - j->landed)
-        chunk = (uint32_t)(j->total - j->landed);
-
-    if (j->landed > 0 && j->left > 0) {
-        j->block++;
-        j->left--;
-    } else {
-        error_t rc = ReadLocate(j->handle, pos / TAGFS_BLOCK_SIZE, &j->block, &j->left);
-        if (rc != OK) {
-            rjob_answer(j, rc);
-            return;
-        }
+    uint64_t pos   = j->start + j->landed;
+    uint32_t after = 0;
+    error_t  rc    = ReadLocate(j->handle, pos / TAGFS_BLOCK_SIZE, &j->block, &after);
+    if (rc != OK) {
+        rjob_answer(j, rc);
+        return;
     }
-    j->in_offset = offset;
-    j->in_chunk  = chunk;
+    j->head = (uint32_t)(pos % TAGFS_BLOCK_SIZE);
+    uint64_t need = (j->head + (j->total - j->landed) + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE;
+    if (need > (uint64_t)after + 1)
+        need = (uint64_t)after + 1;
+    if (need > j->dma_blocks)
+        need = j->dma_blocks;
+    j->count = (uint32_t)need;
 
-    error_t rc = BoardroomReadAsync(tagfs_get_seat(), tagfs_block_to_sector(j->block),
-                                    TAGFS_BLOCK_SECTORS, j->dma_phys, rjob_answered, j,
-                                    &j->berth);
+    rc = BoardroomReadAsync(tagfs_get_seat(), tagfs_block_to_sector(j->block),
+                            j->count * TAGFS_BLOCK_SECTORS, j->dma_phys, rjob_answered, j,
+                            &j->berth);
     if (rc != OK)
         rjob_answer(j, rc);
 }
 
-/* The block that came in: checked against its digest, landed, and the next
- * one asked for. Where the job goes on — no TagFS lock held. */
+/* The run that came in: each block checked against its digest and landed in
+ * order, so a block that does not match stops the read after the ones before
+ * it; then the next run asked for. Where the job goes on — no TagFS lock held. */
 static void rjob_pump(void *job_)
 {
     ReadJob *j  = (ReadJob *)job_;
     error_t  rc = j->status;
 
-    if (rc == OK && !IntegrityVerify(j->block, j->dma_virt))
-        rc = ERR_CHECKSUM;
-    if (rc == OK) {
-        /* The program's pages as they are now, through its pinned process: a
-         * program gone meanwhile has none, and the block lands nowhere. */
-        if (j->target && !j->sink.kernel)
-            j->sink.vmm = j->target->cabin ? j->target->cabin->vmm : NULL;
-        rc = ReadSinkPush(&j->sink, j->landed, j->dma_virt + j->in_offset, j->in_chunk);
+    /* The program's pages as they are now, through its pinned process: a
+     * program gone meanwhile has none, and the block lands nowhere. */
+    if (rc == OK && j->target && !j->sink.kernel)
+        j->sink.vmm = j->target->cabin ? j->target->cabin->vmm : NULL;
+    for (uint32_t i = 0; i < j->count && rc == OK && j->landed < j->total; i++) {
+        const uint8_t *data  = j->dma_virt + (size_t)i * TAGFS_BLOCK_SIZE;
+        uint32_t       off   = i == 0 ? j->head : 0;
+        uint32_t       chunk = TAGFS_BLOCK_SIZE - off;
+        if ((uint64_t)chunk > j->total - j->landed)
+            chunk = (uint32_t)(j->total - j->landed);
+        if (!IntegrityVerify(j->block + i, data))
+            rc = ERR_CHECKSUM;
+        else if ((rc = ReadSinkPush(&j->sink, j->landed, data + off, chunk)) == OK)
+            j->landed += chunk;
     }
     if (rc != OK) {
         rjob_answer(j, rc);
         return;
     }
-    j->landed += j->in_chunk;
     rjob_step(j);
 }
 
@@ -221,19 +228,22 @@ int ReadJobSubmit(TagFSFileHandle *handle, const ReadJobAsk *ask, Crate *crates,
     if (!j)
         return ERR_NO_MEMORY;
     memset(j, 0, sizeof(*j));
-    j->dma_phys = pmm_alloc(1, PHYS_TAG_DMA32);
+    /* The run the seat takes in one command, in one piece, as a command's
+     * pages must be: a read that cannot have them stands in its call. */
+    j->dma_blocks = TagFSRunBlocks();
+    j->dma_phys   = pmm_alloc(j->dma_blocks, PHYS_TAG_DMA32);
     if (!j->dma_phys) {
         kfree(j);
         return ERR_NO_MEMORY;
     }
     if (!tagfs_enter()) {
-        pmm_free(j->dma_phys, 1);
+        pmm_free(j->dma_phys, j->dma_blocks);
         kfree(j);
         return ERR_TAGFS_NOT_INITIALIZED;
     }
     if (!stand && !(j->target = process_find_ref(ctx->proc->pid))) {
         tagfs_leave();
-        pmm_free(j->dma_phys, 1);
+        pmm_free(j->dma_phys, j->dma_blocks);
         kfree(j);
         return ERR_INVALID_STATE;
     }
@@ -259,7 +269,7 @@ int ReadJobSubmit(TagFSFileHandle *handle, const ReadJobAsk *ask, Crate *crates,
         /* The staged crates become the job's, and the answer with them: the
          * caller parked BEFORE the first submit — a fast answer that finds it
          * still working would be lost — and the chit given before it too, for
-         * the answer may come on another core the moment a block is armed. */
+         * the answer may come on another core the moment a run is armed. */
         j->crates_kbuf   = crates;
         j->crates_uaddr  = ctx->crates_uaddr;
         j->crate_count   = ctx->crate_count;

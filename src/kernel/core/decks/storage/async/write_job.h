@@ -34,12 +34,12 @@
  *   (RT-13);
  *
  *   an asynchronous write parks its caller whether or not the Helm is free:
- *   every block goes through the port — an AHCI port's slots or a USB disk's
- *   queue (BoardroomReadAsync, BoardroomWriteAsync) — the job parked on each
- *   answer and pumped where that seat's answers continue: on the drain core
- *   for an AHCI port, whose answer comes in its interrupt, and at a service
- *   point for a USB disk, whose answer comes on the drain core already
- *   (write_job.c, wjob_continue).
+ *   every command goes through the port — an AHCI port's slots or a USB
+ *   disk's queue (BoardroomReadAsync, BoardroomWriteAsync), a stretch of the
+ *   window a command — the job parked on each answer and pumped where that
+ *   seat's answers continue: on the drain core for an AHCI port, whose answer
+ *   comes in its interrupt, and at a service point for a USB disk, whose
+ *   answer comes on the drain core already (write_job_port.c, wjob_continue).
  *
  * The asynchronous write works on the file's Plot exactly as the synchronous
  * one does (HelmWriteWindow): the same growth rule, the same windows, each
@@ -76,10 +76,11 @@ typedef enum {
     W_INIT = 0,
     W_HELM_WAIT,       /* in the file's Helm FIFO */
     W_ALLOC,           /* the file's Plot loaded, and the window's ground reserved */
-    W_LOCATE,
-    W_READ_OLD,        /* async read of the block a partial write overlays */
-    W_DMA_FILL,
-    W_BLOCK_SUBMIT,    /* the block's write to the port */
+    W_LOCATE,          /* the stretch the cursor is in (PlotStretchAt) */
+    W_READ_OLD,        /* async read of its first or last block, which the write overlays */
+    W_READ_DONE,       /* ... and its answer */
+    W_DMA_FILL,        /* the write's bytes staged in the stretch's DMA pages */
+    W_BLOCK_SUBMIT,    /* the stretch's write to the port, one command */
     W_BLOCK_DONE,      /* ... and its answer */
     W_LOG_META,        /* what landed of the window made ready to be the file's */
     W_INK,             /* the window's record inked (TagFSInkPlot) */
@@ -87,6 +88,10 @@ typedef enum {
     W_SPARE_DONE,
     W_DONE,
 } WriteJobState;
+
+/* The reads a stretch's first and last block still owe (WriteJob.st_reads). */
+#define WJOB_READ_FIRST 1u
+#define WJOB_READ_LAST  2u
 
 typedef struct WriteJob {
     /* ---- identity / target ---- */
@@ -128,18 +133,19 @@ typedef struct WriteJob {
     uint32_t          spare_block;       /* the Spare W_SPARE stamps, until the pool has it */
     MetaPoolBlock    *spare_image;
 
-    /* ---- in-flight chunk ---- */
-    uint32_t          if_disk_block;
-    uint32_t          if_left;           /* blocks of its run after if_disk_block */
-    uint32_t          if_off_in_blk;
-    uint32_t          if_chunk;
-    bool              if_reading;        /* the command out is the overlaid block's read */
+    /* ---- the stretch in flight (PlotStretchAt) ---- */
+    PlotStretch       st;
+    uint8_t           st_reads;          /* WJOB_READ_FIRST / _LAST still to be read */
+    uint32_t          st_reading;        /* the block of it the read out is for */
+    uint32_t          st_staged;         /* its blocks the write carries, from its first */
+    error_t           st_stop;           /* why staging stopped at st_staged; OK when it did not */
     error_t           if_status;         /* the command's answer writes here */
     uint64_t          if_submit_tsc;     /* when the write went out: its time on the medium */
 
-    /* ---- DMA staging ---- */
+    /* ---- DMA staging: the run the seat takes in one command, in one piece ---- */
     void             *dma_phys;
     void             *dma_virt;
+    uint32_t          dma_blocks;
 
     /* ---- state machine ---- */
     _Atomic int       state;
@@ -152,9 +158,10 @@ typedef struct WriteJob {
      * waiter instead (HelmReady), which is just as allocation-free. */
     Baton cq_node;
 
-    /* Where each block's read or write waits when the port has no slot for
-     * it, or its door is shut for a cache flush (core/boardroom/roadstead.h).
-     * The port's from the submit until the answer, then the job's again. */
+    /* Where each command waits when the port has no slot for it, or its door
+     * is shut for a cache flush (core/boardroom/roadstead.h). The port's from
+     * the submit until the answer, then the job's again — with what a refused
+     * write kept (berth.landed). */
     RoadsteadBerth berth;
 
     /* ---- CrateStage handoff (async-safe Crate descriptor staging) ----

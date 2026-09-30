@@ -79,7 +79,8 @@ static bool BraidRawRead(uint8_t disk_id, uint64_t sector, void *data)
 
 static bool BraidRawWrite(uint8_t disk_id, uint64_t sector, const void *data)
 {
-    return BoardroomWrite(disk_id, sector, BRAID_BLOCK_SIZE / BOARDROOM_SECTOR_BYTES, data) == 0;
+    return BoardroomWrite(disk_id, sector, BRAID_BLOCK_SIZE / BOARDROOM_SECTOR_BYTES, data,
+                          NULL) == 0;
 }
 
 // Compute tag-based disk assignment (unique to Braid!)

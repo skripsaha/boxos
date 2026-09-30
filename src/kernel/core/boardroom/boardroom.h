@@ -216,9 +216,16 @@ uint8_t BoardroomSeatIndex(uint8_t seat);
 /* Sector I/O. Counts are in 512-byte sectors and are split as needed, so no
  * caller has to know what any particular controller's limit is. These two and
  * BoardroomFlush are the doors LockRank watches: a TagFS lock held on the
- * calling core is named at the door (tagfs/lock_rank). */
+ * calling core is named at the door (tagfs/lock_rank).
+ *
+ * `landed` (NULL for none): the sectors from `lba` on the medium took — all of
+ * them on 0, and on a refusal the commands before the refused one, with what
+ * the refused one kept before the sector it failed at when the medium names
+ * that sector. Ours do not yet, so a refused command counts none of its own;
+ * BLOCKFAIL's refusal does name it (block_fail.h). */
 int BoardroomRead (uint8_t seat, uint64_t lba, uint32_t count, void* buffer);
-int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffer);
+int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffer,
+                   uint32_t* landed);
 
 /* Whether the medium on `seat` refused a write as protected — DATA PROTECT
  * (sense key 7) on USB, an ATA abort on a write on AHCI — which it goes on

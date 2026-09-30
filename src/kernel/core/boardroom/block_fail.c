@@ -75,8 +75,11 @@ bool BlockFailFired(void)
     return (__atomic_load_n(&g_block_fail_state, __ATOMIC_ACQUIRE) & 1u) != 0;
 }
 
-bool BlockFailStrikes(uint8_t seat, BlockFailKind kind, uint64_t lba, uint32_t count)
+bool BlockFailStrikes(uint8_t seat, BlockFailKind kind, uint64_t lba, uint32_t count,
+                      uint32_t* keep)
 {
+    if (keep)
+        *keep = 0;
     uint64_t s = __atomic_load_n(&g_block_fail_state, __ATOMIC_ACQUIRE);
     uint64_t g = s >> 32;
     if (!(g & 1u))
@@ -109,10 +112,21 @@ bool BlockFailStrikes(uint8_t seat, BlockFailKind kind, uint64_t lba, uint32_t c
     if (!fire)
         return false;
 
+    uint32_t before = (keep && kind != BLOCK_FAIL_FLUSH && plan.first > lba)
+                          ? (uint32_t)(plan.first - lba) : 0;
     if (kind == BLOCK_FAIL_FLUSH) {
         kprintf("[BLOCKFAIL] seat %u: the cache flush is refused as a medium "
                 "error — occurrence %u since arming, and it was never issued to "
                 "the medium\n", seat, n);
+    } else if (before) {
+        *keep = before;
+        kprintf("[BLOCKFAIL] seat %u: the %s of sectors %llu..%llu is refused as "
+                "a medium error from sector %llu on — occurrence %u since arming: "
+                "the %u sector(s) before it reach the medium, and nothing from it "
+                "on is issued\n", seat,
+                kind == BLOCK_FAIL_READ ? "read" : "write",
+                (unsigned long long)lba, (unsigned long long)(lba + count - 1),
+                (unsigned long long)plan.first, n, before);
     } else {
         kprintf("[BLOCKFAIL] seat %u: the %s of sectors %llu..%llu is refused as "
                 "a medium error — occurrence %u since arming, and nothing of it "

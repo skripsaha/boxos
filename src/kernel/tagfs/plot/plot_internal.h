@@ -27,4 +27,8 @@ uint32_t PlotRunRoom(const Plot *p);
 /* Whether the record the Plot would ink fits format v1. */
 bool     PlotRecordFits(const Plot *p);
 
+/* A buffer of up to *most blocks from the heap, halved while the heap will not
+ * give it — *most says how many it holds: NULL only when not one block fits. */
+uint8_t *PlotRunBuffer(uint32_t *most);
+
 #endif /* TAGFS_PLOT_INTERNAL_H */

@@ -1,5 +1,5 @@
 #include "read.h"
-#include "boardroom.h"
+#include "../run/run.h"   /* TagFSRunBlocks — how much the medium takes in one command */
 
 /*
  * The read-ahead windows (read.h). A window's bytes are its handle's alone —
@@ -28,20 +28,15 @@ static bool WindowHolds(uint32_t first, uint32_t count, uint32_t block)
     return count > 0 && block >= first && block - first < count;
 }
 
-uint32_t ReadAheadDepth(void)
-{
-    uint32_t run = BoardroomSeatRun(tagfs_get_seat()) / TAGFS_BLOCK_SECTORS;
-    return run ? run : 1;
-}
-
-/* The handle's window, made at its first fetch: NULL when the heap has no
- * room for it, and the read goes on a block at a time. */
+/* The handle's window, made at its first fetch as deep as the seat's run:
+ * NULL when the heap has no room for it, and the read goes on a block at a
+ * time. */
 static struct ReadAheadWindow *WindowOf(TagFSFileHandle *h)
 {
     if (h->ahead)
         return h->ahead;
 
-    uint32_t                room = ReadAheadDepth();
+    uint32_t                room = TagFSRunBlocks();
     struct ReadAheadWindow *w    = kmalloc(sizeof(*w));
     uint8_t                *data = w ? kmalloc((size_t)room * TAGFS_BLOCK_SIZE) : NULL;
     if (!data) {

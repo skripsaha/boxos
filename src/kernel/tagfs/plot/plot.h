@@ -98,6 +98,30 @@ typedef enum {
 
 PlotFill PlotFillFor(const Plot *p, uint64_t k, uint32_t offset, uint32_t bytes);
 
+/*
+ * A stretch: the part of a write that lies in one run on the medium and goes
+ * out in one command (step 1.11). Only its first and last block can be partly
+ * written, so the one read-modify-write rule is theirs alone; every block
+ * between them the write covers whole.
+ */
+typedef struct {
+    uint32_t block;    /* its first block on the medium */
+    uint32_t count;    /* its blocks, in one run */
+    uint32_t head;     /* where the write begins inside the first block */
+    uint64_t bytes;    /* the write's bytes it carries */
+    PlotFill first;    /* what the first block does with the rest of it */
+    PlotFill last;     /* ... and the last — the first's own when it is one block */
+} PlotStretch;
+
+/* The stretch a write reaches at file byte `pos` with `left` of its bytes
+ * still to go, at most `most` blocks: false when no run of the Plot holds the
+ * block `pos` is in. */
+bool     PlotStretchAt(const Plot *p, uint64_t pos, uint64_t left, uint32_t most,
+                       PlotStretch *out);
+
+/* Of a stretch, the write's bytes its first `blocks` blocks carry. */
+uint64_t PlotStretchBytes(const PlotStretch *s, uint32_t blocks);
+
 /* The run [start, start + count) after the Plot's last one: merged into it
  * when it begins where that one ends, and cut into extents of at most 0xFFFF
  * blocks. OK or ERR_NO_MEMORY, the runs unchanged. */
@@ -179,9 +203,10 @@ error_t  PlotSourceBringIn(const PlotSource *src);
  * page is not there — the program gave it up since it was brought in. */
 error_t  PlotSourcePull(const PlotSource *src, uint64_t at, void *dst, uint32_t bytes);
 
-/* The source written at `at` block by block, synchronously, each block by the
- * one read-modify-write rule. It stops at the first refusal — a read, the
- * source's pages, a write — and *out_done is what landed before it. */
+/* The source written at `at` synchronously, a stretch a command, each block
+ * by the one read-modify-write rule. It stops at the first refusal in the
+ * file's order — a read, the source's pages, a write — and *out_done is what
+ * landed before it: the blocks of a stretch before a refused one are laid. */
 error_t  PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done);
 
 /* A record packed for the medium: its length, or 0 — said — when it is wider

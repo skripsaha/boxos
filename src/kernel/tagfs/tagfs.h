@@ -362,7 +362,7 @@ typedef struct {
  * table, the metadata pool — is counted in blocks of the DATA RUN, from zero,
  * because that is what a file's metadata carries on disk and what the bitmap
  * indexes. `layout.data_block` is the one number that converts between them,
- * and tagfs.c's block_to_vlba() is the one place that applies it.
+ * and tagfs_block_to_sector() is the one place that applies it.
  */
 typedef struct {
     uint8_t          uuid[16];      /* which volume this is */
@@ -618,6 +618,11 @@ void     TagFSNoteMediumGone(void);
  * FIFO. Until the volume is let go of; the next mount begins without it. */
 bool     TagFSMediumLeft(void);
 
+/* The same, asked of the seat now: an empty chair, or one holding another
+ * medium than the volume was mounted from, is latched and said here once.
+ * Asked before every block the volume reads or writes (run/run.c). */
+bool     TagFSMediumGone(void);
+
 /* Whether the medium under the mounted volume takes no write (RT-18): a write
  * it refused as protected — DATA PROTECT on USB, an ATA abort on AHCI. From
  * then on no Ink changes the volume — ERR_TAGFS_READ_ONLY — and every waiter
@@ -780,19 +785,23 @@ error_t  tagfs_defrag_file(uint32_t file_id, uint32_t target_block);
 uint32_t tagfs_get_fragmentation_score(uint32_t* out_files, uint32_t* out_gaps);
 
 // ----------------------------------------------------------------------------
-// Block I/O (for subsystem use)
+// Block I/O (for subsystem use) — a run of blocks in as few commands as the
+// seat takes is run/run.c's (TagFSReadRun below, TagFSWriteRun there)
 // ----------------------------------------------------------------------------
 
 /* One block: OK, or the real refusal — ERR_DEVICE_NOT_READY once the medium
  * left, ERR_READ_FAILED when it would not give the block, ERR_CHECKSUM when
  * what it gave does not match the digest recorded when the block was written
- * (integrity/integrity.h, which names the block and publishes it). */
+ * (integrity/integrity.h, which names the block and publishes it); a write
+ * ERR_DEVICE_NOT_READY or ERR_WRITE_FAILED, its digest recorded once it lands. */
 error_t  tagfs_read_block(uint32_t block, void* buffer);
 error_t  tagfs_write_block(uint32_t block, const void* buffer);
 
-/* `count` blocks from `first` on, off the volume's own medium in one run and
- * checked against nothing: the read-ahead's fetch, which checks each block
- * where it hands it out. OK, ERR_DEVICE_NOT_READY or ERR_READ_FAILED. */
+/* `count` blocks from `first` on, in as few commands as the seat takes and
+ * checked against nothing: for a reader that checks each block where it hands
+ * it out — the read-ahead's fetch, a defrag's copy. A volume assembled in a
+ * Braid gives them a block at a time. OK, ERR_DEVICE_NOT_READY or
+ * ERR_READ_FAILED. */
 error_t  TagFSReadRun(uint32_t first, uint32_t count, void* buffer);
 
 /* A write landed on `block`: no read-ahead window hands out what it held
@@ -805,8 +814,9 @@ void     tagfs_readahead_invalidate(uint32_t block);
  * Read one sector run of the mounted volume, counted from the start of its
  * ground rather than from the start of the medium.
  *
- * This is the only door TagFS and everything under it uses to reach the
- * medium — the DiskBook included. The base is applied here and nowhere else,
+ * This is the door TagFS and everything under it uses to reach the medium —
+ * the DiskBook included — and a block of the data run goes by
+ * tagfs_block_to_sector. The base is applied in those two and nowhere else,
  * which is what makes "no absolute addresses inside a volume" an invariant
  * instead of a convention.
  */
