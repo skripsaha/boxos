@@ -81,9 +81,12 @@ void FallowNodeLetGo(FallowNode* node)
     kfree(node);
 }
 
+STATIC_ASSERT(FALLOW_LIED_LAG > VOLUME_LEDGER_COPIES - 1u,
+              "a medium that lied waits longer than one that keeps its FLUSH");
+
 uint64_t FallowLag(void)
 {
-    return (uint64_t)VOLUME_LEDGER_COPIES - 1u + (SettleMediumLied() ? 1u : 0u);
+    return SettleMediumLied() ? FALLOW_LIED_LAG : (uint64_t)VOLUME_LEDGER_COPIES - 1u;
 }
 
 void FallowAdd(FallowNode* node, uint64_t gen)

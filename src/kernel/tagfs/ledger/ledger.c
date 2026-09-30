@@ -5,6 +5,7 @@
 #include "../use_memory/use_memory.h"
 #include "../../../kernel/drivers/timer/rtc.h"
 #include "../../../lib/kernel/crypto.h"
+#include "boardroom.h"     /* a copy read off whichever seat the medium sits in */
 
 static const uint8_t g_ledger_magic[8] = {
     VOLUME_LEDGER_MAGIC_0, VOLUME_LEDGER_MAGIC_1, VOLUME_LEDGER_MAGIC_2,
@@ -60,16 +61,17 @@ static uint64_t ledger_vlba(uint32_t copy)
 }
 
 /*
- * Read one copy. Returns true when it is present, intact, and long enough to
- * hold what this kernel knows how to read — a Ledger written by a newer kernel
- * is longer than this one expects and is read up to what is understood, which
- * is what `bytes` is for.
+ * Read one copy off `seat`, the volume's ground beginning at sector `base`.
+ * Returns true when it is present, intact, and long enough to hold what this
+ * kernel knows how to read — a Ledger written by a newer kernel is longer than
+ * this one expects and is read up to what is understood, which is what `bytes`
+ * is for. `tail` may be NULL for a reader that wants no inherited text.
  */
-static bool ledger_read_copy(uint32_t copy, VolumeLedger *out,
+static bool ledger_read_copy(uint8_t seat, uint64_t base, uint32_t copy, VolumeLedger *out,
                              char *tail, uint16_t *tail_len)
 {
     uint8_t buf[TAGFS_SECTOR_SIZE];
-    if (tagfs_volume_read(ledger_vlba(copy), 1, buf) != 0) {
+    if (BoardroomRead(seat, base + ledger_vlba(copy), 1, buf) != 0) {
         TagFSNoteReadRefused();
         kprintf("[Ledger] copy %u could not be read off the medium\n", copy);
         return false;
@@ -115,7 +117,7 @@ static bool ledger_read_copy(uint32_t copy, VolumeLedger *out,
      * only its place in the record is checked here. A record that names a
      * chain carries none. */
     *tail_len = 0;
-    if (led.use_context_bytes && !LedgerHas(&led, VOLUME_LEDGER_USE_CHAIN_END)) {
+    if (tail && led.use_context_bytes && !LedgerHas(&led, VOLUME_LEDGER_USE_CHAIN_END)) {
         uint32_t off = led.use_context_offset;
         uint32_t len = led.use_context_bytes;
         if (off < VOLUME_LEDGER_REQUIRED_BYTES || off + len > led.bytes) {
@@ -143,7 +145,8 @@ bool tagfs_ledger_peek(uint32_t copy, VolumeLedger *out, UseText **memory)
     char    *tail     = kmalloc(TAGFS_SECTOR_SIZE);
     uint16_t tail_len = 0;
     if (!tail) return false;
-    bool ok = ledger_read_copy(copy, out, tail, &tail_len);
+    bool ok = ledger_read_copy(tagfs_get_seat(), tagfs_get_volume_base(), copy, out, tail,
+                               &tail_len);
 
     UseChainRef ref;
     if (ok && memory && UseChainRefOf(out, &ref) && ref.first != VOLUME_LEDGER_NO_BLOCK) {
@@ -194,8 +197,8 @@ error_t ledger_load(void)
     if (!tails) return ERR_NO_MEMORY;
 
     for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
-        s_read_ok[c] = ledger_read_copy(c, &s_read[c], tails + (size_t)c * TAGFS_SECTOR_SIZE,
-                                        &tail_len[c]);
+        s_read_ok[c] = ledger_read_copy(tagfs_get_seat(), tagfs_get_volume_base(), c, &s_read[c],
+                                        tails + (size_t)c * TAGFS_SECTOR_SIZE, &tail_len[c]);
         if (s_read_ok[c]) live++;
     }
 
@@ -273,16 +276,54 @@ UseText *LedgerCopyInherited(uint32_t copy)
     return copy < VOLUME_LEDGER_COPIES && s_read_ok[copy] ? UseTextHold(s_read_use[copy]) : NULL;
 }
 
-bool LedgerCopySeal(uint32_t copy, SettleMark *out)
+/* A record's seal, when it carries one that is its own. */
+static bool ledger_seal_of(const VolumeLedger *led, SettleMark *out)
 {
-    if (copy >= VOLUME_LEDGER_COPIES || !s_read_ok[copy])
-        return false;
-    const VolumeLedger *led = &s_read[copy];
     if (!LedgerHas(led, VOLUME_LEDGER_SEAL_END) || led->mark.settle == 0 ||
         led->mark.settle != led->seq)
         return false;
     *out = led->mark;
     return true;
+}
+
+bool LedgerCopySeal(uint32_t copy, SettleMark *out)
+{
+    if (copy >= VOLUME_LEDGER_COPIES || !s_read_ok[copy])
+        return false;
+    return ledger_seal_of(&s_read[copy], out);
+}
+
+/*
+ * What this kernel left on the medium, for a medium that comes back
+ * (LedgerLeftAs): the record the volume stands on once a cycle settled it —
+ * or the one the mount stood on — and the image the last S4 aimed at the
+ * other copy, answered or not: a medium that went mid-cycle may hold either.
+ * Before any S4, that other is the newer copy the mount would not stand on.
+ * Each is known by its seq and its seal's {settle, closed_crc32, tail_crc32};
+ * a record with no seal of its own is known by its seq alone. Under
+ * g_ledger_lock.
+ */
+typedef struct {
+    bool     known;
+    uint64_t seq;
+    uint64_t settle;
+    uint32_t closed_crc32;
+    uint32_t tail_crc32;
+} LedgerLeftMark;
+
+static LedgerLeftMark s_left_settled;
+static LedgerLeftMark s_left_tried;
+
+static LedgerLeftMark ledger_left_mark(const VolumeLedger *led)
+{
+    SettleMark     seal;
+    LedgerLeftMark m = { .known = true, .seq = led->seq };
+    if (ledger_seal_of(led, &seal)) {
+        m.settle       = seal.settle;
+        m.closed_crc32 = seal.closed_crc32;
+        m.tail_crc32   = seal.tail_crc32;
+    }
+    return m;
 }
 
 void LedgerStandOn(uint32_t copy)
@@ -293,10 +334,58 @@ void LedgerStandOn(uint32_t copy)
 
     fs->ledger = s_read[copy];
 
+    /* A newer copy the mount would not stand on is on the medium all the
+     * same, as this kernel found it: until a cycle writes past it, it is what
+     * a medium that comes back holds newest. */
     TagFSLockTake(&g_ledger_lock);
     g_ledger_current = copy;
+    s_left_settled   = ledger_left_mark(&s_read[copy]);
+    s_left_tried.known = false;
+    if (copy != s_read_newest && s_read_ok[s_read_newest])
+        s_left_tried = ledger_left_mark(&s_read[s_read_newest]);
     TagFSLockDrop(&g_ledger_lock);
     LedgerReadForget();
+}
+
+void LedgerSettled(void)
+{
+    TagFSLockTake(&g_ledger_lock);
+    s_left_settled     = s_left_tried;
+    s_left_tried.known = false;
+    TagFSLockDrop(&g_ledger_lock);
+}
+
+bool LedgerNewestOn(uint8_t seat, uint64_t base, VolumeLedger *out)
+{
+    VolumeLedger copy;
+    uint16_t     none = 0;
+    bool         have = false;
+    for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
+        if (!ledger_read_copy(seat, base, c, &copy, NULL, &none))
+            continue;
+        if (!have || copy.seq > out->seq)
+            *out = copy;
+        have = true;
+    }
+    return have;
+}
+
+LedgerLeft LedgerLeftAs(const VolumeLedger *newest, uint64_t *out_settled_seq)
+{
+    TagFSLockTake(&g_ledger_lock);
+    LedgerLeftMark settled = s_left_settled;
+    LedgerLeftMark tried   = s_left_tried;
+    TagFSLockDrop(&g_ledger_lock);
+
+    LedgerLeftMark there = ledger_left_mark(newest);
+    *out_settled_seq = settled.seq;
+    for (int i = 0; i < 2; i++) {
+        const LedgerLeftMark *m = i ? &tried : &settled;
+        if (m->known && m->seq == there.seq && m->settle == there.settle &&
+            m->closed_crc32 == there.closed_crc32 && m->tail_crc32 == there.tail_crc32)
+            return LEDGER_AS_LEFT;
+    }
+    return settled.known && there.seq < settled.seq ? LEDGER_OLDER : LEDGER_OTHER;
 }
 
 void LedgerImageTake(void)
@@ -378,6 +467,16 @@ error_t LedgerImageWrite(const SettleMark *mark)
     uint32_t crc = KCrc32(s_image.sector, bytes);
     memcpy(s_image.sector + __builtin_offsetof(VolumeLedger, crc32), &crc, sizeof(crc));
 
+    /* Named as what this kernel may have left on the medium before a byte of
+     * it moves: a medium that goes mid-write may keep it whole. */
+    TagFSLockTake(&g_ledger_lock);
+    if (tagfs_mount_epoch() == s_image.epoch)
+        s_left_tried = (LedgerLeftMark){ .known = true, .seq = s_image.seq,
+                                         .settle = sealed.settle,
+                                         .closed_crc32 = sealed.closed_crc32,
+                                         .tail_crc32 = sealed.tail_crc32 };
+    TagFSLockDrop(&g_ledger_lock);
+
     int wrote = tagfs_volume_write(ledger_vlba(s_image.slot), 1, s_image.sector);
 
     TagFSLockTake(&g_ledger_lock);
@@ -403,6 +502,10 @@ void LedgerLetGo(void)
 {
     LedgerReadForget();
     UseMemoryLetGo();
+    TagFSLockTake(&g_ledger_lock);
+    s_left_settled.known = false;
+    s_left_tried.known   = false;
+    TagFSLockDrop(&g_ledger_lock);
 }
 
 /*

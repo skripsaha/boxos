@@ -71,7 +71,9 @@ error_t  SettleForRoom(void);
  * block Fallow rests, as its rule allows once they settled — so no clean
  * shutdown leaves a block taken that nothing names. A committer whose core is
  * no longer running is an abandoned cycle: it is taken over and begun again
- * from S0. The answer is kept for tagfs_shutdown.
+ * from S0. A volume whose medium is away runs no cycle: the stopping machine
+ * is the event its open book waited for, and the book is given up — every
+ * waiter answered (mount/away.h). The answer is kept for tagfs_shutdown.
  */
 error_t  TagFSSettleForHalt(void);
 
@@ -165,13 +167,9 @@ bool     SettleStepOwedHere(void);
  * or the window run out, or a demand (RT-10). */
 bool     SettleIdleOwed(void);
 
-/* seat:ready named the volume's seat: a cycle refused by the medium may run. */
+/* seat:ready named the volume's seat, or its open book was taken up: a cycle
+ * refused by the medium may run. */
 void     SettleSeatReady(void);
-
-/* The medium left: every waiter is answered ERR_DEVICE_NOT_READY at the next
- * service point, and so they are once the medium takes no write
- * (ERR_TAGFS_READ_ONLY). From any context. */
-void     SettleMediumLeft(void);
 
 /* Nightwatch's look from the PIT tick (RT-11): `now_us`. A debt older than the
  * window that no committer took up, twice at looks a look apart, is said once
@@ -194,10 +192,12 @@ void     SettleCadenceHold(bool hold);
 // ‼ ONE RULE FOR EVERY WAITER. A program's anchor, its OBJ_WRITE_SETTLED, its
 // Use Context remembered: the handler parks the program behind its Chit and
 // links a waiter; a cycle that settles the waiter's Ink and lays it in a closed
-// block answers it at S6. A medium that refused for good answers every waiter
-// with the code — ERR_TAGFS_READ_ONLY for a medium that takes no write,
-// ERR_DEVICE_NOT_READY for one that left; a refusal that may pass waits for
-// seat:ready, and no attempt is counted. Nothing here is ever a timeout.
+// block answers it at S6. A medium that takes no write answers every waiter
+// with ERR_TAGFS_READ_ONLY; one that left holds them with its open book
+// (mount/away.h) — the next cycle answers them once the same volume comes back
+// as it was left, and the book given up answers them ERR_DEVICE_NOT_READY; a
+// refusal that may pass waits for seat:ready, and no attempt is counted.
+// Nothing here is ever a timeout.
 // ============================================================================
 
 typedef struct SettleWaiter SettleWaiter;

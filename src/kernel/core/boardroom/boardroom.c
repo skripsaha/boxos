@@ -1084,7 +1084,12 @@ int BoardroomFlush(uint8_t seat)
     }
 
 #ifdef CONFIG_VOLUME_TESTS
-    if (BlockFailStrikes(seat, BLOCK_FAIL_FLUSH, 0, 0)) {
+    /* A plan that answers with a SCSI sense is judged by the USB disk's own
+     * driver, as the device's answer would be — remembered, and said. */
+    uint8_t sense[3];
+    if (BlockFailFlushStrikes(seat, sense)) {
+        if (s->kind == BOARD_USB && (sense[0] | sense[1] | sense[2]))
+            return xhci_msd_flush_answered(s->index, sense[0], sense[1], sense[2]);
         return BoardMediumRefusal(s->kind, BLOCK_FAIL_FLUSH);
     }
 #endif

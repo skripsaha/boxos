@@ -264,18 +264,23 @@ typedef struct HelmWaiter {
     struct HelmWaiter* next;
     void (*hand)(struct HelmWaiter* w);   /* the Helm is w's now; no TagFS lock held */
     void (*run)(struct HelmWaiter* w);    /* a waiter HelmReady listed is run here */
-    /* The medium left while w waited: w is answered here instead of ever
-     * being handed the Helm, with the count of changes inked since the last
-     * settled cycle that left with it. No TagFS lock held. */
+    /* The medium left: w is answered here instead of ever being handed the
+     * Helm — asked while it was away, or waiting when its open book was given
+     * up (mount/away.h) — with the count of changes no cycle settled that the
+     * book gave up; 0 for one asked while the book was still held. No TagFS
+     * lock held. */
     void (*gone)(struct HelmWaiter* w, uint64_t lost);
 } HelmWaiter;
 
 /* One holder of a file's extents at a time, and who waits for it. */
 typedef struct {
-    TagFSLock     lock;       /* leaf: the three below */
+    TagFSLock     lock;       /* leaf: the four below */
     HelmWaiter*   holder;     /* NULL when nobody holds it */
     HelmWaiter*   first;      /* the FIFO, oldest first */
     HelmWaiter*   last;
+    /* Its holder let go while the medium was away: the FIFO is held with the
+     * volume's open book, handed on nobody until the book is taken up. */
+    bool          parked;
     volatile bool vacated;    /* a Quitclaim gave the file up */
     /* The extents the holder's unfinished Plot will ink, claimed as room in
      * the file's record that no name or tag inked meanwhile may take (RT-19);
@@ -588,11 +593,12 @@ uint64_t tagfs_get_volume_base(void);
 /*
  * A medium has arrived somewhere in the Boardroom.
  *
- * Either the volume this kernel had is back — same identity, and unchanged
- * while it was out of the machine, both read off the medium rather than
- * assumed — or nothing was ever mounted and this is the first medium that
- * could carry a volume. Called from a context that is allowed to wait,
- * because deciding takes reads.
+ * Either the volume this kernel had is back — the same identity, and its
+ * open book taken up when it is as this kernel left it or given up when it is
+ * not (mount/away.h), both read off the medium rather than assumed — or
+ * nothing was ever mounted and this is the first medium that could carry a
+ * volume. Called from a context that is allowed to wait, because deciding
+ * takes reads.
  */
 /*
  * Listen for media arriving and leaving, instead of being called about them.
@@ -614,9 +620,14 @@ void     TagFSNoteReadRefused(void);
 void     TagFSNoteMediumGone(void);
 
 /* Whether the medium under the mounted volume has left (RT-13): from then on no
- * Ink changes the volume — ERR_DEVICE_NOT_READY — and nobody waits in a Helm's
- * FIFO. Until the volume is let go of; the next mount begins without it. */
+ * Ink changes the volume — ERR_DEVICE_NOT_READY — nobody new waits in a Helm's
+ * FIFO, and the volume's book is held open until an event decides it
+ * (mount/away.h): taken up when the same volume comes back as it was left,
+ * else given up and the volume let go of. TagFSMediumGone asks the room first
+ * and latches a departure it finds — for a caller whose medium command was
+ * refused, and who must tell a medium that left from one that failed. */
 bool     TagFSMediumLeft(void);
+bool     TagFSMediumGone(void);
 
 /* Whether the medium under the mounted volume takes no write (RT-18): a write
  * it refused as protected — DATA PROTECT on USB, an ATA abort on AHCI. From

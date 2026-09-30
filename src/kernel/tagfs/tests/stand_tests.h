@@ -39,8 +39,7 @@
 //                        turns at its Helm, a reader's blocks outliving a
 //                        delete, a defrag beside a delete, a write inked a
 //                        window at a time, a write refused part way, the
-//                        record's room claimed, a medium that left answering
-//                        the waiters, and a guarded file refused
+//                        record's room claimed, and a guarded file refused
 // stand_port_tests.c     the stand_port suite: a program's write through the
 //                        port on an AHCI port or a USB disk, a window at a
 //                        time, and a block's write refused part way
@@ -64,6 +63,9 @@
 // stand_snapshot_tests.c the stand_snapshot suite: the snapshots an earlier
 //                        kernel left, named and refused, and what they kept
 //                        claimed by no owner
+// stand_medium_tests.c   the stand_medium suite: a USB disk's NO MEDIUM to a
+//                        flush refused and its ILLEGAL REQUEST remembered, and
+//                        the open book taken up and given up
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.

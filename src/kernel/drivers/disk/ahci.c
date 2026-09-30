@@ -1,5 +1,6 @@
 #include "klib.h"
 #include "ahci.h"
+#include "ata.h"        /* AtaWriteCacheSaid — the same IDENTIFY words on either road */
 #include "pci.h"
 #include "pmm.h"
 #include "vmm.h"
@@ -1385,12 +1386,13 @@ static int ahci_port_init(uint8_t port_num) {
      * thing that was not, and there is no second channel — nothing outside
      * this driver ever repeats what IDENTIFY said.
      *
-     * Four lines, and each of them is one of the questions an operator asks
+     * Five lines, and each of them is one of the questions an operator asks
      * standing in front of the machine: is that my disk and is it still the
      * same one, is all of it there and on what grid, did the link come up at
-     * the speed I paid for, and will a write on it survive the power going
-     * out. Nothing below is inferred: every value was read off this drive or
-     * this HBA within the last few milliseconds.
+     * the speed I paid for, will a write on it survive the power going out,
+     * and does a write it acknowledges wait in its own cache first. Nothing
+     * below is inferred: every value was read off this drive or this HBA
+     * within the last few milliseconds.
      */
     if (port->model[0] != '\0') {
         kprintf("[AHCI port %u] %s, firmware %s, serial %s\n",
@@ -1483,6 +1485,7 @@ static int ahci_port_init(uint8_t port_num) {
                 "makes a write on this port survive the power going out\n",
                 port_num, (unsigned)id[83]);
     }
+    kprintf("[AHCI port %u] %s\n", port_num, AtaWriteCacheSaid(id));
 
     return 0;
 

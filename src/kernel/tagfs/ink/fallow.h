@@ -50,12 +50,15 @@
  * allocated under it: a node is made before the lock and freed after it.
  */
 
-/* One cycle more for a medium that keeps its FLUSH, derived: the newest copy
- * of the Ledger a cycle wrote can tear, and then the mount stands on the copy
- * before it — one cycle back, never two. A volume whose seals say the medium
- * once held less than a settled cycle's seal (SETTLE_MEDIUM_LIED) waits one
- * more: the budget that covers a lie one cycle deep; a deeper one is two
- * owners of a block, which the mount's census names. */
+/* The cycles more a freer's cycle waits for. For a medium that keeps its
+ * FLUSH, VOLUME_LEDGER_COPIES − 1 — derived: the newest copy of the Ledger a
+ * cycle wrote can tear, and then the mount stands on the copy before it, one
+ * cycle back and never two. Once the medium lied — a volume whose seals say it
+ * once held less than a settled cycle's seal (SETTLE_MEDIUM_LIED) —
+ * FALLOW_LIED_LAG, a BUDGET and not a derivation: it covers a lie one cycle
+ * deep; a deeper one is two owners of a block, which the mount's census names
+ * (the design's addendum §3, "лаг Fallow 1 / 2"). */
+#define FALLOW_LIED_LAG 2u
 uint64_t    FallowLag(void);
 
 typedef enum {

@@ -118,6 +118,7 @@ typedef struct {
     VOLUME_TESTS_ONLY(SUITE(stand_glean)) \
     VOLUME_TESTS_ONLY(SUITE(stand_snapshot)) \
     VOLUME_TESTS_ONLY(SUITE(stand_read)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_medium)) \
     /* the walk ends here; a new suite's line goes above */
 
 #define TEST_SUITE_DECLARED(name) extern const TestSuite g_##name##_suite;

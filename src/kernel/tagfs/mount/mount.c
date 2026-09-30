@@ -1,4 +1,5 @@
 #include "mount.h"
+#include "away.h"
 #include "ground_census.h"
 #include "../tag_registry/tag_registry.h"
 #include "../file_map/file_map.h"
@@ -345,7 +346,7 @@ static error_t MountPool(const MountSeals* seals, PoolMountOutcome* pool, const 
     LedgerStandOn(stood);
     GleanMount(ask.head, PoolChainFirst());
 
-    bool lied = pool->fell_back || UseMemoryMediumLied() ||
+    bool lied = pool->fell_back || UseMemoryMediumLied() || AwayLiedLearned(fs->uuid) ||
                 (pool->seal >= 0 && (seals->mark[pool->seal].flags & SETTLE_MEDIUM_LIED));
     SettleMountStand(pool->from_block, pool->from_bytes, lied);
 

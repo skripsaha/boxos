@@ -51,6 +51,23 @@ error_t VolumeFlushFor(uint64_t need)
     return tagfs_flush_cache();
 }
 
+static volatile uint64_t g_write_need;    /* the highest need a seen write named */
+
+void VolumeWriteSeen(void)
+{
+    uint64_t need = VolumeFlushNeed();
+    uint64_t cur  = __atomic_load_n(&g_write_need, __ATOMIC_RELAXED);
+    while (cur < need &&
+           !__atomic_compare_exchange_n(&g_write_need, &cur, need, false,
+                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+        ;
+}
+
+bool VolumeWritesKept(void)
+{
+    return VolumeFlushKept(__atomic_load_n(&g_write_need, __ATOMIC_ACQUIRE));
+}
+
 // ----------------------------------------------------------------------------
 // Scribe
 // ----------------------------------------------------------------------------

@@ -123,8 +123,8 @@ typedef struct WriteJob {
     bool              loaded;            /* PlotLoad answered OK */
     uint64_t          final_size;        /* the size the job leaves */
     error_t           stopped;           /* the refusal a write that stopped part way ends on */
-    bool              medium_left;       /* answered in the FIFO: the medium left (RT-13) */
-    uint64_t          lost;              /* ... with this many changes no cycle had settled */
+    bool              medium_left;       /* never handed the Helm: the medium left (RT-13) */
+    uint64_t          lost;              /* ... and the book given up took this many changes */
     uint32_t          spare_block;       /* the Spare W_SPARE stamps, until the pool has it */
     MetaPoolBlock    *spare_image;
 

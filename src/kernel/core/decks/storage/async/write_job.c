@@ -53,8 +53,15 @@
  * back everything it took (CR-1), and never a block twice (W-DFREE): what it
  * took is the Plot's Stakes, given back once. A file given up meanwhile is not
  * written further: its Helm is vacated, and the job answers ERR_FILE_NOT_FOUND
- * with its Stakes given back. A job waiting for the Helm when the medium left
- * is answered ERR_DEVICE_NOT_READY, nothing of it done (RT-13).
+ * with its Stakes given back.
+ *
+ * ‼ A MEDIUM THAT LEFT (RT-13). A job asking for the Helm while the medium is
+ * away is answered ERR_DEVICE_NOT_READY, nothing of it done; one that waited
+ * in the FIFO from before the departure waits with the volume's open book
+ * (mount/away.h) — handed the Helm when the book is taken up, answered with
+ * what left with the medium when it is given up. And a window the medium's
+ * leaving stopped declares nothing of itself written: what landed of it is
+ * not inked, and its ground goes back.
  *
  * ‼ NO FLUSH OF ITS OWN. What a job inked reaches the medium with a Settle
  * cycle — the cycle's first flush covers the data before any record names it
@@ -195,8 +202,9 @@ static void wjob_run_ready(HelmWaiter *w)
         (void)wjob_turn(j);
 }
 
-/* The medium left while the job waited for the Helm: nothing of it was done,
- * and it is answered so, with what left with the medium. */
+/* The medium left while the job waited for the Helm, or it asked while the
+ * medium was away: nothing of it was done, and it is answered so, with what
+ * left with the medium. */
 static void wjob_gone(HelmWaiter *w, uint64_t lost)
 {
     WriteJob *j = container_of(w, WriteJob, helm);
@@ -225,9 +233,17 @@ static void wjob_handed(HelmWaiter *w)
 /* The write stops at a refusal. What landed of the window before it is made
  * the file's — one record, inked the way a whole window's is, the ground
  * reserved past it given back — and the refusal is the answer, with the bytes
- * the file now holds of the write. Answers whether the pump goes on. */
+ * the file now holds of the write. A stop the medium's leaving explains inks
+ * nothing (RT-13): what landed may be in a cache that went with it. A port
+ * that refused before the room emptied the seat is not seen as one — its
+ * prefix is inked, and a flush that never covered it gives the volume's open
+ * book up (mount/away.h). Answers whether the pump goes on. */
 static bool wjob_stop(WriteJob *j, error_t cause)
 {
+    if (cause == ERR_DEVICE_NOT_READY || TagFSMediumGone()) {
+        wjob_finalize(j, ERR_DEVICE_NOT_READY);
+        return false;
+    }
     if (j->bytes_done > j->bytes_inked && j->loaded) {
         j->stopped = cause;
         wjob_to(j, W_LOG_META);
@@ -343,9 +359,13 @@ static bool w_locate(WriteJob *j)
  * calls it in — until a place comes free or the door a cache flush shut opens
  * again. Either way `answered` runs, exactly once, perhaps before this
  * returns; an error here means the seat is not there, or the request is
- * malformed. */
+ * malformed — or the volume's medium is away, and its seat is not the
+ * volume's to be written through. */
 static error_t wjob_submit(WriteJob *j, bool write, RoadsteadAnswered answered)
 {
+    if (TagFSMediumGone())
+        return ERR_DEVICE_NOT_READY;
+
     uint8_t  seat = tagfs_get_seat();
     uint64_t lba  = tagfs_block_to_sector(j->if_disk_block);
 
@@ -433,6 +453,7 @@ static bool w_block_done(WriteJob *j)
      * cache ourselves, or a later read could serve pre-write data. */
     tagfs_readahead_invalidate(j->if_disk_block);
     IntegrityUpdate(j->if_disk_block, j->dma_virt);
+    VolumeWriteSeen();
 
     j->plot.data_us += cpu_tsc_to_us(rdtsc() - j->if_submit_tsc);
     j->bytes_done   += j->if_chunk;
@@ -525,6 +546,7 @@ static bool w_spare_done(WriteJob *j)
         wjob_finalize(j, j->if_status);
         return false;
     }
+    VolumeWriteSeen();
     error_t rc = PoolSpareAdopt(j->spare_block, image, VolumeFlushNeed());
     if (rc != OK) {
         wjob_finalize(j, rc);
@@ -680,11 +702,14 @@ static void wjob_say_refused(const WriteJob *j, error_t rc)
     };
     if (rc == OK)
         return;
-    if (j->medium_left)
+    if (j->medium_left && j->lost)
         kprintf("[Storage] file %u: the medium left while this %s waited for the file's Helm — "
-                "nothing of it was done, and %llu change(s) inked since the last settled cycle "
-                "left with the medium\n", j->file_id, what[j->kind],
-                (unsigned long long)j->lost);
+                "nothing of it was done, and %llu change(s) no cycle settled left with the "
+                "medium\n", j->file_id, what[j->kind], (unsigned long long)j->lost);
+    else if (j->medium_left)
+        kprintf("[Storage] file %u: the medium the volume lives on is away, and this %s was "
+                "never handed the file's Helm — nothing of it was done\n", j->file_id,
+                what[j->kind]);
     else if (j->kind == WRITE_JOB_WRITE)
         kprintf("[Storage] write to file %u refused (error %u): %llu of its %llu byte(s) are the "
                 "file's, and the file is %llu bytes\n", j->file_id, (unsigned)rc,

@@ -26,8 +26,9 @@
 // write's one contract: inked a window at a time, the core given back between
 // two; refused part way with the bytes the file holds of it and its size; the
 // record's room claimed before a byte moves, so a tag is refused and not the
-// data; every waiter answered when the medium leaves; and a file the loader
-// reads by its blocks refused by the volume's one guard.
+// data; and a file the loader reads by its blocks refused by the volume's one
+// guard. A medium that leaves holds the waiters with its open book — the
+// stand_medium suite's.
 //
 // A waiter here is the test's own: handed the Helm, it is listed for a
 // service point as a program's synchronous job is (HelmReady), and the test
@@ -54,15 +55,12 @@ typedef struct {
     uint32_t          bytes;
     volatile uint32_t handed;
     volatile uint32_t done;
-    volatile uint32_t gone;     /* answered that the medium left */
-    uint64_t          lost;
     uint32_t          turns;    /* times its work was run at a service point */
     error_t           rc;
     uint64_t          wrote;
 } StandTurn;
 
 static StandTurn  s_turn;
-static StandTurn  s_later;    /* a second waiter, behind s_turn */
 static HelmWaiter s_first;
 
 static void StandTurnHanded(HelmWaiter *w)
@@ -92,11 +90,11 @@ static void StandTurnRun(HelmWaiter *w)
     __atomic_store_n(&t->done, 1u, __ATOMIC_RELEASE);
 }
 
+/* Answered that the medium left: done, never handed the Helm. */
 static void StandTurnGone(HelmWaiter *w, uint64_t lost)
 {
     StandTurn *t = container_of(w, StandTurn, waiter);
-    t->lost = lost;
-    __atomic_add_fetch(&t->gone, 1u, __ATOMIC_ACQ_REL);
+    (void)lost;
     __atomic_store_n(&t->done, 1u, __ATOMIC_RELEASE);
 }
 
@@ -657,85 +655,6 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// The medium leaves: every waiter in a Helm's FIFO is answered
-//
-// RT-13. A job waiting for a file's Helm held the volume's door and waited for
-// a holder whose medium had gone: nothing answered it, and the volume could
-// not be let go of while it stood inside. Now the departure answers every
-// waiter at the next service point, with the count of changes inked since the
-// last settled cycle — and none of them is ever handed the Helm. The test
-// says the departure to the Helm alone (HelmMediumLeft): the medium stays, and
-// nothing else of the volume is told.
-// ----------------------------------------------------------------------------
-
-static TestResult TestStandHelmMediumLeftAnswersWaiters(void)
-{
-    TestResult       verdict = TEST_PASS;
-    uint32_t         file_id = 0;
-    TagFSFileHandle *holder  = NULL;
-    TagFSFileHandle *one     = NULL;
-    TagFSFileHandle *two     = NULL;
-    bool             holding = false;
-    bool             asked   = false;
-    const uint32_t   B       = TAGFS_BLOCK_SIZE;
-    const char      *aside   = StandStepsAsideFor();
-
-    if (aside)
-        return test_steps_aside(aside);
-
-    TestFillAt(g_test_buffer, 2 * B, 0x4E1D0600u, 0);
-    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, B, &file_id), "a one-block file is made");
-    holder = tagfs_open(file_id, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
-    one    = tagfs_open(file_id, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
-    two    = tagfs_open(file_id, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
-    TEST_ASSERT(holder && one && two, "a holder and two waiters open it");
-
-    uint64_t owed = HelmOwed();
-    memset(&s_first, 0, sizeof(s_first));
-    TEST_ASSERT(HelmAsk(holder->ofe, &s_first), "the holder holds the file's Helm");
-    holding = true;
-    StandTurnSetOn(&s_turn, STAND_TURN_WRITE, one, g_test_buffer + B, B);
-    StandTurnSetOn(&s_later, STAND_TURN_WRITE, two, g_test_buffer + B, B);
-    asked = true;
-    TEST_ASSERT(!HelmAsk(one->ofe, &s_turn.waiter), "the first waiter is queued");
-    TEST_ASSERT(!HelmAsk(two->ofe, &s_later.waiter), "and the second behind it");
-
-    PlotSource grow  = { .kernel = g_test_buffer + B, .bytes = B };
-    uint64_t   wrote = 0;
-    TEST_ASSERT_OK(HelmWrite(holder, &grow, &wrote), "the holder appends — a change no cycle settled");
-    uint64_t unsettled = InkedGen() - SettledGen();
-
-    HelmMediumLeft();
-    TEST_ASSERT(StandTurnDone(&s_turn, STAND_HELM_BOUND_MS), "the first waiter is answered");
-    TEST_ASSERT(StandTurnDone(&s_later, STAND_HELM_BOUND_MS), "and so is the second");
-    asked = false;
-    TEST_ASSERT_EQ(s_turn.gone + s_later.gone, 2, "each once, that the medium left");
-    TEST_ASSERT(!s_turn.handed && !s_later.handed, "and neither was handed the Helm");
-    TestEvidence("changes the answer said left with the medium", s_turn.lost);
-    TEST_ASSERT(s_turn.lost >= unsettled && unsettled > 0,
-                "with the changes no cycle had settled, the holder's among them");
-
-    HelmLetGo(holder->ofe, &s_first);
-    holding = false;
-    TEST_ASSERT(!s_turn.handed && !s_later.handed, "the holder lets go and hands nobody the Helm");
-    TEST_ASSERT_EQ(HelmOwed(), owed, "and nothing is owed on the file any more");
-out:
-    if (holding)
-        HelmLetGo(holder->ofe, &s_first);
-    if (asked && (!StandTurnDone(&s_turn, STAND_HELM_BOUND_MS) ||
-                  !StandTurnDone(&s_later, STAND_HELM_BOUND_MS))) {
-        one = NULL;
-        two = NULL;
-    }
-    tagfs_close(holder);
-    tagfs_close(one);
-    tagfs_close(two);
-    if (file_id)
-        tagfs_delete_file(file_id);
-    return verdict;
-}
-
-// ----------------------------------------------------------------------------
 // A file the loader reads by its blocks is refused by the volume's one guard
 //
 // The storage deck used to ask, at its own entry, whether a file wore system
@@ -820,8 +739,6 @@ static const TestCase g_stand_helm_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_helm_record_room_claimed", .func = TestStandHelmRecordRoomClaimed,
       .reach = TEST_WRITES_TO_VOLUME },
-    { .name  = "stand_helm_medium_left_answers_waiters",
-      .func  = TestStandHelmMediumLeftAnswersWaiters, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_helm_guarded_file_refused", .func = TestStandHelmGuardedFileRefused,
       .reach = TEST_WRITES_TO_VOLUME },
 };

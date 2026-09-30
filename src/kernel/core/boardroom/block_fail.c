@@ -23,6 +23,7 @@
 typedef struct {
     uint8_t  seat;
     uint8_t  kind;
+    uint8_t  sense[3];      /* a flush's SCSI answer; all zero: a medium error */
     uint64_t first;
     uint64_t end;           /* 0: the whole seat */
     uint32_t nth;
@@ -45,23 +46,42 @@ bool BlockFailDisarm(void)
     return false;
 }
 
-void BlockFailArm(uint8_t seat, BlockFailKind kind,
-                  uint64_t first_sector, uint64_t sectors, uint32_t nth)
+/* The plan written while the generation is even, then stood up: even -> odd,
+ * with the count and the refusal cleared in the same store. Nothing else
+ * writes the word while the generation is even: a strike swaps only under the
+ * odd generation it read. */
+static void BlockFailStand(const BlockFailPlan* plan)
 {
     BlockFailDisarm();
+    g_block_fail = *plan;
 
-    g_block_fail.seat  = seat;
-    g_block_fail.kind  = (uint8_t)kind;
-    g_block_fail.first = first_sector;
-    g_block_fail.end   = sectors ? first_sector + sectors : 0;
-    g_block_fail.nth   = nth ? nth : 1u;
-
-    /* Even -> odd, with the count and the refusal cleared in the same store.
-     * Nothing else writes the word while the generation is even: a strike
-     * swaps only under the odd generation it read. */
     uint64_t s = __atomic_load_n(&g_block_fail_state, __ATOMIC_RELAXED);
     __atomic_store_n(&g_block_fail_state, (s & ~(BLOCK_FAIL_GEN_ONE - 1u)) + BLOCK_FAIL_GEN_ONE,
                      __ATOMIC_RELEASE);
+}
+
+void BlockFailArm(uint8_t seat, BlockFailKind kind,
+                  uint64_t first_sector, uint64_t sectors, uint32_t nth)
+{
+    BlockFailPlan plan = {
+        .seat  = seat,
+        .kind  = (uint8_t)kind,
+        .first = first_sector,
+        .end   = sectors ? first_sector + sectors : 0,
+        .nth   = nth ? nth : 1u,
+    };
+    BlockFailStand(&plan);
+}
+
+void BlockFailArmFlushSense(uint8_t seat, uint8_t key, uint8_t asc, uint8_t ascq, uint32_t nth)
+{
+    BlockFailPlan plan = {
+        .seat  = seat,
+        .kind  = (uint8_t)BLOCK_FAIL_FLUSH,
+        .sense = { key, asc, ascq },
+        .nth   = nth ? nth : 1u,
+    };
+    BlockFailStand(&plan);
 }
 
 uint32_t BlockFailSeen(void)
@@ -75,7 +95,9 @@ bool BlockFailFired(void)
     return (__atomic_load_n(&g_block_fail_state, __ATOMIC_ACQUIRE) & 1u) != 0;
 }
 
-bool BlockFailStrikes(uint8_t seat, BlockFailKind kind, uint64_t lba, uint32_t count)
+/* The strike, and in *out the plan it struck under. */
+static bool BlockFailStrikesUnder(uint8_t seat, BlockFailKind kind, uint64_t lba, uint32_t count,
+                                  BlockFailPlan* out)
 {
     uint64_t s = __atomic_load_n(&g_block_fail_state, __ATOMIC_ACQUIRE);
     uint64_t g = s >> 32;
@@ -83,6 +105,7 @@ bool BlockFailStrikes(uint8_t seat, BlockFailKind kind, uint64_t lba, uint32_t c
         return false;
 
     BlockFailPlan plan = g_block_fail;
+    *out = plan;
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     if ((__atomic_load_n(&g_block_fail_state, __ATOMIC_RELAXED) >> 32) != g)
         return false;           /* rewritten while it was read: not this plan's command */
@@ -109,7 +132,11 @@ bool BlockFailStrikes(uint8_t seat, BlockFailKind kind, uint64_t lba, uint32_t c
     if (!fire)
         return false;
 
-    if (kind == BLOCK_FAIL_FLUSH) {
+    if (kind == BLOCK_FAIL_FLUSH && (plan.sense[0] | plan.sense[1] | plan.sense[2])) {
+        kprintf("[BLOCKFAIL] seat %u: the cache flush is answered as refused with sense key "
+                "0x%x, code 0x%02x/0x%02x — occurrence %u since arming, and it was never "
+                "issued to the medium\n", seat, plan.sense[0], plan.sense[1], plan.sense[2], n);
+    } else if (kind == BLOCK_FAIL_FLUSH) {
         kprintf("[BLOCKFAIL] seat %u: the cache flush is refused as a medium "
                 "error — occurrence %u since arming, and it was never issued to "
                 "the medium\n", seat, n);
@@ -122,6 +149,20 @@ bool BlockFailStrikes(uint8_t seat, BlockFailKind kind, uint64_t lba, uint32_t c
                 (unsigned long long)(lba + count - 1), n);
     }
     return true;
+}
+
+bool BlockFailStrikes(uint8_t seat, BlockFailKind kind, uint64_t lba, uint32_t count)
+{
+    BlockFailPlan plan;
+    return BlockFailStrikesUnder(seat, kind, lba, count, &plan);
+}
+
+bool BlockFailFlushStrikes(uint8_t seat, uint8_t out_sense[3])
+{
+    BlockFailPlan plan;
+    bool          fired = BlockFailStrikesUnder(seat, BLOCK_FAIL_FLUSH, 0, 0, &plan);
+    memcpy(out_sense, fired ? plan.sense : (const uint8_t[3]){ 0, 0, 0 }, 3);
+    return fired;
 }
 
 /* The seat a protection stands on, + 1; 0 for none. */

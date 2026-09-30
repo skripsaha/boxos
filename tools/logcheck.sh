@@ -7903,8 +7903,8 @@ edits = {
    "        if (__atomic_compare_exchange_n(&g_block_fail_state, &s, s + BLOCK_FAIL_GEN_ONE, false,\n                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))\n            return true;\n",
    "        return true;   /* " + M + ": disarm says it took the plan down and leaves it standing */\n"),
   ("src/kernel/core/boardroom/boardroom.c",
-   "    if (BlockFailStrikes(seat, BLOCK_FAIL_FLUSH, 0, 0)) {\n        return BoardMediumRefusal(s->kind, BLOCK_FAIL_FLUSH);\n    }\n",
-   "    /* " + M + ": the flush is never asked */\n"),
+   "    if (BlockFailFlushStrikes(seat, sense)) {\n        if (s->kind == BOARD_USB && (sense[0] | sense[1] | sense[2]))\n            return xhci_msd_flush_answered(s->index, sense[0], sense[1], sense[2]);\n        return BoardMediumRefusal(s->kind, BLOCK_FAIL_FLUSH);\n    }\n",
+   "    (void)sense;   /* " + M + ": the flush is never asked */\n"),
  ],
  "lands": [
   ("src/kernel/core/boardroom/boardroom.c",
