@@ -124,4 +124,20 @@ bool BlockFailStrikes(uint8_t seat, BlockFailKind kind, uint64_t lba, uint32_t c
     return true;
 }
 
+/* The seat a protection stands on, + 1; 0 for none. */
+static volatile uint32_t g_block_fail_protected;
+
+void BlockFailProtect(uint8_t seat, bool on)
+{
+    __atomic_store_n(&g_block_fail_protected, on ? (uint32_t)seat + 1u : 0u, __ATOMIC_RELEASE);
+    kprintf("[BLOCKFAIL] seat %u: %s\n", seat,
+            on ? "every write is refused from here as a protected medium refuses it"
+               : "writes reach the medium again");
+}
+
+bool BlockFailProtects(uint8_t seat)
+{
+    return __atomic_load_n(&g_block_fail_protected, __ATOMIC_ACQUIRE) == (uint32_t)seat + 1u;
+}
+
 #endif /* CONFIG_VOLUME_TESTS */

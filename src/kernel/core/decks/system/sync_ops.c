@@ -20,7 +20,7 @@
  *     addr_wake runs on the K-Core, so KResultPush (which touches the cabin VMM)
  *     is safe there. The parker's step-6 lost-wakeup recheck can also CLAIM (when
  *     the watched value already changed) and complete synchronously.
- *   - TIMEOUT: armed via TouchQueueWakeAfter. When the timer fires (PIT IRQ),
+ *   - TIMEOUT: armed via TouchQueueArmWake. When the timer fires (PIT IRQ),
  *     touch_queue_fire_wake passes the process's own baton (a never-drop
  *     embedded node, baton.h) — it does NO ResultRing/VMM work in the PIT
  *     tick. SyncTimeoutDeliver then runs on a K-Core: it CLAIMS the entry by
@@ -70,7 +70,7 @@
  *   1.  VA → phys translate (before taking any bucket lock).
  *   2.  Value pre-check: if *phys != expected → return immediately.
  *   3.  Register AddrWaitEntry under bucket lock.
- *   4.  Arm an IRQ-safe timeout reschedule via TouchQueueWakeAfter (PROC_WORKING
+ *   4.  Arm an IRQ-safe timeout reschedule via TouchQueueArmWake (PROC_WORKING
  *       + IPI on expiry; the caller's result_wait call_timeout yields ERR_TIMEOUT).
  *   5.  process_set_state(PROC_WAITING).
  *   6.  Lost-wakeup recheck under ACQUIRE (reload *phys + entry.done) with
@@ -174,7 +174,7 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
     uint32_t park_seq = __atomic_add_fetch(&ctx->proc->park_seq, 1,
                                            __ATOMIC_ACQ_REL);
     if (timeout_ms > 0)
-        TouchQueueWakeAfter(ctx->proc->pid, fire_at, /*owes_result=*/1u, park_seq);
+        TouchQueueArmWake(ctx->proc, fire_at, /*owes_result=*/1u, park_seq);
 
     /* Step 5: park (identical to SysTouchAwait line 275). */
     process_set_state(ctx->proc, PROC_WAITING);
@@ -344,7 +344,7 @@ static int SysAddrWake(const ManifestOp *op, Crate *crates,
             r.context    = KCTX_PACK24(KCTX_GUIDE, cookie);
             KResultPush(target, &r);
 
-            /* The target's armed timeout (TouchQueueWakeAfter) is left in place;
+            /* The target's armed timeout (TouchQueueArmWake) is left in place;
              * if it fires later, SyncTimeoutDeliver finds this entry already
              * claimed (we won here) — AddrWaitClaim fails, so it only does a bare
              * PROC_WORKING reschedule (no Result, no ERR_TIMEOUT). At worst a

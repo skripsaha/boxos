@@ -3,6 +3,8 @@
 #include "klib.h"
 #include "boxos_manifest.h"
 #include "canvas.h"   /* CanvasBatchBegin/End — coalesce multi-op Manifests into one display commit */
+#include "boxos_decks.h"
+#include "tagfs.h"    /* TagFSNoteInker — a program's newest change of the volume */
 
 /*
  * Sequential executor. Walks the compiled op stream once, dispatching each
@@ -24,6 +26,16 @@
 static inline bool crate_index_in_range(uint16_t idx, uint16_t crate_count)
 {
     return idx == CRATE_INDEX_NONE || idx < crate_count;
+}
+
+/* A program that asked the storage deck for something may have changed the
+ * volume: the volume keeps the newest of its changes against the program, so
+ * a program that leaves with one unsettled is a demand on the Settle
+ * (settle.h). An op that parked its caller is noted again by its job. */
+static inline void ManifestNoteVolumeChange(const ManifestOp *op, const OpContext *ctx)
+{
+    if (OP_KIND_DECK(op->op_kind) == DECK_STORAGE && ctx && ctx->proc)
+        TagFSNoteInker(ctx->proc);
 }
 
 static error_t dispatch_op(const OpRegistration *reg,
@@ -54,7 +66,9 @@ static error_t dispatch_op(const OpRegistration *reg,
         return ERR_ACCESS_DENIED;
     }
 
-    return reg->handler(op, crates, crate_count, ctx);
+    int rc = reg->handler(op, crates, crate_count, ctx);
+    ManifestNoteVolumeChange(op, ctx);
+    return rc;
 }
 
 error_t ManifestExecute(ManifestHandle           handle,
@@ -240,6 +254,7 @@ error_t ManifestExecuteOnce(const void              *manifest_kp,
 
         any_executed = true;
         int rc = reg->handler(op, crates, crate_count, ctx);
+        ManifestNoteVolumeChange(op, ctx);
         if (rc != OK) {
             if (first_error == OK) {
                 first_error           = (error_t)rc;

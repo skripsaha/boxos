@@ -113,8 +113,19 @@ error_t InkQuitclaim(uint32_t fid, InkReceipt* out);
 uint64_t InkedGen(void);
 uint64_t InkDataNeed(void);
 
+/* The Ink that laid file `fid`'s newest record — every change the file has had
+ * is in it — or the newest Ink of all for a file no longer in the map, whose
+ * Quitclaim is among them. With no lock; inside the door. */
+uint64_t InkGenOf(uint32_t fid);
+
 /* A mount's first word: no Ink yet. With the door shut. */
 void     InkMountReset(void);
+
+#ifdef CONFIG_VOLUME_TESTS
+/* The stand's undo of a protected medium it armed itself (BlockFailProtect):
+ * the volume takes changes again. */
+void     InkReadOnlyLift(void);
+#endif
 
 /* The stem of a name as a key, read in place: OK with out->key NULL for a
  * name with no stem, ERR_TAGFS_TAG_TOO_LONG for one longer than a key. */

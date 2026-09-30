@@ -55,5 +55,9 @@ void kcore_run_loop(void) __attribute__((noreturn));
 uint32_t kcore_queue_depth(uint8_t core_idx);
 /* True while some K-Core is inside guide_process_one for this strand. */
 bool kcore_is_serving(const struct process_t* proc);
+/* A K-Core asleep in its HLT gate woken to go round its loop again — for work
+ * it finds at a service point rather than in its queue. The work is published
+ * before the call; from any context. */
+void kcore_wake(uint8_t core_idx);
 
 #endif // KCORE_H

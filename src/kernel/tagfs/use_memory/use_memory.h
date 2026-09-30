@@ -87,6 +87,24 @@ typedef enum {
 error_t  tagfs_remember_use_context(UseText *said, uint64_t saying, bool *remembered);
 UseText *tagfs_recall_use_context(uint64_t *out_saying);
 
+/* remember's first half, which never waits: the word said to the volume's
+ * memory, and what the medium makes of it — a later word stands; the medium
+ * holds exactly it already; or it is a demand a cycle that begins after it
+ * carries (OWED), whose number goes to *ticket. A program's `use` waits for an
+ * OWED one through its Chit (SettleWaitLinkCycle). Inside the door, with no
+ * TagFS lock held. */
+typedef enum {
+    USE_SAID_SUPERSEDED = 0,
+    USE_SAID_LANDED,
+    USE_SAID_OWED,
+} UseSaid;
+UseSaid  UseMemorySay(UseText *said, uint64_t saying, uint64_t *ticket);
+
+/* remember's second half, once a cycle that began after demand `ticket` has
+ * settled: whether the volume now holds exactly `said` — false when it had no
+ * ground for it, or a later word stands. With no TagFS lock held. */
+bool     UseMemoryKept(uint64_t ticket, const UseText *said);
+
 // ----------------------------------------------------------------------------
 // The Settle cycle's part (settle.h), by the Settle's holder
 // ----------------------------------------------------------------------------

@@ -17,6 +17,7 @@
 #include "touch_ring.h"
 #include "brook.h"       /* BrookBellUnrung — the surface the kernel never sees deliver */
 #include "pit.h"        /* pit_get_uptime_ms — a clock that runs whether or not IRQ0 has reached the BSP yet */
+#include "tagfs.h"      /* TagFSWatchLook — the Settle's own proof of a debt nobody took up */
 #include "klib.h"
 
 /*
@@ -872,6 +873,23 @@ void nightwatch_core_idle(uint8_t core)
 
     nightwatch_verdict();
     __atomic_store_n(&g_walking, 0, __ATOMIC_RELEASE);
+}
+
+/* The volume's Settle, looked at from the tick (RT-11): the one look that
+ * cannot wait for an idle core, because a cycle that never begins under a
+ * machine that never idles is exactly what it is for. The same spacing as the
+ * other looks; the proof — the same debt, unclaimed, at two looks — is the
+ * Settle's own (SettleWatchLook). IRQ0 is the BSP's alone, so the mark needs
+ * no exchange. */
+static uint64_t g_settle_look_ms;
+
+void nightwatch_tick(void)
+{
+    if (!__atomic_load_n(&g_armed, __ATOMIC_ACQUIRE)) return;
+    uint64_t now = pit_get_uptime_ms();
+    if (g_settle_look_ms != 0 && now - g_settle_look_ms < NIGHTWATCH_LOOK_MS) return;
+    g_settle_look_ms = now;
+    TagFSWatchLook();
 }
 
 void nightwatch_core_busy(uint8_t core)

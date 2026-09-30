@@ -147,8 +147,9 @@ static int ahci_stand_over_io(uint8_t port, uint64_t lba, uint16_t sector_count,
     if (drawn < 0) {
         return -1;
     }
-    uint8_t     slot = (uint8_t)drawn;
-    AhciSlotEnd how  = AHCI_SLOT_GONE;
+    uint8_t     slot    = (uint8_t)drawn;
+    AhciSlotEnd how     = AHCI_SLOT_GONE;
+    int         aborted = 0;    /* attempts a task-file error with ABRT ended */
 
     for (int attempt = 0; attempt < AHCI_MAX_RETRIES; attempt++) {
         if (ahci_build_io(port, slot, lba, sector_count, (void*)dma_phys, write) != OK) {
@@ -157,6 +158,7 @@ static int ahci_stand_over_io(uint8_t port, uint64_t lba, uint16_t sector_count,
         }
         __atomic_fetch_add(&port_state->stats.cmd_count, 1, __ATOMIC_RELAXED);
 
+        uint32_t tfes_at_arm    = __atomic_load_n(&port_state->stats.tfes_count, __ATOMIC_ACQUIRE);
         uint32_t trouble_at_arm = 0;
         if (!ahci_arm_when_running(port, slot, port_state->ncq, &trouble_at_arm)) {
             how = AHCI_SLOT_GONE;
@@ -180,11 +182,23 @@ static int ahci_stand_over_io(uint8_t port, uint64_t lba, uint16_t sector_count,
             how = AHCI_SLOT_GONE;
             break;
         }
+        /* The recovery has recorded the fault by now: was it this write's,
+         * aborted by the drive rather than failed on the medium? */
+        if (write && __atomic_load_n(&port_state->stats.tfes_count, __ATOMIC_ACQUIRE) != tfes_at_arm &&
+            ((__atomic_load_n(&port_state->stats.last_tfd, __ATOMIC_ACQUIRE) >> AHCI_PTFD_ERR_SHIFT) &
+             AHCI_PTFD_ERR_ABRT)) {
+            aborted++;
+        }
     }
 
     AhciLeaveSlot(port, slot);
     if (how == AHCI_SLOT_DONE) {
         return 0;
+    }
+    if (write && aborted == AHCI_MAX_RETRIES &&
+        !__atomic_exchange_n(&port_state->write_refused, 1u, __ATOMIC_ACQ_REL)) {
+        kprintf("[AHCI] port %u: the drive aborted every attempt of a write — it refuses "
+                "writes, and is taken as a medium that takes none while it stands\n", port);
     }
     if (how == AHCI_SLOT_GONE) {
         kprintf("[AHCI] port %u: a %s of %u sector(s) at LBA %llu was not "

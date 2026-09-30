@@ -32,6 +32,7 @@
 #include "cpu_calibrate.h" // cpu_tsc_recal_tick (periodic recalibration)
 #include "touch_queue.h"
 #include "nightwatch.h"
+#include "nightwatch.h"
 #include "clockboard.h"
 #include "pit.h"
 #include "baton.h"
@@ -1978,6 +1979,9 @@ void IrqTheTickAnswers(void)
 
         /* Deferred touch event delivery */
         TouchQueueTick(__atomic_load_n(&g_global_tick, __ATOMIC_RELAXED));
+
+        /* Nightwatch's looks that cannot wait for an idle core. */
+        nightwatch_tick();
 
         /* xHCI: poll for events when the controller has no usable interrupt,
          * and run the command and enumeration watchdogs either way. */

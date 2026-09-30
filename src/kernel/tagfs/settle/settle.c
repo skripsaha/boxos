@@ -1,4 +1,4 @@
-#include "settle.h"
+#include "settle_internal.h"
 #include "../scribe/scribe.h"
 #include "../ink/ink.h"
 #include "../ink/fallow.h"
@@ -11,19 +11,39 @@
 #include "../use_memory/use_memory.h"
 #include "amp.h"
 #include "baton.h"
+#include "kheap.h"
+#include "atomics.h"
+#include "cpu_calibrate.h"
 
 /*
  * The Settle cycle (settle.h). Its holder is the one committer, and is never
  * switched away from while it holds the Scribe (scribe.h); everything below
- * that is not S0 or S6 runs with no TagFS lock held.
+ * that is not S0 or S6 runs with no TagFS lock held. Between two steps the
+ * holder's core is back in its loop, and allocates there as any other work
+ * does: the heap's reserve is the steps' alone.
  */
 Scribe g_settle_scribe = SCRIBE_INIT(SCRIBE_RANK_SETTLE, "the volume's Settle");
 
 typedef enum {
-    SETTLE_FOR_WAITER = 1,   /* an anchor or a demand waits for what it settles */
+    SETTLE_FOR_WAITER = 1,   /* a kernel path asks and waits for what it settles */
     SETTLE_FOR_ROOM,         /* the volume is short while Fallow rests blocks */
     SETTLE_FOR_HALT,         /* the machine is stopping: the last cycle */
+    SETTLE_FOR_CADENCE,      /* Lull permitted, or the window ran out, or a demand */
 } SettleWhy;
+
+typedef enum {
+    SETTLE_STEP_REGISTRY = 0,    /* S1 */
+    SETTLE_STEP_MAP,
+    SETTLE_STEP_TABLE,
+    SETTLE_STEP_INTEGRITY,
+    SETTLE_STEP_USE_CHAIN,       /* the Use Context's new chain, the last of S1 */
+    SETTLE_STEP_MAP_LAY,         /* pages of an integrity map being laid (RT-15) */
+    SETTLE_STEP_FIRST_FLUSH,     /* S2 */
+    SETTLE_STEP_POOL,            /* S3, a block a turn */
+    SETTLE_STEP_LEDGER,          /* S4 */
+    SETTLE_STEP_LAST_FLUSH,      /* S5 */
+    SETTLE_STEP_DONE,            /* S6 */
+} SettleStep;
 
 /* Under the state lock. */
 static uint64_t s_settled_gen;
@@ -47,6 +67,35 @@ static uint32_t s_sealed_block;
 static uint32_t s_sealed_bytes;
 static bool     s_medium_lied;
 
+typedef struct {
+    PoolSnap      pool;
+    SettleMark    mark;         /* what the cycle leaves on the medium, for S4 */
+    uint64_t      target;
+    uint64_t      cycle;
+    uint64_t      data_need;
+    MetaPoolPage* given;        /* the halt's Spares, given back at S0 */
+    const char*   stage;        /* where a refusal came from, for the one line */
+    bool          pool_began;
+} SettleSnap;
+
+/* The cycle in flight: the Scribe holder's alone, but `active` and `core`,
+ * which the cadence of every core reads. */
+typedef struct {
+    volatile uint8_t active;
+    volatile uint8_t core;
+    bool             in_step;
+    bool             door;       /* the cycle holds the volume's door itself */
+    SettleWhy        why;
+    SettleStep       step;
+    error_t          answer;     /* how the last cycle ended */
+    uint64_t         cover;      /* the Scribe tickets it answers */
+    uint64_t         s0_us;
+    uint64_t         busy_us;    /* its own time on the medium, step by step */
+    SettleSnap       snap;
+} SettleRun;
+
+static SettleRun s_run;
+
 uint64_t SettledGen(void)
 {
     return __atomic_load_n(&s_settled_gen, __ATOMIC_ACQUIRE);
@@ -57,8 +106,15 @@ uint64_t SettledCycles(void)
     return __atomic_load_n(&s_cycles, __ATOMIC_ACQUIRE);
 }
 
+uint64_t SettleNowUs(void)
+{
+    return cpu_tsc_to_us(rdtsc());
+}
+
 void SettleMountReset(void)
 {
+    SettleWaitersMountReset();
+    CadenceMountReset();
     s_given = 0;
     __atomic_store_n(&s_settled_gen, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_cycles, 0, __ATOMIC_RELEASE);
@@ -105,18 +161,8 @@ error_t SettleHaltAnswer(uint64_t* unsettled)
 }
 
 // ----------------------------------------------------------------------------
-// One cycle
+// The steps
 // ----------------------------------------------------------------------------
-
-typedef struct {
-    PoolSnap      pool;
-    SettleMark    mark;         /* what the cycle leaves on the medium, for S4 */
-    uint64_t      target;
-    uint64_t      cycle;
-    uint64_t      data_need;
-    MetaPoolPage* given;        /* the halt's Spares, given back at S0 */
-    const char*   stage;        /* where a refusal came from, for the one line */
-} SettleSnap;
 
 /*
  * S0: memory only, under the state lock, nothing asked of the heap.
@@ -128,17 +174,29 @@ typedef struct {
  * (TagRegistryFlushFor), so a registry the cycle's own S1 lengthens is past
  * the seal and names nothing the seal holds. The halt's cycles seal clean:
  * the machine stops after them.
+ *
+ * A cycle somebody asked for and waits on closes the tail onto a Spare, and so
+ * does one that must give Fallow's ground back; one the cadence began closes
+ * it only as far as a waiter is owed.
  */
-static void SettleTake(SettleSnap* snap, SettleWhy why)
+static void SettleTake(SettleSnap* snap, SettleWhy why, uint32_t demands)
 {
+    bool     closes     = why != SETTLE_FOR_CADENCE || (demands & SETTLE_DEMAND_ROOM);
+    uint64_t owed_close = closes ? 0 : SettleWaitersCloseUpto();
+
     TagFSState* fs = tagfs_get_state();
     TagFSLockTake(&fs->lock);
     snap->target    = InkedGen();
     snap->cycle     = s_cycles + 1;
     snap->data_need = InkDataNeed();
-    PoolSnapTake(&snap->pool, true);
-    if (why == SETTLE_FOR_HALT)
+    PoolSnapTake(&snap->pool, closes ? snap->target
+                                     : (owed_close < snap->target ? owed_close : snap->target));
+    if (why == SETTLE_FOR_HALT) {
         snap->given = PoolSparesGiveBack();
+        IntegrityLayDrop();
+    } else {
+        (void)IntegrityLayName();
+    }
     PoolSealTake(&snap->mark);
     TagRegistryLanded(fs->registry, &snap->mark);
     snap->mark.pool_from_block = s_sealed_block;
@@ -151,50 +209,6 @@ static void SettleTake(SettleSnap* snap, SettleWhy why)
     TagFSLockDrop(&fs->lock);
 }
 
-/*
- * S1: what the pool's records stand on, and what the Ledger names. The
- * registry's refusal is said by it and ends nothing: no record wears a tag
- * the medium does not define — an Ink takes none that is not on it
- * (InkNameTagIntern, TagRegistryFlushFor) — so what it could not write is
- * only the tags nobody wears yet. The map's, the table's, the integrity
- * map's and the Use Context chain's refusals end the cycle.
- */
-static error_t SettleStandings(SettleSnap* snap)
-{
-    TagFSState* fs = tagfs_get_state();
-
-    SETTLE_CUT_AT(SETTLE_CUT_POINT_REGISTRY);
-    (void)tag_registry_flush(fs->registry);
-
-    SETTLE_CUT_AT(SETTLE_CUT_POINT_BITMAP);
-    error_t rc = BlockMapFlush();
-    if (rc != OK) {
-        snap->stage = "the block map";
-        return rc;
-    }
-
-    SETTLE_CUT_AT(SETTLE_CUT_POINT_TABLE);
-    if (file_table_flush() != 0) {
-        snap->stage = "the file table";
-        return ERR_TAGFS_METADATA_ERROR;
-    }
-
-    SETTLE_CUT_AT(SETTLE_CUT_POINT_INTEGRITY);
-    FallowZeroDigests(snap->cycle);
-    rc = IntegrityFlush();
-    IntegrityDrainReports();
-    if (rc != OK) {
-        snap->stage = "the integrity map";
-        return rc;
-    }
-
-    SETTLE_CUT_AT(SETTLE_CUT_POINT_USECHAIN);
-    rc = UseMemoryWriteLinks();
-    if (rc != OK)
-        snap->stage = "the Use Context's chain";
-    return rc;
-}
-
 /* S2: the first flush, when the cycle names data, tags or a Use Context chain
  * a kept flush does not yet cover — and a closed block's link names a Spare
  * whose stamp it must cover. A need already kept costs nothing
@@ -204,17 +218,104 @@ static error_t SettleFirstFlush(SettleSnap* snap)
     uint64_t need = snap->data_need;
     uint64_t reg  = tag_registry_written_need(tagfs_get_state()->registry);
     uint64_t use  = UseMemoryLinkNeed();
+    uint64_t lay  = IntegrityLayNeed();
     if (reg > need)
         need = reg;
     if (use > need)
         need = use;
+    if (lay > need)
+        need = lay;
     if (snap->pool.link_need > need)
         need = snap->pool.link_need;
     if (need == 0)
         return OK;
-    error_t rc = VolumeFlushFor(need);
-    if (rc != OK)
+    return VolumeFlushFor(need);
+}
+
+/*
+ * One step, and the step after it. S1's registry refusal is said by it and
+ * ends nothing: no record wears a tag the medium does not define — an Ink
+ * takes none that is not on it (InkNameTagIntern, TagRegistryFlushFor) — so
+ * what it could not write is only the tags nobody wears yet. Every other
+ * refusal ends the cycle, and names its stage.
+ */
+static error_t SettleStepRun(SettleSnap* snap, SettleStep* step)
+{
+    TagFSState* fs = tagfs_get_state();
+    error_t     rc = OK;
+    bool        done;
+
+    switch (*step) {
+    case SETTLE_STEP_REGISTRY:
+        SETTLE_CUT_AT(SETTLE_CUT_POINT_REGISTRY);
+        (void)tag_registry_flush(fs->registry);
+        *step = SETTLE_STEP_MAP;
+        return OK;
+    case SETTLE_STEP_MAP:
+        SETTLE_CUT_AT(SETTLE_CUT_POINT_BITMAP);
+        rc          = BlockMapFlush();
+        snap->stage = "the block map";
+        *step       = SETTLE_STEP_TABLE;
+        break;
+    case SETTLE_STEP_TABLE:
+        SETTLE_CUT_AT(SETTLE_CUT_POINT_TABLE);
+        if (file_table_flush() != 0) {
+            rc          = ERR_TAGFS_METADATA_ERROR;
+            snap->stage = "the file table";
+        }
+        *step = SETTLE_STEP_INTEGRITY;
+        break;
+    case SETTLE_STEP_INTEGRITY:
+        SETTLE_CUT_AT(SETTLE_CUT_POINT_INTEGRITY);
+        FallowZeroDigests(snap->cycle);
+        rc = IntegrityFlush();
+        IntegrityDrainReports();
+        snap->stage = "the integrity map";
+        *step       = SETTLE_STEP_USE_CHAIN;
+        break;
+    case SETTLE_STEP_USE_CHAIN:
+        SETTLE_CUT_AT(SETTLE_CUT_POINT_USECHAIN);
+        rc          = UseMemoryWriteLinks();
+        snap->stage = "the Use Context's chain";
+        *step       = SETTLE_STEP_MAP_LAY;
+        break;
+    case SETTLE_STEP_MAP_LAY:
+        /* For no longer than the last cycle took: the lay's share of the medium
+         * is the cycle's own. Its refusal is its own, and ends nothing here. */
+        IntegrityLayStep(SettleLastDUs());
+        *step = SETTLE_STEP_FIRST_FLUSH;
+        return OK;
+    case SETTLE_STEP_FIRST_FLUSH:
+        rc          = SettleFirstFlush(snap);
         snap->stage = "the flush before the pool";
+        *step       = SETTLE_STEP_POOL;
+        break;
+    case SETTLE_STEP_POOL:
+        if (!snap->pool_began) {
+            snap->pool_began = true;
+            SETTLE_CUT_AT(SETTLE_CUT_POINT_POOL);
+        }
+        rc          = PoolSnapWriteNext(&snap->pool, &done);
+        snap->stage = "the metadata pool";
+        if (rc == OK && done)
+            *step = SETTLE_STEP_LEDGER;
+        break;
+    case SETTLE_STEP_LEDGER:
+        SETTLE_CUT_AT(SETTLE_CUT_POINT_LEDGER);
+        rc          = LedgerImageWrite(&snap->mark);
+        UseMemoryLedgerWritten();
+        snap->stage = "the ledger";
+        *step       = SETTLE_STEP_LAST_FLUSH;
+        break;
+    case SETTLE_STEP_LAST_FLUSH:
+        SETTLE_CUT_AT(SETTLE_CUT_POINT_FLUSH);
+        rc = VolumeFlushFor(VolumeFlushNeed());
+        snap->stage = "the flush after the ledger";
+        *step       = SETTLE_STEP_DONE;
+        break;
+    case SETTLE_STEP_DONE:
+        break;
+    }
     return rc;
 }
 
@@ -235,95 +336,200 @@ static void SettleDone(SettleSnap* snap)
     s_sealed_bytes = snap->mark.pool_to_bytes;
     UseMemorySettled();
     s_given = FallowRipen(closed, snap->cycle, &nodes);
+    bool map_stood = IntegrityLayStands();
     TagFSLockDrop(&fs->lock);
 
     PoolPagesFree(spent);
     FallowNodesFree(nodes);
+    if (map_stood)
+        IntegrityLaySay();
 }
 
-static error_t SettleCycle(SettleWhy why)
-{
-    SettleSnap snap;
-    memset(&snap, 0, sizeof(snap));
+// ----------------------------------------------------------------------------
+// The cycle in flight
+// ----------------------------------------------------------------------------
 
-    /* A Spare for the early close, made before S0 — which takes nothing from
-     * the heap or the medium. A volume with none keeps its tail open, and the
-     * cycle writes it as it stands. */
+/* The first step of a cycle the caller just took the Scribe for: a Spare for
+ * the early close, made before S0 — which takes nothing from the heap or the
+ * medium; a volume with none keeps its tail open, and the cycle writes it as
+ * it stands — and S0 itself. */
+static void SettleRunBegin(SettleWhy why, uint64_t cover, bool door)
+{
+    uint64_t t0 = SettleNowUs();
+
+    memset(&s_run.snap, 0, sizeof(s_run.snap));
+    s_run.why     = why;
+    s_run.door    = door;
+    s_run.cover   = cover;
+    s_run.step    = SETTLE_STEP_REGISTRY;
+    s_run.answer  = OK;
+    s_run.busy_us = 0;
+    s_run.in_step = true;
+    __atomic_store_n(&s_run.core, amp_get_core_index(), __ATOMIC_RELEASE);
+    __atomic_store_n(&s_run.active, 1u, __ATOMIC_RELEASE);
+
     if (why != SETTLE_FOR_HALT)
         (void)PoolSpareRefill(1);
     UseMemoryStake();
+    SettleWaitersRunBegins();
+    SettleTake(&s_run.snap, why, CadenceRunBegins());
 
-    SettleTake(&snap, why);
+    s_run.s0_us   = SettleNowUs();
+    s_run.busy_us = s_run.s0_us - t0;
+    s_run.in_step = false;
 
-    error_t rc = SettleStandings(&snap);
-    if (rc == OK)
-        rc = SettleFirstFlush(&snap);
-    if (rc == OK) {
-        SETTLE_CUT_AT(SETTLE_CUT_POINT_POOL);
-        rc = PoolSnapWrite(&snap.pool);
-        if (rc != OK)
-            snap.stage = "the metadata pool";
-    }
-    if (rc == OK) {
-        SETTLE_CUT_AT(SETTLE_CUT_POINT_LEDGER);
-        rc = LedgerImageWrite(&snap.mark);
-        UseMemoryLedgerWritten();
-        if (rc != OK)
-            snap.stage = "the ledger";
-    }
-    if (rc == OK) {
-        SETTLE_CUT_AT(SETTLE_CUT_POINT_FLUSH);
-        rc = VolumeFlushFor(VolumeFlushNeed());
-        if (rc != OK)
-            snap.stage = "the flush after the ledger";
-    }
-    PoolPagesFree(snap.given);
+    /* The Scribe's MINE opened the heap's reserve for the pass; between the
+     * steps it is closed, each step opens it again, and the last step's is
+     * the one the Give closes. */
+    KHeapReserveClose();
+}
 
+/*
+ * The end of the cycle in flight, settled or refused: the Scribe answers its
+ * askers, the cadence learns what it cost, and its waiters are answered. What
+ * the end needs is read out before the Give: from the Give on, the next holder
+ * may be beginning its own cycle in s_run.
+ */
+static void SettleRunEnd(error_t rc)
+{
+    SettleSnap* snap     = &s_run.snap;
+    SettleWhy   why      = s_run.why;
+    bool        door     = s_run.door;
+    uint64_t    target   = snap->target;
+    bool        unclosed = snap->pool.unclosed;
+    uint64_t    busy_us  = s_run.busy_us;
+    uint64_t    s0_us    = s_run.s0_us;
+
+    PoolPagesFree(snap->given);
+    snap->given = NULL;
     if (rc != OK) {
         if (!s_failing)
             kprintf("[Settle] the cycle that would have settled %llu change(s) was refused at "
                     "%s (error %u) — nothing of it is declared settled, and the next cycle "
                     "writes it all again\n",
-                    (unsigned long long)(snap.target - SettledGen()), snap.stage,
-                    (unsigned)rc);
+                    (unsigned long long)(target - SettledGen()), snap->stage, (unsigned)rc);
         s_failing = true;
         UseMemoryCycleOver(rc);
-        return rc;
+        TagFSWriteRefused();
+    } else {
+        SETTLE_CUT_AT(SETTLE_CUT_POINT_DONE);
+        SettleDone(snap);
+        UseMemoryCycleOver(OK);
+        s_failing = false;
     }
-    SETTLE_CUT_AT(SETTLE_CUT_POINT_DONE);
-    SettleDone(&snap);
-    UseMemoryCycleOver(OK);
-    s_failing = false;
+
+    __atomic_store_n(&s_run.active, 0u, __ATOMIC_RELEASE);
+    ScribeGive(&g_settle_scribe, s_run.cover, rc);
+
+    CadenceRunEnded(rc, busy_us, s0_us, target);
+    SettleWaitersRunEnded(rc, target, unclosed);
 
     /* The reserve a delete stands on, made again first from what came back. */
-    if (why != SETTLE_FOR_HALT)
+    if (rc == OK && why != SETTLE_FOR_HALT)
         (void)PoolSpareRefill(SPARE_RESERVE);
-    return OK;
+    if (door)
+        tagfs_leave();
 }
 
+/* One step of the cycle in flight on this core, with the heap's reserve open
+ * for it alone: true, and *answer, when that was its last. */
+static bool SettleRunStep(error_t* answer)
+{
+    uint64_t t0 = SettleNowUs();
+    KHeapReserveOpen();
+    s_run.in_step = true;
+    error_t rc = SettleStepRun(&s_run.snap, &s_run.step);
+    s_run.in_step = false;
+    s_run.busy_us += SettleNowUs() - t0;
+
+    if (rc != OK || s_run.step == SETTLE_STEP_DONE) {
+        *answer = rc;
+        SettleRunEnd(rc);           /* its Give closes the reserve this step opened */
+        return true;
+    }
+    KHeapReserveClose();
+    return false;
+}
+
+/* The cycle in flight run to its end here, by its holder; its answer. */
+static error_t SettleRunDrive(void)
+{
+    error_t answer = OK;
+    while (!SettleRunStep(&answer))
+        ;
+    return answer;
+}
+
+bool SettleRunInFlight(void)
+{
+    return __atomic_load_n(&s_run.active, __ATOMIC_ACQUIRE) != 0;
+}
+
+bool SettleRunBetweenStepsHere(void)
+{
+    return SettleRunInFlight() && !s_run.in_step &&
+           __atomic_load_n(&s_run.core, __ATOMIC_ACQUIRE) == amp_get_core_index() &&
+           ScribeHeldHere(&g_settle_scribe);
+}
+
+void SettleRunStepHere(void)
+{
+    error_t answer;
+    if (SettleRunBetweenStepsHere())
+        (void)SettleRunStep(&answer);
+}
+
+/* A cycle the cadence begins holds the volume's door from S0 to its end: the
+ * volume it writes is the one mounted until it is done, whoever else leaves. */
+bool SettleRunBeginForCadence(void)
+{
+    uint64_t cover   = 0;
+    error_t  refused = OK;
+    if (!tagfs_enter())
+        return false;
+    uint64_t ticket = ScribeAsk(&g_settle_scribe);
+    if (ScribeTry(&g_settle_scribe, ticket, &cover, &refused) != SCRIBE_MINE) {
+        tagfs_leave();
+        return false;
+    }
+    SettleRunBegin(SETTLE_FOR_CADENCE, cover, true);
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// Askers who wait
+// ----------------------------------------------------------------------------
+
 /* A cycle that began after the ask: this call's own, or one another core was
- * already making. */
+ * already making. A cycle this very core holds between two of its steps is
+ * run to its end here first — waiting for it would be waiting for ourselves —
+ * and then the ask is put again: that cycle took its snapshot before it. */
 static error_t SettleAsked(SettleWhy why)
 {
-    uint64_t   cover  = 0;
-    error_t    rc     = OK;
-    uint64_t   ticket = ScribeAsk(&g_settle_scribe);
-    ScribeTurn turn   = why == SETTLE_FOR_HALT
-                            ? ScribeWaitTakingOver(&g_settle_scribe, ticket, &cover, &rc)
-                            : ScribeWait(&g_settle_scribe, ticket, &cover, &rc);
-    switch (turn) {
-    case SCRIBE_MINE:
-        rc = SettleCycle(why);
-        ScribeGive(&g_settle_scribe, cover, rc);
-        return rc;
-    case SCRIBE_SELF:
-        kprintf("[Settle] a cycle was asked for on a core that holds one beneath the ask — "
-                "waiting for it here would never end\n");
-        return ERR_BUSY;
-    case SCRIBE_REFUSED:
-        return rc;
-    default:
-        return OK;          /* SCRIBE_WRITTEN */
+    uint64_t ticket = ScribeAsk(&g_settle_scribe);
+    for (;;) {
+        uint64_t   cover = 0;
+        error_t    rc    = OK;
+        ScribeTurn turn  = why == SETTLE_FOR_HALT
+                               ? ScribeWaitTakingOver(&g_settle_scribe, ticket, &cover, &rc)
+                               : ScribeWait(&g_settle_scribe, ticket, &cover, &rc);
+        switch (turn) {
+        case SCRIBE_MINE:
+            SettleRunBegin(why, cover, false);
+            return SettleRunDrive();
+        case SCRIBE_SELF:
+            if (SettleRunBetweenStepsHere()) {
+                (void)SettleRunDrive();
+                continue;
+            }
+            kprintf("[Settle] a cycle was asked for on a core that holds one beneath the ask — "
+                    "waiting for it here would never end\n");
+            return ERR_BUSY;
+        case SCRIBE_REFUSED:
+            return rc;
+        default:
+            return OK;          /* SCRIBE_WRITTEN */
+        }
     }
 }
 
@@ -341,9 +547,12 @@ error_t SettleForRoom(void)
     TagFSState* fs = tagfs_get_state();
 
     /* A caller under a TagFS lock or a Scribe, or a baton continuation, may
-     * not wait for a cycle: the room stays on its way. */
-    if (LockRankAnyHeldHere() || ScribeAnyHeldHere() || BatonRunningHere())
+     * not wait for a cycle: the room stays on its way, and the next cycle is
+     * asked for. */
+    if (LockRankAnyHeldHere() || ScribeAnyHeldHere() || BatonRunningHere()) {
+        SettleDemand(SETTLE_DEMAND_ROOM);
         return ERR_WOULD_BLOCK;
+    }
 
     for (uint64_t round = 0; round <= FallowLag(); round++) {
         TagFSLockTake(&fs->lock);

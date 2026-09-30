@@ -113,6 +113,7 @@
 #include "ink.h"         /* TagFSInkPlot — the one way the file changes */
 #include "meta_pool.h"   /* PoolSpareBegin / Adopt / Drop — a Spare stamped through the port */
 #include "scribe.h"      /* VolumeFlushNeed — what the landed blocks wait for */
+#include "cpu_calibrate.h"  /* a block's time on the medium, for the cadence */
 
 /* ---- forward decls ---- */
 static void wjob_pump(void *job_);
@@ -388,6 +389,7 @@ static bool w_dma_fill(WriteJob *j)
 /* W_BLOCK_SUBMIT — the block's write to the port, and a yield to its answer. */
 static bool w_block_submit(WriteJob *j)
 {
+    j->if_submit_tsc = rdtsc();
     error_t err = wjob_submit(j, true, wjob_block_complete);
     if (err != OK)
         return wjob_stop(j, err);
@@ -420,7 +422,8 @@ static bool w_block_done(WriteJob *j)
     tagfs_readahead_invalidate(j->if_disk_block);
     IntegrityUpdate(j->if_disk_block, j->dma_virt);
 
-    j->bytes_done += j->if_chunk;
+    j->plot.data_us += cpu_tsc_to_us(rdtsc() - j->if_submit_tsc);
+    j->bytes_done   += j->if_chunk;
     wjob_to(j, j->bytes_done >= j->window_end ? W_LOG_META : W_LOCATE);
     return true;
 }
@@ -703,6 +706,10 @@ static int wjob_finalize(WriteJob *j, error_t rc)
 
     PlotRelease(&j->plot);
     wjob_say_refused(j, rc);
+    if (rc != OK && !j->medium_left)
+        TagFSWriteRefused();
+    if (j->target)
+        TagFSNoteInker(j->target);
     wjob_publish(j, rc);
     if (j->holds_helm)
         HelmLetGo(j->handle->ofe, &j->helm);

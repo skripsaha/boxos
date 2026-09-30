@@ -2,104 +2,29 @@
 #include "../tagfs.h"
 #include "../box_hash/box_hash.h"
 #include "../scribe/scribe.h"
-#include "../settle/settle.h"
-#include "../ink/fallow.h"
 #include "../mount/ground_census.h"
 #include "../../lib/kernel/klib.h"
 #include "touch.h"
 #include "amp.h"
-#include "kheap.h"        /* MapPage: the reserve serves the map's pages */
 #include "scheduler.h"    /* a page's transfer is a held span */
 #include "system_halt.h"  /* and the halt stops the core only after it */
+#include "integrity_internal.h"
 
-/* Where the map is, and how much of it there is, are two fields of the volume's
- * Ledger (volume_ledger.h). They used to be two four-byte windows into the
- * superblock's reserved[] area, at offsets this file chose and the CoW layer
- * had to be told to stay out of. They are the volume's state, changed under
- * its lock like every other field of the Ledger. */
-#define SB_MAP_BLOCK(fs)  ((fs)->ledger.integrity_map_block)
-#define SB_MAP_COUNT(fs)  ((fs)->ledger.integrity_map_blocks)
-
-#define ENTRIES_PER_BLOCK (TAGFS_BLOCK_SIZE / (uint32_t)sizeof(uint64_t))  // 512
-#define MAP_CACHE_SLOTS   16          // bounded RAM: 16 * 4 KB = 64 KB, ANY disk size
 #define ROT_RING_MAX      64
-#define SLOT_EMPTY        0xFFFFFFFFu
 
-#define MAP_IO_NONE   0u   /* the slot's page is nobody's transfer */
-#define MAP_IO_READ   1u   /* the page is on its way from the medium into g_page[slot] */
-#define MAP_IO_WRITE  2u   /* g_page[slot] is on its way to the medium */
-
-/*
- * One page of the map held in memory: 512 per-block digests. The map is paged
- * on demand: only MAP_CACHE_SLOTS pages live in RAM, so memory is constant
- * regardless of disk size (the old design held total_blocks*8 bytes resident,
- * ~2 GB on a 1 TB disk).
- *
- * ‼ A PAGE GOES TO AND FROM THE MEDIUM WITH THE MAP'S LOCK LET GO.
- *
- * The lock is an interrupts-off spinlock, taken from inside every block read
- * and write. Held across a page's transfer, it kept every core that read or
- * wrote a block spinning with interrupts off for as long as the medium took.
- * So a slot records whose transfer it is out with (`io`, `owner`), and every
- * decision about it is made under the lock while the bytes move without it:
- *
- *   `entries` are the truth in memory, and never a transfer's buffer — a
- *   transfer moves g_page[slot], which only the slot's transfer touches;
- *
- *   a digest recorded while the slot's page is still coming in is written
- *   into `entries` at once and marked in `heard`, so the page that lands is
- *   laid UNDER it rather than over it;
- *
- *   `turn` moves whenever what the slot holds changes, so a transfer that
- *   comes back to a slot emptied under it applies nothing.
- *
- * No block read or write ever waits for a slot: they are called under the
- * locks of whoever reads or writes the block, and a wait there would be a
- * wait with interrupts off. A slot out with a transfer is simply not taken.
- *
- * ‼ A DIGEST THAT COULD NOT BE RECORDED MAKES ITS PAGE UNKNOWN, NOT WRONG.
- *
- * When no slot can be had for a block's page — every one out with a transfer,
- * or pushed aside dirty again and again, or a page that would not go out or
- * come in — the block's new digest is lost, and the medium's page still holds
- * the digest of what the block held before. Checked against that, a healthy
- * block would read as rot. So the page is marked forgotten (g_forgot): until
- * it is laid again every digest in it reads as unknown, and it is laid again
- * as zeros under whatever was recorded since — the next time it is taken into
- * a slot, which the next flush does for every page still forgotten — so the
- * medium loses the stale digests too.
- *
- * AND A TRANSFER IS A HELD SPAN. A page on its way to or from the medium
- * belongs to its slot until the transfer comes back, and a core stopped by an
- * orderly halt in between would fence that slot for good — its digests never
- * written. So the core holds its scheduler across the transfer
- * (SchedulerHoldHere): the halt lets it finish, and it stops only once the
- * map's lock is let go (HaltStopIfOwedHere).
- */
-typedef struct {
-    uint32_t          map_idx;                        /* the page it holds; SLOT_EMPTY if none */
-    uint32_t          lru;
-    uint32_t          turn;                           /* +1 whenever what it holds changes */
-    volatile uint8_t  io;                             /* MAP_IO_*: out with a transfer */
-    volatile uint32_t owner;                          /* 0, or the transfer's core index + 1 */
-    bool              dirty;                          /* entries the medium does not have */
-    uint64_t          heard[ENTRIES_PER_BLOCK / 64];  /* recorded while MAP_IO_READ travels */
-    uint64_t          entries[ENTRIES_PER_BLOCK];
-} MapSlot;
-
-static volatile bool  g_initialized   = false;
-static TagFSLock      g_lock          = TAGFS_LOCK_INIT("integrity", LOCK_RANK_LEAF);
-static uint32_t       g_map_entries   = 0;       // == total_blocks (bounds check)
-static uint32_t       g_map_first_block = 0;
-static uint32_t       g_map_count     = 0;       // map blocks on disk
-static MapSlot        g_cache[MAP_CACHE_SLOTS];  // ~65 KB static, fixed
-static uint64_t       g_page[MAP_CACHE_SLOTS][ENTRIES_PER_BLOCK]
+volatile bool         g_map_initialized  = false;
+TagFSLock             g_map_lock         = TAGFS_LOCK_INIT("integrity", LOCK_RANK_LEAF);
+uint32_t              g_map_entries      = 0;       // == total_blocks (bounds check)
+uint32_t              g_map_first_block  = 0;
+uint32_t              g_map_count        = 0;       // map blocks on disk
+MapSlot               g_map_cache[MAP_CACHE_SLOTS]; // ~65 KB static, fixed
+uint64_t              g_map_page[MAP_CACHE_SLOTS][ENTRIES_PER_BLOCK]
                           __attribute__((aligned(TAGFS_BLOCK_SIZE)));
-static uint32_t       g_map_epoch     = 0;       // +1 each IntegrityShutdown
+uint32_t              g_map_epoch        = 0;       // +1 each IntegrityShutdown
+uint64_t             *g_map_forgot       = NULL;    // a bit per map page: its digests are unknown
+uint32_t              g_map_forgot_count = 0;       // bits set in g_map_forgot
 static uint32_t       g_lru_tick      = 0;
 static bool           g_no_room_said  = false;
-static uint64_t      *g_forgot        = NULL;    // a bit per map page: its digests are unknown
-static uint32_t       g_forgot_count  = 0;       // bits set in g_forgot
 static BoxHashContext g_ctx;
 static uint32_t       g_errors        = 0;
 static uint32_t       g_rot_ring[ROT_RING_MAX];
@@ -111,22 +36,11 @@ static inline bool in_map_region(uint32_t block) {
            block >= g_map_first_block && block < g_map_first_block + g_map_count;
 }
 
-static inline uint32_t MapCoreHere(void)
-{
-    return (uint32_t)amp_get_core_index() + 1u;
-}
-
-/* Under g_lock. */
-static inline bool MapForgotten(uint32_t idx)
-{
-    return g_forgot && (g_forgot[idx / 64] & (1ull << (idx % 64)));
-}
-
 static inline void MapForget(uint32_t idx)
 {
-    if (g_forgot && !MapForgotten(idx)) {
-        g_forgot[idx / 64] |= 1ull << (idx % 64);
-        g_forgot_count++;
+    if (g_map_forgot && !MapForgotten(idx)) {
+        g_map_forgot[idx / 64] |= 1ull << (idx % 64);
+        g_map_forgot_count++;
     }
 }
 
@@ -140,15 +54,15 @@ static __attribute__((noinline)) void MapLayForgottenLocked(MapSlot *m)
             m->entries[off] = 0;
     }
     m->dirty = true;
-    g_forgot[m->map_idx / 64] &= ~(1ull << (m->map_idx % 64));
-    g_forgot_count--;
+    g_map_forgot[m->map_idx / 64] &= ~(1ull << (m->map_idx % 64));
+    g_map_forgot_count--;
 }
 
 static MapSlot *MapFindLocked(uint32_t idx)
 {
     for (uint32_t s = 0; s < MAP_CACHE_SLOTS; s++) {
-        if (g_cache[s].map_idx == idx)
-            return &g_cache[s];
+        if (g_map_cache[s].map_idx == idx)
+            return &g_map_cache[s];
     }
     return NULL;
 }
@@ -165,7 +79,7 @@ static MapSlot *MapTakeLocked(uint32_t idx, MapSlot **writeback)
 
     *writeback = NULL;
     for (uint32_t s = 0; s < MAP_CACHE_SLOTS; s++) {
-        MapSlot *m = &g_cache[s];
+        MapSlot *m = &g_map_cache[s];
         if (m->io != MAP_IO_NONE)
             continue;
         if (m->map_idx == SLOT_EMPTY) {
@@ -194,7 +108,7 @@ static MapSlot *MapTakeLocked(uint32_t idx, MapSlot **writeback)
     return clean;
 }
 
-static void MapTransferDone(MapSlot *m)
+void MapTransferDone(MapSlot *m)
 {
     __atomic_store_n(&m->io, (uint8_t)MAP_IO_NONE, __ATOMIC_RELEASE);
     __atomic_store_n(&m->owner, 0u, __ATOMIC_RELEASE);
@@ -204,29 +118,34 @@ static void MapTransferDone(MapSlot *m)
  * Digests recorded while the page travels land in the entries and mark them
  * dirty again, for the next page-out; a refused write leaves the page owed.
  * The map's own blocks record no digest (in_map_region), so the write never
- * comes back in here. Entered and left with g_lock held, taken again in the
+ * comes back in here. Entered and left with g_map_lock held, taken again in the
  * name of `site` — the entry this runs for, which is what a LockRank line
  * about the map's lock names. */
 static error_t MapPageOut(MapSlot *m, const char *site)
 {
-    uint32_t s    = (uint32_t)(m - g_cache);
-    uint32_t turn = m->turn;
-    uint32_t at   = g_map_first_block + m->map_idx;
+    uint32_t s     = (uint32_t)(m - g_map_cache);
+    uint32_t idx   = m->map_idx;
+    uint32_t turn  = m->turn;
+    uint32_t at    = g_map_first_block + idx;
+    uint32_t carry = MapLayCarried(idx);   /* a map being laid holds this page too */
 
-    memcpy(g_page[s], m->entries, sizeof(m->entries));
+    memcpy(g_map_page[s], m->entries, sizeof(m->entries));
     m->dirty = false;
     __atomic_store_n(&m->owner, MapCoreHere(), __ATOMIC_RELAXED);
     __atomic_store_n(&m->io, (uint8_t)MAP_IO_WRITE, __ATOMIC_RELEASE);
     SchedulerHoldHere();
-    TagFSLockDropAt(&g_lock, site);
+    TagFSLockDropAt(&g_map_lock, site);
 
-    error_t wrote = tagfs_write_block(at, g_page[s]);
+    error_t wrote = tagfs_write_block(at, g_map_page[s]);
+    error_t also  = (wrote == OK && carry) ? tagfs_write_block(carry, g_map_page[s]) : OK;
 
-    TagFSLockTakeAt(&g_lock, site);
+    TagFSLockTakeAt(&g_map_lock, site);
     SchedulerLetGoHere();
     MapTransferDone(m);
     if (wrote != OK && m->turn == turn)
         m->dirty = true;
+    if (also != OK)
+        MapLayCarryAgain(idx);
     return wrote;
 }
 
@@ -234,19 +153,19 @@ static error_t MapPageOut(MapSlot *m, const char *site)
  * and laid under whatever was recorded while it travelled. Answers whether the
  * slot now holds the page. A refused read empties the slot, and the digests
  * recorded meanwhile go with it; the caller that recorded one forgets the
- * page. Entered and left with g_lock held, as MapPageOut is. */
-static bool MapPageIn(MapSlot *m, const char *site)
+ * page. Entered and left with g_map_lock held, as MapPageOut is. */
+bool MapPageIn(MapSlot *m, const char *site)
 {
-    uint32_t s    = (uint32_t)(m - g_cache);
+    uint32_t s    = (uint32_t)(m - g_map_cache);
     uint32_t turn = m->turn;
     uint32_t at   = g_map_first_block + m->map_idx;
 
     SchedulerHoldHere();
-    TagFSLockDropAt(&g_lock, site);
+    TagFSLockDropAt(&g_map_lock, site);
 
-    error_t got = tagfs_read_block(at, g_page[s]);
+    error_t got = tagfs_read_block(at, g_map_page[s]);
 
-    TagFSLockTakeAt(&g_lock, site);
+    TagFSLockTakeAt(&g_map_lock, site);
     SchedulerLetGoHere();
     if (m->turn != turn) {
         MapTransferDone(m);         /* emptied under the read: nothing here is ours */
@@ -261,7 +180,7 @@ static bool MapPageIn(MapSlot *m, const char *site)
     }
     for (uint32_t off = 0; off < ENTRIES_PER_BLOCK; off++) {
         if (!(m->heard[off / 64] & (1ull << (off % 64))))
-            m->entries[off] = g_page[s][off];
+            m->entries[off] = g_map_page[s][off];
     }
     MapTransferDone(m);
     return true;
@@ -274,8 +193,8 @@ static bool MapPageIn(MapSlot *m, const char *site)
  * again, a bounded number of times: pages other cores keep dirtying cannot
  * hold a block's read or write here. NULL when the map was shut down meanwhile,
  * when a page would not go out, or when no slot could be had (*no_room).
- * Entered and left with g_lock held, as MapPageOut is. */
-static MapSlot *MapSlotFor(uint32_t idx, uint32_t epoch, const char *site, bool *mine,
+ * Entered and left with g_map_lock held, as MapPageOut is. */
+MapSlot *MapSlotFor(uint32_t idx, uint32_t epoch, const char *site, bool *mine,
                            bool *no_room)
 {
     *mine    = false;
@@ -318,7 +237,7 @@ static void MapSayNoRoom(bool said_before)
 }
 
 /* A transfer's core was stopped by a halt: the transfer never comes back. */
-static bool MapOwnerStopped(const MapSlot *m)
+bool MapOwnerStopped(const MapSlot *m)
 {
     uint32_t owner = __atomic_load_n(&m->owner, __ATOMIC_ACQUIRE);
     return owner != 0 &&
@@ -327,223 +246,10 @@ static bool MapOwnerStopped(const MapSlot *m)
 
 /* The wait for a slot another core has out ends when its transfer does — or
  * when that core has been stopped, which the waiter then finds under the lock. */
-static bool MapSlotSettled(const void *ctx)
+bool MapSlotSettled(const void *ctx)
 {
     const MapSlot *m = (const MapSlot *)ctx;
     return __atomic_load_n(&m->io, __ATOMIC_ACQUIRE) == MAP_IO_NONE || MapOwnerStopped(m);
-}
-
-/*
- * ‼ THE LEDGER NAMES A RUN THROUGH ITS ONE WRITER, THE SETTLE CYCLE.
- *
- * The fields are set under the volume's state lock, so the Ledger's image has
- * both or neither, and a cycle is asked for and waited on: OK once a cycle
- * that began after the change settled — the Ledger naming the run is on the
- * medium and a flush after it was kept. A refusal puts the fields back, for
- * the next cycle to carry; it does not say no copy on the medium names the
- * run — the cycle may have landed its Ledger and lost only its flush — so the
- * caller lets the run rest (MapRunRests) instead of giving it back.
- */
-static error_t MapNameInLedger(TagFSState *fs, uint32_t block, uint32_t count,
-                               uint32_t was_block, uint32_t was_count)
-{
-    TagFSLockTake(&fs->lock);
-    SB_MAP_BLOCK(fs) = block;
-    SB_MAP_COUNT(fs) = count;
-    TagFSLockDrop(&fs->lock);
-
-    error_t named = TagFSSettle();
-    if (named == OK)
-        return OK;
-
-    TagFSLockTake(&fs->lock);
-    SB_MAP_BLOCK(fs) = was_block;
-    SB_MAP_COUNT(fs) = was_count;
-    TagFSLockDrop(&fs->lock);
-    return named;
-}
-
-/*
- * ‼ A RUN A LEDGER FIELD NAMED GOES BACK ONLY ONCE NO COPY NAMES IT (RT-05).
- *
- * The Ledger has two copies and a cycle writes the older one, so the run the
- * field named before a change stays named by one copy until the cycle after —
- * and a mount that finds the newest copy torn stands on that one. The run
- * rests in Fallow, freed by the next cycle's Ledger, and goes back once both
- * copies moved past it. Without memory for the node it stays taken, said: a
- * block the medium calls taken costs a block, never a file.
- */
-static void MapRunRests(uint32_t start, uint32_t count)
-{
-    uint32_t    pieces = (count + 0xFFFFu - 1u) / 0xFFFFu;
-    FileExtent *runs   = kmalloc(sizeof(FileExtent) * pieces);
-    FallowNode *node   = NULL;
-    for (uint32_t i = 0; runs && i < pieces; i++) {
-        uint32_t left = count - i * 0xFFFFu;
-        runs[i].start_block = start + i * 0xFFFFu;
-        runs[i].block_count = (uint16_t)(left < 0xFFFFu ? left : 0xFFFFu);
-    }
-    if (runs)
-        node = FallowNodeMake(runs, pieces, FALLOW_BY_LEDGER, 0);
-    kfree(runs);
-    if (!node) {
-        kprintf("[Integrity] no memory to let the %u-block run at %u rest until no copy "
-                "of the Ledger names it — it stays taken\n", count, start);
-        return;
-    }
-    TagFSLockTake(&tagfs_get_state()->lock);
-    FallowAdd(node, 0);
-    TagFSLockDrop(&tagfs_get_state()->lock);
-}
-
-/* One page the map is laid or carried through: one of the kernel's own paths,
- * so the heap serves it from its reserve first (kheap.h). */
-static uint8_t *MapPage(void)
-{
-    KHeapReserveOpen();
-    uint8_t *page = (uint8_t *)kmalloc(TAGFS_BLOCK_SIZE);
-    KHeapReserveClose();
-    return page;
-}
-
-/*
- * A fresh map: a run of blocks, zeroed on the medium, made durable, and only
- * then named by the Ledger. Named first, a cut that kept the Ledger and lost
- * the zeros would leave a map made of whatever those blocks held before —
- * every digest in it a false report of rot. Answers the run in *out_first.
- */
-static error_t MapLayFresh(TagFSState *fs, uint32_t count, uint32_t *out_first)
-{
-    uint32_t start = 0;
-    uint8_t *page  = MapPage();   /* the zeros, off the stack */
-
-    if (!page) {
-        kprintf("[Integrity] no memory for the one page a fresh map is zeroed "
-                "with, so nothing on this volume is checked for bit rot this "
-                "boot\n");
-        return ERR_NO_MEMORY;
-    }
-    if (tagfs_alloc_blocks(count, &start) != 0 || start == 0) {
-        /* Said aloud: a volume mounted without its integrity map is a
-         * volume whose bit rot nobody will ever be told about, and that
-         * is a property of this machine's disk rather than of this
-         * build. It was a debug_printf, which compiles to nothing in a
-         * shipped build — so the one boot where it mattered was silent. */
-        kprintf("[Integrity] this volume has no room for a %u-block map, "
-                "so nothing on it is checked for bit rot this boot\n", count);
-        kfree(page);
-        return ERR_NO_MEMORY;
-    }
-
-    memset(page, 0, TAGFS_BLOCK_SIZE);
-    error_t  wrote = OK;
-    uint32_t at    = 0;
-    while (at < count && (wrote = tagfs_write_block(start + at, page)) == OK)
-        at++;
-    kfree(page);
-    if (wrote != OK) {
-        tagfs_free_blocks(start, count);
-        kprintf("[Integrity] block %u of a fresh %u-block map would not take its "
-                "zeros (error %u), so the room is given back and nothing on this "
-                "volume is checked for bit rot this boot\n",
-                at, count, (unsigned)wrote);
-        return wrote;
-    }
-    error_t flushed = VolumeFlushFor(VolumeFlushNeed());
-    if (flushed != OK) {
-        tagfs_free_blocks(start, count);
-        kprintf("[Integrity] the zeros of a fresh %u-block map are not proven on "
-                "the medium (error %u), so the room is given back and nothing on "
-                "this volume is checked for bit rot this boot\n",
-                count, (unsigned)flushed);
-        return flushed;
-    }
-
-    /* ‼ AND THE LEDGER'S ANSWER IS HEARD. The Ledger is the only thing that
-     * will ever name the run; a cycle refused leaves it resting until no copy
-     * can name it, and the volume goes without a map this boot. */
-    error_t named = MapNameInLedger(fs, start, count, 0, 0);
-    if (named != OK) {
-        MapRunRests(start, count);
-        kprintf("[Integrity] the ledger would not take a fresh %u-block map at %u "
-                "(error %u) — the run rests until no copy of the ledger can name it, "
-                "and nothing on this volume is checked for bit rot this boot\n",
-                count, start, (unsigned)named);
-        return named;
-    }
-    debug_printf("[Integrity] fresh map: %u blocks at %u (%u-slot cache)\n",
-                 count, start, MAP_CACHE_SLOTS);
-    *out_first = start;
-    return OK;
-}
-
-/*
- * ‼ THE MAP ON THE MEDIUM IS AS BIG AS IT WAS MADE, NOT AS BIG AS THE
- * VOLUME IS NOW.
- *
- * The count wanted is derived from data_blocks — the size of the volume
- * TODAY. The region was allocated once and the Ledger records how many blocks
- * that was. The day a volume grows into the ground behind it (tagfs.c:
- * volume_take_more_ground) those two numbers disagree, and believing the
- * derived one is not a wrong number on a screen: a map page is written at
- * the map's first block + its index, so every page past the region would land
- * on blocks that belong to FILES.
- *
- * The answer is to lay down a region that covers the volume and CARRY THE OLD
- * ENTRIES INTO THE FRONT OF IT. Every block that already had a checksum keeps
- * it — the map is indexed by block number and the data run never moves, so
- * entry N still describes block N — and the blocks the volume has just gained
- * get room of their own.
- *
- * ‼ AND THREE THINGS IN ORDER, EACH MADE DURABLE BEFORE THE NEXT.
- *
- * The new run is written and flushed before the Ledger names it, so a Ledger
- * that names it never points at a run that is not there. The old run is not
- * given back when the Ledger naming the new one has settled, but rests until
- * the Ledger's other copy has moved past it too (MapRunRests): given back
- * sooner, a file could be handed those blocks while a copy still calls them
- * the map, and a mount standing on that copy would read the file as
- * checksums, grow again, and free the file's blocks. A refusal anywhere
- * leaves the map where the medium says it is.
- *
- * Answers whether the map moved; *first then says where to.
- */
-static bool MapGrow(TagFSState *fs, uint32_t *first, uint32_t stored, uint32_t count)
-{
-    uint32_t start = 0;
-    uint8_t *page  = MapPage();   /* one page of the copy, off the stack */
-    bool     laid  = page && tagfs_alloc_blocks(count, &start) == 0 && start != 0;
-
-    for (uint32_t i = 0; laid && i < count; i++) {
-        if (i < stored)
-            laid = tagfs_read_block(*first + i, page) == OK;
-        else
-            memset(page, 0, TAGFS_BLOCK_SIZE);
-        if (laid)
-            laid = tagfs_write_block(start + i, page) == OK;
-    }
-    kfree(page);
-    if (laid)
-        laid = VolumeFlushFor(VolumeFlushNeed()) == OK;
-    if (!laid) {
-        if (start)
-            tagfs_free_blocks(start, count);
-        return false;
-    }
-
-    if (MapNameInLedger(fs, start, count, *first, stored) != OK) {
-        MapRunRests(start, count);
-        kprintf("[Integrity] a bigger map was laid down and the ledger would not take "
-                "it — the map stays where it was, and the %u-block run at %u rests "
-                "until no copy of the ledger can name it\n", count, start);
-        return false;
-    }
-    MapRunRests(*first, stored);
-    kprintf("[Integrity] the volume grew, so its map did too: %u block(s) at %u, "
-            "carrying the %u it already had — every block of %u is covered\n",
-            count, start, stored, fs->layout.data_blocks);
-    *first = start;
-    return true;
 }
 
 error_t IntegrityInit(void) {
@@ -557,42 +263,42 @@ error_t IntegrityInit(void) {
     /* Every slot empty, and its turn moved on. `io` and `owner` are left as
      * they are: only a slot IntegrityShutdown left fenced can still be out, and
      * its page buffer is that transfer's until the transfer ends. */
-    TagFSLockTake(&g_lock);
+    TagFSLockTake(&g_map_lock);
     for (uint32_t s = 0; s < MAP_CACHE_SLOTS; s++) {
-        g_cache[s].map_idx = SLOT_EMPTY;
-        g_cache[s].dirty   = false;
-        g_cache[s].turn++;
-        memset(g_cache[s].heard, 0, sizeof(g_cache[s].heard));
+        g_map_cache[s].map_idx = SLOT_EMPTY;
+        g_map_cache[s].dirty   = false;
+        g_map_cache[s].turn++;
+        memset(g_map_cache[s].heard, 0, sizeof(g_map_cache[s].heard));
     }
     g_lru_tick  = 0;
     g_rot_count = 0;
-    TagFSLockDrop(&g_lock);
+    TagFSLockDrop(&g_map_lock);
 
     uint32_t entries = fs->layout.data_blocks;
     uint32_t count   = (entries + ENTRIES_PER_BLOCK - 1) / ENTRIES_PER_BLOCK;
     BoxHashInit(&g_ctx, fs->uuid, 16);
 
-    uint32_t first = SB_MAP_BLOCK(fs);
+    if (fs->registry) {
+        TagSpelling integrity = TagSpellingOfKey("integrity");
+        if (TagRegistryIntern(fs->registry, &integrity, &g_integrity_tag) != OK)
+            g_integrity_tag = TAGFS_INVALID_TAG_ID;
+    }
+
+    /* A volume with no map has one laid by the cycles, and is checked once it
+     * stands; one that grew past its map is checked by the map it has, over
+     * what that covers, while a bigger one is laid. */
+    uint32_t first  = SB_MAP_BLOCK(fs);
+    uint32_t stored = SB_MAP_COUNT(fs);
     if (first == 0) {
-        // First mount: lazily allocate a contiguous map region (first-mount only;
-        // later mounts just reuse it). Bounded RAM regardless of how big it is.
-        error_t laid = MapLayFresh(fs, count, &first);
-        if (laid != OK)
-            return laid;
-    } else {
-        uint32_t stored = SB_MAP_COUNT(fs);
-        if (stored != 0 && stored < count && !MapGrow(fs, &first, stored, count)) {
-            count   = stored;
-            entries = stored * ENTRIES_PER_BLOCK;
-            kprintf("[Integrity] the map covers %u block(s) and the volume "
-                    "now has %u — a bigger one could not be laid down, so "
-                    "verify-on-read covers the first %u and says nothing "
-                    "about the rest\n",
-                    entries, fs->layout.data_blocks, entries);
-        }
-        debug_printf("[Integrity] map at %u (%u blocks, %u-slot paged cache)\n",
-                     first, count, MAP_CACHE_SLOTS);
-        // No full load — pages fault in on demand.
+        error_t began = MapLayBegin(count, entries, 0, 0);
+        return began == OK ? ERR_WOULD_BLOCK : began;
+    }
+    uint32_t want         = count;
+    uint32_t want_entries = entries;
+    bool     grows        = stored != 0 && stored < count;
+    if (grows) {
+        count   = stored;
+        entries = stored * ENTRIES_PER_BLOCK;
     }
 
     /* A bit for every page of the map, off the heap: the map is as big as
@@ -605,21 +311,20 @@ error_t IntegrityInit(void) {
     }
     memset(forgot, 0, ((size_t)count + 63u) / 64u * sizeof(uint64_t));
 
-    TagFSLockTake(&g_lock);
+    TagFSLockTake(&g_map_lock);
     g_map_first_block = first;
     g_map_count       = count;
     g_map_entries     = entries;
-    g_forgot          = forgot;
-    TagFSLockDrop(&g_lock);
-
-    if (fs->registry) {
-        TagSpelling integrity = TagSpellingOfKey("integrity");
-        if (TagRegistryIntern(fs->registry, &integrity, &g_integrity_tag) != OK)
-            g_integrity_tag = TAGFS_INVALID_TAG_ID;
-    }
+    g_map_forgot          = forgot;
+    TagFSLockDrop(&g_map_lock);
 
     /* The hooks were no-ops until now, so Init's own I/O recorded nothing. */
-    __atomic_store_n(&g_initialized, true, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_map_initialized, true, __ATOMIC_RELEASE);
+
+    if (grows && MapLayBegin(want, want_entries, first, stored) != OK)
+        kprintf("[Integrity] the map covers %u block(s) and the volume now has %u — a bigger "
+                "one could not be begun, so verify-on-read covers the first %u and says "
+                "nothing about the rest\n", entries, fs->layout.data_blocks, entries);
     return OK;
 }
 
@@ -633,7 +338,7 @@ void IntegrityUpdate(uint32_t block, const void *data) {
     bool     no_room = false;
     bool     said    = false;
 
-    TagFSLockTake(&g_lock);
+    TagFSLockTake(&g_map_lock);
     if (IntegrityIsInitialized() && block < g_map_entries && !in_map_region(block)) {
         uint32_t epoch = g_map_epoch;
         MapSlot *m     = MapSlotFor(idx, epoch, __func__, &mine, &no_room);
@@ -654,7 +359,7 @@ void IntegrityUpdate(uint32_t block, const void *data) {
         if (no_room)
             g_no_room_said = true;
     }
-    TagFSLockDrop(&g_lock);
+    TagFSLockDrop(&g_map_lock);
     if (no_room)
         MapSayNoRoom(said);
     HaltStopIfOwedHere("a page of the integrity map it carried");
@@ -678,7 +383,7 @@ void IntegrityForget(uint32_t start, uint32_t count) {
         if (stop > end)
             stop = end;
 
-        TagFSLockTake(&g_lock);
+        TagFSLockTake(&g_map_lock);
         if (IntegrityIsInitialized() && b < g_map_entries) {
             uint32_t epoch = g_map_epoch;
             MapSlot *m     = MapSlotFor(idx, epoch, __func__, &mine, &no_room);
@@ -698,7 +403,7 @@ void IntegrityForget(uint32_t start, uint32_t count) {
             if (no_room)
                 g_no_room_said = true;
         }
-        TagFSLockDrop(&g_lock);
+        TagFSLockDrop(&g_map_lock);
         if (no_room)
             MapSayNoRoom(said);
         b = stop;
@@ -716,7 +421,7 @@ bool IntegrityVerify(uint32_t block, const void *data) {
     bool     no_room = false;
     bool     said    = false;
 
-    TagFSLockTake(&g_lock);
+    TagFSLockTake(&g_map_lock);
     if (IntegrityIsInitialized() && block < g_map_entries && !in_map_region(block) &&
         !MapForgotten(idx)) {
         MapSlot *m = MapSlotFor(idx, g_map_epoch, __func__, &mine, &no_room);
@@ -732,7 +437,7 @@ bool IntegrityVerify(uint32_t block, const void *data) {
         if (no_room)
             g_no_room_said = true;
     }
-    TagFSLockDrop(&g_lock);
+    TagFSLockDrop(&g_map_lock);
     if (no_room)
         MapSayNoRoom(said);
     HaltStopIfOwedHere("a page of the integrity map it carried");
@@ -744,10 +449,10 @@ bool IntegrityVerify(uint32_t block, const void *data) {
         return true;
 
     __atomic_fetch_add(&g_errors, 1, __ATOMIC_RELAXED);
-    TagFSLockTake(&g_lock);
+    TagFSLockTake(&g_map_lock);
     if (g_rot_count < ROT_RING_MAX)
         g_rot_ring[g_rot_count++] = block;    // queued for deferred Touch report
-    TagFSLockDrop(&g_lock);
+    TagFSLockDrop(&g_map_lock);
     debug_printf("[Integrity] BIT-ROT on block %u: stored=%016lx read=%016lx\n",
                  block, (unsigned long)stored, (unsigned long)h);
     return false;
@@ -756,13 +461,13 @@ bool IntegrityVerify(uint32_t block, const void *data) {
 /* Every page still forgotten taken into a slot — laid as zeros there — so
  * the flush that follows puts the zeros on the medium over the stale digests.
  * Answers how many could not be had a slot this time: they stay forgotten,
- * reading as unknown, for the next flush. Entered and left with g_lock held,
+ * reading as unknown, for the next flush. Entered and left with g_map_lock held,
  * as MapPageOut is. */
 static uint32_t MapLayForgotten(uint32_t epoch)
 {
     uint32_t left = 0;
 
-    for (uint32_t w = 0; g_forgot_count > left && g_map_epoch == epoch &&
+    for (uint32_t w = 0; g_map_forgot_count > left && g_map_epoch == epoch &&
                          w < (g_map_count + 63u) / 64u; w++) {
         for (uint32_t b = 0; b < 64 && g_map_epoch == epoch; b++) {
             uint32_t idx = w * 64u + b;
@@ -804,11 +509,11 @@ error_t IntegrityFlush(void) {
     uint32_t beneath   = 0;
     uint32_t stopped   = 0, stopped_page = 0;
 
-    TagFSLockTake(&g_lock);
+    TagFSLockTake(&g_map_lock);
     uint32_t epoch  = g_map_epoch;
-    uint32_t unlaid = g_forgot_count ? MapLayForgotten(epoch) : 0;
+    uint32_t unlaid = g_map_forgot_count ? MapLayForgotten(epoch) : 0;
     for (uint32_t s = 0; s < MAP_CACHE_SLOTS && g_map_epoch == epoch; ) {
-        MapSlot *m = &g_cache[s];
+        MapSlot *m = &g_map_cache[s];
         if (m->map_idx == SLOT_EMPTY) {
             s++;
             continue;
@@ -825,9 +530,9 @@ error_t IntegrityFlush(void) {
                 s++;
                 continue;
             }
-            TagFSLockDrop(&g_lock);
+            TagFSLockDrop(&g_map_lock);
             ScribeTurn waited = ScribeWaitFor(&m->owner, MapSlotSettled, m);
-            TagFSLockTake(&g_lock);
+            TagFSLockTake(&g_map_lock);
             if (waited == SCRIBE_SELF) {
                 beneath++;
                 s++;
@@ -843,7 +548,7 @@ error_t IntegrityFlush(void) {
         }
         s++;
     }
-    TagFSLockDrop(&g_lock);
+    TagFSLockDrop(&g_map_lock);
 
     if (beneath || stopped)
         answer = ERR_WOULD_BLOCK;
@@ -874,12 +579,12 @@ void IntegrityDrainReports(void) {
         return;
     uint32_t local[ROT_RING_MAX];
     uint32_t n;
-    TagFSLockTake(&g_lock);
+    TagFSLockTake(&g_map_lock);
     n = g_rot_count;
     if (n > ROT_RING_MAX) n = ROT_RING_MAX;
     memcpy(local, g_rot_ring, n * sizeof(uint32_t));
     g_rot_count = 0;
-    TagFSLockDrop(&g_lock);
+    TagFSLockDrop(&g_map_lock);
 
     for (uint32_t i = 0; i < n; i++) {
         struct __attribute__((packed)) {
@@ -901,6 +606,7 @@ void IntegrityDrainReports(void) {
  * until then.
  */
 void IntegrityShutdown(void) {
+    MapLayLetGo();
     if (!IntegrityIsInitialized())
         return;
     IntegrityFlush();
@@ -909,29 +615,29 @@ void IntegrityShutdown(void) {
     uint32_t beneath = 0;
     uint32_t stopped = 0;
 
-    TagFSLockTake(&g_lock);
+    TagFSLockTake(&g_map_lock);
     if (!IntegrityIsInitialized()) {
-        TagFSLockDrop(&g_lock);
+        TagFSLockDrop(&g_map_lock);
         return;
     }
-    __atomic_store_n(&g_initialized, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_map_initialized, false, __ATOMIC_RELEASE);
     g_map_epoch++;
     for (uint32_t s = 0; s < MAP_CACHE_SLOTS; s++) {
-        g_cache[s].map_idx = SLOT_EMPTY;
-        g_cache[s].dirty   = false;
-        g_cache[s].turn++;
-        memset(g_cache[s].heard, 0, sizeof(g_cache[s].heard));
+        g_map_cache[s].map_idx = SLOT_EMPTY;
+        g_map_cache[s].dirty   = false;
+        g_map_cache[s].turn++;
+        memset(g_map_cache[s].heard, 0, sizeof(g_map_cache[s].heard));
     }
     g_map_first_block = 0;
     g_map_count = 0;
     g_map_entries = 0;
-    uint64_t *forgot   = g_forgot;
-    uint32_t  unlaid   = g_forgot_count;
-    g_forgot       = NULL;
-    g_forgot_count = 0;
+    uint64_t *forgot   = g_map_forgot;
+    uint32_t  unlaid   = g_map_forgot_count;
+    g_map_forgot       = NULL;
+    g_map_forgot_count = 0;
 
     for (uint32_t s = 0; s < MAP_CACHE_SLOTS; ) {
-        MapSlot *m = &g_cache[s];
+        MapSlot *m = &g_map_cache[s];
         if (m->io == MAP_IO_NONE) {
             s++;
             continue;
@@ -941,15 +647,15 @@ void IntegrityShutdown(void) {
             s++;
             continue;
         }
-        TagFSLockDrop(&g_lock);
+        TagFSLockDrop(&g_map_lock);
         ScribeTurn waited = ScribeWaitFor(&m->owner, MapSlotSettled, m);
-        TagFSLockTake(&g_lock);
+        TagFSLockTake(&g_map_lock);
         if (waited == SCRIBE_SELF) {
             beneath++;
             s++;
         }
     }
-    TagFSLockDrop(&g_lock);
+    TagFSLockDrop(&g_map_lock);
     if (forgot)
         kfree(forgot);
 
@@ -964,7 +670,7 @@ void IntegrityShutdown(void) {
                 unlaid);
 }
 
-bool IntegrityIsInitialized(void) { return __atomic_load_n(&g_initialized, __ATOMIC_ACQUIRE); }
+bool IntegrityIsInitialized(void) { return __atomic_load_n(&g_map_initialized, __ATOMIC_ACQUIRE); }
 uint32_t IntegrityErrorCount(void) { return g_errors; }
 
 void IntegrityClaimGround(void) {

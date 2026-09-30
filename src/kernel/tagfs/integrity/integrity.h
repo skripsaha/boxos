@@ -20,8 +20,34 @@
 // and any block whose digest is unknown are skipped.
 // ============================================================================
 
-error_t  IntegrityInit(void);        // load the on-disk map, or lazily create it
+// The on-disk map taken up: OK. A volume with no map has one laid by the
+// Settle cycles (below) and answers ERR_WOULD_BLOCK, checking nothing until it
+// stands; one that grew past its map is checked by it while a bigger one is
+// laid. The refusal otherwise.
+error_t  IntegrityInit(void);
 void     IntegrityShutdown(void);
+
+// A map laid a page at a time by the Settle cycles (RT-15), each owned by the
+// cycle's holder with no TagFS lock held unless said:
+//   Owed    a map is being laid — a debt the cadence cycles for;
+//   Step    pages laid for up to `budget_us`, at least one;
+//   Need    the flush need the pages laid so far hold (the cycle's first flush);
+//   Name    S0, under the state lock: every page carried and flushed — the
+//           Ledger's fields name the run; true when named;
+//   Stands  S6 of a settled cycle, under the state lock: the named run is the
+//           map from here, the old one rests; true when it stood;
+//   Say     after the lock, when it stood;
+//   Drop    the machine's last cycle, under the state lock: an unfinished run
+//           given back, since no one will finish it;
+//   Blocks  the blocks a run being laid holds, for the stand's count.
+bool     IntegrityLayOwed(void);
+void     IntegrityLayStep(uint64_t budget_us);
+uint64_t IntegrityLayNeed(void);
+bool     IntegrityLayName(void);
+bool     IntegrityLayStands(void);
+void     IntegrityLaySay(void);
+void     IntegrityLayDrop(void);
+uint32_t IntegrityLayBlocks(void);
 
 // Record a block's digest after writing it (sync + async write paths).
 // Never waits: it is called under the locks of whoever wrote the block. A

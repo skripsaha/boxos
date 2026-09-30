@@ -217,22 +217,36 @@ MetaPoolPage* PoolSparesGiveBack(void);
 typedef struct {
     MetaPoolPage* first;       /* the oldest closed block this cycle writes, or NULL */
     MetaPoolPage* upto;        /* ... and the newest */
+    MetaPoolPage* next;        /* the next closed block S3 writes; NULL once past `upto` */
     uint32_t      tail_block;
     bool          tail_write;
+    bool          tail_written;
+    bool          unclosed;    /* a close was owed and no Spare was there to close onto */
     uint64_t      tail_edits;  /* the tail's edits at S0: unchanged at S6, the medium has it */
     uint64_t      link_need;   /* the stamps the written links name need a kept flush before them */
     uint64_t      gen_max;     /* the newest record in the closed blocks it writes */
 } PoolSnap;
 
-/* S0, under the state lock. `close_tail` closes a tail holding records onto a
- * Spare first — the anchor's promise: what a cycle with a waiter settles lies
- * in a block never written again. */
-void     PoolSnapTake(PoolSnap* snap, bool close_tail);
+/* S0, under the state lock. Every record up to Ink `close_upto` is to lie in a
+ * closed block — the anchor's promise: what a cycle with a waiter settles lies
+ * in a block never written again — so a tail holding one is closed onto a
+ * Spare first; 0 closes nothing. `unclosed` says a close was owed and the pool
+ * had no Spare to close onto. */
+void     PoolSnapTake(PoolSnap* snap, uint64_t close_upto);
 
-/* S3, with no TagFS lock held: the closed blocks in chain order, then the
- * tail. OK, or the first refusal — said. Every write is the same bytes a
- * retry writes again. */
-error_t  PoolSnapWrite(const PoolSnap* snap);
+/* S3, with no TagFS lock held, one command at a time: the next closed block in
+ * chain order, then the tail. OK with *done once nothing of the snapshot is
+ * left to write, or the refusal — said. Every write is the same bytes a retry
+ * writes again. */
+error_t  PoolSnapWriteNext(PoolSnap* snap, bool* done);
+
+/* The newest Ink whose record lies in a closed block a cycle settled — what a
+ * waiter owed a closed block is answered by. */
+uint64_t PoolClosedSettledGen(void);
+
+/* Whether a closed block waits for a cycle — the tail filled and turned. A
+ * read with no lock, for the cadence. */
+bool     PoolClosedWaiting(void);
 
 /* S6, under the state lock: the closed blocks the cycle wrote are settled and
  * leave memory — their buffers come back in *spent, for PoolPagesFree after

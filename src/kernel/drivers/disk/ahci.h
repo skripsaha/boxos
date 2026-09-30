@@ -137,6 +137,7 @@
 #define AHCI_PTFD_STS_BSY   (1U << 7)
 #define AHCI_PTFD_STS_DRQ   (1U << 3)
 #define AHCI_PTFD_STS_ERR   (1U << 0)
+#define AHCI_PTFD_ERR_ABRT  (1U << 2)   // in the error byte: the command was aborted (ATA8-ACS)
 
 // PxIS/PxIE bits
 #define AHCI_PIS_CPDS       (1U << 31)
@@ -683,6 +684,13 @@ typedef struct {
      * and no reader anywhere in the tree. */
     volatile uint8_t standing;   /* AhciPortStanding */
 
+    /* THE DRIVE REFUSES WRITES. Every attempt of a write stood over ended in a
+     * task-file error whose error register said ABRT (ATA8-ACS: the command
+     * was aborted, not failed on the medium) — what a drive locked by its
+     * security feature, or held read-only by its own firmware, answers to every
+     * write. Latched for as long as the port stands; ahci_port_init clears it. */
+    volatile uint8_t write_refused;
+
     /* Never-drop recovery node (Ф26 M4): a fault posts the port's recovery to
      * the drain core via BatonPass with no allocation. The `recovering` 0->1
      * CAS coalesces a storm of error IRQs into one post, and
@@ -830,6 +838,9 @@ error_t ahci_build_io(uint8_t port_num, uint8_t slot, uint64_t lba,
 bool ahci_port_is_ncq(uint8_t port_num);
 
 ahci_port_t* ahci_get_port_state(uint8_t port_num);
+
+/* Whether the drive on the port refuses writes (ahci_port_t.write_refused). */
+bool ahci_port_refuses_writes(uint8_t port_num);
 volatile ahci_port_regs_t* ahci_get_port_regs_pub(uint8_t port_num);
 
 bool ahci_is_initialized(void);

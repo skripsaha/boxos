@@ -200,6 +200,7 @@ static uint32_t msd_patience_ms(uint32_t bytes)
 #define SENSE_NOT_READY       0x02
 #define SENSE_ILLEGAL_REQUEST 0x05
 #define SENSE_UNIT_ATTENTION  0x06
+#define SENSE_DATA_PROTECT    0x07
 
 /* And the additional codes that turn "not ready" into an answer. */
 #define ASC_NOT_READY         0x04    /* ASCQ says which kind */
@@ -257,6 +258,12 @@ typedef struct XhciMsdUnit {
     uint8_t  number;
     uint8_t  lun;
     bool     ready;
+
+    /* The device refused a write with DATA PROTECT: the medium takes no write
+     * for as long as it sits here — a switch on the stick, a card's lock, a
+     * flash worn out to read-only. Never asked with MODE SENSE, which such
+     * devices answer as often wrongly as not; told by the refusal itself. */
+    bool     write_protected;
 
     /*
      * Two counts, because the device and the filesystem measure in different
@@ -1801,6 +1808,16 @@ uint32_t xhci_msd_unit_physical_bytes(uint8_t unit)
     return bytes;
 }
 
+bool xhci_msd_unit_write_protected(uint8_t unit)
+{
+    if (!g_units_lock_ready) return false;
+    spin_lock(&g_units_lock);
+    XhciMsdUnit* u = msd_find_locked(unit);
+    bool locked = u && __atomic_load_n(&u->write_protected, __ATOMIC_ACQUIRE);
+    spin_unlock(&g_units_lock);
+    return locked;
+}
+
 /* The name belongs to the unit, so it is only worth anything while the unit is
  * seated. Every caller copies it straight away, which is the only safe way to
  * use it and the only way it is used. */
@@ -1851,6 +1868,13 @@ static int msd_run_blocks(XhciMsdUnit* u, uint64_t block, uint32_t nblocks,
     if (rc != 0 || moved != bytes) {
         uint8_t key = 0, asc = 0, ascq = 0;
         msd_request_sense(u, &key, &asc, &ascq);
+        if (write && key == SENSE_DATA_PROTECT) {
+            if (!__atomic_exchange_n(&u->write_protected, true, __ATOMIC_ACQ_REL))
+                kprintf("[USB disk %u] refuses writes as protected (DATA PROTECT, code "
+                        "0x%02x/0x%02x) — the medium takes no write while it sits here\n",
+                        u->number, asc, ascq);
+            return -1;
+        }
         kprintf("[USB disk %u] %s of %u block(s) at %llu failed "
                 "(sense key 0x%x, code 0x%02x/0x%02x)\n",
                 u->number, write ? "write" : "read", nblocks,

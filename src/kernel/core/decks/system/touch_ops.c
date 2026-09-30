@@ -153,8 +153,8 @@ static int SysTouchSend(const ManifestOp *op, Crate *crates,
      * crate_read copies a straddling payload across every backing frame, and
      * the BOXOS_TOUCH_PAYLOAD_MAX (96) cap closes a DoS: src->size is
      * attacker-controlled up to UINT32_MAX and every consumer reads at most 96
-     * bytes (TouchPublishPair / TouchQueueEnqueue truncate), so an unbounded
-     * size must never drive the downstream kmalloc/copy. */
+     * bytes (TouchPublishPair truncates, and a delayed node carries what this
+     * snapshot holds), so an unbounded size must never drive a kmalloc/copy. */
     uint8_t     payload_buf[BOXOS_TOUCH_PAYLOAD_MAX];
     const void *payload = NULL;
     uint32_t    plen    = 0;
@@ -201,12 +201,25 @@ static int SysTouchSend(const ManifestOp *op, Crate *crates,
         if (delay_ticks == 0) delay_ticks = 1;
         uint64_t fire_at = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED)
                            + delay_ticks;
-        if (full_id != TOUCH_TAG_INVALID)
-            TouchQueueEnqueue(full_id, payload, plen, fire_at,
-                              ctx->proc->pid, TOUCH_FLAG_USER);
-        if (bare_id != TOUCH_TAG_INVALID && bare_id != full_id)
-            TouchQueueEnqueue(bare_id, payload, plen, fire_at,
-                              ctx->proc->pid, TOUCH_FLAG_USER);
+        /* Both nodes made before either is armed: a send the heap has no room
+         * for is refused whole, never half heard. */
+        bool            two  = bare_id != TOUCH_TAG_INVALID && bare_id != full_id;
+        TouchQueueNode *full = full_id != TOUCH_TAG_INVALID
+                                   ? TouchQueuePublishNode(full_id, payload, plen,
+                                                           ctx->proc->pid, TOUCH_FLAG_USER)
+                                   : NULL;
+        TouchQueueNode *bare = two ? TouchQueuePublishNode(bare_id, payload, plen,
+                                                           ctx->proc->pid, TOUCH_FLAG_USER)
+                                   : NULL;
+        if ((full_id != TOUCH_TAG_INVALID && !full) || (two && !bare)) {
+            kfree(full);
+            kfree(bare);
+            return ERR_NO_MEMORY;
+        }
+        if (full)
+            TouchQueueArm(full, fire_at);
+        if (bare)
+            TouchQueueArm(bare, fire_at);
     }
     return OK;
 }
@@ -215,7 +228,7 @@ static int SysTouchSend(const ManifestOp *op, Crate *crates,
  *   params: [u16 tag_id][u16 _pad][u32 timeout_ms] (8 bytes)
  *
  * Ensures a REST claim on tag_id, applies LEVEL synthetic-touch sync,
- * arms a TouchQueueWakeAfter timeout, parks the caller (PROC_WAITING).
+ * arms a TouchQueueArmWake timeout, parks the caller (PROC_WAITING).
  * Result lands in ResultRing via TouchRestDeliver.
  */
 static int SysTouchAwait(const ManifestOp *op, Crate *crates,
@@ -280,7 +293,7 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
          * owed no Result on expiry — only the in-IRQ reschedule (PROC_WORKING)
          * applies, and no deadline baton is passed. The await's own ring path
          * then reports count=0 on the timeout. */
-        TouchQueueWakeAfter(ctx->proc->pid, fire_at, 0, park_seq);
+        TouchQueueArmWake(ctx->proc, fire_at, 0, park_seq);
     }
 
     process_set_state(ctx->proc, PROC_WAITING);

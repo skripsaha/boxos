@@ -49,9 +49,8 @@
 #include "cow.h"
 #include "amp.h"   /* g_amp.total_cores — an async read needs a K-Core to pump */
 #include "boardroom.h"
-#include "scribe.h"   /* VolumeFlushFor — an anchor's flush, unless one already covers it */
 #include "plot.h"     /* PlotFind, PlotSource — the write's bytes where they are */
-#include "settle.h"   /* TagFSSettle — what an anchor waits for */
+#include "settle_ops.h"  /* anchor, obj.write.settled — the waits for the Settle */
 
 /*
  * Can the medium under the volume answer a read without somebody standing over
@@ -1190,122 +1189,6 @@ static int ObjSnapRefused(const ManifestOp *op, Crate *crates, uint16_t crate_co
 }
 
 /* -------------------------------------------------------------------------
- * STORAGE_OBJ_ANCHOR — durability primitive.
- *
- *   params: [u32 file_id]   (0 = anchor everything; non-zero = the file
- *                             whose tags get the Touch payload's fid)
- *
- * Blocking semantics for the caller — returns when a Settle cycle that
- * began after the call has put every change inked before it on the medium
- * and a flush after it was kept (settle.h).
- *
- * Then publishes a Touch "anchor" event on every tag of file_id so any
- * REST/REACT subscriber observing that tag wakes up: *this file is now
- * durable*. No POSIX equivalent — fsync() returns silently; anchor()
- * fans out a tag-targeted notification, so OBSERVERS get to react too.
- * Combined with Touch's REST mode, an app can fire-and-forget many
- * fwrites and have a single observer await N "anchor" events when its
- * full transaction is durable.
- *
- *   Form A (blocking):  anchor(fid)             — POSIX-shaped sync.
- *   Form B (Touch obs): touch_claim("anchor"…); — async durability fan-out.
- * ------------------------------------------------------------------------- */
-static int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                      const OpContext *ctx)
-{
-    (void)crates; (void)crate_count; (void)ctx;
-    uint32_t file_id = (op->param_size >= 4) ? param_u32(op, 0) : 0;
-
-    /* A Settle cycle, asked for and waited on, so the caller's
-     * fwrite-then-anchor is durable without a shutdown. Its answer is
-     * checked for the same reason the flush below is: a cycle refused
-     * settles nothing, and an anchor published over nothing settled would
-     * be exactly the lie the rest of this function exists to stop. */
-    error_t settled = TagFSSettle();
-    if (settled != OK) {
-        kprintf("[Storage] anchor of file %u: the volume's changes were not "
-                "settled (error %u) — no anchor event is published\n",
-                file_id, (unsigned)settled);
-        return (int)settled;
-    }
-
-    /*
-     * ‼ THIS IS THE OPERATION AN APPLICATION USES TO SAY "MAKE MY WRITE
-     * DURABLE", AND IT USED TO THROW THE ANSWER AWAY.
-     *
-     * The flush was called, its result dropped on the floor, the "anchor"
-     * event published on every tag of the file, and OK returned — so a
-     * program that wrote, anchored, and was told yes had the kernel's word
-     * that its bytes would survive the power going away, while they sat in a
-     * cache the drive can lose. Every observer woken by the Touch event was
-     * told the same thing. There is no worse lie this kernel can tell.
-     *
-     * A flush that did not happen buys no right to the word "anchored": on
-     * any refusal the event is NOT published — an observer that never hears
-     * is an observer that has not been misled — and the refusal goes back to
-     * the caller as the medium's own word.
-     *
-     * Two flushes of the same disk meeting is not a refusal: the second waits
-     * for the port in its roadstead (core/boardroom/roadstead.h) and is issued
-     * when the first has given the port back, so no answer the application
-     * cannot act on reaches it. The need is read after the cycle came back,
-     * so a flush the cycle issued already covers it and costs nothing more.
-     *
-     * anchor() therefore keeps exactly the two answers it always had —
-     * durable, or a named refusal of the medium — and neither of them is a
-     * lie any more.
-     */
-    error_t flushed = VolumeFlushFor(VolumeFlushNeed());
-    if (flushed != OK) {
-        kprintf("[Storage] anchor of file %u: the medium did not make it "
-                "durable (error %u) — no anchor event is published and the "
-                "caller is told, because a file that was not made durable "
-                "must not be announced as one\n",
-                file_id, (unsigned)flushed);
-        return (int)flushed;
-    }
-
-    /* Touch fan-out. For file_id == 0 we publish on a special "anchor"
-     * tag (registered well-known); for a specific fid, publish on every
-     * tag attached to that file so any observer keyed by file's tag
-     * wakes up. */
-    struct __attribute__((packed)) {
-        uint32_t file_id;
-        uint8_t  op;          /* 2 = ANCHOR */
-        uint8_t  _pad[3];
-        uint64_t now_us;
-    } ev = { file_id, 2, {0,0,0}, 0 };
-
-    uint32_t pid = (ctx && ctx->proc) ? ctx->proc->pid : 0;
-
-    if (file_id != 0) {
-        TagFSMetadata wmeta;
-        memset(&wmeta, 0, sizeof(wmeta));
-        if (tagfs_get_metadata(file_id, &wmeta) == OK) {
-            for (uint32_t ti = 0; ti < wmeta.tag_count; ti++) {
-                TouchPublishId(wmeta.tag_ids[ti], &ev, sizeof(ev),
-                               pid, TOUCH_FLAG_TAGFS);
-            }
-            tagfs_metadata_free(&wmeta);
-        }
-    }
-    /* Always also publish on the bare "anchor" tag — generic listeners.
-     *
-     * The one kernel publisher that deliberately does NOT name into the
-     * Logbook. "anchor" is a durability event in the SHARED vocabulary,
-     * keyed the same way as the per-file tag ids published just above, and
-     * a process subscribes to it by name (box::tagfs::on_anchor) — usually
-     * before this code has ever run. Naming it in the kernel's own book
-     * would put publisher and subscriber on two different ids depending on
-     * who spoke first. The reader door gives both sides the same id. */
-    TouchTag anchor_full, anchor_bare;
-    (void)TouchTagResolve("anchor", sizeof("anchor") - 1, &anchor_full, &anchor_bare);
-    TouchPublishPair(anchor_full, anchor_bare, &ev, sizeof(ev),
-                     pid, TOUCH_FLAG_TAGFS);
-    return OK;
-}
-
-/* -------------------------------------------------------------------------
  * Registration
  * ------------------------------------------------------------------------- */
 
@@ -1335,6 +1218,7 @@ error_t StorageDeckRegister(void)
         { STORAGE_SNAP_LIST,    ObjSnapRefused,  OP_AUTH_APP, "storage.snap.list"  },
         { STORAGE_SNAP_INFO,    ObjSnapRefused,  OP_AUTH_APP, "storage.snap.info"  },
         { STORAGE_OBJ_ANCHOR,   ObjAnchor,       OP_AUTH_APP, "storage.anchor"     },
+        { STORAGE_OBJ_WRITE_SETTLED, ObjWriteSettled, OP_AUTH_APP, "storage.write.settled" },
     };
 
     for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {

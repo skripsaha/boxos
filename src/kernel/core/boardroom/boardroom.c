@@ -763,6 +763,9 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
         /* Refused before the driver is called, so a refused write never
          * reaches the medium — the runs before it do. A write nobody stands
          * over asks the same plan at its own door (BoardroomWriteAsync). */
+        if (BlockFailProtects(seat)) {
+            return BoardMediumRefusal(s->kind, BLOCK_FAIL_WRITE);
+        }
         if (BlockFailStrikes(seat, BLOCK_FAIL_WRITE, lba, run)) {
             return BoardMediumRefusal(s->kind, BLOCK_FAIL_WRITE);
         }
@@ -785,6 +788,32 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
         count -= run;
     }
     return 0;
+}
+
+bool BoardroomSeatRefusesWrites(uint8_t seat)
+{
+#ifdef CONFIG_VOLUME_TESTS
+    if (BlockFailProtects(seat)) {
+        return true;
+    }
+#endif
+    BoardSeat* s = seat_taken(seat);
+    if (!s) {
+        return false;
+    }
+    switch (s->kind) {
+    case BOARD_USB:  return xhci_msd_unit_write_protected(s->index);
+    case BOARD_AHCI: return ahci_port_refuses_writes(s->index);
+    /* The legacy channels say nothing a write-protected drive would say
+     * differently from any other refusal. */
+    default:         return false;
+    }
+}
+
+bool BoardroomSeatAnnouncesReady(uint8_t seat)
+{
+    BoardSeat* s = seat_taken(seat);
+    return s && (s->kind == BOARD_AHCI || s->kind == BOARD_USB);
 }
 
 /* Whether the seat answers a command nobody stands over, read or write. */
@@ -833,9 +862,12 @@ static error_t seat_async(uint8_t seat, uint64_t lba, uint32_t count, void* dma_
      * callbacks in use only keep the status and pass it on, and a real
      * completion can already arrive before the submit returns, so answering
      * here is a road the callers already take. Nothing is issued, and the
-     * buffer is not touched: a refused write never reaches the medium. */
+     * buffer is not touched: a refused write never reaches the medium. A
+     * protected medium refuses every write here as it does at the attended
+     * door. */
     if ((s->kind == BOARD_AHCI || s->kind == BOARD_USB) &&
-        BlockFailStrikes(seat, write ? BLOCK_FAIL_WRITE : BLOCK_FAIL_READ, lba, count)) {
+        ((write && BlockFailProtects(seat)) ||
+         BlockFailStrikes(seat, write ? BLOCK_FAIL_WRITE : BLOCK_FAIL_READ, lba, count))) {
         cb(s->index, 0, ERR_IO, ctx);
         return OK;
     }

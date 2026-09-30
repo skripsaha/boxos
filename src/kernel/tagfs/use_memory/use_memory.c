@@ -146,7 +146,7 @@ bool UseChainRest(const UseChain *chain, const char *what)
  * compared outside the lock, and a demand made while they were is seen by
  * the second look.
  */
-error_t tagfs_remember_use_context(UseText *said, uint64_t saying, bool *remembered)
+UseSaid UseMemorySay(UseText *said, uint64_t saying, uint64_t *ticket)
 {
     UseMemoryState *g    = &g_use_memory;
     UseText        *keep = UseTextHold(said);
@@ -181,21 +181,36 @@ error_t tagfs_remember_use_context(UseText *said, uint64_t saying, bool *remembe
     UseTextDrop(gone);
     UseTextDrop(keep);
 
-    if (later || same) {
-        if (remembered) *remembered = !later;
+    if (ticket) *ticket = mine;
+    if (later)
+        return USE_SAID_SUPERSEDED;
+    return same ? USE_SAID_LANDED : USE_SAID_OWED;
+}
+
+bool UseMemoryKept(uint64_t ticket, const UseText *said)
+{
+    UseMemoryState *g = &g_use_memory;
+    TagFSLockTake(UseMemoryLock());
+    bool     answered = g->answered >= ticket && g->landed && UseMemoryChained();
+    UseText *now      = UseTextHold(g->memory);
+    TagFSLockDrop(UseMemoryLock());
+    bool kept = answered && UseTextSame(now, said);
+    UseTextDrop(now);
+    return kept;
+}
+
+error_t tagfs_remember_use_context(UseText *said, uint64_t saying, bool *remembered)
+{
+    uint64_t ticket = 0;
+    UseSaid  told   = UseMemorySay(said, saying, &ticket);
+    if (told != USE_SAID_OWED) {
+        if (remembered) *remembered = told == USE_SAID_LANDED;
         return OK;
     }
 
     /* A demand on the one writer: a cycle that began after it carries it. */
     error_t rc = TagFSSettle();
-
-    TagFSLockTake(UseMemoryLock());
-    bool     answered = g->answered >= mine && g->landed && UseMemoryChained();
-    UseText *now      = UseTextHold(g->memory);
-    TagFSLockDrop(UseMemoryLock());
-    bool kept = rc == OK && answered && UseTextSame(now, said);
-    UseTextDrop(now);
-    if (remembered) *remembered = kept;
+    if (remembered) *remembered = rc == OK && UseMemoryKept(ticket, said);
     return rc;
 }
 

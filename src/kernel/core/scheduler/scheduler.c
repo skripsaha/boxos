@@ -1050,8 +1050,15 @@ void schedule(void *frame_ptr)
         spin_unlock(&s->runqueue.lock);
     }
 
-    // Select next
-    process_t *next = scheduler_select_next();
+    /* RT-10. On one core the volume's Settle runs only in the idle context,
+     * and a program that never parks would never let it: while a cycle is
+     * owed — its window ran out, or somebody demanded it — idle is owed the
+     * next quantum, taken from whoever ran this one. A cycle it begins holds
+     * the core to its end (scribe.h), and then the program has the core back:
+     * the debt costs the program a turn, never the machine its promise. */
+    process_t *next = (current && !process_is_idle(current) && TagFSIdleOwed())
+                          ? idle_process_get()
+                          : scheduler_select_next();
 
     // Work stealing
     if (process_is_idle(next) && amp_is_appcore() && g_amp.multicore_active)

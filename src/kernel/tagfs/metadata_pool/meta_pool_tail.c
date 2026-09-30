@@ -29,6 +29,7 @@ static MetaPoolPage* s_closed_tail;
 static MetaPoolPage* s_spares;
 static uint32_t      s_spare_count;
 static uint64_t      s_closed_settled_gen;
+static uint64_t      s_closed_gen_max;       /* the newest record ever closed this mount */
 
 /* The tail as the Settle's holder writes it: copied at S0 under the state
  * lock, written at S3 with no lock. The holder's alone — one cycle at a time. */
@@ -136,6 +137,8 @@ bool PoolTailTurn(bool dig_reserve)
     page->link    = g_pool_tail_link;
     page->image   = g_pool_tail;
     page->gen_max = g_pool_tail_gen;
+    if (g_pool_tail_gen > s_closed_gen_max)
+        s_closed_gen_max = g_pool_tail_gen;
     /* page->need stays: the stamp the closed block's link names */
     if (s_closed_tail)
         __atomic_store_n(&s_closed_tail->next, page, __ATOMIC_RELEASE);
@@ -300,18 +303,21 @@ void PoolPagesFree(MetaPoolPage* list)
 // The Settle cycle
 // ---------------------------------------------------------------------------
 
-void PoolSnapTake(PoolSnap* snap, bool close_tail)
+void PoolSnapTake(PoolSnap* snap, uint64_t close_upto)
 {
     memset(snap, 0, sizeof(*snap));
     if (!g_pool_tail)
         return;
 
-    bool unsettled = g_pool_tail_changed || g_pool_tail_frozen < g_pool_tail->used_bytes;
-    if (close_tail && g_pool_tail->used_bytes > 0 && unsettled)
-        (void)PoolTailTurn(true);   /* no Spare: the tail stays open, and is written */
+    /* Every record the tail holds is newer than every closed block's: a record
+     * owed a closed block is in the tail exactly when it is newer than the
+     * newest record ever closed. */
+    if (close_upto > s_closed_gen_max && g_pool_tail->used_bytes > 0 && !PoolTailTurn(true))
+        snap->unclosed = true;      /* no Spare: the tail stays open, and is written */
 
     snap->first = s_closed_head;
     snap->upto  = s_closed_tail;
+    snap->next  = s_closed_head;
     for (MetaPoolPage* p = s_closed_head; p; p = p->next) {
         if (p->need > snap->link_need)
             snap->link_need = p->need;
@@ -331,9 +337,11 @@ void PoolSnapTake(PoolSnap* snap, bool close_tail)
     g_pool_tail_frozen = g_pool_tail->used_bytes;
 }
 
-error_t PoolSnapWrite(const PoolSnap* snap)
+error_t PoolSnapWriteNext(PoolSnap* snap, bool* done)
 {
-    for (MetaPoolPage* p = snap->first; p; p = __atomic_load_n(&p->next, __ATOMIC_ACQUIRE)) {
+    *done = false;
+    MetaPoolPage* p = snap->next;
+    if (p) {
         error_t wrote = tagfs_write_block(p->block, p->image);
         if (wrote != OK) {
             kprintf("[MetaPool] closed block %u of this volume's metadata would not be "
@@ -341,10 +349,10 @@ error_t PoolSnapWrite(const PoolSnap* snap)
                     "again\n", p->block, (unsigned)wrote);
             return wrote;
         }
-        if (p == snap->upto)
-            break;
+        snap->next = p == snap->upto ? NULL : __atomic_load_n(&p->next, __ATOMIC_ACQUIRE);
+        return OK;
     }
-    if (snap->tail_write) {
+    if (snap->tail_write && !snap->tail_written) {
         error_t wrote = tagfs_write_block(snap->tail_block, &s_settle_tail);
         if (wrote != OK) {
             kprintf("[MetaPool] block %u, the tail of this volume's metadata, would not be "
@@ -352,8 +360,21 @@ error_t PoolSnapWrite(const PoolSnap* snap)
                     snap->tail_block, (unsigned)wrote);
             return wrote;
         }
+        snap->tail_written = true;
+        return OK;
     }
+    *done = true;
     return OK;
+}
+
+uint64_t PoolClosedSettledGen(void)
+{
+    return __atomic_load_n(&s_closed_settled_gen, __ATOMIC_ACQUIRE);
+}
+
+bool PoolClosedWaiting(void)
+{
+    return __atomic_load_n(&s_closed_head, __ATOMIC_ACQUIRE) != NULL;
 }
 
 uint64_t PoolSnapSettled(const PoolSnap* snap, MetaPoolPage** spent)
@@ -367,7 +388,7 @@ uint64_t PoolSnapSettled(const PoolSnap* snap, MetaPoolPage** spent)
         snap->upto->next = NULL;
     }
     if (snap->gen_max > s_closed_settled_gen)
-        s_closed_settled_gen = snap->gen_max;
+        __atomic_store_n(&s_closed_settled_gen, snap->gen_max, __ATOMIC_RELEASE);
     if (snap->tail_write && s_tail_edits == snap->tail_edits &&
         g_pool_tail_block == snap->tail_block)
         g_pool_tail_changed = false;
@@ -406,6 +427,7 @@ void PoolTailShutdown(void)
     s_spares             = NULL;
     s_spare_count        = 0;
     s_closed_settled_gen = 0;
+    s_closed_gen_max     = 0;
     s_tail_edits         = 0;
     g_pool_tail          = NULL;
     g_pool_tail_block    = 0;

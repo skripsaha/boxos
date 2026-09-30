@@ -1,0 +1,371 @@
+#include "settle_internal.h"
+#include "../scribe/scribe.h"
+#include "../ink/ink.h"
+#include "../metadata_pool/meta_pool.h"
+#include "../integrity/integrity.h"
+#include "amp.h"
+#include "baton.h"
+#include "kcore.h"
+#include "process.h"
+#include "scheduler.h"      /* g_global_tick, SCHEDULER_DEFAULT_TICK_HZ */
+#include "touch_queue.h"
+
+/*
+ * The cadence (settle.h): when the committer begins a cycle. What it reads is
+ * advisory — a race costs a cycle a moment early or late, never a change: the
+ * cycle's own snapshot, taken under the state lock, decides what is settled.
+ */
+
+/* k — the one place it is derived from the medium's share. */
+#define SETTLE_LULL_FACTOR  (100u / SETTLE_SHARE - 1u)
+
+static volatile uint64_t s_d_us;           /* the last settled cycle's own time on the medium */
+static volatile uint64_t s_last_end_us;    /* when the last cycle ended */
+static volatile uint64_t s_owed_since_us;  /* when the oldest change no cycle settled was inked */
+static volatile uint64_t s_eager_gen;      /* the newest Ink that starts a cycle by Lull */
+static volatile uint32_t s_demand;         /* SettleDemandKind */
+static volatile uint64_t s_lull_fire;      /* the tick the Lull's node was last armed for */
+static volatile int32_t  s_held;           /* the test runner's holds */
+static bool              s_binds_said;     /* the window binds the Lull: said once an episode */
+
+static void SettleKnocked(void* ctx);
+
+/* The one knock every Ink, every demand and the Lull's own node give. */
+static Knock g_quill_knock = { .baton = { .next = NULL, .run = SettleKnocked, .ctx = NULL,
+                                          .one_way = 0 },
+                               .raised = 0 };
+static TouchQueueNode s_lull_node;
+
+uint8_t SettleCommitterCore(void)
+{
+    if (g_amp.total_cores <= 1 || !g_amp.multicore_active || g_amp.k_count <= 1)
+        return g_amp.bsp_index;
+    for (uint8_t c = 0; c < g_amp.total_cores; c++) {
+        const CoreDescriptor* core = &g_amp.cores[c];
+        if (core->is_kcore && c != g_amp.bsp_index && amp_core_online(core))
+            return c;
+    }
+    return g_amp.bsp_index;
+}
+
+/* The knock is run by the drain core: the committer's own loop reaches its
+ * service point after the batons, and another core's is woken to go round. */
+static void SettleKnocked(void* ctx)
+{
+    (void)ctx;
+    KnockOpen(&g_quill_knock);
+    kcore_wake(SettleCommitterCore());
+}
+
+uint64_t SettleLullUs(void)
+{
+    uint64_t tick = 1000000ull / SCHEDULER_DEFAULT_TICK_HZ;
+    uint64_t lull = SETTLE_LULL_FACTOR * __atomic_load_n(&s_d_us, __ATOMIC_RELAXED);
+    if (lull < tick)
+        lull = tick;
+    return lull < SETTLE_WINDOW_US ? lull : SETTLE_WINDOW_US;
+}
+
+uint64_t SettleLastDUs(void)
+{
+    return __atomic_load_n(&s_d_us, __ATOMIC_RELAXED);
+}
+
+void CadenceMountReset(void)
+{
+    __atomic_store_n(&s_owed_since_us, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&s_eager_gen, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_demand, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_last_end_us, 0, __ATOMIC_RELEASE);
+}
+
+void SettleInked(uint64_t gen, bool lazy)
+{
+    uint64_t none = 0;
+    (void)__atomic_compare_exchange_n(&s_owed_since_us, &none, SettleNowUs(), false,
+                                      __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    if (!lazy) {
+        uint64_t seen = __atomic_load_n(&s_eager_gen, __ATOMIC_RELAXED);
+        while (seen < gen &&
+               !__atomic_compare_exchange_n(&s_eager_gen, &seen, gen, false,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+            ;
+    }
+    KnockOn(&g_quill_knock);
+}
+
+void SettleDemand(uint32_t kinds)
+{
+    __atomic_fetch_or(&s_demand, kinds, __ATOMIC_SEQ_CST);
+    KnockOn(&g_quill_knock);
+}
+
+void SettleKnock(void)
+{
+    KnockOn(&g_quill_knock);
+}
+
+void SettleCadenceHold(bool hold)
+{
+    __atomic_add_fetch(&s_held, hold ? 1 : -1, __ATOMIC_ACQ_REL);
+    if (!hold)
+        KnockOn(&g_quill_knock);
+}
+
+void SettleMediumLeft(void)
+{
+    KnockOn(&g_quill_knock);
+}
+
+uint32_t CadenceRunBegins(void)
+{
+    return __atomic_exchange_n(&s_demand, 0u, __ATOMIC_SEQ_CST);
+}
+
+/* The window binds the Lull once k·D passes it: from there the medium pays more
+ * than its share for the promise. Said once an episode, with what it costs. */
+static void CadenceSayBinds(uint64_t d_us)
+{
+    bool binds = (uint64_t)SETTLE_LULL_FACTOR * d_us > SETTLE_WINDOW_US;
+    if (binds && !s_binds_said)
+        kprintf("[Settle] the medium pays %llu%% of its time for the %llu ms window — one cycle "
+                "takes it %llu ms, more than the %u%% share allows\n",
+                (unsigned long long)(d_us * 100u / (SETTLE_WINDOW_US + d_us)),
+                (unsigned long long)(SETTLE_WINDOW_US / 1000u),
+                (unsigned long long)(d_us / 1000u), SETTLE_SHARE);
+    s_binds_said = binds;
+}
+
+/*
+ * The window's clock after a cycle: nothing owed when every Ink is settled,
+ * else the changes after S0 are at most as old as S0. The Ink side sets the
+ * clock only when it reads nothing owed, after its gen was published; so this
+ * clears first and then looks at the gen, and an Ink between the two either is
+ * seen here or finds the clock cleared and starts it itself.
+ */
+void CadenceRunEnded(error_t rc, uint64_t busy_us, uint64_t s0_us, uint64_t target)
+{
+    __atomic_store_n(&s_last_end_us, SettleNowUs(), __ATOMIC_RELEASE);
+    if (rc == OK) {
+        __atomic_store_n(&s_d_us, busy_us, __ATOMIC_RELAXED);
+        CadenceSayBinds(busy_us);
+        __atomic_store_n(&s_owed_since_us, 0, __ATOMIC_SEQ_CST);
+        if (InkedGen() > target)
+            __atomic_store_n(&s_owed_since_us, s0_us, __ATOMIC_SEQ_CST);
+    }
+    KnockOn(&g_quill_knock);
+}
+
+typedef enum {
+    CADENCE_REST = 0,       /* nothing owed, or a refusal waits for seat:ready */
+    CADENCE_NOW,
+    CADENCE_LATER,          /* at *at_us: the Lull's permit, or the window's end */
+} CadenceVerdict;
+
+/* Whether a cycle is due. At a pocket's boundary only the window run out and a
+ * demand start one; at the service point after the queue, Lull permits one for
+ * an eager change as well. Lock-free. */
+static CadenceVerdict CadenceDue(bool boundary, uint64_t now, uint64_t* at_us)
+{
+    uint64_t settled = SettledGen();
+    bool     waiters = SettleWaitersOwed();
+    bool     closed  = PoolClosedWaiting();
+    uint32_t demand  = __atomic_load_n(&s_demand, __ATOMIC_ACQUIRE);
+    bool     laying  = IntegrityLayOwed();     /* a map laid by the cycles: owed like a change */
+    bool     owed    = InkedGen() > settled || laying;
+
+    if (!owed && !waiters && !closed && !demand)
+        return CADENCE_REST;
+    if (SettleParked() || __atomic_load_n(&s_held, __ATOMIC_ACQUIRE) > 0)
+        return CADENCE_REST;
+    if (waiters || closed || demand)
+        return CADENCE_NOW;
+
+    uint64_t since     = __atomic_load_n(&s_owed_since_us, __ATOMIC_SEQ_CST);
+    uint64_t window_at = (since ? since : now) + SETTLE_WINDOW_US;
+    if (now >= window_at)
+        return CADENCE_NOW;
+    if (boundary)
+        return CADENCE_REST;
+
+    bool     eager  = __atomic_load_n(&s_eager_gen, __ATOMIC_ACQUIRE) > settled || laying;
+    uint64_t permit = __atomic_load_n(&s_last_end_us, __ATOMIC_ACQUIRE) + SettleLullUs();
+    if (eager && now >= permit)
+        return CADENCE_NOW;
+    *at_us = (eager && permit < window_at) ? permit : window_at;
+    return CADENCE_LATER;
+}
+
+/* The Lull's node, armed for the tick at or after `at_us`: when it fires it
+ * knocks, and the committer looks again. */
+static void CadenceArmLull(uint64_t at_us, uint64_t now_us)
+{
+    uint64_t ticks = (at_us - now_us) * SCHEDULER_DEFAULT_TICK_HZ / 1000000ull + 1u;
+    uint64_t fire  = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED) + ticks;
+    if (__atomic_load_n(&s_lull_fire, __ATOMIC_RELAXED) == fire)
+        return;
+    __atomic_store_n(&s_lull_fire, fire, __ATOMIC_RELAXED);
+    TouchQueueArmKnock(&s_lull_node, &g_quill_knock, fire);
+}
+
+/* A volume a cycle can write: mounted, its medium here, and taking writes. */
+static bool CadenceMounted(void)
+{
+    return tagfs_get_state()->initialized && !TagFSMediumLeft() && !TagFSReadOnly();
+}
+
+void SettleServiceIfPending(bool boundary)
+{
+    /* A medium that left, or takes no write, answers every waiter for good —
+     * on whichever core comes by first. */
+    if (SettleWaitersOwed() && (TagFSMediumLeft() || TagFSReadOnly()))
+        SettleWaitersAnswerAll(TagFSMediumLeft() ? ERR_DEVICE_NOT_READY : ERR_TAGFS_READ_ONLY);
+
+    /* The cycle in flight is stepped by the core that began it, even one that
+     * stopped being the committer's meanwhile (the other cores came up). */
+    if (SettleRunInFlight()) {
+        SettleRunStepHere();        /* nothing unless the cycle is this core's */
+        return;
+    }
+    if (amp_get_core_index() != SettleCommitterCore() || !CadenceMounted())
+        return;
+    SettleWaitersSweep();
+
+    uint64_t now = SettleNowUs();
+    uint64_t at  = 0;
+    switch (CadenceDue(boundary, now, &at)) {
+    case CADENCE_NOW:
+        (void)SettleRunBeginForCadence();
+        return;
+    case CADENCE_LATER:
+        CadenceArmLull(at, now);
+        return;
+    default:
+        return;
+    }
+}
+
+bool SettleStepOwedHere(void)
+{
+    if (SettleRunInFlight())
+        return SettleRunBetweenStepsHere();
+    if (amp_get_core_index() != SettleCommitterCore())
+        return false;
+    /* A cycle another asker runs knocks when it ends. */
+    if (__atomic_load_n(&g_settle_scribe.holder, __ATOMIC_ACQUIRE) != 0 || !CadenceMounted())
+        return false;
+    uint64_t at = 0;
+    return CadenceDue(false, SettleNowUs(), &at) == CADENCE_NOW;
+}
+
+bool SettleIdleOwed(void)
+{
+    if (g_amp.total_cores != 1)
+        return false;
+    if (SettleRunInFlight())
+        return true;
+    if (!CadenceMounted())
+        return false;
+    uint64_t at = 0;
+    return CadenceDue(true, SettleNowUs(), &at) == CADENCE_NOW;
+}
+
+void TagFSServiceAtBoundary(void)
+{
+    SettleServiceIfPending(true);
+}
+
+bool TagFSStepOwedHere(void)
+{
+    return SettleStepOwedHere();
+}
+
+bool TagFSIdleOwed(void)
+{
+    return SettleIdleOwed();
+}
+
+void TagFSWatchLook(void)
+{
+    SettleWatchLook(SettleNowUs());
+}
+
+void TagFSNoteInker(process_t* proc)
+{
+    if (!tagfs_get_state()->initialized)
+        return;
+    uint64_t gen  = InkedGen();
+    uint64_t seen = __atomic_load_n(&proc->volume_inked_gen, __ATOMIC_RELAXED);
+    while (seen < gen &&
+           !__atomic_compare_exchange_n(&proc->volume_inked_gen, &seen, gen, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        ;
+}
+
+/* A gen past the newest Ink is a mount's before this one: its changes went
+ * with that volume. */
+void TagFSInkerLeaves(process_t* proc)
+{
+    uint64_t gen = __atomic_load_n(&proc->volume_inked_gen, __ATOMIC_ACQUIRE);
+    if (!CadenceMounted() || gen == 0 || gen > InkedGen() || gen <= SettledGen())
+        return;
+    SettleDemand(SETTLE_DEMAND_LEAVE);
+}
+
+// ----------------------------------------------------------------------------
+// Nightwatch's look (RT-11)
+// ----------------------------------------------------------------------------
+
+static uint64_t s_watch_since;      /* the debt the last look saw unclaimed */
+static uint64_t s_watch_settled;
+static bool     s_watch_seen;
+static bool     s_watch_said;
+
+static void SettleWatchSay(void* ctx);
+static Baton    s_watch_baton = { .next = NULL, .run = SettleWatchSay, .ctx = NULL, .one_way = 0 };
+static volatile uint32_t s_watch_passed;
+
+static void SettleWatchSay(void* ctx)
+{
+    (void)ctx;
+    uint64_t since = __atomic_load_n(&s_owed_since_us, __ATOMIC_SEQ_CST);
+    uint64_t now   = SettleNowUs();
+    kprintf("[Nightwatch] SETTLE UNCLAIMED: changes of the volume owed to the medium for %llu ms, "
+            "past the %llu ms window, and no committer took them up across two looks — the "
+            "cadence's launch rule did not start the cycle it owed (settled up to Ink %llu, "
+            "inked %llu)\n",
+            (unsigned long long)(since && now > since ? (now - since) / 1000u : 0),
+            (unsigned long long)(SETTLE_WINDOW_US / 1000u),
+            (unsigned long long)SettledGen(), (unsigned long long)InkedGen());
+    __atomic_store_n(&s_watch_passed, 0u, __ATOMIC_RELEASE);
+}
+
+/* From the PIT tick, a look apart: a debt older than the window, no committer
+ * holding the Scribe, no refusal parked on seat:ready — and the same debt, not
+ * a byte of it settled, at the next look. The first half alone is a cycle about
+ * to begin; the second is a launch rule that did not. */
+void SettleWatchLook(uint64_t now_us)
+{
+    uint64_t since   = __atomic_load_n(&s_owed_since_us, __ATOMIC_SEQ_CST);
+    uint64_t settled = SettledGen();
+    bool     late    = CadenceMounted() && since && now_us > since &&
+                       now_us - since > SETTLE_WINDOW_US && !SettleParked() &&
+                       __atomic_load_n(&s_held, __ATOMIC_ACQUIRE) == 0 &&
+                       __atomic_load_n(&g_settle_scribe.holder, __ATOMIC_ACQUIRE) == 0;
+    if (!late) {
+        s_watch_seen = false;
+        s_watch_said = false;
+        return;
+    }
+    if (!s_watch_seen || s_watch_since != since || s_watch_settled != settled) {
+        s_watch_seen    = true;
+        s_watch_since   = since;
+        s_watch_settled = settled;
+        return;
+    }
+    if (s_watch_said)
+        return;
+    s_watch_said = true;
+    if (__atomic_exchange_n(&s_watch_passed, 1u, __ATOMIC_ACQ_REL) == 0)
+        (void)BatonPass(&s_watch_baton);
+}

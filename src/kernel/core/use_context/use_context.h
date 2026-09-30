@@ -134,6 +134,11 @@ void    UseContextCabinChanged(void);
  */
 void    UseContextRemember(bool *remembered);
 
+/* The context's text as it stands, and which word it is — for a program's
+ * `use`, which tells the volume without waiting inside the kernel
+ * (SettleUseRemembered). A reference the caller drops; NULL for none. */
+UseText *UseContextSaying(uint64_t *out_saying);
+
 /*
  * A volume is up — said on every road to a mounted volume. A machine holding
  * no context takes up what the volume remembers: the volume hands its memory

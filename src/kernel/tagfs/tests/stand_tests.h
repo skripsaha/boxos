@@ -51,6 +51,10 @@
 //                        cut at its pool and its Ledger, seals the medium does
 //                        not bear out, a table torn under a seal, and the next
 //                        file id derived
+// stand_settle_tests.c   the stand_settle suite: a change settled with no
+//                        anchor, an anchor answered through its Chit, the idle
+//                        context owed a quantum on one core, and a protected
+//                        medium turning the volume read-only
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.

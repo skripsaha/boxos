@@ -817,6 +817,13 @@ void process_destroy(process_t *proc)
      * would otherwise dispatch the freed struct (the recycle-race). */
     sched_dequeue_all_cores(proc);
 
+    /* A timed park the strand left armed holds this record; nothing is owed
+     * to a strand that is gone, so the deadline goes with it. */
+    TouchQueueDisarm(&proc->park_wake);
+
+    /* And a change of the volume it left unsettled is not left to Lull. */
+    TagFSInkerLeaves(proc);
+
     ManifestReleaseAllForOwner(proc->pid);
 
     /* The shared IPC ring MemTags are cleared in cabin_destroy (last

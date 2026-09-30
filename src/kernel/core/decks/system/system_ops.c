@@ -39,6 +39,7 @@
 #include "tagfs.h"
 #include "write_job.h"      /* the defrag is a WriteJob: it holds the file's Helm */
 #include "use_context.h"
+#include "settle_ops.h"   /* SettleUseRemembered — `use` waits through its Chit */
 #include "perf_trace.h"
 #include "kernel_config.h"
 #include "amp.h"
@@ -1483,16 +1484,19 @@ static int SysStrandPoolBind(const ManifestOp *op, Crate *crates, uint16_t crate
  * exactly this context, 0 when it does not (no volume up, no ground on it for
  * the context, a medium that will not take the write, a later word already
  * said to it). The context itself is set either way; the person is told,
- * never refused. */
+ * never refused. A word the medium does not hold yet is answered when the
+ * Settle cycle that carries it settles: the caller waits behind its Chit,
+ * never inside the kernel. */
 static int UseSayRemembered(const ManifestOp *op, Crate *crates, const OpContext *ctx)
 {
-    bool kept = false;
-    UseContextRemember(&kept);
-    if (op->out_crate != CRATE_INDEX_NONE && crates[op->out_crate].capacity >= 1) {
-        uint8_t byte = kept ? 1u : 0u;
-        (void)crate_write(&crates[op->out_crate], ctx, &byte, 1);
-    }
-    return OK;
+    Crate *out = (op->out_crate != CRATE_INDEX_NONE && crates[op->out_crate].capacity >= 1)
+                     ? &crates[op->out_crate]
+                     : NULL;
+    uint64_t saying = 0;
+    UseText *said   = UseContextSaying(&saying);
+    int      rc     = SettleUseRemembered(said, saying, ctx, crates, out);
+    UseTextDrop(said);
+    return rc;
 }
 
 /* SYSTEM_OP_USE_SET  in_crate: comma-separated tag list. No crate, or an
