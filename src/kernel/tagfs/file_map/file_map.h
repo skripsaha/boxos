@@ -134,6 +134,11 @@ void     FileMapDrop(FileMap* map, uint32_t fid);
  * it does with each file may change the map. */
 uint32_t FileMapRows(FileMap* map, uint32_t from, uint32_t* out, uint32_t room);
 
+/* Up to `room` file ids from `from` on that the map holds at all — a row, a
+ * record or both — in id order: the mount's walk, which decides what each of
+ * them is, asks this way. */
+uint32_t FileMapFiles(FileMap* map, uint32_t from, uint32_t* out, uint32_t room);
+
 /* The rows of file ids first .. first+count-1 into `out`, a row of zeros for
  * an id with none — one block of the file table, as the medium holds it. */
 void     FileMapRowsInto(FileMap* map, uint32_t first, uint32_t count, FileTableEntry* out);

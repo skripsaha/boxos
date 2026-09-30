@@ -104,19 +104,18 @@ error_t BlockMapMount(uint32_t data_blocks, uint64_t map_vlba)
 }
 
 /*
- * One window of the medium's map against the roll call's: its orphans and
+ * One window of the medium's map against its owners' bits: its orphans and
  * missing blocks counted and named, and the missing ones laid into `sector`,
  * so that its summary counts them taken. They are written down as takes of
- * the window, owed to the medium, and reach it with the first settle — the
- * mount itself writes nothing. False when there is no memory to write the
+ * the window, owed to the medium, and reach it with the next Settle cycle —
+ * the mount itself writes nothing. False when there is no memory to write the
  * repair down.
  */
-static bool MapCensusWindow(uint32_t w, uint8_t *sector, const uint8_t *computed)
+static bool MapCensusWindow(uint32_t w, uint8_t *sector, const uint8_t *owns)
 {
-    uint32_t       base = w * MAP_WINDOW_BLOCKS;
-    uint32_t       in   = g_map.blocks - base < MAP_WINDOW_BLOCKS ? g_map.blocks - base
-                                                                  : MAP_WINDOW_BLOCKS;
-    const uint8_t *owns = computed + base / 8;
+    uint32_t base = w * MAP_WINDOW_BLOCKS;
+    uint32_t in   = g_map.blocks - base < MAP_WINDOW_BLOCKS ? g_map.blocks - base
+                                                            : MAP_WINDOW_BLOCKS;
 
     uint32_t runs = 0;
     bool     was  = false;
@@ -166,10 +165,13 @@ static bool MapCensusWindow(uint32_t w, uint8_t *sector, const uint8_t *computed
     return true;
 }
 
-error_t BlockMapCensus(const uint8_t *computed, BlockMapCensusCount *out)
+error_t BlockMapCensus(BlockMapOwnsFn owns, void *ctx, BlockMapCensusCount *out)
 {
     uint8_t *chunk = kmalloc(TAGFS_BLOCK_SIZE);
-    if (!chunk) {
+    uint8_t *bits  = owns ? kmalloc(MAP_WINDOW_BLOCKS / 8u) : NULL;
+    if (!chunk || (owns && !bits)) {
+        kfree(chunk);
+        kfree(bits);
         kprintf("[TagFS] no memory for the one block this volume's block map is read "
                 "through\n");
         return ERR_NO_MEMORY;
@@ -184,13 +186,16 @@ error_t BlockMapCensus(const uint8_t *computed, BlockMapCensusCount *out)
         uint32_t n = g_map.windows - w0 < TAGFS_BLOCK_SECTORS ? g_map.windows - w0
                                                              : TAGFS_BLOCK_SECTORS;
         if (tagfs_volume_read(g_map.map_vlba + w0, n, chunk) != 0) {
+            TagFSNoteReadRefused();
             rc = ERR_TAGFS_CORRUPTED;
             break;
         }
         for (uint32_t k = 0; k < n; k++) {
             uint32_t w      = w0 + k;
             uint8_t *sector = chunk + k * TAGFS_SECTOR_SIZE;
-            if (computed && !MapCensusWindow(w, sector, computed)) {
+            if (owns)
+                owns(w, bits, ctx);
+            if (owns && !MapCensusWindow(w, sector, bits)) {
                 kprintf("[TagFS FSCK] no memory to write down the repair of window %u of "
                         "the block map\n", w);
                 rc = ERR_NO_MEMORY;
@@ -201,18 +206,20 @@ error_t BlockMapCensus(const uint8_t *computed, BlockMapCensusCount *out)
         }
     }
     kfree(chunk);
+    kfree(bits);
     if (rc != OK)
         return rc;
 
     MapTallyClose(&s_orphans);
     MapTallyClose(&s_missing);
     if (s_orphans.blocks || s_missing.blocks) {
-        /* ‼ SAID ALOUD. An orphan is the footprint a severed chain leaves —
-         * shorter than it was, its lost blocks still taken and nothing
-         * pointing at them — and the count is the evidence; a volume that has
-         * lost something says so on the boot that finds it. The repair keeps
-         * every block the medium calls taken: a roll call that missed an owner
-         * costs a block, never a file. */
+        /* ‼ SAID ALOUD. An orphan is the footprint of a cycle the medium did
+         * not settle, or of a chain severed — ground taken and nothing
+         * naming it — and the count is the evidence; a volume that has lost
+         * something says so on the boot that finds it. The repair keeps every
+         * block the medium calls taken: a census that missed an owner costs a
+         * block, never a file (owner decision 3: orphans are reported, and
+         * given back only once the census agrees with the host's). */
         kprintf("[TagFS FSCK] Bitmap mismatch: %u orphan, %u missing - additive repair\n",
                 s_orphans.blocks, s_missing.blocks);
         MapTallySay(&s_orphans, "orphan");

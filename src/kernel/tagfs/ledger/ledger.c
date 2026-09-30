@@ -11,16 +11,20 @@ static const uint8_t g_ledger_magic[8] = {
     VOLUME_LEDGER_MAGIC_6, VOLUME_LEDGER_MAGIC_7
 };
 
-/* The seq and the copy the volume stands on — the newest copy the medium
- * holds, as far as this kernel wrote or read it. The next write goes to the
- * other copy with seq + 1: this is the whole of the alternation. Moved only
- * by a pass that landed, so the copy named here is always intact.
+/* The copy the volume stands on, and the highest seq the medium holds — the
+ * next write goes to the other copy with that seq + 1: this is the whole of
+ * the alternation. The copy stood on is the newest intact one, unless the
+ * mount found the medium does not bear its seal out and stood on the one
+ * before it (LedgerStandOn); then the next write goes over the newer copy,
+ * never the one stood on, and its seq is still past every seq the medium
+ * holds. Moved only by a pass that landed, so the copy named here is always
+ * intact.
  *
  * What the volume remembers of the Use Context — the comma-joined text it was
  * last told, held by reference and written out with the counters on every
  * Ledger write. One sector is the record's whole world (ledger_read_copy takes
  * one and refuses a longer claim), so this is bounded by what a sector holds
- * past the fixed fields: a text that will not fit is not kept in part.
+ * past the fields and the seal: a text that will not fit is not kept in part.
  *
  * All of it under g_ledger_lock, which holds memory only: a leaf, taken under
  * the volume's state lock for the snapshot and alone everywhere else; nothing
@@ -38,8 +42,13 @@ static uint64_t   g_ledger_use_edits;
 static uint64_t   g_ledger_use_landed;
 #define LEDGER_USE_MAX  ((size_t)TAGFS_SECTOR_SIZE - sizeof(VolumeLedger))
 
-_Static_assert(sizeof(VolumeLedger) < TAGFS_SECTOR_SIZE,
-               "the Ledger's fixed fields, and room for a Use Context, fit its one sector");
+/* The copies as the mount read them, until it says which it stands on: each
+ * intact one's record, and the context it remembers. The mount's alone — it
+ * runs with the door shut. */
+static VolumeLedger s_read[VOLUME_LEDGER_COPIES];
+static bool         s_read_ok[VOLUME_LEDGER_COPIES];
+static UseText     *s_read_use[VOLUME_LEDGER_COPIES];
+static uint32_t     s_read_newest;
 
 /*
  * ‼ ONE WRITER: THE SETTLE CYCLE'S S4. The image is taken at the cycle's S0,
@@ -72,6 +81,7 @@ static bool ledger_read_copy(uint32_t copy, VolumeLedger *out,
 {
     uint8_t buf[TAGFS_SECTOR_SIZE];
     if (tagfs_volume_read(ledger_vlba(copy), 1, buf) != 0) {
+        TagFSNoteReadRefused();
         kprintf("[Ledger] copy %u could not be read off the medium\n", copy);
         return false;
     }
@@ -95,10 +105,10 @@ static bool ledger_read_copy(uint32_t copy, VolumeLedger *out,
         return false;
     }
 
-    uint8_t probe[TAGFS_SECTOR_SIZE];
-    memcpy(probe, buf, led.bytes);
-    memset(probe + __builtin_offsetof(VolumeLedger, crc32), 0, sizeof(uint32_t));
-    uint32_t have = KCrc32(probe, led.bytes);
+    /* Summed as it was written, with the sum's own field zero: the field is
+     * zeroed in the sector read, whose copy in `led` keeps the value. */
+    memset(buf + __builtin_offsetof(VolumeLedger, crc32), 0, sizeof(uint32_t));
+    uint32_t have = KCrc32(buf, led.bytes);
     if (have != led.crc32) {
         kprintf("[Ledger] copy %u does not match its own checksum "
                 "(0x%08x against 0x%08x) — it was torn mid-write\n",
@@ -139,8 +149,20 @@ bool tagfs_ledger_peek(uint32_t copy, VolumeLedger *out, char *tail, uint16_t *t
     return ledger_read_copy(copy, out, tail, tail_len);
 }
 
+/* The copies the mount read, let go of — their contexts with them. */
+static void LedgerReadForget(void)
+{
+    for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
+        UseTextDrop(s_read_use[c]);
+        s_read_use[c] = NULL;
+        s_read_ok[c]  = false;
+    }
+}
+
 /*
- * Take up the newer of the two.
+ * Both copies read, and the newer intact one taken up for now: the counters
+ * into the volume's state. Which copy the volume stands on is the mount's to
+ * say once it has held the seals against the medium (LedgerStandOn).
  *
  * One unreadable copy is survivable and is said out loud, because a volume
  * running on a single Ledger has no second opinion left. Both unreadable is
@@ -152,21 +174,21 @@ bool tagfs_ledger_peek(uint32_t copy, VolumeLedger *out, char *tail, uint16_t *t
  */
 error_t ledger_load(void)
 {
-    TagFSState  *fs = tagfs_get_state();
-    VolumeLedger led[VOLUME_LEDGER_COPIES];
-    bool         ok[VOLUME_LEDGER_COPIES];
-    uint32_t     live = 0;
+    TagFSState *fs   = tagfs_get_state();
+    uint32_t    live = 0;
 
-    /* Each copy's remembered context, read with it; the newest copy's is the
-     * one the volume stands on. Off the stack: two sectors' worth. */
+    LedgerReadForget();
+
+    /* Each copy's remembered context, read with it. Off the stack: two
+     * sectors' worth. */
     char *tails = kmalloc((size_t)VOLUME_LEDGER_COPIES * TAGFS_SECTOR_SIZE);
     uint16_t tail_len[VOLUME_LEDGER_COPIES];
     if (!tails) return ERR_NO_MEMORY;
 
     for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
-        ok[c] = ledger_read_copy(c, &led[c], tails + (size_t)c * TAGFS_SECTOR_SIZE,
-                                 &tail_len[c]);
-        if (ok[c]) live++;
+        s_read_ok[c] = ledger_read_copy(c, &s_read[c], tails + (size_t)c * TAGFS_SECTOR_SIZE,
+                                        &tail_len[c]);
+        if (s_read_ok[c]) live++;
     }
 
     if (live == 0) {
@@ -178,46 +200,92 @@ error_t ledger_load(void)
 
     uint32_t newest = 0;
     bool     have   = false;
+    uint64_t top    = 0;
     for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
-        if (!ok[c]) continue;
-        if (!have || led[c].seq > led[newest].seq) {
+        if (!s_read_ok[c]) continue;
+        if (!have || s_read[c].seq > s_read[newest].seq) {
             newest = c;
             have   = true;
         }
+        if (s_read[c].seq > top)
+            top = s_read[c].seq;
     }
 
-    /* The reader lets a context start as early as the counters end, which is
-     * four bytes before this kernel's record does: a list longer than a record
-     * of this kernel's holds would overrun the sector the next write builds.
-     * Forgotten whole, as remembering forgets one — never kept in part. */
-    uint16_t kept = tail_len[newest];
-    if (kept > LEDGER_USE_MAX) {
-        kprintf("[Ledger] copy %u remembers a Use Context of %u bytes, longer "
-                "than the %u a record holds — it is forgotten, not kept in part\n",
-                newest, (unsigned)kept, (unsigned)LEDGER_USE_MAX);
-        kept = 0;
+    /* A record of this kernel's has its context after the seal: a list
+     * longer than that leaves the room for — one an earlier kernel kept
+     * where the seal is now — would overrun the sector the next write
+     * builds. Forgotten whole, as remembering forgets one — never kept in
+     * part. */
+    error_t rc = OK;
+    for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES && rc == OK; c++) {
+        uint16_t kept = s_read_ok[c] ? tail_len[c] : 0;
+        if (kept > LEDGER_USE_MAX) {
+            if (c == newest)
+                kprintf("[Ledger] copy %u remembers a Use Context of %u bytes, longer "
+                        "than the %u a record holds — it is forgotten, not kept in part\n",
+                        c, (unsigned)kept, (unsigned)LEDGER_USE_MAX);
+            kept = 0;
+        }
+        if (kept && !(s_read_use[c] = UseTextMake(tails + (size_t)c * TAGFS_SECTOR_SIZE, kept)))
+            rc = ERR_NO_MEMORY;
     }
-    UseText *memory = kept ? UseTextMake(tails + (size_t)newest * TAGFS_SECTOR_SIZE, kept) : NULL;
     kfree(tails);
-    if (kept && !memory) return ERR_NO_MEMORY;
+    if (rc != OK) {
+        LedgerReadForget();
+        return rc;
+    }
 
-    fs->ledger = led[newest];
+    s_read_newest = newest;
+    fs->ledger    = s_read[newest];
 
     TagFSLockTake(&g_ledger_lock);
-    UseText *gone       = g_ledger_use;
-    g_ledger_seq        = led[newest].seq;
-    g_ledger_current    = newest;
-    g_ledger_use        = memory;
-    g_ledger_use_saying = 0;
+    g_ledger_seq     = top;
+    g_ledger_current = newest;
     TagFSLockDrop(&g_ledger_lock);
-    UseTextDrop(gone);
 
     if (live < VOLUME_LEDGER_COPIES) {
         kprintf("[Ledger] running on copy %u alone (seq %llu); the other one "
                 "did not survive\n",
-                newest, (unsigned long long)led[newest].seq);
+                newest, (unsigned long long)s_read[newest].seq);
     }
     return OK;
+}
+
+uint32_t LedgerNewestCopy(void)
+{
+    return s_read_newest;
+}
+
+bool LedgerCopySeal(uint32_t copy, SettleMark *out)
+{
+    if (copy >= VOLUME_LEDGER_COPIES || !s_read_ok[copy])
+        return false;
+    const VolumeLedger *led = &s_read[copy];
+    if (!LedgerHas(led, VOLUME_LEDGER_SEAL_END) || led->mark.settle == 0 ||
+        led->mark.settle != led->seq)
+        return false;
+    *out = led->mark;
+    return true;
+}
+
+void LedgerStandOn(uint32_t copy)
+{
+    TagFSState *fs = tagfs_get_state();
+    if (copy >= VOLUME_LEDGER_COPIES || !s_read_ok[copy])
+        copy = s_read_newest;
+
+    fs->ledger = s_read[copy];
+    UseText *memory = s_read_use[copy];
+    s_read_use[copy] = NULL;
+
+    TagFSLockTake(&g_ledger_lock);
+    UseText *gone       = g_ledger_use;
+    g_ledger_current    = copy;
+    g_ledger_use        = memory;
+    g_ledger_use_saying = 0;
+    TagFSLockDrop(&g_ledger_lock);
+    UseTextDrop(gone);
+    LedgerReadForget();
 }
 
 void LedgerImageTake(void)
@@ -239,9 +307,10 @@ void LedgerImageTake(void)
     s_image.use_edits = g_ledger_use_edits;
     TagFSLockDrop(&g_ledger_lock);
 
-    /* The remembered Use Context follows the fixed fields and is summed with
-     * them: a torn write loses the context together with the counters, never
-     * one without the other. */
+    /* The remembered Use Context follows the fields and the seal and is
+     * summed with them: a torn write loses the context together with the
+     * counters, never one without the other. The seal and the sum go in at
+     * S4, once the cycle knows what it left on the medium. */
     memcpy(led.magic, g_ledger_magic, sizeof(g_ledger_magic));
     led.seq                = s_image.seq;
     led.written_unix       = now;
@@ -249,22 +318,30 @@ void LedgerImageTake(void)
     led.use_context_bytes  = use_len;
     led.bytes              = (uint32_t)sizeof(VolumeLedger) + use_len;
     led.crc32              = 0;
+    memset(&led.mark, 0, sizeof(led.mark));
     memcpy(s_image.sector, &led, sizeof(led));
-    led.crc32 = KCrc32(s_image.sector, led.bytes);
-    memcpy(s_image.sector + __builtin_offsetof(VolumeLedger, crc32), &led.crc32,
-           sizeof(led.crc32));
 }
 
 /*
- * The image to the older copy. Only once it landed is the new copy the one the
- * volume stands on — and only for the image's own volume, by the Settle's own
- * holder: a mount between the snapshot and here means another volume's Ledger
- * is the one in memory now. A refusal leaves the volume standing on the copy
- * it stood on; the copy aimed at may be torn or untouched, and it is the older
- * one either way, which the next cycle aims at again.
+ * The image, sealed, to the other copy. Only once it landed is the new copy
+ * the one the volume stands on — and only for the image's own volume, by the
+ * Settle's own holder: a mount between the snapshot and here means another
+ * volume's Ledger is the one in memory now. A refusal leaves the volume
+ * standing on the copy it stood on; the copy aimed at may be torn or
+ * untouched, and it is never the one stood on, which the next cycle aims past
+ * again.
  */
-error_t LedgerImageWrite(void)
+error_t LedgerImageWrite(const SettleMark *mark)
 {
+    SettleMark sealed = *mark;
+    uint32_t   bytes;
+    sealed.settle = s_image.seq;
+    memcpy(s_image.sector + __builtin_offsetof(VolumeLedger, mark), &sealed, sizeof(sealed));
+    memcpy(&bytes, s_image.sector + __builtin_offsetof(VolumeLedger, bytes), sizeof(bytes));
+    memset(s_image.sector + __builtin_offsetof(VolumeLedger, crc32), 0, sizeof(uint32_t));
+    uint32_t crc = KCrc32(s_image.sector, bytes);
+    memcpy(s_image.sector + __builtin_offsetof(VolumeLedger, crc32), &crc, sizeof(crc));
+
     int wrote = tagfs_volume_write(ledger_vlba(s_image.slot), 1, s_image.sector);
 
     TagFSLockTake(&g_ledger_lock);
@@ -340,6 +417,7 @@ UseText *tagfs_recall_use_context(uint64_t *out_saying)
 
 void LedgerLetGo(void)
 {
+    LedgerReadForget();
     TagFSLockTake(&g_ledger_lock);
     UseText *gone       = g_ledger_use;
     g_ledger_use        = NULL;

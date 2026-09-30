@@ -212,6 +212,22 @@ typedef struct {
     bool              said_failing;   /* a refusal is said once, until a flush succeeds */
     bool              said_full;      /* every id issued: said once, the first time a tag is refused */
     Scribe            scribe;
+
+    /* What the medium's last block holds of the registry as the last write
+     * (or the load) left it — the block, the bytes of its records and their
+     * CRC32 — for the seal of a Settle cycle (volume_ledger.h). Under `lock`.
+     * `tail_owed`: the medium's last block holds other than tail_image (a
+     * load cut it back to what a seal bears out), and the next flush writes
+     * it whole even with nothing new; the Scribe's holder's. */
+    uint32_t          landed_block;
+    uint32_t          landed_bytes;
+    uint32_t          landed_crc;
+    bool              tail_owed;
+
+    /* The chain's blocks as the load read them, for the mount's census; let
+     * go once they are claimed (TagRegistryClaimGround). */
+    uint32_t*         chain_blocks;
+    uint32_t          chain_count;
 } TagRegistry;
 
 // ----------------------------------------------------------------------------
@@ -399,8 +415,13 @@ error_t      TagRegistryKeyIds(TagRegistry* reg, const char* key, size_t key_len
 error_t      tag_registry_flush(TagRegistry* reg);
 
 /* The registry read off the medium from its head; the mount's, once. Refuses
- * — and says why — a chain it cannot walk or a registry it cannot hold whole. */
-int          tag_registry_load(TagRegistry* reg, uint32_t first_block);
+ * — and says why — a chain it cannot walk or a registry it cannot hold whole.
+ * Under a seal (`newest`, and the copy before it, `older`; both NULL for a
+ * volume whose newest Ledger carries none) it is read as far as the seal
+ * says, and a last block that does not bear the seal out is rolled back to
+ * the blocks before it (tag_registry.c). */
+int          tag_registry_load(TagRegistry* reg, uint32_t first_block,
+                               const SettleMark* newest, const SettleMark* older);
 
 // ----------------------------------------------------------------------------
 // Bitmap Index API
@@ -460,7 +481,7 @@ int             TagBitmapQueryPage(TagBitmapIndex* idx,
 // File Table API
 // ----------------------------------------------------------------------------
 
-int  file_table_init(uint32_t first_block);
+int  file_table_init(uint32_t first_block, bool sealed);
 void file_table_shutdown(void);
 int  file_table_lookup(uint32_t file_id, uint32_t* out_block, uint32_t* out_offset);
 int  file_table_update(uint32_t file_id, uint32_t meta_block, uint32_t meta_offset);
@@ -545,6 +566,11 @@ uint64_t tagfs_get_volume_base(void);
 void     TagFSWatchSeats(void);
 
 void     TagFSAttendArrival(void);
+
+/* A read of the volume the medium refused — said by the mount's readers, so a
+ * mount that fails on a medium that did not answer is asked again when the
+ * seat answers (seat:ready), and one refused for what it holds is not. */
+void     TagFSNoteReadRefused(void);
 
 /* The medium under the volume may have left; ask now rather than at the next
  * read, because by then the seat can hold something else. */

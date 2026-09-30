@@ -27,7 +27,7 @@
  * A volume an earlier kernel wrote may still carry snapshots — the manifest
  * the Ledger names and the redirects in the DiskBook. They are read at mount,
  * named, and held in memory as they were found, so the blocks they kept stay
- * taken (CowRollCall) until the volume's census returns them.
+ * taken (CowClaimGround) until the volume's census returns them.
  */
 
 // On-disk per-snapshot entry (68 bytes each)
@@ -64,12 +64,11 @@ error_t TagFS_SnapshotRefused(const char *asked);
 /* The snapshots an earlier kernel left on this volume: the manifest the
  * Ledger names at `manifest_block` (0 when it names none), and the DiskBook's
  * redirects into them. Read, held as found, and named out loud. Called once,
- * by the mount, after the DiskBook is opened and before the roll call. */
+ * by the mount, after the DiskBook is opened and before the census. */
 void    CowNameStanding(uint32_t manifest_block);
 
-/* Mark the blocks of the data run that belong to copy-on-write into the map
- * the mount's roll call is building. Called from the fsck in tagfs_init,
- * beside IntegrityMarkMapBlocks; marks only, never clears. */
-void    CowRollCall(uint8_t *computed_bm, uint32_t total_blocks);
+/* The mount's census: the blocks of the data run copy-on-write owns, claimed
+ * (the manifests, and both blocks of every redirect replayed). */
+void    CowClaimGround(void);
 
 #endif // COW_H

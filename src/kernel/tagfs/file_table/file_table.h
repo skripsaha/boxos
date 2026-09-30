@@ -3,13 +3,27 @@
 
 #include "../tagfs.h"
 
-/* Take up the table that starts at `first_block`.
+/* Take up the table that starts at `first_block`: its chain, and its rows into
+ * the map of live files. `sealed`: the volume's newest Ledger carries a seal,
+ * the mount derives every row from the sealed span of the pool, and a block
+ * of the chain that does not read as the table ends the chain there instead of
+ * refusing the volume (file_table.c, TableBlockRefused).
  *
  * There is no length parameter and there is not going to be one. The Deed used
  * to state file_table_blocks, mkfs wrote a 1 into it and nothing has ever
  * raised it, so the table came up 510 entries long on every volume regardless
  * of how many files were on it. The length is counted off the chain instead. */
-int  file_table_init(uint32_t first_block);
+int  file_table_init(uint32_t first_block, bool sealed);
+
+/* The mount's census: the chain's blocks, claimed. */
+void FileTableClaimGround(void);
+
+#ifdef CONFIG_VOLUME_TESTS
+/* Whether a mount would stand on the table chain from `first_block`, walked
+ * by the mount's own rules and read only — nothing of the mounted table is
+ * touched. For the stand. */
+bool FileTableWouldStand(uint32_t first_block, bool sealed);
+#endif
 
 /*
  * Let the table go: its memory, and not one byte written. Only the Settle

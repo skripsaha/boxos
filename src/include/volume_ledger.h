@@ -82,6 +82,61 @@
  * that reserves the room. */
 #define VOLUME_LEDGER_COPIES  2u
 
+/*
+ * ‼ THE SEAL OF THE LAST SETTLED CYCLE — SettleMark.
+ *
+ * The one writer of this record is a Settle cycle's S4, and it seals what the
+ * cycle left on the medium: the metadata pool from `chain_first` to `pool_to`
+ * and the tag registry up to `registry_*`, each with a checksum a mount holds
+ * against the blocks it reads. A mount stands on the newest copy whose seal
+ * the medium bears out and reads nothing of the pool past it: a cycle cut
+ * anywhere before its record landed leaves the cycle before it, whole.
+ *
+ *   settle        the seq of the record the seal rides in; a seal is one only
+ *                 when it says so (0 is none, and a copy of another record's
+ *                 seal is none either);
+ *   chain_first   the pool's first block — the authority on where the pool
+ *                 begins; the Deed's head and its link are hints for readers
+ *                 that know no seal, and the head is never unlinked;
+ *   pool_from     where the cycle's own records begin: the pool_to of the
+ *                 seal before it, or the tail as the mount found it — the
+ *                 records a machine stopped uncleanly last wrote (RT-22);
+ *   pool_to       the pool's open block, and the bytes of its records the
+ *                 cycle wrote — nothing past them was settled;
+ *   registry_*    the registry's last block on the medium, the bytes of its
+ *                 records, and their CRC32;
+ *   closed_crc32  the pool's closed blocks from chain_first up to pool_to's
+ *                 block, folded: each block's CRC32 of its records, summed
+ *                 again with the block's number and the records' length (a
+ *                 12-byte {block, bytes, crc}), and the sums XORed — so
+ *                 blocks dropped off the chain's front take their sums out and
+ *                 nothing is read. A closed block is never written again by a
+ *                 kernel that seals, so a closed part that does not match is a
+ *                 kernel that retired records in place, or rot;
+ *   tail_crc32    the open block's records up to pool_to;
+ *   flags         SETTLE_CLEAN: written by a machine's last cycles as it
+ *                 stopped; SETTLE_MEDIUM_LIED: a mount once found the medium
+ *                 holding less than the newest seal said and stood on the one
+ *                 before it — freed ground rests a cycle longer on it for good.
+ */
+#define SETTLE_CLEAN        (1u << 0)
+#define SETTLE_MEDIUM_LIED  (1u << 1)
+
+typedef struct __attribute__((packed)) {
+    uint64_t settle;
+    uint32_t chain_first;
+    uint32_t pool_from_block;
+    uint32_t pool_from_bytes;
+    uint32_t pool_to_block;
+    uint32_t pool_to_bytes;
+    uint32_t registry_block;
+    uint32_t registry_bytes;
+    uint32_t registry_crc32;
+    uint32_t closed_crc32;
+    uint32_t tail_crc32;
+    uint32_t flags;
+} SettleMark;
+
 typedef struct __attribute__((packed)) {
     uint8_t  magic[8];
     uint32_t bytes;             /* how much of this record exists and is summed */
@@ -116,19 +171,41 @@ typedef struct __attribute__((packed)) {
     /* The Use Context the volume remembers — what its person was doing when
      * they left, said in tags, taken up again when the volume comes up under
      * a machine that holds none. The names ride inside this same record, one
-     * comma-joined list right after the fixed fields: `use_context_offset`
+     * comma-joined list after the fields (after the seal, from a kernel that
+     * seals; right after these two, from one before): `use_context_offset`
      * from the start of the record, `use_context_bytes` long, no NUL. Both
      * zero when the volume remembers none. The record is one sector, and
      * that is the whole room a context has here — a list that will not fit
      * is not kept in part; the volume forgets, and the person is told. */
     uint16_t use_context_offset;
     uint16_t use_context_bytes;
+
+    /* The growth field (HOW THIS GROWS): read only where LedgerHas says the
+     * writer put it there. */
+    SettleMark mark;
 } VolumeLedger;
 
 /* What every reader requires of `bytes`: the counters. A record written
  * before the Use Context was kept ends exactly here, and reads as a volume
  * that remembers none — the growth rule above, applied for the first time. */
 #define VOLUME_LEDGER_REQUIRED_BYTES  __builtin_offsetof(VolumeLedger, use_context_offset)
+
+/* Where the seal ends, and the one rule for every field of the growth field:
+ * the record reaches past it, and no Use Context lies over it. A kernel
+ * before the seal lays its context at the end of the two fields above —
+ * exactly where the seal is — so its record, however long, never counts as
+ * carrying one. */
+#define VOLUME_LEDGER_SEAL_END  (__builtin_offsetof(VolumeLedger, mark) + sizeof(SettleMark))
+
+static inline int LedgerHas(const VolumeLedger *led, uint32_t end)
+{
+    return led->bytes >= end &&
+           (led->use_context_bytes == 0 || led->use_context_offset >= end);
+}
+
+/* The record is one sector for every reader: the fixed fields and the whole
+ * growth field stay inside it. */
+_Static_assert(sizeof(VolumeLedger) <= 512, "the Ledger's record is one sector");
 
 /* Blocks in the data run are counted from zero, so zero cannot also mean "a
  * block". Nothing is allocated at data block 0 by anybody: mkfs puts the tag

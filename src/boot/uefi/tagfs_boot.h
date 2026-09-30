@@ -13,6 +13,7 @@
  * them. <stdint.h> is not available here; uefi.h defines the fixed-width types
  * these headers take from their includer. */
 #include "volume_deed.h"
+#include "volume_ledger.h"
 
 /* =========================================================================
  * Constants (must match tagfs.h / create_tagfs.c)

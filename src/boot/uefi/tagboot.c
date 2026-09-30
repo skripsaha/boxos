@@ -854,8 +854,13 @@ static EFI_STATUS DeedTakeUp(void)
  *
  * Asked only when the Deed names no kernel (TagBootMain). The registry gives
  * the tags' ids, and the metadata pool is then read the way the kernel's
- * mount reads it (meta_pool.c, meta_pool_mirror_init):
+ * mount reads it (metadata_pool/meta_pool_mount.c, PoolMount):
  *
+ *   - from the chain_first of the seal the newest copy of the Ledger carries,
+ *     and no further than its `to` — what lies past it is a cycle that did not
+ *     settle; a walk that cannot reach it is made again by the other copy's
+ *     seal, and then whole from the Deed's head, as a kernel before the seal
+ *     reads a volume whose newest copy carries none;
  *   - every record in chain order, and the NEWEST record of a file is the
  *     file — a file written again leaves its older records behind it;
  *   - a record without ACTIVE is a Quitclaim: the file is gone, whatever its
@@ -1151,17 +1156,75 @@ static int BootCandidateSee(BootCandidates *set, uint32_t fid, uint32_t block,
     return 1;
 }
 
+/* Where one walk of the pool begins and ends: a seal's span, or the whole chain
+ * from the Deed's head (`sealed` 0). */
+typedef struct {
+    int      sealed;
+    uint32_t first;
+    uint32_t to_block;
+    uint32_t to_bytes;
+} PoolSpan;
+
 /*
- * The whole pool, walked once: every file some record showed wearing a boot
- * tag ends up in `set` at its newest record. 0 when the pool could not be read
- * to its end — then which record of a file is its newest is not known, and no
- * kernel is taken from it.
+ * The seals the Ledger's copies carry (volume_ledger.h), newest copy first —
+ * none when the newest intact copy carries none of its own: a kernel before the
+ * seal wrote it last, and its pool is read whole. How many were found.
  */
-static int PoolWalkForBootFiles(const uint16_t ids[BOOT_TAG_COUNT], BootCandidates *set)
+static uint32_t LedgerSeals(SettleMark seals[VOLUME_LEDGER_COPIES])
 {
-    uint32_t block_idx = g_layout.metadata_pool_block - g_layout.data_block;
+    static const uint8_t magic[8] = {
+        VOLUME_LEDGER_MAGIC_0, VOLUME_LEDGER_MAGIC_1, VOLUME_LEDGER_MAGIC_2,
+        VOLUME_LEDGER_MAGIC_3, VOLUME_LEDGER_MAGIC_4, VOLUME_LEDGER_MAGIC_5,
+        VOLUME_LEDGER_MAGIC_6, VOLUME_LEDGER_MAGIC_7
+    };
+    VolumeLedger copies[VOLUME_LEDGER_COPIES];
+    int          intact[VOLUME_LEDGER_COPIES];
+    uint8_t      sector[TAGFS_SECTOR_SIZE];
+
+    for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
+        intact[c] = 0;
+        uint64_t vlba = ((uint64_t)g_layout.state_block + c) * TAGFS_SECTORS_PER_BLOCK;
+        if (EFI_ERROR(ReadSectors(vlba, 1, sector))) continue;
+        VolumeLedger *led = &copies[c];
+        MemCopy(led, sector, sizeof(*led));
+        int same = 1;
+        for (uint32_t k = 0; k < 8; k++) same &= led->magic[k] == magic[k];
+        if (!same || led->bytes < VOLUME_LEDGER_REQUIRED_BYTES ||
+            led->bytes > TAGFS_SECTOR_SIZE)
+            continue;
+        MemZero(sector + __builtin_offsetof(VolumeLedger, crc32), 4);
+        if (Crc32(sector, led->bytes) != led->crc32) continue;
+        if (led->bytes < sizeof(*led))
+            MemZero((uint8_t *)led + led->bytes, sizeof(*led) - led->bytes);
+        intact[c] = 1;
+    }
+
+    uint32_t newest = intact[1] && (!intact[0] || copies[1].seq > copies[0].seq) ? 1 : 0;
+    uint32_t found  = 0;
+    for (uint32_t k = 0; k < VOLUME_LEDGER_COPIES; k++) {
+        uint32_t            c   = (newest + k) % VOLUME_LEDGER_COPIES;
+        const VolumeLedger *led = &copies[c];
+        if (!intact[c] || !LedgerHas(led, VOLUME_LEDGER_SEAL_END) || led->mark.settle == 0 ||
+            led->mark.settle != led->seq)
+            break;
+        seals[found++] = led->mark;
+    }
+    return found;
+}
+
+/*
+ * One walk of the pool by `span`: every file some record showed wearing a boot
+ * tag ends up in `set` at its newest record of the span. 0 when the span
+ * could not be read to its end — then which record of a file is its newest is
+ * not known, and no kernel is taken from it.
+ */
+static int PoolWalkForBootFiles(const uint16_t ids[BOOT_TAG_COUNT], const PoolSpan *span,
+                                BootCandidates *set)
+{
+    uint32_t block_idx = span->first;
     uint32_t passed    = 0;   /* records of a file that fail their own sum */
 
+    set->count = 0;
     for (uint32_t walked = 0;; walked++) {
         if (!ChainMayRead("metadata pool", block_idx, walked)) return 0;
         if (EFI_ERROR(ReadDataBlock(block_idx, &g_pool_block))) {
@@ -1177,15 +1240,18 @@ static int PoolWalkForBootFiles(const uint16_t ids[BOOT_TAG_COUNT], BootCandidat
         /* By length, as the kernel's mirror walks it: a length of zero, or one
          * past the payload, ends the block; a record shorter than a head is
          * stepped over and read as nobody's. The last byte of the payload has
-         * no room for a length, and is not read as one. */
+         * no room for a length, and is not read as one. The seal's open block
+         * is read no further than its `to`. */
+        int      last = span->sealed && block_idx == span->to_block;
         uint32_t used = g_pool_block.used_bytes;
         if (used > TAGFS_MPOOL_DATA_SIZE) used = TAGFS_MPOOL_DATA_SIZE;
+        if (last && used > span->to_bytes) used = span->to_bytes;
         uint32_t pos = 0;
         while (pos < used && pos + 2 <= TAGFS_MPOOL_DATA_SIZE) {
             const uint8_t *r = g_pool_block.payload + pos;
             uint16_t record_len;
             MemCopy(&record_len, r + META_RECORD_LEN_OFF, 2);
-            if (record_len == 0 || record_len > TAGFS_MPOOL_DATA_SIZE - pos) break;
+            if (record_len == 0 || record_len > used - pos) break;
 
             uint32_t fid = 0;
             if (record_len >= META_RECORD_VARDATA_OFF)
@@ -1200,7 +1266,15 @@ static int PoolWalkForBootFiles(const uint16_t ids[BOOT_TAG_COUNT], BootCandidat
             pos += record_len;
         }
 
-        if (g_pool_block.next_block == 0) break;
+        if (last) break;
+        if (g_pool_block.next_block == 0) {
+            if (span->sealed) {
+                ChainStoppedAt("metadata pool", "ends before the block its seal names",
+                               block_idx, walked);
+                return 0;
+            }
+            break;
+        }
         block_idx = g_pool_block.next_block;
     }
 
@@ -1211,6 +1285,24 @@ static int PoolWalkForBootFiles(const uint16_t ids[BOOT_TAG_COUNT], BootCandidat
               "passed over — each file's record before them stands\r\n");
     }
     return 1;
+}
+
+/* The walks in the order the kernel's mount would stand on them: the newest
+ * seal, the one before it, the whole chain. 1 once one of them was read to its
+ * end. */
+static int PoolWalkBySeals(const uint16_t ids[BOOT_TAG_COUNT], BootCandidates *set)
+{
+    SettleMark seals[VOLUME_LEDGER_COPIES];
+    uint32_t   n = LedgerSeals(seals);
+    for (uint32_t i = 0; i < n; i++) {
+        PoolSpan span = { 1, seals[i].chain_first, seals[i].pool_to_block,
+                          seals[i].pool_to_bytes };
+        if (PoolWalkForBootFiles(ids, &span, set)) return 1;
+        Print("TagBoot: the pool does not bear a seal of the Ledger out — the walk is "
+              "made again\r\n");
+    }
+    PoolSpan whole = { 0, g_layout.metadata_pool_block - g_layout.data_block, 0, 0 };
+    return PoolWalkForBootFiles(ids, &whole, set);
 }
 
 /* The record a candidate names, read again and taken apart into the runs of
@@ -1284,7 +1376,7 @@ static int TagFsFindKernelByTags(KernelPlace *out)
 
     BootCandidates set  = { NULL, 0, 0 };
     int            found = 0;
-    if (PoolWalkForBootFiles(ids, &set)) {
+    if (PoolWalkBySeals(ids, &set)) {
         for (uint32_t i = 0; i < BOOT_TAG_COUNT && !found; i++) {
             for (uint32_t c = 0; c < set.count && !found; c++) {
                 if (!(set.slot[c].carries & (1U << i))) continue;

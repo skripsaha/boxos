@@ -34,13 +34,14 @@
  */
 
 /* S0, under the volume's state lock: the image the cycle writes, for the
- * older copy with seq + 1. */
+ * copy it does not stand on, with a seq past every one the medium holds. */
 void     LedgerImageTake(void);
 
-/* S4, by the Settle's holder with no TagFS lock held: the image to the
- * medium. OK, and the volume stands on it; or ERR_TAGFS_METADATA_ERROR —
- * said, with the copy the volume still stands on. */
-error_t  LedgerImageWrite(void);
+/* S4, by the Settle's holder with no TagFS lock held: the image, sealed with
+ * `mark` (its `settle` is the image's seq), to the medium. OK, and the volume
+ * stands on it; or ERR_TAGFS_METADATA_ERROR — said, with the copy the volume
+ * still stands on. */
+error_t  LedgerImageWrite(const SettleMark *mark);
 
 /*
  * The Use Context the volume remembers — what its person was doing when they
@@ -68,10 +69,21 @@ error_t  tagfs_remember_use_context(UseText *said, uint64_t saying, bool *rememb
 UseText *tagfs_recall_use_context(uint64_t *out_saying);
 bool     tagfs_ledger_peek(uint32_t copy, VolumeLedger *out, char *tail, uint16_t *tail_len);
 
-/* The mount takes up the newer intact copy — the counters into the volume's
- * state, the copy it stands on and its Use Context into the Ledger's own
- * memory. Both unreadable refuses the mount. */
+/* The mount reads both copies and takes up the newer intact one's counters
+ * into the volume's state for now. Both unreadable refuses the mount. */
 error_t  ledger_load(void);
+
+/* Of the copies ledger_load read: which is the newest intact one, and a
+ * copy's seal — false when the copy is not intact or carries none that is
+ * its own (LedgerHas, settle == its seq). */
+uint32_t LedgerNewestCopy(void);
+bool     LedgerCopySeal(uint32_t copy, SettleMark *out);
+
+/* The copy the mount stands on, once it has held the seals against the
+ * medium: its record into the volume's state, and its Use Context into the
+ * Ledger's own memory; the copies read are let go. A copy that is not intact
+ * is the newest. */
+void     LedgerStandOn(uint32_t copy);
 
 /* The volume is let go of: what it remembered goes with it, and the next one
  * is read, not assumed. */

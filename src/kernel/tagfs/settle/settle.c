@@ -39,6 +39,13 @@ static uint64_t s_given;
 static bool     s_halt_ran;
 static error_t  s_halt_answer;
 
+/* Where the last settled seal's pool span ended — the next seal's pool_from —
+ * and whether this volume's seals say its medium once held less than a seal
+ * did. The Settle's holder's, and the mount's with the door shut. */
+static uint32_t s_sealed_block;
+static uint32_t s_sealed_bytes;
+static bool     s_medium_lied;
+
 uint64_t SettledGen(void)
 {
     return __atomic_load_n(&s_settled_gen, __ATOMIC_ACQUIRE);
@@ -56,6 +63,18 @@ void SettleMountReset(void)
     __atomic_store_n(&s_cycles, 0, __ATOMIC_RELEASE);
     s_failing  = false;
     s_halt_ran = false;
+}
+
+void SettleMountStand(uint32_t from_block, uint32_t from_bytes, bool medium_lied)
+{
+    s_sealed_block = from_block;
+    s_sealed_bytes = from_bytes;
+    __atomic_store_n(&s_medium_lied, medium_lied, __ATOMIC_RELEASE);
+}
+
+bool SettleMediumLied(void)
+{
+    return __atomic_load_n(&s_medium_lied, __ATOMIC_ACQUIRE);
 }
 
 void SettleOwed(uint64_t* unsettled, bool* committer_busy)
@@ -90,6 +109,7 @@ error_t SettleHaltAnswer(uint64_t* unsettled)
 
 typedef struct {
     PoolSnap      pool;
+    SettleMark    mark;         /* what the cycle leaves on the medium, for S4 */
     uint64_t      target;
     uint64_t      cycle;
     uint64_t      data_need;
@@ -97,7 +117,17 @@ typedef struct {
     const char*   stage;        /* where a refusal came from, for the one line */
 } SettleSnap;
 
-/* S0: memory only, under the state lock, nothing asked of the heap. */
+/*
+ * S0: memory only, under the state lock, nothing asked of the heap.
+ *
+ * The seal is taken here, of the same instant as the pool it describes: the
+ * pool's part as it stands once S3 has written what was just taken, and the
+ * registry's as far as its last write landed — every tag a record in this
+ * snapshot wears was on the medium before the record was inked
+ * (TagRegistryFlushFor), so a registry the cycle's own S1 lengthens is past
+ * the seal and names nothing the seal holds. The halt's cycles seal clean:
+ * the machine stops after them.
+ */
 static void SettleTake(SettleSnap* snap, SettleWhy why)
 {
     TagFSState* fs = tagfs_get_state();
@@ -108,6 +138,12 @@ static void SettleTake(SettleSnap* snap, SettleWhy why)
     PoolSnapTake(&snap->pool, true);
     if (why == SETTLE_FOR_HALT)
         snap->given = PoolSparesGiveBack();
+    PoolSealTake(&snap->mark);
+    TagRegistryLanded(fs->registry, &snap->mark);
+    snap->mark.pool_from_block = s_sealed_block;
+    snap->mark.pool_from_bytes = s_sealed_bytes;
+    snap->mark.flags           = (why == SETTLE_FOR_HALT ? SETTLE_CLEAN : 0u) |
+                                 (s_medium_lied ? SETTLE_MEDIUM_LIED : 0u);
     LedgerImageTake();
     FallowLedgerTaken(snap->cycle);
     TagFSLockDrop(&fs->lock);
@@ -180,6 +216,8 @@ static void SettleDone(SettleSnap* snap)
     uint64_t closed = PoolSnapSettled(&snap->pool, &spent);
     __atomic_store_n(&s_settled_gen, snap->target, __ATOMIC_RELEASE);
     __atomic_store_n(&s_cycles, snap->cycle, __ATOMIC_RELEASE);
+    s_sealed_block = snap->mark.pool_to_block;
+    s_sealed_bytes = snap->mark.pool_to_bytes;
     s_given = FallowRipen(closed, snap->cycle, &nodes);
     TagFSLockDrop(&fs->lock);
 
@@ -211,7 +249,7 @@ static error_t SettleCycle(SettleWhy why)
     }
     if (rc == OK) {
         SETTLE_CUT_AT(SETTLE_CUT_POINT_LEDGER);
-        rc = LedgerImageWrite();
+        rc = LedgerImageWrite(&snap.mark);
         if (rc != OK)
             snap.stage = "the ledger";
     }
@@ -287,7 +325,7 @@ error_t SettleForRoom(void)
     if (LockRankAnyHeldHere() || ScribeAnyHeldHere() || BatonRunningHere())
         return ERR_WOULD_BLOCK;
 
-    for (uint64_t round = 0; round <= FALLOW_LAG; round++) {
+    for (uint64_t round = 0; round <= FallowLag(); round++) {
         TagFSLockTake(&fs->lock);
         uint64_t resting = FallowBlocks();
         TagFSLockDrop(&fs->lock);
@@ -329,10 +367,10 @@ error_t TagFSSettleForHalt(void)
      * such a block taken for good. So the last cycle is followed by the ones
      * Fallow's rule asks for — each settles, so both copies of the Ledger move
      * past the records that freed the ground — and by one more that writes the
-     * map giving it back: at most 1 + FALLOW_LAG + 1, fewer when nothing rests.
+     * map giving it back: at most 1 + FallowLag() + 1, fewer when nothing rests.
      */
     error_t rc = SettleAsked(SETTLE_FOR_HALT);
-    for (uint64_t more = 0; rc == OK && more <= FALLOW_LAG && SettleHaltOwesGround(); more++)
+    for (uint64_t more = 0; rc == OK && more <= FallowLag() && SettleHaltOwesGround(); more++)
         rc = SettleAsked(SETTLE_FOR_HALT);
     s_halt_answer = rc;
     s_halt_ran    = true;

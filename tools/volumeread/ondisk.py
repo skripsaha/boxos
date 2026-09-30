@@ -117,6 +117,16 @@ VOLUME_LEDGER = Fields("<8sIIQQQQIIIIIIIHH",   # volume_ledger.h:85-126
                        "next_file_id next_tag_id total_tags cow_manifest_block "
                        "cow_manifest_backup_block integrity_map_block "
                        "integrity_map_blocks use_context_offset use_context_bytes")
+# The seal of the last settled cycle, in the growth field right after the
+# record's fields (volume_ledger.h SettleMark, LedgerHas).
+SETTLE_MARK = Fields("<QIIIIIIIIIII",
+                     "settle chain_first pool_from_block pool_from_bytes pool_to_block "
+                     "pool_to_bytes registry_block registry_bytes registry_crc32 "
+                     "closed_crc32 tail_crc32 flags")
+LEDGER_SEAL_AT = VOLUME_LEDGER.size                  # offsetof(VolumeLedger, mark)
+LEDGER_SEAL_END = LEDGER_SEAL_AT + SETTLE_MARK.size  # volume_ledger.h VOLUME_LEDGER_SEAL_END
+SETTLE_CLEAN = 1 << 0                                # volume_ledger.h
+SETTLE_MEDIUM_LIED = 1 << 1
 
 # ---------------------------------------------------------------------------
 # The three chains and the metadata record
@@ -377,10 +387,13 @@ def ReadLedgerCopy(sector, copy):
         d["why"] = ("does not match its own checksum (0x%08x against 0x%08x)"
                     % (have, d["crc32"]))
         return d
-    if n < VOLUME_LEDGER.size:
-        rec[n:VOLUME_LEDGER.size] = bytes(VOLUME_LEDGER.size - n)
+    if n < SECTOR:
+        rec[n:SECTOR] = bytes(SECTOR - n)
         d.update(VOLUME_LEDGER.Unpack(rec))
         d.update(copy=copy, why=None, use_context=None, use_misplaced=False)
+    d["mark"] = SETTLE_MARK.Unpack(rec, LEDGER_SEAL_AT)
+    d["sealed"] = (LedgerHas(d, LEDGER_SEAL_END) and d["mark"]["settle"] != 0 and
+                   d["mark"]["settle"] == d["seq"])
     if d["use_context_bytes"]:
         off, ln = d["use_context_offset"], d["use_context_bytes"]
         if off < LEDGER_REQUIRED_BYTES or off + ln > n:
@@ -389,6 +402,12 @@ def ReadLedgerCopy(sector, copy):
             d["use_context"] = bytes(rec[off:off + ln]).decode("utf-8", "replace")
     d["ok"] = True
     return d
+
+
+def LedgerHas(d, end):
+    """The one rule for the Ledger's growth field (volume_ledger.h LedgerHas):
+    the record reaches past `end`, and no Use Context lies over it."""
+    return d["bytes"] >= end and (d["use_context_bytes"] == 0 or d["use_context_offset"] >= end)
 
 
 def LedgerChoice(copies):
@@ -744,8 +763,100 @@ def WalkChain(read_block, first, magic, run):
         block = nxt
 
 
+def PoolBlockMix(block, raw):
+    """A closed pool block's part in a seal's fold (meta_pool.c PoolBlockMix):
+    the CRC32 of its records, summed again with the block's number and the
+    records' length."""
+    used = min(U16(raw, 8), MPOOL_DATA)
+    payload = raw[CHAIN_HEADER:CHAIN_HEADER + used]
+    return Crc32(struct.pack("<III", block, used, Crc32(bytes(payload))))
+
+
+def SealStand(read_block, copies, run):
+    """What PoolMount (meta_pool_mount.c) stands on: the newest intact copy's
+    seal borne out; else the other copy's borne out (fell back — the medium is
+    marked SETTLE_MEDIUM_LIED); else a seal whose closed blocks are borne out
+    and whose open block is not (decision 5: its records roll back); else no
+    seal. None when the newest intact copy carries no seal of its own — the
+    volume is read the way a kernel before the seal reads it. Otherwise a dict:
+    stood ('seal' | 'torn' | 'none'), copy, mark, fell_back."""
+    newest = LedgerChoice(copies)
+    if newest is None or not newest["sealed"]:
+        return None
+    tries = [{"copy": newest, "fold": 0, "verdict": None}]
+    other = [c for c in copies if c is not newest and c["ok"] and c["sealed"]]
+    if other and other[0]["mark"]["chain_first"] == newest["mark"]["chain_first"]:
+        tries.append({"copy": other[0], "fold": 0, "verdict": None})
+
+    def judge(block, raw):
+        for t in tries:
+            m = t["copy"]["mark"]
+            if t["verdict"] is not None:
+                continue
+            if block != m["pool_to_block"]:
+                if raw is None:
+                    t["verdict"] = "broken"
+                else:
+                    t["fold"] ^= PoolBlockMix(block, raw)
+                continue
+            to = m["pool_to_bytes"]
+            tail = (raw is not None and to <= MPOOL_DATA and U16(raw, 8) >= to and
+                    Crc32(bytes(raw[CHAIN_HEADER:CHAIN_HEADER + to])) == m["tail_crc32"])
+            t["verdict"] = ("broken" if t["fold"] != m["closed_crc32"]
+                            else "borne" if tail else "torn")
+
+    s0 = newest["mark"]
+    block = s0["chain_first"]
+    for _hops in range(run):
+        raw = read_block(block) if block < run else None
+        ok = raw is not None and U32(raw, 0) == MPOOL_MAGIC
+        judge(block, raw if ok else None)
+        if not ok or block == s0["pool_to_block"]:
+            break
+        if U32(raw, 4) == 0:
+            judge(None, None)
+            break
+        block = U32(raw, 4)
+
+    out = {"stood": "none", "copy": None, "mark": None, "fell_back": False}
+    if tries[0]["verdict"] == "borne":
+        pick, stood = tries[0], "seal"
+    elif len(tries) > 1 and tries[1]["verdict"] == "borne":
+        pick, stood = tries[1], "seal"
+        out["fell_back"] = True
+    else:
+        torn = [t for t in tries if t["verdict"] == "torn"]
+        pick, stood = (torn[0], "torn") if torn else (None, "none")
+    if pick:
+        out.update(stood=stood, copy=pick["copy"], mark=pick["copy"]["mark"])
+    return out
+
+
+def SealCutPool(blocks, raws, seal):
+    """The pool's chain as the mount stands on `seal` (SealStand): up to the
+    seal's open block, whose records end at `to` — none of them when it was
+    torn — and which links nothing. The chain as it is when the seal's block
+    is not on it."""
+    mark = seal["mark"]
+    if mark["pool_to_block"] not in blocks:
+        return blocks, raws
+    i = blocks.index(mark["pool_to_block"])
+    raw = bytearray(raws[i])
+    to = 0 if seal["stood"] == "torn" else mark["pool_to_bytes"]
+    struct.pack_into("<IH", raw, 4, 0, to)
+    raw[CHAIN_HEADER + to:] = bytes(len(raw) - CHAIN_HEADER - to)
+    return blocks[:i + 1], raws[:i] + [bytes(raw)]
+
+
+def NextFileId(ledger_next, top_row, top_record):
+    """MountNextFileId (mount/mount.c): past every id a row or a record shows,
+    never short of the Ledger's count; a wrapped count (0) stays."""
+    nxt = min(max(top_row, top_record) + 1, 0xFFFFFFFF)
+    return ledger_next if ledger_next == 0 or nxt <= ledger_next else nxt
+
+
 def MirrorWalk(pool_blocks, pool_raws):
-    """The mount's mirror (meta_pool_mirror_init): every pool block in chain
+    """The mount's mirror (meta_pool_mount.c, PoolMount): every pool block in chain
     order, every record in append order, and for each fid > 0 the LAST record
     that unpacks. Returns {fid: Record}. The kernel keeps only the fids the
     table has a row for (file_map/), and its roll call asks for no other."""
@@ -853,8 +964,8 @@ class Volume:
         except IOError:
             return None
 
-    def ledger(self):
-        """The Ledger copy the kernel stands on, or None when neither reads."""
+    def ledgers(self):
+        """Both copies of the Ledger, as read."""
         copies = []
         for c in range(LEDGER_COPIES):
             try:
@@ -862,7 +973,11 @@ class Volume:
             except IOError:
                 sector = b""
             copies.append(ReadLedgerCopy(sector, c))
-        return LedgerChoice(copies)
+        return copies
+
+    def ledger(self):
+        """The newest intact Ledger copy, or None when neither reads."""
+        return LedgerChoice(self.ledgers())
 
     def files(self):
         """Every file the mounted kernel would show, resolved the way its mount
@@ -885,9 +1000,17 @@ class Volume:
         _tb, table_raws, _why = WalkChain(self.read_block, table_head, FILETBL_MAGIC, run)
         pool_blocks, pool_raws, _why = WalkChain(self.read_block, pool_head, MPOOL_MAGIC, run)
         rows = TableRows(table_raws)
-        led = self.ledger()
-        next_fid = led["next_file_id"] if led else max(rows, default=0) + 1
-        mirror = MirrorWalk(pool_blocks, pool_raws)
+        copies = self.ledgers()
+        led = LedgerChoice(copies)
+        seal = SealStand(self.read_block, copies, run) if led else None
+        if seal and seal["stood"] != "none":
+            # Under a seal the files are the newest records of the sealed span.
+            pool_blocks, pool_raws = SealCutPool(pool_blocks, pool_raws, seal)
+            mirror = MirrorWalk(pool_blocks, pool_raws)
+            rows = {fid: (r.block, r.at) for fid, r in mirror.items() if r.flags & FILE_ACTIVE}
+        else:
+            mirror = MirrorWalk(pool_blocks, pool_raws)
+        next_fid = max(rows, default=0) + 1
         out = []
         for v in KernelRollCall(self.read_block, next_fid, rows, mirror):
             if v.outcome != "visible" or v.record.flags & FILE_TRASHED:

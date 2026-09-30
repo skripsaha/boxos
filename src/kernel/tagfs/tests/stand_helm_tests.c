@@ -222,7 +222,7 @@ static TestResult TestStandHelmDeleteKeepsReadersBlocks(void)
     TEST_ASSERT(HelmVacated(reader->ofe), "and its Helm says the file was given up");
 
     uint64_t rested = 0;
-    for (uint64_t c = 0; c <= FALLOW_LAG + 1; c++, rested++)
+    for (uint64_t c = 0; c <= FallowLag() + 1; c++, rested++)
         TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle after the delete");
     TEST_ASSERT(StandBlockInUse(block), "the reader's block still rests past the delete's cycles");
     TestEvidence("cycles the deleted file's block rested while a reader had it open", rested);
@@ -234,7 +234,7 @@ static TestResult TestStandHelmDeleteKeepsReadersBlocks(void)
 
     tagfs_close(reader);
     reader = NULL;
-    for (uint64_t c = 0; c <= FALLOW_LAG; c++)
+    for (uint64_t c = 0; c <= FallowLag(); c++)
         TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle after the reader let go");
     TEST_ASSERT(!StandBlockInUse(block), "and the block goes back once the reader let go");
 out:

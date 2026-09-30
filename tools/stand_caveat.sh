@@ -59,18 +59,24 @@ caveat_row() {
         coldread)   echo "|a read into pages its program had not touched yet reported every byte and delivered only those before the first such page" ;;
         coldwrite)  echo "|a write out of pages its program had not touched yet reported every byte, and the file holds other than the zeros those pages are" ;;
         noanchor)   echo "1.7|a file written without anchor has no name after a power cut" ;;
-        nextfid)    echo "1.6|a table written ahead of its ledger hands the same file id out twice" ;;
+        nextfid)    echo "|a table written ahead of its ledger hands the same file id out twice" ;;
         hog)        echo "1.7|on one core under a CPU hog nothing settles a write before the power goes" ;;
         settlecut:FID_PAST_NEXT)
-                    echo "1.6|a sync stopped by SETTLECUT=ledger before its ledger leaves a table row past the ledger's next_file_id" ;;
+                    echo "|a sync stopped by SETTLECUT=ledger before its ledger leaves a table row past the ledger's next_file_id" ;;
         noanchor:ORPHAN|hog:ORPHAN)
                     echo "|a create never anchored, cut by the power, leaves a block marked used that nothing owns — the map is written only inside Settle" ;;
         race:durable)
                     echo "|an anchored file is lost by a later torn sync — the shutdown sync retires its record in place" ;;
+        # Lifted at 1.6: the mount derives the next file id past every row and
+        # record the medium shows (mount/mount.c MountNextFileId) and the host
+        # census the same (medium.py), so no row lies past it; and under the
+        # seal every cycle and mkfs leave, the table is derived from the sealed
+        # pool span — a row with no record there is a cycle that did not
+        # settle, let go, never a file lost.
         nextfid:FID_PAST_NEXT|halt:FID_PAST_NEXT|race:FID_PAST_NEXT|chaingrow:prefix:FID_PAST_NEXT|chaingrow:subset:FID_PAST_NEXT)
-                    echo "1.6|a sync cut between its table and its ledger leaves a table row past the ledger's next_file_id" ;;
+                    echo "|a sync cut between its table and its ledger leaves a table row past the ledger's next_file_id" ;;
         nextfid:FILE_LOST|halt:FILE_LOST|race:FILE_LOST)
-                    echo "1.6|a sync cut between its writes leaves a table row naming a record the pool never got, and the mount deletes the file" ;;
+                    echo "|a sync cut between its writes leaves a table row naming a record the pool never got, and the mount deletes the file" ;;
         nextfid:MISSING|halt:MISSING|race:MISSING)
                     echo "1.6|a sync cut between its writes leaves a named block reading free, for the allocator to hand out again" ;;
         # chaingrow's own rows lifted in step 1.1 as a side effect of the two D5
@@ -93,16 +99,25 @@ caveat_row() {
                     echo "1.6|a sync cut between its writes leaves blocks marked used that nothing owns" ;;
         nextfid:TAG_ABSENT|halt:TAG_ABSENT|race:TAG_ABSENT)
                     echo "1.6|a sync cut between its writes leaves a file wearing a tag the registry does not define" ;;
+        # Lifted at 1.6: under the seal a file is the newest record of the
+        # sealed span, so no ACTIVE record of it goes without its row; and the
+        # pool is read no further than the seal's `to`, so a link past it into
+        # a block the cut kept from landing is never followed.
         nextfid:UNNAMED_RECORD|halt:UNNAMED_RECORD|race:UNNAMED_RECORD)
-                    echo "1.6|a sync cut between its writes leaves an ACTIVE record no table row names, its blocks leaked" ;;
+                    echo "|a sync cut between its writes leaves an ACTIVE record no table row names, its blocks leaked" ;;
         halt:CHAIN_REFUSED|race:CHAIN_REFUSED)
-                    echo "1.6|a cut inside the shutdown sync keeps a pool link to a block none of whose writes landed, and the kernel refuses to mount the volume" ;;
+                    echo "|a cut inside the shutdown sync keeps a pool link to a block none of whose writes landed, and the kernel refuses to mount the volume" ;;
         halt:SPARE_UNNAMED|race:SPARE_UNNAMED)
                     echo "1.6|a cut keeps a stamped spare header whose link was lost, a block nothing names" ;;
+        # Lifted at 1.6: the registry's last block and the pool's open block
+        # are read no further than the seal's bytes, and only when their CRC32
+        # bears the seal out — a torn one rolls back to the blocks before it —
+        # so a torn record, a repeated key or a header counting records the
+        # block does not hold is never read.
         race:TAG_DUPLICATE)
-                    echo "1.6|a registry write torn by the cut leaves a record repeating another's key, and it is dropped" ;;
+                    echo "|a registry write torn by the cut leaves a record repeating another's key, and it is dropped" ;;
         race:RECORD_SHAPE)
-                    echo "1.6|the pool's last block is rewritten in place, so a cut that tears it after its first sector leaves a header counting records the block no longer holds, and the walk stops short" ;;
+                    echo "|the pool's last block is rewritten in place, so a cut that tears it after its first sector leaves a header counting records the block no longer holds, and the walk stops short" ;;
         chaingrow:prefix:CHAIN_REFUSED:table)
                     echo "|the file table writes its last block's link to a block it has just taken before that block, so a power cut between the two leaves a chain into unstamped ground and the kernel refuses the volume at every mount" ;;
         chaingrow:prefix:CHAIN_REFUSED:registry)

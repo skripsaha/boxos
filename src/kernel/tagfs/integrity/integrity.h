@@ -52,8 +52,7 @@ void     IntegrityDrainReports(void);
 bool     IntegrityIsInitialized(void);
 uint32_t IntegrityErrorCount(void);  // bit-rot detections this session
 
-// Mark the map's own blocks in an fsck computed-bitmap so they are not seen as
-// orphans (and are protected from reuse even if the on-disk bitmap is stale).
-void     IntegrityMarkMapBlocks(uint8_t *computed_bm, uint32_t total_blocks);
+// The mount's census: the map's own run, which no file names, claimed.
+void     IntegrityClaimGround(void);
 
 #endif // TAGFS_INTEGRITY_H

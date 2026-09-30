@@ -89,6 +89,7 @@
 #define RECORD_HEADER_SIZE    42   /* metadata pool record header (40 fields + 2 CRC16) */
 #define RECORD_CRC_OFFSET     40   /* CRC16 stored at bytes [40..41] of packed record */
 #define MPOOL_BLOCK_HEADER    16   /* MetaPoolBlock header before payload */
+#define INTEGRITY_DIGESTS_PER_BLOCK  (TAGFS_BLOCK_SIZE / 8)   /* integrity.c ENTRIES_PER_BLOCK */
 
 /* ====================================================================
  * On-disk structures — must match kernel's tagfs.h exactly
@@ -778,7 +779,21 @@ static int write_deed(FILE* disk, uint32_t role, uint64_t vsector,
  * still has to mount, and a mount reads whichever copy is newer. They carry
  * the same seq here, and the first write the kernel makes goes to the other
  * one with seq+1 — from then on the pair alternates forever.
+ *
+ * Both are SEALED (volume_ledger.h, SettleMark): mkfs is the volume's first
+ * settled cycle, and a machine stopping cleanly — the pool from its head to
+ * its last record and the registry to its last record, with their CRC32s — so
+ * the first mount stands on a seal like every mount after it.
  * ==================================================================== */
+
+/* A closed pool block's part in the seal's fold (volume_ledger.h,
+ * closed_crc32): the CRC32 of its records, summed again with the block's
+ * number and the records' length — metadata_pool/meta_pool.c PoolBlockMix,
+ * the same twelve bytes, little-endian. */
+static uint32_t pool_block_mix(uint32_t block, const MetaPoolBlock* blk) {
+    uint32_t mix[3] = { block, blk->used_bytes, tagfs_crc32(blk->payload, blk->used_bytes) };
+    return tagfs_crc32((const uint8_t*)mix, sizeof(mix));
+}
 
 static int write_ledger(FILE* disk, const VolumeShape* shape,
                         const VolumeLedger* src) {
@@ -802,6 +817,34 @@ static int write_ledger(FILE* disk, const VolumeShape* shape,
         uint64_t vsector = (uint64_t)(shape->ledger_block + copy) * TAGFS_BLOCK_SECTORS;
         if (write_at_sector(disk, vsector, block, sizeof(block)) != 0) return -1;
     }
+    return 0;
+}
+
+/* ====================================================================
+ * The integrity map
+ *
+ * One 64-bit digest per block of the data run (tagfs/integrity/), a zero
+ * digest meaning "unknown", laid down here already zeroed: a mount never lays
+ * a map, so it never writes and flushes a run of zeros the size of the volume
+ * before the volume is up (RT-15). The Ledger names it (write_ledger's
+ * caller).
+ * ==================================================================== */
+
+static int write_integrity_map(FILE* disk, uint32_t data_start_block, uint32_t first,
+                               uint32_t count, uint32_t total_blocks) {
+    if (first + count > total_blocks) {
+        fprintf(stderr, "Not enough blocks for the integrity map (%u at %u)\n", count, first);
+        return -1;
+    }
+    uint8_t zero[TAGFS_BLOCK_SIZE];
+    memset(zero, 0, sizeof(zero));
+    for (uint32_t i = 0; i < count; i++) {
+        if (write_block(disk, data_start_block, first + i, zero) != 0) {
+            fprintf(stderr, "Failed to write integrity map block %u\n", first + i);
+            return -1;
+        }
+    }
+    printf("  Integrity map: %u block(s) at data block %u\n", count, first);
     return 0;
 }
 
@@ -833,7 +876,7 @@ static uint32_t registry_record_size(const TagEntry* t) {
  */
 static int write_registry_chain(FILE* disk, uint32_t data_start_block,
                                 uint32_t* next_free, uint32_t total_blocks,
-                                uint32_t* out_blocks) {
+                                uint32_t* out_blocks, SettleMark* mark) {
     TagRegistryBlock blk;
     memset(&blk, 0, sizeof(blk));
     blk.magic = TAGFS_REGISTRY_MAGIC;
@@ -907,6 +950,11 @@ static int write_registry_chain(FILE* disk, uint32_t data_start_block,
         fprintf(stderr, "Failed to write tag registry block %u\n", here);
         return -1;
     }
+
+    /* The seal's part of the registry: its last block, and its records. */
+    mark->registry_block = here;
+    mark->registry_bytes = blk.used_bytes;
+    mark->registry_crc32 = tagfs_crc32(blk.data, blk.used_bytes);
 
     *out_blocks = blocks;
     return 0;
@@ -1111,6 +1159,11 @@ static int say_the_ground(int pair_count, char* argv[], int first) {
 
     data_blocks += GROUND_WORKING_ROOM_BLOCKS;
 
+    /* And the integrity map mkfs lays down zeroed (write_integrity_map): one
+     * digest per block of the run, a block of digests past the estimate for
+     * the run the grain rounds up to. */
+    data_blocks += (data_blocks + INTEGRITY_DIGESTS_PER_BLOCK - 1) / INTEGRITY_DIGESTS_PER_BLOCK + 1;
+
     /* compute_layout answers the other way round — ground in, data run out —
      * and the bitmap in between makes it not quite invertible. So the ground
      * is grown a grain at a time until the run it yields is big enough. It
@@ -1270,9 +1323,11 @@ int main(int argc, char* argv[]) {
 
     /* ---- Write tag registry (block 0, chains if needed) ---- */
     printf("\n[create_tagfs] Writing tag registry...\n");
-    uint32_t reg_blocks = 1;
+    uint32_t   reg_blocks = 1;
+    SettleMark seal;
+    memset(&seal, 0, sizeof(seal));
     if (write_registry_chain(disk, data_start_block, &next_block,
-                             total_blocks, &reg_blocks) != 0) {
+                             total_blocks, &reg_blocks, &seal) != 0) {
         fclose(disk); return 1;
     }
     if (reg_blocks > 1) {
@@ -1353,6 +1408,7 @@ int main(int argc, char* argv[]) {
             }
             printf("  Metadata pool: block %u full (%u records, %u bytes), chaining to block %u\n",
                    current_mpool_block, mpool.record_count, mpool.used_bytes, new_mpool_block);
+            seal.closed_crc32 ^= pool_block_mix(current_mpool_block, &mpool);
 
             /* Start fresh block */
             current_mpool_block = new_mpool_block;
@@ -1381,6 +1437,12 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "Failed to write metadata pool block %u\n", current_mpool_block);
         free(ftable_all); fclose(disk); return 1;
     }
+    seal.chain_first     = 2;
+    seal.pool_from_block = 2;
+    seal.pool_from_bytes = 0;
+    seal.pool_to_block   = current_mpool_block;
+    seal.pool_to_bytes   = mpool.used_bytes;
+    seal.tail_crc32      = tagfs_crc32(mpool.payload, mpool.used_bytes);
     if (mpool_block_count > 1) {
         printf("  Metadata pool: %u blocks total\n", mpool_block_count);
     }
@@ -1428,6 +1490,15 @@ int main(int argc, char* argv[]) {
         }
     }
     free(ftable_all);
+
+    /* ---- The integrity map, laid zeroed where the Ledger names it ---- */
+    printf("[create_tagfs] Writing the integrity map...\n");
+    uint32_t map_first = next_block;
+    uint32_t map_count = (total_blocks + INTEGRITY_DIGESTS_PER_BLOCK - 1) / INTEGRITY_DIGESTS_PER_BLOCK;
+    if (write_integrity_map(disk, data_start_block, map_first, map_count, total_blocks) != 0) {
+        fclose(disk); return 1;
+    }
+    next_block += map_count;
 
     /* ---- Write block bitmap ---- */
     printf("[create_tagfs] Writing block bitmap...\n");
@@ -1512,6 +1583,11 @@ int main(int argc, char* argv[]) {
     led.next_file_id = (uint32_t)(file_count + 1);
     led.next_tag_id  = g_tag_count;
     led.total_tags   = g_tag_count;
+    led.integrity_map_block  = map_first;
+    led.integrity_map_blocks = map_count;
+    led.mark         = seal;
+    led.mark.settle  = led.seq;
+    led.mark.flags   = SETTLE_CLEAN;
 
     if (write_ledger(disk, &shape, &led) != 0) {
         fprintf(stderr, "Failed to write the Ledger\n");

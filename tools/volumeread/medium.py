@@ -778,8 +778,16 @@ class VolumeFacts:
             self.chains[name] = (blocks, raws)
             if why:
                 self.refused[name] = why
+        # Every id the pool's chain shows — past a seal too: the medium has
+        # seen it, and the mount's next file id is past it (mount/mount.c).
+        top_record = max((fid for r in self.chains["pool"][1]
+                          for _a, _l, fid in ondisk.ReadPoolBlock(r)["mirror_walk"]), default=0)
+        self.seal = ondisk.SealStand(self.read_block, self.ledgers, D) if self.ledger else None
+        sealed = self.seal is not None and self.seal["stood"] != "none"
+        if sealed:
+            self._CutToSeal()
         self.registry = [(b, ondisk.ReadRegistryBlock(r)) for b, r in zip(*self.chains["registry"])]
-        self.rows = ondisk.TableRows(self.chains["table"][1])
+        self.rows_medium = ondisk.TableRows(self.chains["table"][1])
         self.pool = [(b, ondisk.ReadPoolBlock(r), r) for b, r in zip(*self.chains["pool"])]
         # Every record in append order, and the newest of each file with no
         # capacity: the truth view (the mount's mirror is KernelView's).
@@ -789,3 +797,59 @@ class VolumeFacts:
         for r in self.records:
             if r.fid and r.unpack_ok:
                 self.newest[r.fid] = r
+        # Under a seal the table is derived from the pool's span: a file is
+        # the newest record of its id, and a row the span does not bear out is
+        # a cycle that did not settle (mount/mount.c). With no seal the table
+        # says which files there are.
+        if sealed:
+            self.rows = {fid: (r.block, r.at) for fid, r in self.newest.items()
+                         if r.flags & ondisk.FILE_ACTIVE}
+        else:
+            self.rows = self.rows_medium
+        if self.ledger:
+            self.ledger = dict(self.ledger)
+            self.ledger["next_file_id"] = ondisk.NextFileId(
+                self.ledger["next_file_id"], max(self.rows_medium, default=0), top_record)
+
+    def _CutToSeal(self):
+        """The chains as the mount stands on the seal: the Ledger copy the seal
+        rides in; the pool to the seal's open block, its records no further
+        than `to` — none of them when the block was torn (decision 5) — and
+        linking nothing; the registry to the block the seal names, with the
+        records of the newest seal whose CRC32 the block bears out, else none
+        (tag_registry_load.c RegistrySealedBytes); a table block that does not
+        read is no refusal (file_table.c)."""
+        st, mark = self.seal, self.seal["mark"]
+        self.ledger = st["copy"]
+
+        blocks, raws = self.chains["pool"]
+        if mark["pool_to_block"] in blocks:
+            self.chains["pool"] = ondisk.SealCutPool(blocks, raws, st)
+            self.refused.pop("pool", None)
+
+        blocks, raws = self.chains["registry"]
+        seals = [c["mark"] for c in self.ledgers if c["ok"] and c["sealed"]]
+        seals.sort(key=lambda m: -m["settle"])
+        at = mark["registry_block"]
+        if at in blocks:
+            i = blocks.index(at)
+            raw = bytearray(raws[i])
+            data = bytes(raw[ondisk.CHAIN_HEADER:ondisk.CHAIN_HEADER + ondisk.REGISTRY_DATA])
+            keep = 0
+            for m in seals:
+                if (m["registry_block"] == at and m["registry_bytes"] <= ondisk.REGISTRY_DATA and
+                        ondisk.Crc32(data[:m["registry_bytes"]]) == m["registry_crc32"]):
+                    keep = m["registry_bytes"]
+                    break
+            count, off = 0, 0
+            for rec in ondisk.ReadRegistryBlock(bytes(raw))["records"]:
+                size = ondisk.REGISTRY_RECORD.size + rec["key_len"] + rec["value_len"]
+                if off + size > keep:
+                    break
+                off += size
+                count += 1
+            struct.pack_into("<IHH", raw, 4, 0, count, off)
+            raw[ondisk.CHAIN_HEADER + off:] = bytes(len(raw) - ondisk.CHAIN_HEADER - off)
+            self.chains["registry"] = (blocks[:i + 1], raws[:i] + [bytes(raw)])
+            self.refused.pop("registry", None)
+        self.refused.pop("table", None)

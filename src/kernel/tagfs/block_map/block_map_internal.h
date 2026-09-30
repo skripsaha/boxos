@@ -13,7 +13,7 @@
  * to or from the medium, which only its transfer touches.
  */
 
-#define MAP_WINDOW_BLOCKS  (TAGFS_SECTOR_SIZE * 8u)    /* the blocks one sector of the map covers */
+#define MAP_WINDOW_BLOCKS  BLOCK_MAP_WINDOW_BLOCKS     /* the blocks one sector of the map covers */
 #define MAP_PAGE_SLOTS     64u                        /* a budget: 32 KiB of sectors on any volume */
 #define MAP_NO_WINDOW      0xFFFFFFFFu
 

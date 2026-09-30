@@ -738,6 +738,17 @@ uint32_t FileMapRows(FileMap* map, uint32_t from, uint32_t* out, uint32_t room)
     return n;
 }
 
+uint32_t FileMapFiles(FileMap* map, uint32_t from, uint32_t* out, uint32_t room)
+{
+    uint32_t n = 0, pos = 0;
+    TagFSLockTake(&map->lock);
+    for (FileMapNode* leaf = MapFrom(map, from, &pos); leaf && n < room; leaf = leaf->next, pos = 0)
+        for (; pos < leaf->count && n < room; pos++)
+            out[n++] = leaf->key[pos];
+    TagFSLockDrop(&map->lock);
+    return n;
+}
+
 void FileMapRowsInto(FileMap* map, uint32_t first, uint32_t count, FileTableEntry* out)
 {
     uint32_t pos = 0;

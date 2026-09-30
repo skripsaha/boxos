@@ -599,7 +599,7 @@ static TestResult TestStandRegistryScratchLeavesTheVolumeAlone(void)
     TEST_ASSERT(scratch != NULL, "memory for a registry of the test's own");
     TEST_ASSERT_EQ(tag_registry_init(scratch), 0, "a registry of the test's own is built");
     built = true;
-    TEST_ASSERT_EQ(tag_registry_load(scratch, before.blocks[0]), 0,
+    TEST_ASSERT_EQ(tag_registry_load(scratch, before.blocks[0], NULL, NULL), 0,
                    "it reads the volume's registry off the medium");
     TagSpelling own = TagSpellingOfKey("stand_scratch");
     uint16_t    own_id;
@@ -661,7 +661,7 @@ static TestResult TestStandRegistryLoadRefusesWhatItCannotHold(void)
 
         HeapFailArm(me, n);
         armed = true;
-        int  loaded = tag_registry_load(scratch, before.blocks[0]);
+        int  loaded = tag_registry_load(scratch, before.blocks[0], NULL, NULL);
         bool fired  = HeapFailFired();
         HeapFailDisarm();
         armed = false;

@@ -68,25 +68,22 @@ static uint32_t QueryHides(const uint16_t* tag_ids, uint32_t tag_count,
 // Every file
 // ----------------------------------------------------------------------------
 
-/* The files are the map's that have a row, below the id the next create
- * takes: a row past it names an id the volume never issued — a table written
- * ahead of its Ledger — which the mount leaves unchecked and in no index, and
- * no answer lists (nextfid, step 1.6). The bound is taken once per page. */
+/* The files are the map's that have a row. Every one is below the id the next
+ * create takes: the mount derives that id past every row and record the
+ * medium holds (mount/mount.c), so no row names an id the volume never
+ * issued. */
 static void ListPageInside(uint32_t from, uint32_t* out, uint32_t room, bool want_total,
                            TagFSPage* page)
 {
     TagFSState* fs = tagfs_get_state();
     uint16_t    hide[2];
     uint32_t    hides = QueryHides(NULL, 0, NULL, 0, hide);
-    uint32_t    below = tagfs_file_ceiling();
     uint32_t    batch[QUERY_BATCH];
     uint32_t    at = from ? from : 1;
     uint32_t    n;
 
     while ((n = FileMapRows(fs->files, at, batch, QUERY_BATCH)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
-            if (batch[i] >= below)
-                return;
             bool hidden = false;
             for (uint32_t h = 0; h < hides && !hidden; h++)
                 hidden = TagBitmapHas(fs->bitmap_index, hide[h], batch[i]);
@@ -237,13 +234,11 @@ uint32_t tagfs_get_fragmentation_score(uint32_t* out_files, uint32_t* out_gaps)
     if (!tagfs_enter())
         return 0;
 
-    uint32_t below = tagfs_file_ceiling();
     uint32_t batch[QUERY_BATCH];
     uint32_t at = 1;
     uint32_t n;
-    while ((n = FileMapRows(tagfs_get_state()->files, at, batch, QUERY_BATCH)) > 0 &&
-           batch[0] < below) {
-        for (uint32_t i = 0; i < n && batch[i] < below; i++)
+    while ((n = FileMapRows(tagfs_get_state()->files, at, batch, QUERY_BATCH)) > 0) {
+        for (uint32_t i = 0; i < n; i++)
             FragOfFile(&frag, batch[i]);
         if (batch[n - 1] == 0xFFFFFFFFu)
             break;

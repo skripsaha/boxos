@@ -18,7 +18,7 @@
  *
  *   (1) the record that freed it lies in a CLOSED block of the pool — never
  *       rewritten again;
- *   (2) the cycle that settled that block has been followed by FALLOW_LAG
+ *   (2) the cycle that settled that block has been followed by FallowLag()
  *       more: the Ledger's other copy has moved past it too;
  *   (3) no open handle of the file views it as it was before — one opened
  *       before the freer (its view_gen below the freer's gen) keeps the ground
@@ -43,9 +43,11 @@
 
 /* One cycle more for a medium that keeps its FLUSH, derived: the newest copy
  * of the Ledger a cycle wrote can tear, and then the mount stands on the copy
- * before it — one cycle back, never two. A medium that lied about a FLUSH
- * (MEDIUM_LIED, steps 1.6 and 1.12) needs one more. */
-#define FALLOW_LAG ((uint64_t)VOLUME_LEDGER_COPIES - 1u)
+ * before it — one cycle back, never two. A volume whose seals say the medium
+ * once held less than a settled cycle's seal (SETTLE_MEDIUM_LIED) waits one
+ * more: the budget that covers a lie one cycle deep; a deeper one is two
+ * owners of a block, which the mount's census names. */
+uint64_t    FallowLag(void);
 
 typedef enum {
     FALLOW_BY_RECORD = 1,

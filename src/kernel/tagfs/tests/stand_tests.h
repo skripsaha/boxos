@@ -41,6 +41,10 @@
 // stand_use_tests.c      the stand_use suite: a context said without a number
 //                        issued, two sayings that race to the volume, and the
 //                        scheduler's question under a context of any size
+// stand_seal_tests.c     the stand_seal suite: the seal a cycle leaves, a cycle
+//                        cut at its pool and its Ledger, seals the medium does
+//                        not bear out, a table torn under a seal, and the next
+//                        file id derived
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.

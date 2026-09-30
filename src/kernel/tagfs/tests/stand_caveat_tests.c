@@ -679,7 +679,7 @@ TestResult TestStandFrozenBlockFreedTwice(void)
     TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "the file is deleted");
     file_id = 0;
     TEST_ASSERT(StandBlockInUse(kept), "its block rests while the Quitclaim is not settled");
-    for (uint64_t c = 0; c <= FALLOW_LAG; c++)
+    for (uint64_t c = 0; c <= FallowLag(); c++)
         TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle after the delete");
     TEST_ASSERT(!StandBlockInUse(kept), "and goes back once the cycles after it settled");
 
