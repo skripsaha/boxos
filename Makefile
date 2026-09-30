@@ -601,6 +601,22 @@ CFLAGS += -DCONFIG_XHCI_ENUM_SILENCE_PROOF=1
 endif
 ENUMSILENCE_MARK = $(BUILDDIR)/.enumsilence.$(if $(filter on,$(ENUMSILENCE)),on,off)
 
+# ── STRICT=on, the kernel's half ───────────────────────────────────────────
+#
+# STRICT=on is first a machine key: QEMU run the way real hardware runs (the
+# block over `STRICT ?= off` further down). It reaches the kernel as well, for
+# the one thing a stand must not soften either: LockRank's witness
+# (tagfs/lock_rank/) PANICS at a TagFS lock held across a medium command or a
+# Scribe wait, or taken out of order, where it would otherwise name the place
+# in one line. Since step 1.5 no such place is held under a step of the plan,
+# so every place is a defect, and the matrix — which runs STRICT — stops on
+# it. Keyed like every other key: `make run-bg STRICT=on` on a tree built
+# without it builds the kernel again, with it.
+ifeq ($(STRICT),on)
+CFLAGS += -DCONFIG_STRICT=1
+endif
+STRICT_MARK = $(BUILDDIR)/.strict.$(if $(filter on,$(STRICT)),on,off)
+
 # ‼ THE ONE KEY THAT MUST NOT REACH THE COMPILER. `make HARNESS=on` says who is
 # asking — the test harness, which has the tree deliberately mutated — and it
 # lets the pack gate stamp the image UNDER TEST instead of refusing it. It adds
@@ -631,6 +647,7 @@ BUILD_KEYS_SET := $(strip \
   $(if $(filter on,$(RETURNFAIL)),RETURNFAIL=on,) \
   $(if $(SETTLECUT),SETTLECUT=$(SETTLECUT),) \
   $(if $(filter on,$(ENUMSILENCE)),ENUMSILENCE=on,) \
+  $(if $(filter on,$(STRICT)),STRICT=on,) \
   $(if $(filter off,$(NOEXEC)),NOEXEC=off,) \
   $(if $(filter off,$(IOMMU)),IOMMU=off,))
 BUILD_KEYS := $(if $(BUILD_KEYS_SET),$(BUILD_KEYS_SET),all defaults)
@@ -941,6 +958,10 @@ $(ENUMSILENCE_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.enumsilence.*
 	@touch $@
 
+$(STRICT_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.strict.*
+	@touch $@
+
 # EVERY KEY THAT REACHES THE COMPILER, NAMED ONCE.
 #
 # ‼ This list used to be written out twice — in the USB object rule and in the
@@ -957,7 +978,8 @@ BUILD_KEY_MARKS := $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) \
                    $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) \
                    $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) \
                    $(SETTLECUT_MARK) $(IOMMU_MARK) $(INTX_MARK) $(DEBUG_MARK) \
-                   $(BRINGUP_MARK) $(WEDGETEST_MARK) $(ENUMSILENCE_MARK)
+                   $(BRINGUP_MARK) $(WEDGETEST_MARK) $(ENUMSILENCE_MARK) \
+                   $(STRICT_MARK)
 
 $(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(BUILD_KEY_MARKS) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
@@ -1453,6 +1475,9 @@ UEFI       ?= off
 #                              BIOS run (STRICT=off) is on it as well.
 #   • -d guest_errors,unimp,cpu_reset — log every undefined / unimplemented
 #                              guest behaviour QEMU normally absorbs silently.
+#   • CONFIG_STRICT in the kernel — LockRank panics at its places instead of
+#                              naming them (the kernel's half, with the keys
+#                              above).
 #   STRICT deliberately does NOT set -no-reboot or -no-shutdown:
 #     - Real hardware reboots after reset (and triple-fault); STRICT mirrors
 #       that — `reboot` actually restarts the VM, matching production.

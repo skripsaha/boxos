@@ -43,10 +43,11 @@ static TagFSState* InkState(void)
 }
 
 // ----------------------------------------------------------------------------
-// The guards (RT-09)
+// The guards (RT-09, RT-13)
 // ----------------------------------------------------------------------------
 
-bool InkTagGuarded(uint16_t tag_id)
+/* Whether a tag's key is one no Ink takes off a file: system, boot, god. */
+static bool InkTagGuarded(uint16_t tag_id)
 {
     TagSpelling tag = { 0 };
     if (tag_id == TAGFS_INVALID_TAG_ID ||
@@ -56,7 +57,9 @@ bool InkTagGuarded(uint16_t tag_id)
            TagSpanIs("god", tag.key, tag.key_len);
 }
 
-bool InkTouchesBoot(const FileExtent* runs, uint32_t count)
+/* Whether any of the runs holds a block of the kernel the Deed points the
+ * loader at. */
+static bool InkTouchesBoot(const FileExtent* runs, uint32_t count)
 {
     TagFSState* fs = InkState();
     if (!fs->boot.kernel_blocks || fs->boot.kernel_block < fs->layout.data_block)
@@ -71,12 +74,36 @@ bool InkTouchesBoot(const FileExtent* runs, uint32_t count)
     return false;
 }
 
-static bool InkWearsGuarded(const FileRecord* rec)
+static bool InkWearsGuarded(const uint16_t* tags, uint32_t count)
 {
-    for (uint32_t i = 0; i < rec->tag_count; i++)
-        if (InkTagGuarded(rec->tags[i]))
+    for (uint32_t i = 0; i < count; i++)
+        if (InkTagGuarded(tags[i]))
             return true;
     return false;
+}
+
+/* The guard with the ground a change lets go of asked too: a Plot's freed runs
+ * are the kernel's no more than its runs may be. */
+static error_t InkGuard(uint32_t fid, const uint16_t* tags, uint32_t tag_count,
+                        const FileExtent* runs, uint32_t run_count,
+                        const FileExtent* freed, uint32_t freed_count)
+{
+    if (TagFSMediumLeft())
+        return ERR_DEVICE_NOT_READY;
+    if (InkWearsGuarded(tags, tag_count) || InkTouchesBoot(runs, run_count) ||
+        InkTouchesBoot(freed, freed_count)) {
+        kprintf("[TagFS] file %u is one the loader reads by its blocks — it wears system, boot "
+                "or god, or holds the kernel the Deed points the loader at — and it is not "
+                "changed\n", fid);
+        return ERR_PERMISSION_DENIED;
+    }
+    return OK;
+}
+
+error_t InkMayChange(uint32_t fid, const uint16_t* tags, uint32_t tag_count,
+                     const FileExtent* runs, uint32_t run_count)
+{
+    return InkGuard(fid, tags, tag_count, runs, run_count, NULL, 0);
 }
 
 // ----------------------------------------------------------------------------
@@ -239,6 +266,8 @@ static error_t InkPlotLocked(Plot* p, const RecordWhere* was, InkRecord* r, Fall
     InkRowFollows(p->fid, &where);
     if (fallow)
         FallowAdd(fallow, gen);
+    if (p->claimed)
+        p->helm->claimed_runs = 0;    /* the record names them now */
     if (p->data_need > s_data_need)
         s_data_need = p->data_need;
     __atomic_store_n(&s_inked_gen, gen, __ATOMIC_RELEASE);
@@ -246,13 +275,15 @@ static error_t InkPlotLocked(Plot* p, const RecordWhere* was, InkRecord* r, Fall
     return OK;
 }
 
+/* The tags the Plot was loaded with are the ones asked: a file that came to
+ * wear a guarded tag after the load had its bytes laid already, and refusing
+ * the record now would take back its size, not its bytes. */
 error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
 {
-    if (InkTouchesBoot(p->runs, p->run_count) || InkTouchesBoot(p->freed, p->freed_count)) {
-        kprintf("[TagFS] file %u holds the kernel the loader reads by its blocks — its "
-                "extents are not changed\n", p->fid);
-        return ERR_PERMISSION_DENIED;
-    }
+    error_t rc = InkGuard(p->fid, p->meta.tag_ids, p->meta.tag_count, p->runs, p->run_count,
+                          p->freed, p->freed_count);
+    if (rc != OK)
+        return rc;
 
     FallowNode* fallow = NULL;
     if (p->freed_count &&
@@ -260,7 +291,6 @@ error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
         return ERR_NO_MEMORY;
 
     uint64_t now = rtc_get_unix64();
-    error_t  rc;
     for (;;) {
         RecordWhere was;
         FileRecord* cur = FileMapRecordHold(InkState()->files, p->fid, &was);
@@ -297,6 +327,7 @@ error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
     if (rc != OK)
         return rc;
 
+    p->claimed       = 0;
     p->stake_count   = 0;
     p->freed_count   = 0;
     p->size_before   = p->size;
@@ -305,6 +336,53 @@ error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
     p->shape         = out->gen;
     p->data_need     = 0;
     return OK;
+}
+
+/* Under the state lock, so a name or a tag inked for the file either came
+ * before — and the record as it is now is the one checked here — or comes
+ * after, and finds the room claimed. */
+error_t InkRoomClaim(Plot* p)
+{
+    if (!p->helm || p->run_count <= p->runs_before)
+        return OK;
+
+    TagFSState* fs = InkState();
+    error_t     rc = OK;
+    TagFSLockTake(&fs->lock);
+    FileRecord* cur = FileMapRecordHold(fs->files, p->fid, NULL);
+    if (!cur) {
+        rc = ERR_FILE_NOT_FOUND;
+    } else {
+        TagFSMetadata record = {
+            .filename     = (char*)cur->name,
+            .tag_ids      = (uint16_t*)cur->tags,
+            .tag_count    = cur->tag_count,
+            .extent_count = p->run_count,
+        };
+        if (PlotFits(&record, NULL)) {
+            p->helm->claimed_runs = p->run_count;
+            p->claimed            = p->run_count;
+        } else {
+            rc = ERR_TAGFS_RECORD_FULL;
+        }
+        FileRecordRelease(cur);
+    }
+    TagFSLockDrop(&fs->lock);
+    if (rc == ERR_TAGFS_RECORD_FULL)
+        kprintf("[TagFS] file %u: its name and tags as they are now leave its record no room "
+                "for the %u extent(s) this call would name — refused, and nothing of it "
+                "written\n", p->fid, p->run_count);
+    return rc;
+}
+
+void InkRoomLetGo(Plot* p)
+{
+    if (!p->claimed)
+        return;
+    TagFSLockTake(&InkState()->lock);
+    p->helm->claimed_runs = 0;
+    TagFSLockDrop(&InkState()->lock);
+    p->claimed = 0;
 }
 
 // ----------------------------------------------------------------------------
@@ -352,9 +430,22 @@ static bool InkFieldsTags(const FileRecord* cur, const char* name, uint16_t add,
     return true;
 }
 
+/* The record `meta` describes must also leave the room a write in flight
+ * claimed (RT-19): the extents that write will ink, where they are more than
+ * the record names now. */
+static bool InkFieldsLeaveRoom(uint32_t fid, const TagFSMetadata* meta)
+{
+    uint32_t claimed = HelmClaimedRuns(fid);
+    if (claimed <= meta->extent_count)
+        return true;
+    TagFSMetadata wide = *meta;
+    wide.extent_count  = claimed;
+    return PlotFits(&wide, NULL);
+}
+
 static error_t InkFieldsLocked(uint32_t fid, const RecordWhere* was, const InkFieldsPlan* f,
-                               uint16_t add, InkRecord* r, TagBitmapStake* stake,
-                               InkReceipt* out)
+                               const TagFSMetadata* meta, uint16_t add, InkRecord* r,
+                               TagBitmapStake* stake, InkReceipt* out)
 {
     TagFSState* fs = InkState();
     RecordWhere now;
@@ -366,6 +457,8 @@ static error_t InkFieldsLocked(uint32_t fid, const RecordWhere* was, const InkFi
         return INK_AGAIN;
     if (f->adds && !TagBitmapStakeCovers(fs->bitmap_index, &add, 1, fid, stake))
         return INK_AGAIN;
+    if (!InkFieldsLeaveRoom(fid, meta))
+        return ERR_TAGFS_RECORD_FULL;
 
     InkPlan plan;
     error_t rc = InkPlanFor(fid, &now, r->bytes, false, &plan);
@@ -401,11 +494,23 @@ static error_t InkFieldsOnce(uint32_t fid, const char* name, uint16_t add, uint1
     InkFieldsPlan   f;
     InkRecord       r     = { 0 };
     TagBitmapStake* stake = NULL;
-    error_t         rc    = OK;
+    error_t         rc    = TagFSMediumLeft() ? ERR_DEVICE_NOT_READY : OK;
     if (!InkFieldsTags(cur, name, add, drop, &f)) {
         FileRecordRelease(cur);
         return ERR_NO_MEMORY;
     }
+    TagFSMetadata meta = {
+        .file_id       = fid,
+        .flags         = cur->flags,
+        .size          = cur->size,
+        .created_time  = cur->created_time,
+        .modified_time = cur->modified_time,
+        .filename      = (char*)(name ? name : cur->name),
+        .tag_ids       = f.tags,
+        .tag_count     = f.count,
+        .extents       = (FileExtent*)cur->extents,
+        .extent_count  = cur->extent_count,
+    };
     for (uint32_t i = 0; i < f.drops && i < 2 && rc == OK; i++)
         if (InkTagGuarded(f.dropped[i]))
             rc = ERR_PERMISSION_DENIED;
@@ -414,31 +519,21 @@ static error_t InkFieldsOnce(uint32_t fid, const char* name, uint16_t add, uint1
         out->gen = was.gen;
         goto out;
     }
-    if (rc == OK) {
-        TagFSMetadata meta = {
-            .file_id       = fid,
-            .flags         = cur->flags,
-            .size          = cur->size,
-            .created_time  = cur->created_time,
-            .modified_time = cur->modified_time,
-            .filename      = (char*)(name ? name : cur->name),
-            .tag_ids       = f.tags,
-            .tag_count     = f.count,
-            .extents       = (FileExtent*)cur->extents,
-            .extent_count  = cur->extent_count,
-        };
+    if (rc == OK)
         rc = InkRecordMake(&meta, true, &r);
-    }
     if (rc == OK && f.adds)
         rc = TagBitmapStakeFor(fs->bitmap_index, &add, 1, fid, &stake);
     if (rc == OK) {
         TagFSLockTake(&fs->lock);
-        rc = InkFieldsLocked(fid, &was, &f, add, &r, stake, out);
+        rc = InkFieldsLocked(fid, &was, &f, &meta, add, &r, stake, out);
         TagFSLockDrop(&fs->lock);
     }
 out:
     if (rc == ERR_PERMISSION_DENIED)
         kprintf("[TagFS] file %u: a tag of key system, boot or god does not come off it\n", fid);
+    else if (rc == ERR_TAGFS_RECORD_FULL)
+        kprintf("[TagFS] file %u: its record has no room for this name or tag beside the extents "
+                "it names and those a write in flight will name — refused\n", fid);
     TagBitmapStakeLetGo(stake);
     InkRecordLetGo(&r);
     kfree(f.tags);
@@ -516,6 +611,8 @@ error_t InkNew(const char* name, const uint16_t* tags, uint32_t count, uint32_t*
         .tag_count     = count,
     };
 
+    if (TagFSMediumLeft())
+        return ERR_DEVICE_NOT_READY;
     InkRecord r;
     error_t   rc = InkRecordMake(&meta, true, &r);
     if (rc == ERR_TAGFS_RECORD_FULL)
@@ -595,12 +692,8 @@ static error_t InkQuitclaimOnce(uint32_t fid, InkReceipt* out)
 
     FallowNode* fallow = NULL;
     InkRecord   r      = { 0 };
-    error_t     rc     = OK;
-    if (InkWearsGuarded(cur) || InkTouchesBoot(cur->extents, cur->extent_count)) {
-        kprintf("[TagFS] file %u wears system, boot or god, or holds the kernel the loader "
-                "reads — it is not given up\n", fid);
-        rc = ERR_PERMISSION_DENIED;
-    }
+    error_t     rc     = InkMayChange(fid, cur->tags, cur->tag_count, cur->extents,
+                                      cur->extent_count);
     if (rc == OK && cur->extent_count &&
         !(fallow = FallowNodeMake(cur->extents, cur->extent_count, FALLOW_BY_RECORD, fid)))
         rc = ERR_NO_MEMORY;

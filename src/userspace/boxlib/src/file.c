@@ -261,7 +261,8 @@ int file_info(uint32_t file_id, file_info_t *info)
 /* fread / fwrite return the byte count transferred (0 .. 4 GiB) or a negative
  * -error_t on failure. The STORAGE wire field is 32-bit, so a single call moves
  * at most UINT32_MAX bytes; a larger request is capped (a short transfer — the
- * caller loops for more) rather than silently wrapped. The int64 return keeps a
+ * caller loops for more) rather than silently wrapped, and a write refused
+ * part way is a short transfer too. The int64 return keeps a
  * 2..4 GiB count on the non-negative side, clear of the -error_t cause channel
  * (every error_t <= 1100); the C++ box::result bridge is box::_detail::from_ret64. */
 int64_t fread(uint32_t file_id, uint64_t offset, void *buffer, size_t size)
@@ -296,6 +297,11 @@ int64_t fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t siz
     memcpy(params + 4,  &offset,  8);
     memcpy(params + 12, &flags,   4);
 
+    /* The stats crate [u64 written][u64 size] comes back on every answer, a
+     * refusal included: the bytes the file holds of this write. A refusal
+     * part way through is a short count — the file holds that much, and the
+     * next call, from there, meets the refusal itself — never an error that
+     * would have the caller write again what already landed. */
     uint8_t  out[16] = {0};
     uint32_t out_actual = 0;
     int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_WRITE,
@@ -303,11 +309,12 @@ int64_t fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t siz
                      buffer, req,
                      out, sizeof(out), &out_actual,
                      BOX_ANSWER_GUARANTEED, NULL);
-    if (rc != 0) return box_fail(rc);
-    if (out_actual < 8) return (int64_t)req; /* op succeeded; assume full write of the submitted crate */
-
     uint64_t bytes_written = 0;
-    memcpy(&bytes_written, out, 8);
+    if (out_actual >= 8)
+        memcpy(&bytes_written, out, 8);
+    if (rc != 0)
+        return bytes_written > 0 ? (int64_t)bytes_written : box_fail(rc);
+    if (out_actual < 8) return (int64_t)req; /* op succeeded; assume full write of the submitted crate */
     return (int64_t)bytes_written;
 }
 

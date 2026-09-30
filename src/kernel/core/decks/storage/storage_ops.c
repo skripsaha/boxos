@@ -19,7 +19,8 @@
  *   OBJ_WRITE.in_crate     : payload source, taken out of the program's pages
  *                            a block at a time as the write reaches it
  *   OBJ_WRITE.out_crate    : optional [u64 bytes_written][u64 new_file_size],
- *                            written on a refusal too: the bytes the file holds
+ *                            written on a refusal too: the bytes the file's
+ *                            inked record holds of the write, and its size
  *   OBJ_GET_INFO.out_crate : serialized record, see ObjGetInfo() below
  */
 
@@ -536,7 +537,9 @@ static int ObjRead(const ManifestOp *op,
  *
  * Every write is a WriteJob (write_job.h): it holds the file's Helm for its
  * whole length, and a program whose file another holds is parked until the
- * Helm is handed to its job.
+ * Helm is handed to its job. A file the loader reads by its blocks is refused
+ * by the volume itself (ink.h, InkMayChange), before a byte of the write moves:
+ * no deck asks that question on its own.
  * ------------------------------------------------------------------------- */
 
 static int ObjWrite(const ManifestOp *op,
@@ -588,21 +591,12 @@ static int ObjWrite(const ManifestOp *op,
     return WriteJobSubmit(&ask, crates, ctx);
 }
 
-/* Whether the file wears a tag whose key is system or boot: a file the
- * machine starts from, which no program cuts, grows or deletes. */
-static bool storage_file_is_guarded(const TagFSMetadata *md)
-{
-    for (uint32_t i = 0; i < md->tag_count; i++) {
-        char key[128];
-        if (!tagfs_tag_key(md->tag_ids[i], key, sizeof(key))) continue;
-        if (strcmp(key, "system") == 0 || strcmp(key, "boot") == 0)
-            return true;
-    }
-    return false;
-}
-
 /* -------------------------------------------------------------------------
- * OBJ_DELETE — refuse to delete files with system/boot tags.
+ * OBJ_DELETE — the file given up (a Quitclaim). A file the machine starts
+ * from — wearing system, boot or god, or holding the kernel the loader reads
+ * by its blocks — is refused ERR_PERMISSION_DENIED by the volume's own guard
+ * (InkMayChange), and so is every delete once the medium left: the answer is
+ * the volume's.
  * ------------------------------------------------------------------------- */
 
 static int ObjDelete(const ManifestOp *op,
@@ -615,18 +609,8 @@ static int ObjDelete(const ManifestOp *op,
     (void)ctx;
     if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
 
-    uint32_t file_id = param_u32(op, 0);
-
-    TagFSMetadata md;
-    if (tagfs_get_metadata(file_id, &md) == 0 && (md.flags & TAGFS_FILE_ACTIVE)) {
-        bool guarded = storage_file_is_guarded(&md);
-        tagfs_metadata_free(&md);
-        if (guarded)
-            return ERR_PERMISSION_DENIED;
-    }
-
-    int rc = tagfs_delete_file(file_id);
-    return (rc == 0) ? OK : ERR_FILE_NOT_FOUND;
+    int rc = tagfs_delete_file(param_u32(op, 0));
+    return rc == 0 ? OK : -rc;
 }
 
 /* -------------------------------------------------------------------------
@@ -635,9 +619,9 @@ static int ObjDelete(const ManifestOp *op,
  * the old size on. A WriteJob, as a write is: it holds the file's Helm, and
  * waits for it parked.
  *
- * Guarded like OBJ_DELETE: cutting a "system" or "boot" file down to nothing
- * destroys it just as thoroughly as deleting it, so the same tags refuse the
- * same way.
+ * Guarded like OBJ_DELETE, by the same one guard: cutting a file the machine
+ * starts from down to nothing destroys it just as thoroughly as deleting it,
+ * and the span's load of the file refuses it (PlotLoad).
  *
  * The change is published on every tag of the file (op 3, write_job.c): a
  * content change that published nothing would be a hole in the Touch spine —
@@ -658,18 +642,6 @@ static int ObjSpan(const ManifestOp *op,
     ask.kind    = WRITE_JOB_SPAN;
     ask.file_id = param_u32(op, 0);
     ask.size    = param_u64(op, 4);
-
-    TagFSMetadata md;
-    memset(&md, 0, sizeof(md));
-    if (tagfs_get_metadata(ask.file_id, &md) != 0 || !(md.flags & TAGFS_FILE_ACTIVE)) {
-        tagfs_metadata_free(&md);
-        return ERR_FILE_NOT_FOUND;
-    }
-    bool guarded = storage_file_is_guarded(&md);
-    tagfs_metadata_free(&md);
-    if (guarded)
-        return ERR_PERMISSION_DENIED;
-
     return WriteJobSubmit(&ask, crates, ctx);
 }
 
@@ -697,8 +669,10 @@ static int ObjRename(const ManifestOp *op,
     memcpy(name, op->params + 6, new_name_len);
     name[new_name_len] = '\0';
 
+    /* The volume's own answer: ERR_TAGFS_RECORD_FULL for a name that would
+     * take the room a write in flight claimed (RT-19) among them. */
     int rc = tagfs_rename_file(file_id, name);
-    return (rc == 0) ? OK : ERR_INVALID_ARGUMENT;
+    return rc == 0 ? OK : -rc;
 }
 
 /* -------------------------------------------------------------------------

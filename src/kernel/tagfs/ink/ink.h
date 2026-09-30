@@ -36,11 +36,18 @@
  * ERR_WOULD_BLOCK and the caller makes one its own way. It never waits for a
  * cycle to make one for it.
  *
- * ‼ WHAT THE LOADER READS BY ITS BLOCKS IS NOT TOUCHED (RT-09). No Ink gives up
- * a file holding the kernel the Deed points the loader at, or changes its
- * extents, and no Ink takes a tag whose key is system, boot or god off a file,
- * or gives up a file wearing one: ERR_PERMISSION_DENIED. The storage deck asks
- * the same of the programs that reach it; this is the volume's own answer.
+ * ‼ WHAT THE LOADER READS BY ITS BLOCKS IS NOT TOUCHED (RT-09), AND THIS IS THE
+ * ONE PLACE THAT SAYS SO. No Ink changes the extents of a file wearing a tag
+ * whose key is system, boot or god, or holding the kernel the Deed points the
+ * loader at, or gives such a file up, and no Ink takes one of those tags off a
+ * file: ERR_PERMISSION_DENIED. A write, a span and a defrag ask the same guard
+ * when they load the file (PlotLoad), before a byte of theirs moves; nobody
+ * above the volume asks it again.
+ *
+ * ‼ AND NOTHING CHANGES A VOLUME WHOSE MEDIUM LEFT (RT-13). From the moment the
+ * volume sees its medium gone every Ink is refused ERR_DEVICE_NOT_READY, and
+ * so is every load for a change: memory that no cycle can take to the medium
+ * is not written further.
  */
 
 /* What an Ink leaves: `gen` is its place in the order of Inks, and a Settle
@@ -58,15 +65,31 @@ typedef enum {
 } InkSpares;
 
 /* The Plot's size and extents become the file's record, with its name and tags
- * as they are now; the ground the Plot let go of rests in Fallow, and every
- * Stake is the record's. Called by the holder of the file's Helm, which loaded
- * the Plot under it. OK — and the Plot stands for the record committed — or
- * the refusal, the file as it was and the Stakes still the Plot's:
- * ERR_FILE_NOT_FOUND (the file was given up meanwhile), ERR_BUSY (its extents
- * were changed since the load, which only a caller that did not hold the Helm
- * can do — said), ERR_PERMISSION_DENIED, ERR_TAGFS_RECORD_FULL, ERR_NO_MEMORY,
- * or a Spare's refusal. */
+ * as they are now; the ground the Plot let go of rests in Fallow, every Stake
+ * is the record's, and the room it claimed is let go. Called by the holder of
+ * the file's Helm, which loaded the Plot under it. OK — and the Plot stands
+ * for the record committed — or the refusal, the file as it was and the Stakes
+ * still the Plot's: ERR_FILE_NOT_FOUND (the file was given up meanwhile),
+ * ERR_BUSY (its extents were changed since the load, which only a caller that
+ * did not hold the Helm can do — said), ERR_PERMISSION_DENIED,
+ * ERR_DEVICE_NOT_READY, ERR_TAGFS_RECORD_FULL, ERR_NO_MEMORY, or a Spare's
+ * refusal. */
 error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out);
+
+/*
+ * RT-19. The room in its record the Plot's extents need, claimed before a byte
+ * of the call moves: the record with its name and tags as they are now and the
+ * Plot's extents must fit, or the call is refused ERR_TAGFS_RECORD_FULL — said
+ * — with nothing written; and from here until the Plot is inked or let go, a
+ * name or a tag inked for the file (InkFields) must leave that room, or is
+ * refused itself. A write's record is full because of a tag, never after its
+ * data landed. Nothing is claimed for a Plot loaded with no Helm, or one that
+ * names no more extents than its record. Called with no TagFS lock held.
+ */
+error_t InkRoomClaim(Plot* p);
+
+/* The room the Plot claimed let go; nothing when it claimed none. */
+void    InkRoomLetGo(Plot* p);
 
 /* A file's name and tags. `name` non-NULL renames it, and the name's tag
  * moves with it: the tag of the name it had comes off, `add` (the new name's,
@@ -106,11 +129,10 @@ error_t InkNameTagIntern(const char* name, uint16_t* out_tag);
 /* The tag a name gives, when the registry already has it; else invalid. */
 uint16_t InkNameTagLookup(const char* name);
 
-/* Whether a tag's key is one no Ink takes off a file: system, boot, god. */
-bool     InkTagGuarded(uint16_t tag_id);
-
-/* Whether any of the runs holds a block of the kernel the Deed points the
- * loader at. */
-bool     InkTouchesBoot(const FileExtent* runs, uint32_t count);
+/* The one guard of a change to a file (see above), asked with the tags the file
+ * wears and the runs it names: OK, ERR_DEVICE_NOT_READY once the medium left,
+ * or ERR_PERMISSION_DENIED — said — for a file the loader reads by its blocks. */
+error_t  InkMayChange(uint32_t fid, const uint16_t* tags, uint32_t tag_count,
+                      const FileExtent* runs, uint32_t run_count);
 
 #endif /* TAGFS_INK_H */

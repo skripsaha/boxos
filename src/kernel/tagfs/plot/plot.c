@@ -77,14 +77,9 @@ error_t PlotLoad(Plot *p, uint32_t fid)
                 (unsigned long long)p->size, (unsigned long long)p->blocks);
         return ERR_METADATA_CORRUPTED;
     }
-    /* The kernel the loader reads by its blocks is written by nobody (RT-09):
-     * refused here, before a byte of it moves. */
-    if (InkTouchesBoot(p->runs, p->run_count)) {
-        kprintf("[TagFS] file %u holds the kernel the loader reads by its blocks — nothing "
-                "is written to it\n", fid);
-        return ERR_PERMISSION_DENIED;
-    }
-    return OK;
+    /* A file the loader reads by its blocks, or a volume whose medium left,
+     * is changed by nobody: refused here, before a byte of the call moves. */
+    return InkMayChange(fid, p->meta.tag_ids, p->meta.tag_count, p->runs, p->run_count);
 }
 
 void PlotPullStakes(Plot *p)
@@ -109,6 +104,7 @@ void PlotPullStakes(Plot *p)
 void PlotRelease(Plot *p)
 {
     PlotPullStakes(p);
+    InkRoomLetGo(p);
     kfree(p->runs);
     kfree(p->stakes);
     kfree(p->freed);
@@ -389,7 +385,8 @@ error_t PlotReserve(Plot *p, uint64_t end)
         if (rc != OK)
             return rc;
     }
-    return PlotFitOrGather(p);
+    error_t rc = PlotFitOrGather(p);
+    return rc == OK ? InkRoomClaim(p) : rc;
 }
 
 error_t PlotBeginWrite(Plot *p, uint64_t offset, bool append, uint64_t bytes, uint64_t *out_at)

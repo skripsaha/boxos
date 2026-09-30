@@ -428,11 +428,12 @@ out:
 // ----------------------------------------------------------------------------
 // LockRank — the witness at the medium's doors and the order check, proved on
 // two locks of the tests' own, so that no TagFS lock and no place of TagFS is
-// touched and every number below is fixed by the test alone
+// touched and every number below is fixed by the test alone. They are proof
+// locks: a STRICT kernel names their places as any other and does not stop.
 // ----------------------------------------------------------------------------
 
-static TagFSLock s_proof       = TAGFS_LOCK_INIT("proof", LOCK_RANK_LEAF);
-static TagFSLock s_proof_state = TAGFS_LOCK_INIT("proofstate", LOCK_RANK_STATE);
+static TagFSLock s_proof       = TAGFS_PROOF_LOCK_INIT("proof", LOCK_RANK_LEAF);
+static TagFSLock s_proof_state = TAGFS_PROOF_LOCK_INIT("proofstate", LOCK_RANK_STATE);
 
 static inline uint64_t StandInterruptsOff(void)
 {

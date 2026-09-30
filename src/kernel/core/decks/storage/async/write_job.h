@@ -21,21 +21,26 @@
  * again under it (W-DOOR). It asks for the Helm once, and nobody spins:
  *
  *   free, and the work synchronous — the job runs at once, in the caller's
- *   call, and the answer is the call's;
+ *   call, and the answer is the call's; a write longer than a window runs its
+ *   first there, then parks its caller and runs each next window at a service
+ *   point, giving the core back between two (RT-16);
  *
  *   held — the caller is parked on its chit and the job waits in the Helm's
  *   FIFO. The holder that lets go hands the Helm on (HelmHand): a synchronous
  *   job is listed for a service point (HelmReady) and run there, an
  *   asynchronous write is passed to the drain core (BatonPass), and the answer
- *   is pushed when the job ends;
+ *   is pushed when the job ends — or, when the medium left meanwhile, the job
+ *   is answered ERR_DEVICE_NOT_READY instead of being handed anything (RT-13);
  *
  *   an asynchronous write parks its caller whether or not the Helm is free:
  *   every block goes through the port, the job parked on each answer and
  *   pumped on the drain core.
  *
  * The asynchronous write works on the file's Plot exactly as the synchronous
- * one does (HelmWrite): the same growth rule, the same reservation before any
- * byte moves, the same read-modify-write rule, and one inked record.
+ * one does (HelmWriteWindow): the same growth rule, the same windows, each
+ * reserved before a byte of it moves, the same read-modify-write rule, and one
+ * inked record a window. Either way the answer is one contract (W-ERR): the
+ * reason, the bytes the file's inked record holds of the write, the size.
  */
 
 struct OpContext;
@@ -56,20 +61,20 @@ typedef struct {
     uint64_t     waybill;       /* WRITE: a ferry's correlation token (0 = none) */
     uint64_t     size;          /* SPAN: the size the file is made */
     uint32_t     target_block;  /* DEFRAG: near where its one run is laid */
-    Crate       *out_crate;     /* WRITE: [u64 written][u64 size]; DEFRAG: [u32 score]; or NULL */
+    Crate       *out_crate;     /* WRITE: [u64 inked][u64 size], every answer; DEFRAG: [u32 score]; or NULL */
 } WriteJobAsk;
 
 typedef enum {
     W_INIT = 0,
     W_HELM_WAIT,       /* in the file's Helm FIFO */
-    W_ALLOC,           /* the file's Plot loaded and the write's ground reserved */
+    W_ALLOC,           /* the file's Plot loaded, and the window's ground reserved */
     W_LOCATE,
     W_READ_OLD,        /* async read of the block a partial write overlays */
     W_DMA_FILL,
     W_AHCI_SUBMIT,
     W_AHCI_DONE,
-    W_LOG_META,        /* what landed made ready to be the file's */
-    W_INK,             /* the record inked (TagFSInkPlot) */
+    W_LOG_META,        /* what landed of the window made ready to be the file's */
+    W_INK,             /* the window's record inked (TagFSInkPlot) */
     W_SPARE,           /* a Spare for the pool's tail stamped through the port */
     W_SPARE_DONE,
     W_DONE,
@@ -91,7 +96,9 @@ typedef struct WriteJob {
     uint64_t          asked_offset;      /* where the caller asked the write to begin */
     bool              append;            /* ... or at the file's size */
     uint64_t          start_offset;      /* where it begins: set once the Plot is loaded */
-    uint64_t          bytes_done;
+    uint64_t          bytes_done;        /* of the source, landed */
+    uint64_t          bytes_inked;       /* ... and named by the file's inked record */
+    uint64_t          window_end;        /* where the window being written ends, in the source */
     uint64_t          span_size;
     uint64_t          span_was;          /* the size the span found */
     uint32_t          defrag_target;
@@ -105,9 +112,10 @@ typedef struct WriteJob {
     bool              holds_helm;
     Plot              plot;              /* the async write's, loaded under the Helm (W_ALLOC) */
     bool              loaded;            /* PlotLoad answered OK */
-    bool              committed;         /* an inked record naming bytes_done is the file's */
     uint64_t          final_size;        /* the size the job leaves */
     error_t           stopped;           /* the refusal a write that stopped part way ends on */
+    bool              medium_left;       /* answered in the FIFO: the medium left (RT-13) */
+    uint64_t          lost;              /* ... with this many changes no cycle had settled */
     uint32_t          spare_block;       /* the Spare W_SPARE stamps, until the pool has it */
     MetaPoolBlock    *spare_image;
 

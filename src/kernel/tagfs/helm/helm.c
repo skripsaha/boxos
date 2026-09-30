@@ -1,5 +1,6 @@
 #include "helm.h"
 #include "../ink/ink.h"
+#include "../settle/settle.h"
 #include "baton.h"       /* the Knock that wakes a service point for a ready waiter */
 #include "scheduler.h"   /* SchedulerHoldHere — a ready waiter's work is never switched away from */
 
@@ -42,6 +43,7 @@ static OpenFileEntry  *g_open_first[OPEN_FILES_FIRST];
 static OpenFileEntry **g_open_files   = g_open_first;
 static uint32_t        g_open_buckets = OPEN_FILES_FIRST;
 static uint32_t        g_open_count   = 0;
+static uint32_t        g_open_regrown = 0;   /* bumped each time the entries move to a new table */
 static TagFSLock g_open_table_lock = TAGFS_LOCK_INIT("openfiles", LOCK_RANK_LEAF);
 
 /* The file's entry, under g_open_table_lock; NULL when it is not open. */
@@ -85,6 +87,7 @@ static void ofe_grow(void)
         g_open_files   = table;
         g_open_buckets = want;
         table          = NULL;
+        g_open_regrown++;
     }
     TagFSLockDrop(&g_open_table_lock);
     kfree(table);
@@ -191,6 +194,33 @@ static void HelmHand(HelmWaiter *next)
     next->hand(next);
 }
 
+/* Changes inked since the last settled cycle: what a medium that left took
+ * with it. */
+static uint64_t HelmLost(void)
+{
+    uint64_t inked   = InkedGen();
+    uint64_t settled = SettledGen();
+    return inked > settled ? inked - settled : 0;
+}
+
+/* Every waiter of the chain answered that the medium left, with no TagFS lock
+ * held; each one's answer may free it, so the next is read first. */
+static void HelmAnswerGone(HelmWaiter *w)
+{
+    uint64_t lost = HelmLost();
+    while (w) {
+        HelmWaiter *next = w->next;
+        w->next = NULL;
+        __atomic_sub_fetch(&s_helm_owed, 1u, __ATOMIC_ACQ_REL);
+        w->gone(w, lost);
+        w = next;
+    }
+}
+
+/* The medium's departure is read under the Helm's lock, and the walk that
+ * answers the FIFOs takes every Helm's lock after the departure was latched:
+ * a waiter is either queued before that take and answered by it, or asks
+ * after it and is never queued. */
 bool HelmAsk(OpenFileEntry *ofe, HelmWaiter *w)
 {
     FileHelm *h = &ofe->helm;
@@ -199,9 +229,10 @@ bool HelmAsk(OpenFileEntry *ofe, HelmWaiter *w)
 
     TagFSLockTake(&h->lock);
     bool mine = h->holder == NULL;
+    bool gone = !mine && TagFSMediumLeft();
     if (mine) {
         h->holder = w;
-    } else {
+    } else if (!gone) {
         if (h->last)
             h->last->next = w;
         else
@@ -209,6 +240,8 @@ bool HelmAsk(OpenFileEntry *ofe, HelmWaiter *w)
         h->last = w;
     }
     TagFSLockDrop(&h->lock);
+    if (gone)
+        HelmAnswerGone(w);
     return mine;
 }
 
@@ -239,7 +272,13 @@ void HelmLetGo(OpenFileEntry *ofe, HelmWaiter *w)
         return;
     }
     HelmWaiter *next = h->first;
-    if (next) {
+    HelmWaiter *gone = NULL;
+    if (next && TagFSMediumLeft()) {
+        gone     = next;
+        next     = NULL;
+        h->first = NULL;
+        h->last  = NULL;
+    } else if (next) {
         h->first = next->next;
         if (!h->first)
             h->last = NULL;
@@ -251,6 +290,17 @@ void HelmLetGo(OpenFileEntry *ofe, HelmWaiter *w)
     __atomic_sub_fetch(&s_helm_owed, 1u, __ATOMIC_ACQ_REL);
     if (next)
         HelmHand(next);
+    HelmAnswerGone(gone);
+}
+
+bool HelmTakeNow(TagFSFileHandle *handle, HelmWaiter *here)
+{
+    memset(here, 0, sizeof(*here));
+    if (HelmTry(handle->ofe, here))
+        return true;
+    kprintf("[TagFS] file %u is being changed by the holder of its Helm — a caller in the "
+            "kernel cannot be parked behind it, and is refused\n", handle->file_id);
+    return false;
 }
 
 bool HelmVacated(const OpenFileEntry *ofe)
@@ -270,6 +320,15 @@ void HelmVacate(uint32_t file_id)
 uint64_t HelmOwed(void)
 {
     return __atomic_load_n(&s_helm_owed, __ATOMIC_ACQUIRE);
+}
+
+uint32_t HelmClaimedRuns(uint32_t file_id)
+{
+    TagFSLockTake(&g_open_table_lock);
+    OpenFileEntry *e       = ofe_find(file_id);
+    uint32_t       claimed = e ? e->helm.claimed_runs : 0;
+    TagFSLockDrop(&g_open_table_lock);
+    return claimed;
 }
 
 // ----------------------------------------------------------------------------
@@ -308,9 +367,29 @@ void HelmReady(HelmWaiter *w)
     KnockOn(&s_ready_knock);
 }
 
+static void HelmAnswerLeft(void);
+static volatile uint32_t s_left_owed;   /* the medium left: the FIFOs are owed their answer */
+
+bool HelmReadyListed(void)
+{
+    return __atomic_load_n(&s_ready_count, __ATOMIC_ACQUIRE) != 0 ||
+           __atomic_load_n(&s_left_owed, __ATOMIC_ACQUIRE) != 0;
+}
+
+void HelmMediumLeft(void)
+{
+    __atomic_store_n(&s_left_owed, 1u, __ATOMIC_RELEASE);
+    KnockOn(&s_ready_knock);
+}
+
 void HelmRunReady(void)
 {
-    while (__atomic_load_n(&s_ready_count, __ATOMIC_ACQUIRE) != 0) {
+    if (__atomic_load_n(&s_left_owed, __ATOMIC_ACQUIRE) &&
+        __atomic_exchange_n(&s_left_owed, 0u, __ATOMIC_ACQ_REL))
+        HelmAnswerLeft();
+
+    for (uint32_t listed = __atomic_load_n(&s_ready_count, __ATOMIC_ACQUIRE); listed > 0;
+         listed--) {
         TagFSLockTake(&s_ready_lock);
         HelmWaiter *w = s_ready_first;
         if (w) {
@@ -327,6 +406,72 @@ void HelmRunReady(void)
         SchedulerHoldHere();
         w->run(w);
         SchedulerLetGoHere();
+    }
+}
+
+// ----------------------------------------------------------------------------
+// The FIFOs of a medium that left (RT-13)
+// ----------------------------------------------------------------------------
+
+/* The entry the walk visits after `e` — the next of its bucket, or the first
+ * of a later bucket — with a reference of the walk's own, so it stays listed
+ * while its Helm's lock is taken; NULL at the end of the table. Under the
+ * table's lock, the table not regrown since `e` was visited. */
+static OpenFileEntry *HelmWalkNext(OpenFileEntry *e, uint32_t *bucket)
+{
+    OpenFileEntry *n = e ? e->next : g_open_files[*bucket];
+    while (!n && ++*bucket < g_open_buckets)
+        n = g_open_files[*bucket];
+    if (n)
+        n->ref_count++;
+    return n;
+}
+
+/* One Helm's FIFO taken whole under its lock, and each waiter answered. */
+static void HelmAnswerFifo(OpenFileEntry *e)
+{
+    FileHelm *h = &e->helm;
+    TagFSLockTake(&h->lock);
+    HelmWaiter *chain = h->first;
+    h->first = NULL;
+    h->last  = NULL;
+    TagFSLockDrop(&h->lock);
+    HelmAnswerGone(chain);
+}
+
+/*
+ * Every open file's FIFO, with nothing allocated: the walk holds a reference
+ * on the entry it stands on, so the entry's place in its bucket stays, and
+ * takes the next one under the table's lock. A table regrown meanwhile has
+ * moved every entry to another bucket, and the walk begins again — an entry
+ * visited twice finds its FIFO empty the second time. It ends: no waiter is
+ * queued once the departure is latched, and a table only regrows by doubling.
+ */
+static void HelmAnswerLeft(void)
+{
+    OpenFileEntry *at     = NULL;
+    uint32_t       bucket = 0;
+    uint32_t       shape  = 0;
+
+    for (;;) {
+        TagFSLockTake(&g_open_table_lock);
+        if (!at || shape != g_open_regrown) {
+            shape  = g_open_regrown;
+            bucket = 0;
+            if (at) {
+                TagFSLockDrop(&g_open_table_lock);
+                ofe_release(at);
+                at = NULL;
+                continue;
+            }
+        }
+        OpenFileEntry *next = HelmWalkNext(at, &bucket);
+        TagFSLockDrop(&g_open_table_lock);
+        ofe_release(at);
+        if (!next)
+            return;
+        HelmAnswerFifo(next);
+        at = next;
     }
 }
 

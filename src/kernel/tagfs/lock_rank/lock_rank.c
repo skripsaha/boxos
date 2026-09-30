@@ -68,6 +68,28 @@ static LockRankPlace g_lock_rank_places[LOCK_RANK_PLACES];
 static bool          g_lock_rank_full_said;
 static spinlock_t    g_lock_rank_places_lock;
 
+/* Whether a place whose locks are `a` and `b` (NULL for none) stops the
+ * machine: in a STRICT kernel, unless a proof's own lock is one of them. */
+static bool LockRankStops(const TagFSLock *a, const TagFSLock *b)
+{
+#if CONFIG_STRICT
+    return !(a && a->Proof) && !(b && b->Proof);
+#else
+    (void)a;
+    (void)b;
+    return false;
+#endif
+}
+
+/* The one line a place is named in — or, where the place stops the machine,
+ * the panic that names it in the same words. */
+#define LOCK_RANK_SAY(stop, ...)       \
+    do {                               \
+        if (stop)                      \
+            panic(__VA_ARGS__);        \
+        kprintf(__VA_ARGS__);          \
+    } while (0)
+
 static inline uint64_t LockRankIrqOff(void)
 {
     uint64_t flags;
@@ -204,18 +226,20 @@ static void LockRankSayIo(LockRankCore *core, const TagFSLock *held, const char 
                           uintptr_t asked_by)
 {
     char who[NAMEPLATE_NAME_MAX + 24];
+    bool stop = LockRankStops(held, NULL);
 
-    if (!LockRankShouldSay(core, LOCK_RANK_PLACE_IO, held->Name, held->HeldBy, op, NULL))
+    if (!LockRankShouldSay(core, LOCK_RANK_PLACE_IO, held->Name, held->HeldBy, op, NULL) &&
+        !stop)
         return;
     LockRankNameOf(asked_by, who, sizeof(who));
     if (strcmp(op, "wait") == 0)
-        kprintf("[LockRank] %s is held across a wait for a Scribe: taken in %s, "
-                "the wait asked for by %s\n",
-                LockRankWord(held->Name), LockRankWord(held->HeldBy), who);
+        LOCK_RANK_SAY(stop, "[LockRank] %s is held across a wait for a Scribe: taken in %s, "
+                            "the wait asked for by %s\n",
+                      LockRankWord(held->Name), LockRankWord(held->HeldBy), who);
     else
-        kprintf("[LockRank] %s is held across a medium %s: taken in %s, "
-                "the %s asked for by %s\n",
-                LockRankWord(held->Name), op, LockRankWord(held->HeldBy), op, who);
+        LOCK_RANK_SAY(stop, "[LockRank] %s is held across a medium %s: taken in %s, "
+                            "the %s asked for by %s\n",
+                      LockRankWord(held->Name), op, LockRankWord(held->HeldBy), op, who);
 }
 
 /* A lock with no rank, the lock this core already holds, and every lock held
@@ -229,21 +253,24 @@ static void LockRankCheckHere(LockRankCore *core, TagFSLock *lock, const char *s
         kprintf("[LockRank] a TagFS lock with no rank taken in %s\n", site);
 
     for (uint8_t i = 0; i < core->Depth; i++) {
-        const TagFSLock *h = core->Held[i];
+        const TagFSLock *h    = core->Held[i];
+        bool             stop = LockRankStops(lock, h);
         if (h == lock) {
-            if (LockRankShouldSay(core, LOCK_RANK_PLACE_TWICE, lock->Name, site, h->HeldBy, NULL))
-                kprintf("[LockRank] %s taken in %s while this core already holds it, "
-                        "taken in %s — this core now waits for itself\n",
-                        LockRankWord(lock->Name), site, LockRankWord(h->HeldBy));
+            if (LockRankShouldSay(core, LOCK_RANK_PLACE_TWICE, lock->Name, site, h->HeldBy, NULL) ||
+                stop)
+                LOCK_RANK_SAY(stop, "[LockRank] %s taken in %s while this core already holds it, "
+                                    "taken in %s — this core now waits for itself\n",
+                              LockRankWord(lock->Name), site, LockRankWord(h->HeldBy));
             continue;
         }
         if (lock->Rank == LOCK_RANK_NONE || h->Rank < lock->Rank)
             continue;
         broke = true;
-        if (LockRankShouldSay(core, LOCK_RANK_PLACE_ORDER, h->Name, h->HeldBy, lock->Name, site))
-            kprintf("[LockRank] %s taken in %s under %s, taken in %s — out of order\n",
-                    LockRankWord(lock->Name), site, LockRankWord(h->Name),
-                    LockRankWord(h->HeldBy));
+        if (LockRankShouldSay(core, LOCK_RANK_PLACE_ORDER, h->Name, h->HeldBy, lock->Name, site) ||
+            stop)
+            LOCK_RANK_SAY(stop, "[LockRank] %s taken in %s under %s, taken in %s — out of order\n",
+                          LockRankWord(lock->Name), site, LockRankWord(h->Name),
+                          LockRankWord(h->HeldBy));
     }
     if (broke) {
         core->OutOfOrder++;
@@ -272,6 +299,7 @@ void TagFSLockInit(TagFSLock *lock, const char *name, LockRankLevel rank)
     lock->Name       = name;
     lock->HeldBy     = NULL;
     lock->Rank       = (uint8_t)rank;
+    lock->Proof      = false;
     lock->Witnessed  = 0;
     lock->OutOfOrder = 0;
 }

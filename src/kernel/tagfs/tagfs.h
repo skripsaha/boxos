@@ -251,6 +251,10 @@ typedef struct HelmWaiter {
     struct HelmWaiter* next;
     void (*hand)(struct HelmWaiter* w);   /* the Helm is w's now; no TagFS lock held */
     void (*run)(struct HelmWaiter* w);    /* a waiter HelmReady listed is run here */
+    /* The medium left while w waited: w is answered here instead of ever
+     * being handed the Helm, with the count of changes inked since the last
+     * settled cycle that left with it. No TagFS lock held. */
+    void (*gone)(struct HelmWaiter* w, uint64_t lost);
 } HelmWaiter;
 
 /* One holder of a file's extents at a time, and who waits for it. */
@@ -260,6 +264,10 @@ typedef struct {
     HelmWaiter*   first;      /* the FIFO, oldest first */
     HelmWaiter*   last;
     volatile bool vacated;    /* a Quitclaim gave the file up */
+    /* The extents the holder's unfinished Plot will ink, claimed as room in
+     * the file's record that no name or tag inked meanwhile may take (RT-19);
+     * 0 for none. Under the volume's state lock. */
+    uint32_t      claimed_runs;
 } FileHelm;
 
 struct TagFSFileHandle;
@@ -550,6 +558,11 @@ void     TagFSAttendArrival(void);
  * read, because by then the seat can hold something else. */
 void     TagFSNoteMediumGone(void);
 
+/* Whether the medium under the mounted volume has left (RT-13): from then on no
+ * Ink changes the volume — ERR_DEVICE_NOT_READY — and nobody waits in a Helm's
+ * FIFO. Until the volume is let go of; the next mount begins without it. */
+bool     TagFSMediumLeft(void);
+
 /* Said once, by whoever tried the boot mount, whether or not it succeeded.
  * Before it, an arriving medium belongs to the boot that is still happening. */
 void     TagFSBootMountSettled(void);
@@ -682,8 +695,8 @@ TagFSState* tagfs_get_state(void);
 
 /* The file laid in one run near `target_block`, its record naming the run in
  * as few extents as a record can say it. OK, or the refusal: the file is left
- * where it was. A file the loader reads by its blocks — wearing system or boot,
- * or holding the kernel the Deed points at — is not moved. */
+ * where it was. A file the loader reads by its blocks — wearing system, boot or
+ * god, or holding the kernel the Deed points at — is not moved (ink.h). */
 error_t  tagfs_defrag_file(uint32_t file_id, uint32_t target_block);
 /* How fragmented the volume's files are: the share, in percent, of the steps
  * from one of a file's blocks to its next that are a gap — the next run not
