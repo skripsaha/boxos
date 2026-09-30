@@ -7559,7 +7559,6 @@ run_censusmut() {
 STAND_HELD="
 integrity_reports_every_rot|1.10|of 65 rotten blocks, reported 64|of 65 rotten blocks, reported 65
 use_context_long_remembered|1.6|of 479 bytes said, the volume remembers 0|of 479 bytes said, the volume remembers 479
-stand_open_joins_the_writers|1.5|handle with no open-file entry at refused allocation 1|opens whole or refused, allocations refused 6
 "
 
 # The last thing a halt says about the volume, whichever way its sync went
@@ -7825,22 +7824,6 @@ stand_mut_boot() {
 
 # stand_fix_on — the real fix of every caveated test, emulated.
 stand_fix_on() {
-    mutate src/kernel/tagfs/tagfs.c
-    python3 - <<'EOF'
-p = "src/kernel/tagfs/tagfs.c"
-s = open(p).read()
-edits = [
-    # 1.5: an open that cannot join the writers is refused
-    ("    OpenFileEntry *ofe = ofe_acquire(file_id);\n\n    TagFSFileHandle *handle = kmalloc(sizeof(TagFSFileHandle));\n",
-     "    OpenFileEntry *ofe = ofe_acquire(file_id);\n    if (!ofe)\n        return NULL;   /* logcheck mutation: an open with no open-file entry is refused */\n\n    TagFSFileHandle *handle = kmalloc(sizeof(TagFSFileHandle));\n"),
-]
-for a, m in edits:
-    assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
-    s = s.replace(a, m, 1)
-open(p, "w").write(s)
-EOF
-    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 1
-
     # 1.6: a Use Context longer than the Ledger's record is still the volume's.
     # The step keeps it whole on the medium (its own block); what the test asks
     # is the volume's answer, and this gives that answer while the record
@@ -7875,8 +7858,7 @@ EOF
 }
 stand_fix_off() {
     local f
-    for f in src/kernel/tagfs/tagfs.c src/kernel/tagfs/integrity/integrity.c \
-             src/kernel/tagfs/ledger/ledger.c; do
+    for f in src/kernel/tagfs/integrity/integrity.c src/kernel/tagfs/ledger/ledger.c; do
         restore "$f"
     done
 }
@@ -9199,8 +9181,13 @@ run_stackguard() {
 # the storage deck outside LockRank's own module — and a bare spinlock_t put
 # into tagfs.c must turn it.
 
+# No place LockRank names has been held under a step since step 1.5 took the
+# last TagFS lock held across the medium away (the file's writer lock, now its
+# Helm), so the judge is shown what it holds on the table as it stood before
+# that step: the held place's row given its step back.
 LOCKRANK_HELD_LINE='[LockRank] writer is held across a medium write: taken in tagfs_write_inside, the write asked for by tagfs_alloc_blocks+0x1f5'
 LOCKRANK_HELD_KEY='writer@tagfs_write_inside:write'
+LOCKRANK_HELD_STEP='1.5'
 
 # lockrankmut_log NAME LINE... — a boot's log holding exactly LINE..., the way
 # the serial line ends them; prints its path.
@@ -9210,12 +9197,32 @@ lockrankmut_log() {
     echo "$f"
 }
 
-# lockrankmut_said LOGS — what lockrank_judge says of LOGS, then "counted
-# PASS FAIL CAVEAT", in a subshell whose counters start at nothing.
+# lockrankmut_said LOGS — what lockrank_judge says of LOGS on the table
+# tools/stand_caveat.sh holds now, then "counted PASS FAIL CAVEAT", in a
+# subshell whose counters start at nothing.
 lockrankmut_said() {
-    (PASS=0; FAIL=0; CAVEAT=0; HARNESS=0
+    (. tools/stand_caveat.sh
+     PASS=0; FAIL=0; CAVEAT=0; HARNESS=0
      lockrank_judge "$1" "lockrankmut"
      echo "counted $PASS $FAIL $CAVEAT")
+}
+
+# lockrankmut_step_given — the held place's row given its step back, in the
+# file (restore puts it back).
+lockrankmut_step_given() {
+    mutate tools/stand_caveat.sh
+    python3 - "$LOCKRANK_HELD_KEY" "$LOCKRANK_HELD_STEP" <<'EOF'
+import re, sys
+p = "tools/stand_caveat.sh"
+s = open(p).read()
+key = re.escape("lockrank:" + sys.argv[1])
+s, n = re.subn(r'(' + key + r'[|)][^"]*?\n\s*echo ")(\|[^\n]*;;)',
+               lambda m: m.group(1) + sys.argv[2] + m.group(2) + "   # logcheck mutation: the step given back",
+               s, count=1, flags=re.S)
+assert n == 1, "lockrankmut: the row of " + sys.argv[1] + " was not found"
+open(p, "w").write(s)
+EOF
+    mut_done tools/stand_caveat.sh "logcheck mutation" 1
 }
 
 # lockrankmut_saw WHAT LOGS COUNTED TEXT — the judge counted COUNTED ("P F C")
@@ -9239,7 +9246,7 @@ lockrank_bare() {
 run_lockrankmut() {
     echo "== lockrankmut: the LockRank judge, shown what it must refuse and what it must hold =="
     local held held2 unknown twice full deadlock proof said n bare step defect
-    step=$(caveat_step "lockrank:$LOCKRANK_HELD_KEY")
+    step=$LOCKRANK_HELD_STEP
     defect=$(caveat_defect "lockrank:$LOCKRANK_HELD_KEY")
     held=$(lockrankmut_log held "$LOCKRANK_HELD_LINE")
     held2=$(lockrankmut_log held2 "$LOCKRANK_HELD_LINE")
@@ -9253,6 +9260,8 @@ run_lockrankmut() {
     proof=$(lockrankmut_log proof \
         '[LockRank] proof is held across a medium read: taken in TestStandLockRankNamesTheMedium, the read asked for by TestStandLockRankNamesTheMedium+0x12a')
 
+    # On the table as it stood before the held place's step landed.
+    lockrankmut_step_given
     lockrankmut_saw "a place its row holds is a caveat held under step $step" "$held" "1 0 1" \
         "caveat held: lockrank:$LOCKRANK_HELD_KEY — $defect — discharged by step $step (lockrankmut, named in 1 of 1 boot(s): $LOCKRANK_HELD_LINE)"
     lockrankmut_saw "and one caveat, however many boots named it" "$held $held2" "1 0 1" \
@@ -9268,38 +9277,23 @@ run_lockrankmut() {
     lockrankmut_saw "the self-tests' own place is held, and is no caveat" "$proof" "1 0 0" \
         "(0 under a step, 1 the self-tests' own)"
 
-    # The day the step that removes the place lands, its row loses the step;
-    # the place seen again is then the defect back.
-    mutate tools/stand_caveat.sh
-    python3 - "$LOCKRANK_HELD_KEY" <<'EOF'
-import re, sys
-p = "tools/stand_caveat.sh"
-s = open(p).read()
-key = re.escape("lockrank:" + sys.argv[1])
-s, n = re.subn(r'(' + key + r'[|)][^"]*?\n\s*echo ")[0-9.]+[a-z]*(\|[^\n]*;;)',
-               r'\1\2   # logcheck mutation: the step lifted', s, count=1, flags=re.S)
-assert n == 1, "lockrankmut: the row of " + sys.argv[1] + " was not found"
-open(p, "w").write(s)
-EOF
-    mut_done tools/stand_caveat.sh "logcheck mutation" 1
-    said=$(. tools/stand_caveat.sh
-           PASS=0; FAIL=0; CAVEAT=0; HARNESS=0
-           lockrank_judge "$held" "lockrankmut"
-           echo "counted $PASS $FAIL $CAVEAT"
-           echo "unheld $(lockrank_unheld "$held" | wc -l | tr -d ' ')")
+    # What the matrix counts is what the judge refuses.
+    n=$(. tools/stand_caveat.sh
+        for f in "$held" "$unknown" "$twice" "$full" "$proof"; do
+            printf '%s ' "$(lockrank_unheld "$f" | wc -l | tr -d ' ')"
+        done)
     restore tools/stand_caveat.sh
+    [ "$n" = "0 1 1 1 0 " ]
+    chk $? "lockrankmut: the matrix counts nothing held and every refusal (held, unknown, twice, full, proof: $n)"
+
+    # And on the table as it stands, the step landed and the row lost it: the
+    # place seen again is the defect back.
+    said=$(lockrankmut_said "$held"; echo "unheld $(lockrank_unheld "$held" | wc -l | tr -d ' ')")
     printf '%s\n' "$said" | grep -qx "counted 0 1 0" &&
         printf '%s\n' "$said" | grep -qF "lockrank:$LOCKRANK_HELD_KEY failed: the defect it stands for is back — $defect"
     chk $? "lockrankmut: a place whose row lost its step is the defect back, and a FAIL ($(printf '%s\n' "$said" | grep '^counted'))"
     printf '%s\n' "$said" | grep -qx "unheld 1"
     chk $? "lockrankmut: and the matrix counts it ($(printf '%s\n' "$said" | grep '^unheld'))"
-
-    # What the matrix counts is what the judge refuses.
-    n="$(lockrank_unheld "$held" | wc -l | tr -d ' ') $(lockrank_unheld "$unknown" | wc -l | tr -d ' ')"
-    n="$n $(lockrank_unheld "$twice" | wc -l | tr -d ' ') $(lockrank_unheld "$full" | wc -l | tr -d ' ')"
-    n="$n $(lockrank_unheld "$proof" | wc -l | tr -d ' ')"
-    [ "$n" = "0 1 1 1 0" ]
-    chk $? "lockrankmut: the matrix counts nothing held and every refusal (held, unknown, twice, full, proof: $n)"
 
     # No lock in TagFS without a rank.
     bare=$(lockrank_bare)

@@ -46,7 +46,7 @@
 #include "ata.h"
 #include "touch.h"
 #include "cow.h"
-#include "amp.h"   /* g_amp.total_cores — async write needs a K-Core to pump */
+#include "amp.h"   /* g_amp.total_cores — an async read needs a K-Core to pump */
 #include "boardroom.h"
 #include "scribe.h"   /* VolumeFlushFor — an anchor's flush, unless one already covers it */
 #include "plot.h"     /* PlotFind, PlotSource — the write's bytes where they are */
@@ -71,21 +71,6 @@
 static inline bool tagfs_volume_can_read_async(void)
 {
     return BoardroomSeatCanReadAsync(tagfs_get_seat());
-}
-
-/*
- * Writing is still AHCI's, and only AHCI's — honestly rather than by omission.
- *
- * A write here is not one command: it is a WriteJob that allocates blocks and
- * commits the file's record, and its state machine is built on AHCI slots and
- * the AHCI completion. Pointing it at another kind of
- * seat would need that machine rebuilt, not a different submit call. Until it
- * is, a volume on a flash drive takes the synchronous write path, which is
- * correct and says so.
- */
-static inline bool tagfs_volume_is_ahci(void)
-{
-    return BoardroomSeatKind(tagfs_get_seat()) == BOARD_AHCI;
 }
 
 #define OBJ_WRITE_APPEND_FLAG (1u << 0)
@@ -358,9 +343,9 @@ static void obj_read_step(ObjReadAsyncCtx *ctx)
  * completion from its own ResultRing via the ferry poll. Descriptor write-back
  * precedes the KResultPush so a ferry that frees its submission block on
  * completion cannot race it (no UAF). */
-static int storage_sync_ferry_finalize(const OpContext *ctx, Crate *crates,
-                                       error_t err, uint64_t bytes,
-                                       uint64_t waybill)
+int storage_sync_ferry_finalize(const OpContext *ctx, Crate *crates,
+                                error_t err, uint64_t bytes,
+                                uint64_t waybill)
 {
     if (crates && ctx->crate_count > 0 && ctx->proc && ctx->proc->cabin) {
         crate_stage_commit_and_release(crates, ctx->crate_count,
@@ -540,39 +525,6 @@ static int ObjRead(const ManifestOp *op,
     return (sync_err == OK) ? OK : (int)sync_err;
 }
 
-/* A change to a file's bytes, said on every tag it wears — one 32-byte shape
- * for every road that changes them, so one listener reads them all: op 1 a
- * write (the bytes written at offset), op 3 a span (the bytes cut or added
- * from offset, the old or the new size, whichever is less). */
-static void storage_publish_change(uint32_t file_id, uint8_t op, uint64_t offset,
-                                   uint64_t bytes, uint64_t final_size, const OpContext *ctx)
-{
-    if (!TouchHasAnyListeners())
-        return;
-    TagFSMetadata meta;
-    memset(&meta, 0, sizeof(meta));
-    if (tagfs_get_metadata(file_id, &meta) != OK)
-        return;
-    struct {
-        uint32_t file_id;
-        uint8_t  op;
-        uint8_t  _pad[3];
-        uint64_t offset;
-        uint64_t bytes;
-        uint64_t final_size;
-    } __attribute__((packed)) ev = {
-        .file_id    = file_id,
-        .op         = op,
-        .offset     = offset,
-        .bytes      = bytes,
-        .final_size = final_size,
-    };
-    uint32_t pid = (ctx && ctx->proc) ? ctx->proc->pid : 0;
-    for (uint32_t ti = 0; ti < meta.tag_count; ti++)
-        TouchPublishId(meta.tag_ids[ti], &ev, sizeof(ev), pid, TOUCH_FLAG_TAGFS);
-    tagfs_metadata_free(&meta);
-}
-
 /* -------------------------------------------------------------------------
  * OBJ_WRITE — in_crate.size bytes into the file at offset, or at its size
  * with OBJ_WRITE_APPEND_FLAG. An offset past the size is refused
@@ -581,6 +533,10 @@ static void storage_publish_change(uint32_t file_id, uint8_t op, uint64_t offset
  * into the kernel heap, so its size is bounded by the volume, not the heap.
  * If out_crate is provided and capacity >= 16, the stats are written back on
  * every answer: the bytes the file now holds of the write, and its size.
+ *
+ * Every write is a WriteJob (write_job.h): it holds the file's Helm for its
+ * whole length, and a program whose file another holds is parked until the
+ * Helm is handed to its job.
  * ------------------------------------------------------------------------- */
 
 static int ObjWrite(const ManifestOp *op,
@@ -592,96 +548,44 @@ static int ObjWrite(const ManifestOp *op,
     if (op->in_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
     if (op->param_size < 16)              return ERR_INVALID_ARGUMENT;
 
-    uint32_t file_id = param_u32(op, 0);
-    uint64_t offset  = param_u64(op, 4);
-    uint32_t flags   = param_u32(op, 12);
+    WriteJobAsk ask;
+    memset(&ask, 0, sizeof(ask));
+    ask.kind    = WRITE_JOB_WRITE;
+    ask.file_id = param_u32(op, 0);
+    ask.offset  = param_u64(op, 4);
+    ask.append  = (param_u32(op, 12) & OBJ_WRITE_APPEND_FLAG) != 0;
     /* Ф26e: optional trailing correlation waybill (box::ferry). Absent for a
      * synchronous write (param_size 16) → 0 → plain KCTX_GUIDE completion. */
-    uint64_t waybill = (op->param_size >= 24) ? param_u64(op, 16) : 0;
-    bool     append  = (flags & OBJ_WRITE_APPEND_FLAG) != 0;
+    ask.waybill = (op->param_size >= 24) ? param_u64(op, 16) : 0;
 
     Crate *src = &crates[op->in_crate];
     if (src->size == 0 || src->size > src->capacity)
-        return storage_op_fail(ctx, crates, ERR_INVALID_ARGUMENT, waybill);
+        return storage_op_fail(ctx, crates, ERR_INVALID_ARGUMENT, ask.waybill);
 
     /* Where the bytes are: the program's pages, walked as the write reaches
      * them, or — for a kernel caller with no cabin — the crate's own address.
-     * A page the program has not touched yet is brought in here, before any
-     * lock of the volume is taken; a write that cannot have its pages is
-     * refused with nothing of it written. */
-    PlotSource source;
-    memset(&source, 0, sizeof(source));
-    source.bytes = src->size;
+     * A page the program has not touched yet is brought in here, in the
+     * program's own call, before the job is built: the job pulls where it
+     * happens to run, which is not the program's context. A write that cannot
+     * have its pages is refused with nothing of it written. */
+    ask.source.bytes = src->size;
     if (ctx && ctx->proc && ctx->proc->cabin) {
-        source.vmm  = ctx->proc->cabin->vmm;
-        source.user = (uintptr_t)src->addr;
+        ask.source.vmm  = ctx->proc->cabin->vmm;
+        ask.source.user = (uintptr_t)src->addr;
     } else {
-        source.kernel = (const uint8_t *)(uintptr_t)src->addr;
+        ask.source.kernel = (const uint8_t *)(uintptr_t)src->addr;
     }
-    error_t pages = PlotSourceBringIn(&source);
+    error_t pages = PlotSourceBringIn(&ask.source);
     if (pages != OK)
-        return storage_op_fail(ctx, crates, pages, waybill);
+        return storage_op_fail(ctx, crates, pages, ask.waybill);
 
-    /* Optional output stats crate [u64 bytes_written][u64 new_file_size].
-     * Written via crate_write (sync) / vmm_user_buf_commit_out (async) —
-     * both page-walk, so a stats crate that straddles a page is safe. */
-    Crate *out_crate = NULL;
-    if (op->out_crate != CRATE_INDEX_NONE) {
-        Crate *o = &crates[op->out_crate];
-        if (o->capacity >= 16) out_crate = o;
-    }
+    /* Optional output stats crate [u64 bytes_written][u64 new_file_size],
+     * page-walked on either road, so a stats crate that straddles a page is
+     * safe. */
+    if (op->out_crate != CRATE_INDEX_NONE && crates[op->out_crate].capacity >= 16)
+        ask.out_crate = &crates[op->out_crate];
 
-    /* Async write requires a K-Core to pump its IRQ-deferred completion
-     * continuations (write completion does heavy work — the record's
-     * commit — that cannot run in IRQ context, so it is posted to the never-drop
-     * storage completion queue and drained by kcore_run_loop). That loop only exists in multi-core
-     * mode; on a single core the BSP runs userspace and never pumps, so the
-     * job would strand. Use the sync path there — it is correct and has no
-     * benefit to lose (one core does everything regardless). */
-    if (tagfs_volume_is_ahci() && ctx && ctx->proc && g_amp.total_cores > 1) {
-        int rc = ObjWriteAsync(file_id, offset, append, &source, out_crate, ctx,
-                               crates, ctx->crate_count, ctx->crates_uaddr, waybill);
-        if (rc == ERR_WOULD_BLOCK) {
-            /* The job owns the write AND the staged Crate[] kbuf now —
-             * wjob_finalize answers and frees. */
-            return ERR_WOULD_BLOCK;
-        }
-        /* Refused before the job took it — nothing of it moved; fall through. */
-    }
-
-    /* Sync fallback. */
-    TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE |
-                                                  (append ? TAGFS_HANDLE_APPEND : 0));
-    if (!handle)
-        return storage_op_fail(ctx, crates, ERR_FILE_NOT_FOUND, waybill);
-    handle->offset = offset;
-
-    uint64_t wrote      = 0;
-    error_t  rc         = tagfs_write(handle, &source, &wrote);
-    uint64_t final_size = handle->file_size;
-    uint64_t began_at   = handle->offset - wrote;
-    tagfs_close(handle);
-
-    /* A refusal part way leaves the bytes before it in the file: the listeners
-     * hear of them and the stats count them, the same as on the async road. */
-    if (wrote > 0)
-        storage_publish_change(file_id, 1, began_at, wrote, final_size, ctx);
-
-    if (out_crate) {
-        uint8_t stats[16];
-        memcpy(stats + 0, &wrote,      sizeof(uint64_t));
-        memcpy(stats + 8, &final_size, sizeof(uint64_t));
-        /* Best-effort: a commit failure (user unmapped the page mid-op)
-         * leaves the stats crate empty but does not fail the write —
-         * crate_write sets out_crate->size only on success. */
-        (void)crate_write(out_crate, ctx, stats, 16);
-    }
-
-    /* Ф26e: answer a ferry write on the KCTX_STORAGE channel — the async
-     * path was declined (single core / alloc-fail) and fell through here. */
-    if (waybill != 0)
-        return storage_sync_ferry_finalize(ctx, crates, rc, wrote, waybill);
-    return (int)rc;
+    return WriteJobSubmit(&ask, crates, ctx);
 }
 
 /* Whether the file wears a tag whose key is system or boot: a file the
@@ -727,17 +631,18 @@ static int ObjDelete(const ManifestOp *op,
 
 /* -------------------------------------------------------------------------
  * OBJ_SPAN — params = [u32 file_id][u64 size]: the file made exactly `size`
- * bytes long (tagfs_span_file). Shorter cuts the tail; longer reads as zeros
- * from the old size on.
+ * bytes long (HelmSpan). Shorter cuts the tail; longer reads as zeros from
+ * the old size on. A WriteJob, as a write is: it holds the file's Helm, and
+ * waits for it parked.
  *
  * Guarded like OBJ_DELETE: cutting a "system" or "boot" file down to nothing
  * destroys it just as thoroughly as deleting it, so the same tags refuse the
  * same way.
  *
- * Publishes the change on every tag of the file (storage_publish_change,
- * op 3): a content change that published nothing would be a hole in the Touch
- * spine — an observer would have to poll to notice, which is the thing Touch
- * exists to remove.
+ * The change is published on every tag of the file (op 3, write_job.c): a
+ * content change that published nothing would be a hole in the Touch spine —
+ * an observer would have to poll to notice, which is the thing Touch exists
+ * to remove.
  * ------------------------------------------------------------------------- */
 
 static int ObjSpan(const ManifestOp *op,
@@ -745,32 +650,27 @@ static int ObjSpan(const ManifestOp *op,
                    uint16_t          crate_count,
                    const OpContext  *ctx)
 {
-    (void)crates;
     (void)crate_count;
     if (op->param_size < 12) return ERR_INVALID_ARGUMENT;
 
-    uint32_t file_id = param_u32(op, 0);
-    uint64_t size    = param_u64(op, 4);
+    WriteJobAsk ask;
+    memset(&ask, 0, sizeof(ask));
+    ask.kind    = WRITE_JOB_SPAN;
+    ask.file_id = param_u32(op, 0);
+    ask.size    = param_u64(op, 4);
 
     TagFSMetadata md;
     memset(&md, 0, sizeof(md));
-    if (tagfs_get_metadata(file_id, &md) != 0 || !(md.flags & TAGFS_FILE_ACTIVE)) {
+    if (tagfs_get_metadata(ask.file_id, &md) != 0 || !(md.flags & TAGFS_FILE_ACTIVE)) {
         tagfs_metadata_free(&md);
         return ERR_FILE_NOT_FOUND;
     }
-    bool     guarded = storage_file_is_guarded(&md);
-    uint64_t was     = md.size;
+    bool guarded = storage_file_is_guarded(&md);
     tagfs_metadata_free(&md);
     if (guarded)
         return ERR_PERMISSION_DENIED;
 
-    error_t rc = tagfs_span_file(file_id, size);
-    if (rc != OK)
-        return (int)rc;
-    if (size != was)
-        storage_publish_change(file_id, 3, size < was ? size : was,
-                               size < was ? was - size : size - was, size, ctx);
-    return OK;
+    return WriteJobSubmit(&ask, crates, ctx);
 }
 
 /* -------------------------------------------------------------------------

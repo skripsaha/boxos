@@ -5,6 +5,7 @@
 #include "../file_table/file_table.h"
 #include "../tag_registry/tag_registry.h"
 #include "../settle/settle.h"
+#include "../helm/helm.h"
 #include "../../../kernel/drivers/timer/rtc.h"
 
 /*
@@ -254,7 +255,8 @@ error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
     }
 
     FallowNode* fallow = NULL;
-    if (p->freed_count && !(fallow = FallowNodeMake(p->freed, p->freed_count, FALLOW_BY_RECORD)))
+    if (p->freed_count &&
+        !(fallow = FallowNodeMake(p->freed, p->freed_count, FALLOW_BY_RECORD, p->fid)))
         return ERR_NO_MEMORY;
 
     uint64_t now = rtc_get_unix64();
@@ -268,8 +270,9 @@ error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
         }
         if (was.shape != p->shape) {
             FileRecordRelease(cur);
-            kprintf("[TagFS] file %u: another write's record was committed while this one was "
-                    "in flight — this one is refused rather than laid over it\n", p->fid);
+            kprintf("[TagFS] file %u: its extents were changed since this call loaded them, by a "
+                    "caller that did not hold its Helm — this record is refused rather than laid "
+                    "over that one\n", p->fid);
             rc = ERR_BUSY;
             break;
         }
@@ -599,7 +602,7 @@ static error_t InkQuitclaimOnce(uint32_t fid, InkReceipt* out)
         rc = ERR_PERMISSION_DENIED;
     }
     if (rc == OK && cur->extent_count &&
-        !(fallow = FallowNodeMake(cur->extents, cur->extent_count, FALLOW_BY_RECORD)))
+        !(fallow = FallowNodeMake(cur->extents, cur->extent_count, FALLOW_BY_RECORD, fid)))
         rc = ERR_NO_MEMORY;
     if (rc == OK) {
         TagFSMetadata quitclaim = {
@@ -623,12 +626,16 @@ static error_t InkQuitclaimOnce(uint32_t fid, InkReceipt* out)
     return rc;
 }
 
+/* A holder of the file's Helm is not waited for: the file is vacated, and the
+ * holder answers ERR_FILE_NOT_FOUND at its own Ink, its Stakes given back. */
 error_t InkQuitclaim(uint32_t fid, InkReceipt* out)
 {
     error_t rc;
     do {
         rc = InkQuitclaimOnce(fid, out);
     } while (rc != OK && InkGoesRound(&rc, INK_MAKES_SPARES));
+    if (rc == OK)
+        HelmVacate(fid);
     return rc;
 }
 

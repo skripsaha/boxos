@@ -8,7 +8,7 @@
  * Plot — a file's extents as one call works on them, and all of their algebra.
  *
  * Every write, span and defrag loads the file's record into a Plot under the
- * file's writer (PlotLoad), works on the Plot in memory — finds blocks, takes
+ * file's Helm (PlotLoad), works on the Plot in memory — finds blocks, takes
  * new ground, merges runs, checks the record still fits — and inks the one
  * record the Plot builds (TagFSInkPlot, ink/). What the call took and did not
  * ink is given back on its way out, whichever way out it takes (PlotRelease):
@@ -151,9 +151,10 @@ error_t  PlotGather(Plot *p, uint32_t shed, uint32_t hint);
  * copied into the heap first.
  *
  * A pull reads only pages the program has: it never brings one in, because a
- * write pulls with its file's writer held — a TagFS lock, interrupts off — and
- * bringing a page in takes the program's own VMM lock. So the pages are
- * brought in first, before any TagFS lock is taken (PlotSourceBringIn).
+ * write pulls where its job happens to run — a continuation on the drain core,
+ * or a service point — which is not the program's own context, while bringing
+ * a page in is the program's own first touch. So the pages are brought in
+ * first, in the program's call, before the job is built (PlotSourceBringIn).
  */
 typedef struct PlotSource {
     const uint8_t *kernel;   /* the bytes, when they are the kernel's own */

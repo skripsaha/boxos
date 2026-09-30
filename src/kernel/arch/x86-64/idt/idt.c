@@ -2410,7 +2410,7 @@ static void sync_syscall_dispatch(process_t *proc, interrupt_frame_t *frame)
      * pass can observe the mark between here and guide()'s return.
      *
      * What it did do was destroy every park a handler took. A handler that
-     * parks — addr_park, touch_await, ObjRead, ObjWriteAsync — writes the same
+     * parks — addr_park, touch_await, ObjRead, a WriteJob — writes the same
      * PROC_WAITING to mean the opposite thing: "woken by event, not by the
      * next pass". Arriving already marked, its write was a no-op (old == new,
      * so no sched_dequeue), and guide()'s matching restore then read the mark

@@ -383,7 +383,7 @@ static void MapRunRests(uint32_t start, uint32_t count)
         runs[i].block_count = (uint16_t)(left < 0xFFFFu ? left : 0xFFFFu);
     }
     if (runs)
-        node = FallowNodeMake(runs, pieces, FALLOW_BY_LEDGER);
+        node = FallowNodeMake(runs, pieces, FALLOW_BY_LEDGER, 0);
     kfree(runs);
     if (!node) {
         kprintf("[Integrity] no memory to let the %u-block run at %u rest until no copy "

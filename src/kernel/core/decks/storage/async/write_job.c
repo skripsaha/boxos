@@ -1,14 +1,18 @@
 /*
- * WriteJob — async ObjWrite state-machine implementation.
+ * WriteJob — the one automaton of a file's changes a program asks for
+ * (write_job.h).
  *
- * Pumped from K-Core continuations posted by the AHCI IRQ. The IRQ side
- * is intentionally minimal: stash status, set the next state, post the
- * continuation. The K-Core side does everything that needs locks
- * (the Plot, the record's Ink, token release, Touch publish).
+ * A synchronous job runs its work in one piece under the file's Helm — the
+ * caller's call when the Helm was free, a service point when it was handed on
+ * (HelmWrite, HelmSpan, HelmDefrag). An asynchronous write is a state machine
+ * pumped from K-Core continuations posted by the AHCI IRQ. The IRQ side is
+ * intentionally minimal: stash status, set the next state, post the
+ * continuation. The K-Core side does everything that needs locks (the Plot,
+ * the record's Ink, the Helm, Touch publish).
  *
- * State flow (full):
+ * The asynchronous write's states:
  *
- *   W_INIT → W_TOKEN_WAIT? → W_ALLOC → W_LOCATE
+ *   W_HELM_WAIT? → W_ALLOC → W_LOCATE
  *
  *   per block, by the one read-modify-write rule (PlotFillFor):
  *     W_LOCATE → (the file's bytes, partly overlaid → W_READ_OLD → W_DMA_FILL)
@@ -19,30 +23,32 @@
  *                 → else:           W_LOG_META
  *
  *   the record (once):
- *     W_LOG_META → W_INK → W_PUBLISH → W_RELEASE_TOKEN → W_DONE
+ *     W_LOG_META → W_INK → W_DONE
  *     W_INK with no Spare to close the pool's tail onto:
  *              → W_SPARE → (yield to IRQ) → W_SPARE_DONE → W_INK
  *
- * The job is a write like the synchronous one, on the same Plot (plot.h): the
- * file's record loaded under the job's token, every block the write needs
+ * The file's record is loaded under the Helm, every block the write needs
  * reserved and the record's room checked before a byte moves, and what landed
  * inked as one record (TagFSInkPlot). A refusal on the way — a read of an
  * overlaid block, a block's write, the program's pages — stops the job there:
  * what landed before it is inked and said, and the ground reserved past it
  * goes back. A job that inks nothing gives back everything it took (CR-1), and
  * never a block twice (W-DFREE): what it took is the Plot's Stakes, given back
- * once.
+ * once. A file given up meanwhile is not written further: its Helm is vacated,
+ * and the job answers ERR_FILE_NOT_FOUND with its Stakes given back.
  *
- * ‼ NO FLUSH OF ITS OWN. What the job inked reaches the medium with a Settle
- * cycle, as a synchronous write's does — the cycle's first flush covers the
- * data before any record names it (settle.h). A flush after every write was a
- * SYNC CACHE per fwrite and proved nothing about the record, which no cycle
- * had written.
+ * ‼ NO FLUSH OF ITS OWN. What a job inked reaches the medium with a Settle
+ * cycle — the cycle's first flush covers the data before any record names it
+ * (settle.h). A flush after every write was a SYNC CACHE per fwrite and proved
+ * nothing about the record, which no cycle had written.
  *
- * ‼ A SPARE IS MADE THE JOB'S OWN WAY. A continuation may not stand over the
- * medium, so an Ink with no Spare to close the tail onto answers
+ * ‼ A SPARE IS MADE THE ASYNCHRONOUS JOB'S OWN WAY. A continuation may not
+ * stand over the medium, so an Ink with no Spare to close the tail onto answers
  * ERR_WOULD_BLOCK (INK_ASKS_SPARES) and the job stamps one through the port
  * like any block of its own (W_SPARE), hands it to the pool and inks again.
+ * And a volume short of ground Fallow still rests turns the job synchronous:
+ * a continuation cannot wait for the Settle cycle that gives it back, and a
+ * service point can (HelmWrite).
  *
  * The bytes come out of the program's pages a block at a time, into the DMA
  * page they go out of — never copied whole into the kernel heap first.
@@ -56,7 +62,10 @@
 #include "boardroom.h"
 #include "baton.h"
 #include "crate_stage.h"
+#include "crate_io.h"
+#include "op_registry.h"
 #include "tagfs.h"
+#include "helm.h"        /* the file's Helm, and the work its holder does */
 #include "ahci.h"
 #include "ahci_async.h"
 #include "vmm.h"
@@ -69,17 +78,18 @@
 #include "amp.h"
 #include "boxos_manifest.h"
 #include "boxos_crate.h"
-#include "op_registry.h"
 #include "touch.h"
 #include "integrity.h"
 #include "ink.h"         /* TagFSInkPlot — the one way the file changes */
 #include "meta_pool.h"   /* PoolSpareBegin / Adopt / Drop — a Spare stamped through the port */
 #include "scribe.h"      /* VolumeFlushNeed — what the landed blocks wait for */
+#ifdef CONFIG_VOLUME_TESTS
+#include "block_fail.h"  /* BLOCKFAIL — the port's commands refused on the stand */
+#endif
 
 /* ---- forward decls ---- */
 static void wjob_pump(void *job_);
-static void wjob_finalize(WriteJob *j, int rc);
-static void wjob_publish_change(WriteJob *j);
+static int  wjob_finalize(WriteJob *j, error_t rc);
 static void wjob_ahci_complete(uint8_t port, uint8_t slot, error_t status, void *ctx);
 
 static inline void wjob_to(WriteJob *j, WriteJobState s)
@@ -88,59 +98,51 @@ static inline void wjob_to(WriteJob *j, WriteJobState s)
 }
 
 /* =========================================================================
- *  Token handoff
+ *  The Helm
  * ========================================================================= */
 
-static bool token_try_claim(WriteJob *j)
+/* The job's work, synchronously, under the Helm it holds. */
+static error_t wjob_work(WriteJob *j)
 {
-    OpenFileEntry *ofe = j->ofe;
-    TagFSLockTake(&ofe->async_token_lock);
-    if (ofe->async_write_owner == NULL) {
-        ofe->async_write_owner = j;
-        TagFSLockDrop(&ofe->async_token_lock);
-        return true;
+    error_t rc;
+    switch (j->kind) {
+    case WRITE_JOB_WRITE:
+        j->handle->offset = j->asked_offset;
+        rc = HelmWrite(j->handle, &j->source, &j->bytes_done);
+        j->committed    = true;
+        j->start_offset = j->handle->offset - j->bytes_done;
+        j->final_size   = j->handle->file_size;
+        return rc;
+    case WRITE_JOB_SPAN:
+        return HelmSpan(j->handle, j->span_size, &j->span_was);
+    case WRITE_JOB_DEFRAG:
+        return HelmDefrag(j->handle, j->defrag_target);
     }
-    j->next_pending = NULL;
-    if (!ofe->async_pending_head) {
-        ofe->async_pending_head = j;
+    return ERR_INVALID_ARGUMENT;
+}
+
+/* A synchronous job handed the Helm is run at the next service point. */
+static void wjob_run_ready(HelmWaiter *w)
+{
+    WriteJob *j = container_of(w, WriteJob, helm);
+    (void)wjob_finalize(j, wjob_work(j));
+}
+
+/* HelmHand's call, on the core that let go, with no TagFS lock held. */
+static void wjob_handed(HelmWaiter *w)
+{
+    WriteJob *j = container_of(w, WriteJob, helm);
+    j->holds_helm = true;
+    if (j->async) {
+        wjob_to(j, W_ALLOC);
+        BatonPass(&j->cq_node);   /* never-drop; routes to the drain core */
     } else {
-        struct WriteJob *t = ofe->async_pending_head;
-        while (t->next_pending) t = t->next_pending;
-        t->next_pending = j;
-    }
-    TagFSLockDrop(&ofe->async_token_lock);
-    return false;
-}
-
-static WriteJob *token_release_handoff(WriteJob *j)
-{
-    OpenFileEntry *ofe = j->ofe;
-    WriteJob *next = NULL;
-    TagFSLockTake(&ofe->async_token_lock);
-    if (ofe->async_write_owner == j) {
-        next = ofe->async_pending_head;
-        if (next) {
-            ofe->async_pending_head = next->next_pending;
-            next->next_pending = NULL;
-        }
-        ofe->async_write_owner = next;
-    }
-    TagFSLockDrop(&ofe->async_token_lock);
-    return next;
-}
-
-/* The token passed on: the next writer loads the file as this one left it. */
-static void token_pass(WriteJob *j)
-{
-    WriteJob *next = token_release_handoff(j);
-    if (next) {
-        wjob_to(next, W_ALLOC);
-        BatonPass(&next->cq_node);   /* never-drop; routes to drain core */
+        HelmReady(w);
     }
 }
 
 /* =========================================================================
- *  State handlers
+ *  State handlers — the asynchronous write
  * ========================================================================= */
 
 /* The write stops at a refusal. What landed before it is made the file's —
@@ -158,15 +160,28 @@ static bool wjob_stop(WriteJob *j, error_t cause)
     return false;
 }
 
-/* W_ALLOC — the file's record loaded under the token, the growth rule asked,
- * and every block the write covers reserved, before any byte moves. */
+/* W_ALLOC — the file's record loaded under the Helm, the growth rule asked,
+ * and every block the write covers reserved, before any byte moves. A volume
+ * short of ground Fallow rests turns the job synchronous: the service point
+ * that runs it may wait for the cycle that gives the ground back. */
 static bool w_alloc(WriteJob *j)
 {
-    error_t rc = PlotLoad(&j->plot, j->file_id);
+    error_t rc = ERR_FILE_NOT_FOUND;
+    if (!HelmVacated(j->handle->ofe)) {
+        HelmViewTake(j->handle);   /* it views the file from this load on (HelmWrite's rule) */
+        rc = PlotLoad(&j->plot, j->file_id);
+    }
     j->loaded = rc == OK;
     if (rc == OK)
         rc = PlotBeginWrite(&j->plot, j->asked_offset, j->append, j->source.bytes,
                             &j->start_offset);
+    if (rc == ERR_WOULD_BLOCK) {
+        PlotRelease(&j->plot);
+        j->loaded = false;
+        j->async  = false;
+        HelmReady(&j->helm);
+        return false;
+    }
     if (rc != OK) {
         wjob_finalize(j, rc);
         return false;
@@ -176,9 +191,15 @@ static bool w_alloc(WriteJob *j)
 }
 
 /* W_LOCATE — the block the cursor is in, and what the rest of it needs: a
- * read of the file's bytes, zeros, or nothing. */
+ * read of the file's bytes, zeros, or nothing. A file given up meanwhile is
+ * written no further. */
 static bool w_locate(WriteJob *j)
 {
+    if (HelmVacated(j->handle->ofe)) {
+        wjob_finalize(j, ERR_FILE_NOT_FOUND);
+        return false;
+    }
+
     uint64_t pos   = j->start_offset + j->bytes_done;
     uint64_t k     = pos / TAGFS_BLOCK_SIZE;
     uint32_t off   = (uint32_t)(pos % TAGFS_BLOCK_SIZE);
@@ -234,6 +255,17 @@ static error_t wjob_submit(WriteJob *j, bool write, RoadsteadAnswered answered)
 
     j->if_reading = !write;
     uint8_t port = BoardroomSeatIndex(tagfs_get_seat());
+#ifdef CONFIG_VOLUME_TESTS
+    /* BLOCKFAIL, asked the way the Boardroom asks it of an asynchronous read:
+     * the command is taken and answered through the callback with ERR_IO, as
+     * a real completion can already arrive before the submit returns. Nothing
+     * is issued. */
+    if (BlockFailStrikes(tagfs_get_seat(), write ? BLOCK_FAIL_WRITE : BLOCK_FAIL_READ,
+                         b->lba, b->sectors)) {
+        answered(port, 0, ERR_IO, j);
+        return OK;
+    }
+#endif
     return write ? ahci_submit_write_async(port, b) : ahci_submit_read_async(port, b);
 }
 
@@ -324,7 +356,8 @@ static bool w_log_meta(WriteJob *j)
 }
 
 /* W_INK — the one record the Plot builds, inked; with no Spare for the pool's
- * tail, one is stamped first (W_SPARE). */
+ * tail, one is stamped first (W_SPARE). A file given up meanwhile has no
+ * record to ink over, and the answer is ERR_FILE_NOT_FOUND. */
 static bool w_ink(WriteJob *j)
 {
     InkReceipt inked;
@@ -337,8 +370,9 @@ static bool w_ink(WriteJob *j)
         wjob_finalize(j, rc);
         return false;
     }
-    j->committed = true;
-    wjob_to(j, W_PUBLISH);
+    j->committed  = true;
+    j->final_size = j->plot.size;
+    wjob_to(j, W_DONE);
     return true;
 }
 
@@ -392,133 +426,114 @@ static bool w_spare_done(WriteJob *j)
     return true;
 }
 
-/* The file's size as the job leaves it: the inked record's once the job
- * loaded one, the open's before that. */
-static uint64_t wjob_final_size(const WriteJob *j)
-{
-    return j->loaded ? j->plot.size_before : (j->handle ? j->handle->file_size : 0);
-}
+/* =========================================================================
+ *  The end — one for every job, however it ran
+ * ========================================================================= */
 
-/* Say what happened to the file on every tag it carries. Separate from the
- * W_PUBLISH state because the change is a fact about the file, not about how
- * the job ended: a write stopped part way, or whose cache flush was refused,
- * has still changed the file for every reader, and the listeners have to hear
- * that from the same place a successful one tells them. */
-static void wjob_publish_change(WriteJob *j)
+/* A change to a file's bytes, said on every tag it wears — one 32-byte shape
+ * for every road that changes them, so one listener reads them all: op 1 a
+ * write (the bytes written at offset), op 3 a span (the bytes cut or added
+ * from offset, the old or the new size, whichever is less). A defrag moves the
+ * bytes and changes none of them, and says nothing. */
+static void wjob_publish(const WriteJob *j, error_t rc)
 {
-    if (j->bytes_done > 0 && TouchHasAnyListeners()) {
-        TagFSMetadata wmeta;
-        memset(&wmeta, 0, sizeof(wmeta));
-        if (tagfs_get_metadata(j->file_id, &wmeta) == OK) {
-            struct {
-                uint32_t file_id;
-                uint8_t  op;          /* 1 = WRITE */
-                uint8_t  _pad[3];
-                uint64_t offset;
-                uint64_t bytes;
-                uint64_t final_size;
-            } __attribute__((packed)) ev = {
-                .file_id    = j->file_id,
-                .op         = 1,
-                .offset     = j->start_offset,
-                .bytes      = j->bytes_done,
-                .final_size = wjob_final_size(j),
-            };
-            for (uint32_t ti = 0; ti < wmeta.tag_count; ti++) {
-                TouchPublishId(wmeta.tag_ids[ti], &ev, sizeof(ev),
-                               (j->target ? j->target->pid : 0),
-                               TOUCH_FLAG_TAGFS);
-            }
-            tagfs_metadata_free(&wmeta);
-        }
+    uint8_t  op;
+    uint64_t offset, bytes, final_size;
+    switch (j->kind) {
+    case WRITE_JOB_WRITE:
+        if (!j->committed || j->bytes_done == 0)
+            return;
+        op = 1, offset = j->start_offset, bytes = j->bytes_done, final_size = j->final_size;
+        break;
+    case WRITE_JOB_SPAN:
+        if (rc != OK || j->span_size == j->span_was)
+            return;
+        op         = 3;
+        offset     = j->span_size < j->span_was ? j->span_size : j->span_was;
+        bytes      = j->span_size < j->span_was ? j->span_was - j->span_size
+                                                : j->span_size - j->span_was;
+        final_size = j->span_size;
+        break;
+    default:
+        return;
     }
+    if (!TouchHasAnyListeners())
+        return;
+
+    TagFSMetadata meta;
+    memset(&meta, 0, sizeof(meta));
+    if (tagfs_get_metadata(j->file_id, &meta) != OK)
+        return;
+    struct {
+        uint32_t file_id;
+        uint8_t  op;
+        uint8_t  _pad[3];
+        uint64_t offset;
+        uint64_t bytes;
+        uint64_t final_size;
+    } __attribute__((packed)) ev = {
+        .file_id    = j->file_id,
+        .op         = op,
+        .offset     = offset,
+        .bytes      = bytes,
+        .final_size = final_size,
+    };
+    uint32_t pid = j->target ? j->target->pid : 0;
+    for (uint32_t ti = 0; ti < meta.tag_count; ti++)
+        TouchPublishId(meta.tag_ids[ti], &ev, sizeof(ev), pid, TOUCH_FLAG_TAGFS);
+    tagfs_metadata_free(&meta);
 }
 
-/* W_PUBLISH — the file's tags hear about the write, then the token moves on.
- * Best-effort: a publish failure does not abort the write. */
-static bool w_publish(WriteJob *j)
+/* What the job's out crate carries: a write's [u64 written][u64 size] — the
+ * bytes an inked record names, all of them, a prefix a refusal stopped, or
+ * none: answering "0 bytes" to an appending writer whose bytes are in the file
+ * is exactly what would make it write the same payload twice — and a defrag's
+ * [u32 score] once it moved the file. The length, 0 for nothing. */
+static uint32_t wjob_out_bytes(const WriteJob *j, error_t rc, uint64_t written,
+                               uint8_t out[16])
 {
-    wjob_publish_change(j);
-    wjob_to(j, W_RELEASE_TOKEN);
-    return true;
-}
-
-/* W_RELEASE_TOKEN — handoff to next pending writer (if any), then DONE. */
-static bool w_release_token(WriteJob *j)
-{
-    token_pass(j);
-    wjob_to(j, W_DONE);
-    return true;
-}
-
-/* W_DONE / W_ERROR — common exit. */
-static void wjob_finalize(WriteJob *j, int rc)
-{
-    /* What the stats and the answer say is read off the Plot before it goes. */
-    uint64_t bytes_written = j->committed ? j->bytes_done : 0;
-    uint64_t final_size    = wjob_final_size(j);
-
-    /* What the job took and no inked record names goes back first — on
-     * every way out, once — and only then may the next writer load the file. */
-    PlotRelease(&j->plot);
-    if (rc != OK && j->ofe)
-        token_pass(j);
-
-    /* Stat reporter, on the sync ObjWrite contract: the size says 16 only of
-     * stats that reached the program, as crate_write sets it only on success.
-     * A commit the program's pages refuse leaves the size as it staged it, and
-     * the write itself stands. out_crate points into the staged Crate[] kbuf;
-     * out_crate->addr is the user vaddr. j->target is pinned for the job's
-     * lifetime and commit_out walks the page tables physically (no target CR3
-     * switch) — same model as the crate_stage_commit_and_release below.
-     *
-     * The count the caller is given is the count that is IN the file: the
-     * bytes an inked record names — all of them, a prefix a refusal
-     * stopped, or none. Answering "0 bytes" to an appending writer whose bytes
-     * are in the file is exactly what would make it write the same payload
-     * into the file twice. */
-    if (j->out_crate && j->out_crate->capacity >= 16 &&
-        j->target && j->target->cabin) {
-        uint8_t stats[16];
-        memcpy(stats + 0, &bytes_written, sizeof(uint64_t));
-        memcpy(stats + 8, &final_size,    sizeof(uint64_t));
-        if (vmm_user_buf_commit_out(j->target->cabin->vmm,
-                                    (uintptr_t)j->out_crate->addr, stats, 16) == OK)
-            j->out_crate->size = 16;
+    if (!j->out_crate)
+        return 0;
+    if (j->kind == WRITE_JOB_WRITE && j->out_crate->capacity >= 16) {
+        memcpy(out + 0, &written,       sizeof(uint64_t));
+        memcpy(out + 8, &j->final_size, sizeof(uint64_t));
+        return 16;
     }
-
-    if (j->dma_phys)    pmm_free(j->dma_phys, 1);
-    /* A Spare still in hand here was stamped for a mounting that is gone: its
-     * block number is not this volume's to give back. */
-    kfree(j->spare_image);
-    if (j->handle)      tagfs_close(j->handle);
-
-    /* CrateStage release. Dispatcher handed us ownership of crates_kbuf
-     * at ObjWriteAsync's PROC_WAITING return. The stats' size above went
-     * into kbuf only if the stats arrived; commit_and_release
-     * flushes the whole descriptor array back to user memory and frees
-     * the kbuf. Cabin is target->cabin (already pinned via ref). */
-    if (j->crates_kbuf) {
-        crate_stage_commit_and_release(j->crates_kbuf, j->crate_count,
-                                        (j->target && j->target->cabin) ? j->target->cabin->vmm : NULL,
-                                        j->crates_uaddr);
+    if (j->kind == WRITE_JOB_DEFRAG && rc == OK && j->out_crate->capacity >= sizeof(uint32_t)) {
+        uint32_t score = tagfs_get_fragmentation_score(NULL, NULL);
+        memcpy(out, &score, sizeof(score));
+        return sizeof(score);
     }
+    return 0;
+}
+
+/* The answer pushed to the parked caller. The out crate reaches the program's
+ * pages first, then the descriptors — the dispatcher handed the staged kbuf
+ * to the job when it parked — and only then the Result: a ferry that frees its
+ * submission block on completion cannot race it. j->target is pinned for the
+ * job's lifetime and commit_out walks the page tables physically (no target
+ * CR3 switch). */
+static void wjob_answer_pushed(WriteJob *j, error_t rc, uint64_t written)
+{
+    uint8_t  out[16];
+    uint32_t n    = wjob_out_bytes(j, rc, written, out);
+    vmm_context_t *vmm = (j->target && j->target->cabin) ? j->target->cabin->vmm : NULL;
+    if (n && vmm && vmm_user_buf_commit_out(vmm, (uintptr_t)j->out_crate->addr, out, n) == OK)
+        j->out_crate->size = n;
+    if (j->crates_kbuf)
+        crate_stage_commit_and_release(j->crates_kbuf, j->crate_count, vmm, j->crates_uaddr);
 
     Result r;
     memset(&r, 0, sizeof(r));
-    /* The error the job actually ended on, not a blanket ERR_IO. Every exit
-     * above already carries a distinct one — ERR_TAGFS_BEYOND_SIZE (a write
-     * past the size), ERR_TAGFS_RECORD_FULL (a record out of room),
-     * ERR_DEVICE_NOT_READY (the port is not in the machine), ERR_NO_MEMORY
-     * (this machine, not this disk), the status the AHCI completion reported,
-     * the refusal of the cache flush — and flattening them here is what left
-     * the caller unable to tell one from another. */
+    /* The error the job actually ended on, never a blanket ERR_IO: the
+     * caller tells ERR_TAGFS_BEYOND_SIZE from ERR_TAGFS_RECORD_FULL from the
+     * medium's own answer by it. */
     r.error_code  = (uint32_t)rc;
-    r.data_length = (uint32_t)bytes_written;
+    r.data_length = (uint32_t)written;
     r.sender_pid  = 0;
     /* Ф26e: a waybilled (box::ferry) write echoes its correlation token in
      * data_addr and flies the KCTX_STORAGE flag so boxlib routes it to the
-     * ferry station; a plain write keeps KCTX_GUIDE / data_addr==0. */
+     * ferry station; a plain answer keeps KCTX_GUIDE / data_addr==0. */
     if (j->waybill) { r.context = KCTX_STORAGE; r.data_addr = j->waybill; }
     else            { r.context = KCTX_PACK24(KCTX_GUIDE, j->submit_cookie); }
 
@@ -527,39 +542,69 @@ static void wjob_finalize(WriteJob *j, int rc)
          * the kernel's own debt. Due here, kept by the push. */
         ChitDue(j->target, j->submit_cookie);
         KResultPush(j->target, &r);
-        process_ref_dec(j->target);
     }
+}
+
+/* The answer of a job that ran inside its caller's call: the out crate
+ * through the call's own crates, and the handler's return. A ferry is
+ * answered on its own channel even so. Best-effort: an out crate the program
+ * unmapped meanwhile is left empty, and the work stands. */
+static int wjob_answer_now(WriteJob *j, error_t rc, uint64_t written)
+{
+    uint8_t  out[16];
+    uint32_t n = wjob_out_bytes(j, rc, written, out);
+    if (n)
+        (void)crate_write(j->out_crate, j->ctx, out, n);
+    if (j->waybill)
+        return storage_sync_ferry_finalize(j->ctx, j->crates_kbuf, rc, written, j->waybill);
+    return (int)rc;
+}
+
+/* What the job took goes back first — the Stakes nobody inked, on every way
+ * out, once — then the listeners hear of what changed, the Helm goes to the
+ * next waiter, and the answer is given; the door is let go of last of what
+ * the volume lent. The handler's return when the job ran inside its call. */
+static int wjob_finalize(WriteJob *j, error_t rc)
+{
+    uint64_t written = j->committed ? j->bytes_done : 0;
+    if (!j->committed && j->loaded)
+        j->final_size = j->plot.size_before;
+    else if (!j->committed)
+        j->final_size = j->handle->file_size;
+
+    PlotRelease(&j->plot);
+    wjob_publish(j, rc);
+    if (j->holds_helm)
+        HelmLetGo(j->handle->ofe, &j->helm);
+
+    if (j->dma_phys)
+        pmm_free(j->dma_phys, 1);
+    tagfs_close(j->handle);
+    tagfs_leave();
+
+    int answer = OK;
+    if (j->deferred)
+        wjob_answer_pushed(j, rc, written);
+    else
+        answer = wjob_answer_now(j, rc, written);
+
+    if (j->target)
+        process_ref_dec(j->target);
     kfree(j);
+    return answer;
 }
 
 /* =========================================================================
  *  Pump
  * ========================================================================= */
 
+/* The job holds the volume's door from its making to its end, so the volume
+ * its Plot's block numbers belong to is the one mounted for as long as it
+ * pumps: a take-down waits for the job, and no second mount begins beneath it
+ * on another K-Core (W-DOOR). */
 static void wjob_pump(void *job_)
 {
     WriteJob *j = (WriteJob *)job_;
-
-    /*
-     * ‼ IS THIS STILL THE VOLUME THIS WRITE WAS AIMED AT?
-     *
-     * A job lives across yields, and what it carries is a Plot of the file —
-     * disk block numbers. If the medium left and came back in between, the
-     * volume has been read again and those numbers now name whatever it keeps
-     * there today. Carrying on would not fail: it would write this file's
-     * bytes into another file's blocks.
-     *
-     * Asked once per pump rather than once per state, because a re-mount
-     * cannot happen inside the loop below: it is finished by the same guide
-     * loop that is running this.
-     */
-    if (!tagfs_handle_is_of_this_mount(j->handle)) {
-        kprintf("[Storage] a write to file %u was aimed at an earlier mounting "
-                "of this volume — it is refused rather than written somewhere "
-                "else\n", j->file_id);
-        wjob_finalize(j, ERR_IO);
-        return;
-    }
 
     for (;;) {
         WriteJobState s = (WriteJobState)atomic_load_u32((volatile uint32_t *)&j->state);
@@ -574,12 +619,9 @@ static void wjob_pump(void *job_)
             case W_INK:           if (!w_ink(j))           return; break;
             case W_SPARE:         if (!w_spare(j))         return; break;
             case W_SPARE_DONE:    if (!w_spare_done(j))    return; break;
-            case W_PUBLISH:       if (!w_publish(j))       return; break;
-            case W_RELEASE_TOKEN: if (!w_release_token(j)) return; break;
             case W_DONE:          wjob_finalize(j, j->stopped); return;
             case W_INIT:
-            case W_TOKEN_WAIT:
-            case W_ERROR:
+            case W_HELM_WAIT:
                 return;
         }
     }
@@ -632,98 +674,137 @@ static void wjob_ahci_complete(uint8_t port, uint8_t slot,
 }
 
 /* =========================================================================
- *  Public entry — ObjWriteAsync
+ *  Public entry — WriteJobSubmit
  * ========================================================================= */
 
-int ObjWriteAsync(uint32_t                file_id,
-                  uint64_t                offset,
-                  bool                    append,
-                  const PlotSource       *source,
-                  Crate                  *out_crate,
-                  const struct OpContext *ctx,
-                  Crate                  *crates_kbuf,
-                  uint16_t                crate_count,
-                  uint64_t                crates_uaddr,
-                  uint64_t                waybill)
+/* A write goes through the port, the job parked on each block's answer, only
+ * where the volume is on AHCI and a K-Core pumps its continuations: on a
+ * single core the BSP runs the program and never pumps, so the job would
+ * strand, and the other seats' machines are not built on AHCI's slots. A job
+ * that cannot have its DMA page is synchronous. */
+static void wjob_choose_async(WriteJob *j)
 {
-    if (!ctx || !ctx->proc || !source || source->bytes == 0) return ERR_INVALID_ARGUMENT;
+    if (j->kind != WRITE_JOB_WRITE || !j->target || g_amp.total_cores <= 1 ||
+        BoardroomSeatKind(tagfs_get_seat()) != BOARD_AHCI)
+        return;
+    j->dma_phys = pmm_alloc(1, PHYS_TAG_DMA32);
+    if (!j->dma_phys)
+        return;
+    j->dma_virt = vmm_phys_to_virt((uintptr_t)j->dma_phys);
+    j->async    = true;
+}
 
-    TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
-    if (!handle) return ERR_FILE_NOT_FOUND;
-
-    void *dma_phys = pmm_alloc(1, PHYS_TAG_DMA32);
-    if (!dma_phys) {
-        tagfs_close(handle);
-        return ERR_NO_MEMORY;
-    }
-    void *dma_virt = vmm_phys_to_virt((uintptr_t)dma_phys);
-
-    process_t *target = process_find_ref(ctx->proc->pid);
-    if (!target) {
-        pmm_free(dma_phys, 1);
-        tagfs_close(handle);
-        return ERR_INVALID_ARGUMENT;
-    }
-
+/* The job for `ask`, its file open for writing and its caller pinned: OK, or
+ * the refusal with nothing held. Inside the volume's door. */
+static error_t wjob_make(const WriteJobAsk *ask, Crate *crates, const OpContext *ctx,
+                         WriteJob **out)
+{
+    uint32_t flags = TAGFS_HANDLE_WRITE |
+                     (ask->kind == WRITE_JOB_WRITE && ask->append ? TAGFS_HANDLE_APPEND : 0);
     WriteJob *j = kmalloc(sizeof(WriteJob));
-    if (!j) {
-        process_ref_dec(target);
-        pmm_free(dma_phys, 1);
-        tagfs_close(handle);
+    if (!j)
         return ERR_NO_MEMORY;
-    }
     memset(j, 0, sizeof(*j));
 
-    j->target        = target;
-    j->file_id       = file_id;
-    j->handle        = handle;
-    j->ofe           = handle->ofe;
-    j->out_crate     = out_crate;
-    j->source        = *source;
-    j->asked_offset  = offset;
-    j->append        = append;
-    j->waybill       = waybill;
-    j->submit_cookie = ctx->submit_cookie;
-    j->dma_phys      = dma_phys;
-    j->dma_virt      = dma_virt;
-
-    /* Never-drop completion node: the AHCI IRQ / token handoff posts this
-     * job to the drain core with no allocation. Set once, reused across
-     * every enqueue of this job. */
-    j->cq_node.run   = wjob_pump;
-    j->cq_node.ctx   = j;
-
-    /* CrateStage ownership transfer from dispatcher. After we return
-     * ERR_WOULD_BLOCK below (via process_set_state PROC_WAITING), the
-     * dispatcher will not touch the staged crates kbuf. wjob_finalize
-     * writes out_crate->size = bytes and calls
-     * crate_stage_commit_and_release to flush + free. */
-    j->crates_kbuf   = crates_kbuf;
-    j->crate_count   = crate_count;
-    j->crates_uaddr  = crates_uaddr;
-
-    process_set_state(ctx->proc, PROC_WAITING);
-    /* The chit, and with it the staged-crates ownership transfer to
-     * wjob_finalize (the dispatcher then skips its sync commit_out + kfree —
-     * race-safe vs a very fast completion). Before the token claim: a job
-     * that gets the token pumps at once, and can finish on another core. */
-    ChitGive(ctx, "storage.write", file_id);
-
-    if (token_try_claim(j)) {
-        wjob_to(j, W_ALLOC);
-        /* Run the first pump synchronously in this syscall (thread) context,
-         * not as a posted continuation: thread context can safely take every
-         * lock the state machine needs and skips a queue round-trip on the
-         * common path. It pumps until it parks at W_AHCI_SUBMIT (yield to the
-         * AHCI IRQ, whose completion posts the job's never-drop node to the
-         * drain core). Any continuation the machine posts from here — e.g. a
-         * token handoff on an early-error exit — goes through
-         * BatonPass, which routes to the drain core (never the
-         * calling App Core), so it cannot strand. */
-        wjob_pump(j);
-    } else {
-        wjob_to(j, W_TOKEN_WAIT);
+    j->handle = tagfs_open(ask->file_id, flags);
+    if (!j->handle) {
+        kfree(j);
+        return ERR_FILE_NOT_FOUND;
+    }
+    if (ctx && ctx->proc) {
+        j->target = process_find_ref(ctx->proc->pid);
+        if (!j->target) {
+            tagfs_close(j->handle);
+            kfree(j);
+            return ERR_INVALID_ARGUMENT;
+        }
     }
 
+    j->kind          = ask->kind;
+    j->ctx           = ctx;
+    j->file_id       = ask->file_id;
+    j->out_crate     = ask->out_crate;
+    j->source        = ask->source;
+    j->asked_offset  = ask->offset;
+    j->append        = ask->append;
+    j->waybill       = ask->waybill;
+    j->span_size     = ask->size;
+    j->defrag_target = ask->target_block;
+    j->submit_cookie = ctx ? ctx->submit_cookie : 0;
+    j->final_size    = j->handle->file_size;
+    j->helm.hand     = wjob_handed;
+    j->helm.run      = wjob_run_ready;
+    j->cq_node.run   = wjob_pump;
+    j->cq_node.ctx   = j;
+    j->crates_kbuf   = crates;
+    j->crate_count   = ctx ? ctx->crate_count : 0;
+    j->crates_uaddr  = ctx ? ctx->crates_uaddr : 0;
+    wjob_choose_async(j);
+    *out = j;
+    return OK;
+}
+
+/* The caller is parked and the answer becomes the job's to push — the chit,
+ * and with it the staged crates, before the job can be handed the Helm: a job
+ * handed it runs at once, and can finish on another core before this call
+ * returns. */
+static void wjob_defer(WriteJob *j, const OpContext *ctx)
+{
+    static const char *const holder[] = {
+        [WRITE_JOB_WRITE]  = "storage.write",
+        [WRITE_JOB_SPAN]   = "storage.span",
+        [WRITE_JOB_DEFRAG] = "system.fs.defrag",
+    };
+    j->deferred = true;
+    j->ctx      = NULL;
+    process_set_state(ctx->proc, PROC_WAITING);
+    ChitGive(ctx, holder[j->kind], j->file_id);
+}
+
+int WriteJobSubmit(const WriteJobAsk *ask, Crate *crates, const OpContext *ctx)
+{
+    if (!ask || (ask->kind == WRITE_JOB_WRITE && ask->source.bytes == 0))
+        return ERR_INVALID_ARGUMENT;
+    if (!tagfs_enter()) {
+        return (ask->waybill && ctx)
+                   ? storage_sync_ferry_finalize(ctx, crates, ERR_TAGFS_NOT_INITIALIZED, 0,
+                                                 ask->waybill)
+                   : (int)ERR_TAGFS_NOT_INITIALIZED;
+    }
+
+    WriteJob *j  = NULL;
+    error_t   rc = wjob_make(ask, crates, ctx, &j);
+    if (rc != OK) {
+        tagfs_leave();
+        return (ask->waybill && ctx) ? storage_sync_ferry_finalize(ctx, crates, rc, 0, ask->waybill)
+                                     : (int)rc;
+    }
+    OpenFileEntry *ofe = j->handle->ofe;
+
+    if (!j->async && HelmTry(ofe, &j->helm)) {
+        j->holds_helm = true;
+        return wjob_finalize(j, wjob_work(j));
+    }
+    if (!j->target) {
+        kprintf("[Storage] file %u is being changed by the holder of its Helm, and a caller "
+                "with no program to park cannot wait behind it — refused\n", j->file_id);
+        return wjob_finalize(j, ERR_BUSY);
+    }
+
+    wjob_defer(j, ctx);
+    wjob_to(j, W_HELM_WAIT);
+    if (!HelmAsk(ofe, &j->helm))
+        return ERR_WOULD_BLOCK;   /* the job is the Helm's now: not touched again here */
+
+    j->holds_helm = true;
+    if (j->async) {
+        /* The first pump in this call's own context: it takes every lock the
+         * machine needs and skips a queue round-trip, and parks at the first
+         * submit. What it posts from here goes to the drain core. */
+        wjob_to(j, W_ALLOC);
+        wjob_pump(j);
+    } else {
+        (void)wjob_finalize(j, wjob_work(j));
+    }
     return ERR_WOULD_BLOCK;
 }

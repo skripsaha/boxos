@@ -47,8 +47,8 @@ void SettleCutSayArmed(void)
  * wait's caller included, since that wait no longer turns them on (it takes
  * the drive's answer itself, drivers/disk/ata_async.c). It does NOT prove a
  * core was between writes: one frozen between two synchronous writes of a
- * stage that holds no lock (a writer with no open-file entry, say) stops right
- * there. A scenario therefore runs a single writer, and the cycle is that
+ * stage that holds no lock (a file's writer, whose Helm is no lock) stops
+ * right there. A scenario therefore runs a single writer, and the cycle is that
  * writer.
  *
  * And what cannot be stopped is not claimed: a command another operation had

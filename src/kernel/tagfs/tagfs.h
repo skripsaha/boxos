@@ -245,33 +245,50 @@ typedef struct {
 // In-Memory Structures: File Handles and Metadata
 // ----------------------------------------------------------------------------
 
-/* Forward decl: WriteJob lives in storage/async/write_job.h. The OFE
- * carries a token-handoff slot so concurrent async writers serialize
- * without holding write_lock across an IO yield. */
-struct WriteJob;
+/* A place in a file's Helm (helm/helm.h): the FIFO while it waits, then the
+ * ready list when its work is run at a service point. */
+typedef struct HelmWaiter {
+    struct HelmWaiter* next;
+    void (*hand)(struct HelmWaiter* w);   /* the Helm is w's now; no TagFS lock held */
+    void (*run)(struct HelmWaiter* w);    /* a waiter HelmReady listed is run here */
+} HelmWaiter;
 
+/* One holder of a file's extents at a time, and who waits for it. */
+typedef struct {
+    TagFSLock     lock;       /* leaf: the three below */
+    HelmWaiter*   holder;     /* NULL when nobody holds it */
+    HelmWaiter*   first;      /* the FIFO, oldest first */
+    HelmWaiter*   last;
+    volatile bool vacated;    /* a Quitclaim gave the file up */
+} FileHelm;
+
+struct TagFSFileHandle;
+
+/* A file some handle has open: its Helm, and every open handle's view of it,
+ * under the open-file table's lock (helm/helm.c). */
 typedef struct OpenFileEntry {
-    uint32_t              file_id;
-    uint32_t              ref_count;
-    TagFSLock             write_lock;        /* sync path only */
-    struct WriteJob *     async_write_owner; /* token (NULL = free) */
-    struct WriteJob *     async_pending_head;/* FIFO of waiters */
-    TagFSLock             async_token_lock;  /* guards above two fields */
-    struct OpenFileEntry* next;
+    uint32_t                file_id;
+    uint32_t                ref_count;
+    FileHelm                helm;
+    struct TagFSFileHandle* views;
+    struct OpenFileEntry*   next;
 } OpenFileEntry;
 
-/* A file opened for one operation. `extents` and `file_size` are the record as
- * the open found it, and only a read walks them: a write loads the file's
- * record again under its writer (plot.h, PlotLoad) and leaves here only where
- * it ended — `offset`, and the size it left. */
-typedef struct {
+/* A file opened for one operation. A handle opened to read carries the record
+ * as the open found it — `extents` and `file_size` — and only a read walks
+ * them; one opened only to write carries no extents: its work loads the record
+ * under the file's Helm (plot.h, PlotLoad) and leaves here only where it ended
+ * — `offset`, and the size it left. `view_gen` is the newest Ink when the open
+ * looked: ground an Ink after it frees from the file rests until the handle is
+ * closed (helm.h). */
+typedef struct TagFSFileHandle {
     uint32_t    file_id;
     uint32_t    flags;
     uint64_t    offset;
     uint64_t    file_size;
     FileExtent* extents;
     uint32_t    extent_count;
-    OpenFileEntry* ofe;   // back-pointer to open file entry (for locking)
+    OpenFileEntry* ofe;
 
     /* Which mounting of the volume the extents above were copied out of.
      *
@@ -281,6 +298,10 @@ typedef struct {
      * them is not a failed read — it is a successful read of the wrong file.
      * See tagfs_mount_epoch(). */
     uint32_t    mount_epoch;
+
+    uint64_t                view_gen;
+    struct TagFSFileHandle* view_prev;   /* the file's views (OpenFileEntry.views) */
+    struct TagFSFileHandle* view_next;
 } TagFSFileHandle;
 
 typedef struct {
@@ -485,9 +506,11 @@ uint32_t tagfs_mount_epoch(void);
 bool     tagfs_handle_is_of_this_mount(const TagFSFileHandle* handle);
 
 /*
- * A volume that has been taken down leaves its memory alone until the last
- * caller is out. This is where that is finished: called from the guide loop
- * and the idle loop, one atomic load when there is nothing to do.
+ * The service point, called from the guide loop and the idle loop — one atomic
+ * load per duty when there is nothing to do. Here the work of a Helm handed to
+ * a waiter that does it synchronously is run (HelmRunReady), and a volume that
+ * has been taken down, which leaves its memory alone until the last caller is
+ * out, is finished.
  */
 void     TagFSServiceIfPending(void);
 
@@ -560,6 +583,15 @@ int  tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint32_t t
 int  tagfs_delete_file(uint32_t file_id);
 int  tagfs_rename_file(uint32_t file_id, const char* new_filename);
 
+/*
+ * The three changes of a file's extents — a write, span and defrag — are made
+ * by the holder of the file's Helm (helm/helm.h). A program reaches them
+ * through the storage deck, which parks it while another holds the Helm
+ * (write_job.c). These are for a caller in the kernel, which cannot be parked
+ * and does not spin: each takes the Helm only when it is free, and answers
+ * ERR_BUSY, said, when another holds it.
+ */
+
 /* span — the file made exactly `size` bytes long. Shorter: the tail is cut and
  * its blocks given back. Longer: the bytes from the old size to the new one
  * read as zeros, written to blocks taken for them — never a previous owner's
@@ -598,6 +630,9 @@ error_t  TagFSListPage(uint32_t from, uint32_t* out, uint32_t room, bool want_to
  * 0 when no volume is mounted. */
 uint32_t tagfs_file_ceiling(void);
 
+/* The file opened for one operation: NULL when it is not there, or when the
+ * handle, its extents or its place among the file's open handles could not
+ * be had. */
 TagFSFileHandle* tagfs_open(uint32_t file_id, uint32_t flags);
 void             tagfs_close(TagFSFileHandle* handle);
 

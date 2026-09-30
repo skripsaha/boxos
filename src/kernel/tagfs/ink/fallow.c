@@ -1,5 +1,6 @@
 #include "fallow.h"
 #include "../integrity/integrity.h"
+#include "../helm/helm.h"
 
 struct FallowNode {
     FallowNode* next;
@@ -7,6 +8,7 @@ struct FallowNode {
     uint64_t    ripe_at;    /* the cycle it goes back at; 0 while its freer is unsettled */
     uint64_t    zeroed_in;  /* the cycle that zeroed its digests; 0 while none has */
     FallowKind  kind;
+    uint32_t    fid;        /* the file a record freer freed it from; 0 for a Ledger's */
     uint32_t    count;
     FileExtent  runs[];
 };
@@ -24,7 +26,7 @@ static uint64_t NodeBlocks(const FallowNode* n)
     return blocks;
 }
 
-FallowNode* FallowNodeMake(const FileExtent* runs, uint32_t count, FallowKind kind)
+FallowNode* FallowNodeMake(const FileExtent* runs, uint32_t count, FallowKind kind, uint32_t fid)
 {
     FallowNode* n = kmalloc(sizeof(FallowNode) + sizeof(FileExtent) * count);
     if (!n)
@@ -34,6 +36,7 @@ FallowNode* FallowNodeMake(const FileExtent* runs, uint32_t count, FallowKind ki
     n->ripe_at   = 0;
     n->zeroed_in = 0;
     n->kind      = kind;
+    n->fid       = fid;
     n->count     = count;
     if (count)
         memcpy(n->runs, runs, sizeof(FileExtent) * count);
@@ -115,7 +118,8 @@ uint64_t FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent)
             else if (n->gen <= closed_gen)
                 n->ripe_at = cycle + FALLOW_LAG;
         }
-        if (n->ripe_at == 0 || cycle < n->ripe_at || n->zeroed_in == 0 || n->zeroed_in > cycle) {
+        if (n->ripe_at == 0 || cycle < n->ripe_at || n->zeroed_in == 0 || n->zeroed_in > cycle ||
+            (n->kind == FALLOW_BY_RECORD && n->gen > HelmViewFloor(n->fid))) {
             prev = n;
             n    = next;
             continue;

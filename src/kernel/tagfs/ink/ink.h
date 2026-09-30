@@ -59,12 +59,13 @@ typedef enum {
 
 /* The Plot's size and extents become the file's record, with its name and tags
  * as they are now; the ground the Plot let go of rests in Fallow, and every
- * Stake is the record's. OK — and the Plot stands for the record committed —
- * or the refusal, the file as it was and the Stakes still the Plot's:
- * ERR_FILE_NOT_FOUND (the file was given up meanwhile), ERR_BUSY (another
- * write's record came first — the file's writers are not yet one, step 1.5),
- * ERR_PERMISSION_DENIED, ERR_TAGFS_RECORD_FULL, ERR_NO_MEMORY, or a Spare's
- * refusal. */
+ * Stake is the record's. Called by the holder of the file's Helm, which loaded
+ * the Plot under it. OK — and the Plot stands for the record committed — or
+ * the refusal, the file as it was and the Stakes still the Plot's:
+ * ERR_FILE_NOT_FOUND (the file was given up meanwhile), ERR_BUSY (its extents
+ * were changed since the load, which only a caller that did not hold the Helm
+ * can do — said), ERR_PERMISSION_DENIED, ERR_TAGFS_RECORD_FULL, ERR_NO_MEMORY,
+ * or a Spare's refusal. */
 error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out);
 
 /* A file's name and tags. `name` non-NULL renames it, and the name's tag
