@@ -830,7 +830,6 @@ static const TestCase g_stand_tests[] = {
                        "non-empty file as empty" },
     { .name  = "stand_open_joins_the_writers", .func = TestStandOpenJoinsTheWriters,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.5",
       .caveat_defect = "an open whose open-file entry cannot get memory succeeds without "
                        "one, so its writes are serialised with nobody's" },
     { .name  = "stand_frozen_block_freed_twice", .func = TestStandFrozenBlockFreedTwice,

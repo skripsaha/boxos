@@ -116,9 +116,8 @@ RecordWhere PoolAppend(const uint8_t* packed, uint32_t bytes, uint64_t gen);
 #define SPARE_RESERVE              (SPARE_FOR_QUITCLAIMS + SPARE_FOR_GLEAN)
 
 /* One Spare made: a block taken, stamped empty, the stamp's need noted, and
- * handed to the pool with the room its link will take. With no state lock
- * held — a file's writer lock may be, and then the block is found without
- * reading the map. OK, or the refusal: ERR_TAGFS_NO_SPACE, ERR_WOULD_BLOCK
+ * handed to the pool with the room its link will take. With no TagFS lock
+ * held — a file's Helm may be. OK, or the refusal: ERR_TAGFS_NO_SPACE, ERR_WOULD_BLOCK
  * when Fallow rests blocks a cycle would give back, ERR_NO_MEMORY, or the
  * medium's refusal of the stamp. */
 error_t  PoolSpareMake(void);

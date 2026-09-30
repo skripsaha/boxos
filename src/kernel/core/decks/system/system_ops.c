@@ -37,6 +37,7 @@
 #include "process.h"
 #include "pid_allocator.h"  /* pid_generation — own-child authority defeats pid-reuse */
 #include "tagfs.h"
+#include "write_job.h"      /* the defrag is a WriteJob: it holds the file's Helm */
 #include "use_context.h"
 #include "perf_trace.h"
 #include "kernel_config.h"
@@ -1744,28 +1745,23 @@ static int SysTagCheck(const ManifestOp *op, Crate *crates, uint16_t crate_count
  * ========================================================================= */
 
 /* SYSTEM_OP_DEFRAG_FILE  params:[u32 file_id][u32 target_block]
- *                        out_crate (optional): u32 frag_score */
+ *                        out_crate (optional): u32 frag_score
+ * A WriteJob (write_job.h): the file's Helm is held for the whole gather, and
+ * a caller whose file another holds is parked until it is handed on. */
 static int SysDefragFile(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                          const OpContext *ctx)
 {
     (void)crate_count;
     if (op->param_size < 8) return ERR_INVALID_ARGUMENT;
 
-    uint32_t file_id, target_block;
-    memcpy(&file_id,      op->params,     sizeof(uint32_t));
-    memcpy(&target_block, op->params + 4, sizeof(uint32_t));
-
-    error_t rc = tagfs_defrag_file(file_id, target_block);
-    if (rc != OK) return (int)rc;
-
-    if (op->out_crate != CRATE_INDEX_NONE) {
-        Crate *out = &crates[op->out_crate];
-        if (out->capacity >= sizeof(uint32_t)) {
-            uint32_t score = tagfs_get_fragmentation_score(NULL, NULL);
-            (void)crate_write(out, ctx, &score, sizeof(uint32_t));
-        }
-    }
-    return OK;
+    WriteJobAsk ask;
+    memset(&ask, 0, sizeof(ask));
+    ask.kind = WRITE_JOB_DEFRAG;
+    memcpy(&ask.file_id,      op->params,     sizeof(uint32_t));
+    memcpy(&ask.target_block, op->params + 4, sizeof(uint32_t));
+    if (op->out_crate != CRATE_INDEX_NONE)
+        ask.out_crate = &crates[op->out_crate];
+    return WriteJobSubmit(&ask, crates, ctx);
 }
 
 /* SYSTEM_OP_FRAG_SCORE  out_crate:[u32 score][u32 total_files][u32 total_gaps]

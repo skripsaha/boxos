@@ -25,6 +25,7 @@
 #include "ink/ink.h"
 #include "ink/fallow.h"
 #include "settle/settle.h"
+#include "helm/helm.h"
 #include "../../kernel/drivers/timer/rtc.h"
 #include "logbook.h"
 #include "cpu_calibrate.h"
@@ -214,184 +215,6 @@ static bool handle_belongs_here(const TagFSFileHandle *handle, const char *what)
 }
 
 // ----------------------------------------------------------------------------
-// Open File Table — per-file write serialization
-// ----------------------------------------------------------------------------
-
-/*
- * ‼ THIS TABLE BELONGS TO THE MACHINE, NOT TO THE VOLUME.
- *
- * It used to be emptied by every tagfs_init — the lock re-initialised and the
- * buckets memset — which is three separate wrongs on a re-mount:
- *
- *   a lock another core is holding is re-initialised to "free", so the mutual
- *   exclusion it was providing is simply lost, silently;
- *
- *   every OpenFileEntry in it is dropped on the floor: they are kmalloc'd,
- *   the handles that own them still point at them, and nothing frees them;
- *
- *   and — the one that corrupts a file rather than losing memory — the next
- *   ofe_acquire for a file that already had an entry makes a SECOND one. The
- *   whole purpose of this table is that two writers to one file take the same
- *   write_lock. Two entries means two locks, which means no serialisation at
- *   all, and ofe_release survives it (it kfree's an entry it cannot find in
- *   the bucket), so there is not even a symptom.
- *
- * A mount brings up what is on the medium. Who has a file open is a fact about
- * this machine, and it is left alone.
- *
- * ‼ AND IT GROWS WITH WHAT IS OPEN. Its buckets were a fixed 32, so a machine
- * with a thousand files open walked chains thirty long on every open and
- * close. When it holds more entries than buckets it doubles: the new table is
- * allocated outside the lock and the entries moved into it under the lock,
- * and nothing is allocated under the lock at all — an entry for a file not yet
- * open is made before the lock is taken again to put it in.
- */
-#define OPEN_FILES_FIRST 32u
-
-static OpenFileEntry  *g_open_first[OPEN_FILES_FIRST];
-static OpenFileEntry **g_open_files   = g_open_first;
-static uint32_t        g_open_buckets = OPEN_FILES_FIRST;
-static uint32_t        g_open_count   = 0;
-static TagFSLock g_open_table_lock = TAGFS_LOCK_INIT("openfiles", LOCK_RANK_LEAF);
-
-/* The file's entry, under g_open_table_lock; NULL when it is not open. */
-static OpenFileEntry *ofe_find(uint32_t file_id)
-{
-    for (OpenFileEntry *e = g_open_files[file_id % g_open_buckets]; e; e = e->next)
-        if (e->file_id == file_id)
-            return e;
-    return NULL;
-}
-
-/* Twice the buckets, if the table still holds more entries than it has when
- * the lock is taken again. A table that cannot grow keeps its chains longer,
- * and nothing else is lost. */
-static void ofe_grow(void)
-{
-    TagFSLockTake(&g_open_table_lock);
-    uint32_t want = g_open_count > g_open_buckets ? g_open_buckets * 2u : 0;
-    TagFSLockDrop(&g_open_table_lock);
-    if (want == 0)
-        return;
-
-    OpenFileEntry **table = kmalloc(sizeof(OpenFileEntry *) * want);
-    if (!table)
-        return;
-    memset(table, 0, sizeof(OpenFileEntry *) * want);
-
-    OpenFileEntry **old = NULL;
-    TagFSLockTake(&g_open_table_lock);
-    if (g_open_buckets * 2u == want) {
-        for (uint32_t b = 0; b < g_open_buckets; b++) {
-            OpenFileEntry *e = g_open_files[b];
-            while (e) {
-                OpenFileEntry *next = e->next;
-                e->next = table[e->file_id % want];
-                table[e->file_id % want] = e;
-                e = next;
-            }
-        }
-        old            = g_open_files;
-        g_open_files   = table;
-        g_open_buckets = want;
-        table          = NULL;
-    }
-    TagFSLockDrop(&g_open_table_lock);
-    kfree(table);
-    if (old && old != g_open_first)
-        kfree(old);
-}
-
-static OpenFileEntry *ofe_acquire(uint32_t file_id)
-{
-    TagFSLockTake(&g_open_table_lock);
-    OpenFileEntry *e = ofe_find(file_id);
-    if (e) {
-        e->ref_count++;
-        TagFSLockDrop(&g_open_table_lock);
-        return e;
-    }
-    TagFSLockDrop(&g_open_table_lock);
-
-    OpenFileEntry *made = kmalloc(sizeof(OpenFileEntry));
-    if (!made)
-        return NULL;
-    made->file_id = file_id;
-    made->ref_count = 1;
-    TagFSLockInit(&made->write_lock, "writer", LOCK_RANK_WRITER);
-    made->async_write_owner  = NULL;
-    made->async_pending_head = NULL;
-    TagFSLockInit(&made->async_token_lock, "token", LOCK_RANK_LEAF);
-
-    /* Another core may have opened the file meanwhile: its entry is the one,
-     * and this one is given back. */
-    TagFSLockTake(&g_open_table_lock);
-    e = ofe_find(file_id);
-    if (e) {
-        e->ref_count++;
-    } else {
-        uint32_t bucket = file_id % g_open_buckets;
-        made->next = g_open_files[bucket];
-        g_open_files[bucket] = made;
-        g_open_count++;
-        e    = made;
-        made = NULL;
-    }
-    bool grow = g_open_count > g_open_buckets;
-    TagFSLockDrop(&g_open_table_lock);
-    kfree(made);
-    if (grow)
-        ofe_grow();
-    return e;
-}
-
-static void ofe_release(OpenFileEntry *ofe)
-{
-    if (!ofe)
-        return;
-
-    bool do_free = false;
-
-    TagFSLockTake(&g_open_table_lock);
-    if (ofe->ref_count == 0)
-    {
-        uint32_t fid = ofe->file_id;
-        TagFSLockDrop(&g_open_table_lock);
-        panic("[TagFS] ofe_release: ref_count already zero for file_id=%u — double-release or corruption", fid);
-    }
-    ofe->ref_count--;
-    if (ofe->ref_count == 0)
-    {
-        // FIX: Remove from table FIRST while holding table_lock,
-        // then RELEASE table_lock BEFORE acquiring write_lock.
-        // This prevents nested spinlock deadlock.
-        OpenFileEntry **ptr = &g_open_files[ofe->file_id % g_open_buckets];
-        while (*ptr)
-        {
-            if (*ptr == ofe)
-            {
-                *ptr = ofe->next;
-                g_open_count--;
-                break;
-            }
-            ptr = &(*ptr)->next;
-        }
-        do_free = true;
-        // Note: table_lock is still held here, will be released below
-    }
-    TagFSLockDrop(&g_open_table_lock);
-
-    // Now acquire write_lock OUTSIDE of table_lock to prevent deadlock.
-    // This waits for any in-flight writer to finish before freeing memory.
-    if (do_free)
-    {
-        TagFSLockTake(&ofe->write_lock);
-        TagFSLockDrop(&ofe->write_lock);
-        kfree(ofe);
-    }
-}
-
-// ----------------------------------------------------------------------------
 // HOLDGROUND=on — a caller who is inside the volume when its medium leaves
 // ----------------------------------------------------------------------------
 
@@ -428,21 +251,11 @@ static uint64_t         g_hold_until   = 0;
 static TagFSFileHandle *g_hold_handle  = NULL;
 
 /* Is the entry this handle owns still the one the table hands out for its
- * file? A second entry for one file is two write locks for one file, which is
- * no serialisation at all — and it leaves no trace of its own, because
- * ofe_release frees an entry it cannot find in the bucket without complaining. */
+ * file? A second entry for one file is a second Helm for one file, which is
+ * two holders of its extents at once — and it leaves no trace of its own. */
 static bool hold_entry_still_listed(const TagFSFileHandle *handle, uint32_t *out_refs)
 {
-    if (!handle || !handle->ofe) {
-        return false;
-    }
-    TagFSLockTake(&g_open_table_lock);
-    OpenFileEntry *e     = ofe_find(handle->ofe->file_id);
-    bool           found = e == handle->ofe;
-    if (found && out_refs)
-        *out_refs = e->ref_count;
-    TagFSLockDrop(&g_open_table_lock);
-    return found;
+    return handle && ofe_listed(handle->ofe, out_refs);
 }
 
 /* A file is held open from the moment the volume is first mounted, so that it
@@ -499,10 +312,11 @@ static void TagFSHoldGroundAfterReturn(void)
         return;
     }
 
-    uint8_t probe[16];
-    int rc = tagfs_read(g_hold_handle, probe, sizeof(probe));
-    kprintf("[TagFS HOLDGROUND] a read through the handle from before returned "
-            "%d\n", rc);
+    uint8_t  probe[16];
+    uint64_t got = 0;
+    error_t  rc  = tagfs_read(g_hold_handle, probe, sizeof(probe), &got);
+    kprintf("[TagFS HOLDGROUND] a read through the handle from before answered "
+            "%u\n", (unsigned)rc);
 
     uint32_t refs = 0;
     bool listed = hold_entry_still_listed(g_hold_handle, &refs);
@@ -2340,7 +2154,8 @@ error_t tagfs_init(void) {
      * medium leaving and coming back produces, they are three bugs: a lock
      * another core is holding is declared free, and the open-file table is
      * emptied under the handles that own its entries. See the note over the
-     * table itself; the write serialisation it exists to provide is what goes.
+     * table itself (helm/helm.c); the one Helm per file it exists to provide
+     * is what goes.
      */
 
     // Initialize read-ahead cache FIRST — read_block uses it before the rest of init
@@ -3050,17 +2865,22 @@ static void tagfs_ask_for_the_mount_again(void)
 }
 
 /*
- * The ground could not be cleared when the medium left, because somebody was
- * standing on it. Finish it here, and then let the ordinary road take the
- * volume back up.
+ * The work of a Helm handed to a waiter that does it synchronously runs here
+ * first: a job holds the door for its whole life, so a volume on its way out
+ * is let go of only once the work inside it has been done.
+ *
+ * And the ground that could not be cleared when the medium left, because
+ * somebody was standing on it, is finished here, and then the ordinary road
+ * takes the volume back up.
  *
  * Called from the guide loop and from the idle loop — the two places in this
  * kernel that are allowed to wait and are reached often — and it is one atomic
- * load per half when there is nothing to do, which is every iteration but a
+ * load per duty when there is nothing to do, which is every iteration but a
  * handful in the life of a machine.
  */
 void TagFSServiceIfPending(void)
 {
+    HelmRunReady();
     tagfs_ask_for_the_mount_again();
 
     if (__atomic_load_n(&g_abandon_pending, __ATOMIC_ACQUIRE) == 0) {
@@ -3167,7 +2987,12 @@ static TagFSFileHandle *tagfs_open_inside(uint32_t file_id, uint32_t flags)
         return NULL;
     }
 
+    /* An open that cannot join its file's Helm is refused (W-NULLOFE): a
+     * handle with no entry would change the file beside its holder instead of
+     * after it. */
     OpenFileEntry *ofe = ofe_acquire(file_id);
+    if (!ofe)
+        return NULL;
 
     TagFSFileHandle *handle = kmalloc(sizeof(TagFSFileHandle));
     if (!handle)
@@ -3175,46 +3000,43 @@ static TagFSFileHandle *tagfs_open_inside(uint32_t file_id, uint32_t flags)
         ofe_release(ofe);
         return NULL;
     }
-
+    memset(handle, 0, sizeof(*handle));
     handle->file_id = file_id;
-    handle->flags = flags;
-    handle->offset = 0;
+    handle->flags   = flags;
+    handle->ofe     = ofe;
     /* Which mounting of the volume these extents were copied out of. A handle
      * is refused after the volume has been read again, because the blocks it
      * names then belong to whatever the volume keeps there now. */
     handle->mount_epoch = tagfs_mount_epoch();
-    handle->file_size = 0;
-    handle->extents = NULL;
-    handle->extent_count = 0;
-    handle->ofe = ofe;
+    HelmViewTake(handle);
 
     /*
      * ‼ AN OPEN HOLDS WHAT IT NAMES, OR IS REFUSED (MP-D16). The record is the
      * map's — the authority every read stands on, read with no I/O — and a
      * file whose record is not there, or whose extents cannot be copied, is
-     * not handed out as an empty file: the next write would lay a fresh file
-     * over the bytes it could not see.
+     * not handed out as an empty file. A handle opened only to write copies no
+     * extents at all (W-STALE): its work loads the record under the file's
+     * Helm, and a copy from before the Helm was its own would be stale.
      */
-    FileRecord *rec = FileMapRecordHold(g_state.files, file_id, NULL);
-    bool        held = rec != NULL;
-    if (held && rec->extent_count > 0)
+    bool        reads = (flags & TAGFS_HANDLE_READ) || !(flags & TAGFS_HANDLE_WRITE);
+    FileRecord *rec   = FileMapRecordHold(g_state.files, file_id, NULL);
+    bool        held  = rec != NULL;
+    if (held && reads && rec->extent_count > 0)
     {
         handle->extents = kmalloc(sizeof(FileExtent) * rec->extent_count);
         held = handle->extents != NULL;
         if (held)
+        {
             memcpy(handle->extents, rec->extents, sizeof(FileExtent) * rec->extent_count);
+            handle->extent_count = rec->extent_count;
+        }
     }
     if (held)
-    {
-        handle->file_size    = rec->size;
-        handle->extent_count = rec->extent_count;
-    }
+        handle->file_size = rec->size;
     FileRecordRelease(rec);
     if (!held)
     {
-        ofe_release(ofe);
-        kfree(handle->extents);
-        kfree(handle);
+        tagfs_close(handle);
         return NULL;
     }
     return handle;
@@ -3224,14 +3046,10 @@ void tagfs_close(TagFSFileHandle *handle)
 {
     if (!handle)
         return;
-    debug_printf("[TagFS] close: file_id=%u\n", handle->file_id);
+    HelmViewLetGo(handle);
     ofe_release(handle->ofe);
-    debug_printf("[TagFS] close: ofe released\n");
-    if (handle->extents)
-        kfree(handle->extents);
-    debug_printf("[TagFS] close: extents freed\n");
+    kfree(handle->extents);
     kfree(handle);
-    debug_printf("[TagFS] close: handle freed\n");
 }
 
 static error_t tagfs_read_inside(TagFSFileHandle *handle, void *buffer, uint64_t size,
@@ -3339,23 +3157,17 @@ static error_t tagfs_read_inside(TagFSFileHandle *handle, void *buffer, uint64_t
     return OK;
 }
 
-static error_t tagfs_write_inside(TagFSFileHandle *handle, const PlotSource *src,
-                                  uint64_t *out_written);
-
-/*
- * A write, span or defrag that answered ERR_WOULD_BLOCK changed nothing: the
- * volume is short of ground Fallow still rests, which a Settle cycle gives
- * back. The call was made under the file's writer and could not wait for one;
- * let go of it, its caller has cycles run until some ground came back
- * (SettleForRoom) and makes the call again. True to make it again; otherwise
- * *rc is the answer — ERR_TAGFS_NO_SPACE once nothing rests.
- */
-static bool tagfs_room_came_back(error_t *rc)
+/* A caller in the kernel takes a file's Helm only when it is free: it cannot
+ * be parked behind the holder the way a program is (write_job.c), and it does
+ * not spin for it. Held: said, and false. */
+static bool tagfs_helm_now(TagFSFileHandle *handle, HelmWaiter *here)
 {
-    if (*rc != ERR_WOULD_BLOCK)
-        return false;
-    *rc = SettleForRoom();
-    return *rc == OK;
+    memset(here, 0, sizeof(*here));
+    if (HelmTry(handle->ofe, here))
+        return true;
+    kprintf("[TagFS] file %u is being changed by the holder of its Helm — a caller in the "
+            "kernel cannot be parked behind it, and is refused\n", handle->file_id);
+    return false;
 }
 
 error_t tagfs_write(TagFSFileHandle *handle, const PlotSource *src, uint64_t *out_written)
@@ -3367,90 +3179,18 @@ error_t tagfs_write(TagFSFileHandle *handle, const PlotSource *src, uint64_t *ou
         return ERR_INVALID_ARGUMENT;
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc;
-    do {
-        rc = handle_belongs_here(handle, "write")
-                 ? tagfs_write_inside(handle, src, out_written)
-                 : ERR_TAGFS_INVALID_HANDLE;
-    } while (*out_written == 0 && tagfs_room_came_back(&rc));
+    error_t    rc = ERR_TAGFS_INVALID_HANDLE;
+    HelmWaiter here;
+    if (handle_belongs_here(handle, "write")) {
+        rc = ERR_BUSY;
+        if (tagfs_helm_now(handle, &here)) {
+            rc = HelmWrite(handle, src, out_written);
+            HelmLetGo(handle->ofe, &here);
+        }
+    }
     tagfs_leave();
     return rc;
 }
-
-/*
- * One write, the synchronous way: the file's record loaded afresh under its
- * writer, the ground the write needs reserved and the record's room checked
- * before a byte moves, the blocks written by the one read-modify-write rule,
- * and what landed inked as one record (TagFSInkPlot). A write the medium stops
- * part way keeps what landed before the stop and says why; ground it took past
- * that goes back (CR-13), and a write that inks nothing gives back everything
- * it took (CR-1).
- *
- * The writer lock is taken by trying, never by spinning in TagFSLockTake. It
- * is held across the medium, and on some roads the holder's command is
- * finished only by what the drain core does — an AHCI slot an asynchronous
- * write holds comes back only through the BSP's interrupt or its tick, and a
- * continuation queued for the drain core runs only there. A BSP spinning here
- * with its interrupts off would strand the holder; between tries the caller's
- * interrupts are as it left them and the drain core pumps its continuations
- * (TagFSLockTakePumping). A legacy-IDE DMA waiter takes the drive's answer
- * itself (BmideAnswerHere). Helm, at step 1.5, takes the file without a
- * spinlock at all.
- */
-static error_t tagfs_write_inside(TagFSFileHandle *handle, const PlotSource *src,
-                                  uint64_t *out_written)
-{
-    if (!(handle->flags & TAGFS_HANDLE_WRITE))
-        return ERR_PERMISSION_DENIED;
-    if (handle->ofe)
-        TagFSLockTakePumping(&handle->ofe->write_lock);
-
-    Plot     plot;
-    uint64_t at   = 0;
-    uint64_t done = 0;
-    bool     append = (handle->flags & TAGFS_HANDLE_APPEND) != 0;
-    error_t  rc   = PlotLoad(&plot, handle->file_id);
-    bool     loaded = rc == OK;
-
-    if (rc == OK)
-        rc = PlotBeginWrite(&plot, handle->offset, append, src->bytes, &at);
-    if (rc == OK)
-        rc = PlotWriteBlocks(&plot, at, src, &done);
-    if (done > 0) {
-        InkReceipt inked;
-        error_t    kept = PlotEndWrite(&plot, at, done);
-        if (kept == OK)
-            kept = TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked);
-        if (kept != OK) {
-            if (rc == OK)
-                rc = kept;
-            done = 0;
-        }
-    }
-
-    if (loaded) {
-        handle->file_size = plot.size_before;
-        if (done > 0)
-            handle->offset = at + done;
-    }
-    *out_written = done;
-    PlotRelease(&plot);
-    if (handle->ofe)
-        TagFSLockDrop(&handle->ofe->write_lock);
-    return rc;
-}
-
-// ----------------------------------------------------------------------------
-// span — a file made exactly as long as asked
-//
-// It replaces the truncate this kernel had, which only ever shrank: a file
-// could be cut, and it grew only by being written at its end. span also grows
-// one across a gap, and the gap reads as zeros, written to ground taken for
-// it — a write can never make a gap on its own (ERR_TAGFS_BEYOND_SIZE).
-// Taken under the file's writer, like a write.
-// ----------------------------------------------------------------------------
-
-static error_t tagfs_span_file_inside(uint32_t file_id, uint64_t size);
 
 error_t tagfs_span_file(uint32_t file_id, uint64_t size)
 {
@@ -3458,40 +3198,19 @@ error_t tagfs_span_file(uint32_t file_id, uint64_t size)
         return ERR_INVALID_ARGUMENT;
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc;
-    do {
-        rc = tagfs_span_file_inside(file_id, size);
-    } while (tagfs_room_came_back(&rc));
-    tagfs_leave();
-    return rc;
-}
-
-static error_t tagfs_span_file_inside(uint32_t file_id, uint64_t size)
-{
+    error_t          rc     = ERR_FILE_NOT_FOUND;
     TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
-    if (!handle)
-        return ERR_FILE_NOT_FOUND;
-    if (handle->ofe)
-        TagFSLockTakePumping(&handle->ofe->write_lock);
-
-    Plot    plot;
-    error_t rc = PlotLoad(&plot, file_id);
-    if (rc == OK && size != plot.size) {
-        if (size < plot.size) {
-            rc = PlotTrimTo(&plot, (size + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE);
-            plot.size = size;
-        } else {
-            rc = PlotExtendZero(&plot, size);
+    HelmWaiter       here;
+    if (handle) {
+        rc = ERR_BUSY;
+        if (tagfs_helm_now(handle, &here)) {
+            uint64_t was = 0;
+            rc = HelmSpan(handle, size, &was);
+            HelmLetGo(handle->ofe, &here);
         }
-        InkReceipt inked;
-        if (rc == OK)
-            rc = TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked);
+        tagfs_close(handle);
     }
-    PlotRelease(&plot);
-
-    if (handle->ofe)
-        TagFSLockDrop(&handle->ofe->write_lock);
-    tagfs_close(handle);
+    tagfs_leave();
     return rc;
 }
 
@@ -3731,63 +3450,21 @@ char *TagFSKeyList(const uint16_t *tag_ids, uint32_t count)
 // Defrag
 // ----------------------------------------------------------------------------
 
-static error_t tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block);
-
 error_t tagfs_defrag_file(uint32_t file_id, uint32_t target_block)
 {
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc;
-    do {
-        rc = tagfs_defrag_file_inside(file_id, target_block);
-    } while (tagfs_room_came_back(&rc));
+    error_t          rc     = ERR_FILE_NOT_FOUND;
+    TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
+    HelmWaiter       here;
+    if (handle) {
+        rc = ERR_BUSY;
+        if (tagfs_helm_now(handle, &here)) {
+            rc = HelmDefrag(handle, target_block);
+            HelmLetGo(handle->ofe, &here);
+        }
+        tagfs_close(handle);
+    }
     tagfs_leave();
     return rc;
 }
-
-/* Whether the runs are one run on the medium, each beginning where the one
- * before it ends. */
-static bool tagfs_runs_are_one(const FileExtent *runs, uint32_t count)
-{
-    for (uint32_t i = 1; i < count; i++)
-        if (runs[i].start_block != runs[i - 1].start_block + runs[i - 1].block_count)
-            return false;
-    return true;
-}
-
-/*
- * Defrag is a gather of every extent (PlotGather, shed 0) under the file's
- * writer, so no write and no span of the file runs beside it (D7-defrag): the
- * blocks are copied into one run taken through the block map near the target,
- * made durable, and named by one inked record, and only then does the old
- * ground come to rest in Fallow. Ground the record named past the file's size
- * goes with it. A file the loader reads by its blocks is not moved.
- */
-static error_t tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
-{
-    TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
-    if (!handle)
-        return ERR_FILE_NOT_FOUND;
-    if (handle->ofe)
-        TagFSLockTakePumping(&handle->ofe->write_lock);
-
-    Plot    plot;
-    bool    moved = false;
-    error_t rc    = PlotLoad(&plot, file_id);
-    if (rc == OK)
-        rc = PlotTrimTo(&plot, (plot.size + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE);
-    if (rc == OK && !tagfs_runs_are_one(plot.runs, plot.run_count)) {
-        rc    = PlotGather(&plot, 0, target_block);
-        moved = rc == OK;
-    }
-    InkReceipt inked;
-    if (rc == OK && (moved || plot.freed_count > 0))
-        rc = TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked);
-    PlotRelease(&plot);
-
-    if (handle->ofe)
-        TagFSLockDrop(&handle->ofe->write_lock);
-    tagfs_close(handle);
-    return rc;
-}
-

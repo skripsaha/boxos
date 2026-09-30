@@ -192,12 +192,11 @@ caveat_row() {
         lockrank:state@tagfs_add_tag_inside:read|\
         lockrank:state@tagfs_add_tag_inside:write)
                     echo "|a create, a delete, a rename, a tag or its removal reads and writes metadata pool blocks under the volume's state lock, so every other create, delete, rename and tag waits with interrupts off for as long as the medium takes" ;;
+        # The writer lock is gone since step 1.5: a write, span and defrag
+        # hold the file's Helm, which is no lock and nobody spins for.
         lockrank:writer@tagfs_write_inside:read|\
         lockrank:writer@tagfs_write_inside:write)
-                    echo "1.5|a file's writer holds its IRQ-off lock across every medium command of its write, so a second writer of the file spins with interrupts off for the whole of the first one's write" ;;
-        # Written at step 1.3 from reading, not measured: span, defrag and a
-        # write's PlotGather run under the file's writer as a write does, and a
-        # gather flushes the blocks it moved before any record names them.
+                    echo "|a file's writer holds its IRQ-off lock across every medium command of its write, so a second writer of the file spins with interrupts off for the whole of the first one's write" ;;
         lockrank:writer@tagfs_write_inside:flush|\
         lockrank:writer@tagfs_span_file_inside:read|\
         lockrank:writer@tagfs_span_file_inside:write|\
@@ -205,7 +204,7 @@ caveat_row() {
         lockrank:writer@tagfs_defrag_file_inside:read|\
         lockrank:writer@tagfs_defrag_file_inside:write|\
         lockrank:writer@tagfs_defrag_file_inside:flush)
-                    echo "1.5|a file's writer holds its IRQ-off lock across the medium commands of a span, a defrag and a gather of its extents — the gather's flush among them — so a second writer of the file spins with interrupts off for all of them" ;;
+                    echo "|a file's writer holds its IRQ-off lock across the medium commands of a span, a defrag and a gather of its extents — the gather's flush among them — so a second writer of the file spins with interrupts off for all of them" ;;
         lockrank:state@tagfs_defrag_file_inside:read|\
         lockrank:state@tagfs_defrag_file_inside:write)
                     echo "|defragmenting a file copies its blocks under the volume's state lock, so every create, delete, rename and tag waits with interrupts off while the medium reads and writes the whole file" ;;

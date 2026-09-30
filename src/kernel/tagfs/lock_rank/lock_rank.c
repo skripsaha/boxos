@@ -1,7 +1,6 @@
 #include "lock_rank.h"
 #include "amp.h"
 #include "atomics.h"
-#include "baton.h"   /* TagFSLockTakePumping runs the drain core's continuations */
 #include "nameplate.h"
 #include "nameplate_format.h"
 
@@ -16,9 +15,9 @@
  * the state of IF for an answer: whether a TagFS lock is held is read off the
  * record, never off the interrupt flag.
  *
- * The deepest legal chain is four, one lock of each rank: writer -> cow ->
- * state -> one leaf — a leaf under a leaf is itself what LockRank names. The
- * record holds twice that, so that the takes of a chain gone wrong are still
+ * The deepest legal chain is three, one lock of each rank: cow -> state ->
+ * one leaf — a leaf under a leaf is itself what LockRank names. The record
+ * holds more than twice that, so that the takes of a chain gone wrong are still
  * named; a ninth lock is counted in Unwatched and said, so the record never
  * lies about what it cannot hold.
  */
@@ -301,7 +300,7 @@ void TagFSLockTakeAt(TagFSLock *lock, const char *site)
 
 /* A try that fails waits for nobody and breaks no order: only a take that
  * succeeded is checked and recorded. A caller that tries again and again is
- * waiting all the same — that is TagFSLockTakePumping, not a loop of these. */
+ * waiting all the same, and is a take, not a loop of these. */
 bool TagFSLockTryAt(TagFSLock *lock, const char *site)
 {
     LockRankCore *core;
@@ -312,27 +311,6 @@ bool TagFSLockTryAt(TagFSLock *lock, const char *site)
     LockRankCheckHere(core, lock, site);
     LockRankPush(core, lock, site);
     return true;
-}
-
-/* Tried first; refused, the order is checked BEFORE the wait, as a take checks
- * before it spins, and the lock is then tried again and again with this core's
- * interrupts as the caller left them between tries and the drain core's
- * continuations run meanwhile — the holder may be waiting for one of them. */
-void TagFSLockTakePumpingAt(TagFSLock *lock, const char *site)
-{
-    if (TagFSLockTryAt(lock, site))
-        return;
-
-    uint64_t flags = LockRankIrqOff();
-    LockRankCheckHere(LockRankHere(), lock, site);
-    LockRankIrqRestore(flags);
-
-    uint8_t core = amp_get_core_index();
-    while (!spin_trylock(&lock->Spin)) {
-        BatonPump(core);
-        cpu_pause();
-    }
-    LockRankPush(LockRankHere(), lock, site);
 }
 
 /* Searched from the top, so a lock let go out of the order it was taken in is

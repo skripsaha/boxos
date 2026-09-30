@@ -20,8 +20,9 @@
  *       rewritten again;
  *   (2) the cycle that settled that block has been followed by FALLOW_LAG
  *       more: the Ledger's other copy has moved past it too;
- *   (3) no handle views the file as it was before — Helm's view_gen, which
- *       arrives with step 1.5;
+ *   (3) no open handle of the file views it as it was before — one opened
+ *       before the freer (its view_gen below the freer's gen) keeps the ground
+ *       until it is closed (helm.h), so a reader's blocks outlive a delete;
  *   (4) no snapshot keeps it — a format-v1 volume takes none, and the ones an
  *       earlier kernel left keep the blocks their redirects moved away from,
  *       which no record names;
@@ -53,9 +54,9 @@ typedef enum {
 
 typedef struct FallowNode FallowNode;
 
-/* A node for `count` runs, taken with no TagFS lock held: NULL when there is
- * no memory. */
-FallowNode* FallowNodeMake(const FileExtent* runs, uint32_t count, FallowKind kind);
+/* A node for `count` runs of file `fid` (0 for a Ledger freer's), taken with
+ * no TagFS lock held: NULL when there is no memory. */
+FallowNode* FallowNodeMake(const FileExtent* runs, uint32_t count, FallowKind kind, uint32_t fid);
 
 /* A node that was never added, let go. */
 void        FallowNodeLetGo(FallowNode* node);
@@ -81,9 +82,10 @@ void        FallowRetag(uint64_t from, uint64_t to);
 
 /* Under the state lock, at the end of cycle number `cycle`: every node whose
  * freer now lies in a settled closed block (gen <= closed_gen) is given the
- * cycle it may go back at, and every node whose cycle has come, and whose
- * digests a settled cycle zeroed, goes back to the allocator. Answers the blocks given back; the nodes spent come back in
- * *spent, for FallowNodesFree after the lock. */
+ * cycle it may go back at, and every node whose cycle has come, whose digests
+ * a settled cycle zeroed, and whose file no open handle views as it was before
+ * goes back to the allocator. Answers the blocks given back; the nodes spent
+ * come back in *spent, for FallowNodesFree after the lock. */
 uint64_t    FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent);
 
 /* Nodes FallowRipen spent, freed with no TagFS lock held. */

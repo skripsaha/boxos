@@ -763,9 +763,7 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
         /* Refused before the driver is called, so a refused write never
          * reaches the medium — the runs before it do. The asynchronous
          * WriteJob does not come through this door (write_job.c submits its
-         * reads and writes to AHCI itself), so no write it makes is ever
-         * refused here: that road is folded into this one at step 1.5, and
-         * armed there. */
+         * reads and writes to AHCI itself) and asks the plan there. */
         if (BlockFailStrikes(seat, BLOCK_FAIL_WRITE, lba, run)) {
             return BoardMediumRefusal(s->kind, BLOCK_FAIL_WRITE);
         }

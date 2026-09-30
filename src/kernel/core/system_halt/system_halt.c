@@ -9,6 +9,7 @@
 #include "scheduler.h"
 #include "tagfs.h"
 #include "settle.h"      /* the volume's last Settle cycle, run here before cli */
+#include "helm.h"        /* the Helm work still owed, and run by the drain */
 #include "boardroom.h"    /* the seat, so a lost commit can be named */
 #include "ata.h"
 #include "acpi.h"
@@ -105,6 +106,9 @@ static const char *halt_name_of(void (*run)(void *ctx), NameplateName *scratch)
  *   3. The volume's changes no Settle cycle has settled yet (inked_gen −
  *      settled_gen), and whether another core holds the Settle — the halt
  *      runs the last cycle itself, once nothing else is owed (RT-12).
+ *   4. The holders and waiters of every file's Helm: jobs that still owe a
+ *      program its write, span or defrag. A waiter handed the Helm to run at a
+ *      service point is run by the drain itself too.
  * Every term is non-negative and falls as the machine finishes work — which is
  * exactly what lets the drain below run without a deadline while they fall.
  *
@@ -113,11 +117,12 @@ static const char *halt_name_of(void (*run)(void *ctx), NameplateName *scratch)
  * that is initialised and idle owes nothing at this instant, while a machine
  * with no controller can never owe anything through that term at all. */
 typedef struct HaltWorkOwed {
-    uint64_t Total;       /* Baton + Ahci + Unsettled + Committer — the progress measure */
+    uint64_t Total;       /* Baton + Ahci + Unsettled + Committer + Helm — the progress measure */
     uint64_t Baton;       /* passes handed to a core and not yet run        */
     uint64_t Ahci;        /* command slots the controller has not completed */
     uint64_t Unsettled;   /* the volume's changes no Settle cycle has settled */
     uint64_t Committer;   /* 1 while another running core holds the Settle  */
+    uint64_t Helm;        /* holders and waiters of the files' Helms        */
     bool     AhciPresent; /* an AHCI controller was initialised at boot     */
 } HaltWorkOwed;
 
@@ -146,8 +151,9 @@ static void halt_async_work_owed(HaltWorkOwed *owed)
     bool busy = false;
     SettleOwed(&owed->Unsettled, &busy);
     owed->Committer = busy ? 1u : 0u;
+    owed->Helm      = HelmOwed();
 
-    owed->Total = owed->Baton + owed->Ahci + owed->Unsettled + owed->Committer;
+    owed->Total = owed->Baton + owed->Ahci + owed->Unsettled + owed->Committer + owed->Helm;
 }
 
 /* The core carrying the most un-run passes, and the continuation most recently
@@ -255,6 +261,10 @@ static void halt_drain_async_writes(void)
          * a harmless empty early-out on a non-drain core; other cores keep
          * pumping their own queues from their guide loops. */
         BatonPump(me);
+        /* And the Helm work handed to a service point: this core is standing
+         * in the drain, not at its loop's service point, and on a machine with
+         * one K-Core no other core would ever run it. */
+        HelmRunReady();
 
         HaltWorkOwed owed;
         halt_async_work_owed(&owed);
@@ -297,10 +307,10 @@ static void halt_drain_async_writes(void)
             } else if (!by_ahci && !told_core) {
                 told_core = true;
                 kprintf("[HALT] work owed stopped falling at %lu (%lu pass(es), "
-                        "%lu unsettled change(s), %s, %s) — judged by the core "
-                        "deadline, %lu us: a baton queue falls only when its own "
-                        "core pumps it\n",
-                        owed.Total, owed.Baton, owed.Unsettled,
+                        "%lu unsettled change(s), %lu Helm job(s), %s, %s) — judged "
+                        "by the core deadline, %lu us: a baton queue falls only when "
+                        "its own core pumps it\n",
+                        owed.Total, owed.Baton, owed.Unsettled, owed.Helm,
                         owed.Committer ? "a Settle cycle running on another core"
                                        : "no Settle cycle running elsewhere",
                         owed.AhciPresent ? "no AHCI command issued"

@@ -282,8 +282,8 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
     /*
      * Async-park detection — handler-set flag, not state read.
      *
-     * The flag is set by async handlers (ObjReadAsync setup,
-     * ObjWriteAsync) BEFORE they hand control back via ERR_WOULD_BLOCK,
+     * The flag is set by async handlers (ObjReadAsync setup, a
+     * WriteJob that parks its caller) BEFORE they hand control back via ERR_WOULD_BLOCK,
      * to signal explicit ownership transfer of the staged crates kbuf.
      * The previous state-based check (PROC_WAITING) raced on fast async
      * paths: if AHCI completion fired before the dispatcher rechecked,

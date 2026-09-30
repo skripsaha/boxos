@@ -22,10 +22,10 @@
  * driver-level stand (QEMU blkdebug).
  *
  * Chosen by seat and sectors, never by core: the command is refused wherever
- * it was issued from. Asked only on the synchronous reads and writes, the
- * flush, and the asynchronous read. The asynchronous WRITE path (write_job.c,
- * which submits to AHCI directly instead of through the Boardroom) is not
- * reached — that road is unified at step 1.5 and is armed there.
+ * it was issued from. Asked on the synchronous reads and writes, the flush,
+ * the asynchronous read, and the asynchronous WriteJob's reads and writes —
+ * the job submits to AHCI itself instead of through the Boardroom, and asks
+ * the plan there (write_job.c).
  *
  * Built only into a VOLUME_TESTS=on kernel. A kernel that ships has no plan to
  * consult, and pays nothing.
