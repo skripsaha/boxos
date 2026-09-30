@@ -1,7 +1,7 @@
 #include "helm.h"
 #include "../ink/ink.h"
 #include "../settle/settle.h"
-#include "boardroom.h"   /* BoardroomSeatRun — how much the medium takes in one command */
+#include "../run/run.h"  /* TagFSRunBlocks — how much the medium takes in one command */
 
 /*
  * The work a Helm's holder does, synchronously (helm.h). The holder is the only
@@ -47,12 +47,12 @@ static error_t HelmPlotLoad(TagFSFileHandle *handle, Plot *plot)
 
 /* A window is the run the medium takes in one command, in whole blocks and at
  * least one — the unit the stream moves (plot_write.c) is the unit a record is
- * inked for — and it ends at a block's end of the file, so the next window
+ * inked for, and a window that lies in one run on the medium goes out in one
+ * command — and it ends at a block's end of the file, so the next window
  * begins a block and reads nothing back of this one. */
 uint64_t HelmWindowBytes(uint64_t at)
 {
-    uint64_t blocks = (uint64_t)BoardroomSeatRun(tagfs_get_seat()) * 512u / TAGFS_BLOCK_SIZE;
-    return (blocks ? blocks : 1u) * TAGFS_BLOCK_SIZE - at % TAGFS_BLOCK_SIZE;
+    return (uint64_t)TagFSRunBlocks() * TAGFS_BLOCK_SIZE - at % TAGFS_BLOCK_SIZE;
 }
 
 /* The part of the source the window beginning at file offset `at` writes: from

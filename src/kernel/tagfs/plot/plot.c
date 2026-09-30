@@ -142,6 +142,43 @@ PlotFill PlotFillFor(const Plot *p, uint64_t k, uint32_t offset, uint32_t bytes)
     return PlotExisted(p, k) ? PLOT_FILL_READ : PLOT_FILL_FRESH;
 }
 
+uint64_t PlotStretchBytes(const PlotStretch *s, uint32_t blocks)
+{
+    if (blocks == 0)
+        return 0;
+    uint64_t carried = (uint64_t)blocks * PLOT_BLOCK - s->head;
+    return carried < s->bytes ? carried : s->bytes;
+}
+
+bool PlotStretchAt(const Plot *p, uint64_t pos, uint64_t left, uint32_t most, PlotStretch *out)
+{
+    uint64_t k     = pos / PLOT_BLOCK;
+    uint32_t block = 0, after = 0;
+    if (left == 0 || most == 0 || !PlotFind(p->runs, p->run_count, k, &block, &after))
+        return false;
+
+    uint32_t head  = (uint32_t)(pos % PLOT_BLOCK);
+    uint64_t count = PlotBlocksFor(head + left);
+    if (count > (uint64_t)after + 1)
+        count = (uint64_t)after + 1;
+    if (count > most)
+        count = most;
+
+    uint64_t carried = count * PLOT_BLOCK - head;
+    out->block = block;
+    out->count = (uint32_t)count;
+    out->head  = head;
+    out->bytes = carried < left ? carried : left;
+
+    uint64_t in_first = PLOT_BLOCK - head < out->bytes ? PLOT_BLOCK - head : out->bytes;
+    out->first = PlotFillFor(p, k, head, (uint32_t)in_first);
+    out->last  = out->first;
+    if (count > 1)
+        out->last = PlotFillFor(p, k + count - 1, 0,
+                                (uint32_t)(head + out->bytes - (count - 1) * PLOT_BLOCK));
+    return true;
+}
+
 /* How many more extents [start, start + count) can take when appended. */
 static uint64_t PlotPiecesFor(uint32_t count)
 {

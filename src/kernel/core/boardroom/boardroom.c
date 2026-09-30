@@ -721,7 +721,7 @@ int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
 #ifdef CONFIG_VOLUME_TESTS
         /* Per run, because a run is what a driver is handed: the runs before a
          * refused one reach the medium, exactly as they do when it is real. */
-        if (BlockFailStrikes(seat, BLOCK_FAIL_READ, lba, run)) {
+        if (BlockFailStrikes(seat, BLOCK_FAIL_READ, lba, run, NULL)) {
             return BoardMediumRefusal(s->kind, BLOCK_FAIL_READ);
         }
 #endif
@@ -745,49 +745,67 @@ int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
     return 0;
 }
 
-int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffer)
+/* One command's write, handed to the seat's driver: its answer. */
+static int BoardSeatWrite(const BoardSeat* s, uint64_t lba, uint32_t run, const uint8_t* in)
+{
+    switch (s->kind) {
+    case BOARD_AHCI: return ahci_write_sectors_sync(s->index, lba, (uint16_t)run, in);
+    case BOARD_ATA:  return ata_write_sectors_retry(s->index, lba, (uint16_t)run, in);
+    case BOARD_USB:  return xhci_msd_write(s->index, lba, run, in);
+    default:         return -1;
+    }
+}
+
+int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffer,
+                   uint32_t* landed)
 {
     LockRankWitness("write", (uintptr_t)__builtin_return_address(0));
+    if (landed) {
+        *landed = 0;
+    }
     BoardSeat* s = seat_taken(seat);
     if (!s || !buffer || count == 0) {
         return -1;
     }
 
     const uint32_t most = BoardroomSeatRun(seat);
-    const uint8_t* in = (const uint8_t*)buffer;
+    const uint8_t* in   = (const uint8_t*)buffer;
+    uint32_t       took = 0;
+    int            rc   = 0;
     while (count > 0) {
         uint32_t run = (count > most) ? most : count;
-        int rc;
 
 #ifdef CONFIG_VOLUME_TESTS
         /* Refused before the driver is called, so a refused write never
-         * reaches the medium — the runs before it do. A write nobody stands
-         * over asks the same plan at its own door (BoardroomWriteAsync). */
-        if (BlockFailProtects(seat)) {
-            return BoardMediumRefusal(s->kind, BLOCK_FAIL_WRITE);
-        }
-        if (BlockFailStrikes(seat, BLOCK_FAIL_WRITE, lba, run)) {
-            return BoardMediumRefusal(s->kind, BLOCK_FAIL_WRITE);
+         * reaches the medium — the runs before it do, and so do the sectors
+         * of this one before the plan's first, the way a medium that names
+         * the sector it failed at keeps them. A write nobody stands over asks
+         * the same plan at its own door (BoardroomWriteAsync). */
+        uint32_t keep = 0;
+        if (BlockFailProtects(seat) ||
+            BlockFailStrikes(seat, BLOCK_FAIL_WRITE, lba, run, &keep)) {
+            rc = keep ? BoardSeatWrite(s, lba, keep, in) : 0;
+            if (rc == 0) {
+                took += keep;
+                rc    = BoardMediumRefusal(s->kind, BLOCK_FAIL_WRITE);
+            }
+            break;
         }
 #endif
 
-        switch (s->kind) {
-        case BOARD_AHCI: rc = ahci_write_sectors_sync(s->index, lba,
-                                                      (uint16_t)run, in); break;
-        case BOARD_ATA:  rc = ata_write_sectors_retry(s->index, lba,
-                                                      (uint16_t)run, in); break;
-        case BOARD_USB:  rc = xhci_msd_write(s->index, lba, run, in); break;
-        default:         return -1;
-        }
+        rc = BoardSeatWrite(s, lba, run, in);
         if (rc != 0) {
-            return rc;
+            break;
         }
-
         in    += run * BOARDROOM_SECTOR_BYTES;
         lba   += run;
         count -= run;
+        took  += run;
     }
-    return 0;
+    if (landed) {
+        *landed = took;
+    }
+    return rc;
 }
 
 bool BoardroomSeatRefusesWrites(uint8_t seat)
@@ -846,6 +864,24 @@ bool BoardroomSeatCanWriteAsync(uint8_t seat)
     return seat_can_async(seat);
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+/* The answer to the sectors a struck write kept, which went out as their own
+ * command: the caller hears the refusal it was going to hear, with what
+ * landed before the struck sector — or the kept command's own refusal, with
+ * nothing. Lean, as every seat's answer is: it may run in an interrupt. */
+static void BoardStruckAnswered(uint8_t index, uint8_t slot, error_t status, void* ctx)
+{
+    RoadsteadBerth*   b        = (RoadsteadBerth*)ctx;
+    RoadsteadAnswered answered = b->struck_answered;
+    void*             theirs   = b->struck_ctx;
+
+    b->landed   = status == OK ? b->sectors : 0;
+    b->answered = answered;
+    b->ctx      = theirs;
+    answered(index, slot, status == OK ? ERR_IO : status, theirs);
+}
+#endif
+
 /* One command nobody stands over, read or write, handed to its seat. */
 static error_t seat_async(uint8_t seat, uint64_t lba, uint32_t count, void* dma_phys,
                           BoardroomAsyncCb cb, void* ctx, RoadsteadBerth* berth, bool write)
@@ -855,30 +891,41 @@ static error_t seat_async(uint8_t seat, uint64_t lba, uint32_t count, void* dma_
         return ERR_INVALID_ARGUMENT;
     }
 
-#ifdef CONFIG_VOLUME_TESTS
-    /* Refused the way these seats refuse a command nobody stands over: taken,
-     * and then answered through the callback with ERR_IO — never by the
-     * submit's own return, which a real medium error does not reach. The
-     * callbacks in use only keep the status and pass it on, and a real
-     * completion can already arrive before the submit returns, so answering
-     * here is a road the callers already take. Nothing is issued, and the
-     * buffer is not touched: a refused write never reaches the medium. A
-     * protected medium refuses every write here as it does at the attended
-     * door. */
-    if ((s->kind == BOARD_AHCI || s->kind == BOARD_USB) &&
-        ((write && BlockFailProtects(seat)) ||
-         BlockFailStrikes(seat, write ? BLOCK_FAIL_WRITE : BLOCK_FAIL_READ, lba, count))) {
-        cb(s->index, 0, ERR_IO, ctx);
-        return OK;
-    }
-#endif
-
     memset(berth, 0, sizeof(*berth));
     berth->lba      = lba;
     berth->sectors  = count;
     berth->dma_phys = dma_phys;
     berth->answered = cb;
     berth->ctx      = ctx;
+
+#ifdef CONFIG_VOLUME_TESTS
+    /* Refused the way these seats refuse a command nobody stands over: taken,
+     * and then answered through the callback with ERR_IO — never by the
+     * submit's own return, which a real medium error does not reach. The
+     * callbacks in use only keep the status and pass it on, and a real
+     * completion can already arrive before the submit returns, so answering
+     * here is a road the callers already take. Nothing of it is issued, and
+     * the buffer is not touched — except a write's sectors before the plan's
+     * first one, which go out as their own command, as BoardroomWrite keeps
+     * them, and are answered as landed (BoardStruckAnswered). A protected
+     * medium refuses every write here as it does at the attended door. */
+    uint32_t keep   = 0;
+    bool     struck = (s->kind == BOARD_AHCI || s->kind == BOARD_USB) &&
+                      ((write && BlockFailProtects(seat)) ||
+                       BlockFailStrikes(seat, write ? BLOCK_FAIL_WRITE : BLOCK_FAIL_READ, lba,
+                                        count, write ? &keep : NULL));
+    if (struck && keep == 0) {
+        cb(s->index, 0, ERR_IO, ctx);
+        return OK;
+    }
+    if (struck) {
+        berth->sectors         = keep;
+        berth->struck_answered = cb;
+        berth->struck_ctx      = ctx;
+        berth->answered        = BoardStruckAnswered;
+        berth->ctx             = berth;
+    }
+#endif
 
     switch (s->kind) {
     case BOARD_AHCI: return write ? ahci_submit_write_async(s->index, berth)
@@ -1084,7 +1131,7 @@ int BoardroomFlush(uint8_t seat)
     }
 
 #ifdef CONFIG_VOLUME_TESTS
-    if (BlockFailStrikes(seat, BLOCK_FAIL_FLUSH, 0, 0)) {
+    if (BlockFailStrikes(seat, BLOCK_FAIL_FLUSH, 0, 0, NULL)) {
         return BoardMediumRefusal(s->kind, BLOCK_FAIL_FLUSH);
     }
 #endif

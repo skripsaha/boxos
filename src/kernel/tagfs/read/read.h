@@ -73,9 +73,6 @@ void    ReadAheadForgetBlock(uint32_t block);
 /* Every window emptied: what they hold are copies of a medium that left. */
 void    ReadAheadForgetAll(void);
 
-/* How many blocks a window holds on the volume's medium: its run, at least one. */
-uint32_t ReadAheadDepth(void);
-
 /* A fetch in its two halves, for ReadAheadFetch and for the stand that proves
  * a late fetch is dropped: Begin makes the handle's window (when it has none)
  * and gives up what it held, names the run on its way in — *count cut to the

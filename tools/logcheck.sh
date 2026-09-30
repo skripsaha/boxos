@@ -7664,7 +7664,8 @@ stand_orders() {
 # it. ROAD is bios or uefi; SEAT is the volume seat's name as an ERE;
 # BLOCKFAILS is how many commands the faults refuse on that machine — one per
 # test that arms BLOCKFAIL to refuse and runs there (the asynchronous read has
-# no road on the legacy channel; a plan that only counts refuses nothing).
+# no road on the legacy channel, whose one block a command has no run with an
+# inside to refuse either; a plan that only counts refuses nothing).
 stand_judge() {
     local L="$SCRATCH/serial.$1.log" what=$2 road=$3 seat=$4 want=$5 said got count
     count=$(stand_held_count "$road")
@@ -7755,7 +7756,7 @@ run_stand() {
     rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
           "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log
     stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 10 CORES=4 MEM=4G
-    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 12 UEFI=on STRICT=on CORES=4 MEM=4G
+    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 14 UEFI=on STRICT=on CORES=4 MEM=4G
     for f in "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
              "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log; do
         [ -f "$f" ] && logs="$logs $f"
@@ -7903,13 +7904,13 @@ edits = {
    "        if (__atomic_compare_exchange_n(&g_block_fail_state, &s, s + BLOCK_FAIL_GEN_ONE, false,\n                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))\n            return true;\n",
    "        return true;   /* " + M + ": disarm says it took the plan down and leaves it standing */\n"),
   ("src/kernel/core/boardroom/boardroom.c",
-   "    if (BlockFailStrikes(seat, BLOCK_FAIL_FLUSH, 0, 0)) {\n        return BoardMediumRefusal(s->kind, BLOCK_FAIL_FLUSH);\n    }\n",
+   "    if (BlockFailStrikes(seat, BLOCK_FAIL_FLUSH, 0, 0, NULL)) {\n        return BoardMediumRefusal(s->kind, BLOCK_FAIL_FLUSH);\n    }\n",
    "    /* " + M + ": the flush is never asked */\n"),
  ],
  "lands": [
   ("src/kernel/core/boardroom/boardroom.c",
-   "        if (BlockFailStrikes(seat, BLOCK_FAIL_WRITE, lba, run)) {\n            return BoardMediumRefusal(s->kind, BLOCK_FAIL_WRITE);\n        }\n",
-   "        if (BlockFailStrikes(seat, BLOCK_FAIL_WRITE, lba, run)) {\n            switch (s->kind) {   /* " + M + ": the refused write reaches the medium first */\n            case BOARD_AHCI: ahci_write_sectors_sync(s->index, lba, (uint16_t)run, in); break;\n            case BOARD_ATA:  ata_write_sectors_retry(s->index, lba, (uint16_t)run, in); break;\n            case BOARD_USB:  xhci_msd_write(s->index, lba, run, in); break;\n            default:         break;\n            }\n            return BoardMediumRefusal(s->kind, BLOCK_FAIL_WRITE);\n        }\n"),
+   "            rc = keep ? BoardSeatWrite(s, lba, keep, in) : 0;\n",
+   "            rc = BoardSeatWrite(s, lba, run, in);   /* " + M + ": the refused write reaches the medium first */\n"),
   ("src/kernel/core/boardroom/boardroom.c",
    "        cb(s->index, 0, ERR_IO, ctx);\n        return OK;\n",
    "        (void)cb;\n        return ERR_IO;   /* " + M + ": refused by the submit's answer, never through the callback */\n"),

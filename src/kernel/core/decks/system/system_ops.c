@@ -41,6 +41,7 @@
 #include "use_context.h"
 #include "settle_ops.h"   /* SettleUseRemembered — `use` waits through its Chit */
 #include "perf_trace.h"
+#include "run.h"            /* TagFSDataCostSay — what the files' bytes cost the medium */
 #include "kernel_config.h"
 #include "amp.h"
 #include "guide.h"   /* guide_dispatch_stats — enclosed/addressed split for perf.dump */
@@ -1910,6 +1911,9 @@ static int SysPerfDump(const ManifestOp *op, Crate *crates, uint16_t crate_count
         kprintf("[GUIDE] dispatches: enclosed=%lu addressed=%lu\n",
                 (unsigned long)d[0], (unsigned long)d[1]);
     }
+    /* The medium commands the files' bytes went out in, a write and a
+     * megabyte (step 1.11): the trace a run of writes is measured by. */
+    TagFSDataCostSay();
     return OK;
 }
 

@@ -13,14 +13,16 @@ struct OpContext;
  * ReadJob — a program's read that does not stand in its call (OBJ_READ on a
  * seat that takes reads nobody stands over, with a K-Core to pump them).
  *
- * Its every block goes through the port (BoardroomReadAsync) into one DMA
- * page, and between two answers the job is pumped where its seat's answers
+ * Its blocks go through the port (BoardroomReadAsync) a run a command — as
+ * many of the file's next blocks as lie in one run on the medium and the seat
+ * takes at once — into DMA pages of its own, and between two answers the job
+ * is pumped where its seat's answers
  * continue — the drain core's baton for an AHCI port, whose answer comes in
  * its interrupt; a service point for a USB disk, whose answer comes in a
  * drain-core baton a caller standing over the same disk may be pumping, and
  * beneath which nothing may stand over the medium (write_job.c says why). Each
  * block is checked against the digest recorded when it was written before a
- * byte of it lands (N8), and lands in the program's pages from the DMA page
+ * byte of it lands (N8), and lands in the program's pages from its DMA page
  * straight — never through a bounce of the whole read in the heap (S3c).
  *
  * ‼ ONE ANSWER, WITH ITS REAL REASON AND WHAT LANDED. The job's answer is the
@@ -54,8 +56,8 @@ bool ReadJobSeatRunsAsync(uint8_t seat);
  * byte of it inside the file's size. ERR_WOULD_BLOCK: the job owns the
  * handle, the answer and the staged crates, and its caller is parked (or, on
  * the stand, told through its record). Anything else: no job was made — no
- * memory for it, no DMA page, the volume's door shut — and the handle is still
- * the caller's, to read standing in its call. */
+ * memory for it, no DMA pages, the volume's door shut — and the handle is
+ * still the caller's, to read standing in its call. */
 int ReadJobSubmit(TagFSFileHandle *handle, const ReadJobAsk *ask, Crate *crates,
                   const struct OpContext *ctx);
 

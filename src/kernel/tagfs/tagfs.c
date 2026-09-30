@@ -27,6 +27,7 @@
 #include "helm/helm.h"
 #include "mount/mount.h"
 #include "read/read.h"
+#include "run/run.h"
 #include "../../kernel/drivers/timer/rtc.h"
 #include "logbook.h"
 #include "cpu_calibrate.h"
@@ -504,24 +505,18 @@ static void TagFSProbeDrive(void)
 
     /*
      * And how much this medium will be asked for at a time, said out loud
-     * because it is a property of the MEDIUM and not of the filesystem.
-     *
-     * A legacy channel answers eight sectors — one block — because past that
-     * it gives up its DMA path; a flash drive and a SATA port answer far more,
-     * and their neighbours are then fetched together. Printing it is what
-     * turns "why is this machine slower off that disk" into a sentence
-     * somebody can read off a screen.
-     *
-     * It used to stand beside the size of a read-ahead cache that held four
-     * blocks for the whole machine, and the narrower of the two was what a
-     * read got: the flash drive on the board offered sixteen of this volume's
-     * blocks at a time and was asked for four. The window a read fetches into
-     * is its handle's now, as deep as the run.
+     * because it is a property of the MEDIUM and not of the filesystem: a
+     * legacy channel answers eight sectors — one block — because past that it
+     * gives up its DMA path; a flash drive and a SATA port answer far more,
+     * and a file's neighbouring blocks then move together, read or written.
+     * Printing it is what turns "why is this machine slower off that disk"
+     * into a sentence somebody can read off a screen.
      */
     kprintf("[TagFS] this medium hands over %u sector(s) in one go, which is %u "
             "of this volume's %u-byte block(s) — a read in order fetches that "
-            "many neighbours in one command, into a window of its own handle\n",
-            BoardroomSeatRun(g_tagfs_seat), ReadAheadDepth(), (unsigned)TAGFS_BLOCK_SIZE);
+            "many neighbours in one command, into a window of its own handle, "
+            "and a write lays that many of a file's blocks in one\n",
+            BoardroomSeatRun(g_tagfs_seat), TagFSRunBlocks(), (unsigned)TAGFS_BLOCK_SIZE);
 }
 
 /* A run of any length, in the volume's own sectors: the room cuts it into the
@@ -540,7 +535,7 @@ void TagFSNoteReadRefused(void)
 
 int tagfs_volume_write(uint64_t vlba, uint32_t count, const void *buffer)
 {
-    return BoardroomWrite(g_tagfs_seat, g_volume_base + vlba, count, buffer);
+    return BoardroomWrite(g_tagfs_seat, g_volume_base + vlba, count, buffer, NULL);
 }
 
 /* A Deed occupies one block wherever it sits — the pen says how many sectors
@@ -1212,7 +1207,7 @@ static bool g_medium_left = false;
 
 bool TagFSMediumLeft(void) { return __atomic_load_n(&g_medium_left, __ATOMIC_ACQUIRE); }
 
-static bool volume_medium_gone(void)
+bool TagFSMediumGone(void)
 {
     if (TagFSMediumLeft()) {
         return true;
@@ -1292,7 +1287,7 @@ static error_t mount_attempt(void)
  *
  * Not "is the seat occupied": a stick pulled out and a different one pushed in
  * leaves the seat number unchanged, and the taking stamp is the only thing
- * that tells the two apart. The same question volume_medium_gone() asks of the
+ * that tells the two apart. The same question TagFSMediumGone() asks of the
  * mounted volume, asked here of a seat nothing is mounted from yet.
  */
 static bool medium_still_seated(uint8_t seat, uint32_t seating)
@@ -1461,7 +1456,7 @@ void TagFSBootMountSettled(void)
 /*
  * The medium under this volume may have just left. Ask, and latch if it has.
  *
- * volume_medium_gone() already knows how to decide and how to say so; what was
+ * TagFSMediumGone() already knows how to decide and how to say so; what was
  * missing was anybody asking at the moment it became true rather than at the
  * next read, which on a machine where nothing reads for a second is a second
  * during which the seat can come to hold a different medium entirely.
@@ -1471,7 +1466,7 @@ void TagFSNoteMediumGone(void)
     if (!g_state.initialized) {
         return;
     }
-    if (volume_medium_gone()) {
+    if (TagFSMediumGone()) {
         TagFSHoldGroundTake();      /* nothing at all unless HOLDGROUND=on */
     }
 }
@@ -1588,93 +1583,67 @@ void tagfs_readahead_invalidate(uint32_t block)
 }
 
 /*
- * A block of the DATA RUN → a sector inside the volume.
+ * A block of the DATA RUN → a sector of the MEDIUM.
  *
  * The two coordinate systems meet here and nowhere else. What a file's
  * metadata carries, and what the bitmap indexes, is a block of the data run
  * counted from zero; where the data run sits inside the volume is
- * `layout.data_block`, out of the Deed.
- */
-static uint64_t block_to_vlba(uint32_t block)
-{
-    return ((uint64_t)g_state.layout.data_block + block) * TAGFS_BLOCK_SECTORS;
-}
-
-/*
- * And the same block as a sector of the MEDIUM.
- *
- * For the paths that hand an LBA straight to the Boardroom instead of going
- * through this file's door — the asynchronous storage ops, and Braid, which
+ * `layout.data_block`, out of the Deed, and the volume on its medium at the
+ * base. Every road a block takes to its seat asks here: a block's doors below,
+ * a run's (run/run.c), the storage ops nobody stands over, and Braid, which
  * addresses other media that have no ground of their own.
  */
 uint64_t tagfs_block_to_sector(uint32_t block)
 {
-    return g_volume_base + block_to_vlba(block);
+    return g_volume_base + ((uint64_t)g_state.layout.data_block + block) * TAGFS_BLOCK_SECTORS;
 }
 
-/* The block off the medium, and its bytes checked against the digest recorded
- * when it was written — through the Braid the volume is assembled in, when it
- * is (TagFSState.braid, which a v1 mount never names), else off the volume's
- * own medium. A mismatch is the read's answer (ERR_CHECKSUM), never thrown
- * away: the integrity map names the block and publishes it. */
-static error_t read_block(uint32_t block, void *buffer)
+/*
+ * A single block's doors. They are the integrity map's own — it reads and
+ * writes its pages through them, and they record and check every block's
+ * digest through it — so they stay a block's, beside the state they read, and
+ * light: that recursion is on the deepest way a request takes to the medium.
+ * A run of blocks goes through run/run.c.
+ *
+ * Through the Braid the volume is assembled in, when it is (TagFSState.braid,
+ * which a v1 mount never names) and it takes the block, else the volume's own
+ * medium. A read's bytes are checked against the digest recorded when the
+ * block was written, and a mismatch is its answer (ERR_CHECKSUM), never thrown
+ * away: the integrity map names the block and publishes it. A write that
+ * landed has its digest recorded, and no read-ahead window hands out what the
+ * block held.
+ */
+error_t tagfs_read_block(uint32_t block, void *buffer)
 {
-    if (volume_medium_gone())
+    if (!buffer)
+        return ERR_NULL_POINTER;
+    if (TagFSMediumGone())
         return ERR_DEVICE_NOT_READY;
 
     bool got = g_state.braid &&
                BraidReadBlock(g_state.braid, tagfs_block_to_sector(block), buffer, NULL) == OK;
-    if (!got && tagfs_volume_read(block_to_vlba(block), TAGFS_BLOCK_SECTORS, buffer) != 0) {
+    if (!got && BoardroomRead(g_tagfs_seat, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS,
+                              buffer) != 0) {
         TagFSNoteReadRefused();
         return ERR_READ_FAILED;
     }
     return IntegrityVerify(block, buffer) ? OK : ERR_CHECKSUM;
 }
 
-static int write_block(uint32_t block, const void *buffer)
-{
-    if (volume_medium_gone()) {
-        return -1;
-    }
-
-    /* Through the Braid the volume is assembled in, when it is; the volume's
-     * own medium takes the block when Braid would not. */
-    int rc = -1;
-    if (g_state.braid &&
-        BraidWriteBlock(g_state.braid, tagfs_block_to_sector(block), buffer, NULL) == OK)
-        rc = 0;
-    if (rc != 0)
-        rc = tagfs_volume_write(block_to_vlba(block), TAGFS_BLOCK_SECTORS, buffer);
-
-    if (rc == 0) {
-        ReadAheadForgetBlock(block);
-        IntegrityUpdate(block, buffer);
-    }
-    return rc;
-}
-
-error_t tagfs_read_block(uint32_t block, void *buffer)
-{
-    if (!buffer)
-        return ERR_NULL_POINTER;
-    return read_block(block, buffer);
-}
-
 error_t tagfs_write_block(uint32_t block, const void *buffer)
 {
     if (!buffer)
         return ERR_NULL_POINTER;
-    return write_block(block, buffer) == 0 ? OK : ERR_WRITE_FAILED;
-}
-
-error_t TagFSReadRun(uint32_t first, uint32_t count, void *buffer)
-{
-    if (volume_medium_gone())
+    if (TagFSMediumGone())
         return ERR_DEVICE_NOT_READY;
-    if (tagfs_volume_read(block_to_vlba(first), count * TAGFS_BLOCK_SECTORS, buffer) != 0) {
-        TagFSNoteReadRefused();
-        return ERR_READ_FAILED;
-    }
+
+    bool took = g_state.braid &&
+                BraidWriteBlock(g_state.braid, tagfs_block_to_sector(block), buffer, NULL) == OK;
+    if (!took && BoardroomWrite(g_tagfs_seat, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS,
+                                buffer, NULL) != 0)
+        return ERR_WRITE_FAILED;
+    ReadAheadForgetBlock(block);
+    IntegrityUpdate(block, buffer);
     return OK;
 }
 
@@ -2460,6 +2429,7 @@ error_t tagfs_write(TagFSFileHandle *handle, const PlotSource *src, uint64_t *ou
         if (HelmTakeNow(handle, &here)) {
             rc = HelmWrite(handle, src, out_written);
             HelmLetGo(handle->ofe, &here);
+            TagFSDataCostWrite();
         }
     }
     tagfs_leave();

@@ -64,6 +64,11 @@
 // stand_snapshot_tests.c the stand_snapshot suite: the snapshots an earlier
 //                        kernel left, named and refused, and what they kept
 //                        claimed by no owner
+// stand_run_tests.c      the stand_run suite: a megabyte in one run on the
+//                        medium going out in as few commands as the seat
+//                        takes, and the k-th block of a run refused answering
+//                        the k-1 before it — standing in the call and through
+//                        the port
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.
