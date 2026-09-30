@@ -20,8 +20,8 @@ names and asks two questions.
   fallen to LIMIT or under must leave the file.
 
   REACH. The heaviest chain of frames from a storage request to the medium
-  may not exceed BUDGET. Today it does, and the held file says so once, with
-  the step that brings it under.
+  may not exceed BUDGET. A reach over it is held by one line of the held
+  file, with the step that brings it under; since step 1.10 there is none.
 
 A held line is a Caveat in the sense the plan approved: while the defect is
 there the build says "caveat held" and goes on; once it is gone, the line is a

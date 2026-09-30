@@ -8953,23 +8953,21 @@ quill_fid_kept() {
 # and requires the build to stop before the first link pass, in the gate's
 # own words and with its numbers:
 #   M1 a 4 KiB block on the stack of a function that holds none: new offender
-#   M2 a held frame 512 bytes bigger: grew
-#   M3 a held frame's block moved off the stack: lifted early
-#   M4 512 bytes on the way to the medium, in a frame under the limit: the
-#      reach grew, and nothing else is said to be wrong
-#   M5 the reach line taken out of the held file: the reach is over its budget
+#   M2 that block held 512 bytes short of what M1 measured it at: grew
+#   M3 the line kept and the block taken back off the stack: lifted early
+#   M4 a reach line while the reach is within its budget: lifted early, and
+#      nothing else is said to be wrong
+#   M5 the budget lowered one byte below the reach: over its budget
+# Since steps 1.9 and 1.10 the tree holds no frame, so M2 and M3 ask the held
+# rules of a line the scenario writes itself, for tagfs_close.
 # Then M2 once more through the harness, where the same mutant must LINK, the
-# gate must say what it did not judge, and no stamp may be left: every *mut
-# scenario in this file builds a mutated tree with HARNESS=on, and one that
-# failed to link over a frame's few bytes would fail for the wrong reason.
+# gate must say what it did not judge and hold the frame, and no stamp may be
+# left: every *mut scenario in this file builds a mutated tree with
+# HARNESS=on, and one that failed to link over a frame's few bytes would fail
+# for the wrong reason.
 # ---------------------------------------------------------------------------
 
 STACKGUARD_HELD=tools/stack_usage_held.txt
-
-# stackguard_held FUNCTION — the bytes the held file holds FUNCTION at.
-stackguard_held() {
-    awk -v f=":$1" 'substr($1, length($1) - length(f) + 1) == f { print $2 }' "$STACKGUARD_HELD"
-}
 
 # stackguard_red NAME ERE — a plain make must stop at the gate, saying ERE,
 # before any link. Returns 0 when it did; the build log is kept either way.
@@ -8985,6 +8983,7 @@ stackguard_said() {   # the gate's first refusal in NAME's build, for a verdict 
     grep -E '^\[stack\] FAIL' "$SCRATCH/build.stackguard.$1.log" | head -1 | cut -c1-220
 }
 
+# stackguard_block_on — a block on the stack of tagfs_close, which holds none.
 stackguard_block_on() {
     mutate src/kernel/tagfs/tagfs.c
     python3 - <<'EOF2'
@@ -9000,27 +8999,13 @@ EOF2
     mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 1
 }
 
-# stackguard_frame_on grow|lift — DiskBookValidateAndReplay's record, held
-# until 2.5: 512 bytes more beside it, or none of it on the stack.
-stackguard_frame_on() {
-    mutate src/kernel/tagfs/disk_book/disk_book.c
-    python3 - "$1" <<'EOF2'
-import sys
-p = "src/kernel/tagfs/disk_book/disk_book.c"
-s = open(p).read()
-anchor = "        DiskBookEntry e;\n        if (read_entry(i, &e) != OK)\n"
-assert s.count(anchor) == 1, "stackguard DiskBookValidateAndReplay anchor missing"
-if sys.argv[1] == "grow":
-    new = ("        DiskBookEntry e;\n"
-           "        volatile uint8_t logcheck_more[512];   /* logcheck mutation: a held frame grows */\n"
-           "        logcheck_more[i % 512] = 1;\n"
-           "        if (read_entry(i, &e) != OK)\n")
-else:
-    new = ("        static DiskBookEntry e;   /* logcheck mutation: the record leaves the stack */\n"
-           "        if (read_entry(i, &e) != OK)\n")
-open(p, "w").write(s.replace(anchor, new, 1))
-EOF2
-    mut_done src/kernel/tagfs/disk_book/disk_book.c "logcheck mutation" 1
+# stackguard_hold_on BYTES — a line holding tagfs_close at BYTES, under a step
+# that has not landed.
+stackguard_hold_on() {
+    mutate "$STACKGUARD_HELD"
+    printf 'src/kernel/tagfs/tagfs.c:tagfs_close  %s  9.99 logcheck mutation: a block held on the stack\n' "$1" \
+        >>"$STACKGUARD_HELD"
+    mut_done "$STACKGUARD_HELD" "logcheck mutation" 1
 }
 
 # stackguard_reach_on BYTES — a reach line held at BYTES, when the reach is
@@ -9082,30 +9067,32 @@ run_stackguard() {
     stackguard_block_on
     stackguard_red block "^\[stack\] FAIL new offender: src/kernel/tagfs/tagfs.c:tagfs_close stands on [0-9]+ bytes, over 1024"
     chk $? "stackguard: a 4 KiB block in tagfs_close stops the link — $(stackguard_said block)"
-    restore src/kernel/tagfs/tagfs.c
+    n=$(sed -nE 's/.*new offender: src\/kernel\/tagfs\/tagfs\.c:tagfs_close stands on ([0-9]+) bytes.*/\1/p' \
+        "$SCRATCH/build.stackguard.block.log" | head -1)
 
-    # M2 — a held frame grows, by at least what was put on it.
-    held=$(stackguard_held DiskBookValidateAndReplay)
-    stackguard_frame_on grow
-    stackguard_red grow "^\[stack\] FAIL src/kernel/tagfs/disk_book/disk_book.c:DiskBookValidateAndReplay grew to [0-9]+ bytes while its caveat holds it at $held "
-    n=$(sed -nE 's/.*DiskBookValidateAndReplay grew to ([0-9]+) bytes.*/\1/p' "$SCRATCH/build.stackguard.grow.log" | head -1)
-    [ -n "$n" ] && [ "$n" -ge $((held + 512)) ]
-    chk $? "stackguard: DiskBookValidateAndReplay 512 bytes bigger stops the link, at ${n:-?} over its $held — $(stackguard_said grow)"
+    # M2 — the same block, its line 512 bytes short of what M1 measured: a
+    # held frame that stands over its line grew, by exactly those bytes.
+    held=$(( ${n:-512} - 512 ))
+    stackguard_hold_on "$held"
+    stackguard_red grow "^\[stack\] FAIL src/kernel/tagfs/tagfs.c:tagfs_close grew to ${n:-?} bytes while its caveat holds it at $held "
+    chk $? "stackguard: tagfs_close held at $held, 512 bytes under the ${n:-?} it stands on, stops the link — $(stackguard_said grow)"
 
-    # The same mutant through the harness: said, not judged, linked, no stamp.
+    # The same mutant through the harness: said, not judged, held, linked, no
+    # stamp.
     L="$SCRATCH/build.stackguard.harness.log"
     make >"$L" 2>&1
     n=$?
     [ $n -eq 0 ] && grep -q "Nameplate pass 1" "$L" && [ ! -f build/.stack_usage.ok ] \
-        && grep -qE "^\[stack\] under the harness, said and not judged: src/kernel/tagfs/disk_book/disk_book.c:DiskBookValidateAndReplay grew to [0-9]+ bytes while its caveat holds it at $held " "$L"
-    chk $? "stackguard: under HARNESS=on the same mutant links, the growth is said and not judged, and no stamp is left (make $n)"
-    restore src/kernel/tagfs/disk_book/disk_book.c
+        && grep -qE "^\[stack\] under the harness, said and not judged: src/kernel/tagfs/tagfs.c:tagfs_close grew to [0-9]+ bytes while its caveat holds it at $held " "$L" \
+        && grep -qE "^caveat held: stack src/kernel/tagfs/tagfs.c:tagfs_close [0-9]+ B — logcheck mutation: a block held on the stack — discharged by step 9.99$" "$L"
+    chk $? "stackguard: under HARNESS=on the same mutant links, the growth is said and not judged, the frame is held, and no stamp is left (make $n)"
+    restore src/kernel/tagfs/tagfs.c
 
-    # M3 — a held frame's buffer leaves the stack: the caveat must be lifted.
-    stackguard_frame_on lift
-    stackguard_red lift "^\[stack\] FAIL caveat lifted early: stack src/kernel/tagfs/disk_book/disk_book.c:DiskBookValidateAndReplay — .* — (is [0-9]+ bytes, no longer over 1024|is no longer a function of its own): the test does not test what it claims, or step [0-9.]+[a-z]* already landed — lift the caveat$"
-    chk $? "stackguard: DiskBookValidateAndReplay with its record off the stack is a caveat lifted early — $(stackguard_said lift)"
-    restore src/kernel/tagfs/disk_book/disk_book.c
+    # M3 — the line kept, the block back off the stack: the caveat must be
+    # lifted.
+    stackguard_red lift "^\[stack\] FAIL caveat lifted early: stack src/kernel/tagfs/tagfs.c:tagfs_close — logcheck mutation: a block held on the stack — is [0-9]+ bytes, no longer over 1024: the test does not test what it claims, or step 9.99 already landed — lift the caveat$"
+    chk $? "stackguard: tagfs_close held with no block on its stack is a caveat lifted early — $(stackguard_said lift)"
+    restore "$STACKGUARD_HELD"
 
     # M4 — a reach line where the reach is within its budget is a caveat
     # lifted early, and it is the only thing said to be wrong.
