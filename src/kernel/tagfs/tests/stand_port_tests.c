@@ -46,7 +46,7 @@ static WriteJobStandAnswer s_answer;
 /* Why this machine has no port road for a program's write to walk: one core,
  * where the program stands in its call and no K-Core pumps, or a legacy
  * channel, which has no completion to be told about. NULL when it has one. */
-static const char* StandPortAside(uint8_t seat)
+const char* StandPortAside(uint8_t seat)
 {
     if (g_amp.total_cores <= 1)
         return "one core: a program's write stands in its call there, and no K-Core would "
@@ -61,7 +61,7 @@ static const char* StandPortAside(uint8_t seat)
 /* One turn of the machine the job continues in: the seat's answers brought in,
  * the drain core's batons pumped (an AHCI job's steps, a USB command's), and
  * the service point run (a USB job's steps). */
-static void StandPortTurn(uint8_t seat)
+void StandPortTurn(uint8_t seat)
 {
     switch (BoardroomSeatKind(seat)) {
     case BOARD_AHCI:

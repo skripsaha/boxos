@@ -1,7 +1,6 @@
 #include "tests.h"
 #include "stand_tests.h"
 #include "../tagfs.h"
-#include "../braid/braid.h"
 #include "block_fail.h"
 #include "boardroom.h"
 #include "amp.h"
@@ -37,9 +36,9 @@
 
 const char* StandStepsAsideFor(void)
 {
-    if (BraidIsHealthy())
-        return "Braid is healthy and takes every block of the volume, so a fault "
-               "armed on the volume's own sectors would never meet its command";
+    if (tagfs_get_state()->braid)
+        return "the volume is assembled in Braid, which takes every block of it, so a "
+               "fault armed on the volume's own sectors would never meet its command";
     return NULL;
 }
 
@@ -99,9 +98,9 @@ bool StandBlockInUse(uint32_t block)
 // ----------------------------------------------------------------------------
 
 /* A plan on the middle block of a three-block file, second read. Each block
- * is read on its own, never through a read of the file, which would take the
- * middle one in the prefetch of the block before it and hand it out of the
- * read-ahead cache the second time. The block before it meets no plan; the
+ * is read on its own, never through a read of the file, which would fetch the
+ * middle one in the run of the block before it, one command for both. The
+ * block before it meets no plan; the
  * first read of the middle one meets the plan once and is served; the second
  * is refused at that block; an overwrite of the block is a write and is not
  * counted; the third read is served again, because the plan fires once; and
@@ -838,11 +837,6 @@ static const TestCase g_stand_tests[] = {
       .caveat_defect = "deleting a file whose block a snapshot still keeps gives the "
                        "block back, and deleting the snapshot gives it back again, so "
                        "the allocator counts it free twice" },
-    { .name  = "stand_readahead_hit_is_verified", .func = TestStandReadAheadHitIsVerified,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_defect = "a block read out of the read-ahead cache is handed out without "
-                       "verify-on-read, so a rotten block is caught only when it is the "
-                       "first of the run a read prefetched" },
 };
 
 const TestSuite g_stand_suite = {

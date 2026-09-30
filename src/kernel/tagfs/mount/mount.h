@@ -53,4 +53,12 @@ uint32_t MountNextFileId(uint32_t ledger_next, uint32_t top_row, uint32_t top_re
  * digest, or its digest without it, and neither is rot. */
 void    MountAfterDoor(void);
 
+/* Whether the volume's last stop is known to have been clean: the seal the
+ * mount stood on says a machine stopping wrote it. False for any other seal,
+ * and for a volume an older kernel left with none — a block whose digest does
+ * not match may then be a write in place that did not land before the stop,
+ * which format v1 cannot tell from rot. *out_cycle: the seal's cycle, 0 with
+ * none. */
+bool    MountStopWasClean(uint64_t* out_cycle);
+
 #endif /* TAGFS_MOUNT_H */

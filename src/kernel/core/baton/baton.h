@@ -7,7 +7,7 @@
  *
  * A baton is passed from hand to hand; it is never thrown into a basket that
  * may have no room. The node that carries the continuation is EMBEDDED in
- * the thing it is about — a WriteJob, an ObjReadAsyncCtx, an xHCI transfer,
+ * the thing it is about — a WriteJob, a ReadJob, an xHCI transfer,
  * a process's park deadline, a GHES error source, an MCE migration slot —
  * so a pass needs no allocation and no free slot, and cannot be dropped for
  * want of one. Drop is not made rare; it is made impossible.
@@ -96,7 +96,7 @@
 /* Intrusive MPSC node, embedded BY VALUE in whatever the continuation is
  * about. run+ctx are stored explicitly (not via container_of) so the
  * consumer is type-blind across the heterogeneous containers (WriteJob,
- * ObjReadAsyncCtx, ahci_port_t, process_t). Set before the first pass and
+ * ReadJob, ahci_port_t, process_t). Set before the first pass and
  * reused across every pass of that container; `next` is owned by the
  * queue. */
 typedef struct Baton Baton;

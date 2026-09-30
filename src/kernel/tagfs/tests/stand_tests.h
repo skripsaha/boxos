@@ -72,9 +72,18 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 /* Why a stand test cannot be asked on this volume right now, or NULL. A
- * healthy Braid takes every block (tagfs.c, read_block and write_block), so a
- * fault armed on a sector of the volume would never meet the command. */
+ * volume assembled in Braid has its every block taken by it (tagfs.c,
+ * read_block and write_block), so a fault armed on a sector of the volume
+ * would never meet the command. */
 const char* StandStepsAsideFor(void);
+
+/* Why this machine has no port road for a program's read or write to walk —
+ * one core, or a legacy channel — or NULL when it has one; and one turn of the
+ * machine a job through the port continues in, done by hand before the
+ * machine runs: the seat's answers brought in, the drain core's batons
+ * pumped, the service point run (stand_port_tests.c). */
+const char* StandPortAside(uint8_t seat);
+void        StandPortTurn(uint8_t seat);
 
 /* A file of `bytes` bytes of `data`, created and written through the handle
  * API, named `name` and carrying no tag but its name's. False — with nothing
@@ -145,7 +154,6 @@ TestResult TestStandOpenHoldsWhatItNames(void);
 TestResult TestStandOpenRefusesUnreadMetadata(void);
 TestResult TestStandOpenJoinsTheWriters(void);
 TestResult TestStandFrozenBlockFreedTwice(void);
-TestResult TestStandReadAheadHitIsVerified(void);
 
 #endif /* CONFIG_VOLUME_TESTS */
 

@@ -123,4 +123,16 @@ void     MapLayCarryAgain(uint32_t idx);
 error_t  MapLayBegin(uint32_t count, uint32_t entries, uint32_t old_first, uint32_t old_count);
 void     MapLayLetGo(void);
 
+/* The rotten blocks a mount names (integrity_rot.c): begun at IntegrityInit on
+ * the "integrity" tag (TAGFS_INVALID_TAG_ID: named in the log only), a
+ * mismatch IntegrityVerify found named — said and published once per rot —
+ * and ended at IntegrityShutdown, saying how many were named and how many
+ * more the set had no room for. A block written again or given back is
+ * forgotten (IntegrityUpdate, IntegrityForget): rot in what it holds next is
+ * named again. Name and Forget are called with no TagFS lock held. */
+void     IntegrityRotBegin(uint16_t tag);
+void     IntegrityRotName(uint32_t block, uint64_t stored, uint64_t read);
+void     IntegrityRotForget(uint32_t start, uint32_t count);
+void     IntegrityRotEnd(void);
+
 #endif /* TAGFS_INTEGRITY_INTERNAL_H */

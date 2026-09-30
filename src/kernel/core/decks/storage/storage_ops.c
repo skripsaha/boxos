@@ -15,7 +15,9 @@
  *   OBJ_RENAME    params: [u32 file_id][u16 new_name_len][char new_name[]]
  *   OBJ_GET_INFO  params: [u32 file_id]
  *
- *   OBJ_READ.out_crate     : payload destination; size <- bytes_read
+ *   OBJ_READ.out_crate     : payload destination, written a block at a time
+ *                            as the read reaches it; size <- the bytes that
+ *                            landed, on a refusal too
  *   OBJ_WRITE.in_crate     : payload source, taken out of the program's pages
  *                            a block at a time as the write reaches it
  *   OBJ_WRITE.out_crate    : optional [u64 bytes_written][u64 new_file_size],
@@ -36,42 +38,16 @@
 #include "tagfs.h"
 #include "use_context.h"   /* the user's tags — folded into query and create */
 #include "vmm.h"
-#include "pmm.h"
 #include "process.h"
-#include "ahci.h"
-#include "ahci_async.h"
 #include "kring.h"
 #include "kresult.h"
 #include "write_job.h"
-#include "baton.h"   /* BatonPass — never-drop read completion (Ф26 M2/M4) */
+#include "read_job.h"  /* a read through the port, and the sink its bytes land in */
 #include "ata.h"
 #include "touch.h"
 #include "cow.h"
-#include "amp.h"   /* g_amp.total_cores — an async read needs a K-Core to pump */
-#include "boardroom.h"
 #include "plot.h"     /* PlotFind, PlotSource — the write's bytes where they are */
 #include "settle_ops.h"  /* anchor, obj.write.settled — the waits for the Settle */
-
-/*
- * Can the medium under the volume answer a read without somebody standing over
- * it?
- *
- * This used to be "is there an AHCI controller", which was the same question as
- * "is the volume on it" only for as long as there was nowhere else a volume
- * could be. Then it became "is the volume on AHCI", which stopped reads going
- * to somebody else's disk but left the real answer unasked: a machine that
- * boots from a flash drive has its filesystem on the USB bus, answered no, and
- * spent a core standing over every block of every file it read — while the
- * same machine booted from SATA parked the caller and got on with something
- * else. The medium was never what made the difference.
- *
- * So the question is put to the seat, which is the one place that knows what is
- * under it.
- */
-static inline bool tagfs_volume_can_read_async(void)
-{
-    return BoardroomSeatCanReadAsync(tagfs_get_seat());
-}
 
 #define OBJ_WRITE_APPEND_FLAG (1u << 0)
 
@@ -107,225 +83,6 @@ static uint16_t param_u16(const ManifestOp *op, uint16_t off)
     uint16_t v;
     memcpy(&v, op->params + off, sizeof(v));
     return v;
-}
-
-/* -------------------------------------------------------------------------
- * OBJ_READ — fill out_crate with up to capacity bytes from file at offset.
- *
- * Async fast-path: the seat under the volume takes a read nobody stands over
- * (BoardroomReadAsync), so the caller is parked (PROC_WAITING) and
- * ERR_WOULD_BLOCK returned. The seat's answer (obj_read_async_complete)
- * hands the heavy half to the drain core, which copies DMA → user buffer,
- * writes the actual byte count back into the Crate, KResultPush'es a Result
- * and ref_dec's the pinned process — KResultPush also flips PROC_WAITING →
- * PROC_WORKING so the caller wakes. A seat with every place taken does not
- * refuse the read: it waits in the context's berth for its turn.
- *
- * Fallback (a seat that only answers a caller who stays, allocation
- * failure, no proc context) takes the existing tagfs_read sync path.
- * ------------------------------------------------------------------------- */
-
-/* ------------------------------------------------------------------------
- * Multi-block async read state machine.
- *
- * Each completed disk read fires the callback which memcpy's the chunk
- * out of the reusable DMA page, advances the file cursor, and either
- * submits the NEXT block read (state transition) or finishes the
- * request (KResultPush + cleanup). Sequential submission keeps the
- * model simple; future enhancement could batch consecutive
- * intra-extent blocks into one multi-sector read.
- *
- * The DMA buffer is a single 4 KiB page reused across iterations;
- * each iteration overwrites the previous read since we memcpy out
- * before submitting again.
- * ------------------------------------------------------------------------ */
-typedef struct {
-    process_t       *target;       /* pinned via process_find_ref */
-    TagFSFileHandle *handle;       /* close on completion */
-    Crate           *out_crate;    /* points into crates_kbuf; valid until release */
-    uint8_t         *out_base;     /* kernel-side bounce buffer (kmalloc'd) */
-    uintptr_t        out_user_addr;/* user vaddr; commit_out target for payload */
-    uint64_t         total_bytes;
-    uint64_t         bytes_done;
-    uint64_t         start_offset;
-    uint64_t         waybill;       /* Ф26e: ferry correlation token (0 = sync/no-token) */
-    uint32_t         submit_cookie; /* the read submit's cloakroom token — echoed
-                                     * into the plain (waybill==0) completion so
-                                     * the caller's paired wait adopts its own. */
-    void            *dma_phys;
-    void            *dma_virt;
-    uint32_t         in_flight_off_in_blk;
-    uint32_t         in_flight_chunk;
-    error_t          if_status;      /* Ф26 M2: AHCI IRQ stashes status here; obj_read_pump reads it */
-
-    /* CrateStage handoff: ownership of the staged Crate[] buffer transfers
-     * from the dispatcher to this async context the moment ObjRead returns
-     * ERR_WOULD_BLOCK with PROC_WAITING. Async completion writes
-     * crates_kbuf[idx].size = N (via out_crate above), then calls
-     * crate_stage_commit_and_release to write back + free. */
-    Crate           *crates_kbuf;
-    uint64_t         crates_uaddr;
-    uint16_t         crate_count;
-
-    /* Never-drop completion node (Ф26 M4): the AHCI IRQ posts this read to
-     * the drain core with zero allocation, so a completion can never be
-     * dropped. run = obj_read_pump, ctx = this ctx; set once at alloc. */
-    Baton cq_node;
-
-    /* Where each block's read waits when the seat has no place for it — the
-     * seat's until its answer comes, then this read's again for the next
-     * block. */
-    RoadsteadBerth berth;
-} ObjReadAsyncCtx;
-
-static void obj_read_step(ObjReadAsyncCtx *ctx);
-static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_ok);
-static void obj_read_async_complete(uint8_t port, uint8_t slot,
-                                     error_t status, void *ctx_);
-static void obj_read_pump(void *ctx_);   /* Ф26 M2: K-Core half of a read completion */
-
-static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_ok)
-{
-    Result r;
-    memset(&r, 0, sizeof(r));
-    uint64_t reported = partial_ok ? ctx->bytes_done : 0;
-    error_t  answer   = (status == OK) ? OK : ERR_IO;
-
-    /* The bytes reach the program's pages BEFORE anything says they did, and
-     * a count is said only of bytes that got there. A commit that cannot
-     * finish — a page the program does not own (ERR_INVALID_ADDRESS), or no
-     * frame left to bring in one it does (ERR_NO_MEMORY) — is the read's
-     * answer: its error and 0 bytes, the code crate_out_commit hands the
-     * synchronous path for the same refusal. This used to go on and report
-     * the whole count, and a read into a buffer the program had not been
-     * through yet said every byte had arrived while the pages past the first
-     * untouched one stayed zeros. */
-    if (reported > 0) {
-        error_t crc = (ctx->out_base && ctx->target && ctx->target->cabin)
-                          ? vmm_user_buf_commit_out(ctx->target->cabin->vmm, ctx->out_user_addr,
-                                                    ctx->out_base, (size_t)reported)
-                          : ERR_INVALID_ADDRESS;
-        if (crc != OK) {
-            answer   = crc;
-            reported = 0;
-        }
-    }
-    ctx->out_crate->size = reported;
-    r.error_code  = answer;
-    r.data_length = (uint32_t)reported;
-    r.sender_pid  = 0;
-    /* Ф26e: a waybilled (box::ferry) read echoes its correlation token in
-     * data_addr and flies the KCTX_STORAGE flag so boxlib routes it to the
-     * ferry station and nothing else. A plain (waybill==0) read keeps
-     * KCTX_GUIDE / data_addr==0 — byte-identical to the pre-ferry substrate. */
-    if (ctx->waybill) { r.context = KCTX_STORAGE; r.data_addr = ctx->waybill; }
-    else              { r.context = KCTX_PACK24(KCTX_GUIDE, ctx->submit_cookie); }
-
-    if (ctx->out_base)  vmm_user_buf_free(ctx->out_base);
-    if (ctx->dma_phys)  pmm_free(ctx->dma_phys, 1);
-    if (ctx->handle)    tagfs_close(ctx->handle);
-
-    /* CrateStage release: the dispatcher handed the staged Crate[] buffer
-     * to this async context at ERR_WOULD_BLOCK. We wrote crates[idx].size
-     * just above; now commit the whole descriptor array back to user
-     * memory and free the kbuf. Always run, even on partial-fail paths —
-     * the dispatcher will NOT clean up after async-park. */
-    if (ctx->crates_kbuf) {
-        crate_stage_commit_and_release(ctx->crates_kbuf, ctx->crate_count,
-                                        (ctx->target && ctx->target->cabin) ? ctx->target->cabin->vmm : NULL,
-                                        ctx->crates_uaddr);
-    }
-
-    /* The answer is determined; only its delivery remains, and that is the
-     * kernel's own debt. Due here, kept by the push. */
-    ChitDue(ctx->target, ctx->submit_cookie);
-    KResultPush(ctx->target, &r);
-    process_ref_dec(ctx->target);
-    kfree(ctx);
-}
-
-/* Ф26 M2/M4 — IRQ callback, LEAN. Runs in raw AHCI completion IRQ context. Stashes
- * the retire status and posts the heavy half (memcpy out of DMA, page-walked
- * commit, pmm/vmm free, tagfs_close, crate-stage release, KResultPush, kfree, and
- * re-arming the next block) to the drain core's K-Core pump via the ctx's
- * embedded never-drop node. Doing that work HERE is the exact "no allocation /
- * no thread-context locks from IRQ" violation diagnosed as the root of the
- * 2026-05-17 random-hang class; the write path (wjob_block_complete) posts the
- * same way. The node lives inside the ctx, so the post can never be dropped. */
-static void obj_read_async_complete(uint8_t port, uint8_t slot,
-                                     error_t status, void *ctx_)
-{
-    (void)port;
-    (void)slot;
-    ObjReadAsyncCtx *ctx = (ObjReadAsyncCtx *)ctx_;
-    ctx->if_status = status;
-    BatonPass(&ctx->cq_node);   /* never-drop; heavy half on the K-Core pump */
-}
-
-/* Ф26 M2 — K-Core pump: the heavy half of a read completion, drained by the same
- * BatonPump loop that pumps write jobs (kcore_run_loop). Safe to take locks /
- * alloc / free / page-walk here (pump context, not IRQ). Applies the just-read
- * chunk, advances the cursor, and either finalizes or arms the next block. */
-static void obj_read_pump(void *ctx_)
-{
-    ObjReadAsyncCtx *ctx = (ObjReadAsyncCtx *)ctx_;
-
-    if (ctx->if_status != OK) {
-        obj_read_finish(ctx, ERR_IO, /*partial_ok=*/false);
-        return;
-    }
-
-    /* Apply this chunk out of the reusable DMA page. The next block is armed
-     * only AFTER this copy (both in pump context), so the device cannot
-     * overwrite the page between completion and copy. */
-    memcpy(ctx->out_base + ctx->bytes_done,
-           (uint8_t *)ctx->dma_virt + ctx->in_flight_off_in_blk,
-           ctx->in_flight_chunk);
-    ctx->bytes_done += ctx->in_flight_chunk;
-
-    if (ctx->bytes_done >= ctx->total_bytes) {
-        obj_read_finish(ctx, OK, /*partial_ok=*/true);
-        return;
-    }
-
-    /* More to do — arm the next block (now in pump context, not IRQ). */
-    obj_read_step(ctx);
-}
-
-static void obj_read_step(ObjReadAsyncCtx *ctx)
-{
-    /* The same question the write pump asks, for the same reason: this read
-     * carries a handle full of block numbers from the mounting it started in,
-     * and a volume that left and came back has been read again since. */
-    if (!tagfs_handle_is_of_this_mount(ctx->handle)) {
-        obj_read_finish(ctx, ERR_IO, /*partial_ok=*/false);
-        return;
-    }
-
-    uint64_t file_pos   = ctx->start_offset + ctx->bytes_done;
-    uint32_t off_in_blk = (uint32_t)(file_pos % TAGFS_BLOCK_SIZE);
-    uint32_t disk_block = 0;
-
-    if (!PlotFind(ctx->handle->extents, ctx->handle->extent_count,
-                  file_pos / TAGFS_BLOCK_SIZE, &disk_block, NULL)) {
-        /* Walked past last extent — finish with what we have. */
-        obj_read_finish(ctx, OK, /*partial_ok=*/true);
-        return;
-    }
-
-    uint64_t remaining = ctx->total_bytes - ctx->bytes_done;
-    uint32_t chunk     = TAGFS_BLOCK_SIZE - off_in_blk;
-    if ((uint64_t)chunk > remaining) chunk = (uint32_t)remaining;
-
-    ctx->in_flight_off_in_blk = off_in_blk;
-    ctx->in_flight_chunk      = chunk;
-
-    uint64_t lba = tagfs_block_to_sector(disk_block);
-    error_t  err = BoardroomReadAsync(tagfs_get_seat(), lba, 8, ctx->dma_phys,
-                                      obj_read_async_complete, ctx, &ctx->berth);
-    if (err != OK) {
-        obj_read_finish(ctx, ERR_IO, /*partial_ok=*/false);
-    }
 }
 
 /* Ф26e — deliver a box::ferry completion for a storage op that ran on the
@@ -381,6 +138,21 @@ static int storage_op_fail(const OpContext *ctx, Crate *crates,
     return (int)err;
 }
 
+/* -------------------------------------------------------------------------
+ * OBJ_READ — up to out_crate.capacity bytes of the file from offset, into the
+ * program's pages a block at a time as the read reaches them: never bounced
+ * whole through the kernel heap, so a read is bounded by the volume, not the
+ * heap (S3c). The file is opened first, and nothing is allocated for a read
+ * the file refuses.
+ *
+ * On a seat that takes reads nobody stands over, with a K-Core to pump them,
+ * the read is a ReadJob (async/read_job.h) and the program is parked until it
+ * answers; otherwise — one core, a legacy channel, a kernel caller, no job to
+ * be had — it stands in the program's call. Either way the answer is the one
+ * contract: the real reason, never folded into ERR_IO (S3b), with the bytes
+ * that landed before it in out_crate.size.
+ * ------------------------------------------------------------------------- */
+
 static int ObjRead(const ManifestOp *op,
                    Crate            *crates,
                    uint16_t          crate_count,
@@ -399,130 +171,41 @@ static int ObjRead(const ManifestOp *op,
     if (out->capacity == 0)
         return storage_op_fail(ctx, crates, ERR_BUFFER_TOO_SMALL, waybill);
 
-    /* Bounce buffer for multi-page user payloads. tagfs_read fills kp,
-     * we copy back to user pages at the end. The kernel address is one
-     * contiguous allocation regardless of how the user pages map. */
-    void *kp = crate_out_alloc(out, out->capacity);
-    if (!kp) return storage_op_fail(ctx, crates, ERR_NO_MEMORY, waybill);
-
     TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
-    if (!handle) {
-        crate_buf_free(kp);
+    if (!handle)
         return storage_op_fail(ctx, crates, ERR_FILE_NOT_FOUND, waybill);
-    }
-
     handle->offset = offset;
 
-    /* Async path — multi-block state machine. Covers any in-bounds read
-     * regardless of size or extent layout. The state machine submits one
-     * disk read at a time; each completion's callback memcpy's the chunk
-     * out of the reusable DMA page, advances the cursor and either fires
-     * the next read or finalizes. Sequential per-block submission keeps
-     * the model simple — future work can batch consecutive blocks within
-     * one extent into a single multi-sector read. */
-    /* Multi-core only: the async read completion (obj_read_finish) runs in
-     * AHCI IRQ context and touches the heap / tagfs / result ring. On a
-     * single core that IRQ preempts the very userspace thread that owns
-     * those structures; the sync read path below is correct there and on
-     * real HW (which is multi-core) the async path still applies. */
-    if (offset < handle->file_size && handle->extent_count > 0 &&
-        tagfs_volume_can_read_async() && ctx && ctx->proc && g_amp.total_cores > 1) {
-
-        uint64_t remaining = handle->file_size - offset;
-        uint64_t to_read   = (out->capacity > remaining) ? remaining : out->capacity;
-
-        if (to_read > 0) {
-            void *dma_phys = pmm_alloc(1, PHYS_TAG_DMA32);
-            if (dma_phys) {
-                void *dma_virt = vmm_phys_to_virt((uintptr_t)dma_phys);
-                ObjReadAsyncCtx *async_ctx = kmalloc(sizeof(*async_ctx));
-                if (async_ctx) {
-                    process_t *target = process_find_ref(ctx->proc->pid);
-                    if (target) {
-                        async_ctx->target        = target;
-                        async_ctx->handle        = handle;
-                        async_ctx->out_crate     = out;
-                        async_ctx->out_base      = (uint8_t *)kp;
-                        async_ctx->out_user_addr = (uintptr_t)out->addr;
-                        async_ctx->total_bytes   = to_read;
-                        async_ctx->bytes_done    = 0;
-                        async_ctx->start_offset  = offset;
-                        async_ctx->waybill       = waybill;
-                        async_ctx->submit_cookie = ctx->submit_cookie;
-                        async_ctx->dma_phys      = dma_phys;
-                        async_ctx->dma_virt      = dma_virt;
-                        /* CrateStage ownership transfer: the dispatcher
-                         * staged the Crate[] kbuf and points `crates`
-                         * (handler arg) at it. We take that pointer +
-                         * the user-side write-back coordinates from
-                         * OpContext. After we return ERR_WOULD_BLOCK
-                         * + PROC_WAITING, the dispatcher will not touch
-                         * the staged crates; obj_read_finish must call
-                         * crate_stage_commit_and_release. */
-                        async_ctx->crates_kbuf   = crates;
-                        async_ctx->crates_uaddr  = ctx->crates_uaddr;
-                        async_ctx->crate_count   = ctx->crate_count;
-
-                        /* Never-drop completion node: set before the first
-                         * submit so the AHCI IRQ can post it with no alloc. */
-                        async_ctx->cq_node.run   = obj_read_pump;
-                        async_ctx->cq_node.ctx   = async_ctx;
-
-                        /* Park BEFORE the first submit — if the IRQ
-                         * fires before we set WAITING, KResultPush's
-                         * "if state==WAITING flip to WORKING" is a
-                         * no-op and the wake is lost. Setting WAITING
-                         * first makes that transition reliable. */
-                        process_set_state(ctx->proc, PROC_WAITING);
-                        /* The chit, and with it the ownership transfer of
-                         * the staged crates kbuf to the async_ctx (the flag
-                         * the dispatcher reads instead of process state —
-                         * race-safe vs a fast completion that flips state
-                         * back to PROC_WORKING). Given BEFORE the first
-                         * submit: the finish that keeps it may run on
-                         * another core the moment the read is armed. */
-                        ChitGive(ctx, "storage.read", file_id);
-                        obj_read_step(async_ctx);
-                        return ERR_WOULD_BLOCK;
-                    }
-                    kfree(async_ctx);
-                }
-                pmm_free(dma_phys, 1);
-            }
-            /* Allocation failure — fall through to sync. */
-        }
-    }
-
-    /* Sync fallback (no AHCI, no proc context, alloc failure, or empty
-     * read). Same bounce path — we already allocated kp above. */
-    uint64_t got  = 0;
-    error_t  read = tagfs_read(handle, kp, out->capacity, &got);
-    tagfs_close(handle);
-
-    error_t  sync_err   = OK;
-    uint64_t sync_bytes = 0;
-    if (read != OK) {
-        sync_err  = ERR_IO;
-        out->size = 0;
-    } else if (got > 0) {
-        int crc = crate_out_commit(out, ctx, kp, got);
-        if (crc != OK) {
-            sync_err  = (error_t)crc;
-            out->size = 0;
-        } else {
-            sync_bytes = got;
-            out->size  = got;
-        }
+    /* Where the bytes land: the program's pages, or — for a kernel caller
+     * with no cabin — the crate's own address. */
+    ReadJobAsk ask;
+    memset(&ask, 0, sizeof(ask));
+    ask.file_id    = file_id;
+    ask.out_crate  = out;
+    ask.waybill    = waybill;
+    ask.sink.bytes = out->capacity;
+    if (ctx && ctx->proc && ctx->proc->cabin) {
+        ask.sink.vmm  = ctx->proc->cabin->vmm;
+        ask.sink.user = (uintptr_t)out->addr;
     } else {
-        out->size = 0;   /* at or past the size: 0 bytes, success */
+        ask.sink.kernel = (uint8_t *)(uintptr_t)out->addr;
     }
-    crate_buf_free(kp);
 
-    /* Ф26e: a ferry read that fell through to sync must still be answered on
-     * the KCTX_STORAGE channel or its awaiter hangs (single-core / EOF-read). */
+    if (offset < handle->file_size && ctx && ctx->proc &&
+        ReadJobSeatRunsAsync(tagfs_get_seat()) &&
+        ReadJobSubmit(handle, &ask, crates, ctx) == ERR_WOULD_BLOCK)
+        return ERR_WOULD_BLOCK;
+
+    uint64_t got = 0;
+    error_t  rc  = TagFSReadInto(handle, &ask.sink, &got);
+    tagfs_close(handle);
+    out->size = got;
+
+    /* Ф26e: a ferry read that stood in its call must still be answered on the
+     * KCTX_STORAGE channel or its awaiter hangs. */
     if (waybill != 0)
-        return storage_sync_ferry_finalize(ctx, crates, sync_err, sync_bytes, waybill);
-    return (sync_err == OK) ? OK : (int)sync_err;
+        return storage_sync_ferry_finalize(ctx, crates, rc, got, waybill);
+    return (int)rc;
 }
 
 /* -------------------------------------------------------------------------

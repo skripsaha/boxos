@@ -304,7 +304,6 @@ static error_t SettleStepRun(SettleSnap* snap, SettleStep* step)
         SETTLE_CUT_AT(SETTLE_CUT_POINT_INTEGRITY);
         FallowZeroDigests(snap->cycle);
         rc = IntegrityFlush();
-        IntegrityDrainReports();
         snap->stage = "the integrity map";
         *step       = SETTLE_STEP_USE_CHAIN;
         break;

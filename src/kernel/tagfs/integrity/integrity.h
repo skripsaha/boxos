@@ -60,7 +60,10 @@ void     IntegrityUpdate(uint32_t block, const void *data);
 void     IntegrityForget(uint32_t start, uint32_t count);
 
 // Re-check a block just read from disk. Returns true if OK or unknown; on a
-// mismatch it logs + counts the rot and returns false. Never waits, as above.
+// mismatch it counts the rot, names the block — one line and one Touch on the
+// "integrity" tag, once until the block is written again — and returns false,
+// which the read answers ERR_CHECKSUM. Never waits for the map, as above;
+// called with no TagFS lock held.
 bool     IntegrityVerify(uint32_t block, const void *data);
 
 // Persist the dirty map pages, waiting for a page another core has out, after
@@ -69,11 +72,6 @@ bool     IntegrityVerify(uint32_t block, const void *data);
 // ERR_WOULD_BLOCK when a page is out with a transfer this call cannot wait
 // for — one beneath it on this very core, or one a stopped core left.
 error_t  IntegrityFlush(void);
-
-// Publish a Touch event on the well-known "integrity" tag for each bit-rot
-// detection recorded since the last drain. Called from a lock-free context
-// (the Settle cycle) — never from the read path, which runs under g_state.lock.
-void     IntegrityDrainReports(void);
 
 bool     IntegrityIsInitialized(void);
 uint32_t IntegrityErrorCount(void);  // bit-rot detections this session

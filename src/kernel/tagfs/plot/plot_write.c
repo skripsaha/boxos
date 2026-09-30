@@ -8,8 +8,10 @@
  * (PlotFillFor): a block the call took is zeros under what is written and is
  * never read — it holds a previous owner's bytes, not the file's; a block the
  * file had is read first, and a read the medium refuses stops the write there
- * rather than laying zeros over the file's own bytes (S1); a block the write
- * covers whole is neither.
+ * rather than laying zeros over the file's own bytes (S1), as does a block
+ * that does not match its digest, whose rot a fresh digest would make the
+ * file's for good (RT-22); a block the write covers whole is neither, and is
+ * never refused for what it held.
  *
  * The block moves through a buffer of its own from the heap: a kernel stack
  * has no room for 4 KiB.
@@ -59,10 +61,11 @@ error_t PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *o
         if (fill == PLOT_FILL_FRESH) {
             memset(buf, 0, TAGFS_BLOCK_SIZE);
         } else if (fill == PLOT_FILL_READ && (rc = tagfs_read_block(block, buf)) != OK) {
-            kprintf("[TagFS] file %u: block %u would not read, so the %u byte(s) meant for it "
-                    "are not laid over the rest of it — the write stops at byte %llu, %llu of "
-                    "%llu written\n", p->fid, block, chunk, (unsigned long long)pos,
-                    (unsigned long long)done, (unsigned long long)src->bytes);
+            kprintf("[TagFS] file %u: block %u answered %u to its read, so the %u byte(s) meant "
+                    "for it are not laid over the rest of it — the write stops at byte %llu, "
+                    "%llu of %llu written\n", p->fid, block, (unsigned)rc, chunk,
+                    (unsigned long long)pos, (unsigned long long)done,
+                    (unsigned long long)src->bytes);
             break;
         }
 
@@ -127,8 +130,9 @@ error_t PlotExtendZero(Plot *p, uint64_t size)
         first = false;
         rc = tagfs_read_block(block, buf);
         if (rc != OK) {
-            kprintf("[TagFS] file %u: its last block %u would not read, so it is not grown "
-                    "past its %llu bytes\n", p->fid, block, (unsigned long long)from);
+            kprintf("[TagFS] file %u: its last block %u answered %u to its read, so it is not "
+                    "grown past its %llu bytes\n", p->fid, block, (unsigned)rc,
+                    (unsigned long long)from);
             goto out;
         }
         memset(buf + tail, 0, TAGFS_BLOCK_SIZE - tail);
