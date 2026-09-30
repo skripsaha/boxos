@@ -331,14 +331,14 @@ typedef struct XhciMsdUnit {
     spinlock_t        q_lock;
 
     /* The job holding the turn when nobody is standing over it, and since
-     * when. Only ever set for an asynchronous read: a caller that waits is its
-     * own watchdog, and one that does not needs this. */
+     * when. Only ever set for an asynchronous command: a caller that waits is
+     * its own watchdog, and one that does not needs this. */
     struct MsdJob*    watched;
     volatile uint64_t watched_since;
 
-    /* The asynchronous read holding the turn, if one does: its job, and the
-     * berth it answers. The device runs one command at a time, so one job
-     * serves every such read in its turn — and a read waiting for it costs
+    /* The asynchronous read or write holding the turn, if one does: its job,
+     * and the berth it answers. The device runs one command at a time, so one
+     * job serves every such command in its turn — and one waiting for it costs
      * nothing here, because its berth is its caller's. */
     MsdJob            async_job;
     RoadsteadBerth*   async_berth;
@@ -548,13 +548,13 @@ static RoadsteadAnswer msd_gate_admit(XhciMsdUnit* u, RoadsteadBerth* b)
 /*
  * Give the turn up — straight to the berth at the head, so it is never free
  * while anybody waits and nobody arriving can take it out of order. A caller
- * standing over its berth is told the turn is its own; a read whose caller
- * went away is started here.
+ * standing over its berth is told the turn is its own; a read or a write whose
+ * caller went away is started here.
  *
- * A read whose submission fails ends inside its start, and its end gives the
- * turn up again. That second leave does not nest: it finds this one passing
- * the turn along, says so, and this one goes round — so however many reads
- * fail at once the turn is passed along in a loop, one frame deep.
+ * A command whose submission fails ends inside its start, and its end gives
+ * the turn up again. That second leave does not nest: it finds this one
+ * passing the turn along, says so, and this one goes round — so however many
+ * commands fail at once the turn is passed along in a loop, one frame deep.
  */
 static void msd_gate_leave(XhciMsdUnit* u)
 {
@@ -893,8 +893,8 @@ static void msd_job_finish(MsdJob* j, int status)
  * ‼ NOTHING A CALLER MAY KNOW ABOUT AN ASYNCHRONOUS JOB AFTERWARDS.
  *
  * A submission that cannot be made finishes the job inside this call, and for
- * an asynchronous read finishing the job runs msd_async_done, which gives the
- * turn — and with it the unit's job — to the next read waiting for it. The
+ * an asynchronous command finishing the job runs msd_async_done, which gives
+ * the turn — and with it the unit's job — to the next one waiting for it. The
  * caller that wanted to know "did it finish?" used to read j->finished
  * afterwards, out of memory that had changed hands. Nor is a job that did not
  * finish here one to look at: a transfer that was accepted belongs to
@@ -1815,32 +1815,36 @@ const char* xhci_msd_unit_name(uint8_t unit)
 }
 
 /*
- * One run of device blocks, in or out of the bounce buffer.
+ * The command that reads or writes a run of device blocks, and its length.
  *
- * The command is chosen by the numbers rather than by a capability the device
- * was never asked about: ten bytes while the block number fits in the
- * thirty-two the ten-byte form has room for, sixteen when it does not. A drive
- * above two tebibytes is addressed correctly at both ends of itself, and one
- * below never sees a sixteen-byte command it might not implement.
+ * Chosen by the numbers rather than by a capability the device was never
+ * asked about: ten bytes while the block number fits in the thirty-two the
+ * ten-byte form has room for, sixteen when it does not. A drive above two
+ * tebibytes is addressed correctly at both ends of itself, and one below never
+ * sees a sixteen-byte command it might not implement.
  */
-static int msd_run_blocks(XhciMsdUnit* u, uint64_t block, uint32_t nblocks,
-                          uint32_t bytes, bool write)
+static uint8_t msd_cdb_rw(uint8_t cdb[16], uint64_t block, uint32_t nblocks, bool write)
 {
-    uint8_t cdb[16] = {0};
-    uint8_t cdb_len;
-
+    memset(cdb, 0, 16);
     if (block + nblocks > 0x100000000ULL) {
         cdb[0] = write ? SCSI_WRITE_16 : SCSI_READ_16;
         be64_put(&cdb[2], block);
         be32_put(&cdb[10], nblocks);
-        cdb_len = 16;
-    } else {
-        cdb[0] = write ? SCSI_WRITE_10 : SCSI_READ_10;
-        be32_put(&cdb[2], (uint32_t)block);
-        cdb[7] = (uint8_t)(nblocks >> 8);
-        cdb[8] = (uint8_t)nblocks;
-        cdb_len = 10;
+        return 16;
     }
+    cdb[0] = write ? SCSI_WRITE_10 : SCSI_READ_10;
+    be32_put(&cdb[2], (uint32_t)block);
+    cdb[7] = (uint8_t)(nblocks >> 8);
+    cdb[8] = (uint8_t)nblocks;
+    return 10;
+}
+
+/* One run of device blocks, in or out of the bounce buffer. */
+static int msd_run_blocks(XhciMsdUnit* u, uint64_t block, uint32_t nblocks,
+                          uint32_t bytes, bool write)
+{
+    uint8_t cdb[16];
+    uint8_t cdb_len = msd_cdb_rw(cdb, block, nblocks, write);
 
     uint32_t moved = 0;
     int rc = msd_command(u, cdb, cdb_len, u->bounce_phys, bytes, !write, &moved);
@@ -1943,34 +1947,36 @@ static int msd_rw(uint8_t unit, uint64_t lba, uint32_t count,
 }
 
 
-/* ── a read for somebody who did not stay ───────────────────────────────── */
+/* ── a command for somebody who did not stay ────────────────────────────── */
 
 /*
  * The same BOT job, with the other driver on the handle.
  *
- * Everything above this — the Boardroom, the storage deck, a process reading a
- * file — has had exactly one way to get sectors off a flash drive: ask, and
- * stand there. That is what made a machine booted from a stick spend a core on
- * every block of every file, while the same machine booted from a SATA disk
- * parked the caller and got on with something else. The difference was never
- * the hardware; the USB path was simply never joined to the completion spine
- * the SATA path has used all along.
+ * Everything above this — the Boardroom, the storage deck, a process reading
+ * or writing a file — had exactly one way to move sectors to or from a flash
+ * drive: ask, and stand there. That is what made a machine booted from a stick
+ * spend a core on every block of every file, while the same machine booted
+ * from a SATA disk parked the caller and got on with something else. The
+ * difference was never the hardware; the USB path was simply never joined to
+ * the completion spine the SATA path has used all along. Reads were joined to
+ * it first; a file's write goes the same way (its WriteJob, write_job.c).
  *
  * A request that finds the device busy is LEFT here rather than refused: its
  * berth moors in the unit's roadstead and is started when the turn reaches it.
  * Its owner is not standing over it and cannot be told to try again, and the
  * layer above has no way to fall back once it has committed to waiting — so a
- * refusal would surface as a failed read on a perfectly good disk. The berth
- * is the owner's memory and the job is the unit's, so leaving a request here
- * cannot fail for want of room either.
+ * refusal would surface as a failed read or write on a perfectly good disk.
+ * The berth is the owner's memory and the job is the unit's, so leaving a
+ * request here cannot fail for want of room either.
  */
 static void msd_async_done(void* ctx, int status, uint32_t transferred);
 
-/* Start the read a berth carries, holding the turn. Whichever way the start
- * goes, the answer comes through msd_async_done — possibly before this
- * returns, which is why nothing here looks at the job afterwards (see
- * msd_job_begin). The job's completion node is left as it is: it belongs to
- * the queue until its last run has been taken, and msd_job_begin sets it. */
+/* Start the command a berth carries — its read, or its write — holding the
+ * turn. Whichever way the start goes, the answer comes through msd_async_done
+ * — possibly before this returns, which is why nothing here looks at the job
+ * afterwards (see msd_job_begin). The job's completion node is left as it is:
+ * it belongs to the queue until its last run has been taken, and
+ * msd_job_begin sets it. */
 static void msd_async_begin(XhciMsdUnit* u, RoadsteadBerth* b)
 {
     MsdJob*        j          = &u->async_job;
@@ -1984,26 +1990,13 @@ static void msd_async_begin(XhciMsdUnit* u, RoadsteadBerth* b)
     j->hand_to_kcore = true;
     j->data_phys     = (uint64_t)(uintptr_t)b->dma_phys;
     j->data_len      = nblocks * u->block_bytes;
-    j->data_in       = true;
+    j->data_in       = !b->write;
     j->transferred   = 0;
     j->status        = 0;
     j->done          = msd_async_done;
     j->done_ctx      = u;
+    j->cdb_len       = msd_cdb_rw(j->cdb, block, nblocks, b->write);
     __atomic_store_n(&j->finished, 0u, __ATOMIC_RELAXED);
-
-    memset(j->cdb, 0, sizeof(j->cdb));
-    if (block + nblocks > 0x100000000ULL) {
-        j->cdb[0] = SCSI_READ_16;
-        be64_put(&j->cdb[2], block);
-        be32_put(&j->cdb[10], nblocks);
-        j->cdb_len = 16;
-    } else {
-        j->cdb[0] = SCSI_READ_10;
-        be32_put(&j->cdb[2], (uint32_t)block);
-        j->cdb[7] = (uint8_t)(nblocks >> 8);
-        j->cdb[8] = (uint8_t)nblocks;
-        j->cdb_len = 10;
-    }
 
     u->async_berth = b;
     msd_watch_arm(u, j);
@@ -2014,9 +2007,9 @@ static void msd_async_begin(XhciMsdUnit* u, RoadsteadBerth* b)
  * The job is over, and this runs on a K-Core.
  *
  * The order matters: what the answer needs is read out of the unit first,
- * because the turn goes next and the next read may take the job over at once;
- * then the device is let go of, so the turn is available before the caller
- * above is woken and possibly asks for another block; then the answer.
+ * because the turn goes next and the next command may take the job over at
+ * once; then the device is let go of, so the turn is available before the
+ * caller above is woken and possibly asks for another block; then the answer.
  */
 static void msd_async_done(void* ctx, int status, uint32_t transferred)
 {
@@ -2031,8 +2024,13 @@ static void msd_async_done(void* ctx, int status, uint32_t transferred)
     u->async_berth = NULL;
 
     /* A device that carried the command out but moved fewer bytes than were
-     * asked for has not answered the question that was put to it. */
-    error_t st = (status == 0 && transferred == want) ? OK : ERR_IO;
+     * asked for has not answered the question that was put to it. One that is
+     * no longer in its socket is not a medium error at all: the command ended
+     * because its device left, and that is the answer — the one the next
+     * request gets before anything is issued (msd_async_submit). */
+    error_t st = (status == 0 && transferred == want) ? OK
+               : msd_device_is_there(u)              ? ERR_IO
+                                                     : ERR_DEVICE_NOT_READY;
 
     /* The turn, then the visit. Both belong to the request and neither may
      * outlive it — and after the visit, the unit may not be there to read. */
@@ -2070,12 +2068,12 @@ void xhci_msd_watchdog(void)
          * ‼ THE FACT FIRST, AND IT IS WHY THIS PASS EXISTS AT ALL.
          *
          * A caller that stayed asks this every pass of its own loop. One that
-         * did not stay has nobody to ask it — so a read left on a device that
-         * has been pulled used to wait out the WHOLE budget before anything
-         * noticed, and for every one of those milliseconds the slot could not
-         * be taken down, the unit number could not come back, and the medium
-         * could not be announced as gone. With several reads outstanding that
-         * is the budget over and over, one after another.
+         * did not stay has nobody to ask it — so a command left on a device
+         * that has been pulled used to wait out the WHOLE budget before
+         * anything noticed, and for every one of those milliseconds the slot
+         * could not be taken down, the unit number could not come back, and the
+         * medium could not be announced as gone. With several commands
+         * outstanding that is the budget over and over, one after another.
          *
          * The device having left is a fact — the slot's tenancy and the port's
          * own register — and it ends the wait now.
@@ -2103,40 +2101,42 @@ void xhci_msd_watchdog(void)
     }
 
     if (gone) {
-        msd_note_gone(late_unit, "a read nobody was waiting on was outstanding");
+        msd_note_gone(late_unit, "a command nobody was waiting on was outstanding");
         xhci_ep_abandon(late_unit->ctrl, late_unit->slot, late_job->dci);
         msd_job_finish(late_job, -1);
         return;
     }
 
-    kprintf("[USB disk %u] a read nobody was waiting on has been asking for "
-            "more time for %u ms at stage %u — giving up on the command\n",
+    kprintf("[USB disk %u] a command nobody was waiting on has been asking "
+            "for more time for %u ms at stage %u — giving up on the command\n",
             late_unit->number,
             msd_patience_ms(late_job->data_len + late_job->behind),
             late_job->phase);
     /* The transfer comes off the endpoint before anything else happens — see
      * the note on the same call in msd_job_run. It matters more here: this job
      * carries a completion node, and msd_job_finish is about to hand the job
-     * to the next read waiting for the turn. */
+     * to the next command waiting for the turn. */
     xhci_ep_abandon(late_unit->ctrl, late_unit->slot, late_job->dci);
     msd_bot_reset(late_unit);
     msd_job_finish(late_job, -1);
 }
 
-bool xhci_msd_unit_can_read_async(uint8_t unit)
+bool xhci_msd_unit_can_async(uint8_t unit)
 {
     XhciMsdUnit* u = msd_take(unit);
     if (!u) {
         return false;
     }
     /* Nothing about the geometry rules it out: a request is refused per-request
-     * if it does not sit on whole blocks, and the reads that come down here are
-     * filesystem blocks, which do. */
+     * if it does not sit on whole blocks, and the reads and writes that come
+     * down here are filesystem blocks, which do. */
     msd_give_back(u);
     return true;
 }
 
-error_t xhci_msd_read_async(uint8_t unit, RoadsteadBerth* berth)
+/* A read or a write for a caller that did not stay: its berth left in the
+ * unit's roadstead, or its command started at once when the turn is free. */
+static error_t msd_async_submit(uint8_t unit, RoadsteadBerth* berth, bool write)
 {
     if (!berth || !berth->answered || !berth->dma_phys || berth->sectors == 0) {
         return ERR_INVALID_ARGUMENT;
@@ -2156,8 +2156,8 @@ error_t xhci_msd_read_async(uint8_t unit, RoadsteadBerth* berth)
 
     /*
      * Whole device blocks, starting on one. Said out loud rather than worked
-     * around: widening the request would need the bounce buffer and a copy out
-     * of it, and the copy is exactly what the caller is not here to do.
+     * around: widening the request would need the bounce buffer and a copy
+     * through it, and the copy is exactly what the caller is not here to do.
      */
     const uint32_t per_sector = u->per_sector;
     if ((lba % per_sector) != 0 || (count % per_sector) != 0) {
@@ -2177,12 +2177,23 @@ error_t xhci_msd_read_async(uint8_t unit, RoadsteadBerth* berth)
      * for its turn, and both outlive this call by design — msd_async_done
      * gives it back.
      */
-    berth->next = NULL;
-    berth->want = BERTH_ONE;
+    berth->next  = NULL;
+    berth->want  = BERTH_ONE;
+    berth->write = write;
     if (msd_gate_admit(u, berth) == ROADSTEAD_TAKEN) {
         msd_async_begin(u, berth);
     }
     return OK;
+}
+
+error_t xhci_msd_read_async(uint8_t unit, RoadsteadBerth* berth)
+{
+    return msd_async_submit(unit, berth, false);
+}
+
+error_t xhci_msd_write_async(uint8_t unit, RoadsteadBerth* berth)
+{
+    return msd_async_submit(unit, berth, true);
 }
 
 int xhci_msd_read(uint8_t unit, uint64_t lba, uint32_t count, void* buffer)

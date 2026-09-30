@@ -16,10 +16,10 @@
  * device's answer to "how big are you" and "give me these sectors" comes back
  * through the other two.
  *
- * Every call here but one is synchronous, because the thing above it is a
+ * Most calls here are synchronous, because the thing above them is a
  * filesystem mounting at boot with nothing else to do until the sector
- * arrives. The one that is not is a read for a caller that went away
- * (xhci_msd_read_async).
+ * arrives. The ones that are not are a read and a write for a caller that
+ * went away (xhci_msd_read_async, xhci_msd_write_async).
  */
 
 /* The sector size BoxOS keeps filesystems in. A device reporting anything else
@@ -64,22 +64,29 @@ int xhci_msd_read (uint8_t unit, uint64_t lba, uint32_t count, void* buffer);
 int xhci_msd_write(uint8_t unit, uint64_t lba, uint32_t count, const void* buffer);
 
 /*
- * A read for a caller that is not going to stand and watch.
+ * A read for a caller that is not going to stand and watch, and a write the
+ * same way.
  *
  * The request is the berth (core/boardroom/roadstead.h): lba, sectors, the DMA
  * page and `answered` with its ctx. The sectors land straight in the page — no
  * bounce, because the whole point is that nobody is here to copy them out
- * afterwards — and `answered` is told when the device has answered. It runs on
- * a K-Core, out of the guide loop, so it may take locks, free memory and wake
- * whoever was waiting. It is shaped exactly like the SATA one, so that the
+ * afterwards — and a write's sectors go out of it the same way — and
+ * `answered` is told when the device has answered. It runs on a K-Core, out of
+ * the guide loop, so it may take locks, free memory and wake whoever was
+ * waiting — but it never stands over this unit itself: it may run beneath a
+ * caller standing over the same unit on the drain core, which pumps the steps
+ * of the command ahead of it, and a command of its own would wait behind that
+ * caller for ever. It is shaped exactly like the SATA one, so that the
  * Boardroom can hand the same function to either kind of seat without an
  * adapter standing in between: `index` is the USB unit, `slot` is meaningless
  * here and is zero.
  *
  * The request must cover whole device blocks and start on one. Everything
- * BoxOS reads asynchronously is a filesystem block, which does; a request that
- * does not is REFUSED rather than quietly widened, because widening it would
- * mean a bounce buffer and a copy, and that is the sync path's job.
+ * BoxOS reads or writes asynchronously is a filesystem block, which does; a
+ * request that does not is REFUSED rather than quietly widened, because
+ * widening it would mean a bounce buffer and a copy, and that is the sync
+ * path's job. A command that ends because the device left the socket is
+ * answered ERR_DEVICE_NOT_READY, never as a medium error.
  *
  * Returns OK when the command is on its way, or moored behind the commands
  * ahead of it on the same device, and `answered` WILL run; the berth is the
@@ -88,20 +95,21 @@ int xhci_msd_write(uint8_t unit, uint64_t lba, uint32_t count, const void* buffe
  * time on a job of its own.
  */
 error_t xhci_msd_read_async(uint8_t unit, RoadsteadBerth* berth);
+error_t xhci_msd_write_async(uint8_t unit, RoadsteadBerth* berth);
 
-/* True when this unit can take the call above — it exists, it is ready, and
+/* True when this unit can take the calls above — it exists, it is ready, and
  * the geometry of a filesystem block suits it. */
-bool xhci_msd_unit_can_read_async(uint8_t unit);
+bool xhci_msd_unit_can_async(uint8_t unit);
 
 /*
- * Look over the asynchronous reads in flight, and end one that is not going to
- * be answered.
+ * Look over the asynchronous commands in flight, and end one that is not going
+ * to be answered.
  *
- * A read somebody is standing over asks the facts itself, in the loop that is
- * standing there: is the device still in the socket, is its pipe well, is the
- * controller running. One nobody is standing over has nobody to ask them — so
- * this asks on its behalf, and the FIRST of those facts is what ends nearly
- * every such read: a device that has been pulled is finished with here and
+ * A command somebody is standing over asks the facts itself, in the loop that
+ * is standing there: is the device still in the socket, is its pipe well, is
+ * the controller running. One nobody is standing over has nobody to ask them —
+ * so this asks on its behalf, and the FIRST of those facts is what ends nearly
+ * every such command: a device that has been pulled is finished with here and
  * now, not after a budget. Only a device that is present, well and silent
  * reaches the clock, and on bulk that means it has been saying "not yet".
  *

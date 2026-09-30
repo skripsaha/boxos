@@ -7756,7 +7756,7 @@ run_stand() {
     rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
           "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log
     stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 10 CORES=4 MEM=4G
-    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 11 UEFI=on STRICT=on CORES=4 MEM=4G
+    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 12 UEFI=on STRICT=on CORES=4 MEM=4G
     for f in "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
              "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log; do
         [ -f "$f" ] && logs="$logs $f"

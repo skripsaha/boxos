@@ -270,14 +270,16 @@ caveat_judge() {
 # stand_path LOG CORES — the way a userspace write went down to the medium on
 # the machine that wrote LOG, booted with CORES cores. A red test that writes
 # is evidence about ONE path: the same test takes the legacy channel
-# synchronously on one machine and the AHCI WriteJob on another, and a verdict
-# that does not say which cannot be compared with the next one. Read off the
-# kernel's own mount line ("[TagFS] volume on seat N: <seat>", tagfs.c) and
-# ObjWrite's own fork (storage_ops.c: AHCI, more than one core and a writer in
-# userspace go through the WriteJob; everything else writes synchronously).
-# Prints one of AHCI async (WriteJob) | AHCI sync | ATA sync | USB sync. A log
-# that mounted nothing, or a seat this does not know, prints what it found
-# instead and answers 1, so the path in a verdict is never a guess.
+# synchronously on one machine and the WriteJob through the port on another,
+# and a verdict that does not say which cannot be compared with the next one.
+# Read off the kernel's own mount line ("[TagFS] volume on seat N: <seat>",
+# tagfs.c) and the WriteJob's own fork (write_job.c, WriteJobSeatRunsAsync: an
+# AHCI port or a USB disk, more than one core and a writer in userspace go
+# through the port; everything else writes synchronously). Prints one of
+# AHCI async (WriteJob) | AHCI sync | ATA sync | USB async (WriteJob) |
+# USB sync. A log that mounted nothing, or a seat this does not know, prints
+# what it found instead and answers 1, so the path in a verdict is never a
+# guess.
 stand_path() {
     local log=$1 cores=$2 seat
     case "$cores" in
@@ -289,7 +291,8 @@ stand_path() {
         "AHCI port "*)
             if [ "$cores" -gt 1 ]; then echo "AHCI async (WriteJob)"; else echo "AHCI sync"; fi ;;
         ATA*) echo "ATA sync" ;;
-        usb*) echo "USB sync" ;;
+        usb*)
+            if [ "$cores" -gt 1 ]; then echo "USB async (WriteJob)"; else echo "USB sync"; fi ;;
         "")   echo "no path: $log mounted no volume"; return 1 ;;
         *)    echo "no path: seat '$seat' is none this knows"; return 1 ;;
     esac

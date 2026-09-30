@@ -23,9 +23,9 @@
  *
  * Chosen by seat and sectors, never by core: the command is refused wherever
  * it was issued from. Asked on the synchronous reads and writes, the flush,
- * the asynchronous read, and the asynchronous WriteJob's reads and writes —
- * the job submits to AHCI itself instead of through the Boardroom, and asks
- * the plan there (write_job.c).
+ * and the reads and writes nobody stands over (BoardroomReadAsync,
+ * BoardroomWriteAsync) — an asynchronous WriteJob's among them, on an AHCI
+ * port or a USB disk alike.
  *
  * Built only into a VOLUME_TESTS=on kernel. A kernel that ships has no plan to
  * consult, and pays nothing.
