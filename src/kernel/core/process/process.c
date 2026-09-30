@@ -27,7 +27,7 @@
 #include "bay.h"
 #include "brook.h"
 #include "tagfs.h"
-#include "use_context.h"    /* UseContextBindTag — a tag the user's context waited for */
+#include "use_context.h"    /* UseContextCabinChanged — a cabin's tags decide its verdict */
 #include "per_core.h"
 #include "amp.h"
 #include "cet_lifecycle.h"  /* Phase 2K+ per-process shadow-stack hooks */
@@ -110,7 +110,10 @@ static int process_set_tag_bit(process_t *proc, uint16_t tag_id)
         }
     }
 
-    cabin->tag_overflow_ids[cabin->tag_overflow_count++] = tag_id;
+    /* The number before the count that shows it: the Use Context counts what
+     * a cabin wears without this lock (use_context.c). */
+    cabin->tag_overflow_ids[cabin->tag_overflow_count] = tag_id;
+    __atomic_store_n(&cabin->tag_overflow_count, cabin->tag_overflow_count + 1, __ATOMIC_RELEASE);
     return 0;
 }
 
@@ -120,15 +123,17 @@ static int process_clear_tag_bit(process_t *proc, uint16_t tag_id)
 
     if (tag_id < 64)
     {
-        cabin->tag_bits &= ~((uint64_t)1 << tag_id);
+        __atomic_and_fetch(&cabin->tag_bits, ~((uint64_t)1 << tag_id), __ATOMIC_RELAXED);
         return 0;
     }
     for (uint32_t i = 0; i < cabin->tag_overflow_count; i++)
     {
         if (cabin->tag_overflow_ids[i] == tag_id)
         {
-            cabin->tag_overflow_ids[i] = cabin->tag_overflow_ids[cabin->tag_overflow_count - 1];
-            cabin->tag_overflow_count--;
+            uint32_t last = cabin->tag_overflow_count - 1;
+            __atomic_store_n(&cabin->tag_overflow_ids[i], cabin->tag_overflow_ids[last],
+                             __ATOMIC_RELAXED);
+            __atomic_store_n(&cabin->tag_overflow_count, last, __ATOMIC_RELEASE);
             return 0;
         }
     }
@@ -1777,6 +1782,9 @@ error_t process_add_tag(process_t *proc, const char *tag)
 
     spin_lock(&process_lock);
 
+    /* The intern tells the user's context the number, if the context names
+     * this tag and had none for it yet — so a strand tagged after `use` still
+     * lands in the context tier. */
     uint16_t tid;
     rc = TagFSInternSpelling(&spelled, &tid);
     if (rc != OK)
@@ -1784,11 +1792,6 @@ error_t process_add_tag(process_t *proc, const char *tag)
         spin_unlock(&process_lock);
         return rc;
     }
-
-    /* The user's context may name this tag without yet having a number for
-     * it; this is the number, so a strand tagged after `use` still lands in
-     * the context tier. */
-    UseContextBindTag(&spelled, tid);
 
     if (process_set_tag_bit(proc, tid) != 0)
         rc = ERR_TAG_OVERFLOW_FAILED;
@@ -1800,6 +1803,8 @@ error_t process_add_tag(process_t *proc, const char *tag)
         __atomic_or_fetch(&proc->cabin->auth_bits, AuthBitForKey(spelled.key, spelled.key_len),
                           __ATOMIC_RELAXED);
     spin_unlock(&process_lock);
+    if (rc == OK)
+        UseContextCabinChanged();
     return rc;
 }
 
@@ -1830,6 +1835,8 @@ int process_remove_tag(process_t *proc, const char *tag)
         __atomic_and_fetch(&proc->cabin->auth_bits, ~AuthBitForKey(spelled.key, spelled.key_len),
                            __ATOMIC_RELAXED);
     spin_unlock(&process_lock);
+    if (ret == 0)
+        UseContextCabinChanged();
     return ret;
 }
 

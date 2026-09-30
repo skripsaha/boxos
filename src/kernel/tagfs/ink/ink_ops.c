@@ -63,6 +63,50 @@ static error_t CreateInside(const char* filename, const uint16_t* tag_ids, uint3
     return rc;
 }
 
+static int CreateTagOrder(const void* a, const void* b, void* ctx)
+{
+    const TagSpelling* tags = ctx;
+    return TagSpellingCompare(&tags[*(const uint32_t*)a], &tags[*(const uint32_t*)b]);
+}
+
+error_t TagFSCreateFits(const char* filename, const TagSpelling* tags, uint32_t count,
+                        uint32_t* out_worn)
+{
+    if (!filename || (count && !tags))
+        return ERR_INVALID_ARGUMENT;
+    TagSpelling stem;
+    error_t     rc = InkNameStem(filename, &stem);
+    if (rc != OK)
+        return rc;
+
+    /* Each tag counted once — the record lists a tag once however often it
+     * was asked for — sorted, so the count is n log n compares at any n. */
+    uint32_t* order = count ? kmalloc(sizeof(uint32_t) * count) : NULL;
+    if (count && !order)
+        return ERR_NO_MEMORY;
+    for (uint32_t i = 0; i < count; i++)
+        order[i] = i;
+    KSort(order, count, sizeof(uint32_t), CreateTagOrder, (void*)tags);
+
+    uint32_t worn      = 0;
+    bool     stem_worn = false;
+    for (uint32_t s = 0; s < count; s++) {
+        const TagSpelling* tag = &tags[order[s]];
+        if (s > 0 && TagSpellingCompare(tag, &tags[order[s - 1]]) == 0)
+            continue;
+        worn++;
+        stem_worn = stem_worn || (stem.key && TagSpellingCompare(&stem, tag) == 0);
+    }
+    kfree(order);
+    if (stem.key && !stem_worn)
+        worn++;
+    if (out_worn)
+        *out_worn = worn;
+
+    TagFSMetadata record = { .filename = (char*)filename, .tag_count = worn };
+    return PlotFits(&record, NULL) ? OK : ERR_TAGFS_RECORD_FULL;
+}
+
 int tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint32_t tag_count,
                       uint32_t* out_file_id)
 {
@@ -141,6 +185,8 @@ error_t tagfs_add_tag_string(uint32_t file_id, const TagSpelling* tag)
         return ERR_TAGFS_NOT_INITIALIZED;
     uint16_t tag_id;
     error_t  rc = TagRegistryIntern(OpsRegistry(), tag, &tag_id);
+    if (rc == OK)
+        UseContextBindTag(tag, tag_id);
     tagfs_leave();
     if (rc != OK)
         return rc;

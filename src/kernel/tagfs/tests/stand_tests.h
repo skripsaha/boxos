@@ -35,6 +35,9 @@
 // stand_ink_tests.c      the stand_ink suite: where the pool lays every file's
 //                        record, a deleted file's newest record, and a volume
 //                        with no free block that still deletes
+// stand_use_tests.c      the stand_use suite: a context said without a number
+//                        issued, two sayings that race to the volume, and the
+//                        scheduler's question under a context of any size
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.

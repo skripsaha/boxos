@@ -74,22 +74,24 @@ static void HistoryKeep(const char *line, uint32_t len)
     umutex_unlock(&g_history_lock);
 }
 
-/* Copy entry `index` (0 = oldest) into `out`; false when there is no such
- * entry. A copy, because another strand may grow the history meanwhile. */
-static bool HistoryFetch(uint32_t index, char *out, uint32_t cap)
+/* Entry `index` (0 = oldest), whole, in a copy of its own the caller frees —
+ * a copy, because another strand may grow the history meanwhile. NULL when
+ * there is no such entry or no memory for it. */
+static char *HistoryCopy(uint32_t index, uint32_t *out_len)
 {
-    bool have = false;
+    char *copy = NULL;
     umutex_lock(&g_history_lock);
     if (index < g_history.count) {
         const char *src = g_history.lines[index];
         uint32_t    n   = (uint32_t)strlen(src);
-        if (n > cap - 1) n = cap - 1;
-        memcpy(out, src, n);
-        out[n] = '\0';
-        have = true;
+        copy = (char *)malloc(n + 1);
+        if (copy) {
+            memcpy(copy, src, n + 1);
+            *out_len = n;
+        }
     }
     umutex_unlock(&g_history_lock);
-    return have;
+    return copy;
 }
 
 static uint32_t HistoryCount(void)
@@ -105,8 +107,9 @@ static uint32_t HistoryCount(void)
  * =========================================================================== */
 
 typedef struct EditLine {
-    char    *buf;      /* the caller's buffer */
+    char    *buf;      /* the caller's buffer, or the line's own when it grows */
     uint32_t cap;      /* bytes of text it can hold (NUL excluded) */
+    bool     grows;    /* the buffer is the line's own, and doubles as it fills */
     uint32_t len;
     uint32_t cursor;
     uint32_t browse;   /* history index while browsing; == count when not */
@@ -114,6 +117,28 @@ typedef struct EditLine {
     uint32_t draft_len;
     bool     echo_diverged;  /* the echo stopped reading as the line; RestateLine */
 } EditLine;
+
+/* The first room a growing line is given; it doubles whenever the line fills
+ * it, so a line is as long as the person types it. */
+#define READLINE_FIRST_ROOM 64u
+
+/* Room for `need` bytes of text: true when the buffer holds them — as it is,
+ * or grown, for a line that grows. A caller's own buffer never grows. */
+static bool EnsureRoom(EditLine *l, uint32_t need)
+{
+    if (need <= l->cap) return true;
+    if (!l->grows) return false;
+    uint32_t cap = l->cap;
+    while (cap < need) {
+        if (cap > UINT32_MAX / 2) return false;
+        cap *= 2;
+    }
+    char *more = (char *)realloc(l->buf, (size_t)cap + 1);
+    if (!more) return false;
+    l->buf = more;
+    l->cap = cap;
+    return true;
+}
 
 /* Lay down `n` blanks in as few calls as the road takes.
  *
@@ -159,7 +184,7 @@ static void EchoTail(EditLine *l, uint32_t from, uint32_t trailing_blanks)
 
 static void Insert(EditLine *l, char c)
 {
-    if (l->len >= l->cap) return;               /* the caller's buffer is full */
+    if (!EnsureRoom(l, l->len + 1)) return;     /* the caller's buffer is full */
     memmove(l->buf + l->cursor + 1, l->buf + l->cursor, l->len - l->cursor);
     l->buf[l->cursor] = c;
     l->len++;
@@ -207,7 +232,7 @@ static void MoveTo(EditLine *l, uint32_t where)
 static void Replace(EditLine *l, const char *text, uint32_t n)
 {
     uint32_t was = l->len;
-    if (n > l->cap) n = l->cap;
+    if (!EnsureRoom(l, n)) n = l->cap;
 
     /* A recall laid over a line that had characters says them both, in the
      * one place the log cannot tell them apart — see EchoTail's note and
@@ -247,10 +272,10 @@ static void Recall(EditLine *l, bool older)
             return;
         }
     }
-    char *entry = (char *)malloc(l->cap + 1);
+    uint32_t n     = 0;
+    char    *entry = HistoryCopy(l->browse, &n);
     if (!entry) return;
-    if (HistoryFetch(l->browse, entry, l->cap + 1))
-        Replace(l, entry, (uint32_t)strlen(entry));
+    Replace(l, entry, n);
     free(entry);
 }
 
@@ -327,32 +352,26 @@ static void RestateLine(const EditLine *l)
     print_bytes(l->buf, l->len);
 }
 
-int readline(char *buffer, size_t max_len)
+/* Keys edited into `l` until Enter: the line's length, NUL-terminated in
+ * l->buf, or -1 when the ear is gone. */
+static int EditUntilEnter(EditLine *l)
 {
-    if (!buffer || max_len < 2) return -1;
-
     TouchTag ear = console_listen();
     if (ear == TOUCH_TAG_INVALID) return -1;
 
-    EditLine l = {
-        .buf = buffer, .cap = (uint32_t)(max_len - 1), .len = 0, .cursor = 0,
-        .browse = HistoryCount(), .draft = NULL, .draft_len = 0,
-        .echo_diverged = false,
-    };
-
     for (;;) {
         kb_event_t k;
-        if (!NextKey(ear, &k)) { free(l.draft); console_unlisten(); return -1; }
+        if (!NextKey(ear, &k)) { free(l->draft); console_unlisten(); return -1; }
 
         if (k.mods & KB_MOD_EXTENDED) {
             switch (k.scancode) {
-            case KEY_LEFT:   if (l.cursor > 0) MoveTo(&l, l.cursor - 1); break;
-            case KEY_RIGHT:  MoveTo(&l, l.cursor + 1);                   break;
-            case KEY_HOME:   MoveTo(&l, 0);                              break;
-            case KEY_END:    MoveTo(&l, l.len);                          break;
-            case KEY_UP:     Recall(&l, true);                           break;
-            case KEY_DOWN:   Recall(&l, false);                          break;
-            case KEY_DELETE: DeleteForward(&l);                          break;
+            case KEY_LEFT:   if (l->cursor > 0) MoveTo(l, l->cursor - 1); break;
+            case KEY_RIGHT:  MoveTo(l, l->cursor + 1);                    break;
+            case KEY_HOME:   MoveTo(l, 0);                                break;
+            case KEY_END:    MoveTo(l, l->len);                           break;
+            case KEY_UP:     Recall(l, true);                             break;
+            case KEY_DOWN:   Recall(l, false);                            break;
+            case KEY_DELETE: DeleteForward(l);                            break;
             default: break;
             }
             continue;
@@ -360,21 +379,51 @@ int readline(char *buffer, size_t max_len)
 
         char c = k.ascii;
         if (c == '\r' || c == '\n') {
-            MoveTo(&l, l.len);
+            MoveTo(l, l->len);
             /* Before the newline, so the line the log ends up holding is the
              * one that was accepted and not the keys it was edited out of. */
-            if (l.echo_diverged) RestateLine(&l);
+            if (l->echo_diverged) RestateLine(l);
             print_bytes("\n", 1);
-            buffer[l.len] = '\0';
-            HistoryKeep(buffer, l.len);
-            free(l.draft);
+            l->buf[l->len] = '\0';
+            HistoryKeep(l->buf, l->len);
+            free(l->draft);
             io_flush();
             console_unlisten();
-            return (int)l.len;
+            return (int)l->len;
         }
-        if (c == '\b' || c == 0x7F) { Backspace(&l); continue; }
-        if ((unsigned char)c >= 0x20 && (unsigned char)c < 0x7F) Insert(&l, c);
+        if (c == '\b' || c == 0x7F) { Backspace(l); continue; }
+        if ((unsigned char)c >= 0x20 && (unsigned char)c < 0x7F) Insert(l, c);
     }
+}
+
+int readline(char *buffer, size_t max_len)
+{
+    if (!buffer || max_len < 2) return -1;
+    EditLine l = {
+        .buf = buffer, .cap = (uint32_t)(max_len - 1), .grows = false, .len = 0,
+        .cursor = 0, .browse = HistoryCount(), .draft = NULL, .draft_len = 0,
+        .echo_diverged = false,
+    };
+    return EditUntilEnter(&l);
+}
+
+int readline_grow(char **line)
+{
+    if (!line) return -1;
+    *line = NULL;
+    EditLine l = {
+        .buf = (char *)malloc(READLINE_FIRST_ROOM + 1), .cap = READLINE_FIRST_ROOM,
+        .grows = true, .len = 0, .cursor = 0, .browse = HistoryCount(), .draft = NULL,
+        .draft_len = 0, .echo_diverged = false,
+    };
+    if (!l.buf) return -1;
+    int len = EditUntilEnter(&l);
+    if (len < 0) {
+        free(l.buf);
+        return -1;
+    }
+    *line = l.buf;
+    return len;
 }
 
 /* WEAK for the same reason as printf in print.c: boxcxx's getchar reads

@@ -55,6 +55,11 @@ int printf(const char* fmt, ...);
 
 /* Input — the line editor (readline.c), event-driven over the console's ear. */
 int readline(char* buffer, size_t max_len);
+
+/* The same editor over a line of its own that grows as it is typed, with no
+ * ceiling but memory: its length, and *line — NUL-terminated, the caller's to
+ * free — or -1 with *line NULL when the ear is gone or no memory was had. */
+int readline_grow(char** line);
 int getchar(void);
 int input(const char* prompt, char* buffer, size_t max_len);
 

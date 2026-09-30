@@ -15,6 +15,7 @@
 #include "bay.h"
 #include "brook.h"
 #include "process.h"
+#include "use_context.h"   /* a strand's verdict recounted as it enters */
 #include "klib.h"
 #include "vmm.h"
 #include "pocket_ring.h"
@@ -414,6 +415,7 @@ void guide(void)
         process_t *proc = ready_queue_pop(&g_ready_queue);
         if (!proc) break;
 
+        UseContextVerdictRefresh(proc);
         while (!KPocketIsEmpty(proc)) {
             guide_process_pocket(proc);
             pockets_processed++;
@@ -441,6 +443,9 @@ void guide_process_one(process_t *proc)
     uint32_t perf_snapshot = perf_trace_snapshot();
     uint32_t count = 0;
 
+    /* The strand is in the kernel: a stale Use Context verdict on its cabin
+     * is recounted here, with interrupts on, not in the scheduler. */
+    UseContextVerdictRefresh(proc);
     while (!KPocketIsEmpty(proc)) {
         guide_process_pocket(proc);
         count++;

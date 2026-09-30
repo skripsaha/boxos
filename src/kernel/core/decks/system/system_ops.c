@@ -1480,8 +1480,9 @@ static int SysStrandPoolBind(const ManifestOp *op, Crate *crates, uint16_t crate
 /* After a set or a clear: the volume is told, and the caller learns whether
  * it listened. out_crate (optional): u8 — 1 when the volume now remembers
  * exactly this context, 0 when it does not (no volume up, a medium that will
- * not take the write, a context longer than the Ledger's record holds). The
- * context itself is set either way; the person is told, never refused. */
+ * not take the write, a context longer than the Ledger's record holds, a
+ * later word already said to it). The context itself is set either way; the
+ * person is told, never refused. */
 static int UseSayRemembered(const ManifestOp *op, Crate *crates, const OpContext *ctx)
 {
     bool kept = false;
@@ -1496,8 +1497,9 @@ static int UseSayRemembered(const ManifestOp *op, Crate *crates, const OpContext
 /* SYSTEM_OP_USE_SET  in_crate: comma-separated tag list. No crate, or an
  * empty one, clears — the same thing use.clear says. The list rides whole:
  * copied off the caller's pages at its own length, no ceiling of this deck's
- * choosing, and handed to the context, which spells every tag canonically
- * and refuses one the volume registry could not hold.
+ * choosing, and handed to the context, which spells every tag canonically,
+ * refuses one the volume registry could not hold, and only looks the volume's
+ * numbers up — saying a context issues none.
  * out_crate (optional): u8 remembered — see UseSayRemembered. */
 static int SysUseSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
@@ -1514,18 +1516,9 @@ static int SysUseSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     void  *raw = crate_in_buf(src, ctx);
     if (!raw) return ERR_INVALID_ADDRESS;
 
-    /* The crate carries bytes; the context reads a string. */
-    char *list = kmalloc(src->size + 1);
-    if (!list) {
-        crate_buf_free(raw);
-        return ERR_NO_MEMORY;
-    }
-    memcpy(list, raw, src->size);
-    list[src->size] = '\0';
+    /* Read at the crate's own length: the context copies what it keeps. */
+    error_t rc = UseContextSet(raw, src->size);
     crate_buf_free(raw);
-
-    error_t rc = UseContextSet(list, true);
-    kfree(list);
     if (rc != OK) return rc;   /* refused: the context is as it was, nothing to tell */
     return UseSayRemembered(op, crates, ctx);
 }
@@ -1556,38 +1549,32 @@ static int SysUseGet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     Crate *out = &crates[op->out_crate];
     if (out->capacity < 8) return ERR_BUFFER_TOO_SMALL;
 
-    char        *block = NULL;
-    const char **names = NULL;
-    uint32_t     count = 0;
-    error_t arc = UseContextTagArray(&block, &names, &count);
-    if (arc != OK) return arc;
+    /* The context as it stands at one look, read in place: its canonical
+     * text is the comma-joined list, so `needed` is its length and a NUL. */
+    UseList *use   = UseContextHold();
+    uint32_t count = UseListCount(use);
 
     uint8_t *kp = crate_out_alloc(out, out->capacity);
     if (!kp) {
-        kfree(block);
-        kfree(names);
+        UseListDrop(use);
         return ERR_INVALID_ADDRESS;
     }
 
-    /* Comma-joined, every tag costs its length plus one — a comma between
-     * tags, the NUL after the last; an empty context is one NUL. */
-    uint32_t needed  = 1;
+    uint32_t needed  = use ? (uint32_t)UseListText(use)->bytes + 1u : 1u;
     uint64_t pos     = 8;
     uint32_t written = 0;
     for (uint32_t i = 0; i < count; i++) {
-        size_t l = strlen(names[i]);
-        needed += (uint32_t)l + (i ? 1u : 0u);
-        if (pos + 2u + l > out->capacity) continue;   /* no room: still counted */
-        if (written != i) continue;                    /* keep the order whole */
+        TagSpelling tag = UseListTag(use, i);
+        size_t      l   = TagSpellingTextLength(&tag);
+        if (pos + 2u + l > out->capacity) break;   /* the order kept whole: no later tag */
         uint16_t l16 = (uint16_t)l;
-        memcpy(kp + pos, &l16, 2);       pos += 2;
-        memcpy(kp + pos, names[i], l);   pos += l;
+        memcpy(kp + pos, &l16, 2);        pos += 2;
+        memcpy(kp + pos, tag.key, l);     pos += l;   /* key, ':' and value lie together */
         written++;
     }
     memcpy(kp,     &written, 4);
     memcpy(kp + 4, &needed,  4);
-    kfree(block);
-    kfree(names);
+    UseListDrop(use);
 
     int crc = crate_out_commit(out, ctx, kp, pos);
     crate_buf_free(kp);

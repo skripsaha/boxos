@@ -8,9 +8,10 @@
 // Use Context
 //
 // The context is the user's and the volume is the user's. Every context set
-// here is set WITHOUT interning (a tag the volume does not know stays
-// unknown), and whatever the user had — in the machine, and in the volume's
-// memory — is put back on every path out, not only when the test passed.
+// here only looks the volume's numbers up (a tag the volume does not know
+// stays unknown), and whatever the user had — in the machine, and in the
+// volume's memory — is put back on every path out, not only when the test
+// passed.
 // ============================================================================
 
 /* Kept off the stack: two answers of 256 file ids and a tag's text would make
@@ -20,46 +21,26 @@ static uint32_t    s_everywhere[256];
 static char        s_tag_text[512];
 static TagSpelling s_spelled[8];
 
-/* The context's names spelled for a query, into s_spelled. */
-static bool use_spelled(const char** names, uint32_t count)
+/* The held context's tags, spelled into s_spelled for a query. */
+static bool use_spelled(const UseList* l)
 {
+    uint32_t count = UseListCount(l);
     if (count > ARRAY_SIZE(s_spelled)) return false;
     for (uint32_t i = 0; i < count; i++)
-        if (TagSpell(names[i], strlen(names[i]), &s_spelled[i]) != OK) return false;
+        s_spelled[i] = UseListTag(l, i);
     return true;
 }
 
-/* The context as it was: a comma-joined list to hand back to UseContextSet,
- * or NULL for none. */
-static bool use_snapshot_take(char** out_list)
+/* The context as it was, said again from its own text — or cleared, when there
+ * was none — and the held list let go of. */
+static void use_snapshot_restore(UseList* saved)
 {
-    uint32_t n    = 0;
-    size_t   need = UseContextTags(NULL, 0, &n);
-    if (need == 0) {
-        *out_list = NULL;
-        return true;
-    }
-    char* block = kmalloc(need);
-    if (!block) return false;
-    uint32_t got = 0;
-    UseContextTags(block, need, &got);
-    size_t pos = 0;
-    for (uint32_t i = 0; i + 1 < got; i++) {
-        pos += strlen(block + pos);
-        block[pos++] = ',';
-    }
-    *out_list = block;
-    return true;
-}
-
-static void use_snapshot_restore(char* list)
-{
-    if (list) {
-        UseContextSet(list, false);
-        kfree(list);
-    } else {
+    const UseText* text = UseListText(saved);
+    if (text)
+        UseContextSet(text->text, text->bytes);
+    else
         UseContextClear();
-    }
+    UseListDrop(saved);
 }
 
 /* A strand that wears exactly one tag, for UseContextMatches. */
@@ -99,44 +80,46 @@ static void use_test_strand_free(process_t* proc, cabin_t* cabin)
     kfree(proc);
 }
 
-/* Spelling: blanks dropped, "key:" is "key", a duplicate kept once, an unfit
- * tag refused with the context left as it was. */
+/* The scheduler's answer for a strand whose cabin was just changed by hand:
+ * the change said, the verdict recounted as the strand's entry would, and the
+ * question asked. */
+static bool use_verdict_after_change(process_t* proc)
+{
+    UseContextCabinChanged();
+    UseContextVerdictRefresh(proc);
+    return UseContextMatches(proc);
+}
+
+/* Spelling: blanks dropped, "key:" is "key", a repeat kept once where it was
+ * first said, the order the person's, an unfit tag refused with the context
+ * left as it was. */
 static TestResult test_use_context_spelling(void)
 {
-    TestResult   verdict = TEST_PASS;
-    char*        saved   = NULL;
-    bool         taken   = false;
-    char*        block   = NULL;
-    const char** names   = NULL;
-    uint32_t     count   = 0;
-    char         unfit[300];
+    static const char said[] = " code , cpp:, ,project:alpha ,code";
+    TestResult verdict = TEST_PASS;
+    UseList*   saved   = UseContextHold();
+    UseList*   now     = NULL;
+    char       unfit[300];
 
-    TEST_ASSERT(use_snapshot_take(&saved), "the user's context could not be saved");
-    taken = true;
-
-    TEST_ASSERT_OK(UseContextSet(" code , cpp:, ,project:alpha ,code", false),
+    TEST_ASSERT_OK(UseContextSet(said, sizeof(said) - 1),
                    "a list with blanks, an empty value and a repeat is a context");
-    TEST_ASSERT_OK(UseContextTagArray(&block, &names, &count), "names come back");
-    TEST_ASSERT_EQ(count, 3, "three distinct tags");
-    TEST_ASSERT(strcmp(names[0], "code") == 0, "first is code, trimmed");
-    TEST_ASSERT(strcmp(names[1], "cpp") == 0, "cpp: is spelled cpp");
-    TEST_ASSERT(strcmp(names[2], "project:alpha") == 0, "key:value kept whole");
-    kfree(block);
-    kfree(names);
-    block = NULL;
-    names = NULL;
+    now = UseContextHold();
+    TEST_ASSERT(now != NULL, "the context is set");
+    TEST_ASSERT_EQ(UseListCount(now), 3, "three distinct tags");
+    TEST_ASSERT(strcmp(UseListText(now)->text, "code,cpp,project:alpha") == 0,
+                "canonical, in the order said, the repeat where it was first said");
+    UseListDrop(now);
+    now = NULL;
 
     memset(unfit, 'k', sizeof(unfit) - 1);
     unfit[sizeof(unfit) - 1] = '\0';
-    TEST_ASSERT_EQ(UseContextSet(unfit, false), ERR_TAGFS_TAG_TOO_LONG,
+    TEST_ASSERT_EQ(UseContextSet(unfit, sizeof(unfit) - 1), ERR_TAGFS_TAG_TOO_LONG,
                    "a key longer than the registry's field is refused as too long");
-    TEST_ASSERT_OK(UseContextTagArray(&block, &names, &count), "names come back");
-    TEST_ASSERT_EQ(count, 3, "the refusal left the context as it was");
+    now = UseContextHold();
+    TEST_ASSERT_EQ(UseListCount(now), 3, "the refusal left the context as it was");
 out:
-    kfree(block);
-    kfree(names);
-    if (taken)
-        use_snapshot_restore(saved);
+    UseListDrop(now);
+    use_snapshot_restore(saved);
     return verdict;
 }
 
@@ -144,43 +127,34 @@ out:
  * in its tier. */
 static TestResult test_use_context_walls(void)
 {
-    TestResult   verdict = TEST_PASS;
-    char*        saved   = NULL;
-    bool         taken   = false;
-    char*        block   = NULL;
-    const char** names   = NULL;
-    uint32_t     count   = 0;
-    cabin_t*     cabin   = NULL;
-    process_t*   proc    = NULL;
-    uint32_t     ids[8];
-    TagFSPage    page;
+    static const char said[] = "use:test:nobody-wears-this";
+    TestResult verdict = TEST_PASS;
+    UseList*   saved   = UseContextHold();
+    UseList*   now     = NULL;
+    cabin_t*   cabin   = NULL;
+    process_t* proc    = NULL;
+    uint32_t   ids[8];
+    TagFSPage  page;
 
-    TEST_ASSERT(use_snapshot_take(&saved), "the user's context could not be saved");
-    taken = true;
-
-    TEST_ASSERT_OK(UseContextSet("use:test:nobody-wears-this", false),
+    TEST_ASSERT_OK(UseContextSet(said, sizeof(said) - 1),
                    "a tag the volume does not know is still a context");
-    TEST_ASSERT(UseContextIsSet(), "the context is set");
-
-    TEST_ASSERT_OK(UseContextTagArray(&block, &names, &count), "names come back");
-    TEST_ASSERT_EQ(count, 1, "one tag");
-    TEST_ASSERT(use_spelled(names, count), "the context's names spell");
-    TEST_ASSERT_OK(TagFSQueryPage(s_spelled, count, 1, ids, ARRAY_SIZE(ids), true, &page),
+    now = UseContextHold();
+    TEST_ASSERT_EQ(UseListCount(now), 1, "one tag");
+    TEST_ASSERT(use_spelled(now), "the context's tags spell");
+    TEST_ASSERT_OK(TagFSQueryPage(s_spelled, 1, 1, ids, ARRAY_SIZE(ids), true, &page),
                    "the context's question is put to the volume");
     TEST_ASSERT_EQ(page.total, 0, "inside walls nobody has built, nothing is visible");
 
     proc = use_test_strand(0, &cabin);
     TEST_ASSERT(proc != NULL, "no memory for a stand-in strand");
     cabin->tag_bits = ~(uint64_t)0;
-    TEST_ASSERT(!UseContextMatches(proc),
+    TEST_ASSERT(!use_verdict_after_change(proc),
                 "a tag without a number on this volume puts nobody in the tier");
 out:
     if (proc)
         use_test_strand_free(proc, cabin);
-    kfree(block);
-    kfree(names);
-    if (taken)
-        use_snapshot_restore(saved);
+    UseListDrop(now);
+    use_snapshot_restore(saved);
     return verdict;
 }
 
@@ -189,11 +163,9 @@ out:
 static TestResult test_use_context_narrows(void)
 {
     TestResult    verdict   = TEST_PASS;
-    char*         saved     = NULL;
+    UseList*      saved     = NULL;
     bool          taken     = false;
-    char*         block     = NULL;
-    const char**  names     = NULL;
-    uint32_t      count     = 0;
+    UseList*      now       = NULL;
     cabin_t*      cabin     = NULL;
     process_t*    proc      = NULL;
     bool          have_meta = false;
@@ -218,13 +190,14 @@ static TestResult test_use_context_narrows(void)
     size_t tag_len = tagfs_tag_text(tag_id, s_tag_text, sizeof(s_tag_text));
     TEST_ASSERT(tag_len > 0 && tag_len < sizeof(s_tag_text), "the tag has a name, whole");
 
-    TEST_ASSERT(use_snapshot_take(&saved), "the user's context could not be saved");
+    saved = UseContextHold();
     taken = true;
-    TEST_ASSERT_OK(UseContextSet(s_tag_text, false), "a context of a tag the volume knows");
-    TEST_ASSERT_OK(UseContextTagArray(&block, &names, &count), "names come back");
+    TEST_ASSERT_OK(UseContextSet(s_tag_text, tag_len), "a context of a tag the volume knows");
+    now = UseContextHold();
 
-    TEST_ASSERT(use_spelled(names, count), "the context's names spell");
-    TEST_ASSERT_OK(TagFSQueryPage(s_spelled, count, 1, s_inside, ARRAY_SIZE(s_inside), true, &page),
+    TEST_ASSERT(use_spelled(now), "the context's tags spell");
+    TEST_ASSERT_OK(TagFSQueryPage(s_spelled, UseListCount(now), 1, s_inside,
+                                  ARRAY_SIZE(s_inside), true, &page),
                    "the context's question is put to the volume");
     uint32_t n_inside = page.total;
     TEST_ASSERT(n_inside >= 1, "the file that wears the tag is visible inside");
@@ -237,14 +210,14 @@ static TestResult test_use_context_narrows(void)
 
     proc = use_test_strand(tag_id, &cabin);
     TEST_ASSERT(proc != NULL, "no memory for a stand-in strand");
-    bool wearing = UseContextMatches(proc);
+    bool wearing = use_verdict_after_change(proc);
     cabin->tag_bits           = 0;
     cabin->tag_overflow_count = 0;
-    bool bare = UseContextMatches(proc);
+    bool bare = use_verdict_after_change(proc);
     UseContextClear();
     if (tag_id < 64) cabin->tag_bits = (uint64_t)1 << tag_id;
     else             cabin->tag_overflow_count = 1;
-    bool after_clear = UseContextMatches(proc);
+    bool after_clear = use_verdict_after_change(proc);
     TEST_ASSERT(wearing, "a strand wearing the context's tag is in the tier");
     TEST_ASSERT(!bare, "a strand without it is not");
     TEST_ASSERT(!after_clear, "with no context there is no tier");
@@ -253,8 +226,7 @@ out:
         use_test_strand_free(proc, cabin);
     if (have_meta)
         tagfs_metadata_free(&meta);
-    kfree(block);
-    kfree(names);
+    UseListDrop(now);
     if (taken)
         use_snapshot_restore(saved);
     return verdict;
@@ -265,8 +237,8 @@ out:
 //
 // Only the volume's memory is touched here, never the machine's context: the
 // boot road that takes one up runs after these tests, on an empty context. So
-// what the volume held before is put back on every path out, and the road
-// recalls exactly what it would have.
+// what the volume held before is put back on every path out, said as the same
+// word it was, and the road recalls exactly what it would have.
 // ----------------------------------------------------------------------------
 
 /* 30 x "use:test:longNN" and 29 commas: 479 bytes, past the 432 a Ledger
@@ -274,7 +246,6 @@ out:
 #define USE_LONG_TAGS 30u
 
 static struct {
-    char         before[TAGFS_SECTOR_SIZE];
     char         said[TAGFS_SECTOR_SIZE];
     VolumeLedger led[VOLUME_LEDGER_COPIES];
     char         tail[VOLUME_LEDGER_COPIES][TAGFS_SECTOR_SIZE];
@@ -282,12 +253,15 @@ static struct {
     char         words[64];
 } s_ledger;
 
-/* What the volume held before the test is said to it again. */
-static TestResult UseLedgerPutBack(TestResult verdict, size_t before_len)
+/* What the volume held before the test is said to it again, as the word it
+ * was; the held text is let go of. */
+static TestResult UseLedgerPutBack(TestResult verdict, UseText* before, uint64_t saying)
 {
     bool    kept = false;
-    error_t rc   = tagfs_remember_use_context(s_ledger.before, before_len, &kept);
-    if (rc != OK || (before_len != 0 && !kept))
+    error_t rc   = tagfs_remember_use_context(before, saying, &kept);
+    bool    had  = before != NULL;
+    UseTextDrop(before);
+    if (rc != OK || (had && !kept))
         return TestFailedAt(__FILE__, __LINE__,
                             "the earlier context is put back and remembered again "
                             "(error, remembered)", rc, kept);
@@ -300,17 +274,18 @@ static TestResult test_use_context_remembered(void)
 {
     static const char said[] = "use:test:night,use:test:orders";
 
-    TestResult verdict    = TEST_PASS;
-    bool       changed    = false;
-    bool       kept       = false;
-    int        newest     = -1;
-    size_t     before_len = tagfs_recall_use_context(s_ledger.before, sizeof(s_ledger.before));
+    TestResult verdict = TEST_PASS;
+    bool       changed = false;
+    bool       kept    = false;
+    int        newest  = -1;
+    uint64_t   saying  = 0;
+    UseText*   before  = tagfs_recall_use_context(&saying);
+    UseText*   text    = UseTextMake(said, sizeof(said) - 1);
+    UseText*   back    = NULL;
 
-    TEST_ASSERT(before_len <= sizeof(s_ledger.before),
-                "the remembered context is longer than its own record");
-
+    TEST_ASSERT(text != NULL, "memory for the text said");
     changed = true;
-    TEST_ASSERT_OK(tagfs_remember_use_context(said, sizeof(said) - 1, &kept),
+    TEST_ASSERT_OK(tagfs_remember_use_context(text, saying, &kept),
                    "the volume takes the context");
     TEST_ASSERT(kept, "and remembers it");
 
@@ -327,11 +302,15 @@ static TestResult test_use_context_remembered(void)
                 "the medium carries the context as said");
     TEST_ASSERT_EQ(s_ledger.led[newest].use_context_offset, sizeof(VolumeLedger),
                    "right after the fixed fields");
-    TEST_ASSERT_EQ(tagfs_recall_use_context(NULL, 0), sizeof(said) - 1,
-                   "and the volume recalls it");
+    back = tagfs_recall_use_context(NULL);
+    TEST_ASSERT(back != NULL && back->bytes == sizeof(said) - 1, "and the volume recalls it");
 out:
+    UseTextDrop(text);
+    UseTextDrop(back);
     if (changed)
-        verdict = UseLedgerPutBack(verdict, before_len);
+        verdict = UseLedgerPutBack(verdict, before, saying);
+    else
+        UseTextDrop(before);
     return verdict;
 }
 
@@ -341,23 +320,26 @@ out:
  * until step 1.6 gives it room. */
 static TestResult TestUseContextLongRemembered(void)
 {
-    TestResult verdict    = TEST_PASS;
-    bool       changed    = false;
-    bool       kept       = false;
-    size_t     said_len   = 0;
-    size_t     before_len = tagfs_recall_use_context(s_ledger.before, sizeof(s_ledger.before));
-
-    TEST_ASSERT(before_len <= sizeof(s_ledger.before),
-                "the remembered context is longer than its own record");
+    TestResult verdict  = TEST_PASS;
+    bool       changed  = false;
+    bool       kept     = false;
+    size_t     said_len = 0;
+    uint64_t   saying   = 0;
+    UseText*   before   = tagfs_recall_use_context(&saying);
+    UseText*   text     = NULL;
+    UseText*   back     = NULL;
 
     for (uint32_t i = 0; i < USE_LONG_TAGS; i++)
         said_len += (size_t)ksnprintf(s_ledger.said + said_len,
                                       sizeof(s_ledger.said) - said_len,
                                       "%suse:test:long%02u", i ? "," : "", i);
+    text = UseTextMake(s_ledger.said, said_len);
+    TEST_ASSERT(text != NULL, "memory for the text said");
 
     changed = true;
-    error_t rc   = tagfs_remember_use_context(s_ledger.said, said_len, &kept);
-    size_t  left = tagfs_recall_use_context(NULL, 0);
+    error_t rc   = tagfs_remember_use_context(text, saying, &kept);
+    back         = tagfs_recall_use_context(NULL);
+    size_t  left = back ? back->bytes : 0;
     ksnprintf(s_ledger.words, sizeof(s_ledger.words),
               "of %u bytes said, the volume remembers", (unsigned)said_len);
     TestEvidence(s_ledger.words, left);
@@ -369,12 +351,14 @@ static TestResult TestUseContextLongRemembered(void)
     }
     TEST_ASSERT(kept, "a long context is remembered");
     TEST_ASSERT_EQ(left, said_len, "whole, not in part");
-    TEST_ASSERT_EQ(tagfs_recall_use_context(s_ledger.tail[0], sizeof(s_ledger.tail[0])),
-                   said_len, "and recalled");
-    TEST_ASSERT(memcmp(s_ledger.tail[0], s_ledger.said, said_len) == 0, "as it was said");
+    TEST_ASSERT(memcmp(back->text, s_ledger.said, said_len) == 0, "and recalled as it was said");
 out:
+    UseTextDrop(text);
+    UseTextDrop(back);
     if (changed)
-        verdict = UseLedgerPutBack(verdict, before_len);
+        verdict = UseLedgerPutBack(verdict, before, saying);
+    else
+        UseTextDrop(before);
     return verdict;
 }
 

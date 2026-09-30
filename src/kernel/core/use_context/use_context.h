@@ -3,6 +3,7 @@
 
 #include "ktypes.h"
 #include "error.h"
+#include "tag_spelling.h"
 
 struct process_t;
 
@@ -22,99 +23,147 @@ struct process_t;
  * TAGS, NOT NUMBERS. A tag is a name, `key` or `key:value`. Its number is a
  * page in one particular book, and this machine keeps three books: the mounted
  * volume's registry, the kernel's Logbook, MemTag's registry. So the context
- * holds the NAMES, and asks a book for numbers only when it needs that book's.
- * The volume's numbers are cached here for the one reader that can take
- * neither a lock nor the volume's door — the scheduler. They are bound when the
- * context is set with a volume up, re-bound when a volume is mounted, dropped
- * when the volume's registry is cleared away, and a tag the volume had no
- * number for yet is bound the moment a cabin interns it (UseContextBindTag),
- * so a process tagged after `use` still lands in the context tier.
+ * holds the NAMES, and saying them never writes a page of any book: `use`
+ * only LOOKS its tags up. A tag the volume has no page for yet gets one when a
+ * cabin wears it or a file is given it, and that intern tells the context its
+ * number (UseContextBindTag). The numbers are bound when the context is set
+ * with a volume up, re-bound when a volume is mounted, and dropped when the
+ * volume's registry is cleared away.
  *
- * THE VOLUME REMEMBERS IT. What the person said is written to the volume's
- * Ledger with every set and clear (UseContextRemember), and a volume coming
+ * WHAT IS SAID IS ONE PIECE. A context is built once, outside every lock, into
+ * an immutable list — the canonical text in the order the person gave it, and
+ * beside it the same tags in sorted order for finding one by halves — and it
+ * replaces the old one under the context's lock in one store. Every reader
+ * holds a reference to one list and reads it with no lock at all, so nobody
+ * ever sees half of one context and half of another, and nobody remembers or
+ * reports a prefix of what was said.
+ *
+ * THE SCHEDULER ASKS IN ONE COMPARE. Every change that could change who wears
+ * the context — a set, a clear, a binding, any cabin's tags — raises one epoch
+ * after it is made. A cabin keeps its verdict as one word, epoch << 1 | match.
+ * The scheduler compares the word's epoch with the machine's and takes the
+ * match bit either way; a stale one is the previous verdict, and says a
+ * recount is owed. The recount runs outside interrupts-off: when the process
+ * next enters the kernel, and in a pass on a service loop for cabins that
+ * never do.
+ *
+ * THE VOLUME REMEMBERS IT. What the person said is handed to the volume by
+ * reference with every set and clear (UseContextRemember), and a volume coming
  * up under a machine that holds no context is asked what it remembers
  * (UseContextRecall) — so what one was doing is still what one is doing
  * after the night, and it travels with the medium rather than the machine.
  */
 
 /*
- * Replace the context with the tags of a comma-separated list — "code,cpp" or
- * "code, project:alpha". An empty list clears. Each tag is read by the one
- * spelling (tag_spelling.h): blanks around it are dropped, "key:" with nothing
- * after the colon is the bare "key". A tag the volume registry could not hold
- * is refused with the spelling's code (ERR_TAGFS_TAG_TOO_LONG,
- * ERR_TAGFS_INVALID_TAG) and the context is left as it was.
- *
- * `intern` says whether a tag the mounted volume does not know yet may be
- * entered into its registry. The user's own `use` says yes: a tag is created
- * the way `create` would create it. A reader that must not write to the medium
- * says no and gets a context whose unknown tags simply match nothing until
- * something interns them.
+ * The context as text, "key,key:value,..." — made once and never changed
+ * after, shared by reference between the machine's context and the volume's
+ * memory of it. `bytes` does not count the NUL that follows the text.
  */
-error_t UseContextSet(const char *list, bool intern);
+typedef struct UseText {
+    uint32_t refs;
+    size_t   bytes;
+    char     text[];
+} UseText;
+
+/* A text of `bytes` bytes, copied, with one reference; NULL with no memory. */
+UseText *UseTextMake(const char *text, size_t bytes);
+/* Another reference to `t`, which is returned; NULL stays NULL. */
+UseText *UseTextHold(UseText *t);
+/* A reference given back; the last one frees. NULL is nothing. */
+void     UseTextDrop(UseText *t);
+/* Whether two texts say the same bytes; two NULLs do. */
+bool     UseTextSame(const UseText *a, const UseText *b);
+
+/*
+ * The context as it stands, held: NULL when none is set. The caller reads it
+ * with no lock — its tags in the order they were said, each a spelling into
+ * the list's own text — and gives it back with UseListDrop.
+ */
+typedef struct UseList UseList;
+
+UseList       *UseContextHold(void);
+void           UseListDrop(UseList *l);
+uint32_t       UseListCount(const UseList *l);
+TagSpelling    UseListTag(const UseList *l, uint32_t index);
+UseText       *UseListText(const UseList *l);
+
+/*
+ * Replace the context with the tags of a comma-separated list — "code,cpp" or
+ * "code, project:alpha" — of `len` bytes, or up to a NUL before them. A list
+ * naming no tag clears. Each tag is read by the one spelling (tag_spelling.h):
+ * blanks around it are dropped, "key:" with nothing after the colon is the
+ * bare "key", and a tag said twice is kept once, where it was first said. A
+ * tag the volume registry could not hold is refused with the spelling's code
+ * (ERR_TAGFS_TAG_TOO_LONG, ERR_TAGFS_INVALID_TAG) and the context is left as
+ * it was. The volume's numbers are looked up, never issued.
+ */
+error_t UseContextSet(const char *list, size_t len);
 void    UseContextClear(void);
 
 /*
- * The context as names: one NUL-terminated tag after another, copied into
- * `buf`. Returns the byte length the whole answer takes, so a caller whose
- * buffer was too small can size one; writes as many whole tags as fit and
- * reports how many in *out_count. `buf` may be NULL with `cap` 0 to ask the
- * size alone.
- */
-size_t  UseContextTags(char *buf, size_t cap, uint32_t *out_count);
-
-/*
- * The same names as an array, for a caller that hands tags to a query: one
- * kmalloc'd block of NUL-terminated names and a kmalloc'd array of pointers
- * into it. Both NULL with count 0 when no context is set; the caller frees
- * both with kfree.
- */
-error_t UseContextTagArray(char **out_block, const char ***out_ptrs, uint32_t *out_count);
-bool    UseContextIsSet(void);
-
-/*
  * The scheduler's question: does this strand's cabin wear EVERY tag of the
- * context? Lock-free on its fast path. False when no context is set, when
- * there is no volume, and when the context has a tag this volume has no
- * number for yet — nothing can wear a tag that does not exist.
+ * context? One compare, no lock, nothing of the context read: the cabin's
+ * verdict word, previous or current. A stale word is answered with its
+ * previous verdict, and the recount it owes is asked for.
  */
 bool    UseContextMatches(const struct process_t *proc);
+
+/* The verdict of this strand's cabin made current, counted outside any lock
+ * against a snapshot of the context — at the strand's entry into the kernel. */
+void    UseContextVerdictRefresh(struct process_t *proc);
+
+/* The recount for every cabin whose verdict is stale, when one is owed: one
+ * load when none is. Called from the service loops, with interrupts on. */
+void    UseContextServiceIfPending(void);
+
+/* A cabin's tags changed: every verdict is stale from here on. Said after the
+ * change is made. */
+void    UseContextCabinChanged(void);
 
 /*
  * The volume remembers the context (volume_ledger.h) — say the current one to
  * it. Done after every set and clear, and when a volume comes up under a
  * context the person had already said. *remembered says whether the volume
  * now holds exactly this context: false with no volume up, a medium that will
- * not take the write, or a context longer than the record holds. The context
- * is set all the same — the person is told, never refused.
+ * not take the write, a context longer than the record holds, or a later
+ * word already said to it. The context is set all the same — the person is
+ * told, never refused.
  */
 void    UseContextRemember(bool *remembered);
 
 /*
  * A volume is up — said on every road to a mounted volume. A machine holding
- * no context takes up what the volume remembers, without interning: a tag the
- * volume no longer knows stays unbound, matching nothing, until something
- * interns it. A machine that holds one keeps it — the person's word stands
- * over the volume's memory — binds its numbers on the volume that is up now,
- * and tells the volume.
+ * no context takes up what the volume remembers: the volume hands its memory
+ * over in one take and it is read here, outside every lock, and set only if
+ * the machine still holds none. A machine that holds one keeps it — the
+ * person's word stands over the volume's memory — binds its numbers on the
+ * volume that is up now, and tells the volume.
  */
 void    UseContextRecall(void);
 
 /*
  * The volume's book is going: that registry is being freed, so its numbers
- * mean nothing from here on.
+ * mean nothing from here on. Said with the volume's door drained.
  */
 void    UseContextUnbind(void);
 
 /*
- * A cabin just interned `tag` and was given `tag_id` for it. If the context
- * holds this tag and had no number for it, this is the number. One relaxed
- * load when nothing is waiting, which is almost always.
+ * The mounted volume just gave `tag` the number `tag_id` — a cabin wore it, a
+ * file was given it. If the context holds this tag without a number, this is
+ * the number. Said inside the volume's door, with no TagFS lock held; one load
+ * when the context waits for no number, which is almost always.
  */
-struct TagSpelling;
-void    UseContextBindTag(const struct TagSpelling *tag, uint16_t tag_id);
+void    UseContextBindTag(const TagSpelling *tag, uint16_t tag_id);
 
 void    UseContextInit(void);
 void    UseContextShutdown(void);
+
+#ifdef CONFIG_VOLUME_TESTS
+/* How many times two tags have been compared inside the context on this core
+ * — finding a tag in the list, finding a number in the snapshot — since boot.
+ * The stand counts it across the scheduler's question to see that the
+ * question compares none. */
+uint64_t UseContextCompares(void);
+#endif
 
 #endif /* USE_CONTEXT_H */
