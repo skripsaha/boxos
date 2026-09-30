@@ -9085,16 +9085,16 @@ stackguard_frame_on() {
 import sys
 p = "src/kernel/tagfs/tagfs.c"
 s = open(p).read()
-anchor = "            uint8_t tmp[TAGFS_BLOCK_SIZE];\n            if (disk_read_sectors(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {\n"
+anchor = "            uint8_t tmp[TAGFS_BLOCK_SIZE];\n            if (tagfs_volume_read(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {\n"
 assert s.count(anchor) == 1, "stackguard ReadAheadPrefetch anchor missing"
 if sys.argv[1] == "grow":
     new = ("            uint8_t tmp[TAGFS_BLOCK_SIZE];\n"
            "            volatile uint8_t logcheck_more[512];   /* logcheck mutation: a held frame grows */\n"
            "            logcheck_more[i % 512] = 1;\n"
-           "            if (disk_read_sectors(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {\n")
+           "            if (tagfs_volume_read(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {\n")
 else:
     new = ("            static uint8_t tmp[TAGFS_BLOCK_SIZE];   /* logcheck mutation: the block leaves the stack */\n"
-           "            if (disk_read_sectors(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {\n")
+           "            if (tagfs_volume_read(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {\n")
 open(p, "w").write(s.replace(anchor, new, 1))
 EOF2
     mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 1

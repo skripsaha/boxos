@@ -116,14 +116,14 @@ int FileRecordCopyOut(const FileRecord* rec, TagFSMetadata* out)
         if (!out->tag_ids)
             goto refused;
         memcpy(out->tag_ids, rec->tags, sizeof(uint16_t) * rec->tag_count);
-        out->tag_count = (uint16_t)rec->tag_count;
+        out->tag_count = rec->tag_count;
     }
     if (rec->extent_count) {
         out->extents = kmalloc(sizeof(FileExtent) * rec->extent_count);
         if (!out->extents)
             goto refused;
         memcpy(out->extents, rec->extents, sizeof(FileExtent) * rec->extent_count);
-        out->extent_count = (uint16_t)rec->extent_count;
+        out->extent_count = rec->extent_count;
     }
     out->filename = kmalloc(rec->name_len + 1u);
     if (!out->filename)
