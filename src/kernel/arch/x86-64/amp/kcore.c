@@ -244,6 +244,17 @@ submitted:
     return OK;
 }
 
+/* The gate's store of in_hlt and its last look are both sequentially
+ * consistent, and so is this load after the caller published its work: either
+ * the gate sees the work, or this sees the core committed to its HLT. */
+void kcore_wake(uint8_t core_idx)
+{
+    if (!g_kcore_queues || core_idx >= g_amp.total_cores || core_idx == amp_get_core_index())
+        return;
+    if (__atomic_load_n(&g_kcore_queues[core_idx].in_hlt, __ATOMIC_SEQ_CST))
+        lapic_send_ipi(g_amp.cores[core_idx].lapic_id, IPI_WAKE_VECTOR);
+}
+
 static void kcore_process_entry(struct process_t* proc)
 {
     if (!proc || proc->magic != PROCESS_MAGIC) {
@@ -300,9 +311,14 @@ void kcore_run_loop(void)
     __asm__ volatile("sti");
 
     for (;;) {
+        /* Between two pockets the volume's Settle may take its turn: a step of
+         * the cycle this core runs, or one whose window ran out or that was
+         * demanded — never one Lull merely allows, which waits for the queue
+         * to empty (settle.h). */
         struct process_t* proc;
         while ((proc = kcore_queue_pop(q)) != NULL) {
             kcore_process_entry(proc);
+            TagFSServiceAtBoundary();
         }
 
         /* Drain the batons on this K-Core (never-drop MPSC): storage
@@ -431,7 +447,7 @@ void kcore_run_loop(void)
          * hands over now rides a baton, and the baton queue is asked. */
         __asm__ volatile("cli");
         __atomic_store_n(&q->in_hlt, 1u, __ATOMIC_SEQ_CST);  /* before the last look */
-        if (kcore_queue_depth(my_idx) != 0 || BatonPending(my_idx)) {
+        if (kcore_queue_depth(my_idx) != 0 || BatonPending(my_idx) || TagFSStepOwedHere()) {
             __atomic_store_n(&q->in_hlt, 0u, __ATOMIC_RELEASE);
             __asm__ volatile("sti");        /* raced submit — loop, don't sleep */
         } else {

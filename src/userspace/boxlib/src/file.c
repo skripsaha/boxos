@@ -541,3 +541,12 @@ int anchor(uint32_t file_id)
                      BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }
+
+int write_settled(uint32_t file_id)
+{
+    int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_WRITE_SETTLED,
+                     &file_id, sizeof(file_id),
+                     NULL, 0, NULL, 0, NULL,
+                     BOX_ANSWER_GUARANTEED, NULL);
+    return box_fail(rc);
+}

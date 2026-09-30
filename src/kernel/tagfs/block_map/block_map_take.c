@@ -1,5 +1,6 @@
 #include "block_map_internal.h"
 #include "../ink/fallow.h"
+#include "../settle/settle.h"
 
 /*
  * Where a take goes.
@@ -230,10 +231,14 @@ void MapSayNoRoom(uint32_t want)
             want, (unsigned long long)tagfs_get_state()->ledger.free_blocks, longest);
 }
 
+/* Short while Fallow rests blocks: a cycle gives them back, so one is demanded
+ * now rather than when Lull allows it. */
 error_t MapShort(uint32_t want)
 {
-    if (FallowBlocks() > 0)
+    if (FallowBlocks() > 0) {
+        SettleDemand(SETTLE_DEMAND_ROOM);
         return ERR_WOULD_BLOCK;
+    }
     MapSayNoRoom(want);
     return ERR_TAGFS_NO_SPACE;
 }

@@ -364,7 +364,7 @@ error_t LedgerImageWrite(const SettleMark *mark)
     return OK;
 }
 
-error_t tagfs_remember_use_context(UseText *said, uint64_t saying, bool *remembered)
+UseSaid LedgerUseSay(UseText *said, uint64_t saying)
 {
     /* A text the record cannot hold is not cut short and not kept: the volume
      * forgets rather than remembering half of what was said, and says so. */
@@ -393,15 +393,27 @@ error_t tagfs_remember_use_context(UseText *said, uint64_t saying, bool *remembe
     UseTextDrop(gone);
 
     /* A later word already stands: this one is not what the volume holds. */
-    if (later) {
+    if (later)
+        return USE_SAID_SUPERSEDED;
+    if (!landed)
+        return fits ? USE_SAID_OWED : USE_SAID_FORGOTTEN_OWED;
+    return fits ? USE_SAID_LANDED : USE_SAID_FORGOTTEN;
+}
+
+error_t tagfs_remember_use_context(UseText *said, uint64_t saying, bool *remembered)
+{
+    UseSaid told = LedgerUseSay(said, saying);
+    if (told == USE_SAID_SUPERSEDED) {
         if (remembered) *remembered = false;
         return OK;
     }
 
     /* A demand on the one writer: the cycle that covers it carries the
      * context in the Ledger it writes. */
-    error_t rc = landed ? OK : TagFSSettle();
-    if (remembered) *remembered = fits && rc == OK;
+    bool    owed = told == USE_SAID_OWED || told == USE_SAID_FORGOTTEN_OWED;
+    error_t rc   = owed ? TagFSSettle() : OK;
+    if (remembered)
+        *remembered = (told == USE_SAID_OWED || told == USE_SAID_LANDED) && rc == OK;
     return rc;
 }
 

@@ -67,6 +67,21 @@ error_t  LedgerImageWrite(const SettleMark *mark);
  */
 error_t  tagfs_remember_use_context(UseText *said, uint64_t saying, bool *remembered);
 UseText *tagfs_recall_use_context(uint64_t *out_saying);
+
+/* remember's first half, which never waits: the word said to the Ledger's
+ * memory, and what the medium makes of it — a later word stands; the medium
+ * holds it already; or the next cycle carries it (OWED). FORGOTTEN: the text
+ * is longer than the record holds, and what the volume keeps is none — which
+ * a cycle may still owe the medium. A program's `use` waits for an OWED one
+ * through its Chit (SettleWaitLinkCycle). */
+typedef enum {
+    USE_SAID_SUPERSEDED = 0,
+    USE_SAID_LANDED,
+    USE_SAID_OWED,
+    USE_SAID_FORGOTTEN,
+    USE_SAID_FORGOTTEN_OWED,
+} UseSaid;
+UseSaid  LedgerUseSay(UseText *said, uint64_t saying);
 bool     tagfs_ledger_peek(uint32_t copy, VolumeLedger *out, char *tail, uint16_t *tail_len);
 
 /* The mount reads both copies and takes up the newer intact one's counters

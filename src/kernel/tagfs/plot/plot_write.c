@@ -1,5 +1,7 @@
 #include "plot_internal.h"
 #include "scribe.h"
+#include "atomics.h"
+#include "cpu_calibrate.h"
 
 /*
  * Blocks written the synchronous way, each by the one read-modify-write rule
@@ -73,7 +75,9 @@ error_t PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *o
             break;
         }
 
+        uint64_t began = rdtsc();
         rc = tagfs_write_block(block, buf);
+        p->data_us += cpu_tsc_to_us(rdtsc() - began);
         if (rc != OK) {
             kprintf("[TagFS] file %u: block %u would not be written — %llu of %llu bytes had "
                     "landed before the medium stopped answering\n", p->fid, block,

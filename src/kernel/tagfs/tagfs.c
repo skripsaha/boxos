@@ -1268,6 +1268,7 @@ static bool volume_medium_gone(void)
             swapped ? "been replaced by another one in the same seat"
                     : "left");
     HelmMediumLeft();
+    SettleMediumLeft();
     return true;
 }
 
@@ -1537,9 +1538,11 @@ static void tagfs_on_seat_ready(TouchTag tag, const void *payload,
 {
     (void)tag; (void)source_pid; (void)ctx;
     const BoardroomSeatEvent *ev = payload;
-    if (plen < sizeof(*ev) || !__atomic_load_n(&g_mount_owed, __ATOMIC_ACQUIRE))
+    if (plen < sizeof(*ev) || ev->first != g_tagfs_seat)
         return;
-    if (ev->first == g_tagfs_seat)
+    if (g_state.initialized)
+        SettleSeatReady();          /* a refused cycle may run again */
+    if (__atomic_load_n(&g_mount_owed, __ATOMIC_ACQUIRE))
         __atomic_store_n(&g_mount_ready, 1u, __ATOMIC_RELEASE);
 }
 
@@ -2234,12 +2237,13 @@ error_t tagfs_init(void) {
     __atomic_add_fetch(&g_mount_epoch, 1, __ATOMIC_ACQ_REL);
     __atomic_store_n(&g_door, VOLUME_UP, __ATOMIC_RELEASE);
 
-    // Data-block integrity map (verify-on-read). After initialized=true so the
-    // lazy first-mount allocation can use the block allocator.
-    if (IntegrityInit() != OK)
-        kprintf("[TagFS] integrity map unavailable - continuing without verify-on-read\n");
-    else
+    // Data-block integrity map (verify-on-read). After initialized=true so a
+    // map laid by the cycles can take its run from the block allocator.
+    error_t integrity = IntegrityInit();
+    if (integrity == OK)
         kprintf("[TagFS] data-integrity verify-on-read active\n");
+    else if (integrity != ERR_WOULD_BLOCK)
+        kprintf("[TagFS] integrity map unavailable - continuing without verify-on-read\n");
     MountAfterDoor();
 
     /*
@@ -2284,19 +2288,19 @@ error_t tagfs_init(void) {
             (unsigned long long)g_state.ledger.total_files);
 
     /*
-     * ‼ AND WHAT THAT MOUNT PROMISES, SAID ONCE, IN PLAIN WORDS.
-     *
-     * A write's bytes reach the medium as they are written; the record that
-     * names them — the file's name, size and extents — is inked in memory and
-     * reaches the medium with a Settle cycle, which this step runs when
-     * somebody asks and waits: `anchor`, an orderly shutdown. A promise nobody
-     * is told is not a promise, and it is said here rather than in a document
-     * because the document is not on the screen when the power goes.
+     * ‼ AND WHAT THAT MOUNT PROMISES, SAID ONCE, IN PLAIN WORDS — the difference
+     * between before and after an anchor included (RT-06/07): until then a
+     * change lives in the last cycle's open tail, which the next cycle writes
+     * again in place, and a flash page torn by the power can take it; an
+     * anchored change lies in a closed block nothing writes again. A promise
+     * nobody is told is not a promise, and the document is not on the screen
+     * when the power goes.
      */
-    kprintf("[TagFS] what this volume promises: a file's content reaches the "
-            "medium as it is written; its name, size and extents, the table, the "
-            "bitmap and the ledger are made durable by a Settle cycle — `anchor`, "
-            "and an orderly shutdown\n");
+    kprintf("[TagFS] what this volume promises: a file's content reaches the medium as it "
+            "is written, and its name, size and extents follow on their own within %llu ms "
+            "(a Settle cycle, settle.h); until `anchor` a change stands as the last cycle "
+            "left it, but for a flash page torn by the power; after `anchor`, for good\n",
+            (unsigned long long)(SETTLE_WINDOW_US / 1000u));
 
     /* The Spares a delete stands on, laid by now so a volume with no free
      * block left can still give a file up (meta_pool.h, SPARE_RESERVE). A
@@ -2498,7 +2502,8 @@ static void tagfs_ask_for_the_mount_again(void)
 /*
  * The work of a Helm handed to a waiter that does it synchronously runs here
  * first: a job holds the door for its whole life, so a volume on its way out
- * is let go of only once the work inside it has been done.
+ * is let go of only once the work inside it has been done. Then the Settle's
+ * turn: a step of its cycle, or the start of one that is due (settle.h).
  *
  * And the ground that could not be cleared when the medium left, because
  * somebody was standing on it, is finished here, and then the ordinary road
@@ -2512,6 +2517,7 @@ static void tagfs_ask_for_the_mount_again(void)
 void TagFSServiceIfPending(void)
 {
     HelmRunReady();
+    SettleServiceIfPending(false);
     tagfs_ask_for_the_mount_again();
 
     if (__atomic_load_n(&g_abandon_pending, __ATOMIC_ACQUIRE) == 0) {
@@ -2541,39 +2547,6 @@ void TagFSServiceIfPending(void)
     }
 
     attending_done();
-}
-
-
-// ----------------------------------------------------------------------------
-// Test runner interface (called from userspace via System Deck)
-// ----------------------------------------------------------------------------
-
-static error_t TagFS_RunTests_inside(void);
-
-error_t TagFS_RunTests(void)
-{
-    if (!tagfs_enter())
-        return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = TagFS_RunTests_inside();
-    tagfs_leave();
-    return rc;
-}
-
-static error_t TagFS_RunTests_inside(void)
-{
-    TestStats stats;
-    error_t result = TagFS_RunAllTests(&stats);
-
-    /* kprintf, not debug_printf: without these numbers a run where every
-     * single test SKIPPED still printed "All tests PASSED". A test held under
-     * a caveat is a known defect reproduced on purpose — counted on its own,
-     * neither passed nor failed nor skipped, and it does not fail the run. */
-    kprintf("[TESTS] TagFS: %u run, %u passed, %u failed, %u skipped, "
-            "%u held under a caveat\n",
-            stats.total_tests, stats.total_passed, stats.total_failed,
-            stats.total_skipped, stats.total_held);
-
-    return result;
 }
 
 // ----------------------------------------------------------------------------

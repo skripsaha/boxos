@@ -25,7 +25,7 @@
  * happens" — a shell prompt may wait for a keystroke for a week. A guessed one
  * would be a wake-up with nothing to do, and parking BOUNDED waits was measured
  * to break sixteen-core runs (a child's _Exit racing SYS_PROC_KILL, process:died
- * lost for three seconds). So this op arms no timer at all: no TouchQueueWakeAfter,
+ * lost for three seconds). So this op arms no timer at all: no TouchQueueArmWake,
  * no park_seq, nothing to go stale and land on a later sleep. Bounded waiters do
  * not turn in; they keep their old spin, and their deadline stays their own.
  *

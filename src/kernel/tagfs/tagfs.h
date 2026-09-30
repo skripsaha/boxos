@@ -544,6 +544,27 @@ bool     tagfs_handle_is_of_this_mount(const TagFSFileHandle* handle);
 void     TagFSServiceIfPending(void);
 
 /*
+ * The Settle's share of the loops (settle/cadence.c). Between two pockets of
+ * the K-Core loop: a step of the cycle this core runs, or a cycle whose window
+ * ran out or that was demanded. Whether this core's loop owes the Settle a turn
+ * before it sleeps. On one core, whether the idle context is owed the next
+ * quantum (RT-10) — read by the scheduler from the tick, lock-free.
+ */
+void     TagFSServiceAtBoundary(void);
+bool     TagFSStepOwedHere(void);
+bool     TagFSIdleOwed(void);
+
+/* Nightwatch's look at the Settle, from the PIT tick (RT-11). */
+void     TagFSWatchLook(void);
+
+/* A program's newest change of the volume, noted after the storage deck
+ * served it; and the program leaving (settle.h): with a change of its own no
+ * cycle settled, the next cycle is demanded rather than left to Lull. */
+struct process_t;
+void     TagFSNoteInker(struct process_t* proc);
+void     TagFSInkerLeaves(struct process_t* proc);
+
+/*
  * Where this volume's ground begins on that medium, in the medium's own
  * sectors. Zero when nothing is mounted.
  *
@@ -588,6 +609,14 @@ void     TagFSNoteMediumGone(void);
  * Ink changes the volume — ERR_DEVICE_NOT_READY — and nobody waits in a Helm's
  * FIFO. Until the volume is let go of; the next mount begins without it. */
 bool     TagFSMediumLeft(void);
+
+/* Whether the medium under the mounted volume takes no write (RT-18): a write
+ * it refused as protected — DATA PROTECT on USB, an ATA abort on AHCI. From
+ * then on no Ink changes the volume — ERR_TAGFS_READ_ONLY — and every waiter
+ * for a cycle hears the same, until the volume is let go of. TagFSWriteRefused
+ * asks the seat after a write the medium refused, and latches it. */
+bool     TagFSReadOnly(void);
+void     TagFSWriteRefused(void);
 
 /* Said once, by whoever tried the boot mount, whether or not it succeeded.
  * Before it, an arriving medium belongs to the boot that is still happening. */

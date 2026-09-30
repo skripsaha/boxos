@@ -44,6 +44,11 @@ ahci_port_t* ahci_get_port_state(uint8_t port_num) {
     return ahci_get_port(port_num);
 }
 
+bool ahci_port_refuses_writes(uint8_t port_num) {
+    ahci_port_t* port = ahci_get_port(port_num);
+    return port && __atomic_load_n(&port->write_refused, __ATOMIC_ACQUIRE) != 0;
+}
+
 volatile ahci_port_regs_t* ahci_get_port_regs_pub(uint8_t port_num) {
     ahci_port_t* port = ahci_get_port(port_num);
     if (!port) return NULL;

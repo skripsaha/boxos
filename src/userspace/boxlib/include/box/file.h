@@ -101,8 +101,10 @@ typedef struct {
 int snap_info(uint32_t snap_id, snap_info_t *out);
 
 /*
- * anchor() — durability primitive. Forces all in-memory metadata to
- * disk and flushes the disk cache. Returns when persisted.
+ * anchor() — durability primitive. Returns once every change made before it
+ * is on the medium, in a place the volume never writes again, behind a kept
+ * cache flush. The volume settles changes on its own within five seconds
+ * (the mount says so); anchor is the word that makes it now and for good.
  *
  * Two ways to use it:
  *   anchor(fid)        — explicit blocking call. POSIX-shaped.
@@ -117,6 +119,16 @@ int snap_info(uint32_t snap_id, snap_info_t *out);
  * generic "anchor" event (no per-tag fan-out).
  */
 int anchor(uint32_t file_id);
+
+/*
+ * write_settled() — waits, without asking for anything to be published, until
+ * the file's changes so far are settled on the medium in a place the volume
+ * never writes again (file_id == 0: every change of the volume so far). At
+ * once when they already are. A refusal of the medium comes back as its code:
+ * ERR_TAGFS_READ_ONLY for a medium that takes no write, ERR_DEVICE_NOT_READY
+ * for one that left.
+ */
+int write_settled(uint32_t file_id);
 
 #ifdef __cplusplus
 }

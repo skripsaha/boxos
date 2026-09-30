@@ -58,9 +58,9 @@ caveat_row() {
         systemtag)  echo "|any program may take the system tag off kernel.bin and then delete it — the kernel the volume boots is gone" ;;
         coldread)   echo "|a read into pages its program had not touched yet reported every byte and delivered only those before the first such page" ;;
         coldwrite)  echo "|a write out of pages its program had not touched yet reported every byte, and the file holds other than the zeros those pages are" ;;
-        noanchor)   echo "1.7|a file written without anchor has no name after a power cut" ;;
+        noanchor)   echo "|a file written without anchor has no name after a power cut" ;;
         nextfid)    echo "|a table written ahead of its ledger hands the same file id out twice" ;;
-        hog)        echo "1.7|on one core under a CPU hog nothing settles a write before the power goes" ;;
+        hog)        echo "|on one core under a CPU hog nothing settles a write before the power goes" ;;
         settlecut:FID_PAST_NEXT)
                     echo "|a sync stopped by SETTLECUT=ledger before its ledger leaves a table row past the ledger's next_file_id" ;;
         noanchor:ORPHAN|hog:ORPHAN)

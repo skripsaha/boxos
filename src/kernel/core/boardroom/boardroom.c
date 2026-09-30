@@ -764,6 +764,9 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
          * reaches the medium — the runs before it do. The asynchronous
          * WriteJob does not come through this door (write_job.c submits its
          * reads and writes to AHCI itself) and asks the plan there. */
+        if (BlockFailProtects(seat)) {
+            return BoardMediumRefusal(s->kind, BLOCK_FAIL_WRITE);
+        }
         if (BlockFailStrikes(seat, BLOCK_FAIL_WRITE, lba, run)) {
             return BoardMediumRefusal(s->kind, BLOCK_FAIL_WRITE);
         }
@@ -786,6 +789,32 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
         count -= run;
     }
     return 0;
+}
+
+bool BoardroomSeatRefusesWrites(uint8_t seat)
+{
+#ifdef CONFIG_VOLUME_TESTS
+    if (BlockFailProtects(seat)) {
+        return true;
+    }
+#endif
+    BoardSeat* s = seat_taken(seat);
+    if (!s) {
+        return false;
+    }
+    switch (s->kind) {
+    case BOARD_USB:  return xhci_msd_unit_write_protected(s->index);
+    case BOARD_AHCI: return ahci_port_refuses_writes(s->index);
+    /* The legacy channels say nothing a write-protected drive would say
+     * differently from any other refusal. */
+    default:         return false;
+    }
+}
+
+bool BoardroomSeatAnnouncesReady(uint8_t seat)
+{
+    BoardSeat* s = seat_taken(seat);
+    return s && (s->kind == BOARD_AHCI || s->kind == BOARD_USB);
 }
 
 bool BoardroomSeatCanReadAsync(uint8_t seat)

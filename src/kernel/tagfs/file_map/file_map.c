@@ -74,6 +74,7 @@ FileRecord* FileRecordOf(const TagFSMetadata* meta)
     rec->size          = meta->size;
     rec->created_time  = meta->created_time;
     rec->modified_time = meta->modified_time;
+    rec->small_append_us = 0;
     rec->tag_count     = tags;
     rec->extent_count  = extents;
     rec->name_len      = name_len;

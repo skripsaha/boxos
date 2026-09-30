@@ -220,6 +220,16 @@ uint8_t BoardroomSeatIndex(uint8_t seat);
 int BoardroomRead (uint8_t seat, uint64_t lba, uint32_t count, void* buffer);
 int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffer);
 
+/* Whether the medium on `seat` refused a write as protected — DATA PROTECT
+ * (sense key 7) on USB, an ATA abort on a write on AHCI — which it goes on
+ * doing for as long as it sits there. Asked after a refused write. */
+bool BoardroomSeatRefusesWrites(uint8_t seat);
+
+/* Whether the seat says seat:ready when it answers again after a refusal —
+ * AHCI after a port recovery, USB once a unit is ready again. The legacy
+ * channels do not, so a refusal there is the last word on the matter. */
+bool BoardroomSeatAnnouncesReady(uint8_t seat);
+
 /*
  * A read for a caller that is not going to stand and watch.
  *

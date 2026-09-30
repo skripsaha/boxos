@@ -99,6 +99,7 @@
 #include "ink.h"         /* TagFSInkPlot — the one way the file changes */
 #include "meta_pool.h"   /* PoolSpareBegin / Adopt / Drop — a Spare stamped through the port */
 #include "scribe.h"      /* VolumeFlushNeed — what the landed blocks wait for */
+#include "cpu_calibrate.h"  /* a block's time on the medium, for the cadence */
 #ifdef CONFIG_VOLUME_TESTS
 #include "block_fail.h"  /* BLOCKFAIL — the port's commands refused on the stand */
 #endif
@@ -327,7 +328,8 @@ static error_t wjob_submit(WriteJob *j, bool write, RoadsteadAnswered answered)
      * the command is taken and answered through the callback with ERR_IO, as
      * a real completion can already arrive before the submit returns. Nothing
      * is issued. */
-    if (BlockFailStrikes(tagfs_get_seat(), write ? BLOCK_FAIL_WRITE : BLOCK_FAIL_READ,
+    if ((write && BlockFailProtects(tagfs_get_seat())) ||
+        BlockFailStrikes(tagfs_get_seat(), write ? BLOCK_FAIL_WRITE : BLOCK_FAIL_READ,
                          b->lba, b->sectors)) {
         answered(port, 0, ERR_IO, j);
         return OK;
@@ -370,6 +372,7 @@ static bool w_dma_fill(WriteJob *j)
 /* W_AHCI_SUBMIT — fire write, yield to IRQ. */
 static bool w_ahci_submit(WriteJob *j)
 {
+    j->if_submit_tsc = rdtsc();
     error_t err = wjob_submit(j, true, wjob_ahci_complete);
     if (err != OK)
         return wjob_stop(j, err);
@@ -402,7 +405,8 @@ static bool w_ahci_done(WriteJob *j)
     tagfs_readahead_invalidate(j->if_disk_block);
     IntegrityUpdate(j->if_disk_block, j->dma_virt);
 
-    j->bytes_done += j->if_chunk;
+    j->plot.data_us += cpu_tsc_to_us(rdtsc() - j->if_submit_tsc);
+    j->bytes_done   += j->if_chunk;
     wjob_to(j, j->bytes_done >= j->window_end ? W_LOG_META : W_LOCATE);
     return true;
 }
@@ -671,6 +675,10 @@ static int wjob_finalize(WriteJob *j, error_t rc)
 
     PlotRelease(&j->plot);
     wjob_say_refused(j, rc);
+    if (rc != OK && !j->medium_left)
+        TagFSWriteRefused();
+    if (j->target)
+        TagFSNoteInker(j->target);
     wjob_publish(j, rc);
     if (j->holds_helm)
         HelmLetGo(j->handle->ofe, &j->helm);

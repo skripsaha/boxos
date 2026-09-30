@@ -3,6 +3,8 @@
 #include "../plot/plot.h"
 #include "../metadata_pool/meta_pool.h"
 #include "../ink/fallow.h"
+#include "../settle/settle.h"
+#include "../integrity/integrity.h"
 #include "boardroom.h"
 #ifdef CONFIG_VOLUME_TESTS
 #include "block_fail.h"
@@ -233,6 +235,7 @@ bool VolumeTallyTake(VolumeTally* tally)
     TagFSLockTake(&fs->lock);
     uint64_t used = fs->layout.data_blocks - fs->ledger.free_blocks;
     uint64_t own  = chains + PoolBlocksHeld() + FallowBlocks() + fs->ledger.integrity_map_blocks +
+                    IntegrityLayBlocks() +
                     (fs->ledger.cow_manifest_block != 0) +
                     (fs->ledger.cow_manifest_backup_block != 0);
     tally->files = fs->ledger.total_files;
@@ -395,14 +398,17 @@ static void TestSayWritePath(void)
 static bool TestLeftAFaultArmed(const TestCase* test)
 {
 #ifdef CONFIG_VOLUME_TESTS
-    bool block = BlockFailDisarm();
-    bool heap  = HeapFailDisarm();
-    if (!block && !heap)
+    bool block   = BlockFailDisarm();
+    bool heap    = HeapFailDisarm();
+    bool protect = BlockFailProtects(tagfs_get_seat());
+    if (protect)
+        BlockFailProtect(tagfs_get_seat(), false);
+    if (!block && !heap && !protect)
         return false;
-    kprintf("[TESTS] %s failed: it left %s armed — taken down by the runner "
+    kprintf("[TESTS] %s failed: it left %s%s%s armed — taken down by the runner "
             "before anything else could meet it\n", test->name,
-            block && heap ? "BLOCKFAIL and HEAPFAIL"
-                          : block ? "BLOCKFAIL" : "HEAPFAIL");
+            block ? "BLOCKFAIL " : "", heap ? "HEAPFAIL " : "",
+            protect ? "a protected medium" : "");
     return true;
 #else
     (void)test;
@@ -466,6 +472,9 @@ error_t TagFS_RunAllTests(TestStats* stats)
     uint32_t skipped_writers = 0;
     bool     path_said       = false;
 
+    /* No cycle begins on its own while the tests run: each meets the cycles
+     * it drives, and a fault it arms is met by one of them (settle.h). */
+    SettleCadenceHold(true);
     for (uint32_t s = 0; s < ARRAY_SIZE(g_suites); s++) {
         const TestSuite* suite = g_suites[s];
         for (uint32_t i = 0; i < suite->count; i++) {
@@ -495,6 +504,7 @@ error_t TagFS_RunAllTests(TestStats* stats)
             TestRun(test, stats);
         }
     }
+    SettleCadenceHold(false);
 
     /* Said with kprintf: "37 run, 35 passed" tells nobody which 37, and a
      * suite that quietly shrank is how a test stops covering anything. */
@@ -509,4 +519,23 @@ error_t TagFS_RunAllTests(TestStats* stats)
 #endif
 
     return stats->total_failed == 0 ? OK : ERR_INTERNAL;
+}
+
+/* The runner's door, called from userspace through the System Deck: the tests
+ * run inside the volume. kprintf, not debug_printf: without these numbers a run
+ * where every single test SKIPPED still printed "All tests PASSED". A test held
+ * under a caveat is a known defect reproduced on purpose — counted on its own,
+ * neither passed nor failed nor skipped, and it does not fail the run. */
+error_t TagFS_RunTests(void)
+{
+    if (!tagfs_enter())
+        return ERR_TAGFS_NOT_INITIALIZED;
+    TestStats stats;
+    error_t   result = TagFS_RunAllTests(&stats);
+    kprintf("[TESTS] TagFS: %u run, %u passed, %u failed, %u skipped, "
+            "%u held under a caveat\n",
+            stats.total_tests, stats.total_passed, stats.total_failed,
+            stats.total_skipped, stats.total_held);
+    tagfs_leave();
+    return result;
 }

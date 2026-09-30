@@ -73,6 +73,14 @@ bool     BlockFailFired(void);
 bool     BlockFailStrikes(uint8_t seat, BlockFailKind kind,
                           uint64_t lba, uint32_t count);
 
+/* A medium that takes no write, on `seat`: while it stands, every write is
+ * refused the way the seat's driver refuses one, never issued, and the seat
+ * says it refuses writes as protected (BoardroomSeatRefusesWrites) — what
+ * DATA PROTECT is on USB and an abort on a write is on AHCI. Off lifts it; the
+ * volume a protection turned read-only stays so until it is mounted again. */
+void     BlockFailProtect(uint8_t seat, bool on);
+bool     BlockFailProtects(uint8_t seat);
+
 #endif /* CONFIG_VOLUME_TESTS */
 
 #endif /* BLOCK_FAIL_H */

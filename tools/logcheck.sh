@@ -7966,9 +7966,9 @@ edits = {
    "    int wrote = tagfs_volume_write(ledger_vlba(s_image.slot), 1, s_image.sector);\n"
    "    TagFSLockDrop(&g_ledger_lock);\n"),
   ("src/kernel/tagfs/integrity/integrity.c",
-   "    TagFSLockDropAt(&g_lock, site);\n\n    error_t got = tagfs_read_block(at, g_page[s]);\n\n    TagFSLockTakeAt(&g_lock, site);\n",
+   "    TagFSLockDropAt(&g_map_lock, site);\n\n    error_t got = tagfs_read_block(at, g_map_page[s]);\n\n    TagFSLockTakeAt(&g_map_lock, site);\n",
    "    /* " + M + ": the map's page comes in under its lock again */\n"
-   "    error_t got = tagfs_read_block(at, g_page[s]);\n\n"),
+   "    error_t got = tagfs_read_block(at, g_map_page[s]);\n\n"),
  ],
  "scribe": [
   ("src/kernel/tagfs/scribe/scribe.c",

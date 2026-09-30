@@ -11,6 +11,7 @@
 #include "addr_wait.h"
 #include "baton.h"
 #include "chit.h"
+#include "touch_queue.h"
 
 /*
  * Lock ordering:
@@ -383,6 +384,16 @@ typedef struct process_t
      * A stale wake then finds a strand that has moved on and does nothing,
      * which costs one comparison in the tick and needs no cancellation. */
     uint32_t          park_seq;
+
+    /* That wake's node, carried here so arming it cannot fail for want of
+     * memory (touch_queue.h). One park at a time, so one node: a park armed
+     * while the last one's wake still waits moves it to its own tick. */
+    TouchQueueNode    park_wake;
+
+    /* The newest change of the mounted volume this strand asked for — the
+     * volume's Ink gen after the storage deck served it (TagFSNoteInker). A
+     * strand that ends with it unsettled demands the next Settle cycle. */
+    volatile uint64_t volume_inked_gen;
 
     /* Nameplate — where this image's "address -> name" table is mapped, found
      * by the loader (nameplate_locate) at the one moment the whole file is in

@@ -7,6 +7,9 @@
 #include "../settle/settle.h"
 #include "../helm/helm.h"
 #include "../../../kernel/drivers/timer/rtc.h"
+#include "boardroom.h"
+#include "atomics.h"
+#include "cpu_calibrate.h"
 
 /*
  * The halves of every Ink (ink.h): the record built with no lock held, then
@@ -16,6 +19,7 @@
 
 static uint64_t s_inked_gen;     /* the newest Ink's */
 static uint64_t s_data_need;     /* the flush need the newest data an Ink named holds */
+static volatile uint8_t s_read_only;   /* the medium refused a write as protected */
 
 /* A retry of the first half: the file changed between the halves, or a stake
  * no longer covers. Never an answer. */
@@ -34,12 +38,50 @@ uint64_t InkDataNeed(void)
 void InkMountReset(void)
 {
     __atomic_store_n(&s_inked_gen, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_read_only, 0u, __ATOMIC_RELEASE);
     s_data_need = 0;
+}
+
+bool TagFSReadOnly(void)
+{
+    return __atomic_load_n(&s_read_only, __ATOMIC_ACQUIRE) != 0;
+}
+
+#ifdef CONFIG_VOLUME_TESTS
+void InkReadOnlyLift(void)
+{
+    __atomic_store_n(&s_read_only, 0u, __ATOMIC_RELEASE);
+}
+#endif
+
+/* Asked after any write the medium refused: a refusal the seat calls
+ * protection is final for this mount, and said once. */
+void TagFSWriteRefused(void)
+{
+    if (!BoardroomSeatRefusesWrites(tagfs_get_seat()))
+        return;
+    if (__atomic_exchange_n(&s_read_only, 1u, __ATOMIC_ACQ_REL))
+        return;
+    kprintf("[TagFS] the medium under the volume refuses writes as protected — the volume "
+            "takes no change from here on (ERR_TAGFS_READ_ONLY), and %llu change(s) no cycle "
+            "settled stay unwritten\n",
+            (unsigned long long)(InkedGen() - SettledGen()));
+    SettleKnock();
 }
 
 static TagFSState* InkState(void)
 {
     return tagfs_get_state();
+}
+
+uint64_t InkGenOf(uint32_t fid)
+{
+    RecordWhere where;
+    FileRecord* rec = FileMapRecordHold(InkState()->files, fid, &where);
+    if (!rec)
+        return InkedGen();
+    FileRecordRelease(rec);
+    return where.gen;
 }
 
 // ----------------------------------------------------------------------------
@@ -90,6 +132,8 @@ static error_t InkGuard(uint32_t fid, const uint16_t* tags, uint32_t tag_count,
 {
     if (TagFSMediumLeft())
         return ERR_DEVICE_NOT_READY;
+    if (TagFSReadOnly())
+        return ERR_TAGFS_READ_ONLY;
     if (InkWearsGuarded(tags, tag_count) || InkTouchesBoot(runs, run_count) ||
         InkTouchesBoot(freed, freed_count)) {
         kprintf("[TagFS] file %u is one the loader reads by its blocks — it wears system, boot "
@@ -275,6 +319,38 @@ static error_t InkPlotLocked(Plot* p, const RecordWhere* was, InkRecord* r, Fall
     return OK;
 }
 
+/* Whether the file wears settle:lazy — its program's own word that its changes
+ * wait for the window. */
+static bool InkWearsLazy(const FileRecord* cur)
+{
+    TagSpelling lazy = { .key = "settle", .key_len = 6, .value = "lazy", .value_len = 4 };
+    uint16_t    id   = TagRegistryLookup(InkState()->registry, &lazy);
+    if (id == TAGFS_INVALID_TAG_ID)
+        return false;
+    for (uint32_t i = 0; i < cur->tag_count; i++)
+        if (cur->tags[i] == id)
+            return true;
+    return false;
+}
+
+/*
+ * Whether a write is a frequent small writer's (settle.h), told by what it
+ * does: it grew the file by data that cost the medium less time than the last
+ * Settle cycle did — settling it would cost more than it — and the file's last
+ * change was such an append too, less than a Lull ago. Both measures are the
+ * medium's own, measured; nothing here is a number of bytes or of writes.
+ * `small` says whether this one is such an append, for the next to ask.
+ */
+static bool InkPlotLazy(const Plot* p, const FileRecord* cur, uint64_t now_us, bool* small)
+{
+    uint64_t d = SettleLastDUs();
+    *small = p->size > p->size_before && d != 0 && p->data_us < d;
+    if (InkWearsLazy(cur))
+        return true;
+    return *small && cur->small_append_us != 0 && now_us > cur->small_append_us &&
+           now_us - cur->small_append_us < SettleLullUs();
+}
+
 /* The tags the Plot was loaded with are the ones asked: a file that came to
  * wear a guarded tag after the load had its bytes laid already, and refusing
  * the record now would take back its size, not its bytes. */
@@ -290,7 +366,9 @@ error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
         !(fallow = FallowNodeMake(p->freed, p->freed_count, FALLOW_BY_RECORD, p->fid)))
         return ERR_NO_MEMORY;
 
-    uint64_t now = rtc_get_unix64();
+    uint64_t now    = rtc_get_unix64();
+    uint64_t now_us = cpu_tsc_to_us(rdtsc());
+    bool     lazy   = false;
     for (;;) {
         RecordWhere was;
         FileRecord* cur = FileMapRecordHold(InkState()->files, p->fid, &was);
@@ -306,11 +384,14 @@ error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
             rc = ERR_BUSY;
             break;
         }
+        bool small = false;
+        lazy = InkPlotLazy(p, cur, now_us, &small);
         InkRecord r;
         rc = InkPlotRecord(p, cur, now, &r);
         FileRecordRelease(cur);
         if (rc != OK)
             break;
+        r.rec->small_append_us = small ? now_us : 0;
 
         TagFSLockTake(&InkState()->lock);
         rc = InkPlotLocked(p, &was, &r, fallow, out);
@@ -335,6 +416,8 @@ error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
     p->runs_before   = p->run_count;
     p->shape         = out->gen;
     p->data_need     = 0;
+    p->data_us       = 0;
+    SettleInked(out->gen, lazy);
     return OK;
 }
 
@@ -494,7 +577,9 @@ static error_t InkFieldsOnce(uint32_t fid, const char* name, uint16_t add, uint1
     InkFieldsPlan   f;
     InkRecord       r     = { 0 };
     TagBitmapStake* stake = NULL;
-    error_t         rc    = TagFSMediumLeft() ? ERR_DEVICE_NOT_READY : OK;
+    error_t         rc    = TagFSMediumLeft() ? ERR_DEVICE_NOT_READY
+                            : TagFSReadOnly() ? ERR_TAGFS_READ_ONLY
+                                              : OK;
     if (!InkFieldsTags(cur, name, add, drop, &f)) {
         FileRecordRelease(cur);
         return ERR_NO_MEMORY;
@@ -527,6 +612,8 @@ static error_t InkFieldsOnce(uint32_t fid, const char* name, uint16_t add, uint1
         TagFSLockTake(&fs->lock);
         rc = InkFieldsLocked(fid, &was, &f, &meta, add, &r, stake, out);
         TagFSLockDrop(&fs->lock);
+        if (rc == OK)
+            SettleInked(out->gen, false);
     }
 out:
     if (rc == ERR_PERMISSION_DENIED)
@@ -613,6 +700,8 @@ error_t InkNew(const char* name, const uint16_t* tags, uint32_t count, uint32_t*
 
     if (TagFSMediumLeft())
         return ERR_DEVICE_NOT_READY;
+    if (TagFSReadOnly())
+        return ERR_TAGFS_READ_ONLY;
     InkRecord r;
     error_t   rc = InkRecordMake(&meta, true, &r);
     if (rc == ERR_TAGFS_RECORD_FULL)
@@ -634,6 +723,8 @@ error_t InkNew(const char* name, const uint16_t* tags, uint32_t count, uint32_t*
             TagFSLockTake(&fs->lock);
             rc = InkNewLocked(tags, count, &r, &st, out_fid, out);
             TagFSLockDrop(&fs->lock);
+            if (rc == OK)
+                SettleInked(out->gen, false);
         }
         FileMapStakeLetGo(&st.map);
         TagBitmapStakeLetGo(st.index);
@@ -710,8 +801,10 @@ static error_t InkQuitclaimOnce(uint32_t fid, InkReceipt* out)
         TagFSLockTake(&fs->lock);
         rc = InkQuitclaimLocked(fid, &was, cur, &r, fallow, out);
         TagFSLockDrop(&fs->lock);
-        if (rc == OK)
+        if (rc == OK) {
             fallow = NULL;
+            SettleInked(out->gen, false);
+        }
     }
     FallowNodeLetGo(fallow);
     InkRecordLetGo(&r);

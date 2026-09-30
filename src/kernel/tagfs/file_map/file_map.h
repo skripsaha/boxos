@@ -40,6 +40,11 @@ typedef struct FileRecord {
     uint64_t           size;
     uint64_t           created_time;
     uint64_t           modified_time;
+    /* When the Ink that made this record was a small append — its data cost
+     * the medium less than a Settle cycle does — in the cadence's
+     * microseconds; 0 for any other change. Memory only: the cadence asks it
+     * of the next append (settle.h, a frequent small writer). */
+    uint64_t           small_append_us;
     uint32_t           tag_count;
     uint32_t           extent_count;
     uint32_t           name_len;

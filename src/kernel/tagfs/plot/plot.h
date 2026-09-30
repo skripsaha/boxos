@@ -38,6 +38,7 @@ typedef struct {
     TagFSMetadata meta;           /* the record as loaded: name, tags, flags, times */
     uint64_t      shape;          /* the Ink that gave the loaded record its size and extents */
     uint64_t      data_need;      /* the flush need the blocks this call wrote hold, 0 for none */
+    uint64_t      data_us;        /* the medium's time on this call's data, measured, since its last Ink */
     uint64_t      size_before;    /* the size the call found; what existed is below it */
     uint64_t      size;           /* the size the call leaves */
     FileExtent   *runs;           /* the working extents, in file order */

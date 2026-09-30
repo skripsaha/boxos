@@ -250,9 +250,10 @@ void cpu_idle(void) {
      * write come back for its next window, having given the core back between
      * two — is run on the next turn of this loop, not after the next
      * interrupt: on one core this loop is the only service point there is,
-     * and a write would move one window a tick. Interrupts are on from here,
+     * and a write would move one window a tick. So is the next step of the
+     * volume's Settle cycle, or one that is due. Interrupts are on from here,
      * as after a sleep, so a tick still takes the core for a program. */
-    if (HelmReadyListed()) {
+    if (HelmReadyListed() || TagFSStepOwedHere()) {
         __asm__ volatile("sti" ::: "memory");
         return;
     }

@@ -126,6 +126,7 @@ typedef struct WriteJob {
     uint32_t          if_chunk;
     bool              if_reading;        /* the command out is the overlaid block's read */
     error_t           if_status;         /* IRQ writes here */
+    uint64_t          if_submit_tsc;     /* when the write went out: its time on the medium */
 
     /* ---- DMA staging ---- */
     void             *dma_phys;

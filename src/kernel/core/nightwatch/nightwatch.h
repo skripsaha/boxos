@@ -76,4 +76,8 @@ void nightwatch_core_idle(uint8_t core);
  * re-arms the report, so a system that stalls twice reports twice. */
 void nightwatch_core_busy(uint8_t core);
 
+/* From the PIT tick: the looks that must not wait for an idle core — the
+ * volume's Settle owed past its window with no committer (SETTLE UNCLAIMED). */
+void nightwatch_tick(void);
+
 #endif /* NIGHTWATCH_H */

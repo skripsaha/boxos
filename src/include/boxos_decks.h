@@ -173,7 +173,7 @@
 
 /* ─── Strand sync — park/wake on address (0xC0 – 0xC1) ─────────────── */
 /* Substrate for std::atomic::wait / notify. Parked caller is resumed by
- * SysAddrWake or by the timeout armed via TouchQueueWakeAfter. */
+ * SysAddrWake or by the timeout armed via TouchQueueArmWake. */
 #define SYSTEM_OP_ADDR_PARK         0xC0  /* (u64 va)(u64 expected)(u32 timeout_ms) */
 #define SYSTEM_OP_ADDR_WAKE         0xC1  /* (u64 va)(u32 count — 0 = all)         */
 #define SYSTEM_OP_STRAND_SPAWN      0xC2  /* (u64 entry_va)(u64 arg)[(u8 joinable)] -> out: u32 strand pid */
@@ -257,12 +257,22 @@
 #define STORAGE_SNAP_DELETE         0x21
 #define STORAGE_SNAP_LIST           0x22
 /* anchor — durability + tag-event fan-out. params = [u32 file_id].
- * file_id == 0 anchors the entire FS and publishes a generic "anchor"
- * Touch event. Non-zero anchors and additionally fans out the event on
- * every tag of that file, so observers keyed by tag (Touch REST) wake
- * with payload {file_id, op=2, ...}. No POSIX equivalent — fsync()
- * returns silently and offers no notification side-channel. */
+ * Answered once every change made before it is settled and lies in a block
+ * the volume never writes again; the caller waits behind its Chit, never
+ * inside the kernel. file_id == 0 publishes a generic "anchor" Touch event.
+ * Non-zero additionally fans out the event on every tag of that file, so
+ * observers keyed by tag (Touch REST) wake with payload {file_id, op=2, ...}.
+ * No POSIX equivalent — fsync() returns silently and offers no notification
+ * side-channel. */
 #define STORAGE_OBJ_ANCHOR          0x23
+/* obj.write.settled — the wait for a file's changes to reach the medium on
+ * their own: params = [u32 file_id]; 0 = every change of the volume so far.
+ * Answered, with nothing published, once the file's newest change is settled
+ * and lies in a block the volume never writes again — or at once, when it is.
+ * A demand: the cycle it waits for does not wait for Lull. The medium's
+ * lasting refusal answers with its code (ERR_TAGFS_READ_ONLY,
+ * ERR_DEVICE_NOT_READY). */
+#define STORAGE_OBJ_WRITE_SETTLED   0x25
 /* snap.info — structured per-snapshot record by id. params = [u32 snap_id].
  * out_crate = [u32 id][u32 parent_file_id][u64 created_time][u32 file_count]
  *             [u64 total_size][u8 flags][char name[32]]. Gives the name-by-id

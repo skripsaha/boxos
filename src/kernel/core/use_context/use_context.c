@@ -621,6 +621,16 @@ void UseContextServiceIfPending(void)
  * The volume's memory
  * ------------------------------------------------------------------------- */
 
+UseText *UseContextSaying(uint64_t *out_saying)
+{
+    spin_lock(&g_use.lock);
+    UseText *said   = UseTextHold(g_use.list ? g_use.list->said : NULL);
+    uint64_t saying = g_use.said;
+    spin_unlock(&g_use.lock);
+    *out_saying = saying;
+    return said;
+}
+
 void UseContextRemember(bool *remembered)
 {
     bool kept = false;
