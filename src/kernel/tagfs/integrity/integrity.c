@@ -2,6 +2,8 @@
 #include "../tagfs.h"
 #include "../box_hash/box_hash.h"
 #include "../scribe/scribe.h"
+#include "../settle/settle.h"
+#include "../ink/fallow.h"
 #include "../../lib/kernel/klib.h"
 #include "touch.h"
 #include "amp.h"
@@ -331,41 +333,66 @@ static bool MapSlotSettled(const void *ctx)
 }
 
 /*
- * ‼ THE LEDGER NAMES A RUN, AND A REFUSAL IS TAKEN BACK THE SAME WAY.
+ * ‼ THE LEDGER NAMES A RUN THROUGH ITS ONE WRITER, THE SETTLE CYCLE.
  *
- * The fields are set under the volume's state lock, so the Ledger's snapshot
- * has both or neither, and the Ledger is written. If that write is refused
- * the fields go back and the Ledger is written again — because the refusal
- * does not say the medium holds no copy naming the run: another core's
- * Ledger write may have carried the fields while this one waited, and landed,
- * and the refused write itself may have reached the medium all the same.
- *
- * A Ledger write that landed is one the medium took into a cache it can lose,
- * and a power cut keeps any subset of what was written since the last kept
- * flush — so the copy naming the run may survive and the copy that takes it
- * back may not. *put_back is true only once a copy naming the old fields
- * landed AND a flush issued after it was kept: that, and nothing less, is what
- * makes the refused run free to give back.
+ * The fields are set under the volume's state lock, so the Ledger's image has
+ * both or neither, and a cycle is asked for and waited on: OK once a cycle
+ * that began after the change settled — the Ledger naming the run is on the
+ * medium and a flush after it was kept. A refusal puts the fields back, for
+ * the next cycle to carry; it does not say no copy on the medium names the
+ * run — the cycle may have landed its Ledger and lost only its flush — so the
+ * caller lets the run rest (MapRunRests) instead of giving it back.
  */
 static error_t MapNameInLedger(TagFSState *fs, uint32_t block, uint32_t count,
-                               uint32_t was_block, uint32_t was_count, bool *put_back)
+                               uint32_t was_block, uint32_t was_count)
 {
     TagFSLockTake(&fs->lock);
     SB_MAP_BLOCK(fs) = block;
     SB_MAP_COUNT(fs) = count;
     TagFSLockDrop(&fs->lock);
 
-    *put_back = false;
-    error_t written = tagfs_write_ledger();
-    if (written == OK)
+    error_t named = TagFSSettle();
+    if (named == OK)
         return OK;
 
     TagFSLockTake(&fs->lock);
     SB_MAP_BLOCK(fs) = was_block;
     SB_MAP_COUNT(fs) = was_count;
     TagFSLockDrop(&fs->lock);
-    *put_back = tagfs_write_ledger() == OK && VolumeFlushFor(VolumeFlushNeed()) == OK;
-    return written;
+    return named;
+}
+
+/*
+ * ‼ A RUN A LEDGER FIELD NAMED GOES BACK ONLY ONCE NO COPY NAMES IT (RT-05).
+ *
+ * The Ledger has two copies and a cycle writes the older one, so the run the
+ * field named before a change stays named by one copy until the cycle after —
+ * and a mount that finds the newest copy torn stands on that one. The run
+ * rests in Fallow, freed by the next cycle's Ledger, and goes back once both
+ * copies moved past it. Without memory for the node it stays taken, said: a
+ * block the medium calls taken costs a block, never a file.
+ */
+static void MapRunRests(uint32_t start, uint32_t count)
+{
+    uint32_t    pieces = (count + 0xFFFFu - 1u) / 0xFFFFu;
+    FileExtent *runs   = kmalloc(sizeof(FileExtent) * pieces);
+    FallowNode *node   = NULL;
+    for (uint32_t i = 0; runs && i < pieces; i++) {
+        uint32_t left = count - i * 0xFFFFu;
+        runs[i].start_block = start + i * 0xFFFFu;
+        runs[i].block_count = (uint16_t)(left < 0xFFFFu ? left : 0xFFFFu);
+    }
+    if (runs)
+        node = FallowNodeMake(runs, pieces, FALLOW_BY_LEDGER);
+    kfree(runs);
+    if (!node) {
+        kprintf("[Integrity] no memory to let the %u-block run at %u rest until no copy "
+                "of the Ledger names it — it stays taken\n", count, start);
+        return;
+    }
+    TagFSLockTake(&tagfs_get_state()->lock);
+    FallowAdd(node, 0);
+    TagFSLockDrop(&tagfs_get_state()->lock);
 }
 
 /* One page the map is laid or carried through: one of the kernel's own paths,
@@ -431,24 +458,16 @@ static error_t MapLayFresh(TagFSState *fs, uint32_t count, uint32_t *out_first)
         return flushed;
     }
 
-    /* ‼ AND THE LEDGER'S ANSWER IS HEARD. The run is allocated, the Ledger is
-     * the only thing that will ever name it again, and if the write refuses
-     * then the volume comes up with a region that is marked taken in RAM,
-     * named nowhere on the medium, and therefore lost to the next mount. */
-    bool put_back = false;
-    error_t named = MapNameInLedger(fs, start, count, 0, 0, &put_back);
+    /* ‼ AND THE LEDGER'S ANSWER IS HEARD. The Ledger is the only thing that
+     * will ever name the run; a cycle refused leaves it resting until no copy
+     * can name it, and the volume goes without a map this boot. */
+    error_t named = MapNameInLedger(fs, start, count, 0, 0);
     if (named != OK) {
-        if (put_back) {
-            tagfs_free_blocks(start, count);
-            kprintf("[Integrity] the ledger would not take a fresh %u-block "
-                    "map, so the room is given back and nothing on this "
-                    "volume is checked for bit rot this boot\n", count);
-        } else {
-            kprintf("[Integrity] the ledger would not take a fresh %u-block map "
-                    "at %u, nor prove it taken back — the run stays taken, since "
-                    "the medium may still name it, and nothing on this volume is "
-                    "checked for bit rot this boot\n", count, start);
-        }
+        MapRunRests(start, count);
+        kprintf("[Integrity] the ledger would not take a fresh %u-block map at %u "
+                "(error %u) — the run rests until no copy of the ledger can name it, "
+                "and nothing on this volume is checked for bit rot this boot\n",
+                count, start, (unsigned)named);
         return named;
     }
     debug_printf("[Integrity] fresh map: %u blocks at %u (%u-slot cache)\n",
@@ -478,13 +497,13 @@ static error_t MapLayFresh(TagFSState *fs, uint32_t count, uint32_t *out_first)
  * ‼ AND THREE THINGS IN ORDER, EACH MADE DURABLE BEFORE THE NEXT.
  *
  * The new run is written and flushed before the Ledger names it, so a Ledger
- * that names it never points at a run that is not there. The Ledger is
- * written and flushed before the old run is given back, because the give
- * clears the run's bits in the block map — a file can be handed those
- * blocks at once, and a cut that kept the file and lost the Ledger would
- * leave a volume whose next mount reads a file as checksums, and grows
- * again, and frees that file's blocks. A refusal anywhere leaves the map
- * where the medium says it is.
+ * that names it never points at a run that is not there. The old run is not
+ * given back when the Ledger naming the new one has settled, but rests until
+ * the Ledger's other copy has moved past it too (MapRunRests): given back
+ * sooner, a file could be handed those blocks while a copy still calls them
+ * the map, and a mount standing on that copy would read the file as
+ * checksums, grow again, and free the file's blocks. A refusal anywhere
+ * leaves the map where the medium says it is.
  *
  * Answers whether the map moved; *first then says where to.
  */
@@ -511,30 +530,14 @@ static bool MapGrow(TagFSState *fs, uint32_t *first, uint32_t stored, uint32_t c
         return false;
     }
 
-    bool put_back = false;
-    if (MapNameInLedger(fs, start, count, *first, stored, &put_back) != OK) {
-        if (put_back) {
-            tagfs_free_blocks(start, count);
-            kprintf("[Integrity] a bigger map was laid down and the ledger would "
-                    "not take it — the map stays where it was and the room is "
-                    "given back\n");
-        } else {
-            kprintf("[Integrity] a bigger map was laid down and the ledger would "
-                    "not take it, nor prove it taken back — the map stays where it "
-                    "was, and the %u-block run at %u stays taken, since the medium "
-                    "may still name it\n", count, start);
-        }
+    if (MapNameInLedger(fs, start, count, *first, stored) != OK) {
+        MapRunRests(start, count);
+        kprintf("[Integrity] a bigger map was laid down and the ledger would not take "
+                "it — the map stays where it was, and the %u-block run at %u rests "
+                "until no copy of the ledger can name it\n", count, start);
         return false;
     }
-
-    if (VolumeFlushFor(VolumeFlushNeed()) == OK) {
-        tagfs_free_blocks(*first, stored);
-    } else {
-        kprintf("[Integrity] the ledger that names the bigger map is not proven on "
-                "the medium, so the old %u-block map at %u stays taken — a volume "
-                "that comes up on the old ledger still finds its map there\n",
-                stored, *first);
-    }
+    MapRunRests(*first, stored);
     kprintf("[Integrity] the volume grew, so its map did too: %u block(s) at %u, "
             "carrying the %u it already had — every block of %u is covered\n",
             count, start, stored, fs->layout.data_blocks);
@@ -653,6 +656,52 @@ void IntegrityUpdate(uint32_t block, const void *data) {
     TagFSLockDrop(&g_lock);
     if (no_room)
         MapSayNoRoom(said);
+    HaltStopIfOwedHere("a page of the integrity map it carried");
+}
+
+/* ‼ A BLOCK THAT COMES TO REST TAKES NO DIGEST WITH IT (RT-22). Its digest is
+ * zeroed before Fallow gives it back, by the cycle that writes the map — so by
+ * then the medium calls it unknown, and a next owner whose first write lands
+ * and whose digest does not, when the power goes, is read as unknown rather
+ * than as rot. A page at a time, paged in as a write's digest would be: the
+ * Settle's holder calls it, with no TagFS lock held. */
+void IntegrityForget(uint32_t start, uint32_t count) {
+    uint64_t end = (uint64_t)start + count;
+
+    for (uint64_t b = start; b < end && IntegrityIsInitialized(); ) {
+        uint32_t idx     = (uint32_t)(b / ENTRIES_PER_BLOCK);
+        uint64_t stop    = ((uint64_t)idx + 1u) * ENTRIES_PER_BLOCK;
+        bool     mine    = false;
+        bool     no_room = false;
+        bool     said    = false;
+        if (stop > end)
+            stop = end;
+
+        TagFSLockTake(&g_lock);
+        if (IntegrityIsInitialized() && b < g_map_entries) {
+            uint32_t epoch = g_map_epoch;
+            MapSlot *m     = MapSlotFor(idx, epoch, __func__, &mine, &no_room);
+            for (uint64_t k = b; m && k < stop && k < g_map_entries; k++) {
+                if (in_map_region((uint32_t)k))
+                    continue;
+                uint32_t off = (uint32_t)(k % ENTRIES_PER_BLOCK);
+                if (m->io == MAP_IO_READ)
+                    m->heard[off / 64] |= 1ull << (off % 64);
+                m->entries[off] = 0;
+                m->dirty = true;
+            }
+            bool kept = m && (!mine || MapPageIn(m, __func__));
+            if (!kept && g_map_epoch == epoch)
+                MapForget(idx);     /* the zeros went nowhere: the page is unknown, zeros too */
+            said = g_no_room_said;
+            if (no_room)
+                g_no_room_said = true;
+        }
+        TagFSLockDrop(&g_lock);
+        if (no_room)
+            MapSayNoRoom(said);
+        b = stop;
+    }
     HaltStopIfOwedHere("a page of the integrity map it carried");
 }
 

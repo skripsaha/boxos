@@ -170,6 +170,11 @@ void          MapPlan(MapPick *k, bool may_read);
  * two numbers that tell "full" from "in pieces". Under the state lock. */
 void          MapSayNoRoom(uint32_t want);
 
+/* The answer to a take no run could serve, under the state lock: while Fallow
+ * rests blocks a Settle cycle would give back it is ERR_WOULD_BLOCK — the room
+ * is coming, not gone — and ERR_TAGFS_NO_SPACE, said, when none rest. */
+error_t       MapShort(uint32_t want);
+
 /* ---- what growing files keep in hand (allotment.c) --------------------- */
 
 void          AllotmentOverlay(uint32_t w, uint8_t *view);

@@ -23,9 +23,12 @@
  * edit written down and laid onto the sector when it next comes in.
  *
  * MapOwed: a take leaves the medium owed the sector its bit lives in, and the
- * door that took the block pays the debt before it returns, so a block is
- * taken on the medium before its caller can name it anywhere. A give is never
- * owed — a block the medium still calls taken costs a block, never a file.
+ * Settle cycle pays it at S1 (BlockMapFlush), before any record, row or Ledger
+ * naming the block reaches the medium — no door writes a sector for a take
+ * (M4b). A name the cycle does not carry — a registry chain's link — can land
+ * first; its block then reads free on the medium, and the next mount's census
+ * takes it (a MISSING block). A give is never owed — a block the medium still
+ * calls taken costs a block, never a file.
  */
 
 /* Summary and cache for a data run of `data_blocks`, whose map begins at
@@ -60,22 +63,24 @@ void    BlockMapUnmount(void);
  * Nothing here reads or writes the medium.
  *
  * Take: `count` blocks in one run, the run nearest `hint` among those that
- * are long enough. 0 and *start; -1 when no run of `count` can be had without
- * reading the map — said out loud, with the numbers.
+ * are long enough. OK and *start; when no run of `count` can be had without
+ * reading the map, ERR_WOULD_BLOCK while Fallow rests blocks a Settle cycle
+ * would give back, or ERR_TAGFS_NO_SPACE — said out loud, with the numbers —
+ * when none rest; ERR_NO_MEMORY for no room to write the take down.
  *
  * Give: the run back. A run holding a block that is already free is refused
  * whole — ERR_TAGFS_EXTENT_ERROR, said with the block — and the map is left as
  * it is: freeing a free block is how one block comes to have two owners.
  */
-int     BlockMapTakeLocked(uint32_t count, uint32_t hint, uint32_t *start);
+error_t BlockMapTakeLocked(uint32_t count, uint32_t hint, uint32_t *start);
 error_t BlockMapGiveLocked(uint32_t start, uint32_t count);
 
 /*
  * The same take, by a door with no TagFS lock held: the sectors it needs are
- * fetched first, and the debt it leaves is paid before it returns. Held under
- * a TagFS lock it takes without reading instead. `site` names the caller in
- * a LockRank line about the state lock. ERR_TAGFS_NO_SPACE when no run of
- * `count` is free, after every other file's Allotment was taken back.
+ * fetched first. Held under a TagFS lock it takes without reading instead.
+ * `site` names the caller in a LockRank line about the state lock. When no
+ * run of `count` is free, after every other file's Allotment was taken back:
+ * ERR_WOULD_BLOCK while Fallow rests blocks, else ERR_TAGFS_NO_SPACE.
  */
 error_t BlockMapTake(uint32_t count, uint32_t hint, uint32_t *start, const char *site);
 
@@ -90,11 +95,12 @@ void    BlockMapFetchRun(uint32_t start, uint32_t count, const char *site);
 /*
  * Pay what the map owes the medium: every edit made without its sector is laid
  * onto it, and every sector carrying a take the medium has not heard is
- * written. A door calls it with no TagFS lock held; under one it does nothing.
+ * written. A give's door calls it with no TagFS lock held; under one it does
+ * nothing.
  */
 void    BlockMapSettle(void);
 
-/* The sync's part: settled, and every sector memory changed written too. OK,
+/* The Settle cycle's S1: settled, and every sector memory changed written too. OK,
  * or the first refusal — each one said. */
 error_t BlockMapFlush(void);
 
@@ -103,8 +109,8 @@ error_t BlockMapFlush(void);
  * as a run that long lies: *got is `want` wherever a run of `want` exists, and
  * otherwise the longest the volume has. Where the hint itself is free and the
  * run from it is long enough, the take starts exactly there — a file that
- * grows grows in place. ERR_TAGFS_NO_SPACE when nothing is free, after every
- * Allotment was taken back.
+ * grows grows in place. When nothing is free, after every Allotment was taken
+ * back: ERR_WOULD_BLOCK while Fallow rests blocks, else ERR_TAGFS_NO_SPACE.
  */
 error_t TagFSTakeRun(uint32_t want, uint32_t hint, uint32_t *start, uint32_t *got);
 

@@ -108,6 +108,17 @@ uint32_t PackV1(const TagFSMetadata *meta, uint8_t *out)
     return record_len;
 }
 
+void PackV1Refile(uint8_t *rec, uint32_t fid)
+{
+    uint16_t record_len;
+    uint16_t crc = 0;
+    memcpy(&record_len, rec, 2);
+    memcpy(rec + 2, &fid, 4);
+    memcpy(rec + RECORD_CRC_OFFSET, &crc, 2);
+    crc = KCrc16(rec, record_len);
+    memcpy(rec + RECORD_CRC_OFFSET, &crc, 2);
+}
+
 /* The record's CRC16 taken as it was stamped — its own two bytes as zeros —
  * in three pieces, so no copy of the record is made to zero them. */
 static uint16_t PlotRecordCrc(const uint8_t *rec, uint16_t record_len)

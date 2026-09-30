@@ -1,4 +1,5 @@
 #include "plot_internal.h"
+#include "../ink/ink.h"
 #include "scribe.h"
 
 /*
@@ -15,12 +16,12 @@
  *
  * The new run is a Stake like any ground the call takes, so a write that goes
  * no further gives it back; the ground it leaves is the record's until a
- * record that no longer names it is committed.
+ * record that no longer names it is inked, and then rests in Fallow.
  */
 
 /* Whether the file is one the loader reads by its blocks: wearing system or
  * boot, or holding a block of the kernel the Deed points at. */
-static bool PlotLoaderReads(const Plot *p, uint32_t *out_boot_first, uint32_t *out_boot_count)
+static bool PlotLoaderReads(const Plot *p)
 {
     for (uint32_t i = 0; i < p->meta.tag_count; i++) {
         TagSpelling tag       = { 0 };
@@ -29,20 +30,7 @@ static bool PlotLoaderReads(const Plot *p, uint32_t *out_boot_first, uint32_t *o
             (TagSpanIs("system", tag.key, tag.key_len) || TagSpanIs("boot", tag.key, tag.key_len)))
             return true;
     }
-
-    TagFSState *fs = tagfs_get_state();
-    *out_boot_first = 0;
-    *out_boot_count = 0;
-    if (fs->boot.kernel_blocks && fs->boot.kernel_block >= fs->layout.data_block) {
-        *out_boot_first = fs->boot.kernel_block - fs->layout.data_block;
-        *out_boot_count = fs->boot.kernel_blocks;
-    }
-    for (uint32_t i = 0; i < p->run_count; i++) {
-        uint64_t a = p->runs[i].start_block, b = a + p->runs[i].block_count;
-        if (*out_boot_count && a < (uint64_t)*out_boot_first + *out_boot_count && b > *out_boot_first)
-            return true;
-    }
-    return false;
+    return InkTouchesBoot(p->runs, p->run_count);
 }
 
 /* How many extents `blocks` in one run take. */
@@ -93,7 +81,7 @@ static bool PlotChooseWindow(const Plot *p, uint32_t shed, uint32_t *first, uint
 }
 
 /* The window's blocks copied into [to, to + blocks), and made durable before
- * any record can name them there. */
+ * any record can name them there — so the copy owes a cycle no flush. */
 static error_t PlotCopyWindow(const Plot *p, uint32_t first, uint32_t last, uint32_t to)
 {
     uint8_t *buf = kmalloc(TAGFS_BLOCK_SIZE);
@@ -145,8 +133,7 @@ static error_t PlotSplice(Plot *p, uint32_t first, uint32_t last, uint32_t start
 
 error_t PlotGather(Plot *p, uint32_t shed, uint32_t hint)
 {
-    uint32_t boot_first = 0, boot_count = 0;
-    if (PlotLoaderReads(p, &boot_first, &boot_count)) {
+    if (PlotLoaderReads(p)) {
         kprintf("[TagFS] file %u: the loader reads it by its blocks, so its extents are not "
                 "moved\n", p->fid);
         return ERR_PERMISSION_DENIED;
@@ -179,8 +166,8 @@ error_t PlotGather(Plot *p, uint32_t shed, uint32_t hint)
         return rc;
 
     /* The old ground of the window stays the record's until the new record
-     * is committed; it is noted now, before the runs forget it. A move that
-     * goes no further notes nothing: the new run is a Stake, and goes back. */
+     * is inked; it is noted now, before the runs forget it. A move that goes
+     * no further notes nothing: the new run is a Stake, and goes back. */
     uint32_t noted = p->freed_count;
     uint32_t count = last - first + 1;
     for (uint32_t i = first; i <= last && rc == OK; i++)

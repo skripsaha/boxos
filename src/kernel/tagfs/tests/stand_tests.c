@@ -587,7 +587,7 @@ out:
     return verdict;
 }
 
-static Scribe s_scribe_asked = SCRIBE_INIT(SCRIBE_RANK_SYNC, "the stand's own Scribe");
+static Scribe s_scribe_asked = SCRIBE_INIT(SCRIBE_RANK_SETTLE, "the stand's own Scribe");
 
 /* An ask made while a pass runs is not what that pass covers: the first pass
  * answers the first ask WRITTEN, and the second ask takes a pass of its own,
@@ -644,7 +644,7 @@ static bool StandBoundPassed(const void *ctx)
     return rdtsc() >= *(const uint64_t *)ctx;
 }
 
-static Scribe s_scribe_self = SCRIBE_INIT(SCRIBE_RANK_SYNC, "the stand's own Scribe, held beneath");
+static Scribe s_scribe_self = SCRIBE_INIT(SCRIBE_RANK_SETTLE, "the stand's own Scribe, held beneath");
 
 /* A Scribe this core holds beneath the caller is answered SELF — by a try, and
  * at once by both waits, which would otherwise spin for a holder that cannot
@@ -689,7 +689,7 @@ out:
  * the holder cleared. The drain core then waits for the turn. Kept in
  * statics, because a probe the wait did not run is still queued when the test
  * returns, and runs when the drain core next pumps. */
-static Scribe            s_scribe_pumped = SCRIBE_INIT(SCRIBE_RANK_SYNC,
+static Scribe            s_scribe_pumped = SCRIBE_INIT(SCRIBE_RANK_SETTLE,
                                                        "the stand's own Scribe, held on another core");
 static Baton             s_scribe_probe;
 static volatile uint64_t s_scribe_probe_cover;
@@ -802,18 +802,15 @@ static const TestCase g_stand_tests[] = {
                        "of the block, writes it back and answers success" },
     { .name  = "stand_create_all_or_nothing", .func = TestStandCreateAllOrNothing,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.4",
       .caveat_defect = "a create whose allocation is refused can answer OK and leave the "
                        "file out of its name's index, or leave a deleted file findable "
                        "by its name" },
     { .name  = "stand_sync_owns_a_refused_write", .func = TestStandSyncOwnsARefusedWrite,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.4",
       .caveat_defect = "a sync whose file-table write the medium refuses still writes "
                        "the ledger and answers OK" },
     { .name  = "stand_sync_owns_a_refused_flush", .func = TestStandSyncOwnsARefusedFlush,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.4",
       .caveat_defect = "a sync whose cache flush the medium refuses still answers OK" },
     { .name  = "stand_write_returns_its_ground", .func = TestStandWriteReturnsItsGround,
       .reach = TEST_WRITES_TO_VOLUME,
@@ -825,12 +822,10 @@ static const TestCase g_stand_tests[] = {
                        "success instead of refusing" },
     { .name  = "stand_open_holds_what_it_names", .func = TestStandOpenHoldsWhatItNames,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.4",
       .caveat_defect = "an open whose extent copy cannot get memory hands back a handle "
                        "that counts extents and holds none" },
     { .name  = "stand_open_refuses_unread_metadata", .func = TestStandOpenRefusesUnreadMetadata,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_step   = "1.4",
       .caveat_defect = "an open whose metadata read cannot get memory hands back a "
                        "non-empty file as empty" },
     { .name  = "stand_open_joins_the_writers", .func = TestStandOpenJoinsTheWriters,

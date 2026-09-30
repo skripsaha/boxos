@@ -207,6 +207,8 @@ typedef struct {
     uint32_t          spare_block;
     TagRegistryBlock* spare_image;
     uint64_t          spare_need;
+    uint64_t          written_need;   /* the flush need of the records last written: a cycle's
+                                       * first flush covers it before any record names them */
     bool              said_failing;   /* a refusal is said once, until a flush succeeds */
     bool              said_full;      /* every id issued: said once, the first time a tag is refused */
     Scribe            scribe;
@@ -368,8 +370,9 @@ bool         TagRegistrySpelling(TagRegistry* reg, uint16_t tag_id, TagSpelling*
  * key: NULL and 0. */
 error_t      TagRegistryKeyIds(TagRegistry* reg, const char* key, size_t key_len, TagIdList* out);
 
-/* Every tag interned before the call written to the medium; made durable by
- * the caller's sync, as before. OK at once, with no I/O, when nothing is owed.
+/* Every tag interned before the call written to the medium; made durable by a
+ * flush after it — the Settle cycle's first. OK at once, with no I/O, when
+ * nothing is owed.
  * May wait for another core's flush of the same registry, so never under a
  * TagFS lock. */
 error_t      tag_registry_flush(TagRegistry* reg);
@@ -396,6 +399,30 @@ int             tag_bitmap_clear(TagBitmapIndex* idx, uint16_t tag_id, uint32_t 
 void            tag_bitmap_remove_file(TagBitmapIndex* idx, uint32_t file_id,
                                        const uint16_t* tag_ids, uint32_t tag_count);
 bool            TagBitmapHas(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id);
+
+/* An add of `file_id` under each of `count` distinct tags, in two halves so the
+ * volume's state lock never waits on the heap. TagBitmapStakeFor takes, with
+ * no TagFS lock held, every piece of memory the adds lack now: OK (*out NULL
+ * when they lack nothing), or ERR_NO_MEMORY — said — with nothing taken. Under
+ * the state lock, TagBitmapStakeCovers puts the pieces in and answers whether
+ * the adds now lack nothing — false when the index changed shape since the
+ * stake, and then nothing is added and the caller stakes again — and
+ * TagBitmapAddCovered makes the adds, which cannot fail once covered. What was
+ * not spent, and what the pieces replaced, go with TagBitmapStakeLetGo, after
+ * the lock. */
+typedef struct TagBitmapStake TagBitmapStake;
+error_t         TagBitmapStakeFor(TagBitmapIndex* idx, const uint16_t* tags, uint32_t count,
+                                  uint32_t file_id, TagBitmapStake** out);
+bool            TagBitmapStakeCovers(TagBitmapIndex* idx, const uint16_t* tags, uint32_t count,
+                                     uint32_t file_id, TagBitmapStake* stake);
+void            TagBitmapAddCovered(TagBitmapIndex* idx, const uint16_t* tags, uint32_t count,
+                                    uint32_t file_id);
+void            TagBitmapStakeLetGo(TagBitmapStake* stake);
+
+/* The file out from under the tag with nothing allocated — a window that falls
+ * to where an array would be lighter stays a bitmap, which costs room and
+ * nothing else — for a caller under the volume's state lock. */
+void            TagBitmapLeave(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id);
 /* The kernel heap the index holds. */
 uint64_t        TagBitmapBytes(TagBitmapIndex* idx);
 /* The files from `from` on that wear every one of `tag_ids`, at least one
@@ -419,19 +446,9 @@ int  file_table_update(uint32_t file_id, uint32_t meta_block, uint32_t meta_offs
 int  file_table_delete(uint32_t file_id);
 int  file_table_flush(void);
 
-// ----------------------------------------------------------------------------
-// Metadata Pool API
-// ----------------------------------------------------------------------------
-
-int      meta_pool_init(uint32_t first_block);
-void     meta_pool_shutdown(bool write_back);
-int      meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out);
-int      meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* out_offset);
-int      meta_pool_delete(uint32_t block, uint32_t offset);
-int      meta_pool_mirror_init(void);
-int      meta_pool_read_cached(uint32_t file_id, TagFSMetadata* out);
+/* What tagfs_get_metadata filled in, let go. The pool itself is
+ * metadata_pool/meta_pool.h's. */
 void     tagfs_metadata_free(TagFSMetadata* meta);
-int      meta_pool_flush(void);
 
 // ----------------------------------------------------------------------------
 // Main TagFS API
@@ -513,8 +530,9 @@ void     TagFSNoteMediumGone(void);
 /* Said once, by whoever tried the boot mount, whether or not it succeeded.
  * Before it, an arriving medium belongs to the boot that is still happening. */
 void     TagFSBootMountSettled(void);
+/* The machine is stopping, and its last Settle cycle has run (settle.h,
+ * TagFSSettleForHalt): the door shut, and what that cycle answered. */
 error_t tagfs_shutdown(void);
-error_t tagfs_sync(void);
 
 /* Flush the volatile write cache of the disk that holds the TagFS volume
  * (routes to the probed AHCI port / ATA drive, not a hardcoded device). The

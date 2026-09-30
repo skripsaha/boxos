@@ -639,6 +639,7 @@ static error_t RegistryWritePass(TagRegistry* reg, char* why, size_t why_size) {
 
     TagFSLockTake(&reg->lock);
     reg->written_next = tail->next_block ? end : upto;
+    reg->written_need = VolumeFlushNeed();
     TagFSLockDrop(&reg->lock);
     if (tail->next_block) {
         reg->tail_block  = reg->spare_block;
@@ -712,6 +713,14 @@ error_t tag_registry_flush(TagRegistry* reg) {
         break;      /* WRITTEN leaves OK; REFUSED has put the pass's refusal in rc */
     }
     return rc;
+}
+
+uint64_t tag_registry_written_need(TagRegistry* reg) {
+    if (!reg) return 0;
+    TagFSLockTake(&reg->lock);
+    uint64_t need = reg->written_need;
+    TagFSLockDrop(&reg->lock);
+    return need;
 }
 
 /*

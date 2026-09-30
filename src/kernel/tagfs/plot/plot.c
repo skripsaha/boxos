@@ -1,11 +1,13 @@
 #include "plot_internal.h"
 #include "../metadata_pool/meta_pool.h"
+#include "../file_map/file_map.h"
+#include "../ink/ink.h"
 #include "pmm.h"
 
 /*
- * The Plot of one call: loaded from the record the file table names, worked on
- * in memory, committed as one record, and let go of — its Stakes with it when
- * nothing committed them (CR-1). See plot.h.
+ * The Plot of one call: loaded from the file's record in the map of live
+ * files, worked on in memory, inked as one record, and let go of — its Stakes
+ * with it when nothing inked them (CR-1). See plot.h.
  */
 
 #define PLOT_BLOCK TAGFS_BLOCK_SIZE
@@ -43,15 +45,16 @@ error_t PlotLoad(Plot *p, uint32_t fid)
     memset(p, 0, sizeof(*p));
     p->fid         = fid;
     p->mount_epoch = tagfs_mount_epoch();
-    if (file_table_lookup(fid, &p->meta_block, &p->meta_offset) != 0)
+
+    RecordWhere where;
+    FileRecord *rec = FileMapRecordHold(tagfs_get_state()->files, fid, &where);
+    if (!rec)
         return ERR_FILE_NOT_FOUND;
-    int read = meta_pool_read(p->meta_block, p->meta_offset, &p->meta);
-    if (read != 0) {
-        kprintf("[TagFS] file %u: its record, block %u at %u, does not read (error %d) — "
-                "nothing is written over a file whose record cannot be read\n",
-                fid, p->meta_block, p->meta_offset, -read);
-        return (error_t)-read;
-    }
+    int copied = FileRecordCopyOut(rec, &p->meta);
+    FileRecordRelease(rec);
+    if (copied != 0)
+        return ERR_NO_MEMORY;
+    p->shape = where.shape;
 
     /* The record's extents are the Plot's runs from here on. */
     p->runs      = p->meta.extents;
@@ -73,6 +76,13 @@ error_t PlotLoad(Plot *p, uint32_t fid)
                 "than that needs — nothing is written over it\n", fid,
                 (unsigned long long)p->size, (unsigned long long)p->blocks);
         return ERR_METADATA_CORRUPTED;
+    }
+    /* The kernel the loader reads by its blocks is written by nobody (RT-09):
+     * refused here, before a byte of it moves. */
+    if (InkTouchesBoot(p->runs, p->run_count)) {
+        kprintf("[TagFS] file %u holds the kernel the loader reads by its blocks — nothing "
+                "is written to it\n", fid);
+        return ERR_PERMISSION_DENIED;
     }
     return OK;
 }
@@ -217,8 +227,8 @@ static uint32_t PlotStakeHolding(const Plot *p, uint32_t block)
 
 /*
  * [start, start + count) is no longer the file's. What of it this call staked
- * goes back now — no record ever named it; what a record named goes back once
- * a record that no longer names it is committed.
+ * goes back now — no record ever named it; what a record named comes to rest
+ * in Fallow once a record that no longer names it is inked.
  */
 static error_t PlotLetGo(Plot *p, uint32_t start, uint32_t count)
 {
@@ -404,50 +414,7 @@ error_t PlotEndWrite(Plot *p, uint64_t at, uint64_t done)
         keep = p->blocks_before;
     if (end > p->size)
         p->size = end;
-    error_t rc = PlotTrimTo(p, keep);
-    return rc == OK ? PlotCommit(p) : rc;
-}
-
-error_t PlotCommit(Plot *p)
-{
-    TagFSMetadata record = PlotRecord(p);
-    uint32_t      block = 0, offset = 0;
-
-    if (meta_pool_write(&record, &block, &offset) != 0) {
-        kprintf("[TagFS] file %u: the pool would not take its record — the file is left as "
-                "it was\n", p->fid);
-        return ERR_TAGFS_METADATA_ERROR;
-    }
-    if (file_table_update(p->fid, block, offset) != 0) {
-        /* Nothing names the new record: it is retired, and the old one stands. */
-        (void)meta_pool_delete(block, offset);
-        kprintf("[TagFS] file %u: the file table would not name its new record — the file "
-                "is left as it was\n", p->fid);
-        return ERR_TAGFS_METADATA_ERROR;
-    }
-    /* The record it replaces is retired. Should the pool not take the retire,
-     * the replaced record still loses to this one: a mount keeps a file's
-     * newest record in the pool's own order. */
-    (void)meta_pool_delete(p->meta_block, p->meta_offset);
-
-    p->meta_block    = block;
-    p->meta_offset   = offset;
-    p->stake_count   = 0;
-    p->size_before   = p->size;
-    p->blocks_before = p->blocks;
-    p->runs_before   = p->run_count;
-
-    /* Ground the committed record no longer names goes straight back. Fallow
-     * (step 1.4) will hold it until the record that let it go has settled. */
-    for (uint32_t i = 0; i < p->freed_count; i++) {
-        int given = tagfs_free_blocks(p->freed[i].start_block, p->freed[i].block_count);
-        if (given != 0)
-            kprintf("[TagFS] file %u: %u block(s) at %u its record no longer names would not "
-                    "go back (error %d)\n", p->fid, p->freed[i].block_count,
-                    p->freed[i].start_block, -given);
-    }
-    p->freed_count = 0;
-    return OK;
+    return PlotTrimTo(p, keep);
 }
 
 error_t PlotSourceBringIn(const PlotSource *src)

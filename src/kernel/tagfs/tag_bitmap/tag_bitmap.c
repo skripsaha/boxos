@@ -407,6 +407,162 @@ int tag_bitmap_set(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id)
     }
 }
 
+// ----------------------------------------------------------------------------
+// An add staked before the volume's state lock, made under it
+//
+// A file's record changes under the volume's state lock (Ink), and the file
+// goes under its tags in the same hold — but nothing is allocated under that
+// lock. So every piece the adds lack is taken first, with no TagFS lock held
+// (TagBitmapStakeFor), and under the lock the pieces are put in (Covers) and
+// the file added (AddCovered). Every change of the index's shape is made under
+// the state lock — by an Ink, or by the mount with the volume's door shut — so
+// what Covers found enough stays enough until AddCovered. When it is not
+// enough — the index changed since the stake — nothing is added, the pieces
+// already put in stay (a table that grew, a list with room, both harmless),
+// and the caller stakes again.
+// ----------------------------------------------------------------------------
+
+#define TAG_STAKE_PIECES 4u     /* the most one add can lack: tags, members, windows, data */
+
+struct TagBitmapStake {
+    uint32_t count;             /* pieces taken */
+    uint32_t spent_old;         /* storage the installs replaced, freed with the stake */
+    void*    old[1];            /* ... room for count of them, then the pieces */
+};
+
+static TagPiece* StakePieces(TagBitmapStake* s)
+{
+    return (TagPiece*)(void*)&s->old[s->count ? s->count : 1];
+}
+
+/* What adding `fid` to `tag` lacks, piece by piece, as if each were put in:
+ * written into out[], the count answered. `cap` is the table's length as the
+ * pieces staked before this one would leave it. */
+static uint32_t IndexWantsAll(const TagBitmapIndex* idx, uint16_t tag, uint32_t fid,
+                              uint32_t* cap, TagPiece out[TAG_STAKE_PIECES])
+{
+    uint32_t n = 0;
+    const TagMembers* m = (uint32_t)tag < idx->capacity ? idx->tags[tag] : NULL;
+    if ((uint32_t)tag >= *cap) {
+        uint32_t grown = *cap ? *cap : 64u;
+        while (grown <= (uint32_t)tag)
+            grown *= 2u;
+        out[n++] = (TagPiece){ WANT_TAGS, grown, NULL };
+        *cap = grown;
+    }
+    if (!m) {
+        out[n++] = (TagPiece){ WANT_MEMBERS, 0, NULL };
+        out[n++] = (TagPiece){ WANT_WINDOWS, 4u, NULL };
+        out[n++] = (TagPiece){ WANT_DATA, TAG_ARRAY_FIRST, NULL };
+        return n;
+    }
+    TagPiece last = IndexWants(idx, tag, fid);
+    if (last.want == WANT_WINDOWS) {
+        out[n++] = last;
+        last = (TagPiece){ WANT_DATA, TAG_ARRAY_FIRST, NULL };
+    }
+    if (last.want != WANT_NOTHING)
+        out[n++] = last;
+    return n;
+}
+
+error_t TagBitmapStakeFor(TagBitmapIndex* idx, const uint16_t* tags, uint32_t count,
+                          uint32_t fid, TagBitmapStake** out)
+{
+    *out = NULL;
+    if (!idx || count == 0)
+        return OK;
+
+    TagPiece* wants = kmalloc(sizeof(TagPiece) * TAG_STAKE_PIECES * count);
+    if (!wants)
+        return ERR_NO_MEMORY;
+    uint32_t n = 0;
+    TagFSLockTake(&idx->lock);
+    uint32_t cap = idx->capacity;
+    for (uint32_t i = 0; i < count; i++)
+        n += IndexWantsAll(idx, tags[i], fid, &cap, &wants[n]);
+    TagFSLockDrop(&idx->lock);
+
+    TagBitmapStake* s = kmalloc(sizeof(TagBitmapStake) + sizeof(void*) * (n ? n - 1 : 0) +
+                                sizeof(TagPiece) * (n ? n : 1));
+    if (!s) {
+        kfree(wants);
+        return ERR_NO_MEMORY;
+    }
+    s->count     = n;
+    s->spent_old = 0;
+    TagPiece* piece = StakePieces(s);
+    error_t   rc    = OK;
+    for (uint32_t i = 0; i < n; i++) {
+        piece[i]       = wants[i];
+        piece[i].piece = rc == OK ? kmalloc(PieceBytes(&wants[i])) : NULL;
+        if (!piece[i].piece && rc == OK) {
+            IndexSayShort(idx, tags[0], fid, &wants[i]);
+            rc = ERR_NO_MEMORY;
+        }
+    }
+    kfree(wants);
+    if (rc != OK) {
+        TagBitmapStakeLetGo(s);
+        return rc;
+    }
+    *out = s;
+    return OK;
+}
+
+bool TagBitmapStakeCovers(TagBitmapIndex* idx, const uint16_t* tags, uint32_t count,
+                          uint32_t fid, TagBitmapStake* s)
+{
+    bool covered = true;
+    TagFSLockTake(&idx->lock);
+    for (uint32_t i = 0; i < count && covered; i++) {
+        for (;;) {
+            TagPiece want = IndexWants(idx, tags[i], fid);
+            if (want.want == WANT_NOTHING)
+                break;
+            TagPiece* have = NULL;
+            for (uint32_t k = 0; s && k < s->count && !have; k++) {
+                TagPiece* p = &StakePieces(s)[k];
+                if (p->piece && p->want == want.want && p->size == want.size)
+                    have = p;
+            }
+            if (!have) {
+                covered = false;
+                break;
+            }
+            void* old = IndexInstall(idx, tags[i], fid, have);
+            if (old == have->piece) {
+                covered = false;        /* the index is not what the want was read from */
+                break;
+            }
+            if (old)
+                s->old[s->spent_old++] = old;
+        }
+    }
+    TagFSLockDrop(&idx->lock);
+    return covered;
+}
+
+void TagBitmapAddCovered(TagBitmapIndex* idx, const uint16_t* tags, uint32_t count, uint32_t fid)
+{
+    TagFSLockTake(&idx->lock);
+    for (uint32_t i = 0; i < count; i++)
+        IndexAdd(idx, tags[i], fid);
+    idx->said_short = false;
+    TagFSLockDrop(&idx->lock);
+}
+
+void TagBitmapStakeLetGo(TagBitmapStake* s)
+{
+    if (!s)
+        return;
+    for (uint32_t i = 0; i < s->spent_old; i++)
+        kfree(s->old[i]);
+    for (uint32_t k = 0; k < s->count; k++)
+        kfree(StakePieces(s)[k].piece);
+    kfree(s);
+}
+
 /* `fid` out of `tag`'s members under the lock. What the removal emptied —
  * the window's storage, and the tag's own list when it has no member left —
  * goes to `freed[]` to be given back after the lock. Answers how many members
@@ -496,6 +652,18 @@ int tag_bitmap_clear(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id)
     if (back)
         IndexShrink(idx, tag_id, file_id, back);
     return known ? 0 : -1;
+}
+
+void TagBitmapLeave(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id)
+{
+    if (!idx)
+        return;
+    void* freed[3] = { NULL, NULL, NULL };
+    TagFSLockTake(&idx->lock);
+    (void)IndexRemove(idx, tag_id, file_id, freed);
+    TagFSLockDrop(&idx->lock);
+    for (uint32_t i = 0; i < 3; i++)
+        kfree(freed[i]);
 }
 
 void tag_bitmap_remove_file(TagBitmapIndex* idx, uint32_t file_id,

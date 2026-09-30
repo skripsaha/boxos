@@ -6418,20 +6418,20 @@ run_byname() {
 # The oracle measured against itself: rename leaves the tag where it was, and
 # the renamed file must stop answering to its new name.
 byname_mut_on() {
-    mutate src/kernel/tagfs/tagfs.c
+    mutate src/kernel/tagfs/ink/ink.c
     python3 - <<'EOF2'
-p = "src/kernel/tagfs/tagfs.c"
+p = "src/kernel/tagfs/ink/ink.c"
 s = open(p).read()
-anchor = "    if (old_tag != new_tag)\n    {\n        if (old_tag != TAGFS_INVALID_TAG_ID)\n"
+anchor = "    uint16_t old_name = name ? InkNameTagLookup(cur->name) : TAGFS_INVALID_TAG_ID;\n"
 assert s.count(anchor) == 1, "byname mutation anchor missing"
-s = s.replace(anchor, "    if (old_tag != new_tag && false)   /* logcheck mutation: the tag stays behind */\n    {\n        if (old_tag != TAGFS_INVALID_TAG_ID)\n", 1)
+s = s.replace(anchor, "    uint16_t old_name = TAGFS_INVALID_TAG_ID;   /* logcheck mutation: the tag stays behind */\n    if (name)\n        add = TAGFS_INVALID_TAG_ID;\n", 1)
 open(p, "w").write(s)
 EOF2
-    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation"
+    mut_done src/kernel/tagfs/ink/ink.c "logcheck mutation"
 }
 
 byname_mut_off() {
-    restore src/kernel/tagfs/tagfs.c
+    restore src/kernel/tagfs/ink/ink.c
 }
 
 run_bynamemut() {
@@ -7555,20 +7555,10 @@ run_censusmut() {
 # be asked on the other and stands down there; held on a road it is not
 # written for is a failure. How many caveats a boot holds is counted off these
 # rows, per road. A sweep's LIFTED count is how many allocations the operation
-# takes on a fresh volume of this tree; a create takes more when a leaf of
-# the map of live files splits for its id or its name's members must grow
-# (file_map/, tag_bitmap.c), which is why the create sweep makes and deletes
-# one file first. Both of stand_create_all_or_nothing's numbers were measured
-# before step 1.3b changed what a create allocates, and are measured again at
-# the checkpoint.
+# takes on a fresh volume of this tree.
 STAND_HELD="
 integrity_reports_every_rot|1.10|of 65 rotten blocks, reported 64|of 65 rotten blocks, reported 65
 use_context_long_remembered|1.6|of 479 bytes said, the volume remembers 0|of 479 bytes said, the volume remembers 479
-stand_create_all_or_nothing|1.4|half-done create at refused allocation 5|creates whole or refused whole, allocations refused 5
-stand_sync_owns_a_refused_write|1.4|ledger copies written after the file table's write was refused 1|ledger copies written after the file table's write was refused 0
-stand_sync_owns_a_refused_flush|1.4|cache flushes the medium refused under a sync that answered OK 1|a refused cache flush, and the sync answered it with error 200
-stand_open_holds_what_it_names|1.4|handle counting extents it did not hold at refused allocation 6|opens whole or refused, allocations refused 6
-stand_open_refuses_unread_metadata|1.4|one-block file opened as empty at refused allocation 3|opens whole or refused, allocations refused 6
 stand_open_joins_the_writers|1.5|handle with no open-file entry at refused allocation 1|opens whole or refused, allocations refused 6
 "
 
@@ -7840,35 +7830,16 @@ stand_fix_on() {
 p = "src/kernel/tagfs/tagfs.c"
 s = open(p).read()
 edits = [
-    # 1.4: a tag the index will not take undoes the create
-    ("        if (meta.tag_ids[i] != TAGFS_INVALID_TAG_ID)\n        {\n            tag_bitmap_set(g_state.bitmap_index, meta.tag_ids[i], file_id);\n        }\n",
-     "        if (meta.tag_ids[i] != TAGFS_INVALID_TAG_ID &&\n            tag_bitmap_set(g_state.bitmap_index, meta.tag_ids[i], file_id) != 0)\n        {\n            for (uint16_t j = 0; j < i; j++)   /* logcheck mutation: create is all or nothing */\n                tag_bitmap_clear(g_state.bitmap_index, meta.tag_ids[j], file_id);\n            file_table_delete(file_id);\n            meta_pool_delete(meta_block, meta_offset);\n            kfree(meta.tag_ids);\n            kfree(meta.filename);\n            TagFSLockDrop(&g_state.lock);\n            return -1;\n        }\n"),
-    # 1.4: the sync answers for its table and its flush
-    ("static void tagfs_sync_inside(void);\n",
-     "static error_t tagfs_sync_inside(void);   /* logcheck mutation: the sync answers for its stages */\n"),
-    ("        tagfs_sync_inside();\n        ScribeGive(&g_sync_scribe, cover, OK);\n",
-     "        rc = tagfs_sync_inside();\n        ScribeGive(&g_sync_scribe, cover, rc);\n"),
-    ("static void tagfs_sync_inside(void)\n{\n", "static error_t tagfs_sync_inside(void)\n{\n"),
-    ("    file_table_flush();\n    SETTLE_CUT_AT(SETTLE_CUT_POINT_RETIRES);\n",
-     "    if (file_table_flush() != 0)\n        return ERR_IO;\n    SETTLE_CUT_AT(SETTLE_CUT_POINT_RETIRES);\n"),
-    ("    SETTLE_CUT_AT(SETTLE_CUT_POINT_DONE);\n}\n",
-     "    SETTLE_CUT_AT(SETTLE_CUT_POINT_DONE);\n    return flushed;\n}\n"),
     # 1.5: an open that cannot join the writers is refused
     ("    OpenFileEntry *ofe = ofe_acquire(file_id);\n\n    TagFSFileHandle *handle = kmalloc(sizeof(TagFSFileHandle));\n",
      "    OpenFileEntry *ofe = ofe_acquire(file_id);\n    if (!ofe)\n        return NULL;   /* logcheck mutation: an open with no open-file entry is refused */\n\n    TagFSFileHandle *handle = kmalloc(sizeof(TagFSFileHandle));\n"),
-    # 1.4: an open that cannot read its record is refused
-    ("    if (meta_pool_read(meta_block, meta_offset, &meta) == 0)\n    {\n        handle->file_size = meta.size;\n",
-     "    if (meta_pool_read(meta_block, meta_offset, &meta) != 0)\n    {\n        ofe_release(ofe);   /* logcheck mutation: an open that cannot read its record is refused */\n        kfree(handle);\n        return NULL;\n    }\n    {\n        handle->file_size = meta.size;\n"),
-    # 1.4: an open that cannot copy its extents is refused
-    ("                memcpy(handle->extents, meta.extents,\n                       sizeof(FileExtent) * meta.extent_count);\n            }\n",
-     "                memcpy(handle->extents, meta.extents,\n                       sizeof(FileExtent) * meta.extent_count);\n            }\n            else\n            {\n                tagfs_metadata_free(&meta);   /* logcheck mutation: an open that cannot copy its extents is refused */\n                ofe_release(ofe);\n                kfree(handle);\n                return NULL;\n            }\n"),
 ]
 for a, m in edits:
     assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
     s = s.replace(a, m, 1)
 open(p, "w").write(s)
 EOF
-    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 5
+    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 1
 
     # 1.6: a Use Context longer than the Ledger's record is still the volume's.
     # The step keeps it whole on the medium (its own block); what the test asks
@@ -8008,9 +7979,9 @@ edits = {
  ],
  "underlock": [
   ("src/kernel/tagfs/ledger/ledger.c",
-   "    int wrote = tagfs_volume_write(ledger_vlba(slot), 1, sector);\n",
+   "    int wrote = tagfs_volume_write(ledger_vlba(s_image.slot), 1, s_image.sector);\n",
    "    TagFSLockTake(&g_ledger_lock);   /* " + M + ": the Ledger's write is back under its lock */\n"
-   "    int wrote = tagfs_volume_write(ledger_vlba(slot), 1, sector);\n"
+   "    int wrote = tagfs_volume_write(ledger_vlba(s_image.slot), 1, s_image.sector);\n"
    "    TagFSLockDrop(&g_ledger_lock);\n"),
   ("src/kernel/tagfs/integrity/integrity.c",
    "    TagFSLockDropAt(&g_lock, site);\n\n    error_t got = tagfs_read_block(at, g_page[s]);\n\n    TagFSLockTakeAt(&g_lock, site);\n",
@@ -8069,16 +8040,16 @@ edits = {
    "    if (LinksReserve(wanted) != OK) {\n"
    "        kprintf(\"[FileTable] there is no memory to hold the %u links the file \"\n"
    "                \"table's rows need \u2014 its chain stays %u block(s) long, and the \"\n"
-   "                \"rows from file id %u on stay in memory until a later sync\\n\",\n"
+   "                \"rows from file id %u on stay in memory until a later Settle cycle\\n\",\n"
    "                wanted, have, have * TAGFS_FTABLE_PER_BLOCK);\n"
    "        return -1;\n"
    "    }\n",
    "    /* " + M + ": the memory for a link is asked only after its block is taken */\n"),
   ("src/kernel/tagfs/file_table/file_table.c",
-   "        TagFSLockTake(&g_lock);\n        g_links[have + in_hand] = (FileTableLink){ .block = block };\n",
+   "        TagFSLockTake(table_lock());\n        g_links[have + in_hand] = (FileTableLink){ .block = block };\n",
    "        if (LinksReserve(wanted) != OK)   /* " + M + ": and a refusal forgets the block */\n"
    "            return -1;\n"
-   "        TagFSLockTake(&g_lock);\n        g_links[have + in_hand] = (FileTableLink){ .block = block };\n"),
+   "        TagFSLockTake(table_lock());\n        g_links[have + in_hand] = (FileTableLink){ .block = block };\n"),
  ],
  "registry": [
   ("src/kernel/tagfs/tag_registry/tag_registry.c",
@@ -9100,7 +9071,7 @@ EOF2
     mut_done src/kernel/tagfs/tagfs.c "logcheck mutation" 1
 }
 
-# The 512 bytes go into ObjWrite, the root of the heaviest chain: a function
+# The 512 bytes go into ObjRead, the root of the heaviest chain: a function
 # reached through the op table is never inlined, so the bytes land in its own
 # frame, which stays under the limit, and nothing but the reach moves.
 stackguard_reach_on() {
@@ -9108,8 +9079,8 @@ stackguard_reach_on() {
     python3 - <<'EOF2'
 p = "src/kernel/core/decks/storage/storage_ops.c"
 s = open(p).read()
-anchor = "    uint32_t flags   = param_u32(op, 12);\n"
-assert s.count(anchor) == 1, "stackguard ObjWrite anchor missing"
+anchor = "    uint64_t waybill = (op->param_size >= 20) ? param_u64(op, 12) : 0;\n    Crate   *out     = &crates[op->out_crate];\n"
+assert s.count(anchor) == 1, "stackguard ObjRead anchor missing"
 s = s.replace(anchor, anchor +
     "    volatile uint8_t logcheck_reach[512];   /* logcheck mutation: 512 bytes on the way to the medium */\n"
     "    logcheck_reach[file_id % 512] = 1;\n", 1)
@@ -9147,8 +9118,15 @@ run_stackguard() {
     held_reach=$(awk '$1 == "reach" { print $2 }' "$STACKGUARD_HELD")
     grep -qE "^caveat held: stack reach $held_reach B > 4096 — .* — discharged by step [0-9.]+[a-z]*$" "$SCRATCH/build.log"
     chk $? "stackguard: the reach is held at its measured $held_reach bytes, under its step"
-    grep -qE '^\[stack\] recursion on the way to the medium, each frame counted once: ' "$SCRATCH/build.log"
-    chk $? "stackguard: the recursion on the way to the medium is named"
+    # A recursion is named when the heaviest way to the medium runs through
+    # one — the chain then carries it as {its frames} — and never otherwise.
+    if grep -E '^\[stack\]   ' "$SCRATCH/build.log" | grep -q '{'; then
+        grep -qE '^\[stack\] recursion on the way to the medium, each frame counted once: ' "$SCRATCH/build.log"
+        chk $? "stackguard: the recursion on the way to the medium is named"
+    else
+        ! grep -qE '^\[stack\] recursion on the way to the medium' "$SCRATCH/build.log"
+        chk $? "stackguard: the heaviest way to the medium runs through no recursion, and none is named"
+    fi
     [ -f build/.stack_usage.ok ]
     chk $? "stackguard: the clean tree is judged in full through the harness too, and stamped"
 
@@ -9187,12 +9165,12 @@ run_stackguard() {
     reach_now=$(sed -nE 's/.*reach grew to ([0-9]+) bytes.*/\1/p' "$SCRATCH/build.stackguard.reach.log" | head -1)
     [ -n "$reach_now" ] && [ "$reach_now" -ge $((held_reach + 512)) ] \
         && [ "$(grep -c '^\[stack\] FAIL' "$SCRATCH/build.stackguard.reach.log")" = 1 ]
-    chk $? "stackguard: 512 bytes in ObjWrite grow the reach to ${reach_now:-?} over its $held_reach, and nothing else fails — $(stackguard_said reach)"
+    chk $? "stackguard: 512 bytes in ObjRead grow the reach to ${reach_now:-?} over its $held_reach, and nothing else fails — $(stackguard_said reach)"
     restore src/kernel/core/decks/storage/storage_ops.c
 
     # M5 — no reach line: the budget itself is the rule.
     stackguard_noreach_on
-    stackguard_red noreach "^\[stack\] FAIL reach $held_reach bytes, over its budget of 4096: ObjWrite "
+    stackguard_red noreach "^\[stack\] FAIL reach $held_reach bytes, over its budget of 4096: ObjRead "
     chk $? "stackguard: with the reach caveat gone, $held_reach bytes against 4096 stops the link — $(stackguard_said noreach)"
     restore "$STACKGUARD_HELD"
 

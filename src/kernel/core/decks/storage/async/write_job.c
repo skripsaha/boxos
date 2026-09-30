@@ -4,7 +4,7 @@
  * Pumped from K-Core continuations posted by the AHCI IRQ. The IRQ side
  * is intentionally minimal: stash status, set the next state, post the
  * continuation. The K-Core side does everything that needs locks
- * (the Plot, the record's commit, token release, cache flush, Touch publish).
+ * (the Plot, the record's Ink, token release, Touch publish).
  *
  * State flow (full):
  *
@@ -18,17 +18,31 @@
  *     W_AHCI_DONE → if more bytes: W_LOCATE
  *                 → else:           W_LOG_META
  *
- *   commit phase (once):
- *     W_LOG_META → W_COMMIT_TXN → W_PUBLISH → W_RELEASE_TOKEN → W_DONE
+ *   the record (once):
+ *     W_LOG_META → W_INK → W_PUBLISH → W_RELEASE_TOKEN → W_DONE
+ *     W_INK with no Spare to close the pool's tail onto:
+ *              → W_SPARE → (yield to IRQ) → W_SPARE_DONE → W_INK
  *
  * The job is a write like the synchronous one, on the same Plot (plot.h): the
  * file's record loaded under the job's token, every block the write needs
  * reserved and the record's room checked before a byte moves, and what landed
- * committed as one record. A refusal on the way — a read of an overlaid block,
- * a block's write, the program's pages — stops the job there: what landed
- * before it is committed and said, and the ground reserved past it goes back.
- * A job that commits nothing gives back everything it took (CR-1), and never
- * a block twice (W-DFREE): what it took is the Plot's Stakes, given back once.
+ * inked as one record (TagFSInkPlot). A refusal on the way — a read of an
+ * overlaid block, a block's write, the program's pages — stops the job there:
+ * what landed before it is inked and said, and the ground reserved past it
+ * goes back. A job that inks nothing gives back everything it took (CR-1), and
+ * never a block twice (W-DFREE): what it took is the Plot's Stakes, given back
+ * once.
+ *
+ * ‼ NO FLUSH OF ITS OWN. What the job inked reaches the medium with a Settle
+ * cycle, as a synchronous write's does — the cycle's first flush covers the
+ * data before any record names it (settle.h). A flush after every write was a
+ * SYNC CACHE per fwrite and proved nothing about the record, which no cycle
+ * had written.
+ *
+ * ‼ A SPARE IS MADE THE JOB'S OWN WAY. A continuation may not stand over the
+ * medium, so an Ink with no Spare to close the tail onto answers
+ * ERR_WOULD_BLOCK (INK_ASKS_SPARES) and the job stamps one through the port
+ * like any block of its own (W_SPARE), hands it to the pool and inks again.
  *
  * The bytes come out of the program's pages a block at a time, into the DMA
  * page they go out of — never copied whole into the kernel heap first.
@@ -58,6 +72,9 @@
 #include "op_registry.h"
 #include "touch.h"
 #include "integrity.h"
+#include "ink.h"         /* TagFSInkPlot — the one way the file changes */
+#include "meta_pool.h"   /* PoolSpareBegin / Adopt / Drop — a Spare stamped through the port */
+#include "scribe.h"      /* VolumeFlushNeed — what the landed blocks wait for */
 
 /* ---- forward decls ---- */
 static void wjob_pump(void *job_);
@@ -127,19 +144,18 @@ static void token_pass(WriteJob *j)
  * ========================================================================= */
 
 /* The write stops at a refusal. What landed before it is made the file's —
- * one record, the ground reserved past it given back — and the refusal is the
- * answer, with the bytes the file now holds of the write. */
-static void wjob_stop(WriteJob *j, error_t cause)
+ * one record, inked the way a whole write's is, the ground reserved past it
+ * given back — and the refusal is the answer, with the bytes the file now
+ * holds of the write. Answers whether the pump goes on. */
+static bool wjob_stop(WriteJob *j, error_t cause)
 {
     if (j->bytes_done > 0 && j->loaded) {
-        if (PlotEndWrite(&j->plot, j->start_offset, j->bytes_done) == OK) {
-            j->committed = true;
-            wjob_publish_change(j);
-        } else {
-            j->bytes_done = 0;
-        }
+        j->stopped = cause;
+        wjob_to(j, W_LOG_META);
+        return true;
     }
     wjob_finalize(j, cause);
+    return false;
 }
 
 /* W_ALLOC — the file's record loaded under the token, the growth rule asked,
@@ -180,8 +196,7 @@ static bool w_locate(WriteJob *j)
         kprintf("[Storage] write to file %u: no extent of its plot holds block %llu, which the "
                 "write reserved — the write stops at byte %llu\n", j->file_id,
                 (unsigned long long)k, (unsigned long long)pos);
-        wjob_stop(j, ERR_TAGFS_EXTENT_ERROR);
-        return false;
+        return wjob_stop(j, ERR_TAGFS_EXTENT_ERROR);
     }
 
     j->if_off_in_blk = off;
@@ -231,10 +246,8 @@ static void wjob_read_old_complete(uint8_t port, uint8_t slot,
 static bool w_read_old(WriteJob *j)
 {
     error_t err = wjob_submit(j, false, wjob_read_old_complete);
-    if (err != OK) {
-        wjob_stop(j, err);
-        return false;
-    }
+    if (err != OK)
+        return wjob_stop(j, err);
     return false;  /* parked until IRQ */
 }
 
@@ -249,8 +262,7 @@ static bool w_dma_fill(WriteJob *j)
                 "the pages they are in (error %u) — %llu of %llu written\n", j->file_id,
                 (unsigned long long)j->bytes_done, (unsigned)rc,
                 (unsigned long long)j->bytes_done, (unsigned long long)j->source.bytes);
-        wjob_stop(j, rc);
-        return false;
+        return wjob_stop(j, rc);
     }
     wjob_to(j, W_AHCI_SUBMIT);
     return true;
@@ -260,10 +272,8 @@ static bool w_dma_fill(WriteJob *j)
 static bool w_ahci_submit(WriteJob *j)
 {
     error_t err = wjob_submit(j, true, wjob_ahci_complete);
-    if (err != OK) {
-        wjob_stop(j, err);
-        return false;
-    }
+    if (err != OK)
+        return wjob_stop(j, err);
     return false;  /* parked until IRQ */
 }
 
@@ -284,8 +294,7 @@ static bool w_ahci_done(WriteJob *j)
                     "bytes had landed before the medium stopped answering\n", j->file_id,
                     j->if_disk_block, (unsigned long long)j->bytes_done,
                     (unsigned long long)j->source.bytes);
-        wjob_stop(j, j->if_status);
-        return false;
+        return wjob_stop(j, j->if_status);
     }
 
     /* The async path writes straight to the AHCI port, bypassing
@@ -299,58 +308,91 @@ static bool w_ahci_done(WriteJob *j)
     return true;
 }
 
-/* W_LOG_META — the one record the Plot builds, committed. */
+/* W_LOG_META — what landed made ready to be the file's: the flush need its
+ * blocks hold, read after their completions were seen, and the ground
+ * reserved past them cut off. */
 static bool w_log_meta(WriteJob *j)
 {
+    j->plot.data_need = VolumeFlushNeed();
     error_t rc = PlotEndWrite(&j->plot, j->start_offset, j->bytes_done);
     if (rc != OK) {
         wjob_finalize(j, rc);
         return false;
     }
-    j->committed = true;
-    wjob_to(j, W_COMMIT_TXN);
+    wjob_to(j, W_INK);
     return true;
 }
 
-/* W_COMMIT_TXN — the durability point, and it is only a durability point if
- * somebody listens to the answer.
- *
- * Forcing the data blocks written above out of the drive's volatile write
- * cache to media is what makes them survive the power going away. A medium
- * that REFUSED the flush — a device that has no FLUSH CACHE EXT to give, a
- * device that stopped answering, a link that went down between the last write
- * and here — fails the write. Nothing is rolled back, and nothing is hidden
- * either: the blocks are on the medium and the record that names them is
- * committed, so the file HAS changed for every reader — which is why the
- * change is still announced on the file's tags, and why the caller is told
- * the byte count that is really in the file rather than a zero it would answer
- * by writing the same payload a second time. The one thing it must not be
- * told is "durable".
- *
- * Two writes reaching their durability point at the same moment is not a
- * refusal: the second flush waits for the port in its roadstead, behind the
- * first, and is issued when the port is given back — its want of the whole
- * port stops new reads and writes from being admitted meanwhile, so the wait
- * ends on the commands already out, each bounded by the device. */
-static bool w_commit_txn(WriteJob *j)
+/* W_INK — the one record the Plot builds, inked; with no Spare for the pool's
+ * tail, one is stamped first (W_SPARE). */
+static bool w_ink(WriteJob *j)
 {
-    error_t flushed = tagfs_flush_cache();
-
-    if (flushed != OK) {
-        kprintf("[Storage] write to file %u: the medium would not flush "
-                "its write cache (%u) — the bytes are in the file but not "
-                "proven to survive power loss, so the write is refused "
-                "rather than reported done\n",
-                j->file_id, (unsigned)flushed);
-        wjob_publish_change(j);
-        wjob_finalize(j, flushed);
+    InkReceipt inked;
+    error_t    rc = TagFSInkPlot(&j->plot, INK_ASKS_SPARES, &inked);
+    if (rc == ERR_WOULD_BLOCK) {
+        wjob_to(j, W_SPARE);
+        return true;
+    }
+    if (rc != OK) {
+        wjob_finalize(j, rc);
         return false;
     }
+    j->committed = true;
     wjob_to(j, W_PUBLISH);
     return true;
 }
 
-/* The file's size as the job leaves it: the committed record's once the job
+static void wjob_spare_complete(uint8_t port, uint8_t slot, error_t status, void *ctx);
+
+/* W_SPARE — a block taken for the pool and its empty stamp written through
+ * the port, from the job's DMA page like any block of the write. A volume
+ * with no block for it ends the job with the allocator's answer: nothing is
+ * inked, and the ground the write took goes back. */
+static bool w_spare(WriteJob *j)
+{
+    error_t rc = PoolSpareBegin(&j->spare_block, &j->spare_image);
+    if (rc != OK) {
+        kprintf("[Storage] write to file %u: the pool has no Spare to take its record and "
+                "none could be made (error %u) — the write is refused, the file as it was\n",
+                j->file_id, (unsigned)rc);
+        wjob_finalize(j, rc);
+        return false;
+    }
+    memcpy(j->dma_virt, j->spare_image, TAGFS_BLOCK_SIZE);
+    j->if_disk_block = j->spare_block;
+    rc = wjob_submit(j, true, wjob_spare_complete);
+    if (rc != OK) {
+        PoolSpareDrop(j->spare_block, j->spare_image);
+        j->spare_image = NULL;
+        wjob_finalize(j, rc);
+    }
+    return false;  /* parked until IRQ */
+}
+
+/* W_SPARE_DONE — the stamp landed: the Spare is the pool's, and the job inks
+ * again. */
+static bool w_spare_done(WriteJob *j)
+{
+    MetaPoolBlock *image = j->spare_image;
+    j->spare_image = NULL;
+    if (j->if_status != OK) {
+        kprintf("[Storage] write to file %u: block %u would not take the stamp of a Spare "
+                "for the pool (error %u) — the write is refused, the file as it was\n",
+                j->file_id, j->spare_block, (unsigned)j->if_status);
+        PoolSpareDrop(j->spare_block, image);
+        wjob_finalize(j, j->if_status);
+        return false;
+    }
+    error_t rc = PoolSpareAdopt(j->spare_block, image, VolumeFlushNeed());
+    if (rc != OK) {
+        wjob_finalize(j, rc);
+        return false;
+    }
+    wjob_to(j, W_INK);
+    return true;
+}
+
+/* The file's size as the job leaves it: the inked record's once the job
  * loaded one, the open's before that. */
 static uint64_t wjob_final_size(const WriteJob *j)
 {
@@ -416,7 +458,7 @@ static void wjob_finalize(WriteJob *j, int rc)
     uint64_t bytes_written = j->committed ? j->bytes_done : 0;
     uint64_t final_size    = wjob_final_size(j);
 
-    /* What the job took and no committed record names goes back first — on
+    /* What the job took and no inked record names goes back first — on
      * every way out, once — and only then may the next writer load the file. */
     PlotRelease(&j->plot);
     if (rc != OK && j->ofe)
@@ -431,7 +473,7 @@ static void wjob_finalize(WriteJob *j, int rc)
      * switch) — same model as the crate_stage_commit_and_release below.
      *
      * The count the caller is given is the count that is IN the file: the
-     * bytes a committed record names — all of them, a prefix a refusal
+     * bytes an inked record names — all of them, a prefix a refusal
      * stopped, or none. Answering "0 bytes" to an appending writer whose bytes
      * are in the file is exactly what would make it write the same payload
      * into the file twice. */
@@ -446,6 +488,9 @@ static void wjob_finalize(WriteJob *j, int rc)
     }
 
     if (j->dma_phys)    pmm_free(j->dma_phys, 1);
+    /* A Spare still in hand here was stamped for a mounting that is gone: its
+     * block number is not this volume's to give back. */
+    kfree(j->spare_image);
     if (j->handle)      tagfs_close(j->handle);
 
     /* CrateStage release. Dispatcher handed us ownership of crates_kbuf
@@ -526,10 +571,12 @@ static void wjob_pump(void *job_)
             case W_AHCI_SUBMIT:   if (!w_ahci_submit(j))   return; break;
             case W_AHCI_DONE:     if (!w_ahci_done(j))     return; break;
             case W_LOG_META:      if (!w_log_meta(j))      return; break;
-            case W_COMMIT_TXN:    if (!w_commit_txn(j))    return; break;
+            case W_INK:           if (!w_ink(j))           return; break;
+            case W_SPARE:         if (!w_spare(j))         return; break;
+            case W_SPARE_DONE:    if (!w_spare_done(j))    return; break;
             case W_PUBLISH:       if (!w_publish(j))       return; break;
             case W_RELEASE_TOKEN: if (!w_release_token(j)) return; break;
-            case W_DONE:          wjob_finalize(j, OK);    return;
+            case W_DONE:          wjob_finalize(j, j->stopped); return;
             case W_INIT:
             case W_TOKEN_WAIT:
             case W_ERROR:
@@ -560,6 +607,16 @@ static void wjob_read_old_complete(uint8_t port, uint8_t slot,
         wjob_to(j, W_DMA_FILL);
     }
     BatonPass(&j->cq_node);   /* never-drop; heavy half on the K-Core pump */
+}
+
+/* IRQ callback for W_SPARE, as lean as the others. */
+static void wjob_spare_complete(uint8_t port, uint8_t slot, error_t status, void *ctx)
+{
+    (void)port; (void)slot;
+    WriteJob *j = (WriteJob *)ctx;
+    j->if_status = status;
+    wjob_to(j, W_SPARE_DONE);
+    BatonPass(&j->cq_node);
 }
 
 /* IRQ callback. Lean — only stash status + defer continuation. See

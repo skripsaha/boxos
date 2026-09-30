@@ -17,7 +17,7 @@
  * drain core's pump, and KResultPush wakes the caller when the job is done.
  * The job works on the file's Plot exactly as a synchronous write does: the
  * same growth rule, the same reservation before any byte moves, the same
- * read-modify-write rule, and one committed record.
+ * read-modify-write rule, and one inked record.
  */
 
 struct OpContext;
@@ -32,8 +32,10 @@ typedef enum {
     W_DMA_FILL,
     W_AHCI_SUBMIT,
     W_AHCI_DONE,
-    W_LOG_META,
-    W_COMMIT_TXN,
+    W_LOG_META,        /* what landed made ready to be the file's */
+    W_INK,             /* the record inked (TagFSInkPlot) */
+    W_SPARE,           /* a Spare for the pool's tail stamped through the port */
+    W_SPARE_DONE,
     W_PUBLISH,
     W_RELEASE_TOKEN,
     W_DONE,
@@ -62,7 +64,10 @@ typedef struct WriteJob {
     /* ---- the file ---- */
     Plot              plot;              /* loaded under the token (W_ALLOC) */
     bool              loaded;            /* PlotLoad answered OK */
-    bool              committed;         /* a record naming bytes_done is the file's */
+    bool              committed;         /* an inked record naming bytes_done is the file's */
+    error_t           stopped;           /* the refusal a write that stopped part way ends on */
+    uint32_t          spare_block;       /* the Spare W_SPARE stamps, until the pool has it */
+    MetaPoolBlock    *spare_image;
 
     /* ---- in-flight chunk ---- */
     uint32_t          if_disk_block;

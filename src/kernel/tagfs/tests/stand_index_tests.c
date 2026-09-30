@@ -52,7 +52,8 @@ static bool StandIndexFill(FileMap* map, uint32_t step)
             FileRecordRelease(rec);
             return false;
         }
-        error_t put = FileMapRecordPut(map, fid, rec, 0, 16 + k, &stake);
+        RecordWhere   where = { .link = 0, .offset = 16 + k, .gen = 0, .shape = 0 };
+        error_t put = FileMapRecordPut(map, fid, rec, &where, &stake);
         FileMapStakeLetGo(&stake);
         if (put != OK || FileMapRowSet(map, fid, 3, 16 + k) != OK)
             return false;
@@ -343,7 +344,7 @@ out:
  * the volume's own create is asked with its counter at the end, and must
  * refuse the same way and make nothing. The fifteen are not made as files: a
  * file table row is placed by its id (file_table.c), and one at 0xFFFFFFF0
- * would ask the table's chain for eight million blocks at the next sync. The
+ * would ask the table's chain for eight million blocks at the next cycle. The
  * name has no stem, so the create interns no tag and writes nothing before it
  * reaches the counter, and the live counter is at the end for no longer than
  * that.

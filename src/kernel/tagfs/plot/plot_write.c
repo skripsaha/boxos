@@ -1,4 +1,5 @@
 #include "plot_internal.h"
+#include "scribe.h"
 
 /*
  * Blocks written the synchronous way, each by the one read-modify-write rule
@@ -83,6 +84,10 @@ error_t PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *o
     }
 
     kfree(buf);
+    /* What landed is the medium's only once a flush issued after it is kept:
+     * the cycle that names these blocks issues it before the name. */
+    if (done > 0)
+        p->data_need = VolumeFlushNeed();
     *out_done = done;
     return rc;
 }
@@ -143,7 +148,8 @@ error_t PlotExtendZero(Plot *p, uint64_t size)
             goto out;
         }
     }
-    p->size = size;
+    p->size      = size;
+    p->data_need = VolumeFlushNeed();
 out:
     kfree(buf);
     return rc;

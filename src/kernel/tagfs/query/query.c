@@ -1,7 +1,5 @@
 #include "../tagfs.h"
 #include "../file_map/file_map.h"
-#include "../file_table/file_table.h"
-#include "../metadata_pool/meta_pool.h"
 #include "klib.h"
 
 /*
@@ -207,22 +205,14 @@ static void FragAdd(FragCount* frag, uint32_t flags, const FileExtent* extents, 
     frag->files++;
 }
 
-/* One file's record — memory's when the map holds it, the medium's otherwise. */
+/* One file's record, out of the map of live files: every live file has one. */
 static void FragOfFile(FragCount* frag, uint32_t fid)
 {
-    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL, NULL);
-    if (rec) {
-        FragAdd(frag, rec->flags, rec->extents, rec->extent_count);
-        FileRecordRelease(rec);
+    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    if (!rec)
         return;
-    }
-    uint32_t      mb, mo;
-    TagFSMetadata meta;
-    memset(&meta, 0, sizeof(meta));
-    if (file_table_lookup(fid, &mb, &mo) != 0 || meta_pool_read(mb, mo, &meta) != 0)
-        return;
-    FragAdd(frag, meta.flags, meta.extents, meta.extent_count);
-    tagfs_metadata_free(&meta);
+    FragAdd(frag, rec->flags, rec->extents, rec->extent_count);
+    FileRecordRelease(rec);
 }
 
 /*

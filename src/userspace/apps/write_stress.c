@@ -7,7 +7,7 @@
  *
  * Each scenario writes deterministic content and reads it back to verify
  * the bytes survived the async pump (W_LOCATE → W_DMA_FILL → W_AHCI_SUBMIT
- * → W_AHCI_DONE → W_LOG_META → W_PUBLISH → W_RELEASE_TOKEN → W_DONE).
+ * → W_AHCI_DONE → W_LOG_META → W_INK → W_PUBLISH → W_RELEASE_TOKEN → W_DONE).
  */
 
 #include "box/file.h"

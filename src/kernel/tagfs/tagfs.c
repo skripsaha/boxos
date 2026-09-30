@@ -22,6 +22,9 @@
 #include "settle_cut/settle_cut.h"
 #include "plot/plot.h"
 #include "scribe/scribe.h"
+#include "ink/ink.h"
+#include "ink/fallow.h"
+#include "settle/settle.h"
 #include "../../kernel/drivers/timer/rtc.h"
 #include "logbook.h"
 #include "cpu_calibrate.h"
@@ -2183,19 +2186,18 @@ static error_t mount_refused(const char *what, error_t why)
 /*
  * One live file the table names, held against the pool.
  *
- * ‼ WHERE THE POOL SAYS THE NEWEST RECORD IS, WINS. The pool is append-only and
- * the mount's walk of it read it in order, so its answer is the newest record
- * for this file that ever reached the medium. A table naming somewhere else is
- * a table that missed a flush the pool did not — the exact state a power cut
- * between the two writes of one metadata update leaves. Correcting it here is
- * what turns that from a lost file into a file one sync behind.
+ * ‼ WHERE THE POOL SAYS THE NEWEST RECORD IS, WINS. The pool is only appended
+ * to, and the mount's walk read it in order, so the record the map holds for a
+ * file is the newest of its records that ever reached the medium. A table row
+ * naming somewhere else is a row whose block no cycle wrote again since —
+ * rows are written when files come and go, not every time a record moves —
+ * and it is corrected to the pool, in memory now and on the medium by the
+ * next cycle.
  *
- * The record that walk holds is the one at the corrected place, unpacked and
- * summed already, so it is what is read; the medium is asked only for a file
- * whose record memory could not hold. A file with nothing readable anywhere,
- * or whose newest record is no longer ACTIVE, leaves the table and the map of
- * live files; the rest have their extents marked in the roll call's map, when
- * there is one, and every tag they wear put into the tag index.
+ * A file the pool holds no record of has nothing readable anywhere: it leaves
+ * the table and the map of live files, said. The rest have their extents
+ * marked in the roll call's map, when there is one, and every tag they wear
+ * put into the tag index.
  */
 static void mount_check_file(uint32_t fid, uint8_t *computed_bm, uint32_t *checked,
                              uint32_t *corrected, uint32_t *lost)
@@ -2204,66 +2206,41 @@ static void mount_check_file(uint32_t fid, uint8_t *computed_bm, uint32_t *check
     if (file_table_lookup(fid, &mb, &mo) != 0)
         return;
 
-    uint32_t pb, po;
-    bool     pooled = meta_pool_mirror_where(fid, &pb, &po) == 0;
-    if (pooled && (pb != mb || po != mo))
+    RecordWhere where;
+    FileRecord *rec = FileMapRecordHold(g_state.files, fid, &where);
+    if (!rec)
     {
-        kprintf("[TagFS FSCK] file %u is named at block %u+%u and "
-                "this volume's newest metadata for it is at block "
-                "%u+%u — the pool is the newer of the two, and the "
-                "table is corrected to it\n",
-                fid, mb, mo, pb, po);
-        file_table_update(fid, pb, po);
-        mb = pb;
-        mo = po;
-        (*corrected)++;
-    }
-
-    TagFSMetadata meta;
-    memset(&meta, 0, sizeof(meta));
-    int read = pooled ? meta_pool_read_cached(fid, &meta) : -1;
-    if (read != 0)
-        read = meta_pool_read(mb, mo, &meta);
-    if (read != 0)
-    {
-        /* Nothing readable is left for this file anywhere: the table's place
-         * will not unpack and the pool has no newer one to offer. The entry
-         * goes, and with it the file — so it is said with kprintf and survives
-         * into a shipped build. This line was the silence that turned a lost
-         * file into a mystery. */
-        kprintf("[TagFS FSCK] file %u is named at block %u+%u and "
-                "there is no readable metadata there or anywhere "
-                "else in this volume's pool — the file is gone and "
-                "its name goes with it\n", fid, mb, mo);
+        /* Said with kprintf, so it survives into a shipped build: this line
+         * was the silence that turned a lost file into a mystery. */
+        kprintf("[TagFS FSCK] file %u is named at block %u+%u and this volume's pool "
+                "holds no record of it that reads — the file is gone and its name "
+                "goes with it\n", fid, mb, mo);
         (*lost)++;
         file_table_delete(fid);
         FileMapDrop(g_state.files, fid);
         return;
     }
 
-    if (!(meta.flags & TAGFS_FILE_ACTIVE))
+    uint32_t pb = 0;
+    if (PoolLinkBlock(where.link, &pb) && (pb != mb || where.offset != mo))
     {
-        /* A delete that did not finish: the table's row goes and the extents
-         * are not marked, so the roll call gives the blocks back. */
-        file_table_delete(fid);
-        FileMapDrop(g_state.files, fid);
-        tagfs_metadata_free(&meta);
-        return;
+        file_table_update(fid, pb, where.offset);
+        (*corrected)++;
     }
 
-    for (uint32_t e = 0; computed_bm && e < meta.extent_count; e++)
+    for (uint32_t e = 0; computed_bm && e < rec->extent_count; e++)
     {
-        uint32_t start = meta.extents[e].start_block;
-        uint32_t count = meta.extents[e].block_count;
+        uint32_t start = rec->extents[e].start_block;
+        uint32_t count = rec->extents[e].block_count;
         for (uint32_t b = start; b < start + count && b < g_state.layout.data_blocks; b++)
             bitmap_set_bit(computed_bm, b);
     }
     (*checked)++;
 
-    for (uint32_t t = 0; t < meta.tag_count; t++)
-        tag_bitmap_set(g_state.bitmap_index, meta.tag_ids[t], fid);
+    for (uint32_t t = 0; t < rec->tag_count; t++)
+        tag_bitmap_set(g_state.bitmap_index, rec->tags[t], fid);
 
-    tagfs_metadata_free(&meta);
+    FileRecordRelease(rec);
 }
 
 /* Every live file, a batch of ids at a time out of the map of them: the walk
@@ -2582,7 +2559,7 @@ error_t tagfs_init(void) {
      * can be derived wins over the number that was remembered.
      */
     if (meta_pool_mirror_init() != 0) {
-        return mount_refused("there is no memory to read its metadata pool through",
+        return mount_refused("its files' records could not all be held in memory",
                              ERR_NO_MEMORY);
     }
 
@@ -2744,27 +2721,18 @@ error_t tagfs_init(void) {
      * MEASURED 2026-09-10: a volume that grew, had its head deed rolled back
      * to the pre-growth one — the state a power cut between the two writes of
      * a growth leaves — and then grew again on the next mount, came up
-     * claiming 118764 free blocks in a data run of 73594. More free space than
-     * the volume has, from a number that had been added to twice for the same
-     * ground. The bitmap knew better the whole time, and the roll call above
-     * has just counted it, window by window, at no cost beyond the read it
-     * made anyway.
+     * claiming 118764 free blocks in a data run of 73594. The bitmap knew
+     * better the whole time, and the roll call above has just counted it.
      *
-     * So the stored number is corrected when it disagrees. That makes every
-     * mount a repair of it, and takes the whole class of "the count drifted"
-     * out of the system rather than adding another place that tries to keep
-     * it right.
+     * So the number is corrected in memory, and the Ledger's one writer — the
+     * next Settle cycle — carries it to the medium: a mount writes no Ledger.
      */
     if (g_state.ledger.free_blocks != g_ledger_free_as_read) {
-        bool kept = (tagfs_write_ledger() == OK);
-        kprintf("[TagFS] the ledger came off the medium saying %llu blocks "
-                "were free and the bitmap says %llu — a block is taken in "
-                "the bitmap, so that is the number kept%s\n",
+        kprintf("[TagFS] the ledger came off the medium saying %llu blocks were free and "
+                "the bitmap says %llu — a block is taken in the bitmap, so that is the "
+                "number kept, and the next Settle cycle writes it\n",
                 (unsigned long long)g_ledger_free_as_read,
-                (unsigned long long)g_state.ledger.free_blocks,
-                kept ? ", and it is written back"
-                     : "; the medium would not take it, so it is counted "
-                       "again on the next mount");
+                (unsigned long long)g_state.ledger.free_blocks);
     }
 
     /* Said HERE and not beside the Ledger, because until the bitmap has been
@@ -2777,6 +2745,11 @@ error_t tagfs_init(void) {
 
     // Populate well-known tag bitmasks for O(1) checks
     tagfs_init_well_known_tags();
+
+    /* Nothing is inked, nothing settled and nothing rests: every record the
+     * pool holds is on the medium. */
+    InkMountReset();
+    SettleMountReset();
 
     g_state.initialized = true;
 
@@ -2846,166 +2819,30 @@ error_t tagfs_init(void) {
     /*
      * ‼ AND WHAT THAT MOUNT PROMISES, SAID ONCE, IN PLAIN WORDS.
      *
-     * Write-through on every metadata edit was measured and rejected: 3.25x the
-     * bytes and 6x the commands per write, all landing on the same three
-     * blocks — the worst pattern there is for the flash this machine boots
-     * from. So the promise is the one the system can actually keep, and a
-     * promise nobody is told is not a promise. It is said here rather than in
-     * a document because the document is not on the screen when the power
-     * goes.
+     * A write's bytes reach the medium as they are written; the record that
+     * names them — the file's name, size and extents — is inked in memory and
+     * reaches the medium with a Settle cycle, which this step runs when
+     * somebody asks and waits: `anchor`, an orderly shutdown. A promise nobody
+     * is told is not a promise, and it is said here rather than in a document
+     * because the document is not on the screen when the power goes.
      */
     kprintf("[TagFS] what this volume promises: a file's content reaches the "
-            "medium as it is written; its name, the table, the bitmap and the "
-            "ledger are made durable by `anchor` and by an orderly shutdown\n");
+            "medium as it is written; its name, size and extents, the table, the "
+            "bitmap and the ledger are made durable by a Settle cycle — `anchor`, "
+            "and an orderly shutdown\n");
+
+    /* The Spares a delete stands on, laid by now so a volume with no free
+     * block left can still give a file up (meta_pool.h, SPARE_RESERVE). A
+     * volume with no room for them says so, and deletes while its tail lasts. */
+    error_t spared = PoolSpareRefill(SPARE_RESERVE);
+    if (spared != OK)
+        kprintf("[TagFS] the Spares a delete stands on could not all be laid (error %u) — "
+                "a full volume deletes only while its pool's tail has room\n",
+                (unsigned)spared);
 
     SettleCutSayArmed();            /* nothing at all unless SETTLECUT=<point> */
     TagFSHoldGroundOpenFile();      /* nothing at all unless HOLDGROUND=on */
     return 0;
-}
-
-// ----------------------------------------------------------------------------
-// tagfs_sync / tagfs_shutdown
-// ----------------------------------------------------------------------------
-
-static void tagfs_sync_inside(void);
-
-error_t tagfs_sync(void)
-{
-    if (!tagfs_enter()) {
-        /* The same fact volume_would_not_flush tells about a flush that
-         * could not reach the medium, told here about a sync that never
-         * started: named volume, named seat, and what the door says right
-         * now — because a caller who hears nothing assumes the records it
-         * asked for are on the medium, and here not one byte was written. */
-        uint8_t door = __atomic_load_n(&g_door, __ATOMIC_ACQUIRE);
-        kprintf("[TagFS] sync refused at the door — seat %u (%s), %s — not "
-                "one byte of metadata was written\n",
-                g_tagfs_seat, BoardroomSeatName(g_tagfs_seat),
-                door == VOLUME_LEAVING ? "the volume is already on its way out"
-                                       : "no volume is mounted there");
-        return ERR_TAGFS_NOT_INITIALIZED;
-    }
-    /* One sync at a time: two, each cut by the other's flush, could leave the
-     * medium a table naming a pool record of the other sync that no flush has
-     * covered yet. A sync asked for while another runs is answered by the
-     * pass that covers it — its own, or the one that began after it asked. */
-    uint64_t cover  = 0;
-    error_t  rc     = OK;
-    uint64_t ticket = ScribeAsk(&g_sync_scribe);
-    switch (ScribeWait(&g_sync_scribe, ticket, &cover, &rc)) {
-    case SCRIBE_MINE:
-        /* Given back OK whatever the pass met on the medium: a sync answers
-         * for its writes only from step 1.4, which holds that very defect
-         * (stand_sync_owns_a_refused_write, _flush). Until then a caller whose
-         * ask this pass covers hears WRITTEN over a refused table write, as
-         * this caller hears OK — and does not run a pass of its own. */
-        tagfs_sync_inside();
-        ScribeGive(&g_sync_scribe, cover, OK);
-        break;
-    case SCRIBE_SELF:
-        kprintf("[TagFS] sync refused: a sync on this core is suspended beneath "
-                "this one, and waiting for it here would never end\n");
-        rc = ERR_BUSY;
-        break;
-    default:
-        break;      /* WRITTEN leaves OK; REFUSED has put the pass's refusal in rc */
-    }
-    tagfs_leave();
-    return rc;
-}
-
-static void tagfs_sync_inside(void)
-{
-    /* SETTLE_CUT_AT: a SETTLECUT=<point> kernel stops the machine at that
-     * point of the first sync to reach it (settle_cut.h); nothing in any other
-     * build. */
-    SETTLE_CUT_AT(SETTLE_CUT_POINT_REGISTRY);
-    tag_registry_flush(g_state.registry);
-
-    /*
-     * ‼ THE RECORD, THEN THE NAME, THEN THE PLACE OF THE RECORD IT REPLACED.
-     *
-     * These were the other way up: the file table went first and published an
-     * entry naming a record at a byte offset the medium's copy of the pool
-     * block had not reached yet. A crash there left a name pointing into the
-     * middle of nothing. A record must exist on the medium before anything
-     * names it.
-     *
-     * The retires come last, after the name is down, because a retire destroys
-     * the only copy of a file's OLD metadata — and until the replacement is
-     * named on the medium, the old copy is the only metadata that file has.
-     * See the note over MetaPoolRetire.
-     */
-    SETTLE_CUT_AT(SETTLE_CUT_POINT_POOL);
-    meta_pool_flush();
-    SETTLE_CUT_AT(SETTLE_CUT_POINT_TABLE);
-    file_table_flush();
-    SETTLE_CUT_AT(SETTLE_CUT_POINT_RETIRES);
-    meta_pool_flush_retires();
-
-    SETTLE_CUT_AT(SETTLE_CUT_POINT_INTEGRITY);
-    IntegrityFlush();
-    IntegrityDrainReports();   // publish any pending bit-rot Touch events
-
-    /* The block map's part: every edit laid on, every sector memory changed
-     * written — the sectors that carry bits for the data run, a window at a
-     * time, never the whole region the volume reserved for its growth.
-     *
-     * ‼ THE WRITE THAT MAKES THE ALLOCATOR DURABLE, SAID WHEN REFUSED. What is
-     * at stake is not this sync: it is the NEXT mount, which reads this map
-     * and believes it. A block handed out since the medium last took its
-     * sector reads as free there, and the roll call is what then keeps it
-     * from being handed to a second owner. */
-    SETTLE_CUT_AT(SETTLE_CUT_POINT_BITMAP);
-    if (BlockMapFlush() != OK) {
-        kprintf("[TagFS] sync: the block map of %u block(s) is not all on the "
-                "medium — its map there is older than this volume, and the next "
-                "mount will read it as such\n", g_state.layout.data_blocks);
-    }
-
-    SETTLE_CUT_AT(SETTLE_CUT_POINT_LEDGER);
-    tagfs_write_ledger();
-
-    /* Drive write-cache flush.
-     *
-     * NCQ WRITE FPDMA QUEUED returns "received" — bytes may still be
-     * in the on-disk write cache (16-256 MiB) when the command
-     * completes. Without an explicit FLUSH CACHE after the sync
-     * sequence, a power cut between this point and the next disk
-     * write loses the superblock + bitmap + journal commit records
-     * we just produced — the next mount sees a corrupted file
-     * system. tagfs_flush_cache() dispatches FLUSH CACHE EXT to the
-     * *probed* device (the AHCI port / ATA drive that actually holds
-     * the volume — never a hardcoded port 0) and only returns when the
-     * drive's write cache has reached the media.
-     *
-     * Cost: ~5-15 ms per call on a spinning drive, ~50 µs on NVMe
-     * via SATA. tagfs_sync is called from exactly two places — an
-     * application's anchor() request (STORAGE_OBJ_ANCHOR, storage_ops.c)
-     * and the shutdown path (tagfs_shutdown) — both rare next to ordinary
-     * writes.
-     *
-     * ‼ AND THE ANSWER IS HEARD. It was thrown away, so a sync that wrote
-     * every one of the records above and then could not get one of them onto
-     * the media returned exactly as a sync that had. tagfs_sync's error_t
-     * speaks for the door — refused before a single byte was touched — but
-     * carries nothing about a flush that fails AFTER real writes, so that
-     * fact is still told only here. tagfs_flush_cache has already named the
-     * volume; what is added is what it means for the records this
-     * particular call just wrote.
-     *
-     * It INSISTS rather than reporting a busy port: a sync is asked for
-     * exactly when somebody needs these records on the media, and "somebody
-     * else is flushing this instant" is not an answer to that. See
-     * VolumeFlushFor (scribe.h) for why the asking ends. */
-    SETTLE_CUT_AT(SETTLE_CUT_POINT_FLUSH);
-    error_t flushed = VolumeFlushFor(VolumeFlushNeed());
-    if (flushed != OK) {
-        kprintf("[TagFS] sync: the registry, the pool, the file table, the "
-                "bitmap and the ledger are all written, and none of them is "
-                "proven durable\n");
-    }
-    SETTLE_CUT_AT(SETTLE_CUT_POINT_DONE);
 }
 
 /*
@@ -3031,10 +2868,9 @@ static void tagfs_sync_inside(void)
  *
  * ‼ NOT ONE BYTE IS WRITTEN. What is held in memory describes the volume as it
  * was BEFORE whatever went wrong, and the medium under the head may not even be
- * the same one any more. That is why the one shutdown that could still write,
- * the metadata pool's, is told so explicitly (meta_pool_shutdown(false))
- * rather than being relied upon to find the medium gone; the file table's
- * shutdown only lets go of memory.
+ * the same one any more. Only a Settle cycle writes the volume's records, and
+ * every shutdown below only lets go of memory — the pool's tail and the ground
+ * resting in Fallow included, which the next mount reads afresh.
  */
 static void tagfs_clear_the_ground(void)
 {
@@ -3059,7 +2895,8 @@ static void tagfs_clear_the_ground(void)
     }
 
     file_table_shutdown();
-    meta_pool_shutdown(false);
+    meta_pool_shutdown();
+    FallowDropAll();
     FileMapDestroy(g_state.files);
     g_state.files = NULL;
 
@@ -3136,16 +2973,17 @@ static bool tagfs_abandon(void)
 }
 
 /*
- * ‼ THE MACHINE IS STOPPING, AND THAT IS A DIFFERENT THING ENTIRELY.
+ * ‼ THE MACHINE IS STOPPING, AND ITS LAST CYCLE HAS ALREADY RUN.
  *
- * What has to happen is that memory reaches the medium; what must NOT happen
- * is that memory somebody is still reading is handed back to an allocator no
- * one will ever ask again. So this writes everything back through the ordinary
- * door — with the volume still up, so the flushes below it are allowed to work
- * — and then shuts the door and stops. Nothing is freed.
- *
- * Freeing at a halt was never for the machine's benefit; it was tidiness, and
- * it is the one road on which the take-down cannot wait for anybody.
+ * The halt runs the volume's last Settle cycle itself, before interrupts go
+ * off (TagFSSettleForHalt, system_halt.c): after that a committer could be a
+ * core the halt has stopped, and nothing may stand over the medium then. What
+ * is left here is to shut the door and to say what the last cycle answered —
+ * and how many changes no cycle settled, inked after it by programs still
+ * running while the halt began or left by a cycle that was refused, which the
+ * medium was not given. Nothing is freed: freeing at
+ * a halt was never for the machine's benefit, and memory somebody is still
+ * reading must not go back to an allocator nobody will ask again.
  */
 error_t tagfs_shutdown(void)
 {
@@ -3153,11 +2991,16 @@ error_t tagfs_shutdown(void)
         return OK;                      /* nothing mounted, nothing owed */
     }
 
-    error_t synced = tagfs_sync();
-
+    uint64_t after  = 0;
+    error_t  answer = SettleHaltAnswer(&after);
     __atomic_store_n(&g_door, (uint8_t)VOLUME_LEAVING, __ATOMIC_RELEASE);
-    debug_printf("[TagFS] Shutdown complete\n");
-    return synced;
+    if (after) {
+        kprintf("[TagFS] %llu change(s) no Settle cycle settled before the machine stopped — "
+                "the medium was not given them\n", (unsigned long long)after);
+        if (answer == OK)
+            answer = ERR_TAGFS_METADATA_ERROR;
+    }
+    return answer;
 }
 
 /*
@@ -3283,682 +3126,6 @@ static error_t TagFS_RunTests_inside(void)
 }
 
 // ----------------------------------------------------------------------------
-// The name is a tag
-//
-// Every file carries the stem of its name — up to the last dot — as its first
-// tag, so "who is called kernel" is a question for the index, not a walk of the
-// volume. create puts the tag there and rename moves it, both through this one
-// rule, so the two can never disagree about what a name's tag is. The stem is a
-// key, spelled by the one spelling (tag_spelling.h) but never split at ':', and
-// it is read in place: a name is never cut to fit a buffer, so it never wears a
-// shorter tag than itself.
-// ----------------------------------------------------------------------------
-
-/* The stem of a name as a key. OK with out->key NULL when the name has no
- * stem — ".profile", or nothing but blanks before the dot — and so no tag;
- * ERR_TAGFS_TAG_TOO_LONG for a stem longer than a key may be. */
-static error_t tagfs_name_stem(const char *filename, TagSpelling *out)
-{
-    size_t flen = strlen(filename);
-    size_t slen = flen;
-    for (size_t i = flen; i > 0; i--)
-    {
-        if (filename[i - 1] == '.')
-        {
-            slen = i - 1;
-            break;
-        }
-    }
-    error_t rc = TagSpellKey(filename, slen, out);
-    if (rc == ERR_TAGFS_INVALID_TAG)
-    {
-        out->key = NULL;
-        return OK;
-    }
-    return rc;
-}
-
-/* Intern the name's tag: its id in *out_tag, TAGFS_INVALID_TAG_ID for a name
- * with no stem. A name whose tag the registry refuses is refused with it —
- * a file is never made or renamed without the tag its name gives it — and so
- * is one whose tag the medium was not given: a file that wore an id the
- * registry on the medium does not define would find that id handed to
- * another tag after the next mount. Called WITHOUT g_state.lock: a new tag
- * flushes the registry to the medium, and that flush writes, and may wait for
- * another core's flush of the registry — neither of which may happen under
- * the state lock. A name the medium already has costs the flush nothing. */
-static error_t tagfs_name_tag_intern(const char *filename, uint16_t *out_tag)
-{
-    TagSpelling stem;
-    *out_tag = TAGFS_INVALID_TAG_ID;
-    error_t rc = tagfs_name_stem(filename, &stem);
-    if (rc != OK || !stem.key)
-        return rc;
-    rc = TagRegistryIntern(g_state.registry, &stem, out_tag);
-    if (rc == OK)
-        rc = TagRegistryFlushFor(g_state.registry, *out_tag);
-    return rc;
-}
-
-/* The name's tag if the registry already knows it, else invalid. A lookup only
- * takes the registry's own lock, so it is safe under g_state.lock. */
-static uint16_t tagfs_name_tag_lookup(const char *filename)
-{
-    TagSpelling stem;
-    if (tagfs_name_stem(filename, &stem) != OK || !stem.key)
-        return TAGFS_INVALID_TAG_ID;
-    return TagRegistryLookup(g_state.registry, &stem);
-}
-
-// ----------------------------------------------------------------------------
-// tagfs_create_file
-// ----------------------------------------------------------------------------
-
-static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_ids, uint32_t tag_count,
-                                    uint32_t *out_file_id);
-
-int tagfs_create_file(const char *filename, const uint16_t *tag_ids, uint32_t tag_count,
-                      uint32_t *out_file_id)
-{
-    if (!tagfs_enter())
-        return -(int)ERR_TAGFS_NOT_INITIALIZED;
-    int rc = tagfs_create_file_inside(filename, tag_ids, tag_count, out_file_id);
-    tagfs_leave();
-    return rc;
-}
-
-static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_ids, uint32_t tag_count,
-                                    uint32_t *out_file_id)
-{
-    if (!filename || !out_file_id)
-        return -(int)ERR_INVALID_ARGUMENT;
-
-    // The name's tag first, outside the state lock (it may flush the registry).
-    uint16_t auto_tag;
-    error_t  named = tagfs_name_tag_intern(filename, &auto_tag);
-    if (named != OK)
-        return -(int)named;
-
-    TagFSLockTake(&g_state.lock);
-
-    uint32_t file_id = 0;
-    error_t  issued  = LedgerIssueFileId(&g_state.ledger, &file_id);
-    if (issued != OK) {
-        TagFSLockDrop(&g_state.lock);
-        return -(int)issued;
-    }
-
-    // Build deduplicated tag array: auto-label first, then caller's tags
-    uint32_t final_count = 0;
-    uint16_t *final_tags = NULL;
-    {
-        uint64_t max_tags = (uint64_t)tag_count + 1;
-        final_tags = kmalloc(sizeof(uint16_t) * max_tags);
-        if (!final_tags)
-        {
-            debug_printf("[TagFS] create_file: kmalloc for final_tags failed\n");
-            TagFSLockDrop(&g_state.lock);
-            return -(int)ERR_NO_MEMORY;
-        }
-
-        // Add auto-label tag first
-        if (auto_tag != TAGFS_INVALID_TAG_ID)
-        {
-            final_tags[final_count++] = auto_tag;
-        }
-
-        // Add caller's tags, skipping duplicates
-        for (uint32_t i = 0; i < tag_count; i++)
-        {
-            if (!tag_ids)
-                break;
-            uint16_t tid = tag_ids[i];
-            bool dup = false;
-            for (uint32_t j = 0; j < final_count; j++)
-            {
-                if (final_tags[j] == tid)
-                {
-                    dup = true;
-                    break;
-                }
-            }
-            if (!dup)
-            {
-                final_tags[final_count++] = tid;
-            }
-        }
-    }
-
-    // Build metadata
-    TagFSMetadata meta;
-    memset(&meta, 0, sizeof(meta));
-    meta.file_id = file_id;
-    meta.flags = TAGFS_FILE_ACTIVE;
-    meta.size = 0;
-    meta.created_time = 0;
-    meta.modified_time = 0;
-    meta.extent_count = 0;
-    meta.extents = NULL;
-
-    size_t name_len = strlen(filename);
-    meta.filename = kmalloc(name_len + 1);
-    if (!meta.filename)
-    {
-        debug_printf("[TagFS] create_file: kmalloc for filename failed\n");
-        kfree(final_tags);
-        TagFSLockDrop(&g_state.lock);
-        return -(int)ERR_NO_MEMORY;
-    }
-    memcpy(meta.filename, filename, name_len + 1);
-
-    meta.tag_count = final_count;
-    meta.tag_ids = final_tags;
-
-    if (!PlotFits(&meta, NULL))
-    {
-        kprintf("[TagFS] create of '%s': %u tag(s) and its name make a record wider than this "
-                "volume holds (%u bytes) — no file is made\n", filename, final_count,
-                TAGFS_MPOOL_DATA_SIZE);
-        kfree(meta.tag_ids);
-        kfree(meta.filename);
-        TagFSLockDrop(&g_state.lock);
-        return -(int)ERR_TAGFS_RECORD_FULL;
-    }
-
-    // No journal for create: metadata is NEW (no previous on-disk state to protect).
-    // Write ordering ensures consistency:
-    //   1. meta_pool_write (append-only, crash → orphaned record, fsck cleans up)
-    //   2. file_table_update (crash → table points to valid metadata, counters off → fsck fixes)
-    //   3. superblock update (eventual)
-
-    // Write to metadata pool
-    uint32_t meta_block, meta_offset;
-    if (meta_pool_write(&meta, &meta_block, &meta_offset) != 0)
-    {
-        debug_printf("[TagFS] create_file: meta_pool_write failed for file_id=%u\n", file_id);
-        kfree(meta.tag_ids);
-        kfree(meta.filename);
-        TagFSLockDrop(&g_state.lock);
-        return -(int)ERR_DISK_FULL;
-    }
-
-    // Update file table
-    if (file_table_update(file_id, meta_block, meta_offset) != 0)
-    {
-        debug_printf("[TagFS] create_file: file_table_update failed for file_id=%u\n", file_id);
-        kfree(meta.tag_ids);
-        kfree(meta.filename);
-        TagFSLockDrop(&g_state.lock);
-        return -(int)ERR_DISK_FULL;
-    }
-
-    // Add to bitmap index (use final_count, the deduplicated count)
-    for (uint32_t i = 0; i < final_count; i++)
-    {
-        if (meta.tag_ids[i] != TAGFS_INVALID_TAG_ID)
-        {
-            tag_bitmap_set(g_state.bitmap_index, meta.tag_ids[i], file_id);
-        }
-    }
-
-    g_state.ledger.total_files++;
-
-    *out_file_id = file_id;
-
-    kfree(meta.tag_ids);
-    kfree(meta.filename);
-
-    TagFSLockDrop(&g_state.lock);
-
-    debug_printf("[TagFS] Created file '%s' file_id=%u\n", filename, file_id);
-    return 0;
-}
-
-// Forward declaration. Not static: the metadata pool hands a block back when
-// the last record in it is retired, and it is already holding g_state.lock
-// when it does — the same reason tagfs_alloc_blocks_internal is reachable from
-// there.
-error_t tagfs_free_blocks_internal(uint32_t start_block, uint32_t count);
-
-// ----------------------------------------------------------------------------
-// tagfs_delete_file
-// ----------------------------------------------------------------------------
-
-static int tagfs_delete_file_inside(uint32_t file_id);
-
-int tagfs_delete_file(uint32_t file_id)
-{
-    if (!tagfs_enter())
-        return -1;
-    int rc = tagfs_delete_file_inside(file_id);
-    /* The file's blocks whose sectors were away went back as edits written
-     * down; they are laid on now, so the ground is free when this returns. */
-    BlockMapSettle();
-    tagfs_leave();
-    return rc;
-}
-
-static int tagfs_delete_file_inside(uint32_t file_id)
-{
-    TagFSLockTake(&g_state.lock);
-
-    uint32_t meta_block, meta_offset;
-    if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0)
-    {
-        TagFSLockDrop(&g_state.lock);
-        return -1;
-    }
-
-    // Read metadata to get extents and tags for cleanup
-    TagFSMetadata meta;
-    memset(&meta, 0, sizeof(meta));
-    int has_meta = meta_pool_read(meta_block, meta_offset, &meta);
-
-    // Cleanup order: bitmap → file_table → blocks → metadata pool.
-    // file_table_delete before block_free ensures that on crash,
-    // fsck won't find a file referencing freed (and possibly reused) blocks.
-
-    // Out from under every tag its record says it wears — or, with no record
-    // to say, every tag the index has
-    if (has_meta == 0)
-        tag_bitmap_remove_file(g_state.bitmap_index, file_id, meta.tag_ids, meta.tag_count);
-    else
-        tag_bitmap_remove_file(g_state.bitmap_index, file_id, NULL, 0);
-
-    // Delete from file table (commit point: file officially gone)
-    file_table_delete(file_id);
-
-    // And the ground it kept in hand for its growth
-    AllotmentRelease(file_id);
-
-    // Free data blocks if we could read metadata — and the record's copy, an
-    // empty file's too, whose tags and name used to be left on the heap
-    if (has_meta == 0)
-    {
-        for (uint32_t i = 0; meta.extents && i < meta.extent_count; i++)
-        {
-            tagfs_free_blocks_internal(meta.extents[i].start_block, meta.extents[i].block_count);
-        }
-        tagfs_metadata_free(&meta);
-    }
-
-    // Delete from metadata pool (last: safe to zero after file_table is gone)
-    meta_pool_delete(meta_block, meta_offset);
-
-    if (g_state.ledger.total_files > 0)
-    {
-        g_state.ledger.total_files--;
-    }
-
-    TagFSLockDrop(&g_state.lock);
-
-    debug_printf("[TagFS] Deleted file_id=%u\n", file_id);
-    return 0;
-}
-
-// ----------------------------------------------------------------------------
-// tagfs_rename_file
-// ----------------------------------------------------------------------------
-
-static int tagfs_rename_file_inside(uint32_t file_id, const char *new_filename);
-
-int tagfs_rename_file(uint32_t file_id, const char *new_filename)
-{
-    if (!tagfs_enter())
-        return -1;
-    int rc = tagfs_rename_file_inside(file_id, new_filename);
-    tagfs_leave();
-    return rc;
-}
-
-static int tagfs_rename_file_inside(uint32_t file_id, const char *new_filename)
-{
-    if (!new_filename)
-        return -1;
-
-    /* The tag follows the name. A rename that changed the string and left the
-     * tag made the file visible under its old name and invisible under its
-     * new one — by-name lookup and proc_exec ask the index, not the string. */
-    uint16_t new_tag;
-    if (tagfs_name_tag_intern(new_filename, &new_tag) != OK)
-        return -1;
-
-    TagFSLockTake(&g_state.lock);
-
-    uint32_t meta_block, meta_offset;
-    if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0)
-    {
-        TagFSLockDrop(&g_state.lock);
-        return -1;
-    }
-
-    TagFSMetadata meta;
-    memset(&meta, 0, sizeof(meta));
-    if (meta_pool_read(meta_block, meta_offset, &meta) != 0)
-    {
-        debug_printf("[TagFS] rename_file: failed to read metadata for file_id=%u\n", file_id);
-        TagFSLockDrop(&g_state.lock);
-        return -1;
-    }
-
-    uint16_t old_tag = meta.filename ? tagfs_name_tag_lookup(meta.filename)
-                                     : TAGFS_INVALID_TAG_ID;
-
-    // Replace filename
-    if (meta.filename)
-        kfree(meta.filename);
-    size_t len = strlen(new_filename);
-    meta.filename = kmalloc(len + 1);
-    if (!meta.filename)
-    {
-        tagfs_metadata_free(&meta);
-        TagFSLockDrop(&g_state.lock);
-        return -1;
-    }
-    memcpy(meta.filename, new_filename, len + 1);
-
-    // Move the name's tag: the old one out (if it was there), the new one in
-    // first, where create puts it. Same stem, same tag — nothing to move.
-    bool old_tag_removed = false;
-    bool new_tag_added   = false;
-    if (old_tag != new_tag)
-    {
-        if (old_tag != TAGFS_INVALID_TAG_ID)
-        {
-            for (uint32_t i = 0; i < meta.tag_count; i++)
-            {
-                if (meta.tag_ids[i] == old_tag)
-                {
-                    for (uint32_t j = i; j + 1 < meta.tag_count; j++)
-                        meta.tag_ids[j] = meta.tag_ids[j + 1];
-                    meta.tag_count--;
-                    old_tag_removed = true;
-                    break;
-                }
-            }
-        }
-        if (new_tag != TAGFS_INVALID_TAG_ID)
-        {
-            bool present = false;
-            for (uint32_t i = 0; i < meta.tag_count; i++)
-                if (meta.tag_ids[i] == new_tag) present = true;
-            if (!present)
-            {
-                uint16_t *ids = kmalloc(sizeof(uint16_t) * (meta.tag_count + 1u));
-                if (!ids)
-                {
-                    tagfs_metadata_free(&meta);
-                    TagFSLockDrop(&g_state.lock);
-                    return -1;
-                }
-                ids[0] = new_tag;
-                if (meta.tag_ids)
-                    memcpy(ids + 1, meta.tag_ids, sizeof(uint16_t) * meta.tag_count);
-                kfree(meta.tag_ids);
-                meta.tag_ids = ids;
-                meta.tag_count++;
-                new_tag_added = true;
-            }
-        }
-    }
-
-    uint32_t new_block, new_offset;
-    if (meta_pool_write(&meta, &new_block, &new_offset) != 0)
-    {
-        debug_printf("[TagFS] rename_file: meta_pool_write failed\n");
-        tagfs_metadata_free(&meta);
-        TagFSLockDrop(&g_state.lock);
-        return -1;
-    }
-
-    file_table_update(file_id, new_block, new_offset);
-    if (old_tag_removed)
-        tag_bitmap_clear(g_state.bitmap_index, old_tag, file_id);
-    if (new_tag_added)
-        tag_bitmap_set(g_state.bitmap_index, new_tag, file_id);
-    meta_pool_delete(meta_block, meta_offset);
-
-    tagfs_metadata_free(&meta);
-
-    TagFSLockDrop(&g_state.lock);
-    return 0;
-}
-
-// ----------------------------------------------------------------------------
-// Tag operations
-// ----------------------------------------------------------------------------
-
-static int tagfs_add_tag_inside(uint32_t file_id, uint16_t tag_id);
-
-int tagfs_add_tag(uint32_t file_id, uint16_t tag_id)
-{
-    if (!tagfs_enter())
-        return -1;
-    int rc = tagfs_add_tag_inside(file_id, tag_id);
-    tagfs_leave();
-    return rc;
-}
-
-static int tagfs_add_tag_inside(uint32_t file_id, uint16_t tag_id)
-{
-    TagFSLockTake(&g_state.lock);
-
-    uint32_t meta_block, meta_offset;
-    if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0)
-    {
-        TagFSLockDrop(&g_state.lock);
-        return -1;
-    }
-
-    TagFSMetadata meta;
-    memset(&meta, 0, sizeof(meta));
-    if (meta_pool_read(meta_block, meta_offset, &meta) != 0)
-    {
-        TagFSLockDrop(&g_state.lock);
-        return -1;
-    }
-
-    // Check if tag already present
-    for (uint32_t i = 0; i < meta.tag_count; i++)
-    {
-        if (meta.tag_ids[i] == tag_id)
-        {
-            tagfs_metadata_free(&meta);
-            TagFSLockDrop(&g_state.lock);
-            return 0;
-        }
-    }
-
-    // Grow tag list
-    uint32_t new_count = meta.tag_count + 1;
-    uint16_t *new_ids = kmalloc(sizeof(uint16_t) * new_count);
-    if (!new_ids)
-    {
-        tagfs_metadata_free(&meta);
-        TagFSLockDrop(&g_state.lock);
-        return -1;
-    }
-    if (meta.tag_ids)
-    {
-        memcpy(new_ids, meta.tag_ids, sizeof(uint16_t) * meta.tag_count);
-    }
-    new_ids[meta.tag_count] = tag_id;
-    kfree(meta.tag_ids);
-    meta.tag_ids = new_ids;
-    meta.tag_count = new_count;
-
-    uint32_t new_block, new_offset;
-    int r = meta_pool_write(&meta, &new_block, &new_offset);
-    if (r != 0)
-    {
-        tagfs_metadata_free(&meta);
-        TagFSLockDrop(&g_state.lock);
-        return r;
-    }
-    file_table_update(file_id, new_block, new_offset);
-    tag_bitmap_set(g_state.bitmap_index, tag_id, file_id);
-    meta_pool_delete(meta_block, meta_offset);
-
-    tagfs_metadata_free(&meta);
-    TagFSLockDrop(&g_state.lock);
-    return 0;
-}
-
-static int tagfs_remove_tag_inside(uint32_t file_id, uint16_t tag_id);
-
-int tagfs_remove_tag(uint32_t file_id, uint16_t tag_id)
-{
-    if (!tagfs_enter())
-        return -1;
-    int rc = tagfs_remove_tag_inside(file_id, tag_id);
-    tagfs_leave();
-    return rc;
-}
-
-static int tagfs_remove_tag_inside(uint32_t file_id, uint16_t tag_id)
-{
-    TagFSLockTake(&g_state.lock);
-
-    uint32_t meta_block, meta_offset;
-    if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0)
-    {
-        TagFSLockDrop(&g_state.lock);
-        return -1;
-    }
-
-    TagFSMetadata meta;
-    memset(&meta, 0, sizeof(meta));
-    if (meta_pool_read(meta_block, meta_offset, &meta) != 0)
-    {
-        TagFSLockDrop(&g_state.lock);
-        return -1;
-    }
-
-    // Find and remove
-    bool found = false;
-    for (uint32_t i = 0; i < meta.tag_count; i++)
-    {
-        if (meta.tag_ids[i] == tag_id)
-        {
-            meta.tag_ids[i] = meta.tag_ids[meta.tag_count - 1];
-            meta.tag_count--;
-            found = true;
-            break;
-        }
-    }
-
-    if (!found)
-    {
-        tagfs_metadata_free(&meta);
-        TagFSLockDrop(&g_state.lock);
-        return -1;
-    }
-
-    uint32_t new_block, new_offset;
-    int r = meta_pool_write(&meta, &new_block, &new_offset);
-    if (r != 0)
-    {
-        tagfs_metadata_free(&meta);
-        TagFSLockDrop(&g_state.lock);
-        return r;
-    }
-    file_table_update(file_id, new_block, new_offset);
-    tag_bitmap_clear(g_state.bitmap_index, tag_id, file_id);
-    meta_pool_delete(meta_block, meta_offset);
-
-    tagfs_metadata_free(&meta);
-    TagFSLockDrop(&g_state.lock);
-    return 0;
-}
-
-static bool tagfs_has_tag_inside(uint32_t file_id, uint16_t tag_id);
-
-bool tagfs_has_tag(uint32_t file_id, uint16_t tag_id)
-{
-    if (!tagfs_enter())
-        return false;
-    bool rc = tagfs_has_tag_inside(file_id, tag_id);
-    tagfs_leave();
-    return rc;
-}
-
-static bool tagfs_has_tag_inside(uint32_t file_id, uint16_t tag_id)
-{
-    return TagBitmapHas(g_state.bitmap_index, tag_id, file_id);
-}
-
-static error_t tagfs_add_tag_string_inside(uint32_t file_id, const TagSpelling *tag);
-
-error_t tagfs_add_tag_string(uint32_t file_id, const TagSpelling *tag)
-{
-    if (!tagfs_enter())
-        return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = tagfs_add_tag_string_inside(file_id, tag);
-    tagfs_leave();
-    return rc;
-}
-
-static error_t tagfs_add_tag_string_inside(uint32_t file_id, const TagSpelling *tag)
-{
-    uint16_t tag_id;
-    error_t  rc = TagRegistryIntern(g_state.registry, tag, &tag_id);
-    if (rc != OK)
-        return rc;
-    /* A new tag is on the medium before any file wears it, or no file does:
-     * the tag is not put on when the registry could not be written. One the
-     * medium already has costs the flush nothing. */
-    rc = TagRegistryFlushFor(g_state.registry, tag_id);
-    if (rc != OK)
-        return rc;
-    return tagfs_add_tag(file_id, tag_id) == 0 ? OK : ERR_INVALID_ARGUMENT;
-}
-
-static int tagfs_remove_tag_string_inside(uint32_t file_id, const TagSpelling *tag);
-
-int tagfs_remove_tag_string(uint32_t file_id, const TagSpelling *tag)
-{
-    if (!tagfs_enter())
-        return -1;
-    int rc = tagfs_remove_tag_string_inside(file_id, tag);
-    tagfs_leave();
-    return rc;
-}
-
-/* Whether the file's tag `tag_id` is what `tag` names: that exact tag when it
- * has a value, and any tag of its key when it is bare. */
-static bool tag_named_by(uint16_t tag_id, const TagSpelling *tag)
-{
-    TagSpelling worn;
-    if (!TagRegistrySpelling(g_state.registry, tag_id, &worn, NULL))
-        return false;
-    if (worn.key_len != tag->key_len || memcmp(worn.key, tag->key, tag->key_len) != 0)
-        return false;
-    return !tag->value || (worn.value && worn.value_len == tag->value_len &&
-                           memcmp(worn.value, tag->value, tag->value_len) == 0);
-}
-
-static int tagfs_remove_tag_string_inside(uint32_t file_id, const TagSpelling *tag)
-{
-    /* Remove by what the text names. The registry keys tags by (key, value),
-     * so a bare key names no one tag of its own: unset "color" drops
-     * "color:red" and a bare "color" alike, and unset "color:red" drops that
-     * tag alone. The tags a file wears are its record's. */
-    TagFSMetadata meta;
-    memset(&meta, 0, sizeof(meta));
-    if (tagfs_get_metadata(file_id, &meta) != 0)
-        return -1;
-
-    int removed = 0;
-    for (uint32_t i = 0; i < meta.tag_count; i++) {
-        if (tag_named_by(meta.tag_ids[i], tag) && tagfs_remove_tag(file_id, meta.tag_ids[i]) == 0)
-            removed++;
-    }
-
-    tagfs_metadata_free(&meta);
-    return removed > 0 ? 0 : -1;
-}
-
-// ----------------------------------------------------------------------------
 // The next file id — the questions of which files there are live in query/
 // ----------------------------------------------------------------------------
 
@@ -4021,24 +3188,35 @@ static TagFSFileHandle *tagfs_open_inside(uint32_t file_id, uint32_t flags)
     handle->extent_count = 0;
     handle->ofe = ofe;
 
-    TagFSMetadata meta;
-    memset(&meta, 0, sizeof(meta));
-    if (meta_pool_read(meta_block, meta_offset, &meta) == 0)
+    /*
+     * ‼ AN OPEN HOLDS WHAT IT NAMES, OR IS REFUSED (MP-D16). The record is the
+     * map's — the authority every read stands on, read with no I/O — and a
+     * file whose record is not there, or whose extents cannot be copied, is
+     * not handed out as an empty file: the next write would lay a fresh file
+     * over the bytes it could not see.
+     */
+    FileRecord *rec = FileMapRecordHold(g_state.files, file_id, NULL);
+    bool        held = rec != NULL;
+    if (held && rec->extent_count > 0)
     {
-        handle->file_size = meta.size;
-        handle->extent_count = meta.extent_count;
-        if (meta.extent_count > 0 && meta.extents)
-        {
-            handle->extents = kmalloc(sizeof(FileExtent) * meta.extent_count);
-            if (handle->extents)
-            {
-                memcpy(handle->extents, meta.extents,
-                       sizeof(FileExtent) * meta.extent_count);
-            }
-        }
-        tagfs_metadata_free(&meta);
+        handle->extents = kmalloc(sizeof(FileExtent) * rec->extent_count);
+        held = handle->extents != NULL;
+        if (held)
+            memcpy(handle->extents, rec->extents, sizeof(FileExtent) * rec->extent_count);
     }
-
+    if (held)
+    {
+        handle->file_size    = rec->size;
+        handle->extent_count = rec->extent_count;
+    }
+    FileRecordRelease(rec);
+    if (!held)
+    {
+        ofe_release(ofe);
+        kfree(handle->extents);
+        kfree(handle);
+        return NULL;
+    }
     return handle;
 }
 
@@ -4164,6 +3342,22 @@ static error_t tagfs_read_inside(TagFSFileHandle *handle, void *buffer, uint64_t
 static error_t tagfs_write_inside(TagFSFileHandle *handle, const PlotSource *src,
                                   uint64_t *out_written);
 
+/*
+ * A write, span or defrag that answered ERR_WOULD_BLOCK changed nothing: the
+ * volume is short of ground Fallow still rests, which a Settle cycle gives
+ * back. The call was made under the file's writer and could not wait for one;
+ * let go of it, its caller has cycles run until some ground came back
+ * (SettleForRoom) and makes the call again. True to make it again; otherwise
+ * *rc is the answer — ERR_TAGFS_NO_SPACE once nothing rests.
+ */
+static bool tagfs_room_came_back(error_t *rc)
+{
+    if (*rc != ERR_WOULD_BLOCK)
+        return false;
+    *rc = SettleForRoom();
+    return *rc == OK;
+}
+
 error_t tagfs_write(TagFSFileHandle *handle, const PlotSource *src, uint64_t *out_written)
 {
     if (!out_written)
@@ -4173,9 +3367,12 @@ error_t tagfs_write(TagFSFileHandle *handle, const PlotSource *src, uint64_t *ou
         return ERR_INVALID_ARGUMENT;
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = handle_belongs_here(handle, "write")
-                     ? tagfs_write_inside(handle, src, out_written)
-                     : ERR_TAGFS_INVALID_HANDLE;
+    error_t rc;
+    do {
+        rc = handle_belongs_here(handle, "write")
+                 ? tagfs_write_inside(handle, src, out_written)
+                 : ERR_TAGFS_INVALID_HANDLE;
+    } while (*out_written == 0 && tagfs_room_came_back(&rc));
     tagfs_leave();
     return rc;
 }
@@ -4184,9 +3381,9 @@ error_t tagfs_write(TagFSFileHandle *handle, const PlotSource *src, uint64_t *ou
  * One write, the synchronous way: the file's record loaded afresh under its
  * writer, the ground the write needs reserved and the record's room checked
  * before a byte moves, the blocks written by the one read-modify-write rule,
- * and what landed committed as one record. A write the medium stops part way
- * keeps what landed before the stop and says why; ground it took past that
- * goes back (CR-13), and a write that commits nothing gives back everything
+ * and what landed inked as one record (TagFSInkPlot). A write the medium stops
+ * part way keeps what landed before the stop and says why; ground it took past
+ * that goes back (CR-13), and a write that inks nothing gives back everything
  * it took (CR-1).
  *
  * The writer lock is taken by trying, never by spinning in TagFSLockTake. It
@@ -4220,7 +3417,10 @@ static error_t tagfs_write_inside(TagFSFileHandle *handle, const PlotSource *src
     if (rc == OK)
         rc = PlotWriteBlocks(&plot, at, src, &done);
     if (done > 0) {
-        error_t kept = PlotEndWrite(&plot, at, done);
+        InkReceipt inked;
+        error_t    kept = PlotEndWrite(&plot, at, done);
+        if (kept == OK)
+            kept = TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked);
         if (kept != OK) {
             if (rc == OK)
                 rc = kept;
@@ -4258,7 +3458,10 @@ error_t tagfs_span_file(uint32_t file_id, uint64_t size)
         return ERR_INVALID_ARGUMENT;
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = tagfs_span_file_inside(file_id, size);
+    error_t rc;
+    do {
+        rc = tagfs_span_file_inside(file_id, size);
+    } while (tagfs_room_came_back(&rc));
     tagfs_leave();
     return rc;
 }
@@ -4280,8 +3483,9 @@ static error_t tagfs_span_file_inside(uint32_t file_id, uint64_t size)
         } else {
             rc = PlotExtendZero(&plot, size);
         }
+        InkReceipt inked;
         if (rc == OK)
-            rc = PlotCommit(&plot);
+            rc = TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked);
     }
     PlotRelease(&plot);
 
@@ -4295,14 +3499,6 @@ static error_t tagfs_span_file_inside(uint32_t file_id, uint64_t size)
 // Block allocator — the doors into the block map (block_map/)
 // ----------------------------------------------------------------------------
 
-/* Caller holds g_state.lock. Not static: the metadata pool takes the block its
- * chain grows by under that lock, and nothing here reads the medium to find
- * it — the block map decides on what memory holds (block_map.h). */
-int tagfs_alloc_blocks_internal(uint32_t count, uint32_t *out_start_block)
-{
-    return BlockMapTakeLocked(count, 0, out_start_block);
-}
-
 static int tagfs_alloc_blocks_inside(uint32_t count, uint32_t *out_start_block);
 
 int tagfs_alloc_blocks(uint32_t count, uint32_t *out_start_block)
@@ -4314,29 +3510,17 @@ int tagfs_alloc_blocks(uint32_t count, uint32_t *out_start_block)
     return rc;
 }
 
-/* ‼ BEFORE THE CALLER CAN NAME IT. Every caller of this function goes on to
- * write the block's number somewhere that outlives this boot — a Ledger field,
- * a file's extent, a chain's next pointer. The block map's door pays MapOwed
- * before it returns, so the worst a crash between the two can leave is a block
- * nobody claims, never a block two owners claim. The metadata pool's chain,
- * taken under the state lock through tagfs_alloc_blocks_internal, is paid by
- * the next door or sync; its blocks are reachable another way — the mount's
- * roll call walks the pool chain by its magic. */
+/* ‼ BEFORE ANYTHING ON THE MEDIUM NAMES IT. Every caller of this function goes
+ * on to name the block somewhere that outlives this boot — a Ledger field, a
+ * chain's next pointer — and the take is owed to the medium until the next
+ * Settle cycle's S1 writes its sector, which comes before the name that cycle
+ * carries. A crash between the two leaves a block nobody claims, never a block
+ * two owners claim (block_map.h, MapOwed). */
 static int tagfs_alloc_blocks_inside(uint32_t count, uint32_t *out_start_block)
 {
     if (count == 0 || !out_start_block)
         return -1;
     return BlockMapTake(count, 0, out_start_block, __func__) == OK ? 0 : -1;
-}
-
-// Give blocks back to the allocator — the one door out of it. Caller MUST
-// hold g_state.lock.
-//
-// OK, or the block map's refusal — a run holding a block already free is
-// refused whole and the map left as it is.
-error_t tagfs_free_blocks_internal(uint32_t start_block, uint32_t count)
-{
-    return BlockMapGiveLocked(start_block, count);
 }
 
 // Public version - acquires g_state.lock
@@ -4361,7 +3545,7 @@ static int tagfs_free_blocks_inside(uint32_t start_block, uint32_t count)
 
     BlockMapFetchRun(start_block, count, __func__);
     TagFSLockTake(&g_state.lock);
-    error_t given = tagfs_free_blocks_internal(start_block, count);
+    error_t given = BlockMapGiveLocked(start_block, count);
     TagFSLockDrop(&g_state.lock);
     BlockMapSettle();
     return given == OK ? 0 : -(int)given;
@@ -4382,22 +3566,19 @@ int tagfs_get_metadata(uint32_t file_id, TagFSMetadata *out)
     return rc;
 }
 
+/* The file's record, out of the map of live files — the authority every read
+ * stands on, holding every live file's newest record, so no road leads to the
+ * medium. -1 for a file the map does not hold, or no memory for the copy. */
 static int tagfs_get_metadata_inside(uint32_t file_id, TagFSMetadata *out)
 {
     if (!out)
         return -1;
-
-    // Fast path: read from mirror (no disk I/O)
-    if (meta_pool_read_cached(file_id, out) == 0)
-    {
-        return 0;
-    }
-
-    // Slow path: disk read
-    uint32_t block, offset;
-    if (file_table_lookup(file_id, &block, &offset) != 0)
+    FileRecord *rec = FileMapRecordHold(g_state.files, file_id, NULL);
+    if (!rec)
         return -1;
-    return meta_pool_read(block, offset, out);
+    int copied = FileRecordCopyOut(rec, out);
+    FileRecordRelease(rec);
+    return copied;
 }
 
 TagFSState *tagfs_get_state(void)
@@ -4556,7 +3737,10 @@ error_t tagfs_defrag_file(uint32_t file_id, uint32_t target_block)
 {
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = tagfs_defrag_file_inside(file_id, target_block);
+    error_t rc;
+    do {
+        rc = tagfs_defrag_file_inside(file_id, target_block);
+    } while (tagfs_room_came_back(&rc));
     tagfs_leave();
     return rc;
 }
@@ -4575,9 +3759,9 @@ static bool tagfs_runs_are_one(const FileExtent *runs, uint32_t count)
  * Defrag is a gather of every extent (PlotGather, shed 0) under the file's
  * writer, so no write and no span of the file runs beside it (D7-defrag): the
  * blocks are copied into one run taken through the block map near the target,
- * made durable, and named by one committed record, and only then is the old
- * ground given back. Ground the record named past the file's size goes with
- * it. A file the loader reads by its blocks is not moved.
+ * made durable, and named by one inked record, and only then does the old
+ * ground come to rest in Fallow. Ground the record named past the file's size
+ * goes with it. A file the loader reads by its blocks is not moved.
  */
 static error_t tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
 {
@@ -4596,8 +3780,9 @@ static error_t tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
         rc    = PlotGather(&plot, 0, target_block);
         moved = rc == OK;
     }
+    InkReceipt inked;
     if (rc == OK && (moved || plot.freed_count > 0))
-        rc = PlotCommit(&plot);
+        rc = TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked);
     PlotRelease(&plot);
 
     if (handle->ofe)

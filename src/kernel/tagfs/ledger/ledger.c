@@ -1,6 +1,7 @@
 #include "ledger.h"
 #include "../tagfs.h"
 #include "../scribe/scribe.h"
+#include "../settle/settle.h"
 #include "../../../kernel/drivers/timer/rtc.h"
 #include "../../../lib/kernel/crypto.h"
 
@@ -21,23 +22,36 @@ static const uint8_t g_ledger_magic[8] = {
  * one and refuses a longer claim), so this is bounded by what a sector holds
  * past the fixed fields: a list that will not fit is not kept in part.
  *
- * All four under g_ledger_lock, which holds memory only: a leaf, taken under
- * the volume's state lock for the snapshot and alone everywhere else. */
+ * All of it under g_ledger_lock, which holds memory only: a leaf, taken under
+ * the volume's state lock for the snapshot and alone everywhere else.
+ * `g_ledger_use_edits` moves with every change of the context, and
+ * `g_ledger_use_landed` is the edit the medium's newest copy carries. */
 TagFSLock         g_ledger_lock = TAGFS_LOCK_INIT("ledger", LOCK_RANK_LEAF);
 static uint64_t   g_ledger_seq;
 static uint32_t   g_ledger_current;
 static char       g_ledger_use[TAGFS_SECTOR_SIZE];
 static uint16_t   g_ledger_use_len;
+static uint64_t   g_ledger_use_edits;
+static uint64_t   g_ledger_use_landed;
 #define LEDGER_USE_MAX  ((size_t)TAGFS_SECTOR_SIZE - sizeof(VolumeLedger))
 
 _Static_assert(sizeof(VolumeLedger) < TAGFS_SECTOR_SIZE,
                "the Ledger's fixed fields, and room for a Use Context, fit its one sector");
 
-/* One Ledger write on its way to the medium at a time, for the whole volume.
- * Two writers reading the same seq would each build a record for the same
- * older copy, and the medium would keep whichever landed last while memory
- * kept whichever committed last — not necessarily the same one. */
-static Scribe g_ledger_scribe = SCRIBE_INIT(SCRIBE_RANK_LEDGER, "the volume's Ledger");
+/*
+ * ‼ ONE WRITER: THE SETTLE CYCLE'S S4. The image is taken at the cycle's S0,
+ * under the volume's state lock and then the Ledger's — the counters of the
+ * same instant as the pool the cycle writes — and written at S4 with no lock
+ * held. The holder of the Settle's Scribe alone touches it, one cycle at a
+ * time, so two writers can never build a record for the same older copy.
+ */
+static struct {
+    uint8_t  sector[TAGFS_SECTOR_SIZE];
+    uint64_t seq;
+    uint32_t slot;
+    uint32_t epoch;
+    uint64_t use_edits;
+} s_image;
 
 static uint64_t ledger_vlba(uint32_t copy)
 {
@@ -199,66 +213,57 @@ error_t ledger_load(void)
     return OK;
 }
 
-/*
- * One pass: a snapshot, one sector to the medium, and — only if it landed —
- * the copy the volume stands on moves. Run by the holder of the Ledger's
- * Scribe alone.
- *
- * The snapshot is taken under the volume's state lock and then the Ledger's,
- * so the counters are the ones of one instant, with the Use Context as it
- * stood at that same instant; the clock is read before either lock, and the
- * sector goes to the medium after both are let go. The sector lives on this
- * pass's own stack: nothing else ever writes into it.
- *
- * A refusal leaves the volume standing on the copy it stood on — the copy
- * this pass aimed at may be torn or untouched, and it is the older one either
- * way. Nothing is written again on its own: the next ask starts the next pass.
- */
-static error_t LedgerStroke(void)
+void LedgerImageTake(void)
 {
     TagFSState  *fs  = tagfs_get_state();
     uint64_t     now = rtc_get_unix64();
-    uint8_t      sector[TAGFS_SECTOR_SIZE];
     VolumeLedger led;
 
-    memset(sector, 0, sizeof(sector));
+    memset(s_image.sector, 0, sizeof(s_image.sector));
 
-    TagFSLockTake(&fs->lock);
     TagFSLockTake(&g_ledger_lock);
     led = fs->ledger;
     uint16_t use_len = g_ledger_use_len;
-    memcpy(sector + sizeof(led), g_ledger_use, use_len);
-    uint64_t seq   = g_ledger_seq + 1;
-    uint32_t slot  = (g_ledger_current + 1) % VOLUME_LEDGER_COPIES;
-    uint32_t epoch = tagfs_mount_epoch();
+    memcpy(s_image.sector + sizeof(led), g_ledger_use, use_len);
+    s_image.seq       = g_ledger_seq + 1;
+    s_image.slot      = (g_ledger_current + 1) % VOLUME_LEDGER_COPIES;
+    s_image.epoch     = tagfs_mount_epoch();
+    s_image.use_edits = g_ledger_use_edits;
     TagFSLockDrop(&g_ledger_lock);
-    TagFSLockDrop(&fs->lock);
 
     /* The remembered Use Context follows the fixed fields and is summed with
      * them: a torn write loses the context together with the counters, never
      * one without the other. */
     memcpy(led.magic, g_ledger_magic, sizeof(g_ledger_magic));
-    led.seq                = seq;
+    led.seq                = s_image.seq;
     led.written_unix       = now;
     led.use_context_offset = use_len ? (uint16_t)sizeof(VolumeLedger) : 0;
     led.use_context_bytes  = use_len;
     led.bytes              = (uint32_t)sizeof(VolumeLedger) + use_len;
     led.crc32              = 0;
-    memcpy(sector, &led, sizeof(led));
-    led.crc32 = KCrc32(sector, led.bytes);
-    memcpy(sector + __builtin_offsetof(VolumeLedger, crc32), &led.crc32, sizeof(led.crc32));
+    memcpy(s_image.sector, &led, sizeof(led));
+    led.crc32 = KCrc32(s_image.sector, led.bytes);
+    memcpy(s_image.sector + __builtin_offsetof(VolumeLedger, crc32), &led.crc32,
+           sizeof(led.crc32));
+}
 
-    int wrote = tagfs_volume_write(ledger_vlba(slot), 1, sector);
+/*
+ * The image to the older copy. Only once it landed is the new copy the one the
+ * volume stands on — and only for the image's own volume, by the Settle's own
+ * holder: a mount between the snapshot and here means another volume's Ledger
+ * is the one in memory now. A refusal leaves the volume standing on the copy
+ * it stood on; the copy aimed at may be torn or untouched, and it is the older
+ * one either way, which the next cycle aims at again.
+ */
+error_t LedgerImageWrite(void)
+{
+    int wrote = tagfs_volume_write(ledger_vlba(s_image.slot), 1, s_image.sector);
 
-    /* Only now is the new copy the one the volume stands on. And only for the
-     * pass's own volume, by the pass's own writer: a mount between the
-     * snapshot and here means another volume's Ledger is the one in memory
-     * now, and the Scribe is never taken from a holder (scribe.h) — this is
-     * where that is relied on, so it is where it is asked. */
     TagFSLockTake(&g_ledger_lock);
-    if (wrote == 0 && ScribeHeldHere(&g_ledger_scribe) && tagfs_mount_epoch() == epoch) {
-        g_ledger_seq     = seq;
-        g_ledger_current = slot;
+    if (wrote == 0 && ScribeHeldHere(&g_settle_scribe) && tagfs_mount_epoch() == s_image.epoch) {
+        g_ledger_seq        = s_image.seq;
+        g_ledger_current    = s_image.slot;
+        g_ledger_use_landed = s_image.use_edits;
     }
     uint64_t stands_seq = g_ledger_seq;
     uint32_t stands     = g_ledger_current;
@@ -267,42 +272,11 @@ static error_t LedgerStroke(void)
     if (wrote != 0) {
         kprintf("[Ledger] copy %u would not take seq %llu — the volume still "
                 "stands on copy %u (seq %llu)\n",
-                slot, (unsigned long long)seq, stands, (unsigned long long)stands_seq);
+                s_image.slot, (unsigned long long)s_image.seq, stands,
+                (unsigned long long)stands_seq);
         return ERR_TAGFS_METADATA_ERROR;
     }
     return OK;
-}
-
-/* The answer to one ask: a pass that began after it — this call's own, or
- * one another core was already making — wrote the Ledger, or was refused. */
-static error_t LedgerWriteFor(uint64_t ticket)
-{
-    uint64_t cover = 0;
-    error_t  rc    = OK;
-
-    switch (ScribeWait(&g_ledger_scribe, ticket, &cover, &rc)) {
-    case SCRIBE_MINE:
-        rc = LedgerStroke();
-        ScribeGive(&g_ledger_scribe, cover, rc);
-        return rc;
-    case SCRIBE_SELF:
-        kprintf("[Ledger] write refused: a Ledger write on this core is "
-                "suspended beneath this one, and waiting for it here would "
-                "never end — what changed goes out with the next one\n");
-        return ERR_WOULD_BLOCK;
-    case SCRIBE_REFUSED:
-        return rc;
-    default:
-        return OK;      /* SCRIBE_WRITTEN */
-    }
-}
-
-error_t tagfs_write_ledger(void)
-{
-    if (tagfs_get_state()->layout.state_blocks < VOLUME_LEDGER_COPIES) {
-        return ERR_TAGFS_METADATA_ERROR;
-    }
-    return LedgerWriteFor(ScribeAsk(&g_ledger_scribe));
 }
 
 error_t tagfs_remember_use_context(const char *list, size_t len, bool *remembered)
@@ -313,12 +287,23 @@ error_t tagfs_remember_use_context(const char *list, size_t len, bool *remembere
      * forgets rather than remembering half of what was said, and says so. */
     bool fits = len <= LEDGER_USE_MAX;
 
+    /* What the medium already holds is not written again: a mount recalls the
+     * context and remembers it at once, and an unchanged one costs nothing. */
     TagFSLockTake(&g_ledger_lock);
-    g_ledger_use_len = fits ? (uint16_t)len : 0;
-    if (g_ledger_use_len) memcpy(g_ledger_use, list, g_ledger_use_len);
+    uint16_t kept   = fits ? (uint16_t)len : 0;
+    bool     same   = g_ledger_use_len == kept &&
+                      (kept == 0 || memcmp(g_ledger_use, list, kept) == 0);
+    bool     landed = same && g_ledger_use_landed == g_ledger_use_edits;
+    if (!same) {
+        g_ledger_use_len = kept;
+        if (kept) memcpy(g_ledger_use, list, kept);
+        g_ledger_use_edits++;
+    }
     TagFSLockDrop(&g_ledger_lock);
 
-    error_t rc = tagfs_write_ledger();
+    /* A demand on the one writer: the cycle that covers it carries the
+     * context in the Ledger it writes. */
+    error_t rc = landed ? OK : TagFSSettle();
     if (remembered) *remembered = fits && rc == OK;
     return rc;
 }
@@ -335,7 +320,9 @@ size_t tagfs_recall_use_context(char *buf, size_t cap)
 void LedgerLetGo(void)
 {
     TagFSLockTake(&g_ledger_lock);
-    g_ledger_use_len = 0;
+    g_ledger_use_len    = 0;
+    g_ledger_use_edits  = 0;
+    g_ledger_use_landed = 0;
     TagFSLockDrop(&g_ledger_lock);
 }
 
