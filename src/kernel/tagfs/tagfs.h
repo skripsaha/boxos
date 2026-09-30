@@ -602,8 +602,9 @@ error_t tagfs_shutdown(void);
 error_t  tagfs_flush_cache(void);
 
 /* Convert a TagFS logical block number to its absolute disk-sector LBA.
- * Used by the async storage path which submits raw AHCI reads outside
- * the read_block helper. */
+ * Used by the storage deck's reads and writes nobody stands over, which reach
+ * the seat (BoardroomReadAsync, BoardroomWriteAsync) outside the block
+ * helpers. */
 uint64_t tagfs_block_to_sector(uint32_t block);
 
 /* There is no tagfs_format() here. A volume is made by the tool that lays it

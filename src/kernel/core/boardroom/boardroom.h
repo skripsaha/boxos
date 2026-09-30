@@ -221,7 +221,8 @@ int BoardroomRead (uint8_t seat, uint64_t lba, uint32_t count, void* buffer);
 int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffer);
 
 /*
- * A read for a caller that is not going to stand and watch.
+ * A read for a caller that is not going to stand and watch — and a write the
+ * same way (BoardroomWriteAsync, below).
  *
  * The room is where "which controller is this" is answered, and this is the
  * same question in the one place it is asked. Before it, the storage deck asked
@@ -232,22 +233,24 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
  * booting from SATA parks the caller and gets on with something else.
  *
  * `cb` runs once the medium has answered — on SATA from the completion
- * interrupt or from whoever brings the completion in, on USB from a K-Core — so
- * it is short and allocates nothing. It is shaped the way the SATA path
- * already shaped it — `index` names the port or the unit, `slot` is the AHCI
- * command slot and is zero for a seat that has no such thing — so the same
- * function can be handed to either kind of seat with nothing standing in
- * between to translate.
+ * interrupt or from whoever brings the completion in, on USB from a K-Core,
+ * possibly beneath a caller standing over the same disk — so it is short,
+ * allocates nothing and never stands over the medium. It is shaped the way
+ * the SATA path already shaped it — `index` names the port or the unit,
+ * `slot` is the AHCI command slot and is zero for a seat that has no such
+ * thing — so the same function can be handed to either kind of seat with
+ * nothing standing in between to translate.
  *
- * `berth` is the caller's memory the read waits in (core/boardroom/
+ * `berth` is the caller's memory the command waits in (core/boardroom/
  * roadstead.h): a medium with every place taken — all its command slots, its
- * one turn, its door shut for a cache flush — moors the read there and issues
- * it when its turn comes, rather than refusing it. The room fills it in; it is
- * the seat's from an OK return until `cb` has run, and must live that long.
+ * one turn, its door shut for a cache flush — moors the command there and
+ * issues it when its turn comes, rather than refusing it. The room fills it
+ * in; it is the seat's from an OK return until `cb` has run, and must live
+ * that long.
  *
- * Sectors land straight in `dma_phys`. Returns OK when the read is on its way
- * or waiting its turn, and the callback WILL run; on any other return it will
- * not, and the caller still owns everything it passed in.
+ * Sectors land straight in `dma_phys`, or go out of it. Returns OK when the
+ * command is on its way or waiting its turn, and the callback WILL run; on any
+ * other return it will not, and the caller still owns everything it passed in.
  */
 typedef void (*BoardroomAsyncCb)(uint8_t index, uint8_t slot,
                                  error_t status, void* ctx);
@@ -271,10 +274,14 @@ uint32_t BoardroomSeatRun(uint8_t seat);
 error_t BoardroomReadAsync(uint8_t seat, uint64_t lba, uint32_t count,
                            void* dma_phys, BoardroomAsyncCb cb, void* ctx,
                            RoadsteadBerth* berth);
+error_t BoardroomWriteAsync(uint8_t seat, uint64_t lba, uint32_t count,
+                            void* dma_phys, BoardroomAsyncCb cb, void* ctx,
+                            RoadsteadBerth* berth);
 
-/* Whether this seat can take the call above at all. A seat that cannot is not
- * a broken seat — it is one whose caller has to stay and wait. */
+/* Whether this seat can take the read, or the write, above at all. A seat that
+ * cannot is not a broken seat — it is one whose caller has to stay and wait. */
 bool BoardroomSeatCanReadAsync(uint8_t seat);
+bool BoardroomSeatCanWriteAsync(uint8_t seat);
 
 /*
  * Prove, on this machine, that a read nobody stands over brings back the same

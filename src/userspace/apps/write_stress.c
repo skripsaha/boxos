@@ -6,8 +6,8 @@
  *   S3  append loop (10× 64-byte appends → 640-byte file, alloc + meta-commit)
  *
  * Each scenario writes deterministic content and reads it back to verify
- * the bytes survived the async pump (W_LOCATE → W_DMA_FILL → W_AHCI_SUBMIT
- * → W_AHCI_DONE → W_LOG_META → W_INK → W_DONE).
+ * the bytes survived the async pump (W_LOCATE → W_DMA_FILL → W_BLOCK_SUBMIT
+ * → W_BLOCK_DONE → W_LOG_META → W_INK → W_DONE), on an AHCI port or a USB disk.
  */
 
 #include "box/file.h"

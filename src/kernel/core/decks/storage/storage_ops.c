@@ -251,7 +251,7 @@ static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_o
  * re-arming the next block) to the drain core's K-Core pump via the ctx's
  * embedded never-drop node. Doing that work HERE is the exact "no allocation /
  * no thread-context locks from IRQ" violation diagnosed as the root of the
- * 2026-05-17 random-hang class; the write path (wjob_ahci_complete) posts the
+ * 2026-05-17 random-hang class; the write path (wjob_block_complete) posts the
  * same way. The node lives inside the ctx, so the post can never be dropped. */
 static void obj_read_async_complete(uint8_t port, uint8_t slot,
                                      error_t status, void *ctx_)

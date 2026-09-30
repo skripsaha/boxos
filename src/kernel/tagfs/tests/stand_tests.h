@@ -41,6 +41,9 @@
 //                        window at a time, a write refused part way, the
 //                        record's room claimed, a medium that left answering
 //                        the waiters, and a guarded file refused
+// stand_port_tests.c     the stand_port suite: a program's write through the
+//                        port on an AHCI port or a USB disk, a window at a
+//                        time, and a block's write refused part way
 // stand_use_tests.c      the stand_use suite: a context said without a number
 //                        issued, two sayings that race to the volume, and the
 //                        scheduler's question under a context of any size

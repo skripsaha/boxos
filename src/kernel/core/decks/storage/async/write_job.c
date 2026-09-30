@@ -5,11 +5,13 @@
  * A synchronous job runs under the file's Helm — the caller's call when the
  * Helm was free, a service point when it was handed on: a span and a defrag in
  * one piece (HelmSpan, HelmDefrag), a write a window at a time
- * (HelmWriteWindow). An asynchronous write is a state machine pumped from
- * K-Core continuations posted by the AHCI IRQ. The IRQ side is intentionally
- * minimal: stash status, set the next state, post the continuation. The K-Core
- * side does everything that needs locks (the Plot, the record's Ink, the Helm,
- * Touch publish).
+ * (HelmWriteWindow). An asynchronous write is a state machine whose every
+ * block goes through the port (BoardroomReadAsync, BoardroomWriteAsync) — an
+ * AHCI port's slots or a USB disk's queue — and which is pumped between two
+ * answers where its seat's answers continue (wjob_continue). The answer's side
+ * is intentionally minimal: stash status, set the next state, post the
+ * continuation. The pump does everything that needs locks (the Plot, the
+ * record's Ink, the Helm, Touch publish).
  *
  * The asynchronous write's states:
  *
@@ -19,15 +21,15 @@
  *     W_LOCATE → (the file's bytes, partly overlaid → W_READ_OLD → W_DMA_FILL)
  *              → (a block that held nothing of the file → W_DMA_FILL)  [zeros]
  *              → (covered whole                         → W_DMA_FILL)
- *     W_DMA_FILL → W_AHCI_SUBMIT → (yield to IRQ) → W_AHCI_DONE
- *     W_AHCI_DONE → if more bytes of the window: W_LOCATE
- *                 → else:                        W_LOG_META
+ *     W_DMA_FILL → W_BLOCK_SUBMIT → (yield to the answer) → W_BLOCK_DONE
+ *     W_BLOCK_DONE → if more bytes of the window: W_LOCATE
+ *                  → else:                        W_LOG_META
  *
  *   the record, once a window:
- *     W_LOG_META → W_INK → (more windows: yield to the K-Core → W_ALLOC)
- *                        → (the last one:                     W_DONE)
+ *     W_LOG_META → W_INK → (more windows: yield the core → W_ALLOC)
+ *                        → (the last one:                W_DONE)
  *     W_INK with no Spare to close the pool's tail onto:
- *              → W_SPARE → (yield to IRQ) → W_SPARE_DONE → W_INK
+ *              → W_SPARE → (yield to the answer) → W_SPARE_DONE → W_INK
  *
  * ‼ A WRITE IS INKED A WINDOW AT A TIME (RT-16), ON EITHER ROAD. The window is
  * the run the medium takes in one command (HelmWindowBytes): its ground is
@@ -35,7 +37,8 @@
  * what landed of it is inked as one record (TagFSInkPlot), and between two
  * windows the job gives its core back while it keeps the Helm — a synchronous
  * job is listed for the next service point (HelmReady), its caller parked, an
- * asynchronous one posts itself behind what the drain core has waiting. A
+ * asynchronous one posts itself behind what its seat's continuations have
+ * waiting (wjob_continue). A
  * write of any length holds no more than a window's ground unnamed, and a
  * K-Core for no longer than one window.
  *
@@ -66,6 +69,19 @@
  * a continuation cannot wait for the Settle cycle that gives it back, and a
  * service point can (HelmWriteWindow), from the last window inked.
  *
+ * ‼ A USB DISK'S ANSWER IS NOT AN INTERRUPT'S. An AHCI port answers in its
+ * completion interrupt, and the job's next step is the drain core's baton. A
+ * USB disk runs one command at a time, and its command's own steps are the
+ * drain core's batons (xhci_msd.c): its answer comes in one of them — and a
+ * caller standing over the same disk on the drain core pumps those batons
+ * while it waits, so the job's next step, pumped there, would run beneath
+ * that caller. A step that stood over the disk itself there — a page of the
+ * block map or of the integrity map brought in, a gather, ground given back
+ * and its sector laid on — would moor behind the very caller that pumped it,
+ * and the drain core would wait on itself for ever. So on a USB disk the job
+ * goes on at a service point (HelmReady), where standing over the medium is
+ * allowed, and the port carries only its blocks.
+ *
  * The bytes come out of the program's pages a block at a time, into the DMA
  * page they go out of — never copied whole into the kernel heap first.
  *
@@ -82,8 +98,6 @@
 #include "op_registry.h"
 #include "tagfs.h"
 #include "helm.h"        /* the file's Helm, and the work its holder does */
-#include "ahci.h"
-#include "ahci_async.h"
 #include "vmm.h"
 #include "pmm.h"
 #include "process.h"
@@ -99,18 +113,27 @@
 #include "ink.h"         /* TagFSInkPlot — the one way the file changes */
 #include "meta_pool.h"   /* PoolSpareBegin / Adopt / Drop — a Spare stamped through the port */
 #include "scribe.h"      /* VolumeFlushNeed — what the landed blocks wait for */
-#ifdef CONFIG_VOLUME_TESTS
-#include "block_fail.h"  /* BLOCKFAIL — the port's commands refused on the stand */
-#endif
 
 /* ---- forward decls ---- */
 static void wjob_pump(void *job_);
 static int  wjob_finalize(WriteJob *j, error_t rc);
-static void wjob_ahci_complete(uint8_t port, uint8_t slot, error_t status, void *ctx);
+static void wjob_block_complete(uint8_t port, uint8_t slot, error_t status, void *ctx);
 
 static inline void wjob_to(WriteJob *j, WriteJobState s)
 {
     atomic_store_u32((volatile uint32_t *)&j->state, (uint32_t)s);
+}
+
+/* The asynchronous job's next step, posted where its seat's answers continue
+ * — never run here: the drain core's baton for an AHCI port, never dropped; a
+ * service point for a USB disk, where the step may stand over the medium
+ * (the note above). */
+static void wjob_continue(WriteJob *j)
+{
+    if (j->resumes_at_service)
+        HelmReady(&j->helm);
+    else
+        BatonPass(&j->cq_node);
 }
 
 /* =========================================================================
@@ -134,9 +157,10 @@ static error_t wjob_window(WriteJob *j)
 /* A synchronous job's turn under the Helm it holds: a span or a defrag whole,
  * a write one window. A write with windows left gives its core back — its
  * caller parked if it was not yet, the job listed for the next service point,
- * and the turn ends there; a caller in the kernel has no core to give back,
- * and its windows run on. The handler's answer when the job ended inside its
- * caller's call, else ERR_WOULD_BLOCK: the answer is the job's to push. */
+ * and the turn ends there; a caller in the kernel standing in its call has no
+ * core to give back, and its windows run on. The handler's answer when the job
+ * ended inside its caller's call, else ERR_WOULD_BLOCK: the answer is the
+ * job's to push. */
 static int wjob_turn(WriteJob *j)
 {
     if (j->kind == WRITE_JOB_SPAN)
@@ -148,20 +172,26 @@ static int wjob_turn(WriteJob *j)
         error_t rc = wjob_window(j);
         if (rc != OK || j->bytes_inked >= j->source.bytes)
             return wjob_finalize(j, rc);
-        if (!j->target)
-            continue;
-        if (!j->deferred)
+        if (!j->deferred) {
+            if (!j->target)
+                continue;
             wjob_defer(j, j->ctx);
+        }
         HelmReady(&j->helm);   /* the job is the service point's now: not touched again here */
         return ERR_WOULD_BLOCK;
     }
 }
 
-/* A synchronous job handed the Helm, or come back for its next window, is run
- * at a service point. */
+/* A job listed for a service point: a synchronous one handed the Helm, or come
+ * back for its next window, takes its turn; an asynchronous one whose steps
+ * resume here goes on from the state its last answer set. */
 static void wjob_run_ready(HelmWaiter *w)
 {
-    (void)wjob_turn(container_of(w, WriteJob, helm));
+    WriteJob *j = container_of(w, WriteJob, helm);
+    if (j->async)
+        wjob_pump(j);
+    else
+        (void)wjob_turn(j);
 }
 
 /* The medium left while the job waited for the Helm: nothing of it was done,
@@ -181,7 +211,7 @@ static void wjob_handed(HelmWaiter *w)
     j->holds_helm = true;
     if (j->async) {
         wjob_to(j, W_ALLOC);
-        BatonPass(&j->cq_node);   /* never-drop; routes to the drain core */
+        wjob_continue(j);
     } else {
         HelmReady(w);
     }
@@ -303,42 +333,30 @@ static bool w_locate(WriteJob *j)
     return true;
 }
 
-/* One block of this job to the port. "Every command slot on the port is
- * taken" is not "the disk failed", and it is not "come back later" either: the
- * job's berth carries the request, and the port issues it now or moors it in
- * its roadstead — under the same lock that found no slot, so a slot freed a
- * moment later calls it in — until a slot comes free or the door a cache flush
- * shut opens again. Either way `answered` runs, exactly once; an error here
- * means the port is not there, or the request is malformed. */
+/* One block of this job to the port. "Every place on the medium is taken" —
+ * every command slot of an AHCI port, the one turn of a USB disk — is not "the
+ * disk failed", and it is not "come back later" either: the job's berth
+ * carries the request, and the seat issues it now or moors it in its roadstead
+ * — under the same lock that found no place, so a place freed a moment later
+ * calls it in — until a place comes free or the door a cache flush shut opens
+ * again. Either way `answered` runs, exactly once, perhaps before this
+ * returns; an error here means the seat is not there, or the request is
+ * malformed. */
 static error_t wjob_submit(WriteJob *j, bool write, RoadsteadAnswered answered)
 {
-    RoadsteadBerth *b = &j->berth;
-    memset(b, 0, sizeof(*b));
-    b->lba      = tagfs_block_to_sector(j->if_disk_block);
-    b->sectors  = TAGFS_BLOCK_SECTORS;
-    b->dma_phys = j->dma_phys;
-    b->answered = answered;
-    b->ctx      = j;
+    uint8_t  seat = tagfs_get_seat();
+    uint64_t lba  = tagfs_block_to_sector(j->if_disk_block);
 
     j->if_reading = !write;
-    uint8_t port = BoardroomSeatIndex(tagfs_get_seat());
-#ifdef CONFIG_VOLUME_TESTS
-    /* BLOCKFAIL, asked the way the Boardroom asks it of an asynchronous read:
-     * the command is taken and answered through the callback with ERR_IO, as
-     * a real completion can already arrive before the submit returns. Nothing
-     * is issued. */
-    if (BlockFailStrikes(tagfs_get_seat(), write ? BLOCK_FAIL_WRITE : BLOCK_FAIL_READ,
-                         b->lba, b->sectors)) {
-        answered(port, 0, ERR_IO, j);
-        return OK;
-    }
-#endif
-    return write ? ahci_submit_write_async(port, b) : ahci_submit_read_async(port, b);
+    return write ? BoardroomWriteAsync(seat, lba, TAGFS_BLOCK_SECTORS, j->dma_phys, answered, j,
+                                       &j->berth)
+                 : BoardroomReadAsync(seat, lba, TAGFS_BLOCK_SECTORS, j->dma_phys, answered, j,
+                                      &j->berth);
 }
 
 /* W_READ_OLD — async read of the block a partial write overlays into DMA,
- * so the user bytes fold over what the block holds. IRQ jumps state to
- * W_DMA_FILL via wjob_read_old_complete. */
+ * so the user bytes fold over what the block holds. Its answer moves the
+ * state to W_DMA_FILL (wjob_read_old_complete). */
 static void wjob_read_old_complete(uint8_t port, uint8_t slot,
                                    error_t status, void *ctx);
 
@@ -347,7 +365,7 @@ static bool w_read_old(WriteJob *j)
     error_t err = wjob_submit(j, false, wjob_read_old_complete);
     if (err != OK)
         return wjob_stop(j, err);
-    return false;  /* parked until IRQ */
+    return false;  /* parked until the answer */
 }
 
 /* W_DMA_FILL — the write's bytes for this block, out of the program's pages,
@@ -363,24 +381,24 @@ static bool w_dma_fill(WriteJob *j)
                 (unsigned long long)j->bytes_done, (unsigned long long)j->source.bytes);
         return wjob_stop(j, rc);
     }
-    wjob_to(j, W_AHCI_SUBMIT);
+    wjob_to(j, W_BLOCK_SUBMIT);
     return true;
 }
 
-/* W_AHCI_SUBMIT — fire write, yield to IRQ. */
-static bool w_ahci_submit(WriteJob *j)
+/* W_BLOCK_SUBMIT — the block's write to the port, and a yield to its answer. */
+static bool w_block_submit(WriteJob *j)
 {
-    error_t err = wjob_submit(j, true, wjob_ahci_complete);
+    error_t err = wjob_submit(j, true, wjob_block_complete);
     if (err != OK)
         return wjob_stop(j, err);
-    return false;  /* parked until IRQ */
+    return false;  /* parked until the answer */
 }
 
-/* W_AHCI_DONE — IRQ retired. Advance and decide next phase. A refused read of
- * the block being overlaid stops the write before the block is written: the
- * bytes around the write are the file's, and zeros laid over them would be a
- * write nobody asked for (S1). */
-static bool w_ahci_done(WriteJob *j)
+/* W_BLOCK_DONE — the port answered. Advance and decide next phase. A refused
+ * read of the block being overlaid stops the write before the block is
+ * written: the bytes around the write are the file's, and zeros laid over them
+ * would be a write nobody asked for (S1). */
+static bool w_block_done(WriteJob *j)
 {
     if (j->if_status != OK) {
         if (j->if_reading)
@@ -396,7 +414,7 @@ static bool w_ahci_done(WriteJob *j)
         return wjob_stop(j, j->if_status);
     }
 
-    /* The async path writes straight to the AHCI port, bypassing
+    /* The async path writes straight to the port, bypassing
      * tagfs_write_block — so drop the just-written block from the read-ahead
      * cache ourselves, or a later read could serve pre-write data. */
     tagfs_readahead_invalidate(j->if_disk_block);
@@ -426,8 +444,8 @@ static bool w_log_meta(WriteJob *j)
 /* W_INK — the window's record the Plot builds, inked; with no Spare for the
  * pool's tail, one is stamped first (W_SPARE). A file given up meanwhile has
  * no record to ink over, and the answer is ERR_FILE_NOT_FOUND. With windows
- * left, the job posts itself behind what the drain core has waiting before it
- * reserves the next one. */
+ * left, the job posts itself behind what its seat's continuations have waiting
+ * before it reserves the next one. */
 static bool w_ink(WriteJob *j)
 {
     InkReceipt inked;
@@ -447,7 +465,7 @@ static bool w_ink(WriteJob *j)
         return true;
     }
     wjob_to(j, W_ALLOC);
-    BatonPass(&j->cq_node);   /* the next window, after what the drain core has waiting */
+    wjob_continue(j);   /* the next window, after what its core has waiting */
     return false;
 }
 
@@ -475,7 +493,7 @@ static bool w_spare(WriteJob *j)
         j->spare_image = NULL;
         wjob_finalize(j, rc);
     }
-    return false;  /* parked until IRQ */
+    return false;  /* parked until the answer */
 }
 
 /* W_SPARE_DONE — the stamp landed: the Spare is the pool's, and the job inks
@@ -659,6 +677,20 @@ static void wjob_say_refused(const WriteJob *j, error_t rc)
                 (unsigned long long)j->final_size);
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+/* The stand's record, filled and then marked answered: the test reads the rest
+ * only after the mark, and nothing of the job touches it again. */
+static void wjob_tell_stand(WriteJobStandAnswer *a, error_t rc, uint64_t written,
+                            uint64_t size, bool through_port)
+{
+    a->rc           = rc;
+    a->written      = written;
+    a->size         = size;
+    a->through_port = through_port;
+    __atomic_store_n(&a->answered, 1u, __ATOMIC_RELEASE);
+}
+#endif
+
 /* What the job took goes back first — the Stakes nobody inked, on every way
  * out, once — then the listeners hear of what changed, the Helm goes to the
  * next waiter, and the answer is given; the door is let go of last of what
@@ -688,6 +720,10 @@ static int wjob_finalize(WriteJob *j, error_t rc)
 
     if (j->target)
         process_ref_dec(j->target);
+#ifdef CONFIG_VOLUME_TESTS
+    if (j->stand)
+        wjob_tell_stand(j->stand, rc, written, j->final_size, j->async);
+#endif
     kfree(j);
     return answer;
 }
@@ -711,8 +747,8 @@ static void wjob_pump(void *job_)
             case W_LOCATE:        if (!w_locate(j))        return; break;
             case W_READ_OLD:      if (!w_read_old(j))      return; break;
             case W_DMA_FILL:      if (!w_dma_fill(j))      return; break;
-            case W_AHCI_SUBMIT:   if (!w_ahci_submit(j))   return; break;
-            case W_AHCI_DONE:     if (!w_ahci_done(j))     return; break;
+            case W_BLOCK_SUBMIT:  if (!w_block_submit(j))  return; break;
+            case W_BLOCK_DONE:    if (!w_block_done(j))    return; break;
             case W_LOG_META:      if (!w_log_meta(j))      return; break;
             case W_INK:           if (!w_ink(j))           return; break;
             case W_SPARE:         if (!w_spare(j))         return; break;
@@ -725,16 +761,17 @@ static void wjob_pump(void *job_)
     }
 }
 
-/* IRQ callback for W_READ_OLD. Drops state directly to W_DMA_FILL —
- * the read populated DMA with the block's content, ready for the
- * user-bytes overlay; a refused read goes to W_AHCI_DONE, which stops the
- * write before the block is written.
+/* The answer to W_READ_OLD. Drops state directly to W_DMA_FILL — the read
+ * populated DMA with the block's content, ready for the user-bytes overlay; a
+ * refused read goes to W_BLOCK_DONE, which stops the write before the block is
+ * written.
  *
- * Runs in AHCI completion IRQ context. It only stashes status and posts
- * the job's embedded completion node (BatonPass) to the drain
- * core — no allocation, no lock, and NEVER dropped: the node lives inside
- * the WriteJob, so there is no slot to run out of. The heavy half (the
- * overlay / finalize / next block) runs later in the K-Core pump. */
+ * Runs where the seat answers: an AHCI port's completion interrupt, a USB
+ * disk's command step on the drain core. It only stashes status and posts the
+ * job's next step (wjob_continue) — no allocation, no medium, and NEVER
+ * dropped: the node it posts lives inside the WriteJob, so there is no slot to
+ * run out of. The heavy half (the overlay / finalize / next block) runs later,
+ * in the pump. */
 static void wjob_read_old_complete(uint8_t port, uint8_t slot,
                                    error_t status, void *ctx)
 {
@@ -742,54 +779,72 @@ static void wjob_read_old_complete(uint8_t port, uint8_t slot,
     WriteJob *j = (WriteJob *)ctx;
     if (status != OK) {
         j->if_status = status;
-        wjob_to(j, W_AHCI_DONE);
+        wjob_to(j, W_BLOCK_DONE);
     } else {
         wjob_to(j, W_DMA_FILL);
     }
-    BatonPass(&j->cq_node);   /* never-drop; heavy half on the K-Core pump */
+    wjob_continue(j);
 }
 
-/* IRQ callback for W_SPARE, as lean as the others. */
+/* The answer to W_SPARE, as lean as the others. */
 static void wjob_spare_complete(uint8_t port, uint8_t slot, error_t status, void *ctx)
 {
     (void)port; (void)slot;
     WriteJob *j = (WriteJob *)ctx;
     j->if_status = status;
     wjob_to(j, W_SPARE_DONE);
-    BatonPass(&j->cq_node);
+    wjob_continue(j);
 }
 
-/* IRQ callback. Lean — only stash status + defer continuation. See
- * wjob_read_old_complete above for the IRQ-safety rationale. */
-static void wjob_ahci_complete(uint8_t port, uint8_t slot,
+/* The answer to W_BLOCK_SUBMIT, as lean as wjob_read_old_complete. */
+static void wjob_block_complete(uint8_t port, uint8_t slot,
                                 error_t status, void *ctx)
 {
     (void)port; (void)slot;
     WriteJob *j = (WriteJob *)ctx;
     j->if_status = status;
-    wjob_to(j, W_AHCI_DONE);
-    BatonPass(&j->cq_node);   /* never-drop; heavy half on the K-Core pump */
+    wjob_to(j, W_BLOCK_DONE);
+    wjob_continue(j);
 }
 
 /* =========================================================================
  *  Public entry — WriteJobSubmit
  * ========================================================================= */
 
-/* A write goes through the port, the job parked on each block's answer, only
- * where the volume is on AHCI and a K-Core pumps its continuations: on a
- * single core the BSP runs the program and never pumps, so the job would
- * strand, and the other seats' machines are not built on AHCI's slots. A job
- * that cannot have its DMA page is synchronous. */
+bool WriteJobSeatRunsAsync(uint8_t seat)
+{
+    return g_amp.total_cores > 1 && BoardroomSeatCanReadAsync(seat) &&
+           BoardroomSeatCanWriteAsync(seat);
+}
+
+/* Whether the job's answer is told later rather than returned from its call:
+ * a program it parks, or — on the stand — the record a test brought. */
+static bool wjob_answered_later(const WriteJob *j)
+{
+#ifdef CONFIG_VOLUME_TESTS
+    if (j->stand)
+        return true;
+#endif
+    return j->target != NULL;
+}
+
+/* A write goes through the port, the job parked on each block's answer, where
+ * the seat takes commands nobody stands over and a K-Core pumps what they
+ * continue into (WriteJobSeatRunsAsync), for a caller whose answer is told
+ * later: a caller standing in its call has nothing to do while it waits but
+ * wait. On a USB disk its steps go on at a service point (wjob_continue). A
+ * job that cannot have its DMA page is synchronous. */
 static void wjob_choose_async(WriteJob *j)
 {
-    if (j->kind != WRITE_JOB_WRITE || !j->target || g_amp.total_cores <= 1 ||
-        BoardroomSeatKind(tagfs_get_seat()) != BOARD_AHCI)
+    uint8_t seat = tagfs_get_seat();
+    if (j->kind != WRITE_JOB_WRITE || !wjob_answered_later(j) || !WriteJobSeatRunsAsync(seat))
         return;
     j->dma_phys = pmm_alloc(1, PHYS_TAG_DMA32);
     if (!j->dma_phys)
         return;
-    j->dma_virt = vmm_phys_to_virt((uintptr_t)j->dma_phys);
-    j->async    = true;
+    j->dma_virt           = vmm_phys_to_virt((uintptr_t)j->dma_phys);
+    j->async              = true;
+    j->resumes_at_service = BoardroomSeatKind(seat) == BOARD_USB;
 }
 
 /* The job for `ask`, its file open for writing and its caller pinned: OK, or
@@ -838,6 +893,11 @@ static error_t wjob_make(const WriteJobAsk *ask, Crate *crates, const OpContext 
     j->crates_kbuf   = crates;
     j->crate_count   = ctx ? ctx->crate_count : 0;
     j->crates_uaddr  = ctx ? ctx->crates_uaddr : 0;
+#ifdef CONFIG_VOLUME_TESTS
+    /* The stand's caller never stands in its call: its answer is the record. */
+    j->stand         = ask->stand;
+    j->deferred      = ask->stand != NULL;
+#endif
     wjob_choose_async(j);
     *out = j;
     return OK;
@@ -884,13 +944,14 @@ int WriteJobSubmit(const WriteJobAsk *ask, Crate *crates, const OpContext *ctx)
         j->holds_helm = true;
         return wjob_turn(j);
     }
-    if (!j->target) {
+    if (!wjob_answered_later(j)) {
         kprintf("[Storage] file %u is being changed by the holder of its Helm, and a caller "
                 "with no program to park cannot wait behind it — refused\n", j->file_id);
         return wjob_finalize(j, ERR_BUSY);
     }
 
-    wjob_defer(j, ctx);
+    if (!j->deferred)
+        wjob_defer(j, ctx);
     wjob_to(j, W_HELM_WAIT);
     if (!HelmAsk(ofe, &j->helm))
         return ERR_WOULD_BLOCK;   /* the job is the Helm's now, or answered: not touched again here */
@@ -899,7 +960,8 @@ int WriteJobSubmit(const WriteJobAsk *ask, Crate *crates, const OpContext *ctx)
     if (j->async) {
         /* The first pump in this call's own context: it takes every lock the
          * machine needs and skips a queue round-trip, and parks at the first
-         * submit. What it posts from here goes to the drain core. */
+         * submit. What it posts from here goes where its seat's steps
+         * continue (wjob_continue). */
         wjob_to(j, W_ALLOC);
         wjob_pump(j);
     } else {

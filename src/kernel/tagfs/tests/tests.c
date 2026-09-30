@@ -4,6 +4,8 @@
 #include "../metadata_pool/meta_pool.h"
 #include "../ink/fallow.h"
 #include "boardroom.h"
+#include "write_job.h"   /* WriteJobSeatRunsAsync — the road a program's write takes */
+#include "amp.h"
 #ifdef CONFIG_VOLUME_TESTS
 #include "block_fail.h"
 #include "stand_tests.h"
@@ -372,15 +374,21 @@ static void TestJudge(const TestCase* test, TestResult seen, TestStats* stats)
 static const TestSuite* const g_suites[] = { TEST_SUITES(TEST_SUITE_WALKED) };
 
 /* Said once, before the first test that writes. A red test is only half a
- * report until it says which road its writes took: these call tagfs_write
- * from the boot core, so they never take the asynchronous WriteJob path a
- * program's ObjWrite takes on an AHCI seat with more than one core. */
+ * report until it says which road its writes took: these write from the boot
+ * core as a caller in the kernel, which stands in its call — all but the
+ * stand_port suite's, which take the road a program's write takes on this
+ * seat (WriteJobSeatRunsAsync): through the port, parked on each answer, on an
+ * AHCI port or a USB disk with more than one core. */
 static void TestSayWritePath(void)
 {
     uint8_t seat = tagfs_get_seat();
     kprintf("[TESTS] the tests that write go through seat %u (%s), on the "
-            "synchronous path — they call tagfs_write directly, never ObjWrite\n",
-            seat, BoardroomSeatName(seat));
+            "synchronous path — as a caller in the kernel, standing in its call; "
+            "a program's write there, and the stand_port suite's, goes %s, on %u core(s)\n",
+            seat, BoardroomSeatName(seat),
+            WriteJobSeatRunsAsync(seat) ? "through the port, parked on each answer"
+                                        : "the synchronous path too",
+            (unsigned)g_amp.total_cores);
 }
 
 /*

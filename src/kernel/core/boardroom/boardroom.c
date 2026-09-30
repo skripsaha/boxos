@@ -761,9 +761,8 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
 
 #ifdef CONFIG_VOLUME_TESTS
         /* Refused before the driver is called, so a refused write never
-         * reaches the medium — the runs before it do. The asynchronous
-         * WriteJob does not come through this door (write_job.c submits its
-         * reads and writes to AHCI itself) and asks the plan there. */
+         * reaches the medium — the runs before it do. A write nobody stands
+         * over asks the same plan at its own door (BoardroomWriteAsync). */
         if (BlockFailStrikes(seat, BLOCK_FAIL_WRITE, lba, run)) {
             return BoardMediumRefusal(s->kind, BLOCK_FAIL_WRITE);
         }
@@ -788,7 +787,8 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
     return 0;
 }
 
-bool BoardroomSeatCanReadAsync(uint8_t seat)
+/* Whether the seat answers a command nobody stands over, read or write. */
+static bool seat_can_async(uint8_t seat)
 {
     BoardSeat* s = seat_taken(seat);
     if (!s) {
@@ -797,7 +797,7 @@ bool BoardroomSeatCanReadAsync(uint8_t seat)
 
     switch (s->kind) {
     case BOARD_AHCI: return ahci_is_initialized();
-    case BOARD_USB:  return xhci_msd_unit_can_read_async(s->index);
+    case BOARD_USB:  return xhci_msd_unit_can_async(s->index);
     /* The legacy channels are programmed I/O with the processor doing the
      * moving. There is no completion to be told about, so there is nothing
      * here to be asynchronous about — and saying so is better than pretending
@@ -807,9 +807,19 @@ bool BoardroomSeatCanReadAsync(uint8_t seat)
     }
 }
 
-error_t BoardroomReadAsync(uint8_t seat, uint64_t lba, uint32_t count,
-                           void* dma_phys, BoardroomAsyncCb cb, void* ctx,
-                           RoadsteadBerth* berth)
+bool BoardroomSeatCanReadAsync(uint8_t seat)
+{
+    return seat_can_async(seat);
+}
+
+bool BoardroomSeatCanWriteAsync(uint8_t seat)
+{
+    return seat_can_async(seat);
+}
+
+/* One command nobody stands over, read or write, handed to its seat. */
+static error_t seat_async(uint8_t seat, uint64_t lba, uint32_t count, void* dma_phys,
+                          BoardroomAsyncCb cb, void* ctx, RoadsteadBerth* berth, bool write)
 {
     BoardSeat* s = seat_taken(seat);
     if (!s || !dma_phys || count == 0 || !cb || !berth) {
@@ -817,14 +827,15 @@ error_t BoardroomReadAsync(uint8_t seat, uint64_t lba, uint32_t count,
     }
 
 #ifdef CONFIG_VOLUME_TESTS
-    /* Refused the way these seats refuse an asynchronous read: taken, and then
-     * answered through the callback with ERR_IO — never by the submit's own
-     * return, which a real medium error does not reach. The callbacks in use
-     * only keep the status and pass it on, and a real completion can already
-     * arrive before the submit returns, so answering here is a road the
-     * callers already take. Nothing is issued, and the buffer is not touched. */
+    /* Refused the way these seats refuse a command nobody stands over: taken,
+     * and then answered through the callback with ERR_IO — never by the
+     * submit's own return, which a real medium error does not reach. The
+     * callbacks in use only keep the status and pass it on, and a real
+     * completion can already arrive before the submit returns, so answering
+     * here is a road the callers already take. Nothing is issued, and the
+     * buffer is not touched: a refused write never reaches the medium. */
     if ((s->kind == BOARD_AHCI || s->kind == BOARD_USB) &&
-        BlockFailStrikes(seat, BLOCK_FAIL_READ, lba, count)) {
+        BlockFailStrikes(seat, write ? BLOCK_FAIL_WRITE : BLOCK_FAIL_READ, lba, count)) {
         cb(s->index, 0, ERR_IO, ctx);
         return OK;
     }
@@ -838,10 +849,26 @@ error_t BoardroomReadAsync(uint8_t seat, uint64_t lba, uint32_t count,
     berth->ctx      = ctx;
 
     switch (s->kind) {
-    case BOARD_AHCI: return ahci_submit_read_async(s->index, berth);
-    case BOARD_USB:  return xhci_msd_read_async(s->index, berth);
+    case BOARD_AHCI: return write ? ahci_submit_write_async(s->index, berth)
+                                  : ahci_submit_read_async(s->index, berth);
+    case BOARD_USB:  return write ? xhci_msd_write_async(s->index, berth)
+                                  : xhci_msd_read_async(s->index, berth);
     default:         return ERR_UNSUPPORTED;
     }
+}
+
+error_t BoardroomReadAsync(uint8_t seat, uint64_t lba, uint32_t count,
+                           void* dma_phys, BoardroomAsyncCb cb, void* ctx,
+                           RoadsteadBerth* berth)
+{
+    return seat_async(seat, lba, count, dma_phys, cb, ctx, berth, false);
+}
+
+error_t BoardroomWriteAsync(uint8_t seat, uint64_t lba, uint32_t count,
+                            void* dma_phys, BoardroomAsyncCb cb, void* ctx,
+                            RoadsteadBerth* berth)
+{
+    return seat_async(seat, lba, count, dma_phys, cb, ctx, berth, true);
 }
 
 /* ── a read nobody stands over, proved on this machine ─────────────────── */
