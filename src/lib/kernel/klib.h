@@ -167,6 +167,13 @@ void* memmove(void* dest, const void* src, size_t n);
 int memcmp(const void* s1, const void* s2, size_t n);
 void* memchr(const void* s, int c, size_t n);
 
+/* `count` elements of `size` bytes at `base` put in the order `order` gives —
+ * negative, zero or positive as a comes before, with or after b. A heapsort:
+ * O(n log n) compares whatever the input, no recursion and no allocation, so
+ * it serves a kernel stack and a caller holding a lock alike. Not stable. */
+typedef int (*KSortOrder)(const void* a, const void* b, void* ctx);
+void KSort(void* base, size_t count, size_t size, KSortOrder order, void* ctx);
+
 char* itoa(int value, char* str, int base);
 char* utoa(unsigned int value, char* str, int base);
 char* itoa64(int64_t value, char* str, int base);

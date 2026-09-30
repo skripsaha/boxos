@@ -198,13 +198,22 @@ void TagSpellingText(const TagSpelling *tag, char *out)
     out[at] = '\0';
 }
 
-bool TagSpellingMatchesText(const TagSpelling *tag, const char *text)
+/* Bytewise, a span that is a prefix of the other first. */
+static int TagSpanOrder(const char *a, size_t a_len, const char *b, size_t b_len)
 {
-    for (size_t i = 0; i < tag->key_len; i++)
-        if (text[i] != tag->key[i])
-            return false;
-    if (!tag->value)
-        return text[tag->key_len] == '\0';
-    return text[tag->key_len] == ':' &&
-           TagSpanIs(text + tag->key_len + 1, tag->value, tag->value_len);
+    size_t common = a_len < b_len ? a_len : b_len;
+    int    by     = memcmp(a, b, common);
+    if (by != 0)
+        return by;
+    return a_len < b_len ? -1 : (a_len > b_len ? 1 : 0);
+}
+
+int TagSpellingCompare(const TagSpelling *a, const TagSpelling *b)
+{
+    int by_key = TagSpanOrder(a->key, a->key_len, b->key, b->key_len);
+    if (by_key != 0)
+        return by_key;
+    if (!a->value || !b->value)
+        return (a->value ? 1 : 0) - (b->value ? 1 : 0);
+    return TagSpanOrder(a->value, a->value_len, b->value, b->value_len);
 }

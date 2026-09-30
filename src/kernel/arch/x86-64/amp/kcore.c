@@ -19,6 +19,7 @@
 #include "nightwatch.h"
 #include "baton.h"  /* Never-drop MPSC: async storage continuations */
 #include "tagfs.h"
+#include "use_context.h"
 
 KCorePocketQueue *g_kcore_queues = NULL;
 
@@ -382,6 +383,10 @@ void kcore_run_loop(void)
          * machine this loop is where the cores actually are. One atomic load
          * when there is nothing to do. */
         TagFSServiceIfPending();
+
+        /* And the Use Context's verdicts, when one went stale: the recount for
+         * cabins that never enter the kernel. One load when none is owed. */
+        UseContextServiceIfPending();
 
         if ((++loop_count % 10) == 0) {
             /* P5b: reclaim exited strands (PROC_DONE/CRASHED zombies) before

@@ -9,7 +9,6 @@
 #include "aslr.h"
 #include "cabin_layout.h"
 #include "tagfs.h"
-#include "use_context.h"
 #include "auth_tags.h"
 #include "atomics.h"
 #include "bay.h"       /* BayCleanupCabin — the claims are the cabin's */
@@ -54,7 +53,10 @@ static int cabin_set_tag_bit(cabin_t *cabin, uint16_t tag_id)
             kfree(old_ids);
     }
 
-    cabin->tag_overflow_ids[cabin->tag_overflow_count++] = tag_id;
+    /* The number before the count that shows it, for the Use Context's
+     * lock-free count of what a cabin wears. */
+    cabin->tag_overflow_ids[cabin->tag_overflow_count] = tag_id;
+    __atomic_store_n(&cabin->tag_overflow_count, cabin->tag_overflow_count + 1, __ATOMIC_RELEASE);
     return 0;
 }
 
@@ -76,6 +78,8 @@ static error_t cabin_wear_tags(cabin_t *cabin, const char *tags)
         if (rc != OK || !tag.key)
             return rc;
 
+        /* The intern tells the user's context the number, if the context
+         * names this tag and had none for it yet. */
         uint16_t tid;
         rc = TagFSInternSpelling(&tag, &tid);
         if (rc == ERR_TAGFS_NOT_INITIALIZED)
@@ -83,9 +87,6 @@ static error_t cabin_wear_tags(cabin_t *cabin, const char *tags)
         if (rc != OK)
             return rc;
 
-        /* The user's context may name this tag without yet having a number
-         * for it; this is the number. */
-        UseContextBindTag(&tag, tid);
         if (cabin_set_tag_bit(cabin, tid) != 0)
             return ERR_NO_MEMORY;
         /* Mirror the fixed auth bit for a bare auth key. Plain OR: the cabin

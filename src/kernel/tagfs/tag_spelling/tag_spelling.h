@@ -78,6 +78,12 @@ bool    TagPatternMatches(const TagSpelling *pattern, const TagSpelling *tag);
  * hash both books of names, the volume's registry and the Logbook, keep. */
 uint32_t TagSpellingHash(const TagSpelling *tag);
 
+/* One order of all tags, for a list kept sorted and searched by halves: by
+ * key, then a bare tag before its key's tags with a value, then by value;
+ * bytewise, a shorter span before a longer one it begins. Zero exactly when
+ * the two are one tag. */
+int     TagSpellingCompare(const TagSpelling *a, const TagSpelling *b);
+
 /* Whether NUL-terminated `text` is exactly the `len` bytes at `span`. */
 bool    TagSpanIs(const char *text, const char *span, size_t len);
 
@@ -85,12 +91,10 @@ bool    TagSpanIs(const char *text, const char *span, size_t len);
  * memory. */
 char   *TagSpanDup(const char *span, size_t len);
 
-/* The canonical text of a spelling, "key" or "key:value": its length, the text
- * written into `out` (room for the length and a NUL), and whether NUL-
- * terminated `text` is exactly it. */
+/* The canonical text of a spelling, "key" or "key:value": its length, and the
+ * text written into `out` (room for the length and a NUL). */
 size_t  TagSpellingTextLength(const TagSpelling *tag);
 void    TagSpellingText(const TagSpelling *tag, char *out);
-bool    TagSpellingMatchesText(const TagSpelling *tag, const char *text);
 
 /* The spelling of a key the kernel names itself, from a C string literal. The
  * widths are still the reader's to judge. */

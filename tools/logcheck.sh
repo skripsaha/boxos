@@ -7833,10 +7833,10 @@ stand_fix_on() {
 p = "src/kernel/tagfs/ledger/ledger.c"
 s = open(p).read()
 edits = [
-    ("    bool fits = len <= LEDGER_USE_MAX;\n",
-     "    bool fits = len <= sizeof(g_ledger_use);   /* logcheck mutation: a Use Context longer than the record is still remembered */\n"),
-    ("    uint16_t use_len = g_ledger_use_len;\n",
-     "    uint16_t use_len = g_ledger_use_len <= LEDGER_USE_MAX ? g_ledger_use_len : 0;   /* logcheck mutation: the record carries what fits */\n"),
+    ("    bool     fits = !said || said->bytes <= LEDGER_USE_MAX;\n",
+     "    bool     fits = true;   /* logcheck mutation: a Use Context longer than the record is still remembered */\n"),
+    ("    uint16_t use_len = g_ledger_use ? (uint16_t)g_ledger_use->bytes : 0;\n",
+     "    uint16_t use_len = g_ledger_use && g_ledger_use->bytes <= LEDGER_USE_MAX ? (uint16_t)g_ledger_use->bytes : 0;   /* logcheck mutation: the record carries what fits */\n"),
 ]
 for a, m in edits:
     assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]

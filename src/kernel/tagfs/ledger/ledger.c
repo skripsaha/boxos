@@ -16,21 +16,24 @@ static const uint8_t g_ledger_magic[8] = {
  * other copy with seq + 1: this is the whole of the alternation. Moved only
  * by a pass that landed, so the copy named here is always intact.
  *
- * What the volume remembers of the Use Context — the comma-joined list it was
- * last told, kept beside the counters and written out with them on every
+ * What the volume remembers of the Use Context — the comma-joined text it was
+ * last told, held by reference and written out with the counters on every
  * Ledger write. One sector is the record's whole world (ledger_read_copy takes
  * one and refuses a longer claim), so this is bounded by what a sector holds
- * past the fixed fields: a list that will not fit is not kept in part.
+ * past the fixed fields: a text that will not fit is not kept in part.
  *
  * All of it under g_ledger_lock, which holds memory only: a leaf, taken under
- * the volume's state lock for the snapshot and alone everywhere else.
- * `g_ledger_use_edits` moves with every change of the context, and
- * `g_ledger_use_landed` is the edit the medium's newest copy carries. */
+ * the volume's state lock for the snapshot and alone everywhere else; nothing
+ * is allocated or freed under it. `g_ledger_use_saying` is the machine's word
+ * the memory is (0 for the medium's own, read at the mount), so a word said
+ * earlier never lands over a later one. `g_ledger_use_edits` moves with every
+ * change of the memory, and `g_ledger_use_landed` is the edit the medium's
+ * newest copy carries. */
 TagFSLock         g_ledger_lock = TAGFS_LOCK_INIT("ledger", LOCK_RANK_LEAF);
 static uint64_t   g_ledger_seq;
 static uint32_t   g_ledger_current;
-static char       g_ledger_use[TAGFS_SECTOR_SIZE];
-static uint16_t   g_ledger_use_len;
+static UseText   *g_ledger_use;
+static uint64_t   g_ledger_use_saying;
 static uint64_t   g_ledger_use_edits;
 static uint64_t   g_ledger_use_landed;
 #define LEDGER_USE_MAX  ((size_t)TAGFS_SECTOR_SIZE - sizeof(VolumeLedger))
@@ -194,16 +197,20 @@ error_t ledger_load(void)
                 newest, (unsigned)kept, (unsigned)LEDGER_USE_MAX);
         kept = 0;
     }
+    UseText *memory = kept ? UseTextMake(tails + (size_t)newest * TAGFS_SECTOR_SIZE, kept) : NULL;
+    kfree(tails);
+    if (kept && !memory) return ERR_NO_MEMORY;
 
     fs->ledger = led[newest];
 
     TagFSLockTake(&g_ledger_lock);
-    g_ledger_seq     = led[newest].seq;
-    g_ledger_current = newest;
-    g_ledger_use_len = kept;
-    memcpy(g_ledger_use, tails + (size_t)newest * TAGFS_SECTOR_SIZE, kept);
+    UseText *gone       = g_ledger_use;
+    g_ledger_seq        = led[newest].seq;
+    g_ledger_current    = newest;
+    g_ledger_use        = memory;
+    g_ledger_use_saying = 0;
     TagFSLockDrop(&g_ledger_lock);
-    kfree(tails);
+    UseTextDrop(gone);
 
     if (live < VOLUME_LEDGER_COPIES) {
         kprintf("[Ledger] running on copy %u alone (seq %llu); the other one "
@@ -223,8 +230,9 @@ void LedgerImageTake(void)
 
     TagFSLockTake(&g_ledger_lock);
     led = fs->ledger;
-    uint16_t use_len = g_ledger_use_len;
-    memcpy(s_image.sector + sizeof(led), g_ledger_use, use_len);
+    uint16_t use_len = g_ledger_use ? (uint16_t)g_ledger_use->bytes : 0;
+    if (use_len)
+        memcpy(s_image.sector + sizeof(led), g_ledger_use->text, use_len);
     s_image.seq       = g_ledger_seq + 1;
     s_image.slot      = (g_ledger_current + 1) % VOLUME_LEDGER_COPIES;
     s_image.epoch     = tagfs_mount_epoch();
@@ -279,27 +287,39 @@ error_t LedgerImageWrite(void)
     return OK;
 }
 
-error_t tagfs_remember_use_context(const char *list, size_t len, bool *remembered)
+error_t tagfs_remember_use_context(UseText *said, uint64_t saying, bool *remembered)
 {
-    if (!list && len) return ERR_INVALID_ARGUMENT;
-
-    /* A list the record cannot hold is not cut short and not kept: the volume
+    /* A text the record cannot hold is not cut short and not kept: the volume
      * forgets rather than remembering half of what was said, and says so. */
-    bool fits = len <= LEDGER_USE_MAX;
+    bool     fits = !said || said->bytes <= LEDGER_USE_MAX;
+    UseText *keep = UseTextHold(fits ? said : NULL);
+    UseText *gone = NULL;
 
     /* What the medium already holds is not written again: a mount recalls the
      * context and remembers it at once, and an unchanged one costs nothing. */
     TagFSLockTake(&g_ledger_lock);
-    uint16_t kept   = fits ? (uint16_t)len : 0;
-    bool     same   = g_ledger_use_len == kept &&
-                      (kept == 0 || memcmp(g_ledger_use, list, kept) == 0);
-    bool     landed = same && g_ledger_use_landed == g_ledger_use_edits;
-    if (!same) {
-        g_ledger_use_len = kept;
-        if (kept) memcpy(g_ledger_use, list, kept);
-        g_ledger_use_edits++;
+    bool later  = saying < g_ledger_use_saying;
+    bool landed = false;
+    if (!later) {
+        bool same = UseTextSame(g_ledger_use, keep);
+        landed              = same && g_ledger_use_landed == g_ledger_use_edits;
+        g_ledger_use_saying = saying;
+        if (!same) {
+            gone         = g_ledger_use;
+            g_ledger_use = keep;
+            keep         = NULL;
+            g_ledger_use_edits++;
+        }
     }
     TagFSLockDrop(&g_ledger_lock);
+    UseTextDrop(keep);
+    UseTextDrop(gone);
+
+    /* A later word already stands: this one is not what the volume holds. */
+    if (later) {
+        if (remembered) *remembered = false;
+        return OK;
+    }
 
     /* A demand on the one writer: the cycle that covers it carries the
      * context in the Ledger it writes. */
@@ -308,22 +328,26 @@ error_t tagfs_remember_use_context(const char *list, size_t len, bool *remembere
     return rc;
 }
 
-size_t tagfs_recall_use_context(char *buf, size_t cap)
+UseText *tagfs_recall_use_context(uint64_t *out_saying)
 {
     TagFSLockTake(&g_ledger_lock);
-    size_t len = g_ledger_use_len;
-    if (buf && cap >= len && len) memcpy(buf, g_ledger_use, len);
+    UseText *memory = UseTextHold(g_ledger_use);
+    uint64_t saying = g_ledger_use_saying;
     TagFSLockDrop(&g_ledger_lock);
-    return len;
+    if (out_saying) *out_saying = saying;
+    return memory;
 }
 
 void LedgerLetGo(void)
 {
     TagFSLockTake(&g_ledger_lock);
-    g_ledger_use_len    = 0;
+    UseText *gone       = g_ledger_use;
+    g_ledger_use        = NULL;
+    g_ledger_use_saying = 0;
     g_ledger_use_edits  = 0;
     g_ledger_use_landed = 0;
     TagFSLockDrop(&g_ledger_lock);
+    UseTextDrop(gone);
 }
 
 /*

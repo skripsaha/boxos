@@ -853,16 +853,20 @@ static error_t storage_scope_of(const ManifestOp *op, size_t at, uint8_t *out_sc
  * never makes a file without a tag it was asked for. So is a text that names
  * no tag at all — asking for every file is asking with no text.
  *
- * *out_tags is the caller's to kfree, and so is *out_block, the Use Context's
- * names the last spellings point into. Both NULL, and a count of 0, when there
- * is nothing to ask.
+ * The Use Context's spellings point into the context as it stood at the one
+ * look this takes — held in *out_use, which the caller gives back with
+ * UseListDrop once the spellings are done with; NULL outside the USE scope or
+ * with no context. *out_tags is the caller's to kfree; the caller's own tags
+ * are the first *out_own of *out_count. All NULL and 0 when there is nothing
+ * to ask.
  */
 static error_t storage_tags_spelled(uint8_t scope, const char *text, size_t len,
-                                    TagSpelling **out_tags, char **out_block,
-                                    uint32_t *out_count)
+                                    TagSpelling **out_tags, UseList **out_use,
+                                    uint32_t *out_own, uint32_t *out_count)
 {
     *out_tags  = NULL;
-    *out_block = NULL;
+    *out_use   = NULL;
+    *out_own   = 0;
     *out_count = 0;
 
     uint32_t own = 0;
@@ -872,38 +876,28 @@ static error_t storage_tags_spelled(uint8_t scope, const char *text, size_t len,
     if (len > 0 && own == 0)
         return ERR_TAGFS_INVALID_TAG;
 
-    char        *block = NULL;
-    const char **names = NULL;
-    uint32_t     use   = 0;
-    if (scope == STORAGE_SCOPE_USE) {
-        rc = UseContextTagArray(&block, &names, &use);
-        if (rc != OK)
-            return rc;
-    }
-    if (own + use == 0)
+    UseList *use   = scope == STORAGE_SCOPE_USE ? UseContextHold() : NULL;
+    uint32_t n_use = UseListCount(use);
+    if (own + n_use == 0) {
+        UseListDrop(use);
         return OK;
+    }
 
-    TagSpelling *tags = kmalloc(sizeof(TagSpelling) * (own + use));
+    TagSpelling *tags = kmalloc(sizeof(TagSpelling) * ((size_t)own + n_use));
     if (!tags) {
-        kfree(block);
-        kfree(names);
+        UseListDrop(use);
         return ERR_NO_MEMORY;
     }
     size_t at = 0;
     for (uint32_t i = 0; i < own; i++)
         (void)TagListNext(text, len, &at, &tags[i]);   /* judged whole above */
-    for (uint32_t i = 0; i < use && rc == OK; i++)
-        rc = TagSpell(names[i], strlen(names[i]), &tags[own + i]);
-    kfree(names);
-    if (rc != OK) {
-        kfree(tags);
-        kfree(block);
-        return rc;
-    }
+    for (uint32_t i = 0; i < n_use; i++)
+        tags[own + i] = UseListTag(use, i);
 
     *out_tags  = tags;
-    *out_block = block;
-    *out_count = own + use;
+    *out_use   = use;
+    *out_own   = own;
+    *out_count = own + n_use;
     return OK;
 }
 
@@ -1004,10 +998,11 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     error_t rc = storage_crate_text(op, crates, ctx, &text, &tlen);
     if (rc != OK) return rc;
 
-    TagSpelling *tags      = NULL;
-    char        *use_block = NULL;
-    uint32_t     total     = 0;
-    rc = storage_tags_spelled(scope, text, tlen, &tags, &use_block, &total);
+    TagSpelling *tags  = NULL;
+    UseList     *use   = NULL;
+    uint32_t     own   = 0;
+    uint32_t     total = 0;
+    rc = storage_tags_spelled(scope, text, tlen, &tags, &use, &own, &total);
     if (rc != OK) {
         crate_buf_free(text);
         return rc;
@@ -1016,7 +1011,7 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     uint32_t hdr[2] = { 0, 0 };   /* delivered, total */
     rc = storage_query_into(tags, total, out, ctx, hdr);
     kfree(tags);
-    kfree(use_block);
+    UseListDrop(use);
     crate_buf_free(text);
     if (rc != OK) return rc;
 
@@ -1107,16 +1102,35 @@ static error_t storage_intern_all(const TagSpelling *tags, uint32_t count, uint1
     return OK;
 }
 
+/* The record a file named `filename` wearing `tags` would have, judged before
+ * any tag is interned: a create refused for its width spends none of the
+ * volume's numbers. When the caller's own tags fit and the Use Context's do
+ * not, the refusal says it is the context. */
+static error_t storage_create_fits(const char *filename, const TagSpelling *tags,
+                                   uint32_t own, uint32_t total)
+{
+    uint32_t worn = 0;
+    error_t  rc   = TagFSCreateFits(filename, tags, total, &worn);
+    if (rc == ERR_TAGFS_RECORD_FULL && total > own &&
+        TagFSCreateFits(filename, tags, own, NULL) == OK)
+        kprintf("[USE] '%s' is not made: the context carries more tags than a file on "
+                "this volume can hold — %u tags with the file's own and its name's\n",
+                filename, worn);
+    return rc;
+}
+
 /* STORAGE_OBJ_CREATE  params:[char filename[32]] (NUL-padded)
  *                            [u8 scope] (optional) — inside the Use Context
  *                            (absent, STORAGE_SCOPE_USE) or EVERYWHERE
  *                     in_crate (optional): tag string
  *                     out_crate (optional): u32 file_id
  *                     Inside the context the new file is stamped with the
- *                     user's tags as well as its own. Every tag is spelled
- *                     before any is interned, and a tag that does not spell
- *                     or intern refuses the create: no file is made without a
- *                     tag it was asked to wear. */
+ *                     user's tags as well as its own. Every tag is spelled,
+ *                     and the record they make judged, before any is
+ *                     interned; a tag that does not spell or intern, or a
+ *                     record wider than a file may have (ERR_TAGFS_RECORD_FULL),
+ *                     refuses the create: no file is made without a tag it
+ *                     was asked to wear, least of all its context's. */
 static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
@@ -1132,30 +1146,37 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     size_t name_len = strnlen((const char *)op->params, field);
     if (name_len == 0) return ERR_INVALID_ARGUMENT;
 
+    char *filename = kmalloc(name_len + 1);
+    if (!filename) return ERR_NO_MEMORY;
+    memcpy(filename, op->params, name_len);
+    filename[name_len] = '\0';
+
     char  *text = NULL;
     size_t tlen = 0;
     rc = storage_crate_text(op, crates, ctx, &text, &tlen);
-    if (rc != OK) return rc;
+    if (rc != OK) {
+        kfree(filename);
+        return rc;
+    }
 
-    TagSpelling *tags      = NULL;
-    char        *use_block = NULL;
-    uint32_t     total     = 0;
-    uint16_t    *tag_ids   = NULL;
-    char        *filename  = NULL;
-    rc = storage_tags_spelled(scope, text, tlen, &tags, &use_block, &total);
+    TagSpelling *tags    = NULL;
+    UseList     *use     = NULL;
+    uint32_t     own     = 0;
+    uint32_t     total   = 0;
+    uint16_t    *tag_ids = NULL;
+    rc = storage_tags_spelled(scope, text, tlen, &tags, &use, &own, &total);
+    if (rc == OK)
+        rc = storage_create_fits(filename, tags, own, total);
     if (rc == OK)
         rc = storage_intern_all(tags, total, &tag_ids);
-    if (rc == OK && !(filename = kmalloc(name_len + 1)))
-        rc = ERR_NO_MEMORY;
     kfree(tags);
-    kfree(use_block);
+    UseListDrop(use);
     crate_buf_free(text);
     if (rc != OK) {
         kfree(tag_ids);
+        kfree(filename);
         return rc;
     }
-    memcpy(filename, op->params, name_len);
-    filename[name_len] = '\0';
 
     uint32_t file_id = 0;
     int made = tagfs_create_file(filename, tag_ids, total, &file_id);

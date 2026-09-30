@@ -93,6 +93,10 @@ uint64_t InkDataNeed(void);
 /* A mount's first word: no Ink yet. With the door shut. */
 void     InkMountReset(void);
 
+/* The stem of a name as a key, read in place: OK with out->key NULL for a
+ * name with no stem, ERR_TAGFS_TAG_TOO_LONG for one longer than a key. */
+error_t InkNameStem(const char* name, TagSpelling* out);
+
 /* The tag a file's name gives it — the stem, up to the last dot, as a key —
  * interned, and on the medium before any file wears it: OK and the id
  * (TAGFS_INVALID_TAG_ID for a name with no stem), or the registry's refusal.

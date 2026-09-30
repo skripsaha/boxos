@@ -653,7 +653,7 @@ error_t InkQuitclaim(uint32_t fid, InkReceipt* out)
 /* The stem of a name as a key. OK with out->key NULL when the name has no
  * stem — ".profile", or nothing but blanks before the dot — and so no tag;
  * ERR_TAGFS_TAG_TOO_LONG for a stem longer than a key may be. */
-static error_t InkNameStem(const char* name, TagSpelling* out)
+error_t InkNameStem(const char* name, TagSpelling* out)
 {
     size_t len  = strlen(name);
     size_t stem = len;
@@ -679,9 +679,10 @@ error_t InkNameTagIntern(const char* name, uint16_t* out_tag)
     if (rc != OK || !stem.key)
         return rc;
     rc = TagRegistryIntern(InkState()->registry, &stem, out_tag);
-    if (rc == OK)
-        rc = TagRegistryFlushFor(InkState()->registry, *out_tag);
-    return rc;
+    if (rc != OK)
+        return rc;
+    UseContextBindTag(&stem, *out_tag);
+    return TagRegistryFlushFor(InkState()->registry, *out_tag);
 }
 
 uint16_t InkNameTagLookup(const char* name)

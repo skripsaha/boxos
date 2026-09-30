@@ -38,6 +38,9 @@
 // stand_helm_tests.c     the stand_helm suite: two writers of a file taking
 //                        turns at its Helm, a reader's blocks outliving a
 //                        delete, and a defrag beside a delete
+// stand_use_tests.c      the stand_use suite: a context said without a number
+//                        issued, two sayings that race to the volume, and the
+//                        scheduler's question under a context of any size
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.

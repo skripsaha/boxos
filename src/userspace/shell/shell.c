@@ -13,6 +13,7 @@
 #include "executor.h"
 #include "box/print.h"
 #include "box/string.h"
+#include "box/memory.h"
 #include "box/ipc.h"
 #include "box/core/result.h"
 #include "box/system.h"
@@ -69,28 +70,89 @@ void ShellInit(void)
  * Prompt management
  * ========================================================================= */
 
+/* The whole context, comma-joined, into a buffer of its own size the caller
+ * frees: the number of tags, 0 for none, negative when the kernel refused.
+ * Asked for its size first and read again if it grew in between. */
+static int ShellContextWhole(char **out)
+{
+    *out = NULL;
+    for (;;) {
+        size_t needed = 0;
+        int    rc     = use_get(NULL, 0, &needed);
+        if (rc < 0 || needed <= 1) return rc < 0 ? rc : 0;
+
+        char *list = malloc(needed);
+        if (!list) return -1;
+        size_t again = 0;
+        int    tags  = use_get(list, needed, &again);
+        if (tags >= 0 && again <= needed) {
+            *out = list;
+            return tags;
+        }
+        free(list);
+        if (tags < 0) return tags;
+    }
+}
+
+/* `n` in decimal at `out`; the number of bytes written. */
+static size_t ShellDecimal(char *out, uint32_t n)
+{
+    char   digits[10];
+    size_t count = 0;
+    do {
+        digits[count++] = (char)('0' + n % 10);
+        n /= 10;
+    } while (n);
+    for (size_t i = 0; i < count; i++)
+        out[i] = digits[count - 1 - i];
+    return count;
+}
+
+/* "] ~ " and its NUL, and " +4294967295" before them: what the prompt keeps
+ * back from the tags. */
+#define SHELL_PROMPT_TAIL  (5u + 12u)
+
 /*
  * The prompt says what the kernel holds as the Use Context — "[code,cpp] ~ " —
  * read fresh each time rather than kept as a copy of what this shell typed, so
  * a nested shell shows the context it was born into and a context set by a
- * system program shows up too. The kernel writes as many whole tags as the
- * prompt has room for; a context longer than the prompt is shown to that
- * point and never torn mid-tag.
+ * system program shows up too. As many whole tags as the prompt has room for
+ * are shown, never one torn mid-tag, and the rest are counted: "[code,cpp +3]".
  */
 void ShellUpdatePrompt(void)
 {
-    /* "[" + list + "] ~ " + NUL */
-    char list[SHELL_PROMPT_MAX - 5];
-    int  tags = use_get(list, sizeof(list), NULL);
-
-    if (tags > 0) {
-        size_t len = strlen(list);
-        g_state.prompt[0] = '[';
-        memcpy(g_state.prompt + 1, list, len);
-        memcpy(g_state.prompt + 1 + len, "] ~ ", 5);
-    } else {
+    char *whole = NULL;
+    int   total = ShellContextWhole(&whole);
+    if (total <= 0) {
+        free(whole);
         memcpy(g_state.prompt, "~ ", 3);
+        return;
     }
+
+    char       *p     = g_state.prompt;
+    size_t      used  = 0;
+    int         shown = 0;
+    const char *tag   = whole;
+    p[used++] = '[';
+    while (shown < total) {
+        const char *comma = strchr(tag, ',');
+        size_t      len   = comma ? (size_t)(comma - tag) : strlen(tag);
+        size_t      cost  = len + (shown ? 1u : 0u);
+        if (used + cost > SHELL_PROMPT_MAX - SHELL_PROMPT_TAIL) break;
+        if (shown) p[used++] = ',';
+        memcpy(p + used, tag, len);
+        used += len;
+        shown++;
+        if (!comma) break;
+        tag = comma + 1;
+    }
+    free(whole);
+    if (shown < total) {
+        if (shown) p[used++] = ' ';
+        p[used++] = '+';
+        used += ShellDecimal(p + used, (uint32_t)(total - shown));
+    }
+    memcpy(p + used, "] ~ ", 5);
 }
 
 /* =========================================================================
@@ -112,38 +174,37 @@ void ShellDrainStaleIpc(void)
     while (receive(&drain)) { }
 }
 
+/* One typed line, whatever its length, run: the cut words for a built-in,
+ * the line itself for a program, which carries it as its Luggage. */
+static void ShellRunLine(const char *input)
+{
+    ParsedCommand cmd;
+    if (ParserParse(input, &cmd) != 0) {
+        println("Error: no memory to read the command");
+        return;
+    }
+    if (cmd.argc > 0 && ExecutorRun(&cmd, input) != 0) {
+        const char *err = ExecutorGetError();
+        if (err && err[0] != '\0') {
+            printf("%colorError: %s%color\n",
+                   COLOR_RED, err, COLOR_DEFAULT);
+        }
+    }
+    ParserFree(&cmd);
+}
+
 void ShellMainLoop(void)
 {
-    char input[SHELL_LINE_MAX];
-
     while (g_state.running) {
         print(g_state.prompt);
         io_flush();
 
-        int len = readline(input, SHELL_LINE_MAX);
-        if (len <= 0)
-            continue;
-
-        /* Parse */
-        ParsedCommand cmd;
-        if (ParserParse(input, &cmd) != 0) {
-            println("Error: failed to parse command");
-            continue;
-        }
-
-        if (cmd.argc == 0)
-            continue;
-
-        /* Execute — the cut words for a built-in, the line itself for a
-         * program, which carries it as its Luggage. */
-        int result = ExecutorRun(&cmd, input);
-        if (result != 0) {
-            const char *err = ExecutorGetError();
-            if (err && err[0] != '\0') {
-                printf("%colorError: %s%color\n",
-                       COLOR_RED, err, COLOR_DEFAULT);
-            }
-        }
+        /* The line grows as it is typed: no ceiling but memory. */
+        char *input = NULL;
+        int   len   = readline_grow(&input);
+        if (len > 0)
+            ShellRunLine(input);
+        free(input);
     }
 }
 

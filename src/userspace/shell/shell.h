@@ -7,8 +7,6 @@
  * BoxOS Shell Constants — no magic numbers in code
  * ========================================================================= */
 
-#define SHELL_LINE_MAX          512     /* max input line length (matches LINE_CAPACITY) */
-#define SHELL_MAX_ARGS          64      /* max tokens per command */
 #define SHELL_PROMPT_MAX        128     /* max prompt string */
 #define SHELL_ERROR_MAX         256     /* error message buffer */
 
@@ -21,10 +19,13 @@ typedef struct {
     bool     running;
 } ShellState;
 
+/* A typed line cut into words: as many words as the line has, each a string
+ * in `storage`, a copy of the line of its own length. Both arrays are the
+ * parser's, given back with ParserFree. */
 typedef struct {
-    int   argc;
-    char *argv[SHELL_MAX_ARGS];
-    char  storage[SHELL_LINE_MAX];
+    int    argc;
+    char **argv;
+    char  *storage;
 } ParsedCommand;
 
 typedef int (*CommandHandler)(int argc, char *argv[]);

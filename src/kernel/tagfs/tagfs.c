@@ -1546,10 +1546,8 @@ static void attend_arrival(void)
     }
 
     {
-        /* The boot path does this after its own mount and this path did not,
-         * so a volume that arrived late came up with the Use Context still
-         * holding no numbers for its tags. The person's word, if any, stands
-         * over what the arriving volume remembers. */
+        /* Said on every road to a mounted volume: the Use Context binds its
+         * numbers here, and the person's word stands over the volume's memory. */
         UseContextRecall();
         kprintf("[TagFS] a medium arrived carrying a volume, and this machine "
                 "had none — mounted from seat %u\n", g_tagfs_seat);
@@ -2690,8 +2688,8 @@ error_t tagfs_init(void) {
 static void tagfs_clear_the_ground(void)
 {
     /* The registry is about to go, and with it every number it issued. The
-     * Use Context holds some of them for the scheduler; told first, so no
-     * dispatch decides on a page of a book that no longer exists. */
+     * Use Context holds some; told first — the door drained, so nothing binds
+     * one after — its verdicts are stale before the book is freed. */
     UseContextUnbind();
 
     /* What this volume remembered goes with it; the next one is read, not
@@ -3340,6 +3338,8 @@ error_t TagFSInternSpelling(const TagSpelling *tag, uint16_t *out_id)
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
     error_t rc = TagRegistryIntern(g_state.registry, tag, out_id);
+    if (rc == OK)   /* inside the door: bound before this book can go */
+        UseContextBindTag(tag, *out_id);
     tagfs_leave();
     return rc;
 }

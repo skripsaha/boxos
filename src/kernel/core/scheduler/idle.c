@@ -18,6 +18,7 @@
 #include "cpuid.h"          // g_cpu_caps.has_monitor (MWAIT idle)
 #include "cpu_calibrate.h"  // cpu_tsc_recal_if_pending — periodic TSC recal
 #include "tagfs.h"
+#include "use_context.h"
 
 // BSP idle process (static, PID 0)
 static process_t g_idle_process;
@@ -238,6 +239,11 @@ void cpu_idle(void) {
      * and the caller still inside may be waiting for a transfer this loop is
      * the one to finish. One atomic load when there is nothing to do. */
     TagFSServiceIfPending();
+
+    /* And the Use Context's verdicts, when one went stale — the recount for
+     * cabins that never enter the kernel, which on one core has nowhere else
+     * to run with interrupts on. One load when none is owed. */
+    UseContextServiceIfPending();
 
     if (g_cpu_caps.has_mwait_c1) {
         /* MWAIT C1 (hint 0x00). The monitored cell is this idle stack's own

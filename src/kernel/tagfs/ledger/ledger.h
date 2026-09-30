@@ -4,6 +4,7 @@
 #include "../../../lib/kernel/ktypes.h"
 #include "../../../include/volume_ledger.h"
 #include "../../core/error/error.h"
+#include "../../core/use_context/use_context.h"
 #include "../lock_rank/lock_rank.h"
 
 /*
@@ -43,24 +44,28 @@ error_t  LedgerImageWrite(void);
 
 /*
  * The Use Context the volume remembers — what its person was doing when they
- * left (volume_ledger.h). Kept in the Ledger and written with it.
+ * left (volume_ledger.h). Kept in the Ledger and written with it, as a text
+ * shared by reference with the context that said it (use_context.h).
  *
- * remember: say `list` (comma-joined tag names, `len` bytes, no NUL; len 0
- * says none) to the volume, and a Settle cycle carries it to the medium — none
- * when the medium already holds exactly it. *remembered reports whether the
- * volume now holds exactly this list — false when the cycle was refused, or
- * when the list is longer than the record holds, in which case the volume
- * forgets rather than keeping half. The caller is inside the volume already
- * (use_context.c takes the door) and holds no TagFS lock.
+ * remember: say `said` (the comma-joined text; NULL says none), the `saying`-th
+ * word the machine has said, to the volume, and a Settle cycle carries it to
+ * the medium — none when the medium already holds exactly it. A word older
+ * than one the volume was already told changes nothing: two sayings that race
+ * leave the later one whole. *remembered reports whether the volume now holds
+ * exactly this text — false when the cycle was refused, when a later word
+ * stands, or when the text is longer than the record holds, in which case the
+ * volume forgets rather than keeping half. The caller is inside the volume
+ * already (use_context.c takes the door) and holds no TagFS lock.
  *
- * recall: copy what the volume remembers into `buf` when it fits `cap`;
- * returns the byte length either way (0 = none), so a caller can size one.
+ * recall: what the volume remembers, in one take — a reference the caller
+ * drops (UseTextDrop), or NULL when it remembers none — and in *out_saying
+ * (optional) which word it is, 0 for the medium's own.
  *
  * peek: one copy of the Ledger read off the medium by the Ledger's own
  * reader, its remembered context included — a proof, not a way in.
  */
-error_t  tagfs_remember_use_context(const char *list, size_t len, bool *remembered);
-size_t   tagfs_recall_use_context(char *buf, size_t cap);
+error_t  tagfs_remember_use_context(UseText *said, uint64_t saying, bool *remembered);
+UseText *tagfs_recall_use_context(uint64_t *out_saying);
 bool     tagfs_ledger_peek(uint32_t copy, VolumeLedger *out, char *tail, uint16_t *tail_len);
 
 /* The mount takes up the newer intact copy — the counters into the volume's

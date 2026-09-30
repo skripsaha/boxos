@@ -580,6 +580,15 @@ uint64_t tagfs_block_to_sector(uint32_t block);
  * it can is refused ERR_TAGFS_FID_EXHAUSTED (LedgerIssueFileId). */
 int  tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint32_t tag_count,
                        uint32_t* out_file_id);
+
+/* Whether a file named `filename` wearing `tags` — each counted once, its
+ * name's own tag with them — has a record format v1 can hold: OK, or
+ * ERR_TAGFS_RECORD_FULL; the name's refusal (ERR_TAGFS_TAG_TOO_LONG), or
+ * ERR_NO_MEMORY. Asked before a single tag is interned, so a create refused
+ * for its width spends none of the volume's numbers. *out_worn (optional):
+ * how many tags the record would list. */
+error_t TagFSCreateFits(const char* filename, const TagSpelling* tags, uint32_t count,
+                        uint32_t* out_worn);
 int  tagfs_delete_file(uint32_t file_id);
 int  tagfs_rename_file(uint32_t file_id, const char* new_filename);
 

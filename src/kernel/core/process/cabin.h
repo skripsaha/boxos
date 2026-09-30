@@ -60,6 +60,12 @@ typedef struct cabin_t
     uint32_t  tag_overflow_capacity;
     TagOverflowRetired *tag_overflow_retired;  /* old buffers, freed at cabin_destroy */
 
+    /* The Use Context's verdict on this cabin, one word: the epoch it was
+     * counted at << 1 | whether the cabin wears every context tag. The
+     * scheduler reads it and compares one epoch (use_context.h); 0 is stale
+     * from birth. */
+    uint64_t use_verdict;
+
     /* MemTag held-tag set, level 1 — see the block above MemCabinGrant in
      * memtag.h for the shape and why it is two levels. Each slot carries
      * the address of a leaf bitmap covering MEMTAG_HELD_LEAF_IDS
