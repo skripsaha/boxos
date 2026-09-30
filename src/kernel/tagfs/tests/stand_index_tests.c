@@ -51,7 +51,8 @@ static bool StandIndexFill(FileMap* map, uint32_t step)
             FileRecordRelease(rec);
             return false;
         }
-        error_t put = FileMapRecordPut(map, fid, rec, 0, 16 + k, &stake);
+        RecordWhere   where = { .link = 0, .offset = 16 + k, .gen = 0, .shape = 0 };
+        error_t put = FileMapRecordPut(map, fid, rec, &where, &stake);
         FileMapStakeLetGo(&stake);
         if (put != OK || FileMapRowSet(map, fid, 3, 16 + k) != OK)
             return false;

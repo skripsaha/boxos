@@ -4,6 +4,7 @@
 #include "block_fail.h"
 #include "amp.h"
 #include "../scribe/scribe.h"
+#include "../settle/settle.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -362,8 +363,8 @@ out:
 
 /* The same question of the file table. File ids are spent up to the first id
  * past the table's chain on the medium, one file is made with that id, and
- * the sync that has to grow the table for it meets the refusal. The file's
- * row is on the medium once the unarmed sync afterwards has run. */
+ * the Settle cycle that has to grow the table for it meets the refusal. The
+ * file's row is on the medium once the unarmed cycle afterwards has run. */
 static TestResult TestStandTableGrowsOntoAStamp(void)
 {
     TestResult     verdict = TEST_PASS;
@@ -377,7 +378,7 @@ static TestResult TestStandTableGrowsOntoAStamp(void)
     if (aside)
         return test_steps_aside(aside);
 
-    TEST_ASSERT_OK(tagfs_sync(), "an unarmed sync settles the file table first");
+    TEST_ASSERT_OK(TagFSSettle(), "an unarmed Settle cycle settles the file table first");
     TEST_ASSERT(StandChainOnMedium(fs->layout.file_table_block, TAGFS_FILETBL_MAGIC, &before) &&
                 !before.broken, "the file table's chain on the medium is whole");
     uint32_t edge = before.links * TAGFS_FTABLE_PER_BLOCK;
@@ -395,7 +396,7 @@ static TestResult TestStandTableGrowsOntoAStamp(void)
     BlockFailArm(tagfs_get_seat(), BLOCK_FAIL_WRITE, tagfs_block_to_sector(block),
                  TAGFS_BLOCK_SECTORS, 1);
     armed = true;
-    tagfs_sync();
+    (void)TagFSSettle();
     bool fired = BlockFailFired();
     BlockFailDisarm();
     armed = false;
@@ -416,10 +417,10 @@ out:
     if (file_id) {
         uint32_t       meta_block = 0, meta_offset = 0;
         FileTableEntry row        = { 0, 0 };
-        error_t        again      = tagfs_sync();
+        error_t        again      = TagFSSettle();
         if (again != OK)
-            verdict = TestFailedAt(__FILE__, __LINE__, "an unarmed sync afterwards is taken "
-                                   "(error, OK)", again, OK);
+            verdict = TestFailedAt(__FILE__, __LINE__, "an unarmed Settle cycle afterwards is "
+                                   "taken (error, OK)", again, OK);
         else if (!StandChainOnMedium(fs->layout.file_table_block, TAGFS_FILETBL_MAGIC, &after) ||
                  after.broken || after.links <= before.links)
             verdict = TestFailedAt(__FILE__, __LINE__, "and grows the table's chain whole on the "
@@ -437,12 +438,12 @@ out:
 /* CR-11's guard. The file table is made to need one more block — a row past
  * its chain, set to nothing, is all a growth asks for — and its flush is run
  * with the n-th allocation it makes refused, n = 1, 2, … until a pass makes
- * fewer than n. The flush is asked directly, under the sync's own Scribe, so
+ * fewer than n. The flush is asked directly, under the Settle's own Scribe, so
  * the sweep counts the table's allocations and nobody else's; a pass that grew
  * the chain is followed by a row past its new end. None of it may leave a
  * block taken that the chain does not name: the slot a link is kept in is
  * reserved before its block is taken, so nothing refused after the take can
- * strand it. Counted once an unarmed sync has written whatever the passes left
+ * strand it. Counted once an unarmed Settle cycle has written whatever the passes left
  * owed — a link attached in memory whose write is still to come is not a
  * stranded block. The table is the only taker of blocks in a pass, so a block
  * a pass took is the lowest free block when it began, and one of those the
@@ -464,7 +465,7 @@ static TestResult TestStandTableGrowthGivesBackItsGround(void)
     if (aside)
         return test_steps_aside(aside);
 
-    TEST_ASSERT_OK(tagfs_sync(), "an unarmed sync settles the file table first");
+    TEST_ASSERT_OK(TagFSSettle(), "an unarmed Settle cycle settles the file table first");
     TEST_ASSERT(VolumeTallyTake(&before), "the volume is counted before the sweep");
 
     for (uint32_t n = 1; n <= STAND_GROWTH_SWEEP && !ran_out; n++) {
@@ -479,26 +480,26 @@ static TestResult TestStandTableGrowthGivesBackItsGround(void)
         TagFSLockDrop(&fs->lock);
         TEST_ASSERT_EQ(named, 0, "a row past the chain makes the table need one more block");
         TEST_ASSERT(StandNextBlock(&block), "the allocator has a block for the growth to take");
-        TEST_ASSERT_EQ(ScribeWait(&g_sync_scribe, ScribeAsk(&g_sync_scribe), &cover, &said),
-                       SCRIBE_MINE, "the test holds the sync's Scribe, as the sync does");
+        TEST_ASSERT_EQ(ScribeWait(&g_settle_scribe, ScribeAsk(&g_settle_scribe), &cover, &said),
+                       SCRIBE_MINE, "the test holds the Settle's Scribe, as a cycle does");
 
         HeapFailArm(me, n);
         file_table_flush();
         ran_out = !HeapFailFired();
         HeapFailDisarm();
-        ScribeGive(&g_sync_scribe, cover, OK);
+        ScribeGive(&g_settle_scribe, cover, OK);
         taken[passes++] = StandBlockInUse(block) ? block : 0;
     }
     TEST_ASSERT(ran_out, "the sweep reaches a pass that makes fewer allocations than it refuses at");
 
 out:
     if (passes) {
-        error_t again = tagfs_sync();
+        error_t again = TagFSSettle();
         chain.blocks   = s_links_after;
         chain.capacity = STAND_CHAIN_LISTED;
         if (again != OK)
-            verdict = TestFailedAt(__FILE__, __LINE__, "an unarmed sync afterwards writes what "
-                                   "the passes left owed (answered, OK)", again, OK);
+            verdict = TestFailedAt(__FILE__, __LINE__, "an unarmed Settle cycle afterwards writes "
+                                   "what the passes left owed (answered, OK)", again, OK);
         else if (!StandChainOnMedium(fs->layout.file_table_block, TAGFS_FILETBL_MAGIC, &chain) ||
                  chain.broken || chain.links > STAND_CHAIN_LISTED)
             verdict = TestFailedAt(__FILE__, __LINE__, "and leaves the table's chain whole and "

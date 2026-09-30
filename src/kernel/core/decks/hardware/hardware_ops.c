@@ -681,8 +681,8 @@ static int HwDiskInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
  * UTILITY, not NONE. It takes no file and names nothing belonging to the
  * caller: it makes the WHOLE medium commit, and every program on the machine
  * pays for the pause. A program that wants its own writing to be durable has
- * the operation that was built for it — storage.anchor (OP_AUTH_APP) does
- * tagfs_sync() and this flush together and then tells the file's watchers —
+ * the operation that was built for it — storage.anchor (OP_AUTH_APP) waits
+ * for a Settle cycle and this flush together and then tells the file's watchers —
  * so nothing an app can legitimately want is behind this level.
  */
 static int HwDiskFlush(const ManifestOp *op, Crate *crates, uint16_t crate_count,

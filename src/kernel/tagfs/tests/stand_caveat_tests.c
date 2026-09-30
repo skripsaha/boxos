@@ -5,6 +5,8 @@
 #include "../integrity/integrity.h"
 #include "block_fail.h"
 #include "amp.h"
+#include "../settle/settle.h"
+#include "../ink/fallow.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -138,10 +140,7 @@ static bool StandVolumeNames(uint32_t file_id)
  *
  * The file a create made is deleted on every path out, and by the id the
  * create answered — `id` is only the one it should have taken, and may be
- * another creator's. A refused create that left a record behind is failed and
- * the record stays: it has no table row (file_table_update is the step that
- * failed), so tagfs_delete_file cannot find it and nothing a test can call
- * retires it. */
+ * another creator's. A refused create that left a record behind is failed. */
 static TestResult StandCreateOnce(uint32_t n, uint16_t stem, bool* fired, bool* whole)
 {
     TestResult verdict = TEST_PASS;
@@ -237,7 +236,7 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// A sync that meets a refusal
+// A Settle cycle that meets a refusal
 // ----------------------------------------------------------------------------
 
 static struct {
@@ -261,7 +260,7 @@ uint64_t StandLedgerSeq(void)
 
 /* The file's row of the file table as the MEDIUM holds it: the table's chain
  * walked from its head, on the medium, to the block that carries the row —
- * tagfs_read_block reads it there, because the sync's write_block took the
+ * tagfs_read_block reads it there, because the cycle's write_block took the
  * block out of the read-ahead cache. False when the chain does not reach it. */
 bool StandTableRowOnMedium(uint32_t file_id, FileTableEntry* out, uint32_t* out_block)
 {
@@ -288,19 +287,19 @@ bool StandTableRowOnMedium(uint32_t file_id, FileTableEntry* out, uint32_t* out_
 }
 
 /* The block of the file table that carries a file's row is refused while a
- * sync writes it. The sync goes on to write the ledger over a table the medium
- * does not have, and answers OK; the right answer names the refusal and
- * writes no ledger.
+ * Settle cycle writes it. A sync used to go on to write the ledger over a
+ * table the medium did not have, and answer OK; the right answer names the
+ * refusal and writes no ledger.
  *
- * The row is put on the medium first and then made owed again by renaming the
- * file to its own name — a new record, so a new row, and no new tag — and the
- * plan is armed on the block the medium says carries it: a table that writes
- * only the rows it owes still writes that block, wherever the file's id falls.
+ * The row is put on the medium first and then marked owed again — set to what
+ * it is, under the state lock, the way a file's coming marks its block — and
+ * the plan is armed on the block the medium says carries it: a table that
+ * writes only the blocks it owes still writes that one, wherever the file's
+ * id falls.
  *
  * On the way out the table the medium refused is still owed to it, and that
- * is proven off the medium: an unarmed sync while the file stands, then the
- * file's row read back — the refused table never carried it, so the medium
- * holds it only if the second sync wrote the table. */
+ * is proven off the medium: an unarmed cycle while the file stands, then the
+ * file's row read back and matched with memory's. */
 TestResult TestStandSyncOwnsARefusedWrite(void)
 {
     TestResult     verdict   = TEST_PASS;
@@ -316,17 +315,19 @@ TestResult TestStandSyncOwnsARefusedWrite(void)
 
     TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0,
                    "a file is created, so the table has a row to write");
-    TEST_ASSERT_OK(tagfs_sync(), "an unarmed sync puts the file's row on the medium");
-    TEST_ASSERT_EQ(tagfs_rename_file(file_id, "test_file"), 0,
-                   "the file is renamed to its own name, so its row is owed again");
+    TEST_ASSERT_OK(TagFSSettle(), "an unarmed Settle cycle puts the file's row on the medium");
     TEST_ASSERT(StandTableRowOnMedium(file_id, &row, &row_block),
                 "the block that carries the file's row is found on the medium");
+    TagFSLockTake(&tagfs_get_state()->lock);
+    int marked = file_table_update(file_id, row.meta_block, row.meta_offset);
+    TagFSLockDrop(&tagfs_get_state()->lock);
+    TEST_ASSERT_EQ(marked, 0, "the file's row is marked owed to the medium again");
     uint64_t seq_before = StandLedgerSeq();
     TEST_ASSERT(seq_before > 0, "a Ledger copy reads");
 
     BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(row_block), TAGFS_BLOCK_SECTORS, 1);
     armed = true;
-    error_t synced = tagfs_sync();
+    error_t synced = TagFSSettle();
     bool fired = BlockFailFired();
     BlockFailDisarm();
     armed = false;
@@ -339,22 +340,22 @@ TestResult TestStandSyncOwnsARefusedWrite(void)
         verdict = TEST_DEFECT;
         goto out;
     }
-    TEST_ASSERT(synced != OK, "a sync whose table write was refused says so");
+    TEST_ASSERT(synced != OK, "a cycle whose table write was refused says so");
     TEST_ASSERT_EQ(seq_after, seq_before, "and writes no ledger over it");
 out:
     if (armed)
         BlockFailDisarm();
-    error_t again = tagfs_sync();
+    error_t again = TagFSSettle();
     if (again != OK) {
-        verdict = TestFailedAt(__FILE__, __LINE__, "an unarmed sync afterwards is taken "
-                               "(error, OK)", again, OK);
+        verdict = TestFailedAt(__FILE__, __LINE__, "an unarmed Settle cycle afterwards is "
+                               "taken (error, OK)", again, OK);
     } else if (file_id) {
         uint32_t       meta_block = 0, meta_offset = 0;
         FileTableEntry on_medium  = { 0, 0 };
         bool           read_back  = StandTableRowOnMedium(file_id, &on_medium, NULL);
         if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0 || !read_back ||
             on_medium.meta_block != meta_block || on_medium.meta_offset != meta_offset)
-            verdict = TestFailedAt(__FILE__, __LINE__, "an unarmed sync afterwards puts the "
+            verdict = TestFailedAt(__FILE__, __LINE__, "an unarmed cycle afterwards puts the "
                                    "table on the medium — the file's row, read back off it "
                                    "(on the medium, in memory)",
                                    read_back ? (int64_t)on_medium.meta_block : -1, meta_block);
@@ -364,8 +365,9 @@ out:
     return verdict;
 }
 
-/* The medium refuses the sync's cache flush. The sync prints that none of it
- * is proven durable — and answers OK. */
+/* The medium refuses the Settle cycle's cache flush. A sync used to print that
+ * none of it was proven durable — and answer OK; a cycle declares nothing
+ * settled and answers the refusal. */
 TestResult TestStandSyncOwnsARefusedFlush(void)
 {
     TestResult verdict = TEST_PASS;
@@ -373,19 +375,19 @@ TestResult TestStandSyncOwnsARefusedFlush(void)
 
     BlockFailArm(tagfs_get_seat(), BLOCK_FAIL_FLUSH, 0, 0, 1);
     armed = true;
-    error_t synced = tagfs_sync();
+    error_t synced = TagFSSettle();
     bool fired = BlockFailFired();
     uint32_t seen = BlockFailSeen();
     BlockFailDisarm();
     armed = false;
 
-    TEST_ASSERT(fired, "the sync's cache flush was the command refused");
+    TEST_ASSERT(fired, "the cycle's cache flush was the command refused");
     if (synced == OK) {
-        TestEvidence("cache flushes the medium refused under a sync that answered OK", seen);
+        TestEvidence("cache flushes the medium refused under a cycle that answered OK", seen);
         verdict = TEST_DEFECT;
         goto out;
     }
-    TestEvidence("a refused cache flush, and the sync answered it with error", synced);
+    TestEvidence("a refused cache flush, and the cycle answered it with error", synced);
 out:
     if (armed)
         BlockFailDisarm();
@@ -642,9 +644,11 @@ TestResult TestStandOpenJoinsTheWriters(void)
 // and the write lands on the block the file has; and a second give of a free
 // block is refused whole by the block map and said (CW-D3). So the road is
 // walked as it now is — a one-block file, a snapshot of it asked for and
-// refused, its block written over whole, the file deleted — and the allocator
-// is then asked how far its count drifted from its map (TagFSAllocatorRederive,
-// which also derives it again, so no drift outlives the test).
+// refused, its block written over whole, the file deleted and its block rested
+// in Fallow until the cycles after its Quitclaim gave it back — and the
+// allocator is then asked how far its count drifted from its map
+// (TagFSAllocatorRederive, which also derives it again, so no drift outlives
+// the test).
 // ----------------------------------------------------------------------------
 
 TestResult TestStandFrozenBlockFreedTwice(void)
@@ -674,7 +678,10 @@ TestResult TestStandFrozenBlockFreedTwice(void)
     TEST_ASSERT_EQ(TagFSAllocatorRederive(), 0, "the allocator agrees with its bitmap before the delete");
     TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "the file is deleted");
     file_id = 0;
-    TEST_ASSERT(!StandBlockInUse(kept), "and its block is given back with it");
+    TEST_ASSERT(StandBlockInUse(kept), "its block rests while the Quitclaim is not settled");
+    for (uint64_t c = 0; c <= FALLOW_LAG; c++)
+        TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle after the delete");
+    TEST_ASSERT(!StandBlockInUse(kept), "and goes back once the cycles after it settled");
 
     int64_t drift = TagFSAllocatorRederive();
     TEST_ASSERT(drift >= 0, "the allocator counts no block taken that its bitmap calls free");

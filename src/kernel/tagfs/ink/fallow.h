@@ -1,0 +1,99 @@
+#ifndef TAGFS_FALLOW_H
+#define TAGFS_FALLOW_H
+
+#include "../tagfs.h"
+
+/*
+ * Fallow — ground the volume stopped naming, resting until nothing that could
+ * still be read back off the medium names it.
+ *
+ * A block a file gives up is not free the moment memory says so. The record
+ * that gave it up may still be only in memory, or in the pool's tail — the
+ * one block of the pool that is rewritten in place, and that a torn write can
+ * take back to what it held before — and the medium's older copy of the
+ * Ledger may still stand for the cycle before. Handed to another file while
+ * any of that is so, the block would have two owners the moment the power
+ * went. So it rests, and goes back to the allocator only when all of these
+ * hold (the design, M1):
+ *
+ *   (1) the record that freed it lies in a CLOSED block of the pool — never
+ *       rewritten again;
+ *   (2) the cycle that settled that block has been followed by FALLOW_LAG
+ *       more: the Ledger's other copy has moved past it too;
+ *   (3) no handle views the file as it was before — Helm's view_gen, which
+ *       arrives with step 1.5;
+ *   (4) no snapshot keeps it — a format-v1 volume takes none, and the ones an
+ *       earlier kernel left keep the blocks their redirects moved away from,
+ *       which no record names;
+ *   (5) its zeroed digest has settled — the digests of a node are zeroed by
+ *       the first cycle after it came to rest, just before that cycle writes
+ *       the integrity map, and the node goes back only once a cycle at least
+ *       that late has settled.
+ *
+ * A freer is one of two kinds. A record of the pool (FALLOW_BY_RECORD) is
+ * known by the gen of the Ink that wrote it; a field of the Ledger
+ * (FALLOW_BY_LEDGER) — the integrity map's old run — by the number of the
+ * first cycle whose Ledger image was taken after the field changed, for which
+ * (1) is moot.
+ *
+ * Everything here is changed under the volume's state lock and nothing is
+ * allocated under it: a node is made before the lock and freed after it.
+ */
+
+/* One cycle more for a medium that keeps its FLUSH, derived: the newest copy
+ * of the Ledger a cycle wrote can tear, and then the mount stands on the copy
+ * before it — one cycle back, never two. A medium that lied about a FLUSH
+ * (MEDIUM_LIED, steps 1.6 and 1.12) needs one more. */
+#define FALLOW_LAG ((uint64_t)VOLUME_LEDGER_COPIES - 1u)
+
+typedef enum {
+    FALLOW_BY_RECORD = 1,
+    FALLOW_BY_LEDGER = 2,
+} FallowKind;
+
+typedef struct FallowNode FallowNode;
+
+/* A node for `count` runs, taken with no TagFS lock held: NULL when there is
+ * no memory. */
+FallowNode* FallowNodeMake(const FileExtent* runs, uint32_t count, FallowKind kind);
+
+/* A node that was never added, let go. */
+void        FallowNodeLetGo(FallowNode* node);
+
+/* Under the state lock: the node's runs come to rest, freed by `gen` — the
+ * Ink's gen; 0 for a Ledger freer, whose cycle the next S0 names
+ * (FallowLedgerTaken). The node is Fallow's from here on. */
+void        FallowAdd(FallowNode* node, uint64_t gen);
+
+/* Under the state lock, at S0 of cycle number `cycle`, as the Ledger's image
+ * is taken: every Ledger freer not yet named is freed by this cycle. */
+void        FallowLedgerTaken(uint64_t cycle);
+
+/* By the Settle's holder, with no TagFS lock held, before the cycle numbered
+ * `cycle` writes the integrity map: the digests of every node not yet zeroed
+ * are zeroed (IntegrityForget), and the node says which cycle did it. */
+void        FallowZeroDigests(uint64_t cycle);
+
+/* Under the state lock: what the unsettled record written by Ink `from` had
+ * freed is freed by Ink `to` now — the record was replaced in the tail by a
+ * newer one of the same file, and the older one never reaches the medium. */
+void        FallowRetag(uint64_t from, uint64_t to);
+
+/* Under the state lock, at the end of cycle number `cycle`: every node whose
+ * freer now lies in a settled closed block (gen <= closed_gen) is given the
+ * cycle it may go back at, and every node whose cycle has come, and whose
+ * digests a settled cycle zeroed, goes back to the allocator. Answers the blocks given back; the nodes spent come back in
+ * *spent, for FallowNodesFree after the lock. */
+uint64_t    FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent);
+
+/* Nodes FallowRipen spent, freed with no TagFS lock held. */
+void        FallowNodesFree(FallowNode* list);
+
+/* Under the state lock: how many blocks rest. */
+uint64_t    FallowBlocks(void);
+
+/* The volume let go of: every node freed and nothing given back — what memory
+ * held of the map is dropped with it. With the door shut. */
+void        FallowDropAll(void);
+
+#endif /* TAGFS_FALLOW_H */

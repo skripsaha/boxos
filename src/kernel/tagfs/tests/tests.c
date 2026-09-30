@@ -1,6 +1,8 @@
 #include "tests.h"
 #include "../tagfs.h"
 #include "../plot/plot.h"
+#include "../metadata_pool/meta_pool.h"
+#include "../ink/fallow.h"
 #include "boardroom.h"
 #ifdef CONFIG_VOLUME_TESTS
 #include "block_fail.h"
@@ -174,15 +176,18 @@ int TestFileRead(uint32_t file_id, void* buffer, uint32_t capacity)
 //   held       blocks in use that are not the volume's own bookkeeping.
 //
 // Not the free count on its own, because the free count is not the test's
-// alone to move. The metadata pool chains a fresh block the moment a record
-// no longer fits (meta_pool.c, meta_pool_write), and the file table and the
-// registry chain theirs at a sync — all of it for good, and none of it
-// residue. So the chains are walked on the medium, the way the mount's roll
-// call walks them, and they, the integrity map and the snapshot manifest an
-// earlier kernel may have laid down are taken out of the count. No test can
-// take a snapshot (a format-v1 volume refuses one), so what is left is what
-// files hold, and a test that leaves a block behind, or hands back one that
-// was never its own, moves it.
+// alone to move. The metadata pool takes Spares and closes its tail onto them
+// (metadata_pool/), and the file table and the registry chain theirs at a
+// Settle cycle — all of it for good, and none of it residue — and what a file
+// gave up rests in Fallow until the cycles after its record gave it back
+// (ink/fallow.h). So the registry's and the table's chains are walked on the
+// medium, the way the mount's roll call walks them; the pool's chain and its
+// Spares are counted in memory, which holds the pool's newest links before any
+// cycle wrote them; and they, the ground at rest, the integrity map and the
+// snapshot manifest an earlier kernel may have laid down are taken out of the
+// count. No test can take a snapshot (a format-v1 volume refuses one), so what
+// is left is what files hold, and a test that leaves a block behind, or hands
+// back one that was never its own, moves it.
 //
 // Not the tag count: a tag is interned for good (every created file interns
 // the stem of its name), so the tests keep to names they have always used and
@@ -223,12 +228,11 @@ bool VolumeTallyTake(VolumeTally* tally)
 
     uint64_t chains =
         VolumeChainLength(fs->layout.tag_registry_block,  TAGFS_REGISTRY_MAGIC) +
-        VolumeChainLength(fs->layout.file_table_block,    TAGFS_FILETBL_MAGIC) +
-        VolumeChainLength(fs->layout.metadata_pool_block, TAGFS_MPOOL_MAGIC);
+        VolumeChainLength(fs->layout.file_table_block,    TAGFS_FILETBL_MAGIC);
 
     TagFSLockTake(&fs->lock);
     uint64_t used = fs->layout.data_blocks - fs->ledger.free_blocks;
-    uint64_t own  = chains + fs->ledger.integrity_map_blocks +
+    uint64_t own  = chains + PoolBlocksHeld() + FallowBlocks() + fs->ledger.integrity_map_blocks +
                     (fs->ledger.cow_manifest_block != 0) +
                     (fs->ledger.cow_manifest_backup_block != 0);
     tally->files = fs->ledger.total_files;

@@ -95,8 +95,8 @@ error_t  VolumeFlushFor(uint64_t need);
 //      TagFS lock.
 //   3. Take or wait for a Scribe with no TagFS lock held — a core spinning for
 //      a Scribe with interrupts off would never hear the completion the holder
-//      is waiting for — and nest Scribes only downward: sync, then registry,
-//      then ledger. The witness names a Scribe asked for under a TagFS lock
+//      is waiting for — and nest Scribes only downward: the Settle, then the
+//      registry. The witness names a Scribe asked for under a TagFS lock
 //      ([LockRank] ... held across a wait for a Scribe), and a "[Scribe]" line
 //      names one asked for out of order; both let the work go on.
 //   4. A pass that fails keeps what it did not write owed in memory, so the
@@ -106,7 +106,7 @@ error_t  VolumeFlushFor(uint64_t need);
 //      waits for one, and a continuation asking for a Scribe that core holds
 //      beneath it would be answered SELF; one that does is named ("[Scribe]
 //      ... inside a baton continuation"). The one pass that must take them —
-//      the halt a one-way pass begins, whose sync takes every Scribe — is
+//      the halt a one-way pass begins, whose last Settle takes them — is
 //      never run by the pump inside a wait: it waits for the core's own loop
 //      (BatonPumpAtRest, baton.h).
 //   7. Give on the core that took it, holding no spinlock of any kind: an
@@ -131,9 +131,9 @@ error_t  VolumeFlushFor(uint64_t need);
 // ============================================================================
 
 typedef enum {
-    SCRIBE_RANK_SYNC     = 1,   /* tagfs_sync, the whole pass */
-    SCRIBE_RANK_REGISTRY = 2,
-    SCRIBE_RANK_LEDGER   = 3    /* innermost */
+    SCRIBE_RANK_SETTLE   = 1,   /* the Settle cycle, the whole of it */
+    SCRIBE_RANK_REGISTRY = 2,   /* innermost */
+    SCRIBE_RANK_LAST     = SCRIBE_RANK_REGISTRY
 } ScribeRank;
 
 typedef enum {
@@ -156,9 +156,6 @@ typedef struct Scribe {
 
 #define SCRIBE_INIT(rank_, what_) { .holder = 0, .rank = (rank_), .what = (what_) }
 
-/* The volume's sync: held by tagfs_sync for its whole pass. */
-extern Scribe g_sync_scribe;
-
 uint64_t   ScribeAsk (Scribe *s);
 
 /* Answered, taken, or not now — never a wait. */
@@ -168,6 +165,12 @@ ScribeTurn ScribeTry (Scribe *s, uint64_t ticket, uint64_t *cover, error_t *refu
  * the caller left them, running the drain core's continuations meanwhile.
  * SELF at once rather than a wait that would never end. */
 ScribeTurn ScribeWait(Scribe *s, uint64_t ticket, uint64_t *cover, error_t *refusal);
+
+/* The same wait, for a stopping machine: a holder whose core is no longer
+ * running is a pass abandoned where it stood — the halt's roll call never
+ * stops a core in one, so only a core lost some other way leaves one — and it
+ * is taken over (MINE), said, for a pass begun again from its start. */
+ScribeTurn ScribeWaitTakingOver(Scribe *s, uint64_t ticket, uint64_t *cover, error_t *refusal);
 
 /* The end of the pass that MINE began: `cover` as MINE gave it, and the
  * pass's own answer. */
@@ -201,9 +204,11 @@ ScribeTurn ScribeWaitFor(const volatile uint32_t *holder, bool (*settled)(const 
  * One block from the allocator, stamped with an empty header carrying `magic`
  * — next_block 0, nothing in it, the shape volume-read calls a Spare — written
  * from `image`, the caller's own TAGFS_BLOCK_SIZE buffer. OK: *out_block is
- * stamped on the medium and *out_need is the need its link must wait for. A
- * refused write gives the block back. Called inside the door, under the
- * consumer's Scribe, with no TagFS lock held.
+ * stamped on the medium and *out_need is the need its link must wait for. The
+ * allocator's refusal as it is — ERR_TAGFS_NO_SPACE, or ERR_WOULD_BLOCK while
+ * Fallow rests blocks a cycle would give back — and a refused write gives the
+ * block back. Called inside the door with no state lock held: under the
+ * consumer's Scribe, or by an Ink's holder, whose file's writer lock may be.
  */
 error_t SpareStamp(uint32_t magic, void *image, uint32_t *out_block, uint64_t *out_need);
 

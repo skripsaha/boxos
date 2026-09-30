@@ -1,19 +1,22 @@
 #include "file_table.h"
 #include "../scribe/scribe.h"
 #include "../file_map/file_map.h"
+#include "../settle/settle.h"
 
 /*
- * ‼ THE TABLE'S LOCK GUARDS MEMORY, AND NOTHING ELSE IS DONE UNDER IT.
+ * ‼ THE TABLE IS THE VOLUME'S STATE, AND ITS LOCK IS THE STATE LOCK.
  *
- * A leaf: create, delete, rename, tagging and defrag take it under the
- * volume's state lock, a write's commit under its file's writer lock, and
- * under it no command goes to the medium, nothing is allocated and no other
- * TagFS lock is taken. The flush used to hold it across every block it wrote
- * and to take a block for its chain under it — so the state lock was taken
- * under the table while a create took the table under state (MP-D4), and a
- * core that only wanted to look a file up spun with its interrupts off for as
- * long as the medium took. Now the flush copies one block's rows out and
- * writes them with no lock held.
+ * It had a leaf lock of its own, and an Ink — which changes a file's record,
+ * its row and its tags in one hold of the state lock (ink/) — would have taken
+ * it under state on every change. The links are changed under the state lock
+ * now, by an Ink or by the flush, and by the mount's walk with the volume's
+ * door shut; nothing under it goes to the medium, allocates or waits. The
+ * flush copies one block's rows out under it and writes them with no lock
+ * held. It used to hold its lock across every block it wrote and to take a
+ * block for its chain under it — so the state lock was taken under the table
+ * while a create took the table under state (MP-D4), and a core that only
+ * wanted to look a file up spun with its interrupts off for as long as the
+ * medium took.
  *
  * ‼ THE ROWS ARE THE LIVE FILES', AND LIVE IN THE MAP OF THEM (file_map/).
  * Memory used to hold the table as the medium does, a row for every file id
@@ -22,7 +25,10 @@
  * file has one; what this file keeps is the chain, a few words per block of
  * 510 ids. A block is written from the rows the map holds for its ids.
  */
-static TagFSLock g_lock = TAGFS_LOCK_INIT("table", LOCK_RANK_LEAF);
+static TagFSLock* table_lock(void)
+{
+    return &tagfs_get_state()->lock;
+}
 
 static FileMap* table_files(void)
 {
@@ -46,18 +52,27 @@ static FileMap* table_files(void)
  * the table already owns.
  *
  * One entry per block of the chain. `edited` is the generation of the last
- * change to what the block carries — one of its rows, or its link to the next
- * block — and `landed` the generation the image last written to it was taken
- * at, so the block is owed to the medium exactly while edited > landed. A row
- * changed while its block is being written moves `edited` past what that write
- * carried, and the block stays owed: a write is never taken for more than the
- * snapshot it wrote.
+ * change to what the block carries — which files it names, or its link to the
+ * next block — and `landed` the generation the image last written to it was
+ * taken at, so the block is owed to the medium exactly while edited > landed.
+ * A file named or let go while its block is being written moves `edited` past
+ * what that write carried, and the block stays owed: a write is never taken
+ * for more than the snapshot it wrote.
+ *
+ * ‼ A BLOCK IS OWED BY WHICH FILES IT NAMES, NOT BY WHERE THEIR RECORDS ARE.
+ * A file's record moves on every change of it, and the pool is the authority
+ * on where it is: the mount corrects a row naming an older record to the
+ * newest one the pool holds (tagfs.c, mount_check_file). So a row follows its
+ * record in memory for nothing, and a block goes to the medium when a file
+ * comes or goes in it — which is what the table decides on its own while the
+ * volume carries no SettleMark (step 1.6).
  *
  * Past g_link_count, a slot whose block is not 0 is a Spare the flush has
  * stamped for the chain and not linked yet — the medium would not yet commit
  * the stamp (see FileTableGrow). The links and the slots change only in the
- * flush, which the volume's sync runs under its Scribe, and in the mount's
- * walk, with the door closed; update and delete only mark links, under g_lock.
+ * flush, which the Settle cycle runs under its Scribe, and in the mount's
+ * walk, with the door closed; update and delete only mark links, under the
+ * state lock.
  *
  * A row is changed in the map before its link is marked, and a flush reads the
  * mark before it copies the rows: a change the copy missed has marked its link
@@ -73,11 +88,11 @@ static FileTableLink* g_links        = NULL;
 static uint32_t       g_link_count   = 0;   /* links of the chain on the medium */
 static uint32_t       g_link_cap     = 0;   /* slots in g_links */
 static uint32_t       g_links_wanted = 0;   /* links the rows named since the mount need */
-static uint64_t       g_gen          = 0;   /* one step per change, taken under g_lock */
+static uint64_t       g_gen          = 0;   /* one step per change, under the state lock */
 
 /* The one block image there is: the mount's walk reads into it, and the flush
  * stamps a Spare and snapshots a link through it — the flush alone, under the
- * sync's Scribe, so no two of them ever share it. */
+ * Settle's Scribe, so no two of them ever share it. */
 static FileTableBlock g_image;
 
 /*
@@ -88,7 +103,8 @@ static FileTableBlock g_image;
  * there returned with the block taken and named by nothing, for good).
  *
  * Called with no lock held — by the flush, or by the mount's walk — and the
- * array swapped under g_lock, since update and delete mark links under it. A
+ * array swapped under the state lock, since update and delete mark links under
+ * it. A
  * new array holds exactly `want`; the walk, which cannot know the chain's
  * length before it has followed it, asks twice as many each time it runs out.
  */
@@ -101,14 +117,14 @@ static error_t LinksReserve(uint32_t want)
     if (!grown)
         return ERR_NO_MEMORY;
 
-    TagFSLockTake(&g_lock);
+    TagFSLockTake(table_lock());
     if (g_links)
         memcpy(grown, g_links, sizeof(FileTableLink) * g_link_cap);
     memset(grown + g_link_cap, 0, sizeof(FileTableLink) * (want - g_link_cap));
     FileTableLink* old = g_links;
     g_links    = grown;
     g_link_cap = want;
-    TagFSLockDrop(&g_lock);
+    TagFSLockDrop(table_lock());
     if (old)
         kfree(old);
     return OK;
@@ -241,16 +257,15 @@ int file_table_lookup(uint32_t file_id, uint32_t* out_block, uint32_t* out_offse
 
 /* The link that carries a row marked owed, after the row changed in the map.
  * A row past the chain marks no link: the link that will carry it is attached
- * by the flush already owed to the medium (FileTableGrow). */
+ * by the flush already owed to the medium (FileTableGrow). Under the state
+ * lock, or with the door shut. */
 static void table_mark(uint32_t file_id, bool named) {
     uint32_t link = file_id / TAGFS_FTABLE_PER_BLOCK;
-    TagFSLockTake(&g_lock);
     g_gen++;
     if (link < g_link_count)
         g_links[link].edited = g_gen;
     if (named && link >= g_links_wanted)
         g_links_wanted = link + 1;
-    TagFSLockDrop(&g_lock);
 }
 
 int file_table_update(uint32_t file_id, uint32_t meta_block, uint32_t meta_offset) {
@@ -294,27 +309,27 @@ int file_table_delete(uint32_t file_id) {
  * the chain as it was, and at worst the Spare taken and named by nothing.
  *
  * The array for every link is reserved before any block is taken, and nothing
- * is allocated, written or waited for under g_lock. A refused stamp gives its
+ * is allocated, written or waited for under the state lock. A refused stamp gives its
  * block back; a flush the medium will not keep leaves the stamped Spares in
  * their slots, unlinked, for the next pass to link once a flush is kept.
  * Rows past the chain stay in memory until then.
  */
 static int FileTableGrow(void)
 {
-    TagFSLockTake(&g_lock);
+    TagFSLockTake(table_lock());
     uint32_t wanted  = g_links_wanted;
     uint32_t have    = g_link_count;
     uint32_t in_hand = 0;
     while (have + in_hand < g_link_cap && g_links[have + in_hand].block != 0)
         in_hand++;
-    TagFSLockDrop(&g_lock);
+    TagFSLockDrop(table_lock());
     if (have >= wanted)
         return 0;
 
     if (LinksReserve(wanted) != OK) {
         kprintf("[FileTable] there is no memory to hold the %u links the file "
                 "table's rows need — its chain stays %u block(s) long, and the "
-                "rows from file id %u on stay in memory until a later sync\n",
+                "rows from file id %u on stay in memory until a later Settle cycle\n",
                 wanted, have, have * TAGFS_FTABLE_PER_BLOCK);
         return -1;
     }
@@ -331,15 +346,15 @@ static int FileTableGrow(void)
             kprintf("[FileTable] the file table needs %u more block(s) to hold "
                     "file ids up to %u and the volume gave none (error %d) — "
                     "the rows from file id %u on stay in memory until a later "
-                    "sync\n", wanted - have - in_hand,
+                    "Settle cycle\n", wanted - have - in_hand,
                     wanted * TAGFS_FTABLE_PER_BLOCK - 1, (int)got,
                     (have + in_hand) * TAGFS_FTABLE_PER_BLOCK);
             rc = -1;
             break;
         }
-        TagFSLockTake(&g_lock);
+        TagFSLockTake(table_lock());
         g_links[have + in_hand] = (FileTableLink){ .block = block };
-        TagFSLockDrop(&g_lock);
+        TagFSLockDrop(table_lock());
         in_hand++;
         need = stamped;
     }
@@ -355,32 +370,33 @@ static int FileTableGrow(void)
     }
 
     /* The old last link's next changes, and each new link is born owed. */
-    TagFSLockTake(&g_lock);
+    TagFSLockTake(table_lock());
     for (; in_hand > 0; in_hand--) {
         g_gen++;
         g_links[g_link_count - 1].edited = g_gen;
         g_links[g_link_count].edited     = g_gen;
         g_link_count++;
     }
-    TagFSLockDrop(&g_lock);
+    TagFSLockDrop(table_lock());
     return rc;
 }
 
 /*
  * Write the first link at or past *at that is owed to the medium, and leave
  * *at on it: 1 when one was written, 0 when none is owed from *at on, -1 when
- * the medium refused it. The generation it is written at is read under g_lock
- * before its rows are copied out of the map into g_image; the image is written
- * with no lock held, and that generation is what the write marks landed.
+ * the medium refused it. The generation it is written at is read, and its rows
+ * are copied out of the map into g_image, in one hold of the state lock — the
+ * rows of the files the generation names, no fewer; the image is written with
+ * no lock held, and that generation is what the write marks landed.
  */
 static int FileTableWriteLink(uint32_t* at)
 {
-    TagFSLockTake(&g_lock);
+    TagFSLockTake(table_lock());
     uint32_t i = *at;
     while (i < g_link_count && g_links[i].edited <= g_links[i].landed)
         i++;
     if (i >= g_link_count) {
-        TagFSLockDrop(&g_lock);
+        TagFSLockDrop(table_lock());
         return 0;
     }
     uint64_t gen   = g_links[i].edited;
@@ -389,31 +405,31 @@ static int FileTableWriteLink(uint32_t* at)
     g_image.next_block  = i + 1 < g_link_count ? g_links[i + 1].block : 0;
     g_image.entry_count = TAGFS_FTABLE_PER_BLOCK;
     g_image.reserved    = 0;
-    TagFSLockDrop(&g_lock);
-
     FileMapRowsInto(table_files(), i * TAGFS_FTABLE_PER_BLOCK, TAGFS_FTABLE_PER_BLOCK,
                     g_image.entries);
+    TagFSLockDrop(table_lock());
+
     *at = i;
     error_t wrote = tagfs_write_block(block, &g_image);
     if (wrote != OK) {
         kprintf("[FileTable] block %u would not take the file table's rows "
-                "%u..%u (error %d) — they are written again at the next sync\n",
+                "%u..%u (error %d) — they are written again by the next Settle cycle\n",
                 block, i * TAGFS_FTABLE_PER_BLOCK,
                 i * TAGFS_FTABLE_PER_BLOCK + TAGFS_FTABLE_PER_BLOCK - 1, (int)wrote);
         return -1;
     }
 
-    TagFSLockTake(&g_lock);
+    TagFSLockTake(table_lock());
     if (g_links[i].landed < gen)
         g_links[i].landed = gen;
-    TagFSLockDrop(&g_lock);
+    TagFSLockDrop(table_lock());
     return 1;
 }
 
 /*
- * Only the volume's sync calls this, and it holds the sync's Scribe for its
+ * Only the Settle cycle calls this, and it holds the Settle's Scribe for its
  * whole pass: one flusher at a time, so the links, the Spares and g_image are
- * its alone, and two syncs never write one block from two snapshots. A flush
+ * its alone, and two cycles never write one block from two snapshots. A flush
  * asked for any other way — without that Scribe, or with a TagFS lock held,
  * whose holder would then cross the medium with it — writes nothing.
  *
@@ -421,10 +437,10 @@ static int FileTableWriteLink(uint32_t* at)
  * so a link to a new block is never followed by nothing but its rows.
  */
 int file_table_flush(void) {
-    bool scribed = ScribeHeldHere(&g_sync_scribe);
+    bool scribed = ScribeHeldHere(&g_settle_scribe);
     if (!scribed || LockRankAnyHeldHere()) {
         kprintf("[FileTable] a flush was asked for %s — nothing is written\n",
-                !scribed ? "outside the volume's sync, which alone writes the table"
+                !scribed ? "outside the Settle cycle, which alone writes the table"
                          : "under a TagFS lock, which its writes would cross the medium holding");
         return -1;
     }

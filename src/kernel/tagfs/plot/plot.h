@@ -9,10 +9,10 @@
  *
  * Every write, span and defrag loads the file's record into a Plot under the
  * file's writer (PlotLoad), works on the Plot in memory — finds blocks, takes
- * new ground, merges runs, checks the record still fits — and commits the one
- * record the Plot builds (PlotCommit). What the call took and did not commit
- * is given back on its way out, whichever way out it takes (PlotRelease): a
- * block is a Stake from the moment it is taken until a committed record names
+ * new ground, merges runs, checks the record still fits — and inks the one
+ * record the Plot builds (TagFSInkPlot, ink/). What the call took and did not
+ * ink is given back on its way out, whichever way out it takes (PlotRelease):
+ * a block is a Stake from the moment it is taken until an inked record names
  * it, and a Stake nobody named goes back.
  *
  * The widths of format v1 are known here and in plot/plot_width.h only: the
@@ -36,8 +36,8 @@ typedef struct {
     uint32_t      fid;
     uint32_t      mount_epoch;    /* the mounting the Plot's block numbers are of */
     TagFSMetadata meta;           /* the record as loaded: name, tags, flags, times */
-    uint32_t      meta_block;     /* where that record lies — the one a commit retires */
-    uint32_t      meta_offset;
+    uint64_t      shape;          /* the Ink that gave the loaded record its size and extents */
+    uint64_t      data_need;      /* the flush need the blocks this call wrote hold, 0 for none */
     uint64_t      size_before;    /* the size the call found; what existed is below it */
     uint64_t      size;           /* the size the call leaves */
     FileExtent   *runs;           /* the working extents, in file order */
@@ -49,14 +49,16 @@ typedef struct {
     Stake        *stakes;
     uint32_t      stake_count;
     uint32_t      stake_room;
-    FileExtent   *freed;          /* ground the record stops naming, given back once it is committed */
+    FileExtent   *freed;          /* ground the record stops naming, to Fallow once it is inked */
     uint32_t      freed_count;
     uint32_t      freed_room;
 } Plot;
 
-/* The file's record, read afresh — never a handle's copy of it. OK, or
- * ERR_FILE_NOT_FOUND, ERR_METADATA_CORRUPTED (the record does not read, or
- * names fewer blocks than its size needs), ERR_NO_MEMORY. */
+/* The file's record, out of the map of live files afresh — never a handle's
+ * copy of it. OK, or ERR_FILE_NOT_FOUND, ERR_METADATA_CORRUPTED (the record
+ * names fewer blocks than its size needs), ERR_PERMISSION_DENIED (the file
+ * holds the kernel the loader reads by its blocks: nothing of it is written),
+ * ERR_NO_MEMORY. */
 error_t  PlotLoad(Plot *p, uint32_t fid);
 
 /* Everything the Plot holds let go; every Stake still standing is given back
@@ -110,14 +112,14 @@ error_t  PlotReserve(Plot *p, uint64_t end);
 error_t  PlotBeginWrite(Plot *p, uint64_t offset, bool append, uint64_t bytes,
                         uint64_t *out_at);
 
-/* The write that began at `at` made the file's for the `done` bytes of it that
- * landed: the ground reserved past them cut off (CR-13), the size grown to
- * their end, and the one record committed (PlotCommit). */
+/* The write that began at `at` made ready to be the file's for the `done`
+ * bytes of it that landed: the ground reserved past them cut off (CR-13) and
+ * the size grown to their end. The caller inks the record (TagFSInkPlot). */
 error_t  PlotEndWrite(Plot *p, uint64_t at, uint64_t done);
 
 /* The runs cut to their first keep_blocks blocks. Staked ground cut off goes
- * back now; ground a record named goes back once PlotCommit has a record that
- * no longer names it. */
+ * back now; ground a record named comes to rest in Fallow once a record that
+ * no longer names it is inked. */
 error_t  PlotTrimTo(Plot *p, uint64_t keep_blocks);
 
 /* The file grown to `size` with zeros: the old last block's bytes past the old
@@ -131,8 +133,8 @@ error_t  PlotExtendZero(Plot *p, uint64_t size);
  * The consecutive extents whose blocks, laid in one run, shed at least `shed`
  * extents from the record, the window with the fewest blocks of all such: one
  * run of exactly that many is taken near `hint`, the blocks are copied into it
- * and flushed, and the Plot names the run instead. The ground left is given
- * back once PlotCommit has a record that no longer names it. `shed` 0 asks for
+ * and flushed, and the Plot names the run instead. The ground left comes to
+ * rest once a record that no longer names it is inked. `shed` 0 asks for
  * every extent of the file in one run (defrag).
  *
  * Only ground the loaded record named is moved, never a Stake. Refused
@@ -142,12 +144,6 @@ error_t  PlotExtendZero(Plot *p, uint64_t size);
  * run that long is free.
  */
 error_t  PlotGather(Plot *p, uint32_t shed, uint32_t hint);
-
-/* The one record the Plot builds, put where the file table points: the pool
- * takes it, the table names it, the record it replaces is retired, and the
- * ground the record no longer names is given back. OK: every Stake is the
- * record's. Otherwise the file is as it was and the Stakes still stand. */
-error_t  PlotCommit(Plot *p);
 
 /*
  * Where a write's bytes come from: the kernel's own memory, or a program's
@@ -183,6 +179,9 @@ error_t  PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *
 /* A record packed for the medium: its length, or 0 — said — when it is wider
  * than format v1 carries or names a block outside the data run. */
 uint32_t PackV1(const TagFSMetadata *meta, uint8_t *out);
+
+/* A packed record given the file id `fid`, and summed again. */
+void     PackV1Refile(uint8_t *rec, uint32_t fid);
 
 /* A packed record read back, whose room in its block is `room` bytes: OK,
  * ERR_METADATA_CORRUPTED when it does not check out, or ERR_NO_MEMORY. */

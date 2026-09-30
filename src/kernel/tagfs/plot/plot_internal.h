@@ -17,14 +17,14 @@ void     PlotRunsPut(FileExtent *runs, uint32_t *n, uint32_t start, uint32_t cou
 /* A run this call took, recorded as a Stake: OK or ERR_NO_MEMORY. */
 error_t  PlotStake(Plot *p, uint32_t start, uint32_t count);
 
-/* Ground a record named, given back once PlotCommit has a record that no
- * longer names it: OK or ERR_NO_MEMORY. */
+/* Ground a record named, come to rest in Fallow once a record that no longer
+ * names it is inked (TagFSInkPlot): OK or ERR_NO_MEMORY. */
 error_t  PlotLetGoLater(Plot *p, uint32_t start, uint32_t count);
 
 /* How many extents the record has room for beside its tags and its name. */
 uint32_t PlotRunRoom(const Plot *p);
 
-/* Whether the record the Plot would commit fits format v1. */
+/* Whether the record the Plot would ink fits format v1. */
 bool     PlotRecordFits(const Plot *p);
 
 #endif /* TAGFS_PLOT_INTERNAL_H */

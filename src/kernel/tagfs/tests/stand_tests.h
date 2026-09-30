@@ -31,6 +31,9 @@
 //                        files cost, a tag's members across a window's edge,
 //                        the registry's hashes growing, and more files than
 //                        the old ceiling asked a page at a time
+// stand_ink_tests.c      the stand_ink suite: where the pool lays every file's
+//                        record, a deleted file's newest record, and a volume
+//                        with no free block that still deletes
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.

@@ -16,55 +16,42 @@
  *
  * ‼ WHO WRITES IT, AND UNDER WHAT.
  *
- * One writer at a time — the Ledger's Scribe (scribe.h) — and that writer
- * holds no lock while the sector is on its way to the medium. What it writes
- * is a snapshot taken under the volume's state lock and then the Ledger's
- * own: the counters exactly as they stood at one instant, never a mix of two.
- * Its lock guards memory only — the seq and copy the volume stands on, and
- * the Use Context it remembers — and is a leaf under the state lock.
+ * One writer: the Settle cycle (settle/), at its S4, and no lock is held while
+ * the sector is on its way to the medium. What it writes is a snapshot taken
+ * at the cycle's S0 under the volume's state lock and then the Ledger's own:
+ * the counters exactly as they stood at one instant — the instant of the pool
+ * the cycle writes — never a mix of two. The Ledger's lock guards memory only
+ * — the seq and copy the volume stands on, and the Use Context it remembers —
+ * and is a leaf under the state lock.
  *
  * The counters live in the volume's state (TagFSState.ledger) and are changed
  * there, under the state lock, by whoever changes them. A write never puts
  * anything back into them: a copy taken before the write and stored over them
  * after it would erase every change another core made while the sector
- * travelled — a file id handed out twice, a free count that drifts.
+ * travelled — a file id handed out twice, a free count that drifts. Whoever
+ * needs a change on the medium asks for a cycle (TagFSSettle).
  */
 
-/*
- * Write the Ledger: the medium has then taken a copy no older than this call —
- * taken, into a cache it can lose, not made durable. A copy is on the medium
- * for good only once a flush issued after this call returned is kept
- * (VolumeFlushFor(VolumeFlushNeed()), scribe.h); until then a power cut may
- * keep an older copy instead. Whoever frees ground the older copy names waits
- * for that flush.
- *
- * Change a counter or a field under the volume's state lock FIRST, let the
- * lock go, then call this: the pass that answers the call takes its snapshot
- * after the call asked, so it carries the change. Called with no TagFS lock
- * held — the call may wait for a pass another core is making.
- *
- *   OK                        a pass that began after this call wrote a copy
- *                             the medium took;
- *   ERR_TAGFS_METADATA_ERROR  that pass was refused by the medium (said, with
- *                             the copy the volume still stands on), or this
- *                             volume has no room for two copies;
- *   ERR_WOULD_BLOCK           a Ledger write on this very core is suspended
- *                             beneath this call — waiting for it here would
- *                             never end. What was changed goes out with the
- *                             next Ledger write.
- */
-error_t  tagfs_write_ledger(void);
+/* S0, under the volume's state lock: the image the cycle writes, for the
+ * older copy with seq + 1. */
+void     LedgerImageTake(void);
+
+/* S4, by the Settle's holder with no TagFS lock held: the image to the
+ * medium. OK, and the volume stands on it; or ERR_TAGFS_METADATA_ERROR —
+ * said, with the copy the volume still stands on. */
+error_t  LedgerImageWrite(void);
 
 /*
  * The Use Context the volume remembers — what its person was doing when they
  * left (volume_ledger.h). Kept in the Ledger and written with it.
  *
  * remember: say `list` (comma-joined tag names, `len` bytes, no NUL; len 0
- * says none) to the volume and write the Ledger. *remembered reports whether
- * the volume now holds exactly this list — false when the medium would not
- * take the write, or when the list is longer than the record holds, in which
- * case the volume forgets rather than keeping half. Takes no door: the
- * caller is inside the volume already (use_context.c takes it).
+ * says none) to the volume, and a Settle cycle carries it to the medium — none
+ * when the medium already holds exactly it. *remembered reports whether the
+ * volume now holds exactly this list — false when the cycle was refused, or
+ * when the list is longer than the record holds, in which case the volume
+ * forgets rather than keeping half. The caller is inside the volume already
+ * (use_context.c takes the door) and holds no TagFS lock.
  *
  * recall: copy what the volume remembers into `buf` when it fits `cap`;
  * returns the byte length either way (0 = none), so a caller can size one.

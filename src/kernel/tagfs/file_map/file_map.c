@@ -13,8 +13,7 @@ typedef struct {
     FileRecord* record;      /* the pool's newest record of the file, or NULL */
     uint32_t    row_block;   /* the file table's row; 0 is none */
     uint32_t    row_offset;
-    uint32_t    link;        /* where the record sits: the pool chain's link */
-    uint32_t    offset;      /* and the byte in its block */
+    RecordWhere where;       /* where the record sits, and which Ink put it there */
 } FileMapEntry;
 
 typedef struct FileMapNode FileMapNode;
@@ -615,7 +614,7 @@ void FileMapDestroy(FileMap* map)
 }
 
 error_t FileMapRecordPut(FileMap* map, uint32_t fid, FileRecord* rec,
-                         uint32_t link, uint32_t offset, FileMapStake* stake)
+                         const RecordWhere* where, FileMapStake* stake)
 {
     FileMapEntry* e;
     if (MapEntryHeld(map, fid, stake, &e) != OK) {
@@ -627,46 +626,45 @@ error_t FileMapRecordPut(FileMap* map, uint32_t fid, FileRecord* rec,
         map->record_bytes -= e->record->bytes;
     map->record_bytes += rec->bytes;
     e->record = rec;
-    e->link   = link;
-    e->offset = offset;
+    e->where  = *where;
     TagFSLockDrop(&map->lock);
     LeftoverFree(&left);
     return OK;
 }
 
-FileRecord* FileMapRecordHold(FileMap* map, uint32_t fid, uint32_t* out_link,
-                              uint32_t* out_offset)
+uint32_t FileMapNodesToAdd(FileMap* map, uint32_t fid)
+{
+    TagFSLockTake(&map->lock);
+    uint32_t need = MapFind(map, fid) ? 0 : MapNodesToInsert(map, fid);
+    TagFSLockDrop(&map->lock);
+    return need;
+}
+
+FileRecord* FileMapRecordHold(FileMap* map, uint32_t fid, RecordWhere* out)
 {
     TagFSLockTake(&map->lock);
     FileMapEntry* e   = MapFind(map, fid);
     FileRecord*   rec = e ? e->record : NULL;
     if (rec) {
         __atomic_add_fetch(&rec->refs, 1, __ATOMIC_ACQ_REL);
-        if (out_link)
-            *out_link = e->link;
-        if (out_offset)
-            *out_offset = e->offset;
+        if (out)
+            *out = e->where;
     }
     TagFSLockDrop(&map->lock);
     return rec;
 }
 
-void FileMapRecordForgetAt(FileMap* map, uint32_t fid, uint32_t link, uint32_t offset)
+void FileMapRecordMoved(FileMap* map, uint32_t fid, uint32_t link, uint32_t block,
+                        uint32_t from, uint32_t to)
 {
-    FileMapLeftover left = { NULL, NULL };
     TagFSLockTake(&map->lock);
     FileMapEntry* e = MapFind(map, fid);
-    if (e && e->record && e->link == link && e->offset == offset) {
-        if (e->row_block) {
-            map->record_bytes -= e->record->bytes;
-            left.record = e->record;
-            e->record   = NULL;
-        } else {
-            MapLetGoEntry(map, fid, e, &left);
-        }
+    if (e && e->record && e->where.link == link && e->where.offset == from) {
+        e->where.offset = to;
+        if (e->row_block == block && e->row_offset == from)
+            e->row_offset = to;
     }
     TagFSLockDrop(&map->lock);
-    LeftoverFree(&left);
 }
 
 error_t FileMapRowSet(FileMap* map, uint32_t fid, uint32_t block, uint32_t offset)

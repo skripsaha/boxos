@@ -11,26 +11,25 @@
  * names no point is an undeclared identifier and never gets this far. */
 _Static_assert(CONFIG_TAGFS_SETTLE_CUT_POINT >= SETTLE_CUT_POINT_REGISTRY &&
                CONFIG_TAGFS_SETTLE_CUT_POINT <= SETTLE_CUT_POINT_DONE,
-               "SETTLECUT names no point of this sync");
+               "SETTLECUT names no point of the Settle cycle");
 
 static const char *const SettleCutWhere[] = {
     [SETTLE_CUT_POINT_REGISTRY]  = "before the tag registry is written",
     [SETTLE_CUT_POINT_POOL]      = "before the metadata pool is written",
     [SETTLE_CUT_POINT_TABLE]     = "before the file table is written",
-    [SETTLE_CUT_POINT_RETIRES]   = "before the retired records are released",
     [SETTLE_CUT_POINT_INTEGRITY] = "before the integrity map is written",
     [SETTLE_CUT_POINT_BITMAP]    = "before the block bitmap is written",
     [SETTLE_CUT_POINT_LEDGER]    = "before the ledger is written",
     [SETTLE_CUT_POINT_FLUSH]     = "before the medium's cache is flushed",
-    [SETTLE_CUT_POINT_DONE]      = "after the cache flush, with the whole sync on the medium",
+    [SETTLE_CUT_POINT_DONE]      = "after the cache flush, with the whole cycle on the medium",
 };
 
-static volatile uint32_t g_settle_syncs;        /* syncs that reached point 1 */
+static volatile uint32_t g_settle_syncs;        /* cycles that reached point 1 */
 static volatile uint32_t g_settle_cut_made;
 
 void SettleCutSayArmed(void)
 {
-    kprintf("[SETTLECUT] armed: the first sync to reach point %u of %u, %s, "
+    kprintf("[SETTLECUT] armed: the first cycle to reach point %u of %u, %s, "
             "stops this machine there\n",
             (unsigned)CONFIG_TAGFS_SETTLE_CUT_POINT,
             (unsigned)SETTLE_CUT_POINT_DONE,
@@ -49,7 +48,7 @@ void SettleCutSayArmed(void)
  * the drive's answer itself, drivers/disk/ata_async.c). It does NOT prove a
  * core was between writes: one frozen between two synchronous writes of a
  * stage that holds no lock (a writer with no open-file entry, say) stops right
- * there. A scenario therefore runs a single writer, and the sync is that
+ * there. A scenario therefore runs a single writer, and the cycle is that
  * writer.
  *
  * And what cannot be stopped is not claimed: a command another operation had
@@ -83,7 +82,7 @@ void SettleCutAt(SettleCutPoint here)
      * the same order, as every rung of system_halt. */
     WireForceRelease();
     WireDrain();
-    kprintf("[SETTLECUT] the power went at point %u of %u, %s, in sync %u of "
+    kprintf("[SETTLECUT] the power went at point %u of %u, %s, in cycle %u of "
             "this boot, on core %u — %u of the %u other core(s) answered the "
             "roll call and run no more, and nothing after this point was "
             "issued to the medium\n",

@@ -1,4 +1,5 @@
 #include "block_map_internal.h"
+#include "../ink/fallow.h"
 
 /*
  * Where a take goes.
@@ -229,11 +230,21 @@ void MapSayNoRoom(uint32_t want)
             want, (unsigned long long)tagfs_get_state()->ledger.free_blocks, longest);
 }
 
+error_t MapShort(uint32_t want)
+{
+    if (FallowBlocks() > 0)
+        return ERR_WOULD_BLOCK;
+    MapSayNoRoom(want);
+    return ERR_TAGFS_NO_SPACE;
+}
+
 /*
  * The door every take outside an Allotment goes through. `exact` asks for a
  * run of exactly `want` or nothing; otherwise the longest up to `want`. With
- * no TagFS lock held it fetches what decides better and pays the medium before
- * it answers; held under one it reads nothing and pays nothing.
+ * no TagFS lock held it fetches what decides better; held under one it reads
+ * nothing. Neither writes the sector the take lands in (M4b): the take is owed
+ * to the medium, and the Settle cycle pays it at S1 — before any record, row
+ * or Ledger naming the block reaches the medium.
  */
 static error_t MapTakeDoor(uint32_t want, uint32_t hint, bool exact,
                            uint32_t *start, uint32_t *got, const char *site)
@@ -275,9 +286,9 @@ static error_t MapTakeDoor(uint32_t want, uint32_t hint, bool exact,
             }
             bool gives = g_map.gives != 0;
             if (!may_read || !gives || caught_up) {
-                MapSayNoRoom(want);
+                error_t short_by = MapShort(want);
                 TagFSLockDropAt(lock, site);
-                return ERR_TAGFS_NO_SPACE;
+                return short_by;
             }
             TagFSLockDropAt(lock, site);
             caught_up = true;
@@ -295,8 +306,6 @@ static error_t MapTakeDoor(uint32_t want, uint32_t hint, bool exact,
         MapTakeKnown(k.at, n);
         TagFSLockDropAt(lock, site);
 
-        if (may_read)
-            BlockMapSettle();
         *start = k.at;
         *got   = n;
         return OK;
@@ -309,10 +318,12 @@ error_t BlockMapTake(uint32_t count, uint32_t hint, uint32_t *start, const char 
     return MapTakeDoor(count, hint, true, start, &got, site);
 }
 
-int BlockMapTakeLocked(uint32_t count, uint32_t hint, uint32_t *start)
+error_t BlockMapTakeLocked(uint32_t count, uint32_t hint, uint32_t *start)
 {
-    if (!g_map.up || count == 0 || !start)
-        return -1;
+    if (!g_map.up)
+        return ERR_TAGFS_NOT_INITIALIZED;
+    if (count == 0 || !start)
+        return ERR_INVALID_ARGUMENT;
 
     for (;;) {
         MapPick k = { .want = count, .hint = hint };
@@ -321,17 +332,16 @@ int BlockMapTakeLocked(uint32_t count, uint32_t hint, uint32_t *start)
             if (!MapDeltaRoom(MapUnreadWindows(k.at, count))) {
                 kprintf("[TagFS] block map: no memory to write down a take of %u block(s) "
                         "at %u — nothing is taken\n", count, k.at);
-                return -1;
+                return ERR_NO_MEMORY;
             }
             MapTakeKnown(k.at, count);
             *start = k.at;
-            return 0;
+            return OK;
         }
         if (!AllotmentTakeBackLocked(MAP_NO_FID))
             break;
     }
-    MapSayNoRoom(count);
-    return -1;
+    return MapShort(count);
 }
 
 error_t TagFSTakeRun(uint32_t want, uint32_t hint, uint32_t *start, uint32_t *got)

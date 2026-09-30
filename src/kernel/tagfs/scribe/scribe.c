@@ -55,20 +55,18 @@ error_t VolumeFlushFor(uint64_t need)
 // Scribe
 // ----------------------------------------------------------------------------
 
-Scribe g_sync_scribe = SCRIBE_INIT(SCRIBE_RANK_SYNC, "the volume's sync");
-
 /* How many Scribes of each rank this core holds. Written only by the core
  * itself, with its interrupts off, so the halt's interrupt on the same core
  * reads a count that is whole. Counts, not bits: two Scribes of one rank held
  * at once are out of order, and a bit would call the core free after the
  * first of them went. */
-static uint8_t g_scribe_held[MAX_CORES][SCRIBE_RANK_LEDGER + 1];
+static uint8_t g_scribe_held[MAX_CORES][SCRIBE_RANK_LAST + 1];
 
 /* Each out-of-order pair of ranks — held, then asked for — named once. */
-static volatile uint8_t g_scribe_order_said[SCRIBE_RANK_LEDGER + 1][SCRIBE_RANK_LEDGER + 1];
+static volatile uint8_t g_scribe_order_said[SCRIBE_RANK_LAST + 1][SCRIBE_RANK_LAST + 1];
 
 /* Each rank asked for inside a baton continuation, named once. */
-static volatile uint8_t g_scribe_continuation_said[SCRIBE_RANK_LEDGER + 1];
+static volatile uint8_t g_scribe_continuation_said[SCRIBE_RANK_LAST + 1];
 
 static inline uint64_t ScribeIrqOff(void)
 {
@@ -85,7 +83,7 @@ static inline void ScribeIrqRestore(uint64_t flags)
 
 static bool ScribeAnyHeldOn(uint8_t core)
 {
-    for (uint32_t rank = SCRIBE_RANK_SYNC; rank <= SCRIBE_RANK_LEDGER; rank++) {
+    for (uint32_t rank = SCRIBE_RANK_SETTLE; rank <= SCRIBE_RANK_LAST; rank++) {
         if (g_scribe_held[core][rank])
             return true;
     }
@@ -106,13 +104,13 @@ static void ScribeOrderCheck(const Scribe *s, uint8_t core)
 {
     if (__atomic_load_n(&s->holder, __ATOMIC_ACQUIRE) == (uint32_t)core + 1u)
         return;
-    for (uint32_t rank = s->rank; rank <= SCRIBE_RANK_LEDGER; rank++) {
+    for (uint32_t rank = s->rank; rank <= SCRIBE_RANK_LAST; rank++) {
         if (!g_scribe_held[core][rank])
             continue;
         if (__atomic_exchange_n(&g_scribe_order_said[rank][s->rank], (uint8_t)1,
                                 __ATOMIC_ACQ_REL) == 0)
             kprintf("[Scribe] %s asked for on core %u, which holds a Scribe of rank %u — "
-                    "out of order: Scribes nest sync, then registry, then ledger\n",
+                    "out of order: Scribes nest the Settle, then the registry\n",
                     s->what, (unsigned)core, (unsigned)rank);
     }
 }
@@ -227,6 +225,48 @@ ScribeTurn ScribeWait(Scribe *s, uint64_t ticket, uint64_t *cover, error_t *refu
     }
 }
 
+/* The holder's core is no longer running: the pass is taken over for this
+ * core, with interrupts off from the exchange to the count as a take is. The
+ * stopped core's count stays where it stood — it never runs again. */
+static bool ScribeTakeOver(Scribe *s, uint8_t core, uint32_t dead, uint64_t *cover)
+{
+    uint32_t seen  = dead;
+    uint64_t flags = ScribeIrqOff();
+    if (!__atomic_compare_exchange_n(&s->holder, &seen, (uint32_t)core + 1u, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        ScribeIrqRestore(flags);
+        return false;
+    }
+    g_scribe_held[core][s->rank]++;
+    *cover = __atomic_load_n(&s->asked, __ATOMIC_SEQ_CST);
+    SchedulerHoldHere();
+    KHeapReserveOpen();
+    ScribeIrqRestore(flags);
+    kprintf("[Scribe] %s was held by core %u, which is no longer running — its pass is "
+            "abandoned where it stood and begun again from its start on core %u\n",
+            s->what, (unsigned)(dead - 1u), (unsigned)core);
+    return true;
+}
+
+ScribeTurn ScribeWaitTakingOver(Scribe *s, uint64_t ticket, uint64_t *cover, error_t *refusal)
+{
+    uint8_t core = amp_get_core_index();
+
+    ScribeWitness((uintptr_t)__builtin_return_address(0));
+    ScribeOrderCheck(s, core);
+    ScribeContinuationCheck(s, core);
+    for (;;) {
+        ScribeTurn turn = ScribeTryHere(s, core, ticket, cover, refusal);
+        if (turn != SCRIBE_HELD)
+            return turn;
+        uint32_t holder = __atomic_load_n(&s->holder, __ATOMIC_ACQUIRE);
+        if (holder && holder - 1u < g_amp.total_cores &&
+            !amp_core_online(&g_amp.cores[holder - 1u]) && ScribeTakeOver(s, core, holder, cover))
+            return SCRIBE_MINE;
+        ScribeWaitTurn(core);
+    }
+}
+
 ScribeTurn ScribeWaitFor(const volatile uint32_t *holder, bool (*settled)(const void *ctx),
                          const void *ctx)
 {
@@ -305,9 +345,9 @@ bool ScribeAnyHeldHere(void)
 error_t SpareStamp(uint32_t magic, void *image, uint32_t *out_block, uint64_t *out_need)
 {
     uint32_t block = 0;
-
-    if (tagfs_alloc_blocks(1, &block) != 0)
-        return ERR_TAGFS_NO_SPACE;
+    error_t  took  = BlockMapTake(1, 0, &block, __func__);
+    if (took != OK)
+        return took;
 
     memset(image, 0, TAGFS_BLOCK_SIZE);
     memcpy(image, &magic, sizeof(magic));

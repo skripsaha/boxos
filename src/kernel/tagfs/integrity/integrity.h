@@ -29,6 +29,10 @@ void     IntegrityShutdown(void);
 // lock let go.
 void     IntegrityUpdate(uint32_t block, const void *data);
 
+// The digests of the run zeroed — the blocks came to rest (Fallow) — a page at
+// a time, paged in as a write's digest would be. With no TagFS lock held.
+void     IntegrityForget(uint32_t start, uint32_t count);
+
 // Re-check a block just read from disk. Returns true if OK or unknown; on a
 // mismatch it logs + counts the rot and returns false. Never waits, as above.
 bool     IntegrityVerify(uint32_t block, const void *data);
@@ -42,7 +46,7 @@ error_t  IntegrityFlush(void);
 
 // Publish a Touch event on the well-known "integrity" tag for each bit-rot
 // detection recorded since the last drain. Called from a lock-free context
-// (tagfs_sync) — never from the read path, which runs under g_state.lock.
+// (the Settle cycle) — never from the read path, which runs under g_state.lock.
 void     IntegrityDrainReports(void);
 
 bool     IntegrityIsInitialized(void);

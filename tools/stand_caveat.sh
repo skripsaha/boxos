@@ -40,7 +40,9 @@ CAVEAT=0
 # PowerCut's census (tools/powercut.sh): every (scenario, code) pair a
 # scenario was measured showing is its own row, held under 1.6 — except the
 # ORPHAN an unanchored create leaves (noanchor, hog) and race's anchored file
-# lost by a later torn sync, under 1.4 (the owner, 2026-09-27). chaingrow
+# lost by a later torn sync, lifted at 1.4 (the owner, 2026-09-27): no door
+# writes a take's sector any more, the Settle cycle does, and no record is
+# retired in place. chaingrow
 # keeps its census by kind, (scenario, prefix|subset, code), and a chain
 # refused by the chain's name: its refusals are MP-D5, under 1.1 — the subset
 # rows too, because step 1.1 links a new block only once a flush has covered
@@ -53,7 +55,7 @@ caveat_row() {
                     echo "|a file's record takes one extent per 4 KiB written and never merges them, so the 4080-byte record of a 10-byte name refuses its write at byte 2748416, after 671 extents" ;;
         usememory)  echo "1.6|a Use Context longer than 432 bytes is forgotten, remembered=0" ;;
         fidhistory) echo "|a mount spends kernel heap on every file id ever issued, the dead ones included" ;;
-        systemtag)  echo "1.4|any program may take the system tag off kernel.bin and then delete it — the kernel the volume boots is gone" ;;
+        systemtag)  echo "|any program may take the system tag off kernel.bin and then delete it — the kernel the volume boots is gone" ;;
         coldread)   echo "|a read into pages its program had not touched yet reported every byte and delivered only those before the first such page" ;;
         coldwrite)  echo "|a write out of pages its program had not touched yet reported every byte, and the file holds other than the zeros those pages are" ;;
         noanchor)   echo "1.7|a file written without anchor has no name after a power cut" ;;
@@ -62,9 +64,9 @@ caveat_row() {
         settlecut:FID_PAST_NEXT)
                     echo "1.6|a sync stopped by SETTLECUT=ledger before its ledger leaves a table row past the ledger's next_file_id" ;;
         noanchor:ORPHAN|hog:ORPHAN)
-                    echo "1.4|a create never anchored, cut by the power, leaves a block marked used that nothing owns — the map is written only inside Settle" ;;
+                    echo "|a create never anchored, cut by the power, leaves a block marked used that nothing owns — the map is written only inside Settle" ;;
         race:durable)
-                    echo "1.4|an anchored file is lost by a later torn sync — the shutdown sync retires its record in place" ;;
+                    echo "|an anchored file is lost by a later torn sync — the shutdown sync retires its record in place" ;;
         nextfid:FID_PAST_NEXT|halt:FID_PAST_NEXT|race:FID_PAST_NEXT|chaingrow:prefix:FID_PAST_NEXT|chaingrow:subset:FID_PAST_NEXT)
                     echo "1.6|a sync cut between its table and its ledger leaves a table row past the ledger's next_file_id" ;;
         nextfid:FILE_LOST|halt:FILE_LOST|race:FILE_LOST)
@@ -179,7 +181,7 @@ caveat_row() {
                     echo "|deleting a snapshot rewrites the DiskBook's header under the copy-on-write and DiskBook locks, a medium write with both held" ;;
         lockrank:state@meta_pool_flush_retires:read|\
         lockrank:state@meta_pool_flush_retires:write)
-                    echo "1.4|the sync gives retired metadata records back under the volume's state lock, reading and writing pool blocks while every create, delete, rename and tag waits with interrupts off" ;;
+                    echo "|the sync gives retired metadata records back under the volume's state lock, reading and writing pool blocks while every create, delete, rename and tag waits with interrupts off" ;;
         lockrank:state@tagfs_create_file_inside:read|\
         lockrank:state@tagfs_create_file_inside:write|\
         lockrank:state@tagfs_delete_file_inside:read|\
@@ -189,7 +191,7 @@ caveat_row() {
         lockrank:state@tagfs_rename_file_inside:write|\
         lockrank:state@tagfs_add_tag_inside:read|\
         lockrank:state@tagfs_add_tag_inside:write)
-                    echo "1.4|a create, a delete, a rename, a tag or its removal reads and writes metadata pool blocks under the volume's state lock, so every other create, delete, rename and tag waits with interrupts off for as long as the medium takes" ;;
+                    echo "|a create, a delete, a rename, a tag or its removal reads and writes metadata pool blocks under the volume's state lock, so every other create, delete, rename and tag waits with interrupts off for as long as the medium takes" ;;
         lockrank:writer@tagfs_write_inside:read|\
         lockrank:writer@tagfs_write_inside:write)
                     echo "1.5|a file's writer holds its IRQ-off lock across every medium command of its write, so a second writer of the file spins with interrupts off for the whole of the first one's write" ;;

@@ -8,6 +8,7 @@
 #include "process.h"
 #include "scheduler.h"
 #include "tagfs.h"
+#include "settle.h"      /* the volume's last Settle cycle, run here before cli */
 #include "boardroom.h"    /* the seat, so a lost commit can be named */
 #include "ata.h"
 #include "acpi.h"
@@ -86,7 +87,7 @@ static const char *halt_name_of(void (*run)(void *ctx), NameplateName *scratch)
 /* What the machine still owes, and WHOSE it is — because the amount alone
  * cannot say which deadline is allowed to judge it.
  *
- * Counted the only two ways async storage work can be owed:
+ * Counted the ways storage work can be owed:
  *   1. Never-drop baton passes posted but not yet consumed — the read/write
  *      state-machine continuations the AHCI IRQ hands on, plus every other
  *      pass an interrupt made (SCI/GPE, AHCI recovery, the Touch IRQ ring's
@@ -101,7 +102,10 @@ static const char *halt_name_of(void (*run)(void *ctx), NameplateName *scratch)
  *   2. AHCI command issue, which is a real depth: one bit per occupied slot in
  *      PxCI (AHCI 1.3.1 §3.3.14) and PxSACT (§3.3.13), each cleared by the
  *      controller when that command completes.
- * Both terms are non-negative and fall as the machine finishes work — which is
+ *   3. The volume's changes no Settle cycle has settled yet (inked_gen −
+ *      settled_gen), and whether another core holds the Settle — the halt
+ *      runs the last cycle itself, once nothing else is owed (RT-12).
+ * Every term is non-negative and falls as the machine finishes work — which is
  * exactly what lets the drain below run without a deadline while they fall.
  *
  * AhciPresent is asked separately from Ahci because the two answer different
@@ -109,9 +113,11 @@ static const char *halt_name_of(void (*run)(void *ctx), NameplateName *scratch)
  * that is initialised and idle owes nothing at this instant, while a machine
  * with no controller can never owe anything through that term at all. */
 typedef struct HaltWorkOwed {
-    uint64_t Total;       /* Baton + Ahci — the progress measure            */
+    uint64_t Total;       /* Baton + Ahci + Unsettled + Committer — the progress measure */
     uint64_t Baton;       /* passes handed to a core and not yet run        */
     uint64_t Ahci;        /* command slots the controller has not completed */
+    uint64_t Unsettled;   /* the volume's changes no Settle cycle has settled */
+    uint64_t Committer;   /* 1 while another running core holds the Settle  */
     bool     AhciPresent; /* an AHCI controller was initialised at boot     */
 } HaltWorkOwed;
 
@@ -137,7 +143,11 @@ static void halt_async_work_owed(HaltWorkOwed *owed)
         }
     }
 
-    owed->Total = owed->Baton + owed->Ahci;
+    bool busy = false;
+    SettleOwed(&owed->Unsettled, &busy);
+    owed->Committer = busy ? 1u : 0u;
+
+    owed->Total = owed->Baton + owed->Ahci + owed->Unsettled + owed->Committer;
 }
 
 /* The core carrying the most un-run passes, and the continuation most recently
@@ -201,6 +211,15 @@ static bool halt_deepest_baton(uint8_t *core_out, uint64_t *depth_out,
  *
  * Other cores are still live here — cli has not run yet — so their guide loops
  * keep pumping continuations naturally.
+ *
+ * ‼ AND THE VOLUME'S LAST SETTLE CYCLE IS RUN HERE, BY THE HALT ITSELF (RT-12).
+ * Once no pass, no command and no other committer is owed, whatever the volume
+ * inked and no cycle settled is settled by this core — before cli, before any
+ * core is stopped: a committer frozen in the middle of the medium could never
+ * be finished, and a halt after cli could wait on nobody. Programs still run
+ * until the roll call, so what they ink meanwhile is owed again and asks for
+ * another cycle; the running minimum ends that as it ends everything else, and
+ * tagfs_shutdown says how many changes came after the last one.
  */
 static void halt_drain_async_writes(void)
 {
@@ -219,6 +238,8 @@ static void halt_drain_async_writes(void)
      * are at most two lines. */
     bool      told_ahci = false;
     bool      told_core = false;
+    bool      settled   = false;    /* the halt's own Settle cycle has run once */
+    bool      refused   = false;    /* ... and the last one was refused */
     HourGlass stall;
 
     for (;;) {
@@ -237,6 +258,16 @@ static void halt_drain_async_writes(void)
 
         HaltWorkOwed owed;
         halt_async_work_owed(&owed);
+        if (owed.Baton == 0 && owed.Ahci == 0 && owed.Committer == 0 && !refused &&
+            (owed.Unsettled > 0 || !settled)) {
+            refused = TagFSSettleForHalt() != OK;
+            settled = true;
+            halt_async_work_owed(&owed);
+        }
+        /* A cycle the medium refused leaves nothing the halt can do for what
+         * it did not settle: tagfs_shutdown says how much that is. */
+        if (refused)
+            owed.Total -= owed.Unsettled;
         if (owed.Total == 0)
             break;
 
@@ -266,9 +297,12 @@ static void halt_drain_async_writes(void)
             } else if (!by_ahci && !told_core) {
                 told_core = true;
                 kprintf("[HALT] work owed stopped falling at %lu (%lu pass(es), "
-                        "%s) — judged by the core deadline, %lu us: a baton queue "
-                        "falls only when its own core pumps it\n",
-                        owed.Total, owed.Baton,
+                        "%lu unsettled change(s), %s, %s) — judged by the core "
+                        "deadline, %lu us: a baton queue falls only when its own "
+                        "core pumps it\n",
+                        owed.Total, owed.Baton, owed.Unsettled,
+                        owed.Committer ? "a Settle cycle running on another core"
+                                       : "no Settle cycle running elsewhere",
                         owed.AhciPresent ? "no AHCI command issued"
                                          : "no AHCI controller on this machine",
                         bound);
@@ -691,7 +725,7 @@ static void halt_terminate_all_processes(void)
  */
 static void halt_sync_storage(void)
 {
-    kprintf("[HALT] Syncing TagFS...\n");
+    kprintf("[HALT] Closing TagFS...\n");
     /*
      * ‼ AND THE ANSWER IS HEARD. Two different things can go wrong here and
      * only one of them used to be reported.
@@ -701,8 +735,9 @@ static void halt_sync_storage(void)
      * bitmap write was refused — returned exactly like one that wrote
      * everything, and the flush below then reported a perfectly successful
      * flush OF NOTHING. "Storage sync complete" was printed over it. It now
-     * carries an error_t and this is the caller that has to hear it, because
-     * this is the last place anybody can be told.
+     * carries the answer of the halt's last Settle cycle, run before cli
+     * (halt_drain_async_writes), and this is the caller that has to hear it,
+     * because this is the last place anybody can be told.
      *
      * The two answers are kept apart on purpose: the volume's own records are
      * one question ("were they written at all?") and the medium's cache is

@@ -230,9 +230,9 @@ static error_t AllotmentTakeInside(uint32_t fid, uint32_t want, uint64_t file_bl
                     continue;
                 }
                 if (!may_read || !g_map.gives || caught_up) {
-                    MapSayNoRoom(want);
+                    error_t short_by = MapShort(want);
                     TagFSLockDrop(lock);
-                    return ERR_TAGFS_NO_SPACE;
+                    return short_by;
                 }
                 TagFSLockDrop(lock);
                 caught_up = true;
@@ -248,8 +248,6 @@ static error_t AllotmentTakeInside(uint32_t fid, uint32_t want, uint64_t file_bl
                     "file %u — nothing is taken\n", want, fid);
             return rc;
         }
-        if (may_read)
-            BlockMapSettle();
         *start = s;
         *got   = n;
         return OK;

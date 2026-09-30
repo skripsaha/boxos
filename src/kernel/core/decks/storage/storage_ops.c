@@ -50,6 +50,7 @@
 #include "boardroom.h"
 #include "scribe.h"   /* VolumeFlushFor — an anchor's flush, unless one already covers it */
 #include "plot.h"     /* PlotFind, PlotSource — the write's bytes where they are */
+#include "settle.h"   /* TagFSSettle — what an anchor waits for */
 
 /*
  * Can the medium under the volume answer a read without somebody standing over
@@ -1299,9 +1300,9 @@ static int ObjSnapRefused(const ManifestOp *op, Crate *crates, uint16_t crate_co
  *   params: [u32 file_id]   (0 = anchor everything; non-zero = the file
  *                             whose tags get the Touch payload's fid)
  *
- * Blocking semantics for the caller — returns when meta_pool current
- * block, file_table dirty blocks, block-bitmap, and superblock are all
- * persisted to disk. Plus the AHCI cache flush is forced.
+ * Blocking semantics for the caller — returns when a Settle cycle that
+ * began after the call has put every change inked before it on the medium
+ * and a flush after it was kept (settle.h).
  *
  * Then publishes a Touch "anchor" event on every tag of file_id so any
  * REST/REACT subscriber observing that tag wakes up: *this file is now
@@ -1320,18 +1321,17 @@ static int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     (void)crates; (void)crate_count; (void)ctx;
     uint32_t file_id = (op->param_size >= 4) ? param_u32(op, 0) : 0;
 
-    /* Sync flush of all in-memory state — same path bye uses, but
-     * inline so caller's fwrite-then-anchor is durable without a
-     * shutdown. Its answer is checked for the same reason the flush
-     * below is: a sync refused at the door writes nothing, and an
-     * anchor published over nothing written would be exactly the lie
-     * the rest of this function exists to stop. */
-    error_t synced = tagfs_sync();
-    if (synced != OK) {
-        kprintf("[Storage] anchor of file %u: the volume's metadata was not "
-                "synced (error %u) — no anchor event is published\n",
-                file_id, (unsigned)synced);
-        return (int)synced;
+    /* A Settle cycle, asked for and waited on, so the caller's
+     * fwrite-then-anchor is durable without a shutdown. Its answer is
+     * checked for the same reason the flush below is: a cycle refused
+     * settles nothing, and an anchor published over nothing settled would
+     * be exactly the lie the rest of this function exists to stop. */
+    error_t settled = TagFSSettle();
+    if (settled != OK) {
+        kprintf("[Storage] anchor of file %u: the volume's changes were not "
+                "settled (error %u) — no anchor event is published\n",
+                file_id, (unsigned)settled);
+        return (int)settled;
     }
 
     /*
@@ -1353,8 +1353,8 @@ static int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
      * Two flushes of the same disk meeting is not a refusal: the second waits
      * for the port in its roadstead (core/boardroom/roadstead.h) and is issued
      * when the first has given the port back, so no answer the application
-     * cannot act on reaches it. The need is read after the sync came back, so
-     * the sync's own flush does not count for it; a flush begun since does.
+     * cannot act on reaches it. The need is read after the cycle came back,
+     * so a flush the cycle issued already covers it and costs nothing more.
      *
      * anchor() therefore keeps exactly the two answers it always had —
      * durable, or a named refusal of the medium — and neither of them is a

@@ -6,6 +6,7 @@
 #include "boardroom.h"
 #include "ata_async.h"
 #include "amp.h"
+#include "../settle/settle.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -85,18 +86,18 @@ out:
 // The Ledger and the integrity map
 // ----------------------------------------------------------------------------
 
-/* One Ledger write, asked for the way the sync asks for it, and the medium's
+/* One Ledger write, made by its one writer — a Settle cycle — and the medium's
  * newest copy read back to prove it was made. */
 static TestResult TestStandLedgerWritesOutsideItsLock(void)
 {
     TestResult verdict   = TEST_PASS;
     uint64_t   seq       = StandLedgerSeq();
     uint32_t   witnessed = g_ledger_lock.Witnessed;
-    error_t    wrote     = tagfs_write_ledger();
+    error_t    wrote     = TagFSSettle();
     uint32_t   crossed   = g_ledger_lock.Witnessed - witnessed;
 
     TEST_ASSERT(seq > 0, "a Ledger copy reads before the write");
-    TEST_ASSERT_OK(wrote, "the Ledger is written");
+    TEST_ASSERT_OK(wrote, "a Settle cycle writes the Ledger");
     TEST_ASSERT_EQ(StandLedgerSeq(), seq + 1, "and the medium's newest copy is the one it wrote");
 
     TestEvidence("Ledger writes of one that crossed the medium holding the Ledger's lock",
@@ -110,7 +111,7 @@ out:
 /* One block written under each of seventeen pages of the integrity map — one
  * page more than the map keeps in memory, so at least one of them is paged
  * in off the medium, and the pages the writes dirty are paged back out as
- * others push them aside. The sync first leaves no page owed from before.
+ * others push them aside. A Settle cycle first leaves no page owed from before.
  *
  * The test holds no TagFS lock and a raw block write takes none but the
  * map's own on its way to the medium, so any door this core passes under a
@@ -130,7 +131,7 @@ static TestResult TestStandIntegrityPagesOutsideItsLock(void)
         return test_steps_aside(aside);
 
     TEST_ASSERT(IntegrityIsInitialized(), "the volume's integrity map is up");
-    TEST_ASSERT_OK(tagfs_sync(), "a sync first, so no page of the map is owed to the medium");
+    TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle first, so no page of the map is owed to the medium");
     TEST_ASSERT_EQ(tagfs_alloc_blocks(span, &first), 0,
                    "a run of blocks under seventeen pages of the map is taken");
     taken = true;

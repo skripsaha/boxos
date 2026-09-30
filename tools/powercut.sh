@@ -759,15 +759,15 @@ EOF
 }
 
 run_nextfidmut() {
-    mut_on src/kernel/tagfs/tagfs.c "logcheck mutation" <<'EOF'
+    mut_on src/kernel/tagfs/settle/settle.c "logcheck mutation" <<'EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
 a = "    SETTLE_CUT_AT(SETTLE_CUT_POINT_REGISTRY);"
 assert s.count(a) == 1
-s = s.replace(a, "    tagfs_write_ledger(); /* logcheck mutation: the ledger is written first */\n" + a)
-a = "    tagfs_write_ledger();"
-assert s.count(a + "\n") == 1
-open(p, "w").write(s.replace(a + "\n", ""))
+s = s.replace(a, "    (void)LedgerImageWrite(); /* logcheck mutation: the ledger is written first */\n" + a)
+a = "        rc = LedgerImageWrite();\n"
+assert s.count(a) == 1
+open(p, "w").write(s.replace(a, "        rc = OK;\n"))
 EOF
     mut_run nextfidmut nextfid reissue behaves "the ledger written first, no fid is issued twice"
     # First in time, but in the same epoch as the table: a medium that keeps
@@ -775,20 +775,20 @@ EOF
     # the checker, which sees every subset, must still say so.
     pc_expect code:FID_PAST_NEXT defect \
         "the ledger written first but behind no flush of its own, a cut that keeps the table and loses it still holds a row past it"
-    restore src/kernel/tagfs/tagfs.c
+    restore src/kernel/tagfs/settle/settle.c
 }
 
 run_tablemut() {
-    mut_on src/kernel/tagfs/tagfs.c "logcheck mutation" <<'EOF'
+    mut_on src/kernel/tagfs/settle/settle.c "logcheck mutation" <<'EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = "    file_table_flush();"
+a = "    if (file_table_flush() != 0) {"
 assert s.count(a) == 1
-open(p, "w").write(s.replace(a, "    /* logcheck mutation: the file table is never written */"))
+open(p, "w").write(s.replace(a, "    if (0) {   /* logcheck mutation: the file table is never written */"))
 EOF
     mut_run tablemut nextfid "durable:_anchor_test@anchor_test" fail \
         "the file table never written, the anchored file is not durable"
-    restore src/kernel/tagfs/tagfs.c
+    restore src/kernel/tagfs/settle/settle.c
 }
 
 # Only the anchor's flushes are taken out — the sync's own, and the one
@@ -797,12 +797,12 @@ EOF
 # of anchor_test's own data comes before the anchor's sync: the ack must not
 # be credited with it.
 run_flushmut() {
-    mut_on src/kernel/tagfs/tagfs.c "logcheck mutation" <<'EOF'
+    mut_on src/kernel/tagfs/settle/settle.c "logcheck mutation" <<'EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = "    error_t flushed = VolumeFlushFor(VolumeFlushNeed());"
+a = "        rc = VolumeFlushFor(VolumeFlushNeed());"
 assert s.count(a) == 1
-open(p, "w").write(s.replace(a, "    error_t flushed = OK;   /* logcheck mutation: the sync never asks the medium to flush */"))
+open(p, "w").write(s.replace(a, "        rc = OK;   /* logcheck mutation: the cycle never asks the medium to flush */"))
 EOF
     mut_on src/kernel/core/decks/storage/storage_ops.c "logcheck mutation" <<'EOF'
 import sys
@@ -816,7 +816,7 @@ EOF
         "on the WriteJob the data's own flush comes first, and still the anchor's ack has none behind it" \
         STRICT=on CORES=4 MEM=4G
     restore src/kernel/core/decks/storage/storage_ops.c
-    restore src/kernel/tagfs/tagfs.c
+    restore src/kernel/tagfs/settle/settle.c
 }
 
 # Both chains' fixes for MP-D5 are in (step 1.1), and here both are taken
