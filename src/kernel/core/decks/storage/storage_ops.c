@@ -1046,6 +1046,52 @@ static error_t storage_crate_text(const ManifestOp *op, Crate *crates, const OpC
     return OK;
 }
 
+/* The ids a query answer moves from the index to the caller's crate at a time. */
+#define STORAGE_QUERY_PIECE 512u
+
+/*
+ * The files `tags` match (every file, for none), written into the out crate
+ * after its 8-byte header a piece at a time, straight from the index's pages:
+ * the kernel holds one piece and never the whole answer, and the crate is
+ * given as many ids as it has room for. hdr[0] is how many went in, hdr[1]
+ * how many match — counted by the first page, and never less than what went
+ * in, since a file made while the pages are taken is delivered too.
+ */
+static error_t storage_query_into(const TagSpelling *tags, uint32_t count, const Crate *out,
+                                  const OpContext *ctx, uint32_t hdr[2])
+{
+    uint64_t room_ids = (out->capacity - 8) / sizeof(uint32_t);
+    uint32_t most     = room_ids > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)room_ids;
+    uint32_t *piece   = kmalloc(STORAGE_QUERY_PIECE * sizeof(uint32_t));
+    if (!piece) return ERR_NO_MEMORY;
+
+    error_t  rc    = OK;
+    uint32_t from  = 1;
+    bool     first = true;
+    for (;;) {
+        uint32_t  room = most - hdr[0] < STORAGE_QUERY_PIECE ? most - hdr[0] : STORAGE_QUERY_PIECE;
+        TagFSPage page;
+        rc = TagFSQueryPage(tags, count, from, piece, room, first, &page);
+        if (rc != OK) break;
+        if (first) hdr[1] = page.total;
+        first = false;
+        if (page.delivered > 0) {
+            int wrc = crate_out_commit_at(out, ctx, 8 + (uint64_t)hdr[0] * sizeof(uint32_t),
+                                          piece, (uint64_t)page.delivered * sizeof(uint32_t));
+            if (wrc != OK) {
+                rc = (error_t)wrc;
+                break;
+            }
+            hdr[0] += page.delivered;
+        }
+        if (page.next == 0 || hdr[0] == most) break;
+        from = page.next;
+    }
+    kfree(piece);
+    if (hdr[1] < hdr[0]) hdr[1] = hdr[0];
+    return rc;
+}
+
 /* STORAGE_TAG_QUERY  params (optional): [u8 scope] — inside the Use Context
  *                    (absent, STORAGE_SCOPE_USE) or STORAGE_SCOPE_EVERYWHERE
  *                    in_crate (optional): comma-separated tag string
@@ -1090,49 +1136,17 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
         return rc;
     }
 
-    /* Room for every file the volume can hold, so the count is the true one
-     * and not the size of the caller's crate. The volume's ceiling — the
-     * number no file id reaches — is the only honest size for such a buffer,
-     * the same one proc_exec asks for. */
-    uint32_t  room    = tagfs_file_ceiling();
-    uint32_t *all_ids = NULL;
-    int       count   = 0;
-    if (room > 0) {
-        all_ids = kmalloc(room * sizeof(uint32_t));
-        if (!all_ids)
-            count = -(int)ERR_NO_MEMORY;
-        else if (total > 0)
-            count = tagfs_query_files(tags, total, all_ids, room);
-        else
-            count = tagfs_list_all_files(all_ids, room);
-    }
+    uint32_t hdr[2] = { 0, 0 };   /* delivered, total */
+    rc = storage_query_into(tags, total, out, ctx, hdr);
     kfree(tags);
     kfree(use_block);
     crate_buf_free(text);
-    if (count < 0) {
-        kfree(all_ids);
-        return (int)(error_t)(-count);
-    }
+    if (rc != OK) return rc;
 
-    uint32_t max_results = (uint32_t)((out->capacity - 8) / sizeof(uint32_t));
-    uint32_t hdr[2];
-    hdr[0] = (uint32_t)count < max_results ? (uint32_t)count : max_results;  /* delivered */
-    hdr[1] = (uint32_t)count;                                                 /* total     */
-    uint64_t out_bytes = 8 + (uint64_t)hdr[0] * sizeof(uint32_t);
-
-    uint8_t *kp = crate_out_alloc(out, out_bytes);
-    if (!kp) {
-        kfree(all_ids);
-        return ERR_INVALID_ADDRESS;
-    }
-    memcpy(kp, hdr, sizeof(hdr));
-    if (hdr[0] > 0) memcpy(kp + 8, all_ids, hdr[0] * sizeof(uint32_t));
-    kfree(all_ids);
-
-    int crc = crate_out_commit(out, ctx, kp, out_bytes);
-    crate_buf_free(kp);
+    /* The header last: a crate whose ids did not all go in says nothing. */
+    int crc = crate_out_commit_at(out, ctx, 0, hdr, sizeof(hdr));
     if (crc != OK) return crc;   /* fail closed: leave out->size unset */
-    out->size = out_bytes;
+    out->size = sizeof(hdr) + (uint64_t)hdr[0] * sizeof(uint32_t);
     return OK;
 }
 

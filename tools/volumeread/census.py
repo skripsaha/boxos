@@ -26,7 +26,7 @@ import struct
 from . import ondisk
 from .ondisk import (SECTOR, BLOCK, SECTORS_PER_BLOCK, REGISTRY_MAGIC,
                      FILETBL_MAGIC, MPOOL_MAGIC, TUSE_MAGIC, COW_MANIFEST_MAGIC,
-                     FILE_ACTIVE, MAX_TAG_ID, INTEGRITY_PER_BLOCK, MIRROR_SLACK,
+                     FILE_ACTIVE, MAX_TAG_ID, INTEGRITY_PER_BLOCK,
                      LEDGER_COPIES, DISKBOOK_BLOCKS, TUSE_TEXT, REGISTRY_DATA,
                      REGISTRY_RECORD, FTABLE_PER_BLOCK,
                      RunsFromBits, RunsNormal, RunsIntersect, RunsSubtract,
@@ -183,8 +183,7 @@ class KernelView:
         """The mount's roll call (tagfs_init's fsck, after the ledger and the chains)."""
         f, lay, D = self.f, self.f.layout, self.f.D
         led = f.ledger
-        mirror = ondisk.MirrorWalk([b for b, _blk, _r in f.pool], [r for _b, _blk, r in f.pool],
-                                   led["next_file_id"] + MIRROR_SLACK + 1)
+        mirror = ondisk.MirrorWalk([b for b, _blk, _r in f.pool], [r for _b, _blk, r in f.pool])
         marks = [(0, min(3, D))]
         corrected = lost = quits = 0
         for v in ondisk.KernelRollCall(f.read_block, led["next_file_id"], f.rows, mirror):

@@ -137,51 +137,28 @@ static process_t *autostart_launch_one(uint32_t file_id, TagFSMetadata *meta,
     return proc;
 }
 
-int AutostartLaunchFromVolume(process_t **out_first, bool scheduler_live)
+/* One file of the volume started when it asks to be: the process, or NULL
+ * when it does not ask or could not be started (said by the launch). */
+static process_t *autostart_consider(uint32_t file_id, bool scheduler_live)
 {
-    if (out_first) *out_first = NULL;
-
-    /* Is there a volume? Asked of the flag rather than of the registry
-     * pointer beside it, which a re-mount frees. */
-    TagFSState *fs = tagfs_get_state();
-    if (!fs || !fs->initialized) return 0;
-
-    uint32_t max_files = (fs->ledger.total_files > 0)
-                         ? fs->ledger.total_files : TAGFS_MAX_FILES;
-    uint32_t *file_ids = kmalloc(sizeof(uint32_t) * max_files);
-    if (!file_ids) {
-        kprintf("[AUTOSTART] no memory to list the volume's files\n");
-        return 0;
+    TagFSMetadata meta;
+    if (tagfs_get_metadata(file_id, &meta) != 0) return NULL;
+    if (!(meta.flags & TAGFS_FILE_ACTIVE) || !autostart_wanted(&meta)) {
+        tagfs_metadata_free(&meta);
+        return NULL;
     }
 
-    int file_count = tagfs_list_all_files(file_ids, max_files);
-    int launched   = 0;
+    /* The file's keys, whole: a process started from it wears every one
+     * (TagFSKeyList), never the ones that fitted a buffer. */
+    char *tags = TagFSKeyList(meta.tag_ids, meta.tag_count);
+    if (!tags) {
+        kprintf("[AUTOSTART] Skip '%s': no memory for its tags\n", meta.filename);
+        tagfs_metadata_free(&meta);
+        return NULL;
+    }
 
-    for (int i = 0; i < file_count; i++) {
-        TagFSMetadata meta;
-        if (tagfs_get_metadata(file_ids[i], &meta) != 0) continue;
-        if (!(meta.flags & TAGFS_FILE_ACTIVE) ||
-            !autostart_wanted(&meta)) {
-            tagfs_metadata_free(&meta);
-            continue;
-        }
-
-        /* The file's keys, whole: a process started from it wears every one
-         * (TagFSKeyList), never the ones that fitted a buffer. */
-        char *tags = TagFSKeyList(meta.tag_ids, meta.tag_count);
-        if (!tags) {
-            kprintf("[AUTOSTART] Skip '%s': no memory for its tags\n", meta.filename);
-            tagfs_metadata_free(&meta);
-            continue;
-        }
-
-        process_t *proc = autostart_launch_one(file_ids[i], &meta, tags);
-        if (!proc) {
-            kfree(tags);
-            tagfs_metadata_free(&meta);
-            continue;
-        }
-
+    process_t *proc = autostart_launch_one(file_id, &meta, tags);
+    if (proc) {
         /*
          * At boot the scheduler is not running yet and every WORKING process is
          * swept onto a run queue in one pass afterwards, so the state is set
@@ -194,17 +171,41 @@ int AutostartLaunchFromVolume(process_t **out_first, bool scheduler_live)
         } else {
             proc->state = PROC_WORKING;
         }
-
-        launched++;
         kprintf("[AUTOSTART] Started '%s' (PID %u, tags: %s)\n",
                 meta.filename, proc->pid, tags);
-        kfree(tags);
-        tagfs_metadata_free(&meta);
-
-        if (out_first && !*out_first) *out_first = proc;
     }
+    kfree(tags);
+    tagfs_metadata_free(&meta);
+    return proc;
+}
 
-    kfree(file_ids);
+int AutostartLaunchFromVolume(process_t **out_first, bool scheduler_live)
+{
+    if (out_first) *out_first = NULL;
+
+    /* Is there a volume? Asked of the flag rather than of the registry
+     * pointer beside it, which a re-mount frees. */
+    TagFSState *fs = tagfs_get_state();
+    if (!fs || !fs->initialized) return 0;
+
+    /* Every live file, a page at a time: what stood here was one array as
+     * long as the Ledger's count of files — or 1024 when it said none — and
+     * the files past it were never asked whether they start. */
+    uint32_t  file_ids[32];
+    TagFSPage page;
+    uint32_t  from     = 1;
+    int       launched = 0;
+    do {
+        if (TagFSListPage(from, file_ids, ARRAY_SIZE(file_ids), false, &page) != OK) break;
+        for (uint32_t i = 0; i < page.delivered; i++) {
+            process_t *proc = autostart_consider(file_ids[i], scheduler_live);
+            if (!proc) continue;
+            launched++;
+            if (out_first && !*out_first) *out_first = proc;
+        }
+        from = page.next;
+    } while (from != 0);
+
     return launched;
 }
 

@@ -1183,6 +1183,25 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
     return rc;
 }
 
+/* Whether the file is a program — ACTIVE, and wearing app or utility — and
+ * then its keys, whole (NULL in *out_tags when there was no memory for them). */
+static bool SysExecCandidate(uint32_t file_id, char **out_tags)
+{
+    TagFSMetadata meta;
+    if (tagfs_get_metadata(file_id, &meta) != 0) return false;
+
+    bool has_exec_tag = false;
+    for (uint16_t t = 0; (meta.flags & TAGFS_FILE_ACTIVE) && t < meta.tag_count; t++) {
+        char key[128];
+        if (!tagfs_tag_key(meta.tag_ids[t], key, sizeof(key))) continue;
+        if (strcmp(key, "app") == 0 || strcmp(key, "utility") == 0) has_exec_tag = true;
+    }
+    if (has_exec_tag)
+        *out_tags = TagFSKeyList(meta.tag_ids, meta.tag_count);
+    tagfs_metadata_free(&meta);
+    return has_exec_tag;
+}
+
 static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext *ctx,
                             const TagSpelling *name,
                             const uint8_t *luggage, uint32_t luggage_len)
@@ -1194,44 +1213,25 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
     size_t      aug_len = op->param_size;
 
     /* Locate the file by tag-name + executable tag: every file that carries
-     * the name as a tag, asked of the index, with room for every one of them.
-     * The volume knows how many files it has and that is the only ceiling
-     * there is. What stood here was a scan of the first 256 files of the
-     * volume, so the 257th program was "not found" — and nothing said so. */
-    uint32_t room = tagfs_file_ceiling();
-    if (room == 0) return ERR_FILE_NOT_FOUND;
-    uint32_t *file_ids = kmalloc(room * sizeof(uint32_t));
-    if (!file_ids) return ERR_NO_MEMORY;
-
-    int file_count = tagfs_query_files(name, 1, file_ids, room);
-
-    uint32_t found_id   = 0;
-    char    *found_tags = NULL;
-
-    for (int i = 0; i < file_count; i++) {
-        TagFSMetadata meta;
-        if (tagfs_get_metadata(file_ids[i], &meta) != 0) continue;
-        if (!(meta.flags & TAGFS_FILE_ACTIVE)) {
-            tagfs_metadata_free(&meta);
-            continue;
+     * the name as a tag, asked of the index a page at a time until one is a
+     * program. What stood here first was a scan of the first 256 files of the
+     * volume, so the 257th program was "not found" — and nothing said so; and
+     * then one array as long as every id the volume had ever issued. */
+    uint32_t  page_ids[32];
+    TagFSPage page;
+    uint32_t  from       = 1;
+    uint32_t  found_id   = 0;
+    char     *found_tags = NULL;
+    do {
+        error_t asked = TagFSQueryPage(name, 1, from, page_ids, ARRAY_SIZE(page_ids), false, &page);
+        if (asked == ERR_TAGFS_NOT_INITIALIZED) return ERR_FILE_NOT_FOUND;
+        if (asked != OK) return asked;
+        for (uint32_t i = 0; i < page.delivered && found_id == 0; i++) {
+            if (SysExecCandidate(page_ids[i], &found_tags))
+                found_id = page_ids[i];
         }
-
-        bool has_exec_tag = false;
-        for (uint16_t t = 0; t < meta.tag_count; t++) {
-            char key[128];
-            if (!tagfs_tag_key(meta.tag_ids[t], key, sizeof(key))) continue;
-            if (strcmp(key, "app") == 0 || strcmp(key, "utility") == 0) has_exec_tag = true;
-        }
-
-        if (has_exec_tag) {
-            found_id   = file_ids[i];
-            found_tags = TagFSKeyList(meta.tag_ids, meta.tag_count);
-            tagfs_metadata_free(&meta);
-            break;
-        }
-        tagfs_metadata_free(&meta);
-    }
-    kfree(file_ids);
+        from = page.next;
+    } while (found_id == 0 && from != 0);
 
     if (found_id == 0) return ERR_FILE_NOT_FOUND;
     if (!found_tags) return ERR_NO_MEMORY;

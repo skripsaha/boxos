@@ -153,7 +153,6 @@ META_RECORD = Fields("<HIIQQQHHHH",     # tagfs_boot.h:53-67; meta_pool.c:492-50
 FILE_ACTIVE, FILE_TRASHED, FILE_HIDDEN = 1, 2, 4   # tagfs.h:60-62; bit 3 is spent (tagfs.h:63)
 MAX_TAG_ID = 0x7FFE                     # tagfs.h:57 TAGFS_MAX_TAG_ID
 TAG_FLAG_HAS_VALUE, TAG_FLAG_SYSTEM = 1, 2   # tagfs_constants.h:36-37
-MIRROR_SLACK = 64                       # tagfs_init: meta_pool_mirror_init(next_file_id + 64); meta_pool.c:726 adds 1
 EXTENT_END_LIMIT = 0xFFFFFFFF           # meta_pool.c:631 start + count past 2^32-1 is an overflow
 
 # ---------------------------------------------------------------------------
@@ -745,15 +744,15 @@ def WalkChain(read_block, first, magic, run):
         block = nxt
 
 
-def MirrorWalk(pool_blocks, pool_raws, capacity):
-    """The mount's mirror (meta_pool.c:744-791): every pool block in chain
-    order, every record in append order, and for each 0 < fid < capacity the
-    LAST record that unpacks. Returns {fid: Record}. Pass capacity None for the
-    truth view, which has no capacity."""
+def MirrorWalk(pool_blocks, pool_raws):
+    """The mount's mirror (meta_pool_mirror_init): every pool block in chain
+    order, every record in append order, and for each fid > 0 the LAST record
+    that unpacks. Returns {fid: Record}. The kernel keeps only the fids the
+    table has a row for (file_map/), and its roll call asks for no other."""
     newest = {}
     for block, raw in zip(pool_blocks, pool_raws):
         for at, _record_len, fid in ReadPoolBlock(raw)["mirror_walk"]:
-            if fid == 0 or (capacity is not None and fid >= capacity):
+            if fid == 0:
                 continue
             rec = ParseRecord(raw, at, block)
             if rec.unpack_ok:
@@ -888,7 +887,7 @@ class Volume:
         rows = TableRows(table_raws)
         led = self.ledger()
         next_fid = led["next_file_id"] if led else max(rows, default=0) + 1
-        mirror = MirrorWalk(pool_blocks, pool_raws, next_fid + MIRROR_SLACK + 1)
+        mirror = MirrorWalk(pool_blocks, pool_raws)
         out = []
         for v in KernelRollCall(self.read_block, next_fid, rows, mirror):
             if v.outcome != "visible" or v.record.flags & FILE_TRASHED:

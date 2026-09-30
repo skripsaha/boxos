@@ -153,6 +153,7 @@ static TestResult test_use_context_walls(void)
     cabin_t*     cabin   = NULL;
     process_t*   proc    = NULL;
     uint32_t     ids[8];
+    TagFSPage    page;
 
     TEST_ASSERT(use_snapshot_take(&saved), "the user's context could not be saved");
     taken = true;
@@ -164,8 +165,9 @@ static TestResult test_use_context_walls(void)
     TEST_ASSERT_OK(UseContextTagArray(&block, &names, &count), "names come back");
     TEST_ASSERT_EQ(count, 1, "one tag");
     TEST_ASSERT(use_spelled(names, count), "the context's names spell");
-    TEST_ASSERT_EQ(tagfs_query_files(s_spelled, count, ids, 8), 0,
-                   "inside walls nobody has built, nothing is visible");
+    TEST_ASSERT_OK(TagFSQueryPage(s_spelled, count, 1, ids, ARRAY_SIZE(ids), true, &page),
+                   "the context's question is put to the volume");
+    TEST_ASSERT_EQ(page.total, 0, "inside walls nobody has built, nothing is visible");
 
     proc = use_test_strand(0, &cabin);
     TEST_ASSERT(proc != NULL, "no memory for a stand-in strand");
@@ -196,9 +198,11 @@ static TestResult test_use_context_narrows(void)
     process_t*    proc      = NULL;
     bool          have_meta = false;
     uint32_t      first[1];
+    TagFSPage     page;
     TagFSMetadata meta;
 
-    TEST_ASSERT_EQ(tagfs_list_all_files(first, 1), 1, "a volume with at least one file");
+    TEST_ASSERT_OK(TagFSListPage(1, first, 1, false, &page), "the volume's files are listed");
+    TEST_ASSERT_EQ(page.delivered, 1, "a volume with at least one file");
     TEST_ASSERT(tagfs_get_metadata(first[0], &meta) == 0, "the first file's metadata");
     have_meta = true;
     if (meta.tag_count == 0) {
@@ -220,13 +224,16 @@ static TestResult test_use_context_narrows(void)
     TEST_ASSERT_OK(UseContextTagArray(&block, &names, &count), "names come back");
 
     TEST_ASSERT(use_spelled(names, count), "the context's names spell");
-    int n_inside = tagfs_query_files(s_spelled, count, s_inside, ARRAY_SIZE(s_inside));
+    TEST_ASSERT_OK(TagFSQueryPage(s_spelled, count, 1, s_inside, ARRAY_SIZE(s_inside), true, &page),
+                   "the context's question is put to the volume");
+    uint32_t n_inside = page.total;
     TEST_ASSERT(n_inside >= 1, "the file that wears the tag is visible inside");
-    for (int i = 0; i < n_inside; i++)
+    for (uint32_t i = 0; i < page.delivered; i++)
         TEST_ASSERT(tagfs_has_tag(s_inside[i], tag_id), "everything visible inside wears the tag");
 
-    int n_everywhere = tagfs_list_all_files(s_everywhere, ARRAY_SIZE(s_everywhere));
-    TEST_ASSERT(n_inside <= n_everywhere, "inside is never more than everywhere");
+    TEST_ASSERT_OK(TagFSListPage(1, s_everywhere, ARRAY_SIZE(s_everywhere), true, &page),
+                   "the volume's files are listed");
+    TEST_ASSERT(n_inside <= page.total, "inside is never more than everywhere");
 
     proc = use_test_strand(tag_id, &cabin);
     TEST_ASSERT(proc != NULL, "no memory for a stand-in strand");

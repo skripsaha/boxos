@@ -2,7 +2,6 @@
 #define BOXOS_LIMITS_H
 
 #define MAX_PROCESSES      4096
-#define MAX_OPEN_FILES     4096
 
 // Per-process memory limits (single source of truth)
 #define BOXOS_USER_HEAP_MAX_SIZE    (256 * 1024 * 1024)   // 256MB max heap per process
@@ -11,11 +10,6 @@
 
 #define IDT_ENTRIES        256
 #define ATA_SECTOR_SIZE    512
-
-#define TAGFS_MAX_FILES    1024  // Ceiling for callers with no volume; a mounted one says how many it holds (its Ledger)
-#define TAGFS_MAX_TAG_INDEX 1024
-#define TAGFS_INODE_SIZE   512
-#define JOURNAL_ENTRY_COUNT 512
 
 #define INPUT_BUFFER_SIZE         1024
 

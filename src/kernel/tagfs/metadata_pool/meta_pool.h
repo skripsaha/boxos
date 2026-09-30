@@ -28,7 +28,11 @@ int      meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_
  * meta_pool_flush_retires for when. */
 int      meta_pool_delete(uint32_t block, uint32_t offset);
 
-int      meta_pool_mirror_init(uint32_t max_file_id);
+/* The newest record of every file the file table names, read into the map of
+ * live files (file_map/) — so the table's rows must be in it first. A record
+ * of a file no row names is passed over. */
+int      meta_pool_mirror_init(void);
+/* The file's record, copied out of the map; -1 when the map holds none. */
 int      meta_pool_read_cached(uint32_t file_id, TagFSMetadata* out);
 
 /* Where the pool holds this file's newest record. The mirror walk reads the

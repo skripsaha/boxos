@@ -55,9 +55,8 @@
 #define TAGFS_MPOOL_DATA_SIZE       4080
 #define TAGFS_FTABLE_PER_BLOCK      510
 
-// Bitmap index initial capacities
+// The tag index's table of tags before it first grows
 #define TAGFS_BITMAP_INITIAL_TAG_CAP    64
-#define TAGFS_BITMAP_INITIAL_FILE_CAP   256
 
 // Read-ahead cache
 #define TAGFS_READ_AHEAD_BLOCKS         4
