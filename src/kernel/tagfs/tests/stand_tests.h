@@ -55,6 +55,12 @@
 //                        anchor, an anchor answered through its Chit, the idle
 //                        context owed a quantum on one core, and a protected
 //                        medium turning the volume read-only
+// stand_glean_tests.c    the stand_glean suite: ten thousand overwrites of one
+//                        file, and a uniform load of sixty-four, within the
+//                        chain's slack; the Deed's head still the pool's and
+//                        walked whole from; a block taken off resting past its
+//                        cycle; and a lie after a glean falling back to the
+//                        other copy's own chain
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.

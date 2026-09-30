@@ -63,13 +63,15 @@ int         FileRecordCopyOut(const FileRecord* rec, TagFSMetadata* out);
 
 /* Where a file's newest record sits in the metadata pool, and which Ink put
  * it there: `link` is the pool chain's link, counted from the chain's head,
- * which a link keeps whatever is unlinked around it, and `offset` the record's
- * byte in that link's block. `gen` is the Ink that wrote the record and
- * `shape` the Ink that last gave the file its size and extents — both 0 for a
- * record the mount read, which every Ink since is newer than. */
+ * which a link keeps whatever is unlinked around it, `offset` the record's
+ * byte in that link's block and `len` its length — a block's geometry, which
+ * both fit in 16 bits. `gen` is the Ink that wrote the record and `shape` the
+ * Ink that last gave the file its size and extents — both 0 for a record the
+ * mount read, which every Ink since is newer than. */
 typedef struct {
     uint32_t link;
-    uint32_t offset;
+    uint16_t offset;
+    uint16_t len;
     uint64_t gen;
     uint64_t shape;
 } RecordWhere;
@@ -98,7 +100,8 @@ void     FileMapStakeLetGo(FileMapStake* stake);
 
 /*
  * `rec` becomes the file's record, sitting where `where` says. The reference is
- * the map's from here on, and the record it replaces is let go. The file is
+ * the map's from here on, and the record it replaces is let go — where that one
+ * sat comes back in *was, a `len` of 0 when the file had none. The file is
  * added when it is not in the map, from the stake; OK, or ERR_NO_MEMORY —
  * said — when the stake does not cover the insert and the heap refused the
  * difference, and then `rec` is let go and the map is as it was. A caller that
@@ -106,7 +109,7 @@ void     FileMapStakeLetGo(FileMapStake* stake);
  * first, so the put never reaches the heap under that lock.
  */
 error_t  FileMapRecordPut(FileMap* map, uint32_t fid, FileRecord* rec,
-                          const RecordWhere* where, FileMapStake* stake);
+                          const RecordWhere* where, FileMapStake* stake, RecordWhere* was);
 
 /* How many nodes adding `fid` would take now; 0 when the file is in the map. */
 uint32_t FileMapNodesToAdd(FileMap* map, uint32_t fid);
@@ -122,6 +125,16 @@ FileRecord* FileMapRecordHold(FileMap* map, uint32_t fid, RecordWhere* out);
 void     FileMapRecordMoved(FileMap* map, uint32_t fid, uint32_t link, uint32_t block,
                             uint32_t from, uint32_t to);
 
+/* Whether the file's record is the one at byte `offset` of link `link`. */
+bool     FileMapRecordAt(FileMap* map, uint32_t fid, uint32_t link, uint32_t offset);
+
+/* The file's record, found where `from` says, laid again where `to` says — in
+ * block `to_block`, by Glean — the same record under a new place and Ink, its
+ * shape kept; and the file's row with it. False, and nothing changed, when the
+ * map has the file's record anywhere else. */
+bool     FileMapRecordRelink(FileMap* map, uint32_t fid, const RecordWhere* from,
+                             const RecordWhere* to, uint32_t to_block);
+
 /* The file table's row of a file. Set adds the file when it is not in the
  * map (ERR_NO_MEMORY, said, when there is no room); Get answers false for a
  * file with no row; Clear takes the row away, and the file with it when it has
@@ -130,8 +143,9 @@ error_t  FileMapRowSet(FileMap* map, uint32_t fid, uint32_t block, uint32_t offs
 bool     FileMapRowGet(FileMap* map, uint32_t fid, uint32_t* out_block, uint32_t* out_offset);
 void     FileMapRowClear(FileMap* map, uint32_t fid);
 
-/* The file out of the map, row and record both. */
-void     FileMapDrop(FileMap* map, uint32_t fid);
+/* The file out of the map, row and record both; where its record sat in *was
+ * (may be NULL), a `len` of 0 when it had none. */
+void     FileMapDrop(FileMap* map, uint32_t fid, RecordWhere* was);
 
 /* Up to `room` file ids from `from` on that have a row — the live files — in
  * id order: how many were written. A walk of them all asks again from one

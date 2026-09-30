@@ -825,22 +825,9 @@ def PoolBlockMix(block, raw):
     return Crc32(struct.pack("<III", block, used, Crc32(bytes(payload))))
 
 
-def SealStand(read_block, copies, run):
-    """What PoolMount (meta_pool_mount.c) stands on: the newest intact copy's
-    seal borne out; else the other copy's borne out (fell back — the medium is
-    marked SETTLE_MEDIUM_LIED); else a seal whose closed blocks are borne out
-    and whose open block is not (decision 5: its records roll back); else no
-    seal. None when the newest intact copy carries no seal of its own — the
-    volume is read the way a kernel before the seal reads it. Otherwise a dict:
-    stood ('seal' | 'torn' | 'none'), copy, mark, fell_back."""
-    newest = LedgerChoice(copies)
-    if newest is None or not newest["sealed"]:
-        return None
-    tries = [{"copy": newest, "fold": 0, "verdict": None}]
-    other = [c for c in copies if c is not newest and c["ok"] and c["sealed"]]
-    if other and other[0]["mark"]["chain_first"] == newest["mark"]["chain_first"]:
-        tries.append({"copy": other[0], "fold": 0, "verdict": None})
-
+def _SealJudgeWalk(read_block, tries, mark, run):
+    """The seals of `tries` held against the chain walked from `mark`'s first
+    block up to its open one (meta_pool_mount.c WalkJudge), reading only."""
     def judge(block, raw):
         for t in tries:
             m = t["copy"]["mark"]
@@ -858,18 +845,46 @@ def SealStand(read_block, copies, run):
             t["verdict"] = ("broken" if t["fold"] != m["closed_crc32"]
                             else "borne" if tail else "torn")
 
-    s0 = newest["mark"]
-    block = s0["chain_first"]
+    block = mark["chain_first"]
     for _hops in range(run):
         raw = read_block(block) if block < run else None
         ok = raw is not None and U32(raw, 0) == MPOOL_MAGIC
         judge(block, raw if ok else None)
-        if not ok or block == s0["pool_to_block"]:
+        if not ok or block == mark["pool_to_block"]:
             break
         if U32(raw, 4) == 0:
             judge(None, None)
             break
         block = U32(raw, 4)
+
+
+def SealStand(read_block, copies, run):
+    """What PoolMount (meta_pool_mount.c) stands on: the newest intact copy's
+    seal borne out; else the other copy's borne out (fell back — the medium is
+    marked SETTLE_MEDIUM_LIED); else a seal whose closed blocks are borne out
+    and whose open block is not (decision 5: its records roll back); else no
+    seal. None when the newest intact copy carries no seal of its own — the
+    volume is read the way a kernel before the seal reads it. Otherwise a dict:
+    stood ('seal' | 'torn' | 'none'), copy, mark, fell_back.
+
+    The other copy's seal is judged by the walk from the newest one's first
+    block when both chains begin at one block; when they begin apart — the
+    newest cycle's Glean took blocks off the front (glean/glean.h) — by a walk
+    from its own first block, made only when the newest is not borne out."""
+    newest = LedgerChoice(copies)
+    if newest is None or not newest["sealed"]:
+        return None
+    s0 = newest["mark"]
+    tries = [{"copy": newest, "fold": 0, "verdict": None}]
+    other = [c for c in copies if c is not newest and c["ok"] and c["sealed"]]
+    apart = bool(other) and other[0]["mark"]["chain_first"] != s0["chain_first"]
+    if other and not apart:
+        tries.append({"copy": other[0], "fold": 0, "verdict": None})
+    _SealJudgeWalk(read_block, tries, s0, run)
+    if apart and tries[0]["verdict"] != "borne":
+        own = {"copy": other[0], "fold": 0, "verdict": None}
+        _SealJudgeWalk(read_block, [own], other[0]["mark"], run)
+        tries.append(own)
 
     out = {"stood": "none", "copy": None, "mark": None, "fell_back": False}
     if tries[0]["verdict"] == "borne":
@@ -882,6 +897,43 @@ def SealStand(read_block, copies, run):
         pick, stood = (torn[0], "torn") if torn else (None, "none")
     if pick:
         out.update(stood=stood, copy=pick["copy"], mark=pick["copy"]["mark"])
+    return out
+
+
+def SealPoolChain(read_block, head, seal, run):
+    """The pool's chain as the mount walks it (meta_pool_mount.c): under a seal
+    from the seal's chain_first — the Deed's head may lie before it, off the
+    chain, once Glean took blocks off the front — and cut to the seal's open
+    block (SealCutPool); with none, from the head, whole. Returns (blocks,
+    raws, refused)."""
+    sealed = seal is not None and seal["stood"] != "none"
+    first = seal["mark"]["chain_first"] if sealed else head
+    blocks, raws, why = WalkChain(read_block, first, MPOOL_MAGIC, run)
+    if sealed and seal["mark"]["pool_to_block"] in blocks:
+        blocks, raws = SealCutPool(blocks, raws, seal)
+        why = None
+    return blocks, raws, why
+
+
+def HeadPrefix(read_block, head, first, chain, run):
+    """What the Deed's head still names before the chain's first block, when
+    the chain begins past it (glean.c GleanMount, GleanWalkPrefix): followed
+    from the head's next_block up to `first`, and no further than a block
+    outside the run, one of the chain, the head itself, or one that does not
+    read as a pool block. The mount keeps them the pool's until the head is
+    written to name past them."""
+    raw = read_block(head) if head < run else None
+    if raw is None or U32(raw, 0) != MPOOL_MAGIC:
+        return []
+    out, block, on_chain = [], U32(raw, 4), set(chain)
+    for _hops in range(run):
+        if block in (first, 0) or block >= run or block == head or block in on_chain:
+            break
+        raw = read_block(block)
+        if raw is None or U32(raw, 0) != MPOOL_MAGIC:
+            break
+        out.append(block)
+        block = U32(raw, 4)
     return out
 
 
@@ -1051,18 +1103,15 @@ class Volume:
         table_head = self.layout["file_table_block"] - self.layout["data_block"]
         pool_head = self.layout["metadata_pool_block"] - self.layout["data_block"]
         _tb, table_raws, _why = WalkChain(self.read_block, table_head, FILETBL_MAGIC, run)
-        pool_blocks, pool_raws, _why = WalkChain(self.read_block, pool_head, MPOOL_MAGIC, run)
         rows = TableRows(table_raws)
         copies = self.ledgers()
         led = LedgerChoice(copies)
         seal = SealStand(self.read_block, copies, run) if led else None
+        pool_blocks, pool_raws, _why = SealPoolChain(self.read_block, pool_head, seal, run)
+        mirror = MirrorWalk(pool_blocks, pool_raws)
         if seal and seal["stood"] != "none":
             # Under a seal the files are the newest records of the sealed span.
-            pool_blocks, pool_raws = SealCutPool(pool_blocks, pool_raws, seal)
-            mirror = MirrorWalk(pool_blocks, pool_raws)
             rows = {fid: (r.block, r.at) for fid, r in mirror.items() if r.flags & FILE_ACTIVE}
-        else:
-            mirror = MirrorWalk(pool_blocks, pool_raws)
         next_fid = max(rows, default=0) + 1
         out = []
         for v in KernelRollCall(self.read_block, next_fid, rows, mirror):

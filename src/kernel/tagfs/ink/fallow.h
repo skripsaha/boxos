@@ -31,7 +31,7 @@
  *       the integrity map, and the node goes back only once a cycle at least
  *       that late has settled.
  *
- * A freer is one of three kinds. A record of the pool (FALLOW_BY_RECORD) is
+ * A freer is one of four kinds. A record of the pool (FALLOW_BY_RECORD) is
  * known by the gen of the Ink that wrote it; a field of the Ledger
  * (FALLOW_BY_LEDGER) — the integrity map's old run — by the number of the
  * first cycle whose Ledger image was taken after the field changed, for which
@@ -40,7 +40,11 @@
  * while either copy of the Ledger may still name it — asked at the moment it
  * would go back, never when it came to rest (use_memory.h): a copy whose
  * write was not proven may name the chain it held or the one it was given,
- * and a mount that rolls back to the older copy stands on its chain.
+ * and a mount that rolls back to the older copy stands on its chain. A block
+ * Glean took off the pool chain's front (FALLOW_BY_UNLINK) is freed as a
+ * Ledger field is — by the cycle whose seal first began the chain past it —
+ * and is held besides while the Deed's head may still name it on the medium
+ * (glean.h, GleanHintCovers): a reader that knows no seal walks from there.
  *
  * Everything here is changed under the volume's state lock and nothing is
  * allocated under it: a node is made before the lock and freed after it.
@@ -58,6 +62,7 @@ typedef enum {
     FALLOW_BY_RECORD    = 1,
     FALLOW_BY_LEDGER    = 2,
     FALLOW_BY_USE_CHAIN = 3,   /* runs[0] begins with the chain's first link */
+    FALLOW_BY_UNLINK    = 4,
 } FallowKind;
 
 typedef struct FallowNode FallowNode;
@@ -65,6 +70,14 @@ typedef struct FallowNode FallowNode;
 /* A node for `count` runs of file `fid` (0 for a Ledger freer's), taken with
  * no TagFS lock held: NULL when there is no memory. */
 FallowNode* FallowNodeMake(const FileExtent* runs, uint32_t count, FallowKind kind, uint32_t fid);
+
+/* A node with room for `blocks` blocks and none in it yet, for a freer that
+ * learns its ground under the state lock (Glean): NULL when there is no
+ * memory. FallowNodeKeep puts one block in it, under the state lock and
+ * before it is added — a block beside the last joins its run; the count of
+ * blocks it holds. */
+FallowNode* FallowNodeRoom(uint32_t blocks, FallowKind kind);
+uint32_t    FallowNodeKeep(FallowNode* node, uint32_t block);
 
 /* A node that was never added, let go. */
 void        FallowNodeLetGo(FallowNode* node);
@@ -93,7 +106,8 @@ void        FallowRetag(uint64_t from, uint64_t to);
  * freer now lies in a settled closed block (gen <= closed_gen) is given the
  * cycle it may go back at, and every node whose cycle has come, whose digests
  * a settled cycle zeroed, whose file no open handle views as it was before,
- * and — a Use Context chain — which no copy of the Ledger may name, goes back
+ * and — a Use Context chain — which no copy of the Ledger may name, or — an
+ * unlinked pool block — which the Deed's head no longer names, goes back
  * to the allocator. Answers the blocks given back; the nodes spent come back
  * in *spent, for FallowNodesFree after the lock. */
 uint64_t    FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent);

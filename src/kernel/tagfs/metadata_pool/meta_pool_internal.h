@@ -17,17 +17,23 @@
 #define MPOOL_BLOCK_HEADER  16
 
 /* One link of the chain: the block, the number it keeps whatever is unlinked
- * around it — the numbers only rise along the chain — and, once the block is
- * closed, its mix in the seal's fold (PoolBlockMix); 0 for the open tail. */
+ * around it — the numbers only rise along the chain — once the block is
+ * closed, its mix in the seal's fold (PoolBlockMix), 0 for the open tail; and
+ * the bytes of its records the map of live files names — a file's newest —
+ * which only the tail's ever grows (Glean, glean/). */
 typedef struct {
     uint32_t block;
     uint32_t link;
     uint32_t mix;
+    uint32_t live;
 } MetaPoolLink;
 
 extern MetaPoolLink* g_pool_chain;
 extern uint32_t      g_pool_chain_len;
 extern uint32_t      g_pool_chain_cap;
+
+/* Every link's `live`, summed. */
+extern uint64_t      g_pool_live_bytes;
 
 /* The seal's closed_crc32 as memory has it: every closed link's mix, XORed
  * (volume_ledger.h). A link closed XORs its mix in; one dropped off the front
@@ -72,6 +78,11 @@ int      PoolChainRoom(uint32_t want);
 
 /* A link appended; the room was made. */
 void     PoolChainAppend(uint32_t block);
+
+/* A record's bytes leaving the link `from` names and coming to the one `to`
+ * names, in the count of what the links hold of the live files; a `len` of 0,
+ * or NULL, is no record. */
+void     PoolLiveMove(const RecordWhere* from, const RecordWhere* to);
 
 /* Where in the chain link `link` sits, or g_pool_chain_len. */
 uint32_t PoolChainAt(uint32_t link);

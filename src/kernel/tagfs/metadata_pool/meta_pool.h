@@ -48,7 +48,9 @@
  *     before its flush, or the medium said a flush was kept that was not: the
  *     volume stands on the cycle before, the walk is made again up to its
  *     `to`, and the medium is marked as one that once held less than a seal
- *     (SETTLE_MEDIUM_LIED);
+ *     (SETTLE_MEDIUM_LIED). A seal whose chain begins at another block — the
+ *     newest cycle's Glean took blocks off the front — is judged by that walk
+ *     from its own first block, since the first walk never met them;
  *   neither, and a seal's closed part is borne out while its open block is not
  *     — the open block was torn as it was rewritten (decision 5): the pool
  *     rolls back to its last closed block, loudly, and mounts writable;
@@ -116,9 +118,20 @@ void     tagfs_metadata_free(TagFSMetadata* meta);
  * and for every Ink alike (the design's principle 26): an ACTIVE record becomes
  * the file's, sitting where `where` says; NULL — a Quitclaim — takes the file
  * out of the map, its row with it. OK, or ERR_NO_MEMORY when the stake did not
- * cover the insert and the heap refused, and then `rec` is let go. */
+ * cover the insert and the heap refused, and then `rec` is let go. Every link
+ * of the chain counts the bytes of the records the map names in it, and the
+ * door keeps the count: what a record leaves, what one comes to. */
 error_t  PoolMirrorPut(uint32_t fid, FileRecord* rec, const RecordWhere* where,
                        FileMapStake* stake);
+
+/* The file out of the map — its record and its row there — through the same
+ * door; the file table is the caller's to tell. */
+void     PoolMirrorDrop(uint32_t fid);
+
+/* The file's record, where `from` says, laid again where `to` says (Glean):
+ * the map, the file's row and the links' counts follow. False, and nothing
+ * changed, when the file's record is not the one at `from`. */
+bool     PoolMirrorMove(uint32_t fid, const RecordWhere* from, const RecordWhere* to);
 
 /* Whether `where` can name a record of `fid` (MP-D9): its link is on the chain
  * and its offset inside the block's records — and where the block is in memory
@@ -149,6 +162,10 @@ void     PoolTakeBack(const RecordWhere* where, uint32_t len);
  * only when `dig_reserve` (a Quitclaim, a cycle closing early). */
 bool     PoolTailTurn(bool dig_reserve);
 
+/* The same turn for Glean, which may take its own share of the reserve
+ * (SPARE_FOR_GLEAN) and leaves the deletes theirs. */
+bool     PoolTailTurnGlean(void);
+
 /* Whether a Spare may be had. */
 bool     PoolSpareAvailable(bool dig_reserve);
 
@@ -162,8 +179,8 @@ RecordWhere PoolAppend(const uint8_t* packed, uint32_t bytes, uint64_t gen);
 
 /* ‼ HOW MANY SPARES THE POOL KEEPS FOR A DELETE, DERIVED. One block of the tail
  * holds every Quitclaim a run of deletes needs until a cycle can close it —
- * POOL_QUITCLAIMS_PER_BLOCK of them, 97 — and one more is a Glean step's (step
- * 1.8): the live records of the oldest block, at most one block's payload. The
+ * POOL_QUITCLAIMS_PER_BLOCK of them, 97 — and one more is a Glean step's
+ * (glean/): the live records of the oldest block, at most one block's payload. The
  * same two serve a tail closed early: the first becomes the closed block's
  * next, the second the tail after it. A volume with no free block can still
  * delete, and the 98th delete waits for a Spare the Fallow gives back. */
@@ -263,8 +280,43 @@ void     PoolPagesFree(MetaPoolPage* list);
 void     PoolSealTake(SettleMark* mark);
 
 /* Under the state lock: the blocks the pool holds that are not files' — its
- * chain in memory, and its Spares. */
+ * chain in memory, its Spares, and the Deed's head once the chain begins past
+ * it. */
 uint64_t PoolBlocksHeld(void);
+
+// ----------------------------------------------------------------------------
+// Glean's view of the chain (glean/), under the state lock
+// ----------------------------------------------------------------------------
+
+/* The blocks of the chain, the tail's included; and how many blocks the
+ * records the map of live files names would fill, packed. */
+uint32_t PoolChainBlocks(void);
+uint32_t PoolLiveBlocks(void);
+
+/* The block the chain begins at; and whether `block` is one of its links. */
+uint32_t PoolChainFirst(void);
+bool     PoolChainHolds(uint32_t block);
+
+/* A link at the chain's front as Glean may take it: a closed block a settled
+ * cycle wrote — never the tail, never one no cycle has written yet. */
+typedef struct {
+    uint32_t block;
+    uint32_t link;
+    uint32_t live;      /* the bytes of its records the map names */
+    uint32_t next;      /* the block after it — what its next_block says */
+    uint32_t mix;       /* its part in the seal's fold */
+} PoolFront;
+
+/* The i-th link from the chain's front, when Glean may take it. */
+bool     PoolFrontLink(uint32_t i, PoolFront* out);
+
+/* Whether `img`, read off the medium, is the block the front link says it is:
+ * its records sum to the link's mix. */
+bool     PoolFrontReadsTrue(const PoolFront* front, const MetaPoolBlock* img);
+
+/* The `count` links at the chain's front off the chain: their mixes out of
+ * the seal's fold, and the chain begins at the link after them. */
+void     PoolUnlinkFront(uint32_t count);
 
 /* Under the state lock: the gen of the newest record the tail holds; 0 when
  * it holds none. For the stand. */

@@ -231,6 +231,16 @@ static void InkRowFollows(uint32_t fid, const RecordWhere* where)
         (void)FileMapRowSet(InkState()->files, fid, block, where->offset);
 }
 
+/* The same laying and the same door as every Ink: a moved record is its
+ * file's newest, and lands past every record there is. */
+void InkGleanLocked(uint32_t fid, const RecordWhere* from, const uint8_t* packed)
+{
+    uint64_t    gen = s_inked_gen + 1;
+    RecordWhere to  = PoolAppend(packed, from->len, gen);
+    (void)PoolMirrorMove(fid, from, &to);
+    __atomic_store_n(&s_inked_gen, gen, __ATOMIC_RELEASE);
+}
+
 // ----------------------------------------------------------------------------
 // A Spare, when an Ink had none
 // ----------------------------------------------------------------------------

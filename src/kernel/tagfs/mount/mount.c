@@ -10,6 +10,7 @@
 #include "../integrity/integrity.h"
 #include "../cow/cow.h"
 #include "../use_memory/use_memory.h"
+#include "../glean/glean.h"
 
 /*
  * The mount's read of the volume (mount.h). Everything here runs with the
@@ -115,13 +116,13 @@ static void MountFile(uint32_t fid, MountFileCount* n)
             n->lost++;
         }
         file_table_delete(fid);
-        FileMapDrop(fs->files, fid);
+        PoolMirrorDrop(fid);
         return;
     }
     if (!has_row && !n->sealed) {
         n->unnamed++;
         FileRecordRelease(rec);
-        FileMapDrop(fs->files, fid);
+        PoolMirrorDrop(fid);
         return;
     }
 
@@ -243,6 +244,7 @@ static error_t MountCensus(const char** what)
     TagRegistryClaimGround(fs->registry);
     FileTableClaimGround();
     PoolClaimGround(MountDataBlock(fs->layout.metadata_pool_block));
+    GleanClaimGround();
     IntegrityClaimGround();
     CowClaimGround();
     UseRollCall();
@@ -329,6 +331,7 @@ static error_t MountPool(const MountSeals* seals, PoolMountOutcome* pool, const 
     /* The copy stood on: the seal's own, or the newest when none stands. */
     uint32_t stood = pool->seal >= 0 ? seals->copy[pool->seal] : seals->copy[0];
     LedgerStandOn(stood);
+    GleanMount(ask.head, PoolChainFirst());
 
     bool lied = pool->fell_back || UseMemoryMediumLied() ||
                 (pool->seal >= 0 && (seals->mark[pool->seal].flags & SETTLE_MEDIUM_LIED));

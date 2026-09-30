@@ -3,6 +3,7 @@
 #include "../helm/helm.h"
 #include "../settle/settle.h"
 #include "../use_memory/use_memory.h"
+#include "../glean/glean.h"
 
 struct FallowNode {
     FallowNode* next;
@@ -12,6 +13,7 @@ struct FallowNode {
     FallowKind  kind;
     uint32_t    fid;        /* the file a record freer freed it from; 0 for the others */
     uint32_t    count;
+    uint32_t    room;       /* the runs runs[] has room for */
     FileExtent  runs[];
 };
 
@@ -28,9 +30,10 @@ static uint64_t NodeBlocks(const FallowNode* n)
     return blocks;
 }
 
-FallowNode* FallowNodeMake(const FileExtent* runs, uint32_t count, FallowKind kind, uint32_t fid)
+/* A node with room for `room` runs, none of them in it yet. */
+static FallowNode* NodeAlloc(uint32_t room, FallowKind kind, uint32_t fid)
 {
-    FallowNode* n = kmalloc(sizeof(FallowNode) + sizeof(FileExtent) * count);
+    FallowNode* n = kmalloc(sizeof(FallowNode) + sizeof(FileExtent) * room);
     if (!n)
         return NULL;
     n->next      = NULL;
@@ -39,10 +42,38 @@ FallowNode* FallowNodeMake(const FileExtent* runs, uint32_t count, FallowKind ki
     n->zeroed_in = 0;
     n->kind      = kind;
     n->fid       = fid;
-    n->count     = count;
-    if (count)
-        memcpy(n->runs, runs, sizeof(FileExtent) * count);
+    n->count     = 0;
+    n->room      = room;
     return n;
+}
+
+FallowNode* FallowNodeMake(const FileExtent* runs, uint32_t count, FallowKind kind, uint32_t fid)
+{
+    FallowNode* n = NodeAlloc(count, kind, fid);
+    if (n && count) {
+        memcpy(n->runs, runs, sizeof(FileExtent) * count);
+        n->count = count;
+    }
+    return n;
+}
+
+FallowNode* FallowNodeRoom(uint32_t blocks, FallowKind kind)
+{
+    return NodeAlloc(blocks, kind, 0);
+}
+
+uint32_t FallowNodeKeep(FallowNode* node, uint32_t block)
+{
+    FileExtent* last = node->count ? &node->runs[node->count - 1u] : NULL;
+    if (last && last->start_block + last->block_count == block &&
+        last->block_count < PLOT_RUN_MOST) {
+        last->block_count++;
+    } else if (node->count < node->room) {
+        node->runs[node->count].start_block = block;
+        node->runs[node->count].block_count = 1;
+        node->count++;
+    }
+    return (uint32_t)NodeBlocks(node);
 }
 
 void FallowNodeLetGo(FallowNode* node)
@@ -129,7 +160,8 @@ uint64_t FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent)
         }
         if (n->ripe_at == 0 || cycle < n->ripe_at || n->zeroed_in == 0 || n->zeroed_in > cycle ||
             (n->kind == FALLOW_BY_RECORD && n->gen > HelmViewFloor(n->fid)) ||
-            (n->kind == FALLOW_BY_USE_CHAIN && UseMemoryNames(n->runs[0].start_block))) {
+            (n->kind == FALLOW_BY_USE_CHAIN && UseMemoryNames(n->runs[0].start_block)) ||
+            (n->kind == FALLOW_BY_UNLINK && n->gen > GleanHintCovers())) {
             prev = n;
             n    = next;
             continue;

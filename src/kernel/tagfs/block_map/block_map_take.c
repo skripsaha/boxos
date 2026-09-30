@@ -1,6 +1,7 @@
 #include "block_map_internal.h"
 #include "../ink/fallow.h"
 #include "../settle/settle.h"
+#include "../glean/glean.h"
 
 /*
  * Where a take goes.
@@ -232,10 +233,17 @@ void MapSayNoRoom(uint32_t want)
 }
 
 /* Short while Fallow rests blocks: a cycle gives them back, so one is demanded
- * now rather than when Lull allows it. */
+ * now rather than when Lull allows it. Short with nothing resting while the
+ * pool's chain holds more than its live records need: the next cycles glean it
+ * down to them, and what comes off rests and comes back the same way. */
 error_t MapShort(uint32_t want)
 {
     if (FallowBlocks() > 0) {
+        SettleDemand(SETTLE_DEMAND_ROOM);
+        return ERR_WOULD_BLOCK;
+    }
+    if (GleanMayFree()) {
+        GleanShort();
         SettleDemand(SETTLE_DEMAND_ROOM);
         return ERR_WOULD_BLOCK;
     }
