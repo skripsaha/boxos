@@ -3,7 +3,6 @@
 
 #include "../../lib/kernel/ktypes.h"
 #include "../../lib/kernel/klib.h"
-#include "../lock_rank/lock_rank.h"
 #include "../tagfs_constants.h"
 #include "../../core/error/error.h"
 
@@ -25,9 +24,11 @@
  * blocks are. Snapshots arrive with format v2, as bookmarks that can be read.
  *
  * A volume an earlier kernel wrote may still carry snapshots — the manifest
- * the Ledger names and the redirects in the DiskBook. They are read at mount,
- * named, and held in memory as they were found, so the blocks they kept stay
- * taken (CowClaimGround) until the volume's census returns them.
+ * the Ledger names and the redirects in the DiskBook. The mount reads them and
+ * names them, and keeps nothing of them: with no reader of a v1 snapshot, the
+ * blocks they kept are owned by nothing, so the mount's census names them
+ * among its orphans and keeps them taken until it gives orphans back (owner
+ * decision 3). The manifest the Ledger names is the one block claimed here.
  */
 
 // On-disk per-snapshot entry (68 bytes each)
@@ -54,21 +55,46 @@ typedef struct __packed {
 
 STATIC_ASSERT(sizeof(CowManifest) == 4096, "CowManifest must be 4096 bytes");
 
-error_t TagFS_CowInit(void);
-void    TagFS_CowShutdown(void);
-
 /* The answer every snapshot request gets on this format — create, delete,
  * list or info, named in `asked`: ERR_UNSUPPORTED, said once a boot. */
 error_t TagFS_SnapshotRefused(const char *asked);
 
-/* The snapshots an earlier kernel left on this volume: the manifest the
- * Ledger names at `manifest_block` (0 when it names none), and the DiskBook's
- * redirects into them. Read, held as found, and named out loud. Called once,
- * by the mount, after the DiskBook is opened and before the census. */
-void    CowNameStanding(uint32_t manifest_block);
+/* One snapshot an earlier kernel left, as read: what its manifest entry says
+ * of it, and every block its redirects say it kept, each once. */
+typedef struct {
+    uint32_t  snapshot_id;
+    uint32_t  parent_file_id;               /* 0: the whole volume */
+    char      name[sizeof(((CowSnapshotDisk *)0)->name) + 1];
+    uint32_t *kept;
+    uint32_t  kept_count;
+    uint32_t  kept_cap;
+} CowSnapshot;
 
-/* The mount's census: the blocks of the data run copy-on-write owns, claimed
- * (the manifests, and both blocks of every redirect replayed). */
-void    CowClaimGround(void);
+/* The snapshots of one manifest, with the DiskBook's redirects read into them. */
+typedef struct {
+    CowSnapshot *snapshots;
+    uint32_t     count;
+    uint32_t     stray;          /* redirects naming no snapshot of the manifest */
+    error_t      book;           /* the DiskBook's replay: OK, or why nothing was replayed */
+    bool         short_of_memory;
+} CowReading;
+
+/* The manifest at data block `manifest_block` (0: none) and the DiskBook at
+ * volume block `book_block`, read into `out` — the book only when the
+ * manifest names a snapshot. Writes nothing, holds nothing but `out`. */
+void CowReadStanding(uint32_t manifest_block, uint32_t book_block, CowReading *out);
+
+/* A line for the lot and one for each snapshot. */
+void CowSayStanding(const CowReading *reading);
+
+void CowReadingDrop(CowReading *reading);
+
+/* The mount: the snapshots of the manifest the Ledger names, read, named out
+ * loud, and let go. */
+void CowNameStanding(void);
+
+/* The mount's census: the manifest at `manifest_block`, the one block of the
+ * data run copy-on-write owns. */
+void CowClaimGround(uint32_t manifest_block);
 
 #endif // COW_H

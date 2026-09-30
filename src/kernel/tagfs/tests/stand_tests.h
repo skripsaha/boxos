@@ -55,6 +55,9 @@
 //                        anchor, an anchor answered through its Chit, the idle
 //                        context owed a quantum on one core, and a protected
 //                        medium turning the volume read-only
+// stand_snapshot_tests.c the stand_snapshot suite: the snapshots an earlier
+//                        kernel left, named and refused, and what they kept
+//                        claimed by no owner
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.

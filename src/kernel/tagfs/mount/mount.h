@@ -8,8 +8,8 @@
  * the copy of the Ledger whose seal the medium bears out.
  *
  * tagfs_init stands on the ground, reads the Deed and both copies of the
- * Ledger, and brings up what an earlier kernel left (the DiskBook, copy-on-
- * write); this reads the rest, in the order each part needs the one before:
+ * Ledger, and names the snapshots an earlier kernel left (cow.h); this reads
+ * the rest, in the order each part needs the one before:
  *
  *   the seals      the newest intact copy's seal, and the other copy's; a
  *                  newest copy with none was written last by a kernel before

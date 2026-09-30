@@ -27,7 +27,7 @@
  *   core names that lock and where it was taken;
  *
  *   a take is checked BEFORE it spins: only strictly downward is allowed,
- *   COW -> STATE -> LEAF, and a leaf under a leaf is out of order. The ABBA
+ *   STATE -> LEAF, and a leaf under a leaf is out of order. The ABBA
  *   and the self-deadlock are named before the core could wedge in them. A
  *   TagFSLockTry that fails waits for nobody and is not checked; one that
  *   succeeds is, as a take.
@@ -54,9 +54,8 @@
 
 typedef enum {
     LOCK_RANK_NONE   = 0,   /* never given: a lock nobody ranked is named */
-    LOCK_RANK_COW    = 1,   /* g_cow_state.lock */
-    LOCK_RANK_STATE  = 2,   /* g_state.lock */
-    LOCK_RANK_LEAF   = 3    /* while held, no other TagFS lock is taken */
+    LOCK_RANK_STATE  = 1,   /* g_state.lock */
+    LOCK_RANK_LEAF   = 2    /* while held, no other TagFS lock is taken */
 } LockRankLevel;
 
 typedef struct TagFSLock {

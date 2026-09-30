@@ -244,7 +244,7 @@ static error_t MountCensus(const char** what)
     FileTableClaimGround();
     PoolClaimGround(MountDataBlock(fs->layout.metadata_pool_block));
     IntegrityClaimGround();
-    CowClaimGround();
+    CowClaimGround(fs->ledger.cow_manifest_block);
     UseRollCall();
     MountClaimBoot();
 

@@ -733,13 +733,13 @@ class VolumeFacts:
         heads = [self.vread(db + i, 1) for i in (0, 1)]
         self.diskbook = [ondisk.ReadDiskBookHead(h, records_sector) if h else None
                          for h in heads]
-        # read_superblock_into (disk_book.c:56-69): the head, else its copy.
-        self.book = None
-        for h in self.diskbook:
-            if h is not None and h["valid"]:
-                self.book = h
-                break
-        self.book_ok = self.book is not None and self.book["acceptable"]
+        # DiskBookReplay (disk_book.c DiskBookHeadTaken): the first copy of the
+        # head that is whole and describes the book the kernel knows; with none,
+        # the first whole one, to say why it is not taken.
+        whole = [h for h in self.diskbook if h is not None and h["valid"]]
+        taken = [h for h in whole if h["acceptable"]]
+        self.book = taken[0] if taken else (whole[0] if whole else None)
+        self.book_ok = bool(taken)
         self.book_records = []
         if self.book_ok:
             for i in range(self.book["count"]):
@@ -747,23 +747,23 @@ class VolumeFacts:
                 try:
                     raw = self.medium.sectors(self.base + sector, ondisk.DISKBOOK_SECTORS_PER_ENTRY)
                 except IOError:
-                    break                        # replay stops at a failed read (disk_book.c:129-130)
+                    break                        # replay stops at a failed read (disk_book.c DiskBookReplay)
                 self.book_records.append(ondisk.ReadDiskBookEntry(raw))
 
     def _ReadCow(self):
         self.manifests, self.snapshots = [], set()
         led = self.ledger or {}
-        for which in ("cow_manifest_block", "cow_manifest_backup_block"):
-            b = led.get(which, 0)
-            if not b:
-                continue
+        # The manifest the Ledger names (cow.c CowReadStanding); its backup was
+        # never allocated by any kernel, and the kernel does not read it.
+        b = led.get("cow_manifest_block", 0)
+        if b:
             raw = self.read_block(b)
             m = ondisk.ReadManifest(raw) if raw is not None else None
-            self.manifests.append((which, b, m))
-            if which == "cow_manifest_block" and m is not None and m["ok"]:
+            self.manifests.append(("cow_manifest_block", b, m))
+            if m is not None and m["ok"]:
                 self.snapshots = {e["snapshot_id"] for e in m["entries"]}
-        # DiskBookValidateAndReplay (disk_book.c:119-147) into the snapshots the
-        # manifest restored; a book the mount does not take has nothing to replay.
+        # DiskBookReplay (disk_book.c) into the snapshots the manifest names; a
+        # book the mount does not take has nothing to replay.
         self.redirects, self.stray = [], []
         for e in self.book_records:
             if not e["valid"] or e["type"] != DISKBOOK_TYPE_REDIRECT:

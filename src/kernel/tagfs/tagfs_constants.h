@@ -16,9 +16,6 @@
  * mount — see tagfs.h. These were absolute sectors of the whole medium, which
  * is why a volume could only ever exist in one place. */
 
-// DiskBook journal size on disk (must match disk_book.h CAPACITY × SECTORS_PER_ENTRY)
-#define DISK_BOOK_JOURNAL_SECTORS   1024    /* 512 entries × 2 sectors each */
-
 // Tag constants
 #define TAGFS_INVALID_TAG_ID        0xFFFF
 /* Volume tag ids stop one short of bit 15. Bit 15 belongs to the kernel's

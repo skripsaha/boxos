@@ -9,7 +9,6 @@
 #include "file_table/file_table.h"
 #include "metadata_pool/meta_pool.h"
 #include "use_context.h"
-#include "disk_book/disk_book.h"
 #include "error.h"
 #include "ahci_sync.h"
 #include "ahci.h"
@@ -2031,7 +2030,7 @@ error_t tagfs_init(void) {
      *
      * So the guarantee lives in ONE place, where the failure is, and it is
      * provable: take the clearing out of mount_refused and the second mount
-     * dies at TagFS_CowInit exactly as the board did.
+     * dies at TagFS_TestsInit exactly as the board did at TagFS_CowInit.
      */
 
     /* Detect which ATA drive (master/slave) holds the TagFS volume.
@@ -2101,32 +2100,10 @@ error_t tagfs_init(void) {
         return ledger_rc;
     }
 
-    /* --- The DiskBook: the redirect log an earlier kernel kept for its
-     *     snapshots, only ever read now. Its redirects are replayed into the
-     *     snapshots the manifest names, once copy-on-write has read that.
-     *
-     *     Its head, the copy of its head and its records are three separate
-     *     runs of the volume, in the volume's own sectors — the DiskBook is
-     *     handed where they are rather than deriving them from one number,
-     *     because "the backup is the next sector along" is what put a record
-     *     and its only copy inside one physical block. */
-    if (DiskBookInit(
-            (uint64_t)g_state.layout.disk_book_block * TAGFS_BLOCK_SECTORS,
-            (uint64_t)(g_state.layout.disk_book_block + 1) * TAGFS_BLOCK_SECTORS,
-            (uint64_t)(g_state.layout.disk_book_block + 2) * TAGFS_BLOCK_SECTORS) != OK)
-    {
-        debug_printf("[TagFS] Warning: DiskBookInit failed\n");
-    }
-
-    // --- CoW Snapshots init ---
-    if (TagFS_CowInit() != OK) {
-        return mount_refused("its copy-on-write layer would not start",
-                             ERR_COW_NOT_INITIALIZED);
-    }
-
-    /* --- The snapshots an earlier kernel left: read, held, named. A
+    /* --- The snapshots an earlier kernel left: the manifest the Ledger names
+     *     and the DiskBook's redirects into it, read, named, and not kept. A
      *     format-v1 volume takes no new one (TagFS_SnapshotRefused). */
-    CowNameStanding(g_state.ledger.cow_manifest_block);
+    CowNameStanding();
 
     // --- Test Framework init ---
     if (TagFS_TestsInit() != OK) {
@@ -2137,8 +2114,8 @@ error_t tagfs_init(void) {
     /*
      * ‼ THE FAILURE THAT COST A BOARD ITS FILESYSTEM, ON COMMAND.
      *
-     * Every refusal from here down leaves three subsystems standing — DiskBook,
-     * CoW and the test framework — and until
+     * Every refusal from here down leaves the test framework standing — and
+     * once the DiskBook and CoW beside it — and until
      * tagfs_clear_the_ground existed nothing took them down. The NEXT mount
      * then died at TagFS_CowInit with ERR_ALREADY_INITIALIZED, and went on
      * dying there for the rest of the boot, saying nothing. Nothing in QEMU
@@ -2321,13 +2298,13 @@ error_t tagfs_init(void) {
  *
  * This is the piece that did not exist, and its absence is what turned one
  * transient read error into a machine with no filesystem for the rest of its
- * boot. tagfs_init brings up eight things in order and any of them may refuse;
+ * boot. tagfs_init brought up eight things in order and any of them could refuse;
  * when one did, the seven before it were left standing and nothing anywhere took
  * them down — tagfs_teardown begins with `if (!g_state.initialized) return`,
  * and a mount that failed never set that flag.
  *
  * The next attempt then met a CoW layer that was already up, and TagFS_CowInit
- * answers ERR_ALREADY_INITIALIZED to that. tagfs_init treated it as fatal and
+ * answered ERR_ALREADY_INITIALIZED to that. tagfs_init treated it as fatal and
  * said so with debug_printf, which compiles to nothing. So every later mount
  * died at the same line, silently, for ever: the room seated the medium, the
  * deed was read, "58 files" was printed, and the shell could not find one of
@@ -2373,11 +2350,9 @@ static void tagfs_clear_the_ground(void)
 
     BlockMapUnmount();
 
-    TagFS_CowShutdown();
     BraidShutdown();
     IntegrityShutdown();
     TagFS_TestsShutdown();
-    DiskBookShutdown();
 
     g_state.initialized = false;
 }

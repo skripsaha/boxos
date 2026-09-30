@@ -16,10 +16,9 @@
 //
 // Nothing appends to it any more. A format-v1 volume refuses every snapshot
 // request (TagFS_SnapshotRefused), and no write copies a block for one, so the
-// book is only ever READ: at mount, its redirects are replayed into the
-// snapshots an earlier kernel left (CowNameStanding), so the blocks those keep
-// stay taken until the volume's census returns them. It goes with format v2,
-// whose snapshots are bookmarks that need no log.
+// book is only ever READ, once, by the mount that names the snapshots an
+// earlier kernel left (CowNameStanding). It goes with format v2, whose
+// snapshots are bookmarks that need no log.
 // ============================================================================
 
 #define DISK_BOOK_MAGIC             0x44424F4F  /* "DBOO" — redirect record    */
@@ -65,26 +64,21 @@ typedef struct __packed {
 
 STATIC_ASSERT(sizeof(DiskBookEntry) == 1024, "DiskBookEntry_must_be_1024_bytes");
 
-/* Where the DiskBook's three parts are, each counted from the start of the
- * volume: its head, the copy of its head, and the run its records live in.
- * Three numbers rather than one, because "the backup is the next sector along"
- * is what put a record and its only copy inside one physical block of the
- * medium — see the Deed's layout stamp, which names all three. Reads the head
- * and writes nothing: a head this kernel cannot take is a book with no record
- * to replay. */
-error_t  DiskBookInit(uint64_t head_sector, uint64_t backup_sector,
-                     uint64_t records_sector);
-
 /* One redirect the replay read and found whole. */
 typedef void (*DiskBookRedirectSeen)(uint32_t snapshot_id, uint32_t old_block,
                                      uint32_t new_block, void *ctx);
 
-/* Every live redirect record, read off the medium and checked, handed to
- * `seen` in the order the book holds them; a record that fails its magic or
- * its checksum is counted, said, and skipped. */
-error_t  DiskBookValidateAndReplay(DiskBookRedirectSeen seen, void *ctx);
-
-void     DiskBookShutdown(void);            /* forgets the book, writes nothing */
-bool     DiskBookIsInitialized(void);
+/*
+ * Every live redirect record of the DiskBook that begins at volume block
+ * `book_block` (the Deed's disk_book_block), read off the medium, checked, and
+ * handed to `seen` in the order the book holds them; a record that fails its
+ * magic or its checksum is counted, said, and skipped. Writes nothing.
+ *
+ * OK once a head was taken, whatever its records held; ERR_TAGFS_CORRUPTED
+ * when neither copy of the head is one this kernel takes — a book of another
+ * version or geometry, or a checksum failed in both — and nothing is
+ * replayed; ERR_NO_MEMORY when there was no room to read it through.
+ */
+error_t DiskBookReplay(uint32_t book_block, DiskBookRedirectSeen seen, void *ctx);
 
 #endif // DISK_BOOK_H

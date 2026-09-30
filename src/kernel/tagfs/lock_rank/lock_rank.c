@@ -15,11 +15,11 @@
  * the state of IF for an answer: whether a TagFS lock is held is read off the
  * record, never off the interrupt flag.
  *
- * The deepest legal chain is three, one lock of each rank: cow -> state ->
- * one leaf — a leaf under a leaf is itself what LockRank names. The record
- * holds more than twice that, so that the takes of a chain gone wrong are still
- * named; a ninth lock is counted in Unwatched and said, so the record never
- * lies about what it cannot hold.
+ * The deepest legal chain is two, one lock of each rank: state -> one leaf —
+ * a leaf under a leaf is itself what LockRank names. The record holds four
+ * times that, so that the takes of a chain gone wrong are still named; a
+ * ninth lock is counted in Unwatched and said, so the record never lies about
+ * what it cannot hold.
  */
 #define LOCK_RANK_DEPTH   8
 #define LOCK_RANK_PLACES  256

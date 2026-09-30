@@ -238,8 +238,7 @@ bool VolumeTallyTake(VolumeTally* tally)
     uint64_t used = fs->layout.data_blocks - fs->ledger.free_blocks;
     uint64_t own  = chains + PoolBlocksHeld() + FallowBlocks() + UseMemoryBlocksHeld() +
                     fs->ledger.integrity_map_blocks + IntegrityLayBlocks() +
-                    (fs->ledger.cow_manifest_block != 0) +
-                    (fs->ledger.cow_manifest_backup_block != 0);
+                    (fs->ledger.cow_manifest_block != 0);
     tally->files = fs->ledger.total_files;
     TagFSLockDrop(&fs->lock);
 

@@ -428,10 +428,8 @@ class Classifier:
                 return "tuse", "TUSE link at data block %u" % b
             if magic == ondisk.COW_MANIFEST_MAGIC:
                 return "manifest", "snapshot manifest at data block %u" % b
-        # The BOOT run is an alias of the kernel file and is named by it; a
-        # snapshot's frozen block is file data that a snapshot still holds.
-        for kind, name in (("file", "file"), ("frozen", "file"), ("integrity", "integrity"),
-                           ("manifest", "manifest"), ("manifest_backup", "manifest")):
+        # The BOOT run is an alias of the kernel file and is named by it.
+        for kind, name in (("file", "file"), ("integrity", "integrity"), ("manifest", "manifest")):
             if kind in chains:
                 return name, chains[kind]
         for kind in ("registry", "table", "pool"):

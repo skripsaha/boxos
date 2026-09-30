@@ -3,156 +3,89 @@
 #include "../../lib/kernel/klib.h"
 #include "../../lib/kernel/crypto.h"
 
-// Sector I/O through the volume's own door (tagfs_volume_read), not the
-// Boardroom directly: the DiskBook lives in a run of the volume named by its
-// Deed, so every sector it names is counted from the volume's start. Going to
-// the medium itself would mean knowing where the volume begins, which is
-// exactly the knowledge that stopped a volume from being able to move.
-static int disk_book_read_sectors(uint64_t vlba, uint16_t count, void *buf) {
-    return tagfs_volume_read(vlba, count, buf);
+/*
+ * The book's three parts are whole blocks apart, from the block the Deed
+ * names: its head, the copy of its head, and the run its records live in —
+ * so no record shares a block of the medium with its only copy. Every sector
+ * is counted from the start of the volume and read through the volume's own
+ * door (tagfs_volume_read), never the Boardroom's: going to the medium itself
+ * would mean knowing where the volume begins, which is exactly the knowledge
+ * that stopped a volume from being able to move.
+ */
+static uint64_t DiskBookPartAt(uint32_t book_block, uint32_t part)
+{
+    return ((uint64_t)book_block + part) * TAGFS_BLOCK_SECTORS;
 }
 
-// ----------------------------------------------------------------------------
-// Global state
-//
-// Written only by DiskBookInit and read only by the replay, both on the road
-// that mounts the volume, and forgotten by DiskBookShutdown on the road that
-// takes it down: nothing reaches the book between the two, so it needs no
-// lock.
-// ----------------------------------------------------------------------------
-static DiskBookSuperblock g_sb;
-static bool      g_initialized       = false;
-static uint64_t  g_sb_sector         = 0;   /* both counted from the */
-static uint64_t  g_sb_backup_sector  = 0;   /* start of the volume   */
+/* Whether a piece is whole: its magic, and a CRC32 over it with its own
+ * checksum field taken as zero — asked in place, so nothing is copied onto
+ * the stack to be checked. */
+static bool DiskBookHeadWhole(DiskBookSuperblock *h)
+{
+    uint32_t stored = h->crc32;
+    h->crc32 = 0;
+    bool whole = h->magic == DISK_BOOK_SB_MAGIC &&
+                 KCrc32((const uint8_t *)h, sizeof(*h)) == stored;
+    h->crc32 = stored;
+    return whole;
+}
 
-// Whether a record is whole: its magic, and a CRC32 over it with its
-// record_crc32 field taken as zero. Asked in place, so the record is not
-// copied a second time onto the stack to be checked.
-static bool entry_whole(DiskBookEntry *e) {
+static bool DiskBookRecordWhole(DiskBookEntry *e)
+{
     uint32_t stored = e->record_crc32;
     e->record_crc32 = 0;
     bool whole = e->magic == DISK_BOOK_MAGIC &&
-                 KCrc32((const uint8_t *)e, sizeof(DiskBookEntry)) == stored;
+                 KCrc32((const uint8_t *)e, sizeof(*e)) == stored;
     e->record_crc32 = stored;
     return whole;
 }
 
-static uint64_t record_sector(uint32_t idx) {
-    return g_sb.start_sector + (uint64_t)idx * DISK_BOOK_SECTORS_PER_ENTRY;
+/* The copy of the head at `at`, read into `h` and taken only when it is whole
+ * and describes the book this kernel knows: its version, its geometry, and
+ * its records where the Deed puts them. */
+static bool DiskBookHeadTaken(uint64_t at, uint64_t records_at, DiskBookSuperblock *h)
+{
+    return tagfs_volume_read(at, 1, h) == 0 && DiskBookHeadWhole(h) &&
+           h->version == DISK_BOOK_VERSION && h->capacity == DISK_BOOK_CAPACITY &&
+           h->count <= DISK_BOOK_CAPACITY && h->start_sector == records_at;
 }
 
-// ----------------------------------------------------------------------------
-// The head (primary + backup, each exactly one sector)
-// ----------------------------------------------------------------------------
-static bool sb_valid(const DiskBookSuperblock *sb) {
-    if (sb->magic != DISK_BOOK_SB_MAGIC)
-        return false;
-    DiskBookSuperblock t = *sb;
-    uint32_t stored = t.crc32;
-    t.crc32 = 0;
-    return KCrc32((const uint8_t *)&t, sizeof(t)) == stored;
-}
+error_t DiskBookReplay(uint32_t book_block, DiskBookRedirectSeen seen, void *ctx)
+{
+    uint64_t records_at = DiskBookPartAt(book_block, 2);
 
-static int read_superblock_into(DiskBookSuperblock *out) {
-    uint8_t buf[TAGFS_SECTOR_SIZE];
-    if (disk_book_read_sectors(g_sb_sector, 1, buf) == 0) {
-        memcpy(out, buf, sizeof(DiskBookSuperblock));
-        if (sb_valid(out))
-            return OK;
-    }
-    if (disk_book_read_sectors(g_sb_backup_sector, 1, buf) != 0)
-        return ERR_CORRUPTED;
-    memcpy(out, buf, sizeof(DiskBookSuperblock));
-    if (sb_valid(out))
-        return OK;
-    return ERR_CORRUPTED;
-}
-
-static int read_entry(uint32_t idx, DiskBookEntry *out) {
-    if (idx >= g_sb.capacity)
-        return ERR_INVALID_ARGUMENT;
-    if (disk_book_read_sectors(record_sector(idx), DISK_BOOK_SECTORS_PER_ENTRY, out) != 0)
-        return ERR_IO;
-    return OK;
-}
-
-// ----------------------------------------------------------------------------
-// Init
-// ----------------------------------------------------------------------------
-/*
- * ‼ READS THE HEAD AND WRITES NOTHING.
- *
- * A head this kernel does not take — a fresh volume that never had one, a
- * version or a geometry of somebody else's, a checksum that fails in both
- * copies — used to be answered by formatting an empty book over it at mount.
- * Nothing appends to the book any more, so that head would be a write no
- * reader ever needs; the book is simply taken as holding no record to replay.
- * A kernel from before this one formats its own head when it mounts the
- * volume, as it always did.
- */
-error_t DiskBookInit(uint64_t head_sector, uint64_t backup_sector,
-                    uint64_t records_sector) {
-    if (g_initialized)
-        return ERR_ALREADY_INITIALIZED;
-
-    g_sb_sector        = head_sector;
-    g_sb_backup_sector = backup_sector;
-
-    DiskBookSuperblock disk;
-    if (read_superblock_into(&disk) == OK && disk.version == DISK_BOOK_VERSION &&
-        disk.capacity == DISK_BOOK_CAPACITY &&
-        disk.count <= DISK_BOOK_CAPACITY &&
-        disk.start_sector == records_sector) {
-        g_sb = disk;
-    } else {
-        memset(&g_sb, 0, sizeof(g_sb));
+    /* One record's room, the head read into it first. */
+    DiskBookEntry *room = kmalloc(sizeof(DiskBookEntry));
+    if (!room)
+        return ERR_NO_MEMORY;
+    DiskBookSuperblock *head = (DiskBookSuperblock *)room;
+    if (!DiskBookHeadTaken(DiskBookPartAt(book_block, 0), records_at, head) &&
+        !DiskBookHeadTaken(DiskBookPartAt(book_block, 1), records_at, head)) {
+        kfree(room);
+        return ERR_TAGFS_CORRUPTED;
     }
 
-    g_initialized = true;
-    return OK;
-}
-
-// ----------------------------------------------------------------------------
-// Replay — every live record, checked, handed to the caller. Content-addressed:
-// a torn or foreign record is counted and skipped, never handed on.
-// ----------------------------------------------------------------------------
-error_t DiskBookValidateAndReplay(DiskBookRedirectSeen seen, void *ctx) {
-    if (!g_initialized)
-        return ERR_NOT_INITIALIZED;
-    if (!seen)
-        return ERR_INVALID_ARGUMENT;
-
-    uint32_t skipped = 0;
+    uint32_t count   = head->count;
     uint32_t read    = 0;
-    for (uint32_t i = 0; i < g_sb.count && i < g_sb.capacity; i++) {
-        DiskBookEntry e;
-        if (read_entry(i, &e) != OK)
+    uint32_t skipped = 0;
+    for (; read < count; read++) {
+        uint64_t at = records_at + (uint64_t)read * DISK_BOOK_SECTORS_PER_ENTRY;
+        if (tagfs_volume_read(at, DISK_BOOK_SECTORS_PER_ENTRY, room) != 0)
             break;
-        read++;
-        if (!entry_whole(&e)) {
+        if (!DiskBookRecordWhole(room)) {
             skipped++;
             continue;
         }
-        if (e.type == DISK_BOOK_TYPE_REDIRECT)
-            seen(e.snapshot_id, e.old_block, e.new_block, ctx);
+        if (room->type == DISK_BOOK_TYPE_REDIRECT)
+            seen(room->snapshot_id, room->old_block, room->new_block, ctx);
     }
+    kfree(room);
 
-    if (read < g_sb.count)
+    if (read < count)
         kprintf("[DiskBook] record %u of %u would not read — the redirects from it on "
-                "are not replayed\n", read, g_sb.count);
+                "are not replayed\n", read, count);
     if (skipped)
         kprintf("[DiskBook] %u of %u redirect record(s) fail their magic or checksum and "
                 "are skipped\n", skipped, read);
     return OK;
-}
-
-// ----------------------------------------------------------------------------
-// Shutdown — the book is forgotten, not sealed: it is only ever read.
-// ----------------------------------------------------------------------------
-void DiskBookShutdown(void) {
-    g_initialized = false;
-}
-
-bool DiskBookIsInitialized(void) {
-    return g_initialized;
 }
