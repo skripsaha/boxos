@@ -490,12 +490,12 @@ class GroundCensus:
         for name in ("registry", "table", "pool"):
             for i, b in enumerate(f.chains[name][0]):
                 self.Claim(name, "%s[%u]" % (name, i), [(b, 1)])
-        for i, b in enumerate(f.pool_held):
-            self.Claim("pool", "pool head" if i == 0 else "pool before its first[%u]" % (i - 1),
-                       [(b, 1)])
             if name in f.refused:
                 self.Say("CHAIN_REFUSED", "damage", "the %s: %s — the kernel refuses the mount: %s"
                          % (name, f.refused[name], self.kernel.refusal or "(an earlier refusal)"))
+        for i, b in enumerate(f.pool_held):
+            self.Claim("pool", "pool head" if i == 0 else "pool before its first[%u]" % (i - 1),
+                       [(b, 1)])
         drift = [(b, blk["kept"], blk["kept_counted"]) for b, blk, _r in f.pool
                  if blk["kept"] != blk["kept_counted"]]
         if drift:
