@@ -7555,9 +7555,12 @@ run_censusmut() {
 # be asked on the other and stands down there; held on a road it is not
 # written for is a failure. How many caveats a boot holds is counted off these
 # rows, per road. A sweep's LIFTED count is how many allocations the operation
-# takes on a fresh volume of this tree; a create takes one more when its
-# name's tag row has to widen for the new file id (tag_bitmap.c,
-# ensure_bitmap_width), which is why the create sweep aligns its ids first.
+# takes on a fresh volume of this tree; a create takes more when a leaf of
+# the map of live files splits for its id or its name's members must grow
+# (file_map/, tag_bitmap.c), which is why the create sweep makes and deletes
+# one file first. Both of stand_create_all_or_nothing's numbers were measured
+# before step 1.3b changed what a create allocates, and are measured again at
+# the checkpoint.
 STAND_HELD="
 integrity_reports_every_rot|1.10|of 65 rotten blocks, reported 64|of 65 rotten blocks, reported 65
 use_context_long_remembered|1.6|of 479 bytes said, the volume remembers 0|of 479 bytes said, the volume remembers 479
@@ -7703,8 +7706,8 @@ stand_judge() {
     chk $? "stand: $what — HEAPFAIL refused the third allocation of its plan, a slab one"
     grep -aqE '^\[HEAPFAIL\] core [0-9]+: allocation 4 since arming \(3000 bytes\) is answered NULL' "$L"
     chk $? "stand: $what — and the fourth of the next, one the pool would have served"
-    grep -aqE '^\[HEAPFAIL\] core [0-9]+: allocation 1 since arming \(2 bytes\) is answered NULL' "$L"
-    chk $? "stand: $what — and the tag row's widening, which the row then refused to write past"
+    grep -aqE '^\[HEAPFAIL\] core [0-9]+: allocation 1 since arming \(16 bytes\) is answered NULL' "$L"
+    chk $? "stand: $what — and the tag window's array doubling to eight members, which the index then refused to write past"
     grep -aq '^\[HALT\] Storage sync complete' "$L"
     chk $? "stand: $what — the halt through bye said its sync wrote the volume ($(grep -aE "$STAND_HALT_ENDS" "$L" | tr -d '\r' | head -1 | cut -c1-120))"
 }
@@ -7888,29 +7891,6 @@ open(p, "w").write(s)
 EOF
     mut_done src/kernel/tagfs/ledger/ledger.c "logcheck mutation" 2
 
-    mutate src/kernel/tagfs/tag_bitmap/tag_bitmap.c
-    python3 - <<'EOF'
-p = "src/kernel/tagfs/tag_bitmap/tag_bitmap.c"
-s = open(p).read()
-edits = [
-    ("static void reverse_index_add(TagBitmapIndex* idx, uint32_t file_id, uint16_t tag_id) {\n",
-     "static bool reverse_index_add(TagBitmapIndex* idx, uint32_t file_id, uint16_t tag_id) {   /* logcheck mutation: the reverse index says when it cannot hold a file */\n"),
-    ("        if (list->ids[i] == tag_id) {\n            return;\n        }\n",
-     "        if (list->ids[i] == tag_id) {\n            return true;\n        }\n"),
-    ("            debug_printf(\"[TagBitmap] reverse_index_add: kmalloc failed\\n\");\n            return;\n",
-     "            debug_printf(\"[TagBitmap] reverse_index_add: kmalloc failed\\n\");\n            return false;\n"),
-    ("    list->ids[list->count++] = tag_id;\n}\n",
-     "    list->ids[list->count++] = tag_id;\n    return true;\n}\n"),
-    ("    reverse_index_add(idx, file_id, tag_id);\n    idx->generation++;\n",
-     "    if (!reverse_index_add(idx, file_id, tag_id)) {\n        idx->bitmaps[tag_id]->bits[byte_idx] &= (uint8_t)~(1 << bit_idx);\n        if (idx->bitmaps[tag_id]->file_count > 0)\n            idx->bitmaps[tag_id]->file_count--;\n        TagFSLockDrop(&idx->lock);\n        return -1;\n    }\n    idx->generation++;\n"),
-]
-for a, m in edits:
-    assert s.count(a) == 1, "stand fix anchor missing: " + a.splitlines()[0]
-    s = s.replace(a, m, 1)
-open(p, "w").write(s)
-EOF
-    mut_done src/kernel/tagfs/tag_bitmap/tag_bitmap.c "logcheck mutation" 1
-
     # 1.10: the report ring holds every rot the test plants.
     mutate src/kernel/tagfs/integrity/integrity.c
     python3 - <<'EOF'
@@ -7924,8 +7904,8 @@ EOF
 }
 stand_fix_off() {
     local f
-    for f in src/kernel/tagfs/tagfs.c src/kernel/tagfs/tag_bitmap/tag_bitmap.c \
-             src/kernel/tagfs/integrity/integrity.c src/kernel/tagfs/ledger/ledger.c; do
+    for f in src/kernel/tagfs/tagfs.c src/kernel/tagfs/integrity/integrity.c \
+             src/kernel/tagfs/ledger/ledger.c; do
         restore "$f"
     done
 }
@@ -8013,8 +7993,10 @@ edits = {
    "        cb(s->index, 0, ERR_IO, ctx);\n        return OK;\n",
    "        (void)cb;\n        return ERR_IO;   /* " + M + ": refused by the submit's answer, never through the callback */\n"),
   ("src/kernel/tagfs/tag_bitmap/tag_bitmap.c",
-   "    if (!row->bits || row->bit_count <= needed_max) {\n",
-   "    if (!row->bits) {   /* " + M + ": PF-1 taken out — a row that could not widen is written past */\n"),
+   "        if (!piece.piece) {\n            IndexSayShort(idx, tag_id, file_id, &want);\n            return -1;\n        }\n",
+   "        if (!piece.piece) {   /* " + M + ": PF-1 taken out — a window that could not grow is written past */\n"
+   "            TagFSLockTake(&idx->lock);\n            IndexAdd(idx, tag_id, file_id);\n"
+   "            TagFSLockDrop(&idx->lock);\n            return 0;\n        }\n"),
  ],
  "lockrank": [
   ("src/kernel/tagfs/lock_rank/lock_rank.c",

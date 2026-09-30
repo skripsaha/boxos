@@ -1,637 +1,702 @@
-#include "tag_bitmap.h"
+#include "../tagfs.h"
 #include "klib.h"
 
-// ---------------------------------------------------------------------------
-// Internal helpers (no locking)
-// ---------------------------------------------------------------------------
+/*
+ * ‼ WHO WEARS A TAG, KEPT FOR THE FILES THAT WEAR IT AND NO OTHER.
+ *
+ * Each tag used to be a bitmap as wide as the highest file id the volume had
+ * ever issued, beside a second array per file id of the tags it wore. A tag
+ * worn by one file cost an eighth of a byte for every file ever made, and the
+ * index was sized by the volume's history, not by what it holds.
+ *
+ * Now a tag's members are split into windows of 65536 file ids, the way the
+ * ids fall, and a window exists only while a member of the tag lies in it. A
+ * window of up to 4096 members is a sorted array of their low 16 bits — two
+ * bytes a member; past 4096 the array would outweigh a bitmap of the whole
+ * window, so the window becomes that bitmap, 8 KiB, and goes back to an array
+ * once it falls to 2048 — the gap keeps one member that comes and goes at the
+ * edge from rebuilding the window every time. The tags a file wears are read
+ * from its record in the map of live files, not kept a second time here.
+ *
+ * Everything is changed under the index's lock, a leaf, and nothing is
+ * allocated under it: an add that finds it needs memory — a longer table of
+ * tags, a tag's first member, a longer list of windows, a window's storage —
+ * lets the lock go, takes that one piece, and comes back to install it if it
+ * is still what is wanted.
+ */
 
-static void ensure_bitmap_capacity(TagBitmapIndex* idx, uint16_t tag_id) {
-    if ((uint32_t)tag_id < idx->bitmap_capacity) {
-        return;
+#define TAG_WINDOW_SHIFT   16u
+#define TAG_WINDOW_IDS     (1u << TAG_WINDOW_SHIFT)
+#define TAG_WINDOW_WORDS   (TAG_WINDOW_IDS / 64u)
+#define TAG_BITMAP_BYTES   (TAG_WINDOW_IDS / 8u)
+#define TAG_ARRAY_MOST     (TAG_BITMAP_BYTES / sizeof(uint16_t))   /* 4096: as heavy as the bitmap */
+#define TAG_ARRAY_BACK     (TAG_ARRAY_MOST / 2u)
+#define TAG_ARRAY_FIRST    4u
+
+/* Next ids a query weighs under one hold of the lock, before letting it go
+ * for anybody waiting and taking it again where it stopped. */
+#define TAG_QUERY_STEPS    512u
+
+typedef struct {
+    uint16_t hi;             /* the window's file ids share this: id >> 16 */
+    uint16_t bitmap;         /* 1: `data` is TAG_WINDOW_WORDS words; 0: a sorted array */
+    uint32_t count;          /* members in the window */
+    uint32_t room;           /* an array's slots */
+    void*    data;
+} TagWindow;
+
+typedef struct {
+    uint32_t   members;
+    uint32_t   windows;      /* in use, ascending by hi */
+    uint32_t   room;
+    TagWindow* window;
+} TagMembers;
+
+struct TagBitmapIndex {
+    TagMembers** tags;       /* by tag id; NULL for a tag no file wears */
+    uint32_t     capacity;
+    uint64_t     bytes;      /* what the index holds of the kernel heap */
+    bool         said_short;
+    TagFSLock    lock;
+};
+
+// ----------------------------------------------------------------------------
+// A window
+// ----------------------------------------------------------------------------
+
+static uint32_t ArrayLowerBound(const uint16_t* a, uint32_t n, uint32_t lo)
+{
+    uint32_t l = 0, h = n;
+    while (l < h) {
+        uint32_t mid = (l + h) / 2;
+        if (a[mid] < lo)
+            l = mid + 1;
+        else
+            h = mid;
     }
-
-    uint32_t new_cap = idx->bitmap_capacity ? idx->bitmap_capacity : 64;
-    while (new_cap <= (uint32_t)tag_id) {
-        new_cap *= 2;
-    }
-
-    TagBitmap** new_bitmaps = kmalloc(sizeof(TagBitmap*) * new_cap);
-    if (!new_bitmaps) {
-        debug_printf("[TagBitmap] ensure_bitmap_capacity: kmalloc failed\n");
-        return;
-    }
-
-    if (idx->bitmaps) {
-        memcpy(new_bitmaps, idx->bitmaps, sizeof(TagBitmap*) * idx->bitmap_capacity);
-        kfree(idx->bitmaps);
-    }
-    memset(new_bitmaps + idx->bitmap_capacity, 0,
-           sizeof(TagBitmap*) * (new_cap - idx->bitmap_capacity));
-
-    idx->bitmaps = new_bitmaps;
-    idx->bitmap_capacity = new_cap;
+    return l;
 }
 
-static void ensure_file_capacity(TagBitmapIndex* idx, uint32_t file_id) {
-    if (file_id < idx->file_capacity) {
-        return;
-    }
-
-    uint32_t new_cap = idx->file_capacity ? idx->file_capacity : 64;
-    while (new_cap <= file_id) {
-        new_cap *= 2;
-    }
-
-    TagIdList* new_list = kmalloc(sizeof(TagIdList) * new_cap);
-    if (!new_list) {
-        debug_printf("[TagBitmap] ensure_file_capacity: kmalloc failed\n");
-        return;
-    }
-
-    if (idx->file_to_tags) {
-        memcpy(new_list, idx->file_to_tags, sizeof(TagIdList) * idx->file_capacity);
-        kfree(idx->file_to_tags);
-    }
-    memset(new_list + idx->file_capacity, 0,
-           sizeof(TagIdList) * (new_cap - idx->file_capacity));
-
-    idx->file_to_tags = new_list;
-    idx->file_capacity = new_cap;
+static bool WindowHas(const TagWindow* w, uint32_t lo)
+{
+    if (w->bitmap)
+        return (((const uint64_t*)w->data)[lo / 64u] >> (lo % 64u)) & 1u;
+    uint32_t at = ArrayLowerBound(w->data, w->count, lo);
+    return at < w->count && ((const uint16_t*)w->data)[at] == lo;
 }
 
-static void ensure_bitmap_width(TagBitmap* bm, uint32_t new_max) {
-    if (bm->bit_count >= new_max + 1) {
-        return;
+/* The least member of the window at or past `lo`. */
+static bool WindowNext(const TagWindow* w, uint32_t lo, uint32_t* out)
+{
+    if (!w->bitmap) {
+        uint32_t at = ArrayLowerBound(w->data, w->count, lo);
+        if (at == w->count)
+            return false;
+        *out = ((const uint16_t*)w->data)[at];
+        return true;
     }
-
-    uint32_t old_size = (bm->bit_count + 7) / 8;
-    uint32_t new_size = (new_max + 8) / 8;
-
-    uint8_t* new_bits = kmalloc(new_size);
-    if (!new_bits) {
-        debug_printf("[TagBitmap] ensure_bitmap_width: kmalloc failed\n");
-        return;
+    const uint64_t* bits = w->data;
+    uint32_t        word = lo / 64u;
+    uint64_t        v    = bits[word] & (~0ull << (lo % 64u));
+    for (;;) {
+        if (v) {
+            *out = word * 64u + (uint32_t)__builtin_ctzll(v);
+            return true;
+        }
+        if (++word == TAG_WINDOW_WORDS)
+            return false;
+        v = bits[word];
     }
-
-    if (bm->bits && old_size > 0) {
-        memcpy(new_bits, bm->bits, old_size);
-    }
-    memset(new_bits + old_size, 0, new_size - old_size);
-
-    if (bm->bits) {
-        kfree(bm->bits);
-    }
-    bm->bits = new_bits;
-    bm->bit_count = new_size * 8;
 }
 
-static void reverse_index_add(TagBitmapIndex* idx, uint32_t file_id, uint16_t tag_id) {
-    TagIdList* list = &idx->file_to_tags[file_id];
+/* Where the window of `hi` is, or would go. */
+static uint32_t WindowAt(const TagMembers* m, uint32_t hi)
+{
+    uint32_t l = 0, h = m->windows;
+    while (l < h) {
+        uint32_t mid = (l + h) / 2;
+        if (m->window[mid].hi < hi)
+            l = mid + 1;
+        else
+            h = mid;
+    }
+    return l;
+}
 
-    for (uint32_t i = 0; i < list->count; i++) {
-        if (list->ids[i] == tag_id) {
-            return;
+static TagMembers* MembersOf(const TagBitmapIndex* idx, uint16_t tag)
+{
+    return (uint32_t)tag < idx->capacity ? idx->tags[tag] : NULL;
+}
+
+static bool MembersHas(const TagMembers* m, uint32_t fid)
+{
+    if (!m)
+        return false;
+    uint32_t w = WindowAt(m, fid >> TAG_WINDOW_SHIFT);
+    return w < m->windows && m->window[w].hi == (fid >> TAG_WINDOW_SHIFT) &&
+           WindowHas(&m->window[w], fid & (TAG_WINDOW_IDS - 1u));
+}
+
+/* The least member at or past x. */
+static bool MembersNext(const TagMembers* m, uint64_t x, uint64_t* out)
+{
+    if (!m || x > 0xFFFFFFFFull)
+        return false;
+    uint32_t hi = (uint32_t)(x >> TAG_WINDOW_SHIFT);
+    for (uint32_t w = WindowAt(m, hi); w < m->windows; w++) {
+        const TagWindow* win   = &m->window[w];
+        uint32_t         start = win->hi == hi ? (uint32_t)(x & (TAG_WINDOW_IDS - 1u)) : 0;
+        uint32_t         lo;
+        if (WindowNext(win, start, &lo)) {
+            *out = ((uint64_t)win->hi << TAG_WINDOW_SHIFT) | lo;
+            return true;
         }
     }
-
-    if (list->count >= list->capacity) {
-        uint32_t new_cap = list->capacity ? list->capacity * 2 : 4;   /* a u16 doubled past 32768 is 0 */
-        uint16_t* new_ids = kmalloc(sizeof(uint16_t) * new_cap);
-        if (!new_ids) {
-            debug_printf("[TagBitmap] reverse_index_add: kmalloc failed\n");
-            return;
-        }
-        if (list->ids) {
-            memcpy(new_ids, list->ids, sizeof(uint16_t) * list->count);
-            kfree(list->ids);
-        }
-        list->ids = new_ids;
-        list->capacity = new_cap;
-    }
-
-    list->ids[list->count++] = tag_id;
+    return false;
 }
 
-static void reverse_index_remove(TagBitmapIndex* idx, uint32_t file_id, uint16_t tag_id) {
-    if (file_id >= idx->file_capacity) {
+// ----------------------------------------------------------------------------
+// What an add needs, and installing it
+// ----------------------------------------------------------------------------
+
+typedef enum {
+    WANT_NOTHING = 0,
+    WANT_TAGS,               /* a table of `size` tags */
+    WANT_MEMBERS,            /* the tag's TagMembers */
+    WANT_WINDOWS,            /* a list of `size` windows */
+    WANT_DATA                /* a window's storage: `size` array slots, or 0 for a bitmap */
+} TagWant;
+
+typedef struct {
+    TagWant  want;
+    uint32_t size;
+    void*    piece;          /* taken for it, not yet installed */
+} TagPiece;
+
+static size_t PieceBytes(const TagPiece* p)
+{
+    switch (p->want) {
+    case WANT_TAGS:    return sizeof(TagMembers*) * p->size;
+    case WANT_MEMBERS: return sizeof(TagMembers);
+    case WANT_WINDOWS: return sizeof(TagWindow) * p->size;
+    case WANT_DATA:    return p->size ? sizeof(uint16_t) * p->size : TAG_BITMAP_BYTES;
+    default:           return 0;
+    }
+}
+
+static size_t WindowBytes(const TagWindow* w)
+{
+    return w->bitmap ? TAG_BITMAP_BYTES : sizeof(uint16_t) * w->room;
+}
+
+/* What adding `fid` to `tag` still lacks. */
+static TagPiece IndexWants(const TagBitmapIndex* idx, uint16_t tag, uint32_t fid)
+{
+    TagPiece p = { WANT_NOTHING, 0, NULL };
+    if ((uint32_t)tag >= idx->capacity) {
+        uint32_t cap = idx->capacity ? idx->capacity : 64u;
+        while (cap <= (uint32_t)tag)
+            cap *= 2u;
+        p.want = WANT_TAGS;
+        p.size = cap;
+        return p;
+    }
+    const TagMembers* m = idx->tags[tag];
+    if (!m) {
+        p.want = WANT_MEMBERS;
+        return p;
+    }
+    uint32_t hi = fid >> TAG_WINDOW_SHIFT;
+    uint32_t w  = WindowAt(m, hi);
+    if (w == m->windows || m->window[w].hi != hi) {
+        p.want = m->windows == m->room ? WANT_WINDOWS : WANT_DATA;
+        p.size = m->windows == m->room ? (m->room ? m->room * 2u : 4u) : TAG_ARRAY_FIRST;
+        return p;
+    }
+    const TagWindow* win = &m->window[w];
+    if (!win->bitmap && win->count == win->room &&
+        !WindowHas(win, fid & (TAG_WINDOW_IDS - 1u))) {
+        p.want = WANT_DATA;
+        p.size = win->room < TAG_ARRAY_MOST
+                     ? (win->room * 2u < TAG_ARRAY_MOST ? win->room * 2u : TAG_ARRAY_MOST)
+                     : 0;
+    }
+    return p;
+}
+
+/* The piece put where it is wanted, when it is still what adding `fid` to
+ * `tag` wants: answers what it replaced, or the piece itself when it no longer
+ * fits the index, for the caller to free once the lock is let go. */
+static void* IndexInstall(TagBitmapIndex* idx, uint16_t tag, uint32_t fid, TagPiece* p)
+{
+    TagPiece now = IndexWants(idx, tag, fid);
+    if (now.want != p->want || now.size != p->size)
+        return p->piece;
+
+    void* old = NULL;
+    idx->bytes += PieceBytes(p);
+    switch (p->want) {
+    case WANT_TAGS: {
+        TagMembers** grown = p->piece;
+        if (idx->capacity)
+            memcpy(grown, idx->tags, sizeof(TagMembers*) * idx->capacity);
+        memset(grown + idx->capacity, 0, sizeof(TagMembers*) * (p->size - idx->capacity));
+        old = idx->tags;
+        idx->bytes -= sizeof(TagMembers*) * idx->capacity;
+        idx->tags     = grown;
+        idx->capacity = p->size;
+        break;
+    }
+    case WANT_MEMBERS:
+        memset(p->piece, 0, sizeof(TagMembers));
+        idx->tags[tag] = p->piece;
+        break;
+    case WANT_WINDOWS: {
+        TagMembers* m = idx->tags[tag];
+        if (m->windows)
+            memcpy(p->piece, m->window, sizeof(TagWindow) * m->windows);
+        old = m->window;
+        idx->bytes -= sizeof(TagWindow) * m->room;
+        m->window = p->piece;
+        m->room   = p->size;
+        break;
+    }
+    case WANT_DATA: {
+        TagMembers* m  = idx->tags[tag];
+        uint32_t    hi = fid >> TAG_WINDOW_SHIFT;
+        uint32_t    w  = WindowAt(m, hi);
+        if (w == m->windows || m->window[w].hi != hi) {
+            memmove(&m->window[w + 1], &m->window[w], sizeof(TagWindow) * (m->windows - w));
+            m->window[w] = (TagWindow){ .hi = (uint16_t)hi, .bitmap = 0, .count = 0,
+                                        .room = p->size, .data = p->piece };
+            m->windows++;
+            break;
+        }
+        TagWindow* win = &m->window[w];
+        old = win->data;
+        idx->bytes -= WindowBytes(win);
+        if (p->size) {
+            memcpy(p->piece, win->data, sizeof(uint16_t) * win->count);
+            win->room = p->size;
+        } else {
+            uint64_t*       bits = p->piece;
+            const uint16_t* low  = win->data;
+            memset(bits, 0, TAG_BITMAP_BYTES);
+            for (uint32_t i = 0; i < win->count; i++)
+                bits[low[i] / 64u] |= 1ull << (low[i] % 64u);
+            win->bitmap = 1;
+            win->room   = 0;
+        }
+        win->data = p->piece;
+        break;
+    }
+    default:
+        break;
+    }
+    p->piece = NULL;
+    return old;
+}
+
+/* `fid` into `tag`'s members, which IndexWants found need nothing more. */
+static void IndexAdd(TagBitmapIndex* idx, uint16_t tag, uint32_t fid)
+{
+    TagMembers* m   = idx->tags[tag];
+    TagWindow*  win = &m->window[WindowAt(m, fid >> TAG_WINDOW_SHIFT)];
+    uint32_t    lo  = fid & (TAG_WINDOW_IDS - 1u);
+    if (WindowHas(win, lo))
         return;
+    if (win->bitmap) {
+        ((uint64_t*)win->data)[lo / 64u] |= 1ull << (lo % 64u);
+    } else {
+        uint16_t* low = win->data;
+        uint32_t  at  = ArrayLowerBound(low, win->count, lo);
+        memmove(&low[at + 1], &low[at], sizeof(uint16_t) * (win->count - at));
+        low[at] = (uint16_t)lo;
     }
-
-    TagIdList* list = &idx->file_to_tags[file_id];
-    for (uint32_t i = 0; i < list->count; i++) {
-        if (list->ids[i] == tag_id) {
-            list->ids[i] = list->ids[list->count - 1];
-            list->count--;
-            return;
-        }
-    }
+    win->count++;
+    m->members++;
 }
 
-// ---------------------------------------------------------------------------
+/* ‼ A SHORTAGE IS SAID WITH THE INDEX'S NUMBERS, once until the heap gives
+ * again — which file and tag were refused, what was asked, and what the index
+ * already holds — and the caller hears the refusal. */
+static void IndexSayShort(TagBitmapIndex* idx, uint16_t tag, uint32_t fid, const TagPiece* p)
+{
+    TagFSLockTake(&idx->lock);
+    bool     said  = idx->said_short;
+    uint64_t bytes = idx->bytes;
+    idx->said_short = true;
+    TagFSLockDrop(&idx->lock);
+    if (!said)
+        kprintf("[TagFS] the tag index could not put file %u under tag %u: %zu bytes were "
+                "refused, and it holds %llu bytes of kernel heap\n",
+                fid, tag, PieceBytes(p), (unsigned long long)bytes);
+}
+
+// ----------------------------------------------------------------------------
 // Public API
-// ---------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
 
-TagBitmapIndex* tag_bitmap_create(uint32_t initial_tag_cap, uint32_t initial_file_cap) {
+TagBitmapIndex* tag_bitmap_create(uint32_t initial_tag_cap)
+{
     TagBitmapIndex* idx = kmalloc(sizeof(TagBitmapIndex));
-    if (!idx) {
+    if (!idx)
         return NULL;
+    memset(idx, 0, sizeof(*idx));
+    if (initial_tag_cap) {
+        idx->tags = kmalloc(sizeof(TagMembers*) * initial_tag_cap);
+        if (!idx->tags) {
+            kfree(idx);
+            return NULL;
+        }
+        memset(idx->tags, 0, sizeof(TagMembers*) * initial_tag_cap);
+        idx->capacity = initial_tag_cap;
+        idx->bytes    = sizeof(TagMembers*) * initial_tag_cap;
     }
-    memset(idx, 0, sizeof(TagBitmapIndex));
-
-    idx->bitmaps = kmalloc(sizeof(TagBitmap*) * initial_tag_cap);
-    if (!idx->bitmaps) {
-        kfree(idx);
-        return NULL;
-    }
-    memset(idx->bitmaps, 0, sizeof(TagBitmap*) * initial_tag_cap);
-    idx->bitmap_capacity = initial_tag_cap;
-
-    idx->file_to_tags = kmalloc(sizeof(TagIdList) * initial_file_cap);
-    if (!idx->file_to_tags) {
-        kfree(idx->bitmaps);
-        kfree(idx);
-        return NULL;
-    }
-    memset(idx->file_to_tags, 0, sizeof(TagIdList) * initial_file_cap);
-    idx->file_capacity = initial_file_cap;
-
-    idx->max_file_id = 0;
-    idx->generation  = 0;
-    memset(idx->cache, 0, sizeof(idx->cache));
     TagFSLockInit(&idx->lock, "index", LOCK_RANK_LEAF);
-
     return idx;
 }
 
-void tag_bitmap_destroy(TagBitmapIndex* idx) {
-    if (!idx) {
+static void MembersFree(TagMembers* m)
+{
+    for (uint32_t w = 0; w < m->windows; w++)
+        kfree(m->window[w].data);
+    kfree(m->window);
+    kfree(m);
+}
+
+void tag_bitmap_destroy(TagBitmapIndex* idx)
+{
+    if (!idx)
         return;
-    }
-
-    for (uint32_t i = 0; i < idx->bitmap_capacity; i++) {
-        if (idx->bitmaps[i]) {
-            if (idx->bitmaps[i]->bits) {
-                kfree(idx->bitmaps[i]->bits);
-            }
-            kfree(idx->bitmaps[i]);
-        }
-    }
-    kfree(idx->bitmaps);
-
-    for (uint32_t i = 0; i < idx->file_capacity; i++) {
-        if (idx->file_to_tags[i].ids) {
-            kfree(idx->file_to_tags[i].ids);
-        }
-    }
-    kfree(idx->file_to_tags);
-
-    for (int i = 0; i < QUERY_CACHE_SLOTS; i++) {
-        if (idx->cache[i].file_ids) kfree(idx->cache[i].file_ids);
-        if (idx->cache[i].tag_key)  kfree(idx->cache[i].tag_key);
-    }
-
+    for (uint32_t t = 0; t < idx->capacity; t++)
+        if (idx->tags[t])
+            MembersFree(idx->tags[t]);
+    kfree(idx->tags);
     kfree(idx);
 }
 
-int tag_bitmap_set(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id) {
-    if (!idx) {
+int tag_bitmap_set(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id)
+{
+    if (!idx || file_id == 0)
         return -1;
-    }
 
-    TagFSLockTake(&idx->lock);
-
-    ensure_bitmap_capacity(idx, tag_id);
-    ensure_file_capacity(idx, file_id);
-
-    if (!idx->bitmaps || (uint32_t)tag_id >= idx->bitmap_capacity) {
-        TagFSLockDrop(&idx->lock);
-        return -1;
-    }
-
-    if (!idx->file_to_tags || file_id >= idx->file_capacity) {
-        TagFSLockDrop(&idx->lock);
-        return -1;
-    }
-
-    if (!idx->bitmaps[tag_id]) {
-        TagBitmap* bm = kmalloc(sizeof(TagBitmap));
-        if (!bm) {
+    TagPiece piece = { WANT_NOTHING, 0, NULL };
+    for (;;) {
+        void* spare = NULL;
+        TagFSLockTake(&idx->lock);
+        if (piece.piece)
+            spare = IndexInstall(idx, tag_id, file_id, &piece);
+        TagPiece want = IndexWants(idx, tag_id, file_id);
+        if (want.want == WANT_NOTHING) {
+            IndexAdd(idx, tag_id, file_id);
+            idx->said_short = false;
             TagFSLockDrop(&idx->lock);
+            kfree(spare);
+            return 0;
+        }
+        TagFSLockDrop(&idx->lock);
+        kfree(spare);
+
+        piece       = want;
+        piece.piece = kmalloc(PieceBytes(&want));
+        if (!piece.piece) {
+            IndexSayShort(idx, tag_id, file_id, &want);
             return -1;
         }
-        memset(bm, 0, sizeof(TagBitmap));
-        idx->bitmaps[tag_id] = bm;
     }
-
-    uint32_t needed_max = (file_id > idx->max_file_id) ? file_id : idx->max_file_id;
-    ensure_bitmap_width(idx->bitmaps[tag_id], needed_max);
-
-    /* A row that could not be widened is refused, never written past. This
-     * asked only whether the row had bits at all, so a row that failed to grow
-     * kept its old array and had the new file's bit set beyond the end of it —
-     * one byte into whatever the heap put next, every eighth new file id. */
-    TagBitmap* row = idx->bitmaps[tag_id];
-    if (!row->bits || row->bit_count <= needed_max) {
-        TagFSLockDrop(&idx->lock);
-        return -1;
-    }
-
-    uint32_t byte_idx = file_id / 8;
-    uint32_t bit_idx  = file_id % 8;
-
-    if (!(idx->bitmaps[tag_id]->bits[byte_idx] & (1 << bit_idx))) {
-        idx->bitmaps[tag_id]->bits[byte_idx] |= (uint8_t)(1 << bit_idx);
-        idx->bitmaps[tag_id]->file_count++;
-    }
-
-    if (file_id > idx->max_file_id) {
-        idx->max_file_id = file_id;
-    }
-
-    reverse_index_add(idx, file_id, tag_id);
-    idx->generation++;
-
-    TagFSLockDrop(&idx->lock);
-    return 0;
 }
 
-int tag_bitmap_clear(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id) {
-    if (!idx) {
-        return -1;
-    }
+/* `fid` out of `tag`'s members under the lock. What the removal emptied —
+ * the window's storage, and the tag's own list when it has no member left —
+ * goes to `freed[]` to be given back after the lock. Answers how many members
+ * a bitmap window that fell to TAG_ARRAY_BACK still holds, to be made an array
+ * again; 0 otherwise. */
+static uint32_t IndexRemove(TagBitmapIndex* idx, uint16_t tag, uint32_t fid, void* freed[3])
+{
+    TagMembers* m = MembersOf(idx, tag);
+    uint32_t    w = m ? WindowAt(m, fid >> TAG_WINDOW_SHIFT) : 0;
+    if (!m || w == m->windows || m->window[w].hi != (fid >> TAG_WINDOW_SHIFT))
+        return 0;
+    TagWindow* win = &m->window[w];
+    uint32_t   lo  = fid & (TAG_WINDOW_IDS - 1u);
+    if (!WindowHas(win, lo))
+        return 0;
 
+    if (win->bitmap) {
+        ((uint64_t*)win->data)[lo / 64u] &= ~(1ull << (lo % 64u));
+    } else {
+        uint16_t* low = win->data;
+        uint32_t  at  = ArrayLowerBound(low, win->count, lo);
+        memmove(&low[at], &low[at + 1], sizeof(uint16_t) * (win->count - at - 1));
+    }
+    win->count--;
+    m->members--;
+    uint32_t back = win->bitmap && win->count <= TAG_ARRAY_BACK ? win->count : 0;
+
+    if (win->count == 0) {
+        idx->bytes -= WindowBytes(win);
+        freed[0] = win->data;
+        memmove(&m->window[w], &m->window[w + 1], sizeof(TagWindow) * (m->windows - w - 1));
+        m->windows--;
+    }
+    if (m->members == 0) {
+        idx->bytes -= sizeof(TagWindow) * m->room + sizeof(TagMembers);
+        freed[1] = m->window;
+        freed[2] = m;
+        idx->tags[tag] = NULL;
+    }
+    return back;
+}
+
+/* A bitmap window of `tag` that fell to TAG_ARRAY_BACK made an array again,
+ * as long as its `count` members need, taken outside the lock; left a bitmap
+ * when there is no memory, which costs room and nothing else. */
+static void IndexShrink(TagBitmapIndex* idx, uint16_t tag, uint32_t fid, uint32_t count)
+{
+    uint32_t room = TAG_ARRAY_FIRST;
+    while (room < count)
+        room *= 2u;
+    uint16_t* low = kmalloc(sizeof(uint16_t) * room);
+    if (!low)
+        return;
+    void* old = low;
     TagFSLockTake(&idx->lock);
-
-    if ((uint32_t)tag_id >= idx->bitmap_capacity || !idx->bitmaps[tag_id]) {
-        TagFSLockDrop(&idx->lock);
-        return -1;
+    TagMembers* m = MembersOf(idx, tag);
+    uint32_t    w = m ? WindowAt(m, fid >> TAG_WINDOW_SHIFT) : 0;
+    if (m && w < m->windows && m->window[w].hi == (fid >> TAG_WINDOW_SHIFT) &&
+        m->window[w].bitmap && m->window[w].count <= room) {
+        TagWindow*      win  = &m->window[w];
+        const uint64_t* bits = win->data;
+        uint32_t        n    = 0;
+        for (uint32_t k = 0; k < TAG_WINDOW_WORDS; k++)
+            for (uint64_t v = bits[k]; v; v &= v - 1)
+                low[n++] = (uint16_t)(k * 64u + (uint32_t)__builtin_ctzll(v));
+        old         = win->data;
+        win->data   = low;
+        win->bitmap = 0;
+        win->room   = room;
+        idx->bytes  = idx->bytes - TAG_BITMAP_BYTES + sizeof(uint16_t) * room;
     }
-
-    TagBitmap* bm = idx->bitmaps[tag_id];
-    uint32_t byte_idx = file_id / 8;
-    uint32_t bit_idx  = file_id % 8;
-
-    if (byte_idx < (bm->bit_count + 7) / 8 && (bm->bits[byte_idx] & (1 << bit_idx))) {
-        bm->bits[byte_idx] &= (uint8_t)(~(1 << bit_idx));
-        if (bm->file_count > 0) {
-            bm->file_count--;
-        }
-    }
-
-    reverse_index_remove(idx, file_id, tag_id);
-    idx->generation++;
-
     TagFSLockDrop(&idx->lock);
-    return 0;
+    kfree(old);
 }
 
-void tag_bitmap_remove_file(TagBitmapIndex* idx, uint32_t file_id) {
-    if (!idx || file_id >= idx->file_capacity) {
+int tag_bitmap_clear(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id)
+{
+    if (!idx)
+        return -1;
+    void* freed[3] = { NULL, NULL, NULL };
+    TagFSLockTake(&idx->lock);
+    bool     known = MembersOf(idx, tag_id) != NULL;
+    uint32_t back  = IndexRemove(idx, tag_id, file_id, freed);
+    TagFSLockDrop(&idx->lock);
+    for (uint32_t i = 0; i < 3; i++)
+        kfree(freed[i]);
+    if (back)
+        IndexShrink(idx, tag_id, file_id, back);
+    return known ? 0 : -1;
+}
+
+void tag_bitmap_remove_file(TagBitmapIndex* idx, uint32_t file_id,
+                            const uint16_t* tag_ids, uint32_t tag_count)
+{
+    if (!idx)
+        return;
+    if (tag_ids) {
+        for (uint32_t i = 0; i < tag_count; i++)
+            tag_bitmap_clear(idx, tag_ids[i], file_id);
         return;
     }
-
+    /* No record to say which tags the file wore: every tag is asked, one hold
+     * of the lock each, so nobody waits on the whole walk. */
     TagFSLockTake(&idx->lock);
+    uint32_t tags = idx->capacity;
+    TagFSLockDrop(&idx->lock);
+    for (uint32_t t = 0; t < tags && t < TAGFS_INVALID_TAG_ID; t++)
+        if (TagBitmapHas(idx, (uint16_t)t, file_id))
+            tag_bitmap_clear(idx, (uint16_t)t, file_id);
+}
 
-    TagIdList* list = &idx->file_to_tags[file_id];
+bool TagBitmapHas(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id)
+{
+    if (!idx)
+        return false;
+    TagFSLockTake(&idx->lock);
+    bool has = MembersHas(MembersOf(idx, tag_id), file_id);
+    TagFSLockDrop(&idx->lock);
+    return has;
+}
 
-    for (uint32_t i = 0; i < list->count; i++) {
-        uint16_t tid = list->ids[i];
-        if ((uint32_t)tid < idx->bitmap_capacity && idx->bitmaps[tid]) {
-            TagBitmap* bm = idx->bitmaps[tid];
-            uint32_t byte_idx = file_id / 8;
-            uint32_t bit_idx  = file_id % 8;
-            uint32_t bm_bytes = (bm->bit_count + 7) / 8;
-            if (byte_idx < bm_bytes && (bm->bits[byte_idx] & (1 << bit_idx))) {
-                bm->bits[byte_idx] &= (uint8_t)(~(1 << bit_idx));
-                if (bm->file_count > 0) {
-                    bm->file_count--;
+uint64_t TagBitmapBytes(TagBitmapIndex* idx)
+{
+    if (!idx)
+        return 0;
+    TagFSLockTake(&idx->lock);
+    uint64_t bytes = idx->bytes;
+    TagFSLockDrop(&idx->lock);
+    return bytes;
+}
+
+// ----------------------------------------------------------------------------
+// A query, a page at a time
+//
+// Every term — a tag, or the tags of a key any one of which will do — is a
+// sorted set of file ids, and the matches are the ids every term holds. They
+// are found by leaping: each term is asked for its least member at or past
+// the candidate, and a term whose answer lies further on moves the candidate
+// there, until every term answers the candidate itself. No set is copied and
+// nothing is allocated; the smallest term leads, so the leaps are as long as
+// the index allows.
+// ----------------------------------------------------------------------------
+
+typedef struct {
+    const uint16_t*  tag_ids;
+    uint32_t         tag_count;
+    const TagIdList* groups;
+    uint32_t         group_count;
+    uint32_t         lead;           /* the term asked first */
+} TagQuery;
+
+static uint32_t QueryTerms(const TagQuery* q)
+{
+    return q->tag_count + q->group_count;
+}
+
+static void QueryTerm(const TagQuery* q, uint32_t t, const uint16_t** ids, uint32_t* n)
+{
+    if (t < q->tag_count) {
+        *ids = &q->tag_ids[t];
+        *n   = 1;
+    } else {
+        *ids = q->groups[t - q->tag_count].ids;
+        *n   = q->groups[t - q->tag_count].count;
+    }
+}
+
+static uint64_t TermSize(const TagBitmapIndex* idx, const TagQuery* q, uint32_t t)
+{
+    const uint16_t* ids;
+    uint32_t        n;
+    uint64_t        size = 0;
+    QueryTerm(q, t, &ids, &n);
+    for (uint32_t i = 0; i < n; i++) {
+        const TagMembers* m = MembersOf(idx, ids[i]);
+        size += m ? m->members : 0;
+    }
+    return size;
+}
+
+static bool TermNext(const TagBitmapIndex* idx, const TagQuery* q, uint32_t t, uint64_t x,
+                     uint64_t* out)
+{
+    const uint16_t* ids;
+    uint32_t        n;
+    bool            any = false;
+    QueryTerm(q, t, &ids, &n);
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t y;
+        if (MembersNext(MembersOf(idx, ids[i]), x, &y) && (!any || y < *out)) {
+            *out = y;
+            any  = true;
+        }
+    }
+    return any;
+}
+
+typedef enum { QUERY_MATCH, QUERY_END, QUERY_PAUSE } QueryStep;
+
+/* From *x, the next id every term holds: MATCH with *x on it, END when there
+ * is none, PAUSE with *x where to go on once the budget is spent. */
+static QueryStep QueryLeap(const TagBitmapIndex* idx, const TagQuery* q, uint64_t* x,
+                           uint32_t* budget)
+{
+    uint32_t terms = QueryTerms(q);
+    for (;;) {
+        bool moved = false;
+        for (uint32_t k = 0; k < terms && !moved; k++) {
+            uint32_t t = k == 0 ? q->lead : (k <= q->lead ? k - 1 : k);
+            uint64_t y;
+            if (*budget == 0)
+                return QUERY_PAUSE;
+            (*budget)--;
+            if (!TermNext(idx, q, t, *x, &y))
+                return QUERY_END;
+            if (y != *x) {
+                *x    = y;
+                moved = true;
+            }
+        }
+        if (!moved)
+            return QUERY_MATCH;
+    }
+}
+
+static bool QueryExcludes(const TagBitmapIndex* idx, const uint16_t* unless, uint32_t n,
+                          uint32_t fid)
+{
+    for (uint32_t i = 0; i < n; i++)
+        if (MembersHas(MembersOf(idx, unless[i]), fid))
+            return true;
+    return false;
+}
+
+int TagBitmapQueryPage(TagBitmapIndex* idx,
+                       const uint16_t* tag_ids, uint32_t tag_count,
+                       const TagIdList* groups, uint32_t group_count,
+                       const uint16_t* unless, uint32_t unless_count,
+                       uint32_t from, uint32_t* out, uint32_t room,
+                       bool want_total, TagFSPage* page)
+{
+    memset(page, 0, sizeof(*page));
+    if (!idx || (room && !out))
+        return -1;
+    TagQuery q = { tag_ids, tag_count, groups, group_count, 0 };
+    if (QueryTerms(&q) == 0)
+        return 0;
+
+    uint64_t x    = from ? from : 1;
+    bool     done = false;
+    bool     led  = false;
+    while (!done) {
+        uint32_t budget = TAG_QUERY_STEPS;
+        TagFSLockTake(&idx->lock);
+        if (!led) {
+            uint64_t least = TermSize(idx, &q, 0);
+            for (uint32_t t = 1; t < QueryTerms(&q); t++) {
+                uint64_t size = TermSize(idx, &q, t);
+                if (size < least) {
+                    least  = size;
+                    q.lead = t;
                 }
             }
+            led = true;
         }
-    }
-
-    if (list->ids) {
-        kfree(list->ids);
-        list->ids = NULL;
-    }
-    list->count    = 0;
-    list->capacity = 0;
-    idx->generation++;
-
-    TagFSLockDrop(&idx->lock);
-}
-
-// ---------------------------------------------------------------------------
-// Query cache helpers (called under lock)
-// ---------------------------------------------------------------------------
-
-/* Only a query of plain tags is cached, so only its tags are hashed. */
-static uint32_t query_hash(const uint16_t* tag_ids, uint32_t tag_count) {
-    uint32_t h = 0x811c9dc5;  // FNV-1a
-    for (uint32_t i = 0; i < tag_count; i++) {
-        h ^= tag_ids[i];
-        h *= 0x01000193;
-    }
-    return h;
-}
-
-static QueryCacheEntry* cache_lookup(TagBitmapIndex* idx, uint32_t hash,
-                                      const uint16_t* tag_ids, uint32_t tag_count) {
-    for (int i = 0; i < QUERY_CACHE_SLOTS; i++) {
-        QueryCacheEntry* e = &idx->cache[i];
-        if (e->hash == hash && e->generation == idx->generation &&
-            e->tag_count == tag_count && e->tag_key && e->file_ids) {
-            bool match = true;
-            for (uint32_t j = 0; j < tag_count; j++) {
-                if (e->tag_key[j] != tag_ids[j]) { match = false; break; }
+        for (;;) {
+            QueryStep step = QueryLeap(idx, &q, &x, &budget);
+            if (step == QUERY_PAUSE)
+                break;
+            if (step == QUERY_END) {
+                done = true;
+                break;
             }
-            if (match) return e;
-        }
-    }
-    return NULL;
-}
-
-static void cache_store(TagBitmapIndex* idx, uint32_t hash,
-                        const uint16_t* tag_ids, uint32_t tag_count,
-                        const uint32_t* file_ids, uint32_t count) {
-    // Find empty or oldest slot (simple: use hash % SLOTS)
-    int slot = (int)(hash % QUERY_CACHE_SLOTS);
-    QueryCacheEntry* e = &idx->cache[slot];
-
-    if (e->file_ids) kfree(e->file_ids);
-    if (e->tag_key)  kfree(e->tag_key);
-
-    e->hash       = hash;
-    e->generation = idx->generation;
-    e->count      = count;
-    e->tag_count  = tag_count;
-
-    e->file_ids = kmalloc(sizeof(uint32_t) * (count > 0 ? count : 1));
-    e->tag_key  = kmalloc(sizeof(uint16_t) * (tag_count > 0 ? tag_count : 1));
-
-    if (e->file_ids && count > 0)
-        memcpy(e->file_ids, file_ids, sizeof(uint32_t) * count);
-    if (e->tag_key && tag_count > 0)
-        memcpy(e->tag_key, tag_ids, sizeof(uint16_t) * tag_count);
-}
-
-// ---------------------------------------------------------------------------
-// Fast bit extraction: use CTZ to skip empty words
-// ---------------------------------------------------------------------------
-
-static uint32_t extract_set_bits(const uint8_t* bitmap, uint32_t byte_count,
-                                  uint32_t max_file_id,
-                                  uint32_t* out_ids, uint32_t max_results) {
-    uint32_t count = 0;
-    const uint64_t* words = (const uint64_t*)bitmap;
-    uint32_t word_count = byte_count / 8;
-
-    // 64-bit word scan with CTZ
-    for (uint32_t w = 0; w < word_count && count < max_results; w++) {
-        uint64_t word = words[w];
-        while (word != 0 && count < max_results) {
-            uint32_t bit = (uint32_t)__builtin_ctzll(word);
-            uint32_t fid = w * 64 + bit;
-            if (fid >= 1 && fid <= max_file_id) {
-                out_ids[count++] = fid;
-            }
-            word &= word - 1;  // clear lowest set bit
-        }
-    }
-
-    // Handle remaining bytes (if byte_count not aligned to 8)
-    for (uint32_t b = word_count * 8; b < byte_count && count < max_results; b++) {
-        uint8_t byte = bitmap[b];
-        while (byte != 0 && count < max_results) {
-            uint32_t bit = (uint32_t)__builtin_ctz((unsigned)byte);
-            uint32_t fid = b * 8 + bit;
-            if (fid >= 1 && fid <= max_file_id) {
-                out_ids[count++] = fid;
-            }
-            byte &= (uint8_t)(byte - 1);
-        }
-    }
-
-    return count;
-}
-
-// ---------------------------------------------------------------------------
-// Check if bitmap is all-zero (early termination)
-// ---------------------------------------------------------------------------
-
-static bool bitmap_is_empty(const uint8_t* bitmap, uint32_t byte_count) {
-    const uint64_t* words = (const uint64_t*)bitmap;
-    uint32_t word_count = byte_count / 8;
-    for (uint32_t w = 0; w < word_count; w++) {
-        if (words[w] != 0) return false;
-    }
-    for (uint32_t b = word_count * 8; b < byte_count; b++) {
-        if (bitmap[b] != 0) return false;
-    }
-    return true;
-}
-
-// ---------------------------------------------------------------------------
-// Optimized query: cache + 64-bit AND + CTZ extraction + early termination
-// ---------------------------------------------------------------------------
-
-int tag_bitmap_query(TagBitmapIndex* idx,
-                     const uint16_t* tag_ids, uint32_t tag_count,
-                     const TagIdList* groups, uint32_t group_count,
-                     uint32_t* out_file_ids, uint32_t max_results) {
-    if (!idx || !out_file_ids) {
-        return -1;
-    }
-
-    TagFSLockTake(&idx->lock);
-
-    if (idx->max_file_id == 0) {
-        TagFSLockDrop(&idx->lock);
-        return 0;
-    }
-
-    // --- Cache lookup (only for simple tag-only queries) ---
-    uint32_t hash = 0;
-    if (tag_count > 0 && group_count == 0) {
-        hash = query_hash(tag_ids, tag_count);
-        QueryCacheEntry* cached = cache_lookup(idx, hash, tag_ids, tag_count);
-        if (cached) {
-            uint32_t copy = cached->count < max_results ? cached->count : max_results;
-            if (copy > 0) memcpy(out_file_ids, cached->file_ids, sizeof(uint32_t) * copy);
-            TagFSLockDrop(&idx->lock);
-            return (int)copy;
-        }
-    }
-
-    // --- Bitmap intersection ---
-    uint32_t result_size = (idx->max_file_id + 8) / 8;
-    // Align to 8 bytes for safe uint64_t access
-    result_size = (result_size + 7) & ~7u;
-
-    uint8_t* result_bitmap = kmalloc(result_size);
-    if (!result_bitmap) {
-        TagFSLockDrop(&idx->lock);
-        return -1;
-    }
-    memset(result_bitmap, 0, result_size);
-
-    bool first = true;
-
-    // AND all required tags
-    for (uint32_t i = 0; i < tag_count; i++) {
-        uint16_t tid = tag_ids[i];
-        if ((uint32_t)tid >= idx->bitmap_capacity || !idx->bitmaps[tid]) {
-            kfree(result_bitmap);
-            TagFSLockDrop(&idx->lock);
-            return 0;
-        }
-
-        TagBitmap* bm = idx->bitmaps[tid];
-        uint32_t bm_bytes = (bm->bit_count + 7) / 8;
-        uint32_t copy_len = bm_bytes < result_size ? bm_bytes : result_size;
-
-        if (first) {
-            memcpy(result_bitmap, bm->bits, copy_len);
-            if (copy_len < result_size) {
-                memset(result_bitmap + copy_len, 0, result_size - copy_len);
-            }
-            first = false;
-        } else {
-            uint64_t* r64 = (uint64_t*)result_bitmap;
-            uint64_t* b64 = (uint64_t*)bm->bits;
-            uint32_t words = copy_len / 8;
-            for (uint32_t w = 0; w < words; w++) {
-                r64[w] &= b64[w];
-            }
-            // AND remaining bytes that don't fill a full 64-bit word
-            for (uint32_t b = words * 8; b < copy_len; b++) {
-                result_bitmap[b] &= bm->bits[b];
-            }
-            for (uint32_t b = copy_len; b < result_size; b++) {
-                result_bitmap[b] = 0;
-            }
-            // Early termination: if result is all-zero, no matches possible
-            if (bitmap_is_empty(result_bitmap, result_size)) {
-                kfree(result_bitmap);
-                TagFSLockDrop(&idx->lock);
-                return 0;
-            }
-        }
-    }
-
-    // AND with each group (OR within group)
-    for (uint32_t g = 0; g < group_count; g++) {
-        const TagIdList* grp = &groups[g];
-        if (grp->count == 0) {
-            continue;
-        }
-
-        uint8_t* temp = kmalloc(result_size);
-        if (!temp) {
-            kfree(result_bitmap);
-            TagFSLockDrop(&idx->lock);
-            return -1;
-        }
-        memset(temp, 0, result_size);
-
-        for (uint32_t k = 0; k < grp->count; k++) {
-            uint16_t tid = grp->ids[k];
-            if ((uint32_t)tid >= idx->bitmap_capacity || !idx->bitmaps[tid]) {
+            uint32_t fid = (uint32_t)x;
+            x++;
+            if (QueryExcludes(idx, unless, unless_count, fid))
                 continue;
+            if (page->delivered < room) {
+                out[page->delivered++] = fid;
+            } else if (!page->next) {
+                page->next = fid;
+                if (!want_total) {
+                    done = true;
+                    break;
+                }
             }
-            TagBitmap* bm = idx->bitmaps[tid];
-            uint32_t bm_bytes = (bm->bit_count + 7) / 8;
-            uint32_t or_len = bm_bytes < result_size ? bm_bytes : result_size;
-
-            uint64_t* t64 = (uint64_t*)temp;
-            uint64_t* b64 = (uint64_t*)bm->bits;
-            uint32_t words = or_len / 8;
-            for (uint32_t w = 0; w < words; w++) {
-                t64[w] |= b64[w];
-            }
-            // OR remaining bytes that don't fill a full 64-bit word
-            for (uint32_t b = words * 8; b < or_len; b++) {
-                temp[b] |= bm->bits[b];
-            }
+            if (want_total)
+                page->total++;
         }
-
-        if (first) {
-            memcpy(result_bitmap, temp, result_size);
-            first = false;
-        } else {
-            uint64_t* r64 = (uint64_t*)result_bitmap;
-            uint64_t* t64 = (uint64_t*)temp;
-            uint32_t words = result_size / 8;
-            for (uint32_t w = 0; w < words; w++) {
-                r64[w] &= t64[w];
-            }
-        }
-
-        kfree(temp);
-
-        // Early termination after group AND
-        if (!first && bitmap_is_empty(result_bitmap, result_size)) {
-            kfree(result_bitmap);
-            TagFSLockDrop(&idx->lock);
-            return 0;
-        }
-    }
-
-    if (first) {
-        kfree(result_bitmap);
         TagFSLockDrop(&idx->lock);
-        return 0;
     }
-
-    // --- Fast bit extraction with CTZ ---
-    uint32_t count = extract_set_bits(result_bitmap, result_size,
-                                       idx->max_file_id,
-                                       out_file_ids, max_results);
-
-    // --- Store in cache (simple tag-only queries, non-truncated only) ---
-    if (tag_count > 0 && group_count == 0 && count < max_results) {
-        cache_store(idx, hash, tag_ids, tag_count, out_file_ids, count);
-    }
-
-    kfree(result_bitmap);
-    TagFSLockDrop(&idx->lock);
-    return (int)count;
-}
-
-int tag_bitmap_tags_for_file(TagBitmapIndex* idx, uint32_t file_id,
-                              uint16_t* out_ids, uint32_t max_ids) {
-    if (!idx || !out_ids) {
-        return -1;
-    }
-
-    TagFSLockTake(&idx->lock);
-
-    if (file_id >= idx->file_capacity) {
-        TagFSLockDrop(&idx->lock);
-        return 0;
-    }
-
-    TagIdList* list = &idx->file_to_tags[file_id];
-    uint32_t copy_count = list->count < max_ids ? list->count : max_ids;
-    if (copy_count > 0 && list->ids) {
-        memcpy(out_ids, list->ids, sizeof(uint16_t) * copy_count);
-    }
-
-    TagFSLockDrop(&idx->lock);
-    return (int)copy_count;
-}
-
-int tag_bitmap_tag_count_for_file(TagBitmapIndex* idx, uint32_t file_id) {
-    if (!idx) return 0;
-
-    TagFSLockTake(&idx->lock);
-
-    if (file_id >= idx->file_capacity) {
-        TagFSLockDrop(&idx->lock);
-        return 0;
-    }
-
-    int count = (int)idx->file_to_tags[file_id].count;
-    TagFSLockDrop(&idx->lock);
-    return count;
+    return 0;
 }

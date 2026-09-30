@@ -168,6 +168,9 @@ typedef struct TagRegistryNode {
  * lock may hold a pointer into one (MP-D11) — TagRegistryKeyIds copies. */
 typedef struct TagKeyGroup TagKeyGroup;
 
+/* The two hashes — tags by their text, and a key's every tag — start at
+ * TAGFS_REG_BUCKETS and TAGFS_KEY_BUCKETS buckets and double as they fill:
+ * a new table is built outside the lock and swapped in under it. */
 typedef struct {
     TagRegistryNode** buckets;
     uint32_t          bucket_count;
@@ -180,6 +183,7 @@ typedef struct {
 
     TagKeyGroup** key_buckets;
     uint32_t      key_bucket_count;
+    uint32_t      key_groups;
 
     TagFSLock lock;
 
@@ -210,14 +214,8 @@ typedef struct {
 } TagRegistry;
 
 // ----------------------------------------------------------------------------
-// In-Memory Structures: Bitmap Index
+// In-Memory Structures: the Indexes of the Live Files
 // ----------------------------------------------------------------------------
-
-typedef struct {
-    uint8_t* bits;
-    uint32_t bit_count;
-    uint32_t file_count;
-} TagBitmap;
 
 typedef struct {
     uint16_t* ids;
@@ -225,38 +223,26 @@ typedef struct {
     uint32_t  capacity;
 } TagIdList;
 
-// Query cache: stores recent query results, invalidated by generation counter
-#define QUERY_CACHE_SLOTS 16
+/* Who wears each tag (tag_bitmap/tag_bitmap.c), and the files by id with the
+ * file table's row and the pool's newest record of each (file_map/). Both hold
+ * the live files and nothing for an id no live file has. */
+typedef struct TagBitmapIndex TagBitmapIndex;
+typedef struct FileMap        FileMap;
 
+/* One page of the live files a question matches, in file id order. The ids
+ * go into the caller's room and no further; nothing is cut silently: `next`
+ * says where the rest begin, and `total` how many there are. */
 typedef struct {
-    uint32_t  hash;         // hash of sorted tag_ids
-    uint64_t  generation;   // generation when cached
-    uint32_t* file_ids;     // cached result array
-    uint32_t  count;        // number of results
-    uint16_t* tag_key;      // copy of sorted tag_ids (for validation)
-    uint32_t  tag_count;    // number of tags in key
-} QueryCacheEntry;
-
-typedef struct {
-    TagBitmap** bitmaps;
-    uint32_t    bitmap_capacity;
-    uint32_t    max_file_id;
-
-    TagIdList*  file_to_tags;
-    uint32_t    file_capacity;
-
-    uint64_t    generation;     // incremented on every mutation
-    QueryCacheEntry cache[QUERY_CACHE_SLOTS];
-
-    TagFSLock   lock;
-} TagBitmapIndex;
+    uint32_t delivered;   /* ids written into the caller's room */
+    uint32_t total;       /* every match from the page's first id on — counted
+                           * only when the caller asked for it, 0 otherwise */
+    uint32_t next;        /* the first match past the room: ask again from it;
+                           * 0 when there is none */
+} TagFSPage;
 
 // ----------------------------------------------------------------------------
 // In-Memory Structures: File Handles and Metadata
 // ----------------------------------------------------------------------------
-
-// Per-file lock entry in the open file table
-#define OPEN_FILE_BUCKETS 32
 
 /* Forward decl: WriteJob lives in storage/async/write_job.h. The OFE
  * carries a token-handoff slot so concurrent async writers serialize
@@ -339,6 +325,7 @@ typedef struct {
 
     TagRegistry*     registry;
     TagBitmapIndex*  bitmap_index;
+    FileMap*         files;
     bool             initialized;
     TagFSLock        lock;
 } TagFSState;
@@ -396,18 +383,31 @@ int          tag_registry_load(TagRegistry* reg, uint32_t first_block);
 // Bitmap Index API
 // ----------------------------------------------------------------------------
 
-TagBitmapIndex* tag_bitmap_create(uint32_t initial_tag_cap, uint32_t initial_file_cap);
+/* An index with room for `initial_tag_cap` tags before its table of them
+ * first grows; NULL when there is no memory. */
+TagBitmapIndex* tag_bitmap_create(uint32_t initial_tag_cap);
 void            tag_bitmap_destroy(TagBitmapIndex* idx);
+/* The file put under the tag: 0, or -1 — said once, with the index's numbers
+ * — when the index had no memory for it, and then nothing changed. */
 int             tag_bitmap_set(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id);
+/* The file out from under the tag: 0, or -1 when no file wears the tag. */
 int             tag_bitmap_clear(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id);
-void            tag_bitmap_remove_file(TagBitmapIndex* idx, uint32_t file_id);
-int             tag_bitmap_query(TagBitmapIndex* idx,
+/* The file out from under each of the `tag_count` tags it wore — its record's
+ * — or, with no record to say (tag_ids NULL), from under every tag. */
+void            tag_bitmap_remove_file(TagBitmapIndex* idx, uint32_t file_id,
+                                       const uint16_t* tag_ids, uint32_t tag_count);
+bool            TagBitmapHas(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id);
+/* The kernel heap the index holds. */
+uint64_t        TagBitmapBytes(TagBitmapIndex* idx);
+/* The files from `from` on that wear every one of `tag_ids`, at least one
+ * tag of each of `groups`, and none of `unless`, in id order: up to `room`
+ * into `out`, and the page says the rest (TagFSPage). 0, or -1 for no index. */
+int             TagBitmapQueryPage(TagBitmapIndex* idx,
                     const uint16_t* tag_ids, uint32_t tag_count,
                     const TagIdList* groups, uint32_t group_count,
-                    uint32_t* out_file_ids, uint32_t max_results);
-int             tag_bitmap_tags_for_file(TagBitmapIndex* idx, uint32_t file_id,
-                    uint16_t* out_ids, uint32_t max_ids);
-int             tag_bitmap_tag_count_for_file(TagBitmapIndex* idx, uint32_t file_id);
+                    const uint16_t* unless, uint32_t unless_count,
+                    uint32_t from, uint32_t* out, uint32_t room,
+                    bool want_total, TagFSPage* page);
 
 // ----------------------------------------------------------------------------
 // File Table API
@@ -429,7 +429,7 @@ void     meta_pool_shutdown(bool write_back);
 int      meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out);
 int      meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* out_offset);
 int      meta_pool_delete(uint32_t block, uint32_t offset);
-int      meta_pool_mirror_init(uint32_t max_file_id);
+int      meta_pool_mirror_init(void);
 int      meta_pool_read_cached(uint32_t file_id, TagFSMetadata* out);
 void     tagfs_metadata_free(TagFSMetadata* meta);
 int      meta_pool_flush(void);
@@ -562,15 +562,22 @@ int  tagfs_remove_tag_string(uint32_t file_id, const TagSpelling* tag);
 
 bool tagfs_key_is_reserved(const char *key, size_t key_len);
 
-/* Every file wearing all of `tags` ("key:..." is any tag of the key): how many
- * were found, or a negative -ERR_*. */
-int  tagfs_query_files(const TagSpelling* tags, uint32_t count,
-                       uint32_t* out_file_ids, uint32_t max_results);
-int  tagfs_list_all_files(uint32_t* out_file_ids, uint32_t max_results);
-/* The number no file id of this volume reaches. Room for "every file that
- * matches" is this many, and the volume's own count is the only honest size
- * for such a buffer — any smaller number turns the file past it into one
- * that is "not found". 0 when no volume is mounted. */
+/*
+ * The live files a question matches, a page at a time and in file id order
+ * (query/query.c): every file wearing all of `tags` ("key:..." is any tag of
+ * the key) — a question of no tags is every file, TagFSListPage — leaving out
+ * the trashed and the hidden unless the question names them. From file id
+ * `from` on, up to `room` ids into `out`; the page says where the rest begin
+ * and, when `want_total`, how many match from `from` on. OK, or the refusal:
+ * ERR_TAGFS_NOT_INITIALIZED with no volume, ERR_NO_MEMORY when the question
+ * could not be put to the index.
+ */
+error_t  TagFSQueryPage(const TagSpelling* tags, uint32_t count, uint32_t from,
+                        uint32_t* out, uint32_t room, bool want_total, TagFSPage* page);
+error_t  TagFSListPage(uint32_t from, uint32_t* out, uint32_t room, bool want_total,
+                       TagFSPage* page);
+/* The file id the next create takes — no id of this volume has reached it.
+ * 0 when no volume is mounted. */
 uint32_t tagfs_file_ceiling(void);
 
 TagFSFileHandle* tagfs_open(uint32_t file_id, uint32_t flags);

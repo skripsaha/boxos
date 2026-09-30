@@ -52,7 +52,7 @@ caveat_row() {
         sequential|interleave)
                     echo "|a file's record takes one extent per 4 KiB written and never merges them, so the 4080-byte record of a 10-byte name refuses its write at byte 2748416, after 671 extents" ;;
         usememory)  echo "1.6|a Use Context longer than 432 bytes is forgotten, remembered=0" ;;
-        fidhistory) echo "1.3b|a mount spends kernel heap on every file id ever issued, the dead ones included" ;;
+        fidhistory) echo "|a mount spends kernel heap on every file id ever issued, the dead ones included" ;;
         systemtag)  echo "1.4|any program may take the system tag off kernel.bin and then delete it — the kernel the volume boots is gone" ;;
         coldread)   echo "|a read into pages its program had not touched yet reported every byte and delivered only those before the first such page" ;;
         coldwrite)  echo "|a write out of pages its program had not touched yet reported every byte, and the file holds other than the zeros those pages are" ;;

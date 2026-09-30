@@ -1,5 +1,6 @@
 #include "file_table.h"
 #include "../scribe/scribe.h"
+#include "../file_map/file_map.h"
 
 /*
  * ‼ THE TABLE'S LOCK GUARDS MEMORY, AND NOTHING ELSE IS DONE UNDER IT.
@@ -11,13 +12,23 @@
  * and to take a block for its chain under it — so the state lock was taken
  * under the table while a create took the table under state (MP-D4), and a
  * core that only wanted to look a file up spun with its interrupts off for as
- * long as the medium took. Now the flush copies one block's rows out under
- * the lock and writes them with no lock held.
+ * long as the medium took. Now the flush copies one block's rows out and
+ * writes them with no lock held.
+ *
+ * ‼ THE ROWS ARE THE LIVE FILES', AND LIVE IN THE MAP OF THEM (file_map/).
+ * Memory used to hold the table as the medium does, a row for every file id
+ * below the highest ever issued — eight bytes a slot, dead files' included.
+ * A row is kept now beside its file's record in the map, and only while the
+ * file has one; what this file keeps is the chain, a few words per block of
+ * 510 ids. A block is written from the rows the map holds for its ids.
  */
 static TagFSLock g_lock = TAGFS_LOCK_INIT("table", LOCK_RANK_LEAF);
 
-static FileTableEntry* g_entries  = NULL;   /* the rows, by file id */
-static uint32_t        g_capacity = 0;      /* rows memory holds; a whole number of blocks' worth */
+static FileMap* table_files(void)
+{
+    TagFSState* fs = tagfs_get_state();
+    return fs ? fs->files : NULL;
+}
 
 /*
  * ‼ THE TABLE IS AS LONG AS THE CHAIN, AND THE CHAIN IS ON THE MEDIUM.
@@ -47,6 +58,10 @@ static uint32_t        g_capacity = 0;      /* rows memory holds; a whole number
  * the stamp (see FileTableGrow). The links and the slots change only in the
  * flush, which the volume's sync runs under its Scribe, and in the mount's
  * walk, with the door closed; update and delete only mark links, under g_lock.
+ *
+ * A row is changed in the map before its link is marked, and a flush reads the
+ * mark before it copies the rows: a change the copy missed has marked its link
+ * past what that write carries, and the link stays owed.
  */
 typedef struct {
     uint32_t block;    /* the data-run block this link is */
@@ -64,50 +79,6 @@ static uint64_t       g_gen          = 0;   /* one step per change, taken under 
  * stamps a Spare and snapshots a link through it — the flush alone, under the
  * sync's Scribe, so no two of them ever share it. */
 static FileTableBlock g_image;
-
-/*
- * Make memory hold at least `want` rows, called with g_lock NOT held: the new
- * array is allocated before the lock is taken and the old one given back after
- * it is let go. Two cores growing it at once each allocate, and the one that
- * finds it already grown far enough when it takes the lock gives its own back.
- *
- * The rows grow twice over at a time. A table grown by one block's rows would
- * copy the whole of itself every 510 creates; doubled, what a create pays for
- * the copying stays the same however many files there are. What the MEDIUM
- * holds is not tied to this: the chain grows a block at a time, as far as the
- * rows named need (g_links_wanted), never as far as memory has reserved.
- */
-static int table_grow_to(uint64_t want)
-{
-    TagFSLockTake(&g_lock);
-    uint64_t have = g_capacity;
-    TagFSLockDrop(&g_lock);
-    if (want <= have)
-        return 0;
-
-    uint64_t rows = have * 2 > want ? have * 2 : want;
-    rows = (rows + TAGFS_FTABLE_PER_BLOCK - 1) / TAGFS_FTABLE_PER_BLOCK * TAGFS_FTABLE_PER_BLOCK;
-    if (rows > 0xFFFFFFFFu)
-        return -1;
-    FileTableEntry* grown = kmalloc(sizeof(FileTableEntry) * rows);
-    if (!grown)
-        return -1;
-
-    FileTableEntry* spare = grown;
-    TagFSLockTake(&g_lock);
-    if (rows > g_capacity) {
-        if (g_entries)
-            memcpy(grown, g_entries, sizeof(FileTableEntry) * g_capacity);
-        memset(grown + g_capacity, 0, sizeof(FileTableEntry) * (rows - g_capacity));
-        spare      = g_entries;
-        g_entries  = grown;
-        g_capacity = (uint32_t)rows;
-    }
-    TagFSLockDrop(&g_lock);
-    if (spare)
-        kfree(spare);
-    return 0;
-}
 
 /*
  * Room for `want` links, made BEFORE any block is taken for one: a growth
@@ -144,10 +115,7 @@ static error_t LinksReserve(uint32_t want)
 }
 
 static void table_release(void) {
-    if (g_entries) kfree(g_entries);
     if (g_links)   kfree(g_links);
-    g_entries      = NULL;
-    g_capacity     = 0;
     g_links        = NULL;
     g_link_count   = 0;
     g_link_cap     = 0;
@@ -167,9 +135,10 @@ int file_table_init(uint32_t first_block) {
      * together, and a next_block outside the run is refused before it is read
      * — nothing under tagfs_read_block bounds a block number.
      */
-    TagFSState* fs  = tagfs_get_state();
-    uint32_t    run = fs ? fs->layout.data_blocks : 0;
-    if (run == 0) {
+    TagFSState* fs    = tagfs_get_state();
+    uint32_t    run   = fs ? fs->layout.data_blocks : 0;
+    FileMap*    files = table_files();
+    if (run == 0 || !files) {
         kprintf("[FileTable] this volume states a data run of no blocks at "
                 "all, so there is nowhere for a file table to be — it is not "
                 "mounted\n");
@@ -213,22 +182,34 @@ int file_table_init(uint32_t first_block) {
 
         uint32_t entry_offset = g_link_count * TAGFS_FTABLE_PER_BLOCK;
 
-        if ((g_link_count == g_link_cap &&
-             LinksReserve(g_link_cap ? g_link_cap * 2 : 1) != OK) ||
-            table_grow_to((uint64_t)entry_offset + TAGFS_FTABLE_PER_BLOCK) != 0) {
+        if (g_link_count == g_link_cap &&
+            LinksReserve(g_link_cap ? g_link_cap * 2 : 1) != OK) {
             kprintf("[FileTable] there is no memory to hold this volume's file "
-                    "table at %u entries — it is not mounted\n",
-                    entry_offset + TAGFS_FTABLE_PER_BLOCK);
+                    "table's chain at %u blocks — it is not mounted\n",
+                    g_link_count + 1);
             table_release();
             return -1;
         }
         g_links[g_link_count++] = (FileTableLink){ .block = block };
 
+        /* Only the rows that name a file are kept, each in the map beside its
+         * file. A table the map has no room for is not a table held in part:
+         * the rows past the refusal would read as no files. */
         uint32_t count = g_image.entry_count;
         if (count > TAGFS_FTABLE_PER_BLOCK) {
             count = TAGFS_FTABLE_PER_BLOCK;
         }
-        memcpy(g_entries + entry_offset, g_image.entries, sizeof(FileTableEntry) * count);
+        for (uint32_t r = 0; r < count; r++) {
+            const FileTableEntry* row = &g_image.entries[r];
+            if (row->meta_block == 0 || entry_offset + r == 0)
+                continue;
+            if (FileMapRowSet(files, entry_offset + r, row->meta_block, row->meta_offset) != OK) {
+                kprintf("[FileTable] there is no memory to hold the row of file %u — this "
+                        "volume is not mounted\n", entry_offset + r);
+                table_release();
+                return -1;
+            }
+        }
 
         if (g_image.next_block == 0) break;
 
@@ -243,8 +224,8 @@ int file_table_init(uint32_t first_block) {
     }
 
     g_links_wanted = g_link_count;
-    debug_printf("[FileTable] initialized: first_block=%u blocks=%u capacity=%u\n",
-                 first_block, g_link_count, g_capacity);
+    debug_printf("[FileTable] initialized: first_block=%u blocks=%u\n",
+                 first_block, g_link_count);
     return 0;
 }
 
@@ -254,60 +235,42 @@ void file_table_shutdown(void) {
 }
 
 int file_table_lookup(uint32_t file_id, uint32_t* out_block, uint32_t* out_offset) {
+    FileMap* files = table_files();
+    return files && FileMapRowGet(files, file_id, out_block, out_offset) ? 0 : -1;
+}
+
+/* The link that carries a row marked owed, after the row changed in the map.
+ * A row past the chain marks no link: the link that will carry it is attached
+ * by the flush already owed to the medium (FileTableGrow). */
+static void table_mark(uint32_t file_id, bool named) {
+    uint32_t link = file_id / TAGFS_FTABLE_PER_BLOCK;
     TagFSLockTake(&g_lock);
-
-    if (file_id >= g_capacity || g_entries[file_id].meta_block == 0) {
-        TagFSLockDrop(&g_lock);
-        return -1;
-    }
-
-    *out_block  = g_entries[file_id].meta_block;
-    *out_offset = g_entries[file_id].meta_offset;
-
+    g_gen++;
+    if (link < g_link_count)
+        g_links[link].edited = g_gen;
+    if (named && link >= g_links_wanted)
+        g_links_wanted = link + 1;
     TagFSLockDrop(&g_lock);
-    return 0;
 }
 
 int file_table_update(uint32_t file_id, uint32_t meta_block, uint32_t meta_offset) {
-    if (table_grow_to((uint64_t)file_id + 1) != 0) {
+    FileMap* files = table_files();
+    if (!files || FileMapRowSet(files, file_id, meta_block, meta_offset) != OK) {
         kprintf("[FileTable] there is no memory to hold a row for file id %u "
                 "— the row is not kept, and the change that named it is "
                 "refused\n", file_id);
         return -1;
     }
-
-    /* A row past the chain marks no link: the link that will carry it is
-     * attached by the flush already owed to the medium (FileTableGrow). */
-    uint32_t link = file_id / TAGFS_FTABLE_PER_BLOCK;
-    TagFSLockTake(&g_lock);
-    g_entries[file_id].meta_block  = meta_block;
-    g_entries[file_id].meta_offset = meta_offset;
-    g_gen++;
-    if (link < g_link_count)
-        g_links[link].edited = g_gen;
-    if (link >= g_links_wanted)
-        g_links_wanted = link + 1;
-    TagFSLockDrop(&g_lock);
+    table_mark(file_id, true);
     return 0;
 }
 
 int file_table_delete(uint32_t file_id) {
-    uint32_t link = file_id / TAGFS_FTABLE_PER_BLOCK;
-
-    TagFSLockTake(&g_lock);
-
-    if (file_id >= g_capacity) {
-        TagFSLockDrop(&g_lock);
+    FileMap* files = table_files();
+    if (!files)
         return -1;
-    }
-
-    g_entries[file_id].meta_block  = 0;
-    g_entries[file_id].meta_offset = 0;
-    g_gen++;
-    if (link < g_link_count)
-        g_links[link].edited = g_gen;
-
-    TagFSLockDrop(&g_lock);
+    FileMapRowClear(files, file_id);
+    table_mark(file_id, false);
     return 0;
 }
 
@@ -406,9 +369,9 @@ static int FileTableGrow(void)
 /*
  * Write the first link at or past *at that is owed to the medium, and leave
  * *at on it: 1 when one was written, 0 when none is owed from *at on, -1 when
- * the medium refused it. Its image is taken under g_lock into g_image and
- * written with no lock held; the generation it was taken at is what the write
- * marks landed.
+ * the medium refused it. The generation it is written at is read under g_lock
+ * before its rows are copied out of the map into g_image; the image is written
+ * with no lock held, and that generation is what the write marks landed.
  */
 static int FileTableWriteLink(uint32_t* at)
 {
@@ -426,10 +389,10 @@ static int FileTableWriteLink(uint32_t* at)
     g_image.next_block  = i + 1 < g_link_count ? g_links[i + 1].block : 0;
     g_image.entry_count = TAGFS_FTABLE_PER_BLOCK;
     g_image.reserved    = 0;
-    memcpy(g_image.entries, g_entries + (size_t)i * TAGFS_FTABLE_PER_BLOCK,
-           sizeof(g_image.entries));
     TagFSLockDrop(&g_lock);
 
+    FileMapRowsInto(table_files(), i * TAGFS_FTABLE_PER_BLOCK, TAGFS_FTABLE_PER_BLOCK,
+                    g_image.entries);
     *at = i;
     error_t wrote = tagfs_write_block(block, &g_image);
     if (wrote != OK) {

@@ -38,6 +38,11 @@ void *crate_in_buf   (const Crate *src, const OpContext *ctx);
 void *crate_out_alloc(const Crate *out, uint64_t bytes);
 int   crate_out_commit(const Crate *out, const OpContext *ctx,
                        const void *kbuf, uint64_t bytes);
+/* `bytes` of `kbuf` into the out crate from byte `offset` on, the rest of the
+ * crate untouched: an answer written a piece at a time, so the kernel never
+ * holds more of it than one piece. ERR_INVALID_ARGUMENT past the capacity. */
+int   crate_out_commit_at(const Crate *out, const OpContext *ctx, uint64_t offset,
+                          const void *kbuf, uint64_t bytes);
 void  crate_buf_free (void *kbuf);
 
 #endif /* CRATE_IO_H */

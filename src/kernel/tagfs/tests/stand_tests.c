@@ -386,24 +386,27 @@ out:
 // The tag row that could not widen (PF-1)
 //
 // The precondition for sweeping a refused allocation through create: when a
-// tag's row of the index had to grow for a new file id and the allocation for
-// the wider row failed, tag_bitmap_set kept the old array and set the bit past
-// its end. Asked on an index of its own, never the volume's: a row created for
-// file 7 is one byte, and file 8 needs a second.
+// tag's members had to grow for a new file id and the allocation failed, the
+// index wrote past what it held (PF-1: tag_bitmap_set kept the old row and
+// set the bit past its end). Asked on an index of its own, never the
+// volume's: a window's first array holds four members, and a fifth needs the
+// array doubled.
 // ----------------------------------------------------------------------------
 
 static TestResult TestStandTagRowRefusesWhatItCannotWiden(void)
 {
     TestResult      verdict = TEST_PASS;
-    TagBitmapIndex* idx     = tag_bitmap_create(4, 16);
+    TagBitmapIndex* idx     = tag_bitmap_create(4);
     bool            armed   = false;
 
     TEST_ASSERT(idx != NULL, "an index of the test's own");
-    TEST_ASSERT_EQ(tag_bitmap_set(idx, 1, 7), 0, "file 7 takes its bit in a fresh row of one byte");
+    for (uint32_t fid = 7; fid <= 10; fid++)
+        TEST_ASSERT_EQ(tag_bitmap_set(idx, 1, fid), 0,
+                       "files 7 to 10 fill the first array of the tag's window");
 
     HeapFailArm(amp_get_core_index(), 1);
     armed = true;
-    int set = tag_bitmap_set(idx, 1, 8);
+    int set = tag_bitmap_set(idx, 1, 11);
     bool fired = HeapFailFired();
     HeapFailDisarm();
     armed = false;
@@ -411,6 +414,9 @@ static TestResult TestStandTagRowRefusesWhatItCannotWiden(void)
     TEST_ASSERT(fired, "the row's widening was the allocation refused");
     TEST_ASSERT_EQ(set, -1, "a row that could not widen refuses the set instead of "
                             "writing past its end");
+    TEST_ASSERT(!TagBitmapHas(idx, 1, 11), "and the file it refused is not the tag's");
+    for (uint32_t fid = 7; fid <= 10; fid++)
+        TEST_ASSERT(TagBitmapHas(idx, 1, fid), "every member before it still is");
 out:
     if (armed)
         HeapFailDisarm();

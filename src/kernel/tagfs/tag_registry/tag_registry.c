@@ -118,8 +118,77 @@ static TagKeyGroup* find_or_create_key_group(TagRegistry* reg, const char* key, 
     new_group->capacity = 8;
     new_group->next     = reg->key_buckets[bucket];
     reg->key_buckets[bucket] = new_group;
+    reg->key_groups++;
 
     return new_group;
+}
+
+/*
+ * ‼ THE TWO HASHES GROW WITH THE TAGS.
+ *
+ * They were a fixed TAGFS_REG_BUCKETS and TAGFS_KEY_BUCKETS, so a registry of
+ * thirty thousand tags walked chains sixty long on every lookup — under a lock
+ * every core that names a tag takes with its interrupts off. Each doubles now
+ * once it holds more than it has buckets: the new table is taken with no lock
+ * held, filled and put in place under the lock, and the old one given back
+ * after it. A table the heap will not give keeps the chains longer until the
+ * next tag asks again, and nothing else is lost.
+ */
+/* Whether either hash holds more than it has buckets. Under reg->lock. */
+static bool RegistryCrowded(const TagRegistry* reg) {
+    return reg->total_tags > reg->bucket_count || reg->key_groups > reg->key_bucket_count;
+}
+
+static void RegistryRehash(TagRegistry* reg) {
+    TagFSLockTake(&reg->lock);
+    uint32_t buckets     = reg->bucket_count;
+    uint32_t key_buckets = reg->key_bucket_count;
+    uint32_t want        = buckets;
+    uint32_t key_want    = key_buckets;
+    while (reg->total_tags > want) want *= 2;
+    while (reg->key_groups > key_want) key_want *= 2;
+    TagFSLockDrop(&reg->lock);
+    if (want == buckets && key_want == key_buckets) return;
+
+    TagRegistryNode** table     = want != buckets ? kmalloc(sizeof(TagRegistryNode*) * want) : NULL;
+    TagKeyGroup**     key_table = key_want != key_buckets ? kmalloc(sizeof(TagKeyGroup*) * key_want) : NULL;
+    if (table) memset(table, 0, sizeof(TagRegistryNode*) * want);
+    if (key_table) memset(key_table, 0, sizeof(TagKeyGroup*) * key_want);
+
+    TagFSLockTake(&reg->lock);
+    if (table && reg->bucket_count == buckets) {
+        for (uint32_t b = 0; b < buckets; b++) {
+            for (TagRegistryNode* node = reg->buckets[b], *next; node; node = next) {
+                const TagRegistryEntry* entry = reg->by_id[node->tag_id];
+                TagSpelling spelled = { entry->key, entry->value, entry->key_len, entry->value_len };
+                uint32_t    at      = TagSpellingHash(&spelled) % want;
+                next       = node->next;
+                node->next = table[at];
+                table[at]  = node;
+            }
+        }
+        TagRegistryNode** old = reg->buckets;
+        reg->buckets      = table;
+        reg->bucket_count = want;
+        table             = old;
+    }
+    if (key_table && reg->key_bucket_count == key_buckets) {
+        for (uint32_t b = 0; b < key_buckets; b++) {
+            for (TagKeyGroup* group = reg->key_buckets[b], *next; group; group = next) {
+                uint32_t at = key_hash(group->key, strlen(group->key), key_want);
+                next          = group->next;
+                group->next   = key_table[at];
+                key_table[at] = group;
+            }
+        }
+        TagKeyGroup** old = reg->key_buckets;
+        reg->key_buckets      = key_table;
+        reg->key_bucket_count = key_want;
+        key_table             = old;
+    }
+    TagFSLockDrop(&reg->lock);
+    kfree(table);
+    kfree(key_table);
 }
 
 static uint16_t lookup_unlocked(TagRegistry* reg, const TagSpelling* tag) {
@@ -280,6 +349,7 @@ int tag_registry_init(TagRegistry* reg) {
 
     reg->bucket_count     = TAGFS_REG_BUCKETS;
     reg->key_bucket_count = TAGFS_KEY_BUCKETS;
+    reg->key_groups       = 0;
     reg->by_id_capacity   = 64;
     reg->total_tags       = 0;
     reg->next_id          = 0;
@@ -363,7 +433,10 @@ error_t TagRegistryIntern(TagRegistry* reg, const TagSpelling* tag, uint16_t* ou
 
     TagFSLockTake(&reg->lock);
     rc = intern_unlocked(reg, tag, out_id);
+    bool crowded = RegistryCrowded(reg);
     TagFSLockDrop(&reg->lock);
+    if (crowded)
+        RegistryRehash(reg);
 
     /* Said once for the registry: the ids of a v1 volume are never given back,
      * so a registry that is full stays full, and every later refusal is the
@@ -770,6 +843,7 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block) {
                     "mounted\n", block);
             return -1;
         }
+        RegistryRehash(reg);
 
         if (image->next_block == 0) break;  /* end of chain */
 

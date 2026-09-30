@@ -31,7 +31,6 @@ static uint8_t  s_info[1024];
 static uint8_t  s_op[sizeof(ManifestOp) + 40] __attribute__((aligned(8)));
 static Crate    s_crates[2];
 static char     s_well_text[2][40];
-static uint32_t s_ids[STAND_ANSWER_IDS];
 
 /* One storage-deck op, asked the way a program asks it. The params are copied
  * in after the op's head; `in` and `out` are the two crates, either absent. */
@@ -252,14 +251,14 @@ static bool StandHighTag(char* text, size_t text_size, uint16_t* out_id)
     return false;
 }
 
-/* Whether a query of `count` spellings lists `file_id`. */
+/* Whether a query of `count` spellings lists `file_id`: its page from that id
+ * on begins with it. */
 static bool StandListed(const TagSpelling* tags, uint32_t count, uint32_t file_id)
 {
-    int n = tagfs_query_files(tags, count, s_ids, STAND_ANSWER_IDS);
-    for (int i = 0; i < n; i++)
-        if (s_ids[i] == file_id)
-            return true;
-    return false;
+    TagFSPage page;
+    uint32_t  first = 0;
+    return TagFSQueryPage(tags, count, file_id, &first, 1, false, &page) == OK &&
+           page.delivered == 1 && first == file_id;
 }
 
 /* The flags storage.getinfo gives a file, 0 when it would not answer. */

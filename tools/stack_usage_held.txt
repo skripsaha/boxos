@@ -25,7 +25,6 @@
 # again at 1.3, at 9456, once no write asked copy-on-write for a snapshot; and
 # at 1.3's Plot, at 5456: a write's block, a defrag's copy and a record's CRC
 # check are in the heap now, and meta_pool_delete's is the one block left.
-src/kernel/tagfs/metadata_pool/meta_pool.c:meta_pool_mirror_init 4240  1.4  uint8_t buf[TAGFS_BLOCK_SIZE]
 src/kernel/tagfs/metadata_pool/meta_pool.c:meta_pool_flush_retires 4192 1.4 uint8_t buf[TAGFS_BLOCK_SIZE]
 src/kernel/tagfs/metadata_pool/meta_pool.c:meta_pool_init        4176  1.4  MetaPoolBlock here
 src/kernel/tagfs/metadata_pool/meta_pool.c:meta_pool_delete      4176  1.4  uint8_t buf[TAGFS_BLOCK_SIZE]

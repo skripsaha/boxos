@@ -85,6 +85,19 @@ int crate_out_commit(const Crate *out, const OpContext *ctx,
     return 0;
 }
 
+int crate_out_commit_at(const Crate *out, const OpContext *ctx, uint64_t offset,
+                        const void *kbuf, uint64_t bytes)
+{
+    if (!out || !kbuf || bytes == 0) return 0;
+    if (offset > out->capacity || bytes > out->capacity - offset) return ERR_INVALID_ARGUMENT;
+    if (ctx && ctx->proc && ctx->proc->cabin) {
+        return vmm_user_buf_commit_out(ctx->proc->cabin->vmm, (uintptr_t)(out->addr + offset),
+                                        kbuf, (size_t)bytes);
+    }
+    memcpy((void *)(uintptr_t)(out->addr + offset), kbuf, (size_t)bytes);
+    return 0;
+}
+
 void crate_buf_free(void *kbuf)
 {
     if (kbuf) vmm_user_buf_free(kbuf);

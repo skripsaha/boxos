@@ -110,19 +110,12 @@ out:
 // A create with one of its allocations refused
 // ----------------------------------------------------------------------------
 
-static uint32_t s_found[256];
-
-/* Does the name's row of the tag index hold this file id? Asked of the index
+/* Does the tag index count this file id among the name's? Asked of the index
  * itself, so neither a Use Context nor the hidden/trashed filter can stand
- * between the question and the row. */
+ * between the question and the answer. */
 static bool StandNameFinds(uint16_t stem, uint32_t file_id)
 {
-    int n = tag_bitmap_query(tagfs_get_state()->bitmap_index, &stem, 1, NULL, 0,
-                             s_found, ARRAY_SIZE(s_found));
-    for (int i = 0; i < n; i++)
-        if (s_found[i] == file_id)
-            return true;
-    return false;
+    return TagBitmapHas(tagfs_get_state()->bitmap_index, stem, file_id);
 }
 
 static bool StandVolumeNames(uint32_t file_id)
@@ -198,18 +191,17 @@ TestResult TestStandCreateAllOrNothing(void)
     uint32_t   broken_at = 0;
     bool       swept     = false;
 
-    /* The name's tag and its row are made, if no test before made them, by one
-     * create before the sweep — the sweep measures a create, not the first
-     * create of a name. Then the ids are brought to a multiple of eight: the
-     * name's row widens by a byte for every eight ids (tag_bitmap.c), so a
-     * create takes one allocation more or fewer by where its id falls, and the
-     * ids the tests before this one spent differ from boot to boot. */
-    do {
-        TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0,
-                       "a create before the sweep interns the name and aligns the ids");
-        TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "and its file is deleted");
-        file_id = 0;
-    } while (tagfs_file_ceiling() % 8 != 0);
+    /* The name's tag is made, if no test before made it, by one create before
+     * the sweep — the sweep measures a create, not the first create of a name.
+     * That create also leaves the index and the map of live files as every
+     * create of the sweep finds them: a leaf of the map that was full is split
+     * by it and stays split, and what the name's members need for one more
+     * file is taken and given back by each create alike (tag_bitmap.c,
+     * file_map/). */
+    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0,
+                   "a create before the sweep interns the name");
+    TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "and its file is deleted");
+    file_id = 0;
     uint16_t stem = tagfs_tag_lookup("test_file");
     TEST_ASSERT(stem != TAGFS_INVALID_TAG_ID, "the name has a tag");
 

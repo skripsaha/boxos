@@ -5,7 +5,7 @@
 #include "deed_pen.h"
 #include "tagfs_reserved.h"
 #include "tag_registry/tag_registry.h"
-#include "tag_bitmap/tag_bitmap.h"
+#include "file_map/file_map.h"
 #include "file_table/file_table.h"
 #include "metadata_pool/meta_pool.h"
 #include "use_context.h"
@@ -236,45 +236,110 @@ static bool handle_belongs_here(const TagFSFileHandle *handle, const char *what)
  *
  * A mount brings up what is on the medium. Who has a file open is a fact about
  * this machine, and it is left alone.
+ *
+ * ‼ AND IT GROWS WITH WHAT IS OPEN. Its buckets were a fixed 32, so a machine
+ * with a thousand files open walked chains thirty long on every open and
+ * close. When it holds more entries than buckets it doubles: the new table is
+ * allocated outside the lock and the entries moved into it under the lock,
+ * and nothing is allocated under the lock at all — an entry for a file not yet
+ * open is made before the lock is taken again to put it in.
  */
-static OpenFileEntry *g_open_files[OPEN_FILE_BUCKETS];
+#define OPEN_FILES_FIRST 32u
+
+static OpenFileEntry  *g_open_first[OPEN_FILES_FIRST];
+static OpenFileEntry **g_open_files   = g_open_first;
+static uint32_t        g_open_buckets = OPEN_FILES_FIRST;
+static uint32_t        g_open_count   = 0;
 static TagFSLock g_open_table_lock = TAGFS_LOCK_INIT("openfiles", LOCK_RANK_LEAF);
 
-static uint32_t ofe_hash(uint32_t file_id)
+/* The file's entry, under g_open_table_lock; NULL when it is not open. */
+static OpenFileEntry *ofe_find(uint32_t file_id)
 {
-    return file_id % OPEN_FILE_BUCKETS;
+    for (OpenFileEntry *e = g_open_files[file_id % g_open_buckets]; e; e = e->next)
+        if (e->file_id == file_id)
+            return e;
+    return NULL;
+}
+
+/* Twice the buckets, if the table still holds more entries than it has when
+ * the lock is taken again. A table that cannot grow keeps its chains longer,
+ * and nothing else is lost. */
+static void ofe_grow(void)
+{
+    TagFSLockTake(&g_open_table_lock);
+    uint32_t want = g_open_count > g_open_buckets ? g_open_buckets * 2u : 0;
+    TagFSLockDrop(&g_open_table_lock);
+    if (want == 0)
+        return;
+
+    OpenFileEntry **table = kmalloc(sizeof(OpenFileEntry *) * want);
+    if (!table)
+        return;
+    memset(table, 0, sizeof(OpenFileEntry *) * want);
+
+    OpenFileEntry **old = NULL;
+    TagFSLockTake(&g_open_table_lock);
+    if (g_open_buckets * 2u == want) {
+        for (uint32_t b = 0; b < g_open_buckets; b++) {
+            OpenFileEntry *e = g_open_files[b];
+            while (e) {
+                OpenFileEntry *next = e->next;
+                e->next = table[e->file_id % want];
+                table[e->file_id % want] = e;
+                e = next;
+            }
+        }
+        old            = g_open_files;
+        g_open_files   = table;
+        g_open_buckets = want;
+        table          = NULL;
+    }
+    TagFSLockDrop(&g_open_table_lock);
+    kfree(table);
+    if (old && old != g_open_first)
+        kfree(old);
 }
 
 static OpenFileEntry *ofe_acquire(uint32_t file_id)
 {
     TagFSLockTake(&g_open_table_lock);
-    uint32_t bucket = ofe_hash(file_id);
-    OpenFileEntry *e = g_open_files[bucket];
-    while (e)
-    {
-        if (e->file_id == file_id)
-        {
-            e->ref_count++;
-            TagFSLockDrop(&g_open_table_lock);
-            return e;
-        }
-        e = e->next;
-    }
-    e = kmalloc(sizeof(OpenFileEntry));
-    if (!e)
-    {
+    OpenFileEntry *e = ofe_find(file_id);
+    if (e) {
+        e->ref_count++;
         TagFSLockDrop(&g_open_table_lock);
-        return NULL;
+        return e;
     }
-    e->file_id = file_id;
-    e->ref_count = 1;
-    TagFSLockInit(&e->write_lock, "writer", LOCK_RANK_WRITER);
-    e->async_write_owner  = NULL;
-    e->async_pending_head = NULL;
-    TagFSLockInit(&e->async_token_lock, "token", LOCK_RANK_LEAF);
-    e->next = g_open_files[bucket];
-    g_open_files[bucket] = e;
     TagFSLockDrop(&g_open_table_lock);
+
+    OpenFileEntry *made = kmalloc(sizeof(OpenFileEntry));
+    if (!made)
+        return NULL;
+    made->file_id = file_id;
+    made->ref_count = 1;
+    TagFSLockInit(&made->write_lock, "writer", LOCK_RANK_WRITER);
+    made->async_write_owner  = NULL;
+    made->async_pending_head = NULL;
+    TagFSLockInit(&made->async_token_lock, "token", LOCK_RANK_LEAF);
+
+    /* Another core may have opened the file meanwhile: its entry is the one,
+     * and this one is given back. */
+    TagFSLockTake(&g_open_table_lock);
+    e = ofe_find(file_id);
+    if (e) {
+        e->ref_count++;
+    } else {
+        uint32_t bucket = file_id % g_open_buckets;
+        made->next = g_open_files[bucket];
+        g_open_files[bucket] = made;
+        g_open_count++;
+        e    = made;
+        made = NULL;
+    }
+    bool grow = g_open_count > g_open_buckets;
+    TagFSLockDrop(&g_open_table_lock);
+    kfree(made);
+    if (grow)
+        ofe_grow();
     return e;
 }
 
@@ -298,13 +363,13 @@ static void ofe_release(OpenFileEntry *ofe)
         // FIX: Remove from table FIRST while holding table_lock,
         // then RELEASE table_lock BEFORE acquiring write_lock.
         // This prevents nested spinlock deadlock.
-        uint32_t bucket = ofe_hash(ofe->file_id);
-        OpenFileEntry **ptr = &g_open_files[bucket];
+        OpenFileEntry **ptr = &g_open_files[ofe->file_id % g_open_buckets];
         while (*ptr)
         {
             if (*ptr == ofe)
             {
                 *ptr = ofe->next;
+                g_open_count--;
                 break;
             }
             ptr = &(*ptr)->next;
@@ -369,15 +434,11 @@ static bool hold_entry_still_listed(const TagFSFileHandle *handle, uint32_t *out
     if (!handle || !handle->ofe) {
         return false;
     }
-    bool found = false;
     TagFSLockTake(&g_open_table_lock);
-    for (OpenFileEntry *e = g_open_files[ofe_hash(handle->ofe->file_id)]; e; e = e->next) {
-        if (e == handle->ofe) {
-            found = true;
-            if (out_refs) *out_refs = e->ref_count;
-            break;
-        }
-    }
+    OpenFileEntry *e     = ofe_find(handle->ofe->file_id);
+    bool           found = e == handle->ofe;
+    if (found && out_refs)
+        *out_refs = e->ref_count;
     TagFSLockDrop(&g_open_table_lock);
     return found;
 }
@@ -389,9 +450,9 @@ static void TagFSHoldGroundOpenFile(void)
     if (g_hold_handle) {
         return;
     }
-    uint32_t ids[8];
-    int n = tagfs_list_all_files(ids, 8);
-    if (n <= 0) {
+    uint32_t  ids[1];
+    TagFSPage page;
+    if (TagFSListPage(1, ids, 1, false, &page) != OK || page.delivered == 0) {
         kprintf("[TagFS HOLDGROUND] this volume has no file to hold open\n");
         return;
     }
@@ -671,6 +732,10 @@ static void TagFSProbeDrive(void)
                 : "which is all the medium offered");
 }
 
+/* A run of any length, in the volume's own sectors: the room cuts it into the
+ * runs the medium takes (BoardroomSeatRun). There used to be a door with a
+ * 16-bit count in front of these, and a bitmap of a volume past a terabyte
+ * went through it as a read of 0 sectors. */
 int tagfs_volume_read(uint64_t vlba, uint32_t count, void *buffer)
 {
     return BoardroomRead(g_tagfs_seat, g_volume_base + vlba, count, buffer);
@@ -679,16 +744,6 @@ int tagfs_volume_read(uint64_t vlba, uint32_t count, void *buffer)
 int tagfs_volume_write(uint64_t vlba, uint32_t count, const void *buffer)
 {
     return BoardroomWrite(g_tagfs_seat, g_volume_base + vlba, count, buffer);
-}
-
-static int disk_read_sectors(uint64_t vlba, uint16_t count, void *buffer)
-{
-    return tagfs_volume_read(vlba, count, buffer);
-}
-
-static int disk_write_sectors(uint64_t vlba, uint16_t count, const void *buffer)
-{
-    return tagfs_volume_write(vlba, count, buffer);
 }
 
 /* A Deed occupies one block wherever it sits — the pen says how many sectors
@@ -730,7 +785,7 @@ static bool ground_ahead_is_blank(uint32_t from, uint32_t to, uint32_t *out_set)
 
     for (uint32_t off = first_byte / TAGFS_BLOCK_SIZE * TAGFS_BLOCK_SIZE;
          off < last_byte; off += TAGFS_BLOCK_SIZE) {
-        if (disk_read_sectors(base + off / TAGFS_SECTOR_SIZE,
+        if (tagfs_volume_read(base + off / TAGFS_SECTOR_SIZE,
                               TAGFS_BLOCK_SECTORS, buf) != 0) {
             /* Nothing was learned, so nothing is reported: a partial tally
              * from the blocks read before the failure would have the caller
@@ -1835,7 +1890,7 @@ static void ReadAheadPrefetch(uint32_t start_block, uint32_t count) {
 
         if (len == 1) {
             uint8_t tmp[TAGFS_BLOCK_SIZE];
-            if (disk_read_sectors(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {
+            if (tagfs_volume_read(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {
                 TagFSLockTake(&g_read_ahead_lock);
                 memcpy(g_read_ahead_cache[slots[i]].data, tmp, TAGFS_BLOCK_SIZE);
                 g_read_ahead_cache[slots[i]].block = to_fetch[i];
@@ -1846,8 +1901,7 @@ static void ReadAheadPrefetch(uint32_t start_block, uint32_t count) {
             continue;
         }
 
-        if (disk_read_sectors(block_to_vlba(to_fetch[i]),
-                              (uint16_t)(len * 8u), run) == 0) {
+        if (tagfs_volume_read(block_to_vlba(to_fetch[i]), len * TAGFS_BLOCK_SECTORS, run) == 0) {
             TagFSLockTake(&g_read_ahead_lock);
             for (uint32_t k = 0; k < len; k++) {
                 memcpy(g_read_ahead_cache[slots[i + k]].data,
@@ -1951,7 +2005,7 @@ static int read_block(uint32_t block, void *buffer)
         // Braid failed — fall through to direct disk read as recovery path
     }
 
-    int rc = disk_read_sectors(block_to_vlba(block), 8, buffer);
+    int rc = tagfs_volume_read(block_to_vlba(block), 8, buffer);
     if (rc == 0)
         (void)IntegrityVerify(block, buffer);   // detect silent bit-rot on read
     return rc;
@@ -1973,7 +2027,7 @@ static int write_block(uint32_t block, const void *buffer)
         // Braid failed — fall through to direct disk write as recovery path
     }
     if (rc != 0)
-        rc = disk_write_sectors(block_to_vlba(block), 8, (void *)buffer);
+        rc = tagfs_volume_write(block_to_vlba(block), 8, (void *)buffer);
 
     // Drop any stale read-ahead copy + record the new integrity digest.
     if (rc == 0) {
@@ -2011,50 +2065,6 @@ error_t tagfs_write_block(uint32_t block, const void *buffer) {
  * corrects the count in RAM and does not write it, so without this the same
  * wrong number came back off the medium on every boot for ever. */
 static uint64_t g_ledger_free_as_read;
-
-// ----------------------------------------------------------------------------
-// System behavior tag helpers
-// ----------------------------------------------------------------------------
-
-// Check if a file has trashed or hidden tag. skip_trashed/skip_hidden control
-// which behavior tags to check (allows callers to exempt explicitly-queried tags).
-static bool file_has_system_behavior_tag(uint32_t file_id,
-                                         bool skip_trashed, bool skip_hidden)
-{
-    if (!skip_trashed && !skip_hidden)
-        return false;
-
-    uint16_t trashed_id = g_wk.trashed;
-    uint16_t hidden_id  = g_wk.hidden;
-
-    int count = tag_bitmap_tag_count_for_file(g_state.bitmap_index, file_id);
-    if (count <= 0)
-        return false;
-
-    uint16_t *file_tags = kmalloc(sizeof(uint16_t) * (uint32_t)count);
-    if (!file_tags)
-        return true;
-
-    int actual = tag_bitmap_tags_for_file(g_state.bitmap_index, file_id, file_tags, (uint32_t)count);
-
-    bool found = false;
-    for (int i = 0; i < actual; i++)
-    {
-        if (skip_trashed && file_tags[i] == trashed_id)
-        {
-            found = true;
-            break;
-        }
-        if (skip_hidden && file_tags[i] == hidden_id)
-        {
-            found = true;
-            break;
-        }
-    }
-
-    kfree(file_tags);
-    return found;
-}
 
 // ----------------------------------------------------------------------------
 // tagfs_init_well_known_tags
@@ -2169,6 +2179,118 @@ static error_t mount_refused(const char *what, error_t why)
             what, (int)why);
     tagfs_clear_the_ground();
     return why;
+}
+
+/*
+ * One live file the table names, held against the pool.
+ *
+ * ‼ WHERE THE POOL SAYS THE NEWEST RECORD IS, WINS. The pool is append-only and
+ * the mount's walk of it read it in order, so its answer is the newest record
+ * for this file that ever reached the medium. A table naming somewhere else is
+ * a table that missed a flush the pool did not — the exact state a power cut
+ * between the two writes of one metadata update leaves. Correcting it here is
+ * what turns that from a lost file into a file one sync behind.
+ *
+ * The record that walk holds is the one at the corrected place, unpacked and
+ * summed already, so it is what is read; the medium is asked only for a file
+ * whose record memory could not hold. A file with nothing readable anywhere,
+ * or whose newest record is no longer ACTIVE, leaves the table and the map of
+ * live files; the rest have their extents marked in the roll call's map, when
+ * there is one, and every tag they wear put into the tag index.
+ */
+static void mount_check_file(uint32_t fid, uint8_t *computed_bm, uint32_t *checked,
+                             uint32_t *corrected, uint32_t *lost)
+{
+    uint32_t mb, mo;
+    if (file_table_lookup(fid, &mb, &mo) != 0)
+        return;
+
+    uint32_t pb, po;
+    bool     pooled = meta_pool_mirror_where(fid, &pb, &po) == 0;
+    if (pooled && (pb != mb || po != mo))
+    {
+        kprintf("[TagFS FSCK] file %u is named at block %u+%u and "
+                "this volume's newest metadata for it is at block "
+                "%u+%u — the pool is the newer of the two, and the "
+                "table is corrected to it\n",
+                fid, mb, mo, pb, po);
+        file_table_update(fid, pb, po);
+        mb = pb;
+        mo = po;
+        (*corrected)++;
+    }
+
+    TagFSMetadata meta;
+    memset(&meta, 0, sizeof(meta));
+    int read = pooled ? meta_pool_read_cached(fid, &meta) : -1;
+    if (read != 0)
+        read = meta_pool_read(mb, mo, &meta);
+    if (read != 0)
+    {
+        /* Nothing readable is left for this file anywhere: the table's place
+         * will not unpack and the pool has no newer one to offer. The entry
+         * goes, and with it the file — so it is said with kprintf and survives
+         * into a shipped build. This line was the silence that turned a lost
+         * file into a mystery. */
+        kprintf("[TagFS FSCK] file %u is named at block %u+%u and "
+                "there is no readable metadata there or anywhere "
+                "else in this volume's pool — the file is gone and "
+                "its name goes with it\n", fid, mb, mo);
+        (*lost)++;
+        file_table_delete(fid);
+        FileMapDrop(g_state.files, fid);
+        return;
+    }
+
+    if (!(meta.flags & TAGFS_FILE_ACTIVE))
+    {
+        /* A delete that did not finish: the table's row goes and the extents
+         * are not marked, so the roll call gives the blocks back. */
+        file_table_delete(fid);
+        FileMapDrop(g_state.files, fid);
+        tagfs_metadata_free(&meta);
+        return;
+    }
+
+    for (uint32_t e = 0; computed_bm && e < meta.extent_count; e++)
+    {
+        uint32_t start = meta.extents[e].start_block;
+        uint32_t count = meta.extents[e].block_count;
+        for (uint32_t b = start; b < start + count && b < g_state.layout.data_blocks; b++)
+            bitmap_set_bit(computed_bm, b);
+    }
+    (*checked)++;
+
+    for (uint32_t t = 0; t < meta.tag_count; t++)
+        tag_bitmap_set(g_state.bitmap_index, meta.tag_ids[t], fid);
+
+    tagfs_metadata_free(&meta);
+}
+
+/* Every live file, a batch of ids at a time out of the map of them: the walk
+ * costs the files the volume holds, not every id it ever issued, and no lock
+ * is held while a file is checked — which may take it out of the map. A row
+ * at or past the Ledger's next_file_id names an id the volume never issued —
+ * a table written ahead of its Ledger — and is left as it lies, unchecked and
+ * in no index, as it always was (nextfid, step 1.6). */
+static void mount_walk_files(uint8_t *computed_bm, uint32_t *checked,
+                             uint32_t *corrected, uint32_t *lost)
+{
+    uint32_t batch[64];
+    uint32_t from = 1;
+    uint32_t n;
+    while ((n = FileMapRows(g_state.files, from, batch, ARRAY_SIZE(batch))) > 0)
+    {
+        for (uint32_t i = 0; i < n; i++)
+        {
+            if (batch[i] >= g_state.ledger.next_file_id)
+                return;
+            mount_check_file(batch[i], computed_bm, checked, corrected, lost);
+        }
+        if (batch[n - 1] == 0xFFFFFFFFu)
+            break;
+        from = batch[n - 1] + 1;
+    }
 }
 
 error_t tagfs_init(void) {
@@ -2390,6 +2512,13 @@ error_t tagfs_init(void) {
      * still finds everything after them, and nothing in this kernel reads
      * either one to decide anything.
      */
+    // --- The map of live files: the table's rows and the pool's records ---
+    g_state.files = FileMapCreate();
+    if (!g_state.files) {
+        return mount_refused("there is no memory for its map of live files",
+                             ERR_NO_MEMORY);
+    }
+
     // --- File Table ---
     if (file_table_init(data_block_of(g_state.layout.file_table_block)) != OK) {
         return mount_refused("its file table would not read",
@@ -2403,7 +2532,7 @@ error_t tagfs_init(void) {
     }
 
     // --- Bitmap Index ---
-    g_state.bitmap_index = tag_bitmap_create(TAGFS_BITMAP_INITIAL_TAG_CAP, TAGFS_BITMAP_INITIAL_FILE_CAP);
+    g_state.bitmap_index = tag_bitmap_create(TAGFS_BITMAP_INITIAL_TAG_CAP);
     if (!g_state.bitmap_index) {
         return mount_refused("there is no memory for its tag index",
                              ERR_NO_MEMORY);
@@ -2456,7 +2585,10 @@ error_t tagfs_init(void) {
      * road the free-block count already takes further down: the number that
      * can be derived wins over the number that was remembered.
      */
-    meta_pool_mirror_init(g_state.ledger.next_file_id + 64);
+    if (meta_pool_mirror_init() != 0) {
+        return mount_refused("there is no memory to read its metadata pool through",
+                             ERR_NO_MEMORY);
+    }
 
     /*
      * --- Mount-time roll call: every owner of a block, against the map ---
@@ -2491,85 +2623,7 @@ error_t tagfs_init(void) {
         uint32_t entries_corrected = 0;
         uint32_t files_lost = 0;
 
-        for (uint32_t fid = 1; fid < g_state.ledger.next_file_id; fid++)
-        {
-            uint32_t mb, mo;
-            if (file_table_lookup(fid, &mb, &mo) != 0)
-                continue;
-
-            /* ‼ WHERE THE POOL SAYS THE NEWEST RECORD IS, WINS.
-             *
-             * The pool is append-only and the mirror walked it in order,
-             * so its answer is the newest record for this file that ever
-             * reached the medium. A table naming somewhere else is a table
-             * that missed a flush the pool did not — the exact state a
-             * power cut between the two writes of one metadata update
-             * leaves. Correcting it here is what turns that from a lost
-             * file into a file one sync behind. */
-            uint32_t pb, po;
-            if (meta_pool_mirror_where(fid, &pb, &po) == 0 &&
-                (pb != mb || po != mo))
-            {
-                kprintf("[TagFS FSCK] file %u is named at block %u+%u and "
-                        "this volume's newest metadata for it is at block "
-                        "%u+%u — the pool is the newer of the two, and the "
-                        "table is corrected to it\n",
-                        fid, mb, mo, pb, po);
-                file_table_update(fid, pb, po);
-                mb = pb;
-                mo = po;
-                entries_corrected++;
-            }
-
-            TagFSMetadata meta;
-            memset(&meta, 0, sizeof(meta));
-            if (meta_pool_read(mb, mo, &meta) != 0)
-            {
-                /* Nothing readable is left for this file anywhere: the
-                 * table's place will not unpack and the pool has no newer
-                 * one to offer. The entry goes, and with it the file — so
-                 * it is said with kprintf and survives into a shipped
-                 * build. This line was the silence that turned a lost file
-                 * into a mystery. */
-                kprintf("[TagFS FSCK] file %u is named at block %u+%u and "
-                        "there is no readable metadata there or anywhere "
-                        "else in this volume's pool — the file is gone and "
-                        "its name goes with it\n", fid, mb, mo);
-                files_lost++;
-                file_table_delete(fid);
-                continue;
-            }
-
-            if (!(meta.flags & TAGFS_FILE_ACTIVE))
-            {
-                // File was marked for deletion (journal replay or incomplete delete).
-                // Complete the cleanup: remove file_table entry and free blocks.
-                debug_printf("[TagFS FSCK] File %u has ACTIVE=0 — completing cleanup\n", fid);
-                file_table_delete(fid);
-                // Don't mark extents in computed_bm → blocks will be reclaimed
-                tagfs_metadata_free(&meta);
-                continue;
-            }
-
-            for (uint32_t e = 0; computed_bm && e < meta.extent_count; e++)
-            {
-                uint32_t start = meta.extents[e].start_block;
-                uint32_t count = meta.extents[e].block_count;
-                for (uint32_t b = start; b < start + count && b < g_state.layout.data_blocks; b++)
-                {
-                    bitmap_set_bit(computed_bm, b);
-                }
-            }
-            files_checked++;
-
-            // Rebuild bitmap index from disk metadata
-            for (uint32_t t = 0; t < meta.tag_count; t++)
-            {
-                tag_bitmap_set(g_state.bitmap_index, meta.tag_ids[t], fid);
-            }
-
-            tagfs_metadata_free(&meta);
-        }
+        mount_walk_files(computed_bm, &files_checked, &entries_corrected, &files_lost);
 
         if (computed_bm)
         {
@@ -2773,15 +2827,15 @@ error_t tagfs_init(void) {
     /*
      * ‼ WHAT THIS MOUNT KEEPS ON THE KERNEL HEAP, AND FOR HOW MANY NAMES.
      *
-     * A mount builds its mirrors in kernel memory, and some of them are sized
-     * by every file id the volume ever issued rather than by the files it
-     * has: the pool mirror runs to next_file_id, so an id spent on a file
-     * deleted years ago still costs every mount its slot. The heap grows only
-     * as far as the machine has room, so that is a volume that can one day
-     * refuse to mount because of its history and not its contents — and
-     * nothing said what a mount costs until now. Three numbers, so that two
-     * mounts of one volume a known number of dead ids apart measure the price
-     * of one (logcheck `quill`, fidhistory). The bytes are the difference of
+     * A mount builds its indexes in kernel memory. They used to be sized by
+     * every file id the volume ever issued rather than by the files it has —
+     * the pool's mirror, the table's rows and every tag's bitmap ran to
+     * next_file_id — so an id spent on a file deleted years ago cost every
+     * mount its slot, and a volume could one day refuse to mount because of
+     * its history and not its contents. Now each holds the live files only
+     * (file_map/, tag_bitmap/). Three numbers, so that two mounts of one
+     * volume a known number of dead ids apart measure what a dead id costs,
+     * which is nothing (logcheck `quill`, fidhistory). The bytes are the difference of
      * KHeapLiveBytes across the mount, every road of the heap; another core
      * allocating meanwhile is in the figure too, which is why the harness
      * judges a slope over tens of thousands of ids and never one mount.
@@ -3010,6 +3064,8 @@ static void tagfs_clear_the_ground(void)
 
     file_table_shutdown();
     meta_pool_shutdown(false);
+    FileMapDestroy(g_state.files);
+    g_state.files = NULL;
 
     BlockMapUnmount();
 
@@ -3502,8 +3558,12 @@ static int tagfs_delete_file_inside(uint32_t file_id)
     // file_table_delete before block_free ensures that on crash,
     // fsck won't find a file referencing freed (and possibly reused) blocks.
 
-    // Remove from bitmap index
-    tag_bitmap_remove_file(g_state.bitmap_index, file_id);
+    // Out from under every tag its record says it wears — or, with no record
+    // to say, every tag the index has
+    if (has_meta == 0)
+        tag_bitmap_remove_file(g_state.bitmap_index, file_id, meta.tag_ids, meta.tag_count);
+    else
+        tag_bitmap_remove_file(g_state.bitmap_index, file_id, NULL, 0);
 
     // Delete from file table (commit point: file officially gone)
     file_table_delete(file_id);
@@ -3511,10 +3571,11 @@ static int tagfs_delete_file_inside(uint32_t file_id)
     // And the ground it kept in hand for its growth
     AllotmentRelease(file_id);
 
-    // Free data blocks if we could read metadata
-    if (has_meta == 0 && meta.extents)
+    // Free data blocks if we could read metadata — and the record's copy, an
+    // empty file's too, whose tags and name used to be left on the heap
+    if (has_meta == 0)
     {
-        for (uint32_t i = 0; i < meta.extent_count; i++)
+        for (uint32_t i = 0; meta.extents && i < meta.extent_count; i++)
         {
             tagfs_free_blocks_internal(meta.extents[i].start_block, meta.extents[i].block_count);
         }
@@ -3823,28 +3884,7 @@ bool tagfs_has_tag(uint32_t file_id, uint16_t tag_id)
 
 static bool tagfs_has_tag_inside(uint32_t file_id, uint16_t tag_id)
 {
-    TagBitmapIndex *idx = g_state.bitmap_index;
-    if (!idx)
-        return false;
-
-    TagFSLockTake(&idx->lock);
-
-    if ((uint32_t)tag_id >= idx->bitmap_capacity || !idx->bitmaps[tag_id])
-    {
-        TagFSLockDrop(&idx->lock);
-        return false;
-    }
-
-    TagBitmap *bm = idx->bitmaps[tag_id];
-    uint32_t byte_idx = file_id / 8;
-    uint32_t bit_idx = file_id % 8;
-    uint32_t bm_bytes = (bm->bit_count + 7) / 8;
-
-    bool result = (byte_idx < bm_bytes) &&
-                  (bm->bits[byte_idx] & (1 << bit_idx));
-
-    TagFSLockDrop(&idx->lock);
-    return result;
+    return TagBitmapHas(g_state.bitmap_index, tag_id, file_id);
 }
 
 static error_t tagfs_add_tag_string_inside(uint32_t file_id, const TagSpelling *tag);
@@ -3902,205 +3942,38 @@ static int tagfs_remove_tag_string_inside(uint32_t file_id, const TagSpelling *t
     /* Remove by what the text names. The registry keys tags by (key, value),
      * so a bare key names no one tag of its own: unset "color" drops
      * "color:red" and a bare "color" alike, and unset "color:red" drops that
-     * tag alone. */
-    int count = tag_bitmap_tag_count_for_file(g_state.bitmap_index, file_id);
-    if (count <= 0)
+     * tag alone. The tags a file wears are its record's. */
+    TagFSMetadata meta;
+    memset(&meta, 0, sizeof(meta));
+    if (tagfs_get_metadata(file_id, &meta) != 0)
         return -1;
 
-    uint16_t *file_tags = kmalloc(sizeof(uint16_t) * (uint32_t)count);
-    if (!file_tags)
-        return -1;
-
-    int actual  = tag_bitmap_tags_for_file(g_state.bitmap_index, file_id,
-                                           file_tags, (uint32_t)count);
     int removed = 0;
-    for (int i = 0; i < actual; i++) {
-        if (tag_named_by(file_tags[i], tag) && tagfs_remove_tag(file_id, file_tags[i]) == 0)
+    for (uint32_t i = 0; i < meta.tag_count; i++) {
+        if (tag_named_by(meta.tag_ids[i], tag) && tagfs_remove_tag(file_id, meta.tag_ids[i]) == 0)
             removed++;
     }
 
-    kfree(file_tags);
+    tagfs_metadata_free(&meta);
     return removed > 0 ? 0 : -1;
 }
 
 // ----------------------------------------------------------------------------
-// Query
+// The next file id — the questions of which files there are live in query/
 // ----------------------------------------------------------------------------
-
-static int tagfs_query_files_inside(const TagSpelling *tags, uint32_t count,
-                                    uint32_t *out_file_ids, uint32_t max_results);
-
-int tagfs_query_files(const TagSpelling *tags, uint32_t count,
-                      uint32_t *out_file_ids, uint32_t max_results)
-{
-    if (!tagfs_enter())
-        return -(int)ERR_TAGFS_NOT_INITIALIZED;
-    int rc = tagfs_query_files_inside(tags, count, out_file_ids, max_results);
-    tagfs_leave();
-    return rc;
-}
-
-/* A query leaves out the files wearing trashed or hidden, unless it names the
- * tag itself — plainly or through a wildcard of its key. */
-static void query_names_well_known(const uint16_t *tag_ids, uint32_t tag_count,
-                                   const TagIdList *groups, uint32_t group_count,
-                                   bool *out_trashed, bool *out_hidden)
-{
-    *out_trashed = false;
-    *out_hidden  = false;
-    for (uint32_t i = 0; i < tag_count; i++) {
-        *out_trashed |= tag_ids[i] == g_wk.trashed;
-        *out_hidden  |= tag_ids[i] == g_wk.hidden;
-    }
-    for (uint32_t g = 0; g < group_count; g++) {
-        for (uint32_t k = 0; k < groups[g].count; k++) {
-            *out_trashed |= groups[g].ids[k] == g_wk.trashed;
-            *out_hidden  |= groups[g].ids[k] == g_wk.hidden;
-        }
-    }
-}
-
-static int tagfs_query_files_inside(const TagSpelling *tags, uint32_t count,
-                                    uint32_t *out_file_ids, uint32_t max_results)
-{
-    if (!tags || count == 0 || !out_file_ids || max_results == 0)
-        return 0;
-
-    uint16_t *tag_ids = kmalloc(sizeof(uint16_t) * count);
-    if (!tag_ids)
-        return -(int)ERR_NO_MEMORY;
-
-    /* A wildcard's ids are copies (TagRegistryKeyIds): the registry frees its
-     * own array of a key when the key's next tag outgrows it, and that can
-     * happen on another core while this query reads. */
-    TagIdList *groups = kmalloc(sizeof(TagIdList) * count);
-    if (!groups)
-    {
-        kfree(tag_ids);
-        return -(int)ERR_NO_MEMORY;
-    }
-
-    uint32_t tag_count = 0;
-    uint32_t group_count = 0;
-    int      result = 0;
-
-    for (uint32_t i = 0; i < count; i++)
-    {
-        if (TagSpellingIsWildcard(&tags[i]))
-        {
-            TagIdList *grp = &groups[group_count];
-            if (TagRegistryKeyIds(g_state.registry, tags[i].key, tags[i].key_len, grp) != OK)
-            {
-                result = -(int)ERR_NO_MEMORY;
-                goto out;
-            }
-            if (grp->count > 0)
-                group_count++;
-        }
-        else
-        {
-            uint16_t tid = TagRegistryLookup(g_state.registry, &tags[i]);
-            if (tid == TAGFS_INVALID_TAG_ID)
-            {
-                // Tag not in registry — no files can match
-                goto out;
-            }
-            tag_ids[tag_count++] = tid;
-        }
-    }
-
-    result = tag_bitmap_query(g_state.bitmap_index,
-                              tag_ids, tag_count,
-                              groups, group_count,
-                              out_file_ids, max_results);
-
-    // Post-filter: remove trashed/hidden files unless explicitly queried
-    if (result > 0)
-    {
-        bool query_has_trashed, query_has_hidden;
-        query_names_well_known(tag_ids, tag_count, groups, group_count,
-                               &query_has_trashed, &query_has_hidden);
-
-        bool skip_trashed = !query_has_trashed && g_wk.trashed != TAGFS_INVALID_TAG_ID;
-        bool skip_hidden = !query_has_hidden && g_wk.hidden != TAGFS_INVALID_TAG_ID;
-
-        if (skip_trashed || skip_hidden)
-        {
-            int filtered = 0;
-            for (int i = 0; i < result; i++)
-            {
-                if (!file_has_system_behavior_tag(out_file_ids[i], skip_trashed, skip_hidden))
-                {
-                    out_file_ids[filtered++] = out_file_ids[i];
-                }
-            }
-            result = filtered;
-        }
-    }
-
-out:
-    for (uint32_t g = 0; g < group_count; g++)
-        kfree(groups[g].ids);
-    kfree(tag_ids);
-    kfree(groups);
-    return result;
-}
-
-static int tagfs_list_all_files_inside(uint32_t *out_file_ids, uint32_t max_results);
 
 uint32_t tagfs_file_ceiling(void)
 {
     if (!tagfs_enter())
         return 0;
-    /* Under g_state.lock for the same reason the scan bound below is: create
-     * bumps next_file_id under it, and a lock-free read can see the value
-     * from before a create that has already returned to its caller. */
+    /* Under g_state.lock: create bumps next_file_id under it, and a lock-free
+     * read can see the value from before a create that has already returned
+     * to its caller. */
     TagFSLockTake(&g_state.lock);
     uint32_t ceiling = g_state.ledger.next_file_id;
     TagFSLockDrop(&g_state.lock);
     tagfs_leave();
     return ceiling;
-}
-
-int tagfs_list_all_files(uint32_t *out_file_ids, uint32_t max_results)
-{
-    if (!tagfs_enter())
-        return 0;
-    int rc = tagfs_list_all_files_inside(out_file_ids, max_results);
-    tagfs_leave();
-    return rc;
-}
-
-static int tagfs_list_all_files_inside(uint32_t *out_file_ids, uint32_t max_results)
-{
-    if (!out_file_ids || max_results == 0)
-        return 0;
-
-    uint32_t found = 0;
-    /* Snapshot the scan bound under g_state.lock. create bumps next_file_id
-     * under this lock, so a lock-free read here can observe a stale pre-
-     * increment value (x86-TSO store buffer / no acquire) and truncate the scan
-     * below a just-created fid — hiding a file whose create() already returned
-     * to the caller (the cross-core half of write_concurrent "file not found").
-     * Snapshot then release so the per-fid file_table locking below stays
-     * unnested. */
-    TagFSLockTake(&g_state.lock);
-    uint32_t max_id = g_state.ledger.next_file_id;
-    TagFSLockDrop(&g_state.lock);
-
-    for (uint32_t fid = 1; fid < max_id && found < max_results; fid++)
-    {
-        uint32_t mb, mo;
-        if (file_table_lookup(fid, &mb, &mo) == 0 && mb != 0)
-        {
-            // Skip files with trashed/hidden system behavior tags
-            if (file_has_system_behavior_tag(fid, true, true))
-                continue;
-            out_file_ids[found++] = fid;
-        }
-    }
-
-    return (int)found;
 }
 
 // ----------------------------------------------------------------------------
@@ -4733,70 +4606,3 @@ static error_t tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
     return rc;
 }
 
-static uint32_t tagfs_get_fragmentation_score_inside(uint32_t *out_files, uint32_t *out_gaps);
-
-uint32_t tagfs_get_fragmentation_score(uint32_t *out_files, uint32_t *out_gaps)
-{
-    if (out_files)
-        *out_files = 0;
-    if (out_gaps)
-        *out_gaps = 0;
-    if (!tagfs_enter())
-        return 0;
-    uint32_t rc = tagfs_get_fragmentation_score_inside(out_files, out_gaps);
-    tagfs_leave();
-    return rc;
-}
-
-/*
- * ‼ COUNTED WHERE A READ HAS TO SEEK, NOT BY HOW THE RECORD SPLITS A FILE.
- *
- * The score used to be one less than each file's extent count, summed, and no
- * share of anything, while the tools print it as a percentage: a file written
- * 4 KiB at a time carries an extent per block, laid end to end, and read as
- * shredded though it reads in one run. And the gaps it stands for were sent
- * out as zero, never counted (CW-N9). A gap is a run that does not begin on
- * the block after the one before it ends; the score is the gaps as a share of
- * every step from one of a file's blocks to its next.
- */
-static uint32_t tagfs_get_fragmentation_score_inside(uint32_t *out_files, uint32_t *out_gaps)
-{
-    uint32_t files  = 0;
-    uint32_t gaps   = 0;
-    uint32_t steps  = 0;
-    uint32_t max_id = g_state.ledger.next_file_id;
-
-    for (uint32_t fid = 1; fid < max_id; fid++)
-    {
-        uint32_t mb, mo;
-        if (file_table_lookup(fid, &mb, &mo) != 0 || mb == 0)
-            continue;
-
-        TagFSMetadata meta;
-        memset(&meta, 0, sizeof(meta));
-        if (meta_pool_read(mb, mo, &meta) != 0)
-            continue;
-        if (meta.flags & TAGFS_FILE_ACTIVE)
-        {
-            uint32_t blocks = 0;
-            for (uint32_t e = 0; e < meta.extent_count && meta.extents; e++)
-            {
-                const FileExtent *run = &meta.extents[e];
-                if (e > 0 && run->start_block !=
-                             run[-1].start_block + run[-1].block_count)
-                    gaps++;
-                blocks += run->block_count;
-            }
-            if (blocks > 1)
-                steps += blocks - 1;
-            files++;
-        }
-        tagfs_metadata_free(&meta);
-    }
-
-    if (out_files)
-        *out_files = files;
-    if (out_gaps)
-        *out_gaps = gaps;
-    return steps ? (uint32_t)(((uint64_t)gaps * 100u + steps - 1) / steps) : 0;
-}

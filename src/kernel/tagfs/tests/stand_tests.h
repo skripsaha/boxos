@@ -27,6 +27,10 @@
 //                        comes twice, and the ground a growing file keeps
 // stand_plot_tests.c     the stand_plot suite: where a write may begin, what a
 //                        gap reads as, how a file's extents grow, and span
+// stand_index_tests.c    the stand_index suite: what the indexes of the live
+//                        files cost, a tag's members across a window's edge,
+//                        the registry's hashes growing, and more files than
+//                        the old ceiling asked a page at a time
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.

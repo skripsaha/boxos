@@ -1,6 +1,7 @@
 #include "meta_pool.h"
 #include "../tagfs.h"
 #include "../plot/plot.h"
+#include "../file_map/file_map.h"
 
 // Forward declarations - internal functions in tagfs.c. Both are meant for a
 // caller holding g_state.lock. A write's, a span's and a defrag's commit
@@ -45,13 +46,21 @@ static MetaPoolBlock g_fresh_block;
  * Order matters and is the whole reason this is an array and not a set. An
  * emptied block is unlinked by rewriting its PREDECESSOR's next_block, and the
  * predecessor is the entry before it — found in memory, without a second walk
- * of the medium per delete. A chain is a handful of blocks on any volume that
- * has ever been seen, so a linear search through it costs nothing worth
- * measuring and a hash of four entries would cost more to maintain than to
- * skip.
+ * of the medium per delete.
+ *
+ * ‼ AND EVERY LINK KEEPS ITS NUMBER. `link` counts from the head as the chain
+ * was walked at mount, and a link appended later takes the next number; one
+ * unlinked out of the middle takes its number with it and nobody else's
+ * moves. That number is what the map of live files keeps as where a record
+ * sits, so a record's place stays true whatever is unlinked — or gleaned off
+ * the front — around it. A number finds its link by halving (the numbers only
+ * rise along the chain), and a block finds its number through a hash that
+ * grows with the chain: the pool is appended to without end, and a walk of
+ * the whole chain on every metadata update is a cost that grows with it.
  */
 typedef struct {
     uint32_t block;
+    uint32_t link;
     uint16_t kept;
 } MetaPoolLink;
 
@@ -59,55 +68,137 @@ static MetaPoolLink* g_chain     = NULL;
 static uint32_t      g_chain_len = 0;
 static uint32_t      g_chain_cap = 0;
 
+/* Block -> link number, open addressed: a slot is 0 when empty and
+ * block + 1 otherwise, and a table is never more than half full. */
+typedef struct {
+    uint32_t block1;
+    uint32_t link;
+} MetaPoolSlot;
+
+static MetaPoolSlot* g_hash      = NULL;
+static uint32_t      g_hash_cap  = 0;     /* a power of two */
+
+static uint32_t hash_home(uint32_t block, uint32_t cap) {
+    return (block * 0x9E3779B1u) & (cap - 1u);
+}
+
+static void hash_put_into(MetaPoolSlot* table, uint32_t cap, uint32_t block, uint32_t link) {
+    uint32_t at = hash_home(block, cap);
+    while (table[at].block1 != 0 && table[at].block1 != block + 1u)
+        at = (at + 1u) & (cap - 1u);
+    table[at].block1 = block + 1u;
+    table[at].link   = link;
+}
+
+static bool hash_get(uint32_t block, uint32_t* out_link) {
+    if (!g_hash_cap) return false;
+    for (uint32_t at = hash_home(block, g_hash_cap);; at = (at + 1u) & (g_hash_cap - 1u)) {
+        if (g_hash[at].block1 == 0) return false;
+        if (g_hash[at].block1 == block + 1u) {
+            *out_link = g_hash[at].link;
+            return true;
+        }
+    }
+}
+
+/* Out of the table, and every slot after it in its run moved back to where a
+ * search from its home still finds it. */
+static void hash_del(uint32_t block) {
+    if (!g_hash_cap) return;
+    uint32_t mask = g_hash_cap - 1u;
+    uint32_t at   = hash_home(block, g_hash_cap);
+    while (g_hash[at].block1 != block + 1u) {
+        if (g_hash[at].block1 == 0) return;
+        at = (at + 1u) & mask;
+    }
+    for (uint32_t next = (at + 1u) & mask; g_hash[next].block1 != 0; next = (next + 1u) & mask) {
+        uint32_t home = hash_home(g_hash[next].block1 - 1u, g_hash_cap);
+        if (((next - home) & mask) >= ((next - at) & mask)) {
+            g_hash[at] = g_hash[next];
+            at = next;
+        }
+    }
+    g_hash[at].block1 = 0;
+}
+
 static void chain_release(void) {
     if (g_chain) kfree(g_chain);
+    if (g_hash) kfree(g_hash);
     g_chain     = NULL;
     g_chain_len = 0;
     g_chain_cap = 0;
+    g_hash      = NULL;
+    g_hash_cap  = 0;
 }
 
-// Make room for `want` links. Called before the disk block it will describe is
-// allocated, so running out of memory costs the volume nothing.
+// Make room for `want` links, in the chain and in its hash — the hash rebuilt
+// into a table twice the size, then put in place. Called before the disk block
+// the new link will describe is allocated, so running out of memory costs the
+// volume nothing.
 static int chain_reserve(uint32_t want) {
-    if (want <= g_chain_cap) return 0;
+    if (want > g_chain_cap) {
+        uint32_t cap = g_chain_cap ? g_chain_cap * 2 : 8;
+        if (cap < want) cap = want;
 
-    uint32_t cap = g_chain_cap ? g_chain_cap * 2 : 8;
-    if (cap < want) cap = want;
+        MetaPoolLink* grown = kmalloc(sizeof(MetaPoolLink) * cap);
+        if (!grown) return -1;
+        if (g_chain && g_chain_len)
+            memcpy(grown, g_chain, sizeof(MetaPoolLink) * g_chain_len);
+        if (g_chain) kfree(g_chain);
+        g_chain     = grown;
+        g_chain_cap = cap;
+    }
 
-    MetaPoolLink* grown = kmalloc(sizeof(MetaPoolLink) * cap);
-    if (!grown) return -1;
-
-    if (g_chain && g_chain_len)
-        memcpy(grown, g_chain, sizeof(MetaPoolLink) * g_chain_len);
-    if (g_chain) kfree(g_chain);
-
-    g_chain     = grown;
-    g_chain_cap = cap;
+    if (want * 2u > g_hash_cap) {
+        uint32_t cap = g_hash_cap ? g_hash_cap : 16u;
+        while (want * 2u > cap) cap *= 2u;
+        MetaPoolSlot* table = kmalloc(sizeof(MetaPoolSlot) * cap);
+        if (!table) return -1;
+        memset(table, 0, sizeof(MetaPoolSlot) * cap);
+        for (uint32_t i = 0; i < g_chain_len; i++)
+            hash_put_into(table, cap, g_chain[i].block, g_chain[i].link);
+        if (g_hash) kfree(g_hash);
+        g_hash     = table;
+        g_hash_cap = cap;
+    }
     return 0;
 }
 
 static int chain_append(uint32_t block, uint16_t kept) {
     if (chain_reserve(g_chain_len + 1) != 0) return -1;
+    uint32_t link = g_chain_len ? g_chain[g_chain_len - 1].link + 1u : 0;
     g_chain[g_chain_len].block = block;
+    g_chain[g_chain_len].link  = link;
     g_chain[g_chain_len].kept  = kept;
     g_chain_len++;
+    hash_put_into(g_hash, g_hash_cap, block, link);
     return 0;
+}
+
+// Where in the chain the link numbered `link` sits, or g_chain_len when it has
+// been unlinked.
+static uint32_t chain_at_link(uint32_t link) {
+    uint32_t lo = 0, hi = g_chain_len;
+    while (lo < hi) {
+        uint32_t mid = (lo + hi) / 2;
+        if (g_chain[mid].link < link) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < g_chain_len && g_chain[lo].link == link ? lo : g_chain_len;
 }
 
 // Where in the chain this block sits, or g_chain_len when it is not in it at
 // all — which is a file table pointing somewhere the pool does not reach.
 static uint32_t chain_find(uint32_t block) {
-    for (uint32_t i = 0; i < g_chain_len; i++) {
-        if (g_chain[i].block == block) return i;
-    }
-    return g_chain_len;
+    uint32_t link;
+    return hash_get(block, &link) ? chain_at_link(link) : g_chain_len;
 }
 
 static void chain_drop(uint32_t index) {
     if (index >= g_chain_len) return;
-    for (uint32_t i = index; i + 1 < g_chain_len; i++) {
-        g_chain[i] = g_chain[i + 1];
-    }
+    hash_del(g_chain[index].block);
+    memmove(&g_chain[index], &g_chain[index + 1],
+            sizeof(MetaPoolLink) * (g_chain_len - index - 1));
     g_chain_len--;
 }
 
@@ -230,32 +321,22 @@ static uint16_t retire_apply(uint32_t block, MetaPoolBlock* blk) {
     return count_kept_records(blk);
 }
 
-// Memory Mirror: in-memory cache of all metadata, indexed by file_id
-static TagFSMetadata* g_mirror          = NULL;
-static uint32_t       g_mirror_capacity = 0;
-static bool*          g_mirror_valid    = NULL;
-
 /*
- * And WHERE in the pool each mirrored record was found.
+ * ‼ THE MIRROR IS THE MAP OF LIVE FILES (file_map/), AND SO IS WHERE.
  *
- * The mirror walk reads the chain in append order, so the last record it sees
- * for a file id is by construction the newest one on the medium. That makes
- * the pool the authority on where a file's metadata is — and a file table that
- * names somewhere else is a file table that missed a flush, which is exactly
- * what the mount fsck has to repair. Without this the mirror knew WHAT the
- * newest record said and not where it was, so it could not say the sentence
- * that corrects the table.
+ * Every record this pool writes goes into the map as the file's record, with
+ * the place it sits — its link's number and its byte offset — and the mount's
+ * walk puts there the newest record it finds for every file the table names.
+ * The walk reads the chain in append order, so the last record it sees for a
+ * file is by construction the newest one on the medium: the pool is the
+ * authority on where a file's metadata is, and a file table that names
+ * somewhere else is one that missed a flush, which is what the mount fsck
+ * corrects it to.
  */
-typedef struct {
-    uint32_t block;
-    uint32_t offset;
-} MetaPoolWhere;
-
-static MetaPoolWhere* g_mirror_where = NULL;
-
-// Seqlock for mirror: readers are lock-free, writers bump sequence.
-// Odd sequence = write in progress, even = stable.
-static volatile uint32_t g_mirror_seq   = 0;
+static FileMap* pool_files(void) {
+    TagFSState* fs = tagfs_get_state();
+    return fs ? fs->files : NULL;
+}
 
 // ---------------------------------------------------------------------------
 // Public: init / shutdown / flush
@@ -431,25 +512,6 @@ void meta_pool_shutdown(bool write_back) {
     }
     g_current_dirty = false;
 
-    if (g_mirror) {
-        for (uint32_t i = 0; i < g_mirror_capacity; i++) {
-            if (g_mirror_valid && g_mirror_valid[i]) {
-                tagfs_metadata_free(&g_mirror[i]);
-            }
-        }
-        kfree(g_mirror);
-        g_mirror = NULL;
-    }
-    if (g_mirror_valid) {
-        kfree(g_mirror_valid);
-        g_mirror_valid = NULL;
-    }
-    if (g_mirror_where) {
-        kfree(g_mirror_where);
-        g_mirror_where = NULL;
-    }
-    g_mirror_capacity = 0;
-
     chain_release();
     /* A retire that is still owed dies with the mount and costs the volume
      * nothing: the record it would have zeroed is intact metadata that nothing
@@ -477,79 +539,30 @@ void tagfs_metadata_free(TagFSMetadata* meta) {
 }
 
 // ---------------------------------------------------------------------------
-// Internal: deep-copy src into dst (allocates new memory for pointers)
+// Public: the mirror
 // ---------------------------------------------------------------------------
 
-// Returns true on success, false if any allocation failed (dst is left clean on failure).
-static bool mirror_deep_copy(const TagFSMetadata* src, TagFSMetadata* dst) {
-    dst->file_id       = src->file_id;
-    dst->flags         = src->flags;
-    dst->size          = src->size;
-    dst->created_time  = src->created_time;
-    dst->modified_time = src->modified_time;
-    dst->tag_count     = src->tag_count;
-    dst->extent_count  = src->extent_count;
-    dst->tag_ids  = NULL;
-    dst->extents  = NULL;
-    dst->filename = NULL;
-
-    if (src->tag_count > 0 && src->tag_ids) {
-        dst->tag_ids = kmalloc(sizeof(uint16_t) * src->tag_count);
-        if (!dst->tag_ids) return false;
-        memcpy(dst->tag_ids, src->tag_ids, sizeof(uint16_t) * src->tag_count);
-    }
-    if (src->extent_count > 0 && src->extents) {
-        dst->extents = kmalloc(sizeof(FileExtent) * src->extent_count);
-        if (!dst->extents) {
-            kfree(dst->tag_ids);
-            dst->tag_ids = NULL;
-            return false;
-        }
-        memcpy(dst->extents, src->extents, sizeof(FileExtent) * src->extent_count);
-    }
-    if (src->filename) {
-        size_t len = strlen(src->filename);
-        dst->filename = kmalloc(len + 1);
-        if (!dst->filename) {
-            kfree(dst->tag_ids);
-            kfree(dst->extents);
-            dst->tag_ids = NULL;
-            dst->extents = NULL;
-            return false;
-        }
-        memcpy(dst->filename, src->filename, len);
-        dst->filename[len] = '\0';
-    }
-    return true;
-}
-
-// ---------------------------------------------------------------------------
-// Public: mirror init / cached read
-// ---------------------------------------------------------------------------
-
-int meta_pool_mirror_init(uint32_t max_file_id) {
-    g_mirror_capacity = max_file_id + 1;
-    g_mirror       = kmalloc(sizeof(TagFSMetadata) * g_mirror_capacity);
-    g_mirror_valid = kmalloc(sizeof(bool) * g_mirror_capacity);
-    g_mirror_where = kmalloc(sizeof(MetaPoolWhere) * g_mirror_capacity);
-    if (!g_mirror || !g_mirror_valid || !g_mirror_where) {
-        debug_printf("[MetaPool] Mirror: alloc failed\n");
+/*
+ * The newest record of every file the table names, into the map of live
+ * files, from the chain the init walk proved rather than a second walk of
+ * next_block pointers — that walk refused the mount for anything it could not
+ * read or did not recognise. A record of a file the table does not name is
+ * passed over: no live file is made of it, and the map holds nothing for it.
+ * One block buffer for the walk, the heap's.
+ */
+int meta_pool_mirror_init(void) {
+    FileMap* files = pool_files();
+    uint8_t* buf   = kmalloc(TAGFS_BLOCK_SIZE);
+    if (!files || !buf) {
+        kfree(buf);
+        kprintf("[MetaPool] there is no memory for the one block the mount reads this "
+                "volume's metadata through\n");
         return -1;
     }
-    memset(g_mirror,       0, sizeof(TagFSMetadata) * g_mirror_capacity);
-    memset(g_mirror_valid, 0, sizeof(bool)          * g_mirror_capacity);
-    memset(g_mirror_where, 0, sizeof(MetaPoolWhere) * g_mirror_capacity);
 
-    /*
-     * The chain the init walk proved, rather than a second walk of next_block
-     * pointers. That walk refused the mount for anything it could not read or
-     * did not recognise, so there is nothing left here for a `break` to hide —
-     * and one walker of the chain is one fewer place to keep in agreement.
-     */
-    uint32_t loaded = 0;
-    for (uint32_t link = 0; link < g_chain_len; link++) {
-        uint8_t buf[TAGFS_BLOCK_SIZE];
-        uint32_t block_num = g_chain[link].block;
+    uint32_t loaded = 0, refused = 0;
+    for (uint32_t at = 0; at < g_chain_len; at++) {
+        uint32_t block_num = g_chain[at].block;
 
         // The last block of the chain may hold records that have not reached
         // the medium yet; it is in memory and that copy is the newer one.
@@ -571,32 +584,36 @@ int meta_pool_mirror_init(uint32_t max_file_id) {
             memcpy(&record_len, hdr->payload + pos, sizeof(uint16_t));
             if (record_len == 0 || record_len > TAGFS_MPOOL_DATA_SIZE - pos) break;
 
-            uint32_t file_id;
+            uint32_t file_id, row_block, row_offset;
             memcpy(&file_id, hdr->payload + pos + 2, sizeof(uint32_t));
 
-            if (file_id > 0 && file_id < g_mirror_capacity) {
-                TagFSMetadata meta;
-                memset(&meta, 0, sizeof(meta));
-                /* record_len is bounded by what the block holds past pos, above. */
-                if (UnpackV1(hdr->payload + pos, record_len, &meta) == OK) {
-                    if (g_mirror_valid[file_id]) {
-                        tagfs_metadata_free(&g_mirror[file_id]);
-                    }
-                    g_mirror[file_id] = meta;
-                    g_mirror_valid[file_id] = true;
-                    /* Last one wins, and the walk is in append order, so this
-                     * ends up holding the NEWEST record for the file and the
-                     * place it sits — which is what the mount fsck corrects a
-                     * file table against. */
-                    g_mirror_where[file_id].block  = block_num;
-                    g_mirror_where[file_id].offset = MPOOL_BLOCK_HEADER + pos;
+            TagFSMetadata meta;
+            memset(&meta, 0, sizeof(meta));
+            /* record_len is bounded by what the block holds past pos, above. */
+            if (file_id > 0 && FileMapRowGet(files, file_id, &row_block, &row_offset) &&
+                UnpackV1(hdr->payload + pos, record_len, &meta) == OK) {
+                /* Last one wins, and the walk is in append order, so this
+                 * ends up holding the NEWEST record for the file and the
+                 * place it sits — which is what the mount fsck corrects a
+                 * file table against. The file is in the map by its row, so
+                 * the put takes no node. */
+                FileRecord*  rec   = FileRecordOf(&meta);
+                FileMapStake stake = { .count = 0 };
+                if (rec && FileMapRecordPut(files, file_id, rec, g_chain[at].link,
+                                            MPOOL_BLOCK_HEADER + pos, &stake) == OK)
                     loaded++;
-                }
+                else
+                    refused++;
+                tagfs_metadata_free(&meta);
             }
             pos += record_len;
         }
     }
+    kfree(buf);
 
+    if (refused)
+        kprintf("[MetaPool] %u record(s) of this volume's files could not be held in memory "
+                "at mount — those files are read from the medium instead\n", refused);
     debug_printf("[MetaPool] Mirror loaded: %u entries\n", loaded);
     return 0;
 }
@@ -606,43 +623,48 @@ int meta_pool_mirror_init(uint32_t max_file_id) {
  * has nothing for this file, which is a different sentence from "the entry is
  * wrong" and is left to the caller to judge. */
 int meta_pool_mirror_where(uint32_t file_id, uint32_t* out_block, uint32_t* out_offset) {
-    if (!g_mirror_where || !g_mirror_valid || file_id >= g_mirror_capacity)
+    FileMap*    files = pool_files();
+    uint32_t    link = 0, offset = 0;
+    FileRecord* rec  = files ? FileMapRecordHold(files, file_id, &link, &offset) : NULL;
+    if (!rec)
         return -1;
-    if (!g_mirror_valid[file_id] || g_mirror_where[file_id].offset == 0)
+    FileRecordRelease(rec);
+    uint32_t at = chain_at_link(link);
+    if (at == g_chain_len)
         return -1;
-    *out_block  = g_mirror_where[file_id].block;
-    *out_offset = g_mirror_where[file_id].offset;
+    *out_block  = g_chain[at].block;
+    *out_offset = offset;
     return 0;
 }
 
+/* The file's record out of the map, a copy the caller frees. A reader holds a
+ * reference while it copies, so a record replaced meanwhile is freed after the
+ * copy and never under it. */
 int meta_pool_read_cached(uint32_t file_id, TagFSMetadata* out) {
-    // Seqlock read: no spinlock, retry if writer was active.
-    // kfree() in kernel heap doesn't unmap pages, so reading stale
-    // pointers during a concurrent write won't fault — the seqlock
-    // retry detects the race and discards the garbage copy.
-    for (;;) {
-        uint32_t seq = __atomic_load_n(&g_mirror_seq, __ATOMIC_ACQUIRE);
-        if (seq & 1) { __asm__ volatile("pause"); continue; }
-
-        if (!g_mirror || file_id >= g_mirror_capacity || !g_mirror_valid[file_id]) {
-            return -1;
-        }
-        if (!mirror_deep_copy(&g_mirror[file_id], out))
-            return -1;
-
-        __asm__ volatile("" ::: "memory");
-        if (__atomic_load_n(&g_mirror_seq, __ATOMIC_ACQUIRE) == seq)
-            return 0;
-
-        // Writer was active during our copy — discard and retry
-        tagfs_metadata_free(out);
-    }
+    FileMap*    files = pool_files();
+    FileRecord* rec   = files ? FileMapRecordHold(files, file_id, NULL, NULL) : NULL;
+    if (!rec)
+        return -1;
+    int rc = FileRecordCopyOut(rec, out);
+    FileRecordRelease(rec);
+    return rc;
 }
 
 // ---------------------------------------------------------------------------
 // Public: write
 // ---------------------------------------------------------------------------
 
+static int pool_append(const TagFSMetadata* meta, uint32_t record_size,
+                       uint32_t* out_block, uint32_t* out_offset);
+
+/*
+ * The record appended, and made the file's record in the map of live files.
+ *
+ * ‼ THE MAP'S ROOM IS TAKEN BEFORE THE POOL IS TOUCHED. The copy the map keeps
+ * and the nodes an insert of a new file may split are allocated first, so a
+ * heap that refuses them refuses the write whole — nothing appended, nothing
+ * named — and the append that follows cannot leave the map behind the pool.
+ */
 int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* out_offset) {
     uint32_t record_size = 0;
     if (!PlotFits(meta, &record_size)) {
@@ -651,8 +673,36 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
         return -1;
     }
 
-    // spin_lock removed - using g_state.lock
+    FileMap*     files = meta->file_id ? pool_files() : NULL;
+    FileRecord*  rec   = NULL;
+    FileMapStake stake = { .count = 0 };
+    if (files) {
+        rec = FileRecordOf(meta);
+        if (!rec) {
+            kprintf("[MetaPool] there is no memory for memory's copy of file %u's record "
+                    "(%u bytes) — the record is not written\n", meta->file_id, record_size);
+            return -1;
+        }
+        if (FileMapStakeFor(files, meta->file_id, &stake) != OK) {
+            FileRecordRelease(rec);
+            return -1;
+        }
+    }
 
+    int rc = pool_append(meta, record_size, out_block, out_offset);
+    if (rc == 0 && rec)
+        (void)FileMapRecordPut(files, meta->file_id, rec, g_chain[g_chain_len - 1].link,
+                               *out_offset, &stake);
+    else
+        FileRecordRelease(rec);
+    FileMapStakeLetGo(&stake);
+    return rc;
+}
+
+/* The record packed onto the end of the chain, chaining a new block when the
+ * last one has no room. */
+static int pool_append(const TagFSMetadata* meta, uint32_t record_size,
+                       uint32_t* out_block, uint32_t* out_offset) {
     // Check if we need to chain to a new block
     if (record_size > (uint32_t)(TAGFS_MPOOL_DATA_SIZE - g_current_block.used_bytes)) {
         debug_printf("[MetaPool] CHAINING: block %u full (used=%u need=%u)\n",
@@ -797,27 +847,6 @@ int meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* ou
     debug_printf("[MetaPool] write: file_id=%u block=%u offset=%u size=%u\n",
                  meta->file_id, *out_block, *out_offset, record_size);
 
-    // Write-through: update mirror (seqlock write)
-    if (g_mirror && meta->file_id < g_mirror_capacity) {
-        __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);  // odd = writing
-        if (g_mirror_valid[meta->file_id]) {
-            tagfs_metadata_free(&g_mirror[meta->file_id]);
-        }
-        if (mirror_deep_copy(meta, &g_mirror[meta->file_id])) {
-            g_mirror_valid[meta->file_id] = true;
-            if (g_mirror_where) {
-                g_mirror_where[meta->file_id].block  = *out_block;
-                g_mirror_where[meta->file_id].offset = *out_offset;
-            }
-        } else {
-            // Allocation failed: mark entry invalid so stale/partial data isn't returned.
-            g_mirror_valid[meta->file_id] = false;
-            debug_printf("[MetaPool] mirror: kmalloc failed for file_id=%u — entry invalidated\n",
-                         meta->file_id);
-        }
-        __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);  // even = done
-    }
-
     /* Self-Healing keeps a whole 4096-byte BLOCK per mirror slot and sums it
      * over TAGFS_BLOCK_SIZE, so what it must be handed is the block — which is
      * this one, in memory, newer than the medium's copy and therefore the right
@@ -856,15 +885,15 @@ int meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out) {
 // Public: delete
 // ---------------------------------------------------------------------------
 
-// Drop the mirror's copy of a file whose record is being retired.
-static void mirror_forget(uint32_t file_id) {
-    if (!g_mirror || file_id >= g_mirror_capacity || !g_mirror_valid[file_id])
-        return;
-    __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);
-    tagfs_metadata_free(&g_mirror[file_id]);
-    memset(&g_mirror[file_id], 0, sizeof(TagFSMetadata));
-    g_mirror_valid[file_id] = false;
-    __atomic_fetch_add(&g_mirror_seq, 1, __ATOMIC_RELEASE);
+/* The record at byte `offset` of link `index` is retired: the map lets the
+ * file's record go only when that is where it sits. A retire that follows the
+ * write of a newer record — every update does it in that order — used to drop
+ * the newer one from memory too, and every read of the file went back to the
+ * medium until the next mount. */
+static void mirror_forget(uint32_t file_id, uint32_t index, uint32_t offset) {
+    FileMap* files = pool_files();
+    if (files)
+        FileMapRecordForgetAt(files, file_id, g_chain[index].link, offset);
 }
 
 /*
@@ -976,7 +1005,7 @@ int meta_pool_delete(uint32_t block, uint32_t offset) {
             // number smaller than what a scan of the payload finds.
             return 0;
         }
-        mirror_forget(del_file_id);
+        mirror_forget(del_file_id, index, offset);
         memset(rec + 2, 0, 4);
 
         /* Counted from the records rather than decremented on faith, the same
@@ -1037,7 +1066,7 @@ int meta_pool_delete(uint32_t block, uint32_t offset) {
                 "retired record — the record stays as it is\n", block);
         return -1;
     }
-    mirror_forget(del_file_id);
+    mirror_forget(del_file_id, index, offset);
 
     /* The header's count is only ever as good as the records under it, so it
      * is taken from them rather than decremented on faith — the same walk the
