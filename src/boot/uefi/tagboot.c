@@ -5,8 +5,9 @@
  *   1. Locate Block IO on boot device via loaded image device handle
  *   2. Read the medium's partition table for the ground claimed for BoxOS,
  *      and the Deed at the head of it
- *   3. Search tag registry + metadata pool for kernel by tag priority:
- *      "god" → "boot" → "system". Fall back to what the Deed itself says.
+ *   3. Take the kernel's place from the Deed's boot stamp; a Deed without one
+ *      has the tag registry + metadata pool searched, "god" → "boot" →
+ *      "system", each file at its newest record.
  *   4. Allocate pages at 0x100000 and load kernel binary
  *   5. Query GOP framebuffer; record address and parameters
  *   6. Get UEFI memory map; convert to e820_entry_t format at 0x500
@@ -851,15 +852,91 @@ static EFI_STATUS DeedTakeUp(void)
 /* =========================================================================
  * TagFS: tag-based kernel lookup
  *
- * Strategy:
- *   1. Load tag registry (block 0) and scan it for the desired tag key.
- *   2. Load file table (block 1) to get meta_block/meta_offset per file_id.
- *   3. Scan all metadata pool records for a file whose tag_ids[] include the
- *      target tag. Return the first file's start_block and block_count.
+ * Asked only when the Deed names no kernel (TagBootMain). The registry gives
+ * the tags' ids, and the metadata pool is then read the way the kernel's
+ * mount reads it (meta_pool.c, meta_pool_mirror_init):
  *
- * Priority: "god" → "boot" → "system".
- * Fall back to boot hints if tag lookup returns nothing.
+ *   - every record in chain order, and the NEWEST record of a file is the
+ *     file — a file written again leaves its older records behind it;
+ *   - a record without ACTIVE is a Quitclaim: the file is gone, whatever its
+ *     older records say;
+ *   - a record that fails its CRC16 is passed over, so the one before it
+ *     stands;
+ *   - a record whose file id is zero was retired in place by a kernel from
+ *     before the pool took only appends, and is nobody's.
+ *
+ * The file taken is read through every extent its newest record names.
+ * Priority: "god" → "boot" → "system", and among the files whose newest
+ * record carries a tag, the one with the lowest file id — the oldest, which
+ * stays the oldest however often any of them is written, where "the first
+ * record in the pool" moves every time one is.
+ *
+ * No chain is walked further than the data run is long: a chain of distinct
+ * blocks inside it cannot be longer, so that many blocks is a circle — the
+ * kernel's own bound. Ceilings of 64 registry blocks and 256 pool blocks
+ * stood here, and a volume grown past them hid whatever lay behind them.
  * ========================================================================= */
+
+/* The tags a kernel is looked for by, in the order they are asked. */
+static const char *const g_boot_tags[] = { "god", "boot", "system" };
+#define BOOT_TAG_COUNT ((uint32_t)(sizeof(g_boot_tags) / sizeof(g_boot_tags[0])))
+
+/* The most extents one record carries: a record never crosses its block. */
+#define RECORD_EXTENTS_MOST \
+    ((TAGFS_MPOOL_DATA_SIZE - META_RECORD_VARDATA_OFF) / sizeof(TagBootFileExtent))
+
+/* A run of the kernel's blocks, counted in blocks of the whole volume. */
+typedef struct {
+    uint64_t first;
+    uint32_t count;
+} KernelRun;
+
+/* Where the kernel file is: its runs in file order, the blocks they hold,
+ * and its size in bytes — 0 when whatever named it did not say. */
+typedef struct {
+    KernelRun runs[RECORD_EXTENTS_MOST];
+    uint32_t  run_count;
+    uint64_t  blocks;
+    uint64_t  bytes;
+} KernelPlace;
+
+static KernelPlace g_kernel_place;
+
+/* One pool block at a time: the walk's, then the chosen record's again. */
+static TagBootMetaPoolBlock g_pool_block;
+
+/* A chain that stopped anywhere but at a link of zero, said with numbers. */
+static void ChainStoppedAt(const char *chain, const char *why, uint32_t block,
+                           uint32_t walked)
+{
+    Print("TagBoot: the ");
+    Print(chain);
+    Print(" chain ");
+    Print(why);
+    Print(" at data block ");
+    PrintDec(block);
+    Print(", ");
+    PrintDec(walked);
+    Print(" block(s) in, in a data run of ");
+    PrintDec(g_layout.data_blocks);
+    Print(" blocks\r\n");
+}
+
+/* Where a chain's next block is to be read from, or 0 — said — when the walk
+ * has to stop there: outside the data run, or as many blocks in as the run
+ * holds, which only a circle reaches. */
+static int ChainMayRead(const char *chain, uint32_t block, uint32_t walked)
+{
+    if (block >= g_layout.data_blocks) {
+        ChainStoppedAt(chain, "leaves the data run", block, walked);
+        return 0;
+    }
+    if (walked >= g_layout.data_blocks) {
+        ChainStoppedAt(chain, "goes round in a circle", block, walked);
+        return 0;
+    }
+    return 1;
+}
 
 /* Read tag registry block chain; return tag_id for (key, NULL) label tag.
  * Returns TAGFS_INVALID_TAG_ID if not found. */
@@ -873,13 +950,24 @@ static uint16_t TagRegistryFindLabel(const char *key)
 
     static TagBootRegistryBlock reg_blk;
 
-    for (uint32_t chain = 0; chain < 64; chain++) {
-        if (EFI_ERROR(ReadDataBlock(block_idx, &reg_blk))) break;
-        if (reg_blk.magic != TAGFS_REGISTRY_MAGIC)                      break;
+    for (uint32_t walked = 0;; walked++) {
+        if (!ChainMayRead("tag registry", block_idx, walked)) break;
+        if (EFI_ERROR(ReadDataBlock(block_idx, &reg_blk))) {
+            ChainStoppedAt("tag registry", "would not read", block_idx, walked);
+            break;
+        }
+        if (reg_blk.magic != TAGFS_REGISTRY_MAGIC) {
+            ChainStoppedAt("tag registry", "runs into a block that is not one", block_idx,
+                           walked);
+            break;
+        }
+
+        uint32_t used = reg_blk.used_bytes;
+        if (used > TAGFS_REGISTRY_DATA_SIZE) used = TAGFS_REGISTRY_DATA_SIZE;
 
         uint32_t pos = 0;
-        for (uint16_t i = 0; i < reg_blk.entry_count && pos < reg_blk.used_bytes; i++) {
-            if (pos + 6 > reg_blk.used_bytes) break;
+        for (uint16_t i = 0; i < reg_blk.entry_count && pos < used; i++) {
+            if (pos + 6 > used) break;
 
             uint8_t  *p         = reg_blk.data + pos;
             uint16_t  tag_id;
@@ -893,7 +981,7 @@ static uint16_t TagRegistryFindLabel(const char *key)
             MemCopy(&this_val_len,  p + TAG_RECORD_VALLEN_OFF, 2);
 
             uint32_t record_size = 6 + this_key_len + this_val_len;
-            if (pos + record_size > reg_blk.used_bytes) break;
+            if (pos + record_size > used) break;
 
             /*
              * A label tag is one with no value. It is NOT "flags == 0":
@@ -925,118 +1013,313 @@ static uint16_t TagRegistryFindLabel(const char *key)
     return TAGFS_INVALID_TAG_ID;
 }
 
-/* Scan metadata pool for any record whose tag_ids[] contain target_tag_id.
- * Returns the start_block, block_count, and actual file_size of the first active match. */
-static int TagFsFindFileByTagId(uint16_t target_tag_id,
-                                uint32_t *out_start_block,
-                                uint32_t *out_block_count,
-                                uint64_t *out_file_size)
+/* CRC-16/CCITT-FALSE, the sum a metadata record carries (crypto.c,
+ * KCrc16Continue), carried on over the pieces it is taken in. */
+static uint16_t Crc16Continue(uint16_t crc, const uint8_t *data, uint32_t len)
+{
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)((uint16_t)data[i] << 8);
+        for (int b = 0; b < 8; b++)
+            crc = (crc & 0x8000U) ? (uint16_t)((crc << 1) ^ 0x1021U) : (uint16_t)(crc << 1);
+    }
+    return crc;
+}
+
+/* Whether the record at `r`, `room` bytes before its block's payload ends, is
+ * one the kernel reads (plot_pack.c, UnpackV1): a whole head long and inside
+ * the room, its CRC16 over its own length with the sum's two bytes taken as
+ * zeros, and the tags, extents and name its counts say inside that length. */
+static int PoolRecordWhole(const uint8_t *r, uint32_t room)
+{
+    static const uint8_t zeros[2] = { 0, 0 };
+    uint16_t len, stored, tags, extents, name;
+
+    MemCopy(&len, r + META_RECORD_LEN_OFF, 2);
+    if (len < META_RECORD_VARDATA_OFF || len > room) return 0;
+
+    MemCopy(&stored, r + META_RECORD_CRC_OFF, 2);
+    uint16_t crc = Crc16Continue(0xFFFFU, r, META_RECORD_CRC_OFF);
+    crc = Crc16Continue(crc, zeros, sizeof(zeros));
+    crc = Crc16Continue(crc, r + META_RECORD_CRC_OFF + 2,
+                        (uint32_t)len - META_RECORD_CRC_OFF - 2);
+    if (crc != stored) return 0;
+
+    MemCopy(&tags,    r + META_RECORD_TAGCOUNT_OFF, 2);
+    MemCopy(&extents, r + META_RECORD_EXTCOUNT_OFF, 2);
+    MemCopy(&name,    r + META_RECORD_NAMELEN_OFF,  2);
+    return (uint32_t)META_RECORD_VARDATA_OFF + (uint32_t)tags * 2U +
+           (uint32_t)extents * sizeof(TagBootFileExtent) + name <= len;
+}
+
+/* Which of the boot tags a whole record says its file wears: bit i for
+ * ids[i]. None for a Quitclaim, a trashed file, or one naming no block — its
+ * newest record says there is nothing there to boot. */
+static uint32_t PoolRecordCarries(const uint8_t *r, const uint16_t ids[BOOT_TAG_COUNT])
+{
+    uint32_t flags;
+    uint16_t tags, extents;
+    MemCopy(&flags,   r + META_RECORD_FLAGS_OFF,    4);
+    MemCopy(&tags,    r + META_RECORD_TAGCOUNT_OFF, 2);
+    MemCopy(&extents, r + META_RECORD_EXTCOUNT_OFF, 2);
+    if (!(flags & TAGFS_FILE_ACTIVE) || (flags & TAGFS_FILE_TRASHED) || extents == 0)
+        return 0;
+
+    uint32_t carries = 0;
+    for (uint16_t t = 0; t < tags; t++) {
+        uint16_t tid;
+        MemCopy(&tid, r + META_RECORD_VARDATA_OFF + (uint32_t)t * 2U, 2);
+        for (uint32_t i = 0; i < BOOT_TAG_COUNT; i++)
+            if (ids[i] != TAGFS_INVALID_TAG_ID && tid == ids[i]) carries |= 1U << i;
+    }
+    return carries;
+}
+
+/* A file some record of the pool showed wearing a boot tag, and where its
+ * NEWEST record is: a block of the data run and a byte of its payload.
+ * `carries` is what that newest record says (PoolRecordCarries). */
+typedef struct {
+    uint32_t fid;
+    uint32_t block;
+    uint32_t at;
+    uint32_t carries;
+} BootCandidate;
+
+/* Kept sorted by file id, in memory asked of the firmware as it grows. */
+typedef struct {
+    BootCandidate *slot;
+    uint32_t       count;
+    uint32_t       cap;
+} BootCandidates;
+
+/* The slot of `fid`, or the one it would take. */
+static uint32_t BootCandidateAt(const BootCandidates *set, uint32_t fid)
+{
+    uint32_t lo = 0, hi = set->count;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (set->slot[mid].fid < fid) lo = mid + 1;
+        else                          hi = mid;
+    }
+    return lo;
+}
+
+/* Room for one more, twice the room asked for each time it runs out. */
+static int BootCandidatesGrow(BootCandidates *set)
+{
+    if (set->count < set->cap) return 1;
+
+    uint32_t       cap   = set->cap ? set->cap * 2U : 64U;
+    BootCandidate *grown = NULL;
+    if (cap <= set->cap ||
+        EFI_ERROR(g_bs->allocate_pool(EfiLoaderData, (UINTN)cap * sizeof(BootCandidate),
+                                      (void **)&grown))) {
+        Print("TagBoot: the firmware would not give ");
+        PrintDec((uint64_t)cap * sizeof(BootCandidate));
+        Print(" bytes to hold the ");
+        PrintDec((uint64_t)set->count + 1);
+        Print(" files the metadata pool shows wearing a boot tag\r\n");
+        return 0;
+    }
+    if (set->count) MemCopy(grown, set->slot, (size_t)set->count * sizeof(BootCandidate));
+    if (set->slot) g_bs->free_pool(set->slot);
+    set->slot = grown;
+    set->cap  = cap;
+    return 1;
+}
+
+/* A whole record of `fid`, newer than any of its records seen before it: it is
+ * where the file is now. A file no record has shown wearing a boot tag is no
+ * candidate, and costs nothing. */
+static int BootCandidateSee(BootCandidates *set, uint32_t fid, uint32_t block,
+                            uint32_t at, uint32_t carries)
+{
+    uint32_t i = BootCandidateAt(set, fid);
+    if (i < set->count && set->slot[i].fid == fid) {
+        set->slot[i].block   = block;
+        set->slot[i].at      = at;
+        set->slot[i].carries = carries;
+        return 1;
+    }
+    if (!carries) return 1;
+    if (!BootCandidatesGrow(set)) return 0;
+    for (uint32_t j = set->count; j > i; j--) set->slot[j] = set->slot[j - 1];
+    set->slot[i].fid     = fid;
+    set->slot[i].block   = block;
+    set->slot[i].at      = at;
+    set->slot[i].carries = carries;
+    set->count++;
+    return 1;
+}
+
+/*
+ * The whole pool, walked once: every file some record showed wearing a boot
+ * tag ends up in `set` at its newest record. 0 when the pool could not be read
+ * to its end — then which record of a file is its newest is not known, and no
+ * kernel is taken from it.
+ */
+static int PoolWalkForBootFiles(const uint16_t ids[BOOT_TAG_COUNT], BootCandidates *set)
 {
     uint32_t block_idx = g_layout.metadata_pool_block - g_layout.data_block;
+    uint32_t passed    = 0;   /* records of a file that fail their own sum */
 
-    static TagBootMetaPoolBlock mpool;
+    for (uint32_t walked = 0;; walked++) {
+        if (!ChainMayRead("metadata pool", block_idx, walked)) return 0;
+        if (EFI_ERROR(ReadDataBlock(block_idx, &g_pool_block))) {
+            ChainStoppedAt("metadata pool", "would not read", block_idx, walked);
+            return 0;
+        }
+        if (g_pool_block.magic != TAGFS_MPOOL_MAGIC) {
+            ChainStoppedAt("metadata pool", "runs into a block that is not one", block_idx,
+                           walked);
+            return 0;
+        }
 
-    for (uint32_t chain = 0; chain < 256; chain++) {
-        if (EFI_ERROR(ReadDataBlock(block_idx, &mpool))) break;
-        if (mpool.magic != TAGFS_MPOOL_MAGIC)                         break;
-
+        /* By length, as the kernel's mirror walks it: a length of zero, or one
+         * past the payload, ends the block; a record shorter than a head is
+         * stepped over and read as nobody's. The last byte of the payload has
+         * no room for a length, and is not read as one. */
+        uint32_t used = g_pool_block.used_bytes;
+        if (used > TAGFS_MPOOL_DATA_SIZE) used = TAGFS_MPOOL_DATA_SIZE;
         uint32_t pos = 0;
-        for (uint16_t rec = 0; rec < mpool.record_count && pos < mpool.used_bytes; rec++) {
-            if (pos + META_RECORD_VARDATA_OFF > mpool.used_bytes) break;
+        while (pos < used && pos + 2 <= TAGFS_MPOOL_DATA_SIZE) {
+            const uint8_t *r = g_pool_block.payload + pos;
+            uint16_t record_len;
+            MemCopy(&record_len, r + META_RECORD_LEN_OFF, 2);
+            if (record_len == 0 || record_len > TAGFS_MPOOL_DATA_SIZE - pos) break;
 
-            uint8_t *r = mpool.payload + pos;
-
-            uint16_t record_len, tag_count, extent_count, name_len;
-            uint32_t flags;
-
-            MemCopy(&record_len,   r + META_RECORD_LEN_OFF,     2);
-            MemCopy(&flags,        r + META_RECORD_FLAGS_OFF,    4);
-            MemCopy(&tag_count,    r + META_RECORD_TAGCOUNT_OFF, 2);
-            MemCopy(&extent_count, r + META_RECORD_EXTCOUNT_OFF, 2);
-            MemCopy(&name_len,     r + META_RECORD_NAMELEN_OFF,  2);
-
-            if (record_len == 0 || pos + record_len > mpool.used_bytes) break;
-
-            /* Skip trashed/inactive files. */
-            if (!(flags & TAGFS_FILE_ACTIVE) || (flags & TAGFS_FILE_TRASHED)) {
-                pos += record_len;
-                continue;
+            uint32_t fid = 0;
+            if (record_len >= META_RECORD_VARDATA_OFF)
+                MemCopy(&fid, r + META_RECORD_FILE_ID_OFF, 4);
+            if (fid != 0) {
+                if (!PoolRecordWhole(r, TAGFS_MPOOL_DATA_SIZE - pos))
+                    passed++;
+                else if (!BootCandidateSee(set, fid, block_idx, pos,
+                                           PoolRecordCarries(r, ids)))
+                    return 0;
             }
-
-            /* tag_ids[] start at META_RECORD_VARDATA_OFF */
-            uint8_t *tag_ids_ptr = r + META_RECORD_VARDATA_OFF;
-
-            for (uint16_t t = 0; t < tag_count; t++) {
-                uint16_t tid;
-                MemCopy(&tid, tag_ids_ptr + t * 2, 2);
-                if (tid == target_tag_id) {
-                    /* Found match. Extract first extent. */
-                    uint8_t *extent_ptr = tag_ids_ptr + tag_count * 2;
-                    if (extent_count == 0) break;
-
-                    TagBootFileExtent ext;
-                    MemCopy(&ext, extent_ptr, sizeof(ext));
-                    *out_start_block  = ext.start_block;
-                    *out_block_count  = ext.block_count;
-
-                    uint64_t file_size = 0;
-                    MemCopy(&file_size, r + META_RECORD_SIZE_OFF, 8);
-                    *out_file_size = file_size;
-                    return 1;
-                }
-            }
-
             pos += record_len;
         }
 
-        if (mpool.next_block == 0) break;
-        block_idx = mpool.next_block;
+        if (g_pool_block.next_block == 0) break;
+        block_idx = g_pool_block.next_block;
     }
 
-    return 0;
+    if (passed) {
+        Print("TagBoot: ");
+        PrintDec(passed);
+        Print(" record(s) of the metadata pool fail their own checksum and are "
+              "passed over — each file's record before them stands\r\n");
+    }
+    return 1;
+}
+
+/* The record a candidate names, read again and taken apart into the runs of
+ * blocks the kernel file is made of. 0, said, when it no longer reads whole
+ * or names a block outside the data run. */
+static int KernelPlaceFromRecord(const BootCandidate *c, KernelPlace *out)
+{
+    if (EFI_ERROR(ReadDataBlock(c->block, &g_pool_block)) ||
+        !PoolRecordWhole(g_pool_block.payload + c->at, TAGFS_MPOOL_DATA_SIZE - c->at)) {
+        Print("TagBoot: the newest record of file id ");
+        PrintDec(c->fid);
+        Print(", in data block ");
+        PrintDec(c->block);
+        Print(", does not read whole a second time\r\n");
+        return 0;
+    }
+
+    const uint8_t *r = g_pool_block.payload + c->at;
+    uint16_t tags, extents;
+    uint64_t size;
+    MemCopy(&size,    r + META_RECORD_SIZE_OFF,     8);
+    MemCopy(&tags,    r + META_RECORD_TAGCOUNT_OFF, 2);
+    MemCopy(&extents, r + META_RECORD_EXTCOUNT_OFF, 2);
+
+    const uint8_t *ext = r + META_RECORD_VARDATA_OFF + (uint32_t)tags * 2U;
+    out->blocks = 0;
+    for (uint16_t e = 0; e < extents; e++) {
+        TagBootFileExtent x;
+        MemCopy(&x, ext + (uint32_t)e * sizeof(x), sizeof(x));
+        if (x.block_count == 0 ||
+            (uint64_t)x.start_block + x.block_count > g_layout.data_blocks) {
+            Print("TagBoot: extent ");
+            PrintDec(e);
+            Print(" of file id ");
+            PrintDec(c->fid);
+            Print(" names blocks ");
+            PrintDec(x.start_block);
+            Print("+");
+            PrintDec(x.block_count);
+            Print(", not inside a data run of ");
+            PrintDec(g_layout.data_blocks);
+            Print(" blocks\r\n");
+            return 0;
+        }
+        out->runs[e].first = (uint64_t)g_layout.data_block + x.start_block;
+        out->runs[e].count = x.block_count;
+        out->blocks       += x.block_count;
+    }
+    out->run_count = extents;
+    out->bytes     = size;
+    return 1;
 }
 
 /* Try each tag in priority order; return 1 on success. */
-static int TagFsFindKernelByTags(uint32_t *out_start_block, uint32_t *out_block_count,
-                                  uint64_t *out_file_size)
+static int TagFsFindKernelByTags(KernelPlace *out)
 {
-    static const char *const priority_tags[] = { "god", "boot", "system", NULL };
+    uint16_t ids[BOOT_TAG_COUNT];
+    int      named = 0;
 
-    for (int i = 0; priority_tags[i] != NULL; i++) {
-        uint16_t tid = TagRegistryFindLabel(priority_tags[i]);
-        if (tid == TAGFS_INVALID_TAG_ID) continue;
-
+    for (uint32_t i = 0; i < BOOT_TAG_COUNT; i++) {
+        ids[i] = TagRegistryFindLabel(g_boot_tags[i]);
+        if (ids[i] == TAGFS_INVALID_TAG_ID) continue;
+        named = 1;
         Print("TagBoot: searching for tag '");
-        Print(priority_tags[i]);
+        Print(g_boot_tags[i]);
         Print("' (id=");
-        PrintDec(tid);
+        PrintDec(ids[i]);
         Print(")\r\n");
+    }
+    if (!named) return 0;
 
-        if (TagFsFindFileByTagId(tid, out_start_block, out_block_count, out_file_size)) {
-            Print("TagBoot: kernel found via tag '");
-            Print(priority_tags[i]);
-            Print("'\r\n");
-            return 1;
+    BootCandidates set  = { NULL, 0, 0 };
+    int            found = 0;
+    if (PoolWalkForBootFiles(ids, &set)) {
+        for (uint32_t i = 0; i < BOOT_TAG_COUNT && !found; i++) {
+            for (uint32_t c = 0; c < set.count && !found; c++) {
+                if (!(set.slot[c].carries & (1U << i))) continue;
+                found = KernelPlaceFromRecord(&set.slot[c], out);
+                if (!found) continue;
+                Print("TagBoot: kernel found via tag '");
+                Print(g_boot_tags[i]);
+                Print("': file id ");
+                PrintDec(set.slot[c].fid);
+                Print(", the oldest file whose newest record wears it\r\n");
+            }
         }
     }
-    return 0;
+    /* Pool memory left behind is one more descriptor in the map this loader
+     * is about to hand over. */
+    if (set.slot) g_bs->free_pool(set.slot);
+    return found;
 }
 
 /*
  * Where the Deed says the kernel is — in the volume's own blocks, so a loader
  * holding nothing but the Deed can turn it into a sector.
  *
- * This is the answer when the tag search finds nothing, and it is a better
- * answer than the one it replaces: the boot hints used to live in the
- * superblock's reserved[] area at offsets four files agreed on by comment.
+ * This is the answer asked for first, and it is a better answer than the one
+ * it replaced: the boot hints used to live in the superblock's reserved[] area
+ * at offsets four files agreed on by comment.
  */
-static int TagFsBootStamp(uint32_t *out_volume_block, uint32_t *out_block_count,
-                          uint64_t *out_file_size)
+static int TagFsBootStamp(KernelPlace *out)
 {
     if (!g_have_boot) return 0;
-    *out_volume_block = g_boot.kernel_block;
-    *out_block_count  = g_boot.kernel_blocks;
-    *out_file_size    = (uint64_t)g_boot.kernel_bytes;
+    out->runs[0].first = g_boot.kernel_block;
+    out->runs[0].count = g_boot.kernel_blocks;
+    out->run_count     = 1;
+    out->blocks        = g_boot.kernel_blocks;
+    out->bytes         = g_boot.kernel_bytes;
     return 1;
 }
 
@@ -1054,15 +1337,13 @@ static int TagFsBootStamp(uint32_t *out_volume_block, uint32_t *out_block_count,
  * that answer means. */
 static uint64_t g_kernel_alloc_end = 0;
 
-/* Loads kernel file blocks to KERNEL_LOAD_ADDR.
- * Reads all block_count blocks from disk; returns file_size as the actual byte count,
- * or 0 on error. */
-static uint64_t TagFsLoadKernel(uint32_t volume_block,
-                                uint32_t block_count,
-                                uint64_t file_size)
+/* Loads the kernel file to KERNEL_LOAD_ADDR, run after run, as far as its size
+ * reaches; returns that size in bytes, or 0 on error. A size of zero is one
+ * nobody stated, and then the blocks are the file. */
+static uint64_t TagFsLoadKernel(const KernelPlace *place)
 {
     EFI_PHYSICAL_ADDRESS load_addr = KERNEL_LOAD_ADDR;
-    uint64_t total_bytes = (uint64_t)block_count * TAGFS_BLOCK_SIZE;
+    uint64_t total_bytes = place->blocks * TAGFS_BLOCK_SIZE;
 
     if (total_bytes > KERNEL_MAX_SIZE) {
         Print("TagBoot: kernel too large (");
@@ -1071,11 +1352,22 @@ static uint64_t TagFsLoadKernel(uint32_t volume_block,
         return 0;
     }
 
-    /* Use actual file size if provided and fits within allocated blocks. */
-    if (file_size == 0 || file_size > total_bytes)
+    /* A size past the blocks is a record whose extents do not reach its own
+     * end, and whatever lies past them is not the kernel. */
+    uint64_t file_size = place->bytes;
+    if (file_size > total_bytes) {
+        Print("TagBoot: the kernel is said to be ");
+        PrintDec(file_size);
+        Print(" bytes and its blocks hold ");
+        PrintDec(total_bytes);
+        Print("\r\n");
+        return 0;
+    }
+    if (file_size == 0)
         file_size = total_bytes;
+    uint64_t want = (file_size + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE;
 
-    UINTN pages = (UINTN)((total_bytes + PAGE_4KB - 1) / PAGE_4KB);
+    UINTN pages = (UINTN)((want * TAGFS_BLOCK_SIZE + PAGE_4KB - 1) / PAGE_4KB);
     EFI_STATUS status = g_bs->allocate_pages(AllocateAddress,
                                              EfiLoaderData,
                                              pages,
@@ -1113,17 +1405,20 @@ static uint64_t TagFsLoadKernel(uint32_t volume_block,
 
     g_kernel_alloc_end = KERNEL_LOAD_ADDR + (uint64_t)pages * PAGE_4KB;
 
-    uint8_t *dst = (uint8_t *)(uintptr_t)KERNEL_LOAD_ADDR;
-
-    for (uint32_t b = 0; b < block_count; b++) {
-        uint64_t vlba = (uint64_t)(volume_block + b) * TAGFS_SECTORS_PER_BLOCK;
-        status = ReadSectors(vlba, TAGFS_SECTORS_PER_BLOCK,
-                             dst + (uint64_t)b * TAGFS_BLOCK_SIZE);
-        if (EFI_ERROR(status)) {
-            Print("TagBoot: disk read error at volume block ");
-            PrintDec(volume_block + b);
-            Print("\r\n");
-            return 0;
+    uint8_t *dst  = (uint8_t *)(uintptr_t)KERNEL_LOAD_ADDR;
+    uint64_t done = 0;
+    for (uint32_t r = 0; r < place->run_count && done < want; r++) {
+        for (uint32_t k = 0; k < place->runs[r].count && done < want; k++, done++) {
+            uint64_t volume_block = place->runs[r].first + k;
+            status = ReadSectors(volume_block * TAGFS_SECTORS_PER_BLOCK,
+                                 TAGFS_SECTORS_PER_BLOCK,
+                                 dst + done * TAGFS_BLOCK_SIZE);
+            if (EFI_ERROR(status)) {
+                Print("TagBoot: disk read error at volume block ");
+                PrintDec(volume_block);
+                Print("\r\n");
+                return 0;
+            }
         }
     }
 
@@ -2625,60 +2920,50 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     Print(" blocks\r\n");
 
     /* ----- 3. Find kernel file ----- */
-    uint32_t kernel_volume_block = 0;
-    uint32_t kernel_block_count  = 0;
-    uint64_t kernel_file_size    = 0;
 
     /*
      * The Deed first, the tag search second.
      *
      * The Deed names one file — the kernel this volume was made with — and its
-     * checksum covers that answer. The tag search answers "the first file
-     * carrying 'god', 'boot' or 'system'", which is a different question: on
-     * this image the shell and the display daemon carry 'system' too, and
-     * which one comes first is an accident of the order they were written in.
+     * checksum covers that answer. The tag search answers "the oldest file
+     * whose newest record carries 'god', 'boot' or 'system'", which is a
+     * different question: on this image the shell and the display daemon
+     * carry 'system' too.
      *
      * So the exact answer is asked for first, and the search is what happens
      * when a volume's Deed carries no boot stamp — an older volume, or one
      * made by something that did not know to write one.
      */
-    uint32_t kernel_data_block = 0;
-    if (TagFsBootStamp(&kernel_volume_block, &kernel_block_count,
-                       &kernel_file_size)) {
+    if (TagFsBootStamp(&g_kernel_place)) {
         Print("TagBoot: the deed names the kernel\r\n");
-    } else if (TagFsFindKernelByTags(&kernel_data_block, &kernel_block_count,
-                                     &kernel_file_size)) {
-        /* The tag search answers in data-run blocks, which is what a file's
-         * extents on disk are counted in. */
-        kernel_volume_block = g_layout.data_block + kernel_data_block;
-    } else {
+    } else if (!TagFsFindKernelByTags(&g_kernel_place)) {
         Panic("kernel not found — this deed names none and no file carries a boot tag");
     }
 
     Print("TagBoot: kernel at volume block ");
-    PrintDec(kernel_volume_block);
+    PrintDec(g_kernel_place.runs[0].first);
     Print(" (");
-    PrintDec(kernel_block_count);
-    Print(" blocks)\r\n");
+    PrintDec(g_kernel_place.blocks);
+    Print(" blocks in ");
+    PrintDec(g_kernel_place.run_count);
+    Print(" run(s))\r\n");
 
-    /* Defensive bound: kernel_block_count comes from TagFS metadata which is
-     * built by tools/create_tagfs.c at image-build time. A corrupted or
-     * malicious image could set arbitrary values; cap at the same limit
-     * stage2 uses (KERNEL_MAX_SIZE / TAGFS_BLOCK_SIZE). Derived rather
-     * than literal so KERNEL_MAX_SIZE bumps don't desync between paths. */
-    const uint32_t kernel_max_blocks = (uint32_t)(KERNEL_MAX_SIZE / TAGFS_BLOCK_SIZE);
-    if (kernel_block_count == 0 || kernel_block_count > kernel_max_blocks) {
+    /* Defensive bound: the blocks come out of the Deed or out of a record on
+     * the medium, and a corrupted or malicious volume could say anything; cap
+     * at the same limit stage2 uses (KERNEL_MAX_SIZE / TAGFS_BLOCK_SIZE).
+     * Derived rather than literal so KERNEL_MAX_SIZE bumps don't desync
+     * between paths. */
+    const uint64_t kernel_max_blocks = KERNEL_MAX_SIZE / TAGFS_BLOCK_SIZE;
+    if (g_kernel_place.blocks == 0 || g_kernel_place.blocks > kernel_max_blocks) {
         Print("TagBoot: FATAL — kernel_block_count out of range: ");
-        PrintDec(kernel_block_count);
+        PrintDec(g_kernel_place.blocks);
         Print("\r\n");
         Panic("TagFS metadata reports invalid kernel block count");
     }
 
     /* ----- 4. Load kernel ----- */
     Print("TagBoot: loading kernel to 0x100000...\r\n");
-    uint64_t loaded_bytes = TagFsLoadKernel(kernel_volume_block,
-                                             kernel_block_count,
-                                             kernel_file_size);
+    uint64_t loaded_bytes = TagFsLoadKernel(&g_kernel_place);
     if (loaded_bytes == 0) Panic("kernel load failed");
 
     Print("TagBoot: kernel loaded (");

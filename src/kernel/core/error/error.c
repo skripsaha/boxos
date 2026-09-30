@@ -156,8 +156,6 @@ const char* ErrorString(error_t err) {
             return "Snapshot limit reached";
         case ERR_SNAPSHOT_NOT_FOUND:
             return "Snapshot not found";
-        case ERR_SELF_HEAL_FAILED:
-            return "Self-healing failed";
 
         case ERR_PROCESS_NOT_FOUND:
             return "Process not found";
@@ -347,6 +345,8 @@ const char* ErrorString(error_t err) {
             return "TagFS write begins past the file's size";
         case ERR_TAGFS_RECORD_FULL:
             return "TagFS file record full";
+        case ERR_TAGFS_FID_EXHAUSTED:
+            return "TagFS file ids exhausted";
 
         // TagFS Module Errors
         case ERR_DISKBOOK_NOT_INITIALIZED:
@@ -380,17 +380,6 @@ const char* ErrorString(error_t err) {
             return "CoW allocation failed";
         case ERR_COW_RESTORE_FAILED:
             return "Snapshot restore failed";
-        
-        case ERR_SELF_HEAL_NOT_INITIALIZED:
-            return "Self-heal not initialized";
-        case ERR_SELF_HEAL_CORRUPTION_DETECTED:
-            return "Self-heal corruption detected";
-        case ERR_SELF_HEAL_RECOVERY_FAILED:
-            return "Self-heal recovery failed";
-        case ERR_SELF_HEAL_MIRROR_FAILED:
-            return "Self-heal mirror failed";
-        case ERR_SELF_HEAL_SCRUB_FAILED:
-            return "Self-heal scrub failed";
         
         case ERR_BOXHASH_INVALID_CONTEXT:
             return "BoxHash invalid context";

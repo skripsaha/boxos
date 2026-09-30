@@ -338,3 +338,35 @@ void LedgerLetGo(void)
     g_ledger_use_len = 0;
     TagFSLockDrop(&g_ledger_lock);
 }
+
+/*
+ * ‼ A FILE ID IS ISSUED ONCE, AND NEVER ZERO.
+ *
+ * The id is 32 bits wide on format v1 (volume_ledger.h) and was handed out by
+ * a bare increment, so the 2^32-th create was given id 0 — the id no file may
+ * wear, the one a retired record carries — and the create after it id 1, a
+ * file the volume already holds. The last id issued is 0xFFFFFFFE: issuing
+ * 0xFFFFFFFF would leave the counter at 0, and every walk bounded by it would
+ * see no file at all. So a counter at 0xFFFFFFFF says every id has been
+ * issued, and a counter at 0 is a Ledger an earlier kernel let wrap; both are
+ * refused out loud and the counter does not move. Format v2 carries 64-bit
+ * ids (Quill design §2.3).
+ */
+error_t LedgerIssueFileId(VolumeLedger *led, uint32_t *out_fid)
+{
+    uint32_t next = led->next_file_id;
+    if (next == 0 || next == UINT32_MAX) {
+        if (next)
+            kprintf("[Ledger] no file is made: every file id a 32-bit id carries has been "
+                    "issued on this volume, the last of them %u — format v2 carries "
+                    "64-bit ids\n", UINT32_MAX - 1u);
+        else
+            kprintf("[Ledger] no file is made: this volume's Ledger names file id 0 as "
+                    "the next, a count an earlier kernel let wrap past %u — the ids "
+                    "after it belong to files the volume holds\n", UINT32_MAX);
+        return ERR_TAGFS_FID_EXHAUSTED;
+    }
+    *out_fid          = next;
+    led->next_file_id = next + 1u;
+    return OK;
+}

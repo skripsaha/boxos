@@ -72,6 +72,7 @@
 #define META_RECORD_TAGCOUNT_OFF 34
 #define META_RECORD_EXTCOUNT_OFF 36
 #define META_RECORD_NAMELEN_OFF  38
+#define META_RECORD_CRC_OFF      40   /* over the whole record, these two bytes as zeros */
 #define META_RECORD_VARDATA_OFF  42   /* start of tag_ids[] */
 
 /* =========================================================================
