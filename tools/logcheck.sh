@@ -21,8 +21,9 @@
 #                         on the record, and the Lifeline stays silent
 #   logcheck.sh census    the host's roll call (tools/volume-read.py check) and
 #                         the kernel's fsck name the same runs, counts and free
-#                         figure on a planted volume; and a qemu-io blklogwrites
-#                         log replays onto its base byte for byte
+#                         figure, and the same seal, on planted volumes; and a
+#                         qemu-io blklogwrites log replays onto its base byte
+#                         for byte
 #   logcheck.sh censusmut either half of that reconcile broken on purpose — the
 #                         kernel's pool walk, the census's retired-record rule —
 #                         must turn it red
@@ -7274,6 +7275,17 @@ run_footing() {
 # carries 40 orphan runs, so the line that counts the rest is held to its
 # numbers too.
 #
+# The rest hold the seal's decisions to the same prediction: S1, a newest seal
+# the medium did not keep, fallen back from; S2, an open block torn under both
+# seals, rolled back with every file whose only record it held; GL1, a chain
+# whose first block Glean moved, the head's old blocks the pool's still; R2, a
+# file's newest record rotten in a sealed span, the file standing on the record
+# before it and that record's block another file's. Each boot is held to the
+# line the kernel says of the seal it stood on, of the rows it let go or set,
+# the records it passed over, the blocks before the chain's first, a registry
+# rolled back, the next file id and the blocks named twice — every one the
+# census's prediction.
+#
 # Host only, beside them: (A) a real blklogwrites log written by qemu-io, read
 # back by `cut` and replayed onto its base, byte for byte; and volume-read's
 # self-test in its plain form on a fresh image, the one gate that answers for
@@ -7396,11 +7408,13 @@ if not k["mounts"]:
 fsck = k["fsck"]
 m = re.search(r"is MOUNTED — (\d+) file", log)
 say(m is not None, "the kernel mounted the planted volume — %s file(s)" % (m.group(1) if m else "no MOUNTED line"))
+# The mount says the line only when it has something to repair
+# (block_map_mount.c): no line is 0 orphan, 0 missing.
 m = re.search(r"\[TagFS FSCK\] Bitmap mismatch: (\d+) orphan, (\d+) missing", log)
-have = (int(m.group(1)), int(m.group(2))) if m else None
+have = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
 say(have == (fsck["orphan"], fsck["missing"]),
     "the kernel's mismatch line says %s; the census predicted %u orphan, %u missing"
-    % ("%u orphan, %u missing" % have if have else "nothing", fsck["orphan"], fsck["missing"]))
+    % ("%u orphan, %u missing" % have if m else "nothing", fsck["orphan"], fsck["missing"]))
 for kind in ("orphan", "missing"):
     (got, got_rest), (want, want_rest) = said(kind), due(fsck[kind + "_runs"])
     say(got == want, "the kernel names %s runs %s; the census predicted %s" % (kind, text(got), text(want)))
@@ -7431,6 +7445,59 @@ say(not owned and (named, rest) == (census_named, census_rest),
     "every orphan the kernel names (%s; %s) is one the census finds no owner for (%s; %s)%s"
     % (text(named), more(rest), text(census_named), more(census_rest),
        " — the kernel calls OWNED blocks orphans: " + "; ".join(owned) if owned else ""))
+
+# What the mount stood on, and what it rolled back, in the kernel's own words
+# (mount.c MountSealsRead, meta_pool_mount.c SayFellBack / WalkChoose).
+seal = k["seal"]
+m_none = re.search(r"\[TagFS\] this volume's newest Ledger carries no seal", log)
+m_fell = re.search(r"\[TagFS\] fell back: the newest seal \(cycle \d+\)[^\n]*so the volume stands on "
+                   r"cycle (\d+)", log)
+m_torn = re.search(r"\[TagFS\] the pool's open block (\d+) does not hold what [^\n]*ROLLED BACK", log)
+m_unborne = re.search(r"\[TagFS\] no copy's seal is borne out by the pool's closed blocks", log)
+have = ("no seal on the newest copy" if m_none else
+        "the seal of cycle %s, fallen back to" % m_fell.group(1) if m_fell else
+        "its open block %s rolled back" % m_torn.group(1) if m_torn else
+        "no seal borne out" if m_unborne else "the newest seal")
+want = ("no seal on the newest copy" if not seal["newest_sealed"] else
+        "the seal of cycle %s, fallen back to" % seal["settle"] if seal["fell_back"] else
+        "its open block %s rolled back" % seal["to_block"] if seal["stood"] == "torn" else
+        "no seal borne out" if seal["stood"] == "none" else "the newest seal")
+say(have == want, "the kernel's pool stands on %s; the census predicted %s" % (have, want))
+
+def count(pattern, groups=1):
+    m = re.search(pattern, log)
+    return tuple(int(x) for x in m.groups()) if m else (0,) * groups
+
+have = count(r"\[TagFS\] the file table is derived from the sealed pool: (\d+) row\(s\) named files "
+             r"of a cycle that did not settle and are let go, (\d+) row\(s\) the table lacked are set "
+             r"from the pool", 2)
+say(have == (fsck["unsettled"], fsck["derived"]),
+    "the kernel let %u row(s) go unsettled and set %u from the pool; the census predicted %u and %u"
+    % (have + (fsck["unsettled"], fsck["derived"])))
+have = count(r"\[TagFS FSCK\] (\d+) ACTIVE record\(s\) of the pool no table row names")
+say(have == (fsck["unnamed"],), "the kernel took up no record of %u unnamed one(s); the census "
+    "predicted %u" % (have + (fsck["unnamed"],)))
+have = count(r"\[MetaPool\] (\d+) record\(s\) of this volume's pool do not check out")
+say(have == (fsck["unreadable"],), "the kernel passed %u record(s) over that do not check out; the "
+    "census predicted %u" % (have + (fsck["unreadable"],)))
+have = count(r"\[Glean\] (\d+) block\(s\) the pool's head still names lie before the chain's first")
+say(have == (len(seal["prefix"]),), "the kernel rests %u block(s) the pool's head names before the "
+    "chain; the census predicted %u (%s)" % (have + (len(seal["prefix"]), seal["prefix"])))
+m = re.search(r"\[TagRegistry\] block (\d+), the registry's last, does not hold what the volume's "
+              r"seal says", log)
+have = int(m.group(1)) if m else None
+say(have == seal["registry_rolled"], "the kernel rolled back registry block %s; the census predicted %s"
+    % (have, seal["registry_rolled"]))
+stood = next(c for c in pred["ledger"]["copies"] if c["copy"] == pred["ledger"]["standing_on"])
+m = re.search(r"\[TagFS\] the Ledger's next file id is \d+ and the medium names file id \d+ — "
+              r"[^\n]*so the next file is given (\d+)", log)
+have = int(m.group(1)) if m else stood["next_file_id"]
+say(have == k["next_file_id"], "the kernel gives the next file id %u; the census predicted %u"
+    % (have, k["next_file_id"]))
+have = sorted(int(b) for b in re.findall(r"\[TagFS FSCK\] data block (\d+) is named by [^\n]* at once", log))
+want = sorted(s for s, _n in pred["census"]["double"])
+say(have == want, "the kernel names data block(s) %s twice owned; the census predicted %s"
+    % (have or "none", want or "none"))
 CENSUS_EOF
     local rc=$?
     [ $rc = 0 ] && [ -s "$SCRATCH/census.$1.verdict" ] && return 0
@@ -7443,7 +7510,7 @@ run_census() {
     local plant line
     census_qemu_io
     census_selftest
-    for plant in reconcile C17; do
+    for plant in reconcile C17 S1 S2 GL1 R2; do
         census_boot "$plant" "$plant" || continue
         census_judge "$plant"
         while IFS= read -r line; do
@@ -7500,7 +7567,7 @@ run_censusmut() {
             bad "censusmut: the kernel left the pool chain out of its roll call and the reconcile stayed green"
         fi
     fi
-    restore src/kernel/tagfs/tagfs.c
+    restore src/kernel/tagfs/mount/mount.c
     build
 
     census_exempt_on

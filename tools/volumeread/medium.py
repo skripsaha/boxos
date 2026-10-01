@@ -24,8 +24,8 @@ from .ondisk import (SECTOR, BLOCK, SECTORS_PER_BLOCK, DEED_MAGIC, DEED_SECTORS,
                      DEED_ROLE_HEAD, DEED_ROLE_TAIL, BOXOS_TYPE_GUID,
                      MBR_TYPE_BOXOS, MBR_TYPE_PROTECTIVE, GPT_ARRAY_MAX_BYTES,
                      GPT_BLOCK_MAX_BYTES, GROUND_MAX_PER_MEDIUM, LEDGER_COPIES,
-                     REGISTRY_MAGIC, FILETBL_MAGIC, MPOOL_MAGIC,
                      DISKBOOK_TYPE_REDIRECT, RunsFromBits, RunsIntersect)
+from .mount import MountModel
 
 
 class Unreadable(Exception):
@@ -645,9 +645,9 @@ class VolumeFacts:
         self.bits = bytes(self.region[:(self.D + 7) // 8]).ljust((self.D + 7) // 8, b"\0")
         self.used = RunsFromBits(self.bits, self.D)
         self._ReadLedger()
+        self._Mount()
         self._ReadDiskBook()
         self._ReadCow()
-        self._ReadChains()
 
     # --- reading ---------------------------------------------------------
 
@@ -663,9 +663,6 @@ class VolumeFacts:
         if b not in self._cache:
             self._cache[b] = self.vread(self.layout["data_block"] + b)
         return self._cache[b]
-
-    def Head(self, volume_block):
-        return (volume_block - self.layout["data_block"]) & 0xFFFFFFFF
 
     def _ReadBitmapRegion(self):
         lay = self.layout
@@ -725,7 +722,6 @@ class VolumeFacts:
             d["use_chain_read"] = (ondisk.ReadUseChain(self.read_block, chain, self.D)
                                    if d["ok"] and chain and chain["first"] else None)
             self.ledgers.append(d)
-        self.ledger = ondisk.LedgerChoice(self.ledgers)
 
     def _ReadDiskBook(self):
         db = self.layout["disk_book_block"]
@@ -753,8 +749,9 @@ class VolumeFacts:
     def _ReadCow(self):
         self.manifests, self.snapshots = [], set()
         led = self.ledger or {}
-        # The manifest the Ledger names (cow.c CowReadStanding); its backup was
-        # never allocated by any kernel, and the kernel does not read it.
+        # The manifest the Ledger the mount stands on names (cow.c
+        # CowClaimGround); its backup was never allocated by any kernel, and
+        # the kernel does not read it.
         b = led.get("cow_manifest_block", 0)
         if b:
             raw = self.read_block(b)
@@ -773,105 +770,24 @@ class VolumeFacts:
             item = (e["snapshot_id"], e["old_block"], e["new_block"])
             (self.redirects if e["snapshot_id"] in self.snapshots else self.stray).append(item)
 
-    def _ReadChains(self):
-        lay, D = self.layout, self.D
-        self.chains, self.refused, self.pool_held = {}, {}, []
-        for name, head, magic in (("registry", lay["tag_registry_block"], REGISTRY_MAGIC),
-                                  ("table", lay["file_table_block"], FILETBL_MAGIC),
-                                  ("pool", lay["metadata_pool_block"], MPOOL_MAGIC)):
-            blocks, raws, why = ondisk.WalkChain(self.read_block, self.Head(head), magic, D)
-            self.chains[name] = (blocks, raws)
-            if why:
-                self.refused[name] = why
-        self.seal = ondisk.SealStand(self.read_block, self.ledgers, D) if self.ledger else None
-        sealed = self.seal is not None and self.seal["stood"] != "none"
-        # Under a seal the mount walks the pool from the seal's chain_first
-        # (meta_pool_mount.c): the Deed's head may lie before it, off the
-        # chain, once Glean took blocks off the front (glean/glean.h).
-        if sealed:
-            first = self.seal["mark"]["chain_first"]
-            blocks, raws, why = ondisk.WalkChain(self.read_block, first, MPOOL_MAGIC, D)
-            self.chains["pool"] = (blocks, raws)
-            self.refused.pop("pool", None)
-            if why:
-                self.refused["pool"] = why
-        # Every id the pool's chain shows — past a seal too: the medium has
-        # seen it, and the mount's next file id is past it (mount/mount.c).
-        top_record = max((fid for r in self.chains["pool"][1]
-                          for _a, _l, fid in ondisk.ReadPoolBlock(r)["mirror_walk"]), default=0)
-        # The blocks the pool holds off its chain: the Deed's head once the
-        # chain begins past it, and what the head still names before the
-        # chain's first block (glean.c GleanMount).
-        if sealed:
-            self._CutToSeal()
-            head, chain = self.Head(lay["metadata_pool_block"]), self.chains["pool"][0]
-            if head not in chain:
-                self.pool_held = [head] + ondisk.HeadPrefix(self.read_block, head, first,
-                                                            chain, D)
-        self.registry = [(b, ondisk.ReadRegistryBlock(r)) for b, r in zip(*self.chains["registry"])]
-        self.rows_medium = ondisk.TableRows(self.chains["table"][1])
-        self.pool = [(b, ondisk.ReadPoolBlock(r), r) for b, r in zip(*self.chains["pool"])]
-        # Every record in append order, and the newest of each file with no
-        # capacity: the truth view (the mount's mirror is KernelView's).
-        self.records = [ondisk.ParseRecord(raw, at, b)
-                        for b, blk, raw in self.pool for at, _l, _f in blk["mirror_walk"]]
+    def _Mount(self):
+        """The mount's read of the volume (mount.MountModel), and what the
+        census reads off it: the chains as the mount walks them, the pool's
+        span and the records in it, the table's rows, and the Ledger copy the
+        volume stands on — carrying the next file id the mount derives."""
+        m = self.mount = MountModel(self.read_block, self.layout, self.ledgers, self.deed["boot"])
+        self.refused = m.Refused()
+        self.chains = {"registry": list(m.registry["blocks"]), "table": list(m.table["links"]),
+                       "pool": list(m.pool["chain"])}
+        self.registry = [(b, {"records": recs}) for b, recs in m.registry["taken"]]
+        self.pool = [(b, ondisk.ReadPoolBlock(raw, upto), raw) for b, raw, upto in m.pool["spans"]]
+        self.records = list(m.pool["records"])
         self.newest = {}
         for r in self.records:
             if r.fid and r.unpack_ok:
                 self.newest[r.fid] = r
-        # Under a seal the table is derived from the pool's span: a file is
-        # the newest record of its id, and a row the span does not bear out is
-        # a cycle that did not settle (mount/mount.c). With no seal the table
-        # says which files there are.
-        if sealed:
-            self.rows = {fid: (r.block, r.at) for fid, r in self.newest.items()
-                         if r.flags & ondisk.FILE_ACTIVE}
-        else:
-            self.rows = self.rows_medium
-        if self.ledger:
-            self.ledger = dict(self.ledger)
-            self.ledger["next_file_id"] = ondisk.NextFileId(
-                self.ledger["next_file_id"], max(self.rows_medium, default=0), top_record)
-
-    def _CutToSeal(self):
-        """The chains as the mount stands on the seal: the Ledger copy the seal
-        rides in; the pool to the seal's open block, its records no further
-        than `to` — none of them when the block was torn (decision 5) — and
-        linking nothing; the registry to the block the seal names, with the
-        records of the newest seal whose CRC32 the block bears out, else none
-        (tag_registry_load.c RegistrySealedBytes); a table block that does not
-        read is no refusal (file_table.c)."""
-        st, mark = self.seal, self.seal["mark"]
-        self.ledger = st["copy"]
-
-        blocks, raws = self.chains["pool"]
-        if mark["pool_to_block"] in blocks:
-            self.chains["pool"] = ondisk.SealCutPool(blocks, raws, st)
-            self.refused.pop("pool", None)
-
-        blocks, raws = self.chains["registry"]
-        seals = [c["mark"] for c in self.ledgers if c["ok"] and c["sealed"]]
-        seals.sort(key=lambda m: -m["settle"])
-        at = mark["registry_block"]
-        if at in blocks:
-            i = blocks.index(at)
-            raw = bytearray(raws[i])
-            data = bytes(raw[ondisk.CHAIN_HEADER:ondisk.CHAIN_HEADER + ondisk.REGISTRY_DATA])
-            keep = 0
-            for m in seals:
-                if (m["registry_block"] == at and m["registry_bytes"] <= ondisk.REGISTRY_DATA and
-                        ondisk.Crc32(data[:m["registry_bytes"]]) == m["registry_crc32"]):
-                    keep = m["registry_bytes"]
-                    break
-            count, off = 0, 0
-            for rec in ondisk.ReadRegistryBlock(bytes(raw))["records"]:
-                size = ondisk.REGISTRY_RECORD.size + rec["key_len"] + rec["value_len"]
-                if off + size > keep:
-                    break
-                off += size
-                count += 1
-            struct.pack_into("<IHH", raw, 4, 0, count, off)
-            raw[ondisk.CHAIN_HEADER + off:] = bytes(len(raw) - ondisk.CHAIN_HEADER - off)
-            self.chains["registry"] = (blocks[:i + 1], raws[:i] + [bytes(raw)])
-            self.refused.pop("registry", None)
-        self.refused.pop("table", None)
+        self.rows = dict(m.table["rows"])
+        self.ledger = None
+        if m.stood is not None:
+            self.ledger = dict(m.stood)
+            self.ledger["next_file_id"] = m.next_file_id

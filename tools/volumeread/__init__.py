@@ -1,11 +1,13 @@
 """volumeread — the one Python owner of the TagFS v1 format.
 
     ondisk    the format: every constant with the C line it is copied from, the
-              checksums, the parsers, and the walks that are format semantics
-              (how far a chain runs, which record of a file wins, what the
-              mount's roll call makes of a file)
+              checksums and the parsers — what a block, a record or a Ledger
+              copy says, nothing about what the mount makes of it
+    mount     the mount's decision procedure, step for step: which seal the
+              volume stands on, which record of a file wins, what rolls back,
+              who owns which block, the next file id and the next tag id
     medium    a medium and an in-memory overlay on one; where the volume stands
-    census    GroundCensus (the truth) and KernelView (the mount), held
+    census    GroundCensus (the account) and KernelView (the mount), held
               against each other
     blklog    QEMU blklogwrites logs: epochs, what each write touched, cuts
     selftest  every census rule planted and caught, the cut logic on a

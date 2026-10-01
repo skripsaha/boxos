@@ -54,7 +54,7 @@ import sys
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from volumeread import ondisk                                   # noqa: E402
+from volumeread.mount import Volume                             # noqa: E402
 from volumeread.medium import (Medium, Unreadable, find_ground,  # noqa: E402
                                find_the_stick, permission_advice, read_deed)
 
@@ -93,7 +93,7 @@ def CmdFiles(args, medium):
               f"{lay['data_blocks']} block(s)")
         return 0
 
-    vol = ondisk.Volume(medium, ground, deed)
+    vol = Volume(medium, ground, deed)
     if vol.ledger() is None:
         print("[volume-read] neither ledger copy is readable, so the kernel would not "
               "mount this volume; every file its table names is listed",

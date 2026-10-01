@@ -2,22 +2,21 @@
 
 Two roll calls over the same image, held against each other.
 
-The CENSUS is the truth: every structure on the volume that owns a block of
-the data run, found by reading the volume the way its writers laid it down,
-set against the bitmap. A block with two owners, a block used with no owner
-(an orphan) and a block owned and free (missing) are each named, as runs.
+The KERNELVIEW is the mount: what MountReadVolume and its GroundCensus decide
+on this image (mount.MountModel, the kernel's decision procedure said once) —
+the refusals, which seal it stands on, which files it takes up, lets go and
+loses, the orphan and missing runs its census names, the free count it keeps
+and the line it prints. A change to the mount has to change mount.py in the
+same commit: logcheck's `census` scenario boots the image and holds the
+kernel's own named runs against this model, so a drift is a red line, not a
+surprise.
 
-The KERNELVIEW is the mount: a step-by-step simulation of what tagfs_init
-decides on this image — the refusals, the fsck's orphan and missing runs, the
-table entries it corrects, the files it loses, the free count it derives, the
-line it prints and the writes the mount itself makes. It models the kernel as
-it is in this tree, and a change to the mount or its roll call has to change
-this file in the same commit: logcheck's `census` scenario boots the image
-and holds the kernel's own named runs against this model, so a drift is a red
-line, not a surprise.
-
-Where the two disagree — a block the kernel would call an orphan that the
-census knows an owner for — that is a KERNEL_BLIND finding.
+The CENSUS is the account of the same ground, owner by owner — the owners the
+kernel hears (src/include/ground_owner.h), each named for what it is — set
+against the bitmap: a block with two owners, a block used with no owner (an
+orphan, explained by what the volume says it was) and a block owned and free
+(missing) are each named, as runs; and beside them what the records, the
+registry, the rows and the seals say that is damage, a leak, or a note.
 """
 
 import hashlib
@@ -26,12 +25,12 @@ import struct
 from . import ondisk
 from .ondisk import (SECTOR, BLOCK, SECTORS_PER_BLOCK, REGISTRY_MAGIC,
                      FILETBL_MAGIC, MPOOL_MAGIC, TUSE_MAGIC, COW_MANIFEST_MAGIC,
-                     FILE_ACTIVE, MAX_TAG_ID, INTEGRITY_PER_BLOCK,
-                     LEDGER_COPIES, DISKBOOK_BLOCKS, TUSE_TEXT, REGISTRY_DATA,
-                     REGISTRY_RECORD, FTABLE_PER_BLOCK,
+                     FILE_ACTIVE, MAX_TAG_ID, LEDGER_COPIES, DISKBOOK_BLOCKS,
+                     REGISTRY_DATA, REGISTRY_RECORD, FTABLE_PER_BLOCK, RECORD_HEADER,
                      RunsFromBits, RunsNormal, RunsIntersect, RunsSubtract,
                      RunsCount, RunsText)
 from .medium import VolumeFacts
+from .mount import Label
 from .ground_owners import GROUND_OWNER_ALONE
 
 SEVERITY = ("damage", "leak", "note")        # exit 1 on any damage or leak
@@ -50,13 +49,13 @@ class Finding:
 class GroundClaim:
     """One owner's claim on the data run. An alias (the BOOT run) is not
     exclusive: it may coincide with its partner — the one file it is — and
-    with nothing else."""
+    with nothing else; with no partner found, with any file."""
 
-    __slots__ = ("kind", "label", "runs", "exclusive", "kernel_sees", "partner")
+    __slots__ = ("kind", "label", "runs", "exclusive", "partner")
 
     def __init__(self, kind, label, runs, exclusive=True, partner=None):
         self.kind, self.label, self.runs = kind, label, RunsNormal(runs)
-        self.exclusive, self.partner, self.kernel_sees = exclusive, partner, True
+        self.exclusive, self.partner = exclusive, partner
 
     def Allows(self, other):
         if self.partner is not None:
@@ -90,25 +89,24 @@ def Sweep(claims):
 
 
 # ---------------------------------------------------------------------------
-# KernelView — what tagfs_init decides on this image
+# KernelView — what the mount decides on this image
 # ---------------------------------------------------------------------------
 
 
 class KernelView:
-    """A pure simulation of the mount in this tree. It reads nothing the facts
-    have not read, except the blocks the mount itself would read."""
+    """The mount in this tree, on this image: the facts' MountModel and the
+    GroundCensus it runs. It reads nothing the facts have not read."""
 
     def __init__(self, facts):
         self.f = facts
         self.refusal = self.step = None
         self.fsck = None
         self.says = None
+        self.free = None
         self.writes = []                 # [(sentence, runs of data blocks written)]
         self.kept_line = None
-        self.verdicts = {}               # fid -> ondisk.FileVerdict
         self.marked = []
         self.union = []
-        self.current = None              # Ledger copy the mount last wrote or stands on
         self._Mount()
 
     def Refuse(self, step, sentence):
@@ -137,16 +135,9 @@ class KernelView:
             self.writes.append(("the far copy at sector %u, the head deed, and zeros over "
                                 "the old far copy at sector %u — the volume takes %u more "
                                 "data blocks" % (g["new_tail"], g["old_tail"], g["more"]), []))
-        if f.ledger is None:
-            return self.Refuse("ledger", "[Ledger] neither copy is readable — this volume cannot say "
-                               "what is on it")
-        self.current = f.ledger["copy"]
-        self.seq = f.ledger["seq"]
-        for name, sentence in (("registry", "its tag registry would not read"),
-                               ("table", "its file table would not read"),
-                               ("pool", "its metadata pool would not read")):
-            if name in f.refused:
-                return self.Refuse(name, "%s — %s" % (sentence, f.refused[name]))
+        m = f.mount
+        if m.refusal is not None:
+            return self.Refuse(*m.refusal)
         need = ((D + 7) // 8 + SECTOR - 1) // SECTOR
         if need > lay["block_bitmap_blocks"] * SECTORS_PER_BLOCK:
             return self.Refuse("layout", "its block bitmap region is too small to hold a bit for every "
@@ -154,108 +145,46 @@ class KernelView:
         if len(f.region) < need * SECTOR:
             return self.Refuse("bitmap", "its block bitmap would not read, and a missing bitmap reads "
                                "as a volume with nothing on it")
-        self._Fsck()
-        self._Integrity()
-        disagreed = sum(1 for _b, blk, _r in f.pool if blk["kept_counted"] != blk["kept"])
-        if disagreed:
-            self.kept_line = (disagreed, len(f.pool))
+        self._Census()
+        if m.pool["disagreed"]:
+            self.kept_line = (m.pool["disagreed"], len(m.pool["chain"]))
 
-    def _Fsck(self):
-        """The mount's roll call (tagfs_init's fsck, after the ledger and the chains)."""
-        f, lay, D = self.f, self.f.layout, self.f.D
-        led = f.ledger
-        mirror = ondisk.MirrorWalk([b for b, _blk, _r in f.pool], [r for _b, _blk, r in f.pool])
+    def _Census(self):
+        """MountCensus: every owner's ground (MountModel.claims) against the
+        bitmap. An orphan is kept taken, a missing block is taken in memory
+        (the additive repair the next Settle cycle writes), and the free count
+        is what is left of the data run."""
+        f, m, D = self.f, self.f.mount, self.f.D
         marks = []
-        corrected = lost = quits = 0
-        for v in ondisk.KernelRollCall(f.read_block, led["next_file_id"], f.rows, mirror):
-            self.verdicts[v.fid] = v
-            corrected += v.corrected
-            if v.outcome == "lost":
-                lost += 1
-            elif v.outcome == "quitclaim":
-                quits += 1
-            else:
-                marks += RunsIntersect(RunsNormal(v.record.extents_at_mount), [(0, D)])
-        # The census asks each owner for its ground from what the mount holds
-        # (mount/ground_census.h): the chains as it walked them — under a seal,
-        # the pool to the seal's open block and the registry to the block the
-        # seal names — the Deed's head of the pool, and the BOOT run.
-        for name in ("registry", "table", "pool"):
-            marks += [(b, 1) for b in f.chains[name][0] if b < D]
-        head = f.Head(lay["metadata_pool_block"])
-        if head < D:
-            marks.append((head, 1))
-        marks += [(b, 1) for b in f.pool_held if b < D]
-        boot = f.deed["boot"]
-        if boot and boot["kernel_blocks"] and boot["kernel_block"] >= lay["data_block"]:
-            marks += RunsIntersect([(boot["kernel_block"] - lay["data_block"],
-                                     boot["kernel_blocks"])], [(0, D)])
-        first, count = led["integrity_map_block"], led["integrity_map_blocks"]
-        if first:
-            marks += RunsIntersect([(first, count)], [(0, D)])
-        # CowClaimGround: the manifest the Ledger names, and nothing a snapshot
-        # kept — those blocks are orphans.
-        b = led["cow_manifest_block"]
-        if b and b < D:
-            marks.append((b, 1))
-        # UseRollCall: every link either copy's chain reads back as its own.
-        for c in f.ledgers:
-            if c.get("use_chain_read"):
-                marks += [(b, 1) for b in c["use_chain_read"]["blocks"] if b < D]
+        for _kind, _label, runs, _partner in m.claims:
+            marks += RunsIntersect(RunsNormal(runs), [(0, D)])
         self.marked = RunsNormal(marks)
         orphans = RunsSubtract(f.used, self.marked)
         missing = RunsSubtract(self.marked, f.used)
         self.union = RunsNormal(f.used + self.marked)
         self.free = D - RunsCount(self.union)
+        c = m.counts
         self.fsck = {"orphan": RunsCount(orphans), "missing": RunsCount(missing),
-                     "corrected": corrected, "lost": lost, "quitclaims": quits,
+                     "corrected": c["corrected"], "lost": c["lost"], "derived": c["derived"],
+                     "unsettled": c["unsettled"], "unnamed": c["unnamed"],
+                     "unreadable": len(m.pool["unreadable"]),
                      "orphan_runs": orphans, "missing_runs": missing}
-        self.says = (D, self.free, led["total_files"])
-        if self.free != led["free_blocks"]:
-            self._LedgerWrite("the ledger's free count, %u where the bitmap says %u"
-                              % (led["free_blocks"], self.free))
+        self.says = (D, self.free, c["checked"])
 
-    def _LedgerWrite(self, why):
-        """LedgerStroke (ledger.c): the older copy, seq + 1."""
-        self.current = (self.current + 1) % LEDGER_COPIES
-        self.seq += 1
-        self.writes.append(("ledger copy %u at seq %u (%s)" % (self.current, self.seq, why), []))
-
-    def _Alloc(self, count):
-        """tagfs_alloc_blocks (tagfs.c) through BlockMapTake (block_map_take.c):
-        a take of `count` with no hint is the lowest run that holds it — first
-        fit, ascending, in the map the roll call left."""
-        for s, n in RunsSubtract([(0, self.f.D)], self.union):
-            if n >= count:
-                self.union = RunsNormal(self.union + [(s, count)])
-                return s
-        return None
-
-    def _Integrity(self):
-        """IntegrityInit (integrity.c:87-258): the first mount lays a map down;
-        a volume that grew past its map moves it."""
-        led, D = self.f.ledger, self.f.D
-        need = (D + INTEGRITY_PER_BLOCK - 1) // INTEGRITY_PER_BLOCK
-        first, stored = led["integrity_map_block"], led["integrity_map_blocks"]
-        if first != 0 and not (stored != 0 and stored < need):
-            return
-        start = self._Alloc(need)
-        if start is None or start == 0:
-            self.writes.append(("nothing for an integrity map — no free run of %u blocks" % need, []))
-            return
-        # MapOwed (block_map.c, block_map_cache.c): every bitmap sector the
-        # run's bits live in is written before the map is.
-        lo, hi = (start // 8) // SECTOR, ((start + need - 1) // 8) // SECTOR
-        what = "bitmap sector %u" % lo if lo == hi else "bitmap sectors %u..%u" % (lo, hi)
-        if first == 0:
-            self.writes.append(("%s, a %u-block integrity map at data block %u"
-                                % (what, need, start), [(start, need)]))
-            self._LedgerWrite("naming the map")
-        else:
-            self.writes.append(("%s, a %u-block integrity map at data block %u carrying the "
-                                "%u blocks at %u" % (what, need, start, stored, first),
-                                [(start, need)]))
-            self._LedgerWrite("naming the moved map")
+    def Seal(self):
+        """What the pool stood on: 'seal' (borne out), 'torn' (its open block
+        rolled back) or 'none' (the whole chain, as a kernel before the seal
+        reads it); the copy of the Ledger the volume stands on, its cycle and
+        the open block it names; the blocks the Deed's head names before the
+        chain's first (Glean); and the registry block the seal rolled back."""
+        m = self.f.mount
+        at = m.pool["seal"]
+        return {"stood": m.pool["stood"], "copy": m.stood["copy"] if m.stood else None,
+                "settle": m.seals[at]["settle"] if at is not None else None,
+                "to_block": m.seals[at]["pool_to_block"] if at is not None else None,
+                "fell_back": m.pool["fell_back"], "verdicts": m.pool["verdicts"],
+                "newest_sealed": m.seals[0] is not None, "prefix": list(m.prefix),
+                "registry_rolled": m.registry["rolled"]}
 
     def Json(self):
         fsck = None
@@ -263,10 +192,11 @@ class KernelView:
             fsck = dict(self.fsck)
             fsck["orphan_runs"] = [list(r) for r in self.fsck["orphan_runs"]]
             fsck["missing_runs"] = [list(r) for r in self.fsck["missing_runs"]]
-        g = self.f.growth
+        g, m = self.f.growth, self.f.mount
         return {"mounts": self.refusal is None, "refusal": self.refusal, "fsck": fsck,
                 "says": (None if self.says is None else
                          {"data_blocks": self.says[0], "free": self.says[1], "files": self.says[2]}),
+                "seal": self.Seal(), "next_file_id": m.next_file_id, "next_tag_id": m.next_tag_id,
                 "writes_at_mount": [w for w, _r in self.writes],
                 "kept_line": (None if self.kept_line is None else
                               {"disagreed": self.kept_line[0], "blocks": self.kept_line[1]}),
@@ -274,12 +204,8 @@ class KernelView:
 
 
 # ---------------------------------------------------------------------------
-# GroundCensus — the truth, and the findings
+# GroundCensus — the account, and the findings
 # ---------------------------------------------------------------------------
-
-
-def _Label(fid, rec):
-    return "fid %u '%s'" % (fid, rec.name) if rec is not None else "fid %u" % fid
 
 
 class GroundCensus:
@@ -289,13 +215,15 @@ class GroundCensus:
     def __init__(self, medium, forced_start=None):
         self.f = f = VolumeFacts(medium, forced_start)
         self.medium = medium
-        self.findings, self.claims, self.files, self.by_id = [], [], {}, {}
+        self.findings, self.claims, self.files = [], [], {}
+        self.by_id = f.mount.by_id
         self.kernel = KernelView(f)
         self.swept, self.boot_file = False, None
         self._Deed()
         if self.kernel.step == "layout" or not self._Regions():
             return
         self._Ledger()
+        self._Seal()
         self._UseChain()
         self._DiskBook()
         self._Cow()
@@ -304,6 +232,7 @@ class GroundCensus:
         self._Records()
         self._Files()
         self._Boot()
+        self._Claims()
         if f.ledger is not None and self.kernel.step != "bitmap":
             self._Sweep()
         self._Drift()
@@ -318,7 +247,6 @@ class GroundCensus:
             raise ValueError("%s is no owner src/include/ground_owner.h names" % kind)
         c = GroundClaim(kind, label, RunsIntersect(RunsNormal(runs), [(0, self.f.D)]),
                         GROUND_OWNER_ALONE[kind], partner)
-        c.kernel_sees = not RunsSubtract(c.runs, self.kernel.marked)
         self.claims.append(c)
         return c
 
@@ -402,9 +330,10 @@ class GroundCensus:
                      "sweep is not run, because the ledger names blocks nothing else can"
                      % (bad[0]["why"], bad[1]["why"]))
         elif bad:
+            good = f.mount.newest
             self.Say("LEDGER_TORN", "note", "ledger copy %u %s — the kernel runs on copy %u "
                      "(seq %u) alone (ledger.c ledger_load)" % (bad[0]["copy"], bad[0]["why"],
-                                                            f.ledger["copy"], f.ledger["seq"]))
+                                                            good["copy"], good["seq"]))
         for c in f.ledgers:
             if c["ok"] and c["use_misplaced"]:
                 self.Say("LEDGER_USE_MISPLACED", "note", "ledger copy %u places its Use Context at "
@@ -412,30 +341,65 @@ class GroundCensus:
                          "(ledger.c ledger_read_copy)" % (c["copy"], c["use_context_offset"],
                                                   c["use_context_bytes"]))
 
+    def _Seal(self):
+        """What the mount stood on, said when it is not the newest seal borne
+        out (meta_pool_mount.c PoolMount, tag_registry_load.c)."""
+        m = self.f.mount
+        if m.newest is None:
+            return
+        s0, s1 = m.seals
+        p = m.pool
+        if s0 is None:
+            self.Say("SEAL_ABSENT", "note", "the newest ledger copy (%u, seq %u) carries no seal: a "
+                     "kernel before the seal wrote it last, so the volume is read as that kernel "
+                     "reads it — the file table says which files there are, the pool is read to "
+                     "its end (mount.c MountSealsRead)" % (m.newest["copy"], m.newest["seq"]))
+        elif p["stood"] == "none" and not p["refused"]:
+            self.Say("SEAL_UNBORNE", "note", "no copy's seal is borne out by the pool's closed "
+                     "blocks (verdicts %s) — a kernel before the seal rewrote records in them in "
+                     "place, or they rotted — so the whole chain is read as such a kernel reads it: "
+                     "the file table says which files there are, and nothing is rolled back "
+                     "(meta_pool_mount.c WalkChoose)" % "/".join(str(v) for v in p["verdicts"]))
+        elif p["fell_back"]:
+            self.Say("SEAL_FELL_BACK", "note", "the newest seal (cycle %u) names pool records the "
+                     "medium does not hold — its verdict %s — so the volume stands on cycle %u, "
+                     "the one before it, and the medium is one that once held less than a seal "
+                     "(SETTLE_MEDIUM_LIED; meta_pool_mount.c SayFellBack)"
+                     % (s0["settle"], p["verdicts"][0], s1["settle"]))
+        elif p["stood"] == "torn":
+            mark = m.seals[p["seal"]]
+            gone = sorted(fid for fid, v in self.f.mount.files.items() if v["state"] != "mounted")
+            self.Say("SEAL_TAIL_TORN", "note", "the pool's open block %u does not hold what the "
+                     "seal of cycle %u says — it was torn as it was written again: its %u byte(s) "
+                     "of records are rolled back to the last closed block, every file whose newest "
+                     "record was there stands on the one before it, and %u name(s) with none "
+                     "before it go (meta_pool_mount.c WalkChoose)"
+                     % (mark["pool_to_block"], mark["settle"], mark["pool_to_bytes"], len(gone)))
+        r = m.registry
+        if r["rolled"] is not None:
+            self.Say("REGISTRY_ROLLED_BACK", "note", "block %u, the registry's last, does not hold "
+                     "what the newest seal says it does — its records are rolled back: the tags "
+                     "they named are forgotten, and their numbers are never given out again "
+                     "(tag_registry_load.c RegistrySealedBytes)" % r["rolled"])
+
     def _UseChain(self):
-        """The Use Context's chains the copies name (use_memory_mount.c):
-        GroundOwner use_chain, every link read back as the chain's own. A
+        """The Use Context's chains the copies name (use_memory_mount.c): a
         newest copy's chain that does not read whole is the mount rolling the
         memory back to the copy before — the medium's lie only when a link of
         the chain the record's own cycle wrote holds another's content."""
-        f, seen = self.f, set()
-        newest = f.ledger
+        f = self.f
+        newest = f.mount.newest
         for c in f.ledgers:
             got = c.get("use_chain_read")
-            if not got:
+            if not got or newest is None or c["copy"] != newest["copy"] or got["state"] == "whole":
                 continue
             first = c["use_chain"]["first"]
-            if first not in seen:
-                seen.add(first)
-                self.Claim("use_chain", "Use Context chain at data block %u" % first,
-                           RunsNormal([(b, 1) for b in got["blocks"]]))
-            if newest is not None and c["copy"] == newest["copy"] and got["state"] != "whole":
-                lied = got["state"] == "foreign" and c["use_chain"]["seq"] == c["seq"]
-                self.Say("TUSE_TORN", "note", "the newest ledger copy names a Use Context chain "
-                         "at data block %u that reads %s — the mount remembers what the copy "
-                         "before it names%s (use_memory_mount.c UseMemoryJudge)"
-                         % (first, got["state"], ", and says the medium lied about its FLUSH"
-                            if lied else ""))
+            lied = got["state"] == "foreign" and c["use_chain"]["seq"] == c["seq"]
+            self.Say("TUSE_TORN", "note", "the newest ledger copy names a Use Context chain "
+                     "at data block %u that reads %s — the mount remembers what the copy "
+                     "before it names%s (use_memory_mount.c UseMemoryJudge)"
+                     % (first, got["state"], ", and says the medium lied about its FLUSH"
+                        if lied else ""))
 
     def _DiskBook(self):
         f = self.f
@@ -456,7 +420,7 @@ class GroundCensus:
                      % ", ".join(map(str, bad)))
 
     def _Cow(self):
-        f, led = self.f, self.f.ledger
+        f = self.f
         for _which, b, m in f.manifests:
             if b >= f.D or m is None or not m["ok"]:
                 self.Say("MANIFEST_BAD", "damage", "the snapshot manifest the ledger names at data "
@@ -464,7 +428,6 @@ class GroundCensus:
                                                   else "will not read" if m is None else
                                                   "reads magic 0x%08x, count %u"
                                                   % (m["magic"], m["count"])), [(b, 1)])
-            self.Claim("manifest", "snapshot manifest", [(b, 1)])
         # What a snapshot kept is no owner's (ground_owner.h): its frozen blocks
         # are orphans, named in _Orphans for what they are.
         if f.stray:
@@ -472,9 +435,6 @@ class GroundCensus:
                      "does not carry (%s) — the kernel passes them over and counts them "
                      "(cow.c CowRedirectSeen)"
                      % (len(f.stray), ", ".join(str(s[0]) for s in f.stray)))
-        if led and led["integrity_map_block"]:
-            self.Claim("integrity", "integrity map",
-                       [(led["integrity_map_block"], led["integrity_map_blocks"])])
 
     # --- the chains, the registry and the records -------------------------
 
@@ -487,46 +447,39 @@ class GroundCensus:
                      "%s — ground the volume would take on growth is not blank (tagfs.c "
                      "volume_take_more_ground)"
                      % (RunsCount(past), f.D, RunsText(past)))
-        for name in ("registry", "table", "pool"):
-            for i, b in enumerate(f.chains[name][0]):
-                self.Claim(name, "%s[%u]" % (name, i), [(b, 1)])
+        for name in ("registry", "pool", "table"):
             if name in f.refused:
                 self.Say("CHAIN_REFUSED", "damage", "the %s: %s — the kernel refuses the mount: %s"
                          % (name, f.refused[name], self.kernel.refusal or "(an earlier refusal)"))
-        for i, b in enumerate(f.pool_held):
-            self.Claim("pool", "pool head" if i == 0 else "pool before its first[%u]" % (i - 1),
-                       [(b, 1)])
         drift = [(b, blk["kept"], blk["kept_counted"]) for b, blk, _r in f.pool
                  if blk["kept"] != blk["kept_counted"]]
         if drift:
             self.Say("POOL_KEPT_DRIFT", "note", "%u of %u pool block(s) state a kept count the records "
-                     "do not bear out (%s) — the mount says so and counts (meta_pool.c:395-400)"
-                     % (len(drift), len(f.pool), ", ".join("block %u says %u, holds %u" % d
-                                                           for d in drift)))
+                     "do not bear out (%s) — the mount says so and counts (meta_pool_mount.c "
+                     "PoolMount)" % (len(drift), len(f.pool), ", ".join("block %u says %u, holds %u" % d
+                                                                       for d in drift)))
         for b, blk, _r in f.pool:
             if blk["walk_stop"] is not None:
                 at, ln = blk["walk_stop"]
                 self.Say("RECORD_SHAPE", "damage", "pool block %u: the walk stops at byte %u, where a "
                          "record says it is %u long, with %u used bytes stated — the records behind "
-                         "it are never read (meta_pool.c:764-767)" % (b, at, ln, blk["used_bytes"]))
+                         "it are never read (meta_pool_mount.c WalkRecords)"
+                         % (b, at, ln, blk["used_bytes"]))
 
     def _Registry(self):
-        """RegistryAdopt's rules (tag_registry.c) over the chain."""
-        by_kv, dup, rng = {}, [], []
-        for b, blk in self.f.registry:
-            for r in blk["records"]:
-                where, kv = "block %u +%u" % (b, r["at"]), (r["key"], r["value"])
-                if kv in by_kv:
-                    if by_kv[kv] != r["tag_id"]:
-                        dup.append("id %u at %s repeats id %u's key/value and is dropped"
-                                   % (r["tag_id"], where, by_kv[kv]))
-                elif r["tag_id"] > MAX_TAG_ID:
-                    rng.append("id %u at %s is past %u and is dropped" % (r["tag_id"], where, MAX_TAG_ID))
-                elif r["tag_id"] in self.by_id:
-                    dup.append("id %u at %s collides with an earlier record of that id and is "
-                               "dropped" % (r["tag_id"], where))
-                else:
-                    self.by_id[r["tag_id"]], by_kv[kv] = kv, r["tag_id"]
+        """RegistryAdopt's rules (tag_registry.c) over what the mount takes of
+        the chain (mount.RegistryAdopt)."""
+        dup, rng = [], []
+        for why, b, r, other in self.f.mount.dropped:
+            where = "block %u +%u" % (b, r["at"])
+            if why == "repeats":
+                dup.append("id %u at %s repeats id %u's key/value and is dropped"
+                           % (r["tag_id"], where, other))
+            elif why == "range":
+                rng.append("id %u at %s is past %u and is dropped" % (r["tag_id"], where, MAX_TAG_ID))
+            else:
+                dup.append("id %u at %s collides with an earlier record of that id and is "
+                           "dropped" % (r["tag_id"], where))
         if dup:
             self.Say("TAG_DUPLICATE", "damage", "tag registry: " + "; ".join(dup))
         if rng:
@@ -536,18 +489,21 @@ class GroundCensus:
         bad, shape = [], []
         for r in self.f.records:
             # A retired record has its file_id zeroed with its CRC left as it
-            # was (meta_pool.c:225-234): a fid-0 record fails its sum by
-            # construction, and is not damage.
+            # was (an earlier kernel's meta_pool_delete): a fid-0 record fails
+            # its sum by construction, and is not damage.
             if r.fid != 0 and not r.unpack_ok:
-                bad.append("fid %u at block %u +%u" % (r.fid, r.block, r.at))
+                (bad if not r.crc_ok else shape).append(
+                    "fid %u at block %u +%u%s" % (r.fid, r.block, r.at, "" if not r.crc_ok else
+                                                  " (its counts reach past its length of %u)" % r.len))
             elif r.fid != 0 and (not r.shape_ok or (r.extents and not r.extents_at_mount)):
                 shape.append("fid %u at block %u +%u (%s)" % (
                     r.fid, r.block, r.at, "length %u against a shape of %u" % (
-                        r.len, 42 + 2 * r.tag_count + 6 * r.extent_count + r.name_len)
+                        r.len, RECORD_HEADER + 2 * r.tag_count + 6 * r.extent_count + r.name_len)
                     if not r.shape_ok else "an extent the mount drops, and with it every extent"))
         if bad:
             self.Say("RECORD_CRC", "damage", "%u pool record(s) fail their CRC16: %s — the mount "
-                     "never reads them (meta_pool.c:569-580)" % (len(bad), ", ".join(bad)))
+                     "passes them over, and each file keeps the newest of its records that reads "
+                     "(meta_pool_mount.c WalkPut)" % (len(bad), ", ".join(bad)))
         if shape:
             self.Say("RECORD_SHAPE", "damage", "record(s) unpack with the wrong shape: " + ", ".join(shape))
 
@@ -562,73 +518,53 @@ class GroundCensus:
         if outside:
             self.Say("EXTENT_OUTSIDE", "damage", "%s names block(s) %s past the data run's %u "
                      "blocks — the mount keeps them and every later read drops the whole list "
-                     "(K4, meta_pool.c:625-641)" % (_Label(fid, rec), RunsText(outside), self.f.D))
+                     "(plot_pack.c PlotExtentsInRun)" % (Label(fid, rec), RunsText(outside), self.f.D))
         for tag in rec.tags:
             if tag not in self.by_id:
-                self.absent.setdefault(tag, []).append(_Label(fid, rec))
-        self.Claim("file", _Label(fid, rec), runs)
-
-    def _AtRow(self, fid, row):
-        """A named file with no record in the pool's walk: what its row's place
-        holds. Returns the record to go on with, or None when it is judged."""
-        f = self.f
-        if row[1] + ondisk.RECORD_HEADER > BLOCK:
-            self.Say("ROW_OFFSET_OVERRUN", "damage", "fid %u is named at block %u offset %u, past "
-                     "where a record header fits — the kernel unpacks it off the end of a 4 KiB "
-                     "stack buffer (K2, meta_pool.c:1047-1052; step 1.4)" % (fid, row[0], row[1]))
-            return self._File(fid, "offset_overrun", None, row)
-        raw = f.read_block(row[0])
-        rec = ondisk.ParseRecord(raw, row[1], row[0]) if raw is not None else None
-        if rec is not None and rec.unpack_ok and rec.fid == fid:
-            self.Say("ROW_OFF_CHAIN", "note", "%s is named at block %u+%u, %s — its record reads "
-                     "there and nowhere the mirror walks (meta_pool.c:1160-1166)"
-                     % (_Label(fid, rec), row[0], row[1],
-                        "on the pool chain at an offset its walk never reaches"
-                        if row[0] in f.chains["pool"][0] else "a block not on the pool chain"))
-            return rec
-        if rec is not None and rec.unpack_ok:
-            self.Say("ROW_NAMES_OTHER", "damage", "fid %u is named at block %u+%u and the record "
-                     "there is fid %u '%s'" % (fid, row[0], row[1], rec.fid, rec.name))
-            return self._File(fid, "names_other", None, row)
-        self.Say("FILE_LOST", "damage", "fid %u is named at block %u+%u and there is no readable "
-                 "record for it there or anywhere in the pool — the mount deletes its name "
-                 "(tagfs_init's roll call)" % (fid, row[0], row[1]))
-        return self._File(fid, "lost", None, row)
+                self.absent.setdefault(tag, []).append(Label(fid, rec))
 
     def _Files(self):
+        """Every id the mount's map holds, as MountFile judges it
+        (mount.MountFiles): a file it takes up is live; a record no row names,
+        with no seal, is unnamed; a row with no record is a cycle that did not
+        settle under a seal and a file lost without one — or, where the newest
+        record the span holds of it is a Quitclaim, a delete whose row had not
+        yet gone."""
         f, self.absent = self.f, {}
-        next_fid = f.ledger["next_file_id"] if f.ledger else None
-        for fid in sorted(set(f.rows) | set(f.newest)):
-            row, rec = f.rows.get(fid), f.newest.get(fid)
-            if row is None:
-                if rec.flags & FILE_ACTIVE:
-                    self._File(fid, "unnamed", rec, None)
-                continue
-            past = next_fid is not None and fid >= next_fid
-            if rec is None:
-                rec = self._AtRow(fid, row)
-                if rec is None:
-                    continue
-            elif (rec.block, rec.at) != row and not past:
-                self.Say("TABLE_CORRECTED", "note", "%s is named at block %u+%u and its newest "
-                         "record is at block %u+%u — the mount corrects the table to it "
-                         "(tagfs_init's roll call)" % (_Label(fid, rec), row[0], row[1], rec.block, rec.at))
-            if past:
-                self.Say("FID_PAST_NEXT", "damage", "%s has a table row and the ledger's "
-                         "next_file_id is %u — the roll call never visits it (tagfs_init) and "
-                         "the next create is issued its id and overwrites the row "
-                         "(file_table.c:203-227)" % (_Label(fid, rec), next_fid))
-                self._File(fid, "past_next", rec, row)
-                if rec.flags & FILE_ACTIVE:
-                    self._Owns(fid, rec)
-            elif rec.flags & FILE_ACTIVE:
+        unsettled = []
+        for fid, v in sorted(f.mount.files.items()):
+            rec, row, state = v["record"], v["row"], v["state"]
+            newest = f.newest.get(fid)
+            if state == "mounted":
+                if v["corrected"]:
+                    self.Say("TABLE_CORRECTED", "note", "%s is named at block %u+%u and its newest "
+                             "record is at block %u+%u — the mount corrects the table to it "
+                             "(mount.c MountFile)" % (Label(fid, rec), row[0], row[1], rec.block, rec.at))
                 self._File(fid, "live", rec, row)
                 self._Owns(fid, rec)
+            elif state == "unnamed":
+                self._File(fid, "unnamed", rec, None)
+            elif newest is not None and not newest.flags & FILE_ACTIVE:
+                self.Say("QUITCLAIM_PENDING", "note", "%s is named at block %u+%u and its newest "
+                         "record is a Quitclaim — the file was deleted and its row had not gone "
+                         "yet; the mount lets the name go and counts it %s (mount.c MountFile)"
+                         % (Label(fid, newest), row[0], row[1],
+                            "among the rows of a cycle that did not settle" if f.mount.sealed
+                            else "among the lost"))
+                self._File(fid, "quitclaim", newest, row)
+            elif state == "unsettled":
+                unsettled.append("fid %u at block %u+%u" % (fid, row[0], row[1]))
+                self._File(fid, "unsettled", None, row)
             else:
-                self.Say("QUITCLAIM_PENDING", "note", "%s is named and its newest record is not "
-                         "ACTIVE — the mount deletes the name and frees its blocks without a word "
-                         "(tagfs_init's roll call)" % _Label(fid, rec))
-                self._File(fid, "quitclaim", rec, row)
+                self.Say("FILE_LOST", "damage", "fid %u is named at block %u+%u and the pool holds "
+                         "no record of it that reads — the mount deletes its name (mount.c "
+                         "MountFile)" % (fid, row[0], row[1]))
+                self._File(fid, "lost", None, row)
+        if unsettled:
+            self.Say("ROW_UNSETTLED", "note", "%u table row(s) name files the sealed pool holds no "
+                     "record of — %s — rows of a cycle that did not settle, or of records the "
+                     "mount rolled back; they are let go (mount.c MountFile)"
+                     % (len(unsettled), ", ".join(unsettled)))
         for tag, holders in sorted(self.absent.items()):
             self.Say("TAG_ABSENT", "damage", "tag id %u is carried by %u file(s) and the registry does "
                      "not define it: %s" % (tag, len(holders), ", ".join(holders)))
@@ -657,8 +593,13 @@ class GroundCensus:
                      "(volume_deed.h:216-235, create_tagfs.c:1503-1518)"
                      % (boot["kernel_block"], boot["kernel_blocks"], boot["kernel_bytes"], why))
             return
-        self.boot_file = _Label(holders[0]["fid"], holders[0]["record"])
-        self.Claim("boot", "BOOT", run, partner=self.boot_file)
+        self.boot_file = Label(holders[0]["fid"], holders[0]["record"])
+
+    def _Claims(self):
+        """Every owner's ground as the mount's census hears it (MountModel):
+        the BOOT run beside the kernel file it is, when the census found it."""
+        for kind, label, runs, _partner in self.f.mount.claims:
+            self.Claim(kind, label, runs, partner=self.boot_file if kind == "boot" else None)
 
     # --- the sweep -----------------------------------------------------------
 
@@ -683,15 +624,14 @@ class GroundCensus:
             kept = RunsIntersect(runs, self.kernel.marked)
             if kept:
                 self.Say("MISSING", "note", "data block(s) %s of %s read free in the bitmap — the "
-                         "kernel's union repair keeps them, in memory, at every mount "
-                         "(tagfs_init's union repair)" % (RunsText(kept), " and ".join(labels)), kept)
+                         "mount's census takes them again, in memory, and the next Settle cycle "
+                         "writes them (block_map_mount.c MapCensusWindow)"
+                         % (RunsText(kept), " and ".join(labels)), kept)
             lost = RunsSubtract(runs, self.kernel.marked)
             if lost:
-                self.Say("MISSING", "damage", "data block(s) %s of %s read free in the bitmap and %s"
-                         % (RunsText(lost), " and ".join(labels),
-                            "the kernel's roll call does not reach them — the allocator hands them out"
-                            if self.kernel.refusal is None else
-                            "the kernel, which refuses this mount, repairs nothing"), lost)
+                self.Say("MISSING", "damage", "data block(s) %s of %s read free in the bitmap and "
+                         "the kernel, which refuses this mount, repairs nothing"
+                         % (RunsText(lost), " and ".join(labels)), lost)
         self.claimed = RunsNormal([(s, n) for s, n, _c in segs])
         self.orphans = RunsSubtract(f.used, self.claimed)
         self._Orphans()
@@ -702,37 +642,35 @@ class GroundCensus:
             leak = RunsIntersect(RunsSubtract(ext, self.claimed), f.used)
             taken = RunsIntersect(ext, self.claimed)
             self.Say("UNNAMED_RECORD", "leak" if leak else "note",
-                     "%s is an ACTIVE newest record no table row names — %s"
-                     % (_Label(fid, e["record"]),
+                     "%s is an ACTIVE newest record no table row names, on a volume with no seal "
+                     "the mount stands on — %s"
+                     % (Label(fid, e["record"]),
                         "its blocks %s are marked used and nothing owns them: an interrupted "
-                        "create, or a delete whose retire never landed (tagfs.c "
-                        "tagfs_delete_file_inside, tagfs_sync_inside)"
+                        "create a kernel before the seal left (mount.c MountFile)"
                         % RunsText(leak) if leak else
                         "stale: its blocks %s" % ("went to others" if taken else "are free")), leak)
-        if self.kernel.fsck is not None:
-            for c in self.claims:
-                blind = RunsIntersect(c.runs, self.kernel.fsck["orphan_runs"])
-                if blind:
-                    self.Say("KERNEL_BLIND", "note", "%s at data block(s) %s — the kernel's roll "
-                             "call does not reach it and calls it an orphan" % (c.label, RunsText(blind)),
-                             blind)
 
     def _Explanations(self):
         """What each orphan block might be the extent of: {block: text}, the
         most telling explanation winning."""
         f, out = self.f, {}
-        state = {e["record"]: e["state"] for e in self.files.values() if e["record"] is not None}
-        for r in f.records:
-            if state.get(r) in ("live", "past_next"):
+        state = {id(e["record"]): e["state"] for e in self.files.values() if e["record"] is not None}
+        past = [(r, "past") for r in f.mount.pool["past"]]
+        for r, where in [(r, None) for r in f.records] + past:
+            st = state.get(id(r))
+            if st == "live":
                 continue                         # an owner, not an explanation
-            if state.get(r) == "unnamed":
-                rank, text = 0, "extents of unnamed record %s" % _Label(r.fid, r)
-            elif state.get(r) == "quitclaim":
-                rank, text = 1, "extents of %s, whose newest record is not ACTIVE" % _Label(r.fid, r)
+            if st == "unnamed":
+                rank, text = 0, "extents of unnamed record %s" % Label(r.fid, r)
+            elif st == "quitclaim":
+                rank, text = 1, "extents of %s, whose newest record is a Quitclaim" % Label(r.fid, r)
+            elif where == "past" and r.fid and r.unpack_ok:
+                rank, text = 1, ("extents of a record of %s past the seal's span — a cycle that "
+                                 "did not settle" % Label(r.fid, r))
             elif r.fid and r.unpack_ok:
-                rank, text = 1, "extents of a superseded record of %s" % _Label(r.fid, r)
+                rank, text = 1, "extents of a superseded record of %s" % Label(r.fid, r)
             elif r.fid:
-                rank, text = 2, "extents named by a record of fid %u that fails its checksum" % r.fid
+                rank, text = 2, "extents named by a record of fid %u that does not unpack" % r.fid
             else:
                 rank, text = 3, "extents of a retired record '%s'" % r.name
             for s, n in RunsIntersect(RunsNormal(r.extents), self.orphans):
@@ -744,6 +682,8 @@ class GroundCensus:
     def _Orphans(self):
         f, explained, groups, links = self.f, self._Explanations(), {}, []
         kept = {old for _snap, old, _new in f.redirects}
+        past_pool = set(f.mount.pool["past_blocks"])
+        past_registry = f.mount.registry["past"]
         for s, n in self.orphans:
             for b in range(s, s + n):
                 if b in kept:
@@ -760,13 +700,18 @@ class GroundCensus:
                     continue
                 if spare:
                     code, text = "SPARE_UNNAMED", "a spare %s header linked from nowhere" % spare
+                elif magic == MPOOL_MAGIC and b in past_pool:
+                    code, text = "ORPHAN", ("a pool block a cycle that did not settle linked past "
+                                            "the seal's open block")
                 elif magic == MPOOL_MAGIC:
                     alive = any(fid for _a, _l, fid in ondisk.ReadPoolBlock(raw)["mirror_walk"])
-                    text = ("a pool block linked from nowhere (a severed tail, or the "
-                            "stamp-then-link window meta_pool.c:922-937)" if alive else
-                            "a retired pool block whose unlink the bitmap had not caught up with "
-                            "(meta_pool.c:1095-1136)")
+                    text = ("a pool block linked from nowhere (a severed tail, or a block a "
+                            "cycle took off the chain's front)" if alive else
+                            "a pool block holding no record of a file")
                     code = "ORPHAN"
+                elif magic == REGISTRY_MAGIC and b == past_registry:
+                    code, text = "ORPHAN", ("a registry block linked past the block the seal "
+                                            "names — a cycle that did not settle")
                 elif magic in (FILETBL_MAGIC, REGISTRY_MAGIC):
                     code, text = "ORPHAN", "a %s block linked from nowhere" % (
                         "table" if magic == FILETBL_MAGIC else "registry")
@@ -815,8 +760,8 @@ class GroundCensus:
         derived = k.free if k.fsck is not None else f.D - RunsCount(f.used)
         if derived != led["free_blocks"]:
             self.Say("LEDGER_FREE_DRIFT", "note", "the ledger says %u free and the bitmap derives %u "
-                     "— the mount writes the ledger back (tagfs_init's free-count rewrite)"
-                     % (led["free_blocks"], derived))
+                     "— the mount keeps the bitmap's number, and the next Settle cycle writes it "
+                     "(mount.c MountCensus)" % (led["free_blocks"], derived))
         live = sum(1 for e in self.files.values() if e["state"] == "live")
         if led["total_files"] != live:
             self.Say("LEDGER_FILES_DRIFT", "note", "the ledger says %u files and %u are live"
@@ -841,13 +786,6 @@ class GroundCensus:
     def Sorted(self):
         return sorted(self.findings, key=lambda x: SEVERITY.index(x.severity))
 
-    def FileRecord(self, fid):
-        """The record a file is read through: the mount's, when it sees it."""
-        v = self.kernel.verdicts.get(fid)
-        if v is not None and v.record is not None:
-            return v.record
-        return self.files[fid]["record"] if fid in self.files else None
-
     def Sha256(self, rec):
         """sha256 of a file's first `size` bytes read through the extents the
         mount keeps; None when the medium ends inside them."""
@@ -863,6 +801,14 @@ class GroundCensus:
                 left -= BLOCK
         return h.hexdigest()
 
+    def RegistryTailUsed(self):
+        """The bytes of records the registry's last block holds as the mount
+        took it — where the next record is appended (tag_registry_load.c)."""
+        taken = self.f.mount.registry["taken"]
+        if not taken:
+            return None
+        return sum(REGISTRY_RECORD.size + r["key_len"] + r["value_len"] for r in taken[-1][1])
+
     def HumanLines(self):
         f, k, st, out = self.f, self.kernel, self.f.stand, []
         out.append("ground sector %u (%s), volume %s" % (st.start, st.how, st.deed["uuid"].hex()))
@@ -874,17 +820,25 @@ class GroundCensus:
         good = [c for c in f.ledgers if c["ok"]]
         if len(good) == LEDGER_COPIES:
             seqs = [c["seq"] for c in good]
-            out.append("ledger copies 0 and 1 are intact, %s — the kernel stands on copy %u"
+            out.append("ledger copies 0 and 1 are intact, %s — the newest is copy %u"
                        % ("both at seq %u" % seqs[0] if seqs[0] == seqs[1] else
-                          "at seq %u and %u" % tuple(seqs), f.ledger["copy"]))
+                          "at seq %u and %u" % tuple(seqs), f.mount.newest["copy"]))
+        if f.ledger is not None:
+            seal = k.Seal()
+            out.append("the pool stands on %s, ledger copy %u%s — next file id %u, next tag id %u"
+                       % ({"seal": "the seal of cycle %s" % seal["settle"],
+                           "torn": "the seal of cycle %s, its open block rolled back" % seal["settle"],
+                           "none": "no seal"}[seal["stood"]], seal["copy"],
+                          " (fell back)" if seal["fell_back"] else "",
+                          f.mount.next_file_id, f.mount.next_tag_id))
         if self.swept:
             used = RunsCount(f.used)
             out.append("data run %u blocks at volume block %u — %u used, %u free, the ledger says %u"
                        % (f.D, f.layout["data_block"], used, f.D - used, f.ledger["free_blocks"]))
             live = [e for e in self.files.values() if e["state"] == "live"]
-            pool = f.chains["pool"][0]
+            pool = f.chains["pool"]
             out.append("owners — registry %u block(s), table %u, pool %u (%s), %u files in %u blocks%s"
-                       % (len(f.chains["registry"][0]), len(f.chains["table"][0]), len(pool),
+                       % (len(f.chains["registry"]), len(f.chains["table"]), len(pool),
                           ", ".join(map(str, pool)), len(live),
                           sum(RunsCount(RunsIntersect(RunsNormal(e["record"].extents_at_mount),
                                                       [(0, f.D)])) for e in live),
@@ -913,7 +867,7 @@ class GroundCensus:
                                  if isinstance(b, bytes) else b) for a, b in deed[key].items()}
         files = []
         for fid, e in sorted(self.files.items()):
-            rec, v = self.FileRecord(fid), k.verdicts.get(fid)
+            rec = e["record"]
             files.append({"fid": fid, "state": e["state"],
                           "name": rec.name if rec else None,
                           "row": list(e["row"]) if e["row"] else None,
@@ -921,7 +875,7 @@ class GroundCensus:
                           "size": rec.size if rec else None,
                           "extents": [list(x) for x in rec.extents_at_mount] if rec else [],
                           "tags": list(rec.tags) if rec else [],
-                          "visible": v is not None and v.outcome == "visible",
+                          "visible": e["state"] == "live",
                           "sha256": self.Sha256(rec) if rec else None})
         led_copies = []
         for c in f.ledgers:
@@ -943,15 +897,14 @@ class GroundCensus:
                          "records_bad": [i for i, e in enumerate(f.book_records) if not e["valid"]]},
             "cow": {"snapshots": sorted(f.snapshots), "redirects": [list(r) for r in f.redirects],
                     "stray": [list(r) for r in f.stray]},
-            "chains": {"registry": f.chains["registry"][0], "table": f.chains["table"][0],
-                       "pool": f.chains["pool"][0], "refused": dict(f.refused) or None,
+            "chains": {"registry": f.chains["registry"], "table": f.chains["table"],
+                       "pool": f.chains["pool"], "refused": dict(f.refused) or None,
                        # How far each chain is from taking a new block: the
                        # registry's last block is filled record by record and a
                        # record that does not fit starts the next one; the
                        # table takes its next block for the first row past what
                        # its blocks hold (tag_registry.c, file_table.c flush).
-                       "registry_tail_used": (f.registry[-1][1]["used_bytes"]
-                                              if f.registry else None),
+                       "registry_tail_used": self.RegistryTailUsed(),
                        "registry_block_data": REGISTRY_DATA,
                        "registry_record_header": REGISTRY_RECORD.size,
                        "table_rows_per_block": FTABLE_PER_BLOCK},
@@ -959,8 +912,7 @@ class GroundCensus:
             "census": {"used": RunsCount(f.used), "free": f.D - RunsCount(f.used),
                        "swept": self.swept,
                        "claims": [{"kind": c.kind, "label": c.label,
-                                   "runs": [list(r) for r in c.runs],
-                                   "kernel_sees": c.kernel_sees} for c in self.claims],
+                                   "runs": [list(r) for r in c.runs]} for c in self.claims],
                        "orphan_runs": [list(r) for r in getattr(self, "orphans", [])],
                        "missing_runs": [list(r) for x in self.findings if x.code == "MISSING"
                                         for r in x.runs],
