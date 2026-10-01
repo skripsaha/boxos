@@ -28,6 +28,7 @@
 #include "mount/mount.h"
 #include "mount/away.h"
 #include "mount/hold_ground.h"
+#include "mount/return_fail.h"
 #include "read/read.h"
 #include "run/run.h"
 #include "../../kernel/drivers/timer/rtc.h"
@@ -1860,7 +1861,8 @@ error_t tagfs_init(void) {
      * medium left exactly where it is — as a read the medium refused, so the
      * only way back from there is the machine asking again by itself, when
      * the seat says it answers again (seat:ready, the note over
-     * g_mount_owed).
+     * g_mount_owed) — which QEMU's stick never says, so this build says it
+     * for the stick's driver (mount/return_fail.c).
      *
      * Not the first mount: the stamp counts the ones that finished, so this
      * trips on the first mount after a volume has already been up.
@@ -1871,6 +1873,7 @@ error_t tagfs_init(void) {
         if (!tripped && tagfs_mount_epoch() >= 1) {
             tripped = true;
             TagFSNoteReadRefused();
+            TagFSReturnFailTripped(g_tagfs_seat);
             return mount_refused("RETURNFAIL=on asked this re-mount to fail",
                                  ERR_TAGFS_CORRUPTED);
         }
@@ -2202,6 +2205,7 @@ void TagFSServiceIfPending(void)
 {
     HelmRunReady();
     SettleServiceIfPending(false);
+    TagFSReturnFailSeatReady();     /* nothing at all unless RETURNFAIL=on */
     tagfs_ask_for_the_mount_again();
 
     if (__atomic_load_n(&g_abandon_pending, __ATOMIC_ACQUIRE) == 0) {

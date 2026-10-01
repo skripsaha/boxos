@@ -1,5 +1,6 @@
 #include "hold_ground.h"
 #include "../helm/helm.h"
+#include "atomics.h"
 #include "cpu_calibrate.h"
 
 /*

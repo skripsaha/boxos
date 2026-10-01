@@ -532,7 +532,10 @@ HOLDGROUND_MARK = $(BUILDDIR)/.holdground.$(if $(filter on,$(HOLDGROUND)),on,off
 # and all three came back ONLY because the hand at the machine kept replugging.
 #
 # This key fails the first RE-mount once, with the medium left exactly where it
-# is, so the only road back is the machine asking again by itself.
+# is, so the only road back is the machine asking again by itself — when the
+# seat says it answers again (seat:ready). QEMU's stick never says that, so the
+# key says it for the stick's driver two seconds after the refusal
+# (tagfs/mount/return_fail.c).
 ifeq ($(RETURNFAIL),on)
 CFLAGS += -DCONFIG_TAGFS_RETURN_FAIL_ONCE=1
 endif
