@@ -2,26 +2,33 @@
 proved on a synthetic log, and the format held against the C headers.
 
 A rule nobody has seen fire is a rule that may not work. Each case here lays
-one kind of damage over the image in memory (an OverlayMedium — the image
-file is never written), runs the census on it, and holds the findings, and
-the KernelView's roll call, against what that damage must produce. The image
-has to be consistent to begin with (C0), because every case is measured as a
-difference from it.
+one kind of damage — or one state a kernel cycle leaves — over the image in
+memory (an OverlayMedium — the image file is never written), runs the census on
+it, and holds the findings, and the mount's decisions, against what that state
+must produce. The image has to be consistent to begin with (C0), because every
+case is measured as a difference from it; and it is sealed, as mkfs leaves every
+volume, so a plant that changes the pool or the registry either seals again what
+it laid down (Reseal — what a Settle cycle's last write leaves) or leaves the
+seal as it was and is read the way the mount reads a seal the medium does not
+bear out. NoSeal writes both copies of the Ledger the way a kernel before the
+seal writes them.
 
 `--emit CASE --out IMG` writes one case's overlay out as a new image, for a
-harness to boot: logcheck's `census` scenario boots `reconcile` and `C17`
-and holds the kernel's own fsck lines against this package's prediction.
+harness to boot: logcheck's `census` scenario boots some of them and holds the
+kernel's own lines against this package's prediction.
 """
 
+import importlib.util
 import os
 import re
 import struct
 
 from . import ondisk
-from .ondisk import SECTOR, BLOCK, SECTORS_PER_BLOCK
+from .ondisk import SECTOR, BLOCK, SECTORS_PER_BLOCK, U16, U32
 from .medium import OverlayMedium, Unreadable
 from .census import GroundCensus
 from .ondisk import RunsNormal, RunsSubtract
+from .ground_owners import GROUND_OWNERS
 from . import blklog
 
 
@@ -29,38 +36,47 @@ class Targets:
     """What the cases aim at, chosen off C0's census.
 
     S — the live file with the fewest blocks (at least one), lowest fid first,
-        that has exactly one record in the pool, carries a tag and a name, and
-        is not the BOOT file: a file whose loss or retirement nothing else
-        stands in for.
+        that has exactly one record in the pool, carries a tag and a name, is
+        not the BOOT file, and whose record lies in a closed block of the pool:
+        a file whose loss nothing else stands in for, and whose record changed
+        in place is a closed block the seal no longer bears out.
+    U — the next such file of one block: the file a block S let go is taken by.
     L — the live file with the most blocks, lowest fid first.
-    F — the lowest data block starting four free ones (C12 in `reconcile` sits
-        at F+3)."""
+    F — the lowest data block starting four free ones (`reconcile` sits a
+        registry block at F+3)."""
 
     def __init__(self, c0):
         f = c0.f
         self.c0, self.f = c0, f
         self.base, self.lay = f.base, f.layout
         live = [e for e in c0.files.values() if e["state"] == "live"]
+        tail_block, tail, _raw = f.pool[-1]
         counts = {}
         for r in f.records:
             counts[r.fid] = counts.get(r.fid, 0) + 1
         ok = [e for e in live if e["record"].Blocks() >= 1 and counts.get(e["fid"]) == 1 and
-              e["record"].tags and e["record"].name and
+              e["record"].tags and e["record"].name and e["record"].block != tail_block and
               ondisk.RECORD_HEADER <= e["record"].len and
               "fid %u '%s'" % (e["fid"], e["record"].name) != c0.boot_file]
         if not ok or len(live) < 2:
             raise Unreadable("the image has no live file a case can aim at")
         self.S = min(ok, key=lambda e: (e["record"].Blocks(), e["fid"]))
+        ones = [e for e in ok if e is not self.S and e["record"].Blocks() == 1]
+        if not ones:
+            raise Unreadable("the image has no second one-block file a case can aim at")
+        self.U = min(ones, key=lambda e: e["fid"])
         self.L = min((e for e in live if e is not self.S),
                      key=lambda e: (-e["record"].Blocks(), e["fid"]))
         free = RunsSubtract([(3, f.D - 3)], f.used)
         self.F = next(s for s, n in free if n >= 4)
-        self.Srec, self.Lrec = self.S["record"], self.L["record"]
+        self.Srec, self.Lrec, self.Urec = self.S["record"], self.L["record"], self.U["record"]
         self.Sruns = RunsNormal(self.Srec.extents_at_mount)
+        self.Uruns = RunsNormal(self.Urec.extents_at_mount)
         blocks = [b for s, n in RunsNormal(self.Lrec.extents_at_mount) for b in range(s, s + n)]
         self.Lmid = blocks[len(blocks) // 2]
-        tail_block, tail, _raw = f.pool[-1]
         self.PoolTail = (tail_block, ondisk.CHAIN_HEADER + tail["used_bytes"])
+        self.maxfid = max(e["fid"] for e in live)
+        self.tail_files = sorted(e["fid"] for e in live if e["record"].block == tail_block)
 
     def Label(self, e):
         return "fid %u '%s'" % (e["fid"], e["record"].name)
@@ -97,9 +113,11 @@ class Targets:
 
     def Row(self, over, fid, place):
         link, i = divmod(fid, ondisk.FTABLE_PER_BLOCK)
-        b = self.f.chains["table"][0][link]
+        b = self.f.chains["table"][link]
         raw = self.Block(over, b)
         struct.pack_into("<II", raw, ondisk.CHAIN_HEADER + i * 8, *place)
+        if i >= U32(raw, 8):
+            struct.pack_into("<I", raw, 8, i + 1)
         self.PutBlock(over, b, raw)
 
     def Ledger(self, over, copy, edit):
@@ -113,25 +131,88 @@ class Targets:
         struct.pack_into("<I", raw, ondisk.LEDGER_CRC_AT, ondisk.Crc32(bytes(body)))
         over.Put(lba, bytes(raw))
 
+    def Chain(self, over, first):
+        """[(block, raw)] of a chain followed by next_block from `first`."""
+        out, b = [], first
+        while True:
+            raw = self.Block(over, b)
+            out.append((b, raw))
+            b = U32(raw, 4)
+            if b == 0 or len(out) >= self.f.D:
+                return out
+
+
+LEDGER_AT = dict((f, o) for f, o, _s in ondisk.VOLUME_LEDGER.Offsets())
+
+
+def LedgerField(name, value):
+    """An edit for Targets.Ledger: one u32 field of the record set."""
+    return lambda raw: struct.pack_into("<I", raw, LEDGER_AT[name], value)
+
 
 # ---------------------------------------------------------------------------
 # The plants
 # ---------------------------------------------------------------------------
 
 
+def Reseal(t, over, pool=True, registry=True, copies=(0, 1), first=None, edit=None):
+    """What a Settle cycle's last write leaves over what the medium now holds:
+    each copy's seal made again (settle kept, so it is still the copy's own) —
+    the pool from the seal's first block (`first`, when Glean moved it) to the
+    chain's end, its closed blocks folded and its open block summed; the
+    registry's last block and its records. `edit(mark, raw)` changes the seal
+    and the record after, for a newer cycle or a seal that lies."""
+    def Seal(raw):
+        mark = ondisk.SETTLE_MARK.Unpack(raw, ondisk.LEDGER_SEAL_AT)
+        if first is not None:
+            mark["chain_first"] = first
+        if pool:
+            chain = t.Chain(over, mark["chain_first"])
+            fold = 0
+            for b, r in chain[:-1]:
+                fold ^= ondisk.PoolBlockMix(b, r)
+            tb, tr = chain[-1]
+            to = ondisk.PoolUsed(tr)
+            mark.update(pool_to_block=tb, pool_to_bytes=to, closed_crc32=fold,
+                        tail_crc32=ondisk.Crc32(bytes(tr[ondisk.CHAIN_HEADER:ondisk.CHAIN_HEADER + to])))
+        if registry:
+            rb, rr = t.Chain(over, t.f.mount.head["tag_registry_block"])[-1]
+            n = U16(rr, 10)
+            mark.update(registry_block=rb, registry_bytes=n,
+                        registry_crc32=ondisk.Crc32(bytes(rr[ondisk.CHAIN_HEADER:ondisk.CHAIN_HEADER + n])))
+        if edit:
+            edit(mark, raw)
+        raw[ondisk.LEDGER_SEAL_AT:ondisk.LEDGER_SEAL_END] = ondisk.SETTLE_MARK.struct.pack(
+            *(mark[k] for k in ondisk.SETTLE_MARK.names))
+    for c in copies:
+        t.Ledger(over, c, Seal)
+
+
+def NewerCycle(more=0):
+    """A Reseal edit: the copy written by the next cycle (seq and settle 2),
+    its seal naming `more` bytes of the open block past what the medium holds."""
+    def Edit(mark, raw):
+        mark["settle"] = 2
+        mark["pool_to_bytes"] += more
+        struct.pack_into("<Q", raw, LEDGER_AT["seq"], 2)
+    return Edit
+
+
+def NoSeal(t, over, copies=(0, 1)):
+    """The copies as a kernel before the seal writes them: the record ends
+    where the seal would begin (volume_ledger.h LedgerHas)."""
+    for c in copies:
+        t.Ledger(over, c, LedgerField("bytes", ondisk.LEDGER_SEAL_AT))
+
+
 def PlantOrphan(t, over, b):
     t.Bit(over, b, True)
-
-
-def PlantDouble(t, over):
-    t.RecordPatch(over, t.Srec, ondisk.RECORD_HEADER + 2 * t.Srec.tag_count,
-                  struct.pack("<I", t.Lrec.extents_at_mount[0][0]), True)
 
 
 def PlantRegistrySplit(t, over, at):
     """The registry's last ten records moved to data block `at`, linked from
     the head: a registry chain whose continuation is NOT data block 0."""
-    head = t.f.chains["registry"][0][0]
+    head = t.f.chains["registry"][0]
     raw = t.Block(over, head)
     blk = ondisk.ReadRegistryBlock(raw)
     recs = blk["records"]
@@ -150,81 +231,174 @@ def PlantRegistrySplit(t, over, at):
     t.Bit(over, at, True)
 
 
+def PlantRegistryAppend(t, over, tag_id):
+    """A registry record (id `tag_id`, key "zz") laid after the last block's
+    records, its counts moved with it, and the seal left as it was: a tag a
+    cycle that did not settle added."""
+    b = t.f.chains["registry"][-1]
+    raw = t.Block(over, b)
+    hdr = ondisk.REGISTRY_BLOCK.Unpack(raw)
+    rec = ondisk.REGISTRY_RECORD.struct.pack(tag_id, 0, 2, 0) + b"zz"
+    at = ondisk.CHAIN_HEADER + hdr["used_bytes"]
+    raw[at:at + len(rec)] = rec
+    struct.pack_into("<HH", raw, 8, hdr["entry_count"] + 1, hdr["used_bytes"] + len(rec))
+    t.PutBlock(over, b, raw)
+
+
 def PlantLink(t, over, name, at):
-    """What a chain grown link first leaves when the power goes before the new
-    block is written (MP-D5, as the registry and the file table grew before
-    step 1.1): the chain's last block naming data block `at`, ground nothing
-    ever stamped."""
-    last = t.f.chains[name][0][-1]
+    """A chain's last block naming data block `at`, ground nothing ever
+    stamped — what a chain grown link first leaves when the power goes before
+    the new block is written."""
+    last = t.f.chains[name][-1]
     raw = t.Block(over, last)
     struct.pack_into("<I", raw, 4, at)
     t.PutBlock(over, last, raw)
 
 
 def PlantRetire(t, over):
-    """What meta_pool_delete leaves (meta_pool.c:1138-1240): the file_id zeroed
-    and the CRC left alone."""
+    """What an earlier kernel's meta_pool_delete left: the file_id zeroed and
+    the CRC left alone — a closed block rewritten in place."""
     t.RecordPatch(over, t.Srec, 2, b"\0\0\0\0", False)
 
 
 def PlantAppend(t, over, record):
-    """`record` appended to the pool as a kernel from step 1.4 on writes every
-    record, older ones left where they are: after the last record of the
-    chain's last block (T.PoolTail), that block's used bytes, record count and
-    kept count moved with it."""
-    block, at = t.PoolTail
+    """`record` appended to the pool as every Ink writes a record, older ones
+    left where they are: after the last record of the chain's last block, that
+    block's used bytes, record count and kept count moved with it. Where it
+    landed, (block, at)."""
+    block, _at = t.PoolTail
     raw = t.Block(over, block)
     head = ondisk.META_POOL_BLOCK.Unpack(raw)
+    at = ondisk.CHAIN_HEADER + head["used_bytes"]
     if at + len(record) > ondisk.CHAIN_HEADER + ondisk.MPOOL_DATA:
         raise Unreadable("the pool's last block has no room for a %u-byte record" % len(record))
     raw[at:at + len(record)] = record
     kept = head["kept"] + (1 if struct.unpack_from("<I", record, 2)[0] else 0)
     struct.pack_into("<HHH", raw, 8, head["used_bytes"] + len(record), head["record_count"] + 1, kept)
     t.PutBlock(over, block, raw)
+    return block, at
+
+
+def Resummed(record):
+    rec = bytearray(record)
+    rec[ondisk.RECORD_CRC_AT:ondisk.RECORD_CRC_AT + 2] = b"\0\0"
+    struct.pack_into("<H", rec, ondisk.RECORD_CRC_AT, ondisk.Crc16(bytes(rec)))
+    return bytes(rec)
 
 
 def Quitclaim(fid):
     """A Quitclaim of `fid` (Quill design §2): a record of the file without
     ACTIVE, nothing else in it, summed."""
-    rec = bytearray(ondisk.META_RECORD.struct.pack(ondisk.RECORD_HEADER, fid, 0, 0, 0, 0, 0, 0, 0, 0))
-    struct.pack_into("<H", rec, ondisk.RECORD_CRC_AT, ondisk.Crc16(bytes(rec)))
-    return bytes(rec)
+    return Resummed(ondisk.META_RECORD.struct.pack(ondisk.RECORD_HEADER, fid, 0, 0, 0, 0, 0, 0, 0, 0))
 
 
-def PlantSuperseded(t, over):
-    """S written again: its record, byte for byte, appended — the record at
-    its row is now an older one."""
-    raw = t.Block(over, t.Srec.block)
-    PlantAppend(t, over, bytes(raw[t.Srec.at:t.Srec.at + t.Srec.len]))
+def RecordOf(t, over, rec, fid=None, block=None, tag=None, rot=False):
+    """`rec`'s bytes again — as file `fid`, its first extent at `block`, its
+    first tag `tag` — summed, or with its sum broken when `rot`."""
+    out = bytearray(t.Block(over, rec.block)[rec.at:rec.at + rec.len])
+    if fid is not None:
+        struct.pack_into("<I", out, 2, fid)
+    if tag is not None:
+        struct.pack_into("<H", out, ondisk.RECORD_HEADER, tag)
+    if block is not None:
+        struct.pack_into("<I", out, ondisk.RECORD_HEADER + 2 * rec.tag_count, block)
+    out = bytearray(Resummed(out))
+    if rot:
+        out[-1] ^= 0x5A
+    return bytes(out)
+
+
+def PlantRewritten(t, over, rec, **kw):
+    """`rec`'s file written again by a cycle that settled: the record appended
+    (RecordOf with `kw`) and the pool sealed over it."""
+    place = PlantAppend(t, over, RecordOf(t, over, rec, **kw))
+    Reseal(t, over, registry=False)
+    return place
 
 
 def PlantQuitclaimLanded(t, over):
-    """S deleted by a kernel from step 1.4 on, all of it on the medium: its
-    Quitclaim appended, its row gone, its blocks free."""
+    """S deleted by a cycle that settled: its Quitclaim appended, its row gone,
+    its blocks free, the pool sealed over it."""
     PlantAppend(t, over, Quitclaim(t.S["fid"]))
     t.Row(over, t.S["fid"], (0, 0))
     for s, n in t.Sruns:
         for b in range(s, s + n):
             t.Bit(over, b, False)
+    Reseal(t, over, registry=False)
 
 
 def PlantMissing(t, over):
     t.Bit(over, t.Lmid, False)
 
 
-def PlantUseChain(t, over, broken):
+def PlantFellBack(t, over):
+    """A cycle the medium lied about: a new file (fid maxfid+1, its block F
+    taken, its row written) appended at the open block, and copy 0 written as
+    the next cycle with a seal naming 42 bytes more of the open block than the
+    medium holds; copy 1's seal, the cycle before, is borne out."""
+    block, at = PlantAppend(t, over, RecordOf(t, over, t.Srec, fid=t.maxfid + 1, block=t.F))
+    t.Row(over, t.maxfid + 1, (block, at))
+    t.Bit(over, t.F, True)
+    Reseal(t, over, copies=(0,), edit=NewerCycle(ondisk.RECORD_HEADER))
+
+
+def PlantTornTail(t, over):
+    """The open block torn as it was written again: a byte of its settled
+    records is not what either seal summed."""
+    block, _at = t.PoolTail
+    raw = t.Block(over, block)
+    raw[ondisk.CHAIN_HEADER + ondisk.PoolUsed(raw) - 1] ^= 0x5A
+    t.PutBlock(over, block, raw)
+
+
+def PlantGlean(t, over, lie=False):
+    """What Glean leaves: the records of the pool's blocks laid again in new
+    blocks from F on, linked after the old open block, every row following its
+    record, and the seal's first block moved to F — the Deed's head still
+    naming the old blocks, which now lie before the chain's first. With `lie`,
+    only copy 0 is sealed so, as the next cycle, naming 42 bytes more of its
+    open block than the medium holds: copy 1's seal, whose chain begins at the
+    head, is judged by a walk of its own."""
+    old = t.Chain(over, t.f.mount.head["metadata_pool_block"])
+    moved = {}
+    for i, (b, raw) in enumerate(old):
+        blk = bytearray(raw)
+        struct.pack_into("<I", blk, 4, t.F + i + 1 if i + 1 < len(old) else 0)
+        t.PutBlock(over, t.F + i, blk)
+        t.Bit(over, t.F + i, True)
+        moved[b] = t.F + i
+    tail_b, tail_raw = old[-1]
+    raw = bytearray(tail_raw)
+    struct.pack_into("<I", raw, 4, t.F)
+    t.PutBlock(over, tail_b, raw)
+    for fid, (mb, mo) in t.f.rows.items():
+        t.Row(over, fid, (moved.get(mb, mb), mo))
+    Reseal(t, over, registry=False, copies=(0,) if lie else (0, 1), first=t.F,
+           edit=NewerCycle(ondisk.RECORD_HEADER) if lie else None)
+    return [t.F + i for i in range(len(old))], [b for b, _r in old]
+
+
+def PlantUseChain(t, over, broken, named=False):
+    """A Use Context chain of two links at F and F+1. `broken`: unnamed, the
+    second link's index is wrong; named, the second link carries another pair,
+    a write that never landed. `named`: copy 0 names the chain."""
     text = bytes((i * 7 + 3) & 0xFF for i in range(5000))
     crc = ondisk.Crc32(text)
     parts = [text[:ondisk.TUSE_TEXT], text[ondisk.TUSE_TEXT:]]
     for i, part in enumerate(parts):
         link = bytearray(BLOCK)
-        index = 5 if broken and i == 1 else i
+        index = 5 if broken and not named and i == 1 else i
+        seq = 2 if broken and named and i == 1 else 1
         nxt = t.F + 1 if i == 0 else 0
         link[:ondisk.TUSE_LINK.size] = ondisk.TUSE_LINK.struct.pack(
-            ondisk.TUSE_MAGIC, nxt, 1, 1, index, len(part), 2, len(text), crc)
+            ondisk.TUSE_MAGIC, nxt, seq, 1, index, len(part), 2, len(text), crc)
         link[ondisk.TUSE_LINK.size:ondisk.TUSE_LINK.size + len(part)] = part
         t.PutBlock(over, t.F + i, link)
         t.Bit(over, t.F + i, True)
+    if named:
+        t.Ledger(over, 0, lambda raw: raw.__setitem__(
+            slice(ondisk.LEDGER_USE_CHAIN_AT, ondisk.LEDGER_USE_CHAIN_END),
+            ondisk.USE_CHAIN.struct.pack(t.F, 1, 1, len(text), crc)))
 
 
 def PlantSpare(t, over):
@@ -232,6 +406,28 @@ def PlantSpare(t, over):
     struct.pack_into("<I", spare, 0, ondisk.MPOOL_MAGIC)
     t.PutBlock(over, t.F, spare)
     t.Bit(over, t.F, True)
+
+
+def PlantManifest(t, over):
+    """A snapshot manifest at F with no snapshots, named by both copies."""
+    raw = bytearray(BLOCK)
+    struct.pack_into("<II", raw, 0, ondisk.COW_MANIFEST_MAGIC, 0)
+    t.PutBlock(over, t.F, raw)
+    t.Bit(over, t.F, True)
+    for c in (0, 1):
+        t.Ledger(over, c, LedgerField("cow_manifest_block", t.F))
+
+
+def PlantRotten(t, over, taken):
+    """S's newest record rotten inside the sealed span: S written again to
+    block F and that record's sum broken. `taken`: first U written again onto
+    S's old block — the block S let go, taken — so the older record S stands
+    on names U's block."""
+    if taken:
+        PlantAppend(t, over, RecordOf(t, over, t.Urec, block=t.Sruns[0][0]))
+    PlantAppend(t, over, RecordOf(t, over, t.Srec, block=t.F, rot=True))
+    t.Bit(over, t.F, True)
+    Reseal(t, over, registry=False)
 
 
 def PlantBoot(t, over):
@@ -329,9 +525,13 @@ def Runs(c, code):
     return RunsNormal([r for x in Findings(c, code) for r in x.runs])
 
 
+def Kinds(c):
+    return {x.kind for x in c.claims}
+
+
 class Case:
     """A plant, the codes it must raise, the other damage or leak codes it may
-    raise, and the facts about the census and the kernel that must hold."""
+    raise, and the facts about the census and the mount that must hold."""
 
     def __init__(self, name, plant, must=(), may=(), checks=()):
         self.name, self.plant = name, plant
@@ -345,89 +545,158 @@ FSCK_RUNS_NAMED = 32
 
 
 def Cases(t):
-    c0, S, L, F = t.c0, t.S, t.L, t.F
-    maxfid = max(e["fid"] for e in c0.files.values() if e["state"] == "live")
-    Mruns = RunsNormal(c0.files[maxfid]["record"].extents_at_mount)
+    c0, S, U, L, F = t.c0, t.S, t.U, t.L, t.F
+    Sfid, Ufid, maxfid = S["fid"], U["fid"], t.maxfid
     stand = c0.f.ledger["copy"]
     other = 1 - stand
     maxtag = max(c0.by_id)
     seqs = [c["seq"] for c in c0.f.ledgers]
     tie_rule = 0 if seqs[0] >= seqs[1] else 1
+    head = c0.f.mount.head
+    pool0, registry0, table0 = (c0.f.chains[k] for k in ("pool", "registry", "table"))
+    rows0 = len(c0.f.rows)
+    tail_runs = RunsNormal([r for fid in t.tail_files
+                            for r in c0.files[fid]["record"].extents_at_mount])
 
     def K(c):
         return c.kernel.fsck or {}
 
-    def Next(value):
-        return lambda raw: struct.pack_into("<I", raw, 48, value)
+    def M(c):
+        return c.f.mount
+
+    def Seal(c):
+        return c.kernel.Seal()
+
+    def State(c, fid):
+        return c.files.get(fid, {}).get("state")
+
+    def Stood(stood, copy, fell_back=False):
+        return lambda c: (Seal(c)["stood"], Seal(c)["copy"], Seal(c)["fell_back"]) == (stood, copy, fell_back)
+
+    def Lost(n):
+        return ("the kernel loses %u file(s) and lets no row go unsaid" % n,
+                lambda c: K(c)["lost"] == n and K(c)["unsettled"] == 0)
 
     return [
+        # --- the ground every later case is measured from ---------------------
         Case("C0 pristine", lambda o: None, checks=[
             ("the kernel mounts it", lambda c: c.kernel.refusal is None),
             ("the kernel stands on copy %u, the strictly newer or copy 0 on a tie" % tie_rule,
              lambda c: c.f.ledger["copy"] == tie_rule),
-            ("its roll call finds nothing", lambda c: not K(c)["orphan_runs"] and not K(c)["missing_runs"])]),
+            ("the pool stands on the newest seal, borne out", Stood("seal", tie_rule)),
+            ("its roll call finds nothing", lambda c: not K(c)["orphan_runs"] and not K(c)["missing_runs"]),
+            ("the next file id is past every id shown, %u" % (maxfid + 1),
+             lambda c: M(c).next_file_id == maxfid + 1),
+            ("the registry, the table, the pool, the files, the integrity map and BOOT are heard",
+             lambda c: {"registry", "table", "pool", "file", "integrity", "boot"} <= Kinds(c))]),
         Case("C1 orphan", lambda o: PlantOrphan(t, o, F), must={"ORPHAN"}, checks=[
             ("the orphan is %u+1" % F, lambda c: Runs(c, "ORPHAN") == [(F, 1)]),
             ("the kernel names %u+1" % F, lambda c: K(c)["orphan_runs"] == [(F, 1)])]),
-        Case("C2 double", lambda o: PlantDouble(t, o), must={"DOUBLE_OWNER", "ORPHAN"}, checks=[
-            ("the double names %s and %s" % (t.Label(S), t.Label(L)),
-             lambda c: any(t.Label(S) in x.text and t.Label(L) in x.text
-                           for x in Findings(c, "DOUBLE_OWNER"))),
-            ("the orphans are %s's old blocks" % t.Label(S),
-             lambda c: Runs(c, "ORPHAN") == RunsNormal(t.Sruns[:1]))]),
-        Case("C3 bad CRC", lambda o: t.RecordPatch(o, t.Srec, t.Srec.len - 1,
-                                                   bytes([t.Block(o, t.Srec.block)[t.Srec.at + t.Srec.len - 1] ^ 0x5A]),
-                                                   False),
+        Case("C2 double", lambda o: PlantRewritten(t, o, t.Srec, block=t.Lrec.extents_at_mount[0][0]),
+             must={"DOUBLE_OWNER", "ORPHAN"}, checks=[
+                 ("the double names %s and %s" % (t.Label(S), t.Label(L)),
+                  lambda c: any(t.Label(S) in x.text and t.Label(L) in x.text
+                                for x in Findings(c, "DOUBLE_OWNER"))),
+                 ("the orphans are %s's old blocks" % t.Label(S),
+                  lambda c: Runs(c, "ORPHAN") == RunsNormal(t.Sruns[:1])),
+                 ("the kernel corrects %s's row to its newest record" % t.Label(S),
+                  lambda c: K(c)["corrected"] == 1)]),
+        Case("C3 rot in a closed block", lambda o: t.RecordPatch(
+                 o, t.Srec, t.Srec.len - 1,
+                 bytes([t.Block(o, t.Srec.block)[t.Srec.at + t.Srec.len - 1] ^ 0x5A]), False),
              must={"RECORD_CRC", "FILE_LOST", "ORPHAN"}, checks=[
-                 ("the kernel loses 1 file", lambda c: K(c)["lost"] == 1),
+                 ("no seal is borne out, so the chain is read whole", Stood("none", tie_rule)),
+                 Lost(1),
+                 ("the walk passes 1 record over", lambda c: K(c)["unreadable"] == 1),
                  ("the orphans are %s's blocks" % t.Label(S), lambda c: Runs(c, "ORPHAN") == t.Sruns)]),
-        Case("C4 fid past next", lambda o: [t.Ledger(o, i, Next(maxfid)) for i in (0, 1)],
-             must={"FID_PAST_NEXT"}, checks=[
-                 ("KERNEL_BLIND names fid %u's blocks" % maxfid,
-                  lambda c: Runs(c, "KERNEL_BLIND") == Mruns),
-                 ("the kernel's orphans are fid %u's blocks" % maxfid,
-                  lambda c: K(c)["orphan_runs"] == Mruns)]),
-        Case("C5 absent tag", lambda o: t.RecordPatch(o, t.Srec, ondisk.RECORD_HEADER,
-                                                      struct.pack("<H", maxtag + 1), True),
-             must={"TAG_ABSENT"}),
+        Case("C4 next file id derived", lambda o: [t.Ledger(o, i, LedgerField("next_file_id", maxfid))
+                                                   for i in (0, 1)], checks=[
+            ("the Ledger says %u and the rows reach %u: the mount gives %u" % (maxfid, maxfid, maxfid + 1),
+             lambda c: M(c).next_file_id == maxfid + 1)]),
+        Case("C4b next file id kept", lambda o: [t.Ledger(o, i, LedgerField("next_file_id", maxfid + 10))
+                                                for i in (0, 1)], checks=[
+            ("the Ledger's %u is past every id shown and stays" % (maxfid + 10),
+             lambda c: M(c).next_file_id == maxfid + 10)]),
+        Case("C5 absent tag", lambda o: PlantRewritten(t, o, t.Srec, tag=maxtag + 1),
+             must={"TAG_ABSENT"}, checks=[
+                 ("the next tag id is past the tag a record wears, %u" % (maxtag + 2),
+                  lambda c: M(c).next_tag_id == maxtag + 2)]),
         Case("C6 torn ledger", lambda o: o.Patch(t.VLba(t.lay["state_block"] + other) * SECTOR + 50,
                                                  bytes([o.sectors(t.VLba(t.lay["state_block"] + other), 1)[50] ^ 0xFF])),
-             must={"LEDGER_TORN"}, checks=[
-                 ("the kernel stands on copy %u" % stand, lambda c: c.f.ledger["copy"] == stand)]),
+             checks=[
+                 ("the ledger copy is named torn", lambda c: bool(Findings(c, "LEDGER_TORN"))),
+                 ("the kernel stands on copy %u" % stand, lambda c: c.f.ledger["copy"] == stand),
+                 ("and on its seal alone", lambda c: M(c).seals[1] is None and Seal(c)["stood"] == "seal")]),
         Case("C6b no ledger", lambda o: [o.Patch(t.VLba(t.lay["state_block"] + i) * SECTOR + 50,
                                                  bytes([o.sectors(t.VLba(t.lay["state_block"] + i), 1)[50] ^ 0xFF]))
                                          for i in (0, 1)],
              must={"LEDGER_NONE"}, checks=[
                  ("the kernel refuses at the ledger", lambda c: c.kernel.step == "ledger")]),
-        Case("C7 TUSE", lambda o: PlantUseChain(t, o, False), must={"TUSE_UNNAMED"}, checks=[
+        # --- the Use Context's chain ---------------------------------------------
+        Case("C7 TUSE unnamed", lambda o: PlantUseChain(t, o, False), must={"TUSE_UNNAMED"}, checks=[
             ("it reads 2 links, 5000 bytes, crc ok",
              lambda c: any("2 links, 5000 bytes, crc ok" in x.text for x in Findings(c, "TUSE_UNNAMED")))]),
-        Case("C7b broken TUSE", lambda o: PlantUseChain(t, o, True), must={"TUSE_BROKEN"}),
+        Case("C7b TUSE broken", lambda o: PlantUseChain(t, o, True), must={"TUSE_BROKEN"}),
+        Case("C7c TUSE named", lambda o: PlantUseChain(t, o, False, named=True), checks=[
+            ("the chain copy 0 names is the use_chain's, %u+2" % F,
+             lambda c: [x.runs for x in c.claims if x.kind == "use_chain"] == [[(F, 2)]]),
+            ("and nothing is an orphan", lambda c: not K(c)["orphan_runs"])]),
+        Case("C7d TUSE link never landed", lambda o: PlantUseChain(t, o, True, named=True),
+             must={"TUSE_BROKEN"}, checks=[
+                 ("the newest copy's chain is held only as far as its own links, %u+1" % F,
+                  lambda c: [x.runs for x in c.claims if x.kind == "use_chain"] == [[(F, 1)]]),
+                 ("the mount rolls the memory back and names the medium's lie",
+                  lambda c: any("lied" in x.text for x in Findings(c, "TUSE_TORN"))),
+                 ("the link of another pair is the orphan, %u+1" % (F + 1),
+                  lambda c: K(c)["orphan_runs"] == [(F + 1, 1)])]),
         Case("C8 Spare", lambda o: PlantSpare(t, o), must={"SPARE_UNNAMED"}, checks=[
             ("it is a spare pool header", lambda c: any("spare pool" in x.text
                                                         for x in Findings(c, "SPARE_UNNAMED")))]),
+        # --- files, rows and records ---------------------------------------------
         Case("C9 lost", lambda o: PlantRetire(t, o), must={"FILE_LOST", "ORPHAN"}, checks=[
-            ("the kernel loses 1 file", lambda c: K(c)["lost"] == 1),
+            ("no seal is borne out", Stood("none", tie_rule)),
+            Lost(1),
             ("the orphans are %s's blocks, named as a retired record's" % t.Label(S),
              lambda c: Runs(c, "ORPHAN") == t.Sruns and
              any("retired record" in x.text for x in Findings(c, "ORPHAN")))]),
-        Case("C10 unnamed", lambda o: t.Row(o, S["fid"], (0, 0)), must={"UNNAMED_RECORD", "ORPHAN"},
-             checks=[("UNNAMED_RECORD is a leak", lambda c: any(x.severity == "leak"
-                                                               for x in Findings(c, "UNNAMED_RECORD"))),
-                     ("the orphan is explained as its extents",
-                      lambda c: any("unnamed record" in x.text for x in Findings(c, "ORPHAN")))]),
+        Case("C10 row derived", lambda o: t.Row(o, Sfid, (0, 0)), checks=[
+            ("under the seal %s's row is set from the pool" % t.Label(S),
+             lambda c: K(c)["derived"] == 1 and State(c, Sfid) == "live"),
+            ("and the kernel says every file", lambda c: c.kernel.says[2] == c0.kernel.says[2])]),
+        Case("C10b unnamed", lambda o: [NoSeal(t, o), t.Row(o, Sfid, (0, 0))],
+             must={"UNNAMED_RECORD", "ORPHAN"}, checks=[
+                 ("with no seal the record no row names is not taken up",
+                  lambda c: K(c)["unnamed"] == 1 and State(c, Sfid) == "unnamed"),
+                 ("UNNAMED_RECORD is a leak", lambda c: any(x.severity == "leak"
+                                                            for x in Findings(c, "UNNAMED_RECORD"))),
+                 ("the orphan is explained as its extents",
+                  lambda c: any("unnamed record" in x.text for x in Findings(c, "ORPHAN")))]),
         Case("C11 BOOT", lambda o: PlantBoot(t, o), must={"BOOT_MISMATCH"}),
-        Case("C12 registry chained", lambda o: PlantRegistrySplit(t, o, F), checks=[
-            ("the registry chain is [%u, %u]" % (c0.f.chains["registry"][0][0], F),
-             lambda c: c.f.chains["registry"][0] == [c0.f.chains["registry"][0][0], F]),
-            ("the kernel's roll call reaches registry[1]", lambda c: not K(c)["orphan_runs"]),
-            ("nothing is KERNEL_BLIND", lambda c: not Findings(c, "KERNEL_BLIND"))]),
+        Case("C12 registry chained", lambda o: [PlantRegistrySplit(t, o, F), Reseal(t, o, pool=False)], checks=[
+            ("the registry chain is [%u, %u]" % (registry0[0], F),
+             lambda c: c.f.chains["registry"] == [registry0[0], F]),
+            ("every tag is adopted", lambda c: len(c.by_id) == len(c0.by_id)),
+            ("the kernel's roll call reaches registry[1]", lambda c: not K(c)["orphan_runs"])]),
+        Case("C12b registry torn", lambda o: t.PutBlock(o, registry0[-1], bytes(
+                 b ^ 0x5A if i == ondisk.CHAIN_HEADER + 6 else b
+                 for i, b in enumerate(t.Block(o, registry0[-1])))),
+             must={"TAG_ABSENT"}, checks=[
+                 ("the sealed block rolls back", lambda c: M(c).registry["rolled"] == registry0[-1] and
+                  bool(Findings(c, "REGISTRY_ROLLED_BACK"))),
+                 ("no tag is adopted", lambda c: not c.by_id),
+                 ("and no tag id a record wears is given out again",
+                  lambda c: M(c).next_tag_id == c0.f.mount.pool["top_tag"] + 1)]),
+        Case("C12c registry past the seal", lambda o: PlantRegistryAppend(t, o, maxtag + 1), checks=[
+            ("the record past the sealed bytes is not adopted",
+             lambda c: maxtag + 1 not in c.by_id and len(c.by_id) == len(c0.by_id))]),
         Case("C13 missing", lambda o: PlantMissing(t, o), must={"MISSING"}, checks=[
             ("it is a note: the kernel keeps %u" % t.Lmid,
              lambda c: [x.severity for x in Findings(c, "MISSING")] == ["note"]),
             ("the kernel names %u+1 missing" % t.Lmid, lambda c: K(c)["missing_runs"] == [(t.Lmid, 1)])]),
-        Case("C14 retired is not bad", lambda o: [t.Row(o, S["fid"], (0, 0)), PlantRetire(t, o)] +
-             [t.Bit(o, b, False) for s, n in t.Sruns for b in range(s, s + n)]),
+        Case("C14 retired is not bad", lambda o: [t.Row(o, Sfid, (0, 0)), PlantRetire(t, o)] +
+             [t.Bit(o, b, False) for s, n in t.Sruns for b in range(s, s + n)], checks=[
+                 ("the retired record is read and passed over",
+                  lambda c: any(r.fid == 0 and not r.unpack_ok for r in c.f.records))]),
         Case("C15 head torn", lambda o: PlantHeadTorn(t, o), must={"DEED_HEAD_BAD"}, checks=[
             ("it stands on the far copy", lambda c: c.f.stand.stood_on == "tail")]),
         Case("C17 many orphan runs", lambda o: [PlantOrphan(t, o, b) for b in ManyOrphans(t)],
@@ -436,29 +705,148 @@ def Cases(t):
                   % (ORPHAN_RUNS, FSCK_RUNS_NAMED),
                   lambda c: K(c)["orphan_runs"] == [(b, 1) for b in ManyOrphans(t)]),
                  ("the census's orphans are the kernel's", lambda c: Runs(c, "ORPHAN") == K(c)["orphan_runs"])]),
-        LinkCase(t, "C18", "table"),
-        LinkCase(t, "C19", "registry"),
-        Case("C20 superseded", lambda o: PlantSuperseded(t, o), checks=[
+        # --- chains linked to ground nothing stamped -------------------------------
+        Case("C18 table linked to ground, sealed", lambda o: PlantLink(t, o, "table", F),
+             must={"MISSING"}, checks=[
+                 ("under the seal the table ends at %u, kept as its last link" % F,
+                  lambda c: c.kernel.refusal is None and c.f.chains["table"] == table0 + [F]),
+                 ("which the kernel takes again", lambda c: K(c)["missing_runs"] == [(F, 1)])]),
+        LinkCase(t, "C18b", "table", "holds no file table"),
+        Case("C19 registry linked to ground, sealed", lambda o: PlantLink(t, o, "registry", F), checks=[
+            ("the walk ends at the block the seal names, %u" % registry0[-1],
+             lambda c: c.kernel.refusal is None and c.f.chains["registry"] == registry0)]),
+        LinkCase(t, "C19b", "registry", "holds 0x00000000"),
+        Case("C19p pool linked to ground, sealed", lambda o: PlantLink(t, o, "pool", F), checks=[
+            ("past the seal's open block the walk reads ids only, and stops at %u" % F,
+             lambda c: c.kernel.refusal is None and c.f.chains["pool"] == pool0 and
+             not M(c).pool["past_blocks"])]),
+        LinkCase(t, "C19q", "pool", "holds no metadata pool"),
+        # --- the pool's records, newest first --------------------------------------
+        Case("C20 superseded", lambda o: PlantRewritten(t, o, t.Srec), checks=[
             ("%s is taken at the record appended, not the one its row names" % t.Label(S),
-             lambda c: (c.f.newest[S["fid"]].block, c.f.newest[S["fid"]].at) == t.PoolTail),
+             lambda c: (c.f.newest[Sfid].block, c.f.newest[Sfid].at) == t.PoolTail),
             ("the kernel corrects its row to that record and loses nothing",
-             lambda c: K(c)["corrected"] == 1 and K(c)["lost"] == 0 and
-             c.kernel.verdicts[S["fid"]].outcome == "visible"),
+             lambda c: K(c)["corrected"] == 1 and K(c)["lost"] == 0 and State(c, Sfid) == "live"),
             ("its blocks are owned once", lambda c: not K(c)["orphan_runs"])]),
-        Case("C21 quitclaim pending", lambda o: PlantAppend(t, o, Quitclaim(S["fid"])),
+        Case("C21 quitclaim, row left", lambda o: [PlantAppend(t, o, Quitclaim(Sfid)),
+                                                   Reseal(t, o, registry=False)],
              must={"ORPHAN"}, checks=[
                  ("%s is gone: its newest record is the Quitclaim" % t.Label(S),
-                  lambda c: c.files[S["fid"]]["state"] == "quitclaim" and
-                  bool(Findings(c, "QUITCLAIM_PENDING"))),
-                 ("the kernel quitclaims 1 and keeps its row from nothing",
-                  lambda c: K(c)["quitclaims"] == 1 and K(c)["lost"] == 0),
+                  lambda c: State(c, Sfid) == "quitclaim" and bool(Findings(c, "QUITCLAIM_PENDING"))),
+                 ("under the seal its row is let go unsaid",
+                  lambda c: K(c)["unsettled"] == 1 and K(c)["lost"] == 0),
                  ("the orphans are %s's blocks, named as a superseded record's" % t.Label(S),
                   lambda c: Runs(c, "ORPHAN") == t.Sruns and
                   any("superseded record" in x.text for x in Findings(c, "ORPHAN")))]),
+        Case("C21b quitclaim, row left, no seal", lambda o: [PlantAppend(t, o, Quitclaim(Sfid)),
+                                                             NoSeal(t, o)],
+             must={"ORPHAN"}, checks=[
+                 ("with no seal the kernel counts the name among the lost, and the census "
+                  "knows it a delete", lambda c: K(c)["lost"] == 1 and State(c, Sfid) == "quitclaim" and
+                  not Findings(c, "FILE_LOST"))]),
         Case("C22 quitclaim landed", lambda o: PlantQuitclaimLanded(t, o), checks=[
-            ("%s is no file at all" % t.Label(S), lambda c: S["fid"] not in c.files),
+            ("%s is no file at all" % t.Label(S), lambda c: Sfid not in c.files),
             ("and the kernel finds nothing to repair",
              lambda c: not K(c)["orphan_runs"] and not K(c)["missing_runs"])]),
+        Case("C23 record past the seal", lambda o: [
+                 PlantAppend(t, o, RecordOf(t, o, t.Srec, fid=maxfid + 5, block=F)), t.Bit(o, F, True)],
+             must={"ORPHAN"}, checks=[
+                 ("the seal is borne out and the record past it is not taken up",
+                  lambda c: Seal(c)["stood"] == "seal" and (maxfid + 5) not in c.files),
+                 ("its id is all the same: the next file id is %u" % (maxfid + 6),
+                  lambda c: M(c).next_file_id == maxfid + 6),
+                 ("its block is the orphan, named as a record past the seal's",
+                  lambda c: Runs(c, "ORPHAN") == [(F, 1)] and
+                  any("past the seal's span" in x.text for x in Findings(c, "ORPHAN")))]),
+        # --- which seal the pool stands on -----------------------------------------
+        Case("S1 fell back", lambda o: PlantFellBack(t, o), must={"ORPHAN"}, checks=[
+            ("the newest seal is not borne out and the volume stands on the other",
+             lambda c: Stood("seal", 1 - tie_rule, True)(c) and bool(Findings(c, "SEAL_FELL_BACK"))),
+            ("its verdicts are torn and borne", lambda c: Seal(c)["verdicts"] == ["torn", "borne"]),
+            ("the new file's row is let go unsaid", lambda c: K(c)["unsettled"] == 1 and
+             State(c, maxfid + 1) == "unsettled"),
+            ("and its id is never given out again: the next file id is %u" % (maxfid + 2),
+             lambda c: M(c).next_file_id == maxfid + 2),
+            ("its block is the orphan", lambda c: K(c)["orphan_runs"] == [(F, 1)])]),
+        Case("S2 torn tail", lambda o: PlantTornTail(t, o), must={"ORPHAN"}, checks=[
+            ("the newest seal's open block rolls back", lambda c: Stood("torn", tie_rule)(c) and
+             bool(Findings(c, "SEAL_TAIL_TORN"))),
+            ("the %u file(s) whose only record was there go: their rows let go unsaid" % len(t.tail_files),
+             lambda c: K(c)["unsettled"] == len(t.tail_files) and K(c)["lost"] == 0 and
+             sorted(f for f in t.tail_files if State(c, f) == "unsettled") == t.tail_files),
+            ("the kernel says %u files" % (c0.kernel.says[2] - len(t.tail_files)),
+             lambda c: c.kernel.says[2] == c0.kernel.says[2] - len(t.tail_files)),
+            ("their blocks are the orphans", lambda c: K(c)["orphan_runs"] == tail_runs)]),
+        Case("S3 no seal", lambda o: NoSeal(t, o), checks=[
+            ("a kernel before the seal wrote both copies: none is stood on",
+             lambda c: Stood("none", tie_rule)(c) and bool(Findings(c, "SEAL_ABSENT"))),
+            ("and the volume reads whole", lambda c: c.kernel.says == c0.kernel.says and
+             not K(c)["orphan_runs"])]),
+        Case("S4 closed block rewritten in place", lambda o: t.RecordPatch(
+                 o, t.Srec, t.Srec.len - 1, bytes([t.Block(o, t.Srec.block)[t.Srec.at + t.Srec.len - 1] ^ 1]),
+                 True), checks=[
+            ("no seal is borne out", lambda c: Stood("none", tie_rule)(c) and
+             Seal(c)["verdicts"] == ["broken", "broken"] and bool(Findings(c, "SEAL_UNBORNE"))),
+            ("and every file reads", lambda c: c.kernel.says == c0.kernel.says)]),
+        Case("S5 newest unsealed, older sealed", lambda o: [
+                 t.Ledger(o, 0, lambda raw: (struct.pack_into("<Q", raw, LEDGER_AT["seq"], 2),
+                                             struct.pack_into("<I", raw, 8, ondisk.LEDGER_SEAL_AT)))],
+             checks=[
+                 ("copy 1's seal is not looked at: there is no seal", lambda c:
+                  c.f.ledger["copy"] == 0 and Stood("none", 0)(c) and not Seal(c)["newest_sealed"])]),
+        Case("S6 seal names a block the chain never reaches", lambda o: Reseal(
+                 t, o, registry=False, edit=lambda mark, raw: mark.update(pool_to_block=F)), checks=[
+            ("both seals are broken and none is stood on",
+             lambda c: Stood("none", tie_rule)(c) and Seal(c)["verdicts"] == ["broken", "broken"])]),
+        # --- Glean: the chain's first block moves ----------------------------------
+        Case("GL1 Glean head", lambda o: PlantGlean(t, o), checks=[
+            ("the chain begins at the seal's first block, %u" % F,
+             lambda c: c.f.chains["pool"] == [F + i for i in range(len(pool0))]),
+            ("what the head names before it is the pool's",
+             lambda c: M(c).prefix == pool0[1:] and
+             any(x.kind == "pool" and x.label == "pool head" for x in c.claims)),
+            ("every row follows its record and nothing is an orphan",
+             lambda c: K(c)["corrected"] == 0 and not K(c)["orphan_runs"] and not K(c)["missing_runs"])]),
+        Case("GL2 Glean, newest lied", lambda o: PlantGlean(t, o, lie=True), must={"ORPHAN"}, checks=[
+            ("the other copy's seal, its chain from the head, is judged by a walk of its own and stood on",
+             lambda c: Stood("seal", 1 - tie_rule, True)(c) and c.f.chains["pool"] == pool0),
+            ("the new blocks are past its open block", lambda c: M(c).pool["past_blocks"] ==
+             [F + i for i in range(len(pool0))] and K(c)["orphan_runs"] == [(F, len(pool0))]),
+            ("every row moved with Glean is corrected back", lambda c: K(c)["corrected"] == rows0)]),
+        # --- a rotten newest record: today's rule (meta_pool_mount.c WalkPut) -----
+        Case("R1 rotten newest, older stands", lambda o: PlantRotten(t, o, False),
+             must={"RECORD_CRC", "ORPHAN"}, checks=[
+                 ("%s stands on its older record" % t.Label(S),
+                  lambda c: State(c, Sfid) == "live" and
+                  (c.files[Sfid]["record"].block, c.files[Sfid]["record"].at) == (t.Srec.block, t.Srec.at)),
+                 ("the walk passes 1 record over", lambda c: K(c)["unreadable"] == 1),
+                 ("the rotten record's block is the orphan", lambda c: K(c)["orphan_runs"] == [(F, 1)])]),
+        Case("R2 rotten newest, older's block taken", lambda o: PlantRotten(t, o, True),
+             must={"RECORD_CRC", "DOUBLE_OWNER", "ORPHAN"}, checks=[
+                 ("%s stands on its older record, whose block %s holds" % (t.Label(S), t.Label(U)),
+                  lambda c: State(c, Sfid) == "live" and any(
+                      t.Label(S) in x.text and "fid %u " % Ufid in x.text for x in Findings(c, "DOUBLE_OWNER"))),
+                 ("the orphans are %s's old block and the rotten record's" % t.Label(U),
+                  lambda c: K(c)["orphan_runs"] == RunsNormal(t.Uruns + [(F, 1)]))]),
+        # --- the owners ------------------------------------------------------------
+        Case("O1 manifest", lambda o: PlantManifest(t, o), checks=[
+            ("the manifest the Ledger names is owned", lambda c: [x.runs for x in c.claims
+                                                                  if x.kind == "manifest"] == [[(F, 1)]]),
+            ("and nothing is an orphan", lambda c: not K(c)["orphan_runs"])]),
+        # --- what logcheck boots ---------------------------------------------------
+        Case("reconcile", lambda o: Reconcile(t, o), must={"ORPHAN", "FILE_LOST", "MISSING"}, checks=[
+            ("the census's orphans are the kernel's", lambda c: Runs(c, "ORPHAN") == K(c)["orphan_runs"]),
+            ("the kernel's orphans are %u+2 and %s's blocks" % (F, t.Label(S)),
+             lambda c: K(c)["orphan_runs"] == RunsNormal([(F, 2)] + t.Sruns)),
+            ("the kernel names %u+1 missing" % t.Lmid, lambda c: K(c)["missing_runs"] == [(t.Lmid, 1)]),
+            ("the registry chain reaches %u under its seal" % (F + 3),
+             lambda c: c.f.chains["registry"] == [registry0[0], F + 3]),
+            Lost(1)]),
+    ] + GroundCases(t)
+
+
+def GroundCases(t):
+    return [
         Case("G1 MBR type", lambda o: PlantMbrEntry(t, o, kind=0x83), must={"GROUND_REFUSED"}, checks=[
             ("the kernel refuses at the ground", lambda c: c.kernel.step == "ground"),
             ("the refusal names the types it found", lambda c: "0:0x83" in c.kernel.refusal),
@@ -489,33 +877,33 @@ def Cases(t):
              c.kernel.refusal is None)]),
         Case("G9 bitmap away", lambda o: PlantBitmapAway(t, o), must={"BITMAP_UNREADABLE", "REGION_OVERLAP"},
              checks=[("the kernel refuses at the bitmap", lambda c: c.kernel.step == "bitmap")]),
-        Case("reconcile", lambda o: Reconcile(t, o), must={"ORPHAN", "FILE_LOST", "MISSING"}, checks=[
-            ("the census's orphans are the kernel's", lambda c: Runs(c, "ORPHAN") == K(c)["orphan_runs"]),
-            ("the kernel's orphans are %u+2 and %s's blocks" % (F, t.Label(S)),
-             lambda c: K(c)["orphan_runs"] == RunsNormal([(F, 2)] + t.Sruns)),
-            ("the kernel names %u+1 missing" % t.Lmid, lambda c: K(c)["missing_runs"] == [(t.Lmid, 1)]),
-            ("the kernel loses 1 file", lambda c: K(c)["lost"] == 1)]),
     ]
 
 
-def LinkCase(t, label, name):
-    """A chain whose last block links to free ground (PlantLink): the mount
-    refuses at that chain, and says which block it found unstamped."""
-    before = t.c0.f.chains[name][0]
-    return Case("%s %s linked to ground" % (label, name), lambda o: PlantLink(t, o, name, t.F),
+def LinkCase(t, label, name, said):
+    """A chain whose last block links to free ground (PlantLink) on a volume
+    with no seal: the mount refuses at that chain, and says which block it
+    found unstamped."""
+    before = t.c0.f.chains[name]
+    return Case("%s %s linked to ground, no seal" % (label, name),
+                lambda o: [NoSeal(t, o), PlantLink(t, o, name, t.F)],
                 must={"CHAIN_REFUSED"}, checks=[
                     ("the kernel refuses at the %s" % name, lambda c: c.kernel.step == name),
                     ("the refusal names data block %u, never stamped" % t.F,
-                     lambda c: c.f.refused.get(name, "").startswith("block %u holds 0x" % t.F)),
+                     lambda c: c.f.refused.get(name, "").startswith("block %u " % t.F) and
+                     said in c.f.refused[name]),
                     ("the chain stops at its last stamped block, %u" % before[-1],
-                     lambda c: c.f.chains[name][0] == before)])
+                     lambda c: c.f.chains[name][:len(before)] == before)])
 
 
 def Reconcile(t, over):
-    """C1 at F and F+1, C12 at F+3, C13 and C9 at once: what logcheck boots."""
+    """C1 at F and F+1, C12 at F+3 (its registry sealed), C13 and C9 at once:
+    what logcheck boots. The retired record leaves no seal borne out, so the
+    mount reads the chain whole and the table says which files there are."""
     PlantOrphan(t, over, t.F)
     PlantOrphan(t, over, t.F + 1)
     PlantRegistrySplit(t, over, t.F + 3)
+    Reseal(t, over, pool=False)
     PlantMissing(t, over)
     PlantRetire(t, over)
 
@@ -533,7 +921,7 @@ def Judge(case, census):
     for what, check in case.checks:
         try:
             held = check(census)
-        except (KeyError, IndexError, TypeError):
+        except (KeyError, IndexError, TypeError, AttributeError):
             held = False
         if not held:
             wrong.append("not so: " + what)
@@ -760,6 +1148,30 @@ def ConstantsCheck(src):
 
 
 # ---------------------------------------------------------------------------
+# X2: the owners of the data run, held against the header and heard
+# ---------------------------------------------------------------------------
+
+
+def OwnersCheck(src, heard):
+    """What is wrong with ground_owners.py: not what tools/gen_ground_owners.py
+    writes out of src/include/ground_owner.h today, or an owner the header
+    names that no case's census heard claim a block."""
+    gen = os.path.join(os.path.dirname(src), "tools", "gen_ground_owners.py")
+    spec = importlib.util.spec_from_file_location("gen_ground_owners", gen)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    wrong = []
+    with open(module.OUT) as fh:
+        if fh.read() != module.Text(module.Owners()):
+            wrong.append("%s is stale against %s — run tools/gen_ground_owners.py"
+                         % (module.OUT, module.HEADER))
+    unheard = [name for name, _alone in GROUND_OWNERS if name not in heard]
+    if unheard:
+        wrong.append("no case's census heard %s claim a block" % ", ".join(unheard))
+    return wrong
+
+
+# ---------------------------------------------------------------------------
 # Running
 # ---------------------------------------------------------------------------
 
@@ -785,10 +1197,13 @@ def Run(medium, src):
     print("self-test: aiming at S = %s (%u block(s)), L = %s (%u), F = data block %u"
           % (t.Label(t.S), t.Srec.Blocks(), t.Label(t.L), t.Lrec.Blocks(), t.F))
     passed = total = 0
+    heard = set()
     for case in Cases(t):
         over = OverlayMedium(medium)
         case.plant(over)
-        ok, codes, wrong = Judge(case, GroundCensus(over))
+        census = GroundCensus(over)
+        ok, codes, wrong = Judge(case, census)
+        heard |= Kinds(census)
         total += 1
         passed += ok
         print("self-test: %s — flagged %s — %s" % (case.name, ", ".join(codes) or "nothing",
@@ -815,6 +1230,12 @@ def Run(medium, src):
     passed += not wrong
     print("self-test: X1 constants — %u constants and struct fields held against the headers — %s"
           % (n, "as expected" if not wrong else "; ".join(wrong)))
+    wrong = OwnersCheck(src, heard)
+    total += 1
+    passed += not wrong
+    print("self-test: X2 ground owners — the %u owners ground_owners.py lists are the header's, and "
+          "each is heard in a case — %s" % (len(GROUND_OWNERS), "as expected" if not wrong
+                                           else "; ".join(wrong)))
     print("self-test: %u of %u cases answered as expected" % (passed, total))
     return 0 if passed == total else 1
 

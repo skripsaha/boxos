@@ -9,12 +9,8 @@ comment names is only found by reading it.
 
 The parsers take bytes and give back plain dicts (or a Record). None of them
 reads the medium: what to read, and in which order, is the caller's business —
-the census reads it the way the mounting kernel does, the cut reads it out of a
-write log. The three walkers (WalkChain, MirrorWalk, KernelRollCall) take a
-`read_block` callable instead of a medium, because they ARE format semantics —
-how far a chain may run, which record of a file wins, what the mount's roll
-call does with a file it cannot read — and those have to be said in exactly one
-place for `list`, `get` and `check` alike.
+the mount's model (mount.py) reads it the way the mounting kernel does, the cut
+reads it out of a write log.
 
 Blocks of the data run are answered as runs, [(start, count)] sorted: the
 bitmap's bit order is format, and a 64 GB stick is two megabytes of bitmap
@@ -489,31 +485,29 @@ def ReadManifest(raw):
 # ---------------------------------------------------------------------------
 
 
-def _CString(raw):
-    """What the kernel holds after copying `raw` into a NUL-terminated buffer:
-    everything up to the first NUL (tag_registry.c RegistryAdopt)."""
-    return bytes(raw).split(b"\0", 1)[0]
-
-
-def ReadRegistryBlock(raw):
+def ReadRegistryBlock(raw, upto=REGISTRY_DATA):
     """A tag registry block (tagfs.h:84-91) and its records, walked exactly as
-    tag_registry_load walks them: entry_count records packed from the start of
-    the data, and none past its end."""
+    tag_registry_load's RegistryAdoptBlock walks them: entry_count records
+    packed from the start of the data, and none past `upto` — the whole data,
+    or the bytes a seal names of the block it names."""
     d = REGISTRY_BLOCK.Unpack(raw)
+    upto = min(upto, REGISTRY_DATA)
     data = raw[CHAIN_HEADER:CHAIN_HEADER + REGISTRY_DATA]
     records, offset = [], 0
     for _ in range(d["entry_count"]):
-        if offset + REGISTRY_RECORD.size > REGISTRY_DATA:
+        if offset + REGISTRY_RECORD.size > upto:
             break
         r = REGISTRY_RECORD.Unpack(data, offset)
         size = REGISTRY_RECORD.size + r["key_len"] + r["value_len"]
-        if offset + size > REGISTRY_DATA:
+        if offset + size > upto:
             break
         key_at = offset + REGISTRY_RECORD.size
         value_at = key_at + r["key_len"]
         r["at"] = CHAIN_HEADER + offset
-        r["key"] = _CString(data[key_at:value_at])
-        r["value"] = (_CString(data[value_at:value_at + r["value_len"]])
+        # A spelling is its bytes and their length (tag_registry.c entry_is):
+        # a NUL inside a key is a byte of it, and a value of no bytes is none.
+        r["key"] = bytes(data[key_at:value_at])
+        r["value"] = (bytes(data[value_at:value_at + r["value_len"]])
                       if r["value_len"] else None)
         records.append(r)
         offset += size
@@ -532,53 +526,73 @@ def ReadTableBlock(raw):
     return d
 
 
-def ReadPoolBlock(raw):
-    """A metadata pool block (tagfs.h:137-145) with its two walks.
+def PoolUsed(raw):
+    """The bytes of records a pool block states, as every walk bounds them
+    (meta_pool.c PoolCountKept, meta_pool_mount.c WalkRecords): its used_bytes,
+    no more than the payload."""
+    return min(U16(raw, 8), MPOOL_DATA)
 
-    `mirror_walk` is the mount's mirror walk (meta_pool.c:763-791): by
-    record_len while pos < used_bytes, stopping at a length of zero or one past
-    the payload. Each step is (at, record_len, file_id) with `at` counted from
-    the block start, the way a table row counts it. `walk_stop` is where that
-    walk gave up inside used_bytes, or None.
 
-    `kept_counted` is count_kept_records (meta_pool.c:124-142), the number the
-    mount believes instead of the header's `kept`."""
-    d = META_POOL_BLOCK.Unpack(raw)
-    walk, pos, stop = [], 0, None
-    while pos < d["used_bytes"]:
+def PoolRecords(raw, upto):
+    """The records of a pool block up to byte `upto` of its payload, walked as
+    the mount walks them (meta_pool_mount.c WalkRecords, WalkFidsPast;
+    meta_pool.c PoolCountKept): a record begins where the one before ended, at
+    least a header's length must be left, and a length under a header or past
+    `upto` ends the walk. [(at, record_len, file_id)], `at` counted from the
+    block's start, as a table row counts it; and the byte the walk stopped at."""
+    walk, pos = [], 0
+    while pos + RECORD_HEADER <= upto:
         record_len = U16(raw, CHAIN_HEADER + pos)
-        if record_len == 0 or record_len > MPOOL_DATA - pos:
-            stop = (CHAIN_HEADER + pos, record_len)
+        if record_len < RECORD_HEADER or record_len > upto - pos:
             break
         walk.append((CHAIN_HEADER + pos, record_len, U32(raw, CHAIN_HEADER + pos + 2)))
         pos += record_len
-    d["mirror_walk"], d["walk_stop"] = walk, stop
+    return walk, pos
 
-    used = min(d["used_bytes"], MPOOL_DATA)
-    kept, pos = 0, 0
-    while pos + RECORD_HEADER <= used:
-        record_len = U16(raw, CHAIN_HEADER + pos)
-        if record_len < RECORD_HEADER or record_len > used - pos:
-            break
-        if U32(raw, CHAIN_HEADER + pos + 2) != 0:
-            kept += 1
-        pos += record_len
-    d["kept_counted"] = kept
+
+def ReadPoolBlock(raw, upto=None):
+    """A metadata pool block (tagfs.h:137-145) and its records.
+
+    `mirror_walk` is the walk of its records over used_bytes. `walk_stop` is
+    (at, record_len) where the mount's walk stopped short of `upto` — the bytes
+    it reads the block's records to: its used bytes, or the bytes a seal names
+    of its open block (meta_pool_mount.c WalkOnce) — or None: what lies there
+    is never read by anybody. Past a seal's bytes nothing is a record the mount
+    takes up, so nothing there is a shape it misses.
+
+    `kept_counted` is PoolCountKept (meta_pool.c), the number the mount
+    believes instead of the header's `kept`."""
+    d = META_POOL_BLOCK.Unpack(raw)
+    used = PoolUsed(raw)
+    walk, _pos = PoolRecords(raw, used)
+    upto = used if upto is None else min(upto, used)
+    _walk, pos = PoolRecords(raw, upto)
+    d["mirror_walk"] = walk
+    d["walk_stop"] = (CHAIN_HEADER + pos, U16(raw, CHAIN_HEADER + pos)) if pos < upto else None
+    d["kept_counted"] = sum(1 for _a, _l, fid in walk if fid != 0)
     return d
+
+
+def PoolBlockMix(block, raw):
+    """A closed pool block's part in a seal's fold (meta_pool.c PoolBlockMix):
+    the CRC32 of its records, summed again with the block's number and the
+    records' length."""
+    used = PoolUsed(raw)
+    payload = raw[CHAIN_HEADER:CHAIN_HEADER + used]
+    return Crc32(struct.pack("<III", block, used, Crc32(bytes(payload))))
 
 
 class Record:
     """One metadata record at byte `at` of a 4096-byte block.
 
-    `unpack_ok` is unpack_record's acceptance (meta_pool.c:553-581): a length
-    in [42, 4080] and a CRC16 over exactly that length with the crc field
-    zeroed — plus the record lying inside the block, because past it the
-    kernel sums its own stack. `shape_ok` is what a writer produces
-    (meta_pool.c:474-480): the length is exactly 42 + 2t + 6e + n. The tags,
-    extents and name are read where unpack_record reads them — from the counts,
-    not bounded by the length (K3). `extents_at_mount` is what the mount keeps:
-    nothing at all when one extent has a zero count or runs past 2^32-1
-    (meta_pool.c:628-641; the past-the-run test is off while mounting, 625-627).
+    `unpack_ok` is UnpackV1's acceptance (plot/plot_pack.c): a length in
+    [42, 4080], a CRC16 over exactly that length with the crc field zeroed,
+    the record lying inside the block, and what its counts say it carries —
+    42 + 2t + 6e + n — inside its length. `crc_ok` is the sum alone.
+    `shape_ok` is what a writer produces (PackV1): the length is exactly
+    42 + 2t + 6e + n. `extents_at_mount` is what the mount keeps: nothing at
+    all when one extent has a zero count or runs past 2^32-1 (PlotExtentsInRun;
+    the past-the-run test is off while mounting — the volume is not up yet).
     """
 
     __slots__ = ("block", "at", "header_ok", "len", "fid", "flags", "size",
@@ -610,6 +624,7 @@ class Record:
         name_at = ext_at + FILE_EXTENT.size * self.extent_count
         end = name_at + self.name_len
         self.shape_ok = self.len == end - at and end <= len(raw)
+        self.unpack_ok = self.unpack_ok and end - at <= self.len
         if end <= len(raw):
             self.tags = list(struct.unpack_from("<%dH" % self.tag_count, raw, tag_at))
             self.extents = [FILE_EXTENT.struct.unpack_from(raw, ext_at + FILE_EXTENT.size * e)
@@ -772,366 +787,3 @@ def RunsCount(runs):
 
 def RunsText(runs):
     return ", ".join("%u+%u" % r for r in runs) if runs else "none"
-
-
-# ---------------------------------------------------------------------------
-# The walkers — format semantics that need blocks, not bytes
-# ---------------------------------------------------------------------------
-
-CHAIN_NAMES = {REGISTRY_MAGIC: "tag registry", FILETBL_MAGIC: "file table",
-               MPOOL_MAGIC: "metadata pool"}
-
-
-def WalkChain(read_block, first, magic, run):
-    """A chain walked exactly as its loader walks it — the three are one rule
-    (file_table.c:105-170, meta_pool.c:324-380, tag_registry_load): a link
-    outside the run is refused before it is read, a block that will not read or
-    does not carry the magic is refused, next_block == 0 ends the chain, and
-    the run's own length in hops is a cycle.
-
-    Returns (blocks, raws, refused) where `refused` is None or the sentence of
-    the loader that would refuse the mount over it."""
-    name = CHAIN_NAMES[magic]
-    blocks, raws, block, hops = [], [], first, 0
-    while True:
-        if block >= run:
-            return blocks, raws, ("the %s chain points at block %u and the data run "
-                                  "is %u blocks" % (name, block, run))
-        raw = read_block(block)
-        if raw is None:
-            return blocks, raws, "block %u of the %s would not read" % (block, name)
-        found = struct.unpack_from("<I", raw, 0)[0]
-        if found != magic:
-            return blocks, raws, ("block %u holds 0x%08x where the %s should be"
-                                  % (block, found, name))
-        blocks.append(block)
-        raws.append(raw)
-        nxt = struct.unpack_from("<I", raw, 4)[0]
-        if nxt == 0:
-            return blocks, raws, None
-        hops += 1
-        if hops >= run:
-            return blocks, raws, ("the %s chain has taken %u hops in a data run of "
-                                  "%u blocks" % (name, hops, run))
-        block = nxt
-
-
-def PoolBlockMix(block, raw):
-    """A closed pool block's part in a seal's fold (meta_pool.c PoolBlockMix):
-    the CRC32 of its records, summed again with the block's number and the
-    records' length."""
-    used = min(U16(raw, 8), MPOOL_DATA)
-    payload = raw[CHAIN_HEADER:CHAIN_HEADER + used]
-    return Crc32(struct.pack("<III", block, used, Crc32(bytes(payload))))
-
-
-def _SealJudgeWalk(read_block, tries, mark, run):
-    """The seals of `tries` held against the chain walked from `mark`'s first
-    block up to its open one (meta_pool_mount.c WalkJudge), reading only."""
-    def judge(block, raw):
-        for t in tries:
-            m = t["copy"]["mark"]
-            if t["verdict"] is not None:
-                continue
-            if block != m["pool_to_block"]:
-                if raw is None:
-                    t["verdict"] = "broken"
-                else:
-                    t["fold"] ^= PoolBlockMix(block, raw)
-                continue
-            to = m["pool_to_bytes"]
-            tail = (raw is not None and to <= MPOOL_DATA and U16(raw, 8) >= to and
-                    Crc32(bytes(raw[CHAIN_HEADER:CHAIN_HEADER + to])) == m["tail_crc32"])
-            t["verdict"] = ("broken" if t["fold"] != m["closed_crc32"]
-                            else "borne" if tail else "torn")
-
-    block = mark["chain_first"]
-    for _hops in range(run):
-        raw = read_block(block) if block < run else None
-        ok = raw is not None and U32(raw, 0) == MPOOL_MAGIC
-        judge(block, raw if ok else None)
-        if not ok or block == mark["pool_to_block"]:
-            break
-        if U32(raw, 4) == 0:
-            judge(None, None)
-            break
-        block = U32(raw, 4)
-
-
-def SealStand(read_block, copies, run):
-    """What PoolMount (meta_pool_mount.c) stands on: the newest intact copy's
-    seal borne out; else the other copy's borne out (fell back — the medium is
-    marked SETTLE_MEDIUM_LIED); else a seal whose closed blocks are borne out
-    and whose open block is not (decision 5: its records roll back); else no
-    seal. None when the newest intact copy carries no seal of its own — the
-    volume is read the way a kernel before the seal reads it. Otherwise a dict:
-    stood ('seal' | 'torn' | 'none'), copy, mark, fell_back.
-
-    The other copy's seal is judged by the walk from the newest one's first
-    block when both chains begin at one block; when they begin apart — the
-    newest cycle's Glean took blocks off the front (glean/glean.h) — by a walk
-    from its own first block, made only when the newest is not borne out."""
-    newest = LedgerChoice(copies)
-    if newest is None or not newest["sealed"]:
-        return None
-    s0 = newest["mark"]
-    tries = [{"copy": newest, "fold": 0, "verdict": None}]
-    other = [c for c in copies if c is not newest and c["ok"] and c["sealed"]]
-    apart = bool(other) and other[0]["mark"]["chain_first"] != s0["chain_first"]
-    if other and not apart:
-        tries.append({"copy": other[0], "fold": 0, "verdict": None})
-    _SealJudgeWalk(read_block, tries, s0, run)
-    if apart and tries[0]["verdict"] != "borne":
-        own = {"copy": other[0], "fold": 0, "verdict": None}
-        _SealJudgeWalk(read_block, [own], other[0]["mark"], run)
-        tries.append(own)
-
-    out = {"stood": "none", "copy": None, "mark": None, "fell_back": False}
-    if tries[0]["verdict"] == "borne":
-        pick, stood = tries[0], "seal"
-    elif len(tries) > 1 and tries[1]["verdict"] == "borne":
-        pick, stood = tries[1], "seal"
-        out["fell_back"] = True
-    else:
-        torn = [t for t in tries if t["verdict"] == "torn"]
-        pick, stood = (torn[0], "torn") if torn else (None, "none")
-    if pick:
-        out.update(stood=stood, copy=pick["copy"], mark=pick["copy"]["mark"])
-    return out
-
-
-def SealPoolChain(read_block, head, seal, run):
-    """The pool's chain as the mount walks it (meta_pool_mount.c): under a seal
-    from the seal's chain_first — the Deed's head may lie before it, off the
-    chain, once Glean took blocks off the front — and cut to the seal's open
-    block (SealCutPool); with none, from the head, whole. Returns (blocks,
-    raws, refused)."""
-    sealed = seal is not None and seal["stood"] != "none"
-    first = seal["mark"]["chain_first"] if sealed else head
-    blocks, raws, why = WalkChain(read_block, first, MPOOL_MAGIC, run)
-    if sealed and seal["mark"]["pool_to_block"] in blocks:
-        blocks, raws = SealCutPool(blocks, raws, seal)
-        why = None
-    return blocks, raws, why
-
-
-def HeadPrefix(read_block, head, first, chain, run):
-    """What the Deed's head still names before the chain's first block, when
-    the chain begins past it (glean.c GleanMount, GleanWalkPrefix): followed
-    from the head's next_block up to `first`, and no further than a block
-    outside the run, one of the chain, the head itself, or one that does not
-    read as a pool block. The mount keeps them the pool's until the head is
-    written to name past them."""
-    raw = read_block(head) if head < run else None
-    if raw is None or U32(raw, 0) != MPOOL_MAGIC:
-        return []
-    out, block, on_chain = [], U32(raw, 4), set(chain)
-    for _hops in range(run):
-        if block in (first, 0) or block >= run or block == head or block in on_chain:
-            break
-        raw = read_block(block)
-        if raw is None or U32(raw, 0) != MPOOL_MAGIC:
-            break
-        out.append(block)
-        block = U32(raw, 4)
-    return out
-
-
-def SealCutPool(blocks, raws, seal):
-    """The pool's chain as the mount stands on `seal` (SealStand): up to the
-    seal's open block, whose records end at `to` — none of them when it was
-    torn — and which links nothing. The chain as it is when the seal's block
-    is not on it."""
-    mark = seal["mark"]
-    if mark["pool_to_block"] not in blocks:
-        return blocks, raws
-    i = blocks.index(mark["pool_to_block"])
-    raw = bytearray(raws[i])
-    to = 0 if seal["stood"] == "torn" else mark["pool_to_bytes"]
-    struct.pack_into("<IH", raw, 4, 0, to)
-    raw[CHAIN_HEADER + to:] = bytes(len(raw) - CHAIN_HEADER - to)
-    return blocks[:i + 1], raws[:i] + [bytes(raw)]
-
-
-def NextFileId(ledger_next, top_row, top_record):
-    """MountNextFileId (mount/mount.c): past every id a row or a record shows,
-    never short of the Ledger's count; a wrapped count (0) stays."""
-    nxt = min(max(top_row, top_record) + 1, 0xFFFFFFFF)
-    return ledger_next if ledger_next == 0 or nxt <= ledger_next else nxt
-
-
-def MirrorWalk(pool_blocks, pool_raws):
-    """The mount's mirror (meta_pool_mount.c, PoolMount): every pool block in chain
-    order, every record in append order, and for each fid > 0 the LAST record
-    that unpacks. Returns {fid: Record}. The kernel keeps only the fids the
-    table has a row for (file_map/), and its roll call asks for no other."""
-    newest = {}
-    for block, raw in zip(pool_blocks, pool_raws):
-        for at, _record_len, fid in ReadPoolBlock(raw)["mirror_walk"]:
-            if fid == 0:
-                continue
-            rec = ParseRecord(raw, at, block)
-            if rec.unpack_ok:
-                newest[fid] = rec
-    return newest
-
-
-class FileVerdict:
-    """What the mount's roll call decided about one file id."""
-
-    __slots__ = ("fid", "record", "outcome", "corrected")
-
-    def __init__(self, fid, record, outcome, corrected):
-        self.fid, self.record, self.outcome, self.corrected = fid, record, outcome, corrected
-
-
-def KernelRead(read_block, place):
-    """meta_pool_read (meta_pool.c:1036-1053) as far as a host can follow it:
-    the block the place names, unpacked at the offset the place names. An
-    offset whose header would not fit the block is a failed read here — the
-    kernel reads past a 4 KiB stack buffer there (K2, left for step 1.4)."""
-    block, offset = place
-    if offset + RECORD_HEADER > BLOCK:
-        return None
-    raw = read_block(block)
-    if raw is None:
-        return None
-    rec = ParseRecord(raw, offset, block)
-    return rec if rec.unpack_ok else None
-
-
-def KernelRollCall(read_block, next_file_id, rows, mirror):
-    """The per-file half of the mount's fsck (tagfs_init's roll call): fid 1 up to
-    next_file_id, skipping one with no row; the pool's newest place wins over
-    the row's; a place that will not unpack loses the file; a record that is
-    not ACTIVE is quietly quitclaimed. Returns [FileVerdict] with outcome
-    'visible', 'lost' or 'quitclaim'."""
-    out = []
-    for fid in range(1, next_file_id):
-        row = rows.get(fid)
-        if row is None:
-            continue
-        place, corrected = row, False
-        newest = mirror.get(fid)
-        if newest is not None and (newest.block, newest.at) != row:
-            place, corrected = (newest.block, newest.at), True
-        rec = KernelRead(read_block, place)
-        if rec is None:
-            outcome = "lost"
-        elif not rec.flags & FILE_ACTIVE:
-            outcome = "quitclaim"
-        else:
-            outcome = "visible"
-        out.append(FileVerdict(fid, rec, outcome, corrected))
-    return out
-
-
-def TableRows(table_raws):
-    """{fid: (meta_block, meta_offset)} for every row that names a file."""
-    rows = {}
-    for link, raw in enumerate(table_raws):
-        for i, (mb, mo) in enumerate(ReadTableBlock(raw)["rows"]):
-            if mb != 0:
-                rows[link * FTABLE_PER_BLOCK + i] = (mb, mo)
-    return rows
-
-
-# ---------------------------------------------------------------------------
-# Volume — list and get
-# ---------------------------------------------------------------------------
-
-
-class Volume:
-    """A volume on a medium, for reading files out of it the way the mounted
-    kernel would see them."""
-
-    def __init__(self, medium, ground, deed):
-        self.medium = medium
-        self.ground = ground
-        self.layout = deed["layout"]
-        self.deed = deed
-
-    def data_block(self, rel):
-        """One 4 KiB block of the DATA RUN, counted from the run's start —
-        block_to_vlba (tagfs.c)."""
-        lba = self.ground + (self.layout["data_block"] + rel) * SECTORS_PER_BLOCK
-        return self.medium.sectors(lba, SECTORS_PER_BLOCK)
-
-    def volume_block(self, abs_b):
-        """One 4 KiB block counted from the START of the volume."""
-        lba = self.ground + abs_b * SECTORS_PER_BLOCK
-        return self.medium.sectors(lba, SECTORS_PER_BLOCK)
-
-    def read_block(self, rel):
-        """data_block, answering None where the medium ends — a failed read."""
-        try:
-            return self.data_block(rel)
-        except IOError:
-            return None
-
-    def ledgers(self):
-        """Both copies of the Ledger, as read."""
-        copies = []
-        for c in range(LEDGER_COPIES):
-            try:
-                sector = self.volume_block(self.layout["state_block"] + c)[:SECTOR]
-            except IOError:
-                sector = b""
-            copies.append(ReadLedgerCopy(sector, c))
-        return copies
-
-    def ledger(self):
-        """The newest intact Ledger copy, or None when neither reads."""
-        return LedgerChoice(self.ledgers())
-
-    def files(self):
-        """Every file the mounted kernel would show, resolved the way its mount
-        resolves them (KernelRollCall): ids below the Ledger's next_file_id
-        that have a table row, each at the NEWEST record the pool holds for it
-        — not at whatever place the row names — CRC-checked and ACTIVE.
-
-        ‼ The pool is append-only: a file written in several goes leaves a
-        record per go, every one of them ACTIVE. The row names one of them and
-        the pool's newest names another whenever a table flush was lost, and
-        the kernel believes the pool (tagfs_init's roll call). A reader that believed
-        the row would hand back a file the machine never shows.
-
-        A volume with no readable Ledger does not mount at all; its files are
-        still listed, bounded by the table's own length, because this is the
-        tool that gets evidence off a volume that will not mount."""
-        run = self.layout["data_blocks"]
-        table_head = self.layout["file_table_block"] - self.layout["data_block"]
-        pool_head = self.layout["metadata_pool_block"] - self.layout["data_block"]
-        _tb, table_raws, _why = WalkChain(self.read_block, table_head, FILETBL_MAGIC, run)
-        rows = TableRows(table_raws)
-        copies = self.ledgers()
-        led = LedgerChoice(copies)
-        seal = SealStand(self.read_block, copies, run) if led else None
-        pool_blocks, pool_raws, _why = SealPoolChain(self.read_block, pool_head, seal, run)
-        mirror = MirrorWalk(pool_blocks, pool_raws)
-        if seal and seal["stood"] != "none":
-            # Under a seal the files are the newest records of the sealed span.
-            rows = {fid: (r.block, r.at) for fid, r in mirror.items() if r.flags & FILE_ACTIVE}
-        next_fid = max(rows, default=0) + 1
-        out = []
-        for v in KernelRollCall(self.read_block, next_fid, rows, mirror):
-            if v.outcome != "visible" or v.record.flags & FILE_TRASHED:
-                continue
-            r = v.record
-            out.append({"fid": v.fid, "name": r.name, "size": r.size,
-                        "flags": r.flags, "extents": r.extents,
-                        "extents_at_mount": r.extents_at_mount})
-        return out
-
-    def contents(self, entry):
-        """The file's bytes, following the extents the mount keeps and stopping
-        at its size."""
-        out = bytearray()
-        for start, count in entry["extents_at_mount"]:
-            for i in range(count):
-                if len(out) >= entry["size"]:
-                    break
-                out += self.data_block(start + i)
-            if len(out) >= entry["size"]:
-                break
-        return bytes(out[:entry["size"]])
