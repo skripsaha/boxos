@@ -936,7 +936,10 @@ class GroundCensus:
                      "far_end_sectors": st.far_end["sectors"] if st.far_end else None},
             "regions": [{"name": n, "first": a, "blocks": c} for n, a, c in self.Regions()],
             "ledger": {"copies": led_copies,
-                       "standing_on": f.ledger["copy"] if f.ledger else None},
+                       "standing_on": f.ledger["copy"] if f.ledger else None,
+                       # The id the mount hands the next create: past every
+                       # id a row or a record of this medium shows (medium.py).
+                       "next_file_id": f.ledger["next_file_id"] if f.ledger else None},
             "diskbook": {"head_ok": bool(f.diskbook[0] and f.diskbook[0]["valid"]),
                          "backup_ok": bool(f.diskbook[1] and f.diskbook[1]["valid"]),
                          "acceptable": f.book_ok, "count": f.book["count"] if f.book else None,

@@ -60,6 +60,10 @@ run_rgbtest() {  # $1 = firmware label
     sleep 2
 }
 
+# Both halves boot STRICT=on, a build key as well as a machine key: built here,
+# where a failure is seen, not again inside the first run-bg.
+make STRICT=on >build/rgbcheck_build.log 2>&1 || fail "the tree does not build with STRICT=on (build/rgbcheck_build.log)"
+
 # ───── UEFI/GOP half: bit-exact pixels ─────
 
 make run-stop >/dev/null 2>&1

@@ -283,8 +283,12 @@ def Compact(cid, rc, out, err, base_files, base_names):
             changed.append("fid %d %s %s" % (bf["fid"], bf["name"], "gone" if f is None else
                            "not visible (%s)" % f["state"] if not f["visible"] else
                            "is %s bytes, sha256 %s" % (f["size"], (f["sha256"] or "none")[:12])))
+    led = d["ledger"]
+    stood = next((c for c in led["copies"] if c.get("copy") == led["standing_on"]), None)
     return {"id": cid, "rc": rc, "verdict": d["verdict"], "mounts": k["mounts"],
             "refusal": k["refusal"], "says": k["says"],
+            "next_file_id": led.get("next_file_id"),
+            "ledger_next": stood.get("next_file_id") if stood else None,
             "refused": d["chains"]["refused"] or {},
             "chains": {x: len(d["chains"][x]) for x in ("registry", "table", "pool")},
             "fsck": {x: fsck.get(x) for x in ("orphan", "missing", "corrected", "lost")},

@@ -11,6 +11,11 @@ burst="memtest files bench memtest files bench memtest \
 
 mkdir -p build/uefi16c_x20_logs
 
+# Built as every run boots it: STRICT=on is a build key as well as a machine
+# key, and a tree built without it is built again inside the first run-bg.
+make STRICT=on >build/uefi16c_x20_logs/build.log 2>&1 || {
+    echo "BUILD FAILED (STRICT=on) — build/uefi16c_x20_logs/build.log"; exit 2; }
+
 PASS=0
 FAIL=0
 

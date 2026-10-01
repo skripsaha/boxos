@@ -45,9 +45,12 @@ fi
 make run-stop >/dev/null 2>&1 || true
 pkill -f 'qemu-system-x86_64.*boxos.img' >/dev/null 2>&1 || true
 
+# Built STRICT=on, as every config boots it: STRICT is a build key as well as
+# a machine key, and a tree built without it is built again inside run-bg,
+# out of sight, and that time counted as the run's.
 t0=$(date +%s)
 if [ "${NOBUILD:-0}" != "1" ]; then
-    if ! make >build/cxx_gate_build.log 2>&1; then
+    if ! make STRICT=on >build/cxx_gate_build.log 2>&1; then
         echo "[gate] BUILD FAILED — build/cxx_gate_build.log:"
         grep -nE 'error:|Error|undefined reference' build/cxx_gate_build.log | head -30
         exit 2
