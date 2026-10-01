@@ -207,6 +207,17 @@ stranger_off() {
 # apart into a guard that has quietly stopped guarding.
 LATEARRIVAL_MARK="logcheck mutation: the internal disk is not this machine's"
 
+# ‼ AND IT IS SAID IN BOTH PLACES THE KERNEL ASKS, NOT ONLY IN THE FIRST.
+#
+# The stick is a copy of the boot image, so the internal disk carries the very
+# same volume — the same sixteen bytes — for the whole run. tagfs_recognise is
+# where an ARRIVAL asks whose volume a medium carries; a RETURN asks somewhere
+# else: the open book looks for the volume that left in every seat of the room
+# (volume_ground_on), and the internal disk is seat 0. With the mutation in the
+# first place only, every return was judged against the internal disk — a
+# medium that never left — and measured so on 1.12: "the volume came back in
+# seat 0 with its Ledger as this kernel left it", the stick sitting in seat 1.
+# So the disk is not this machine's on both roads, which is what the words say.
 latearrival_on() {
     mutate src/kernel/tagfs/tagfs.c
     python3 - <<'EOF'
@@ -215,9 +226,13 @@ s = open(p).read()
 anchor = "static bool tagfs_recognise(void *ctx, uint8_t seat, uint8_t out_uuid[16])\n{\n"
 assert anchor in s, "late-arrival anchor missing"
 s = s.replace(anchor, anchor + "    if (BoardroomSeatKind(seat) == BOARD_ATA) return false;   /* logcheck mutation: the internal disk is not this machine's */\n", 1)
+back = ("static bool volume_ground_on(uint8_t seat, const uint8_t uuid[16], uint64_t *out_base,\n"
+        "                             bool *out_same)\n{\n")
+assert s.count(back) == 1, "late-arrival return anchor missing"
+s = s.replace(back, back + "    if (BoardroomSeatKind(seat) == BOARD_ATA) return false;   /* logcheck mutation: the internal disk is not this machine's */\n", 1)
 open(p, "w").write(s)
 EOF
-    mut_done src/kernel/tagfs/tagfs.c "$LATEARRIVAL_MARK"
+    mut_done src/kernel/tagfs/tagfs.c "$LATEARRIVAL_MARK" 2
 }
 latearrival_off() {
     restore src/kernel/tagfs/tagfs.c
@@ -302,6 +317,73 @@ stick_from_boot_image() {
     fi
     echo "  (the stick carries this machine's volume $stick)"
     return 0
+}
+
+# ── the stick's Ledger moved on while the stick was out of the machine ─────
+#
+# A medium that comes back is taken up with its open book only when its Ledger
+# is the one this kernel left on it — the seq, and the seal's {settle,
+# closed_crc32, tail_crc32} (tagfs/mount/away.h). Another BoxOS kernel that
+# settled a cycle on the stick meanwhile wrote the next seq into the OTHER copy
+# and sealed it as that cycle. This writes exactly that from the host, between
+# the pull and the push: the newest copy laid into the other slot, its seq one
+# higher, its seal naming that seq, its checksum made again — and nothing else.
+# No table, no pool, no block of any file: the volume it describes is the same
+# volume, and only the record of who settled it last has moved.
+#
+# ‼ ONLY THE LEDGER, AND ON PURPOSE. A host that changes a file's bytes and
+# leaves the Ledger alone moves no seq, and the kernel does not see it — it
+# says so itself, in the line that takes the book up — so that is not a change
+# this can stand for.
+#
+# The image is the host's while this runs: a drive added over HMP goes with its
+# device, so between the pull's `device_del` and the next `drive_add` nothing
+# in QEMU holds the file.
+ledger_moved_on_host() {
+    python3 - "$1" <<'PY'
+import struct, sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, "tools")
+from volumeread import medium, ondisk
+
+path = sys.argv[1]
+stand = medium.StandOnDeed(medium.Medium(path), None)
+state = stand.deed["layout"]["state_block"]
+lba = [stand.start + (state + c) * ondisk.SECTORS_PER_BLOCK for c in range(ondisk.LEDGER_COPIES)]
+at = {name: off for name, off, _n in ondisk.VOLUME_LEDGER.Offsets()}
+settle_at = ondisk.LEDGER_SEAL_AT + dict((n, o) for n, o, _s in ondisk.SETTLE_MARK.Offsets())["settle"]
+
+with open(path, "r+b") as f:
+    def read(c):
+        f.seek(lba[c] * ondisk.SECTOR)
+        return f.read(ondisk.SECTOR)
+    was = [ondisk.ReadLedgerCopy(read(c), c) for c in range(ondisk.LEDGER_COPIES)]
+    newest = ondisk.LedgerChoice(was)
+    if newest is None:
+        sys.exit("ledger_moved_on_host: no copy of the stick's Ledger reads intact")
+    if not newest["sealed"]:
+        sys.exit("ledger_moved_on_host: the newest copy (seq %u) carries no seal — "
+                 "this kernel always seals, so the stick is not what it should be" % newest["seq"])
+    src = newest["copy"]
+    dst = (src + 1) % ondisk.LEDGER_COPIES
+    seq = newest["seq"] + 1
+    rec = bytearray(read(src))
+    struct.pack_into("<Q", rec, at["seq"], seq)
+    struct.pack_into("<Q", rec, settle_at, seq)
+    struct.pack_into("<I", rec, at["crc32"], 0)
+    struct.pack_into("<I", rec, at["crc32"], ondisk.Crc32(bytes(rec[:newest["bytes"]])))
+    f.seek(lba[dst] * ondisk.SECTOR)
+    f.write(rec)
+    f.flush()
+    now = [ondisk.ReadLedgerCopy(read(c), c) for c in range(ondisk.LEDGER_COPIES)]
+
+stands = ondisk.LedgerChoice(now)
+if (stands is None or stands["copy"] != dst or stands["seq"] != seq or not stands["sealed"]
+        or not now[src]["ok"] or now[src]["seq"] != newest["seq"]):
+    sys.exit("ledger_moved_on_host: the stick did not take the moved Ledger as written")
+print("  (the stick's Ledger moved on the host: copy %u at seq %u, copy %u now seq %u, "
+      "sealed as that cycle)" % (src, newest["seq"], dst, seq))
+PY
 }
 
 run_latearrival() {
@@ -418,6 +500,52 @@ run_latearrival() {
 # machine that boots from a stick, that is the machine gone until it is
 # switched off and on.
 #
+# ‼ SINCE 1.12 A RETURN IS JUDGED, AND THERE ARE TWO RETURNS HERE.
+#
+# A medium that leaves takes nothing down: the volume's book is held open, and
+# the return decides it (tagfs/mount/away.h). The SAME stick, as this kernel
+# left it — its Ledger's seq and seal the ones a cycle left there, every write
+# the volume saw kept by a flush — is TAKEN UP: no second mount, nothing read
+# again, the files it held still the files it holds. A stick whose Ledger moved
+# while it was away is not the book this kernel holds, and is GIVEN UP: the
+# volume is let go of and mounted from the medium as it now is. So the stick
+# goes out twice. The first time it comes back as it left; the second time the
+# host moves its Ledger on, as another BoxOS kernel settling a cycle on it
+# would (ledger_moved_on_host), and it must not be taken for the same book.
+#
+# The file that proves the first return is `anchor_test`'s, written and
+# anchored before the stick goes: anchored, so the volume's every write is
+# covered by a flush the medium kept, which is what "as this kernel left it"
+# asks — the anchor's line is the event the pull waits for, not a clock. After
+# the return the same program reads it back and checks it, deletes it, and
+# writes and anchors it again: the volume reads, and it takes a write. The
+# second return is proved by the same file read off the volume mounted anew.
+#
+# ‼ RED ON 1.12, FOUR CHECKS, AND THE KERNEL IS WHY. The first return is never
+# taken up. The anchor's cycle ends by laying again the Spares a delete stands
+# on (SettleRunEnd, settle.c: PoolSpareRefill after the cycle's flush), and
+# every Spare is stamped on the medium — a write the volume saw complete that
+# no kept flush covers until the next cycle. VolumeWritesKept() answers no, the
+# stick that left exactly as it was is judged AWAY_IN_DOUBT, and its book is
+# given up and read again; a volume mounted and never written is judged the
+# same, by the mount's own refill (tagfs_init). Measured: with one flush after
+# that refill — not in the tree — this is 23 passed, 0 failed. The four are the
+# claim, so they stay red until the kernel keeps it.
+#
+# ‼ THE MUTATIONS IT EXISTS FOR, one per return, each measured on 1.12:
+#
+#   take the take-up out of volume_book_decided (tagfs.c: `if (verdict ==
+#      AWAY_AS_LEFT) { volume_book_taken_up(...); return true; }`) — every
+#      return is given up and read again, and the first one mounts a second
+#      time. MEASURED with the flush above: 19 passed, 4 failed — exactly the
+#      four the kernel reddens by itself today, so until it is mended this
+#      mutation and that defect read as one result;
+#   take `if (as == LEDGER_OTHER) return AWAY_OTHER;` out of AwayJudge
+#      (away.c) — the stick whose Ledger moved is taken up as the book this
+#      kernel holds, and nothing is read again. MEASURED: 17 passed, 6 failed
+#      (the doubt above still gives that book up, so its judgement and its
+#      order are what go red); with the flush, 18 passed, 5 failed.
+#
 # Four cores, same as latearrival: the departure is taken down from the idle
 # and guide loops, and on one core neither of them runs.
 run_replug() {
@@ -439,14 +567,21 @@ run_replug() {
     # under a program being loaded — and reports it as this.
     wait_for_line build/serial.log "hands over" "$WAIT_QUIET_S"
     sleep 2
-    # A mark in the log, so the second half is read apart from the first: every
-    # line the checks below care about has a twin above it.
-    local FIRST_LINES
+
+    # A file on the stick before anything leaves, and every write under a
+    # flush the medium kept: anchor_test writes and anchors it.
+    type_cmd "anchor_test"
+    sleep 1; key_press ret
+    wait_for_line build/serial.log "\[ANCHOR\] WROTE+ANCHORED" "$WAIT_QUIET_S"
+    sleep 2
+    # A mark in the log, so the returns are read apart from the first arrival:
+    # every line the checks below care about has a twin above it.
+    local FIRST_LINES SECOND_LINES AT
     FIRST_LINES=$(wc -l < build/serial.log)
 
-    # Pulled out.
+    # ── the first return: the stick as it left ─────────────────────────────
     mon_raw "device_del usbstick"
-    wait_for_line build/serial.log "is empty" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "is empty" "$WAIT_QUIET_S" $((FIRST_LINES + 1))
     sleep 2
 
     # And now, with the medium out, ask for a program that IS on it and one
@@ -468,49 +603,64 @@ run_replug() {
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
-    wait_for_line build/serial.log "the volume is back" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "the volume is back\|its book is given up" "$WAIT_QUIET_S" $((FIRST_LINES + 1))
     sleep 3
+
+    # The file from before the pull, read back and checked; then written and
+    # anchored again, which is the volume taking a write after the return.
+    AT=$(wc -l < build/serial.log)
+    type_cmd "anchor_test"
+    sleep 1; key_press ret
+    wait_for_line build/serial.log "\[ANCHOR\] PASS\|\[ANCHOR\] FAIL\|\[ANCHOR\] read rc" "$WAIT_QUIET_S" $((AT + 1))
+    sleep 2
+    AT=$(wc -l < build/serial.log)
+    type_cmd "anchor_test"
+    sleep 1; key_press ret
+    wait_for_line build/serial.log "\[ANCHOR\] WROTE+ANCHORED\|\[ANCHOR\] create rc\|\[ANCHOR\] fwrite rc\|\[ANCHOR\] anchor rc" "$WAIT_QUIET_S" $((AT + 1))
+    sleep 2
+    SECOND_LINES=$(wc -l < build/serial.log)
+
+    # ── the second return: the stick's Ledger moved while it was away ──────
+    mon_raw "device_del usbstick"
+    wait_for_line build/serial.log "the medium the volume lives on has left" "$WAIT_QUIET_S" $((SECOND_LINES + 1))
+    sleep 2
+    local MOVED=1
+    ledger_moved_on_host "$SCRATCH/stick.img" && MOVED=0
+    mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
+    sleep 1
+    mon_raw "device_add usb-storage,drive=stick,id=usbstick"
+    wait_for_line build/serial.log "the volume is back\|is MOUNTED\|would not mount" "$WAIT_QUIET_S" $((SECOND_LINES + 1))
+    sleep 3
+    AT=$(wc -l < build/serial.log)
+    type_cmd "anchor_test"
+    sleep 1; key_press ret
+    wait_for_line build/serial.log "\[ANCHOR\] PASS\|\[ANCHOR\] FAIL\|\[ANCHOR\] read rc\|\[ANCHOR\] WROTE" "$WAIT_QUIET_S" $((AT + 1))
+    sleep 2
 
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.replug.log"
     latearrival_off
     L="$SCRATCH/serial.replug.log"
-    # Everything after the first arrival. The checks are about the SECOND one.
-    tail -n +$((FIRST_LINES + 1)) "$L" > "$SCRATCH/serial.replug.second.log"
-    local S="$SCRATCH/serial.replug.second.log"
+    # The first return, and the second, each read alone.
+    sed -n "$((FIRST_LINES + 1)),${SECOND_LINES}p" "$L" > "$SCRATCH/serial.replug.second.log"
+    tail -n +$((SECOND_LINES + 1)) "$L" > "$SCRATCH/serial.replug.third.log"
+    local S="$SCRATCH/serial.replug.second.log" T="$SCRATCH/serial.replug.third.log"
 
     # The first arrival happened at all — otherwise the rest is vacuous.
     grep -q "a medium arrived carrying a volume, and this machine had none" "$L"
     chk $? "the stick was mounted on its first arrival"
     grep -q "AUTOSTART. Started .shell.bin" "$L"; chk $? "and its shell started"
     grep -q "the stand-in .PID 1. hands over" "$L"; chk $? "and the stand-in handed over"
+    head -n "$FIRST_LINES" "$L" | grep -q "\[ANCHOR\] WROTE+ANCHORED"
+    chk $? "a file was written and anchored on it before it left"
 
+    # ── the first return ───────────────────────────────────────────────────
     # The departure NAMES the chair. Saying only "something left" is what made
     # the room unable to empty the right one.
     grep -qE "seat [0-9]+ is empty . usb[0-9]+" "$S"
     chk $? "the room emptied the chair and named it"
-    grep -q "the medium the volume lives on has left" "$S"
-    chk $? "TagFS noticed the medium go"
-
-    # The second arrival is announced. This is the whole repair: it used not to
-    # be, because the room only ever spoke when it GREW.
-    grep -q "took a seat while the machine was" "$S"
-    chk $? "the return was announced, not swallowed"
-    grep -q "the volume is back, in seat" "$S"
-    chk $? "TagFS took the volume back up"
-
-    # And FINISHED doing so. "The volume is back" is said before the mount is
-    # attempted; it is the return starting, not the return working.
-    grep -q "\[TagFS\] the volume on seat .* is MOUNTED" "$S"
-    chk $? "and the second mount finished, rather than only beginning"
-
-    # Into the chair it left, not a new one. The room must not grow a chair
-    # per plug cycle — sixteen of them is what a live board showed.
-    grep -q "seat 2:" "$S"
-    if [ $? -ne 0 ]; then ok "no new chair was added for the returning stick"
-    else bad "no new chair was added for the returning stick"; fi
-    grep -qE "the volume is back, in seat 1" "$S"
-    chk $? "and it is the same seat number it had before"
+    grep -q "the medium the volume lives on has left — its book is held open" "$S"
+    chk $? "TagFS noticed the medium go, and held its book open"
 
     # A program that is on the absent volume, and one that is on no volume at
     # all, must not get the same sentence.
@@ -518,6 +668,55 @@ run_replug() {
     chk $? "a real command on an absent medium says so"
     grep -q "Unknown command: nosuchthing" "$S"
     chk $? "and a command that does not exist is still unknown"
+
+    # The second arrival is announced. This is the whole repair: it used not to
+    # be, because the room only ever spoke when it GREW.
+    grep -q "took a seat while the machine was" "$S"
+    chk $? "the return was announced, not swallowed"
+
+    # ‼ TAKEN UP, in the chair it left, and not read again.
+    grep -qE "the volume is back, in seat 1: .* as this kernel left it" "$S"
+    chk $? "the stick as it left was taken back up, in the seat it had"
+    ! grep -q "its book is given up" "$S"
+    chk $? "and its book was not given up"
+    ! grep -q "\[TagFS\] the volume on seat .* is MOUNTED" "$S"
+    chk $? "and nothing was mounted a second time"
+
+    # Into the chair it left, not a new one. The room must not grow a chair
+    # per plug cycle — sixteen of them is what a live board showed.
+    ! grep -q "seat 2:" "$L"
+    chk $? "no new chair was added for the returning stick"
+
+    # The file from before the pull is there and reads back whole, and the
+    # volume takes a write after the return.
+    grep -q "\[ANCHOR\] PASS" "$S"
+    chk $? "the file written before the pull reads back intact"
+    grep -q "\[ANCHOR\] WROTE+ANCHORED" "$S"
+    chk $? "and the volume takes a write and anchors it after the return"
+
+    # ── the second return: the stick's Ledger moved while it was away ──────
+    [ "$MOVED" = 0 ]
+    chk $? "the host moved the stick's Ledger on while it was out"
+    grep -q "came back in seat 1 with a Ledger or a Deed this kernel did not leave on it" "$T"
+    chk $? "the stick whose Ledger moved was judged not to be the book this kernel holds"
+    ! grep -q "the volume is back, in seat" "$T"
+    chk $? "and was not taken up as that book"
+    grep -q "\[TagFS\] the volume on seat 1 is MOUNTED" "$T"
+    chk $? "the volume was mounted anew from the medium as it now is"
+    local GIVEN_AT UP_AT READ_AT
+    GIVEN_AT=$(grep -n "did not leave on it" "$T" | head -1 | cut -d: -f1)
+    UP_AT=$(grep -n "is MOUNTED" "$T" | head -1 | cut -d: -f1)
+    READ_AT=$(grep -n "\[ANCHOR\] PASS" "$T" | head -1 | cut -d: -f1)
+    [ -n "$GIVEN_AT" ] && [ -n "$UP_AT" ] && [ -n "$READ_AT" ] && \
+        [ "$GIVEN_AT" -lt "$UP_AT" ] && [ "$UP_AT" -lt "$READ_AT" ]
+    chk $? "given up, then mounted, then the file read back off it — in that order (${GIVEN_AT:-?}, ${UP_AT:-?}, ${READ_AT:-?})"
+
+    # One arrival mounts; the unchanged return mounts nothing; the changed one
+    # mounts once. Two mounts, and one of them is the first.
+    local mounts
+    mounts=$(grep -c "\[TagFS\] the volume on seat .* is MOUNTED" "$L")
+    [ "$mounts" = 2 ]
+    chk $? "two mounts in the whole run: the arrival and the changed return ($mounts)"
 
     # ONE stick, ONE unit number, for the whole run.
     #
@@ -2409,28 +2608,59 @@ run_yank() {
 
 # ── holdground: the volume comes back while somebody is still inside it ────
 #
-# replug proves a volume that leaves and comes home is re-read. It proves it on
-# an IDLE machine, which is the one case where the re-read is free: nobody is
-# in the filesystem, so the memory it hands back — the tag registry, the tag
-# index, the block map, the file table, the metadata pool — is memory nobody
-# is holding. That is not the machine this has to survive.
+# replug proves a volume that leaves and comes home is judged, and one read
+# again is read again. It proves it on an IDLE machine, which is the one case
+# where letting go is free: nobody is in the filesystem, so the memory it hands
+# back — the tag registry, the tag index, the block map, the file table, the
+# metadata pool — is memory nobody is holding. That is not the machine this
+# has to survive.
 #
 # `make HOLDGROUND=on` puts somebody there. At the moment the medium is noticed
 # gone, one caller steps into the volume and does not step out until the volume
-# is back; and a file is held OPEN across the whole departure. Three separate
-# lines of the repair are then falsifiable, and each was measured against its
-# own mutation:
+# is back; and a file is held OPEN across the whole departure.
 #
+# ‼ SINCE 1.12 ONLY A BOOK GIVEN UP TAKES ANYTHING DOWN. A stick that comes
+# back as it left is taken up with its book open (tagfs/mount/away.h) — the
+# caller steps out, the handle reads on, nothing is let go of — so the
+# situation this exists for needs a stick that is NOT the book this kernel
+# holds: its Ledger is moved on from the host while it is out, as another BoxOS
+# kernel settling a cycle on it would move it (ledger_moved_on_host). The book
+# is given up, and the take-down has to wait for the caller.
+#
+# What each party hears, derived from the code rather than guessed:
+#   a program that asks the volume while its medium is away — a block read of
+#      the absent medium answers ERR_DEVICE_NOT_READY (203, said by
+#      TagFSReadStream with the bytes that had landed), and the program is
+#      refused by name: "is there and would not start";
+#   the caller inside — nothing is let go of until it is out: the take-down
+#      says it waits, the caller steps out, and only then is the old volume let
+#      go of and the new one mounted (tagfs_abandon, the service pass);
+#   the handle held from before — its mounting is not the one up, so a read
+#      through it is refused by name and answers ERR_TAGFS_INVALID_HANDLE (855,
+#      handle_belongs_here), never a block of somebody else's file; its entry
+#      in the open-file table is still the one the table hands out.
+#
+# ‼ THE MUTATIONS IT EXISTS FOR, each measured against this scenario on 1.12:
+#
+#   take `if (as == LEDGER_OTHER) return AWAY_OTHER;` out of AwayJudge
+#      (away.c) -> the stick whose Ledger moved is taken up as the book this
+#      kernel holds, and nothing below happens at all. MEASURED: 17 passed,
+#      2 failed — the doubt replug names (a volume mounted and never written
+#      is already judged AWAY_IN_DOUBT) still gives that book up, so only its
+#      judgement and its order go red; with one flush after each Spare refill,
+#      10 passed, 9 failed;
 #   take the "somebody is inside" refusal out of tagfs_abandon      -> the
 #      take-down says nothing and frees the volume under the caller.
-#      MEASURED: 6 passed, 7 failed;
-#   take the mounting stamp off the handle (handle_belongs_here)    -> the old
-#      handle reads block numbers that now belong to another file, and says
-#      nothing. MEASURED: 11 passed, 2 failed — and exactly the two;
-#   put memset(g_open_files, ...) back into tagfs_init              -> the
+#      MEASURED: 11 passed, 8 failed;
+#   take the mounting stamp off the handle (tagfs_handle_is_of_this_mount
+#      answers yes)                                                 -> the old
+#      handle reads block numbers that may now belong to another file, and
+#      says nothing. MEASURED: 17 passed, 2 failed — and exactly the two;
+#   empty the open-file table at the mount again — what memset(g_open_files)
+#      did in tagfs_init before the table moved to helm.c           -> the
 #      entry a live handle owns is no longer the one the table hands out, so
-#      two writers to one file take two different locks.
-#      MEASURED: 11 passed, 2 failed — and exactly the other two.
+#      two writers to one file take two different locks. MEASURED: 17 passed,
+#      2 failed — and exactly the other two.
 run_holdground() {
     echo "== holdground: the volume comes back while somebody is still in it =="
 
@@ -2459,22 +2689,35 @@ run_holdground() {
     wait_for_line build/serial.log "hands over" "$WAIT_QUIET_S"
     sleep 2
 
-    local FIRST_LINES
+    local FIRST_LINES AT
     FIRST_LINES=$(wc -l < build/serial.log)
 
     # Pulled out — and waited on the PROBE's own line, not on a clock: it is
     # the fact that there is somebody inside the volume to protect.
     mon_raw "device_del usbstick"
-    wait_for_line build/serial.log "HOLDGROUND. a caller was inside the volume" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "HOLDGROUND. a caller was inside the volume" "$WAIT_QUIET_S" $((FIRST_LINES + 1))
     sleep 2
 
-    # And pushed back in. drive_add first: an HMP drive is auto-delete and went
-    # with the device.
+    # A program asked of the volume while its medium is away.
+    type_cmd "files"
+    sleep 1; key_press ret; sleep 3
+
+    # The stick is changed while it is out, and pushed back in. drive_add
+    # first: an HMP drive is auto-delete and went with the device.
+    local MOVED=1
+    ledger_moved_on_host "$SCRATCH/stick.img" && MOVED=0
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
     wait_for_line build/serial.log "HOLDGROUND. the open-file entry" "$WAIT_QUIET_S" $((FIRST_LINES + 1))
     sleep 3
+
+    # And the volume mounted anew takes a write and anchors it.
+    AT=$(wc -l < build/serial.log)
+    type_cmd "anchor_test"
+    sleep 1; key_press ret
+    wait_for_line build/serial.log "\[ANCHOR\] WROTE+ANCHORED\|\[ANCHOR\] create rc\|\[ANCHOR\] fwrite rc\|\[ANCHOR\] anchor rc" "$WAIT_QUIET_S" $((AT + 1))
+    sleep 2
 
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.holdground.log"
@@ -2490,25 +2733,43 @@ run_holdground() {
     chk $? "and a file was held open on it"
     grep -q "HOLDGROUND. a caller was inside the volume when its medium left" "$S"
     chk $? "somebody was inside the volume when the medium left"
-    grep -q "the volume is back, in seat" "$S"
-    chk $? "and the volume came back"
+    [ "$MOVED" = 0 ]
+    chk $? "the host moved the stick's Ledger on while it was out"
+
+    # ── a program asking the absent medium hears it is absent ──────────────
+    grep -q "answered 203 — 0 of .* bytes had landed" "$S"
+    chk $? "a read of the absent medium answered ERR_DEVICE_NOT_READY (203)"
+    grep -q "files: is there and would not start" "$S"
+    chk $? "and the program was refused by name, not called unknown"
+
+    # ── ‼ NOT THE BOOK THIS KERNEL HOLDS ───────────────────────────────────
+    grep -q "came back in seat 1 with a Ledger or a Deed this kernel did not leave on it" "$S"
+    chk $? "the stick whose Ledger moved was judged not to be the book this kernel holds"
+    ! grep -q "the volume is back, in seat" "$S"
+    chk $? "and was not taken up as that book"
 
     # ── ‼ THE BARRIER. Nothing is let go of while somebody is on it ─────────
     grep -qE "the volume is on its way out and [1-9][0-9]* caller\(s\) are still inside it" "$S"
     chk $? "the take-down found a caller inside and let go of nothing"
 
+    grep -q "HOLDGROUND. the caller has stepped out of the old volume" "$S"
+    chk $? "the caller stepped out of the old volume"
+
     grep -q "the last caller is out and the old volume has been let go of" "$S"
-    chk $? "and finished only once that caller was out"
+    chk $? "and the take-down finished only once that caller was out"
 
     # In that ORDER. A "let go of" line that precedes the "still inside" line
     # would mean the memory went back first and the sentence came after.
-    local WAIT_AT FREE_AT MOUNT_AT
+    local GIVEN_AT WAIT_AT OUT_AT FREE_AT MOUNT_AT
+    GIVEN_AT=$(grep -n "did not leave on it" "$S" | head -1 | cut -d: -f1)
     WAIT_AT=$(grep -nE "the volume is on its way out and [1-9]" "$S" | head -1 | cut -d: -f1)
+    OUT_AT=$(grep -n "HOLDGROUND. the caller has stepped out" "$S" | head -1 | cut -d: -f1)
     FREE_AT=$(grep -n  "the last caller is out and the old volume" "$S" | head -1 | cut -d: -f1)
     MOUNT_AT=$(grep -n "the volume on seat .* is MOUNTED" "$S" | tail -1 | cut -d: -f1)
-    [ -n "$WAIT_AT" ] && [ -n "$FREE_AT" ] && [ -n "$MOUNT_AT" ] && \
-        [ "$WAIT_AT" -lt "$FREE_AT" ] && [ "$FREE_AT" -lt "$MOUNT_AT" ]
-    chk $? "waited, then let go, then mounted — in that order (${WAIT_AT:-?}, ${FREE_AT:-?}, ${MOUNT_AT:-?})"
+    [ -n "$GIVEN_AT" ] && [ -n "$WAIT_AT" ] && [ -n "$OUT_AT" ] && [ -n "$FREE_AT" ] && \
+        [ -n "$MOUNT_AT" ] && [ "$GIVEN_AT" -lt "$WAIT_AT" ] && [ "$WAIT_AT" -lt "$OUT_AT" ] && \
+        [ "$OUT_AT" -lt "$FREE_AT" ] && [ "$FREE_AT" -lt "$MOUNT_AT" ]
+    chk $? "given up, waited, stepped out, let go, then mounted — in that order (${GIVEN_AT:-?}, ${WAIT_AT:-?}, ${OUT_AT:-?}, ${FREE_AT:-?}, ${MOUNT_AT:-?})"
 
     # ── ‼ THE HANDLE FROM BEFORE IS REFUSED, NOT FOLLOWED ──────────────────
     grep -q "was opened on an earlier mounting of this volume" "$S"
@@ -2526,8 +2787,10 @@ run_holdground() {
     chk $? "and one file still has exactly one entry, so its writers share one lock"
 
     # ── and the machine is usable afterwards, which is the point ───────────
-    grep -q "the volume on seat .* is MOUNTED" "$S"
-    chk $? "the volume was taken back up"
+    grep -q "\[TagFS\] the volume on seat 1 is MOUNTED" "$S"
+    chk $? "the volume was mounted anew from the medium as it now is"
+    grep -q "\[ANCHOR\] WROTE+ANCHORED" "$S"
+    chk $? "and it takes a write and anchors it"
     grep -q "BoxOS Shell" "$L"
     chk $? "the machine still has a shell"
 }
@@ -2544,14 +2807,38 @@ run_holdground() {
 # because the hand at the machine kept replugging. A read that fails on a
 # medium which STAYS PUT had no way back at all.
 #
-# `make RETURNFAIL=on` fails the first re-mount once, with the medium left
-# exactly where it is. The stick is plugged in ONCE here — that single arrival
-# is spent on the attempt that fails — so every line after it is the machine
-# asking again by itself.
+# `make RETURNFAIL=on` fails the first re-mount once, as a read the medium
+# refused, with the medium left exactly where it is. The stick is plugged in
+# ONCE after the pull — that single arrival is spent on the attempt that
+# fails — so every line after it is the machine asking again by itself.
 #
-# ‼ THE MUTATION IT EXISTS FOR: take mount_owed() out of the return road in
-# TagFSVolumeReturned. The "asking again" line never appears, no second
-# `is MOUNTED` follows, and the machine sits volumeless with its stick in.
+# ‼ SINCE 1.12 THERE IS A RE-MOUNT ONLY WHEN THE BOOK IS GIVEN UP. A stick that
+# comes back as this kernel left it is taken up with its book open, and nothing
+# is read again (tagfs/mount/away.h) — there would be no re-mount here to fail.
+# So the stick comes back CHANGED: its Ledger is moved on from the host while
+# it is out, as another BoxOS kernel settling a cycle on it would move it
+# (ledger_moved_on_host). That book is given up by design, the volume is let
+# go of, and the mount that follows is the one RETURNFAIL fails.
+#
+# ‼ AND IT IS ASKED AGAIN WHEN THE SEAT SAYS IT ANSWERS AGAIN, NOT ON A CLOCK.
+# The refusal is a read the medium refused, so the machine owes the mount until
+# `seat:ready` names its seat (tagfs.c, the note over g_mount_owed). QEMU's
+# stick never says that — it refuses nothing and recovers from nothing — so the
+# key says it for the stick's driver, out loud, two seconds after the refusal
+# (tagfs/mount/return_fail.c). A machine that asked again on its own, on a
+# clock or straight away, asks BEFORE that line; the order below says so.
+#
+# ‼ THE MUTATIONS IT EXISTS FOR, each measured on 1.12:
+#
+#   take the line that lets seat:ready ask for the owed mount out of
+#      tagfs_on_seat_ready (tagfs.c: `if (g_mount_owed) g_mount_ready = 1`) —
+#      the seat says it answers again and nobody hears it: no asking, no
+#      mount, the machine volumeless with its stick in. MEASURED: 10 passed,
+#      5 failed;
+#   set g_mount_ready in mount_attempt beside g_mount_owed — the machine asks
+#      again at once, on its own, as the old retry did; it even mounts, and
+#      only the order says it asked before the seat answered. MEASURED: 14
+#      passed, 1 failed — exactly the order.
 run_returnfail() {
     echo "== returnfail: a mount that did not finish is asked again =="
 
@@ -2574,24 +2861,33 @@ run_returnfail() {
     wait_for_line build/serial.log "hands over" "$WAIT_QUIET_S"
     sleep 2
 
-    local FIRST_LINES
+    local FIRST_LINES AT
     FIRST_LINES=$(wc -l < build/serial.log)
 
     # Pulled out.
     mon_raw "device_del usbstick"
-    wait_for_line build/serial.log "the medium the volume lives on has left" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "the medium the volume lives on has left" "$WAIT_QUIET_S" $((FIRST_LINES + 1))
     sleep 2
 
-    # And pushed back in ONCE. That single arrival is spent on the re-mount
-    # this build is told to fail; nothing is plugged in after it.
+    # Changed while it is out, and pushed back in ONCE. That single arrival is
+    # spent on the re-mount this build is told to fail; nothing is plugged in
+    # after it.
+    local MOVED=1
+    ledger_moved_on_host "$SCRATCH/stick.img" && MOVED=0
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
 
-    # Waited on the machine's own words, not a clock: the retry is spaced by
-    # TAGFS_MOUNT_RETRY_MS and gets eight attempts, so a pass costs a second.
-    wait_for_line build/serial.log "asking again for the volume nobody has mounted" "$WAIT_QUIET_S" $((FIRST_LINES + 1))
-    sleep 4
+    # Waited on the machine's own words, not a clock: the mount it asks for.
+    wait_for_line build/serial.log "a medium arrived carrying a volume, and this machine had none" "$WAIT_QUIET_S" $((FIRST_LINES + 1))
+    sleep 3
+
+    # And the volume it asked for takes a write and anchors it.
+    AT=$(wc -l < build/serial.log)
+    type_cmd "anchor_test"
+    sleep 1; key_press ret
+    wait_for_line build/serial.log "\[ANCHOR\] WROTE+ANCHORED\|\[ANCHOR\] create rc\|\[ANCHOR\] fwrite rc\|\[ANCHOR\] anchor rc" "$WAIT_QUIET_S" $((AT + 1))
+    sleep 2
 
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.returnfail.log"
@@ -2603,10 +2899,16 @@ run_returnfail() {
     # ── the situation was reached ───────────────────────────────────────────
     grep -q "a medium arrived carrying a volume, and this machine had none" "$L"
     chk $? "the stick was mounted on its first arrival"
-    grep -q "the medium the volume lives on has left" "$S"
-    chk $? "and the medium then left"
+    grep -q "the medium the volume lives on has left — its book is held open" "$S"
+    chk $? "and the medium then left, its book held open"
+    [ "$MOVED" = 0 ]
+    chk $? "the host moved the stick's Ledger on while it was out"
+    grep -q "came back in seat 1 with a Ledger or a Deed this kernel did not leave on it" "$S"
+    chk $? "the changed stick was not taken for the book this kernel holds, and the book was given up"
     grep -q "this volume is NOT mounted: RETURNFAIL=on asked this re-mount to fail" "$S"
     chk $? "the re-mount failed where it was told to, and said so out loud"
+    grep -q "the medium in seat 1 refused a read while its volume was being read — the mount is asked again when the seat says it answers again (seat:ready)" "$S"
+    chk $? "the machine took it for a read the medium refused, and owes the mount until seat:ready"
     grep -q "the volume came back and would not mount" "$S"
     chk $? "and the return road carried the refusal up"
 
@@ -2616,30 +2918,37 @@ run_returnfail() {
     [ "$arrivals" = 1 ]
     chk $? "the stick was plugged in exactly once after the pull ($arrivals)"
 
-    # ── ‼ THE MACHINE ASKED AGAIN BY ITSELF ────────────────────────────────
-    grep -q "asking again for the volume nobody has mounted" "$S"
+    # ── ‼ THE MACHINE ASKED AGAIN BY ITSELF, WHEN THE SEAT SAID SO ─────────
+    grep -q "\[TagFS RETURNFAIL\] seat 1: its driver says the medium answers again (seat:ready)" "$S"
+    chk $? "the seat said it answers again"
+    grep -q "seat 1 answers again — asking for the volume nobody has mounted" "$S"
     chk $? "the machine asked again for the volume nobody had mounted"
+    grep -q "a medium arrived carrying a volume, and this machine had none — mounted from seat 1" "$S"
+    chk $? "and the volume came up in the seat it sat in"
 
-    grep -q "\[TagFS\] the volume on seat .* is MOUNTED" "$S"
-    chk $? "and the volume came up"
+    # In that order: given up, refused, the seat answering, the asking, the
+    # mount. An asking that comes before the seat answers is a machine asking
+    # on a clock, which is what this replaced.
+    local GIVEN_AT OWED_AT READY_AT ASK_AT UP_AT
+    GIVEN_AT=$(grep -n "did not leave on it" "$S" | head -1 | cut -d: -f1)
+    OWED_AT=$(grep -n "refused a read while its volume was being read" "$S" | head -1 | cut -d: -f1)
+    READY_AT=$(grep -n "\[TagFS RETURNFAIL\] seat 1: its driver says" "$S" | head -1 | cut -d: -f1)
+    ASK_AT=$(grep -n "asking for the volume nobody has mounted" "$S" | head -1 | cut -d: -f1)
+    UP_AT=$(grep -n "\[TagFS\] the volume on seat 1 is MOUNTED" "$S" | tail -1 | cut -d: -f1)
+    [ -n "$GIVEN_AT" ] && [ -n "$OWED_AT" ] && [ -n "$READY_AT" ] && [ -n "$ASK_AT" ] && \
+        [ -n "$UP_AT" ] && [ "$GIVEN_AT" -lt "$OWED_AT" ] && [ "$OWED_AT" -lt "$READY_AT" ] && \
+        [ "$READY_AT" -lt "$ASK_AT" ] && [ "$ASK_AT" -lt "$UP_AT" ]
+    chk $? "given up, refused, the seat answered, asked, mounted — in that order (${GIVEN_AT:-?}, ${OWED_AT:-?}, ${READY_AT:-?}, ${ASK_AT:-?}, ${UP_AT:-?})"
 
-    # In that order: the refusal, then the asking, then the mount.
-    local FAIL_AT ASK_AT UP_AT
-    FAIL_AT=$(grep -n "came back and would not mount" "$S" | head -1 | cut -d: -f1)
-    ASK_AT=$(grep -n  "asking again for the volume" "$S" | head -1 | cut -d: -f1)
-    UP_AT=$(grep -n   "is MOUNTED" "$S" | tail -1 | cut -d: -f1)
-    [ -n "$FAIL_AT" ] && [ -n "$ASK_AT" ] && [ -n "$UP_AT" ] && \
-        [ "$FAIL_AT" -lt "$ASK_AT" ] && [ "$ASK_AT" -lt "$UP_AT" ]
-    chk $? "refused, then asked again, then mounted — in that order (${FAIL_AT:-?}, ${ASK_AT:-?}, ${UP_AT:-?})"
+    # One seat:ready, one asking: the mount owed is asked for once.
+    local asked
+    asked=$(grep -c "asking for the volume nobody has mounted" "$S")
+    [ "$asked" = 1 ]
+    chk $? "and it was asked for once, on the one event ($asked)"
 
-    # It did not spend its whole budget: one attempt is what a healthy medium
-    # costs. A pass that needed eight would mean the spacing is wrong.
-    grep -q "asking again for the volume nobody has mounted (attempt 1 of" "$S"
-    chk $? "and it came up on the first asking, not by grinding through the budget"
-
-    ! grep -q "stops asking and waits for a medium to arrive" "$S"
-    chk $? "the machine never had to give up"
-
+    # ── and the machine is usable afterwards, which is the point ───────────
+    grep -q "\[ANCHOR\] WROTE+ANCHORED" "$S"
+    chk $? "the volume it asked for takes a write and anchors it"
     grep -q "BoxOS Shell" "$L"; chk $? "the machine still has a shell"
 }
 
